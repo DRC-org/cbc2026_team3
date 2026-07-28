@@ -1,5 +1,5 @@
+import { Tab, TabList, TabPanel, Tabs } from "@tsaito18/tuicss-react";
 import { useCallback } from "react";
-import { TuiTabs } from "react-tuicss";
 
 import { EStopOverlay } from "@/components/EStopOverlay";
 import { RobotProvider } from "@/context/RobotContext";
@@ -41,24 +41,27 @@ export function App() {
         >
           cbc2026_team3_controller
         </div>
-        <TuiTabs
-          tabs={[
-            { tabTitle: "Monitor", tab: <Dashboard /> },
-            {
-              tabTitle: "Main Hand",
-              tab: <RobotControl robotKey="main_hand" label="メインハンド" />,
-            },
-            {
-              tabTitle: "Sub Hand",
-              tab: <RobotControl robotKey="sub_hand" label="サブハンド" />,
-            },
-            { tabTitle: "PID Tuning", tab: <MotorTuning /> },
-          ]}
-        />
-        <div
-          className="tui-statusbar cyan-168 absolute"
-          style={{ height: "1.5rem" }}
-        >
+        <Tabs defaultValue="monitor">
+          <TabList>
+            <Tab value="monitor">Monitor</Tab>
+            <Tab value="main-hand">Main Hand</Tab>
+            <Tab value="sub-hand">Sub Hand</Tab>
+            <Tab value="pid-tuning">PID Tuning</Tab>
+          </TabList>
+          <TabPanel value="monitor">
+            <Dashboard />
+          </TabPanel>
+          <TabPanel value="main-hand">
+            <RobotControl robotKey="main_hand" label="メインハンド" />
+          </TabPanel>
+          <TabPanel value="sub-hand">
+            <RobotControl robotKey="sub_hand" label="サブハンド" />
+          </TabPanel>
+          <TabPanel value="pid-tuning">
+            <MotorTuning />
+          </TabPanel>
+        </Tabs>
+        <div className="tui-statusbar cyan-168 absolute" style={{ height: "1.5rem" }}>
           <ul>
             <li>
               {socket.connected ? (

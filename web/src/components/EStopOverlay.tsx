@@ -1,4 +1,4 @@
-import { Color, TuiButton } from "react-tuicss";
+import { Button } from "@tsaito18/tuicss-react";
 
 import { useRobot } from "@/context/RobotContext";
 
@@ -8,7 +8,7 @@ export function EStopOverlay() {
   if (!eStopActive) return null;
 
   return (
-    <div className="tui-modal-container active" aria-label="緊急停止中">
+    <div className="tui-modal-container active">
       <div className="tui-modal">
         <div
           className="tui-window red-168 white-255-text center"
@@ -27,9 +27,9 @@ export function EStopOverlay() {
                 justifyContent: "center",
               }}
             >
-              <TuiButton color={Color.Yellow} onClick={onEStopRelease}>
+              <Button className="yellow-255" onClick={onEStopRelease}>
                 ◄ Reset ►
-              </TuiButton>
+              </Button>
             </div>
           </fieldset>
         </div>

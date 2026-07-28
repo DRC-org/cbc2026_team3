@@ -1,5 +1,5 @@
+import { Button } from "@tsaito18/tuicss-react";
 import { useState } from "react";
-import { Color, TuiButton } from "react-tuicss";
 
 import { Modal } from "@/components/Modal";
 import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
@@ -79,11 +79,7 @@ export function SequenceStepList({
           justifyContent: "space-between",
         }}
       >
-        <h3
-          style={{ opacity: 0.8 }}
-        >
-          STEP LIST
-        </h3>
+        <h3 style={{ opacity: 0.8 }}>STEP LIST</h3>
         <span style={{ opacity: 0.6 }}>クリックで再開</span>
       </div>
 
@@ -151,10 +147,10 @@ export function SequenceStepList({
         title="STEP JUMP"
         footer={
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <TuiButton onClick={handleCancel}>キャンセル</TuiButton>
-            <TuiButton color={Color.Yellow} onClick={handleConfirm}>
+            <Button onClick={handleCancel}>キャンセル</Button>
+            <Button className="yellow-255" onClick={handleConfirm}>
               再開
-            </TuiButton>
+            </Button>
           </div>
         }
       >
@@ -165,10 +161,7 @@ export function SequenceStepList({
         <p style={{ marginTop: 8, opacity: 0.8 }}>
           現在の動作を中断して指定ステップから実行を開始します。
         </p>
-        <p
-          className="warning-text"
-          style={{ marginTop: 8 }}
-        >
+        <p className="warning-text" style={{ marginTop: 8 }}>
           ⚠ 物理状態が安全であることを必ず確認してください。
         </p>
       </Modal>

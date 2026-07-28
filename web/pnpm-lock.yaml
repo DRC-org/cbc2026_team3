@@ -4,24 +4,19 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  react-tuicss@1.0.4:
-    hash: e4e40827ab74e4e20ce75d63ac67decb1c09399a653dbccd50c82e37b6d03ce6
-    path: patches/react-tuicss@1.0.4.patch
-
 importers:
 
   .:
     dependencies:
+      '@tsaito18/tuicss-react':
+        specifier: ^0.1.4
+        version: 0.1.4(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       react:
         specifier: ^19.2.5
         version: 19.2.5
       react-dom:
         specifier: ^19.2.5
         version: 19.2.5(react@19.2.5)
-      react-tuicss:
-        specifier: ^1.0.4
-        version: 1.0.4(patch_hash=e4e40827ab74e4e20ce75d63ac67decb1c09399a653dbccd50c82e37b6d03ce6)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       the-new-css-reset:
         specifier: ^1.11.3
         version: 1.11.3
@@ -416,6 +411,13 @@ packages:
   '@rolldown/pluginutils@1.0.0-rc.7':
     resolution: {integrity: sha512-qujRfC8sFVInYSPPMLQByRh7zhwkGFS4+tyMQ83srV1qrxL4g8E2tyxVVyxd0+8QeBM1mIk9KbWxkegRr76XzA==}
 
+  '@tsaito18/tuicss-react@0.1.4':
+    resolution: {integrity: sha512-UbpDwjOmvPtyNEsux1ZMwYnU1O5muXcq6NJFGZ31GjPKvagTrBwAjCpV0wB8hUHPm4hLZWpRfpjSzQqWhc+v6A==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    peerDependencies:
+      react: '>=19'
+      react-dom: '>=19'
+
   '@tybys/wasm-util@0.10.1':
     resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
 
@@ -445,9 +447,6 @@ packages:
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
-
-  date-fns@3.3.1:
-    resolution: {integrity: sha512-y8e109LYGgoQDveiEBD3DYXKba1jWf5BA8YU1FL5Tvm0BTdEfy54WLCwnuYWZNnzzvALy/QQ4Hov+Q9RVRv+Zw==}
 
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
@@ -581,12 +580,6 @@ packages:
     peerDependencies:
       react: ^19.2.5
 
-  react-tuicss@1.0.4:
-    resolution: {integrity: sha512-K6V5xcfnym38+BzbwiXv9UhRLVemZaL3BcSYKUWsKOPcgrWVcT+DIIFOC3MQCyhbSSOKIx53p1/JdimtQl81wA==}
-    peerDependencies:
-      react: ~18.3.0
-      react-dom: ~18.3.0
-
   react@19.2.5:
     resolution: {integrity: sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA==}
     engines: {node: '>=0.10.0'}
@@ -616,9 +609,6 @@ packages:
 
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
-
-  tuicss@2.1.2:
-    resolution: {integrity: sha512-bqsV0FPyargcF3s5wXAyFaZsQPf9a1jLeHqSURohQMXS06PkTfIuZwILE5bFoZouLhPjvhvNQanHaqMBU4/amA==}
 
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
@@ -865,6 +855,11 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.0-rc.7': {}
 
+  '@tsaito18/tuicss-react@0.1.4(react-dom@19.2.5(react@19.2.5))(react@19.2.5)':
+    dependencies:
+      react: 19.2.5
+      react-dom: 19.2.5(react@19.2.5)
+
   '@tybys/wasm-util@0.10.1':
     dependencies:
       tslib: 2.8.1
@@ -888,8 +883,6 @@ snapshots:
       vite: 8.0.10(@types/node@24.12.2)(jiti@2.6.1)
 
   csstype@3.2.3: {}
-
-  date-fns@3.3.1: {}
 
   detect-libc@2.1.2: {}
 
@@ -1015,13 +1008,6 @@ snapshots:
       react: 19.2.5
       scheduler: 0.27.0
 
-  react-tuicss@1.0.4(patch_hash=e4e40827ab74e4e20ce75d63ac67decb1c09399a653dbccd50c82e37b6d03ce6)(react-dom@19.2.5(react@19.2.5))(react@19.2.5):
-    dependencies:
-      date-fns: 3.3.1
-      react: 19.2.5
-      react-dom: 19.2.5(react@19.2.5)
-      tuicss: 2.1.2
-
   react@19.2.5: {}
 
   rolldown@1.0.0-rc.17:
@@ -1060,8 +1046,6 @@ snapshots:
 
   tslib@2.8.1:
     optional: true
-
-  tuicss@2.1.2: {}
 
   typescript@6.0.3: {}
 

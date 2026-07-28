@@ -1,15 +1,15 @@
+import { Button } from "@tsaito18/tuicss-react";
 import { useState } from "react";
-import { Color, TuiButton } from "react-tuicss";
 
 import { HealthIndicator } from "@/components/HealthIndicator";
 import { Modal } from "@/components/Modal";
+import { MotorCheckButton } from "@/components/MotorCheckButton";
+import { MotorCheckPanel } from "@/components/MotorCheckPanel";
 import { MotorSummary } from "@/components/MotorSummary";
 import { SequenceProgress } from "@/components/SequenceProgress";
 import { SequenceStepList } from "@/components/SequenceStepList";
 import { TriggerButton } from "@/components/TriggerButton";
 import { useRobot } from "@/context/RobotContext";
-import { MotorCheckButton } from "@/components/MotorCheckButton";
-import { MotorCheckPanel } from "@/components/MotorCheckPanel";
 
 interface RobotControlProps {
   robotKey: string;
@@ -39,16 +39,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     send({ type: "sequence_start", robot: robotKey });
   };
 
-  const completed =
-    state && state.total_steps > 0 && state.step_index >= state.total_steps;
+  const completed = state && state.total_steps > 0 && state.step_index >= state.total_steps;
   const idleStopped =
     state &&
     state.total_steps > 0 &&
     !state.waiting_trigger &&
     state.step_index === 0 &&
     !completed;
-  const inProgress =
-    state && !state.waiting_trigger && !completed && !idleStopped;
+  const inProgress = state && !state.waiting_trigger && !completed && !idleStopped;
   const showStop = Boolean(inProgress || state?.waiting_trigger);
 
   if (!state) {
@@ -67,9 +65,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         <div className="tui-window">
           <fieldset className="tui-fieldset">
             <legend>{label}</legend>
-            <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>
-              データ未受信 — 接続待機中...
-            </p>
+            <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>データ未受信 — 接続待機中...</p>
           </fieldset>
         </div>
       </main>
@@ -80,8 +76,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     <main
       style={{
         display: "grid",
-        gridTemplateColumns:
-          "minmax(0,1fr) minmax(280px,340px) minmax(280px,340px)",
+        gridTemplateColumns: "minmax(0,1fr) minmax(280px,340px) minmax(280px,340px)",
         gap: "0.75rem",
         overflow: "hidden",
         padding: "0.75rem",
@@ -124,23 +119,23 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           }}
         >
           {showStop ? (
-            <TuiButton
-              color={Color.Red}
-              fullWidth
+            <Button
+              className="red-255"
               onClick={() => setStopConfirmOpen(true)}
               aria-label="シーケンスを通常停止"
+              style={{ width: "100%" }}
             >
               ■ STOP
-            </TuiButton>
+            </Button>
           ) : (
-            <TuiButton
-              color={Color.Green}
-              fullWidth
+            <Button
+              className="green-255"
               onClick={handleStart}
               aria-label="シーケンスを先頭から開始"
+              style={{ width: "100%" }}
             >
               ► START
-            </TuiButton>
+            </Button>
           )}
           <TriggerButton
             waiting={state.waiting_trigger}
@@ -231,16 +226,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           gap: 8,
         }}
       >
-        <MotorCheckButton
-          robotName={robotKey}
-          onPanelOpen={() => setHealthCheckOpen(true)}
-        />
-        <TuiButton
-          color={Color.Yellow}
-          onClick={() => setHealthCheckOpen(true)}
-        >
+        <MotorCheckButton robotName={robotKey} onPanelOpen={() => setHealthCheckOpen(true)} />
+        <Button className="yellow-255" onClick={() => setHealthCheckOpen(true)}>
           ▤ 結果を表示
-        </TuiButton>
+        </Button>
       </div>
 
       <MotorCheckPanel
@@ -260,22 +249,16 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               gap: "0.5rem",
             }}
           >
-            <TuiButton onClick={() => setStopConfirmOpen(false)}>
-              キャンセル
-            </TuiButton>
-            <TuiButton color={Color.Red} onClick={handleConfirmStop}>
+            <Button onClick={() => setStopConfirmOpen(false)}>キャンセル</Button>
+            <Button className="red-255" onClick={handleConfirmStop}>
               停止
-            </TuiButton>
+            </Button>
           </div>
         }
       >
         <p>シーケンスを停止しますか？</p>
-        <p style={{ marginTop: "0.5rem" }}>
-          ⚠ 緊急停止 (EMG STOP) ではなく、通常停止です。
-        </p>
-        <p style={{ opacity: 0.8 }}>
-          停止後はステップ #1 に戻り、待機状態になります。
-        </p>
+        <p style={{ marginTop: "0.5rem" }}>⚠ 緊急停止 (EMG STOP) ではなく、通常停止です。</p>
+        <p style={{ opacity: 0.8 }}>停止後はステップ #1 に戻り、待機状態になります。</p>
       </Modal>
     </main>
   );

@@ -1,5 +1,5 @@
+import { Button } from "@tsaito18/tuicss-react";
 import { useState } from "react";
-import { Color, TuiButton } from "react-tuicss";
 
 import { MotorStatus } from "@/components/MotorStatus";
 import { useRobot } from "@/context/RobotContext";
@@ -36,15 +36,10 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-      <span style={{ width: "1.75rem", flexShrink: 0 }}>
-        {label}
-      </span>
-      <TuiButton
-        aria-label={`${label} を減らす`}
-        onClick={() => onChange(clamp(value - STEP))}
-      >
+      <span style={{ width: "1.75rem", flexShrink: 0 }}>{label}</span>
+      <Button aria-label={`${label} を減らす`} onClick={() => onChange(clamp(value - STEP))}>
         ◄
-      </TuiButton>
+      </Button>
       <input
         type="range"
         style={{ flex: 1 }}
@@ -55,12 +50,9 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
         value={value}
         onChange={(e) => onChange(clamp(Number(e.target.value)))}
       />
-      <TuiButton
-        aria-label={`${label} を増やす`}
-        onClick={() => onChange(clamp(value + STEP))}
-      >
+      <Button aria-label={`${label} を増やす`} onClick={() => onChange(clamp(value + STEP))}>
         ►
-      </TuiButton>
+      </Button>
       <span
         style={{
           width: "3.5rem",
@@ -71,25 +63,18 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
       >
         {value.toFixed(2)}
       </span>
-      <TuiButton
-        color={Color.Blue}
-        aria-label={`${label} を送信`}
-        onClick={onSend}
-      >
+      <Button className="blue-255" aria-label={`${label} を送信`} onClick={onSend}>
         ► SEND
-      </TuiButton>
+      </Button>
     </div>
   );
 }
 
 export function MotorTuning() {
   const { states, send } = useRobot();
-  const [values, setValues] = useState<Record<string, Record<string, number>>>(
-    {},
-  );
+  const [values, setValues] = useState<Record<string, Record<string, number>>>({});
 
-  const getValue = (motor: string, param: string) =>
-    values[motor]?.[param] ?? 0;
+  const getValue = (motor: string, param: string) => values[motor]?.[param] ?? 0;
 
   const setValue = (motor: string, param: string, val: number) => {
     setValues((prev) => ({
@@ -147,13 +132,9 @@ export function MotorTuning() {
               <legend>{label}</legend>
 
               {!state ? (
-                <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>
-                  データ未受信 — 接続待機中...
-                </p>
+                <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>データ未受信 — 接続待機中...</p>
               ) : motors.length === 0 ? (
-                <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>
-                  モータ情報なし
-                </p>
+                <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>モータ情報なし</p>
               ) : (
                 // モータ数が増えても枠内のみスクロールさせ全体スクロールは禁止する。
                 <div
@@ -167,11 +148,7 @@ export function MotorTuning() {
                   }}
                 >
                   {motors.map(([motorName, motorState]) => (
-                    <fieldset
-                      key={motorName}
-                      className="tui-fieldset"
-                      style={{ marginBottom: 0 }}
-                    >
+                    <fieldset key={motorName} className="tui-fieldset" style={{ marginBottom: 0 }}>
                       <legend>{motorName}</legend>
                       <div style={{ marginBottom: "0.5rem" }}>
                         <MotorStatus name={motorName} state={motorState} />
@@ -182,20 +159,16 @@ export function MotorTuning() {
                           paddingTop: "0.5rem",
                         }}
                       >
-                        {PID_PARAMS.map(
-                          ({ key: paramKey, label: paramLabel, max }) => (
-                            <PidRow
-                              key={paramKey}
-                              label={paramLabel}
-                              max={max}
-                              value={getValue(motorName, paramKey)}
-                              onChange={(val) =>
-                                setValue(motorName, paramKey, val)
-                              }
-                              onSend={() => handleSend(motorName, paramKey)}
-                            />
-                          ),
-                        )}
+                        {PID_PARAMS.map(({ key: paramKey, label: paramLabel, max }) => (
+                          <PidRow
+                            key={paramKey}
+                            label={paramLabel}
+                            max={max}
+                            value={getValue(motorName, paramKey)}
+                            onChange={(val) => setValue(motorName, paramKey, val)}
+                            onSend={() => handleSend(motorName, paramKey)}
+                          />
+                        ))}
                       </div>
                     </fieldset>
                   ))}

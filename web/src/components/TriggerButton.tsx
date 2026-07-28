@@ -1,5 +1,5 @@
+import { Button } from "@tsaito18/tuicss-react";
 import { useEffect, useState } from "react";
-import { Color, TuiButton } from "react-tuicss";
 
 interface TriggerButtonProps {
   waiting: boolean;
@@ -29,12 +29,12 @@ export function TriggerButton({ waiting, stepIndex, totalSteps, onTrigger }: Tri
 
   if (isComplete) {
     return (
-      <TuiButton
+      <Button
         disabled
-        fullWidth
-        color={Color.Green}
+        className="green-255"
         style={{
           display: "flex",
+          width: "100%",
           alignItems: "center",
           justifyContent: "center",
           gap: "0.75rem",
@@ -43,19 +43,19 @@ export function TriggerButton({ waiting, stepIndex, totalSteps, onTrigger }: Tri
         aria-label="シーケンス完走"
       >
         ✓ DONE
-      </TuiButton>
+      </Button>
     );
   }
 
   if (waiting) {
     return (
-      <TuiButton
-        color={Color.Blue}
-        fullWidth
+      <Button
+        className="blue-255"
         onClick={onTrigger}
         aria-label="次のステップへ進む"
         style={{
           display: "flex",
+          width: "100%",
           alignItems: "center",
           justifyContent: "center",
           gap: "0.75rem",
@@ -63,17 +63,17 @@ export function TriggerButton({ waiting, stepIndex, totalSteps, onTrigger }: Tri
         }}
       >
         ► NEXT
-      </TuiButton>
+      </Button>
     );
   }
 
   return (
-    <TuiButton
+    <Button
       disabled
-      fullWidth
-      color={Color.Cyan}
+      className="cyan-255"
       style={{
         display: "flex",
+        width: "100%",
         alignItems: "center",
         justifyContent: "center",
         gap: "0.75rem",
@@ -83,6 +83,6 @@ export function TriggerButton({ waiting, stepIndex, totalSteps, onTrigger }: Tri
     >
       <span className="tabular-nums">[{spinner}]</span>
       RUNNING
-    </TuiButton>
+    </Button>
   );
 }

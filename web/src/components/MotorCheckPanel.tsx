@@ -1,14 +1,10 @@
-import { Color, TuiButton, TuiProgressBar } from "react-tuicss";
+import { Button, ProgressBar } from "@tsaito18/tuicss-react";
 
 import { Modal } from "@/components/Modal";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type {
-  MotorCheckOverall,
-  MotorCheckRecord,
-  MotorCheckResult,
-} from "@/hooks/useRobotSocket";
+import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
-import { PROGRESS_BAR_VARIANT, type TuiColor } from "@/lib/tuiColor";
+import type { TuiColor } from "@/lib/tuiColor";
 
 interface MotorCheckPanelProps {
   robotName: string;
@@ -85,13 +81,7 @@ function describeRecord(record: MotorCheckRecord): string {
   }
 }
 
-function MotorRow({
-  record,
-  isCurrent,
-}: {
-  record: MotorCheckRecord;
-  isCurrent: boolean;
-}) {
+function MotorRow({ record, isCurrent }: { record: MotorCheckRecord; isCurrent: boolean }) {
   const result: MotorCheckResult =
     isCurrent && record.result === "pending" ? "running" : record.result;
   const style = RESULT_STYLES[result];
@@ -107,9 +97,7 @@ function MotorRow({
         padding: "4px",
       }}
     >
-      <div
-        style={{ display: "flex", minWidth: 0, alignItems: "center", gap: 8 }}
-      >
+      <div style={{ display: "flex", minWidth: 0, alignItems: "center", gap: 8 }}>
         <span
           className={cx(style.textClass)}
           style={{
@@ -130,9 +118,7 @@ function MotorRow({
           >
             {record.motor}
           </span>
-          <span style={{ opacity: 0.6 }}>
-            bus: {record.bus}
-          </span>
+          <span style={{ opacity: 0.6 }}>bus: {record.bus}</span>
         </div>
       </div>
       <div
@@ -151,11 +137,7 @@ function MotorRow({
   );
 }
 
-export function MotorCheckPanel({
-  robotName,
-  isOpen,
-  onOpenChange,
-}: MotorCheckPanelProps) {
+export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckPanelProps) {
   const { state, start, abort } = useMotorCheck(robotName);
 
   const isRunning = state.status === "running";
@@ -165,8 +147,7 @@ export function MotorCheckPanel({
 
   const total = state.progress?.total ?? state.records.length;
   const index = state.progress?.index ?? state.records.length;
-  const percent =
-    total > 0 ? Math.min(100, Math.round((index / total) * 100)) : 0;
+  const percent = total > 0 ? Math.min(100, Math.round((index / total) * 100)) : 0;
 
   const footerLabel = isRunning
     ? "実行中..."
@@ -175,9 +156,6 @@ export function MotorCheckPanel({
       : isError
         ? "失敗"
         : "未実行";
-
-  // 進捗バーは確認進行中のみ表示するため info(Cyan) 固定で写像する。
-  const ProgressBar = TuiProgressBar[PROGRESS_BAR_VARIANT.info];
 
   return (
     <Modal
@@ -193,20 +171,18 @@ export function MotorCheckPanel({
             gap: 8,
           }}
         >
-          <span style={{ opacity: 0.7 }}>
-            {footerLabel}
-          </span>
+          <span style={{ opacity: 0.7 }}>{footerLabel}</span>
           <div style={{ display: "flex", gap: 8 }}>
             {isRunning ? (
-              <TuiButton color={Color.Red} onClick={abort}>
+              <Button className="red-255" onClick={abort}>
                 ■ 中断
-              </TuiButton>
+              </Button>
             ) : state.records.length > 0 || isError ? (
-              <TuiButton color={Color.Cyan} onClick={start}>
+              <Button className="cyan-255" onClick={start}>
                 ► リトライ
-              </TuiButton>
+              </Button>
             ) : null}
-            <TuiButton onClick={() => onOpenChange(false)}>閉じる</TuiButton>
+            <Button onClick={() => onOpenChange(false)}>閉じる</Button>
           </div>
         </div>
       }
@@ -227,14 +203,8 @@ export function MotorCheckPanel({
               justifyContent: "space-between",
             }}
           >
-            <span
-              style={{ opacity: 0.8 }}
-            >
-              OVERALL
-            </span>
-            <span
-              className={cx(overallStyle.textClass)}
-            >
+            <span style={{ opacity: 0.8 }}>OVERALL</span>
+            <span className={cx(overallStyle.textClass)}>
               [{overallStyle.symbol} {overallStyle.label}]
             </span>
           </div>
@@ -263,25 +233,24 @@ export function MotorCheckPanel({
                 {state.current ?? "—"}
               </span>
             </div>
-            <ProgressBar progress={percent} barWidth="100%" />
+            <ProgressBar
+              className="tui-bg-cyan-black"
+              progressClassName="cyan-255"
+              style={{ width: "100%" }}
+              value={percent}
+            />
           </div>
         ) : null}
 
         {isError ? (
           <div className="danger-text">
             <p>⚠ エラー</p>
-            <p style={{ marginTop: 4, opacity: 0.9 }}>
-              {state.error}
-            </p>
+            <p style={{ marginTop: 4, opacity: 0.9 }}>{state.error}</p>
           </div>
         ) : null}
 
         {state.records.length === 0 && !isRunning && !isError ? (
-          <p
-            style={{ padding: "12px 4px", opacity: 0.7 }}
-          >
-            動作確認はまだ実行されていません。
-          </p>
+          <p style={{ padding: "12px 4px", opacity: 0.7 }}>動作確認はまだ実行されていません。</p>
         ) : (
           <div
             className="tui-scroll"

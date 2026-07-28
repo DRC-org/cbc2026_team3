@@ -1,7 +1,6 @@
+import { Button, Modal, Window, Fieldset } from "@tsaito18/tuicss-react";
 import { useState } from "react";
-import { Color, TuiButton } from "react-tuicss";
 
-import { Modal } from "@/components/Modal";
 import { useRobot } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 
@@ -47,41 +46,25 @@ export function MotorCheckButton({
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-      <TuiButton
-        color={Color.Cyan}
+      <Button
+        className="cyan-255"
         disabled={disabled}
         onClick={() => setConfirmOpen(true)}
         aria-label={`${robotName} の動作確認を開始`}
       >
         {checkRunning ? "► 確認実行中..." : "▮ 動作確認"}
-      </TuiButton>
+      </Button>
       {/* Tooltip は使えないため無効化理由を等幅テキストで併記する。 */}
       {disabled && reasonLabel ? (
-        <span style={{ opacity: 0.7 }}>
-          [?] {reasonLabel}
-        </span>
+        <span style={{ opacity: 0.7 }}>[?] {reasonLabel}</span>
       ) : null}
 
-      <Modal
-        isOpen={confirmOpen}
-        title="ACTUATOR CHECK"
-        footer={
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "flex-end",
-              gap: "0.5rem",
-            }}
-          >
-            <TuiButton onClick={() => setConfirmOpen(false)}>
-              キャンセル
-            </TuiButton>
-            <TuiButton color={Color.Cyan} onClick={handleConfirmStart}>
-              開始
-            </TuiButton>
-          </div>
-        }
-      >
+      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)}>
+        <Window className="red-168">
+          <Fieldset legend="Operational Check">
+            Some content inside the fieldset.
+          </Fieldset>
+        </Window>
         <p>
           <span className="info-text">{robotName}</span>{" "}
           の全モータを順番に微小駆動します。
@@ -97,6 +80,18 @@ export function MotorCheckButton({
         <p style={{ marginTop: "0.25rem", opacity: 0.8 }}>
           実行中も緊急停止 (EMG STOP) は即時優先で動作します。
         </p>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: "0.5rem",
+          }}
+        >
+          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+          <Button className="cyan-255" onClick={handleConfirmStart}>
+            Start
+          </Button>
+        </div>
       </Modal>
     </div>
   );
