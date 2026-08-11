@@ -1,6 +1,12 @@
-import { Button, ProgressBar } from "@tsaito18/tuicss-react";
+import {
+  Button,
+  Modal,
+  ModalBody,
+  ModalFooter,
+  ModalHeader,
+  ProgressBar,
+} from "@tsaito18/tuicss-react";
 
-import { Modal } from "@/components/Modal";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
@@ -158,36 +164,10 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
         : "未実行";
 
   return (
-    <Modal
-      isOpen={isOpen}
-      title={`MOTOR CHECK — ${robotName}`}
-      footer={
-        <div
-          style={{
-            display: "flex",
-            width: "100%",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-          }}
-        >
-          <span style={{ opacity: 0.7 }}>{footerLabel}</span>
-          <div style={{ display: "flex", gap: 8 }}>
-            {isRunning ? (
-              <Button className="red-255" onClick={abort}>
-                ■ 中断
-              </Button>
-            ) : state.records.length > 0 || isError ? (
-              <Button className="cyan-255" onClick={start}>
-                ► リトライ
-              </Button>
-            ) : null}
-            <Button onClick={() => onOpenChange(false)}>閉じる</Button>
-          </div>
-        </div>
-      }
-    >
-      <div
+    <Modal open={isOpen} onClose={() => onOpenChange(false)} windowClassName="red-168 left-align">
+      <ModalHeader>MOTOR CHECK — {robotName}</ModalHeader>
+      <ModalBody
+        className="tui-scroll-cyan"
         style={{
           display: "flex",
           flexDirection: "column",
@@ -252,14 +232,7 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
         {state.records.length === 0 && !isRunning && !isError ? (
           <p style={{ padding: "12px 4px", opacity: 0.7 }}>動作確認はまだ実行されていません。</p>
         ) : (
-          <div
-            className="tui-scroll"
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              maxHeight: "50vh",
-            }}
-          >
+          <div style={{ display: "flex", flexDirection: "column" }}>
             {state.records.map((record) => (
               <MotorRow
                 key={record.motor}
@@ -269,7 +242,22 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
             ))}
           </div>
         )}
-      </div>
+      </ModalBody>
+      <ModalFooter style={{ width: "100%", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ opacity: 0.7 }}>{footerLabel}</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          {isRunning ? (
+            <Button className="red-255" onClick={abort}>
+              ■ 中断
+            </Button>
+          ) : state.records.length > 0 || isError ? (
+            <Button className="cyan-255" onClick={start}>
+              ► リトライ
+            </Button>
+          ) : null}
+          <Button onClick={() => onOpenChange(false)}>閉じる</Button>
+        </div>
+      </ModalFooter>
     </Modal>
   );
 }

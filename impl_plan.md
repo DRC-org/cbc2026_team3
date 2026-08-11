@@ -227,10 +227,12 @@ cbc2026_team3_central/
 ├── pyproject.toml
 ├── config/
 │   ├── main_hand.yaml
-│   └── sub_hand.yaml
+│   ├── sub_hand.yaml
+│   └── checklist.yaml      # 指差喚呼チェックリスト定義
 ├── lib/
 │   ├── __init__.py
 │   ├── can_manager.py
+│   ├── match_state.py      # モード / コート / フェーズ / チェックリスト
 │   ├── drivers/
 │   │   ├── __init__.py
 │   │   ├── base.py
@@ -264,6 +266,9 @@ cbc2026_team3_central/
 │           ├── SequenceProgress.tsx
 │           ├── MotorStatus.tsx
 │           ├── TriggerButton.tsx
+│           ├── Checklist.tsx       # 指差喚呼チェックリスト
+│           ├── MatchControl.tsx    # モード/コート切替 + 試合開始・終了
+│           ├── PhaseBanner.tsx     # MODE/COURT/PHASE 常時表示
 │           └── EStopButton.tsx
 ├── main.py
 └── tests/
@@ -273,6 +278,9 @@ cbc2026_team3_central/
     │   ├── test_edulite05.py
     │   └── test_generic.py
     ├── test_sequence_engine.py
+    ├── test_sequence_court_auto.py
+    ├── test_match_state.py
+    ├── test_server_match.py
     ├── test_can_manager.py
     └── test_ws_protocol.py
 ```
@@ -293,8 +301,8 @@ cbc2026_team3_central/
   "total_steps": 5,
   "waiting_trigger": true,
   "steps": [
-    { "index": 0, "label": "初期位置へ移動", "require_trigger": false },
-    { "index": 1, "label": "ワーク前まで前進", "require_trigger": true }
+    { "index": 0, "label": "初期位置へ移動", "require_trigger": false, "auto_stop": false },
+    { "index": 1, "label": "ワーク前まで前進", "require_trigger": true, "auto_stop": false }
   ],
   "motors": {
     "m3508_1": { "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0 },
@@ -324,25 +332,153 @@ cbc2026_team3_central/
 - **sequence_stop**: 通常停止 (緊急停止と異なり CAN 層には介入しない)。停止後 `step_index=0` に戻り `running=false` になる
 - **sequence_start**: 先頭から実行開始 (停止後・完走後の再起動)
 
+**シーケンスは起動時に自動実行しない。** `_run_sequence_loop` は resume 要求を待って停止したまま起動し、
+操縦者の明示的な `sequence_start` (半自動) または `match_start` (全自動) があるまでロボットを動かさない。
+
 ### dry-run モード
 
 `uv run python main.py --dry-run` 起動時、`RobotServer` は以下の変更を加えて Web UI を完全デモ可能にする:
 
 - 各モータの状態は `time.time()` ベースのサイン波で擬似生成（pos/vel/torque/temp）
 - ヘルススナップショットは全モータ・全バスを `ok` に上書き（virtual バスではフィードバックが返らないため）
-- シーケンスは `_on_startup` で自動的に `_run_sequence_loop` タスクとして起動され、`require_trigger` ステップで待機する
+- シーケンスタスクは `_on_startup` で起動されるが、実機同様に開始合図を待って停止したままになる
+
+---
+
+## 試合運用フロー（モード / コート / フェーズ）
+
+`lib/match_state.py` が試合全体の状態を一元管理する。ロボット単位の `state` メッセージとは別系統。
+操縦者 2 名 + Monitor が**別ブラウザ**で接続するため、チェックリストの進捗をクライアント側に持つと
+「2 人とも完了」の判定ができない。**正は必ずサーバー側**に置く。
+
+### 2 つの直交する軸
+
+| 軸 | 値 | 意味 |
+|---|---|---|
+| `mode` | `semi_auto` / `full_auto` | 半自動は操縦者 2 名、全自動は Monitor 1 名で運用 |
+| `court` | `red` / `blue` | 自陣コート。赤青で配置が左右反転する |
+| `phase` | `setup` → `ready` → `match` → `finished` | セッティングタイムと試合中を分離 |
+
+### フェーズ遷移
+
+```
+setup ⇄ ready → match → finished → setup
+  ↑ 必要チェックリスト完了で自動遷移 (ready)、チェックが外れると setup に戻る
+              ↑ match_start (明示操作のみ)
+                      ↑ match_finish   ↑ match_reset (どのフェーズからでも可)
+```
+
+- 必要ロール: `semi_auto` → `main_hand` + `sub_hand` / `full_auto` → `monitor`
+- `mode` / `court` を変更するとチェックリストは**全リセット**され `setup` に戻る（配置が変わるため指差喚呼をやり直す）
+- `match_reset` はモード・コートを維持したままチェックリストのみリセットする
+- 項目ゼロのロールは「完了」とみなす（ゲートが永久に開かなくなるのを防ぐ）
+
+### フェーズによるコマンドゲート
+
+`MatchState.deny_reason(command)` が単一の判定点。UI でボタンを隠すだけでは WS 直叩きや
+リロード直後を防げないため、サーバー側でも同じ制約を掛ける。
+
+| コマンド | setup | ready | match | finished |
+|---|:-:|:-:|:-:|:-:|
+| `set_mode` / `set_court` | ✓ | ✓ | ✗ | ✓ |
+| `checklist_set` / `checklist_reset` | ✓ | ✓ | ✗ | ✗ |
+| `motor_check_start` | ✓ | ✓ | ✗ | ✓ |
+| `match_start` | ✗ | ✓ | ✗ | ✗ |
+| `match_finish` | ✗ | ✗ | ✓ | ✗ |
+| `sequence_start` / `sequence_jump` / `trigger` | ✗ | ✗ | ✓ | ✗ |
+| `sequence_stop` / `e_stop` / `match_reset` | ✓ | ✓ | ✓ | ✓ |
+
+拒否時は `{"type":"command_rejected","command":...,"reason":...}` を配信する。
+ただし `motor_check_start` の拒否だけは既存の `motor_check_error` イベントに合わせる（UI の表示経路が別のため）。
+
+`motor_check` は HTTP POST 経路が `_handle_command` を通らないため、`_start_motor_check` 側にも
+同じフェーズ判定を置いている（片方だけでは穴が空く）。
+
+### 試合開始の挙動（モード別）
+
+- **半自動**: `match_start` はフェーズを `match` にするだけ。各操縦者が自分のタブで `sequence_start` を押す
+  （ハンドごとに開始タイミングが異なるため）
+- **全自動**: 操縦者タブが無いので `match_start` が両ロボットの `request_start()` を兼ねる
+
+### 全自動モードの実現方式
+
+シーケンス定義は半自動と共用し、`Sequence.set_auto_advance(True)` で `require_trigger` のステップを
+待たずに通過させる。二重メンテを避け、半自動と全自動で挙動が乖離しないようにするため。
+
+人間の目視確認が必須な危険動作には `@step("...", require_trigger=True, auto_stop=True)` を付ける。
+`auto_stop=True` のステップは全自動でも必ずトリガー待ちで停止する。
+
+### コート対応
+
+`Sequence.court` で参照できる。実際の左右反転は各 `robots/*.py` の責務。
+座標定数が未確定のため現状は土台のみで、確定後に反転テーブル／`court_offsets` を導入する。
+
+### WebSocket プロトコル拡張
+
+Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後に送らないと、リロードした操縦者が
+現在のモード・フェーズを知れない:
+
+```jsonc
+{
+  "type": "match_state",
+  "mode": "semi_auto",
+  "court": "red",
+  "phase": "setup",
+  "required_roles": ["main_hand", "sub_hand"],
+  "can_start_match": false,
+  "checklists": {
+    "monitor":   { "items": [{ "id": "power", "label": "電源投入確認", "checked": false }], "completed": false },
+    "main_hand": { "items": [/* ... */], "completed": false },
+    "sub_hand":  { "items": [/* ... */], "completed": false }
+  }
+}
+{ "type": "command_rejected", "command": "sequence_start", "reason": "試合中のみシーケンスを開始できます" }
+```
+
+Client → Server:
+
+```jsonc
+{ "type": "set_mode", "mode": "full_auto" }
+{ "type": "set_court", "court": "blue" }
+{ "type": "checklist_set", "role": "main_hand", "item_id": "home_position", "checked": true }
+{ "type": "checklist_reset", "role": "main_hand" }   // role 省略で全ロール
+{ "type": "match_start" }
+{ "type": "match_finish" }
+{ "type": "match_reset" }
+```
+
+### チェックリスト設定（`config/checklist.yaml`）
+
+```yaml
+checklists:
+  monitor:
+    - { id: power, label: 電源投入・バッテリ電圧確認 }
+  main_hand:
+    - { id: home_position, label: メインハンド初期位置確認 }
+  sub_hand:
+    - { id: home_position, label: サブハンド初期位置確認 }
+```
+
+`id` はロール内で一意。`id` / `label` を欠くエントリは無視して起動する
+（yaml の記述ミスで起動が落ちるより、UI 上で項目欠落に気付ける方が競技当日の運用に適する）。
+`--checklist <path>` でパスを差し替え可能。ファイルが無ければ項目ゼロで起動する。
 
 ---
 
 ## Web UI ページ構成
 
-| パス | ページ | 内容 |
+タブ構成（`web/src/App.tsx`）。操縦者 2 名はそれぞれ Main Hand / Sub Hand タブを開く。
+
+| タブ | ページ | 内容 |
 |---|---|---|
-| `/` | Dashboard | 両ロボットの状態概要、シーケンス進行状況 |
-| `/main-hand` | RobotControl | メインハンド操作画面（トリガーボタン + 進行表示 + モータ状態） |
-| `/main-hand/motors` | MotorTuning | メインハンドのモータ個別調整 |
-| `/sub-hand` | RobotControl | サブハンド操作画面 |
-| `/sub-hand/motors` | MotorTuning | サブハンドのモータ個別調整 |
+| Monitor | `pages/Dashboard.tsx` | 試合制御 (`MatchControl`)、全自動時の指差喚呼、半自動時は 2 名の進捗監視、両ロボット概要 |
+| Main Hand | `pages/RobotControl.tsx` | 半自動セッティング中は指差喚呼、試合中はシーケンス操作 |
+| Sub Hand | `pages/RobotControl.tsx` | 同上 |
+| PID Tuning | `pages/MotorTuning.tsx` | モータ個別調整 |
+
+- ステータスバーに `PhaseBanner`（MODE / COURT / PHASE）を常時表示。誤ったコート設定のまま試合に入る事故を防ぐ
+- `command_rejected` は画面下部にトースト表示（4 秒で自動消去）
+- 試合中以外は START / NEXT / ステップジャンプを UI 上でも無効化する（サーバー側ゲートとの二重防御）
 
 ---
 
@@ -732,6 +868,33 @@ motors:
 | ⑨ サーバー統合 | 6-21, 6-22 | WS で `_start` → 進捗 → 完了の一連を確認、競合拒否 |
 | ⑩ config 反映 | 6-23 | dry-run でモータ別パラメータが効くか |
 | ⑪ Web UI | 6-24〜6-27 | dry-run + Web UI から実押下・結果表示・無効化ロジックの目視確認 |
+
+### Phase 7: 試合運用フロー（モード / コート / フェーズ / 指差喚呼）— TDD
+
+詳細な仕様は「試合運用フロー」セクションを参照。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 7-1 | `lib/match_state.py` | Mode / Court / Phase / ChecklistItem / MatchState / `load_checklist_definitions` |
+| 7-2 | `tests/test_match_state.py` | 遷移規則・完了判定・モード切替時リセット・コマンドゲートの単体テスト |
+| 7-3 | `lib/sequence/engine.py` | `court` / `auto_advance` / `@step(auto_stop=True)` を追加 |
+| 7-4 | `tests/test_sequence_court_auto.py` | コート伝播と全自動通過／`auto_stop` 停止の検証 |
+| 7-5 | `lib/server.py` | `MatchState` 保持、フェーズゲート、`match_state` 配信、接続直後スナップショット、自動開始の廃止 |
+| 7-6 | `tests/test_server_match.py` | WS 経由の全フローと HTTP `motor_check` ゲートの検証 |
+| 7-7 | `config/checklist.yaml`, `main.py` | チェックリスト定義の読み込みと `--checklist` オプション |
+| 7-8 | `web/src/hooks/useRobotSocket.ts` | `match_state` / `command_rejected` の受信 |
+| 7-9 | `web/src/components/{Checklist,MatchControl,PhaseBanner}.tsx` | 新規 UI コンポーネント |
+| 7-10 | `web/src/pages/{Dashboard,RobotControl}.tsx` | Monitor の試合制御、操縦者タブのフェーズ別表示 |
+
+#### 設計上の判断
+
+- **状態の正はサーバー**: 操縦者 2 名 + Monitor が別ブラウザで接続するため、
+  クライアントローカルでは「2 人とも完了」を判定できない
+- **`mode` と `phase` は直交**: 混在させると状態が破綻するので 2 軸に分離した
+- **ゲートは二重**: UI の無効化だけでは WS 直叩き・リロード直後を防げないので
+  サーバー側 (`deny_reason`) を単一の判定点とする
+- **全自動は共用シーケンス + フラグ**: 専用シーケンスを別定義すると二重メンテになり、
+  半自動と全自動で挙動が乖離する
 
 ---
 

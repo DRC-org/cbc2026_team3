@@ -1,7 +1,16 @@
 import { createContext, useContext } from "react";
 import type { ReactNode } from "react";
 
-import type { HealthChangeEvent, MotorCheckState, RobotState } from "@/hooks/useRobotSocket";
+import type {
+  ChecklistRole,
+  CommandRejectedEvent,
+  HealthChangeEvent,
+  MatchCourt,
+  MatchMode,
+  MatchState,
+  MotorCheckState,
+  RobotState,
+} from "@/hooks/useRobotSocket";
 
 interface RobotContextValue {
   states: Record<string, RobotState>;
@@ -9,9 +18,19 @@ interface RobotContextValue {
   eStopActive: boolean;
   healthEvents: HealthChangeEvent[];
   motorChecks: Record<string, MotorCheckState>;
+  matchState: MatchState;
+  rejection: CommandRejectedEvent | null;
+  clearRejection: () => void;
   send: (data: object) => void;
   onEStop: () => void;
   onEStopRelease: () => void;
+  setMode: (mode: MatchMode) => void;
+  setCourt: (court: MatchCourt) => void;
+  setChecklistItem: (role: ChecklistRole, itemId: string, checked: boolean) => void;
+  resetChecklist: (role: ChecklistRole) => void;
+  matchStart: () => void;
+  matchFinish: () => void;
+  matchReset: () => void;
 }
 
 const RobotContext = createContext<RobotContextValue | null>(null);

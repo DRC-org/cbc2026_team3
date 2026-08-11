@@ -1,4 +1,4 @@
-import { Button, Modal, Window, Fieldset } from "@tsaito18/tuicss-react";
+import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
 import { useRobot } from "@/context/RobotContext";
@@ -9,10 +9,7 @@ interface MotorCheckButtonProps {
   onPanelOpen?: () => void;
 }
 
-export function MotorCheckButton({
-  robotName,
-  onPanelOpen,
-}: MotorCheckButtonProps) {
+export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonProps) {
   const { eStopActive, connected, states } = useRobot();
   const { state, start } = useMotorCheck(robotName);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -55,43 +52,31 @@ export function MotorCheckButton({
         {checkRunning ? "► 確認実行中..." : "▮ 動作確認"}
       </Button>
       {/* Tooltip は使えないため無効化理由を等幅テキストで併記する。 */}
-      {disabled && reasonLabel ? (
-        <span style={{ opacity: 0.7 }}>[?] {reasonLabel}</span>
-      ) : null}
+      {disabled && reasonLabel ? <span style={{ opacity: 0.7 }}>[?] {reasonLabel}</span> : null}
 
-      <Modal open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <Window className="red-168">
-          <Fieldset legend="Operational Check">
-            Some content inside the fieldset.
-          </Fieldset>
-        </Window>
-        <p>
-          <span className="info-text">{robotName}</span>{" "}
-          の全モータを順番に微小駆動します。
-        </p>
-        <p
-          className="danger-text"
-          style={{
-            marginTop: "0.5rem",
-          }}
-        >
-          ⚠ 周囲の安全を確認してから開始してください。
-        </p>
-        <p style={{ marginTop: "0.25rem", opacity: 0.8 }}>
-          実行中も緊急停止 (EMG STOP) は即時優先で動作します。
-        </p>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "flex-end",
-            gap: "0.5rem",
-          }}
-        >
+      <Modal
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        windowClassName="red-168 left-align"
+      >
+        <ModalHeader>Operational Check</ModalHeader>
+        <ModalBody>
+          <p>
+            <span className="info-text">{robotName}</span> の全モータを順番に微小駆動します。
+          </p>
+          <p className="danger-text" style={{ marginTop: "0.5rem" }}>
+            ⚠ 周囲の安全を確認してから開始してください。
+          </p>
+          <p style={{ marginTop: "0.25rem", opacity: 0.8 }}>
+            実行中も緊急停止 (EMG STOP) は即時優先で動作します。
+          </p>
+        </ModalBody>
+        <ModalFooter>
           <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
           <Button className="cyan-255" onClick={handleConfirmStart}>
             Start
           </Button>
-        </div>
+        </ModalFooter>
       </Modal>
     </div>
   );

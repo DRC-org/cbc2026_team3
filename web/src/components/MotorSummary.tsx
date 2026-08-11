@@ -1,72 +1,48 @@
 import { MotorStatus } from "@/components/MotorStatus";
-import type { MotorState } from "@/hooks/useRobotSocket";
+import type { MotorHealth, MotorState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
+import { TEMP_WARNING } from "@/lib/robots";
 
 interface MotorSummaryProps {
   motors: Record<string, MotorState>;
+  healthMotors?: MotorHealth[];
 }
-
-const TEMP_WARNING = 60;
 
 function countAnomalies(motors: Record<string, MotorState>): number {
   return Object.values(motors).filter((m) => m.temp >= TEMP_WARNING).length;
 }
 
-function SummaryBadge({
-  hasAnomaly,
-  anomalyCount,
-}: {
-  hasAnomaly: boolean;
-  anomalyCount: number;
-}) {
+function SummaryBadge({ hasAnomaly, anomalyCount }: { hasAnomaly: boolean; anomalyCount: number }) {
   return (
     <span
       className={cx(hasAnomaly ? "warning-text" : "success-text")}
       style={{ whiteSpace: "nowrap" }}
     >
-      [{hasAnomaly ? "⚠" : "✓"}{" "}
-      {hasAnomaly ? `異常 ${anomalyCount} 件` : `All operational`}]
+      [{hasAnomaly ? "⚠" : "✓"} {hasAnomaly ? `異常 ${anomalyCount} 件` : `All operational`}]
     </span>
   );
 }
 
-export function MotorSummary({ motors }: MotorSummaryProps) {
+export function MotorSummary({ motors, healthMotors }: MotorSummaryProps) {
   const total = Object.keys(motors).length;
   const anomalyCount = countAnomalies(motors);
+  const healthMap = Object.fromEntries((healthMotors ?? []).map((m) => [m.name, m]));
 
   if (total === 0) {
-    return (
-      <div style={{ padding: 8, opacity: 0.7 }}>
-        モータ情報なし
-      </div>
-    );
+    return <div style={{ padding: 8, opacity: 0.7 }}>モータ情報なし</div>;
   }
 
   const hasAnomaly = anomalyCount > 0;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, gap: 6 }}>
-      <div
-        style={{
-          display: "flex",
-          flexShrink: 0,
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <h3
-          style={{
-            opacity: 0.8,
-          }}
-        >
-          MOTORS
-        </h3>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, gap: 4 }}>
+      <div style={{ display: "flex", flexShrink: 0, justifyContent: "flex-end" }}>
         <SummaryBadge hasAnomaly={hasAnomaly} anomalyCount={anomalyCount} />
       </div>
-      <div className="tui-scroll" style={{ flex: 1 }}>
+      <div className="tui-scroll-cyan" style={{ overflow: "auto" }}>
         <div style={{ display: "flex", flexDirection: "column" }}>
           {Object.entries(motors).map(([name, state]) => (
-            <MotorStatus key={name} name={name} state={state} />
+            <MotorStatus key={name} name={name} state={state} health={healthMap[name]} />
           ))}
         </div>
       </div>

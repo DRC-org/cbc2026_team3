@@ -14,6 +14,7 @@ from lib.drivers.base import MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
 from lib.server import RobotServer
 
@@ -27,6 +28,7 @@ _DRIVER_MAP: dict[str, type[MotorDriver]] = {
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
 _DEFAULT_CONFIGS = ["main_hand.yaml", "sub_hand.yaml"]
+_CHECKLIST_CONFIG = "checklist.yaml"
 
 # RobotServer.__init__ のキーワード引数デフォルトと一致させること。
 # 値の変更は lib/server.py の RobotServer 既定値と同期する。
@@ -55,6 +57,10 @@ def _parse_args() -> argparse.Namespace:
         "--config",
         nargs="*",
         help="config ファイルパス (デフォルト: config/main_hand.yaml config/sub_hand.yaml)",
+    )
+    parser.add_argument(
+        "--checklist",
+        help="指差喚呼チェックリストの yaml パス (デフォルト: config/checklist.yaml)",
     )
     parser.add_argument(
         "--dry-run",
@@ -227,6 +233,18 @@ def _collect_per_motor_overrides(
     return overrides
 
 
+def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistItem]]:
+    """チェックリスト yaml を読み込む。存在しなければ空定義で起動する。
+
+    項目ゼロのロールは「常に完了」とみなされるため、yaml が無くても試合には
+    入れる。逆に yaml があれば全項目のチェックが試合開始の前提条件になる。
+    """
+    if not path.exists():
+        logger.warning("チェックリスト設定が見つかりません: %s (項目なしで起動)", path)
+        return load_checklist_definitions({})
+    return load_checklist_definitions(_load_config(path) or {})
+
+
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
@@ -345,6 +363,15 @@ async def main() -> None:
         motor_check_overrides,
     )
 
+    checklist_path = (
+        pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
+    )
+    checklist_definitions = _load_checklist_definitions(checklist_path)
+    logger.info(
+        "チェックリスト項目数: %s",
+        {role: len(items) for role, items in checklist_definitions.items()},
+    )
+
     server = RobotServer(
         host=args.host,
         port=args.port,
@@ -352,6 +379,7 @@ async def main() -> None:
         motor_check_per_motor_timeout_ms=motor_check_settings["per_motor_timeout_ms"],
         motor_check_default_magnitude=motor_check_settings["default_magnitude"],
         motor_check_per_motor_overrides=motor_check_overrides,
+        checklist_definitions=checklist_definitions,
         dry_run=args.dry_run,
     )
     can_managers: list[CANManager] = []

@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@tsaito18/tuicss-react':
-        specifier: ^0.1.4
-        version: 0.1.4(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
+        specifier: ^0.1.7
+        version: 0.1.7(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       react:
         specifier: ^19.2.5
         version: 19.2.5
@@ -411,8 +411,8 @@ packages:
   '@rolldown/pluginutils@1.0.0-rc.7':
     resolution: {integrity: sha512-qujRfC8sFVInYSPPMLQByRh7zhwkGFS4+tyMQ83srV1qrxL4g8E2tyxVVyxd0+8QeBM1mIk9KbWxkegRr76XzA==}
 
-  '@tsaito18/tuicss-react@0.1.4':
-    resolution: {integrity: sha512-UbpDwjOmvPtyNEsux1ZMwYnU1O5muXcq6NJFGZ31GjPKvagTrBwAjCpV0wB8hUHPm4hLZWpRfpjSzQqWhc+v6A==}
+  '@tsaito18/tuicss-react@0.1.7':
+    resolution: {integrity: sha512-BA5/Pu3gfx8I7Ao86XS2aseyDIXlupH6dGbMtWhPcsnAdhbOfqVUZHmY+3TWYrHsKAWFhTucccs3BhM1cVxXWA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     peerDependencies:
       react: '>=19'
@@ -855,7 +855,7 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.0-rc.7': {}
 
-  '@tsaito18/tuicss-react@0.1.4(react-dom@19.2.5(react@19.2.5))(react@19.2.5)':
+  '@tsaito18/tuicss-react@0.1.7(react-dom@19.2.5(react@19.2.5))(react@19.2.5)':
     dependencies:
       react: 19.2.5
       react-dom: 19.2.5(react@19.2.5)

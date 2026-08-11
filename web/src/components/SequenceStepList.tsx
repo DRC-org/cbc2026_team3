@@ -1,7 +1,6 @@
-import { Button } from "@tsaito18/tuicss-react";
+import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
-import { Modal } from "@/components/Modal";
 import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
 
@@ -10,6 +9,8 @@ interface SequenceStepListProps {
   stepIndex: number;
   waitingTrigger: boolean;
   onJump: (index: number) => void;
+  /** 試合中以外はステップジャンプを禁止する (サーバー側でも拒否される) */
+  disabled?: boolean;
 }
 
 type StepKind = "done" | "current" | "waiting" | "future";
@@ -47,6 +48,7 @@ export function SequenceStepList({
   stepIndex,
   waitingTrigger,
   onJump,
+  disabled = false,
 }: SequenceStepListProps) {
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
 
@@ -58,7 +60,7 @@ export function SequenceStepList({
   const target = pendingIndex !== null ? steps[pendingIndex] : null;
 
   const handleRequestJump = (index: number) => {
-    if (index === stepIndex) return;
+    if (disabled || index === stepIndex) return;
     setPendingIndex(index);
   };
 
@@ -80,10 +82,13 @@ export function SequenceStepList({
         }}
       >
         <h3 style={{ opacity: 0.8 }}>STEP LIST</h3>
-        <span style={{ opacity: 0.6 }}>クリックで再開</span>
+        <span style={{ opacity: 0.6 }}>{disabled ? "試合中のみ操作可" : "クリックで再開"}</span>
       </div>
 
-      <ol className="tui-scroll flex-1" style={{ display: "flex", flexDirection: "column" }}>
+      <ol
+        className="tui-scroll-cyan flex-1"
+        style={{ display: "flex", flexDirection: "column", overflow: "auto" }}
+      >
         {steps.map((step, i) => {
           const kind = classifyStep(i, stepIndex, totalSteps, waitingTrigger);
           const isActive = kind === "current" || kind === "waiting";
@@ -92,6 +97,7 @@ export function SequenceStepList({
               <button
                 type="button"
                 onClick={() => handleRequestJump(i)}
+                disabled={disabled}
                 aria-current={isActive ? "step" : undefined}
                 aria-label={`ステップ ${i + 1}: ${step.label}`}
                 className={cx(
@@ -105,9 +111,10 @@ export function SequenceStepList({
                   gap: 8,
                   padding: "6px 8px",
                   textAlign: "left",
-                  cursor: "pointer",
+                  cursor: disabled ? "not-allowed" : "pointer",
                   border: "none",
                   background: "transparent",
+                  opacity: disabled ? 0.6 : 1,
                 }}
               >
                 <span
@@ -143,27 +150,29 @@ export function SequenceStepList({
       </ol>
 
       <Modal
-        isOpen={pendingIndex !== null}
-        title="STEP JUMP"
-        footer={
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            <Button onClick={handleCancel}>キャンセル</Button>
-            <Button className="yellow-255" onClick={handleConfirm}>
-              再開
-            </Button>
-          </div>
-        }
+        open={pendingIndex !== null}
+        onClose={handleCancel}
+        windowClassName="red-168 left-align"
       >
-        <p>
-          ステップ {pendingIndex !== null ? pendingIndex + 1 : ""}{" "}
-          {target ? `「${target.label}」` : ""} から再開しますか？
-        </p>
-        <p style={{ marginTop: 8, opacity: 0.8 }}>
-          現在の動作を中断して指定ステップから実行を開始します。
-        </p>
-        <p className="warning-text" style={{ marginTop: 8 }}>
-          ⚠ 物理状態が安全であることを必ず確認してください。
-        </p>
+        <ModalHeader>STEP JUMP</ModalHeader>
+        <ModalBody>
+          <p>
+            ステップ {pendingIndex !== null ? pendingIndex + 1 : ""}{" "}
+            {target ? `「${target.label}」` : ""} から再開しますか？
+          </p>
+          <p style={{ marginTop: 8, opacity: 0.8 }}>
+            現在の動作を中断して指定ステップから実行を開始します。
+          </p>
+          <p className="warning-text" style={{ marginTop: 8 }}>
+            ⚠ 物理状態が安全であることを必ず確認してください。
+          </p>
+        </ModalBody>
+        <ModalFooter>
+          <Button onClick={handleCancel}>キャンセル</Button>
+          <Button className="yellow-255" onClick={handleConfirm}>
+            再開
+          </Button>
+        </ModalFooter>
       </Modal>
     </div>
   );

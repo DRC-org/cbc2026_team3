@@ -1,10 +1,4 @@
-import type {
-  BusHealth,
-  BusHealthState,
-  HealthSnapshot,
-  MotorHealth,
-  MotorHealthState,
-} from "@/hooks/useRobotSocket";
+import type { BusHealth, BusHealthState, HealthSnapshot } from "@/hooks/useRobotSocket";
 
 interface HealthIndicatorProps {
   health: HealthSnapshot | undefined;
@@ -30,12 +24,6 @@ const TONE_STYLES: Record<Tone, ToneStyle> = {
 function busTone(state: BusHealthState): Tone {
   if (state === "ok") return "success";
   if (state === "degraded") return "warning";
-  return "danger";
-}
-
-function motorTone(state: MotorHealthState): Tone {
-  if (state === "ok") return "success";
-  if (state === "stale" || state === "warning") return "warning";
   return "danger";
 }
 
@@ -131,48 +119,11 @@ function BusRow({ bus }: { bus: BusHealth }) {
   );
 }
 
-function MotorRow({ motor }: { motor: MotorHealth }) {
-  const style = TONE_STYLES[motorTone(motor.state)];
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "0.75rem",
-        padding: "0.25rem",
-      }}
-    >
-      <span style={{ minWidth: 0 }}>{motor.name}</span>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "0.75rem",
-        }}
-      >
-        <span style={{ opacity: 0.7 }}>{formatAge(motor.feedback_age_ms)}</span>
-        <span style={{ opacity: 0.7 }}>{motor.temperature.toFixed(0)}℃</span>
-        <span className={style.textClass}>{motor.state.toUpperCase()}</span>
-      </div>
-    </div>
-  );
-}
-
 function BusOnlyMode({ health }: { health: HealthSnapshot }) {
   const tone = busTone(health.overall);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.375rem" }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <h3 style={{ opacity: 0.8 }}>
-          CAN BUS
-        </h3>
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <StatusTag tone={tone} />
       </div>
       {health.buses.length > 0 ? (
@@ -182,9 +133,7 @@ function BusOnlyMode({ health }: { health: HealthSnapshot }) {
           ))}
         </div>
       ) : (
-        <div style={{ padding: "0.25rem", opacity: 0.6 }}>
-          バス情報なし
-        </div>
+        <div style={{ padding: "0.25rem", opacity: 0.6 }}>バス情報なし</div>
       )}
     </div>
   );
@@ -214,30 +163,10 @@ function CardMode({ health }: { health: HealthSnapshot }) {
           <StatusTag tone={tone} />
         </div>
         {health.buses.length > 0 ? (
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}
-          >
-            <span
-              style={{ opacity: 0.7 }}
-            >
-              バス ({health.buses.length})
-            </span>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+            <span style={{ opacity: 0.7 }}>バス ({health.buses.length})</span>
             {health.buses.map((bus) => (
               <BusRow key={bus.name} bus={bus} />
-            ))}
-          </div>
-        ) : null}
-        {health.motors.length > 0 ? (
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}
-          >
-            <span
-              style={{ opacity: 0.7 }}
-            >
-              モータ ({health.motors.length})
-            </span>
-            {health.motors.map((motor) => (
-              <MotorRow key={motor.name} motor={motor} />
             ))}
           </div>
         ) : null}
@@ -256,36 +185,20 @@ function NeutralPlaceholder({
   }
   if (variant === "bus-only") {
     return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <h3 style={{ opacity: 0.8 }}>
-          CAN BUS
-        </h3>
-        <span style={{ opacity: 0.6 }}>
-          CAN ヘルス未取得
-        </span>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <span style={{ opacity: 0.6 }}>未取得</span>
       </div>
     );
   }
   return (
     <fieldset className="tui-fieldset">
       <legend>CAN Health</legend>
-      <p style={{ padding: "0.25rem", opacity: 0.7 }}>
-        ヘルス情報未取得
-      </p>
+      <p style={{ padding: "0.25rem", opacity: 0.7 }}>ヘルス情報未取得</p>
     </fieldset>
   );
 }
 
-export function HealthIndicator({
-  health,
-  variant = "compact",
-}: HealthIndicatorProps) {
+export function HealthIndicator({ health, variant = "compact" }: HealthIndicatorProps) {
   if (!health) return <NeutralPlaceholder variant={variant} />;
   if (variant === "pill") return <PillMode health={health} />;
   if (variant === "compact") return <CompactMode health={health} />;

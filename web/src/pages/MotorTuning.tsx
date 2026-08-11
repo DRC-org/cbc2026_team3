@@ -3,16 +3,12 @@ import { useState } from "react";
 
 import { MotorStatus } from "@/components/MotorStatus";
 import { useRobot } from "@/context/RobotContext";
+import { ROBOTS } from "@/lib/robots";
 
 const PID_PARAMS = [
   { key: "kp", label: "Kp", max: 10 },
   { key: "ki", label: "Ki", max: 5 },
   { key: "kd", label: "Kd", max: 5 },
-] as const;
-
-const ROBOTS = [
-  { key: "main_hand", label: "MAIN HAND" },
-  { key: "sub_hand", label: "SUB HAND" },
 ] as const;
 
 const STEP = 0.01;
@@ -138,13 +134,14 @@ export function MotorTuning() {
               ) : (
                 // モータ数が増えても枠内のみスクロールさせ全体スクロールは禁止する。
                 <div
-                  className="tui-scroll"
+                  className="tui-scroll-cyan"
                   style={{
                     display: "flex",
                     flexDirection: "column",
                     flex: 1,
                     gap: "0.75rem",
                     paddingRight: "0.25rem",
+                    overflow: "auto",
                   }}
                 >
                   {motors.map(([motorName, motorState]) => (

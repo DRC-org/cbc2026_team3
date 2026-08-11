@@ -108,10 +108,52 @@ function mergeRecord(records: MotorCheckRecord[], next: MotorCheckRecord): Motor
   return copy;
 }
 
+export type MatchMode = "semi_auto" | "full_auto";
+export type MatchCourt = "red" | "blue";
+export type MatchPhase = "setup" | "ready" | "match" | "finished";
+export type ChecklistRole = "monitor" | "main_hand" | "sub_hand";
+
+export interface ChecklistItem {
+  id: string;
+  label: string;
+  checked: boolean;
+}
+
+export interface ChecklistState {
+  items: ChecklistItem[];
+  completed: boolean;
+}
+
+export interface MatchState {
+  mode: MatchMode;
+  court: MatchCourt;
+  phase: MatchPhase;
+  required_roles: ChecklistRole[];
+  can_start_match: boolean;
+  checklists: Record<string, ChecklistState>;
+}
+
+export interface CommandRejectedEvent {
+  command: string;
+  reason: string;
+  receivedAt: number;
+}
+
+// WS 未接続時に UI を成立させるための初期値。サーバー接続直後に必ず上書きされる
+const INITIAL_MATCH_STATE: MatchState = {
+  mode: "semi_auto",
+  court: "red",
+  phase: "setup",
+  required_roles: ["main_hand", "sub_hand"],
+  can_start_match: false,
+  checklists: {},
+};
+
 export interface SequenceStepInfo {
   index: number;
   label: string;
   require_trigger: boolean;
+  auto_stop?: boolean;
 }
 
 export interface RobotState {
@@ -133,6 +175,9 @@ interface UseRobotSocketReturn {
   eStopActive: boolean;
   healthEvents: HealthChangeEvent[];
   motorChecks: Record<string, MotorCheckState>;
+  matchState: MatchState;
+  rejection: CommandRejectedEvent | null;
+  clearRejection: () => void;
   setEStopActive: (active: boolean) => void;
   send: (data: object) => void;
 }
@@ -148,6 +193,8 @@ export function useRobotSocket(url: string = DEFAULT_URL): UseRobotSocketReturn 
   const [eStopActive, setEStopActive] = useState(false);
   const [healthEvents, setHealthEvents] = useState<HealthChangeEvent[]>([]);
   const [motorChecks, setMotorChecks] = useState<Record<string, MotorCheckState>>({});
+  const [matchState, setMatchState] = useState<MatchState>(INITIAL_MATCH_STATE);
+  const [rejection, setRejection] = useState<CommandRejectedEvent | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -174,6 +221,22 @@ export function useRobotSocket(url: string = DEFAULT_URL): UseRobotSocketReturn 
           if (typeof msg.e_stop_active === "boolean") {
             setEStopActive(msg.e_stop_active);
           }
+        } else if (msg.type === "match_state") {
+          // サーバーが正。接続直後のスナップショットと変化通知の両方がここに来る
+          setMatchState({
+            mode: msg.mode as MatchMode,
+            court: msg.court as MatchCourt,
+            phase: msg.phase as MatchPhase,
+            required_roles: Array.isArray(msg.required_roles) ? msg.required_roles : [],
+            can_start_match: Boolean(msg.can_start_match),
+            checklists: msg.checklists ?? {},
+          });
+        } else if (msg.type === "command_rejected") {
+          setRejection({
+            command: typeof msg.command === "string" ? msg.command : "",
+            reason: typeof msg.reason === "string" ? msg.reason : "",
+            receivedAt: Date.now(),
+          });
         } else if (msg.type === "e_stop_state" && typeof msg.active === "boolean") {
           setEStopActive(msg.active);
         } else if (msg.type === "health_change" && typeof msg.robot === "string") {
@@ -294,12 +357,17 @@ export function useRobotSocket(url: string = DEFAULT_URL): UseRobotSocketReturn 
     }
   }, []);
 
+  const clearRejection = useCallback(() => setRejection(null), []);
+
   return {
     states,
     connected,
     eStopActive,
     healthEvents,
     motorChecks,
+    matchState,
+    rejection,
+    clearRejection,
     setEStopActive,
     send,
   };

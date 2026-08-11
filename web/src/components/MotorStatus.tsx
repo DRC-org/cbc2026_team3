@@ -1,12 +1,27 @@
-import type { MotorState } from "@/hooks/useRobotSocket";
+import { formatAge } from "@/components/HealthIndicator";
+import type { MotorHealth, MotorHealthState, MotorState } from "@/hooks/useRobotSocket";
+import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
 
 interface MotorStatusProps {
   name: string;
   state: MotorState;
+  health?: MotorHealth;
 }
 
-const TEMP_WARNING = 60;
-const TEMP_DANGER = 80;
+type HealthTone = "success" | "warning" | "danger";
+
+const HEALTH_TONE: Record<MotorHealthState, HealthTone> = {
+  ok: "success",
+  stale: "warning",
+  warning: "warning",
+  fault: "danger",
+};
+
+const HEALTH_TEXT_CLASS: Record<HealthTone, string> = {
+  success: "success-text",
+  warning: "warning-text",
+  danger: "danger-text",
+};
 
 type StatTone = "default" | "warning" | "danger";
 
@@ -57,7 +72,7 @@ function Cell({ label, value, unit, tone = "default" }: CellProps) {
   );
 }
 
-export function MotorStatus({ name, state }: MotorStatusProps) {
+export function MotorStatus({ name, state, health }: MotorStatusProps) {
   return (
     <div
       style={{
@@ -86,15 +101,16 @@ export function MotorStatus({ name, state }: MotorStatusProps) {
           gap: "0.75rem",
         }}
       >
+        {health ? (
+          <span className={HEALTH_TEXT_CLASS[HEALTH_TONE[health.state]]} style={{ opacity: 0.85 }}>
+            {health.state.toUpperCase()}
+          </span>
+        ) : null}
+        {health ? <span style={{ opacity: 0.6 }}>{formatAge(health.feedback_age_ms)}</span> : null}
         <Cell label="POS" value={state.pos.toFixed(1)} />
         <Cell label="VEL" value={state.vel.toFixed(1)} />
         <Cell label="TRQ" value={state.torque.toFixed(1)} />
-        <Cell
-          label="TMP"
-          value={state.temp.toFixed(1)}
-          unit="℃"
-          tone={tempTone(state.temp)}
-        />
+        <Cell label="TMP" value={state.temp.toFixed(1)} unit="℃" tone={tempTone(state.temp)} />
       </div>
     </div>
   );

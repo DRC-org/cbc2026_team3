@@ -14,7 +14,7 @@
     "check": "pnpm lint && pnpm format:check && tsc -b --noEmit"
   },
   "dependencies": {
-    "@tsaito18/tuicss-react": "^0.1.4",
+    "@tsaito18/tuicss-react": "^0.1.7",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "the-new-css-reset": "^1.11.3"

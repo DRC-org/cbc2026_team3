@@ -6,6 +6,9 @@ interface TriggerButtonProps {
   stepIndex: number;
   totalSteps: number;
   onTrigger: () => void;
+  /** 試合中以外はサーバー側でも拒否されるため、UI でも押せなくする */
+  disabled?: boolean;
+  disabledLabel?: string;
 }
 
 // 実行中表示用の ASCII 回転記号。lucide スピナー撤去の代替（CSS keyframe 不要）。
@@ -21,11 +24,35 @@ function useAsciiSpinner(active: boolean): string {
   return SPINNER_FRAMES[frame];
 }
 
-export function TriggerButton({ waiting, stepIndex, totalSteps, onTrigger }: TriggerButtonProps) {
+const FILL_STYLE = {
+  display: "flex",
+  width: "100%",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "0.75rem",
+  height: "100%",
+} as const;
+
+export function TriggerButton({
+  waiting,
+  stepIndex,
+  totalSteps,
+  onTrigger,
+  disabled = false,
+  disabledLabel = "試合開始前",
+}: TriggerButtonProps) {
   // バックエンドは完走時 step_index = total_steps を返す。「最終ステップ実行中」と
   // 「全完走」を分けるため、>= total での判定を採用する
   const isComplete = totalSteps > 0 && stepIndex >= totalSteps && !waiting;
-  const spinner = useAsciiSpinner(!waiting && !isComplete);
+  const spinner = useAsciiSpinner(!disabled && !waiting && !isComplete);
+
+  if (disabled) {
+    return (
+      <Button disabled style={FILL_STYLE} aria-label={`操作不可: ${disabledLabel}`}>
+        ⊘ {disabledLabel}
+      </Button>
+    );
+  }
 
   if (isComplete) {
     return (

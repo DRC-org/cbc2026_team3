@@ -1,0 +1,52 @@
+# セッティングタイム中の指差喚呼チェックリスト。
+#
+# ロール:
+#   monitor   — 全自動モードで表示 (Monitor タブ)
+#   main_hand — 半自動モードでメインハンド操縦者に表示
+#   sub_hand  — 半自動モードでサブハンド操縦者に表示
+#
+# 必要ロールが全て完了するまで試合モードに入れない。
+# 項目は id / label のみ必須。id はロール内で一意にすること。
+
+checklists:
+  monitor:
+    - id: power
+      label: 電源投入・バッテリ電圧確認
+    - id: estop_release
+      label: 非常停止スイッチ解除確認
+    - id: can_health
+      label: CAN バス 3 系統 OK 確認
+    - id: motor_check
+      label: アクチュエータ動作確認 完了
+    - id: court
+      label: コート設定 (赤/青) と実配置の一致確認
+    - id: field_clear
+      label: 可動範囲内に人・物がないこと確認
+
+  main_hand:
+    - id: estop_release
+      label: 非常停止スイッチ解除確認
+    - id: home_position
+      label: メインハンド初期位置確認
+    - id: gripper_open
+      label: グリッパ開状態確認
+    - id: motor_check
+      label: アクチュエータ動作確認 完了
+    - id: court
+      label: コート設定 (赤/青) と実配置の一致確認
+    - id: field_clear
+      label: 可動範囲内に人・物がないこと確認
+
+  sub_hand:
+    - id: estop_release
+      label: 非常停止スイッチ解除確認
+    - id: home_position
+      label: サブハンド初期位置確認
+    - id: gripper_open
+      label: 補助ハンド開状態確認
+    - id: motor_check
+      label: アクチュエータ動作確認 完了
+    - id: court
+      label: コート設定 (赤/青) と実配置の一致確認
+    - id: field_clear
+      label: 可動範囲内に人・物がないこと確認

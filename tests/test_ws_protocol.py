@@ -8,8 +8,29 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
 from lib.drivers.base import MotorState
+from lib.match_state import Phase
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
+
+
+async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict | None:
+    """接続直後の match_state や周期配信に紛れた特定 type のメッセージを拾う。"""
+    for _ in range(tries):
+        try:
+            msg = await asyncio.wait_for(ws.receive_json(), timeout=0.2)
+        except (TimeoutError, TypeError):
+            return None
+        if msg.get("type") == wanted:
+            return msg
+    return None
+
+
+def _enter_match(server: RobotServer) -> None:
+    """シーケンス操作コマンドはフェーズゲートで試合中のみ許可される。"""
+    for role in server.match.required_roles:
+        for item in server.match.checklists[role].items:
+            server.match.set_checklist_item(role, item.id, True)
+    server.match._phase = Phase.MATCH
 
 
 class DummySequence(Sequence):
@@ -58,7 +79,8 @@ class TestStateMessageFormat:
             # ブロードキャストを手動でトリガー
             await server._broadcast_state()
 
-            msg = await ws.receive_json()
+            msg = await _recv_type(ws, "state")
+            assert msg is not None
             assert msg["type"] == "state"
             assert msg["robot"] == "main_hand"
             assert msg["sequence"] == "test_seq"
@@ -82,6 +104,7 @@ class TestTriggerCommand:
     async def test_trigger_command(self) -> None:
         """trigger コマンドでシーケンスの trigger() が呼ばれることを検証する。"""
         server = _build_server()
+        _enter_match(server)
         ctx = server._robots["main_hand"]
         seq = ctx.sequence
         app = server.create_app()
@@ -138,8 +161,8 @@ class TestUnknownCommandIgnored:
 
             # 正常にブロードキャストを受信できることを確認
             await server._broadcast_state()
-            msg = await ws.receive_json()
-            assert msg["type"] == "state"
+            msg = await _recv_type(ws, "state")
+            assert msg is not None
 
             await ws.close()
 
@@ -157,8 +180,8 @@ class TestEStopSetsActiveState:
 
             assert server._e_stop_active is True
 
-            msg = await ws.receive_json()
-            assert msg["type"] == "e_stop_state"
+            msg = await _recv_type(ws, "e_stop_state")
+            assert msg is not None
             assert msg["active"] is True
 
             await ws.close()
@@ -176,7 +199,8 @@ class TestEStopRelease:
             # まず緊急停止を有効化
             await ws.send_json({"type": "e_stop"})
             await asyncio.sleep(0.05)
-            msg = await ws.receive_json()
+            msg = await _recv_type(ws, "e_stop_state")
+            assert msg is not None
             assert msg["active"] is True
 
             # 緊急停止を解除
@@ -191,7 +215,7 @@ class TestEStopRelease:
             for _ in range(20):
                 try:
                     msg = await asyncio.wait_for(ws.receive_json(), timeout=0.1)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     break
                 if msg.get("type") == "e_stop_state" and msg.get("active") is False:
                     found = True
@@ -211,8 +235,8 @@ class TestStateIncludesEStopActive:
             ws = await client.ws_connect("/ws")
 
             await server._broadcast_state()
-            msg = await ws.receive_json()
-            assert msg["type"] == "state"
+            msg = await _recv_type(ws, "state")
+            assert msg is not None
             assert "e_stop_active" in msg
             assert msg["e_stop_active"] is False
 

@@ -128,9 +128,9 @@ class TestProgress:
             "waiting_trigger": False,
             "running": False,
             "steps": [
-                {"index": 0, "label": "ステップ1", "require_trigger": False},
-                {"index": 1, "label": "ステップ2", "require_trigger": True},
-                {"index": 2, "label": "ステップ3", "require_trigger": False},
+                {"index": 0, "label": "ステップ1", "require_trigger": False, "auto_stop": False},
+                {"index": 1, "label": "ステップ2", "require_trigger": True, "auto_stop": False},
+                {"index": 2, "label": "ステップ3", "require_trigger": False, "auto_stop": False},
             ],
         }
 

@@ -22,6 +22,7 @@ from lib.health import (
     MotorHealth,
     MotorHealthInfo,
 )
+from lib.match_state import ChecklistItem, Court, MatchState, Mode
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
 
@@ -76,6 +77,7 @@ class RobotServer:
         motor_check_per_motor_timeout_ms: float = 1500.0,
         motor_check_default_magnitude: dict[str, float] | None = None,
         motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
+        checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         dry_run: bool = False,
     ) -> None:
         self._host = host
@@ -90,6 +92,10 @@ class RobotServer:
         # Web UI のデモを成立させる。実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
+
+        # 試合全体の状態 (モード / コート / フェーズ / チェックリスト)。
+        # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く。
+        self.match = MatchState(definitions=checklist_definitions)
 
         # ヘルスチェックしきい値は config/*.yaml の health セクション由来 (Phase 6 段階⑤で反映)
         self._health_thresholds: dict[str, float | int] = {
@@ -117,6 +123,15 @@ class RobotServer:
 
     def add_robot(self, name: str, sequence: Sequence, can_manager: CANManager) -> None:
         self._robots[name] = RobotContext(sequence=sequence, can_manager=can_manager)
+        self._apply_match_settings_to(sequence)
+
+    def _apply_match_settings_to(self, sequence: Sequence) -> None:
+        sequence.set_court(self.match.court)
+        sequence.set_auto_advance(self.match.mode is Mode.FULL_AUTO)
+
+    def _apply_match_settings(self) -> None:
+        for ctx in self._robots.values():
+            self._apply_match_settings_to(ctx.sequence)
 
     def create_app(self) -> web.Application:
         app = web.Application()
@@ -199,10 +214,12 @@ class RobotServer:
         self._ws_clients.clear()
 
     async def _run_sequence_loop(self, robot_name: str) -> None:
-        """シーケンスを永続的に走らせる。停止/完走後は resume 要求を待つ。"""
+        """シーケンスを永続的に走らせる。停止/完走後は resume 要求を待つ。
+
+        起動時は resume を立てない。操縦者の明示的な開始合図 (sequence_start /
+        全自動時の match_start) があるまでロボットを動かしてはならない。
+        """
         seq = self._robots[robot_name].sequence
-        # 起動時は即実行 (操縦者は接続直後から進行を観察できる)
-        seq._resume_event.set()
         while True:
             await seq._resume_event.wait()
             seq._resume_event.clear()
@@ -224,6 +241,14 @@ class RobotServer:
         self._ws_clients.add(ws)
         logger.info("WebSocket 接続: %s", request.remote)
 
+        # match_state は変化時のみ配信するため、接続直後に一度スナップショットを送る。
+        # これがないとリロード直後のクライアントが現在のモード/フェーズを知れない。
+        try:
+            await ws.send_str(json.dumps(self.match.to_dict(), ensure_ascii=False))
+        except ConnectionResetError:
+            self._ws_clients.discard(ws)
+            return ws
+
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -243,6 +268,19 @@ class RobotServer:
 
     async def _handle_command(self, data: dict) -> None:
         cmd_type = data.get("type")
+
+        # フェーズゲート。UI でボタンを隠すだけでは WS 直叩きやリロード直後を防げない。
+        if isinstance(cmd_type, str):
+            deny = self.match.deny_reason(cmd_type)
+            if deny is not None:
+                logger.info("コマンド拒否: %s (%s)", cmd_type, deny)
+                if cmd_type == "motor_check_start":
+                    # 動作確認の拒否は既存の専用イベントに合わせる (UI 側の表示経路が別)
+                    robot_name = data.get("robot")
+                    await self._broadcast_motor_check_error(str(robot_name), deny)
+                else:
+                    await self._broadcast_command_rejected(cmd_type, deny)
+                return
 
         if cmd_type == "trigger":
             robot_name = data.get("robot")
@@ -302,11 +340,7 @@ class RobotServer:
         elif cmd_type == "sequence_jump":
             robot_name = data.get("robot")
             step_index = data.get("step_index")
-            if (
-                robot_name
-                and robot_name in self._robots
-                and isinstance(step_index, int)
-            ):
+            if robot_name and robot_name in self._robots and isinstance(step_index, int):
                 self._robots[robot_name].sequence.request_jump(step_index)
                 logger.info("sequence_jump: %s -> %d", robot_name, step_index)
 
@@ -333,8 +367,109 @@ class RobotServer:
             if robot_name and robot_name in self._motor_check_runners:
                 self._motor_check_runners[robot_name].abort()
 
+        elif cmd_type == "set_mode":
+            await self._handle_set_mode(data)
+
+        elif cmd_type == "set_court":
+            await self._handle_set_court(data)
+
+        elif cmd_type == "checklist_set":
+            role = data.get("role")
+            item_id = data.get("item_id")
+            checked = bool(data.get("checked"))
+            if isinstance(role, str) and isinstance(item_id, str):
+                if self.match.set_checklist_item(role, item_id, checked):
+                    await self._broadcast_match_state()
+                else:
+                    logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
+
+        elif cmd_type == "checklist_reset":
+            role = data.get("role")
+            self.match.reset_checklist(role if isinstance(role, str) else None)
+            await self._broadcast_match_state()
+
+        elif cmd_type == "match_start":
+            await self._handle_match_start()
+
+        elif cmd_type == "match_finish":
+            if self.match.match_finish():
+                logger.info("試合終了")
+                self._stop_all_sequences()
+                await self._broadcast_match_state()
+
+        elif cmd_type == "match_reset":
+            self.match.match_reset()
+            logger.info("セッティングタイムへ復帰")
+            self._stop_all_sequences()
+            self._apply_match_settings()
+            await self._broadcast_match_state()
+
         else:
             logger.debug("未知のコマンド: %s", cmd_type)
+
+    # ------------------------------------------------------------------ #
+    #  試合状態 (モード / コート / フェーズ / チェックリスト)
+    # ------------------------------------------------------------------ #
+
+    async def _handle_set_mode(self, data: dict) -> None:
+        raw = data.get("mode")
+        try:
+            mode = Mode(raw)
+        except ValueError:
+            logger.warning("未知のモード: %s", raw)
+            return
+        if not self.match.set_mode(mode):
+            return
+        # 全自動ではトリガー待ちを自動通過させる。切替は必ずシーケンスへ伝播させること
+        self._apply_match_settings()
+        logger.info("モード変更: %s", mode.value)
+        await self._broadcast_match_state()
+
+    async def _handle_set_court(self, data: dict) -> None:
+        raw = data.get("court")
+        try:
+            court = Court(raw)
+        except ValueError:
+            logger.warning("未知のコート: %s", raw)
+            return
+        if not self.match.set_court(court):
+            return
+        self._apply_match_settings()
+        logger.info("コート変更: %s", court.value)
+        await self._broadcast_match_state()
+
+    async def _handle_match_start(self) -> None:
+        if not self.match.match_start():
+            await self._broadcast_command_rejected(
+                "match_start", self.match.deny_reason("match_start") or "試合を開始できません"
+            )
+            return
+
+        # 開始直前にもう一度設定を流し込む (取りこぼしがあると挙動が全自動/半自動でずれる)
+        self._apply_match_settings()
+        logger.info("試合開始: mode=%s court=%s", self.match.mode.value, self.match.court.value)
+
+        # 全自動には操縦者タブが無いため、試合開始が両機のシーケンス起動を兼ねる。
+        # 半自動では各操縦者が自分のタイミングで START を押す。
+        if self.match.mode is Mode.FULL_AUTO:
+            for ctx in self._robots.values():
+                ctx.sequence.request_start()
+
+        await self._broadcast_match_state()
+
+    def _stop_all_sequences(self) -> None:
+        """全ロボットのシーケンスを通常停止する (緊急停止と異なり CAN 層は触らない)。"""
+        for ctx in self._robots.values():
+            if ctx.sequence._running:
+                ctx.sequence.request_stop()
+
+    async def _broadcast_match_state(self) -> None:
+        await self._broadcast_json(self.match.to_dict())
+
+    async def _broadcast_command_rejected(self, command: str, reason: str) -> None:
+        await self._broadcast_json(
+            {"type": "command_rejected", "command": command, "reason": reason}
+        )
 
     async def _broadcast_e_stop_state(self) -> None:
         msg = json.dumps(
@@ -378,11 +513,20 @@ class RobotServer:
         """指定ロボットの動作確認を起動する。拒否時は False を返す。
 
         拒否条件の優先順:
-          1. 緊急停止中 (誤発火による微小駆動を完全に止める)
-          2. 通常シーケンス実行中 (制御権の二重取得を防ぐ)
-          3. 既に動作確認実行中 (二重起動の防止)
+          1. 試合中 (モータを微小駆動するため試合進行を乱す)
+          2. 緊急停止中 (誤発火による微小駆動を完全に止める)
+          3. 通常シーケンス実行中 (制御権の二重取得を防ぐ)
+          4. 既に動作確認実行中 (二重起動の防止)
+
+        WS 経由は _handle_command でも同じフェーズ判定を行うが、HTTP POST は
+        そこを通らないため本メソッド側にもゲートを置く。
         """
         if robot_name not in self._robots:
+            return False
+
+        phase_deny = self.match.deny_reason("motor_check_start")
+        if phase_deny is not None:
+            await self._broadcast_motor_check_error(robot_name, phase_deny)
             return False
 
         if self._e_stop_active:

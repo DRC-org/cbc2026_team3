@@ -1,25 +1,52 @@
 import { Tab, TabList, TabPanel, Tabs } from "@tsaito18/tuicss-react";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 
 import { EStopOverlay } from "@/components/EStopOverlay";
+import { PhaseBanner } from "@/components/PhaseBanner";
 import { RobotProvider } from "@/context/RobotContext";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
+import type { ChecklistRole, MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
 import { Dashboard } from "@/pages/Dashboard";
 import { MotorTuning } from "@/pages/MotorTuning";
 import { RobotControl } from "@/pages/RobotControl";
 
+const REJECTION_VISIBLE_MS = 4000;
+
 export function App() {
   const socket = useRobotSocket();
+  const { send, rejection, clearRejection } = socket;
 
   const onEStop = useCallback(() => {
-    socket.send({ type: "e_stop" });
+    send({ type: "e_stop" });
     socket.setEStopActive(true);
-  }, [socket]);
+  }, [send, socket]);
 
   const onEStopRelease = useCallback(() => {
-    socket.send({ type: "e_stop_release" });
+    send({ type: "e_stop_release" });
     socket.setEStopActive(false);
-  }, [socket]);
+  }, [send, socket]);
+
+  const setMode = useCallback((mode: MatchMode) => send({ type: "set_mode", mode }), [send]);
+  const setCourt = useCallback((court: MatchCourt) => send({ type: "set_court", court }), [send]);
+  const setChecklistItem = useCallback(
+    (role: ChecklistRole, itemId: string, checked: boolean) =>
+      send({ type: "checklist_set", role, item_id: itemId, checked }),
+    [send],
+  );
+  const resetChecklist = useCallback(
+    (role: ChecklistRole) => send({ type: "checklist_reset", role }),
+    [send],
+  );
+  const matchStart = useCallback(() => send({ type: "match_start" }), [send]);
+  const matchFinish = useCallback(() => send({ type: "match_finish" }), [send]);
+  const matchReset = useCallback(() => send({ type: "match_reset" }), [send]);
+
+  // 拒否通知は一定時間で自動的に消す。操作の手を止めさせないため確認ボタンは置かない
+  useEffect(() => {
+    if (!rejection) return;
+    const timer = setTimeout(clearRejection, REJECTION_VISIBLE_MS);
+    return () => clearTimeout(timer);
+  }, [rejection, clearRejection]);
 
   return (
     <RobotProvider
@@ -29,9 +56,19 @@ export function App() {
         eStopActive: socket.eStopActive,
         healthEvents: socket.healthEvents,
         motorChecks: socket.motorChecks,
-        send: socket.send,
+        matchState: socket.matchState,
+        rejection: socket.rejection,
+        clearRejection,
+        send,
         onEStop,
         onEStopRelease,
+        setMode,
+        setCourt,
+        setChecklistItem,
+        resetChecklist,
+        matchStart,
+        matchFinish,
+        matchReset,
       }}
     >
       <div className="wrapper white-168">
@@ -74,6 +111,9 @@ export function App() {
                 </>
               )}
             </li>
+            <li>
+              <PhaseBanner />
+            </li>
             {/* ToDo: 時計、電源状態 など */}
             <li className="red-255 white-255-text">
               <button onClick={onEStop}>
@@ -82,6 +122,27 @@ export function App() {
             </li>
           </ul>
         </div>
+
+        {rejection ? (
+          <div
+            className="tui-window red-168"
+            style={{
+              position: "fixed",
+              left: "50%",
+              transform: "translateX(-50%)",
+              bottom: "3rem",
+              zIndex: 60,
+              maxWidth: "calc(100vw - 2rem)",
+            }}
+          >
+            <fieldset className="tui-fieldset">
+              <legend>[!] 操作が拒否されました</legend>
+              <div>{rejection.reason}</div>
+              <div style={{ opacity: 0.8 }}>command: {rejection.command}</div>
+            </fieldset>
+          </div>
+        ) : null}
+
         <EStopOverlay />
       </div>
     </RobotProvider>
