@@ -13,4 +13,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    // UI は同一 origin の /ws へ接続する。dev サーバー経由でも実機と同じ挙動にするため、
+    // ここで制御プログラム (既定 8080) へ中継する
+    proxy: {
+      "/ws": {
+        target: "http://localhost:8080",
+        ws: true,
+      },
+    },
+  },
 });

@@ -73,40 +73,57 @@ function Cell({ label, value, unit, tone = "default" }: CellProps) {
 }
 
 export function MotorStatus({ name, state, health }: MotorStatusProps) {
+  // モータ名と数値を同じ行に並べると、サイドカラム幅ではモータ名が "li..." まで
+  // 削られて識別できなくなる。名前を独立した行に出して常に読めるようにする
   return (
     <div
       style={{
         display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "0.5rem",
+        flexDirection: "column",
+        gap: "0.125rem",
         padding: "0.25rem",
       }}
     >
-      <span
-        style={{
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {name}
-      </span>
       <div
         style={{
           display: "flex",
-          flexShrink: 0,
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: "0.5rem",
+        }}
+      >
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {name}
+        </span>
+        <span style={{ display: "flex", flexShrink: 0, gap: "0.5rem" }}>
+          {health ? (
+            <span
+              className={HEALTH_TEXT_CLASS[HEALTH_TONE[health.state]]}
+              style={{ opacity: 0.85 }}
+            >
+              {health.state.toUpperCase()}
+            </span>
+          ) : null}
+          {health ? (
+            <span style={{ opacity: 0.6 }}>{formatAge(health.feedback_age_ms)}</span>
+          ) : null}
+        </span>
+      </div>
+      <div
+        style={{
+          display: "flex",
           alignItems: "center",
+          justifyContent: "flex-end",
           gap: "0.75rem",
         }}
       >
-        {health ? (
-          <span className={HEALTH_TEXT_CLASS[HEALTH_TONE[health.state]]} style={{ opacity: 0.85 }}>
-            {health.state.toUpperCase()}
-          </span>
-        ) : null}
-        {health ? <span style={{ opacity: 0.6 }}>{formatAge(health.feedback_age_ms)}</span> : null}
         <Cell label="POS" value={state.pos.toFixed(1)} />
         <Cell label="VEL" value={state.vel.toFixed(1)} />
         <Cell label="TRQ" value={state.torque.toFixed(1)} />

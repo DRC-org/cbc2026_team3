@@ -3,17 +3,65 @@ html {
 }
 
 .wrapper {
-  font-size: 20px;
+  /* 20px 固定だと 1366x768 級のノート PC でパネルが画面外に溢れる。
+     幅と高さの両方に追従させ、どの機材を持ち込んでも 1 画面に収める */
+  font-size: clamp(13px, min(1.05vw, 2.1vh), 20px);
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100svh;
+  overflow: hidden;
 }
 
 .symbol {
   font-size: 0.75em;
 }
 
+/* --- タブ ------------------------------------------------------------- */
+
+.app-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.app-tabs > .tui-tabs {
+  flex-shrink: 0;
+}
+
+/* TabPanel は非アクティブ時に unmount されるため、唯一の子が本文領域になる */
+.app-tabs > .tui-tab-content {
+  display: flex !important;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  /* 画面下端に固定されたステータスバーとパネルが重ならないようにする */
+  padding-bottom: 1.75rem;
+}
+
+/* --- キーヒント ------------------------------------------------------- */
+
+.key-hint {
+  display: inline-block;
+  margin-left: 0.5em;
+  padding: 0 0.35em;
+  border: 1px solid currentColor;
+  font-size: 0.7em;
+  line-height: 1.4;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+/* --- 警告表示 --------------------------------------------------------- */
+
 .estop-title {
   margin: 0.25rem 0;
+  animation: estop-blink 1s steps(2, start) infinite;
+}
+
+.alert-blink {
   animation: estop-blink 1s steps(2, start) infinite;
 }
 
@@ -21,4 +69,28 @@ html {
   50% {
     opacity: 0.35;
   }
+}
+
+/* --- トースト --------------------------------------------------------- */
+
+.toast-stack {
+  position: fixed;
+  right: 1rem;
+  bottom: 2.5rem;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.toast-stack > * {
+  pointer-events: auto;
+}
+
+.toast-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

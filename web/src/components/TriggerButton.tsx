@@ -24,6 +24,7 @@ function useAsciiSpinner(active: boolean): string {
   return SPINNER_FRAMES[frame];
 }
 
+// 試合中に最も多く押すボタンなので、視線を戻した瞬間に状態が読めるよう大きく出す
 const FILL_STYLE = {
   display: "flex",
   width: "100%",
@@ -31,6 +32,7 @@ const FILL_STYLE = {
   justifyContent: "center",
   gap: "0.75rem",
   height: "100%",
+  fontSize: "1.4em",
 } as const;
 
 export function TriggerButton({
@@ -56,19 +58,7 @@ export function TriggerButton({
 
   if (isComplete) {
     return (
-      <Button
-        disabled
-        className="green-255"
-        style={{
-          display: "flex",
-          width: "100%",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: "0.75rem",
-          height: "100%",
-        }}
-        aria-label="シーケンス完走"
-      >
+      <Button disabled className="green-255" style={FILL_STYLE} aria-label="シーケンス完走">
         ✓ DONE
       </Button>
     );
@@ -80,34 +70,16 @@ export function TriggerButton({
         className="blue-255"
         onClick={onTrigger}
         aria-label="次のステップへ進む"
-        style={{
-          display: "flex",
-          width: "100%",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: "0.75rem",
-          height: "100%",
-        }}
+        style={FILL_STYLE}
       >
         ► NEXT
+        <span className="key-hint">Space</span>
       </Button>
     );
   }
 
   return (
-    <Button
-      disabled
-      className="cyan-255"
-      style={{
-        display: "flex",
-        width: "100%",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: "0.75rem",
-        height: "100%",
-      }}
-      aria-label="シーケンス実行中"
-    >
+    <Button disabled className="cyan-255" style={FILL_STYLE} aria-label="シーケンス実行中">
       <span className="tabular-nums">[{spinner}]</span>
       RUNNING
     </Button>

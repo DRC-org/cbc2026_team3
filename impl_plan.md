@@ -469,16 +469,43 @@ checklists:
 
 タブ構成（`web/src/App.tsx`）。操縦者 2 名はそれぞれ Main Hand / Sub Hand タブを開く。
 
-| タブ | ページ | 内容 |
-|---|---|---|
-| Monitor | `pages/Dashboard.tsx` | 試合制御 (`MatchControl`)、全自動時の指差喚呼、半自動時は 2 名の進捗監視、両ロボット概要 |
-| Main Hand | `pages/RobotControl.tsx` | 半自動セッティング中は指差喚呼、試合中はシーケンス操作 |
-| Sub Hand | `pages/RobotControl.tsx` | 同上 |
-| PID Tuning | `pages/MotorTuning.tsx` | モータ個別調整 |
+| タブ | キー | ページ | 内容 |
+|---|---|---|---|
+| Monitor | `1` | `pages/Dashboard.tsx` | 試合制御 (`MatchControl`)、指差喚呼、両ロボット監視 |
+| Main Hand | `2` | `pages/RobotControl.tsx` | 準備中は指差喚呼＋動作確認、試合中はシーケンス操作 |
+| Sub Hand | `3` | `pages/RobotControl.tsx` | 同上 |
+| PID Tuning | `4` | `pages/MotorTuning.tsx` | モータ個別調整 |
 
-- ステータスバーに `PhaseBanner`（MODE / COURT / PHASE）を常時表示。誤ったコート設定のまま試合に入る事故を防ぐ
-- `command_rejected` は画面下部にトースト表示（4 秒で自動消去）
+### フェーズ連動レイアウト
+
+Monitor / RobotControl は `phase` でレイアウトごと切り替える（`lib/phase.ts` の
+`isSetupPhase` / `isMatchPhase`）。準備中に試合用の操作系を並べても押せず、
+試合中に設定 UI を並べても使わないため、その時に使うものだけを画面に出す。
+
+| | setup / ready | match / finished |
+|---|---|---|
+| Monitor | `MatchControl`(full) + 指差喚呼 + `RobotReadiness`（異常有無のみの 1 行サマリ） | `MatchControl`(compact: 試合終了/リセットのみ) + 両機の詳細カード |
+| RobotControl | `Checklist` + `SEQUENCE PREVIEW`（参照専用）+ 診断カラム | `CurrentStepPanel` + STEP LIST + 診断カラム + START/STOP/NEXT |
+
+`MatchControl` の compact variant は必須。試合中に `MatchControl` を全て隠すと
+`match_finish` の導線が消え、試合を終われなくなる（`match_finish` は MATCH フェーズ限定）。
+
+### キーボード操作（`hooks/useHotkeys.ts`）
+
+- `1`–`4`: タブ切替。表示中のタブは URL ハッシュ（`#main-hand` 等）に載せ、リロードで復帰する
+- `Space`: 表示中のロボットの NEXT / START。非アクティブな `TabPanel` は unmount されるため、
+  ハンドラは表示中のロボットにだけ効く
+- 修飾キー併用・キーリピート・入力欄フォーカス中・モーダル表示中（`.tui-modal.active`）は一切発火しない
+
+### その他の UI 方針
+
+- ヘッダー帯 `AppHeader` にフェーズ（地色）/ MODE / COURT と EMG STOP を常時表示
+- WS 切断時は `ConnectionBanner` を画面上端に全幅表示（値が更新されていないことを明示）
+- 通知は `Toaster` に一本化（操作拒否 + ヘルス異常、右下に最大 3 件スタック）
 - 試合中以外は START / NEXT / ステップジャンプを UI 上でも無効化する（サーバー側ゲートとの二重防御）
+- 通常停止（STOP）は確認ダイアログを挟まない。安全側の動作であり、止めるまでの時間を延ばさない
+- WS 接続先はページ origin から導出する（`hooks/useRobotSocket.ts`）。別 PC・タブレットからの
+  アクセスに対応するため。vite dev では `/ws` を 8080 へプロキシする（`vite.config.ts`）
 
 ---
 

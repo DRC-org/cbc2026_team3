@@ -182,12 +182,25 @@ interface UseRobotSocketReturn {
   send: (data: object) => void;
 }
 
-const DEFAULT_URL = "ws://localhost:8080/ws";
+/**
+ * 配信元と同じホスト・ポートの /ws に接続する。
+ *
+ * localhost 固定にすると、操縦者が別 PC やタブレットから開いたときに
+ * 自分自身の localhost へ繋ぎにいって接続できない。サーバーは既定で
+ * 0.0.0.0 を listen しており複数端末からの利用を想定しているため、
+ * 接続先はページの origin から導出する。
+ * (vite dev では /ws を 8080 へプロキシする — vite.config.ts 参照)
+ */
+function defaultWsUrl(): string {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws`;
+}
+
 const RECONNECT_INTERVAL = 3000;
 // 直近警告のフラッシュ表示用にのみ保持。長期履歴は不要なので少量で十分
 const HEALTH_EVENT_BUFFER = 5;
 
-export function useRobotSocket(url: string = DEFAULT_URL): UseRobotSocketReturn {
+export function useRobotSocket(url: string = defaultWsUrl()): UseRobotSocketReturn {
   const [states, setStates] = useState<Record<string, RobotState>>({});
   const [connected, setConnected] = useState(false);
   const [eStopActive, setEStopActive] = useState(false);

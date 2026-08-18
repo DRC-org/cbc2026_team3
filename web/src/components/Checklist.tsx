@@ -22,7 +22,10 @@ export function Checklist({ checklistRole, title }: ChecklistProps) {
   const completed = checklist?.completed ?? false;
 
   return (
-    <div className="tui-window" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <div
+      className="tui-window"
+      style={{ display: "flex", flex: 1, flexDirection: "column", minWidth: 0, minHeight: 0 }}
+    >
       <fieldset
         className="tui-fieldset"
         style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
