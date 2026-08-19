@@ -20,6 +20,7 @@
     "the-new-css-reset": "^1.11.3"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.52.1",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
