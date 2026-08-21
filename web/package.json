@@ -7,11 +7,13 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "check": "pnpm lint && pnpm format:check && tsc -b --noEmit"
+    "check": "pnpm lint && pnpm format:check && tsc -b --noEmit && pnpm test:run"
   },
   "dependencies": {
     "@tsaito18/tuicss-react": "^0.1.7",
@@ -21,14 +23,19 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.52.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.5",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "jsdom": "^30.0.1",
     "oxfmt": "^0.46.0",
     "oxlint": "^1.62.0",
     "typescript": "~6.0.2",
     "vite": "^8.0.10",
+    "vitest": "^4.1.11",
     "wrangler": "^4.124.0"
   },
   "packageManager": "pnpm@10.32.1"

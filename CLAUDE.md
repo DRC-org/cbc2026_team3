@@ -29,9 +29,12 @@ uv run ruff format .              # フォーマット
 ### Web UI（web/ ディレクトリ）
 
 ```bash
-cd web && npm install             # 依存インストール
-cd web && npm run dev             # 開発サーバー起動
-cd web && npm run build           # プロダクションビルド
+cd web && pnpm install            # 依存インストール
+cd web && pnpm dev                # 開発サーバー起動
+cd web && pnpm build              # プロダクションビルド
+cd web && pnpm test               # vitest（watch）
+cd web && pnpm test:run           # vitest（1 回だけ実行）
+cd web && pnpm check              # lint + format + 型検査 + テスト
 ```
 
 ### vcan セットアップ（CAN 統合テスト用）
@@ -53,7 +56,8 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - `server.py` — aiohttp で HTTP 静的配信 + WebSocket (`/ws`) を統合
 - `robots/` — ロボット固有のシーケンス定義（main_hand.py / sub_hand.py）
 - `config/` — YAML でモータ構成を宣言（ドライバ種別、CAN バス、CAN ID）
-- `web/` — Vite + React + React Router + TypeScript の操作 UI
+- `web/` — Vite + React + TypeScript の操作 UI（画面切替はタブ + URL ハッシュ。ルーターは使わない）
+  - `src/test/` — vitest 共通ヘルパ（WebSocket スタブ、RobotProvider ラッパ）。テスト本体は対象ソースの隣に `*.test.ts(x)`
 
 CAN バスは 3 系統: can0（M3508）、can1（EDULITE 05）、can2（自作モタドラ）。
 プロトコルが異なる（M3508=Standard Frame, EDULITE 05=Extended Frame 29bit, 自作=Standard Frame）。
