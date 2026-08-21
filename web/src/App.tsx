@@ -50,10 +50,10 @@ function tabBadge(state: RobotState | undefined): { symbol: string; className: s
   if (!state) return null;
   const health = state.health;
   if (health && health.overall !== "ok") {
-    return { symbol: "⚠", className: "red-255-text" };
+    return { symbol: "⚠", className: "danger-text" };
   }
   if (state.waiting_trigger) {
-    return { symbol: "!", className: "yellow-255-text" };
+    return { symbol: "!", className: "warning-text" };
   }
   return null;
 }
@@ -141,8 +141,7 @@ export function App() {
         matchReset,
       }}
     >
-      {/* 地色を黒にして、パネルの外側（余白）が端末画面として自然に見えるようにする */}
-      <div className="wrapper black-255 white-255-text">
+      <div className="wrapper">
         <ConnectionBanner />
         <AppHeader />
 
@@ -176,29 +175,29 @@ export function App() {
           </TabPanel>
         </Tabs>
 
-        <div className="tui-statusbar cyan-168">
+        <div className="tui-statusbar">
           <ul>
             <li>
               {socket.connected ? (
                 <>
-                  <span className="symbol green-255-text">●</span> Connected
+                  <span className="symbol success-text">●</span> Connected
                 </>
               ) : (
                 <>
-                  <span className="symbol red-255-text">●</span> Disconnected
+                  <span className="symbol danger-text">●</span> Disconnected
                 </>
               )}
             </li>
             <li>
               <Clock />
             </li>
-            <li style={{ opacity: 0.75 }}>
+            <li>
               <span className="key-hint">1</span>
               <span className="key-hint">2</span>
               <span className="key-hint">3</span>
               <span className="key-hint">4</span> タブ切替
             </li>
-            <li style={{ opacity: 0.75 }}>
+            <li>
               <span className="key-hint">Space</span> START / NEXT
             </li>
           </ul>

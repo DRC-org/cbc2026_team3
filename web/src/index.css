@@ -1,5 +1,46 @@
+/* ==================================================================
+   テーマ層
+
+   TuiCss 本来のパレットは 16 色 CGA (rgb(0,0,168) 等) で彩度が高い。
+   この画面はほぼ全面がパネルで埋まるため、既定色のままだと画面全体が
+   原色の青一色になり、試合中の長時間注視に耐えない。
+   グレー基調へ落とし、彩色は状態表示 (正常/警告/異常/実行中) の
+   アクセントだけに限定する。
+
+   ライブラリの構造クラス (.tui-*) は配色のみここで差し替える。
+   本ファイルは main.tsx でライブラリ CSS より後に読み込むこと
+   (同一詳細度で後勝ちさせるため)。
+   ================================================================== */
+
+:root {
+  --bg: #14161a;
+  --surface: #1b1e23;
+  --surface-raised: #232830;
+  --surface-sunken: #101216;
+  --line: #39404a;
+  --line-soft: #272c34;
+  --fg: #c3c9d1;
+  --fg-strong: #e6eaf0;
+  --fg-dim: #7c848e;
+
+  /* 状態色。彩度を CGA の半分程度まで落として明度差で読ませる */
+  --ok: #7ba767;
+  --warn: #c6a04d;
+  --danger: #cd6d5d;
+  --info: #6d9bb1;
+
+  /* 緊急停止だけは例外的に強い赤。安全上、他の何よりも先に目に入る必要がある */
+  --estop: #b03a2e;
+  --estop-fg: #ffe9e5;
+}
+
 html {
   font-family: DOS, DotGothic16, monospace !important;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
 }
 
 .wrapper {
@@ -11,13 +52,373 @@ html {
   width: 100%;
   height: 100svh;
   overflow: hidden;
+  background-color: var(--bg);
+  color: var(--fg);
 }
 
 .symbol {
   font-size: 0.75em;
 }
 
-/* --- タブ ------------------------------------------------------------- */
+/* ==================================================================
+   ライブラリ構造クラスの再配色
+   ================================================================== */
+
+/* Window は Modal が内部で fieldset を包むのにも使う。
+   枠を持たせると必ず二重枠になるため、素通しのコンテナに徹させる */
+.tui-window {
+  display: block;
+  background-color: transparent;
+  box-shadow: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* パネルの枠はここ 1 箇所だけ。6px double + padding 12px は枠が主張しすぎ、
+   1 画面に載る情報量も落ちるため 1px の実線に落とす */
+.tui-fieldset {
+  border: 1px solid var(--line);
+  background-color: var(--surface);
+  padding: 0.5rem 0.6rem 0.6rem;
+  margin-bottom: 0;
+  color: var(--fg);
+}
+
+.tui-fieldset > legend {
+  padding: 0 0.5em;
+  color: var(--fg-dim);
+}
+
+.tui-input-fieldset {
+  border: 1px solid var(--line);
+  background-color: var(--surface);
+  padding: 0.25rem 0.4rem;
+}
+
+.tui-input-fieldset legend,
+.tui-input-fieldset:hover legend {
+  color: var(--fg-dim);
+}
+
+.tui-input-fieldset:hover {
+  border-color: var(--fg-dim);
+}
+
+.tui-divider {
+  border-bottom: 1px solid var(--line);
+}
+
+/* --- タブ ---------------------------------------------------------- */
+
+.tui-tabs {
+  background-color: var(--surface-sunken);
+  border-bottom: 1px solid var(--line);
+  padding: 0 0.5rem;
+}
+
+.tui-tab {
+  color: var(--fg-dim);
+  border: 1px solid transparent;
+  border-bottom: none;
+}
+
+.tui-tab:hover {
+  color: var(--fg);
+  background-color: var(--surface);
+}
+
+.tui-tab.active {
+  background-color: var(--surface);
+  border-color: var(--line);
+  color: var(--fg-strong);
+}
+
+/* --- ステータスバー ------------------------------------------------- */
+
+/* 既定は position: fixed。wrapper が 100svh のフレックス列なので、
+   フローに戻したほうがパネル側の逃げ (padding-bottom) が要らなくなる */
+.wrapper > .tui-statusbar {
+  position: static;
+  flex-shrink: 0;
+  background-color: var(--surface-sunken);
+  border-top: 1px solid var(--line);
+  color: var(--fg-dim);
+}
+
+.tui-statusbar ul li:active {
+  background-color: var(--surface-raised);
+  color: var(--fg);
+}
+
+.tui-statusbar-divider {
+  border-right-color: var(--line);
+}
+
+/* --- ボタン -------------------------------------------------------- */
+
+.tui-button {
+  background-color: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg);
+  padding: 1px 10px;
+  /* 既定の 10px オフセット影はボタン間の間隔を実寸より広く見せ、
+     密に並べたツールバーで押下対象がずれて見える */
+  box-shadow: none;
+}
+
+.tui-button:hover:not(:disabled) {
+  background-color: var(--surface-raised);
+  border-color: var(--fg-dim);
+}
+
+.tui-button:focus-visible {
+  outline: 1px solid var(--info);
+  outline-offset: 1px;
+  color: var(--fg-strong) !important;
+}
+
+.tui-button:active:not(:disabled) {
+  background-color: var(--fg-dim) !important;
+  color: var(--surface-sunken) !important;
+  box-shadow: none !important;
+}
+
+.tui-button:disabled {
+  border-color: var(--line-soft);
+  color: var(--fg-dim);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 現在選択中のトグル (モード / コート)。押下済みであることを反転で示す。
+   トーン付きのボタンと併用されるため、トーン指定より前に置いて上書きさせる */
+.btn-selected:not(:disabled) {
+  background-color: var(--surface-raised);
+  border-color: var(--fg-dim);
+  color: var(--fg-strong);
+}
+
+/* 主要操作のトーン。地をベタ塗りせず縁と文字色で示すことで、
+   ボタンが並んでも画面が原色で埋まらない */
+.btn-ok:not(:disabled) {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.btn-ok:not(:disabled):hover {
+  background-color: var(--ok);
+  color: var(--surface-sunken);
+}
+
+.btn-warn:not(:disabled) {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.btn-warn:not(:disabled):hover {
+  background-color: var(--warn);
+  color: var(--surface-sunken);
+}
+
+.btn-danger:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn-danger:not(:disabled):hover {
+  background-color: var(--danger);
+  color: var(--surface-sunken);
+}
+
+.btn-info:not(:disabled) {
+  border-color: var(--info);
+  color: var(--info);
+}
+
+.btn-info:not(:disabled):hover {
+  background-color: var(--info);
+  color: var(--surface-sunken);
+}
+
+/* 試合中に最も多く押す NEXT だけは地をベタ塗りにする。
+   周辺視野でも「今 押すボタンはこれ」と分かる必要があるため、
+   ここだけは縁取りではなく面で主張させる */
+.btn-next:not(:disabled) {
+  background-color: var(--warn);
+  border-color: var(--warn);
+  color: var(--surface-sunken);
+}
+
+.btn-next:not(:disabled):hover {
+  background-color: #d7b25e;
+}
+
+/* --- 入力系 -------------------------------------------------------- */
+
+.tui-input,
+.tui-textarea {
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--line);
+  color: var(--fg);
+}
+
+.tui-input:focus,
+.tui-textarea:focus {
+  background-color: var(--surface-sunken) !important;
+  border-color: var(--info);
+  color: var(--fg-strong) !important;
+}
+
+.tui-checkbox {
+  color: var(--fg);
+}
+
+.tui-checkbox.disabled {
+  color: var(--fg-dim);
+}
+
+.tui-checkbox input:checked ~ span::after {
+  color: var(--ok);
+}
+
+/* 未到達部 */
+.tui-range {
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--line);
+  height: 1rem;
+}
+
+.tui-range::-webkit-slider-runnable-track,
+.tui-range::-moz-range-track {
+  height: 100%;
+  background-image: linear-gradient(
+    to right,
+    var(--info) 0%,
+    var(--info) var(--tui-range-percent),
+    transparent var(--tui-range-percent),
+    transparent 100%
+  );
+}
+
+.tui-range::-webkit-slider-thumb,
+.tui-range::-moz-range-thumb {
+  height: 100%;
+  background-color: var(--fg-strong);
+}
+
+.tui-range:focus::-webkit-slider-thumb,
+.tui-range:focus::-moz-range-thumb {
+  background-color: var(--warn);
+}
+
+/* --- プログレスバー ------------------------------------------------- */
+
+.tui-progress-bar {
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--line);
+  height: 0.9rem;
+  background-image: none !important;
+}
+
+.tui-progress,
+.tui-progress-bar .tui-indeterminate {
+  background-color: var(--fg-dim);
+}
+
+.tui-progress-bar .tui-indeterminate {
+  height: 100%;
+}
+
+.progress-ok .tui-progress {
+  background-color: var(--ok);
+}
+
+.progress-warn .tui-progress {
+  background-color: var(--warn);
+}
+
+.progress-danger .tui-progress {
+  background-color: var(--danger);
+}
+
+.progress-info .tui-progress {
+  background-color: var(--info);
+}
+
+/* --- モーダル ------------------------------------------------------ */
+
+.tui-overlap {
+  background-color: rgb(8 9 11 / 78%);
+}
+
+.tui-modal .tui-fieldset {
+  background-color: var(--surface-raised);
+  border-color: var(--fg-dim);
+}
+
+.tui-modal-header {
+  color: var(--fg-strong);
+}
+
+/* 破壊的操作・危険操作の確認ダイアログだけ枠と見出しを危険色にする */
+.modal-danger .tui-fieldset {
+  border-color: var(--danger);
+}
+
+.modal-danger .tui-modal-header {
+  color: var(--danger);
+}
+
+.modal-estop .tui-fieldset {
+  background-color: var(--estop);
+  border-color: var(--estop-fg);
+  color: var(--estop-fg);
+}
+
+.modal-estop .tui-modal-header {
+  color: var(--estop-fg);
+}
+
+/* 赤い面の上に置くため、通常のボタン配色では読めない */
+.btn-estop-reset {
+  background-color: var(--estop-fg);
+  border-color: var(--estop-fg);
+  color: var(--estop);
+}
+
+.btn-estop-reset:hover:not(:disabled) {
+  background-color: #fff;
+  border-color: #fff;
+  color: var(--estop);
+}
+
+/* --- セマンティック文字色 ------------------------------------------- */
+
+.success-text {
+  color: var(--ok);
+}
+
+.warning-text {
+  color: var(--warn);
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
+.info-text {
+  color: var(--info);
+}
+
+.secondary-text {
+  color: var(--fg-dim);
+}
+
+/* ==================================================================
+   アプリ共通クラス
+   ================================================================== */
+
+/* --- レイアウト ----------------------------------------------------- */
 
 .app-tabs {
   display: flex;
@@ -37,11 +438,242 @@ html {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  /* 画面下端に固定されたステータスバーとパネルが重ならないようにする */
-  padding-bottom: 1.75rem;
 }
 
-/* --- キーヒント ------------------------------------------------------- */
+.page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0.5rem;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.vstack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.no-shrink {
+  flex-shrink: 0;
+}
+
+/* --- パネル --------------------------------------------------------- */
+
+/* 画面上の枠は「パネル 1 つにつき 1 本」。入れ子にはせず、
+   内部の区切りは .group の罫線で表す */
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-fill {
+  flex: 1;
+}
+
+/* パネル内でスクロールさせる領域。ページ全体はスクロールさせない */
+.panel-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 行が縮んで潰れると等幅の桁揃えが崩れる。溢れた分はスクロールで見せる */
+.panel-body > * {
+  flex-shrink: 0;
+}
+
+/* 入れ子 fieldset の代替。罫線 1 本 + 小見出しでグループを表す */
+.group {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 0.25rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line-soft);
+  margin-top: 0.4rem;
+}
+
+.group-fill {
+  flex: 1;
+  min-height: 0;
+}
+
+.group:first-of-type {
+  padding-top: 0;
+  border-top: none;
+  margin-top: 0;
+}
+
+.group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--fg-dim);
+}
+
+/* --- 行 / 値の並び -------------------------------------------------- */
+
+.hstack {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.hsplit {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.dim {
+  color: var(--fg-dim);
+}
+
+.spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 交互の地色。等幅の数値が縦に並ぶ表で行を追いやすくする */
+.striped > :nth-child(odd) {
+  background-color: var(--surface-sunken);
+}
+
+/* --- モータ行 -------------------------------------------------------- */
+
+.motor-row {
+  display: flex;
+  flex-direction: column;
+  padding: 0.15rem 0.3rem;
+}
+
+/* 4 値を等幅の列に固定する。列幅が可変だとモータごとに桁位置がずれ、
+   一覧を上から流し読みしたときに異常値を拾えない */
+.motor-cells {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.motor-cell {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 0.3em;
+  min-width: 0;
+}
+
+/* --- スクロール ------------------------------------------------------ */
+
+.scroll {
+  overflow: auto;
+  scrollbar-color: var(--line) var(--surface-sunken);
+}
+
+.scroll::-webkit-scrollbar {
+  width: 0.6rem;
+  height: 0.6rem;
+}
+
+.scroll::-webkit-scrollbar-track {
+  background-color: var(--surface-sunken);
+  background-image: none;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background-color: var(--line);
+}
+
+.scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--fg-dim);
+}
+
+/* --- ヘッダー帯 ----------------------------------------------------- */
+
+/* 「今 機体が動くフェーズか」を視線を落とさず判別させる帯。
+   全面をフェーズ色でベタ塗りすると画面で最も明るい面になってしまうため、
+   地はグレーに固定し、左端のバーとフェーズ名だけを色で示す */
+.phase-band {
+  display: flex;
+  flex-shrink: 0;
+  align-items: stretch;
+  gap: 1rem;
+  background-color: var(--surface-raised);
+  border-bottom: 1px solid var(--line);
+  border-left: 0.5rem solid var(--fg-dim);
+}
+
+.phase-setup {
+  border-left-color: var(--warn);
+}
+
+.phase-ready {
+  border-left-color: var(--info);
+}
+
+.phase-match {
+  border-left-color: var(--ok);
+}
+
+.phase-finished {
+  border-left-color: var(--fg-dim);
+}
+
+.estop-button {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 1.5rem;
+  border: none;
+  background-color: var(--estop);
+  color: var(--estop-fg);
+  cursor: pointer;
+  /* インライン style から移設した既存値。倍率は変更していない */
+  font-size: 1.1em;
+  font-weight: bold;
+}
+
+.estop-button:hover {
+  background-color: #c8412f;
+}
+
+/* --- キーヒント ------------------------------------------------------ */
 
 .key-hint {
   display: inline-block;
@@ -54,7 +686,16 @@ html {
   white-space: nowrap;
 }
 
-/* --- 警告表示 --------------------------------------------------------- */
+/* --- 警告表示 -------------------------------------------------------- */
+
+.connection-banner {
+  flex-shrink: 0;
+  padding: 0.25rem 0.75rem;
+  background-color: var(--danger);
+  color: var(--surface-sunken);
+  text-align: center;
+  font-weight: bold;
+}
 
 .estop-title {
   margin: 0.25rem 0;
@@ -69,6 +710,39 @@ html {
   50% {
     opacity: 0.35;
   }
+}
+
+/* --- ステップ一覧 ----------------------------------------------------- */
+
+.step-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0.4rem;
+  text-align: left;
+  border: none;
+  border-left: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.step-row:hover:not(:disabled) {
+  background-color: var(--surface-raised);
+}
+
+.step-row:disabled {
+  cursor: not-allowed;
+}
+
+.step-row-current {
+  border-left-color: var(--info);
+  background-color: var(--surface-raised);
+}
+
+.step-row-waiting {
+  border-left-color: var(--warn);
+  background-color: var(--surface-raised);
 }
 
 /* --- トースト --------------------------------------------------------- */
@@ -93,4 +767,16 @@ html {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toast-close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.toast-close:hover {
+  color: var(--fg-strong);
 }

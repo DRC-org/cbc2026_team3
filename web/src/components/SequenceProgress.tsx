@@ -1,6 +1,5 @@
 import { ProgressBar } from "@tsaito18/tuicss-react";
 
-import { cx } from "@/lib/cx";
 import type { TuiColor } from "@/lib/tuiColor";
 
 interface SequenceProgressProps {
@@ -19,6 +18,14 @@ const STATUS: Record<StatusKey, { label: string; symbol: string; color: TuiColor
   waiting: { label: "Awaiting approval", symbol: "▮", color: "warning" },
   running: { label: "Running", symbol: "►", color: "info" },
   idle: { label: "Not started", symbol: "○", color: "secondary" },
+};
+
+const PROGRESS_TONE_CLASS: Record<TuiColor, string> = {
+  success: "progress-ok",
+  warning: "progress-warn",
+  danger: "progress-danger",
+  info: "progress-info",
+  secondary: "",
 };
 
 export function SequenceProgress({
@@ -40,89 +47,32 @@ export function SequenceProgress({
     totalSteps === 0 ? "idle" : isComplete ? "complete" : waitingTrigger ? "waiting" : "running";
   const status = STATUS[statusKey];
 
-  const progressColorClass: Record<TuiColor, string> = {
-    success: "green-255",
-    warning: "yellow-255",
-    danger: "red-255",
-    info: "cyan-255",
-    secondary: "blue-255",
-  };
-
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            minWidth: 0,
-            alignItems: "baseline",
-            gap: 8,
-          }}
-        >
-          <span style={{ opacity: 0.7 }}>SEQ</span>
-          <span
-            style={{
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {sequence}
-          </span>
+    <section style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+      <div className="hsplit">
+        <div className="hstack" style={{ alignItems: "baseline" }}>
+          <span className="dim">SEQ</span>
+          <span className="ellipsis">{sequence}</span>
         </div>
-        <span
-          className={cx(`${status.color}-text`)}
-          style={{ flexShrink: 0, whiteSpace: "nowrap" }}
-        >
+        <span className={`${status.color}-text nowrap`}>
           [{status.symbol} {status.label}]
         </span>
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-end",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            minWidth: 0,
-            alignItems: "baseline",
-            gap: 8,
-          }}
-        >
+      <div className="hsplit">
+        <div className="hstack" style={{ alignItems: "baseline" }}>
           <span className="tabular-nums">{displayIndex}</span>
-          <span style={{ opacity: 0.7 }}>/ {totalSteps}</span>
-          <span
-            style={{
-              marginLeft: 4,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title={currentStep ?? undefined}
-          >
+          <span className="dim">/ {totalSteps}</span>
+          <span className="ellipsis" title={currentStep ?? undefined}>
             {currentStep ? `› ${currentStep}` : "—"}
           </span>
         </div>
-        <span className="tabular-nums" style={{ flexShrink: 0, opacity: 0.9 }}>
-          {Math.round(percent)}%
-        </span>
+        <span className="nowrap tabular-nums">{Math.round(percent)}%</span>
       </div>
 
       <ProgressBar
-        className="tui-bg-cyan-black"
-        progressClassName={progressColorClass[status.color]}
+        className={PROGRESS_TONE_CLASS[status.color]}
+        trackBackground={false}
         style={{ width: "100%" }}
         value={percent}
       />

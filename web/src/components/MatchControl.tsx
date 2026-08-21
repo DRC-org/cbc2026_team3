@@ -1,8 +1,16 @@
-import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
+import {
+  Button,
+  Fieldset,
+  Modal,
+  ModalBody,
+  ModalFooter,
+  ModalHeader,
+} from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
 import { useRobot } from "@/context/RobotContext";
 import type { MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
+import { cx } from "@/lib/cx";
 import { COURT_LABEL, MODE_LABEL } from "@/lib/phase";
 
 const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
@@ -10,9 +18,9 @@ const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
   { value: "full_auto", label: "全自動" },
 ];
 
-const COURT_OPTIONS: { value: MatchCourt; label: string; className: string }[] = [
-  { value: "red", label: "赤コート", className: "red-255" },
-  { value: "blue", label: "青コート", className: "blue-168" },
+const COURT_OPTIONS: { value: MatchCourt; label: string; toneClass: string }[] = [
+  { value: "red", label: "赤コート", toneClass: "btn-danger" },
+  { value: "blue", label: "青コート", toneClass: "btn-info" },
 ];
 
 type ConfirmKind = "start" | "finish" | "reset";
@@ -59,7 +67,9 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
     <Modal
       open={confirm !== null}
       onClose={() => setConfirm(null)}
-      windowClassName="red-168 left-align"
+      overlapBackground={false}
+      className="modal-danger"
+      windowClassName="left-align"
     >
       <ModalHeader>
         {confirm === "start" ? "START MATCH" : confirm === "finish" ? "FINISH MATCH" : "RESET"}
@@ -78,23 +88,25 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
                 ⚠ 全自動モードでは開始と同時に両ロボットが動き出します。
               </p>
             ) : (
-              <p style={{ marginTop: "0.5rem", opacity: 0.8 }}>
+              <p className="dim" style={{ marginTop: "0.5rem" }}>
                 半自動モードでは各操縦者が自分のタブで START を押すまで動きません。
               </p>
             )}
-            <p style={{ marginTop: "0.25rem", opacity: 0.8 }}>周囲の安全を確認してください。</p>
+            <p className="dim" style={{ marginTop: "0.25rem" }}>
+              周囲の安全を確認してください。
+            </p>
           </>
         ) : confirm === "finish" ? (
           <>
             <p>試合を終了します。</p>
-            <p style={{ marginTop: "0.5rem", opacity: 0.8 }}>
+            <p className="dim" style={{ marginTop: "0.5rem" }}>
               実行中のシーケンスは通常停止します (緊急停止ではありません)。
             </p>
           </>
         ) : (
           <>
             <p>セッティングタイムに戻します。</p>
-            <p style={{ marginTop: "0.5rem", opacity: 0.8 }}>
+            <p className="dim" style={{ marginTop: "0.5rem" }}>
               チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
             </p>
           </>
@@ -102,7 +114,7 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
       </ModalBody>
       <ModalFooter>
         <Button onClick={() => setConfirm(null)}>キャンセル</Button>
-        <Button className="red-255" onClick={handleConfirm}>
+        <Button className="btn-danger" onClick={handleConfirm}>
           実行
         </Button>
       </ModalFooter>
@@ -112,23 +124,14 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
   if (variant === "compact") {
     return (
       <>
-        <div
-          className="tui-window"
-          style={{ display: "flex", flexShrink: 0, alignItems: "center", gap: "0.75rem" }}
-        >
-          <fieldset
-            className="tui-fieldset"
-            style={{ display: "flex", flex: 1, alignItems: "center", gap: "0.75rem" }}
-          >
-            <legend>
-              <span className="cyan-168-text">MATCH</span>
-            </legend>
-            <span style={{ flex: 1, minWidth: 0 }}>
+        <Fieldset className="panel no-shrink" legend="MATCH">
+          <div className="hstack">
+            <span className="spacer ellipsis">
               {MODE_LABEL[mode]} / {COURT_LABEL[court]}
             </span>
             {phase === "match" ? (
               <Button
-                className="red-255"
+                className="btn-danger"
                 onClick={() => setConfirm("finish")}
                 aria-label="試合を終了する"
               >
@@ -136,15 +139,15 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
               </Button>
             ) : (
               <Button
-                className="yellow-255"
+                className="btn-warn"
                 onClick={() => setConfirm("reset")}
                 aria-label="セッティングタイムへ戻す"
               >
                 ↺ セッティングへ戻る
               </Button>
             )}
-          </fieldset>
-        </div>
+          </div>
+        </Fieldset>
         {confirmModal}
       </>
     );
@@ -152,85 +155,77 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
 
   return (
     <>
-      <div className="tui-window">
-        <fieldset className="tui-fieldset">
-          <legend>
-            <span className="cyan-168-text">MATCH CONTROL</span>
-          </legend>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-            <div>
-              <div style={{ marginBottom: "0.25rem", opacity: 0.8 }}>MODE</div>
-              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                {MODE_OPTIONS.map((opt) => (
-                  <Button
-                    key={opt.value}
-                    className={mode === opt.value ? "cyan-255" : ""}
-                    disabled={settingsLocked}
-                    onClick={() => setMode(opt.value)}
-                    aria-pressed={mode === opt.value}
-                  >
-                    {mode === opt.value ? "◆ " : "◇ "}
-                    {opt.label}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div style={{ marginBottom: "0.25rem", opacity: 0.8 }}>COURT</div>
-              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                {COURT_OPTIONS.map((opt) => (
-                  <Button
-                    key={opt.value}
-                    className={court === opt.value ? opt.className : ""}
-                    disabled={settingsLocked}
-                    onClick={() => setCourt(opt.value)}
-                    aria-pressed={court === opt.value}
-                  >
-                    {court === opt.value ? "◆ " : "◇ "}
-                    {opt.label}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            {settingsLocked && phase === "match" ? (
-              <p style={{ opacity: 0.8 }}>[?] 試合中はモード・コートを変更できません</p>
-            ) : (
-              <p style={{ opacity: 0.7 }}>[!] 変更するとチェックリストは全てリセットされます</p>
-            )}
-
-            <hr />
-
-            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+      <Fieldset className="panel" legend="MATCH CONTROL">
+        <div className="group">
+          <div className="group-title">MODE</div>
+          <div className="hstack" style={{ flexWrap: "wrap" }}>
+            {MODE_OPTIONS.map((opt) => (
               <Button
-                // 押せない状態で緑のままだと「押せそうなのに反応しない」と読める
-                className={startBlockedReason === null ? "green-255" : ""}
-                disabled={startBlockedReason !== null}
-                onClick={() => setConfirm("start")}
-                aria-label="試合を開始する"
+                key={opt.value}
+                className={cx(mode === opt.value && "btn-selected")}
+                disabled={settingsLocked}
+                onClick={() => setMode(opt.value)}
+                aria-pressed={mode === opt.value}
               >
-                ► 試合開始
+                {mode === opt.value ? "◆ " : "◇ "}
+                {opt.label}
               </Button>
-              <Button
-                className="red-255"
-                disabled={phase !== "match"}
-                onClick={() => setConfirm("finish")}
-                aria-label="試合を終了する"
-              >
-                ■ 試合終了
-              </Button>
-              <Button onClick={() => setConfirm("reset")} aria-label="セッティングタイムへ戻す">
-                ↺ リセット
-              </Button>
-            </div>
-            {startBlockedReason ? (
-              <span style={{ opacity: 0.7 }}>[?] 試合開始 不可: {startBlockedReason}</span>
-            ) : null}
+            ))}
           </div>
-        </fieldset>
-      </div>
+        </div>
+
+        <div className="group">
+          <div className="group-title">COURT</div>
+          <div className="hstack" style={{ flexWrap: "wrap" }}>
+            {COURT_OPTIONS.map((opt) => (
+              <Button
+                key={opt.value}
+                className={cx(court === opt.value && `btn-selected ${opt.toneClass}`)}
+                disabled={settingsLocked}
+                onClick={() => setCourt(opt.value)}
+                aria-pressed={court === opt.value}
+              >
+                {court === opt.value ? "◆ " : "◇ "}
+                {opt.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <p className="dim" style={{ marginTop: "0.5rem" }}>
+          {settingsLocked && phase === "match"
+            ? "[?] 試合中はモード・コートを変更できません"
+            : "[!] 変更するとチェックリストは全てリセットされます"}
+        </p>
+
+        <div className="group">
+          <div className="hstack" style={{ flexWrap: "wrap" }}>
+            <Button
+              // 押せない状態で強調色のままだと「押せそうなのに反応しない」と読める
+              className={cx(startBlockedReason === null && "btn-ok")}
+              disabled={startBlockedReason !== null}
+              onClick={() => setConfirm("start")}
+              aria-label="試合を開始する"
+            >
+              ► 試合開始
+            </Button>
+            <Button
+              className="btn-danger"
+              disabled={phase !== "match"}
+              onClick={() => setConfirm("finish")}
+              aria-label="試合を終了する"
+            >
+              ■ 試合終了
+            </Button>
+            <Button onClick={() => setConfirm("reset")} aria-label="セッティングタイムへ戻す">
+              ↺ リセット
+            </Button>
+          </div>
+          {startBlockedReason ? (
+            <span className="dim">[?] 試合開始 不可: {startBlockedReason}</span>
+          ) : null}
+        </div>
+      </Fieldset>
 
       {confirmModal}
     </>

@@ -11,7 +11,11 @@ export function EStopOverlay() {
       open={eStopActive}
       dismissable={false}
       role="alertdialog"
-      windowClassName="red-168 white-255-text center"
+      overlapBackground={false}
+      // 停止中であることが画面のどこを見ても分かる必要がある唯一の状態。
+      // グレー基調の例外として、ここだけは面を赤で塗る
+      className="modal-estop"
+      windowClassName="center"
     >
       <ModalHeader>EMERGENCY STOP</ModalHeader>
       <ModalBody>
@@ -20,7 +24,7 @@ export function EStopOverlay() {
         <p>全ロボットの動作を停止しています。周囲の安全を確認してください。</p>
       </ModalBody>
       <ModalFooter divider={false} style={{ marginTop: "1rem", justifyContent: "center" }}>
-        <Button className="yellow-255" onClick={onEStopRelease}>
+        <Button className="btn-estop-reset" onClick={onEStopRelease}>
           ◄ Reset ►
         </Button>
       </ModalFooter>

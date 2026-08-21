@@ -1,3 +1,5 @@
+import { Fieldset } from "@tsaito18/tuicss-react";
+
 import { useRobot } from "@/context/RobotContext";
 import type { RobotState } from "@/hooks/useRobotSocket";
 import { ROBOTS, TEMP_WARNING } from "@/lib/robots";
@@ -46,38 +48,23 @@ export function RobotReadiness() {
   const { states } = useRobot();
 
   return (
-    <div className="tui-window" style={{ flex: 1, minWidth: 0 }}>
-      <fieldset className="tui-fieldset">
-        <legend>
-          <span className="cyan-168-text">MACHINE READINESS</span>
-        </legend>
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-          {ROBOTS.map(({ key, label }) => {
-            const state = states[key];
-            const readiness = evaluate(state);
-            const motorCount = state ? Object.keys(state.motors).length : 0;
-            return (
-              <div
-                key={key}
-                style={{
-                  display: "flex",
-                  alignItems: "baseline",
-                  justifyContent: "space-between",
-                  gap: "0.75rem",
-                }}
-              >
-                <span style={{ whiteSpace: "nowrap" }}>{label}</span>
-                <span style={{ flex: 1, opacity: 0.6, textAlign: "right" }}>
-                  {motorCount > 0 ? `モータ ${motorCount}` : ""}
-                </span>
-                <span className={`${readiness.tone}-text`} style={{ whiteSpace: "nowrap" }}>
-                  [{readiness.symbol} {readiness.label}]
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </fieldset>
-    </div>
+    <Fieldset className="panel" legend="MACHINE READINESS" style={{ flex: 1 }}>
+      {ROBOTS.map(({ key, label }) => {
+        const state = states[key];
+        const readiness = evaluate(state);
+        const motorCount = state ? Object.keys(state.motors).length : 0;
+        return (
+          <div key={key} className="hsplit">
+            <span className="nowrap">{label}</span>
+            <span className="spacer dim" style={{ textAlign: "right" }}>
+              {motorCount > 0 ? `モータ ${motorCount}` : ""}
+            </span>
+            <span className={`${readiness.tone}-text nowrap`}>
+              [{readiness.symbol} {readiness.label}]
+            </span>
+          </div>
+        );
+      })}
+    </Fieldset>
   );
 }
