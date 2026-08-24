@@ -1,4 +1,4 @@
-import { Button } from "@tsaito18/tuicss-react";
+import { Button, Fieldset, Range } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
 import { MotorStatus } from "@/components/MotorStatus";
@@ -21,7 +21,7 @@ interface PidRowProps {
   onSend: () => void;
 }
 
-// PID 1 項目の行: ◄ 微減 / TUI レンジ / ► 微増 / 数値表示 / SEND。
+// PID 1 項目の行: ◄ 微減 / レンジ / ► 微増 / 数値表示 / SEND。
 // 送信は明示ボタンのみ（スライダー操作だけでは set_param を飛ばさない）。
 function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
   // クランプ後に STEP 単位の浮動小数誤差を丸める。
@@ -31,14 +31,16 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
   };
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-      <span style={{ width: "1.75rem", flexShrink: 0 }}>{label}</span>
+    <div className="hstack">
+      <span className="dim" style={{ width: "1.75rem", flexShrink: 0 }}>
+        {label}
+      </span>
       <Button aria-label={`${label} を減らす`} onClick={() => onChange(clamp(value - STEP))}>
         ◄
       </Button>
-      <input
-        type="range"
+      <Range
         style={{ flex: 1 }}
+        trackBackground={false}
         aria-label={label}
         min={0}
         max={max}
@@ -49,17 +51,10 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
       <Button aria-label={`${label} を増やす`} onClick={() => onChange(clamp(value + STEP))}>
         ►
       </Button>
-      <span
-        style={{
-          width: "3.5rem",
-          flexShrink: 0,
-          textAlign: "right",
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
+      <span className="tabular-nums" style={{ width: "3.5rem", flexShrink: 0, textAlign: "right" }}>
         {value.toFixed(2)}
       </span>
-      <Button className="blue-255" aria-label={`${label} を送信`} onClick={onSend}>
+      <Button className="btn-info" aria-label={`${label} を送信`} onClick={onSend}>
         ► SEND
       </Button>
     </div>
@@ -89,90 +84,39 @@ export function MotorTuning() {
   };
 
   return (
-    <main
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(2,minmax(0,1fr))",
-        gap: "0.75rem",
-        minHeight: 0,
-        flex: 1,
-        overflow: "hidden",
-        padding: "0.75rem",
-      }}
-    >
+    <main className="page grid-2">
       {ROBOTS.map(({ key, label }) => {
         const state = states[key];
         const motors = state ? Object.entries(state.motors) : [];
         return (
-          <div
-            key={key}
-            className="tui-window"
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              flex: 1,
-              minHeight: 0,
-              height: "100%",
-              overflow: "hidden",
-            }}
-          >
-            <fieldset
-              className="tui-fieldset"
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                flex: 1,
-                minHeight: 0,
-              }}
-            >
-              <legend>{label}</legend>
-
-              {!state ? (
-                <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>データ未受信 — 接続待機中...</p>
-              ) : motors.length === 0 ? (
-                <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>モータ情報なし</p>
-              ) : (
-                // モータ数が増えても枠内のみスクロールさせ全体スクロールは禁止する。
-                <div
-                  className="tui-scroll-cyan"
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    flex: 1,
-                    gap: "0.75rem",
-                    paddingRight: "0.25rem",
-                    overflow: "auto",
-                  }}
-                >
-                  {motors.map(([motorName, motorState]) => (
-                    <fieldset key={motorName} className="tui-fieldset" style={{ marginBottom: 0 }}>
-                      <legend>{motorName}</legend>
-                      <div style={{ marginBottom: "0.5rem" }}>
-                        <MotorStatus name={motorName} state={motorState} />
-                      </div>
-                      <div
-                        style={{
-                          borderTop: "1px solid rgba(255,255,255,0.3)",
-                          paddingTop: "0.5rem",
-                        }}
-                      >
-                        {PID_PARAMS.map(({ key: paramKey, label: paramLabel, max }) => (
-                          <PidRow
-                            key={paramKey}
-                            label={paramLabel}
-                            max={max}
-                            value={getValue(motorName, paramKey)}
-                            onChange={(val) => setValue(motorName, paramKey, val)}
-                            onSend={() => handleSend(motorName, paramKey)}
-                          />
-                        ))}
-                      </div>
-                    </fieldset>
-                  ))}
-                </div>
-              )}
-            </fieldset>
-          </div>
+          <Fieldset key={key} className="panel" legend={label}>
+            {!state ? (
+              <p className="dim">データ未受信 — 接続待機中...</p>
+            ) : motors.length === 0 ? (
+              <p className="dim">モータ情報なし</p>
+            ) : (
+              // モータ数が増えても枠内のみスクロールさせ全体スクロールは禁止する。
+              // モータごとの枠は入れ子にせず、罫線 1 本で区切る
+              <div className="panel-body scroll">
+                {motors.map(([motorName, motorState]) => (
+                  <div key={motorName} className="group">
+                    {/* 見出しは MotorStatus 側のモータ名行が兼ねる */}
+                    <MotorStatus name={motorName} state={motorState} />
+                    {PID_PARAMS.map(({ key: paramKey, label: paramLabel, max }) => (
+                      <PidRow
+                        key={paramKey}
+                        label={paramLabel}
+                        max={max}
+                        value={getValue(motorName, paramKey)}
+                        onChange={(val) => setValue(motorName, paramKey, val)}
+                        onSend={() => handleSend(motorName, paramKey)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Fieldset>
         );
       })}
     </main>

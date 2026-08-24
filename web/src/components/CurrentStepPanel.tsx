@@ -1,3 +1,5 @@
+import { Fieldset } from "@tsaito18/tuicss-react";
+
 import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
 
 interface CurrentStepPanelProps {
@@ -32,66 +34,43 @@ export function CurrentStepPanel({
       : { label: "実行中", className: "info-text", symbol: "►" };
 
   return (
-    <div
-      className="tui-window"
-      style={{ display: "flex", flex: 1, flexDirection: "column", minHeight: 0 }}
-    >
-      <fieldset
-        className="tui-fieldset"
-        style={{ display: "flex", flex: 1, flexDirection: "column", gap: "0.75rem", minHeight: 0 }}
+    <Fieldset className="panel panel-fill" legend="CURRENT STEP">
+      <div
+        className="fill"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.5rem",
+          justifyContent: "center",
+        }}
       >
-        <legend>CURRENT STEP</legend>
-
-        <div
-          style={{
-            display: "flex",
-            flex: 1,
-            flexDirection: "column",
-            gap: "0.5rem",
-            justifyContent: "center",
-            minHeight: 0,
-          }}
-        >
-          <div className={status.className}>
-            [{status.symbol} {status.label}]
-          </div>
-          <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", minWidth: 0 }}>
-            <span
-              className="tabular-nums"
-              style={{ flexShrink: 0, fontSize: "1.6em", opacity: 0.7 }}
-            >
-              #{isComplete ? totalSteps : stepIndex + 1}
-            </span>
-            <span style={{ minWidth: 0, fontSize: "1.6em", lineHeight: 1.25 }}>
-              {isComplete ? "全ステップ完了" : (current?.label ?? "—")}
-            </span>
-          </div>
+        <div className={status.className}>
+          [{status.symbol} {status.label}]
         </div>
-
-        <div style={{ borderTop: "1px solid rgba(255,255,255,0.3)", paddingTop: "0.5rem" }}>
-          <div style={{ opacity: 0.7 }}>NEXT</div>
-          {next ? (
-            <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem", minWidth: 0 }}>
-              <span className="tabular-nums" style={{ flexShrink: 0, opacity: 0.8 }}>
-                #{stepIndex + 2}
-              </span>
-              {next.require_trigger ? <span style={{ flexShrink: 0 }}>✋</span> : null}
-              <span
-                style={{
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {next.label}
-              </span>
-            </div>
-          ) : (
-            <div style={{ opacity: 0.7 }}>これが最終ステップです</div>
-          )}
+        <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", minWidth: 0 }}>
+          <span className="dim tabular-nums" style={{ flexShrink: 0, fontSize: "1.6em" }}>
+            #{isComplete ? totalSteps : stepIndex + 1}
+          </span>
+          <span style={{ minWidth: 0, fontSize: "1.6em", lineHeight: 1.25 }}>
+            {isComplete ? "全ステップ完了" : (current?.label ?? "—")}
+          </span>
         </div>
-      </fieldset>
-    </div>
+      </div>
+
+      <div className="group">
+        <div className="group-title">NEXT</div>
+        {next ? (
+          <div className="hstack">
+            <span className="dim tabular-nums" style={{ flexShrink: 0 }}>
+              #{stepIndex + 2}
+            </span>
+            {next.require_trigger ? <span style={{ flexShrink: 0 }}>✋</span> : null}
+            <span className="ellipsis">{next.label}</span>
+          </div>
+        ) : (
+          <div className="dim">これが最終ステップです</div>
+        )}
+      </div>
+    </Fieldset>
   );
 }

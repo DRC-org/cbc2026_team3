@@ -58,16 +58,18 @@ export function TriggerButton({
 
   if (isComplete) {
     return (
-      <Button disabled className="green-255" style={FILL_STYLE} aria-label="シーケンス完走">
+      <Button disabled className="btn-ok" style={FILL_STYLE} aria-label="シーケンス完走">
         ✓ DONE
       </Button>
     );
   }
 
+  // 待機解除は試合中に最も多く押す操作。ここだけは地をベタ塗りして、
+  // 「今 押すべきボタンはこれ」が周辺視野でも分かるようにする
   if (waiting) {
     return (
       <Button
-        className="blue-255"
+        className="btn-next"
         onClick={onTrigger}
         aria-label="次のステップへ進む"
         style={FILL_STYLE}
@@ -79,7 +81,7 @@ export function TriggerButton({
   }
 
   return (
-    <Button disabled className="cyan-255" style={FILL_STYLE} aria-label="シーケンス実行中">
+    <Button disabled className="btn-info" style={FILL_STYLE} aria-label="シーケンス実行中">
       <span className="tabular-nums">[{spinner}]</span>
       RUNNING
     </Button>

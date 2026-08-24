@@ -13,16 +13,7 @@ export function ConnectionBanner() {
   if (connected) return null;
 
   return (
-    <div
-      role="alert"
-      className="red-255 white-255-text"
-      style={{
-        flexShrink: 0,
-        padding: "0.25rem 0.75rem",
-        textAlign: "center",
-        fontWeight: "bold",
-      }}
-    >
+    <div role="alert" className="connection-banner">
       {/* 点滅は先頭の記号だけに留める。文章まで点滅すると読み取りに時間がかかる */}
       <span className="alert-blink">◆</span> 通信切断 —
       サーバーに接続できません。表示中の値は最新ではありません (自動再接続中...)

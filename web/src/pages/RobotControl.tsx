@@ -1,4 +1,4 @@
-import { Button } from "@tsaito18/tuicss-react";
+import { Button, Fieldset } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
 import { Checklist } from "@/components/Checklist";
@@ -13,6 +13,7 @@ import { TriggerButton } from "@/components/TriggerButton";
 import { useRobot } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import type { ChecklistRole, RobotState } from "@/hooks/useRobotSocket";
+import { cx } from "@/lib/cx";
 import { isSetupPhase } from "@/lib/phase";
 
 interface RobotControlProps {
@@ -20,7 +21,12 @@ interface RobotControlProps {
   label: string;
 }
 
-/** CAN バス / モータ / 動作確認。準備中も試合中も右カラムに置く共通ブロック。 */
+/**
+ * CAN バス / モータ / 動作確認。準備中も試合中も右カラムに置く共通ブロック。
+ *
+ * 3 つの見出しは別々のパネルにせず 1 枠にまとめる。診断情報は「どれか 1 つを見る」
+ * ものではなく上から順に流し読みする対象なので、枠で分断しないほうが速く読める。
+ */
 function DiagnosticsColumn({
   robotKey,
   state,
@@ -31,54 +37,24 @@ function DiagnosticsColumn({
   onPanelOpen: () => void;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.75rem",
-        minHeight: 0,
-        overflow: "hidden",
-      }}
-    >
-      <div className="tui-window" style={{ flexShrink: 0 }}>
-        <fieldset className="tui-fieldset">
-          <legend>CAN BUS</legend>
-          <HealthIndicator variant="bus-only" health={state.health} />
-        </fieldset>
+    <Fieldset className="panel" legend="DIAGNOSTICS">
+      <div className="group">
+        <div className="group-title">CAN BUS</div>
+        <HealthIndicator variant="bus-only" health={state.health} />
       </div>
-      <div
-        className="tui-window"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          flex: 1,
-          minHeight: 0,
-          overflow: "hidden",
-        }}
-      >
-        <fieldset
-          className="tui-fieldset"
-          style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
-        >
-          <legend>MOTORS</legend>
-          <MotorSummary motors={state.motors} healthMotors={state.health?.motors} />
-        </fieldset>
+
+      <div className="group group-fill">
+        <div className="group-title">MOTORS</div>
+        <MotorSummary motors={state.motors} healthMotors={state.health?.motors} />
       </div>
-      <div
-        style={{
-          display: "flex",
-          flexShrink: 0,
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 8,
-        }}
-      >
-        <MotorCheckButton robotName={robotKey} onPanelOpen={onPanelOpen} />
-        <Button className="yellow-255" onClick={onPanelOpen}>
-          ▤ 結果を表示
-        </Button>
+
+      <div className="group">
+        <div className="hstack" style={{ flexWrap: "wrap" }}>
+          <MotorCheckButton robotName={robotKey} onPanelOpen={onPanelOpen} />
+          <Button onClick={onPanelOpen}>▤ 結果を表示</Button>
+        </div>
       </div>
-    </div>
+    </Fieldset>
   );
 }
 
@@ -125,23 +101,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   if (!state) {
     return (
-      <main
-        style={{
-          display: "flex",
-          flex: 1,
-          alignItems: "center",
-          justifyContent: "center",
-          overflow: "hidden",
-          padding: "1.5rem",
-          minHeight: 0,
-        }}
-      >
-        <div className="tui-window">
-          <fieldset className="tui-fieldset">
-            <legend>{label}</legend>
-            <p style={{ padding: "1rem 0.5rem", opacity: 0.8 }}>データ未受信 — 接続待機中...</p>
-          </fieldset>
-        </div>
+      <main className="page" style={{ alignItems: "center", justifyContent: "center" }}>
+        <Fieldset className="panel" legend={label} style={{ flex: "0 0 auto" }}>
+          <p className="dim">データ未受信 — 接続待機中...</p>
+        </Fieldset>
       </main>
     );
   }
@@ -159,17 +122,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     return (
       <>
         <main
+          className="page"
           style={{
             display: "grid",
             gridTemplateColumns: "minmax(0, 1fr) minmax(300px, 24rem)",
-            gap: "0.75rem",
-            flex: 1,
-            minHeight: 0,
-            overflow: "hidden",
-            padding: "0.75rem",
           }}
         >
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", minHeight: 0 }}>
+          <div className="vstack">
             {ownsChecklist ? (
               // 指差喚呼は項目数ぶんの高さがあれば足りる。残りはステップ一覧に回すが、
               // 項目が増えても画面の半分までに抑えて一覧を潰さない
@@ -180,45 +139,25 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 />
               </div>
             ) : (
-              <div className="tui-window" style={{ flexShrink: 0 }}>
-                <fieldset className="tui-fieldset">
-                  <legend>
-                    <span className="cyan-168-text">全自動モード</span>
-                  </legend>
-                  <p style={{ opacity: 0.8 }}>
-                    指差喚呼は Monitor タブ <span className="key-hint">1</span> で実施します。
-                  </p>
-                </fieldset>
-              </div>
+              <Fieldset className="panel no-shrink" legend="全自動モード">
+                <p className="dim">
+                  指差喚呼は Monitor タブ <span className="key-hint">1</span> で実施します。
+                </p>
+              </Fieldset>
             )}
 
-            <div
-              className="tui-window"
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                flex: 1,
-                minHeight: 0,
-                overflow: "hidden",
-              }}
-            >
-              <fieldset
-                className="tui-fieldset"
-                style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
-              >
-                <legend>SEQUENCE PREVIEW</legend>
-                <p style={{ opacity: 0.7, marginBottom: "0.25rem" }}>
-                  {state.sequence} — 全 {state.total_steps} ステップ (試合開始後に操作できます)
-                </p>
-                <SequenceStepList
-                  steps={state.steps ?? []}
-                  stepIndex={state.step_index}
-                  waitingTrigger={state.waiting_trigger}
-                  onJump={handleJump}
-                  disabled
-                />
-              </fieldset>
-            </div>
+            <Fieldset className="panel panel-fill" legend="SEQUENCE PREVIEW">
+              <p className="dim no-shrink">
+                {state.sequence} — 全 {state.total_steps} ステップ (試合開始後に操作できます)
+              </p>
+              <SequenceStepList
+                steps={state.steps ?? []}
+                stepIndex={state.step_index}
+                waitingTrigger={state.waiting_trigger}
+                onJump={handleJump}
+                disabled
+              />
+            </Fieldset>
           </div>
 
           <DiagnosticsColumn
@@ -236,29 +175,22 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   return (
     <>
       <main
+        className="page"
         style={{
           display: "grid",
           gridTemplateColumns: "minmax(0,1fr) minmax(280px,340px) minmax(280px,340px)",
-          gap: "0.75rem",
-          overflow: "hidden",
-          padding: "0.75rem",
-          minHeight: 0,
-          flex: 1,
         }}
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", minHeight: 0 }}>
-          <div className="tui-window" style={{ flexShrink: 0 }}>
-            <fieldset className="tui-fieldset">
-              <legend>SEQUENCE</legend>
-              <SequenceProgress
-                sequence={state.sequence}
-                currentStep={state.current_step}
-                stepIndex={state.step_index}
-                totalSteps={state.total_steps}
-                waitingTrigger={state.waiting_trigger}
-              />
-            </fieldset>
-          </div>
+        <div className="vstack">
+          <Fieldset className="panel no-shrink" legend="SEQUENCE">
+            <SequenceProgress
+              sequence={state.sequence}
+              currentStep={state.current_step}
+              stepIndex={state.step_index}
+              totalSteps={state.total_steps}
+              waitingTrigger={state.waiting_trigger}
+            />
+          </Fieldset>
 
           <CurrentStepPanel
             steps={state.steps ?? []}
@@ -272,7 +204,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             style={{
               display: "grid",
               gridTemplateColumns: "180px 1fr",
-              gap: "0.75rem",
+              gap: "0.5rem",
               flexShrink: 0,
               minHeight: 88,
             }}
@@ -281,7 +213,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               // 通常停止は安全側の動作。確認ダイアログを挟むと「止めたいのに止まらない」
               // 時間が生まれるため、ここは 1 アクションで即座に止める
               <Button
-                className="red-255"
+                className="btn-danger"
                 onClick={handleStop}
                 aria-label="シーケンスを通常停止"
                 style={{ width: "100%" }}
@@ -290,7 +222,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               </Button>
             ) : (
               <Button
-                className={inMatch ? "green-255" : ""}
+                className={cx(inMatch && "btn-ok")}
                 disabled={!inMatch}
                 onClick={handleStart}
                 aria-label="シーケンスを先頭から開始"
@@ -311,31 +243,15 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           </div>
         </div>
 
-        <div
-          className="tui-window"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            flex: 1,
-            minHeight: 0,
-            height: "100%",
-            overflow: "hidden",
-          }}
-        >
-          <fieldset
-            className="tui-fieldset"
-            style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
-          >
-            <legend>STEPS</legend>
-            <SequenceStepList
-              steps={state.steps ?? []}
-              stepIndex={state.step_index}
-              waitingTrigger={state.waiting_trigger}
-              onJump={handleJump}
-              disabled={!inMatch}
-            />
-          </fieldset>
-        </div>
+        <Fieldset className="panel" legend="STEPS">
+          <SequenceStepList
+            steps={state.steps ?? []}
+            stepIndex={state.step_index}
+            waitingTrigger={state.waiting_trigger}
+            onJump={handleJump}
+            disabled={!inMatch}
+          />
+        </Fieldset>
 
         <DiagnosticsColumn
           robotKey={robotKey}

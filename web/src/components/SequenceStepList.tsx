@@ -35,11 +35,19 @@ const STEP_MARKER: Record<StepKind, string> = {
   future: "·",
 };
 
-// 行全体の文字色（TuiCss セマンティック text クラス）。
+// 行全体の文字色。
 const STEP_TONE_CLASS: Record<StepKind, string> = {
   done: "secondary-text",
   current: "info-text",
   waiting: "warning-text",
+  future: "",
+};
+
+// 実行位置の行だけ左端にカラーバーと薄い地色を敷き、一覧の中で現在地を見失わせない。
+const STEP_ACTIVE_CLASS: Record<StepKind, string> = {
+  done: "",
+  current: "step-row-current",
+  waiting: "step-row-waiting",
   future: "",
 };
 
@@ -53,7 +61,7 @@ export function SequenceStepList({
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
 
   if (steps.length === 0) {
-    return <p style={{ padding: 8, opacity: 0.7 }}>ステップ情報なし</p>;
+    return <p className="dim">ステップ情報なし</p>;
   }
 
   const totalSteps = steps.length;
@@ -72,23 +80,13 @@ export function SequenceStepList({
   const handleCancel = () => setPendingIndex(null);
 
   return (
-    <div className="flex-1" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div
-        style={{
-          display: "flex",
-          flexShrink: 0,
-          alignItems: "center",
-          justifyContent: "space-between",
-        }}
-      >
-        <h3 style={{ opacity: 0.8 }}>STEP LIST</h3>
-        <span style={{ opacity: 0.6 }}>{disabled ? "試合中のみ操作可" : "クリックで再開"}</span>
+    <div className="fill" style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+      <div className="hsplit no-shrink group-title">
+        <span>STEP LIST</span>
+        <span>{disabled ? "試合中のみ操作可" : "クリックで再開"}</span>
       </div>
 
-      <ol
-        className="tui-scroll-cyan flex-1"
-        style={{ display: "flex", flexDirection: "column", overflow: "auto" }}
-      >
+      <ol className="panel-body scroll">
         {steps.map((step, i) => {
           const kind = classifyStep(i, stepIndex, totalSteps, waitingTrigger);
           const isActive = kind === "current" || kind === "waiting";
@@ -100,22 +98,7 @@ export function SequenceStepList({
                 disabled={disabled}
                 aria-current={isActive ? "step" : undefined}
                 aria-label={`ステップ ${i + 1}: ${step.label}`}
-                className={cx(
-                  STEP_TONE_CLASS[kind],
-                  isActive && (kind === "current" ? "info" : "warning"),
-                )}
-                style={{
-                  display: "flex",
-                  width: "100%",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "6px 8px",
-                  textAlign: "left",
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  border: "none",
-                  background: "transparent",
-                  opacity: disabled ? 0.6 : 1,
-                }}
+                className={cx("step-row", STEP_TONE_CLASS[kind], STEP_ACTIVE_CLASS[kind])}
               >
                 <span
                   className="tabular-nums"
@@ -123,24 +106,13 @@ export function SequenceStepList({
                 >
                   {STEP_MARKER[kind]}
                 </span>
-                <span
-                  className="tabular-nums"
-                  style={{ width: "1.75rem", flexShrink: 0, opacity: 0.8 }}
-                >
+                <span className="dim tabular-nums" style={{ width: "1.75rem", flexShrink: 0 }}>
                   #{i + 1}
                 </span>
                 <span style={{ width: "1.25rem", flexShrink: 0, textAlign: "center" }}>
                   {step.require_trigger ? "✋" : ""}
                 </span>
-                <span
-                  style={{
-                    minWidth: 0,
-                    flex: 1,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
+                <span className="ellipsis" style={{ flex: 1 }}>
                   {step.label}
                 </span>
               </button>
@@ -152,7 +124,9 @@ export function SequenceStepList({
       <Modal
         open={pendingIndex !== null}
         onClose={handleCancel}
-        windowClassName="red-168 left-align"
+        overlapBackground={false}
+        className="modal-danger"
+        windowClassName="left-align"
       >
         <ModalHeader>STEP JUMP</ModalHeader>
         <ModalBody>
@@ -160,7 +134,7 @@ export function SequenceStepList({
             ステップ {pendingIndex !== null ? pendingIndex + 1 : ""}{" "}
             {target ? `「${target.label}」` : ""} から再開しますか？
           </p>
-          <p style={{ marginTop: 8, opacity: 0.8 }}>
+          <p className="dim" style={{ marginTop: 8 }}>
             現在の動作を中断して指定ステップから実行を開始します。
           </p>
           <p className="warning-text" style={{ marginTop: 8 }}>
@@ -169,7 +143,7 @@ export function SequenceStepList({
         </ModalBody>
         <ModalFooter>
           <Button onClick={handleCancel}>キャンセル</Button>
-          <Button className="yellow-255" onClick={handleConfirm}>
+          <Button className="btn-warn" onClick={handleConfirm}>
             再開
           </Button>
         </ModalFooter>

@@ -124,7 +124,7 @@ function MotorRow({ record, isCurrent }: { record: MotorCheckRecord; isCurrent: 
           >
             {record.motor}
           </span>
-          <span style={{ opacity: 0.6 }}>bus: {record.bus}</span>
+          <span className="dim">bus: {record.bus}</span>
         </div>
       </div>
       <div
@@ -164,10 +164,16 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
         : "未実行";
 
   return (
-    <Modal open={isOpen} onClose={() => onOpenChange(false)} windowClassName="red-168 left-align">
+    <Modal
+      open={isOpen}
+      onClose={() => onOpenChange(false)}
+      overlapBackground={false}
+      className="modal-danger"
+      windowClassName="left-align"
+    >
       <ModalHeader>MOTOR CHECK — {robotName}</ModalHeader>
       <ModalBody
-        className="tui-scroll-cyan"
+        className="scroll"
         style={{
           display: "flex",
           flexDirection: "column",
@@ -183,7 +189,7 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
               justifyContent: "space-between",
             }}
           >
-            <span style={{ opacity: 0.8 }}>OVERALL</span>
+            <span className="dim">OVERALL</span>
             <span className={cx(overallStyle.textClass)}>
               [{overallStyle.symbol} {overallStyle.label}]
             </span>
@@ -199,7 +205,7 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
                 justifyContent: "space-between",
               }}
             >
-              <span className="tabular-nums" style={{ opacity: 0.8 }}>
+              <span className="dim tabular-nums">
                 {index} / {total}
               </span>
               <span
@@ -214,8 +220,8 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
               </span>
             </div>
             <ProgressBar
-              className="tui-bg-cyan-black"
-              progressClassName="cyan-255"
+              className="progress-info"
+              trackBackground={false}
               style={{ width: "100%" }}
               value={percent}
             />
@@ -225,14 +231,16 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
         {isError ? (
           <div className="danger-text">
             <p>⚠ エラー</p>
-            <p style={{ marginTop: 4, opacity: 0.9 }}>{state.error}</p>
+            <p style={{ marginTop: 4 }}>{state.error}</p>
           </div>
         ) : null}
 
         {state.records.length === 0 && !isRunning && !isError ? (
-          <p style={{ padding: "12px 4px", opacity: 0.7 }}>動作確認はまだ実行されていません。</p>
+          <p className="dim" style={{ padding: "12px 4px" }}>
+            動作確認はまだ実行されていません。
+          </p>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column" }}>
+          <div className="striped" style={{ display: "flex", flexDirection: "column" }}>
             {state.records.map((record) => (
               <MotorRow
                 key={record.motor}
@@ -244,14 +252,14 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
         )}
       </ModalBody>
       <ModalFooter style={{ width: "100%", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ opacity: 0.7 }}>{footerLabel}</span>
+        <span className="dim">{footerLabel}</span>
         <div style={{ display: "flex", gap: 8 }}>
           {isRunning ? (
-            <Button className="red-255" onClick={abort}>
+            <Button className="btn-danger" onClick={abort}>
               ■ 中断
             </Button>
           ) : state.records.length > 0 || isError ? (
-            <Button className="cyan-255" onClick={start}>
+            <Button className="btn-info" onClick={start}>
               ► リトライ
             </Button>
           ) : null}

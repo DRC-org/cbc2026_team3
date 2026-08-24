@@ -1,4 +1,4 @@
-import { Button, Checkbox } from "@tsaito18/tuicss-react";
+import { Button, Checkbox, Fieldset } from "@tsaito18/tuicss-react";
 
 import { useRobot } from "@/context/RobotContext";
 import type { ChecklistRole } from "@/hooks/useRobotSocket";
@@ -22,58 +22,51 @@ export function Checklist({ checklistRole, title }: ChecklistProps) {
   const completed = checklist?.completed ?? false;
 
   return (
-    <div
-      className="tui-window"
-      style={{ display: "flex", flex: 1, flexDirection: "column", minWidth: 0, minHeight: 0 }}
+    <Fieldset
+      className="panel panel-fill"
+      legend={
+        <span className={completed ? "success-text" : "warning-text"}>
+          {completed ? "[✓]" : "[ ]"} {title}
+        </span>
+      }
     >
-      <fieldset
-        className="tui-fieldset"
-        style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
-      >
-        <legend>
-          <span className={completed ? "green-255-text" : "yellow-255-text"}>
-            {completed ? "[✓]" : "[ ]"} {title}
-          </span>
-        </legend>
+      <div className="hsplit no-shrink" style={{ alignItems: "center" }}>
+        <span className="dim">
+          {checkedCount} / {items.length} 項目
+        </span>
+        <Button
+          disabled={locked || checkedCount === 0}
+          onClick={() => resetChecklist(checklistRole)}
+          aria-label={`${title} のチェックをすべて解除`}
+        >
+          ↺ CLEAR
+        </Button>
+      </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.5rem" }}>
-          <span style={{ opacity: 0.8 }}>
-            {checkedCount} / {items.length} 項目
-          </span>
-          <Button
-            disabled={locked || checkedCount === 0}
-            onClick={() => resetChecklist(checklistRole)}
-            aria-label={`${title} のチェックをすべて解除`}
-          >
-            ↺ CLEAR
-          </Button>
+      {items.length === 0 ? (
+        <p className="dim" style={{ marginTop: "0.5rem" }}>
+          チェック項目が未定義です (config/checklist.yaml)
+        </p>
+      ) : (
+        <div className="panel-body scroll" style={{ gap: "0.25rem", marginTop: "0.5rem" }}>
+          {items.map((item) => (
+            <Checkbox
+              key={item.id}
+              checked={item.checked}
+              disabled={locked}
+              onChange={(e) => setChecklistItem(checklistRole, item.id, e.currentTarget.checked)}
+            >
+              {item.label}
+            </Checkbox>
+          ))}
         </div>
+      )}
 
-        {items.length === 0 ? (
-          <p style={{ opacity: 0.7 }}>チェック項目が未定義です (config/checklist.yaml)</p>
-        ) : (
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: "0.25rem", overflowY: "auto" }}
-          >
-            {items.map((item) => (
-              <Checkbox
-                key={item.id}
-                checked={item.checked}
-                disabled={locked}
-                onChange={(e) => setChecklistItem(checklistRole, item.id, e.currentTarget.checked)}
-              >
-                {item.label}
-              </Checkbox>
-            ))}
-          </div>
-        )}
-
-        {completed ? (
-          <p className="green-255-text" style={{ marginTop: "0.5rem" }}>
-            ✓ 指差喚呼 完了
-          </p>
-        ) : null}
-      </fieldset>
-    </div>
+      {completed ? (
+        <p className="success-text no-shrink" style={{ marginTop: "0.5rem" }}>
+          ✓ 指差喚呼 完了
+        </p>
+      ) : null}
+    </Fieldset>
   );
 }

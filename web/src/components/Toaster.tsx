@@ -1,3 +1,4 @@
+import { Fieldset } from "@tsaito18/tuicss-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { useRobot } from "@/context/RobotContext";
@@ -24,41 +25,24 @@ const TONE_CLASS: Record<Tone, string> = {
 
 function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => void }) {
   return (
-    <div className="tui-window" style={{ width: "22rem", maxWidth: "calc(100vw - 2rem)" }}>
-      <fieldset className="tui-fieldset">
-        <legend>
-          <span className={TONE_CLASS[toast.tone]}>[!] {toast.title}</span>
-        </legend>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            {toast.lines.map((line, i) => (
-              <div
-                key={line}
-                className={i === 0 ? TONE_CLASS[toast.tone] : "toast-line"}
-                style={i === 0 ? undefined : { opacity: 0.8 }}
-              >
-                {line}
-              </div>
-            ))}
-          </div>
-          <button
-            type="button"
-            onClick={onDismiss}
-            aria-label="通知を閉じる"
-            style={{
-              flexShrink: 0,
-              background: "transparent",
-              border: "none",
-              color: "inherit",
-              cursor: "pointer",
-              opacity: 0.8,
-            }}
-          >
-            [X]
-          </button>
+    <Fieldset
+      className="panel"
+      style={{ width: "22rem", maxWidth: "calc(100vw - 2rem)" }}
+      legend={<span className={TONE_CLASS[toast.tone]}>[!] {toast.title}</span>}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          {toast.lines.map((line, i) => (
+            <div key={line} className={i === 0 ? TONE_CLASS[toast.tone] : "toast-line dim"}>
+              {line}
+            </div>
+          ))}
         </div>
-      </fieldset>
-    </div>
+        <button type="button" onClick={onDismiss} aria-label="通知を閉じる" className="toast-close">
+          [X]
+        </button>
+      </div>
+    </Fieldset>
   );
 }
 

@@ -42,9 +42,9 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
   };
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+    <>
       <Button
-        className="cyan-255"
+        className="btn-info"
         disabled={disabled}
         onClick={() => setConfirmOpen(true)}
         aria-label={`${robotName} の動作確認を開始`}
@@ -52,12 +52,14 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
         {checkRunning ? "► 確認実行中..." : "▮ 動作確認"}
       </Button>
       {/* Tooltip は使えないため無効化理由を等幅テキストで併記する。 */}
-      {disabled && reasonLabel ? <span style={{ opacity: 0.7 }}>[?] {reasonLabel}</span> : null}
+      {disabled && reasonLabel ? <span className="dim">[?] {reasonLabel}</span> : null}
 
       <Modal
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
-        windowClassName="red-168 left-align"
+        overlapBackground={false}
+        className="modal-danger"
+        windowClassName="left-align"
       >
         <ModalHeader>Operational Check</ModalHeader>
         <ModalBody>
@@ -67,17 +69,17 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
           <p className="danger-text" style={{ marginTop: "0.5rem" }}>
             ⚠ 周囲の安全を確認してから開始してください。
           </p>
-          <p style={{ marginTop: "0.25rem", opacity: 0.8 }}>
+          <p className="dim" style={{ marginTop: "0.25rem" }}>
             実行中も緊急停止 (EMG STOP) は即時優先で動作します。
           </p>
         </ModalBody>
         <ModalFooter>
           <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
-          <Button className="cyan-255" onClick={handleConfirmStart}>
+          <Button className="btn-info" onClick={handleConfirmStart}>
             Start
           </Button>
         </ModalFooter>
       </Modal>
-    </div>
+    </>
   );
 }
