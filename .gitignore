@@ -8,3 +8,5 @@ dist/
 build/
 web/node_modules/
 web/dist/
+web/.wrangler/
+.claude/worktrees/

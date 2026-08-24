@@ -537,6 +537,9 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 - 通常停止（STOP）は確認ダイアログを挟まない。安全側の動作であり、止めるまでの時間を延ばさない
 - WS 接続先はページ origin から導出する（`hooks/useRobotSocket.ts`）。別 PC・タブレットからの
   アクセスに対応するため。vite dev では `/ws` を 8080 へプロキシする（`vite.config.ts`）
+- `@cloudflare/vite-plugin` は build / preview のみで有効にする（`vite.config.ts`）。dev サーバーは
+  制御 PC 上のローカル UI 開発専用で Worker ランタイムを必要とせず、miniflare 起動に伴う
+  `Request.cf` 取得（外部通信）と起動遅延を避けるため
 
 ---
 
