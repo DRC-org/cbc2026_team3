@@ -175,7 +175,7 @@ CAN ID = `0x7FF`（コマンド種別=0b111, デバイスID=0xFF）、データ�
 | **CAN 実通信** | △ | vcan（仮想 CAN）を使った統合テスト。CI でも実行可能 |
 | **WebSocket プロトコル** | ○ | JSON パース/生成の単体テスト |
 | **aiohttp サーバー** | △ | aiohttp.test_utils で最低限の結合テスト |
-| **Web UI (React)** | - | 今回はスコープ外 |
+| **Web UI (React)** | ○ | vitest + jsdom + Testing Library。WS メッセージ処理・ホットキー抑止・状態→表示の分岐を単体テスト |
 
 ### vcan を使った統合テスト
 
@@ -202,6 +202,33 @@ tests/
 └── test_ws_protocol.py          # WebSocket JSON プロトコル
 ```
 
+### フロントエンドテスト（vitest）
+
+テストは対象ソースの隣に `*.test.ts(x)` として置き、共通ヘルパのみ `src/test/` に集約する。
+
+```
+web/
+├── vitest.config.ts             # vite.config.ts とは分離（cloudflare プラグインを読まない）
+└── src/
+    ├── test/
+    │   ├── setup.ts             # jest-dom マッチャ登録・各テスト後の cleanup
+    │   ├── mockWebSocket.ts     # サーバー側イベントを任意に発火できる WebSocket スタブ
+    │   └── robotContext.tsx     # RobotProvider ラッパと既定コンテキスト値
+    ├── lib/{cx,phase}.test.ts
+    ├── hooks/{useRobotSocket,useHotkeys,useMotorCheck}.test.ts(x)
+    └── components/{TriggerButton,Toaster,Checklist,HealthIndicator}.test.tsx
+```
+
+テスト対象の優先順位は「壊れたときに実機で困る度合い」で決めている。
+
+- `useRobotSocket` — WS メッセージ 8 種の分岐、ヘルスイベントのリングバッファ、
+  モータチェック record のマージ、切断時の再接続
+- `useHotkeys` — 修飾キー・入力欄・モーダル表示中の抑止。競技中の誤爆は機体破損に直結する
+- `Toaster` / `TriggerButton` / `Checklist` — 状態から表示・活性が一意に決まることの確認
+
+`vitest.config.ts` を `vite.config.ts` と分けているのは、後者が build/preview で
+cloudflare プラグイン（workerd）を有効化するため。テストに Worker ランタイムは不要。
+
 ### TDD の流れ（各ドライバ実装時）
 
 1. プロトコル仕様からテストケースを先に書く（期待するバイト列、変換値）
@@ -216,6 +243,10 @@ uv run pytest                    # 全テスト実行
 uv run pytest tests/drivers/     # ドライバテストのみ
 uv run pytest -x                 # 最初の失敗で停止
 uv run pytest -k "m3508"         # M3508 関連のみ
+
+cd web && pnpm test              # フロントエンド（watch）
+cd web && pnpm test:run          # フロントエンド（1 回だけ実行）
+cd web && pnpm check             # lint + format + 型検査 + テスト
 ```
 
 ---

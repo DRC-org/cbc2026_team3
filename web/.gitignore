@@ -10,6 +10,9 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+
+# wrangler/vite が build 時に生成する作業ディレクトリ
+.wrangler
 *.local
 
 # Editor directories and files
