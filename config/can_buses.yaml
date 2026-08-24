@@ -1,0 +1,31 @@
+# CAN バス定義の単一情報源。
+#
+# CANable の USB 列挙順は挿す順・ハブのポート・起動タイミングで変わるため、
+# can0/can1/can2 という番号は個体との対応を保証しない。番号が入れ替わると
+# C620 に EDULITE 用コマンドが飛ぶ事故になるため、STM32 UID 由来の serial で
+# 固定名を割り当てる。
+#
+# udev ルール (99-canable.rules) も setup_can.sh もこのファイルから生成/参照する。
+# serial の採取手順は impl_plan.md「CAN バス命名規約」を参照。
+
+# CANable2 (candleLight FW) の USB ID。全個体共通。
+usb:
+  vendor_id: "1d50"
+  product_id: "606f"
+
+buses:
+  can_m3508:
+    serial: "004600224E4D501520343332"
+    bitrate: 1000000
+    # 既定の 10 では制御周期での連続送信時に溢れる
+    txqueuelen: 1000
+
+  can_edulite:
+    serial: "006F004A4E4D501820343332"
+    bitrate: 1000000
+    txqueuelen: 1000
+
+  can_generic:
+    serial: "0068005C4E4D501520343332"
+    bitrate: 1000000
+    txqueuelen: 1000

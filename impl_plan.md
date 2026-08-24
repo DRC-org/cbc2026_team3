@@ -62,11 +62,72 @@ uv run ruff format .      # フォーマット
 
 ### CAN バス構成（3 系統）
 
-| バス | USB-CAN アダプタ | 接続デバイス |
+| バス（固定名） | CANable | USB serial | 接続デバイス | ビットレート |
+|---|---|---|---|---|
+| `can_m3508` | #1 | `004600224E4D501520343332` | M3508 × 2 | 1 Mbps |
+| `can_edulite` | #2 | 未採取 | EDULITE 05 × 2 | 1 Mbps |
+| `can_generic` | #3 | 未採取 | DC モータ / サーボ（自作モタドラ） | 1 Mbps |
+
+#### インターフェース名を固定する理由
+
+`can0` / `can1` / `can2` の番号は USB の列挙順（挿す順・ハブのポート・起動タイミング）で
+決まり、個体との対応を保証しない。番号が入れ替わると C620 に EDULITE 用のコマンドが飛び、
+モータを破損しうる。
+
+CANable2（candleLight FW）は STM32 UID 由来の USB serial を持つため、udev でシリアル一致の
+固定名を割り当ててこれを回避する。定義は `config/can_buses.yaml` に集約し、udev ルールと
+セットアップスクリプトの双方をそこから生成・参照する（二重管理の防止）。
+
+#### セットアップ
+
+```bash
+sudo scripts/install.sh            # udev ルール配置 + systemd 有効化（初回のみ）
+scripts/setup_can.sh               # 手動 up。見つかったバスだけ立ち上げる（開発用）
+scripts/setup_can.sh --strict      # 試合前点検。3 本揃わなければ異常終了
+sudo scripts/install.sh --uninstall
+```
+
+PC 起動時は `cbc-can.service`（`Type=oneshot` + `RemainAfterExit=yes`）が
+`setup_can.sh --wait 15` を実行する。`--wait` は USB 列挙が起動直後に間に合わない場合の
+待ち時間。USB 抜き差し時も udev の `RUN+=` により service が再実行される。
+
+`setup_can.sh` は冪等で、up 済みのバスも一度 down してから再設定する
+（`ip link set type can` は down 中しか受け付けないため）。up 後は `ERROR-ACTIVE` を
+確認してから成功を返す（`ip link set up` の成功は通信可能を意味しないため）。
+
+#### 新しい CANable の serial 採取手順
+
+USB ハブ入手後、残り 2 個について以下を実行する。
+
+```bash
+# 対象の 1 個だけを挿した状態で（他が挿さっていると can0 がどれか判別できない）
+udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
+```
+
+得られた値を `config/can_buses.yaml` の該当バスの `serial`（現在 `TBD`）に記入し、
+`sudo scripts/install.sh` を再実行する。`TBD` のままのバスは udev ルールに出力されず、
+`setup_can.sh` の対象からも外れる。
+
+#### 既知の制約: バス down 時の失敗が分かりにくい
+
+実測した挙動は以下のとおり。
+
+| インターフェースの状態 | `_create_bus()` | 受信ループ |
 |---|---|---|
-| can0 | CANable #1 | M3508 × 2 |
-| can1 | CANable #2 | EDULITE 05 × 2 |
-| can2 | CANable #3 | DC モータ / サーボ（自作モタドラ） |
+| 存在しない | `OSError: [Errno 19] No such device` で起動失敗 | — |
+| 存在するが down | **オープン成功。例外は出ない** | `bus.recv` が `CanOperationError` を投げて即死 |
+| up | 正常 | 正常 |
+
+問題は 2 行目。`CANManager.run()` は `_receive_loop` を `asyncio.create_task` で起こす
+だけで例外を回収しないため、受信タスクの死亡が握りつぶされる。結果としてモータ状態が
+一切更新されず、ヘルスチェックが全モータを STALE と報告する。原因が「バスが down」だと
+特定するのは難しい。
+
+`cbc-can.service` により通常は起動時に up されるため実害は出にくいが、service が失敗した
+場合などに起きうる。対策候補は次の 2 つで、いずれも今後の課題とする。
+
+1. `_create_bus()` にインターフェースの `operstate` 検証を追加し、down なら起動を止める
+2. `_receive_loop` に例外ハンドラを入れ、バス異常をヘルススナップショットへ反映する
 
 ---
 
@@ -259,7 +320,13 @@ cbc2026_team3_central/
 ├── config/
 │   ├── main_hand.yaml
 │   ├── sub_hand.yaml
+│   ├── can_buses.yaml      # CAN バス定義の単一情報源（serial ↔ 固定名）
 │   └── checklist.yaml      # 指差喚呼チェックリスト定義
+├── scripts/
+│   ├── can_config.py       # can_buses.yaml → TSV / udev ルール変換
+│   ├── setup_can.sh        # CAN バス up（冪等・--strict / --wait 対応）
+│   ├── cbc-can.service     # systemd unit テンプレート
+│   └── install.sh          # udev / systemd への配置と有効化
 ├── lib/
 │   ├── __init__.py
 │   ├── can_manager.py

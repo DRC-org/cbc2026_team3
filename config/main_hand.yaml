@@ -1,9 +1,11 @@
 robot_name: main_hand
 
+# インターフェース名は udev で個体ごとに固定する (config/can_buses.yaml 参照)。
+# can0/can1/can2 は USB 列挙順で入れ替わるため使わない。
 can_buses:
-  m3508_bus: can0
-  edulite_bus: can1
-  generic_bus: can2
+  m3508_bus: can_m3508
+  edulite_bus: can_edulite
+  generic_bus: can_generic
 
 health:
   feedback_timeout_ms: 500   # この時間フィードバックなければ STALE

@@ -1,0 +1,19 @@
+# テンプレート。@PROJECT_DIR@ は install.sh が実パスに置換して
+# /etc/systemd/system/ へ配置する。
+
+[Unit]
+Description=CBC2026 Team3 CAN バス初期化
+Documentation=file://@PROJECT_DIR@/impl_plan.md
+After=network-pre.target
+
+[Service]
+Type=oneshot
+# CAN の up は一度きりの処理で常駐しない。RemainAfterExit により
+# 後続の service が After= で依存できる状態を保つ。
+RemainAfterExit=yes
+# USB の列挙が起動直後だと間に合わないため、スクリプト側でデバイス出現を待つ。
+ExecStart=@PROJECT_DIR@/scripts/setup_can.sh --wait 15
+ExecStop=/bin/true
+
+[Install]
+WantedBy=multi-user.target
