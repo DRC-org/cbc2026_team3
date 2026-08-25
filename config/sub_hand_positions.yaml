@@ -1,0 +1,33 @@
+# サブハンドの機構位置定数。書き方は config/main_hand_positions.yaml と同じ。
+#
+# !!! 機構が未完成のため、ここに書かれた値はすべて仮値 (安全側の小さい可動量) !!!
+# robots/sub_hand.py には数値を書かないこと。
+
+axes:
+  # RobStride EDULITE 05 の補助アーム関節。指令・フィードバックともに rad。
+  sub_arm_joint:
+    unit: deg
+    command_unit: rad
+    scale: 0.017453292519943295   # deg -> rad (pi/180)
+    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
+    timeout_s: 3.0       # この時間で到達しなければシーケンスを停止する
+
+  # 自作モータドライバの補助グリッパ。指令・フィードバックともに deg。
+  sub_gripper:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+
+positions:
+  # TODO: 機構完成後に実測値へ。現状は微小可動量のみ。
+  sub_arm_joint:
+    home: 0.0            # 収納姿勢 [deg]
+    extended: 8.0        # 展開姿勢 [deg]
+    handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
+    place: 10.0          # 配置姿勢 [deg]
+
+  sub_gripper:
+    open: 5.0            # 開 [deg]
+    closed: 0.0          # 閉 (把持) [deg]

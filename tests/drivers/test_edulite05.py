@@ -292,3 +292,54 @@ def test_evaluate_check_result_and_reset() -> None:
     reset = driver.reset_after_check()
     assert reset.data == bytes(8)
     assert driver.parse_can_id(reset.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
+
+
+def test_activation_writes_current_position_before_enable() -> None:
+    """enable 直前に現在角を目標へ書かないと、有効化した瞬間に原点へ飛ぶ。"""
+    driver = Edulite05Driver("m1", can_id=5)
+    driver.update_state(feedback_message(driver, position=0.8))
+    current = driver.state.position
+
+    steps = driver.activation_steps()
+    comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg, _delay in steps]
+
+    assert comm_types == [driver.COMM_TYPE_WRITE_PARAM, driver.COMM_TYPE_ENABLE]
+    assert steps[0][0].data == struct.pack("<Hxxf", driver.PARAM_LOC_REF, current)
+    assert steps[1][0].data == bytes(8)
+
+
+def test_activation_requires_fresh_feedback_only_in_position_mode() -> None:
+    position = Edulite05Driver("m1", can_id=5, mode="position")
+    velocity = Edulite05Driver("m2", can_id=6, mode="velocity")
+
+    assert position.requires_fresh_feedback_for_activation() is True
+    assert velocity.requires_fresh_feedback_for_activation() is False
+
+
+def test_activation_in_velocity_mode_holds_zero_speed() -> None:
+    driver = Edulite05Driver("m1", can_id=5, mode="velocity")
+    driver.update_state(feedback_message(driver, velocity=3.0))
+
+    steps = driver.activation_steps()
+
+    assert steps[0][0].data == struct.pack("<Hxxf", driver.PARAM_SPD_REF, 0.0)
+    assert driver.parse_can_id(steps[1][0].arbitration_id)[0] == driver.COMM_TYPE_ENABLE
+
+
+def test_initialization_steps_never_contain_enable() -> None:
+    """起動フレームだけで enable すると現在角を書く前に励磁されてしまう。"""
+    driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+    comm_types = [
+        driver.parse_can_id(msg.arbitration_id)[0] for msg in driver.initialization_messages()
+    ]
+    assert driver.COMM_TYPE_ENABLE not in comm_types
+
+
+def test_feedback_probe_is_disable_without_fault_clear() -> None:
+    """フィードバックを引き出す問い合わせは、無励磁を保つフレームでなければならない。"""
+    driver = Edulite05Driver("m1", can_id=5)
+    probe = driver.feedback_probe_message()
+
+    assert probe is not None
+    assert driver.parse_can_id(probe.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
+    assert probe.data == bytes(8)

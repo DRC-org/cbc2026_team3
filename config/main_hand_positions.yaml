@@ -1,0 +1,59 @@
+# メインハンドの機構位置定数。
+#
+# !!! 機構が未完成のため、ここに書かれた値はすべて仮値 (安全側の小さい可動量) !!!
+# 機構が完成したら、このファイルの数値だけを実測値に差し替えれば済むようにしてある。
+# robots/main_hand.py には数値を書かないこと。
+#
+# axes: 人間が扱いやすい単位からモータ指令値への換算。command = value * scale + offset
+#   モータごとに指令の単位が違う (M3508=モータ軸 deg / EDULITE 05=rad / 自作=deg) ため、
+#   換算をここに閉じ込めてシーケンス本体から単位を消している。
+# positions: 各軸の目標位置。値は axes.<軸>.unit の単位で書く。
+#   コートで値が変わる位置だけ `{ red: <値>, blue: <値> }` と書く (両方必須)。
+
+axes:
+  # DJI M3508 + 減速機 + ボールねじ想定の昇降/送り軸。
+  # 指令は「モータ軸の累積角 [deg]」。出力軸 1 回転 = 360 * 3591/187 ≒ 6913.2 deg。
+  lift_motor:
+    unit: mm
+    command_unit: deg
+    # TODO: 機構確定後に実測値へ。scale = 360 * (3591/187) / リード[mm/rev]
+    #       下はリード 8mm/rev と仮定した値 (6913.2 / 8 = 864.15 deg/mm)
+    scale: 864.15
+    offset: 0.0          # 原点は電源投入位置。機械原点がずれるならここで吸収 [deg]
+    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
+    # tolerance: 0.5     # TODO: 到達許容差 [mm]。未指定ならドライバ既定 (出力軸 1deg 相当)
+
+  # RobStride EDULITE 05 のアーム関節。指令・フィードバックともに rad。
+  arm_joint:
+    unit: deg
+    command_unit: rad
+    scale: 0.017453292519943295   # deg -> rad (pi/180)。機構側の減速がないので固定値
+    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
+    timeout_s: 3.0
+
+  # 自作モータドライバのグリッパ。指令・フィードバックともに deg。
+  gripper:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+
+positions:
+  # TODO: 機構完成後に実測値へ。現状は「機構が付いていない状態で誰かが起動しても
+  #       壊れない」ことだけを狙った微小ストローク。
+  lift_motor:
+    home: 0.0            # 電源投入位置 = 原点 [mm]
+    work_3: 10.0         # 自陣ワーク 3 列目 [mm]
+    approach: 15.0       # ワーク直前 [mm]
+    place: 5.0           # 配置位置 [mm]
+
+  arm_joint:
+    home: 0.0            # 収納姿勢 [deg]
+    extended: 8.0        # 展開姿勢 [deg]
+    retracted: 0.0       # 把持後の引き戻し姿勢 [deg]。home と分けてあるのは
+                         # ワークを持った状態の退避角を別に詰められるようにするため
+
+  gripper:
+    open: 5.0            # 開 [deg]
+    closed: 0.0          # 閉 (把持) [deg]

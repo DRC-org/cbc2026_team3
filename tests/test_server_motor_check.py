@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,9 +10,12 @@ import can
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorDriver, MotorState
+from lib.control.position_loop import M3508PositionLoop, make_position_pid
+from lib.drivers.base import ControlMode, MotorDriver, MotorState
 from lib.drivers.edulite05 import Edulite05Driver
+from lib.drivers.m3508 import M3508Driver
 from lib.health import MotorCheckResult
+from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
 
@@ -107,6 +111,7 @@ def _build_server_with_motors(
     motor_check_per_motor_timeout_ms: float = 200.0,
     motor_check_default_magnitude: dict[str, float] | None = None,
     motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
+    position_loops: list[M3508PositionLoop] | None = None,
 ) -> tuple[RobotServer, CANManager, dict[str, _MockMotor], can.Bus]:
     """RobotServer + 実 CANManager + virtual バス + MockMotor の構成を組む。
 
@@ -143,8 +148,71 @@ def _build_server_with_motors(
         mgr.send = _patched_send  # type: ignore[method-assign]
 
     seq = sequence if sequence is not None else _DummySequence()
-    server.add_robot("main_hand", seq, mgr)
+    server.add_robot("main_hand", seq, mgr, position_loops=position_loops)
     return server, mgr, motors, bus
+
+
+class _AutoClock:
+    """呼ばれるたびに一定量進む単調クロック。実時間 sleep なしで dt を固定する。"""
+
+    def __init__(self, step_s: float = 0.005) -> None:
+        self.now = 1000.0
+        self._step = step_s
+
+    def __call__(self) -> float:
+        self.now += self._step
+        return self.now
+
+
+class _LoopProbe:
+    """位置制御ループ + そのバスへの送信フレーム記録。"""
+
+    def __init__(
+        self,
+        mgr: CANManager,
+        *,
+        bus: str = "bus0",
+        motor_name: str = "lift_m3508",
+        can_id: int = 4,
+        ki: float = 0.0,
+    ) -> None:
+        self.frames: list[can.Message] = []
+        original_send_to_bus = mgr.send_to_bus
+
+        async def _counting(bus_name: str, msg: can.Message) -> None:
+            self.frames.append(msg)
+            await original_send_to_bus(bus_name, msg)
+
+        mgr.send_to_bus = _counting  # type: ignore[method-assign]
+
+        self.mgr = mgr
+        self.motor_name = motor_name
+        self.driver = M3508Driver(motor_name, can_id=can_id)
+        self.loop = M3508PositionLoop(
+            mgr,
+            bus,
+            is_estop_active=lambda: False,
+            time_source=_AutoClock(),
+        )
+        self.loop.add_motor(motor_name, self.driver, make_position_pid(kp=1.0, ki=ki))
+
+    def feed(self, deg: float = 0.0) -> None:
+        angle_raw = round(deg / 360.0 * 8192) % 8192
+        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
+        self.driver.update_state(can.Message(arbitration_id=0x200 + self.driver.can_id, data=data))
+        self.mgr._last_rx_at[self.motor_name] = time.time()
+
+
+async def _wait_for_running_runner(
+    server: RobotServer, robot: str, *, timeout: float = 2.0
+) -> MotorCheckRunner:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        runner = server._motor_check_runners.get(robot)
+        if runner is not None and runner.is_running:
+            return runner
+        await asyncio.sleep(0.01)
+    raise AssertionError("動作確認 runner が起動しなかった")
 
 
 async def _drain(ws, *, timeout: float = 0.05, limit: int = 50) -> list[dict]:
@@ -647,3 +715,124 @@ class TestMotorCheckUnknownRobotSilentIgnoreOnWs:
                 await ws.close()
         finally:
             bus.shutdown()
+
+
+class TestPositionLoopExclusion:
+    """動作確認と M3508 位置制御ループ (0x200) の排他。"""
+
+    async def test_position_loop_sends_no_frame_during_motor_check(self) -> None:
+        server, mgr, _, bus = _build_server_with_motors(
+            bus_channel="vsrvchk_loop_busy",
+            feed_immediately=False,
+            motor_check_per_motor_timeout_ms=2000.0,
+        )
+        probe = _LoopProbe(mgr)
+        server._robots["main_hand"].position_loops = [probe.loop]
+        try:
+            assert await server._start_motor_check("main_hand") is True
+            runner = await _wait_for_running_runner(server, "main_hand")
+
+            assert probe.loop.is_paused is True
+            before = len(probe.frames)
+            await probe.loop.step()
+            # 動作確認中にループが 0x200 を送ると、指令が 0 電流で上書きされる
+            assert len(probe.frames) == before
+
+            runner.abort()
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+        finally:
+            bus.shutdown()
+
+    async def test_position_loop_resumed_after_motor_check(self) -> None:
+        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_resume")
+        probe = _LoopProbe(mgr)
+        server._robots["main_hand"].position_loops = [probe.loop]
+        try:
+            assert await server._start_motor_check("main_hand") is True
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+
+            assert probe.loop.is_paused is False
+            before = len(probe.frames)
+            await probe.loop.step()
+            assert len(probe.frames) == before + 1
+        finally:
+            bus.shutdown()
+
+    async def test_position_loop_resumed_after_abort(self) -> None:
+        server, mgr, _, bus = _build_server_with_motors(
+            bus_channel="vsrvchk_loop_abort",
+            feed_immediately=False,
+            motor_check_per_motor_timeout_ms=2000.0,
+        )
+        probe = _LoopProbe(mgr)
+        server._robots["main_hand"].position_loops = [probe.loop]
+        try:
+            assert await server._start_motor_check("main_hand") is True
+            runner = await _wait_for_running_runner(server, "main_hand")
+            runner.abort()
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+
+            assert probe.loop.is_paused is False
+        finally:
+            bus.shutdown()
+
+    async def test_position_loop_resumed_when_runner_raises(self) -> None:
+        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_raise")
+        probe = _LoopProbe(mgr)
+        server._robots["main_hand"].position_loops = [probe.loop]
+        try:
+            with patch.object(
+                MotorCheckRunner,
+                "run",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("テスト用例外"),
+            ):
+                assert await server._start_motor_check("main_hand") is True
+                await _wait_until_idle(server, "main_hand", timeout=4.0)
+
+            # 復帰しないとリフトが保持電流を失ったままになる
+            assert probe.loop.is_paused is False
+        finally:
+            bus.shutdown()
+
+    async def test_pid_integral_not_carried_over_after_motor_check(self) -> None:
+        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_integral")
+        probe = _LoopProbe(mgr, ki=10.0)
+        server._robots["main_hand"].position_loops = [probe.loop]
+        try:
+            probe.feed(0.0)
+            await probe.loop.set_target(probe.motor_name, ControlMode.POSITION, 10.0)
+            await probe.loop.step()
+            await probe.loop.step()
+            assert probe.loop.pid(probe.motor_name).integral != 0.0
+
+            assert await server._start_motor_check("main_hand") is True
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+
+            # 動作確認でモータが動かされた後に古い積分が残ると復帰時に暴れる
+            assert probe.loop.pid(probe.motor_name).integral == 0.0
+            assert probe.loop.target(probe.motor_name) == 10.0
+        finally:
+            bus.shutdown()
+
+    async def test_motor_check_works_without_position_loops(self) -> None:
+        # sub_hand 等 M3508 が居ない構成でも従来どおり動く
+        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_absent")
+        try:
+            assert server._robots["main_hand"].position_loops == []
+
+            assert await server._start_motor_check("main_hand") is True
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+
+            snapshot = server._motor_check_last.get("main_hand")
+            assert snapshot is not None
+            assert snapshot.overall == "ok"
+        finally:
+            bus.shutdown()
+
+    async def test_add_robot_defaults_to_no_position_loops(self) -> None:
+        server = RobotServer()
+        mgr = CANManager()
+        server.add_robot("sub_hand", _DummySequence(), mgr)
+
+        assert server._robots["sub_hand"].position_loops == []

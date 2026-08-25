@@ -6,7 +6,7 @@ import can
 import pytest
 
 from lib.drivers.base import ControlMode, MotorState
-from lib.drivers.m3508 import M3508Driver
+from lib.drivers.m3508 import GEAR_RATIO, M3508Driver
 
 
 class TestEncodeCurrentCommand:
@@ -224,3 +224,153 @@ class TestMotorCheck:
         assert values[1] == 0
         assert values[2] == 0
         assert values[3] == 0
+
+
+class TestMultiTurn:
+    """多回転累積角 (リフト軸の位置制御用)。"""
+
+    def setup_method(self) -> None:
+        self.driver = M3508Driver("lift", can_id=1)
+
+    def _feed_angle(self, angle_raw: int) -> None:
+        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
+        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
+        self.driver.update_state(msg)
+
+    @staticmethod
+    def _deg(counts: float) -> float:
+        return counts / 8192 * 360.0
+
+    def test_initial_position_is_zero_before_any_feedback(self) -> None:
+        assert self.driver.multi_turn_position == pytest.approx(0.0)
+
+    def test_first_feedback_becomes_origin(self) -> None:
+        # 起動位置を原点にすることで、目標 0 が「電源投入時の姿勢維持」を意味する
+        self._feed_angle(3000)
+        assert self.driver.multi_turn_position == pytest.approx(0.0)
+
+    def test_accumulates_forward_within_one_turn(self) -> None:
+        self._feed_angle(1000)
+        self._feed_angle(3048)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(2048), abs=1e-6)
+
+    def test_accumulates_backward_within_one_turn(self) -> None:
+        self._feed_angle(3048)
+        self._feed_angle(1000)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(-2048), abs=1e-6)
+
+    def test_wraparound_forward(self) -> None:
+        # 8000 → 200 は 0 を跨いだ正転 (+392 counts)
+        self._feed_angle(8000)
+        self._feed_angle(200)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(392), abs=1e-6)
+
+    def test_wraparound_backward(self) -> None:
+        # 200 → 8000 は 0 を跨いだ逆転 (-392 counts)
+        self._feed_angle(200)
+        self._feed_angle(8000)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(-392), abs=1e-6)
+
+    def test_multiple_revolutions_forward(self) -> None:
+        self._feed_angle(0)
+        for raw in (2000, 4000, 6000, 8000, 1808, 3808):
+            self._feed_angle(raw)
+        # 2000 counts x 6 = 12000 counts (1 回転と少し)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(12000), abs=1e-6)
+
+    def test_multiple_revolutions_backward(self) -> None:
+        self._feed_angle(0)
+        for raw in (6192, 4192, 2192, 192, 6384):
+            self._feed_angle(raw)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(-10000), abs=1e-6)
+
+    def test_reset_origin_makes_current_position_zero(self) -> None:
+        self._feed_angle(1000)
+        self._feed_angle(5096)
+        assert self.driver.multi_turn_position != pytest.approx(0.0)
+
+        self.driver.reset_multi_turn_origin()
+        assert self.driver.multi_turn_position == pytest.approx(0.0)
+
+        # 原点リセット後も累積は継続する
+        self._feed_angle(6096)
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(1000), abs=1e-6)
+
+    def test_single_turn_position_still_reported_in_degrees(self) -> None:
+        # decode_feedback の position は 0〜360 のまま (既存 API の互換性)
+        self._feed_angle(4096)
+        assert self.driver.state.position == pytest.approx(4096 / 8191 * 360, abs=0.1)
+
+
+class TestMultiTurnTargetReached:
+    """到達判定が多回転累積角基準で行われること (位置制御ループと同じ次元)。"""
+
+    def setup_method(self) -> None:
+        self.driver = M3508Driver("lift", can_id=1)
+
+    def _feed(self, angle_raw: int, *, velocity: int = 0, current: int = 0) -> None:
+        data = struct.pack(">HhhBB", angle_raw, velocity, current, 25, 0)
+        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
+        self.driver.update_state(msg)
+
+    def _spin_two_turns(self) -> None:
+        """累積角をちょうど +720deg (16384 counts) にし、単回転角は 0 に戻す。"""
+        for raw in (0, 2048, 4096, 6144, 0, 2048, 4096, 6144, 0):
+            self._feed(raw)
+        assert self.driver.multi_turn_position == pytest.approx(720.0)
+        assert self.driver.state.position == pytest.approx(0.0)
+
+    def test_reached_at_multi_turn_target(self) -> None:
+        self._spin_two_turns()
+        assert self.driver.is_target_reached(720.0, ControlMode.POSITION) is True
+
+    def test_wrapped_angle_matching_target_is_not_reached(self) -> None:
+        # 累積 720deg の時点で単回転角は 0deg。ラップ角で判定すると誤って到達扱いになる
+        self._spin_two_turns()
+        assert self.driver.is_target_reached(0.0, ControlMode.POSITION) is False
+
+    def test_not_reached_before_finishing_the_turns(self) -> None:
+        for raw in (0, 2048, 4096, 6144, 0):
+            self._feed(raw)
+        assert self.driver.multi_turn_position == pytest.approx(360.0)
+        assert self.driver.is_target_reached(720.0, ControlMode.POSITION) is False
+
+    def test_negative_multi_turn_target(self) -> None:
+        for raw in (0, 6144, 4096, 2048, 0, 6144, 4096, 2048, 0):
+            self._feed(raw)
+        assert self.driver.multi_turn_position == pytest.approx(-720.0)
+        assert self.driver.is_target_reached(-720.0, ControlMode.POSITION) is True
+        assert self.driver.is_target_reached(720.0, ControlMode.POSITION) is False
+
+    def test_explicit_tolerance_boundary(self) -> None:
+        self._spin_two_turns()
+        assert self.driver.is_target_reached(730.0, ControlMode.POSITION, tolerance=10.0) is True
+        assert self.driver.is_target_reached(730.1, ControlMode.POSITION, tolerance=10.0) is False
+
+    def test_default_tolerance_is_one_degree_at_output_shaft(self) -> None:
+        # フィードバックはモータ軸基準なので、既定許容差も減速比分だけ広げる
+        assert self.driver.default_tolerance(ControlMode.POSITION) == pytest.approx(GEAR_RATIO)
+
+    def test_default_tolerance_applies_to_multi_turn_error(self) -> None:
+        self._spin_two_turns()
+        inside = 720.0 + GEAR_RATIO * 0.9
+        outside = 720.0 + GEAR_RATIO * 1.1
+        assert self.driver.is_target_reached(inside, ControlMode.POSITION) is True
+        assert self.driver.is_target_reached(outside, ControlMode.POSITION) is False
+
+    def test_reached_after_origin_reset(self) -> None:
+        self._spin_two_turns()
+        self.driver.reset_multi_turn_origin()
+        assert self.driver.is_target_reached(0.0, ControlMode.POSITION) is True
+        assert self.driver.is_target_reached(720.0, ControlMode.POSITION) is False
+
+    def test_current_mode_is_always_reached(self) -> None:
+        # 開ループ指令なので目標電流とフィードバックの一致は問わない
+        self._spin_two_turns()
+        self._feed(0, current=0)
+        assert self.driver.is_target_reached(5000.0, ControlMode.CURRENT) is True
+
+    def test_velocity_mode_still_uses_feedback_rpm(self) -> None:
+        self._feed(0, velocity=1000)
+        assert self.driver.is_target_reached(1002.0, ControlMode.VELOCITY) is True
+        assert self.driver.is_target_reached(1020.0, ControlMode.VELOCITY) is False

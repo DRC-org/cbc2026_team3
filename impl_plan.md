@@ -9,7 +9,7 @@
 
 - **バックエンド**: Python 3.12+ / asyncio（単一プロセス）
 - **CAN 通信**: python-can + SocketCAN
-- **Web UI**: Vite + React + React Router + TypeScript
+- **Web UI**: Vite + React + TypeScript（画面切替はタブ + URL ハッシュ。ルーターは使わない）
 - **通信**: WebSocket（JSON）
 - **サーバー**: aiohttp（HTTP 静的配信 + WebSocket を統合）
 
@@ -45,8 +45,55 @@ uv run ruff format .      # フォーマット
 ### 設計判断
 
 - **ROS 2 不採用**: 固定型 + 一本道シーケンスでは DDS のメリットが薄く、WebSocket 通信との統合で不要な複雑性が生じるため
-- **Python メイン**: シーケンス制御の記述性を優先。モータドライバ側で PID が閉じており、中央 PC からは目標値送信のみなので asyncio で十分なリアルタイム性を確保できる
+- **Python メイン**: シーケンス制御の記述性を優先。制御ループの大半はモータ側で閉じており、中央 PC からは目標値送信のみで済む。**ただし M3508 だけは例外で、位置ループを PC 側で持つ**（下表）
 - **aiohttp 採用**: 静的ファイル配信と WebSocket を 1 プロセスで統合でき、localhost:8080 で全機能を提供可能
+
+#### PID がどこで閉じているか
+
+| モータ | 位置ループの所在 | PC が送るもの |
+|---|---|---|
+| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時に `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、`config` の `position_kp`）を書き込み、実測角を保持目標に書いてから励磁する（「Phase 9: 励磁の有効化」参照） | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
+| 自作モタドラ（DC / サーボ） | **モタドラのマイコン**。制御タイプは `SET_MODE` / `SET_PARAM` で設定 | 目標値のみ（`SET_TARGET` フレーム） |
+| DJI M3508 (C620) | **電流ループのみ ESC 内。位置ループは PC 側**（`lib/control/position_loop.py`、既定 200Hz） | 電流指令（0x200 フレーム、4 モータ分を 1 通に束ねる） |
+
+C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は CURRENT 以外を `ValueError`）ため、
+リフト軸の位置決めには PC 側で `累積角 [deg] → 電流 [counts]` の外側ループを回すしかない。
+内側の電流ループは ESC 内で高速に閉じているので、カスケード構成の外側だけを 200Hz で回す形になる。
+
+#### asyncio で 200Hz の位置ループを回す判断
+
+**成立する理由**:
+
+- 1 周期の仕事は「フィードバック鮮度の確認 → PID 演算 → 0x200 フレーム 1 通の送信」だけで、演算量は無視できる
+- 制御対象は外側の位置ループのみ。内側の電流ループは C620 側で閉じているので、
+  数 ms のジッタが即座にトルクリップルになる性質のループではない
+- `dt` は固定値を仮定せず毎周期 `time.monotonic()` の実測差分を使う。
+  周期が揺れても PID の積分・微分は時間的に正しく計算される
+
+**限界（隠さずに書く）**:
+
+- **周期は保証されない。** ループは `await asyncio.sleep(0.005)` を処理の後に置く実装なので、
+  実効周期は「処理時間 + 5ms + イベントループの遅延」であり厳密な 200Hz ではない。
+  GC の停止、WebSocket ブロードキャスト、ヘルスチェック、シーケンスの同期処理など
+  同一イベントループ上の別タスクが長く CPU を握れば、その分だけ制御周期がまるごと飛ぶ
+- **CAN 送受信は `run_in_executor`（既定スレッドプール）越し**（`lib/can_manager.py`）。
+  送信 200Hz/バス と受信ポーリング 100Hz/バス（`_RECV_TIMEOUT = 0.01`）が同じプールを共有するため、
+  バスを増やすとスレッドプールの待ちが周期に乗る
+- Python / SCHED_OTHER / GIL の上で動く以上、**ハードリアルタイム性は無い**。
+  実機で周期の乱れが問題になる場合は、位置ループをマイコン側（自作モタドラ相当）へ移す設計変更が必要
+
+**乱れたときに壊さないための備え**（詳細は「M3508 の位置制御（PC 側 PID）」の安全側の挙動表）:
+
+| 事象 | 備え |
+|---|---|
+| 周期が飛んだ | PID に渡す `dt` を `DEFAULT_MAX_DT_S`（50ms = 制御周期の 10 倍）で頭打ち。実測 dt をそのまま渡して積分・微分が跳ねるのを防ぐ |
+| フィードバック途絶 | `health.feedback_timeout_ms`（既定 500ms）超過で電流 0 + PID リセット。古い実測値で PID を回して暴走させない |
+| 周期処理で例外 | 0 電流を送ってループは継続（ループを抜けて指令が途切れると C620 が惰走する） |
+| 緊急停止 | 電流 0 + PID リセット + 目標解除 |
+| 一時停止からの復帰 | `resume()` で全軸 PID リセット + `_last_tick` 取り直し（停止時間が丸ごと `dt` に化けない） |
+
+**未検証**: 上記はいずれも単体テスト（`tests/test_position_loop.py`）でのみ確認しており、
+実機で 200Hz が維持できるかは測定していない（「未解決の課題」参照）。
 
 ---
 
@@ -236,6 +283,109 @@ CAN ID = `0x7FF`（コマンド種別=0b111, デバイスID=0xFF）、データ�
 [M3508×2] [EDULITE05×2] [DC/Servo...]
 ```
 
+### M3508 の位置制御（PC 側 PID）
+
+M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_target` は CURRENT 以外を
+`ValueError`）。リフト軸には位置決めが必要なため、PC 側で `位置 [deg] → 電流 [mA]` の PID を回す。
+
+- `lib/control/pid.py` — モータ非依存の PID（測定値微分 / conditional integration / デッドバンド）
+- `lib/control/position_loop.py` — `M3508PositionLoop`：**CAN バス単位**の非同期制御ループ
+
+**バス単位でまとめる理由**: C620 の電流指令フレーム（0x200）は 1 通に 4 モータ分のスロットを持つ。
+モータごとに個別送信すると自分以外のスロットを 0 で上書きしてしまい、同一バス上の他モータが
+カクつく。そのため全モータ分の電流を `M3508Driver.encode_current_frame()` で 1 フレームに束ね、
+`CANManager.send_to_bus()` で 1 周期 1 通だけ送る。
+
+**多回転**: `decode_feedback()` の `position` は既存 API 互換のため 0〜360 のまま。累積角は
+`M3508Driver.update_state()` でラップアラウンドをアンラップして保持し、`multi_turn_position`
+（deg）で公開する。ホーミング後は `reset_multi_turn_origin()` で原点を張り直す。
+
+**到達判定**: 目標値が累積角なので、`M3508Driver` は `_observed_for(POSITION)` を
+`multi_turn_position` にオーバーライドする（基底のままだとラップ角と比較してしまい、
+何回転もする軸では目標 720deg に対しラップ角 0deg を比べる／たまたま一致して誤到達する）。
+フィードバックはモータ軸基準のため、`default_tolerance(POSITION)` は共通既定の 1deg を
+減速比 `GEAR_RATIO`（3591/187 ≒ 19.2）倍し、他ドライバと同じ「出力軸 1deg」に揃える。
+
+**目標値の流れ**: `MotorHandle.target_sink`（`lib/sequence/motors.py`）に
+`M3508PositionLoop.target_sink(name)` を差し込む。シーケンスが `set_position()` を呼ぶと目標
+累積角が更新され、実際の CAN 送信は制御ループが代行する。`ControlMode.CURRENT` はホーミングで
+機構端に押し当てる用途として PID を通さず素通しし、VELOCITY / DUTY は `ValueError`。
+
+**安全側の挙動**:
+
+| 条件 | 挙動 |
+|------|------|
+| 緊急停止中（`is_estop_active`） | 電流 0 + PID リセット + 目標解除（解除だけでは動き出さない） |
+| フィードバック途絶（`health.feedback_timeout_ms` 超過） | 電流 0 + PID リセット |
+| 周期処理で例外 | ログを残して 0 電流を送り、ループは継続（指令断は C620 の惰走を招く） |
+| 周期が飛んだ（asyncio スタール） | PID に渡す `dt` を `DEFAULT_MAX_DT_S`（50ms）で頭打ち |
+| 一時停止中（`pause()`） | **1 通も送らない**（0 電流フレームすら送らない）。緊急停止は状態のみ反映 |
+
+制御周期は既定 200Hz（`DEFAULT_INTERVAL_S = 0.005`）。`dt` は毎周期 `time.monotonic()` の
+実測差分を使う（asyncio のジッタがあるため固定 dt を仮定しない）。
+
+#### アクチュエータ動作確認との排他（0x200 の奪い合い）
+
+アクチュエータ動作確認（`lib/motor_check.py`）は `M3508Driver.encode_target()` で
+**自分のスロットだけ埋めて他を 0 にした 0x200 フレーム**を送る。一方この制御ループは
+目標未設定でも安全のため 0 電流フレームを送り続ける。両者を同時に走らせると相互に
+フレームを上書きし、動作確認でモータが回らず FAILED / TIMEOUT になる。
+
+そこで**ループ側を黙らせる方向**で排他を取る（`pause()` / `resume()`）。
+
+| 方式 | 採否 | 理由 |
+|------|------|------|
+| ループを `stop()` → 終了後 `start()` | ✗ | タスクの再生成に失敗すると復帰できず、リフトが保持電流を失ったまま残る |
+| **一時停止フラグ（採用）** | ✓ | `resume()` は同期メソッドでフラグを戻すだけ。`finally` から確実に呼べて失敗しない |
+| 対象軸の目標だけ解除 | ✗ | 目標が無くてもループは 0 電流フレームを送り続けるため排他にならない |
+
+- `pause()` は `_step_lock` を取ってからフラグを立てるため、**戻った時点で「送信中の 1 周期」も
+  完了済み**であることを保証する（await 中の周期が動作確認の指令を後から上書きするのを防ぐ）
+- 一時停止中も**緊急停止の判定だけは行う**（目標解除 + PID リセット）。送信は行わない
+  （緊急停止自体の 0 電流送信は `RobotServer._handle_command("e_stop")` が別経路で行う）
+- `resume()` は**目標値を残したまま全軸の PID をリセット**する。動作確認でモータが動かされて
+  いるため、古い積分と前回測定値を持ち越すと復帰した瞬間に大電流が出る。目標を消さないのは、
+  保持していた昇降軸が復帰時に落下しないようにするため
+- `resume()` は `_last_tick` も取り直す（停止していた時間が丸ごと `dt` に化けるのを防ぐ。
+  `max_dt_s` の頭打ちがあるが、意味のない大 `dt` を PID に渡さない）
+
+### main.py での配線
+
+`main.py` が config から部品を組み立て、シーケンスに注入する。
+
+| 関数 | 役割 |
+|------|------|
+| `_load_pid_config(motor_name, motor_cfg)` | `motors[name].pid` を読み `_DEFAULT_PID` で補完 |
+| `_build_position_pid(motor_name, motor_cfg)` | `make_position_pid()` + 出力レンジの絞り込み |
+| `_build_position_loops(...)` | M3508 が居る**バスごとに 1 つ** `M3508PositionLoop` を生成 |
+| `_wire_robot_motors(...)` | `build_motor_group()` → `Sequence.bind_motors()`。生成したループを返す |
+
+生成したループは `server.add_robot(robot_name, seq, can_manager, position_loops=loops)` で
+`RobotServer` にも渡す（動作確認との 0x200 排他に使う）。
+
+**緊急停止インターロック**: `RobotServer.e_stop_active`（読み取り専用プロパティ）を参照する
+チェッカを、`build_motor_group(is_estop_active=...)` と `M3508PositionLoop(is_estop_active=...)`
+の**両方**に渡す。前者はシーケンスからの指令自体を `EStopActiveError` で拒否し、後者は
+既に走っている PID ループの出力を電流 0 に落とす。片方でも渡し忘れると、緊急停止中に
+実行中ステップがモータを動かせてしまう。
+
+**ライフサイクル**: `CANManager.run()` 後に `loop.start()`、`finally` で `await loop.stop()` →
+`CANManager.shutdown()` の順。例外・Ctrl-C のどちらで抜けてもループを止める（止まらないと
+電流指令が出続ける）。
+
+**PID ゲインの config スキーマ**（`config/main_hand.yaml` の `motors.lift_motor.pid`）:
+
+| キー | 既定値 | 意味 |
+|------|--------|------|
+| `kp` / `ki` / `kd` | 2.0 / 0.0 / 0.0 | 累積角 [deg] → 電流指令 [counts] |
+| `integral_limit` | `null` | 積分項の出力寄与上限 [counts]（`null` で無制限） |
+| `dead_band` | 1.0 | 偏差の不感帯 [deg] |
+| `output_limit` | 2000 | 電流指令の絶対値上限 [counts]。`CURRENT_MAX` (16384) で頭打ち |
+
+`pid` セクションが無い M3508 は既定値で動く（起動失敗にしない）。既定値は機構未完成を前提に
+「暴れない」ことを優先した仮値であり、**実機で要チューニング**。`output_limit` の既定 2000
+（≒2.4A、C620 フルスケールの約 12%）は、暴走しても人力で押さえられる範囲に留めるための制限。
+
 ---
 
 ## テスト戦略
@@ -252,6 +402,11 @@ CAN ID = `0x7FF`（コマンド種別=0b111, デバイスID=0xFF）、データ�
 | **EDULITE 05 プロトコル** | ◎ | 29bit CAN ID 組み立て・パース、値マッピングの単体テスト |
 | **自作モタドラプロトコル** | ◎ | エンコード/デコードの単体テスト |
 | **シーケンスエンジン** | ◎ | モータドライバを mock し、ステップ遷移・trigger 待ち・エラー処理をテスト |
+| **PID / 位置制御ループ** | ◎ | 時刻・sleep・CAN 送信を注入して差し替え、実時間を待たずに周期を駆動。積分ワインドアップ、dt 頭打ち、フィードバック途絶、pause/resume を単体テスト |
+| **モータアクセス層** | ◎ | `MotorHandle` / `MotorGroup` の目標送信・到達待ち・緊急停止拒否を mock ドライバで検証 |
+| **緊急停止ゲート** | ◎ | WS 経由でコマンド拒否・シーケンス停止・解除後の復帰を結合テスト |
+| **機構位置定数** | ◎ | yaml → 換算後の指令値、コート差異、欠損・記述ミス時の挙動を単体テスト |
+| **ロボット固有シーケンス** | ◎ | モータを mock し「どの軸にどの値を送ったか」を検証。値は試験用の定数表で与えるので、実機の位置定数を変えてもテストは追随不要 |
 | **config パース** | ○ | YAML → ドライバインスタンス生成の単体テスト |
 | **CAN 実通信** | △ | vcan（仮想 CAN）を使った統合テスト。CI でも実行可能 |
 | **WebSocket プロトコル** | ○ | JSON パース/生成の単体テスト |
@@ -273,15 +428,36 @@ pytest の fixture で vcan バスを自動セットアップし、実際の CAN
 
 ```
 tests/
-├── conftest.py                  # 共通 fixture（mock モータ、vcan セットアップ等）
 ├── drivers/
-│   ├── test_m3508.py            # M3508 エンコード/デコード
+│   ├── test_m3508.py            # M3508 エンコード/デコード・多回転累積角
 │   ├── test_edulite05.py        # EDULITE 05 エンコード/デコード
-│   └── test_generic.py          # 自作プロトコル エンコード/デコード
+│   ├── test_generic.py          # 自作プロトコル エンコード/デコード
+│   └── test_target_reached.py   # is_target_reached / default_tolerance（全ドライバ横断）
+├── test_pid.py                  # PID 単体（ワインドアップ・デッドバンド・出力制限）
+├── test_position_loop.py        # M3508PositionLoop（周期・dt 頭打ち・途絶・pause/resume）
 ├── test_sequence_engine.py      # シーケンスエンジンの状態遷移
+├── test_sequence_court_auto.py  # コート伝播と全自動通過 / auto_stop 停止
+├── test_sequence_motors.py      # MotorHandle / MotorGroup / build_motor_group
+├── test_sequence_positions.py   # 位置定数の読み込み・単位換算・コート差異
+├── test_sequence_move_to.py     # bind_positions / move_to / タイムアウト時の停止
+├── test_robot_sequences.py      # robots/*.py の各ステップが送る指令の検証
 ├── test_can_manager.py          # vcan を使った統合テスト
-└── test_ws_protocol.py          # WebSocket JSON プロトコル
+├── test_can_manager_health.py   # 受信タイムアウト → STALE、送信失敗 → DOWN
+├── test_health.py               # ヘルス判定・状態遷移・JSON シリアライズ
+├── test_motor_check.py          # MotorCheckRunner（PASSED/FAILED/TIMEOUT・abort）
+├── test_match_state.py          # モード / コート / フェーズ / チェックリスト
+├── test_ws_protocol.py          # WebSocket JSON プロトコル
+├── test_server_health.py        # WS の health 同梱・GET /health・health_change
+├── test_server_match.py         # 試合運用フローとフェーズゲート
+├── test_server_motor_check.py   # 動作確認の WS イベント列と競合拒否
+├── test_server_e_stop.py        # 緊急停止でのシーケンス停止とコマンドゲート
+├── test_main_wiring.py          # main.py の配線（PID 生成・バス単位ループ・インターロック）
+├── test_main_positions_config.py    # 位置定数 yaml の読み込みと欠損時の挙動
+├── test_main_health_config.py       # health セクションの集約
+└── test_main_motor_check_config.py  # motor_check セクションの集約とモータ別上書き
 ```
+
+共通 fixture は各テストファイル内に置いており、`tests/conftest.py` は現時点では作っていない。
 
 ### フロントエンドテスト（vitest）
 
@@ -341,7 +517,9 @@ cbc2026_team3_central/
 │   ├── main_hand.yaml
 │   ├── sub_hand.yaml
 │   ├── can_buses.yaml      # CAN バス定義の単一情報源（serial ↔ 固定名）
-│   └── checklist.yaml      # 指差喚呼チェックリスト定義
+│   ├── checklist.yaml      # 指差喚呼チェックリスト定義
+│   ├── main_hand_positions.yaml  # メインハンドの機構位置定数（単位換算込み）
+│   └── sub_hand_positions.yaml   # サブハンドの機構位置定数（単位換算込み）
 ├── scripts/
 │   ├── can_config.py       # can_buses.yaml → TSV / udev ルール変換
 │   ├── setup_can.sh        # CAN バス up（冪等・--strict / --wait 対応）
@@ -351,15 +529,23 @@ cbc2026_team3_central/
 │   ├── __init__.py
 │   ├── can_manager.py
 │   ├── match_state.py      # モード / コート / フェーズ / チェックリスト
+│   ├── health.py           # ヘルス状態の列挙・スナップショット・動作確認レコード
+│   ├── motor_check.py      # MotorCheckRunner（アクチュエータ動作確認）
 │   ├── drivers/
 │   │   ├── __init__.py
 │   │   ├── base.py
 │   │   ├── m3508.py
 │   │   ├── edulite05.py
 │   │   └── generic.py
+│   ├── control/
+│   │   ├── __init__.py
+│   │   ├── pid.py             # モータ非依存 PID
+│   │   └── position_loop.py   # M3508 のバス単位位置制御ループ
 │   ├── sequence/
 │   │   ├── __init__.py
-│   │   └── engine.py
+│   │   ├── engine.py
+│   │   ├── motors.py          # シーケンスからのモータ指令・到達待ち
+│   │   └── positions.py       # 機構位置定数の読み込みと単位換算
 │   └── server.py
 ├── robots/
 │   ├── __init__.py
@@ -369,38 +555,47 @@ cbc2026_team3_central/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── vite.config.ts
+│   ├── vitest.config.ts
 │   ├── index.html
 │   └── src/
 │       ├── main.tsx
-│       ├── App.tsx
-│       ├── router.tsx
+│       ├── App.tsx                 # タブ + URL ハッシュで画面切替（ルーターは使わない）
+│       ├── index.css
+│       ├── context/
+│       │   └── RobotContext.tsx
 │       ├── hooks/
-│       │   └── useRobotSocket.ts
+│       │   ├── useRobotSocket.ts
+│       │   ├── useHotkeys.ts
+│       │   └── useMotorCheck.ts
+│       ├── lib/
+│       │   ├── cx.ts
+│       │   ├── phase.ts            # isSetupPhase / isMatchPhase
+│       │   ├── robots.ts
+│       │   └── tuiColor.ts
 │       ├── pages/
 │       │   ├── Dashboard.tsx
 │       │   ├── RobotControl.tsx
 │       │   └── MotorTuning.tsx
+│       ├── test/                   # vitest 共通ヘルパ（setup / mockWebSocket / robotContext）
 │       └── components/
+│           ├── AppHeader.tsx        # フェーズ / MODE / COURT / EMG STOP + タブ
+│           ├── ConnectionBanner.tsx # WS 切断の全幅バナー
+│           ├── Toaster.tsx          # 操作拒否・ヘルス異常の通知
 │           ├── SequenceProgress.tsx
-│           ├── MotorStatus.tsx
+│           ├── SequenceStepList.tsx
+│           ├── CurrentStepPanel.tsx
 │           ├── TriggerButton.tsx
-│           ├── Checklist.tsx       # 指差喚呼チェックリスト
-│           ├── MatchControl.tsx    # モード/コート切替 + 試合開始・終了
-│           ├── PhaseBanner.tsx     # MODE/COURT/PHASE 常時表示
-│           └── EStopButton.tsx
+│           ├── MotorStatus.tsx
+│           ├── MotorSummary.tsx
+│           ├── MotorCheckButton.tsx
+│           ├── MotorCheckPanel.tsx
+│           ├── HealthIndicator.tsx
+│           ├── RobotReadiness.tsx   # Monitor 用の 1 行サマリ
+│           ├── Checklist.tsx        # 指差喚呼チェックリスト
+│           ├── MatchControl.tsx     # モード/コート切替 + 試合開始・終了
+│           └── EStopOverlay.tsx     # 全画面フラッシュ + ツイスト解除
 ├── main.py
-└── tests/
-    ├── conftest.py
-    ├── drivers/
-    │   ├── test_m3508.py
-    │   ├── test_edulite05.py
-    │   └── test_generic.py
-    ├── test_sequence_engine.py
-    ├── test_sequence_court_auto.py
-    ├── test_match_state.py
-    ├── test_server_match.py
-    ├── test_can_manager.py
-    └── test_ws_protocol.py
+└── tests/                          # 構成は「テスト戦略 > テストファイル構成」を参照
 ```
 
 ---
@@ -429,6 +624,14 @@ cbc2026_team3_central/
   "e_stop_active": false,
   "health": { /* HealthSnapshot */ }
 }
+```
+
+緊急停止状態は定期配信の `state` に載るほか、切り替わった瞬間に専用イベントを push する
+（`state` の配信周期を待つと EMG STOP の表示が遅れるため）。WS 接続直後にも、
+緊急停止中であれば 1 回送る:
+
+```jsonc
+{ "type": "e_stop_state", "active": true }
 ```
 
 ### Client → Server（操作）
@@ -512,6 +715,34 @@ setup ⇄ ready → match → finished → setup
 `motor_check` は HTTP POST 経路が `_handle_command` を通らないため、`_start_motor_check` 側にも
 同じフェーズ判定を置いている（片方だけでは穴が空く）。
 
+### 緊急停止によるコマンドゲート
+
+フェーズゲートとは独立した二段目のゲート。フェーズが `match` のままでも緊急停止中は
+以下のコマンドを拒否する（`lib/server.py` の `_E_STOP_DENY_MESSAGES`）。緊急停止中に
+シーケンスが進むと、次のステップが新しいモータ目標値を送って停止指令を上書きしてしまう。
+
+| コマンド | 緊急停止中 | 拒否理由 |
+|---|:-:|---|
+| `sequence_start` | ✗ | 緊急停止中のためシーケンスを開始できません |
+| `sequence_jump` | ✗ | 緊急停止中のためステップ移動できません |
+| `trigger` | ✗ | 緊急停止中のためトリガーを送れません |
+| `match_start` | ✗ | 緊急停止中のため試合を開始できません |
+| `set_param` | ✗ | 緊急停止中のためパラメータを変更できません |
+| `motor_check_start` | ✗ | 緊急停止中のため動作確認を実行できません（`motor_check_error` で通知） |
+| `sequence_stop` / `e_stop` / `e_stop_release` / `match_reset` / `match_finish` | ✓ | 止める方向・復帰方向の操作は緊急停止中こそ通す |
+
+拒否通知はフェーズゲートと同じ `command_rejected` イベント（`motor_check_start` のみ
+`motor_check_error`）。UI 側でボタンを無効化するだけでは WS 直叩き・リロード直後を防げない。
+
+`match_start` を載せる理由: 緊急停止は `match_reset` → チェックリスト再実施で `ready` に
+戻れるため、フェーズゲートだけでは素通りする。全自動では `match_start` が両ロボットの
+`request_start()` を兼ねるので、素通りすると緊急停止中に試合開始ボタンだけで両機が動き出す。
+ゲートは `_handle_match_start()` より手前に置き、フェーズ遷移そのものを起こさない
+（緊急停止中に試合フェーズへ入れること自体が異常なため安全側に倒す）。
+
+`set_param` を載せる理由: 現状はログ出力のみだが、実装が入ると緊急停止中にモータの
+制御パラメータを書き換えられてしまう（停止状態の前提が崩れる）。
+
 ### 試合開始の挙動（モード別）
 
 - **半自動**: `match_start` はフェーズを `match` にするだけ。各操縦者が自分のタブで `sequence_start` を押す
@@ -526,10 +757,25 @@ setup ⇄ ready → match → finished → setup
 人間の目視確認が必須な危険動作には `@step("...", require_trigger=True, auto_stop=True)` を付ける。
 `auto_stop=True` のステップは全自動でも必ずトリガー待ちで停止する。
 
+**`auto_stop` の付与基準（機構未確定の現状）**: 「失敗したときに機構が壊れるか」で線を引く。
+壊れるものだけに付ける。得点を落とすだけの失敗にまで付けると全自動が半自動と変わらなくなり、
+モードを分けた意味が無くなるため。
+
+| ステップ | require_trigger | auto_stop | 理由 |
+|---|---|---|---|
+| main_hand「ハンド閉じる (ワーク把持)」 | ✓ | ✓ | 位置ずれのまま閉じるとワークと機構の双方を破損する |
+| sub_hand「ハンド閉じる (受け取り)」 | ✓ | ✓ | メインハンドと機構同士が向かい合う唯一の動作。衝突で両方壊れる |
+| main_hand「ハンド開く (リリース)」 | ✓ | — | 落とすとやり直せないので半自動では配置位置到達を目視確認させる。ただし破損はしないので全自動は止めない |
+| sub_hand「ハンド開く (配置)」 | ✓ | — | 同上 |
+
+機構が固まって位置決め精度が確認できたら、把持の `auto_stop` を外して全自動を通しで回す。
+
 ### コート対応
 
-`Sequence.court` で参照できる。実際の左右反転は各 `robots/*.py` の責務。
-座標定数が未確定のため現状は土台のみで、確定後に反転テーブル／`court_offsets` を導入する。
+`Sequence.court` で参照できる。`move_to` は現在のコートを `PositionTable` に自動で渡すため、
+コートで値が変わる位置は `config/<robot_name>_positions.yaml` 側で
+`{ red: <値>, blue: <値> }` と書くだけでよい（「機構位置定数」セクション参照）。
+現状の軸構成（昇降・関節・グリッパ）には左右反転する軸が無いため、同梱 yaml はすべてスカラー。
 
 ### WebSocket プロトコル拡張
 
@@ -635,16 +881,20 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 ```yaml
 robot_name: main_hand
 
-can_buses:
-  m3508_bus: can0
-  edulite_bus: can1
-  generic_bus: can2
+can_buses:                 # 値は udev で固定した名前（can0/can1/can2 は使わない）
+  m3508_bus: can_m3508
+  edulite_bus: can_edulite
+  generic_bus: can_generic
 
 motors:
   lift_motor:
     driver: m3508
     bus: m3508_bus
     can_id: 1
+    pid:                   # PC 側位置制御 PID（M3508 のみ。省略時は既定値）
+      kp: 2.0
+      dead_band: 1.0
+      output_limit: 2000
   arm_joint:
     driver: edulite05
     bus: edulite_bus
@@ -659,6 +909,51 @@ motors:
 
 ---
 
+## 機構位置定数（`config/<robot_name>_positions.yaml`）
+
+**シーケンス本体に生の数値を書かない。** 3 種類のモータで指令の単位がばらばら
+（M3508 = モータ軸 deg / EDULITE 05 = rad / 自作モタドラ = deg）なため、
+シーケンスに数値を直書きすると単位事故が起きる。目標値と単位換算は
+`config/<robot_name>_positions.yaml` に一元化し、`lib/sequence/positions.py` が読む。
+
+機構が未完成の間は仮値（安全側の小さい可動量）を置いておき、
+**機構完成後はこの yaml の数値だけを差し替える**。`robots/*.py` は触らない。
+
+```yaml
+axes:                      # 人間の単位 → モータ指令値の換算: command = value * scale + offset
+  lift_motor:
+    unit: mm               # チームが positions に書く単位
+    command_unit: deg      # モータへ実際に送る単位（M3508 はモータ軸 deg）
+    scale: 864.15          # 360 * (3591/187) / リード[mm/rev]
+    offset: 0.0            # 機械原点と電気原点のずれ（指令単位）
+    timeout_s: 4.0         # 到達待ちの上限。未指定なら 5.0s
+    # tolerance: 0.5       # 到達許容差（人間の単位）。未指定ならドライバ既定値
+  arm_joint:
+    unit: deg
+    command_unit: rad
+    scale: 0.017453292519943295   # deg → rad
+
+positions:                 # 値は axes.<軸>.unit の単位で書く
+  lift_motor:
+    home: 0.0
+    work_3: 10.0
+    place: { red: 10.0, blue: -10.0 }   # コートで変わる位置だけ辞書で書く（両方必須）
+```
+
+**設計上の決定事項**:
+- `positions` に `axes` 未定義の軸が出てきたら**読み込みを拒否**する。換算係数が無いまま
+  人間の単位の値を生の指令値として送ると機構を壊すため、checklist.yaml のような
+  「壊れていても起動する」方針は取らない。
+- ただし main.py 側は**起動自体は続行**する（`_load_position_table_file`）。
+  yaml が無い／壊れている場合は警告・エラーログを出して**空の定数表**を bind し、
+  シーケンスが値を引いた時点で `PositionLookupError` を出す。
+  定数が無くてもアクチュエータ動作確認とヘルス監視は実施したいため。
+- コート差異は**位置の値だけ**を `{red:, blue:}` に切り替えられる形にした。
+  機構未確定の段階で反転テーブルのような抽象化を作り込むと外れたときの手戻りが大きく、
+  「必要になった位置だけスカラーを辞書に書き換える」方式なら追加コストがほぼ無いため。
+  現状の同梱 yaml はすべてスカラー（メイン／サブとも昇降・関節・グリッパのみで、
+  左右反転する軸を持たない）。
+
 ## シーケンス記述例
 
 ```python
@@ -667,20 +962,34 @@ from lib.sequence.engine import Sequence, step
 class PickAndPlace(Sequence):
     @step("初期位置へ移動")
     async def move_to_home(self):
-        await self.motors.m3508_1.set_position(0)
-        await self.motors.edulite_1.set_position(0)
-        await self.wait_all_reached()
+        # {軸名: 位置名} を渡すと、換算・指令・到達待ちまで move_to が面倒を見る
+        await self.move_to({"lift_motor": "home", "arm_joint": "home"})
 
     @step("アーム展開", require_trigger=True)
     async def extend_arm(self):
-        await self.motors.m3508_1.set_position(1500)
-        await self.wait_all_reached()
+        await self.move_to({"arm_joint": "extended"})
 
-    @step("ハンド閉じる")
+    # 失敗すると機構破損に直結する動作は全自動でも止める
+    @step("ハンド閉じる", require_trigger=True, auto_stop=True)
     async def close_hand(self):
-        await self.motors.servo_1.set_angle(90)
-        await asyncio.sleep(0.5)
+        await self.move_to({"gripper": "closed"})
 ```
+
+### `Sequence.move_to` の責務
+
+| 項目 | 決定 |
+|---|---|
+| 単位換算 | `PositionTable`（yaml の `axes`）が担当。シーケンスには数値が現れない |
+| コート | `self.court` を自動で渡す。スカラー値の位置はコートに依存しない |
+| 到達待ち | 軸ごとに `wait_reached(tolerance, timeout)` を並列実行 |
+| タイムアウト | 軸ごとの `timeout_s`（既定 5.0s）。`move_to(..., timeout=)` で上書き可 |
+| タイムアウト時 | `SequenceTimeoutError` を送出。`run()` が捕捉してログを残しシーケンスを停止 |
+| 指令値の後始末 | **クリアしない**。昇降軸で保持トルクを失うとワークごと落下するため |
+
+**タイムアウトで例外を投げる理由**: 黙って次のステップへ進むと、ワークを掴めていないのに
+搬送に入る・アームが展開しきっていないのにハンドを閉じる、といった二次被害が出る。
+`run()` は例外を握って `break` するので、シーケンスは停止して Web UI 上で止まった位置が分かり、
+操縦者が原因を除去して該当ステップへジャンプできる。
 
 ---
 
@@ -766,8 +1075,23 @@ class PickAndPlace(Sequence):
 
 | # | ファイル | 内容 |
 |---|---|---|
-| 5-1 | `robots/main_hand.py` | メインハンドのシーケンスクラス（担当者が記述） |
-| 5-2 | `robots/sub_hand.py` | サブハンドのシーケンスクラス（担当者が記述） |
+| 5-1 | `lib/sequence/positions.py` | 機構位置定数の読み込み・単位換算・コート差異解決 |
+| 5-2 | `lib/sequence/engine.py` | `bind_positions()` / `move_to()` / `SequenceTimeoutError` を追加 |
+| 5-3 | `config/main_hand_positions.yaml` | メインハンドの位置定数（機構完成まで仮値） |
+| 5-4 | `config/sub_hand_positions.yaml` | サブハンドの位置定数（機構完成まで仮値） |
+| 5-5 | `robots/main_hand.py` | メインハンドのシーケンス（`move_to` で記述。数値は持たない） |
+| 5-6 | `robots/sub_hand.py` | サブハンドのシーケンス（同上） |
+| 5-7 | `main.py` | `<robot_name>_positions.yaml` を読んで `bind_positions()` |
+
+**機構完成後にやること**:
+1. `config/*_positions.yaml` の `axes.*.scale` / `offset` を実測値に置換
+   （M3508 は `360 * (3591/187) / リード[mm/rev]`、EDULITE は deg→rad のまま）
+2. `positions.*` の各値を実測ストロークに置換（現状は安全側の微小値）
+3. `axes.*.timeout_s` を実動作時間 + 余裕に調整、必要なら `tolerance` を指定
+4. コートで変わる位置があれば、その値だけ `{ red:, blue: }` に書き換え
+5. `config/main_hand.yaml` の `motors.lift_motor.pid` を実機チューニング
+6. `tests/test_robot_sequences.py` は位置名・軸名のみを検証しているので、
+   値を変えてもテストは追随不要（軸／位置名を増減したときだけ更新）
 
 ### Phase 6: CAN Bus ヘルスチェック — TDD
 
@@ -942,6 +1266,7 @@ HTTP:
 
 ```
 RobotServer.handle("motor_check_start")
+  ├─ 0) RobotContext.position_loops を全て await pause()（0x200 の排他）
   └─ MotorCheckRunner(robot, can_manager, motors).run()
        1) 緊急停止 / 通常シーケンス実行中なら拒否
        2) ロックを取り、CheckRunSnapshot を初期化
@@ -955,6 +1280,7 @@ RobotServer.handle("motor_check_start")
             - WS push (motor_check_record)
        4) overall = all/some/none passed
        5) WS push (motor_check_done) / lock release
+  └─ finally) position_loops を全て resume()（正常終了・abort・例外・キャンセルのいずれでも）
 ```
 
 ##### 安全策
@@ -963,6 +1289,12 @@ RobotServer.handle("motor_check_start")
 - 各モータの指令量は **物理的に安全な微小量に固定**（config で上書き可能）
 - 動作確認実行中も **緊急停止コマンドは即時優先**（既存 e_stop 経路）
 - M3508 の電流指令はリリース時に必ず 0 を再送（駆動状態を残さない）
+- **M3508 位置制御ループとの排他**: 実行中は同ロボットの `M3508PositionLoop` を一時停止する。
+  `RobotServer.add_robot(name, sequence, can_manager, position_loops=...)` でループを受け取り
+  （`RobotContext.position_loops`。M3508 が居ない `sub_hand` は空リスト）、動作確認タスクの
+  `try` 先頭で `pause()`、`finally` で `resume()` する。復帰漏れは保持電流の喪失（落下）に
+  直結するため、`finally` での復帰は必須。
+  排他はロボット単位で十分（`sub_hand` に M3508 は無く、両ロボットの M3508 バスは競合しない）
 
 ##### config（既定値）
 
@@ -1043,6 +1375,126 @@ motors:
   サーバー側 (`deny_reason`) を単一の判定点とする
 - **全自動は共用シーケンス + フラグ**: 専用シーケンスを別定義すると二重メンテになり、
   半自動と全自動で挙動が乖離する
+
+### Phase 8: モータアクセス層と M3508 位置制御 — TDD
+
+Phase 5 で `move_to` の器はできたが、シーケンスから実モータへ指令が届く経路が無かった。
+その配線と、M3508 に必要な PC 側位置ループ・緊急停止の穴埋めをまとめて行う。
+詳細な仕様は「M3508 の位置制御（PC 側 PID）」「main.py での配線」を参照。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 8-1 | `tests/test_sequence_motors.py` | **テスト先行**: 目標送信・到達待ち・緊急停止拒否・target_sink 差し込み |
+| 8-2 | `lib/sequence/motors.py` | `MotorHandle` / `MotorGroup` / `build_motor_group` |
+| 8-3 | `tests/drivers/test_target_reached.py` | **テスト先行**: 到達判定と許容差の既定値（全ドライバ横断） |
+| 8-4 | `lib/drivers/base.py` (修正) | `is_target_reached()` / `default_tolerance()` / `_observed_for()` |
+| 8-5 | `lib/sequence/engine.py` (修正) | `bind_motors()` / `wait_all_reached()` を追加し `move_to` を実指令に接続 |
+| 8-6 | `tests/test_pid.py` | **テスト先行**: 比例/積分/微分、conditional integration、デッドバンド、出力制限 |
+| 8-7 | `lib/control/pid.py` | モータ非依存 PID（測定値微分・積分ワインドアップ対策） |
+| 8-8 | `tests/test_position_loop.py` | **テスト先行**: バス単位の 1 フレーム送信、dt 頭打ち、途絶時 0 電流、pause/resume、緊急停止 |
+| 8-9 | `lib/control/position_loop.py` | `M3508PositionLoop` + `make_position_pid()` |
+| 8-10 | `lib/drivers/m3508.py` (修正) | 多回転累積角（`multi_turn_position` / `reset_multi_turn_origin`）、`encode_current_frame`、減速比込みの許容差 |
+| 8-11 | `tests/test_server_e_stop.py` | **テスト先行**: E-STOP でのシーケンス停止、コマンドゲート、解除後の復帰 |
+| 8-12 | `lib/server.py` (修正) | E-STOP でシーケンス停止（送信失敗時も）、`_E_STOP_DENY_MESSAGES` ゲート、`e_stop_active` プロパティ、動作確認と位置制御ループの排他 |
+| 8-13 | `tests/test_main_wiring.py` | **テスト先行**: PID の config 読み込み、バス単位ループ生成、両系統への緊急停止インターロック |
+| 8-14 | `main.py` (修正) | `_load_pid_config` / `_build_position_pid` / `_build_position_loops` / `_wire_robot_motors` とライフサイクル |
+| 8-15 | `config/main_hand.yaml` (修正) | `motors.lift_motor.pid` セクション（仮値） |
+
+#### 設計上の判断
+
+- **緊急停止インターロックは二重に置く**: シーケンス側（`MotorHandle.set_target` が
+  `EStopActiveError`）と PID ループ側（出力を電流 0 に落とす）の両方。片方だけでは、
+  既に走っているループ、または実行中ステップのどちらかが停止指令を上書きする
+- **0x200 の排他はループを黙らせる方向**: 動作確認側を待たせるのではなく
+  `pause()` / `resume()` でループを止める。`resume()` は同期メソッドなので `finally` から確実に呼べる
+- **E-STOP はシーケンスも止める**: 停止フレームの送信可否に関わらず `finally` で停止する。
+  シーケンスが走ったままだと次のステップが新しい目標値を送って停止を上書きする
+
+---
+
+### Phase 9: 励磁の有効化（EDULITE 05 の enable）— TDD
+
+`initialization_steps()` に `encode_enable()` が無く、通常起動では EDULITE 05 が
+無励磁のままだった（動作確認の `prepare_check_steps()` だけが enable していた）。
+Phase 8 でシーケンスが実位置指令を出すようになったため、この穴を塞ぐ。
+
+ただし **単に enable を足すのは危険**。本機は enable した瞬間に `PARAM_LOC_REF` へ
+追従を始めるので、目標角が 0 のまま励磁するとアームが原点へ全速で飛ぶ。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 9-1 | `tests/drivers/test_edulite05.py` | **テスト先行**: 現在角を書いてから enable する順序、位置モードのみフィードバック必須、速度モードは 0 保持、問い合わせフレームが disable であること、起動フレームに enable が混ざらないこと |
+| 9-2 | `lib/drivers/base.py` (修正) | `activation_steps()` / `requires_fresh_feedback_for_activation()` / `feedback_probe_message()` の既定実装（既定はいずれも「有効化不要」） |
+| 9-3 | `lib/drivers/edulite05.py` (修正) | 位置モードは実測角、それ以外は 0 を目標に書いてから `encode_enable()`。問い合わせは `encode_disable()` |
+| 9-4 | `tests/test_can_manager.py` | **テスト先行**: 起動時に初期化 → 有効化の順で送ること、フィードバック受信後に目標を組み立てること、未受信なら有効化しないこと、中断できること |
+| 9-5 | `lib/can_manager.py` (修正) | `activate_motor()` / `activate_motors()` / `_wait_fresh_feedback()` / `_send_steps()` |
+| 9-6 | `tests/test_server_e_stop.py` | **テスト先行**: 緊急停止解除で再有効化が走ること、再度の緊急停止で中断できること |
+| 9-7 | `lib/server.py` (修正) | `e_stop_release` から `_reactivate_motors()` |
+
+#### 有効化シーケンス
+
+```
+initialization_steps()      disable → run_mode → limit_spd → limit_cur → loc_kp → (set_zero)
+        ↓
+_wait_fresh_feedback()      待機開始より "後に" 届いたフィードバックだけを認める
+                            （応答が無いモータには disable を 50ms 周期で送って応答を促す）
+        ↓
+activation_steps()          LOC_REF = 実測角 → enable
+```
+
+#### 設計上の判断
+
+- **enable は初期化フレームから分離する**: `initialization_steps()` は
+  「送るだけで完結する純粋なフレーム列」のままにし、実測値に依存する有効化は
+  `activation_steps()` として `CANManager` が適切なタイミングで組み立てる。
+  この分離により「現在角を読んでから目標に書く」を型を変えずに表現できる
+- **フィードバックは "待機開始より後に届いたもの" しか使わない**: `MotorState` の
+  初期値 `position=0.0` を実測角と取り違えると原点へ飛ぶ。さらに
+  `set_zero_on_start=true` では原点が付け替わるため、`set_zero` 以前に受信した値も
+  実測角として使えない。`last_feedback_at` の値そのものではなく
+  「待機開始後に更新されたか」を判定条件にすることで両方を同時に塞いでいる
+- **確認できないときは有効化しない**: フィードバックが得られなければ enable を送らず
+  無励磁のまま残す（`activate_motor()` は False を返し WARNING を出す）。
+  「動かない」より「意図せず飛ぶ」ほうが危険なので、安全側は無励磁側にある
+- **問い合わせは `disable`**: 無励磁を保ったまま応答だけ得られる唯一のフレーム。
+  `clear_fault=False` なので障害フラグを握り潰さない
+- **緊急停止解除で再有効化する**: 解除は `_e_stop_active = False` にするだけでは
+  EDULITE が無励磁のままで以後の指令が一切効かない。解除時に `activate_motors()` を
+  呼ぶが、有効化自体が「現在角を保持目標に書いてから」なので解除操作で機体は動かない。
+  再有効化の途中で緊急停止が再度入った場合に備え、`should_abort` で中断し、
+  それでも通り抜けた enable のために停止フレームを再送する
+
+---
+
+## 未解決の課題
+
+実装済みだが実機・運用面で未対応の項目。競技当日までに潰すか、意識的に許容するかを決める必要がある。
+
+### 安全系
+
+| 課題 | 現状 | 影響 |
+|---|---|---|
+| `_e_stop_active` がプロセスメモリ上のみ | `RobotServer.__init__` で `False` に初期化されるだけで永続化しない | サーバーを再起動すると緊急停止状態が消える。物理的な緊急停止ボタンの状態と同期する仕組みも無く、UI 上「解除済み」に見えるまま実機は停止しているという不一致が起きうる |
+| 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は Phase 9 で `activate_motors()`（現在角を書いてから enable）を呼ぶようになったが、`encode_disable(clear_fault=True)` は送らない | EDULITE 05 が過電流等の障害フラグを保持したままだと、再有効化しても指令が効かない。fault の自動クリアは原因を隠すため意図的に行っていない。実機で「解除しても動かない」場合は fault の内容を確認して電源再投入で対処する（`health` の `FAULT` 表示で判別できる） |
+| フィードバックが得られないと EDULITE が無励磁のまま残る | Phase 9 の `activate_motor()` は待機（既定 0.5s）の間にフィードバックを受け取れないと enable を送らず、WARNING をログに出すだけ | 電源断・配線ミス・CAN 断のときは「シーケンスは進むのに軸だけ動かない」状態になる。ログを見ないと気づけないので、有効化を見送ったモータを UI（health / 起動時バナー）に出す仕組みが欲しい。なお `--dry-run` は virtual バスで応答が無いため、この WARNING が必ず 2 件出るのが正常 |
+| M3508 のホーミングが未実装 | `multi_turn_position` の原点は初回フィードバック受信時の姿勢。`reset_multi_turn_origin()` / `M3508PositionLoop.set_origin_here()` を呼ぶ経路がシーケンスにも `main.py` にも無い | 「目標 0 = 電源投入時の位置」であり機械原点ではない。電源投入時の姿勢が毎回違うと `positions` の値がそのままズレる。機構端への押し当て（`ControlMode.CURRENT` の素通し）は用意してあるが、それを使うステップがまだ無い |
+| `_receive_loop` の例外が握りつぶされる | 「既知の制約: バス down 時の失敗が分かりにくい」参照 | 対策候補は同節に記載済み。未着手 |
+
+### 制御・チューニング
+
+| 課題 | 現状 | 影響 |
+|---|---|---|
+| PID ゲイン・機構定数がすべて仮値 | `main.py` の `_DEFAULT_PID`（kp=2.0 / ki=kd=0 / dead_band=1.0 / output_limit=2000）、`config/*_positions.yaml` の `scale` / `offset` / `positions` はいずれも安全側に振った仮値 | **実機チューニング必須**。現状のゲインでは重力負荷を持ち上げられない可能性が高い（ki=0 のため定常偏差が残る） |
+| M3508 の位置制御が実機未検証 | 多回転アンラップ・PID・到達判定とも単体テストのみ | ラップアラウンド判定のしきい値（半周＝3600rpm 相当）や減速比込みの許容差が実機で妥当かは未確認 |
+| 200Hz が実機で維持できるか未測定 | 周期の実測・ジッタのロギング機構が無い | 「asyncio で 200Hz の位置ループを回す判断」の限界節を参照。乱れた場合の備えはあるが、乱れているかどうかを知る手段が無い |
+| `dead_band=1.0`（モータ軸 deg）と `default_tolerance` の関係 | 到達判定の許容差は出力軸 1deg 相当（モータ軸で約 19.2deg）、PID のデッドバンドはモータ軸 1deg | 現状は許容差 > デッドバンドなので到達はするが、チューニングで両者を動かすときは大小関係を意識する必要がある（デッドバンドが許容差より広いと永久に到達しない） |
+
+### 運用
+
+| 課題 | 現状 | 影響 |
+|---|---|---|
+| `set_param` が未実装 | `lib/server.py` はログ出力のみ | PID Tuning タブから実機のゲインを変更できない。緊急停止中のゲートだけは先に入れてある |
+| 位置定数の実機反映手順が手動 | 「Phase 5 > 機構完成後にやること」参照 | 未着手 |
 
 ---
 

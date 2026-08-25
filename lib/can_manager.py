@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 _RECV_TIMEOUT = 0.01
 
+# 励磁の有効化前にフィードバックを待つ上限。1Mbps の CAN でモータが応答するには十分で、
+# 応答が無いモータ (電源断・配線ミス) の分だけ起動が遅れる上限でもある。
+_ACTIVATION_FEEDBACK_TIMEOUT_S = 0.5
+# 待機中に問い合わせフレームを送る間隔。自発的にフィードバックを送らないモータでも
+# この周期で応答を引き出せる。
+_ACTIVATION_PROBE_INTERVAL_S = 0.05
+
 
 class CANManager:
     """複数の CAN バスとモータドライバを asyncio で管理する。"""
@@ -74,6 +81,13 @@ class CANManager:
     def set_on_state_update(self, callback: Callable[[str, MotorState], None]) -> None:
         self._on_state_update = callback
 
+    def last_feedback_at(self, motor_name: str) -> float | None:
+        """最後にフィードバックを受信した時刻 (time.time 基準)。未受信なら None。
+
+        位置制御ループがフィードバック途絶を検出して電流を落とすために参照する。
+        """
+        return self._last_rx_at.get(motor_name)
+
     async def send(self, motor_name: str, msg: can.Message) -> None:
         bus_name = self._motor_bus[motor_name]
         await self.send_to_bus(bus_name, msg)
@@ -121,12 +135,99 @@ class CANManager:
         await self.initialize_motors()
 
     async def initialize_motors(self) -> None:
-        """各モータの起動時設定を宣言順に送る。"""
+        """各モータの起動時設定を宣言順に送り、続けて励磁を有効化する。"""
         for motor_name, motor in self._motors.items():
-            for message, delay_after_s in motor.initialization_steps():
-                await self.send(motor_name, message)
-                if delay_after_s > 0:
-                    await asyncio.sleep(delay_after_s)
+            await self._send_steps(motor_name, motor.initialization_steps())
+            await self.activate_motor(motor_name)
+
+    async def activate_motors(
+        self,
+        *,
+        should_abort: Callable[[], bool] | None = None,
+        feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
+    ) -> None:
+        """全モータの励磁を有効化する。緊急停止解除後の復帰にも使う。
+
+        should_abort は「途中で有効化をやめるべきか」を返す。緊急停止が再び入った
+        場合に、残りのモータへ enable を送らないための中断口。
+        """
+        for motor_name in self._motors:
+            if should_abort is not None and should_abort():
+                logger.warning("モータの有効化を中断しました (残り: %s 以降)", motor_name)
+                return
+            await self.activate_motor(
+                motor_name,
+                should_abort=should_abort,
+                feedback_timeout_s=feedback_timeout_s,
+            )
+
+    async def activate_motor(
+        self,
+        motor_name: str,
+        *,
+        should_abort: Callable[[], bool] | None = None,
+        feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
+    ) -> bool:
+        """1 モータの励磁を有効化する。有効化しなかった場合は False。
+
+        位置追従するモータは「現在角を目標に書いてから enable する」ことでしか
+        有効化時の飛び出しを防げない。実測角を確認できないうちは有効化せず、
+        無励磁のまま残すほうが安全なので、フィードバックが得られなければ諦める。
+        """
+        motor = self._motors[motor_name]
+
+        if motor.requires_fresh_feedback_for_activation() and not await self._wait_fresh_feedback(
+            motor_name, feedback_timeout_s
+        ):
+            logger.warning(
+                "モータ '%s' のフィードバックを %.2fs 以内に受信できないため"
+                "有効化を見送りました (無励磁のまま)",
+                motor_name,
+                feedback_timeout_s,
+            )
+            return False
+
+        steps = motor.activation_steps()
+        if not steps:
+            return True
+        if should_abort is not None and should_abort():
+            logger.warning("モータ '%s' の有効化を中断しました", motor_name)
+            return False
+
+        await self._send_steps(motor_name, steps)
+        return True
+
+    async def _send_steps(self, motor_name: str, steps: list[tuple[can.Message, float]]) -> None:
+        for message, delay_after_s in steps:
+            await self.send(motor_name, message)
+            if delay_after_s > 0:
+                await asyncio.sleep(delay_after_s)
+
+    async def _wait_fresh_feedback(self, motor_name: str, timeout_s: float) -> bool:
+        """待機開始より後に届いたフィードバックを待つ。
+
+        待機開始前に受信済みの値は set_zero より前の原点で測ったものかもしれず、
+        保持目標として使うと原点の付け替え分だけモータが動いてしまう。そのため
+        「新しく届いたこと」を要求し、受信済みの値の再利用は認めない。
+        """
+        baseline = self._last_rx_at.get(motor_name)
+        probe = self._motors[motor_name].feedback_probe_message()
+        deadline = time.monotonic() + timeout_s
+
+        while True:
+            last_rx = self._last_rx_at.get(motor_name)
+            if last_rx is not None and (baseline is None or last_rx > baseline):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            if probe is not None:
+                try:
+                    await self.send(motor_name, probe)
+                except Exception:
+                    # 問い合わせが通らないバスでも、自発フィードバックが届く可能性は残る。
+                    # 待機自体はタイムアウトまで続ける。
+                    logger.debug("モータ '%s' への問い合わせ送信に失敗", motor_name)
+            await asyncio.sleep(_ACTIVATION_PROBE_INTERVAL_S)
 
     async def shutdown(self) -> None:
         for task in self._tasks:
