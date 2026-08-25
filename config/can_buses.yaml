@@ -6,7 +6,7 @@
 # 固定名を割り当てる。
 #
 # udev ルール (99-canable.rules) も setup_can.sh もこのファイルから生成/参照する。
-# serial の採取手順は impl_plan.md「CAN バス命名規約」を参照。
+# serial の採取手順は docs/impl_plan.md「CAN バス命名規約」を参照。
 
 # CANable2 (candleLight FW) の USB ID。全個体共通。
 usb:
