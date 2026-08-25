@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,7 @@ import pytest
 
 from lib.can_manager import CANManager
 from lib.drivers.base import MotorState
+from lib.drivers.generic import CommandType, GenericDriver
 
 
 def _make_mock_bus() -> MagicMock:
@@ -71,9 +73,7 @@ class TestCANManager:
         with patch("asyncio.get_event_loop") as mock_loop:
             mock_loop.return_value.run_in_executor = AsyncMock()
             await mgr.send("m1", msg)
-            mock_loop.return_value.run_in_executor.assert_called_once_with(
-                None, bus0.send, msg
-            )
+            mock_loop.return_value.run_in_executor.assert_called_once_with(None, bus0.send, msg)
 
     async def test_initialize_motors_sends_steps_with_declared_delays(self) -> None:
         mgr = CANManager()
@@ -99,9 +99,7 @@ class TestCANManager:
         mgr = CANManager()
         mgr.add_bus("can0", _make_mock_bus())
 
-        with patch.object(
-            mgr, "initialize_motors", new_callable=AsyncMock
-        ) as initialize_motors:
+        with patch.object(mgr, "initialize_motors", new_callable=AsyncMock) as initialize_motors:
             await mgr.run()
 
         initialize_motors.assert_awaited_once_with()
@@ -134,6 +132,7 @@ class TestCANManager:
         bus.recv.side_effect = recv_side_effect
 
         with patch("asyncio.get_event_loop") as mock_loop:
+
             async def fake_executor(executor, fn, *args):
                 return fn(*args)
 
@@ -173,6 +172,7 @@ class TestCANManager:
         bus.recv.side_effect = recv_side_effect
 
         with patch("asyncio.get_event_loop") as mock_loop:
+
             async def fake_executor(executor, fn, *args):
                 return fn(*args)
 
@@ -288,3 +288,78 @@ class TestMotorActivation:
             await mgr.activate_motors(should_abort=lambda: True)
 
         assert send.await_count == 0
+
+
+class TestReceiveLoopRobustness:
+    """受信ループは想定外のフレーム 1 通で死んではならない。
+
+    死ぬとそのバスの全モータが永久に STALE になり、試合中は復旧不能になる。
+    """
+
+    @staticmethod
+    def _drain_recv(bus: MagicMock, messages: list[can.Message]) -> None:
+        queue = list(messages)
+
+        def recv_side_effect(timeout: float) -> can.Message | None:
+            if queue:
+                return queue.pop(0)
+            raise asyncio.CancelledError
+
+        bus.recv.side_effect = recv_side_effect
+
+    @staticmethod
+    def _feedback_msg(device_id: int, position_dg: int) -> can.Message:
+        data = bytearray(8)
+        struct.pack_into("<h", data, 0, position_dg)
+        return can.Message(
+            arbitration_id=GenericDriver.build_can_id(CommandType.FEEDBACK, device_id),
+            data=bytes(data),
+            is_extended_id=False,
+        )
+
+    async def _run_loop(self, mgr: CANManager) -> None:
+        with patch("asyncio.get_event_loop") as mock_loop:
+
+            async def fake_executor(executor, fn, *args):
+                return fn(*args)
+
+            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=fake_executor)
+
+            with pytest.raises(asyncio.CancelledError):
+                await mgr._receive_loop("can0")
+
+    @pytest.mark.parametrize("reserved_command_type", [0b100, 0b101, 0b110])
+    async def test_receive_loop_survives_reserved_command_type(
+        self, reserved_command_type: int
+    ) -> None:
+        mgr = CANManager()
+        bus = _make_mock_bus()
+        motor = GenericDriver("gripper", 0x01)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        bogus = can.Message(
+            arbitration_id=(reserved_command_type << 8) | 0x01,
+            data=bytes(8),
+            is_extended_id=False,
+        )
+        self._drain_recv(bus, [bogus, self._feedback_msg(0x01, 900)])
+
+        await self._run_loop(mgr)
+
+        # 予約種別のフレームの後でも、続くフィードバックが取り込めていること
+        assert motor.state.position == pytest.approx(90.0)
+
+    async def test_receive_loop_survives_extended_frame(self) -> None:
+        mgr = CANManager()
+        bus = _make_mock_bus()
+        motor = GenericDriver("gripper", 0x01)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        alien = can.Message(arbitration_id=0x12345678, data=bytes(8), is_extended_id=True)
+        self._drain_recv(bus, [alien, self._feedback_msg(0x01, 450)])
+
+        await self._run_loop(mgr)
+
+        assert motor.state.position == pytest.approx(45.0)

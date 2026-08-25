@@ -23,12 +23,20 @@ motor_check:
   # tolerance はドライバ側のデフォルト (1deg / 5rpm 等) を採用。
   # 個別上書きしたい場合は motors[name].motor_check で行う。
 
+# !!! can_id はバス単位でロボット横断に一意にすること !!!
+# can_edulite / can_generic はメインハンドと物理的に同じバスを共有する。
+# CANManager はロボットごとに別インスタンスだが CAN ID 空間は共有されるため、
+# 同じ can_id を両者が使うと CANManager._receive_loop が最初にマッチした 1 台で break し、
+# もう一方は永久にフィードバックを得られない。EDULITE 05 は
+# requires_fresh_feedback_for_activation が True なので、無励磁のまま運用に入ってしまう。
+# メインハンド (config/main_hand.yaml) が edulite:1,2 / generic:0x01〜0x04 を使うため、
+# サブハンドは後ろにずらしてある。
 motors:
   # RobStride EDULITE 05 — 補助アーム関節
   sub_arm_joint:
     driver: edulite05
     bus: edulite_bus
-    can_id: 2
+    can_id: 3                  # main_hand の rotate_r/rotate_l (1,2) との衝突回避
     host_id: 0xFD
     mode: position
     limit_speed: 2.0
@@ -40,5 +48,5 @@ motors:
   sub_gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x02
+    can_id: 0x05               # main_hand の generic 系 (0x01〜0x04) との衝突回避
     control_type: position

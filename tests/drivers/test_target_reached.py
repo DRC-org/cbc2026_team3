@@ -140,3 +140,30 @@ class TestM3508IsTargetReached:
         driver._state = MotorState(position=10.0)
         # 単回転角だけ書き換えても累積角は 0 のままなので到達しない
         assert driver.is_target_reached(360.0, ControlMode.POSITION) is False
+
+
+class TestFeedbackPosition:
+    """位置偏差監視用の共通 API。ドライバ種別によらず同じ意味の値が得られること。"""
+
+    def test_base_driver_returns_state_position(self) -> None:
+        driver = _BaseDriver("b", 1)
+        driver._state = MotorState(position=12.5)
+        assert driver.feedback_position() == pytest.approx(12.5)
+
+    def test_generic_returns_state_position_in_degrees(self) -> None:
+        driver = GenericDriver("g", 1)
+        _feed_generic(driver, position=42.0)
+        assert driver.feedback_position() == pytest.approx(driver.state.position)
+        assert driver.feedback_position() == pytest.approx(42.0)
+
+    def test_edulite_returns_state_position_in_radians(self) -> None:
+        driver = Edulite05Driver("e", 1)
+        driver._state = MotorState(position=1.25)
+        assert driver.feedback_position() == pytest.approx(driver.state.position)
+        assert driver.feedback_position() == pytest.approx(1.25)
+
+    def test_m3508_returns_multi_turn_position_not_wrapped_angle(self) -> None:
+        driver = M3508Driver("m", 1)
+        driver._state = MotorState(position=10.0)
+        assert driver.feedback_position() == pytest.approx(driver.multi_turn_position)
+        assert driver.feedback_position() != pytest.approx(driver.state.position)

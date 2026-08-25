@@ -4,9 +4,11 @@ import math
 
 import pytest
 
+from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.positions import (
     DEFAULT_TIMEOUT_S,
+    MotorSpec,
     PositionLookupError,
     PositionTable,
     load_position_table,
@@ -221,3 +223,207 @@ class TestIntrospection:
 
         assert spec.unit == "mm"
         assert spec.command_unit == "deg"
+
+
+_PAIRED_CONFIG: dict = {
+    "axes": {
+        "y_axis": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "tolerance": 1.0,
+            "sync_tolerance": 2.0,
+            "motors": {
+                "y_axis_r": {"scale": 864.15, "offset": 0.0},
+                "y_axis_l": {"scale": -864.15, "offset": 0.0},
+            },
+        },
+        "gripper": {"unit": "state", "command_unit": "deg", "scale": 1.0},
+    },
+    "positions": {
+        "y_axis": {"home": 0.0, "work": 10.0},
+        "gripper": {"open": 30.0, "closed": 0.0},
+    },
+}
+
+
+class TestMotorSpec:
+    def test_to_value_is_inverse_of_to_command(self) -> None:
+        motor = MotorSpec(name="y_axis_l", scale=-864.15, offset=12.5)
+
+        assert motor.to_value(motor.to_command(7.5)) == pytest.approx(7.5)
+
+    def test_to_command_applies_scale_and_offset(self) -> None:
+        motor = MotorSpec(name="y_axis_r", scale=2.0, offset=100.0)
+
+        assert motor.to_command(5.0) == pytest.approx(110.0)
+
+
+class TestPairedAxis:
+    def test_commands_applies_per_motor_scale(self) -> None:
+        """逆回転ペアは scale の符号で表すため、左右で符号が反転した指令になる。"""
+        table = load_position_table(_PAIRED_CONFIG, source="<test>")
+
+        assert table.commands("y_axis", "work") == {
+            "y_axis_r": pytest.approx(10.0 * 864.15),
+            "y_axis_l": pytest.approx(-10.0 * 864.15),
+        }
+
+    def test_commands_for_single_motor_axis_is_keyed_by_axis_name(self) -> None:
+        table = load_position_table(_PAIRED_CONFIG, source="<test>")
+
+        assert table.commands("gripper", "open") == {"gripper": pytest.approx(30.0)}
+
+    def test_legacy_command_on_paired_axis_returns_first_motor(self) -> None:
+        """既存呼び出し元を壊さないため、ペア軸でも command() は motors[0] を返す。"""
+        table = load_position_table(_PAIRED_CONFIG, source="<test>")
+
+        assert table.command("y_axis", "work") == pytest.approx(10.0 * 864.15)
+
+    def test_motor_names_and_is_paired(self) -> None:
+        table = load_position_table(_PAIRED_CONFIG, source="<test>")
+
+        assert table.axis("y_axis").motor_names == ("y_axis_r", "y_axis_l")
+        assert table.axis("y_axis").is_paired is True
+        assert table.axis("gripper").motor_names == ("gripper",)
+        assert table.axis("gripper").is_paired is False
+
+    def test_sync_tolerance_and_paired_axes(self) -> None:
+        table = load_position_table(_PAIRED_CONFIG, source="<test>")
+
+        assert table.sync_tolerance("y_axis") == pytest.approx(2.0)
+        assert table.sync_tolerance("gripper") is None
+        assert table.paired_axes() == ("y_axis",)
+
+    def test_commands_resolves_court_variants(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "motors": {
+                            "y_axis_r": {"scale": 2.0},
+                            "y_axis_l": {"scale": -2.0},
+                        }
+                    }
+                },
+                "positions": {"y_axis": {"place": {"red": 10.0, "blue": -10.0}}},
+            }
+        )
+
+        assert table.commands("y_axis", "place", court=Court.BLUE) == {
+            "y_axis_r": pytest.approx(-20.0),
+            "y_axis_l": pytest.approx(20.0),
+        }
+
+
+class TestCommandMode:
+    def test_defaults_to_position(self) -> None:
+        table = load_position_table(_PAIRED_CONFIG, source="<test>")
+
+        assert table.command_mode("gripper") is ControlMode.POSITION
+        assert table.settle_s("gripper") == pytest.approx(0.0)
+
+    def test_duty_mode_with_settle(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {
+                    "conveyor": {
+                        "unit": "duty",
+                        "command_unit": "duty",
+                        "command_mode": "duty",
+                        "settle_s": 0.3,
+                    }
+                },
+                "positions": {"conveyor": {"run": 0.6, "stop": 0.0}},
+            }
+        )
+
+        assert table.command_mode("conveyor") is ControlMode.DUTY
+        assert table.settle_s("conveyor") == pytest.approx(0.3)
+
+    def test_velocity_mode(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {"conveyor": {"command_mode": "velocity"}},
+                "positions": {"conveyor": {"run": 100.0}},
+            }
+        )
+
+        assert table.command_mode("conveyor") is ControlMode.VELOCITY
+
+    def test_current_mode_is_rejected(self) -> None:
+        """電流指令は位置定数から出す用途が無く、誤記のまま機構へ流すと危険なため拒否する。"""
+        with pytest.raises(ValueError, match="command_mode"):
+            load_position_table({"axes": {"conveyor": {"command_mode": "current"}}})
+
+    def test_unknown_mode_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="command_mode"):
+            load_position_table({"axes": {"conveyor": {"command_mode": "torque"}}})
+
+
+class TestAxisSchemaValidation:
+    def test_motors_with_axis_level_scale_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="motors"):
+            load_position_table(
+                {"axes": {"y_axis": {"scale": 2.0, "motors": {"y_axis_r": {"scale": 2.0}}}}}
+            )
+
+    def test_motors_with_axis_level_offset_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="motors"):
+            load_position_table(
+                {"axes": {"y_axis": {"offset": 1.0, "motors": {"y_axis_r": {"scale": 2.0}}}}}
+            )
+
+    def test_empty_motors_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="motors"):
+            load_position_table({"axes": {"y_axis": {"motors": {}}}})
+
+    def test_unknown_key_under_motor_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="invert"):
+            load_position_table(
+                {"axes": {"y_axis": {"motors": {"y_axis_r": {"scale": 2.0, "invert": True}}}}}
+            )
+
+    def test_zero_scale_on_any_motor_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="scale"):
+            load_position_table(
+                {
+                    "axes": {
+                        "y_axis": {
+                            "motors": {
+                                "y_axis_r": {"scale": 2.0},
+                                "y_axis_l": {"scale": 0.0},
+                            }
+                        }
+                    }
+                }
+            )
+
+    def test_sync_tolerance_on_single_motor_axis_is_rejected(self) -> None:
+        """1 台の軸に書くと防護が効かないまま「書いたつもり」になるため拒否する。"""
+        with pytest.raises(ValueError, match="sync_tolerance"):
+            load_position_table({"axes": {"gripper": {"scale": 1.0, "sync_tolerance": 2.0}}})
+
+    def test_negative_sync_tolerance_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sync_tolerance"):
+            load_position_table(
+                {
+                    "axes": {
+                        "y_axis": {
+                            "sync_tolerance": -1.0,
+                            "motors": {"a": {"scale": 1.0}, "b": {"scale": -1.0}},
+                        }
+                    }
+                }
+            )
+
+    def test_negative_settle_s_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="settle_s"):
+            load_position_table({"axes": {"conveyor": {"settle_s": -0.1}}})
+
+    def test_motors_must_be_mapping(self) -> None:
+        with pytest.raises(ValueError, match="motors"):
+            load_position_table({"axes": {"y_axis": {"motors": ["y_axis_r"]}}})
+
+    def test_motor_entry_must_be_mapping(self) -> None:
+        with pytest.raises(ValueError, match="y_axis_r"):
+            load_position_table({"axes": {"y_axis": {"motors": {"y_axis_r": 2.0}}}})

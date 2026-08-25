@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import time
+from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import can
@@ -9,7 +12,7 @@ import pytest
 
 from lib.drivers.base import ControlMode, MotorDriver, MotorState
 from lib.match_state import Court
-from lib.sequence.engine import Sequence, SequenceTimeoutError, step
+from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 
@@ -17,15 +20,17 @@ from lib.sequence.positions import load_position_table
 class _EchoDriver(MotorDriver):
     """指令値をそのままフィードバックに反映する (常に即到達する) テスト用ドライバ。"""
 
-    def __init__(self, name: str, *, reaches: bool = True) -> None:
+    def __init__(self, name: str, *, reaches: bool = True, bias: float = 0.0) -> None:
         super().__init__(name, 1)
         self.commands: list[tuple[ControlMode, float]] = []
         self._reaches = reaches
+        # 指令値とフィードバックのずれ。ペア軸の偏差検知を再現するために使う
+        self._bias = bias
 
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
         self.commands.append((mode, value))
         if self._reaches:
-            self._state = MotorState(position=value)
+            self._state = MotorState(position=value + self._bias)
         return can.Message(arbitration_id=0x100, data=bytes(8), is_extended_id=False)
 
     def decode_feedback(self, msg: can.Message) -> MotorState:  # pragma: no cover
@@ -191,3 +196,177 @@ class TestBackwardCompatibility:
         await seq.run()
 
         assert seq.executed == ["noop"]
+
+
+# ---------------------------------------------------------------------- #
+#  複数モータ軸 (逆回転ペア) / 位置以外を指令する軸
+# ---------------------------------------------------------------------- #
+
+
+def _make_axis_group(
+    options: Mapping[str, Mapping[str, float | bool]],
+    *,
+    send: AsyncMock | None = None,
+) -> tuple[MotorGroup, dict[str, _EchoDriver]]:
+    """モータごとに到達可否とフィードバックのずれを指定してグループを組む。"""
+    mgr = MagicMock()
+    mgr.send = send if send is not None else AsyncMock()
+    group = MotorGroup()
+    drivers: dict[str, _EchoDriver] = {}
+    for name, option in options.items():
+        driver = _EchoDriver(
+            name,
+            reaches=bool(option.get("reaches", True)),
+            bias=float(option.get("bias", 0.0)),
+        )
+        drivers[name] = driver
+        group.add(MotorHandle(name, driver, mgr, poll_interval=0.001))
+    return group, drivers
+
+
+_PAIRED_CONFIG = {
+    "axes": {
+        # 左右直結の逆回転ペア。scale の符号だけが左右で異なる
+        "y_axis": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "timeout_s": 0.05,
+            "tolerance": 5.0,
+            "sync_tolerance": 2.0,
+            "motors": {
+                "y_axis_r": {"scale": 10.0},
+                "y_axis_l": {"scale": -10.0},
+            },
+        },
+        # 左右で scale の絶対値が異なる軸 (許容差がモータごとに換算されるかの検証用)
+        "wide_pair": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "timeout_s": 0.05,
+            "tolerance": 0.5,
+            "motors": {
+                "wide_a": {"scale": 10.0},
+                "wide_b": {"scale": -100.0},
+            },
+        },
+        "conveyor": {
+            "unit": "duty",
+            "command_unit": "duty",
+            "command_mode": "duty",
+            "settle_s": 0.05,
+            "timeout_s": 0.05,
+        },
+        "spinner": {
+            "unit": "rpm",
+            "command_unit": "rpm",
+            "command_mode": "velocity",
+            "settle_s": 0.0,
+            "timeout_s": 0.05,
+        },
+    },
+    "positions": {
+        "y_axis": {"home": 0.0, "work": 3.0},
+        "wide_pair": {"work": 1.0},
+        "conveyor": {"run": 0.5, "stop": 0.0},
+        "spinner": {"run": 100.0},
+    },
+}
+
+
+def _paired_sequence(group: MotorGroup) -> _MoveSequence:
+    seq = _MoveSequence()
+    seq.bind_motors(group)
+    seq.bind_positions(load_position_table(_PAIRED_CONFIG))
+    return seq
+
+
+class TestPairedAxis:
+    async def test_sends_per_motor_commands(self) -> None:
+        """逆回転ペアではモータごとの scale が効いて左右で符号が反転する。"""
+        group, drivers = _make_axis_group({"y_axis_r": {}, "y_axis_l": {}})
+        seq = _paired_sequence(group)
+
+        await seq.move_to({"y_axis": "work"})
+
+        assert drivers["y_axis_r"].commands == [(ControlMode.POSITION, 30.0)]
+        assert drivers["y_axis_l"].commands == [(ControlMode.POSITION, -30.0)]
+
+    async def test_commands_are_sent_concurrently(self) -> None:
+        """左右の送信に時間差があると機構がねじれるため、逐次 await してはならない。"""
+        events: list[tuple[str, str]] = []
+
+        async def _send(name: str, msg: can.Message) -> None:
+            events.append(("start", name))
+            if name == "y_axis_r":
+                await asyncio.sleep(0.02)
+            events.append(("done", name))
+
+        group, _ = _make_axis_group(
+            {"y_axis_r": {}, "y_axis_l": {}}, send=AsyncMock(side_effect=_send)
+        )
+        seq = _paired_sequence(group)
+
+        await seq.move_to({"y_axis": "work"})
+
+        # 逐次送信なら ("done", "y_axis_r") が ("start", "y_axis_l") より先に来る
+        assert events.index(("start", "y_axis_l")) < events.index(("done", "y_axis_r"))
+
+    async def test_timeout_when_one_motor_does_not_reach(self) -> None:
+        group, _ = _make_axis_group({"y_axis_r": {}, "y_axis_l": {"bias": 1000.0}})
+        seq = _paired_sequence(group)
+
+        with pytest.raises(SequenceTimeoutError, match="y_axis"):
+            await seq.move_to({"y_axis": "work"})
+
+    async def test_sync_error_raises_after_reach(self) -> None:
+        """到達許容差の内側でも左右がずれていれば次のステップへ進ませない。"""
+        # 30deg のずれ = 人間の単位で 3.0mm。到達許容差 (50deg) の内側だが sync_tolerance 超過
+        group, _ = _make_axis_group({"y_axis_r": {}, "y_axis_l": {"bias": 30.0}})
+        seq = _paired_sequence(group)
+
+        with pytest.raises(AxisSyncError, match="y_axis"):
+            await seq.move_to({"y_axis": "work"})
+
+    async def test_sync_error_within_tolerance_passes(self) -> None:
+        group, _ = _make_axis_group({"y_axis_r": {}, "y_axis_l": {"bias": 10.0}})
+        seq = _paired_sequence(group)
+
+        await seq.move_to({"y_axis": "work"})
+
+    async def test_tolerance_is_converted_per_motor(self) -> None:
+        """scale の絶対値が左右で違っても、許容差はモータごとに換算される。"""
+        # 人間の単位 0.5mm → wide_a は 5deg、wide_b は 50deg が許容差になる
+        group, _ = _make_axis_group({"wide_a": {"bias": 4.0}, "wide_b": {"bias": 40.0}})
+        seq = _paired_sequence(group)
+
+        await seq.move_to({"wide_pair": "work"})
+
+    async def test_tolerance_still_rejects_out_of_range_motor(self) -> None:
+        group, _ = _make_axis_group({"wide_a": {"bias": 6.0}, "wide_b": {"bias": 40.0}})
+        seq = _paired_sequence(group)
+
+        with pytest.raises(SequenceTimeoutError, match="wide_pair"):
+            await seq.move_to({"wide_pair": "work"})
+
+
+class TestNonPositionAxis:
+    async def test_duty_axis_waits_settle_only(self) -> None:
+        """到達フラグを持たない軸は判定せず settle_s だけ待つ。"""
+        group, drivers = _make_axis_group({"conveyor": {"reaches": False}})
+        seq = _paired_sequence(group)
+
+        started = time.monotonic()
+        await seq.move_to({"conveyor": "run"})
+        elapsed = time.monotonic() - started
+
+        assert drivers["conveyor"].commands == [(ControlMode.DUTY, 0.5)]
+        assert elapsed >= 0.05
+
+    async def test_velocity_axis_does_not_time_out(self) -> None:
+        """速度指令の軸は到達判定を持たないため、フィードバックが追従しなくても止まらない。"""
+        group, drivers = _make_axis_group({"spinner": {"reaches": False}})
+        seq = _paired_sequence(group)
+
+        await seq.move_to({"spinner": "run"})
+
+        assert drivers["spinner"].commands == [(ControlMode.VELOCITY, 100.0)]

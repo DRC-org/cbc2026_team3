@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from lib.control.pid import PIDController
+from lib.control.sync_monitor import SyncGroup
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 
@@ -80,6 +81,8 @@ class M3508PositionLoop:
     安全側の挙動:
       - 緊急停止中は電流 0 + PID リセット + 目標解除
       - フィードバックが ``feedback_timeout_ms`` を超えて途絶したら電流 0 + PID リセット
+      - ``add_sync_group`` で束ねた左右直結ペアは、途絶・偏差超過をペア単位で扱う
+        (1 台でも異常ならペア全員を電流 0。片側だけ生かすと機構が壊れる)
       - 周期処理で例外が出てもループは継続する (指令が止まると C620 の挙動次第で危険)
       - ``pause()`` 中は 1 通も送らない (アクチュエータ動作確認と 0x200 を奪い合わないため)
     """
@@ -121,6 +124,13 @@ class M3508PositionLoop:
         self._sleep = sleep
 
         self._axes: dict[str, _Axis] = {}
+        self._sync_groups: dict[str, SyncGroup] = {}
+        # モータ名 → 所属グループ名。周期処理でグループを引くための逆引き
+        self._group_of: dict[str, str] = {}
+        # 偏差超過のラッチ。reset_sync_violation() を通るまで電流 0 を維持する
+        self._sync_violations: set[str] = set()
+        # グループ単位のフィードバック途絶の遷移でのみログを出すためのフラグ
+        self._group_stale: set[str] = set()
         # 生成時を基準にしておく。run() 開始時に取り直すので、生成から起動までの
         # 待ち時間が最初の dt に化けることはない
         self._last_tick: float = time_source()
@@ -145,6 +155,33 @@ class M3508PositionLoop:
                 raise ValueError(f"can_id {driver.can_id} が重複 ('{name}' と '{existing_name}')")
         self._axes[name] = _Axis(driver=driver, pid=pid)
 
+    def add_sync_group(self, group: SyncGroup) -> None:
+        """機構的に直結したモータ組を登録する。
+
+        登録されたグループは「フィードバック途絶の判定単位」かつ「偏差監視の単位」になる。
+        メンバが未登録のまま受け入れると、そのモータだけ保護から漏れて片側駆動になるため
+        構成時点で弾く。
+        """
+        if group.name in self._sync_groups:
+            raise ValueError(f"同期グループ '{group.name}' は既に登録済み")
+
+        for member in group.members:
+            if member.motor_name not in self._axes:
+                raise ValueError(
+                    f"同期グループ '{group.name}' のモータ '{member.motor_name}' が"
+                    f"このループ (bus={self._bus_name}) に未登録"
+                )
+            # 1 台が 2 グループに属すると、どちらの許容値で止めるかが曖昧になる
+            existing = self._group_of.get(member.motor_name)
+            if existing is not None:
+                raise ValueError(
+                    f"モータ '{member.motor_name}' は既に同期グループ '{existing}' に所属"
+                )
+
+        self._sync_groups[group.name] = group
+        for member in group.members:
+            self._group_of[member.motor_name] = group.name
+
     def set_sleep(self, sleep: SleepFunc) -> None:
         """周期待ち関数を差し替える (テスト用)。"""
         self._sleep = sleep
@@ -156,6 +193,15 @@ class M3508PositionLoop:
     @property
     def motor_names(self) -> tuple[str, ...]:
         return tuple(self._axes)
+
+    @property
+    def sync_group_names(self) -> tuple[str, ...]:
+        return tuple(self._sync_groups)
+
+    @property
+    def sync_violations(self) -> frozenset[str]:
+        """偏差超過でラッチ中のグループ名。"""
+        return frozenset(self._sync_violations)
 
     def pid(self, name: str) -> PIDController:
         return self._axes[name].pid
@@ -213,6 +259,34 @@ class M3508PositionLoop:
         axis.driver.reset_multi_turn_origin()
         self.clear_target(name)
 
+    def set_group_origin_here(self, name: str) -> None:
+        """同期グループ全員の累積角原点を同時に確定する。
+
+        左右を別々の時刻に原点確定すると、その間に片方が動いた分だけ偏差が最初から
+        オフセットを持ち、正常な動作でも即座に偏差超過で止まってしまう。
+        await を挟まず 1 回で回すことで、制御周期が割り込む余地を無くしている。
+        """
+        group = self._sync_groups[name]
+        for member in group.members:
+            self._axes[member.motor_name].driver.reset_multi_turn_origin()
+        for member in group.members:
+            self.clear_target(member.motor_name)
+
+    def reset_sync_violation(self, name: str | None = None) -> None:
+        """偏差超過のラッチを解除する (None で全グループ)。
+
+        緊急停止の解除 (``_disable_all``) や動作確認からの復帰 (``resume``) では
+        意図的に解除しない。機構が物理的にずれているという事実はそれらの操作では
+        直らず、自動解除すると人間が原因に気付かないまま再び駆動してしまうため、
+        「人間がずれを直した」という宣言としてこのメソッドを明示的に通させる。
+        """
+        if name is None:
+            self._sync_violations.clear()
+            return
+        if name not in self._sync_groups:
+            raise KeyError(name)
+        self._sync_violations.discard(name)
+
     def target_sink(self, name: str) -> TargetSink:
         """MotorHandle に差し込む目標値シンクを返す。"""
         if name not in self._axes:
@@ -255,9 +329,18 @@ class M3508PositionLoop:
             return
 
         wall_now = self._feedback_clock()
+        stale = {name: self._is_feedback_stale(name, wall_now) for name in self._axes}
+        blocked = self._blocked_groups(stale)
+
         currents = [0, 0, 0, 0]
         for name, axis in self._axes.items():
-            currents[axis.driver.can_id - 1] = self._compute_current(name, axis, dt, wall_now)
+            currents[axis.driver.can_id - 1] = self._compute_current(
+                name,
+                axis,
+                dt,
+                stale=stale[name],
+                blocked=self._group_of.get(name) in blocked,
+            )
 
         await self._send(currents)
 
@@ -365,11 +448,73 @@ class M3508PositionLoop:
             return 0.0
         return min(dt, self._max_dt_s)
 
-    def _compute_current(self, name: str, axis: _Axis, dt: float, wall_now: float) -> int:
+    def _blocked_groups(self, stale: dict[str, bool]) -> frozenset[str]:
+        """この周期で電流 0 に落とすグループ名を決める。
+
+        判定は「メンバの誰かが途絶した」と「左右の偏差が許容を超えた」の 2 つ。どちらも
+        「左右のうち片方だけが動き続ける」状況を作らせないための保護で、グループ単位で
+        しか意味を持たない。
+
+        途絶しているグループでは偏差判定を行わない。欠けたメンバを含む比較は
+        「ずれていない」とも「ずれている」とも言えず、どのみち電流は 0 に落ちている。
+        """
+        blocked = set(self._sync_violations)
+        for group in self._sync_groups.values():
+            if any(stale[member.motor_name] for member in group.members):
+                # 左右直結の機構では片方だけ止めると残った側が押し続けて壊れるため、
+                # 1 台でも途絶したらグループ全員を電流 0 にする
+                blocked.add(group.name)
+                if group.name not in self._group_stale:
+                    self._group_stale.add(group.name)
+                    logger.warning(
+                        "同期グループのフィードバック途絶のため全員を電流 0 に落とす "
+                        "(axis=%s, bus=%s)",
+                        group.name,
+                        self._bus_name,
+                    )
+                continue
+            self._group_stale.discard(group.name)
+            if group.name in self._sync_violations:
+                continue
+            if self._check_deviation(group):
+                blocked.add(group.name)
+        return frozenset(blocked)
+
+    def _check_deviation(self, group: SyncGroup) -> bool:
+        """グループの左右ずれを判定し、超過ならラッチして True を返す。
+
+        SyncMonitor (50Hz) と意図的に二重の判定になっている。こちらは「電流を即 0 に
+        する」局所保護で、機構が壊れる前に力を抜くことだけを担う。SyncMonitor は
+        「試合を止めて人間に知らせる」全体保護で役割が違うため、片方があれば十分とは
+        しない。連続サンプル数による debounce も入れない (壊れるまでの猶予が短く、
+        1 周期でも早く力を抜く方が安全側)。
+        """
+        positions = {
+            member.motor_name: self._axes[member.motor_name].driver.feedback_position()
+            for member in group.members
+        }
+        deviation = group.deviation(positions)
+        if deviation is None or deviation <= group.tolerance:
+            return False
+
+        self._sync_violations.add(group.name)
+        # 試合中に「なぜ止まったか」が分からないと復旧手順を選べない
+        logger.error(
+            "同期ずれのため電流 0 にラッチ (axis=%s, deviation=%.3f, tolerance=%.3f, bus=%s)",
+            group.name,
+            deviation,
+            group.tolerance,
+            self._bus_name,
+        )
+        return True
+
+    def _compute_current(
+        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool
+    ) -> int:
         if axis.target is None or axis.mode is None:
             return 0
 
-        if self._is_feedback_stale(name, wall_now):
+        if stale:
             if not axis.stale:
                 axis.stale = True
                 logger.warning(
@@ -384,6 +529,12 @@ class M3508PositionLoop:
         if axis.stale:
             axis.stale = False
             logger.info("フィードバック復帰 (motor=%s, bus=%s)", name, self._bus_name)
+
+        if blocked:
+            # 自分は健全でも、同じ機構に直結した相方が止まっている (途絶 or 偏差超過)。
+            # 目標は残したまま力だけ抜く (復帰時に保持位置を作り直さずに済む)
+            axis.pid.reset()
+            return 0
 
         if axis.mode is ControlMode.CURRENT:
             return round(axis.target)

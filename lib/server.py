@@ -335,22 +335,7 @@ class RobotServer:
                 logger.info("trigger: %s", robot_name)
 
         elif cmd_type == "e_stop":
-            logger.warning("緊急停止コマンド受信")
-            self._e_stop_active = True
-            for runner in self._motor_check_runners.values():
-                if runner.is_running:
-                    runner.abort()
-            try:
-                await self._send_e_stop_frames()
-            except Exception:
-                # 送信経路が丸ごと壊れても操縦者の WS を落とさない。ここで例外を投げると
-                # 接続が切れ、解除操作も緊急停止状態の表示もできなくなる
-                logger.exception("E-STOP 停止フレーム送信に失敗")
-            finally:
-                # 停止フレームの成否に関わらずシーケンスを止める。走らせたままだと
-                # 次のステップが新しいモータ目標値を送り、緊急停止を上書きしてしまう
-                self._stop_all_sequences(discard_pending_start=True)
-                await self._broadcast_e_stop_state()
+            await self.activate_e_stop()
 
         elif cmd_type == "e_stop_release":
             logger.info("緊急停止解除コマンド受信")
@@ -488,6 +473,34 @@ class RobotServer:
 
         await self._broadcast_match_state()
 
+    async def activate_e_stop(self, *, reason: str | None = None) -> None:
+        """緊急停止を発動する (操縦者コマンドと内部検知の共通経路)。
+
+        同期監視のような内部の異常検知も、操縦者が押した場合と完全に同じ順序で
+        停止させる必要がある (停止経路が 2 つあると片方だけ穴が空く)。
+        既に停止中に再度呼ばれても、状態を壊さず停止指令を送り直すだけで済む。
+
+        Args:
+            reason: 停止理由。試合中に「なぜ止まったか」が操縦者に伝わらないと
+                復旧できないため、ログと WS 配信の両方に載せる。
+        """
+        logger.warning("緊急停止発動: %s", reason or "操縦者コマンド")
+        self._e_stop_active = True
+        for runner in self._motor_check_runners.values():
+            if runner.is_running:
+                runner.abort()
+        try:
+            await self._send_e_stop_frames()
+        except Exception:
+            # 送信経路が丸ごと壊れても操縦者の WS を落とさない。ここで例外を投げると
+            # 接続が切れ、解除操作も緊急停止状態の表示もできなくなる
+            logger.exception("E-STOP 停止フレーム送信に失敗")
+        finally:
+            # 停止フレームの成否に関わらずシーケンスを止める。走らせたままだと
+            # 次のステップが新しいモータ目標値を送り、緊急停止を上書きしてしまう
+            self._stop_all_sequences(discard_pending_start=True)
+            await self._broadcast_e_stop_state(reason=reason)
+
     async def _send_e_stop_frames(self) -> None:
         """全ロボットの全モータ / 全バスへ停止フレームを送る。
 
@@ -561,11 +574,12 @@ class RobotServer:
             {"type": "command_rejected", "command": command, "reason": reason}
         )
 
-    async def _broadcast_e_stop_state(self) -> None:
-        msg = json.dumps(
-            {"type": "e_stop_state", "active": self._e_stop_active},
-            ensure_ascii=False,
-        )
+    async def _broadcast_e_stop_state(self, *, reason: str | None = None) -> None:
+        payload: dict[str, object] = {"type": "e_stop_state", "active": self._e_stop_active}
+        if reason is not None:
+            # 未知フィールドは既存 UI が無視するため、理由が無いときは付けない
+            payload["reason"] = reason
+        msg = json.dumps(payload, ensure_ascii=False)
         dead: set[web.WebSocketResponse] = set()
         for ws in self._ws_clients:
             if ws.closed:

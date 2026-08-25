@@ -96,10 +96,21 @@ class MotorDriver(abc.ABC):
             return True
         return abs(observed - target) <= tol
 
+    def feedback_position(self) -> float:
+        """多回転を含む位置フィードバック。
+
+        ドライバ種別によらず同じ意味で比較できる値を返す (単回転でラップしない)。
+        単位はドライバごとの位置単位のまま (M3508/自作=deg, EDULITE 05=rad) なので、
+        比較してよいのは同一機構に直結した同種モータ同士。
+        """
+        return self._state.position
+
     def _observed_for(self, mode: ControlMode) -> float | None:
         """モードに対応するフィードバック量。比較対象がない場合は None。"""
+        # 位置フィードバックの定義は feedback_position に一本化する。
+        # 到達判定と偏差監視で別々の定義を持つと、片方だけ直したときに気付けない
         if mode is ControlMode.POSITION:
-            return self._state.position
+            return self.feedback_position()
         if mode is ControlMode.VELOCITY:
             return self._state.velocity
         if mode is ControlMode.CURRENT:

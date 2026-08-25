@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from lib.match_state import Court
+from lib.sequence.motors import AxisHandle
 from lib.sequence.positions import PositionTable
 
 if TYPE_CHECKING:
@@ -20,6 +21,15 @@ class SequenceTimeoutError(RuntimeError):
 
     run() が例外を捕まえてシーケンスを停止させるため、掴めていないワークを
     搬送するといった「黙って次のステップへ進む」事故を防げる。
+    """
+
+
+class AxisSyncError(RuntimeError):
+    """左右ペア軸の位置ずれ (sync_tolerance 超過) を検知したときに送出される。
+
+    左右 2 台が機構的に直結した軸では、ずれたまま動かし続けると押し合いになって
+    その場で機構が壊れる。到達判定を満たしていても偏差が残っていれば次のステップへ
+    進ませず、run() に捕捉させてシーケンスを止める。
     """
 
 
@@ -142,36 +152,49 @@ class Sequence:
 
         単位換算・許容差・待ち時間はすべて位置定数 yaml の責務なので、
         シーケンス本体には生の数値が現れない。到達しない軸があれば
-        SequenceTimeoutError を送出して停止させる。
+        SequenceTimeoutError を、到達しても左右がずれている軸があれば
+        AxisSyncError を送出して停止させる。
         指令値は保持したままにする (落下すると危険な軸で保持トルクを失わないため)。
         """
         table = self.positions
-        pending: list[tuple[str, str, Awaitable[bool]]] = []
+        pending: list[tuple[AxisHandle, str, Awaitable[bool]]] = []
 
         for axis, position_name in targets.items():
-            handle = getattr(self.motors, axis)
-            value = table.command(axis, position_name, court=self.court)
-            await handle.set_position(value)
+            spec = table.axis(axis)
+            # 未定義のモータ名は MotorGroup 側が利用可能な名前付きの例外にしてくれる
+            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
+            await handle.set_target_value(
+                table.commands(axis, position_name, court=self.court),
+            )
             pending.append(
                 (
-                    axis,
+                    handle,
                     position_name,
-                    handle.wait_reached(
-                        tolerance=table.tolerance(axis),
-                        timeout=table.timeout(axis) if timeout is None else timeout,
-                    ),
+                    handle.wait_reached(timeout=spec.timeout_s if timeout is None else timeout),
                 )
             )
 
         results = await asyncio.gather(*(awaitable for _, _, awaitable in pending))
         failed = [
-            f"{axis}->{position_name}"
-            for (axis, position_name, _), reached in zip(pending, results, strict=True)
+            f"{handle.name}->{position_name}"
+            for (handle, position_name, _), reached in zip(pending, results, strict=True)
             if not reached
         ]
         if failed:
             raise SequenceTimeoutError(
                 f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
+            )
+
+        # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない
+        desynced = []
+        for handle, _, _ in pending:
+            error = handle.sync_error()
+            allowed = table.sync_tolerance(handle.name)
+            if error is not None and allowed is not None and error > allowed:
+                desynced.append(f"{handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
+        if desynced:
+            raise AxisSyncError(
+                f"シーケンス '{self.name}': 軸内のモータ位置がずれています ({', '.join(desynced)})"
             )
 
     @property

@@ -392,7 +392,8 @@ class TestMotorCheckRejectedDuringEStop:
 
             assert send.await_count == 2
             assert send_to_bus.await_count == 2
-            broadcast.assert_awaited_once_with()
+            # 操縦者操作による緊急停止には停止理由が無い (内部検知のときだけ載る)
+            broadcast.assert_awaited_once_with(reason=None)
             assert "driver固有送信失敗" in caplog.text
             assert "bus送信失敗" in caplog.text
         finally:

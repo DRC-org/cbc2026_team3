@@ -13,6 +13,7 @@ from lib.control.position_loop import (
     M3508PositionLoop,
     make_position_pid,
 )
+from lib.control.sync_monitor import SyncGroup, SyncMember
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 
@@ -534,3 +535,267 @@ class TestMakePositionPid:
 
     def test_default_interval_is_within_100_to_200hz(self) -> None:
         assert 1.0 / 200.0 <= DEFAULT_INTERVAL_S <= 1.0 / 100.0
+
+
+def _pair_group(*, name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
+    """lift / tilt を逆回転ペアとして束ねたグループ (逆回転は scale の符号で表す)。"""
+    return SyncGroup(
+        name=name,
+        members=(SyncMember("lift", 1.0, 0.0), SyncMember("tilt", -1.0, 0.0)),
+        tolerance=tolerance,
+    )
+
+
+async def _target_pair(fx: _Fixture, value: float) -> None:
+    """ペアに「同じ動作」を指示する (逆回転側は符号を反転)。"""
+    await fx.loop.set_target("lift", ControlMode.POSITION, value)
+    await fx.loop.set_target("tilt", ControlMode.POSITION, -value)
+
+
+class TestSyncGroupRegistration:
+    async def test_unknown_motor_rejected(self) -> None:
+        fx = _Fixture()
+        group = SyncGroup(
+            name="y_axis",
+            members=(SyncMember("lift", 1.0, 0.0), SyncMember("ghost", -1.0, 0.0)),
+            tolerance=2.0,
+        )
+        with pytest.raises(ValueError, match="ghost"):
+            fx.loop.add_sync_group(group)
+
+    async def test_duplicate_group_rejected(self) -> None:
+        fx = _Fixture()
+        fx.loop.add_sync_group(_pair_group())
+        with pytest.raises(ValueError, match="y_axis"):
+            fx.loop.add_sync_group(_pair_group())
+
+    async def test_group_names_exposed(self) -> None:
+        fx = _Fixture()
+        fx.loop.add_sync_group(_pair_group())
+        assert fx.loop.sync_group_names == ("y_axis",)
+
+
+class TestPairedStaleFeedback:
+    async def test_stale_member_zeroes_whole_group(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group())
+        await _target_pair(fx, 10.0)
+        await fx.tick()
+        assert fx.manager.last_currents == (1000, -1000, 0, 0)
+
+        # lift だけ途絶させる (tilt のフィードバックは新鮮なまま)
+        fx.mono.advance(0.6)
+        fx.wall.advance(0.6)
+        fx.feed("tilt", 0.0)
+        await fx.loop.step()
+
+        # 片方だけ止めると残った側が押し続けて機構が壊れる
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_ungrouped_stale_axis_does_not_affect_others(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await _target_pair(fx, 10.0)
+        await fx.tick()
+
+        fx.mono.advance(0.6)
+        fx.wall.advance(0.6)
+        fx.feed("tilt", 0.0)
+        await fx.loop.step()
+
+        # グループ未登録なら従来どおり軸単位判定 (後方互換)
+        assert fx.manager.last_currents == (0, -1000, 0, 0)
+
+    async def test_healthy_member_pid_reset_on_group_stale(self) -> None:
+        fx = _Fixture(kp=0.0, ki=10.0)
+        fx.loop.add_sync_group(_pair_group())
+        await _target_pair(fx, 10.0)
+        await fx.tick()
+        await fx.tick()
+        assert fx.loop.pid("tilt").integral != pytest.approx(0.0)
+
+        fx.mono.advance(0.6)
+        fx.wall.advance(0.6)
+        fx.feed("tilt", 0.0)
+        await fx.loop.step()
+
+        assert fx.loop.pid("tilt").integral == pytest.approx(0.0)
+
+    async def test_group_recovers_after_feedback_returns(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group())
+        await _target_pair(fx, 10.0)
+        await fx.tick(dt=0.6)
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+        fx.feed("lift", 0.0)
+        fx.feed("tilt", 0.0)
+        await fx.tick()
+        assert fx.manager.last_currents == (1000, -1000, 0, 0)
+
+
+class TestSyncDeviation:
+    async def test_reverse_rotation_pair_has_no_deviation(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group())
+        await _target_pair(fx, 20.0)
+
+        # 左右が正しく同一動作している状態 (逆回転なので符号が逆)
+        fx.feed("lift", 10.0)
+        fx.feed("tilt", -10.0)
+        await fx.tick()
+
+        assert fx.loop.sync_violations == frozenset()
+        assert fx.manager.last_currents[0] == pytest.approx(1000, abs=5)
+        assert fx.manager.last_currents[1] == pytest.approx(-1000, abs=5)
+
+    async def test_violation_zeroes_group_and_latches(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+        fx.feed("lift", -5.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+        # 偏差が許容内に戻ってもラッチは外れない
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+    async def test_violation_resets_pid(self) -> None:
+        fx = _Fixture(kp=0.0, ki=10.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+        await fx.tick()
+        await fx.tick()
+        assert fx.loop.pid("lift").integral != pytest.approx(0.0)
+
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+
+        assert fx.loop.pid("lift").integral == pytest.approx(0.0)
+        assert fx.loop.pid("tilt").integral == pytest.approx(0.0)
+
+    async def test_reset_sync_violation_restores_output(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+        # 人間が機構のずれを直した状態 (逆回転ペアなので符号が逆で揃う)
+        fx.feed("lift", 5.0)
+        fx.loop.reset_sync_violation()
+        await fx.tick()
+
+        assert fx.loop.sync_violations == frozenset()
+        assert fx.manager.last_currents[0] == pytest.approx(1500, abs=5)
+        assert fx.manager.last_currents[1] == pytest.approx(-1500, abs=5)
+
+    async def test_reset_sync_violation_by_name(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+
+        with pytest.raises(KeyError):
+            fx.loop.reset_sync_violation("unknown")
+        fx.loop.reset_sync_violation("y_axis")
+        assert fx.loop.sync_violations == frozenset()
+
+    async def test_violation_is_logged_with_axis_and_values(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+
+        with caplog.at_level("ERROR", logger="lib.control.position_loop"):
+            fx.feed("lift", 15.0)
+            fx.feed("tilt", -5.0)
+            await fx.tick()
+
+        # 試合中に「なぜ止まったか」が分からないと復旧できない
+        assert "y_axis" in caplog.text
+        assert "2.0" in caplog.text
+
+    async def test_stale_member_excluded_from_deviation(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+
+        # lift を途絶させたまま tilt だけ大きく動かす (比較対象が 1 個なので判定しない)
+        fx.mono.advance(0.6)
+        fx.wall.advance(0.6)
+        fx.feed("tilt", -30.0)
+        await fx.loop.step()
+
+        assert fx.loop.sync_violations == frozenset()
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_latch_survives_estop_release(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+        fx.estop = True
+        await fx.tick()
+        fx.estop = False
+        await fx.tick()
+
+        # 機構のずれは緊急停止の解除では直らない
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+    async def test_no_violation_while_paused(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+        await fx.loop.pause()
+
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+
+        # 動作確認は 1 台ずつ動かすため、その間の偏差は機構のずれではない
+        assert fx.loop.sync_violations == frozenset()
+
+
+class TestGroupOrigin:
+    async def test_set_group_origin_here_zeroes_all_members(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group())
+        await _target_pair(fx, 20.0)
+        fx.feed("lift", 12.0)
+        fx.feed("tilt", -12.0)
+        await fx.tick()
+
+        fx.loop.set_group_origin_here("y_axis")
+
+        assert fx.lift.multi_turn_position == pytest.approx(0.0)
+        assert fx.tilt.multi_turn_position == pytest.approx(0.0)
+        # 原点が動くと既存の目標値の意味も変わるため、目標は解除される
+        assert fx.loop.target("lift") is None
+        assert fx.loop.target("tilt") is None
+
+        await fx.tick()
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_unknown_group_raises(self) -> None:
+        fx = _Fixture()
+        with pytest.raises(KeyError):
+            fx.loop.set_group_origin_here("y_axis")

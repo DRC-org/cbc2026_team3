@@ -24,6 +24,8 @@ addopts = "-p no:launch_testing_ros_pytest_entrypoint -p no:launch_testing -p no
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# PlatformIO が取得する外部ライブラリ (Unity 等) は自分たちの管理外なので lint しない
+extend-exclude = ["firmware/**/.pio"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
