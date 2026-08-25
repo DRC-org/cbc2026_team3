@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# 1 モータあたりの観測タイムアウト既定値 (impl_plan.md: 1.5s)。
+# 1 モータあたりの観測タイムアウト既定値 (docs/impl_plan.md: 1.5s)。
 DEFAULT_PER_MOTOR_TIMEOUT_MS: float = 1500.0
 
 # ドライバ種別ごとの既定 magnitude。
@@ -53,7 +53,7 @@ class MotorCheckRunner:
     フィードバック観測 → 元の状態に戻す、を順次繰り返す。各モータ完了ごとに
     on_record コールバックを呼ぶことで Web UI 等への進捗配信を可能にする。
 
-    安全策 (impl_plan.md):
+    安全策 (docs/impl_plan.md):
       - reset_after_check は PASSED/FAILED/TIMEOUT どの結末でも必ず送る (駆動状態を残さない)
       - 緊急停止 / 通常シーケンス中の起動拒否は呼び出し側 (server.py) で行う
       - 二重実行は RuntimeError で拒否し、進行中スナップショットの破壊を防ぐ
