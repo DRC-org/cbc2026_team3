@@ -18,6 +18,16 @@
 
 using namespace motorcan;
 
+// CAN 線を他用途に奪われた基板は PC から停止できなくなる。config.h のピン定数を
+// 書き換えたときに実機で気付くのではなく、ビルドで止まるようにしておく。
+#if HAS_STATUS_LED
+static_assert(kPinLed != PIN_CAN0_TX && kPinLed != PIN_CAN0_RX,
+              "ステータス LED が CAN ピンと衝突している (config.h の HAS_STATUS_LED 判定を確認)");
+#endif
+static_assert(kPinPwmN != PIN_CAN0_TX && kPinPwmN != PIN_CAN0_RX, "PWM_N が CAN ピンと衝突");
+static_assert(kPinPwmL != PIN_CAN0_TX && kPinPwmL != PIN_CAN0_RX, "PWM_L が CAN ピンと衝突");
+static_assert(kPinDis != PIN_CAN0_TX && kPinDis != PIN_CAN0_RX, "DIS が CAN ピンと衝突");
+
 // ===========================================================================
 // ペリフェラル
 // ===========================================================================
@@ -414,7 +424,9 @@ static void updateLed(uint32_t nowMs) {
     }
     g_lastBlinkMs = nowMs;
     g_ledOn = !g_ledOn;
+#if HAS_STATUS_LED
     digitalWrite(kPinLed, g_ledOn ? HIGH : LOW);
+#endif
 
 #if HAS_RGB_LED
     // TODO(実機で確認): RGB LED ライブラリを platformio.ini の lib_deps に追加し、
@@ -475,8 +487,10 @@ void setup() {
     pinMode(kPinDis, OUTPUT);
     setGateDriverEnabled(false);
 
+#if HAS_STATUS_LED
     pinMode(kPinLed, OUTPUT);
     digitalWrite(kPinLed, LOW);
+#endif
 
     for (uint8_t bit = 0; bit < 4; ++bit) {
         pinMode(kPinDip[bit], INPUT_PULLUP);
