@@ -18,40 +18,26 @@
 // CAN ペリフェラルと衝突するピン
 // ===========================================================================
 
-// UNO R4 の CAN0 は variant ごとに別のピンへ固定されており、Arduino_CAN の CAN インスタンスが
+// UNO R4 Minima の CAN0 は D4(TX) / D5(RX) に固定されており、Arduino_CAN の CAN インスタンスが
 // variant の PIN_CAN0_TX / PIN_CAN0_RX を使う。ここの定数は配線確認用で、コードから直接は
 // 使わない（実際の値は pins_arduino.h が持つ）。
 //
-//   Minima : PIN_CAN0_TX = D4,  PIN_CAN0_RX = D5
-//   WiFi   : PIN_CAN0_TX = D10, PIN_CAN0_RX = D13（D13 はオンボード LED と兼用）
-//
 // **チーム提供のサンプルは SV0..SV3 を D4〜D7 に置いているが、この配線はそのまま使えない。**
-// Minima では D4/D5 が CAN ペリフェラルに固定されており、サーボ出力と正面衝突する。
+// D4/D5 が CAN ペリフェラルに固定されており、サーボ出力と正面衝突する。
 // サーボ側が先にピンを握れば CAN が上がらず PC から止められない基板になり、
 // CAN が先に握ればサーボが動かない。どちらにしても現場で原因が分かりにくい。
-constexpr uint8_t kPinCanTxMinima = 4;
-constexpr uint8_t kPinCanRxMinima = 5;
-constexpr uint8_t kPinCanTxWifi = 10;
-constexpr uint8_t kPinCanRxWifi = 13;
+constexpr uint8_t kPinCanTx = 4;
+constexpr uint8_t kPinCanRx = 5;
 
 // ===========================================================================
 // ピン配置
 // ===========================================================================
 
 // サーボ出力。UNO R4 で PWM が出せるのは D3 / D5 / D6 / D9 / D10 / D11 のみ。
-// そこから上記 CAN のピンを除くと、両基板で安全に使えるのは D3 / D6 / D9 / D11。
-//
-// 既定は Minima を前提に D9 / D10 / D11。WiFi では D10 が CAN TX なので
-// ch1 だけ D6 へ逃がしてある（基板が確定したら片方に寄せて条件分岐を消すこと）。
-#if defined(ARDUINO_UNOWIFIR4)
-constexpr uint8_t kPinServoCh0 = 9;   // TODO(実機で確認)
-constexpr uint8_t kPinServoCh1 = 6;   // TODO(実機で確認): WiFi では D10 が CAN TX のため D6
-constexpr uint8_t kPinServoCh2 = 11;  // TODO(実機で確認)
-#else
+// そこから CAN の D4/D5 を除くと D3 / D6 / D9 / D10 / D11 が使える。
 constexpr uint8_t kPinServoCh0 = 9;   // TODO(実機で確認)
 constexpr uint8_t kPinServoCh1 = 10;  // TODO(実機で確認)
 constexpr uint8_t kPinServoCh2 = 11;  // TODO(実機で確認)
-#endif
 
 // DIP スイッチ 4bit。INPUT_PULLUP の負論理で、LOW = 1。
 // 添字がビット位置: {SW0=bit0, SW1=bit1, SW2=bit2, SW3=bit3}。
@@ -62,18 +48,9 @@ constexpr uint8_t kPinServoCh2 = 11;  // TODO(実機で確認)
 // TODO(実機で確認): 基板の DIP がどのピンに落ちているか。
 constexpr uint8_t kPinDip[4] = {14, 15, 16, 17};  // A0, A1, A2, A3
 
-// オンボード LED。
-// **WiFi 基板では D13 が CAN RX と兼用**で、pinMode/digitalWrite で握ると CAN 受信が死ぬ。
-// PC から止められない基板になるので、WiFi では LED を使わない。
-// TODO(実機で確認): WiFi 基板を採用する場合は LED マトリクス等、CAN と兼用でない
-// 表示手段へ差し替えること（Arduino_LED_Matrix はコアに同梱されている）。
-#if defined(ARDUINO_UNOWIFIR4)
-#define HAS_STATUS_LED 0
+// オンボード LED。Minima では CAN(D4/D5) と重ならない。
+// ピンを変更して CAN と衝突させた場合は main.cpp の static_assert がビルド時に弾く。
 constexpr uint8_t kPinLed = 13;
-#else
-#define HAS_STATUS_LED 1
-constexpr uint8_t kPinLed = 13;
-#endif
 
 // シリアル RGB LED による状態表示。外部ライブラリ（FastLED_NeoPixel 等）が必要なので既定は無効。
 // 有効にするには platformio.ini の lib_deps に追加すること。
@@ -118,7 +95,7 @@ struct ServoChannelConfig {
 //   ch | デバイス ID | モータ  | ピン
 //   ---+------------+---------+------
 //    0 | 0x01       | gripper | D9
-//    1 | 0x03       | wall_f  | D10（WiFi では D6）
+//    1 | 0x03       | wall_f  | D10
 //    2 | 0x04       | wall_r  | D11
 //
 // TODO(実機で確認): angle_min / angle_max は機構が付いた状態で「当たらない範囲」を

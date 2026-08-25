@@ -33,42 +33,19 @@ constexpr uint8_t kPinSwB = 17;  // A3。リミットスイッチ想定。現状
 constexpr uint8_t kPinSens = 14;  // A0。電流センス
 constexpr uint8_t kPinInt = 12;   // ゲートドライバのフォールト出力想定。現状は未使用
 
-// CAN。CAN ペリフェラルのピンは variant 固定で、Arduino_CAN の CAN インスタンスが
-// PIN_CAN0_TX / PIN_CAN0_RX を使う。ここの定数は配線確認用で、コードから直接は使わない。
-//
-// !!! Minima と WiFi でピンが違う !!!
-//   Minima : TX=D4,  RX=D5
-//   WiFi   : TX=D10, RX=D13   ← D13 はオンボード LED と同じピン
-// チーム提供のサンプルが CAN_RX 5 / CAN_TX 4 を前提にしているので基板は Minima と
-// 見ているが、WiFi でビルドした場合に LED が CAN 線を奪わないよう下でガードしている。
+// CAN。UNO R4 Minima の CAN ペリフェラルは D4(TX) / D5(RX) に固定されており、
+// Arduino_CAN の CAN インスタンスが variant の PIN_CAN0_TX / PIN_CAN0_RX を使う。
+// ここの定数は配線確認用で、コードから直接は使わない。
+// これらのピンを他用途へ割り当てると PC から止められない基板になるため、
+// src/main.cpp の static_assert が衝突をビルド時に検出する。
 constexpr uint8_t kPinCanRx = PIN_CAN0_RX;
 constexpr uint8_t kPinCanTx = PIN_CAN0_TX;
 
 constexpr uint8_t kPinScl = 19;  // A5。現状は未使用
 constexpr uint8_t kPinSda = 18;  // A4。現状は未使用
 
-// ステータス LED を駆動してよいか。
-// WiFi では D13 が CAN RX なので、pinMode(OUTPUT) にした時点で受信が死ぬ。
-// 「LED が光らない」より「PC から止められない基板」の方が明らかに危険なため、
-// 衝突する構成では LED 側を自動的に諦める。
-//
-// constexpr ではなくマクロで判定しているのは、#if がプリプロセッサの段階で評価され
-// constexpr 変数を参照できない（未定義識別子として 0 に潰れ、ガードが黙って
-// 無効化される）ため。
-#define PIN_STATUS_LED 13
-
-#if !defined(PIN_CAN0_TX) || !defined(PIN_CAN0_RX)
-#error "PIN_CAN0_TX / PIN_CAN0_RX が未定義。config.h は Arduino.h の後に include すること"
-#endif
-
-#if (PIN_STATUS_LED == PIN_CAN0_TX) || (PIN_STATUS_LED == PIN_CAN0_RX)
-#define HAS_STATUS_LED 0
-#else
-#define HAS_STATUS_LED 1
-#endif
-
-constexpr uint8_t kPinLed = PIN_STATUS_LED;  // オンボード LED
-constexpr uint8_t kPinRgb = 6;               // シリアル RGB LED（HAS_RGB_LED 時のみ）
+constexpr uint8_t kPinLed = 13;  // オンボード LED
+constexpr uint8_t kPinRgb = 6;   // シリアル RGB LED（HAS_RGB_LED 時のみ）
 
 // DIP スイッチ 4bit（デバイス ID）。INPUT_PULLUP の負論理で、LOW = 1。
 // 添字がビット位置: {SW0=bit0, SW1=bit1, SW2=bit2, SW3=bit3}。
