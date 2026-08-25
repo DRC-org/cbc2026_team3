@@ -66,6 +66,53 @@ describe("接続", () => {
     act(() => latestSocket().open());
     expect(result.current.connected).toBe(true);
   });
+
+  it("url が変わると新しい接続先へ張り直し、その間は切断表示にする", () => {
+    const NEXT = "ws://drc:8080/ws";
+    const { result, rerender } = renderHook(({ url }) => useRobotSocket(url), {
+      initialProps: { url: URL },
+    });
+    act(() => latestSocket().open());
+    expect(result.current.connected).toBe(true);
+
+    rerender({ url: NEXT });
+    expect(latestSocket().url).toBe(NEXT);
+    // 新しい接続が open するまでは指令が届かない。繋がっている表示を残してはならない
+    expect(result.current.connected).toBe(false);
+
+    act(() => latestSocket().open());
+    expect(result.current.connected).toBe(true);
+  });
+
+  it("接続先切替後、旧接続の close で旧 URL へ再接続しない", () => {
+    vi.useFakeTimers();
+    const NEXT = "ws://drc:8080/ws";
+    const { rerender } = renderHook(({ url }) => useRobotSocket(url), {
+      initialProps: { url: URL },
+    });
+    const old = latestSocket();
+    act(() => old.open());
+
+    rerender({ url: NEXT });
+    // 実 WebSocket の close イベントは切替より後に非同期で届く
+    act(() => old.close());
+    act(() => vi.advanceTimersByTime(3000));
+
+    expect(latestSocket().url).toBe(NEXT);
+  });
+
+  it("接続先切替後、旧接続から届いた state で画面を上書きしない", () => {
+    const { result, rerender } = renderHook(({ url }) => useRobotSocket(url), {
+      initialProps: { url: URL },
+    });
+    const old = latestSocket();
+    act(() => old.open());
+
+    rerender({ url: "ws://drc:8080/ws" });
+    act(() => old.receive({ type: "state", robot: "main_hand", step_index: 9 }));
+
+    expect(result.current.states).toEqual({});
+  });
 });
 
 describe("送信", () => {

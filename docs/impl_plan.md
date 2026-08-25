@@ -565,13 +565,15 @@ cbc2026_team3_central/
 │       │   └── RobotContext.tsx
 │       ├── hooks/
 │       │   ├── useRobotSocket.ts
+│       │   ├── useWsUrl.ts         # WS 接続先の解決結果を保持し、保存・リセットする
 │       │   ├── useHotkeys.ts
 │       │   └── useMotorCheck.ts
 │       ├── lib/
 │       │   ├── cx.ts
 │       │   ├── phase.ts            # isSetupPhase / isMatchPhase
 │       │   ├── robots.ts
-│       │   └── tuiColor.ts
+│       │   ├── tuiColor.ts
+│       │   └── wsUrl.ts            # WS 接続先の優先順位解決・入力の正規化・永続化
 │       ├── pages/
 │       │   ├── Dashboard.tsx
 │       │   ├── RobotControl.tsx
@@ -579,7 +581,8 @@ cbc2026_team3_central/
 │       ├── test/                   # vitest 共通ヘルパ（setup / mockWebSocket / robotContext）
 │       └── components/
 │           ├── AppHeader.tsx        # フェーズ / MODE / COURT / EMG STOP + タブ
-│           ├── ConnectionBanner.tsx # WS 切断の全幅バナー
+│           ├── ConnectionBanner.tsx # WS 切断の全幅バナー（接続先設定への入口も持つ）
+│           ├── WsSettings.tsx       # WS 接続先の確認・変更ダイアログ
 │           ├── Toaster.tsx          # 操作拒否・ヘルス異常の通知
 │           ├── SequenceProgress.tsx
 │           ├── SequenceStepList.tsx
@@ -879,8 +882,18 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 - 通知は `Toaster` に一本化（操作拒否 + ヘルス異常、右下に最大 3 件スタック）
 - 試合中以外は START / NEXT / ステップジャンプを UI 上でも無効化する（サーバー側ゲートとの二重防御）
 - 通常停止（STOP）は確認ダイアログを挟まない。安全側の動作であり、止めるまでの時間を延ばさない
-- WS 接続先はページ origin から導出する（`hooks/useRobotSocket.ts`）。別 PC・タブレットからの
-  アクセスに対応するため。vite dev では `/ws` を 8080 へプロキシする（`vite.config.ts`）
+- WS 接続先は `lib/wsUrl.ts` が **クエリ `?ws=` > localStorage > `VITE_WS_URL` > ページ origin**
+  の優先順で解決する。既定（origin 由来）は別 PC・タブレットからのアクセスを成立させるため。
+  vite dev では `/ws` を 8080 へプロキシする（`vite.config.ts`。中継先は `DEV_WS_TARGET` で変更可）
+- 接続先は UI から差し替えられる（`components/WsSettings.tsx`。ステータスバーの接続表示と
+  切断バナーから開く）。「配信元 ≠ 制御プログラム」になる構成 — vite dev を Tailscale 経由で開く、
+  配信済み UI から手元の制御 PC へ繋ぐ、予備機へ切り替える — を再ビルドせず現場で解決するため。
+  クエリ `?ws=` は非永続の一時上書きで、保存済み設定を壊さずに 1 画面だけ別機を見られる
+- 接続先を切り替えると `useRobotSocket` は世代番号で旧接続のイベントを無視する。
+  弾かないと旧 URL への再接続タイマーが走り、古いサーバーの状態で画面が上書きされる
+- vite dev / preview は `host: true` で全インターフェースに bind し、`allowedHosts` に
+  `drc` と `.ts.net` を登録する。既定の localhost bind と Host ヘッダ検査（DNS リバインディング対策）
+  の両方が Tailscale 経由のアクセスを塞ぐため。別名は `VITE_ALLOWED_HOSTS` で追加する
 - `@cloudflare/vite-plugin` は build / preview のみで有効にする（`vite.config.ts`）。dev サーバーは
   制御 PC 上のローカル UI 開発専用で Worker ランタイムを必要とせず、miniflare 起動に伴う
   `Request.cf` 取得（外部通信）と起動遅延を避けるため
