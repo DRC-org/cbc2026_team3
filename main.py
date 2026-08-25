@@ -380,9 +380,16 @@ def _load_pid_config(motor_name: str, motor_cfg: dict) -> dict[str, float | None
                     _DEFAULT_PID[key],
                 )
                 continue
-            result[key] = None
-            continue
-        result[key] = float(value)
+        try:
+            result[key] = float(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "motors.%s.pid.%s が数値ではありません: %r。既定値 %s を使います。",
+                motor_name,
+                key,
+                value,
+                _DEFAULT_PID[key],
+            )
     return result
 
 

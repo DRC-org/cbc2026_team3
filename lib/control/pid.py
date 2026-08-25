@@ -18,7 +18,7 @@ class PIDController:
     M3508 は C620 ESC 経由で電流指令しか受け付けないため、位置制御はこのクラスで
     ``位置 [deg] → 電流指令`` に変換して使う。その場合は
     ``output_min=-16384`` / ``output_max=16384`` (lib/drivers/m3508.py の
-    ``_CURRENT_MIN`` / ``_CURRENT_MAX``) を指定する。
+    ``CURRENT_MIN`` / ``CURRENT_MAX``) を指定する。
 
     ゲイン ``kp`` / ``ki`` / ``kd`` は実行中のチューニング UI から書き換える想定で
     公開属性にしている。
