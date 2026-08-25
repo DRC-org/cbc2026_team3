@@ -63,7 +63,10 @@ export function SequenceProgress({
       </div>
 
       <progress
-        className={cx("progress h-[0.9rem] w-full bg-base-300", TONE_PROGRESS_CLASS[status.tone])}
+        className={cx(
+          "progress h-[0.9rem] w-full border border-line bg-base-300",
+          TONE_PROGRESS_CLASS[status.tone],
+        )}
         value={percent}
         max={100}
       />

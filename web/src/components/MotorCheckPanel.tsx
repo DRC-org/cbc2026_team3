@@ -144,7 +144,10 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
             <span className="truncate text-info">{state.current ?? "—"}</span>
           </div>
           <progress
-            className={cx("progress h-[0.9rem] w-full bg-base-300", TONE_PROGRESS_CLASS.info)}
+            className={cx(
+              "progress h-[0.9rem] w-full border border-line bg-base-300",
+              TONE_PROGRESS_CLASS.info,
+            )}
             value={percent}
             max={100}
           />

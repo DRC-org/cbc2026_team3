@@ -78,7 +78,7 @@ function RobotCard({ robotKey, label }: { robotKey: string; label: string }) {
       <Panel legend={label}>
         <div className="hstack py-2">
           <span className="whitespace-nowrap text-fg-dim">データ未受信</span>
-          <progress className="progress h-[0.9rem] flex-1 bg-base-300" />
+          <progress className="progress h-[0.9rem] flex-1 border border-line bg-base-300" />
         </div>
       </Panel>
     );

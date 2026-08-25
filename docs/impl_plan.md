@@ -1277,7 +1277,35 @@ TuiCss を Tailwind v4 + daisyUI 5 に、タブ管理（`useState` + URL ハッ�
 - **画面スケーリングの移設**: `font-size: clamp(13px, min(1.05vw, 2.1vh), 20px)` を `.wrapper` から
   `html` へ移した。Tailwind の余白は root 基準の `rem` なので、ここを起点にしないと
   「どの機材でも 1 画面に収める」要件が文字サイズにしか効かない。
+- **フォント**: 旧フォントスタック先頭の `DOS`（Perfect DOS VGA 437）は TuiCss が同梱していた
+  ものなので、パッケージ撤去とともに実体が消えた。解決しない名前を残すと誤解を生むため落とし、
+  `DotGothic16, ui-monospace, monospace` にした。ラテン文字の見た目は変わる。
+  完全に元へ戻すにはフォントを自前ホストする必要があるが、フォント本体に明示のライセンス文が
+  無い（TuiCss の MIT 配布に同梱されていただけ）ため、採否はチームの判断に委ねる。
 - **不変点**: WebSocket 送受信ロジックとメッセージ型、`lib/server.py`、`wrangler.jsonc` は未変更。
+
+##### dry-run 実機描画で見つけて直した不具合
+
+自動テストは DOM の存在しか見ないため、以下は `--dry-run` 起動 + ヘッドレス Chrome の
+描画・計算済みスタイル実測でしか捕まらなかった。**配色や部品を変えたら必ず実機描画で確認すること。**
+
+| # | 症状 | 原因 | 対処 |
+|---|---|---|---|
+| 1 | **全モーダルが不可視**（DOM には存在し、テストも通る） | `modal-box` だけ書き `modal modal-open` を書かなかったため、可視化ルール `.modal.modal-open>.modal-box{opacity:1}` が Tailwind のツリーシェイクで CSS から消えた | 外枠に `modal modal-open` を付与。`src/components/ui/Modal.test.tsx` で外枠のクラスを固定 |
+| 2 | 無効ボタンの文字が読めない | daisyUI 既定の `:disabled` は文字 `base-content` 20% / 枠 透明。`⊘ 準備中` `RUNNING` `✓ DONE` は*状態表示を兼ねる*無効ボタンなので致命的 | `Button` に `DISABLED_CLASS`（`text-fg-dim` + `border-line-soft` + `opacity-60`）を追加し移行前の見た目へ戻す |
+| 3 | START/STOP だけ高さ 28px、隣の NEXT/RUNNING は 88px で不揃い | `w-full` のみで `h-full` が無く、daisyUI `.btn` の固定高が残った | 両ボタンに `h-full` |
+| 4 | プログレスバーの枠線が消えた | 移植漏れ（旧 `.tui-progress-bar` は `1px solid`） | 3 箇所に `border border-line` |
+| 5 | 旧ハッシュ URL が Monitor に落ちる | `createBrowserRouter` の生成が `main.tsx` 本体より先に評価される | 読み替えを `App.tsx` へ移設し `src/App.test.tsx` で順序を固定 |
+
+検証済み: 4 タブ × セッティング/試合中/試合終了、モーダル 4 種（接続先設定・STEP JUMP・
+MOTOR CHECK・緊急停止）、1366x768 と 1280x720 で溢れなし、配色・桁揃えのピクセル実測。
+
+##### 未修正（本移行とは別件の既存挙動）
+
+- `SequenceProgress` は `step_index === 0` で未開始でも `► Running` と表示する
+  （`STATUS.idle` は `total_steps === 0` のときしか使われない）。一方 `RobotControl` は
+  同じ状態を「未開始」と判定して `► START` を出すため、同一画面で表示が食い違う。
+  どちらを正とするかは競技運用の判断が要るため本移行では触っていない。
 
 #### ファイル一覧
 

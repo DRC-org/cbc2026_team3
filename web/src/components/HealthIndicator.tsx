@@ -14,15 +14,17 @@ interface ToneStyle {
   symbol: string;
 }
 
-const TONE_STYLES: Record<Tone, ToneStyle> = {
+/** CAN ヘルスは正常/劣化/停止/未取得の 4 段階しか取らない（info は使わない） */
+type HealthTone = Exclude<Tone, "info">;
+
+const TONE_STYLES: Record<HealthTone, ToneStyle> = {
   success: { label: "OK", symbol: "✓" },
   warning: { label: "DEGRADED", symbol: "⚠" },
   error: { label: "DOWN", symbol: "✗" },
-  info: { label: "INFO", symbol: "·" },
   neutral: { label: "未取得", symbol: "○" },
 };
 
-function busTone(state: BusHealthState): Tone {
+function busTone(state: BusHealthState): HealthTone {
   if (state === "ok") return "success";
   if (state === "degraded") return "warning";
   return "error";
@@ -47,7 +49,7 @@ function buildSummary(health: HealthSnapshot): string {
 }
 
 // 状態バッジ（[記号 ラベル]）。
-function StatusTag({ tone, extra }: { tone: Tone; extra?: string }) {
+function StatusTag({ tone, extra }: { tone: HealthTone; extra?: string }) {
   const style = TONE_STYLES[tone];
   return (
     <span className={TONE_TEXT_CLASS[tone]}>

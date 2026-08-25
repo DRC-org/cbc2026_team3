@@ -18,6 +18,14 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
  * （daisyUI の btn-outline がホバー時だけ面を塗る挙動と一致する）。
  * next だけは例外で、試合中に最も多く押すため周辺視野でも分かるよう面で主張させる。
  */
+/**
+ * 無効時の見た目。daisyUI の既定は文字が base-content の 20%・枠が透明で、
+ * 「⊘ 準備中」「RUNNING」「✓ DONE」のように*状態表示を兼ねる*無効ボタンが読めない。
+ * 押せないことは示しつつ、文字と枠は視認できる濃さに戻す。
+ */
+const DISABLED_CLASS =
+  "disabled:border-line-soft disabled:bg-transparent disabled:text-fg-dim disabled:opacity-60";
+
 const TONE_CLASS: Record<ButtonTone, string> = {
   default: "btn btn-sm border-line bg-transparent hover:border-fg-dim hover:bg-raised",
   ok: "btn btn-sm btn-outline btn-success",
@@ -36,6 +44,7 @@ export function Button({ tone = "default", selected = false, className, ...props
       type="button"
       className={cx(
         TONE_CLASS[tone],
+        DISABLED_CLASS,
         selected && "border-fg-dim bg-raised text-fg-strong",
         className,
       )}

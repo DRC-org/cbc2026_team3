@@ -196,7 +196,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 tone="danger"
                 onClick={handleStop}
                 aria-label="シーケンスを通常停止"
-                className="w-full"
+                className="h-full w-full"
               >
                 ■ STOP
               </Button>
@@ -206,7 +206,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 disabled={!inMatch}
                 onClick={handleStart}
                 aria-label="シーケンスを先頭から開始"
-                className="w-full"
+                className="h-full w-full"
               >
                 {inMatch ? "► START" : `⊘ ${blockedLabel}`}
                 {inMatch ? <span className="key-hint">Space</span> : null}

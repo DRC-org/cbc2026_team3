@@ -58,7 +58,12 @@
 }
 
 @theme {
-  --font-mono: DOS, DotGothic16, monospace;
+  /* 旧スタック先頭の "DOS" (Perfect DOS VGA 437) は TuiCss が同梱していたもので、
+     パッケージ撤去とともに実体が無くなった。解決しない名前を残すと
+     「指定してあるのに効かない」誤解を生むため落とす。
+     DotGothic16 は index.html が Google Fonts から読む。
+     数値の桁揃えは各所の tabular-nums が担保する */
+  --font-mono: DotGothic16, ui-monospace, monospace;
 
   /* daisyUI の base スケールに収まらない面と罫線 */
   --color-raised: #232830;

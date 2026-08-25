@@ -40,11 +40,16 @@ const TONE_TITLE_CLASS: Record<ModalTone, string> = {
 };
 
 /**
- * daisyUI の modal-box を素の overlay に載せたモーダル。
+ * daisyUI の modal を `<div>` 版で使うモーダル。
  *
  * `<dialog>` + showModal() は Esc で必ず閉じてしまい、解除経路を限定したい
  * 緊急停止オーバーレイの要件と両立しない。閉じる手段は onClose の有無だけで
  * 決まる形にして、渡さなければ構造的に閉じられないことを保証する。
+ *
+ * 外枠の `modal modal-open` は必須。`.modal-box` は既定が `opacity:0; scale:.95` で、
+ * 可視化するルールは `.modal-open` 側にしかない。付け忘れると Tailwind の
+ * ツリーシェイクでそのルールごと CSS から消え、モーダルが不可視のまま出荷される。
+ * 背景の暗さだけはユーティリティで上書きする（daisyUI 既定は #0006 と薄い）。
  */
 export function Modal({
   open,
@@ -78,7 +83,7 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgb(8_9_11_/_78%)] p-4"
+      className="modal modal-open bg-[rgb(8_9_11_/_78%)]"
       onClick={onClose ? (event) => event.target === event.currentTarget && onClose() : undefined}
       role="presentation"
     >
