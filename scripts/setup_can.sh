@@ -47,14 +47,17 @@ fi
 
 # デバイスが現れるまで待つ。USB の列挙は起動直後だと間に合わないことがあるため、
 # systemd から呼ぶ際は --wait を指定する。
+#
+# デッドラインは全バスで共有する。バスごとに待つと、欠けが N 本あるとき
+# N x WAIT_SEC 秒かかり PC 起動が実測で 31 秒まで伸びた。全 CANable は同じ
+# USB 列挙で現れるため、待ち時間を分ける意味はない。
 wait_for_iface() {
-    local iface="$1" deadline
-    deadline=$(( $(date +%s) + WAIT_SEC ))
+    local iface="$1"
     while :; do
         if ip link show "$iface" &>/dev/null; then
             return 0
         fi
-        if [[ $(date +%s) -ge $deadline ]]; then
+        if [[ $(date +%s) -ge $WAIT_DEADLINE ]]; then
             return 1
         fi
         sleep 0.5
@@ -103,6 +106,30 @@ if [[ ! -f "$CAN_CONFIG" ]]; then
     exit 1
 fi
 
+# can_buses.yaml を編集しても install.sh を再実行しなければ udev には反映されない。
+# 反映漏れは「serial を書いたのに固定名にならない」形で現れ、原因が分かりにくいため
+# ここで検出する。パスは install.sh の UDEV_RULE_PATH と一致させること。
+UDEV_RULE_PATH="/etc/udev/rules.d/99-canable.rules"
+udev_stale=0
+
+check_udev_sync() {
+    if [[ ! -f "$UDEV_RULE_PATH" ]]; then
+        log_warn "udev ルールが未配置です: ${UDEV_RULE_PATH}"
+        log_warn "  -> sudo scripts/install.sh を実行してください"
+        udev_stale=1
+        return
+    fi
+    if ! "$PYTHON" "$CAN_CONFIG" udev | diff -q - "$UDEV_RULE_PATH" &>/dev/null; then
+        log_warn "config/can_buses.yaml と配置済み udev ルールが一致しません"
+        log_warn "  -> sudo scripts/install.sh を再実行してください"
+        udev_stale=1
+    fi
+}
+
+check_udev_sync
+
+WAIT_DEADLINE=$(( $(date +%s) + WAIT_SEC ))
+
 configured=0
 up_count=0
 missing=()
@@ -145,6 +172,12 @@ echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 
 if [[ $STRICT -eq 1 ]]; then
     if [[ ${#unassigned[@]} -gt 0 || ${#missing[@]} -gt 0 ]]; then
         log_err "strict モード: 全 CAN バスが揃っていません"
+        exit 1
+    fi
+    # バスが揃っていても定義と実態がズレていれば、意図しない個体に
+    # 繋がっている可能性がある。試合前点検では失敗として扱う。
+    if [[ $udev_stale -eq 1 ]]; then
+        log_err "strict モード: udev ルールが config/can_buses.yaml と同期していません"
         exit 1
     fi
 fi

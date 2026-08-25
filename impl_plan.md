@@ -65,8 +65,8 @@ uv run ruff format .      # フォーマット
 | バス（固定名） | CANable | USB serial | 接続デバイス | ビットレート |
 |---|---|---|---|---|
 | `can_m3508` | #1 | `004600224E4D501520343332` | M3508 × 2 | 1 Mbps |
-| `can_edulite` | #2 | 未採取 | EDULITE 05 × 2 | 1 Mbps |
-| `can_generic` | #3 | 未採取 | DC モータ / サーボ（自作モタドラ） | 1 Mbps |
+| `can_edulite` | #2 | `006F004A4E4D501820343332` | EDULITE 05 × 2 | 1 Mbps |
+| `can_generic` | #3 | `0068005C4E4D501520343332` | DC モータ / サーボ（自作モタドラ） | 1 Mbps |
 
 #### インターフェース名を固定する理由
 
@@ -95,6 +95,24 @@ PC 起動時は `cbc-can.service`（`Type=oneshot` + `RemainAfterExit=yes`）が
 （`ip link set type can` は down 中しか受け付けないため）。up 後は `ERROR-ACTIVE` を
 確認してから成功を返す（`ip link set up` の成功は通信可能を意味しないため）。
 
+#### `can_buses.yaml` を編集したら install.sh の再実行が必須
+
+udev ルールは `can_buses.yaml` から生成されるため、yaml を編集しただけでは `/etc` 側に
+反映されない。反映漏れは「serial を書いたのに固定名にならない」という分かりにくい形で
+現れるため、`setup_can.sh` は起動時に yaml と配置済みルールを比較し、ズレていれば警告を
+出す。`--strict` では失敗として扱う（定義と実態がズレたまま試合に入るのを防ぐため）。
+
+```
+[WARN] config/can_buses.yaml と配置済み udev ルールが一致しません
+[WARN]   -> sudo scripts/install.sh を再実行してください
+```
+
+#### `--wait` のデッドラインは全バスで共有する
+
+待ち時間をバスごとに消費すると、欠けが N 本あるとき N × `--wait` 秒かかる。実測で
+2 本欠け時に起動が 31 秒まで伸びたため、デッドラインはメインループ開始時に一度だけ
+確定させ、全バスで共有する。全 CANable は同じ USB 列挙で現れるので待ちを分ける意味はない。
+
 #### 新しい CANable の serial 採取手順
 
 USB ハブ入手後、残り 2 個について以下を実行する。
@@ -104,9 +122,11 @@ USB ハブ入手後、残り 2 個について以下を実行する。
 udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 ```
 
-得られた値を `config/can_buses.yaml` の該当バスの `serial`（現在 `TBD`）に記入し、
-`sudo scripts/install.sh` を再実行する。`TBD` のままのバスは udev ルールに出力されず、
-`setup_can.sh` の対象からも外れる。
+得られた値を `config/can_buses.yaml` の該当バスの `serial` に記入し、
+**`sudo scripts/install.sh` を再実行する**（これを忘れると反映されない）。`TBD` のままの
+バスは udev ルールに出力されず、`setup_can.sh` の対象からも外れる。
+
+3 個とも採取済みのため、通常この手順が必要になるのは CANable を交換したときだけ。
 
 #### 既知の制約: バス down 時の失敗が分かりにくい
 
