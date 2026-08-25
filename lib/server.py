@@ -7,11 +7,12 @@ import logging
 import math
 import pathlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
+from lib.control.position_loop import M3508PositionLoop
 from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
@@ -40,6 +41,21 @@ _BUS_SEVERITY_RANK: dict[BusHealth, int] = {
 }
 
 
+#: 緊急停止中に拒否するコマンドと、操縦者へ返す理由。
+#: 停止方向の操作 (sequence_stop / e_stop / match_reset / match_finish / e_stop_release) は
+#: 緊急停止中こそ通す必要があるため決して載せてはならない。motor_check_start は
+#: _start_motor_check が motor_check_error で拒否する別経路を持つのでここでは扱わない。
+#: match_start は全自動モードで両ロボットの request_start() を兼ねるため、
+#: 載せないと緊急停止中に試合開始ボタンだけで両機が動き出す。
+_E_STOP_DENY_MESSAGES: dict[str, str] = {
+    "sequence_start": "緊急停止中のためシーケンスを開始できません",
+    "sequence_jump": "緊急停止中のためステップ移動できません",
+    "trigger": "緊急停止中のためトリガーを送れません",
+    "match_start": "緊急停止中のため試合を開始できません",
+    "set_param": "緊急停止中のためパラメータを変更できません",
+}
+
+
 def _level_for_state(state: BusHealth) -> str:
     """BusHealth を health_change イベントの level 文字列にマップする。"""
     if state is BusHealth.DOWN:
@@ -62,6 +78,9 @@ def _level_for_motor_state(state: MotorHealth) -> str:
 class RobotContext:
     sequence: Sequence
     can_manager: CANManager
+    # そのロボットの M3508 位置制御ループ (バスごと 1 本)。動作確認中は
+    # 0x200 フレームの奪い合いになるため一時停止させる
+    position_loops: list[M3508PositionLoop] = field(default_factory=list)
 
 
 class RobotServer:
@@ -121,8 +140,26 @@ class RobotServer:
         # asyncio.create_task で起動した実行タスク。シャットダウン時にキャンセルする
         self._motor_check_tasks: dict[str, asyncio.Task[None]] = {}
 
-    def add_robot(self, name: str, sequence: Sequence, can_manager: CANManager) -> None:
-        self._robots[name] = RobotContext(sequence=sequence, can_manager=can_manager)
+    @property
+    def e_stop_active(self) -> bool:
+        """緊急停止状態。モータ指令経路のインターロックがこの値を参照する。
+
+        書き換えは e_stop / e_stop_release コマンド経由に限りたいため読み取り専用。
+        """
+        return self._e_stop_active
+
+    def add_robot(
+        self,
+        name: str,
+        sequence: Sequence,
+        can_manager: CANManager,
+        position_loops: list[M3508PositionLoop] | None = None,
+    ) -> None:
+        self._robots[name] = RobotContext(
+            sequence=sequence,
+            can_manager=can_manager,
+            position_loops=list(position_loops or []),
+        )
         self._apply_match_settings_to(sequence)
 
     def _apply_match_settings_to(self, sequence: Sequence) -> None:
@@ -282,6 +319,15 @@ class RobotServer:
                     await self._broadcast_command_rejected(cmd_type, deny)
                 return
 
+            # 緊急停止ゲート。フェーズが MATCH のままだと緊急停止中でも START が通り、
+            # シーケンスが実モータ指令を書き込んで停止指令を上書きしてしまう。
+            # match_start は READY で受理されうるので、フェーズ遷移前にここで止める。
+            if self._e_stop_active and cmd_type in _E_STOP_DENY_MESSAGES:
+                reason = _E_STOP_DENY_MESSAGES[cmd_type]
+                logger.info("コマンド拒否: %s (%s)", cmd_type, reason)
+                await self._broadcast_command_rejected(cmd_type, reason)
+                return
+
         if cmd_type == "trigger":
             robot_name = data.get("robot")
             if robot_name and robot_name in self._robots:
@@ -294,38 +340,23 @@ class RobotServer:
             for runner in self._motor_check_runners.values():
                 if runner.is_running:
                     runner.abort()
-            e_stop_msg = GenericDriver.encode_e_stop()
             try:
-                for name, ctx in self._robots.items():
-                    for motor_name, motor in ctx.can_manager._motors.items():
-                        driver_stop = motor.emergency_stop_message()
-                        if driver_stop is None:
-                            continue
-                        try:
-                            await ctx.can_manager.send(motor_name, driver_stop)
-                        except Exception:
-                            logger.exception(
-                                "E-STOP driver固有送信失敗: robot=%s motor=%s",
-                                name,
-                                motor_name,
-                            )
-                    for bus_name in ctx.can_manager._buses:
-                        try:
-                            await ctx.can_manager.send_to_bus(bus_name, e_stop_msg)
-                        except Exception:
-                            logger.exception(
-                                "E-STOP bus送信失敗: robot=%s bus=%s",
-                                name,
-                                bus_name,
-                            )
-                    logger.info("E-STOP 送信試行完了: %s", name)
+                await self._send_e_stop_frames()
+            except Exception:
+                # 送信経路が丸ごと壊れても操縦者の WS を落とさない。ここで例外を投げると
+                # 接続が切れ、解除操作も緊急停止状態の表示もできなくなる
+                logger.exception("E-STOP 停止フレーム送信に失敗")
             finally:
+                # 停止フレームの成否に関わらずシーケンスを止める。走らせたままだと
+                # 次のステップが新しいモータ目標値を送り、緊急停止を上書きしてしまう
+                self._stop_all_sequences(discard_pending_start=True)
                 await self._broadcast_e_stop_state()
 
         elif cmd_type == "e_stop_release":
             logger.info("緊急停止解除コマンド受信")
             self._e_stop_active = False
             await self._broadcast_e_stop_state()
+            await self._reactivate_motors()
 
         elif cmd_type == "health_check":
             # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
@@ -457,9 +488,68 @@ class RobotServer:
 
         await self._broadcast_match_state()
 
-    def _stop_all_sequences(self) -> None:
-        """全ロボットのシーケンスを通常停止する (緊急停止と異なり CAN 層は触らない)。"""
+    async def _send_e_stop_frames(self) -> None:
+        """全ロボットの全モータ / 全バスへ停止フレームを送る。
+
+        1 モータ・1 バスの送信失敗で他への送信を諦めないよう個別に握り潰す。
+        """
+        e_stop_msg = GenericDriver.encode_e_stop()
+        for name, ctx in self._robots.items():
+            for motor_name, motor in ctx.can_manager._motors.items():
+                driver_stop = motor.emergency_stop_message()
+                if driver_stop is None:
+                    continue
+                try:
+                    await ctx.can_manager.send(motor_name, driver_stop)
+                except Exception:
+                    logger.exception(
+                        "E-STOP driver固有送信失敗: robot=%s motor=%s",
+                        name,
+                        motor_name,
+                    )
+            for bus_name in ctx.can_manager._buses:
+                try:
+                    await ctx.can_manager.send_to_bus(bus_name, e_stop_msg)
+                except Exception:
+                    logger.exception(
+                        "E-STOP bus送信失敗: robot=%s bus=%s",
+                        name,
+                        bus_name,
+                    )
+            logger.info("E-STOP 送信試行完了: %s", name)
+
+    async def _reactivate_motors(self) -> None:
+        """緊急停止解除後にモータの励磁を戻す。
+
+        EDULITE 05 は非常停止で無励磁になるため、解除で再励磁しないと以後の位置指令が
+        一切効かない。再励磁自体はドライバ側が現在角を保持目標に書いてから行うので、
+        解除操作そのものでロボットが動くことはない。
+        """
+        for name, ctx in self._robots.items():
+            try:
+                await ctx.can_manager.activate_motors(should_abort=lambda: self._e_stop_active)
+            except Exception:
+                logger.exception("緊急停止解除後のモータ有効化に失敗: robot=%s", name)
+
+        # 有効化の途中で再び緊急停止が入ると、中断判定をすり抜けた enable が
+        # 停止フレームより後に届きうる。念のため停止フレームを送り直す。
+        if self._e_stop_active:
+            logger.warning("有効化中に緊急停止が再度入ったため停止フレームを再送します")
+            try:
+                await self._send_e_stop_frames()
+            except Exception:
+                logger.exception("E-STOP 停止フレーム再送に失敗")
+
+    def _stop_all_sequences(self, *, discard_pending_start: bool = False) -> None:
+        """全ロボットのシーケンスを通常停止する (緊急停止と異なり CAN 層は触らない)。
+
+        discard_pending_start=True では未処理の開始/ジャンプ要求も破棄する。
+        緊急停止直前に届いた開始要求が停止処理の直後に発火するのを防ぐため。
+        """
         for ctx in self._robots.values():
+            if discard_pending_start:
+                ctx.sequence._resume_event.clear()
+                ctx.sequence._jump_request = None
             if ctx.sequence._running:
                 ctx.sequence.request_stop()
 
@@ -582,8 +672,15 @@ class RobotServer:
 
         self._motor_check_runners[robot_name] = runner
 
+        # 動作確認は C620 の電流指令フレーム (0x200) を自前で送るため、同一バスの
+        # 位置制御ループが走っていると互いのフレームを上書きし合う。ループ側を
+        # 黙らせて排他を取る。M3508 が居ないロボットでは空リストになる。
+        loops = list(ctx.position_loops)
+
         async def _run() -> None:
             try:
+                for loop in loops:
+                    await loop.pause(reason=f"{robot_name} 動作確認")
                 snapshot = await runner.run()
                 self._motor_check_last[robot_name] = snapshot
                 await self._broadcast_motor_check_done(robot_name, snapshot)
@@ -591,6 +688,10 @@ class RobotServer:
                 logger.exception("動作確認エラー (%s): %s", robot_name, exc)
                 await self._broadcast_motor_check_error(robot_name, str(exc))
             finally:
+                # 中断・例外・キャンセルのいずれで抜けても必ず復帰させる。
+                # 止まったままだと昇降軸が保持電流を失って落下する
+                for loop in loops:
+                    loop.resume()
                 self._motor_check_tasks.pop(robot_name, None)
                 # runners からは敢えて消さない: GET /motor_check/last の補助情報として
                 # 直近 runner を参照したい場合に備える。次回 start で上書きされる。
@@ -842,7 +943,7 @@ class RobotServer:
             "waiting_trigger": progress["waiting_trigger"],
             "steps": progress.get("steps", []),
             "motors": motors,
-            "e_stop_active": self._e_stop_active,
+            "e_stop_active": self.e_stop_active,
             "health": snapshot_dict,
         }
 

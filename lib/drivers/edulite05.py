@@ -201,6 +201,31 @@ class Edulite05Driver(MotorDriver):
         """待機時間を除いた起動フレーム。診断・互換用途。"""
         return [message for message, _delay in self.initialization_steps()]
 
+    def activation_steps(self) -> list[tuple[can.Message, float]]:
+        """現在値を目標に書いてから励磁する。
+
+        本機は enable した瞬間に PARAM_LOC_REF (位置モード) へ追従を始めるため、
+        目標を書かずに励磁するとアームが原点へ全速で飛ぶ。位置モードでは直前に
+        受信したフィードバックの実測角を、それ以外のモードでは静止を意味する 0 を
+        目標として書いてから enable する。
+        """
+        hold = self._state.position if self.mode is ControlMode.POSITION else 0.0
+        return [
+            (self.encode_target(self.mode, hold), 0.05),
+            (self.encode_enable(), 0.1),
+        ]
+
+    def requires_fresh_feedback_for_activation(self) -> bool:
+        # 位置モードの保持目標は実測角そのもの。MotorState の初期値 0.0 を実測角と
+        # 取り違えると原点へ飛ぶため、フィードバック未受信では励磁させない。
+        # set_zero_on_start で原点が変わった直後の値も同じ理由で使えない。
+        return self.mode is ControlMode.POSITION
+
+    def feedback_probe_message(self) -> can.Message | None:
+        # disable は無励磁を保ったままフィードバック応答を返させられる唯一のフレーム。
+        # clear_fault=False なので障害フラグを握り潰す心配もない。
+        return self.encode_disable()
+
     def decode_feedback(self, msg: can.Message) -> MotorState:
         if not self.matches_feedback(msg):
             raise ValueError("対象モータの EDULITE 05 フィードバックではありません")
@@ -237,6 +262,16 @@ class Edulite05Driver(MotorDriver):
         return self.fault_bits != Edulite05Fault.NONE
 
     _CHECK_DEFAULT_TOLERANCE_DEG = 1.0
+    # 速度到達判定の許容差 5rpm (共通既定値) を本機のフィードバック単位 rad/s に換算した値
+    _CHECK_DEFAULT_TOLERANCE_RAD_PER_S = 5.0 * 2.0 * math.pi / 60.0
+
+    def default_tolerance(self, mode: ControlMode) -> float:
+        # 本機のフィードバックは rad / rad/s なので、deg / rpm 基準の共通既定値は使えない
+        if mode is ControlMode.POSITION:
+            return math.radians(self._CHECK_DEFAULT_TOLERANCE_DEG)
+        if mode is ControlMode.VELOCITY:
+            return self._CHECK_DEFAULT_TOLERANCE_RAD_PER_S
+        return super().default_tolerance(mode)
 
     def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
         steps = [

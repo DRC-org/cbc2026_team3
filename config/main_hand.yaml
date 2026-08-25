@@ -29,6 +29,16 @@ motors:
     driver: m3508
     bus: m3508_bus
     can_id: 1
+    # PC 側位置制御 PID。入力=累積角 [deg]、出力=C620 電流指令 [counts] (16384 ≒ 20A)。
+    # !!! 機構が未完成のため実ゲインは未定。以下は「暴れない」ことだけを狙った仮値で、
+    #     実機で要チューニング (kp を少しずつ上げ、振動が出る手前で止めること)。
+    pid:
+      kp: 2.0              # 100deg の偏差でも 200counts (≒0.24A)。振動しない領域から開始
+      ki: 0.0              # 重力補償が必要と判明してから足す (機構端で積分が育つと危険)
+      kd: 0.0              # ノイズを増幅するため、kp を上げて振動が出てから入れる
+      integral_limit: null # ki を入れるときに出力寄与の上限 [counts] を必ず設定する
+      dead_band: 1.0       # 目標付近の唸り防止 [deg] (減速比 19:1 で出力軸 0.05deg 相当)
+      output_limit: 2000   # 電流上限 [counts] ≒2.4A。C620 フルスケールの約 12% に制限
 
   # RobStride EDULITE 05 — CAN Extended Frame
   arm_joint:

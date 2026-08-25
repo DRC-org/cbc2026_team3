@@ -119,6 +119,29 @@ class GenericDriver(MotorDriver):
         return cmd == CommandType.FEEDBACK and dev == self.can_id
 
     # ------------------------------------------------------------------ #
+    #  目標到達判定
+    # ------------------------------------------------------------------ #
+    def default_tolerance(self, mode: ControlMode) -> float:
+        if mode is ControlMode.POSITION:
+            return self._CHECK_POSITION_TOLERANCE_DEG
+        if mode is ControlMode.VELOCITY:
+            return self._CHECK_VELOCITY_TOLERANCE_RPM
+        return super().default_tolerance(mode)
+
+    def is_target_reached(
+        self,
+        target: float,
+        mode: ControlMode,
+        *,
+        tolerance: float | None = None,
+    ) -> bool:
+        # 自作モタドラはフィードバック bit0 に到達フラグを持つ。
+        # 位置決めは行き過ぎ・オーバーシュートを含むため、ファームの到達判定を優先する
+        if mode is ControlMode.POSITION and not self._state.reached:
+            return False
+        return super().is_target_reached(target, mode, tolerance=tolerance)
+
+    # ------------------------------------------------------------------ #
     #  ヘルスチェック判定
     # ------------------------------------------------------------------ #
     def has_overcurrent_warning(self) -> bool:

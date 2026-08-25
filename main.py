@@ -10,12 +10,16 @@ import can
 import yaml
 
 from lib.can_manager import CANManager
+from lib.control.pid import PIDController
+from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.drivers.base import MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
-from lib.drivers.m3508 import M3508Driver
+from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
+from lib.sequence.motors import EStopChecker, TargetSink, build_motor_group
+from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,8 @@ _DRIVER_MAP: dict[str, type[MotorDriver]] = {
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
 _DEFAULT_CONFIGS = ["main_hand.yaml", "sub_hand.yaml"]
 _CHECKLIST_CONFIG = "checklist.yaml"
+# 機構位置定数は robot config と同じディレクトリに <robot_name>_positions.yaml で置く
+_POSITIONS_SUFFIX = "_positions.yaml"
 
 # RobotServer.__init__ のキーワード引数デフォルトと一致させること。
 # 値の変更は lib/server.py の RobotServer 既定値と同期する。
@@ -48,6 +54,27 @@ _DEFAULT_MOTOR_CHECK: dict[str, object] = {
         "edulite05": 5.0,
         "generic": 0.1,
     },
+}
+
+
+# M3508 の PC 側位置制御 PID の既定値 (motors[name].pid が無い場合の補完値)。
+# 入力は累積角 [deg]、出力は C620 の電流指令 [counts] (16384 counts ≒ 20A)。
+#
+# 機構が未完成でイナーシャも重力負荷も不明なため、ここでは「動かないより暴れない」を
+# 優先した保守的な仮値を置いている。実機で要チューニング。
+#   kp=2.0  : 100deg の偏差でも 200counts (≒0.24A) しか出ない。まず振動しない領域から始める
+#   ki=0.0  : 積分は重力補償が必要と分かってから足す。機構端に当たった状態で育つと危険
+#   kd=0.0  : ノイズを増幅するため、kp を上げて振動が出てから初めて入れる
+#   dead_band=1.0 : M3508 の減速比 (19:1) を考えると出力軸で 0.05deg 相当。唸り防止
+#   output_limit=2000 : 電流上限 ≒2.4A。C620 フルスケール (20A) の約 12%。
+#                       機構が確定するまで、暴走しても人力で押さえられる領域に留める
+_DEFAULT_PID: dict[str, float | None] = {
+    "kp": 2.0,
+    "ki": 0.0,
+    "kd": 0.0,
+    "integral_limit": None,
+    "dead_band": 1.0,
+    "output_limit": 2000.0,
 }
 
 
@@ -245,6 +272,28 @@ def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistI
     return load_checklist_definitions(_load_config(path) or {})
 
 
+def _positions_path(config_path: pathlib.Path, robot_name: str) -> pathlib.Path:
+    """robot config と同じディレクトリの位置定数 yaml のパスを返す。"""
+    return config_path.with_name(f"{robot_name}{_POSITIONS_SUFFIX}")
+
+
+def _load_position_table_file(path: pathlib.Path) -> PositionTable:
+    """位置定数 yaml を読み込む。読めなければ空表で起動する。
+
+    起動自体は通す (モータ動作確認やヘルス監視は定数なしでもやりたい) が、
+    定数が壊れているときに推測で動かすと機構を壊すため、空表のまま先へ進めて
+    シーケンスが値を引いた時点で明示的に失敗させる。
+    """
+    if not path.exists():
+        logger.warning("位置定数ファイルが見つかりません: %s (定数なしで起動)", path)
+        return PositionTable.empty(source=str(path))
+    try:
+        return load_position_table(_load_config(path) or {}, source=str(path))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        logger.error("位置定数ファイルを読み込めません: %s (%s) — 定数なしで起動", path, exc)
+        return PositionTable.empty(source=str(path))
+
+
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
@@ -302,6 +351,132 @@ def _setup_robot(config: dict, *, dry_run: bool) -> tuple[str, CANManager, dict[
         motors[motor_name] = motor
 
     return robot_name, can_manager, motors
+
+
+def _load_pid_config(motor_name: str, motor_cfg: dict) -> dict[str, float | None]:
+    """motors[name].pid を読み、未指定キーを _DEFAULT_PID で補完する。
+
+    pid セクションが無い M3508 は既定ゲインで動かす (エラーにしない)。
+    起動できないと動作確認そのものができず、機構調整中の実機で困るため。
+    既定値は安全側に振ってあるので、無指定でも暴れない。
+    """
+    result: dict[str, float | None] = dict(_DEFAULT_PID)
+    pid_cfg = motor_cfg.get("pid")
+    if not isinstance(pid_cfg, dict):
+        return result
+
+    for key, value in pid_cfg.items():
+        if key not in _DEFAULT_PID:
+            logger.warning("未知の pid キー: motors.%s.pid.%s (無視)", motor_name, key)
+            continue
+        if value is None:
+            # integral_limit だけは「制限なし」を null で表現できる。
+            # 他のキーの null は書きかけの yaml とみなし、既定値のまま使う
+            if key != "integral_limit":
+                logger.warning(
+                    "motors.%s.pid.%s が null です。既定値 %s を使います。",
+                    motor_name,
+                    key,
+                    _DEFAULT_PID[key],
+                )
+                continue
+            result[key] = None
+            continue
+        result[key] = float(value)
+    return result
+
+
+def _build_position_pid(motor_name: str, motor_cfg: dict) -> PIDController:
+    """M3508 1 台分の位置制御 PID を config から組み立てる。"""
+    params = _load_pid_config(motor_name, motor_cfg)
+    pid = make_position_pid(
+        params["kp"],
+        params["ki"],
+        params["kd"],
+        integral_limit=params["integral_limit"],
+        dead_band=params["dead_band"],
+    )
+
+    # make_position_pid の出力レンジは C620 のフルスケール (±16384 = ±20A)。
+    # 機構が確定するまでフルトルクを許すと、暴走時に人力で止められず機構を壊すため、
+    # config の output_limit まで絞り込む。ハード上限は決して超えない。
+    limit = min(abs(float(params["output_limit"])), float(CURRENT_MAX))
+    pid.output_min = -limit
+    pid.output_max = limit
+    return pid
+
+
+def _build_position_loops(
+    config: dict,
+    can_manager: CANManager,
+    motors: dict[str, MotorDriver],
+    *,
+    feedback_timeout_ms: float,
+    is_estop_active: EStopChecker,
+) -> dict[str, M3508PositionLoop]:
+    """config 中の M3508 をバス単位でまとめた位置制御ループ群を作る。
+
+    バス単位で 1 ループにする理由: C620 の電流指令フレーム (0x200) は 1 通に
+    4 モータ分のスロットを持つ。モータごとに送ると他モータのスロットを 0 で
+    上書きしてしまうため、同一バス上の M3508 は必ず 1 ループが束ねる。
+    """
+    loops: dict[str, M3508PositionLoop] = {}
+    motor_configs: dict = config.get("motors") or {}
+
+    for motor_name, motor_cfg in motor_configs.items():
+        driver = motors.get(motor_name)
+        if not isinstance(driver, M3508Driver):
+            continue
+
+        bus_name = motor_cfg["bus"]
+        loop = loops.get(bus_name)
+        if loop is None:
+            loop = M3508PositionLoop(
+                can_manager,
+                bus_name,
+                feedback_timeout_ms=feedback_timeout_ms,
+                # 緊急停止インターロック: 実行中ステップが出した目標を破棄し電流 0 に落とす
+                is_estop_active=is_estop_active,
+            )
+            loops[bus_name] = loop
+        loop.add_motor(motor_name, driver, _build_position_pid(motor_name, motor_cfg))
+
+    return loops
+
+
+def _wire_robot_motors(
+    config: dict,
+    can_manager: CANManager,
+    motors: dict[str, MotorDriver],
+    sequence: Sequence,
+    *,
+    feedback_timeout_ms: float,
+    is_estop_active: EStopChecker,
+) -> list[M3508PositionLoop]:
+    """シーケンスにモータアクセス層を注入し、必要な位置制御ループを返す。"""
+    loops = _build_position_loops(
+        config,
+        can_manager,
+        motors,
+        feedback_timeout_ms=feedback_timeout_ms,
+        is_estop_active=is_estop_active,
+    )
+
+    # M3508 は電流指令しか受け付けないため、目標値は PC 側 PID ループへ迂回させる
+    target_sinks: dict[str, TargetSink] = {}
+    for loop in loops.values():
+        target_sinks.update(loop.target_sinks())
+
+    sequence.bind_motors(
+        build_motor_group(
+            can_manager,
+            motors,
+            # 緊急停止インターロック: 停止中はシーケンスからの指令自体を拒否する
+            is_estop_active=is_estop_active,
+            target_sinks=target_sinks,
+        )
+    )
+    return list(loops.values())
 
 
 def _load_sequence(robot_name: str) -> Sequence | None:
@@ -383,9 +558,15 @@ async def main() -> None:
         dry_run=args.dry_run,
     )
     can_managers: list[CANManager] = []
+    position_loops: list[M3508PositionLoop] = []
+
+    # モータ指令経路に渡す緊急停止インターロック。server の状態を遅延参照するため
+    # クロージャにしている (server は add_robot より先に生成済み)
+    def is_estop_active() -> bool:
+        return server.e_stop_active
 
     # 2 パス目: 既存の robot 登録ロジック
-    for _config_path, config in loaded:
+    for config_path, config in loaded:
         robot_name, can_manager, motors = _setup_robot(config, dry_run=args.dry_run)
         can_managers.append(can_manager)
 
@@ -393,20 +574,43 @@ async def main() -> None:
         if seq is None:
             seq = _PlaceholderSequence(robot_name)
 
-        server.add_robot(robot_name, seq, can_manager)
+        positions = _load_position_table_file(_positions_path(config_path, robot_name))
+        seq.bind_positions(positions)
+
+        loops = _wire_robot_motors(
+            config,
+            can_manager,
+            motors,
+            seq,
+            feedback_timeout_ms=float(health_thresholds["feedback_timeout_ms"]),
+            is_estop_active=is_estop_active,
+        )
+        position_loops.extend(loops)
+
+        server.add_robot(robot_name, seq, can_manager, position_loops=loops)
         logger.info(
-            "ロボット登録: %s (モータ: %d 台)",
+            "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s)",
             robot_name,
             len(motors),
+            [loop.bus_name for loop in loops] or "なし",
+            list(positions.axes) or "なし",
         )
 
     try:
         for mgr in can_managers:
             await mgr.run()
+        # 受信ループ起動後に始める。フィードバック未受信のまま PID を回すと
+        # 途絶判定で電流 0 に落ちるだけだが、無駄な警告ログを避ける
+        for loop in position_loops:
+            loop.start()
         await server.start()
     except asyncio.CancelledError:
         pass
     finally:
+        # 例外・キャンセルのどちらで抜けてもここを通す。ループが生き残ると
+        # 電流指令が出続けるため、CAN シャットダウンより先に必ず止める
+        for loop in position_loops:
+            await loop.stop()
         for mgr in can_managers:
             await mgr.shutdown()
         await server.cleanup()

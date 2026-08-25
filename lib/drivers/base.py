@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -23,6 +24,13 @@ class MotorState:
     current: float = 0.0
     temperature: float = 0.0
     reached: bool = False
+
+
+# 到達判定の既定許容差。GenericDriver の動作確認しきい値と同じ値を使う
+_DEFAULT_REACH_TOLERANCES: dict[ControlMode, float] = {
+    ControlMode.POSITION: 1.0,
+    ControlMode.VELOCITY: 5.0,
+}
 
 
 class MotorDriver(abc.ABC):
@@ -55,6 +63,50 @@ class MotorDriver(abc.ABC):
         """受信した CAN メッセージがこのモータのフィードバックかどうか判定する。"""
 
     # ------------------------------------------------------------------ #
+    #  目標到達判定 (シーケンスの wait_reached 用)
+    # ------------------------------------------------------------------ #
+    # 到達フラグの有無やフィードバック単位はプロトコル固有のため、判定はドライバ層に置く。
+    # 既存の evaluate_check_result と同じ流儀で、基底にデフォルト実装を持たせ
+    # 特別扱いが必要なドライバだけオーバーライドする。
+
+    def default_tolerance(self, mode: ControlMode) -> float:
+        """到達判定の既定許容差。
+
+        値は動作確認 (evaluate_check_result) の既定値と揃えてある
+        (POSITION=1deg / VELOCITY=5rpm)。
+        CURRENT / DUTY は開ループ指令でフィードバック量と目標値の次元が一致しないため、
+        「到達判定しない」意味で無限大を返す。
+        """
+        return _DEFAULT_REACH_TOLERANCES.get(mode, math.inf)
+
+    def is_target_reached(
+        self,
+        target: float,
+        mode: ControlMode,
+        *,
+        tolerance: float | None = None,
+    ) -> bool:
+        """現在のフィードバックが目標値に到達しているか判定する。"""
+        tol = self.default_tolerance(mode) if tolerance is None else tolerance
+        if math.isinf(tol):
+            return True
+
+        observed = self._observed_for(mode)
+        if observed is None:
+            return True
+        return abs(observed - target) <= tol
+
+    def _observed_for(self, mode: ControlMode) -> float | None:
+        """モードに対応するフィードバック量。比較対象がない場合は None。"""
+        if mode is ControlMode.POSITION:
+            return self._state.position
+        if mode is ControlMode.VELOCITY:
+            return self._state.velocity
+        if mode is ControlMode.CURRENT:
+            return self._state.current
+        return None
+
+    # ------------------------------------------------------------------ #
     #  ヘルスチェック判定 (Phase 6)
     # ------------------------------------------------------------------ #
     # しきい値は config/*.yaml の health セクション由来 (デフォルト: warning=65, critical=80)
@@ -84,8 +136,37 @@ class MotorDriver(abc.ABC):
     # デフォルトは NotImplementedError raise としてサブクラスで個別に実装する
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
-        """起動時に送る ``(message, delay_after_seconds)``。既定は初期化不要。"""
+        """起動時に送る ``(message, delay_after_seconds)``。既定は初期化不要。
+
+        励磁の有効化はここに含めない (activation_steps を使う)。
+        """
         return []
+
+    def activation_steps(self) -> list[tuple[can.Message, float]]:
+        """励磁を有効化する ``(message, delay_after_seconds)``。既定は有効化不要。
+
+        有効化した瞬間にモータが動き出さない順序 (現在値を目標に書いてから enable する等)
+        はドライバ自身が決める。``requires_fresh_feedback_for_activation`` が True の
+        ドライバでは、呼び出し側が新しいフィードバックを受信してから呼ぶ契約になっている
+        ため、本メソッドは常に「最新の ``state`` を読んでよい」前提で組み立ててよい。
+        """
+        return []
+
+    def requires_fresh_feedback_for_activation(self) -> bool:
+        """activation_steps を組み立てる前に新しいフィードバックが必要か。
+
+        目標位置へ追従するモータは、現在角を目標として書かずに励磁すると原点へ飛ぶ。
+        実測角が確認できない限り有効化してはならないドライバが True を返す。
+        """
+        return False
+
+    def feedback_probe_message(self) -> can.Message | None:
+        """フィードバックを引き出すための問い合わせフレーム。
+
+        無励磁のまま応答だけを得られるフレームに限る (励磁や目標変更を伴ってはならない)。
+        自発的にフィードバックを送るモータでは不要なので既定は ``None``。
+        """
+        return None
 
     def prepare_check(self) -> list[can.Message]:
         """動作確認前に順次送る初期化メッセージ。既定は初期化不要。"""

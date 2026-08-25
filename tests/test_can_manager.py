@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import can
@@ -22,6 +23,10 @@ def _make_mock_motor(name: str, can_id: int) -> MagicMock:
     motor.can_id = can_id
     motor.matches_feedback.return_value = False
     motor.update_state.return_value = MotorState()
+    motor.initialization_steps.return_value = []
+    motor.activation_steps.return_value = []
+    motor.requires_fresh_feedback_for_activation.return_value = False
+    motor.feedback_probe_message.return_value = None
     return motor
 
 
@@ -190,3 +195,96 @@ class TestCANManager:
 
         bus0.shutdown.assert_called_once()
         bus1.shutdown.assert_called_once()
+
+
+class TestMotorActivation:
+    """励磁の有効化は「有効化した瞬間に動かない」ことを保証してからでないと行えない。"""
+
+    def _prepare(self) -> tuple[CANManager, MagicMock]:
+        mgr = CANManager()
+        mgr.add_bus("can0", _make_mock_bus())
+        motor = _make_mock_motor("m1", 1)
+        mgr.add_motor("can0", motor)
+        return mgr, motor
+
+    async def test_initialize_motors_activates_after_initialization_steps(self) -> None:
+        mgr, motor = self._prepare()
+        init_msg = can.Message(arbitration_id=0x201, data=bytes(8))
+        enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
+        motor.initialization_steps.return_value = [(init_msg, 0.0)]
+        motor.activation_steps.return_value = [(enable_msg, 0.0)]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            await mgr.initialize_motors()
+
+        assert [call.args[1] for call in send.await_args_list] == [init_msg, enable_msg]
+
+    async def test_activation_reads_position_after_fresh_feedback_arrives(self) -> None:
+        """set_zero 後の原点を反映した実測角でなければ、目標として書いてはいけない。"""
+        mgr, motor = self._prepare()
+        motor.requires_fresh_feedback_for_activation.return_value = True
+        motor.feedback_probe_message.return_value = can.Message(arbitration_id=0x203, data=bytes(8))
+        enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
+
+        # 待機開始前の受信は set_zero 前の可能性があるため、認めてはならない
+        mgr._last_rx_at["m1"] = time.time()
+
+        seen_rx_at: list[float | None] = []
+
+        def record_activation() -> list[tuple[can.Message, float]]:
+            seen_rx_at.append(mgr._last_rx_at.get("m1"))
+            return [(enable_msg, 0.0)]
+
+        motor.activation_steps.side_effect = record_activation
+
+        async def fake_send(name: str, msg: can.Message) -> None:
+            # 問い合わせフレームへの応答としてフィードバックが届く状況を模す
+            mgr._last_rx_at[name] = time.time()
+
+        with patch.object(mgr, "send", new_callable=AsyncMock, side_effect=fake_send):
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=0.5)
+
+        assert activated is True
+        assert seen_rx_at and seen_rx_at[0] is not None
+        assert seen_rx_at[0] > mgr._last_rx_at["m1"] - 1.0
+
+    async def test_activation_skipped_when_feedback_never_arrives(self) -> None:
+        """現在角が分からないまま enable すると原点へ飛ぶため、無励磁のままにする。"""
+        mgr, motor = self._prepare()
+        motor.requires_fresh_feedback_for_activation.return_value = True
+        motor.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
+        ]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=0.05)
+
+        assert activated is False
+        motor.activation_steps.assert_not_called()
+        assert send.await_count == 0
+
+    async def test_activation_requires_feedback_newer_than_wait_start(self) -> None:
+        mgr, motor = self._prepare()
+        motor.requires_fresh_feedback_for_activation.return_value = True
+        motor.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
+        ]
+        mgr._last_rx_at["m1"] = time.time()
+
+        with patch.object(mgr, "send", new_callable=AsyncMock):
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=0.05)
+
+        assert activated is False
+        motor.activation_steps.assert_not_called()
+
+    async def test_activate_motors_stops_when_abort_requested(self) -> None:
+        """緊急停止が再び入ったら、途中でも enable を送ってはならない。"""
+        mgr, motor = self._prepare()
+        motor.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
+        ]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            await mgr.activate_motors(should_abort=lambda: True)
+
+        assert send.await_count == 0

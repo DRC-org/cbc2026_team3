@@ -2,13 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lib.match_state import Court
+from lib.sequence.positions import PositionTable
+
+if TYPE_CHECKING:
+    from lib.sequence.motors import MotorGroup
 
 logger = logging.getLogger(__name__)
+
+
+class SequenceTimeoutError(RuntimeError):
+    """目標位置に到達しないままタイムアウトしたときに送出される。
+
+    run() が例外を捕まえてシーケンスを停止させるため、掴めていないワークを
+    搬送するといった「黙って次のステップへ進む」事故を防げる。
+    """
 
 
 @dataclass
@@ -65,6 +77,102 @@ class Sequence:
         self._court: Court = Court.RED
         # 全自動モード。True のとき require_trigger のステップを待たずに通過する
         self._auto_advance: bool = False
+        # モータアクセス層。bind_motors で外部から注入する (未注入でもシーケンスは動作する)
+        self._motors: MotorGroup | None = None
+        # 機構位置の定数表。bind_positions で外部から注入する (未注入でもシーケンスは動作する)
+        self._positions: PositionTable | None = None
+
+    # ------------------------------------------------------------------ #
+    #  モータアクセス
+    # ------------------------------------------------------------------ #
+
+    def bind_motors(self, group: MotorGroup) -> None:
+        self._motors = group
+
+    @property
+    def has_motors(self) -> bool:
+        return self._motors is not None
+
+    @property
+    def motors(self) -> MotorGroup:
+        # 未 bind でもシーケンス自体は動かせる必要があるため、参照された時点で初めて弾く
+        if self._motors is None:
+            raise RuntimeError(
+                f"シーケンス '{self.name}' に MotorGroup が bind されていません "
+                "(bind_motors を呼んでください)"
+            )
+        return self._motors
+
+    async def wait_all_reached(
+        self,
+        *,
+        tolerance: float | None = None,
+        timeout: float | None = None,
+    ) -> bool:
+        return await self.motors.wait_all_reached(tolerance=tolerance, timeout=timeout)
+
+    # ------------------------------------------------------------------ #
+    #  機構位置の定数
+    # ------------------------------------------------------------------ #
+
+    def bind_positions(self, table: PositionTable) -> None:
+        self._positions = table
+
+    @property
+    def has_positions(self) -> bool:
+        return self._positions is not None
+
+    @property
+    def positions(self) -> PositionTable:
+        # bind_motors と同じ方針。未 bind でもシーケンス定義自体は成立させる
+        if self._positions is None:
+            raise RuntimeError(
+                f"シーケンス '{self.name}' に PositionTable が bind されていません "
+                "(bind_positions を呼んでください)"
+            )
+        return self._positions
+
+    async def move_to(
+        self,
+        targets: Mapping[str, str],
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """``{軸名: 位置名}`` を位置定数から引いて指令し、全軸の到達を待つ。
+
+        単位換算・許容差・待ち時間はすべて位置定数 yaml の責務なので、
+        シーケンス本体には生の数値が現れない。到達しない軸があれば
+        SequenceTimeoutError を送出して停止させる。
+        指令値は保持したままにする (落下すると危険な軸で保持トルクを失わないため)。
+        """
+        table = self.positions
+        pending: list[tuple[str, str, Awaitable[bool]]] = []
+
+        for axis, position_name in targets.items():
+            handle = getattr(self.motors, axis)
+            value = table.command(axis, position_name, court=self.court)
+            await handle.set_position(value)
+            pending.append(
+                (
+                    axis,
+                    position_name,
+                    handle.wait_reached(
+                        tolerance=table.tolerance(axis),
+                        timeout=table.timeout(axis) if timeout is None else timeout,
+                    ),
+                )
+            )
+
+        results = await asyncio.gather(*(awaitable for _, _, awaitable in pending))
+        failed = [
+            f"{axis}->{position_name}"
+            for (axis, position_name, _), reached in zip(pending, results, strict=True)
+            if not reached
+        ]
+        if failed:
+            raise SequenceTimeoutError(
+                f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
+            )
 
     @property
     def court(self) -> Court:
