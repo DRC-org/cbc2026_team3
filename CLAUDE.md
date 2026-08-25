@@ -42,6 +42,11 @@ cd web && pnpm test:run           # vitest（1 回だけ実行）
 cd web && pnpm check              # lint + format + 型検査 + テスト
 ```
 
+dev サーバーは全インターフェースに bind し、Host ヘッダは `drc` と `*.ts.net` を許可する
+（`vite.config.ts`）。Tailscale 経由なら `http://drc:5173`、制御プログラム直結なら
+`http://drc:8080` で開く。別名のホストを使うなら `VITE_ALLOWED_HOSTS` に足す。
+WS 接続先は UI のステータスバー（接続表示）から変更でき、`?ws=drc:8080` でも一時上書きできる。
+
 ### ファームウェア（PlatformIO）
 
 `-d` にプロジェクトディレクトリを渡せばリポジトリ直下から実行できる。

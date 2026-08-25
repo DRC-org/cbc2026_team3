@@ -5,10 +5,12 @@ import { AppHeader } from "@/components/AppHeader";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { EStopOverlay } from "@/components/EStopOverlay";
 import { Toaster } from "@/components/Toaster";
+import { WsSettings } from "@/components/WsSettings";
 import { RobotProvider } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
 import type { ChecklistRole, MatchCourt, MatchMode, RobotState } from "@/hooks/useRobotSocket";
+import { useWsUrl } from "@/hooks/useWsUrl";
 import { Dashboard } from "@/pages/Dashboard";
 import { MotorTuning } from "@/pages/MotorTuning";
 import { RobotControl } from "@/pages/RobotControl";
@@ -58,6 +60,15 @@ function tabBadge(state: RobotState | undefined): { symbol: string; className: s
   return null;
 }
 
+/** ステータスバーは横幅が限られるため host:port だけ出す（全体は title 属性で見せる） */
+function wsHostLabel(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 function Clock() {
   const [now, setNow] = useState(() => new Date());
 
@@ -70,9 +81,13 @@ function Clock() {
 }
 
 export function App() {
-  const socket = useRobotSocket();
+  const { wsUrl, wsUrlSource, setWsUrl, resetWsUrl } = useWsUrl();
+  const socket = useRobotSocket(wsUrl);
   const { send, clearRejection } = socket;
   const [activeTab, setActiveTab] = useState(readTabFromHash);
+  const [wsSettingsOpen, setWsSettingsOpen] = useState(false);
+  const openWsSettings = useCallback(() => setWsSettingsOpen(true), []);
+  const closeWsSettings = useCallback(() => setWsSettingsOpen(false), []);
 
   useEffect(() => {
     if (window.location.hash !== `#${activeTab}`) {
@@ -129,6 +144,11 @@ export function App() {
         matchState: socket.matchState,
         rejection: socket.rejection,
         clearRejection,
+        wsUrl,
+        wsUrlSource,
+        setWsUrl,
+        resetWsUrl,
+        openWsSettings,
         send,
         onEStop,
         onEStopRelease,
@@ -178,15 +198,24 @@ export function App() {
         <div className="tui-statusbar">
           <ul>
             <li>
-              {socket.connected ? (
-                <>
-                  <span className="symbol success-text">●</span> Connected
-                </>
-              ) : (
-                <>
-                  <span className="symbol danger-text">●</span> Disconnected
-                </>
-              )}
+              {/* 接続表示そのものを接続先設定の入口にする。繋がらない時に最初に見る場所なので */}
+              <button
+                type="button"
+                onClick={openWsSettings}
+                style={{ cursor: "pointer" }}
+                title={`接続先: ${wsUrl}（クリックで変更）`}
+              >
+                {socket.connected ? (
+                  <>
+                    <span className="symbol success-text">●</span> Connected
+                  </>
+                ) : (
+                  <>
+                    <span className="symbol danger-text">●</span> Disconnected
+                  </>
+                )}
+                <span className="dim"> {wsHostLabel(wsUrl)}</span>
+              </button>
             </li>
             <li>
               <Clock />
@@ -204,6 +233,7 @@ export function App() {
         </div>
 
         <Toaster />
+        <WsSettings open={wsSettingsOpen} onClose={closeWsSettings} />
         <EStopOverlay />
       </div>
     </RobotProvider>

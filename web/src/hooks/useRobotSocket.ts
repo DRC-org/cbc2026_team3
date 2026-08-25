@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { originWsUrl } from "@/lib/wsUrl";
+
 export interface MotorState {
   pos: number;
   vel: number;
@@ -182,25 +184,17 @@ interface UseRobotSocketReturn {
   send: (data: object) => void;
 }
 
-/**
- * 配信元と同じホスト・ポートの /ws に接続する。
- *
- * localhost 固定にすると、操縦者が別 PC やタブレットから開いたときに
- * 自分自身の localhost へ繋ぎにいって接続できない。サーバーは既定で
- * 0.0.0.0 を listen しており複数端末からの利用を想定しているため、
- * 接続先はページの origin から導出する。
- * (vite dev では /ws を 8080 へプロキシする — vite.config.ts 参照)
- */
-function defaultWsUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws`;
-}
-
 const RECONNECT_INTERVAL = 3000;
 // 直近警告のフラッシュ表示用にのみ保持。長期履歴は不要なので少量で十分
 const HEALTH_EVENT_BUFFER = 5;
 
-export function useRobotSocket(url: string = defaultWsUrl()): UseRobotSocketReturn {
+/**
+ * 指定 URL の WebSocket に接続し、切断中は RECONNECT_INTERVAL ごとに再接続する。
+ *
+ * 接続先は `lib/wsUrl.ts` が解決する（既定は配信元 origin の /ws）。
+ * url が変わると現在の接続を畳んで新しい接続先へ張り直す。
+ */
+export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketReturn {
   const [states, setStates] = useState<Record<string, RobotState>>({});
   const [connected, setConnected] = useState(false);
   const [eStopActive, setEStopActive] = useState(false);
@@ -210,16 +204,25 @@ export function useRobotSocket(url: string = defaultWsUrl()): UseRobotSocketRetu
   const [rejection, setRejection] = useState<CommandRejectedEvent | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 接続先を切り替えた後も、旧接続の close/message は非同期に届く。世代番号で弾かないと
+  // 旧 URL への再接続タイマーが走り、古いサーバーの状態で画面が上書きされる
+  const generationRef = useRef(0);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
+    const generation = generationRef.current;
+    const isCurrent = () => generation === generationRef.current;
+
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
-    ws.addEventListener("open", () => setConnected(true));
+    ws.addEventListener("open", () => {
+      if (isCurrent()) setConnected(true);
+    });
 
     ws.addEventListener("close", () => {
+      if (!isCurrent()) return;
       setConnected(false);
       reconnectTimer.current = setTimeout(connect, RECONNECT_INTERVAL);
     });
@@ -227,6 +230,7 @@ export function useRobotSocket(url: string = defaultWsUrl()): UseRobotSocketRetu
     ws.addEventListener("error", () => ws.close());
 
     ws.addEventListener("message", (event: MessageEvent) => {
+      if (!isCurrent()) return;
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === "state" && msg.robot) {
@@ -357,10 +361,15 @@ export function useRobotSocket(url: string = defaultWsUrl()): UseRobotSocketRetu
   }, [url]);
 
   useEffect(() => {
+    // 接続先切替の直後に旧接続の "Connected" 表示が残ると、届いていない指令を
+    // 届いたものと誤認する。張り直しの間は必ず切断表示にする
+    setConnected(false);
     connect();
     return () => {
+      generationRef.current += 1;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       wsRef.current?.close();
+      wsRef.current = null;
     };
   }, [connect]);
 

@@ -11,6 +11,7 @@ import type {
   MotorCheckState,
   RobotState,
 } from "@/hooks/useRobotSocket";
+import type { WsUrlSource } from "@/lib/wsUrl";
 
 interface RobotContextValue {
   states: Record<string, RobotState>;
@@ -21,6 +22,11 @@ interface RobotContextValue {
   matchState: MatchState;
   rejection: CommandRejectedEvent | null;
   clearRejection: () => void;
+  wsUrl: string;
+  wsUrlSource: WsUrlSource;
+  setWsUrl: (input: string) => boolean;
+  resetWsUrl: () => void;
+  openWsSettings: () => void;
   send: (data: object) => void;
   onEStop: () => void;
   onEStopRelease: () => void;
