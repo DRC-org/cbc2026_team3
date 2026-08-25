@@ -42,9 +42,8 @@ pio test -e native -d firmware/dc_motor   # プロトコル層・安全機構・
 pio test -e native -d firmware/servo      # 角度補間・可動範囲クランプ・到達推定
 
 # ビルド
-pio run -e uno_r4_minima -d firmware/dc_motor   # DC は Minima 専用（下記参照）
+pio run -e uno_r4_minima -d firmware/dc_motor
 pio run -e uno_r4_minima -d firmware/servo
-pio run -e uno_r4_wifi   -d firmware/servo
 
 # 書き込み（サーボ基板）
 pio run -e uno_r4_minima -d firmware/servo -t upload
@@ -61,17 +60,10 @@ pio device monitor -e uno_r4_minima -d firmware/dc_motor
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
 
-**DC 基板は Minima 専用**で、`uno_r4_wifi` の env を意図的に用意していない。
-WiFi は CAN のピンが `D10`(TX)/`D13`(RX) に割り当たり、この基板の配線では
-`PWM_L` が `D10`・ステータス LED が `D13` なので、**モータ出力が CAN 送信線を
-乗っ取って PC から一切停止できない基板ができあがる**ため。チーム提供のサンプルが
-`CAN_RX 5` / `CAN_TX 4` を前提にしていることからも DC 基板は Minima である。
-
-サーボ基板は**まだ基板が確定していない**ので両方の env を残してある（WiFi 側では
-ch1 を `D10` から `D6` へ退避し、ステータス LED を無効化している）。既定は
-`uno_r4_minima`（`platformio.ini` の `default_envs`）。基板が確定したら
-`servo/include/config.h` の `#if defined(ARDUINO_UNOWIFIR4)` を畳んで
-使わない方の分岐を消すこと。
+**基板は DC 用・サーボ用とも UNO R4 Minima。** CAN ペリフェラルは `D4`(TX)/`D5`(RX) に
+固定されているので、このピンを他用途へ割り当ててはならない。割り当てると CAN が上がらず
+**PC から止められない基板**ができあがる。各 `main.cpp` の `static_assert` が
+`config.h` のピンと `PIN_CAN0_TX` / `PIN_CAN0_RX` の衝突をビルド時に検出する。
 
 初回ビルドではツールチェーン（`toolchain-gccarmnoneeabi`）と Arduino コアが
 ダウンロードされるためネットワークが必要。以降はオフラインでビルドできる。
@@ -124,7 +116,7 @@ USB CDC の `Serial`（115200 baud）から角度を直接入力できる。
 | ch | 基準デバイス ID | モータ | 既定ピン |
 |---|---|---|---|
 | 0 | `0x01` | `gripper` | D9 |
-| 1 | `0x03` | `wall_f` | D10（WiFi 基板では D6） |
+| 1 | `0x03` | `wall_f` | D10 |
 | 2 | `0x04` | `wall_r` | D11 |
 
 **DIP はデバイス ID そのものではなく、チャンネル表全体に加えるオフセットとして働く。**
@@ -188,17 +180,16 @@ rpm 換算」であり、電流・温度・過電流・過熱は検出手段が�
 | `kServoChannels[].limits.angleMinDeg` / `angleMaxDeg` | `0.0` / `30.0` | 機構を付けた状態で当たらない可動範囲を実測する | **広すぎるとサーボがメカストッパに当たったまま停動し、短時間で焼損する。最優先で確認**（狭すぎる分はクランプで止まるだけ） |
 | `kServoPulse270` | `{500, 2500, 270.0}` | サーボのデータシートのパルス幅と可動角 | 指令角と実角がずれる。上端で当たり続ける |
 | `kServoPwmPeriodUs` | `20000`（50Hz） | サーボが許容するフレーム周期。デジタルサーボなら上げられる | 対応しない個体に速い周期を与えると発熱・ジッタ |
-| `kPinServoCh0/1/2` | `9` / `10`(WiFi は `6`) / `11` | 基板のサーボ信号線。**CAN のピンと重ならないこと** | `main.cpp` の `static_assert` がビルド時に弾く |
+| `kPinServoCh0/1/2` | `9` / `10` / `11` | 基板のサーボ信号線。**CAN のピンと重ならないこと** | `main.cpp` の `static_assert` がビルド時に弾く |
 | `kPinDip[4]` | `{14,15,16,17}`（A0–A3） | 基板の DIP がどのピンに落ちているか | オフセットが化けて別のアクチュエータが動く |
 | `kServoChannels[].initialAngleDeg` | `0.0` | 電源投入時に持っていく角度 | 起動した瞬間に機構が動く |
 | `kEStopDetach` | `false` | 緊急停止時に脱力させたい機構があるか | `true` にすると壁が自重で倒れ、把持中のワークを落とす |
-| `HAS_STATUS_LED` | Minima `1` / WiFi `0` | WiFi 基板では `D13` が CAN RX と兼用 | LED を握ると CAN 受信が死んで PC から止められなくなる |
 
-**UNO R4 の CAN ペリフェラルは基板ごとに別のピンへ固定されている。**
-Minima は `D4`(TX)/`D5`(RX)、WiFi は `D10`(TX)/`D13`(RX)。
-チーム提供のサンプルは `SV0..SV3` を `D4`〜`D7` に置いているが、この配線は Minima の
-CAN と正面衝突するためそのままでは使えない。`servo/src/main.cpp` の `static_assert` が
-サーボ出力ピンと `PIN_CAN0_TX` / `PIN_CAN0_RX` の衝突とピン重複をビルド時に検出する。
+**UNO R4 Minima の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている。**
+チーム提供のサンプルは `SV0..SV3` を `D4`〜`D7` に置いているが、この配線は CAN と
+正面衝突するためそのままでは使えない。`servo/src/main.cpp` の `static_assert` が
+サーボ出力ピン・ステータス LED と `PIN_CAN0_TX` / `PIN_CAN0_RX` の衝突、および
+チャンネル間のピン重複をビルド時に検出する。
 
 ## 安全に関する既定値
 

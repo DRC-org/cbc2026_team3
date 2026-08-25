@@ -46,6 +46,8 @@ static constexpr bool servoPinsAreSane() {
 }
 static_assert(servoPinsAreSane(),
               "config.h のサーボ出力ピンが CAN のピンと衝突しているか、重複している");
+static_assert(kPinLed != PIN_CAN0_TX && kPinLed != PIN_CAN0_RX,
+              "config.h のステータス LED が CAN のピンと衝突している");
 
 // デバイス ID がチャンネル間で重複すると、1 つの SET_TARGET が複数のサーボを動かす。
 static constexpr bool servoDeviceIdsAreUnique() {
@@ -394,7 +396,6 @@ static void resolveDeviceIds() {
 // ===========================================================================
 
 static void updateLed(uint32_t nowMs) {
-#if HAS_STATUS_LED
     // ID 未設定のチャンネルがあれば速い点滅で知らせる（仕様書 §2.2 / §7.1）。
     bool unconfigured = false;
     for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
@@ -415,10 +416,6 @@ static void updateLed(uint32_t nowMs) {
     // TODO(実機で確認): RGB LED ライブラリを platformio.ini の lib_deps に追加し、
     // ここで unconfigured=赤 / 緊急停止=橙 / 通常=緑 を出す。
     // 依存が取れない環境でもビルドが通るよう既定では無効にしてある。
-#endif
-#else
-    // WiFi 基板では LED_BUILTIN(D13) が CAN RX と兼用で、握ると CAN 受信が死ぬ（config.h 参照）。
-    (void)nowMs;
 #endif
 }
 
@@ -477,10 +474,8 @@ static void pollSerial(uint32_t nowMs) {
 // ===========================================================================
 
 void setup() {
-#if HAS_STATUS_LED
     pinMode(kPinLed, OUTPUT);
     digitalWrite(kPinLed, LOW);
-#endif
 
     for (uint8_t bit = 0; bit < 4; ++bit) {
         pinMode(kPinDip[bit], INPUT_PULLUP);

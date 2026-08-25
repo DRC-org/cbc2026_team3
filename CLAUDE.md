@@ -127,9 +127,9 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 片方だけを変更してはならない。`firmware/lib/MotorCan/` が `Arduino.h` を include しないのは、
 native 環境（`pio test -e native`）でプロトコル層と安全機構をテストできるようにするため。
 
-**UNO R4 は基板ごとに CAN のピンが違う。** Minima が `D4`(TX)/`D5`(RX)、WiFi が `D10`/`D13`。
-DC 基板は配線が Minima 前提のため `uno_r4_wifi` の env を意図的に置いていない。
-各 `main.cpp` の `static_assert` がピン衝突をビルド時に検出する。
+**基板は DC 用・サーボ用とも UNO R4 Minima で、CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定。**
+このピンを他用途へ割り当てると CAN が上がらず、PC から止められない基板ができあがる。
+各 `main.cpp` の `static_assert` が `config.h` のピン衝突をビルド時に検出する。
 
 **Web UI はモータ名をハードコードしていない。** モータ状態は `Record<string, MotorState>` として
 そのまま流れるので、モータの増減で UI 側の変更は要らない。
