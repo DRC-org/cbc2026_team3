@@ -582,3 +582,95 @@ class TestEStopReleaseReactivatesMotors:
             assert should_abort() is True
 
             await ws.close()
+
+
+class TestActivateEStopFromInside:
+    """同期監視など内部の異常検知から、操縦者の e_stop と同じ経路で止められること。"""
+
+    async def test_same_side_effects_as_e_stop_command(self) -> None:
+        server = _build_server()
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            seqs = await _start_both_sequences(server, ws)
+
+            await server.activate_e_stop(reason="y_axis の左右ずれ")
+
+            assert server.e_stop_active is True
+            for name in _ROBOT_NAMES:
+                # 停止フレームはモータ個別・バス全体の両方へ出す
+                server._robots[name].can_manager.send_to_bus.assert_awaited()
+
+            await _release_gates_and_settle(seqs)
+            for s in seqs:
+                assert s.executed == ["gate"], f"{s.name}: 内部緊急停止後に後続ステップが実行された"
+                assert s._running is False
+
+            await ws.close()
+
+    async def test_discards_pending_start_request(self) -> None:
+        server = _build_server()
+        seq = _sequences(server)[0]
+        seq.request_start()
+        assert seq._resume_event.is_set()
+
+        await server.activate_e_stop(reason="rotate の左右ずれ")
+
+        assert not seq._resume_event.is_set()
+
+    async def test_reason_is_broadcast(self) -> None:
+        """試合中に「なぜ止まったか」が操縦者に届かないと復旧できない。"""
+        server = _build_server()
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+
+            await server.activate_e_stop(reason="y_axis の左右ずれ 3.400mm が許容 2.000mm 超過")
+
+            msg = await _recv_type(ws, "e_stop_state")
+            assert msg is not None
+            assert msg["active"] is True
+            assert "y_axis" in msg["reason"]
+
+            await ws.close()
+
+    async def test_command_e_stop_keeps_broadcast_shape(self) -> None:
+        """操縦者操作による緊急停止の配信内容は従来どおり (理由なしでも壊れない)。"""
+        server = _build_server()
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+
+            await ws.send_json({"type": "e_stop"})
+
+            msg = await _recv_type(ws, "e_stop_state")
+            assert msg is not None
+            assert msg["active"] is True
+            assert msg.get("reason") is None
+
+            await ws.close()
+
+    async def test_repeated_activation_is_safe(self) -> None:
+        """同期監視は軸ごとに発報しうる。多重発報で状態が壊れないこと。"""
+        server = _build_server()
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            seqs = await _start_both_sequences(server, ws)
+
+            await server.activate_e_stop(reason="y_axis の左右ずれ")
+            await server.activate_e_stop(reason="rotate の左右ずれ")
+            await server.activate_e_stop()
+
+            assert server.e_stop_active is True
+
+            await _release_gates_and_settle(seqs)
+            for s in seqs:
+                assert s.executed == ["gate"]
+                assert s._running is False
+
+            await ws.close()

@@ -5,6 +5,7 @@ import asyncio
 import importlib
 import logging
 import pathlib
+from collections.abc import Callable
 
 import can
 import yaml
@@ -12,7 +13,8 @@ import yaml
 from lib.can_manager import CANManager
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.drivers.base import MotorDriver
+from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.drivers.base import ControlMode, MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
@@ -28,6 +30,12 @@ _DRIVER_MAP: dict[str, type[MotorDriver]] = {
     "m3508": M3508Driver,
     "edulite05": Edulite05Driver,
     "generic": GenericDriver,
+}
+
+# motors[name].control_type に書ける制御モード。CURRENT を除くのは GenericDriver が
+# 電流指令フレームを持たないため (指定されても POSITION へ落として起動は続ける)
+_CONTROL_MODES: dict[str, ControlMode] = {
+    mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY, ControlMode.DUTY)
 }
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
@@ -300,6 +308,26 @@ def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
     return can.Bus(interface="socketcan", channel=channel)
 
 
+def _parse_control_type(motor_name: str, raw: object) -> ControlMode:
+    """generic ドライバの control_type を ControlMode へ変換する。
+
+    未対応値でも起動は続ける。機構調整中に起動できないと動作確認すらできず、
+    実機の前で手が止まるため (_load_pid_config と同じ方針)。
+    """
+    if raw is None:
+        return ControlMode.POSITION
+    mode = _CONTROL_MODES.get(str(raw).strip().lower())
+    if mode is None:
+        logger.warning(
+            "motors.%s.control_type に未対応の値: %r (指定できるのは %s)。position を使います。",
+            motor_name,
+            raw,
+            ", ".join(_CONTROL_MODES),
+        )
+        return ControlMode.POSITION
+    return mode
+
+
 def _create_motor(motor_name: str, motor_cfg: dict) -> MotorDriver | None:
     """設定からモータを生成し、ドライバ固有設定も反映する。"""
     driver_type = motor_cfg["driver"]
@@ -325,6 +353,15 @@ def _create_motor(motor_name: str, motor_cfg: dict) -> MotorDriver | None:
             limit_current=float(motor_cfg.get("limit_current", 5.0)),
             position_kp=float(motor_cfg.get("position_kp", 30.0)),
             set_zero_on_start=bool(motor_cfg.get("set_zero_on_start", False)),
+        )
+
+    if driver_type == "generic":
+        # control_type を渡さないと duty 指令の DC モータが位置制御で生成され、
+        # 動作確認も reset も config と別物の指令になる
+        return GenericDriver(
+            name=motor_name,
+            can_id=can_id,
+            control_type=_parse_control_type(motor_name, motor_cfg.get("control_type")),
         )
 
     return driver_cls(name=motor_name, can_id=can_id)
@@ -369,17 +406,19 @@ def _load_pid_config(motor_name: str, motor_cfg: dict) -> dict[str, float | None
         if key not in _DEFAULT_PID:
             logger.warning("未知の pid キー: motors.%s.pid.%s (無視)", motor_name, key)
             continue
+        if value is None and key == "integral_limit":
+            # integral_limit の null は「制限なし」という正当な指定
+            result[key] = None
+            continue
         if value is None:
-            # integral_limit だけは「制限なし」を null で表現できる。
             # 他のキーの null は書きかけの yaml とみなし、既定値のまま使う
-            if key != "integral_limit":
-                logger.warning(
-                    "motors.%s.pid.%s が null です。既定値 %s を使います。",
-                    motor_name,
-                    key,
-                    _DEFAULT_PID[key],
-                )
-                continue
+            logger.warning(
+                "motors.%s.pid.%s が null です。既定値 %s を使います。",
+                motor_name,
+                key,
+                _DEFAULT_PID[key],
+            )
+            continue
         try:
             result[key] = float(value)
         except (TypeError, ValueError):
@@ -486,6 +525,80 @@ def _wire_robot_motors(
     return list(loops.values())
 
 
+def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver]) -> list[SyncGroup]:
+    """位置定数のペア軸から同期監視グループを組み立てる。
+
+    逆回転ペアは MotorSpec の scale の符号がそのまま監視側の換算になる。
+    """
+    groups: list[SyncGroup] = []
+    for axis_name in positions.paired_axes():
+        spec = positions.axis(axis_name)
+        missing = [motor.name for motor in spec.motors if motor.name not in motors]
+        if missing:
+            # 黙って飛ばすと「監視しているつもり」で機構破損に至るため必ず残す
+            logger.warning(
+                "同期監視をスキップ: 軸 %s のモータ %s がこのロボットに存在しません",
+                axis_name,
+                ", ".join(missing),
+            )
+            continue
+        groups.append(
+            SyncGroup(
+                name=axis_name,
+                members=tuple(
+                    SyncMember(motor.name, motor.scale, motor.offset) for motor in spec.motors
+                ),
+                tolerance=float(spec.sync_tolerance or 0.0),
+            )
+        )
+    return groups
+
+
+def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop]) -> None:
+    """全メンバが同一の位置制御ループに載るグループだけをループへ登録する。
+
+    ループ側の保護 (偏差超過で即電流 0・途絶をペア単位で判定) は、そのループが
+    両方のモータの電流を握っている場合にしか成立しない。EDULITE のペアや
+    バスをまたぐペアは SyncMonitor による全体緊急停止だけで守る。
+    """
+    for group in groups:
+        member_names = {member.motor_name for member in group.members}
+        target = next(
+            (loop for loop in loops if member_names <= set(loop.motor_names)),
+            None,
+        )
+        if target is None:
+            logger.info("同期監視: %s は位置制御ループ外 (SyncMonitor のみで監視)", group.name)
+            continue
+        target.add_sync_group(group)
+        logger.info("同期監視: %s を位置制御ループ (bus=%s) に登録", group.name, target.bus_name)
+
+
+def _make_sync_violation_handler(
+    server: RobotServer,
+    robot_name: str,
+    positions: PositionTable,
+    tasks: set[asyncio.Task[None]],
+) -> Callable[[str, float], None]:
+    """同期ずれの検出を全体緊急停止に接続するハンドラを作る。"""
+
+    def on_violation(axis_name: str, deviation: float) -> None:
+        spec = positions.axis(axis_name)
+        unit = spec.unit
+        tolerance = float(spec.sync_tolerance or 0.0)
+        reason = (
+            f"{robot_name} の {axis_name} の左右ずれ {deviation:.3f}{unit} が"
+            f" 許容 {tolerance:.3f}{unit} を超えました"
+        )
+        # SyncMonitor のコールバックは同期関数なので停止処理をタスクへ逃がす。
+        # 参照を保持しないと GC でタスクが消え、緊急停止が発火しないことがある
+        task = asyncio.create_task(server.activate_e_stop(reason=reason))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    return on_violation
+
+
 def _load_sequence(robot_name: str) -> Sequence | None:
     """robots/<robot_name>.py からシーケンスクラスを動的にロードする。"""
     module_name = f"robots.{robot_name}"
@@ -566,6 +679,9 @@ async def main() -> None:
     )
     can_managers: list[CANManager] = []
     position_loops: list[M3508PositionLoop] = []
+    sync_monitors: list[SyncMonitor] = []
+    # 同期ずれから起動した緊急停止タスクの強参照置き場 (GC で消えると停止しない)
+    e_stop_tasks: set[asyncio.Task[None]] = set()
 
     # モータ指令経路に渡す緊急停止インターロック。server の状態を遅延参照するため
     # クロージャにしている (server は add_robot より先に生成済み)
@@ -594,13 +710,30 @@ async def main() -> None:
         )
         position_loops.extend(loops)
 
+        # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
+        sync_groups = _build_sync_groups(positions, motors)
+        _attach_sync_groups(sync_groups, loops)
+        if sync_groups:
+            sync_monitors.append(
+                SyncMonitor(
+                    sync_groups,
+                    motors,
+                    last_feedback_at=can_manager.last_feedback_at,
+                    feedback_timeout_ms=float(health_thresholds["feedback_timeout_ms"]),
+                    on_violation=_make_sync_violation_handler(
+                        server, robot_name, positions, e_stop_tasks
+                    ),
+                )
+            )
+
         server.add_robot(robot_name, seq, can_manager, position_loops=loops)
         logger.info(
-            "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s)",
+            "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, 同期監視: %s)",
             robot_name,
             len(motors),
             [loop.bus_name for loop in loops] or "なし",
             list(positions.axes) or "なし",
+            [group.name for group in sync_groups] or "なし",
         )
 
     try:
@@ -610,6 +743,8 @@ async def main() -> None:
         # 途絶判定で電流 0 に落ちるだけだが、無駄な警告ログを避ける
         for loop in position_loops:
             loop.start()
+        for monitor in sync_monitors:
+            monitor.start()
         await server.start()
     except asyncio.CancelledError:
         pass
@@ -618,6 +753,9 @@ async def main() -> None:
         # 電流指令が出続けるため、CAN シャットダウンより先に必ず止める
         for loop in position_loops:
             await loop.stop()
+        # 監視だけが生き残ると、停止済みのモータのフィードバックを見て誤発報する
+        for monitor in sync_monitors:
+            await monitor.stop()
         for mgr in can_managers:
             await mgr.shutdown()
         await server.cleanup()

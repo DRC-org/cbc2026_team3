@@ -9,11 +9,13 @@ import pytest
 from lib.drivers.base import ControlMode, MotorDriver, MotorState
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import (
+    AxisHandle,
     EStopActiveError,
     MotorGroup,
     MotorHandle,
     build_motor_group,
 )
+from lib.sequence.positions import AxisSpec, MotorSpec
 
 
 class _FakeDriver(MotorDriver):
@@ -379,3 +381,59 @@ class TestSequenceMotorBinding:
 
         assert driver.encoded == [(ControlMode.POSITION, 100.0)]
         assert seq.reached is True
+
+
+class TestAxisHandle:
+    def _pair(self, *, sync_tolerance: float | None) -> tuple[AxisHandle, dict[str, _FakeDriver]]:
+        mgr = _make_can_manager()
+        drivers = {name: _FakeDriver(name, i + 1) for i, name in enumerate(("pair_r", "pair_l"))}
+        spec = AxisSpec(
+            name="pair",
+            unit="mm",
+            command_unit="deg",
+            timeout_s=1.0,
+            tolerance=None,
+            motors=(
+                MotorSpec(name="pair_r", scale=10.0, offset=0.0),
+                MotorSpec(name="pair_l", scale=-10.0, offset=0.0),
+            ),
+            sync_tolerance=sync_tolerance,
+        )
+        handles = [MotorHandle(name, drivers[name], mgr, poll_interval=0.001) for name in drivers]
+        return AxisHandle(spec, handles), drivers
+
+    def test_name_is_axis_name(self) -> None:
+        handle, _ = self._pair(sync_tolerance=1.0)
+
+        assert handle.name == "pair"
+
+    async def test_set_target_value_sends_per_motor_commands(self) -> None:
+        handle, drivers = self._pair(sync_tolerance=1.0)
+
+        await handle.set_target_value({"pair_r": 30.0, "pair_l": -30.0})
+
+        assert drivers["pair_r"].encoded == [(ControlMode.POSITION, 30.0)]
+        assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
+
+    def test_sync_error_is_none_without_sync_tolerance(self) -> None:
+        handle, drivers = self._pair(sync_tolerance=None)
+        drivers["pair_r"].set_observed(position=30.0)
+        drivers["pair_l"].set_observed(position=0.0)
+
+        assert handle.sync_error() is None
+
+    def test_sync_error_cancels_reverse_rotation(self) -> None:
+        """逆回転は scale の符号で吸収されるので、揃っていれば偏差 0 になる。"""
+        handle, drivers = self._pair(sync_tolerance=1.0)
+        drivers["pair_r"].set_observed(position=30.0)
+        drivers["pair_l"].set_observed(position=-30.0)
+
+        assert handle.sync_error() == pytest.approx(0.0)
+
+    def test_sync_error_reports_human_unit_deviation(self) -> None:
+        handle, drivers = self._pair(sync_tolerance=1.0)
+        drivers["pair_r"].set_observed(position=30.0)
+        drivers["pair_l"].set_observed(position=-10.0)
+
+        # 3.0mm と 1.0mm の差
+        assert handle.sync_error() == pytest.approx(2.0)

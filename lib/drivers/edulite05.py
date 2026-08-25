@@ -190,9 +190,7 @@ class Edulite05Driver(MotorDriver):
             (self.encode_write_param_float(self.PARAM_LIMIT_CUR, self.limit_current), 0.05),
         ]
         if self.mode is ControlMode.POSITION:
-            steps.append(
-                (self.encode_write_param_float(self.PARAM_LOC_KP, self.position_kp), 0.05)
-            )
+            steps.append((self.encode_write_param_float(self.PARAM_LOC_KP, self.position_kp), 0.05))
         if self.set_zero_on_start:
             steps.append((self.encode_set_zero(), 0.2))
         return steps
@@ -321,9 +319,7 @@ class Edulite05Driver(MotorDriver):
     ) -> tuple[bool, str | None]:
         target = context["target"]
         tol = (
-            tolerance
-            if tolerance is not None
-            else math.radians(self._CHECK_DEFAULT_TOLERANCE_DEG)
+            tolerance if tolerance is not None else math.radians(self._CHECK_DEFAULT_TOLERANCE_DEG)
         )
         if abs(state.position - target) <= tol:
             return True, None

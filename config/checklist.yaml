@@ -23,6 +23,9 @@ checklists:
     - id: field_clear
       label: 可動範囲内に人・物がないこと確認
 
+  # メインハンドの y_axis / rotate は左右 2 台が機構的に直結したペア軸で、片側だけ
+  # 駆動すると壊れるため motor_check から除外している (config/main_hand.yaml 参照)。
+  # 自動確認が効かない分をここでの目視確認で埋めるので、下記の *_sync は省略できない。
   main_hand:
     - id: estop_release
       label: 非常停止スイッチ解除確認
@@ -30,6 +33,14 @@ checklists:
       label: メインハンド初期位置確認
     - id: gripper_open
       label: グリッパ開状態確認
+    - id: y_axis_sync
+      label: y 軸 左右のずれがないこと確認
+    - id: rotate_sync
+      label: エンドエフェクタ回転 左右のずれがないこと確認
+    - id: wall_initial
+      label: 壁 前後とも初期位置確認
+    - id: conveyor_stop
+      label: コンベア停止確認
     - id: motor_check
       label: アクチュエータ動作確認 完了
     - id: court

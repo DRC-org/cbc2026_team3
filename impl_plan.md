@@ -634,6 +634,17 @@ cbc2026_team3_central/
 { "type": "e_stop_state", "active": true }
 ```
 
+内部検知（同期監視の偏差超過など）で発動した場合は停止理由を添える。試合中に
+「なぜ止まったか」が操縦者に分からないと復旧できないため:
+
+```jsonc
+{ "type": "e_stop_state", "active": true, "reason": "main_hand の y_axis の左右ずれ 3.400mm が 許容 2.000mm を超えました" }
+```
+
+`reason` は操縦者操作による `e_stop` では付かない（既存 UI は未知フィールドを無視するため
+後方互換）。内部からの発動は `RobotServer.activate_e_stop(reason=...)` が唯一の入口で、
+`e_stop` コマンドと同じ経路（動作確認 abort → 停止フレーム → シーケンス停止 → 状態配信）を通る。
+
 ### Client → Server（操作）
 
 ```jsonc
@@ -954,6 +965,149 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
   現状の同梱 yaml はすべてスカラー（メイン／サブとも昇降・関節・グリッパのみで、
   左右反転する軸を持たない）。
 
+## メインハンド実機構成（2026-08 確定）
+
+機構が確定したためモータ構成を実物に合わせる。`lift_motor` / `arm_joint` / `gripper` の
+仮構成は廃止する。
+
+| 論理軸 | モータ | ドライバ | バス | can_id | 役割 |
+|---|---|---|---|---|---|
+| `y_axis` | `y_axis_r` / `y_axis_l` | m3508 | can_m3508 | 1 / 2 | y 軸前後移動（ラックアンドピニオン）。**逆回転で同一動作** |
+| `rotate` | `rotate_r` / `rotate_l` | edulite05 | can_edulite | 1 / 2 | エンドエフェクタ回転。**逆回転で同一動作** |
+| `gripper` | `gripper` | generic (サーボ) | can_generic | 0x01 | 開 / 閉 の 2 状態のみ |
+| `conveyor` | `conveyor` | generic (DC) | can_generic | 0x02 | 回転 / 停止 のみ |
+| `wall_f` | `wall_f` | generic (サーボ) | can_generic | 0x03 | 初期 / 閉 / 開 の 3 状態のみ |
+| `wall_r` | `wall_r` | generic (サーボ) | can_generic | 0x04 | 初期 / 閉 / 開 の 3 状態のみ |
+
+### CAN ID をロボット横断で一意にする
+
+`can_edulite` / `can_generic` は**メインハンドとサブハンドで物理的に同じバス**を共有する。
+ロボットごとに `CANManager` は別インスタンスだが CAN ID 空間は共有されるため、
+同じ can_id を両者が使うと `CANManager._receive_loop` が最初にマッチした 1 台で `break` し、
+もう一方は永久にフィードバックを得られない。EDULITE では
+`requires_fresh_feedback_for_activation` が True のため**無励磁のまま運用に入る**。
+
+したがって can_id はバス単位でロボット横断に一意とする。メインハンドに若い番号を割り当て、
+サブハンドは後ろにずらす（`sub_arm_joint`: 2 → 3、`sub_gripper`: 0x02 → 0x05）。
+
+### 逆回転ペア軸（`y_axis` / `rotate`）
+
+左右 2 台が機構的に直結し、**位置がずれるとその場で機構が壊れる**。単なる「2 モータに同じ
+値を送る」では不十分で、以下 3 つの防護を入れる。
+
+**防護 1: 同一指令の原子性**
+`y_axis` は同一 `M3508PositionLoop` に載るため、電流指令は 200Hz の同一 `0x200` フレームに
+2 台分のスロットとして載り、物理的に同時に届く。`rotate` (EDULITE) は 1 台 1 フレームで
+原子的送信手段がないため、2 通を連続送信する。
+
+**防護 2: 偏差監視で即停止**
+逆回転なので「同じ動作」とは `pos_r / dir_r ≒ pos_l / dir_l`（`dir` は `scale` の符号）を
+意味する。この偏差が `sync_tolerance` を超えたら停止する。
+- `y_axis`: `M3508PositionLoop` 内で 200Hz 判定し、超過ならペア両方を即座に電流 0
+- `y_axis` / `rotate` 共通: `SyncMonitor` が 50Hz で判定し、超過なら**全体緊急停止**
+
+**防護 3: フィードバック途絶をペア単位で判定**
+`M3508PositionLoop` は従来フィードバック途絶を軸ごとに独立判定し、stale な軸だけ電流 0 に
+していた。左右直結の機構では片方が停止して片方が押し続けるため、そのまま破損する。
+**ペアのどちらか一方が stale なら両方を電流 0** に変更する。
+
+**動作確認（motor_check）からは除外する**
+`MotorCheckRunner` は 1 台ずつ順に動かす設計で、片側だけを 500mA で回すと機構を壊す。
+また `M3508Driver.encode_target` は自スロット以外を 0 で埋めるため、単独駆動が構造的に
+避けられない。ペア軸のモータは `motor_check.magnitude: 0` を指定して SKIPPED にし、
+指差喚呼チェックリストでの手動確認に回す。ペア同時駆動に対応した動作確認は将来課題。
+
+### 離散状態アクチュエータ（`gripper` / `conveyor` / `wall_f` / `wall_r`）
+
+CAN で指定するのは状態のみで、連続値の指令は行わない。新しいドライバは作らず、
+**位置定数 yaml の「名前付き状態」として表現する**（`positions.gripper.open` 等）。
+`move_to` は位置名でしか値を引けないため、定義した状態以外を送れないことが構造的に保証される。
+
+`conveyor` は DC モータで位置の概念がないため duty 指令とする。これには `move_to` 側の
+拡張が要る（従来は `set_position` 固定だった）。
+
+動作確認（`motor_check`）の `magnitude` も generic 既定の 0.1 は使わない。
+
+- `gripper` / `wall_f` / `wall_r`: **位置定数 yaml の「安全な状態」の値と一致させる**
+  （`gripper.open` / `wall_*.open`）。0.1deg は離散状態サーボにとって「どの状態でもない」
+  無意味な指令になるため。値がずれると動作確認で動く位置と運用で使う位置が別物になり
+  確認が意味を失うので、一致は `tests/test_robot_sequences.py` で検証する。
+- `conveyor`: 0.3（duty）。0.1 では DC モータが回り出さず、`evaluate_check_result` の
+  「回転検出なし」で必ず失敗する。
+
+### `axes` スキーマ拡張
+
+```yaml
+axes:
+  # 複数モータで駆動する論理軸。軸名はモータ名でなくてよい
+  y_axis:
+    unit: mm
+    command_unit: deg
+    timeout_s: 4.0
+    tolerance: 1.0          # 到達許容差（人間の単位）
+    sync_tolerance: 2.0     # 左右のずれ許容（人間の単位）。超過で停止
+    motors:                 # scale / offset はモータごとに書く
+      y_axis_r: { scale: 864.15, offset: 0.0 }
+      y_axis_l: { scale: -864.15, offset: 0.0 }   # 逆回転は scale の符号で表す
+
+  # 位置以外を指令する軸
+  conveyor:
+    unit: duty
+    command_unit: duty
+    command_mode: duty      # position（既定）/ velocity / duty
+    settle_s: 0.3           # 到達判定を持たない軸の指令後固定待ち [s]
+
+  # 単一モータ軸は従来どおり（軸名 = モータ名、scale / offset を軸直下に書く）
+  gripper:
+    unit: state
+    command_unit: deg
+    scale: 1.0
+```
+
+**設計上の決定事項**:
+- `motors:` を書かない軸は「軸名 = モータ名」の単一モータ軸として扱う（既存 yaml と後方互換）。
+- `motors:` と軸直下の `scale` / `offset` の併記は**読み込みを拒否**する。どちらが効くか
+  曖昧なまま機構を動かすと破損に直結するため。
+- 逆回転は `scale` の符号で表す。専用の `invert` フラグを作らないのは、単位換算と回転方向を
+  2 箇所に分けると片方だけ直したときに気付けないため。
+- `sync_tolerance` を書いた軸はモータ 2 台以上が必須。1 台の軸に書いたら読み込みを拒否する
+  （書いた本人はペアのつもりでいるため、黙って無視すると防護が効いていないことに気付けない）。
+- `command_mode: duty` / `velocity` の軸は到達フラグを持たない（`default_tolerance` が `inf` で
+  常に到達扱い）。`settle_s` を書かないと次のステップへ即座に進むため、DC モータの
+  起動・停止待ちは `settle_s` で明示する。
+
+### 同期監視（`lib/control/sync_monitor.py`）
+
+EDULITE は位置ループがドライバ内蔵で PC 側に常駐ループが無く、`M3508PositionLoop` のような
+偏差検知の置き場所が無い。またシーケンス実行中以外（動作確認中・待機中・手動操作中）にも
+機構がずれる可能性があるため、**シーケンスから独立した常駐監視**を置く。
+
+- 対象: `sync_tolerance` を持つ全軸（`y_axis` / `rotate`）
+- 周期: 50Hz（機構が壊れる前に止まればよく、200Hz は不要）
+- 偏差: 各モータのフィードバックを人間の単位へ逆換算 `(fb - offset) / scale` し、最大値 − 最小値
+- 超過時: `on_violation(axis_name, error)` を呼ぶ。`main.py` はこれを**サーバの緊急停止**に接続する
+- フィードバック未受信のモータは判定から除外する（起動直後に誤検知して緊急停止させないため）
+
+`y_axis` は `M3508PositionLoop` 側の 200Hz 判定と二重になるが、これは意図的な多重防護である。
+ループ側は「電流を即 0 にする」局所的な保護、`SyncMonitor` は「試合を止めて人間に知らせる」
+全体的な保護で、役割が違う。
+
+#### `main.py` での配線
+
+- `_build_sync_groups(positions, motors)`: `PositionTable.paired_axes()` の各軸を `SyncGroup` に
+  変換する。そのロボットに存在しないモータを含む軸は**スキップして WARNING**（config の
+  書き間違いで監視が黙って無効になるのを防ぐ）。
+- `_attach_sync_groups(groups, loops)`: 全メンバが**同一の** `M3508PositionLoop` に載っている
+  グループだけ `loop.add_sync_group()` する。ループ側の保護はそのループが両モータの電流を
+  握っている場合にしか成立しないため。EDULITE のペア（`rotate`）はここでは登録されない。
+- `SyncMonitor` はロボットごとに、グループが 1 つ以上あるときだけ生成する。`on_violation` は
+  `asyncio.create_task(server.activate_e_stop(reason=...))` で全体緊急停止を起動し、
+  タスクは GC 回避のため `main()` の集合で強参照を保持する。
+- ライフサイクルは位置制御ループと同じ。CAN 受信ループ起動後に `start()`、`finally` で
+  必ず `await stop()`（監視だけ生き残ると停止済みモータのフィードバックで誤発報する）。
+
+---
+
 ## シーケンス記述例
 
 ```python
@@ -990,6 +1144,22 @@ class PickAndPlace(Sequence):
 搬送に入る・アームが展開しきっていないのにハンドを閉じる、といった二次被害が出る。
 `run()` は例外を握って `break` するので、シーケンスは停止して Web UI 上で止まった位置が分かり、
 操縦者が原因を除去して該当ステップへジャンプできる。
+
+### `AxisHandle`（`lib/sequence/motors.py`）
+
+`move_to` は軸ごとに `AxisHandle` を組み立てて指令する。1 論理軸（1〜N モータ）への指令と
+到達待ちをまとめる薄いラッパで、状態を持たないため `move_to` のたびに生成してよい。
+
+| メソッド | 責務 |
+|---|---|
+| `set_target_value(commands)` | `{モータ名: 指令値}` を `command_mode` で **同時に** 送る（`asyncio.gather`）。逐次 await すると左右に時間差が出て機構がねじれる |
+| `wait_reached(timeout=)` | POSITION 軸は全モータの到達を並列待ち。**許容差はモータごとに `abs(tolerance * scale)` へ換算**する（左右で scale の絶対値が違っても同じ幅を効かせるため）。POSITION 以外（velocity / duty）は到達判定を持たないので `settle_s` だけ待って True |
+| `sync_error()` | 各モータのフィードバックを `(fb - offset) / scale` で人間の単位へ逆換算し `max - min`。`sync_tolerance` が無い軸は `None` |
+
+到達後に `sync_error()` が `sync_tolerance` を超えていれば `AxisSyncError`（`lib/sequence/engine.py`）を
+送出してシーケンスを止める。到達判定を満たしていても左右がずれたまま動かし続けると
+押し合いで機構が壊れるため、`SequenceTimeoutError` と同じく「黙って次へ進ませない」扱いにする。
+これは `SyncMonitor` の 50Hz 常駐監視とは別レイヤの防護で、役割が重複するのは意図的。
 
 ---
 

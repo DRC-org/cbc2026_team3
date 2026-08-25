@@ -166,8 +166,7 @@ def test_initialization_messages_apply_configuration_in_safe_order() -> None:
 def test_initialization_does_not_set_zero_by_default() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     comm_types = [
-        driver.parse_can_id(msg.arbitration_id)[0]
-        for msg in driver.initialization_messages()
+        driver.parse_can_id(msg.arbitration_id)[0] for msg in driver.initialization_messages()
     ]
     assert driver.COMM_TYPE_SET_ZERO not in comm_types
     assert driver.COMM_TYPE_ENABLE not in comm_types
@@ -263,9 +262,7 @@ def test_prepare_check_disables_configures_position_and_enables() -> None:
 
 def test_check_safety_rejects_known_fault_and_overtemperature() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(
-        feedback_message(driver, fault_bits=int(Edulite05Fault.UNDERVOLTAGE))
-    )
+    driver.update_state(feedback_message(driver, fault_bits=int(Edulite05Fault.UNDERVOLTAGE)))
     assert "fault=0x01" in driver.check_safety_error()
 
     driver.update_state(feedback_message(driver, temperature=60.0))
@@ -283,9 +280,7 @@ def test_emergency_stop_uses_extended_disable_without_fault_clear() -> None:
 def test_evaluate_check_result_and_reset() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     context = {"target": math.radians(5.0)}
-    passed, detail = driver.evaluate_check_result(
-        MotorState(position=math.radians(4.5)), context
-    )
+    passed, detail = driver.evaluate_check_result(MotorState(position=math.radians(4.5)), context)
 
     assert passed is True
     assert detail is None

@@ -374,3 +374,33 @@ class TestMultiTurnTargetReached:
         self._feed(0, velocity=1000)
         assert self.driver.is_target_reached(1002.0, ControlMode.VELOCITY) is True
         assert self.driver.is_target_reached(1020.0, ControlMode.VELOCITY) is False
+
+
+class TestFeedbackPosition:
+    """偏差監視 (左右直結軸) が使う共通 API が多回転累積角を返すこと。"""
+
+    def setup_method(self) -> None:
+        self.driver = M3508Driver("lift", can_id=1)
+
+    def _feed_angle(self, angle_raw: int) -> None:
+        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
+        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
+        self.driver.update_state(msg)
+
+    def test_returns_multi_turn_position(self) -> None:
+        self._feed_angle(0)
+        self._feed_angle(2048)
+        assert self.driver.feedback_position() == pytest.approx(self.driver.multi_turn_position)
+        assert self.driver.feedback_position() == pytest.approx(90.0)
+
+    def test_continuous_across_wraparound(self) -> None:
+        # 単回転角は 0 に戻るが、偏差監視では連続した値でなければならない
+        for raw in (0, 2048, 4096, 6144, 0):
+            self._feed_angle(raw)
+        assert self.driver.state.position == pytest.approx(0.0)
+        assert self.driver.feedback_position() == pytest.approx(360.0)
+
+    def test_negative_direction_is_continuous(self) -> None:
+        for raw in (0, 6144, 4096, 2048, 0):
+            self._feed_angle(raw)
+        assert self.driver.feedback_position() == pytest.approx(-360.0)

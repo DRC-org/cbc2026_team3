@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
@@ -10,6 +10,7 @@ from lib.drivers.base import ControlMode
 if TYPE_CHECKING:
     from lib.can_manager import CANManager
     from lib.drivers.base import MotorDriver, MotorState
+    from lib.sequence.positions import AxisSpec
 
 # 到達待ちのポーリング間隔。CAN フィードバックは 1kHz 前後で届くため
 # 10ms 周期なら取りこぼしがなく、asyncio ループへの負荷も無視できる
@@ -200,6 +201,84 @@ class MotorGroup:
     def clear_targets(self) -> None:
         for handle in self._handles.values():
             handle.clear_target()
+
+
+class AxisHandle:
+    """1 論理軸 (1〜N モータ) への指令と到達待ちをまとめるハンドル。
+
+    軸の状態は AxisSpec と MotorHandle 側にしかないため、``move_to`` のたびに
+    生成してよい。ここに寿命のある状態を持たせないのは、同じ軸を別経路
+    (手動操作・動作確認) から動かしたときに古い目標値が残るのを避けるため。
+    """
+
+    def __init__(self, spec: AxisSpec, handles: Sequence[MotorHandle]) -> None:
+        self._spec = spec
+        self._handles = tuple(handles)
+        self._motors = {motor.name: motor for motor in spec.motors}
+
+    @property
+    def name(self) -> str:
+        return self._spec.name
+
+    async def set_target_value(self, commands: Mapping[str, float]) -> None:
+        """モータ名 → 指令値をまとめて送る。
+
+        逐次 await しないのは、左右直結の軸で送信に時間差が出ると機構がねじれるため。
+        """
+        try:
+            values = [(handle, commands[handle.name]) for handle in self._handles]
+        except KeyError as exc:
+            raise KeyError(
+                f"軸 '{self.name}' のモータ {exc.args[0]!r} に対する指令値がありません"
+            ) from exc
+
+        await asyncio.gather(
+            *(handle.set_target(self._spec.command_mode, value) for handle, value in values)
+        )
+
+    async def wait_reached(self, *, timeout: float | None = None) -> bool:
+        """軸の到達を待つ。到達すれば True、タイムアウトなら False。"""
+        if self._spec.command_mode is not ControlMode.POSITION:
+            # duty / velocity 指令の軸は目標値と同じ次元のフィードバックを持たず
+            # 到達判定ができない。代わりに機構が動き切るまでの固定待ちだけを行う
+            if self._spec.settle_s > 0.0:
+                await asyncio.sleep(self._spec.settle_s)
+            return True
+
+        results = await asyncio.gather(
+            *(
+                handle.wait_reached(tolerance=self._tolerance_for(handle.name), timeout=timeout)
+                for handle in self._handles
+            )
+        )
+        return all(results)
+
+    def sync_error(self) -> float | None:
+        """モータ間のずれ (人間の単位)。監視対象でない軸は None。
+
+        逆回転ペアは scale の符号で向きが吸収されるため、正しく追従していれば 0 に近づく。
+        """
+        if self._spec.sync_tolerance is None:
+            return None
+
+        values = [
+            self._motors[handle.name].to_value(handle.driver.feedback_position())
+            for handle in self._handles
+        ]
+        if not values:
+            return None
+        return max(values) - min(values)
+
+    def _tolerance_for(self, motor_name: str) -> float | None:
+        """人間の単位の許容差をモータの指令単位へ換算する。
+
+        軸ではなくモータごとに換算するのは、左右で scale の絶対値が異なる機構でも
+        同じ幅の許容差を効かせるため。None のときはドライバ既定値に委ねる。
+        """
+        if self._spec.tolerance is None:
+            return None
+        # 許容差は幅であって向きを持たないため、scale が負でも正の幅になるようにする
+        return abs(self._spec.tolerance * self._motors[motor_name].scale)
 
 
 def build_motor_group(

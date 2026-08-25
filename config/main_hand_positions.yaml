@@ -1,37 +1,57 @@
 # メインハンドの機構位置定数。
 #
-# !!! 機構が未完成のため、ここに書かれた値はすべて仮値 (安全側の小さい可動量) !!!
-# 機構が完成したら、このファイルの数値だけを実測値に差し替えれば済むようにしてある。
-# robots/main_hand.py には数値を書かないこと。
+# !!! 機構寸法が未確定のため、ここに書かれた数値はすべて仮値 !!!
+# 「機構が付いていない状態で誰かが起動しても壊れない」ことだけを狙った、安全側の
+# 小さい可動量に留めてある。機構が確定したら、このファイルの数値だけを実測値へ
+# 差し替えれば済むようにしてある。robots/main_hand.py には数値を書かないこと。
 #
 # axes: 人間が扱いやすい単位からモータ指令値への換算。command = value * scale + offset
 #   モータごとに指令の単位が違う (M3508=モータ軸 deg / EDULITE 05=rad / 自作=deg) ため、
 #   換算をここに閉じ込めてシーケンス本体から単位を消している。
+#   左右 2 台で 1 つの動作をする軸は motors: に両方を並べる。逆回転は scale の符号で表す
+#   (専用の invert フラグを設けないのは、単位換算と回転方向が 2 箇所に分かれると
+#   片方だけ直したときに気付けないため)。
 # positions: 各軸の目標位置。値は axes.<軸>.unit の単位で書く。
 #   コートで値が変わる位置だけ `{ red: <値>, blue: <値> }` と書く (両方必須)。
+#
+# 離散状態アクチュエータ (gripper / wall_f / wall_r) の値は「自作基板ファームが
+# 目標角度 [deg] を受け取る」前提で書いてある。ファームが「状態番号を受け取る」仕様に
+# なった場合は、ここの値を 0/1/2 のような状態番号へ差し替えるだけでよく、
+# robots/main_hand.py もドライバも変更しなくてよい。これがこの設計の要点である。
 
 axes:
-  # DJI M3508 + 減速機 + ボールねじ想定の昇降/送り軸。
-  # 指令は「モータ軸の累積角 [deg]」。出力軸 1 回転 = 360 * 3591/187 ≒ 6913.2 deg。
-  lift_motor:
+  # ラックアンドピニオンによる y 軸前後移動。左右 2 台の M3508 が機構的に直結しており、
+  # 逆回転で同一の動作になる。指令は「モータ軸の累積角 [deg]」。
+  # scale = 360 * (3591/187) / (pi * ピニオン基準円直径[mm])
+  #   出力軸 1 回転 = 360 * 3591/187 ≒ 6913.2 deg、出力軸 1 回転で進む距離 = pi * d [mm]
+  # TODO: 下の 55.02 はピニオン基準円直径 40mm と仮定した値。実機の歯数・モジュールから
+  #       再計算し実測で確認すること。
+  #       (旧 config にあったボールねじのリード基準の式は機構が変わったので使わない)
+  y_axis:
     unit: mm
     command_unit: deg
-    # TODO: 機構確定後に実測値へ。scale = 360 * (3591/187) / リード[mm/rev]
-    #       下はリード 8mm/rev と仮定した値 (6913.2 / 8 = 864.15 deg/mm)
-    scale: 864.15
-    offset: 0.0          # 原点は電源投入位置。機械原点がずれるならここで吸収 [deg]
-    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
-    # tolerance: 0.5     # TODO: 到達許容差 [mm]。未指定ならドライバ既定 (出力軸 1deg 相当)
+    timeout_s: 4.0        # この時間で到達しなければシーケンスを停止する
+    tolerance: 1.0        # 到達許容差 [mm]
+    # 左右のずれ許容 [mm]。超過したら押し合いで機構が壊れるため停止する
+    sync_tolerance: 2.0
+    motors:
+      y_axis_r: { scale: 55.02, offset: 0.0 }
+      y_axis_l: { scale: -55.02, offset: 0.0 }   # 機構的に逆回転で同一動作
 
-  # RobStride EDULITE 05 のアーム関節。指令・フィードバックともに rad。
-  arm_joint:
+  # エンドエフェクタ回転。左右 2 台の EDULITE 05 が直結し、逆回転で同一動作。
+  # 指令・フィードバックともに rad。
+  rotate:
     unit: deg
     command_unit: rad
-    scale: 0.017453292519943295   # deg -> rad (pi/180)。機構側の減速がないので固定値
-    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
     timeout_s: 3.0
+    tolerance: 2.0        # 到達許容差 [deg]
+    sync_tolerance: 3.0   # 左右のずれ許容 [deg]。超過で停止 (機構保護)
+    motors:
+      # deg -> rad (pi/180)。機構側に減速が入るなら実測値へ差し替えること
+      rotate_r: { scale: 0.017453292519943295, offset: 0.0 }
+      rotate_l: { scale: -0.017453292519943295, offset: 0.0 }   # 逆回転で同一動作
 
-  # 自作モータドライバのグリッパ。指令・フィードバックともに deg。
+  # ワーク把持のグリッパ。開 / 閉 の 2 状態しか取らない。
   gripper:
     unit: deg
     command_unit: deg
@@ -39,21 +59,64 @@ axes:
     offset: 0.0
     timeout_s: 2.0
 
+  # ワーク搬送コンベア。DC モータなので位置の概念がなく duty 指令で回す。
+  # duty 指令は到達フラグを持たないため、settle_s で待たないと指令直後に次の
+  # ステップへ進んでしまう (起動・停止し切る前に先へ行く)。
+  conveyor:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5         # DC モータの起動・停止待ち [s]
+    timeout_s: 1.0
+
+  # 前側の壁。初期 / 閉 / 開 の 3 状態しか取らない。
+  wall_f:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+
+  # 後側の壁。wall_f と同一仕様。
+  wall_r:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+
 positions:
-  # TODO: 機構完成後に実測値へ。現状は「機構が付いていない状態で誰かが起動しても
-  #       壊れない」ことだけを狙った微小ストローク。
-  lift_motor:
+  # TODO: 機構完成後に実測値へ。現状は微小ストロークのみ。
+  y_axis:
     home: 0.0            # 電源投入位置 = 原点 [mm]
     work_3: 10.0         # 自陣ワーク 3 列目 [mm]
     approach: 15.0       # ワーク直前 [mm]
     place: 5.0           # 配置位置 [mm]
 
-  arm_joint:
+  rotate:
     home: 0.0            # 収納姿勢 [deg]
-    extended: 8.0        # 展開姿勢 [deg]
-    retracted: 0.0       # 把持後の引き戻し姿勢 [deg]。home と分けてあるのは
-                         # ワークを持った状態の退避角を別に詰められるようにするため
+    pick: 8.0            # 把持姿勢 [deg]
+    place: 0.0           # 配置姿勢 [deg]。home と分けてあるのは、ワークを持った状態の
+                         # 姿勢だけを後から詰められるようにするため
 
+  # !!! 以下 3 軸の値は config/main_hand.yaml の motor_check.magnitude と一致させること。
+  #     ずれると動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
   gripper:
-    open: 5.0            # 開 [deg]
+    open: 5.0            # 開 [deg] (= main_hand.yaml gripper.motor_check.magnitude)
     closed: 0.0          # 閉 (把持) [deg]
+
+  conveyor:
+    stop: 0.0            # 停止 [duty]
+    run: 0.3             # 搬送 [duty]。符号が回転方向なので、逆転が必要になったら負値にする
+
+  wall_f:
+    initial: 0.0         # 初期 (退避) [deg]
+    closed: 3.0          # 閉 (ワーク保持) [deg]
+    open: 6.0            # 開 [deg] (= main_hand.yaml wall_f.motor_check.magnitude)
+
+  wall_r:
+    initial: 0.0         # 初期 (退避) [deg]
+    closed: 3.0          # 閉 (ワーク保持) [deg]
+    open: 6.0            # 開 [deg] (= main_hand.yaml wall_r.motor_check.magnitude)

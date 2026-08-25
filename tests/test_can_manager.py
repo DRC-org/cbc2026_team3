@@ -71,9 +71,7 @@ class TestCANManager:
         with patch("asyncio.get_event_loop") as mock_loop:
             mock_loop.return_value.run_in_executor = AsyncMock()
             await mgr.send("m1", msg)
-            mock_loop.return_value.run_in_executor.assert_called_once_with(
-                None, bus0.send, msg
-            )
+            mock_loop.return_value.run_in_executor.assert_called_once_with(None, bus0.send, msg)
 
     async def test_initialize_motors_sends_steps_with_declared_delays(self) -> None:
         mgr = CANManager()
@@ -99,9 +97,7 @@ class TestCANManager:
         mgr = CANManager()
         mgr.add_bus("can0", _make_mock_bus())
 
-        with patch.object(
-            mgr, "initialize_motors", new_callable=AsyncMock
-        ) as initialize_motors:
+        with patch.object(mgr, "initialize_motors", new_callable=AsyncMock) as initialize_motors:
             await mgr.run()
 
         initialize_motors.assert_awaited_once_with()
@@ -134,6 +130,7 @@ class TestCANManager:
         bus.recv.side_effect = recv_side_effect
 
         with patch("asyncio.get_event_loop") as mock_loop:
+
             async def fake_executor(executor, fn, *args):
                 return fn(*args)
 
@@ -173,6 +170,7 @@ class TestCANManager:
         bus.recv.side_effect = recv_side_effect
 
         with patch("asyncio.get_event_loop") as mock_loop:
+
             async def fake_executor(executor, fn, *args):
                 return fn(*args)
 

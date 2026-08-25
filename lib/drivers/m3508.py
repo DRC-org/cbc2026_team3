@@ -128,13 +128,11 @@ class M3508Driver(MotorDriver):
             return super().default_tolerance(mode) * GEAR_RATIO
         return super().default_tolerance(mode)
 
-    def _observed_for(self, mode: ControlMode) -> float | None:
+    def feedback_position(self) -> float:
         # 位置制御ループ (lib/control/position_loop.py) は累積角を目標値として扱う。
         # 単回転角 (MotorState.position) と比較すると次元が食い違い、
         # 何回転もする軸でラップ角がたまたま目標と一致した瞬間に誤到達する
-        if mode is ControlMode.POSITION:
-            return self.multi_turn_position
-        return super()._observed_for(mode)
+        return self.multi_turn_position
 
     def has_overcurrent_warning(self) -> bool:
         return abs(self._state.current) > _OVERCURRENT_THRESHOLD_MA

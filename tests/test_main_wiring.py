@@ -1,25 +1,35 @@
 from __future__ import annotations
 
+import logging
+import pathlib
 import struct
 import time
 
 import can
 import pytest
+import yaml
 
+from lib.control.sync_monitor import SyncGroup, SyncMember
 from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError
+from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
 from main import (
     _DEFAULT_PID,
+    _attach_sync_groups,
     _build_position_loops,
     _build_position_pid,
+    _build_sync_groups,
+    _create_motor,
     _load_pid_config,
     _wire_robot_motors,
 )
+
+_CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
 
 class _StubCANManager:
@@ -110,6 +120,13 @@ class TestLoadPidConfig:
         result = _load_pid_config("lift_motor", {"pid": {"integral_limit": None}})
 
         assert result["integral_limit"] is None
+
+    def test_null_integral_limit_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
+        """integral_limit の null は「制限なし」という正当な指定なので警告しない。"""
+        with caplog.at_level(logging.WARNING):
+            _load_pid_config("lift_motor", {"pid": {"integral_limit": None}})
+
+        assert caplog.records == []
 
     def test_null_numeric_key_falls_back_to_default(self) -> None:
         """書きかけの yaml (null) で起動を壊さず、安全側の既定値を使う。"""
@@ -372,3 +389,227 @@ class TestServerEStopProperty:
 
         with pytest.raises(AttributeError):
             server.e_stop_active = True  # type: ignore[misc]
+
+
+class TestCreateMotorControlType:
+    """generic ドライバの control_type が config から反映されること。
+
+    duty 指令の DC モータが POSITION で生成されると、動作確認は位置到達を待って
+    必ず失敗し、reset も位置指令になる。config と実挙動が食い違う状態を防ぐ。
+    """
+
+    def _generic(self, **extra: object) -> GenericDriver:
+        cfg: dict = {"driver": "generic", "bus": "generic_bus", "can_id": 1}
+        cfg.update(extra)
+        motor = _create_motor("gripper", cfg)
+        assert isinstance(motor, GenericDriver)
+        return motor
+
+    def test_duty_control_type_is_applied(self) -> None:
+        assert self._generic(control_type="duty").control_type is ControlMode.DUTY
+
+    def test_velocity_control_type_is_applied(self) -> None:
+        assert self._generic(control_type="velocity").control_type is ControlMode.VELOCITY
+
+    def test_position_control_type_is_applied(self) -> None:
+        assert self._generic(control_type="position").control_type is ControlMode.POSITION
+
+    def test_control_type_is_case_insensitive(self) -> None:
+        assert self._generic(control_type="DUTY").control_type is ControlMode.DUTY
+
+    def test_missing_control_type_defaults_to_position(self) -> None:
+        assert self._generic().control_type is ControlMode.POSITION
+
+    def test_unknown_control_type_falls_back_to_position_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            motor = self._generic(control_type="torque")
+
+        assert motor.control_type is ControlMode.POSITION
+        assert any("control_type" in record.getMessage() for record in caplog.records)
+
+    def test_current_control_type_falls_back_to_position_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """GenericDriver は CURRENT を送れない。起動は続けたうえで警告する。"""
+        with caplog.at_level(logging.WARNING):
+            motor = self._generic(control_type="current")
+
+        assert motor.control_type is ControlMode.POSITION
+        assert any("control_type" in record.getMessage() for record in caplog.records)
+
+    def test_control_type_is_ignored_for_non_generic_driver(self) -> None:
+        motor = _create_motor(
+            "y_axis_r",
+            {"driver": "m3508", "bus": "m3508_bus", "can_id": 1, "control_type": "duty"},
+        )
+
+        assert isinstance(motor, M3508Driver)
+
+
+def _paired_table() -> PositionTable:
+    return load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "tolerance": 1.0,
+                    "sync_tolerance": 2.0,
+                    "motors": {
+                        "y_axis_r": {"scale": 55.02, "offset": 1.0},
+                        "y_axis_l": {"scale": -55.02, "offset": -1.0},
+                    },
+                },
+                "gripper": {"unit": "deg", "command_unit": "deg", "scale": 1.0},
+            }
+        },
+        source="<test>",
+    )
+
+
+def _paired_motors() -> dict[str, object]:
+    return {
+        "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+        "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+        "gripper": GenericDriver("gripper", can_id=1),
+    }
+
+
+class TestBuildSyncGroups:
+    def test_paired_axis_becomes_group(self) -> None:
+        groups = _build_sync_groups(_paired_table(), _paired_motors())
+
+        assert [g.name for g in groups] == ["y_axis"]
+        group = groups[0]
+        assert group.tolerance == 2.0
+        # 逆回転ペアは scale の符号で表す。符号が落ちると偏差が常に過大に見えて誤発報する
+        assert [(m.motor_name, m.scale, m.offset) for m in group.members] == [
+            ("y_axis_r", 55.02, 1.0),
+            ("y_axis_l", -55.02, -1.0),
+        ]
+
+    def test_single_motor_axis_is_not_included(self) -> None:
+        groups = _build_sync_groups(_paired_table(), _paired_motors())
+
+        assert all(g.name != "gripper" for g in groups)
+
+    def test_axis_with_missing_motor_is_skipped_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """config の書き間違いで監視が黙って無効になるのを防ぐ。"""
+        motors = {"y_axis_r": M3508Driver("y_axis_r", can_id=1)}
+
+        with caplog.at_level(logging.WARNING):
+            groups = _build_sync_groups(_paired_table(), motors)
+
+        assert groups == []
+        assert any("y_axis_l" in record.getMessage() for record in caplog.records)
+
+
+class TestAttachSyncGroups:
+    def _loops(self) -> dict:
+        config = {
+            "robot_name": "main_hand",
+            "motors": {
+                "y_axis_r": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1},
+                "y_axis_l": {"driver": "m3508", "bus": "m3508_bus", "can_id": 2},
+                "other": {"driver": "m3508", "bus": "other_bus", "can_id": 1},
+            },
+        }
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+            "other": M3508Driver("other", can_id=1),
+        }
+        return _build_position_loops(
+            config,
+            _StubCANManager(),
+            motors,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+
+    def test_group_on_single_loop_is_registered(self) -> None:
+        loops = self._loops()
+        group = SyncGroup(
+            "y_axis",
+            (SyncMember("y_axis_r", 55.02, 0.0), SyncMember("y_axis_l", -55.02, 0.0)),
+            tolerance=2.0,
+        )
+
+        _attach_sync_groups([group], list(loops.values()))
+
+        assert loops["m3508_bus"].sync_group_names == ("y_axis",)
+        assert loops["other_bus"].sync_group_names == ()
+
+    def test_group_outside_position_loops_is_skipped(self) -> None:
+        """EDULITE のペアは PC 側常駐ループを持たないので SyncMonitor だけで見る。"""
+        loops = self._loops()
+        group = SyncGroup(
+            "rotate",
+            (SyncMember("rotate_r", 1.0, 0.0), SyncMember("rotate_l", -1.0, 0.0)),
+            tolerance=3.0,
+        )
+
+        _attach_sync_groups([group], list(loops.values()))
+
+        assert all(loop.sync_group_names == () for loop in loops.values())
+
+    def test_group_split_across_loops_is_skipped(self) -> None:
+        """別バスに分かれたペアは 1 フレームで同時指令できないため登録しない。"""
+        loops = self._loops()
+        group = SyncGroup(
+            "mixed",
+            (SyncMember("y_axis_r", 1.0, 0.0), SyncMember("other", -1.0, 0.0)),
+            tolerance=1.0,
+        )
+
+        _attach_sync_groups([group], list(loops.values()))
+
+        assert all(loop.sync_group_names == () for loop in loops.values())
+
+
+class TestShippedMainHandConfig:
+    """同梱 config と配線の結合を守る回帰テスト。"""
+
+    def _load(self) -> tuple[dict, PositionTable, dict]:
+        config = yaml.safe_load((_CONFIG_DIR / "main_hand.yaml").read_text())
+        positions = load_position_table(
+            yaml.safe_load((_CONFIG_DIR / "main_hand_positions.yaml").read_text()),
+            source="main_hand_positions.yaml",
+        )
+        motors = {}
+        for motor_name, motor_cfg in config["motors"].items():
+            motor = _create_motor(motor_name, motor_cfg)
+            assert motor is not None, motor_name
+            motors[motor_name] = motor
+        return config, positions, motors
+
+    def test_two_sync_groups_are_built(self) -> None:
+        _, positions, motors = self._load()
+
+        groups = _build_sync_groups(positions, motors)
+
+        assert {g.name for g in groups} == {"y_axis", "rotate"}
+
+    def test_y_axis_group_lands_on_the_m3508_loop(self) -> None:
+        config, positions, motors = self._load()
+        loops = _build_position_loops(
+            config,
+            _StubCANManager(),
+            motors,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+
+        _attach_sync_groups(_build_sync_groups(positions, motors), list(loops.values()))
+
+        assert loops["m3508_bus"].sync_group_names == ("y_axis",)
+
+    def test_conveyor_is_created_as_duty_motor(self) -> None:
+        _, _, motors = self._load()
+
+        assert motors["conveyor"].control_type is ControlMode.DUTY
+        assert motors["gripper"].control_type is ControlMode.POSITION
