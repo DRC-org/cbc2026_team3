@@ -14,10 +14,10 @@ function tabBadge(state: RobotState | undefined): { symbol: string; className: s
   if (!state) return null;
   const health = state.health;
   if (health && health.overall !== "ok") {
-    return { symbol: "⚠", className: "danger-text" };
+    return { symbol: "⚠", className: "text-error" };
   }
   if (state.waiting_trigger) {
-    return { symbol: "!", className: "warning-text" };
+    return { symbol: "!", className: "text-warning" };
   }
   return null;
 }
@@ -29,18 +29,24 @@ export function TabBar() {
   const { search } = useLocation();
 
   return (
-    <nav className="tui-tabs" aria-label="画面切替">
+    <nav
+      className="tabs tabs-lift shrink-0 border-b border-line bg-base-300 px-2"
+      aria-label="画面切替"
+    >
       {TABS.map((tab) => {
         const badge = tab.robotKey ? tabBadge(states[tab.robotKey]) : null;
         return (
           <NavLink
             key={tab.path}
             to={{ pathname: tab.path, search }}
-            className={({ isActive }) => cx("tui-tab", isActive && "active")}
+            className={({ isActive }) =>
+              cx(
+                "tab border-transparent text-fg-dim hover:bg-base-100 hover:text-base-content",
+                isActive && "tab-active border-line bg-base-100 text-fg-strong",
+              )
+            }
           >
-            <span className="key-hint" style={{ marginLeft: 0, marginRight: "0.4em" }}>
-              {tab.hotkey}
-            </span>
+            <span className="key-hint mr-[0.4em] ml-0">{tab.hotkey}</span>
             {tab.label}
             {badge ? <span className={badge.className}> [{badge.symbol}]</span> : null}
           </NavLink>

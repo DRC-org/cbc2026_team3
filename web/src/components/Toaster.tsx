@@ -1,6 +1,6 @@
-import { Fieldset } from "@tsaito18/tuicss-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
 
 const REJECTION_TTL_MS = 5000;
@@ -19,38 +19,42 @@ interface ToastItem {
 }
 
 const TONE_CLASS: Record<Tone, string> = {
-  warning: "warning-text",
-  danger: "danger-text",
+  warning: "text-warning",
+  danger: "text-error",
 };
 
 function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => void }) {
   return (
-    <Fieldset
-      className="panel"
-      style={{ width: "22rem", maxWidth: "calc(100vw - 2rem)" }}
+    <Panel
+      className="w-[22rem] max-w-[calc(100vw-2rem)]"
       legend={<span className={TONE_CLASS[toast.tone]}>[!] {toast.title}</span>}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
           {toast.lines.map((line, i) => (
-            <div key={line} className={i === 0 ? TONE_CLASS[toast.tone] : "toast-line dim"}>
+            <div key={line} className={i === 0 ? TONE_CLASS[toast.tone] : "truncate text-fg-dim"}>
               {line}
             </div>
           ))}
         </div>
-        <button type="button" onClick={onDismiss} aria-label="通知を閉じる" className="toast-close">
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="通知を閉じる"
+          className="shrink-0 cursor-pointer text-fg-dim hover:text-fg-strong"
+        >
           [X]
         </button>
       </div>
-    </Fieldset>
+    </Panel>
   );
 }
 
 /**
- * 全タブ共通の通知スタック。
+ * 全画面共通の通知スタック。
  *
- * 以前は「操作拒否」を App が画面下中央に、「ヘルス異常」を Dashboard が画面下右に
- * それぞれ別実装で出しており、同時発生時に重なって読めなくなっていた。
+ * 以前は「操作拒否」と「ヘルス異常」をそれぞれ別実装で出しており、
+ * 同時発生時に重なって読めなくなっていた。
  * 表示位置と寿命の管理をここへ一本化し、常に右下から積み上げる。
  */
 export function Toaster() {
@@ -109,7 +113,7 @@ export function Toaster() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="toast-stack">
+    <div className="pointer-events-none fixed right-4 bottom-10 z-50 flex flex-col items-end gap-2 [&>*]:pointer-events-auto">
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}

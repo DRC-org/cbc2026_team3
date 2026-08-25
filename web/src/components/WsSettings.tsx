@@ -1,6 +1,7 @@
-import { Button, Input, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
 import { useEffect, useState } from "react";
 
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { useRobot } from "@/context/RobotContext";
 import type { WsUrlSource } from "@/lib/wsUrl";
 import { WS_URL_QUERY_KEY, normalizeWsUrl } from "@/lib/wsUrl";
@@ -51,68 +52,69 @@ export function WsSettings({ open, onClose }: { open: boolean; onClose: () => vo
   };
 
   return (
-    <Modal open={open} onClose={onClose} windowClassName="center" aria-label="接続先設定">
-      <ModalHeader>CONNECTION</ModalHeader>
-      <ModalBody>
-        <div className="vstack" style={{ gap: "0.75rem", minWidth: "26rem", maxWidth: "90vw" }}>
-          <div className="hstack" style={{ gap: "0.5rem" }}>
-            <span className="dim nowrap">現在</span>
-            <span className="ellipsis">{wsUrl}</span>
-            <span className={connected ? "success-text nowrap" : "danger-text nowrap"}>
-              {connected ? "● 接続中" : "● 切断"}
-            </span>
-          </div>
-          <div className="dim">設定元: {SOURCE_LABEL[wsUrlSource]}</div>
-
-          <form
-            className="hstack"
-            style={{ gap: "0.5rem" }}
-            onSubmit={(event) => {
-              event.preventDefault();
-              apply();
-            }}
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="CONNECTION"
+      ariaLabel="接続先設定"
+      footer={
+        <>
+          <Button onClick={resetWsUrl}>既定に戻す</Button>
+          <Button onClick={onClose}>閉じる</Button>
+        </>
+      }
+    >
+      <div className="flex max-w-[90vw] min-w-[26rem] flex-col gap-3">
+        <div className="hstack">
+          <span className="whitespace-nowrap text-fg-dim">現在</span>
+          <span className="truncate">{wsUrl}</span>
+          <span
+            className={
+              connected ? "whitespace-nowrap text-success" : "whitespace-nowrap text-error"
+            }
           >
-            <label className="nowrap" htmlFor="ws-url-input">
-              接続先
-            </label>
-            <Input
-              id="ws-url-input"
-              className="spacer"
-              value={draft}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="drc:8080"
-              onChange={(event) => setDraft(event.target.value)}
-            />
-            <Button type="submit">保存して再接続</Button>
-          </form>
-
-          {error ? <div className="danger-text">{error}</div> : null}
-
-          {direct && direct !== wsUrl ? (
-            <div className="hstack" style={{ gap: "0.5rem" }}>
-              <span className="dim nowrap">候補</span>
-              <Button type="button" onClick={() => setDraft(direct)}>
-                制御 PC へ直結 ({direct})
-              </Button>
-            </div>
-          ) : null}
-
-          {hasQueryOverride() && wsUrlSource !== "query" ? (
-            <div className="dim">
-              URL に ?{WS_URL_QUERY_KEY}= が付いています。リロードするとそちらが優先されます
-            </div>
-          ) : null}
+            {connected ? "● 接続中" : "● 切断"}
+          </span>
         </div>
-      </ModalBody>
-      <ModalFooter>
-        <Button type="button" onClick={resetWsUrl}>
-          既定に戻す
-        </Button>
-        <Button type="button" onClick={onClose}>
-          閉じる
-        </Button>
-      </ModalFooter>
+        <div className="text-fg-dim">設定元: {SOURCE_LABEL[wsUrlSource]}</div>
+
+        <form
+          className="hstack"
+          onSubmit={(event) => {
+            event.preventDefault();
+            apply();
+          }}
+        >
+          <label className="whitespace-nowrap" htmlFor="ws-url-input">
+            接続先
+          </label>
+          <input
+            id="ws-url-input"
+            className="input min-w-0 flex-1 border-line bg-base-300 input-sm focus:border-info focus:outline-none"
+            value={draft}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="drc:8080"
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <Button type="submit">保存して再接続</Button>
+        </form>
+
+        {error ? <div className="text-error">{error}</div> : null}
+
+        {direct && direct !== wsUrl ? (
+          <div className="hstack">
+            <span className="whitespace-nowrap text-fg-dim">候補</span>
+            <Button onClick={() => setDraft(direct)}>制御 PC へ直結 ({direct})</Button>
+          </div>
+        ) : null}
+
+        {hasQueryOverride() && wsUrlSource !== "query" ? (
+          <div className="text-fg-dim">
+            URL に ?{WS_URL_QUERY_KEY}= が付いています。リロードするとそちらが優先されます
+          </div>
+        ) : null}
+      </div>
     </Modal>
   );
 }

@@ -1,31 +1,31 @@
-import { Fieldset } from "@tsaito18/tuicss-react";
-
+import { Panel } from "@/components/ui/Panel";
 import type { BusHealth, BusHealthState, HealthSnapshot } from "@/hooks/useRobotSocket";
+import { cx } from "@/lib/cx";
+import type { Tone } from "@/lib/tone";
+import { TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface HealthIndicatorProps {
   health: HealthSnapshot | undefined;
   variant?: "pill" | "card" | "compact" | "bus-only";
 }
 
-type Tone = "success" | "warning" | "danger" | "neutral";
-
 interface ToneStyle {
   label: string;
   symbol: string;
-  textClass: string;
 }
 
 const TONE_STYLES: Record<Tone, ToneStyle> = {
-  success: { label: "OK", symbol: "✓", textClass: "success-text" },
-  warning: { label: "DEGRADED", symbol: "⚠", textClass: "warning-text" },
-  danger: { label: "DOWN", symbol: "✗", textClass: "danger-text" },
-  neutral: { label: "未取得", symbol: "○", textClass: "secondary-text" },
+  success: { label: "OK", symbol: "✓" },
+  warning: { label: "DEGRADED", symbol: "⚠" },
+  error: { label: "DOWN", symbol: "✗" },
+  info: { label: "INFO", symbol: "·" },
+  neutral: { label: "未取得", symbol: "○" },
 };
 
 function busTone(state: BusHealthState): Tone {
   if (state === "ok") return "success";
   if (state === "degraded") return "warning";
-  return "danger";
+  return "error";
 }
 
 export function formatAge(ms: number | null | undefined): string {
@@ -50,7 +50,7 @@ function buildSummary(health: HealthSnapshot): string {
 function StatusTag({ tone, extra }: { tone: Tone; extra?: string }) {
   const style = TONE_STYLES[tone];
   return (
-    <span className={style.textClass}>
+    <span className={TONE_TEXT_CLASS[tone]}>
       [{style.symbol} {style.label}
       {extra ? ` ${extra}` : ""}]
     </span>
@@ -78,14 +78,15 @@ function CompactMode({ health }: { health: HealthSnapshot }) {
 }
 
 function BusRow({ bus }: { bus: BusHealth }) {
-  const style = TONE_STYLES[busTone(bus.state)];
+  const tone = busTone(bus.state);
+  const style = TONE_STYLES[tone];
   return (
-    <div className="hsplit" style={{ padding: "0.15rem 0.3rem" }}>
-      <span className="hstack" style={{ alignItems: "baseline" }}>
+    <div className="hsplit px-[0.3rem] py-[0.15rem]">
+      <span className="hstack items-baseline">
         <span>{bus.name}</span>
-        <span className="dim">{bus.channel}</span>
+        <span className="text-fg-dim">{bus.channel}</span>
       </span>
-      <span className={`${style.textClass} hstack nowrap`} style={{ flexShrink: 0 }}>
+      <span className={cx("hstack shrink-0 whitespace-nowrap", TONE_TEXT_CLASS[tone])}>
         <span>
           {style.symbol} {style.label}
         </span>
@@ -99,19 +100,19 @@ function BusRow({ bus }: { bus: BusHealth }) {
 function BusOnlyMode({ health }: { health: HealthSnapshot }) {
   const tone = busTone(health.overall);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
+    <div className="flex flex-col gap-[0.15rem]">
       <div className="hsplit">
-        <span className="dim">{health.buses.length} 系統</span>
+        <span className="text-fg-dim">{health.buses.length} 系統</span>
         <StatusTag tone={tone} />
       </div>
       {health.buses.length > 0 ? (
-        <div className="striped" style={{ display: "flex", flexDirection: "column" }}>
+        <div className="striped flex flex-col">
           {health.buses.map((bus) => (
             <BusRow key={bus.name} bus={bus} />
           ))}
         </div>
       ) : (
-        <div className="dim">バス情報なし</div>
+        <div className="text-fg-dim">バス情報なし</div>
       )}
     </div>
   );
@@ -120,19 +121,19 @@ function BusOnlyMode({ health }: { health: HealthSnapshot }) {
 function CardMode({ health }: { health: HealthSnapshot }) {
   const tone = busTone(health.overall);
   return (
-    <Fieldset className="panel" legend="CAN Health">
+    <Panel legend="CAN Health">
       <div className="hsplit">
         <span>STATUS</span>
         <StatusTag tone={tone} />
       </div>
       {health.buses.length > 0 ? (
-        <div className="striped" style={{ display: "flex", flexDirection: "column" }}>
+        <div className="striped flex flex-col">
           {health.buses.map((bus) => (
             <BusRow key={bus.name} bus={bus} />
           ))}
         </div>
       ) : null}
-    </Fieldset>
+    </Panel>
   );
 }
 
@@ -147,15 +148,15 @@ function NeutralPlaceholder({
   if (variant === "bus-only") {
     return (
       <div className="hsplit">
-        <span className="dim">CAN</span>
-        <span className="dim">未取得</span>
+        <span className="text-fg-dim">CAN</span>
+        <span className="text-fg-dim">未取得</span>
       </div>
     );
   }
   return (
-    <Fieldset className="panel" legend="CAN Health">
-      <p className="dim">ヘルス情報未取得</p>
-    </Fieldset>
+    <Panel legend="CAN Health">
+      <p className="text-fg-dim">ヘルス情報未取得</p>
+    </Panel>
   );
 }
 

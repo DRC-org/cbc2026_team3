@@ -1,11 +1,10 @@
-import { Fieldset, ProgressBar } from "@tsaito18/tuicss-react";
-
 import { Checklist } from "@/components/Checklist";
 import { HealthIndicator } from "@/components/HealthIndicator";
 import { MatchControl } from "@/components/MatchControl";
 import { MotorSummary } from "@/components/MotorSummary";
 import { RobotReadiness } from "@/components/RobotReadiness";
 import { SequenceProgress } from "@/components/SequenceProgress";
+import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
 import type { ChecklistRole } from "@/hooks/useRobotSocket";
 import { isSetupPhase } from "@/lib/phase";
@@ -26,29 +25,31 @@ function OperatorChecklistProgress() {
   const { matchState } = useRobot();
 
   return (
-    <Fieldset className="panel" legend="SETUP CHECKLIST">
-      <p className="dim">半自動モードでは各操縦者が自分のタブでチェックします (読み取り専用)。</p>
-      <div className="panel-body scroll" style={{ gap: "0.75rem", marginTop: "0.5rem" }}>
+    <Panel legend="SETUP CHECKLIST">
+      <p className="text-fg-dim">
+        半自動モードでは各操縦者が自分のタブでチェックします (読み取り専用)。
+      </p>
+      <div className="panel-body scroll mt-2 gap-3">
         {OPERATOR_ROLES.map(({ role, label }) => {
           const checklist = matchState.checklists[role];
           const items = checklist?.items ?? [];
           const checked = items.filter((i) => i.checked).length;
           const done = checklist?.completed ?? false;
           return (
-            <div key={role} className="no-shrink">
+            <div key={role} className="shrink-0">
               <div className="hsplit">
-                <span className={done ? "success-text" : "warning-text"}>
+                <span className={done ? "text-success" : "text-warning"}>
                   {done ? "[✓]" : "[ ]"} {label}
                 </span>
-                <span className="dim nowrap">
+                <span className="whitespace-nowrap text-fg-dim">
                   {checked} / {items.length}
                 </span>
               </div>
-              <div style={{ paddingLeft: "1.5rem" }}>
+              <div className="pl-6">
                 {items.map((item) => (
                   <div
                     key={item.id}
-                    className={item.checked ? "secondary-text ellipsis" : "warning-text ellipsis"}
+                    className={item.checked ? "truncate text-fg-dim" : "truncate text-warning"}
                   >
                     {item.checked ? "✓" : "·"} {item.label}
                   </div>
@@ -58,7 +59,7 @@ function OperatorChecklistProgress() {
           );
         })}
       </div>
-    </Fieldset>
+    </Panel>
   );
 }
 
@@ -74,17 +75,17 @@ function RobotCard({ robotKey, label }: { robotKey: string; label: string }) {
 
   if (!state) {
     return (
-      <Fieldset className="panel" legend={label}>
-        <div className="hstack" style={{ padding: "0.5rem 0" }}>
-          <span className="dim nowrap">データ未受信</span>
-          <ProgressBar indeterminate style={{ flex: 1 }} />
+      <Panel legend={label}>
+        <div className="hstack py-2">
+          <span className="whitespace-nowrap text-fg-dim">データ未受信</span>
+          <progress className="progress h-[0.9rem] flex-1 bg-base-300" />
         </div>
-      </Fieldset>
+      </Panel>
     );
   }
 
   return (
-    <Fieldset className="panel" legend={label}>
+    <Panel legend={label}>
       <div className="group">
         <div className="group-title">SEQUENCE</div>
         <SequenceProgress
@@ -101,11 +102,11 @@ function RobotCard({ robotKey, label }: { robotKey: string; label: string }) {
         <HealthIndicator variant="bus-only" health={state.health} />
       </div>
 
-      <div className="group group-fill">
+      <div className="group min-h-0 flex-1">
         <div className="group-title">MOTORS</div>
         <MotorSummary motors={state.motors} healthMotors={state.health?.motors} />
       </div>
-    </Fieldset>
+    </Panel>
   );
 }
 
@@ -120,22 +121,15 @@ export function Dashboard() {
 
   if (isSetupPhase(matchState.phase)) {
     return (
-      <main
-        className="page"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-          // 上段が残り高さを埋め、機体レディネスは常に画面下端に固定される
-          gridTemplateRows: "minmax(0, 1fr) auto",
-        }}
-      >
+      // 上段が残り高さを埋め、機体レディネスは常に画面下端に固定される
+      <main className="page grid grid-cols-2 grid-rows-[minmax(0,1fr)_auto]">
         <MatchControl />
         {matchState.mode === "full_auto" ? (
           <Checklist checklistRole="monitor" title="セッティング指差喚呼 (全自動)" />
         ) : (
           <OperatorChecklistProgress />
         )}
-        <div style={{ display: "flex", gridColumn: "1 / -1" }}>
+        <div className="col-span-full flex">
           <RobotReadiness />
         </div>
       </main>
@@ -145,7 +139,7 @@ export function Dashboard() {
   return (
     <main className="page">
       <MatchControl variant="compact" />
-      <div className="grid-2 fill">
+      <div className="grid min-h-0 flex-1 grid-cols-2 gap-2">
         {ROBOTS.map(({ key, label }) => (
           <RobotCard key={key} robotKey={key} label={label} />
         ))}

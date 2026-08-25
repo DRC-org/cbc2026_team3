@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { cloudflare } from "@cloudflare/vite-plugin";
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -31,7 +32,7 @@ export default defineConfig(({ command, isPreview }) => {
   const useCloudflare = command === "build" || isPreview === true;
 
   return {
-    plugins: [react(), ...(useCloudflare ? [cloudflare()] : [])],
+    plugins: [react(), tailwindcss(), ...(useCloudflare ? [cloudflare()] : [])],
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),

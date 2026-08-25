@@ -8,12 +8,34 @@ import { StatusBar } from "@/components/StatusBar";
 import { TabBar } from "@/components/TabBar";
 import { Toaster } from "@/components/Toaster";
 import { WsSettings } from "@/components/WsSettings";
+import { ModalProvider } from "@/context/ModalContext";
 import { RobotProvider } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
 import type { ChecklistRole, MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
 import { useWsUrl } from "@/hooks/useWsUrl";
 import { TABS } from "@/lib/tabs";
+
+/**
+ * 数字キーによるタブ移動。
+ * ModalProvider の内側に置くことで、モーダル表示中は発火しない
+ * （緊急停止オーバーレイの裏でタブが動くのを防ぐ）。
+ */
+function TabHotkeys() {
+  const navigate = useNavigate();
+  const { search } = useLocation();
+
+  const tabHotkeys = useMemo(
+    () =>
+      Object.fromEntries(
+        TABS.map((tab) => [tab.hotkey, () => navigate({ pathname: tab.path, search })] as const),
+      ),
+    [navigate, search],
+  );
+  useHotkeys(tabHotkeys);
+
+  return null;
+}
 
 /**
  * 全画面共通の外枠。
@@ -29,9 +51,6 @@ export function RootLayout() {
   const [wsSettingsOpen, setWsSettingsOpen] = useState(false);
   const openWsSettings = useCallback(() => setWsSettingsOpen(true), []);
   const closeWsSettings = useCallback(() => setWsSettingsOpen(false), []);
-
-  const navigate = useNavigate();
-  const { search } = useLocation();
 
   const onEStop = useCallback(() => {
     send({ type: "e_stop" });
@@ -57,15 +76,6 @@ export function RootLayout() {
   const matchStart = useCallback(() => send({ type: "match_start" }), [send]);
   const matchFinish = useCallback(() => send({ type: "match_finish" }), [send]);
   const matchReset = useCallback(() => send({ type: "match_reset" }), [send]);
-
-  const tabHotkeys = useMemo(
-    () =>
-      Object.fromEntries(
-        TABS.map((tab) => [tab.hotkey, () => navigate({ pathname: tab.path, search })] as const),
-      ),
-    [navigate, search],
-  );
-  useHotkeys(tabHotkeys);
 
   return (
     <RobotProvider
@@ -95,23 +105,28 @@ export function RootLayout() {
         matchReset,
       }}
     >
-      <div className="wrapper">
-        <ConnectionBanner />
-        <AppHeader />
+      <ModalProvider>
+        <TabHotkeys />
+        {/* 20px 固定だと 1366x768 級のノート PC でパネルが画面外に溢れる。
+            ページ全体はスクロールさせず、常に 1 画面へ収める */}
+        <div className="flex h-svh w-full flex-col overflow-hidden bg-base-200 text-base-content">
+          <ConnectionBanner />
+          <AppHeader />
 
-        <div className="app-tabs">
-          <TabBar />
-          <div className="tui-tab-content">
-            <Outlet />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <TabBar />
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <Outlet />
+            </div>
           </div>
+
+          <StatusBar />
+
+          <Toaster />
+          <WsSettings open={wsSettingsOpen} onClose={closeWsSettings} />
+          <EStopOverlay />
         </div>
-
-        <StatusBar />
-
-        <Toaster />
-        <WsSettings open={wsSettingsOpen} onClose={closeWsSettings} />
-        <EStopOverlay />
-      </div>
+      </ModalProvider>
     </RobotProvider>
   );
 }

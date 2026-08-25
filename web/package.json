@@ -16,13 +16,11 @@
     "check": "pnpm lint && pnpm format:check && tsc -b --noEmit && pnpm test:run"
   },
   "dependencies": {
-    "@tsaito18/tuicss-react": "^0.1.7",
     "daisyui": "^5.7.22",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.3.0",
-    "tailwindcss": "^4.3.3",
-    "the-new-css-reset": "^1.11.3"
+    "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.52.1",

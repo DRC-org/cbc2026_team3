@@ -26,41 +26,38 @@ export function StatusBar() {
   const { connected, wsUrl, openWsSettings } = useRobot();
 
   return (
-    <div className="tui-statusbar">
-      <ul>
-        <li>
-          {/* 接続表示そのものを接続先設定の入口にする。繋がらない時に最初に見る場所なので */}
-          <button
-            type="button"
-            onClick={openWsSettings}
-            style={{ cursor: "pointer" }}
-            title={`接続先: ${wsUrl}（クリックで変更）`}
-          >
-            {connected ? (
-              <>
-                <span className="symbol success-text">●</span> Connected
-              </>
-            ) : (
-              <>
-                <span className="symbol danger-text">●</span> Disconnected
-              </>
-            )}
-            <span className="dim"> {wsHostLabel(wsUrl)}</span>
-          </button>
-        </li>
-        <li>
-          <Clock />
-        </li>
-        <li>
-          <span className="key-hint">1</span>
-          <span className="key-hint">2</span>
-          <span className="key-hint">3</span>
-          <span className="key-hint">4</span> タブ切替
-        </li>
-        <li>
-          <span className="key-hint">Space</span> START / NEXT
-        </li>
-      </ul>
+    <div className="flex shrink-0 items-center gap-6 border-t border-line bg-base-300 px-3 py-[0.15rem] text-fg-dim">
+      {/* 接続表示そのものを接続先設定の入口にする。繋がらない時に最初に見る場所なので */}
+      <button
+        type="button"
+        onClick={openWsSettings}
+        className="cursor-pointer hover:text-base-content"
+        title={`接続先: ${wsUrl}（クリックで変更）`}
+      >
+        {connected ? (
+          <>
+            <span className="text-[0.75em] text-success">●</span> Connected
+          </>
+        ) : (
+          <>
+            <span className="text-[0.75em] text-error">●</span> Disconnected
+          </>
+        )}
+        <span> {wsHostLabel(wsUrl)}</span>
+      </button>
+
+      <Clock />
+
+      <span>
+        <span className="key-hint">1</span>
+        <span className="key-hint">2</span>
+        <span className="key-hint">3</span>
+        <span className="key-hint">4</span> タブ切替
+      </span>
+
+      <span>
+        <span className="key-hint">Space</span> START / NEXT
+      </span>
     </div>
   );
 }

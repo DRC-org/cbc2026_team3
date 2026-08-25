@@ -36,3 +36,15 @@ export function legacyHashTarget(location: {
   if (!LEGACY_HASH_IDS.has(id)) return null;
   return `/${id}${location.search}`;
 }
+
+/**
+ * 旧ブックマークの読み替えを実際の履歴へ適用する。
+ *
+ * createBrowserRouter は生成時点の location を読み取るため、
+ * これは必ずルーター生成より前に呼ばれなければならない。描画後に遷移させると
+ * Monitor が一瞬映り、担当タブを開いたつもりの操縦者が戸惑う。
+ */
+export function applyLegacyHashRedirect(): void {
+  const target = legacyHashTarget(window.location);
+  if (target) window.history.replaceState(null, "", target);
+}

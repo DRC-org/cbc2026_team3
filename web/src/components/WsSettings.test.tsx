@@ -13,16 +13,14 @@ function mount(overrides: Partial<RobotContextValue> = {}, open = true) {
 }
 
 describe("WsSettings", () => {
-  // TuiCss の Modal は閉じている間も DOM に残り .active の有無で表示を切り替える。
-  // useHotkeys はこの .active を見て背後の操作を止めるため、状態が正しいことを確かめる
-  it("閉じている間は .active が付かない（背後のホットキーを塞がない）", () => {
+  it("閉じている間はダイアログを描画しない", () => {
     mount({}, false);
-    expect(document.querySelector(".tui-modal.active")).toBeNull();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("開いている間は .active が付く（背後のホットキーを止める）", () => {
+  it("開いている間はダイアログを描画する", () => {
     mount();
-    expect(document.querySelector(".tui-modal.active")).not.toBeNull();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("現在の接続先・設定元・接続状態を表示する", () => {

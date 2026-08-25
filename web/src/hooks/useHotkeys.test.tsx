@@ -1,6 +1,8 @@
-import { renderHook } from "@testing-library/react";
+import { render, renderHook } from "@testing-library/react";
+import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ModalProvider, useModalRegistry } from "@/context/ModalContext";
 import type { HotkeyMap } from "@/hooks/useHotkeys";
 import { useHotkeys } from "@/hooks/useHotkeys";
 
@@ -15,6 +17,16 @@ function mount(map: HotkeyMap, enabled = true) {
   return renderHook(({ m, e }: { m: HotkeyMap; e: boolean }) => useHotkeys(m, e), {
     initialProps: { m: map, e: enabled },
   });
+}
+
+/** モーダル 1 枚が表示中であることだけを登録簿に伝えるスタブ */
+function ModalStub({ open }: { open: boolean }) {
+  const { register } = useModalRegistry();
+  useEffect(() => {
+    if (!open) return;
+    return register();
+  }, [open, register]);
+  return null;
 }
 
 afterEach(() => {
@@ -99,16 +111,64 @@ describe("誤爆の抑止", () => {
 
   it("モーダル表示中は発火しない (緊急停止オーバーレイの裏でシーケンスが進むのを防ぐ)", () => {
     const handler = vi.fn();
-    mount({ " ": handler });
+    function Probe({ open }: { open: boolean }) {
+      useHotkeys({ " ": handler });
+      return <ModalStub open={open} />;
+    }
 
-    const modal = document.createElement("div");
-    modal.className = "tui-modal active";
-    document.body.appendChild(modal);
+    const { rerender } = render(
+      <ModalProvider>
+        <Probe open />
+      </ModalProvider>,
+    );
+
     press(" ");
     expect(handler).not.toHaveBeenCalled();
 
-    // 閉じた (active が外れた) モーダルは抑止しない
-    modal.className = "tui-modal";
+    // 閉じたモーダルは抑止しない
+    rerender(
+      <ModalProvider>
+        <Probe open={false} />
+      </ModalProvider>,
+    );
+    press(" ");
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("モーダルが複数重なっても、全て閉じるまで抑止が続く", () => {
+    const handler = vi.fn();
+    function Probe({ count }: { count: number }) {
+      useHotkeys({ " ": handler });
+      return (
+        <>
+          {Array.from({ length: count }, (_, i) => (
+            <ModalStub key={i} open />
+          ))}
+        </>
+      );
+    }
+
+    const { rerender } = render(
+      <ModalProvider>
+        <Probe count={2} />
+      </ModalProvider>,
+    );
+    press(" ");
+    expect(handler).not.toHaveBeenCalled();
+
+    rerender(
+      <ModalProvider>
+        <Probe count={1} />
+      </ModalProvider>,
+    );
+    press(" ");
+    expect(handler).not.toHaveBeenCalled();
+
+    rerender(
+      <ModalProvider>
+        <Probe count={0} />
+      </ModalProvider>,
+    );
     press(" ");
     expect(handler).toHaveBeenCalledTimes(1);
   });

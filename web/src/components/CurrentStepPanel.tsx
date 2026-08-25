@@ -1,5 +1,4 @@
-import { Fieldset } from "@tsaito18/tuicss-react";
-
+import { Panel } from "@/components/ui/Panel";
 import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
 
 interface CurrentStepPanelProps {
@@ -28,30 +27,22 @@ export function CurrentStepPanel({
   const next = isComplete ? null : steps[stepIndex + 1];
 
   const status = isComplete
-    ? { label: "シーケンス完走", className: "success-text", symbol: "✓" }
+    ? { label: "シーケンス完走", className: "text-success", symbol: "✓" }
     : waitingTrigger
-      ? { label: "許可待ち — NEXT を押してください", className: "warning-text", symbol: "▮" }
-      : { label: "実行中", className: "info-text", symbol: "►" };
+      ? { label: "許可待ち — NEXT を押してください", className: "text-warning", symbol: "▮" }
+      : { label: "実行中", className: "text-info", symbol: "►" };
 
   return (
-    <Fieldset className="panel panel-fill" legend="CURRENT STEP">
-      <div
-        className="fill"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.5rem",
-          justifyContent: "center",
-        }}
-      >
+    <Panel legend="CURRENT STEP" className="flex-1">
+      <div className="flex min-h-0 flex-1 flex-col justify-center gap-2">
         <div className={status.className}>
           [{status.symbol} {status.label}]
         </div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", minWidth: 0 }}>
-          <span className="dim tabular-nums" style={{ flexShrink: 0, fontSize: "1.6em" }}>
+        <div className="flex min-w-0 items-baseline gap-3">
+          <span className="shrink-0 text-[1.6em] text-fg-dim tabular-nums">
             #{isComplete ? totalSteps : stepIndex + 1}
           </span>
-          <span style={{ minWidth: 0, fontSize: "1.6em", lineHeight: 1.25 }}>
+          <span className="min-w-0 text-[1.6em] leading-[1.25]">
             {isComplete ? "全ステップ完了" : (current?.label ?? "—")}
           </span>
         </div>
@@ -61,16 +52,14 @@ export function CurrentStepPanel({
         <div className="group-title">NEXT</div>
         {next ? (
           <div className="hstack">
-            <span className="dim tabular-nums" style={{ flexShrink: 0 }}>
-              #{stepIndex + 2}
-            </span>
-            {next.require_trigger ? <span style={{ flexShrink: 0 }}>✋</span> : null}
-            <span className="ellipsis">{next.label}</span>
+            <span className="shrink-0 text-fg-dim tabular-nums">#{stepIndex + 2}</span>
+            {next.require_trigger ? <span className="shrink-0">✋</span> : null}
+            <span className="truncate">{next.label}</span>
           </div>
         ) : (
-          <div className="dim">これが最終ステップです</div>
+          <div className="text-fg-dim">これが最終ステップです</div>
         )}
       </div>
-    </Fieldset>
+    </Panel>
   );
 }

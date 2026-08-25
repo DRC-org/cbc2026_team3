@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@tsaito18/tuicss-react':
-        specifier: ^0.1.7
-        version: 0.1.7(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       daisyui:
         specifier: ^5.7.22
         version: 5.7.22
@@ -26,9 +23,6 @@ importers:
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
-      the-new-css-reset:
-        specifier: ^1.11.3
-        version: 1.11.3
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.52.1
@@ -1058,13 +1052,6 @@ packages:
     peerDependencies:
       '@testing-library/dom': '>=7.21.4'
 
-  '@tsaito18/tuicss-react@0.1.7':
-    resolution: {integrity: sha512-BA5/Pu3gfx8I7Ao86XS2aseyDIXlupH6dGbMtWhPcsnAdhbOfqVUZHmY+3TWYrHsKAWFhTucccs3BhM1cVxXWA==}
-    engines: {node: ^20.19.0 || >=22.12.0}
-    peerDependencies:
-      react: '>=19'
-      react-dom: '>=19'
-
   '@tybys/wasm-util@0.10.1':
     resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
 
@@ -1509,9 +1496,6 @@ packages:
   tapable@2.3.3:
     resolution: {integrity: sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==}
     engines: {node: '>=6'}
-
-  the-new-css-reset@1.11.3:
-    resolution: {integrity: sha512-61SB81vu9foUyEIqoU1CeqxrdlsVjJojj/CBXoG8BdvlKFsllB0Rza63DblnRqH+3uttPj3FGWo7+c9nu7MT+A==}
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -2345,11 +2329,6 @@ snapshots:
     dependencies:
       '@testing-library/dom': 10.4.1
 
-  '@tsaito18/tuicss-react@0.1.7(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
-    dependencies:
-      react: 19.2.8
-      react-dom: 19.2.8(react@19.2.8)
-
   '@tybys/wasm-util@0.10.1':
     dependencies:
       tslib: 2.8.1
@@ -2827,8 +2806,6 @@ snapshots:
   tailwindcss@4.3.3: {}
 
   tapable@2.3.3: {}
-
-  the-new-css-reset@1.11.3: {}
 
   tinybench@2.9.0: {}
 

@@ -1,6 +1,7 @@
-import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
 
@@ -37,17 +38,17 @@ const STEP_MARKER: Record<StepKind, string> = {
 
 // 行全体の文字色。
 const STEP_TONE_CLASS: Record<StepKind, string> = {
-  done: "secondary-text",
-  current: "info-text",
-  waiting: "warning-text",
+  done: "text-fg-dim",
+  current: "text-info",
+  waiting: "text-warning",
   future: "",
 };
 
 // 実行位置の行だけ左端にカラーバーと薄い地色を敷き、一覧の中で現在地を見失わせない。
 const STEP_ACTIVE_CLASS: Record<StepKind, string> = {
   done: "",
-  current: "step-row-current",
-  waiting: "step-row-waiting",
+  current: "border-l-info bg-raised",
+  waiting: "border-l-warning bg-raised",
   future: "",
 };
 
@@ -61,7 +62,7 @@ export function SequenceStepList({
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
 
   if (steps.length === 0) {
-    return <p className="dim">ステップ情報なし</p>;
+    return <p className="text-fg-dim">ステップ情報なし</p>;
   }
 
   const totalSteps = steps.length;
@@ -80,8 +81,8 @@ export function SequenceStepList({
   const handleCancel = () => setPendingIndex(null);
 
   return (
-    <div className="fill" style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
-      <div className="hsplit no-shrink group-title">
+    <div className="flex min-h-0 flex-1 flex-col gap-1">
+      <div className="hsplit group-title shrink-0">
         <span>STEP LIST</span>
         <span>{disabled ? "試合中のみ操作可" : "クリックで再開"}</span>
       </div>
@@ -98,23 +99,17 @@ export function SequenceStepList({
                 disabled={disabled}
                 aria-current={isActive ? "step" : undefined}
                 aria-label={`ステップ ${i + 1}: ${step.label}`}
-                className={cx("step-row", STEP_TONE_CLASS[kind], STEP_ACTIVE_CLASS[kind])}
+                className={cx(
+                  "flex w-full cursor-pointer items-center gap-2 border-l-2 border-transparent px-[0.4rem] py-[0.15rem] text-left",
+                  "enabled:hover:bg-raised disabled:cursor-not-allowed",
+                  STEP_TONE_CLASS[kind],
+                  STEP_ACTIVE_CLASS[kind],
+                )}
               >
-                <span
-                  className="tabular-nums"
-                  style={{ width: "1rem", flexShrink: 0, textAlign: "center" }}
-                >
-                  {STEP_MARKER[kind]}
-                </span>
-                <span className="dim tabular-nums" style={{ width: "1.75rem", flexShrink: 0 }}>
-                  #{i + 1}
-                </span>
-                <span style={{ width: "1.25rem", flexShrink: 0, textAlign: "center" }}>
-                  {step.require_trigger ? "✋" : ""}
-                </span>
-                <span className="ellipsis" style={{ flex: 1 }}>
-                  {step.label}
-                </span>
+                <span className="w-4 shrink-0 text-center tabular-nums">{STEP_MARKER[kind]}</span>
+                <span className="w-7 shrink-0 text-fg-dim tabular-nums">#{i + 1}</span>
+                <span className="w-5 shrink-0 text-center">{step.require_trigger ? "✋" : ""}</span>
+                <span className="flex-1 truncate">{step.label}</span>
               </button>
             </li>
           );
@@ -124,29 +119,23 @@ export function SequenceStepList({
       <Modal
         open={pendingIndex !== null}
         onClose={handleCancel}
-        overlapBackground={false}
-        className="modal-danger"
-        windowClassName="left-align"
+        tone="danger"
+        title="STEP JUMP"
+        footer={
+          <>
+            <Button onClick={handleCancel}>キャンセル</Button>
+            <Button tone="warn" onClick={handleConfirm}>
+              再開
+            </Button>
+          </>
+        }
       >
-        <ModalHeader>STEP JUMP</ModalHeader>
-        <ModalBody>
-          <p>
-            ステップ {pendingIndex !== null ? pendingIndex + 1 : ""}{" "}
-            {target ? `「${target.label}」` : ""} から再開しますか？
-          </p>
-          <p className="dim" style={{ marginTop: 8 }}>
-            現在の動作を中断して指定ステップから実行を開始します。
-          </p>
-          <p className="warning-text" style={{ marginTop: 8 }}>
-            ⚠ 物理状態が安全であることを必ず確認してください。
-          </p>
-        </ModalBody>
-        <ModalFooter>
-          <Button onClick={handleCancel}>キャンセル</Button>
-          <Button className="btn-warn" onClick={handleConfirm}>
-            再開
-          </Button>
-        </ModalFooter>
+        <p>
+          ステップ {pendingIndex !== null ? pendingIndex + 1 : ""}{" "}
+          {target ? `「${target.label}」` : ""} から再開しますか？
+        </p>
+        <p className="mt-2 text-fg-dim">現在の動作を中断して指定ステップから実行を開始します。</p>
+        <p className="mt-2 text-warning">⚠ 物理状態が安全であることを必ず確認してください。</p>
       </Modal>
     </div>
   );

@@ -1,7 +1,8 @@
-import { Button, Fieldset, Range } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
 import { MotorStatus } from "@/components/MotorStatus";
+import { Button } from "@/components/ui/Button";
+import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
 import { ROBOTS } from "@/lib/robots";
 
@@ -32,15 +33,13 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
 
   return (
     <div className="hstack">
-      <span className="dim" style={{ width: "1.75rem", flexShrink: 0 }}>
-        {label}
-      </span>
+      <span className="w-7 shrink-0 text-fg-dim">{label}</span>
       <Button aria-label={`${label} を減らす`} onClick={() => onChange(clamp(value - STEP))}>
         ◄
       </Button>
-      <Range
-        style={{ flex: 1 }}
-        trackBackground={false}
+      <input
+        type="range"
+        className="range min-w-0 flex-1 text-info range-xs"
         aria-label={label}
         min={0}
         max={max}
@@ -51,10 +50,8 @@ function PidRow({ label, max, value, onChange, onSend }: PidRowProps) {
       <Button aria-label={`${label} を増やす`} onClick={() => onChange(clamp(value + STEP))}>
         ►
       </Button>
-      <span className="tabular-nums" style={{ width: "3.5rem", flexShrink: 0, textAlign: "right" }}>
-        {value.toFixed(2)}
-      </span>
-      <Button className="btn-info" aria-label={`${label} を送信`} onClick={onSend}>
+      <span className="w-14 shrink-0 text-right tabular-nums">{value.toFixed(2)}</span>
+      <Button tone="info" aria-label={`${label} を送信`} onClick={onSend}>
         ► SEND
       </Button>
     </div>
@@ -84,16 +81,16 @@ export function MotorTuning() {
   };
 
   return (
-    <main className="page grid-2">
+    <main className="page grid grid-cols-2 gap-2">
       {ROBOTS.map(({ key, label }) => {
         const state = states[key];
         const motors = state ? Object.entries(state.motors) : [];
         return (
-          <Fieldset key={key} className="panel" legend={label}>
+          <Panel key={key} legend={label}>
             {!state ? (
-              <p className="dim">データ未受信 — 接続待機中...</p>
+              <p className="text-fg-dim">データ未受信 — 接続待機中...</p>
             ) : motors.length === 0 ? (
-              <p className="dim">モータ情報なし</p>
+              <p className="text-fg-dim">モータ情報なし</p>
             ) : (
               // モータ数が増えても枠内のみスクロールさせ全体スクロールは禁止する。
               // モータごとの枠は入れ子にせず、罫線 1 本で区切る
@@ -116,7 +113,7 @@ export function MotorTuning() {
                 ))}
               </div>
             )}
-          </Fieldset>
+          </Panel>
         );
       })}
     </main>
