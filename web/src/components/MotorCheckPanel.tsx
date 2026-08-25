@@ -1,16 +1,10 @@
-import {
-  Button,
-  Modal,
-  ModalBody,
-  ModalFooter,
-  ModalHeader,
-  ProgressBar,
-} from "@tsaito18/tuicss-react";
-
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
-import type { TuiColor } from "@/lib/tuiColor";
+import type { Tone } from "@/lib/tone";
+import { TONE_PROGRESS_CLASS, TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface MotorCheckPanelProps {
   robotName: string;
@@ -18,47 +12,21 @@ interface MotorCheckPanelProps {
   onOpenChange: (open: boolean) => void;
 }
 
-// 各モータ結果を TUI 記号 + セマンティック色クラスで表現する。
-const RESULT_STYLES: Record<
-  MotorCheckResult,
-  { symbol: string; textClass: string; label: string }
-> = {
-  pending: { symbol: "○", textClass: "secondary-text", label: "待機中" },
-  running: { symbol: "►", textClass: "info-text", label: "確認中" },
-  passed: { symbol: "✓", textClass: "success-text", label: "合格" },
-  failed: { symbol: "✗", textClass: "danger-text", label: "失敗" },
-  timeout: { symbol: "⚠", textClass: "warning-text", label: "タイムアウト" },
-  skipped: { symbol: "·", textClass: "secondary-text", label: "中断" },
+// 各モータ結果を記号 + セマンティック色で表現する。
+const RESULT_STYLES: Record<MotorCheckResult, { symbol: string; tone: Tone; label: string }> = {
+  pending: { symbol: "○", tone: "neutral", label: "待機中" },
+  running: { symbol: "►", tone: "info", label: "確認中" },
+  passed: { symbol: "✓", tone: "success", label: "合格" },
+  failed: { symbol: "✗", tone: "error", label: "失敗" },
+  timeout: { symbol: "⚠", tone: "warning", label: "タイムアウト" },
+  skipped: { symbol: "·", tone: "neutral", label: "中断" },
 };
 
-const OVERALL_STYLES: Record<
-  MotorCheckOverall,
-  { symbol: string; textClass: string; color: TuiColor; label: string }
-> = {
-  running: {
-    symbol: "►",
-    textClass: "info-text",
-    color: "info",
-    label: "実行中",
-  },
-  ok: {
-    symbol: "✓",
-    textClass: "success-text",
-    color: "success",
-    label: "全モータ合格",
-  },
-  partial: {
-    symbol: "⚠",
-    textClass: "warning-text",
-    color: "warning",
-    label: "一部失敗",
-  },
-  failed: {
-    symbol: "✗",
-    textClass: "danger-text",
-    color: "danger",
-    label: "失敗",
-  },
+const OVERALL_STYLES: Record<MotorCheckOverall, { symbol: string; tone: Tone; label: string }> = {
+  running: { symbol: "►", tone: "info", label: "実行中" },
+  ok: { symbol: "✓", tone: "success", label: "全モータ合格" },
+  partial: { symbol: "⚠", tone: "warning", label: "一部失敗" },
+  failed: { symbol: "✗", tone: "error", label: "失敗" },
 };
 
 function formatNumber(value: number): string {
@@ -94,50 +62,19 @@ function MotorRow({ record, isCurrent }: { record: MotorCheckRecord; isCurrent: 
   const description = describeRecord({ ...record, result });
 
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-        padding: "4px",
-      }}
-    >
-      <div style={{ display: "flex", minWidth: 0, alignItems: "center", gap: 8 }}>
-        <span
-          className={cx(style.textClass)}
-          style={{
-            width: "1rem",
-            flexShrink: 0,
-            textAlign: "center",
-          }}
-        >
+    <div className="flex items-center justify-between gap-3 p-1">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className={cx("w-4 shrink-0 text-center", TONE_TEXT_CLASS[style.tone])}>
           {style.symbol}
         </span>
-        <div style={{ display: "flex", minWidth: 0, flexDirection: "column" }}>
-          <span
-            style={{
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {record.motor}
-          </span>
-          <span className="dim">bus: {record.bus}</span>
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate">{record.motor}</span>
+          <span className="text-fg-dim">bus: {record.bus}</span>
         </div>
       </div>
-      <div
-        className={cx(style.textClass)}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "flex-end",
-          gap: 2,
-        }}
-      >
+      <div className={cx("flex flex-col items-end gap-px", TONE_TEXT_CLASS[style.tone])}>
         <span>{style.label}</span>
-        <span style={{ opacity: 0.8 }}>{description}</span>
+        <span className="opacity-80">{description}</span>
       </div>
     </div>
   );
@@ -167,105 +104,76 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
     <Modal
       open={isOpen}
       onClose={() => onOpenChange(false)}
-      overlapBackground={false}
-      className="modal-danger"
-      windowClassName="left-align"
-    >
-      <ModalHeader>MOTOR CHECK — {robotName}</ModalHeader>
-      <ModalBody
-        className="scroll"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-          minWidth: "min(560px, 80vw)",
-        }}
-      >
-        {overallStyle ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <span className="dim">OVERALL</span>
-            <span className={cx(overallStyle.textClass)}>
-              [{overallStyle.symbol} {overallStyle.label}]
-            </span>
+      tone="danger"
+      title={`MOTOR CHECK — ${robotName}`}
+      boxClassName="min-w-[min(560px,80vw)]"
+      bodyClassName="flex flex-col gap-3"
+      footer={
+        <div className="flex w-full items-center justify-between">
+          <span className="text-fg-dim">{footerLabel}</span>
+          <div className="flex gap-2">
+            {isRunning ? (
+              <Button tone="danger" onClick={abort}>
+                ■ 中断
+              </Button>
+            ) : state.records.length > 0 || isError ? (
+              <Button tone="info" onClick={start}>
+                ► リトライ
+              </Button>
+            ) : null}
+            <Button onClick={() => onOpenChange(false)}>閉じる</Button>
           </div>
-        ) : null}
-
-        {isRunning ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <span className="dim tabular-nums">
-                {index} / {total}
-              </span>
-              <span
-                className="info-text"
-                style={{
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {state.current ?? "—"}
-              </span>
-            </div>
-            <ProgressBar
-              className="progress-info"
-              trackBackground={false}
-              style={{ width: "100%" }}
-              value={percent}
-            />
-          </div>
-        ) : null}
-
-        {isError ? (
-          <div className="danger-text">
-            <p>⚠ エラー</p>
-            <p style={{ marginTop: 4 }}>{state.error}</p>
-          </div>
-        ) : null}
-
-        {state.records.length === 0 && !isRunning && !isError ? (
-          <p className="dim" style={{ padding: "12px 4px" }}>
-            動作確認はまだ実行されていません。
-          </p>
-        ) : (
-          <div className="striped" style={{ display: "flex", flexDirection: "column" }}>
-            {state.records.map((record) => (
-              <MotorRow
-                key={record.motor}
-                record={record}
-                isCurrent={isRunning && state.current === record.motor}
-              />
-            ))}
-          </div>
-        )}
-      </ModalBody>
-      <ModalFooter style={{ width: "100%", alignItems: "center", justifyContent: "space-between" }}>
-        <span className="dim">{footerLabel}</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          {isRunning ? (
-            <Button className="btn-danger" onClick={abort}>
-              ■ 中断
-            </Button>
-          ) : state.records.length > 0 || isError ? (
-            <Button className="btn-info" onClick={start}>
-              ► リトライ
-            </Button>
-          ) : null}
-          <Button onClick={() => onOpenChange(false)}>閉じる</Button>
         </div>
-      </ModalFooter>
+      }
+    >
+      {overallStyle ? (
+        <div className="flex items-center justify-between">
+          <span className="text-fg-dim">OVERALL</span>
+          <span className={TONE_TEXT_CLASS[overallStyle.tone]}>
+            [{overallStyle.symbol} {overallStyle.label}]
+          </span>
+        </div>
+      ) : null}
+
+      {isRunning ? (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between">
+            <span className="text-fg-dim tabular-nums">
+              {index} / {total}
+            </span>
+            <span className="truncate text-info">{state.current ?? "—"}</span>
+          </div>
+          <progress
+            className={cx(
+              "progress h-[0.9rem] w-full border border-line bg-base-300",
+              TONE_PROGRESS_CLASS.info,
+            )}
+            value={percent}
+            max={100}
+          />
+        </div>
+      ) : null}
+
+      {isError ? (
+        <div className="text-error">
+          <p>⚠ エラー</p>
+          <p className="mt-1">{state.error}</p>
+        </div>
+      ) : null}
+
+      {state.records.length === 0 && !isRunning && !isError ? (
+        <p className="px-1 py-3 text-fg-dim">動作確認はまだ実行されていません。</p>
+      ) : (
+        <div className="striped flex flex-col">
+          {state.records.map((record) => (
+            <MotorRow
+              key={record.motor}
+              record={record}
+              isCurrent={isRunning && state.current === record.motor}
+            />
+          ))}
+        </div>
+      )}
     </Modal>
   );
 }

@@ -1,6 +1,6 @@
-import { ProgressBar } from "@tsaito18/tuicss-react";
-
-import type { TuiColor } from "@/lib/tuiColor";
+import { cx } from "@/lib/cx";
+import type { Tone } from "@/lib/tone";
+import { TONE_PROGRESS_CLASS, TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface SequenceProgressProps {
   sequence: string;
@@ -12,20 +12,12 @@ interface SequenceProgressProps {
 
 type StatusKey = "complete" | "waiting" | "running" | "idle";
 
-// TUI 記号 + セマンティック色でステータスを表現する。
-const STATUS: Record<StatusKey, { label: string; symbol: string; color: TuiColor }> = {
-  complete: { label: "Done", symbol: "✓", color: "success" },
-  waiting: { label: "Awaiting approval", symbol: "▮", color: "warning" },
-  running: { label: "Running", symbol: "►", color: "info" },
-  idle: { label: "Not started", symbol: "○", color: "secondary" },
-};
-
-const PROGRESS_TONE_CLASS: Record<TuiColor, string> = {
-  success: "progress-ok",
-  warning: "progress-warn",
-  danger: "progress-danger",
-  info: "progress-info",
-  secondary: "",
+// 記号 + セマンティック色でステータスを表現する。
+const STATUS: Record<StatusKey, { label: string; symbol: string; tone: Tone }> = {
+  complete: { label: "Done", symbol: "✓", tone: "success" },
+  waiting: { label: "Awaiting approval", symbol: "▮", tone: "warning" },
+  running: { label: "Running", symbol: "►", tone: "info" },
+  idle: { label: "Not started", symbol: "○", tone: "neutral" },
 };
 
 export function SequenceProgress({
@@ -48,33 +40,35 @@ export function SequenceProgress({
   const status = STATUS[statusKey];
 
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+    <section className="flex flex-col gap-1">
       <div className="hsplit">
-        <div className="hstack" style={{ alignItems: "baseline" }}>
-          <span className="dim">SEQ</span>
-          <span className="ellipsis">{sequence}</span>
+        <div className="hstack items-baseline">
+          <span className="text-fg-dim">SEQ</span>
+          <span className="truncate">{sequence}</span>
         </div>
-        <span className={`${status.color}-text nowrap`}>
+        <span className={cx("whitespace-nowrap", TONE_TEXT_CLASS[status.tone])}>
           [{status.symbol} {status.label}]
         </span>
       </div>
 
       <div className="hsplit">
-        <div className="hstack" style={{ alignItems: "baseline" }}>
+        <div className="hstack items-baseline">
           <span className="tabular-nums">{displayIndex}</span>
-          <span className="dim">/ {totalSteps}</span>
-          <span className="ellipsis" title={currentStep ?? undefined}>
+          <span className="text-fg-dim">/ {totalSteps}</span>
+          <span className="truncate" title={currentStep ?? undefined}>
             {currentStep ? `› ${currentStep}` : "—"}
           </span>
         </div>
-        <span className="nowrap tabular-nums">{Math.round(percent)}%</span>
+        <span className="whitespace-nowrap tabular-nums">{Math.round(percent)}%</span>
       </div>
 
-      <ProgressBar
-        className={PROGRESS_TONE_CLASS[status.color]}
-        trackBackground={false}
-        style={{ width: "100%" }}
+      <progress
+        className={cx(
+          "progress h-[0.9rem] w-full border border-line bg-base-300",
+          TONE_PROGRESS_CLASS[status.tone],
+        )}
         value={percent}
+        max={100}
       />
     </section>
   );

@@ -23,17 +23,17 @@ export const PHASE_LABEL: Record<MatchPhase, string> = {
  * 地はグレーに固定し、左端のバー色だけでフェーズを示す。
  */
 export const PHASE_BAND_CLASS: Record<MatchPhase, string> = {
-  setup: "phase-band phase-setup",
-  ready: "phase-band phase-ready",
-  match: "phase-band phase-match",
-  finished: "phase-band phase-finished",
+  setup: "border-l-warning",
+  ready: "border-l-info",
+  match: "border-l-success",
+  finished: "border-l-fg-dim",
 };
 
 export const PHASE_TEXT_CLASS: Record<MatchPhase, string> = {
-  setup: "warning-text",
-  ready: "info-text",
-  match: "success-text",
-  finished: "secondary-text",
+  setup: "text-warning",
+  ready: "text-info",
+  match: "text-success",
+  finished: "text-fg-dim",
 };
 
 /**

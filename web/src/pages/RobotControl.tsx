@@ -1,4 +1,3 @@
-import { Button, Fieldset } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
 import { Checklist } from "@/components/Checklist";
@@ -10,10 +9,11 @@ import { MotorSummary } from "@/components/MotorSummary";
 import { SequenceProgress } from "@/components/SequenceProgress";
 import { SequenceStepList } from "@/components/SequenceStepList";
 import { TriggerButton } from "@/components/TriggerButton";
+import { Button } from "@/components/ui/Button";
+import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import type { ChecklistRole, RobotState } from "@/hooks/useRobotSocket";
-import { cx } from "@/lib/cx";
 import { isSetupPhase } from "@/lib/phase";
 
 interface RobotControlProps {
@@ -37,24 +37,24 @@ function DiagnosticsColumn({
   onPanelOpen: () => void;
 }) {
   return (
-    <Fieldset className="panel" legend="DIAGNOSTICS">
+    <Panel legend="DIAGNOSTICS">
       <div className="group">
         <div className="group-title">CAN BUS</div>
         <HealthIndicator variant="bus-only" health={state.health} />
       </div>
 
-      <div className="group group-fill">
+      <div className="group min-h-0 flex-1">
         <div className="group-title">MOTORS</div>
         <MotorSummary motors={state.motors} healthMotors={state.health?.motors} />
       </div>
 
       <div className="group">
-        <div className="hstack" style={{ flexWrap: "wrap" }}>
+        <div className="hstack flex-wrap">
           <MotorCheckButton robotName={robotKey} onPanelOpen={onPanelOpen} />
           <Button onClick={onPanelOpen}>▤ 結果を表示</Button>
         </div>
       </div>
-    </Fieldset>
+    </Panel>
   );
 }
 
@@ -86,7 +86,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const inProgress = state && !state.waiting_trigger && !completed && !idleStopped;
   const showStop = Boolean(inProgress || state?.waiting_trigger);
 
-  // Space に主操作を集約する。非アクティブなタブの TabPanel は unmount されるので、
+  // Space に主操作を集約する。ルーターは表示中のタブしか描画しないので、
   // 表示中のロボットにだけ届く。トリガー待ちなら NEXT、待機中なら START に解決する
   useHotkeys(
     {
@@ -101,10 +101,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   if (!state) {
     return (
-      <main className="page" style={{ alignItems: "center", justifyContent: "center" }}>
-        <Fieldset className="panel" legend={label} style={{ flex: "0 0 auto" }}>
-          <p className="dim">データ未受信 — 接続待機中...</p>
-        </Fieldset>
+      <main className="page items-center justify-center">
+        <Panel legend={label} className="flex-none">
+          <p className="text-fg-dim">データ未受信 — 接続待機中...</p>
+        </Panel>
       </main>
     );
   }
@@ -121,33 +121,27 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   if (setupPhase) {
     return (
       <>
-        <main
-          className="page"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) minmax(300px, 24rem)",
-          }}
-        >
-          <div className="vstack">
+        <main className="page grid grid-cols-[minmax(0,1fr)_minmax(300px,24rem)]">
+          <div className="flex min-h-0 flex-col gap-2">
             {ownsChecklist ? (
               // 指差喚呼は項目数ぶんの高さがあれば足りる。残りはステップ一覧に回すが、
               // 項目が増えても画面の半分までに抑えて一覧を潰さない
-              <div style={{ display: "flex", flexShrink: 0, maxHeight: "50%", minHeight: 0 }}>
+              <div className="flex max-h-[50%] min-h-0 shrink-0">
                 <Checklist
                   checklistRole={robotKey as ChecklistRole}
                   title={`${label} セッティング指差喚呼`}
                 />
               </div>
             ) : (
-              <Fieldset className="panel no-shrink" legend="全自動モード">
-                <p className="dim">
+              <Panel legend="全自動モード" className="shrink-0">
+                <p className="text-fg-dim">
                   指差喚呼は Monitor タブ <span className="key-hint">1</span> で実施します。
                 </p>
-              </Fieldset>
+              </Panel>
             )}
 
-            <Fieldset className="panel panel-fill" legend="SEQUENCE PREVIEW">
-              <p className="dim no-shrink">
+            <Panel legend="SEQUENCE PREVIEW" className="flex-1">
+              <p className="shrink-0 text-fg-dim">
                 {state.sequence} — 全 {state.total_steps} ステップ (試合開始後に操作できます)
               </p>
               <SequenceStepList
@@ -157,7 +151,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 onJump={handleJump}
                 disabled
               />
-            </Fieldset>
+            </Panel>
           </div>
 
           <DiagnosticsColumn
@@ -174,15 +168,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // --- 試合中 / 試合終了: シーケンス操作が主役 ---
   return (
     <>
-      <main
-        className="page"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(0,1fr) minmax(280px,340px) minmax(280px,340px)",
-        }}
-      >
-        <div className="vstack">
-          <Fieldset className="panel no-shrink" legend="SEQUENCE">
+      <main className="page grid grid-cols-[minmax(0,1fr)_minmax(280px,340px)_minmax(280px,340px)]">
+        <div className="flex min-h-0 flex-col gap-2">
+          <Panel legend="SEQUENCE" className="shrink-0">
             <SequenceProgress
               sequence={state.sequence}
               currentStep={state.current_step}
@@ -190,7 +178,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               totalSteps={state.total_steps}
               waitingTrigger={state.waiting_trigger}
             />
-          </Fieldset>
+          </Panel>
 
           <CurrentStepPanel
             steps={state.steps ?? []}
@@ -200,33 +188,25 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           />
 
           {/* 開始/停止 + TriggerButton。180px 固定 + 残りで横並び。 */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "180px 1fr",
-              gap: "0.5rem",
-              flexShrink: 0,
-              minHeight: 88,
-            }}
-          >
+          <div className="grid min-h-[88px] shrink-0 grid-cols-[180px_1fr] gap-2">
             {showStop ? (
               // 通常停止は安全側の動作。確認ダイアログを挟むと「止めたいのに止まらない」
               // 時間が生まれるため、ここは 1 アクションで即座に止める
               <Button
-                className="btn-danger"
+                tone="danger"
                 onClick={handleStop}
                 aria-label="シーケンスを通常停止"
-                style={{ width: "100%" }}
+                className="h-full w-full"
               >
                 ■ STOP
               </Button>
             ) : (
               <Button
-                className={cx(inMatch && "btn-ok")}
+                tone={inMatch ? "ok" : "default"}
                 disabled={!inMatch}
                 onClick={handleStart}
                 aria-label="シーケンスを先頭から開始"
-                style={{ width: "100%" }}
+                className="h-full w-full"
               >
                 {inMatch ? "► START" : `⊘ ${blockedLabel}`}
                 {inMatch ? <span className="key-hint">Space</span> : null}
@@ -243,7 +223,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           </div>
         </div>
 
-        <Fieldset className="panel" legend="STEPS">
+        <Panel legend="STEPS">
           <SequenceStepList
             steps={state.steps ?? []}
             stepIndex={state.step_index}
@@ -251,7 +231,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             onJump={handleJump}
             disabled={!inMatch}
           />
-        </Fieldset>
+        </Panel>
 
         <DiagnosticsColumn
           robotKey={robotKey}

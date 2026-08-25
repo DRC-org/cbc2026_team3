@@ -4,7 +4,7 @@ import { cx } from "@/lib/cx";
 
 describe("cx", () => {
   it("クラス名を空白区切りで連結する", () => {
-    expect(cx("tui-window", "black-255")).toBe("tui-window black-255");
+    expect(cx("btn", "btn-sm")).toBe("btn btn-sm");
   });
 
   it("条件付きクラスの false/null/undefined を落とす", () => {

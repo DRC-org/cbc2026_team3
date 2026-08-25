@@ -1,16 +1,11 @@
-import {
-  Button,
-  Fieldset,
-  Modal,
-  ModalBody,
-  ModalFooter,
-  ModalHeader,
-} from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
+import { Button } from "@/components/ui/Button";
+import type { ButtonTone } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
+import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
 import type { MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
-import { cx } from "@/lib/cx";
 import { COURT_LABEL, MODE_LABEL } from "@/lib/phase";
 
 const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
@@ -18,9 +13,9 @@ const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
   { value: "full_auto", label: "全自動" },
 ];
 
-const COURT_OPTIONS: { value: MatchCourt; label: string; toneClass: string }[] = [
-  { value: "red", label: "赤コート", toneClass: "btn-danger" },
-  { value: "blue", label: "青コート", toneClass: "btn-info" },
+const COURT_OPTIONS: { value: MatchCourt; label: string; tone: ButtonTone }[] = [
+  { value: "red", label: "赤コート", tone: "danger" },
+  { value: "blue", label: "青コート", tone: "info" },
 ];
 
 type ConfirmKind = "start" | "finish" | "reset";
@@ -67,71 +62,65 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
     <Modal
       open={confirm !== null}
       onClose={() => setConfirm(null)}
-      overlapBackground={false}
-      className="modal-danger"
-      windowClassName="left-align"
+      tone="danger"
+      title={confirm === "start" ? "START MATCH" : confirm === "finish" ? "FINISH MATCH" : "RESET"}
+      footer={
+        <>
+          <Button onClick={() => setConfirm(null)}>キャンセル</Button>
+          <Button tone="danger" onClick={handleConfirm}>
+            実行
+          </Button>
+        </>
+      }
     >
-      <ModalHeader>
-        {confirm === "start" ? "START MATCH" : confirm === "finish" ? "FINISH MATCH" : "RESET"}
-      </ModalHeader>
-      <ModalBody>
-        {confirm === "start" ? (
-          <>
-            <p>
-              <span className="info-text">
-                {MODE_LABEL[mode]} / {COURT_LABEL[court]}
-              </span>{" "}
-              で試合を開始します。
+      {confirm === "start" ? (
+        <>
+          <p>
+            <span className="text-info">
+              {MODE_LABEL[mode]} / {COURT_LABEL[court]}
+            </span>{" "}
+            で試合を開始します。
+          </p>
+          {mode === "full_auto" ? (
+            <p className="mt-2 text-error">
+              ⚠ 全自動モードでは開始と同時に両ロボットが動き出します。
             </p>
-            {mode === "full_auto" ? (
-              <p className="danger-text" style={{ marginTop: "0.5rem" }}>
-                ⚠ 全自動モードでは開始と同時に両ロボットが動き出します。
-              </p>
-            ) : (
-              <p className="dim" style={{ marginTop: "0.5rem" }}>
-                半自動モードでは各操縦者が自分のタブで START を押すまで動きません。
-              </p>
-            )}
-            <p className="dim" style={{ marginTop: "0.25rem" }}>
-              周囲の安全を確認してください。
+          ) : (
+            <p className="mt-2 text-fg-dim">
+              半自動モードでは各操縦者が自分のタブで START を押すまで動きません。
             </p>
-          </>
-        ) : confirm === "finish" ? (
-          <>
-            <p>試合を終了します。</p>
-            <p className="dim" style={{ marginTop: "0.5rem" }}>
-              実行中のシーケンスは通常停止します (緊急停止ではありません)。
-            </p>
-          </>
-        ) : (
-          <>
-            <p>セッティングタイムに戻します。</p>
-            <p className="dim" style={{ marginTop: "0.5rem" }}>
-              チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
-            </p>
-          </>
-        )}
-      </ModalBody>
-      <ModalFooter>
-        <Button onClick={() => setConfirm(null)}>キャンセル</Button>
-        <Button className="btn-danger" onClick={handleConfirm}>
-          実行
-        </Button>
-      </ModalFooter>
+          )}
+          <p className="mt-1 text-fg-dim">周囲の安全を確認してください。</p>
+        </>
+      ) : confirm === "finish" ? (
+        <>
+          <p>試合を終了します。</p>
+          <p className="mt-2 text-fg-dim">
+            実行中のシーケンスは通常停止します (緊急停止ではありません)。
+          </p>
+        </>
+      ) : (
+        <>
+          <p>セッティングタイムに戻します。</p>
+          <p className="mt-2 text-fg-dim">
+            チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
+          </p>
+        </>
+      )}
     </Modal>
   );
 
   if (variant === "compact") {
     return (
       <>
-        <Fieldset className="panel no-shrink" legend="MATCH">
+        <Panel legend="MATCH" className="shrink-0">
           <div className="hstack">
-            <span className="spacer ellipsis">
+            <span className="min-w-0 flex-1 truncate">
               {MODE_LABEL[mode]} / {COURT_LABEL[court]}
             </span>
             {phase === "match" ? (
               <Button
-                className="btn-danger"
+                tone="danger"
                 onClick={() => setConfirm("finish")}
                 aria-label="試合を終了する"
               >
@@ -139,7 +128,7 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
               </Button>
             ) : (
               <Button
-                className="btn-warn"
+                tone="warn"
                 onClick={() => setConfirm("reset")}
                 aria-label="セッティングタイムへ戻す"
               >
@@ -147,7 +136,7 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
               </Button>
             )}
           </div>
-        </Fieldset>
+        </Panel>
         {confirmModal}
       </>
     );
@@ -155,14 +144,14 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
 
   return (
     <>
-      <Fieldset className="panel" legend="MATCH CONTROL">
+      <Panel legend="MATCH CONTROL">
         <div className="group">
           <div className="group-title">MODE</div>
-          <div className="hstack" style={{ flexWrap: "wrap" }}>
+          <div className="hstack flex-wrap">
             {MODE_OPTIONS.map((opt) => (
               <Button
                 key={opt.value}
-                className={cx(mode === opt.value && "btn-selected")}
+                selected={mode === opt.value}
                 disabled={settingsLocked}
                 onClick={() => setMode(opt.value)}
                 aria-pressed={mode === opt.value}
@@ -176,11 +165,12 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
 
         <div className="group">
           <div className="group-title">COURT</div>
-          <div className="hstack" style={{ flexWrap: "wrap" }}>
+          <div className="hstack flex-wrap">
             {COURT_OPTIONS.map((opt) => (
               <Button
                 key={opt.value}
-                className={cx(court === opt.value && `btn-selected ${opt.toneClass}`)}
+                tone={court === opt.value ? opt.tone : "default"}
+                selected={court === opt.value}
                 disabled={settingsLocked}
                 onClick={() => setCourt(opt.value)}
                 aria-pressed={court === opt.value}
@@ -192,17 +182,17 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
           </div>
         </div>
 
-        <p className="dim" style={{ marginTop: "0.5rem" }}>
+        <p className="mt-2 text-fg-dim">
           {settingsLocked && phase === "match"
             ? "[?] 試合中はモード・コートを変更できません"
             : "[!] 変更するとチェックリストは全てリセットされます"}
         </p>
 
         <div className="group">
-          <div className="hstack" style={{ flexWrap: "wrap" }}>
+          <div className="hstack flex-wrap">
             <Button
               // 押せない状態で強調色のままだと「押せそうなのに反応しない」と読める
-              className={cx(startBlockedReason === null && "btn-ok")}
+              tone={startBlockedReason === null ? "ok" : "default"}
               disabled={startBlockedReason !== null}
               onClick={() => setConfirm("start")}
               aria-label="試合を開始する"
@@ -210,7 +200,7 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
               ► 試合開始
             </Button>
             <Button
-              className="btn-danger"
+              tone="danger"
               disabled={phase !== "match"}
               onClick={() => setConfirm("finish")}
               aria-label="試合を終了する"
@@ -222,10 +212,10 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
             </Button>
           </div>
           {startBlockedReason ? (
-            <span className="dim">[?] 試合開始 不可: {startBlockedReason}</span>
+            <span className="text-fg-dim">[?] 試合開始 不可: {startBlockedReason}</span>
           ) : null}
         </div>
-      </Fieldset>
+      </Panel>
 
       {confirmModal}
     </>

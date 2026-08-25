@@ -1,73 +1,41 @@
-# React + TypeScript + Vite
+# web — 操縦 UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+キャチロボバトルコンテスト 2026 出場ロボットの操縦 UI。
+Vite + React + TypeScript + Tailwind v4 / daisyUI 5。
 
-Currently, two official plugins are available:
+設計判断は `../docs/impl_plan.md`、リポジトリ全体の約束は `../CLAUDE.md` を参照。
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## コマンド
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(["dist"]),
-  {
-    files: ["**/*.{ts,tsx}"],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-]);
+```bash
+pnpm install       # 依存インストール
+pnpm dev           # 開発サーバー（全インターフェースに bind）
+pnpm build         # プロダクションビルド（出力は dist/）
+pnpm test          # vitest（watch）
+pnpm test:run      # vitest（1 回だけ実行）
+pnpm check         # lint + format + 型検査 + テスト
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+制御プログラム（`uv run python main.py`）が `dist/` をそのまま配信するため、
+ビルド出力先は `dist/` から変えないこと（`../lib/server.py` が参照している）。
 
-```js
-// eslint.config.js
-import reactX from "eslint-plugin-react-x";
-import reactDom from "eslint-plugin-react-dom";
+## 構成
 
-export default defineConfig([
-  globalIgnores(["dist"]),
-  {
-    files: ["**/*.{ts,tsx}"],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs["recommended-typescript"],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-]);
-```
+| パス                          | 役割                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `src/App.tsx`                 | 旧ハッシュ URL の読み替え → `createBrowserRouter` の生成（**この順序に依存**） |
+| `src/routes.tsx`              | ルート定義                                                                     |
+| `src/layouts/RootLayout.tsx`  | WebSocket 接続・Provider・ヘッダー・タブ・ステータスバー                       |
+| `src/index.css`               | Tailwind の取り込みと daisyUI カスタムテーマ `cbc`（配色の単一情報源）         |
+| `src/components/ui/`          | 自前プリミティブ（`Button` / `Panel` / `Modal`）                               |
+| `src/hooks/useRobotSocket.ts` | WebSocket 送受信とメッセージ型                                                 |
+| `src/test/`                   | vitest 共通ヘルパ。テスト本体は対象ソースの隣に `*.test.ts(x)`                 |
+
+## 開発時に踏みやすい点
+
+- **配色は `index.css` のテーマだけを触る。** 個別コンポーネントに色の生値を書かない
+- **`applyLegacyHashRedirect()` は `createBrowserRouter()` より前。** 順序が崩れると
+  操縦者がブックマークした `#main-hand` 等の URL が全て Monitor に落ちる
+- **タブ遷移では `location.search` を落とさない。** `?ws=` の接続先上書きが失われる
+- **モーダルに `<dialog>` を使わない。** Esc で必ず閉じてしまい、緊急停止オーバーレイの
+  「解除は Reset ボタンのみ」という安全設計と両立しない

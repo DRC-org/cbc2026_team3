@@ -46,6 +46,8 @@ dev サーバーは全インターフェースに bind し、Host ヘッダは `
 （`vite.config.ts`）。Tailscale 経由なら `http://drc:5173`、制御プログラム直結なら
 `http://drc:8080` で開く。別名のホストを使うなら `VITE_ALLOWED_HOSTS` に足す。
 WS 接続先は UI のステータスバー（接続表示）から変更でき、`?ws=drc:8080` でも一時上書きできる。
+タブは URL パス（`/monitor` `/main-hand` `/sub-hand` `/pid-tuning`）。旧ハッシュ形式の
+ブックマーク（`#main-hand` 等）は起動時にパスへ読み替える。
 
 ### ファームウェア（PlatformIO）
 
@@ -90,7 +92,11 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 - `robots/` — ロボット固有のシーケンス定義（main_hand.py / sub_hand.py）
 - `config/` — YAML 設定（後述）
 - `firmware/` — 自作モータドライバのファームウェア（PlatformIO / Arduino UNO R4）
-- `web/` — Vite + React + TypeScript の操作 UI（画面切替はタブ + URL ハッシュ。ルーターは使わない）
+- `web/` — Vite + React + TypeScript + Tailwind v4 / daisyUI 5 の操作 UI
+  - 画面切替は React Router（library mode / `createBrowserRouter`）。ルートは `src/routes.tsx`、
+    共通の外枠と WebSocket 接続は `src/layouts/RootLayout.tsx`
+  - 配色は `src/index.css` の daisyUI カスタムテーマ `cbc` に集約。組み込みテーマは使わない
+  - `src/components/ui/` — 自前プリミティブ（`Button` / `Panel` / `Modal`）
   - `src/test/` — vitest 共通ヘルパ（WebSocket スタブ、RobotProvider ラッパ）。テスト本体は対象ソースの隣に `*.test.ts(x)`
 
 ### 設定ファイルの分担
@@ -138,6 +144,28 @@ native 環境（`pio test -e native`）でプロトコル層と安全機構を�
 
 **Web UI はモータ名をハードコードしていない。** モータ状態は `Record<string, MotorState>` として
 そのまま流れるので、モータの増減で UI 側の変更は要らない。
+
+**旧ハッシュ URL の読み替えはルーター生成より前に行う。** 各操縦者は担当タブの URL をブックマークして
+試合に臨む。`web/src/App.tsx` は `applyLegacyHashRedirect()` → `createBrowserRouter()` の順で
+評価されることに依存しており（`createBrowserRouter` は生成時点の location を読む）、
+順序が崩れると `#main-hand` 等の旧ブックマークが全て Monitor に落ちる。`src/App.test.tsx` が検証している。
+
+**モーダルは `<dialog>` を使わない。** `<dialog>` + `showModal()` は Esc で必ず閉じるため、
+解除経路を Reset ボタンのみに限定する緊急停止オーバーレイの安全設計と両立しない。
+`components/ui/Modal.tsx` は `onClose` を渡さなければ閉じられない構造になっている。
+
+**daisyUI のクラスは「対」で書く。片方だけだと可視化ルールごと消える。** Tailwind は
+ソース中に現れたクラスぶんしか CSS を出力しない。`modal-box` を書いて `modal modal-open` を
+書かないと、`.modal-box` の既定 `opacity:0` だけが残り、`.modal.modal-open>.modal-box{opacity:1}` は
+出力されず、**DOM には居るのに何も見えないモーダル**になる（実際に一度これで出荷しかけた）。
+同種の罠は「親クラス + 状態クラス」で成立する daisyUI コンポーネント全般にある。
+
+**daisyUI の既定を上書きしたい箇所は必ず明示のユーティリティを書く。** ビルド後の
+レイヤ順は `... < utilities < daisyui` に見えるが、実測ではユーティリティが勝つ。
+一方でユーティリティを書いていない属性は daisyUI の既定がそのまま残る。
+特に `:disabled` は既定が「文字 base-content 20% / 枠 透明」で、`⊘ 準備中` `RUNNING` `✓ DONE` の
+ように*状態表示を兼ねる*無効ボタンが読めなくなる（`components/ui/Button.tsx` の `DISABLED_CLASS` で
+上書き済み）。配色を変えたときは実機描画で確認すること。
 
 ## テスト方針
 

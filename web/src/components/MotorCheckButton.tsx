@@ -1,6 +1,7 @@
-import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
 import { useState } from "react";
 
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { useRobot } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 
@@ -44,7 +45,7 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
   return (
     <>
       <Button
-        className="btn-info"
+        tone="info"
         disabled={disabled}
         onClick={() => setConfirmOpen(true)}
         aria-label={`${robotName} の動作確認を開始`}
@@ -52,33 +53,27 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
         {checkRunning ? "► 確認実行中..." : "▮ 動作確認"}
       </Button>
       {/* Tooltip は使えないため無効化理由を等幅テキストで併記する。 */}
-      {disabled && reasonLabel ? <span className="dim">[?] {reasonLabel}</span> : null}
+      {disabled && reasonLabel ? <span className="text-fg-dim">[?] {reasonLabel}</span> : null}
 
       <Modal
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
-        overlapBackground={false}
-        className="modal-danger"
-        windowClassName="left-align"
+        tone="danger"
+        title="Operational Check"
+        footer={
+          <>
+            <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+            <Button tone="info" onClick={handleConfirmStart}>
+              Start
+            </Button>
+          </>
+        }
       >
-        <ModalHeader>Operational Check</ModalHeader>
-        <ModalBody>
-          <p>
-            <span className="info-text">{robotName}</span> の全モータを順番に微小駆動します。
-          </p>
-          <p className="danger-text" style={{ marginTop: "0.5rem" }}>
-            ⚠ 周囲の安全を確認してから開始してください。
-          </p>
-          <p className="dim" style={{ marginTop: "0.25rem" }}>
-            実行中も緊急停止 (EMG STOP) は即時優先で動作します。
-          </p>
-        </ModalBody>
-        <ModalFooter>
-          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
-          <Button className="btn-info" onClick={handleConfirmStart}>
-            Start
-          </Button>
-        </ModalFooter>
+        <p>
+          <span className="text-info">{robotName}</span> の全モータを順番に微小駆動します。
+        </p>
+        <p className="mt-2 text-error">⚠ 周囲の安全を確認してから開始してください。</p>
+        <p className="mt-1 text-fg-dim">実行中も緊急停止 (EMG STOP) は即時優先で動作します。</p>
       </Modal>
     </>
   );

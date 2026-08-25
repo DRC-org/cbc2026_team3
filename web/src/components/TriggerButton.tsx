@@ -1,5 +1,6 @@
-import { Button } from "@tsaito18/tuicss-react";
 import { useEffect, useState } from "react";
+
+import { Button } from "@/components/ui/Button";
 
 interface TriggerButtonProps {
   waiting: boolean;
@@ -25,15 +26,7 @@ function useAsciiSpinner(active: boolean): string {
 }
 
 // 試合中に最も多く押すボタンなので、視線を戻した瞬間に状態が読めるよう大きく出す
-const FILL_STYLE = {
-  display: "flex",
-  width: "100%",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: "0.75rem",
-  height: "100%",
-  fontSize: "1.4em",
-} as const;
+const FILL_CLASS = "flex h-full w-full items-center justify-center gap-3 text-[1.4em]";
 
 export function TriggerButton({
   waiting,
@@ -50,7 +43,7 @@ export function TriggerButton({
 
   if (disabled) {
     return (
-      <Button disabled style={FILL_STYLE} aria-label={`操作不可: ${disabledLabel}`}>
+      <Button disabled className={FILL_CLASS} aria-label={`操作不可: ${disabledLabel}`}>
         ⊘ {disabledLabel}
       </Button>
     );
@@ -58,7 +51,7 @@ export function TriggerButton({
 
   if (isComplete) {
     return (
-      <Button disabled className="btn-ok" style={FILL_STYLE} aria-label="シーケンス完走">
+      <Button disabled tone="ok" className={FILL_CLASS} aria-label="シーケンス完走">
         ✓ DONE
       </Button>
     );
@@ -69,10 +62,10 @@ export function TriggerButton({
   if (waiting) {
     return (
       <Button
-        className="btn-next"
+        tone="next"
         onClick={onTrigger}
         aria-label="次のステップへ進む"
-        style={FILL_STYLE}
+        className={FILL_CLASS}
       >
         ► NEXT
         <span className="key-hint">Space</span>
@@ -81,7 +74,7 @@ export function TriggerButton({
   }
 
   return (
-    <Button disabled className="btn-info" style={FILL_STYLE} aria-label="シーケンス実行中">
+    <Button disabled tone="info" className={FILL_CLASS} aria-label="シーケンス実行中">
       <span className="tabular-nums">[{spinner}]</span>
       RUNNING
     </Button>

@@ -1,33 +1,28 @@
-import { Button, Modal, ModalBody, ModalFooter, ModalHeader } from "@tsaito18/tuicss-react";
-
+import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 import { useRobot } from "@/context/RobotContext";
 
 export function EStopOverlay() {
   const { eStopActive, onEStopRelease } = useRobot();
 
   return (
-    // 解除経路を Reset ボタンのみに限定する（Esc / 背景クリックでの誤解除を禁止）
+    // onClose を渡さないことで解除経路を Reset ボタンのみに限定する
+    // （Esc / 背景クリックでの誤解除を構造的に禁止する）
     <Modal
       open={eStopActive}
-      dismissable={false}
       role="alertdialog"
-      overlapBackground={false}
-      // 停止中であることが画面のどこを見ても分かる必要がある唯一の状態。
-      // グレー基調の例外として、ここだけは面を赤で塗る
-      className="modal-estop"
-      windowClassName="center"
-    >
-      <ModalHeader>EMERGENCY STOP</ModalHeader>
-      <ModalBody>
-        <p className="estop-title">◆ 緊急停止中 ◆</p>
-        <p>ALL MOTION HALTED</p>
-        <p>全ロボットの動作を停止しています。周囲の安全を確認してください。</p>
-      </ModalBody>
-      <ModalFooter divider={false} style={{ marginTop: "1rem", justifyContent: "center" }}>
-        <Button className="btn-estop-reset" onClick={onEStopRelease}>
+      tone="estop"
+      title="EMERGENCY STOP"
+      boxClassName="text-center"
+      footer={
+        <Button tone="estopReset" className="mx-auto" onClick={onEStopRelease}>
           ◄ Reset ►
         </Button>
-      </ModalFooter>
+      }
+    >
+      <p className="alert-blink my-1">◆ 緊急停止中 ◆</p>
+      <p>ALL MOTION HALTED</p>
+      <p>全ロボットの動作を停止しています。周囲の安全を確認してください。</p>
     </Modal>
   );
 }

@@ -9,7 +9,7 @@
 
 - **バックエンド**: Python 3.12+ / asyncio（単一プロセス）
 - **CAN 通信**: python-can + SocketCAN
-- **Web UI**: Vite + React + TypeScript（画面切替はタブ + URL ハッシュ。ルーターは使わない）
+- **Web UI**: Vite + React + TypeScript + Tailwind v4 / daisyUI（画面切替は React Router のパスベース SPA ルーティング）
 - **通信**: WebSocket（JSON）
 - **サーバー**: aiohttp（HTTP 静的配信 + WebSocket を統合）
 
@@ -559,9 +559,13 @@ cbc2026_team3_central/
 │   ├── index.html
 │   └── src/
 │       ├── main.tsx
-│       ├── App.tsx                 # タブ + URL ハッシュで画面切替（ルーターは使わない）
-│       ├── index.css
+│       ├── App.tsx                 # createBrowserRouter の生成（旧ハッシュの読み替えを含む）
+│       ├── routes.tsx              # ルート定義（/monitor /main-hand /sub-hand /pid-tuning）
+│       ├── layouts/
+│       │   └── RootLayout.tsx      # WS 接続・Provider・ヘッダー・タブ・ステータスバー
+│       ├── index.css               # Tailwind + daisyUI カスタムテーマ cbc
 │       ├── context/
+│       │   ├── ModalContext.tsx    # 表示中モーダル数（ホットキー抑止の判定元）
 │       │   └── RobotContext.tsx
 │       ├── hooks/
 │       │   ├── useRobotSocket.ts
@@ -572,7 +576,8 @@ cbc2026_team3_central/
 │       │   ├── cx.ts
 │       │   ├── phase.ts            # isSetupPhase / isMatchPhase
 │       │   ├── robots.ts
-│       │   ├── tuiColor.ts
+│       │   ├── tabs.ts             # タブ定義・数字キー割当・旧ハッシュ URL の読み替え
+│       │   ├── tone.ts             # 状態色 → daisyUI セマンティッククラスの対応表
 │       │   └── wsUrl.ts            # WS 接続先の優先順位解決・入力の正規化・永続化
 │       ├── pages/
 │       │   ├── Dashboard.tsx
@@ -870,10 +875,12 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 
 ### キーボード操作（`hooks/useHotkeys.ts`）
 
-- `1`–`4`: タブ切替。表示中のタブは URL ハッシュ（`#main-hand` 等）に載せ、リロードで復帰する
-- `Space`: 表示中のロボットの NEXT / START。非アクティブな `TabPanel` は unmount されるため、
+- `1`–`4`: タブ切替。表示中のタブは URL パス（`/main-hand` 等）そのものなので、リロードで復帰する。
+  遷移時は `location.search` を引き継ぐ（`?ws=` の接続先上書きを落とさないため）
+- `Space`: 表示中のロボットの NEXT / START。ルーターは表示中のルートしか描画しないため、
   ハンドラは表示中のロボットにだけ効く
-- 修飾キー併用・キーリピート・入力欄フォーカス中・モーダル表示中（`.tui-modal.active`）は一切発火しない
+- 修飾キー併用・キーリピート・入力欄フォーカス中・モーダル表示中は一切発火しない。
+  モーダル判定は `ModalContext` が持つ表示中モーダル数で行う（CSS クラスの DOM 検索には依存しない）
 
 ### その他の UI 方針
 
@@ -1221,9 +1228,10 @@ class PickAndPlace(Sequence):
 | Formatter | **oxfmt** (Beta) | `web/.oxfmtrc.json`、Tailwind ソート + import ソート組み込み |
 | ESLint / Prettier | 不採用（削除済み）| oxlint + oxfmt に集約 |
 | フォント | `@fontsource/inter` + `@fontsource-variable/noto-sans-jp` + `@fontsource-variable/jetbrains-mono`（自己ホスト） | Tailwind `@theme` の `--font-sans` で英→Inter、日本語→Noto Sans JP のグリフ単位フォールバック |
-| UI ライブラリ | **TuiCss（CSS のみ）+ 自前 `tui/` プリミティブ** | 旧 HeroUI v3 から全面移行（後述「TUI リデザイン」参照）。`tuicss.js` は React と DOM 制御が競合するため不使用、モーダル/タブは React state で制御 |
+| UI ライブラリ | **Tailwind v4 + daisyUI 5 + 自前 `components/ui/` プリミティブ** | 旧 TuiCss から全面移行（後述「daisyUI + Tailwind 移行」参照）|
+| ルーティング | **React Router 8（library mode / `createBrowserRouter`）** | SPA フォールバックは `lib/server.py` の `_spa_handler` と `wrangler.jsonc` の `not_found_handling` が担う |
 | アイコン | **不採用（Unicode/ASCII 記号化）** | 旧 `lucide-react` を撤去。◆◇▲▼█░ 等の記号で代替し依存ゼロ化 |
-| テーマ | **TUI 配色（IBM CGA 風・濃青背景＋白文字＋等幅）** | `web/src/index.css` の `:root` で `--tui-*` パレットと `--font-tui` を定義。html/body のベース色だけ `@theme` の `--color-bg`/`--color-text` を残す |
+| テーマ | **daisyUI カスタムテーマ `cbc`（グレー基調・彩色は状態表示のみ）** | `web/src/index.css` の `@plugin "daisyui/theme"` で定義。組み込みテーマは `themes: false` で持ち込まない |
 | 実行環境 | **node/pnpm は mise 経由** | `mise exec -- pnpm <cmd>`（素のシェルには node が無い） |
 | scripts | `dev` / `build` / `preview` / `lint` / `lint:fix` / `format` / `format:check` / `check` | `check` = `lint && format:check && tsc -b --noEmit` |
 
@@ -1237,6 +1245,67 @@ class PickAndPlace(Sequence):
 - **アイコン撤去**: lucide を全廃し Unicode/ASCII 記号（◆◇▲▼█░ 等）で代替。
 - **レイアウト**: ルート `.tui-shell`（100vw × 100svh, `overflow:hidden`）配下に AppHeader（固定）＋ flex-1 の main ＋ Statusbar（固定）。全体スクロールは禁止し、スクロールは `.tui-scroll` 領域内のみ（`min-h-0` チェーンで担保）。
 - **不変点**: WebSocket 送受信ロジック（`useRobotSocket` / `RobotContext` / `useMotorCheck`）とメッセージ型は未変更。今回の変更は UI 層のみ。
+
+#### daisyUI + Tailwind 移行 / React Router SPA 化（2026-08）
+
+TuiCss を Tailwind v4 + daisyUI 5 に、タブ管理（`useState` + URL ハッシュ）を React Router に置き換えた。
+
+- **依存**: `@tsaito18/tuicss-react` と `the-new-css-reset`（Tailwind Preflight が担うため不要）を削除し、
+  `tailwindcss` / `@tailwindcss/vite` / `daisyui` / `react-router` を追加。`react` は react-router 8 の
+  peer 要求（`>=19.2.7`）に合わせて更新。
+- **配色は据え置き**: 旧 `index.css` の再配色レイヤ（約 400 行）を daisyUI カスタムテーマ `cbc` に移植した。
+  色の値は 1 つも変えていない（描画結果のピクセル値で確認済み: 地 `#14161a` / パネル面 `#1b1e23` /
+  沈んだ面 `#101216` / 淡色文字 `#7c848e`）。角丸・影・グラデーションは全て 0 に設定し、
+  1px 実線 1 本でパネル境界を表す情報密度優先のレイアウトを維持する。
+- **ルーティングは library mode**: React Router 公式の framework SPA モード（`ssr: false`）は
+  ビルド出力が `build/client` に変わり `lib/server.py` と `wrangler.jsonc` に波及するが、
+  データは全て WebSocket 経由で loader を使わないため利点がない。`createBrowserRouter` を採用し、
+  Vite / Cloudflare / サーバー側の構成には一切触れていない。
+- **旧ブックマークの互換**: `#main-hand` 形式の URL は `applyLegacyHashRedirect()` がパスへ読み替える。
+  `createBrowserRouter` は生成時点の location を読むため、**この呼び出しは必ずルーター生成より前**に
+  置かなければならない（`App.tsx` の先頭 2 行。順序が崩れると旧 URL が全て Monitor に落ちる）。
+  `src/App.test.tsx` がこの順序を検証している。
+- **`?ws=` の引き継ぎ**: タブリンクと数字キー遷移の双方で `location.search` を維持する。
+  接続先の上書きはロード時にしか読まれないため、search を落とすとタブ切替後のリロードで既定へ戻る。
+- **ホットキー抑止の作り直し**: 「モーダル表示中は背後を操作させない」判定を
+  `.tui-modal.active` の DOM 検索から `ModalContext`（表示中モーダル数）へ移した。安全機構が
+  CSS クラス名の変更で静かに壊れないようにするため。
+- **モーダルは `<dialog>` を使わない**: `<dialog>` + `showModal()` は Esc で必ず閉じるため、
+  解除経路を Reset ボタンのみに限定する `EStopOverlay` の要件と両立しない。
+  `components/ui/Modal.tsx` は overlay + `modal-box` で構成し、閉じる手段は `onClose` の有無だけで決まる
+  （渡さなければ Esc でも背景クリックでも閉じない）。
+- **画面スケーリングの移設**: `font-size: clamp(13px, min(1.05vw, 2.1vh), 20px)` を `.wrapper` から
+  `html` へ移した。Tailwind の余白は root 基準の `rem` なので、ここを起点にしないと
+  「どの機材でも 1 画面に収める」要件が文字サイズにしか効かない。
+- **フォント**: 旧フォントスタック先頭の `DOS`（Perfect DOS VGA 437）は TuiCss が同梱していた
+  ものなので、パッケージ撤去とともに実体が消えた。解決しない名前を残すと誤解を生むため落とし、
+  `DotGothic16, ui-monospace, monospace` にした。ラテン文字の見た目は変わる。
+  完全に元へ戻すにはフォントを自前ホストする必要があるが、フォント本体に明示のライセンス文が
+  無い（TuiCss の MIT 配布に同梱されていただけ）ため、採否はチームの判断に委ねる。
+- **不変点**: WebSocket 送受信ロジックとメッセージ型、`lib/server.py`、`wrangler.jsonc` は未変更。
+
+##### dry-run 実機描画で見つけて直した不具合
+
+自動テストは DOM の存在しか見ないため、以下は `--dry-run` 起動 + ヘッドレス Chrome の
+描画・計算済みスタイル実測でしか捕まらなかった。**配色や部品を変えたら必ず実機描画で確認すること。**
+
+| # | 症状 | 原因 | 対処 |
+|---|---|---|---|
+| 1 | **全モーダルが不可視**（DOM には存在し、テストも通る） | `modal-box` だけ書き `modal modal-open` を書かなかったため、可視化ルール `.modal.modal-open>.modal-box{opacity:1}` が Tailwind のツリーシェイクで CSS から消えた | 外枠に `modal modal-open` を付与。`src/components/ui/Modal.test.tsx` で外枠のクラスを固定 |
+| 2 | 無効ボタンの文字が読めない | daisyUI 既定の `:disabled` は文字 `base-content` 20% / 枠 透明。`⊘ 準備中` `RUNNING` `✓ DONE` は*状態表示を兼ねる*無効ボタンなので致命的 | `Button` に `DISABLED_CLASS`（`text-fg-dim` + `border-line-soft` + `opacity-60`）を追加し移行前の見た目へ戻す |
+| 3 | START/STOP だけ高さ 28px、隣の NEXT/RUNNING は 88px で不揃い | `w-full` のみで `h-full` が無く、daisyUI `.btn` の固定高が残った | 両ボタンに `h-full` |
+| 4 | プログレスバーの枠線が消えた | 移植漏れ（旧 `.tui-progress-bar` は `1px solid`） | 3 箇所に `border border-line` |
+| 5 | 旧ハッシュ URL が Monitor に落ちる | `createBrowserRouter` の生成が `main.tsx` 本体より先に評価される | 読み替えを `App.tsx` へ移設し `src/App.test.tsx` で順序を固定 |
+
+検証済み: 4 タブ × セッティング/試合中/試合終了、モーダル 4 種（接続先設定・STEP JUMP・
+MOTOR CHECK・緊急停止）、1366x768 と 1280x720 で溢れなし、配色・桁揃えのピクセル実測。
+
+##### 未修正（本移行とは別件の既存挙動）
+
+- `SequenceProgress` は `step_index === 0` で未開始でも `► Running` と表示する
+  （`STATUS.idle` は `total_steps === 0` のときしか使われない）。一方 `RobotControl` は
+  同じ状態を「未開始」と判定して `► START` を出すため、同一画面で表示が食い違う。
+  どちらを正とするかは競技運用の判断が要るため本移行では触っていない。
 
 #### ファイル一覧
 
