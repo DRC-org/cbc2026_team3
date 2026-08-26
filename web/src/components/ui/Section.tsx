@@ -4,8 +4,6 @@ import { cx } from "@/lib/cx";
 
 interface SectionProps {
   title?: ReactNode;
-  /** 小見出し行の右端。件数やヒントなど、見出しと対で読ませたいものを置く */
-  aside?: ReactNode;
   className?: string;
   children: ReactNode;
 }
@@ -16,7 +14,7 @@ interface SectionProps {
  * 先頭の Section だけ上罫線と余白を落とすことで、パネル見出しの直下に
  * 意味のない二重線が出るのを防ぐ。
  */
-export function Section({ title, aside, className, children }: SectionProps) {
+export function Section({ title, className, children }: SectionProps) {
   return (
     <section
       className={cx(
@@ -27,7 +25,6 @@ export function Section({ title, aside, className, children }: SectionProps) {
       {title === undefined ? null : (
         <div className="flex items-baseline justify-between gap-3 text-[0.8em] tracking-wide text-base-content/70">
           <span className="min-w-0 truncate">{title}</span>
-          {aside ? <span className="shrink-0 whitespace-nowrap">{aside}</span> : null}
         </div>
       )}
       {children}

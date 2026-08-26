@@ -119,41 +119,37 @@ class TestAxisSpecSyncGroup:
         assert group.tolerance == pytest.approx(2.0)
 
 
-class TestFirstMotorApiRejectsPairedAxis:
-    """先頭モータだけを見る API をペア軸に使うと左のモータへ右の scale が当たる。"""
+class TestConversionIsAlwaysPerMotor:
+    """換算はモータごとにしか行えない (軸単位の scale を返す API を公開しない)。
 
-    def test_to_command_rejects_paired_axis(self) -> None:
+    かつては軸単位の ``scale`` / ``to_command`` / ``command_tolerance`` があり、
+    ペア軸に使うと先頭モータの scale が左右の両方へ当たって、左のモータが右向きに
+    全ストローク動いた。ValueError で塞いでいたが API ごと削除したため、
+    残っているのはモータごとに換算する道だけになった。
+    """
+
+    def test_paired_axis_converts_each_motor_with_its_own_scale(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
-        with pytest.raises(ValueError, match="y_axis"):
-            table.axis("y_axis").to_command(10.0)
+        commands = table.commands("y_axis", "work")
 
-    def test_command_rejects_paired_axis(self) -> None:
+        assert set(commands) == {"y_axis_r", "y_axis_l"}
+        # 逆回転ペアは符号が反転する (向きは scale の符号で表す)
+        assert commands["y_axis_r"] == pytest.approx(-commands["y_axis_l"])
+
+    def test_tolerance_is_converted_per_motor_without_sign(self) -> None:
+        spec = load_position_table(_PAIRED_CONFIG, source="<test>").axis("y_axis")
+        assert spec.tolerance is not None
+
+        widths = [motor.to_tolerance(spec.tolerance) for motor in spec.motors]
+
+        # 許容差は幅であって向きを持たない。符号が残ると逆回転側だけ到達判定が素通りする
+        assert all(width > 0.0 for width in widths)
+
+    def test_single_motor_axis_is_keyed_by_axis_name(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
-        with pytest.raises(ValueError, match="y_axis"):
-            table.command("y_axis", "work")
-
-    def test_scale_and_offset_reject_paired_axis(self) -> None:
-        table = load_position_table(_PAIRED_CONFIG, source="<test>")
-        spec = table.axis("y_axis")
-
-        with pytest.raises(ValueError, match="y_axis"):
-            _ = spec.scale
-        with pytest.raises(ValueError, match="y_axis"):
-            _ = spec.offset
-
-    def test_command_tolerance_rejects_paired_axis(self) -> None:
-        table = load_position_table(_PAIRED_CONFIG, source="<test>")
-
-        with pytest.raises(ValueError, match="y_axis"):
-            table.tolerance("y_axis")
-
-    def test_single_motor_axis_is_unaffected(self) -> None:
-        table = load_position_table(_PAIRED_CONFIG, source="<test>")
-
-        assert table.command("gripper", "open") == pytest.approx(60.0)
-        assert table.tolerance("gripper") == pytest.approx(1.0)
+        assert table.commands("gripper", "open") == {"gripper": pytest.approx(60.0)}
 
 
 class TestSyncGroupDeviation:

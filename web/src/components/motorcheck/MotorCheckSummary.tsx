@@ -1,6 +1,6 @@
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type { MotorCheckOverall } from "@/hooks/useRobotSocket";
+import type { MotorCheckOverall } from "@/lib/protocol";
 import { formatClock } from "@/lib/time";
 import type { Tone } from "@/lib/tone";
 

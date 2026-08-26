@@ -62,12 +62,16 @@ def _make_mock_can_manager() -> CANManager:
     motor = MagicMock()
     motor.state = MotorState(position=0.0, velocity=0.0, current=0.0, temperature=30.0)
     motor.name = "m1"
+    # 実物では motors は _motors の読み取り専用ビュー。fake_health が _motors を
+    # 見るため、モックでは両方を同じ dict に揃える
     mgr._motors = {"m1": motor}
+    mgr.motors = mgr._motors
     mgr.get_motor.return_value = motor
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
     mgr.activate_motors = AsyncMock()
     mgr._buses = {"bus0": MagicMock()}
+    mgr.bus_names = tuple(mgr._buses)
     # health() が HealthSnapshot を返さないと、サーバーの「判定できないものは DOWN」
     # 経路を常に踏み、本番とは別物の状態でテストすることになる
     mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
@@ -672,6 +676,7 @@ class _SyncFixture:
         self.right = M3508Driver("y_r", can_id=1)
         self.left = M3508Driver("y_l", can_id=2)
         self.mgr._motors = {"y_r": self.right, "y_l": self.left}
+        self.mgr.motors = self.mgr._motors
         self.mgr.last_feedback_at.side_effect = lambda _name: time.time()
 
         group = SyncGroup(

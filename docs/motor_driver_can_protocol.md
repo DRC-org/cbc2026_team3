@@ -180,6 +180,14 @@ Byte 6-7 : 予約
 壊れた値を保存すると次の電源投入で原因不明の暴走になり、現場で切り分けられなくなるため。
 恒久的に変えたい値は `config.h` に書いてビルドし直す。
 
+**既定値の置き場は「PC 側との契約かどうか」で分ける。** `command_timeout_ms` は PC 側の
+目標値再送周期の根拠、`feedback_interval_ms` は PC 側の STALE 判定が前提にしている送信周期で、
+どちらも基板ごとに変えてよい値ではない。この 2 つはファーム側では
+`firmware/lib/MotorCan/src/MotorCanProtocol.h`（`kDefaultCommandTimeoutMs` /
+`kDefaultFeedbackIntervalMs`）が唯一の定義を持つ。両基板の `config.h` に同じ数字を書くと、
+仕様が動いたとき片方だけが古くなる。`max_duty` / `overcurrent_threshold_ma` / `kp`・`ki`・`kd` /
+`reached_tolerance` はアクチュエータ単位のチューニング値なので各 `config.h` が持つ。
+
 未知のパラメータ ID は無視する（PC 側の新しいファームと古い基板が混在しても止まらないように）。
 
 ### 3.5 `E_STOP`（PC → モタドラ）
@@ -253,9 +261,19 @@ bit4 は「CAN 通信が途絶した」ことの報告であって「駆動で�
 > 要るので、再送周期は `command_timeout_ms` の数分の 1 —— 既定 500ms なら 50ms 周期（20Hz）
 > —— を目安とする。
 
-ビルド時フラグ `WATCHDOG_ENABLED` を 0 にすると、DC 用・サーボ用のどちらのファームでも
+`config.h` の `WATCHDOG_ENABLED` を 0 にすると、DC 用・サーボ用のどちらのファームでも
 ウォッチドッグそのものが無効になる（途絶しても駆動ゲートを通し、bit4 も報告しない）。
 **PC の停止やケーブル断に対する最後の砦を外すことになるので、試合では既定の 1 のまま使う。**
+
+有効/無効は `MotorSafety` が持つ実行時フラグで、`setup()` が `config.h` の値を写す
+（`MotorSafety::setWatchdogEnabled()`）。ビルド時の `#if` を各 `main.cpp` に置くと同じ分岐を
+両ファームが各自で持つことになり、片方に入れ忘れても誰も気付けない。写し忘れた場合は
+有効側に倒れる。**`SET_PARAM` にこのフラグの ID は無く、CAN からは変更できない。**
+最後の砦が 1 フレームで外れる経路を作らないため。無効化するにはビルドし直すしかない。
+
+駆動の可否は必ず `MotorSafety::isOutputAllowed()` を通す。ウォッチドッグの満了だけを
+見る判定（`isExpired()`）を駆動ゲートに直接書くと、この無効化フラグと緊急停止ラッチの
+両方を迂回する。
 
 ### 5.2 緊急停止
 
@@ -391,6 +409,6 @@ DC 用は出力を切ってコーストさせるが、**サーボは PWM を止�
 | 温度 | DC モタドラは温度センサを持たず常に 0 を送る。PC 側の温度警告は発火しない | 基板改版時に検討 |
 | 電流 | 電流センスを持たない基板（DC 用の `HAS_CURRENT_SENSE` = 0 / サーボ用）は電流 0 を送り、過電流（bit1）を検出できない | 過負荷の検知は機構側の設計と目視でカバー |
 | `FEEDBACK` bit3-5 | PC 側 `GenericDriver` が bit3=緊急停止中 / bit4=ウォッチドッグ作動中 / bit5=デバイス ID 未設定 を保持する | **対応済み**。bit5 は `is_fault`、bit3-4 は `check_safety_error` で動作確認を拒否する理由になる |
-| `SET_PARAM` | PC 側は `lib/server.py` の `set_param` がスタブのまま（ログ出力のみ） | Web UI からのゲイン調整と合わせて実装 |
+| `SET_PARAM` | PC 側の `set_param` は **M3508 の PC 側 PID 専用**で、このプロトコルの `SET_PARAM` フレームは送っていない | 自作モタドラのゲインは PC 側にエンコーダが無く同じ意味を持たないため、`config.h` の値をビルド時に確定させる運用でカバー |
 | 予約コマンド種別 | 受信ループが未定義値のフレームで停止する問題 | **対応済み**。`matches_feedback` は `try_parse_can_id` を使い、未定義値と Extended Frame に対して例外ではなく `False` を返す。`parse_can_id` は後方互換のため例外を投げたまま |
 | 位置の折り返し | ±3276.7deg で飽和する | 連続回転軸では位置制御しない運用でカバー |

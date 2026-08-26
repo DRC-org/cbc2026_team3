@@ -12,10 +12,10 @@ import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import type { ChecklistRole } from "@/hooks/useRobotSocket";
-import { isSetupPhase } from "@/lib/phase";
+import { isDuringMatch, isSetupPhase } from "@/lib/phase";
+import type { ChecklistRole } from "@/lib/protocol";
 import { sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
@@ -24,7 +24,9 @@ interface RobotControlProps {
 }
 
 export function RobotControl({ robotKey, label }: RobotControlProps) {
-  const { states, send, matchState } = useRobot();
+  const states = useRobotStates();
+  const { matchState } = useRobotStatus();
+  const { send } = useRobotCommands();
   const state = states[robotKey];
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
 
@@ -35,7 +37,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const handleStart = () => send({ type: "sequence_start", robot: robotKey });
 
   // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
-  const inMatch = matchState.phase === "match";
+  const inMatch = isDuringMatch(matchState.phase);
   const setupPhase = isSetupPhase(matchState.phase);
   const blockedLabel = matchState.phase === "finished" ? "試合終了" : "準備中";
 

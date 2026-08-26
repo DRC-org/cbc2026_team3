@@ -51,10 +51,24 @@ class MotorSafety {
     void setTimeoutMs(uint32_t timeoutMs) { timeoutMs_ = timeoutMs; }
     uint32_t timeoutMs() const { return timeoutMs_; }
 
+    // ウォッチドッグそのものの有効/無効（仕様書 §5.1 / §8）。無効にすると途絶しても
+    // 駆動を許可し、FEEDBACK bit4 も報告しない。書き換えてよいのは setup() が
+    // config.h の WATCHDOG_ENABLED を写すときだけで、CAN の SET_PARAM からは触らせない
+    // （PC 側の 1 フレームで最後の砦が外れる経路を作らないため）。
+    //
+    // ビルド時の #if ではなく実行時フラグにしてあるのは、両ファームの main.cpp が
+    // 同じ #if 分岐を各自で持つと片方に入れ忘れられるため。実際 WATCHDOG_ENABLED は
+    // servo にだけ効き、dc_motor では「設定しても効かないフラグ」だった時期がある。
+    void setWatchdogEnabled(bool enabled) { watchdogEnabled_ = enabled; }
+    bool isWatchdogEnabled() const { return watchdogEnabled_; }
+
     // ---- 総合判定 ----
 
     // 緊急停止ラッチ中でもウォッチドッグ満了中でもなければ true。
-    bool isOutputAllowed(uint32_t nowMs) const { return !latched_ && !isExpired(nowMs); }
+    // 駆動ゲートはすべてこれを通すこと（isExpired を直に見ると無効化フラグを迂回する）。
+    bool isOutputAllowed(uint32_t nowMs) const {
+        return !latched_ && !(watchdogEnabled_ && isExpired(nowMs));
+    }
 
     // FEEDBACK Byte7 の bit3 / bit4 を返す（他のビットは呼び出し側で OR する）。
     // bit4 は isCommandLost() に従うので、起動直後の未受信では立たない。
@@ -65,6 +79,7 @@ class MotorSafety {
     uint32_t lastFedMs_;
     bool everFed_;
     bool latched_;
+    bool watchdogEnabled_;
 };
 
 }  // namespace motorcan

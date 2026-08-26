@@ -142,11 +142,15 @@ constexpr uint32_t kControlIntervalUs = 1000;
 // 手で cansend を打つようなベンチ確認（20Hz の再送を用意できない場合）のための
 // 逃げ道であって、試合では既定の 1 のまま使う。再送が間に合わない状態は運用上の
 // 異常なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
+//
+// この値は setup() が MotorSafety::setWatchdogEnabled() へ写す。判定を #if で
+// main.cpp 側に置くと、同じ分岐を両ファームが各自で持つことになり、片方に入れ忘れても
+// 誰も気付けない（実際そうなっていた）。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
-// 仕様書 §3.4 の既定値。
-constexpr uint32_t kDefaultCommandTimeoutMs = 500;
-constexpr uint32_t kDefaultFeedbackIntervalMs = 10;  // 100Hz
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
+// MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
+// 基板ごとに変えてよい値ではなく、両基板の config.h に同じ数字を書くと片方だけ古くなる。
 
 // TODO(実機で確認): PID ゲイン。
 // 仕様書 §3.4 の kp/ki/kd は position と velocity で共有する 1 組であり、

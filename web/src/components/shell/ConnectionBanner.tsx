@@ -2,7 +2,7 @@ import { TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 
 /**
  * WebSocket 切断の全画面幅バナー。
@@ -12,7 +12,8 @@ import { useRobot } from "@/context/RobotContext";
  * useRobotSocket が 3 秒間隔で自動再接続するので、操縦者側の操作は不要。
  */
 export function ConnectionBanner() {
-  const { connected, wsUrl, openWsSettings } = useRobot();
+  const { connected, wsUrl } = useRobotStatus();
+  const { openWsSettings } = useRobotCommands();
 
   if (connected) return null;
 

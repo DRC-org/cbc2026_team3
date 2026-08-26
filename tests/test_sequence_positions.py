@@ -39,12 +39,17 @@ def _table(**overrides: object) -> PositionTable:
     return load_position_table(data, source="<test>")
 
 
+def _command(table: PositionTable, axis: str, name: str, *, court: Court | None = None) -> float:
+    """単一モータ軸 (モータ名 = 軸名) の指令値。本番と同じ commands() 経由で引く。"""
+    return table.commands(axis, name, court=court)[axis]
+
+
 class TestUnitConversion:
     def test_scale_is_applied(self) -> None:
         """人間の単位 (mm) からモータ指令 (M3508 モータ軸 deg) へ換算される。"""
         table = _table()
 
-        assert table.command("lift_motor", "work") == pytest.approx(10.0 * 864.0)
+        assert _command(table, "lift_motor", "work") == pytest.approx(10.0 * 864.0)
 
     def test_offset_is_applied(self) -> None:
         table = load_position_table(
@@ -54,13 +59,13 @@ class TestUnitConversion:
             }
         )
 
-        assert table.command("lift_motor", "home") == pytest.approx(5.0 * 2.0 + 100.0)
+        assert _command(table, "lift_motor", "home") == pytest.approx(5.0 * 2.0 + 100.0)
 
     def test_deg_to_rad_conversion(self) -> None:
         """EDULITE 05 の指令は rad。deg で書いた値が rad に換算される。"""
         table = _table()
 
-        assert table.command("arm_joint", "extended") == pytest.approx(math.radians(15.0))
+        assert _command(table, "arm_joint", "extended") == pytest.approx(math.radians(15.0))
 
     def test_scale_and_offset_default_to_identity(self) -> None:
         table = load_position_table(
@@ -70,7 +75,7 @@ class TestUnitConversion:
             }
         )
 
-        assert table.command("gripper", "open") == pytest.approx(12.0)
+        assert _command(table, "gripper", "open") == pytest.approx(12.0)
 
     def test_raw_returns_human_unit_value(self) -> None:
         table = _table()
@@ -82,7 +87,7 @@ class TestTimeoutAndTolerance:
     def test_timeout_defaults(self) -> None:
         table = _table()
 
-        assert table.timeout("lift_motor") == pytest.approx(DEFAULT_TIMEOUT_S)
+        assert table.axis("lift_motor").timeout_s == pytest.approx(DEFAULT_TIMEOUT_S)
 
     def test_timeout_from_yaml(self) -> None:
         table = load_position_table(
@@ -92,13 +97,13 @@ class TestTimeoutAndTolerance:
             }
         )
 
-        assert table.timeout("lift_motor") == pytest.approx(2.5)
+        assert table.axis("lift_motor").timeout_s == pytest.approx(2.5)
 
     def test_tolerance_defaults_to_none(self) -> None:
         """未指定ならドライバ既定の許容差を使う (None を返す)。"""
         table = _table()
 
-        assert table.tolerance("lift_motor") is None
+        assert table.axis("lift_motor").tolerance is None
 
     def test_tolerance_is_converted_by_scale(self) -> None:
         table = load_position_table(
@@ -108,16 +113,19 @@ class TestTimeoutAndTolerance:
             }
         )
 
-        # 許容差は向きを持たないため scale の符号は無視する
-        assert table.tolerance("lift_motor") == pytest.approx(0.5 * 864.0)
+        # 許容差は向きを持たないため scale の符号は無視する。到達待ちは
+        # AxisHandle がモータごとに換算するので、その経路と同じ API で確かめる
+        spec = table.axis("lift_motor")
+        assert spec.tolerance == pytest.approx(0.5)
+        assert spec.motors[0].to_tolerance(spec.tolerance) == pytest.approx(0.5 * 864.0)
 
 
 class TestCourtVariants:
     def test_scalar_value_is_court_independent(self) -> None:
         table = _table()
 
-        assert table.command("lift_motor", "work", court=Court.RED) == pytest.approx(8640.0)
-        assert table.command("lift_motor", "work", court=Court.BLUE) == pytest.approx(8640.0)
+        assert _command(table, "lift_motor", "work", court=Court.RED) == pytest.approx(8640.0)
+        assert _command(table, "lift_motor", "work", court=Court.BLUE) == pytest.approx(8640.0)
 
     def test_mapping_value_resolves_per_court(self) -> None:
         table = load_position_table(
@@ -127,8 +135,8 @@ class TestCourtVariants:
             }
         )
 
-        assert table.command("lift_motor", "place", court=Court.RED) == pytest.approx(10.0)
-        assert table.command("lift_motor", "place", court=Court.BLUE) == pytest.approx(-10.0)
+        assert _command(table, "lift_motor", "place", court=Court.RED) == pytest.approx(10.0)
+        assert _command(table, "lift_motor", "place", court=Court.BLUE) == pytest.approx(-10.0)
 
     def test_mapping_value_without_court_raises(self) -> None:
         table = load_position_table(
@@ -139,7 +147,7 @@ class TestCourtVariants:
         )
 
         with pytest.raises(PositionLookupError):
-            table.command("lift_motor", "place")
+            _command(table, "lift_motor", "place")
 
     def test_mapping_missing_court_key_raises_at_load(self) -> None:
         with pytest.raises(ValueError, match="blue"):
@@ -156,7 +164,7 @@ class TestLookupErrors:
         table = _table()
 
         with pytest.raises(PositionLookupError) as excinfo:
-            table.command("no_such_axis", "home")
+            _command(table, "no_such_axis", "home")
 
         assert "lift_motor" in str(excinfo.value)
 
@@ -164,7 +172,7 @@ class TestLookupErrors:
         table = _table()
 
         with pytest.raises(PositionLookupError) as excinfo:
-            table.command("lift_motor", "no_such_position")
+            _command(table, "lift_motor", "no_such_position")
 
         assert "work" in str(excinfo.value)
 
@@ -172,7 +180,7 @@ class TestLookupErrors:
         table = _table()
 
         with pytest.raises(PositionLookupError) as excinfo:
-            table.command("lift_motor", "no_such_position")
+            _command(table, "lift_motor", "no_such_position")
 
         assert "<test>" in str(excinfo.value)
 
@@ -200,15 +208,14 @@ class TestLoadValidation:
     def test_empty_config_yields_empty_table(self) -> None:
         table = load_position_table({})
 
-        assert table.is_empty is True
         assert table.axes == ()
 
     def test_empty_helper(self) -> None:
         table = PositionTable.empty(source="missing.yaml")
 
-        assert table.is_empty is True
+        assert table.axes == ()
         with pytest.raises(PositionLookupError, match=r"missing\.yaml"):
-            table.command("lift_motor", "home")
+            _command(table, "lift_motor", "home")
 
 
 class TestIntrospection:
@@ -273,20 +280,11 @@ class TestPairedAxis:
 
         assert table.commands("gripper", "open") == {"gripper": pytest.approx(30.0)}
 
-    def test_command_rejects_paired_axis(self) -> None:
-        """先頭モータの scale だけを返すと、左のモータへ右の符号が当たって機構が壊れる。"""
-        table = load_position_table(_PAIRED_CONFIG, source="<test>")
-
-        with pytest.raises(ValueError, match="y_axis"):
-            table.command("y_axis", "work")
-
-    def test_motor_names_and_is_paired(self) -> None:
+    def test_motor_names(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
         assert table.axis("y_axis").motor_names == ("y_axis_r", "y_axis_l")
-        assert table.axis("y_axis").is_paired is True
         assert table.axis("gripper").motor_names == ("gripper",)
-        assert table.axis("gripper").is_paired is False
 
     def test_sync_tolerance_and_paired_axes(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
@@ -320,8 +318,8 @@ class TestCommandMode:
     def test_defaults_to_position(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
-        assert table.command_mode("gripper") is ControlMode.POSITION
-        assert table.settle_s("gripper") == pytest.approx(0.0)
+        assert table.axis("gripper").command_mode is ControlMode.POSITION
+        assert table.axis("gripper").settle_s == pytest.approx(0.0)
 
     def test_duty_mode_with_settle(self) -> None:
         table = load_position_table(
@@ -338,8 +336,8 @@ class TestCommandMode:
             }
         )
 
-        assert table.command_mode("conveyor") is ControlMode.DUTY
-        assert table.settle_s("conveyor") == pytest.approx(0.3)
+        assert table.axis("conveyor").command_mode is ControlMode.DUTY
+        assert table.axis("conveyor").settle_s == pytest.approx(0.3)
 
     def test_velocity_mode(self) -> None:
         table = load_position_table(
@@ -349,7 +347,7 @@ class TestCommandMode:
             }
         )
 
-        assert table.command_mode("conveyor") is ControlMode.VELOCITY
+        assert table.axis("conveyor").command_mode is ControlMode.VELOCITY
 
     def test_current_mode_is_rejected(self) -> None:
         """電流指令は位置定数から出す用途が無く、誤記のまま機構へ流すと危険なため拒否する。"""

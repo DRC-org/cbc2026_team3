@@ -270,6 +270,29 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
 [M3508×2] [EDULITE05×2] [DC/Servo...]
 ```
 
+### 層をまたぐ参照は公開 API だけを通す
+
+サーバー・動作確認・制御ループはどれも `CANManager` と `Sequence` の利用側であり、
+private 属性を直接掴むと責務がその場で漏れる（「シーケンスのライフサイクルの一部が
+サーバー側にある」「モータ一覧の取り出し方が呼び出し側ごとに違う」）。漏れた分は
+シーケンス単体・CAN 層単体のテストでは守れない。振る舞いのテストは *新しく増えた*
+参照を止められないので、`tests/test_server_encapsulation.py` が字句解析で
+`名前._private` の形そのものを禁止する。
+
+`CANManager` が外へ出すのは次の 4 つ。
+
+| API | 返すもの | なぜこの形か |
+|---|---|---|
+| `motors` | `MappingProxyType`（宣言順） | 書き換え可能な dict を渡すと登録経路が `add_motor` 以外にも生まれ、名前・can_id の重複検査を素通りしたモータが混ざる |
+| `bus_names` | バス名のタプル | **`can.Bus` そのものは渡さない。** 生のバスを掴めると `send_to_bus` を経由しない送信ができ、送信失敗が `tx_error_count` に載らない = ヘルスが「正常」と言い続ける経路ができる |
+| `bus_of(motor)` | バス名 / `None` | 動作確認結果の表示に要る。未登録は「表示できない」だけなので例外にしない |
+| `last_feedback_at(motor)` | 受信時刻 / `None` | 位置制御ループ・同期監視・動作確認が鮮度判定に使う（判定自体は `FeedbackFreshness`） |
+
+同じ理由で、WS の全クライアント配信は `_fanout()` に、終了処理でのクライアント一斉切断は
+`_close_all_clients()` に 1 本化する。配信経路が分かれていると「送信ごとに上限を通す」
+「切り離しの `close()` は別タスクへ逃がす」という約束事を経路の数だけ守り続けることになり、
+1 つ抜けただけで**画面が「接続中」のまま値だけ凍る**事故に戻る。
+
 ### M3508 の位置制御（PC 側 PID）
 
 M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_target` は CURRENT 以外を
@@ -310,6 +333,38 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 
 制御周期は既定 200Hz（`DEFAULT_INTERVAL_S = 0.005`）。`dt` は毎周期 `time.monotonic()` の
 実測差分を使う（asyncio のジッタがあるため固定 dt を仮定しない）。
+
+**原点の張り直しは同期グループ単位。** `set_origin_here()` は指定モータが同期グループに
+属していれば全員を `await` を挟まず 1 回で確定する。左右を別々の時刻に原点確定すると、
+その間に片方が動いた分だけ偏差が最初からオフセットを持ち、正常な動作でも即座に偏差超過で
+止まる。「1 台だけに効かせてよいか」の判断は `_paired_with()` に 1 つだけ置き、
+`set_pid_gain()` も同じ答えを使う。
+
+#### 周期タスクの共通土台（`lib/control/periodic.py`）
+
+`M3508PositionLoop`（200Hz）/ `SyncMonitor`（50Hz）/ `GenericTargetRefresher`（20Hz）は
+`PeriodicTask`（動作確認と送信経路を奪い合うものは `PausablePeriodicTask`）を継承し、
+ライフサイクルの作法を揃える。同じパッケージの兄弟クラスで作法が違うと、片方の知識で
+もう片方を触ったときに「止めたつもりが止まっていない」が起きる。
+
+- 二重 `start()` は `RuntimeError`。黙って無視すると「起動したつもり」で止まっている
+  タスクを試合中に発見できない
+- `stop()` は `cancel()` しない。`_on_run_exit()` で 0 電流フレームを送るタスクがあり、
+  キャンセルするとその `await` が中断されて止め損なう。待ちは最大 1 周期
+- **周期は次回起床時刻を絶対時刻で管理する。** 「処理 → `sleep(interval)`」だと実周期が
+  `interval + 処理時間` になり、公称 50Hz を前提に「2 サンプル = 40ms なら機構破損に
+  間に合う」と置いている偏差監視の応答が負荷に比例して伸びる。1 周期以上遅れた場合は
+  取り戻そうとせず位相を捨てて数え直す（復帰直後に処理が集中して更に遅れるため）
+- 例外は間引きログ（`LogThrottle`）に落としてループを継続する。200Hz で毎周期出すと
+  本当に読みたい 1 行が流れる
+
+判定そのものも制御層で共有する。`FeedbackFreshness`（`lib/control/feedback.py`）が
+「この実測値はまだ信じてよいか」を、`SyncGuard`（`lib/control/sync_guard.py`）が
+「左右直結ペアをこの周期で電流 0 に落とすか」を持つ。どちらも位置制御ループと同期監視の
+両方が同じ答えを必要とするので、比較を書き写してはならない（片方だけ境界を直しても
+気付けず、2 つの層が違う瞬間に「異常」と言い出す）。`FeedbackFreshness` は未受信を
+異常として扱わない。未受信のモータを位置 0 とみなすと、起動直後にいきなり偏差超過で
+緊急停止する。
 
 #### アクチュエータ動作確認との排他（0x200 の奪い合い）
 
@@ -432,18 +487,26 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 コンパイルしてテストできるようにするため**。基板が無くてもプロトコル層と安全機構を
 検証でき、実機デバッグで潰すべき対象を「配線と機体依存定数」だけに絞れる。
 
+**テストは `firmware/test/` にあり、両プロジェクトが `test_dir = ../test` で同じものを指す。**
+対象は共有ライブラリ `MotorCan` なので、どちらのプロジェクトから回しても同じ 91 ケースが走る。
+片方のプロジェクトの下にだけ置くと、もう一方だけを回した人が共有ライブラリの回帰を
+検出できない（`MotorSafety` のテストが dc_motor 側にしか無ければ、servo だけを回した人は
+安全機構を壊しても気付けない）。
+
 ```bash
-pio test -e native -d firmware/dc_motor   # プロトコル層・安全機構・PID（37 ケース）
-pio test -e native -d firmware/servo      # 角度補間・可動範囲クランプ・到達推定（23 ケース）
+pio test -e native -d firmware/dc_motor   # 91 ケース
+pio test -e native -d firmware/servo      # 同じ 91 ケース
 ```
 
 | スイート | 対象 | 主な検証項目 |
 |---|---|---|
-| `firmware/dc_motor/test/test_protocol/` | `MotorCanProtocol` / `MotorSafety` / `MotorPid` | CAN ID の組み立て・解析（予約値 `0b100`/`0b101`/`0b110` を無効として弾く）、float32 LE の往復と既知バイト列、`E_STOP` の解除がマジックバイト `0x5A` `0xA5` 揃いのときだけ通ること、`FEEDBACK` の位置・速度・電流が int16 で折り返さず飽和すること、ウォッチドッグの満了・復帰・`millis()` 折り返し・ラッチ中も養えること、**未受信と受信後の途絶を分けて bit4 に載せること**、duty クランプ、PID のリセットとワインドアップ制限 |
-| `firmware/servo/test/test_servo/` | `ServoMotion` | 角度 → パルス幅の線形変換とクランプ、NaN 目標の拒否、スルーレート制限と所要時間 `距離 / slew_rate`、`holdHere()` の凍結、`setLimits()` で可動範囲を狭めたときに角度を飛ばさないこと、`SET_PARAM` がサーボ向け ID だけを通すこと、`millis()` 折り返しで補間が巻き戻らないこと |
+| `firmware/test/test_protocol/` | `MotorCanProtocol` / `MotorSafety` / `MotorPid` / `ControlTarget` | CAN ID の組み立て・解析（予約値 `0b100`/`0b101`/`0b110` を無効として弾く）、float32 LE の往復と既知バイト列、`E_STOP` の解除がマジックバイト `0x5A` `0xA5` 揃いのときだけ通ること、`FEEDBACK` の位置・速度・電流が int16 で折り返さず飽和すること、ウォッチドッグの満了・復帰・`millis()` 折り返し・ラッチ中も養えること、**未受信と受信後の途絶を分けて bit4 に載せること**、**ウォッチドッグを無効にしても緊急停止ラッチは効くこと**、duty クランプ、PID のリセットとワインドアップ制限、モード切替時に目標値が 0 に落ちること |
+| `firmware/test/test_board/` | `MotorCanRouter` / `PeriodicTimer` / `SerialLineBuffer` | Standard Frame 以外を捨てること、予約コマンド種別の拒否、`0xFF` は `E_STOP` のときだけ全チャンネルへ配ること、デバイス ID `0x00` に「自分宛」が無いこと、DIP オフセットが `0x00` / `0xFF` に回り込んだチャンネルを未設定に倒すこと、DIP のビット順と負論理、`millis()` 折り返しで周期が止まらないこと、空行を指令として通さないこと |
+| `firmware/test/test_servo/` | `ServoMotion` | 角度 → パルス幅の線形変換とクランプ、NaN 目標の拒否、スルーレート制限と所要時間 `距離 / slew_rate`、`holdHere()` の凍結、`setLimits()` で可動範囲を狭めたときに角度を飛ばさないこと、`SET_PARAM` がサーボ向け ID だけを通すこと、`millis()` 折り返しで補間が巻き戻らないこと |
 
-`main.cpp` はペリフェラル依存のため native テストの対象外。
-**`MotorCan` は両ファームで共有しているので、触ったら両方の native テストを回すこと。**
+`main.cpp` はペリフェラル依存のため native テストの対象外。ただし宛先判定・周期管理・
+シリアル行組み立ては `MotorCan` 側へ出してあり、`main.cpp` に残るのはペリフェラルの
+呼び出しだけになっている。**実機ビルド（`pio run`）は両プロジェクトで確認すること。**
 
 ### vcan を使った統合テスト
 
@@ -527,6 +590,9 @@ tests/
 ├── test_commands.py             # CommandSpec の語彙と 2 段ゲート
 ├── test_threshold_wiring.py     # しきい値の既定値が config_schema にしか無いこと
 ├── test_pid.py                  # PID 単体（ワインドアップ・デッドバンド・出力制限）
+├── test_periodic.py             # 周期タスクの土台（絶対時刻の周期・二重 start 拒否・停止時フック）
+├── test_feedback_freshness.py   # FeedbackFreshness（境界・未受信を異常にしないこと）
+├── test_sync_guard.py           # SyncGuard（グループ判定・ラッチ・解除経路）
 ├── test_position_loop.py        # M3508PositionLoop（周期・dt 頭打ち・途絶・pause/resume）
 ├── test_sync_monitor.py         # SyncMonitor（偏差判定・未受信の除外・発報の一度きり）
 ├── test_target_refresh.py       # GenericTargetRefresher（20Hz 再送・緊急停止/動作確認中の沈黙）
@@ -550,6 +616,7 @@ tests/
 ├── test_server_set_param.py     # set_param の受理・拒否
 ├── test_server_command_rejected.py  # command_rejected を要求元だけに返すこと
 ├── test_server_broadcast_resilience.py  # 詰まったクライアントで配信を止めないこと
+├── test_server_encapsulation.py # CANManager / Sequence の利用側が private を触らないこと
 ├── test_runtime_pid_gain.py     # 実行中の PID ゲイン差し替え（左右ペアを別特性にしない）
 ├── test_config_schema.py        # yaml スキーマ検証（未知キー・誤記・共通設定の移動）
 ├── test_main_wiring.py          # main.py の配線（PID 生成・バス単位ループ・インターロック）
@@ -575,11 +642,14 @@ web/
     │   └── wsContract.test.ts   # 実配信サンプルを受信経路へ流す契約テスト（例外的にここに置く）
     ├── {App,routes}.test.tsx
     ├── lib/{cx,phase,tabs,wsUrl,daisyPairs,healthVerdict,sequenceStatus}.test.ts(x)
+    ├── lib/{protocol,robotReducer}.test.ts   # 接続を張らずに受信条件と状態遷移を検証する
     ├── hooks/{useRobotSocket,useHotkeys,useMotorCheck,useWsUrl}.test.ts(x)
-    ├── pages/Dashboard.test.tsx
+    ├── context/RobotContext.test.tsx   # 購読の分割が再描画を止めていること
+    ├── layouts/RootLayout.test.tsx     # テレメトリで外枠が描き直されないこと
+    ├── pages/{Dashboard,MotorTuning}.test.tsx
     └── components/          # テストは対象と同じグループディレクトリに置く
         ├── shell/{ConnectionBanner,Toaster,WsSettings,EStopOverlay,TabBar}.test.tsx
-        ├── monitor/StartGate.test.tsx
+        ├── monitor/{StartGate,MatchControl}.test.tsx
         ├── operator/{ActionPanel,Checklist,TriggerButton}.test.tsx
         ├── motorcheck/{MotorCheckButton,MotorCheckPanel,MotorCheckSummary}.test.tsx
         ├── diagnostics/{HealthIndicator,SubsystemStatus}.test.tsx
@@ -588,10 +658,14 @@ web/
 
 テスト対象の優先順位は「壊れたときに実機で困る度合い」で決めている。
 
-- `useRobotSocket` — WS メッセージ 9 種の分岐、ヘルスイベントのリングバッファ、
-  モータチェック record のマージ、切断時の再接続。**受信条件が正しいかは
-  `wsContract.test.ts` が実配信サンプルで担保する**（このファイル単体のテストは
-  サンプルを自前で用意するため、サーバーとの食い違いは検出できない）
+- `lib/protocol.ts` / `lib/robotReducer.ts` — WS メッセージの受信条件と状態遷移。
+  接続を張らずに検証できるので、分岐はここで網羅する。**受信条件が正しいかは
+  `wsContract.test.ts` が実配信サンプルで担保する**（自前サンプルのテストだけでは
+  サーバーとの食い違いを検出できない）。`useRobotSocket` 側は接続・再接続と
+  3 者の結線だけを見る
+- `context/RobotContext.tsx` / `layouts/RootLayout.tsx` — テレメトリ更新で
+  再描画される範囲。再描画回数そのものを assert する（1 秒 40 回の描画は
+  操作の取りこぼしとして現れるので、目視では原因にたどり着けない）
 - `useHotkeys` — 修飾キー・入力欄・モーダル表示中の抑止。競技中の誤爆は機体破損に直結する
 - `Toaster` / `TriggerButton` / `Checklist` — 状態から表示・活性が一意に決まることの確認
 
@@ -662,6 +736,9 @@ cbc2026_team3/
 │   ├── control/
 │   │   ├── __init__.py
 │   │   ├── pid.py             # モータ非依存 PID
+│   │   ├── periodic.py        # 周期タスクの土台（PeriodicTask / PausablePeriodicTask / LogThrottle）
+│   │   ├── feedback.py        # フィードバック鮮度の判定（FeedbackFreshness）
+│   │   ├── sync_guard.py      # 左右直結ペアの局所保護（SyncGuard。判定とラッチ）
 │   │   ├── position_loop.py   # M3508 のバス単位位置制御ループ
 │   │   ├── sync_monitor.py    # 左右ペア軸のずれ監視（50Hz 常駐）
 │   │   └── target_refresh.py  # generic 向け目標値再送（20Hz。ファームのウォッチドッグ対策）
@@ -677,23 +754,30 @@ cbc2026_team3/
 │   └── sub_hand.py
 ├── firmware/                        # 自作モータドライバのファーム（PlatformIO / UNO R4 Minima）
 │   ├── README.md                    # 通電前の要確認項目・デバイス ID・安全既定値
+│   ├── common.ini                   # 両プロジェクト共通のビルド設定（各 ini が extra_configs で参照）
 │   ├── lib/MotorCan/                # 両ファーム共有。Arduino 非依存の純 C++
 │   │   ├── library.json
 │   │   └── src/
-│   │       ├── MotorCanProtocol.{h,cpp}  # CAN ID / フレームの符号化・復号
+│   │       ├── MotorCanProtocol.{h,cpp}  # CAN ID / フレームの符号化・復号 + PC 側との契約既定値
+│   │       ├── MotorCanRouter.{h,cpp}    # 受信フレームの宛先判定・DIP オフセット・DIP 読み出し
+│   │       ├── MotorControlTarget.h      # ControlTarget（モードと目標値を 1 状態にする）
+│   │       ├── MotorLoopTimer.h          # PeriodicTimer（millis() 折り返しに耐える周期判定）
 │   │       ├── MotorSafety.{h,cpp}       # 緊急停止ラッチ + コマンドウォッチドッグ
 │   │       ├── MotorPid.{h,cpp}          # position / velocity 用 PID（DC 用のみ）
+│   │       ├── SerialLineBuffer.{h,cpp}  # デバッグシリアルの行組み立て（解釈は各 main.cpp）
 │   │       └── ServoMotion.{h,cpp}       # 角度補間・可動範囲クランプ・到達推定（サーボ用のみ）
+│   ├── test/                        # native 環境の Unity テスト。両プロジェクトが test_dir で共有
+│   │   ├── test_protocol/           # プロトコル層・安全機構・PID・制御目標
+│   │   ├── test_board/              # 宛先判定・デバイス ID 解決・周期タイマ・シリアル行
+│   │   └── test_servo/              # 角度補間・可動範囲クランプ・到達推定
 │   ├── dc_motor/
-│   │   ├── platformio.ini
+│   │   ├── platformio.ini           # 固有行のみ（default_envs / extra_configs / test_dir）
 │   │   ├── include/config.h         # ピン配置・機体依存定数（TODO(実機で確認) はここ）
-│   │   ├── src/main.cpp
-│   │   └── test/test_protocol/      # native 環境の Unity テスト
+│   │   └── src/main.cpp
 │   └── servo/
-│       ├── platformio.ini
+│       ├── platformio.ini           # 同上
 │       ├── include/config.h         # ピン配置・チャンネル表・機体依存定数
-│       ├── src/main.cpp
-│       └── test/test_servo/         # native 環境の Unity テスト
+│       └── src/main.cpp
 ├── web/
 │   ├── package.json
 │   ├── tsconfig.json
@@ -705,19 +789,22 @@ cbc2026_team3/
 │       ├── App.tsx                 # createBrowserRouter の生成（旧ハッシュの読み替えを含む）
 │       ├── routes.tsx              # ルート定義（/monitor /main-hand /sub-hand /pid-tuning）
 │       ├── layouts/
-│       │   └── RootLayout.tsx      # WS 接続・Provider・ヘッダー・タブ・ステータスバー
+│       │   └── RootLayout.tsx      # WS 接続・Provider・外枠（外枠は memo した AppShell）
 │       ├── index.css               # Tailwind + daisyUI カスタムテーマ cbc
 │       ├── context/
 │       │   ├── ModalContext.tsx    # 表示中モーダル数（ホットキー抑止の判定元）
-│       │   └── RobotContext.tsx
+│       │   └── RobotContext.tsx    # 購読を頻度で 3 分割（useRobotStates / Status / Commands）
 │       ├── hooks/
-│       │   ├── useRobotSocket.ts
+│       │   ├── useWebSocket.ts     # 接続・再接続・接続先切替のみ（メッセージを解釈しない）
+│       │   ├── useRobotSocket.ts   # protocol + robotReducer + useWebSocket を束ねる
 │       │   ├── useWsUrl.ts         # WS 接続先の解決結果を保持し、保存・リセットする
 │       │   ├── useHotkeys.ts
 │       │   └── useMotorCheck.ts
 │       ├── lib/
 │       │   ├── cx.ts
-│       │   ├── phase.ts            # isSetupPhase / isMatchPhase
+│       │   ├── protocol.ts         # WS ワイヤ型と parseServerMessage（受信条件の単一情報源）
+│       │   ├── robotReducer.ts     # 受信 → UI 状態の遷移（純関数）
+│       │   ├── phase.ts            # isSetupPhase（レイアウト）/ isDuringMatch（可否の理由）
 │       │   ├── robots.ts
 │       │   ├── tabs.ts             # タブ定義・数字キー割当・旧ハッシュ URL の読み替え
 │       │   ├── time.ts             # エポック秒 / ミリ秒を型名で分ける（EpochSeconds / EpochMs）
@@ -861,9 +948,15 @@ cbc2026_team3/
 - **sequence_stop**: 通常停止 (緊急停止と異なり CAN 層には介入しない)。停止後 `step_index=0` に戻り `running=false` になる
 - **sequence_start**: 先頭から実行開始 (停止後・完走後の再起動)
 
-**シーケンスは起動時に自動実行しない。** `_run_sequence_loop` は resume 要求を待って停止したまま起動し、
-操縦者の明示的な `sequence_start` があるまでロボットを動かさない。`match_start` はフェーズを
-進めるだけで、機体は動かさない。
+**シーケンスは起動時に自動実行しない。** 常駐ループ `Sequence.run_forever()` は開始要求を
+待って停止したまま起動し、操縦者の明示的な `sequence_start` があるまでロボットを動かさない。
+`match_start` はフェーズを進めるだけで、機体は動かさない。
+
+**「停止したらどこへ戻るか」はシーケンス自身の責務。** 通常停止後の先頭への巻き戻しは
+`run_forever()` の中にあり、サーバーは持たない。呼び出し側に持たせると同じ巻き戻しを
+各所で書き写すことになり、書き忘れた経路だけが停止位置から再開する。緊急停止は
+`discard_pending_start()` で未処理の開始要求を捨てる。捨てないと、停止処理を終えた
+次の瞬間に直前の要求が発火し、操縦者が何も押していないのに機体が動き出す。
 
 ### パラメータ変更（`set_param`）
 
@@ -1124,8 +1217,12 @@ checklists:
 ### フェーズ連動レイアウト
 
 Monitor / RobotControl は `phase` でレイアウトごと切り替える（`lib/phase.ts` の
-`isSetupPhase` / `isMatchPhase`）。準備中に試合用の操作系を並べても押せず、
+`isSetupPhase`）。準備中に試合用の操作系を並べても押せず、
 試合中に設定 UI を並べても使わないため、その時に使うものだけを画面に出す。
+
+レイアウトの区分（`isSetupPhase`）と**コマンドの可否の区分（`isDuringMatch`）は別物**で、
+一致させてはならない。前者は `finished` を試合中と同じ情報密度に寄せるための区分、
+後者は `lib/match_state.py` の `PHASES_DURING_MATCH` の写しである。
 
 | | setup / ready | match / finished |
 |---|---|---|
@@ -1153,12 +1250,15 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 - 通知は `Toaster` に一本化（操作拒否 + ヘルス異常、右下に最大 3 件スタック）
 - **時刻の単位は型名で分ける**（`lib/time.ts` の `EpochSeconds` / `EpochMs`）。サーバーの
   `time.time()` はエポック秒、`Date` / `Date.now()` はエポックミリ秒で、どちらも `number` の
-  ため取り違えても型検査を通る。受信境界（`useRobotSocket`）で必ず ms へ正規化し、UI 状態の
+  ため取り違えても型検査を通る。受信境界（`lib/robotReducer.ts`）で必ず ms へ正規化し、UI 状態の
   フィールド名は `...Ms` で終わらせる。ワイヤ形式のフィールド（`started_at` 等）だけが
   `EpochSeconds` を名乗る。取り違えると動作確認の実施時刻が 1970-01-01 になり、
   指差喚呼で「動作確認 完了」にチェックする直前の唯一の判断材料が嘘になる
   （`wsContract.test.ts` の `motor_check_done` が実配信の値で正規化を固定している）
 - 試合中以外は START / NEXT / ステップジャンプを UI 上でも無効化する（サーバー側ゲートとの二重防御）
+- **試合中の PID Tuning は送信だけを塞ぎ、値の編集は塞がない。** 送信ボタンを無効化して
+  理由を出す（`set_param` はサーバーが試合中を拒否する）。編集まで凍結すると、
+  試合を見ながら次に入れる値を用意しておくという実際の使い方ができなくなる
 - 通常停止（STOP）は確認ダイアログを挟まない。安全側の動作であり、止めるまでの時間を延ばさない
 - WS 接続先は `lib/wsUrl.ts` が **クエリ `?ws=` > localStorage > `VITE_WS_URL` > ページ origin**
   の優先順で解決する。既定（origin 由来）は別 PC・タブレットからのアクセスを成立させるため。
@@ -1426,6 +1526,10 @@ axes:
 - `command_mode: duty` / `velocity` の軸は到達フラグを持たない（`default_tolerance` が `inf` で
   常に到達扱い）。`settle_s` を書かないと次のステップへ即座に進むため、DC モータの
   起動・停止待ちは `settle_s` で明示する。
+- `PositionTable` が公開するのは `move_to` が使う `axis()` / `commands()` / `sync_tolerance()`、
+  `main.py` の配線が使う `paired_axes()` / `axes`、そして config の不変条件テストが使う
+  `names()` / `raw()` だけ。`AxisSpec` の各フィールドを個別に取り出すアクセサを増やすと、
+  単位換算の途中結果をシーケンス側から触れるようになり、「数値は yaml だけが持つ」が崩れる。
 
 ### 偏差判定と単位換算の一本化（`lib/axis_sync.py`）
 

@@ -3,12 +3,7 @@ import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import { TabBar } from "@/components/shell/TabBar";
-import type {
-  BusHealthState,
-  HealthSnapshot,
-  RobotState,
-  SafetyState,
-} from "@/hooks/useRobotSocket";
+import type { BusHealthState, HealthSnapshot, RobotState, SafetyState } from "@/lib/protocol";
 import { renderWithRobot } from "@/test/robotContext";
 
 function health(busState: BusHealthState): HealthSnapshot {

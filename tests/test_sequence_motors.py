@@ -57,7 +57,7 @@ class TestMotorHandleSend:
     async def test_set_position_encodes_and_sends(self) -> None:
         handle, driver, mgr = _make_handle()
 
-        await handle.set_position(120.0)
+        await handle.set_target(ControlMode.POSITION, 120.0)
 
         assert driver.encoded == [(ControlMode.POSITION, 120.0)]
         mgr.send.assert_awaited_once()
@@ -68,9 +68,9 @@ class TestMotorHandleSend:
     async def test_set_velocity_current_duty(self) -> None:
         handle, driver, mgr = _make_handle()
 
-        await handle.set_velocity(50.0)
-        await handle.set_current(500.0)
-        await handle.set_duty(0.3)
+        await handle.set_target(ControlMode.VELOCITY, 50.0)
+        await handle.set_target(ControlMode.CURRENT, 500.0)
+        await handle.set_target(ControlMode.DUTY, 0.3)
 
         assert driver.encoded == [
             (ControlMode.VELOCITY, 50.0),
@@ -86,7 +86,7 @@ class TestMotorHandleSend:
         assert handle.target is None
         assert handle.mode is None
 
-        await handle.set_position(90.0)
+        await handle.set_target(ControlMode.POSITION, 90.0)
 
         assert handle.has_target is True
         assert handle.target == 90.0
@@ -109,7 +109,7 @@ class TestMotorHandleEStop:
         handle, driver, mgr = _make_handle(is_estop_active=lambda: active)
 
         with pytest.raises(EStopActiveError):
-            await handle.set_position(10.0)
+            await handle.set_target(ControlMode.POSITION, 10.0)
 
         assert driver.encoded == []
         mgr.send.assert_not_awaited()
@@ -118,9 +118,9 @@ class TestMotorHandleEStop:
         handle, _driver, mgr = _make_handle(is_estop_active=lambda: True)
 
         for coro in (
-            handle.set_velocity(1.0),
-            handle.set_current(1.0),
-            handle.set_duty(0.1),
+            handle.set_target(ControlMode.VELOCITY, 1.0),
+            handle.set_target(ControlMode.CURRENT, 1.0),
+            handle.set_target(ControlMode.DUTY, 0.1),
         ):
             with pytest.raises(EStopActiveError):
                 await coro
@@ -136,7 +136,7 @@ class TestMotorHandleEStop:
         handle, driver, mgr = _make_handle(is_estop_active=is_active)
         active = False
 
-        await handle.set_position(10.0)
+        await handle.set_target(ControlMode.POSITION, 10.0)
 
         assert driver.encoded == [(ControlMode.POSITION, 10.0)]
         mgr.send.assert_awaited_once()
@@ -145,7 +145,7 @@ class TestMotorHandleEStop:
         handle, _driver, _mgr = _make_handle(is_estop_active=lambda: True)
 
         with pytest.raises(EStopActiveError):
-            await handle.set_position(10.0)
+            await handle.set_target(ControlMode.POSITION, 10.0)
 
         assert handle.has_target is False
 
@@ -159,7 +159,7 @@ class TestMotorHandleTargetSink:
 
         handle, driver, mgr = _make_handle(target_sink=sink)
 
-        await handle.set_position(45.0)
+        await handle.set_target(ControlMode.POSITION, 45.0)
 
         assert calls == [(ControlMode.POSITION, 45.0)]
         assert driver.encoded == []
@@ -170,7 +170,7 @@ class TestMotorHandleTargetSink:
             return None
 
         handle, driver, _mgr = _make_handle(target_sink=sink)
-        await handle.set_position(45.0)
+        await handle.set_target(ControlMode.POSITION, 45.0)
         driver.set_observed(position=45.0)
 
         assert handle.target == 45.0
@@ -185,7 +185,7 @@ class TestMotorHandleTargetSink:
         handle, _driver, _mgr = _make_handle(target_sink=sink, is_estop_active=lambda: True)
 
         with pytest.raises(EStopActiveError):
-            await handle.set_position(45.0)
+            await handle.set_target(ControlMode.POSITION, 45.0)
 
         assert calls == []
 
@@ -193,21 +193,21 @@ class TestMotorHandleTargetSink:
 class TestMotorHandleWaitReached:
     async def test_returns_true_when_already_reached(self) -> None:
         handle, driver, _mgr = _make_handle()
-        await handle.set_position(10.0)
+        await handle.set_target(ControlMode.POSITION, 10.0)
         driver.set_observed(position=10.2)
 
         assert await handle.wait_reached(timeout=0.05) is True
 
     async def test_returns_false_on_timeout(self) -> None:
         handle, driver, _mgr = _make_handle()
-        await handle.set_position(10.0)
+        await handle.set_target(ControlMode.POSITION, 10.0)
         driver.set_observed(position=100.0)
 
         assert await handle.wait_reached(timeout=0.05) is False
 
     async def test_returns_true_when_reached_later(self) -> None:
         handle, driver, _mgr = _make_handle()
-        await handle.set_position(10.0)
+        await handle.set_target(ControlMode.POSITION, 10.0)
         driver.set_observed(position=100.0)
 
         async def arrive() -> None:
@@ -222,7 +222,7 @@ class TestMotorHandleWaitReached:
 
     async def test_explicit_tolerance(self) -> None:
         handle, driver, _mgr = _make_handle()
-        await handle.set_position(10.0)
+        await handle.set_target(ControlMode.POSITION, 10.0)
         driver.set_observed(position=13.0)
 
         assert await handle.wait_reached(tolerance=5.0, timeout=0.05) is True
@@ -234,7 +234,7 @@ class TestMotorHandleWaitReached:
 
     async def test_clear_target(self) -> None:
         handle, driver, _mgr = _make_handle()
-        await handle.set_position(10.0)
+        await handle.set_target(ControlMode.POSITION, 10.0)
         driver.set_observed(position=100.0)
 
         handle.clear_target()
@@ -281,19 +281,18 @@ class TestMotorGroup:
         assert group.names == ("lift_motor", "arm_joint")
         assert len(group) == 2
         assert [h.name for h in group.handles] == ["lift_motor", "arm_joint"]
-        assert [name for name, _h in group.items()] == ["lift_motor", "arm_joint"]
 
     async def test_send_through_group(self) -> None:
         group, drivers, mgr = self._group()
-        await group.lift_motor.set_current(300.0)
+        await group.lift_motor.set_target(ControlMode.CURRENT, 300.0)
 
         assert drivers["lift_motor"].encoded == [(ControlMode.CURRENT, 300.0)]
         assert mgr.send.await_args.args[0] == "lift_motor"
 
     async def test_wait_all_reached_true(self) -> None:
         group, drivers, _mgr = self._group()
-        await group.lift_motor.set_position(10.0)
-        await group.arm_joint.set_position(20.0)
+        await group.lift_motor.set_target(ControlMode.POSITION, 10.0)
+        await group.arm_joint.set_target(ControlMode.POSITION, 20.0)
         drivers["lift_motor"].set_observed(position=10.0)
         drivers["arm_joint"].set_observed(position=20.0)
 
@@ -301,8 +300,8 @@ class TestMotorGroup:
 
     async def test_wait_all_reached_false_when_one_lags(self) -> None:
         group, drivers, _mgr = self._group()
-        await group.lift_motor.set_position(10.0)
-        await group.arm_joint.set_position(20.0)
+        await group.lift_motor.set_target(ControlMode.POSITION, 10.0)
+        await group.arm_joint.set_target(ControlMode.POSITION, 20.0)
         drivers["lift_motor"].set_observed(position=10.0)
         drivers["arm_joint"].set_observed(position=200.0)
 
@@ -310,7 +309,7 @@ class TestMotorGroup:
 
     async def test_wait_all_reached_ignores_motors_without_target(self) -> None:
         group, drivers, _mgr = self._group()
-        await group.lift_motor.set_position(10.0)
+        await group.lift_motor.set_target(ControlMode.POSITION, 10.0)
         drivers["lift_motor"].set_observed(position=10.0)
         drivers["arm_joint"].set_observed(position=999.0)
 
@@ -322,7 +321,7 @@ class TestMotorGroup:
         group = build_motor_group(mgr, drivers, is_estop_active=lambda: True)
 
         with pytest.raises(EStopActiveError):
-            await group.lift_motor.set_position(1.0)
+            await group.lift_motor.set_target(ControlMode.POSITION, 1.0)
 
 
 class _UnboundSequence(Sequence):
@@ -342,7 +341,7 @@ class _BoundSequence(Sequence):
 
     @step("持ち上げ")
     async def lift(self) -> None:
-        await self.motors.lift_motor.set_position(100.0)
+        await self.motors.lift_motor.set_target(ControlMode.POSITION, 100.0)
         self.reached = await self.wait_all_reached(timeout=0.05)
 
 

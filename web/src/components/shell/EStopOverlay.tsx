@@ -3,10 +3,11 @@ import { OctagonX, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 
 export function EStopOverlay() {
-  const { eStopActive, eStopReason, onEStopRelease } = useRobot();
+  const { eStopActive, eStopReason } = useRobotStatus();
+  const { onEStopRelease } = useRobotCommands();
 
   return (
     // onClose を渡さないことで解除経路を Reset ボタンのみに限定する

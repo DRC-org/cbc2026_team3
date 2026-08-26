@@ -342,7 +342,7 @@ class TestWireRobotMotors:
         """target_sinks 経由になっていれば、set_position は直接 CAN 送信しない。"""
         _, manager, _, seq, loops = self._wire([False])
 
-        await seq.motors.lift_motor.set_position(42.0)
+        await seq.motors.lift_motor.set_target(ControlMode.POSITION, 42.0)
 
         assert loops[0].target("lift_motor") == 42.0
         assert loops[0].mode("lift_motor") is ControlMode.POSITION
@@ -351,7 +351,7 @@ class TestWireRobotMotors:
     async def test_non_m3508_still_sends_directly(self) -> None:
         _, manager, _, seq, _ = self._wire([False])
 
-        await seq.motors.gripper.set_position(1.0)
+        await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
 
         assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
 
@@ -363,9 +363,9 @@ class TestWireRobotMotors:
         flag[0] = True
 
         with pytest.raises(EStopActiveError):
-            await seq.motors.lift_motor.set_position(10.0)
+            await seq.motors.lift_motor.set_target(ControlMode.POSITION, 10.0)
         with pytest.raises(EStopActiveError):
-            await seq.motors.gripper.set_position(10.0)
+            await seq.motors.gripper.set_target(ControlMode.POSITION, 10.0)
 
     async def test_estop_checker_reaches_position_loop(self) -> None:
         """実行中ステップが出した目標も、緊急停止で位置制御ループ側が破棄する。"""
@@ -373,7 +373,7 @@ class TestWireRobotMotors:
         _, manager, _, seq, loops = self._wire(flag)
         loop = loops[0]
 
-        await seq.motors.lift_motor.set_position(100.0)
+        await seq.motors.lift_motor.set_target(ControlMode.POSITION, 100.0)
         assert loop.target("lift_motor") == 100.0
 
         flag[0] = True
@@ -439,7 +439,7 @@ class TestBuildTargetRefresher:
         flag = [False]
         refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: flag[0])
         assert refresher is not None
-        await seq.motors.gripper.set_position(1.0)
+        await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
         manager.sent_by_motor.clear()
 
         flag[0] = True
@@ -451,7 +451,7 @@ class TestBuildTargetRefresher:
         manager, motors, seq = self._wire()
         refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
         assert refresher is not None
-        await seq.motors.gripper.set_position(1.0)
+        await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
         manager.sent_by_motor.clear()
 
         await refresher.step()

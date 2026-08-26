@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import can
@@ -59,7 +59,7 @@ class MotorCheckRunner:
         self,
         robot_name: str,
         can_manager: CANManager,
-        motors: dict[str, MotorDriver],
+        motors: Mapping[str, MotorDriver],
         *,
         per_motor_timeout_ms: float = DEFAULT_MOTOR_CHECK.per_motor_timeout_ms,
         feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
@@ -147,11 +147,15 @@ class MotorCheckRunner:
         self._abort_event.clear()
 
         now = time.time()
+        # 開始時点のモータ一覧を確定させる。motors は CANManager の読み取り専用ビューでも
+        # よく、実行中に登録が増えると records の添字と駆動対象がずれる。
+        targets = list(self._motors.items())
+
         # 全レコードを PENDING で初期化してから順次更新していく。
         # 進行中も snapshot プロパティで参照可能にするため、ここで一度組み立てる。
         records: list[MotorCheckRecord] = []
-        for name in self._motors:
-            bus_name = self._can_manager._motor_bus.get(name, "")
+        for name, _motor in targets:
+            bus_name = self._can_manager.bus_of(name) or ""
             records.append(
                 MotorCheckRecord(
                     motor=name,
@@ -173,8 +177,8 @@ class MotorCheckRunner:
         )
 
         try:
-            total = len(self._motors)
-            for i, (name, motor) in enumerate(self._motors.items()):
+            total = len(targets)
+            for i, (name, motor) in enumerate(targets):
                 record = records[i]
 
                 # 中断要求 → 残りはすべて SKIPPED にして抜ける
@@ -269,7 +273,7 @@ class MotorCheckRunner:
             return
 
         # 初期化応答を動作確認の応答と誤認しないよう、指令送信直前の時刻を保存する。
-        saved_rx_at = self._can_manager._last_rx_at.get(name)
+        saved_rx_at = self._can_manager.last_feedback_at(name)
 
         try:
             msg, context = motor.check_command(magnitude=magnitude)
@@ -350,7 +354,7 @@ class MotorCheckRunner:
             return False
 
         if motor.requires_fresh_feedback_for_check():
-            last_rx_at = self._can_manager._last_rx_at.get(name)
+            last_rx_at = self._can_manager.last_feedback_at(name)
             if last_rx_at is None:
                 record.result = MotorCheckResult.FAILED
                 record.detail = "動作確認前フィードバック未受信"
@@ -403,7 +407,7 @@ class MotorCheckRunner:
         """
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            new_rx = self._can_manager._last_rx_at.get(name)
+            new_rx = self._can_manager.last_feedback_at(name)
             if new_rx is not None and (saved_rx_at is None or new_rx > saved_rx_at):
                 return True
             if self._aborted:

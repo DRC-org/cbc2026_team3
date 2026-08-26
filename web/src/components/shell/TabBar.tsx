@@ -1,10 +1,10 @@
 import { NavLink, useLocation } from "react-router";
 
 import { Kbd } from "@/components/ui/Kbd";
-import { useRobot } from "@/context/RobotContext";
-import type { RobotState } from "@/hooks/useRobotSocket";
+import { useRobotStates } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { evaluateHealth } from "@/lib/healthVerdict";
+import type { RobotState } from "@/lib/protocol";
 import { TABS } from "@/lib/tabs";
 import type { Tone } from "@/lib/tone";
 import { TONE_STATUS_CLASS } from "@/lib/tone";
@@ -37,7 +37,7 @@ function tabIndicator(state: RobotState | undefined): { tone: Tone; label: strin
 }
 
 export function TabBar() {
-  const { states } = useRobot();
+  const states = useRobotStates();
   // ?ws= による接続先の上書きはロード時にしか読まれない。リンクで search を捨てると
   // 「タブを切り替えてリロードしたら接続先が既定へ戻る」事故になるため引き継ぐ
   const { search } = useLocation();

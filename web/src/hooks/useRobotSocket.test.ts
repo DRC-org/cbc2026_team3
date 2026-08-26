@@ -1,8 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CheckRunSnapshot, MotorCheckRecord } from "@/hooks/useRobotSocket";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
+import type { CheckRunSnapshot, MotorCheckRecord } from "@/lib/protocol";
 import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 
 const URL = "ws://test/ws";

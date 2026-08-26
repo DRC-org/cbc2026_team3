@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -9,6 +8,8 @@ from typing import TYPE_CHECKING
 
 from lib.axis_sync import SyncGroup
 from lib.config_schema import DEFAULT_HEALTH
+from lib.control.feedback import FeedbackFreshness
+from lib.control.periodic import PeriodicTask
 
 if TYPE_CHECKING:
     from lib.drivers.base import MotorDriver
@@ -26,15 +27,12 @@ DEFAULT_INTERVAL_S = 0.02
 # (層ごとに debounce が違う理由は lib/axis_sync.py のモジュール docstring を参照)
 DEFAULT_VIOLATION_SAMPLES = 2
 
-# 同一原因のログを毎周期出すと 50Hz でログが溢れるため、種類ごとに間引く
-_LOG_THROTTLE_S = 1.0
-
 ViolationHandler = Callable[[str, float], None]
 FeedbackClock = Callable[[], float]
 SleepFunc = Callable[[float], Awaitable[None]]
 
 
-class SyncMonitor:
+class SyncMonitor(PeriodicTask):
     """左右直結軸の位置ずれを常駐監視し、超過したら発報する。
 
     EDULITE 05 は位置ループがドライバ内蔵で PC 側に常駐ループが無く、
@@ -48,6 +46,8 @@ class SyncMonitor:
 
     誤発報の代償が「試合が止まる」ことなので、この層だけ ``violation_samples``
     による debounce を持つ (3 層の比較は lib/axis_sync.py のモジュール docstring)。
+
+    ライフサイクル (start / stop / 例外時の継続) は ``PeriodicTask`` と共通。
     """
 
     def __init__(
@@ -61,6 +61,7 @@ class SyncMonitor:
         violation_samples: int = DEFAULT_VIOLATION_SAMPLES,
         on_violation: ViolationHandler | None = None,
         feedback_clock: FeedbackClock = time.time,
+        time_source: Callable[[], float] = time.monotonic,
         sleep: SleepFunc = asyncio.sleep,
     ) -> None:
         """
@@ -73,23 +74,20 @@ class SyncMonitor:
             violation_samples: 発報に必要な連続超過サンプル数
             on_violation: 超過時に呼ぶハンドラ (main.py で緊急停止に接続する)
             feedback_clock: last_feedback_at と比較する壁時計
+            time_source: 周期とログ間引きに使う単調クロック
             sleep: 周期待ちに使う関数 (テストで差し替え可能)
         """
+        super().__init__(interval_s=interval_s, time_source=time_source, sleep=sleep, logger=logger)
         self._groups = tuple(groups)
         self._drivers = drivers
-        self._last_feedback_at = last_feedback_at
-        self._feedback_timeout_ms = feedback_timeout_ms
-        self._interval_s = interval_s
+        self._freshness = FeedbackFreshness(
+            last_feedback_at, timeout_ms=feedback_timeout_ms, clock=feedback_clock
+        )
         self._violation_samples = max(1, violation_samples)
         self._on_violation = on_violation
-        self._feedback_clock = feedback_clock
-        self._sleep = sleep
 
         self._counts: dict[str, int] = {}
         self._violated: set[str] = set()
-        self._task: asyncio.Task[None] | None = None
-        self._stop_event = asyncio.Event()
-        self._log_at: dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     #  状態
@@ -104,10 +102,6 @@ class SyncMonitor:
         """発報済み (ラッチ中) の軸名。"""
         return frozenset(self._violated)
 
-    @property
-    def is_running(self) -> bool:
-        return self._task is not None and not self._task.done()
-
     def reset(self) -> None:
         """ラッチと連続カウントを解除する。
 
@@ -119,15 +113,21 @@ class SyncMonitor:
         self._counts.clear()
         self._violated.clear()
 
+    def _label(self) -> str:
+        return f"同期監視 ({', '.join(self.group_names) or '対象なし'})"
+
     # ------------------------------------------------------------------ #
     #  監視
     # ------------------------------------------------------------------ #
 
     def step(self) -> None:
         """1 周期分の判定を行う。run() から呼ばれるほか、テストから直接駆動できる。"""
-        now = self._feedback_clock()
+        now = self._freshness.now()
         for group in self._groups:
             self._check_group(group, now)
+
+    async def _tick(self) -> None:
+        self.step()
 
     def _check_group(self, group: SyncGroup, now: float) -> None:
         positions = self._fresh_positions(group, now)
@@ -168,8 +168,7 @@ class SyncMonitor:
             driver = self._drivers.get(member.name)
             if driver is None:
                 continue
-            last_rx = self._last_feedback_at(member.name)
-            if last_rx is None or (now - last_rx) * 1000.0 > self._feedback_timeout_ms:
+            if self._freshness.is_stale(member.name, now):
                 continue
             positions[member.name] = driver.feedback_position()
         return positions
@@ -182,49 +181,3 @@ class SyncMonitor:
         except Exception:
             # ハンドラが落ちて監視まで死ぬ方が危険。残りの軸の判定は続ける
             logger.exception("同期ずれハンドラで例外 (axis=%s)", group_name)
-
-    # ------------------------------------------------------------------ #
-    #  ライフサイクル
-    # ------------------------------------------------------------------ #
-
-    async def run(self) -> None:
-        """停止要求まで監視を回し続ける。"""
-        while not self._stop_event.is_set():
-            try:
-                self.step()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # 監視が止まると防護が丸ごと失われる。ログに残して周期は維持する
-                self._log_throttled("step", "同期監視の周期処理で例外")
-            await self._sleep(self._interval_s)
-
-    def start(self) -> None:
-        """run() をバックグラウンドタスクとして起動する。二重呼び出しは無視する。"""
-        if self.is_running:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self.run())
-
-    def request_stop(self) -> None:
-        """次の周期でループを抜けるよう要求する (同期)。"""
-        self._stop_event.set()
-
-    async def stop(self) -> None:
-        """監視を止めてタスクの終了を待つ。"""
-        self.request_stop()
-        task = self._task
-        self._task = None
-        if task is None:
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-    def _log_throttled(self, key: str, message: str) -> None:
-        now = self._feedback_clock()
-        last = self._log_at.get(key)
-        if last is not None and now - last < _LOG_THROTTLE_S:
-            return
-        self._log_at[key] = now
-        logger.exception(message)

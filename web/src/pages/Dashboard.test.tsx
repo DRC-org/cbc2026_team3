@@ -1,7 +1,7 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type { HealthSnapshot, MatchState, RobotState } from "@/hooks/useRobotSocket";
+import type { HealthSnapshot, MatchState, RobotState } from "@/lib/protocol";
 import { Dashboard } from "@/pages/Dashboard";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 

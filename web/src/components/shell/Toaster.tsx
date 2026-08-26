@@ -2,7 +2,7 @@ import { OctagonAlert, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Icon } from "@/components/ui/Icon";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 
 const REJECTION_TTL_MS = 5000;
 const HEALTH_TTL_MS = 6000;
@@ -65,7 +65,8 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
  * 表示位置と寿命の管理をここへ一本化し、常に右下から積み上げる。
  */
 export function Toaster() {
-  const { rejection, clearRejection, healthEvents } = useRobot();
+  const { rejection, healthEvents } = useRobotStatus();
+  const { clearRejection } = useRobotCommands();
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const push = useCallback((toast: ToastItem) => {

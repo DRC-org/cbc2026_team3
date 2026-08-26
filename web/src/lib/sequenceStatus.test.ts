@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { RobotState } from "@/hooks/useRobotSocket";
+import type { RobotState } from "@/lib/protocol";
 import { isSequenceComplete, sequenceKind } from "@/lib/sequenceStatus";
 
 function state(over: Partial<RobotState> = {}): RobotState {

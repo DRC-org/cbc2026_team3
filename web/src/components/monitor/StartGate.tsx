@@ -2,7 +2,7 @@ import { CircleAlert, Play, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { evaluateHealth } from "@/lib/healthVerdict";
 import { ROBOTS } from "@/lib/robots";
@@ -27,7 +27,8 @@ const ROLE_LABEL: Record<string, string> = {
  * 開始が遅れている原因を探すのに操縦者へ聞きにいく、という運用がそこから生まれる。
  */
 export function StartGate({ onStart }: { onStart: () => void }) {
-  const { matchState, connected, states } = useRobot();
+  const { matchState, connected } = useRobotStatus();
+  const states = useRobotStates();
   const { phase, can_start_match: canStart } = matchState;
 
   const blockers: Blocker[] = [];

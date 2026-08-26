@@ -4,7 +4,8 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import can
@@ -104,6 +105,36 @@ class CANManager:
 
     def get_motor(self, name: str) -> MotorDriver:
         return self._motors[name]
+
+    @property
+    def motors(self) -> Mapping[str, MotorDriver]:
+        """登録済みモータの読み取り専用ビュー (宣言順を保つ)。
+
+        サーバーは全モータの状態配信・停止フレーム送信のために一覧を必要とする。
+        書き換え可能な dict を渡すと登録経路が add_motor 以外にも生まれ、
+        名前・can_id の重複検査を素通りしたモータが混ざりうる。
+        ビューなので登録の追加はそのまま見えるが、外からは変更できない。
+        """
+        return MappingProxyType(self._motors)
+
+    @property
+    def bus_names(self) -> tuple[str, ...]:
+        """登録済みバス名 (登録順)。
+
+        バス単位のブロードキャスト (E-STOP の 0x7FF など) の宛先を列挙するために要る。
+        ``can.Bus`` そのものは渡さない。生のバスを掴むと send_to_bus を経由しない
+        送信ができてしまい、送信失敗が tx_error_count に載らない = ヘルスが
+        「正常」と言い続ける経路ができる。
+        """
+        return tuple(self._buses)
+
+    def bus_of(self, motor_name: str) -> str | None:
+        """モータが所属するバス名。未登録なら None。
+
+        どのバスに繋がったモータかは動作確認結果の表示に必要で、
+        未登録は「表示できない」だけなので例外にせず None を返す。
+        """
+        return self._motor_bus.get(motor_name)
 
     def set_on_state_update(self, callback: Callable[[str, MotorState], None]) -> None:
         self._on_state_update = callback

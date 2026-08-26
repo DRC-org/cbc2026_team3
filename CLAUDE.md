@@ -54,13 +54,16 @@ WS 接続先は UI のステータスバー（接続表示）から変更でき�
 `-d` にプロジェクトディレクトリを渡せばリポジトリ直下から実行できる。
 
 ```bash
-pio test -e native -d firmware/dc_motor   # 実機不要。プロトコル層・安全機構・PID
-pio test -e native -d firmware/servo      # 実機不要。角度補間・可動範囲クランプ・到達推定
+pio test -e native -d firmware/dc_motor   # 実機不要。firmware/test/ の全ケース
+pio test -e native -d firmware/servo      # 実機不要。上とまったく同じ全ケース
 pio run -e uno_r4_minima -d firmware/dc_motor
 pio run -e uno_r4_minima -d firmware/servo -t upload
 ```
 
-`firmware/lib/MotorCan/` は両ファームで共有しているので、**触ったら両方の native テストを回すこと。**
+テストは `firmware/test/` にあり、両プロジェクトが `test_dir` で共有するので、
+**native テストはどちらか一方で足りる**（どちらから回しても同じ全ケースが走る）。
+一方**実機ビルド（`pio run`）は従来どおり両方必要**。共有しているのは `firmware/lib/MotorCan/`
+までで、`main.cpp` と `config.h` は別物のため。
 
 ### CAN セットアップ
 
@@ -85,6 +88,10 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - `commands.py` — WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ）の単一情報源
   - `config_schema.py` — yaml の検証付き読み込み。しきい値の既定値もここだけが持つ
   - `drivers/` — モータドライバ群（M3508 / EDULITE 05 / 自作モタドラ）。`base.py` の基底クラスを継承
+  - `control/periodic.py` — 周期タスクの土台（`PeriodicTask` / `PausablePeriodicTask` / `LogThrottle`）。
+    3 つの周期タスクはこれを継承し、起動・停止・周期の作法を共有する
+  - `control/feedback.py` — フィードバック鮮度の判定（`FeedbackFreshness`）。未受信は異常にしない
+  - `control/sync_guard.py` — 左右直結ペアの局所保護（`SyncGuard`）。判定とラッチだけを持つ
   - `control/position_loop.py` — M3508 の PC 側位置制御 PID ループ（200Hz）
   - `control/sync_monitor.py` — 左右ペア軸のずれを常時監視（50Hz）。超過で全体緊急停止
   - `sequence/positions.py` — 位置定数 yaml の読み込み・単位換算・論理軸の解決
@@ -156,6 +163,19 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 `lib/axis_sync.py` は最下位層なので上位モジュールを import してはならず、層ごとの差とその理由は
 同モジュールの docstring に集約してある。
 
+**ペア軸に片側だけ効く操作を作らない。** PID ゲイン差し替え（`set_pid_gain`）も原点確定
+（`set_origin_here`）もグループ全員へ展開する。左右を別々の時刻に原点確定すると、その間に
+片方が動いた分だけ消えないオフセットが残り、正常な動作でも即座に偏差超過で止まる。
+「1 台だけに効かせてよいか」の判断は `M3508PositionLoop._paired_with()` に 1 つだけ置く。
+
+**周期タスクは `lib/control/periodic.py` を継承し、作法を揃える。** 兄弟クラスで作法が違うと
+片方の知識でもう片方を触ったときに「止めたつもりが止まっていない」が起きる。二重 `start()` は
+`RuntimeError`（黙って無視すると起動したつもりのタスクを試合中に発見できない）、`stop()` は
+`cancel()` せず停止イベントで降ろす（`_on_run_exit()` で 0 電流フレームを送るタスクがあり、
+キャンセルすると止め損なう）。**周期は次回起床時刻を絶対時刻で管理する。** 後置 `sleep` だと
+実周期が `interval + 処理時間` になり、「50Hz × 2 サンプル = 40ms なら機構破損に間に合う」と
+置いている偏差監視の時間予算が負荷に比例して伸びる。周期の実測をテストで固定してある。
+
 **離散状態アクチュエータは新ドライバを作らず位置定数で表す。** グリッパの開/閉、壁の初期/閉/開は
 `positions` の名前付き状態として書く。`move_to` は位置名でしか値を引けないため、
 定義した状態以外を送れないことが構造的に保証される。
@@ -170,6 +190,15 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 サーバーが「開始できる」と配信しているのに画面がボタンを殺す状態を作った（配信ロールが
 1 つ増えただけで試合が始められなくなる）。`lib/healthVerdict.ts` と同じ、判定を 1 箇所に
 置く原則がここにも要る。
+
+**フェーズによる可否のサーバー写しは `lib/phase.ts` の `isDuringMatch()` だけ。**
+`lib/match_state.py` の `PHASES_DURING_MATCH` と 1:1 で対応し、`PHASES_OUTSIDE_MATCH` は
+その補集合なのでこの 1 つで両側に答えられる。可否を決めるのはサーバー（`lib/commands.py`）で、
+UI は送る前に理由を説明するだけ。画面ごとに `phase === "match"` と書き散らすと、
+フェーズが増えたときに片方の画面だけが古い条件のまま残る。レイアウトの出し分けに使う
+`isSetupPhase()` とは別物で、一致させてはならない（あちらは `finished` を試合中と同じ
+情報密度へ寄せるための区分）。塞ぐのは送信であって編集ではない — 試合中の `/pid-tuning` は
+送信ボタンだけを無効化する。値を用意しておけるほうが実務に合う。
 
 **WS コマンドの語彙は `lib/commands.py` の `CommandSpec` が単一情報源。** 名前・許可フェーズ・
 拒否理由・緊急停止中の可否・ハンドラ名・拒否通知経路を同じ 1 行に置く。`CommandSpec` は
@@ -212,8 +241,23 @@ Python 側は `target` と `to` しか見ていなかった）。`tests/test_ws_
 `UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py` で再生成し、web/ 側の型と
 受信条件も必ず追従させること。
 
+**WS のワイヤ型と受信条件は `web/src/lib/protocol.ts` にしかない。** 型は
+`parseServerMessage()` と同じファイルに置く。型だけを別に持つと「型は合っているのに
+受信条件が弾く」— 画面には何も出ないのに型検査は通る — 状態が作れてしまう。
+`lib/` は最下層なので `hooks/` を import してはならない（接続を張らずに受信条件と状態遷移を
+検証できる性質は、依存の向きが片方向であることで成立している）。状態遷移は純関数の
+`lib/robotReducer.ts`、接続の面倒だけが `hooks/useWebSocket.ts` にある。
+
 **Web UI はモータ名をハードコードしていない。** モータ状態は `Record<string, MotorState>` として
 そのまま流れるので、モータの増減で UI 側の変更は要らない。
+
+**context は購読頻度で 3 つに分ける。** `useRobotStates()`（毎秒 40 回変わるテレメトリ）/
+`useRobotStatus()`（フェーズ・接続・ヘルス）/ `useRobotCommands()`（送信関数）から
+**必要なものだけ**を読む。1 つに束ねると、モータ温度が 0.1℃ 動いただけでチェックリストも
+タブもトーストも描き直される。**ただし分割だけでは効かない。** 親が再描画すると React は
+memo の無い子を素通しで描き直すので、外枠は `memo` した `AppShell`（`layouts/RootLayout.tsx`）に
+括り出し、そこへテレメトリ由来の props を渡さないこと。`RootLayout.test.tsx` と
+`RobotContext.test.tsx` が再描画回数で守っている。
 
 **旧ハッシュ URL の読み替えはルーター生成より前に行う。** 各操縦者は担当タブの URL をブックマークして
 試合に臨む。`web/src/App.tsx` は `applyLegacyHashRedirect()` → `createBrowserRouter()` の順で

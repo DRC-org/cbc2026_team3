@@ -4,8 +4,12 @@
 // 機体依存の定数はすべて include/config.h にある。
 //
 // 責務の分割:
-//   MotorCan（Arduino 非依存）… フレームの符号化・復号、緊急停止ラッチ、ウォッチドッグ、角度補間
+//   MotorCan（Arduino 非依存）… フレームの符号化・復号、宛先判定、緊急停止ラッチ、
+//                                ウォッチドッグ、角度補間、周期タイマ、シリアル行組み立て
 //   このファイル              … ペリフェラル初期化、チャンネル管理、CAN 送受信の配線
+//
+// DC 用（firmware/dc_motor）と同じ判断をする箇所は MotorCan 側に置くこと。
+// 両 main.cpp が同じ分岐を各自で持つと、片方だけ直したことに誰も気付けない。
 //
 // DC 用（firmware/dc_motor）との違いは、サーボが位置フィードバックを持たないことに由来する。
 //   - 1 枚の基板が複数チャンネルを持ち、チャンネルごとに独立したデバイス ID を持つ（§7.1）
@@ -15,9 +19,13 @@
 
 #include <Arduino.h>
 #include <Arduino_CAN.h>
+#include <stdlib.h>
 
 #include "MotorCanProtocol.h"
+#include "MotorCanRouter.h"
+#include "MotorLoopTimer.h"
 #include "MotorSafety.h"
+#include "SerialLineBuffer.h"
 #include "ServoMotion.h"
 #include "config.h"
 #include "pwm.h"
@@ -67,6 +75,10 @@ static_assert(servoDeviceIdsAreUnique(), "config.h のチャンネル表でデ�
 static_assert(kServoChannelCount == 3,
               "チャンネル数を変えたら g_pwm / g_motion / g_safety の初期化子も更新すること");
 
+// 宛先判定の結果はチャンネルのビットマスク（uint8_t）で返ってくる。
+static_assert(kServoChannelCount <= motorcan::kMaxChannels,
+              "チャンネル数が FrameRoute::channelMask のビット数を超えている");
+
 // ===========================================================================
 // ペリフェラルと状態（すべてチャンネル単位）
 // ===========================================================================
@@ -98,17 +110,18 @@ static uint8_t g_deviceId[kServoChannelCount] = {0, 0, 0};
 static bool g_pwmStarted[kServoChannelCount] = {false, false, false};
 
 static uint32_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
-static uint32_t g_lastFeedbackMs[kServoChannelCount] = {0, 0, 0};
+static PeriodicTimer g_feedbackTimer[kServoChannelCount];
 
-static uint32_t g_lastMotionMs = 0;
-static uint32_t g_lastBlinkMs = 0;
+static PeriodicTimer g_motionTimer;
+static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
 #if ENABLE_SERIAL_DEBUG
 // シリアルから角度を入力している間だけ true。
 // CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
 static bool g_serialOverride = false;
-static String g_serialLine;
+static char g_serialStorage[24];
+static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
 
 // ===========================================================================
@@ -120,35 +133,10 @@ static bool isChannelConfigured(uint8_t ch) {
     return g_deviceId[ch] != kDeviceIdUnconfigured;
 }
 
-// WATCHDOG_ENABLED=0 のときは満了しないものとして扱う（FEEDBACK の bit4 も立てない）。
-// PC 側の定期再送を用意できないベンチ確認のための逃げ道で、試合では有効のまま使う
-// （仕様書 §5.1 / §8）。
-static bool isWatchdogTripped(uint8_t ch, uint32_t nowMs) {
-#if WATCHDOG_ENABLED
-    return g_safety[ch].isExpired(nowMs);
-#else
-    (void)ch;
-    (void)nowMs;
-    return false;
-#endif
-}
-
+// 緊急停止ラッチとウォッチドッグ（WATCHDOG_ENABLED による無効化を含む）の判定は
+// MotorSafety が持つ。ここで isExpired() を直に見ると無効化フラグを迂回する。
 static bool isDriveAllowed(uint8_t ch, uint32_t nowMs) {
-    return !g_safety[ch].isLatched() && !isWatchdogTripped(ch, nowMs);
-}
-
-// FEEDBACK bit4 は「CAN 通信が途絶した」ことの報告なので、指令をまだ 1 通も
-// 受けていない起動直後には立てない（出力は isWatchdogTripped 側で止めたまま）。
-// 立てると PC 側 check_safety_error() がセッティングタイムの動作確認を
-// 指令送信前に打ち切り、健全な基板の配線を疑わせる誤誘導になる。
-static bool isWatchdogReported(uint8_t ch, uint32_t nowMs) {
-#if WATCHDOG_ENABLED
-    return g_safety[ch].isCommandLost(nowMs);
-#else
-    (void)ch;
-    (void)nowMs;
-    return false;
-#endif
+    return g_safety[ch].isOutputAllowed(nowMs);
 }
 
 // サーボへのパルス出力はすべてこの関数を通す。
@@ -199,26 +187,11 @@ static void updateMotion(uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
-static int8_t findChannel(uint8_t deviceId) {
-    if (deviceId == kDeviceIdUnconfigured) {
-        return -1;
-    }
-    for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-        if (g_deviceId[ch] == deviceId) {
-            return static_cast<int8_t>(ch);
-        }
-    }
-    return -1;
-}
-
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
-    uint8_t flags = 0;
-    if (g_safety[ch].isLatched()) {
-        flags |= status_flag::kEStop;
-    }
-    if (isWatchdogReported(ch, nowMs)) {
-        flags |= status_flag::kWatchdog;
-    }
+    // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
+    // bit4 は指令を一度でも受けた後の満了でのみ立ち、無効化した基板では立たない。
+    // ここで手で組み立て直すと、DC 用と同じ条件で立つ保証が無くなる。
+    uint8_t flags = g_safety[ch].statusFlags(nowMs);
     if (g_motion[ch].isReached()) {
         // 仕様書 §7.3: これは実測ではなく補間の完了を示す推定値。
         // 脱調・過負荷・メカ干渉で実際には動いていなくても立つ。
@@ -284,9 +257,9 @@ static void applyServoParam(uint8_t ch, const ServoParamCommand &cmd) {
     }
 }
 
-static void handleChannelFrame(uint8_t ch, const CanIdInfo &info, const CanMsg &msg,
+static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &msg,
                                uint32_t nowMs) {
-    switch (info.command) {
+    switch (command) {
         case CommandType::SetTarget: {
             // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
             // 養わないと解除した直後に満了済みで動かない。
@@ -339,33 +312,21 @@ static void handleChannelFrame(uint8_t ch, const CanIdInfo &info, const CanMsg &
 }
 
 static void handleFrame(const CanMsg &msg) {
-    // 本プロトコルは Standard Frame のみ（仕様書 §1）。
-    if (!msg.isStandardId()) {
-        return;
-    }
-
-    const CanIdInfo info = parseCanId(static_cast<uint16_t>(msg.getStandardId()));
-    if (!info.valid) {
-        // 予約コマンド種別（仕様書 §2.1）や他プロトコルの相乗り。無視する。
+    // Standard Frame 判定・予約コマンド種別・宛先判定（チャンネル表との突き合わせ /
+    // ブロードキャスト E_STOP は全チャンネル / ID 未設定チャンネルに自分宛は無い）は
+    // DC 用と同じ規則なので MotorCanRouter に集約してある。
+    const FrameRoute route = routeFrame(static_cast<uint16_t>(msg.getStandardId()),
+                                        msg.isStandardId(), g_deviceId, kServoChannelCount);
+    if (!route.accepted) {
         return;
     }
 
     const uint32_t nowMs = millis();
-
-    // ブロードキャスト E_STOP（0x7FF）は全チャンネルに効く（仕様書 §3.5）。
-    if (info.command == CommandType::EStop && info.deviceId == kDeviceIdBroadcast) {
-        for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-            handleChannelFrame(ch, info, msg, nowMs);
+    for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
+        if ((route.channelMask & static_cast<uint8_t>(1u << ch)) != 0) {
+            handleChannelFrame(ch, route.command, msg, nowMs);
         }
-        return;
     }
-
-    // 宛先指定のフレームは、チャンネル表に載っている ID のものだけを処理する（仕様書 §7.1）。
-    const int8_t ch = findChannel(info.deviceId);
-    if (ch < 0) {
-        return;
-    }
-    handleChannelFrame(static_cast<uint8_t>(ch), info, msg, nowMs);
 }
 
 static void pollCan() {
@@ -383,26 +344,13 @@ static void pollCan() {
 // 1 枚がチャンネルごとに別のデバイス ID を持つため（§7.1）、DIP は
 // **チャンネル表全体に加えるオフセット**として働く。同一ファームの基板を複数枚使うとき、
 // 2 枚目の DIP を 1 段上げるだけで全チャンネルの ID がまとめてずれる。
-static uint8_t readDipOffset() {
-    uint8_t offset = 0;
-    for (uint8_t bit = 0; bit < 4; ++bit) {
-        // INPUT_PULLUP の負論理: LOW = ON = 1
-        if (digitalRead(kPinDip[bit]) == LOW) {
-            offset |= static_cast<uint8_t>(1u << bit);
-        }
-    }
-    return offset;
-}
-
+// 負論理とビット順の対応、およびオフセット適用時の 0x00 / 0xFF への回り込みの扱いは
+// MotorCanRouter が持つ（native テストで守られている）。
 static void resolveDeviceIds() {
-    const uint8_t offset = readDipOffset();
+    const uint8_t offset = readDipSwitch(
+        kPinDip, 4, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); }, LOW);
     for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-        const uint8_t id = static_cast<uint8_t>(kServoChannels[ch].deviceId + offset);
-        // 0x00 は「未設定」、0xFF は E_STOP のブロードキャスト用に予約されている（§2.2）。
-        // オフセットの足し算で 8bit を回り込んだ結果どちらかになったチャンネルは駆動しない。
-        g_deviceId[ch] = (id == kDeviceIdUnconfigured || id == kDeviceIdBroadcast)
-                             ? kDeviceIdUnconfigured
-                             : id;
+        g_deviceId[ch] = applyDeviceIdOffset(kServoChannels[ch].deviceId, offset);
     }
 }
 
@@ -418,12 +366,10 @@ static void updateLed(uint32_t nowMs) {
             unconfigured = true;
         }
     }
-    const uint32_t interval = unconfigured ? kUnconfiguredBlinkIntervalMs : kHeartbeatIntervalMs;
-
-    if (nowMs - g_lastBlinkMs < interval) {
+    if (!g_blinkTimer.due(nowMs,
+                          unconfigured ? kUnconfiguredBlinkIntervalMs : kHeartbeatIntervalMs)) {
         return;
     }
-    g_lastBlinkMs = nowMs;
     g_ledOn = !g_ledOn;
     digitalWrite(kPinLed, g_ledOn ? HIGH : LOW);
 
@@ -445,31 +391,27 @@ static void updateLed(uint32_t nowMs) {
 // 一括で出力を禁止するため、ここから安全機構を迂回することはできない（仕様書 §5.2 の要求）。
 static void pollSerial(uint32_t nowMs) {
     while (Serial.available() > 0) {
-        const char c = static_cast<char>(Serial.read());
-        if (c != '\n' && c != '\r') {
-            if (g_serialLine.length() < 24) {
-                g_serialLine += c;
-            }
+        if (!g_serialLine.push(static_cast<char>(Serial.read()))) {
             continue;
         }
-        if (g_serialLine.length() == 0) {
-            continue;
-        }
+        const char *line = g_serialLine.line();
 
-        if (g_serialLine[0] == 's' || g_serialLine[0] == 'S') {
+        if (line[0] == 's' || line[0] == 'S') {
             g_serialOverride = false;
             for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
                 g_motion[ch].holdHere(nowMs);
             }
         } else {
-            const int sep = g_serialLine.indexOf(' ');
-            const long ch = sep > 0 ? g_serialLine.substring(0, sep).toInt() : -1;
-            if (ch >= 0 && ch < static_cast<long>(kServoChannelCount)) {
-                g_motion[ch].setTarget(g_serialLine.substring(sep + 1).toFloat(), nowMs);
+            // チャンネル番号と角度が空白で区切られていない行は捨てる。
+            // 番号を読み違えると別のサーボが動くので、曖昧な入力は指令にしない。
+            char *sep = nullptr;
+            const long ch = strtol(line, &sep, 10);
+            if (sep != line && *sep == ' ' && ch >= 0 &&
+                ch < static_cast<long>(kServoChannelCount)) {
+                g_motion[ch].setTarget(strtof(sep + 1, nullptr), nowMs);
                 g_serialOverride = true;
             }
         }
-        g_serialLine = "";
     }
 
     // シリアル操作中はウォッチドッグを養い続ける。
@@ -512,8 +454,8 @@ void setup() {
         // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
         // 周期を等分した位相をチャンネルごとにずらして平準化する。
         // ID 未設定のチャンネルも bit5 を知らせるために送るので、ここは全チャンネル分やる。
-        g_lastFeedbackMs[ch] = startMs - g_feedbackIntervalMs +
-                               (g_feedbackIntervalMs * ch) / kServoChannelCount;
+        g_feedbackTimer[ch].setLastMs(startMs - g_feedbackIntervalMs +
+                                      (g_feedbackIntervalMs * ch) / kServoChannelCount);
 
         if (!isChannelConfigured(ch)) {
             continue;
@@ -537,8 +479,14 @@ void setup() {
         }
     }
 
-    g_lastMotionMs = startMs;
-    g_lastBlinkMs = startMs;
+    // config.h のビルド時フラグを実行時フラグへ写す（仕様書 §5.1 / §8）。
+    // 判定そのものは MotorSafety にしか無いので、写し忘れれば有効のまま動く。
+    for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
+        g_safety[ch].setWatchdogEnabled(WATCHDOG_ENABLED != 0);
+    }
+
+    g_motionTimer.reset(startMs);
+    g_blinkTimer.reset(startMs);
 }
 
 void loop() {
@@ -549,14 +497,12 @@ void loop() {
     pollSerial(nowMs);
 #endif
 
-    if (nowMs - g_lastMotionMs >= kMotionIntervalMs) {
-        g_lastMotionMs = nowMs;
+    if (g_motionTimer.due(nowMs, kMotionIntervalMs)) {
         updateMotion(nowMs);
     }
 
     for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-        if (nowMs - g_lastFeedbackMs[ch] >= g_feedbackIntervalMs) {
-            g_lastFeedbackMs[ch] = nowMs;
+        if (g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(ch, nowMs);
         }
     }

@@ -9,8 +9,30 @@ UI は「接続中」を出し続け、操縦者は凍った値を最新だと�
 from __future__ import annotations
 
 import asyncio
+import json
+from unittest.mock import MagicMock
 
+from lib.can_manager import CANManager
+from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
+
+
+class _NoopSequence(Sequence):
+    """state メッセージを 1 通生成させるための最小シーケンス。"""
+
+    def __init__(self) -> None:
+        super().__init__("noop_seq")
+
+    @step("ノーオペ")
+    async def noop(self) -> None:
+        return None
+
+
+def _bare_can_manager() -> CANManager:
+    """モータ 0 台・バス 1 本の実 CANManager (配信経路だけを見るため)。"""
+    mgr = CANManager()
+    mgr.add_bus("bus0", MagicMock(), channel="vbroadcast0")
+    return mgr
 
 
 class _StalledClient:
@@ -52,8 +74,10 @@ class _ExplodingClient:
 
     def __init__(self) -> None:
         self.closed = False
+        self.attempts = 0
 
     async def send_str(self, msg: str) -> None:
+        self.attempts += 1
         raise RuntimeError("transport is closing")
 
     async def close(self) -> None:
@@ -111,3 +135,82 @@ class TestBroadcastResilience:
         task.cancel()
         # 1 回目の例外でループが終わっていたら 2 回目以降は呼ばれない
         assert calls["n"] > 1
+
+
+class TestFanout:
+    """全配信経路が同じファンアウトを通ること。
+
+    経路が分かれていると「送信タイムアウトを通す」「切り離しは別タスクへ逃がす」という
+    不変条件を経路の数だけ守り続ける必要があり、増えた経路が 1 つ抜けただけで
+    テレメトリ全体が 1 クライアントに引きずられて凍る。
+    """
+
+    async def test_複数メッセージは順序どおり届く(self) -> None:
+        server = RobotServer()
+        healthy = _HealthyClient()
+        server._ws_clients = {healthy}  # type: ignore[assignment]
+
+        await server._fanout([{"type": "a"}, {"type": "b"}])
+
+        assert healthy.sent == ['{"type": "a"}', '{"type": "b"}']
+
+    async def test_1通目に失敗した相手へ2通目は送らない(self) -> None:
+        # 送れないと分かった相手に残りを投げ続けるぶんだけ、他クライアントの配信が遅れる
+        server = RobotServer()
+        exploding = _ExplodingClient()
+        healthy = _HealthyClient()
+        server._ws_clients = {exploding, healthy}  # type: ignore[assignment]
+
+        await server._fanout([{"type": "a"}, {"type": "b"}])
+
+        assert exploding.attempts == 1
+        assert exploding not in server._ws_clients
+        assert healthy.sent == ['{"type": "a"}', '{"type": "b"}']
+
+    async def test_テレメトリ配信も詰まった相手を切り離す(self, monkeypatch) -> None:
+        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+
+        server = RobotServer()
+        server.add_robot("main_hand", _NoopSequence(), _bare_can_manager())
+        stalled = _StalledClient()
+        healthy = _HealthyClient()
+        server._ws_clients = {stalled, healthy}  # type: ignore[assignment]
+
+        await asyncio.wait_for(server._broadcast_state(), timeout=2.0)
+
+        assert stalled not in server._ws_clients
+        assert healthy in server._ws_clients
+        assert json.loads(healthy.sent[0])["type"] == "state"
+
+
+class TestShutdownDoesNotHang:
+    """終了処理も送信と同じ上限を通す。
+
+    `close()` は相手のクローズ応答を待つ。スリープしたノート PC が 1 台繋がって
+    いるだけでシャットダウンが返らなくなり、CAN を落とす後始末まで到達しない。
+    """
+
+    async def test_on_shutdown_は詰まったクライアントを待たない(self, monkeypatch) -> None:
+        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+
+        server = RobotServer()
+        app = server.create_app()
+        stalled = _StalledClient()
+        server._ws_clients = {stalled}  # type: ignore[assignment]
+
+        await asyncio.wait_for(server._on_shutdown(app), timeout=2.0)
+
+        assert not server._ws_clients
+        assert stalled.close_called
+
+    async def test_cleanup_は詰まったクライアントを待たない(self, monkeypatch) -> None:
+        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+
+        server = RobotServer()
+        stalled = _StalledClient()
+        server._ws_clients = {stalled}  # type: ignore[assignment]
+
+        await asyncio.wait_for(server.cleanup(), timeout=2.0)
+
+        assert not server._ws_clients
+        assert stalled.close_called

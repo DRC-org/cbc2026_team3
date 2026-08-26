@@ -425,3 +425,47 @@ class TestDuplicateRegistration:
 
         assert mgr._bus_motors["can_generic"] == [first]
         assert set(mgr._motors) == {"gripper"}
+
+
+class TestReadOnlyViews:
+    """構成の読み取り口。サーバー・動作確認がここを通れば private を触らずに済む。"""
+
+    def _mgr(self) -> CANManager:
+        mgr = CANManager()
+        mgr.add_bus("can_m3508", _make_mock_bus(), channel="vcan0")
+        mgr.add_bus("can_generic", _make_mock_bus(), channel="vcan1")
+        mgr.add_motor("can_m3508", _make_mock_motor("y_axis_r", 0x01))
+        mgr.add_motor("can_m3508", _make_mock_motor("y_axis_l", 0x02))
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+        return mgr
+
+    def test_motors_は宣言順を保つ(self) -> None:
+        # 動作確認は config の宣言順に 1 台ずつ動かす。順序が崩れると
+        # 指差喚呼の読み上げ順と画面の進捗が食い違う
+        mgr = self._mgr()
+        assert list(mgr.motors) == ["y_axis_r", "y_axis_l", "gripper"]
+        assert mgr.motors["gripper"] is mgr.get_motor("gripper")
+
+    def test_motors_は書き換えられない(self) -> None:
+        mgr = self._mgr()
+        with pytest.raises(TypeError):
+            mgr.motors["gripper"] = _make_mock_motor("gripper", 0x09)  # type: ignore[index]
+
+    def test_motors_は登録を追従する(self) -> None:
+        mgr = self._mgr()
+        view = mgr.motors
+        mgr.add_motor("can_generic", _make_mock_motor("wall", 0x02))
+        assert "wall" in view
+
+    def test_bus_names_で送信先バスを列挙できる(self) -> None:
+        mgr = self._mgr()
+        assert mgr.bus_names == ("can_m3508", "can_generic")
+
+    def test_bus_of_でモータの所属バスを引ける(self) -> None:
+        mgr = self._mgr()
+        assert mgr.bus_of("y_axis_l") == "can_m3508"
+        assert mgr.bus_of("gripper") == "can_generic"
+
+    def test_bus_of_は未登録モータで_None(self) -> None:
+        # 未登録を KeyError にすると、ヘルス表示のためだけに呼ぶ側が必ず握り潰す羽目になる
+        assert self._mgr().bus_of("unknown") is None

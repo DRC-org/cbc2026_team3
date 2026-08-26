@@ -1,4 +1,4 @@
-import type { RobotState } from "@/hooks/useRobotSocket";
+import type { RobotState } from "@/lib/protocol";
 
 /**
  * シーケンスが今どの状態にあるか。ラベルや配色は画面ごとに違う

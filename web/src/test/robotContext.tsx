@@ -1,13 +1,14 @@
 import { render } from "@testing-library/react";
-import type { ComponentProps, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
-import type { MatchState, MotorCheckState } from "@/hooks/useRobotSocket";
-import { emptyMotorCheckState } from "@/hooks/useRobotSocket";
+import type { RobotContextValue } from "@/context/RobotContext";
+import type { MatchState } from "@/lib/protocol";
+import type { MotorCheckState } from "@/lib/robotReducer";
+import { emptyMotorCheckState } from "@/lib/robotReducer";
 
-// RobotContextValue は非公開なので、Provider の props から復元する
-export type RobotContextValue = ComponentProps<typeof RobotProvider>["value"];
+export type { RobotContextValue };
 
 export const EMPTY_MOTOR_CHECK: MotorCheckState = emptyMotorCheckState();
 

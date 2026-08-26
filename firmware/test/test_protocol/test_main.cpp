@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "MotorCanProtocol.h"
+#include "MotorControlTarget.h"
 #include "MotorPid.h"
 #include "MotorSafety.h"
 
@@ -384,6 +385,123 @@ static void test_command_lost_separates_startup_from_dropout() {
 }
 
 // --------------------------------------------------------------------------
+// §5.1 ウォッチドッグの有効/無効
+// --------------------------------------------------------------------------
+
+// 試合では必ず有効。config.h の WATCHDOG_ENABLED を写し忘れた基板が
+// 「気付かないうちに無効」になっていないよう、既定は有効側に倒す。
+static void test_watchdog_is_enabled_by_default() {
+    MotorSafety safety(500);
+    TEST_ASSERT_TRUE(safety.isWatchdogEnabled());
+}
+
+// 無効化した基板は途絶しても駆動を続け、bit4 も報告しない（仕様書 §5.1 / §8）。
+// 以前は両 main.cpp が #if で同じ分岐を持っており、servo にだけ実装されて
+// dc_motor では「設定しても効かないフラグ」になっていた。判定は MotorSafety に 1 つだけ置く。
+static void test_disabled_watchdog_allows_output_and_hides_bit4() {
+    MotorSafety safety(500);
+    safety.setWatchdogEnabled(false);
+
+    safety.feed(1000);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(9999));
+    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(9999));
+
+    // 生の満了判定そのものは無効化の影響を受けない（報告と駆動可否だけが変わる）
+    TEST_ASSERT_TRUE(safety.isExpired(9999));
+    TEST_ASSERT_TRUE(safety.isCommandLost(9999));
+}
+
+// 無効化は「最後の砦を 1 枚外す」だけであって、緊急停止まで無効にしてはならない。
+static void test_disabled_watchdog_still_honors_e_stop_latch() {
+    MotorSafety safety(500);
+    safety.setWatchdogEnabled(false);
+    safety.feed(0);
+
+    safety.stop();
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(100));
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, safety.statusFlags(100));
+
+    safety.tryClear();
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(100));
+}
+
+// 有効へ戻したら即座に満了判定が効く（ベンチ確認から試合構成へ戻す経路）。
+static void test_watchdog_can_be_re_enabled() {
+    MotorSafety safety(500);
+    safety.setWatchdogEnabled(false);
+    safety.feed(0);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(600));
+
+    safety.setWatchdogEnabled(true);
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(600));
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kWatchdog, safety.statusFlags(600));
+}
+
+// --------------------------------------------------------------------------
+// §3.4 パラメータ既定値
+// --------------------------------------------------------------------------
+
+// PC 側の再送周期（command_timeout_ms の数分の 1）と STALE 判定は、この 2 つの値が
+// 仕様書どおりであることを前提にしている。基板ごとの config.h に書くと片方だけが
+// 古くなるので、ここが単一定義を持つ。
+static void test_protocol_defaults_match_spec() {
+    TEST_ASSERT_EQUAL_UINT32(500, kDefaultCommandTimeoutMs);
+    TEST_ASSERT_EQUAL_UINT32(10, kDefaultFeedbackIntervalMs);
+}
+
+// --------------------------------------------------------------------------
+// §3.3 / §5.4 制御モードと目標値
+// --------------------------------------------------------------------------
+
+// 仕様書 §5.4: 電源投入直後は duty モード・目標 0。
+static void test_control_target_starts_stopped_in_duty() {
+    ControlTarget control;
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Duty),
+                            static_cast<uint8_t>(control.mode()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+}
+
+// 仕様書 §3.3 の暴走防止の本体。位置目標 90.0[deg] がそのまま duty 90.0（= 9000%）として
+// 解釈される事故を防ぐため、モードが変わったら目標値を必ず 0 に落とす。
+static void test_switch_mode_resets_target_to_zero() {
+    ControlTarget control;
+    control.setValue(90.0f);
+
+    TEST_ASSERT_TRUE(control.switchMode(ControlType::Position));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Position),
+                            static_cast<uint8_t>(control.mode()));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+
+    control.setValue(1500.0f);
+    TEST_ASSERT_TRUE(control.switchMode(ControlType::Velocity));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+}
+
+// SET_TARGET は毎フレーム制御タイプを載せてくる（仕様書 §3.1）ので、同じモードでの
+// 呼び出しで目標値を 0 に落としてはならない。落とすと 20Hz の再送のたびに
+// 目標値が 0 と指令値の間で振動する。
+static void test_switch_to_same_mode_keeps_target() {
+    ControlTarget control;
+    control.switchMode(ControlType::Velocity);
+    control.setValue(1000.0f);
+
+    TEST_ASSERT_FALSE(control.switchMode(ControlType::Velocity));
+    TEST_ASSERT_EQUAL_FLOAT(1000.0f, control.value());
+}
+
+// 仕様書 §3.5: 緊急停止の解除直後は目標値 0 から始める。モードは変えない。
+static void test_clear_value_keeps_mode() {
+    ControlTarget control;
+    control.switchMode(ControlType::Position);
+    control.setValue(45.0f);
+
+    control.clearValue();
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Position),
+                            static_cast<uint8_t>(control.mode()));
+}
+
+// --------------------------------------------------------------------------
 // §3.3 モード切替時の PID リセット
 // --------------------------------------------------------------------------
 
@@ -454,6 +572,15 @@ int main(int, char **) {
     RUN_TEST(test_status_flags_omit_watchdog_before_first_feed);
     RUN_TEST(test_status_flags_report_watchdog_after_first_feed);
     RUN_TEST(test_command_lost_separates_startup_from_dropout);
+    RUN_TEST(test_watchdog_is_enabled_by_default);
+    RUN_TEST(test_disabled_watchdog_allows_output_and_hides_bit4);
+    RUN_TEST(test_disabled_watchdog_still_honors_e_stop_latch);
+    RUN_TEST(test_watchdog_can_be_re_enabled);
+    RUN_TEST(test_protocol_defaults_match_spec);
+    RUN_TEST(test_control_target_starts_stopped_in_duty);
+    RUN_TEST(test_switch_mode_resets_target_to_zero);
+    RUN_TEST(test_switch_to_same_mode_keeps_target);
+    RUN_TEST(test_clear_value_keeps_mode);
     RUN_TEST(test_pid_proportional_only);
     RUN_TEST(test_pid_no_derivative_kick_on_first_update);
     RUN_TEST(test_pid_reset_clears_integral);

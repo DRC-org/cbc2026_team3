@@ -51,12 +51,3 @@ export const TONE_BORDER_L_CLASS: Record<Tone, string> = {
   info: "border-l-info",
   neutral: "border-l-base-300",
 };
-
-/** 四辺の枠色。 */
-export const TONE_BORDER_CLASS: Record<Tone, string> = {
-  success: "border-success",
-  warning: "border-warning",
-  error: "border-error",
-  info: "border-info",
-  neutral: "border-base-300",
-};

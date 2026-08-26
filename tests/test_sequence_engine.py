@@ -190,3 +190,120 @@ class TestCallback:
         assert callback_args[0]["current_step"] == "ステップ1"
         assert callback_args[1]["current_step"] == "ステップ2"
         assert callback_args[2]["current_step"] == "ステップ3"
+
+
+class TestLifecycle:
+    """開始要求待ち → 実行 → 停止後の巻き戻し、という常駐ループの公開 API。
+
+    このループをサーバー側に写すと「停止後にどこへ戻るか」がシーケンスの外に置かれ、
+    シーケンス単体では正しい状態へ戻れなくなる。
+    """
+
+    async def test_開始要求があるまで一歩も動かない(self):
+        seq = SampleSequence()
+        task = asyncio.create_task(seq.run_forever())
+        await asyncio.sleep(0.05)
+
+        assert seq.executed == []
+        assert seq.is_running is False
+
+        seq.request_start()
+        await asyncio.sleep(0.05)
+
+        assert seq.executed == ["step1"]
+        assert seq.is_running is True
+        task.cancel()
+
+    async def test_通常停止でステップが先頭へ巻き戻る(self):
+        seq = SampleSequence()
+        task = asyncio.create_task(seq.run_forever())
+        seq.request_start()
+        await asyncio.sleep(0.05)
+        assert seq.progress["step_index"] == 1
+
+        seq.request_stop()
+        await asyncio.sleep(0.05)
+
+        assert seq.is_running is False
+        assert seq.progress["step_index"] == 0
+
+        # 巻き戻った状態から再び先頭を実行できる
+        seq.request_start()
+        await asyncio.sleep(0.05)
+        assert seq.executed == ["step1", "step1"]
+        task.cancel()
+
+    async def test_完走後は位置を保持する(self):
+        seq = SampleSequence()
+        task = asyncio.create_task(seq.run_forever())
+        seq.request_start()
+
+        async def auto_trigger():
+            while True:
+                if seq.waiting_trigger:
+                    seq.trigger()
+                await asyncio.sleep(0.01)
+
+        trigger_task = asyncio.create_task(auto_trigger())
+        await asyncio.sleep(0.1)
+        trigger_task.cancel()
+
+        assert seq.executed == ["step1", "step2", "step3"]
+        assert seq.is_running is False
+        assert seq.progress["step_index"] == 3
+        task.cancel()
+
+    async def test_例外が出ても常駐ループは次の開始要求を受け付ける(self, monkeypatch):
+        seq = SampleSequence()
+        calls = {"n": 0}
+
+        async def boom() -> None:
+            calls["n"] += 1
+            raise RuntimeError("シーケンス内部の異常")
+
+        monkeypatch.setattr(seq, "run", boom)
+        task = asyncio.create_task(seq.run_forever())
+
+        seq.request_start()
+        await asyncio.sleep(0.03)
+        seq.request_start()
+        await asyncio.sleep(0.03)
+
+        assert calls["n"] == 2
+        task.cancel()
+
+    async def test_未処理の開始要求を破棄できる(self):
+        seq = SampleSequence()
+        seq.request_start()
+        seq.discard_pending_start()
+
+        task = asyncio.create_task(seq.run_forever())
+        await asyncio.sleep(0.05)
+
+        assert seq.executed == []
+        task.cancel()
+
+    async def test_未処理のジャンプ要求も破棄される(self):
+        seq = SampleSequence()
+        seq.request_jump(2)
+        seq.discard_pending_start()
+
+        task = asyncio.create_task(seq.run_forever())
+        seq.request_start()
+        await asyncio.sleep(0.05)
+
+        # 破棄されていなければ step3 から走り出す
+        assert seq.executed == ["step1"]
+        task.cancel()
+
+    async def test_is_running_は_run_中だけ真(self):
+        seq = SampleSequence()
+        assert seq.is_running is False
+
+        task = asyncio.create_task(seq.run())
+        await asyncio.sleep(0.05)
+        assert seq.is_running is True
+
+        seq.request_stop()
+        await task
+        assert seq.is_running is False

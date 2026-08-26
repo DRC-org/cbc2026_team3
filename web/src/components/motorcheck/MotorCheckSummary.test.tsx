@@ -2,7 +2,8 @@ import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
-import type { MotorCheckRecord, MotorCheckState } from "@/hooks/useRobotSocket";
+import type { MotorCheckRecord } from "@/lib/protocol";
+import type { MotorCheckState } from "@/lib/robotReducer";
 import { EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
 /** 2023-11-15 06:13:20 UTC。UI が使うのは常にエポック**ミリ秒** */

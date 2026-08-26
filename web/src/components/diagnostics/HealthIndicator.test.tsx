@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { HealthIndicator, formatAge } from "@/components/diagnostics/HealthIndicator";
-import type { HealthSnapshot } from "@/hooks/useRobotSocket";
+import type { HealthSnapshot } from "@/lib/protocol";
 
 function snapshot(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
   return {
@@ -55,32 +55,36 @@ describe("formatAge", () => {
   });
 });
 
+/**
+ * 表示は 1 通りだけ。以前は pill / card / compact / bus-only の 4 variant を持ち、
+ * 本番から呼ばれるのは bus-only だけで、残る 3 つはテストからしか到達しなかった。
+ * 「使われていないのに緑のまま残るコード」は、読む人に選択肢があると誤解させる。
+ */
 describe("HealthIndicator", () => {
   it("ヘルス未取得ならプレースホルダを出す", () => {
-    render(<HealthIndicator health={undefined} variant="card" />);
-    expect(screen.getByText("ヘルス情報未取得")).toBeInTheDocument();
+    render(<HealthIndicator health={undefined} />);
+    expect(screen.getByText("CAN")).toBeInTheDocument();
+    expect(screen.getByText(/未取得/)).toBeInTheDocument();
   });
 
   it("overall=ok を成功表示にする", () => {
-    render(<HealthIndicator health={snapshot()} variant="pill" />);
-    expect(screen.getByText(/OK/)).toBeInTheDocument();
+    render(<HealthIndicator health={snapshot()} />);
+    expect(screen.getAllByText(/OK/).length).toBeGreaterThan(0);
   });
 
   it("overall=degraded / down を異常として表示する", () => {
-    const { unmount } = render(
-      <HealthIndicator health={snapshot({ overall: "degraded" })} variant="pill" />,
-    );
-    expect(screen.getByText(/DEGRADED/)).toBeInTheDocument();
+    const { unmount } = render(<HealthIndicator health={snapshot({ overall: "degraded" })} />);
+    expect(screen.getAllByText(/DEGRADED/).length).toBeGreaterThan(0);
     unmount();
 
-    render(<HealthIndicator health={snapshot({ overall: "down" })} variant="pill" />);
-    expect(screen.getByText(/DOWN/)).toBeInTheDocument();
+    render(<HealthIndicator health={snapshot({ overall: "down" })} />);
+    expect(screen.getAllByText(/DOWN/).length).toBeGreaterThan(0);
   });
 
   it("バス名とチャネル名を並べて表示する", () => {
     const health = snapshot();
     health.buses[0] = { ...health.buses[0], name: "m3508", channel: "can0" };
-    render(<HealthIndicator health={health} variant="bus-only" />);
+    render(<HealthIndicator health={health} />);
 
     expect(screen.getByText("m3508")).toBeInTheDocument();
     expect(screen.getByText("can0")).toBeInTheDocument();

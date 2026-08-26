@@ -5,8 +5,8 @@ import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import type { HealthSnapshot, MotorState, SafetyState } from "@/hooks/useRobotSocket";
 import { describeSafetyIssues, evaluateHealth } from "@/lib/healthVerdict";
+import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
   health: HealthSnapshot | undefined;
@@ -96,7 +96,7 @@ export function SubsystemStatus({
       {open ? (
         <div className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
           <SafetyIssues safety={safety} />
-          <HealthIndicator variant="bus-only" health={health} />
+          <HealthIndicator health={health} />
           <MotorSummary motors={motors} healthMotors={health?.motors} />
         </div>
       ) : null}

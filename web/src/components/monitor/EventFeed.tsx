@@ -1,6 +1,6 @@
-import { useRobot } from "@/context/RobotContext";
-import type { HealthChangeLevel } from "@/hooks/useRobotSocket";
+import { useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
+import type { HealthChangeLevel } from "@/lib/protocol";
 import { formatClock } from "@/lib/time";
 import type { Tone } from "@/lib/tone";
 import { TONE_STATUS_CLASS } from "@/lib/tone";
@@ -19,7 +19,7 @@ const LEVEL_TONE: Record<HealthChangeLevel, Tone> = {
  * 数秒の間に起きた事象は痕跡ごと消えていた。試合中の画面に残す。
  */
 export function EventFeed() {
-  const { healthEvents } = useRobot();
+  const { healthEvents } = useRobotStatus();
 
   if (healthEvents.length === 0) {
     return (

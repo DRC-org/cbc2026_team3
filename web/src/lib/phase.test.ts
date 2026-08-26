@@ -1,35 +1,47 @@
 import { describe, expect, it } from "vitest";
 
-import type { MatchPhase } from "@/hooks/useRobotSocket";
 import {
   COURT_LABEL,
   PHASE_BAND_CLASS,
   PHASE_LABEL,
   PHASE_TONE,
-  isMatchPhase,
+  isDuringMatch,
   isSetupPhase,
 } from "@/lib/phase";
+import type { MatchPhase } from "@/lib/protocol";
 
 const ALL_PHASES: MatchPhase[] = ["setup", "ready", "match", "finished"];
 
-describe("isSetupPhase / isMatchPhase", () => {
+describe("isSetupPhase", () => {
   it("setup と ready を準備フェーズとして扱う", () => {
     expect(isSetupPhase("setup")).toBe(true);
     expect(isSetupPhase("ready")).toBe(true);
     expect(isSetupPhase("match")).toBe(false);
     expect(isSetupPhase("finished")).toBe(false);
   });
+});
 
-  it("match と finished を試合フェーズとして扱う", () => {
-    expect(isMatchPhase("match")).toBe(true);
-    expect(isMatchPhase("finished")).toBe(true);
-    expect(isMatchPhase("setup")).toBe(false);
-    expect(isMatchPhase("ready")).toBe(false);
+/**
+ * サーバーのフェーズゲート (`lib/match_state.py`) の写し。
+ * PHASES_DURING_MATCH = {match}、PHASES_OUTSIDE_MATCH はその補集合なので、
+ * この 1 つの判定で両方に答えられる。
+ */
+describe("isDuringMatch", () => {
+  it("match だけを試合中とする", () => {
+    expect(isDuringMatch("match")).toBe(true);
+    expect(isDuringMatch("setup")).toBe(false);
+    expect(isDuringMatch("ready")).toBe(false);
   });
 
-  it("どのフェーズも準備・試合のどちらか一方に必ず分類される", () => {
+  it("finished は試合中ではない (PID 変更も動作確認もサーバーは通す)", () => {
+    // 画面レイアウトの都合で match と finished をまとめて扱いたくなるが、
+    // コマンドの可否は別物。ここを混ぜると試合終了後に操作を塞いでしまう
+    expect(isDuringMatch("finished")).toBe(false);
+  });
+
+  it("準備フェーズと試合中が同時に成立することはない", () => {
     for (const phase of ALL_PHASES) {
-      expect(isSetupPhase(phase) !== isMatchPhase(phase)).toBe(true);
+      expect(isSetupPhase(phase) && isDuringMatch(phase)).toBe(false);
     }
   });
 });

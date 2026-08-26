@@ -224,12 +224,11 @@ class RobotServer:
 
     async def _on_startup(self, app: web.Application) -> None:
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
-        # 各ロボットのシーケンス実行ループを起動。停止/ジャンプで再起動可能な
+        # 各ロボットのシーケンス常駐ループを起動。停止/ジャンプで再起動可能な
         # 永続タスクとして保持し、shutdown でキャンセルする。
-        for robot_name in self._robots:
-            self._sequence_tasks[robot_name] = asyncio.create_task(
-                self._run_sequence_loop(robot_name)
-            )
+        # ループ本体 (開始要求待ち・停止後の巻き戻し) はシーケンス側の責務。
+        for robot_name, ctx in self._robots.items():
+            self._sequence_tasks[robot_name] = asyncio.create_task(ctx.sequence.run_forever())
 
     async def _on_shutdown(self, app: web.Application) -> None:
         if self._broadcast_task is not None:
@@ -248,31 +247,19 @@ class RobotServer:
             task.cancel()
         self._closing_tasks.clear()
 
-        for ws in set(self._ws_clients):
-            await ws.close()
-        self._ws_clients.clear()
+        await self._close_all_clients()
 
-    async def _run_sequence_loop(self, robot_name: str) -> None:
-        """シーケンスを永続的に走らせる。停止/完走後は resume 要求を待つ。
+    async def _close_all_clients(self) -> None:
+        """接続中のクライアントを全て閉じる (終了処理の共通経路)。
 
-        起動時は resume を立てない。操縦者の明示的な開始合図 (sequence_start) が
-        あるまでロボットを動かしてはならない。
+        `close()` は相手のクローズ応答を待つため、スリープしたノート PC が 1 台
+        繋がっているだけで終了処理が返らなくなり、CAN を落とす後始末まで到達しない。
+        送信と同じ上限を通し、複数台をまとめて待つことで最悪でも上限 1 回ぶんで抜ける。
         """
-        seq = self._robots[robot_name].sequence
-        while True:
-            await seq._resume_event.wait()
-            seq._resume_event.clear()
-            try:
-                await seq.run()
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("シーケンス実行中にエラー: %s", robot_name)
-            # 通常停止された場合はステップを 0 に戻して次の起動を待つ。
-            # 完走 (current_index == total) はそのまま位置を保持する。
-            if seq._stop_event.is_set():
-                seq._current_index = 0
-                seq._stop_event.clear()
+        clients = set(self._ws_clients)
+        self._ws_clients.clear()
+        if clients:
+            await asyncio.gather(*(self._close_quietly(ws) for ws in clients))
 
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
@@ -526,7 +513,7 @@ class RobotServer:
         「存在しない」と「存在するが PC 側 PID を持たない」を操縦者に区別させるために要る
         (前者は打ち間違い、後者は仕様)。
         """
-        return any(motor_name in ctx.can_manager._motors for ctx in self._robots.values())
+        return any(motor_name in ctx.can_manager.motors for ctx in self._robots.values())
 
     # ------------------------------------------------------------------ #
     #  試合状態 (コート / フェーズ / チェックリスト)
@@ -607,7 +594,7 @@ class RobotServer:
                         name,
                         loop.bus_name,
                     )
-            for motor_name, motor in ctx.can_manager._motors.items():
+            for motor_name, motor in ctx.can_manager.motors.items():
                 driver_stop = motor.emergency_stop_message()
                 if driver_stop is None:
                     continue
@@ -619,7 +606,7 @@ class RobotServer:
                         name,
                         motor_name,
                     )
-            for bus_name in ctx.can_manager._buses:
+            for bus_name in ctx.can_manager.bus_names:
                 try:
                     await ctx.can_manager.send_to_bus(bus_name, e_stop_msg)
                 except Exception:
@@ -718,9 +705,8 @@ class RobotServer:
         """
         for ctx in self._robots.values():
             if discard_pending_start:
-                ctx.sequence._resume_event.clear()
-                ctx.sequence._jump_request = None
-            if ctx.sequence._running:
+                ctx.sequence.discard_pending_start()
+            if ctx.sequence.is_running:
                 ctx.sequence.request_stop()
 
     async def _broadcast_match_state(self) -> None:
@@ -754,12 +740,7 @@ class RobotServer:
         if reason is not None:
             # 未知フィールドは既存 UI が無視するため、理由が無いときは付けない
             payload["reason"] = reason
-        msg = json.dumps(payload, ensure_ascii=False)
-        dead: set[web.WebSocketResponse] = set()
-        for ws in self._ws_clients:
-            if ws.closed or not await self._send_or_drop(ws, msg):
-                dead.add(ws)
-        await self._drop_clients(dead)
+        await self._broadcast_json(payload)
 
     async def _send_or_drop(self, ws: web.WebSocketResponse, msg: str) -> bool:
         """1 クライアントへ送信する。詰まった相手は生存とみなさず切り離す。
@@ -801,16 +782,38 @@ class RobotServer:
             task.add_done_callback(self._closing_tasks.discard)
 
     async def _broadcast_json(self, payload: dict) -> None:
-        """単一の JSON dict を全クライアントへ送信する共通ヘルパ。
+        """1 メッセージを全クライアントへ配信する。"""
+        await self._fanout([payload])
 
-        既存 _broadcast_state / _broadcast_e_stop_state はそのまま残し、
-        本メソッドは動作確認イベント (motor_check_*) 専用に使う。
+    async def _fanout(self, payloads: list[dict]) -> None:
+        """全クライアントへの配信経路はここ 1 本だけ。
+
+        配信は全クライアントへ直列に行うため、1 台でも詰まると他の全員 —
+        Monitor を含む — のテレメトリが止まる。それを防ぐ約束事 (送信ごとに
+        `_send_or_drop` の上限を通す・切り離しの `close()` は別タスクへ逃がす) は
+        経路が分かれているぶんだけ守り続ける必要があり、増えた経路で 1 つ抜けた
+        だけで同じ事故に戻る。経路を 1 本にして、約束事もここだけで守る。
+
+        シリアライズはクライアント数によらず 1 回。20Hz の配信で全員ぶん
+        JSON を作り直すのは無駄でしかない。
+
+        送信はクライアント単位でまとめ、途中で失敗した相手には残りを送らない
+        (送れないと分かった相手に投げ続けるぶん、他の配信が遅れる)。
         """
-        msg = json.dumps(payload, ensure_ascii=False)
+        if not payloads:
+            return
+        messages = [json.dumps(payload, ensure_ascii=False) for payload in payloads]
+
         dead: set[web.WebSocketResponse] = set()
         for ws in self._ws_clients:
-            if ws.closed or not await self._send_or_drop(ws, msg):
+            if ws.closed:
                 dead.add(ws)
+                continue
+            for msg in messages:
+                if not await self._send_or_drop(ws, msg):
+                    dead.add(ws)
+                    break
+
         await self._drop_clients(dead)
 
     # ------------------------------------------------------------------ #
@@ -844,7 +847,7 @@ class RobotServer:
             return False
 
         ctx = self._robots[robot_name]
-        if ctx.sequence._running:
+        if ctx.sequence.is_running:
             await self._broadcast_motor_check_error(
                 robot_name, "通常シーケンス実行中のため動作確認を実行できません"
             )
@@ -855,9 +858,9 @@ class RobotServer:
             await self._broadcast_motor_check_error(robot_name, "既に動作確認を実行中です")
             return False
 
-        # MotorCheckRunner にはロボットに登録された全モータを渡す。順序は dict 挿入順
-        # = config の宣言順を保つため OrderedDict 的な扱いは Python 3.7+ で保証されている。
-        motors = ctx.can_manager._motors
+        # MotorCheckRunner にはロボットに登録された全モータを渡す。順序は登録順
+        # = config の宣言順で、指差喚呼の読み上げ順がこれに従う。
+        motors = dict(ctx.can_manager.motors)
         runner = MotorCheckRunner(
             robot_name=robot_name,
             can_manager=ctx.can_manager,
@@ -1112,28 +1115,16 @@ class RobotServer:
             return
 
         # 2) state メッセージ (health 同梱) を生成
-        state_messages: list[str] = []
-        change_events: list[str] = []
+        state_messages: list[dict] = []
+        change_events: list[dict] = []
         for robot_name, snap in snapshots.items():
-            state = self._build_state_message(robot_name, snapshot=snap)
-            state_messages.append(json.dumps(state, ensure_ascii=False))
+            state_messages.append(self._build_state_message(robot_name, snapshot=snap))
 
             # 3) health_change イベントを差分から生成
             prev = self._last_health.get(robot_name)
-            for ev in self._diff_health(robot_name, prev, snap):
-                change_events.append(json.dumps(ev, ensure_ascii=False))
+            change_events.extend(self._diff_health(robot_name, prev, snap))
 
-        dead: set[web.WebSocketResponse] = set()
-        for ws in self._ws_clients:
-            if ws.closed:
-                dead.add(ws)
-                continue
-            for msg_text in (*state_messages, *change_events):
-                if not await self._send_or_drop(ws, msg_text):
-                    dead.add(ws)
-                    break
-
-        await self._drop_clients(dead)
+        await self._fanout([*state_messages, *change_events])
 
         # 4) 差分検出後にスナップショットを更新する。順序を逆にすると
         #    1 回目の broadcast で health_change が出てしまう。
@@ -1152,7 +1143,7 @@ class RobotServer:
         progress = ctx.sequence.progress
 
         motors: dict[str, dict] = {}
-        for motor_name, motor in ctx.can_manager._motors.items():
+        for motor_name, motor in ctx.can_manager.motors.items():
             if self._dry_run:
                 # dry-run: 実機フィードバックがないので、UI デモ向けに擬似値を生成
                 motors[motor_name] = self._dry_run_motor_state(robot_name, motor_name)
@@ -1237,6 +1228,4 @@ class RobotServer:
             await runner.cleanup()
 
     async def cleanup(self) -> None:
-        for ws in set(self._ws_clients):
-            await ws.close()
-        self._ws_clients.clear()
+        await self._close_all_clients()

@@ -5,7 +5,7 @@ import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
@@ -16,7 +16,8 @@ import { ROBOTS } from "@/lib/robots";
  * - 試合中 / 試合終了: 問いは 1 つ「どちらの機体が止まっていて、何か起きていないか」
  */
 export function Dashboard() {
-  const { states, matchState } = useRobot();
+  const states = useRobotStates();
+  const { matchState } = useRobotStatus();
   const { confirmModal, requestConfirm } = useMatchConfirm();
 
   if (isSetupPhase(matchState.phase)) {

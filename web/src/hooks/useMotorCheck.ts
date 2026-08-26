@@ -1,8 +1,8 @@
 import { useCallback, useMemo } from "react";
 
-import { useRobot } from "@/context/RobotContext";
-import type { MotorCheckState } from "@/hooks/useRobotSocket";
-import { emptyMotorCheckState } from "@/hooks/useRobotSocket";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
+import type { MotorCheckState } from "@/lib/robotReducer";
+import { emptyMotorCheckState } from "@/lib/robotReducer";
 
 interface UseMotorCheckReturn {
   state: MotorCheckState;
@@ -16,7 +16,8 @@ const EMPTY_STATE: MotorCheckState = emptyMotorCheckState();
 // useRobotSocket が集約した motor_check_* の state を取り出し、
 // start/abort のコマンド送信を束ねるだけのプレゼンテーション層 hook
 export function useMotorCheck(robot: string): UseMotorCheckReturn {
-  const { motorChecks, send } = useRobot();
+  const { motorChecks } = useRobotStatus();
+  const { send } = useRobotCommands();
   const state = motorChecks[robot] ?? EMPTY_STATE;
 
   const start = useCallback(() => {

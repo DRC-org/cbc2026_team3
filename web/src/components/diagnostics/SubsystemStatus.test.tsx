@@ -2,7 +2,7 @@ import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
-import type { HealthSnapshot, MotorState, SafetyState } from "@/hooks/useRobotSocket";
+import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 import { renderWithRobot } from "@/test/robotContext";
 
 const HEALTH: HealthSnapshot = {

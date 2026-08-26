@@ -63,6 +63,18 @@ constexpr uint8_t kFrameLength = 8;
 constexpr uint8_t kEStopClearMagic1 = 0x5A;
 constexpr uint8_t kEStopClearMagic2 = 0xA5;
 
+// 仕様書 §3.4 の既定値のうち、PC 側との契約になっているもの。
+//
+// command_timeout_ms は PC 側の目標値再送周期（この値の数分の 1）の根拠であり、
+// feedback_interval_ms は PC 側の STALE 判定が前提にしている送信周期。どちらも
+// 基板ごとに変えてよい値ではないので、基板の config.h ではなくここが単一定義を持つ。
+// 同じ数字を両 config.h に書くと、仕様が動いたとき片方だけが古くなる。
+//
+// 一方 max_duty / overcurrent / kp・ki・kd / reached_tolerance は仕様書に既定値が
+// 載っていてもアクチュエータ単位のチューニング値なので、各 config.h が持つ。
+constexpr uint32_t kDefaultCommandTimeoutMs = 500;
+constexpr uint32_t kDefaultFeedbackIntervalMs = 10;  // 100Hz
+
 // ---------------------------------------------------------------------------
 // CAN ID
 // ---------------------------------------------------------------------------

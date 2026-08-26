@@ -72,23 +72,7 @@ class MotorHandle:
     def has_target(self) -> bool:
         return self._target is not None and self._mode is not None
 
-    def set_target_sink(self, sink: TargetSink | None) -> None:
-        """目標値の送り先を差し替える (PC 側 PID ループの後付け用)。"""
-        self._target_sink = sink
-
     # ---- 指令系 ----
-
-    async def set_position(self, value: float) -> None:
-        await self.set_target(ControlMode.POSITION, value)
-
-    async def set_velocity(self, value: float) -> None:
-        await self.set_target(ControlMode.VELOCITY, value)
-
-    async def set_current(self, value: float) -> None:
-        await self.set_target(ControlMode.CURRENT, value)
-
-    async def set_duty(self, value: float) -> None:
-        await self.set_target(ControlMode.DUTY, value)
 
     async def set_target(self, mode: ControlMode, value: float) -> None:
         """目標値を送信する。緊急停止中は送信せず EStopActiveError を送出する。"""
@@ -181,9 +165,6 @@ class MotorGroup:
     def handles(self) -> tuple[MotorHandle, ...]:
         return tuple(self._handles.values())
 
-    def items(self) -> list[tuple[str, MotorHandle]]:
-        return list(self._handles.items())
-
     def __getitem__(self, name: str) -> MotorHandle:
         return self._handles[name]
 
@@ -221,10 +202,6 @@ class MotorGroup:
             *(handle.wait_reached(tolerance=tolerance, timeout=timeout) for handle in pending)
         )
         return all(results)
-
-    def clear_targets(self) -> None:
-        for handle in self._handles.values():
-            handle.clear_target()
 
 
 class AxisHandle:

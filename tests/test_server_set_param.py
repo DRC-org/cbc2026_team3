@@ -41,10 +41,14 @@ def _make_mock_can_manager(motor_names: list[str]) -> CANManager:
         motor.state = MotorState(position=0.0, velocity=0.0, current=0.0, temperature=30.0)
         motor.name = name
         motors[name] = motor
+    # 実物では motors は _motors の読み取り専用ビュー。fake_health が _motors を
+    # 見るため、モックでは両方を同じ dict に揃える
     mgr._motors = motors
+    mgr.motors = motors
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
     mgr._buses = {M3508_BUS: MagicMock()}
+    mgr.bus_names = tuple(mgr._buses)
     mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
     return mgr
 

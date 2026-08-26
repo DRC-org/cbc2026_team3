@@ -36,10 +36,10 @@ class AxisSpec:
     異なるため、換算はここに一元化してシーケンス本体には持ち込まない。
 
     1 つの論理軸が複数モータで駆動される場合 (左右直結のラックアンドピニオン等) は
-    ``motors`` に複数を並べる。この場合 ``scale`` / ``offset`` / ``to_command`` /
-    ``command_tolerance`` は先頭モータの値しか見ないため使用を禁止する
-    (``_require_single_motor``)。逆回転ペアで先頭の scale を左右へ当てると、
-    左のモータが右向きに全ストローク動いて機構を壊す。
+    ``motors`` に複数を並べる。換算はモータごとに行う API しか公開しない
+    (``to_commands`` / ``MotorSpec.to_tolerance``)。「軸 = モータ 1 台」を前提に
+    先頭モータの値だけを返す API を置くと、逆回転ペアで左のモータに右の scale が
+    当たり、左が右向きに全ストローク動いて機構を壊す。
     """
 
     name: str
@@ -59,47 +59,12 @@ class AxisSpec:
         if not self.motors:
             raise ValueError(f"axes.{self.name} にモータがありません")
 
-    def _require_single_motor(self, api: str) -> MotorSpec:
-        """先頭モータだけを見る API をペア軸で使わせない。
-
-        呼び出し側が「軸 = モータ 1 台」を前提にしている印なので、複数モータ軸で
-        通してしまうと右の scale が左のモータへ当たったまま無言で動く。
-        ペア軸には ``to_commands`` / ``MotorSpec.to_tolerance`` を使うこと。
-        """
-        if self.is_paired:
-            raise ValueError(
-                f"軸 '{self.name}' は {len(self.motors)} 台のモータで駆動されるため "
-                f"{api} は使えません (モータごとに換算する API を使ってください)"
-            )
-        return self.motors[0]
-
-    @property
-    def scale(self) -> float:
-        return self._require_single_motor("scale").scale
-
-    @property
-    def offset(self) -> float:
-        return self._require_single_motor("offset").offset
-
     @property
     def motor_names(self) -> tuple[str, ...]:
         return tuple(motor.name for motor in self.motors)
 
-    @property
-    def is_paired(self) -> bool:
-        return len(self.motors) > 1
-
-    def to_command(self, value: float) -> float:
-        return self._require_single_motor("to_command").to_command(value)
-
     def to_commands(self, value: float) -> dict[str, float]:
         return {motor.name: motor.to_command(value) for motor in self.motors}
-
-    @property
-    def command_tolerance(self) -> float | None:
-        if self.tolerance is None:
-            return None
-        return self._require_single_motor("command_tolerance").to_tolerance(self.tolerance)
 
     @property
     def sync_group(self) -> SyncGroup | None:
@@ -138,7 +103,13 @@ _COMMAND_MODES = {
 
 
 class PositionTable:
-    """機構位置の定数表。軸ごとの単位換算とコート差異を吸収する。"""
+    """機構位置の定数表。軸ごとの単位換算とコート差異を吸収する。
+
+    公開するのは「軸を引く」(``axis``) と「位置名を指令値へ換算する」(``commands``)
+    の 2 つに絞る。待ち条件や指令モードは ``axis(name)`` が返す ``AxisSpec`` から
+    直接読むこと。同じ値を読む道を 2 本置くと、どちらが正しいのかを毎回確かめる
+    ことになる。
+    """
 
     def __init__(
         self,
@@ -162,10 +133,6 @@ class PositionTable:
         return self._source
 
     @property
-    def is_empty(self) -> bool:
-        return not self._axes
-
-    @property
     def axes(self) -> tuple[str, ...]:
         return tuple(self._axes)
 
@@ -181,25 +148,8 @@ class PositionTable:
             )
         return spec
 
-    def timeout(self, axis: str) -> float:
-        return self.axis(axis).timeout_s
-
-    def tolerance(self, axis: str) -> float | None:
-        """単一モータ軸の到達許容差 (指令単位)。ペア軸では ValueError。
-
-        ペア軸の許容差はモータごとに換算しなければならない (左右で scale の絶対値が
-        違う機構がある)。実際の到達待ちは ``AxisHandle`` がモータ単位で換算する。
-        """
-        return self.axis(axis).command_tolerance
-
     def sync_tolerance(self, axis: str) -> float | None:
         return self.axis(axis).sync_tolerance
-
-    def command_mode(self, axis: str) -> ControlMode:
-        return self.axis(axis).command_mode
-
-    def settle_s(self, axis: str) -> float:
-        return self.axis(axis).settle_s
 
     def paired_axes(self) -> tuple[str, ...]:
         """同期監視の対象となる軸 (sync_tolerance を持つ軸)。"""
@@ -225,10 +175,6 @@ class PositionTable:
                 )
             return float(value[str(court)])
         return float(value)
-
-    def command(self, axis: str, name: str, *, court: Court | None = None) -> float:
-        """単一モータ軸の指令値を返す。ペア軸では ValueError (``commands`` を使うこと)。"""
-        return self.axis(axis).to_command(self.raw(axis, name, court=court))
 
     def commands(self, axis: str, name: str, *, court: Court | None = None) -> dict[str, float]:
         """モータ名 → 指令値。逆回転ペアではモータごとに異なる scale が効く。"""

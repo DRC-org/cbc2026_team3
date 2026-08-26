@@ -115,7 +115,11 @@ def _make_can_manager() -> CANManager:
             "gripper", MotorState(position=5.0, velocity=0.0, current=0.0, temperature=30.0)
         ),
     }
+    # 実物では motors は _motors の読み取り専用ビュー。fake_health が _motors を
+    # 見るため、モックでは両方を同じ dict に揃える
+    mgr.motors = mgr._motors
     mgr._buses = {_M3508_BUS: MagicMock()}
+    mgr.bus_names = tuple(mgr._buses)
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
     mgr.last_feedback_at.return_value = None

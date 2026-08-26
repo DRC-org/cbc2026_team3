@@ -5,8 +5,8 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
+import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 

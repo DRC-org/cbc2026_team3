@@ -1,7 +1,7 @@
 import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import type { MotorHealth, MotorState } from "@/hooks/useRobotSocket";
 import { countHotMotors } from "@/lib/healthVerdict";
+import type { MotorHealth, MotorState } from "@/lib/protocol";
 
 interface MotorSummaryProps {
   motors: Record<string, MotorState>;

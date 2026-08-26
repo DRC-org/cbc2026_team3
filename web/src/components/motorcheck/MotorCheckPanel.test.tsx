@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
-import type { MotorCheckRecord, MotorCheckState } from "@/hooks/useRobotSocket";
+import type { MotorCheckRecord } from "@/lib/protocol";
+import type { MotorCheckState } from "@/lib/robotReducer";
 import { EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
 function record(over: Partial<MotorCheckRecord> = {}): MotorCheckRecord {

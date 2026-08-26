@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import time
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -75,16 +77,17 @@ class _MockMotor(MotorDriver):
 
 
 class _MockCANManager:
-    """CANManager の MotorCheckRunner から触られる API のみ実装したスタブ。
+    """CANManager の MotorCheckRunner から触られる公開 API のみ実装したスタブ。
 
-    `_last_rx_at` を直接書き換えることでフィードバック受信を瞬時に模擬する。
-    `send` 後に自動でフィードバック更新するフックを切り替えできるようにする。
+    private 属性を持たせないことで「本物の CANManager でも公開 API だけで足りる」ことを
+    このスタブの形そのもので担保する。private を握った途端にここが動かなくなる。
+    受信時刻は set_rx_at で直接進め、フィードバック受信を実時間待ちなしに模擬する。
     """
 
     def __init__(self, motors: dict[str, MotorDriver]) -> None:
         self._motors = motors
-        self._motor_bus = {name: "test_bus" for name in motors}
-        self._last_rx_at: dict[str, float] = {}
+        self._bus_of = {name: "test_bus" for name in motors}
+        self._rx_at: dict[str, float] = {}
         # send が成功するたびに呼ばれるフック (フィードバック模擬)
         self._post_send_hook: Any = None
         self._send_failures: dict[str, Exception] = {}
@@ -94,6 +97,12 @@ class _MockCANManager:
     def get_motor(self, name: str) -> MotorDriver:
         return self._motors[name]
 
+    def bus_of(self, motor_name: str) -> str | None:
+        return self._bus_of.get(motor_name)
+
+    def last_feedback_at(self, motor_name: str) -> float | None:
+        return self._rx_at.get(motor_name)
+
     def set_post_send_hook(self, hook) -> None:
         self._post_send_hook = hook
 
@@ -101,7 +110,7 @@ class _MockCANManager:
         self._send_failures[motor_name] = exc
 
     def set_rx_at(self, motor_name: str, ts: float) -> None:
-        self._last_rx_at[motor_name] = ts
+        self._rx_at[motor_name] = ts
 
     async def send(self, motor_name: str, msg: can.Message) -> None:
         self.sent.append((motor_name, msg))
@@ -126,6 +135,25 @@ class TestMotorCheckRunnerBasics:
             "edulite05": 5.0,
             "generic": 0.1,
         }
+
+    def test_motors_accepts_read_only_mapping(self) -> None:
+        """サーバーは CANManager.motors (読み取り専用ビュー) をそのまま渡せる必要がある。
+
+        dict を要求すると呼び出し側ごとに防御的コピーを書かせることになり、
+        「モータ一覧をどう取り出すか」が再び呼び出し側に散る。
+        """
+        annotation = inspect.signature(MotorCheckRunner.__init__).parameters["motors"].annotation
+        assert annotation == "Mapping[str, MotorDriver]"
+
+        motors = {"m1": _MockMotor("m1")}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            MappingProxyType(motors),
+            default_magnitude={"_MockMotor": 1.0},
+        )
+        assert runner.snapshot.robot == "main_hand"
 
     def test_initial_snapshot_state(self) -> None:
         motors = {"m1": _MockMotor("m1")}
@@ -365,7 +393,7 @@ class TestMotorCheckRunnerHappyPath:
 
 class TestMotorCheckRunnerTimeout:
     async def test_no_feedback_results_in_timeout(self) -> None:
-        # post_send_hook を設定しない → _last_rx_at が更新されない → タイムアウト
+        # post_send_hook を設定しない → 受信時刻が更新されない → タイムアウト
         motors = {"m1": _MockMotor("m1")}
         manager = _MockCANManager(motors)
         # テスト時間を短く保つため per_motor_timeout_ms を 50ms に縮める

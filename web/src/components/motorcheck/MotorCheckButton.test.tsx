@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
-import type { MatchPhase, MotorCheckState } from "@/hooks/useRobotSocket";
+import type { MatchPhase } from "@/lib/protocol";
+import type { MotorCheckState } from "@/lib/robotReducer";
 import { DEFAULT_MATCH_STATE, EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
 function mount(

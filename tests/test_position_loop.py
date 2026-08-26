@@ -869,3 +869,33 @@ class TestGroupOrigin:
         fx = _Fixture()
         with pytest.raises(KeyError):
             fx.loop.set_group_origin_here("y_axis")
+
+    async def test_set_origin_here_on_paired_motor_zeroes_whole_group(self) -> None:
+        """ペアの片側だけ原点確定すると、正常動作でも即座に偏差超過で止まる。
+
+        原点が左右で別々の瞬間に決まると、その差がそのまま消えないオフセットになる。
+        1 台ぶんの API から入っても機構の単位 (グループ) で確定させる。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+        fx.feed("lift", 12.0)
+        fx.feed("tilt", -12.0)
+        await fx.tick()
+
+        fx.loop.set_origin_here("lift")
+
+        assert fx.lift.multi_turn_position == pytest.approx(0.0)
+        assert fx.tilt.multi_turn_position == pytest.approx(0.0)
+        assert fx.loop.target("tilt") is None
+
+    async def test_set_origin_here_on_solo_motor_touches_only_itself(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        await fx.loop.set_target("tilt", ControlMode.POSITION, 10.0)
+        fx.feed("lift", 12.0)
+
+        fx.loop.set_origin_here("lift")
+
+        assert fx.loop.target("lift") is None
+        assert fx.loop.target("tilt") == pytest.approx(10.0)

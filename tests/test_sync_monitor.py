@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 
 import pytest
 
@@ -206,6 +207,43 @@ class TestCallbackRobustness:
         assert fx.monitor.violated == frozenset({"y_axis", "rotate"})
 
 
+class TestSamplingPeriod:
+    async def test_processing_time_does_not_inflate_period(self) -> None:
+        """「50Hz x 2 サンプル = 40ms なら機構破損に間に合う」という前提を実測で固定する。
+
+        後置 sleep だと実周期が ``interval + 判定時間`` になり、この前提が負荷に
+        比例して崩れる (lib/axis_sync.py のモジュール docstring が置いている前提)。
+        """
+        clock = _FakeClock(start=0.0)
+        sampled: list[float] = []
+
+        async def _sleep(delay: float) -> None:
+            clock.advance(delay)
+
+        class _SlowMonitor(SyncMonitor):
+            def step(self) -> None:
+                sampled.append(clock.now)
+                # 1 回の判定に 8ms かかる状況 (CAN 受信と競合して重い周期)
+                clock.advance(0.008)
+                if len(sampled) >= 3:
+                    self.request_stop()
+                super().step()
+
+        monitor = _SlowMonitor(
+            (_pair_group(),),
+            {},
+            last_feedback_at=lambda _name: None,
+            interval_s=0.02,
+            time_source=clock,
+            sleep=_sleep,
+        )
+
+        await monitor.run()
+
+        periods = [b - a for a, b in itertools.pairwise(sampled)]
+        assert periods == pytest.approx([0.02, 0.02])
+
+
 class TestLifecycle:
     async def test_start_and_stop_leaves_no_task(self) -> None:
         fx = _Fixture(violation_samples=1)
@@ -221,13 +259,20 @@ class TestLifecycle:
         assert fx.monitor.is_running is False
         assert len(fx.violations) == 1
 
-    async def test_double_start_does_not_spawn_second_task(self) -> None:
+    async def test_double_start_raises_and_spawns_no_second_task(self) -> None:
+        """3 つの周期タスクで揃えた作法 (lib/control/periodic.py)。
+
+        黙って無視すると「起動したつもり」のまま止まっている監視に気付けない。
+        """
         fx = _Fixture()
         before = len(asyncio.all_tasks())
         fx.monitor.start()
-        fx.monitor.start()
-        assert len(asyncio.all_tasks()) == before + 1
-        await fx.monitor.stop()
+        try:
+            with pytest.raises(RuntimeError):
+                fx.monitor.start()
+            assert len(asyncio.all_tasks()) == before + 1
+        finally:
+            await fx.monitor.stop()
 
     async def test_stop_without_start_is_noop(self) -> None:
         fx = _Fixture()

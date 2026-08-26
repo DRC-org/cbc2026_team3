@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { Checklist } from "@/components/operator/Checklist";
-import type { ChecklistState, MatchPhase } from "@/hooks/useRobotSocket";
+import type { ChecklistState, MatchPhase } from "@/lib/protocol";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
 const ITEMS: ChecklistState = {

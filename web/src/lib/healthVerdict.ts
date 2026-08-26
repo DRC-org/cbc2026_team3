@@ -1,4 +1,4 @@
-import type { HealthSnapshot, MotorState, SafetyState } from "@/hooks/useRobotSocket";
+import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
 import type { Tone } from "@/lib/tone";
 

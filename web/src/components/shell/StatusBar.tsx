@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { Kbd } from "@/components/ui/Kbd";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { TONE_STATUS_CLASS } from "@/lib/tone";
 
@@ -30,7 +30,8 @@ function Clock() {
 }
 
 export function StatusBar() {
-  const { connected, wsUrl, openWsSettings } = useRobot();
+  const { connected, wsUrl } = useRobotStatus();
+  const { openWsSettings } = useRobotCommands();
 
   return (
     <div className="flex shrink-0 items-center gap-4 border-t border-base-300 bg-base-100 px-2 py-[0.1rem] text-[0.82em] text-base-content/70">

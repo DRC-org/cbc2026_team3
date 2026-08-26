@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  BusHealth,
-  HealthSnapshot,
-  MotorHealth,
-  MotorState,
-  SafetyState,
-} from "@/hooks/useRobotSocket";
 import {
   countHotMotors,
   describeSafetyIssues,
   evaluateHealth,
   motorTempTone,
 } from "@/lib/healthVerdict";
+import type {
+  BusHealth,
+  HealthSnapshot,
+  MotorHealth,
+  MotorState,
+  SafetyState,
+} from "@/lib/protocol";
 import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
 
 function bus(over: Partial<BusHealth> = {}): BusHealth {

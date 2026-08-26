@@ -2,7 +2,7 @@ import { screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ActionPanel } from "@/components/operator/ActionPanel";
-import type { RobotState, SequenceStepInfo } from "@/hooks/useRobotSocket";
+import type { RobotState, SequenceStepInfo } from "@/lib/protocol";
 import { renderWithRobot } from "@/test/robotContext";
 
 function step(index: number, label: string, requireTrigger = false): SequenceStepInfo {
