@@ -1,27 +1,7 @@
 robot_name: sub_hand
 
-# インターフェース名は udev で個体ごとに固定する (config/can_buses.yaml 参照)。
-# can0/can1/can2 は USB 列挙順で入れ替わるため使わない。
-can_buses:
-  m3508_bus: can_m3508
-  edulite_bus: can_edulite
-  generic_bus: can_generic
-
-health:
-  feedback_timeout_ms: 500   # この時間フィードバックなければ STALE
-  temp_warning_c: 65         # この温度で WARNING
-  temp_critical_c: 80        # この温度で FAULT
-  tx_error_threshold: 96     # CAN error_passive 境界
-  # bus_check_interval_ms は将来の独立ヘルスチェックループ用 (現状未使用)
-
-motor_check:
-  per_motor_timeout_ms: 1500   # 1 モータあたりのタイムアウト
-  default_magnitude:
-    m3508: 500                 # mA
-    edulite05: 5.0             # deg
-    generic: 0.1               # POSITION/VELOCITY/DUTY 共通の小さい目標値
-  # tolerance はドライバ側のデフォルト (1deg / 5rpm 等) を採用。
-  # 個別上書きしたい場合は motors[name].motor_check で行う。
+# バス別名 (m3508_bus 等) の定義・health・motor_check の共通設定は config/system.yaml。
+# 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
 
 # !!! can_id はバス単位でロボット横断に一意にすること !!!
 # can_edulite / can_generic はメインハンドと物理的に同じバスを共有する。
@@ -44,9 +24,16 @@ motors:
     position_kp: 30.0
     set_zero_on_start: false
 
-  # 自作モータドライバ — 補助ハンドのグリッパ
+  # --- 離散状態アクチュエータ (自作モータドライバ) ---
+  # 開 / 閉 の 2 状態しか取らないため、generic 既定の 0.1deg は「どの状態でもない」
+  # 無意味な指令になる。しかもサーボは補間完了で reached を立てるので、0.1deg しか
+  # 動いていなくても動作確認は PASSED になる。安全な状態そのものを指令する。
+  # !!! magnitude は config/sub_hand_positions.yaml の対応する位置定数と同じ値にすること。
+  #     ずれると「動作確認で動いた位置」と「運用で使う位置」が別物になり、確認が意味を失う。
   sub_gripper:
     driver: generic
     bus: generic_bus
     can_id: 0x05               # main_hand の generic 系 (0x01〜0x04) との衝突回避
     control_type: position
+    motor_check:
+      magnitude: 5.0           # positions.sub_gripper.open と一致させること

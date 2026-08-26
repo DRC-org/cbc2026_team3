@@ -16,6 +16,8 @@ interface RobotContextValue {
   states: Record<string, RobotState>;
   connected: boolean;
   eStopActive: boolean;
+  /** 直近の緊急停止の理由 (SyncMonitor の発報等)。操縦者コマンドなら null */
+  eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
   motorChecks: Record<string, MotorCheckState>;
   matchState: MatchState;

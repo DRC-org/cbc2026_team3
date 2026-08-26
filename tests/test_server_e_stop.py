@@ -462,14 +462,21 @@ class TestEStopBlocksSetParam:
 
             await ws.close()
 
-    async def test_set_param_allowed_without_e_stop(self) -> None:
+    async def test_set_param_not_blocked_by_e_stop_gate_when_inactive(self) -> None:
+        """緊急停止していなければ緊急停止ゲートでは弾かれないこと。
+
+        このフィクスチャの m1 は PC 側 PID を持たない (M3508 位置制御ループが無い) ため
+        set_param 自体は別の理由で拒否される。ここで見たいのは緊急停止ゲートの挙動だけ
+        なので、拒否理由が緊急停止由来でないことを確認する。
+        """
         server = _build_server()
         app = server.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await ws.send_json({"type": "set_param", "motor": "m1", "key": "kp", "value": 1.0})
-            await _expect_no_rejection(ws, "set_param", tries=5)
+            msg = await _recv_type(ws, "command_rejected", tries=5)
+            assert msg is None or "緊急停止" not in msg["reason"]
             await ws.close()
 
 

@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
 from lib.drivers.base import MotorState
+from lib.health import BusHealth, MotorHealth
 from lib.match_state import Phase
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
@@ -267,4 +268,82 @@ class TestSetParamCommand:
 
             # エラーなく接続が維持されていること
             assert not ws.closed
+            await ws.close()
+
+
+def _fault_health_snapshot(mgr: CANManager):
+    """全モータ FAULT のスナップショット (health_change 差分を作るため)。"""
+    snap = ok_health_snapshot(mgr)
+    for motor in snap.motors:
+        motor.state = MotorHealth.FAULT
+    snap.overall = BusHealth.DOWN
+    return snap
+
+
+class TestStateIncludesRunning:
+    async def test_state_includes_running(self) -> None:
+        """state に running が含まれること。
+
+        欠けていると UI が step_index/total_steps から実行中かを推測することになる。
+        """
+        server = _build_server()
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+
+            await server._broadcast_state()
+            msg = await _recv_type(ws, "state")
+            assert msg is not None
+            assert msg["running"] is False
+
+            await ws.close()
+
+    async def test_state_running_true_while_sequence_runs(self) -> None:
+        """シーケンス実行中は running=true になること。"""
+        server = _build_server()
+        _enter_match(server)
+        seq = server._robots["main_hand"].sequence
+        app = server.create_app()
+
+        task = asyncio.create_task(seq.run())
+        await asyncio.sleep(0.05)
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await server._broadcast_state()
+            msg = await _recv_type(ws, "state")
+            assert msg is not None
+            assert msg["running"] is True
+            await ws.close()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+class TestHealthChangeIncludesRobot:
+    async def test_health_change_includes_robot(self) -> None:
+        """health_change にどの機体のイベントかが載ること。
+
+        Monitor は 2 機分のイベントを 1 本のリストに並べるため、robot が無いと
+        どちらの異常か判別できない。
+        """
+        server = _build_server()
+        can_mgr = server._robots["main_hand"].can_manager
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+
+            # 1 回目で前回スナップショットを作り、2 回目で FAULT への遷移を出す
+            await server._broadcast_state()
+            can_mgr.health.side_effect = lambda **_kwargs: _fault_health_snapshot(can_mgr)
+            await server._broadcast_state()
+
+            msg = await _recv_type(ws, "health_change")
+            assert msg is not None
+            assert msg["robot"] == "main_hand"
+            assert msg["target"] == "motor:m3508_1"
+
             await ws.close()

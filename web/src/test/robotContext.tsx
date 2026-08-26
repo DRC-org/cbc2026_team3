@@ -4,20 +4,12 @@ import { vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
 import type { MatchState, MotorCheckState } from "@/hooks/useRobotSocket";
+import { emptyMotorCheckState } from "@/hooks/useRobotSocket";
 
 // RobotContextValue は非公開なので、Provider の props から復元する
 export type RobotContextValue = ComponentProps<typeof RobotProvider>["value"];
 
-export const EMPTY_MOTOR_CHECK: MotorCheckState = {
-  status: "idle",
-  current: null,
-  progress: null,
-  records: [],
-  snapshot: null,
-  error: null,
-  startedAt: null,
-  finishedAt: null,
-};
+export const EMPTY_MOTOR_CHECK: MotorCheckState = emptyMotorCheckState();
 
 export const DEFAULT_MATCH_STATE: MatchState = {
   court: "red",
@@ -32,6 +24,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     states: {},
     connected: true,
     eStopActive: false,
+    eStopReason: null,
     healthEvents: [],
     motorChecks: {},
     matchState: DEFAULT_MATCH_STATE,

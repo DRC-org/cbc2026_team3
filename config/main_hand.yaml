@@ -1,27 +1,7 @@
 robot_name: main_hand
 
-# インターフェース名は udev で個体ごとに固定する (config/can_buses.yaml 参照)。
-# can0/can1/can2 は USB 列挙順で入れ替わるため使わない。
-can_buses:
-  m3508_bus: can_m3508
-  edulite_bus: can_edulite
-  generic_bus: can_generic
-
-health:
-  feedback_timeout_ms: 500   # この時間フィードバックなければ STALE
-  temp_warning_c: 65         # この温度で WARNING
-  temp_critical_c: 80        # この温度で FAULT
-  tx_error_threshold: 96     # CAN error_passive 境界
-  # bus_check_interval_ms は将来の独立ヘルスチェックループ用 (現状未使用)
-
-motor_check:
-  per_motor_timeout_ms: 1500   # 1 モータあたりのタイムアウト
-  default_magnitude:
-    m3508: 500                 # mA
-    edulite05: 5.0             # deg
-    generic: 0.1               # POSITION/VELOCITY/DUTY 共通の小さい目標値
-  # tolerance はドライバ側のデフォルト (1deg / 5rpm 等) を採用。
-  # 個別上書きしたい場合は motors[name].motor_check で行う。
+# バス別名 (m3508_bus 等) の定義・health・motor_check の共通設定は config/system.yaml。
+# 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
 
 motors:
   # --- 逆回転ペア軸 y_axis (ラックアンドピニオンの前後移動) ---

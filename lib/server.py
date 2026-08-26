@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
-from lib.control.position_loop import M3508PositionLoop
+from lib.control.position_loop import TUNABLE_PID_KEYS, M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
@@ -312,7 +312,7 @@ class RobotServer:
                     except json.JSONDecodeError:
                         logger.warning("不正な JSON を受信: %s", msg.data)
                         continue
-                    await self._handle_command(data)
+                    await self._handle_command(data, requester=ws)
                 elif msg.type == WSMsgType.ERROR:
                     logger.error("WebSocket エラー: %s", ws.exception())
         finally:
@@ -321,7 +321,18 @@ class RobotServer:
 
         return ws
 
-    async def _handle_command(self, data: dict) -> None:
+    async def _handle_command(
+        self,
+        data: dict,
+        *,
+        requester: web.WebSocketResponse | None = None,
+    ) -> None:
+        """1 コマンドを処理する。
+
+        Args:
+            requester: 要求元のクライアント。拒否通知の宛先に使う。HTTP POST や
+                内部からの呼び出しには返す相手がいないため None を許す。
+        """
         cmd_type = data.get("type")
 
         # フェーズゲート。UI でボタンを隠すだけでは WS 直叩きやリロード直後を防げない。
@@ -334,7 +345,7 @@ class RobotServer:
                     robot_name = data.get("robot")
                     await self._broadcast_motor_check_error(str(robot_name), deny)
                 else:
-                    await self._broadcast_command_rejected(cmd_type, deny)
+                    await self._reject_command(requester, cmd_type, deny)
                 return
 
             # 緊急停止ゲート。フェーズが MATCH のままだと緊急停止中でも START が通り、
@@ -343,7 +354,7 @@ class RobotServer:
             if self._e_stop_active and cmd_type in _E_STOP_DENY_MESSAGES:
                 reason = _E_STOP_DENY_MESSAGES[cmd_type]
                 logger.info("コマンド拒否: %s (%s)", cmd_type, reason)
-                await self._broadcast_command_rejected(cmd_type, reason)
+                await self._reject_command(requester, cmd_type, reason)
                 return
 
         if cmd_type == "trigger":
@@ -370,10 +381,7 @@ class RobotServer:
             await self._broadcast_state()
 
         elif cmd_type == "set_param":
-            motor_name = data.get("motor")
-            key = data.get("key")
-            value = data.get("value")
-            logger.info("set_param: motor=%s key=%s value=%s", motor_name, key, value)
+            await self._handle_set_param(data, requester)
 
         elif cmd_type == "sequence_jump":
             robot_name = data.get("robot")
@@ -424,7 +432,7 @@ class RobotServer:
             await self._broadcast_match_state()
 
         elif cmd_type == "match_start":
-            await self._handle_match_start()
+            await self._handle_match_start(requester)
 
         elif cmd_type == "match_finish":
             if self.match.match_finish():
@@ -441,6 +449,86 @@ class RobotServer:
 
         else:
             logger.debug("未知のコマンド: %s", cmd_type)
+
+    async def _handle_set_param(
+        self,
+        data: dict,
+        requester: web.WebSocketResponse | None,
+    ) -> None:
+        """PID ゲインを実行中に差し替える (/pid-tuning タブ)。
+
+        対象は M3508 だけ。位置制御を PC 側の PIDController で閉じているのは M3508 の
+        位置制御ループのみで、EDULITE 05 と自作モータドライバはドライバ/ファーム側で
+        ループを閉じているため PC 側に書き換えられるゲインが存在しない
+        (自作モタドラの SET_PARAM は PC 側にエンコーダが無く同じ意味を持たない)。
+
+        通らない要求は必ず理由を返す。以前のように黙ってログを出すだけだと、操縦者は
+        送信できたと信じたまま効いていないゲインで調整を続けることになる。
+        """
+        motor_name = data.get("motor")
+        key = data.get("key")
+        value = data.get("value")
+
+        if not isinstance(motor_name, str) or not motor_name:
+            await self._reject_command(requester, "set_param", "モータが指定されていません")
+            return
+
+        if not isinstance(key, str) or key not in TUNABLE_PID_KEYS:
+            await self._reject_command(
+                requester,
+                "set_param",
+                f"変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみです (受け取った: {key!r})",
+            )
+            return
+
+        # bool は Python では int だが、ゲインとして送られてきた時点で誤送信
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            await self._reject_command(
+                requester, "set_param", f"{key} の値が数値ではありません: {value!r}"
+            )
+            return
+        if not math.isfinite(value):
+            await self._reject_command(
+                requester, "set_param", f"{key} の値が有限ではありません: {value!r}"
+            )
+            return
+        if value < 0:
+            # 負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する
+            await self._reject_command(
+                requester, "set_param", f"{key} に負の値は指定できません: {value}"
+            )
+            return
+
+        loop = self._find_position_loop(motor_name)
+        if loop is None:
+            if self._has_motor(motor_name):
+                reason = (
+                    f"モータ '{motor_name}' は PC 側 PID を持ちません "
+                    "(ドライバ側で制御しているためサーバーからは変更できません)"
+                )
+            else:
+                reason = f"モータ '{motor_name}' が見つかりません"
+            await self._reject_command(requester, "set_param", reason)
+            return
+
+        affected = loop.set_pid_gain(motor_name, key, float(value))
+        logger.info("set_param: %s=%s を適用 (%s)", key, value, ", ".join(affected))
+
+    def _find_position_loop(self, motor_name: str) -> M3508PositionLoop | None:
+        """指定モータを制御している M3508 位置制御ループを探す。"""
+        for ctx in self._robots.values():
+            for loop in ctx.position_loops:
+                if motor_name in loop.motor_names:
+                    return loop
+        return None
+
+    def _has_motor(self, motor_name: str) -> bool:
+        """いずれかのロボットに登録されているモータかどうか。
+
+        「存在しない」と「存在するが PC 側 PID を持たない」を操縦者に区別させるために要る
+        (前者は打ち間違い、後者は仕様)。
+        """
+        return any(motor_name in ctx.can_manager._motors for ctx in self._robots.values())
 
     # ------------------------------------------------------------------ #
     #  試合状態 (コート / フェーズ / チェックリスト)
@@ -459,10 +547,12 @@ class RobotServer:
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
-    async def _handle_match_start(self) -> None:
+    async def _handle_match_start(self, requester: web.WebSocketResponse | None = None) -> None:
         if not self.match.match_start():
-            await self._broadcast_command_rejected(
-                "match_start", self.match.deny_reason("match_start") or "試合を開始できません"
+            await self._reject_command(
+                requester,
+                "match_start",
+                self.match.deny_reason("match_start") or "試合を開始できません",
             )
             return
 
@@ -638,10 +728,28 @@ class RobotServer:
     async def _broadcast_match_state(self) -> None:
         await self._broadcast_json(self.match.to_dict())
 
-    async def _broadcast_command_rejected(self, command: str, reason: str) -> None:
-        await self._broadcast_json(
-            {"type": "command_rejected", "command": command, "reason": reason}
+    async def _reject_command(
+        self,
+        requester: web.WebSocketResponse | None,
+        command: str,
+        reason: str,
+    ) -> None:
+        """拒否理由を要求元 1 台にだけ返す。
+
+        拒否は「今その操作をした人」への返答であって全員への通知ではない。
+        全配信すると、Monitor の set_court が試合中に弾かれただけで両操縦者の画面にも
+        赤トーストが出る。自分が押していない操作の拒否が混ざると、本当に自分の操作が
+        通らなかったときの通知と区別できなくなる。
+        要求元が居ない経路 (HTTP POST・内部の安全機構) では誰にも送らない。
+        """
+        if requester is None or requester.closed:
+            return
+        msg = json.dumps(
+            {"type": "command_rejected", "command": command, "reason": reason},
+            ensure_ascii=False,
         )
+        if not await self._send_or_drop(requester, msg):
+            await self._drop_clients({requester})
 
     async def _broadcast_e_stop_state(self, *, reason: str | None = None) -> None:
         payload: dict[str, object] = {"type": "e_stop_state", "active": self._e_stop_active}
@@ -952,8 +1060,11 @@ class RobotServer:
         """前回スナップショットとの差分から health_change イベントの一覧を生成する。
 
         前回 None (初回) の場合は空リストを返す。バス・モータそれぞれの state が
-        変化したペアだけイベント化する。robot_name はターゲット文字列に含めない
-        (現状クライアントはバス/モータ名のみで識別できるため)。
+        変化したペアだけイベント化する。
+
+        ``robot`` フィールドは必須。Monitor は 2 機分のイベントを 1 本のリストへ
+        並べるため、どちらの機体の異常かがイベント自身に載っていないと区別できない
+        (バス名は両機で共有しており、target だけでは機体を特定できない)。
         """
         if prev is None:
             return []
@@ -967,6 +1078,7 @@ class RobotServer:
                 events.append(
                     {
                         "type": "health_change",
+                        "robot": robot_name,
                         "level": _level_for_state(b.state),
                         "target": f"bus:{b.name}",
                         "from": old.state.value,
@@ -982,6 +1094,7 @@ class RobotServer:
                 events.append(
                     {
                         "type": "health_change",
+                        "robot": robot_name,
                         "level": _level_for_motor_state(m.state),
                         "target": f"motor:{m.name}",
                         "from": old_m.state.value,
@@ -1076,6 +1189,9 @@ class RobotServer:
             "step_index": progress["step_index"],
             "total_steps": progress["total_steps"],
             "waiting_trigger": progress["waiting_trigger"],
+            # UI に step_index/total_steps から実行状態を推測させないため、
+            # シーケンス側が持っている実行フラグをそのまま配信する
+            "running": progress["running"],
             "steps": progress.get("steps", []),
             "motors": motors,
             "e_stop_active": self.e_stop_active,

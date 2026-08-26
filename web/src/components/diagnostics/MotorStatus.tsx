@@ -2,8 +2,9 @@ import { formatAge } from "@/components/diagnostics/HealthIndicator";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { MotorHealth, MotorHealthState, MotorState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
-import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
+import { motorTempTone } from "@/lib/healthVerdict";
 import type { Tone } from "@/lib/tone";
+import { TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface MotorStatusProps {
   name: string;
@@ -19,19 +20,13 @@ const HEALTH_TONE: Record<MotorHealthState, Tone> = {
   fault: "error",
 };
 
-type StatTone = "default" | "warning" | "danger";
-
-// 温度帯に応じた文字色。default は地の文字色のまま。
-const STAT_TONE_TEXT: Record<StatTone, string> = {
-  default: "",
-  warning: "text-warning font-medium",
-  danger: "text-error font-medium",
-};
-
-function tempTone(temp: number): StatTone {
-  if (temp >= TEMP_DANGER) return "danger";
-  if (temp >= TEMP_WARNING) return "warning";
-  return "default";
+/**
+ * 温度帯に応じた文字色。正常域は地の文字色のままにする
+ * (全モータが緑に光ると、本当に見るべき 1 基が沈む)。
+ */
+function tempTextClass(temp: number): string {
+  const tone = motorTempTone(temp);
+  return tone === "warning" || tone === "error" ? cx(TONE_TEXT_CLASS[tone], "font-medium") : "";
 }
 
 /** 4 値の桁位置をモータ間で揃えるためのグリッド。ヘッダーと値行で共有する */
@@ -54,17 +49,9 @@ export function MotorStatHeader({ className }: { className?: string }) {
   );
 }
 
-function Cell({
-  value,
-  unit,
-  tone = "default",
-}: {
-  value: string;
-  unit?: string;
-  tone?: StatTone;
-}) {
+function Cell({ value, unit, toneClass }: { value: string; unit?: string; toneClass?: string }) {
   return (
-    <span className={cx("truncate font-mono tabular-nums", STAT_TONE_TEXT[tone])}>
+    <span className={cx("truncate font-mono tabular-nums", toneClass)}>
       {value}
       {unit ? <span className="text-base-content/60">{unit}</span> : null}
     </span>
@@ -92,7 +79,7 @@ export function MotorStatus({ name, state, health, className }: MotorStatusProps
         <Cell value={state.pos.toFixed(1)} />
         <Cell value={state.vel.toFixed(1)} />
         <Cell value={state.torque.toFixed(1)} />
-        <Cell value={state.temp.toFixed(1)} unit="℃" tone={tempTone(state.temp)} />
+        <Cell value={state.temp.toFixed(1)} unit="℃" toneClass={tempTextClass(state.temp)} />
       </div>
     </div>
   );

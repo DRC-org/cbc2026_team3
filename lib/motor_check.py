@@ -45,6 +45,11 @@ _DRIVER_TYPE_KEY: dict[str, str] = {
 # 観測ループの poll 間隔。短すぎると CPU を食い、長すぎると判定が遅れるため 10ms 固定。
 _POLL_INTERVAL_S: float = 0.01
 
+# magnitude=0 で SKIPPED になったときの理由。セッティングタイムの操縦者はこの detail しか
+# 見ないため、「壊れている」と「わざと外してある」を取り違えないよう文言で分ける。
+SKIP_DETAIL_CONFIG_EXCLUDED: str = "設定で意図的に除外 (単独駆動が危険なため指差喚呼で目視確認)"
+SKIP_DETAIL_UNSUPPORTED_DRIVER: str = "未対応ドライバ種別 (既定 magnitude 未定義)"
+
 
 class MotorCheckRunner:
     """1 ロボット分のアクチュエータ動作確認シーケンスを実行する。
@@ -227,10 +232,20 @@ class MotorCheckRunner:
         magnitude = self._resolve_magnitude(motor, override)
         timeout_s = float(override.get("timeout_ms", self._per_motor_timeout_ms)) / 1000.0
 
-        # magnitude=0 (未対応ドライバ) は SKIPPED 扱い。reset も送らずに抜ける。
+        # magnitude=0 は駆動せず SKIPPED 扱い。reset も送らずに抜ける。
+        # 到達経路が 2 通りあり、操縦者にとって意味が正反対なので detail を分ける:
+        #   - config が明示的に 0 を指定 → 意図的な除外。左右直結のペア軸
+        #     (config/main_hand.yaml の y_axis_* / rotate_*) は MotorCheckRunner が
+        #     1 台ずつ駆動する以上どうしても片側だけが動き機構を壊すため、
+        #     config/checklist.yaml の指差喚呼による目視確認に回してある。
+        #   - 解決に失敗して 0 → そのドライバ種別の既定 magnitude が無い。設定の不備。
         if magnitude == 0.0:
             record.result = MotorCheckResult.SKIPPED
-            record.detail = "未対応ドライバ種別"
+            record.detail = (
+                SKIP_DETAIL_CONFIG_EXCLUDED
+                if "magnitude" in override
+                else SKIP_DETAIL_UNSUPPORTED_DRIVER
+            )
             return
 
         if not await self._guard_check(name, motor, record):

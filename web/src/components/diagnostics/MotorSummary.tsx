@@ -1,20 +1,16 @@
 import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { MotorHealth, MotorState } from "@/hooks/useRobotSocket";
-import { TEMP_WARNING } from "@/lib/robots";
+import { countHotMotors } from "@/lib/healthVerdict";
 
 interface MotorSummaryProps {
   motors: Record<string, MotorState>;
   healthMotors?: MotorHealth[];
 }
 
-function countAnomalies(motors: Record<string, MotorState>): number {
-  return Object.values(motors).filter((m) => m.temp >= TEMP_WARNING).length;
-}
-
 export function MotorSummary({ motors, healthMotors }: MotorSummaryProps) {
   const total = Object.keys(motors).length;
-  const anomalyCount = countAnomalies(motors);
+  const anomalyCount = countHotMotors(motors);
   const healthMap = Object.fromEntries((healthMotors ?? []).map((m) => [m.name, m]));
 
   if (total === 0) {

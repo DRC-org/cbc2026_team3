@@ -5,6 +5,8 @@ import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
+import { isSequenceComplete, sequenceKind } from "@/lib/sequenceStatus";
+import type { SequenceKind } from "@/lib/sequenceStatus";
 import type { Tone } from "@/lib/tone";
 import { TONE_BORDER_L_CLASS, TONE_PROGRESS_CLASS } from "@/lib/tone";
 
@@ -13,23 +15,17 @@ interface RobotStatusRowProps {
   state: RobotState | undefined;
 }
 
-interface Activity {
-  tone: Tone;
-  label: string;
-}
-
 /**
  * 試合中の Monitor が最初に読むべき「その機体は今どうなっているか」。
- * 進行中か、操縦者の操作待ちで止まっているか、完走したか。
+ * 判定 (どの状態か) は `sequenceKind` に一本化し、ここは表示だけを持つ。
  */
-function activityOf(state: RobotState): Activity {
-  const { total_steps: total, step_index: index, waiting_trigger: waiting } = state;
-  if (total === 0) return { tone: "neutral", label: "シーケンス未取得" };
-  if (index >= total && !waiting) return { tone: "success", label: "完走" };
-  if (waiting) return { tone: "warning", label: "許可待ち" };
-  if (index === 0) return { tone: "neutral", label: "待機中" };
-  return { tone: "info", label: "実行中" };
-}
+const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
+  no_sequence: { tone: "neutral", label: "シーケンス未取得" },
+  idle: { tone: "neutral", label: "待機中" },
+  waiting_trigger: { tone: "warning", label: "許可待ち" },
+  running: { tone: "info", label: "実行中" },
+  complete: { tone: "success", label: "完走" },
+};
 
 /**
  * Monitor 試合中の 1 機分。
@@ -48,9 +44,9 @@ export function RobotStatusRow({ label, state }: RobotStatusRowProps) {
     );
   }
 
-  const activity = activityOf(state);
+  const activity = ACTIVITY[sequenceKind(state)];
   const { total_steps: total, step_index: index, waiting_trigger: waiting } = state;
-  const isComplete = total > 0 && index >= total && !waiting;
+  const isComplete = isSequenceComplete(state);
   const displayIndex = total > 0 ? Math.min(index + 1, total) : 0;
   const percent = total > 0 ? Math.min(100, ((isComplete ? total : index + 1) / total) * 100) : 0;
   const steps = state.steps ?? [];
@@ -92,7 +88,12 @@ export function RobotStatusRow({ label, state }: RobotStatusRowProps) {
       {/* Monitor は操縦しない役で、数値を追う時間がある。操縦者側の同じ部品は
           畳んだままにしてあり、既定の開閉だけを役割で変えている */}
       <div className="flex min-h-0 flex-1 flex-col border-t border-base-300 px-1 py-1">
-        <SubsystemStatus health={state.health} motors={state.motors} defaultOpen />
+        <SubsystemStatus
+          health={state.health}
+          motors={state.motors}
+          safety={state.safety}
+          defaultOpen
+        />
       </div>
     </section>
   );

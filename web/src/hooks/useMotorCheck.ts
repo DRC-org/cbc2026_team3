@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 
 import { useRobot } from "@/context/RobotContext";
 import type { MotorCheckState } from "@/hooks/useRobotSocket";
+import { emptyMotorCheckState } from "@/hooks/useRobotSocket";
 
 interface UseMotorCheckReturn {
   state: MotorCheckState;
@@ -9,16 +10,8 @@ interface UseMotorCheckReturn {
   abort: () => void;
 }
 
-const EMPTY_STATE: MotorCheckState = {
-  status: "idle",
-  current: null,
-  progress: null,
-  records: [],
-  snapshot: null,
-  error: null,
-  startedAt: null,
-  finishedAt: null,
-};
+// 受信前の状態はここで作らない。reducer 側と 2 箇所に持つと片方だけ古くなる
+const EMPTY_STATE: MotorCheckState = emptyMotorCheckState();
 
 // useRobotSocket が集約した motor_check_* の state を取り出し、
 // start/abort のコマンド送信を束ねるだけのプレゼンテーション層 hook

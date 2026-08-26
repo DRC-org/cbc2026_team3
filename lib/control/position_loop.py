@@ -18,7 +18,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_INTERVAL_S", "M3508PositionLoop", "make_position_pid"]
+__all__ = [
+    "DEFAULT_INTERVAL_S",
+    "TUNABLE_PID_KEYS",
+    "M3508PositionLoop",
+    "make_position_pid",
+]
+
+# 実行中に差し替えてよい PID パラメータ。出力レンジ・不感帯・積分上限は機構の
+# 保護値なので操縦者の調整対象にしない (誤って緩めると保護が消える)
+TUNABLE_PID_KEYS: tuple[str, ...] = ("kp", "ki", "kd")
 
 # 制御周期 200Hz。C620 のフィードバックは 1kHz で届くので取りこぼしはなく、
 # asyncio のジッタ (数 ms) に対しても十分な余裕がある
@@ -205,6 +214,33 @@ class M3508PositionLoop:
 
     def pid(self, name: str) -> PIDController:
         return self._axes[name].pid
+
+    def set_pid_gain(self, name: str, key: str, value: float) -> tuple[str, ...]:
+        """実行中に PID ゲインを差し替え、実際に更新したモータ名を返す。
+
+        同期グループのメンバを指定した場合はグループ全員へ同じ値を入れる。
+        左右直結ペアで追従特性が変わると互いに押し合って機構が壊れるため、
+        「片側だけ別ゲイン」という状態をサーバー側で作れてはならない
+        (チューニング UI はモータ 1 基ずつしか送れない)。
+
+        Raises:
+            KeyError: このループに居ないモータ名
+            ValueError: 実行中の差し替え対象でないパラメータ名
+        """
+        if name not in self._axes:
+            raise KeyError(name)
+        if key not in TUNABLE_PID_KEYS:
+            raise ValueError(f"実行中に変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみ: {key}")
+
+        group_name = self._group_of.get(name)
+        if group_name is None:
+            targets: tuple[str, ...] = (name,)
+        else:
+            targets = tuple(m.motor_name for m in self._sync_groups[group_name].members)
+
+        for target in targets:
+            self._axes[target].pid.set_gains(**{key: float(value)})
+        return targets
 
     def target(self, name: str) -> float | None:
         return self._axes[name].target

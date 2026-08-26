@@ -9,7 +9,8 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobot } from "@/context/RobotContext";
 import type { MotorState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
-import { ROBOTS, TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
+import { motorTempTone } from "@/lib/healthVerdict";
+import { ROBOTS } from "@/lib/robots";
 
 const PID_PARAMS = [
   { key: "kp", label: "Kp", max: 10 },
@@ -22,12 +23,6 @@ const STEP = 0.01;
 interface Selection {
   robot: string;
   motor: string;
-}
-
-function tempTone(temp: number) {
-  if (temp >= TEMP_DANGER) return "error" as const;
-  if (temp >= TEMP_WARNING) return "warning" as const;
-  return "success" as const;
 }
 
 /** 調整対象の 1 値を大きく出す。応答を見ながら詰める作業なので視認性を優先する */
@@ -214,7 +209,9 @@ function MotorDetail({
     <Panel
       legend={`${robotLabel} / ${motor}`}
       actions={
-        <StatusBadge tone={tempTone(motorState.temp)}>{motorState.temp.toFixed(1)}℃</StatusBadge>
+        <StatusBadge tone={motorTempTone(motorState.temp)}>
+          {motorState.temp.toFixed(1)}℃
+        </StatusBadge>
       }
     >
       {/* 応答を見ながら詰めるので、選択中 1 基の現在値は大きく出す */}

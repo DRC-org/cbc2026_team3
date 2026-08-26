@@ -113,10 +113,16 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 
 | ファイル | 持つもの |
 |---|---|
+| `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`motor_check` |
 | `config/can_buses.yaml` | CAN バス定義の単一情報源。udev ルールとセットアップスクリプトの双方がここから生成・参照する |
-| `config/<robot>.yaml` | モータ構成（ドライバ種別・バス・CAN ID・PID・動作確認設定） |
+| `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID・動作確認の個別上書き） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算と機構位置の定数 |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
+
+読み込みと検証は `lib/config_schema.py` に一本化してある。`health` / `motor_check` /
+`can_buses` は PC 上に 1 組しか存在し得ないため `config/<robot>.yaml` には書けず、
+書いてあったら移動先を示して**起動を拒否**する。ロボットごとの yaml に書けてしまうと
+読み込み側は片方の値しか採用できず、もう片方が「書けるのに効かない設定」になるため。
 
 **`robots/*.py` に数値を書いてはならない。** シーケンスは `move_to({"軸名": "位置名"})` の形で書き、
 単位換算・許容差・待ち時間はすべて位置定数 yaml が持つ。機構が変わったら yaml の数値だけを差し替える。
@@ -169,6 +175,18 @@ native 環境（`pio test -e native`）でプロトコル層と安全機構を�
 凍った値を最新だと思って見続ける。送信には `_WS_SEND_TIMEOUT_S` を必ず通し
 (`_send_or_drop`)、切り離しの `close()` は別タスクへ逃がす（`close()` も相手の応答を待つので、
 配信ループ上で await すると同じ場所で詰まる）。`_broadcast_loop` の例外ガードも外さないこと。
+
+**WS メッセージの契約は 1 箇所で定義し、サーバーと UI が同じものを見る。** 両者が
+それぞれ自分のサンプルを持つと、契約が食い違ったまま両方のテストが緑になる。一度これで
+`health_change` に `robot` が載っていないのに UI が `typeof msg.robot === "string"` を受信条件に
+していて、ヘルス異常が 100% 捨てられたまま出荷しかけた（TS 側はサンプルを自分で捏造し、
+Python 側は `target` と `to` しか見ていなかった）。`tests/test_ws_contract.py` が実物の
+`RobotServer` に配信させたメッセージを `web/src/test/ws-contract.json` へ焼き付け、
+`web/src/test/wsContract.test.ts` が同じファイルを `useRobotSocket` の**受信経路へ流し込む**
+（型が合っていても受信条件が弾けば画面には何も出ないので、型アサーションでは足りない）。
+契約ファイルは**手書き禁止**。サーバー側を変えたら
+`UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py` で再生成し、web/ 側の型と
+受信条件も必ず追従させること。
 
 **Web UI はモータ名をハードコードしていない。** モータ状態は `Record<string, MotorState>` として
 そのまま流れるので、モータの増減で UI 側の変更は要らない。

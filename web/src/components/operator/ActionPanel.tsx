@@ -7,6 +7,7 @@ import { Kbd } from "@/components/ui/Kbd";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
+import { isSequenceComplete, sequenceKind } from "@/lib/sequenceStatus";
 import type { Tone } from "@/lib/tone";
 import { TONE_BORDER_L_CLASS, TONE_PROGRESS_CLASS } from "@/lib/tone";
 
@@ -14,7 +15,6 @@ interface ActionPanelProps {
   state: RobotState;
   inMatch: boolean;
   blockedLabel: string;
-  showStop: boolean;
   onStart: () => void;
   onStop: () => void;
   onTrigger: () => void;
@@ -38,15 +38,18 @@ export function ActionPanel({
   state,
   inMatch,
   blockedLabel,
-  showStop,
   onStart,
   onStop,
   onTrigger,
 }: ActionPanelProps) {
-  const { total_steps: totalSteps, step_index: stepIndex, waiting_trigger: waiting } = state;
+  const { total_steps: totalSteps, step_index: stepIndex } = state;
   const steps = state.steps ?? [];
 
-  const isComplete = totalSteps > 0 && stepIndex >= totalSteps;
+  // 実行状態はサーバーの running を唯一の根拠にする (step_index からの推測をしない)
+  const kind = sequenceKind(state);
+  const isComplete = isSequenceComplete(state);
+  // 止められるのは動いているときだけ。トリガー待ちもシーケンスは生きている
+  const canStop = kind === "running" || kind === "waiting_trigger";
   const current = isComplete ? null : steps[stepIndex];
   // NEXT 後に走る一連のステップ。次の許可待ち (require_trigger) を含めてそこで切る。
   // 許可待ちが無いまま延々続く場合に画面を埋めないよう表示は数件で打ち切る
@@ -60,9 +63,9 @@ export function ActionPanel({
   }
   const upcoming = burst.slice(0, UPCOMING_LIMIT);
   const moreCount = burst.length - upcoming.length;
-  // まだ 1 度も走っていない状態。ここで RUNNING を出すと、同じ画面の中で
+  // 走っていない状態。ここで RUNNING を出すと、同じ画面の中で
   // 状態表示は「待機中」なのにボタンだけ「実行中」を主張して食い違う
-  const idle = inMatch && !waiting && !isComplete && !showStop;
+  const idle = inMatch && kind === "idle";
 
   const displayIndex = totalSteps > 0 ? Math.min(stepIndex + 1, totalSteps) : 0;
   const percent =
@@ -72,13 +75,13 @@ export function ActionPanel({
 
   const status: { label: string; tone: Tone } = !inMatch
     ? { label: blockedLabel, tone: "neutral" }
-    : isComplete
+    : kind === "complete"
       ? { label: "完走", tone: "success" }
-      : waiting
+      : kind === "waiting_trigger"
         ? { label: "許可待ち — NEXT を押してください", tone: "warning" }
-        : idle
-          ? { label: "待機中 — START で開始", tone: "neutral" }
-          : { label: "実行中", tone: "info" };
+        : kind === "running"
+          ? { label: "実行中", tone: "info" }
+          : { label: "待機中 — START で開始", tone: "neutral" };
 
   return (
     <section
@@ -164,7 +167,7 @@ export function ActionPanel({
             時間が生まれるため、ここは 1 アクションで即座に止める */}
         <Button
           tone="danger"
-          disabled={!inMatch || !showStop}
+          disabled={!inMatch || !canStop}
           onClick={onStop}
           aria-label="シーケンスを通常停止"
           className={PRIMARY_CLASS}
@@ -186,9 +189,7 @@ export function ActionPanel({
           </Button>
         ) : (
           <TriggerButton
-            waiting={waiting}
-            stepIndex={stepIndex}
-            totalSteps={totalSteps}
+            kind={kind}
             onTrigger={onTrigger}
             disabled={!inMatch}
             disabledLabel={blockedLabel}

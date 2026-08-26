@@ -23,6 +23,13 @@ _ROBOTS = [
     ("sub_hand_positions.yaml", "sub_hand.yaml", SubHandSequence),
 ]
 
+# 同梱 config と位置定数の対応。設定漏れの検出は片方のロボットだけでは意味がないため、
+# 全ロボットを回す試験でこれを共有する
+_ROBOT_CONFIGS = [
+    ("main_hand.yaml", "main_hand_positions.yaml"),
+    ("sub_hand.yaml", "sub_hand_positions.yaml"),
+]
+
 
 class _RecordingDriver(MotorDriver):
     """指令を共有リストに記録し、即座に到達したことにするテスト用ドライバ。"""
@@ -350,23 +357,55 @@ class TestShippedRobotConfig:
         assert duplicated == {}
 
     @pytest.mark.parametrize(
-        ("motor_name", "position_name"),
-        [("gripper", "open"), ("wall_f", "open"), ("wall_r", "open")],
+        ("robot_config", "yaml_name", "motor_name", "position_name"),
+        [
+            ("main_hand.yaml", "main_hand_positions.yaml", "gripper", "open"),
+            ("main_hand.yaml", "main_hand_positions.yaml", "wall_f", "open"),
+            ("main_hand.yaml", "main_hand_positions.yaml", "wall_r", "open"),
+            ("sub_hand.yaml", "sub_hand_positions.yaml", "sub_gripper", "open"),
+        ],
     )
     def test_motor_check_magnitude_matches_safe_position(
-        self, motor_name: str, position_name: str
+        self, robot_config: str, yaml_name: str, motor_name: str, position_name: str
     ) -> None:
         """離散状態アクチュエータの動作確認は、実際に使う安全な状態値で行うこと。
 
         generic 既定の 0.1deg は「どの状態でもない」無意味な指令になる。値がずれると
         動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
         """
-        motors = _load_config("main_hand.yaml")["motors"]
-        table = _load_shipped("main_hand_positions.yaml")
+        motors = _load_config(robot_config)["motors"]
+        table = _load_shipped(yaml_name)
 
         magnitude = motors[motor_name]["motor_check"]["magnitude"]
 
         assert magnitude == pytest.approx(table.raw(motor_name, position_name))
+
+    @pytest.mark.parametrize(("robot_config", "yaml_name"), _ROBOT_CONFIGS)
+    def test_every_generic_position_motor_checks_a_defined_state(
+        self, robot_config: str, yaml_name: str
+    ) -> None:
+        """位置指令の generic モータは、必ず定義済みの状態値で動作確認すること。
+
+        個別に列挙すると、モータを 1 台足したときに設定漏れが検出できない
+        (実際にサブハンドの sub_gripper は既定 0.1deg のまま放置され、
+        サーボが 0.1deg しか動かないのに PASSED になっていた)。
+        duty 指令の軸を除くのは、そこに「状態」という概念が無いため。
+        """
+        motors = _load_config(robot_config)["motors"]
+        table = _load_shipped(yaml_name)
+
+        offenders: dict[str, object] = {}
+        for motor_name, motor_cfg in motors.items():
+            if motor_cfg["driver"] != "generic":
+                continue
+            if str(motor_cfg.get("control_type", "position")).lower() != "position":
+                continue
+            magnitude = (motor_cfg.get("motor_check") or {}).get("magnitude")
+            states = [table.raw(motor_name, name) for name in table.names(motor_name)]
+            if magnitude is None or not any(magnitude == pytest.approx(v) for v in states):
+                offenders[motor_name] = magnitude
+
+        assert offenders == {}
 
     @pytest.mark.parametrize("motor_name", ["y_axis_r", "y_axis_l", "rotate_r", "rotate_l"])
     def test_paired_motors_are_excluded_from_motor_check(self, motor_name: str) -> None:

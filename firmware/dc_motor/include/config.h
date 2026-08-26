@@ -75,7 +75,9 @@ constexpr float kDefaultMaxDuty = 0.30f;
 // エンコーダ（位置・速度フィードバック）
 // ===========================================================================
 
+// TODO(実機で確認): 基板にエンコーダが載っているか。
 // エンコーダ無しの基板では 0 にする。位置・速度制御は使えなくなり duty のみになる。
+// 無いのに 1 のままだと位置・速度が 0 で張り付き、PID が出力を振り切る。
 #define HAS_ENCODER 1
 
 // TODO(実機で確認): エンコーダの 1 相あたりパルス数（モータ軸）。
@@ -165,11 +167,11 @@ constexpr float kDefaultReachedToleranceRpm = 5.0f;
 // 表示
 // ===========================================================================
 
-// シリアル RGB LED による状態表示。
-// FastLED_NeoPixel が lib_deps に無い環境でもビルドが通るよう、main.cpp 側で
-// __has_include を見てオンボード LED のみのフォールバックへ落とす。
-// 実際に発光させるには platformio.ini の lib_deps にライブラリを追加すること。
-#define HAS_RGB_LED 1
+// シリアル RGB LED による状態表示。**点灯処理はまだ無い**（main.cpp の updateLed() の
+// #if HAS_RGB_LED は TODO コメントだけ）ので、1 にしても状態表示はオンボード LED の
+// 点滅のままで何も変わらない。発光させるには platformio.ini の lib_deps に
+// RGB LED ライブラリを追加したうえで中身を書くこと。
+#define HAS_RGB_LED 0
 
 // DIP が 0x00（設定忘れ）のときの赤点滅周期（仕様書 §2.2）。
 constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;

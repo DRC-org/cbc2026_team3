@@ -84,7 +84,7 @@ export function Toaster() {
   useEffect(() => {
     if (!rejection) return;
     push({
-      id: rejection.receivedAt,
+      id: rejection.receivedAtMs,
       tone: "danger",
       title: "操作が拒否されました",
       lines: [rejection.reason, `command: ${rejection.command}`],
@@ -97,7 +97,7 @@ export function Toaster() {
     const latest = healthEvents[0];
     if (!latest || latest.level === "info") return;
     push({
-      id: latest.receivedAt,
+      id: latest.receivedAtMs,
       tone: latest.level === "critical" ? "danger" : "warning",
       title: `${latest.level.toUpperCase()} — ${latest.robot}`,
       lines: [

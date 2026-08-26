@@ -11,6 +11,8 @@ from lib.health import MotorCheckResult
 from lib.motor_check import (
     DEFAULT_MAGNITUDES,
     DEFAULT_PER_MOTOR_TIMEOUT_MS,
+    SKIP_DETAIL_CONFIG_EXCLUDED,
+    SKIP_DETAIL_UNSUPPORTED_DRIVER,
     MotorCheckRunner,
 )
 
@@ -474,6 +476,51 @@ class TestMotorCheckRunnerCallbacks:
 
         await runner.run()
         assert progress_seen == [("m1", 0, 2), ("m2", 1, 2)]
+
+
+class TestMotorCheckRunnerSkipReason:
+    """magnitude=0 の SKIPPED で「意図的な除外」と「未対応ドライバ」を区別する。
+
+    セッティングタイムに画面を見る操縦者が、config で意図的に外したペア軸
+    (y_axis_* / rotate_*) を異常だと誤解しないことが目的。
+    """
+
+    async def test_config_excluded_motor_reports_intentional_skip(self) -> None:
+        motor = _MockMotor("y_axis_r")
+        motors = {"y_axis_r": motor}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            motors,
+            default_magnitude={"_MockMotor": 1.0},
+            per_motor_overrides={"y_axis_r": {"magnitude": 0.0}},
+        )
+
+        snap = await runner.run()
+
+        assert snap.records[0].result is MotorCheckResult.SKIPPED
+        assert snap.records[0].detail == SKIP_DETAIL_CONFIG_EXCLUDED
+        # 意図的な除外なので CAN へは一切送らない
+        assert manager.sent == []
+        assert motor.last_magnitude is None
+
+    async def test_unsupported_driver_reports_unsupported_skip(self) -> None:
+        # default_magnitude にこのクラスの既定値が無く、magnitude が解決できないケース
+        motor = _MockMotor("unknown")
+        motors = {"unknown": motor}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner("main_hand", manager, motors, default_magnitude={})
+
+        snap = await runner.run()
+
+        assert snap.records[0].result is MotorCheckResult.SKIPPED
+        assert snap.records[0].detail == SKIP_DETAIL_UNSUPPORTED_DRIVER
+
+    def test_skip_details_are_distinguishable(self) -> None:
+        assert SKIP_DETAIL_CONFIG_EXCLUDED != SKIP_DETAIL_UNSUPPORTED_DRIVER
+        # 意図的な除外側は「壊れているのではない」と読める文言であること
+        assert "指差喚呼" in SKIP_DETAIL_CONFIG_EXCLUDED
 
 
 class TestMotorCheckRunnerOverrides:

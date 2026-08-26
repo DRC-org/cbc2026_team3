@@ -81,6 +81,7 @@ export function RootLayout() {
         states: socket.states,
         connected: socket.connected,
         eStopActive: socket.eStopActive,
+        eStopReason: socket.eStopReason,
         healthEvents: socket.healthEvents,
         motorChecks: socket.motorChecks,
         matchState: socket.matchState,

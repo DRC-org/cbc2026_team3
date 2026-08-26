@@ -36,8 +36,8 @@ describe("useMotorCheck", () => {
       records: [],
       snapshot: null,
       error: null,
-      startedAt: 100,
-      finishedAt: null,
+      startedAtMs: 100_000,
+      finishedAtMs: null,
     };
     const { result } = mount("main_hand", {
       motorChecks: { main_hand: running, sub_hand: { ...running, current: "other" } },

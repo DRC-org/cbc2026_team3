@@ -1,0 +1,3 @@
+# Python 側 (tests/test_ws_contract.py) が生成する golden。手で整形すると
+# 再生成のたびに差分が出るため、フォーマッタの対象から外す
+src/test/ws-contract.json

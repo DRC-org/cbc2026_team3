@@ -9,7 +9,7 @@ import { createRobotContext } from "@/test/robotContext";
 import type { RobotContextValue } from "@/test/robotContext";
 
 function rejection(over: Partial<CommandRejectedEvent> = {}): CommandRejectedEvent {
-  return { command: "match_start", reason: "チェックリスト未完了", receivedAt: 1, ...over };
+  return { command: "match_start", reason: "チェックリスト未完了", receivedAtMs: 1, ...over };
 }
 
 function healthEvent(over: Partial<HealthChangeEvent> = {}): HealthChangeEvent {
@@ -20,7 +20,7 @@ function healthEvent(over: Partial<HealthChangeEvent> = {}): HealthChangeEvent {
     from: "ok",
     to: "degraded",
     message: "受信途絶",
-    receivedAt: 1,
+    receivedAtMs: 1,
     ...over,
   };
 }
@@ -81,8 +81,8 @@ describe("表示するもの", () => {
   it("最新のヘルスイベントだけを通知する", () => {
     mount({
       healthEvents: [
-        healthEvent({ receivedAt: 2, target: "new" }),
-        healthEvent({ receivedAt: 1, target: "old" }),
+        healthEvent({ receivedAtMs: 2, target: "new" }),
+        healthEvent({ receivedAtMs: 1, target: "old" }),
       ],
     });
 
@@ -105,7 +105,7 @@ describe("寿命と件数の制御", () => {
     const { update } = mount();
 
     for (let i = 1; i <= 5; i++) {
-      update({ healthEvents: [healthEvent({ receivedAt: i, target: `can${i}` })] });
+      update({ healthEvents: [healthEvent({ receivedAtMs: i, target: `can${i}` })] });
     }
 
     expect(screen.getAllByText(/WARNING — main_hand/)).toHaveLength(3);
