@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import can
 
+from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
 from lib.drivers.base import MotorDriver
 from lib.health import (
     BusHealth,
@@ -69,8 +70,34 @@ class CANManager:
         self._bus_off.setdefault(name, False)
 
     def add_motor(self, bus_name: str, motor: MotorDriver) -> None:
+        """バスにモータを登録する。名前・CAN ID の重複は構成時に弾く。
+
+        名前が衝突すると _motors は後勝ちで上書きされる一方 _bus_motors には両方残り、
+        受信ループは孤児になった先勝ちドライバへフィードバックを配り続ける
+        (get_motor は後勝ちを返すので、状態が永久に更新されないモータができる)。
+        同一バスの can_id 衝突は受信ループが最初にマッチした 1 台で打ち切るため、
+        もう一方が永久にフィードバックを得られない。
+
+        ただしロボットごとに別インスタンスを持つ構成のため、
+        **ロボット横断の衝突は 1 つの CANManager からは原理的に検出できない**
+        (メインハンドとサブハンドは can_edulite / can_generic を物理的に共有する)。
+        全ロボットを合わせた一意性は tests/test_robot_sequences.py の
+        yaml 静的テストが引き続き担保する。
+        """
         if bus_name not in self._buses:
             raise KeyError(f"バス '{bus_name}' が登録されていません")
+
+        existing_bus = self._motor_bus.get(motor.name)
+        if existing_bus is not None:
+            raise ValueError(f"モータ '{motor.name}' は既に登録済み (bus={existing_bus})")
+
+        for existing in self._bus_motors[bus_name]:
+            if existing.can_id == motor.can_id:
+                raise ValueError(
+                    f"バス '{bus_name}' の can_id 0x{motor.can_id:02X} が重複 "
+                    f"('{motor.name}' と '{existing.name}')"
+                )
+
         self._motors[motor.name] = motor
         self._motor_bus[motor.name] = bus_name
         self._bus_motors[bus_name].append(motor)
@@ -244,14 +271,7 @@ class CANManager:
     #  ヘルスチェック (Phase 6, タスク 6-8)
     # ------------------------------------------------------------------ #
 
-    def health(
-        self,
-        *,
-        feedback_timeout_ms: float = 500.0,
-        temp_warning_c: float = 65.0,
-        temp_critical_c: float = 80.0,
-        tx_error_threshold: int = 96,
-    ) -> HealthSnapshot:
+    def health(self, *, thresholds: HealthThresholds = DEFAULT_HEALTH) -> HealthSnapshot:
         """現在の受動監視状態から HealthSnapshot を組み立てる (同期処理)。
 
         サーバの WS 配信ループや GET /health から呼ばれる前提で副作用を持たない。
@@ -271,13 +291,15 @@ class CANManager:
 
             # 優先度: ハード fault > 温度 critical > フィードバック切れ > warning > OK。
             # FAULT 系は STALE/WARNING より重大なので先に判定する。
-            stale = last_fb is None or (age_ms is not None and age_ms > feedback_timeout_ms)
+            stale = last_fb is None or (
+                age_ms is not None and age_ms > thresholds.feedback_timeout_ms
+            )
             warning = (
-                motor.has_thermal_warning(temp_warning_c, temp_critical_c)
+                motor.has_thermal_warning(thresholds.temp_warning_c)
                 or motor.has_overcurrent_warning()
             )
 
-            if motor.is_fault() or motor.has_thermal_fault(temp_critical_c):
+            if motor.is_fault() or motor.has_thermal_fault(thresholds.temp_critical_c):
                 state = MotorHealth.FAULT
             elif stale:
                 state = MotorHealth.STALE
@@ -320,7 +342,7 @@ class CANManager:
 
             if bus_off or is_error:
                 state = BusHealth.DOWN
-            elif tx_err >= tx_error_threshold or is_passive:
+            elif tx_err >= thresholds.tx_error_threshold or is_passive:
                 state = BusHealth.DEGRADED
             else:
                 state = BusHealth.OK

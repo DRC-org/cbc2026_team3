@@ -24,9 +24,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.control.sync_monitor import SyncMonitor
 from lib.drivers.base import MotorState
 from lib.drivers.m3508 import M3508Driver
 from lib.health import (
@@ -126,8 +127,8 @@ def _sync_group() -> SyncGroup:
     return SyncGroup(
         name="y_axis",
         members=(
-            SyncMember(motor_name="y_axis_r", scale=1.0, offset=0.0),
-            SyncMember(motor_name="y_axis_l", scale=-1.0, offset=0.0),
+            MotorSpec(name="y_axis_r", scale=1.0, offset=0.0),
+            MotorSpec(name="y_axis_l", scale=-1.0, offset=0.0),
         ),
         tolerance=5.0,
     )

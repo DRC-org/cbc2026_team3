@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import can
 
+from lib.config_schema import DEFAULT_HEALTH, DEFAULT_MOTOR_CHECK
+from lib.drivers.base import CheckContext, ControlMode, MotorState
 from lib.health import (
     CheckRunSnapshot,
     MotorCheckRecord,
@@ -22,18 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# 1 モータあたりの観測タイムアウト既定値 (docs/impl_plan.md: 1.5s)。
-DEFAULT_PER_MOTOR_TIMEOUT_MS: float = 1500.0
-
-# ドライバ種別ごとの既定 magnitude。
-# 物理的に安全な微小量に固定し、各値は config の motor_check.default_magnitude で上書き可能。
-DEFAULT_MAGNITUDES: dict[str, float] = {
-    "m3508": 500.0,  # mA
-    "edulite05": 5.0,  # deg
-    "generic": 0.1,  # 0.1 rev / 10% duty 等 (control_type 依存)
-}
-
-# クラス名 → DEFAULT_MAGNITUDES のキーへの対応表。
+# クラス名 → config の motor_check.default_magnitude のキーへの対応表。
 # 実ドライバはこのテーブル経由で magnitude を引く。テスト用 mock など未登録クラスは
 # default_magnitude にクラス名そのものをキーとして渡せばフォールバックできる。
 _DRIVER_TYPE_KEY: dict[str, str] = {
@@ -70,8 +61,8 @@ class MotorCheckRunner:
         can_manager: CANManager,
         motors: dict[str, MotorDriver],
         *,
-        per_motor_timeout_ms: float = DEFAULT_PER_MOTOR_TIMEOUT_MS,
-        feedback_freshness_ms: float = 500.0,
+        per_motor_timeout_ms: float = DEFAULT_MOTOR_CHECK.per_motor_timeout_ms,
+        feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         default_magnitude: dict[str, float] | None = None,
         per_motor_overrides: dict[str, dict] | None = None,
     ) -> None:
@@ -79,9 +70,11 @@ class MotorCheckRunner:
         self._can_manager = can_manager
         self._motors = motors
         self._per_motor_timeout_ms = per_motor_timeout_ms
-        self._feedback_freshness_ms = feedback_freshness_ms
+        self._feedback_timeout_ms = feedback_timeout_ms
         self._default_magnitude: dict[str, float] = (
-            dict(DEFAULT_MAGNITUDES) if default_magnitude is None else dict(default_magnitude)
+            dict(DEFAULT_MOTOR_CHECK.default_magnitude)
+            if default_magnitude is None
+            else dict(default_magnitude)
         )
         self._per_motor_overrides: dict[str, dict] = per_motor_overrides or {}
 
@@ -271,7 +264,7 @@ class MotorCheckRunner:
             return
         except Exception as exc:
             record.result = MotorCheckResult.FAILED
-            record.detail = f"prepare_check 例外: {exc!s}"
+            record.detail = f"prepare_check_steps 例外: {exc!s}"
             await self._safe_reset(name, motor)
             return
 
@@ -287,7 +280,7 @@ class MotorCheckRunner:
             await self._safe_reset(name, motor)
             return
 
-        record.expected = self._extract_expected(context)
+        record.expected = context.target
 
         if not await self._guard_check(name, motor, record):
             return
@@ -311,16 +304,15 @@ class MotorCheckRunner:
             return
 
         # 受信できた → ドライバの判定ロジックに委譲
-        state = motor.state
         try:
-            passed, detail = motor.evaluate_check_result(state, context)
+            passed, detail = motor.evaluate_check_result(context)
         except Exception as exc:
             record.result = MotorCheckResult.FAILED
             record.detail = f"evaluate 例外: {exc!s}"
             await self._safe_reset(name, motor)
             return
 
-        record.observed = self._extract_observed(state, context)
+        record.observed = self._extract_observed(motor.state, context)
 
         if passed:
             record.result = MotorCheckResult.PASSED
@@ -365,7 +357,7 @@ class MotorCheckRunner:
                 await self._safe_reset(name, motor)
                 return False
             age_ms = (time.time() - last_rx_at) * 1000.0
-            if age_ms > self._feedback_freshness_ms:
+            if age_ms > self._feedback_timeout_ms:
                 record.result = MotorCheckResult.FAILED
                 record.detail = f"動作確認前フィードバックSTALE ({age_ms:.0f}ms)"
                 await self._safe_reset(name, motor)
@@ -437,20 +429,9 @@ class MotorCheckRunner:
             logger.warning("reset_after_check の送信に失敗 (motor=%s)", name, exc_info=True)
 
     @staticmethod
-    def _extract_expected(context: dict) -> float | None:
-        target = context.get("target")
-        if target is None:
-            return None
-        try:
-            return float(target)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _extract_observed(state, context: dict) -> float | None:
-        # mode="position" → position、それ以外 (current/velocity/duty) → velocity を採用。
+    def _extract_observed(state: MotorState, context: CheckContext) -> float:
+        # POSITION → position、それ以外 (current/velocity/duty) → velocity を採用。
         # M3508 の電流チェックは「rpm の符号一致」を見ているため velocity を保存する。
-        mode = context.get("mode")
-        if mode == "position":
+        if context.mode is ControlMode.POSITION:
             return float(state.position)
         return float(state.velocity)

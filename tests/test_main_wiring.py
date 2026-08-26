@@ -9,8 +9,8 @@ import can
 import pytest
 import yaml
 
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.config_schema import MotorConfig, RobotConfig, load_robot_config
-from lib.control.sync_monitor import SyncGroup, SyncMember
 from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
@@ -565,7 +565,7 @@ class TestBuildSyncGroups:
         group = groups[0]
         assert group.tolerance == 2.0
         # 逆回転ペアは scale の符号で表す。符号が落ちると偏差が常に過大に見えて誤発報する
-        assert [(m.motor_name, m.scale, m.offset) for m in group.members] == [
+        assert [(m.name, m.scale, m.offset) for m in group.members] == [
             ("y_axis_r", 55.02, 1.0),
             ("y_axis_l", -55.02, -1.0),
         ]
@@ -615,7 +615,7 @@ class TestAttachSyncGroups:
         loops = self._loops()
         group = SyncGroup(
             "y_axis",
-            (SyncMember("y_axis_r", 55.02, 0.0), SyncMember("y_axis_l", -55.02, 0.0)),
+            (MotorSpec("y_axis_r", 55.02, 0.0), MotorSpec("y_axis_l", -55.02, 0.0)),
             tolerance=2.0,
         )
 
@@ -629,7 +629,7 @@ class TestAttachSyncGroups:
         loops = self._loops()
         group = SyncGroup(
             "rotate",
-            (SyncMember("rotate_r", 1.0, 0.0), SyncMember("rotate_l", -1.0, 0.0)),
+            (MotorSpec("rotate_r", 1.0, 0.0), MotorSpec("rotate_l", -1.0, 0.0)),
             tolerance=3.0,
         )
 
@@ -642,7 +642,7 @@ class TestAttachSyncGroups:
         loops = self._loops()
         group = SyncGroup(
             "mixed",
-            (SyncMember("y_axis_r", 1.0, 0.0), SyncMember("other", -1.0, 0.0)),
+            (MotorSpec("y_axis_r", 1.0, 0.0), MotorSpec("other", -1.0, 0.0)),
             tolerance=1.0,
         )
 

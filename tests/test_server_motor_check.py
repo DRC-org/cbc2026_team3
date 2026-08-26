@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.target_refresh import GenericTargetRefresher
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
@@ -59,18 +59,12 @@ class _MockMotor(MotorDriver):
         # フィードバック受信ループで一致しないことを保証 (テスト分離のため)
         return False
 
-    def check_command(self, *, magnitude: float) -> tuple[can.Message, dict]:
+    def check_command(self, *, magnitude: float) -> tuple[can.Message, CheckContext]:
         self.last_magnitude = magnitude
         msg = can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-        return msg, {"target": self.target_value, "mode": "current"}
+        return msg, CheckContext(mode=ControlMode.CURRENT, target=self.target_value)
 
-    def evaluate_check_result(
-        self,
-        state: MotorState,
-        context: dict,
-        *,
-        tolerance: float | None = None,
-    ) -> tuple[bool, str | None]:
+    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
         return self.evaluate_passed, None if self.evaluate_passed else "差分過大"
 
     def reset_after_check(self) -> can.Message:

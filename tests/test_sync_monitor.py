@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.axis_sync import MotorSpec, SyncGroup
+from lib.control.sync_monitor import SyncMonitor
 
 # 実機の y_axis (ラックアンドピニオン) と同じ構成。左右は逆回転で同一動作
 SCALE = 864.15
@@ -35,8 +36,8 @@ def _pair_group(name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
     return SyncGroup(
         name=name,
         members=(
-            SyncMember(motor_name=f"{name}_r", scale=SCALE, offset=0.0),
-            SyncMember(motor_name=f"{name}_l", scale=-SCALE, offset=0.0),
+            MotorSpec(name=f"{name}_r", scale=SCALE, offset=0.0),
+            MotorSpec(name=f"{name}_l", scale=-SCALE, offset=0.0),
         ),
         tolerance=tolerance,
     )
@@ -59,8 +60,8 @@ class _Fixture:
         self.feedback_at: dict[str, float] = {}
         for group in self.groups:
             for member in group.members:
-                self.drivers[member.motor_name] = _StubDriver()
-                self.feedback_at[member.motor_name] = self.clock.now
+                self.drivers[member.name] = _StubDriver()
+                self.feedback_at[member.name] = self.clock.now
         self.violations: list[tuple[str, float]] = []
         self.monitor = SyncMonitor(
             self.groups,
@@ -83,40 +84,12 @@ class _Fixture:
         if fresh:
             self.feedback_at[name] = self.clock.now
 
-    def _member(self, name: str) -> SyncMember:
+    def _member(self, name: str) -> MotorSpec:
         for group in self.groups:
             for member in group.members:
-                if member.motor_name == name:
+                if member.name == name:
                     return member
         raise KeyError(name)
-
-
-class TestSyncMember:
-    def test_to_value_is_inverse_of_command_conversion(self) -> None:
-        member = SyncMember(motor_name="y_axis_r", scale=SCALE, offset=100.0)
-        command = 10.0 * SCALE + 100.0
-        assert member.to_value(command) == pytest.approx(10.0)
-
-    def test_to_value_handles_negative_scale(self) -> None:
-        member = SyncMember(motor_name="y_axis_l", scale=-SCALE, offset=0.0)
-        assert member.to_value(-10.0 * SCALE) == pytest.approx(10.0)
-
-
-class TestSyncGroupDeviation:
-    def test_reverse_pair_in_sync_has_zero_deviation(self) -> None:
-        group = _pair_group()
-        positions = {"y_axis_r": 10.0 * SCALE, "y_axis_l": -10.0 * SCALE}
-        assert group.deviation(positions) == pytest.approx(0.0)
-
-    def test_deviation_reflects_mismatch_in_human_units(self) -> None:
-        group = _pair_group()
-        positions = {"y_axis_r": 10.0 * SCALE, "y_axis_l": -7.0 * SCALE}
-        assert group.deviation(positions) == pytest.approx(3.0)
-
-    def test_deviation_is_none_with_fewer_than_two_members(self) -> None:
-        group = _pair_group()
-        assert group.deviation({"y_axis_r": 0.0}) is None
-        assert group.deviation({}) is None
 
 
 class TestViolationDetection:

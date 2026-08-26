@@ -363,3 +363,65 @@ class TestReceiveLoopRobustness:
         await self._run_loop(mgr)
 
         assert motor.state.position == pytest.approx(45.0)
+
+
+class TestDuplicateRegistration:
+    """名前 / CAN ID の重複はフィードバックの配り先を静かに壊すため構成時に弾く。"""
+
+    def test_duplicate_motor_name_is_rejected(self) -> None:
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+
+        with pytest.raises(ValueError) as excinfo:
+            mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x02))
+
+        assert "gripper" in str(excinfo.value)
+
+    def test_duplicate_motor_name_across_buses_is_rejected(self) -> None:
+        """名前は _motors の唯一のキーなので、別バスでも後勝ちで上書きされてしまう。"""
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_bus("can_edulite", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+
+        with pytest.raises(ValueError):
+            mgr.add_motor("can_edulite", _make_mock_motor("gripper", 0x01))
+
+    def test_duplicate_can_id_on_same_bus_is_rejected(self) -> None:
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+
+        with pytest.raises(ValueError) as excinfo:
+            mgr.add_motor("can_generic", _make_mock_motor("wall", 0x01))
+
+        message = str(excinfo.value)
+        # どのバスの・どの CAN ID が・どのモータと衝突したかが分からないと現物を追えない
+        assert "can_generic" in message
+        assert "0x01" in message
+        assert "gripper" in message
+        assert "wall" in message
+
+    def test_same_can_id_on_different_bus_is_allowed(self) -> None:
+        """バスが違えばフレームは混ざらない。ここまで弾くと現実の配線が組めない。"""
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_bus("can_edulite", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+        mgr.add_motor("can_edulite", _make_mock_motor("rotate_l", 0x01))
+
+        assert mgr.get_motor("gripper").can_id == mgr.get_motor("rotate_l").can_id
+
+    def test_rejected_motor_is_not_registered(self) -> None:
+        """弾いた後に _bus_motors 側だけ残ると、受信ループが孤児へフレームを配る。"""
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        first = _make_mock_motor("gripper", 0x01)
+        mgr.add_motor("can_generic", first)
+
+        with pytest.raises(ValueError):
+            mgr.add_motor("can_generic", _make_mock_motor("wall", 0x01))
+
+        assert mgr._bus_motors["can_generic"] == [first]
+        assert set(mgr._motors) == {"gripper"}

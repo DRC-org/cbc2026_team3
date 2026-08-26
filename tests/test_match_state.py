@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import pytest
-
 from lib.match_state import (
+    PHASES_ANY,
+    PHASES_DURING_MATCH,
+    PHASES_OUTSIDE_MATCH,
+    PHASES_PREPARATION,
+    PHASES_START_GATE,
     ROLE_MAIN_HAND,
     ROLE_SUB_HAND,
     ChecklistItem,
@@ -153,48 +156,30 @@ class TestPhaseTransitions:
         assert state.phase is Phase.MATCH
 
 
-class TestCommandGate:
-    @pytest.mark.parametrize(
-        "command",
-        ["sequence_start", "sequence_jump", "trigger"],
-    )
-    def test_sequence_commands_only_in_match(self, command: str) -> None:
+class TestPhaseSets:
+    """遷移条件の名前付き集合。lib/commands.py のコマンドゲートも同じ定数を参照する。"""
+
+    def test_allows_follows_current_phase(self) -> None:
         state = _make()
-        assert state.deny_reason(command) is not None
-
-        _complete_all(state)
-        assert state.deny_reason(command) is not None  # READY でもまだ不可
-
-        state.match_start()
-        assert state.deny_reason(command) is None
-
-        state.match_finish()
-        assert state.deny_reason(command) is not None
-
-    def test_motor_check_blocked_during_match(self) -> None:
-        state = _make()
-        assert state.deny_reason("motor_check_start") is None
+        assert state.allows(PHASES_PREPARATION) is True
+        assert state.allows(PHASES_DURING_MATCH) is False
 
         _complete_all(state)
         state.match_start()
-        assert state.deny_reason("motor_check_start") is not None
+        assert state.allows(PHASES_DURING_MATCH) is True
+        assert state.allows(PHASES_PREPARATION) is False
+        assert state.allows(PHASES_OUTSIDE_MATCH) is False
 
-    @pytest.mark.parametrize(
-        "command",
-        ["e_stop", "e_stop_release", "sequence_stop", "match_reset", "health_check"],
-    )
-    def test_always_allowed_commands(self, command: str) -> None:
-        state = _make()
-        assert state.deny_reason(command) is None
+    def test_any_covers_every_phase(self) -> None:
+        """全フェーズ許可の宣言が 1 つでもフェーズを取りこぼすと、そのコマンドが死ぬ。"""
+        assert frozenset(Phase) == PHASES_ANY
 
-        _complete_all(state)
-        state.match_start()
-        assert state.deny_reason(command) is None
+    def test_outside_match_is_the_complement_of_during_match(self) -> None:
+        assert PHASES_OUTSIDE_MATCH == PHASES_ANY - PHASES_DURING_MATCH
 
-    def test_unknown_command_is_not_gated(self) -> None:
-        """ゲート表に無いコマンドは従来どおりの扱い (拒否しない)。"""
-        state = _make()
-        assert state.deny_reason("totally_unknown") is None
+    def test_start_gate_is_ready_only(self) -> None:
+        """指差喚呼が揃った READY 以外から試合へ入れてはならない。"""
+        assert frozenset({Phase.READY}) == PHASES_START_GATE
 
 
 class TestSerialization:

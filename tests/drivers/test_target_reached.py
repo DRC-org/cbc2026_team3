@@ -6,14 +6,15 @@ import struct
 import can
 import pytest
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import CommandType, GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from tests.fake_drivers import CheckStubDriver
 
 
-class _BaseDriver(MotorDriver):
-    """基底実装をそのまま使う最小のドライバ (追加 API を一切上書きしない)。"""
+class _BaseDriver(CheckStubDriver):
+    """到達判定の基底実装をそのまま使う最小のドライバ。"""
 
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
         return can.Message(arbitration_id=1, data=bytes(8))
@@ -45,11 +46,11 @@ def _feed_generic(
 
 
 class TestDefaultTolerance:
-    def test_position_default_matches_generic_check_tolerance(self) -> None:
+    def test_position_default_is_one_degree(self) -> None:
         driver = GenericDriver("g", 1)
         assert driver.default_tolerance(ControlMode.POSITION) == 1.0
 
-    def test_velocity_default_matches_generic_check_tolerance(self) -> None:
+    def test_velocity_default_is_five_rpm(self) -> None:
         driver = GenericDriver("g", 1)
         assert driver.default_tolerance(ControlMode.VELOCITY) == 5.0
 
@@ -123,13 +124,6 @@ class TestGenericIsTargetReached:
         _feed_generic(driver, velocity=100.0, flags=0x00)
         assert driver.is_target_reached(102.0, ControlMode.VELOCITY) is True
         assert driver.is_target_reached(120.0, ControlMode.VELOCITY) is False
-
-
-class TestBackwardCompatibility:
-    def test_minimal_driver_subclass_still_works(self) -> None:
-        """既存の mock 相当 (追加 API を実装しない派生クラス) が壊れないこと。"""
-        driver = _BaseDriver("x", 1)
-        assert driver.is_target_reached(0.0, ControlMode.POSITION) is True
 
 
 class TestM3508IsTargetReached:

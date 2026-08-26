@@ -165,7 +165,7 @@ class TestHealth:
 
     def test_thermal_warning_via_temperature_byte(self):
         self._feed(temp=70, flags=0x00)
-        assert self.drv.has_thermal_warning(temp_warning_c=65.0, temp_critical_c=80.0) is True
+        assert self.drv.has_thermal_warning(temp_warning_c=65.0) is True
 
     def test_overcurrent_flag_bit1(self):
         # bit1 = 過電流警告
@@ -233,8 +233,8 @@ class TestMotorCheck:
         assert msg.data[0] == 0  # position
         value = struct.unpack_from("<f", msg.data, 2)[0]
         assert value == pytest.approx(0.1)
-        assert context["target"] == pytest.approx(0.1)
-        assert context["mode"] == ControlMode.POSITION.value
+        assert context.target == pytest.approx(0.1)
+        assert context.mode is ControlMode.POSITION
 
     def test_check_command_velocity_mode(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
@@ -242,7 +242,7 @@ class TestMotorCheck:
         assert msg.data[0] == 1  # velocity
         value = struct.unpack_from("<f", msg.data, 2)[0]
         assert value == pytest.approx(50.0)
-        assert context["mode"] == ControlMode.VELOCITY.value
+        assert context.mode is ControlMode.VELOCITY
 
     def test_check_command_duty_mode(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
@@ -256,7 +256,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=10.0)
         # position=10.0deg, reached フラグ立ち上がり
         self._feed(drv, position_dg=100, flags=0x01)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is None
 
@@ -265,7 +265,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=10.0)
         # 目標 10.0deg に対して 5.0deg しか動いていない (許容 1.0 超え)
         self._feed(drv, position_dg=50, flags=0x00)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -274,7 +274,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=100.0)
         # velocity=100rpm (許容 5)
         self._feed(drv, velocity_rpm=98)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is None
 
@@ -282,7 +282,7 @@ class TestMotorCheck:
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
         _, context = drv.check_command(magnitude=100.0)
         self._feed(drv, velocity_rpm=20)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -291,14 +291,14 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=0.3)
         # 何らかの回転が観測されれば PASSED (|velocity| > 10)
         self._feed(drv, velocity_rpm=50)
-        passed, _ = drv.evaluate_check_result(drv.state, context)
+        passed, _ = drv.evaluate_check_result(context)
         assert passed is True
 
     def test_evaluate_duty_failed_when_no_rotation(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
         _, context = drv.check_command(magnitude=0.3)
         self._feed(drv, velocity_rpm=2)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -307,7 +307,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=10.0)
         # 過電流フラグつき + 目標到達 → PASSED だが detail に注釈
         self._feed(drv, position_dg=100, flags=0b00000011)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is not None
         assert "過電流" in detail

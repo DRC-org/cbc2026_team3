@@ -7,13 +7,14 @@ import can
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorDriver, MotorState
+from lib.drivers.base import MotorState
 from lib.health import BusHealth
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
+from tests.fake_drivers import CheckStubDriver
 
 
-class _MockMotor(MotorDriver):
+class _MockMotor(CheckStubDriver):
     """サーバーヘルス統合テスト用の最小モータドライバ。
 
     health() の判定経路だけを検証するために、フィードバックパース実装を持たず
@@ -37,7 +38,7 @@ class _MockMotor(MotorDriver):
     def matches_feedback(self, msg: can.Message) -> bool:
         return msg.arbitration_id == 0x200 + self.can_id
 
-    def has_thermal_warning(self, temp_warning_c: float, temp_critical_c: float) -> bool:
+    def has_thermal_warning(self, temp_warning_c: float) -> bool:
         return self.thermal_warning
 
     def has_thermal_fault(self, temp_critical_c: float) -> bool:

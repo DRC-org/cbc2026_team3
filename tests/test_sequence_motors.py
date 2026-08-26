@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import can
 import pytest
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorState
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import (
     AxisHandle,
@@ -16,9 +16,10 @@ from lib.sequence.motors import (
     build_motor_group,
 )
 from lib.sequence.positions import AxisSpec, MotorSpec
+from tests.fake_drivers import CheckStubDriver
 
 
-class _FakeDriver(MotorDriver):
+class _FakeDriver(CheckStubDriver):
     """CAN プロトコルに依存せず encode/state だけを差し替えられるテスト用ドライバ。"""
 
     def __init__(self, name: str = "m1", can_id: int = 1) -> None:
@@ -415,25 +416,33 @@ class TestAxisHandle:
         assert drivers["pair_r"].encoded == [(ControlMode.POSITION, 30.0)]
         assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
 
-    def test_sync_error_is_none_without_sync_tolerance(self) -> None:
+    def test_sync_violation_is_none_without_sync_tolerance(self) -> None:
         handle, drivers = self._pair(sync_tolerance=None)
         drivers["pair_r"].set_observed(position=30.0)
         drivers["pair_l"].set_observed(position=0.0)
 
-        assert handle.sync_error() is None
+        assert handle.sync_violation() is None
 
-    def test_sync_error_cancels_reverse_rotation(self) -> None:
-        """逆回転は scale の符号で吸収されるので、揃っていれば偏差 0 になる。"""
+    def test_sync_violation_is_none_when_reverse_pair_is_aligned(self) -> None:
+        """逆回転は scale の符号で吸収されるので、揃っていれば偏差 0 で超過しない。"""
         handle, drivers = self._pair(sync_tolerance=1.0)
         drivers["pair_r"].set_observed(position=30.0)
         drivers["pair_l"].set_observed(position=-30.0)
 
-        assert handle.sync_error() == pytest.approx(0.0)
+        assert handle.sync_violation() is None
 
-    def test_sync_error_reports_human_unit_deviation(self) -> None:
+    def test_sync_violation_reports_human_unit_deviation(self) -> None:
         handle, drivers = self._pair(sync_tolerance=1.0)
         drivers["pair_r"].set_observed(position=30.0)
         drivers["pair_l"].set_observed(position=-10.0)
 
         # 3.0mm と 1.0mm の差
-        assert handle.sync_error() == pytest.approx(2.0)
+        assert handle.sync_violation() == pytest.approx(2.0)
+
+    def test_sync_violation_is_none_within_tolerance(self) -> None:
+        """超過しているかの判定は SyncGroup と同じ境界で行う。"""
+        handle, drivers = self._pair(sync_tolerance=1.0)
+        drivers["pair_r"].set_observed(position=30.0)
+        drivers["pair_l"].set_observed(position=-25.0)
+
+        assert handle.sync_violation() is None

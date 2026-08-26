@@ -8,9 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import can
 from aiohttp.test_utils import TestClient, TestServer
 
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.generic import GenericDriver
@@ -676,8 +677,8 @@ class _SyncFixture:
         group = SyncGroup(
             name="y_axis",
             members=(
-                SyncMember(motor_name="y_r", scale=1.0, offset=0.0),
-                SyncMember(motor_name="y_l", scale=-1.0, offset=0.0),
+                MotorSpec(name="y_r", scale=1.0, offset=0.0),
+                MotorSpec(name="y_l", scale=-1.0, offset=0.0),
             ),
             tolerance=tolerance,
         )

@@ -7,11 +7,14 @@ import logging
 import math
 import pathlib
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
+from lib.commands import CommandSpec, RejectChannel, phase_deny_reason, spec_for
+from lib.config_schema import DEFAULT_HEALTH, DEFAULT_MOTOR_CHECK, HealthThresholds
 from lib.control.position_loop import TUNABLE_PID_KEYS, M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -37,6 +40,9 @@ _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 #: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
 _WS_SEND_TIMEOUT_S = 1.0
 
+#: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
+type WSOrNone = web.WebSocketResponse | None
+
 
 # overall を最悪値で集約するためのランク。lib.health._BUS_SEVERITY_RANK と一致させる
 # (重複定義を避けたいが、health.py 側を private 扱いにしているため局所コピーする)。
@@ -44,21 +50,6 @@ _BUS_SEVERITY_RANK: dict[BusHealth, int] = {
     BusHealth.OK: 0,
     BusHealth.DEGRADED: 1,
     BusHealth.DOWN: 2,
-}
-
-
-#: 緊急停止中に拒否するコマンドと、操縦者へ返す理由。
-#: 停止方向の操作 (sequence_stop / e_stop / match_reset / match_finish / e_stop_release) は
-#: 緊急停止中こそ通す必要があるため決して載せてはならない。motor_check_start は
-#: _start_motor_check が motor_check_error で拒否する別経路を持つのでここでは扱わない。
-#: match_start は試合フェーズへ入る操作で、通ると操縦者の sequence_start が解禁される。
-#: 緊急停止中に MATCH へ入れてしまうと動作確認もコート設定も同時に閉じてしまうため塞ぐ。
-_E_STOP_DENY_MESSAGES: dict[str, str] = {
-    "sequence_start": "緊急停止中のためシーケンスを開始できません",
-    "sequence_jump": "緊急停止中のためステップ移動できません",
-    "trigger": "緊急停止中のためトリガーを送れません",
-    "match_start": "緊急停止中のため試合を開始できません",
-    "set_param": "緊急停止中のためパラメータを変更できません",
 }
 
 
@@ -101,11 +92,8 @@ class RobotServer:
         host: str = "0.0.0.0",
         port: int = 8080,
         *,
-        feedback_timeout_ms: float = 500.0,
-        temp_warning_c: float = 65.0,
-        temp_critical_c: float = 80.0,
-        tx_error_threshold: int = 96,
-        motor_check_per_motor_timeout_ms: float = 1500.0,
+        health: HealthThresholds = DEFAULT_HEALTH,
+        motor_check_per_motor_timeout_ms: float = DEFAULT_MOTOR_CHECK.per_motor_timeout_ms,
         motor_check_default_magnitude: dict[str, float] | None = None,
         motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
@@ -130,13 +118,9 @@ class RobotServer:
         # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く。
         self.match = MatchState(definitions=checklist_definitions)
 
-        # ヘルスチェックしきい値は config/*.yaml の health セクション由来 (Phase 6 段階⑤で反映)
-        self._health_thresholds: dict[str, float | int] = {
-            "feedback_timeout_ms": feedback_timeout_ms,
-            "temp_warning_c": temp_warning_c,
-            "temp_critical_c": temp_critical_c,
-            "tx_error_threshold": tx_error_threshold,
-        }
+        # ヘルスチェックしきい値は config/system.yaml の health セクション由来。
+        # 4 値を分解せず 1 つの値のまま持つ (config_schema.HealthThresholds 参照)
+        self._health = health
         # 直近の HealthSnapshot をロボット名で保持し、_diff_health で前回と比較する
         self._last_health: dict[str, HealthSnapshot] = {}
 
@@ -333,122 +317,136 @@ class RobotServer:
             requester: 要求元のクライアント。拒否通知の宛先に使う。HTTP POST や
                 内部からの呼び出しには返す相手がいないため None を許す。
         """
-        cmd_type = data.get("type")
+        spec = spec_for(data.get("type"))
+        if spec is None:
+            # 語彙に無いコマンドはハンドラへ到達させない (拒否理由も返さない)
+            logger.debug("未知のコマンド: %s", data.get("type"))
+            return
 
-        # フェーズゲート。UI でボタンを隠すだけでは WS 直叩きやリロード直後を防げない。
-        if isinstance(cmd_type, str):
-            deny = self.match.deny_reason(cmd_type)
-            if deny is not None:
-                logger.info("コマンド拒否: %s (%s)", cmd_type, deny)
-                if cmd_type == "motor_check_start":
-                    # 動作確認の拒否は既存の専用イベントに合わせる (UI 側の表示経路が別)
-                    robot_name = data.get("robot")
-                    await self._broadcast_motor_check_error(str(robot_name), deny)
-                else:
-                    await self._reject_command(requester, cmd_type, deny)
-                return
+        # ゲートは 2 段。フェーズゲート (試合進行として許されるか) を先に見て、
+        # 通ったものだけ緊急停止ゲート (今モータを動かしてよいか) に掛ける。
+        # フェーズが MATCH のままでも緊急停止中は START を通してはならず、
+        # match_start は READY で受理されうるのでフェーズ遷移より手前で止める。
+        deny = spec.phase_deny_reason(self.match.phase)
+        if deny is None and self._e_stop_active:
+            deny = spec.e_stop_deny_reason()
+        if deny is not None:
+            logger.info("コマンド拒否: %s (%s)", spec.name, deny)
+            await self._reject_by_channel(spec, data, requester, deny)
+            return
 
-            # 緊急停止ゲート。フェーズが MATCH のままだと緊急停止中でも START が通り、
-            # シーケンスが実モータ指令を書き込んで停止指令を上書きしてしまう。
-            # match_start は READY で受理されうるので、フェーズ遷移前にここで止める。
-            if self._e_stop_active and cmd_type in _E_STOP_DENY_MESSAGES:
-                reason = _E_STOP_DENY_MESSAGES[cmd_type]
-                logger.info("コマンド拒否: %s (%s)", cmd_type, reason)
-                await self._reject_command(requester, cmd_type, reason)
-                return
+        handler: Callable[[dict, web.WebSocketResponse | None], Awaitable[None]] = getattr(
+            self, spec.handler
+        )
+        await handler(data, requester)
 
-        if cmd_type == "trigger":
-            robot_name = data.get("robot")
-            if robot_name and robot_name in self._robots:
-                self._robots[robot_name].sequence.trigger()
-                logger.info("trigger: %s", robot_name)
-
-        elif cmd_type == "e_stop":
-            await self.activate_e_stop()
-
-        elif cmd_type == "e_stop_release":
-            logger.info("緊急停止解除コマンド受信")
-            # フラグを落とす前にラッチを外す。逆順だと「復帰した」と配信した後にも
-            # ラッチが残る周期が生まれ、その間 y_axis だけが動かない機体になる。
-            # 停止中は電流 0 が維持されるので、先に外しても機体は動き出さない
-            self._reset_sync_latches()
-            self._e_stop_active = False
-            await self._broadcast_e_stop_state()
-            await self._reactivate_motors()
-
-        elif cmd_type == "health_check":
-            # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
-            await self._broadcast_state()
-
-        elif cmd_type == "set_param":
-            await self._handle_set_param(data, requester)
-
-        elif cmd_type == "sequence_jump":
-            robot_name = data.get("robot")
-            step_index = data.get("step_index")
-            if robot_name and robot_name in self._robots and isinstance(step_index, int):
-                self._robots[robot_name].sequence.request_jump(step_index)
-                logger.info("sequence_jump: %s -> %d", robot_name, step_index)
-
-        elif cmd_type == "sequence_stop":
-            robot_name = data.get("robot")
-            if robot_name and robot_name in self._robots:
-                self._robots[robot_name].sequence.request_stop()
-                logger.info("sequence_stop: %s", robot_name)
-
-        elif cmd_type == "sequence_start":
-            robot_name = data.get("robot")
-            if robot_name and robot_name in self._robots:
-                self._robots[robot_name].sequence.request_start()
-                logger.info("sequence_start: %s", robot_name)
-
-        elif cmd_type == "motor_check_start":
-            robot_name = data.get("robot")
-            # 知らないロボットは silent ignore (ws を切断しないため)
-            if robot_name and robot_name in self._robots:
-                await self._start_motor_check(robot_name)
-
-        elif cmd_type == "motor_check_abort":
-            robot_name = data.get("robot")
-            if robot_name and robot_name in self._motor_check_runners:
-                self._motor_check_runners[robot_name].abort()
-
-        elif cmd_type == "set_court":
-            await self._handle_set_court(data)
-
-        elif cmd_type == "checklist_set":
-            role = data.get("role")
-            item_id = data.get("item_id")
-            checked = bool(data.get("checked"))
-            if isinstance(role, str) and isinstance(item_id, str):
-                if self.match.set_checklist_item(role, item_id, checked):
-                    await self._broadcast_match_state()
-                else:
-                    logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
-
-        elif cmd_type == "checklist_reset":
-            role = data.get("role")
-            self.match.reset_checklist(role if isinstance(role, str) else None)
-            await self._broadcast_match_state()
-
-        elif cmd_type == "match_start":
-            await self._handle_match_start(requester)
-
-        elif cmd_type == "match_finish":
-            if self.match.match_finish():
-                logger.info("試合終了")
-                self._stop_all_sequences()
-                await self._broadcast_match_state()
-
-        elif cmd_type == "match_reset":
-            self.match.match_reset()
-            logger.info("セッティングタイムへ復帰")
-            self._stop_all_sequences()
-            self._apply_court()
-            await self._broadcast_match_state()
-
+    async def _reject_by_channel(
+        self,
+        spec: CommandSpec,
+        data: dict,
+        requester: web.WebSocketResponse | None,
+        reason: str,
+    ) -> None:
+        """拒否を、そのコマンドが宣言した経路で操縦者へ返す。"""
+        if spec.reject_channel is RejectChannel.MOTOR_CHECK_ERROR:
+            await self._broadcast_motor_check_error(str(data.get("robot")), reason)
         else:
-            logger.debug("未知のコマンド: %s", cmd_type)
+            await self._reject_command(requester, spec.name, reason)
+
+    # ------------------------------------------------------------------ #
+    #  コマンドハンドラ (lib/commands.py の CommandSpec.handler から引かれる)
+    #  ゲートは _handle_command で済んでいるので、ここでは実行だけを行う。
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_trigger(self, data: dict, _requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        if robot_name and robot_name in self._robots:
+            self._robots[robot_name].sequence.trigger()
+            logger.info("trigger: %s", robot_name)
+
+    async def _cmd_e_stop(self, _data: dict, _requester: WSOrNone = None) -> None:
+        await self.activate_e_stop()
+
+    async def _cmd_e_stop_release(self, _data: dict, _requester: WSOrNone = None) -> None:
+        logger.info("緊急停止解除コマンド受信")
+        # フラグを落とす前にラッチを外す。逆順だと「復帰した」と配信した後にも
+        # ラッチが残る周期が生まれ、その間 y_axis だけが動かない機体になる。
+        # 停止中は電流 0 が維持されるので、先に外しても機体は動き出さない
+        self._reset_sync_latches()
+        self._e_stop_active = False
+        await self._broadcast_e_stop_state()
+        await self._reactivate_motors()
+
+    async def _cmd_health_check(self, _data: dict, _requester: WSOrNone = None) -> None:
+        # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
+        await self._broadcast_state()
+
+    async def _cmd_set_param(self, data: dict, requester: WSOrNone = None) -> None:
+        await self._handle_set_param(data, requester)
+
+    async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        step_index = data.get("step_index")
+        if robot_name and robot_name in self._robots and isinstance(step_index, int):
+            self._robots[robot_name].sequence.request_jump(step_index)
+            logger.info("sequence_jump: %s -> %d", robot_name, step_index)
+
+    async def _cmd_sequence_stop(self, data: dict, _requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        if robot_name and robot_name in self._robots:
+            self._robots[robot_name].sequence.request_stop()
+            logger.info("sequence_stop: %s", robot_name)
+
+    async def _cmd_sequence_start(self, data: dict, _requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        if robot_name and robot_name in self._robots:
+            self._robots[robot_name].sequence.request_start()
+            logger.info("sequence_start: %s", robot_name)
+
+    async def _cmd_motor_check_start(self, data: dict, _requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        # 知らないロボットは silent ignore (ws を切断しないため)
+        if robot_name and robot_name in self._robots:
+            await self._start_motor_check(robot_name)
+
+    async def _cmd_motor_check_abort(self, data: dict, _requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        if robot_name and robot_name in self._motor_check_runners:
+            self._motor_check_runners[robot_name].abort()
+
+    async def _cmd_set_court(self, data: dict, _requester: WSOrNone = None) -> None:
+        await self._handle_set_court(data)
+
+    async def _cmd_checklist_set(self, data: dict, _requester: WSOrNone = None) -> None:
+        role = data.get("role")
+        item_id = data.get("item_id")
+        checked = bool(data.get("checked"))
+        if isinstance(role, str) and isinstance(item_id, str):
+            if self.match.set_checklist_item(role, item_id, checked):
+                await self._broadcast_match_state()
+            else:
+                logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
+
+    async def _cmd_checklist_reset(self, data: dict, _requester: WSOrNone = None) -> None:
+        role = data.get("role")
+        self.match.reset_checklist(role if isinstance(role, str) else None)
+        await self._broadcast_match_state()
+
+    async def _cmd_match_start(self, _data: dict, requester: WSOrNone = None) -> None:
+        await self._handle_match_start(requester)
+
+    async def _cmd_match_finish(self, _data: dict, _requester: WSOrNone = None) -> None:
+        if self.match.match_finish():
+            logger.info("試合終了")
+            self._stop_all_sequences()
+            await self._broadcast_match_state()
+
+    async def _cmd_match_reset(self, _data: dict, _requester: WSOrNone = None) -> None:
+        self.match.match_reset()
+        logger.info("セッティングタイムへ復帰")
+        self._stop_all_sequences()
+        self._apply_court()
+        await self._broadcast_match_state()
 
     async def _handle_set_param(
         self,
@@ -552,7 +550,7 @@ class RobotServer:
             await self._reject_command(
                 requester,
                 "match_start",
-                self.match.deny_reason("match_start") or "試合を開始できません",
+                phase_deny_reason("match_start", self.match.phase) or "試合を開始できません",
             )
             return
 
@@ -834,7 +832,7 @@ class RobotServer:
         if robot_name not in self._robots:
             return False
 
-        phase_deny = self.match.deny_reason("motor_check_start")
+        phase_deny = phase_deny_reason("motor_check_start", self.match.phase)
         if phase_deny is not None:
             await self._broadcast_motor_check_error(robot_name, phase_deny)
             return False
@@ -865,7 +863,7 @@ class RobotServer:
             can_manager=ctx.can_manager,
             motors=motors,
             per_motor_timeout_ms=float(self._motor_check_settings["per_motor_timeout_ms"]),
-            feedback_freshness_ms=float(self._health_thresholds["feedback_timeout_ms"]),
+            feedback_timeout_ms=self._health.feedback_timeout_ms,
             default_magnitude=self._motor_check_settings["default_magnitude"],  # type: ignore[arg-type]
             per_motor_overrides=self._motor_check_settings["per_motor_overrides"],  # type: ignore[arg-type]
         )
@@ -1022,12 +1020,7 @@ class RobotServer:
         """
         ctx = self._robots[robot_name]
         try:
-            snap = ctx.can_manager.health(
-                feedback_timeout_ms=float(self._health_thresholds["feedback_timeout_ms"]),
-                temp_warning_c=float(self._health_thresholds["temp_warning_c"]),
-                temp_critical_c=float(self._health_thresholds["temp_critical_c"]),
-                tx_error_threshold=int(self._health_thresholds["tx_error_threshold"]),
-            )
+            snap = ctx.can_manager.health(thresholds=self._health)
         except Exception as exc:
             logger.exception("ヘルス計算に失敗: robot=%s", robot_name)
             return self._health_unknown(f"ヘルス計算に失敗しました: {exc}")

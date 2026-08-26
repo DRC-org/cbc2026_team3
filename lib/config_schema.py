@@ -6,6 +6,13 @@
 ファームへ届き、ファーム側も正当なフレームとして受理する。誤記を警告ログに
 落として起動を続けると、操縦者はログを読まない限り気付けない。
 「壊れていても起動する」方針 (checklist.yaml) はここでは取らない。
+
+このモジュールは yaml が黙っていたときに使う既定値 (``DEFAULT_HEALTH`` /
+``DEFAULT_MOTOR_CHECK``) の単一情報源でもある。しきい値を使う側 (can_manager /
+server / control / motor_check) は自前のリテラルを持たず、ここを参照する。
+同じ数値を各所に書くと、config を配線し忘れた 1 経路だけが古い境界で判定を続け、
+どこにも異常として現れない。
+そのため上位モジュールを import してはならない (依存は lib.drivers.base のみ)。
 """
 
 from __future__ import annotations
@@ -56,7 +63,13 @@ _MOVED_TO_SYSTEM = frozenset({"health", "motor_check", "can_buses"})
 
 @dataclass(frozen=True)
 class HealthThresholds:
-    """ヘルス判定のしきい値。既定値は lib/server.py の RobotServer と同期する。"""
+    """ヘルス判定のしきい値。この 4 値は必ず 1 組で運ぶ。
+
+    バラの数値として配ると、配線側が 4 本のうち 3 本だけ渡した経路を作れてしまい、
+    残る 1 本だけが既定値のまま黙って効く。「フィードバック途絶は config どおり
+    250ms で見ているのに、温度警告だけ既定の 65℃ を見ている」という状態は
+    ログにも UI にも現れない。1 つの値として渡せば部分配線が構文的に作れない。
+    """
 
     feedback_timeout_ms: float = 500.0
     temp_warning_c: float = 65.0
@@ -66,7 +79,11 @@ class HealthThresholds:
 
 @dataclass(frozen=True)
 class MotorCheckSettings:
-    """アクチュエータ動作確認の共通設定。既定値は lib/motor_check.py と同期する。"""
+    """アクチュエータ動作確認の共通設定。
+
+    ``default_magnitude`` はドライバ種別ごとの試験駆動量で、機構に触れても危険でない
+    微小量に固定してある (mA / deg / rev・duty と単位はドライバ種別で違う)。
+    """
 
     per_motor_timeout_ms: float = 1500.0
     default_magnitude: Mapping[str, float] = field(

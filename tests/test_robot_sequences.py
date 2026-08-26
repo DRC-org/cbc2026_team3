@@ -8,12 +8,13 @@ import can
 import pytest
 import yaml
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorState
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from robots.main_hand import MainHandSequence
 from robots.sub_hand import SubHandSequence
+from tests.fake_drivers import CheckStubDriver
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -31,7 +32,7 @@ _ROBOT_CONFIGS = [
 ]
 
 
-class _RecordingDriver(MotorDriver):
+class _RecordingDriver(CheckStubDriver):
     """指令を共有リストに記録し、即座に到達したことにするテスト用ドライバ。"""
 
     def __init__(self, name: str, sink: list[tuple[str, float]]) -> None:

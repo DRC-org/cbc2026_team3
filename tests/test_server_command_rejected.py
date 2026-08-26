@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
+from lib.commands import COMMANDS
 from lib.drivers.base import MotorState
 from lib.match_state import Court, Phase
 from lib.sequence.engine import Sequence, step
@@ -164,3 +165,55 @@ class TestRejectionGoesToRequesterOnly:
             await _expect_no_type(watcher, "command_rejected")
 
             await watcher.close()
+
+
+class TestUnknownCommandsNeverReachHandlers:
+    """語彙に無いコマンドはゲートを素通りしてハンドラへ届いてはならない。
+
+    ゲート表とディスパッチが別々の表だった頃は、どの表にも載っていないコマンドが
+    「拒否もされず実行される」状態になり得た。今は COMMANDS が唯一の入口なので、
+    宣言されていない名前はハンドラへ到達しない。
+    """
+
+    def _record_handler_calls(self, server: RobotServer) -> list[str]:
+        called: list[str] = []
+
+        def _make(name: str):
+            async def _recorder(_data: dict, _requester=None) -> None:
+                called.append(name)
+
+            return _recorder
+
+        for handler_name in {spec.handler for spec in COMMANDS.values()}:
+            setattr(server, handler_name, _make(handler_name))
+        return called
+
+    async def test_undeclared_command_is_dropped(self) -> None:
+        server = _build_server()
+        _enter_match(server)
+        called = self._record_handler_calls(server)
+
+        await server._handle_command({"type": "totally_unknown", "robot": "main_hand"})
+        await server._handle_command({"type": None})
+
+        assert called == []
+
+        # 差し替えたハンドラが実際に呼ばれる構成であることも確かめる
+        # (呼ばれない仕掛けになっていると上の assert は常に通ってしまう)
+        await server._handle_command({"type": "trigger", "robot": "main_hand"})
+        assert called == ["_cmd_trigger"]
+
+    async def test_undeclared_command_is_not_rejected(self) -> None:
+        """未知のコマンドに拒否理由を返すと、語彙の有無を外から総当たりで探れてしまう。"""
+        server = _build_server()
+        _enter_match(server)
+        app = server.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            requester = await client.ws_connect("/ws")
+
+            await requester.send_json({"type": "totally_unknown"})
+
+            await _expect_no_type(requester, "command_rejected")
+
+            await requester.close()

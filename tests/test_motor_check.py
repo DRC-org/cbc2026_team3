@@ -6,11 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 import can
 
-from lib.drivers.base import MotorDriver, MotorState
+from lib.config_schema import DEFAULT_MOTOR_CHECK
+from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
 from lib.health import MotorCheckResult
 from lib.motor_check import (
-    DEFAULT_MAGNITUDES,
-    DEFAULT_PER_MOTOR_TIMEOUT_MS,
     SKIP_DETAIL_CONFIG_EXCLUDED,
     SKIP_DETAIL_UNSUPPORTED_DRIVER,
     MotorCheckRunner,
@@ -59,18 +58,12 @@ class _MockMotor(MotorDriver):
     def matches_feedback(self, msg: can.Message) -> bool:  # pragma: no cover
         return False
 
-    def check_command(self, *, magnitude: float) -> tuple[can.Message, dict]:
+    def check_command(self, *, magnitude: float) -> tuple[can.Message, CheckContext]:
         self.last_magnitude = magnitude
         msg = can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-        return msg, {"target": self.target_value, "mode": "current"}
+        return msg, CheckContext(mode=ControlMode.CURRENT, target=self.target_value)
 
-    def evaluate_check_result(
-        self,
-        state: MotorState,
-        context: dict,
-        *,
-        tolerance: float | None = None,
-    ) -> tuple[bool, str | None]:
+    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
         return self.evaluate_passed, self.evaluate_detail
 
     def reset_after_check(self) -> can.Message:
@@ -127,8 +120,12 @@ class TestMotorCheckRunnerBasics:
     """MotorCheckRunner の基本 API 形状と既定値の検証。"""
 
     def test_module_constants(self) -> None:
-        assert DEFAULT_PER_MOTOR_TIMEOUT_MS == 1500.0
-        assert DEFAULT_MAGNITUDES == {"m3508": 500.0, "edulite05": 5.0, "generic": 0.1}
+        assert DEFAULT_MOTOR_CHECK.per_motor_timeout_ms == 1500.0
+        assert dict(DEFAULT_MOTOR_CHECK.default_magnitude) == {
+            "m3508": 500.0,
+            "edulite05": 5.0,
+            "generic": 0.1,
+        }
 
     def test_initial_snapshot_state(self) -> None:
         motors = {"m1": _MockMotor("m1")}
@@ -173,10 +170,10 @@ class TestMotorCheckRunnerHappyPath:
 
     async def test_prepare_messages_are_sent_before_check_command(self) -> None:
         class _PreparingMotor(_MockMotor):
-            def prepare_check(self) -> list[can.Message]:
+            def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
                 return [
-                    can.Message(arbitration_id=0x201, data=bytes(8)),
-                    can.Message(arbitration_id=0x202, data=bytes(8)),
+                    (can.Message(arbitration_id=0x201, data=bytes(8)), 0.0),
+                    (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0),
                 ]
 
         motors = {"m1": _PreparingMotor("m1")}
@@ -226,8 +223,8 @@ class TestMotorCheckRunnerHappyPath:
             def check_safety_error(self) -> str | None:
                 return "既知fault"
 
-            def prepare_check(self) -> list[can.Message]:
-                raise AssertionError("prepare_check must not run")
+            def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
+                raise AssertionError("prepare_check_steps must not run")
 
         motors = {"m1": _UnsafeMotor("m1")}
         manager = _MockCANManager(motors)
@@ -255,7 +252,7 @@ class TestMotorCheckRunnerHappyPath:
                 "main_hand",
                 manager,
                 motors,
-                feedback_freshness_ms=500.0,
+                feedback_timeout_ms=500.0,
                 default_magnitude={"_FeedbackRequiredMotor": 1.0},
             )
 
@@ -290,7 +287,7 @@ class TestMotorCheckRunnerHappyPath:
             "main_hand",
             manager,
             motors,
-            feedback_freshness_ms=500.0,
+            feedback_timeout_ms=500.0,
             default_magnitude={"_FeedbackRequiredMotor": 1.0},
         )
 

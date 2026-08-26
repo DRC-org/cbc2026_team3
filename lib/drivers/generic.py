@@ -5,12 +5,18 @@ from enum import IntEnum
 
 import can
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
 
 _MODE_MAP = {
     ControlMode.POSITION: 0,
     ControlMode.VELOCITY: 1,
     ControlMode.DUTY: 2,
+}
+
+# 動作確認の detail に出す単位。操縦者は config に書いた値の単位しか知らない
+_DISPLAY_UNITS = {
+    ControlMode.POSITION: "deg",
+    ControlMode.VELOCITY: "rpm",
 }
 
 
@@ -39,12 +45,9 @@ _E_STOP_CLEAR_MAGIC = (0x5A, 0xA5)
 class GenericDriver(MotorDriver):
     """自作モータドライバ(DC モータ/サーボ)用の汎用 CAN ドライバ。"""
 
-    # 動作確認の判定許容値 (control_type 別)
-    # POSITION: 0.1deg 単位フィードバック → 1.0deg 余裕
-    # VELOCITY: 5rpm 程度のリップルを許容
-    # DUTY: |velocity| > 10rpm で「回った」と見なす
-    _CHECK_POSITION_TOLERANCE_DEG = 1.0
-    _CHECK_VELOCITY_TOLERANCE_RPM = 5.0
+    # POSITION / VELOCITY の許容差は base.default_tolerance が単一情報源。
+    # DUTY は指令 (duty 比) とフィードバック (rpm) の次元が違い追従を定義できないため、
+    # 「回った」と見なす回転数だけをここに持つ
     _CHECK_DUTY_ROTATION_RPM = 10.0
 
     def __init__(
@@ -184,13 +187,6 @@ class GenericDriver(MotorDriver):
     # ------------------------------------------------------------------ #
     #  目標到達判定
     # ------------------------------------------------------------------ #
-    def default_tolerance(self, mode: ControlMode) -> float:
-        if mode is ControlMode.POSITION:
-            return self._CHECK_POSITION_TOLERANCE_DEG
-        if mode is ControlMode.VELOCITY:
-            return self._CHECK_VELOCITY_TOLERANCE_RPM
-        return super().default_tolerance(mode)
-
     def is_target_reached(
         self,
         target: float,
@@ -267,45 +263,43 @@ class GenericDriver(MotorDriver):
     #  動作確認 (Phase 6 段階⑦)
     # ------------------------------------------------------------------ #
 
-    def check_command(self, *, magnitude: float = 0.1) -> tuple[can.Message, dict]:
-        msg = self.encode_target(self.control_type, magnitude)
-        context = {"target": float(magnitude), "mode": self.control_type.value}
-        return msg, context
+    def check_command(self, *, magnitude: float = 0.1) -> tuple[can.Message, CheckContext]:
+        # 位置指令は絶対値なので、実際に動くはずの量は「現在位置との差」になる。
+        # reference を省くと、既に目標位置に居るモータが動かないまま合格する
+        reference = self._observed_for(self.control_type)
+        context = CheckContext(
+            mode=self.control_type,
+            target=float(magnitude),
+            reference=0.0 if reference is None else reference,
+            display_unit=_DISPLAY_UNITS.get(self.control_type, ""),
+        )
+        return self.encode_target(self.control_type, magnitude), context
 
-    def evaluate_check_result(
-        self,
-        state: MotorState,
-        context: dict,
-        *,
-        tolerance: float | None = None,
-    ) -> tuple[bool, str | None]:
-        target = context["target"]
-        mode = context["mode"]
-
-        if mode == ControlMode.POSITION.value:
-            tol = tolerance if tolerance is not None else self._CHECK_POSITION_TOLERANCE_DEG
-            position_ok = state.reached and abs(state.position - target) <= tol
-            if position_ok:
+    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
+        if context.mode is ControlMode.DUTY:
+            # duty 指令 [0..1] と rpm フィードバックは次元が違うので追従判定できない。
+            # 「回ったかどうか」だけを見る
+            if abs(self._state.velocity) > self._CHECK_DUTY_ROTATION_RPM:
                 return True, self._overflow_note()
             return False, (
-                f"目標 {target:.2f}deg, 観測 {state.position:.2f}deg (reached={state.reached})"
+                f"回転検出なし (target duty={context.target:.2f}, "
+                f"velocity={self._state.velocity:.1f}rpm)"
             )
 
-        if mode == ControlMode.VELOCITY.value:
-            tol = tolerance if tolerance is not None else self._CHECK_VELOCITY_TOLERANCE_RPM
-            if abs(state.velocity - target) <= tol:
-                return True, self._overflow_note()
-            return False, (f"目標 {target:.1f}rpm, 観測 {state.velocity:.1f}rpm")
+        passed, detail = self.evaluate_tracking(context)
 
-        if mode == ControlMode.DUTY.value:
-            if abs(state.velocity) > self._CHECK_DUTY_ROTATION_RPM:
-                return True, self._overflow_note()
-            return False, (
-                f"回転検出なし (target duty={target:.2f}, velocity={state.velocity:.1f}rpm)"
+        if context.mode is not ControlMode.POSITION:
+            return (True, self._overflow_note()) if passed else (False, detail)
+
+        # 位置決めの行き過ぎ・整定中はファームの到達フラグ (§3.2 bit0) が持つ
+        if passed and self._state.reached:
+            return True, self._overflow_note()
+        if detail is None:
+            detail = (
+                f"目標 {context.display(context.target)}, "
+                f"観測 {context.display(self._state.position)}"
             )
-
-        # 未知の制御モード (将来拡張時のフォールバック)
-        return False, f"未対応の制御モード: {mode}"
+        return False, f"{detail} (reached={self._state.reached})"
 
     def reset_after_check(self) -> can.Message:
         return self.encode_target(self.control_type, 0.0)

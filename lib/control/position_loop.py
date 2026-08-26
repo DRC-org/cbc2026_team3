@@ -8,8 +8,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from lib.axis_sync import SyncGroup
+from lib.config_schema import DEFAULT_HEALTH
 from lib.control.pid import PIDController
-from lib.control.sync_monitor import SyncGroup
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 
@@ -103,7 +104,7 @@ class M3508PositionLoop:
         *,
         interval_s: float = DEFAULT_INTERVAL_S,
         max_dt_s: float = DEFAULT_MAX_DT_S,
-        feedback_timeout_ms: float = 500.0,
+        feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         is_estop_active: EStopChecker | None = None,
         time_source: Callable[[], float] = time.monotonic,
         feedback_clock: Callable[[], float] = time.time,
@@ -175,21 +176,19 @@ class M3508PositionLoop:
             raise ValueError(f"同期グループ '{group.name}' は既に登録済み")
 
         for member in group.members:
-            if member.motor_name not in self._axes:
+            if member.name not in self._axes:
                 raise ValueError(
-                    f"同期グループ '{group.name}' のモータ '{member.motor_name}' が"
+                    f"同期グループ '{group.name}' のモータ '{member.name}' が"
                     f"このループ (bus={self._bus_name}) に未登録"
                 )
             # 1 台が 2 グループに属すると、どちらの許容値で止めるかが曖昧になる
-            existing = self._group_of.get(member.motor_name)
+            existing = self._group_of.get(member.name)
             if existing is not None:
-                raise ValueError(
-                    f"モータ '{member.motor_name}' は既に同期グループ '{existing}' に所属"
-                )
+                raise ValueError(f"モータ '{member.name}' は既に同期グループ '{existing}' に所属")
 
         self._sync_groups[group.name] = group
         for member in group.members:
-            self._group_of[member.motor_name] = group.name
+            self._group_of[member.name] = group.name
 
     def set_sleep(self, sleep: SleepFunc) -> None:
         """周期待ち関数を差し替える (テスト用)。"""
@@ -236,7 +235,7 @@ class M3508PositionLoop:
         if group_name is None:
             targets: tuple[str, ...] = (name,)
         else:
-            targets = tuple(m.motor_name for m in self._sync_groups[group_name].members)
+            targets = tuple(m.name for m in self._sync_groups[group_name].members)
 
         for target in targets:
             self._axes[target].pid.set_gains(**{key: float(value)})
@@ -304,9 +303,9 @@ class M3508PositionLoop:
         """
         group = self._sync_groups[name]
         for member in group.members:
-            self._axes[member.motor_name].driver.reset_multi_turn_origin()
+            self._axes[member.name].driver.reset_multi_turn_origin()
         for member in group.members:
-            self.clear_target(member.motor_name)
+            self.clear_target(member.name)
 
     def reset_sync_violation(self, name: str | None = None) -> None:
         """偏差超過のラッチを解除する (None で全グループ)。
@@ -516,7 +515,7 @@ class M3508PositionLoop:
         """
         blocked = set(self._sync_violations)
         for group in self._sync_groups.values():
-            if any(stale[member.motor_name] for member in group.members):
+            if any(stale[member.name] for member in group.members):
                 # 左右直結の機構では片方だけ止めると残った側が押し続けて壊れるため、
                 # 1 台でも途絶したらグループ全員を電流 0 にする
                 blocked.add(group.name)
@@ -543,14 +542,16 @@ class M3508PositionLoop:
         する」局所保護で、機構が壊れる前に力を抜くことだけを担う。SyncMonitor は
         「試合を止めて人間に知らせる」全体保護で役割が違うため、片方があれば十分とは
         しない。連続サンプル数による debounce も入れない (壊れるまでの猶予が短く、
-        1 周期でも早く力を抜く方が安全側)。
+        1 周期でも早く力を抜く方が安全側。誤発報しても代償は電流 0 だけで済む)。
+        超過の境界そのものは SyncGroup.violation に一本化してある
+        (3 層の比較は lib/axis_sync.py のモジュール docstring を参照)。
         """
         positions = {
-            member.motor_name: self._axes[member.motor_name].driver.feedback_position()
+            member.name: self._axes[member.name].driver.feedback_position()
             for member in group.members
         }
-        deviation = group.deviation(positions)
-        if deviation is None or deviation <= group.tolerance:
+        deviation = group.violation(positions)
+        if deviation is None:
             return False
 
         self._sync_violations.add(group.name)

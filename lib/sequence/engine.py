@@ -179,13 +179,15 @@ class Sequence:
                 f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
             )
 
-        # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない
+        # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない。
+        # 判定そのものは SyncGroup.violation (3 層共通) が持ち、ここは結果を例外に変えるだけ
         desynced = []
         for handle, _, _ in pending:
-            error = handle.sync_error()
-            allowed = table.sync_tolerance(handle.name)
-            if error is not None and allowed is not None and error > allowed:
-                desynced.append(f"{handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
+            error = handle.sync_violation()
+            if error is None:
+                continue
+            allowed = table.sync_tolerance(handle.name) or 0.0
+            desynced.append(f"{handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
         if desynced:
             raise AxisSyncError(
                 f"シーケンス '{self.name}': 軸内のモータ位置がずれています ({', '.join(desynced)})"

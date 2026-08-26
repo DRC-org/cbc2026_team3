@@ -130,11 +130,11 @@ class TestHealth:
 
     def test_thermal_warning_below_threshold(self) -> None:
         self._feed(temp=60)
-        assert self.driver.has_thermal_warning(temp_warning_c=65, temp_critical_c=80) is False
+        assert self.driver.has_thermal_warning(temp_warning_c=65) is False
 
     def test_thermal_warning_at_threshold(self) -> None:
         self._feed(temp=65)
-        assert self.driver.has_thermal_warning(temp_warning_c=65, temp_critical_c=80) is True
+        assert self.driver.has_thermal_warning(temp_warning_c=65) is True
 
     def test_thermal_fault_at_critical(self) -> None:
         self._feed(temp=80)
@@ -183,20 +183,20 @@ class TestMotorCheck:
         # can_id=1 → スロット 0 に 500 mA 投入
         assert values[0] == 500
         assert values[1] == 0
-        assert context["target"] == pytest.approx(500.0)
-        assert context["mode"] == "current"
+        assert context.target == pytest.approx(500.0)
+        assert context.mode is ControlMode.CURRENT
 
     def test_check_command_negative_magnitude(self) -> None:
         msg, context = self.driver.check_command(magnitude=-500.0)
         values = struct.unpack(">hhhh", msg.data)
         assert values[0] == -500
-        assert context["target"] == pytest.approx(-500.0)
+        assert context.target == pytest.approx(-500.0)
 
     def test_evaluate_passed_when_velocity_sign_matches(self) -> None:
         _, context = self.driver.check_command(magnitude=500.0)
         # 電流指令と同符号の rpm がフィードバック → PASSED
         self._feed(velocity=300)
-        passed, detail = self.driver.evaluate_check_result(self.driver.state, context)
+        passed, detail = self.driver.evaluate_check_result(context)
         assert passed is True
         assert detail is None
 
@@ -204,7 +204,7 @@ class TestMotorCheck:
         _, context = self.driver.check_command(magnitude=500.0)
         # 電流指令は正だが rpm が逆方向 → FAILED
         self._feed(velocity=-300)
-        passed, detail = self.driver.evaluate_check_result(self.driver.state, context)
+        passed, detail = self.driver.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -212,7 +212,7 @@ class TestMotorCheck:
         _, context = self.driver.check_command(magnitude=500.0)
         # |rpm| < 50 は「回転検出なし」
         self._feed(velocity=10)
-        passed, detail = self.driver.evaluate_check_result(self.driver.state, context)
+        passed, detail = self.driver.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
         assert "回転" in detail

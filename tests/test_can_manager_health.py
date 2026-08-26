@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import can
 import pytest
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorDriver, MotorState
+from lib.config_schema import DEFAULT_HEALTH
+from lib.drivers.base import MotorState
 from lib.health import BusHealth, HealthSnapshot, MotorHealth
+from tests.fake_drivers import CheckStubDriver
 
 
-class _FakeMotor(MotorDriver):
+class _FakeMotor(CheckStubDriver):
     """ヘルスチェックテスト専用の簡易ドライバ。
 
     MotorDriver の判定 API (has_thermal_warning など) を属性で直接制御し、
@@ -36,7 +39,7 @@ class _FakeMotor(MotorDriver):
     def matches_feedback(self, msg: can.Message) -> bool:
         return msg.arbitration_id == 0x200 + self.can_id
 
-    def has_thermal_warning(self, temp_warning_c: float, temp_critical_c: float) -> bool:
+    def has_thermal_warning(self, temp_warning_c: float) -> bool:
         return self.thermal_warning
 
     def has_thermal_fault(self, temp_critical_c: float) -> bool:
@@ -118,7 +121,7 @@ class TestCANManagerHealth:
             with pytest.raises(asyncio.CancelledError):
                 await mgr._receive_loop("bus0")
 
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.OK
         assert snap.motors[0].last_feedback_at is not None
         assert snap.motors[0].feedback_age_ms is not None
@@ -128,7 +131,7 @@ class TestCANManagerHealth:
         # last_rx_at が timeout を超えていると STALE
         mgr, motor = mgr_with_motors
         mgr._last_rx_at[motor.name] = time.time() - 1.0  # 1 秒前
-        snap = mgr.health(feedback_timeout_ms=100.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=100.0))
         assert snap.motors[0].state is MotorHealth.STALE
 
     def test_thermal_warning(self, mgr_with_motors) -> None:
@@ -136,7 +139,7 @@ class TestCANManagerHealth:
         mgr, motor = mgr_with_motors
         mgr._last_rx_at[motor.name] = time.time()
         motor.thermal_warning = True
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.WARNING
         # overall は DEGRADED に正規化される (health.py の _MOTOR_TO_BUS_SEVERITY 参照)
         assert snap.overall is BusHealth.DEGRADED
@@ -146,7 +149,7 @@ class TestCANManagerHealth:
         mgr, motor = mgr_with_motors
         mgr._last_rx_at[motor.name] = time.time()
         motor.thermal_fault = True
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.FAULT
         assert snap.overall is BusHealth.DOWN
 
@@ -154,7 +157,7 @@ class TestCANManagerHealth:
         mgr, motor = mgr_with_motors
         mgr._last_rx_at[motor.name] = time.time()
         motor.overcurrent = True
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.WARNING
 
     def test_is_fault_takes_priority(self, mgr_with_motors) -> None:
@@ -163,7 +166,7 @@ class TestCANManagerHealth:
         mgr._last_rx_at[motor.name] = time.time()
         motor.fault = True
         motor.thermal_warning = True  # 同時に warning でも FAULT 維持
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.FAULT
 
     async def test_send_failure_increments_tx_error_and_degrades(self) -> None:
@@ -184,7 +187,7 @@ class TestCANManagerHealth:
         assert mgr._tx_error_count["bus0"] == 3
 
         # しきい値 2 で DEGRADED 判定
-        snap = mgr.health(tx_error_threshold=2)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, tx_error_threshold=2))
         assert snap.buses[0].state is BusHealth.DEGRADED
         assert snap.buses[0].tx_error_count == 3
 

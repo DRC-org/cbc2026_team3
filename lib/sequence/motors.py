@@ -277,21 +277,19 @@ class AxisHandle:
         )
         return all(results)
 
-    def sync_error(self) -> float | None:
-        """モータ間のずれ (人間の単位)。監視対象でない軸は None。
+    def sync_violation(self) -> float | None:
+        """許容差を超えたモータ間のずれ (人間の単位)。超過していなければ None。
 
-        逆回転ペアは scale の符号で向きが吸収されるため、正しく追従していれば 0 に近づく。
+        判定は 3 層で共有する ``SyncGroup.violation`` に委ねる。ここは
+        ``move_to`` の完了時に 1 回だけ見る層で、静止後の 1 サンプルしか使わない
+        (層ごとの違いは lib/axis_sync.py のモジュール docstring を参照)。
         """
-        if self._spec.sync_tolerance is None:
+        group = self._spec.sync_group
+        if group is None:
             return None
-
-        values = [
-            self._motors[handle.name].to_value(handle.driver.feedback_position())
-            for handle in self._handles
-        ]
-        if not values:
-            return None
-        return max(values) - min(values)
+        return group.violation(
+            {handle.name: handle.driver.feedback_position() for handle in self._handles}
+        )
 
     def _tolerance_for(self, motor_name: str) -> float | None:
         """人間の単位の許容差をモータの指令単位へ換算する。
@@ -301,8 +299,7 @@ class AxisHandle:
         """
         if self._spec.tolerance is None:
             return None
-        # 許容差は幅であって向きを持たないため、scale が負でも正の幅になるようにする
-        return abs(self._spec.tolerance * self._motors[motor_name].scale)
+        return self._motors[motor_name].to_tolerance(self._spec.tolerance)
 
 
 def build_motor_group(

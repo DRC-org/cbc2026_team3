@@ -10,14 +10,15 @@ from unittest.mock import AsyncMock, MagicMock
 import can
 import pytest
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorState
 from lib.match_state import Court
 from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
+from tests.fake_drivers import CheckStubDriver
 
 
-class _EchoDriver(MotorDriver):
+class _EchoDriver(CheckStubDriver):
     """指令値をそのままフィードバックに反映する (常に即到達する) テスト用ドライバ。"""
 
     def __init__(self, name: str, *, reaches: bool = True, bias: float = 0.0) -> None:

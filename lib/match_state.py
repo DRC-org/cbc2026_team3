@@ -43,37 +43,25 @@ class Phase(StrEnum):
     FINISHED = "finished"
 
 
-#: 実行を許可するフェーズをコマンド別に列挙する。ここに無いコマンドはゲート対象外。
-#: UI でボタンを隠すだけでは WS を直接叩かれた場合やリロード直後を防げないため、
-#: サーバー側でも同じ制約を二重に掛ける。
-_ALLOWED_PHASES: dict[str, frozenset[Phase]] = {
-    # 試合中のみ: シーケンスの進行操作
-    "sequence_start": frozenset({Phase.MATCH}),
-    "sequence_jump": frozenset({Phase.MATCH}),
-    "trigger": frozenset({Phase.MATCH}),
-    # 試合中以外: モータを微小駆動する動作確認は試合中に走らせてはならない
-    "motor_check_start": frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED}),
-    # 準備中のみ: 設定変更とチェックリスト操作
-    "set_court": frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED}),
-    "checklist_set": frozenset({Phase.SETUP, Phase.READY}),
-    "checklist_reset": frozenset({Phase.SETUP, Phase.READY}),
-    # フェーズ遷移そのもの
-    "match_start": frozenset({Phase.READY}),
-    "match_finish": frozenset({Phase.MATCH}),
-}
+# 以下はこの状態機械が「どのフェーズで何を受け付けるか」の唯一の定義。
+# lib/commands.py のコマンドゲートも同じ定数を参照する。名前付きの集合にしておかないと、
+# MatchState 自身の遷移条件とコマンドゲートに同じ列挙が二重に書かれ、片方だけ直されて
+# 「サーバーは受け付けるのに状態機械が拒む」ずれが生まれる。
 
-#: 拒否理由の文言。操縦者がなぜ弾かれたか分かるようにする
-_DENY_MESSAGES: dict[str, str] = {
-    "sequence_start": "試合中のみシーケンスを開始できます",
-    "sequence_jump": "試合中のみステップ移動できます",
-    "trigger": "試合中のみトリガーを送れます",
-    "motor_check_start": "試合中は動作確認を実行できません",
-    "set_court": "試合中はコートを変更できません",
-    "checklist_set": "このフェーズではチェックリストを操作できません",
-    "checklist_reset": "このフェーズではチェックリストを操作できません",
-    "match_start": "チェックリスト完了後に試合を開始できます",
-    "match_finish": "試合中ではありません",
-}
+#: ゲートしない (全フェーズで受け付ける) ことを明示するための集合。
+PHASES_ANY: frozenset[Phase] = frozenset(Phase)
+
+#: 試合中のみ。シーケンスの進行操作と試合終了はここ。
+PHASES_DURING_MATCH: frozenset[Phase] = frozenset({Phase.MATCH})
+
+#: 試合中以外。モータを微小駆動する動作確認や設定変更は試合進行を乱すため試合中に通さない。
+PHASES_OUTSIDE_MATCH: frozenset[Phase] = frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED})
+
+#: 準備中のみ。指差喚呼は試合が終わるまでやり直させない (結果確認の前に消させない)。
+PHASES_PREPARATION: frozenset[Phase] = frozenset({Phase.SETUP, Phase.READY})
+
+#: 試合開始ゲート。READY = 2 名の指差喚呼が揃った状態でしか試合へ入れない。
+PHASES_START_GATE: frozenset[Phase] = frozenset({Phase.READY})
 
 
 @dataclass
@@ -176,21 +164,16 @@ class MatchState:
     def can_start_match(self) -> bool:
         return all(state.completed for state in self.checklists.values())
 
-    def deny_reason(self, command: str) -> str | None:
-        """現フェーズで command が許可されなければ理由文字列を返す。許可なら None。"""
-        allowed = _ALLOWED_PHASES.get(command)
-        if allowed is None or self._phase in allowed:
-            return None
-        return _DENY_MESSAGES.get(
-            command, f"現在のフェーズ ({self._phase.value}) では実行できません"
-        )
+    def allows(self, phases: frozenset[Phase]) -> bool:
+        """現フェーズが phases に含まれるか。コマンドゲートと遷移条件の共通判定。"""
+        return self._phase in phases
 
     # ------------------------------------------------------------------ #
     #  更新
     # ------------------------------------------------------------------ #
 
     def set_court(self, court: Court) -> bool:
-        if self.deny_reason("set_court") is not None:
+        if not self.allows(PHASES_OUTSIDE_MATCH):
             return False
         if court is not self._court:
             self._court = court
@@ -200,7 +183,7 @@ class MatchState:
         return True
 
     def set_checklist_item(self, role: str, item_id: str, checked: bool) -> bool:
-        if self.deny_reason("checklist_set") is not None:
+        if not self.allows(PHASES_PREPARATION):
             return False
         state = self.checklists.get(role)
         if state is None:
@@ -213,7 +196,7 @@ class MatchState:
         return False
 
     def reset_checklist(self, role: str | None = None) -> bool:
-        if self.deny_reason("checklist_reset") is not None:
+        if not self.allows(PHASES_PREPARATION):
             return False
         if role is None:
             self._reset_all_checklists()
@@ -226,13 +209,13 @@ class MatchState:
         return True
 
     def match_start(self) -> bool:
-        if self.deny_reason("match_start") is not None:
+        if not self.allows(PHASES_START_GATE):
             return False
         self._phase = Phase.MATCH
         return True
 
     def match_finish(self) -> bool:
-        if self.deny_reason("match_finish") is not None:
+        if not self.allows(PHASES_DURING_MATCH):
             return False
         self._phase = Phase.FINISHED
         return True

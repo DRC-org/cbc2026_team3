@@ -5,15 +5,17 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from lib.axis_sync import SyncGroup
+from lib.config_schema import DEFAULT_HEALTH
 
 if TYPE_CHECKING:
     from lib.drivers.base import MotorDriver
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_INTERVAL_S", "SyncGroup", "SyncMember", "SyncMonitor"]
+__all__ = ["DEFAULT_INTERVAL_S", "SyncMonitor"]
 
 # 監視周期 50Hz。機構が壊れる前に止まればよく、位置制御ループの 200Hz は要らない
 DEFAULT_INTERVAL_S = 0.02
@@ -21,6 +23,7 @@ DEFAULT_INTERVAL_S = 0.02
 # 発報に必要な連続超過サンプル数。1 サンプルの外れ値 (CAN の取りこぼしや
 # フィードバックの量子化ノイズ) で試合中に緊急停止させないためのノイズ対策。
 # 50Hz x 2 サンプル = 40ms なので、機構が破損する前には十分間に合う
+# (層ごとに debounce が違う理由は lib/axis_sync.py のモジュール docstring を参照)
 DEFAULT_VIOLATION_SAMPLES = 2
 
 # 同一原因のログを毎周期出すと 50Hz でログが溢れるため、種類ごとに間引く
@@ -29,48 +32,6 @@ _LOG_THROTTLE_S = 1.0
 ViolationHandler = Callable[[str, float], None]
 FeedbackClock = Callable[[], float]
 SleepFunc = Callable[[float], Awaitable[None]]
-
-
-@dataclass(frozen=True)
-class SyncMember:
-    """同期グループを構成する 1 台のモータの単位換算。
-
-    逆回転で同一動作をするペアは ``scale`` の符号で表す。``lib/sequence`` の
-    ``MotorSpec`` と同じ換算だが、制御層からシーケンス層へ依存させないために
-    値だけを受け取る (組み立ては main.py が行う)。
-    """
-
-    motor_name: str
-    scale: float
-    offset: float
-
-    def to_value(self, command: float) -> float:
-        """指令値・フィードバックを人間の単位へ戻す。"""
-        return (command - self.offset) / self.scale
-
-
-@dataclass(frozen=True)
-class SyncGroup:
-    """機構的に直結し、位置が揃っていなければならないモータの組。"""
-
-    name: str
-    members: tuple[SyncMember, ...]
-    tolerance: float
-
-    def deviation(self, positions: Mapping[str, float]) -> float | None:
-        """人間の単位へ逆換算した位置の max - min。比較対象が 2 個未満なら None。
-
-        逆回転ペアでは指令単位のまま引き算しても意味を持たない (符号が逆)。
-        人間の単位へ戻してから比較することで「同じ動作をしているか」を直接見る。
-        """
-        values = [
-            member.to_value(positions[member.motor_name])
-            for member in self.members
-            if member.motor_name in positions
-        ]
-        if len(values) < 2:
-            return None
-        return max(values) - min(values)
 
 
 class SyncMonitor:
@@ -84,6 +45,9 @@ class SyncMonitor:
     ``y_axis`` は ``M3508PositionLoop`` 側の 200Hz 判定と二重になるが、これは意図的な
     多重防護である。ループ側は「電流を即 0 にする」局所的な保護、こちらは
     「試合を止めて人間に知らせる」全体的な保護で役割が違う。
+
+    誤発報の代償が「試合が止まる」ことなので、この層だけ ``violation_samples``
+    による debounce を持つ (3 層の比較は lib/axis_sync.py のモジュール docstring)。
     """
 
     def __init__(
@@ -92,7 +56,7 @@ class SyncMonitor:
         drivers: Mapping[str, MotorDriver],
         *,
         last_feedback_at: Callable[[str], float | None],
-        feedback_timeout_ms: float = 500.0,
+        feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         interval_s: float = DEFAULT_INTERVAL_S,
         violation_samples: int = DEFAULT_VIOLATION_SAMPLES,
         on_violation: ViolationHandler | None = None,
@@ -167,14 +131,10 @@ class SyncMonitor:
 
     def _check_group(self, group: SyncGroup, now: float) -> None:
         positions = self._fresh_positions(group, now)
-        deviation = group.deviation(positions)
+        deviation = group.violation(positions)
         if deviation is None:
-            # 比較対象が揃わない間は「ずれていない」とも「ずれている」とも言えない。
-            # 連続カウントも捨てて、判定は鮮度が戻ってからやり直す
-            self._counts[group.name] = 0
-            return
-
-        if deviation <= group.tolerance:
+            # 許容内、または比較対象が揃わず「ずれている」と言えない状態。
+            # 連続カウントを捨てることで、鮮度が戻ってから 2 サンプル数え直す
             self._counts[group.name] = 0
             return
 
@@ -205,13 +165,13 @@ class SyncMonitor:
         """
         positions: dict[str, float] = {}
         for member in group.members:
-            driver = self._drivers.get(member.motor_name)
+            driver = self._drivers.get(member.name)
             if driver is None:
                 continue
-            last_rx = self._last_feedback_at(member.motor_name)
+            last_rx = self._last_feedback_at(member.name)
             if last_rx is None or (now - last_rx) * 1000.0 > self._feedback_timeout_ms:
                 continue
-            positions[member.motor_name] = driver.feedback_position()
+            positions[member.name] = driver.feedback_position()
         return positions
 
     def _notify(self, group_name: str, deviation: float) -> None:

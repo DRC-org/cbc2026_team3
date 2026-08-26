@@ -4,7 +4,7 @@ import struct
 
 import can
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
 
 # 動作確認時に「回転検出なし」とみなす rpm のしきい値。
 # C620 のフィードバックノイズ・微小逆起電力を除去するため小さめに固定。
@@ -143,30 +143,29 @@ class M3508Driver(MotorDriver):
     # M3508 は電流制御専用のため、check は微小電流を 1 投入し
     # フィードバック rpm の符号一致で「指示が伝わって回転した」ことを確認する
 
-    def check_command(self, *, magnitude: float = 500.0) -> tuple[can.Message, dict]:
+    def check_command(self, *, magnitude: float = 500.0) -> tuple[can.Message, CheckContext]:
         msg = self.encode_target(ControlMode.CURRENT, magnitude)
-        context = {"target": float(magnitude), "mode": "current"}
+        context = CheckContext(
+            mode=ControlMode.CURRENT,
+            target=float(magnitude),
+            display_unit="mA",
+        )
         return msg, context
 
-    def evaluate_check_result(
-        self,
-        state: MotorState,
-        context: dict,
-        *,
-        tolerance: float | None = None,
-    ) -> tuple[bool, str | None]:
-        target = context["target"]
+    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
+        # 指令 [mA] とフィードバック [rpm] は次元が違うため追従判定 (evaluate_tracking) は
+        # 使えない。回転が出たことと駆動方向だけを見る
+        target = context.target
+        velocity = self._state.velocity
 
-        if abs(state.velocity) < _CHECK_VELOCITY_DEAD_BAND_RPM:
-            return False, (
-                f"回転検出なし (target={target:.0f}mA, velocity={state.velocity:.1f}rpm)"
-            )
+        if abs(velocity) < _CHECK_VELOCITY_DEAD_BAND_RPM:
+            return False, (f"回転検出なし (target={target:.0f}mA, velocity={velocity:.1f}rpm)")
 
         # 指令電流符号と rpm 符号が一致 → 駆動方向が正しい
-        if (target > 0 and state.velocity > 0) or (target < 0 and state.velocity < 0):
+        if (target > 0 and velocity > 0) or (target < 0 and velocity < 0):
             return True, None
 
-        return False, (f"回転方向不一致 (target={target:.0f}mA, velocity={state.velocity:.1f}rpm)")
+        return False, (f"回転方向不一致 (target={target:.0f}mA, velocity={velocity:.1f}rpm)")
 
     def reset_after_check(self) -> can.Message:
         # 駆動状態を残さないよう必ず 0 mA を再送する

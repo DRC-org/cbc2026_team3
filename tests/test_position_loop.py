@@ -6,6 +6,7 @@ import struct
 import can
 import pytest
 
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.control.pid import PIDController
 from lib.control.position_loop import (
     DEFAULT_INTERVAL_S,
@@ -13,7 +14,6 @@ from lib.control.position_loop import (
     M3508PositionLoop,
     make_position_pid,
 )
-from lib.control.sync_monitor import SyncGroup, SyncMember
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 
@@ -589,7 +589,7 @@ def _pair_group(*, name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
     """lift / tilt を逆回転ペアとして束ねたグループ (逆回転は scale の符号で表す)。"""
     return SyncGroup(
         name=name,
-        members=(SyncMember("lift", 1.0, 0.0), SyncMember("tilt", -1.0, 0.0)),
+        members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("tilt", -1.0, 0.0)),
         tolerance=tolerance,
     )
 
@@ -605,7 +605,7 @@ class TestSyncGroupRegistration:
         fx = _Fixture()
         group = SyncGroup(
             name="y_axis",
-            members=(SyncMember("lift", 1.0, 0.0), SyncMember("ghost", -1.0, 0.0)),
+            members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("ghost", -1.0, 0.0)),
             tolerance=2.0,
         )
         with pytest.raises(ValueError, match="ghost"):

@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 import can
 import yaml
 
+from lib.axis_sync import SyncGroup
 from lib.can_manager import CANManager
 from lib.config_schema import (
     MotorConfig,
@@ -20,7 +21,7 @@ from lib.config_schema import (
 )
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.base import MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -412,9 +413,10 @@ def _build_target_refresher(
 
 
 def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver]) -> list[SyncGroup]:
-    """位置定数のペア軸から同期監視グループを組み立てる。
+    """位置定数のペア軸のうち、このロボットに実在するものだけを監視対象にする。
 
-    逆回転ペアは MotorSpec の scale の符号がそのまま監視側の換算になる。
+    グループ自体は ``AxisSpec.sync_group`` が返す (単位換算はモータ定義をそのまま
+    使うため、ここで詰め替えない)。この関数の責務は実在確認だけ。
     """
     groups: list[SyncGroup] = []
     for axis_name in positions.paired_axes():
@@ -428,15 +430,9 @@ def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver])
                 ", ".join(missing),
             )
             continue
-        groups.append(
-            SyncGroup(
-                name=axis_name,
-                members=tuple(
-                    SyncMember(motor.name, motor.scale, motor.offset) for motor in spec.motors
-                ),
-                tolerance=float(spec.sync_tolerance or 0.0),
-            )
-        )
+        group = spec.sync_group
+        if group is not None:
+            groups.append(group)
     return groups
 
 
@@ -448,7 +444,7 @@ def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop])
     バスをまたぐペアは SyncMonitor による全体緊急停止だけで守る。
     """
     for group in groups:
-        member_names = {member.motor_name for member in group.members}
+        member_names = {member.name for member in group.members}
         target = next(
             (loop for loop in loops if member_names <= set(loop.motor_names)),
             None,
@@ -549,10 +545,7 @@ async def main() -> None:
     server = RobotServer(
         host=args.host,
         port=args.port,
-        feedback_timeout_ms=health.feedback_timeout_ms,
-        temp_warning_c=health.temp_warning_c,
-        temp_critical_c=health.temp_critical_c,
-        tx_error_threshold=health.tx_error_threshold,
+        health=health,
         motor_check_per_motor_timeout_ms=system.motor_check.per_motor_timeout_ms,
         motor_check_default_magnitude=dict(system.motor_check.default_magnitude),
         motor_check_per_motor_overrides=motor_check_overrides,

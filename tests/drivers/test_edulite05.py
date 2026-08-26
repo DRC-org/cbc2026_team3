@@ -41,6 +41,10 @@ def feedback_message(
     return can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=True)
 
 
+def messages_of(steps: list[tuple[can.Message, float]]) -> list[can.Message]:
+    return [message for message, _delay in steps]
+
+
 def steps_as_frames(
     steps: list[tuple[can.Message, float]],
 ) -> list[tuple[int, bytes, float]]:
@@ -150,7 +154,7 @@ def test_initialization_messages_apply_configuration_in_safe_order() -> None:
         position_kp=30.0,
         set_zero_on_start=True,
     )
-    messages = driver.initialization_messages()
+    messages = messages_of(driver.initialization_steps())
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
 
     assert comm_types == [4, 18, 18, 18, 18, 6]
@@ -172,7 +176,8 @@ def test_initialization_messages_apply_configuration_in_safe_order() -> None:
 def test_initialization_does_not_set_zero_by_default() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     comm_types = [
-        driver.parse_can_id(msg.arbitration_id)[0] for msg in driver.initialization_messages()
+        driver.parse_can_id(msg.arbitration_id)[0]
+        for msg in messages_of(driver.initialization_steps())
     ]
     assert driver.COMM_TYPE_SET_ZERO not in comm_types
     assert driver.COMM_TYPE_ENABLE not in comm_types
@@ -247,14 +252,17 @@ def test_check_uses_position_parameter_and_current_position() -> None:
     msg, context = driver.check_command(magnitude=5.0)
 
     assert msg.data == struct.pack("<Hxxf", driver.PARAM_LOC_REF, target)
-    assert context == {"target": target, "magnitude_deg": 5.0, "mode": "position"}
+    assert context.mode is ControlMode.POSITION
+    assert context.target == pytest.approx(target)
+    # 指令直前の実測角を持たないと「既に目標角に居るのに動いた」と判定できてしまう
+    assert context.reference == pytest.approx(driver.state.position)
 
 
 def test_prepare_check_writes_hold_target_before_enable() -> None:
     """保持目標を書かずに励磁すると、動作確認の瞬間にアームが原点へ飛ぶ。"""
     driver = Edulite05Driver("m1", can_id=5)
     driver.update_state(feedback_message(driver, position=0.8))
-    messages = driver.prepare_check()
+    messages = messages_of(driver.prepare_check_steps())
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
 
     enable_index = comm_types.index(driver.COMM_TYPE_ENABLE)
@@ -296,7 +304,7 @@ def test_prepare_check_after_set_zero_holds_new_origin() -> None:
     driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
     driver.update_state(feedback_message(driver, position=0.8))
 
-    messages = driver.prepare_check()
+    messages = messages_of(driver.prepare_check_steps())
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
 
     set_zero_index = comm_types.index(driver.COMM_TYPE_SET_ZERO)
@@ -317,7 +325,7 @@ def test_prepare_check_keeps_configured_run_mode() -> None:
     driver = Edulite05Driver("m1", can_id=5, mode="velocity")
     driver.update_state(feedback_message(driver, velocity=3.0))
 
-    messages = driver.prepare_check()
+    messages = messages_of(driver.prepare_check_steps())
     run_mode_frames = [
         msg
         for msg in messages
@@ -342,14 +350,15 @@ def test_check_command_and_evaluation_follow_configured_mode() -> None:
 
     assert struct.unpack("<H", msg.data[:2])[0] == driver.PARAM_SPD_REF
     assert struct.unpack("<f", msg.data[4:])[0] == pytest.approx(expected)
-    assert context["mode"] == "velocity"
-    assert context["target"] == pytest.approx(expected)
+    assert context.mode is ControlMode.VELOCITY
+    assert context.target == pytest.approx(expected)
 
-    passed, _detail = driver.evaluate_check_result(MotorState(velocity=expected), context)
+    driver.update_state(feedback_message(driver, velocity=expected))
+    passed, _detail = driver.evaluate_check_result(context)
     assert passed is True
-    # 静止 (velocity=0) は既定許容差 5rpm とちょうど同じ差になり合否が境界上に乗るため、
-    # 逆回転を不合格の代表にする
-    failed, detail = driver.evaluate_check_result(MotorState(velocity=-expected), context)
+
+    driver.update_state(feedback_message(driver, velocity=-expected))
+    failed, detail = driver.evaluate_check_result(context)
     assert failed is False
     assert "rpm" in detail
 
@@ -379,8 +388,10 @@ def test_emergency_stop_uses_extended_disable_without_fault_clear() -> None:
 
 def test_evaluate_check_result_and_reset() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    context = {"target": math.radians(5.0)}
-    passed, detail = driver.evaluate_check_result(MotorState(position=math.radians(4.5)), context)
+    driver.update_state(feedback_message(driver, position=0.0))
+    _msg, context = driver.check_command(magnitude=5.0)
+    driver.update_state(feedback_message(driver, position=math.radians(4.5)))
+    passed, detail = driver.evaluate_check_result(context)
 
     assert passed is True
     assert detail is None
@@ -425,7 +436,8 @@ def test_initialization_steps_never_contain_enable() -> None:
     """起動フレームだけで enable すると現在角を書く前に励磁されてしまう。"""
     driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
     comm_types = [
-        driver.parse_can_id(msg.arbitration_id)[0] for msg in driver.initialization_messages()
+        driver.parse_can_id(msg.arbitration_id)[0]
+        for msg in messages_of(driver.initialization_steps())
     ]
     assert driver.COMM_TYPE_ENABLE not in comm_types
 

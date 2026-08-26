@@ -9,9 +9,9 @@ from __future__ import annotations
 import can
 import pytest
 
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.control.sync_monitor import SyncGroup, SyncMember
 from lib.drivers.m3508 import M3508Driver
 
 BUS = "m3508_bus"
@@ -96,8 +96,8 @@ def _build_loop() -> tuple[M3508PositionLoop, _StubCANManager]:
         SyncGroup(
             name="y_axis",
             members=(
-                SyncMember(motor_name="y_axis_r", scale=1.0, offset=0.0),
-                SyncMember(motor_name="y_axis_l", scale=-1.0, offset=0.0),
+                MotorSpec(name="y_axis_r", scale=1.0, offset=0.0),
+                MotorSpec(name="y_axis_l", scale=-1.0, offset=0.0),
             ),
             tolerance=5.0,
         )

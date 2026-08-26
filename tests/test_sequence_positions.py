@@ -273,11 +273,12 @@ class TestPairedAxis:
 
         assert table.commands("gripper", "open") == {"gripper": pytest.approx(30.0)}
 
-    def test_legacy_command_on_paired_axis_returns_first_motor(self) -> None:
-        """既存呼び出し元を壊さないため、ペア軸でも command() は motors[0] を返す。"""
+    def test_command_rejects_paired_axis(self) -> None:
+        """先頭モータの scale だけを返すと、左のモータへ右の符号が当たって機構が壊れる。"""
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
-        assert table.command("y_axis", "work") == pytest.approx(10.0 * 864.15)
+        with pytest.raises(ValueError, match="y_axis"):
+            table.command("y_axis", "work")
 
     def test_motor_names_and_is_paired(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
