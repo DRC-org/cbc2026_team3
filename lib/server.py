@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 
+#: 1 クライアントへの送信を諦めるまでの秒数。
+#: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
+_WS_SEND_TIMEOUT_S = 1.0
+
 
 # overall を最悪値で集約するためのランク。lib.health._BUS_SEVERITY_RANK と一致させる
 # (重複定義を避けたいが、health.py 側を private 扱いにしているため局所コピーする)。
@@ -104,6 +108,8 @@ class RobotServer:
         self._app: web.Application | None = None
         self._robots: dict[str, RobotContext] = {}
         self._ws_clients: set[web.WebSocketResponse] = set()
+        #: 切り離し中のクライアントを閉じるタスク。GC で消えないよう参照を保持する
+        self._closing_tasks: set[asyncio.Task[None]] = set()
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
         self._e_stop_active: bool = False
@@ -245,6 +251,10 @@ class RobotServer:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._sequence_tasks.clear()
+
+        for task in self._closing_tasks:
+            task.cancel()
+        self._closing_tasks.clear()
 
         for ws in set(self._ws_clients):
             await ws.close()
@@ -582,14 +592,48 @@ class RobotServer:
         msg = json.dumps(payload, ensure_ascii=False)
         dead: set[web.WebSocketResponse] = set()
         for ws in self._ws_clients:
-            if ws.closed:
+            if ws.closed or not await self._send_or_drop(ws, msg):
                 dead.add(ws)
-                continue
-            try:
-                await ws.send_str(msg)
-            except ConnectionResetError:
-                dead.add(ws)
+        await self._drop_clients(dead)
+
+    async def _send_or_drop(self, ws: web.WebSocketResponse, msg: str) -> bool:
+        """1 クライアントへ送信する。詰まった相手は生存とみなさず切り離す。
+
+        aiohttp の `send_str` は相手が読まなくなると無期限に待つ。配信は全
+        クライアントへ直列に行うため、1 台でも詰まると他の全員 — Monitor を含む —
+        のテレメトリが止まる。しかも WebSocket 自体は開いたままなので UI は
+        「接続中」を出し続け、操縦者は凍った値を最新だと思って見続けることになる。
+        操縦者のノート PC がスリープに入る・Wi-Fi が切れるだけで起きうるため、
+        送信ごとに上限を設けて超えた相手を切り離す。
+        """
+        try:
+            await asyncio.wait_for(ws.send_str(msg), timeout=_WS_SEND_TIMEOUT_S)
+            return True
+        except TimeoutError:
+            logger.warning("WebSocket 送信がタイムアウトしたためクライアントを切り離します")
+        except ConnectionResetError:
+            logger.debug("WebSocket 送信先が既に切断されています")
+        except Exception:
+            logger.warning("WebSocket 送信に失敗したためクライアントを切り離します", exc_info=True)
+        return False
+
+    async def _close_quietly(self, ws: web.WebSocketResponse) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(ws.close(), timeout=_WS_SEND_TIMEOUT_S)
+
+    async def _drop_clients(self, dead: set[web.WebSocketResponse]) -> None:
+        """切り離したクライアントの後始末。ソケットも閉じて再接続を促す。
+
+        `close()` は相手からのクローズ応答を待つ。送信が詰まっている相手は
+        まさにその応答を返さないので、ここで await すると送信タイムアウトを
+        設けた意味がなくなり配信ループが同じ場所で止まる。
+        後始末は別タスクへ切り離し、配信ループは決して待たない。
+        """
         self._ws_clients -= dead
+        for ws in dead:
+            task = asyncio.create_task(self._close_quietly(ws))
+            self._closing_tasks.add(task)
+            task.add_done_callback(self._closing_tasks.discard)
 
     async def _broadcast_json(self, payload: dict) -> None:
         """単一の JSON dict を全クライアントへ送信する共通ヘルパ。
@@ -600,14 +644,9 @@ class RobotServer:
         msg = json.dumps(payload, ensure_ascii=False)
         dead: set[web.WebSocketResponse] = set()
         for ws in self._ws_clients:
-            if ws.closed:
+            if ws.closed or not await self._send_or_drop(ws, msg):
                 dead.add(ws)
-                continue
-            try:
-                await ws.send_str(msg)
-            except ConnectionResetError:
-                dead.add(ws)
-        self._ws_clients -= dead
+        await self._drop_clients(dead)
 
     # ------------------------------------------------------------------ #
     #  アクチュエータ動作確認 (Phase 6 段階⑨ — タスク 6-22)
@@ -785,8 +824,20 @@ class RobotServer:
         return web.json_response({"snapshot": snapshot.to_dict()}, status=200)
 
     async def _broadcast_loop(self) -> None:
+        """テレメトリ配信ループ。1 回の例外でループごと終わらせてはならない。
+
+        このタスクが死ぬと WebSocket は繋がったままなので、UI は「接続中」を出しつつ
+        値だけが凍る。操縦者は画面が生きていると信じたまま古い値を見続けることになり、
+        機体が異常でも気付けない。1 フレームの失敗は握って次の周期へ進み、
+        配信そのものは何があっても継続させる。
+        """
         while True:
-            await self._broadcast_state()
+            try:
+                await self._broadcast_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("状態配信に失敗しました (配信は継続します)")
             await asyncio.sleep(self._broadcast_interval)
 
     def _compute_health(self, robot_name: str) -> HealthSnapshot:
@@ -889,24 +940,12 @@ class RobotServer:
             if ws.closed:
                 dead.add(ws)
                 continue
-            sent_ok = True
-            for msg_text in state_messages:
-                try:
-                    await ws.send_str(msg_text)
-                except ConnectionResetError:
-                    dead.add(ws)
-                    sent_ok = False
-                    break
-            if not sent_ok:
-                continue
-            for ev_text in change_events:
-                try:
-                    await ws.send_str(ev_text)
-                except ConnectionResetError:
+            for msg_text in (*state_messages, *change_events):
+                if not await self._send_or_drop(ws, msg_text):
                     dead.add(ws)
                     break
 
-        self._ws_clients -= dead
+        await self._drop_clients(dead)
 
         # 4) 差分検出後にスナップショットを更新する。順序を逆にすると
         #    1 回目の broadcast で health_change が出てしまう。
