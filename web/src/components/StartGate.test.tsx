@@ -68,6 +68,42 @@ describe("StartGate", () => {
     expect(screen.getByRole("button", { name: "試合を開始する" })).toBeEnabled();
   });
 
+  it("サーバーが開始可と言えば、知らないロールのチェックリストが未完でも止めない", () => {
+    // 判定を 2 箇所に置くと、サーバーは can_start_match=true なのに画面だけが
+    // ボタンを殺す。配信ロールが 1 つ増えただけで試合開始できなくなった実例がある
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: HEALTHY_STATES,
+      matchState: {
+        ...DEFAULT_MATCH_STATE,
+        can_start_match: true,
+        checklists: {
+          main_hand: checklist([{ id: "a", label: "電源投入", checked: true }]),
+          sub_hand: checklist([{ id: "c", label: "初期位置確認", checked: true }]),
+          unknown_role: checklist([{ id: "z", label: "知らない項目", checked: false }]),
+        },
+      },
+    });
+
+    expect(screen.getByText("試合を開始できます")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "試合を開始する" })).toBeEnabled();
+    expect(screen.queryByText(/知らない項目/)).not.toBeInTheDocument();
+  });
+
+  it("開始不可の理由が分からなくても、押せないボタンだけを見せない", () => {
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: HEALTHY_STATES,
+      matchState: {
+        ...DEFAULT_MATCH_STATE,
+        can_start_match: false,
+        checklists: { main_hand: checklist([{ id: "a", label: "電源投入", checked: true }]) },
+      },
+    });
+
+    expect(screen.getByText("まだ開始できません")).toBeInTheDocument();
+    expect(screen.getByText(/未完了の項目があります/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "試合を開始する" })).toBeDisabled();
+  });
+
   it("切断中は開始できない", () => {
     renderWithRobot(<StartGate onStart={vi.fn()} />, {
       connected: false,

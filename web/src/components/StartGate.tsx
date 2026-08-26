@@ -38,18 +38,26 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     blockers.push({ label: "フェーズ", detail: "リセットしてセッティングへ戻してください" });
   }
 
-  // どのロールの何項目が残っているかまで出す。件数だけでは担当者が動けない。
-  // checklists のキーがそのまま開始ゲートの対象ロール (サーバーが正)
-  for (const [role, checklist] of Object.entries(matchState.checklists)) {
-    if (checklist.completed) continue;
-    const remaining = checklist.items.filter((i) => !i.checked);
-    blockers.push({
-      label: ROLE_LABEL[role] ?? role,
-      detail:
-        remaining.length === 0
-          ? "未完了"
-          : `残り ${remaining.length} 件 — ${remaining[0].label}${remaining.length > 1 ? " ほか" : ""}`,
-    });
+  // 開始可否を決めるのはサーバーの can_start_match だけ。ここは「なぜ開始できないか」を
+  // 説明するに留める。クライアントでも判定し直すと、サーバーは開始できると言っているのに
+  // 画面がボタンを殺す状態が生まれる (実際に、配信ロールが 1 つ増えただけでそうなった)。
+  if (!canStart) {
+    // どのロールの何項目が残っているかまで出す。件数だけでは担当者が動けない
+    const incomplete = Object.entries(matchState.checklists).filter(([, c]) => !c.completed);
+    for (const [role, checklist] of incomplete) {
+      const remaining = checklist.items.filter((i) => !i.checked);
+      blockers.push({
+        label: ROLE_LABEL[role] ?? role,
+        detail:
+          remaining.length === 0
+            ? "未完了"
+            : `残り ${remaining.length} 件 — ${remaining[0].label}${remaining.length > 1 ? " ほか" : ""}`,
+      });
+    }
+    // 理由を 1 つも挙げられないまま押せないボタンだけを見せない
+    if (incomplete.length === 0) {
+      blockers.push({ label: "指差喚呼", detail: "未完了の項目があります" });
+    }
   }
 
   // 機体側の異常は「開始できない」ではなく「開始前に見るべきこと」。サーバーは
@@ -62,7 +70,7 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     return verdict.tone === "success" ? [] : [{ label, detail: verdict.label }];
   });
 
-  const ready = canStart && blockers.length === 0 && phase !== "finished" && connected;
+  const ready = canStart && connected && phase !== "finished";
 
   return (
     <section
