@@ -1,8 +1,8 @@
-import { EventFeed } from "@/components/EventFeed";
-import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/MatchControl";
-import { RobotStatusRow } from "@/components/RobotStatusRow";
-import { StartGate } from "@/components/StartGate";
-import { SubsystemStatus } from "@/components/SubsystemStatus";
+import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
+import { EventFeed } from "@/components/monitor/EventFeed";
+import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/monitor/MatchControl";
+import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
+import { StartGate } from "@/components/monitor/StartGate";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";

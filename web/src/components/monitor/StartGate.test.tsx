@@ -1,7 +1,7 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { StartGate } from "@/components/StartGate";
+import { StartGate } from "@/components/monitor/StartGate";
 import type { HealthSnapshot, RobotState } from "@/hooks/useRobotSocket";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 

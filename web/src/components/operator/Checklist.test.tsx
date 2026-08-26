@@ -2,7 +2,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { Checklist } from "@/components/Checklist";
+import { Checklist } from "@/components/operator/Checklist";
 import type { ChecklistState, MatchPhase } from "@/hooks/useRobotSocket";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 

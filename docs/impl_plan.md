@@ -473,7 +473,12 @@ web/
     │   └── robotContext.tsx     # RobotProvider ラッパと既定コンテキスト値
     ├── lib/{cx,phase}.test.ts
     ├── hooks/{useRobotSocket,useHotkeys,useMotorCheck}.test.ts(x)
-    └── components/{TriggerButton,Toaster,Checklist,HealthIndicator}.test.tsx
+    └── components/          # テストは対象と同じグループディレクトリに置く
+        ├── shell/{ConnectionBanner,Toaster,WsSettings}.test.tsx
+        ├── monitor/StartGate.test.tsx
+        ├── operator/{ActionPanel,Checklist,TriggerButton}.test.tsx
+        ├── diagnostics/HealthIndicator.test.tsx
+        └── ui/Modal.test.tsx
 ```
 
 テスト対象の優先順位は「壊れたときに実機で困る度合い」で決めている。
@@ -584,24 +589,36 @@ cbc2026_team3_central/
 │       │   ├── RobotControl.tsx
 │       │   └── MotorTuning.tsx
 │       ├── test/                   # vitest 共通ヘルパ（setup / mockWebSocket / robotContext）
-│       └── components/
-│           ├── AppHeader.tsx        # フェーズ / MODE / COURT / EMG STOP + タブ
-│           ├── ConnectionBanner.tsx # WS 切断の全幅バナー（接続先設定への入口も持つ）
-│           ├── WsSettings.tsx       # WS 接続先の確認・変更ダイアログ
-│           ├── Toaster.tsx          # 操作拒否・ヘルス異常の通知
-│           ├── SequenceProgress.tsx
-│           ├── SequenceStepList.tsx
-│           ├── CurrentStepPanel.tsx
-│           ├── TriggerButton.tsx
-│           ├── MotorStatus.tsx
-│           ├── MotorSummary.tsx
-│           ├── MotorCheckButton.tsx
-│           ├── MotorCheckPanel.tsx
-│           ├── HealthIndicator.tsx
-│           ├── RobotReadiness.tsx   # Monitor 用の 1 行サマリ
-│           ├── Checklist.tsx        # 指差喚呼チェックリスト
-│           ├── MatchControl.tsx     # コート切替 + 試合開始・終了
-│           └── EStopOverlay.tsx     # 全画面フラッシュ + ツイスト解除
+│       └── components/            # 分割軸は「誰が描くか」。直下にファイルは置かない
+│           ├── shell/            # RootLayout が全画面へ出す外枠
+│           │   ├── AppHeader.tsx        # フェーズ / タブ / コート / EMG STOP を 1 段に収める
+│           │   ├── TabBar.tsx           # タブ定義は lib/tabs.ts。AppHeader の中に畳む
+│           │   ├── StatusBar.tsx        # 接続状態・接続先（WsSettings への入口）
+│           │   ├── ConnectionBanner.tsx # WS 切断の全幅バナー
+│           │   ├── EStopOverlay.tsx     # 全画面オーバーレイ。解除は Reset のみ（<dialog> 不可）
+│           │   ├── Toaster.tsx          # 操作拒否・ヘルス異常の通知
+│           │   └── WsSettings.tsx       # WS 接続先の確認・変更ダイアログ
+│           ├── monitor/          # Dashboard（Monitor 画面）専用
+│           │   ├── MatchControl.tsx     # コート切替 + 試合開始・終了
+│           │   ├── StartGate.tsx        # 指差喚呼の充足状況。開始可否は can_start_match が決める
+│           │   ├── RobotStatusRow.tsx   # ロボット 1 台ぶんの 1 行サマリ
+│           │   └── EventFeed.tsx        # ヘルス変化・操作拒否の履歴
+│           ├── operator/         # RobotControl（操縦者画面）専用
+│           │   ├── ActionPanel.tsx      # 右＝今押すボタン / 左＝STOP で位置固定
+│           │   ├── TriggerButton.tsx
+│           │   ├── Checklist.tsx        # 指差喚呼チェックリスト
+│           │   └── SequenceStepList.tsx
+│           ├── motorcheck/       # セッティングタイムの動作確認
+│           │   ├── MotorCheckButton.tsx # 緊急停止中 / シーケンス中 / バス DOWN で無効化
+│           │   ├── MotorCheckPanel.tsx  # 実行中の進捗 + モータごとの ✓×
+│           │   └── MotorCheckSummary.tsx
+│           ├── diagnostics/      # SubsystemStatus を頂点とする診断ツリー
+│           │   ├── SubsystemStatus.tsx  # 平常時 1 行に畳み、異常時は開閉操作を上書きして開く
+│           │   ├── MotorSummary.tsx
+│           │   ├── MotorStatus.tsx
+│           │   └── HealthIndicator.tsx  # 判定は lib/healthVerdict.ts に一本化
+│           └── ui/               # 自前プリミティブ（Page / Panel / Section / Button /
+│                                 #   StatusBadge / Kbd / Icon / Modal）
 ├── main.py
 └── tests/                          # 構成は「テスト戦略 > テストファイル構成」を参照
 ```
@@ -882,7 +899,7 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 - WS 接続先は `lib/wsUrl.ts` が **クエリ `?ws=` > localStorage > `VITE_WS_URL` > ページ origin**
   の優先順で解決する。既定（origin 由来）は別 PC・タブレットからのアクセスを成立させるため。
   vite dev では `/ws` を 8080 へプロキシする（`vite.config.ts`。中継先は `DEV_WS_TARGET` で変更可）
-- 接続先は UI から差し替えられる（`components/WsSettings.tsx`。ステータスバーの接続表示と
+- 接続先は UI から差し替えられる（`components/shell/WsSettings.tsx`。ステータスバーの接続表示と
   切断バナーから開く）。「配信元 ≠ 制御プログラム」になる構成 — vite dev を Tailscale 経由で開く、
   配信済み UI から手元の制御 PC へ繋ぐ、予備機へ切り替える — を再ビルドせず現場で解決するため。
   クエリ `?ws=` は非永続の一時上書きで、保存済み設定を壊さずに 1 画面だけ別機を見られる
@@ -1456,6 +1473,32 @@ UI のライトテーマ移行を `--dry-run` の実機描画で確認してい�
 検証済み: 4 タブ × セッティング/試合中、緊急停止オーバーレイ、1366x768 と 1920x1080 で
 `document.documentElement.scrollHeight === clientHeight`（ページ全体のスクロールなし）を実測。
 
+#### `components/` のディレクトリ分割（2026-08-26）
+
+`src/components/` 直下が 30 ファイル（実装 22 + テスト 8）まで育ち、目的のファイルを
+名前で探すしかない状態になっていた。テストの並置は Web フロントの主流であり
+（vitest の既定 `include` は `**/*.{test,spec}.?(c|m)[jt]s?(x)` でディレクトリを問わない）、
+並置そのものは維持したまま、実装側をサブディレクトリへ分けた。
+
+**分割軸は「誰が描くか」（消費者）。** import グラフを取ると、2 画面以上から使われるのは
+`SubsystemStatus` を頂点とする診断ツリーだけで、他は所属先が一意に決まる。
+「状態表示系」「パネル系」のような見た目の軸だと境界が曖昧になり、追加時に迷う。
+
+| ディレクトリ | 描く主体 | 実装 |
+|---|---|---|
+| `shell/` | `RootLayout`（全画面共通） | 7 |
+| `monitor/` | `pages/Dashboard.tsx` | 4 |
+| `operator/` | `pages/RobotControl.tsx` | 4 |
+| `motorcheck/` | `pages/RobotControl.tsx`（セッティングタイム機能として独立） | 3 |
+| `diagnostics/` | `Dashboard` / `RobotControl` / `RobotStatusRow` | 4 |
+| `ui/` | 全域（プリミティブ） | 8 |
+
+barrel（`index.ts`）は置かない。oxlint の `import/no-cycle` を効かせたまま依存の向きを
+読めるようにするためで、参照は常に実ファイルまで書く。
+
+移動対象 30 ファイルはすべて `@/` エイリアス参照だったため、書き換えは他ファイルからの
+import 33 行のみで、振る舞いの変更はない（`git diff -M` 上で 30 件すべてが 100% rename）。
+
 #### ファイル一覧
 
 | # | ファイル | 内容 |
@@ -1578,7 +1621,7 @@ health:
 | 6-9 | `tests/test_server_health.py` | **テスト先行**: WS state に `health` 同梱、`GET /health` の 200/503、`health_change` push |
 | 6-10 | `lib/server.py` (修正) | `_build_state_message` で health 同梱、`/health` ルート追加、状態遷移検出で `health_change` push |
 | 6-11 | `config/*.yaml` (修正) | `health:` セクション追加（既定値は上記） |
-| 6-12 | `web/src/components/HealthIndicator.tsx` | バス/モータごとに信号灯（緑黄赤）+ 詳細ツールチップ |
+| 6-12 | `web/src/components/diagnostics/HealthIndicator.tsx` | バス/モータごとに信号灯（緑黄赤）+ 詳細ツールチップ |
 | 6-13 | `web/src/pages/Dashboard.tsx` (修正) | ヘッダ近傍に overall 表示、警告時はトースト通知 |
 | 6-14 | `web/src/hooks/useRobotSocket.ts` (修正) | `health` パース、`health_change` ハンドリング |
 
@@ -1736,8 +1779,8 @@ motors:
 | 6-22 | `lib/server.py` (修正) | コマンドハンドラ追加（`motor_check_start` / `_abort`）+ HTTP ルート + WS イベント発火 |
 | 6-23 | `config/*.yaml` (修正) | `motor_check:` セクション + モータ単位の上書き |
 | 6-24 | `web/src/hooks/useMotorCheck.ts` | WS イベント集約 hook |
-| 6-25 | `web/src/components/MotorCheckButton.tsx` | ヘッダボタン + 確認ダイアログ。緊急停止中 / シーケンス中 / バス DOWN で無効化 |
-| 6-26 | `web/src/components/MotorCheckPanel.tsx` | 実行中の進捗 + モータごとの ✓×、終了後はサマリ + リトライ |
+| 6-25 | `web/src/components/motorcheck/MotorCheckButton.tsx` | ヘッダボタン + 確認ダイアログ。緊急停止中 / シーケンス中 / バス DOWN で無効化 |
+| 6-26 | `web/src/components/motorcheck/MotorCheckPanel.tsx` | 実行中の進捗 + モータごとの ✓×、終了後はサマリ + リトライ |
 | 6-27 | `web/src/pages/Dashboard.tsx` (修正) | パネル組み込み |
 
 ##### 段階追加

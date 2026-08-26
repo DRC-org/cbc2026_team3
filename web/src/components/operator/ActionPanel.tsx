@@ -1,6 +1,6 @@
 import { ArrowRight, Hand, Play, Square } from "lucide-react";
 
-import { TriggerButton } from "@/components/TriggerButton";
+import { TriggerButton } from "@/components/operator/TriggerButton";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Kbd } from "@/components/ui/Kbd";

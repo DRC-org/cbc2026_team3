@@ -2,7 +2,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { ConnectionBanner } from "@/components/ConnectionBanner";
+import { ConnectionBanner } from "@/components/shell/ConnectionBanner";
 import { renderWithRobot } from "@/test/robotContext";
 
 describe("ConnectionBanner", () => {
