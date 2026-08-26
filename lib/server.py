@@ -23,7 +23,7 @@ from lib.health import (
     MotorHealth,
     MotorHealthInfo,
 )
-from lib.match_state import ChecklistItem, Court, MatchState, Mode
+from lib.match_state import ChecklistItem, Court, MatchState
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
 
@@ -49,8 +49,8 @@ _BUS_SEVERITY_RANK: dict[BusHealth, int] = {
 #: 停止方向の操作 (sequence_stop / e_stop / match_reset / match_finish / e_stop_release) は
 #: 緊急停止中こそ通す必要があるため決して載せてはならない。motor_check_start は
 #: _start_motor_check が motor_check_error で拒否する別経路を持つのでここでは扱わない。
-#: match_start は全自動モードで両ロボットの request_start() を兼ねるため、
-#: 載せないと緊急停止中に試合開始ボタンだけで両機が動き出す。
+#: match_start は試合フェーズへ入る操作で、通ると操縦者の sequence_start が解禁される。
+#: 緊急停止中に MATCH へ入れてしまうと動作確認もコート設定も同時に閉じてしまうため塞ぐ。
 _E_STOP_DENY_MESSAGES: dict[str, str] = {
     "sequence_start": "緊急停止中のためシーケンスを開始できません",
     "sequence_jump": "緊急停止中のためステップ移動できません",
@@ -113,12 +113,12 @@ class RobotServer:
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
         self._e_stop_active: bool = False
-        # dry-run 時はシーケンスを自動進行させ、モータ状態を擬似的に揺らがせて
-        # Web UI のデモを成立させる。実機運用時は False のまま影響しない。
+        # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
+        # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
-        # 試合全体の状態 (モード / コート / フェーズ / チェックリスト)。
+        # 試合全体の状態 (コート / フェーズ / チェックリスト)。
         # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く。
         self.match = MatchState(definitions=checklist_definitions)
 
@@ -166,15 +166,11 @@ class RobotServer:
             can_manager=can_manager,
             position_loops=list(position_loops or []),
         )
-        self._apply_match_settings_to(sequence)
-
-    def _apply_match_settings_to(self, sequence: Sequence) -> None:
         sequence.set_court(self.match.court)
-        sequence.set_auto_advance(self.match.mode is Mode.FULL_AUTO)
 
-    def _apply_match_settings(self) -> None:
+    def _apply_court(self) -> None:
         for ctx in self._robots.values():
-            self._apply_match_settings_to(ctx.sequence)
+            ctx.sequence.set_court(self.match.court)
 
     def create_app(self) -> web.Application:
         app = web.Application()
@@ -263,8 +259,8 @@ class RobotServer:
     async def _run_sequence_loop(self, robot_name: str) -> None:
         """シーケンスを永続的に走らせる。停止/完走後は resume 要求を待つ。
 
-        起動時は resume を立てない。操縦者の明示的な開始合図 (sequence_start /
-        全自動時の match_start) があるまでロボットを動かしてはならない。
+        起動時は resume を立てない。操縦者の明示的な開始合図 (sequence_start) が
+        あるまでロボットを動かしてはならない。
         """
         seq = self._robots[robot_name].sequence
         while True:
@@ -393,9 +389,6 @@ class RobotServer:
             if robot_name and robot_name in self._motor_check_runners:
                 self._motor_check_runners[robot_name].abort()
 
-        elif cmd_type == "set_mode":
-            await self._handle_set_mode(data)
-
         elif cmd_type == "set_court":
             await self._handle_set_court(data)
 
@@ -427,29 +420,15 @@ class RobotServer:
             self.match.match_reset()
             logger.info("セッティングタイムへ復帰")
             self._stop_all_sequences()
-            self._apply_match_settings()
+            self._apply_court()
             await self._broadcast_match_state()
 
         else:
             logger.debug("未知のコマンド: %s", cmd_type)
 
     # ------------------------------------------------------------------ #
-    #  試合状態 (モード / コート / フェーズ / チェックリスト)
+    #  試合状態 (コート / フェーズ / チェックリスト)
     # ------------------------------------------------------------------ #
-
-    async def _handle_set_mode(self, data: dict) -> None:
-        raw = data.get("mode")
-        try:
-            mode = Mode(raw)
-        except ValueError:
-            logger.warning("未知のモード: %s", raw)
-            return
-        if not self.match.set_mode(mode):
-            return
-        # 全自動ではトリガー待ちを自動通過させる。切替は必ずシーケンスへ伝播させること
-        self._apply_match_settings()
-        logger.info("モード変更: %s", mode.value)
-        await self._broadcast_match_state()
 
     async def _handle_set_court(self, data: dict) -> None:
         raw = data.get("court")
@@ -460,7 +439,7 @@ class RobotServer:
             return
         if not self.match.set_court(court):
             return
-        self._apply_match_settings()
+        self._apply_court()
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
@@ -471,15 +450,10 @@ class RobotServer:
             )
             return
 
-        # 開始直前にもう一度設定を流し込む (取りこぼしがあると挙動が全自動/半自動でずれる)
-        self._apply_match_settings()
-        logger.info("試合開始: mode=%s court=%s", self.match.mode.value, self.match.court.value)
-
-        # 全自動には操縦者タブが無いため、試合開始が両機のシーケンス起動を兼ねる。
-        # 半自動では各操縦者が自分のタイミングで START を押す。
-        if self.match.mode is Mode.FULL_AUTO:
-            for ctx in self._robots.values():
-                ctx.sequence.request_start()
+        # 開始直前にもう一度流し込む (取りこぼすとシーケンスが逆コートの分岐で動く)
+        self._apply_court()
+        # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
+        logger.info("試合開始: court=%s", self.match.court.value)
 
         await self._broadcast_match_state()
 

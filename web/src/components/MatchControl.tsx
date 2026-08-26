@@ -1,4 +1,4 @@
-import { Info, RotateCcw, Square, TriangleAlert } from "lucide-react";
+import { Info, RotateCcw, Square } from "lucide-react";
 import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -7,14 +7,9 @@ import { Modal } from "@/components/ui/Modal";
 import { Panel } from "@/components/ui/Panel";
 import { Section } from "@/components/ui/Section";
 import { useRobot } from "@/context/RobotContext";
-import type { MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
+import type { MatchCourt } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
-import { COURT_LABEL, MODE_LABEL } from "@/lib/phase";
-
-const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
-  { value: "semi_auto", label: "半自動 (操縦者 2 名)" },
-  { value: "full_auto", label: "全自動" },
-];
+import { COURT_LABEL } from "@/lib/phase";
 
 /** 選択中のコートは面で塗る。誤ったコート設定は試合をそのまま落とすため */
 const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }[] = [
@@ -33,7 +28,7 @@ export type ConfirmKind = "start" | "finish" | "reset";
  */
 export function useMatchConfirm() {
   const { matchState, matchStart, matchFinish, matchReset } = useRobot();
-  const { mode, court } = matchState;
+  const { court } = matchState;
   const [confirm, setConfirm] = useState<ConfirmKind | null>(null);
 
   const requestConfirm = useCallback((kind: ConfirmKind) => setConfirm(kind), []);
@@ -64,21 +59,11 @@ export function useMatchConfirm() {
       {confirm === "start" ? (
         <>
           <p>
-            <span className="font-medium text-info">
-              {MODE_LABEL[mode]} / {COURT_LABEL[court]}
-            </span>{" "}
-            で試合を開始します。
+            <span className="font-medium text-info">{COURT_LABEL[court]}</span> で試合を開始します。
           </p>
-          {mode === "full_auto" ? (
-            <p className="mt-2 flex items-center gap-1.5 text-error">
-              <Icon as={TriangleAlert} />
-              全自動モードでは開始と同時に両ロボットが動き出します。
-            </p>
-          ) : (
-            <p className="mt-2 text-base-content/70">
-              半自動モードでは各操縦者が自分のタブで START を押すまで動きません。
-            </p>
-          )}
+          <p className="mt-2 text-base-content/70">
+            各操縦者が自分のタブで START を押すまで機体は動きません。
+          </p>
           <p className="mt-1 text-base-content/70">周囲の安全を確認してください。</p>
         </>
       ) : confirm === "finish" ? (
@@ -103,7 +88,7 @@ export function useMatchConfirm() {
 }
 
 /**
- * モード・コートの設定。セッティングタイム専用。
+ * コートの設定。セッティングタイム専用。
  *
  * 試合ごとに一度だけ触る設定なので、開始可否 (StartGate) より下に置く。
  * ただし誤ったコート設定のまま試合に入る事故は致命的なので、畳まずに常時見せる。
@@ -113,29 +98,12 @@ export function MatchSettings({
 }: {
   onRequestConfirm: (kind: ConfirmKind) => void;
 }) {
-  const { matchState, setMode, setCourt, connected } = useRobot();
-  const { mode, court, phase } = matchState;
+  const { matchState, setCourt, connected } = useRobot();
+  const { court, phase } = matchState;
   const settingsLocked = phase === "match" || !connected;
 
   return (
     <Panel legend="試合設定">
-      <Section title="MODE">
-        <div className="join">
-          {MODE_OPTIONS.map((opt) => (
-            <Button
-              key={opt.value}
-              className="join-item"
-              selected={mode === opt.value}
-              disabled={settingsLocked}
-              onClick={() => setMode(opt.value)}
-              aria-pressed={mode === opt.value}
-            >
-              {opt.label}
-            </Button>
-          ))}
-        </div>
-      </Section>
-
       <Section title="COURT">
         <div className="join">
           {COURT_OPTIONS.map((opt) => (
@@ -180,13 +148,13 @@ export function MatchStrip({
   onRequestConfirm: (kind: ConfirmKind) => void;
 }) {
   const { matchState } = useRobot();
-  const { mode, court, phase } = matchState;
+  const { court, phase } = matchState;
 
   return (
     <div className="flex shrink-0 items-center justify-between gap-2 border border-base-300 bg-base-100 px-2 py-1">
       <span className="min-w-0 truncate">
         <span className="text-base-content/70">MATCH </span>
-        {MODE_LABEL[mode]} / {COURT_LABEL[court]}
+        {COURT_LABEL[court]}
       </span>
       {phase === "match" ? (
         <Button

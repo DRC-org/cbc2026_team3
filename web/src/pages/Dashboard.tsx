@@ -1,4 +1,3 @@
-import { Checklist } from "@/components/Checklist";
 import { EventFeed } from "@/components/EventFeed";
 import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/MatchControl";
 import { RobotStatusRow } from "@/components/RobotStatusRow";
@@ -13,7 +12,7 @@ import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
 /**
- * 半自動時、Monitor から 2 名の指差喚呼の進み具合を読み取り専用で監視する。
+ * Monitor から 2 名の指差喚呼の進み具合を読み取り専用で監視する。
  *
  * 完了済みは件数へ畳み、**残っている項目名だけ**を並べる。Monitor が知りたいのは
  * 「何が残っているか」であって「何が終わったか」ではない。以前は完了・未完を同じ
@@ -101,16 +100,12 @@ export function Dashboard() {
             </Panel>
           </div>
 
-          {matchState.mode === "full_auto" ? (
-            <Checklist checklistRole="monitor" title="セッティング指差喚呼 (全自動)" />
-          ) : (
-            <Panel legend="操縦者の指差喚呼 (読み取り専用)">
-              <div className="scroll flex min-h-0 flex-1 flex-col gap-3">
-                <OperatorProgress checklistRole="main_hand" label="メインハンド 操縦者" />
-                <OperatorProgress checklistRole="sub_hand" label="サブハンド 操縦者" />
-              </div>
-            </Panel>
-          )}
+          <Panel legend="操縦者の指差喚呼 (読み取り専用)">
+            <div className="scroll flex min-h-0 flex-1 flex-col gap-3">
+              <OperatorProgress checklistRole="main_hand" label="メインハンド 操縦者" />
+              <OperatorProgress checklistRole="sub_hand" label="サブハンド 操縦者" />
+            </div>
+          </Panel>
         </Page>
         {confirmModal}
       </>

@@ -33,8 +33,8 @@ class SubHandSequence(Sequence):
         await self.move_to({"sub_arm_joint": "handoff"})
 
     # メインハンドと機構同士が向かい合う唯一の動作。ずれたまま閉じると両機構が衝突するため、
-    # 全自動でも目視確認で止める
-    @step("ハンド閉じる (受け取り)", require_trigger=True, auto_stop=True)
+    # 操縦者の目視確認で止める
+    @step("ハンド閉じる (受け取り)", require_trigger=True)
     async def grip_handoff(self) -> None:
         logger.info("[sub_hand] ハンド閉じる")
         await self.move_to({"sub_gripper": "closed"})
@@ -44,7 +44,7 @@ class SubHandSequence(Sequence):
         logger.info("[sub_hand] 配置位置へ移動")
         await self.move_to({"sub_arm_joint": "place"})
 
-    # リリースはやり直しが利かないので、半自動では配置位置到達を目視で確認させる
+    # リリースはやり直しが利かないので、配置位置到達を目視で確認させる
     @step("ハンド開く (配置)", require_trigger=True)
     async def release_at_place(self) -> None:
         logger.info("[sub_hand] ハンド開く")

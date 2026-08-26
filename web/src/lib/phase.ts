@@ -1,10 +1,5 @@
-import type { MatchCourt, MatchMode, MatchPhase } from "@/hooks/useRobotSocket";
+import type { MatchCourt, MatchPhase } from "@/hooks/useRobotSocket";
 import type { Tone } from "@/lib/tone";
-
-export const MODE_LABEL: Record<MatchMode, string> = {
-  semi_auto: "半自動",
-  full_auto: "全自動",
-};
 
 export const COURT_LABEL: Record<MatchCourt, string> = {
   red: "赤コート",

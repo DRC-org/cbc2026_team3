@@ -6,7 +6,7 @@ import type { RobotState, SequenceStepInfo } from "@/hooks/useRobotSocket";
 import { renderWithRobot } from "@/test/robotContext";
 
 function step(index: number, label: string, requireTrigger = false): SequenceStepInfo {
-  return { index, label, require_trigger: requireTrigger, auto_stop: false };
+  return { index, label, require_trigger: requireTrigger };
 }
 
 // 1 → (2) → 3 → 4(✋) → 5 → 6(✋)

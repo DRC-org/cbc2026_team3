@@ -10,7 +10,6 @@ import { SequenceStepList } from "@/components/SequenceStepList";
 import { SubsystemStatus } from "@/components/SubsystemStatus";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
-import { Kbd } from "@/components/ui/Kbd";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
@@ -37,8 +36,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
   const inMatch = matchState.phase === "match";
   const setupPhase = isSetupPhase(matchState.phase);
-  // 半自動では操縦者が自分のタブで指差喚呼を行う。全自動では Monitor 側に表示される
-  const ownsChecklist = matchState.mode === "semi_auto";
   const blockedLabel = matchState.phase === "finished" ? "試合終了" : "準備中";
 
   const completed = state && state.total_steps > 0 && state.step_index >= state.total_steps;
@@ -90,18 +87,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     return (
       <>
         <Page className="grid grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]">
-          {ownsChecklist ? (
-            <Checklist
-              checklistRole={robotKey as ChecklistRole}
-              title={`${label} セッティング指差喚呼`}
-            />
-          ) : (
-            <Panel legend="全自動モード">
-              <p className="flex items-center gap-1.5 text-base-content/70">
-                指差喚呼は Monitor タブ <Kbd>1</Kbd> で実施します。
-              </p>
-            </Panel>
-          )}
+          <Checklist
+            checklistRole={robotKey as ChecklistRole}
+            title={`${label} セッティング指差喚呼`}
+          />
 
           <div className="flex min-h-0 flex-col gap-2">
             {/* 動作確認は準備フェーズの主要アクション。以前は診断カラムの最下段に

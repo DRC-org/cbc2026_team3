@@ -5,14 +5,7 @@ import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobot } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
-import {
-  COURT_LABEL,
-  COURT_TONE,
-  MODE_LABEL,
-  PHASE_BAND_CLASS,
-  PHASE_LABEL,
-  PHASE_TONE,
-} from "@/lib/phase";
+import { COURT_LABEL, COURT_TONE, PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE } from "@/lib/phase";
 
 /**
  * 全画面共通のヘッダー帯。フェーズ表示・タブ・試合設定・緊急停止を 1 段に収める。
@@ -22,12 +15,12 @@ import {
  *
  * 左端のバー色とフェーズチップで「今 機体が動くフェーズか」を示す。
  * 帯全面をフェーズ色で塗ると画面で最も明るい面になってしまうため、地は白に固定する。
- * 誤ったコート設定のまま試合に入る事故を防ぐためモード・コートも常時表示する。
+ * 誤ったコート設定のまま試合に入る事故を防ぐためコートも常時表示する。
  * 緊急停止は最優先操作なので、常に同じ位置・最大サイズでここに置く。
  */
 export function AppHeader() {
   const { matchState, onEStop } = useRobot();
-  const { mode, court, phase } = matchState;
+  const { court, phase } = matchState;
 
   return (
     <header
@@ -39,8 +32,7 @@ export function AppHeader() {
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1">
         <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
         <TabBar />
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          <span className="badge badge-ghost border-base-300 badge-sm">{MODE_LABEL[mode]}</span>
+        <div className="ml-auto flex shrink-0 items-center">
           <StatusBadge tone={COURT_TONE[court]}>{COURT_LABEL[court]}</StatusBadge>
         </div>
       </div>

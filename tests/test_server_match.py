@@ -9,18 +9,15 @@ from lib.can_manager import CANManager
 from lib.drivers.base import MotorState
 from lib.match_state import (
     ROLE_MAIN_HAND,
-    ROLE_MONITOR,
     ROLE_SUB_HAND,
     ChecklistItem,
     Court,
-    Mode,
     Phase,
 )
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
 
 _DEFS = {
-    ROLE_MONITOR: [ChecklistItem(id="power", label="電源投入確認")],
     ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
     ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
 }
@@ -80,7 +77,7 @@ def _complete(server: RobotServer, role: str) -> None:
 
 class TestMatchStateSnapshotOnConnect:
     async def test_snapshot_sent_immediately(self) -> None:
-        """接続直後に match_state が届かないと、リロードした操縦者が現在のモードを知れない。"""
+        """接続直後に match_state が届かないと、リロードした操縦者が現在の状況を知れない。"""
         server = _build_server()
         app = server.create_app()
 
@@ -89,9 +86,8 @@ class TestMatchStateSnapshotOnConnect:
             msg = await _recv_type(ws, "match_state")
             assert msg is not None
             assert msg["phase"] == "setup"
-            assert msg["mode"] == "semi_auto"
             assert msg["court"] == "red"
-            assert msg["required_roles"] == [ROLE_MAIN_HAND, ROLE_SUB_HAND]
+            assert set(msg["checklists"]) == {ROLE_MAIN_HAND, ROLE_SUB_HAND}
             await ws.close()
 
 
@@ -109,21 +105,7 @@ class TestSequenceDoesNotAutoStart:
                 assert seq.executed == []
 
 
-class TestModeAndCourtCommands:
-    async def test_set_mode_propagates_auto_advance(self) -> None:
-        server = _build_server()
-        app = server.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "set_mode", "mode": "full_auto"})
-            await asyncio.sleep(0.05)
-
-            assert server.match.mode is Mode.FULL_AUTO
-            for name in ("main_hand", "sub_hand"):
-                assert server._robots[name].sequence.auto_advance is True
-            await ws.close()
-
+class TestCourtCommand:
     async def test_set_court_propagates_to_sequences(self) -> None:
         server = _build_server()
         app = server.create_app()
@@ -144,11 +126,9 @@ class TestModeAndCourtCommands:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "set_mode", "mode": "nonsense"})
             await ws.send_json({"type": "set_court", "court": "green"})
             await asyncio.sleep(0.05)
 
-            assert server.match.mode is Mode.SEMI_AUTO
             assert server.match.court is Court.RED
             assert not ws.closed
             await ws.close()
@@ -229,7 +209,7 @@ class TestPhaseGate:
             await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
             await asyncio.sleep(0.15)
             assert server._robots["main_hand"].sequence.executed == ["first"]
-            # 半自動では操縦者が押した側だけが動く
+            # 操縦者が押した側だけが動く (試合開始は両機を起動しない)
             assert server._robots["sub_hand"].sequence.executed == []
             await ws.close()
 
@@ -260,24 +240,25 @@ class TestPhaseGate:
             assert resp.status == 409
 
 
-class TestFullAutoStart:
-    async def test_match_start_launches_all_sequences(self) -> None:
-        """全自動には操縦者タブが無いので、試合開始が両機の起動を兼ねる。"""
+class TestMatchStartDoesNotMoveRobots:
+    async def test_match_start_leaves_sequences_idle(self) -> None:
+        """試合開始はフェーズを進めるだけ。動き出すのは操縦者が START を押してから。"""
         server = _build_server()
         app = server.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "set_mode", "mode": "full_auto"})
-            await asyncio.sleep(0.05)
-            _complete(server, ROLE_MONITOR)
+            _complete(server, ROLE_MAIN_HAND)
+            _complete(server, ROLE_SUB_HAND)
 
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.15)
 
-            # 全自動なので require_trigger のステップも待たずに完走する
+            assert server.match.phase is Phase.MATCH
             for name in ("main_hand", "sub_hand"):
-                assert server._robots[name].sequence.executed == ["first", "wait_step"]
+                seq = server._robots[name].sequence
+                assert seq.executed == []
+                assert seq._running is False
             await ws.close()
 
 

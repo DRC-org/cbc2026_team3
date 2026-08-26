@@ -38,15 +38,12 @@ class StepInfo:
     label: str
     method_name: str
     require_trigger: bool
-    # 全自動モードでもトリガー待ちを維持するか。人間の目視確認が必須な危険動作に付ける
-    auto_stop: bool = False
 
 
-def step(label: str, *, require_trigger: bool = False, auto_stop: bool = False) -> Callable:
+def step(label: str, *, require_trigger: bool = False) -> Callable:
     def decorator(method: Callable) -> Callable:
         method._step_label = label  # type: ignore[attr-defined]
         method._step_require_trigger = require_trigger  # type: ignore[attr-defined]
-        method._step_auto_stop = auto_stop  # type: ignore[attr-defined]
         return method
 
     return decorator
@@ -65,7 +62,6 @@ class Sequence:
                         label=value._step_label,
                         method_name=name,
                         require_trigger=value._step_require_trigger,
-                        auto_stop=getattr(value, "_step_auto_stop", False),
                     )
                 )
         cls._steps = steps
@@ -85,8 +81,6 @@ class Sequence:
         self._on_step_change: Callable[[dict], None] | None = None
         # 自陣コート。赤青で配置が左右反転するため各 step 内で参照して動作を分ける
         self._court: Court = Court.RED
-        # 全自動モード。True のとき require_trigger のステップを待たずに通過する
-        self._auto_advance: bool = False
         # モータアクセス層。bind_motors で外部から注入する (未注入でもシーケンスは動作する)
         self._motors: MotorGroup | None = None
         # 機構位置の定数表。bind_positions で外部から注入する (未注入でもシーケンスは動作する)
@@ -205,13 +199,6 @@ class Sequence:
         self._court = court
 
     @property
-    def auto_advance(self) -> bool:
-        return self._auto_advance
-
-    def set_auto_advance(self, enabled: bool) -> None:
-        self._auto_advance = bool(enabled)
-
-    @property
     def current_step(self) -> StepInfo | None:
         if 0 <= self._current_index < len(self._steps):
             return self._steps[self._current_index]
@@ -228,7 +215,6 @@ class Sequence:
                 "index": i,
                 "label": s.label,
                 "require_trigger": s.require_trigger,
-                "auto_stop": s.auto_stop,
             }
             for i, s in enumerate(self._steps)
         ]
@@ -285,11 +271,7 @@ class Sequence:
                 step_info = self._steps[self._current_index]
                 self._notify_step_change()
 
-                # 全自動でもトリガーを要するのは auto_stop 指定のステップのみ
-                needs_trigger = step_info.require_trigger and (
-                    not self._auto_advance or step_info.auto_stop
-                )
-                if needs_trigger:
+                if step_info.require_trigger:
                     self._waiting_trigger = True
                     self._trigger_event.clear()
                     await self._trigger_event.wait()

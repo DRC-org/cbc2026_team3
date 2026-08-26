@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { MatchPhase } from "@/hooks/useRobotSocket";
 import {
   COURT_LABEL,
-  MODE_LABEL,
   PHASE_BAND_CLASS,
   PHASE_LABEL,
   PHASE_TONE,
@@ -49,9 +48,7 @@ describe("ラベル・配色テーブル", () => {
     expect(new Set(bands).size).toBe(ALL_PHASES.length);
   });
 
-  it("モードとコートのラベルが定義されている", () => {
-    expect(MODE_LABEL.semi_auto).toBe("半自動");
-    expect(MODE_LABEL.full_auto).toBe("全自動");
+  it("コートのラベルが定義されている", () => {
     expect(COURT_LABEL.red).toBe("赤コート");
     expect(COURT_LABEL.blue).toBe("青コート");
   });

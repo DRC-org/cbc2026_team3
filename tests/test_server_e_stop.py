@@ -10,10 +10,8 @@ from lib.drivers.base import MotorState
 from lib.drivers.generic import GenericDriver
 from lib.match_state import (
     ROLE_MAIN_HAND,
-    ROLE_MONITOR,
     ROLE_SUB_HAND,
     ChecklistItem,
-    Mode,
     Phase,
 )
 from lib.sequence.engine import Sequence, step
@@ -22,7 +20,6 @@ from lib.server import RobotServer
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
 _DEFS = {
-    ROLE_MONITOR: [ChecklistItem(id="power", label="電源投入確認")],
     ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
     ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
 }
@@ -76,14 +73,8 @@ def _sequences(server: RobotServer) -> list[GatedSequence]:
 
 
 def _complete_all(server: RobotServer) -> None:
+    """全ロールのチェックを完了させ READY へ進める。"""
     for role in (ROLE_MAIN_HAND, ROLE_SUB_HAND):
-        for item in server.match.checklists[role].items:
-            server.match.set_checklist_item(role, item.id, True)
-
-
-def _complete_required(server: RobotServer) -> None:
-    """現在のモードで必須のロールだけをチェック完了させ READY へ進める。"""
-    for role in server.match.required_roles:
         for item in server.match.checklists[role].items:
             server.match.set_checklist_item(role, item.id, True)
 
@@ -378,18 +369,15 @@ class TestEStopBlocksSequenceCommands:
 
 
 class TestEStopBlocksMatchStart:
-    """全自動では match_start が両機の起動を兼ねるため、緊急停止中は必ず塞ぐ必要がある。"""
+    """match_start が通ると操縦者の sequence_start が解禁されるため、停止中は塞ぐ。"""
 
-    async def test_match_start_rejected_while_e_stop_active_full_auto(self) -> None:
-        """緊急停止中に試合開始を押しても両機が動き出さないこと。"""
+    async def test_match_start_rejected_while_e_stop_active(self) -> None:
         server = _build_server()
-        server.match.set_mode(Mode.FULL_AUTO)
-        server._apply_match_settings()
         app = server.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            _complete_required(server)
+            _complete_all(server)
             assert server.match.phase is Phase.READY
 
             await ws.send_json({"type": "e_stop"})
@@ -411,39 +399,14 @@ class TestEStopBlocksMatchStart:
 
             await ws.close()
 
-    async def test_match_start_rejected_while_e_stop_active_semi_auto(self) -> None:
+    async def test_match_start_allowed_after_release(self) -> None:
+        """解除後は試合開始が通り、操縦者の sequence_start が受理されること。"""
         server = _build_server()
         app = server.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            _complete_required(server)
-            assert server.match.phase is Phase.READY
-
-            await ws.send_json({"type": "e_stop"})
-            await _wait_until(lambda: server._e_stop_active)
-
-            await ws.send_json({"type": "match_start"})
-
-            msg = await _recv_type(ws, "command_rejected")
-            assert msg is not None
-            assert msg["command"] == "match_start"
-
-            await asyncio.sleep(0.1)
-            assert server.match.phase is Phase.READY
-
-            await ws.close()
-
-    async def test_match_start_allowed_after_release_full_auto(self) -> None:
-        """解除後は全自動の試合開始が従来どおり両機を起動すること。"""
-        server = _build_server()
-        server.match.set_mode(Mode.FULL_AUTO)
-        server._apply_match_settings()
-        app = server.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            _complete_required(server)
+            _complete_all(server)
 
             await ws.send_json({"type": "e_stop"})
             await _wait_until(lambda: server._e_stop_active)
@@ -452,32 +415,17 @@ class TestEStopBlocksMatchStart:
             await _wait_until(lambda: not server._e_stop_active)
 
             await ws.send_json({"type": "match_start"})
+            entered = await _wait_until(lambda: server.match.phase is Phase.MATCH)
+            assert entered, "解除後の match_start が通っていない"
 
+            # 試合開始そのものは機体を動かさない
             seqs = _sequences(server)
-            started = await _wait_until(lambda: all(s.executed == ["gate"] for s in seqs))
-            assert started, "解除後に全自動の match_start が両機を起動していない"
-            assert server.match.phase is Phase.MATCH
+            await asyncio.sleep(0.1)
+            assert all(s.executed == [] for s in seqs)
 
-            await _release_gates_and_settle(seqs)
-            await ws.close()
-
-    async def test_match_start_starts_both_without_e_stop(self) -> None:
-        """緊急停止していない通常時の全自動 match_start が従来どおり動くこと。"""
-        server = _build_server()
-        server.match.set_mode(Mode.FULL_AUTO)
-        server._apply_match_settings()
-        app = server.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            _complete_required(server)
-
-            await ws.send_json({"type": "match_start"})
-
-            seqs = _sequences(server)
-            started = await _wait_until(lambda: all(s.executed == ["gate"] for s in seqs))
-            assert started
-            assert server.match.phase is Phase.MATCH
+            await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
+            started = await _wait_until(lambda: seqs[0].executed == ["gate"])
+            assert started, "解除後に sequence_start が通っていない"
 
             await _release_gates_and_settle(seqs)
             await ws.close()

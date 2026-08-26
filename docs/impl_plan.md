@@ -436,7 +436,7 @@ tests/
 ├── test_pid.py                  # PID 単体（ワインドアップ・デッドバンド・出力制限）
 ├── test_position_loop.py        # M3508PositionLoop（周期・dt 頭打ち・途絶・pause/resume）
 ├── test_sequence_engine.py      # シーケンスエンジンの状態遷移
-├── test_sequence_court_auto.py  # コート伝播と全自動通過 / auto_stop 停止
+├── test_sequence_court.py       # コート伝播と require_trigger 停止
 ├── test_sequence_motors.py      # MotorHandle / MotorGroup / build_motor_group
 ├── test_sequence_positions.py   # 位置定数の読み込み・単位換算・コート差異
 ├── test_sequence_move_to.py     # bind_positions / move_to / タイムアウト時の停止
@@ -445,7 +445,7 @@ tests/
 ├── test_can_manager_health.py   # 受信タイムアウト → STALE、送信失敗 → DOWN
 ├── test_health.py               # ヘルス判定・状態遷移・JSON シリアライズ
 ├── test_motor_check.py          # MotorCheckRunner（PASSED/FAILED/TIMEOUT・abort）
-├── test_match_state.py          # モード / コート / フェーズ / チェックリスト
+├── test_match_state.py          # コート / フェーズ / チェックリスト
 ├── test_ws_protocol.py          # WebSocket JSON プロトコル
 ├── test_server_health.py        # WS の health 同梱・GET /health・health_change
 ├── test_server_match.py         # 試合運用フローとフェーズゲート
@@ -528,7 +528,7 @@ cbc2026_team3_central/
 ├── lib/
 │   ├── __init__.py
 │   ├── can_manager.py
-│   ├── match_state.py      # モード / コート / フェーズ / チェックリスト
+│   ├── match_state.py      # コート / フェーズ / チェックリスト
 │   ├── health.py           # ヘルス状態の列挙・スナップショット・動作確認レコード
 │   ├── motor_check.py      # MotorCheckRunner（アクチュエータ動作確認）
 │   ├── drivers/
@@ -600,7 +600,7 @@ cbc2026_team3_central/
 │           ├── HealthIndicator.tsx
 │           ├── RobotReadiness.tsx   # Monitor 用の 1 行サマリ
 │           ├── Checklist.tsx        # 指差喚呼チェックリスト
-│           ├── MatchControl.tsx     # モード/コート切替 + 試合開始・終了
+│           ├── MatchControl.tsx     # コート切替 + 試合開始・終了
 │           └── EStopOverlay.tsx     # 全画面フラッシュ + ツイスト解除
 ├── main.py
 └── tests/                          # 構成は「テスト戦略 > テストファイル構成」を参照
@@ -622,8 +622,8 @@ cbc2026_team3_central/
   "total_steps": 5,
   "waiting_trigger": true,
   "steps": [
-    { "index": 0, "label": "初期位置へ移動", "require_trigger": false, "auto_stop": false },
-    { "index": 1, "label": "ワーク前まで前進", "require_trigger": true, "auto_stop": false }
+    { "index": 0, "label": "初期位置へ移動", "require_trigger": false },
+    { "index": 1, "label": "ワーク前まで前進", "require_trigger": true }
   ],
   "motors": {
     "m3508_1": { "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0 },
@@ -673,7 +673,8 @@ cbc2026_team3_central/
 - **sequence_start**: 先頭から実行開始 (停止後・完走後の再起動)
 
 **シーケンスは起動時に自動実行しない。** `_run_sequence_loop` は resume 要求を待って停止したまま起動し、
-操縦者の明示的な `sequence_start` (半自動) または `match_start` (全自動) があるまでロボットを動かさない。
+操縦者の明示的な `sequence_start` があるまでロボットを動かさない。`match_start` はフェーズを
+進めるだけで、機体は動かさない。
 
 ### dry-run モード
 
@@ -685,7 +686,7 @@ cbc2026_team3_central/
 
 ---
 
-## 試合運用フロー（モード / コート / フェーズ）
+## 試合運用フロー（コート / フェーズ）
 
 `lib/match_state.py` が試合全体の状態を一元管理する。ロボット単位の `state` メッセージとは別系統。
 操縦者 2 名 + Monitor が**別ブラウザ**で接続するため、チェックリストの進捗をクライアント側に持つと
@@ -695,7 +696,6 @@ cbc2026_team3_central/
 
 | 軸 | 値 | 意味 |
 |---|---|---|
-| `mode` | `semi_auto` / `full_auto` | 半自動は操縦者 2 名、全自動は Monitor 1 名で運用 |
 | `court` | `red` / `blue` | 自陣コート。赤青で配置が左右反転する |
 | `phase` | `setup` → `ready` → `match` → `finished` | セッティングタイムと試合中を分離 |
 
@@ -708,9 +708,9 @@ setup ⇄ ready → match → finished → setup
                       ↑ match_finish   ↑ match_reset (どのフェーズからでも可)
 ```
 
-- 必要ロール: `semi_auto` → `main_hand` + `sub_hand` / `full_auto` → `monitor`
-- `mode` / `court` を変更するとチェックリストは**全リセット**され `setup` に戻る（配置が変わるため指差喚呼をやり直す）
-- `match_reset` はモード・コートを維持したままチェックリストのみリセットする
+- ゲート対象ロールは `main_hand` + `sub_hand`（= `ALL_ROLES`。操縦者 2 名分が揃うまで試合に入れない）
+- `court` を変更するとチェックリストは**全リセット**され `setup` に戻る（配置が変わるため指差喚呼をやり直す）
+- `match_reset` はコートを維持したままチェックリストのみリセットする
 - 項目ゼロのロールは「完了」とみなす（ゲートが永久に開かなくなるのを防ぐ）
 
 ### フェーズによるコマンドゲート
@@ -720,7 +720,7 @@ setup ⇄ ready → match → finished → setup
 
 | コマンド | setup | ready | match | finished |
 |---|:-:|:-:|:-:|:-:|
-| `set_mode` / `set_court` | ✓ | ✓ | ✗ | ✓ |
+| `set_court` | ✓ | ✓ | ✗ | ✓ |
 | `checklist_set` / `checklist_reset` | ✓ | ✓ | ✗ | ✗ |
 | `motor_check_start` | ✓ | ✓ | ✗ | ✓ |
 | `match_start` | ✗ | ✓ | ✗ | ✗ |
@@ -754,40 +754,32 @@ setup ⇄ ready → match → finished → setup
 `motor_check_error`）。UI 側でボタンを無効化するだけでは WS 直叩き・リロード直後を防げない。
 
 `match_start` を載せる理由: 緊急停止は `match_reset` → チェックリスト再実施で `ready` に
-戻れるため、フェーズゲートだけでは素通りする。全自動では `match_start` が両ロボットの
-`request_start()` を兼ねるので、素通りすると緊急停止中に試合開始ボタンだけで両機が動き出す。
-ゲートは `_handle_match_start()` より手前に置き、フェーズ遷移そのものを起こさない
+戻れるため、フェーズゲートだけでは素通りする。`match_start` が通ると操縦者の `sequence_start`
+が解禁され、同時に動作確認とコート設定が閉じてしまう。ゲートは `_handle_match_start()` より
+手前に置き、フェーズ遷移そのものを起こさない
 （緊急停止中に試合フェーズへ入れること自体が異常なため安全側に倒す）。
 
 `set_param` を載せる理由: 現状はログ出力のみだが、実装が入ると緊急停止中にモータの
 制御パラメータを書き換えられてしまう（停止状態の前提が崩れる）。
 
-### 試合開始の挙動（モード別）
+### 試合開始の挙動
 
-- **半自動**: `match_start` はフェーズを `match` にするだけ。各操縦者が自分のタブで `sequence_start` を押す
-  （ハンドごとに開始タイミングが異なるため）
-- **全自動**: 操縦者タブが無いので `match_start` が両ロボットの `request_start()` を兼ねる
+`match_start` はフェーズを `match` にするだけ。機体を動かすのは各操縦者が自分のタブで押す
+`sequence_start` で、ハンドごとに開始タイミングが異なるためサーバー側からまとめて起動しない。
 
-### 全自動モードの実現方式
+### トリガー待ちステップ
 
-シーケンス定義は半自動と共用し、`Sequence.set_auto_advance(True)` で `require_trigger` のステップを
-待たずに通過させる。二重メンテを避け、半自動と全自動で挙動が乖離しないようにするため。
+人間の目視確認を挟みたい動作には `@step("...", require_trigger=True)` を付ける。
+シーケンスはそのステップの手前で必ず止まり、操縦者の `trigger` を待つ。
 
-人間の目視確認が必須な危険動作には `@step("...", require_trigger=True, auto_stop=True)` を付ける。
-`auto_stop=True` のステップは全自動でも必ずトリガー待ちで停止する。
+**`require_trigger` の付与基準（機構未確定の現状）**: 「失敗したときに取り返しがつかないか」で線を引く。
 
-**`auto_stop` の付与基準（機構未確定の現状）**: 「失敗したときに機構が壊れるか」で線を引く。
-壊れるものだけに付ける。得点を落とすだけの失敗にまで付けると全自動が半自動と変わらなくなり、
-モードを分けた意味が無くなるため。
-
-| ステップ | require_trigger | auto_stop | 理由 |
-|---|---|---|---|
-| main_hand「ハンド閉じる (ワーク把持)」 | ✓ | ✓ | 位置ずれのまま閉じるとワークと機構の双方を破損する |
-| sub_hand「ハンド閉じる (受け取り)」 | ✓ | ✓ | メインハンドと機構同士が向かい合う唯一の動作。衝突で両方壊れる |
-| main_hand「ハンド開く (リリース)」 | ✓ | — | 落とすとやり直せないので半自動では配置位置到達を目視確認させる。ただし破損はしないので全自動は止めない |
-| sub_hand「ハンド開く (配置)」 | ✓ | — | 同上 |
-
-機構が固まって位置決め精度が確認できたら、把持の `auto_stop` を外して全自動を通しで回す。
+| ステップ | require_trigger | 理由 |
+|---|---|---|
+| main_hand「ハンド閉じる (ワーク把持)」 | ✓ | 位置ずれのまま閉じるとワークと機構の双方を破損する |
+| sub_hand「ハンド閉じる (受け取り)」 | ✓ | メインハンドと機構同士が向かい合う唯一の動作。衝突で両方壊れる |
+| main_hand「ハンド開く (リリース)」 | ✓ | 落とすとやり直せないので配置位置到達を目視確認させる |
+| sub_hand「ハンド開く (配置)」 | ✓ | 同上 |
 
 ### コート対応
 
@@ -799,19 +791,16 @@ setup ⇄ ready → match → finished → setup
 ### WebSocket プロトコル拡張
 
 Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後に送らないと、リロードした操縦者が
-現在のモード・フェーズを知れない:
+現在のコート・フェーズを知れない。`checklists` のキーがそのまま試合開始のゲート対象ロール:
 
 ```jsonc
 {
   "type": "match_state",
-  "mode": "semi_auto",
   "court": "red",
   "phase": "setup",
-  "required_roles": ["main_hand", "sub_hand"],
   "can_start_match": false,
   "checklists": {
-    "monitor":   { "items": [{ "id": "power", "label": "電源投入確認", "checked": false }], "completed": false },
-    "main_hand": { "items": [/* ... */], "completed": false },
+    "main_hand": { "items": [{ "id": "home_position", "label": "メインハンド初期位置確認", "checked": false }], "completed": false },
     "sub_hand":  { "items": [/* ... */], "completed": false }
   }
 }
@@ -821,7 +810,6 @@ Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後�
 Client → Server:
 
 ```jsonc
-{ "type": "set_mode", "mode": "full_auto" }
 { "type": "set_court", "court": "blue" }
 { "type": "checklist_set", "role": "main_hand", "item_id": "home_position", "checked": true }
 { "type": "checklist_reset", "role": "main_hand" }   // role 省略で全ロール
@@ -1145,8 +1133,8 @@ class PickAndPlace(Sequence):
     async def extend_arm(self):
         await self.move_to({"arm_joint": "extended"})
 
-    # 失敗すると機構破損に直結する動作は全自動でも止める
-    @step("ハンド閉じる", require_trigger=True, auto_stop=True)
+    # 失敗すると機構破損に直結する動作は必ず操縦者の許可を待つ
+    @step("ハンド閉じる", require_trigger=True)
     async def close_hand(self):
         await self.move_to({"gripper": "closed"})
 ```
@@ -1762,16 +1750,16 @@ motors:
 | ⑩ config 反映 | 6-23 | dry-run でモータ別パラメータが効くか |
 | ⑪ Web UI | 6-24〜6-27 | dry-run + Web UI から実押下・結果表示・無効化ロジックの目視確認 |
 
-### Phase 7: 試合運用フロー（モード / コート / フェーズ / 指差喚呼）— TDD
+### Phase 7: 試合運用フロー（コート / フェーズ / 指差喚呼）— TDD
 
 詳細な仕様は「試合運用フロー」セクションを参照。
 
 | # | ファイル | 内容 |
 |---|---|---|
-| 7-1 | `lib/match_state.py` | Mode / Court / Phase / ChecklistItem / MatchState / `load_checklist_definitions` |
-| 7-2 | `tests/test_match_state.py` | 遷移規則・完了判定・モード切替時リセット・コマンドゲートの単体テスト |
-| 7-3 | `lib/sequence/engine.py` | `court` / `auto_advance` / `@step(auto_stop=True)` を追加 |
-| 7-4 | `tests/test_sequence_court_auto.py` | コート伝播と全自動通過／`auto_stop` 停止の検証 |
+| 7-1 | `lib/match_state.py` | Court / Phase / ChecklistItem / MatchState / `load_checklist_definitions` |
+| 7-2 | `tests/test_match_state.py` | 遷移規則・完了判定・コート切替時リセット・コマンドゲートの単体テスト |
+| 7-3 | `lib/sequence/engine.py` | `court` と `@step(require_trigger=True)` を追加 |
+| 7-4 | `tests/test_sequence_court.py` | コート伝播と `require_trigger` 停止の検証 |
 | 7-5 | `lib/server.py` | `MatchState` 保持、フェーズゲート、`match_state` 配信、接続直後スナップショット、自動開始の廃止 |
 | 7-6 | `tests/test_server_match.py` | WS 経由の全フローと HTTP `motor_check` ゲートの検証 |
 | 7-7 | `config/checklist.yaml`, `main.py` | チェックリスト定義の読み込みと `--checklist` オプション |
@@ -1786,8 +1774,6 @@ motors:
 - **`mode` と `phase` は直交**: 混在させると状態が破綻するので 2 軸に分離した
 - **ゲートは二重**: UI の無効化だけでは WS 直叩き・リロード直後を防げないので
   サーバー側 (`deny_reason`) を単一の判定点とする
-- **全自動は共用シーケンス + フラグ**: 専用シーケンスを別定義すると二重メンテになり、
-  半自動と全自動で挙動が乖離する
 
 ### Phase 8: モータアクセス層と M3508 位置制御 — TDD
 

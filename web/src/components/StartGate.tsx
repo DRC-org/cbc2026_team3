@@ -13,7 +13,6 @@ interface Blocker {
 }
 
 const ROLE_LABEL: Record<string, string> = {
-  monitor: "Monitor",
   main_hand: "メインハンド 操縦者",
   sub_hand: "サブハンド 操縦者",
 };
@@ -29,7 +28,7 @@ const ROLE_LABEL: Record<string, string> = {
  */
 export function StartGate({ onStart }: { onStart: () => void }) {
   const { matchState, connected, states } = useRobot();
-  const { phase, can_start_match: canStart, required_roles: requiredRoles } = matchState;
+  const { phase, can_start_match: canStart } = matchState;
 
   const blockers: Blocker[] = [];
   if (!connected) {
@@ -39,10 +38,10 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     blockers.push({ label: "フェーズ", detail: "リセットしてセッティングへ戻してください" });
   }
 
-  // どのロールの何項目が残っているかまで出す。件数だけでは担当者が動けない
-  for (const role of requiredRoles ?? []) {
-    const checklist = matchState.checklists[role];
-    if (!checklist || checklist.completed) continue;
+  // どのロールの何項目が残っているかまで出す。件数だけでは担当者が動けない。
+  // checklists のキーがそのまま開始ゲートの対象ロール (サーバーが正)
+  for (const [role, checklist] of Object.entries(matchState.checklists)) {
+    if (checklist.completed) continue;
     const remaining = checklist.items.filter((i) => !i.checked);
     blockers.push({
       label: ROLE_LABEL[role] ?? role,

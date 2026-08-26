@@ -6,7 +6,6 @@ import type {
   CommandRejectedEvent,
   HealthChangeEvent,
   MatchCourt,
-  MatchMode,
   MatchState,
   MotorCheckState,
   RobotState,
@@ -30,7 +29,6 @@ interface RobotContextValue {
   send: (data: object) => void;
   onEStop: () => void;
   onEStopRelease: () => void;
-  setMode: (mode: MatchMode) => void;
   setCourt: (court: MatchCourt) => void;
   setChecklistItem: (role: ChecklistRole, itemId: string, checked: boolean) => void;
   resetChecklist: (role: ChecklistRole) => void;

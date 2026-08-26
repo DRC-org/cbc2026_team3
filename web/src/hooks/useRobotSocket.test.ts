@@ -180,38 +180,32 @@ describe("match_state メッセージ", () => {
     act(() =>
       latestSocket().receive({
         type: "match_state",
-        mode: "full_auto",
         court: "blue",
         phase: "match",
-        required_roles: ["main_hand"],
         can_start_match: true,
         checklists: { main_hand: { items: [], completed: true } },
       }),
     );
 
     expect(result.current.matchState).toEqual({
-      mode: "full_auto",
       court: "blue",
       phase: "match",
-      required_roles: ["main_hand"],
       can_start_match: true,
       checklists: { main_hand: { items: [], completed: true } },
     });
   });
 
-  it("required_roles / checklists が欠けても既定値で成立させる", () => {
+  it("checklists が欠けても既定値で成立させる", () => {
     const { result } = renderConnected();
 
     act(() =>
       latestSocket().receive({
         type: "match_state",
-        mode: "semi_auto",
         court: "red",
         phase: "ready",
       }),
     );
 
-    expect(result.current.matchState.required_roles).toEqual([]);
     expect(result.current.matchState.checklists).toEqual({});
     expect(result.current.matchState.can_start_match).toBe(false);
   });

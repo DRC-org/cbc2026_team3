@@ -27,8 +27,8 @@ async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict | None:
 
 def _enter_match(server: RobotServer) -> None:
     """シーケンス操作コマンドはフェーズゲートで試合中のみ許可される。"""
-    for role in server.match.required_roles:
-        for item in server.match.checklists[role].items:
+    for role, checklist in server.match.checklists.items():
+        for item in checklist.items:
             server.match.set_checklist_item(role, item.id, True)
     server.match._phase = Phase.MATCH
 

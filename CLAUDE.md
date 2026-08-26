@@ -139,6 +139,12 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 `positions` の名前付き状態として書く。`move_to` は位置名でしか値を引けないため、
 定義した状態以外を送れないことが構造的に保証される。
 
+**運用は半自動シーケンス制御のみ。操作モードという軸は存在しない。** 機体が動くのは
+操縦者がタブで `sequence_start` / `trigger` を押したときだけで、`match_start` はフェーズを
+進めるだけ。`require_trigger` のステップは常にトリガー待ちで止まる（「全自動なら素通り」
+のような例外は無い）。試合開始のゲートは `main_hand` / `sub_hand` 2 名の指差喚呼で、
+`match_state` の `checklists` のキーがそのまま対象ロールになる。
+
 **ファームと PC 側はプロトコルの対。** `docs/motor_driver_can_protocol.md` を単一情報源とし、
 片方だけを変更してはならない。`firmware/lib/MotorCan/` が `Arduino.h` を include しないのは、
 native 環境（`pio test -e native`）でプロトコル層と安全機構をテストできるようにするため。

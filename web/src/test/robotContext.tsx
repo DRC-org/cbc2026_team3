@@ -20,10 +20,8 @@ export const EMPTY_MOTOR_CHECK: MotorCheckState = {
 };
 
 export const DEFAULT_MATCH_STATE: MatchState = {
-  mode: "semi_auto",
   court: "red",
   phase: "setup",
-  required_roles: ["main_hand", "sub_hand"],
   can_start_match: false,
   checklists: {},
 };
@@ -47,7 +45,6 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     send: vi.fn(),
     onEStop: vi.fn(),
     onEStopRelease: vi.fn(),
-    setMode: vi.fn(),
     setCourt: vi.fn(),
     setChecklistItem: vi.fn(),
     resetChecklist: vi.fn(),

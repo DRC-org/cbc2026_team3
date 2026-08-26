@@ -110,10 +110,9 @@ function mergeRecord(records: MotorCheckRecord[], next: MotorCheckRecord): Motor
   return copy;
 }
 
-export type MatchMode = "semi_auto" | "full_auto";
 export type MatchCourt = "red" | "blue";
 export type MatchPhase = "setup" | "ready" | "match" | "finished";
-export type ChecklistRole = "monitor" | "main_hand" | "sub_hand";
+export type ChecklistRole = "main_hand" | "sub_hand";
 
 export interface ChecklistItem {
   id: string;
@@ -127,11 +126,10 @@ export interface ChecklistState {
 }
 
 export interface MatchState {
-  mode: MatchMode;
   court: MatchCourt;
   phase: MatchPhase;
-  required_roles: ChecklistRole[];
   can_start_match: boolean;
+  /** 完了が試合開始のゲートになるロールと、その進捗。キーの集合はサーバーが持つ */
   checklists: Record<string, ChecklistState>;
 }
 
@@ -143,10 +141,8 @@ export interface CommandRejectedEvent {
 
 // WS 未接続時に UI を成立させるための初期値。サーバー接続直後に必ず上書きされる
 const INITIAL_MATCH_STATE: MatchState = {
-  mode: "semi_auto",
   court: "red",
   phase: "setup",
-  required_roles: ["main_hand", "sub_hand"],
   can_start_match: false,
   checklists: {},
 };
@@ -155,7 +151,6 @@ export interface SequenceStepInfo {
   index: number;
   label: string;
   require_trigger: boolean;
-  auto_stop?: boolean;
 }
 
 export interface RobotState {
@@ -241,10 +236,8 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
         } else if (msg.type === "match_state") {
           // サーバーが正。接続直後のスナップショットと変化通知の両方がここに来る
           setMatchState({
-            mode: msg.mode as MatchMode,
             court: msg.court as MatchCourt,
             phase: msg.phase as MatchPhase,
-            required_roles: Array.isArray(msg.required_roles) ? msg.required_roles : [],
             can_start_match: Boolean(msg.can_start_match),
             checklists: msg.checklists ?? {},
           });

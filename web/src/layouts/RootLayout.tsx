@@ -11,7 +11,7 @@ import { ModalProvider } from "@/context/ModalContext";
 import { RobotProvider } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
-import type { ChecklistRole, MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
+import type { ChecklistRole, MatchCourt } from "@/hooks/useRobotSocket";
 import { useWsUrl } from "@/hooks/useWsUrl";
 import { TABS } from "@/lib/tabs";
 
@@ -61,7 +61,6 @@ export function RootLayout() {
     socket.setEStopActive(false);
   }, [send, socket]);
 
-  const setMode = useCallback((mode: MatchMode) => send({ type: "set_mode", mode }), [send]);
   const setCourt = useCallback((court: MatchCourt) => send({ type: "set_court", court }), [send]);
   const setChecklistItem = useCallback(
     (role: ChecklistRole, itemId: string, checked: boolean) =>
@@ -95,7 +94,6 @@ export function RootLayout() {
         send,
         onEStop,
         onEStopRelease,
-        setMode,
         setCourt,
         setChecklistItem,
         resetChecklist,
