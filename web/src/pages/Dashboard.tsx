@@ -1,149 +1,142 @@
 import { Checklist } from "@/components/Checklist";
-import { HealthIndicator } from "@/components/HealthIndicator";
-import { MatchControl } from "@/components/MatchControl";
-import { MotorSummary } from "@/components/MotorSummary";
-import { RobotReadiness } from "@/components/RobotReadiness";
-import { SequenceProgress } from "@/components/SequenceProgress";
+import { EventFeed } from "@/components/EventFeed";
+import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/MatchControl";
+import { RobotStatusRow } from "@/components/RobotStatusRow";
+import { StartGate } from "@/components/StartGate";
+import { SubsystemStatus } from "@/components/SubsystemStatus";
+import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobot } from "@/context/RobotContext";
 import type { ChecklistRole } from "@/hooks/useRobotSocket";
 import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
-const OPERATOR_ROLES: { role: ChecklistRole; label: string }[] = [
-  { role: "main_hand", label: "メインハンド 操縦者" },
-  { role: "sub_hand", label: "サブハンド 操縦者" },
-];
-
 /**
  * 半自動時、Monitor から 2 名の指差喚呼の進み具合を読み取り専用で監視する。
  *
- * 完了件数だけでは「誰の何が残っているか」が分からず、試合開始が遅れる原因を
- * 探すのに操縦者へ聞きにいく必要があった。未完了の項目名まで出す。
+ * 完了済みは件数へ畳み、**残っている項目名だけ**を並べる。Monitor が知りたいのは
+ * 「何が残っているか」であって「何が終わったか」ではない。以前は完了・未完を同じ
+ * 重さで 16 行並べていたため、開始が遅れている原因を目で差分を取って探す必要があった。
  */
-function OperatorChecklistProgress() {
+// prop 名を `role` にすると JSX 上で ARIA の role 属性と見分けが付かない
+function OperatorProgress({
+  checklistRole,
+  label,
+}: {
+  checklistRole: ChecklistRole;
+  label: string;
+}) {
   const { matchState } = useRobot();
+  const checklist = matchState.checklists[checklistRole];
+  const items = checklist?.items ?? [];
+  const remaining = items.filter((i) => !i.checked);
+  const done = checklist?.completed ?? false;
 
   return (
-    <Panel legend="SETUP CHECKLIST">
-      <p className="text-fg-dim">
-        半自動モードでは各操縦者が自分のタブでチェックします (読み取り専用)。
-      </p>
-      <div className="panel-body scroll mt-2 gap-3">
-        {OPERATOR_ROLES.map(({ role, label }) => {
-          const checklist = matchState.checklists[role];
-          const items = checklist?.items ?? [];
-          const checked = items.filter((i) => i.checked).length;
-          const done = checklist?.completed ?? false;
-          return (
-            <div key={role} className="shrink-0">
-              <div className="hsplit">
-                <span className={done ? "text-success" : "text-warning"}>
-                  {done ? "[✓]" : "[ ]"} {label}
-                </span>
-                <span className="whitespace-nowrap text-fg-dim">
-                  {checked} / {items.length}
-                </span>
-              </div>
-              <div className="pl-6">
-                {items.map((item) => (
-                  <div
-                    key={item.id}
-                    className={item.checked ? "truncate text-fg-dim" : "truncate text-warning"}
-                  >
-                    {item.checked ? "✓" : "·"} {item.label}
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })}
+    <section className="flex min-w-0 shrink-0 flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 truncate font-medium">{label}</span>
+        <StatusBadge tone={done ? "success" : "warning"}>
+          {done ? "完了" : `残り ${remaining.length}`}
+        </StatusBadge>
       </div>
-    </Panel>
-  );
-}
-
-/**
- * 試合中の Monitor が見る 1 機分のカード。シーケンス進捗を最上段に置く。
- *
- * 枠はカード外周の 1 本だけ。内訳 (SEQUENCE / CAN BUS / MOTORS) は
- * 枠を入れ子にせず罫線と小見出しで区切る。
- */
-function RobotCard({ robotKey, label }: { robotKey: string; label: string }) {
-  const { states } = useRobot();
-  const state = states[robotKey];
-
-  if (!state) {
-    return (
-      <Panel legend={label}>
-        <div className="hstack py-2">
-          <span className="whitespace-nowrap text-fg-dim">データ未受信</span>
-          <progress className="progress h-[0.9rem] flex-1 border border-line bg-base-300" />
-        </div>
-      </Panel>
-    );
-  }
-
-  return (
-    <Panel legend={label}>
-      <div className="group">
-        <div className="group-title">SEQUENCE</div>
-        <SequenceProgress
-          sequence={state.sequence}
-          currentStep={state.current_step}
-          stepIndex={state.step_index}
-          totalSteps={state.total_steps}
-          waitingTrigger={state.waiting_trigger}
-        />
-      </div>
-
-      <div className="group">
-        <div className="group-title">CAN BUS</div>
-        <HealthIndicator variant="bus-only" health={state.health} />
-      </div>
-
-      <div className="group min-h-0 flex-1">
-        <div className="group-title">MOTORS</div>
-        <MotorSummary motors={state.motors} healthMotors={state.health?.motors} />
-      </div>
-    </Panel>
+      {remaining.length > 0 ? (
+        <ul className="flex flex-col pl-1">
+          {remaining.map((item) => (
+            <li key={item.id} className="truncate text-base-content/80">
+              {item.label}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <span className="text-[0.85em] text-base-content/50">
+        完了 {items.length - remaining.length} / {items.length}
+      </span>
+    </section>
   );
 }
 
 /**
  * Monitor タブ。フェーズによって役割が変わるため、レイアウトごと切り替える。
  *
- * - セッティングタイム: 試合設定と指差喚呼が主役。ロボットの詳細は畳み、異常有無のみ残す
- * - 試合中 / 試合終了: 両機の状態監視が主役。試合制御は終了導線だけの 1 行に縮退させる
+ * - セッティングタイム: 問いは 1 つ「試合を開始できるか、できないなら何が足りないか」
+ * - 試合中 / 試合終了: 問いは 1 つ「どちらの機体が止まっていて、何か起きていないか」
  */
 export function Dashboard() {
-  const { matchState } = useRobot();
+  const { states, matchState } = useRobot();
+  const { confirmModal, requestConfirm } = useMatchConfirm();
 
   if (isSetupPhase(matchState.phase)) {
     return (
-      // 上段が残り高さを埋め、機体レディネスは常に画面下端に固定される
-      <main className="page grid grid-cols-2 grid-rows-[minmax(0,1fr)_auto]">
-        <MatchControl />
-        {matchState.mode === "full_auto" ? (
-          <Checklist checklistRole="monitor" title="セッティング指差喚呼 (全自動)" />
-        ) : (
-          <OperatorChecklistProgress />
-        )}
-        <div className="col-span-full flex">
-          <RobotReadiness />
-        </div>
-      </main>
+      <>
+        <Page className="grid grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] grid-rows-[auto_minmax(0,1fr)]">
+          {/* 開始可否を画面で最も大きい要素にする。以前これはパネル最下段の
+              小さなグレー文字で、何が足りないかは書かれていなかった */}
+          <div className="col-span-full">
+            <StartGate onStart={() => requestConfirm("start")} />
+          </div>
+
+          <div className="flex min-h-0 flex-col gap-2">
+            <MatchSettings onRequestConfirm={requestConfirm} />
+
+            {/* 機体の異常は StartGate の警告行にも出るが、どのバス・どのモータかは
+                ここを開いて確かめる。準備フェーズはそのための時間なので既定で開く */}
+            <Panel legend="機体状態" className="min-h-0 flex-1" bodyClassName="p-1">
+              <div className="scroll flex min-h-0 flex-1 flex-col gap-2">
+                {ROBOTS.map(({ key, label }) => {
+                  const robot = states[key];
+                  return (
+                    <section key={key} className="flex shrink-0 flex-col">
+                      <span className="px-1 font-medium">{label}</span>
+                      {robot ? (
+                        <SubsystemStatus health={robot.health} motors={robot.motors} defaultOpen />
+                      ) : (
+                        <span className="px-1 text-base-content/70">データ未受信</span>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            </Panel>
+          </div>
+
+          {matchState.mode === "full_auto" ? (
+            <Checklist checklistRole="monitor" title="セッティング指差喚呼 (全自動)" />
+          ) : (
+            <Panel legend="操縦者の指差喚呼 (読み取り専用)">
+              <div className="scroll flex min-h-0 flex-1 flex-col gap-3">
+                <OperatorProgress checklistRole="main_hand" label="メインハンド 操縦者" />
+                <OperatorProgress checklistRole="sub_hand" label="サブハンド 操縦者" />
+              </div>
+            </Panel>
+          )}
+        </Page>
+        {confirmModal}
+      </>
     );
   }
 
   return (
-    <main className="page">
-      <MatchControl variant="compact" />
-      <div className="grid min-h-0 flex-1 grid-cols-2 gap-2">
+    <>
+      <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
+        <div className="col-span-full">
+          <MatchStrip onRequestConfirm={requestConfirm} />
+        </div>
+
         {ROBOTS.map(({ key, label }) => (
-          <RobotCard key={key} robotKey={key} label={label} />
+          <RobotStatusRow key={key} label={label} state={states[key]} />
         ))}
-      </div>
-    </main>
+
+        {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
+            Monitor は起きたことを拾う役なので、履歴を画面に残す */}
+        <div className="col-span-full min-h-0">
+          <Panel legend="イベント" className="h-full" bodyClassName="p-0">
+            <EventFeed />
+          </Panel>
+        </div>
+      </Page>
+      {confirmModal}
+    </>
   );
 }

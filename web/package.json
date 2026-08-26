@@ -16,7 +16,11 @@
     "check": "pnpm lint && pnpm format:check && tsc -b --noEmit && pnpm test:run"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/noto-sans-jp": "^5.3.0",
     "daisyui": "^5.7.22",
+    "lucide-react": "^1.34.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "^8.3.0",

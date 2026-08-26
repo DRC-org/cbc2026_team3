@@ -94,9 +94,14 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 - `firmware/` — 自作モータドライバのファームウェア（PlatformIO / Arduino UNO R4）
 - `web/` — Vite + React + TypeScript + Tailwind v4 / daisyUI 5 の操作 UI
   - 画面切替は React Router（library mode / `createBrowserRouter`）。ルートは `src/routes.tsx`、
-    共通の外枠と WebSocket 接続は `src/layouts/RootLayout.tsx`
-  - 配色は `src/index.css` の daisyUI カスタムテーマ `cbc` に集約。組み込みテーマは使わない
-  - `src/components/ui/` — 自前プリミティブ（`Button` / `Panel` / `Modal`）
+    共通の外枠と WebSocket 接続は `src/layouts/RootLayout.tsx`（タブ帯は `AppHeader` の中）
+  - 配色は `src/index.css` の daisyUI カスタムテーマ `cbc`（ライト基調）に集約。組み込みテーマは使わない
+  - `src/components/ui/` — 自前プリミティブ（`Page` / `Panel` / `Section` / `Button` /
+    `StatusBadge` / `Kbd` / `Icon` / `Modal`）。レイアウト骨格は CSS ではなくここが持つ
+  - 画面の主役は `ActionPanel`（操縦者・試合中）/ `StartGate`（Monitor・準備中）/
+    `Checklist`（操縦者・準備中）。診断は `SubsystemStatus` が平常時 1 行へ畳む
+  - アイコンは `lucide-react`。既定値は `ui/Icon.tsx` に閉じ込め、各所で個別指定しない
+  - フォントは `@fontsource-variable/*` で自己ホスト（会場のネットワークに依存させない）
   - `src/test/` — vitest 共通ヘルパ（WebSocket スタブ、RobotProvider ラッパ）。テスト本体は対象ソースの隣に `*.test.ts(x)`
 
 ### 設定ファイルの分担
@@ -142,6 +147,13 @@ native 環境（`pio test -e native`）でプロトコル層と安全機構を�
 このピンを他用途へ割り当てると CAN が上がらず、PC から止められない基板ができあがる。
 各 `main.cpp` の `static_assert` が `config.h` のピン衝突をビルド時に検出する。
 
+**テレメトリ配信は 1 クライアントの不調で止めてはならない。** `_broadcast_state` は全
+クライアントへ直列に送るため、詰まった 1 台を無期限に待つと他の全員（Monitor 含む）の
+値が凍る。しかも WebSocket は開いたままなので UI は「接続中」を出し続け、操縦者は
+凍った値を最新だと思って見続ける。送信には `_WS_SEND_TIMEOUT_S` を必ず通し
+(`_send_or_drop`)、切り離しの `close()` は別タスクへ逃がす（`close()` も相手の応答を待つので、
+配信ループ上で await すると同じ場所で詰まる）。`_broadcast_loop` の例外ガードも外さないこと。
+
 **Web UI はモータ名をハードコードしていない。** モータ状態は `Record<string, MotorState>` として
 そのまま流れるので、モータの増減で UI 側の変更は要らない。
 
@@ -163,9 +175,43 @@ native 環境（`pio test -e native`）でプロトコル層と安全機構を�
 **daisyUI の既定を上書きしたい箇所は必ず明示のユーティリティを書く。** ビルド後の
 レイヤ順は `... < utilities < daisyui` に見えるが、実測ではユーティリティが勝つ。
 一方でユーティリティを書いていない属性は daisyUI の既定がそのまま残る。
-特に `:disabled` は既定が「文字 base-content 20% / 枠 透明」で、`⊘ 準備中` `RUNNING` `✓ DONE` の
+特に `:disabled` は既定が「地 base-content 10% / 文字 20%」で、`⊘ 準備中` `RUNNING` `✓ DONE` の
 ように*状態表示を兼ねる*無効ボタンが読めなくなる（`components/ui/Button.tsx` の `DISABLED_CLASS` で
 上書き済み）。配色を変えたときは実機描画で確認すること。
+
+**サイズ修飾子が font-size まで固定するコンポーネントに注意。** `card-xs` や `table-xs` は
+padding だけでなく本文の `font-size` も直接指定する。ルートの `clamp()` による全体スケーリングから
+その部分だけが外れるため、`card-body` は使わず（`Panel.tsx` は枠にだけ `card card-border` を使う）、
+`table-xs` はセル側に `text-[0.85em]` を当てて打ち消す。
+
+**各画面は答える問いを 1 つに絞り、同じ事実を 2 度描かない。** 以前は現在ステップが
+`SEQUENCE` / `CURRENT STEP` / `STEP 一覧` の 3 箇所に出ており、操縦者は 3 回読んで
+ようやく 1 つの事実にたどり着いていた。新しい表示を足すときは、まずその事実が
+既にどこかに描かれていないかを確認すること。
+
+**平常時に静かで、異常時に自分から主張する。** 試合中の操縦者は機体を見ており、
+画面へ視線を戻すのは一瞬しかない。そこに 8 モータ × 4 値の数字が常時出ていると
+「異常があるか」が数字の海に沈む。`SubsystemStatus` は平常時 1 行に畳み、
+異常時は操縦者の開閉操作を**上書きして**開く（畳んだまま見逃させない）。
+同じ部品でも役割で既定を変える — 操縦者の試合中は畳み、Monitor と準備フェーズは開く。
+
+**主操作は状態によって位置を動かさない。** `ActionPanel` は右の大きい面が常に
+「今押すべきボタン」（START / NEXT / RUNNING / DONE）で、左は常に STOP。
+状態で入れ替えると押す直前に毎回探し直すことになる。
+
+**grid の子は既定で縦に伸びる。`shrink-0` では止まらない。** 内容ぶんの高さに留めるには
+`self-start` が要る。落とすと、平常時に中身が数行しかないカードが全高の白い箱になる。
+
+**クラス名を実行時に組み立ててはならない。** `TONE_BORDER_CLASS[t].replace("border-", "border-l-")`
+のような書き方は Tailwind の走査から漏れ、CSS ごと出力されない（`lib/tone.ts` に
+`TONE_BORDER_L_CLASS` としてリテラルで持つ）。
+
+**機体の健全性判定は `lib/healthVerdict.ts` に一本化する。** 2 箇所に書くと
+「Monitor は READY と言うのに操縦者の画面は異常と言う」状態が生まれる。
+
+**状態は色付きテキストではなくチップで示す。** ライト地では警告色を AA (4.5:1) まで暗くすると
+もはや警告色に見えない。`components/ui/StatusBadge.tsx` に一本化してあるので、
+新しい状態表示を足すときも着色テキストを書かずにこれを使う。
 
 ## テスト方針
 

@@ -3,15 +3,20 @@
 /* 組み込みテーマは持ち込まない。この画面の配色要件は下の cbc テーマが単独で満たす */
 @plugin "daisyui" {
   themes: false;
+  logs: false;
 }
 
 /* ==================================================================
    テーマ層
 
-   この画面はほぼ全面がパネルで埋まるため、彩度の高い配色だと画面全体が
-   原色で覆われ、試合中の長時間注視に耐えない。
+   ライト基調。この画面はほぼ全面がパネルで埋まるため、彩度の高い配色だと
+   画面全体が原色で覆われ、試合中の長時間注視に耐えない。
    グレー基調へ落とし、彩色は状態表示 (正常/警告/異常/実行中) の
-   アクセントだけに限定する。
+   アクセントだけに限定する方針は暗色時代から継承する。
+
+   状態色は「白抜き文字を載せて AA (4.5:1)」「badge-soft の淡色地に載せて AA」
+   の両方を満たす値を実測して選んである。ライト地では彩度の高い amber や
+   green はそのままでは文字として読めないため、明度を落として選定した。
 
    角丸と影を全て 0 にしているのは、1px の実線 1 本でパネル境界を表す
    情報密度優先のレイアウトに合わせるため。
@@ -20,34 +25,33 @@
 @plugin "daisyui/theme" {
   name: "cbc";
   default: true;
-  color-scheme: dark;
+  color-scheme: light;
 
   /* base-100 がパネル面。base-200 が地、base-300 が沈んだ面 (表の縞・入力欄) */
-  --color-base-100: #1b1e23;
-  --color-base-200: #14161a;
-  --color-base-300: #101216;
-  --color-base-content: #c3c9d1;
+  --color-base-100: #ffffff;
+  --color-base-200: #eef1f4;
+  --color-base-300: #d5dbe2;
+  --color-base-content: #181b1f;
 
-  /* 状態色。彩度を CGA の半分程度まで落として明度差で読ませる */
-  --color-success: #7ba767;
-  --color-success-content: #101216;
-  --color-warning: #c6a04d;
-  --color-warning-content: #101216;
-  --color-error: #cd6d5d;
-  --color-error-content: #101216;
-  --color-info: #6d9bb1;
-  --color-info-content: #101216;
+  --color-success: #2f7a4f;
+  --color-success-content: #ffffff;
+  --color-warning: #96620a;
+  --color-warning-content: #ffffff;
+  --color-error: #b3372c;
+  --color-error-content: #ffffff;
+  --color-info: #25667f;
+  --color-info-content: #ffffff;
 
   /* primary/secondary/accent は独自の意味を持たせない。
      取りこぼした daisyUI 既定クラスが原色で浮かないよう既存の状態色へ寄せる */
-  --color-primary: #6d9bb1;
-  --color-primary-content: #101216;
-  --color-secondary: #7c848e;
-  --color-secondary-content: #101216;
-  --color-accent: #6d9bb1;
-  --color-accent-content: #101216;
-  --color-neutral: #39404a;
-  --color-neutral-content: #c3c9d1;
+  --color-primary: #25667f;
+  --color-primary-content: #ffffff;
+  --color-secondary: #4a5361;
+  --color-secondary-content: #ffffff;
+  --color-accent: #25667f;
+  --color-accent-content: #ffffff;
+  --color-neutral: #4a5361;
+  --color-neutral-content: #ffffff;
 
   --radius-selector: 0;
   --radius-field: 0;
@@ -58,23 +62,20 @@
 }
 
 @theme {
-  /* 旧スタック先頭の "DOS" (Perfect DOS VGA 437) は TuiCss が同梱していたもので、
-     パッケージ撤去とともに実体が無くなった。解決しない名前を残すと
-     「指定してあるのに効かない」誤解を生むため落とす。
-     DotGothic16 は index.html が Google Fonts から読む。
-     数値の桁揃えは各所の tabular-nums が担保する */
-  --font-mono: DotGothic16, ui-monospace, monospace;
-
-  /* daisyUI の base スケールに収まらない面と罫線 */
-  --color-raised: #232830;
-  --color-line: #39404a;
-  --color-line-soft: #272c34;
-  --color-fg-strong: #e6eaf0;
-  --color-fg-dim: #7c848e;
+  /* フォントは自己ホストする。会場にネットワークがある保証はなく、Google Fonts の
+     <link> は解決に失敗しても無言で素の sans-serif に落ちるだけで当日まで気付けない。
+     実体は main.tsx が @fontsource-variable から読む */
+  --font-sans: "Inter Variable", "Noto Sans JP Variable", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
   /* 緊急停止だけは例外的に強い赤。安全上、他の何よりも先に目に入る必要がある */
-  --color-estop: #b03a2e;
-  --color-estop-fg: #ffe9e5;
+  --color-estop: #c62d1f;
+  --color-estop-fg: #ffffff;
+
+  /* NEXT も例外。試合中に最も多く押すボタンで、周辺視野で見つかる必要がある。
+     状態色の warning は文字として読める明度まで落としてあり面塗りでは目立たない */
+  --color-next: #d98c00;
+  --color-next-fg: #241800;
 }
 
 @layer base {
@@ -83,119 +84,36 @@
        幅と高さの両方に追従させ、どの機材を持ち込んでも 1 画面に収める。
        Tailwind の余白は rem 基準なので、ここを起点にすると余白も一緒に追従する */
     font-size: clamp(13px, min(1.05vw, 2.1vh), 20px);
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
   }
 
   body {
     background-color: var(--color-base-200);
     color: var(--color-base-content);
   }
+
+  /* 操作対象はキーボードでも追えなければならない。daisyUI の既定は
+     コンポーネントごとにばらつくため、地の文からここで一律に与える */
+  :focus-visible {
+    outline: 2px solid var(--color-info);
+    outline-offset: 1px;
+  }
 }
 
 /* ==================================================================
    アプリ共通クラス
 
-   ユーティリティで素直に書けるものは JSX 側に置く。ここに残すのは
-   擬似要素・擬似クラスを伴うものと、画面全体で繰り返す骨格だけ。
+   レイアウトと配色はユーティリティか daisyUI コンポーネントで表す。
+   ここに残すのは擬似要素・擬似クラス・keyframe を伴い、
+   ユーティリティでは書けないものだけ。
    ================================================================== */
 
 @layer components {
-  /* --- レイアウト骨格 ------------------------------------------------ */
-
-  .page {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 0.5rem;
-    min-height: 0;
-    overflow: hidden;
-    padding: 0.5rem;
-  }
-
-  /* 画面上の枠は「パネル 1 つにつき 1 本」。入れ子にはせず、
-     内部の区切りは .group の罫線で表す */
-  .panel {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    min-height: 0;
-    border: 1px solid var(--color-line);
-    background-color: var(--color-base-100);
-    padding: 0.5rem 0.6rem 0.6rem;
-    color: var(--color-base-content);
-  }
-
-  .panel > legend {
-    padding: 0 0.5em;
-    color: var(--color-fg-dim);
-  }
-
-  /* パネル内でスクロールさせる領域。ページ全体はスクロールさせない */
-  .panel-body {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  /* 行が縮んで潰れると等幅の桁揃えが崩れる。溢れた分はスクロールで見せる */
-  .panel-body > * {
-    flex-shrink: 0;
-  }
-
-  /* 入れ子パネルの代替。罫線 1 本 + 小見出しでグループを表す */
-  .group {
-    display: flex;
-    flex-direction: column;
-    flex-shrink: 0;
-    gap: 0.25rem;
-    padding-top: 0.4rem;
-    border-top: 1px solid var(--color-line-soft);
-    margin-top: 0.4rem;
-  }
-
-  .group:first-of-type {
-    padding-top: 0;
-    border-top: none;
-    margin-top: 0;
-  }
-
-  .group-title {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.75rem;
-    color: var(--color-fg-dim);
-  }
-
-  /* --- 行 / 値の並び -------------------------------------------------- */
-
-  .hstack {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-
-  .hsplit {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.75rem;
-    min-width: 0;
-  }
-
-  /* 交互の地色。等幅の数値が縦に並ぶ表で行を追いやすくする */
-  .striped > :nth-child(odd) {
-    background-color: var(--color-base-300);
-  }
-
-  /* --- スクロール ------------------------------------------------------ */
-
+  /* パネル内でスクロールさせる領域。ページ全体はスクロールさせない。
+     スクロールバー装飾は Tailwind に等価なユーティリティが無い */
   .scroll {
     overflow: auto;
-    scrollbar-color: var(--color-line) var(--color-base-300);
+    scrollbar-color: var(--color-base-300) transparent;
   }
 
   .scroll::-webkit-scrollbar {
@@ -204,31 +122,16 @@
   }
 
   .scroll::-webkit-scrollbar-track {
-    background-color: var(--color-base-300);
+    background-color: transparent;
   }
 
   .scroll::-webkit-scrollbar-thumb {
-    background-color: var(--color-line);
+    background-color: var(--color-base-300);
   }
 
   .scroll::-webkit-scrollbar-thumb:hover {
-    background-color: var(--color-fg-dim);
+    background-color: color-mix(in oklab, var(--color-base-content) 35%, transparent);
   }
-
-  /* --- キーヒント ------------------------------------------------------ */
-
-  .key-hint {
-    display: inline-block;
-    margin-left: 0.5em;
-    padding: 0 0.35em;
-    border: 1px solid currentColor;
-    font-size: 0.7em;
-    line-height: 1.4;
-    opacity: 0.85;
-    white-space: nowrap;
-  }
-
-  /* --- 点滅 ------------------------------------------------------------ */
 
   /* 点滅は先頭の記号など最小限に留める。文章まで点滅すると読み取りに時間がかかる */
   .alert-blink {
@@ -239,5 +142,13 @@
 @keyframes estop-blink {
   50% {
     opacity: 0.35;
+  }
+}
+
+/* 前庭障害・光過敏への配慮。緊急停止の点滅も例外にしない
+   （色と面積で十分に目立つよう設計してある） */
+@media (prefers-reduced-motion: reduce) {
+  .alert-blink {
+    animation: none;
   }
 }

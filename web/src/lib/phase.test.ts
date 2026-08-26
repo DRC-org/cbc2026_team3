@@ -6,7 +6,7 @@ import {
   MODE_LABEL,
   PHASE_BAND_CLASS,
   PHASE_LABEL,
-  PHASE_TEXT_CLASS,
+  PHASE_TONE,
   isMatchPhase,
   isSetupPhase,
 } from "@/lib/phase";
@@ -40,7 +40,7 @@ describe("ラベル・配色テーブル", () => {
     for (const phase of ALL_PHASES) {
       expect(PHASE_LABEL[phase]).toBeTruthy();
       expect(PHASE_BAND_CLASS[phase]).toBeTruthy();
-      expect(PHASE_TEXT_CLASS[phase]).toBeTruthy();
+      expect(PHASE_TONE[phase]).toBeTruthy();
     }
   });
 

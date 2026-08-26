@@ -5,7 +5,6 @@ import { AppHeader } from "@/components/AppHeader";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { EStopOverlay } from "@/components/EStopOverlay";
 import { StatusBar } from "@/components/StatusBar";
-import { TabBar } from "@/components/TabBar";
 import { Toaster } from "@/components/Toaster";
 import { WsSettings } from "@/components/WsSettings";
 import { ModalProvider } from "@/context/ModalContext";
@@ -111,13 +110,11 @@ export function RootLayout() {
             ページ全体はスクロールさせず、常に 1 画面へ収める */}
         <div className="flex h-svh w-full flex-col overflow-hidden bg-base-200 text-base-content">
           <ConnectionBanner />
+          {/* タブは AppHeader の中。帯を 2 段消費しないよう 1 段に畳んである */}
           <AppHeader />
 
-          <div className="flex min-h-0 flex-1 flex-col">
-            <TabBar />
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-              <Outlet />
-            </div>
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <Outlet />
           </div>
 
           <StatusBar />

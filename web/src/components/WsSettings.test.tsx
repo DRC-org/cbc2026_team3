@@ -28,12 +28,12 @@ describe("WsSettings", () => {
 
     expect(screen.getByText("ws://drc:8080/ws")).toBeInTheDocument();
     expect(screen.getByText("設定元: この端末に保存")).toBeInTheDocument();
-    expect(screen.getByText("● 接続中")).toBeInTheDocument();
+    expect(screen.getByText("接続中")).toBeInTheDocument();
   });
 
   it("切断中はその旨を出す（接続先違いに気付ける必要がある）", () => {
     mount({ connected: false });
-    expect(screen.getByText("● 切断")).toBeInTheDocument();
+    expect(screen.getByText("切断")).toBeInTheDocument();
   });
 
   it("入力を保存すると setWsUrl に渡る", async () => {

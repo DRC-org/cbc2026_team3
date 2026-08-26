@@ -1,11 +1,14 @@
-import { useState } from "react";
+import { Info, RotateCcw, Square, TriangleAlert } from "lucide-react";
+import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
-import type { ButtonTone } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { Panel } from "@/components/ui/Panel";
+import { Section } from "@/components/ui/Section";
 import { useRobot } from "@/context/RobotContext";
 import type { MatchCourt, MatchMode } from "@/hooks/useRobotSocket";
+import { cx } from "@/lib/cx";
 import { COURT_LABEL, MODE_LABEL } from "@/lib/phase";
 
 const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
@@ -13,43 +16,28 @@ const MODE_OPTIONS: { value: MatchMode; label: string }[] = [
   { value: "full_auto", label: "全自動" },
 ];
 
-const COURT_OPTIONS: { value: MatchCourt; label: string; tone: ButtonTone }[] = [
-  { value: "red", label: "赤コート", tone: "danger" },
-  { value: "blue", label: "青コート", tone: "info" },
+/** 選択中のコートは面で塗る。誤ったコート設定は試合をそのまま落とすため */
+const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }[] = [
+  { value: "red", label: "赤コート", selectedClass: "border-error bg-error text-error-content" },
+  { value: "blue", label: "青コート", selectedClass: "border-info bg-info text-info-content" },
 ];
 
-type ConfirmKind = "start" | "finish" | "reset";
-
-interface MatchControlProps {
-  /**
-   * full   — セッティングタイム用。モード / コート / フェーズ遷移を全て扱う
-   * compact — 試合中・試合終了後用。画面をロボット状態に明け渡しつつ、
-   *           試合を終える導線 (match_finish / match_reset) だけを 1 行で残す
-   */
-  variant?: "full" | "compact";
-}
+export type ConfirmKind = "start" | "finish" | "reset";
 
 /**
- * 試合制御パネル。モード・コートの切替とフェーズ遷移を担う。
- * 切替はサーバー側でも試合中は拒否されるが、UI 上でも無効化して誤操作を減らす。
+ * フェーズ遷移の確認ダイアログ。
+ *
+ * 開始は StartGate、終了は MatchStrip、リセットは MatchSettings と、
+ * 呼び出し元が画面ごとに散る。ダイアログ本体と文言をここに一本化し、
+ * 呼び出し側は `requestConfirm(kind)` を叩くだけにする。
  */
-export function MatchControl({ variant = "full" }: MatchControlProps) {
-  const { matchState, setMode, setCourt, matchStart, matchFinish, matchReset, connected } =
-    useRobot();
-  const { mode, court, phase, can_start_match: canStart } = matchState;
+export function useMatchConfirm() {
+  const { matchState, matchStart, matchFinish, matchReset } = useRobot();
+  const { mode, court } = matchState;
   const [confirm, setConfirm] = useState<ConfirmKind | null>(null);
 
-  const settingsLocked = phase === "match" || !connected;
-
-  const startBlockedReason = !connected
-    ? "切断中"
-    : phase === "match"
-      ? "すでに試合中"
-      : phase === "finished"
-        ? "リセットしてください"
-        : !canStart
-          ? "チェックリスト未完了"
-          : null;
+  const requestConfirm = useCallback((kind: ConfirmKind) => setConfirm(kind), []);
+  const close = useCallback(() => setConfirm(null), []);
 
   const handleConfirm = () => {
     if (confirm === "start") matchStart();
@@ -61,12 +49,12 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
   const confirmModal = (
     <Modal
       open={confirm !== null}
-      onClose={() => setConfirm(null)}
+      onClose={close}
       tone="danger"
       title={confirm === "start" ? "START MATCH" : confirm === "finish" ? "FINISH MATCH" : "RESET"}
       footer={
         <>
-          <Button onClick={() => setConfirm(null)}>キャンセル</Button>
+          <Button onClick={close}>キャンセル</Button>
           <Button tone="danger" onClick={handleConfirm}>
             実行
           </Button>
@@ -76,33 +64,34 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
       {confirm === "start" ? (
         <>
           <p>
-            <span className="text-info">
+            <span className="font-medium text-info">
               {MODE_LABEL[mode]} / {COURT_LABEL[court]}
             </span>{" "}
             で試合を開始します。
           </p>
           {mode === "full_auto" ? (
-            <p className="mt-2 text-error">
-              ⚠ 全自動モードでは開始と同時に両ロボットが動き出します。
+            <p className="mt-2 flex items-center gap-1.5 text-error">
+              <Icon as={TriangleAlert} />
+              全自動モードでは開始と同時に両ロボットが動き出します。
             </p>
           ) : (
-            <p className="mt-2 text-fg-dim">
+            <p className="mt-2 text-base-content/70">
               半自動モードでは各操縦者が自分のタブで START を押すまで動きません。
             </p>
           )}
-          <p className="mt-1 text-fg-dim">周囲の安全を確認してください。</p>
+          <p className="mt-1 text-base-content/70">周囲の安全を確認してください。</p>
         </>
       ) : confirm === "finish" ? (
         <>
           <p>試合を終了します。</p>
-          <p className="mt-2 text-fg-dim">
+          <p className="mt-2 text-base-content/70">
             実行中のシーケンスは通常停止します (緊急停止ではありません)。
           </p>
         </>
       ) : (
         <>
           <p>セッティングタイムに戻します。</p>
-          <p className="mt-2 text-fg-dim">
+          <p className="mt-2 text-base-content/70">
             チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
           </p>
         </>
@@ -110,114 +99,114 @@ export function MatchControl({ variant = "full" }: MatchControlProps) {
     </Modal>
   );
 
-  if (variant === "compact") {
-    return (
-      <>
-        <Panel legend="MATCH" className="shrink-0">
-          <div className="hstack">
-            <span className="min-w-0 flex-1 truncate">
-              {MODE_LABEL[mode]} / {COURT_LABEL[court]}
-            </span>
-            {phase === "match" ? (
-              <Button
-                tone="danger"
-                onClick={() => setConfirm("finish")}
-                aria-label="試合を終了する"
-              >
-                ■ 試合終了
-              </Button>
-            ) : (
-              <Button
-                tone="warn"
-                onClick={() => setConfirm("reset")}
-                aria-label="セッティングタイムへ戻す"
-              >
-                ↺ セッティングへ戻る
-              </Button>
-            )}
-          </div>
-        </Panel>
-        {confirmModal}
-      </>
-    );
-  }
+  return { confirmModal, requestConfirm };
+}
+
+/**
+ * モード・コートの設定。セッティングタイム専用。
+ *
+ * 試合ごとに一度だけ触る設定なので、開始可否 (StartGate) より下に置く。
+ * ただし誤ったコート設定のまま試合に入る事故は致命的なので、畳まずに常時見せる。
+ */
+export function MatchSettings({
+  onRequestConfirm,
+}: {
+  onRequestConfirm: (kind: ConfirmKind) => void;
+}) {
+  const { matchState, setMode, setCourt, connected } = useRobot();
+  const { mode, court, phase } = matchState;
+  const settingsLocked = phase === "match" || !connected;
 
   return (
-    <>
-      <Panel legend="MATCH CONTROL">
-        <div className="group">
-          <div className="group-title">MODE</div>
-          <div className="hstack flex-wrap">
-            {MODE_OPTIONS.map((opt) => (
-              <Button
-                key={opt.value}
-                selected={mode === opt.value}
-                disabled={settingsLocked}
-                onClick={() => setMode(opt.value)}
-                aria-pressed={mode === opt.value}
-              >
-                {mode === opt.value ? "◆ " : "◇ "}
-                {opt.label}
-              </Button>
-            ))}
-          </div>
+    <Panel legend="試合設定">
+      <Section title="MODE">
+        <div className="join">
+          {MODE_OPTIONS.map((opt) => (
+            <Button
+              key={opt.value}
+              className="join-item"
+              selected={mode === opt.value}
+              disabled={settingsLocked}
+              onClick={() => setMode(opt.value)}
+              aria-pressed={mode === opt.value}
+            >
+              {opt.label}
+            </Button>
+          ))}
         </div>
+      </Section>
 
-        <div className="group">
-          <div className="group-title">COURT</div>
-          <div className="hstack flex-wrap">
-            {COURT_OPTIONS.map((opt) => (
-              <Button
-                key={opt.value}
-                tone={court === opt.value ? opt.tone : "default"}
-                selected={court === opt.value}
-                disabled={settingsLocked}
-                onClick={() => setCourt(opt.value)}
-                aria-pressed={court === opt.value}
-              >
-                {court === opt.value ? "◆ " : "◇ "}
-                {opt.label}
-              </Button>
-            ))}
-          </div>
+      <Section title="COURT">
+        <div className="join">
+          {COURT_OPTIONS.map((opt) => (
+            <Button
+              key={opt.value}
+              className={cx("join-item", court === opt.value && opt.selectedClass)}
+              disabled={settingsLocked}
+              onClick={() => setCourt(opt.value)}
+              aria-pressed={court === opt.value}
+            >
+              {opt.label}
+            </Button>
+          ))}
         </div>
+      </Section>
 
-        <p className="mt-2 text-fg-dim">
-          {settingsLocked && phase === "match"
-            ? "[?] 試合中はモード・コートを変更できません"
-            : "[!] 変更するとチェックリストは全てリセットされます"}
+      <Section>
+        <p className="flex items-center gap-1.5 text-base-content/70">
+          <Icon as={Info} />
+          変更するとチェックリストは全てリセットされます
         </p>
-
-        <div className="group">
-          <div className="hstack flex-wrap">
-            <Button
-              // 押せない状態で強調色のままだと「押せそうなのに反応しない」と読める
-              tone={startBlockedReason === null ? "ok" : "default"}
-              disabled={startBlockedReason !== null}
-              onClick={() => setConfirm("start")}
-              aria-label="試合を開始する"
-            >
-              ► 試合開始
-            </Button>
-            <Button
-              tone="danger"
-              disabled={phase !== "match"}
-              onClick={() => setConfirm("finish")}
-              aria-label="試合を終了する"
-            >
-              ■ 試合終了
-            </Button>
-            <Button onClick={() => setConfirm("reset")} aria-label="セッティングタイムへ戻す">
-              ↺ リセット
-            </Button>
-          </div>
-          {startBlockedReason ? (
-            <span className="text-fg-dim">[?] 試合開始 不可: {startBlockedReason}</span>
-          ) : null}
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <Button onClick={() => onRequestConfirm("reset")} aria-label="セッティングタイムへ戻す">
+            <Icon as={RotateCcw} />
+            チェックリストをリセット
+          </Button>
         </div>
-      </Panel>
+      </Section>
+    </Panel>
+  );
+}
 
-      {confirmModal}
-    </>
+/**
+ * 試合中・試合終了後の 1 行帯。
+ *
+ * 試合中は画面をロボット状態に明け渡すが、`match_finish` は MATCH フェーズ限定なので
+ * この導線を隠すと試合を終われなくなる。設定値の確認と終了導線だけを 1 行で残す。
+ */
+export function MatchStrip({
+  onRequestConfirm,
+}: {
+  onRequestConfirm: (kind: ConfirmKind) => void;
+}) {
+  const { matchState } = useRobot();
+  const { mode, court, phase } = matchState;
+
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-2 border border-base-300 bg-base-100 px-2 py-1">
+      <span className="min-w-0 truncate">
+        <span className="text-base-content/70">MATCH </span>
+        {MODE_LABEL[mode]} / {COURT_LABEL[court]}
+      </span>
+      {phase === "match" ? (
+        <Button
+          tone="danger"
+          onClick={() => onRequestConfirm("finish")}
+          aria-label="試合を終了する"
+        >
+          <Icon as={Square} />
+          試合終了
+        </Button>
+      ) : (
+        <Button
+          tone="warn"
+          onClick={() => onRequestConfirm("reset")}
+          aria-label="セッティングタイムへ戻す"
+        >
+          <Icon as={RotateCcw} />
+          セッティングへ戻る
+        </Button>
+      )}
+    </div>
   );
 }
