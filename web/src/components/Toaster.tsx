@@ -1,6 +1,7 @@
+import { OctagonAlert, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { Panel } from "@/components/ui/Panel";
+import { Icon } from "@/components/ui/Icon";
 import { useRobot } from "@/context/RobotContext";
 
 const REJECTION_TTL_MS = 5000;
@@ -18,35 +19,41 @@ interface ToastItem {
   expiresAt: number;
 }
 
-const TONE_CLASS: Record<Tone, string> = {
-  warning: "text-warning",
-  danger: "text-error",
+/** daisyUI の alert は「alert + 色修飾子」で 1 組。片方だけだと配色ルールごと消える */
+const TONE_ALERT_CLASS: Record<Tone, string> = {
+  warning: "alert alert-warning",
+  danger: "alert alert-error",
 };
+
+const TONE_ICON = {
+  warning: TriangleAlert,
+  danger: OctagonAlert,
+} as const;
 
 function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => void }) {
   return (
-    <Panel
-      className="w-[22rem] max-w-[calc(100vw-2rem)]"
-      legend={<span className={TONE_CLASS[toast.tone]}>[!] {toast.title}</span>}
+    <div
+      role="alert"
+      className={`${TONE_ALERT_CLASS[toast.tone]} w-[22rem] max-w-[calc(100vw-2rem)] items-start gap-2 p-2`}
     >
-      <div className="flex items-start gap-2">
-        <div className="min-w-0 flex-1">
-          {toast.lines.map((line, i) => (
-            <div key={line} className={i === 0 ? TONE_CLASS[toast.tone] : "truncate text-fg-dim"}>
-              {line}
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          onClick={onDismiss}
-          aria-label="通知を閉じる"
-          className="shrink-0 cursor-pointer text-fg-dim hover:text-fg-strong"
-        >
-          [X]
-        </button>
+      <Icon as={TONE_ICON[toast.tone]} className="mt-[0.15em] text-[1.1em]" />
+      <div className="min-w-0 flex-1">
+        <div className="font-bold">{toast.title}</div>
+        {toast.lines.map((line) => (
+          <div key={line} className="truncate opacity-90">
+            {line}
+          </div>
+        ))}
       </div>
-    </Panel>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="通知を閉じる"
+        className="shrink-0 cursor-pointer opacity-70 hover:opacity-100"
+      >
+        <Icon as={X} className="text-[1.1em]" />
+      </button>
+    </div>
   );
 }
 
@@ -112,8 +119,9 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
+  // ステータスバーに被らないよう底を持ち上げる
   return (
-    <div className="pointer-events-none fixed right-4 bottom-10 z-50 flex flex-col items-end gap-2 [&>*]:pointer-events-auto">
+    <div className="toast toast-end toast-bottom bottom-8 z-50">
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}

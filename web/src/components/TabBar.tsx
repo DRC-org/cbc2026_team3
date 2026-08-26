@@ -1,24 +1,22 @@
 import { NavLink, useLocation } from "react-router";
 
+import { Kbd } from "@/components/ui/Kbd";
 import { useRobot } from "@/context/RobotContext";
 import type { RobotState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
 import { TABS } from "@/lib/tabs";
+import type { Tone } from "@/lib/tone";
+import { TONE_STATUS_CLASS } from "@/lib/tone";
 
 /**
- * タブに出す注意喚起バッジ。
+ * タブに出す注意喚起インジケータ。
  * 操縦者は自分のタブに張り付くため、他機がトリガー待ちや異常状態でも気付けない。
  * 切り替えなくても異変が分かるよう、タブラベル側に状態を出す。
  */
-function tabBadge(state: RobotState | undefined): { symbol: string; className: string } | null {
+function tabTone(state: RobotState | undefined): Tone | null {
   if (!state) return null;
-  const health = state.health;
-  if (health && health.overall !== "ok") {
-    return { symbol: "⚠", className: "text-error" };
-  }
-  if (state.waiting_trigger) {
-    return { symbol: "!", className: "text-warning" };
-  }
+  if (state.health && state.health.overall !== "ok") return "error";
+  if (state.waiting_trigger) return "warning";
   return null;
 }
 
@@ -29,26 +27,30 @@ export function TabBar() {
   const { search } = useLocation();
 
   return (
-    <nav
-      className="tabs tabs-lift shrink-0 border-b border-line bg-base-300 px-2"
-      aria-label="画面切替"
-    >
+    <nav className="tabs tabs-box shrink-0 bg-base-200 p-[0.15rem] tabs-sm" aria-label="画面切替">
       {TABS.map((tab) => {
-        const badge = tab.robotKey ? tabBadge(states[tab.robotKey]) : null;
+        const tone = tab.robotKey ? tabTone(states[tab.robotKey]) : null;
         return (
           <NavLink
             key={tab.path}
             to={{ pathname: tab.path, search }}
             className={({ isActive }) =>
               cx(
-                "tab border-transparent text-fg-dim hover:bg-base-100 hover:text-base-content",
-                isActive && "tab-active border-line bg-base-100 text-fg-strong",
+                "tab gap-1.5 px-2 text-base-content/70",
+                isActive && "tab-active font-medium text-base-content",
               )
             }
           >
-            <span className="key-hint mr-[0.4em] ml-0">{tab.hotkey}</span>
-            {tab.label}
-            {badge ? <span className={badge.className}> [{badge.symbol}]</span> : null}
+            <Kbd className="bg-base-100">{tab.hotkey}</Kbd>
+            <span>{tab.label}</span>
+            {/* 面積が小さいぶん、無印との差が付くよう色付きの LED だけを出す */}
+            {tone ? (
+              <span
+                className={TONE_STATUS_CLASS[tone]}
+                aria-label={tone === "error" ? "異常あり" : "許可待ち"}
+                role="img"
+              />
+            ) : null}
           </NavLink>
         );
       })}

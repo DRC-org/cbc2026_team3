@@ -1,4 +1,7 @@
+import { TriangleAlert } from "lucide-react";
+
 import { Button } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
 import { useRobot } from "@/context/RobotContext";
 
 /**
@@ -14,12 +17,19 @@ export function ConnectionBanner() {
   if (connected) return null;
 
   return (
-    <div role="alert" className="shrink-0 bg-error px-3 py-1 text-center font-bold text-base-300">
+    <div
+      role="alert"
+      className="alert flex w-full shrink-0 items-center justify-center gap-3 border-x-0 border-t-0 px-3 py-1 alert-error"
+    >
       {/* 点滅は先頭の記号だけに留める。文章まで点滅すると読み取りに時間がかかる */}
-      <span className="alert-blink">◆</span> 通信切断 —
-      サーバーに接続できません。表示中の値は最新ではありません (自動再接続中...){" "}
+      <Icon as={TriangleAlert} className="alert-blink text-[1.2em]" />
+      <span className="font-bold">
+        通信切断 — サーバーに接続できません。表示中の値は最新ではありません (自動再接続中...)
+      </span>
       {/* 繋ぎ先違いが原因のことがあるため、切断表示から直接確認・変更できるようにする */}
-      <Button onClick={openWsSettings}>接続先 {wsUrl} を変更</Button>
+      <Button tone="estopReset" onClick={openWsSettings}>
+        接続先 {wsUrl} を変更
+      </Button>
     </div>
   );
 }

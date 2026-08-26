@@ -1,61 +1,25 @@
+import { ListChecks } from "lucide-react";
 import { useState } from "react";
 
+import { ActionPanel } from "@/components/ActionPanel";
 import { Checklist } from "@/components/Checklist";
-import { CurrentStepPanel } from "@/components/CurrentStepPanel";
-import { HealthIndicator } from "@/components/HealthIndicator";
 import { MotorCheckButton } from "@/components/MotorCheckButton";
 import { MotorCheckPanel } from "@/components/MotorCheckPanel";
-import { MotorSummary } from "@/components/MotorSummary";
-import { SequenceProgress } from "@/components/SequenceProgress";
+import { MotorCheckSummary } from "@/components/MotorCheckSummary";
 import { SequenceStepList } from "@/components/SequenceStepList";
-import { TriggerButton } from "@/components/TriggerButton";
+import { SubsystemStatus } from "@/components/SubsystemStatus";
 import { Button } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
+import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobot } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import type { ChecklistRole, RobotState } from "@/hooks/useRobotSocket";
+import type { ChecklistRole } from "@/hooks/useRobotSocket";
 import { isSetupPhase } from "@/lib/phase";
 
 interface RobotControlProps {
   robotKey: string;
   label: string;
-}
-
-/**
- * CAN バス / モータ / 動作確認。準備中も試合中も右カラムに置く共通ブロック。
- *
- * 3 つの見出しは別々のパネルにせず 1 枠にまとめる。診断情報は「どれか 1 つを見る」
- * ものではなく上から順に流し読みする対象なので、枠で分断しないほうが速く読める。
- */
-function DiagnosticsColumn({
-  robotKey,
-  state,
-  onPanelOpen,
-}: {
-  robotKey: string;
-  state: RobotState;
-  onPanelOpen: () => void;
-}) {
-  return (
-    <Panel legend="DIAGNOSTICS">
-      <div className="group">
-        <div className="group-title">CAN BUS</div>
-        <HealthIndicator variant="bus-only" health={state.health} />
-      </div>
-
-      <div className="group min-h-0 flex-1">
-        <div className="group-title">MOTORS</div>
-        <MotorSummary motors={state.motors} healthMotors={state.health?.motors} />
-      </div>
-
-      <div className="group">
-        <div className="hstack flex-wrap">
-          <MotorCheckButton robotName={robotKey} onPanelOpen={onPanelOpen} />
-          <Button onClick={onPanelOpen}>▤ 結果を表示</Button>
-        </div>
-      </div>
-    </Panel>
-  );
 }
 
 export function RobotControl({ robotKey, label }: RobotControlProps) {
@@ -72,8 +36,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
   const inMatch = matchState.phase === "match";
   const setupPhase = isSetupPhase(matchState.phase);
-  // 半自動では操縦者が自分のタブで指差喚呼を行う。全自動では Monitor 側に表示される
-  const ownsChecklist = matchState.mode === "semi_auto";
   const blockedLabel = matchState.phase === "finished" ? "試合終了" : "準備中";
 
   const completed = state && state.total_steps > 0 && state.step_index >= state.total_steps;
@@ -101,15 +63,15 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   if (!state) {
     return (
-      <main className="page items-center justify-center">
+      <Page className="flex flex-col items-center justify-center">
         <Panel legend={label} className="flex-none">
-          <p className="text-fg-dim">データ未受信 — 接続待機中...</p>
+          <p className="text-base-content/70">データ未受信 — 接続待機中...</p>
         </Panel>
-      </main>
+      </Page>
     );
   }
 
-  const panel = (
+  const motorCheckPanel = (
     <MotorCheckPanel
       robotName={robotKey}
       isOpen={healthCheckOpen}
@@ -117,129 +79,103 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     />
   );
 
-  // --- セッティングタイム: 指差喚呼と動作確認が主役。シーケンス操作は出さない ---
+  // --- セッティングタイム -------------------------------------------------
+  // 操縦者の仕事は 2 つだけ: 指差喚呼を終えることと、アクチュエータを動かして確かめること。
+  // 以前はここに操作不能な SEQUENCE PREVIEW が画面の半分を占めていた。試合前に
+  // 一覧を見たくなることはあるが、それは「今やること」ではないのでモーダルへ退避した。
   if (setupPhase) {
     return (
       <>
-        <main className="page grid grid-cols-[minmax(0,1fr)_minmax(300px,24rem)]">
-          <div className="flex min-h-0 flex-col gap-2">
-            {ownsChecklist ? (
-              // 指差喚呼は項目数ぶんの高さがあれば足りる。残りはステップ一覧に回すが、
-              // 項目が増えても画面の半分までに抑えて一覧を潰さない
-              <div className="flex max-h-[50%] min-h-0 shrink-0">
-                <Checklist
-                  checklistRole={robotKey as ChecklistRole}
-                  title={`${label} セッティング指差喚呼`}
-                />
-              </div>
-            ) : (
-              <Panel legend="全自動モード" className="shrink-0">
-                <p className="text-fg-dim">
-                  指差喚呼は Monitor タブ <span className="key-hint">1</span> で実施します。
-                </p>
-              </Panel>
-            )}
+        <Page className="grid grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]">
+          <Checklist
+            checklistRole={robotKey as ChecklistRole}
+            title={`${label} セッティング指差喚呼`}
+          />
 
-            <Panel legend="SEQUENCE PREVIEW" className="flex-1">
-              <p className="shrink-0 text-fg-dim">
-                {state.sequence} — 全 {state.total_steps} ステップ (試合開始後に操作できます)
-              </p>
-              <SequenceStepList
-                steps={state.steps ?? []}
-                stepIndex={state.step_index}
-                waitingTrigger={state.waiting_trigger}
-                onJump={handleJump}
-                disabled
-              />
+          <div className="flex min-h-0 flex-col gap-2">
+            {/* 動作確認は準備フェーズの主要アクション。以前は診断カラムの最下段に
+                埋もれていたため、独立した枠で上に出す */}
+            <Panel
+              legend="アクチュエータ動作確認"
+              className="shrink-0"
+              actions={<MotorCheckSummary robotName={robotKey} />}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <MotorCheckButton
+                  robotName={robotKey}
+                  onPanelOpen={() => setHealthCheckOpen(true)}
+                />
+                <Button onClick={() => setHealthCheckOpen(true)}>
+                  <Icon as={ListChecks} />
+                  結果を表示
+                </Button>
+              </div>
+            </Panel>
+
+            <Panel legend="機体状態" className="min-h-0 flex-1">
+              <SubsystemStatus health={state.health} motors={state.motors} defaultOpen />
+            </Panel>
+
+            <Panel legend="シーケンス" className="shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono">{state.sequence}</span>
+                <span className="shrink-0 text-base-content/70">
+                  全 {state.total_steps} ステップ
+                </span>
+              </div>
             </Panel>
           </div>
-
-          <DiagnosticsColumn
-            robotKey={robotKey}
-            state={state}
-            onPanelOpen={() => setHealthCheckOpen(true)}
-          />
-        </main>
-        {panel}
+        </Page>
+        {motorCheckPanel}
       </>
     );
   }
 
-  // --- 試合中 / 試合終了: シーケンス操作が主役 ---
+  // --- 試合中 / 試合終了 --------------------------------------------------
+  // 操縦者は機体を見ている。画面へ視線を戻すのは一瞬で、答えるべき問いは
+  // 「今 NEXT を押すのか」「押すと何が起きるか」の 2 つだけ。
+  // 左を操作面、右を参照面に割り切り、参照面の診断は平常時 1 行へ畳む。
   return (
     <>
-      <main className="page grid grid-cols-[minmax(0,1fr)_minmax(280px,340px)_minmax(280px,340px)]">
+      <Page className="grid grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)]">
+        {/* 左は操作面。主役を内容ぶんの高さに留め、余った縦はステップ一覧へ渡す */}
         <div className="flex min-h-0 flex-col gap-2">
-          <Panel legend="SEQUENCE" className="shrink-0">
-            <SequenceProgress
-              sequence={state.sequence}
-              currentStep={state.current_step}
+          <ActionPanel
+            state={state}
+            inMatch={inMatch}
+            blockedLabel={blockedLabel}
+            showStop={showStop}
+            onStart={handleStart}
+            onStop={handleStop}
+            onTrigger={handleTrigger}
+          />
+
+          <Panel
+            legend="ステップ"
+            className="min-h-0 flex-1"
+            bodyClassName="p-0"
+            actions={
+              <span className="text-[0.85em] text-base-content/60">
+                {inMatch ? "クリックで再開" : "試合中のみ操作可"}
+              </span>
+            }
+          >
+            <SequenceStepList
+              steps={state.steps ?? []}
               stepIndex={state.step_index}
-              totalSteps={state.total_steps}
               waitingTrigger={state.waiting_trigger}
+              onJump={handleJump}
+              disabled={!inMatch}
             />
           </Panel>
-
-          <CurrentStepPanel
-            steps={state.steps ?? []}
-            stepIndex={state.step_index}
-            totalSteps={state.total_steps}
-            waitingTrigger={state.waiting_trigger}
-          />
-
-          {/* 開始/停止 + TriggerButton。180px 固定 + 残りで横並び。 */}
-          <div className="grid min-h-[88px] shrink-0 grid-cols-[180px_1fr] gap-2">
-            {showStop ? (
-              // 通常停止は安全側の動作。確認ダイアログを挟むと「止めたいのに止まらない」
-              // 時間が生まれるため、ここは 1 アクションで即座に止める
-              <Button
-                tone="danger"
-                onClick={handleStop}
-                aria-label="シーケンスを通常停止"
-                className="h-full w-full"
-              >
-                ■ STOP
-              </Button>
-            ) : (
-              <Button
-                tone={inMatch ? "ok" : "default"}
-                disabled={!inMatch}
-                onClick={handleStart}
-                aria-label="シーケンスを先頭から開始"
-                className="h-full w-full"
-              >
-                {inMatch ? "► START" : `⊘ ${blockedLabel}`}
-                {inMatch ? <span className="key-hint">Space</span> : null}
-              </Button>
-            )}
-            <TriggerButton
-              waiting={state.waiting_trigger}
-              stepIndex={state.step_index}
-              totalSteps={state.total_steps}
-              onTrigger={handleTrigger}
-              disabled={!inMatch}
-              disabledLabel={blockedLabel}
-            />
-          </div>
         </div>
 
-        <Panel legend="STEPS">
-          <SequenceStepList
-            steps={state.steps ?? []}
-            stepIndex={state.step_index}
-            waitingTrigger={state.waiting_trigger}
-            onJump={handleJump}
-            disabled={!inMatch}
-          />
+        {/* 右は参照面。平常時は 1 行に畳み、異常が出たときだけ自分から開く */}
+        <Panel legend="機体状態" className="self-start">
+          <SubsystemStatus health={state.health} motors={state.motors} />
         </Panel>
-
-        <DiagnosticsColumn
-          robotKey={robotKey}
-          state={state}
-          onPanelOpen={() => setHealthCheckOpen(true)}
-        />
-      </main>
-      {panel}
+      </Page>
+      {motorCheckPanel}
     </>
   );
 }

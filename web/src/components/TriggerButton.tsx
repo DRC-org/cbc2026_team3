@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { Ban, Check, Play } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
+import { Kbd } from "@/components/ui/Kbd";
 
 interface TriggerButtonProps {
   waiting: boolean;
@@ -10,19 +12,6 @@ interface TriggerButtonProps {
   /** 試合中以外はサーバー側でも拒否されるため、UI でも押せなくする */
   disabled?: boolean;
   disabledLabel?: string;
-}
-
-// 実行中表示用の ASCII 回転記号。lucide スピナー撤去の代替（CSS keyframe 不要）。
-const SPINNER_FRAMES = ["|", "/", "-", "\\"];
-
-function useAsciiSpinner(active: boolean): string {
-  const [frame, setFrame] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => setFrame((f) => (f + 1) % SPINNER_FRAMES.length), 120);
-    return () => clearInterval(id);
-  }, [active]);
-  return SPINNER_FRAMES[frame];
 }
 
 // 試合中に最も多く押すボタンなので、視線を戻した瞬間に状態が読めるよう大きく出す
@@ -39,12 +28,12 @@ export function TriggerButton({
   // バックエンドは完走時 step_index = total_steps を返す。「最終ステップ実行中」と
   // 「全完走」を分けるため、>= total での判定を採用する
   const isComplete = totalSteps > 0 && stepIndex >= totalSteps && !waiting;
-  const spinner = useAsciiSpinner(!disabled && !waiting && !isComplete);
 
   if (disabled) {
     return (
       <Button disabled className={FILL_CLASS} aria-label={`操作不可: ${disabledLabel}`}>
-        ⊘ {disabledLabel}
+        <Icon as={Ban} />
+        {disabledLabel}
       </Button>
     );
   }
@@ -52,7 +41,8 @@ export function TriggerButton({
   if (isComplete) {
     return (
       <Button disabled tone="ok" className={FILL_CLASS} aria-label="シーケンス完走">
-        ✓ DONE
+        <Icon as={Check} />
+        DONE
       </Button>
     );
   }
@@ -67,15 +57,16 @@ export function TriggerButton({
         aria-label="次のステップへ進む"
         className={FILL_CLASS}
       >
-        ► NEXT
-        <span className="key-hint">Space</span>
+        <Icon as={Play} />
+        NEXT
+        <Kbd className="bg-next-fg/10 text-next-fg">Space</Kbd>
       </Button>
     );
   }
 
   return (
     <Button disabled tone="info" className={FILL_CLASS} aria-label="シーケンス実行中">
-      <span className="tabular-nums">[{spinner}]</span>
+      <span className="loading loading-sm loading-spinner" />
       RUNNING
     </Button>
   );

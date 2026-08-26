@@ -25,16 +25,16 @@ interface ModalProps {
 }
 
 const TONE_BOX_CLASS: Record<ModalTone, string> = {
-  default: "border-fg-dim bg-raised",
+  default: "border-base-300 bg-base-100",
   // 破壊的操作・危険操作の確認ダイアログは枠と見出しを危険色にする
-  danger: "border-error bg-raised",
+  danger: "border-error bg-base-100",
   // 停止中であることが画面のどこを見ても分かる必要がある唯一の状態。
   // グレー基調の例外として、ここだけは面を赤で塗る
   estop: "border-estop-fg bg-estop text-estop-fg",
 };
 
 const TONE_TITLE_CLASS: Record<ModalTone, string> = {
-  default: "text-fg-strong",
+  default: "text-base-content",
   danger: "text-error",
   estop: "text-estop-fg",
 };
@@ -49,7 +49,8 @@ const TONE_TITLE_CLASS: Record<ModalTone, string> = {
  * 外枠の `modal modal-open` は必須。`.modal-box` は既定が `opacity:0; scale:.95` で、
  * 可視化するルールは `.modal-open` 側にしかない。付け忘れると Tailwind の
  * ツリーシェイクでそのルールごと CSS から消え、モーダルが不可視のまま出荷される。
- * 背景の暗さだけはユーティリティで上書きする（daisyUI 既定は #0006 と薄い）。
+ * 背景の暗さだけはユーティリティで上書きする（daisyUI 既定は #0006 と薄く、
+ * ライト地の上では背後の画面と分離しない）。
  */
 export function Modal({
   open,
@@ -83,13 +84,13 @@ export function Modal({
 
   return (
     <div
-      className="modal modal-open bg-[rgb(8_9_11_/_78%)]"
+      className="modal modal-open bg-[rgb(24_27_31_/_62%)]"
       onClick={onClose ? (event) => event.target === event.currentTarget && onClose() : undefined}
       role="presentation"
     >
       <div
         className={cx(
-          "modal-box flex max-h-[90vh] flex-col gap-2 border",
+          "modal-box flex max-h-[90vh] flex-col gap-2 border p-3",
           TONE_BOX_CLASS[tone],
           boxClassName,
         )}
@@ -97,9 +98,16 @@ export function Modal({
         aria-modal="true"
         aria-label={ariaLabel}
       >
-        <h3 className={cx("shrink-0 font-bold", TONE_TITLE_CLASS[tone])}>{title}</h3>
+        <h3
+          className={cx(
+            "shrink-0 border-b border-current/15 pb-1 text-[1.05em] font-bold tracking-wide",
+            TONE_TITLE_CLASS[tone],
+          )}
+        >
+          {title}
+        </h3>
         <div className={cx("scroll min-h-0 flex-1", bodyClassName)}>{children}</div>
-        {footer ? <div className="flex shrink-0 justify-end gap-2 pt-2">{footer}</div> : null}
+        {footer ? <div className="flex shrink-0 justify-end gap-2 pt-1">{footer}</div> : null}
       </div>
     </div>
   );

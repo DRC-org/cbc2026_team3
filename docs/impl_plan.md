@@ -436,7 +436,7 @@ tests/
 ├── test_pid.py                  # PID 単体（ワインドアップ・デッドバンド・出力制限）
 ├── test_position_loop.py        # M3508PositionLoop（周期・dt 頭打ち・途絶・pause/resume）
 ├── test_sequence_engine.py      # シーケンスエンジンの状態遷移
-├── test_sequence_court_auto.py  # コート伝播と全自動通過 / auto_stop 停止
+├── test_sequence_court.py       # コート伝播と require_trigger 停止
 ├── test_sequence_motors.py      # MotorHandle / MotorGroup / build_motor_group
 ├── test_sequence_positions.py   # 位置定数の読み込み・単位換算・コート差異
 ├── test_sequence_move_to.py     # bind_positions / move_to / タイムアウト時の停止
@@ -445,7 +445,7 @@ tests/
 ├── test_can_manager_health.py   # 受信タイムアウト → STALE、送信失敗 → DOWN
 ├── test_health.py               # ヘルス判定・状態遷移・JSON シリアライズ
 ├── test_motor_check.py          # MotorCheckRunner（PASSED/FAILED/TIMEOUT・abort）
-├── test_match_state.py          # モード / コート / フェーズ / チェックリスト
+├── test_match_state.py          # コート / フェーズ / チェックリスト
 ├── test_ws_protocol.py          # WebSocket JSON プロトコル
 ├── test_server_health.py        # WS の health 同梱・GET /health・health_change
 ├── test_server_match.py         # 試合運用フローとフェーズゲート
@@ -528,7 +528,7 @@ cbc2026_team3_central/
 ├── lib/
 │   ├── __init__.py
 │   ├── can_manager.py
-│   ├── match_state.py      # モード / コート / フェーズ / チェックリスト
+│   ├── match_state.py      # コート / フェーズ / チェックリスト
 │   ├── health.py           # ヘルス状態の列挙・スナップショット・動作確認レコード
 │   ├── motor_check.py      # MotorCheckRunner（アクチュエータ動作確認）
 │   ├── drivers/
@@ -600,7 +600,7 @@ cbc2026_team3_central/
 │           ├── HealthIndicator.tsx
 │           ├── RobotReadiness.tsx   # Monitor 用の 1 行サマリ
 │           ├── Checklist.tsx        # 指差喚呼チェックリスト
-│           ├── MatchControl.tsx     # モード/コート切替 + 試合開始・終了
+│           ├── MatchControl.tsx     # コート切替 + 試合開始・終了
 │           └── EStopOverlay.tsx     # 全画面フラッシュ + ツイスト解除
 ├── main.py
 └── tests/                          # 構成は「テスト戦略 > テストファイル構成」を参照
@@ -622,8 +622,8 @@ cbc2026_team3_central/
   "total_steps": 5,
   "waiting_trigger": true,
   "steps": [
-    { "index": 0, "label": "初期位置へ移動", "require_trigger": false, "auto_stop": false },
-    { "index": 1, "label": "ワーク前まで前進", "require_trigger": true, "auto_stop": false }
+    { "index": 0, "label": "初期位置へ移動", "require_trigger": false },
+    { "index": 1, "label": "ワーク前まで前進", "require_trigger": true }
   ],
   "motors": {
     "m3508_1": { "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0 },
@@ -673,7 +673,8 @@ cbc2026_team3_central/
 - **sequence_start**: 先頭から実行開始 (停止後・完走後の再起動)
 
 **シーケンスは起動時に自動実行しない。** `_run_sequence_loop` は resume 要求を待って停止したまま起動し、
-操縦者の明示的な `sequence_start` (半自動) または `match_start` (全自動) があるまでロボットを動かさない。
+操縦者の明示的な `sequence_start` があるまでロボットを動かさない。`match_start` はフェーズを
+進めるだけで、機体は動かさない。
 
 ### dry-run モード
 
@@ -685,7 +686,7 @@ cbc2026_team3_central/
 
 ---
 
-## 試合運用フロー（モード / コート / フェーズ）
+## 試合運用フロー（コート / フェーズ）
 
 `lib/match_state.py` が試合全体の状態を一元管理する。ロボット単位の `state` メッセージとは別系統。
 操縦者 2 名 + Monitor が**別ブラウザ**で接続するため、チェックリストの進捗をクライアント側に持つと
@@ -695,7 +696,6 @@ cbc2026_team3_central/
 
 | 軸 | 値 | 意味 |
 |---|---|---|
-| `mode` | `semi_auto` / `full_auto` | 半自動は操縦者 2 名、全自動は Monitor 1 名で運用 |
 | `court` | `red` / `blue` | 自陣コート。赤青で配置が左右反転する |
 | `phase` | `setup` → `ready` → `match` → `finished` | セッティングタイムと試合中を分離 |
 
@@ -708,9 +708,9 @@ setup ⇄ ready → match → finished → setup
                       ↑ match_finish   ↑ match_reset (どのフェーズからでも可)
 ```
 
-- 必要ロール: `semi_auto` → `main_hand` + `sub_hand` / `full_auto` → `monitor`
-- `mode` / `court` を変更するとチェックリストは**全リセット**され `setup` に戻る（配置が変わるため指差喚呼をやり直す）
-- `match_reset` はモード・コートを維持したままチェックリストのみリセットする
+- ゲート対象ロールは `main_hand` + `sub_hand`（= `ALL_ROLES`。操縦者 2 名分が揃うまで試合に入れない）
+- `court` を変更するとチェックリストは**全リセット**され `setup` に戻る（配置が変わるため指差喚呼をやり直す）
+- `match_reset` はコートを維持したままチェックリストのみリセットする
 - 項目ゼロのロールは「完了」とみなす（ゲートが永久に開かなくなるのを防ぐ）
 
 ### フェーズによるコマンドゲート
@@ -720,7 +720,7 @@ setup ⇄ ready → match → finished → setup
 
 | コマンド | setup | ready | match | finished |
 |---|:-:|:-:|:-:|:-:|
-| `set_mode` / `set_court` | ✓ | ✓ | ✗ | ✓ |
+| `set_court` | ✓ | ✓ | ✗ | ✓ |
 | `checklist_set` / `checklist_reset` | ✓ | ✓ | ✗ | ✗ |
 | `motor_check_start` | ✓ | ✓ | ✗ | ✓ |
 | `match_start` | ✗ | ✓ | ✗ | ✗ |
@@ -754,40 +754,32 @@ setup ⇄ ready → match → finished → setup
 `motor_check_error`）。UI 側でボタンを無効化するだけでは WS 直叩き・リロード直後を防げない。
 
 `match_start` を載せる理由: 緊急停止は `match_reset` → チェックリスト再実施で `ready` に
-戻れるため、フェーズゲートだけでは素通りする。全自動では `match_start` が両ロボットの
-`request_start()` を兼ねるので、素通りすると緊急停止中に試合開始ボタンだけで両機が動き出す。
-ゲートは `_handle_match_start()` より手前に置き、フェーズ遷移そのものを起こさない
+戻れるため、フェーズゲートだけでは素通りする。`match_start` が通ると操縦者の `sequence_start`
+が解禁され、同時に動作確認とコート設定が閉じてしまう。ゲートは `_handle_match_start()` より
+手前に置き、フェーズ遷移そのものを起こさない
 （緊急停止中に試合フェーズへ入れること自体が異常なため安全側に倒す）。
 
 `set_param` を載せる理由: 現状はログ出力のみだが、実装が入ると緊急停止中にモータの
 制御パラメータを書き換えられてしまう（停止状態の前提が崩れる）。
 
-### 試合開始の挙動（モード別）
+### 試合開始の挙動
 
-- **半自動**: `match_start` はフェーズを `match` にするだけ。各操縦者が自分のタブで `sequence_start` を押す
-  （ハンドごとに開始タイミングが異なるため）
-- **全自動**: 操縦者タブが無いので `match_start` が両ロボットの `request_start()` を兼ねる
+`match_start` はフェーズを `match` にするだけ。機体を動かすのは各操縦者が自分のタブで押す
+`sequence_start` で、ハンドごとに開始タイミングが異なるためサーバー側からまとめて起動しない。
 
-### 全自動モードの実現方式
+### トリガー待ちステップ
 
-シーケンス定義は半自動と共用し、`Sequence.set_auto_advance(True)` で `require_trigger` のステップを
-待たずに通過させる。二重メンテを避け、半自動と全自動で挙動が乖離しないようにするため。
+人間の目視確認を挟みたい動作には `@step("...", require_trigger=True)` を付ける。
+シーケンスはそのステップの手前で必ず止まり、操縦者の `trigger` を待つ。
 
-人間の目視確認が必須な危険動作には `@step("...", require_trigger=True, auto_stop=True)` を付ける。
-`auto_stop=True` のステップは全自動でも必ずトリガー待ちで停止する。
+**`require_trigger` の付与基準（機構未確定の現状）**: 「失敗したときに取り返しがつかないか」で線を引く。
 
-**`auto_stop` の付与基準（機構未確定の現状）**: 「失敗したときに機構が壊れるか」で線を引く。
-壊れるものだけに付ける。得点を落とすだけの失敗にまで付けると全自動が半自動と変わらなくなり、
-モードを分けた意味が無くなるため。
-
-| ステップ | require_trigger | auto_stop | 理由 |
-|---|---|---|---|
-| main_hand「ハンド閉じる (ワーク把持)」 | ✓ | ✓ | 位置ずれのまま閉じるとワークと機構の双方を破損する |
-| sub_hand「ハンド閉じる (受け取り)」 | ✓ | ✓ | メインハンドと機構同士が向かい合う唯一の動作。衝突で両方壊れる |
-| main_hand「ハンド開く (リリース)」 | ✓ | — | 落とすとやり直せないので半自動では配置位置到達を目視確認させる。ただし破損はしないので全自動は止めない |
-| sub_hand「ハンド開く (配置)」 | ✓ | — | 同上 |
-
-機構が固まって位置決め精度が確認できたら、把持の `auto_stop` を外して全自動を通しで回す。
+| ステップ | require_trigger | 理由 |
+|---|---|---|
+| main_hand「ハンド閉じる (ワーク把持)」 | ✓ | 位置ずれのまま閉じるとワークと機構の双方を破損する |
+| sub_hand「ハンド閉じる (受け取り)」 | ✓ | メインハンドと機構同士が向かい合う唯一の動作。衝突で両方壊れる |
+| main_hand「ハンド開く (リリース)」 | ✓ | 落とすとやり直せないので配置位置到達を目視確認させる |
+| sub_hand「ハンド開く (配置)」 | ✓ | 同上 |
 
 ### コート対応
 
@@ -799,19 +791,16 @@ setup ⇄ ready → match → finished → setup
 ### WebSocket プロトコル拡張
 
 Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後に送らないと、リロードした操縦者が
-現在のモード・フェーズを知れない:
+現在のコート・フェーズを知れない。`checklists` のキーがそのまま試合開始のゲート対象ロール:
 
 ```jsonc
 {
   "type": "match_state",
-  "mode": "semi_auto",
   "court": "red",
   "phase": "setup",
-  "required_roles": ["main_hand", "sub_hand"],
   "can_start_match": false,
   "checklists": {
-    "monitor":   { "items": [{ "id": "power", "label": "電源投入確認", "checked": false }], "completed": false },
-    "main_hand": { "items": [/* ... */], "completed": false },
+    "main_hand": { "items": [{ "id": "home_position", "label": "メインハンド初期位置確認", "checked": false }], "completed": false },
     "sub_hand":  { "items": [/* ... */], "completed": false }
   }
 }
@@ -821,7 +810,6 @@ Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後�
 Client → Server:
 
 ```jsonc
-{ "type": "set_mode", "mode": "full_auto" }
 { "type": "set_court", "court": "blue" }
 { "type": "checklist_set", "role": "main_hand", "item_id": "home_position", "checked": true }
 { "type": "checklist_reset", "role": "main_hand" }   // role 省略で全ロール
@@ -867,11 +855,13 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 
 | | setup / ready | match / finished |
 |---|---|---|
-| Monitor | `MatchControl`(full) + 指差喚呼 + `RobotReadiness`（異常有無のみの 1 行サマリ） | `MatchControl`(compact: 試合終了/リセットのみ) + 両機の詳細カード |
-| RobotControl | `Checklist` + `SEQUENCE PREVIEW`（参照専用）+ 診断カラム | `CurrentStepPanel` + STEP LIST + 診断カラム + START/STOP/NEXT |
+| Monitor | `StartGate`（開始可否と阻害要因＝画面の主役）+ `MatchSettings` + 機体状態 + 操縦者の残項目 | `MatchStrip`（1 行）+ `RobotStatusRow` ×2 + `EventFeed` |
+| RobotControl | `Checklist`（主役）+ 動作確認 + `SubsystemStatus` | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
 
-`MatchControl` の compact variant は必須。試合中に `MatchControl` を全て隠すと
-`match_finish` の導線が消え、試合を終われなくなる（`match_finish` は MATCH フェーズ限定）。
+`MatchStrip` は必須。試合中に試合制御を全て隠すと `match_finish` の導線が消え、
+試合を終われなくなる（`match_finish` は MATCH フェーズ限定）。
+
+各画面は**答える問いを 1 つに絞る**。設計原則は下記「レイアウト再設計」を参照。
 
 ### キーボード操作（`hooks/useHotkeys.ts`）
 
@@ -1143,8 +1133,8 @@ class PickAndPlace(Sequence):
     async def extend_arm(self):
         await self.move_to({"arm_joint": "extended"})
 
-    # 失敗すると機構破損に直結する動作は全自動でも止める
-    @step("ハンド閉じる", require_trigger=True, auto_stop=True)
+    # 失敗すると機構破損に直結する動作は必ず操縦者の許可を待つ
+    @step("ハンド閉じる", require_trigger=True)
     async def close_hand(self):
         await self.move_to({"gripper": "closed"})
 ```
@@ -1306,6 +1296,165 @@ MOTOR CHECK・緊急停止）、1366x768 と 1280x720 で溢れなし、配色�
   （`STATUS.idle` は `total_steps === 0` のときしか使われない）。一方 `RobotControl` は
   同じ状態を「未開始」と判定して `► START` を出すため、同一画面で表示が食い違う。
   どちらを正とするかは競技運用の判断が要るため本移行では触っていない。
+
+#### レイアウト再設計（2026-08-26）
+
+配色・タイポグラフィ・部品（デザインシステム）は据え置きのまま、**各画面のレイアウトを
+情報設計から組み直した**。「絶妙に情報が頭に入らない・絶妙に使いづらい」という
+実使用でのフィードバックが出発点。
+
+##### 何が悪かったか
+
+| # | 問題 | 具体 |
+|---|---|---|
+| 1 | **同じ事実を 3 回描いていた** | 試合中の現在ステップが `SEQUENCE` パネルの `4/13 ステップ名`、`CURRENT STEP` の `4 ステップ名`、`STEP` 一覧のハイライトに重複。操縦者は 3 回読んでようやく 1 つの事実にたどり着いていた |
+| 2 | **最大面積を占める情報が、その場で行動に結び付かない** | 試合中に 8 モータ × 4 値 = 32 個の数字（Monitor は両機で 64 個）が常時展開。操縦者が試合中にこれを見て取れる行動は無く、必要なのは「異常があるか」の 1 行だけ |
+| 3 | **3 カラムが等しい視覚的重み** | 視線を戻すのが一瞬の画面に焦点が無い |
+| 4 | **主操作が周辺、参照情報が中央** | NEXT が左下、ステップ一覧が中央 |
+| 5 | **最重要の問いが最小の文字** | Monitor 準備中の「開始できるか・何が足りないか」がパネル最下段のグレー 1 行。何が足りないかは書かれておらず、16 行を目で差分を取って探す運用になっていた |
+| 6 | **操作できない情報が画面の半分** | RobotControl 準備中の `SEQUENCE PREVIEW` |
+| 7 | **状態表示と操作が食い違う** | 未開始時に状態は「待機中」なのにボタンは `RUNNING`（旧 `SequenceProgress` と `RobotControl` の判定差。以前から「未修正の既存挙動」として残っていたもの） |
+
+##### 設計原則
+
+1. **1 画面 = 1 つの問い**。その問いへの答えを画面で最も大きい要素にする
+2. **同じ事実を 2 度描かない**
+3. **平常時は静か、異常時だけ主張する**（累進的開示）。ただし異常時は操縦者の開閉操作を上書きして必ず開く
+4. **主操作は最大・固定位置**。状態によってボタンの位置が入れ替わると、押す直前に毎回探し直すことになる
+
+##### 主な構造変更
+
+- **`ActionPanel` を新設**（`SequenceProgress` + `CurrentStepPanel` + ボタン列を統合し 3 つを削除）。
+  上から 状態 → 現在ステップ（画面最大の文字）→ **NEXT で走る範囲** → 操作、という 1 本の縦の流れ。
+  「NEXT で走る範囲」は次の許可待ちステップまでを列挙してそこで打ち切る。NEXT を押すと機体は
+  次の停止点まで複数ステップを一気に走るので、「次の 1 件」だけでは**どこまで動いて止まるのか**が
+  分からず、操縦者は毎回機体が止まるまで身構えることになる。
+- **`SubsystemStatus` を新設**。CAN + モータを 1 判定に畳み、平常時は 1 行。異常時は自動で開く。
+  同じ部品でも役割で既定を変える（操縦者の試合中＝畳む / Monitor と準備フェーズ＝開く）。
+- **`StartGate` を新設**。Monitor 準備中の主役。**残っている項目名まで**出す。
+  機体異常は「開始できない」ではなく警告として併記する — サーバーはハードウェア状態で
+  `match_start` を拒否しないので、ここでボタンを殺すと軽微な警告ひとつで試合を始められなくなる。
+- **`EventFeed` を新設**。ヘルス変化はこれまで数秒で消えるトーストにしか出ていなかった。
+  Monitor は「試合中に起きたことを拾う」役なのに、目を離した数秒の事象は痕跡ごと消えていた。
+- **`RobotStatusRow` を新設**（`RobotReadiness` を置換）。進行状態を主役に据え、数値は下段へ。
+- **ステップ一覧は現在位置へ自動スクロール**。一覧が縦に収まらない機体では、進むほど現在地が
+  枠外へ出て「今どこか」を一覧から読めなくなっていた。
+- **`MatchControl` を 3 つに分解** — `useMatchConfirm`（確認ダイアログ）/ `MatchSettings`（準備中）/
+  `MatchStrip`（試合中の 1 行）。呼び出し元が画面ごとに散るため、文言と遷移を 1 箇所へ集約した。
+- **PID Tuning をマスタ・ディテール化**。以前は両機の全モータを縦に展開しており、1 基を触るだけで
+  スクロールが要り「今どのモータを見ているか」が視界から外れていた。左で選び、右をその 1 基に
+  明け渡す。数値は直接入力を主にし（スライダーだけでは 0.01 刻みで狙った値に置けない）、
+  送信は 3 値まとめて 1 回にした（個別送信では PID が中途半端に混ざった状態が一瞬できる）。
+- **`Checklist` は未完の先頭 1 項目だけを強調**。上から順に指差して唱える運用なので、
+  全項目が同じ重さだとどこまで進んだかを毎回目で数え直すことになる。
+
+##### 実装上の注意（再発しやすい）
+
+- **grid の子は既定で縦に伸びる。`shrink-0` では止まらない。** 内容ぶんの高さに留めるには
+  `self-start` が要る。これを落とすと、平常時に中身が数行しかないカードが全高の白い箱になる。
+- **クラス名を実行時に組み立ててはならない。** `TONE_BORDER_CLASS[...].replace("border-", "border-l-")`
+  のような書き方は Tailwind の走査から漏れ、CSS ごと出力されない。
+  `TONE_BORDER_L_CLASS` としてリテラルで持つ（`lib/tone.ts`）。
+- **判定ロジックを 2 箇所に書かない。** 機体の健全性判定は `lib/healthVerdict.ts` に一本化した。
+  分けて書くと「Monitor は READY と言うのに操縦者の画面は異常と言う」状態が生まれる。
+- **カスタムコンポーネントの prop に `role` を使わない。** JSX 上で ARIA の `role` 属性と
+  区別が付かず、jsx-a11y が誤検出する（`checklistRole` に改名）。
+- **行内に装飾を足すときは入力の読み上げ名を固定する。** チェックリストの行に「次」バッジを
+  置いた結果、`<label>` の文字列に混ざって `getByLabelText` が壊れた（`aria-label` を明示）。
+
+検証: `ActionPanel.test.tsx`（状態表示と主操作の食い違い / 走る範囲の打ち切り）と
+`StartGate.test.tsx`（阻害要因の列挙 / 機体異常で開始を止めない）を追加。
+実機描画は 1366×768・1920×1080 の両方で `scrollHeight === clientHeight` を実測。
+
+#### テレメトリ配信の堅牢化（2026-08-26）
+
+UI のライトテーマ移行を `--dry-run` の実機描画で確認している最中に、
+**画面が「接続中」を表示したまま値だけ凍る**事象を 3 度再現した。原因は UI 側ではなく
+`lib/server.py` の配信経路にあった。
+
+- **詰まった 1 クライアントが全員を止める**: `_broadcast_state` は全クライアントへ
+  **直列に** `await ws.send_str()` していた。aiohttp の `send_str` は相手が読まなくなると
+  無期限に待つため、1 台でも詰まると他の全員 — Monitor を含む — のテレメトリが止まる。
+  WebSocket 自体は開いたままなので UI は「接続中」を出し続け、操縦者は凍った値を
+  最新だと思って見続けることになる。**操縦者のノート PC がスリープに入る・Wi-Fi が
+  切れるだけで起きる。** 送信ごとに `_WS_SEND_TIMEOUT_S`（1 秒。配信は 20Hz なので
+  1 秒返らない相手は既に落ちている）を設け、超えた相手を切り離す。
+- **後始末で同じ場所に詰まる**: 切り離し時の `await ws.close()` は相手のクローズ応答を待つ。
+  送信が詰まっている相手はまさにその応答を返さないので、ここで await すると
+  送信タイムアウトを設けた意味がなくなる。後始末は別タスクへ切り離し、配信ループは待たない
+  （タスク参照は `_closing_tasks` が保持する。GC で消えると後始末ごと消える）。
+- **1 回の例外でループごと死ぬ**: `_broadcast_loop` に例外ガードが無く、`_broadcast_state` が
+  一度でも送出すればタスクが静かに終わって以後テレメトリが完全に止まっていた。
+  1 フレームの失敗は握って次の周期へ進む。
+- **検証**: ハンドシェイクだけして一切読まない TCP クライアントを繋いだ状態で、正常な
+  クライアントが 5 秒間に 197 件の `state` を受信することを実測（修正前は恒久的に停止）。
+  `tests/test_server_broadcast_resilience.py` が 3 ケースを固定している。
+
+#### ライトテーマ化 / daisyUI コンポーネント化（cbc-light、2026-08-26）
+
+暗色の `cbc` テーマをライトの `cbc-light` 配色へ移行し、自前 CSS を daisyUI の既製
+コンポーネントへ寄せ、ヘッダーとタブ帯を 1 段に統合した。**形状（角丸 0）と
+「彩色は状態表示のみ」の方針は暗色時代から継承している。**
+
+- **配色**: 面 `#ffffff` / 地 `#eef1f4` / 沈み `#d5dbe2` / 文字 `#181b1f`。状態色は
+  success `#2f7a4f` / warning `#96620a` / error `#b3372c` / info `#25667f`。
+  値は実測で選定してあり、**「白抜き文字を載せて AA (4.5:1)」と「`badge-soft` の淡色地に
+  載せて AA」の両方**を満たす。ライト地では彩度の高い amber や green はそのままでは
+  文字として読めないため明度を落としている。
+- **状態表示はチップへ**: 着色テキスト（`[✓ OK]`）をやめ、地・枠・文字の 3 点で示す
+  `components/ui/StatusBadge.tsx`（`badge badge-soft badge-*` + `status status-*`）に一本化した。
+  ライト地で警告色を AA まで暗くすると*もはや警告色に見えない*ため、文字色の明度を
+  犠牲にせず状態を目立たせる必要がある。角丸 0 なので見た目は矩形タグ + 正方形 LED になる。
+- **例外トークン**: `--color-estop`（緊急停止）に加えて `--color-next: #d98c00` を新設した。
+  NEXT は試合中に最も多く押し周辺視野で見つかる必要があるが、状態色の warning は
+  「白地に載る文字」として読める明度まで落としてあり面塗りには暗すぎるため。
+- **私設トークンの廃止**: `raised` / `line` / `line-soft` / `fg-strong` / `fg-dim`（計 85 箇所）を
+  daisyUI の base スケールへ畳んだ。淡色文字は `text-base-content/70`（`/60` は約 4.2:1 で AA を割る）。
+  暗色時代の「浮き（raised）」はライトでは「沈み」に反転するため `bg-base-200` に対応する。
+- **自前 CSS の削減**: `index.css` は 227 行 → 約 150 行。`.panel` `.group` `.hstack` `.hsplit`
+  `.striped` `.key-hint` `.panel-body` `.page` を廃し、`card card-border` / `kbd` /
+  `table table-zebra table-xs` / `toast` + `alert` / `join` / `loading loading-spinner` /
+  `tabs tabs-box` に置換した。残したのは `.scroll`（スクロールバー装飾。Tailwind に等価物なし）と
+  `.alert-blink`（keyframe）のみ。レイアウト骨格は CSS ではなく
+  `components/ui/` の `Page` / `Panel` / `Section` が持つ。
+- **フォントは自己ホスト**: `@fontsource-variable/{inter,noto-sans-jp,jetbrains-mono}` を導入し、
+  `index.html` の Google Fonts `<link>` を削除した。**会場にネットワークがある保証はなく、
+  `<link>` は解決に失敗しても無言で素の sans-serif に落ちるだけで当日まで気付けない。**
+  数値は `font-mono`（JetBrains Mono）+ `tabular-nums` で桁を揃える。
+- **ヘッダーとタブの統合**: 2 段（約 3.6rem）を 1 段（約 2.2rem）へ。1366x768 で縦 4% を
+  操作領域に返す。EMG STOP の位置・サイズは据え置き。
+- **アイコン**: `lucide-react` を再導入し ASCII 記号を置換した。既定値は
+  `components/ui/Icon.tsx` に閉じ込める。`size="1em"` はルートの `clamp()` スケーリングに
+  アイコンだけ取り残されないため。**`absoluteStrokeWidth` は使ってはならない** —
+  lucide が内部で `strokeWidth * 24 / Number(size)` を計算するので `size="1em"` では NaN になり線が消える。
+
+##### daisyUI 側の落とし穴（実測で判明）
+
+| 症状 | 原因 | 対処 |
+|---|---|---|
+| `.card-body` を使うと本文が消えかける | `--card-p` 既定 1.5rem がこの密度に過大。`card-xs` 等のサイズ修飾子は **font-size まで固定**し、ルートの `clamp()` による全体スケーリングから本文だけ外れる | `card card-border` は枠にだけ使い、本文は素の div（`Panel.tsx`） |
+| `table-xs` の本文が小さすぎる | `.table-xs :not(thead,tfoot) tr` が `font-size: .6875rem` を直接指定 | セル側（td/th）に `text-[0.85em]` を当てる（直接指定は継承に勝つ） |
+| `list` / `list-row` が使えない | 既定が `padding: 1rem` / `gap: 1rem` 前提で STEP LIST の密度に合わない | ステップ行はユーティリティで組む（行自体がジャンプ操作のボタンでもある） |
+| range のつまみが見えない | `--range-thumb` 既定が `--color-base-100`（＝白）で、白いパネル上では位置が読めない | `[--range-thumb:var(--color-info)]` |
+| `:disabled` がライトで更に薄い | daisyUI 既定は地 `base-content` 10% / 文字 20% | `Button` の `DISABLED_CLASS` をライト用に測り直し（`text-base-content/65`） |
+
+`src/lib/daisyPairs.test.tsx` が「親クラス + 修飾子」の対（`badge`+`badge-soft`+`badge-*`、
+`status`+`status-*` ほか）を固定している。**対は必ず揃った 1 本の文字列としてソースに書くこと**
+（文字列連結で組み立てると Tailwind の走査から漏れ、CSS ごと出力されない）。
+
+##### dry-run 実機描画で見つけて直した不具合（第 2 次）
+
+| # | 症状 | 原因 | 対処 |
+|---|---|---|---|
+| 1 | モータ値のラベルが `POS` → `OS` に欠ける | 4 列等幅グリッド内でラベルと値が取り合い、値の桁が多い行でラベルが削られる。幅 300px の診断カラムで顕在化 | 見出しを一覧に 1 行だけ置く `MotorStatHeader` を新設し、各行は数値のみ（結果的に密度も上がった） |
+| 2 | **セッティングタイム中ずっと動作確認ボタンが押せない** | `sequenceRunning` をステップ番号から推定していたが、準備中は `step_index=0 / total_steps>0` が常に成立。動作確認が主役のフェーズでボタンが常時無効だった（サーバーは `_PHASE_GATES` でこのフェーズでこそ受け付ける） | 判定をサーバーと同じ「フェーズ」に合わせた（`MotorCheckButton.tsx`） |
+| 3 | 準備中の Monitor 左半分が巨大な空白 | 詰め物（`flex-1`）で操作を最下段へ落としていた | 詰め物を廃し、レディネスを左列下端へ移して空白を地色に戻した |
+| 4 | 未チェック項目が全て警告色で「茶色の壁」になる | 暗色時代は目立たなかった `text-warning` がライト地で支配的になる | 未チェックは地の文の色。完了は打ち消し線 + 淡色 |
+| 5 | `STEP LIST` 見出しがパネル凡例と重複 | 凡例（`STEPS` / `SEQUENCE PREVIEW`）が既に同じことを言っている | 見出しを落とし操作ヒントのみ |
+| 6 | compact な MATCH 帯が 2 行を消費 | 凡例 + 本文で Panel を使っていた | 1 行の帯に置換 |
+
+検証済み: 4 タブ × セッティング/試合中、緊急停止オーバーレイ、1366x768 と 1920x1080 で
+`document.documentElement.scrollHeight === clientHeight`（ページ全体のスクロールなし）を実測。
 
 #### ファイル一覧
 
@@ -1601,16 +1750,16 @@ motors:
 | ⑩ config 反映 | 6-23 | dry-run でモータ別パラメータが効くか |
 | ⑪ Web UI | 6-24〜6-27 | dry-run + Web UI から実押下・結果表示・無効化ロジックの目視確認 |
 
-### Phase 7: 試合運用フロー（モード / コート / フェーズ / 指差喚呼）— TDD
+### Phase 7: 試合運用フロー（コート / フェーズ / 指差喚呼）— TDD
 
 詳細な仕様は「試合運用フロー」セクションを参照。
 
 | # | ファイル | 内容 |
 |---|---|---|
-| 7-1 | `lib/match_state.py` | Mode / Court / Phase / ChecklistItem / MatchState / `load_checklist_definitions` |
-| 7-2 | `tests/test_match_state.py` | 遷移規則・完了判定・モード切替時リセット・コマンドゲートの単体テスト |
-| 7-3 | `lib/sequence/engine.py` | `court` / `auto_advance` / `@step(auto_stop=True)` を追加 |
-| 7-4 | `tests/test_sequence_court_auto.py` | コート伝播と全自動通過／`auto_stop` 停止の検証 |
+| 7-1 | `lib/match_state.py` | Court / Phase / ChecklistItem / MatchState / `load_checklist_definitions` |
+| 7-2 | `tests/test_match_state.py` | 遷移規則・完了判定・コート切替時リセット・コマンドゲートの単体テスト |
+| 7-3 | `lib/sequence/engine.py` | `court` と `@step(require_trigger=True)` を追加 |
+| 7-4 | `tests/test_sequence_court.py` | コート伝播と `require_trigger` 停止の検証 |
 | 7-5 | `lib/server.py` | `MatchState` 保持、フェーズゲート、`match_state` 配信、接続直後スナップショット、自動開始の廃止 |
 | 7-6 | `tests/test_server_match.py` | WS 経由の全フローと HTTP `motor_check` ゲートの検証 |
 | 7-7 | `config/checklist.yaml`, `main.py` | チェックリスト定義の読み込みと `--checklist` オプション |
@@ -1625,8 +1774,6 @@ motors:
 - **`mode` と `phase` は直交**: 混在させると状態が破綻するので 2 軸に分離した
 - **ゲートは二重**: UI の無効化だけでは WS 直叩き・リロード直後を防げないので
   サーバー側 (`deny_reason`) を単一の判定点とする
-- **全自動は共用シーケンス + フラグ**: 専用シーケンスを別定義すると二重メンテになり、
-  半自動と全自動で挙動が乖離する
 
 ### Phase 8: モータアクセス層と M3508 位置制御 — TDD
 

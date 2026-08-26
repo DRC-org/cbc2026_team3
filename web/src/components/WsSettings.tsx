@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobot } from "@/context/RobotContext";
 import type { WsUrlSource } from "@/lib/wsUrl";
 import { WS_URL_QUERY_KEY, normalizeWsUrl } from "@/lib/wsUrl";
@@ -65,21 +66,17 @@ export function WsSettings({ open, onClose }: { open: boolean; onClose: () => vo
       }
     >
       <div className="flex max-w-[90vw] min-w-[26rem] flex-col gap-3">
-        <div className="hstack">
-          <span className="whitespace-nowrap text-fg-dim">現在</span>
-          <span className="truncate">{wsUrl}</span>
-          <span
-            className={
-              connected ? "whitespace-nowrap text-success" : "whitespace-nowrap text-error"
-            }
-          >
-            {connected ? "● 接続中" : "● 切断"}
-          </span>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="whitespace-nowrap text-base-content/70">現在</span>
+          <span className="min-w-0 flex-1 truncate font-mono">{wsUrl}</span>
+          <StatusBadge tone={connected ? "success" : "error"}>
+            {connected ? "接続中" : "切断"}
+          </StatusBadge>
         </div>
-        <div className="text-fg-dim">設定元: {SOURCE_LABEL[wsUrlSource]}</div>
+        <div className="text-base-content/70">設定元: {SOURCE_LABEL[wsUrlSource]}</div>
 
         <form
-          className="hstack"
+          className="flex items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             apply();
@@ -90,7 +87,7 @@ export function WsSettings({ open, onClose }: { open: boolean; onClose: () => vo
           </label>
           <input
             id="ws-url-input"
-            className="input min-w-0 flex-1 border-line bg-base-300 input-sm focus:border-info focus:outline-none"
+            className="input min-w-0 flex-1 border-base-300 bg-base-100 font-mono input-sm"
             value={draft}
             spellCheck={false}
             autoComplete="off"
@@ -103,14 +100,14 @@ export function WsSettings({ open, onClose }: { open: boolean; onClose: () => vo
         {error ? <div className="text-error">{error}</div> : null}
 
         {direct && direct !== wsUrl ? (
-          <div className="hstack">
-            <span className="whitespace-nowrap text-fg-dim">候補</span>
+          <div className="flex items-center gap-2">
+            <span className="whitespace-nowrap text-base-content/70">候補</span>
             <Button onClick={() => setDraft(direct)}>制御 PC へ直結 ({direct})</Button>
           </div>
         ) : null}
 
         {hasQueryOverride() && wsUrlSource !== "query" ? (
-          <div className="text-fg-dim">
+          <div className="text-base-content/70">
             URL に ?{WS_URL_QUERY_KEY}= が付いています。リロードするとそちらが優先されます
           </div>
         ) : null}

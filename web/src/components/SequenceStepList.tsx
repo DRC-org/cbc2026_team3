@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { Check, ChevronRight, Circle, Hand, Pause, TriangleAlert } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
@@ -28,17 +30,16 @@ function classifyStep(
   return "future";
 }
 
-// 状態別の左端マーカー記号。done=済 / current=実行中 / waiting=許可待ち / future=未到達。
-const STEP_MARKER: Record<StepKind, string> = {
-  done: "✓",
-  current: "►",
-  waiting: "▮",
-  future: "·",
-};
+// 状態別の左端マーカー。done=済 / current=実行中 / waiting=許可待ち / future=未到達。
+const STEP_MARKER = {
+  done: Check,
+  current: ChevronRight,
+  waiting: Pause,
+  future: Circle,
+} as const;
 
-// 行全体の文字色。
 const STEP_TONE_CLASS: Record<StepKind, string> = {
-  done: "text-fg-dim",
+  done: "text-base-content/45",
   current: "text-info",
   waiting: "text-warning",
   future: "",
@@ -47,8 +48,8 @@ const STEP_TONE_CLASS: Record<StepKind, string> = {
 // 実行位置の行だけ左端にカラーバーと薄い地色を敷き、一覧の中で現在地を見失わせない。
 const STEP_ACTIVE_CLASS: Record<StepKind, string> = {
   done: "",
-  current: "border-l-info bg-raised",
-  waiting: "border-l-warning bg-raised",
+  current: "border-l-info bg-base-200 font-medium",
+  waiting: "border-l-warning bg-base-200 font-medium",
   future: "",
 };
 
@@ -60,9 +61,16 @@ export function SequenceStepList({
   disabled = false,
 }: SequenceStepListProps) {
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
+  const currentRef = useRef<HTMLLIElement | null>(null);
+
+  // 実行位置を常に見える位置へ送る。一覧が縦に収まりきらない機体では、
+  // 進むほど現在地が枠外へ出ていき「今どこか」を一覧から読めなくなる
+  useEffect(() => {
+    currentRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [stepIndex]);
 
   if (steps.length === 0) {
-    return <p className="text-fg-dim">ステップ情報なし</p>;
+    return <p className="text-base-content/70">ステップ情報なし</p>;
   }
 
   const totalSteps = steps.length;
@@ -81,18 +89,13 @@ export function SequenceStepList({
   const handleCancel = () => setPendingIndex(null);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1">
-      <div className="hsplit group-title shrink-0">
-        <span>STEP LIST</span>
-        <span>{disabled ? "試合中のみ操作可" : "クリックで再開"}</span>
-      </div>
-
-      <ol className="panel-body scroll">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ol className="scroll min-h-0 flex-1">
         {steps.map((step, i) => {
           const kind = classifyStep(i, stepIndex, totalSteps, waitingTrigger);
           const isActive = kind === "current" || kind === "waiting";
           return (
-            <li key={step.index}>
+            <li key={step.index} ref={isActive ? currentRef : undefined}>
               <button
                 type="button"
                 onClick={() => handleRequestJump(i)}
@@ -100,16 +103,26 @@ export function SequenceStepList({
                 aria-current={isActive ? "step" : undefined}
                 aria-label={`ステップ ${i + 1}: ${step.label}`}
                 className={cx(
-                  "flex w-full cursor-pointer items-center gap-2 border-l-2 border-transparent px-[0.4rem] py-[0.15rem] text-left",
-                  "enabled:hover:bg-raised disabled:cursor-not-allowed",
+                  "flex w-full cursor-pointer items-center gap-2 border-l-2 border-transparent px-1.5 py-[0.15rem] text-left",
+                  "enabled:hover:bg-base-200 disabled:cursor-not-allowed",
                   STEP_TONE_CLASS[kind],
                   STEP_ACTIVE_CLASS[kind],
                 )}
               >
-                <span className="w-4 shrink-0 text-center tabular-nums">{STEP_MARKER[kind]}</span>
-                <span className="w-7 shrink-0 text-fg-dim tabular-nums">#{i + 1}</span>
-                <span className="w-5 shrink-0 text-center">{step.require_trigger ? "✋" : ""}</span>
-                <span className="flex-1 truncate">{step.label}</span>
+                <Icon
+                  as={STEP_MARKER[kind]}
+                  className={cx("text-[0.9em]", kind === "future" && "opacity-40")}
+                />
+                <span className="w-6 shrink-0 font-mono text-base-content/45 tabular-nums">
+                  {i + 1}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{step.label}</span>
+                {/* 許可待ちで止まるステップは事前に見えている必要がある */}
+                <span className="w-4 shrink-0">
+                  {step.require_trigger ? (
+                    <Icon as={Hand} className="text-[0.9em] text-base-content/50" />
+                  ) : null}
+                </span>
               </button>
             </li>
           );
@@ -134,8 +147,13 @@ export function SequenceStepList({
           ステップ {pendingIndex !== null ? pendingIndex + 1 : ""}{" "}
           {target ? `「${target.label}」` : ""} から再開しますか？
         </p>
-        <p className="mt-2 text-fg-dim">現在の動作を中断して指定ステップから実行を開始します。</p>
-        <p className="mt-2 text-warning">⚠ 物理状態が安全であることを必ず確認してください。</p>
+        <p className="mt-2 text-base-content/70">
+          現在の動作を中断して指定ステップから実行を開始します。
+        </p>
+        <p className="mt-2 flex items-center gap-1.5 text-warning">
+          <Icon as={TriangleAlert} />
+          物理状態が安全であることを必ず確認してください。
+        </p>
       </Modal>
     </div>
   );

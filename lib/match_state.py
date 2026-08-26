@@ -1,7 +1,7 @@
-"""試合全体の状態 (モード・コート・フェーズ・指差喚呼チェックリスト) を管理する。
+"""試合全体の状態 (コート・フェーズ・指差喚呼チェックリスト) を管理する。
 
 ロボット単位の状態 (lib/server.py の state メッセージ) とは別に、
-「今どのモードで、どちらのコートで、セッティング中か試合中か」という
+「どちらのコートで、セッティング中か試合中か」という
 全クライアント共通の状態をここで一元管理する。
 
 操縦者 2 名 + Monitor が別ブラウザで接続するため、チェックリストの進捗を
@@ -13,19 +13,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-ROLE_MONITOR = "monitor"
 ROLE_MAIN_HAND = "main_hand"
 ROLE_SUB_HAND = "sub_hand"
 
-#: チェックリストを持ちうる全ロール。UI が KeyError にならないよう常にこの順で埋める
-ALL_ROLES: tuple[str, ...] = (ROLE_MONITOR, ROLE_MAIN_HAND, ROLE_SUB_HAND)
-
-
-class Mode(StrEnum):
-    """操作モード。半自動は操縦者 2 名、全自動は Monitor 1 名で運用する。"""
-
-    SEMI_AUTO = "semi_auto"
-    FULL_AUTO = "full_auto"
+#: チェックリストを持ちうる全ロール。UI が KeyError にならないよう常にこの順で埋める。
+#: 操縦者 2 名分が揃うまで試合に入れない (= 全ロールが試合開始のゲートを兼ねる)。
+ALL_ROLES: tuple[str, ...] = (ROLE_MAIN_HAND, ROLE_SUB_HAND)
 
 
 class Court(StrEnum):
@@ -50,12 +43,6 @@ class Phase(StrEnum):
     FINISHED = "finished"
 
 
-#: モードごとに完了が必須となるロール。半自動は操縦者 2 名分が揃うまで試合に入れない
-_REQUIRED_ROLES: dict[Mode, list[str]] = {
-    Mode.SEMI_AUTO: [ROLE_MAIN_HAND, ROLE_SUB_HAND],
-    Mode.FULL_AUTO: [ROLE_MONITOR],
-}
-
 #: 実行を許可するフェーズをコマンド別に列挙する。ここに無いコマンドはゲート対象外。
 #: UI でボタンを隠すだけでは WS を直接叩かれた場合やリロード直後を防げないため、
 #: サーバー側でも同じ制約を二重に掛ける。
@@ -67,7 +54,6 @@ _ALLOWED_PHASES: dict[str, frozenset[Phase]] = {
     # 試合中以外: モータを微小駆動する動作確認は試合中に走らせてはならない
     "motor_check_start": frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED}),
     # 準備中のみ: 設定変更とチェックリスト操作
-    "set_mode": frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED}),
     "set_court": frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED}),
     "checklist_set": frozenset({Phase.SETUP, Phase.READY}),
     "checklist_reset": frozenset({Phase.SETUP, Phase.READY}),
@@ -82,7 +68,6 @@ _DENY_MESSAGES: dict[str, str] = {
     "sequence_jump": "試合中のみステップ移動できます",
     "trigger": "試合中のみトリガーを送れます",
     "motor_check_start": "試合中は動作確認を実行できません",
-    "set_mode": "試合中はモードを変更できません",
     "set_court": "試合中はコートを変更できません",
     "checklist_set": "このフェーズではチェックリストを操作できません",
     "checklist_reset": "このフェーズではチェックリストを操作できません",
@@ -165,13 +150,11 @@ class MatchState:
         self,
         definitions: dict[str, list[ChecklistItem]] | None = None,
         *,
-        mode: Mode = Mode.SEMI_AUTO,
         court: Court = Court.RED,
     ) -> None:
         self._definitions: dict[str, list[ChecklistItem]] = definitions or {
             role: [] for role in ALL_ROLES
         }
-        self._mode = mode
         self._court = court
         self._phase = Phase.SETUP
         self.checklists: dict[str, ChecklistState] = {}
@@ -182,10 +165,6 @@ class MatchState:
     # ------------------------------------------------------------------ #
 
     @property
-    def mode(self) -> Mode:
-        return self._mode
-
-    @property
     def court(self) -> Court:
         return self._court
 
@@ -194,12 +173,8 @@ class MatchState:
         return self._phase
 
     @property
-    def required_roles(self) -> list[str]:
-        return list(_REQUIRED_ROLES[self._mode])
-
-    @property
     def can_start_match(self) -> bool:
-        return all(self.checklists[role].completed for role in self.required_roles)
+        return all(state.completed for state in self.checklists.values())
 
     def deny_reason(self, command: str) -> str | None:
         """現フェーズで command が許可されなければ理由文字列を返す。許可なら None。"""
@@ -213,16 +188,6 @@ class MatchState:
     # ------------------------------------------------------------------ #
     #  更新
     # ------------------------------------------------------------------ #
-
-    def set_mode(self, mode: Mode) -> bool:
-        if self.deny_reason("set_mode") is not None:
-            return False
-        if mode is not self._mode:
-            self._mode = mode
-            # 別モードのチェック結果を引き継ぐと未確認のまま試合に入れてしまう
-            self._reset_all_checklists()
-        self._sync_phase()
-        return True
 
     def set_court(self, court: Court) -> bool:
         if self.deny_reason("set_court") is not None:
@@ -273,7 +238,7 @@ class MatchState:
         return True
 
     def match_reset(self) -> bool:
-        """どのフェーズからでもセッティングタイムに戻す。モード・コートは維持する。"""
+        """どのフェーズからでもセッティングタイムに戻す。コートは維持する。"""
         self._reset_all_checklists()
         self._phase = Phase.SETUP
         self._sync_phase()
@@ -317,10 +282,8 @@ class MatchState:
     def to_dict(self) -> dict:
         return {
             "type": "match_state",
-            "mode": self._mode.value,
             "court": self._court.value,
             "phase": self._phase.value,
-            "required_roles": self.required_roles,
             "can_start_match": self.can_start_match,
             "checklists": {
                 role: {

@@ -212,20 +212,19 @@ class TestMainHandSteps:
             "初期位置へ復帰",
         ]
 
-    def test_grip_stops_even_in_full_auto(self) -> None:
-        """把持は失敗すると機構破損に直結するため全自動でも目視確認を要求する。"""
+    def test_grip_requires_trigger(self) -> None:
+        """把持は失敗すると機構破損に直結するため操縦者の目視確認を要求する。"""
         seq = MainHandSequence()
         grip = next(s for s in seq.steps_info if s["label"].startswith("ハンド閉じる"))
 
         assert grip["require_trigger"] is True
-        assert grip["auto_stop"] is True
 
-    def test_release_requires_trigger_but_does_not_block_full_auto(self) -> None:
+    def test_release_requires_trigger(self) -> None:
+        """リリースはやり直しが利かないため配置位置到達の目視確認を要求する。"""
         seq = MainHandSequence()
         release = next(s for s in seq.steps_info if s["label"].startswith("ハンド開く"))
 
         assert release["require_trigger"] is True
-        assert release["auto_stop"] is False
 
 
 class TestSubHandSteps:
@@ -264,12 +263,12 @@ class TestSubHandSteps:
             "初期位置へ復帰",
         ]
 
-    def test_grip_stops_even_in_full_auto(self) -> None:
+    def test_grip_requires_trigger(self) -> None:
+        """メインハンドと向かい合う唯一の動作なので目視確認を要求する。"""
         seq = SubHandSequence()
         grip = next(s for s in seq.steps_info if s["label"].startswith("ハンド閉じる"))
 
         assert grip["require_trigger"] is True
-        assert grip["auto_stop"] is True
 
 
 def _load_shipped(yaml_name: str) -> PositionTable:

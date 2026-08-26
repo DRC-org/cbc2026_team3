@@ -1,9 +1,5 @@
-import type { MatchCourt, MatchMode, MatchPhase } from "@/hooks/useRobotSocket";
-
-export const MODE_LABEL: Record<MatchMode, string> = {
-  semi_auto: "半自動",
-  full_auto: "全自動",
-};
+import type { MatchCourt, MatchPhase } from "@/hooks/useRobotSocket";
+import type { Tone } from "@/lib/tone";
 
 export const COURT_LABEL: Record<MatchCourt, string> = {
   red: "赤コート",
@@ -17,23 +13,30 @@ export const PHASE_LABEL: Record<MatchPhase, string> = {
   finished: "試合終了",
 };
 
+/** フェーズの状態色。ヘッダーのチップと左端バーの双方がこれを引く */
+export const PHASE_TONE: Record<MatchPhase, Tone> = {
+  setup: "warning",
+  ready: "info",
+  match: "success",
+  finished: "neutral",
+};
+
 /**
- * ヘッダー帯のフェーズ表現。
+ * ヘッダー帯の左端バー。
  * 帯全面をフェーズ色で塗ると画面で最も明るい面になってしまうため、
- * 地はグレーに固定し、左端のバー色だけでフェーズを示す。
+ * 地は白のまま固定し、左端のバー色とチップだけでフェーズを示す。
  */
 export const PHASE_BAND_CLASS: Record<MatchPhase, string> = {
   setup: "border-l-warning",
   ready: "border-l-info",
   match: "border-l-success",
-  finished: "border-l-fg-dim",
+  finished: "border-l-base-300",
 };
 
-export const PHASE_TEXT_CLASS: Record<MatchPhase, string> = {
-  setup: "text-warning",
-  ready: "text-info",
-  match: "text-success",
-  finished: "text-fg-dim",
+/** コートの状態色。赤/青は誤設定のまま試合に入る事故を防ぐため常時表示する */
+export const COURT_TONE: Record<MatchCourt, Tone> = {
+  red: "error",
+  blue: "info",
 };
 
 /**

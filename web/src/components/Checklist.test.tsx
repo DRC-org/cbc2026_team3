@@ -30,7 +30,9 @@ describe("Checklist", () => {
 
     expect(screen.getByLabelText("電源投入")).toBeChecked();
     expect(screen.getByLabelText("非常停止解除")).not.toBeChecked();
-    expect(screen.getByText("1 / 2 項目")).toBeInTheDocument();
+    // 件数は「済 / 全」と残数の 2 通りで出す（毎回数え直させないため）
+    expect(screen.getByText("/2")).toBeInTheDocument();
+    expect(screen.getByText("残り 1")).toBeInTheDocument();
   });
 
   it("項目が未定義なら設定ファイルの場所を案内する", () => {
@@ -66,7 +68,23 @@ describe("Checklist", () => {
 
   it("完了時は完了表示を出す", () => {
     mount({ ...ITEMS, completed: true });
-    expect(screen.getByText("✓ 指差喚呼 完了")).toBeInTheDocument();
+    expect(screen.getByText("完了")).toBeInTheDocument();
+  });
+
+  it("未完の先頭だけを『次に唱える項目』として強調する", () => {
+    mount({
+      items: [
+        { id: "power", label: "電源投入", checked: true },
+        { id: "estop", label: "非常停止解除", checked: false },
+        { id: "can", label: "CAN 確認", checked: false },
+      ],
+      completed: false,
+    });
+
+    // 未完は 2 件あるが、強調するのは先頭の 1 件だけ
+    expect(screen.getAllByText("次")).toHaveLength(1);
+    expect(screen.getByLabelText("非常停止解除").closest("label")).toHaveClass("border-l-warning");
+    expect(screen.getByLabelText("CAN 確認").closest("label")).not.toHaveClass("border-l-warning");
   });
 
   it.each<MatchPhase>(["match", "finished"])("%s フェーズでは操作を締め切る", (phase) => {

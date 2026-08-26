@@ -60,8 +60,8 @@ class MainHandSequence(Sequence):
         logger.info("[main_hand] エンドエフェクタを把持姿勢へ")
         await self.move_to({"rotate": "pick"})
 
-    # 位置ずれのまま閉じるとワークと機構の双方を壊すため、全自動でも目視確認で止める
-    @step("ハンド閉じる (ワーク把持)", require_trigger=True, auto_stop=True)
+    # 位置ずれのまま閉じるとワークと機構の双方を壊すため、操縦者の目視確認で止める
+    @step("ハンド閉じる (ワーク把持)", require_trigger=True)
     async def grip_work(self) -> None:
         logger.info("[main_hand] ハンド閉じる")
         await self.move_to({"gripper": "closed"})
@@ -91,7 +91,7 @@ class MainHandSequence(Sequence):
         logger.info("[main_hand] コンベア稼働")
         await self.move_to({"conveyor": "run"})
 
-    # リリースは一度やり直しが利かないので、半自動では配置位置到達を目視で確認させる
+    # リリースは一度やり直しが利かないので、配置位置到達を目視で確認させる
     @step("ハンド開く (リリース)", require_trigger=True)
     async def release_work(self) -> None:
         logger.info("[main_hand] ハンド開く")

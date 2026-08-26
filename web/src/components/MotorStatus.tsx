@@ -1,14 +1,15 @@
 import { formatAge } from "@/components/HealthIndicator";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { MotorHealth, MotorHealthState, MotorState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
 import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
 import type { Tone } from "@/lib/tone";
-import { TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface MotorStatusProps {
   name: string;
   state: MotorState;
   health?: MotorHealth;
+  className?: string;
 }
 
 const HEALTH_TONE: Record<MotorHealthState, Tone> = {
@@ -23,8 +24,8 @@ type StatTone = "default" | "warning" | "danger";
 // 温度帯に応じた文字色。default は地の文字色のまま。
 const STAT_TONE_TEXT: Record<StatTone, string> = {
   default: "",
-  warning: "text-warning",
-  danger: "text-error",
+  warning: "text-warning font-medium",
+  danger: "text-error font-medium",
 };
 
 function tempTone(temp: number): StatTone {
@@ -33,47 +34,65 @@ function tempTone(temp: number): StatTone {
   return "default";
 }
 
-interface CellProps {
-  label: string;
-  value: string;
-  unit?: string;
-  tone?: StatTone;
-}
+/** 4 値の桁位置をモータ間で揃えるためのグリッド。ヘッダーと値行で共有する */
+const STAT_GRID_CLASS = "grid grid-cols-4 gap-1 px-1 text-right";
 
-function Cell({ label, value, unit, tone = "default" }: CellProps) {
+const STAT_LABELS = ["POS", "VEL", "TRQ", "TMP"];
+
+/**
+ * 数値列の見出し。モータ 1 基ごとに `POS` `VEL` などを併記すると、
+ * 幅 300px の診断カラムでは値の桁数しだいでラベルが `OS` まで削られて読めなくなる。
+ * 見出しは一覧に 1 行だけ置き、各行は数値だけを並べる。
+ */
+export function MotorStatHeader({ className }: { className?: string }) {
   return (
-    <div className="flex min-w-0 items-baseline justify-end gap-[0.3em]">
-      <span className="text-fg-dim">{label}</span>
-      <span className={cx("tabular-nums", STAT_TONE_TEXT[tone])}>
-        {value}
-        {unit ? <span className="text-fg-dim">{unit}</span> : null}
-      </span>
+    <div className={cx(STAT_GRID_CLASS, "text-[0.8em] text-base-content/60", className)}>
+      {STAT_LABELS.map((label) => (
+        <span key={label}>{label}</span>
+      ))}
     </div>
   );
 }
 
-export function MotorStatus({ name, state, health }: MotorStatusProps) {
+function Cell({
+  value,
+  unit,
+  tone = "default",
+}: {
+  value: string;
+  unit?: string;
+  tone?: StatTone;
+}) {
+  return (
+    <span className={cx("truncate font-mono tabular-nums", STAT_TONE_TEXT[tone])}>
+      {value}
+      {unit ? <span className="text-base-content/60">{unit}</span> : null}
+    </span>
+  );
+}
+
+export function MotorStatus({ name, state, health, className }: MotorStatusProps) {
   // モータ名と数値を同じ行に並べると、サイドカラム幅ではモータ名が "li..." まで
   // 削られて識別できなくなる。名前を独立した行に出して常に読めるようにする
   return (
-    <div className="flex flex-col px-[0.3rem] py-[0.15rem]">
-      <div className="hsplit">
-        <span className="truncate">{name}</span>
+    <div className={cx("flex flex-col py-[0.15rem]", className)}>
+      <div className="flex min-w-0 items-center justify-between gap-2 px-1">
+        <span className="min-w-0 truncate font-medium">{name}</span>
         {health ? (
-          <span className="hstack shrink-0 whitespace-nowrap">
-            <span className={TONE_TEXT_CLASS[HEALTH_TONE[health.state]]}>
-              {health.state.toUpperCase()}
+          <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+            <StatusBadge tone={HEALTH_TONE[health.state]}>{health.state.toUpperCase()}</StatusBadge>
+            <span className="text-[0.8em] text-base-content/60">
+              {formatAge(health.feedback_age_ms)}
             </span>
-            <span className="text-fg-dim">{formatAge(health.feedback_age_ms)}</span>
           </span>
         ) : null}
       </div>
-      {/* 4 値を等幅グリッドに固定し、モータ間で桁位置が揃うようにする */}
-      <div className="grid grid-cols-4 gap-1">
-        <Cell label="POS" value={state.pos.toFixed(1)} />
-        <Cell label="VEL" value={state.vel.toFixed(1)} />
-        <Cell label="TRQ" value={state.torque.toFixed(1)} />
-        <Cell label="TMP" value={state.temp.toFixed(1)} unit="℃" tone={tempTone(state.temp)} />
+      {/* 見出しは MotorStatHeader が一覧に 1 行だけ出す。同じグリッドを使って桁位置を揃える */}
+      <div className={STAT_GRID_CLASS}>
+        <Cell value={state.pos.toFixed(1)} />
+        <Cell value={state.vel.toFixed(1)} />
+        <Cell value={state.torque.toFixed(1)} />
+        <Cell value={state.temp.toFixed(1)} unit="℃" tone={tempTone(state.temp)} />
       </div>
     </div>
   );

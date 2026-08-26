@@ -1,27 +1,21 @@
 import { Panel } from "@/components/ui/Panel";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { BusHealth, BusHealthState, HealthSnapshot } from "@/hooks/useRobotSocket";
-import { cx } from "@/lib/cx";
 import type { Tone } from "@/lib/tone";
-import { TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface HealthIndicatorProps {
   health: HealthSnapshot | undefined;
   variant?: "pill" | "card" | "compact" | "bus-only";
 }
 
-interface ToneStyle {
-  label: string;
-  symbol: string;
-}
-
 /** CAN ヘルスは正常/劣化/停止/未取得の 4 段階しか取らない（info は使わない） */
 type HealthTone = Exclude<Tone, "info">;
 
-const TONE_STYLES: Record<HealthTone, ToneStyle> = {
-  success: { label: "OK", symbol: "✓" },
-  warning: { label: "DEGRADED", symbol: "⚠" },
-  error: { label: "DOWN", symbol: "✗" },
-  neutral: { label: "未取得", symbol: "○" },
+const TONE_LABEL: Record<HealthTone, string> = {
+  success: "OK",
+  warning: "DEGRADED",
+  error: "DOWN",
+  neutral: "未取得",
 };
 
 function busTone(state: BusHealthState): HealthTone {
@@ -48,14 +42,18 @@ function buildSummary(health: HealthSnapshot): string {
   return fragments.join(", ");
 }
 
-// 状態バッジ（[記号 ラベル]）。
+/**
+ * daisyUI の table-xs は本文を .6875rem に固定する。ルートの clamp() 由来の
+ * 相対サイズから外れて読みづらくなるため、セル側で明示的に上書きする
+ * （font-size は tr に当たっているので、td/th の直接指定が勝つ）。
+ */
+const CELL_CLASS = "text-[0.85em]";
+
 function StatusTag({ tone, extra }: { tone: HealthTone; extra?: string }) {
-  const style = TONE_STYLES[tone];
   return (
-    <span className={TONE_TEXT_CLASS[tone]}>
-      [{style.symbol} {style.label}
-      {extra ? ` ${extra}` : ""}]
-    </span>
+    <StatusBadge tone={tone} detail={extra}>
+      {TONE_LABEL[tone]}
+    </StatusBadge>
   );
 }
 
@@ -64,12 +62,12 @@ function PillMode({ health }: { health: HealthSnapshot }) {
   const summary = buildSummary(health);
   const tooltip =
     summary.length > 0
-      ? `${TONE_STYLES[tone].label}: ${summary}`
-      : `${TONE_STYLES[tone].label} (バス ${health.buses.length} / モータ ${health.motors.length})`;
+      ? `${TONE_LABEL[tone]}: ${summary}`
+      : `${TONE_LABEL[tone]} (バス ${health.buses.length} / モータ ${health.motors.length})`;
   return (
-    <span title={tooltip} aria-label={`ヘルス ${TONE_STYLES[tone].label}`}>
-      <StatusTag tone={tone} />
-    </span>
+    <StatusBadge tone={tone} title={tooltip}>
+      {TONE_LABEL[tone]}
+    </StatusBadge>
   );
 }
 
@@ -81,41 +79,47 @@ function CompactMode({ health }: { health: HealthSnapshot }) {
 
 function BusRow({ bus }: { bus: BusHealth }) {
   const tone = busTone(bus.state);
-  const style = TONE_STYLES[tone];
+  const notes = [
+    bus.bus_off ? "bus_off" : null,
+    bus.tx_error_count > 0 ? `tx_err ${bus.tx_error_count}` : null,
+  ].filter(Boolean);
   return (
-    <div className="hsplit px-[0.3rem] py-[0.15rem]">
-      <span className="hstack items-baseline">
-        <span>{bus.name}</span>
-        <span className="text-fg-dim">{bus.channel}</span>
-      </span>
-      <span className={cx("hstack shrink-0 whitespace-nowrap", TONE_TEXT_CLASS[tone])}>
-        <span>
-          {style.symbol} {style.label}
-        </span>
-        {bus.bus_off ? <span>bus_off</span> : null}
-        {bus.tx_error_count > 0 ? <span>tx_err {bus.tx_error_count}</span> : null}
-      </span>
-    </div>
+    <tr>
+      <td className={`${CELL_CLASS} truncate`}>{bus.name}</td>
+      <td className={`${CELL_CLASS} font-mono text-base-content/70`}>{bus.channel}</td>
+      <td className={`${CELL_CLASS} text-right`}>
+        <StatusBadge tone={tone} detail={notes.length > 0 ? notes.join(" ") : undefined}>
+          {TONE_LABEL[tone]}
+        </StatusBadge>
+      </td>
+    </tr>
+  );
+}
+
+function BusTable({ health }: { health: HealthSnapshot }) {
+  if (health.buses.length === 0) {
+    return <div className="text-base-content/70">バス情報なし</div>;
+  }
+  return (
+    <table className="table table-zebra table-xs">
+      <tbody>
+        {health.buses.map((bus) => (
+          <BusRow key={bus.name} bus={bus} />
+        ))}
+      </tbody>
+    </table>
   );
 }
 
 function BusOnlyMode({ health }: { health: HealthSnapshot }) {
   const tone = busTone(health.overall);
   return (
-    <div className="flex flex-col gap-[0.15rem]">
-      <div className="hsplit">
-        <span className="text-fg-dim">{health.buses.length} 系統</span>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-base-content/70">{health.buses.length} 系統</span>
         <StatusTag tone={tone} />
       </div>
-      {health.buses.length > 0 ? (
-        <div className="striped flex flex-col">
-          {health.buses.map((bus) => (
-            <BusRow key={bus.name} bus={bus} />
-          ))}
-        </div>
-      ) : (
-        <div className="text-fg-dim">バス情報なし</div>
-      )}
+      <BusTable health={health} />
     </div>
   );
 }
@@ -123,18 +127,8 @@ function BusOnlyMode({ health }: { health: HealthSnapshot }) {
 function CardMode({ health }: { health: HealthSnapshot }) {
   const tone = busTone(health.overall);
   return (
-    <Panel legend="CAN Health">
-      <div className="hsplit">
-        <span>STATUS</span>
-        <StatusTag tone={tone} />
-      </div>
-      {health.buses.length > 0 ? (
-        <div className="striped flex flex-col">
-          {health.buses.map((bus) => (
-            <BusRow key={bus.name} bus={bus} />
-          ))}
-        </div>
-      ) : null}
+    <Panel legend="CAN Health" actions={<StatusTag tone={tone} />}>
+      <BusTable health={health} />
     </Panel>
   );
 }
@@ -149,15 +143,15 @@ function NeutralPlaceholder({
   }
   if (variant === "bus-only") {
     return (
-      <div className="hsplit">
-        <span className="text-fg-dim">CAN</span>
-        <span className="text-fg-dim">未取得</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-base-content/70">CAN</span>
+        <StatusTag tone="neutral" />
       </div>
     );
   }
   return (
     <Panel legend="CAN Health">
-      <p className="text-fg-dim">ヘルス情報未取得</p>
+      <p className="text-base-content/70">ヘルス情報未取得</p>
     </Panel>
   );
 }

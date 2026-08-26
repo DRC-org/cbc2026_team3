@@ -23,13 +23,17 @@ from lib.health import (
     MotorHealth,
     MotorHealthInfo,
 )
-from lib.match_state import ChecklistItem, Court, MatchState, Mode
+from lib.match_state import ChecklistItem, Court, MatchState
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
 
 logger = logging.getLogger(__name__)
 
 _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
+
+#: 1 クライアントへの送信を諦めるまでの秒数。
+#: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
+_WS_SEND_TIMEOUT_S = 1.0
 
 
 # overall を最悪値で集約するためのランク。lib.health._BUS_SEVERITY_RANK と一致させる
@@ -45,8 +49,8 @@ _BUS_SEVERITY_RANK: dict[BusHealth, int] = {
 #: 停止方向の操作 (sequence_stop / e_stop / match_reset / match_finish / e_stop_release) は
 #: 緊急停止中こそ通す必要があるため決して載せてはならない。motor_check_start は
 #: _start_motor_check が motor_check_error で拒否する別経路を持つのでここでは扱わない。
-#: match_start は全自動モードで両ロボットの request_start() を兼ねるため、
-#: 載せないと緊急停止中に試合開始ボタンだけで両機が動き出す。
+#: match_start は試合フェーズへ入る操作で、通ると操縦者の sequence_start が解禁される。
+#: 緊急停止中に MATCH へ入れてしまうと動作確認もコート設定も同時に閉じてしまうため塞ぐ。
 _E_STOP_DENY_MESSAGES: dict[str, str] = {
     "sequence_start": "緊急停止中のためシーケンスを開始できません",
     "sequence_jump": "緊急停止中のためステップ移動できません",
@@ -104,15 +108,17 @@ class RobotServer:
         self._app: web.Application | None = None
         self._robots: dict[str, RobotContext] = {}
         self._ws_clients: set[web.WebSocketResponse] = set()
+        #: 切り離し中のクライアントを閉じるタスク。GC で消えないよう参照を保持する
+        self._closing_tasks: set[asyncio.Task[None]] = set()
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
         self._e_stop_active: bool = False
-        # dry-run 時はシーケンスを自動進行させ、モータ状態を擬似的に揺らがせて
-        # Web UI のデモを成立させる。実機運用時は False のまま影響しない。
+        # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
+        # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
-        # 試合全体の状態 (モード / コート / フェーズ / チェックリスト)。
+        # 試合全体の状態 (コート / フェーズ / チェックリスト)。
         # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く。
         self.match = MatchState(definitions=checklist_definitions)
 
@@ -160,15 +166,11 @@ class RobotServer:
             can_manager=can_manager,
             position_loops=list(position_loops or []),
         )
-        self._apply_match_settings_to(sequence)
-
-    def _apply_match_settings_to(self, sequence: Sequence) -> None:
         sequence.set_court(self.match.court)
-        sequence.set_auto_advance(self.match.mode is Mode.FULL_AUTO)
 
-    def _apply_match_settings(self) -> None:
+    def _apply_court(self) -> None:
         for ctx in self._robots.values():
-            self._apply_match_settings_to(ctx.sequence)
+            ctx.sequence.set_court(self.match.court)
 
     def create_app(self) -> web.Application:
         app = web.Application()
@@ -246,6 +248,10 @@ class RobotServer:
                 await task
         self._sequence_tasks.clear()
 
+        for task in self._closing_tasks:
+            task.cancel()
+        self._closing_tasks.clear()
+
         for ws in set(self._ws_clients):
             await ws.close()
         self._ws_clients.clear()
@@ -253,8 +259,8 @@ class RobotServer:
     async def _run_sequence_loop(self, robot_name: str) -> None:
         """シーケンスを永続的に走らせる。停止/完走後は resume 要求を待つ。
 
-        起動時は resume を立てない。操縦者の明示的な開始合図 (sequence_start /
-        全自動時の match_start) があるまでロボットを動かしてはならない。
+        起動時は resume を立てない。操縦者の明示的な開始合図 (sequence_start) が
+        あるまでロボットを動かしてはならない。
         """
         seq = self._robots[robot_name].sequence
         while True:
@@ -383,9 +389,6 @@ class RobotServer:
             if robot_name and robot_name in self._motor_check_runners:
                 self._motor_check_runners[robot_name].abort()
 
-        elif cmd_type == "set_mode":
-            await self._handle_set_mode(data)
-
         elif cmd_type == "set_court":
             await self._handle_set_court(data)
 
@@ -417,29 +420,15 @@ class RobotServer:
             self.match.match_reset()
             logger.info("セッティングタイムへ復帰")
             self._stop_all_sequences()
-            self._apply_match_settings()
+            self._apply_court()
             await self._broadcast_match_state()
 
         else:
             logger.debug("未知のコマンド: %s", cmd_type)
 
     # ------------------------------------------------------------------ #
-    #  試合状態 (モード / コート / フェーズ / チェックリスト)
+    #  試合状態 (コート / フェーズ / チェックリスト)
     # ------------------------------------------------------------------ #
-
-    async def _handle_set_mode(self, data: dict) -> None:
-        raw = data.get("mode")
-        try:
-            mode = Mode(raw)
-        except ValueError:
-            logger.warning("未知のモード: %s", raw)
-            return
-        if not self.match.set_mode(mode):
-            return
-        # 全自動ではトリガー待ちを自動通過させる。切替は必ずシーケンスへ伝播させること
-        self._apply_match_settings()
-        logger.info("モード変更: %s", mode.value)
-        await self._broadcast_match_state()
 
     async def _handle_set_court(self, data: dict) -> None:
         raw = data.get("court")
@@ -450,7 +439,7 @@ class RobotServer:
             return
         if not self.match.set_court(court):
             return
-        self._apply_match_settings()
+        self._apply_court()
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
@@ -461,15 +450,10 @@ class RobotServer:
             )
             return
 
-        # 開始直前にもう一度設定を流し込む (取りこぼしがあると挙動が全自動/半自動でずれる)
-        self._apply_match_settings()
-        logger.info("試合開始: mode=%s court=%s", self.match.mode.value, self.match.court.value)
-
-        # 全自動には操縦者タブが無いため、試合開始が両機のシーケンス起動を兼ねる。
-        # 半自動では各操縦者が自分のタイミングで START を押す。
-        if self.match.mode is Mode.FULL_AUTO:
-            for ctx in self._robots.values():
-                ctx.sequence.request_start()
+        # 開始直前にもう一度流し込む (取りこぼすとシーケンスが逆コートの分岐で動く)
+        self._apply_court()
+        # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
+        logger.info("試合開始: court=%s", self.match.court.value)
 
         await self._broadcast_match_state()
 
@@ -582,14 +566,48 @@ class RobotServer:
         msg = json.dumps(payload, ensure_ascii=False)
         dead: set[web.WebSocketResponse] = set()
         for ws in self._ws_clients:
-            if ws.closed:
+            if ws.closed or not await self._send_or_drop(ws, msg):
                 dead.add(ws)
-                continue
-            try:
-                await ws.send_str(msg)
-            except ConnectionResetError:
-                dead.add(ws)
+        await self._drop_clients(dead)
+
+    async def _send_or_drop(self, ws: web.WebSocketResponse, msg: str) -> bool:
+        """1 クライアントへ送信する。詰まった相手は生存とみなさず切り離す。
+
+        aiohttp の `send_str` は相手が読まなくなると無期限に待つ。配信は全
+        クライアントへ直列に行うため、1 台でも詰まると他の全員 — Monitor を含む —
+        のテレメトリが止まる。しかも WebSocket 自体は開いたままなので UI は
+        「接続中」を出し続け、操縦者は凍った値を最新だと思って見続けることになる。
+        操縦者のノート PC がスリープに入る・Wi-Fi が切れるだけで起きうるため、
+        送信ごとに上限を設けて超えた相手を切り離す。
+        """
+        try:
+            await asyncio.wait_for(ws.send_str(msg), timeout=_WS_SEND_TIMEOUT_S)
+            return True
+        except TimeoutError:
+            logger.warning("WebSocket 送信がタイムアウトしたためクライアントを切り離します")
+        except ConnectionResetError:
+            logger.debug("WebSocket 送信先が既に切断されています")
+        except Exception:
+            logger.warning("WebSocket 送信に失敗したためクライアントを切り離します", exc_info=True)
+        return False
+
+    async def _close_quietly(self, ws: web.WebSocketResponse) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(ws.close(), timeout=_WS_SEND_TIMEOUT_S)
+
+    async def _drop_clients(self, dead: set[web.WebSocketResponse]) -> None:
+        """切り離したクライアントの後始末。ソケットも閉じて再接続を促す。
+
+        `close()` は相手からのクローズ応答を待つ。送信が詰まっている相手は
+        まさにその応答を返さないので、ここで await すると送信タイムアウトを
+        設けた意味がなくなり配信ループが同じ場所で止まる。
+        後始末は別タスクへ切り離し、配信ループは決して待たない。
+        """
         self._ws_clients -= dead
+        for ws in dead:
+            task = asyncio.create_task(self._close_quietly(ws))
+            self._closing_tasks.add(task)
+            task.add_done_callback(self._closing_tasks.discard)
 
     async def _broadcast_json(self, payload: dict) -> None:
         """単一の JSON dict を全クライアントへ送信する共通ヘルパ。
@@ -600,14 +618,9 @@ class RobotServer:
         msg = json.dumps(payload, ensure_ascii=False)
         dead: set[web.WebSocketResponse] = set()
         for ws in self._ws_clients:
-            if ws.closed:
+            if ws.closed or not await self._send_or_drop(ws, msg):
                 dead.add(ws)
-                continue
-            try:
-                await ws.send_str(msg)
-            except ConnectionResetError:
-                dead.add(ws)
-        self._ws_clients -= dead
+        await self._drop_clients(dead)
 
     # ------------------------------------------------------------------ #
     #  アクチュエータ動作確認 (Phase 6 段階⑨ — タスク 6-22)
@@ -785,8 +798,20 @@ class RobotServer:
         return web.json_response({"snapshot": snapshot.to_dict()}, status=200)
 
     async def _broadcast_loop(self) -> None:
+        """テレメトリ配信ループ。1 回の例外でループごと終わらせてはならない。
+
+        このタスクが死ぬと WebSocket は繋がったままなので、UI は「接続中」を出しつつ
+        値だけが凍る。操縦者は画面が生きていると信じたまま古い値を見続けることになり、
+        機体が異常でも気付けない。1 フレームの失敗は握って次の周期へ進み、
+        配信そのものは何があっても継続させる。
+        """
         while True:
-            await self._broadcast_state()
+            try:
+                await self._broadcast_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("状態配信に失敗しました (配信は継続します)")
             await asyncio.sleep(self._broadcast_interval)
 
     def _compute_health(self, robot_name: str) -> HealthSnapshot:
@@ -889,24 +914,12 @@ class RobotServer:
             if ws.closed:
                 dead.add(ws)
                 continue
-            sent_ok = True
-            for msg_text in state_messages:
-                try:
-                    await ws.send_str(msg_text)
-                except ConnectionResetError:
-                    dead.add(ws)
-                    sent_ok = False
-                    break
-            if not sent_ok:
-                continue
-            for ev_text in change_events:
-                try:
-                    await ws.send_str(ev_text)
-                except ConnectionResetError:
+            for msg_text in (*state_messages, *change_events):
+                if not await self._send_or_drop(ws, msg_text):
                     dead.add(ws)
                     break
 
-        self._ws_clients -= dead
+        await self._drop_clients(dead)
 
         # 4) 差分検出後にスナップショットを更新する。順序を逆にすると
         #    1 回目の broadcast で health_change が出てしまう。
