@@ -11,6 +11,7 @@ from lib.drivers.base import MotorState
 from lib.match_state import Phase
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
+from tests.fake_health import ok_health_snapshot
 
 
 async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict | None:
@@ -56,6 +57,9 @@ def _make_mock_can_manager() -> CANManager:
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
     mgr._buses = {"generic_bus": MagicMock()}
+    # health() が HealthSnapshot を返さないと、サーバーの「判定できないものは DOWN」
+    # 経路を常に踏み、本番とは別物の状態でテストすることになる
+    mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
     return mgr
 
 

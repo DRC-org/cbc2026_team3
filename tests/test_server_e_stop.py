@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import struct
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import can
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorState
+from lib.control.position_loop import M3508PositionLoop, make_position_pid
+from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.control.target_refresh import GenericTargetRefresher
+from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.generic import GenericDriver
+from lib.drivers.m3508 import M3508Driver
 from lib.match_state import (
     ROLE_MAIN_HAND,
     ROLE_SUB_HAND,
@@ -15,7 +22,9 @@ from lib.match_state import (
     Phase,
 )
 from lib.sequence.engine import Sequence, step
+from lib.sequence.motors import MotorHandle
 from lib.server import RobotServer
+from tests.fake_health import ok_health_snapshot
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
@@ -58,6 +67,9 @@ def _make_mock_can_manager() -> CANManager:
     mgr.send_to_bus = AsyncMock()
     mgr.activate_motors = AsyncMock()
     mgr._buses = {"bus0": MagicMock()}
+    # health() が HealthSnapshot を返さないと、サーバーの「判定できないものは DOWN」
+    # 経路を常に踏み、本番とは別物の状態でテストすることになる
+    mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
     return mgr
 
 
@@ -622,3 +634,283 @@ class TestActivateEStopFromInside:
                 assert s._running is False
 
             await ws.close()
+
+
+# ---------------------------------------------------------------------- #
+#  同期ずれラッチの解除経路
+# ---------------------------------------------------------------------- #
+
+
+def _feed(driver: M3508Driver, deg: float) -> None:
+    """M3508 のフィードバックフレームを 1 通流し込む。"""
+    raw = round(deg / 360.0 * 8192) % 8192
+    driver.update_state(
+        can.Message(
+            arbitration_id=0x200 + driver.can_id,
+            data=struct.pack(">HhhBB", raw, 0, 0, 25, 0),
+        )
+    )
+
+
+class _SyncFixture:
+    """位置制御ループと同期監視を実物のまま RobotServer へ配線した一式。
+
+    左右ペアのドライバをループと監視で共有する。実機と同じく「同じずれを
+    双方が見る」構成にしないと、解除経路の穴が見えない。
+    """
+
+    def __init__(self, *, tolerance: float = 0.0) -> None:
+        self.mgr = _make_mock_can_manager()
+        self.right = M3508Driver("y_r", can_id=1)
+        self.left = M3508Driver("y_l", can_id=2)
+        self.mgr._motors = {"y_r": self.right, "y_l": self.left}
+        self.mgr.last_feedback_at.side_effect = lambda _name: time.time()
+
+        group = SyncGroup(
+            name="y_axis",
+            members=(
+                SyncMember(motor_name="y_r", scale=1.0, offset=0.0),
+                SyncMember(motor_name="y_l", scale=-1.0, offset=0.0),
+            ),
+            tolerance=tolerance,
+        )
+
+        self.server = RobotServer(checklist_definitions=_DEFS)
+        self.loop = M3508PositionLoop(
+            self.mgr,
+            "can_m3508",
+            is_estop_active=lambda: self.server.e_stop_active,
+        )
+        self.loop.add_motor("y_r", self.right, make_position_pid(kp=1.0))
+        self.loop.add_motor("y_l", self.left, make_position_pid(kp=1.0))
+        self.loop.add_sync_group(group)
+
+        self.violations: list[tuple[str, float]] = []
+        self.tasks: set[asyncio.Task[None]] = set()
+        self.monitor = SyncMonitor(
+            [group],
+            {"y_r": self.right, "y_l": self.left},  # type: ignore[arg-type]
+            last_feedback_at=lambda _name: time.time(),
+            violation_samples=1,
+            on_violation=self._on_violation,
+        )
+        self.server.add_robot(
+            "main_hand",
+            GatedSequence("main_hand"),
+            self.mgr,
+            position_loops=[self.loop],
+            sync_monitors=[self.monitor],
+        )
+        # 累積角の原点は初回フィードバックで確定する。先に 0deg を流しておかないと
+        # 「ずれた姿勢」がそのまま原点になり、偏差 0 と判定されてしまう
+        _feed(self.right, 0.0)
+        _feed(self.left, 0.0)
+
+    def _on_violation(self, axis: str, deviation: float) -> None:
+        self.violations.append((axis, deviation))
+        task = asyncio.create_task(self.server.activate_e_stop(reason=f"{axis} の左右ずれ"))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def deviate(self) -> None:
+        """左右が逆向きに 10deg ずれた状態にする (人間の単位で 20 のずれ)。"""
+        _feed(self.right, 10.0)
+        _feed(self.left, 10.0)
+
+    def aligned(self) -> None:
+        """逆回転ペアが正しく揃っている状態にする。"""
+        _feed(self.right, 10.0)
+        _feed(self.left, -10.0)
+
+    async def settle(self) -> None:
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+
+class TestSyncLatchRelease:
+    async def test_release_clears_position_loop_latch(self) -> None:
+        """ラッチしたままだと y_axis はプロセス再起動まで電流 0 で復帰できない。"""
+        fx = _SyncFixture()
+        fx.deviate()
+        await fx.loop.step()
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+        await fx.server._handle_command({"type": "e_stop"})
+        await fx.server._handle_command({"type": "e_stop_release"})
+
+        assert fx.loop.sync_violations == frozenset()
+
+    async def test_release_clears_sync_monitor_latch(self) -> None:
+        """SyncMonitor がラッチしたままだと、以後どれだけずれても二度と発報しない。"""
+        fx = _SyncFixture()
+        fx.deviate()
+        fx.monitor.step()
+        await fx.settle()
+        assert fx.monitor.violated == frozenset({"y_axis"})
+        assert fx.server.e_stop_active is True
+
+        await fx.server._handle_command({"type": "e_stop_release"})
+
+        assert fx.monitor.violated == frozenset()
+
+    async def test_release_does_not_disable_monitoring(self) -> None:
+        """解除は「再び監視を有効にする」であって「ずれを無かったことにする」ではない。
+
+        解除後もずれが残っていれば、監視は同じ軸で再び発報して緊急停止へ戻す。
+        ここが効かないと、操縦者は復帰したつもりで無監視の機体を動かすことになる。
+        """
+        fx = _SyncFixture()
+        fx.deviate()
+        fx.monitor.step()
+        await fx.settle()
+        assert len(fx.violations) == 1
+
+        await fx.server._handle_command({"type": "e_stop_release"})
+        assert fx.server.e_stop_active is False
+
+        # 機構は直っていない (ずれたまま)
+        fx.monitor.step()
+        await fx.settle()
+
+        assert len(fx.violations) == 2
+        assert fx.server.e_stop_active is True
+
+    async def test_release_does_not_disable_position_loop_detection(self) -> None:
+        """位置制御ループ側も同じ。解除後にずれが残っていれば再びラッチする。"""
+        fx = _SyncFixture()
+        fx.deviate()
+        await fx.loop.step()
+        await fx.server._handle_command({"type": "e_stop"})
+        await fx.server._handle_command({"type": "e_stop_release"})
+        assert fx.loop.sync_violations == frozenset()
+
+        await fx.loop.step()
+
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+    async def test_release_after_repair_keeps_axis_available(self) -> None:
+        """人間がずれを直してから解除すれば、再ラッチせずに軸が使える。"""
+        fx = _SyncFixture()
+        fx.deviate()
+        await fx.loop.step()
+        await fx.server._handle_command({"type": "e_stop"})
+
+        fx.aligned()
+        await fx.server._handle_command({"type": "e_stop_release"})
+        await fx.loop.step()
+
+        assert fx.loop.sync_violations == frozenset()
+        assert fx.monitor.violated == frozenset()
+
+
+def _frames_to(mgr: CANManager, bus_name: str) -> list[can.Message]:
+    """指定バスへ送信されたフレームを送信順に取り出す。"""
+    return [call.args[1] for call in mgr.send_to_bus.await_args_list if call.args[0] == bus_name]
+
+
+class TestEStopStopsM3508:
+    """左右直結で最も危険な Y 軸 (M3508) へ、緊急停止で能動的に停止指令を出すこと。
+
+    M3508 は ``emergency_stop_message()`` を持たず、自作モタドラ向けの 0x7FF も
+    解釈しない。位置制御ループが電流 0 を送り続けることに頼ると、そのタスクが
+    死んだ瞬間に「止める手段が 1 つも無い」状態になる。
+    """
+
+    async def test_zero_current_frame_is_sent(self) -> None:
+        fx = _SyncFixture()
+        await fx.loop.set_target("y_r", ControlMode.CURRENT, 3000.0)
+
+        await fx.server.activate_e_stop()
+
+        frames = _frames_to(fx.mgr, "can_m3508")
+        assert frames, "M3508 のバスへ 1 通も送られていない"
+        assert frames[-1].arbitration_id == 0x200
+        assert struct.unpack(">hhhh", frames[-1].data) == (0, 0, 0, 0)
+
+    async def test_sent_even_when_loop_is_not_running(self) -> None:
+        """停止がループの生存に依存してはならない。"""
+        fx = _SyncFixture()
+        assert fx.loop.is_running is False
+
+        await fx.server.activate_e_stop()
+
+        assert _frames_to(fx.mgr, "can_m3508")
+
+    async def test_targets_are_cleared(self) -> None:
+        """目標が残っていると、ループが動き出した瞬間に再び電流が出る。"""
+        fx = _SyncFixture()
+        await fx.loop.set_target("y_r", ControlMode.POSITION, 30.0)
+
+        await fx.server.activate_e_stop()
+
+        assert fx.loop.target("y_r") is None
+
+    async def test_bus_failure_does_not_block_other_frames(self) -> None:
+        """1 バスの送信失敗で他への停止指令を諦めない (既存方針の維持)。"""
+        fx = _SyncFixture()
+
+        async def _fail_m3508(bus_name: str, msg: can.Message) -> None:
+            if bus_name == "can_m3508":
+                raise can.CanError("送信失敗 (テスト)")
+
+        fx.mgr.send_to_bus = AsyncMock(side_effect=_fail_m3508)
+
+        await fx.server.activate_e_stop()
+
+        # 自作モタドラ向けの 0x7FF ブロードキャストは届いている
+        assert [call.args[0] for call in fx.mgr.send_to_bus.await_args_list].count("bus0") == 1
+        assert fx.server.e_stop_active is True
+
+
+class TestEStopDropsRefreshTargets:
+    """緊急停止の解除だけでコンベアが回り出さないこと。
+
+    自作モタドラの目標値は 20Hz で再送し続けているため、停止時に目標を残すと
+    解除した瞬間に再送が走り、操縦者が何も操作していないのに機体が動き出す。
+    """
+
+    async def test_targets_are_dropped_on_e_stop(self) -> None:
+        server = _build_server()
+        mgr = server._robots["main_hand"].can_manager
+        driver = GenericDriver("conveyor", can_id=9, control_type=ControlMode.DUTY)
+        handle = MotorHandle("conveyor", driver, mgr)
+        refresher = GenericTargetRefresher([handle])
+        server._robots["main_hand"].target_refreshers = [refresher]
+        await handle.set_target(ControlMode.DUTY, 0.3)
+
+        await server.activate_e_stop()
+
+        assert handle.has_target is False
+
+
+class TestSafetyStateBroadcast:
+    async def test_latched_axes_are_broadcast(self) -> None:
+        """どの軸がラッチされているかを UI が知れないと復旧操作を選べない。"""
+        fx = _SyncFixture()
+        fx.deviate()
+        await fx.loop.step()
+        fx.monitor.step()
+        await fx.settle()
+
+        state = fx.server._build_state_message("main_hand")
+
+        assert state["safety"]["sync_violations"] == ["y_axis"]
+
+    async def test_dead_safety_loops_are_visible(self) -> None:
+        """200Hz の位置制御と 50Hz の監視が死んでも、現在は誰も気付けない。"""
+        fx = _SyncFixture()
+
+        state = fx.server._build_state_message("main_hand")
+        assert state["safety"]["loops_running"] is False
+        assert state["safety"]["monitors_running"] is False
+
+        fx.loop.start()
+        fx.monitor.start()
+        await fx.settle()
+        try:
+            state = fx.server._build_state_message("main_hand")
+            assert state["safety"]["loops_running"] is True
+            assert state["safety"]["monitors_running"] is True
+        finally:
+            await fx.loop.stop()
+            await fx.monitor.stop()

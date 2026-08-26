@@ -24,6 +24,7 @@ from main import (
     _build_position_loops,
     _build_position_pid,
     _build_sync_groups,
+    _build_target_refresher,
     _create_motor,
     _load_pid_config,
     _wire_robot_motors,
@@ -372,6 +373,82 @@ class TestWireRobotMotors:
 
         assert loop.target("lift_motor") is None
         assert manager.last_currents == (0, 0, 0, 0)
+
+
+class TestBuildTargetRefresher:
+    """自作モタドラのコマンドウォッチドッグ (500ms) 対策の配線。"""
+
+    def _wire(self) -> tuple:
+        config = _m3508_config()
+        config["motors"]["gripper"] = {
+            "driver": "generic",
+            "bus": "generic_bus",
+            "can_id": 1,
+        }
+        motors = {
+            "lift_motor": M3508Driver("lift_motor", can_id=1),
+            "gripper": GenericDriver("gripper", can_id=1),
+        }
+        manager = _StubCANManager()
+        seq = _DummySequence("main_hand")
+        _wire_robot_motors(
+            config,
+            manager,
+            motors,
+            seq,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+        return manager, motors, seq
+
+    def test_only_generic_motors_are_refreshed(self) -> None:
+        """M3508 は位置制御ループが 200Hz で送り続けるので再送対象ではない。"""
+        _, motors, seq = self._wire()
+
+        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
+
+        assert refresher is not None
+        assert refresher.motor_names == ("gripper",)
+
+    def test_none_without_generic_motors(self) -> None:
+        motors = {"lift_motor": M3508Driver("lift_motor", can_id=1)}
+        manager = _StubCANManager()
+        seq = _DummySequence("main_hand")
+        _wire_robot_motors(
+            _m3508_config(),
+            manager,
+            motors,
+            seq,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+
+        assert _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False) is None
+
+    async def test_estop_checker_blocks_resend(self) -> None:
+        """再送は停止指令を上書きする。緊急停止中は 1 通も出してはならない。"""
+        manager, motors, seq = self._wire()
+        flag = [False]
+        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: flag[0])
+        assert refresher is not None
+        await seq.motors.gripper.set_position(1.0)
+        manager.sent_by_motor.clear()
+
+        flag[0] = True
+        await refresher.step()
+
+        assert manager.sent_by_motor == []
+
+    async def test_resends_last_target(self) -> None:
+        manager, motors, seq = self._wire()
+        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
+        assert refresher is not None
+        await seq.motors.gripper.set_position(1.0)
+        manager.sent_by_motor.clear()
+
+        await refresher.step()
+
+        assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
 
 
 class TestServerEStopProperty:

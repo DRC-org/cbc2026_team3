@@ -8,6 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
 from lib.drivers.base import MotorDriver, MotorState
+from lib.health import BusHealth
 from lib.sequence.engine import Sequence, step
 from lib.server import RobotServer
 
@@ -269,5 +270,76 @@ class TestHealthCheckCommandTriggersBroadcast:
                 assert got_state_with_health, "health_check に対する state 配信が来なかった"
 
                 await ws.close()
+        finally:
+            bus.shutdown()
+
+
+class TestHealthComputationFailure:
+    """健全性計算が壊れたときに「正常」を出してはならない。
+
+    ここで OK に倒すと、監視系も操縦者も異常を検出する手段を丸ごと失う。
+    """
+
+    async def test_exception_is_reported_as_down(self) -> None:
+        server, mgr, _motor, bus = _build_server_with_motors()
+        try:
+
+            def _boom(**_kwargs):
+                raise RuntimeError("health 計算が壊れた")
+
+            mgr.health = _boom  # type: ignore[method-assign]
+
+            snap = server._compute_health("main_hand")
+
+            assert snap.overall is BusHealth.DOWN
+            assert snap.detail is not None
+        finally:
+            bus.shutdown()
+
+    async def test_exception_makes_endpoint_return_503(self) -> None:
+        server, mgr, _motor, bus = _build_server_with_motors()
+        try:
+
+            def _boom(**_kwargs):
+                raise RuntimeError("health 計算が壊れた")
+
+            mgr.health = _boom  # type: ignore[method-assign]
+            app = server.create_app()
+
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.get("/health")
+                assert resp.status == 503
+                data = await resp.json()
+                assert data["overall"] == "down"
+        finally:
+            bus.shutdown()
+
+    async def test_non_snapshot_return_is_reported_as_down(self) -> None:
+        """health() が HealthSnapshot 以外を返す構成は異常。黙って OK にしない。"""
+        server, mgr, _motor, bus = _build_server_with_motors()
+        try:
+            mgr.health = lambda **_kwargs: None  # type: ignore[method-assign, assignment]
+
+            snap = server._compute_health("main_hand")
+
+            assert snap.overall is BusHealth.DOWN
+            assert snap.detail is not None
+        finally:
+            bus.shutdown()
+
+    async def test_failure_detail_reaches_state_message(self) -> None:
+        """理由が残らないと、画面に出た DOWN の原因を操縦者が切り分けられない。"""
+        server, mgr, _motor, bus = _build_server_with_motors()
+        try:
+
+            def _boom(**_kwargs):
+                raise RuntimeError("health 計算が壊れた")
+
+            mgr.health = _boom  # type: ignore[method-assign]
+
+            state = server._build_state_message("main_hand")
+
+            assert state["health"]["overall"] == "down"
+            assert state["health"]["detail"]
         finally:
             bus.shutdown()

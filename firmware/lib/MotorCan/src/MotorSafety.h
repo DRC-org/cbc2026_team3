@@ -41,6 +41,13 @@ class MotorSafety {
     // 満了していれば true。ラッチはしないので、新しい feed() で自動的に復帰する。
     bool isExpired(uint32_t nowMs) const;
 
+    // 「一度でも指令を受けたうえで満了した」= 本物の CAN 通信途絶なら true。
+    // 起動直後の未受信（isExpired が true になる）と区別するために要る。
+    // 出力の可否は isExpired 側で判断し、こちらは FEEDBACK bit4 の報告にだけ使う。
+    bool isCommandLost(uint32_t nowMs) const;
+
+    bool hasEverBeenFed() const { return everFed_; }
+
     void setTimeoutMs(uint32_t timeoutMs) { timeoutMs_ = timeoutMs; }
     uint32_t timeoutMs() const { return timeoutMs_; }
 
@@ -50,6 +57,7 @@ class MotorSafety {
     bool isOutputAllowed(uint32_t nowMs) const { return !latched_ && !isExpired(nowMs); }
 
     // FEEDBACK Byte7 の bit3 / bit4 を返す（他のビットは呼び出し側で OR する）。
+    // bit4 は isCommandLost() に従うので、起動直後の未受信では立たない。
     uint8_t statusFlags(uint32_t nowMs) const;
 
    private:

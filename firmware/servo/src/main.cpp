@@ -121,7 +121,8 @@ static bool isChannelConfigured(uint8_t ch) {
 }
 
 // WATCHDOG_ENABLED=0 のときは満了しないものとして扱う（FEEDBACK の bit4 も立てない）。
-// PC 側の目標値定期再送が未実装のあいだの暫定運用のための逃げ道（仕様書 §5.1 / §8）。
+// PC 側の定期再送を用意できないベンチ確認のための逃げ道で、試合では有効のまま使う
+// （仕様書 §5.1 / §8）。
 static bool isWatchdogTripped(uint8_t ch, uint32_t nowMs) {
 #if WATCHDOG_ENABLED
     return g_safety[ch].isExpired(nowMs);
@@ -134,6 +135,20 @@ static bool isWatchdogTripped(uint8_t ch, uint32_t nowMs) {
 
 static bool isDriveAllowed(uint8_t ch, uint32_t nowMs) {
     return !g_safety[ch].isLatched() && !isWatchdogTripped(ch, nowMs);
+}
+
+// FEEDBACK bit4 は「CAN 通信が途絶した」ことの報告なので、指令をまだ 1 通も
+// 受けていない起動直後には立てない（出力は isWatchdogTripped 側で止めたまま）。
+// 立てると PC 側 check_safety_error() がセッティングタイムの動作確認を
+// 指令送信前に打ち切り、健全な基板の配線を疑わせる誤誘導になる。
+static bool isWatchdogReported(uint8_t ch, uint32_t nowMs) {
+#if WATCHDOG_ENABLED
+    return g_safety[ch].isCommandLost(nowMs);
+#else
+    (void)ch;
+    (void)nowMs;
+    return false;
+#endif
 }
 
 // サーボへのパルス出力はすべてこの関数を通す。
@@ -201,7 +216,7 @@ static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     if (g_safety[ch].isLatched()) {
         flags |= status_flag::kEStop;
     }
-    if (isWatchdogTripped(ch, nowMs)) {
+    if (isWatchdogReported(ch, nowMs)) {
         flags |= status_flag::kWatchdog;
     }
     if (g_motion[ch].isReached()) {

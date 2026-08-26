@@ -11,12 +11,15 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
+from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.base import ControlMode, MotorDriver, MotorState
 from lib.drivers.edulite05 import Edulite05Driver
+from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import MotorCheckResult
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence, step
+from lib.sequence.motors import MotorHandle
 from lib.server import RobotServer
 
 # ---------------------------------------------------------------------- #
@@ -837,3 +840,49 @@ class TestPositionLoopExclusion:
         server.add_robot("sub_hand", _DummySequence(), mgr)
 
         assert server._robots["sub_hand"].position_loops == []
+        assert server._robots["sub_hand"].target_refreshers == []
+
+
+class TestTargetRefreshExclusion:
+    """動作確認と自作モタドラ向け目標値再送の排他。
+
+    再送は「最後に送った目標値」を 20Hz で送り続ける。動作確認中に被せると
+    確認用の指令が打ち消され、健全なモータが FAILED と判定される。
+    """
+
+    def _refresher(self, mgr: CANManager) -> GenericTargetRefresher:
+        driver = GenericDriver("conveyor", can_id=9, control_type=ControlMode.DUTY)
+        handle = MotorHandle("conveyor", driver, mgr)
+        return GenericTargetRefresher([handle])
+
+    async def test_refresher_paused_during_motor_check(self) -> None:
+        server, mgr, _, bus = _build_server_with_motors(
+            bus_channel="vsrvchk_refresh_busy",
+            feed_immediately=False,
+            motor_check_per_motor_timeout_ms=2000.0,
+        )
+        refresher = self._refresher(mgr)
+        server._robots["main_hand"].target_refreshers = [refresher]
+        try:
+            assert await server._start_motor_check("main_hand") is True
+            runner = await _wait_for_running_runner(server, "main_hand")
+
+            assert refresher.is_paused is True
+
+            runner.abort()
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+        finally:
+            bus.shutdown()
+
+    async def test_refresher_resumed_after_motor_check(self) -> None:
+        """再開に失敗すると、以後コンベアが 500ms で止まる機体になる。"""
+        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_refresh_resume")
+        refresher = self._refresher(mgr)
+        server._robots["main_hand"].target_refreshers = [refresher]
+        try:
+            assert await server._start_motor_check("main_hand") is True
+            await _wait_until_idle(server, "main_hand", timeout=4.0)
+
+            assert refresher.is_paused is False
+        finally:
+            bus.shutdown()

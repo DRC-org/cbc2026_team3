@@ -199,15 +199,25 @@ class Edulite05Driver(MotorDriver):
         """待機時間を除いた起動フレーム。診断・互換用途。"""
         return [message for message, _delay in self.initialization_steps()]
 
-    def activation_steps(self) -> list[tuple[can.Message, float]]:
+    def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
         """現在値を目標に書いてから励磁する。
 
         本機は enable した瞬間に PARAM_LOC_REF (位置モード) へ追従を始めるため、
         目標を書かずに励磁するとアームが原点へ全速で飛ぶ。位置モードでは直前に
         受信したフィードバックの実測角を、それ以外のモードでは静止を意味する 0 を
         目標として書いてから enable する。
+
+        after_set_zero は「直前に set_zero を送った」経路向け。原点が付け替わった
+        後のフィードバックはまだ届いておらず、手元の実測角は旧原点基準のままなので、
+        保持目標に使うと原点の差分だけアームが動く。新原点そのものである 0 を書く。
+        起動時 (initialize_motors) と緊急停止復帰 (activate_motors) は set_zero を
+        挟まないか新しいフィードバックを待ってから来るため、既定は実測角のままでよい。
         """
-        hold = self._state.position if self.mode is ControlMode.POSITION else 0.0
+        hold = (
+            self._state.position
+            if self.mode is ControlMode.POSITION and not after_set_zero
+            else 0.0
+        )
         return [
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
@@ -260,8 +270,10 @@ class Edulite05Driver(MotorDriver):
         return self.fault_bits != Edulite05Fault.NONE
 
     _CHECK_DEFAULT_TOLERANCE_DEG = 1.0
+    # 本機の速度は rad/s だが、yaml の magnitude も操縦者への表示も共通単位の rpm で扱う
+    _RPM_TO_RAD_PER_S = 2.0 * math.pi / 60.0
     # 速度到達判定の許容差 5rpm (共通既定値) を本機のフィードバック単位 rad/s に換算した値
-    _CHECK_DEFAULT_TOLERANCE_RAD_PER_S = 5.0 * 2.0 * math.pi / 60.0
+    _CHECK_DEFAULT_TOLERANCE_RAD_PER_S = 5.0 * _RPM_TO_RAD_PER_S
 
     def default_tolerance(self, mode: ControlMode) -> float:
         # 本機のフィードバックは rad / rad/s なので、deg / rpm 基準の共通既定値は使えない
@@ -272,22 +284,29 @@ class Edulite05Driver(MotorDriver):
         return super().default_tolerance(mode)
 
     def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
-        steps = [
-            (self.encode_disable(), 0.05),
-            (self.encode_run_mode(Edulite05RunMode.POSITION), 0.05),
-            (self.encode_write_param_float(self.PARAM_LIMIT_SPD, self.limit_speed), 0.05),
-            (self.encode_write_param_float(self.PARAM_LIMIT_CUR, self.limit_current), 0.05),
-            (self.encode_write_param_float(self.PARAM_LOC_KP, self.position_kp), 0.05),
-        ]
-        if self.set_zero_on_start:
-            steps.append((self.encode_set_zero(), 0.2))
-        steps.append((self.encode_enable(), 0.1))
-        return steps
+        """設定 → 保持目標 → 励磁。起動経路と同じ手順をそのまま合成する。
+
+        励磁手順をここに書き写すと、片方だけ直したときに「保持目標を書かずに
+        enable してアームが原点へ飛ぶ」が動作確認経路だけで再発する。
+        run_mode も設定値のまま使う。ここで POSITION を強制すると、動作確認後に
+        戻す経路が無いぶん速度指令で運用する機体の run_mode が書き換わったまま残る。
+        """
+        return self.initialization_steps() + self.activation_steps(
+            after_set_zero=self.set_zero_on_start
+        )
 
     def prepare_check(self) -> list[can.Message]:
         return [message for message, _delay in self.prepare_check_steps()]
 
     def check_safety_error(self) -> str | None:
+        # 電流モードの指令は [A]、本機のフィードバックはトルク [Nm] で次元が違うため、
+        # 指令に追従したかを判定する術がない。「動かなかった」と区別できない合否を
+        # 出すより、動作確認の対象外だと明示して打ち切る。
+        if self.mode is ControlMode.CURRENT:
+            return (
+                "EDULITE 05 電流モードは動作確認の対象外 "
+                "(指令[A] とフィードバック[Nm] は次元が違う)"
+            )
         if self.is_fault():
             return f"EDULITE 05 fault=0x{int(self.fault_bits):02X}"
         if self._state.temperature >= 60.0:
@@ -301,13 +320,29 @@ class Edulite05Driver(MotorDriver):
         return self.encode_disable()
 
     def check_command(self, *, magnitude: float = 5.0) -> tuple[can.Message, dict]:
+        # 動作確認は運用と同じ run_mode のまま行う。位置設定の機体へ速度指令を送っても
+        # 無反応にしかならず、逆に run_mode を書き換えると運用時の指令が効かなくなる。
+        if self.mode is ControlMode.VELOCITY:
+            # magnitude は共通単位の rpm。encode_target と同じクランプを context にも
+            # 効かせないと、limit_speed で頭打ちになった瞬間に必ず不合格になる。
+            target = self._clamp(
+                magnitude * self._RPM_TO_RAD_PER_S, -self.limit_speed, self.limit_speed
+            )
+            return self.encode_target(ControlMode.VELOCITY, target), {
+                "target": target,
+                "magnitude_rpm": float(magnitude),
+                "mode": ControlMode.VELOCITY.value,
+            }
+        if self.mode is not ControlMode.POSITION:
+            raise ValueError(f"Edulite05Driver は {self.mode} モードの動作確認に対応していません")
+
         target = self._clamp(
             self._state.position + math.radians(magnitude), self.POS_MIN, self.POS_MAX
         )
         return self.encode_target(ControlMode.POSITION, target), {
             "target": target,
             "magnitude_deg": float(magnitude),
-            "mode": "position",
+            "mode": ControlMode.POSITION.value,
         }
 
     def evaluate_check_result(
@@ -318,9 +353,20 @@ class Edulite05Driver(MotorDriver):
         tolerance: float | None = None,
     ) -> tuple[bool, str | None]:
         target = context["target"]
-        tol = (
-            tolerance if tolerance is not None else math.radians(self._CHECK_DEFAULT_TOLERANCE_DEG)
-        )
+        # context の必須キーは target だけ (base の規約)。mode 無しは位置として扱う
+        if context.get("mode") == ControlMode.VELOCITY.value:
+            tol = (
+                tolerance if tolerance is not None else self.default_tolerance(ControlMode.VELOCITY)
+            )
+            if abs(state.velocity - target) <= tol:
+                return True, None
+            # 内部単位は rad/s だが、yaml の magnitude と揃わないと操縦者が原因を追えない
+            return False, (
+                f"目標 {target / self._RPM_TO_RAD_PER_S:.1f}rpm, "
+                f"観測 {state.velocity / self._RPM_TO_RAD_PER_S:.1f}rpm"
+            )
+
+        tol = tolerance if tolerance is not None else self.default_tolerance(ControlMode.POSITION)
         if abs(state.position - target) <= tol:
             return True, None
         return False, (
@@ -328,4 +374,6 @@ class Edulite05Driver(MotorDriver):
         )
 
     def reset_after_check(self) -> can.Message:
+        # prepare_check_steps が run_mode を設定値のまま使うので、戻す作業は無く
+        # 無励磁化だけで原状に復帰する
         return self.encode_disable()

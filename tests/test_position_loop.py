@@ -211,6 +211,54 @@ class TestEmergencyStop:
         assert fx.manager.last_currents[0] == 1000
 
 
+class TestSendStopFrame:
+    """緊急停止の停止指令がループの生存に依存しないこと。"""
+
+    async def test_sends_all_zero_slots(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.CURRENT, 3000.0)
+        await fx.loop.set_target("tilt", ControlMode.CURRENT, -3000.0)
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_works_without_running_loop(self) -> None:
+        fx = _Fixture(kp=100.0)
+        assert fx.loop.is_running is False
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_sends_even_while_paused(self) -> None:
+        """動作確認中でも緊急停止の 0 電流は通す (むしろ上書きさせたい)。"""
+        fx = _Fixture(kp=100.0)
+        await fx.loop.pause(reason="動作確認")
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_clears_targets(self) -> None:
+        """目標が残ると、ループが動き出した瞬間に再び電流が出る。"""
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.loop.target("lift") is None
+        assert fx.loop.mode("lift") is None
+
+    async def test_send_failure_propagates(self) -> None:
+        """送信できなかったことは呼び出し側 (サーバー) が知る必要がある。"""
+        fx = _Fixture(kp=100.0)
+        fx.manager.fail_sends = 1
+
+        with pytest.raises(can.CanError):
+            await fx.loop.send_stop_frame()
+
+
 class TestFeedbackTimeout:
     async def test_zero_current_when_feedback_stale(self) -> None:
         fx = _Fixture(kp=100.0, feedback_timeout_ms=500.0)
@@ -700,6 +748,28 @@ class TestSyncDeviation:
         assert fx.loop.sync_violations == frozenset()
         assert fx.manager.last_currents[0] == pytest.approx(1500, abs=5)
         assert fx.manager.last_currents[1] == pytest.approx(-1500, abs=5)
+
+    async def test_reset_does_not_disable_detection(self) -> None:
+        """解除は「監視を再び有効にする」であって「ずれを無かったことにする」ではない。
+
+        機構が直っていないまま解除された場合、次の周期で再びラッチして電流 0 に
+        戻らなければ、操縦者は復帰したつもりで左右直結の軸を押し込むことになる。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+        fx.loop.reset_sync_violation()
+        # ずれたまま次の周期へ (人間は機構を直していない)
+        await fx.tick()
+
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+        assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_reset_sync_violation_by_name(self) -> None:
         fx = _Fixture(kp=100.0)

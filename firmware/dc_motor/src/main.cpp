@@ -129,13 +129,26 @@ static void writePwm(float duty) {
     }
 }
 
+// WATCHDOG_ENABLED=0 のときは満了しないものとして扱う（FEEDBACK の bit4 も立てない）。
+// PC 側の定期再送を用意できないベンチ確認のための逃げ道で、試合では有効のまま使う
+// （仕様書 §5.1 / §8）。
+// 同名のフラグがサーボ基板でだけ効く状態を作らないよう、servo/src/main.cpp と同型にしてある。
+static bool isWatchdogTripped(uint32_t nowMs) {
+#if WATCHDOG_ENABLED
+    return g_safety.isExpired(nowMs);
+#else
+    (void)nowMs;
+    return false;
+#endif
+}
+
 static bool isDriveAllowed(uint32_t nowMs) {
     // 仕様書 §2.2: DIP 未設定の基板は駆動しない。
     // 設定ミスで意図しないアクチュエータが動くより、動かない方が安全。
     if (g_deviceId == kDeviceIdUnconfigured) {
         return false;
     }
-    return g_safety.isOutputAllowed(nowMs);
+    return !g_safety.isLatched() && !isWatchdogTripped(nowMs);
 }
 
 static void applyOutput(float duty, uint32_t nowMs) {
@@ -179,11 +192,18 @@ static void updateSensors(float dtSec) {
     g_velocityRpm = 0.0f;
 #endif
 
+#if HAS_CURRENT_SENSE
     const int32_t raw = analogRead(kPinSens);
     const float sensed =
         (static_cast<float>(raw) - static_cast<float>(kCurrentSenseZeroCount)) *
         kCurrentSenseMaPerCount;
     g_currentMa += 0.2f * (sensed - g_currentMa);
+#else
+    // センス未実装の基板では SENS ピンが浮き、ADC の振れがそのまま
+    // (raw - zero) * mAPerCount [mA] として過電流しきい値を跨いで誤発火する。
+    // 仕様書 §3.2 のとおり、センサを持たない項目は 0 を送る。
+    g_currentMa = 0.0f;
+#endif
 }
 
 // ===========================================================================
@@ -239,15 +259,23 @@ static void switchMode(ControlType mode) {
 // ===========================================================================
 
 static uint8_t buildStatusFlags(uint32_t nowMs) {
+    // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
+    // bit4 は指令を一度でも受けた後の満了でのみ立つので、起動直後には立たない。
     uint8_t flags = g_safety.statusFlags(nowMs);
+#if !WATCHDOG_ENABLED
+    // 無効化した基板ではウォッチドッグで止まらないのだから、作動中とも報告しない。
+    flags &= static_cast<uint8_t>(~status_flag::kWatchdog);
+#endif
     if (g_reached) {
         flags |= status_flag::kReached;
     }
+#if HAS_CURRENT_SENSE
     const float absCurrent = g_currentMa < 0.0f ? -g_currentMa : g_currentMa;
     if (absCurrent >= g_overcurrentThresholdMa) {
         flags |= status_flag::kOvercurrent;
     }
-    // 温度センサが無いので過熱ビットは立てない（仕様書 §7 の既知の制限）。
+#endif
+    // 温度センサが無いので過熱ビットは立てない（仕様書 §8 の既知の制限）。
     if (g_deviceId == kDeviceIdUnconfigured) {
         flags |= status_flag::kDeviceIdUnconfigured;
     }

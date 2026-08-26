@@ -359,9 +359,32 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 | `_build_position_pid(motor_name, motor_cfg)` | `make_position_pid()` + 出力レンジの絞り込み |
 | `_build_position_loops(...)` | M3508 が居る**バスごとに 1 つ** `M3508PositionLoop` を生成 |
 | `_wire_robot_motors(...)` | `build_motor_group()` → `Sequence.bind_motors()`。生成したループを返す |
+| `_build_target_refresher(...)` | generic ドライバのモータだけを集めた `GenericTargetRefresher` を生成 |
 
-生成したループは `server.add_robot(robot_name, seq, can_manager, position_loops=loops)` で
-`RobotServer` にも渡す（動作確認との 0x200 排他に使う）。
+生成した部品は `server.add_robot(robot_name, seq, can_manager, position_loops=..., sync_monitors=...,
+target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
+①動作確認との排他（0x200 / SET_TARGET の奪い合い）②緊急停止解除でのラッチ解除
+③緊急停止時の保持目標の破棄 ④安全ループの生死配信 にこれらを使う。
+**渡し忘れるとその機能が丸ごと無効になる**（一度 `SyncMonitor` を渡していなかったため、
+ずれを検知した軸を復帰させる手段がプロセス再起動しか無い状態になっていた）。
+
+#### 目標値再送（`lib/control/target_refresh.py`）
+
+自作モタドラのファームは 500ms 自分宛の `SET_TARGET` が来ないと出力を止める
+（`docs/motor_driver_can_protocol.md` §5.1）。PC 側は目標値が変わったときにしか送らないため、
+再送タスクが無いとコンベアは回し始めて 500ms で止まる。
+
+- 周期 20Hz（猶予 500ms の 1/10。9 回連続で落ちても出力は止まらない）
+- 対象は generic ドライバのモータのみ。M3508 は位置制御ループが 200Hz で送り続け、
+  EDULITE はドライバ内蔵の位置ループが目標を保持するため不要
+- 緊急停止中は 1 通も送らない（再送は最後の目標値なので停止指令を上書きしてしまう）
+- 目標が一度も設定されていないモータへは送らない（起動直後の暴発防止）
+- 緊急停止時は保持した目標ごと捨てる（`clear_targets()`）。残すと解除した瞬間に
+  再送が走り、操縦者が何も操作していないのにコンベアが回り出す
+- 動作確認中は `pause()`。同じモータへ古い目標を 20Hz で被せると確認用の指令が
+  打ち消され、健全なモータが FAILED になる
+- 終了時に停止指令は送らない。指令が途切れればファーム側のウォッチドッグが止めるので、
+  PC が落ちた場合と経路を 1 本に保つ
 
 **緊急停止インターロック**: `RobotServer.e_stop_active`（読み取り専用プロパティ）を参照する
 チェッカを、`build_motor_group(is_estop_active=...)` と `M3508PositionLoop(is_estop_active=...)`
@@ -369,9 +392,10 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 既に走っている PID ループの出力を電流 0 に落とす。片方でも渡し忘れると、緊急停止中に
 実行中ステップがモータを動かせてしまう。
 
-**ライフサイクル**: `CANManager.run()` 後に `loop.start()`、`finally` で `await loop.stop()` →
-`CANManager.shutdown()` の順。例外・Ctrl-C のどちらで抜けてもループを止める（止まらないと
-電流指令が出続ける）。
+**ライフサイクル**: `CANManager.run()` 後に `loop.start()` / `monitor.start()` /
+`refresher.start()`、`finally` で `await loop.stop()` → `await refresher.stop()` →
+`await monitor.stop()` → `CANManager.shutdown()` の順。例外・Ctrl-C のどちらで抜けても
+周期タスクを止める（止まらないと電流指令が出続ける）。
 
 **PID ゲインの config スキーマ**（`config/main_hand.yaml` の `motors.lift_motor.pid`）:
 
@@ -647,9 +671,31 @@ cbc2026_team3_central/
     "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0 }
   },
   "e_stop_active": false,
-  "health": { /* HealthSnapshot */ }
+  "health": { /* HealthSnapshot */ },
+  "safety": {
+    "sync_violations": ["y_axis"],
+    "loops_running": true,
+    "monitors_running": true,
+    "position_loops": [
+      { "bus": "m3508_bus", "running": true, "paused": false, "sync_violations": ["y_axis"] }
+    ],
+    "sync_monitors": [
+      { "axes": ["y_axis", "rotate"], "running": true, "violated": [] }
+    ]
+  }
 }
 ```
+
+`safety` は安全機構そのものの状態を運ぶ。`sync_violations` はラッチ中の軸名
+（位置制御ループと `SyncMonitor` の和集合）で、どの軸が電流 0 に固定されているかを
+操縦者に示す。`loops_running` / `monitors_running` は 200Hz の位置制御と 50Hz の同期監視が
+生きているかで、**これを配信しないと安全ループの死亡に誰も気付けない**（WebSocket は
+繋がったままでモータ状態も届き続けるため、画面は正常に見える）。判定は `_safety_state`
+に一本化し、UI 側で組み立て直さない。
+
+`health` の `overall` は健全性計算そのものが失敗したときも `down` になり、理由が
+`detail` に入る。**ここで `ok` に倒してはならない** — 異常の有無が分からない状態は
+安全側では「異常」であって「正常」ではない。
 
 緊急停止状態は定期配信の `state` に載るほか、切り替わった瞬間に専用イベントを push する
 （`state` の配信周期を待つと EMG STOP の表示が遅れるため）。WS 接続直後にも、
@@ -778,6 +824,27 @@ setup ⇄ ready → match → finished → setup
 
 `set_param` を載せる理由: 現状はログ出力のみだが、実装が入ると緊急停止中にモータの
 制御パラメータを書き換えられてしまう（停止状態の前提が崩れる）。
+
+#### 緊急停止で行うこと・解除で行うこと
+
+| 発動 (`activate_e_stop`) | 解除 (`e_stop_release`) |
+|---|---|
+| 動作確認を abort | 同期ずれラッチを解除（`_reset_sync_latches`） |
+| M3508 へ全スロット 0 の電流指令（`send_stop_frame`）| `_e_stop_active` を落として配信 |
+| ドライバ固有の停止フレーム（EDULITE）| EDULITE の再励磁（`activate_motors`）|
+| 全バスへ `0x7FF` ブロードキャスト（自作モタドラ）| |
+| 目標値再送の保持目標を破棄（`clear_targets`）| |
+| 全シーケンスを停止（保留中の開始要求も破棄）| |
+
+M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_message()` は EDULITE しか
+持たず `0x7FF` は自作モタドラしか解釈しないため、これが無いと左右直結で最も危険な Y 軸だけ
+「位置制御ループが生きて電流 0 を出し続けてくれること」に停止を委ねることになる。
+
+解除で同期ずれラッチを外すのは「再び監視を有効にする」ためであり「ずれを無かったことに
+する」ためではない。**解除後もずれが残っていれば双方が再び検知して緊急停止へ戻る**
+（位置制御ループは次の周期で再ラッチ、`SyncMonitor` は再発報）。逆に解除経路が
+どこにも無いと、一度検知した軸は電流 0 のまま復帰できず、`SyncMonitor` は二度と
+発報しないのに UI は「復帰した」と表示する。
 
 ### 試合開始の挙動
 

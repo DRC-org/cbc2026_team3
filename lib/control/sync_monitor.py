@@ -145,7 +145,13 @@ class SyncMonitor:
         return self._task is not None and not self._task.done()
 
     def reset(self) -> None:
-        """ラッチと連続カウントを解除する (緊急停止の解除時に呼ぶ)。"""
+        """ラッチと連続カウントを解除する。
+
+        通す経路は操縦者の緊急停止解除 (``RobotServer._reset_sync_latches``) だけ。
+        これを通らないと軸は ``_violated`` に入ったまま二度と発報せず、以後どれだけ
+        ずれても誰も止められない。解除しても判定は無効化されないため、ずれが
+        残っていれば次のサンプルで再び発報する。
+        """
         self._counts.clear()
         self._violated.clear()
 

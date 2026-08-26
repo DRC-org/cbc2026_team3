@@ -13,6 +13,8 @@ from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop
+from lib.control.sync_monitor import SyncMonitor
+from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
@@ -85,6 +87,12 @@ class RobotContext:
     # そのロボットの M3508 位置制御ループ (バスごと 1 本)。動作確認中は
     # 0x200 フレームの奪い合いになるため一時停止させる
     position_loops: list[M3508PositionLoop] = field(default_factory=list)
+    # そのロボットの同期監視。ラッチの解除経路がサーバー側に無いと、一度ずれを
+    # 検知した軸は二度と発報せず、操縦者は無監視のまま機体を動かすことになる
+    sync_monitors: list[SyncMonitor] = field(default_factory=list)
+    # 自作モタドラ向けの目標値再送。動作確認中は確認用の指令を打ち消すため止め、
+    # 緊急停止時は保持した目標を捨てる (解除だけで動き出させない)
+    target_refreshers: list[GenericTargetRefresher] = field(default_factory=list)
 
 
 class RobotServer:
@@ -160,11 +168,15 @@ class RobotServer:
         sequence: Sequence,
         can_manager: CANManager,
         position_loops: list[M3508PositionLoop] | None = None,
+        sync_monitors: list[SyncMonitor] | None = None,
+        target_refreshers: list[GenericTargetRefresher] | None = None,
     ) -> None:
         self._robots[name] = RobotContext(
             sequence=sequence,
             can_manager=can_manager,
             position_loops=list(position_loops or []),
+            sync_monitors=list(sync_monitors or []),
+            target_refreshers=list(target_refreshers or []),
         )
         sequence.set_court(self.match.court)
 
@@ -345,6 +357,10 @@ class RobotServer:
 
         elif cmd_type == "e_stop_release":
             logger.info("緊急停止解除コマンド受信")
+            # フラグを落とす前にラッチを外す。逆順だと「復帰した」と配信した後にも
+            # ラッチが残る周期が生まれ、その間 y_axis だけが動かない機体になる。
+            # 停止中は電流 0 が維持されるので、先に外しても機体は動き出さない
+            self._reset_sync_latches()
             self._e_stop_active = False
             await self._broadcast_e_stop_state()
             await self._reactivate_motors()
@@ -492,6 +508,17 @@ class RobotServer:
         """
         e_stop_msg = GenericDriver.encode_e_stop()
         for name, ctx in self._robots.items():
+            # 最初に M3508 を止める。左右直結の Y 軸は押し合ったまま残ると即座に
+            # 機構を壊すうえ、ドライバ固有の停止フレームも 0x7FF も効かない
+            for loop in ctx.position_loops:
+                try:
+                    await loop.send_stop_frame()
+                except Exception:
+                    logger.exception(
+                        "E-STOP M3508 停止フレーム送信失敗: robot=%s bus=%s",
+                        name,
+                        loop.bus_name,
+                    )
             for motor_name, motor in ctx.can_manager._motors.items():
                 driver_stop = motor.emergency_stop_message()
                 if driver_stop is None:
@@ -513,7 +540,65 @@ class RobotServer:
                         name,
                         bus_name,
                     )
+            # 目標を残すと、解除した瞬間に再送が走って操縦者の操作なしに動き出す
+            for refresher in ctx.target_refreshers:
+                refresher.clear_targets()
             logger.info("E-STOP 送信試行完了: %s", name)
+
+    def _reset_sync_latches(self) -> None:
+        """同期ずれのラッチを解除し、監視を再び有効な状態へ戻す。
+
+        解除は「ずれを無かったことにする」操作ではない。位置制御ループ側の
+        ラッチは電流 0 を維持し続け、``SyncMonitor`` 側のラッチは同じ軸で二度と
+        発報しないという意味を持つため、解除経路が無いままだと「操縦者は復帰した
+        つもりで、実際には y_axis が動かず rotate が無監視で回る」状態になる。
+        解除後もずれが残っていれば双方が再び検知して緊急停止へ戻すので、
+        ここで外して機構の異常が隠れることはない。
+        """
+        for name, ctx in self._robots.items():
+            for loop in ctx.position_loops:
+                loop.reset_sync_violation()
+            for monitor in ctx.sync_monitors:
+                monitor.reset()
+            logger.info("同期ずれラッチを解除: robot=%s", name)
+
+    def _safety_state(self, robot_name: str) -> dict[str, object]:
+        """安全機構の状態 (ラッチ中の軸 + 保護ループの生死)。
+
+        ラッチ中の軸が分からないと操縦者は復旧手順を選べず、200Hz の位置制御と
+        50Hz の同期監視が死んだことは配信しない限り誰にも気付けない
+        (WS は繋がったままで、モータ状態も届き続けるため画面は正常に見える)。
+        判定は UI 側で組み立て直させずここに一本化する。
+        """
+        ctx = self._robots[robot_name]
+        violations: set[str] = set()
+        for loop in ctx.position_loops:
+            violations |= set(loop.sync_violations)
+        for monitor in ctx.sync_monitors:
+            violations |= set(monitor.violated)
+
+        return {
+            "sync_violations": sorted(violations),
+            "loops_running": all(loop.is_running for loop in ctx.position_loops),
+            "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
+            "position_loops": [
+                {
+                    "bus": loop.bus_name,
+                    "running": loop.is_running,
+                    "paused": loop.is_paused,
+                    "sync_violations": sorted(loop.sync_violations),
+                }
+                for loop in ctx.position_loops
+            ],
+            "sync_monitors": [
+                {
+                    "axes": list(monitor.group_names),
+                    "running": monitor.is_running,
+                    "violated": sorted(monitor.violated),
+                }
+                for monitor in ctx.sync_monitors
+            ],
+        }
 
     async def _reactivate_motors(self) -> None:
         """緊急停止解除後にモータの励磁を戻す。
@@ -699,15 +784,19 @@ class RobotServer:
 
         self._motor_check_runners[robot_name] = runner
 
-        # 動作確認は C620 の電流指令フレーム (0x200) を自前で送るため、同一バスの
-        # 位置制御ループが走っていると互いのフレームを上書きし合う。ループ側を
-        # 黙らせて排他を取る。M3508 が居ないロボットでは空リストになる。
-        loops = list(ctx.position_loops)
+        # 動作確認はモータへ自前の指令を出すため、周期的に指令を出している側と
+        # 指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
+        # 目標値再送とは同じモータの SET_TARGET を奪い合うので、どちらも黙らせて
+        # 排他を取る。対象が居ないロボットでは空リストになる。
+        pausables: list[M3508PositionLoop | GenericTargetRefresher] = [
+            *ctx.position_loops,
+            *ctx.target_refreshers,
+        ]
 
         async def _run() -> None:
             try:
-                for loop in loops:
-                    await loop.pause(reason=f"{robot_name} 動作確認")
+                for pausable in pausables:
+                    await pausable.pause(reason=f"{robot_name} 動作確認")
                 snapshot = await runner.run()
                 self._motor_check_last[robot_name] = snapshot
                 await self._broadcast_motor_check_done(robot_name, snapshot)
@@ -716,9 +805,10 @@ class RobotServer:
                 await self._broadcast_motor_check_error(robot_name, str(exc))
             finally:
                 # 中断・例外・キャンセルのいずれで抜けても必ず復帰させる。
-                # 止まったままだと昇降軸が保持電流を失って落下する
-                for loop in loops:
-                    loop.resume()
+                # 止まったままだと昇降軸が保持電流を失って落下し、
+                # 再送が止まったままだとコンベアが 500ms で動かなくなる
+                for pausable in pausables:
+                    pausable.resume()
                 self._motor_check_tasks.pop(robot_name, None)
                 # runners からは敢えて消さない: GET /motor_check/last の補助情報として
                 # 直近 runner を参照したい場合に備える。次回 start で上書きされる。
@@ -817,8 +907,10 @@ class RobotServer:
     def _compute_health(self, robot_name: str) -> HealthSnapshot:
         """指定ロボットの CANManager から HealthSnapshot を組み立てる。
 
-        テスト等で MagicMock(spec=CANManager) を渡された場合 health() が
-        HealthSnapshot を返さないため、防御的に空スナップショットへフォールバックする。
+        計算そのものが失敗したときは必ず DOWN に倒す。ここで OK を返すと、
+        健全性判定が壊れた瞬間に画面と /health が「正常」を主張し、監視系も
+        操縦者も異常を検出する手段を丸ごと失う (異常の有無が分からない状態は
+        安全側では「異常」であって「正常」ではない)。
         """
         ctx = self._robots[robot_name]
         try:
@@ -828,12 +920,28 @@ class RobotServer:
                 temp_critical_c=float(self._health_thresholds["temp_critical_c"]),
                 tx_error_threshold=int(self._health_thresholds["tx_error_threshold"]),
             )
-        except Exception:  # pragma: no cover - 防御的フォールバック
-            snap = None
+        except Exception as exc:
+            logger.exception("ヘルス計算に失敗: robot=%s", robot_name)
+            return self._health_unknown(f"ヘルス計算に失敗しました: {exc}")
 
         if not isinstance(snap, HealthSnapshot):
-            return HealthSnapshot(timestamp=time.time(), overall=BusHealth.OK)
+            logger.error(
+                "ヘルス計算が HealthSnapshot 以外を返しました: robot=%s type=%s",
+                robot_name,
+                type(snap).__name__,
+            )
+            return self._health_unknown(
+                f"ヘルス計算が不正な戻り値を返しました ({type(snap).__name__})"
+            )
         return snap
+
+    def _health_unknown(self, detail: str) -> HealthSnapshot:
+        """健全性を判定できなかったことを表すスナップショット。
+
+        バス・モータの一覧は空のままにする。判定できていない以上、個々の状態を
+        でっち上げる方が誤解を招く。overall と detail だけで「判定不能」を伝える。
+        """
+        return HealthSnapshot(timestamp=time.time(), overall=BusHealth.DOWN, detail=detail)
 
     def _diff_health(
         self,
@@ -972,6 +1080,7 @@ class RobotServer:
             "motors": motors,
             "e_stop_active": self.e_stop_active,
             "health": snapshot_dict,
+            "safety": self._safety_state(robot_name),
         }
 
     def _dry_run_motor_state(self, robot_name: str, motor_name: str) -> dict:

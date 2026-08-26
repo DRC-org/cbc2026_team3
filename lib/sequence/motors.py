@@ -108,6 +108,30 @@ class MotorHandle:
         self._mode = mode
         self._target = value
 
+    async def resend_target(self) -> bool:
+        """最後に送った目標値をもう一度送る。送ったら True。
+
+        自作モータドライバのファームは 500ms 自分宛の SET_TARGET が来ないと出力を
+        止める (docs/motor_driver_can_protocol.md §5.1)。``set_target`` は値が
+        変わったときにしか送らないため、この再送が無いとコンベアは回し始めて
+        500ms で止まる。
+
+        目標が一度も設定されていなければ何も送らない (起動直後に意図しない駆動を
+        作らない)。緊急停止中も送らない — 例外にせず黙って見送るのは、これが
+        周期タスクからの呼び出しで、停止中は「送らないことが正常」だからである。
+        """
+        if self._target is None or self._mode is None:
+            return False
+        if self._is_estop_active is not None and self._is_estop_active():
+            return False
+
+        if self._target_sink is not None:
+            await self._target_sink(self._mode, self._target)
+        else:
+            msg = self._driver.encode_target(self._mode, self._target)
+            await self._can_manager.send(self._name, msg)
+        return True
+
     def clear_target(self) -> None:
         """到達待ちの対象から外す。"""
         self._target = None

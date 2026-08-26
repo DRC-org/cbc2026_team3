@@ -191,7 +191,7 @@ static void test_encode_feedback_layout() {
     TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[0] | (out[1] << 8)));
     TEST_ASSERT_EQUAL_INT16(-1500, static_cast<int16_t>(out[2] | (out[3] << 8)));
     TEST_ASSERT_EQUAL_INT16(2500, static_cast<int16_t>(out[4] | (out[5] << 8)));
-    TEST_ASSERT_EQUAL_UINT8(0, out[6]);  // DC モタドラは温度センサ非搭載（§7）
+    TEST_ASSERT_EQUAL_UINT8(0, out[6]);  // DC モタドラは温度センサ非搭載（§8）
     TEST_ASSERT_EQUAL_UINT8(0x09, out[7]);
 }
 
@@ -337,6 +337,52 @@ static void test_status_flags_are_reported() {
                             safety.statusFlags(600));
 }
 
+// 起動直後は出力を止めるが、FEEDBACK bit4（ウォッチドッグ作動中）は立てない。
+// bit4 は「CAN 通信が途絶した」ことの報告であり、指令をまだ 1 通も送っていない
+// 状態はそれに当たらない。立ててしまうと PC 側 check_safety_error() が
+// セッティングタイムの動作確認を指令送信前に FAILED で打ち切り、
+// 健全な基板に対して配線を疑わせる誤誘導になる。
+static void test_status_flags_omit_watchdog_before_first_feed() {
+    MotorSafety safety(500);
+
+    // 出力禁止側の判定は従来どおり満了扱いのまま（仕様書 §5.4）
+    TEST_ASSERT_TRUE(safety.isExpired(0));
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(0));
+
+    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(0));
+    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(100000));
+
+    // 起動直後でも緊急停止ラッチ（bit3）はそのまま報告する
+    safety.stop();
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, safety.statusFlags(100000));
+}
+
+// 一度でも指令を受けた後の満了は本物の通信途絶なので bit4 を立てる
+static void test_status_flags_report_watchdog_after_first_feed() {
+    MotorSafety safety(500);
+    safety.feed(1000);
+    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(1499));
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kWatchdog, safety.statusFlags(1500));
+
+    // 通信が復旧したら下りる（ラッチしない。仕様書 §5.1）
+    safety.feed(2000);
+    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(2100));
+}
+
+// 「起動直後で未受信」と「受信後に途絶」を呼び出し側が区別できること。
+// サーボ側 main.cpp は bit3/bit4 を手書きで組み立てているため、
+// 同じ判定を共有できないと基板ごとに挙動がずれる。
+static void test_command_lost_separates_startup_from_dropout() {
+    MotorSafety safety(500);
+    TEST_ASSERT_FALSE(safety.hasEverBeenFed());
+    TEST_ASSERT_FALSE(safety.isCommandLost(100000));
+
+    safety.feed(1000);
+    TEST_ASSERT_TRUE(safety.hasEverBeenFed());
+    TEST_ASSERT_FALSE(safety.isCommandLost(1400));
+    TEST_ASSERT_TRUE(safety.isCommandLost(1500));
+}
+
 // --------------------------------------------------------------------------
 // §3.3 モード切替時の PID リセット
 // --------------------------------------------------------------------------
@@ -405,6 +451,9 @@ int main(int, char **) {
     RUN_TEST(test_e_stop_frame_clears_only_with_magic);
     RUN_TEST(test_safety_output_permission);
     RUN_TEST(test_status_flags_are_reported);
+    RUN_TEST(test_status_flags_omit_watchdog_before_first_feed);
+    RUN_TEST(test_status_flags_report_watchdog_after_first_feed);
+    RUN_TEST(test_command_lost_separates_startup_from_dropout);
     RUN_TEST(test_pid_proportional_only);
     RUN_TEST(test_pid_no_derivative_kick_on_first_update);
     RUN_TEST(test_pid_reset_clears_integral);

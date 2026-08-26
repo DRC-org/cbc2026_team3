@@ -100,6 +100,10 @@ class HealthSnapshot:
     overall: BusHealth
     buses: list[BusHealthInfo] = field(default_factory=list)
     motors: list[MotorHealthInfo] = field(default_factory=list)
+    #: 判定そのものが行えなかった理由。バス・モータの一覧が空の DOWN は
+    #: 「全部壊れている」のか「健全性を計算できなかった」のか区別が付かないため、
+    #: 後者だけがここに理由を持つ
+    detail: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +111,7 @@ class HealthSnapshot:
             "overall": self.overall.value,
             "buses": [b.to_dict() for b in self.buses],
             "motors": [m.to_dict() for m in self.motors],
+            "detail": self.detail,
         }
 
     @staticmethod

@@ -14,13 +14,14 @@ from lib.can_manager import CANManager
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.base import ControlMode, MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
-from lib.sequence.motors import EStopChecker, TargetSink, build_motor_group
+from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
 
@@ -525,6 +526,26 @@ def _wire_robot_motors(
     return list(loops.values())
 
 
+def _build_target_refresher(
+    group: MotorGroup,
+    motors: dict[str, MotorDriver],
+    *,
+    is_estop_active: EStopChecker,
+) -> GenericTargetRefresher | None:
+    """自作モタドラのモータだけを集めた目標値再送タスクを作る (居なければ None)。
+
+    自作モタドラのファームは 500ms 自分宛の SET_TARGET が来ないと出力を止める
+    (docs/motor_driver_can_protocol.md §5.1)。PC 側は目標値が変わったときにしか
+    送らないため、再送が無いとコンベアは回し始めて 500ms で止まる。
+    M3508 は位置制御ループが 200Hz で電流指令を送り続けるので対象外、EDULITE は
+    ドライバ内蔵の位置ループが目標を保持するので対象外。
+    """
+    handles = [group[name] for name, driver in motors.items() if isinstance(driver, GenericDriver)]
+    if not handles:
+        return None
+    return GenericTargetRefresher(handles, is_estop_active=is_estop_active)
+
+
 def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver]) -> list[SyncGroup]:
     """位置定数のペア軸から同期監視グループを組み立てる。
 
@@ -680,6 +701,7 @@ async def main() -> None:
     can_managers: list[CANManager] = []
     position_loops: list[M3508PositionLoop] = []
     sync_monitors: list[SyncMonitor] = []
+    target_refreshers: list[GenericTargetRefresher] = []
     # 同期ずれから起動した緊急停止タスクの強参照置き場 (GC で消えると停止しない)
     e_stop_tasks: set[asyncio.Task[None]] = set()
 
@@ -710,11 +732,22 @@ async def main() -> None:
         )
         position_loops.extend(loops)
 
+        # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと
+        # 500ms で出力が止まる (docs/motor_driver_can_protocol.md §5.1)
+        refresher = _build_target_refresher(
+            seq.motors,
+            motors,
+            is_estop_active=is_estop_active,
+        )
+        robot_refreshers = [refresher] if refresher is not None else []
+        target_refreshers.extend(robot_refreshers)
+
         # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
         sync_groups = _build_sync_groups(positions, motors)
         _attach_sync_groups(sync_groups, loops)
+        robot_monitors: list[SyncMonitor] = []
         if sync_groups:
-            sync_monitors.append(
+            robot_monitors.append(
                 SyncMonitor(
                     sync_groups,
                     motors,
@@ -725,15 +758,27 @@ async def main() -> None:
                     ),
                 )
             )
+            sync_monitors.extend(robot_monitors)
 
-        server.add_robot(robot_name, seq, can_manager, position_loops=loops)
+        # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
+        # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
+        server.add_robot(
+            robot_name,
+            seq,
+            can_manager,
+            position_loops=loops,
+            sync_monitors=robot_monitors,
+            target_refreshers=robot_refreshers,
+        )
         logger.info(
-            "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, 同期監視: %s)",
+            "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, "
+            "同期監視: %s, 目標値再送: %s)",
             robot_name,
             len(motors),
             [loop.bus_name for loop in loops] or "なし",
             list(positions.axes) or "なし",
             [group.name for group in sync_groups] or "なし",
+            list(refresher.motor_names) if refresher is not None else "なし",
         )
 
     try:
@@ -745,6 +790,8 @@ async def main() -> None:
             loop.start()
         for monitor in sync_monitors:
             monitor.start()
+        for refresher in target_refreshers:
+            refresher.start()
         await server.start()
     except asyncio.CancelledError:
         pass
@@ -753,6 +800,10 @@ async def main() -> None:
         # 電流指令が出続けるため、CAN シャットダウンより先に必ず止める
         for loop in position_loops:
             await loop.stop()
+        # 再送を止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
+        # 停止指令をここから送らないのは、PC が落ちた場合と経路を 1 本に保つため
+        for refresher in target_refreshers:
+            await refresher.stop()
         # 監視だけが生き残ると、停止済みのモータのフィードバックを見て誤発報する
         for monitor in sync_monitors:
             await monitor.stop()
