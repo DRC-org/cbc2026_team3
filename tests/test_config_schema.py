@@ -7,6 +7,7 @@ import yaml
 
 import main
 from lib.config_schema import (
+    CAN_ID_RANGES,
     DEFAULT_HEALTH,
     DEFAULT_MOTOR_CHECK,
     DRIVER_TYPES,
@@ -14,6 +15,9 @@ from lib.config_schema import (
     load_system_config,
 )
 from lib.drivers.base import ControlMode
+from lib.drivers.edulite05 import Edulite05Driver
+from lib.drivers.generic import GenericDriver
+from lib.drivers.m3508 import M3508Driver
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -243,6 +247,56 @@ class TestControlType:
                 ),
                 source="test.yaml",
             )
+
+
+class TestCanIdRange:
+    """can_id の範囲は起動時に見る。ドライバ生成まで待つと yaml のどこが悪いか出ない。
+
+    範囲外の generic can_id は静かに壊れる (0xFF は緊急停止**解除**の
+    ブロードキャストになり、共有バス上の全基板のラッチを外す)。
+    """
+
+    @pytest.mark.parametrize("can_id", [0x00, 0xFF, 0x100, -1])
+    def test_generic_id_out_of_range_is_rejected(self, can_id: int) -> None:
+        with pytest.raises(ValueError, match="can_id"):
+            load_robot_config(_robot(gripper=_generic(can_id=can_id)), source="test.yaml")
+
+    @pytest.mark.parametrize("can_id", [0, 5])
+    def test_m3508_id_out_of_range_is_rejected(self, can_id: int) -> None:
+        with pytest.raises(ValueError, match="can_id"):
+            load_robot_config(
+                _robot(y_axis_r={"driver": "m3508", "bus": "m3508_bus", "can_id": can_id}),
+                source="test.yaml",
+            )
+
+    def test_edulite_id_out_of_range_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="can_id"):
+            load_robot_config(
+                _robot(arm={"driver": "edulite05", "bus": "edulite_bus", "can_id": 0x100}),
+                source="test.yaml",
+            )
+
+    def test_ranges_match_what_the_drivers_accept(self) -> None:
+        """config 側の表とドライバ側の検査がずれていないこと。
+
+        2 箇所に範囲を書く以上、片方だけが古くなる経路を塞いでおく
+        (config_schema は lib.drivers.base しか import しない約束なので、
+        表そのものを共有できない)。
+        """
+        builders = {
+            "m3508": lambda i: M3508Driver("m", i),
+            "edulite05": lambda i: Edulite05Driver("m", i),
+            "generic": lambda i: GenericDriver("m", i),
+        }
+        assert set(builders) == set(DRIVER_TYPES)
+
+        for driver, (low, high) in CAN_ID_RANGES.items():
+            build = builders[driver]
+            build(low)
+            build(high)
+            for outside in (low - 1, high + 1):
+                with pytest.raises(ValueError):
+                    build(outside)
 
 
 class TestDriverSpecificKeys:

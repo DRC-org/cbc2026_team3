@@ -221,14 +221,26 @@ class Sequence:
         return self._running
 
     @property
+    def steps(self) -> tuple[StepInfo, ...]:
+        """宣言順のステップ表 (読み取り専用ビュー)。
+
+        ``_steps`` は ``__init_subclass__`` が組み立てるクラス属性で、同じ
+        シーケンスクラスの全インスタンスで共有される。実体の list をそのまま
+        渡すと、受け取った側の 1 回の append/sort が以後生成される全インスタンスの
+        進行順を書き換えてしまうため、コピーした tuple しか外へ出さない。
+        """
+        return tuple(self._steps)
+
+    @property
     def steps_info(self) -> list[dict]:
+        """ステップ表を配信用の dict へ落としたもの (method_name は含めない)。"""
         return [
             {
                 "index": i,
                 "label": s.label,
                 "require_trigger": s.require_trigger,
             }
-            for i, s in enumerate(self._steps)
+            for i, s in enumerate(self.steps)
         ]
 
     @property

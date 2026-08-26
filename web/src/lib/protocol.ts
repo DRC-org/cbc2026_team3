@@ -50,6 +50,12 @@ export interface HealthSnapshot {
   overall: BusHealthState;
   buses: BusHealth[];
   motors: MotorHealth[];
+  /**
+   * 判定できなかった理由。サーバーはヘルス計算そのものが失敗したとき
+   * overall=down・buses/motors 空・この detail 付きで「判定不能」を配信する
+   * (`lib/server.py` の `_health_unknown`)。内訳が空になる以上、理由はここにしか無い。
+   */
+  detail: string | null;
 }
 
 export type HealthChangeLevel = "info" | "warning" | "critical";
@@ -132,20 +138,34 @@ export interface SyncMonitorState {
 }
 
 /**
+ * 目標値再送タスク 1 本 (= 自作モータドライバ向け 20Hz の再送) の状態。
+ *
+ * ファーム側は 500ms のコマンドウォッチドッグを持つため、これが止まると
+ * 500ms 後に generic アクチュエータ (グリッパ・コンベア・壁) が停止する。
+ */
+export interface TargetRefresherState {
+  motors: string[];
+  running: boolean;
+  paused: boolean;
+}
+
+/**
  * 安全機構の状態。
  *
  * `sync_violations` が空でない軸は左右のずれを検知してラッチされており、
  * 緊急停止を解除しても動かない (機構を直して解除し直す必要がある)。
- * `loops_running` / `monitors_running` が false なら 200Hz の位置制御ループか
- * 50Hz の同期監視が死んでいる。WS は繋がったままモータ状態も届き続けるため、
- * ここを読まない限り誰も気付けない。
+ * `loops_running` / `monitors_running` / `refreshers_running` が false なら
+ * 200Hz の位置制御ループ・50Hz の同期監視・20Hz の目標値再送のいずれかが死んでいる。
+ * WS は繋がったままモータ状態も届き続けるため、ここを読まない限り誰も気付けない。
  */
 export interface SafetyState {
   sync_violations: string[];
   loops_running: boolean;
   monitors_running: boolean;
+  refreshers_running: boolean;
   position_loops: PositionLoopState[];
   sync_monitors: SyncMonitorState[];
+  target_refreshers: TargetRefresherState[];
 }
 
 export interface RobotState {

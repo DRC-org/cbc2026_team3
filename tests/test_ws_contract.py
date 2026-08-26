@@ -13,13 +13,11 @@ UI 側が `typeof msg.robot === "string"` を受信条件にしており、Pytho
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 import json
 import os
 import pathlib
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -28,7 +26,9 @@ from lib.axis_sync import MotorSpec, SyncGroup
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
-from lib.drivers.base import MotorState
+from lib.control.target_refresh import GenericTargetRefresher
+from lib.drivers.base import ControlMode, MotorState
+from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import (
     BusHealth,
@@ -39,8 +39,10 @@ from lib.health import (
 )
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence, step
-from lib.server import RobotServer
+from lib.sequence.motors import MotorHandle
+from tests.fake_can import mock_can_manager
 from tests.fake_health import ok_health_snapshot
+from tests.server_fixtures import ServerFixture, require_type
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONTRACT_PATH = _REPO_ROOT / "web" / "src" / "test" / "ws-contract.json"
@@ -95,36 +97,15 @@ class _ContractSequence(Sequence):
         return None
 
 
-def _motor_mock(name: str, state: MotorState) -> MagicMock:
-    motor = MagicMock()
-    motor.name = name
-    motor.state = state
-    return motor
-
-
 def _make_can_manager() -> CANManager:
-    mgr = MagicMock(spec=CANManager)
-    mgr._motors = {
-        "y_axis_r": _motor_mock(
-            "y_axis_r", MotorState(position=1500.0, velocity=0.0, current=0.2, temperature=35.0)
-        ),
-        "y_axis_l": _motor_mock(
-            "y_axis_l", MotorState(position=-1500.0, velocity=0.0, current=0.2, temperature=34.5)
-        ),
-        "gripper": _motor_mock(
-            "gripper", MotorState(position=5.0, velocity=0.0, current=0.0, temperature=30.0)
-        ),
-    }
-    # 実物では motors は _motors の読み取り専用ビュー。fake_health が _motors を
-    # 見るため、モックでは両方を同じ dict に揃える
-    mgr.motors = mgr._motors
-    mgr._buses = {_M3508_BUS: MagicMock()}
-    mgr.bus_names = tuple(mgr._buses)
-    mgr.send = AsyncMock()
-    mgr.send_to_bus = AsyncMock()
-    mgr.last_feedback_at.return_value = None
-    mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
-    return mgr
+    return mock_can_manager(
+        {
+            "y_axis_r": MotorState(position=1500.0, velocity=0.0, current=0.2, temperature=35.0),
+            "y_axis_l": MotorState(position=-1500.0, velocity=0.0, current=0.2, temperature=34.5),
+            "gripper": MotorState(position=5.0, velocity=0.0, current=0.0, temperature=30.0),
+        },
+        bus_name=_M3508_BUS,
+    )
 
 
 def _sync_group() -> SyncGroup:
@@ -177,8 +158,11 @@ def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     }
 
 
-def _build_server() -> tuple[RobotServer, M3508PositionLoop, SyncMonitor]:
-    server = RobotServer(checklist_definitions=_checklist_definitions())
+_Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher]
+
+
+def _build_fixture() -> _Fixture:
+    fx = ServerFixture.build(checklist_definitions=_checklist_definitions())
     mgr = _make_can_manager()
 
     loop = M3508PositionLoop(mgr, _M3508_BUS)
@@ -193,73 +177,76 @@ def _build_server() -> tuple[RobotServer, M3508PositionLoop, SyncMonitor]:
         last_feedback_at=lambda _name: None,
     )
 
-    server.add_robot(
+    # 目標値再送も 1 台ぶん載せる。空リストだと safety.target_refreshers の
+    # 要素構造が golden に現れず、UI 側が形を知る手立てが無くなる
+    refresher = GenericTargetRefresher(
+        [
+            MotorHandle(
+                "gripper",
+                GenericDriver("gripper", can_id=9, control_type=ControlMode.POSITION),
+                mgr,
+            )
+        ]
+    )
+
+    fx.add_robot(
         _ROBOT,
         _ContractSequence(),
         mgr,
         position_loops=[loop],
         sync_monitors=[monitor],
+        target_refreshers=[refresher],
     )
     # 周期配信に割り込まれるとヘルス差分の基準が動く。起動直後の 1 回だけ走らせ、
     # 以降はテストが明示的に呼んだ配信だけを捕まえる
-    server._broadcast_interval = 3600.0
-    return server, loop, monitor
-
-
-async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict:
-    for _ in range(tries):
-        try:
-            msg = await asyncio.wait_for(ws.receive_json(), timeout=0.5)
-        except (TimeoutError, TypeError) as exc:
-            raise AssertionError(f"{wanted} が配信されなかった") from exc
-        if msg.get("type") == wanted:
-            return msg
-    raise AssertionError(f"{wanted} が配信されなかった")
+    fx.freeze_broadcast()
+    return fx, loop, monitor, refresher
 
 
 async def collect_samples() -> dict[str, dict[str, Any]]:
     """実際の RobotServer に配信させたメッセージを型ごとに 1 通ずつ集める。"""
-    server, loop, monitor = _build_server()
-    app = server.create_app()
+    fx, loop, monitor, refresher = _build_fixture()
+    app = fx.create_app()
     samples: dict[str, dict[str, Any]] = {}
 
     loop.start()
     monitor.start()
+    refresher.start()
     try:
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
             # 接続直後のスナップショット
-            samples["match_state"] = await _recv_type(ws, "match_state")
+            samples["match_state"] = await require_type(ws, "match_state")
 
-            await server._broadcast_state()
-            samples["state"] = await _recv_type(ws, "state")
+            await fx.publish_state()
+            samples["state"] = await require_type(ws, "state")
 
-            mgr = server._robots[_ROBOT].can_manager
+            mgr = fx.can_manager(_ROBOT)
             mgr.health.side_effect = lambda **_kwargs: _degraded_bus_snapshot(mgr)
-            await server._broadcast_state()
-            samples["health_change_bus"] = await _recv_type(ws, "health_change")
+            await fx.publish_state()
+            samples["health_change_bus"] = await require_type(ws, "health_change")
 
             mgr.health.side_effect = lambda **_kwargs: _fault_motor_snapshot(mgr)
-            await server._broadcast_state()
-            samples["health_change"] = await _recv_type(ws, "health_change")
+            await fx.publish_state()
+            samples["health_change"] = await require_type(ws, "health_change")
 
             # 準備フェーズなので trigger はフェーズゲートで弾かれる
             await ws.send_json({"type": "trigger", "robot": _ROBOT})
-            samples["command_rejected"] = await _recv_type(ws, "command_rejected")
+            samples["command_rejected"] = await require_type(ws, "command_rejected")
 
-            await server._broadcast_e_stop_state()
-            samples["e_stop_state"] = await _recv_type(ws, "e_stop_state")
+            await fx.publish_e_stop_state()
+            samples["e_stop_state"] = await require_type(ws, "e_stop_state")
 
-            await server.activate_e_stop(reason="同期ずれを検知しました (y_axis)")
-            samples["e_stop_state_with_reason"] = await _recv_type(ws, "e_stop_state")
+            await fx.activate_e_stop(reason="同期ずれを検知しました (y_axis)")
+            samples["e_stop_state_with_reason"] = await require_type(ws, "e_stop_state")
 
-            await server._broadcast_motor_check_progress(_ROBOT, "gripper", 1, 3)
-            samples["motor_check_progress"] = await _recv_type(ws, "motor_check_progress")
+            await fx.publish_motor_check_progress(_ROBOT, "gripper", 1, 3)
+            samples["motor_check_progress"] = await require_type(ws, "motor_check_progress")
 
             record = _check_record()
-            await server._broadcast_motor_check_record(_ROBOT, record)
-            samples["motor_check_record"] = await _recv_type(ws, "motor_check_record")
+            await fx.publish_motor_check_record(_ROBOT, record)
+            samples["motor_check_record"] = await require_type(ws, "motor_check_record")
 
             snapshot = CheckRunSnapshot(
                 robot=_ROBOT,
@@ -268,16 +255,17 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
                 overall="ok",
                 records=[record],
             )
-            await server._broadcast_motor_check_done(_ROBOT, snapshot)
-            samples["motor_check_done"] = await _recv_type(ws, "motor_check_done")
+            await fx.publish_motor_check_done(_ROBOT, snapshot)
+            samples["motor_check_done"] = await require_type(ws, "motor_check_done")
 
-            await server._broadcast_motor_check_error(_ROBOT, "試合中は動作確認を実行できません")
-            samples["motor_check_error"] = await _recv_type(ws, "motor_check_error")
+            await fx.publish_motor_check_error(_ROBOT, "試合中は動作確認を実行できません")
+            samples["motor_check_error"] = await require_type(ws, "motor_check_error")
 
             await ws.close()
     finally:
         await loop.stop()
         await monitor.stop()
+        await refresher.stop()
 
     return samples
 

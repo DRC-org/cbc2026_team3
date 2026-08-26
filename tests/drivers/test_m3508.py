@@ -7,6 +7,7 @@ import pytest
 
 from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.m3508 import GEAR_RATIO, M3508Driver
+from tests.feedback_frames import feed_m3508
 
 
 class TestEncodeCurrentCommand:
@@ -123,10 +124,7 @@ class TestHealth:
         self.driver = M3508Driver("test_motor", can_id=1)
 
     def _feed(self, *, current: int = 0, temp: int = 25) -> None:
-        # フィードバックフレームを 1 つ流して内部 state を更新する補助
-        data = struct.pack(">hhhBB", 0, 0, current, temp, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=0, current=current, temp=temp)
 
     def test_thermal_warning_below_threshold(self) -> None:
         self._feed(temp=60)
@@ -171,9 +169,7 @@ class TestMotorCheck:
 
     def _feed(self, *, velocity: int, current: int = 0, temp: int = 25) -> None:
         # M3508 フィードバックの velocity 符号は電流符号と一致する想定
-        data = struct.pack(">hhhBB", 0, velocity, current, temp, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=0, rpm=velocity, current=current, temp=temp)
 
     def test_check_command_uses_specified_magnitude(self) -> None:
         msg, context = self.driver.check_command(magnitude=500.0)
@@ -233,9 +229,7 @@ class TestMultiTurn:
         self.driver = M3508Driver("lift", can_id=1)
 
     def _feed_angle(self, angle_raw: int) -> None:
-        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=angle_raw)
 
     @staticmethod
     def _deg(counts: float) -> float:
@@ -309,9 +303,7 @@ class TestMultiTurnTargetReached:
         self.driver = M3508Driver("lift", can_id=1)
 
     def _feed(self, angle_raw: int, *, velocity: int = 0, current: int = 0) -> None:
-        data = struct.pack(">HhhBB", angle_raw, velocity, current, 25, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=angle_raw, rpm=velocity, current=current)
 
     def _spin_two_turns(self) -> None:
         """累積角をちょうど +720deg (16384 counts) にし、単回転角は 0 に戻す。"""
@@ -383,9 +375,7 @@ class TestFeedbackPosition:
         self.driver = M3508Driver("lift", can_id=1)
 
     def _feed_angle(self, angle_raw: int) -> None:
-        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=angle_raw)
 
     def test_returns_multi_turn_position(self) -> None:
         self._feed_angle(0)

@@ -5,6 +5,8 @@ import type { Tone } from "@/lib/tone";
 export interface HealthVerdict {
   tone: Tone;
   label: string;
+  /** 判定の理由をラベルに収められないとき (サーバーの判定不能など) の補足 */
+  detail?: string;
 }
 
 /** 安全機構の異常 1 件。`hint` は操縦者が次に取るべき行動 */
@@ -36,9 +38,13 @@ export function motorTempTone(temp: number | null | undefined): Tone {
 /**
  * 安全機構の異常を列挙する。平常時は空配列 (画面に何も足さない)。
  *
- * ラッチ中の軸が分からないと操縦者は復旧手順を選べず、200Hz の位置制御ループと
- * 50Hz の同期監視が死んだことは配信を読まない限り誰も気付けない
+ * ラッチ中の軸が分からないと操縦者は復旧手順を選べず、200Hz の位置制御ループ・
+ * 50Hz の同期監視・20Hz の目標値再送が死んだことは配信を読まない限り誰も気付けない
  * (WS は繋がったままでモータ状態も届き続けるため、画面は正常に見える)。
+ *
+ * 集約値 (`*_running`) と内訳 (`position_loops` 等) は同じ事実の 2 つの見え方なので、
+ * 1 タスク種別につき 1 件へ畳む。内訳から対象を挙げられるときはそれを、
+ * 挙げられないときだけ「全〜」を detail に置く。
  */
 export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIssue[] {
   if (!safety) return [];
@@ -71,6 +77,20 @@ export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIss
     });
   }
 
+  // 20Hz の再送が止まると 500ms 後にファーム側のコマンドウォッチドッグが働き、
+  // generic アクチュエータ (グリッパ・コンベア・壁) が一斉に停止する。
+  // 位置制御ループ・同期監視の停止と同格の異常として扱う
+  const deadRefreshers = safety.target_refreshers
+    .filter((r) => !r.running)
+    .flatMap((r) => r.motors);
+  if (deadRefreshers.length > 0 || !safety.refreshers_running) {
+    issues.push({
+      label: "目標値再送停止",
+      detail: deadRefreshers.length > 0 ? deadRefreshers.join(", ") : "全モータ",
+      hint: "20Hz の再送が止まっています。500ms 後にファーム側ウォッチドッグでグリッパ・コンベア・壁が停止します",
+    });
+  }
+
   return issues;
 }
 
@@ -84,6 +104,10 @@ export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIss
  *
  * 安全機構をバス・モータより先に見るのは、復旧操作が別物だから。
  * ラッチ中の軸は緊急停止を解除しても動かず、CAN やモータの表示を見ても理由が分からない。
+ *
+ * **サーバーの `overall` より楽観的な結論を出してはならない。** サーバーは健全性を
+ * 計算できなかったときに overall=down・内訳空で「判定不能」を配信する。内訳だけを見て
+ * 「異常なし」を返すと、そのフェイルセーフが画面上で消える。
  */
 export function evaluateHealth(
   health: HealthSnapshot | undefined,
@@ -99,17 +123,48 @@ export function evaluateHealth(
   if (!health) return { tone: "neutral", label: "ヘルス未取得" };
 
   const downBuses = health.buses.filter((b) => b.state === "down");
-  if (downBuses.length > 0) return { tone: "error", label: `CAN 停止 ${downBuses[0].name}` };
+  if (downBuses.length > 0) {
+    return {
+      tone: "error",
+      label: `CAN 停止 ${downBuses[0].name}`,
+      detail: health.detail ?? undefined,
+    };
+  }
 
   const faultMotors = health.motors.filter((m) => m.state === "fault");
   if (faultMotors.length > 0) {
-    return { tone: "error", label: `モータ異常 ${faultMotors.length} 件 (${faultMotors[0].name})` };
+    return {
+      tone: "error",
+      label: `モータ異常 ${faultMotors.length} 件 (${faultMotors[0].name})`,
+      detail: health.detail ?? undefined,
+    };
+  }
+
+  // 内訳から理由を挙げられないのに overall が down = サーバーが健全性を判定できていない
+  // (`lib/server.py` の `_health_unknown`)。ここで success を返すと、判定不能を
+  // DOWN へ倒すサーバーのフェイルセーフを UI 側が打ち消してしまう。
+  // 「異常の有無が分からない」は安全側では異常であって正常ではない
+  if (health.overall === "down") {
+    return {
+      tone: "error",
+      label: "健全性 判定不能",
+      detail: health.detail ?? "サーバーがヘルスを判定できていません",
+    };
   }
 
   const degraded = health.buses.filter((b) => b.state !== "ok").length;
   const badMotors = health.motors.filter((m) => m.state !== "ok").length;
   const warnCount = degraded + badMotors + countHotMotors(motors);
   if (warnCount > 0) return { tone: "warning", label: `要確認 ${warnCount} 件` };
+
+  // 内訳に異常が無くてもサーバーの総合判定より楽観的になってはならない
+  if (health.overall !== "ok") {
+    return {
+      tone: "warning",
+      label: "要確認 (サーバー判定 degraded)",
+      detail: health.detail ?? undefined,
+    };
+  }
 
   return { tone: "success", label: "異常なし" };
 }

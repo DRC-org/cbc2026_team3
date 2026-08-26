@@ -21,23 +21,23 @@ pnpm check         # lint + format + 型検査 + テスト
 
 ## 構成
 
-| パス                           | 役割                                                                           |
-| ------------------------------ | ------------------------------------------------------------------------------ |
-| `src/App.tsx`                  | 旧ハッシュ URL の読み替え → `createBrowserRouter` の生成（**この順序に依存**） |
-| `src/routes.tsx`               | ルート定義                                                                     |
-| `src/layouts/RootLayout.tsx`   | WebSocket 接続・Provider・ヘッダー・タブ・ステータスバー                       |
-| `src/index.css`                | Tailwind の取り込みと daisyUI カスタムテーマ `cbc`（配色の単一情報源）         |
-| `src/components/ui/`           | 自前プリミティブ（`Button` / `Panel` / `Modal`）                               |
-| `src/lib/protocol.ts`          | WS メッセージの型と**受信条件**（最下層。UI の hook を import しない）         |
-| `src/lib/robotReducer.ts`      | 受信 → UI 状態の遷移（純関数なので接続を張らずに検証できる）                   |
-| `src/hooks/useWebSocket.ts`    | 接続・再接続・接続先切替だけ（メッセージの意味は解釈しない）                   |
-| `src/hooks/useRobotSocket.ts`  | 上の 3 つを束ねて 1 つの UI 状態にする                                         |
-| `src/context/RobotContext.tsx` | 配布。購読を**頻度で 3 つに分割**（states / status / commands）                |
-| `src/lib/healthVerdict.ts`     | 機体の健全性判定（CAN・モータ・安全機構）の**単一情報源**                      |
-| `src/lib/sequenceStatus.ts`    | シーケンスの実行状態判定の単一情報源（`running` 配信が根拠）                   |
-| `src/lib/time.ts`              | 時刻の単位（`EpochSeconds` / `EpochMs`）と表示                                 |
-| `src/test/ws-contract.json`    | サーバーの実配信サンプル。**生成物なので手で編集しない**                       |
-| `src/test/`                    | vitest 共通ヘルパ。テスト本体は対象ソースの隣に `*.test.ts(x)`                 |
+| パス                           | 役割                                                                                                                                            |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/App.tsx`                  | 旧ハッシュ URL の読み替え → `createBrowserRouter` の生成（**この順序に依存**）                                                                  |
+| `src/routes.tsx`               | ルート定義                                                                                                                                      |
+| `src/layouts/RootLayout.tsx`   | WebSocket 接続・Provider・ヘッダー・タブ・ステータスバー                                                                                        |
+| `src/index.css`                | Tailwind の取り込みと daisyUI カスタムテーマ `cbc`（配色の単一情報源）                                                                          |
+| `src/components/ui/`           | 自前プリミティブ（`Page` / `Panel` / `Section` / `Button` / `StatusBadge` / `Kbd` / `Icon` / `Modal`）。レイアウト骨格は CSS ではなくここが持つ |
+| `src/lib/protocol.ts`          | WS メッセージの型と**受信条件**（最下層。UI の hook を import しない）                                                                          |
+| `src/lib/robotReducer.ts`      | 受信 → UI 状態の遷移（純関数なので接続を張らずに検証できる）                                                                                    |
+| `src/hooks/useWebSocket.ts`    | 接続・再接続・接続先切替だけ（メッセージの意味は解釈しない）                                                                                    |
+| `src/hooks/useRobotSocket.ts`  | 上の 3 つを束ねて 1 つの UI 状態にする                                                                                                          |
+| `src/context/RobotContext.tsx` | 配布。購読を**頻度で 3 つに分割**（states / status / commands）                                                                                 |
+| `src/lib/healthVerdict.ts`     | 機体の健全性判定（CAN・モータ・安全機構）の**単一情報源**                                                                                       |
+| `src/lib/sequenceStatus.ts`    | シーケンスの実行状態判定の単一情報源（`running` 配信が根拠）                                                                                    |
+| `src/lib/time.ts`              | 時刻の単位（`EpochSeconds` / `EpochMs`）と表示                                                                                                  |
+| `src/test/ws-contract.json`    | サーバーの実配信サンプル。**生成物なので手で編集しない**                                                                                        |
+| `src/test/`                    | vitest 共通ヘルパ。テスト本体は対象ソースの隣に `*.test.ts(x)`                                                                                  |
 
 ## 開発時に踏みやすい点
 
@@ -50,6 +50,18 @@ pnpm check         # lint + format + 型検査 + テスト
   で生成）を import して受信経路へ流し込む。写した瞬間に「想像した契約」へ逆戻りし、
   実際に `health_change` が実機で 100% 捨てられていたことを両側のテストが揃って見逃した。
   生成物なので整形もしない（`.prettierignore` で oxfmt の対象外にしてある）
+- **契約は両方向を見る。** 「UI が読む値が実配信に在るか」だけでは、
+  **サーバーが送っているのに TS が知らない欄**を取りこぼす（`health.detail` が
+  型にすら無く、サーバーの「判定不能」を画面が「異常なし」と表示していた）。
+  `wsContract.test.ts` の逆方向は実配信のキーを再帰的に列挙して宣言と突き合わせる。
+  使わないフィールドは `unused` に理由を書く。書かれていない欄が増えたら落ちる
+- **サーバーの判定より UI が楽観的になってはならない。** `health.overall` は
+  ヘルス計算そのものが失敗したときに `down` へ倒れる（内訳は空、理由は `detail`）。
+  内訳だけを見て「異常なし」を出すと、サーバーのフェイルセーフが画面上で消える
+- **切断中に楽観的更新をしない。** `send()` は送れたかを返す。緊急停止のように
+  送信の成否で画面が変わる操作は必ず戻り値を見ること（切断中に赤いオーバーレイを
+  出すと、機体は動いたままで、矛盾を示す接続バナーもその背後に隠れる）。
+  ただし黙って捨てるのも危険なので、送れなかったことは通知枠へ流す
 - **時刻は受信境界で ms へ正規化する。** サーバーはエポック秒、`Date` はミリ秒。
   UI 状態のフィールド名は `...Ms` で終わらせ、秒のままの値は `EpochSeconds` を名乗る
 - **モーダルに `<dialog>` を使わない。** Esc で必ず閉じてしまい、緊急停止オーバーレイの

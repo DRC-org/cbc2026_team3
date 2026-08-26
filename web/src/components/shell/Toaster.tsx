@@ -87,7 +87,8 @@ export function Toaster() {
     push({
       id: rejection.receivedAtMs,
       tone: "danger",
-      title: "操作が拒否されました",
+      // サーバーが断ったのか、そもそも届いていないのかで操縦者の次の一手が変わる
+      title: rejection.source === "local" ? "操作が届きませんでした" : "操作が拒否されました",
       lines: [rejection.reason, `command: ${rejection.command}`],
       expiresAt: Date.now() + REJECTION_TTL_MS,
     });

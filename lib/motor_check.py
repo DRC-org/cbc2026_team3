@@ -41,6 +41,13 @@ _POLL_INTERVAL_S: float = 0.01
 SKIP_DETAIL_CONFIG_EXCLUDED: str = "設定で意図的に除外 (単独駆動が危険なため指差喚呼で目視確認)"
 SKIP_DETAIL_UNSUPPORTED_DRIVER: str = "未対応ドライバ種別 (既定 magnitude 未定義)"
 
+# 中断・緊急停止で駆動を打ち切ったときの detail。操縦者にとって意味が違う
+# (前者は自分が押した、後者は機体が止まっている) ので文言を分ける。
+STOP_DETAIL_ABORTED: str = "動作確認中断"
+STOP_DETAIL_E_STOP: str = "緊急停止中のため動作確認を中止"
+
+EStopChecker = Callable[[], bool]
+
 
 class MotorCheckRunner:
     """1 ロボット分のアクチュエータ動作確認シーケンスを実行する。
@@ -51,7 +58,11 @@ class MotorCheckRunner:
 
     安全策 (docs/impl_plan.md):
       - reset_after_check は PASSED/FAILED/TIMEOUT どの結末でも必ず送る (駆動状態を残さない)
-      - 緊急停止 / 通常シーケンス中の起動拒否は呼び出し側 (server.py) で行う
+      - 通常シーケンス中の起動拒否は呼び出し側 (server.py) で行う
+      - 緊急停止は起動拒否だけに頼らない。``is_estop_active`` を毎ステップ見て
+        駆動を打ち切る (M3508PositionLoop / MotorHandle と同じ多重防護)。
+        起動判定だけだと、判定を通ってから実際に駆動するまでの窓で停止が入った
+        場合に止められない
       - 二重実行は RuntimeError で拒否し、進行中スナップショットの破壊を防ぐ
     """
 
@@ -65,6 +76,7 @@ class MotorCheckRunner:
         feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         default_magnitude: dict[str, float] | None = None,
         per_motor_overrides: dict[str, dict] | None = None,
+        is_estop_active: EStopChecker | None = None,
     ) -> None:
         self._robot_name = robot_name
         self._can_manager = can_manager
@@ -77,6 +89,7 @@ class MotorCheckRunner:
             else dict(default_magnitude)
         )
         self._per_motor_overrides: dict[str, dict] = per_motor_overrides or {}
+        self._is_estop_active = is_estop_active
 
         self._running: bool = False
         self._aborted: bool = False
@@ -126,9 +139,22 @@ class MotorCheckRunner:
 
         観測ループ内でも参照されるため、現在モータの観測タイムアウト前に
         受信があれば判定まで進み、その後 SKIPPED に切り替わる。
+
+        ``run()`` より先に呼ばれても要求は失われない (``run()`` は中断状態を
+        リセットしない)。緊急停止は runner が起動する前 — 呼び出し側が送信経路の
+        一時停止を待っているあいだ — に届きうるため、その 1 通を捨てると
+        「停止したのに全モータが順に駆動される」という最悪の形になる。
         """
         self._aborted = True
         self._abort_event.set()
+
+    def _stop_detail(self) -> str | None:
+        """駆動を打ち切るべきなら記録に残す理由を返す。続行してよければ None。"""
+        if self._aborted:
+            return STOP_DETAIL_ABORTED
+        if self._is_estop_active is not None and self._is_estop_active():
+            return STOP_DETAIL_E_STOP
+        return None
 
     # ------------------------------------------------------------------ #
     #  メインループ
@@ -142,9 +168,10 @@ class MotorCheckRunner:
         if self._running:
             raise RuntimeError("MotorCheckRunner は既に実行中です")
 
+        # 中断状態はここでリセットしない。書き込むのは __init__ と abort() だけ。
+        # 起動前に届いた中断要求 (緊急停止・操縦者の abort) をここで捨てると、
+        # 要求を出した側からは止めたように見えたまま全モータが駆動される
         self._running = True
-        self._aborted = False
-        self._abort_event.clear()
 
         now = time.time()
         # 開始時点のモータ一覧を確定させる。motors は CANManager の読み取り専用ビューでも
@@ -181,9 +208,11 @@ class MotorCheckRunner:
             for i, (name, motor) in enumerate(targets):
                 record = records[i]
 
-                # 中断要求 → 残りはすべて SKIPPED にして抜ける
-                if self._aborted:
+                # 中断要求・緊急停止 → 残りはすべて SKIPPED にして抜ける
+                stop_detail = self._stop_detail()
+                if stop_detail is not None:
                     record.result = MotorCheckResult.SKIPPED
+                    record.detail = stop_detail
                     record.finished_at = time.time()
                     continue
 
@@ -337,9 +366,10 @@ class MotorCheckRunner:
         motor: MotorDriver,
         record: MotorCheckRecord,
     ) -> bool:
-        if self._aborted:
+        stop_detail = self._stop_detail()
+        if stop_detail is not None:
             record.result = MotorCheckResult.SKIPPED
-            record.detail = "動作確認中断"
+            record.detail = stop_detail
             await self._safe_reset(name, motor)
             return False
 

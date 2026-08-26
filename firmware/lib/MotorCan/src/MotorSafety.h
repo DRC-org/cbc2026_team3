@@ -66,8 +66,15 @@ class MotorSafety {
 
     // 緊急停止ラッチ中でもウォッチドッグ満了中でもなければ true。
     // 駆動ゲートはすべてこれを通すこと（isExpired を直に見ると無効化フラグを迂回する）。
+    //
+    // everFed_ を watchdogEnabled_ の外に出してあるのは、仕様書 §5.4 の
+    // 「SET_TARGET を 1 通も受け取るまで出力を許可しない」が**ウォッチドッグの
+    // 有効/無効とは別の条件**だから。中に入れると WATCHDOG_ENABLED 0 の基板が
+    // CAN 通信ゼロのまま setup() でゲートドライバを開く。無効化で外れるのは
+    // 「途絶したら止める」ことだけで、最初の 1 通を待つゲートは外れない
+    // （ベンチ確認の逃げ道は残る。最初の cansend でゲートが開く）。
     bool isOutputAllowed(uint32_t nowMs) const {
-        return !latched_ && !(watchdogEnabled_ && isExpired(nowMs));
+        return !latched_ && everFed_ && !(watchdogEnabled_ && isExpired(nowMs));
     }
 
     // FEEDBACK Byte7 の bit3 / bit4 を返す（他のビットは呼び出し側で OR する）。

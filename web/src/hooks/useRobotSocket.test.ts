@@ -127,6 +127,23 @@ describe("送信", () => {
     act(() => result.current.send({ type: "trigger" }));
     expect(latestSocket().sent).toHaveLength(0);
   });
+
+  it("送れたかどうかを呼び出し側へ返す", () => {
+    // 呼び出し側が「届いた前提」で楽観的に状態を変えると、切断中に緊急停止を
+    // 押しただけで全画面が「停止しました」と表示する (機体は動き続けている)
+    const { result } = renderHook(() => useRobotSocket(URL));
+    let sent: boolean | undefined;
+    act(() => {
+      sent = result.current.send({ type: "trigger" });
+    });
+    expect(sent).toBe(false);
+
+    act(() => latestSocket().open());
+    act(() => {
+      sent = result.current.send({ type: "trigger" });
+    });
+    expect(sent).toBe(true);
+  });
 });
 
 describe("state メッセージ", () => {

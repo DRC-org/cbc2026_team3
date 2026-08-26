@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -9,30 +8,10 @@ from aiohttp.test_utils import TestClient, TestServer
 from lib.can_manager import CANManager
 from lib.drivers.base import MotorState
 from lib.health import BusHealth, MotorHealth
-from lib.match_state import Phase
 from lib.sequence.engine import Sequence, step
-from lib.server import RobotServer
+from tests.fake_can import mock_can_manager
 from tests.fake_health import ok_health_snapshot
-
-
-async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict | None:
-    """接続直後の match_state や周期配信に紛れた特定 type のメッセージを拾う。"""
-    for _ in range(tries):
-        try:
-            msg = await asyncio.wait_for(ws.receive_json(), timeout=0.2)
-        except (TimeoutError, TypeError):
-            return None
-        if msg.get("type") == wanted:
-            return msg
-    return None
-
-
-def _enter_match(server: RobotServer) -> None:
-    """シーケンス操作コマンドはフェーズゲートで試合中のみ許可される。"""
-    for role, checklist in server.match.checklists.items():
-        for item in checklist.items:
-            server.match.set_checklist_item(role, item.id, True)
-    server.match._phase = Phase.MATCH
+from tests.server_fixtures import ServerFixture, recv_type
 
 
 class DummySequence(Sequence):
@@ -47,48 +26,32 @@ class DummySequence(Sequence):
         self.triggered = True
 
 
-def _make_mock_can_manager() -> CANManager:
-    """モータ状態を返せる mock CANManager を生成する。"""
-    mgr = MagicMock(spec=CANManager)
-    motor = MagicMock()
-    motor.state = MotorState(position=1500.0, velocity=0.0, current=0.2, temperature=35.0)
-    motor.name = "m3508_1"
-    # 実物では motors は _motors の読み取り専用ビュー。fake_health が _motors を
-    # 見るため、モックでは両方を同じ dict に揃える
-    mgr._motors = {"m3508_1": motor}
-    mgr.motors = mgr._motors
-    mgr.get_motor.return_value = motor
-    mgr.send = AsyncMock()
-    mgr.send_to_bus = AsyncMock()
-    mgr._buses = {"generic_bus": MagicMock()}
-    mgr.bus_names = tuple(mgr._buses)
-    # health() が HealthSnapshot を返さないと、サーバーの「判定できないものは DOWN」
-    # 経路を常に踏み、本番とは別物の状態でテストすることになる
-    mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
-    return mgr
-
-
-def _build_server() -> RobotServer:
-    server = RobotServer()
-    seq = DummySequence()
-    can_mgr = _make_mock_can_manager()
-    server.add_robot("main_hand", seq, can_mgr)
-    return server
+def _build_fixture() -> ServerFixture:
+    fx = ServerFixture.build()
+    fx.add_robot(
+        "main_hand",
+        DummySequence(),
+        mock_can_manager(
+            {"m3508_1": MotorState(position=1500.0, velocity=0.0, current=0.2, temperature=35.0)},
+            bus_name="generic_bus",
+        ),
+    )
+    return fx
 
 
 class TestStateMessageFormat:
     async def test_state_message_format(self) -> None:
         """state メッセージの JSON 形式を検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
             # ブロードキャストを手動でトリガー
-            await server._broadcast_state()
+            await fx.publish_state()
 
-            msg = await _recv_type(ws, "state")
+            msg = await recv_type(ws, "state")
             assert msg is not None
             assert msg["type"] == "state"
             assert msg["robot"] == "main_hand"
@@ -112,11 +75,10 @@ class TestStateMessageFormat:
 class TestTriggerCommand:
     async def test_trigger_command(self) -> None:
         """trigger コマンドでシーケンスの trigger() が呼ばれることを検証する。"""
-        server = _build_server()
-        _enter_match(server)
-        ctx = server._robots["main_hand"]
-        seq = ctx.sequence
-        app = server.create_app()
+        fx = _build_fixture()
+        fx.enter_match()
+        seq = fx.sequence("main_hand")
+        app = fx.create_app()
 
         # シーケンスを実行して trigger 待ち状態にする
         task = asyncio.create_task(seq.run())
@@ -140,8 +102,8 @@ class TestTriggerCommand:
 class TestEStopCommand:
     async def test_e_stop_command(self) -> None:
         """e_stop コマンドが処理されることを検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -150,15 +112,14 @@ class TestEStopCommand:
             await ws.close()
 
         # send_to_bus が呼ばれたことを確認
-        can_mgr = server._robots["main_hand"].can_manager
-        can_mgr.send_to_bus.assert_called()
+        fx.can_manager("main_hand").send_to_bus.assert_called()
 
 
 class TestUnknownCommandIgnored:
     async def test_unknown_command_ignored(self) -> None:
         """不明なコマンドでエラーにならないことを検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -169,8 +130,8 @@ class TestUnknownCommandIgnored:
             assert not ws.closed
 
             # 正常にブロードキャストを受信できることを確認
-            await server._broadcast_state()
-            msg = await _recv_type(ws, "state")
+            await fx.publish_state()
+            msg = await recv_type(ws, "state")
             assert msg is not None
 
             await ws.close()
@@ -179,17 +140,17 @@ class TestUnknownCommandIgnored:
 class TestEStopSetsActiveState:
     async def test_e_stop_sets_active_state(self) -> None:
         """e_stop コマンドで e_stop_state メッセージが配信されることを検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await ws.send_json({"type": "e_stop"})
             await asyncio.sleep(0.05)
 
-            assert server._e_stop_active is True
+            assert fx.e_stop_active is True
 
-            msg = await _recv_type(ws, "e_stop_state")
+            msg = await recv_type(ws, "e_stop_state")
             assert msg is not None
             assert msg["active"] is True
 
@@ -199,8 +160,8 @@ class TestEStopSetsActiveState:
 class TestEStopRelease:
     async def test_e_stop_release(self) -> None:
         """e_stop_release コマンドで e_stop_state active=false が配信されることを検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -208,7 +169,7 @@ class TestEStopRelease:
             # まず緊急停止を有効化
             await ws.send_json({"type": "e_stop"})
             await asyncio.sleep(0.05)
-            msg = await _recv_type(ws, "e_stop_state")
+            msg = await recv_type(ws, "e_stop_state")
             assert msg is not None
             assert msg["active"] is True
 
@@ -216,7 +177,7 @@ class TestEStopRelease:
             await ws.send_json({"type": "e_stop_release"})
             await asyncio.sleep(0.05)
 
-            assert server._e_stop_active is False
+            assert fx.e_stop_active is False
 
             # ブロードキャストループの state メッセージが混在するため、
             # e_stop_state メッセージが見つかるまで読み進める
@@ -237,14 +198,14 @@ class TestEStopRelease:
 class TestStateIncludesEStopActive:
     async def test_state_includes_e_stop_active(self) -> None:
         """state メッセージに e_stop_active フィールドが含まれることを検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
-            await server._broadcast_state()
-            msg = await _recv_type(ws, "state")
+            await fx.publish_state()
+            msg = await recv_type(ws, "state")
             assert msg is not None
             assert "e_stop_active" in msg
             assert msg["e_stop_active"] is False
@@ -255,8 +216,8 @@ class TestStateIncludesEStopActive:
 class TestSetParamCommand:
     async def test_set_param_command(self) -> None:
         """set_param コマンドの受付を検証する。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -290,14 +251,14 @@ class TestStateIncludesRunning:
 
         欠けていると UI が step_index/total_steps から実行中かを推測することになる。
         """
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
-            await server._broadcast_state()
-            msg = await _recv_type(ws, "state")
+            await fx.publish_state()
+            msg = await recv_type(ws, "state")
             assert msg is not None
             assert msg["running"] is False
 
@@ -305,18 +266,18 @@ class TestStateIncludesRunning:
 
     async def test_state_running_true_while_sequence_runs(self) -> None:
         """シーケンス実行中は running=true になること。"""
-        server = _build_server()
-        _enter_match(server)
-        seq = server._robots["main_hand"].sequence
-        app = server.create_app()
+        fx = _build_fixture()
+        fx.enter_match()
+        seq = fx.sequence("main_hand")
+        app = fx.create_app()
 
         task = asyncio.create_task(seq.run())
         await asyncio.sleep(0.05)
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await server._broadcast_state()
-            msg = await _recv_type(ws, "state")
+            await fx.publish_state()
+            msg = await recv_type(ws, "state")
             assert msg is not None
             assert msg["running"] is True
             await ws.close()
@@ -333,19 +294,19 @@ class TestHealthChangeIncludesRobot:
         Monitor は 2 機分のイベントを 1 本のリストに並べるため、robot が無いと
         どちらの異常か判別できない。
         """
-        server = _build_server()
-        can_mgr = server._robots["main_hand"].can_manager
-        app = server.create_app()
+        fx = _build_fixture()
+        can_mgr = fx.can_manager("main_hand")
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
             # 1 回目で前回スナップショットを作り、2 回目で FAULT への遷移を出す
-            await server._broadcast_state()
+            await fx.publish_state()
             can_mgr.health.side_effect = lambda **_kwargs: _fault_health_snapshot(can_mgr)
-            await server._broadcast_state()
+            await fx.publish_state()
 
-            msg = await _recv_type(ws, "health_change")
+            msg = await recv_type(ws, "health_change")
             assert msg is not None
             assert msg["robot"] == "main_hand"
             assert msg["target"] == "motor:m3508_1"

@@ -1,4 +1,5 @@
-import { act, render } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -102,5 +103,46 @@ describe("RootLayout のテレメトリ再描画", () => {
     }
 
     expect(counts.checklist).toBe(before);
+  });
+});
+
+/**
+ * 切断中の緊急停止。`send` は readyState を見て黙って捨てるので、その後で
+ * 無条件に楽観的更新をすると「何も送っていないのに全画面が赤い停止オーバーレイ」
+ * になる。しかもオーバーレイは inset:0 で、矛盾を示すはずの接続バナーを覆い隠す。
+ */
+describe("切断中の緊急停止", () => {
+  it("送れていないのに停止した体裁を作らない", async () => {
+    await renderApp();
+    // open() を呼ばない = 切断中
+
+    await userEvent.click(screen.getByRole("button", { name: "緊急停止" }));
+
+    expect(latestSocket().sent).toHaveLength(0);
+    expect(screen.queryByText("ALL MOTION HALTED")).toBeNull();
+  });
+
+  it("押したことと送れなかったことを操縦者へ伝える", async () => {
+    // 「押したのに何も起きない」も同じくらい危険。黙って捨ててはならない
+    await renderApp();
+
+    await userEvent.click(screen.getByRole("button", { name: "緊急停止" }));
+
+    expect(screen.getByText(/緊急停止を送信できませんでした/)).toBeInTheDocument();
+    // 機体が止まっていないことまで書く。次の一手 (物理の非常停止) が変わる
+    expect(screen.getByText(/停止していません/)).toBeInTheDocument();
+  });
+
+  it("切断中の Reset でオーバーレイを閉じない (機体側のラッチは残る)", async () => {
+    await renderApp();
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive({ type: "e_stop_state", active: true }));
+    expect(screen.getByText("ALL MOTION HALTED")).toBeInTheDocument();
+
+    act(() => latestSocket().close());
+    await userEvent.click(screen.getByRole("button", { name: /Reset/ }));
+
+    expect(screen.getByText("ALL MOTION HALTED")).toBeInTheDocument();
+    expect(screen.getByText(/解除を送信できませんでした/)).toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
-import { screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
@@ -21,6 +22,7 @@ const HEALTH: HealthSnapshot = {
     },
   ],
   motors: [],
+  detail: null,
 };
 
 const MOTORS: Record<string, MotorState> = { y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 30 } };
@@ -32,6 +34,8 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
     sync_monitors: [{ axes: ["y_axis"], running: true, violated: [] }],
+    refreshers_running: true,
+    target_refreshers: [{ motors: ["gripper"], running: true, paused: false }],
     ...over,
   };
 }
@@ -78,6 +82,125 @@ describe("SubsystemStatus", () => {
     );
 
     expect(screen.getByText("位置制御ループ停止")).toBeInTheDocument();
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+  });
+
+  it("目標値再送の停止を自分から主張する", () => {
+    // 20Hz の再送が止まると 500ms 後にファーム側ウォッチドッグが効き、
+    // グリッパ・コンベア・壁が無反応になる。WS は繋がったままなので画面からは原因が分からない
+    renderWithRobot(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({
+          refreshers_running: false,
+          target_refreshers: [{ motors: ["gripper", "conveyor"], running: false, paused: false }],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("目標値再送停止")).toBeInTheDocument();
+    expect(screen.getByText("gripper, conveyor")).toBeInTheDocument();
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+  });
+
+  it("異常中は操縦者が畳もうとしても畳めない", async () => {
+    // 「自分から開く」だけでは足りない。試合中に一度畳めてしまえば、
+    // その後に出た異常も畳んだままになり、見逃しの経路がそのまま残る
+    renderWithRobot(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ sync_violations: ["y_axis"] })}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { expanded: true }));
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+  });
+
+  it("異常中に畳もうとした操作は、解消した時点で効く", async () => {
+    // 強制開示のまま操作を握り潰すと、異常が消えた後も 32 個の数字が
+    // 試合の残り時間ずっと開いたままになる (平常時に静かでなくなる)
+    // rerender で異常の解消を再現するため、ここは素の render を使う
+    const { rerender } = render(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ sync_violations: ["y_axis"] })}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { expanded: true }));
+    rerender(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+  });
+
+  it("異常中に触っていなければ、解消後も畳んだまま", async () => {
+    const { rerender } = render(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ sync_violations: ["y_axis"] })}
+      />,
+    );
+
+    rerender(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+  });
+
+  it("モータ過熱の警告でも自分から開く (安全機構の異常に限らない)", () => {
+    // 開く条件を error だけに絞ると、焼損に向かう温度上昇を畳んだまま見逃す
+    renderWithRobot(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90 } }}
+        safety={safety()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.getByText("要確認 1 件")).toBeInTheDocument();
+  });
+
+  it("平常時は操縦者の操作で開閉できる", async () => {
+    // 強制開示は異常時だけ。平常時まで開きっぱなしにすると数字の海に戻る
+    renderWithRobot(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+
+    await userEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { expanded: true }));
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+  });
+
+  /**
+   * サーバーはヘルス計算が失敗したとき overall=down・内訳空・detail 付きを配信する。
+   * 内訳が空だからと緑の「異常なし」を出して畳んだままにすると、サーバーが
+   * 「もう健全性を判断できない」と言っている状態が画面上で正常として消える。
+   */
+  it("サーバーが判定不能を配信したら、理由まで出して自分から開く", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        health={{
+          timestamp: 0,
+          overall: "down",
+          buses: [],
+          motors: [],
+          detail: "ヘルス計算に失敗しました: boom",
+        }}
+        motors={MOTORS}
+        safety={safety()}
+      />,
+    );
+
+    expect(screen.queryByText("異常なし")).not.toBeInTheDocument();
+    expect(screen.getByText("健全性 判定不能")).toBeInTheDocument();
+    expect(screen.getByText(/ヘルス計算に失敗しました: boom/)).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 

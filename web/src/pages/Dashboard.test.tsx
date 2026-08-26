@@ -22,6 +22,7 @@ function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
       },
     ],
     motors: [],
+    detail: null,
     ...over,
   };
 }

@@ -63,8 +63,8 @@ export function ActionPanel({
   }
   const upcoming = burst.slice(0, UPCOMING_LIMIT);
   const moreCount = burst.length - upcoming.length;
-  // 走っていない状態。ここで RUNNING を出すと、同じ画面の中で
-  // 状態表示は「待機中」なのにボタンだけ「実行中」を主張して食い違う
+  // START を出すのは「開始できる」ときだけ。ステップが 1 件も無い (no_sequence) を
+  // ここへ含めると、開始しようのないシーケンスの START を押させることになる
   const idle = inMatch && kind === "idle";
 
   const displayIndex = totalSteps > 0 ? Math.min(stepIndex + 1, totalSteps) : 0;
@@ -73,15 +73,19 @@ export function ActionPanel({
       ? Math.min(100, ((isComplete ? totalSteps : stepIndex + 1) / totalSteps) * 100)
       : 0;
 
+  // 状態表示と主操作 (TriggerButton) は同じ kind から作る。どちらかを暗黙の
+  // フォールバックに任せると、同じ画面が相反する 2 つの事実を出す
   const status: { label: string; tone: Tone } = !inMatch
     ? { label: blockedLabel, tone: "neutral" }
-    : kind === "complete"
-      ? { label: "完走", tone: "success" }
-      : kind === "waiting_trigger"
-        ? { label: "許可待ち — NEXT を押してください", tone: "warning" }
-        : kind === "running"
-          ? { label: "実行中", tone: "info" }
-          : { label: "待機中 — START で開始", tone: "neutral" };
+    : kind === "no_sequence"
+      ? { label: "シーケンス未取得", tone: "neutral" }
+      : kind === "complete"
+        ? { label: "完走", tone: "success" }
+        : kind === "waiting_trigger"
+          ? { label: "許可待ち — NEXT を押してください", tone: "warning" }
+          : kind === "running"
+            ? { label: "実行中", tone: "info" }
+            : { label: "待機中 — START で開始", tone: "neutral" };
 
   return (
     <section

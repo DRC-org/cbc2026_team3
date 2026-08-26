@@ -4,6 +4,7 @@
 
 #include <unity.h>
 
+#include <math.h>
 #include <string.h>
 
 #include "MotorCanProtocol.h"
@@ -108,6 +109,17 @@ static void test_decode_set_target_rejects_short_frame() {
     TEST_ASSERT_FALSE(decodeSetTarget(data, 5).valid);
 }
 
+// 化けた float32 の NaN をそのまま目標値にすると、DC 側は PID の積分項が NaN に
+// 汚染されて以後**正常な目標に対しても**出力が NaN のままになる（clampDuty が 0 に
+// 落とすので「無言で死んだモータ」になり、診断ビットも到達フラグも立たない）。
+// サーボ側 ServoMotion::setTarget が NaN を捨てているのと同じ判断を復号層に置く。
+static void test_decode_set_target_rejects_nan() {
+    uint8_t data[8] = {0};
+    data[0] = static_cast<uint8_t>(ControlType::Position);
+    packFloatLe(&data[2], NAN);
+    TEST_ASSERT_FALSE(decodeSetTarget(data, 8).valid);
+}
+
 // --------------------------------------------------------------------------
 // §3.3 SET_MODE / §3.4 SET_PARAM
 // --------------------------------------------------------------------------
@@ -140,6 +152,14 @@ static void test_decode_set_param_unknown_id_is_ignored() {
     uint8_t data[8] = {0};
     data[0] = 0x42;
     packFloatLe(&data[2], 1.0f);
+    TEST_ASSERT_FALSE(decodeSetParam(data, 8).valid);
+}
+
+// NaN のゲインを受け付けると PID の出力が永久に NaN になる。SET_TARGET と同じく捨てる。
+static void test_decode_set_param_rejects_nan() {
+    uint8_t data[8] = {0};
+    data[0] = static_cast<uint8_t>(ParamId::Ki);
+    packFloatLe(&data[2], NAN);
     TEST_ASSERT_FALSE(decodeSetParam(data, 8).valid);
 }
 
@@ -411,6 +431,24 @@ static void test_disabled_watchdog_allows_output_and_hides_bit4() {
     TEST_ASSERT_TRUE(safety.isCommandLost(9999));
 }
 
+// 無効化して外れるのは「途絶したら止める」ことだけで、仕様書 §5.4 の
+// 「SET_TARGET を 1 通も受け取るまで出力を許可しない」ゲートは外れない。
+// 外れると setup() が CAN 通信ゼロのままゲートドライバを開く基板になる
+// （ウォッチドッグを実行時フラグにした時点で DC 基板でも到達可能になった経路）。
+static void test_disabled_watchdog_still_requires_first_command() {
+    MotorSafety safety(500);
+    safety.setWatchdogEnabled(false);
+
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(0));
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(100000));
+
+    // ベンチ確認（手打ちの cansend）の逃げ道は残す。最初の 1 通で開き、
+    // 以後は途絶しても閉じない。
+    safety.feed(1000);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(1000));
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(999999));
+}
+
 // 無効化は「最後の砦を 1 枚外す」だけであって、緊急停止まで無効にしてはならない。
 static void test_disabled_watchdog_still_honors_e_stop_latch() {
     MotorSafety safety(500);
@@ -447,6 +485,49 @@ static void test_watchdog_can_be_re_enabled() {
 static void test_protocol_defaults_match_spec() {
     TEST_ASSERT_EQUAL_UINT32(500, kDefaultCommandTimeoutMs);
     TEST_ASSERT_EQUAL_UINT32(10, kDefaultFeedbackIntervalMs);
+}
+
+// --------------------------------------------------------------------------
+// §3.4 / §5.1 タイミングパラメータの受け付け範囲
+// --------------------------------------------------------------------------
+
+// command_timeout_ms（0x04）に上限が無いと、1 フレームでウォッチドッグを実質無効に
+// できる。仕様書 §5.1 が「このフラグの ID は無く CAN からは変更できない」と書いて
+// 最後の砦を守っているのに、猶予そのものを 49.7 日へ伸ばせば同じ結果になる。
+static void test_command_timeout_param_has_upper_bound() {
+    TEST_ASSERT_EQUAL_UINT32(kMaxCommandTimeoutMs, sanitizeCommandTimeoutMs(1e9f, 500));
+    // (uint32_t)(-1.0f) を狙った値。処理系によって 4294967295 か 0 に化ける
+    TEST_ASSERT_EQUAL_UINT32(kMaxCommandTimeoutMs, sanitizeCommandTimeoutMs(4.2949673e9f, 500));
+}
+
+// 負値・0 は「起動直後から永久に出力禁止」に倒れる。止まる方向でも無言で壊れるので弾く。
+// 下限は PC 側の再送周期（既定 500ms に対して 50ms）で、それより短い猶予は
+// 契約どおり再送している健全な機体を止めてしまう。
+static void test_command_timeout_param_has_lower_bound() {
+    TEST_ASSERT_EQUAL_UINT32(kMinCommandTimeoutMs, sanitizeCommandTimeoutMs(-1.0f, 500));
+    TEST_ASSERT_EQUAL_UINT32(kMinCommandTimeoutMs, sanitizeCommandTimeoutMs(0.0f, 500));
+    TEST_ASSERT_EQUAL_UINT32(kMinCommandTimeoutMs, sanitizeCommandTimeoutMs(10.0f, 500));
+}
+
+static void test_command_timeout_param_keeps_values_in_range() {
+    TEST_ASSERT_EQUAL_UINT32(250u, sanitizeCommandTimeoutMs(250.0f, 500));
+    TEST_ASSERT_EQUAL_UINT32(kDefaultCommandTimeoutMs,
+                             sanitizeCommandTimeoutMs(500.0f, kDefaultCommandTimeoutMs));
+}
+
+// 化けた float32 を uint32_t へキャストするのは未定義動作。指令ごと捨てて現在値を保つ。
+static void test_timing_params_reject_nan() {
+    TEST_ASSERT_EQUAL_UINT32(500u, sanitizeCommandTimeoutMs(NAN, 500));
+    TEST_ASSERT_EQUAL_UINT32(10u, sanitizeFeedbackIntervalMs(NAN, 10));
+}
+
+// feedback_interval_ms（0x05）。0 は送信が詰まってバスを埋め、極端に大きい値は
+// PC 側から「基板が死んだ」ようにしか見えない。
+static void test_feedback_interval_param_is_bounded() {
+    TEST_ASSERT_EQUAL_UINT32(kMinFeedbackIntervalMs, sanitizeFeedbackIntervalMs(0.0f, 10));
+    TEST_ASSERT_EQUAL_UINT32(kMinFeedbackIntervalMs, sanitizeFeedbackIntervalMs(-5.0f, 10));
+    TEST_ASSERT_EQUAL_UINT32(kMaxFeedbackIntervalMs, sanitizeFeedbackIntervalMs(1e9f, 10));
+    TEST_ASSERT_EQUAL_UINT32(20u, sanitizeFeedbackIntervalMs(20.0f, 10));
 }
 
 // --------------------------------------------------------------------------
@@ -489,16 +570,44 @@ static void test_switch_to_same_mode_keeps_target() {
     TEST_ASSERT_EQUAL_FLOAT(1000.0f, control.value());
 }
 
-// 仕様書 §3.5: 緊急停止の解除直後は目標値 0 から始める。モードは変えない。
-static void test_clear_value_keeps_mode() {
+// 仕様書 §3.5: 緊急停止の解除直後は「動き出さない目標値」から始める。モードは変えない。
+// duty / velocity では 0 が停止。
+static void test_clear_to_hold_stops_duty_and_velocity() {
+    ControlTarget control;
+    control.setValue(0.3f);
+    control.clearToHold(123.0f);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Duty),
+                            static_cast<uint8_t>(control.mode()));
+
+    control.switchMode(ControlType::Velocity);
+    control.setValue(1500.0f);
+    control.clearToHold(123.0f);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Velocity),
+                            static_cast<uint8_t>(control.mode()));
+}
+
+// position では 0 は「停止」ではなくエンコーダ原点への移動指令であり、
+// 0 に落とすと解除した瞬間に原点まで走り出す（＝§3.5 が防ごうとしている事故そのもの）。
+// サーボ側 ServoMotion::holdHere() と同じく、現在位置で凍結する。
+static void test_clear_to_hold_freezes_position_at_current() {
     ControlTarget control;
     control.switchMode(ControlType::Position);
     control.setValue(45.0f);
 
-    control.clearValue();
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+    control.clearToHold(123.0f);
+    TEST_ASSERT_EQUAL_FLOAT(123.0f, control.value());
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Position),
                             static_cast<uint8_t>(control.mode()));
+}
+
+// シリアルデバッグの "nan" のように復号層を通らない経路もあるので、目標値の側でも弾く。
+static void test_control_target_ignores_nan_value() {
+    ControlTarget control;
+    control.setValue(0.3f);
+    control.setValue(NAN);
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, control.value());
 }
 
 // --------------------------------------------------------------------------
@@ -529,6 +638,19 @@ static void test_pid_reset_clears_integral() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, pid.update(0.0f, 0.1f));
 }
 
+// ワインドアップ制限は NaN を素通しする（integral_ > limit も < -limit も NaN では
+// false）。一度混入すると ki != 0 のとき積分項が永久に NaN のままになり、
+// 正常な目標を与えても出力が NaN → clampDuty で 0 になる。混入した時点で捨てて自己回復する。
+static void test_pid_recovers_from_nan_error() {
+    MotorPid pid(0.5f, 0.001f, 0.0f, 1.0f);
+
+    pid.update(NAN, 0.001f);
+
+    const float output = pid.update(2.0f, 0.001f);
+    TEST_ASSERT_TRUE(output == output);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, output);
+}
+
 static void test_pid_integral_windup_is_limited() {
     MotorPid pid(0.0f, 1.0f, 0.0f, 1.0f);
     for (int i = 0; i < 1000; ++i) {
@@ -548,9 +670,11 @@ int main(int, char **) {
     RUN_TEST(test_decode_set_target);
     RUN_TEST(test_decode_set_target_rejects_unknown_type);
     RUN_TEST(test_decode_set_target_rejects_short_frame);
+    RUN_TEST(test_decode_set_target_rejects_nan);
     RUN_TEST(test_decode_set_mode);
     RUN_TEST(test_decode_set_param);
     RUN_TEST(test_decode_set_param_unknown_id_is_ignored);
+    RUN_TEST(test_decode_set_param_rejects_nan);
     RUN_TEST(test_decode_e_stop_stop);
     RUN_TEST(test_decode_e_stop_clear_requires_magic);
     RUN_TEST(test_decode_e_stop_wrong_magic_is_not_clear);
@@ -574,16 +698,25 @@ int main(int, char **) {
     RUN_TEST(test_command_lost_separates_startup_from_dropout);
     RUN_TEST(test_watchdog_is_enabled_by_default);
     RUN_TEST(test_disabled_watchdog_allows_output_and_hides_bit4);
+    RUN_TEST(test_disabled_watchdog_still_requires_first_command);
     RUN_TEST(test_disabled_watchdog_still_honors_e_stop_latch);
     RUN_TEST(test_watchdog_can_be_re_enabled);
     RUN_TEST(test_protocol_defaults_match_spec);
+    RUN_TEST(test_command_timeout_param_has_upper_bound);
+    RUN_TEST(test_command_timeout_param_has_lower_bound);
+    RUN_TEST(test_command_timeout_param_keeps_values_in_range);
+    RUN_TEST(test_timing_params_reject_nan);
+    RUN_TEST(test_feedback_interval_param_is_bounded);
     RUN_TEST(test_control_target_starts_stopped_in_duty);
     RUN_TEST(test_switch_mode_resets_target_to_zero);
     RUN_TEST(test_switch_to_same_mode_keeps_target);
-    RUN_TEST(test_clear_value_keeps_mode);
+    RUN_TEST(test_clear_to_hold_stops_duty_and_velocity);
+    RUN_TEST(test_clear_to_hold_freezes_position_at_current);
+    RUN_TEST(test_control_target_ignores_nan_value);
     RUN_TEST(test_pid_proportional_only);
     RUN_TEST(test_pid_no_derivative_kick_on_first_update);
     RUN_TEST(test_pid_reset_clears_integral);
+    RUN_TEST(test_pid_recovers_from_nan_error);
     RUN_TEST(test_pid_integral_windup_is_limited);
     return UNITY_END();
 }

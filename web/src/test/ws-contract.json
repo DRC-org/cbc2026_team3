@@ -195,6 +195,7 @@
             "sync_violations": []
           }
         ],
+        "refreshers_running": true,
         "sync_monitors": [
           {
             "axes": [
@@ -204,7 +205,16 @@
             "violated": []
           }
         ],
-        "sync_violations": []
+        "sync_violations": [],
+        "target_refreshers": [
+          {
+            "motors": [
+              "gripper"
+            ],
+            "paused": false,
+            "running": true
+          }
+        ]
       },
       "sequence": "main_hand_seq",
       "step_index": 0,

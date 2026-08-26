@@ -32,6 +32,17 @@ export function TriggerButton({
     );
   }
 
+  // シーケンスが 1 件も届いていない状態。最後の return (RUNNING) へ落とすと、
+  // 状態表示と主操作が同じ画面で食い違う
+  if (kind === "no_sequence") {
+    return (
+      <Button disabled className={FILL_CLASS} aria-label="操作不可: シーケンス未取得">
+        <Icon as={Ban} />
+        シーケンス未取得
+      </Button>
+    );
+  }
+
   if (kind === "complete") {
     return (
       <Button disabled tone="ok" className={FILL_CLASS} aria-label="シーケンス完走">

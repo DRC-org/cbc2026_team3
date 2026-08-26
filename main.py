@@ -5,7 +5,7 @@ import asyncio
 import importlib
 import logging
 import pathlib
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 import can
 import yaml
@@ -505,6 +505,21 @@ class _PlaceholderSequence(Sequence):
     pass
 
 
+async def _shutdown_step(label: str, awaitable: Awaitable[None]) -> None:
+    """終了処理の 1 手順を実行する。失敗しても残りの手順へ進む。
+
+    後始末は「全ループを止める → 全 CAN を落とす」の順に並んでおり、途中の 1 つが
+    例外を投げた時点で以降が丸ごと飛ぶと、2 台目のロボットのバスが開いたまま
+    残る。止める処理が止まる形は安全側ではないので、失敗は記録して先へ進める。
+    """
+    try:
+        await awaitable
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("終了処理に失敗しました (%s)。残りの後始末は続行します", label)
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -654,17 +669,17 @@ async def main() -> None:
         # 例外・キャンセルのどちらで抜けてもここを通す。ループが生き残ると
         # 電流指令が出続けるため、CAN シャットダウンより先に必ず止める
         for loop in position_loops:
-            await loop.stop()
+            await _shutdown_step(f"位置制御ループ (bus={loop.bus_name})", loop.stop())
         # 再送を止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
         # 停止指令をここから送らないのは、PC が落ちた場合と経路を 1 本に保つため
         for refresher in target_refreshers:
-            await refresher.stop()
+            await _shutdown_step("目標値再送", refresher.stop())
         # 監視だけが生き残ると、停止済みのモータのフィードバックを見て誤発報する
         for monitor in sync_monitors:
-            await monitor.stop()
+            await _shutdown_step("同期監視", monitor.stop())
         for mgr in can_managers:
-            await mgr.shutdown()
-        await server.cleanup()
+            await _shutdown_step("CAN シャットダウン", mgr.shutdown())
+        await _shutdown_step("サーバー終了処理", server.cleanup())
 
 
 if __name__ == "__main__":

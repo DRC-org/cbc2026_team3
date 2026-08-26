@@ -66,6 +66,21 @@ static void test_broadcast_device_id_is_only_for_e_stop() {
     TEST_ASSERT_FALSE(routeStandard(0x3FF, kServoIds, 3).accepted);
 }
 
+// チャンネル数が channelMask のビット数を超えた基板では、先頭 8 チャンネルだけを
+// 見て「受理」と答えてはならない。ブロードキャスト E_STOP が 9 番目以降へ届かない
+// のに届いたことになり、**止まらないチャンネルを持ったまま動く基板**ができる。
+// 「全員に届ける」ことが仕事の関数の失敗モードは、切り詰めではなく全拒否にする
+// （フレームを 1 通も処理しなければ SET_TARGET も通らず、その基板は駆動しない）。
+// 通常は config.h の static_assert が先に弾くので、ここは最後の防壁。
+static void test_channel_count_beyond_mask_width_is_rejected() {
+    const uint8_t ids[10] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A};
+    TEST_ASSERT_FALSE(routeStandard(kBroadcastEStopCanId, ids, 10).accepted);
+    TEST_ASSERT_FALSE(routeStandard(buildCanId(CommandType::SetTarget, 0x01), ids, 10).accepted);
+
+    // 上限ちょうどは従来どおり受理する
+    TEST_ASSERT_TRUE(routeStandard(kBroadcastEStopCanId, ids, kMaxChannels).accepted);
+}
+
 // --------------------------------------------------------------------------
 // §2.2 / §7.1 宛先判定
 // --------------------------------------------------------------------------
@@ -289,6 +304,7 @@ int main(int, char **) {
     RUN_TEST(test_broadcast_e_stop_reaches_unconfigured_channels);
     RUN_TEST(test_e_stop_to_other_device_is_dropped);
     RUN_TEST(test_broadcast_device_id_is_only_for_e_stop);
+    RUN_TEST(test_channel_count_beyond_mask_width_is_rejected);
     RUN_TEST(test_own_frame_is_routed_to_matching_channel);
     RUN_TEST(test_frames_for_other_devices_are_dropped);
     RUN_TEST(test_unconfigured_device_receives_only_broadcast_e_stop);

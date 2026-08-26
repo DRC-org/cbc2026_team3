@@ -93,9 +93,28 @@ describe("robotReducer", () => {
       command: "set_param",
       reason: "試合中はパラメータを変更できません",
       receivedAtMs: NOW,
+      source: "server",
     });
 
     expect(robotReducer(rejected, { type: "clear_rejection" }).rejection).toBeNull();
+  });
+
+  it("送信できなかった操作を、サーバーの拒否と区別して保持する", () => {
+    // 「サーバーが断った」と「そもそも届いていない」では操縦者の次の一手が違う。
+    // 前者は条件を満たせば通るが、後者は機体が指令を受け取っていない
+    const unsent = robotReducer(INITIAL_ROBOT_UI_STATE, {
+      type: "command_unsent",
+      command: "e_stop",
+      reason: "切断中のため緊急停止を送信できませんでした",
+      nowMs: NOW,
+    });
+
+    expect(unsent.rejection).toEqual({
+      command: "e_stop",
+      reason: "切断中のため緊急停止を送信できませんでした",
+      receivedAtMs: NOW,
+      source: "local",
+    });
   });
 
   describe("motor_check_*", () => {

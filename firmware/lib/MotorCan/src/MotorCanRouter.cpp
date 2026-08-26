@@ -14,7 +14,12 @@ FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceId
         return rejected();
     }
     if (channelCount > kMaxChannels) {
-        channelCount = kMaxChannels;
+        // 切り詰めると 9 番目以降のチャンネルへブロードキャスト E_STOP が届かないのに
+        // 「受理」と答えることになり、止まらないチャンネルを持ったまま動く基板になる。
+        // 「全員に届ける」ことが仕事の関数なので、全部を捨てる方に倒す（フレームを
+        // 1 通も処理しなければ SET_TARGET も通らず、その基板はそもそも駆動しない）。
+        // 通常は config.h の static_assert が先に弾くので、これは最後の防壁。
+        return rejected();
     }
 
     const CanIdInfo info = parseCanId(canId);

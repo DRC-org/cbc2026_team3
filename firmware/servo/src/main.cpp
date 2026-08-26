@@ -5,8 +5,13 @@
 //
 // 責務の分割:
 //   MotorCan（Arduino 非依存）… フレームの符号化・復号、宛先判定、緊急停止ラッチ、
-//                                ウォッチドッグ、角度補間、周期タイマ、シリアル行組み立て
+//                                ウォッチドッグ、角度補間、**両者の結線**（ServoChannel）、
+//                                周期タイマ、シリアル行組み立て
 //   このファイル              … ペリフェラル初期化、チャンネル管理、CAN 送受信の配線
+//
+// 「出力禁止中は角度指令を受け付けず、補間より先に現在角で凍結する」（§7.5）は
+// ServoChannel が持つ。ここで ServoMotion / MotorSafety を直に触ると、その規則を
+// 迂回する経路（＝緊急停止中に動くサーボ）が書けてしまう。
 //
 // DC 用（firmware/dc_motor）と同じ判断をする箇所は MotorCan 側に置くこと。
 // 両 main.cpp が同じ分岐を各自で持つと、片方だけ直したことに誰も気付けない。
@@ -24,8 +29,8 @@
 #include "MotorCanProtocol.h"
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
-#include "MotorSafety.h"
 #include "SerialLineBuffer.h"
+#include "ServoChannel.h"
 #include "ServoMotion.h"
 #include "config.h"
 #include "pwm.h"
@@ -70,10 +75,10 @@ static constexpr bool servoDeviceIdsAreUnique() {
 }
 static_assert(servoDeviceIdsAreUnique(), "config.h のチャンネル表でデバイス ID が重複している");
 
-// 下の g_pwm / g_motion / g_safety は各チャンネルを明示的に初期化している。
+// 下の g_pwm / g_channel は各チャンネルを明示的に初期化している。
 // チャンネルを増やすときはそれらの初期化子も一緒に足すこと。
 static_assert(kServoChannelCount == 3,
-              "チャンネル数を変えたら g_pwm / g_motion / g_safety の初期化子も更新すること");
+              "チャンネル数を変えたら g_pwm / g_channel の初期化子も更新すること");
 
 // 宛先判定の結果はチャンネルのビットマスク（uint8_t）で返ってくる。
 static_assert(kServoChannelCount <= motorcan::kMaxChannels,
@@ -89,18 +94,15 @@ static PwmOut g_pwm[kServoChannelCount] = {
     PwmOut(kServoChannels[2].pin),
 };
 
-static ServoMotion g_motion[kServoChannelCount] = {
-    ServoMotion(kServoChannels[0].initialAngleDeg, kServoChannels[0].limits),
-    ServoMotion(kServoChannels[1].initialAngleDeg, kServoChannels[1].limits),
-    ServoMotion(kServoChannels[2].initialAngleDeg, kServoChannels[2].limits),
-};
-
 // 仕様書 §5.4: 起動時の緊急停止ラッチは解除済み。§7.1 のとおり宛先がチャンネルなので
-// ウォッチドッグもチャンネルごとに独立して動く。
-static MotorSafety g_safety[kServoChannelCount] = {
-    MotorSafety(kDefaultCommandTimeoutMs),
-    MotorSafety(kDefaultCommandTimeoutMs),
-    MotorSafety(kDefaultCommandTimeoutMs),
+// ウォッチドッグも補間もチャンネルごとに独立して動く。
+static ServoChannel g_channel[kServoChannelCount] = {
+    ServoChannel(kServoChannels[0].initialAngleDeg, kServoChannels[0].limits,
+                 kDefaultCommandTimeoutMs),
+    ServoChannel(kServoChannels[1].initialAngleDeg, kServoChannels[1].limits,
+                 kDefaultCommandTimeoutMs),
+    ServoChannel(kServoChannels[2].initialAngleDeg, kServoChannels[2].limits,
+                 kDefaultCommandTimeoutMs),
 };
 
 // DIP オフセット適用後の実効デバイス ID。0x00 なら駆動しない（§2.2 / §7.1）。
@@ -134,14 +136,17 @@ static bool isChannelConfigured(uint8_t ch) {
 }
 
 // 緊急停止ラッチとウォッチドッグ（WATCHDOG_ENABLED による無効化を含む）の判定は
-// MotorSafety が持つ。ここで isExpired() を直に見ると無効化フラグを迂回する。
+// MotorSafety が持ち、ServoChannel 経由でのみ触る。ここで isExpired() を直に見ると
+// 無効化フラグと §5.4 の「最初の指令まで出力禁止」の両方を迂回する。
 static bool isDriveAllowed(uint8_t ch, uint32_t nowMs) {
-    return g_safety[ch].isOutputAllowed(nowMs);
+    return g_channel[ch].isOutputAllowed(nowMs);
 }
 
-// サーボへのパルス出力はすべてこの関数を通す。
-// ラッチ・ウォッチドッグ・ID 未設定・可動範囲クランプのいずれかを迂回する経路を作らないため
-// （dc_motor の applyOutput() と同じ方針）。
+// サーボへのパルス出力はすべてこの関数を通す。ID 未設定・可動範囲クランプ・脱力設定の
+// いずれかを迂回する経路を作らないため（dc_motor の applyOutput() と同じ方針）。
+//
+// 仕様書 §7.5 の「新しい角度指令を受け付けず現在角を保持する」は ServoChannel が持つ。
+// ここで凍結すると補間より後ろになり、凍結する前に 1 ティック分だけ進んでしまう。
 static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
     if (!isChannelConfigured(ch) || !g_pwmStarted[ch]) {
         // 設定ミスで意図しないアクチュエータが動くより、動かない方が安全。
@@ -150,25 +155,17 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
         return;
     }
 
-    if (!isDriveAllowed(ch, nowMs)) {
-        // 仕様書 §7.5: 新しい角度指令の受け付けを止め、その時点の角度を保持し続ける。
-        // 目標角を現在角へ落としておくことで、緊急停止を解除した瞬間に動き出すこともない
-        // （DC 用が §3.5 で目標値を 0 に戻すのと同じ意図。サーボで目標 0 にすると
-        //  angle_min まで振れてしまうので、代わりに現在角で凍結する）。
-        g_motion[ch].holdHere(nowMs);
-
-        if (kEStopDetach) {
-            // 脱力させたい機構のための切り替え。既定は false。
-            // パルス幅 0 でサーボへのフレームが消え、出力軸が back-drivable になる。
-            g_pwm[ch].pulseWidth_us(0);
-            return;
-        }
+    if (kEStopDetach && !isDriveAllowed(ch, nowMs)) {
+        // 脱力させたい機構のための切り替え。既定は false。
+        // パルス幅 0 でサーボへのフレームが消え、出力軸が back-drivable になる。
+        g_pwm[ch].pulseWidth_us(0);
+        return;
     }
 
     // ここに来る角度は ServoMotion が angle_min / angle_max でクランプ済み（仕様書 §7.2）。
     // angleToPulseUs 側でもパルス幅を [minUs, maxUs] に収める二重の防壁になっている。
     const uint16_t pulseUs =
-        angleToPulseUs(g_motion[ch].currentAngleDeg(), kServoChannels[ch].pulse);
+        angleToPulseUs(g_channel[ch].currentAngleDeg(), kServoChannels[ch].pulse);
     g_pwm[ch].pulseWidth_us(static_cast<int>(pulseUs));
 }
 
@@ -178,7 +175,8 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 
 static void updateMotion(uint32_t nowMs) {
     for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-        g_motion[ch].update(nowMs);
+        // tick() が「出力禁止なら補間より先に現在角で凍結する」まで面倒を見る（§7.5）。
+        g_channel[ch].tick(nowMs);
         applyChannelOutput(ch, nowMs);
     }
 }
@@ -191,8 +189,8 @@ static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
     // bit4 は指令を一度でも受けた後の満了でのみ立ち、無効化した基板では立たない。
     // ここで手で組み立て直すと、DC 用と同じ条件で立つ保証が無くなる。
-    uint8_t flags = g_safety[ch].statusFlags(nowMs);
-    if (g_motion[ch].isReached()) {
+    uint8_t flags = g_channel[ch].safetyStatusFlags(nowMs);
+    if (g_channel[ch].isReached()) {
         // 仕様書 §7.3: これは実測ではなく補間の完了を示す推定値。
         // 脱調・過負荷・メカ干渉で実際には動いていなくても立つ。
         flags |= status_flag::kReached;
@@ -208,9 +206,11 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
     uint8_t data[kFrameLength];
 
     // 仕様書 §7.4: 位置は補間中の「指令角」であって実測ではない。単位は 0.1deg。
-    const int32_t position = static_cast<int32_t>(lroundf(g_motion[ch].currentAngleDeg() * 10.0f));
+    const int32_t position =
+        static_cast<int32_t>(lroundf(g_channel[ch].currentAngleDeg() * 10.0f));
     // スルーレート [deg/s] を出力軸 rpm へ。deg/s ÷ 360 × 60 = deg/s ÷ 6。
-    const int32_t rpm = static_cast<int32_t>(lroundf(g_motion[ch].currentSlewDegPerSec() / 6.0f));
+    const int32_t rpm =
+        static_cast<int32_t>(lroundf(g_channel[ch].currentSlewDegPerSec() / 6.0f));
 
     encodeFeedback(data, position, rpm, 0, 0, buildStatusFlags(ch, nowMs));
 
@@ -226,32 +226,35 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
 static void applyServoParam(uint8_t ch, const ServoParamCommand &cmd) {
     switch (cmd.id) {
         case ServoParamId::CommandTimeoutMs:
-            g_safety[ch].setTimeoutMs(static_cast<uint32_t>(cmd.value));
+            // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
+            // SET_PARAM 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。
+            // 範囲の根拠と NaN の扱いは MotorCanProtocol が持つ。
+            g_channel[ch].setCommandTimeoutMs(
+                sanitizeCommandTimeoutMs(cmd.value, g_channel[ch].commandTimeoutMs()));
             break;
         case ServoParamId::FeedbackIntervalMs:
-            // 0 にすると送信が詰まってバスを埋めるので下限を置く。
             // 周期は基板全体で 1 つ（チャンネルごとに変えると位相の分散が崩れる）。
-            g_feedbackIntervalMs = cmd.value < 1.0f ? 1u : static_cast<uint32_t>(cmd.value);
+            g_feedbackIntervalMs = sanitizeFeedbackIntervalMs(cmd.value, g_feedbackIntervalMs);
             break;
         case ServoParamId::ReachedTolerance:
-            g_motion[ch].setReachedToleranceDeg(cmd.value);
+            g_channel[ch].setReachedToleranceDeg(cmd.value);
             break;
         case ServoParamId::SlewRate: {
-            ServoLimits limits = g_motion[ch].limits();
+            ServoLimits limits = g_channel[ch].limits();
             limits.slewRateDegPerSec = cmd.value;
-            g_motion[ch].setLimits(limits);
+            g_channel[ch].setLimits(limits);
             break;
         }
         case ServoParamId::AngleMin: {
-            ServoLimits limits = g_motion[ch].limits();
+            ServoLimits limits = g_channel[ch].limits();
             limits.angleMinDeg = cmd.value;
-            g_motion[ch].setLimits(limits);
+            g_channel[ch].setLimits(limits);
             break;
         }
         case ServoParamId::AngleMax: {
-            ServoLimits limits = g_motion[ch].limits();
+            ServoLimits limits = g_channel[ch].limits();
             limits.angleMaxDeg = cmd.value;
-            g_motion[ch].setLimits(limits);
+            g_channel[ch].setLimits(limits);
             break;
         }
     }
@@ -264,7 +267,9 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
             // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
             // 養わないと解除した直後に満了済みで動かない。
             // 制御タイプが position でなくても養うのは、通信自体は生きているため。
-            g_safety[ch].feed(nowMs);
+            // 受理判定（ServoChannel::setTarget）より必ず先に呼ぶこと。起動直後は
+            // §5.4 により未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる。
+            g_channel[ch].feed(nowMs);
 
             const SetTargetCommand cmd = decodeSetTarget(msg.data, msg.data_length);
             if (!cmd.valid) {
@@ -278,8 +283,9 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
 #if ENABLE_SERIAL_DEBUG
             g_serialOverride = false;
 #endif
-            // setTarget が angle_min / angle_max でクランプする（§7.2）。
-            g_motion[ch].setTarget(cmd.value, nowMs);
+            // setTarget が angle_min / angle_max でクランプし（§7.2）、緊急停止ラッチ中・
+            // ウォッチドッグ満了中は受け付けない（§7.5）。
+            g_channel[ch].setTarget(cmd.value, nowMs);
             break;
         }
         case CommandType::SetMode:
@@ -295,9 +301,11 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
             break;
         }
         case CommandType::EStop: {
-            const EStopAction action = g_safety[ch].handleEStopFrame(msg.data, msg.data_length);
+            // 停止でも解除でも、その場で現在角の保持へ倒す（§7.5）。凍結そのものは
+            // ServoChannel が行い、ここは脱力設定のときにパルスを切るために出力を回す。
+            const EStopAction action =
+                g_channel[ch].handleEStopFrame(msg.data, msg.data_length, nowMs);
             if (action != EStopAction::None) {
-                // 停止でも解除でも、その場で現在角の保持へ倒す（§7.5）。
                 applyChannelOutput(ch, nowMs);
 #if ENABLE_SERIAL_DEBUG
                 g_serialOverride = false;
@@ -399,7 +407,7 @@ static void pollSerial(uint32_t nowMs) {
         if (line[0] == 's' || line[0] == 'S') {
             g_serialOverride = false;
             for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-                g_motion[ch].holdHere(nowMs);
+                g_channel[ch].hold(nowMs);
             }
         } else {
             // チャンネル番号と角度が空白で区切られていない行は捨てる。
@@ -408,7 +416,8 @@ static void pollSerial(uint32_t nowMs) {
             const long ch = strtol(line, &sep, 10);
             if (sep != line && *sep == ' ' && ch >= 0 &&
                 ch < static_cast<long>(kServoChannelCount)) {
-                g_motion[ch].setTarget(strtof(sep + 1, nullptr), nowMs);
+                // 緊急停止ラッチ中はシリアルからも角度を通さない（ServoChannel が拒否する）。
+                g_channel[ch].setTarget(strtof(sep + 1, nullptr), nowMs);
                 g_serialOverride = true;
             }
         }
@@ -419,7 +428,7 @@ static void pollSerial(uint32_t nowMs) {
     // 'S' 入力・CAN の SET_TARGET・電源断のいずれでもこのモードは解除される。
     if (g_serialOverride) {
         for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-            g_safety[ch].feed(nowMs);
+            g_channel[ch].feed(nowMs);
         }
     }
 }
@@ -464,7 +473,7 @@ void setup() {
         // PwmOut::begin() の引数無し版は 490Hz・duty 50% で始まり、サーボにとっては
         // 意味不明な指令になるので、周期とパルス幅を明示して初期角から立ち上げる。
         const uint16_t initialPulseUs =
-            angleToPulseUs(g_motion[ch].currentAngleDeg(), kServoChannels[ch].pulse);
+            angleToPulseUs(g_channel[ch].currentAngleDeg(), kServoChannels[ch].pulse);
         g_pwmStarted[ch] =
             g_pwm[ch].begin(kServoPwmPeriodUs, static_cast<uint32_t>(initialPulseUs));
     }
@@ -475,14 +484,14 @@ void setup() {
     // （§7.5 のとおり出力は切らず、初期角を保持したままになる）。
     if (!CAN.begin(CanBitRate::BR_1000k)) {
         for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-            g_safety[ch].stop();
+            g_channel[ch].stop(startMs);
         }
     }
 
     // config.h のビルド時フラグを実行時フラグへ写す（仕様書 §5.1 / §8）。
     // 判定そのものは MotorSafety にしか無いので、写し忘れれば有効のまま動く。
     for (uint8_t ch = 0; ch < kServoChannelCount; ++ch) {
-        g_safety[ch].setWatchdogEnabled(WATCHDOG_ENABLED != 0);
+        g_channel[ch].setWatchdogEnabled(WATCHDOG_ENABLED != 0);
     }
 
     g_motionTimer.reset(startMs);

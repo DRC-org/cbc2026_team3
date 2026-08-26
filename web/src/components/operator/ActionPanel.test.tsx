@@ -115,6 +115,31 @@ describe("ActionPanel", () => {
     });
   });
 
+  /**
+   * シーケンスが 1 件も届いていない状態 (`total_steps === 0`)。サーバー側の
+   * 定義ミスや起動途中で実際に起こりうる。ここを暗黙のフォールバックに任せると、
+   * 状態表示は「待機中 — START で開始」なのにボタンだけが「RUNNING」を主張し、
+   * 操縦者は同じ画面から相反する 2 つの事実を読むことになる。
+   */
+  describe("シーケンス未取得", () => {
+    it("チップとボタンが同じことを言う", () => {
+      mount(makeState({ total_steps: 0, steps: [], current_step: null }));
+
+      expect(screen.getAllByText("シーケンス未取得").length).toBeGreaterThan(1);
+      expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
+      expect(screen.queryByText(/待機中/)).not.toBeInTheDocument();
+    });
+
+    it("開始も停止もさせない (押せるボタンが無い)", () => {
+      mount(makeState({ total_steps: 0, steps: [], current_step: null }));
+
+      // START を出すと、ステップの無いシーケンスを開始させることになる
+      expect(screen.queryByRole("button", { name: "シーケンスを先頭から開始" })).toBeNull();
+      expect(screen.getByRole("button", { name: "シーケンスを通常停止" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();
+    });
+  });
+
   it("試合中以外は主操作を全て塞ぐ", () => {
     mount(makeState(), { inMatch: false });
 

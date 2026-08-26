@@ -351,12 +351,15 @@ static void handleFrame(const CanMsg &msg) {
                     g_maxDuty = clampDuty(cmd.value, 1.0f);
                     break;
                 case ParamId::CommandTimeoutMs:
-                    g_safety.setTimeoutMs(static_cast<uint32_t>(cmd.value));
+                    // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
+                    // SET_PARAM 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。
+                    // 範囲の根拠と NaN の扱いは MotorCanProtocol が持つ。
+                    g_safety.setTimeoutMs(
+                        sanitizeCommandTimeoutMs(cmd.value, g_safety.timeoutMs()));
                     break;
                 case ParamId::FeedbackIntervalMs:
-                    // 0 にすると送信が詰まってバスを埋めるので下限を置く
                     g_feedbackIntervalMs =
-                        cmd.value < 1.0f ? 1u : static_cast<uint32_t>(cmd.value);
+                        sanitizeFeedbackIntervalMs(cmd.value, g_feedbackIntervalMs);
                     break;
                 case ParamId::OvercurrentThresholdMa:
                     g_overcurrentThresholdMa = cmd.value;
@@ -378,9 +381,10 @@ static void handleFrame(const CanMsg &msg) {
             if (action == EStopAction::Stop) {
                 applyOutput(0.0f, nowMs);
             } else if (action == EStopAction::Clear) {
-                // 仕様書 §3.5: 解除直後の目標値は 0 から始める。
-                // 停止前の目標を復元すると解除した瞬間にモータが動き出す。
-                g_control.clearValue();
+                // 仕様書 §3.5: 解除直後は動き出さない目標値から始める。
+                // position では 0 が原点への移動指令になるため現在位置で凍結する
+                // （規則は ControlTarget が持つ）。
+                g_control.clearToHold(g_positionDeg);
                 g_pid.reset();
 #if ENABLE_SERIAL_DEBUG
                 g_serialOverride = false;
@@ -450,7 +454,8 @@ static void pollSerial(uint32_t nowMs) {
 
         if (line[0] == 's' || line[0] == 'S') {
             g_serialOverride = false;
-            g_control.clearValue();
+            // position モードのまま 's' を押しても原点へ走り出さないこと（§3.5 と同じ規則）。
+            g_control.clearToHold(g_positionDeg);
         } else {
             switchMode(ControlType::Duty);
             // 数値として読めない行は 0 になる。duty 0 = 停止なので安全側に落ちる。

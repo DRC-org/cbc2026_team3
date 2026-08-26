@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import can
 import pytest
 
-from lib.drivers.base import ControlMode, MotorState
+from lib.drivers.base import ControlMode
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import (
     AxisHandle,
@@ -16,11 +16,11 @@ from lib.sequence.motors import (
     build_motor_group,
 )
 from lib.sequence.positions import AxisSpec, MotorSpec
-from tests.fake_drivers import CheckStubDriver
+from tests.fake_drivers import StubFeedbackDriver
 
 
-class _FakeDriver(CheckStubDriver):
-    """CAN プロトコルに依存せず encode/state だけを差し替えられるテスト用ドライバ。"""
+class _FakeDriver(StubFeedbackDriver):
+    """送った指令を記録するテスト用ドライバ (観測値の投入は基底の set_observed)。"""
 
     def __init__(self, name: str = "m1", can_id: int = 1) -> None:
         super().__init__(name, can_id)
@@ -28,16 +28,7 @@ class _FakeDriver(CheckStubDriver):
 
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
         self.encoded.append((mode, value))
-        return can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8), is_extended_id=False)
-
-    def decode_feedback(self, msg: can.Message) -> MotorState:  # pragma: no cover
-        return self._state
-
-    def matches_feedback(self, msg: can.Message) -> bool:  # pragma: no cover
-        return False
-
-    def set_observed(self, **kwargs: float) -> None:
-        self._state = MotorState(**kwargs)
+        return super().encode_target(mode, value)
 
 
 def _make_can_manager() -> MagicMock:

@@ -11,12 +11,14 @@ import ast
 import inspect
 
 from lib.can_manager import CANManager
-from lib.config_schema import DEFAULT_HEALTH, DEFAULT_MOTOR_CHECK, HealthThresholds
+from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.drivers.base import MotorDriver
 from lib.motor_check import MotorCheckRunner
+from lib.sequence.engine import Sequence
 from lib.server import RobotServer
+from tests.server_fixtures import ServerFixture
 
 
 def _default_of(func, name: str) -> object:
@@ -47,6 +49,20 @@ def _default_source(func, name: str) -> str:
     if name not in defaults:
         raise AssertionError(f"{func.__qualname__} に既定値つきの引数 {name} が無い")
     return ast.unparse(defaults[name])
+
+
+def _body_references(func, dotted: str) -> bool:
+    """関数本体がその参照をそのまま書いているか。
+
+    引数の既定値に置けない既定 (None のときだけ使う fallback など) は
+    ``_default_source`` では見えない。値の一致で確かめるには本番の private を
+    覗くしかなく、テストのためだけに公開 API を生やすことになるので、
+    ここでも「どう書かれているか」を見る。
+    """
+    tree = ast.parse(inspect.getsource(func).lstrip())
+    return any(
+        isinstance(node, ast.Attribute) and ast.unparse(node) == dotted for node in ast.walk(tree)
+    )
 
 
 class TestDefaultsComeFromConfigSchema:
@@ -92,8 +108,12 @@ class TestFeedbackStalenessHasOneName:
         assert "feedback_freshness_ms" not in params
 
     def test_motor_check_default_magnitude_comes_from_config_schema(self) -> None:
-        runner = MotorCheckRunner(robot_name="r", can_manager=None, motors={})
-        assert runner._default_magnitude == dict(DEFAULT_MOTOR_CHECK.default_magnitude)
+        """既定 magnitude は引数既定ではなく本体の fallback にある (None 判定を挟むため)。"""
+        assert _body_references(MotorCheckRunner.__init__, "DEFAULT_MOTOR_CHECK.default_magnitude")
+
+
+class _NoStepSequence(Sequence):
+    """ステップを 1 つも持たないシーケンス (ヘルス配線の検証に進行は要らない)。"""
 
 
 class _RecordingCANManager:
@@ -117,11 +137,11 @@ class TestServerForwardsThresholdsAsOneUnit:
             temp_critical_c=33.0,
             tx_error_threshold=44,
         )
-        server = RobotServer(health=thresholds)
+        fx = ServerFixture.build(health=thresholds)
         mgr = _RecordingCANManager()
-        server._robots["r"] = type("Ctx", (), {"can_manager": mgr})()
+        fx.add_robot("r", _NoStepSequence("r"), mgr)  # type: ignore[arg-type]
 
-        server._compute_health("r")
+        fx.health("r")
 
         assert mgr.received is thresholds
 

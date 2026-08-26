@@ -25,6 +25,12 @@ export interface CommandRejectedEvent {
   command: string;
   reason: string;
   receivedAtMs: EpochMs;
+  /**
+   * 誰が止めたか。`server` はサーバーが条件を見て拒否したもので、条件を満たせば通る。
+   * `local` は WS が切れていて送信自体ができなかったもので、機体は指令を受け取っていない。
+   * 操縦者の次の一手が変わるため、同じ通知枠でも文言を分ける。
+   */
+  source: "server" | "local";
 }
 
 export type MotorCheckStatus = "idle" | "running" | "completed" | "error";
@@ -58,6 +64,8 @@ export type RobotAction =
   | { type: "message"; message: ServerMessage; nowMs: EpochMs }
   /** 操縦者操作の楽観的更新。サーバーの e_stop_state が届くまでの空白を埋める */
   | { type: "e_stop_local"; active: boolean }
+  /** 切断中で送信できなかった操作。押したのに何も起きない状態を黙らせない */
+  | { type: "command_unsent"; command: string; reason: string; nowMs: EpochMs }
   | { type: "clear_rejection" };
 
 /** 未実行の初期値。UI 側 (`useMotorCheck` / テストヘルパ) も必ずこれを使う */
@@ -138,7 +146,12 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
     case "command_rejected":
       return {
         ...state,
-        rejection: { command: message.command, reason: message.reason, receivedAtMs: nowMs },
+        rejection: {
+          command: message.command,
+          reason: message.reason,
+          receivedAtMs: nowMs,
+          source: "server",
+        },
       };
 
     case "health_change": {
@@ -206,6 +219,16 @@ export function robotReducer(state: RobotUiState, action: RobotAction): RobotUiS
       return applyMessage(state, action.message, action.nowMs);
     case "e_stop_local":
       return state.eStopActive === action.active ? state : { ...state, eStopActive: action.active };
+    case "command_unsent":
+      return {
+        ...state,
+        rejection: {
+          command: action.command,
+          reason: action.reason,
+          receivedAtMs: action.nowMs,
+          source: "local",
+        },
+      };
     case "clear_rejection":
       return state.rejection === null ? state : { ...state, rejection: null };
   }

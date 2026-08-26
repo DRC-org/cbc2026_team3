@@ -36,6 +36,11 @@ _FLAG_E_STOP = 0x08
 _FLAG_WATCHDOG = 0x10
 _FLAG_UNCONFIGURED_ID = 0x20
 
+# デバイス ID の範囲 (仕様書 §2.2)。0x00 は「DIP 設定忘れ」、0xFF は E_STOP
+# ブロードキャストの予約なので、どちらも個別デバイスの ID として使ってはならない。
+_DEVICE_ID_MIN = 0x01
+_DEVICE_ID_MAX = 0xFE
+
 # E_STOP 解除フレームのマジックバイト (仕様書 §3.5)。
 # 1 バイトの値だけで安全装置が解除されるのを避けるため、ファームは Byte1/Byte2 の
 # 一致も要求する。バス上のビット化けや無関係なフレームで解除されてはならない。
@@ -57,6 +62,17 @@ class GenericDriver(MotorDriver):
         *,
         control_type: ControlMode = ControlMode.POSITION,
     ) -> None:
+        # 範囲外の can_id は静かに壊れる。特に 0xFF は activation_steps() が
+        # 緊急停止**解除**フレームを 0x7FF (ブロードキャスト) へ送ることになり、
+        # 共有 can_generic バス上の全基板のラッチをまとめて外す。
+        # 0x100 以上はコマンド種別のビットを侵食し、SET_TARGET が FEEDBACK として
+        # 読まれるフレームになる (何も駆動せず永久に STALE)。
+        # 0x00 はファームが駆動を拒否する ID で、実行時に bit5 で分かるが遅い。
+        if not _DEVICE_ID_MIN <= can_id <= _DEVICE_ID_MAX:
+            raise ValueError(
+                f"can_id は {_DEVICE_ID_MIN:#04x}〜{_DEVICE_ID_MAX:#04x} の範囲"
+                f"(0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約): {can_id}"
+            )
         super().__init__(name, can_id)
         # フィードバック Byte7 の bit1/bit2 は MotorState に持たせず、ドライバ側で保持する
         # (MotorState は frozen dataclass で他ドライバ共通のため、汎用化を避けて専用属性に分離)

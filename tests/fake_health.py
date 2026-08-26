@@ -24,11 +24,14 @@ def ok_health_snapshot(can_manager: Any) -> HealthSnapshot:
     """モックに登録されたバス・モータ構成そのままの OK スナップショットを返す。
 
     構成を実体から引くことで、テスト側でモータを差し替えてもヘルスの中身と
-    state メッセージの中身が食い違わない。
+    state メッセージの中身が食い違わない。参照するのは ``motors`` /
+    ``bus_names`` という公開 API だけにする。ここが private (``_motors``) を
+    見ていた頃は、モックを組む側にも「``motors`` と ``_motors`` を同じ dict へ
+    揃える」という本番に存在しない儀式が必要だった。
     """
     now = time.time()
-    buses = list(getattr(can_manager, "_buses", {}) or {})
-    motors = list(getattr(can_manager, "_motors", {}) or {})
+    buses = list(getattr(can_manager, "bus_names", ()) or ())
+    motors = list(getattr(can_manager, "motors", {}) or {})
     bus_name = buses[0] if buses else "bus0"
 
     return HealthSnapshot(

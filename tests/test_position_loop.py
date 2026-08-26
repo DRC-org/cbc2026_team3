@@ -16,25 +16,20 @@ from lib.control.position_loop import (
 )
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
+from tests.fake_clock import FakeClock
+from tests.feedback_frames import feed_m3508, m3508_counts_for_deg
 
 BUS = "m3508_bus"
 
 
-class _FakeClock:
-    """単調増加クロックのスタブ。実時間 sleep に依存せず dt を制御する。"""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, dt: float) -> None:
-        self.now += dt
-
-
 class _StubCANManager:
-    """M3508PositionLoop が触る API だけを実装したスタブ。"""
+    """M3508PositionLoop が触る API だけを実装したスタブ。
+
+    同名のスタブが tests/test_target_refresh.py にもあるが 1 つにまとめてはならない。
+    位置制御ループはバス単位 (``send_to_bus``) でしか送ってはならず、モータ単位の
+    ``send`` を生やすと「同一バスの M3508 は 1 フレームに束ねる」制約を破る書き方が
+    テストの上では通ってしまう。持たせない API が制約の証明になっている。
+    """
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, can.Message]] = []
@@ -58,15 +53,6 @@ class _StubCANManager:
         return struct.unpack(">hhhh", self.sent[-1][1].data)
 
 
-def _feed(driver: M3508Driver, angle_raw: int, *, rpm: int = 0) -> None:
-    data = struct.pack(">HhhBB", angle_raw, rpm, 0, 25, 0)
-    driver.update_state(can.Message(arbitration_id=0x200 + driver.can_id, data=data))
-
-
-def _counts_for_deg(deg: float) -> int:
-    return round(deg / 360.0 * 8192)
-
-
 class _Fixture:
     """ループ + スタブ一式。各テストで使い回す。"""
 
@@ -78,8 +64,8 @@ class _Fixture:
         estop: bool = False,
         feedback_timeout_ms: float = 500.0,
     ) -> None:
-        self.mono = _FakeClock()
-        self.wall = _FakeClock(start=5000.0)
+        self.mono = FakeClock()
+        self.wall = FakeClock(start=5000.0)
         self.manager = _StubCANManager()
         self.estop = estop
         self.loop = M3508PositionLoop(
@@ -100,7 +86,7 @@ class _Fixture:
 
     def feed(self, name: str, deg: float, *, rpm: int = 0) -> None:
         driver = self.lift if name == "lift" else self.tilt
-        _feed(driver, _counts_for_deg(deg) % 8192, rpm=rpm)
+        feed_m3508(driver, angle_raw=m3508_counts_for_deg(deg) % 8192, rpm=rpm)
         self.manager.feedback_at[name] = self.wall.now
 
     async def tick(self, dt: float = DEFAULT_INTERVAL_S) -> None:

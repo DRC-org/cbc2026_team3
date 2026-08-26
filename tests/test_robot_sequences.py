@@ -8,13 +8,13 @@ import can
 import pytest
 import yaml
 
-from lib.drivers.base import ControlMode, MotorState
+from lib.drivers.base import ControlMode
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from robots.main_hand import MainHandSequence
 from robots.sub_hand import SubHandSequence
-from tests.fake_drivers import CheckStubDriver
+from tests.fake_drivers import StubFeedbackDriver
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -32,7 +32,7 @@ _ROBOT_CONFIGS = [
 ]
 
 
-class _RecordingDriver(CheckStubDriver):
+class _RecordingDriver(StubFeedbackDriver):
     """指令を共有リストに記録し、即座に到達したことにするテスト用ドライバ。"""
 
     def __init__(self, name: str, sink: list[tuple[str, float]]) -> None:
@@ -43,14 +43,8 @@ class _RecordingDriver(CheckStubDriver):
         # コンベアのような duty 指令の軸もあるため、モードは限定せずそのまま記録する
         self._sink.append((self.name, value))
         if mode is ControlMode.POSITION:
-            self._state = MotorState(position=value)
-        return can.Message(arbitration_id=0x100, data=bytes(8), is_extended_id=False)
-
-    def decode_feedback(self, msg: can.Message) -> MotorState:  # pragma: no cover
-        return self._state
-
-    def matches_feedback(self, msg: can.Message) -> bool:  # pragma: no cover
-        return False
+            self.set_observed(position=value)
+        return super().encode_target(mode, value)
 
 
 def _recording_group(names: list[str]) -> tuple[MotorGroup, list[tuple[str, float]]]:
@@ -302,9 +296,8 @@ class TestShippedPositionYaml:
         seq.bind_motors(group)
         seq.bind_positions(table)
 
-        for info in seq.steps_info:
-            method_name = seq._steps[info["index"]].method_name
-            await getattr(seq, method_name)()
+        for info in seq.steps:
+            await getattr(seq, info.method_name)()
 
     @pytest.mark.parametrize(("yaml_name", "robot_config", "sequence_cls"), _ROBOTS)
     def test_axis_motors_exist_in_robot_config(

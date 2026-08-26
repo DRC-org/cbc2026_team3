@@ -81,7 +81,10 @@ export function SubsystemStatus({
       {showVerdict ? (
         <button
           type="button"
-          onClick={() => setManualOpen((v) => !v)}
+          // 記録するのは「今の見え方の逆」。強制開示中に (v) => !v で反転させると、
+          // 見た目が開いたままなのに内部だけ「開く」へ倒れ、異常が解消した後も
+          // 数字が並んだまま試合の残り時間ずっと開きっぱなしになる
+          onClick={() => setManualOpen(!open)}
           aria-expanded={open}
           className="flex shrink-0 cursor-pointer items-center gap-2 px-1 py-1 text-left hover:bg-base-200"
         >
@@ -95,6 +98,13 @@ export function SubsystemStatus({
 
       {open ? (
         <div className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
+          {/* 判定の理由をラベルへ収められなかった場合の逃し先。
+              サーバーが「判定不能」を配信したときの原因文はここにしか残らない */}
+          {verdict.detail ? (
+            <p className="shrink-0 border-l-[0.25rem] border-l-error bg-error/5 px-2 py-1">
+              {verdict.detail}
+            </p>
+          ) : null}
           <SafetyIssues safety={safety} />
           <HealthIndicator health={health} />
           <MotorSummary motors={motors} healthMotors={health?.motors} />

@@ -88,22 +88,40 @@ const AppShell = memo(function AppShell({
 export function RootLayout() {
   const { wsUrl, wsUrlSource, setWsUrl, resetWsUrl } = useWsUrl();
   const socket = useRobotSocket(wsUrl);
-  const { send, clearRejection, setEStopActive } = socket;
+  const { send, clearRejection, setEStopActive, reportUnsent } = socket;
   const [wsSettingsOpen, setWsSettingsOpen] = useState(false);
   const openWsSettings = useCallback(() => setWsSettingsOpen(true), []);
   const closeWsSettings = useCallback(() => setWsSettingsOpen(false), []);
 
   // 依存に socket (毎描画 新しいオブジェクト) を置くと useCallback が実質無効になり、
   // コマンド購読が毎秒 40 回変わる。個々の関数だけを依存にすること
+  //
+  // 楽観的更新は「送れたとき」だけ行う。切断中に無条件で状態を変えると、
+  // 何も送っていないのに全画面へ赤い停止オーバーレイが出る。オーバーレイは
+  // inset:0 なので、矛盾を示すはずの接続バナーごと覆い隠してしまう。
+  // かといって黙って捨てるのも危険なので、送れなかったことは通知枠へ流す
   const onEStop = useCallback(() => {
-    send({ type: "e_stop" });
-    setEStopActive(true);
-  }, [send, setEStopActive]);
+    if (send({ type: "e_stop" })) {
+      setEStopActive(true);
+      return;
+    }
+    reportUnsent(
+      "e_stop",
+      "切断中のため緊急停止を送信できませんでした。機体は停止していません — 機体側の非常停止で止めてください",
+    );
+  }, [send, setEStopActive, reportUnsent]);
 
   const onEStopRelease = useCallback(() => {
-    send({ type: "e_stop_release" });
-    setEStopActive(false);
-  }, [send, setEStopActive]);
+    if (send({ type: "e_stop_release" })) {
+      setEStopActive(false);
+      return;
+    }
+    // ここでオーバーレイだけ閉じると、機体側のラッチが残ったまま画面は平常へ戻る
+    reportUnsent(
+      "e_stop_release",
+      "切断中のため緊急停止の解除を送信できませんでした。機体側のラッチは残っています",
+    );
+  }, [send, setEStopActive, reportUnsent]);
 
   const setCourt = useCallback((court: MatchCourt) => send({ type: "set_court", court }), [send]);
   const setChecklistItem = useCallback(

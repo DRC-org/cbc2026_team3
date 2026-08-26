@@ -97,7 +97,7 @@ function PidRow({ label, max, value, onChange }: PidRowProps) {
  */
 export function MotorTuning() {
   const states = useRobotStates();
-  const { matchState, connected } = useRobotStatus();
+  const { matchState, connected, eStopActive } = useRobotStatus();
   const { send } = useRobotCommands();
   const [values, setValues] = useState<Record<string, Record<string, number>>>({});
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -132,12 +132,15 @@ export function MotorTuning() {
 
   // 試合中の set_param はサーバーが拒否する (走行中の位置制御ループの特性が変わり、
   // 同期グループ全体に適用されるため直結した左右軸が負荷下で同時に別特性になる)。
+  // 緊急停止中も同じく拒否される (`lib/commands.py` の allowed_during_e_stop=False)。
   // 判定の正はサーバーで、ここは押す前に理由を出すだけ。拒否トーストで気付くのでは遅い
   const blockedReason = !connected
     ? "切断中のため送信できません"
-    : isDuringMatch(matchState.phase)
-      ? "試合中はパラメータを変更できません"
-      : null;
+    : eStopActive
+      ? "緊急停止中はパラメータを変更できません"
+      : isDuringMatch(matchState.phase)
+        ? "試合中はパラメータを変更できません"
+        : null;
 
   if (entries.length === 0) {
     return (

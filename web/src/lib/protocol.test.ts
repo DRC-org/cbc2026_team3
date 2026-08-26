@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseServerMessage } from "@/lib/protocol";
+import type { RobotState } from "@/lib/protocol";
 
 /**
  * 受信条件そのもののテスト。
@@ -40,6 +41,19 @@ describe("parseServerMessage", () => {
 
     it("robot の無い state は捨てる (どのロボットの状態か決められない)", () => {
       expect(parse({ type: "state", step_index: 3 })).toBeNull();
+    });
+
+    it("ヘルスの detail を受信経路で落とさない", () => {
+      // サーバーは健全性を計算できなかったとき overall=down と detail だけで
+      // 「判定不能」を伝える。detail を捨てると画面に理由が残らない
+      const msg = parse({
+        type: "state",
+        robot: "main_hand",
+        health: { timestamp: 0, overall: "down", buses: [], motors: [], detail: "計算失敗" },
+      });
+      expect(msg).not.toBeNull();
+      const state = (msg as { state: RobotState }).state;
+      expect(state.health?.detail).toBe("計算失敗");
     });
   });
 

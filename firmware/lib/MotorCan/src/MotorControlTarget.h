@@ -21,11 +21,27 @@ class ControlTarget {
     ControlType mode() const { return mode_; }
     float value() const { return value_; }
 
-    void setValue(float value) { value_ = value; }
+    // NaN を保持すると PID の積分項が汚染され、以後の正常な目標でも出力が NaN のまま
+    // になる。復号層（decodeSetTarget）も弾くが、シリアルデバッグの "nan" のように
+    // そこを通らない経路があるので、保持する側でも受け付けない。
+    void setValue(float value) {
+        if (value != value) {
+            return;
+        }
+        value_ = value;
+    }
 
-    // 仕様書 §3.5: 緊急停止の解除直後は目標値 0 から始める（モードは変えない）。
+    // 仕様書 §3.5: 緊急停止の解除直後は「動き出さない目標値」から始める（モードは変えない）。
     // 停止前の目標を復元すると、解除した瞬間にモータが動き出して人を巻き込む。
-    void clearValue() { value_ = 0.0f; }
+    //
+    // duty / velocity では 0 が停止だが、**position の 0 はエンコーダ原点への移動指令**で、
+    // 0 に落とすこと自体が「解除した瞬間に動き出す」ことになる。position では現在位置を
+    // 目標にして凍結する（サーボ側 ServoMotion::holdHere() と同じ意図）。
+    // 呼び出し側でモードを見て分岐すると、シリアル停止と E_STOP 解除の 2 箇所に
+    // 同じ判断が散るので、規則はここだけが持つ。
+    void clearToHold(float measuredPositionDeg) {
+        value_ = (mode_ == ControlType::Position) ? measuredPositionDeg : 0.0f;
+    }
 
     // モードが実際に変わったときだけ目標値を 0 に落とし、true を返す。
     // PID の積分項クリアは呼び出し側が true のときに行う（PID を持たない基板もあるため）。

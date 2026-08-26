@@ -7,16 +7,15 @@ from __future__ import annotations
 
 import inspect
 import math
-import struct
 
 import can
 import pytest
 
 from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
 from lib.drivers.edulite05 import Edulite05Driver
-from lib.drivers.generic import CommandType, GenericDriver
+from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
-from tests.drivers.test_edulite05 import feedback_message
+from tests.feedback_frames import edulite_feedback, feed_generic
 
 
 class _ProtocolOnlyDriver(MotorDriver):
@@ -30,26 +29,6 @@ class _ProtocolOnlyDriver(MotorDriver):
 
     def matches_feedback(self, msg: can.Message) -> bool:
         return False
-
-
-def _feed_generic(
-    drv: GenericDriver,
-    *,
-    position: float = 0.0,
-    velocity: float = 0.0,
-    flags: int = 0,
-) -> None:
-    data = bytearray(8)
-    struct.pack_into("<h", data, 0, round(position * 10))
-    struct.pack_into("<h", data, 2, int(velocity))
-    data[7] = flags
-    drv.update_state(
-        can.Message(
-            arbitration_id=GenericDriver.build_can_id(CommandType.FEEDBACK, drv.can_id),
-            data=bytes(data),
-            is_extended_id=False,
-        )
-    )
 
 
 class TestCheckApiIsMandatory:
@@ -113,7 +92,7 @@ class TestToleranceHasSingleSource:
     def test_generic_check_follows_default_tolerance(self, monkeypatch) -> None:
         drv = GenericDriver("g", 0x01)
         _msg, context = drv.check_command(magnitude=10.0)
-        _feed_generic(drv, position=7.0, flags=0x01)
+        feed_generic(drv, position=7.0, flags=0x01)
 
         assert drv.evaluate_check_result(context)[0] is False
 
@@ -122,9 +101,9 @@ class TestToleranceHasSingleSource:
 
     def test_edulite_check_follows_default_tolerance(self, monkeypatch) -> None:
         drv = Edulite05Driver("e", 5)
-        drv.update_state(feedback_message(drv, position=0.0))
+        drv.update_state(edulite_feedback(drv, position=0.0))
         _msg, context = drv.check_command(magnitude=10.0)
-        drv.update_state(feedback_message(drv, position=math.radians(7.0)))
+        drv.update_state(edulite_feedback(drv, position=math.radians(7.0)))
 
         assert drv.evaluate_check_result(context)[0] is False
 
@@ -143,7 +122,7 @@ class TestStandstillNeverPasses:
 
     def test_edulite_velocity_standstill_fails(self) -> None:
         drv = Edulite05Driver("e", 5, mode="velocity", limit_speed=2.0)
-        drv.update_state(feedback_message(drv, velocity=0.0))
+        drv.update_state(edulite_feedback(drv, velocity=0.0))
         _msg, context = drv.check_command(magnitude=5.0)
 
         passed, detail = drv.evaluate_check_result(context)
@@ -153,16 +132,16 @@ class TestStandstillNeverPasses:
 
     def test_edulite_velocity_following_command_passes(self) -> None:
         drv = Edulite05Driver("e", 5, mode="velocity", limit_speed=2.0)
-        drv.update_state(feedback_message(drv, velocity=0.0))
+        drv.update_state(edulite_feedback(drv, velocity=0.0))
         _msg, context = drv.check_command(magnitude=5.0)
-        drv.update_state(feedback_message(drv, velocity=context.target))
+        drv.update_state(edulite_feedback(drv, velocity=context.target))
 
         assert drv.evaluate_check_result(context)[0] is True
 
     def test_generic_velocity_standstill_fails(self) -> None:
         drv = GenericDriver("g", 0x01, control_type=ControlMode.VELOCITY)
         _msg, context = drv.check_command(magnitude=5.0)
-        _feed_generic(drv, velocity=0.0)
+        feed_generic(drv, velocity=0.0)
 
         passed, detail = drv.evaluate_check_result(context)
 
@@ -174,6 +153,6 @@ class TestStandstillNeverPasses:
         # 一歩も動かなくても「目標との差 0.5deg」で合格してしまう
         drv = GenericDriver("g", 0x01)
         _msg, context = drv.check_command(magnitude=0.5)
-        _feed_generic(drv, position=0.0, flags=0x01)
+        feed_generic(drv, position=0.0, flags=0x01)
 
         assert drv.evaluate_check_result(context)[0] is False

@@ -9,17 +9,14 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import contextlib
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from lib.can_manager import CANManager
 from lib.commands import COMMANDS
-from lib.drivers.base import MotorState
-from lib.match_state import Court, Phase
+from lib.match_state import ROLE_MAIN_HAND, ROLE_SUB_HAND, ChecklistItem, Court, Phase
 from lib.sequence.engine import Sequence, step
-from lib.server import RobotServer
-from tests.fake_health import ok_health_snapshot
+from tests.server_fixtures import ServerFixture, expect_no_type, recv_type
 
 
 class _DummySequence(Sequence):
@@ -31,62 +28,26 @@ class _DummySequence(Sequence):
         return None
 
 
-def _make_mock_can_manager() -> CANManager:
-    mgr = MagicMock(spec=CANManager)
-    motor = MagicMock()
-    motor.state = MotorState(position=0.0, velocity=0.0, current=0.0, temperature=30.0)
-    motor.name = "m1"
-    # 実物では motors は _motors の読み取り専用ビュー。fake_health が _motors を
-    # 見るため、モックでは両方を同じ dict に揃える
-    mgr._motors = {"m1": motor}
-    mgr.motors = mgr._motors
-    mgr.send = AsyncMock()
-    mgr.send_to_bus = AsyncMock()
-    mgr._buses = {"bus0": MagicMock()}
-    mgr.bus_names = tuple(mgr._buses)
-    mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
-    return mgr
+#: 指差喚呼を 1 項目ずつ持たせる。項目ゼロだと全ロールが即完了扱いになり
+#: 起動直後から READY になるため、SETUP を前提にする検証が書けない
+_DEFS = {
+    ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
+    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
+}
 
 
-def _build_server() -> RobotServer:
-    server = RobotServer()
-    server.add_robot("main_hand", _DummySequence(), _make_mock_can_manager())
-    return server
-
-
-def _enter_match(server: RobotServer) -> None:
-    for role, checklist in server.match.checklists.items():
-        for item in checklist.items:
-            server.match.set_checklist_item(role, item.id, True)
-    server.match._phase = Phase.MATCH
-
-
-async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict | None:
-    for _ in range(tries):
-        try:
-            msg = await asyncio.wait_for(ws.receive_json(), timeout=0.2)
-        except (TimeoutError, TypeError):
-            return None
-        if msg.get("type") == wanted:
-            return msg
-    return None
-
-
-async def _expect_no_type(ws, unwanted: str, *, tries: int = 8) -> None:
-    for _ in range(tries):
-        try:
-            msg = await asyncio.wait_for(ws.receive_json(), timeout=0.1)
-        except (TimeoutError, TypeError):
-            return
-        assert msg.get("type") != unwanted, f"{unwanted} が要求元以外へ配信された: {msg}"
+def _build_fixture() -> ServerFixture:
+    fx = ServerFixture.build(checklist_definitions=_DEFS)
+    fx.add_robot("main_hand", _DummySequence())
+    return fx
 
 
 class TestRejectionGoesToRequesterOnly:
     async def test_phase_denied_command_notifies_requester_only(self) -> None:
         """フェーズゲートの拒否は要求元 1 台だけに返ること。"""
-        server = _build_server()
-        _enter_match(server)
-        app = server.create_app()
+        fx = _build_fixture()
+        fx.enter_match()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             requester = await client.ws_connect("/ws")
@@ -95,34 +56,34 @@ class TestRejectionGoesToRequesterOnly:
             # 試合中の set_court はフェーズゲートで拒否される
             await requester.send_json({"type": "set_court", "court": Court.BLUE.value})
 
-            msg = await _recv_type(requester, "command_rejected")
+            msg = await recv_type(requester, "command_rejected")
             assert msg is not None
             assert msg["command"] == "set_court"
             assert msg["reason"]
 
-            await _expect_no_type(bystander, "command_rejected")
+            await expect_no_type(bystander, "command_rejected")
 
             await requester.close()
             await bystander.close()
 
     async def test_e_stop_denied_command_notifies_requester_only(self) -> None:
         """緊急停止ゲートの拒否も要求元 1 台だけに返ること。"""
-        server = _build_server()
-        _enter_match(server)
-        app = server.create_app()
+        fx = _build_fixture()
+        fx.enter_match()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             requester = await client.ws_connect("/ws")
             bystander = await client.ws_connect("/ws")
 
-            await server.activate_e_stop()
+            await fx.activate_e_stop()
             await requester.send_json({"type": "sequence_start", "robot": "main_hand"})
 
-            msg = await _recv_type(requester, "command_rejected")
+            msg = await recv_type(requester, "command_rejected")
             assert msg is not None
             assert msg["command"] == "sequence_start"
 
-            await _expect_no_type(bystander, "command_rejected")
+            await expect_no_type(bystander, "command_rejected")
 
             await requester.close()
             await bystander.close()
@@ -130,22 +91,20 @@ class TestRejectionGoesToRequesterOnly:
     async def test_match_start_rejection_uses_requester_ws(self) -> None:
         """match_start の拒否 (_handle_match_start 経路) が要求元へ返ること。
 
-        この経路は _handle_command のフェーズゲートを通り抜けた後の防御的な
+        この経路は handle_command のフェーズゲートを通り抜けた後の防御的な
         二重判定なので、ゲートを迂回して直接呼び出さないと踏めない。
         """
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             requester = await client.ws_connect("/ws")
             await asyncio.sleep(0.05)
-            assert len(server._ws_clients) == 1
-            server_ws = next(iter(server._ws_clients))
 
-            server.match._phase = Phase.SETUP
-            await server._handle_match_start(server_ws)
+            assert fx.match.phase is Phase.SETUP
+            await fx.handle_match_start(fx.only_client())
 
-            msg = await _recv_type(requester, "command_rejected")
+            msg = await recv_type(requester, "command_rejected")
             assert msg is not None
             assert msg["command"] == "match_start"
 
@@ -157,16 +116,16 @@ class TestRejectionGoesToRequesterOnly:
         HTTP POST や内部の安全機構から来たコマンドには返す相手がいない。
         代わりに全配信すると、誰も押していない拒否通知が全画面に出る。
         """
-        server = _build_server()
-        _enter_match(server)
-        app = server.create_app()
+        fx = _build_fixture()
+        fx.enter_match()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             watcher = await client.ws_connect("/ws")
 
-            await server._handle_command({"type": "set_court", "court": Court.BLUE.value})
+            await fx.command({"type": "set_court", "court": Court.BLUE.value})
 
-            await _expect_no_type(watcher, "command_rejected")
+            await expect_no_type(watcher, "command_rejected")
 
             await watcher.close()
 
@@ -179,7 +138,13 @@ class TestUnknownCommandsNeverReachHandlers:
     宣言されていない名前はハンドラへ到達しない。
     """
 
-    def _record_handler_calls(self, server: RobotServer) -> list[str]:
+    def _record_handler_calls(self, fx: ServerFixture) -> list[str]:
+        """全ハンドラを記録役へ差し替える。
+
+        差し替え先の名前は ``CommandSpec.handler`` が持っている宣言そのもの
+        (lib/commands.py)。ここでハンドラ名を書き写すと、語彙表とテストが
+        別々の一覧を持つことになり、本文が防いでいる事故がテスト側で再発する。
+        """
         called: list[str] = []
 
         def _make(name: str):
@@ -189,35 +154,119 @@ class TestUnknownCommandsNeverReachHandlers:
             return _recorder
 
         for handler_name in {spec.handler for spec in COMMANDS.values()}:
-            setattr(server, handler_name, _make(handler_name))
+            setattr(fx.server, handler_name, _make(handler_name))
         return called
 
     async def test_undeclared_command_is_dropped(self) -> None:
-        server = _build_server()
-        _enter_match(server)
-        called = self._record_handler_calls(server)
+        fx = _build_fixture()
+        fx.enter_match()
+        called = self._record_handler_calls(fx)
 
-        await server._handle_command({"type": "totally_unknown", "robot": "main_hand"})
-        await server._handle_command({"type": None})
+        await fx.command({"type": "totally_unknown", "robot": "main_hand"})
+        await fx.command({"type": None})
 
         assert called == []
 
         # 差し替えたハンドラが実際に呼ばれる構成であることも確かめる
         # (呼ばれない仕掛けになっていると上の assert は常に通ってしまう)
-        await server._handle_command({"type": "trigger", "robot": "main_hand"})
-        assert called == ["_cmd_trigger"]
+        await fx.command({"type": "trigger", "robot": "main_hand"})
+        assert called == [COMMANDS["trigger"].handler]
 
     async def test_undeclared_command_is_not_rejected(self) -> None:
         """未知のコマンドに拒否理由を返すと、語彙の有無を外から総当たりで探れてしまう。"""
-        server = _build_server()
-        _enter_match(server)
-        app = server.create_app()
+        fx = _build_fixture()
+        fx.enter_match()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             requester = await client.ws_connect("/ws")
 
             await requester.send_json({"type": "totally_unknown"})
 
-            await _expect_no_type(requester, "command_rejected")
+            await expect_no_type(requester, "command_rejected")
 
             await requester.close()
+
+
+class TestDeclaredCommandsAlwaysAnswer:
+    """語彙にあるコマンドは、引数が不正でも黙って捨てない。
+
+    未知のコマンド (語彙に無い = 存在を知らせない) とは別で、こちらは操縦者が
+    実在するボタンを押した結果である。黙って捨てると「送信できた」と信じたまま
+    効いていない状態が続く。
+    """
+
+    async def test_未知のコートは理由付きで拒否される(self) -> None:
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            requester = await client.ws_connect("/ws")
+
+            await requester.send_json({"type": "set_court", "court": "green"})
+
+            msg = await recv_type(requester, "command_rejected")
+            assert msg is not None
+            assert msg["command"] == "set_court"
+            # コートは変わっていない
+            assert fx.match.court is Court.RED
+
+            await requester.close()
+
+
+class _TwoStepSequence(Sequence):
+    """ジャンプ先の違いが実行結果に現れる最小シーケンス。"""
+
+    def __init__(self) -> None:
+        super().__init__("two_step")
+        self.executed: list[str] = []
+
+    @step("最初")
+    async def first(self) -> None:
+        self.executed.append("first")
+
+    @step("次")
+    async def second(self) -> None:
+        self.executed.append("second")
+
+
+class TestSequenceJumpArgumentValidation:
+    """`step_index` は整数のときだけステップ移動として扱う。
+
+    `isinstance(True, int)` は真なので、素通しすると `True` が index 1 として
+    通る。ジャンプ要求は停止中のシーケンスを叩き起こすため、操縦者が誰も
+    開始していないのに 2 番目のステップから機体が動き出す。
+    """
+
+    async def test_真偽値のstep_indexではシーケンスが動き出さない(self) -> None:
+        fx = ServerFixture.build(checklist_definitions=_DEFS)
+        seq = _TwoStepSequence()
+        fx.add_robot("main_hand", seq)
+        fx.enter_match()
+
+        await fx.command({"type": "sequence_jump", "robot": "main_hand", "step_index": True})
+
+        task = asyncio.create_task(seq.run_forever())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert seq.executed == [], "誰も開始していないのにシーケンスが走り出した"
+
+    async def test_整数のstep_indexは従来どおり通る(self) -> None:
+        # 上の検証が「ジャンプ自体が効かなくなった」ことを見ているのではないと示す
+        fx = ServerFixture.build(checklist_definitions=_DEFS)
+        seq = _TwoStepSequence()
+        fx.add_robot("main_hand", seq)
+        fx.enter_match()
+
+        await fx.command({"type": "sequence_jump", "robot": "main_hand", "step_index": 1})
+
+        task = asyncio.create_task(seq.run_forever())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        assert seq.executed == ["second"]

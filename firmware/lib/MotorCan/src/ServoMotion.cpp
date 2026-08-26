@@ -186,9 +186,15 @@ ServoParamCommand decodeServoSetParam(const uint8_t *data, uint8_t length) {
     if (!isServoParamId(data[0])) {
         return cmd;
     }
-    cmd.id = static_cast<ServoParamId>(data[0]);
     // 仕様書 §3.4: 値は Byte2-5 の float32 リトルエンディアン。
-    cmd.value = unpackFloatLe(&data[2]);
+    const float value = unpackFloatLe(&data[2]);
+    if (isNan(value)) {
+        // NaN は setLimits / setReachedToleranceDeg の側でも弾かれるが、
+        // 「化けた float32 のフレームは解釈できないので捨てる」判断は復号層に置く。
+        return cmd;
+    }
+    cmd.id = static_cast<ServoParamId>(data[0]);
+    cmd.value = value;
     cmd.valid = true;
     return cmd;
 }

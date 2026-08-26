@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 
 from lib.sequence.engine import Sequence, StepInfo, step
 
@@ -23,7 +25,37 @@ class SampleSequence(Sequence):
         self.executed.append("step3")
 
 
+@contextlib.asynccontextmanager
+async def _auto_trigger(seq: Sequence) -> AsyncIterator[None]:
+    """トリガー待ちを見つけ次第押し続ける操縦者役。
+
+    ``require_trigger`` のステップは操縦者が押すまで必ず止まる。完走まで見たい
+    テストはその代役が要るが、代役のループ条件を各テストに書き写すと
+    「待たずに素通りしている」のか「押されて進んだ」のかがテストごとに変わる。
+    """
+
+    async def press() -> None:
+        while True:
+            if seq.waiting_trigger:
+                seq.trigger()
+            await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(press())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
 class TestStepDecorator:
+    """``@step`` 単体の検証。
+
+    デコレータの唯一の出力はメソッドへ付けるマーカー属性で、それを拾うのは
+    ``__init_subclass__`` という別の協力者。両者をまとめて検証すると、壊れたときに
+    「印を付け忘れた」のか「集め忘れた」のかが切り分けられない。ここだけは
+    非公開のマーカーを直接見るのが正しい単体試験になる。
+    """
+
     def test_step_decorator_sets_attributes(self):
         assert SampleSequence.step1._step_label == "ステップ1"
         assert SampleSequence.step1._step_require_trigger is False
@@ -34,14 +66,14 @@ class TestStepDecorator:
 class TestStepsCollection:
     def test_steps_collected_in_order(self):
         seq = SampleSequence()
-        assert len(seq._steps) == 3
-        assert seq._steps[0] == StepInfo(
+        assert len(seq.steps) == 3
+        assert seq.steps[0] == StepInfo(
             label="ステップ1", method_name="step1", require_trigger=False
         )
-        assert seq._steps[1] == StepInfo(
+        assert seq.steps[1] == StepInfo(
             label="ステップ2", method_name="step2", require_trigger=True
         )
-        assert seq._steps[2] == StepInfo(
+        assert seq.steps[2] == StepInfo(
             label="ステップ3", method_name="step3", require_trigger=False
         )
 
@@ -50,15 +82,8 @@ class TestRun:
     async def test_run_executes_all_steps(self):
         seq = SampleSequence()
 
-        async def auto_trigger():
-            while seq._running:
-                if seq._waiting_trigger:
-                    seq.trigger()
-                await asyncio.sleep(0.01)
-
-        trigger_task = asyncio.create_task(auto_trigger())
-        await seq.run()
-        trigger_task.cancel()
+        async with _auto_trigger(seq):
+            await seq.run()
 
         assert seq.executed == ["step1", "step2", "step3"]
 
@@ -75,7 +100,7 @@ class TestRun:
         await asyncio.sleep(0.05)
 
         assert seq.executed == ["step1"]
-        assert seq._waiting_trigger is True
+        assert seq.waiting_trigger is True
         assert reached_step2 is False
 
         seq.trigger()
@@ -91,8 +116,8 @@ class TestRun:
         task = asyncio.create_task(seq.run())
         await asyncio.sleep(0.05)
 
-        assert seq._current_index == 1
-        assert seq._waiting_trigger is True
+        assert seq.progress["step_index"] == 1
+        assert seq.waiting_trigger is True
 
         seq.trigger()
         await asyncio.sleep(0.05)
@@ -103,17 +128,10 @@ class TestRun:
     async def test_run_completes(self):
         seq = SampleSequence()
 
-        async def auto_trigger():
-            while seq._running:
-                if seq._waiting_trigger:
-                    seq.trigger()
-                await asyncio.sleep(0.01)
+        async with _auto_trigger(seq):
+            await seq.run()
 
-        trigger_task = asyncio.create_task(auto_trigger())
-        await seq.run()
-        trigger_task.cancel()
-
-        assert seq._running is False
+        assert seq.is_running is False
 
 
 class TestProgress:
@@ -153,21 +171,14 @@ class TestReset:
     async def test_reset(self):
         seq = SampleSequence()
 
-        async def auto_trigger():
-            while seq._running:
-                if seq._waiting_trigger:
-                    seq.trigger()
-                await asyncio.sleep(0.01)
+        async with _auto_trigger(seq):
+            await seq.run()
 
-        trigger_task = asyncio.create_task(auto_trigger())
-        await seq.run()
-        trigger_task.cancel()
-
-        assert seq._current_index == 3
+        assert seq.progress["step_index"] == 3
         await seq.reset()
-        assert seq._current_index == 0
-        assert seq._running is False
-        assert seq._waiting_trigger is False
+        assert seq.progress["step_index"] == 0
+        assert seq.is_running is False
+        assert seq.waiting_trigger is False
 
 
 class TestCallback:
@@ -176,15 +187,8 @@ class TestCallback:
         callback_args: list[dict] = []
         seq.set_on_step_change(lambda progress: callback_args.append(progress))
 
-        async def auto_trigger():
-            while seq._running:
-                if seq._waiting_trigger:
-                    seq.trigger()
-                await asyncio.sleep(0.01)
-
-        trigger_task = asyncio.create_task(auto_trigger())
-        await seq.run()
-        trigger_task.cancel()
+        async with _auto_trigger(seq):
+            await seq.run()
 
         assert len(callback_args) == 3
         assert callback_args[0]["current_step"] == "ステップ1"
@@ -238,15 +242,8 @@ class TestLifecycle:
         task = asyncio.create_task(seq.run_forever())
         seq.request_start()
 
-        async def auto_trigger():
-            while True:
-                if seq.waiting_trigger:
-                    seq.trigger()
-                await asyncio.sleep(0.01)
-
-        trigger_task = asyncio.create_task(auto_trigger())
-        await asyncio.sleep(0.1)
-        trigger_task.cancel()
+        async with _auto_trigger(seq):
+            await asyncio.sleep(0.1)
 
         assert seq.executed == ["step1", "step2", "step3"]
         assert seq.is_running is False

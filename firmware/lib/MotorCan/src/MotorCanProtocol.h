@@ -75,6 +75,31 @@ constexpr uint8_t kEStopClearMagic2 = 0xA5;
 constexpr uint32_t kDefaultCommandTimeoutMs = 500;
 constexpr uint32_t kDefaultFeedbackIntervalMs = 10;  // 100Hz
 
+// SET_PARAM 0x04 / 0x05 で受け付ける範囲（仕様書 §3.4）。
+//
+// command_timeout_ms に上限が無いと、CAN の 1 フレームでウォッチドッグを実質無効に
+// できてしまう。仕様書 §5.1 が「WATCHDOG_ENABLED に SET_PARAM の ID は無い」と書いて
+// 最後の砦を守っているのに、猶予そのものを 49.7 日へ伸ばせば同じ結果になるため、
+// 猶予の側にも上限が要る。上限は既定の 4 倍で、これを超えると「PC が落ちても
+// コンベアが数秒回り続ける」ことになり最後の砦として機能しない。
+// 下限は PC 側の再送周期の目安（既定 500ms に対して 50ms）。それより短い猶予は、
+// 契約どおり再送している健全な機体を止めるだけで安全性を上げない。
+constexpr uint32_t kMinCommandTimeoutMs = 50;
+constexpr uint32_t kMaxCommandTimeoutMs = 2000;
+
+// 0 は送信が詰まってバスを埋める。上限側は、極端に長い周期にすると PC からは
+// 「基板が死んだ（STALE）」ようにしか見えず、原因の切り分けができなくなる。
+constexpr uint32_t kMinFeedbackIntervalMs = 1;
+constexpr uint32_t kMaxFeedbackIntervalMs = 1000;
+
+// SET_PARAM の float 値を上の範囲へ丸める。範囲外は fallbackMs ではなく境界値に
+// 倒す（書いた値に近い側で動かす方が現場で挙動を推測しやすい）。
+// NaN / 無限大だけは fallbackMs（＝現在値）を返して指令ごと捨てる。
+// 化けた float32 を uint32_t へ直接キャストするのは未定義動作で、RA4M1 では
+// 負値が 0 に飽和して「永久に出力禁止」、他の処理系では 4294967295ms に化ける。
+uint32_t sanitizeCommandTimeoutMs(float value, uint32_t fallbackMs);
+uint32_t sanitizeFeedbackIntervalMs(float value, uint32_t fallbackMs);
+
 // ---------------------------------------------------------------------------
 // CAN ID
 // ---------------------------------------------------------------------------

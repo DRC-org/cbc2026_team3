@@ -33,9 +33,16 @@ describe("TriggerButton", () => {
     expect(button).toBeDisabled();
   });
 
-  it("シーケンス未取得では DONE にしない", () => {
+  it("シーケンス未取得は RUNNING でも DONE でもなく、そのまま伝える", () => {
+    // 最後の return へ落として RUNNING を出していた頃は、同じ画面の状態表示が
+    // 「待機中 — START で開始」で、ボタンだけが実行中を主張していた
     render(<TriggerButton kind="no_sequence" onTrigger={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "シーケンス実行中" })).toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: "操作不可: シーケンス未取得" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent("シーケンス未取得");
+    expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
+    expect(screen.queryByText("DONE")).not.toBeInTheDocument();
   });
 
   it("試合中以外は理由付きで操作不可にする", () => {

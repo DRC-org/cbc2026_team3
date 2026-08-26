@@ -17,7 +17,12 @@ from lib.sequence.motors import MotorHandle
 
 
 class _StubCANManager:
-    """MotorHandle が触る API だけを実装したスタブ。"""
+    """MotorHandle が触る API だけを実装したスタブ。
+
+    tests/test_position_loop.py の同名スタブとは意図的に別物 (あちらは
+    ``send_to_bus`` だけを持つ)。触れる API を協力者ごとに絞ることで、
+    本来使ってはならない経路をテストが使い始めても気付けるようにしている。
+    """
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, can.Message]] = []

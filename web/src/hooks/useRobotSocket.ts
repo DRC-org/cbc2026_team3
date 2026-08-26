@@ -19,7 +19,10 @@ interface UseRobotSocketReturn {
   rejection: CommandRejectedEvent | null;
   clearRejection: () => void;
   setEStopActive: (active: boolean) => void;
-  send: (data: object) => void;
+  /** 切断中で送れなかった操作を通知枠へ流す (押したのに無反応、を作らない) */
+  reportUnsent: (command: string, reason: string) => void;
+  /** 送れたら true。切断中は false */
+  send: (data: object) => boolean;
 }
 
 /**
@@ -41,6 +44,11 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
   const { connected, send } = useWebSocket(url, handleMessage);
 
   const clearRejection = useCallback(() => dispatch({ type: "clear_rejection" }), []);
+  const reportUnsent = useCallback(
+    (command: string, reason: string) =>
+      dispatch({ type: "command_unsent", command, reason, nowMs: Date.now() }),
+    [],
+  );
   const setEStopActive = useCallback(
     (active: boolean) => dispatch({ type: "e_stop_local", active }),
     [],
@@ -57,6 +65,7 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
     rejection: state.rejection,
     clearRejection,
     setEStopActive,
+    reportUnsent,
     send,
   };
 }

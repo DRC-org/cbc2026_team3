@@ -23,6 +23,7 @@ function health(busState: BusHealthState): HealthSnapshot {
       },
     ],
     motors: [],
+    detail: null,
   };
 }
 
@@ -45,8 +46,10 @@ const SAFETY: SafetyState = {
   sync_violations: [],
   loops_running: true,
   monitors_running: true,
+  refreshers_running: true,
   position_loops: [],
   sync_monitors: [],
+  target_refreshers: [],
 };
 
 function mount(states: Record<string, RobotState>) {

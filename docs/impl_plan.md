@@ -109,11 +109,15 @@ C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は C
 
 ### CAN バス構成（3 系統）
 
-| バス（固定名） | CANable | USB serial | 接続デバイス | ビットレート |
-|---|---|---|---|---|
-| `can_m3508` | #1 | `004600224E4D501520343332` | M3508 × 2 | 1 Mbps |
-| `can_edulite` | #2 | `006F004A4E4D501820343332` | EDULITE 05 × 2 | 1 Mbps |
-| `can_generic` | #3 | `0068005C4E4D501520343332` | DC モータ / サーボ（自作モタドラ） | 1 Mbps |
+| バス（固定名） | CANable | 接続デバイス | ビットレート |
+|---|---|---|---|
+| `can_m3508` | #1 | M3508 × 2 | 1 Mbps |
+| `can_edulite` | #2 | EDULITE 05 × 2 | 1 Mbps |
+| `can_generic` | #3 | DC モータ / サーボ（自作モタドラ） | 1 Mbps |
+
+**USB serial・bitrate・txqueuelen の実値は `config/can_buses.yaml` にしかない。**
+本書へ書き写すと、CANable を交換したときに片方だけが古くなる。しかも誤った serial は
+「固定名が付かない」という遠い形でしか現れない。
 
 #### インターフェース名を固定する理由
 
@@ -162,7 +166,7 @@ udev ルールは `can_buses.yaml` から生成されるため、yaml を編集�
 
 #### 新しい CANable の serial 採取手順
 
-USB ハブ入手後、残り 2 個について以下を実行する。
+CANable を交換・追加したときに実行する。
 
 ```bash
 # 対象の 1 個だけを挿した状態で（他が挿さっていると can0 がどれか判別できない）
@@ -173,7 +177,7 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 **`sudo scripts/install.sh` を再実行する**（これを忘れると反映されない）。`TBD` のままの
 バスは udev ルールに出力されず、`setup_can.sh` の対象からも外れる。
 
-3 個とも採取済みのため、通常この手順が必要になるのは CANable を交換したときだけ。
+3 個とも採取済みなので、通常この手順は不要。
 
 #### 既知の制約: バス down 時の失敗が分かりにくい
 
@@ -186,15 +190,15 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 | up | 正常 | 正常 |
 
 問題は 2 行目。`CANManager.run()` は `_receive_loop` を `asyncio.create_task` で起こす
-だけで例外を回収しないため、受信タスクの死亡が握りつぶされる。結果としてモータ状態が
-一切更新されず、ヘルスチェックが全モータを STALE と報告する。原因が「バスが down」だと
-特定するのは難しい。
+だけで、`_tasks` を誰も await しない。受信タスクが死ぬとモータ状態が一切更新されなくなり、
+ヘルスチェックが全モータを STALE と報告するが、原因が「バスが down」だとは分からない。
+
+そのため**受信ループは降りる前に必ず `logger.exception` を残す**（「CAN 受信ループの
+堅牢性」参照）。ログが唯一の痕跡なので、この 1 行を外すとループの死が無痕跡に戻る。
 
 `cbc-can.service` により通常は起動時に up されるため実害は出にくいが、service が失敗した
-場合などに起きうる。対策候補は次の 2 つで、いずれも今後の課題とする。
-
-1. `_create_bus()` にインターフェースの `operstate` 検証を追加し、down なら起動を止める
-2. `_receive_loop` に例外ハンドラを入れ、バス異常をヘルススナップショットへ反映する
+場合などに起きうる。**残る対策候補は `_create_bus()` にインターフェースの `operstate` 検証を
+追加し、down なら起動を止めること**で、これは未着手。
 
 ---
 
@@ -224,8 +228,12 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
   再送が無いとコンベアは回し始めて 500ms で止まる
 - **緊急停止のブロードキャストは CAN ID `0x7FF`。データ部が要る**（仕様書 §3.5）。
   解除はマジックバイト `0x5A` / `0xA5` が揃ったときだけ通る
-- **デバイス ID はバス単位でロボット横断に一意**（仕様書 §2.2）。`0x00` は駆動拒否、
-  `0xFF` はブロードキャスト予約なのでモータには割り当てない
+- **デバイス ID はバス単位でロボット横断に一意で、範囲は `0x01`〜`0xFE`**（仕様書 §2.2）。
+  `0x00` は駆動拒否、`0xFF` はブロードキャスト予約なのでモータには割り当てない。範囲外は
+  `lib/config_schema.py` の `CAN_ID_RANGES`（yaml のファイル名とモータ名を添えて起動拒否）と
+  `GenericDriver.__init__`（生成そのものを拒否）の 2 段で弾く。とりわけ `0xFF` は
+  `activation_steps()` の緊急停止**解除**フレームが `0x7FF` ブロードキャストになり、
+  共有 `can_generic` 上の全基板のラッチをまとめて外す
 - **サーボの到達フラグはファームの推定値**（仕様書 §7.3）。実際には動いていなくても到達を
   報告するため、危険な動作には `require_trigger` を付けて目視確認を挟む
 
@@ -290,8 +298,57 @@ private 属性を直接掴むと責務がその場で漏れる（「シーケン
 
 同じ理由で、WS の全クライアント配信は `_fanout()` に、終了処理でのクライアント一斉切断は
 `_close_all_clients()` に 1 本化する。配信経路が分かれていると「送信ごとに上限を通す」
-「切り離しの `close()` は別タスクへ逃がす」という約束事を経路の数だけ守り続けることになり、
-1 つ抜けただけで**画面が「接続中」のまま値だけ凍る**事故に戻る。
+「切り離しの `close()` は別タスクへ逃がす」「反復はクライアント集合のスナップショットに対して
+行う」という約束事を経路の数だけ守り続けることになり、1 つ抜けただけで
+**画面が「接続中」のまま値だけ凍る**事故に戻る。
+
+**反復をスナップショットに対して行うのは、送信 1 通ごとに await が入るからである。**
+その隙に `_ws_handler` が同じ集合へ add / discard を行いうる（操縦者のリロード 1 回で起きる）。
+集合をそのまま回すと `RuntimeError: Set changed size during iteration` になり、例外ガードの
+無い `activate_e_stop` の経路では**E-STOP を押した本人の WS が切れる**。
+
+利用側の private 参照を禁じる以上、**必要な口は公開側が用意する**。
+
+| API | 何を公開しているか | なぜこの形か |
+|---|---|---|
+| `RobotServer.handle_command` | 経路非依存のコマンド受理口 | 操縦者のコマンドがサーバーへ入る唯一の口。WS も内部の安全機構も同じ 2 段ゲート（フェーズ / 緊急停止）へ合流させれば、ゲートを通らない実行経路が生まれない。受理判定は入口ごとに書き直してよいものではない |
+| `Sequence.steps` | 宣言順のステップ表（`tuple`） | `_steps` は `__init_subclass__` が組み立てる**クラス属性**で全インスタンスが共有する。実体の list を渡すと、受け取った側の 1 回の `append` が以後生成される全インスタンスの進行順を書き換える |
+
+テスト側からの private 参照も同じ理由で野放しにしない。集約先は
+「テストヘルパの集約と『内部へ手を伸ばす特権』」を参照。
+
+### CAN 受信ループの堅牢性
+
+バス 1 本につき `_receive_loop` が 1 つ回り、受け取った 1 通を `_dispatch_frame` が
+宛先モータへ配る。**失敗の封じ込め粒度はモータ 1 台**で、`matches_feedback`（宛先判定）と
+`update_state`（デコード）をそれぞれ別に囲う。
+
+分離が要るのは、**バス上に解釈できないフレームが流れるのが構成上の正常だから**である。
+`can_edulite` / `can_generic` はメインハンドとサブハンドが物理的に共有しており、
+相方のロボット宛のフレームも他プロトコルの機器も同じ線に乗る。1 台のドライバが
+そこで例外を投げただけで受信タスクごと死ぬと、**そのバスの全モータが以後永久に STALE、
+UI は「接続中」のまま**という、試合中に最も復旧しにくい壊れ方になる。
+
+| 事象 | 扱い | 理由 |
+|---|---|---|
+| `matches_feedback` が例外 | そのモータを飛ばして次のモータへ | 巻き添えを当該ドライバ 1 台に閉じる |
+| `update_state` が例外 | その 1 通を捨てる。`_last_rx_at` は更新しない | **解釈できていないフレームを「受信できている」と記録すると、途絶検出そのものが効かなくなる** |
+| `bus.recv` が例外 | `logger.exception` を残して伝播 | フレーム 1 通の問題ではない。握り潰して回り続けても全速で失敗を繰り返すだけ |
+| `asyncio.CancelledError` | 素通し（`Exception` しか捕まえない） | 握り潰すと shutdown で止められない受信ループができる |
+
+握り潰した件数は `BusHealthInfo.rx_error_count` に積み、ログは `LogThrottle` で 1 秒に
+間引く（1Mbps では不正フレームが続く限り 1kHz 規模で流れ、本当に読みたい 1 行が押し流される）。
+
+**`BusHealth` の判定は動かさない。** 上記のとおり解釈できないフレームは正常な構成でも
+流れるので、それで DEGRADED を出すと本物の送信障害の警告まで信用されなくなる。
+実害 —— そのモータのフィードバックが来ないこと —— は `MotorHealth.STALE` として別に現れる。
+
+**ブロッキング呼び出しの実行口は `BlockingRunner` として注入する。** python-can の
+`bus.send` / `bus.recv` は同期ブロッキングなので、既定はスレッドプールへの委譲
+（`asyncio.get_running_loop().run_in_executor`）。テストはここを差し替えて同期実行する。
+`asyncio.get_event_loop()` は実行中のループが無い文脈で新しいループを黙って作り、
+そこへ渡した送信は「呼んだのに一度も走らない」形で消えるため `lib/` 全体で使わない
+（`tests/test_server_encapsulation.py` が AST で禁止している）。
 
 ### M3508 の位置制御（PC 側 PID）
 
@@ -384,7 +441,7 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 - `pause()` は `_step_lock` を取ってからフラグを立てるため、**戻った時点で「送信中の 1 周期」も
   完了済み**であることを保証する（await 中の周期が動作確認の指令を後から上書きするのを防ぐ）
 - 一時停止中も**緊急停止の判定だけは行う**（目標解除 + PID リセット）。送信は行わない
-  （緊急停止自体の 0 電流送信は `RobotServer._handle_command("e_stop")` が別経路で行う）
+  （緊急停止自体の 0 電流送信は `RobotServer.handle_command("e_stop")` が別経路で行う）
 - `resume()` は**目標値を残したまま全軸の PID をリセット**する。動作確認でモータが動かされて
   いるため、古い積分と前回測定値を持ち越すと復帰した瞬間に大電流が出る。目標を消さないのは、
   保持していた昇降軸が復帰時に落下しないようにするため
@@ -439,6 +496,12 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 `await monitor.stop()` → `CANManager.shutdown()` の順。例外・Ctrl-C のどちらで抜けても
 周期タスクを止める（止まらないと電流指令が出続ける）。
 
+**後始末は 1 つが失敗しても残りを続ける。** `main()` の `finally` はこれらを素の for で
+並べているため、途中の 1 つが例外を送出した時点で以降が丸ごと飛ぶと、2 台目のロボットの
+バスが開いたまま残る。`_shutdown_step()` が各手順を包んで失敗を記録してから先へ進め、
+`PeriodicTask.stop()` と `CANManager.shutdown()` も同じ理由で「既に異常終了していたタスク」の
+例外を再送出しない（死因は降りる前にログへ残っている）。**止める処理が止まる形は安全側ではない。**
+
 **PID ゲインの config スキーマ**（`config/main_hand.yaml` の `motors.y_axis_r.pid` / `motors.y_axis_l.pid`）:
 
 | キー | 既定値 | 意味 |
@@ -460,6 +523,59 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 
 実機デバッグで時間が溶けやすいバイト列の組み立てミスや状態遷移のバグを、テストで先に潰す。
 
+### 変異テスト: 増やしたテストが本当に噛むかを確かめる
+
+**テストを増やすこと自体は目的ではない。** テストは実装が壊れたときに落ちるための網で、
+落ちない網は緑を配るだけの装置になる。行数もケース数も、噛んでいることの証拠にならない。
+
+そこで**テストを足した／張り替えたら、本番コードにわざと 1 行の不具合を入れ、
+狙ったテストが落ちることを確認してから元に戻す**。落ちなければ、そのテストは
+「実装が正しいこと」ではなく「実装が存在すること」しか見ていない。
+
+**特に危ないのは「private 依存を公開 API へ張り替える」作業**で、
+張り替えたつもりで守備範囲が狭まっていることがある。実例:
+
+| 張り替え前 | 何を迂回していたか | 張り替え後 |
+|---|---|---|
+| `driver._state = MotorState(position=1.25)` | **デコード層を丸ごと**。`decode_feedback` が位置レンジを取り違えても（`POS_MIN`/`POS_MAX` を `VEL_MIN`/`VEL_MAX` に取り違える等）値はテストが置いたまま通る | `driver.update_state(frame)` — 実フレームを公開経路へ流し、デコードと `update_state` の副作用（M3508 の多回転アンラップ、EDULITE 05 の fault ビット取り込み、自作モタドラのフラグ保持）を実際に通す |
+
+「private を触らなくなった」ことは形の改善であって、網が広がった証拠ではない。
+**張り替えのたびに変異を 1 つ入れて、前と同じ不具合を今も検出できることを確かめる。**
+
+`web/src/test/ws-contract.json` の契約テストに対して行う 3 段の確認
+（`health_change` から `robot` を落とすと 3 段階で止まる。「WS メッセージ契約」参照）は、
+この考え方を WS 契約に当てはめたものである。
+
+**多重防護の各層は、1 枚ずつ単独で確かめる。** 層が複数あると、統合経路のテストでは 1 枚
+壊しても他が拾ってしまい落ちない。それでは「壊しても落ちない層」が残り、後で誰かがその層を
+消しても気付けない。他の層を持たない条件を作って、その層だけが効いていることを見るテストを
+層ごとに置くこと。
+
+本書で層を重ねているものは、いずれもこの形でテストする。
+
+| 多重防護 | 層 | 1 枚だけを見るには |
+|---|---|---|
+| 動作確認中の緊急停止 | ①起動時の拒否 ②`pause()` を待つ窓の再判定 ③per-motor ループ冒頭 ④`_guard_check` | 上流の層を通過させた状態を作る（起動判定の後に停止する / runner を直接 `run()` する） |
+| NaN の目標・ゲイン | ①`decodeSetTarget` ②`decodeSetParam` ③`ControlTarget::setValue` ④`MotorPid::update` | 復号層を通さずに ③④ を直接呼ぶ（シリアルデバッグは実際にその経路で入る） |
+| 左右ペア軸の偏差 | ①シーケンス停止 ②`M3508PositionLoop` の電流 0 ③`SyncMonitor` の全体緊急停止 | 層ごとに別テストファイルを持つ（下表） |
+
+**次の不変条件は安全に直結するため、関係するコードを変えたときは必ずこの確認を行う。**
+
+| 不変条件 | 変異の例 | 落ちるべきテスト |
+|---|---|---|
+| 左右ペア軸の偏差検出 | `SyncGroup.violation()` の境界比較（`deviation <= tolerance`）を `<` へ、`scale` の符号を落とす | `test_axis_sync.py` / `test_sync_guard.py` / `test_sync_monitor.py` / `test_position_loop.py` |
+| フィードバック途絶で電流 0 | 途絶判定の分岐を落とし、古い実測値で PID を回す | `test_feedback_freshness.py` / `test_position_loop.py` |
+| 緊急停止インターロック | `CommandSpec` の緊急停止時可否を反転する | `test_commands.py` / `test_server_e_stop.py` |
+| 緊急停止中は動作確認が 1 台も駆動しない | `MotorCheckRunner` の `is_estop_active` を外す / `run()` の冒頭で中断状態をクリアする / `activate_e_stop` の abort を `is_running` 条件に戻す | `test_motor_check.py` / `test_server_motor_check.py` |
+| 停止理由は解除まで保たれ、後から上書きされない | `_broadcast_e_stop_state` を呼び出し元の理由で配信する形へ戻す / `_e_stop_reason` の「保持済みなら書かない」ガードを外す | `test_server_e_stop.py` |
+| 配信はクライアント集合のスナップショットを回す | `_fanout` の `list(...)` を外して集合そのものを反復する | `test_server_broadcast_resilience.py` |
+| ラッチ中のサーボは補間より先に凍結する | `ServoChannel::setTarget` の受理ガードを外す / `tick()` の凍結を補間の後ろへ動かす | `firmware/test/test_servo/` |
+| `SET_TARGET` を 1 通も受けるまで出力しない | `MotorSafety::isOutputAllowed` の `everFed_` を `watchdogEnabled_` の内側へ入れる | `firmware/test/test_protocol/` |
+| フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
+| 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |
+| 判定できないヘルスは DOWN | 例外時の既定を OK に倒す | `test_health.py` / `test_server_health.py` |
+| 解釈できたフレームでしか鮮度を進めない | `_last_rx_at` の更新を `update_state` より前へ動かす | `test_can_manager.py` / `test_can_manager_health.py` |
+
 ### テスト対象とアプローチ
 
 | レイヤー | TDD | テスト手法 |
@@ -475,7 +591,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | **機構位置定数** | ◎ | yaml → 換算後の指令値、コート差異、欠損・記述ミス時の挙動を単体テスト |
 | **ロボット固有シーケンス** | ◎ | モータを mock し「どの軸にどの値を送ったか」を検証。値は試験用の定数表で与えるので、実機の位置定数を変えてもテストは追随不要 |
 | **config パース** | ○ | YAML → ドライバインスタンス生成の単体テスト |
-| **CAN 実通信** | △ | vcan（仮想 CAN）を使った統合テスト。CI でも実行可能 |
+| **CAN 実通信** | ✗ | **未着手。** `tests/test_can_manager.py` は `can.Bus` をモックしており、SocketCAN の層は通っていない（下記「vcan を使った統合テスト（未着手）」） |
+| **CAN 受信ループの堅牢性** | ◎ | 解釈できないフレーム・落ちるドライバ・コールバックの例外を流し、他モータの受信が続くことを検証。`bus.recv` の失敗は伝播しつつログが残ること、`CancelledError` が握り潰されないこと、ログが間引かれることも含む |
+| **CAN バス命名（udev ルール生成）** | ◎ | `scripts/can_config.py` の出力書式を固定する。`setup_can.sh` が TSV の列と `udev` の標準出力に直接依存しており、試合前点検（`--strict`）の合否がこの出力そのものを根拠にするため |
 | **WebSocket プロトコル** | ○ | JSON パース/生成の単体テスト |
 | **WS メッセージ契約（サーバー ↔ Web UI）** | ◎ | 実サーバーに配信させたメッセージを golden JSON へ焼き付け、Python 側は現在の配信との一致を、TS 側は同じ JSON を受信経路へ流して状態が更新されることを検証 |
 | **aiohttp サーバー** | △ | aiohttp.test_utils で最低限の結合テスト |
@@ -488,27 +606,48 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 検証でき、実機デバッグで潰すべき対象を「配線と機体依存定数」だけに絞れる。
 
 **テストは `firmware/test/` にあり、両プロジェクトが `test_dir = ../test` で同じものを指す。**
-対象は共有ライブラリ `MotorCan` なので、どちらのプロジェクトから回しても同じ 91 ケースが走る。
+対象は共有ライブラリ `MotorCan` なので、どちらのプロジェクトから回しても同じ 110 ケースが走る。
 片方のプロジェクトの下にだけ置くと、もう一方だけを回した人が共有ライブラリの回帰を
 検出できない（`MotorSafety` のテストが dc_motor 側にしか無ければ、servo だけを回した人は
 安全機構を壊しても気付けない）。
 
 ```bash
-pio test -e native -d firmware/dc_motor   # 91 ケース
-pio test -e native -d firmware/servo      # 同じ 91 ケース
+pio test -e native -d firmware/dc_motor   # 110 ケース
+pio test -e native -d firmware/servo      # 同じ 110 ケース
 ```
 
-| スイート | 対象 | 主な検証項目 |
-|---|---|---|
-| `firmware/test/test_protocol/` | `MotorCanProtocol` / `MotorSafety` / `MotorPid` / `ControlTarget` | CAN ID の組み立て・解析（予約値 `0b100`/`0b101`/`0b110` を無効として弾く）、float32 LE の往復と既知バイト列、`E_STOP` の解除がマジックバイト `0x5A` `0xA5` 揃いのときだけ通ること、`FEEDBACK` の位置・速度・電流が int16 で折り返さず飽和すること、ウォッチドッグの満了・復帰・`millis()` 折り返し・ラッチ中も養えること、**未受信と受信後の途絶を分けて bit4 に載せること**、**ウォッチドッグを無効にしても緊急停止ラッチは効くこと**、duty クランプ、PID のリセットとワインドアップ制限、モード切替時に目標値が 0 に落ちること |
-| `firmware/test/test_board/` | `MotorCanRouter` / `PeriodicTimer` / `SerialLineBuffer` | Standard Frame 以外を捨てること、予約コマンド種別の拒否、`0xFF` は `E_STOP` のときだけ全チャンネルへ配ること、デバイス ID `0x00` に「自分宛」が無いこと、DIP オフセットが `0x00` / `0xFF` に回り込んだチャンネルを未設定に倒すこと、DIP のビット順と負論理、`millis()` 折り返しで周期が止まらないこと、空行を指令として通さないこと |
-| `firmware/test/test_servo/` | `ServoMotion` | 角度 → パルス幅の線形変換とクランプ、NaN 目標の拒否、スルーレート制限と所要時間 `距離 / slew_rate`、`holdHere()` の凍結、`setLimits()` で可動範囲を狭めたときに角度を飛ばさないこと、`SET_PARAM` がサーボ向け ID だけを通すこと、`millis()` 折り返しで補間が巻き戻らないこと |
+| スイート | 対象 |
+|---|---|
+| `firmware/test/test_protocol/` | `MotorCanProtocol` / `MotorSafety` / `MotorPid` / `ControlTarget` |
+| `firmware/test/test_board/` | `MotorCanRouter` / `PeriodicTimer` / `SerialLineBuffer` |
+| `firmware/test/test_servo/` | `ServoMotion` / `ServoChannel` |
+
+**各スイートが何を検証しているかの一覧は `firmware/README.md` の「テストの方針」が持つ。**
+本書に写すと、ファームを触った人が更新するのは隣にある README だけなので、こちらが黙って古くなる。
 
 `main.cpp` はペリフェラル依存のため native テストの対象外。ただし宛先判定・周期管理・
 シリアル行組み立ては `MotorCan` 側へ出してあり、`main.cpp` に残るのはペリフェラルの
 呼び出しだけになっている。**実機ビルド（`pio run`）は両プロジェクトで確認すること。**
 
-### vcan を使った統合テスト
+**サーボの「安全機構 × 角度補間」の結線も `ServoChannel` へ出してある**
+（`firmware/lib/MotorCan/src/ServoChannel.{h,cpp}`）。`MotorSafety` と `ServoMotion` を別々に持たせると、
+両者をどう組み合わせるかが `servo/main.cpp` の中だけに書かれ、ペリフェラルに埋まって
+native テストが 1 件も掛からない。結線の規則は 2 つあり、どちらも `ServoChannel` だけが持つ:
+`setTarget()` は出力が許可されていない間の指令を**入口で拒否する**（受け付けると、
+ラッチ中の再送のたびに補間が再アンカーされて緊急停止中にサーボが進む）、`tick()` は
+出力禁止中に**補間を進める前に**現在角で凍結する。`main.cpp` から `ServoMotion` /
+`MotorSafety` を直に触る経路は残さない（残すと「凍結しない setTarget」「凍結より先に進む
+update」を書き直せてしまう）。
+
+### vcan を使った統合テスト（未着手）
+
+**現状、vcan を使うテストは 1 つも無い。** `tests/test_can_manager.py` は `can.Bus` を
+モックしており、検証しているのは `CANManager` の登録・宛先解決・受信ループの堅牢性で、
+SocketCAN の層は通っていない。`main.py --dry-run` が使うのも python-can の
+`virtual` インタフェース（プロセス内）で、vcan ではない。
+
+つまり **SocketCAN のフレーム往復は実機の 3 本でしか通っていない。** ここを埋めるなら
+下のセットアップを前提に、`CANManager` を実バス相手に走らせる結合テストを足すことになる。
 
 ```bash
 # vcan セットアップ（テスト実行前に 1 回だけ）
@@ -516,8 +655,6 @@ sudo modprobe vcan
 sudo ip link add dev vcan0 type vcan
 sudo ip link set up vcan0
 ```
-
-pytest の fixture で vcan バスを自動セットアップし、実際の CAN フレーム送受信をテストする。
 
 ### WS メッセージ契約（`web/src/test/ws-contract.json`）
 
@@ -574,6 +711,36 @@ UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py
 3. それも通しても、TS 側の契約テストが落ちる（`health_change` のサンプルが `useRobotSocket` の
    受信条件を通らず `healthEvents` が空のままになる）
 
+### テストヘルパの集約と「内部へ手を伸ばす特権」
+
+同じ組み立てコードがテストファイルへ書き写されていると、**実装を 1 つ変えるだけで
+10 ファイルが機械的に赤くなり、そのたびに「モックの追従」としてテストを実装へ
+合わせ直すことになる**。テストは実装の変更を検出するための網なのに、変更のたびに
+網を編み直しては何も守れない。組み立ては 1 箇所に置く。
+
+| ヘルパ | 役割 |
+|---|---|
+| `tests/server_fixtures.py` | `RobotServer` を建て、ロボットを登録し、配信を 1 フレームだけ進め、WS の特定 type を待ち合わせる。フェーズを試合中まで進める `enter_match()` などの前提作りも持つ |
+| `tests/fake_can.py` | `CANManager` のモック（`motors` / `bus_names` / `send` / `health` を備える）。加えて**実 `CANManager` の受信状態を作る**操作（`deliver_frame` / `mark_feedback_at` / `mark_bus_off`） |
+| `tests/fake_drivers.py` | テスト用 `MotorDriver` のひな型。`CheckStubDriver`（動作確認 API だけを埋めた基底）/ `StubFeedbackDriver`（CAN プロトコルを持たず観測値を `set_observed` で与える）/ `HealthFlagDriver`（ヘルス判定の分岐だけを属性で制御する） |
+| `tests/fake_health.py` | ヘルススナップショットのスタブ。OK を返さないと「判定できないものは DOWN」経路を常に踏み、本番とは別物の状態でテストすることになる |
+| `tests/fake_clock.py` | `time.monotonic` 互換の `FakeClock`。実時間 sleep で周期を作ると CI の負荷で揺れ、「たまに落ちるから」と安全機構の試験を無効化する圧力がかかる |
+| `tests/feedback_frames.py` | 各ドライバの実フィードバックフレームを組み立て、`update_state` へ流す。フレーム書式の唯一の組み立て場所（プロトコルが変わったら 1 箇所だけが赤くなる） |
+
+**private へ手を伸ばす特権は `tests/server_fixtures.py` と `tests/fake_can.py` の
+2 ファイルだけが持ち、その理由を各ファイルの冒頭に書く。** テスト本体は公開 API
+（`handle_command` / `activate_e_stop` / `e_stop_active` / `match` / `steps`）で書く。
+
+特権を認めるのは、**テストの都合で本番へ注入口を生やさないため**である。受信時刻や
+bus-off は本番では受信ループとドライバ層だけが動かすもので、外から書き込む口は無い。
+「フィードバックが来たことにする」関数を本番へ足せば、それは本番コードからも呼べる
+API になる。内部へ手を伸ばす操作を 2 ファイルへ閉じ込めれば、構造が変わったときの
+追従もその 2 ファイルで済む。
+
+**ただし特権は最小に使う。** `deliver_frame`（宛先判定とデコードを実際に通す）で
+足りるなら `mark_feedback_at`（時刻だけを置く）を使わない。鮮度を迂回して時刻だけ
+進めるテストは、**途絶検出が壊れても緑のまま**になる。
+
 ### テストファイル構成
 
 ```
@@ -584,8 +751,12 @@ tests/
 │   ├── test_generic.py          # 自作プロトコル エンコード/デコード
 │   ├── test_target_reached.py   # is_target_reached / default_tolerance（全ドライバ横断）
 │   └── test_driver_contract.py  # 動作確認 API が抽象メソッドであること（全ドライバ横断）
-├── fake_health.py               # ヘルススナップショットのテスト用スタブ（共通ヘルパ）
-├── fake_drivers.py              # CheckStubDriver（動作確認 API を持たないテスト用ドライバ）
+├── server_fixtures.py           # RobotServer の組み立て・駆動・WS 待ち合わせ（内部へ手を伸ばす唯一の場所）
+├── fake_can.py                  # CANManager のモックと、実 CANManager の受信状態を作る操作
+├── fake_drivers.py              # CheckStubDriver / StubFeedbackDriver / HealthFlagDriver
+├── fake_health.py               # ヘルススナップショットのテスト用スタブ
+├── fake_clock.py                # FakeClock（`time.monotonic` 互換。実時間 sleep を使わない）
+├── feedback_frames.py           # 実機と同じフィードバックフレームの組み立てと `update_state` への流し込み
 ├── test_axis_sync.py            # MotorSpec / SyncGroup（換算・偏差・境界）
 ├── test_commands.py             # CommandSpec の語彙と 2 段ゲート
 ├── test_threshold_wiring.py     # しきい値の既定値が config_schema にしか無いこと
@@ -602,7 +773,8 @@ tests/
 ├── test_sequence_positions.py   # 位置定数の読み込み・単位換算・コート差異
 ├── test_sequence_move_to.py     # bind_positions / move_to / タイムアウト時の停止
 ├── test_robot_sequences.py      # robots/*.py の各ステップが送る指令の検証
-├── test_can_manager.py          # vcan を使った統合テスト
+├── test_can_config.py           # scripts/can_config.py（udev ルール / TSV の出力書式）
+├── test_can_manager.py          # 登録・送信先の解決・受信ループの堅牢性・励磁シーケンス
 ├── test_can_manager_health.py   # 受信タイムアウト → STALE、送信失敗 → DOWN
 ├── test_health.py               # ヘルス判定・状態遷移・JSON シリアライズ
 ├── test_motor_check.py          # MotorCheckRunner（PASSED/FAILED/TIMEOUT・abort）
@@ -616,7 +788,7 @@ tests/
 ├── test_server_set_param.py     # set_param の受理・拒否
 ├── test_server_command_rejected.py  # command_rejected を要求元だけに返すこと
 ├── test_server_broadcast_resilience.py  # 詰まったクライアントで配信を止めないこと
-├── test_server_encapsulation.py # CANManager / Sequence の利用側が private を触らないこと
+├── test_server_encapsulation.py # 利用側が private を触らないこと / lib/ が get_event_loop を使わないこと
 ├── test_runtime_pid_gain.py     # 実行中の PID ゲイン差し替え（左右ペアを別特性にしない）
 ├── test_config_schema.py        # yaml スキーマ検証（未知キー・誤記・共通設定の移動）
 ├── test_main_wiring.py          # main.py の配線（PID 生成・バス単位ループ・インターロック）
@@ -624,7 +796,9 @@ tests/
 └── test_main_motor_check_config.py  # motor_check のモータ別上書き
 ```
 
-共通 fixture は各テストファイル内に置いており、`tests/conftest.py` は現時点では作っていない。
+ヘルパは `conftest.py` ではなく通常の import 可能なモジュールとして置く（`tests/conftest.py` は作っていない）。
+fixture として暗黙に注入されるより、テスト本体に import 行が残るほうが
+「そのテストが何に依存しているか」を読み手が追える。
 
 ### フロントエンドテスト（vitest）
 
@@ -646,7 +820,7 @@ web/
     ├── hooks/{useRobotSocket,useHotkeys,useMotorCheck,useWsUrl}.test.ts(x)
     ├── context/RobotContext.test.tsx   # 購読の分割が再描画を止めていること
     ├── layouts/RootLayout.test.tsx     # テレメトリで外枠が描き直されないこと
-    ├── pages/{Dashboard,MotorTuning}.test.tsx
+    ├── pages/{Dashboard,RobotControl,MotorTuning}.test.tsx
     └── components/          # テストは対象と同じグループディレクトリに置く
         ├── shell/{ConnectionBanner,Toaster,WsSettings,EStopOverlay,TabBar}.test.tsx
         ├── monitor/{StartGate,MatchControl}.test.tsx
@@ -668,6 +842,13 @@ web/
   操作の取りこぼしとして現れるので、目視では原因にたどり着けない）
 - `useHotkeys` — 修飾キー・入力欄・モーダル表示中の抑止。競技中の誤爆は機体破損に直結する
 - `Toaster` / `TriggerButton` / `Checklist` — 状態から表示・活性が一意に決まることの確認
+- `pages/RobotControl.tsx` / `pages/MotorTuning.tsx` — 画面が組み上がったときにしか
+  現れない性質を見る。**主操作の宛先が担当機に揃っていること**（1 箇所でも相手機に
+  向くと、操縦者は自分の画面から相手の機体を動かす）、フェーズ別に何を出し何を塞ぐか、
+  Space が状態ごとにどの操作へ解決するか、編集と送信が分離されていること
+- `SubsystemStatus` — **異常中は操縦者が畳もうとしても畳めないこと**。「自分から開く」
+  だけでは足りない。試合中に一度畳めてしまえば、その後に出た異常も畳んだままになり、
+  見逃しの経路がそのまま残る
 
 `vitest.config.ts` を `vite.config.ts` と分けているのは、後者が build/preview で
 cloudflare プラグイン（workerd）を有効化するため。テストに Worker ランタイムは不要。
@@ -765,11 +946,12 @@ cbc2026_team3/
 │   │       ├── MotorSafety.{h,cpp}       # 緊急停止ラッチ + コマンドウォッチドッグ
 │   │       ├── MotorPid.{h,cpp}          # position / velocity 用 PID（DC 用のみ）
 │   │       ├── SerialLineBuffer.{h,cpp}  # デバッグシリアルの行組み立て（解釈は各 main.cpp）
-│   │       └── ServoMotion.{h,cpp}       # 角度補間・可動範囲クランプ・到達推定（サーボ用のみ）
+│   │       ├── ServoMotion.{h,cpp}       # 角度補間・可動範囲クランプ・到達推定（サーボ用のみ）
+│   │       └── ServoChannel.{h,cpp}      # 上 2 つと MotorSafety の結線（サーボ用のみ）
 │   ├── test/                        # native 環境の Unity テスト。両プロジェクトが test_dir で共有
 │   │   ├── test_protocol/           # プロトコル層・安全機構・PID・制御目標
 │   │   ├── test_board/              # 宛先判定・デバイス ID 解決・周期タイマ・シリアル行
-│   │   └── test_servo/              # 角度補間・可動範囲クランプ・到達推定
+│   │   └── test_servo/              # 角度補間・可動範囲クランプ・到達推定・安全機構との結線
 │   ├── dc_motor/
 │   │   ├── platformio.ini           # 固有行のみ（default_envs / extra_configs / test_dir）
 │   │   ├── include/config.h         # ピン配置・機体依存定数（TODO(実機で確認) はここ）
@@ -882,11 +1064,15 @@ cbc2026_team3/
     "sync_violations": ["y_axis"],
     "loops_running": true,
     "monitors_running": true,
+    "refreshers_running": true,
     "position_loops": [
       { "bus": "m3508_bus", "running": true, "paused": false, "sync_violations": ["y_axis"] }
     ],
     "sync_monitors": [
       { "axes": ["y_axis", "rotate"], "running": true, "violated": [] }
+    ],
+    "target_refreshers": [
+      { "motors": ["conveyor", "gripper"], "running": true, "paused": false }
     ]
   }
 }
@@ -901,9 +1087,11 @@ cbc2026_team3/
 
 `safety` は安全機構そのものの状態を運ぶ。`sync_violations` はラッチ中の軸名
 （位置制御ループと `SyncMonitor` の和集合）で、どの軸が電流 0 に固定されているかを
-操縦者に示す。`loops_running` / `monitors_running` は 200Hz の位置制御と 50Hz の同期監視が
-生きているかで、**これを配信しないと安全ループの死亡に誰も気付けない**（WebSocket は
-繋がったままでモータ状態も届き続けるため、画面は正常に見える）。判定は `_safety_state`
+操縦者に示す。`loops_running` / `monitors_running` / `refreshers_running` は 200Hz の位置制御・
+50Hz の同期監視・20Hz の目標値再送が生きているかで、**これを配信しないと安全ループの死亡に
+誰も気付けない**（WebSocket は繋がったままでモータ状態も届き続けるため、画面は正常に見える）。
+目標値再送を残る 2 つと同格に載せるのは、これが死ぬと 500ms 後にファームのウォッチドッグが
+全 generic アクチュエータの出力を落とすため（「目標値再送」参照）。判定は `_safety_state`
 に一本化し、UI 側で組み立て直さない。
 
 `health` の `overall` は健全性計算そのものが失敗したときも `down` になり、理由が
@@ -929,6 +1117,16 @@ cbc2026_team3/
 後方互換）。内部からの発動は `RobotServer.activate_e_stop(reason=...)` が唯一の入口で、
 `e_stop` コマンドと同じ経路（動作確認 abort → 停止フレーム → シーケンス停止 → 状態配信）を通る。
 
+**理由はサーバーが保持し、解除まで再配信のたびに載せる。** 配信側が呼び出し元から理由を
+受け取る形にすると、停止中の定期再配信（`_broadcast_state`）は理由を持たないため、UI に届く
+最後の 1 通からは必ず理由が抜ける（**画面の説明が 50ms 後に消え、正反対の文言に置き換わる**）。
+載せる値は `_broadcast_e_stop_state()` が `_e_stop_reason` から引き、配信フォーマット自体を
+lossy にしない。
+
+**最初に判明した理由を優先し、後から来た理由で上書きしない。** 機体の自動検知で止まった直後に
+操縦者が E-STOP を押すのは普通の流れで、そこで上書きすると説明が「機体が検知した原因」から
+「操縦者が押した」へ変わる。保持した理由は `e_stop_release` で捨てる。
+
 ### Client → Server（操作）
 
 ```jsonc
@@ -944,7 +1142,10 @@ cbc2026_team3/
 ### シーケンス制御コマンドのセマンティクス
 
 - **trigger**: `require_trigger=true` のステップを次に進める
-- **sequence_jump**: 任意のステップへジャンプ。実行中なら次のステップ境界で反映、停止中・完走後なら指定 index から再開
+- **sequence_jump**: 任意のステップへジャンプ。実行中なら次のステップ境界で反映、停止中・完走後なら指定 index から再開。
+  `step_index` は `int` だけを受け付け `bool` は弾く（Python では `bool` も `int` だが、`true` を
+  index 1 として受理すると停止中のシーケンスが叩き起こされ、誰も開始していないのに 2 番目の
+  ステップから機体が動き出す）
 - **sequence_stop**: 通常停止 (緊急停止と異なり CAN 層には介入しない)。停止後 `step_index=0` に戻り `running=false` になる
 - **sequence_start**: 先頭から実行開始 (停止後・完走後の再起動)
 
@@ -974,8 +1175,11 @@ cbc2026_team3/
   状態をサーバー側で作れてはならない（チューニング UI はモータ 1 基ずつしか送れない）
 - **通らない要求は必ず `command_rejected` で理由を返す。** 黙ってログを出すだけだと、操縦者は
   送信できたと信じたまま、効いていないゲインで調整を続けることになる。拒否する条件は
-  モータ名が空 / 対象キーでない / 値が数値でない（`bool` を含む）/ 非有限（NaN・inf）/ 負値。
-  **負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する**
+  モータ名が空 / 対象キーでない / 値が数値でない（`bool` を含む）/ 非有限（NaN・inf）/ 負値 /
+  `MAX_TUNABLE_GAIN`（= `CURRENT_MAX` = 16384）超過。
+  **負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する。**
+  上限が無いと `kp=1e6` のような打ち間違いがそのまま通る。出力は ±`CURRENT_MAX` [counts] に
+  飽和するので、それを超えるゲインは調整ではなくバンバン制御にしかならない
 - **試合中は受け付けない**（`PHASES_OUTSIDE_MATCH`）。走行中の位置制御ループの特性を
   その場で変えることになり、しかも同期グループ全体へ適用されるため、直結した左右軸の
   両方が負荷下で同時に特性変化する。チューニングはセッティングタイムか試合後に行う
@@ -1032,7 +1236,7 @@ setup ⇄ ready → match → finished → setup
 （= 素通りさせると宣言する）。`__post_init__` が「ゲートするのに理由文が無い」
 「全フェーズ許可なのに拒否理由が書いてある」といった矛盾を import 時に弾く。
 
-`lib/server.py` は語彙を持たない。`_handle_command` は `spec_for(type)` で仕様を引き、
+`lib/server.py` は語彙を持たない。`handle_command` は `spec_for(type)` で仕様を引き、
 2 段のゲートを掛け、`spec.handler` の名前で `_cmd_*` を呼ぶだけになっている。
 
 ### フェーズによるコマンドゲート
@@ -1070,7 +1274,7 @@ WS 直叩きやリロード直後を防げないため、サーバー側でも�
 自分が押していない操作の拒否が混ざると、**本当に自分の操作が通らなかったときの通知と区別できなくなる**。
 要求元が居ない経路（HTTP POST・内部の安全機構からの発動）では誰にも送らない。
 
-`motor_check` は HTTP POST 経路が `_handle_command` を通らないため、`_start_motor_check` 側にも
+`motor_check` は HTTP POST 経路が `handle_command` を通らないため、`_start_motor_check` 側にも
 同じフェーズ判定を置いている（片方だけでは穴が空く）。
 
 **語彙に無いコマンドは拒否理由も返さない。** `spec_for()` が `None` を返した時点で黙って捨てる。
@@ -1101,7 +1305,7 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 `match_start` を載せる理由: 緊急停止は `match_reset` → チェックリスト再実施で `ready` に
 戻れるため、フェーズゲートだけでは素通りする。`match_start` が通ると操縦者の `sequence_start`
 が解禁され、同時に動作確認とコート設定が閉じてしまう。ゲートは `_cmd_match_start()` より
-手前（`_handle_command`）に置き、フェーズ遷移そのものを起こさない
+手前（`handle_command`）に置き、フェーズ遷移そのものを起こさない
 （緊急停止中に試合フェーズへ入れること自体が異常なため安全側に倒す）。
 
 `set_param` を載せる理由: 緊急停止は「今の状態を凍結する」ことなので、制御パラメータも
@@ -1111,7 +1315,8 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 
 | 発動 (`activate_e_stop`) | 解除 (`e_stop_release`) |
 |---|---|
-| 動作確認を abort | 同期ずれラッチを解除（`_reset_sync_latches`） |
+| 動作確認を abort（状態を問わず全 runner）| 同期ずれラッチを解除（`_reset_sync_latches`） |
+| 停止理由を保持（保持済みなら上書きしない）| 停止理由を破棄 |
 | M3508 へ全スロット 0 の電流指令（`send_stop_frame`）| `_e_stop_active` を落として配信 |
 | ドライバ固有の停止フレーム（EDULITE）| EDULITE の再励磁（`activate_motors`）|
 | 全バスへ `0x7FF` ブロードキャスト（自作モタドラ）| |
@@ -1121,6 +1326,15 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_message()` は EDULITE しか
 持たず `0x7FF` は自作モタドラしか解釈しないため、これが無いと左右直結で最も危険な Y 軸だけ
 「位置制御ループが生きて電流 0 を出し続けてくれること」に停止を委ねることになる。
+
+**動作確認の abort は runner の状態を問わない。** `is_running` を条件にすると、
+`_start_motor_check` が runner を登録してから `run()` に入るまでの窓 —— 周期送信の `pause()` を
+待っているあいだ —— だけ False になり、その窓で緊急停止を押された動作確認だけが止まらずに
+完走してモータを駆動する。受け手の `MotorCheckRunner.run()` も中断状態をリセットしないので、
+起動前に届いた 1 通が捨てられることはない（「アクチュエータ動作確認シーケンス > 安全策」参照）。
+
+**`e_stop_release` は緊急停止中でなければ拒否する**（`command_rejected` で理由を返す）。
+停止していないのに再励磁とラッチ解除だけが走る経路を残さない。
 
 解除で同期ずれラッチを外すのは「再び監視を有効にする」ためであり「ずれを無かったことに
 する」ためではない。**解除後もずれが残っていれば双方が再び検知して緊急停止へ戻る**
@@ -1153,6 +1367,9 @@ M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_mes
 コートで値が変わる位置は `config/<robot_name>_positions.yaml` 側で
 `{ red: <値>, blue: <値> }` と書くだけでよい（「機構位置定数」セクション参照）。
 現状の軸構成（昇降・関節・グリッパ）には左右反転する軸が無いため、同梱 yaml はすべてスカラー。
+
+**未知のコート値は理由付きで拒否する**（`command_rejected` に有効値を添える）。黙ってログだけ
+出すと、Monitor はコートを切り替えたつもりのまま逆コートの分岐で試合に入ることになる。
 
 ### WebSocket プロトコル拡張
 
@@ -1205,7 +1422,7 @@ checklists:
 
 ## Web UI ページ構成
 
-タブ構成（`web/src/App.tsx`）。操縦者 2 名はそれぞれ Main Hand / Sub Hand タブを開く。
+タブ構成（定義は `web/src/lib/tabs.ts`、ルートは `web/src/routes.tsx`）。操縦者 2 名はそれぞれ Main Hand / Sub Hand タブを開く。
 
 | タブ | キー | ページ | 内容 |
 |---|---|---|---|
@@ -1657,7 +1874,7 @@ class PickAndPlace(Sequence):
 | 1-7 | `tests/drivers/test_generic.py` | **テスト先行**: 自作モタドラプロトコルのテストを書く |
 | 1-8 | `lib/drivers/generic.py` | 自作モタドラプロトコル実装（テストを GREEN にする） |
 | 1-9 | `lib/can_manager.py` | python-can の asyncio ラッパー。バス名 → Bus オブジェクト管理、送受信キュー |
-| 1-10 | `tests/test_can_manager.py` | vcan を使った CAN 送受信の統合テスト |
+| 1-10 | `tests/test_can_manager.py` | 登録・宛先解決・受信ループの堅牢性・励磁シーケンス（`can.Bus` はモック） |
 
 ### Phase 2: シーケンスエンジン — TDD
 
@@ -1952,21 +2169,11 @@ barrel（`index.ts`）は置かない。oxlint の `import/no-cycle` を効か�
 移動対象 30 ファイルはすべて `@/` エイリアス参照だったため、書き換えは他ファイルからの
 import 33 行のみで、振る舞いの変更はない（`git diff -M` 上で 30 件すべてが 100% rename）。
 
-#### ファイル一覧
+#### 現在のファイル構成
 
-| # | ファイル | 内容 |
-|---|---|---|
-| 4-1 | `web/` scaffold | Vite + React + React Router + TypeScript 初期セットアップ |
-| 4-2 | `useRobotSocket.ts` | WebSocket 接続管理、自動再接続、状態パース、`e_stop_state` 専用イベント受信 |
-| 4-3 | `Dashboard.tsx` | 両ロボットの状態概要を Card 化して表示、操縦画面へのリンク |
-| 4-4 | `RobotControl.tsx` | 操作画面: SequenceProgress + 大型 TriggerButton + MotorSummary（折りたたみ）|
-| 4-5 | `MotorTuning.tsx` | モータごとの状態 + PID パラメータ調整（Slider + 送信ボタン） |
-| 4-6 | `EStopButton.tsx` | ヘッダー右に常設。記号（◆）+ 黄黒ストライプ装飾（TUI リデザインで lucide 撤去） |
-| 4-7 | `EStopOverlay.tsx` | 全画面赤フラッシュ + パルスリング + 進捗リング SVG。時計回り 90° ツイストで解除 |
-| 4-8 | `AppHeader.tsx` | 共通ヘッダー（記号化）+ TuiNav タブ + 全画面切替（TUI リデザインで lucide/Drawer 撤去） |
-| 4-9 | `router.tsx` | レイアウトルートで AppHeader と EStopOverlay を一元化、各ページから重複排除 |
-| 4-10 | `components/Icon.tsx`, `StatusDot.tsx`, `StatPill.tsx`, `ConnectionStatus.tsx`, `SequenceProgress.tsx`, `MotorStatus.tsx`, `MotorSummary.tsx`, `TriggerButton.tsx` | デザイントークンに準拠した共通 UI 部品 |
-| 4-11 | `index.css` / `index.html` | TUI パレット（`:root` の `--tui-*`）+ `.tui-*` 補助クラス + 各種 keyframe（e-stop-flash / trigger-glow / connection-dot）。`@theme` は html/body ベース色（`--color-bg`/`--color-text`）とフォント変数のみ保持し、未使用の HeroUI 設計トークン（surface/accent/shadow/radius 等）は削除済み |
+Phase 4 の初期実装（HeroUI 期）・TUI リデザイン期のファイル名はいずれも現存しない。
+**現在の構成は「ディレクトリ構成」の `web/` 以下と `web/README.md` が持つ。**
+ここに 3 つ目の一覧を置くと、UI を触った人が更新しない側が黙って古くなる。
 
 ### Phase 5: ロボット固有シーケンス
 
@@ -2075,7 +2282,7 @@ health:
 | 6-4 | `lib/drivers/m3508.py` (修正) | C620 フィードバックの温度・電流からフラグ判定 |
 | 6-5 | `lib/drivers/edulite05.py` (修正) | RobStride のステータス領域を解釈 |
 | 6-6 | `lib/drivers/generic.py` (修正) | `FEEDBACK` の状態フラグを解釈（bit の割り当ては `docs/motor_driver_can_protocol.md` §3.2。bit5＝デバイス ID 未設定は `is_fault`、bit3・bit4 は動作確認を拒否する理由になる）|
-| 6-7 | `tests/test_can_manager_health.py` | **テスト先行**: vcan で 受信タイムアウト → STALE、送信失敗 → DOWN 遷移、`bus.state` 反映 |
+| 6-7 | `tests/test_can_manager_health.py` | **テスト先行**: 受信タイムアウト → STALE、送信失敗 → DOWN 遷移、`bus.state` 反映 |
 | 6-8 | `lib/can_manager.py` (修正) | 送受信時刻記録、`bus.state` ポーリング、`health()` メソッド、`_health_check_loop` 追加 |
 | 6-9 | `tests/test_server_health.py` | **テスト先行**: WS state に `health` 同梱、`GET /health` の 200/503、`health_change` push |
 | 6-10 | `lib/server.py` (修正) | `_build_state_message` で health 同梱、`/health` ルート追加、状態遷移検出で `health_change` push |
@@ -2090,7 +2297,7 @@ health:
 |---|---|---|
 | ① データ型 | 6-1, 6-2 | `pytest tests/test_health.py` |
 | ② ドライバ拡張 | 6-3〜6-6 | 既存ドライバテストに warning/fault 判定を追加 |
-| ③ CANManager 拡張 | 6-7, 6-8 | vcan で送信止めて 600ms 後 STALE、shutdown で DOWN 遷移を確認 |
+| ③ CANManager 拡張 | 6-7, 6-8 | 送信を止めて 600ms 後 STALE、shutdown で DOWN 遷移を確認 |
 | ④ サーバー統合 | 6-9, 6-10 | `aiohttp.test_utils` で `GET /health` 200/503、WS ペイロード検証 |
 | ⑤ config 反映 | 6-11 | dry-run 起動でしきい値読み込み確認 |
 | ⑥ Web UI | 6-12〜6-14 | `npm run dev` で表示。config しきい値を短くして遷移を目視 |
@@ -2241,7 +2448,20 @@ RobotServer.handle("motor_check_start")
 
 - 動作確認シーケンス開始前に **確認ダイアログ必須**（「全モータを順番に微小駆動します。周囲の安全を確認してください」）
 - 各モータの指令量は **物理的に安全な微小量に固定**（config で上書き可能）
-- 動作確認実行中も **緊急停止コマンドは即時優先**（既存 e_stop 経路）
+- 動作確認実行中も **緊急停止コマンドは即時優先**（既存 e_stop 経路）。
+  **起動時の拒否だけに頼らない。** `MotorCheckRunner(is_estop_active=...)` に
+  `RobotServer.e_stop_active` を見るチェッカを渡し（`M3508PositionLoop` /
+  `build_motor_group` と同じ注入形）、per-motor ループの冒頭と `_guard_check` の 2 箇所で
+  毎回見る。起動判定は「判定した時点で動かしてよかったか」しか答えないので、判定を通ってから
+  実際に駆動するまでの窓に停止が入ると止められない。打ち切ったモータは SKIPPED になり、
+  `detail` は中断（操縦者が押した）と緊急停止（機体が止まっている）を書き分ける
+- **`run()` は中断状態をリセットしない。** 中断状態を書くのは `__init__` と `abort()` だけ。
+  `run()` の冒頭でクリアすると、起動前に届いた中断要求（緊急停止を含む）を捨てて
+  「止めたはずなのに全モータが順に駆動される」形になる
+- **二重起動は実行タスク（`_motor_check_tasks`）の生死で判定する。** runner の `is_running` は
+  登録から `run()` 開始までのあいだ False なので、そこを条件にすると 2 本目が素通りし、
+  `_motor_check_runners` が上書きされて 1 台目を誰も abort できなくなる。さらに pause/resume に
+  入れ子カウントが無いため、先に終わった側の `resume()` がもう一方の駆動中に周期送信を再開させる
 - M3508 の電流指令はリリース時に必ず 0 を再送（駆動状態を残さない）
 - **M3508 位置制御ループとの排他**: 実行中は同ロボットの `M3508PositionLoop` を一時停止する。
   `RobotServer.add_robot(name, sequence, can_manager, position_loops=...)` でループを受け取り
@@ -2438,7 +2658,7 @@ activation_steps()          LOC_REF = 実測角 → enable
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は Phase 9 で `activate_motors()`（現在角を書いてから enable）を呼ぶようになったが、`encode_disable(clear_fault=True)` は送らない | EDULITE 05 が過電流等の障害フラグを保持したままだと、再有効化しても指令が効かない。fault の自動クリアは原因を隠すため意図的に行っていない。実機で「解除しても動かない」場合は fault の内容を確認して電源再投入で対処する（`health` の `FAULT` 表示で判別できる） |
 | フィードバックが得られないと EDULITE が無励磁のまま残る | Phase 9 の `activate_motor()` は待機（既定 0.5s）の間にフィードバックを受け取れないと enable を送らず、WARNING をログに出すだけ | 電源断・配線ミス・CAN 断のときは「シーケンスは進むのに軸だけ動かない」状態になる。ログを見ないと気づけないので、有効化を見送ったモータを UI（health / 起動時バナー）に出す仕組みが欲しい。なお `--dry-run` は virtual バスで応答が無いため、この WARNING が必ず 2 件出るのが正常 |
 | M3508 のホーミングが未実装 | `multi_turn_position` の原点は初回フィードバック受信時の姿勢。`reset_multi_turn_origin()` / `M3508PositionLoop.set_origin_here()` を呼ぶ経路がシーケンスにも `main.py` にも無い | 「目標 0 = 電源投入時の位置」であり機械原点ではない。電源投入時の姿勢が毎回違うと `positions` の値がそのままズレる。機構端への押し当て（`ControlMode.CURRENT` の素通し）は用意してあるが、それを使うステップがまだ無い |
-| `_receive_loop` の例外が握りつぶされる | 「既知の制約: バス down 時の失敗が分かりにくい」参照 | 対策候補は同節に記載済み。未着手 |
+| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。`operstate` の検証は未実装 | 受信ループは `bus.recv` の失敗で降りる。降りたことは `logger.exception` に残る（`_tasks` を誰も await しないのでログが唯一の痕跡）が、プロセスは動き続け、UI 上はそのバスの全モータが STALE になるだけ。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
 
 ### 制御・チューニング
 

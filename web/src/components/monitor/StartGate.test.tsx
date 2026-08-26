@@ -9,7 +9,13 @@ function checklist(items: { id: string; label: string; checked: boolean }[]) {
   return { items, completed: items.every((i) => i.checked) };
 }
 
-const OK_HEALTH: HealthSnapshot = { timestamp: 0, overall: "ok", buses: [], motors: [] };
+const OK_HEALTH: HealthSnapshot = {
+  timestamp: 0,
+  overall: "ok",
+  buses: [],
+  motors: [],
+  detail: null,
+};
 
 function robot(health: HealthSnapshot): RobotState {
   return {
@@ -134,6 +140,7 @@ describe("StartGate", () => {
         },
       ],
       motors: [],
+      detail: null,
     };
 
     renderWithRobot(<StartGate onStart={vi.fn()} />, {

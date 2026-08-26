@@ -15,7 +15,7 @@ from aiohttp import WSMsgType, web
 from lib.can_manager import CANManager
 from lib.commands import CommandSpec, RejectChannel, phase_deny_reason, spec_for
 from lib.config_schema import DEFAULT_HEALTH, DEFAULT_MOTOR_CHECK, HealthThresholds
-from lib.control.position_loop import TUNABLE_PID_KEYS, M3508PositionLoop
+from lib.control.position_loop import MAX_TUNABLE_GAIN, TUNABLE_PID_KEYS, M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
@@ -109,6 +109,10 @@ class RobotServer:
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
         self._e_stop_active: bool = False
+        # 停止理由は停止が続くかぎり保持する。`_broadcast_state` は停止中に毎ティック
+        # e_stop_state を送り直すため、保持しないと自動検知の直後 1 通だけが本当の
+        # 原因を載せ、以降の再配信が UI の表示を「操縦者の停止操作」へ塗り替える
+        self._e_stop_reason: str | None = None
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
@@ -283,7 +287,7 @@ class RobotServer:
                     except json.JSONDecodeError:
                         logger.warning("不正な JSON を受信: %s", msg.data)
                         continue
-                    await self._handle_command(data, requester=ws)
+                    await self.handle_command(data, requester=ws)
                 elif msg.type == WSMsgType.ERROR:
                     logger.error("WebSocket エラー: %s", ws.exception())
         finally:
@@ -292,13 +296,18 @@ class RobotServer:
 
         return ws
 
-    async def _handle_command(
+    async def handle_command(
         self,
         data: dict,
         *,
         requester: web.WebSocketResponse | None = None,
     ) -> None:
-        """1 コマンドを処理する。
+        """1 コマンドを受理して 2 段のゲートに掛け、通ったものだけ実行する。
+
+        操縦者のコマンドがサーバーへ入る唯一の口。経路 (WS / HTTP / 内部の
+        安全機構) に依らずここへ合流させることで、ゲートを通らない実行経路が
+        生まれない。``activate_e_stop`` を公開しているのと同じ理由で公開する:
+        受理判定は入口ごとに書き直してよいものではない。
 
         Args:
             requester: 要求元のクライアント。拒否通知の宛先に使う。HTTP POST や
@@ -342,7 +351,7 @@ class RobotServer:
 
     # ------------------------------------------------------------------ #
     #  コマンドハンドラ (lib/commands.py の CommandSpec.handler から引かれる)
-    #  ゲートは _handle_command で済んでいるので、ここでは実行だけを行う。
+    #  ゲートは handle_command で済んでいるので、ここでは実行だけを行う。
     # ------------------------------------------------------------------ #
 
     async def _cmd_trigger(self, data: dict, _requester: WSOrNone = None) -> None:
@@ -354,13 +363,21 @@ class RobotServer:
     async def _cmd_e_stop(self, _data: dict, _requester: WSOrNone = None) -> None:
         await self.activate_e_stop()
 
-    async def _cmd_e_stop_release(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_e_stop_release(self, _data: dict, requester: WSOrNone = None) -> None:
+        if not self._e_stop_active:
+            # 「解除」は解除すべき状態があるときだけ通す。停止していない試合中に
+            # 1 通届くだけで同期ずれラッチが全解除され、全モータへ再励磁が飛ぶ
+            # (リロード直後の UI やリトライで実際に起こりうる)
+            await self._reject_command(requester, "e_stop_release", "緊急停止中ではありません")
+            return
+
         logger.info("緊急停止解除コマンド受信")
         # フラグを落とす前にラッチを外す。逆順だと「復帰した」と配信した後にも
         # ラッチが残る周期が生まれ、その間 y_axis だけが動かない機体になる。
         # 停止中は電流 0 が維持されるので、先に外しても機体は動き出さない
         self._reset_sync_latches()
         self._e_stop_active = False
+        self._e_stop_reason = None
         await self._broadcast_e_stop_state()
         await self._reactivate_motors()
 
@@ -374,7 +391,12 @@ class RobotServer:
     async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone = None) -> None:
         robot_name = data.get("robot")
         step_index = data.get("step_index")
-        if robot_name and robot_name in self._robots and isinstance(step_index, int):
+        # bool は Python では int だが、ステップ番号として送られてきた時点で誤送信。
+        # True を通すと index 1 として受理され、停止中のシーケンスが叩き起こされて
+        # 誰も開始していないのに 2 番目のステップから機体が動き出す
+        if isinstance(step_index, bool) or not isinstance(step_index, int):
+            return
+        if robot_name and robot_name in self._robots:
             self._robots[robot_name].sequence.request_jump(step_index)
             logger.info("sequence_jump: %s -> %d", robot_name, step_index)
 
@@ -401,8 +423,8 @@ class RobotServer:
         if robot_name and robot_name in self._motor_check_runners:
             self._motor_check_runners[robot_name].abort()
 
-    async def _cmd_set_court(self, data: dict, _requester: WSOrNone = None) -> None:
-        await self._handle_set_court(data)
+    async def _cmd_set_court(self, data: dict, requester: WSOrNone = None) -> None:
+        await self._handle_set_court(data, requester)
 
     async def _cmd_checklist_set(self, data: dict, _requester: WSOrNone = None) -> None:
         role = data.get("role")
@@ -483,6 +505,15 @@ class RobotServer:
                 requester, "set_param", f"{key} に負の値は指定できません: {value}"
             )
             return
+        if value > MAX_TUNABLE_GAIN:
+            # 上限が無いと kp=1e6 のような打ち間違いがそのまま通る。出力は
+            # ±CURRENT_MAX に飽和するので、その先は調整ではなくバンバン制御になる
+            await self._reject_command(
+                requester,
+                "set_param",
+                f"{key} の上限は {MAX_TUNABLE_GAIN:.0f} です (受け取った: {value})",
+            )
+            return
 
         loop = self._find_position_loop(motor_name)
         if loop is None:
@@ -519,12 +550,22 @@ class RobotServer:
     #  試合状態 (コート / フェーズ / チェックリスト)
     # ------------------------------------------------------------------ #
 
-    async def _handle_set_court(self, data: dict) -> None:
+    async def _handle_set_court(
+        self,
+        data: dict,
+        requester: web.WebSocketResponse | None = None,
+    ) -> None:
         raw = data.get("court")
         try:
             court = Court(raw)
         except ValueError:
+            # 通らない要求には必ず理由を返す。黙ってログだけ出すと、Monitor は
+            # コートを切り替えたつもりのまま逆コートの分岐で試合に入る
             logger.warning("未知のコート: %s", raw)
+            valid = "/".join(c.value for c in Court)
+            await self._reject_command(
+                requester, "set_court", f"未知のコートです: {raw!r} (有効: {valid})"
+            )
             return
         if not self.match.set_court(court):
             return
@@ -561,9 +602,16 @@ class RobotServer:
         """
         logger.warning("緊急停止発動: %s", reason or "操縦者コマンド")
         self._e_stop_active = True
+        # 最初に判明した原因を残す。機体側の自動検知で止まった直後に操縦者が
+        # E-STOP を押すのは普通の流れで、そこで理由を上書きすると画面の説明が
+        # 「機体が検知した原因」から「操縦者が押した」という正反対へ変わる
+        if self._e_stop_reason is None:
+            self._e_stop_reason = reason
+        # 動作確認は runner 登録から run() 開始までのあいだ is_running=False の窓を
+        # 持つ。そこを条件にすると起動しかけの動作確認だけが停止をすり抜けるため、
+        # 状態を見ずに全 runner へ中断を要求する (run() 側は要求を捨てない)
         for runner in self._motor_check_runners.values():
-            if runner.is_running:
-                runner.abort()
+            runner.abort()
         try:
             await self._send_e_stop_frames()
         except Exception:
@@ -574,7 +622,7 @@ class RobotServer:
             # 停止フレームの成否に関わらずシーケンスを止める。走らせたままだと
             # 次のステップが新しいモータ目標値を送り、緊急停止を上書きしてしまう
             self._stop_all_sequences(discard_pending_start=True)
-            await self._broadcast_e_stop_state(reason=reason)
+            await self._broadcast_e_stop_state()
 
     async def _send_e_stop_frames(self) -> None:
         """全ロボットの全モータ / 全バスへ停止フレームを送る。
@@ -641,8 +689,10 @@ class RobotServer:
         """安全機構の状態 (ラッチ中の軸 + 保護ループの生死)。
 
         ラッチ中の軸が分からないと操縦者は復旧手順を選べず、200Hz の位置制御と
-        50Hz の同期監視が死んだことは配信しない限り誰にも気付けない
-        (WS は繋がったままで、モータ状態も届き続けるため画面は正常に見える)。
+        50Hz の同期監視、20Hz の目標値再送が死んだことは配信しない限り誰にも
+        気付けない (WS は繋がったままで、モータ状態も届き続けるため画面は正常に
+        見える)。目標値再送が死ぬと 500ms 後にファームのウォッチドッグが全 generic
+        アクチュエータの出力を落とすため、同じ理由でここに載せる。
         判定は UI 側で組み立て直させずここに一本化する。
         """
         ctx = self._robots[robot_name]
@@ -656,6 +706,7 @@ class RobotServer:
             "sync_violations": sorted(violations),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
             "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
+            "refreshers_running": all(r.is_running for r in ctx.target_refreshers),
             "position_loops": [
                 {
                     "bus": loop.bus_name,
@@ -672,6 +723,14 @@ class RobotServer:
                     "violated": sorted(monitor.violated),
                 }
                 for monitor in ctx.sync_monitors
+            ],
+            "target_refreshers": [
+                {
+                    "motors": list(refresher.motor_names),
+                    "running": refresher.is_running,
+                    "paused": refresher.is_paused,
+                }
+                for refresher in ctx.target_refreshers
             ],
         }
 
@@ -735,11 +794,18 @@ class RobotServer:
         if not await self._send_or_drop(requester, msg):
             await self._drop_clients({requester})
 
-    async def _broadcast_e_stop_state(self, *, reason: str | None = None) -> None:
+    async def _broadcast_e_stop_state(self) -> None:
+        """緊急停止の状態と理由を配信する。理由の出所はサーバーの保持値だけ。
+
+        呼び出し側から理由を受け取る形にしていたときは、停止中の定期再配信
+        (`_broadcast_state`) が理由なしで呼ぶため、UI に届く最後の 1 通からは
+        必ず理由が抜けていた。配信フォーマット自体を lossy にしないため、
+        載せる値はここが `_e_stop_reason` から引く。
+        """
         payload: dict[str, object] = {"type": "e_stop_state", "active": self._e_stop_active}
-        if reason is not None:
+        if self._e_stop_reason is not None:
             # 未知フィールドは既存 UI が無視するため、理由が無いときは付けない
-            payload["reason"] = reason
+            payload["reason"] = self._e_stop_reason
         await self._broadcast_json(payload)
 
     async def _send_or_drop(self, ws: web.WebSocketResponse, msg: str) -> bool:
@@ -799,13 +865,19 @@ class RobotServer:
 
         送信はクライアント単位でまとめ、途中で失敗した相手には残りを送らない
         (送れないと分かった相手に投げ続けるぶん、他の配信が遅れる)。
+
+        反復は必ず接続集合のスナップショットに対して行う。送信は 1 通ごとに
+        await するため、その隙に `_ws_handler` が同じ集合へ add / discard を
+        行いうる (操縦者のリロード 1 回で起きる)。集合をそのまま回すと
+        `RuntimeError: Set changed size during iteration` になり、例外ガードの
+        無い `activate_e_stop` 経由では E-STOP を押した本人の WS が切れる。
         """
         if not payloads:
             return
         messages = [json.dumps(payload, ensure_ascii=False) for payload in payloads]
 
         dead: set[web.WebSocketResponse] = set()
-        for ws in self._ws_clients:
+        for ws in list(self._ws_clients):
             if ws.closed:
                 dead.add(ws)
                 continue
@@ -829,7 +901,7 @@ class RobotServer:
           3. 通常シーケンス実行中 (制御権の二重取得を防ぐ)
           4. 既に動作確認実行中 (二重起動の防止)
 
-        WS 経由は _handle_command でも同じフェーズ判定を行うが、HTTP POST は
+        WS 経由は handle_command でも同じフェーズ判定を行うが、HTTP POST は
         そこを通らないため本メソッド側にもゲートを置く。
         """
         if robot_name not in self._robots:
@@ -853,28 +925,36 @@ class RobotServer:
             )
             return False
 
-        existing = self._motor_check_runners.get(robot_name)
-        if existing is not None and existing.is_running:
+        # 二重起動は runner の `is_running` ではなく実行タスクの生死で判定する。
+        # runner を登録してから `run()` へ入るまでのあいだ `is_running` は False で、
+        # そこを素通しすると `_motor_check_runners` が上書きされて 1 台目が誰からも
+        # abort できなくなる。さらに pause/resume に入れ子カウントが無いため、
+        # 先に終わった側の resume() がもう一方の駆動中に送信を再開させる
+        existing_task = self._motor_check_tasks.get(robot_name)
+        if existing_task is not None and not existing_task.done():
             await self._broadcast_motor_check_error(robot_name, "既に動作確認を実行中です")
             return False
 
         # MotorCheckRunner にはロボットに登録された全モータを渡す。順序は登録順
         # = config の宣言順で、指差喚呼の読み上げ順がこれに従う。
-        motors = dict(ctx.can_manager.motors)
         runner = MotorCheckRunner(
             robot_name=robot_name,
             can_manager=ctx.can_manager,
-            motors=motors,
+            motors=ctx.can_manager.motors,
             per_motor_timeout_ms=float(self._motor_check_settings["per_motor_timeout_ms"]),
             feedback_timeout_ms=self._health.feedback_timeout_ms,
             default_magnitude=self._motor_check_settings["default_magnitude"],  # type: ignore[arg-type]
             per_motor_overrides=self._motor_check_settings["per_motor_overrides"],  # type: ignore[arg-type]
+            # 起動判定を通ってから実際に駆動するまでの窓で停止が入ることがある。
+            # M3508PositionLoop / build_motor_group と同じく、走り出した後も
+            # 毎ステップ緊急停止を見て駆動を打ち切る
+            is_estop_active=lambda: self._e_stop_active,
         )
 
         # コールバックは runner の同期コンテキストから呼ばれる。WS 配信は async なので
-        # asyncio.create_task で fire-and-forget する。loop は run() 中なので必ず取れる。
+        # asyncio.create_task で fire-and-forget する。
         # GC で task が消失しないよう _bg_tasks セットに保持する (RUF006 対策)。
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         bg_tasks: set[asyncio.Task[None]] = set()
 
         def _spawn(coro) -> None:
@@ -906,6 +986,14 @@ class RobotServer:
             try:
                 for pausable in pausables:
                     await pausable.pause(reason=f"{robot_name} 動作確認")
+                if self._e_stop_active:
+                    # pause() は送信中の 1 周期ぶんブロックしうる。その窓のあいだに
+                    # 緊急停止が入ったら 1 台も駆動せずに降りる (起動判定は既に
+                    # 過去のもので、今この瞬間モータを動かしてよいかを答えていない)
+                    await self._broadcast_motor_check_error(
+                        robot_name, "緊急停止中のため動作確認を中止しました"
+                    )
+                    return
                 snapshot = await runner.run()
                 self._motor_check_last[robot_name] = snapshot
                 await self._broadcast_motor_check_done(robot_name, snapshot)

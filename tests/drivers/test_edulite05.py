@@ -12,33 +12,7 @@ from lib.drivers.edulite05 import (
     Edulite05Fault,
     Edulite05RunMode,
 )
-
-
-def feedback_message(
-    driver: Edulite05Driver,
-    *,
-    position: float = 0.0,
-    velocity: float = 0.0,
-    torque: float = 0.0,
-    temperature: float = 25.0,
-    mode_state: int = 2,
-    fault_bits: int = 0,
-    host_id: int | None = None,
-) -> can.Message:
-    data_area2 = (mode_state << 14) | (fault_bits << 8) | driver.can_id
-    arbitration_id = driver.build_can_id(
-        driver.COMM_TYPE_FEEDBACK,
-        data_area2,
-        driver.host_id if host_id is None else host_id,
-    )
-    data = struct.pack(
-        ">HHHH",
-        driver.float_to_uint16(position, driver.POS_MIN, driver.POS_MAX),
-        driver.float_to_uint16(velocity, driver.VEL_MIN, driver.VEL_MAX),
-        driver.float_to_uint16(torque, driver.TORQUE_MIN, driver.TORQUE_MAX),
-        int(temperature * 10),
-    )
-    return can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=True)
+from tests.feedback_frames import edulite_feedback
 
 
 def messages_of(steps: list[tuple[can.Message, float]]) -> list[can.Message]:
@@ -196,7 +170,7 @@ def test_current_limit_is_not_clamped_to_torque_range() -> None:
 
 def test_feedback_decode_updates_status_and_faults() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    msg = feedback_message(
+    msg = edulite_feedback(
         driver,
         position=1.0,
         velocity=2.0,
@@ -221,32 +195,32 @@ def test_feedback_decode_updates_status_and_faults() -> None:
 
 def test_torque_value_is_not_compared_with_current_limit() -> None:
     driver = Edulite05Driver("m1", can_id=5, limit_current=1.0)
-    driver.update_state(feedback_message(driver, torque=5.0))
+    driver.update_state(edulite_feedback(driver, torque=5.0))
     assert driver.has_overcurrent_warning() is False
 
 
 def test_matches_feedback_validates_frame_type_motor_and_host() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    valid = feedback_message(driver)
+    valid = edulite_feedback(driver)
     standard = can.Message(arbitration_id=0x205, data=valid.data, is_extended_id=False)
-    wrong_host = feedback_message(driver, host_id=0)
+    wrong_host = edulite_feedback(driver, host_id=0)
     wrong_motor = Edulite05Driver("other", can_id=6)
 
     assert driver.matches_feedback(valid) is True
     assert driver.matches_feedback(standard) is False
     assert driver.matches_feedback(wrong_host) is False
-    assert driver.matches_feedback(feedback_message(wrong_motor)) is False
+    assert driver.matches_feedback(edulite_feedback(wrong_motor)) is False
 
 
 def test_decode_rejects_unrelated_frame() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     with pytest.raises(ValueError):
-        driver.decode_feedback(feedback_message(driver, host_id=0))
+        driver.decode_feedback(edulite_feedback(driver, host_id=0))
 
 
 def test_check_uses_position_parameter_and_current_position() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(feedback_message(driver, position=0.5))
+    driver.update_state(edulite_feedback(driver, position=0.5))
     target = driver.state.position + math.radians(5.0)
 
     msg, context = driver.check_command(magnitude=5.0)
@@ -261,7 +235,7 @@ def test_check_uses_position_parameter_and_current_position() -> None:
 def test_prepare_check_writes_hold_target_before_enable() -> None:
     """保持目標を書かずに励磁すると、動作確認の瞬間にアームが原点へ飛ぶ。"""
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(feedback_message(driver, position=0.8))
+    driver.update_state(edulite_feedback(driver, position=0.8))
     messages = messages_of(driver.prepare_check_steps())
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
 
@@ -292,7 +266,7 @@ def test_prepare_check_writes_hold_target_before_enable() -> None:
 def test_prepare_check_is_initialization_plus_activation() -> None:
     """励磁手順が動作確認経路に複製されると、片方だけ直すたびに S6 が再発する。"""
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(feedback_message(driver, position=0.3))
+    driver.update_state(edulite_feedback(driver, position=0.3))
 
     assert steps_as_frames(driver.prepare_check_steps()) == steps_as_frames(
         driver.initialization_steps() + driver.activation_steps()
@@ -302,7 +276,7 @@ def test_prepare_check_is_initialization_plus_activation() -> None:
 def test_prepare_check_after_set_zero_holds_new_origin() -> None:
     """set_zero で原点が付け替わった後の保持目標は、付け替え前の実測角であってはならない。"""
     driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
-    driver.update_state(feedback_message(driver, position=0.8))
+    driver.update_state(edulite_feedback(driver, position=0.8))
 
     messages = messages_of(driver.prepare_check_steps())
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
@@ -323,7 +297,7 @@ def test_prepare_check_after_set_zero_holds_new_origin() -> None:
 def test_prepare_check_keeps_configured_run_mode() -> None:
     """動作確認が run_mode を書き換えると、以後その機体の速度指令が効かなくなる。"""
     driver = Edulite05Driver("m1", can_id=5, mode="velocity")
-    driver.update_state(feedback_message(driver, velocity=3.0))
+    driver.update_state(edulite_feedback(driver, velocity=3.0))
 
     messages = messages_of(driver.prepare_check_steps())
     run_mode_frames = [
@@ -343,7 +317,7 @@ def test_prepare_check_keeps_configured_run_mode() -> None:
 
 def test_check_command_and_evaluation_follow_configured_mode() -> None:
     driver = Edulite05Driver("m1", can_id=5, mode="velocity", limit_speed=2.0)
-    driver.update_state(feedback_message(driver, velocity=0.0))
+    driver.update_state(edulite_feedback(driver, velocity=0.0))
 
     msg, context = driver.check_command(magnitude=5.0)
     expected = 5.0 * 2.0 * math.pi / 60.0
@@ -353,11 +327,11 @@ def test_check_command_and_evaluation_follow_configured_mode() -> None:
     assert context.mode is ControlMode.VELOCITY
     assert context.target == pytest.approx(expected)
 
-    driver.update_state(feedback_message(driver, velocity=expected))
+    driver.update_state(edulite_feedback(driver, velocity=expected))
     passed, _detail = driver.evaluate_check_result(context)
     assert passed is True
 
-    driver.update_state(feedback_message(driver, velocity=-expected))
+    driver.update_state(edulite_feedback(driver, velocity=-expected))
     failed, detail = driver.evaluate_check_result(context)
     assert failed is False
     assert "rpm" in detail
@@ -371,10 +345,10 @@ def test_check_safety_error_rejects_current_mode() -> None:
 
 def test_check_safety_rejects_known_fault_and_overtemperature() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(feedback_message(driver, fault_bits=int(Edulite05Fault.UNDERVOLTAGE)))
+    driver.update_state(edulite_feedback(driver, fault_bits=int(Edulite05Fault.UNDERVOLTAGE)))
     assert "fault=0x01" in driver.check_safety_error()
 
-    driver.update_state(feedback_message(driver, temperature=60.0))
+    driver.update_state(edulite_feedback(driver, temperature=60.0))
     assert "過温" in driver.check_safety_error()
 
 
@@ -388,9 +362,9 @@ def test_emergency_stop_uses_extended_disable_without_fault_clear() -> None:
 
 def test_evaluate_check_result_and_reset() -> None:
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(feedback_message(driver, position=0.0))
+    driver.update_state(edulite_feedback(driver, position=0.0))
     _msg, context = driver.check_command(magnitude=5.0)
-    driver.update_state(feedback_message(driver, position=math.radians(4.5)))
+    driver.update_state(edulite_feedback(driver, position=math.radians(4.5)))
     passed, detail = driver.evaluate_check_result(context)
 
     assert passed is True
@@ -403,7 +377,7 @@ def test_evaluate_check_result_and_reset() -> None:
 def test_activation_writes_current_position_before_enable() -> None:
     """enable 直前に現在角を目標へ書かないと、有効化した瞬間に原点へ飛ぶ。"""
     driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(feedback_message(driver, position=0.8))
+    driver.update_state(edulite_feedback(driver, position=0.8))
     current = driver.state.position
 
     steps = driver.activation_steps()
@@ -424,7 +398,7 @@ def test_activation_requires_fresh_feedback_only_in_position_mode() -> None:
 
 def test_activation_in_velocity_mode_holds_zero_speed() -> None:
     driver = Edulite05Driver("m1", can_id=5, mode="velocity")
-    driver.update_state(feedback_message(driver, velocity=3.0))
+    driver.update_state(edulite_feedback(driver, velocity=3.0))
 
     steps = driver.activation_steps()
 

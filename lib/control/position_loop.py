@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_INTERVAL_S",
+    "MAX_TUNABLE_GAIN",
     "TUNABLE_PID_KEYS",
     "M3508PositionLoop",
     "make_position_pid",
@@ -31,6 +32,13 @@ __all__ = [
 # 実行中に差し替えてよい PID パラメータ。出力レンジ・不感帯・積分上限は機構の
 # 保護値なので操縦者の調整対象にしない (誤って緩めると保護が消える)
 TUNABLE_PID_KEYS: tuple[str, ...] = ("kp", "ki", "kd")
+
+# 実行中に受け付けるゲインの上限。出力は ±CURRENT_MAX [counts] に飽和するので、
+# これを超えるゲインは「不感帯を出た瞬間に必ず上限へ張り付く」バンバン制御に
+# しかならず、調整の意味を持たない。下限 (負のゲイン = 正帰還) だけを弾いて
+# 上限を置かないと、kp=1e6 のような打ち間違いがそのまま通り、目標を入れた瞬間や
+# 緊急停止を解除した瞬間にフルスケール電流が出る
+MAX_TUNABLE_GAIN: float = float(CURRENT_MAX)
 
 # 制御周期 200Hz。C620 のフィードバックは 1kHz で届くので取りこぼしはなく、
 # asyncio のジッタ (数 ms) に対しても十分な余裕がある

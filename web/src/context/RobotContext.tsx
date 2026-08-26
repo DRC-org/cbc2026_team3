@@ -41,7 +41,8 @@ export interface RobotCommands {
   setWsUrl: (input: string) => boolean;
   resetWsUrl: () => void;
   openWsSettings: () => void;
-  send: (data: object) => void;
+  /** 送れたら true。切断中は false (楽観的更新の可否を呼び出し側が判断できる) */
+  send: (data: object) => boolean;
   onEStop: () => void;
   onEStopRelease: () => void;
   setCourt: (court: MatchCourt) => void;

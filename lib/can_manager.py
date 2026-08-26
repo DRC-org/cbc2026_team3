@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 import can
 
 from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
+from lib.control.periodic import LogThrottle
 from lib.drivers.base import MotorDriver
 from lib.health import (
     BusHealth,
@@ -27,6 +27,25 @@ logger = logging.getLogger(__name__)
 
 _RECV_TIMEOUT = 0.01
 
+
+class BlockingRunner(Protocol):
+    """``bus.send`` / ``bus.recv`` のような同期呼び出しを実行する口。
+
+    python-can の API は同期ブロッキングなので、そのまま呼ぶとイベントループごと
+    止まる (受信が止まれば位置制御は全軸フィードバック途絶に落ちる)。既定は
+    スレッドプールへの委譲で、テストは差し替えて同期実行する。
+    """
+
+    def __call__[T](self, func: Callable[..., T], /, *args: Any) -> Awaitable[T]: ...
+
+
+async def _run_in_default_executor[T](func: Callable[..., T], /, *args: Any) -> T:
+    # コルーチンの中では get_running_loop() が正しい。get_event_loop() は実行中の
+    # ループが無い文脈で新しいループを黙って作る (Python 3.12 では非推奨) ため、
+    # 「送ったつもりのフレームがどのループでも走らない」経路を作りうる
+    return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+
 # 励磁の有効化前にフィードバックを待つ上限。1Mbps の CAN でモータが応答するには十分で、
 # 応答が無いモータ (電源断・配線ミス) の分だけ起動が遅れる上限でもある。
 _ACTIVATION_FEEDBACK_TIMEOUT_S = 0.5
@@ -38,7 +57,8 @@ _ACTIVATION_PROBE_INTERVAL_S = 0.05
 class CANManager:
     """複数の CAN バスとモータドライバを asyncio で管理する。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, run_blocking: BlockingRunner = _run_in_default_executor) -> None:
+        self._run_blocking = run_blocking
         self._buses: dict[str, can.Bus] = {}
         self._motors: dict[str, MotorDriver] = {}
         self._motor_bus: dict[str, str] = {}
@@ -55,6 +75,10 @@ class CANManager:
         self._rx_error_count: dict[str, int] = {}
         self._bus_off: dict[str, bool] = {}
         self._bus_channels: dict[str, str] = {}
+
+        # 受信エラーは不正フレームが続く限り毎フレーム発生する。1Mbps の CAN では
+        # 1kHz 規模でログが流れ、本当に読みたい 1 行が押し流される
+        self._rx_log = LogThrottle(logger)
 
     def add_bus(self, name: str, bus: can.Bus, channel: str = "") -> None:
         self._buses[name] = bus
@@ -152,9 +176,8 @@ class CANManager:
 
     async def send_to_bus(self, bus_name: str, msg: can.Message) -> None:
         bus = self._buses[bus_name]
-        loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, bus.send, msg)
+            await self._run_blocking(bus.send, msg)
         except can.CanError:
             # CAN プロトコル層の送信失敗。tx_error_count を増やしつつ、
             # 既存呼び出し元 (server.py の e_stop など) との互換性のため例外を再 raise する。
@@ -168,23 +191,91 @@ class CANManager:
             self._last_tx_at[bus_name] = time.time()
 
     async def _receive_loop(self, bus_name: str) -> None:
+        """バス 1 本ぶんの受信ループ。フレームの解釈失敗では降りない。
+
+        降りる (= 受信の口そのものが失われた) 場合だけは必ずログに残す。
+        ``_tasks`` は誰も await しないため、ここで記録しないとタスクの死が
+        どこにも現れず、「UI は接続中のまま全モータが STALE」の原因が
+        試合後まで分からない。
+        """
         bus = self._buses[bus_name]
         motors = self._bus_motors[bus_name]
-        loop = asyncio.get_event_loop()
 
-        while True:
-            msg: can.Message | None = await loop.run_in_executor(None, bus.recv, _RECV_TIMEOUT)
-            if msg is None:
+        try:
+            while True:
+                msg: can.Message | None = await self._run_blocking(bus.recv, _RECV_TIMEOUT)
+                if msg is None:
+                    continue
+                self._dispatch_frame(bus_name, motors, msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 受信 API 自体の失敗 (インタフェース断など) はフレーム 1 通の問題ではなく、
+            # 握り潰して回り続けても全速で失敗を繰り返すだけなので伝播させる
+            logger.exception("CAN 受信ループが停止しました (bus=%s)", bus_name)
+            raise
+
+    def _dispatch_frame(
+        self, bus_name: str, motors: Sequence[MotorDriver], msg: can.Message
+    ) -> None:
+        """受信した 1 通を宛先モータへ配る。1 通の失敗はその 1 通に閉じ込める。
+
+        ここで例外を素通しすると受信ループのタスクごと終わり、しかも ``_tasks`` は
+        誰も await しないので例外は握り潰される。結果は「そのバスの全モータが以後
+        永久に STALE、UI は接続中のまま」という、試合中に最も復旧しにくい壊れ方になる。
+        バス上には他プロトコルの機器も、相方のロボット宛のフレームも流れてくるので、
+        解釈できないフレームは必ず来るものとして扱う。
+
+        捕捉するのは ``Exception`` だけ。``asyncio.CancelledError`` (shutdown の停止
+        経路) と ``KeyboardInterrupt`` / ``SystemExit`` は ``BaseException`` 側にあり、
+        握り潰すと「止められない受信ループ」ができるため素通しする。
+        """
+        for motor in motors:
+            try:
+                claimed = motor.matches_feedback(msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # 宛先判定で落ちるドライバは、他モータ宛のフレームまで巻き添えにしない。
+                # 巻き添えの範囲をそのドライバ 1 台に閉じるため次のモータへ進む
+                self._record_rx_error(bus_name, motor.name, "宛先判定")
                 continue
 
-            for motor in motors:
-                if motor.matches_feedback(msg):
-                    state = motor.update_state(msg)
-                    # フィードバック鮮度を MotorHealth の STALE 判定に使う。
-                    self._last_rx_at[motor.name] = time.time()
-                    if self._on_state_update is not None:
-                        self._on_state_update(motor.name, state)
-                    break
+            if not claimed:
+                continue
+
+            try:
+                state = motor.update_state(msg)
+                # フィードバック鮮度を MotorHealth の STALE 判定に使う。
+                # デコードに失敗したフレームでは更新しない (解釈できていない値を
+                # 「受信できている」と報告すると、途絶の検出そのものが効かなくなる)
+                self._last_rx_at[motor.name] = time.time()
+                if self._on_state_update is not None:
+                    self._on_state_update(motor.name, state)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._record_rx_error(bus_name, motor.name, "状態更新")
+            return
+
+    def _record_rx_error(self, bus_name: str, motor_name: str, phase: str) -> None:
+        """握り潰した受信失敗を、数として残しつつ間引いて記録する。
+
+        件数を ``rx_error_count`` に積むのは、握り潰しが「異常が無い」ことにすり替わる
+        のを防ぐため。一方でバスの健全性判定 (``BusHealth``) は動かさない。判定できない
+        フレームを流す機器の相乗りは構成上あり得る (メインハンドとサブハンドは
+        can_edulite / can_generic を物理的に共有する) ので、それだけで DEGRADED を
+        出すと本物の送信障害の警告まで信用されなくなる。実害 —— そのモータの
+        フィードバックが来ないこと —— は当該モータの STALE として別に現れる。
+        """
+        self._rx_error_count[bus_name] = self._rx_error_count.get(bus_name, 0) + 1
+        self._rx_log.exception(
+            f"{bus_name}:{motor_name}:{phase}",
+            "CAN 受信フレームの%sで例外 (bus=%s, motor=%s)。このフレームは破棄します",
+            phase,
+            bus_name,
+            motor_name,
+        )
 
     async def run(self) -> None:
         for bus_name in self._buses:
@@ -288,15 +379,31 @@ class CANManager:
             await asyncio.sleep(_ACTIVATION_PROBE_INTERVAL_S)
 
     async def shutdown(self) -> None:
+        """受信タスクを畳み、全バスを閉じる。
+
+        既に例外で死んでいる受信タスク (バスが down しているときの
+        ``CanOperationError`` など) の例外をここで再送出しない。``main()`` の
+        ``finally`` は 2 台ぶんの ``shutdown()`` を素の for で並べており、
+        1 台目が送出すると 2 台目のバスが開いたまま残る。1 本のバスの
+        ``bus.shutdown()`` が失敗した場合も同じ理由で残りを閉じ続ける。
+        死因は受信ループ側が降りる前に必ずログへ残している。
+        """
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("受信タスクは既に異常終了していました")
         self._tasks.clear()
 
-        for bus in self._buses.values():
-            bus.shutdown()
+        for bus_name, bus in self._buses.items():
+            try:
+                bus.shutdown()
+            except Exception:
+                logger.exception("バスの停止に失敗: bus=%s", bus_name)
 
     # ------------------------------------------------------------------ #
     #  ヘルスチェック (Phase 6, タスク 6-8)

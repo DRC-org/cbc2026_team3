@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -176,13 +175,25 @@ class PeriodicTask(abc.ABC):
         ``cancel()`` は使わない。``_on_run_exit()`` で 0 電流フレームを送るような
         「降りる前にやることがある」タスクがあり、キャンセルするとその await が
         中断されて止め損なう。待ち時間は最大 1 周期で済む。
+
+        既に例外で死んでいるタスクの例外はここで再送出しない。``main()`` の
+        ``finally`` は「全ループを止める → 全 CAN を落とす」を素の for で並べており、
+        1 つが送出した時点で以降の後始末が丸ごと飛ぶ (2 台目のロボットのバスが
+        開いたまま残る)。止める処理が止まる形は安全側ではない。死因はループ側の
+        間引きログに残っているが、``stop()`` から見える最後の痕跡としてここでも記録する。
         """
         self.request_stop()
         task = self._task
         self._task = None
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        if task is None:
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            # 外からキャンセルされた場合。停止要求としては成立している
+            pass
+        except Exception:
+            self._logger.exception("%s は既に異常終了していました", self._label())
 
     @property
     def is_running(self) -> bool:

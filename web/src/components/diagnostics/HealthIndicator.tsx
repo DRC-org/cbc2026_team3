@@ -38,11 +38,20 @@ function StatusTag({ tone }: { tone: HealthTone }) {
   return <StatusBadge tone={tone}>{TONE_LABEL[tone]}</StatusBadge>;
 }
 
+/**
+ * 受信フレームの解釈失敗数 (`rx_err`) は判定 (`tone`) を動かさず、内訳としてだけ添える。
+ * 降格させないのはサーバー側の意図的な判断 (lib/can_manager.py `_record_rx_error`) で、
+ * 表示側がそれを覆すと本物の送信障害の警告と区別が付かなくなる。一方で数を伏せると
+ * 「握り潰した受信失敗を数として残す」ことの意味が消え、操縦者は STALE のモータを前に
+ * 断線と解釈失敗を切り分けられない。
+ */
 function BusRow({ bus }: { bus: BusHealth }) {
   const tone = busTone(bus.state);
+  // 0 のときは出さない。平常時に無音であることが、出たときに意味を持つ条件
   const notes = [
     bus.bus_off ? "bus_off" : null,
     bus.tx_error_count > 0 ? `tx_err ${bus.tx_error_count}` : null,
+    bus.rx_error_count > 0 ? `rx_err ${bus.rx_error_count}` : null,
   ].filter(Boolean);
   return (
     <tr>

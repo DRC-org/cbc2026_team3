@@ -4,7 +4,8 @@ const RECONNECT_INTERVAL = 3000;
 
 interface UseWebSocketReturn {
   connected: boolean;
-  send: (data: object) => void;
+  /** 送れたら true。切断中は false (呼び出し側が楽観的更新を止められるように) */
+  send: (data: object) => boolean;
 }
 
 /**
@@ -65,10 +66,12 @@ export function useWebSocket(url: string, onMessage: (data: string) => void): Us
     };
   }, [connect]);
 
+  // 切断中に黙って捨てると、呼び出し側は「届いた」と区別が付かない。
+  // 緊急停止のように送信の成否で画面表示を変える操作があるため結果を返す
   const send = useCallback((data: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
-    }
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(JSON.stringify(data));
+    return true;
   }, []);
 
   return { connected, send };

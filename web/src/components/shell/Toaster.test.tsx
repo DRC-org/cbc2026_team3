@@ -9,7 +9,13 @@ import { createRobotContext } from "@/test/robotContext";
 import type { RobotContextValue } from "@/test/robotContext";
 
 function rejection(over: Partial<CommandRejectedEvent> = {}): CommandRejectedEvent {
-  return { command: "match_start", reason: "チェックリスト未完了", receivedAtMs: 1, ...over };
+  return {
+    command: "match_start",
+    reason: "チェックリスト未完了",
+    receivedAtMs: 1,
+    source: "server",
+    ...over,
+  };
 }
 
 function healthEvent(over: Partial<HealthChangeEvent> = {}): HealthChangeEvent {
@@ -57,6 +63,19 @@ describe("表示するもの", () => {
     expect(screen.getByText(/操作が拒否されました/)).toBeInTheDocument();
     expect(screen.getByText("チェックリスト未完了")).toBeInTheDocument();
     expect(screen.getByText("command: match_start")).toBeInTheDocument();
+  });
+
+  it("届かなかった操作は「拒否」と書かない (原因が違えば次の一手も違う)", () => {
+    mount({
+      rejection: rejection({
+        source: "local",
+        command: "e_stop",
+        reason: "切断中のため緊急停止を送信できませんでした",
+      }),
+    });
+
+    expect(screen.getByText("操作が届きませんでした")).toBeInTheDocument();
+    expect(screen.queryByText("操作が拒否されました")).not.toBeInTheDocument();
   });
 
   it("拒否を受け取ったらコンテキスト側を空へ戻す (同じ操作の連続拒否も再表示するため)", () => {

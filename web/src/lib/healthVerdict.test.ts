@@ -43,7 +43,14 @@ function motorHealth(over: Partial<MotorHealth> = {}): MotorHealth {
 }
 
 function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
-  return { timestamp: 0, overall: "ok", buses: [bus()], motors: [motorHealth()], ...over };
+  return {
+    timestamp: 0,
+    overall: "ok",
+    buses: [bus()],
+    motors: [motorHealth()],
+    detail: null,
+    ...over,
+  };
 }
 
 function motor(temp: number): MotorState {
@@ -57,6 +64,8 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
     sync_monitors: [{ axes: ["y_axis"], running: true, violated: [] }],
+    refreshers_running: true,
+    target_refreshers: [{ motors: ["gripper"], running: true, paused: false }],
     ...over,
   };
 }
@@ -100,6 +109,59 @@ describe("evaluateHealth", () => {
     expect(verdict.label).toMatch(/1 件/);
   });
 
+  /**
+   * サーバー (`lib/server.py` の `_compute_health` / `_health_unknown`) は健全性を
+   * 計算できなかったとき、意図的に overall=down・buses/motors 空・detail 付きを配信する。
+   * 内訳が空だからと UI が「異常なし」を出すと、そのフェイルセーフを画面側が無効化して
+   * しまう (誰も異常を検知できない状態が、最も安全に見える表示になる)。
+   */
+  describe("サーバーの総合判定", () => {
+    it("内訳が空でも overall=down なら error に倒す", () => {
+      const verdict = evaluateHealth(
+        health({
+          overall: "down",
+          buses: [],
+          motors: [],
+          detail: "ヘルス計算に失敗しました: boom",
+        }),
+        {},
+      );
+      expect(verdict.tone).toBe("error");
+    });
+
+    it("判定不能の理由 (detail) を捨てない", () => {
+      const verdict = evaluateHealth(
+        health({
+          overall: "down",
+          buses: [],
+          motors: [],
+          detail: "ヘルス計算に失敗しました: boom",
+        }),
+        {},
+      );
+      expect(verdict.detail).toBe("ヘルス計算に失敗しました: boom");
+    });
+
+    it("detail が無くても判定不能であることは伝える", () => {
+      const verdict = evaluateHealth(health({ overall: "down", buses: [], motors: [] }), {});
+      expect(verdict.tone).toBe("error");
+      expect(verdict.label).toMatch(/判定不能/);
+    });
+
+    it("内訳から理由を挙げられるならそちらを優先する (対処に直結する)", () => {
+      const verdict = evaluateHealth(
+        health({ overall: "down", buses: [bus({ state: "down" })] }),
+        {},
+      );
+      expect(verdict.label).toMatch(/can_m3508/);
+    });
+
+    it("内訳が空でも overall=degraded なら warning に倒す", () => {
+      const verdict = evaluateHealth(health({ overall: "degraded", buses: [], motors: [] }), {});
+      expect(verdict.tone).toBe("warning");
+    });
+  });
+
   describe("安全機構", () => {
     it("同期ずれラッチは error にし、どの軸かを出す", () => {
       // 緊急停止を解除してもこの軸は動かない。復旧手順の選択に直結する
@@ -112,6 +174,14 @@ describe("evaluateHealth", () => {
       // WS は繋がったままモータ状態も届き続けるので、配信を読まない限り誰も気付けない
       expect(evaluateHealth(health(), {}, safety({ loops_running: false })).tone).toBe("error");
       expect(evaluateHealth(health(), {}, safety({ monitors_running: false })).tone).toBe("error");
+    });
+
+    it("目標値再送の停止は error (ファーム側ウォッチドッグで generic が全停止する)", () => {
+      // 20Hz の再送が途切れると 500ms 後にグリッパ・コンベア・壁が無反応になる。
+      // 位置制御ループ・同期監視の停止と同格の異常として扱う
+      expect(evaluateHealth(health(), {}, safety({ refreshers_running: false })).tone).toBe(
+        "error",
+      );
     });
 
     it("safety が未受信でも判定は成立する", () => {
@@ -163,10 +233,44 @@ describe("describeSafetyIssues", () => {
     expect(issues.some((i) => i.detail.includes("y_axis"))).toBe(true);
   });
 
+  it("止まっている目標値再送をモータ名付きで返す", () => {
+    // どのアクチュエータが指令を失ったかが分からないと、操縦者は何を疑えばいいか決められない
+    const issues = describeSafetyIssues(
+      safety({
+        refreshers_running: false,
+        target_refreshers: [{ motors: ["gripper", "conveyor"], running: false, paused: false }],
+      }),
+    );
+    const refresher = issues.find((i) => i.detail.includes("gripper"));
+    expect(refresher?.detail).toMatch(/conveyor/);
+    expect(refresher?.hint).toMatch(/500ms/);
+  });
+
+  it("集約値と内訳が同時に異常でも 1 件にまとめる (同じ事実を 2 度描かない)", () => {
+    const issues = describeSafetyIssues(
+      safety({
+        refreshers_running: false,
+        target_refreshers: [{ motors: ["gripper"], running: false, paused: false }],
+      }),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].detail).toBe("gripper");
+  });
+
+  it("内訳が挙がらなくても集約値が false なら黙らない", () => {
+    // 再送タスクの一覧そのものが取れていない場合でも、異常であることは伝える
+    const issues = describeSafetyIssues(
+      safety({ refreshers_running: false, target_refreshers: [] }),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].detail).toBe("全モータ");
+  });
+
   it("動作確認中の一時停止 (paused) は異常として扱わない", () => {
     const issues = describeSafetyIssues(
       safety({
         position_loops: [{ bus: "can_m3508", running: true, paused: true, sync_violations: [] }],
+        target_refreshers: [{ motors: ["gripper"], running: true, paused: true }],
       }),
     );
     expect(issues).toEqual([]);

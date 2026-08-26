@@ -38,6 +38,26 @@ _EDULITE_MODES = {
     mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY, ControlMode.CURRENT)
 }
 
+# ドライバ種別ごとの can_id の範囲 (両端を含む)。
+#
+# 範囲そのものは各ドライバの __init__ も持っているが、そちらで捕まえると
+# 「yaml のどのモータが悪いのか」が出ないまま起動が落ちる。config を読んだ時点で
+# ファイル名とモータ名つきで拒否する。
+# このモジュールは lib.drivers.base 以外を import しない約束なので表を共有できず、
+# 数値が 2 箇所にある。ずれていないことは tests/test_config_schema.py が
+# 実際にドライバを生成して検証する。
+#
+#   m3508     … C620 の電流指令フレームが 1 通に 4 台分のスロットしか持たない
+#   edulite05 … Extended Frame のモータ ID フィールドが 8bit
+#   generic   … 仕様書 §2.2 (0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約)
+CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
+    {
+        "m3508": (1, 4),
+        "edulite05": (0x00, 0xFF),
+        "generic": (0x01, 0xFE),
+    }
+)
+
 _SYSTEM_KEYS = frozenset({"can_buses", "health", "motor_check"})
 _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold")
 _MOTOR_CHECK_KEYS = frozenset({"per_motor_timeout_ms", "default_magnitude"})
@@ -362,6 +382,12 @@ def _parse_motor(
         )
 
     can_id = _integer(source, f"{path}.can_id", motor["can_id"])
+    low, high = CAN_ID_RANGES[driver]
+    if not low <= can_id <= high:
+        raise ValueError(
+            f"{source}: {path}.can_id が {driver} の範囲外です: {can_id} "
+            f"(指定できるのは {low:#04x}〜{high:#04x})"
+        )
     check = _parse_motor_check_override(source, motor_name, motor.get("motor_check"))
 
     if driver == "generic":

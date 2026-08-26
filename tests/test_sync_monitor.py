@@ -7,6 +7,7 @@ import pytest
 
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.control.sync_monitor import SyncMonitor
+from tests.fake_clock import FakeClock
 
 # 実機の y_axis (ラックアンドピニオン) と同じ構成。左右は逆回転で同一動作
 SCALE = 864.15
@@ -20,17 +21,6 @@ class _StubDriver:
 
     def feedback_position(self) -> float:
         return self.position
-
-
-class _FakeClock:
-    def __init__(self, start: float = 5000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, dt: float) -> None:
-        self.now += dt
 
 
 def _pair_group(name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
@@ -56,7 +46,7 @@ class _Fixture:
         on_violation: object | None = None,
     ) -> None:
         self.groups = groups if groups is not None else (_pair_group(),)
-        self.clock = _FakeClock()
+        self.clock = FakeClock(start=5000.0)
         self.drivers: dict[str, _StubDriver] = {}
         self.feedback_at: dict[str, float] = {}
         for group in self.groups:
@@ -214,7 +204,7 @@ class TestSamplingPeriod:
         後置 sleep だと実周期が ``interval + 判定時間`` になり、この前提が負荷に
         比例して崩れる (lib/axis_sync.py のモジュール docstring が置いている前提)。
         """
-        clock = _FakeClock(start=0.0)
+        clock = FakeClock(start=0.0)
         sampled: list[float] = []
 
         async def _sleep(delay: float) -> None:

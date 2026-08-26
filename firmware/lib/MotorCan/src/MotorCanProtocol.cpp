@@ -13,8 +13,28 @@ bool isKnownControlType(uint8_t raw) {
     return raw <= static_cast<uint8_t>(ControlType::Duty);
 }
 
+// NaN は比較がすべて false になるため、以降のクランプ・範囲判定をすべて素通りする。
+// DC 側では PID の積分項に入った時点で以後**正常な目標に対しても**出力が NaN になり、
+// clampDuty が 0 へ落とすので「無言で死んだモータ」になる（診断ビットも立たない）。
+// 解釈できないフレームとして復号層で捨てる（サーボ側 ServoMotion::setTarget と同じ判断）。
+bool isNan(float value) { return value != value; }
+
 bool isKnownParamId(uint8_t raw) {
     return raw <= static_cast<uint8_t>(ParamId::ReachedTolerance);
+}
+
+uint32_t sanitizeTimingMs(float value, uint32_t fallbackMs, uint32_t minMs, uint32_t maxMs) {
+    // NaN は比較がすべて false になるので、範囲判定より先に弾く。
+    if (!(value == value)) {
+        return fallbackMs;
+    }
+    if (!(value > static_cast<float>(minMs))) {
+        return minMs;
+    }
+    if (value >= static_cast<float>(maxMs)) {
+        return maxMs;
+    }
+    return static_cast<uint32_t>(value);
 }
 
 }  // namespace
@@ -102,7 +122,11 @@ SetTargetCommand decodeSetTarget(const uint8_t *data, uint8_t length) {
         return cmd;
     }
     cmd.type = static_cast<ControlType>(data[0]);
-    cmd.value = unpackFloatLe(&data[kFloatPayloadOffset]);
+    const float value = unpackFloatLe(&data[kFloatPayloadOffset]);
+    if (isNan(value)) {
+        return cmd;
+    }
+    cmd.value = value;
     cmd.valid = true;
     return cmd;
 }
@@ -131,7 +155,12 @@ SetParamCommand decodeSetParam(const uint8_t *data, uint8_t length) {
         return cmd;
     }
     cmd.id = static_cast<ParamId>(data[0]);
-    cmd.value = unpackFloatLe(&data[kFloatPayloadOffset]);
+    const float value = unpackFloatLe(&data[kFloatPayloadOffset]);
+    if (isNan(value)) {
+        // NaN のゲインを受け付けると PID の出力が永久に NaN になる。
+        return cmd;
+    }
+    cmd.value = value;
     cmd.valid = true;
     return cmd;
 }
@@ -159,6 +188,14 @@ void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, int32_t 
     packInt16Le(&out[4], saturateToInt16(current_ma));
     out[6] = temperature_c;
     out[7] = flags;
+}
+
+uint32_t sanitizeCommandTimeoutMs(float value, uint32_t fallbackMs) {
+    return sanitizeTimingMs(value, fallbackMs, kMinCommandTimeoutMs, kMaxCommandTimeoutMs);
+}
+
+uint32_t sanitizeFeedbackIntervalMs(float value, uint32_t fallbackMs) {
+    return sanitizeTimingMs(value, fallbackMs, kMinFeedbackIntervalMs, kMaxFeedbackIntervalMs);
 }
 
 float clampDuty(float duty, float maxDuty) {

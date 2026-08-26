@@ -101,18 +101,40 @@ constexpr float kEncoderCountsPerOutputRev =
 // 電流センス
 // ===========================================================================
 
-// 電流センスを実装していない基板では 0 にする。FEEDBACK の電流は常に 0 になり、
-// 過電流フラグも立たなくなる。
+// TODO(実機で確認): 基板に電流センス回路が載っているか。
+// 載っていない基板では 0 にする。FEEDBACK の電流は常に 0 になり、過電流フラグも立たない。
+// **無いのに 1 のままだと SENS ピン（A0）が浮き、ADC の振れがそのまま電流値として
+// しきい値を跨いで必ず誤発火する**（仕様書 §3.2）。
 #define HAS_CURRENT_SENSE 1
 
 // TODO(実機で確認): SENS の換算係数（ADC カウント → mA）。
 // 双方向センスを想定し、無電流時のカウントを 0 点として差分から電流を出す。
 // analogReadResolution は既定の 10bit（0–1023）のまま使う。
 constexpr uint16_t kCurrentSenseZeroCount = 512;
-constexpr float kCurrentSenseMaPerCount = 10.0f;
+constexpr float kCurrentSenseMaPerCount = 20.0f;
 
 // TODO(実機で確認): 過電流しきい値。モータとドライバ IC の連続定格から決める。
 constexpr float kDefaultOvercurrentThresholdMa = 5000.0f;
+
+// 双方向センスなので、表現できる電流の絶対値は 0 点から近い側のレールまで。
+constexpr uint16_t kAdcMaxCount = 1023;
+constexpr float kCurrentSenseFullScaleMa =
+    static_cast<float>(kAdcMaxCount - kCurrentSenseZeroCount < kCurrentSenseZeroCount
+                           ? kAdcMaxCount - kCurrentSenseZeroCount
+                           : kCurrentSenseZeroCount) *
+    kCurrentSenseMaPerCount;
+
+// 上の 3 つは独立した仮値なので、組み合わせが成立しないまま通電しうる。
+// しきい値がフルスケール偏差に近いと、**正常な回路でも ADC がレールに張り付く直前でしか
+// 発報できない**「効いているつもりの保護」になる（実際 10mA/count のままでは
+// フルスケール 5110mA に対してしきい値 5000mA だった）。しきい値は連続定格という
+// 物理量なので、センスの換算係数の側をそれに合わせる。ビルドで止めるのは、
+// この不一致が実機では「過電流を一度も検出しない」という無症状で現れるため。
+static_assert(kDefaultOvercurrentThresholdMa > 0.0f,
+              "過電流しきい値が 0 以下。過電流を常時報告するか一度も報告しなくなる");
+static_assert(kDefaultOvercurrentThresholdMa <= 0.8f * kCurrentSenseFullScaleMa,
+              "過電流しきい値が ADC のフルスケール偏差に近すぎる。"
+              "kCurrentSenseMaPerCount / kCurrentSenseZeroCount と併せて見直すこと");
 
 // ===========================================================================
 // 温度

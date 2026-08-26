@@ -1,3 +1,13 @@
+"""main.py の組み立て (composition root) が正しく配線されているかを検証する。
+
+``main`` の関数はすべて ``_`` 付きで、公開されているのは ``main()`` だけ。テストが
+private を掴んでいるのはカプセル化の破りではなく、モジュール全体が非公開だから。
+ここで確かめる事実 —— M3508 の載っていないバスに位置制御ループを作らない、
+同期グループをループへ結び付ける、未知の control_type を起動時に弾く —— は
+どれも取り違えると機構が壊れるものなので、``main()`` の起動 (実バスと実 config が
+要る) を通してしか触れない状態にはできない。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -460,13 +470,18 @@ class TestBuildTargetRefresher:
 
 
 class TestServerEStopProperty:
-    def test_e_stop_active_property_reflects_state(self) -> None:
-        """main.py から private 属性を触らずに緊急停止状態を読めること。"""
+    async def test_e_stop_active_property_reflects_state(self) -> None:
+        """main.py から private 属性を触らずに緊急停止状態を読めること。
+
+        状態を作るのも公開経路 (activate_e_stop) から行う。private へ直接
+        代入すると、「停止したのにプロパティが追随しない」配線ミスを
+        テストの側が肩代わりして隠してしまう。
+        """
         server = RobotServer()
 
         assert server.e_stop_active is False
 
-        server._e_stop_active = True
+        await server.activate_e_stop(reason="配線確認")
         assert server.e_stop_active is True
 
     def test_e_stop_active_is_read_only(self) -> None:
