@@ -1,13 +1,13 @@
 import { ListChecks } from "lucide-react";
 import { useState } from "react";
 
-import { ActionPanel } from "@/components/ActionPanel";
-import { Checklist } from "@/components/Checklist";
-import { MotorCheckButton } from "@/components/MotorCheckButton";
-import { MotorCheckPanel } from "@/components/MotorCheckPanel";
-import { MotorCheckSummary } from "@/components/MotorCheckSummary";
-import { SequenceStepList } from "@/components/SequenceStepList";
-import { SubsystemStatus } from "@/components/SubsystemStatus";
+import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
+import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
+import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
+import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
+import { ActionPanel } from "@/components/operator/ActionPanel";
+import { Checklist } from "@/components/operator/Checklist";
+import { SequenceStepList } from "@/components/operator/SequenceStepList";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";

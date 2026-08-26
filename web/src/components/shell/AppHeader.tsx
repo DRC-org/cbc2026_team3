@@ -1,6 +1,6 @@
 import { OctagonX } from "lucide-react";
 
-import { TabBar } from "@/components/TabBar";
+import { TabBar } from "@/components/shell/TabBar";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobot } from "@/context/RobotContext";

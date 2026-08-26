@@ -1,6 +1,6 @@
 import { Hand } from "lucide-react";
 
-import { SubsystemStatus } from "@/components/SubsystemStatus";
+import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotState } from "@/hooks/useRobotSocket";

@@ -2,7 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { Toaster } from "@/components/Toaster";
+import { Toaster } from "@/components/shell/Toaster";
 import { RobotProvider } from "@/context/RobotContext";
 import type { CommandRejectedEvent, HealthChangeEvent } from "@/hooks/useRobotSocket";
 import { createRobotContext } from "@/test/robotContext";

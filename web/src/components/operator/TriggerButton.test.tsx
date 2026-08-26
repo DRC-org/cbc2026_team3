@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { TriggerButton } from "@/components/TriggerButton";
+import { TriggerButton } from "@/components/operator/TriggerButton";
 
 const BASE = { waiting: false, stepIndex: 0, totalSteps: 5, onTrigger: () => {} };
 

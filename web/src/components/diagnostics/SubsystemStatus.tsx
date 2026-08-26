@@ -1,8 +1,8 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useState } from "react";
 
-import { HealthIndicator } from "@/components/HealthIndicator";
-import { MotorSummary } from "@/components/MotorSummary";
+import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
+import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { HealthSnapshot, MotorState } from "@/hooks/useRobotSocket";

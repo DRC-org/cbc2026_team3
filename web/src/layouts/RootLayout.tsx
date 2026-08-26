@@ -1,12 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router";
 
-import { AppHeader } from "@/components/AppHeader";
-import { ConnectionBanner } from "@/components/ConnectionBanner";
-import { EStopOverlay } from "@/components/EStopOverlay";
-import { StatusBar } from "@/components/StatusBar";
-import { Toaster } from "@/components/Toaster";
-import { WsSettings } from "@/components/WsSettings";
+import { AppHeader } from "@/components/shell/AppHeader";
+import { ConnectionBanner } from "@/components/shell/ConnectionBanner";
+import { EStopOverlay } from "@/components/shell/EStopOverlay";
+import { StatusBar } from "@/components/shell/StatusBar";
+import { Toaster } from "@/components/shell/Toaster";
+import { WsSettings } from "@/components/shell/WsSettings";
 import { ModalProvider } from "@/context/ModalContext";
 import { RobotProvider } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";

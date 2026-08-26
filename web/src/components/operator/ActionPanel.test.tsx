@@ -1,7 +1,7 @@
 import { screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { ActionPanel } from "@/components/ActionPanel";
+import { ActionPanel } from "@/components/operator/ActionPanel";
 import type { RobotState, SequenceStepInfo } from "@/hooks/useRobotSocket";
 import { renderWithRobot } from "@/test/robotContext";
 

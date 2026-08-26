@@ -1,4 +1,4 @@
-import { formatAge } from "@/components/HealthIndicator";
+import { formatAge } from "@/components/diagnostics/HealthIndicator";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { MotorHealth, MotorHealthState, MotorState } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";

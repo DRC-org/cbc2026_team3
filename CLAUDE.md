@@ -96,6 +96,11 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - 画面切替は React Router（library mode / `createBrowserRouter`）。ルートは `src/routes.tsx`、
     共通の外枠と WebSocket 接続は `src/layouts/RootLayout.tsx`（タブ帯は `AppHeader` の中）
   - 配色は `src/index.css` の daisyUI カスタムテーマ `cbc`（ライト基調）に集約。組み込みテーマは使わない
+  - `src/components/` は**誰が描くか**で分ける。`shell/`（RootLayout が全画面へ出す外枠）/
+    `monitor/`（Dashboard 専用）/ `operator/`（RobotControl 専用）/ `motorcheck/`（セッティング
+    タイムの動作確認）/ `diagnostics/`（`SubsystemStatus` を頂点とする診断ツリー）/ `ui/` の 6 つで、
+    直下には何も置かない。barrel（`index.ts`）は作らず常に実ファイルまで指す（oxlint の
+    `import/no-cycle` を効かせたまま依存グラフを読めるようにするため）
   - `src/components/ui/` — 自前プリミティブ（`Page` / `Panel` / `Section` / `Button` /
     `StatusBadge` / `Kbd` / `Icon` / `Modal`）。レイアウト骨格は CSS ではなくここが持つ
   - 画面の主役は `ActionPanel`（操縦者・試合中）/ `StartGate`（Monitor・準備中）/

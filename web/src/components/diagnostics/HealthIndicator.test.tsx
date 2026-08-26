@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { HealthIndicator, formatAge } from "@/components/HealthIndicator";
+import { HealthIndicator, formatAge } from "@/components/diagnostics/HealthIndicator";
 import type { HealthSnapshot } from "@/hooks/useRobotSocket";
 
 function snapshot(over: Partial<HealthSnapshot> = {}): HealthSnapshot {

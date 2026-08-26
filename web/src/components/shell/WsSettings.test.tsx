@@ -2,7 +2,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { WsSettings } from "@/components/WsSettings";
+import { WsSettings } from "@/components/shell/WsSettings";
 import type { RobotContextValue } from "@/test/robotContext";
 import { renderWithRobot } from "@/test/robotContext";
 

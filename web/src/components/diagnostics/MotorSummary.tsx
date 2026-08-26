@@ -1,4 +1,4 @@
-import { MotorStatHeader, MotorStatus } from "@/components/MotorStatus";
+import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { MotorHealth, MotorState } from "@/hooks/useRobotSocket";
 import { TEMP_WARNING } from "@/lib/robots";
