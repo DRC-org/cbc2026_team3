@@ -190,6 +190,82 @@ static int stubReadPin(uint8_t pin) { return g_stubPins[pin]; }
 
 // 添字がビット位置で、INPUT_PULLUP の負論理（LOW = ON = 1）。
 // 順序を取り違えると 0b0001 と 0b1000 が入れ替わり、別のアクチュエータが動く。
+// 1 枚が複数チャンネルを持つ基板では、DIP は「スロット数を刻み幅にしたブロック」を選ぶ。
+// 刻み幅 1 で足すと隣の DIP 設定の基板とブロックが重なり、同じ ID の基板が 2 枚
+// バス上に並ぶ（1 通の SET_TARGET で 2 台が動き、片方は永久に STALE になる）。
+static void test_block_offset_keeps_boards_from_overlapping() {
+    const uint8_t base[3] = {0x11, 0x12, 0x13};
+    // DIP=0 は表そのまま
+    for (uint8_t ch = 0; ch < 3; ++ch) {
+        TEST_ASSERT_EQUAL_UINT8(base[ch], applyDeviceIdBlockOffset(base[ch], 0, 3, 0x1C));
+    }
+    // DIP=1 は 3 つ先のブロックへ丸ごと移る
+    TEST_ASSERT_EQUAL_UINT8(0x14, applyDeviceIdBlockOffset(base[0], 1, 3, 0x1C));
+    TEST_ASSERT_EQUAL_UINT8(0x15, applyDeviceIdBlockOffset(base[1], 1, 3, 0x1C));
+    TEST_ASSERT_EQUAL_UINT8(0x16, applyDeviceIdBlockOffset(base[2], 1, 3, 0x1C));
+    // DIP=3（2bit の最大）まで重ならない
+    TEST_ASSERT_EQUAL_UINT8(0x1A, applyDeviceIdBlockOffset(base[0], 3, 3, 0x1C));
+    TEST_ASSERT_EQUAL_UINT8(0x1C, applyDeviceIdBlockOffset(base[2], 3, 3, 0x1C));
+}
+
+// サーボ基板は 1 枚 5 スロット。役割（サーボ / センサ）をどう振っても基準 ID の集合が
+// 連続ブロックのままになるよう、センサに使うスロットも ID を 1 つ予約する。
+// そのため刻み幅は「サーボの台数」ではなく「スロット数」でなければならない。
+static void test_block_offset_reserves_one_id_per_slot() {
+    const uint8_t base[5] = {0x01, 0x03, 0x04, 0x05, 0x02};
+    for (uint8_t slot = 0; slot < 5; ++slot) {
+        // DIP=1 は 5 つ先。どのスロットも DIP=0 のブロック（0x01-0x05）へ着地しない
+        const uint8_t shifted = applyDeviceIdBlockOffset(base[slot], 1, 5, 0x10);
+        TEST_ASSERT_TRUE(shifted >= 0x06);
+        TEST_ASSERT_TRUE(shifted <= 0x0A);
+    }
+    TEST_ASSERT_EQUAL_UINT8(0x06, applyDeviceIdBlockOffset(0x01, 1, 5, 0x10));
+    TEST_ASSERT_EQUAL_UINT8(0x0B, applyDeviceIdBlockOffset(0x01, 2, 5, 0x10));
+}
+
+// 帯を越えたブロックは未設定へ倒す。倒さずに割り当てると、サーボ基板の DIP を
+// 上げただけで DC 基板の帯（0x11-）を踏み、同じ ID の基板が 2 枚並ぶ。
+// 未設定にしておけば LED が赤く速く点滅し、DIP の設定ミスがその場で目に見える。
+static void test_block_offset_outside_band_is_unconfigured() {
+    // サーボ帯は 0x01-0x10。DIP=3 は 0x10-0x14 になり、はみ出す
+    TEST_ASSERT_EQUAL_UINT8(0x10, applyDeviceIdBlockOffset(0x01, 3, 5, 0x10));
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x02, 3, 5, 0x10));
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x05, 3, 5, 0x10));
+    // DIP を大きく回しても他基板の帯へは絶対に入らない
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x01, 15, 5, 0x10));
+}
+
+// はみ出した分を 8bit に丸めると、他基板のブロックの真ん中へ着地する。
+// 0xFF はブロードキャスト予約でもあるので、越えたものは未設定へ倒す。
+static void test_block_offset_overflow_is_unconfigured() {
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0xF0, 10, 3, 0xFE));
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0xFE, 1, 1, 0xFE));
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x01, 255, 3, 0xFE));
+    // 基準が未設定なら何を足しても未設定のまま
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x00, 1, 3, 0xFE));
+}
+
+// DC 基板の DIP は 2bit（SW0=D1 / SW1=D0）。ビット数を取り違えると別ブロックを名乗る。
+static void test_dip_reads_two_bits() {
+    const uint8_t pins[2] = {0, 1};
+    const int kLow = 0;
+    const int kHigh = 1;
+
+    g_stubPins[0] = kHigh;
+    g_stubPins[1] = kHigh;
+    TEST_ASSERT_EQUAL_UINT8(0x00, readDipSwitch(pins, 2, stubReadPin, kLow));
+
+    g_stubPins[0] = kLow;
+    TEST_ASSERT_EQUAL_UINT8(0x01, readDipSwitch(pins, 2, stubReadPin, kLow));
+
+    g_stubPins[0] = kHigh;
+    g_stubPins[1] = kLow;
+    TEST_ASSERT_EQUAL_UINT8(0x02, readDipSwitch(pins, 2, stubReadPin, kLow));
+
+    g_stubPins[0] = kLow;
+    TEST_ASSERT_EQUAL_UINT8(0x03, readDipSwitch(pins, 2, stubReadPin, kLow));
+}
+
 static void test_dip_is_active_low_and_lsb_first() {
     const uint8_t pins[4] = {0, 1, 2, 3};
     const int kLow = 0;
@@ -316,6 +392,11 @@ int main(int, char **) {
     RUN_TEST(test_zero_offset_keeps_the_table_as_is);
     RUN_TEST(test_offset_wraparound_to_reserved_ids_is_unconfigured);
     RUN_TEST(test_unconfigured_base_stays_unconfigured);
+    RUN_TEST(test_block_offset_keeps_boards_from_overlapping);
+    RUN_TEST(test_block_offset_reserves_one_id_per_slot);
+    RUN_TEST(test_block_offset_outside_band_is_unconfigured);
+    RUN_TEST(test_block_offset_overflow_is_unconfigured);
+    RUN_TEST(test_dip_reads_two_bits);
     RUN_TEST(test_dip_is_active_low_and_lsb_first);
     RUN_TEST(test_periodic_timer_fires_on_interval);
     RUN_TEST(test_periodic_timer_survives_millis_wraparound);

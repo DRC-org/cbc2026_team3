@@ -16,36 +16,47 @@ firmware/
     MotorCan/          全ファーム共通。Arduino 非依存の純 C++
       src/MotorCanProtocol.{h,cpp}   CAN ID / フレームの符号化・復号 + PC 側との契約既定値
       src/MotorCanRouter.{h,cpp}     受信フレームの宛先判定・DIP オフセット・DIP 読み出し
-      src/MotorControlTarget.h       ControlTarget（制御モードと目標値を 1 つの状態にする）
       src/MotorLoopTimer.h           PeriodicTimer（millis() 折り返しに耐える周期判定）
-      src/MotorSafety.{h,cpp}        緊急停止ラッチ + コマンドウォッチドッグ
-      src/MotorPid.{h,cpp}           position / velocity 用 PID（DC 用のみ使用）
+      src/MotorSafety.{h,cpp}        緊急停止ラッチ + コマンドウォッチドッグ + 物理停止入力
       src/SerialLineBuffer.{h,cpp}   デバッグシリアルの行組み立て（行の解釈は各 main.cpp）
+      src/DcChannel.{h,cpp}          DC 1ch 分の結線（安全機構 + duty 目標。DC 用のみ使用）
+      src/MotorCanRouter は帯つきブロックオフセット（applyDeviceIdBlockOffset）を持つ
       src/ServoMotion.{h,cpp}        角度補間・可動範囲クランプ・到達推定（サーボ用のみ使用）
       src/ServoChannel.{h,cpp}       上 2 つの結線（出力禁止中は指令を受け付けず先に凍結する）
   test/                native 環境の Unity テスト。両プロジェクトが test_dir = ../test で共有
-    test_protocol/     プロトコル層・安全機構・PID・制御目標
+    test_protocol/     プロトコル層・安全機構・物理停止・duty 分解・DcChannel
     test_board/        宛先判定・デバイス ID 解決・周期タイマ・シリアル行
     test_servo/        角度補間・可動範囲クランプ・到達推定・安全機構との結線
-  dc_motor/            DC モータ用モタドラのファーム
-    platformio.ini     固有行のみ（default_envs / extra_configs / test_dir）
-    include/config.h   ピン配置と機体依存定数（要確認項目はここ）
-    src/main.cpp       ペリフェラル初期化・制御ループ・CAN 送受信
-  servo/               サーボ用モタドラのファーム（1 枚で複数チャンネル）
-    platformio.ini     同上
+  dc_motor/            DC モータ用モタドラのファーム（1 枚で 3 チャンネル）
+    platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
-    src/main.cpp       ペリフェラル初期化・補間ループ・CAN 送受信
+    src/main.cpp       ペリフェラル初期化・出力反映・CAN 送受信
+  servo/               サーボ用モタドラのファーム（**Arduino Nano** / 1 枚で 5 スロット）
+    platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
+    include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）
+    src/main.cpp       ペリフェラル初期化・補間ループ・MCP2515 送受信
 ```
 
-`MotorCan` が `Arduino.h` を include しないのは意図的で、PC 上の native 環境で
-そのままコンパイルしてテストできるようにするため。`dc_motor/` と `servo/` は
-`lib_extra_dirs = ../lib` で同じ `MotorCan` を共有し、テストも `firmware/test/` を共有するので、
-**`pio test -e native` はどちらのプロジェクトから回しても同じ全ケースが走る。**
-一方**実機ビルド（`pio run`）は両方で確認すること。** 共有しているのは `MotorCan` までで、
-`main.cpp` と `config.h` は別物のため。
+**2 枚は別の MCU に載っている。**
 
-ビルド設定の実体は `common.ini` にある。2 つの `platformio.ini` がコメント以外まったく
-同じ内容を持っていると、片方だけを直したことに誰も気付けない。
+| | DC 用 | サーボ用 |
+|---|---|---|
+| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** |
+| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） |
+| PWM | `PwmOut`（R4 専用） | **`Servo` ライブラリ**（`writeMicroseconds`） |
+| Flash / RAM | 256KB / 32KB | **32KB / 2KB** |
+| PlatformIO env | `uno_r4_minima` | `nano` |
+
+`MotorCan` が `Arduino.h` を include しないのは意図的で、PC 上の native 環境で
+そのままコンパイルしてテストできるようにするため。**MCU が違ってもここは共有できる。**
+`dc_motor/` と `servo/` は `lib_extra_dirs = ../lib` で同じ `MotorCan` を共有し、
+テストも `firmware/test/` を共有するので、
+**`pio test -e native` はどちらのプロジェクトから回しても同じ全ケースが走る。**
+一方**実機ビルド（`pio run`）は両方で確認すること。**
+
+`common.ini` が持つのは本当に共通の部分（`lib_extra_dirs` / `test_framework` / native env と、
+実機ビルドの共通フラグ）だけ。**`platform` / `board` / `lib_deps` は MCU が違うので
+各プロジェクトの `platformio.ini` が持つ。**
 
 ## コマンド
 
@@ -56,13 +67,13 @@ firmware/
 pio test -e native -d firmware/dc_motor
 pio test -e native -d firmware/servo
 
-# ビルド
+# ビルド（env が基板ごとに違う）
 pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e uno_r4_minima -d firmware/servo
+pio run -e nano -d firmware/servo
 
-# 書き込み（サーボ基板）
-pio run -e uno_r4_minima -d firmware/servo -t upload
-pio device monitor -e uno_r4_minima -d firmware/servo
+# 書き込み（サーボ基板 = Arduino Nano）
+pio run -e nano -d firmware/servo -t upload
+pio device monitor -e nano -d firmware/servo
 
 # 書き込み（基板を USB で接続してから）
 pio run -e uno_r4_minima -d firmware/dc_motor -t upload
@@ -75,10 +86,15 @@ pio device monitor -e uno_r4_minima -d firmware/dc_motor
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
 
-**基板は DC 用・サーボ用とも UNO R4 Minima。** CAN ペリフェラルは `D4`(TX)/`D5`(RX) に
-固定されているので、このピンを他用途へ割り当ててはならない。割り当てると CAN が上がらず
-**PC から止められない基板**ができあがる。各 `main.cpp` の `static_assert` が
-`config.h` のピンと `PIN_CAN0_TX` / `PIN_CAN0_RX` の衝突をビルド時に検出する。
+**DC 用基板（UNO R4 Minima）の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている。**
+このピンを他用途へ割り当ててはならない。割り当てると CAN が上がらず**PC から止められない
+基板**ができあがる。**サーボ用基板（Nano）は MCP2515 を SPI で外付けしているので D4/D5 は
+サーボ出力に使えるが、代わりに `D11`/`D12`/`D13` を SPI が占有する**（`D13` は SCK なので
+ステータス LED に使えず、RGB LED がその役目を担う）。
+
+各 `main.cpp` の `static_assert` が、`config.h` の全ピンについて **①CAN/SPI との衝突
+②役割どうしの重複 ③デバイス ID の重複と連続ブロック性 ④センサの報告ビット**を
+ビルド時に検出する。
 
 初回ビルドではツールチェーン（`toolchain-gccarmnoneeabi`）と Arduino コアが
 ダウンロードされるためネットワークが必要。以降はオフラインでビルドできる。
@@ -87,65 +103,114 @@ pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 
 USB CDC の `Serial`（115200 baud）から duty を直接入力できる。
 
-- `0.3` のような数値を送ると duty モードに切り替わって その duty で回る
-- `s` を送ると停止し、シリアル操作モードを抜ける
+- `0 0.3` のように「`<チャンネル番号> <duty>`」を送るとそのチャンネルが回る。
+  **チャンネル番号と duty は空白で区切る。** 区切りが無い行は捨てる（番号を読み違えると
+  別のモータが回るので、曖昧な入力は指令にしない）
+- `s` を送ると全チャンネル停止し、シリアル操作モードを抜ける
 - CAN から `SET_TARGET` が来たらシリアル操作モードは自動的に解除される
-- **緊急停止ラッチ中はシリアルからも駆動できない**
+- **緊急停止ラッチ中はシリアルからも駆動できない**（`max_duty` のクランプも同じく効く）
 
 シリアル操作中はコマンドウォッチドッグを養い続ける（1 回だけ養う実装だと
 `command_timeout_ms` 後に必ず止まってデバッグにならないため）。
 不要なら `config.h` の `ENABLE_SERIAL_DEBUG` を 0 にする。
 
-`SW2`/`SW3`（DIP スイッチ）は D1/D0 = ハードウェア UART と同じピンなので、
+DIP スイッチ（`SW0`/`SW1`）は D1/D0 = ハードウェア UART と同じピンなので、
 **`Serial1` を開いてはならない**。開くと DIP が読めずデバイス ID が化ける。
 
 ## デバッグ用シリアル（servo）
 
 USB CDC の `Serial`（115200 baud）から角度を直接入力できる。
 
-- `0 5.0` のように「`<チャンネル番号> <角度[deg]>`」を送るとそのチャンネルへ角度指令。
-  **チャンネル番号と角度は空白で区切る。** 区切りが無い行は捨てる（番号を読み違えると
-  別のサーボが動くので、曖昧な入力は指令にしない）
-- `s` を送ると全チャンネルを現在角で凍結し、シリアル操作モードを抜ける
+- `0 5.0` のように「`<スロット番号> <角度[deg]>`」を送るとそのスロットへ角度指令。
+  **番号と角度は空白で区切る。** 区切りが無い行、サーボ以外のスロットを指した行は捨てる
+  （番号を読み違えると別のサーボが動くので、曖昧な入力は指令にしない）
+- `s` を送ると全スロットを現在角で凍結し、シリアル操作モードを抜ける
 - CAN から `SET_TARGET` が来たらシリアル操作モードは自動的に解除される
 - **緊急停止ラッチ中はシリアルからも駆動できない**（角度も `angle_min`/`angle_max` でクランプされる）
 
 サーボ基板の DIP は A0〜A3 で UART とは重ならないため、`Serial` の使用に制約はない。
+ただし **Flash 32KB / SRAM 2KB しかない**ので、容量が足りなくなったら
+`config.h` の `ENABLE_SERIAL_DEBUG` を 0 にして落とす。
 
 ## デバイス ID
 
-### dc_motor — DIP がそのままデバイス ID
+### dc_motor — チャンネル表 + DIP ブロックオフセット
 
-基板上の DIP スイッチ 4bit（`INPUT_PULLUP` の負論理、LOW = 1）で設定する。
-`SW0`=bit0, `SW1`=bit1, `SW2`=bit2, `SW3`=bit3。
+DC 基板は 1 枚で 3 つの DC モータを駆動し、**チャンネルごとに独立したデバイス ID を持つ**
+（仕様書 §2.2）。チャンネル表は `firmware/dc_motor/include/config.h` の
+`kDcChannels[]` にある。
 
-`0x00`（全 OFF）は「設定忘れ」とみなし、**駆動を拒否して LED を速く点滅させる**
-（仕様書 §2.2）。`FEEDBACK` の bit5 も立つ。設定ミスで意図しないアクチュエータが
-動くより、動かない方が安全なため。
+| ch | 基準デバイス ID | モータ | PWM | DIR |
+|---|---|---|---|---|
+| 0 | `0x11` | `conveyor` | D11 | D12 |
+| 1 | `0x12` | （未使用） | D10 | D3 |
+| 2 | `0x13` | （未使用） | D9 | D7 |
 
-### servo — チャンネル表 + DIP オフセット
+DIP スイッチは **2bit**（`SW0`=D1=bit0, `SW1`=D0=bit1。`INPUT_PULLUP` の負論理、LOW = 1）で、
+チャンネル表全体に加える**ブロックオフセット**として働く。
 
-サーボ基板は 1 枚で複数のサーボを駆動し、**チャンネルごとに独立したデバイス ID を持つ**
-（仕様書 §7.1）。PC からは別々のモータとして見え、`FEEDBACK` もチャンネルごとに
-別の CAN ID で送る。チャンネル表は `firmware/servo/include/config.h` の
-`kServoChannels[]` にあり、既定は `config/main_hand.yaml` の実構成に合わせてある。
+**刻み幅はチャンネル数（3）。** 刻み幅 1 で足すと、DIP を 1 段上げた基板のブロックが
+隣のブロックへ食い込み、同じ ID の基板が 2 枚バス上に並ぶ。そうなると 1 通の
+`SET_TARGET` で 2 台が同時に動き、PC 側の受信ループは最初にマッチした 1 台で
+打ち切るのでもう一方は永久に STALE になる。
 
-| ch | 基準デバイス ID | モータ | 既定ピン |
-|---|---|---|---|
-| 0 | `0x01` | `gripper` | D9 |
-| 1 | `0x03` | `wall_f` | D10 |
-| 2 | `0x04` | `wall_r` | D11 |
+- DIP = `0` → `0x11` / `0x12` / `0x13`（＝ `config/main_hand.yaml` そのまま）
+- DIP = `1` → `0x14` / `0x15` / `0x16`
+- DIP = `3` → `0x1A` / `0x1B` / `0x1C`
 
-**DIP はデバイス ID そのものではなく、チャンネル表全体に加えるオフセットとして働く。**
-DC 用の「DIP の値 = デバイス ID」とは意味が違う。同一ファームの基板を複数枚使うとき、
-2 枚目の DIP を 1 段上げるだけで全チャンネルの ID がまとめてずれるようにするため。
+DC 系を `0x11` から始まる帯に置いてあるのは、サーボ系（`0x01`〜`0x0F`）と分離して
+どちらの DIP をどう回しても衝突しないようにするため。
 
-- DIP = `0` → ID は `0x01` / `0x03` / `0x04`（＝ `config/main_hand.yaml` そのまま）
-- DIP = `4` → ID は `0x05` / `0x07` / `0x08`
+オフセット適用後の ID が `0x00`（未設定）または `0xFF`（予約）になったチャンネルは
+**駆動しない**。そのチャンネルは `PwmOut::begin()` すら通さないのでパルスが 1 発も出ず、
+`FEEDBACK` の bit5 が立ち、LED が速く点滅する。
 
-オフセット適用後の ID が `0x00`（未設定）または `0xFF`（`E_STOP` ブロードキャスト用に予約）
-になったチャンネルは**駆動しない**。そのチャンネルは `PwmOut::begin()` すら通さないので
-パルスが 1 発も出ず、`FEEDBACK` の bit5 が立ち、LED が速く点滅する。
+### servo — スロット表 + DIP ブロックオフセット
+
+サーボ基板は **5 本の信号線（SV0〜SV4）を持ち、どれもサーボ出力にもデジタル入力にもなる**
+（仕様書 §7.1）。何を繋ぐかは配線で決まるので、ファームは `config.h` の
+`kServoSlots[]` に**役割**（`Servo` / `TouchSensor` / `Unused`）を持つ。
+**組み合わせは自由で、それぞれ何個でもよい** —— 「サーボ 2 + センサ 2 + 空き 1」も
+「センサだけ」も成立する。`Unused` 以外のスロットはすべて CAN デバイスとして
+`FEEDBACK` を送るので、相乗り先の有無に依存しない。
+
+| スロット | ピン | 役割 | 基準デバイス ID | モータ |
+|---|---|---|---|---|
+| SV0 | D4 | `Servo` | `0x01` | `gripper`（メインハンド） |
+| SV1 | D5 | `Servo` | `0x03` | `wall_f`（メインハンド） |
+| SV2 | D6 | `Servo` | `0x04` | `wall_r`（メインハンド） |
+| SV3 | D7 | `Servo` | `0x05` | `sub_gripper`（サブハンド） |
+| SV4 | D8 | **`TouchSensor`** | `0x02` | `origin_sensor`（原点合わせ用） |
+
+**サーボはこの 1 枚で 4 台すべてまかなえる**ので、残る 1 スロットをタッチセンサに充てている。
+
+DIP スイッチ（A0〜A3 の 4bit、`INPUT_PULLUP` の負論理）はスロット表全体に加える
+**ブロックオフセット**で、**刻み幅はスロット数の 5**。
+
+- DIP = `0` → `0x01`〜`0x05`（＝ `config/*.yaml` そのまま）
+- DIP = `1` → `0x06`〜`0x0A`
+- DIP = `2` → `0x0B`〜`0x0F`
+- DIP = `3` 以上 → 帯（`0x01`〜`0x10`）を越えるので**全スロット未設定**（RGB 赤点滅・駆動拒否）
+
+**`Unused` にしたスロットも基準 ID を 1 つ予約する。** 予約をやめると、配線で役割を
+変えた瞬間にブロックの幅が縮み、DIP を 1 段上げた 2 枚目と ID が重なる。
+役割を変えるときはその行の `SlotRole` を書き換えるだけでよく、**デバイス ID は動かさない**
+（スロットに固定しておくと PC 側 yaml の `can_id` が無変更で済む）。
+
+**センサは PC 側 `config/<robot>.yaml` の `motors:` にも 1 台として登録すること。**
+登録しないと受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。
+目標値を持たないので `SET_TARGET` は飛ばず、`motor_check.magnitude: 0` で動作確認からは
+外れるが、途絶は STALE として検出される。
+
+`main.cpp` の `static_assert` がビルド時に検査するのは、ピンの衝突・重複と、
+基準 ID の重複・連続ブロック性・帯からのはみ出しだけ。**役割の個数に関する制約は無い。**
+
+> **`constexpr` のループで `continue` を使わないこと。** avr-gcc 7.3 は `constexpr` 評価中の
+> `continue` で増分式を飛ばし、無限ループになってビルドが落ちる。実際 `Unused` スロットを
+> 1 つ置いただけでこれを踏んだ。条件は `if` の入れ子で書く。
+
+**サーボ以外のスロットの実効デバイス ID は常に `0x00` にしてある。** 予約 ID 宛の
+フレームで何かが動く経路を構造的に無くすため。
 
 デバイス ID の割り当ては仕様書 §2.2 の表と `config/*.yaml` を参照。
 **デバイス ID はバス単位でロボット横断に一意**でなければならない。
@@ -176,33 +241,22 @@ rpm 換算」であり、電流・温度・過電流・過熱は検出手段が�
 
 | 定数 | 仮の値 | 何を確認するか | 誤ったときのリスク |
 |---|---|---|---|
-| `kDisActiveHigh` | `true` | ゲートドライバ `DIS` の論理。HIGH でアサート（出力禁止）と仮定 | **反転していると緊急停止でモータが全力で回る。最優先で確認** |
-| `HAS_ENCODER` | `1` | エンコーダの有無。無ければ 0（position/velocity 制御が使えなくなる） | 無いのに 1 だと位置・速度が 0 のまま PID が振り切れる |
-| `HAS_CURRENT_SENSE` | `1` | 電流センス回路の有無。無ければ 0（電流は常に 0・過電流を検出しない） | **無いのに 1 だと SENS ピン（A0）が浮き、ADC の振れがしきい値を跨いで必ず誤発火する**（仕様書 §3.2） |
-| `kEncoderPulsesPerMotorRev` | `500` | エンコーダ 1 相あたりのパルス数（モータ軸） | 位置・速度の換算が丸ごとずれる |
-| `kGearRatio` | `30.0` | 減速比。`FEEDBACK` は出力軸換算で送る（PC 側は換算を知らない） | 同上 |
-| `kEncoderDirectionSign` | `1.0` | 正の duty で速度が正になるか。A/B の配線で反転する | 位置・速度制御が正帰還になって暴走する |
-| `kCurrentSenseZeroCount` | `512` | 無電流時の ADC カウント（10bit, 0–1023） | 過電流フラグが誤検出／未検出になる |
-| `kCurrentSenseMaPerCount` | `20.0` | ADC カウント → mA の換算係数。しきい値がフルスケール偏差の 80% 以下に収まること | 同上 |
-| `kDefaultOvercurrentThresholdMa` | `5000` | モータとドライバ IC の連続定格 | 同上 |
-| `kDefaultKp` / `kDefaultKi` / `kDefaultKd` | `0.01` / `0` / `0` | PID ゲイン。position と velocity で 1 組を共有する（仕様書 §3.4） | 発振・目標に届かない |
+| `kRefActiveLow` | `true` | 物理非常停止 `REF`（D2）の極性。LOW = 押されている | **反転していると、押しても止まらず離すと止まる基板になる。最優先で確認** |
+| `kDirForwardIsLow` | `true` | 方向ピンの論理。サンプルの `duty >= 0 ? LOW : HIGH` に準拠 | 全チャンネルが指令と反対に回る |
+| `kPinPwm[3]` / `kPinDir[3]` | `{11,10,9}` / `{12,3,7}` | 基板の PWM 線と方向線。**CAN の D4/D5 と重ならないこと** | `main.cpp` の `static_assert` がピンの重複と CAN 衝突をビルド時に弾く |
+| `kPinDip[2]` | `{1,0}`（D1, D0） | 基板の DIP がどのピンに落ちているか | オフセットが化けて別のアクチュエータが動く |
+| `kDefaultMaxDuty` | `0.30` | モータとギヤ比が決まってから詰める（サンプルは 50%） | 大きすぎると機構に無理がかかる。小さすぎると回り出さない |
+| duty 0 の挙動 | — | ハーフブリッジがコーストになるかブレーキになるか | 機構の噛み込みからの復帰性が変わる。この基板には出力禁止（`DIS`）が無く、停止＝PWM 0% だけ |
 
-**電流センスの 3 つの仮値（`kCurrentSenseZeroCount` / `kCurrentSenseMaPerCount` /
-`kDefaultOvercurrentThresholdMa`）は互いに噛み合っていなければならない。**
-しきい値が ADC のフルスケール偏差（0 点から近い側のレールまで × 換算係数）に近いと、
-正常な回路でもレール付近でしか発報できない「効いているつもりの保護」になる。
-しきい値は連続定格という物理量なので、合わせるのは換算係数の側。
-`config.h` の `static_assert` がしきい値をフルスケールの 80% 以下に強制し、
-成立しない組み合わせをビルド時に弾く（実機では「過電流を一度も検出しない」という
-無症状でしか現れないため）。
+**この基板はフィードバックを一切持たない。** エンコーダ・電流センス・温度センサとも非搭載で、
+`FEEDBACK` の位置・速度・電流・温度は常に 0、bit0（到達）/ bit1（過電流）/ bit2（過熱）も
+立たない（仕様書 §3.2 / §8）。位置・速度制御と PID は実装ごと存在せず、`duty` だけを受理する。
 
-温度センサはこの基板に無く、`FEEDBACK` の温度は常に 0 を送る
-（仕様書 §3.2 / §8 の既知の制限）。PC 側の温度警告は発火しない。
-
-`HAS_RGB_LED` は dc_motor / servo とも既定 `0` で、**点灯処理はまだ無い**
-（`updateLed()` の `#if HAS_RGB_LED` は TODO コメントだけ）。1 にしても状態表示は
-オンボード LED の点滅のままなので通電前に確認することは無く、上の表には載せていない。
-発光させるには `platformio.ini` の `lib_deps` にライブラリを追加したうえで中身を書くこと。
+`HAS_RGB_LED` は dc_motor では既定 `1`。基板の D6 にシリアル RGB LED が 1 個載っており、
+`platformio.ini` の `lib_deps` に `dmadison/FastLED NeoPixel` を入れてある
+（FastLED がヘッダ走査で framework 同梱の I2S を巻き込みビルドを壊すので `lib_ignore = I2S` も要る）。
+表示は **赤の速い点滅 = CAN 不通 / デバイス ID 未設定**、**橙 = 緊急停止ラッチ中**、
+**緑のハートビート = 平常**。servo では既定 `0` のまま（実装は未着手）。
 
 ### servo
 
@@ -212,31 +266,37 @@ rpm 換算」であり、電流・温度・過電流・過熱は検出手段が�
 
 | 定数 | 仮の値 | 何を確認するか | 誤ったときのリスク |
 |---|---|---|---|
-| `kServoChannels[].limits.angleMinDeg` / `angleMaxDeg` | `0.0` / `30.0` | 機構を付けた状態で当たらない可動範囲を実測する | **広すぎるとサーボがメカストッパに当たったまま停動し、短時間で焼損する。最優先で確認**（狭すぎる分はクランプで止まるだけ） |
-| `kServoPulse270` | `{500, 2500, 270.0}` | サーボのデータシートのパルス幅と可動角 | 指令角と実角がずれる。上端で当たり続ける |
-| `kServoPwmPeriodUs` | `20000`（50Hz） | サーボが許容するフレーム周期。デジタルサーボなら上げられる | 対応しない個体に速い周期を与えると発熱・ジッタ |
-| `kPinServoCh0/1/2` | `9` / `10` / `11` | 基板のサーボ信号線。**CAN のピンと重ならないこと** | `main.cpp` の `static_assert` がビルド時に弾く |
+| `kServoSlots[].limits.angleMinDeg` / `angleMaxDeg` | `0.0` / `30.0` | 機構を付けた状態で当たらない可動範囲を実測する | **広すぎるとサーボがメカストッパに当たったまま停動し、短時間で焼損する。最優先で確認**（狭すぎる分はクランプで止まるだけ） |
+| `kServoSlots[].role` | サーボ 4 + センサ 1 | 実際に何を何本繋ぐか（個数に制約は無い） | 役割がずれると、指令した先と違うものが動く |
+| `kServoSlots[].sensorActiveLow` | `true` | センサの極性。接触で導通して LOW になる想定 | 逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる |
+| `kServoPulse270` | `{500, 2400, 270.0}` | サーボのデータシートのパルス幅と可動角 | 指令角と実角がずれる。上端で当たり続ける |
+| `kServoSlots[].pin` | `4` / `5` / `6` / `7` / `8` | 基板の信号線。**SPI(D11-13) / MCP2515(D3,D10) / RGB(D9) / DIP(A0-A3) と重ならないこと** | `main.cpp` の `static_assert` がビルド時に弾く |
 | `kPinDip[4]` | `{14,15,16,17}`（A0–A3） | 基板の DIP がどのピンに落ちているか | オフセットが化けて別のアクチュエータが動く |
-| `kServoChannels[].initialAngleDeg` | `0.0` | 電源投入時に持っていく角度 | 起動した瞬間に機構が動く |
+| `kServoSlots[].initialAngleDeg` | `0.0` | 電源投入時に持っていく角度 | 起動した瞬間に機構が動く |
 | `kEStopDetach` | `false` | 緊急停止時に脱力させたい機構があるか | `true` にすると壁が自重で倒れ、把持中のワークを落とす |
 
-**UNO R4 Minima の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている。**
-チーム提供のサンプルは `SV0..SV3` を `D4`〜`D7` に置いているが、この配線は CAN と
-正面衝突するためそのままでは使えない。`servo/src/main.cpp` の `static_assert` が
-サーボ出力ピン・ステータス LED と `PIN_CAN0_TX` / `PIN_CAN0_RX` の衝突、および
-チャンネル間のピン重複をビルド時に検出する。
+**Arduino Nano は Flash 32KB / SRAM 2KB しかない。** ライブラリを足したらビルド時の
+使用率を必ず見ること（現状は Flash 約 49% / RAM 約 40%）。RGB LED に FastLED を使うと
+収まらないので Adafruit NeoPixel にしてある。足りなくなったら `ENABLE_SERIAL_DEBUG` を
+0 にして落とす。
+
+**MCP2515 を 16MHz 水晶で 1Mbps** はサンプルポイントの余裕が乏しい設定として
+知られている。実機で通信エラーが出るなら、バス全体を 500kbps へ下げる判断が要る
+（M3508・EDULITE 側も揃える必要がある）。
 
 ## 安全に関する既定値
 
 | 項目 | dc_motor | servo | 根拠 |
 |---|---|---|---|
-| 出力上限 | `max_duty` = `0.30` | `angle_min` / `angle_max` でのクランプ | 仕様書 §5.3 / §7.2。サーボは可動範囲外で停動すると焼損する |
-| `command_timeout_ms` | `500` | `500`（**チャンネルごとに独立**） | 仕様書 §5.1 / §7.1。ラッチしない |
-| `feedback_interval_ms` | `10` | `10`（チャンネルごとに位相をずらして送信） | 100Hz。緊急停止中・ウォッチドッグ作動中も送り続ける |
+| 出力上限 | `max_duty` = `0.30`（**チャンネルごと**） | `angle_min` / `angle_max` でのクランプ（**スロットごと**） | 仕様書 §5.3 / §7.2。サーボは可動範囲外で停動すると焼損する |
+| `command_timeout_ms` | `500`（**チャンネルごとに独立**） | `500`（**チャンネルごとに独立**） | 仕様書 §5.1 / §7.1。ラッチしない |
+| `feedback_interval_ms` | `10`（チャンネルごとに位相をずらして送信） | `10`（同左） | 100Hz。緊急停止中・ウォッチドッグ作動中も送り続ける |
 | ウォッチドッグ有効/無効 | `WATCHDOG_ENABLED` = `1` | 同左 | 仕様書 §5.1 / §8。`SET_PARAM` からは変更できない |
-| 緊急停止・ウォッチドッグ時 | 出力停止（コースト）。position モードの解除は現在位置で凍結 | **現在角を保持。出力禁止中の `SET_TARGET` は採用しない** | 仕様書 §7.5 / §3.5。サーボは脱力すると壁が倒れワークを落とす。受け付けると再送のたびに補間が再アンカーされ、ラッチ中に動く |
-| 受け付けるモード | position / velocity / duty | **position のみ**（他は無視） | 仕様書 §7.2 |
-| 起動時 | duty モード / 目標 0 / 出力停止 | 各チャンネル `initialAngleDeg` / 緊急停止ラッチ解除済み | 仕様書 §5.4 |
+| 緊急停止・ウォッチドッグ時 | 出力停止（PWM 0%）。**出力禁止中の `SET_TARGET` は採用しない**。目標も 0 に落とす | **現在角を保持。出力禁止中の `SET_TARGET` は採用しない** | 仕様書 §7.5 / §3.5。受け付けると再送のたびに目標が更新され、解除した瞬間にその値で動き出す |
+| 物理非常停止 | **`REF`（D2, LOW = 押下）でラッチ。離しても自動復帰しない** | 入力なし | 仕様書 §5.2。レベル追従だと PC の再送でスイッチを離した瞬間に動き出す |
+| センサ入力 | 無し | **スロットに割り当て（現構成は SV4 / D8 の 1 個。個数自由）。1 個ずつ独立した CAN デバイスとして FEEDBACK bit6 で報告するだけ** | 仕様書 §5.2。判断は PC 側。接触は異常ではないのでヘルスにも動作確認にも影響させない |
+| 受け付けるモード | **duty のみ**（他は無視） | **position のみ**（他は無視） | 仕様書 §4 / §7.2 |
+| 起動時 | duty 0 / 出力停止 / 緊急停止ラッチ解除済み（REF 押下時は即ラッチ） | 各チャンネル `initialAngleDeg` / 緊急停止ラッチ解除済み | 仕様書 §5.4 |
 
 `FEEDBACK` はチャンネルごとに送信タイミングを周期内でずらしてある。
 全チャンネルが同時に送るとフレームのバーストになり、他バスの周期送信と重なったときに

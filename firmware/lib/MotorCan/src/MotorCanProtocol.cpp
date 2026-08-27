@@ -131,19 +131,6 @@ SetTargetCommand decodeSetTarget(const uint8_t *data, uint8_t length) {
     return cmd;
 }
 
-SetModeCommand decodeSetMode(const uint8_t *data, uint8_t length) {
-    SetModeCommand cmd{ControlType::Duty, false};
-    if (data == nullptr || length < kFrameLength) {
-        return cmd;
-    }
-    if (!isKnownControlType(data[0])) {
-        return cmd;
-    }
-    cmd.type = static_cast<ControlType>(data[0]);
-    cmd.valid = true;
-    return cmd;
-}
-
 SetParamCommand decodeSetParam(const uint8_t *data, uint8_t length) {
     SetParamCommand cmd{ParamId::Kp, 0.0f, false};
     if (data == nullptr || length < kFrameLength) {
@@ -215,6 +202,13 @@ float clampDuty(float duty, float maxDuty) {
         return -maxDuty;
     }
     return duty;
+}
+
+DutyOutput splitDuty(float duty, float maxDuty) {
+    const float clamped = clampDuty(duty, maxDuty);
+    // 0 は reverse=false 側に倒す。0 を「負でない」ではなく「負」と扱うと、
+    // 停止のたびに方向ピンが反転する。
+    return DutyOutput{clamped < 0.0f ? -clamped : clamped, clamped < 0.0f};
 }
 
 }  // namespace motorcan

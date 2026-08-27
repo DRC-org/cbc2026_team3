@@ -49,6 +49,18 @@ constexpr uint8_t kOverheat = 1 << 2;
 constexpr uint8_t kEStop = 1 << 3;
 constexpr uint8_t kWatchdog = 1 << 4;
 constexpr uint8_t kDeviceIdUnconfigured = 1 << 5;
+// 基板上のセンサ入力（タッチセンサ等）。予約ビットの bit6 を割り当てる。
+// フレーム長も他のビットの位置も変えないので、対応していない基板・PC が混在しても壊れない。
+//
+// **センサは自分のデバイス ID で FEEDBACK を送る。** サーボのフレームに相乗りさせると、
+// 相乗り先の無い「センサだけの基板」が成立せず（誰も FEEDBACK を送らないので永久に
+// 読めない）、載せられる個数も予約ビットの数で頭打ちになる。1 スロット = 1 デバイスに
+// 揃えれば、サーボ・センサ・空きが何個ずつでも同じ規則で動く。
+//
+// 名前を「タッチセンサ」にしないのは、スロットに何を繋ぐかが配線で決まり、
+// 次はリミットスイッチかもしれないため。
+constexpr uint8_t kSensor = 1 << 6;
+// bit7 は予約。
 }  // namespace status_flag
 
 // 仕様書 §2.2。0x00 は「DIP 設定忘れ」とみなして駆動を拒否する。
@@ -142,12 +154,6 @@ struct SetTargetCommand {
 };
 SetTargetCommand decodeSetTarget(const uint8_t *data, uint8_t length);
 
-struct SetModeCommand {
-    ControlType type;
-    bool valid;
-};
-SetModeCommand decodeSetMode(const uint8_t *data, uint8_t length);
-
 struct SetParamCommand {
     ParamId id;
     float value;
@@ -180,5 +186,15 @@ void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, int32_t 
 // サンプルコードは maxDuty 未初期化で常に 0 になりモータが回らないバグがあったため、
 // 既定値は呼び出し側（config.h の kDefaultMaxDuty）が必ず持つこと。
 float clampDuty(float duty, float maxDuty);
+
+// duty を「PWM に出す大きさ」と「方向ピンを倒す向き」に分ける。
+// 実基板の出力段は PWM 1 本 + 方向 1 本で、符号の扱いを main.cpp に置くと
+// ペリフェラルに埋まって native テストが掛からない。duty 0 で reverse が
+// true になると、停止指令のたびに方向ピンが反転して機構に衝撃が入る。
+struct DutyOutput {
+    float magnitude;  // 0.0–1.0（clampDuty 済みの絶対値）
+    bool reverse;     // duty < 0 のときだけ true
+};
+DutyOutput splitDuty(float duty, float maxDuty);
 
 }  // namespace motorcan

@@ -556,7 +556,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 多重防護 | 層 | 1 枚だけを見るには |
 |---|---|---|
 | 動作確認中の緊急停止 | ①起動時の拒否 ②`pause()` を待つ窓の再判定 ③per-motor ループ冒頭 ④`_guard_check` | 上流の層を通過させた状態を作る（起動判定の後に停止する / runner を直接 `run()` する） |
-| NaN の目標・ゲイン | ①`decodeSetTarget` ②`decodeSetParam` ③`ControlTarget::setValue` ④`MotorPid::update` | 復号層を通さずに ③④ を直接呼ぶ（シリアルデバッグは実際にその経路で入る） |
+| NaN の目標 | ①`decodeSetTarget` ②`decodeSetParam` ③`DcChannel::setDuty` / `ServoMotion::setTarget` | 復号層を通さずに ③ を直接呼ぶ（シリアルデバッグは実際にその経路で入る） |
 | 左右ペア軸の偏差 | ①シーケンス停止 ②`M3508PositionLoop` の電流 0 ③`SyncMonitor` の全体緊急停止 | 層ごとに別テストファイルを持つ（下表） |
 
 **次の不変条件は安全に直結するため、関係するコードを変えたときは必ずこの確認を行う。**
@@ -612,13 +612,13 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 安全機構を壊しても気付けない）。
 
 ```bash
-pio test -e native -d firmware/dc_motor   # 110 ケース
-pio test -e native -d firmware/servo      # 同じ 110 ケース
+pio test -e native -d firmware/dc_motor   # 118 ケース
+pio test -e native -d firmware/servo      # 同じ 118 ケース
 ```
 
 | スイート | 対象 |
 |---|---|
-| `firmware/test/test_protocol/` | `MotorCanProtocol` / `MotorSafety` / `MotorPid` / `ControlTarget` |
+| `firmware/test/test_protocol/` | `MotorCanProtocol` / `MotorSafety`（物理停止入力を含む） / `DcChannel` |
 | `firmware/test/test_board/` | `MotorCanRouter` / `PeriodicTimer` / `SerialLineBuffer` |
 | `firmware/test/test_servo/` | `ServoMotion` / `ServoChannel` |
 
@@ -935,29 +935,28 @@ cbc2026_team3/
 │   └── sub_hand.py
 ├── firmware/                        # 自作モータドライバのファーム（PlatformIO / UNO R4 Minima）
 │   ├── README.md                    # 通電前の要確認項目・デバイス ID・安全既定値
-│   ├── common.ini                   # 両プロジェクト共通のビルド設定（各 ini が extra_configs で参照）
+│   ├── common.ini                   # 共通部のみ（MCU が違うので platform/board は各 ini）
 │   ├── lib/MotorCan/                # 両ファーム共有。Arduino 非依存の純 C++
 │   │   ├── library.json
 │   │   └── src/
 │   │       ├── MotorCanProtocol.{h,cpp}  # CAN ID / フレームの符号化・復号 + PC 側との契約既定値
 │   │       ├── MotorCanRouter.{h,cpp}    # 受信フレームの宛先判定・DIP オフセット・DIP 読み出し
-│   │       ├── MotorControlTarget.h      # ControlTarget（モードと目標値を 1 状態にする）
 │   │       ├── MotorLoopTimer.h          # PeriodicTimer（millis() 折り返しに耐える周期判定）
-│   │       ├── MotorSafety.{h,cpp}       # 緊急停止ラッチ + コマンドウォッチドッグ
-│   │       ├── MotorPid.{h,cpp}          # position / velocity 用 PID（DC 用のみ）
+│   │       ├── MotorSafety.{h,cpp}       # 緊急停止ラッチ + ウォッチドッグ + 物理停止入力
 │   │       ├── SerialLineBuffer.{h,cpp}  # デバッグシリアルの行組み立て（解釈は各 main.cpp）
+│   │       ├── DcChannel.{h,cpp}         # DC 1ch 分の結線（安全機構 + duty 目標。DC 用のみ）
 │   │       ├── ServoMotion.{h,cpp}       # 角度補間・可動範囲クランプ・到達推定（サーボ用のみ）
 │   │       └── ServoChannel.{h,cpp}      # 上 2 つと MotorSafety の結線（サーボ用のみ）
 │   ├── test/                        # native 環境の Unity テスト。両プロジェクトが test_dir で共有
-│   │   ├── test_protocol/           # プロトコル層・安全機構・PID・制御目標
+│   │   ├── test_protocol/           # プロトコル層・安全機構・物理停止・duty 分解・DcChannel
 │   │   ├── test_board/              # 宛先判定・デバイス ID 解決・周期タイマ・シリアル行
 │   │   └── test_servo/              # 角度補間・可動範囲クランプ・到達推定・安全機構との結線
-│   ├── dc_motor/
-│   │   ├── platformio.ini           # 固有行のみ（default_envs / extra_configs / test_dir）
-│   │   ├── include/config.h         # ピン配置・機体依存定数（TODO(実機で確認) はここ）
+│   ├── dc_motor/                    # 1 枚で 3 チャンネル。duty 専用・フィードバック無し
+│   │   ├── platformio.ini           # 固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
+│   │   ├── include/config.h         # ピン配置・チャンネル表・機体依存定数（TODO(実機で確認) はここ）
 │   │   └── src/main.cpp
-│   └── servo/
-│       ├── platformio.ini           # 同上
+│   └── servo/                       # Arduino Nano + MCP2515。1 枚 5 スロット
+│       ├── platformio.ini           # 固有行のみ（env は nano。platform/board/lib_deps はここ）
 │       ├── include/config.h         # ピン配置・チャンネル表・機体依存定数
 │       └── src/main.cpp
 ├── web/
@@ -1621,7 +1620,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `y_axis` | `y_axis_r` / `y_axis_l` | m3508 | can_m3508 | 1 / 2 | y 軸前後移動（ラックアンドピニオン）。**逆回転で同一動作** |
 | `rotate` | `rotate_r` / `rotate_l` | edulite05 | can_edulite | 1 / 2 | エンドエフェクタ回転。**逆回転で同一動作** |
 | `gripper` | `gripper` | generic (サーボ) | can_generic | 0x01 | 開 / 閉 の 2 状態のみ |
-| `conveyor` | `conveyor` | generic (DC) | can_generic | 0x02 | 回転 / 停止 のみ |
+| `conveyor` | `conveyor` | generic (DC) | can_generic | 0x11 | 回転 / 停止 のみ。DC 基板 ch0 |
 | `wall_f` | `wall_f` | generic (サーボ) | can_generic | 0x03 | 初期 / 閉 / 開 の 3 状態のみ |
 | `wall_r` | `wall_r` | generic (サーボ) | can_generic | 0x04 | 初期 / 閉 / 開 の 3 状態のみ |
 
@@ -1700,8 +1699,11 @@ CAN で指定するのは状態のみで、連続値の指令は行わない。�
   （`gripper.open` / `wall_*.open`）。0.1deg は離散状態サーボにとって「どの状態でもない」
   無意味な指令になるため。値がずれると動作確認で動く位置と運用で使う位置が別物になり
   確認が意味を失うので、一致は `tests/test_robot_sequences.py` で検証する。
-- `conveyor`: 0.3（duty）。0.1 では DC モータが回り出さず、`evaluate_check_result` の
-  「回転検出なし」で必ず失敗する。
+- `conveyor`: **`0`（＝動作確認から除外）**。自作 DC モタドラはエンコーダも電流センスも
+  持たず、回ったかどうかを観測する手段が 1 つも無い（仕様書 §8）。以前は `FEEDBACK` の
+  velocity で回転検出していたが、実機では必ず「回転検出なし」で落ち、しかも原因が
+  配線不良にしか見えない失敗になる。`config/checklist.yaml` の `conveyor_run` で
+  指差喚呼による目視確認に回す。
 
 ### `axes` スキーマ拡張
 
@@ -2489,19 +2491,19 @@ motor_check:
 config の `motors` 内で個別上書き:
 ```yaml
 motors:
-  conveyor:
+  gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x02
-    control_type: duty
+    can_id: 0x01
+    control_type: position
     motor_check:
-      magnitude: 0.3             # この個体のみ 30% duty で確認
+      magnitude: 5.0             # この個体のみ開状態（5deg）で確認
       timeout_ms: 2000
 ```
 
 `magnitude: 0` は「動かさない」の意味で SKIPPED になる。左右直結のペア軸
-（`y_axis_r` / `y_axis_l` / `rotate_r` / `rotate_l`）はこれを使って除外し、
-指差喚呼での目視確認に回す。
+（`y_axis_r` / `y_axis_l` / `rotate_r` / `rotate_l`）と、フィードバックを持たない
+`conveyor` はこれを使って除外し、指差喚呼での目視確認に回す。
 
 ##### 実装タスク
 

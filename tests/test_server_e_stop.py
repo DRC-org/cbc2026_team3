@@ -17,6 +17,7 @@ from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.health import BusHealth, BusHealthInfo, HealthSnapshot, MotorHealth, MotorHealthInfo
 from lib.match_state import (
     ROLE_MAIN_HAND,
     ROLE_SUB_HAND,
@@ -26,6 +27,7 @@ from lib.match_state import (
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorHandle
 from tests.fake_can import mock_can_manager, set_motors
+from tests.feedback_frames import feed_generic
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
@@ -1059,3 +1061,133 @@ class TestEStopReasonIsRetained:
             assert latest.get("reason") is None, "解除したはずの前回の停止理由が残っている"
 
             await ws.close()
+
+
+# 仕様書 §3.2 FEEDBACK Byte7 bit3 (基板側の緊急停止ラッチ)
+_FLAG_E_STOP = 0x08
+
+
+def _health_with_feedback_at(mgr, at: float) -> HealthSnapshot:
+    """フィードバック受信時刻だけを指定した OK スナップショット。
+
+    「解除フレームより前に届いたフィードバック」を作るには時刻そのものを
+    置く必要があり、実フレームを流しても時計を狙った位置には置けない。
+    """
+    return HealthSnapshot(
+        timestamp=time.time(),
+        overall=BusHealth.OK,
+        buses=[
+            BusHealthInfo(
+                name=name,
+                channel=name,
+                state=BusHealth.OK,
+                last_tx_at=at,
+                last_rx_at=at,
+                tx_error_count=0,
+                rx_error_count=0,
+                bus_off=False,
+            )
+            for name in mgr.bus_names
+        ],
+        motors=[
+            MotorHealthInfo(
+                name=name,
+                bus=mgr.bus_names[0],
+                state=MotorHealth.OK,
+                last_feedback_at=at,
+                feedback_age_ms=0.0,
+                temperature=30.0,
+                detail=None,
+            )
+            for name in mgr.motors
+        ],
+    )
+
+
+class TestBoardReportedEStop:
+    """基板が FEEDBACK bit3 で報告した緊急停止を、サーバー全体へ伝播すること。
+
+    自作 DC モタドラは物理停止スイッチの押下と CAN 初期化失敗をラッチへ落とす。
+    サーバーが拾わないと **機体は止まっているのに UI は平常のまま** になり、
+    操縦者はシーケンスが進まない理由を画面から知る手段が無い。
+    """
+
+    def _fixture_with_generic(self, *, flags: int) -> tuple[ServerFixture, GenericDriver]:
+        fx = _build_fixture()
+        drv = GenericDriver("conveyor", 0x11, control_type=ControlMode.DUTY)
+        feed_generic(drv, flags=flags)
+        set_motors(fx.can_manager("main_hand"), {"conveyor": drv})
+        return fx, drv
+
+    async def test_board_flag_activates_server_e_stop(self) -> None:
+        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+
+        await fx.publish_state()
+
+        assert fx.e_stop_active is True
+
+    async def test_reason_names_the_motor(self) -> None:
+        """止まった理由が「どのロボットのどのモータか」まで分かること。"""
+        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+
+        await fx.publish_state()
+
+        payload = fx.server._e_stop_reason
+        assert payload is not None
+        assert "main_hand" in payload
+        assert "conveyor" in payload
+
+    async def test_no_flag_keeps_running(self) -> None:
+        fx, _ = self._fixture_with_generic(flags=0x00)
+
+        await fx.publish_state()
+
+        assert fx.e_stop_active is False
+
+    async def test_mock_motors_without_the_flag_are_ignored(self) -> None:
+        """自作モタドラ以外 (M3508 / EDULITE) を巻き込まないこと。"""
+        fx = _build_fixture()
+
+        await fx.publish_state()
+
+        assert fx.e_stop_active is False
+
+    async def test_release_is_not_undone_by_feedback_from_before_the_clear(self) -> None:
+        """解除フレーム送信より前に届いたフィードバックで停止をかけ直さないこと。
+
+        解除は「解除フレーム送信 → 基板がラッチを外す → 次の FEEDBACK」の順に
+        伝わる。送信前のフィードバックに残った bit3 を信じると、解除した瞬間に
+        サーバーが自分で止め直し、**二度と解除できない機体** になる。
+        """
+        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+        await fx.publish_state()
+        assert fx.e_stop_active is True
+
+        mgr = fx.can_manager("main_hand")
+        stale_at = time.time()
+        await fx.command({"type": "e_stop_release"})
+        assert fx.e_stop_active is False
+
+        # 解除フレームより前に届いていたフィードバック (bit3 は立ったまま)
+        mgr.health.side_effect = lambda **_kwargs: _health_with_feedback_at(mgr, stale_at)
+        await fx.publish_state()
+
+        assert fx.e_stop_active is False
+
+    async def test_still_pressed_after_release_stops_again(self) -> None:
+        """解除しても基板がまだ止まっているなら、改めて停止させること。
+
+        物理スイッチが押されたままなら、ファームは解除フレームを受けても
+        次のループで再ラッチする。そこで動けるようにしてしまうと、
+        「押しているのに機体が動く」状態を UI が作り出すことになる。
+        """
+        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+        await fx.publish_state()
+
+        await fx.command({"type": "e_stop_release"})
+        assert fx.e_stop_active is False
+
+        # 解除後に届いたフィードバックでも bit3 が立っている
+        await fx.publish_state()
+
+        assert fx.e_stop_active is True

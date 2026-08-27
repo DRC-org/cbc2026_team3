@@ -384,6 +384,9 @@ class TestShippedRobotConfig:
         (実際にサブハンドの sub_gripper は既定 0.1deg のまま放置され、
         サーボが 0.1deg しか動かないのに PASSED になっていた)。
         duty 指令の軸を除くのは、そこに「状態」という概念が無いため。
+        magnitude: 0 を除くのは「意図的に動作確認から外した」という明示の宣言だから
+        (既定値は system.yaml の default_magnitude で、0 になることはない)。
+        外したものが埋め合わされているかは下の checklist のテストが見る。
         """
         motors = _load_config(robot_config)["motors"]
         table = _load_shipped(yaml_name)
@@ -395,6 +398,8 @@ class TestShippedRobotConfig:
             if str(motor_cfg.get("control_type", "position")).lower() != "position":
                 continue
             magnitude = (motor_cfg.get("motor_check") or {}).get("magnitude")
+            if magnitude == 0:
+                continue
             states = [table.raw(motor_name, name) for name in table.names(motor_name)]
             if magnitude is None or not any(magnitude == pytest.approx(v) for v in states):
                 offenders[motor_name] = magnitude
@@ -409,8 +414,19 @@ class TestShippedRobotConfig:
         assert motors[motor_name]["motor_check"]["magnitude"] == 0
 
     def test_main_hand_checklist_covers_excluded_pairs(self) -> None:
-        """動作確認から外したペア軸・離散アクチュエータは目視確認項目で埋めること。"""
+        """動作確認から外したものは、すべて目視確認項目で埋めること。
+
+        magnitude: 0 で自動確認を外した以上、代わりの網が要る。センサも同じで、
+        死んだまま原点合わせを始めると「いつまでも当たらない」形でしか分からない。
+        """
         checklist = yaml.safe_load((_CONFIG_DIR / "checklist.yaml").read_text())
         ids = {item["id"] for item in checklist["checklists"]["main_hand"]}
 
-        assert {"y_axis_sync", "rotate_sync", "wall_initial", "conveyor_stop"} <= ids
+        assert {
+            "y_axis_sync",
+            "rotate_sync",
+            "wall_initial",
+            "conveyor_stop",
+            "conveyor_run",
+            "origin_sensor_react",
+        } <= ids

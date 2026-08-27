@@ -27,6 +27,20 @@ class MotorSafety {
 
     bool isLatched() const { return latched_; }
 
+    // 基板上の物理緊急停止入力（DC 基板の REF）を毎ループ反映する。
+    //
+    // **押下でラッチし、離しても自動復帰しない。** レベル追従にすると、PC が §5.1 の
+    // 契約どおり 20Hz で目標値を再送し続けている以上、スイッチを離した瞬間に機体が
+    // 動き出す。解除は CAN の E_STOP 解除フレーム（操縦者の明示操作）だけに限る。
+    //
+    // 逆に、押している間は解除フレームが届いても次のループでここが再ラッチするので、
+    // 「押している間は絶対に動かない」が呼び出し順序に依らず成立する。
+    void applyPhysicalStop(bool active) {
+        if (active) {
+            stop();
+        }
+    }
+
     // E_STOP フレームを解釈してラッチ状態へ反映する。
     // マジックバイトが揃わない解除要求ではラッチを維持する（仕様書 §3.5）。
     EStopAction handleEStopFrame(const uint8_t *data, uint8_t length);

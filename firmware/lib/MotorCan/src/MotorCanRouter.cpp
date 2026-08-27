@@ -64,6 +64,21 @@ uint8_t applyDeviceIdOffset(uint8_t baseDeviceId, uint8_t offset) {
     return id;
 }
 
+uint8_t applyDeviceIdBlockOffset(uint8_t baseDeviceId, uint8_t offset, uint8_t stride,
+                                 uint8_t bandEndId) {
+    if (baseDeviceId == kDeviceIdUnconfigured) {
+        return kDeviceIdUnconfigured;
+    }
+    const uint16_t id = static_cast<uint16_t>(baseDeviceId) +
+                        static_cast<uint16_t>(offset) * static_cast<uint16_t>(stride);
+    if (id >= kDeviceIdBroadcast || id > static_cast<uint16_t>(bandEndId)) {
+        // 帯の外は回り込ませない。0xFF はブロードキャスト予約で、それを超えた分を
+        // 8bit に丸めると他基板のブロックの真ん中へ着地する。
+        return kDeviceIdUnconfigured;
+    }
+    return static_cast<uint8_t>(id);
+}
+
 uint8_t readDipSwitch(const uint8_t *pins, uint8_t count, int (*readPin)(uint8_t pin),
                       int activeLevel) {
     if (pins == nullptr || readPin == nullptr) {

@@ -113,6 +113,12 @@ class RobotServer:
         # e_stop_state を送り直すため、保持しないと自動検知の直後 1 通だけが本当の
         # 原因を載せ、以降の再配信が UI の表示を「操縦者の停止操作」へ塗り替える
         self._e_stop_reason: str | None = None
+        # 基板が報告する緊急停止 (FEEDBACK bit3) を、この時刻より後に届いた
+        # フィードバックについてのみ信用する。解除操作は「解除フレーム送信 →
+        # 基板がラッチを外す → 次の FEEDBACK」の順に伝わるので、送信より前の
+        # フィードバックに残った bit3 をそのまま信じると、解除した瞬間に
+        # サーバーが自分で緊急停止をかけ直して二度と解除できなくなる
+        self._board_e_stop_ignore_before: float = 0.0
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
@@ -380,6 +386,10 @@ class RobotServer:
         self._e_stop_reason = None
         await self._broadcast_e_stop_state()
         await self._reactivate_motors()
+        # 解除フレームはこの時点で送り終えている。以降に届いたフィードバックで
+        # まだ bit3 が立っていれば、それは基板側にまだ止まる理由がある
+        # (物理停止スイッチが押されたまま等) ということなので、改めて停止させる
+        self._board_e_stop_ignore_before = time.time()
 
     async def _cmd_health_check(self, _data: dict, _requester: WSOrNone = None) -> None:
         # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
@@ -1189,11 +1199,50 @@ class RobotServer:
 
         return events
 
+    def _detect_board_e_stop(self, snapshots: dict[str, HealthSnapshot]) -> str | None:
+        """基板側が報告している緊急停止 (FEEDBACK bit3) を探す。
+
+        自作モタドラは物理停止スイッチの押下・CAN の初期化失敗を緊急停止ラッチに
+        落とし、bit3 で報告してくる。サーバーがこれを拾わないと、**機体は止まって
+        いるのに UI は平常のまま**になり、操縦者はシーケンスが進まない理由を
+        画面から知る術がない (実際に押されたスイッチを探し回ることになる)。
+
+        判定はフィードバックが `_board_e_stop_ignore_before` より後に届いたものに
+        限る。解除直後にサーバーが自分で停止をかけ直す経路を作らないため。
+        """
+        if self._e_stop_active:
+            # 既に停止中なら報告するまでもない。ここで再発動すると停止理由が
+            # 「最初に判明したもの」から基板の報告へ塗り替わりかねない
+            return None
+
+        for robot_name, ctx in self._robots.items():
+            snapshot = snapshots.get(robot_name)
+            if snapshot is None:
+                continue
+            last_feedback = {info.name: info.last_feedback_at for info in snapshot.motors}
+            for motor_name, motor in ctx.can_manager.motors.items():
+                if not isinstance(motor, GenericDriver) or not motor.e_stop_active:
+                    continue
+                received_at = last_feedback.get(motor_name)
+                if received_at is None or received_at <= self._board_e_stop_ignore_before:
+                    continue
+                return (
+                    f"{robot_name} の {motor_name} が基板側の緊急停止を報告 "
+                    "(物理停止スイッチ / CAN 不通)"
+                )
+        return None
+
     async def _broadcast_state(self) -> None:
         # 1) 各ロボットの health を計算 (クライアント不在でも遷移検出のため必ず実行)
         snapshots: dict[str, HealthSnapshot] = {}
         for robot_name in self._robots:
             snapshots[robot_name] = self._compute_health(robot_name)
+
+        # 2) 基板側の緊急停止をサーバー全体へ伝播する。クライアント不在でも必ず行う。
+        #    誰も見ていないから止めなくてよい、という理屈は成り立たない
+        board_e_stop = self._detect_board_e_stop(snapshots)
+        if board_e_stop is not None:
+            await self.activate_e_stop(reason=board_e_stop)
 
         if not self._ws_clients:
             # クライアントがいなくても _last_health は更新する。
@@ -1202,19 +1251,19 @@ class RobotServer:
             self._last_health = snapshots
             return
 
-        # 2) state メッセージ (health 同梱) を生成
+        # 3) state メッセージ (health 同梱) を生成
         state_messages: list[dict] = []
         change_events: list[dict] = []
         for robot_name, snap in snapshots.items():
             state_messages.append(self._build_state_message(robot_name, snapshot=snap))
 
-            # 3) health_change イベントを差分から生成
+            # 4) health_change イベントを差分から生成
             prev = self._last_health.get(robot_name)
             change_events.extend(self._diff_health(robot_name, prev, snap))
 
         await self._fanout([*state_messages, *change_events])
 
-        # 4) 差分検出後にスナップショットを更新する。順序を逆にすると
+        # 5) 差分検出後にスナップショットを更新する。順序を逆にすると
         #    1 回目の broadcast で health_change が出てしまう。
         self._last_health = snapshots
 

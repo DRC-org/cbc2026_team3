@@ -35,6 +35,10 @@ _FLAG_OVERHEAT = 0x04
 _FLAG_E_STOP = 0x08
 _FLAG_WATCHDOG = 0x10
 _FLAG_UNCONFIGURED_ID = 0x20
+# 基板上のセンサ入力 (タッチセンサ等)。予約ビットの bit6 を割り当てる。
+# センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは 1 つ。
+# サーボのフレームに相乗りさせていた頃は「センサだけの基板」が成立しなかった
+_FLAG_SENSOR = 0x40
 
 # デバイス ID の範囲 (仕様書 §2.2)。0x00 は「DIP 設定忘れ」、0xFF は E_STOP
 # ブロードキャストの予約なので、どちらも個別デバイスの ID として使ってはならない。
@@ -49,11 +53,6 @@ _E_STOP_CLEAR_MAGIC = (0x5A, 0xA5)
 
 class GenericDriver(MotorDriver):
     """自作モータドライバ(DC モータ/サーボ)用の汎用 CAN ドライバ。"""
-
-    # POSITION / VELOCITY の許容差は base.default_tolerance が単一情報源。
-    # DUTY は指令 (duty 比) とフィードバック (rpm) の次元が違い追従を定義できないため、
-    # 「回った」と見なす回転数だけをここに持つ
-    _CHECK_DUTY_ROTATION_RPM = 10.0
 
     def __init__(
         self,
@@ -81,6 +80,7 @@ class GenericDriver(MotorDriver):
         self._e_stop_flag: bool = False
         self._watchdog_flag: bool = False
         self._unconfigured_id_flag: bool = False
+        self._sensor_flag: bool = False
         # 動作確認や reset の指令を出す制御モード。config から渡される値で上書き可能。
         self.control_type: ControlMode = control_type
 
@@ -181,6 +181,7 @@ class GenericDriver(MotorDriver):
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)
+        self._sensor_flag = bool(flags & _FLAG_SENSOR)
         return super().update_state(msg)
 
     def matches_feedback(self, msg: can.Message) -> bool:
@@ -233,6 +234,21 @@ class GenericDriver(MotorDriver):
     def device_id_unconfigured(self) -> bool:
         """DIP スイッチのデバイス ID が未設定 (0x00) か (FEEDBACK bit5)。"""
         return self._unconfigured_id_flag
+
+    @property
+    def sensor_active(self) -> bool:
+        """このデバイスのセンサ入力が入っているか (FEEDBACK bit6, 仕様書 §5.2)。
+
+        基板のセンサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
+        「何番のセンサか」はこのドライバのモータ名と can_id が表す。
+
+        原点合わせ用の入力で、**異常ではない**。is_fault() にも check_safety_error()
+        にも入れない。ここに入れると、センサに触れているだけでヘルスが FAULT になり
+        動作確認もシーケンスも止まる (原点合わせは「触れさせる」操作なので必ず起きる)。
+
+        基板は状態を報告するだけで、判断は PC 側が持つ (仕様書 §5.2)。
+        """
+        return self._sensor_flag
 
     def has_overcurrent_warning(self) -> bool:
         return self._overcurrent_flag
@@ -293,13 +309,15 @@ class GenericDriver(MotorDriver):
 
     def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
         if context.mode is ControlMode.DUTY:
-            # duty 指令 [0..1] と rpm フィードバックは次元が違うので追従判定できない。
-            # 「回ったかどうか」だけを見る
-            if abs(self._state.velocity) > self._CHECK_DUTY_ROTATION_RPM:
-                return True, self._overflow_note()
+            # duty 指令を使うのは自作 DC モタドラだけで、その基板はエンコーダも
+            # 電流センスも持たない (仕様書 §8)。FEEDBACK の velocity は常に 0 で、
+            # 「回ったかどうか」を自動判定する手段が 1 つも存在しない。
+            # 以前はここで velocity を見ており、実機では必ず「回転検出なし」で
+            # 落ちるうえ、原因が配線不良にしか見えない失敗を出していた。
             return False, (
-                f"回転検出なし (target duty={context.target:.2f}, "
-                f"velocity={self._state.velocity:.1f}rpm)"
+                "duty 指令はフィードバックが無く自動判定できない "
+                f"({self.name} は motor_check.magnitude: 0 で除外し、"
+                "config/checklist.yaml の指差喚呼で目視確認すること)"
             )
 
         passed, detail = self.evaluate_tracking(context)

@@ -214,11 +214,62 @@ class TestHealth:
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.is_fault() is False
 
-    def test_reserved_high_bits_ignored(self):
-        # bit6-7 は予約。ヘルス判定に影響してはならない (仕様書 §3.2)
+    def test_sensor_and_reserved_bits_do_not_affect_health(self):
+        # bit6 はセンサ入力 (異常ではない)、bit7 は予約。どちらもヘルス判定に影響させない
         self._feed(flags=0b11000000)
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.is_fault() is False
+
+
+class TestSensorInput:
+    """センサ入力 (FEEDBACK bit6, 仕様書 §5.2)。原点合わせ用。
+
+    センサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
+    ドライバ 1 つがセンサ 1 個に対応する。
+    """
+
+    def setup_method(self):
+        self.drv = GenericDriver("origin_sensor", 0x02)
+
+    def _feed(self, *, flags: int = 0x00) -> None:
+        feed_generic(self.drv, flags=flags)
+
+    def test_initially_inactive(self):
+        assert self.drv.sensor_active is False
+
+    def test_bit6_reports_input(self):
+        self._feed(flags=0b01000000)
+        assert self.drv.sensor_active is True
+
+    def test_clears_when_released(self):
+        self._feed(flags=0b01000000)
+        self._feed(flags=0b00000000)
+        assert self.drv.sensor_active is False
+
+    def test_reserved_bit7_is_not_the_sensor(self):
+        # bit7 は予約のまま。取り違えるとセンサが一度も反応しない
+        self._feed(flags=0b10000000)
+        assert self.drv.sensor_active is False
+
+    def test_contact_is_not_an_abnormality(self):
+        """センサに触れているだけでヘルスや動作確認を止めてはならない。
+
+        原点合わせは「触れさせる」操作なので、異常扱いにすると原点を取るたびに
+        機体が FAULT になりシーケンスが止まる。基板は状態を報告するだけで、
+        それをどう使うかは PC 側のシーケンスが決める (仕様書 §5.2)。
+        """
+        self._feed(flags=0b01000000)
+        assert self.drv.is_fault() is False
+        assert self.drv.has_overcurrent_warning() is False
+        assert self.drv.check_safety_error() is None
+
+    def test_does_not_disturb_other_flags(self):
+        # 同じ Byte7 に載るので、ビットを取り違えると緊急停止やウォッチドッグと混ざる
+        self._feed(flags=0b01011000)  # bit6 + bit4 + bit3
+        assert self.drv.sensor_active is True
+        assert self.drv.e_stop_active is True
+        assert self.drv.watchdog_active is True
+        assert self.drv.device_id_unconfigured is False
 
 
 class TestMotorCheck:
@@ -304,21 +355,22 @@ class TestMotorCheck:
         assert passed is False
         assert detail is not None
 
-    def test_evaluate_duty_passed_when_rotation_detected(self):
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
-        _, context = drv.check_command(magnitude=0.3)
-        # 何らかの回転が観測されれば PASSED (|velocity| > 10)
-        self._feed(drv, velocity_rpm=50)
-        passed, _ = drv.evaluate_check_result(context)
-        assert passed is True
+    def test_evaluate_duty_is_never_auto_judged(self):
+        """duty は自動判定できない。回転が観測されたように見えても PASSED にしない。
 
-    def test_evaluate_duty_failed_when_no_rotation(self):
+        duty を使うのは自作 DC モタドラだけで、その基板はエンコーダを持たず
+        FEEDBACK の velocity は常に 0 (仕様書 §8)。ここで velocity を信じると、
+        バス上の別フレームを取り違えた値で「動作確認 PASSED」を出しかねない。
+        目視確認 (config/checklist.yaml) へ回すのが唯一正しい扱い。
+        """
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
         _, context = drv.check_command(magnitude=0.3)
-        self._feed(drv, velocity_rpm=2)
+        self._feed(drv, velocity_rpm=50)
         passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
+        # 失敗理由が配線不良に見えないよう、除外の手順まで書いてあること
+        assert "magnitude" in detail
 
     def test_evaluate_passed_with_overcurrent_flag_adds_detail(self):
         drv = GenericDriver("test_motor", 0x01)
