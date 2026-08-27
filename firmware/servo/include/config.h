@@ -67,16 +67,14 @@ enum class SlotRole : uint8_t {
 
 struct ServoSlotConfig {
     SlotRole role;
-    // DIP オフセットを足す前の基準デバイス ID。
-    // **Servo 以外のスロットも 1 つ予約する。** 予約しないと、配線でセンサへ役割を
-    // 変えた瞬間にブロックの幅が縮み、DIP を上げた 2 枚目と ID が重なる。
-    uint8_t deviceId;
+    // デバイス ID は表に持たない。**スロットの添字がそのままデバイス ID の下位 3bit**
+    // になるので（仕様書 §2.2）、配線で役割を変えても ID は動かない。
     uint8_t pin;
     float initialAngleDeg;         // 起動時に持っていく角度（仕様書 §5.4）
-    motorcan::ServoLimits limits;  // 可動範囲とスルーレート（SET_PARAM 0x10-0x12 で変更可）
+    motorcan::ServoLimits limits;  // 可動範囲とスルーレート（SET_PARAM 0x04-0x06 で変更可）
     motorcan::ServoPulseSpec pulse;
     // TouchSensor のとき、LOW を「入力あり」とみなすか。
-    // 報告ビットは常に FEEDBACK Byte7 の bit6（自分のデバイス ID で送るので 1 つで足りる）。
+    // 報告ビットは常に FEEDBACK のセンサ入力（自分のデバイス ID で送るので 1 つで足りる）。
     bool sensorActiveLow;
     const char *name;     // シリアルデバッグ表示用。CAN の挙動には影響しない
 };
@@ -116,38 +114,39 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
 // デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
 // ずれるとそのモータは指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
 constexpr ServoSlotConfig kServoSlots[kServoSlotCount] = {
-    {SlotRole::Servo, 0x01, 4, 0.0f, kProvisionalLimits, kServoPulse270, false, "gripper"},
-    {SlotRole::Servo, 0x03, 5, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_f"},
-    {SlotRole::Servo, 0x04, 6, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_r"},
-    {SlotRole::Servo, 0x05, 7, 0.0f, kProvisionalLimits, kServoPulse270, false, "sub_gripper"},
+    {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false, "gripper"},
+    {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_f"},
+    {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_r"},
+    {SlotRole::Servo, 7, 0.0f, kProvisionalLimits, kServoPulse270, false, "sub_gripper"},
     // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
     // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
-    {SlotRole::TouchSensor, 0x02, 8, 0.0f, kProvisionalLimits, kServoPulse270, true,
-     "origin_sensor"},
+    {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true, "origin_sensor"},
 };
 
 // ===========================================================================
-// デバイス ID の帯（仕様書 §2.2）
+// デバイス ID（仕様書 §2.2）
 // ===========================================================================
 
-// DIP は「スロット表全体に加えるブロックオフセット」で、刻み幅は**スロット数**。
-// 実際に使うサーボの台数ではない（役割を変えても幅が変わらないようにするため）。
+// デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割。
+// **帯も刻み幅も連続ブロック性も要らない。** DIP は基板番号そのもので、
+// スロットの添字がそのまま ID の下位 3bit になる。
 //
-//   DIP | デバイス ID
-//   ----+-------------
-//    0  | 0x01 - 0x05
-//    1  | 0x06 - 0x0A
-//    2  | 0x0B - 0x0F
-//    3+ | 帯を越えるので**未設定**（LED 赤点滅・駆動拒否）
+//   基板番号 | SV0  | SV1  | SV2  | SV3  | SV4
+//   ---------+------+------+------+------+------
+//      0     | 0x40 | 0x41 | 0x42 | 0x43 | 0x44
+//      1     | 0x48 | 0x49 | 0x4A | 0x4B | 0x4C
 //
-// 帯は基板種別ごとに切ってある:
-//   0x01 - 0x10 : サーボ基板（5 スロット × 3 枚）  ← ここ
-//   0x11 - 0x1C : DC 基板  （3ch     × 4 枚）
-//
-// 帯を越えたブロックを未設定へ倒さないと、サーボ基板の DIP を上げただけで DC 基板の
-// 帯を踏み、同じ ID の基板が 2 枚バス上に並ぶ。
-constexpr uint8_t kDeviceIdStride = kServoSlotCount;
-constexpr uint8_t kDeviceIdBandEnd = 0x10;
+// candump に 0x4A が流れていれば「サーボ基板 1 枚目の SV2」と直接読める。
+// DIP は 4bit だが基板番号は 3bit なので、8 以上を設定した基板は全スロットが
+// 未設定になる（LED 赤点滅・駆動拒否）。黙って丸めると別の基板の ID を名乗る。
+constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
+
+// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
+// **プロトコルかピン配置を変えたら必ず上げること。**
+constexpr uint8_t kFirmwareVersion = 1;
+
+// INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
+constexpr uint32_t kInfoIntervalMs = 1000;
 
 // ===========================================================================
 // 制御ループ

@@ -43,12 +43,6 @@ bool DcChannel::setDuty(float duty, uint32_t nowMs) {
     if (!safety_.isOutputAllowed(nowMs)) {
         return false;
     }
-    // NaN を保持すると出力段の比較がすべて false になり PWM まで素通りする。
-    // 復号層（decodeSetTarget）も弾くが、シリアルデバッグの "nan" のようにそこを
-    // 通らない経路があるので、保持する側でも受け付けない。
-    if (duty != duty) {
-        return false;
-    }
     duty_ = duty;
     return true;
 }

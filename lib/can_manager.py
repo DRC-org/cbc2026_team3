@@ -61,6 +61,10 @@ class CANManager:
         self._run_blocking = run_blocking
         self._buses: dict[str, can.Bus] = {}
         self._motors: dict[str, MotorDriver] = {}
+        # センサはモータではないので _motors には入れない (仕様書 §5.2)。
+        # 動作確認・目標値再送・UI のモータ一覧に「常に 0 のモータ」を並べないため。
+        # 受信の振り分けとヘルス監視だけは同じ経路に乗せる
+        self._sensors: dict[str, MotorDriver] = {}
         self._motor_bus: dict[str, str] = {}
         self._bus_motors: dict[str, list[MotorDriver]] = {}
         self._tasks: list[asyncio.Task[None]] = []
@@ -108,26 +112,53 @@ class CANManager:
         全ロボットを合わせた一意性は tests/test_robot_sequences.py の
         yaml 静的テストが引き続き担保する。
         """
+        self._add_device(bus_name, motor)
+        self._motors[motor.name] = motor
+
+    def _add_device(self, bus_name: str, device: MotorDriver) -> None:
+        """モータとセンサに共通の登録処理 (受信の振り分け先と重複検査)。
+
+        検査を 2 箇所に書くと、片方だけが緩んで「センサとモータが同じ can_id を
+        名乗る」構成が作れてしまう。同じバス上の別デバイスなので壊れ方は同じ。
+        """
         if bus_name not in self._buses:
             raise KeyError(f"バス '{bus_name}' が登録されていません")
 
-        existing_bus = self._motor_bus.get(motor.name)
+        existing_bus = self._motor_bus.get(device.name)
         if existing_bus is not None:
-            raise ValueError(f"モータ '{motor.name}' は既に登録済み (bus={existing_bus})")
+            raise ValueError(f"デバイス '{device.name}' は既に登録済み (bus={existing_bus})")
 
         for existing in self._bus_motors[bus_name]:
-            if existing.can_id == motor.can_id:
+            if existing.can_id == device.can_id:
                 raise ValueError(
-                    f"バス '{bus_name}' の can_id 0x{motor.can_id:02X} が重複 "
-                    f"('{motor.name}' と '{existing.name}')"
+                    f"バス '{bus_name}' の can_id 0x{device.can_id:02X} が重複 "
+                    f"('{device.name}' と '{existing.name}')"
                 )
 
-        self._motors[motor.name] = motor
-        self._motor_bus[motor.name] = bus_name
-        self._bus_motors[bus_name].append(motor)
+        self._motor_bus[device.name] = bus_name
+        self._bus_motors[bus_name].append(device)
+
+    def add_sensor(self, bus_name: str, sensor: MotorDriver) -> None:
+        """バスにセンサを登録する (仕様書 §5.2)。
+
+        自作基板は 1 スロット = 1 CAN デバイスで、センサも自分のデバイス ID で
+        FEEDBACK を送る。**登録しないと受信ループがそのフレームを誰にも配らず、
+        接触が PC まで届かない。** 名前・can_id の重複検査はモータと同じ空間で行う
+        (同じバス上の別デバイスなので、衝突すれば同じ壊れ方をする)。
+
+        motors とは別に持つのは、動作確認・目標値再送・UI のモータ一覧へ
+        「常に 0 のモータ」を並べないため。ヘルス (STALE) は同じ扱いで監視する。
+        """
+        self._add_device(bus_name, sensor)
+        self._sensors[sensor.name] = sensor
 
     def get_motor(self, name: str) -> MotorDriver:
         return self._motors[name]
+
+    @property
+    def sensors(self) -> Mapping[str, MotorDriver]:
+        """登録済みセンサの読み取り専用ビュー (宣言順を保つ)。"""
+        return MappingProxyType(self._sensors)
 
     @property
     def motors(self) -> Mapping[str, MotorDriver]:
@@ -416,7 +447,9 @@ class CANManager:
 
         # モータ情報 (バス情報の last_rx_at 集計に必要なので先に確定させる)
         bus_latest_rx: dict[str, float] = {}
-        for motor_name, motor in self._motors.items():
+        # センサも同じ扱いで監視する。**死んだまま原点合わせを始めると
+        # 「いつまでも当たらない」形でしか分からない**ので、途絶は検出したい
+        for motor_name, motor in {**self._motors, **self._sensors}.items():
             bus_name = self._motor_bus[motor_name]
             last_fb = self._last_rx_at.get(motor_name)
             age_ms = (now - last_fb) * 1000.0 if last_fb is not None else None

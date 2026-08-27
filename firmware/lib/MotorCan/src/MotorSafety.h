@@ -57,14 +57,14 @@ class MotorSafety {
 
     // 「一度でも指令を受けたうえで満了した」= 本物の CAN 通信途絶なら true。
     // 起動直後の未受信（isExpired が true になる）と区別するために要る。
-    // 出力の可否は isExpired 側で判断し、こちらは FEEDBACK bit4 の報告にだけ使う。
+    // 出力の可否は isExpired 側で判断し、こちらはウォッチドッグの報告にだけ使う。
     bool isCommandLost(uint32_t nowMs) const;
 
     void setTimeoutMs(uint32_t timeoutMs) { timeoutMs_ = timeoutMs; }
     uint32_t timeoutMs() const { return timeoutMs_; }
 
     // ウォッチドッグそのものの有効/無効（仕様書 §5.1 / §8）。無効にすると途絶しても
-    // 駆動を許可し、FEEDBACK bit4 も報告しない。書き換えてよいのは setup() が
+    // 駆動を許可し、ウォッチドッグの報告もしない。書き換えてよいのは setup() が
     // config.h の WATCHDOG_ENABLED を写すときだけで、CAN の SET_PARAM からは触らせない
     // （PC 側の 1 フレームで最後の砦が外れる経路を作らないため）。
     //
@@ -88,8 +88,8 @@ class MotorSafety {
         return !latched_ && everFed_ && !(watchdogEnabled_ && isExpired(nowMs));
     }
 
-    // FEEDBACK Byte7 の bit3 / bit4 を返す（他のビットは呼び出し側で OR する）。
-    // bit4 は isCommandLost() に従うので、起動直後の未受信では立たない。
+    // FEEDBACK Byte7 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
+    // ウォッチドッグのビットは isCommandLost() に従うので、起動直後の未受信では立たない。
     uint8_t statusFlags(uint32_t nowMs) const;
 
    private:

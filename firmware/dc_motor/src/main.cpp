@@ -19,7 +19,7 @@
 // この基板の性質（仕様書 §4 / §8）:
 //   - 1 枚が 3 チャンネルを持ち、チャンネルごとに独立したデバイス ID を持つ
 //   - **フィードバックを一切持たない。** エンコーダ・電流センス・温度センサとも非搭載で、
-//     FEEDBACK の位置・速度・電流・温度はすべて 0、到達フラグ（bit0）も立てない
+//     FEEDBACK の位置・速度はすべて 0、到達フラグも立てない
 //   - duty モードのみ受理する（位置・速度制御は実装ごと存在しない）
 //   - ゲートドライバの出力禁止（DIS）が無く、止める手段は PWM 0% だけ。その代わり
 //     物理緊急停止スイッチの状態を REF ピンで読める
@@ -80,42 +80,17 @@ static constexpr bool pinsAreUnique() {
 }
 static_assert(pinsAreUnique(), "config.h のピンが重複している");
 
-// デバイス ID がチャンネル間で重複すると、1 つの SET_TARGET が複数のモータを動かす。
-static constexpr bool deviceIdsAreUnique() {
-    for (uint8_t i = 0; i < kDcChannelCount; ++i) {
-        for (uint8_t j = static_cast<uint8_t>(i + 1); j < kDcChannelCount; ++j) {
-            if (kDcChannels[i].deviceId == kDcChannels[j].deviceId) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-static_assert(deviceIdsAreUnique(), "config.h のチャンネル表でデバイス ID が重複している");
-
-// 基準デバイス ID は「刻み幅ぴったりの連続ブロック」でなければならない。
-// 幅が刻み幅より狭いと DIP を 1 段上げた基板のブロックが隣へ食い込み、
-// 広いと自分自身の別ブロックと重なる。どちらも同じ ID の基板が 2 枚並ぶ。
-static constexpr bool deviceIdsFormOneBlock() {
-    uint8_t lo = kDcChannels[0].deviceId;
-    uint8_t hi = kDcChannels[0].deviceId;
-    for (uint8_t i = 1; i < kDcChannelCount; ++i) {
-        if (kDcChannels[i].deviceId < lo) lo = kDcChannels[i].deviceId;
-        if (kDcChannels[i].deviceId > hi) hi = kDcChannels[i].deviceId;
-    }
-    return static_cast<uint8_t>(hi - lo + 1) == kDeviceIdStride;
-}
-static_assert(deviceIdsFormOneBlock(),
-              "基準デバイス ID が刻み幅ぴったりの連続ブロックになっていない");
-
-// DIP=0 の時点で帯からはみ出していると、どう設定しても駆動できない基板になる。
-static_assert(kDeviceIdBandEnd >= 0x13 && kDeviceIdBandEnd <= kDeviceIdBroadcast - 1,
-              "kDeviceIdBandEnd が DC 帯の定義と噛み合っていない");
+// デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
+// チャンネル間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）。
+// かつては基準 ID の表を持ち、重複・連続ブロック性・帯の 3 つを static_assert で
+// 見張っていたが、ビット分割にしたことで規則ごと消えた。
 
 // 下の g_pwm / g_channel は各チャンネルを明示的に初期化している。
 // チャンネルを増やすときはそれらの初期化子も一緒に足すこと。
 static_assert(kDcChannelCount == 3,
               "チャンネル数を変えたら g_pwm / g_channel の初期化子も更新すること");
+static_assert(kDcChannelCount <= motorcan::kMaxSlotNumber + 1,
+              "チャンネル数がデバイス ID のスロット番号（3bit）に収まらない");
 
 // 宛先判定の結果はチャンネルのビットマスク（uint8_t）で返ってくる。
 static_assert(kDcChannelCount <= motorcan::kMaxChannels,
@@ -160,6 +135,7 @@ static float g_maxDuty[kDcChannelCount] = {
 static uint32_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 static PeriodicTimer g_feedbackTimer[kDcChannelCount];
 
+static PeriodicTimer g_infoTimer;
 static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
@@ -224,56 +200,64 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 // ===========================================================================
 
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
-    // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
-    // bit4 は指令を一度でも受けた後の満了でのみ立ち、無効化した基板では立たない。
+    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
+    // ウォッチドッグのビットは指令を一度でも受けた後の満了でのみ立ち、
+    // 無効化した基板では立たない。
     // ここで手で組み立て直すと、サーボ用と同じ条件で立つ保証が無くなる。
     uint8_t flags = g_channel[ch].safetyStatusFlags(nowMs);
     if (!isChannelConfigured(ch)) {
         flags |= status_flag::kDeviceIdUnconfigured;
     }
-    // 観測手段が 1 つも無い基板なので bit0（到達）/ bit1（過電流）/ bit2（過熱）は
-    // 常に 0（仕様書 §3.2 / §8）。duty には到達の概念が無く、「指令したから到達した」と
-    // 報告するのは実測でも推定でもない嘘になる。
+    // 観測手段が 1 つも無い基板なので到達フラグは立てない（仕様書 §3.2 / §8）。
+    // duty には到達の概念が無く、「指令したから到達した」と報告するのは
+    // 実測でも推定でもない嘘になる。
     return flags;
 }
 
 static void sendFeedback(uint8_t ch, uint32_t nowMs) {
-    uint8_t data[kFrameLength];
-
-    // 位置・速度・電流・温度はセンサが無いのですべて 0（仕様書 §3.2）。
-    encodeFeedback(data, 0, 0, 0, 0, buildStatusFlags(ch, nowMs));
+    // **この基板は位置を持たないので状態フラグ 1 バイトだけ**（仕様書 §3.2）。
+    // 位置・速度に常に 0 を詰めても、PC には「測ったように見える 0」が届くだけ。
+    uint8_t data[kFeedbackFlagsOnlyLength];
+    const uint8_t len = encodeFeedback(data, buildStatusFlags(ch, nowMs));
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
     // ID 未設定チャンネルは CAN ID 0x100 で送ることになり、複数チャンネルが未設定だと
-    // 同じ ID のフレームが重複するが、PC 側に bit5（設定忘れ）を届ける方を優先する。
-    const CanMsg msg(CanStandardId(buildCanId(CommandType::Feedback, g_deviceId[ch])),
-                     kFrameLength, data);
+    // 同じ ID のフレームが重複するが、PC 側へ「デバイス ID 未設定」を届ける方を優先する。
+    const CanMsg msg(CanStandardId(buildCanId(CommandType::Feedback, g_deviceId[ch])), len,
+                     data);
+    CAN.write(msg);
+}
+
+// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
+static void sendInfo(uint8_t ch) {
+    uint8_t data[kInfoLength];
+    const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator);
+    const CanMsg msg(CanStandardId(buildCanId(CommandType::Info, g_deviceId[ch])), len, data);
     CAN.write(msg);
 }
 
 static void applyParam(uint8_t ch, const SetParamCommand &cmd) {
     switch (cmd.id) {
         case ParamId::MaxDuty:
-            g_maxDuty[ch] = clampDuty(cmd.value, 1.0f);
+            g_maxDuty[ch] = clampDuty(fromRaw(cmd.raw, kDutyScale), 1.0f);
             break;
         case ParamId::CommandTimeoutMs:
             // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
             // SET_PARAM 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。
             // 範囲の根拠と NaN の扱いは MotorCanProtocol が持つ。
-            g_channel[ch].setCommandTimeoutMs(
-                sanitizeCommandTimeoutMs(cmd.value, g_channel[ch].commandTimeoutMs()));
+            g_channel[ch].setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
             break;
         case ParamId::FeedbackIntervalMs:
             // 周期は基板全体で 1 つ（チャンネルごとに変えると位相の分散が崩れる）。
-            g_feedbackIntervalMs = sanitizeFeedbackIntervalMs(cmd.value, g_feedbackIntervalMs);
+            g_feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
             break;
-        case ParamId::Kp:
-        case ParamId::Ki:
-        case ParamId::Kd:
-        case ParamId::OvercurrentThresholdMa:
         case ParamId::ReachedTolerance:
-            // 仕様書 §3.4 / §8: この基板は PID も電流センスも到達判定も持たないので無視する。
+        case ParamId::SlewRate:
+        case ParamId::AngleMin:
+        case ParamId::AngleMax:
+            // 仕様書 §3.4: サーボ固有のパラメータ。この基板は持たないので無視する。
             // 受け付けて内部に持つと、PC 側から「設定できたのに効かない値」に見える。
             break;
     }
@@ -304,12 +288,9 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
             g_serialOverride = false;
 #endif
             // setDuty は緊急停止ラッチ中・ウォッチドッグ満了中は受け付けない。
-            g_channel[ch].setDuty(cmd.value, nowMs);
+            g_channel[ch].setDuty(fromRaw(cmd.raw, kDutyScale), nowMs);
             break;
         }
-        case CommandType::SetMode:
-            // 仕様書 §4: モードは duty 固定。SET_MODE は無視する。
-            break;
         case CommandType::SetParam: {
             const SetParamCommand cmd = decodeSetParam(msg.data, msg.data_length);
             if (cmd.valid) {
@@ -331,7 +312,8 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
             break;
         }
         case CommandType::Feedback:
-            // 他チャンネル・他基板の FEEDBACK。ID は衝突しないが念のため無視する。
+        case CommandType::Info:
+            // 他基板がモタドラ → PC 方向へ送るフレーム。ID は衝突しないが念のため無視する。
             break;
     }
 }
@@ -372,13 +354,11 @@ static void pollCan() {
 // 負論理とビット順の対応、はみ出しの扱いは MotorCanRouter が持つ
 // （native テストで守られている）。
 static void resolveDeviceIds() {
-    const uint8_t offset = readDipSwitch(
+    const uint8_t boardNumber = readDipSwitch(
         kPinDip, kDipBitCount, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); },
         LOW);
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        g_deviceId[ch] =
-            applyDeviceIdBlockOffset(kDcChannels[ch].deviceId, offset, kDeviceIdStride,
-                                     kDeviceIdBandEnd);
+        g_deviceId[ch] = makeDeviceId(kBoardKind, boardNumber, ch);
     }
 }
 
@@ -456,7 +436,10 @@ static void pollSerial(uint32_t nowMs) {
             const long ch = strtol(line, &sep, 10);
             if (sep != line && *sep == ' ' && ch >= 0 &&
                 ch < static_cast<long>(kDcChannelCount)) {
-                g_channel[ch].setDuty(strtof(sep + 1, nullptr), nowMs);
+                // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
+                // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
+                g_channel[ch].setDuty(
+                    fromRaw(toRaw(strtof(sep + 1, nullptr), kDutyScale), kDutyScale), nowMs);
                 g_serialOverride = true;
             }
         }
@@ -517,7 +500,7 @@ void setup() {
         // 全チャンネルが同じ周期で同時に送ると 3 フレームのバーストになり、他バスの
         // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
         // 周期を等分した位相をチャンネルごとにずらして平準化する。
-        // ID 未設定のチャンネルも bit5 を知らせるために送るので、ここは全チャンネル分やる。
+        // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送るので、ここは全チャンネル分やる。
         g_feedbackTimer[ch].setLastMs(startMs - g_feedbackIntervalMs +
                                       (g_feedbackIntervalMs * ch) / kDcChannelCount);
 
@@ -546,13 +529,14 @@ void setup() {
     }
 
     // 電源投入時点で物理緊急停止が押されているなら、その状態から始める。
-    // ここを省くと、押されたまま起動した基板が FEEDBACK bit3 を立てず、
+    // ここを省くと、押されたまま起動した基板が FEEDBACK の緊急停止ビットを立てず、
     // PC からは「解除済み」に見える。
     const bool pressed = isPhysicalStopPressed();
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         g_channel[ch].applyPhysicalStop(pressed);
     }
 
+    g_infoTimer.reset(startMs);
     g_blinkTimer.reset(startMs);
 }
 
@@ -581,6 +565,16 @@ void loop() {
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         if (g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(ch, nowMs);
+        }
+    }
+
+    // 仕様書 §3.6: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
+    // PC が基板より後から起動しても拾えるようにするため。
+    if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
+        for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
+            if (isChannelConfigured(ch)) {
+                sendInfo(ch);
+            }
         }
     }
 

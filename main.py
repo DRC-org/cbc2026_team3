@@ -253,6 +253,12 @@ def _setup_robot(
         can_manager.add_motor(motor_cfg.bus, motor)
         motors[motor_name] = motor
 
+    # センサは motors には入れない (仕様書 §5.2)。受信の振り分けとヘルス監視だけを
+    # 登録し、動作確認・目標値再送・UI のモータ一覧には並べない。
+    # **登録を忘れると受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。**
+    for sensor_cfg in robot.sensors.values():
+        can_manager.add_sensor(sensor_cfg.bus, GenericDriver(sensor_cfg.name, sensor_cfg.can_id))
+
     return can_manager, motors
 
 

@@ -61,9 +61,13 @@ static void test_e_stop_to_other_device_is_dropped() {
 // 0xFF は E_STOP のブロードキャスト専用に予約されている（仕様書 §2.2）。
 // SET_TARGET を 0xFF で送っても誰も動かしてはならない。
 static void test_broadcast_device_id_is_only_for_e_stop() {
-    TEST_ASSERT_FALSE(routeStandard(0x0FF, kServoIds, 3).accepted);
+    // 0x0FF は E_STOP のブロードキャストなので受理される
+    TEST_ASSERT_TRUE(routeStandard(kBroadcastEStopCanId, kServoIds, 3).accepted);
+    // 他の種別を 0xFF 宛で送っても誰も動かしてはならない
+    TEST_ASSERT_FALSE(routeStandard(0x1FF, kServoIds, 3).accepted);
     TEST_ASSERT_FALSE(routeStandard(0x2FF, kServoIds, 3).accepted);
     TEST_ASSERT_FALSE(routeStandard(0x3FF, kServoIds, 3).accepted);
+    TEST_ASSERT_FALSE(routeStandard(0x4FF, kServoIds, 3).accepted);
 }
 
 // チャンネル数が channelMask のビット数を超えた基板では、先頭 8 チャンネルだけを
@@ -113,7 +117,7 @@ static void test_frames_for_other_devices_are_dropped() {
 static void test_unconfigured_device_receives_only_broadcast_e_stop() {
     const uint8_t ids[1] = {kDeviceIdUnconfigured};
     TEST_ASSERT_FALSE(routeStandard(buildCanId(CommandType::SetTarget, 0x00), ids, 1).accepted);
-    TEST_ASSERT_FALSE(routeStandard(buildCanId(CommandType::SetMode, 0x00), ids, 1).accepted);
+    TEST_ASSERT_FALSE(routeStandard(buildCanId(CommandType::SetParam, 0x00), ids, 1).accepted);
     TEST_ASSERT_FALSE(routeStandard(buildCanId(CommandType::SetParam, 0x00), ids, 1).accepted);
     TEST_ASSERT_FALSE(routeStandard(buildCanId(CommandType::EStop, 0x00), ids, 1).accepted);
     TEST_ASSERT_TRUE(routeStandard(kBroadcastEStopCanId, ids, 1).accepted);
@@ -137,9 +141,9 @@ static void test_extended_frame_is_dropped() {
                           .accepted);
 }
 
-// 予約コマンド種別（0b100 / 0b101 / 0b110）と 11bit を超える ID は無視する。
+// 予約コマンド種別（0b101 / 0b110 / 0b111）と 11bit を超える ID は無視する。
 static void test_reserved_and_out_of_range_ids_are_dropped() {
-    for (uint16_t cmd = 4; cmd <= 6; ++cmd) {
+    for (uint16_t cmd = 5; cmd <= 7; ++cmd) {
         TEST_ASSERT_FALSE(routeStandard(static_cast<uint16_t>((cmd << 8) | 0x03), kServoIds, 3)
                               .accepted);
     }
@@ -159,59 +163,44 @@ static void test_feedback_of_other_boards_is_dropped() {
 static uint8_t g_stubPins[4] = {0, 0, 0, 0};
 static int stubReadPin(uint8_t pin) { return g_stubPins[pin]; }
 
-// 1 枚が複数スロットを持つ基板では、DIP は「スロット数を刻み幅にしたブロック」を選ぶ。
-// 刻み幅 1 で足すと隣の DIP 設定の基板とブロックが重なり、同じ ID の基板が 2 枚
-// バス上に並ぶ（1 通の SET_TARGET で 2 台が動き、片方は永久に STALE になる）。
-static void test_block_offset_keeps_boards_from_overlapping() {
-    const uint8_t base[3] = {0x11, 0x12, 0x13};
-    // DIP=0 は表そのまま
-    for (uint8_t ch = 0; ch < 3; ++ch) {
-        TEST_ASSERT_EQUAL_UINT8(base[ch], applyDeviceIdBlockOffset(base[ch], 0, 3, 0x1C));
+// デバイス ID は「基板種別(2bit) | 基板番号(3bit) | スロット番号(3bit)」の固定分割。
+// **帯も刻み幅も連続ブロック性も要らない。** ID を見ればどの基板のどのスロットかが
+// 直接読めるので、candump を眺めているときに対応表を引かなくてよい。
+static void test_device_id_is_a_fixed_bit_split() {
+    TEST_ASSERT_EQUAL_UINT8(0x40, makeDeviceId(BoardKind::Servo, 0, 0));
+    TEST_ASSERT_EQUAL_UINT8(0x44, makeDeviceId(BoardKind::Servo, 0, 4));
+    TEST_ASSERT_EQUAL_UINT8(0x48, makeDeviceId(BoardKind::Servo, 1, 0));
+    TEST_ASSERT_EQUAL_UINT8(0x4A, makeDeviceId(BoardKind::Servo, 1, 2));
+    TEST_ASSERT_EQUAL_UINT8(0x80, makeDeviceId(BoardKind::Dc, 0, 0));
+    TEST_ASSERT_EQUAL_UINT8(0x82, makeDeviceId(BoardKind::Dc, 0, 2));
+    TEST_ASSERT_EQUAL_UINT8(0x88, makeDeviceId(BoardKind::Dc, 1, 0));
+}
+
+// 基板番号とスロット番号がどう組み合わさっても、種別が違えば衝突しない。
+// かつては帯と刻み幅を人が噛み合わせる必要があり、サーボ基板の DIP を上げると
+// DC 基板の帯を踏む、という穴があった。
+static void test_device_ids_never_collide_across_boards() {
+    for (uint8_t board = 0; board <= kMaxBoardNumber; ++board) {
+        for (uint8_t slot = 0; slot <= kMaxSlotNumber; ++slot) {
+            const uint8_t servo = makeDeviceId(BoardKind::Servo, board, slot);
+            const uint8_t dc = makeDeviceId(BoardKind::Dc, board, slot);
+            TEST_ASSERT_NOT_EQUAL_UINT8(servo, dc);
+            // 予約されている 0x00 / 0xFF には決して着地しない
+            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, servo);
+            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, servo);
+            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, dc);
+            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, dc);
+        }
     }
-    // DIP=1 は 3 つ先のブロックへ丸ごと移る
-    TEST_ASSERT_EQUAL_UINT8(0x14, applyDeviceIdBlockOffset(base[0], 1, 3, 0x1C));
-    TEST_ASSERT_EQUAL_UINT8(0x15, applyDeviceIdBlockOffset(base[1], 1, 3, 0x1C));
-    TEST_ASSERT_EQUAL_UINT8(0x16, applyDeviceIdBlockOffset(base[2], 1, 3, 0x1C));
-    // DIP=3（2bit の最大）まで重ならない
-    TEST_ASSERT_EQUAL_UINT8(0x1A, applyDeviceIdBlockOffset(base[0], 3, 3, 0x1C));
-    TEST_ASSERT_EQUAL_UINT8(0x1C, applyDeviceIdBlockOffset(base[2], 3, 3, 0x1C));
 }
 
-// サーボ基板は 1 枚 5 スロット。役割（サーボ / センサ）をどう振っても基準 ID の集合が
-// 連続ブロックのままになるよう、センサに使うスロットも ID を 1 つ予約する。
-// そのため刻み幅は「サーボの台数」ではなく「スロット数」でなければならない。
-static void test_block_offset_reserves_one_id_per_slot() {
-    const uint8_t base[5] = {0x01, 0x03, 0x04, 0x05, 0x02};
-    for (uint8_t slot = 0; slot < 5; ++slot) {
-        // DIP=1 は 5 つ先。どのスロットも DIP=0 のブロック（0x01-0x05）へ着地しない
-        const uint8_t shifted = applyDeviceIdBlockOffset(base[slot], 1, 5, 0x10);
-        TEST_ASSERT_TRUE(shifted >= 0x06);
-        TEST_ASSERT_TRUE(shifted <= 0x0A);
-    }
-    TEST_ASSERT_EQUAL_UINT8(0x06, applyDeviceIdBlockOffset(0x01, 1, 5, 0x10));
-    TEST_ASSERT_EQUAL_UINT8(0x0B, applyDeviceIdBlockOffset(0x01, 2, 5, 0x10));
-}
-
-// 帯を越えたブロックは未設定へ倒す。倒さずに割り当てると、サーボ基板の DIP を
-// 上げただけで DC 基板の帯（0x11-）を踏み、同じ ID の基板が 2 枚並ぶ。
-// 未設定にしておけば LED が赤く速く点滅し、DIP の設定ミスがその場で目に見える。
-static void test_block_offset_outside_band_is_unconfigured() {
-    // サーボ帯は 0x01-0x10。DIP=3 は 0x10-0x14 になり、はみ出す
-    TEST_ASSERT_EQUAL_UINT8(0x10, applyDeviceIdBlockOffset(0x01, 3, 5, 0x10));
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x02, 3, 5, 0x10));
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x05, 3, 5, 0x10));
-    // DIP を大きく回しても他基板の帯へは絶対に入らない
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x01, 15, 5, 0x10));
-}
-
-// はみ出した分を 8bit に丸めると、他基板のブロックの真ん中へ着地する。
-// 0xFF はブロードキャスト予約でもあるので、越えたものは未設定へ倒す。
-static void test_block_offset_overflow_is_unconfigured() {
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0xF0, 10, 3, 0xFE));
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0xFE, 1, 1, 0xFE));
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x01, 255, 3, 0xFE));
-    // 基準が未設定なら何を足しても未設定のまま
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdBlockOffset(0x00, 1, 3, 0xFE));
+// DIP を回しすぎた基板を黙って丸めると、別の基板の ID を名乗る。
+// 未設定にしておけば LED が赤く速く点滅し、設定ミスがその場で目に見える。
+static void test_device_id_out_of_range_is_unconfigured() {
+    // サーボ基板の DIP は 4bit だが基板番号は 3bit
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, makeDeviceId(BoardKind::Servo, 8, 0));
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, makeDeviceId(BoardKind::Servo, 15, 0));
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, makeDeviceId(BoardKind::Dc, 0, 8));
 }
 
 // DC 基板の DIP は 2bit（SW0=D1 / SW1=D0）。ビット数を取り違えると別ブロックを名乗る。
@@ -357,10 +346,9 @@ int main(int, char **) {
     RUN_TEST(test_extended_frame_is_dropped);
     RUN_TEST(test_reserved_and_out_of_range_ids_are_dropped);
     RUN_TEST(test_feedback_of_other_boards_is_dropped);
-    RUN_TEST(test_block_offset_keeps_boards_from_overlapping);
-    RUN_TEST(test_block_offset_reserves_one_id_per_slot);
-    RUN_TEST(test_block_offset_outside_band_is_unconfigured);
-    RUN_TEST(test_block_offset_overflow_is_unconfigured);
+    RUN_TEST(test_device_id_is_a_fixed_bit_split);
+    RUN_TEST(test_device_ids_never_collide_across_boards);
+    RUN_TEST(test_device_id_out_of_range_is_unconfigured);
     RUN_TEST(test_dip_reads_two_bits);
     RUN_TEST(test_dip_is_active_low_and_lsb_first);
     RUN_TEST(test_periodic_timer_fires_on_interval);

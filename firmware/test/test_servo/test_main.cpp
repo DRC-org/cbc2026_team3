@@ -14,17 +14,6 @@
 
 using namespace motorcan;
 
-// PC が送ってくる SET_PARAM のバイト列をテストから組み立てるヘルパ。
-// **本番のファームは float を送らない**（FEEDBACK は int16 だけ）ので、
-// 書く側は MotorCan には置かずここに持つ。
-static void packFloatLe(uint8_t *dst, float value) {
-    uint32_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    dst[0] = static_cast<uint8_t>(bits & 0xFF);
-    dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-    dst[2] = static_cast<uint8_t>((bits >> 16) & 0xFF);
-    dst[3] = static_cast<uint8_t>((bits >> 24) & 0xFF);
-}
 
 void setUp() {}
 void tearDown() {}
@@ -97,13 +86,18 @@ static void test_initial_angle_is_clamped() {
     TEST_ASSERT_EQUAL_FLOAT(20.0f, motion.targetAngleDeg());
 }
 
-// 化けた float32 が目標角として通ると、クランプもパルス変換もすり抜けて
-// サーボが不定の位置へ飛ぶ。NaN は指令ごと捨てる。
-static void test_set_target_ignores_nan() {
-    ServoMotion motion(5.0f, wideLimits());
-    motion.setTarget(30.0f, 0);
-    motion.setTarget(NAN, 0);
-    TEST_ASSERT_EQUAL_FLOAT(30.0f, motion.targetAngleDeg());
+// NaN は ServoMotion では防いでいない。**CAN は int16 しか運ばず**（仕様書 §4）、
+// float が入る唯一の経路であるシリアルデバッグは motorcan::toRaw を通すので、
+// NaN が内部へ到達する道が構造的に無い。防御を 1 箇所へ寄せた形。
+static void test_fixed_point_keeps_nan_out_of_the_motion_layer() {
+    // シリアル経路と同じ変換を通せば、NaN は 0 に飽和して届く
+    const float sanitized = fromRaw(toRaw(NAN, kAngleScale), kAngleScale);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, sanitized);
+
+    ServoMotion motion(30.0f, ServoLimits{0.0f, 90.0f, 90.0f});
+    motion.setTarget(sanitized, 0);
+    motion.update(10000);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentAngleDeg());
 }
 
 // --------------------------------------------------------------------------
@@ -253,65 +247,31 @@ static void test_set_limits_does_not_jump() {
 }
 
 // --------------------------------------------------------------------------
-// §7.6 SET_PARAM のサーボ向け ID
+// §3.4 SET_PARAM（サーボが使う ID）
 // --------------------------------------------------------------------------
 
-static void buildParamFrame(uint8_t *out, uint8_t id, float value) {
-    for (uint8_t i = 0; i < kFrameLength; ++i) {
-        out[i] = 0;
-    }
-    out[0] = id;
-    packFloatLe(&out[2], value);
-}
-
-static void test_decode_servo_param_accepts_servo_ids() {
-    uint8_t frame[kFrameLength];
-
-    buildParamFrame(frame, 0x10, 120.0f);
-    ServoParamCommand cmd = decodeServoSetParam(frame, kFrameLength);
-    TEST_ASSERT_TRUE(cmd.valid);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ServoParamId::SlewRate),
-                            static_cast<uint8_t>(cmd.id));
-    TEST_ASSERT_EQUAL_FLOAT(120.0f, cmd.value);
-
-    buildParamFrame(frame, 0x11, -10.0f);
-    cmd = decodeServoSetParam(frame, kFrameLength);
-    TEST_ASSERT_TRUE(cmd.valid);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ServoParamId::AngleMin),
-                            static_cast<uint8_t>(cmd.id));
-
-    buildParamFrame(frame, 0x12, 200.0f);
-    cmd = decodeServoSetParam(frame, kFrameLength);
-    TEST_ASSERT_TRUE(cmd.valid);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ServoParamId::AngleMax),
-                            static_cast<uint8_t>(cmd.id));
-}
-
-static void test_decode_servo_param_accepts_shared_ids() {
-    uint8_t frame[kFrameLength];
-    const uint8_t shared[] = {0x04, 0x05, 0x07};
-    for (uint8_t id : shared) {
-        buildParamFrame(frame, id, 250.0f);
-        const ServoParamCommand cmd = decodeServoSetParam(frame, kFrameLength);
+// かつてはサーボ専用の ServoParamId / decodeServoSetParam があり、同じフレームに
+// 2 つの enum と 2 つの復号器が並んでいた。ID を 1 つの表へ詰めたので、
+// 各基板は「自分が使わない ID を無視する」だけになった。
+static void test_servo_params_share_one_table() {
+    uint8_t frame[3] = {0, 0, 0};
+    const ParamId used[] = {ParamId::CommandTimeoutMs, ParamId::FeedbackIntervalMs,
+                            ParamId::ReachedTolerance, ParamId::SlewRate, ParamId::AngleMin,
+                            ParamId::AngleMax};
+    for (ParamId id : used) {
+        frame[0] = static_cast<uint8_t>(id);
+        packInt16Le(&frame[1], 900);
+        const SetParamCommand cmd = decodeSetParam(frame, 3);
         TEST_ASSERT_TRUE(cmd.valid);
-        TEST_ASSERT_EQUAL_UINT8(id, static_cast<uint8_t>(cmd.id));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(id), static_cast<uint8_t>(cmd.id));
+        TEST_ASSERT_EQUAL_INT16(900, cmd.raw);
     }
 }
 
-// 仕様書 §7.6: kp / ki / kd / max_duty / overcurrent は制御則を持たないので無視する。
-static void test_decode_servo_param_ignores_dc_only_ids() {
-    uint8_t frame[kFrameLength];
-    const uint8_t ignored[] = {0x00, 0x01, 0x02, 0x03, 0x06, 0x08, 0x13, 0xFF};
-    for (uint8_t id : ignored) {
-        buildParamFrame(frame, id, 1.0f);
-        TEST_ASSERT_FALSE(decodeServoSetParam(frame, kFrameLength).valid);
-    }
-}
-
-static void test_decode_servo_param_rejects_short_frame() {
-    uint8_t frame[kFrameLength];
-    buildParamFrame(frame, 0x10, 120.0f);
-    TEST_ASSERT_FALSE(decodeServoSetParam(frame, 5).valid);
+// 未知の ID は無視する（新しい PC 側ファームと古い基板が混在しても止まらないように）。
+static void test_unknown_param_id_is_ignored() {
+    uint8_t frame[3] = {0x42, 0, 0};
+    TEST_ASSERT_FALSE(decodeSetParam(frame, 3).valid);
 }
 
 // --------------------------------------------------------------------------
@@ -464,7 +424,7 @@ int main(int, char **) {
     RUN_TEST(test_angle_to_pulse_rejects_degenerate_spec);
     RUN_TEST(test_set_target_clamps_to_limits);
     RUN_TEST(test_initial_angle_is_clamped);
-    RUN_TEST(test_set_target_ignores_nan);
+    RUN_TEST(test_fixed_point_keeps_nan_out_of_the_motion_layer);
     RUN_TEST(test_slew_rate_limits_motion);
     RUN_TEST(test_reach_time_matches_distance_over_slew_rate);
     RUN_TEST(test_slew_is_zero_while_idle);
@@ -476,10 +436,8 @@ int main(int, char **) {
     RUN_TEST(test_set_limits_rejects_non_positive_slew_rate);
     RUN_TEST(test_set_limits_normalizes_inverted_range);
     RUN_TEST(test_set_limits_does_not_jump);
-    RUN_TEST(test_decode_servo_param_accepts_servo_ids);
-    RUN_TEST(test_decode_servo_param_accepts_shared_ids);
-    RUN_TEST(test_decode_servo_param_ignores_dc_only_ids);
-    RUN_TEST(test_decode_servo_param_rejects_short_frame);
+    RUN_TEST(test_servo_params_share_one_table);
+    RUN_TEST(test_unknown_param_id_is_ignored);
     RUN_TEST(test_latched_channel_does_not_creep_under_resent_targets);
     RUN_TEST(test_latched_channel_rejects_targets_at_the_entrance);
     RUN_TEST(test_target_commanded_while_latched_does_not_survive_release);

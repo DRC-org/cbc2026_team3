@@ -1063,10 +1063,6 @@ class TestEStopReasonIsRetained:
             await ws.close()
 
 
-# 仕様書 §3.2 FEEDBACK Byte7 bit3 (基板側の緊急停止ラッチ)
-_FLAG_E_STOP = 0x08
-
-
 def _health_with_feedback_at(mgr, at: float) -> HealthSnapshot:
     """フィードバック受信時刻だけを指定した OK スナップショット。
 
@@ -1105,22 +1101,22 @@ def _health_with_feedback_at(mgr, at: float) -> HealthSnapshot:
 
 
 class TestBoardReportedEStop:
-    """基板が FEEDBACK bit3 で報告した緊急停止を、サーバー全体へ伝播すること。
+    """基板が FEEDBACK の緊急停止ビットで報告した停止を、サーバー全体へ伝播すること。
 
     自作 DC モタドラは物理停止スイッチの押下と CAN 初期化失敗をラッチへ落とす。
     サーバーが拾わないと **機体は止まっているのに UI は平常のまま** になり、
     操縦者はシーケンスが進まない理由を画面から知る手段が無い。
     """
 
-    def _fixture_with_generic(self, *, flags: int) -> tuple[ServerFixture, GenericDriver]:
+    def _fixture_with_generic(self, *, e_stop: bool) -> tuple[ServerFixture, GenericDriver]:
         fx = _build_fixture()
         drv = GenericDriver("conveyor", 0x11, control_type=ControlMode.DUTY)
-        feed_generic(drv, flags=flags)
+        feed_generic(drv, e_stop=e_stop)
         set_motors(fx.can_manager("main_hand"), {"conveyor": drv})
         return fx, drv
 
     async def test_board_flag_activates_server_e_stop(self) -> None:
-        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+        fx, _ = self._fixture_with_generic(e_stop=True)
 
         await fx.publish_state()
 
@@ -1128,7 +1124,7 @@ class TestBoardReportedEStop:
 
     async def test_reason_names_the_motor(self) -> None:
         """止まった理由が「どのロボットのどのモータか」まで分かること。"""
-        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+        fx, _ = self._fixture_with_generic(e_stop=True)
 
         await fx.publish_state()
 
@@ -1138,7 +1134,7 @@ class TestBoardReportedEStop:
         assert "conveyor" in payload
 
     async def test_no_flag_keeps_running(self) -> None:
-        fx, _ = self._fixture_with_generic(flags=0x00)
+        fx, _ = self._fixture_with_generic(e_stop=False)
 
         await fx.publish_state()
 
@@ -1156,10 +1152,10 @@ class TestBoardReportedEStop:
         """解除フレーム送信より前に届いたフィードバックで停止をかけ直さないこと。
 
         解除は「解除フレーム送信 → 基板がラッチを外す → 次の FEEDBACK」の順に
-        伝わる。送信前のフィードバックに残った bit3 を信じると、解除した瞬間に
+        伝わる。送信前のフィードバックに残った緊急停止ビットを信じると、解除した瞬間に
         サーバーが自分で止め直し、**二度と解除できない機体** になる。
         """
-        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+        fx, _ = self._fixture_with_generic(e_stop=True)
         await fx.publish_state()
         assert fx.e_stop_active is True
 
@@ -1168,7 +1164,7 @@ class TestBoardReportedEStop:
         await fx.command({"type": "e_stop_release"})
         assert fx.e_stop_active is False
 
-        # 解除フレームより前に届いていたフィードバック (bit3 は立ったまま)
+        # 解除フレームより前に届いていたフィードバック (緊急停止ビットは立ったまま)
         mgr.health.side_effect = lambda **_kwargs: _health_with_feedback_at(mgr, stale_at)
         await fx.publish_state()
 
@@ -1181,13 +1177,13 @@ class TestBoardReportedEStop:
         次のループで再ラッチする。そこで動けるようにしてしまうと、
         「押しているのに機体が動く」状態を UI が作り出すことになる。
         """
-        fx, _ = self._fixture_with_generic(flags=_FLAG_E_STOP)
+        fx, _ = self._fixture_with_generic(e_stop=True)
         await fx.publish_state()
 
         await fx.command({"type": "e_stop_release"})
         assert fx.e_stop_active is False
 
-        # 解除後に届いたフィードバックでも bit3 が立っている
+        # 解除後に届いたフィードバックでも緊急停止ビットが立っている
         await fx.publish_state()
 
         assert fx.e_stop_active is True

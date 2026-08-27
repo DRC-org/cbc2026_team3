@@ -33,7 +33,7 @@ motors:
   sub_gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x05               # main_hand の generic 系 (0x01〜0x04) との衝突回避
+    can_id: 0x43               # サーボ基板 #0 SV3 (仕様書 §2.2)
     control_type: position
     motor_check:
       magnitude: 5.0           # positions.sub_gripper.open と一致させること

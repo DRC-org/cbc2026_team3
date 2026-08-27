@@ -111,23 +111,4 @@ class ServoMotion {
 // 仕様書 §7.6。サーボ基板が処理する SET_PARAM の ID。
 // MotorCanProtocol の decodeSetParam は共通 ID（0x00-0x07）しか通さないので、
 // 0x10 番台を含むサーボ側の受け付けはここで行う。
-enum class ServoParamId : uint8_t {
-    CommandTimeoutMs = 0x04,
-    FeedbackIntervalMs = 0x05,
-    ReachedTolerance = 0x07,
-    SlewRate = 0x10,
-    AngleMin = 0x11,
-    AngleMax = 0x12,
-};
-
-struct ServoParamCommand {
-    ServoParamId id;
-    float value;
-    // kp / ki / kd / max_duty / overcurrent など制御則を持たないサーボに無関係な ID、
-    // および未知の ID では false（仕様書 §7.6: 無視する）。
-    bool valid;
-};
-
-ServoParamCommand decodeServoSetParam(const uint8_t *data, uint8_t length);
-
 }  // namespace motorcan

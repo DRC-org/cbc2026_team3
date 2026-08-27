@@ -14,8 +14,6 @@ namespace {
 // 0.0001deg はどのサーボの分解能よりも細かく、機械的には無視できる。
 constexpr float kTravelEpsilonDeg = 1e-4f;
 
-bool isNan(float value) { return value != value; }
-
 float clampFloat(float value, float low, float high) {
     if (value < low) {
         return low;
@@ -27,24 +25,11 @@ float clampFloat(float value, float low, float high) {
 }
 
 // 仕様書 §7.6 の共通 ID とサーボ固有 ID の集合。
-bool isServoParamId(uint8_t raw) {
-    switch (raw) {
-        case static_cast<uint8_t>(ServoParamId::CommandTimeoutMs):
-        case static_cast<uint8_t>(ServoParamId::FeedbackIntervalMs):
-        case static_cast<uint8_t>(ServoParamId::ReachedTolerance):
-        case static_cast<uint8_t>(ServoParamId::SlewRate):
-        case static_cast<uint8_t>(ServoParamId::AngleMin):
-        case static_cast<uint8_t>(ServoParamId::AngleMax):
-            return true;
-        default:
-            return false;
-    }
-}
 
 }  // namespace
 
 uint16_t angleToPulseUs(float angleDeg, const ServoPulseSpec &spec) {
-    if (spec.angleRangeDeg <= 0.0f || isNan(spec.angleRangeDeg) || isNan(angleDeg)) {
+    if (spec.angleRangeDeg <= 0.0f) {
         // 変換が定義できない。可動範囲の下端へ倒す方が、未定義の値を出すより読みやすい。
         return spec.minUs;
     }
@@ -79,7 +64,7 @@ ServoMotion::ServoMotion(float initialAngleDeg, const ServoLimits &limits)
     // コンストラクタでもそれを通す。
     setLimits(limits);
 
-    const float initial = isNan(initialAngleDeg) ? limits_.angleMinDeg : initialAngleDeg;
+    const float initial = initialAngleDeg;
     currentAngleDeg_ = clampAngle(initial);
     targetAngleDeg_ = currentAngleDeg_;
     startAngleDeg_ = currentAngleDeg_;
@@ -96,10 +81,8 @@ void ServoMotion::anchorAt(uint32_t nowMs) {
 }
 
 void ServoMotion::setTarget(float angleDeg, uint32_t nowMs) {
-    if (isNan(angleDeg)) {
-        // 化けた float32 をそのまま通すとクランプもパルス変換もすり抜ける。指令ごと捨てる。
-        return;
-    }
+    // NaN の防御はここには無い。**CAN は int16 しか運ばず**（仕様書 §4）、float が
+    // 入る唯一の経路であるシリアルデバッグは motorcan::toRaw を通す。
     anchorAt(nowMs);
     targetAngleDeg_ = clampAngle(angleDeg);
     slewDegPerSec_ = 0.0f;
@@ -144,11 +127,6 @@ void ServoMotion::holdHere(uint32_t nowMs) {
 void ServoMotion::setLimits(const ServoLimits &limits) {
     ServoLimits next = limits;
 
-    if (isNan(next.angleMinDeg) || isNan(next.angleMaxDeg)) {
-        // 可動範囲が NaN だとクランプが素通りになり、保護が丸ごと消える。
-        next.angleMinDeg = limits_.angleMinDeg;
-        next.angleMaxDeg = limits_.angleMaxDeg;
-    }
     if (next.angleMinDeg > next.angleMaxDeg) {
         const float swapped = next.angleMinDeg;
         next.angleMinDeg = next.angleMaxDeg;
@@ -172,31 +150,11 @@ void ServoMotion::setLimits(const ServoLimits &limits) {
 }
 
 void ServoMotion::setReachedToleranceDeg(float toleranceDeg) {
-    if (isNan(toleranceDeg) || toleranceDeg < 0.0f) {
+    if (toleranceDeg < 0.0f) {
         return;
     }
     reachedToleranceDeg_ = toleranceDeg;
 }
 
-ServoParamCommand decodeServoSetParam(const uint8_t *data, uint8_t length) {
-    ServoParamCommand cmd{ServoParamId::SlewRate, 0.0f, false};
-    if (data == nullptr || length < kFrameLength) {
-        return cmd;
-    }
-    if (!isServoParamId(data[0])) {
-        return cmd;
-    }
-    // 仕様書 §3.4: 値は Byte2-5 の float32 リトルエンディアン。
-    const float value = unpackFloatLe(&data[2]);
-    if (isNan(value)) {
-        // NaN は setLimits / setReachedToleranceDeg の側でも弾かれるが、
-        // 「化けた float32 のフレームは解釈できないので捨てる」判断は復号層に置く。
-        return cmd;
-    }
-    cmd.id = static_cast<ServoParamId>(data[0]);
-    cmd.value = value;
-    cmd.valid = true;
-    return cmd;
-}
 
 }  // namespace motorcan

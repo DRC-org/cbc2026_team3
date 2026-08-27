@@ -18,7 +18,16 @@ import struct
 import can
 
 from lib.drivers.edulite05 import Edulite05Driver
-from lib.drivers.generic import CommandType, GenericDriver
+from lib.drivers.generic import (
+    _FLAG_E_STOP,
+    _FLAG_NEVER_COMMANDED,
+    _FLAG_REACHED,
+    _FLAG_SENSOR,
+    _FLAG_UNCONFIGURED_ID,
+    _FLAG_WATCHDOG,
+    CommandType,
+    GenericDriver,
+)
 from lib.drivers.m3508 import M3508Driver
 
 # M3508 のエンコーダ 1 回転あたりのカウント数 (C620 フィードバックの角度レンジ)
@@ -69,22 +78,46 @@ def feed_m3508(
 def generic_feedback(
     driver: GenericDriver,
     *,
-    position: float = 0.0,
-    velocity: float = 0.0,
-    current_ma: int = 0,
-    temp: int = 25,
+    position: float | None = None,
+    reached: bool = False,
+    e_stop: bool = False,
+    watchdog: bool = False,
+    unconfigured_id: bool = False,
+    sensor: bool = False,
+    never_commanded: bool = False,
     flags: int = 0x00,
+    reserved: bytes = b"",
 ) -> can.Message:
     """自作モータドライバの FEEDBACK フレーム (仕様書 §3.2)。
 
-    位置は 0.1deg 単位の符号付き 16bit。人間が書く単位 (deg) で受けて換算する。
+    Byte0=状態フラグ / Byte1-2=位置。**DLC は可変**で、位置を持たない基板
+    (DC・センサ) は状態フラグ 1 バイトだけを送る。``position`` を省くとその形になる。
+
+    **状態フラグはビット位置ではなく名前で指定する。** 生の 2 進リテラルを
+    テストに書くと、ビットの割り当てを詰め直したときに全テストを手で書き換える
+    ことになり、しかも 1 つ間違えても「別のフラグを見ている」だけで緑のまま通る。
+    ``flags`` は「予約ビットに値が載っていても影響しないこと」のように
+    *ビット位置そのもの* が検証対象のときだけ使う。
+
+    ``reserved`` は Byte3 以降に載せる余分なバイト。予約領域を素通しにしていない
+    ことを見るテストで使う。
     """
-    data = bytearray(8)
-    struct.pack_into("<h", data, 0, round(position * 10))
-    struct.pack_into("<h", data, 2, int(velocity))
-    struct.pack_into("<h", data, 4, int(current_ma))
-    data[6] = temp
-    data[7] = flags
+    named = 0
+    for enabled, bit in (
+        (reached, _FLAG_REACHED),
+        (e_stop, _FLAG_E_STOP),
+        (watchdog, _FLAG_WATCHDOG),
+        (unconfigured_id, _FLAG_UNCONFIGURED_ID),
+        (sensor, _FLAG_SENSOR),
+        (never_commanded, _FLAG_NEVER_COMMANDED),
+    ):
+        if enabled:
+            named |= bit
+
+    data = bytearray([named | flags])
+    if position is not None:
+        data.extend(struct.pack("<h", round(position * 10)))
+    data.extend(reserved)
     return can.Message(
         arbitration_id=GenericDriver.build_can_id(CommandType.FEEDBACK, driver.can_id),
         data=bytes(data),
@@ -95,20 +128,28 @@ def generic_feedback(
 def feed_generic(
     driver: GenericDriver,
     *,
-    position: float = 0.0,
-    velocity: float = 0.0,
-    current_ma: int = 0,
-    temp: int = 25,
+    position: float | None = None,
+    reached: bool = False,
+    e_stop: bool = False,
+    watchdog: bool = False,
+    unconfigured_id: bool = False,
+    sensor: bool = False,
+    never_commanded: bool = False,
     flags: int = 0x00,
+    reserved: bytes = b"",
 ) -> None:
     driver.update_state(
         generic_feedback(
             driver,
             position=position,
-            velocity=velocity,
-            current_ma=current_ma,
-            temp=temp,
+            reached=reached,
+            e_stop=e_stop,
+            watchdog=watchdog,
+            unconfigured_id=unconfigured_id,
+            sensor=sensor,
+            never_commanded=never_commanded,
             flags=flags,
+            reserved=reserved,
         )
     )
 

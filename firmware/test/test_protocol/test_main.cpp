@@ -13,17 +13,6 @@
 
 using namespace motorcan;
 
-// PC が送ってくる SET_TARGET / SET_PARAM のバイト列をテストから組み立てるヘルパ。
-// **本番のファームは float を送らない**（FEEDBACK は int16 だけ）ので、
-// 書く側は MotorCan には置かずここに持つ。
-static void packFloatLe(uint8_t *dst, float value) {
-    uint32_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    dst[0] = static_cast<uint8_t>(bits & 0xFF);
-    dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-    dst[2] = static_cast<uint8_t>((bits >> 16) & 0xFF);
-    dst[3] = static_cast<uint8_t>((bits >> 24) & 0xFF);
-}
 
 void setUp() {}
 void tearDown() {}
@@ -33,18 +22,35 @@ void tearDown() {}
 // --------------------------------------------------------------------------
 
 static void test_build_can_id() {
-    TEST_ASSERT_EQUAL_UINT16(0x002, buildCanId(CommandType::SetTarget, 0x02));
-    TEST_ASSERT_EQUAL_UINT16(0x102, buildCanId(CommandType::Feedback, 0x02));
-    TEST_ASSERT_EQUAL_UINT16(0x202, buildCanId(CommandType::SetMode, 0x02));
-    TEST_ASSERT_EQUAL_UINT16(0x302, buildCanId(CommandType::SetParam, 0x02));
-    TEST_ASSERT_EQUAL_UINT16(0x702, buildCanId(CommandType::EStop, 0x02));
-    TEST_ASSERT_EQUAL_UINT16(0x7FF, buildCanId(CommandType::EStop, kDeviceIdBroadcast));
+    TEST_ASSERT_EQUAL_UINT16(0x002, buildCanId(CommandType::EStop, 0x02));
+    TEST_ASSERT_EQUAL_UINT16(0x102, buildCanId(CommandType::SetTarget, 0x02));
+    TEST_ASSERT_EQUAL_UINT16(0x202, buildCanId(CommandType::SetParam, 0x02));
+    TEST_ASSERT_EQUAL_UINT16(0x302, buildCanId(CommandType::Feedback, 0x02));
+    TEST_ASSERT_EQUAL_UINT16(0x402, buildCanId(CommandType::Info, 0x02));
+    TEST_ASSERT_EQUAL_UINT16(0x0FF, buildCanId(CommandType::EStop, kDeviceIdBroadcast));
+}
+
+// **CAN の調停は ID が小さいほど優先。止めるフレームが目標値やフィードバックに
+// 追い越されてはならない。** かつては E_STOP が 0b111 で、ブロードキャスト停止の
+// 0x7FF は Standard ID 全 2048 個のうち最も優先度が低かった。
+static void test_e_stop_outranks_every_other_frame() {
+    const uint8_t dev = 0x7F;  // 同じデバイスで比べる
+    const uint16_t estop = buildCanId(CommandType::EStop, dev);
+    TEST_ASSERT_TRUE(estop < buildCanId(CommandType::SetTarget, dev));
+    TEST_ASSERT_TRUE(estop < buildCanId(CommandType::SetParam, dev));
+    TEST_ASSERT_TRUE(estop < buildCanId(CommandType::Feedback, dev));
+    TEST_ASSERT_TRUE(estop < buildCanId(CommandType::Info, dev));
+
+    // ブロードキャスト停止も、他のどのフレームより先に通ること
+    const uint16_t broadcast = buildCanId(CommandType::EStop, kDeviceIdBroadcast);
+    TEST_ASSERT_EQUAL_UINT16(kBroadcastEStopCanId, broadcast);
+    TEST_ASSERT_TRUE(broadcast < buildCanId(CommandType::SetTarget, 0x00));
 }
 
 static void test_parse_can_id_roundtrip() {
-    const CommandType kinds[] = {CommandType::SetTarget, CommandType::Feedback,
-                                 CommandType::SetMode, CommandType::SetParam,
-                                 CommandType::EStop};
+    const CommandType kinds[] = {CommandType::EStop, CommandType::SetTarget,
+                                 CommandType::SetParam, CommandType::Feedback,
+                                 CommandType::Info};
     for (CommandType kind : kinds) {
         for (uint16_t dev = 0; dev <= 0xFF; ++dev) {
             const CanIdInfo info = parseCanId(buildCanId(kind, static_cast<uint8_t>(dev)));
@@ -56,10 +62,10 @@ static void test_parse_can_id_roundtrip() {
     }
 }
 
-// 予約値 0b100 / 0b101 / 0b110 を「有効なコマンド」として扱うと、
+// 予約値 0b101 / 0b110 / 0b111 を「有効なコマンド」として扱うと、
 // PC 側 parse_can_id が例外を投げて受信ループごと落ちる（仕様書 §2.1）。
 static void test_parse_can_id_reserved_is_invalid() {
-    for (uint16_t cmd = 4; cmd <= 6; ++cmd) {
+    for (uint16_t cmd = 5; cmd <= 7; ++cmd) {
         const CanIdInfo info = parseCanId(static_cast<uint16_t>((cmd << 8) | 0x02));
         TEST_ASSERT_FALSE(info.valid);
     }
@@ -71,100 +77,103 @@ static void test_parse_can_id_rejects_out_of_range() {
 }
 
 // --------------------------------------------------------------------------
-// §3 float32 リトルエンディアン
+// §4 固定小数点
 // --------------------------------------------------------------------------
 
-// PC（Python の struct）が送ってくるバイト列を、こちらが同じ値として読めること。
-// **自前の pack で書いて unpack で読み直す往復にしてはならない** —— 両方が同じように
-// 壊れていても通ってしまう。契約はバイト列そのものなので、リテラルで固定する。
-static void test_unpack_float_from_known_bytes() {
-    // 0.3f = 0x3E99999A（IEEE754）。LE なので下位バイトから並ぶ
-    const uint8_t p03[4] = {0x9A, 0x99, 0x99, 0x3E};
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, unpackFloatLe(p03));
-
-    const uint8_t zero[4] = {0x00, 0x00, 0x00, 0x00};
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, unpackFloatLe(zero));
-
-    // -1.0f = 0xBF800000
-    const uint8_t minus_one[4] = {0x00, 0x00, 0x80, 0xBF};
-    TEST_ASSERT_EQUAL_FLOAT(-1.0f, unpackFloatLe(minus_one));
-
-    // 90.0f = 0x42B40000（サーボの既定スルーレート）
-    const uint8_t ninety[4] = {0x00, 0x00, 0xB4, 0x42};
-    TEST_ASSERT_EQUAL_FLOAT(90.0f, unpackFloatLe(ninety));
-
-    // 3276.7f = 0x454CCB33（位置の飽和境界）
-    const uint8_t saturation[4] = {0x33, 0xCB, 0x4C, 0x45};
-    TEST_ASSERT_EQUAL_FLOAT(3276.7f, unpackFloatLe(saturation));
+// CAN 上を流れるのは int16 だけで、float は 1 バイトも流れない（仕様書 §4）。
+// **NaN の防御はプロトコル全体で toRaw の 1 箇所だけ**になったので、
+// ここが素通しになると NaN が内部へ入る経路が復活する。
+static void test_to_raw_saturates_nan_and_out_of_range() {
+    TEST_ASSERT_EQUAL_INT16(0, toRaw(NAN, kAngleScale));
+    TEST_ASSERT_EQUAL_INT16(32767, toRaw(1e9f, kAngleScale));
+    TEST_ASSERT_EQUAL_INT16(-32768, toRaw(-1e9f, kAngleScale));
 }
+
+static void test_fixed_point_roundtrip_keeps_the_unit() {
+    // 0.1deg 単位。90.0deg → 900
+    TEST_ASSERT_EQUAL_INT16(900, toRaw(90.0f, kAngleScale));
+    TEST_ASSERT_EQUAL_FLOAT(90.0f, fromRaw(900, kAngleScale));
+
+    // duty は 1/10000 単位。0.3 → 3000
+    TEST_ASSERT_EQUAL_INT16(3000, toRaw(0.3f, kDutyScale));
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, fromRaw(3000, kDutyScale));
+    TEST_ASSERT_EQUAL_INT16(-10000, toRaw(-1.0f, kDutyScale));
+
+    // 四捨五入すること。切り捨てると 0.1deg 刻みの指令が 1 つ下へずれ続ける
+    TEST_ASSERT_EQUAL_INT16(56, toRaw(5.55f, kAngleScale));
+    TEST_ASSERT_EQUAL_INT16(-56, toRaw(-5.55f, kAngleScale));
+}
+
 
 // --------------------------------------------------------------------------
 // §3.1 SET_TARGET
 // --------------------------------------------------------------------------
 
 static void test_decode_set_target() {
-    uint8_t data[8] = {0};
-    data[0] = static_cast<uint8_t>(ControlType::Duty);
-    packFloatLe(&data[2], 0.3f);
-    const SetTargetCommand cmd = decodeSetTarget(data, 8);
+    // Byte0=制御タイプ / Byte1-2=目標値(int16)。途中に予約バイトを挟まない
+    const uint8_t data[3] = {static_cast<uint8_t>(ControlType::Duty), 0xB8, 0x0B};  // 3000
+    const SetTargetCommand cmd = decodeSetTarget(data, 3);
     TEST_ASSERT_TRUE(cmd.valid);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Duty),
                             static_cast<uint8_t>(cmd.type));
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, cmd.value);
+    TEST_ASSERT_EQUAL_INT16(3000, cmd.raw);
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, fromRaw(cmd.raw, kDutyScale));
+}
+
+// 負の目標値がそのまま符号付きで届くこと。符号を落とすと duty が逆転する
+static void test_decode_set_target_keeps_sign() {
+    const uint8_t data[3] = {static_cast<uint8_t>(ControlType::Duty), 0x48, 0xF4};  // -3000
+    const SetTargetCommand cmd = decodeSetTarget(data, 3);
+    TEST_ASSERT_TRUE(cmd.valid);
+    TEST_ASSERT_EQUAL_INT16(-3000, cmd.raw);
 }
 
 static void test_decode_set_target_rejects_unknown_type() {
-    uint8_t data[8] = {0};
+    uint8_t data[3] = {0};
     data[0] = 3;  // position/velocity/duty 以外
-    TEST_ASSERT_FALSE(decodeSetTarget(data, 8).valid);
+    TEST_ASSERT_FALSE(decodeSetTarget(data, 3).valid);
 }
 
 static void test_decode_set_target_rejects_short_frame() {
-    uint8_t data[8] = {0};
-    TEST_ASSERT_FALSE(decodeSetTarget(data, 5).valid);
+    uint8_t data[3] = {0};
+    TEST_ASSERT_FALSE(decodeSetTarget(data, 2).valid);
 }
 
-// 化けた float32 の NaN をそのまま目標値にすると、DC 側は PID の積分項が NaN に
-// 汚染されて以後**正常な目標に対しても**出力が NaN のままになる（clampDuty が 0 に
-// 落とすので「無言で死んだモータ」になり、診断ビットも到達フラグも立たない）。
-// サーボ側 ServoMotion::setTarget が NaN を捨てているのと同じ判断を復号層に置く。
-static void test_decode_set_target_rejects_nan() {
-    uint8_t data[8] = {0};
-    data[0] = static_cast<uint8_t>(ControlType::Position);
-    packFloatLe(&data[2], NAN);
-    TEST_ASSERT_FALSE(decodeSetTarget(data, 8).valid);
-}
 
 // --------------------------------------------------------------------------
 // §3.4 SET_PARAM
 // --------------------------------------------------------------------------
 
 static void test_decode_set_param() {
-    uint8_t data[8] = {0};
-    data[0] = static_cast<uint8_t>(ParamId::MaxDuty);
-    packFloatLe(&data[2], 0.5f);
-    const SetParamCommand cmd = decodeSetParam(data, 8);
+    const uint8_t data[3] = {static_cast<uint8_t>(ParamId::MaxDuty), 0x88, 0x13};  // 5000
+    const SetParamCommand cmd = decodeSetParam(data, 3);
     TEST_ASSERT_TRUE(cmd.valid);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ParamId::MaxDuty),
                             static_cast<uint8_t>(cmd.id));
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, cmd.value);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, fromRaw(cmd.raw, kDutyScale));
+}
+
+// パラメータ ID は穴を空けずに詰めてある（仕様書 §3.4）。
+// 途中に「予約」を挟むと、対応表を読むたびに使われていない ID を数えることになる。
+static void test_param_ids_are_packed() {
+    TEST_ASSERT_EQUAL_UINT8(0x00, static_cast<uint8_t>(ParamId::MaxDuty));
+    TEST_ASSERT_EQUAL_UINT8(0x01, static_cast<uint8_t>(ParamId::CommandTimeoutMs));
+    TEST_ASSERT_EQUAL_UINT8(0x02, static_cast<uint8_t>(ParamId::FeedbackIntervalMs));
+    TEST_ASSERT_EQUAL_UINT8(0x03, static_cast<uint8_t>(ParamId::ReachedTolerance));
+    TEST_ASSERT_EQUAL_UINT8(0x04, static_cast<uint8_t>(ParamId::SlewRate));
+    TEST_ASSERT_EQUAL_UINT8(0x05, static_cast<uint8_t>(ParamId::AngleMin));
+    TEST_ASSERT_EQUAL_UINT8(0x06, static_cast<uint8_t>(ParamId::AngleMax));
+    // 末尾の次は未知として弾かれること
+    uint8_t data[3] = {0x07, 0, 0};
+    TEST_ASSERT_FALSE(decodeSetParam(data, 3).valid);
 }
 
 // 未知のパラメータ ID は無視する（新ファームと旧基板の混在で止まらないため。仕様書 §3.4）
 static void test_decode_set_param_unknown_id_is_ignored() {
-    uint8_t data[8] = {0};
-    data[0] = 0x42;
-    packFloatLe(&data[2], 1.0f);
-    TEST_ASSERT_FALSE(decodeSetParam(data, 8).valid);
+    uint8_t data[3] = {0x42, 0, 0};
+    TEST_ASSERT_FALSE(decodeSetParam(data, 3).valid);
 }
 
-// NaN のゲインを受け付けると PID の出力が永久に NaN になる。SET_TARGET と同じく捨てる。
-static void test_decode_set_param_rejects_nan() {
-    uint8_t data[8] = {0};
-    data[0] = static_cast<uint8_t>(ParamId::Ki);
-    packFloatLe(&data[2], NAN);
-    TEST_ASSERT_FALSE(decodeSetParam(data, 8).valid);
-}
 
 // --------------------------------------------------------------------------
 // §3.5 E_STOP
@@ -208,15 +217,33 @@ static void test_decode_e_stop_unknown_byte0_is_none() {
 // §3.2 FEEDBACK
 // --------------------------------------------------------------------------
 
-static void test_encode_feedback_layout() {
+// **全基板が必ず持つ状態フラグを先頭に置く。** 逆順（フラグを末尾）にすると、
+// 位置を持たない基板も 8 バイト送ることになる。
+static void test_encode_feedback_flags_only() {
     uint8_t out[8];
-    encodeFeedback(out, 900 /* 90.0deg */, -1500, 2500, 0,
-                   status_flag::kReached | status_flag::kEStop);
-    TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[0] | (out[1] << 8)));
-    TEST_ASSERT_EQUAL_INT16(-1500, static_cast<int16_t>(out[2] | (out[3] << 8)));
-    TEST_ASSERT_EQUAL_INT16(2500, static_cast<int16_t>(out[4] | (out[5] << 8)));
-    TEST_ASSERT_EQUAL_UINT8(0, out[6]);  // DC モタドラは温度センサ非搭載（§8）
-    TEST_ASSERT_EQUAL_UINT8(0x09, out[7]);
+    memset(out, 0xFF, sizeof(out));
+    const uint8_t len = encodeFeedback(out, status_flag::kReached | status_flag::kEStop);
+    TEST_ASSERT_EQUAL_UINT8(1, len);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached | status_flag::kEStop, out[0]);
+}
+
+static void test_encode_feedback_with_position() {
+    uint8_t out[8];
+    memset(out, 0xFF, sizeof(out));
+    const uint8_t len = encodeFeedback(out, status_flag::kReached, 900 /* 90.0deg */);
+    TEST_ASSERT_EQUAL_UINT8(3, len);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached, out[0]);
+    TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[1] | (out[2] << 8)));
+}
+
+// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+static void test_encode_info() {
+    uint8_t out[8];
+    const uint8_t len = encodeInfo(out, 7, BoardKind::Servo, SlotKind::Sensor);
+    TEST_ASSERT_EQUAL_UINT8(3, len);
+    TEST_ASSERT_EQUAL_UINT8(7, out[0]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(BoardKind::Servo), out[1]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SlotKind::Sensor), out[2]);
 }
 
 // int16 をそのままキャストすると +4000deg が負値に化け、PC 側が逆方向へ位置制御しかねない。
@@ -224,19 +251,13 @@ static void test_encode_feedback_layout() {
 static void test_encode_feedback_saturates_position() {
     uint8_t out[8];
 
-    encodeFeedback(out, 40000 /* +4000.0deg */, 0, 0, 0, 0);
-    TEST_ASSERT_EQUAL_INT16(32767, static_cast<int16_t>(out[0] | (out[1] << 8)));
+    encodeFeedback(out, 0, 40000 /* +4000.0deg */);
+    TEST_ASSERT_EQUAL_INT16(32767, static_cast<int16_t>(out[1] | (out[2] << 8)));
 
-    encodeFeedback(out, -40000 /* -4000.0deg */, 0, 0, 0, 0);
-    TEST_ASSERT_EQUAL_INT16(-32768, static_cast<int16_t>(out[0] | (out[1] << 8)));
+    encodeFeedback(out, 0, -40000 /* -4000.0deg */);
+    TEST_ASSERT_EQUAL_INT16(-32768, static_cast<int16_t>(out[1] | (out[2] << 8)));
 }
 
-static void test_encode_feedback_saturates_velocity_and_current() {
-    uint8_t out[8];
-    encodeFeedback(out, 0, 100000, -100000, 0, 0);
-    TEST_ASSERT_EQUAL_INT16(32767, static_cast<int16_t>(out[2] | (out[3] << 8)));
-    TEST_ASSERT_EQUAL_INT16(-32768, static_cast<int16_t>(out[4] | (out[5] << 8)));
-}
 
 // --------------------------------------------------------------------------
 // §5.3 duty クランプ
@@ -253,11 +274,6 @@ static void test_clamp_duty() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, clampDuty(0.5f, -1.0f));
 }
 
-static void test_clamp_duty_rejects_nan() {
-    // NaN が PWM まで届くと duty 計算が不定になるため 0 に落とす
-    const float nan_value = 0.0f / (float)(0.0f == 0.0f ? 0.0 : 1.0);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, clampDuty(nan_value, 0.30f));
-}
 
 // --------------------------------------------------------------------------
 // §5.1 / §5.2 MotorSafety
@@ -373,12 +389,15 @@ static void test_status_flags_omit_watchdog_before_first_feed() {
     TEST_ASSERT_TRUE(safety.isExpired(0));
     TEST_ASSERT_FALSE(safety.isOutputAllowed(0));
 
-    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(0));
-    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(100000));
+    // ウォッチドッグは立てないが、「起動後まだ指令を受けていない」は立てる。
+    // これが無いと基板の再起動が PC から見えない（仕様書 §3.2）
+    TEST_ASSERT_EQUAL_UINT8(0, safety.statusFlags(0) & status_flag::kWatchdog);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kNeverCommanded, safety.statusFlags(100000));
 
-    // 起動直後でも緊急停止ラッチ（bit3）はそのまま報告する
+    // 起動直後でも緊急停止ラッチはそのまま報告する
     safety.stop();
-    TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, safety.statusFlags(100000));
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop | status_flag::kNeverCommanded,
+                            safety.statusFlags(100000));
 }
 
 // 一度でも指令を受けた後の満了は本物の通信途絶なので bit4 を立てる
@@ -501,44 +520,32 @@ static void test_protocol_defaults_match_spec() {
 // できる。仕様書 §5.1 が「このフラグの ID は無く CAN からは変更できない」と書いて
 // 最後の砦を守っているのに、猶予そのものを 49.7 日へ伸ばせば同じ結果になる。
 static void test_command_timeout_param_has_upper_bound() {
-    TEST_ASSERT_EQUAL_UINT32(kMaxCommandTimeoutMs, sanitizeCommandTimeoutMs(1e9f, 500));
-    // (uint32_t)(-1.0f) を狙った値。処理系によって 4294967295 か 0 に化ける
-    TEST_ASSERT_EQUAL_UINT32(kMaxCommandTimeoutMs, sanitizeCommandTimeoutMs(4.2949673e9f, 500));
+    TEST_ASSERT_EQUAL_UINT16(kMaxCommandTimeoutMs, clampCommandTimeoutMs(32767));
+    TEST_ASSERT_EQUAL_UINT16(kMaxCommandTimeoutMs, clampCommandTimeoutMs(3000));
 }
 
 // 負値・0 は「起動直後から永久に出力禁止」に倒れる。止まる方向でも無言で壊れるので弾く。
 // 下限は PC 側の再送周期（既定 500ms に対して 50ms）で、それより短い猶予は
 // 契約どおり再送している健全な機体を止めてしまう。
 static void test_command_timeout_param_has_lower_bound() {
-    TEST_ASSERT_EQUAL_UINT32(kMinCommandTimeoutMs, sanitizeCommandTimeoutMs(-1.0f, 500));
-    TEST_ASSERT_EQUAL_UINT32(kMinCommandTimeoutMs, sanitizeCommandTimeoutMs(0.0f, 500));
-    TEST_ASSERT_EQUAL_UINT32(kMinCommandTimeoutMs, sanitizeCommandTimeoutMs(10.0f, 500));
+    TEST_ASSERT_EQUAL_UINT16(kMinCommandTimeoutMs, clampCommandTimeoutMs(-1));
+    TEST_ASSERT_EQUAL_UINT16(kMinCommandTimeoutMs, clampCommandTimeoutMs(0));
+    TEST_ASSERT_EQUAL_UINT16(kMinCommandTimeoutMs, clampCommandTimeoutMs(10));
 }
 
 static void test_command_timeout_param_keeps_values_in_range() {
-    TEST_ASSERT_EQUAL_UINT32(250u, sanitizeCommandTimeoutMs(250.0f, 500));
-    TEST_ASSERT_EQUAL_UINT32(kDefaultCommandTimeoutMs,
-                             sanitizeCommandTimeoutMs(500.0f, kDefaultCommandTimeoutMs));
+    TEST_ASSERT_EQUAL_UINT16(250, clampCommandTimeoutMs(250));
+    TEST_ASSERT_EQUAL_UINT16(kDefaultCommandTimeoutMs, clampCommandTimeoutMs(500));
 }
 
-// 化けた float32 を uint32_t へキャストするのは未定義動作。指令ごと捨てて現在値を保つ。
-static void test_timing_params_reject_nan() {
-    TEST_ASSERT_EQUAL_UINT32(500u, sanitizeCommandTimeoutMs(NAN, 500));
-    TEST_ASSERT_EQUAL_UINT32(10u, sanitizeFeedbackIntervalMs(NAN, 10));
-}
-
-// feedback_interval_ms（0x05）。0 は送信が詰まってバスを埋め、極端に大きい値は
-// PC 側から「基板が死んだ」ようにしか見えない。
+// feedback_interval_ms。0 はバスを埋め、極端に大きい値は PC からは
+// 「基板が死んだ」ようにしか見えない。
 static void test_feedback_interval_param_is_bounded() {
-    TEST_ASSERT_EQUAL_UINT32(kMinFeedbackIntervalMs, sanitizeFeedbackIntervalMs(0.0f, 10));
-    TEST_ASSERT_EQUAL_UINT32(kMinFeedbackIntervalMs, sanitizeFeedbackIntervalMs(-5.0f, 10));
-    TEST_ASSERT_EQUAL_UINT32(kMaxFeedbackIntervalMs, sanitizeFeedbackIntervalMs(1e9f, 10));
-    TEST_ASSERT_EQUAL_UINT32(20u, sanitizeFeedbackIntervalMs(20.0f, 10));
+    TEST_ASSERT_EQUAL_UINT16(kMinFeedbackIntervalMs, clampFeedbackIntervalMs(0));
+    TEST_ASSERT_EQUAL_UINT16(kMinFeedbackIntervalMs, clampFeedbackIntervalMs(-5));
+    TEST_ASSERT_EQUAL_UINT16(kMaxFeedbackIntervalMs, clampFeedbackIntervalMs(32767));
+    TEST_ASSERT_EQUAL_UINT16(20, clampFeedbackIntervalMs(20));
 }
-
-// --------------------------------------------------------------------------
-// §4 / §5.3 duty の分解（PWM の大きさ + 方向ピンの向き）
-// --------------------------------------------------------------------------
 
 static void test_split_duty_separates_magnitude_and_direction() {
     const DutyOutput forward = splitDuty(0.4f, 1.0f);
@@ -564,9 +571,6 @@ static void test_split_duty_applies_max_duty() {
     TEST_ASSERT_EQUAL_FLOAT(0.3f, clamped.magnitude);
     TEST_ASSERT_TRUE(clamped.reverse);
 
-    const DutyOutput nan_value = splitDuty(NAN, 0.3f);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, nan_value.magnitude);
-    TEST_ASSERT_FALSE(nan_value.reverse);
 }
 
 // --------------------------------------------------------------------------
@@ -602,7 +606,7 @@ static void test_physical_stop_survives_clear_frame_while_held() {
     safety.feed(0);
     safety.applyPhysicalStop(true);
 
-    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
     TEST_ASSERT_EQUAL_INT(static_cast<int>(EStopAction::Clear),
                           static_cast<int>(safety.handleEStopFrame(clear, 8)));
     TEST_ASSERT_FALSE(safety.isLatched());
@@ -619,7 +623,7 @@ static void test_physical_stop_clears_after_release() {
     safety.applyPhysicalStop(true);
     safety.applyPhysicalStop(false);
 
-    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
     safety.handleEStopFrame(clear, 8);
     safety.applyPhysicalStop(false);
     TEST_ASSERT_TRUE(safety.isOutputAllowed(0));
@@ -655,7 +659,7 @@ static void test_dc_channel_rejects_duty_while_latched() {
     TEST_ASSERT_FALSE(ch.setDuty(0.9f, 10));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(10));
 
-    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
     ch.handleEStopFrame(clear, 8);
     // 仕様書 §3.5: 解除直後は目標 0 から始まる
     TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(10));
@@ -690,20 +694,12 @@ static void test_dc_channel_physical_stop_blocks_until_cleared() {
     ch.applyPhysicalStop(false);
     TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(0));
 
-    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
     ch.handleEStopFrame(clear, 8);
     TEST_ASSERT_TRUE(ch.setDuty(0.4f, 0));
     TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
 }
 
-// シリアルデバッグの "nan" のように復号層を通らない経路もあるので、保持側でも弾く。
-static void test_dc_channel_ignores_nan_duty() {
-    DcChannel ch(500);
-    ch.feed(0);
-    ch.setDuty(0.4f, 0);
-    TEST_ASSERT_FALSE(ch.setDuty(NAN, 0));
-    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
-}
 
 // --------------------------------------------------------------------------
 // §3.2 状態フラグのビット割り当て
@@ -714,57 +710,55 @@ static void test_dc_channel_ignores_nan_duty() {
 // 既存のビットと重なると、センサの ON がそのまま緊急停止やウォッチドッグの
 // 報告として読まれる（＝押していないのに機体が止まる／止まったのに気付けない）。
 static void test_status_flag_bits_do_not_overlap() {
-    const uint8_t all[] = {status_flag::kReached,  status_flag::kOvercurrent,
-                           status_flag::kOverheat, status_flag::kEStop,
-                           status_flag::kWatchdog, status_flag::kDeviceIdUnconfigured,
-                           status_flag::kSensor};
+    const uint8_t all[] = {status_flag::kReached, status_flag::kEStop, status_flag::kWatchdog,
+                           status_flag::kDeviceIdUnconfigured, status_flag::kSensor};
     uint8_t seen = 0;
     for (uint8_t bit : all) {
         TEST_ASSERT_NOT_EQUAL_UINT8(0, bit);
         TEST_ASSERT_EQUAL_UINT8(0, seen & bit);
         seen = static_cast<uint8_t>(seen | bit);
     }
-    TEST_ASSERT_EQUAL_UINT8(1 << 6, status_flag::kSensor);
-    // bit7 は予約のまま空けてある
-    TEST_ASSERT_EQUAL_UINT8(0, seen & (1 << 7));
+    // **頭から詰まっていること。** 途中に空きがあると、項目が増えたときに
+    // 「空いているビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる
+    TEST_ASSERT_EQUAL_UINT8(0x1F, seen);
 }
 
 // センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは
 // 1 つで足りる。位置・速度・電流・温度は持たないので 0 のまま。
 static void test_sensor_flag_rides_in_its_own_feedback() {
     uint8_t out[8];
-    encodeFeedback(out, 0, 0, 0, 0, status_flag::kSensor);
-    for (uint8_t i = 0; i < 7; ++i) {
-        TEST_ASSERT_EQUAL_UINT8(0, out[i]);
-    }
-    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[7]);
+    const uint8_t len = encodeFeedback(out, status_flag::kSensor);
+    TEST_ASSERT_EQUAL_UINT8(1, len);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[0]);
 }
 
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_build_can_id);
+    RUN_TEST(test_e_stop_outranks_every_other_frame);
     RUN_TEST(test_parse_can_id_roundtrip);
     RUN_TEST(test_parse_can_id_reserved_is_invalid);
     RUN_TEST(test_parse_can_id_rejects_out_of_range);
-    RUN_TEST(test_unpack_float_from_known_bytes);
+    RUN_TEST(test_to_raw_saturates_nan_and_out_of_range);
+    RUN_TEST(test_fixed_point_roundtrip_keeps_the_unit);
     RUN_TEST(test_decode_set_target);
+    RUN_TEST(test_decode_set_target_keeps_sign);
     RUN_TEST(test_decode_set_target_rejects_unknown_type);
     RUN_TEST(test_decode_set_target_rejects_short_frame);
-    RUN_TEST(test_decode_set_target_rejects_nan);
     RUN_TEST(test_decode_set_param);
+    RUN_TEST(test_param_ids_are_packed);
     RUN_TEST(test_decode_set_param_unknown_id_is_ignored);
-    RUN_TEST(test_decode_set_param_rejects_nan);
     RUN_TEST(test_decode_e_stop_stop);
     RUN_TEST(test_decode_e_stop_clear_requires_magic);
     RUN_TEST(test_decode_e_stop_wrong_magic_is_not_clear);
     RUN_TEST(test_decode_e_stop_unknown_byte0_is_none);
     RUN_TEST(test_status_flag_bits_do_not_overlap);
     RUN_TEST(test_sensor_flag_rides_in_its_own_feedback);
-    RUN_TEST(test_encode_feedback_layout);
+    RUN_TEST(test_encode_feedback_flags_only);
+    RUN_TEST(test_encode_feedback_with_position);
+    RUN_TEST(test_encode_info);
     RUN_TEST(test_encode_feedback_saturates_position);
-    RUN_TEST(test_encode_feedback_saturates_velocity_and_current);
     RUN_TEST(test_clamp_duty);
-    RUN_TEST(test_clamp_duty_rejects_nan);
     RUN_TEST(test_watchdog_expires_and_recovers);
     RUN_TEST(test_watchdog_expired_before_first_feed);
     RUN_TEST(test_watchdog_handles_millis_wraparound);
@@ -786,7 +780,6 @@ int main(int, char **) {
     RUN_TEST(test_command_timeout_param_has_upper_bound);
     RUN_TEST(test_command_timeout_param_has_lower_bound);
     RUN_TEST(test_command_timeout_param_keeps_values_in_range);
-    RUN_TEST(test_timing_params_reject_nan);
     RUN_TEST(test_feedback_interval_param_is_bounded);
     RUN_TEST(test_split_duty_separates_magnitude_and_direction);
     RUN_TEST(test_split_duty_zero_does_not_flip_direction);
@@ -800,6 +793,5 @@ int main(int, char **) {
     RUN_TEST(test_dc_channel_rejects_duty_while_latched);
     RUN_TEST(test_dc_channel_output_stops_on_watchdog_and_recovers);
     RUN_TEST(test_dc_channel_physical_stop_blocks_until_cleared);
-    RUN_TEST(test_dc_channel_ignores_nan_duty);
     return UNITY_END();
 }

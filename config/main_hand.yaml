@@ -80,23 +80,25 @@ motors:
   # !!! magnitude は config/main_hand_positions.yaml の対応する位置定数と同じ値にすること。
   #     ずれると「動作確認で動いた位置」と「運用で使う位置」が別物になり、確認が意味を失う。
 
+  # デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割 (仕様書 §2.2)。
+  # サーボ基板 (種別 1) の基板番号 0、スロット 0-4 が 0x40-0x44。
+  # ID を見ればどの基板のどのスロットかが直接読めるので、candump を眺めるときに
+  # 対応表を引かなくてよい。
   gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x01
+    can_id: 0x40               # サーボ基板 #0 SV0
     control_type: position
     motor_check:
       magnitude: 5.0           # positions.gripper.open と一致させること
 
   # DC モータ。位置の概念がないので duty 指令。
-  # can_id が 0x11 なのは、自作 DC モタドラが 1 枚 3ch でチャンネルごとに
-  # デバイス ID を持ち、DIP をブロックオフセット (刻み幅 3) として使うため。
-  # サーボ系 (0x01〜0x0F) と帯を分けてあるので、DIP をどう回しても衝突しない。
-  # ch0=0x11(conveyor) / ch1=0x12 / ch2=0x13 で、ch1・ch2 は現在未使用。
+  # DC 基板 (種別 2) の基板番号 0、スロット 0-2 が 0x80-0x82。
+  # ch0=0x80(conveyor) / ch1=0x81 / ch2=0x82 で、ch1・ch2 は現在未使用。
   conveyor:
     driver: generic
     bus: generic_bus
-    can_id: 0x11
+    can_id: 0x80               # DC 基板 #0 ch0
     control_type: duty
     motor_check:
       # この基板はエンコーダも電流センスも持たず、FEEDBACK の velocity は常に 0。
@@ -108,7 +110,7 @@ motors:
   wall_f:
     driver: generic
     bus: generic_bus
-    can_id: 0x03
+    can_id: 0x41               # サーボ基板 #0 SV1
     control_type: position
     motor_check:
       magnitude: 6.0           # positions.wall_f.open と一致させること
@@ -116,23 +118,20 @@ motors:
   wall_r:
     driver: generic
     bus: generic_bus
-    can_id: 0x04
+    can_id: 0x42               # サーボ基板 #0 SV2
     control_type: position
     motor_check:
       magnitude: 6.0           # positions.wall_r.open と一致させること
 
-  # --- センサ入力 (自作サーボ基板のスロット SV4) ---
-  # 原点合わせ用のタッチセンサ。**アクチュエータではないがモータとして登録する。**
-  # 自作サーボ基板は 1 スロット = 1 CAN デバイスで、センサも自分のデバイス ID で
-  # FEEDBACK を送る (仕様書 §5.2 / §7.1)。ここに登録しないと CANManager の受信ループが
-  # そのフレームを誰にも配らず、接触が PC まで届かない。
-  #
-  # 目標値を一度も持たないので GenericTargetRefresher は SET_TARGET を送らない。
-  # 接触状態は GenericDriver.sensor_active で読む。途絶は STALE として検出される
-  # (センサが死んだまま原点合わせを続けないために必要)。
+# --- センサ入力 (自作サーボ基板のスロット SV4) ---
+# **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
+# 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
+# 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。
+#
+# motors ではなくこちらに書くことで、動作確認・目標値再送・UI のモータ一覧に
+# 「常に 0 のモータ」が並ばない。途絶は STALE として監視される
+# (センサが死んだまま原点合わせを始めると「いつまでも当たらない」形でしか分からない)。
+sensors:
   origin_sensor:
-    driver: generic
     bus: generic_bus
-    can_id: 0x02
-    motor_check:
-      magnitude: 0             # 駆動する対象ではないので動作確認から除外する
+    can_id: 0x44               # サーボ基板 #0 SV4
