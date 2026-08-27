@@ -9,7 +9,7 @@ from lib.drivers.base import ControlMode
 from lib.drivers.generic import CommandType, GenericDriver
 from tests.feedback_frames import feed_generic
 
-#: FEEDBACK Byte7 の予約ビット (仕様書 §3.2)。名前が付いていない = 誰も報告しない
+#: FEEDBACK Byte4 の予約ビット (仕様書 §3.2)。名前が付いていない = 誰も報告しない
 _RESERVED_BITS = 0xE0
 
 
@@ -72,6 +72,7 @@ class TestEncodeTarget:
         assert msg.data[1] == 0x00
         value = struct.unpack_from("<f", msg.data, 2)[0]
         assert value == pytest.approx(90.0)
+        # SET_TARGET の予約は Byte6-7 (FEEDBACK とはバイト構成が違う。仕様書 §3.1)
         assert msg.data[6] == 0x00
         assert msg.data[7] == 0x00
 
@@ -100,7 +101,7 @@ class TestDecodeFeedback:
         struct.pack_into("<h", data, 2, 300)  # 300 rpm
         struct.pack_into("<h", data, 4, 1500)  # 1500 mA
         data[6] = 45  # 45℃
-        data[7] = 0x00
+        data[4] = 0x00
 
         msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
         state = self.drv.decode_feedback(msg)
@@ -120,13 +121,13 @@ class TestDecodeFeedback:
         struct.pack_into("<h", data, 2, 0)
         struct.pack_into("<h", data, 4, 0)
         data[6] = 80
-        data[7] = 0b00000001  # reached=True
+        data[4] = 0b00000001  # reached=True
 
         msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
         state = self.drv.decode_feedback(msg)
         assert state.reached is True
 
-        data[7] = 0b00000101  # reached=True, overheat=True
+        data[4] = 0b00000011  # reached=True, e_stop=True
         msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
         state = self.drv.decode_feedback(msg)
         assert state.reached is True
@@ -191,7 +192,7 @@ class TestHealth:
 
 
 class TestSensorInput:
-    """センサ入力 (FEEDBACK Byte7, 仕様書 §5.2)。原点合わせ用。
+    """センサ入力 (FEEDBACK Byte4, 仕様書 §5.2)。原点合わせ用。
 
     センサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
     ドライバ 1 つがセンサ 1 個に対応する。
@@ -233,7 +234,7 @@ class TestSensorInput:
         assert self.drv.check_safety_error() is None
 
     def test_does_not_disturb_other_flags(self):
-        # 同じ Byte7 に載るので、ビットを取り違えると緊急停止やウォッチドッグと混ざる
+        # 同じ Byte4 に載るので、ビットを取り違えると緊急停止やウォッチドッグと混ざる
         self._feed(e_stop=True, watchdog=True, sensor=True)
         assert self.drv.sensor_active is True
         assert self.drv.e_stop_active is True
@@ -427,7 +428,7 @@ class TestActivationSteps:
 
 
 class TestSafetyStatusFlags:
-    """FEEDBACK Byte7 の緊急停止 / ウォッチドッグ / デバイス ID 未設定 (仕様書 §3.2)。"""
+    """FEEDBACK Byte4 の緊急停止 / ウォッチドッグ / デバイス ID 未設定 (仕様書 §3.2)。"""
 
     def setup_method(self):
         self.drv = GenericDriver("test_motor", 0x01)

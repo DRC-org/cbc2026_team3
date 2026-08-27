@@ -158,12 +158,14 @@ EStopAction decodeEStop(const uint8_t *data, uint8_t length) {
 void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, uint8_t flags) {
     packInt16Le(&out[0], saturateToInt16(position_0p1deg));
     packInt16Le(&out[2], saturateToInt16(rpm));
-    // Byte4-6 は予約（電流・温度を持つ基板が現れたときのための場所）。
+    out[4] = flags;
+    // Byte5-7 は予約（センサや電流を持つ基板が現れたときのための場所）。
+    // **末尾に寄せてある。** 途中に空きを挟むと、項目が増えたときに
+    // 「空いているバイトがあるのに末尾へ足す」ことになり、対応表が読みにくくなる。
     // 仕様書 §3 のとおり送信側は 0 で埋める。
-    out[4] = 0;
     out[5] = 0;
     out[6] = 0;
-    out[7] = flags;
+    out[7] = 0;
 }
 
 uint32_t sanitizeCommandTimeoutMs(float value, uint32_t fallbackMs) {

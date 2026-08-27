@@ -215,12 +215,12 @@ static void test_encode_feedback_layout() {
                    status_flag::kReached | status_flag::kEStop);
     TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[0] | (out[1] << 8)));
     TEST_ASSERT_EQUAL_INT16(-1500, static_cast<int16_t>(out[2] | (out[3] << 8)));
-    // Byte4-6 は予約。**送信側が 0 で埋めること**（仕様書 §3）。埋め忘れると
-    // 電流・温度を持つ基板が現れたとき、古いファームのゴミが値として読まれる
-    TEST_ASSERT_EQUAL_UINT8(0, out[4]);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached | status_flag::kEStop, out[4]);
+    // Byte5-7 は予約。**送信側が 0 で埋めること**（仕様書 §3）。埋め忘れると
+    // センサや電流を持つ基板が現れたとき、古いファームのゴミが値として読まれる
     TEST_ASSERT_EQUAL_UINT8(0, out[5]);
     TEST_ASSERT_EQUAL_UINT8(0, out[6]);
-    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached | status_flag::kEStop, out[7]);
+    TEST_ASSERT_EQUAL_UINT8(0, out[7]);
 }
 
 // int16 をそのままキャストすると +4000deg が負値に化け、PC 側が逆方向へ位置制御しかねない。
@@ -738,10 +738,10 @@ static void test_status_flag_bits_do_not_overlap() {
 static void test_sensor_flag_rides_in_its_own_feedback() {
     uint8_t out[8];
     encodeFeedback(out, 0, 0, status_flag::kSensor);
-    for (uint8_t i = 0; i < 7; ++i) {
+    for (uint8_t i = 0; i < 4; ++i) {
         TEST_ASSERT_EQUAL_UINT8(0, out[i]);
     }
-    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[7]);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[4]);
 }
 
 int main(int, char **) {

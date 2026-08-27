@@ -98,7 +98,7 @@ def generic_feedback(
     ``flags`` は「予約ビットに値が載っていても影響しないこと」のように
     *ビット位置そのもの* が検証対象のときだけ使う。
 
-    ``current_ma`` / ``temp`` は Byte4-6 の予約領域に載る値。プロトコルからは
+    ``current_ma`` / ``temp`` は Byte5-7 の予約領域に載る値。プロトコルからは
     外れているので (仕様書 §3.2)、素通しにしていないことを見るテストで使う。
     """
     named = 0
@@ -115,9 +115,11 @@ def generic_feedback(
     data = bytearray(8)
     struct.pack_into("<h", data, 0, round(position * 10))
     struct.pack_into("<h", data, 2, int(velocity))
-    struct.pack_into("<h", data, 4, int(current_ma))
-    data[6] = temp
-    data[7] = named | flags
+    data[4] = named | flags
+    # Byte5-7 は予約。プロトコルからは外れているので (仕様書 §3.2)、
+    # 素通しにしていないことを見るテストのためにここへ載せる
+    struct.pack_into("<h", data, 5, int(current_ma))
+    data[7] = temp
     return can.Message(
         arbitration_id=GenericDriver.build_can_id(CommandType.FEEDBACK, driver.can_id),
         data=bytes(data),

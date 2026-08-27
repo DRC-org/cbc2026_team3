@@ -28,7 +28,7 @@ class CommandType(IntEnum):
     E_STOP = 7
 
 
-# FEEDBACK Byte7 の状態フラグ (仕様書 §3.2)。
+# FEEDBACK Byte4 の状態フラグ (仕様書 §3.2)。
 # **頭から詰める。** 空きを挟むと、報告できる項目が増えたときに「途中に空いている
 # ビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる
 _FLAG_REACHED = 0x01
@@ -73,7 +73,7 @@ class GenericDriver(MotorDriver):
                 f"(0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約): {can_id}"
             )
         super().__init__(name, can_id)
-        # フィードバック Byte7 の到達以外は MotorState に持たせず、ドライバ側で保持する
+        # フィードバック Byte4 の到達以外は MotorState に持たせず、ドライバ側で保持する
         # (MotorState は frozen dataclass で他ドライバ共通のため、汎用化を避けて専用属性に分離)
         self._e_stop_flag: bool = False
         self._watchdog_flag: bool = False
@@ -150,10 +150,10 @@ class GenericDriver(MotorDriver):
         d = msg.data
         raw_pos = struct.unpack_from("<h", d, 0)[0]
         raw_vel = struct.unpack_from("<h", d, 2)[0]
-        # Byte4-6 は予約 (仕様書 §3.2)。**読まない。** どちらの基板もセンサを持たないので
+        flags = d[4]
+        # Byte5-7 は予約 (仕様書 §3.2)。**読まない。** どちらの基板もセンサを持たないので
         # 値を持ち込むと「常に 0 の電流・温度」が UI とヘルス判定に流れ込む。
         # MotorState の current / temperature は既定の 0.0 のままにする
-        flags = d[7]
         return MotorState(
             position=raw_pos * 0.1,
             velocity=float(raw_vel),
@@ -163,7 +163,7 @@ class GenericDriver(MotorDriver):
     def update_state(self, msg: can.Message) -> MotorState:
         # decode_feedback は純粋関数のまま保ち、副作用 (フラグ保持) はここで処理する
         # 到達は MotorState.reached に反映、それ以外はドライバ属性に保持
-        flags = msg.data[7]
+        flags = msg.data[4]
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)

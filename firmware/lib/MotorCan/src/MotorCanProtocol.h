@@ -41,7 +41,7 @@ enum class ParamId : uint8_t {
     ReachedTolerance = 0x07,
 };
 
-// 仕様書 §3.2 FEEDBACK Byte7 の状態フラグ。
+// 仕様書 §3.2 FEEDBACK Byte4 の状態フラグ。
 namespace status_flag {
 // **頭から詰める。** 空きを挟むと、報告できる項目が増えたときに「途中に空いている
 // ビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる。
