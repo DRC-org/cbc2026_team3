@@ -5,6 +5,7 @@ import asyncio
 import importlib
 import logging
 import pathlib
+import signal
 from collections.abc import Awaitable, Callable, Mapping
 
 import can
@@ -505,6 +506,38 @@ class _PlaceholderSequence(Sequence):
     pass
 
 
+def _install_stop_signal_handler() -> None:
+    """systemd の停止 (SIGTERM) を SIGINT と同じ後始末経路へ合流させる。
+
+    既定の SIGTERM はプロセスを即死させるため、`main()` の `finally` に並べた
+    後始末 (位置制御ループ停止 → 目標値再送停止 → 同期監視停止 → CAN shutdown)
+    が 1 段も走らない。`systemctl stop` / `restart` のたびに規定の停止経路を
+    外れることになるので、main タスクの cancel へ変換して既存の経路に載せる。
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    if task is None:  # asyncio.run 配下では起こらない
+        return
+
+    stopping = False
+
+    def _request_stop() -> None:
+        # 2 通目以降はハンドラを残したまま無視する。後始末の最中に再 cancel が
+        # 入ると `_shutdown_step` が CancelledError を再送出して以降の手順が飛び、
+        # CAN を開いたままプロセスが落ちる (systemctl restart の連打で起きる)。
+        # remove_signal_handler では外してはならない —— SIGTERM の扱いが SIG_DFL に
+        # 戻り、2 通目が「無視」ではなく「即死」になって後始末ごと消える
+        nonlocal stopping
+        if stopping:
+            logger.warning("後始末の実行中です。停止シグナルを無視します")
+            return
+        stopping = True
+        logger.info("SIGTERM を受信しました。後始末を開始します")
+        task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, _request_stop)
+
+
 async def _shutdown_step(label: str, awaitable: Awaitable[None]) -> None:
     """終了処理の 1 手順を実行する。失敗しても残りの手順へ進む。
 
@@ -525,6 +558,9 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    # CAN を開くより前に登録する。config 読み込み中に停止されても経路を揃えるため
+    _install_stop_signal_handler()
 
     args = _parse_args()
 
@@ -684,6 +720,9 @@ async def main() -> None:
         for mgr in can_managers:
             await _shutdown_step("CAN シャットダウン", mgr.shutdown())
         await _shutdown_step("サーバー終了処理", server.cleanup())
+        # 完走したことを journal に残す。この行が無いまま終了していれば、
+        # 後始末の途中で SIGKILL された (TimeoutStopSec 超過) と判別できる
+        logger.info("後始末完了")
 
 
 if __name__ == "__main__":
