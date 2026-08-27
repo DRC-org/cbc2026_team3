@@ -21,7 +21,7 @@ from lib.health import (
 )
 
 if TYPE_CHECKING:
-    from lib.drivers.base import MotorState
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,6 @@ class CANManager:
         self._motors: dict[str, MotorDriver] = {}
         self._motor_bus: dict[str, str] = {}
         self._bus_motors: dict[str, list[MotorDriver]] = {}
-        self._on_state_update: Callable[[str, MotorState], None] | None = None
         self._tasks: list[asyncio.Task[None]] = []
 
         # ヘルスチェック (Phase 6) 用の受動監視タイムスタンプとカウンタ。
@@ -160,9 +159,6 @@ class CANManager:
         """
         return self._motor_bus.get(motor_name)
 
-    def set_on_state_update(self, callback: Callable[[str, MotorState], None]) -> None:
-        self._on_state_update = callback
-
     def last_feedback_at(self, motor_name: str) -> float | None:
         """最後にフィードバックを受信した時刻 (time.time 基準)。未受信なら None。
 
@@ -245,13 +241,11 @@ class CANManager:
                 continue
 
             try:
-                state = motor.update_state(msg)
+                motor.update_state(msg)
                 # フィードバック鮮度を MotorHealth の STALE 判定に使う。
                 # デコードに失敗したフレームでは更新しない (解釈できていない値を
                 # 「受信できている」と報告すると、途絶の検出そのものが効かなくなる)
                 self._last_rx_at[motor.name] = time.time()
-                if self._on_state_update is not None:
-                    self._on_state_update(motor.name, state)
             except asyncio.CancelledError:
                 raise
             except Exception:

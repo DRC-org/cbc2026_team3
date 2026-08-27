@@ -160,38 +160,6 @@ class TestCANManager:
         motor.matches_feedback.assert_called_once_with(feedback_msg)
         motor.update_state.assert_called_once_with(feedback_msg)
 
-    async def test_state_update_callback(self) -> None:
-        mgr = CANManager(run_blocking=_direct_runner())
-        bus = _make_mock_bus()
-        motor = _make_mock_motor("m1", 1)
-        motor.matches_feedback.return_value = True
-
-        feedback_state = MotorState(position=45.0)
-        motor.update_state.return_value = feedback_state
-
-        callback = MagicMock()
-        mgr.set_on_state_update(callback)
-
-        mgr.add_bus("can0", bus)
-        mgr.add_motor("can0", motor)
-
-        feedback_msg = can.Message(arbitration_id=0x201, data=bytes(8))
-        call_count = 0
-
-        def recv_side_effect(timeout: float) -> can.Message | None:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return feedback_msg
-            raise asyncio.CancelledError
-
-        bus.recv.side_effect = recv_side_effect
-
-        with pytest.raises(asyncio.CancelledError):
-            await mgr._receive_loop("can0")
-
-        callback.assert_called_once_with("m1", feedback_state)
-
     async def test_shutdown(self) -> None:
         mgr = CANManager()
         bus0 = _make_mock_bus()
@@ -439,32 +407,6 @@ class TestReceiveLoopRobustness:
         assert mgr.last_feedback_at("y_axis_r") is None
         assert mgr._rx_error_count["can0"] == 1
 
-    async def test_receive_loop_survives_state_update_callback_error(self) -> None:
-        """配信コールバックの失敗はそのフレームだけの失敗として閉じ込める。"""
-        mgr = CANManager(run_blocking=_direct_runner())
-        bus = _make_mock_bus()
-        motor = GenericDriver("gripper", 0x01)
-        mgr.add_bus("can0", bus)
-        mgr.add_motor("can0", motor)
-
-        delivered: list[str] = []
-
-        def callback(name: str, state: MotorState) -> None:
-            delivered.append(name)
-            raise RuntimeError("配信先で例外")
-
-        mgr.set_on_state_update(callback)
-        self._drain_recv(bus, [self._feedback_msg(0x01, 900), self._feedback_msg(0x01, 450)])
-
-        await self._run_loop(mgr)
-
-        # 1 通目で死なず、2 通目もコールバックまで到達している
-        assert delivered == ["gripper", "gripper"]
-        assert motor.state.position == pytest.approx(45.0)
-        # デコード自体は成功しているので、フィードバック鮮度は失わせない
-        assert mgr.last_feedback_at("gripper") is not None
-        assert mgr._rx_error_count["can0"] == 2
-
     async def test_receive_loop_isolates_failing_matcher_to_one_motor(self) -> None:
         """matches_feedback が投げるドライバが、同じバスの他モータ宛を巻き添えにしない。"""
         mgr = CANManager(run_blocking=_direct_runner())
@@ -488,14 +430,20 @@ class TestReceiveLoopRobustness:
         """CancelledError は shutdown の停止経路。握り潰すと止まらない受信ループが残る。"""
         mgr = CANManager(run_blocking=_direct_runner())
         bus = _make_mock_bus()
-        motor = GenericDriver("gripper", 0x01)
+
+        class CancellingDriver(GenericDriver):
+            """デコードの途中で停止要求が入った状況を作る。
+
+            受信ループはドライバ呼び出しを try で囲んで例外を握り潰すので、
+            そこで CancelledError まで飲み込むと shutdown が効かなくなる。
+            """
+
+            def update_state(self, msg: can.Message) -> MotorState:
+                raise asyncio.CancelledError
+
+        motor = CancellingDriver("gripper", 0x01)
         mgr.add_bus("can0", bus)
         mgr.add_motor("can0", motor)
-
-        def callback(name: str, state: MotorState) -> None:
-            raise asyncio.CancelledError
-
-        mgr.set_on_state_update(callback)
         self._drain_recv(bus, [self._feedback_msg(0x01, 900), self._feedback_msg(0x01, 450)])
 
         await self._run_loop(mgr)

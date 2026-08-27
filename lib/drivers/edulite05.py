@@ -34,9 +34,7 @@ class Edulite05Driver(MotorDriver):
     VEL_MIN, VEL_MAX = -50.0, 50.0
     TORQUE_MIN, TORQUE_MAX = -6.0, 6.0
     KP_MIN, KP_MAX = 0.0, 500.0
-    KD_MIN, KD_MAX = 0.0, 5.0
 
-    COMM_TYPE_MIT = 0x01
     COMM_TYPE_FEEDBACK = 0x02
     COMM_TYPE_ENABLE = 0x03
     COMM_TYPE_DISABLE = 0x04
@@ -131,24 +129,6 @@ class Edulite05Driver(MotorDriver):
             data=data,
             is_extended_id=True,
         )
-
-    def encode_mit(
-        self,
-        p_des: float,
-        v_des: float,
-        kp: float,
-        kd: float,
-        torque: float,
-    ) -> can.Message:
-        torque_raw = self.float_to_uint16(torque, self.TORQUE_MIN, self.TORQUE_MAX)
-        data = struct.pack(
-            ">HHHH",
-            self.float_to_uint16(p_des, self.POS_MIN, self.POS_MAX),
-            self.float_to_uint16(v_des, self.VEL_MIN, self.VEL_MAX),
-            self.float_to_uint16(kp, self.KP_MIN, self.KP_MAX),
-            self.float_to_uint16(kd, self.KD_MIN, self.KD_MAX),
-        )
-        return self._message(self.COMM_TYPE_MIT, data, data_area2=torque_raw)
 
     def encode_write_param_float(self, param_id: int, value: float) -> can.Message:
         data = struct.pack("<Hxxf", param_id, float(value))

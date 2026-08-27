@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
+
 from lib.commands import (
     COMMANDS,
     CommandSpec,
@@ -18,7 +19,6 @@ from lib.commands import (
     e_stop_deny_reason,
     phase_deny_reason,
 )
-
 from lib.match_state import (
     PHASES_ANY,
     PHASES_DURING_MATCH,

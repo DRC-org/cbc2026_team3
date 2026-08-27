@@ -1,5 +1,11 @@
 // サーボ用自作モタドラの機体依存定数。
 //
+// 基板は **Arduino Nano**（ATmega328P / 8bit / 5V / 16MHz）。DC 用の UNO R4 Minima とは
+// MCU も CAN の持ち方も違うので、ピン配置を DC 用から類推してはならない。
+//   - CAN は MCP2515 を SPI で外付け（内蔵 CAN ペリフェラルは無い）
+//   - D11/D12/D13 をハードウェア SPI が占有する
+//   - **D13 は SCK。オンボード LED はステータス表示に使えない**（RGB LED がその役目）
+//
 // ここに集約してあるのは「基板を見ないと確定できない値」と「機構が決まるまで動かせない値」。
 // TODO(実機で確認) が付いた定数は仮置きであり、通電前に必ず基板・サーボのデータシート・
 // 実測と突き合わせること。可動範囲を誤ったまま通電するとサーボがメカストッパに当たったまま
@@ -12,116 +18,148 @@
 
 #include <stdint.h>
 
+#include "MotorCanProtocol.h"
 #include "ServoMotion.h"
-
-// ===========================================================================
-// CAN ペリフェラルと衝突するピン
-// ===========================================================================
-
-// UNO R4 Minima の CAN0 は D4(TX) / D5(RX) に固定されており、Arduino_CAN の CAN インスタンスが
-// variant の PIN_CAN0_TX / PIN_CAN0_RX を使う。ここの定数は配線確認用で、コードから直接は
-// 使わない（実際の値は pins_arduino.h が持つ）。
-//
-// **チーム提供のサンプルは SV0..SV3 を D4〜D7 に置いているが、この配線はそのまま使えない。**
-// D4/D5 が CAN ペリフェラルに固定されており、サーボ出力と正面衝突する。
-// サーボ側が先にピンを握れば CAN が上がらず PC から止められない基板になり、
-// CAN が先に握ればサーボが動かない。どちらにしても現場で原因が分かりにくい。
-constexpr uint8_t kPinCanTx = 4;
-constexpr uint8_t kPinCanRx = 5;
 
 // ===========================================================================
 // ピン配置
 // ===========================================================================
 
-// サーボ出力。UNO R4 で PWM が出せるのは D3 / D5 / D6 / D9 / D10 / D11 のみ。
-// そこから CAN の D4/D5 を除くと D3 / D6 / D9 / D10 / D11 が使える。
-constexpr uint8_t kPinServoCh0 = 9;   // TODO(実機で確認)
-constexpr uint8_t kPinServoCh1 = 10;  // TODO(実機で確認)
-constexpr uint8_t kPinServoCh2 = 11;  // TODO(実機で確認)
+// MCP2515（CAN コントローラ）。INT は受信バッファが埋まっている間 LOW になる。
+constexpr uint8_t kPinMcpInt = 3;
+constexpr uint8_t kPinMcpCs = 10;
+
+// ハードウェア SPI。コードからは直接使わないが、他用途へ割り当てると CAN が死ぬので
+// 衝突検査の対象に入れてある（src/main.cpp の static_assert）。
+constexpr uint8_t kPinSpiMosi = 11;
+constexpr uint8_t kPinSpiMiso = 12;
+constexpr uint8_t kPinSpiSck = 13;
+
+// シリアル RGB LED（1 個）。D13 が SPI の SCK に取られているため、
+// 状態表示はこれが唯一の手段になる。
+constexpr uint8_t kPinRgb = 9;
+constexpr uint8_t kRgbBrightness = 30;
 
 // DIP スイッチ 4bit。INPUT_PULLUP の負論理で、LOW = 1。
 // 添字がビット位置: {SW0=bit0, SW1=bit1, SW2=bit2, SW3=bit3}。
+// A0〜A3 は Nano では 14〜17。Arduino.h に依存しないよう数値で書いてある。
+constexpr uint8_t kPinDip[4] = {14, 15, 16, 17};
+constexpr uint8_t kDipBitCount = 4;
+
+// ===========================================================================
+// スロット表（仕様書 §7.1）
+// ===========================================================================
+
+// **この基板は 5 本の信号線（SV0〜SV4）を持ち、どれもサーボにもセンサにもなる。**
+// どのスロットを何に使うかは配線で決まるので、役割を表に持たせて 1 行で切り替えられる
+// ようにしてある。**サーボ・センサ・空きが何個ずつでも動く**（センサだけの基板も可）。
 //
-// DC 用は D8/D9/D1/D0 を使っているが、サーボ用は D9〜D11 をサーボ出力に取られるので
-// A0〜A3（14〜17）へ移してある。A0-A3 はデジタル入力として普通に使える。
-// D0/D1 を避けているのはハードウェア UART(Serial1) と兼用だから（DC 用 config.h の注記と同じ）。
-// TODO(実機で確認): 基板の DIP がどのピンに落ちているか。
-constexpr uint8_t kPinDip[4] = {14, 15, 16, 17};  // A0, A1, A2, A3
+// これが成立するのは **1 スロット = 1 CAN デバイス**にしてあるからで、センサも自分の
+// デバイス ID で FEEDBACK を送る。サーボのフレームに相乗りさせると、相乗り先の無い
+// 「センサだけの基板」が成立せず、載せられる個数も予約ビットの数で頭打ちになる。
+constexpr uint8_t kServoSlotCount = 5;
 
-// オンボード LED。Minima では CAN(D4/D5) と重ならない。
-// ピンを変更して CAN と衝突させた場合は main.cpp の static_assert がビルド時に弾く。
-constexpr uint8_t kPinLed = 13;
+enum class SlotRole : uint8_t {
+    Servo,        // サーボ出力。deviceId 宛の SET_TARGET で動く
+    TouchSensor,  // デジタル入力。自分のデバイス ID で FEEDBACK を送り bit6 で報告するだけ
+    Unused,       // 何も繋がない。pinMode すら触らない
+};
 
-// シリアル RGB LED による状態表示。外部ライブラリ（FastLED_NeoPixel 等）が必要なので既定は無効。
-// 有効にするには platformio.ini の lib_deps に追加すること。
-#define HAS_RGB_LED 0
-constexpr uint8_t kPinRgb = 3;  // TODO(実機で確認)
-
-// ===========================================================================
-// サーボ PWM
-// ===========================================================================
-
-// アナログサーボの標準的なフレーム周期 50Hz。
-// デジタルサーボなら 200〜333Hz まで上げられるが、対応していない個体に速い周期を
-// 与えると発熱・ジッタの原因になるので、既定は全個体で安全な 50Hz にしてある。
-// TODO(実機で確認): サーボのデータシートで許容周期を確認する。
-constexpr uint32_t kServoPwmPeriodUs = 20000;
-
-// TODO(実機で確認): 角度 → パルス幅の対応。270 度サーボの一般的な値を仮置きしてある。
-// **サンプルコードのように 180/270 を掛けて write() の 0-180 に押し込む変換はしない。**
-// 分解能が 2/3 に落ち、可動範囲の端が表現できなくなるため（ServoMotion.h 参照）。
-constexpr motorcan::ServoPulseSpec kServoPulse270{500, 2500, 270.0f};
-
-// ===========================================================================
-// チャンネル表（仕様書 §7.1）
-// ===========================================================================
-
-// 1 枚の基板が複数のサーボを駆動し、**チャンネルごとに独立したデバイス ID を持つ**。
-// PC からは別々のモータとして見える（config/main_hand.yaml の gripper / wall_f / wall_r が
-// それぞれ別の can_id を持つのはこのため）。
-constexpr uint8_t kServoChannelCount = 3;
-
-struct ServoChannelConfig {
-    uint8_t deviceId;              // DIP オフセットを足す前の基準デバイス ID
-    uint8_t pin;                   // サーボ信号線
+struct ServoSlotConfig {
+    SlotRole role;
+    // DIP オフセットを足す前の基準デバイス ID。
+    // **Servo 以外のスロットも 1 つ予約する。** 予約しないと、配線でセンサへ役割を
+    // 変えた瞬間にブロックの幅が縮み、DIP を上げた 2 枚目と ID が重なる。
+    uint8_t deviceId;
+    uint8_t pin;
     float initialAngleDeg;         // 起動時に持っていく角度（仕様書 §5.4）
     motorcan::ServoLimits limits;  // 可動範囲とスルーレート（SET_PARAM 0x10-0x12 で変更可）
     motorcan::ServoPulseSpec pulse;
-    const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
+    // TouchSensor のとき、LOW を「入力あり」とみなすか。
+    // 報告ビットは常に FEEDBACK Byte7 の bit6（自分のデバイス ID で送るので 1 つで足りる）。
+    bool sensorActiveLow;
+    const char *name;     // シリアルデバッグ表示用。CAN の挙動には影響しない
 };
 
-// 既定は config/main_hand.yaml の実構成に合わせてある。
-//
-//   ch | デバイス ID | モータ  | ピン
-//   ---+------------+---------+------
-//    0 | 0x01       | gripper | D9
-//    1 | 0x03       | wall_f  | D10
-//    2 | 0x04       | wall_r  | D11
-//
+// TODO(実機で確認): 角度 → パルス幅の対応。サンプルの attach(pin, 500, 2400) に合わせてある。
+// **サンプルのように 180/270 を掛けて write() の 0-180 に押し込む変換はしない。**
+// 分解能が 2/3 に落ち、可動範囲の端が表現できなくなるため（ServoMotion.h 参照）。
+// ファームは Servo::writeMicroseconds() でパルス幅を直接指令する。
+constexpr motorcan::ServoPulseSpec kServoPulse270{500, 2400, 270.0f};
+
 // TODO(実機で確認): angle_min / angle_max は機構が付いた状態で「当たらない範囲」を
 // 実測して入れること。現状は config/main_hand_positions.yaml が 0〜6deg の微小ストロークしか
 // 使わないのに合わせた安全側の仮値で、広げるのは機構確定後。**狭すぎる分にはクランプで
 // 止まるだけだが、広すぎるとメカストッパに当たったまま停動して焼損する。**
-constexpr ServoChannelConfig kServoChannels[kServoChannelCount] = {
-    // gripper: ワークを把持する。閉 0deg / 開 5deg（positions.gripper）。
-    // 把持側は機構の当たりが近いので可動範囲を狭めに取る。
-    {0x01, kPinServoCh0, 0.0f, {0.0f, 30.0f, 90.0f}, kServoPulse270, "gripper"},
-    // wall_f: 前側の壁。初期 0deg / 閉 3deg / 開 6deg（positions.wall_f）。
-    {0x03, kPinServoCh1, 0.0f, {0.0f, 30.0f, 90.0f}, kServoPulse270, "wall_f"},
-    // wall_r: 後側の壁。wall_f と同一仕様。
-    {0x04, kPinServoCh2, 0.0f, {0.0f, 30.0f, 90.0f}, kServoPulse270, "wall_r"},
+constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
+
+// 既定は config/main_hand.yaml / config/sub_hand.yaml の実構成に合わせてある。
+// **4ch あるので自作サーボはこの 1 枚で全部まかなえる。**
+//
+//   スロット | ピン | 役割        | デバイス ID | PC 側のモータ / 用途
+//   ---------+------+-------------+------------+---------------------------
+//   SV0      | D4   | Servo       | 0x01       | gripper       (メインハンド)
+//   SV1      | D5   | Servo       | 0x03       | wall_f        (メインハンド)
+//   SV2      | D6   | Servo       | 0x04       | wall_r        (メインハンド)
+//   SV3      | D7   | Servo       | 0x05       | sub_gripper   (サブハンド)
+//   SV4      | D8   | TouchSensor | 0x02       | origin_sensor (原点合わせ用)
+//
+// **Unused 以外のスロットはすべて CAN デバイスとして FEEDBACK を送る。**
+// センサも PC 側 yaml に 1 モータとして登録すること（登録しないと受信ループが
+// そのフレームを誰にも配らない）。目標値を持たないので SET_TARGET は飛ばず、
+// motor_check.magnitude: 0 で動作確認からは外れるが、途絶は STALE として検出される。
+//
+// 役割を変えるときは、その行の SlotRole と最後の引数（sensorActiveLow）だけを
+// 書き換える。**デバイス ID は動かさないこと** — スロットに固定しておくと、
+// 配線を差し替えても PC 側 yaml の can_id が無変更で済む。
+//
+// デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
+// ずれるとそのモータは指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
+constexpr ServoSlotConfig kServoSlots[kServoSlotCount] = {
+    {SlotRole::Servo, 0x01, 4, 0.0f, kProvisionalLimits, kServoPulse270, false, "gripper"},
+    {SlotRole::Servo, 0x03, 5, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_f"},
+    {SlotRole::Servo, 0x04, 6, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_r"},
+    {SlotRole::Servo, 0x05, 7, 0.0f, kProvisionalLimits, kServoPulse270, false, "sub_gripper"},
+    // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
+    // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
+    {SlotRole::TouchSensor, 0x02, 8, 0.0f, kProvisionalLimits, kServoPulse270, true,
+     "origin_sensor"},
 };
+
+// ===========================================================================
+// デバイス ID の帯（仕様書 §2.2）
+// ===========================================================================
+
+// DIP は「スロット表全体に加えるブロックオフセット」で、刻み幅は**スロット数**。
+// 実際に使うサーボの台数ではない（役割を変えても幅が変わらないようにするため）。
+//
+//   DIP | デバイス ID
+//   ----+-------------
+//    0  | 0x01 - 0x05
+//    1  | 0x06 - 0x0A
+//    2  | 0x0B - 0x0F
+//    3+ | 帯を越えるので**未設定**（LED 赤点滅・駆動拒否）
+//
+// 帯は基板種別ごとに切ってある:
+//   0x01 - 0x10 : サーボ基板（5 スロット × 3 枚）  ← ここ
+//   0x11 - 0x1C : DC 基板  （3ch     × 4 枚）
+//
+// 帯を越えたブロックを未設定へ倒さないと、サーボ基板の DIP を上げただけで DC 基板の
+// 帯を踏み、同じ ID の基板が 2 枚バス上に並ぶ。
+constexpr uint8_t kDeviceIdStride = kServoSlotCount;
+constexpr uint8_t kDeviceIdBandEnd = 0x10;
 
 // ===========================================================================
 // 制御ループ
 // ===========================================================================
 
-// 補間の更新周期。サーボ自身が内部でパルス幅へ追従するので、DC 用の 1kHz ほど速くなくてよい。
-// PWM 周期（50Hz = 20ms）より速く、FEEDBACK 周期（100Hz）と同等の 5ms にしてある。
+// 補間の更新周期。サーボ自身が内部でパルス幅へ追従するので、速くする意味は薄い。
+// Servo ライブラリのフレーム周期（20ms）より速く、FEEDBACK 周期（100Hz）と同等。
+// **ATmega328P は float がソフトウェア実装**なので、ここを詰めすぎると CAN 受信が痩せる。
 constexpr uint32_t kMotionIntervalMs = 5;
 
-// コマンドウォッチドッグ（仕様書 §5.1）。**宛先がデバイス ID ＝ チャンネルなので、
-// ウォッチドッグもチャンネルごとに独立して動く。** 1 チャンネルへの指令が途絶えても
+// コマンドウォッチドッグ（仕様書 §5.1）。**宛先がデバイス ID ＝ スロットなので、
+// ウォッチドッグもスロットごとに独立して動く。** 1 チャンネルへの指令が途絶えても
 // 他のチャンネルは動き続ける（片方の壁だけ通信が切れる、という状況が実在するため）。
 //
 // PC 側は最後に指令した角度を kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、
@@ -135,7 +173,7 @@ constexpr uint32_t kMotionIntervalMs = 5;
 //
 // この値は setup() が MotorSafety::setWatchdogEnabled() へ写す。判定を #if で
 // main.cpp 側に置くと、同じ分岐を両ファームが各自で持つことになり、片方に入れ忘れても
-// 誰も気付けない（実際そうなっていた）。有効/無効の判定は MotorSafety にだけある。
+// 誰も気付けない。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
 // command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
@@ -147,18 +185,22 @@ constexpr uint32_t kMotionIntervalMs = 5;
 // 緊急停止・ウォッチドッグ時の振る舞い（仕様書 §7.5）
 // ===========================================================================
 
-// true にすると緊急停止・ウォッチドッグ満了で PWM を止めてサーボを脱力させる。
+// true にすると緊急停止・ウォッチドッグ満了で PWM を止めて（detach して）サーボを脱力させる。
 //
 // **既定は false（現在角を保持）。** サーボは PWM を止めると back-drivable になり、
-// 壁が自重で倒れ、グリッパが把持中のワークを落とす。DC 用のコースト（脱力）と
-// 意図的に振る舞いを変えている点であり、変更するときは機構side の影響を必ず確認すること。
+// 壁が自重で倒れ、グリッパが把持中のワークを落とす。DC 用の「PWM 0%」と
+// 意図的に振る舞いを変えている点であり、変更するときは機構側の影響を必ず確認すること。
 constexpr bool kEStopDetach = false;
 
 // ===========================================================================
 // 表示
 // ===========================================================================
 
-// DIP オフセット適用後のデバイス ID が 0x00 になったチャンネルがあるときの速い点滅
+// D13 が SPI の SCK に取られているため、状態表示は RGB LED だけが担う。
+// 0 にすると状態を知る手段が丸ごと無くなる（現場で切り分けができない）。
+#define HAS_RGB_LED 1
+
+// デバイス ID が未設定のスロットがあるとき、および CAN が上がらなかったときの速い点滅
 // （仕様書 §2.2 / §7.1）。
 constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;
 
@@ -169,7 +211,10 @@ constexpr uint32_t kHeartbeatIntervalMs = 1000;
 // デバッグ用シリアル
 // ===========================================================================
 
-// USB CDC の Serial から「<ch> <角度>」で角度を直接指令できるようにする（0 で無効）。
-// 緊急停止ラッチ中はシリアルからも駆動できない（applyChannelOutput が一括で禁止する）。
+// USB シリアル（115200 baud）から「<スロット番号> <角度>」で角度を直接指令できる（0 で無効）。
+// DIP は A0〜A3 なので、DC 用と違って UART との兼用による制約は無い。
+// 緊急停止ラッチ中はシリアルからも駆動できない（ServoChannel が指令を拒否する）。
+//
+// **Flash 32KB / SRAM 2KB しかないので、容量が足りなくなったらここを 0 にする。**
 #define ENABLE_SERIAL_DEBUG 1
 constexpr uint32_t kSerialBaud = 115200;

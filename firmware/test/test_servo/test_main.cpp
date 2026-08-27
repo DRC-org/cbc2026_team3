@@ -6,12 +6,25 @@
 #include <unity.h>
 
 #include <math.h>
+#include <string.h>
 
 #include "MotorCanProtocol.h"
 #include "ServoChannel.h"
 #include "ServoMotion.h"
 
 using namespace motorcan;
+
+// PC が送ってくる SET_PARAM のバイト列をテストから組み立てるヘルパ。
+// **本番のファームは float を送らない**（FEEDBACK は int16 だけ）ので、
+// 書く側は MotorCan には置かずここに持つ。
+static void packFloatLe(uint8_t *dst, float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    dst[0] = static_cast<uint8_t>(bits & 0xFF);
+    dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    dst[2] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    dst[3] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+}
 
 void setUp() {}
 void tearDown() {}

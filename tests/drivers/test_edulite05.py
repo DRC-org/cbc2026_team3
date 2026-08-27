@@ -110,14 +110,6 @@ def test_encode_target_clamps_to_configured_limits(
     assert struct.unpack("<f", msg.data[4:])[0] == pytest.approx(expected)
 
 
-def test_mit_frame_clamps_command_and_uses_big_endian_words() -> None:
-    driver = Edulite05Driver("m1", can_id=5)
-    msg = driver.encode_mit(99.0, -99.0, 999.0, -1.0, 99.0)
-
-    assert msg.arbitration_id == driver.build_can_id(driver.COMM_TYPE_MIT, 65535, 5)
-    assert msg.data == struct.pack(">HHHH", 65535, 0, 65535, 0)
-
-
 def test_initialization_messages_apply_configuration_in_safe_order() -> None:
     driver = Edulite05Driver(
         "m1",

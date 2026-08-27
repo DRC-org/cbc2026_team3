@@ -181,21 +181,6 @@ class TestReset:
         assert seq.waiting_trigger is False
 
 
-class TestCallback:
-    async def test_on_step_change_callback(self):
-        seq = SampleSequence()
-        callback_args: list[dict] = []
-        seq.set_on_step_change(lambda progress: callback_args.append(progress))
-
-        async with _auto_trigger(seq):
-            await seq.run()
-
-        assert len(callback_args) == 3
-        assert callback_args[0]["current_step"] == "ステップ1"
-        assert callback_args[1]["current_step"] == "ステップ2"
-        assert callback_args[2]["current_step"] == "ステップ3"
-
-
 class TestLifecycle:
     """開始要求待ち → 実行 → 停止後の巻き戻し、という常駐ループの公開 API。
 

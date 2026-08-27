@@ -7,12 +7,23 @@
 #include <math.h>
 #include <string.h>
 
+#include "DcChannel.h"
 #include "MotorCanProtocol.h"
-#include "MotorControlTarget.h"
-#include "MotorPid.h"
 #include "MotorSafety.h"
 
 using namespace motorcan;
+
+// PC が送ってくる SET_TARGET / SET_PARAM のバイト列をテストから組み立てるヘルパ。
+// **本番のファームは float を送らない**（FEEDBACK は int16 だけ）ので、
+// 書く側は MotorCan には置かずここに持つ。
+static void packFloatLe(uint8_t *dst, float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    dst[0] = static_cast<uint8_t>(bits & 0xFF);
+    dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    dst[2] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    dst[3] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+}
 
 void setUp() {}
 void tearDown() {}
@@ -63,24 +74,28 @@ static void test_parse_can_id_rejects_out_of_range() {
 // §3 float32 リトルエンディアン
 // --------------------------------------------------------------------------
 
-static void test_float_le_known_bytes() {
-    // 0.3f = 0x3E99999A（IEEE754）。LE なので下位バイトから並ぶ。
-    uint8_t buf[4] = {0, 0, 0, 0};
-    packFloatLe(buf, 0.3f);
-    TEST_ASSERT_EQUAL_UINT8(0x9A, buf[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x99, buf[1]);
-    TEST_ASSERT_EQUAL_UINT8(0x99, buf[2]);
-    TEST_ASSERT_EQUAL_UINT8(0x3E, buf[3]);
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, unpackFloatLe(buf));
-}
+// PC（Python の struct）が送ってくるバイト列を、こちらが同じ値として読めること。
+// **自前の pack で書いて unpack で読み直す往復にしてはならない** —— 両方が同じように
+// 壊れていても通ってしまう。契約はバイト列そのものなので、リテラルで固定する。
+static void test_unpack_float_from_known_bytes() {
+    // 0.3f = 0x3E99999A（IEEE754）。LE なので下位バイトから並ぶ
+    const uint8_t p03[4] = {0x9A, 0x99, 0x99, 0x3E};
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, unpackFloatLe(p03));
 
-static void test_float_le_roundtrip() {
-    const float values[] = {0.0f, -0.0f, 1.0f, -1.0f, 0.30f, -0.30f, 90.0f, 3276.7f, -12345.5f};
-    for (float v : values) {
-        uint8_t buf[4];
-        packFloatLe(buf, v);
-        TEST_ASSERT_EQUAL_FLOAT(v, unpackFloatLe(buf));
-    }
+    const uint8_t zero[4] = {0x00, 0x00, 0x00, 0x00};
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, unpackFloatLe(zero));
+
+    // -1.0f = 0xBF800000
+    const uint8_t minus_one[4] = {0x00, 0x00, 0x80, 0xBF};
+    TEST_ASSERT_EQUAL_FLOAT(-1.0f, unpackFloatLe(minus_one));
+
+    // 90.0f = 0x42B40000（サーボの既定スルーレート）
+    const uint8_t ninety[4] = {0x00, 0x00, 0xB4, 0x42};
+    TEST_ASSERT_EQUAL_FLOAT(90.0f, unpackFloatLe(ninety));
+
+    // 3276.7f = 0x454CCB33（位置の飽和境界）
+    const uint8_t saturation[4] = {0x33, 0xCB, 0x4C, 0x45};
+    TEST_ASSERT_EQUAL_FLOAT(3276.7f, unpackFloatLe(saturation));
 }
 
 // --------------------------------------------------------------------------
@@ -121,20 +136,8 @@ static void test_decode_set_target_rejects_nan() {
 }
 
 // --------------------------------------------------------------------------
-// §3.3 SET_MODE / §3.4 SET_PARAM
+// §3.4 SET_PARAM
 // --------------------------------------------------------------------------
-
-static void test_decode_set_mode() {
-    uint8_t data[8] = {0};
-    data[0] = static_cast<uint8_t>(ControlType::Velocity);
-    const SetModeCommand cmd = decodeSetMode(data, 8);
-    TEST_ASSERT_TRUE(cmd.valid);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Velocity),
-                            static_cast<uint8_t>(cmd.type));
-
-    data[0] = 9;
-    TEST_ASSERT_FALSE(decodeSetMode(data, 8).valid);
-}
 
 static void test_decode_set_param() {
     uint8_t data[8] = {0};
@@ -395,11 +398,11 @@ static void test_status_flags_report_watchdog_after_first_feed() {
 // 同じ判定を共有できないと基板ごとに挙動がずれる。
 static void test_command_lost_separates_startup_from_dropout() {
     MotorSafety safety(500);
-    TEST_ASSERT_FALSE(safety.hasEverBeenFed());
+    // 起動直後は出力を許可しないが、途絶したわけではないので報告もしない
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(100000));
     TEST_ASSERT_FALSE(safety.isCommandLost(100000));
 
     safety.feed(1000);
-    TEST_ASSERT_TRUE(safety.hasEverBeenFed());
     TEST_ASSERT_FALSE(safety.isCommandLost(1400));
     TEST_ASSERT_TRUE(safety.isCommandLost(1500));
 }
@@ -410,9 +413,12 @@ static void test_command_lost_separates_startup_from_dropout() {
 
 // 試合では必ず有効。config.h の WATCHDOG_ENABLED を写し忘れた基板が
 // 「気付かないうちに無効」になっていないよう、既定は有効側に倒す。
+// フラグを直接覗かず振る舞いで見るのは、写し忘れが効くのは出力の可否だけだから。
 static void test_watchdog_is_enabled_by_default() {
     MotorSafety safety(500);
-    TEST_ASSERT_TRUE(safety.isWatchdogEnabled());
+    safety.feed(0);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(499));
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(500));
 }
 
 // 無効化した基板は途絶しても駆動を続け、bit4 も報告しない（仕様書 §5.1 / §8）。
@@ -531,132 +537,207 @@ static void test_feedback_interval_param_is_bounded() {
 }
 
 // --------------------------------------------------------------------------
-// §3.3 / §5.4 制御モードと目標値
+// §4 / §5.3 duty の分解（PWM の大きさ + 方向ピンの向き）
 // --------------------------------------------------------------------------
 
-// 仕様書 §5.4: 電源投入直後は duty モード・目標 0。
-static void test_control_target_starts_stopped_in_duty() {
-    ControlTarget control;
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Duty),
-                            static_cast<uint8_t>(control.mode()));
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+static void test_split_duty_separates_magnitude_and_direction() {
+    const DutyOutput forward = splitDuty(0.4f, 1.0f);
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, forward.magnitude);
+    TEST_ASSERT_FALSE(forward.reverse);
+
+    const DutyOutput backward = splitDuty(-0.4f, 1.0f);
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, backward.magnitude);
+    TEST_ASSERT_TRUE(backward.reverse);
 }
 
-// 仕様書 §3.3 の暴走防止の本体。位置目標 90.0[deg] がそのまま duty 90.0（= 9000%）として
-// 解釈される事故を防ぐため、モードが変わったら目標値を必ず 0 に落とす。
-static void test_switch_mode_resets_target_to_zero() {
-    ControlTarget control;
-    control.setValue(90.0f);
-
-    TEST_ASSERT_TRUE(control.switchMode(ControlType::Position));
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Position),
-                            static_cast<uint8_t>(control.mode()));
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
-
-    control.setValue(1500.0f);
-    TEST_ASSERT_TRUE(control.switchMode(ControlType::Velocity));
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
+// duty 0 を「負でない」ではなく「負」と扱うと、停止指令のたびに方向ピンが
+// 反転する。停止は毎ループ流れるので、機構に絶えず衝撃が入ることになる。
+static void test_split_duty_zero_does_not_flip_direction() {
+    const DutyOutput stopped = splitDuty(0.0f, 1.0f);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, stopped.magnitude);
+    TEST_ASSERT_FALSE(stopped.reverse);
 }
 
-// SET_TARGET は毎フレーム制御タイプを載せてくる（仕様書 §3.1）ので、同じモードでの
-// 呼び出しで目標値を 0 に落としてはならない。落とすと 20Hz の再送のたびに
-// 目標値が 0 と指令値の間で振動する。
-static void test_switch_to_same_mode_keeps_target() {
-    ControlTarget control;
-    control.switchMode(ControlType::Velocity);
-    control.setValue(1000.0f);
+// 仕様書 §5.3 の上限は分解の前に掛かる。掛け忘れると max_duty を越えた PWM が出る。
+static void test_split_duty_applies_max_duty() {
+    const DutyOutput clamped = splitDuty(-1.0f, 0.3f);
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, clamped.magnitude);
+    TEST_ASSERT_TRUE(clamped.reverse);
 
-    TEST_ASSERT_FALSE(control.switchMode(ControlType::Velocity));
-    TEST_ASSERT_EQUAL_FLOAT(1000.0f, control.value());
-}
-
-// 仕様書 §3.5: 緊急停止の解除直後は「動き出さない目標値」から始める。モードは変えない。
-// duty / velocity では 0 が停止。
-static void test_clear_to_hold_stops_duty_and_velocity() {
-    ControlTarget control;
-    control.setValue(0.3f);
-    control.clearToHold(123.0f);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Duty),
-                            static_cast<uint8_t>(control.mode()));
-
-    control.switchMode(ControlType::Velocity);
-    control.setValue(1500.0f);
-    control.clearToHold(123.0f);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, control.value());
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Velocity),
-                            static_cast<uint8_t>(control.mode()));
-}
-
-// position では 0 は「停止」ではなくエンコーダ原点への移動指令であり、
-// 0 に落とすと解除した瞬間に原点まで走り出す（＝§3.5 が防ごうとしている事故そのもの）。
-// サーボ側 ServoMotion::holdHere() と同じく、現在位置で凍結する。
-static void test_clear_to_hold_freezes_position_at_current() {
-    ControlTarget control;
-    control.switchMode(ControlType::Position);
-    control.setValue(45.0f);
-
-    control.clearToHold(123.0f);
-    TEST_ASSERT_EQUAL_FLOAT(123.0f, control.value());
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::Position),
-                            static_cast<uint8_t>(control.mode()));
-}
-
-// シリアルデバッグの "nan" のように復号層を通らない経路もあるので、目標値の側でも弾く。
-static void test_control_target_ignores_nan_value() {
-    ControlTarget control;
-    control.setValue(0.3f);
-    control.setValue(NAN);
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, control.value());
+    const DutyOutput nan_value = splitDuty(NAN, 0.3f);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, nan_value.magnitude);
+    TEST_ASSERT_FALSE(nan_value.reverse);
 }
 
 // --------------------------------------------------------------------------
-// §3.3 モード切替時の PID リセット
+// §5.2 物理緊急停止入力（DC 基板の REF）
 // --------------------------------------------------------------------------
 
-static void test_pid_proportional_only() {
-    MotorPid pid(0.5f, 0.0f, 0.0f, 1.0f);
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, pid.update(2.0f, 0.001f));
+static void test_physical_stop_latches() {
+    MotorSafety safety(500);
+    safety.feed(0);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(0));
+
+    safety.applyPhysicalStop(true);
+    TEST_ASSERT_TRUE(safety.isLatched());
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(0));
 }
 
-// 初回の微分キックが出ると、目標を与えた瞬間にフルパワーが飛ぶ
-static void test_pid_no_derivative_kick_on_first_update() {
-    MotorPid pid(0.0f, 0.0f, 1.0f, 1.0f);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, pid.update(10.0f, 0.001f));
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, pid.update(10.0f, 0.001f));  // 誤差が変わらなければ 0
+// レベル追従にすると、PC が §5.1 の契約どおり再送し続けている以上、
+// スイッチを離した瞬間に機体が動き出す。解除は操縦者の明示操作だけに限る。
+static void test_physical_stop_does_not_auto_release() {
+    MotorSafety safety(500);
+    safety.feed(0);
+    safety.applyPhysicalStop(true);
+
+    safety.applyPhysicalStop(false);
+    TEST_ASSERT_TRUE(safety.isLatched());
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(0));
 }
 
-// 仕様書 §3.3: モード切替では積分項をクリアする。
-// 残っていると新しいモードの目標 0 に対していきなり出力が乗る。
-static void test_pid_reset_clears_integral() {
-    MotorPid pid(0.0f, 1.0f, 0.0f, 1.0f);
-    pid.update(1.0f, 0.1f);
-    pid.update(1.0f, 0.1f);
-    TEST_ASSERT_TRUE(pid.update(1.0f, 0.1f) > 0.0f);
+// 押している間に解除フレームが届いても、次のループでここが再ラッチする。
+// 「押している間は絶対に動かない」が呼び出し順序に依らず成立すること。
+static void test_physical_stop_survives_clear_frame_while_held() {
+    MotorSafety safety(500);
+    safety.feed(0);
+    safety.applyPhysicalStop(true);
 
-    pid.reset();
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, pid.update(0.0f, 0.1f));
+    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(EStopAction::Clear),
+                          static_cast<int>(safety.handleEStopFrame(clear, 8)));
+    TEST_ASSERT_FALSE(safety.isLatched());
+
+    safety.applyPhysicalStop(true);
+    TEST_ASSERT_TRUE(safety.isLatched());
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(0));
 }
 
-// ワインドアップ制限は NaN を素通しする（integral_ > limit も < -limit も NaN では
-// false）。一度混入すると ki != 0 のとき積分項が永久に NaN のままになり、
-// 正常な目標を与えても出力が NaN → clampDuty で 0 になる。混入した時点で捨てて自己回復する。
-static void test_pid_recovers_from_nan_error() {
-    MotorPid pid(0.5f, 0.001f, 0.0f, 1.0f);
+// 離したあとに解除フレームが来て初めて動けるようになる（＝復帰経路がある）。
+static void test_physical_stop_clears_after_release() {
+    MotorSafety safety(500);
+    safety.feed(0);
+    safety.applyPhysicalStop(true);
+    safety.applyPhysicalStop(false);
 
-    pid.update(NAN, 0.001f);
-
-    const float output = pid.update(2.0f, 0.001f);
-    TEST_ASSERT_TRUE(output == output);
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, output);
+    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    safety.handleEStopFrame(clear, 8);
+    safety.applyPhysicalStop(false);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(0));
 }
 
-static void test_pid_integral_windup_is_limited() {
-    MotorPid pid(0.0f, 1.0f, 0.0f, 1.0f);
-    for (int i = 0; i < 1000; ++i) {
-        pid.update(10.0f, 0.01f);
+// --------------------------------------------------------------------------
+// §5.4 / §3.5 DcChannel（安全機構 + duty 目標の結線）
+// --------------------------------------------------------------------------
+
+// 仕様書 §5.4: 電源投入直後は目標 0・出力停止。SET_TARGET を 1 通も受けていない
+// 間は駆動しない。
+static void test_dc_channel_starts_stopped() {
+    DcChannel ch(500);
+    TEST_ASSERT_FALSE(ch.isOutputAllowed(0));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(0));
+}
+
+static void test_dc_channel_accepts_duty_after_first_command() {
+    DcChannel ch(500);
+    ch.feed(0);
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 0));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
+}
+
+// ラッチ中の再送を受け付けると、解除した瞬間にその duty で回り出す。
+// 入口で捨てることで、ラッチ中の指令が解除後に生き残る経路を無くす。
+static void test_dc_channel_rejects_duty_while_latched() {
+    DcChannel ch(500);
+    ch.feed(0);
+    ch.setDuty(0.4f, 0);
+    ch.stop();
+
+    TEST_ASSERT_FALSE(ch.setDuty(0.9f, 10));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(10));
+
+    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    ch.handleEStopFrame(clear, 8);
+    // 仕様書 §3.5: 解除直後は目標 0 から始まる
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(10));
+}
+
+// ウォッチドッグ満了は「フレームを伴わない出力禁止」なので、出力側で 0 に
+// 落ちなければ止まらない。復帰は次の feed だけで足りること（ラッチしない）。
+static void test_dc_channel_output_stops_on_watchdog_and_recovers() {
+    DcChannel ch(500);
+    ch.feed(0);
+    ch.setDuty(0.4f, 0);
+
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(600));
+    TEST_ASSERT_TRUE((ch.safetyStatusFlags(600) & status_flag::kWatchdog) != 0);
+
+    ch.feed(600);
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 600));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(600));
+}
+
+// REF を押している間は、PC が再送を続けても駆動しない。
+static void test_dc_channel_physical_stop_blocks_until_cleared() {
+    DcChannel ch(500);
+    ch.feed(0);
+    ch.setDuty(0.4f, 0);
+
+    ch.applyPhysicalStop(true);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(0));
+    TEST_ASSERT_TRUE((ch.safetyStatusFlags(0) & status_flag::kEStop) != 0);
+    TEST_ASSERT_FALSE(ch.setDuty(0.4f, 0));
+
+    ch.applyPhysicalStop(false);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(0));
+
+    uint8_t clear[8] = {0x01, kEStopClearMagic1, kEStopClearMagic2, 0, 0, 0, 0, 0};
+    ch.handleEStopFrame(clear, 8);
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 0));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
+}
+
+// シリアルデバッグの "nan" のように復号層を通らない経路もあるので、保持側でも弾く。
+static void test_dc_channel_ignores_nan_duty() {
+    DcChannel ch(500);
+    ch.feed(0);
+    ch.setDuty(0.4f, 0);
+    TEST_ASSERT_FALSE(ch.setDuty(NAN, 0));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
+}
+
+// --------------------------------------------------------------------------
+// §3.2 状態フラグのビット割り当て
+// --------------------------------------------------------------------------
+
+// センサ入力は予約ビットの bit6 に載せる。フレーム長も他のビットの位置も
+// 変えないので、対応していない PC 側・基板が混在しても壊れない。
+// 既存のビットと重なると、センサの ON がそのまま緊急停止やウォッチドッグの
+// 報告として読まれる（＝押していないのに機体が止まる／止まったのに気付けない）。
+static void test_status_flag_bits_do_not_overlap() {
+    const uint8_t all[] = {status_flag::kReached,  status_flag::kOvercurrent,
+                           status_flag::kOverheat, status_flag::kEStop,
+                           status_flag::kWatchdog, status_flag::kDeviceIdUnconfigured,
+                           status_flag::kSensor};
+    uint8_t seen = 0;
+    for (uint8_t bit : all) {
+        TEST_ASSERT_NOT_EQUAL_UINT8(0, bit);
+        TEST_ASSERT_EQUAL_UINT8(0, seen & bit);
+        seen = static_cast<uint8_t>(seen | bit);
     }
-    TEST_ASSERT_TRUE(pid.update(10.0f, 0.01f) <= 1.0f + 1e-4f);
+    TEST_ASSERT_EQUAL_UINT8(1 << 6, status_flag::kSensor);
+    // bit7 は予約のまま空けてある
+    TEST_ASSERT_EQUAL_UINT8(0, seen & (1 << 7));
+}
+
+// センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは
+// 1 つで足りる。位置・速度・電流・温度は持たないので 0 のまま。
+static void test_sensor_flag_rides_in_its_own_feedback() {
+    uint8_t out[8];
+    encodeFeedback(out, 0, 0, 0, 0, status_flag::kSensor);
+    for (uint8_t i = 0; i < 7; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(0, out[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[7]);
 }
 
 int main(int, char **) {
@@ -665,13 +746,11 @@ int main(int, char **) {
     RUN_TEST(test_parse_can_id_roundtrip);
     RUN_TEST(test_parse_can_id_reserved_is_invalid);
     RUN_TEST(test_parse_can_id_rejects_out_of_range);
-    RUN_TEST(test_float_le_known_bytes);
-    RUN_TEST(test_float_le_roundtrip);
+    RUN_TEST(test_unpack_float_from_known_bytes);
     RUN_TEST(test_decode_set_target);
     RUN_TEST(test_decode_set_target_rejects_unknown_type);
     RUN_TEST(test_decode_set_target_rejects_short_frame);
     RUN_TEST(test_decode_set_target_rejects_nan);
-    RUN_TEST(test_decode_set_mode);
     RUN_TEST(test_decode_set_param);
     RUN_TEST(test_decode_set_param_unknown_id_is_ignored);
     RUN_TEST(test_decode_set_param_rejects_nan);
@@ -679,6 +758,8 @@ int main(int, char **) {
     RUN_TEST(test_decode_e_stop_clear_requires_magic);
     RUN_TEST(test_decode_e_stop_wrong_magic_is_not_clear);
     RUN_TEST(test_decode_e_stop_unknown_byte0_is_none);
+    RUN_TEST(test_status_flag_bits_do_not_overlap);
+    RUN_TEST(test_sensor_flag_rides_in_its_own_feedback);
     RUN_TEST(test_encode_feedback_layout);
     RUN_TEST(test_encode_feedback_saturates_position);
     RUN_TEST(test_encode_feedback_saturates_velocity_and_current);
@@ -707,16 +788,18 @@ int main(int, char **) {
     RUN_TEST(test_command_timeout_param_keeps_values_in_range);
     RUN_TEST(test_timing_params_reject_nan);
     RUN_TEST(test_feedback_interval_param_is_bounded);
-    RUN_TEST(test_control_target_starts_stopped_in_duty);
-    RUN_TEST(test_switch_mode_resets_target_to_zero);
-    RUN_TEST(test_switch_to_same_mode_keeps_target);
-    RUN_TEST(test_clear_to_hold_stops_duty_and_velocity);
-    RUN_TEST(test_clear_to_hold_freezes_position_at_current);
-    RUN_TEST(test_control_target_ignores_nan_value);
-    RUN_TEST(test_pid_proportional_only);
-    RUN_TEST(test_pid_no_derivative_kick_on_first_update);
-    RUN_TEST(test_pid_reset_clears_integral);
-    RUN_TEST(test_pid_recovers_from_nan_error);
-    RUN_TEST(test_pid_integral_windup_is_limited);
+    RUN_TEST(test_split_duty_separates_magnitude_and_direction);
+    RUN_TEST(test_split_duty_zero_does_not_flip_direction);
+    RUN_TEST(test_split_duty_applies_max_duty);
+    RUN_TEST(test_physical_stop_latches);
+    RUN_TEST(test_physical_stop_does_not_auto_release);
+    RUN_TEST(test_physical_stop_survives_clear_frame_while_held);
+    RUN_TEST(test_physical_stop_clears_after_release);
+    RUN_TEST(test_dc_channel_starts_stopped);
+    RUN_TEST(test_dc_channel_accepts_duty_after_first_command);
+    RUN_TEST(test_dc_channel_rejects_duty_while_latched);
+    RUN_TEST(test_dc_channel_output_stops_on_watchdog_and_recovers);
+    RUN_TEST(test_dc_channel_physical_stop_blocks_until_cleared);
+    RUN_TEST(test_dc_channel_ignores_nan_duty);
     return UNITY_END();
 }

@@ -2,7 +2,11 @@
 //
 // ここに集約してあるのは「基板を見ないと確定できない値」と「チューニングで変わる値」。
 // TODO(実機で確認) が付いた定数は仮置きであり、通電前に必ず基板・データシートと
-// 突き合わせること。誤ったまま通電するとモータ・ドライバ IC を壊しうる。
+// 突き合わせること。
+//
+// **この基板はフィードバックを一切持たない。** エンコーダ・電流センス・温度センサの
+// いずれも非搭載で、制御は duty の開ループのみ（仕様書 §4 / §8）。位置・速度制御と
+// PID は実装ごと存在しない。
 //
 // パラメータの一部は SET_PARAM で実行時に変更できるが、RAM 上のみで電源断で
 // ここの既定値に戻る（仕様書 §3.4）。恒久的に変えたい値はこのファイルを直すこと。
@@ -15,146 +19,112 @@
 // ピン配置（チーム提供のサンプルコードの配線に準拠）
 // ===========================================================================
 
-// モータ出力: 符号-絶対値方式のハーフブリッジ 2 系統。
-// 正転で PWM_N に duty・PWM_L を 0、逆転でその逆、停止で両方 0（コースト）。
-constexpr uint8_t kPinPwmN = 11;
-constexpr uint8_t kPinPwmL = 10;
+// モータ出力: 1 チャンネルにつき PWM 1 本 + 方向 1 本。
+// UNO R4 で PWM が出せるのは D3 / D5 / D6 / D9 / D10 / D11 で、そこから CAN の
+// D4/D5 を除いた中から 3 本を PWM に充ててある。方向ピンは digitalWrite なので
+// PWM 対応である必要はない。
+constexpr uint8_t kPinPwm[3] = {11, 10, 9};
+constexpr uint8_t kPinDir[3] = {12, 3, 7};
 
-// ゲートドライバの出力禁止。緊急停止・ID 未設定・フォールト時にアサートする。
-constexpr uint8_t kPinDis = 7;
+// TODO(実機で確認): 方向ピンの論理。サンプルの `digitalWrite(DIR, duty >= 0 ? LOW : HIGH)`
+// に準拠して「LOW = 正転」と仮定している。逆だと全チャンネルが指令と反対に回る。
+constexpr bool kDirForwardIsLow = true;
 
-// エンコーダ。ENC_A / ENC_B は外部割込み対応ピンであること（RA4M1 の IRQ0/IRQ1）。
-constexpr uint8_t kPinEncA = 2;
-constexpr uint8_t kPinEncB = 3;
-constexpr uint8_t kPinEncX = 15;  // A1。Z 相（原点）。現状は未使用
-
-constexpr uint8_t kPinSwA = 16;  // A2。リミットスイッチ想定。現状は未使用
-constexpr uint8_t kPinSwB = 17;  // A3。リミットスイッチ想定。現状は未使用
-constexpr uint8_t kPinSens = 14;  // A0。電流センス
-constexpr uint8_t kPinInt = 12;   // ゲートドライバのフォールト出力想定。現状は未使用
+// 物理緊急停止スイッチの検知入力。**LOW = 押されている（停止中）。**
+// INPUT_PULLUP で読むので、断線したときも LOW 側＝停止側へ倒れる。
+//
+// この基板にはゲートドライバの出力禁止（DIS）が無く、PC から止める手段は
+// duty 0 だけしかない。REF はその一重の防壁に対する数少ない追加情報なので、
+// 押下は緊急停止ラッチへ落として FEEDBACK bit3 で PC へ知らせる（仕様書 §5.2）。
+constexpr uint8_t kPinRef = 2;
+constexpr bool kRefActiveLow = true;
 
 // CAN。UNO R4 Minima の CAN ペリフェラルは D4(TX) / D5(RX) に固定されており、
 // Arduino_CAN の CAN インスタンスが variant の PIN_CAN0_TX / PIN_CAN0_RX を使う。
 // ここの定数は配線確認用で、コードから直接は使わない。
 // これらのピンを他用途へ割り当てると PC から止められない基板になるため、
 // src/main.cpp の static_assert が衝突をビルド時に検出する。
-constexpr uint8_t kPinCanRx = PIN_CAN0_RX;
 constexpr uint8_t kPinCanTx = PIN_CAN0_TX;
-
-constexpr uint8_t kPinScl = 19;  // A5。現状は未使用
-constexpr uint8_t kPinSda = 18;  // A4。現状は未使用
+constexpr uint8_t kPinCanRx = PIN_CAN0_RX;
 
 constexpr uint8_t kPinLed = 13;  // オンボード LED
-constexpr uint8_t kPinRgb = 6;   // シリアル RGB LED（HAS_RGB_LED 時のみ）
+constexpr uint8_t kPinRgb = 6;   // シリアル RGB LED（1 個）
 
-// DIP スイッチ 4bit（デバイス ID）。INPUT_PULLUP の負論理で、LOW = 1。
-// 添字がビット位置: {SW0=bit0, SW1=bit1, SW2=bit2, SW3=bit3}。
+// DIP スイッチ **2bit**。INPUT_PULLUP の負論理で、LOW = 1。
+// 添字がビット位置: {SW0=bit0, SW1=bit1}。
 //
-// SW2/SW3 は D1/D0 = ハードウェア UART(Serial1) と同じピンなので、
-// デバッグ用シリアルには必ず USB CDC の Serial を使うこと。Serial1 を開くと
-// DIP が読めなくなり、デバイス ID が化けて別のアクチュエータが動く。
-constexpr uint8_t kPinDip[4] = {8, 9, 1, 0};
+// D0/D1 はハードウェア UART(Serial1) と同じピンなので、デバッグ用シリアルには
+// 必ず USB CDC の Serial を使うこと。Serial1 を開くと DIP が読めなくなり、
+// デバイス ID が化けて別のアクチュエータが動く。
+constexpr uint8_t kPinDip[2] = {1, 0};
+constexpr uint8_t kDipBitCount = 2;
+
+// ===========================================================================
+// チャンネル表（仕様書 §2.2）
+// ===========================================================================
+
+// 1 枚の基板が 3 つの DC モータを駆動し、**チャンネルごとに独立したデバイス ID を持つ**。
+// PC からは別々のモータとして見える（サーボ基板と同じ扱い）。
+constexpr uint8_t kDcChannelCount = 3;
+
+struct DcChannelConfig {
+    uint8_t deviceId;  // DIP オフセットを足す前の基準デバイス ID
+    uint8_t pwmPin;
+    uint8_t dirPin;
+    float maxDuty;     // 仕様書 §5.3 の duty 上限（SET_PARAM 0x03 で変更可）
+    const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
+};
+
+// DIP は「チャンネル表全体に加えるブロックオフセット」で、刻み幅はチャンネル数。
+// 刻み幅 1 で足すと隣の DIP 設定の基板とブロックが重なり、同じ ID の基板が 2 枚
+// バス上に並ぶ（1 通の SET_TARGET で 2 台が動き、片方は永久に STALE になる）。
+//
+//   DIP | ch0  | ch1  | ch2
+//   ----+------+------+------
+//    0  | 0x11 | 0x12 | 0x13
+//    1  | 0x14 | 0x15 | 0x16
+//    2  | 0x17 | 0x18 | 0x19
+//    3  | 0x1A | 0x1B | 0x1C
+//
+// デバイス ID の帯は基板種別ごとに切ってある（仕様書 §2.2）。
+//
+//   0x01 - 0x10 : サーボ基板（5 スロット × 3 枚）
+//   0x11 - 0x1C : DC 基板  （3ch     × 4 枚）  ← ここ
+//
+// 帯を越えたブロックは未設定へ倒す。倒さずに割り当てると、DIP を上げただけで
+// 隣の帯を踏み、同じ ID の基板が 2 枚バス上に並ぶ。未設定にしておけば LED が
+// 赤く速く点滅し、DIP の設定ミスがその場で目に見える。
+constexpr uint8_t kDeviceIdStride = kDcChannelCount;
+constexpr uint8_t kDeviceIdBandEnd = 0x1C;
+
+// TODO(実機で確認): max_duty はモータとギヤ比が決まってから詰めること。
+// サンプルは 50% を上限にしている。ここは安全側に 30% から始める。
+constexpr float kDefaultMaxDuty = 0.30f;
+
+// 既定は config/main_hand.yaml の実構成に合わせてある。ch1 / ch2 は現在未使用で、
+// PC 側の yaml にモータとして登録されていない（指令が来ないので回らない）。
+constexpr DcChannelConfig kDcChannels[kDcChannelCount] = {
+    {0x11, kPinPwm[0], kPinDir[0], kDefaultMaxDuty, "conveyor"},
+    {0x12, kPinPwm[1], kPinDir[1], kDefaultMaxDuty, "ch1"},
+    {0x13, kPinPwm[2], kPinDir[2], kDefaultMaxDuty, "ch2"},
+};
 
 // ===========================================================================
 // モータ出力
 // ===========================================================================
 
-// PWM 周期 30us（約 33kHz）。可聴域を外しつつ MOSFET のスイッチング損失を抑える。
-constexpr uint32_t kPwmPeriodUs = 30;
+// PWM 30kHz。可聴域を外しつつ MOSFET のスイッチング損失を抑える。
+// サンプルの `begin(30000.0f, 0.0f)`（周波数 [Hz] を取る float オーバーロード）と
+// 同じ値。uint32_t の版は「周期 [us]」を取る別物なので取り違えないこと。
+constexpr float kPwmFrequencyHz = 30000.0f;
 
-// TODO(実機で確認): DIS の論理。アクティブ HIGH（HIGH で出力禁止）と仮定している。
-// ゲートドライバのデータシートで反転していたらここを false にする。
-// 逆にすると「緊急停止でモータが全力で回る」最悪の事故になるため、通電前に必ず確認。
-constexpr bool kDisActiveHigh = true;
-
-// 仕様書 §5.3。サンプルコードは maxDuty 未初期化で常に 0 になりモータが回らなかったため、
-// 既定値を明示的に持つ。安全側に低め。
-constexpr float kDefaultMaxDuty = 0.30f;
-
-// ===========================================================================
-// エンコーダ（位置・速度フィードバック）
-// ===========================================================================
-
-// TODO(実機で確認): 基板にエンコーダが載っているか。
-// エンコーダ無しの基板では 0 にする。位置・速度制御は使えなくなり duty のみになる。
-// 無いのに 1 のままだと位置・速度が 0 で張り付き、PID が出力を振り切る。
-#define HAS_ENCODER 1
-
-// TODO(実機で確認): エンコーダの 1 相あたりパルス数（モータ軸）。
-constexpr float kEncoderPulsesPerMotorRev = 500.0f;
-
-// A/B 両相の立上り・立下りを数える 4 逓倍。
-constexpr float kEncoderQuadratureMultiplier = 4.0f;
-
-// TODO(実機で確認): 減速比（モータ軸回転 : 出力軸回転）。
-// 仕様書 §3.2 のとおり FEEDBACK の位置・速度は出力軸換算で送る（PC 側は換算を知らない）。
-constexpr float kGearRatio = 30.0f;
-
-// TODO(実機で確認): 配線次第で A/B が入れ替わり回転方向が反転する。
-// 「正の duty を与えたとき速度が正になる」ようにここで合わせる。
-constexpr float kEncoderDirectionSign = 1.0f;
-
-constexpr float kEncoderCountsPerOutputRev =
-    kEncoderPulsesPerMotorRev * kEncoderQuadratureMultiplier * kGearRatio;
-
-// ===========================================================================
-// 電流センス
-// ===========================================================================
-
-// TODO(実機で確認): 基板に電流センス回路が載っているか。
-// 載っていない基板では 0 にする。FEEDBACK の電流は常に 0 になり、過電流フラグも立たない。
-// **無いのに 1 のままだと SENS ピン（A0）が浮き、ADC の振れがそのまま電流値として
-// しきい値を跨いで必ず誤発火する**（仕様書 §3.2）。
-#define HAS_CURRENT_SENSE 1
-
-// TODO(実機で確認): SENS の換算係数（ADC カウント → mA）。
-// 双方向センスを想定し、無電流時のカウントを 0 点として差分から電流を出す。
-// analogReadResolution は既定の 10bit（0–1023）のまま使う。
-constexpr uint16_t kCurrentSenseZeroCount = 512;
-constexpr float kCurrentSenseMaPerCount = 20.0f;
-
-// TODO(実機で確認): 過電流しきい値。モータとドライバ IC の連続定格から決める。
-constexpr float kDefaultOvercurrentThresholdMa = 5000.0f;
-
-// 双方向センスなので、表現できる電流の絶対値は 0 点から近い側のレールまで。
-constexpr uint16_t kAdcMaxCount = 1023;
-constexpr float kCurrentSenseFullScaleMa =
-    static_cast<float>(kAdcMaxCount - kCurrentSenseZeroCount < kCurrentSenseZeroCount
-                           ? kAdcMaxCount - kCurrentSenseZeroCount
-                           : kCurrentSenseZeroCount) *
-    kCurrentSenseMaPerCount;
-
-// 上の 3 つは独立した仮値なので、組み合わせが成立しないまま通電しうる。
-// しきい値がフルスケール偏差に近いと、**正常な回路でも ADC がレールに張り付く直前でしか
-// 発報できない**「効いているつもりの保護」になる（実際 10mA/count のままでは
-// フルスケール 5110mA に対してしきい値 5000mA だった）。しきい値は連続定格という
-// 物理量なので、センスの換算係数の側をそれに合わせる。ビルドで止めるのは、
-// この不一致が実機では「過電流を一度も検出しない」という無症状で現れるため。
-static_assert(kDefaultOvercurrentThresholdMa > 0.0f,
-              "過電流しきい値が 0 以下。過電流を常時報告するか一度も報告しなくなる");
-static_assert(kDefaultOvercurrentThresholdMa <= 0.8f * kCurrentSenseFullScaleMa,
-              "過電流しきい値が ADC のフルスケール偏差に近すぎる。"
-              "kCurrentSenseMaPerCount / kCurrentSenseZeroCount と併せて見直すこと");
-
-// ===========================================================================
-// 温度
-// ===========================================================================
-
-// この基板は温度センサを繋ぐピンを持たない（A0=電流センス / A1=エンコーダ Z 相 /
-// A2・A3=リミットスイッチ / A4・A5=I2C）。読み取る手段が無いため、FEEDBACK の温度は
-// src/main.cpp の encodeFeedback() へ 0 を直接渡している（仕様書 §3.2 / §8）。
-// PC 側の温度警告（既定 65℃）は発火しない。
-//
-// 基板改版でセンサが載ったら、HAS_CURRENT_SENSE と同じ形でピン・換算係数・
-// 過熱しきい値をここに足し、sendFeedback() の温度引数と buildStatusFlags() の
-// bit2（過熱）を実装すること。
+// TODO(実機で確認): duty 0 のときハーフブリッジがコーストになるかブレーキになるか。
+// この基板には出力禁止（DIS）が無いので、停止＝PWM 0% であり、そのときの
+// 挙動は出力段の構成そのもので決まる。機構の噛み込みからの復帰性に効く。
 
 // ===========================================================================
 // 制御ループ
 // ===========================================================================
-
-// 1kHz。PWM 周期（33kHz）より十分遅く、FEEDBACK 周期（100Hz）より十分速い。
-constexpr uint32_t kControlIntervalUs = 1000;
 
 // コマンドウォッチドッグ（仕様書 §5.1）。PC 側は最後に指令した目標値を
 // kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、途絶は PC の停止か
@@ -165,41 +135,26 @@ constexpr uint32_t kControlIntervalUs = 1000;
 // 逃げ道であって、試合では既定の 1 のまま使う。再送が間に合わない状態は運用上の
 // 異常なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
 //
-// この値は setup() が MotorSafety::setWatchdogEnabled() へ写す。判定を #if で
+// この値は setup() が DcChannel::setWatchdogEnabled() へ写す。判定を #if で
 // main.cpp 側に置くと、同じ分岐を両ファームが各自で持つことになり、片方に入れ忘れても
-// 誰も気付けない（実際そうなっていた）。有効/無効の判定は MotorSafety にだけある。
+// 誰も気付けない。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
 // command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
 // MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
 // 基板ごとに変えてよい値ではなく、両基板の config.h に同じ数字を書くと片方だけ古くなる。
 
-// TODO(実機で確認): PID ゲイン。
-// 仕様書 §3.4 の kp/ki/kd は position と velocity で共有する 1 組であり、
-// 実際に使うモードに合わせて調整すること（モード切替時に積分項はクリアされる）。
-// 出力は duty 次元（-1.0～+1.0）で、誤差の単位は position=deg / velocity=rpm。
-constexpr float kDefaultKp = 0.01f;
-constexpr float kDefaultKi = 0.0f;
-constexpr float kDefaultKd = 0.0f;
-
-// 積分項の飽和上限（duty 次元）。ワインドアップで解除直後に急発進するのを防ぐ。
-constexpr float kIntegralLimit = 1.0f;
-
-// 仕様書 §3.4 の reached_tolerance 既定値。SET_PARAM はそのとき有効なモード側を書き換える。
-constexpr float kDefaultReachedToleranceDeg = 1.0f;
-constexpr float kDefaultReachedToleranceRpm = 5.0f;
-
 // ===========================================================================
 // 表示
 // ===========================================================================
 
-// シリアル RGB LED による状態表示。**点灯処理はまだ無い**（main.cpp の updateLed() の
-// #if HAS_RGB_LED は TODO コメントだけ）ので、1 にしても状態表示はオンボード LED の
-// 点滅のままで何も変わらない。発光させるには platformio.ini の lib_deps に
-// RGB LED ライブラリを追加したうえで中身を書くこと。
-#define HAS_RGB_LED 0
+// シリアル RGB LED（1 個）による状態表示。基板に実装されている。
+// 無効にするとオンボード LED の点滅だけになる（状態の区別は付かなくなる）。
+#define HAS_RGB_LED 1
+constexpr uint8_t kRgbBrightness = 30;
 
-// DIP が 0x00（設定忘れ）のときの赤点滅周期（仕様書 §2.2）。
+// DIP オフセット適用後のデバイス ID が 0x00 になったチャンネルがあるとき、および
+// CAN が上がらなかったときの速い点滅（仕様書 §2.2）。
 constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;
 
 // 正常時のハートビート点滅周期。ファームが生きていることを目視で確認するため。
@@ -209,7 +164,7 @@ constexpr uint32_t kHeartbeatIntervalMs = 1000;
 // デバッグ用シリアル
 // ===========================================================================
 
-// USB CDC の Serial から duty を直接入力できるようにする（0 で無効）。
-// 緊急停止ラッチ中はシリアルからも駆動できない（applyOutput が一括で禁止する）。
+// USB CDC の Serial から「<ch> <duty>」で duty を直接入力できるようにする（0 で無効）。
+// 緊急停止ラッチ中はシリアルからも駆動できない（DcChannel が指令を拒否する）。
 #define ENABLE_SERIAL_DEBUG 1
 constexpr uint32_t kSerialBaud = 115200;
