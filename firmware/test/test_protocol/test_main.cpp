@@ -13,6 +13,18 @@
 
 using namespace motorcan;
 
+// PC が送ってくる SET_TARGET / SET_PARAM のバイト列をテストから組み立てるヘルパ。
+// **本番のファームは float を送らない**（FEEDBACK は int16 だけ）ので、
+// 書く側は MotorCan には置かずここに持つ。
+static void packFloatLe(uint8_t *dst, float value) {
+    uint32_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    dst[0] = static_cast<uint8_t>(bits & 0xFF);
+    dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    dst[2] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    dst[3] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -62,24 +74,28 @@ static void test_parse_can_id_rejects_out_of_range() {
 // §3 float32 リトルエンディアン
 // --------------------------------------------------------------------------
 
-static void test_float_le_known_bytes() {
-    // 0.3f = 0x3E99999A（IEEE754）。LE なので下位バイトから並ぶ。
-    uint8_t buf[4] = {0, 0, 0, 0};
-    packFloatLe(buf, 0.3f);
-    TEST_ASSERT_EQUAL_UINT8(0x9A, buf[0]);
-    TEST_ASSERT_EQUAL_UINT8(0x99, buf[1]);
-    TEST_ASSERT_EQUAL_UINT8(0x99, buf[2]);
-    TEST_ASSERT_EQUAL_UINT8(0x3E, buf[3]);
-    TEST_ASSERT_EQUAL_FLOAT(0.3f, unpackFloatLe(buf));
-}
+// PC（Python の struct）が送ってくるバイト列を、こちらが同じ値として読めること。
+// **自前の pack で書いて unpack で読み直す往復にしてはならない** —— 両方が同じように
+// 壊れていても通ってしまう。契約はバイト列そのものなので、リテラルで固定する。
+static void test_unpack_float_from_known_bytes() {
+    // 0.3f = 0x3E99999A（IEEE754）。LE なので下位バイトから並ぶ
+    const uint8_t p03[4] = {0x9A, 0x99, 0x99, 0x3E};
+    TEST_ASSERT_EQUAL_FLOAT(0.3f, unpackFloatLe(p03));
 
-static void test_float_le_roundtrip() {
-    const float values[] = {0.0f, -0.0f, 1.0f, -1.0f, 0.30f, -0.30f, 90.0f, 3276.7f, -12345.5f};
-    for (float v : values) {
-        uint8_t buf[4];
-        packFloatLe(buf, v);
-        TEST_ASSERT_EQUAL_FLOAT(v, unpackFloatLe(buf));
-    }
+    const uint8_t zero[4] = {0x00, 0x00, 0x00, 0x00};
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, unpackFloatLe(zero));
+
+    // -1.0f = 0xBF800000
+    const uint8_t minus_one[4] = {0x00, 0x00, 0x80, 0xBF};
+    TEST_ASSERT_EQUAL_FLOAT(-1.0f, unpackFloatLe(minus_one));
+
+    // 90.0f = 0x42B40000（サーボの既定スルーレート）
+    const uint8_t ninety[4] = {0x00, 0x00, 0xB4, 0x42};
+    TEST_ASSERT_EQUAL_FLOAT(90.0f, unpackFloatLe(ninety));
+
+    // 3276.7f = 0x454CCB33（位置の飽和境界）
+    const uint8_t saturation[4] = {0x33, 0xCB, 0x4C, 0x45};
+    TEST_ASSERT_EQUAL_FLOAT(3276.7f, unpackFloatLe(saturation));
 }
 
 // --------------------------------------------------------------------------
@@ -382,11 +398,11 @@ static void test_status_flags_report_watchdog_after_first_feed() {
 // 同じ判定を共有できないと基板ごとに挙動がずれる。
 static void test_command_lost_separates_startup_from_dropout() {
     MotorSafety safety(500);
-    TEST_ASSERT_FALSE(safety.hasEverBeenFed());
+    // 起動直後は出力を許可しないが、途絶したわけではないので報告もしない
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(100000));
     TEST_ASSERT_FALSE(safety.isCommandLost(100000));
 
     safety.feed(1000);
-    TEST_ASSERT_TRUE(safety.hasEverBeenFed());
     TEST_ASSERT_FALSE(safety.isCommandLost(1400));
     TEST_ASSERT_TRUE(safety.isCommandLost(1500));
 }
@@ -397,9 +413,12 @@ static void test_command_lost_separates_startup_from_dropout() {
 
 // 試合では必ず有効。config.h の WATCHDOG_ENABLED を写し忘れた基板が
 // 「気付かないうちに無効」になっていないよう、既定は有効側に倒す。
+// フラグを直接覗かず振る舞いで見るのは、写し忘れが効くのは出力の可否だけだから。
 static void test_watchdog_is_enabled_by_default() {
     MotorSafety safety(500);
-    TEST_ASSERT_TRUE(safety.isWatchdogEnabled());
+    safety.feed(0);
+    TEST_ASSERT_TRUE(safety.isOutputAllowed(499));
+    TEST_ASSERT_FALSE(safety.isOutputAllowed(500));
 }
 
 // 無効化した基板は途絶しても駆動を続け、bit4 も報告しない（仕様書 §5.1 / §8）。
@@ -614,7 +633,6 @@ static void test_physical_stop_clears_after_release() {
 // 間は駆動しない。
 static void test_dc_channel_starts_stopped() {
     DcChannel ch(500);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.commandedDuty());
     TEST_ASSERT_FALSE(ch.isOutputAllowed(0));
     TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(0));
 }
@@ -684,7 +702,7 @@ static void test_dc_channel_ignores_nan_duty() {
     ch.feed(0);
     ch.setDuty(0.4f, 0);
     TEST_ASSERT_FALSE(ch.setDuty(NAN, 0));
-    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.commandedDuty());
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
 }
 
 // --------------------------------------------------------------------------
@@ -728,8 +746,7 @@ int main(int, char **) {
     RUN_TEST(test_parse_can_id_roundtrip);
     RUN_TEST(test_parse_can_id_reserved_is_invalid);
     RUN_TEST(test_parse_can_id_rejects_out_of_range);
-    RUN_TEST(test_float_le_known_bytes);
-    RUN_TEST(test_float_le_roundtrip);
+    RUN_TEST(test_unpack_float_from_known_bytes);
     RUN_TEST(test_decode_set_target);
     RUN_TEST(test_decode_set_target_rejects_unknown_type);
     RUN_TEST(test_decode_set_target_rejects_short_frame);

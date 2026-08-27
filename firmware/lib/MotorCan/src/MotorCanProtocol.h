@@ -130,14 +130,15 @@ CanIdInfo parseCanId(uint16_t canId);
 // スカラのバイト列変換（すべてリトルエンディアン）
 // ---------------------------------------------------------------------------
 
-// ホストのバイト順を仮定せずに IEEE754 float32 LE を組み立てる。
-// AVR/ARM/x86 いずれでも同じバイト列になることを保証するため、memcpy でビット列を
-// 取り出したあとシフトでバイトを並べる。
-void packFloatLe(uint8_t *dst, float value);
+// ホストのバイト順を仮定せずに IEEE754 float32 LE を読む。
+// AVR/ARM/x86 いずれでも同じ解釈になることを保証するため、シフトでバイトを積んでから
+// memcpy でビット列を float へ移す。
+//
+// **書く側（packFloatLe）は無い。** float を送るのは PC だけで（SET_TARGET / SET_PARAM）、
+// モタドラが送る FEEDBACK は int16 しか持たない。
 float unpackFloatLe(const uint8_t *src);
 
 void packInt16Le(uint8_t *dst, int16_t value);
-int16_t unpackInt16Le(const uint8_t *src);
 
 // int16 に収まらない値は折り返さず飽和させる。
 // キャストで折り返すと +4000deg が負値に化け、PC 側が逆方向へ位置制御しかねない。

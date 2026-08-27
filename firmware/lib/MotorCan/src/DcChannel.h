@@ -68,9 +68,6 @@ class DcChannel {
     // 呼び出し側が安全機構を迂回する経路を書けない。
     float outputDuty(uint32_t nowMs) const;
 
-    // FEEDBACK には観測値が無く指令値しか無い。実測ではないことを名前で示す。
-    float commandedDuty() const { return duty_; }
-
    private:
     MotorSafety safety_;
     float duty_;

@@ -156,41 +156,10 @@ static void test_feedback_of_other_boards_is_dropped() {
 // §7.1 DIP オフセットによるデバイス ID の解決
 // --------------------------------------------------------------------------
 
-static void test_offset_shifts_the_whole_channel_table() {
-    TEST_ASSERT_EQUAL_UINT8(0x05, applyDeviceIdOffset(0x01, 4));
-    TEST_ASSERT_EQUAL_UINT8(0x07, applyDeviceIdOffset(0x03, 4));
-    TEST_ASSERT_EQUAL_UINT8(0x08, applyDeviceIdOffset(0x04, 4));
-}
-
-static void test_zero_offset_keeps_the_table_as_is() {
-    TEST_ASSERT_EQUAL_UINT8(0x01, applyDeviceIdOffset(0x01, 0));
-    TEST_ASSERT_EQUAL_UINT8(0x04, applyDeviceIdOffset(0x04, 0));
-}
-
-// 8bit の足し算は回り込む。0x00（未設定）や 0xFF（ブロードキャスト予約）になった
-// チャンネルをそのまま使うと、E_STOP のブロードキャストに応答する側へ回ったり、
-// 未設定判定を素通りして駆動してしまう。
-static void test_offset_wraparound_to_reserved_ids_is_unconfigured() {
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdOffset(0x01, 0xFF));
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdOffset(0x01, 0xFE));
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdOffset(0x04, 0xFC));
-}
-
-// 基準 ID そのものが未設定なら、オフセットで有効な ID に化けさせない。
-static void test_unconfigured_base_stays_unconfigured() {
-    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, applyDeviceIdOffset(kDeviceIdUnconfigured, 4));
-}
-
-// --------------------------------------------------------------------------
-// DIP スイッチの読み出し
-// --------------------------------------------------------------------------
-
 static uint8_t g_stubPins[4] = {0, 0, 0, 0};
 static int stubReadPin(uint8_t pin) { return g_stubPins[pin]; }
 
-// 添字がビット位置で、INPUT_PULLUP の負論理（LOW = ON = 1）。
-// 順序を取り違えると 0b0001 と 0b1000 が入れ替わり、別のアクチュエータが動く。
-// 1 枚が複数チャンネルを持つ基板では、DIP は「スロット数を刻み幅にしたブロック」を選ぶ。
+// 1 枚が複数スロットを持つ基板では、DIP は「スロット数を刻み幅にしたブロック」を選ぶ。
 // 刻み幅 1 で足すと隣の DIP 設定の基板とブロックが重なり、同じ ID の基板が 2 枚
 // バス上に並ぶ（1 通の SET_TARGET で 2 台が動き、片方は永久に STALE になる）。
 static void test_block_offset_keeps_boards_from_overlapping() {
@@ -388,10 +357,6 @@ int main(int, char **) {
     RUN_TEST(test_extended_frame_is_dropped);
     RUN_TEST(test_reserved_and_out_of_range_ids_are_dropped);
     RUN_TEST(test_feedback_of_other_boards_is_dropped);
-    RUN_TEST(test_offset_shifts_the_whole_channel_table);
-    RUN_TEST(test_zero_offset_keeps_the_table_as_is);
-    RUN_TEST(test_offset_wraparound_to_reserved_ids_is_unconfigured);
-    RUN_TEST(test_unconfigured_base_stays_unconfigured);
     RUN_TEST(test_block_offset_keeps_boards_from_overlapping);
     RUN_TEST(test_block_offset_reserves_one_id_per_slot);
     RUN_TEST(test_block_offset_outside_band_is_unconfigured);

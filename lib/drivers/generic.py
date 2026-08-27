@@ -122,15 +122,6 @@ class GenericDriver(MotorDriver):
             is_extended_id=False,
         )
 
-    def encode_set_mode(self, mode: ControlMode) -> can.Message:
-        data = bytearray(8)
-        data[0] = _MODE_MAP[mode]
-        return can.Message(
-            arbitration_id=self.build_can_id(CommandType.SET_MODE, self.can_id),
-            data=bytes(data),
-            is_extended_id=False,
-        )
-
     @staticmethod
     def encode_e_stop() -> can.Message:
         return can.Message(

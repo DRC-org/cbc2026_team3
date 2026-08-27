@@ -70,14 +70,6 @@ CanIdInfo parseCanId(uint16_t canId) {
     return info;
 }
 
-void packFloatLe(uint8_t *dst, float value) {
-    uint32_t bits = 0;
-    memcpy(&bits, &value, sizeof(bits));
-    dst[0] = static_cast<uint8_t>(bits & 0xFF);
-    dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-    dst[2] = static_cast<uint8_t>((bits >> 16) & 0xFF);
-    dst[3] = static_cast<uint8_t>((bits >> 24) & 0xFF);
-}
 
 float unpackFloatLe(const uint8_t *src) {
     const uint32_t bits = static_cast<uint32_t>(src[0]) |
@@ -95,11 +87,6 @@ void packInt16Le(uint8_t *dst, int16_t value) {
     dst[1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
 }
 
-int16_t unpackInt16Le(const uint8_t *src) {
-    const uint16_t bits =
-        static_cast<uint16_t>(src[0]) | static_cast<uint16_t>(static_cast<uint16_t>(src[1]) << 8);
-    return static_cast<int16_t>(bits);
-}
 
 int16_t saturateToInt16(int32_t value) {
     if (value > 32767) {

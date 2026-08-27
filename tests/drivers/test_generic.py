@@ -150,23 +150,6 @@ class TestEncodeEStop:
         assert msg.data == bytes(8)
 
 
-class TestEncodeSetMode:
-    def setup_method(self):
-        self.drv = GenericDriver("test_motor", 0x01)
-
-    def test_encode_set_mode(self):
-        msg = self.drv.encode_set_mode(ControlMode.POSITION)
-        assert msg.arbitration_id == GenericDriver.build_can_id(CommandType.SET_MODE, 0x01)
-        assert msg.data[0] == 0
-        assert msg.data[1:] == bytes(7)
-
-        msg = self.drv.encode_set_mode(ControlMode.VELOCITY)
-        assert msg.data[0] == 1
-
-        msg = self.drv.encode_set_mode(ControlMode.DUTY)
-        assert msg.data[0] == 2
-
-
 class TestHealth:
     """ヘルスチェック判定 (Phase 6 段階②)。"""
 

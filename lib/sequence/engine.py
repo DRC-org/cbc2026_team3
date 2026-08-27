@@ -78,7 +78,6 @@ class Sequence:
         self._resume_event: asyncio.Event = asyncio.Event()
         # request_jump で次の反復に反映する目標 index
         self._jump_request: int | None = None
-        self._on_step_change: Callable[[dict], None] | None = None
         # 自陣コート。赤青で配置が左右反転するため各 step 内で参照して動作を分ける
         self._court: Court = Court.RED
         # モータアクセス層。bind_motors で外部から注入する (未注入でもシーケンスは動作する)
@@ -331,7 +330,6 @@ class Sequence:
                 if self._current_index >= len(self._steps):
                     break
                 step_info = self._steps[self._current_index]
-                self._notify_step_change()
 
                 if step_info.require_trigger:
                     self._waiting_trigger = True
@@ -367,10 +365,3 @@ class Sequence:
         self._trigger_event.clear()
         self._stop_event.clear()
         self._jump_request = None
-
-    def set_on_step_change(self, callback: Callable[[dict], None]) -> None:
-        self._on_step_change = callback
-
-    def _notify_step_change(self) -> None:
-        if self._on_step_change is not None:
-            self._on_step_change(self.progress)

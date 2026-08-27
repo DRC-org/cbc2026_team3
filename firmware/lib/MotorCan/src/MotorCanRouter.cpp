@@ -53,16 +53,6 @@ FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceId
     return FrameRoute{true, info.command, mask};
 }
 
-uint8_t applyDeviceIdOffset(uint8_t baseDeviceId, uint8_t offset) {
-    if (baseDeviceId == kDeviceIdUnconfigured) {
-        return kDeviceIdUnconfigured;
-    }
-    const uint8_t id = static_cast<uint8_t>(baseDeviceId + offset);
-    if (id == kDeviceIdUnconfigured || id == kDeviceIdBroadcast) {
-        return kDeviceIdUnconfigured;
-    }
-    return id;
-}
 
 uint8_t applyDeviceIdBlockOffset(uint8_t baseDeviceId, uint8_t offset, uint8_t stride,
                                  uint8_t bandEndId) {

@@ -60,8 +60,6 @@ class MotorSafety {
     // 出力の可否は isExpired 側で判断し、こちらは FEEDBACK bit4 の報告にだけ使う。
     bool isCommandLost(uint32_t nowMs) const;
 
-    bool hasEverBeenFed() const { return everFed_; }
-
     void setTimeoutMs(uint32_t timeoutMs) { timeoutMs_ = timeoutMs; }
     uint32_t timeoutMs() const { return timeoutMs_; }
 
@@ -74,7 +72,6 @@ class MotorSafety {
     // 同じ #if 分岐を各自で持つと片方に入れ忘れられるため。実際 WATCHDOG_ENABLED は
     // servo にだけ効き、dc_motor では「設定しても効かないフラグ」だった時期がある。
     void setWatchdogEnabled(bool enabled) { watchdogEnabled_ = enabled; }
-    bool isWatchdogEnabled() const { return watchdogEnabled_; }
 
     // ---- 総合判定 ----
 

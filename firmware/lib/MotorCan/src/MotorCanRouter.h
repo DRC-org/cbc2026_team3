@@ -38,13 +38,8 @@ struct FrameRoute {
 FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceIds,
                       uint8_t channelCount);
 
-// サーボ基板の DIP は「チャンネル表全体に加えるオフセット」として働く（仕様書 §7.1）。
-// 8bit の足し算は回り込むので、結果が 0x00（未設定）や 0xFF（ブロードキャスト予約）に
-// なったチャンネルは未設定に倒して駆動を拒否する。回り込んだ ID をそのまま使うと、
-// ブロードキャスト E_STOP に応答する側へ回ったり、未設定判定を素通りして駆動する。
-uint8_t applyDeviceIdOffset(uint8_t baseDeviceId, uint8_t offset);
-
-// 上の刻み幅つき・帯つき版。1 枚が複数チャンネルを持つ基板を複数枚使うときは、
+// DIP は「スロット表全体に加えるブロックオフセット」として働く（仕様書 §2.2 / §7.1）。
+// 1 枚が複数スロットを持つ基板を複数枚使うときは、
 // **オフセットの刻み幅をスロット数にしないとブロックが重なる。**
 // 例: 基準 {0x11,0x12,0x13} に stride=1 で +1 すると {0x12,0x13,0x14} となり、
 // 隣の DIP 設定の基板と 2 チャンネルが同じ ID を名乗る。同じ ID の基板が 2 枚
