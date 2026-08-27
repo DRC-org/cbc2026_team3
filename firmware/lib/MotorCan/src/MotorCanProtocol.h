@@ -43,15 +43,14 @@ enum class ParamId : uint8_t {
 
 // 仕様書 §3.2 FEEDBACK Byte7 の状態フラグ。
 namespace status_flag {
+// **頭から詰める。** 空きを挟むと、報告できる項目が増えたときに「途中に空いている
+// ビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる。
+// 使わなくなった項目は末尾を空けるのではなく、以降を繰り上げること。
 constexpr uint8_t kReached = 1 << 0;
-// bit1（過電流）/ bit2（過熱）は予約。**どちらの基板も電流センスも温度センサも持たず、
-// 今後も持たない。** 名前を残すと「報告しうる」と読めてしまうので定数ごと置かない。
-constexpr uint8_t kEStop = 1 << 3;
-constexpr uint8_t kWatchdog = 1 << 4;
-constexpr uint8_t kDeviceIdUnconfigured = 1 << 5;
-// 基板上のセンサ入力（タッチセンサ等）。予約ビットの bit6 を割り当てる。
-// フレーム長も他のビットの位置も変えないので、対応していない基板・PC が混在しても壊れない。
-//
+constexpr uint8_t kEStop = 1 << 1;
+constexpr uint8_t kWatchdog = 1 << 2;
+constexpr uint8_t kDeviceIdUnconfigured = 1 << 3;
+// 基板上のセンサ入力（タッチセンサ等）。
 // **センサは自分のデバイス ID で FEEDBACK を送る。** サーボのフレームに相乗りさせると、
 // 相乗り先の無い「センサだけの基板」が成立せず（誰も FEEDBACK を送らないので永久に
 // 読めない）、載せられる個数も予約ビットの数で頭打ちになる。1 スロット = 1 デバイスに
@@ -59,8 +58,8 @@ constexpr uint8_t kDeviceIdUnconfigured = 1 << 5;
 //
 // 名前を「タッチセンサ」にしないのは、スロットに何を繋ぐかが配線で決まり、
 // 次はリミットスイッチかもしれないため。
-constexpr uint8_t kSensor = 1 << 6;
-// bit7 は予約。
+constexpr uint8_t kSensor = 1 << 4;
+// bit5-7 は予約。どちらの基板も電流センスも温度センサも持たず、今後も持たない。
 }  // namespace status_flag
 
 // 仕様書 §2.2。0x00 は「DIP 設定忘れ」とみなして駆動を拒否する。

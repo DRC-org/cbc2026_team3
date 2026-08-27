@@ -19,7 +19,7 @@
 // この基板の性質（仕様書 §4 / §8）:
 //   - 1 枚が 3 チャンネルを持ち、チャンネルごとに独立したデバイス ID を持つ
 //   - **フィードバックを一切持たない。** エンコーダ・電流センス・温度センサとも非搭載で、
-//     FEEDBACK の位置・速度・電流・温度はすべて 0、到達フラグ（bit0）も立てない
+//     FEEDBACK の位置・速度はすべて 0、到達フラグも立てない
 //   - duty モードのみ受理する（位置・速度制御は実装ごと存在しない）
 //   - ゲートドライバの出力禁止（DIS）が無く、止める手段は PWM 0% だけ。その代わり
 //     物理緊急停止スイッチの状態を REF ピンで読める
@@ -224,14 +224,15 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 // ===========================================================================
 
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
-    // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
-    // bit4 は指令を一度でも受けた後の満了でのみ立ち、無効化した基板では立たない。
+    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
+    // ウォッチドッグのビットは指令を一度でも受けた後の満了でのみ立ち、
+    // 無効化した基板では立たない。
     // ここで手で組み立て直すと、サーボ用と同じ条件で立つ保証が無くなる。
     uint8_t flags = g_channel[ch].safetyStatusFlags(nowMs);
     if (!isChannelConfigured(ch)) {
         flags |= status_flag::kDeviceIdUnconfigured;
     }
-    // 観測手段が 1 つも無い基板なので bit0（到達）は立てない（仕様書 §3.2 / §8）。
+    // 観測手段が 1 つも無い基板なので到達フラグは立てない（仕様書 §3.2 / §8）。
     // duty には到達の概念が無く、「指令したから到達した」と報告するのは
     // 実測でも推定でもない嘘になる。
     return flags;
@@ -246,7 +247,7 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
     // ID 未設定チャンネルは CAN ID 0x100 で送ることになり、複数チャンネルが未設定だと
-    // 同じ ID のフレームが重複するが、PC 側に bit5（設定忘れ）を届ける方を優先する。
+    // 同じ ID のフレームが重複するが、PC 側へ「デバイス ID 未設定」を届ける方を優先する。
     const CanMsg msg(CanStandardId(buildCanId(CommandType::Feedback, g_deviceId[ch])),
                      kFrameLength, data);
     CAN.write(msg);
@@ -517,7 +518,7 @@ void setup() {
         // 全チャンネルが同じ周期で同時に送ると 3 フレームのバーストになり、他バスの
         // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
         // 周期を等分した位相をチャンネルごとにずらして平準化する。
-        // ID 未設定のチャンネルも bit5 を知らせるために送るので、ここは全チャンネル分やる。
+        // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送るので、ここは全チャンネル分やる。
         g_feedbackTimer[ch].setLastMs(startMs - g_feedbackIntervalMs +
                                       (g_feedbackIntervalMs * ch) / kDcChannelCount);
 
@@ -546,7 +547,7 @@ void setup() {
     }
 
     // 電源投入時点で物理緊急停止が押されているなら、その状態から始める。
-    // ここを省くと、押されたまま起動した基板が FEEDBACK bit3 を立てず、
+    // ここを省くと、押されたまま起動した基板が FEEDBACK の緊急停止ビットを立てず、
     // PC からは「解除済み」に見える。
     const bool pressed = isPhysicalStopPressed();
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {

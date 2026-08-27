@@ -92,7 +92,7 @@ class TestToleranceHasSingleSource:
     def test_generic_check_follows_default_tolerance(self, monkeypatch) -> None:
         drv = GenericDriver("g", 0x01)
         _msg, context = drv.check_command(magnitude=10.0)
-        feed_generic(drv, position=7.0, flags=0x01)
+        feed_generic(drv, position=7.0, reached=True)
 
         assert drv.evaluate_check_result(context)[0] is False
 
@@ -153,6 +153,6 @@ class TestStandstillNeverPasses:
         # 一歩も動かなくても「目標との差 0.5deg」で合格してしまう
         drv = GenericDriver("g", 0x01)
         _msg, context = drv.check_command(magnitude=0.5)
-        feed_generic(drv, position=0.0, flags=0x01)
+        feed_generic(drv, position=0.0, reached=True)
 
         assert drv.evaluate_check_result(context)[0] is False

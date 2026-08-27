@@ -9,6 +9,9 @@ from lib.drivers.base import ControlMode
 from lib.drivers.generic import CommandType, GenericDriver
 from tests.feedback_frames import feed_generic
 
+#: FEEDBACK Byte7 の予約ビット (仕様書 §3.2)。名前が付いていない = 誰も報告しない
+_RESERVED_BITS = 0xE0
+
 
 class TestCanIdRange:
     """仕様書 §2.2 のデバイス ID 範囲 (0x01〜0xFE)。
@@ -159,8 +162,8 @@ class TestHealth:
     def setup_method(self):
         self.drv = GenericDriver("test_motor", 0x01)
 
-    def _feed(self, *, temp: int = 25, flags: int = 0x00) -> None:
-        feed_generic(self.drv, temp=temp, flags=flags)
+    def _feed(self, **kwargs: object) -> None:
+        feed_generic(self.drv, **kwargs)  # type: ignore[arg-type]
 
     def test_initial_flags_are_clear(self):
         # 初期化直後はどのフラグも立っていない
@@ -174,29 +177,21 @@ class TestHealth:
         素通しにすると、他プロトコルの相乗りフレームや古いファームのゴミが
         そのまま過熱・過電流として読まれ、試合中に理由のない FAULT が出る。
         """
-        feed_generic(self.drv, temp=90, current_ma=9000, flags=0b00000110)
+        feed_generic(self.drv, temp=90, current_ma=9000, flags=_RESERVED_BITS)
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.has_thermal_warning(temp_warning_c=65.0) is False
         assert self.drv.has_thermal_fault(temp_critical_c=80.0) is False
         assert self.drv.is_fault() is False
 
-    def test_unconfigured_device_id_is_fault(self):
-        """bit5 (デバイス ID 未設定) だけが FAULT。設定ミスは試合前に必ず気付く必要がある。"""
-        feed_generic(self.drv, flags=0b00100000)
-        assert self.drv.is_fault() is True
-
-        feed_generic(self.drv, flags=0b00000000)
-        assert self.drv.is_fault() is False
-
     def test_sensor_and_reserved_bits_do_not_affect_health(self):
-        # bit6 はセンサ入力 (異常ではない)、bit7 は予約。どちらもヘルス判定に影響させない
-        self._feed(flags=0b11000000)
+        # センサ入力は異常ではない。予約ビットもヘルス判定に影響させない
+        self._feed(sensor=True, flags=_RESERVED_BITS)
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.is_fault() is False
 
 
 class TestSensorInput:
-    """センサ入力 (FEEDBACK bit6, 仕様書 §5.2)。原点合わせ用。
+    """センサ入力 (FEEDBACK Byte7, 仕様書 §5.2)。原点合わせ用。
 
     センサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
     ドライバ 1 つがセンサ 1 個に対応する。
@@ -205,24 +200,24 @@ class TestSensorInput:
     def setup_method(self):
         self.drv = GenericDriver("origin_sensor", 0x02)
 
-    def _feed(self, *, flags: int = 0x00) -> None:
-        feed_generic(self.drv, flags=flags)
+    def _feed(self, **kwargs: object) -> None:
+        feed_generic(self.drv, **kwargs)  # type: ignore[arg-type]
 
     def test_initially_inactive(self):
         assert self.drv.sensor_active is False
 
-    def test_bit6_reports_input(self):
-        self._feed(flags=0b01000000)
+    def test_sensor_bit_reports_input(self):
+        self._feed(sensor=True)
         assert self.drv.sensor_active is True
 
     def test_clears_when_released(self):
-        self._feed(flags=0b01000000)
-        self._feed(flags=0b00000000)
+        self._feed(sensor=True)
+        self._feed()
         assert self.drv.sensor_active is False
 
-    def test_reserved_bit7_is_not_the_sensor(self):
-        # bit7 は予約のまま。取り違えるとセンサが一度も反応しない
-        self._feed(flags=0b10000000)
+    def test_reserved_bits_are_not_the_sensor(self):
+        # 予約ビットを取り違えるとセンサが一度も反応しない
+        self._feed(flags=_RESERVED_BITS)
         assert self.drv.sensor_active is False
 
     def test_contact_is_not_an_abnormality(self):
@@ -232,14 +227,14 @@ class TestSensorInput:
         機体が FAULT になりシーケンスが止まる。基板は状態を報告するだけで、
         それをどう使うかは PC 側のシーケンスが決める (仕様書 §5.2)。
         """
-        self._feed(flags=0b01000000)
+        self._feed(sensor=True)
         assert self.drv.is_fault() is False
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.check_safety_error() is None
 
     def test_does_not_disturb_other_flags(self):
         # 同じ Byte7 に載るので、ビットを取り違えると緊急停止やウォッチドッグと混ざる
-        self._feed(flags=0b01011000)  # bit6 + bit4 + bit3
+        self._feed(e_stop=True, watchdog=True, sensor=True)
         assert self.drv.sensor_active is True
         assert self.drv.e_stop_active is True
         assert self.drv.watchdog_active is True
@@ -255,18 +250,14 @@ class TestMotorCheck:
         *,
         position_dg: int = 0,
         velocity_rpm: int = 0,
-        current_ma: int = 0,
-        temp: int = 25,
-        flags: int = 0x00,
+        **kwargs: object,
     ) -> None:
         # フィードバック byte0-1 は 0.1deg 単位。呼び出し側が生値で書いているため deg へ戻す
         feed_generic(
             drv,
             position=position_dg / 10.0,
             velocity=velocity_rpm,
-            current_ma=current_ma,
-            temp=temp,
-            flags=flags,
+            **kwargs,  # type: ignore[arg-type]
         )
 
     def test_check_command_default_position(self):
@@ -298,7 +289,7 @@ class TestMotorCheck:
         drv = GenericDriver("test_motor", 0x01)
         _, context = drv.check_command(magnitude=10.0)
         # position=10.0deg, reached フラグ立ち上がり
-        self._feed(drv, position_dg=100, flags=0x01)
+        self._feed(drv, position_dg=100, reached=True)
         passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is None
@@ -307,7 +298,7 @@ class TestMotorCheck:
         drv = GenericDriver("test_motor", 0x01)
         _, context = drv.check_command(magnitude=10.0)
         # 目標 10.0deg に対して 5.0deg しか動いていない (許容 1.0 超え)
-        self._feed(drv, position_dg=50, flags=0x00)
+        self._feed(drv, position_dg=50)
         passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
@@ -435,48 +426,53 @@ class TestActivationSteps:
         assert drv.requires_fresh_feedback_for_activation() is False
 
 
-class TestStatusFlagsBit3To5:
-    """FEEDBACK Byte7 bit3-5 (仕様書 §3.2)。"""
+class TestSafetyStatusFlags:
+    """FEEDBACK Byte7 の緊急停止 / ウォッチドッグ / デバイス ID 未設定 (仕様書 §3.2)。"""
 
     def setup_method(self):
         self.drv = GenericDriver("test_motor", 0x01)
 
-    def _feed(self, *, flags: int) -> None:
-        feed_generic(self.drv, flags=flags)
+    def _feed(self, **kwargs: object) -> None:
+        feed_generic(self.drv, **kwargs)  # type: ignore[arg-type]
 
     def test_initial_flags_are_clear(self):
         assert self.drv.e_stop_active is False
         assert self.drv.watchdog_active is False
         assert self.drv.device_id_unconfigured is False
 
-    def test_e_stop_flag_bit3(self):
-        self._feed(flags=0b00001000)
+    def test_e_stop_flag(self):
+        self._feed(e_stop=True)
         assert self.drv.e_stop_active is True
         # 緊急停止中は異常ではないので FAULT にはしない
         assert self.drv.is_fault() is False
         assert "緊急停止" in (self.drv.check_safety_error() or "")
 
-    def test_watchdog_flag_bit4(self):
-        self._feed(flags=0b00010000)
+    def test_watchdog_flag(self):
+        self._feed(watchdog=True)
         assert self.drv.watchdog_active is True
         assert self.drv.is_fault() is False
         assert "ウォッチドッグ" in (self.drv.check_safety_error() or "")
 
-    def test_unconfigured_device_id_bit5_is_fault(self):
-        self._feed(flags=0b00100000)
+    def test_unconfigured_device_id_is_fault(self):
+        """デバイス ID 未設定だけが FAULT。設定ミスは試合前に必ず気付く必要がある。"""
+        self._feed(unconfigured_id=True)
         assert self.drv.device_id_unconfigured is True
         assert self.drv.is_fault() is True
         assert "デバイス ID" in (self.drv.check_safety_error() or "")
 
+        # 新しいフレームで降りること (DIP を直したのに FAULT が残ると原因を追えない)
+        self._feed()
+        assert self.drv.is_fault() is False
+
     def test_no_safety_error_when_flags_clear(self):
-        self._feed(flags=0b00000001)
+        self._feed(reached=True)
         assert self.drv.check_safety_error() is None
 
     def test_flags_clear_on_recovery(self):
-        self._feed(flags=0b00111000)
+        self._feed(e_stop=True, watchdog=True, unconfigured_id=True)
         assert self.drv.is_fault() is True
 
-        self._feed(flags=0b00000000)
+        self._feed()
         assert self.drv.e_stop_active is False
         assert self.drv.watchdog_active is False
         assert self.drv.device_id_unconfigured is False

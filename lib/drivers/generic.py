@@ -28,17 +28,17 @@ class CommandType(IntEnum):
     E_STOP = 7
 
 
-# FEEDBACK Byte7 の状態フラグ (仕様書 §3.2)
+# FEEDBACK Byte7 の状態フラグ (仕様書 §3.2)。
+# **頭から詰める。** 空きを挟むと、報告できる項目が増えたときに「途中に空いている
+# ビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる
 _FLAG_REACHED = 0x01
-# bit1 (過電流) / bit2 (過熱) は予約。**どちらの基板も電流センスも温度センサも持たず、
-# 今後も持たない。** 名前を残すと「報告されうる」と読めてしまうので定数ごと置かない
-_FLAG_E_STOP = 0x08
-_FLAG_WATCHDOG = 0x10
-_FLAG_UNCONFIGURED_ID = 0x20
-# 基板上のセンサ入力 (タッチセンサ等)。予約ビットの bit6 を割り当てる。
-# センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは 1 つ。
-# サーボのフレームに相乗りさせていた頃は「センサだけの基板」が成立しなかった
-_FLAG_SENSOR = 0x40
+_FLAG_E_STOP = 0x02
+_FLAG_WATCHDOG = 0x04
+_FLAG_UNCONFIGURED_ID = 0x08
+# 基板上のセンサ入力 (タッチセンサ等)。
+# センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは 1 つ
+_FLAG_SENSOR = 0x10
+# bit5-7 は予約。どちらの基板も電流センスも温度センサも持たない
 
 # デバイス ID の範囲 (仕様書 §2.2)。0x00 は「DIP 設定忘れ」、0xFF は E_STOP
 # ブロードキャストの予約なので、どちらも個別デバイスの ID として使ってはならない。
@@ -66,14 +66,14 @@ class GenericDriver(MotorDriver):
         # 共有 can_generic バス上の全基板のラッチをまとめて外す。
         # 0x100 以上はコマンド種別のビットを侵食し、SET_TARGET が FEEDBACK として
         # 読まれるフレームになる (何も駆動せず永久に STALE)。
-        # 0x00 はファームが駆動を拒否する ID で、実行時に bit5 で分かるが遅い。
+        # 0x00 はファームが駆動を拒否する ID で、実行時に FEEDBACK で分かるが遅い。
         if not _DEVICE_ID_MIN <= can_id <= _DEVICE_ID_MAX:
             raise ValueError(
                 f"can_id は {_DEVICE_ID_MIN:#04x}〜{_DEVICE_ID_MAX:#04x} の範囲"
                 f"(0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約): {can_id}"
             )
         super().__init__(name, can_id)
-        # フィードバック Byte7 の bit3 以上は MotorState に持たせず、ドライバ側で保持する
+        # フィードバック Byte7 の到達以外は MotorState に持たせず、ドライバ側で保持する
         # (MotorState は frozen dataclass で他ドライバ共通のため、汎用化を避けて専用属性に分離)
         self._e_stop_flag: bool = False
         self._watchdog_flag: bool = False
@@ -162,7 +162,7 @@ class GenericDriver(MotorDriver):
 
     def update_state(self, msg: can.Message) -> MotorState:
         # decode_feedback は純粋関数のまま保ち、副作用 (フラグ保持) はここで処理する
-        # bit0 (到達) は MotorState.reached に反映、bit3 以上はドライバ属性に保持
+        # 到達は MotorState.reached に反映、それ以外はドライバ属性に保持
         flags = msg.data[7]
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
@@ -197,7 +197,7 @@ class GenericDriver(MotorDriver):
         *,
         tolerance: float | None = None,
     ) -> bool:
-        # 自作モタドラはフィードバック bit0 に到達フラグを持つ。
+        # 自作モタドラはフィードバックに到達フラグを持つ。
         # 位置決めは行き過ぎ・オーバーシュートを含むため、ファームの到達判定を優先する
         if mode is ControlMode.POSITION and not self._state.reached:
             return False
@@ -208,22 +208,22 @@ class GenericDriver(MotorDriver):
     # ------------------------------------------------------------------ #
     @property
     def e_stop_active(self) -> bool:
-        """ファーム側の緊急停止ラッチが有効か (FEEDBACK bit3)。"""
+        """ファーム側の緊急停止ラッチが有効か (FEEDBACK の緊急停止ビット)。"""
         return self._e_stop_flag
 
     @property
     def watchdog_active(self) -> bool:
-        """コマンドウォッチドッグ作動中か (FEEDBACK bit4, 仕様書 §5.1)。"""
+        """コマンドウォッチドッグ作動中か (FEEDBACK のウォッチドッグビット, 仕様書 §5.1)。"""
         return self._watchdog_flag
 
     @property
     def device_id_unconfigured(self) -> bool:
-        """DIP スイッチのデバイス ID が未設定 (0x00) か (FEEDBACK bit5)。"""
+        """DIP スイッチのデバイス ID が未設定 (0x00) か (FEEDBACK のデバイス ID 未設定ビット)。"""
         return self._unconfigured_id_flag
 
     @property
     def sensor_active(self) -> bool:
-        """このデバイスのセンサ入力が入っているか (FEEDBACK bit6, 仕様書 §5.2)。
+        """このデバイスのセンサ入力が入っているか (FEEDBACK のセンサビット, 仕様書 §5.2)。
 
         基板のセンサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
         「何番のセンサか」はこのドライバのモータ名と can_id が表す。
@@ -239,7 +239,7 @@ class GenericDriver(MotorDriver):
     def is_fault(self) -> bool:
         # デバイス ID 未設定は基板の設定ミスで駆動自体が拒否される状態であり、
         # 試合前に必ず気付く必要があるため FAULT にする。
-        # 緊急停止中 (bit3) とウォッチドッグ作動中 (bit4) は正常な安全動作なので含めない。
+        # 緊急停止中とウォッチドッグ作動中は正常な安全動作なので含めない。
         # 過電流・過熱はどちらの基板も検出手段を持たない (仕様書 §3.2)
         return self._unconfigured_id_flag
 
@@ -308,7 +308,7 @@ class GenericDriver(MotorDriver):
         if context.mode is not ControlMode.POSITION:
             return (True, None) if passed else (False, detail)
 
-        # 位置決めの行き過ぎ・整定中はファームの到達フラグ (§3.2 bit0) が持つ
+        # 位置決めの行き過ぎ・整定中はファームの到達フラグ (§3.2) が持つ
         if passed and self._state.reached:
             return True, None
         if detail is None:

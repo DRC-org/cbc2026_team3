@@ -73,22 +73,22 @@ class TestBaseIsTargetReached:
 class TestGenericIsTargetReached:
     def test_position_requires_reached_flag(self) -> None:
         driver = GenericDriver("g", 1)
-        feed_generic(driver, position=10.0, flags=0x00)
+        feed_generic(driver, position=10.0)
         assert driver.is_target_reached(10.0, ControlMode.POSITION) is False
 
     def test_position_reached_flag_and_within_tolerance(self) -> None:
         driver = GenericDriver("g", 1)
-        feed_generic(driver, position=10.0, flags=0x01)
+        feed_generic(driver, position=10.0, reached=True)
         assert driver.is_target_reached(10.0, ControlMode.POSITION) is True
 
     def test_position_reached_flag_but_far_from_target(self) -> None:
         driver = GenericDriver("g", 1)
-        feed_generic(driver, position=30.0, flags=0x01)
+        feed_generic(driver, position=30.0, reached=True)
         assert driver.is_target_reached(10.0, ControlMode.POSITION) is False
 
     def test_velocity_uses_base_comparison(self) -> None:
         driver = GenericDriver("g", 1)
-        feed_generic(driver, velocity=100.0, flags=0x00)
+        feed_generic(driver, velocity=100.0)
         assert driver.is_target_reached(102.0, ControlMode.VELOCITY) is True
         assert driver.is_target_reached(120.0, ControlMode.VELOCITY) is False
 

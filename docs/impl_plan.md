@@ -2283,7 +2283,7 @@ health:
 | 6-3 | `lib/drivers/base.py` (修正) | `MotorDriver` に `has_thermal_warning()` / `has_overcurrent_warning()` / `is_fault()` のデフォルト実装を追加 |
 | 6-4 | `lib/drivers/m3508.py` (修正) | C620 フィードバックの温度・電流からフラグ判定 |
 | 6-5 | `lib/drivers/edulite05.py` (修正) | RobStride のステータス領域を解釈 |
-| 6-6 | `lib/drivers/generic.py` (修正) | `FEEDBACK` の状態フラグを解釈（bit の割り当ては `docs/motor_driver_can_protocol.md` §3.2。bit5＝デバイス ID 未設定は `is_fault`、bit3・bit4 は動作確認を拒否する理由になる）|
+| 6-6 | `lib/drivers/generic.py` (修正) | `FEEDBACK` の状態フラグを解釈（ビットの割り当ては `docs/motor_driver_can_protocol.md` §3.2。デバイス ID 未設定は `is_fault`、緊急停止とウォッチドッグは動作確認を拒否する理由になる）|
 | 6-7 | `tests/test_can_manager_health.py` | **テスト先行**: 受信タイムアウト → STALE、送信失敗 → DOWN 遷移、`bus.state` 反映 |
 | 6-8 | `lib/can_manager.py` (修正) | 送受信時刻記録、`bus.state` ポーリング、`health()` メソッド、`_health_check_loop` 追加 |
 | 6-9 | `tests/test_server_health.py` | **テスト先行**: WS state に `health` 同梱、`GET /health` の 200/503、`health_change` push |

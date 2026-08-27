@@ -57,7 +57,7 @@ uint8_t MotorSafety::statusFlags(uint32_t nowMs) const {
     if (latched_) {
         flags |= status_flag::kEStop;
     }
-    // bit4 は「CAN 通信が途絶した」ことの報告なので、指令をまだ 1 通も受けていない
+    // ウォッチドッグのビットは「CAN 通信が途絶した」ことの報告なので、指令をまだ 1 通も受けていない
     // 起動直後には立てない。立てると PC 側 check_safety_error() がセッティングタイムの
     // 動作確認を指令送信前に打ち切り、健全な基板の配線を疑わせる誤誘導になる。
     // 出力禁止（isOutputAllowed）は従来どおり未受信でも掛かったままにする。

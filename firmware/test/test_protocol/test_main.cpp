@@ -220,7 +220,7 @@ static void test_encode_feedback_layout() {
     TEST_ASSERT_EQUAL_UINT8(0, out[4]);
     TEST_ASSERT_EQUAL_UINT8(0, out[5]);
     TEST_ASSERT_EQUAL_UINT8(0, out[6]);
-    TEST_ASSERT_EQUAL_UINT8(0x09, out[7]);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached | status_flag::kEStop, out[7]);
 }
 
 // int16 をそのままキャストすると +4000deg が負値に化け、PC 側が逆方向へ位置制御しかねない。
@@ -728,9 +728,9 @@ static void test_status_flag_bits_do_not_overlap() {
         TEST_ASSERT_EQUAL_UINT8(0, seen & bit);
         seen = static_cast<uint8_t>(seen | bit);
     }
-    TEST_ASSERT_EQUAL_UINT8(1 << 6, status_flag::kSensor);
-    // bit1（過電流）/ bit2（過熱）/ bit7 は予約。どちらの基板もセンサを持たない
-    TEST_ASSERT_EQUAL_UINT8(0, seen & ((1 << 1) | (1 << 2) | (1 << 7)));
+    // **頭から詰まっていること。** 途中に空きがあると、項目が増えたときに
+    // 「空いているビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる
+    TEST_ASSERT_EQUAL_UINT8(0x1F, seen);
 }
 
 // センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは

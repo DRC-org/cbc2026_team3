@@ -50,7 +50,7 @@ class DcChannel {
 
     bool isOutputAllowed(uint32_t nowMs) const;
 
-    // FEEDBACK Byte7 の bit3 / bit4（他のビットは呼び出し側で OR する）。
+    // FEEDBACK Byte7 の緊急停止 / ウォッチドッグのビット（他は呼び出し側で OR する）。
     uint8_t safetyStatusFlags(uint32_t nowMs) const;
 
     // ---- 目標 duty（仕様書 §4 / §5.3）----

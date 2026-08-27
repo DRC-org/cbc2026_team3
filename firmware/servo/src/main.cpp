@@ -315,8 +315,9 @@ static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
         return flags;
     }
 
-    // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
-    // bit4 は指令を一度でも受けた後の満了でのみ立ち、無効化した基板では立たない。
+    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
+    // ウォッチドッグのビットは指令を一度でも受けた後の満了でのみ立ち、
+    // 無効化した基板では立たない。
     // ここで手で組み立て直すと、DC 用と同じ条件で立つ保証が無くなる。
     flags |= g_channel[slot].safetyStatusFlags(nowMs);
     if (g_channel[slot].isReached()) {
@@ -345,7 +346,7 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
-    // ID 未設定スロットは CAN ID 0x100 で送ることになるが、PC 側に bit5（設定忘れ）を
+    // ID 未設定スロットは CAN ID 0x100 で送ることになるが、PC 側へ「デバイス ID 未設定」を
     // 届ける方を優先する。
     g_can.sendMsgBuf(buildCanId(CommandType::Feedback, g_deviceId[slot]), 0, kFrameLength,
                      data);
@@ -662,7 +663,7 @@ void setup() {
         // 全スロットが同じ周期で同時に送るとフレームのバーストになり、他バスの
         // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
         // 周期を等分した位相をスロットごとにずらして平準化する。
-        // ID 未設定のスロットも bit5 を知らせるために送るので、ここは全スロット分やる。
+        // ID 未設定のスロットも「デバイス ID 未設定」を知らせるために送るので、ここは全スロット分やる。
         g_feedbackTimer[slot].setLastMs(startMs - g_feedbackIntervalMs +
                                         (g_feedbackIntervalMs * slot) / kServoSlotCount);
 
