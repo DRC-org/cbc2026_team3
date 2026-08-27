@@ -38,7 +38,8 @@ class _StubCANManager:
 
 
 def _target_value(msg: can.Message) -> float:
-    return struct.unpack_from("<f", msg.data, 2)[0]
+    # SET_TARGET は Byte1-2 の int16 固定小数点 (仕様書 §3.1 / §4)
+    return struct.unpack_from("<h", msg.data, 1)[0] / 10000.0
 
 
 class _Fixture:

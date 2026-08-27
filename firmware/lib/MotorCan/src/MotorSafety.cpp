@@ -57,6 +57,13 @@ uint8_t MotorSafety::statusFlags(uint32_t nowMs) const {
     if (latched_) {
         flags |= status_flag::kEStop;
     }
+    // **基板の再起動を PC から見えるようにする（仕様書 §3.2）。** サーボ基板は
+    // setup() で config.h の初期角へ駆動するので、試合中の瞬断は「機構が勝手に飛ぶ」
+    // 形で現れるのに、これが無いと FEEDBACK 上は何事もなかったように見える
+    // （ウォッチドッグのビットは「一度でも受けた後の満了」でしか立たない）。
+    if (!everFed_) {
+        flags |= status_flag::kNeverCommanded;
+    }
     // ウォッチドッグのビットは「CAN 通信が途絶した」ことの報告なので、指令をまだ 1 通も受けていない
     // 起動直後には立てない。立てると PC 側 check_safety_error() がセッティングタイムの
     // 動作確認を指令送信前に打ち切り、健全な基板の配線を疑わせる誤誘導になる。

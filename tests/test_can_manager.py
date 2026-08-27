@@ -325,8 +325,9 @@ class TestReceiveLoopRobustness:
 
     @staticmethod
     def _feedback_msg(device_id: int, position_dg: int) -> can.Message:
-        data = bytearray(8)
-        struct.pack_into("<h", data, 0, position_dg)
+        # Byte0=状態フラグ / Byte1-2=位置 (仕様書 §3.2)
+        data = bytearray([0x00])
+        data.extend(struct.pack("<h", position_dg))
         return can.Message(
             arbitration_id=GenericDriver.build_can_id(CommandType.FEEDBACK, device_id),
             data=bytes(data),
@@ -345,7 +346,7 @@ class TestReceiveLoopRobustness:
         with pytest.raises(asyncio.CancelledError):
             await mgr._receive_loop("can0")
 
-    @pytest.mark.parametrize("reserved_command_type", [0b100, 0b101, 0b110])
+    @pytest.mark.parametrize("reserved_command_type", [0b101, 0b110, 0b111])
     async def test_receive_loop_survives_reserved_command_type(
         self, reserved_command_type: int
     ) -> None:

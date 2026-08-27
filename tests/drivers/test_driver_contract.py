@@ -141,7 +141,7 @@ class TestStandstillNeverPasses:
     def test_generic_velocity_standstill_fails(self) -> None:
         drv = GenericDriver("g", 0x01, control_type=ControlMode.VELOCITY)
         _msg, context = drv.check_command(magnitude=5.0)
-        feed_generic(drv, velocity=0.0)
+        feed_generic(drv)
 
         passed, detail = drv.evaluate_check_result(context)
 

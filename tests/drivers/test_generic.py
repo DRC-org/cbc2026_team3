@@ -20,10 +20,10 @@ class TestCanIdRange:
     無検査だった。範囲外は静かに壊れる:
 
     - ``0xFF`` は E_STOP ブロードキャストの予約 ID。``activation_steps()`` が
-      緊急停止**解除**フレームを 0x7FF へ送り、共有 can_generic バス上の
+      緊急停止**解除**フレームを 0x0FF へ送り、共有 can_generic バス上の
       全基板のラッチをまとめて外す
-    - ``0x1FF`` はコマンド種別のビットを侵食し、SET_TARGET が FEEDBACK として
-      読まれるフレームになる。何も駆動せず永久に STALE
+    - ``0x1FF`` はコマンド種別のビットを侵食し、E_STOP が SET_TARGET として
+      読まれるフレームになる
     - ``0x00`` は「DIP 設定忘れ」の予約。ファームは駆動を拒否する
     """
 
@@ -39,55 +39,100 @@ class TestCanIdRange:
 
 class TestBuildCanId:
     def test_build_can_id(self):
-        assert GenericDriver.build_can_id(CommandType.SET_TARGET, 0x01) == 0x001
-        assert GenericDriver.build_can_id(CommandType.FEEDBACK, 0x01) == 0x101
-        assert GenericDriver.build_can_id(CommandType.SET_MODE, 0x10) == 0x210
-        assert GenericDriver.build_can_id(CommandType.E_STOP, 0xFF) == 0x7FF
+        assert GenericDriver.build_can_id(CommandType.E_STOP, 0x01) == 0x001
+        assert GenericDriver.build_can_id(CommandType.SET_TARGET, 0x01) == 0x101
+        assert GenericDriver.build_can_id(CommandType.SET_PARAM, 0x10) == 0x210
+        assert GenericDriver.build_can_id(CommandType.FEEDBACK, 0x01) == 0x301
+        assert GenericDriver.build_can_id(CommandType.E_STOP, 0xFF) == 0x0FF
+
+    def test_e_stop_outranks_every_other_frame(self):
+        """CAN の調停は ID が小さいほど優先。止めるフレームが追い越されてはならない。
+
+        かつては E_STOP が 0b111 で、ブロードキャスト停止の 0x7FF は
+        Standard ID 全 2048 個のうち最も優先度が低かった。
+        """
+        dev = 0x7F
+        estop = GenericDriver.build_can_id(CommandType.E_STOP, dev)
+        for other in (
+            CommandType.SET_TARGET,
+            CommandType.SET_PARAM,
+            CommandType.FEEDBACK,
+            CommandType.INFO,
+        ):
+            assert estop < GenericDriver.build_can_id(other, dev)
+        # ブロードキャスト停止も、他のどのフレームより先に通ること
+        assert GenericDriver.build_can_id(CommandType.E_STOP, 0xFF) < GenericDriver.build_can_id(
+            CommandType.SET_TARGET, 0x00
+        )
 
 
 class TestParseCanId:
     def test_parse_can_id(self):
-        cmd, dev = GenericDriver.parse_can_id(0x001)
+        cmd, dev = GenericDriver.parse_can_id(0x101)
         assert cmd == CommandType.SET_TARGET
         assert dev == 0x01
 
-        cmd, dev = GenericDriver.parse_can_id(0x101)
+        cmd, dev = GenericDriver.parse_can_id(0x301)
         assert cmd == CommandType.FEEDBACK
         assert dev == 0x01
 
-        cmd, dev = GenericDriver.parse_can_id(0x7FF)
+        cmd, dev = GenericDriver.parse_can_id(0x0FF)
         assert cmd == CommandType.E_STOP
         assert dev == 0xFF
 
 
 class TestEncodeTarget:
+    """SET_TARGET (仕様書 §3.1)。Byte0=制御タイプ / Byte1-2=目標値 (int16)。"""
+
     def setup_method(self):
         self.drv = GenericDriver("test_motor", 0x01)
 
     def test_encode_target_position(self):
         msg = self.drv.encode_target(ControlMode.POSITION, 90.0)
-        assert msg.arbitration_id == 0x001
+        assert msg.arbitration_id == 0x101
         assert msg.is_extended_id is False
+        # 途中に予約バイトを挟まないので DLC=3
+        assert len(msg.data) == 3
         assert msg.data[0] == 0  # position
-        assert msg.data[1] == 0x00
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(90.0)
-        assert msg.data[6] == 0x00
-        assert msg.data[7] == 0x00
-
-    def test_encode_target_velocity(self):
-        msg = self.drv.encode_target(ControlMode.VELOCITY, -100.5)
-        assert msg.arbitration_id == 0x001
-        assert msg.data[0] == 1  # velocity
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(-100.5)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 900  # 0.1deg 単位
 
     def test_encode_target_duty(self):
         msg = self.drv.encode_target(ControlMode.DUTY, 0.75)
-        assert msg.arbitration_id == 0x001
         assert msg.data[0] == 2  # duty
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(0.75)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 7500  # 1/10000 単位
+
+    def test_encode_target_keeps_sign(self):
+        msg = self.drv.encode_target(ControlMode.DUTY, -0.75)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == -7500
+
+    def test_encode_target_saturates_instead_of_wrapping(self):
+        """int16 をそのまま折り返すと +4000deg が負値に化け、基板が逆方向へ動く。"""
+        msg = self.drv.encode_target(ControlMode.POSITION, 1e6)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 32767
+
+        msg = self.drv.encode_target(ControlMode.POSITION, -1e6)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == -32768
+
+    def test_encode_target_rounds_instead_of_truncating(self):
+        """切り捨てると 0.1deg 刻みの指令が 1 つ下へずれ続ける。
+
+        yaml に書く値は 10 進小数なので、5.55deg のように刻みの中間へ落ちる。
+        int() で落とすと常に手前側へ寄り、機構が目標に届かない。
+        """
+        msg = self.drv.encode_target(ControlMode.POSITION, 5.55)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 56
+
+        msg = self.drv.encode_target(ControlMode.POSITION, -5.55)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == -56
+
+        # 0.3 は 2 進で正確に表せない。3000 になること (2999 では duty がずれる)
+        msg = self.drv.encode_target(ControlMode.DUTY, 0.3)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 3000
+
+    def test_encode_target_rejects_nan(self):
+        """yaml に NaN が紛れても 0 に落とす。CAN 上には int16 しか流れない (§4)。"""
+        msg = self.drv.encode_target(ControlMode.POSITION, float("nan"))
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
 
 
 class TestDecodeFeedback:
@@ -95,19 +140,32 @@ class TestDecodeFeedback:
         self.drv = GenericDriver("test_motor", 0x01)
 
     def test_decode_feedback(self):
-        data = bytearray(8)
-        struct.pack_into("<h", data, 0, 1800)  # 180.0 deg
-        struct.pack_into("<h", data, 2, 300)  # 300 rpm
-        struct.pack_into("<h", data, 4, 1500)  # 1500 mA
-        data[6] = 45  # 45℃
-        data[7] = 0x00
+        # Byte0=状態フラグ / Byte1-2=位置 (0.1deg)
+        data = bytearray([0x00])
+        data.extend(struct.pack("<h", 1800))  # 180.0 deg
 
-        msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
+        msg = can.Message(arbitration_id=0x301, data=bytes(data), is_extended_id=False)
         state = self.drv.decode_feedback(msg)
 
         assert state.position == pytest.approx(180.0)
-        assert state.velocity == pytest.approx(300.0)
         assert state.reached is False
+
+    def test_decode_feedback_without_position(self):
+        """位置を持たない基板は状態フラグ 1 バイトだけを送る (DLC=1)。"""
+        msg = can.Message(arbitration_id=0x301, data=bytes([0x00]), is_extended_id=False)
+        state = self.drv.decode_feedback(msg)
+        assert state.position == pytest.approx(0.0)
+
+    def test_decode_feedback_ignores_trailing_bytes(self):
+        """Byte3 以降は予約。素通しにすると、他プロトコルの相乗りフレームが値になる。"""
+        data = bytearray([0x00])
+        data.extend(struct.pack("<h", 1800))
+        data.extend(b"\xff\xff\xff")
+        msg = can.Message(arbitration_id=0x301, data=bytes(data), is_extended_id=False)
+        state = self.drv.decode_feedback(msg)
+        assert state.position == pytest.approx(180.0)
+        assert state.current == pytest.approx(0.0)
+        assert state.temperature == pytest.approx(0.0)
         # Byte4-6 は予約。**読んではならない** (仕様書 §3.2)。どちらの基板もセンサを
         # 持たないので、値を持ち込むと「常に 0 の電流・温度」が UI とヘルス判定へ流れ込む。
         # ここではあえて 0 以外を積んであり、素通しにすると 1500.0 / 45.0 が漏れて落ちる
@@ -115,21 +173,15 @@ class TestDecodeFeedback:
         assert state.temperature == pytest.approx(0.0)
 
     def test_decode_feedback_with_flags(self):
-        data = bytearray(8)
-        struct.pack_into("<h", data, 0, 0)
-        struct.pack_into("<h", data, 2, 0)
-        struct.pack_into("<h", data, 4, 0)
-        data[6] = 80
-        data[7] = 0b00000001  # reached=True
+        data = bytearray([0b00000001])  # reached=True
+        data.extend(struct.pack("<h", 0))
 
-        msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
-        state = self.drv.decode_feedback(msg)
-        assert state.reached is True
+        msg = can.Message(arbitration_id=0x301, data=bytes(data), is_extended_id=False)
+        assert self.drv.decode_feedback(msg).reached is True
 
-        data[7] = 0b00000101  # reached=True, overheat=True
-        msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
-        state = self.drv.decode_feedback(msg)
-        assert state.reached is True
+        data[0] = 0b00000101  # reached=True, watchdog=True
+        msg = can.Message(arbitration_id=0x301, data=bytes(data), is_extended_id=False)
+        assert self.drv.decode_feedback(msg).reached is True
 
 
 class TestMatchesFeedback:
@@ -137,23 +189,24 @@ class TestMatchesFeedback:
         self.drv = GenericDriver("test_motor", 0x01)
 
     def test_matches_feedback(self):
-        msg = can.Message(arbitration_id=0x101, data=bytes(8), is_extended_id=False)
+        msg = can.Message(arbitration_id=0x301, data=bytes(8), is_extended_id=False)
         assert self.drv.matches_feedback(msg) is True
 
     def test_matches_feedback_wrong_device(self):
-        msg = can.Message(arbitration_id=0x102, data=bytes(8), is_extended_id=False)
+        msg = can.Message(arbitration_id=0x302, data=bytes(3), is_extended_id=False)
         assert self.drv.matches_feedback(msg) is False
 
-        msg_target = can.Message(arbitration_id=0x001, data=bytes(8), is_extended_id=False)
+        msg_target = can.Message(arbitration_id=0x101, data=bytes(3), is_extended_id=False)
         assert self.drv.matches_feedback(msg_target) is False
 
 
 class TestEncodeEStop:
     def test_encode_e_stop(self):
         msg = GenericDriver.encode_e_stop()
-        assert msg.arbitration_id == 0x7FF
+        # ブロードキャスト停止は他のどのフレームより優先度が高い ID (仕様書 §3.5)
+        assert msg.arbitration_id == 0x0FF
         assert msg.is_extended_id is False
-        assert msg.data == bytes(8)
+        assert msg.data == bytes(3)
 
 
 class TestHealth:
@@ -177,7 +230,7 @@ class TestHealth:
         素通しにすると、他プロトコルの相乗りフレームや古いファームのゴミが
         そのまま過熱・過電流として読まれ、試合中に理由のない FAULT が出る。
         """
-        feed_generic(self.drv, temp=90, current_ma=9000, flags=_RESERVED_BITS)
+        feed_generic(self.drv, position=0.0, flags=_RESERVED_BITS, reserved=b"\xff\xff\xff")
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.has_thermal_warning(temp_warning_c=65.0) is False
         assert self.drv.has_thermal_fault(temp_critical_c=80.0) is False
@@ -244,29 +297,16 @@ class TestSensorInput:
 class TestMotorCheck:
     """アクチュエータ動作確認 API (Phase 6 段階⑦)。"""
 
-    def _feed(
-        self,
-        drv: GenericDriver,
-        *,
-        position_dg: int = 0,
-        velocity_rpm: int = 0,
-        **kwargs: object,
-    ) -> None:
-        # フィードバック byte0-1 は 0.1deg 単位。呼び出し側が生値で書いているため deg へ戻す
-        feed_generic(
-            drv,
-            position=position_dg / 10.0,
-            velocity=velocity_rpm,
-            **kwargs,  # type: ignore[arg-type]
-        )
+    def _feed(self, drv: GenericDriver, *, position_dg: int = 0, **kwargs: object) -> None:
+        # フィードバックの位置は 0.1deg 単位。呼び出し側が生値で書いているため deg へ戻す
+        feed_generic(drv, position=position_dg / 10.0, **kwargs)  # type: ignore[arg-type]
 
     def test_check_command_default_position(self):
         drv = GenericDriver("test_motor", 0x01)
         msg, context = drv.check_command(magnitude=0.1)
         # control_type デフォルトは POSITION
         assert msg.data[0] == 0  # position
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(0.1)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 1  # 0.1deg → 生値 1
         assert context.target == pytest.approx(0.1)
         assert context.mode is ControlMode.POSITION
 
@@ -274,16 +314,14 @@ class TestMotorCheck:
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
         msg, context = drv.check_command(magnitude=50.0)
         assert msg.data[0] == 1  # velocity
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(50.0)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 500
         assert context.mode is ControlMode.VELOCITY
 
     def test_check_command_duty_mode(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
         msg, _context = drv.check_command(magnitude=0.3)
         assert msg.data[0] == 2  # duty
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(0.3)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 3000  # 1/10000 単位
 
     def test_evaluate_position_passed_when_reached_and_within_tolerance(self):
         drv = GenericDriver("test_motor", 0x01)
@@ -303,22 +341,15 @@ class TestMotorCheck:
         assert passed is False
         assert detail is not None
 
-    def test_evaluate_velocity_passed(self):
+    def test_evaluate_velocity_is_never_auto_judged(self):
+        """速度もプロトコルから外れたので自動判定できない (仕様書 §3.2)。"""
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
         _, context = drv.check_command(magnitude=100.0)
-        # velocity=100rpm (許容 5)
-        self._feed(drv, velocity_rpm=98)
-        passed, detail = drv.evaluate_check_result(context)
-        assert passed is True
-        assert detail is None
-
-    def test_evaluate_velocity_failed(self):
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
-        _, context = drv.check_command(magnitude=100.0)
-        self._feed(drv, velocity_rpm=20)
+        self._feed(drv)
         passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
+        assert "magnitude" in detail
 
     def test_evaluate_duty_is_never_auto_judged(self):
         """duty は自動判定できない。回転が観測されたように見えても PASSED にしない。
@@ -330,7 +361,7 @@ class TestMotorCheck:
         """
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
         _, context = drv.check_command(magnitude=0.3)
-        self._feed(drv, velocity_rpm=50)
+        self._feed(drv)
         passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
@@ -341,15 +372,13 @@ class TestMotorCheck:
         drv = GenericDriver("test_motor", 0x01)
         msg = drv.reset_after_check()
         assert msg.data[0] == 0  # POSITION
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(0.0)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
 
     def test_reset_after_check_velocity_mode_sends_zero(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
         msg = drv.reset_after_check()
         assert msg.data[0] == 1  # VELOCITY
-        value = struct.unpack_from("<f", msg.data, 2)[0]
-        assert value == pytest.approx(0.0)
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
 
 
 class TestMatchesFeedbackRobustness:
@@ -370,17 +399,18 @@ class TestMatchesFeedbackRobustness:
 
     def test_extended_frame_returns_false(self):
         # 同一バスに Extended Frame の他プロトコルが相乗りしても壊れないこと
-        msg = can.Message(arbitration_id=0x101, data=bytes(8), is_extended_id=True)
+        msg = can.Message(arbitration_id=0x301, data=bytes(8), is_extended_id=True)
         assert self.drv.matches_feedback(msg) is False
 
     def test_try_parse_can_id_returns_none_for_reserved(self):
         assert GenericDriver.try_parse_can_id((0b101 << 8) | 0x01) is None
-        assert GenericDriver.try_parse_can_id(0x101) == (CommandType.FEEDBACK, 0x01)
+        assert GenericDriver.try_parse_can_id(0x301) == (CommandType.FEEDBACK, 0x01)
 
     def test_parse_can_id_still_raises_for_reserved(self):
         # 後方互換: 明示的に解析する経路では従来どおり例外を投げる
+        # 予約は 0b101-0b111 (仕様書 §2.1)
         with pytest.raises(ValueError):
-            GenericDriver.parse_can_id((0b100 << 8) | 0x01)
+            GenericDriver.parse_can_id((0b101 << 8) | 0x01)
 
 
 class TestEncodeEStopClear:
@@ -388,12 +418,12 @@ class TestEncodeEStopClear:
 
     def test_encode_e_stop_clear_broadcast(self):
         msg = GenericDriver.encode_e_stop_clear()
-        assert msg.arbitration_id == 0x7FF
+        assert msg.arbitration_id == 0x0FF
         assert msg.is_extended_id is False
         assert msg.data[0] == 0x01
         assert msg.data[1] == 0x5A
         assert msg.data[2] == 0xA5
-        assert msg.data[3:] == bytes(5)
+        assert len(msg.data) == 3
 
     def test_encode_e_stop_clear_specific_device(self):
         msg = GenericDriver.encode_e_stop_clear(0x03)
@@ -403,8 +433,8 @@ class TestEncodeEStopClear:
     def test_encode_e_stop_is_unchanged(self):
         # 停止フレームは Byte0=0x00 のまま (仕様書 §3.5)
         msg = GenericDriver.encode_e_stop()
-        assert msg.arbitration_id == 0x7FF
-        assert msg.data == bytes(8)
+        assert msg.arbitration_id == 0x0FF
+        assert msg.data == bytes(3)
 
 
 class TestActivationSteps:

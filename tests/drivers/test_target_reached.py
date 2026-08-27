@@ -86,11 +86,17 @@ class TestGenericIsTargetReached:
         feed_generic(driver, position=30.0, reached=True)
         assert driver.is_target_reached(10.0, ControlMode.POSITION) is False
 
-    def test_velocity_uses_base_comparison(self) -> None:
+    def test_velocity_has_no_feedback_to_compare(self) -> None:
+        """自作モタドラは速度を返さない (仕様書 §3.2)。
+
+        プロトコルから外したので MotorState.velocity は常に 0。目標 0 以外は
+        永久に到達しない。両基板とも velocity モードを受理しないので実害は無いが、
+        「返らない量で判定しようとしている」ことが分かる形にしておく。
+        """
         driver = GenericDriver("g", 1)
-        feed_generic(driver, velocity=100.0)
-        assert driver.is_target_reached(102.0, ControlMode.VELOCITY) is True
-        assert driver.is_target_reached(120.0, ControlMode.VELOCITY) is False
+        feed_generic(driver)
+        assert driver.is_target_reached(100.0, ControlMode.VELOCITY) is False
+        assert driver.is_target_reached(0.0, ControlMode.VELOCITY) is True
 
 
 class TestM3508IsTargetReached:

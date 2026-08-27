@@ -15,6 +15,8 @@
 
 #include <stdint.h>
 
+#include "MotorCanProtocol.h"
+
 // ===========================================================================
 // ピン配置（チーム提供のサンプルコードの配線に準拠）
 // ===========================================================================
@@ -67,35 +69,29 @@ constexpr uint8_t kDipBitCount = 2;
 // PC からは別々のモータとして見える（サーボ基板と同じ扱い）。
 constexpr uint8_t kDcChannelCount = 3;
 
+// デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割（仕様書 §2.2）。
+// 帯も刻み幅も連続ブロック性も要らず、DIP は基板番号そのもの。
+//
+//   基板番号 | ch0  | ch1  | ch2
+//   ---------+------+------+------
+//      0     | 0x80 | 0x81 | 0x82
+//      1     | 0x88 | 0x89 | 0x8A
+//      2     | 0x90 | 0x91 | 0x92
+//      3     | 0x98 | 0x99 | 0x9A
+//
+// candump に 0x8A が流れていれば「DC 基板 1 枚目の ch2」と直接読める。
+constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Dc;
+
+// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
+// **プロトコルかピン配置を変えたら必ず上げること。**
+constexpr uint8_t kFirmwareVersion = 1;
+
 struct DcChannelConfig {
-    uint8_t deviceId;  // DIP オフセットを足す前の基準デバイス ID
     uint8_t pwmPin;
     uint8_t dirPin;
-    float maxDuty;     // 仕様書 §5.3 の duty 上限（SET_PARAM 0x03 で変更可）
+    float maxDuty;     // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
     const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
 };
-
-// DIP は「チャンネル表全体に加えるブロックオフセット」で、刻み幅はチャンネル数。
-// 刻み幅 1 で足すと隣の DIP 設定の基板とブロックが重なり、同じ ID の基板が 2 枚
-// バス上に並ぶ（1 通の SET_TARGET で 2 台が動き、片方は永久に STALE になる）。
-//
-//   DIP | ch0  | ch1  | ch2
-//   ----+------+------+------
-//    0  | 0x11 | 0x12 | 0x13
-//    1  | 0x14 | 0x15 | 0x16
-//    2  | 0x17 | 0x18 | 0x19
-//    3  | 0x1A | 0x1B | 0x1C
-//
-// デバイス ID の帯は基板種別ごとに切ってある（仕様書 §2.2）。
-//
-//   0x01 - 0x10 : サーボ基板（5 スロット × 3 枚）
-//   0x11 - 0x1C : DC 基板  （3ch     × 4 枚）  ← ここ
-//
-// 帯を越えたブロックは未設定へ倒す。倒さずに割り当てると、DIP を上げただけで
-// 隣の帯を踏み、同じ ID の基板が 2 枚バス上に並ぶ。未設定にしておけば LED が
-// 赤く速く点滅し、DIP の設定ミスがその場で目に見える。
-constexpr uint8_t kDeviceIdStride = kDcChannelCount;
-constexpr uint8_t kDeviceIdBandEnd = 0x1C;
 
 // TODO(実機で確認): max_duty はモータとギヤ比が決まってから詰めること。
 // サンプルは 50% を上限にしている。ここは安全側に 30% から始める。
@@ -104,9 +100,9 @@ constexpr float kDefaultMaxDuty = 0.30f;
 // 既定は config/main_hand.yaml の実構成に合わせてある。ch1 / ch2 は現在未使用で、
 // PC 側の yaml にモータとして登録されていない（指令が来ないので回らない）。
 constexpr DcChannelConfig kDcChannels[kDcChannelCount] = {
-    {0x11, kPinPwm[0], kPinDir[0], kDefaultMaxDuty, "conveyor"},
-    {0x12, kPinPwm[1], kPinDir[1], kDefaultMaxDuty, "ch1"},
-    {0x13, kPinPwm[2], kPinDir[2], kDefaultMaxDuty, "ch2"},
+    {kPinPwm[0], kPinDir[0], kDefaultMaxDuty, "conveyor"},
+    {kPinPwm[1], kPinDir[1], kDefaultMaxDuty, "ch1"},
+    {kPinPwm[2], kPinDir[2], kDefaultMaxDuty, "ch2"},
 };
 
 // ===========================================================================
@@ -159,6 +155,9 @@ constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;
 
 // 正常時のハートビート点滅周期。ファームが生きていることを目視で確認するため。
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
+
+// INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
+constexpr uint32_t kInfoIntervalMs = 1000;
 
 // ===========================================================================
 // デバッグ用シリアル

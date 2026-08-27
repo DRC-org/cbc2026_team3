@@ -62,7 +62,8 @@ _SYSTEM_KEYS = frozenset({"can_buses", "health", "motor_check"})
 _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold")
 _MOTOR_CHECK_KEYS = frozenset({"per_motor_timeout_ms", "default_magnitude"})
 
-_ROBOT_KEYS = frozenset({"robot_name", "motors"})
+_ROBOT_KEYS = frozenset({"robot_name", "motors", "sensors"})
+_SENSOR_KEYS = frozenset({"bus", "can_id"})
 _COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id", "motor_check"})
 # ドライバ固有キー。他のドライバに書いても効かないため、混在は起動時に拒否する
 _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
@@ -160,11 +161,27 @@ class MotorConfig:
 
 
 @dataclass(frozen=True)
+class SensorConfig:
+    """自作基板のセンサ入力 1 つ分の設定 (config/<robot>.yaml の sensors)。
+
+    **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
+    自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。motors に書くと動作確認・
+    目標値再送・UI のモータ一覧に「常に 0 のモータ」として並んでしまうので、
+    受信登録とヘルス監視だけを行う別のセクションに分ける。
+    """
+
+    name: str
+    bus: str
+    can_id: int
+
+
+@dataclass(frozen=True)
 class RobotConfig:
     """ロボット 1 台分の検証済み設定 (config/<robot>.yaml)。"""
 
     robot_name: str
     motors: Mapping[str, MotorConfig]
+    sensors: Mapping[str, SensorConfig] = field(default_factory=dict)
     source: str = "<inline>"
 
 
@@ -355,6 +372,34 @@ def _optional_mode(
     return default if value is None else _mode(source, f"{path}.{key}", value, allowed)
 
 
+def _parse_sensor(
+    source: str, sensor_name: str, raw: object, buses: Mapping[str, str] | None
+) -> SensorConfig:
+    path = f"sensors.{sensor_name}"
+    sensor = _require_mapping(source, path, raw)
+
+    for key in ("bus", "can_id"):
+        if sensor.get(key) is None:
+            raise ValueError(f"{source}: {path}.{key} が指定されていません")
+    _reject_unknown(source, path, sensor, _SENSOR_KEYS)
+
+    bus = str(sensor["bus"])
+    if buses is not None and bus not in buses:
+        raise ValueError(
+            f"{source}: {path}.bus に未定義のバス別名: {bus!r} "
+            f"(config/system.yaml の can_buses に定義済みなのは {', '.join(buses)})"
+        )
+
+    can_id = _integer(source, f"{path}.can_id", sensor["can_id"])
+    low, high = CAN_ID_RANGES["generic"]
+    if not low <= can_id <= high:
+        raise ValueError(
+            f"{source}: {path}.can_id が範囲外です: {can_id} "
+            f"(指定できるのは {low:#04x}〜{high:#04x})"
+        )
+    return SensorConfig(name=sensor_name, bus=bus, can_id=can_id)
+
+
 def _parse_motor(
     source: str, motor_name: str, raw: object, buses: Mapping[str, str] | None
 ) -> MotorConfig:
@@ -462,4 +507,27 @@ def load_robot_config(
         for name, motor_raw in motors_raw.items()
     }
 
-    return RobotConfig(robot_name=robot_name, motors=MappingProxyType(motors), source=source)
+    sensors_raw = raw.get("sensors")
+    sensors = (
+        {}
+        if sensors_raw is None
+        else {
+            str(name): _parse_sensor(source, str(name), sensor_raw, buses)
+            for name, sensor_raw in _require_mapping(source, "sensors", sensors_raw).items()
+        }
+    )
+
+    overlap = sorted(set(motors) & set(sensors))
+    if overlap:
+        # 同じ名前でモータとセンサが並ぶと、ヘルスの表示も CAN の登録も
+        # どちらを指しているのか読めなくなる
+        raise ValueError(
+            f"{source}: motors と sensors で名前が重複しています: {', '.join(overlap)}"
+        )
+
+    return RobotConfig(
+        robot_name=robot_name,
+        motors=MappingProxyType(motors),
+        sensors=MappingProxyType(sensors),
+        source=source,
+    )

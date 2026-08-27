@@ -97,58 +97,17 @@ static constexpr bool fixedPinsAreUnique() {
 }
 static_assert(fixedPinsAreUnique(), "config.h の固定ピン（SPI/CAN/RGB/DIP）が重複している");
 
-// デバイス ID がスロット間で重複すると、1 つの SET_TARGET が複数のサーボを動かす。
-static constexpr bool deviceIdsAreUnique() {
-    for (uint8_t i = 0; i < kServoSlotCount; ++i) {
-        for (uint8_t j = static_cast<uint8_t>(i + 1); j < kServoSlotCount; ++j) {
-            if (kServoSlots[i].deviceId == kServoSlots[j].deviceId) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-static_assert(deviceIdsAreUnique(), "config.h のスロット表でデバイス ID が重複している");
-
-// 基準デバイス ID は「刻み幅ぴったりの連続ブロック」でなければならない。
-// 幅が刻み幅より狭いと DIP を 1 段上げた基板のブロックが隣へ食い込み、
-// 広いと自分自身の別ブロックと重なる。どちらも同じ ID の基板が 2 枚並ぶ。
-// **センサに使うスロットも ID を 1 つ予約している**のはこの連続性のためで、
-// 予約をやめると配線で役割を変えた瞬間に幅が縮む。
-static constexpr bool deviceIdsFormOneBlock() {
-    uint8_t lo = kServoSlots[0].deviceId;
-    uint8_t hi = kServoSlots[0].deviceId;
-    for (uint8_t i = 1; i < kServoSlotCount; ++i) {
-        if (kServoSlots[i].deviceId < lo) lo = kServoSlots[i].deviceId;
-        if (kServoSlots[i].deviceId > hi) hi = kServoSlots[i].deviceId;
-    }
-    return static_cast<uint8_t>(hi - lo + 1) == kDeviceIdStride;
-}
-static_assert(deviceIdsFormOneBlock(),
-              "基準デバイス ID が刻み幅ぴったりの連続ブロックになっていない");
-
-// DIP=0 の時点で帯からはみ出していると、どう設定しても駆動できない基板になる。
-static constexpr bool baseBlockFitsInBand() {
-    for (uint8_t i = 0; i < kServoSlotCount; ++i) {
-        if (kServoSlots[i].deviceId > kDeviceIdBandEnd) {
-            return false;
-        }
-    }
-    return true;
-}
-static_assert(baseBlockFitsInBand(), "基準デバイス ID が kDeviceIdBandEnd を越えている");
-
-// **スロットの役割は自由に振ってよい。** サーボ・センサ・空きが何個ずつでも動く
-// （センサだけの基板も成立する）。1 スロット = 1 CAN デバイスに揃えてあり、センサも
-// 自分のデバイス ID で FEEDBACK を送るので、個数に関する制約は無い。
-//
-// かつてはセンサの状態をサーボの FEEDBACK に相乗りさせており、そのせいで
-// 「センサは予約ビットの数まで」「サーボが 1 つ以上要る」という制約があった。
+// デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
+// スロット間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）。
+// かつては基準 ID の表を持ち、重複・連続ブロック性・帯・センサのビット割り当ての
+// 4 つを static_assert で見張っていたが、ビット分割と 1 デバイス 1 ビットで規則ごと消えた。
 
 // 下の g_servo / g_channel は各スロットを明示的に初期化している。
 // スロットを増やすときはそれらの初期化子も一緒に足すこと。
 static_assert(kServoSlotCount == 5,
               "スロット数を変えたら g_servo / g_channel の初期化子も更新すること");
+static_assert(kServoSlotCount <= motorcan::kMaxSlotNumber + 1,
+              "スロット数がデバイス ID のスロット番号（3bit）に収まらない");
 
 // 宛先判定の結果はスロットのビットマスク（uint8_t）で返ってくる。
 static_assert(kServoSlotCount <= motorcan::kMaxChannels,
@@ -191,6 +150,7 @@ static uint32_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 static PeriodicTimer g_feedbackTimer[kServoSlotCount];
 
 static PeriodicTimer g_motionTimer;
+static PeriodicTimer g_infoTimer;
 static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
@@ -329,63 +289,71 @@ static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
 }
 
 static void sendFeedback(uint8_t slot, uint32_t nowMs) {
-    uint8_t data[kFrameLength];
+    uint8_t data[kFeedbackWithPositionLength];
+    const uint8_t flags = buildStatusFlags(slot, nowMs);
 
-    // センサは位置も速度も持たない。サーボは補間中の「指令角」であって実測ではない
-    // （仕様書 §7.4）。単位は 0.1deg、速度はスルーレートの rpm 換算（÷ 6）。
-    const int32_t position =
+    // **センサは位置を持たないので状態フラグ 1 バイトだけ**（仕様書 §3.2）。
+    // サーボが返す位置は補間中の「指令角」であって実測ではないが、
+    // **angle_min / angle_max でクランプされた結果が分かる唯一の手段**なので送る
+    // （reached はクランプ後の目標に対して立つため、クランプに気付けない）。
+    const uint8_t len =
         isSensorSlot(slot)
-            ? 0
-            : static_cast<int32_t>(lroundf(g_channel[slot].currentAngleDeg() * 10.0f));
-    const int32_t rpm =
-        isSensorSlot(slot)
-            ? 0
-            : static_cast<int32_t>(lroundf(g_channel[slot].currentSlewDegPerSec() / 6.0f));
-
-    encodeFeedback(data, position, rpm, buildStatusFlags(slot, nowMs));
+            ? encodeFeedback(data, flags)
+            : encodeFeedback(data, flags,
+                             static_cast<int32_t>(
+                                 lroundf(g_channel[slot].currentAngleDeg() * kAngleScale)));
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
     // ID 未設定スロットは CAN ID 0x100 で送ることになるが、PC 側へ「デバイス ID 未設定」を
     // 届ける方を優先する。
-    g_can.sendMsgBuf(buildCanId(CommandType::Feedback, g_deviceId[slot]), 0, kFrameLength,
-                     data);
+    g_can.sendMsgBuf(buildCanId(CommandType::Feedback, g_deviceId[slot]), 0, len, data);
 }
 
-static void applyServoParam(uint8_t slot, const ServoParamCommand &cmd) {
+// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
+static void sendInfo(uint8_t slot) {
+    uint8_t data[kInfoLength];
+    const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
+    const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, kind);
+    g_can.sendMsgBuf(buildCanId(CommandType::Info, g_deviceId[slot]), 0, len, data);
+}
+
+static void applyParam(uint8_t slot, const SetParamCommand &cmd) {
     switch (cmd.id) {
-        case ServoParamId::CommandTimeoutMs:
+        case ParamId::CommandTimeoutMs:
             // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
-            // SET_PARAM 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。
-            // 範囲の根拠と NaN の扱いは MotorCanProtocol が持つ。
-            g_channel[slot].setCommandTimeoutMs(
-                sanitizeCommandTimeoutMs(cmd.value, g_channel[slot].commandTimeoutMs()));
+            // SET_PARAM 1 フレームで実質外れる。範囲の根拠は MotorCanProtocol が持つ。
+            g_channel[slot].setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
             break;
-        case ServoParamId::FeedbackIntervalMs:
+        case ParamId::FeedbackIntervalMs:
             // 周期は基板全体で 1 つ（スロットごとに変えると位相の分散が崩れる）。
-            g_feedbackIntervalMs = sanitizeFeedbackIntervalMs(cmd.value, g_feedbackIntervalMs);
+            g_feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
             break;
-        case ServoParamId::ReachedTolerance:
-            g_channel[slot].setReachedToleranceDeg(cmd.value);
+        case ParamId::ReachedTolerance:
+            g_channel[slot].setReachedToleranceDeg(fromRaw(cmd.raw, kAngleScale));
             break;
-        case ServoParamId::SlewRate: {
+        case ParamId::SlewRate: {
             ServoLimits limits = g_channel[slot].limits();
-            limits.slewRateDegPerSec = cmd.value;
+            limits.slewRateDegPerSec = fromRaw(cmd.raw, kRateScale);
             g_channel[slot].setLimits(limits);
             break;
         }
-        case ServoParamId::AngleMin: {
+        case ParamId::AngleMin: {
             ServoLimits limits = g_channel[slot].limits();
-            limits.angleMinDeg = cmd.value;
+            limits.angleMinDeg = fromRaw(cmd.raw, kAngleScale);
             g_channel[slot].setLimits(limits);
             break;
         }
-        case ServoParamId::AngleMax: {
+        case ParamId::AngleMax: {
             ServoLimits limits = g_channel[slot].limits();
-            limits.angleMaxDeg = cmd.value;
+            limits.angleMaxDeg = fromRaw(cmd.raw, kAngleScale);
             g_channel[slot].setLimits(limits);
             break;
         }
+        case ParamId::MaxDuty:
+            // 仕様書 §3.4: DC 固有。この基板は制御則を持たないので無視する。
+            break;
     }
 }
 
@@ -421,18 +389,15 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
 #endif
             // setTarget が angle_min / angle_max でクランプし（§7.2）、緊急停止ラッチ中・
             // ウォッチドッグ満了中は受け付けない（§7.5）。
-            g_channel[slot].setTarget(cmd.value, nowMs);
+            g_channel[slot].setTarget(fromRaw(cmd.raw, kAngleScale), nowMs);
             break;
         }
-        case CommandType::SetMode:
-            // 仕様書 §7.2: モードは position 固定。SET_MODE は無視する。
-            break;
         case CommandType::SetParam: {
             // 仕様書 §7.6: 0x04 / 0x05 / 0x07 / 0x10 / 0x11 / 0x12 のみ処理し、
             // kp / ki / kd / max_duty / overcurrent は制御則を持たないので無視する。
-            const ServoParamCommand cmd = decodeServoSetParam(data, len);
+            const SetParamCommand cmd = decodeSetParam(data, len);
             if (cmd.valid) {
-                applyServoParam(slot, cmd);
+                applyParam(slot, cmd);
             }
             break;
         }
@@ -449,7 +414,8 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
             break;
         }
         case CommandType::Feedback:
-            // 他スロット・他基板の FEEDBACK。ID は衝突しないが念のため無視する。
+        case CommandType::Info:
+            // 他基板がモタドラ → PC 方向へ送るフレーム。ID は衝突しないが念のため無視する。
             break;
     }
 }
@@ -510,13 +476,12 @@ static void pollCan() {
 // **Unused のスロットだけ 0x00 のままにする。** センサは自分のデバイス ID で
 // FEEDBACK を送るので ID を持つ（持たせないと「センサだけの基板」が何も報告できない）。
 static void resolveDeviceIds() {
-    const uint8_t offset = readDipSwitch(
+    const uint8_t boardNumber = readDipSwitch(
         kPinDip, kDipBitCount, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); },
         LOW);
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
         g_deviceId[slot] =
-            isDeviceSlot(slot) ? applyDeviceIdBlockOffset(kServoSlots[slot].deviceId, offset,
-                                                          kDeviceIdStride, kDeviceIdBandEnd)
+            isDeviceSlot(slot) ? makeDeviceId(kBoardKind, boardNumber, slot)
                                : kDeviceIdUnconfigured;
     }
 }
@@ -603,8 +568,12 @@ static void pollSerial(uint32_t nowMs) {
                 isServoSlot(static_cast<uint8_t>(slot))) {
                 // 緊急停止ラッチ中はシリアルからも角度を通さない（ServoChannel が拒否する）。
                 // avr-libc に strtof は無い。AVR では double が 32bit float なので strtod で足りる
-                g_channel[slot].setTarget(static_cast<float>(strtod(sep + 1, nullptr)),
-                                          nowMs);
+                // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
+                // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
+                const float deg = fromRaw(
+                    toRaw(static_cast<float>(strtod(sep + 1, nullptr)), kAngleScale),
+                    kAngleScale);
+                g_channel[slot].setTarget(deg, nowMs);
                 g_serialOverride = true;
             }
         }
@@ -703,6 +672,7 @@ void setup() {
 
     readSensors();
     g_motionTimer.reset(startMs);
+    g_infoTimer.reset(startMs);
     g_blinkTimer.reset(startMs);
 }
 
@@ -725,6 +695,16 @@ void loop() {
         // Unused 以外はすべて FEEDBACK を送る。センサだけの基板でも PC が読めるようにする。
         if (isDeviceSlot(slot) && g_feedbackTimer[slot].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(slot, nowMs);
+        }
+    }
+
+    // 仕様書 §3.6: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
+    // PC が基板より後から起動しても拾えるようにするため。
+    if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
+        for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
+            if (isSlotConfigured(slot)) {
+                sendInfo(slot);
+            }
         }
     }
 

@@ -21,14 +21,20 @@ _DISPLAY_UNITS = {
 
 
 class CommandType(IntEnum):
-    SET_TARGET = 0
-    FEEDBACK = 1
-    SET_MODE = 2
-    SET_PARAM = 3
-    E_STOP = 7
+    """CAN ID 上位 3bit (仕様書 §2.1)。
+
+    **値は CAN の調停順 (小さいほど優先) に合わせてある。** 止めるためのフレームが
+    目標値やフィードバックに追い越されてはならない。0b101-0b111 は予約。
+    """
+
+    E_STOP = 0
+    SET_TARGET = 1
+    SET_PARAM = 2
+    FEEDBACK = 3
+    INFO = 4
 
 
-# FEEDBACK Byte7 の状態フラグ (仕様書 §3.2)。
+# FEEDBACK Byte0 の状態フラグ (仕様書 §3.2)。
 # **頭から詰める。** 空きを挟むと、報告できる項目が増えたときに「途中に空いている
 # ビットがあるのに末尾へ足す」ことになり、対応表が読みにくくなる
 _FLAG_REACHED = 0x01
@@ -38,12 +44,46 @@ _FLAG_UNCONFIGURED_ID = 0x08
 # 基板上のセンサ入力 (タッチセンサ等)。
 # センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは 1 つ
 _FLAG_SENSOR = 0x10
-# bit5-7 は予約。どちらの基板も電流センスも温度センサも持たない
+# **電源投入後まだ SET_TARGET を 1 通も受けていない** (仕様書 §3.2 / §5.4)。
+# これが無いと基板の再起動が PC から見えない。サーボ基板は起動時に config.h の
+# 初期角へ駆動するので、試合中の瞬断は「機構が勝手に飛ぶ」形で現れるのに、
+# ウォッチドッグのビットは「一度でも受けた後の満了」でしか立たない
+_FLAG_NEVER_COMMANDED = 0x20
+# bit6-7 は予約
 
 # デバイス ID の範囲 (仕様書 §2.2)。0x00 は「DIP 設定忘れ」、0xFF は E_STOP
 # ブロードキャストの予約なので、どちらも個別デバイスの ID として使ってはならない。
 _DEVICE_ID_MIN = 0x01
 _DEVICE_ID_MAX = 0xFE
+
+# 固定小数点の単位 (仕様書 §4)。**CAN 上を流れる数値はすべて int16 で、float は
+# 1 バイトも流れない。** float32 をやめたのは NaN の防御をプロトコル全体から消すため。
+# NaN は比較がすべて false になるのでクランプも範囲チェックも素通りし、一度内部へ
+# 入ると「無言で止まったモータ」になる。整数ならその失敗クラスごと存在しない
+_ANGLE_SCALE = 10  # 0.1deg
+_DUTY_SCALE = 10000  # duty -1.0 .. +1.0
+_RATE_SCALE = 10  # 0.1deg/s
+_PLAIN_SCALE = 1  # ms など
+
+#: 制御タイプごとの目標値の単位 (仕様書 §4)
+_TARGET_SCALE = {
+    ControlMode.POSITION: _ANGLE_SCALE,
+    ControlMode.VELOCITY: _ANGLE_SCALE,
+    ControlMode.DUTY: _DUTY_SCALE,
+}
+
+
+def _to_raw(value: float, scale: int) -> int:
+    """float を固定小数点の int16 へ。範囲外と NaN は飽和させる。
+
+    PC 側は yaml から読んだ float を扱うので、ここが唯一の変換点になる。
+    黙って折り返すと +4000deg が負値に化け、基板が逆方向へ動く。
+    """
+    if value != value:  # NaN
+        return 0
+    scaled = round(value * scale)
+    return max(-32768, min(32767, scaled))
+
 
 # E_STOP 解除フレームのマジックバイト (仕様書 §3.5)。
 # 1 バイトの値だけで安全装置が解除されるのを避けるため、ファームは Byte1/Byte2 の
@@ -79,6 +119,7 @@ class GenericDriver(MotorDriver):
         self._watchdog_flag: bool = False
         self._unconfigured_id_flag: bool = False
         self._sensor_flag: bool = False
+        self._never_commanded_flag: bool = False
         # 動作確認や reset の指令を出す制御モード。config から渡される値で上書き可能。
         self.control_type: ControlMode = control_type
 
@@ -111,9 +152,13 @@ class GenericDriver(MotorDriver):
     # ---- 送信フレーム生成 ----
 
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
-        data = bytearray(8)
+        """SET_TARGET フレーム (仕様書 §3.1)。Byte0=制御タイプ / Byte1-2=目標値。
+
+        途中に予約バイトを挟まないので DLC=3 で足りる。
+        """
+        data = bytearray(3)
         data[0] = _MODE_MAP[mode]
-        struct.pack_into("<f", data, 2, value)
+        struct.pack_into("<h", data, 1, _to_raw(value, _TARGET_SCALE[mode]))
         return can.Message(
             arbitration_id=self.build_can_id(CommandType.SET_TARGET, self.can_id),
             data=bytes(data),
@@ -122,9 +167,14 @@ class GenericDriver(MotorDriver):
 
     @staticmethod
     def encode_e_stop() -> can.Message:
+        """ブロードキャスト緊急停止 (仕様書 §3.5)。
+
+        CAN ID 0x0FF は **他のどのフレームより優先度が高い**。かつては 0x7FF で、
+        Standard ID 全 2048 個のうち最も優先度が低かった。
+        """
         return can.Message(
-            arbitration_id=0x7FF,
-            data=bytes(8),
+            arbitration_id=GenericDriver.build_can_id(CommandType.E_STOP, 0xFF),
+            data=bytes(3),
             is_extended_id=False,
         )
 
@@ -135,7 +185,7 @@ class GenericDriver(MotorDriver):
         ファーム側は緊急停止をラッチし、解除フレームを受け取るまで SET_TARGET で
         駆動しない。解除しない限り復旧できないので、起動時と緊急停止解除時に送る。
         """
-        data = bytearray(8)
+        data = bytearray(3)
         data[0] = 0x01
         data[1], data[2] = _E_STOP_CLEAR_MAGIC
         return can.Message(
@@ -147,27 +197,26 @@ class GenericDriver(MotorDriver):
     # ---- 受信フレーム解析 ----
 
     def decode_feedback(self, msg: can.Message) -> MotorState:
+        """FEEDBACK フレーム (仕様書 §3.2)。Byte0=状態フラグ / Byte1-2=位置。
+
+        **DLC は可変。** 位置を持たない基板 (DC・センサ) は状態フラグ 1 バイトだけを
+        送る。常に 0 の位置・速度を詰めても、PC には「測ったように見える 0」が届くだけ。
+        速度は誰も使っていなかったのでプロトコルから外した。
+        """
         d = msg.data
-        raw_pos = struct.unpack_from("<h", d, 0)[0]
-        raw_vel = struct.unpack_from("<h", d, 2)[0]
-        # Byte4-6 は予約 (仕様書 §3.2)。**読まない。** どちらの基板もセンサを持たないので
-        # 値を持ち込むと「常に 0 の電流・温度」が UI とヘルス判定に流れ込む。
-        # MotorState の current / temperature は既定の 0.0 のままにする
-        flags = d[7]
-        return MotorState(
-            position=raw_pos * 0.1,
-            velocity=float(raw_vel),
-            reached=bool(flags & _FLAG_REACHED),
-        )
+        flags = d[0]
+        position = struct.unpack_from("<h", d, 1)[0] / _ANGLE_SCALE if len(d) >= 3 else 0.0
+        return MotorState(position=position, reached=bool(flags & _FLAG_REACHED))
 
     def update_state(self, msg: can.Message) -> MotorState:
         # decode_feedback は純粋関数のまま保ち、副作用 (フラグ保持) はここで処理する
         # 到達は MotorState.reached に反映、それ以外はドライバ属性に保持
-        flags = msg.data[7]
+        flags = msg.data[0]
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)
         self._sensor_flag = bool(flags & _FLAG_SENSOR)
+        self._never_commanded_flag = bool(flags & _FLAG_NEVER_COMMANDED)
         return super().update_state(msg)
 
     def matches_feedback(self, msg: can.Message) -> bool:
@@ -220,6 +269,17 @@ class GenericDriver(MotorDriver):
     def device_id_unconfigured(self) -> bool:
         """DIP スイッチのデバイス ID が未設定 (0x00) か (FEEDBACK のデバイス ID 未設定ビット)。"""
         return self._unconfigured_id_flag
+
+    @property
+    def never_commanded(self) -> bool:
+        """電源投入後まだ指令を受けていないか (仕様書 §3.2)。
+
+        **基板の再起動を検出するためにある。** サーボ基板は起動時に config.h の
+        初期角へ駆動するので、試合中の瞬断は「機構が勝手に飛ぶ」形で現れる。
+        PC は 20Hz で再送しているので 50ms 以内に何事もなかったように復帰し、
+        これが無いと再起動そのものがどこにも現れない。
+        """
+        return self._never_commanded_flag
 
     @property
     def sensor_active(self) -> bool:
@@ -291,22 +351,19 @@ class GenericDriver(MotorDriver):
         return self.encode_target(self.control_type, magnitude), context
 
     def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
-        if context.mode is ControlMode.DUTY:
-            # duty 指令を使うのは自作 DC モタドラだけで、その基板はエンコーダも
-            # 電流センスも持たない (仕様書 §8)。FEEDBACK の velocity は常に 0 で、
-            # 「回ったかどうか」を自動判定する手段が 1 つも存在しない。
-            # 以前はここで velocity を見ており、実機では必ず「回転検出なし」で
-            # 落ちるうえ、原因が配線不良にしか見えない失敗を出していた。
+        if context.mode is not ControlMode.POSITION:
+            # **自作モタドラが返すのは位置だけ** (仕様書 §3.2)。速度も電流も
+            # プロトコルから外れているので、position 以外は「動いたかどうか」を
+            # 自動判定する手段が 1 つも存在しない。以前は velocity を見ており、
+            # 実機では必ず「回転検出なし」で落ちるうえ、原因が配線不良にしか
+            # 見えない失敗を出していた。
             return False, (
-                "duty 指令はフィードバックが無く自動判定できない "
+                f"{context.mode.value} 指令はフィードバックが無く自動判定できない "
                 f"({self.name} は motor_check.magnitude: 0 で除外し、"
                 "config/checklist.yaml の指差喚呼で目視確認すること)"
             )
 
         passed, detail = self.evaluate_tracking(context)
-
-        if context.mode is not ControlMode.POSITION:
-            return (True, None) if passed else (False, detail)
 
         # 位置決めの行き過ぎ・整定中はファームの到達フラグ (§3.2) が持つ
         if passed and self._state.reached:
