@@ -108,12 +108,38 @@ export interface ChecklistState {
   completed: boolean;
 }
 
+/**
+ * 試合時間タイマー。**残り時間ではなく「この配信瞬間の経過ミリ秒」**が載る。
+ *
+ * 各デバイスはこれを起点に自分の単調時計 (`performance.now()`) で進めるため、
+ * デバイス間のずれは WS の片道遅延ぶん (数 ms) に収まり、**端末の壁時計が
+ * 揃っている必要がない**。操縦者 2 名 + Monitor が別ブラウザ・別 PC で繋がる
+ * 構成では、開始時刻 (エポック秒) を配って各自が引き算する方式は使えない
+ * (数秒ずれた 3 つのタイマーが平然と表示され、ずれていることも画面から分からない)。
+ *
+ * `running` が false のときは進めない。試合終了後はサーバーが終了時点で凍結した
+ * 値を送り続けるので、結果確認中に数字が進み続けることがない。
+ */
+export interface MatchTimer {
+  running: boolean;
+  /** 試合開始からの経過。サーバーが配信した瞬間の値 */
+  elapsed_ms: number;
+  /** 試合時間の上限 (config/system.yaml の match.duration_s 由来) */
+  duration_ms: number;
+}
+
 export interface MatchState {
   court: MatchCourt;
   phase: MatchPhase;
   can_start_match: boolean;
   /** 完了が試合開始のゲートになるロールと、その進捗。キーの集合はサーバーが持つ */
   checklists: Record<string, ChecklistState>;
+  /**
+   * タイマーが読めなければ null。**match_state ごと捨ててはならない** —
+   * フェーズと指差喚呼の進捗は試合の進行そのものを握っており、タイマーが
+   * 壊れているという理由でそちらまで落とすほうがはるかに悪い。
+   */
+  timer: MatchTimer | null;
 }
 
 export interface SequenceStepInfo {
@@ -225,6 +251,22 @@ function isObject(value: unknown): value is Raw {
   return typeof value === "object" && value !== null;
 }
 
+/**
+ * タイマーを読む。3 値が揃っていなければ null。
+ *
+ * `duration_ms <= 0` を通すと残り時間が常に 0 以下になり、画面には
+ * 「試合開始と同時に時間切れ」が出る。値の欠落として扱い、表示側に
+ * 「読めていない」ことを出させる (誤った数字を自信満々に出すより良い)。
+ */
+function parseTimer(raw: unknown): MatchTimer | null {
+  if (!isObject(raw)) return null;
+  if (typeof raw.running !== "boolean") return null;
+  if (typeof raw.elapsed_ms !== "number" || !Number.isFinite(raw.elapsed_ms)) return null;
+  if (typeof raw.duration_ms !== "number" || !Number.isFinite(raw.duration_ms)) return null;
+  if (raw.duration_ms <= 0) return null;
+  return { running: raw.running, elapsed_ms: raw.elapsed_ms, duration_ms: raw.duration_ms };
+}
+
 /** どのロボットの話か決められないメッセージは捨てるしかない */
 function robotOf(raw: Raw): string | null {
   return typeof raw.robot === "string" && raw.robot.length > 0 ? raw.robot : null;
@@ -247,6 +289,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           phase: raw.phase as MatchPhase,
           can_start_match: Boolean(raw.can_start_match),
           checklists: (raw.checklists as MatchState["checklists"]) ?? {},
+          timer: parseTimer(raw.timer),
         },
       };
 

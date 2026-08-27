@@ -4,6 +4,7 @@ import asyncio
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from lib.config_schema import MatchSettings
 from lib.match_state import (
     ROLE_MAIN_HAND,
     ROLE_SUB_HAND,
@@ -37,8 +38,8 @@ class DummySequence(Sequence):
         self.executed.append("wait_step")
 
 
-def _build_fixture() -> ServerFixture:
-    fx = ServerFixture.build(checklist_definitions=_DEFS)
+def _build_fixture(**server_kwargs: object) -> ServerFixture:
+    fx = ServerFixture.build(checklist_definitions=_DEFS, **server_kwargs)
     for name in _ROBOT_NAMES:
         fx.add_robot(name, DummySequence(name))
     return fx
@@ -57,6 +58,66 @@ class TestMatchStateSnapshotOnConnect:
             assert msg["phase"] == "setup"
             assert msg["court"] == "red"
             assert set(msg["checklists"]) == {ROLE_MAIN_HAND, ROLE_SUB_HAND}
+            await ws.close()
+
+
+async def _match_state_with_phase(ws: object, phase: str) -> dict:
+    """指定フェーズの match_state を拾う。
+
+    チェックリスト操作でも match_state が飛ぶため、接続直後のスナップショットを
+    そのまま見ると必ず setup を掴む。
+    """
+    for _ in range(10):
+        msg = await recv_type(ws, "match_state")
+        if msg is None:
+            break
+        if msg["phase"] == phase:
+            return msg
+    raise AssertionError(f"phase={phase} の match_state が配信されなかった")
+
+
+class TestMatchTimerBroadcast:
+    """タイマーは match_state に相乗りして全クライアントへ届く。
+
+    専用の配信経路を作らないのは、`_fanout` の約束事 (送信ごとの上限・切り離しの
+    後始末) を守る経路をこれ以上増やさないため。接続直後のスナップショットが
+    そのままアンカーになるので、途中接続の同期にも追加の仕組みが要らない。
+    """
+
+    async def test_snapshot_carries_configured_duration(self) -> None:
+        """config/system.yaml の試合時間が実際に配信へ載ること。
+
+        既定値と同じ値で試すと、設定を配線し忘れた実装でもテストが通ってしまう。
+        当日ルールが変われば yaml を書き換えるのに画面が 3 分のまま、という
+        壊れ方はログにも UI にも現れない。
+        """
+        fx = _build_fixture(match_settings=MatchSettings(duration_s=90.0))
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            msg = await recv_type(ws, "match_state")
+            assert msg is not None
+            assert msg["timer"] == {"running": False, "elapsed_ms": 0, "duration_ms": 90000}
+            await ws.close()
+
+    async def test_timer_starts_running_when_the_match_starts(self) -> None:
+        """試合開始の配信でタイマーが走り出すこと。ここが false のままだと
+        全デバイスが 3:00 を表示したまま止まる。"""
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            for role in (ROLE_MAIN_HAND, ROLE_SUB_HAND):
+                await ws.send_json(
+                    {"type": "checklist_set", "role": role, "item_id": "home", "checked": True}
+                )
+            await ws.send_json({"type": "match_start"})
+            await asyncio.sleep(0.05)
+
+            msg = await _match_state_with_phase(ws, "match")
+            assert msg["timer"]["running"] is True
             await ws.close()
 
 

@@ -548,6 +548,9 @@ async def main() -> None:
         motor_check_overrides,
     )
 
+    # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
+    logger.info("試合時間: %s 秒", system.match.duration_s)
+
     checklist_path = (
         pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
     )
@@ -565,6 +568,7 @@ async def main() -> None:
         motor_check_default_magnitude=dict(system.motor_check.default_magnitude),
         motor_check_per_motor_overrides=motor_check_overrides,
         checklist_definitions=checklist_definitions,
+        match_settings=system.match,
         dry_run=args.dry_run,
     )
     can_managers: list[CANManager] = []

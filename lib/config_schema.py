@@ -58,9 +58,10 @@ CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     }
 )
 
-_SYSTEM_KEYS = frozenset({"can_buses", "health", "motor_check"})
+_SYSTEM_KEYS = frozenset({"can_buses", "health", "motor_check", "match"})
 _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold")
 _MOTOR_CHECK_KEYS = frozenset({"per_motor_timeout_ms", "default_magnitude"})
+_MATCH_KEYS = frozenset({"duration_s"})
 
 _ROBOT_KEYS = frozenset({"robot_name", "motors"})
 _COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id", "motor_check"})
@@ -78,7 +79,7 @@ _PID_KEYS = frozenset({"kp", "ki", "kd", "integral_limit", "dead_band", "output_
 
 # robot yaml から system.yaml へ移した共通設定。移動前の yaml をそのまま起動すると
 # 「書いたのに効かない」状態になるため、残っていたら移動先を示して拒否する
-_MOVED_TO_SYSTEM = frozenset({"health", "motor_check", "can_buses"})
+_MOVED_TO_SYSTEM = frozenset({"health", "motor_check", "can_buses", "match"})
 
 
 @dataclass(frozen=True)
@@ -112,12 +113,24 @@ class MotorCheckSettings:
 
 
 @dataclass(frozen=True)
+class MatchSettings:
+    """試合そのものの設定 (config/system.yaml の match セクション)。
+
+    競技ルールで決まる 1 つの値なので、ロボットごとの yaml には書けない
+    (両ハンドで違う試合時間という状態は存在しない)。
+    """
+
+    duration_s: float = 180.0
+
+
+@dataclass(frozen=True)
 class SystemConfig:
     """両ロボットで共有する設定 (config/system.yaml)。"""
 
     can_buses: Mapping[str, str]
     health: HealthThresholds
     motor_check: MotorCheckSettings
+    match: MatchSettings
     source: str = "<inline>"
 
 
@@ -170,6 +183,7 @@ class RobotConfig:
 
 DEFAULT_HEALTH = HealthThresholds()
 DEFAULT_MOTOR_CHECK = MotorCheckSettings()
+DEFAULT_MATCH = MatchSettings()
 
 
 def _require_mapping(source: str, path: str, raw: object) -> dict:
@@ -288,6 +302,22 @@ def _parse_motor_check(source: str, raw: object) -> MotorCheckSettings:
     )
 
 
+def _parse_match(source: str, raw: object) -> MatchSettings:
+    section = _require_mapping(source, "match", raw)
+    _reject_unknown(source, "match", section, _MATCH_KEYS)
+
+    value = section.get("duration_s")
+    if value is None:
+        return MatchSettings()
+
+    duration = _number(source, "match.duration_s", value)
+    # 0 以下だと試合開始と同時に残り 0 になり、タイマーが常に「時間切れ」を出す。
+    # 誤記を通すと画面の表示だけが壊れ、原因が設定だと気付けない
+    if duration <= 0:
+        raise ValueError(f"{source}: match.duration_s は正の秒数である必要があります: {value!r}")
+    return MatchSettings(duration_s=duration)
+
+
 def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> SystemConfig:
     """両ロボット共通の設定 yaml を検証して読み込む。"""
     raw = _require_mapping(source, "(最上位)", config)
@@ -297,6 +327,7 @@ def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> S
         can_buses=MappingProxyType(_parse_can_buses(source, raw.get("can_buses"))),
         health=_parse_health(source, raw.get("health")),
         motor_check=_parse_motor_check(source, raw.get("motor_check")),
+        match=_parse_match(source, raw.get("match")),
         source=source,
     )
 

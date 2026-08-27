@@ -10,8 +10,12 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+
+from lib.config_schema import DEFAULT_MATCH, MatchSettings
 
 ROLE_MAIN_HAND = "main_hand"
 ROLE_SUB_HAND = "sub_hand"
@@ -139,11 +143,21 @@ class MatchState:
         definitions: dict[str, list[ChecklistItem]] | None = None,
         *,
         court: Court = Court.RED,
+        settings: MatchSettings = DEFAULT_MATCH,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._definitions: dict[str, list[ChecklistItem]] = definitions or {
             role: [] for role in ALL_ROLES
         }
         self._court = court
+        self._settings = settings
+        # 経過時間は必ず単調時計で測る。time.time() は NTP 補正で後ろへ飛ぶことがあり、
+        # 試合中に残り時間が増える (= 操縦者が残り時間を信用できなくなる)。
+        self._clock = clock
+        #: 試合開始時点の単調時刻。未開始は None
+        self._started_at: float | None = None
+        #: 試合終了時点で凍結した経過秒。結果確認中に数字が進み続けないようにする
+        self._frozen_elapsed_s: float | None = None
         self._phase = Phase.SETUP
         self.checklists: dict[str, ChecklistState] = {}
         self._rebuild_checklists()
@@ -167,6 +181,20 @@ class MatchState:
     def allows(self, phases: frozenset[Phase]) -> bool:
         """現フェーズが phases に含まれるか。コマンドゲートと遷移条件の共通判定。"""
         return self._phase in phases
+
+    @property
+    def timer_running(self) -> bool:
+        """試合時間が進行中か。開始前と終了後 (凍結済み) は False。"""
+        return self._started_at is not None and self._frozen_elapsed_s is None
+
+    @property
+    def elapsed_s(self) -> float:
+        """試合開始からの経過秒。未開始は 0、終了後は終了時点で凍結した値。"""
+        if self._frozen_elapsed_s is not None:
+            return self._frozen_elapsed_s
+        if self._started_at is None:
+            return 0.0
+        return self._clock() - self._started_at
 
     # ------------------------------------------------------------------ #
     #  更新
@@ -212,18 +240,30 @@ class MatchState:
         if not self.allows(PHASES_START_GATE):
             return False
         self._phase = Phase.MATCH
+        # 起点はフェーズ遷移が成立した後にだけ引く。試合中に届いた match_start は
+        # ゲートで弾かれるが、その手前で起点を書き換えると機体は動いたまま
+        # タイマーだけが満了時間へ巻き戻る。
+        # 凍結の解除は match_reset だけが行う (READY へは match_reset を通ってしか
+        # 到達できないため)。FINISHED から直接 READY へ戻す遷移を足すなら、
+        # そこでも _frozen_elapsed_s を落とすこと。
+        self._started_at = self._clock()
         return True
 
     def match_finish(self) -> bool:
         if not self.allows(PHASES_DURING_MATCH):
             return False
         self._phase = Phase.FINISHED
+        # 終了時点の経過を焼き付ける。凍結を解くのは match_start だけで、
+        # 解き忘れると 2 試合目が 1 試合目の残り時間から始まる
+        self._frozen_elapsed_s = self.elapsed_s
         return True
 
     def match_reset(self) -> bool:
         """どのフェーズからでもセッティングタイムに戻す。コートは維持する。"""
         self._reset_all_checklists()
         self._phase = Phase.SETUP
+        self._started_at = None
+        self._frozen_elapsed_s = None
         self._sync_phase()
         return True
 
@@ -268,6 +308,17 @@ class MatchState:
             "court": self._court.value,
             "phase": self._phase.value,
             "can_start_match": self.can_start_match,
+            # タイマーは「残り時間」ではなく**この配信瞬間の経過ミリ秒**を配る。
+            # 各デバイスはこれを起点に自分の単調時計で進めるため、デバイス間のずれは
+            # WS の片道遅延ぶん (数 ms) に収まり、**端末の壁時計が揃っている必要がない**。
+            # 残り時間そのものを毎秒配ると (1) match_state の参照が毎秒作り直され
+            # useRobotStatus を読む全画面が再描画される (2) 配信が詰まった 1 台では
+            # タイマーだけが凍り、WS は「接続中」のままなので操縦者が気付けない。
+            "timer": {
+                "running": self.timer_running,
+                "elapsed_ms": round(self.elapsed_s * 1000),
+                "duration_ms": round(self._settings.duration_s * 1000),
+            },
             "checklists": {
                 role: {
                     "items": [item.to_dict() for item in state.items],

@@ -10,6 +10,7 @@ import type {
   HealthChange,
   HealthSnapshot,
   MatchState,
+  MatchTimer,
   MotorCheckRecord,
   MotorHealth,
   MotorState,
@@ -96,6 +97,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
       phase: sample.phase,
       can_start_match: sample.can_start_match,
       checklists: sample.checklists,
+      timer: sample.timer,
     });
   },
 
@@ -340,6 +342,12 @@ const CHECK_SNAPSHOT = fieldsOf<CheckRunSnapshot>({
   robot: { unused: "宛先はエンベロープの robot で決まる (同じ値を二重に持っている)" },
 });
 
+const MATCH_TIMER = fieldsOf<MatchTimer>({
+  running: "ui",
+  elapsed_ms: "ui",
+  duration_ms: "ui",
+});
+
 const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({ id: "ui", label: "ui", checked: "ui" });
 const CHECKLIST_STATE = fieldsOf<ChecklistState>({ items: "ui", completed: "ui" });
 
@@ -397,7 +405,9 @@ const DECLARED: Record<string, FieldSpec> = {
       phase: "ui",
       can_start_match: "ui",
       checklists: "ui",
+      timer: "ui",
     }),
+    ...nest("timer", MATCH_TIMER),
     ...nest("checklists.*", CHECKLIST_STATE),
     ...nest("checklists.*.items[]", CHECKLIST_ITEM),
   },

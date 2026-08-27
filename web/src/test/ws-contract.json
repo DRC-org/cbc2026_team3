@@ -63,6 +63,11 @@
       },
       "court": "red",
       "phase": "setup",
+      "timer": {
+        "duration_ms": 180000,
+        "elapsed_ms": 0,
+        "running": false
+      },
       "type": "match_state"
     },
     "motor_check_done": {

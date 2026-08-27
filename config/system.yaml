@@ -31,3 +31,6 @@ motor_check:
     generic: 0.1               # POSITION/VELOCITY/DUTY 共通の小さい目標値
   # tolerance はドライバ側のデフォルト (1deg / 5rpm 等) を採用。
   # 個別上書きしたい場合は config/<robot>.yaml の motors[name].motor_check で行う。
+
+match:
+  duration_s: 180   # 試合時間。ここが操縦者画面のカウントダウンの上限になる
