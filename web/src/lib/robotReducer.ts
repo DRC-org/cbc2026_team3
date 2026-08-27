@@ -88,6 +88,7 @@ const INITIAL_MATCH_STATE: MatchState = {
   phase: "setup",
   can_start_match: false,
   checklists: {},
+  timer: null,
 };
 
 export const INITIAL_ROBOT_UI_STATE: RobotUiState = {

@@ -73,10 +73,14 @@ const CHECKLISTS: MatchState["checklists"] = {
  * (あるいはその逆へ) 飛ぶ。試験ではそれが最も見つけにくい壊れ方になる。
  */
 // state に null を渡すと「まだ 1 通も届いていない」状況を再現する
-function mount(phase: MatchPhase, state: RobotState | null = robotState()) {
+function mount(
+  phase: MatchPhase,
+  state: RobotState | null = robotState(),
+  timer: MatchState["timer"] = null,
+) {
   return renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
     states: state ? { sub_hand: state } : {},
-    matchState: { ...DEFAULT_MATCH_STATE, phase, checklists: CHECKLISTS },
+    matchState: { ...DEFAULT_MATCH_STATE, phase, checklists: CHECKLISTS, timer },
   });
 }
 
@@ -84,6 +88,23 @@ function mount(phase: MatchPhase, state: RobotState | null = robotState()) {
 function pressSpace() {
   window.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
 }
+
+describe("試合時間タイマーの配置", () => {
+  it("試合中は残り時間を出す", () => {
+    mount("match", robotState(), { running: true, elapsed_ms: 60_000, duration_ms: 180_000 });
+
+    expect(screen.getByText("2:00")).toBeInTheDocument();
+    expect(screen.getByText("残り時間")).toBeInTheDocument();
+  });
+
+  it("セッティングタイムには出さない", () => {
+    // 準備中の操縦者の仕事は指差喚呼と動作確認だけ。まだ動いていない時計を
+    // 置くと、答えるべき問いが 1 つ増える
+    mount("setup", robotState(), { running: false, elapsed_ms: 0, duration_ms: 180_000 });
+
+    expect(screen.queryByText("試合時間")).not.toBeInTheDocument();
+  });
+});
 
 describe("RobotControl の操作先", () => {
   it("主操作はすべて自分の担当機へ宛てて送る", async () => {

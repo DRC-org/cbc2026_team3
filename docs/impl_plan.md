@@ -575,6 +575,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |
 | 判定できないヘルスは DOWN | 例外時の既定を OK に倒す | `test_health.py` / `test_server_health.py` |
 | 解釈できたフレームでしか鮮度を進めない | `_last_rx_at` の更新を `update_state` より前へ動かす | `test_can_manager.py` / `test_can_manager_health.py` |
+| 試合時間タイマーが全デバイスで一致する | 配信の `elapsed_ms` を 0 に固定する / クライアントがサーバーの経過値を無視して 0 から数える / 新しい配信でアンカーを取り直さない / 固定間隔で起こす | `test_match_state.py` / `test_server_match.py` / `MatchTimer.test.tsx` |
+| タイマーはフェーズ遷移が成立した後にだけ動く | `match_start` の起点をゲート判定より前へ移す / `match_finish` の凍結を外す / `match_reset` で起点を消し忘れる | `test_match_state.py` |
+| `config/system.yaml` の全セクションがサーバーまで届く | `main()` の `RobotServer(...)` から `health` / `motor_check_*` / `match_settings` を 1 本落とす | `test_main_wiring.py` |
 
 ### テスト対象とアプローチ
 
@@ -887,7 +890,7 @@ cbc2026_team3/
 │   ├── impl_plan.md                # 本書。実装計画・設計判断の記録
 │   └── motor_driver_can_protocol.md  # 自作モタドラ CAN プロトコルの単一情報源
 ├── config/
-│   ├── system.yaml         # 両ロボット共通（バス別名 / health / motor_check）
+│   ├── system.yaml         # 両ロボット共通（バス別名 / health / motor_check / match）
 │   ├── main_hand.yaml
 │   ├── sub_hand.yaml
 │   ├── can_buses.yaml      # CAN バス定義の単一情報源（serial ↔ 固定名）
@@ -1385,7 +1388,9 @@ Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後�
   "checklists": {
     "main_hand": { "items": [{ "id": "home_position", "label": "メインハンド初期位置確認", "checked": false }], "completed": false },
     "sub_hand":  { "items": [/* ... */], "completed": false }
-  }
+  },
+  // 試合時間タイマー。残り時間ではなく「この配信瞬間の経過ミリ秒」を配る（後述）
+  "timer": { "running": false, "elapsed_ms": 0, "duration_ms": 180000 }
 }
 // command_rejected だけは全配信ではなく、要求元 1 台への返答
 { "type": "command_rejected", "command": "sequence_start", "reason": "試合中のみシーケンスを開始できます" }
@@ -1401,6 +1406,60 @@ Client → Server:
 { "type": "match_finish" }
 { "type": "match_reset" }
 ```
+
+### 試合時間タイマー（全デバイス同期）
+
+操縦者 2 名 + Monitor が**別ブラウザ・別 PC**で接続するため、「全デバイスで同じ残り時間が
+出る」ことが要件になる。素直な実装は 2 つとも採れない。
+
+**サーバーが毎秒「残り何秒」を配る方式**は、`match_state` を変化時のみ配信することで
+`useRobotStatus()` を読む全画面（ヘッダー・タブ・チェックリスト）の再描画を抑えている前提を
+壊す。加えて `_send_or_drop` で切り離される寸前の詰まったクライアントでは**タイマーだけが
+凍り、WebSocket は開いたまま**なので、操縦者は凍った数字を最新だと思って見続けることになる。
+
+**開始時刻（エポック秒）を配って各デバイスが引き算する方式**は、**端末の壁時計が揃っている
+ことを前提にしている**。Tailscale 越しのノート PC 3 台という構成では、数秒ずれた 3 つの
+タイマーが平然と表示され、しかも「ずれている」ことが画面から分からない。
+
+採用したのは**単調時計アンカー方式**である。サーバーは時刻ではなく
+**その配信瞬間の経過ミリ秒**（`timer.elapsed_ms`）だけを配り、各デバイスはそれを起点に
+自分の単調時計で進める。
+
+| 層 | 時刻源 | 理由 |
+|---|---|---|
+| サーバー（`MatchState`） | `time.monotonic()` | `time.time()` は NTP 補正で後ろへ飛び、**試合中に残り時間が増える** |
+| クライアント（`MatchTimer.tsx`） | `performance.now()` | `Date.now()` だと同じ理由で端末側の飛びを拾う |
+
+- デバイス間のずれは **WS の片道遅延ぶん（数 ms）**に収まり、**端末の壁時計が揃っている
+  必要がない**。これがこの方式を選ぶ理由そのものである
+- 水晶発振子の誤差は 50ppm 級なので 3 分で 9ms。**定期的な再同期は要らない**
+- リロード・途中接続は `_ws_handler` が接続直後に送る `match.to_dict()` スナップショットが
+  そのままアンカーになる（**既存の配信経路に何も足していない**）
+- チェックリスト操作などで `_broadcast_match_state()` が走るたび、ついでに再アンカーされる
+
+**秒表示の更新は固定間隔ではなく秒境界に合わせて起こす。** `setInterval` だと端末ごとに
+起床位相がずれ、同じ値を持っているのに秒の繰り上がりが最大 1 周期ぶん食い違って見える。
+画面を並べたときに「同期していない」と読めてしまい、この部品の目的が崩れる。
+
+**タイマーの状態遷移はフェーズ遷移が成立した後にだけ動かす。** 試合中に届いた
+`match_start` はフェーズゲートで弾かれるが、その手前で起点を引き直すと**機体は動いたまま
+タイマーだけが満了時間へ巻き戻る**。凍結の解除は `match_reset` だけが行う
+（READY へは `match_reset` を通ってしか到達できない。FINISHED から直接 READY へ戻す遷移を
+足すなら、そこでも凍結を落とすこと）。
+
+**0 に達しても表示が止まるだけで、試合は終わらない。** 公式の計時が正であり、こちらの
+時計のずれで試合中に機体が止まる経路を作らない。試合終了はあくまで操縦者の `match_finish`。
+
+**試合時間は `config/system.yaml` の `match.duration_s`（既定 180 秒）。** 競技ルールで
+決まる 1 つの値なので `config/<robot>.yaml` には書けず、書いてあったら起動を拒否する
+（両ハンドで違う試合時間という状態は存在しない）。`duration_s <= 0` も起動時に弾く
+（通すと開始と同時に残り 0 になり、誤記が画面表示だけを壊すため原因に気付けない）。
+
+**表示は操縦者画面（`/main-hand` `/sub-hand`）の参照面に置く。** 主操作である `ActionPanel`
+の上には積まない（状態によって主操作の位置が動くと、押す直前に毎回探し直すことになる）。
+セッティングタイムには出さない — 準備中の操縦者の仕事は指差喚呼と動作確認だけで、
+まだ動いていない時計は答えるべき問いを 1 つ増やすだけになる。
+`MatchTimer` は `timer` を受け取るだけの部品なので、Monitor へ出したくなったら 1 行で置ける。
 
 ### チェックリスト設定（`config/checklist.yaml`）
 
@@ -1503,7 +1562,7 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 
 | ファイル | 持つもの |
 |---|---|
-| `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`motor_check` |
+| `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`motor_check`・`match` |
 | `config/can_buses.yaml` | CAN バス定義（serial ↔ 固定名・ビットレート）の単一情報源。udev ルールとセットアップスクリプトが参照する |
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID・動作確認の個別上書き） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算と機構位置の定数 |

@@ -347,6 +347,21 @@ class TestWsContract:
         covered = {msg["type"] for msg in document["samples"].values()}
         assert covered >= REQUIRED_TYPES, f"golden に無い型: {sorted(REQUIRED_TYPES - covered)}"
 
+    async def test_match_state_carries_timer(self) -> None:
+        """タイマーの 3 値が実配信に載っていること。
+
+        golden は再生成で黙らせられるので、UI が読むフィールドは不変条件として
+        別に持つ。3 値のどれか 1 つでも落ちると、全デバイスのタイマーが
+        「動かない」「上限が分からない」のどちらかになる。
+        """
+        document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+        timer = document["samples"]["match_state"]["timer"]
+
+        assert isinstance(timer["running"], bool)
+        assert isinstance(timer["elapsed_ms"], int)
+        # 上限が 0 だと UI 側は残り時間を計算できない (常に時間切れ表示になる)
+        assert isinstance(timer["duration_ms"], int) and timer["duration_ms"] > 0
+
     async def test_health_change_carries_robot_and_target(self) -> None:
         """UI の受信条件が依存するフィールドが実物に載っていること。"""
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))

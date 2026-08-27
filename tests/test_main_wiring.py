@@ -10,6 +10,8 @@ private を掴んでいるのはカプセル化の破りではなく、モジュ
 
 from __future__ import annotations
 
+import ast
+import dataclasses
 import logging
 import pathlib
 import struct
@@ -20,7 +22,7 @@ import pytest
 import yaml
 
 from lib.axis_sync import MotorSpec, SyncGroup
-from lib.config_schema import MotorConfig, RobotConfig, load_robot_config
+from lib.config_schema import MotorConfig, RobotConfig, SystemConfig, load_robot_config
 from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
@@ -29,6 +31,7 @@ from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
+import main
 from main import (
     _DEFAULT_PID,
     _attach_sync_groups,
@@ -707,6 +710,57 @@ class TestShippedMainHandConfig:
 
         assert motors["conveyor"].control_type is ControlMode.DUTY
         assert motors["gripper"].control_type is ControlMode.POSITION
+
+
+
+class TestSystemConfigReachesTheServer:
+    """config/system.yaml の各セクションが RobotServer まで届いていること。
+
+    ここが空いていると、`main()` の RobotServer(...) から引数を 1 本落としても
+    全テストが緑のままになる (実際に health / motor_check の配線は誰も見ていなかった)。
+    症状は「yaml に書いた値どおりに動かない」だけで、ログにも UI にも現れない。
+
+    値ではなく**式の書かれ方**を見る。値の一致だけを見るとリテラルで書き直しても
+    通ってしまい、単一情報源から外れたことを検出できない。
+    """
+
+    #: RobotServer へ渡さないフィールドと、その渡し先。
+    #: 新しいセクションを足した人はここへ書くか、サーバーへ配線するかを選ぶことになる。
+    NOT_FOR_SERVER = {
+        "can_buses": "CANManager の生成に使う (サーバーはバスを直接触らない)",
+        "source": "エラーメッセージへ出すファイル名",
+    }
+
+    def _server_call_keywords(self) -> str:
+        """main() の中の RobotServer(...) 呼び出しの、キーワード引数の式をすべて連結する。"""
+        tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "RobotServer"
+            ):
+                return " ".join(ast.unparse(kw.value) for kw in node.keywords)
+        raise AssertionError("main.py に RobotServer(...) の呼び出しが無い")
+
+    def test_every_section_is_wired(self) -> None:
+        wired = self._server_call_keywords()
+        # 局所変数へ受けてから渡している経路も追えるよう、代入元まで含めて見る
+        source = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+
+        for field in dataclasses.fields(SystemConfig):
+            if field.name in self.NOT_FOR_SERVER:
+                continue
+            reference = f"system.{field.name}"
+            assert reference in wired or f"= {reference}" in source, (
+                f"config/system.yaml の {field.name} が RobotServer へ配線されていません。"
+                f" 渡さないなら {self.__class__.__name__}.NOT_FOR_SERVER に理由を書いてください。"
+            )
+
+    def test_exemptions_are_real_fields(self) -> None:
+        """存在しないフィールド名で免除を書くと、本物の配線漏れを隠せてしまう。"""
+        names = {f.name for f in dataclasses.fields(SystemConfig)}
+        assert set(self.NOT_FOR_SERVER) <= names
 
 
 class TestLoadAllConfigs:

@@ -17,6 +17,9 @@ export const DEFAULT_MATCH_STATE: MatchState = {
   phase: "setup",
   can_start_match: false,
   checklists: {},
+  // 既定は「未受信」。走っているタイマーを既定にすると、関心の無いテストが
+  // 一律に setTimeout を仕掛けることになる (タイマー自体は MatchTimer.test.tsx が見る)
+  timer: null,
 };
 
 /** 全ハンドラを vi.fn() にした既定値。テストは関心のあるフィールドだけ上書きする */

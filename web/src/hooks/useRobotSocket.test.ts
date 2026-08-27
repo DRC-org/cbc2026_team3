@@ -201,6 +201,7 @@ describe("match_state メッセージ", () => {
         phase: "match",
         can_start_match: true,
         checklists: { main_hand: { items: [], completed: true } },
+        timer: { running: true, elapsed_ms: 3_000, duration_ms: 180_000 },
       }),
     );
 
@@ -209,6 +210,7 @@ describe("match_state メッセージ", () => {
       phase: "match",
       can_start_match: true,
       checklists: { main_hand: { items: [], completed: true } },
+      timer: { running: true, elapsed_ms: 3_000, duration_ms: 180_000 },
     });
   });
 

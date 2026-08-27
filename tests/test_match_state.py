@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import inspect
+import time
+
+import pytest
+
+from lib.config_schema import MatchSettings
 from lib.match_state import (
     PHASES_ANY,
     PHASES_DURING_MATCH,
@@ -13,6 +19,7 @@ from lib.match_state import (
     MatchState,
     Phase,
 )
+from tests.fake_clock import FakeClock
 
 _DEFS = {
     ROLE_MAIN_HAND: [
@@ -27,6 +34,15 @@ _DEFS = {
 
 def _make() -> MatchState:
     return MatchState(definitions=_DEFS)
+
+
+def _make_with_clock(clock: FakeClock, *, duration_s: float = 180.0) -> MatchState:
+    return MatchState(definitions=_DEFS, settings=MatchSettings(duration_s=duration_s), clock=clock)
+
+
+def _enter_match(state: MatchState) -> None:
+    _complete_all(state)
+    assert state.match_start() is True
 
 
 def _complete(state: MatchState, role: str) -> None:
@@ -197,6 +213,121 @@ class TestSerialization:
         sub = payload["checklists"][ROLE_SUB_HAND]
         assert sub["completed"] is True
         assert sub["items"] == [{"id": "home", "label": "サブハンド初期位置確認", "checked": True}]
+
+
+class TestMatchTimer:
+    """試合時間タイマー。全デバイスの表示はこの経過時間だけを起点にする。
+
+    サーバーは残り時間ではなく「配信瞬間の経過ミリ秒」を配り、各デバイスが
+    自分の単調時計で進める。したがってここが誤ると、ずれは 1 台ではなく
+    **全デバイスで同じだけ**ずれる (画面同士を見比べても気付けない)。
+    """
+
+    def test_default_clock_is_monotonic(self) -> None:
+        """既定の時刻源は単調時計であること。
+
+        time.time() は NTP 補正で後ろへ飛ぶことがあり、試合中に残り時間が
+        増える。全デバイスがこの値を起点にするため、ずれは 1 台ではなく
+        **全画面で同じだけ**現れ、見比べても気付けない。
+        テストは必ず clock を注入するので、既定値はここでしか踏まれない。
+        """
+        default = inspect.signature(MatchState.__init__).parameters["clock"].default
+        assert default is time.monotonic
+
+    def test_not_started_reads_zero(self) -> None:
+        state = _make_with_clock(FakeClock())
+        assert state.timer_running is False
+        assert state.elapsed_s == 0.0
+
+    def test_elapsed_advances_with_injected_clock(self) -> None:
+        clock = FakeClock()
+        state = _make_with_clock(clock)
+        _enter_match(state)
+
+        clock.advance(12.5)
+        assert state.timer_running is True
+        assert state.elapsed_s == pytest.approx(12.5)
+
+    def test_time_before_start_is_not_counted(self) -> None:
+        """セッティングタイムに費やした時間が試合時間に混ざってはならない。"""
+        clock = FakeClock()
+        state = _make_with_clock(clock)
+        clock.advance(300.0)
+        _enter_match(state)
+
+        assert state.elapsed_s == pytest.approx(0.0)
+
+    def test_denied_match_start_does_not_move_the_origin(self) -> None:
+        """試合中に届いた match_start はフェーズゲートで弾かれる。そこで起点を
+        引き直すと、機体は動いたままタイマーだけが満了時間へ巻き戻る。
+
+        操縦者の押し間違いや Monitor の二重送信 1 回で成立し、しかも
+        「弾かれた」ことは画面に出るので**タイマーの巻き戻りだけが残る**。
+        """
+        clock = FakeClock()
+        state = _make_with_clock(clock)
+        _enter_match(state)
+        clock.advance(40.0)
+
+        assert state.match_start() is False
+        assert state.elapsed_s == pytest.approx(40.0)
+
+    def test_finish_freezes_the_value(self) -> None:
+        """結果確認中に数字が進み続けると、何秒で終えたのかが読めなくなる。"""
+        clock = FakeClock()
+        state = _make_with_clock(clock)
+        _enter_match(state)
+
+        clock.advance(95.0)
+        assert state.match_finish() is True
+        frozen = state.elapsed_s
+
+        clock.advance(60.0)
+        assert state.timer_running is False
+        assert state.elapsed_s == pytest.approx(frozen)
+        assert frozen == pytest.approx(95.0)
+
+    def test_reset_clears_the_timer(self) -> None:
+        clock = FakeClock()
+        state = _make_with_clock(clock)
+        _enter_match(state)
+        clock.advance(50.0)
+
+        assert state.match_reset() is True
+        clock.advance(10.0)
+        assert state.timer_running is False
+        assert state.elapsed_s == 0.0
+
+    def test_second_match_starts_from_zero(self) -> None:
+        """1 試合目の凍結値が残ると、2 試合目が途中から始まる。"""
+        clock = FakeClock()
+        state = _make_with_clock(clock)
+        _enter_match(state)
+        clock.advance(80.0)
+        state.match_finish()
+        state.match_reset()
+
+        clock.advance(30.0)
+        _enter_match(state)
+        clock.advance(5.0)
+
+        assert state.timer_running is True
+        assert state.elapsed_s == pytest.approx(5.0)
+
+    def test_timer_payload_carries_elapsed_and_duration(self) -> None:
+        clock = FakeClock()
+        state = _make_with_clock(clock, duration_s=120.0)
+        _enter_match(state)
+        clock.advance(7.25)
+
+        timer = state.to_dict()["timer"]
+        assert timer == {"running": True, "elapsed_ms": 7250, "duration_ms": 120000}
+
+    def test_duration_comes_from_settings_not_a_literal(self) -> None:
+        """試合時間は config/system.yaml の値。ここに数値を焼き付けると
+        当日ルールが変わったときに yaml を直しても画面が追従しない。"""
+        state = _make_with_clock(FakeClock(), duration_s=90.0)
+        assert state.to_dict()["timer"]["duration_ms"] == 90000
 
 
 class TestLoadDefinitions:

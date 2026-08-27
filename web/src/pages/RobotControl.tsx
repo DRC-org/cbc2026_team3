@@ -7,6 +7,7 @@ import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { Checklist } from "@/components/operator/Checklist";
+import { MatchTimer } from "@/components/operator/MatchTimer";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -170,10 +171,16 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           </Panel>
         </div>
 
-        {/* 右は参照面。平常時は 1 行に畳み、異常が出たときだけ自分から開く */}
-        <Panel legend="機体状態" className="self-start">
-          <SubsystemStatus health={state.health} motors={state.motors} safety={state.safety} />
-        </Panel>
+        {/* 右は参照面。試合時間は操作面へ置かない — 主操作 (ActionPanel) の位置は
+            状態によって動かさない約束なので、上に何かを積むと押す前に探し直しになる。
+            診断は平常時 1 行に畳み、異常が出たときだけ自分から開く */}
+        <div className="flex min-h-0 flex-col gap-2">
+          <MatchTimer timer={matchState.timer} />
+
+          <Panel legend="機体状態" className="self-start">
+            <SubsystemStatus health={state.health} motors={state.motors} safety={state.safety} />
+          </Panel>
+        </div>
       </Page>
       {motorCheckPanel}
     </>

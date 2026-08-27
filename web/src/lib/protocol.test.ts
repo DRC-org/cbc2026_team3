@@ -66,6 +66,7 @@ describe("parseServerMessage", () => {
           phase: "match",
           can_start_match: true,
           checklists: { main_hand: { items: [], completed: true } },
+          timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         }),
       ).toEqual({
         type: "match_state",
@@ -74,6 +75,7 @@ describe("parseServerMessage", () => {
           phase: "match",
           can_start_match: true,
           checklists: { main_hand: { items: [], completed: true } },
+          timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         },
       });
     });
@@ -83,6 +85,28 @@ describe("parseServerMessage", () => {
       expect(msg).toMatchObject({
         matchState: { checklists: {}, can_start_match: false },
       });
+    });
+
+    it("タイマーが欠けても match_state ごと捨てない", () => {
+      // フェーズと指差喚呼の進捗は試合の進行そのものを握っている。タイマーが
+      // 読めないという理由でそちらまで落とすほうがはるかに悪い
+      const msg = parse({ type: "match_state", court: "red", phase: "match" });
+
+      expect(msg).toMatchObject({ matchState: { phase: "match", timer: null } });
+    });
+
+    it.each([
+      ["running が boolean でない", { running: "yes", elapsed_ms: 0, duration_ms: 180_000 }],
+      ["elapsed_ms が無い", { running: true, duration_ms: 180_000 }],
+      ["duration_ms が無い", { running: true, elapsed_ms: 0 }],
+      ["duration_ms が 0", { running: true, elapsed_ms: 0, duration_ms: 0 }],
+      ["duration_ms が負", { running: true, elapsed_ms: 0, duration_ms: -1 }],
+    ])("壊れたタイマー (%s) は null にする", (_label, timer) => {
+      // duration_ms <= 0 を通すと残り時間が常に 0 以下になり、
+      // 画面には「試合開始と同時に時間切れ」が出る
+      const msg = parse({ type: "match_state", court: "red", phase: "match", timer });
+
+      expect(msg).toMatchObject({ matchState: { timer: null } });
     });
   });
 

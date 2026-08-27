@@ -14,7 +14,13 @@ from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
 from lib.commands import CommandSpec, RejectChannel, phase_deny_reason, spec_for
-from lib.config_schema import DEFAULT_HEALTH, DEFAULT_MOTOR_CHECK, HealthThresholds
+from lib.config_schema import (
+    DEFAULT_HEALTH,
+    DEFAULT_MATCH,
+    DEFAULT_MOTOR_CHECK,
+    HealthThresholds,
+    MatchSettings,
+)
 from lib.control.position_loop import MAX_TUNABLE_GAIN, TUNABLE_PID_KEYS, M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -97,6 +103,7 @@ class RobotServer:
         motor_check_default_magnitude: dict[str, float] | None = None,
         motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
+        match_settings: MatchSettings = DEFAULT_MATCH,
         dry_run: bool = False,
     ) -> None:
         self._host = host
@@ -120,7 +127,7 @@ class RobotServer:
 
         # 試合全体の状態 (コート / フェーズ / チェックリスト)。
         # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く。
-        self.match = MatchState(definitions=checklist_definitions)
+        self.match = MatchState(definitions=checklist_definitions, settings=match_settings)
 
         # ヘルスチェックしきい値は config/system.yaml の health セクション由来。
         # 4 値を分解せず 1 つの値のまま持つ (config_schema.HealthThresholds 参照)

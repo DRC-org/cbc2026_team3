@@ -9,6 +9,7 @@ import main
 from lib.config_schema import (
     CAN_ID_RANGES,
     DEFAULT_HEALTH,
+    DEFAULT_MATCH,
     DEFAULT_MOTOR_CHECK,
     DRIVER_TYPES,
     load_robot_config,
@@ -66,6 +67,32 @@ class TestSystemConfig:
 
         assert config.health == DEFAULT_HEALTH
         assert config.motor_check == DEFAULT_MOTOR_CHECK
+        assert config.match == DEFAULT_MATCH
+
+    def test_match_duration_is_read_from_yaml(self) -> None:
+        config = load_system_config(
+            {"can_buses": {"a_bus": "can_a"}, "match": {"duration_s": 120}},
+            source="system.yaml",
+        )
+
+        assert config.match.duration_s == 120.0
+
+    def test_unknown_match_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="countdown"):
+            load_system_config(
+                {"can_buses": {"a_bus": "can_a"}, "match": {"countdown": True}},
+                source="system.yaml",
+            )
+
+    @pytest.mark.parametrize("value", [0, -30])
+    def test_non_positive_match_duration_is_rejected(self, value: int) -> None:
+        """0 以下だと開始と同時に残り 0 になり、タイマーが常に時間切れを出す。
+        誤記が画面の表示だけを壊すため、設定が原因だと気付けない。"""
+        with pytest.raises(ValueError, match=r"match\.duration_s"):
+            load_system_config(
+                {"can_buses": {"a_bus": "can_a"}, "match": {"duration_s": value}},
+                source="system.yaml",
+            )
 
     def test_partial_health_override_fills_defaults(self) -> None:
         config = load_system_config(
@@ -151,7 +178,7 @@ class TestRobotConfigStructure:
                 source="test.yaml",
             )
 
-    @pytest.mark.parametrize("section", ["health", "motor_check", "can_buses"])
+    @pytest.mark.parametrize("section", ["health", "motor_check", "can_buses", "match"])
     def test_shared_sections_point_at_system_yaml(self, section: str) -> None:
         """共通設定を robot yaml に書いても効かない。黙って無視せず移動先を教える。"""
         with pytest.raises(ValueError, match=r"system\.yaml"):
@@ -432,6 +459,7 @@ class TestShippedConfigs:
             "edulite05": 5.0,
             "generic": 0.1,
         }
+        assert system.match.duration_s == 180.0
 
     @pytest.mark.parametrize("name", ["main_hand.yaml", "sub_hand.yaml"])
     def test_robot_yaml_loads(self, name: str) -> None:
@@ -450,7 +478,7 @@ class TestShippedConfigs:
         for name in ("main_hand.yaml", "sub_hand.yaml"):
             raw = yaml.safe_load((_CONFIG_DIR / name).read_text())
 
-            assert {"health", "motor_check", "can_buses"} & set(raw) == set()
+            assert {"health", "motor_check", "can_buses", "match"} & set(raw) == set()
 
     def test_every_bus_alias_maps_to_a_defined_interface(self) -> None:
         """バス別名の実インタフェース名は can_buses.yaml に定義済みのものであること。
