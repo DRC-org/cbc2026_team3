@@ -88,7 +88,7 @@ class MotorSafety {
         return !latched_ && everFed_ && !(watchdogEnabled_ && isExpired(nowMs));
     }
 
-    // FEEDBACK Byte4 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
+    // FEEDBACK Byte7 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
     // ウォッチドッグのビットは isCommandLost() に従うので、起動直後の未受信では立たない。
     uint8_t statusFlags(uint32_t nowMs) const;
 

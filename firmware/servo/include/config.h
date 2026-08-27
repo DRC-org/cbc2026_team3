@@ -76,7 +76,7 @@ struct ServoSlotConfig {
     motorcan::ServoLimits limits;  // 可動範囲とスルーレート（SET_PARAM 0x10-0x12 で変更可）
     motorcan::ServoPulseSpec pulse;
     // TouchSensor のとき、LOW を「入力あり」とみなすか。
-    // 報告ビットは常に FEEDBACK Byte4 のセンサ入力（自分のデバイス ID で送るので 1 つで足りる）。
+    // 報告ビットは常に FEEDBACK Byte7 の bit6（自分のデバイス ID で送るので 1 つで足りる）。
     bool sensorActiveLow;
     const char *name;     // シリアルデバッグ表示用。CAN の挙動には影響しない
 };
