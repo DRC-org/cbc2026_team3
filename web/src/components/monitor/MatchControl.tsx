@@ -6,10 +6,10 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { Panel } from "@/components/ui/Panel";
 import { Section } from "@/components/ui/Section";
-import { useRobot } from "@/context/RobotContext";
-import type { MatchCourt } from "@/hooks/useRobotSocket";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
-import { COURT_LABEL } from "@/lib/phase";
+import { COURT_LABEL, isDuringMatch } from "@/lib/phase";
+import type { MatchCourt } from "@/lib/protocol";
 
 /** 選択中のコートは面で塗る。誤ったコート設定は試合をそのまま落とすため */
 const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }[] = [
@@ -27,7 +27,8 @@ export type ConfirmKind = "start" | "finish" | "reset";
  * 呼び出し側は `requestConfirm(kind)` を叩くだけにする。
  */
 export function useMatchConfirm() {
-  const { matchState, matchStart, matchFinish, matchReset } = useRobot();
+  const { matchState } = useRobotStatus();
+  const { matchStart, matchFinish, matchReset } = useRobotCommands();
   const { court } = matchState;
   const [confirm, setConfirm] = useState<ConfirmKind | null>(null);
 
@@ -98,9 +99,10 @@ export function MatchSettings({
 }: {
   onRequestConfirm: (kind: ConfirmKind) => void;
 }) {
-  const { matchState, setCourt, connected } = useRobot();
+  const { matchState, connected } = useRobotStatus();
+  const { setCourt } = useRobotCommands();
   const { court, phase } = matchState;
-  const settingsLocked = phase === "match" || !connected;
+  const settingsLocked = isDuringMatch(phase) || !connected;
 
   return (
     <Panel legend="試合設定">
@@ -147,7 +149,7 @@ export function MatchStrip({
 }: {
   onRequestConfirm: (kind: ConfirmKind) => void;
 }) {
-  const { matchState } = useRobot();
+  const { matchState } = useRobotStatus();
   const { court, phase } = matchState;
 
   return (
@@ -156,7 +158,7 @@ export function MatchStrip({
         <span className="text-base-content/70">MATCH </span>
         {COURT_LABEL[court]}
       </span>
-      {phase === "match" ? (
+      {isDuringMatch(phase) ? (
         <Button
           tone="danger"
           onClick={() => onRequestConfirm("finish")}

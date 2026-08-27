@@ -4,8 +4,9 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
+import { isDuringMatch } from "@/lib/phase";
 
 interface MotorCheckButtonProps {
   robotName: string;
@@ -13,15 +14,15 @@ interface MotorCheckButtonProps {
 }
 
 export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonProps) {
-  const { eStopActive, connected, matchState } = useRobot();
+  const { eStopActive, connected, matchState } = useRobotStatus();
   const { state, start } = useMotorCheck(robotName);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // 可否の判定はサーバー側 (`_PHASE_GATES["motor_check_start"]`) に合わせてフェーズで行う。
+  // 可否の判定はサーバー側 (`lib/commands.py` の motor_check_start) に合わせてフェーズで行う。
   // 以前はステップ番号から「シーケンス実行中か」を推定していたが、準備中は step_index=0 /
   // total_steps>0 が常に成立するため、動作確認が主役のセッティングタイムで
   // ボタンが常時無効になっていた（サーバーはこのフェーズでこそ受け付ける）。
-  const inMatch = matchState.phase === "match";
+  const inMatch = isDuringMatch(matchState.phase);
   const checkRunning = state.status === "running";
   const disabled = eStopActive || inMatch || checkRunning || !connected;
 

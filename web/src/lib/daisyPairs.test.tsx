@@ -6,7 +6,7 @@ import { TABS } from "@/lib/tabs";
 import type { Tone } from "@/lib/tone";
 import {
   TONE_BADGE_CLASS,
-  TONE_BORDER_CLASS,
+  TONE_BORDER_L_CLASS,
   TONE_PROGRESS_CLASS,
   TONE_STATUS_CLASS,
   TONE_TEXT_CLASS,
@@ -42,10 +42,13 @@ describe("daisyUI のクラスは対で書かれている", () => {
     }
   });
 
-  it("全トーンに文字色・進捗色・枠色が定義されている", () => {
+  it("全トーンに文字色・進捗色・アクセントバー色が定義されている", () => {
+    // 検査対象は実際に使われているマップだけにする。使われていないマップを
+    // 「全トーン揃っている」と守り続けると、消せない死蔵コードになる
     for (const tone of ALL_TONES) {
       expect(TONE_TEXT_CLASS[tone]).toBeTruthy();
-      expect(TONE_BORDER_CLASS[tone]).toBeTruthy();
+      // 実行時に border- から組み立てるのは禁止。リテラルで揃っていることを見る
+      expect(TONE_BORDER_L_CLASS[tone]).toMatch(/(^| )border-l-[a-z0-9-]+( |$)/);
       // neutral だけは既定の進捗色（無指定）を使う
       if (tone !== "neutral") expect(TONE_PROGRESS_CLASS[tone]).toBeTruthy();
     }

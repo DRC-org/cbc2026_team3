@@ -79,6 +79,37 @@ class PIDController:
         self._prev_measurement = None
         self._last_output = 0.0
 
+    def set_gains(
+        self,
+        *,
+        kp: float | None = None,
+        ki: float | None = None,
+        kd: float | None = None,
+    ) -> None:
+        """実行中にゲインを差し替える (バンプレス切り替え)。
+
+        ``ki`` を変えるとき積分器をそのまま残すと、出力に乗る ``ki * integral`` が
+        新旧ゲインの比の分だけ段差になり、その瞬間に電流が跳ねて機構に衝撃が出る。
+        かといって積分をクリアすると、重力を支えていた保持電流ごと抜けて昇降軸が落ちる。
+        どちらも避けるため、積分項の出力寄与が変化前と一致するよう積分器側を作り直す。
+
+        ``ki=0`` では寄与が 0 になるので積分器も捨てる。残しておくと、後から ki を
+        戻した瞬間に古い蓄積が一気に出力へ乗る (``update`` が ki=0 の間は積分を
+        進めないのも同じ理由)。
+
+        ``_prev_measurement`` は保持する。捨てると次の 1 周期だけ D 項が 0 になり、
+        ゲインを上げた直後という最も振動しやすい瞬間に制動が抜ける。
+        """
+        if kp is not None:
+            self.kp = float(kp)
+        if kd is not None:
+            self.kd = float(kd)
+        if ki is not None:
+            new_ki = float(ki)
+            contribution = self.ki * self._integral
+            self._integral = contribution / new_ki if new_ki != 0.0 else 0.0
+            self.ki = new_ki
+
     def update(self, setpoint: float, measurement: float, dt: float) -> float:
         """偏差を 1 周期分処理して操作量を返す。
 

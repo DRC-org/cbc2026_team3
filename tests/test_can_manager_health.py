@@ -1,52 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from dataclasses import replace
+from unittest.mock import MagicMock, patch
 
 import can
 import pytest
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorDriver, MotorState
+from lib.config_schema import DEFAULT_HEALTH
 from lib.health import BusHealth, HealthSnapshot, MotorHealth
-
-
-class _FakeMotor(MotorDriver):
-    """ヘルスチェックテスト専用の簡易ドライバ。
-
-    MotorDriver の判定 API (has_thermal_warning など) を属性で直接制御し、
-    フィードバックパース実装に依存せず health() の判定経路だけを検証する。
-    """
-
-    def __init__(self, name: str, can_id: int) -> None:
-        super().__init__(name, can_id)
-        # 各テストが独立に変更できる判定フラグ
-        self.thermal_warning = False
-        self.thermal_fault = False
-        self.overcurrent = False
-        self.fault = False
-
-    def encode_target(self, mode, value):  # pragma: no cover - 本テストでは未使用
-        return can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-
-    def decode_feedback(self, msg: can.Message) -> MotorState:
-        return self._state
-
-    def matches_feedback(self, msg: can.Message) -> bool:
-        return msg.arbitration_id == 0x200 + self.can_id
-
-    def has_thermal_warning(self, temp_warning_c: float, temp_critical_c: float) -> bool:
-        return self.thermal_warning
-
-    def has_thermal_fault(self, temp_critical_c: float) -> bool:
-        return self.thermal_fault
-
-    def has_overcurrent_warning(self) -> bool:
-        return self.overcurrent
-
-    def is_fault(self) -> bool:
-        return self.fault
+from tests.fake_can import deliver_frame, mark_bus_off, mark_feedback_at
+from tests.fake_drivers import HealthFlagDriver
+from tests.test_can_manager import _direct_runner
 
 
 def _make_virtual_bus(channel: str) -> can.Bus:
@@ -56,9 +24,9 @@ def _make_virtual_bus(channel: str) -> can.Bus:
 @pytest.fixture
 def mgr_with_motors():
     """共通 fixture: 1 バス + 1 モータの CANManager を返す。"""
-    mgr = CANManager()
+    mgr = CANManager(run_blocking=_direct_runner())
     bus = _make_virtual_bus("vhealth0")
-    motor = _FakeMotor("m1", 1)
+    motor = HealthFlagDriver("m1", 1)
     mgr.add_bus("bus0", bus, channel="vhealth0")
     mgr.add_motor("bus0", motor)
     yield mgr, motor
@@ -91,7 +59,7 @@ class TestCANManagerHealth:
         assert snap.motors[0].bus == "bus0"
 
     async def test_receive_records_last_rx_and_marks_ok(self, mgr_with_motors) -> None:
-        # _receive_loop が受信時に _last_rx_at を更新し、十分新しければ OK 判定
+        # 受信ループがフィードバック鮮度を進め、十分新しければ OK 判定
         mgr, motor = mgr_with_motors
         feedback_msg = can.Message(arbitration_id=0x200 + motor.can_id, data=bytes(8))
 
@@ -107,18 +75,11 @@ class TestCANManagerHealth:
         bus = mgr._buses["bus0"]
         with (
             patch.object(bus, "recv", side_effect=recv_side_effect),
-            patch("asyncio.get_event_loop") as mock_loop,
+            pytest.raises(asyncio.CancelledError),
         ):
+            await mgr._receive_loop("bus0")
 
-            async def fake_executor(executor, fn, *args):
-                return fn(*args)
-
-            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=fake_executor)
-
-            with pytest.raises(asyncio.CancelledError):
-                await mgr._receive_loop("bus0")
-
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.OK
         assert snap.motors[0].last_feedback_at is not None
         assert snap.motors[0].feedback_age_ms is not None
@@ -127,16 +88,16 @@ class TestCANManagerHealth:
     def test_feedback_timeout_transitions_to_stale(self, mgr_with_motors) -> None:
         # last_rx_at が timeout を超えていると STALE
         mgr, motor = mgr_with_motors
-        mgr._last_rx_at[motor.name] = time.time() - 1.0  # 1 秒前
-        snap = mgr.health(feedback_timeout_ms=100.0)
+        mark_feedback_at(mgr, motor.name, time.time() - 1.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=100.0))
         assert snap.motors[0].state is MotorHealth.STALE
 
     def test_thermal_warning(self, mgr_with_motors) -> None:
         # 受信は新鮮 + 温度 WARNING フラグ → MotorHealth.WARNING
         mgr, motor = mgr_with_motors
-        mgr._last_rx_at[motor.name] = time.time()
+        deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.thermal_warning = True
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.WARNING
         # overall は DEGRADED に正規化される (health.py の _MOTOR_TO_BUS_SEVERITY 参照)
         assert snap.overall is BusHealth.DEGRADED
@@ -144,26 +105,26 @@ class TestCANManagerHealth:
     def test_thermal_fault(self, mgr_with_motors) -> None:
         # 温度 FAULT フラグは STALE/WARNING より優先される
         mgr, motor = mgr_with_motors
-        mgr._last_rx_at[motor.name] = time.time()
+        deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.thermal_fault = True
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.FAULT
         assert snap.overall is BusHealth.DOWN
 
     def test_overcurrent_warning(self, mgr_with_motors) -> None:
         mgr, motor = mgr_with_motors
-        mgr._last_rx_at[motor.name] = time.time()
+        deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.overcurrent = True
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.WARNING
 
     def test_is_fault_takes_priority(self, mgr_with_motors) -> None:
         # is_fault() True は最優先で FAULT
         mgr, motor = mgr_with_motors
-        mgr._last_rx_at[motor.name] = time.time()
+        deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.fault = True
         motor.thermal_warning = True  # 同時に warning でも FAULT 維持
-        snap = mgr.health(feedback_timeout_ms=500.0)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
         assert snap.motors[0].state is MotorHealth.FAULT
 
     async def test_send_failure_increments_tx_error_and_degrades(self) -> None:
@@ -171,7 +132,7 @@ class TestCANManagerHealth:
         mgr = CANManager()
         bus = MagicMock()
         bus.send.side_effect = can.CanError("simulated tx failure")
-        motor = _FakeMotor("m1", 1)
+        motor = HealthFlagDriver("m1", 1)
         mgr.add_bus("bus0", bus, channel="vhealth-fail")
         mgr.add_motor("bus0", motor)
 
@@ -184,14 +145,13 @@ class TestCANManagerHealth:
         assert mgr._tx_error_count["bus0"] == 3
 
         # しきい値 2 で DEGRADED 判定
-        snap = mgr.health(tx_error_threshold=2)
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, tx_error_threshold=2))
         assert snap.buses[0].state is BusHealth.DEGRADED
         assert snap.buses[0].tx_error_count == 3
 
     def test_bus_off_marks_down(self, mgr_with_motors) -> None:
-        # _bus_off フラグが立つと BusHealth.DOWN (実バス bus_off の単体テスト代替)
         mgr, _ = mgr_with_motors
-        mgr._bus_off["bus0"] = True
+        mark_bus_off(mgr, "bus0")
         snap = mgr.health()
         assert snap.buses[0].state is BusHealth.DOWN
         assert snap.buses[0].bus_off is True
@@ -199,17 +159,50 @@ class TestCANManagerHealth:
 
     async def test_send_success_records_last_tx_at(self) -> None:
         # 送信成功時は _last_tx_at が更新され、tx_error_count は据え置き
-        mgr = CANManager()
+        mgr = CANManager(run_blocking=_direct_runner())
         bus = MagicMock()
-        motor = _FakeMotor("m1", 1)
+        motor = HealthFlagDriver("m1", 1)
         mgr.add_bus("bus0", bus)
         mgr.add_motor("bus0", motor)
 
         before = time.time()
         msg = can.Message(arbitration_id=0x100, data=bytes(8))
-        with patch("asyncio.get_event_loop") as mock_loop:
-            mock_loop.return_value.run_in_executor = AsyncMock()
-            await mgr.send_to_bus("bus0", msg)
+        await mgr.send_to_bus("bus0", msg)
 
         assert mgr._last_tx_at["bus0"] >= before
         assert mgr._tx_error_count["bus0"] == 0
+
+    async def test_frame_decode_failure_surfaces_as_rx_error_count(self) -> None:
+        """握り潰したフレームは rx_error_count としてヘルスに現れなければならない。
+
+        ヘルス配信が「全部 OK」と言い続けるなら、握り潰しはバグの隠蔽と同じになる。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = MagicMock()
+        motor = HealthFlagDriver("m1", 1)
+        motor.decode_feedback = MagicMock(  # type: ignore[method-assign]
+            side_effect=struct.error("DLC 不足")
+        )
+        mgr.add_bus("bus0", bus, channel="vhealth-rx")
+        mgr.add_motor("bus0", motor)
+
+        feedback_msg = can.Message(arbitration_id=0x200 + motor.can_id, data=bytes(4))
+        queue = [feedback_msg, feedback_msg]
+
+        def recv_side_effect(timeout: float):
+            if queue:
+                return queue.pop(0)
+            raise asyncio.CancelledError
+
+        bus.recv.side_effect = recv_side_effect
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._receive_loop("bus0")
+
+        snap = mgr.health()
+        assert snap.buses[0].rx_error_count == 2
+        # デコードできなかったフレームを受信扱いしないので、モータは STALE のまま出る
+        assert snap.motors[0].state is MotorHealth.STALE
+        # バスの判定自体は変えない。フレームを解釈できない機器が同じバスに相乗りする
+        # (メインハンドとサブハンドは can_edulite / can_generic を物理的に共有する)
+        # だけで DEGRADED になると、本物の送信障害の警告まで信用されなくなる
+        assert snap.buses[0].state is BusHealth.OK

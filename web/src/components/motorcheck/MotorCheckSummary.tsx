@@ -1,6 +1,7 @@
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type { MotorCheckOverall } from "@/hooks/useRobotSocket";
+import type { MotorCheckOverall } from "@/lib/protocol";
+import { formatClock } from "@/lib/time";
 import type { Tone } from "@/lib/tone";
 
 const OVERALL: Record<MotorCheckOverall, { tone: Tone; label: string }> = {
@@ -9,11 +10,6 @@ const OVERALL: Record<MotorCheckOverall, { tone: Tone; label: string }> = {
   partial: { tone: "warning", label: "一部失敗" },
   failed: { tone: "error", label: "失敗" },
 };
-
-function formatTime(ms: number | null): string {
-  if (ms === null) return "—";
-  return new Date(ms).toLocaleTimeString("ja-JP", { hour12: false });
-}
 
 /**
  * 直近の動作確認の結果を 1 行で出す。
@@ -51,7 +47,7 @@ export function MotorCheckSummary({ robotName }: { robotName: string }) {
         {passed}/{state.records.length}
       </span>
       <span className="text-base-content/60">
-        {formatTime(state.finishedAt ?? state.startedAt)}
+        {formatClock(state.finishedAtMs ?? state.startedAtMs)}
       </span>
     </span>
   );

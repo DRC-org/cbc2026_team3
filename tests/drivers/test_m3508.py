@@ -7,6 +7,7 @@ import pytest
 
 from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.m3508 import GEAR_RATIO, M3508Driver
+from tests.feedback_frames import feed_m3508
 
 
 class TestEncodeCurrentCommand:
@@ -123,18 +124,15 @@ class TestHealth:
         self.driver = M3508Driver("test_motor", can_id=1)
 
     def _feed(self, *, current: int = 0, temp: int = 25) -> None:
-        # フィードバックフレームを 1 つ流して内部 state を更新する補助
-        data = struct.pack(">hhhBB", 0, 0, current, temp, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=0, current=current, temp=temp)
 
     def test_thermal_warning_below_threshold(self) -> None:
         self._feed(temp=60)
-        assert self.driver.has_thermal_warning(temp_warning_c=65, temp_critical_c=80) is False
+        assert self.driver.has_thermal_warning(temp_warning_c=65) is False
 
     def test_thermal_warning_at_threshold(self) -> None:
         self._feed(temp=65)
-        assert self.driver.has_thermal_warning(temp_warning_c=65, temp_critical_c=80) is True
+        assert self.driver.has_thermal_warning(temp_warning_c=65) is True
 
     def test_thermal_fault_at_critical(self) -> None:
         self._feed(temp=80)
@@ -171,9 +169,7 @@ class TestMotorCheck:
 
     def _feed(self, *, velocity: int, current: int = 0, temp: int = 25) -> None:
         # M3508 フィードバックの velocity 符号は電流符号と一致する想定
-        data = struct.pack(">hhhBB", 0, velocity, current, temp, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=0, rpm=velocity, current=current, temp=temp)
 
     def test_check_command_uses_specified_magnitude(self) -> None:
         msg, context = self.driver.check_command(magnitude=500.0)
@@ -183,20 +179,20 @@ class TestMotorCheck:
         # can_id=1 → スロット 0 に 500 mA 投入
         assert values[0] == 500
         assert values[1] == 0
-        assert context["target"] == pytest.approx(500.0)
-        assert context["mode"] == "current"
+        assert context.target == pytest.approx(500.0)
+        assert context.mode is ControlMode.CURRENT
 
     def test_check_command_negative_magnitude(self) -> None:
         msg, context = self.driver.check_command(magnitude=-500.0)
         values = struct.unpack(">hhhh", msg.data)
         assert values[0] == -500
-        assert context["target"] == pytest.approx(-500.0)
+        assert context.target == pytest.approx(-500.0)
 
     def test_evaluate_passed_when_velocity_sign_matches(self) -> None:
         _, context = self.driver.check_command(magnitude=500.0)
         # 電流指令と同符号の rpm がフィードバック → PASSED
         self._feed(velocity=300)
-        passed, detail = self.driver.evaluate_check_result(self.driver.state, context)
+        passed, detail = self.driver.evaluate_check_result(context)
         assert passed is True
         assert detail is None
 
@@ -204,7 +200,7 @@ class TestMotorCheck:
         _, context = self.driver.check_command(magnitude=500.0)
         # 電流指令は正だが rpm が逆方向 → FAILED
         self._feed(velocity=-300)
-        passed, detail = self.driver.evaluate_check_result(self.driver.state, context)
+        passed, detail = self.driver.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -212,7 +208,7 @@ class TestMotorCheck:
         _, context = self.driver.check_command(magnitude=500.0)
         # |rpm| < 50 は「回転検出なし」
         self._feed(velocity=10)
-        passed, detail = self.driver.evaluate_check_result(self.driver.state, context)
+        passed, detail = self.driver.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
         assert "回転" in detail
@@ -233,9 +229,7 @@ class TestMultiTurn:
         self.driver = M3508Driver("lift", can_id=1)
 
     def _feed_angle(self, angle_raw: int) -> None:
-        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=angle_raw)
 
     @staticmethod
     def _deg(counts: float) -> float:
@@ -309,9 +303,7 @@ class TestMultiTurnTargetReached:
         self.driver = M3508Driver("lift", can_id=1)
 
     def _feed(self, angle_raw: int, *, velocity: int = 0, current: int = 0) -> None:
-        data = struct.pack(">HhhBB", angle_raw, velocity, current, 25, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=angle_raw, rpm=velocity, current=current)
 
     def _spin_two_turns(self) -> None:
         """累積角をちょうど +720deg (16384 counts) にし、単回転角は 0 に戻す。"""
@@ -383,9 +375,7 @@ class TestFeedbackPosition:
         self.driver = M3508Driver("lift", can_id=1)
 
     def _feed_angle(self, angle_raw: int) -> None:
-        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-        msg = can.Message(arbitration_id=0x201, data=data, is_extended_id=False)
-        self.driver.update_state(msg)
+        feed_m3508(self.driver, angle_raw=angle_raw)
 
     def test_returns_multi_turn_position(self) -> None:
         self._feed_angle(0)

@@ -1,4 +1,4 @@
-import { Send } from "lucide-react";
+import { CircleHelp, Send } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -6,10 +6,12 @@ import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { useRobot } from "@/context/RobotContext";
-import type { MotorState } from "@/hooks/useRobotSocket";
+import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
-import { ROBOTS, TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
+import { motorTempTone } from "@/lib/healthVerdict";
+import { isDuringMatch } from "@/lib/phase";
+import type { MotorState } from "@/lib/protocol";
+import { ROBOTS } from "@/lib/robots";
 
 const PID_PARAMS = [
   { key: "kp", label: "Kp", max: 10 },
@@ -22,12 +24,6 @@ const STEP = 0.01;
 interface Selection {
   robot: string;
   motor: string;
-}
-
-function tempTone(temp: number) {
-  if (temp >= TEMP_DANGER) return "error" as const;
-  if (temp >= TEMP_WARNING) return "warning" as const;
-  return "success" as const;
 }
 
 /** 調整対象の 1 値を大きく出す。応答を見ながら詰める作業なので視認性を優先する */
@@ -100,7 +96,9 @@ function PidRow({ label, max, value, onChange }: PidRowProps) {
  * 詰める作業なので、左で対象を選び、右をその 1 基に明け渡す形にする。
  */
 export function MotorTuning() {
-  const { states, send } = useRobot();
+  const states = useRobotStates();
+  const { matchState, connected, eStopActive } = useRobotStatus();
+  const { send } = useRobotCommands();
   const [values, setValues] = useState<Record<string, Record<string, number>>>({});
   const [selected, setSelected] = useState<Selection | null>(null);
 
@@ -131,6 +129,18 @@ export function MotorTuning() {
       send({ type: "set_param", motor, key, value: getValue(motor, key) });
     }
   };
+
+  // 試合中の set_param はサーバーが拒否する (走行中の位置制御ループの特性が変わり、
+  // 同期グループ全体に適用されるため直結した左右軸が負荷下で同時に別特性になる)。
+  // 緊急停止中も同じく拒否される (`lib/commands.py` の allowed_during_e_stop=False)。
+  // 判定の正はサーバーで、ここは押す前に理由を出すだけ。拒否トーストで気付くのでは遅い
+  const blockedReason = !connected
+    ? "切断中のため送信できません"
+    : eStopActive
+      ? "緊急停止中はパラメータを変更できません"
+      : isDuringMatch(matchState.phase)
+        ? "試合中はパラメータを変更できません"
+        : null;
 
   if (entries.length === 0) {
     return (
@@ -189,6 +199,7 @@ export function MotorTuning() {
           getValue={getValue}
           setValue={setValue}
           onSend={() => sendAll(active.motor)}
+          blockedReason={blockedReason}
         />
       ) : null}
     </Page>
@@ -202,6 +213,7 @@ function MotorDetail({
   getValue,
   setValue,
   onSend,
+  blockedReason,
 }: {
   robotLabel: string;
   motor: string;
@@ -209,12 +221,16 @@ function MotorDetail({
   getValue: (motor: string, param: string) => number;
   setValue: (motor: string, param: string, val: number) => void;
   onSend: () => void;
+  /** 送信できない理由。null なら送れる */
+  blockedReason: string | null;
 }) {
   return (
     <Panel
       legend={`${robotLabel} / ${motor}`}
       actions={
-        <StatusBadge tone={tempTone(motorState.temp)}>{motorState.temp.toFixed(1)}℃</StatusBadge>
+        <StatusBadge tone={motorTempTone(motorState.temp)}>
+          {motorState.temp.toFixed(1)}℃
+        </StatusBadge>
       }
     >
       {/* 応答を見ながら詰めるので、選択中 1 基の現在値は大きく出す */}
@@ -237,13 +253,26 @@ function MotorDetail({
         ))}
       </div>
 
-      {/* 送信は明示操作のみ。スライダーを触っただけでは set_param を飛ばさない */}
+      {/* 送信は明示操作のみ。スライダーを触っただけでは set_param を飛ばさない。
+          値の編集自体は塞がない (試合中に次の値を用意しておけるほうが実務に合う) */}
       <div className="mt-3 flex shrink-0 items-center gap-3">
-        <Button tone="info" onClick={onSend} aria-label={`${motor} の PID を送信`}>
+        <Button
+          tone="info"
+          onClick={onSend}
+          disabled={blockedReason !== null}
+          aria-label={`${motor} の PID を送信`}
+        >
           <Icon as={Send} />
           この 3 値を送信
         </Button>
-        <span className="text-base-content/60">スライダー操作だけでは送信されません</span>
+        {blockedReason ? (
+          <span className="flex items-center gap-1.5 text-base-content/70">
+            <Icon as={CircleHelp} />
+            {blockedReason}
+          </span>
+        ) : (
+          <span className="text-base-content/60">スライダー操作だけでは送信されません</span>
+        )}
       </div>
     </Panel>
   );

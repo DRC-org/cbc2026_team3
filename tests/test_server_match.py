@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from lib.can_manager import CANManager
-from lib.drivers.base import MotorState
 from lib.match_state import (
     ROLE_MAIN_HAND,
     ROLE_SUB_HAND,
@@ -15,12 +12,14 @@ from lib.match_state import (
     Phase,
 )
 from lib.sequence.engine import Sequence, step
-from lib.server import RobotServer
+from tests.server_fixtures import ServerFixture, recv_type
 
 _DEFS = {
     ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
     ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
 }
+
+_ROBOT_NAMES = ("main_hand", "sub_hand")
 
 
 class DummySequence(Sequence):
@@ -38,52 +37,22 @@ class DummySequence(Sequence):
         self.executed.append("wait_step")
 
 
-def _make_mock_can_manager() -> CANManager:
-    mgr = MagicMock(spec=CANManager)
-    motor = MagicMock()
-    motor.state = MotorState(position=0.0, velocity=0.0, current=0.0, temperature=30.0)
-    motor.name = "m1"
-    mgr._motors = {"m1": motor}
-    mgr.get_motor.return_value = motor
-    mgr.send = AsyncMock()
-    mgr.send_to_bus = AsyncMock()
-    mgr._buses = {"bus0": MagicMock()}
-    return mgr
-
-
-def _build_server() -> RobotServer:
-    server = RobotServer(checklist_definitions=_DEFS)
-    for name in ("main_hand", "sub_hand"):
-        server.add_robot(name, DummySequence(name), _make_mock_can_manager())
-    return server
-
-
-async def _recv_type(ws, wanted: str, *, tries: int = 40) -> dict | None:
-    """周期配信の state メッセージに紛れた特定 type のメッセージを拾う。"""
-    for _ in range(tries):
-        try:
-            msg = await asyncio.wait_for(ws.receive_json(), timeout=0.2)
-        except (TimeoutError, TypeError):
-            return None
-        if msg.get("type") == wanted:
-            return msg
-    return None
-
-
-def _complete(server: RobotServer, role: str) -> None:
-    for item in server.match.checklists[role].items:
-        server.match.set_checklist_item(role, item.id, True)
+def _build_fixture() -> ServerFixture:
+    fx = ServerFixture.build(checklist_definitions=_DEFS)
+    for name in _ROBOT_NAMES:
+        fx.add_robot(name, DummySequence(name))
+    return fx
 
 
 class TestMatchStateSnapshotOnConnect:
     async def test_snapshot_sent_immediately(self) -> None:
         """接続直後に match_state が届かないと、リロードした操縦者が現在の状況を知れない。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            msg = await _recv_type(ws, "match_state")
+            msg = await recv_type(ws, "match_state")
             assert msg is not None
             assert msg["phase"] == "setup"
             assert msg["court"] == "red"
@@ -94,54 +63,53 @@ class TestMatchStateSnapshotOnConnect:
 class TestSequenceDoesNotAutoStart:
     async def test_sequence_idle_after_startup(self) -> None:
         """明示的な開始合図があるまでシーケンスを走らせない。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)):
             await asyncio.sleep(0.2)
-            for name in ("main_hand", "sub_hand"):
-                seq = server._robots[name].sequence
-                assert seq._running is False
+            for seq in fx.sequences():
+                assert seq.is_running is False
                 assert seq.executed == []
 
 
 class TestCourtCommand:
     async def test_set_court_propagates_to_sequences(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await ws.send_json({"type": "set_court", "court": "blue"})
             await asyncio.sleep(0.05)
 
-            assert server.match.court is Court.BLUE
-            for name in ("main_hand", "sub_hand"):
-                assert server._robots[name].sequence.court is Court.BLUE
+            assert fx.match.court is Court.BLUE
+            for seq in fx.sequences():
+                assert seq.court is Court.BLUE
             await ws.close()
 
     async def test_invalid_value_ignored(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await ws.send_json({"type": "set_court", "court": "green"})
             await asyncio.sleep(0.05)
 
-            assert server.match.court is Court.RED
+            assert fx.match.court is Court.RED
             assert not ws.closed
             await ws.close()
 
 
 class TestChecklistCommands:
     async def test_checklist_set_broadcasts_match_state(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _recv_type(ws, "match_state")
+            await recv_type(ws, "match_state")
 
             await ws.send_json(
                 {
@@ -151,7 +119,7 @@ class TestChecklistCommands:
                     "checked": True,
                 }
             )
-            msg = await _recv_type(ws, "match_state")
+            msg = await recv_type(ws, "match_state")
             assert msg is not None
             assert msg["checklists"][ROLE_MAIN_HAND]["completed"] is True
             # 片方だけでは試合に入れない
@@ -159,8 +127,8 @@ class TestChecklistCommands:
             await ws.close()
 
     async def test_both_operators_unlock_ready(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -170,70 +138,65 @@ class TestChecklistCommands:
                 )
             await asyncio.sleep(0.05)
 
-            assert server.match.phase is Phase.READY
-            assert server.match.can_start_match is True
+            assert fx.match.phase is Phase.READY
+            assert fx.match.can_start_match is True
             await ws.close()
 
 
 class TestPhaseGate:
     async def test_sequence_start_rejected_before_match(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
 
-            msg = await _recv_type(ws, "command_rejected")
+            msg = await recv_type(ws, "command_rejected")
             assert msg is not None
             assert msg["command"] == "sequence_start"
             assert msg["reason"]
 
             await asyncio.sleep(0.1)
-            assert server._robots["main_hand"].sequence.executed == []
+            assert fx.sequence("main_hand").executed == []
             await ws.close()
 
     async def test_sequence_start_allowed_in_match(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            _complete(server, ROLE_MAIN_HAND)
-            _complete(server, ROLE_SUB_HAND)
+            fx.complete_all_checklists()
 
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
-            assert server.match.phase is Phase.MATCH
+            assert fx.match.phase is Phase.MATCH
 
             await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
             await asyncio.sleep(0.15)
-            assert server._robots["main_hand"].sequence.executed == ["first"]
+            assert fx.sequence("main_hand").executed == ["first"]
             # 操縦者が押した側だけが動く (試合開始は両機を起動しない)
-            assert server._robots["sub_hand"].sequence.executed == []
+            assert fx.sequence("sub_hand").executed == []
             await ws.close()
 
     async def test_motor_check_rejected_during_match(self) -> None:
-        server = _build_server()
-        app = server.create_app()
-        _complete(server, ROLE_MAIN_HAND)
-        _complete(server, ROLE_SUB_HAND)
-        server.match.match_start()
+        fx = _build_fixture()
+        app = fx.create_app()
+        fx.enter_match()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
-            msg = await _recv_type(ws, "motor_check_error")
+            msg = await recv_type(ws, "motor_check_error")
             assert msg is not None
             await ws.close()
 
     async def test_motor_check_http_rejected_during_match(self) -> None:
-        """HTTP 経路は _handle_command を通らないため個別にゲートが要る。"""
-        server = _build_server()
-        app = server.create_app()
-        _complete(server, ROLE_MAIN_HAND)
-        _complete(server, ROLE_SUB_HAND)
-        server.match.match_start()
+        """HTTP 経路は handle_command を通らないため個別にゲートが要る。"""
+        fx = _build_fixture()
+        app = fx.create_app()
+        fx.enter_match()
 
         async with TestClient(TestServer(app)) as client:
             resp = await client.post("/robots/main_hand/motor_check")
@@ -243,34 +206,31 @@ class TestPhaseGate:
 class TestMatchStartDoesNotMoveRobots:
     async def test_match_start_leaves_sequences_idle(self) -> None:
         """試合開始はフェーズを進めるだけ。動き出すのは操縦者が START を押してから。"""
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            _complete(server, ROLE_MAIN_HAND)
-            _complete(server, ROLE_SUB_HAND)
+            fx.complete_all_checklists()
 
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.15)
 
-            assert server.match.phase is Phase.MATCH
-            for name in ("main_hand", "sub_hand"):
-                seq = server._robots[name].sequence
+            assert fx.match.phase is Phase.MATCH
+            for seq in fx.sequences():
                 assert seq.executed == []
-                assert seq._running is False
+                assert seq.is_running is False
             await ws.close()
 
 
 class TestMatchFinishAndReset:
     async def test_finish_stops_sequences(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            _complete(server, ROLE_MAIN_HAND)
-            _complete(server, ROLE_SUB_HAND)
+            fx.complete_all_checklists()
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
             await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
@@ -279,24 +239,23 @@ class TestMatchFinishAndReset:
             await ws.send_json({"type": "match_finish"})
             await asyncio.sleep(0.15)
 
-            assert server.match.phase is Phase.FINISHED
-            assert server._robots["main_hand"].sequence._running is False
+            assert fx.match.phase is Phase.FINISHED
+            assert fx.sequence("main_hand").is_running is False
             await ws.close()
 
     async def test_reset_returns_to_setup(self) -> None:
-        server = _build_server()
-        app = server.create_app()
+        fx = _build_fixture()
+        app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            _complete(server, ROLE_MAIN_HAND)
-            _complete(server, ROLE_SUB_HAND)
+            fx.complete_all_checklists()
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
 
             await ws.send_json({"type": "match_reset"})
             await asyncio.sleep(0.05)
 
-            assert server.match.phase is Phase.SETUP
-            assert server.match.checklists[ROLE_MAIN_HAND].completed is False
+            assert fx.match.phase is Phase.SETUP
+            assert fx.match.checklists[ROLE_MAIN_HAND].completed is False
             await ws.close()

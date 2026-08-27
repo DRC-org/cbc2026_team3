@@ -28,6 +28,8 @@ positions:
     handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
     place: 10.0          # 配置姿勢 [deg]
 
+  # !!! 以下の値は config/sub_hand.yaml の motor_check.magnitude と一致させること。
+  #     ずれると動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
   sub_gripper:
-    open: 5.0            # 開 [deg]
+    open: 5.0            # 開 [deg] (= sub_hand.yaml sub_gripper.motor_check.magnitude)
     closed: 0.0          # 閉 (把持) [deg]

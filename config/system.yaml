@@ -1,0 +1,33 @@
+# 両ロボットで共有する制御プログラムの設定。
+#
+# ここに置くのは「PC 上に 1 つしか存在しないもの」に限る。以前はこの 3 ブロックを
+# main_hand.yaml / sub_hand.yaml の両方にコメントごと逐語で書いていたが、読み込み側は
+# 最初に見つけた値だけを採用していたため、sub_hand.yaml 側の編集は WARNING ログを
+# 残して黙って捨てられていた。「書けるのに効かない設定」を作らないため 1 箇所へ集約する。
+#
+# モータ構成 (ドライバ種別・CAN ID・PID・動作確認の個別上書き) はロボットごとに違うので
+# config/<robot>.yaml に残す。
+
+# バス別名 -> SocketCAN インタフェース名。
+# インタフェース名の実体 (serial / bitrate) は config/can_buses.yaml が単一情報源。
+# can0/can1/can2 は USB 列挙順で入れ替わるため使わない。番号が入れ替わると
+# C620 に EDULITE 用のコマンドが飛んでモータを壊す。
+can_buses:
+  m3508_bus: can_m3508
+  edulite_bus: can_edulite
+  generic_bus: can_generic
+
+health:
+  feedback_timeout_ms: 500   # この時間フィードバックなければ STALE
+  temp_warning_c: 65         # この温度で WARNING
+  temp_critical_c: 80        # この温度で FAULT
+  tx_error_threshold: 96     # CAN error_passive 境界
+
+motor_check:
+  per_motor_timeout_ms: 1500   # 1 モータあたりのタイムアウト
+  default_magnitude:
+    m3508: 500                 # mA
+    edulite05: 5.0             # deg
+    generic: 0.1               # POSITION/VELOCITY/DUTY 共通の小さい目標値
+  # tolerance はドライバ側のデフォルト (1deg / 5rpm 等) を採用。
+  # 個別上書きしたい場合は config/<robot>.yaml の motors[name].motor_check で行う。

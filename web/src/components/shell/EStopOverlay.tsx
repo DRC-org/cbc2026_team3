@@ -3,10 +3,11 @@ import { OctagonX, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 
 export function EStopOverlay() {
-  const { eStopActive, onEStopRelease } = useRobot();
+  const { eStopActive, eStopReason } = useRobotStatus();
+  const { onEStopRelease } = useRobotCommands();
 
   return (
     // onClose を渡さないことで解除経路を Reset ボタンのみに限定する
@@ -28,6 +29,11 @@ export function EStopOverlay() {
         <Icon as={OctagonX} className="alert-blink text-[3em]" />
         <p className="text-[1.3em] font-bold tracking-wide">ALL MOTION HALTED</p>
         <p>全ロボットの動作を停止しています。周囲の安全を確認してください。</p>
+        {/* 停止理由。SyncMonitor の左右ペア軸ずれ検出もこの経路で理由付きに発動する。
+            「誰かが押したのか、機体が壊れたのか」が分からないと復旧手順を選べない */}
+        <p className="text-[1.1em] font-medium">
+          {eStopReason ?? "操縦者の停止操作 (機体側の自動検知ではありません)"}
+        </p>
       </div>
     </Modal>
   );

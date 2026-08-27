@@ -4,20 +4,24 @@ import asyncio
 import logging
 import struct
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import can
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.control.target_refresh import GenericTargetRefresher
+from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
 from lib.drivers.edulite05 import Edulite05Driver
+from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import MotorCheckResult
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence, step
-from lib.server import RobotServer
+from lib.sequence.motors import MotorHandle
+from tests.fake_can import mark_feedback_at
+from tests.server_fixtures import ServerFixture, drain
 
 # ---------------------------------------------------------------------- #
 #  テスト用ダミー実装
@@ -56,18 +60,12 @@ class _MockMotor(MotorDriver):
         # フィードバック受信ループで一致しないことを保証 (テスト分離のため)
         return False
 
-    def check_command(self, *, magnitude: float) -> tuple[can.Message, dict]:
+    def check_command(self, *, magnitude: float) -> tuple[can.Message, CheckContext]:
         self.last_magnitude = magnitude
         msg = can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-        return msg, {"target": self.target_value, "mode": "current"}
+        return msg, CheckContext(mode=ControlMode.CURRENT, target=self.target_value)
 
-    def evaluate_check_result(
-        self,
-        state: MotorState,
-        context: dict,
-        *,
-        tolerance: float | None = None,
-    ) -> tuple[bool, str | None]:
+    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
         return self.evaluate_passed, None if self.evaluate_passed else "差分過大"
 
     def reset_after_check(self) -> can.Message:
@@ -89,7 +87,7 @@ class _DummySequence(Sequence):
 class _LongRunningSequence(Sequence):
     """run() を呼んだ後 _running=True のまま停止し続けるシーケンス。
 
-    通常シーケンス実行中の拒否 (server._start_motor_check) を検証する目的で、
+    通常シーケンス実行中の拒否 (動作確認の起動判定) を検証する目的で、
     実際にステップ内で長時間 await する代わりに run() 開始後に _running=True
     を直接観測できるよう trigger 待ちで止める。
     """
@@ -102,7 +100,7 @@ class _LongRunningSequence(Sequence):
         return None
 
 
-def _build_server_with_motors(
+def _build_fixture_with_motors(
     *,
     bus_channel: str,
     motors: dict[str, _MockMotor] | None = None,
@@ -112,10 +110,10 @@ def _build_server_with_motors(
     motor_check_default_magnitude: dict[str, float] | None = None,
     motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
     position_loops: list[M3508PositionLoop] | None = None,
-) -> tuple[RobotServer, CANManager, dict[str, _MockMotor], can.Bus]:
+) -> tuple[ServerFixture, CANManager, dict[str, _MockMotor], can.Bus]:
     """RobotServer + 実 CANManager + virtual バス + MockMotor の構成を組む。
 
-    feed_immediately=True で send 直後に _last_rx_at を進めるパッチを当てる
+    feed_immediately=True で send 直後にフィードバック受信時刻を進めるパッチを当てる
     (フィードバック受信を即時模擬)。
     """
     if motors is None:
@@ -123,7 +121,7 @@ def _build_server_with_motors(
     if motor_check_default_magnitude is None:
         motor_check_default_magnitude = {"_MockMotor": 1.0}
 
-    server = RobotServer(
+    fx = ServerFixture.build(
         motor_check_per_motor_timeout_ms=motor_check_per_motor_timeout_ms,
         motor_check_default_magnitude=motor_check_default_magnitude,
         motor_check_per_motor_overrides=motor_check_per_motor_overrides,
@@ -134,7 +132,7 @@ def _build_server_with_motors(
     for motor in motors.values():
         mgr.add_motor("bus0", motor)
         # 全モータについて初期受信時刻を記録 (health の STALE 判定回避)
-        mgr._last_rx_at[motor.name] = time.time()
+        mark_feedback_at(mgr, motor.name, time.time())
 
     if feed_immediately:
         # CANManager.send を差し替え、送信直後に rx タイムスタンプを進める。
@@ -143,13 +141,13 @@ def _build_server_with_motors(
 
         async def _patched_send(motor_name: str, msg: can.Message) -> None:
             await original_send(motor_name, msg)
-            mgr._last_rx_at[motor_name] = time.time() + 0.001
+            mark_feedback_at(mgr, motor_name, time.time() + 0.001)
 
         mgr.send = _patched_send  # type: ignore[method-assign]
 
     seq = sequence if sequence is not None else _DummySequence()
-    server.add_robot("main_hand", seq, mgr, position_loops=position_loops)
-    return server, mgr, motors, bus
+    fx.add_robot("main_hand", seq, mgr, position_loops=position_loops)
+    return fx, mgr, motors, bus
 
 
 class _AutoClock:
@@ -200,39 +198,7 @@ class _LoopProbe:
         angle_raw = round(deg / 360.0 * 8192) % 8192
         data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
         self.driver.update_state(can.Message(arbitration_id=0x200 + self.driver.can_id, data=data))
-        self.mgr._last_rx_at[self.motor_name] = time.time()
-
-
-async def _wait_for_running_runner(
-    server: RobotServer, robot: str, *, timeout: float = 2.0
-) -> MotorCheckRunner:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        runner = server._motor_check_runners.get(robot)
-        if runner is not None and runner.is_running:
-            return runner
-        await asyncio.sleep(0.01)
-    raise AssertionError("動作確認 runner が起動しなかった")
-
-
-async def _drain(ws, *, timeout: float = 0.05, limit: int = 50) -> list[dict]:
-    """WS から残メッセージを排出する。タイムアウトしたら戻る。"""
-    drained: list[dict] = []
-    for _ in range(limit):
-        try:
-            msg = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
-        except TimeoutError:
-            break
-        drained.append(msg)
-    return drained
-
-
-async def _wait_until_idle(server: RobotServer, robot: str, *, timeout: float = 2.0) -> None:
-    """指定ロボットの動作確認タスクが完了するまで待つ。"""
-    task = server._motor_check_tasks.get(robot)
-    if task is None:
-        return
-    await asyncio.wait_for(task, timeout=timeout)
+        mark_feedback_at(self.mgr, self.motor_name, time.time())
 
 
 # ---------------------------------------------------------------------- #
@@ -243,12 +209,12 @@ async def _wait_until_idle(server: RobotServer, robot: str, *, timeout: float = 
 class TestMotorCheckStartKicksOffRunner:
     async def test_motor_check_start_kicks_off_runner(self) -> None:
         # WS で motor_check_start を送ると runner が起動し、progress イベントが配信される
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_start")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_start")
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
 
@@ -267,7 +233,7 @@ class TestMotorCheckStartKicksOffRunner:
                         break
 
                 assert got_progress, "motor_check_progress が配信されなかった"
-                await _wait_until_idle(server, "main_hand")
+                await fx.wait_motor_check_idle("main_hand")
                 await ws.close()
         finally:
             bus.shutdown()
@@ -280,12 +246,12 @@ class TestMotorCheckDoneIncludesSnapshot:
             "m1": _MockMotor("m1", 1, evaluate_passed=True),
             "m2": _MockMotor("m2", 2, evaluate_passed=True),
         }
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_done", motors=motors)
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_done", motors=motors)
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
 
@@ -318,18 +284,18 @@ class TestMotorCheckRecordPerMotor:
             "m1": _MockMotor("m1", 1, evaluate_passed=True),
             "m2": _MockMotor("m2", 2, evaluate_passed=False),
         }
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_record", motors=motors)
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_record", motors=motors)
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
 
                 # 動作確認タスクの完了を待ってから WS バッファを順に読み出すことで、
                 # done と record 配信の到着順レースを排除する。
-                await _wait_until_idle(server, "main_hand", timeout=3.0)
+                await fx.wait_motor_check_idle("main_hand", timeout=3.0)
 
                 records_seen: list[dict] = []
                 got_done = False
@@ -359,7 +325,7 @@ class TestMotorCheckRejectedDuringEStop:
     async def test_e_stop_continues_after_individual_send_failures_and_broadcasts(
         self, caplog
     ) -> None:
-        server = RobotServer()
+        fx = ServerFixture.build()
         manager = CANManager()
         bus0 = can.Bus(interface="virtual", channel="vsrvchk_estop_fail0")
         bus1 = can.Bus(interface="virtual", channel="vsrvchk_estop_fail1")
@@ -367,7 +333,7 @@ class TestMotorCheckRejectedDuringEStop:
         manager.add_bus("bus1", bus1)
         manager.add_motor("bus0", Edulite05Driver("arm0", can_id=5))
         manager.add_motor("bus1", Edulite05Driver("arm1", can_id=6))
-        server.add_robot("main_hand", _DummySequence(), manager)
+        fx.add_robot("main_hand", _DummySequence(), manager)
 
         try:
             with (
@@ -383,42 +349,37 @@ class TestMotorCheckRejectedDuringEStop:
                     new_callable=AsyncMock,
                     side_effect=[can.CanError("bus failure"), None],
                 ) as send_to_bus,
-                patch.object(
-                    server, "_broadcast_e_stop_state", new_callable=AsyncMock
-                ) as broadcast,
+                fx.patch_e_stop_broadcast() as broadcast,
                 caplog.at_level(logging.ERROR),
             ):
-                await server._handle_command({"type": "e_stop"})
+                await fx.command({"type": "e_stop"})
 
             assert send.await_count == 2
             assert send_to_bus.await_count == 2
-            # 操縦者操作による緊急停止には停止理由が無い (内部検知のときだけ載る)
-            broadcast.assert_awaited_once_with(reason=None)
+            # 停止フレームが全滅しても状態配信は 1 回行う (理由の出所は保持値なので引数を取らない)
+            broadcast.assert_awaited_once_with()
             assert "driver固有送信失敗" in caplog.text
             assert "bus送信失敗" in caplog.text
         finally:
             bus0.shutdown()
             bus1.shutdown()
 
-    async def test_e_stop_aborts_runner_and_sends_edulite_extended_disable(self) -> None:
-        server = RobotServer()
+    async def test_e_stop_sends_edulite_extended_disable(self) -> None:
+        fx = ServerFixture.build()
         manager = CANManager()
         bus = can.Bus(interface="virtual", channel="vsrvchk_edulite_estop")
         manager.add_bus("bus0", bus)
         motor = Edulite05Driver("arm", can_id=5)
         manager.add_motor("bus0", motor)
-        server.add_robot("main_hand", _DummySequence(), manager)
-        runner = MagicMock(is_running=True)
-        server._motor_check_runners["main_hand"] = runner
+        fx.add_robot("main_hand", _DummySequence(), manager)
 
         try:
             with (
                 patch.object(manager, "send", new_callable=AsyncMock) as send,
                 patch.object(manager, "send_to_bus", new_callable=AsyncMock),
             ):
-                await server._handle_command({"type": "e_stop"})
+                await fx.command({"type": "e_stop"})
 
-            runner.abort.assert_called_once_with()
             send.assert_awaited_once()
             motor_name, message = send.await_args.args
             assert motor_name == "arm"
@@ -430,14 +391,14 @@ class TestMotorCheckRejectedDuringEStop:
 
     async def test_motor_check_rejected_during_e_stop(self) -> None:
         # e_stop 状態で motor_check_start → motor_check_error が配信され runner 起動なし
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_estop")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_estop")
         try:
-            server._e_stop_active = True
+            await fx.activate_e_stop()
 
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
 
@@ -455,7 +416,7 @@ class TestMotorCheckRejectedDuringEStop:
 
                 assert got_error, "motor_check_error が配信されなかった"
                 # runner は起動していない
-                assert "main_hand" not in server._motor_check_runners
+                assert fx.motor_check_runner("main_hand") is None
                 await ws.close()
         finally:
             bus.shutdown()
@@ -465,17 +426,17 @@ class TestMotorCheckRejectedDuringSequence:
     async def test_motor_check_rejected_during_sequence(self) -> None:
         # 通常シーケンス _running=True 中の start は拒否される
         seq = _LongRunningSequence()
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_seq", sequence=seq)
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_seq", sequence=seq)
         try:
             # シーケンスを起動して trigger 待ち (_running=True, waiting_trigger=True)
             seq_task = asyncio.create_task(seq.run())
             await asyncio.sleep(0.05)
-            assert seq._running is True
+            assert seq.is_running is True
 
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
 
@@ -491,7 +452,7 @@ class TestMotorCheckRejectedDuringSequence:
                         break
 
                 assert got_error
-                assert "main_hand" not in server._motor_check_runners
+                assert fx.motor_check_runner("main_hand") is None
                 await ws.close()
         finally:
             seq_task.cancel()
@@ -505,17 +466,17 @@ class TestMotorCheckRejectedWhenAlreadyRunning:
         # 1 回目 start 直後にもう一度 start → 2 回目は拒否
         # フィードバックを送らせず長く時間がかかるよう per_motor_timeout を長くしてある
         motors = {"m1": _MockMotor("m1", 1)}
-        server, _, _, bus = _build_server_with_motors(
+        fx, _, _, bus = _build_fixture_with_motors(
             bus_channel="vsrvchk_busy",
             motors=motors,
             feed_immediately=False,
             motor_check_per_motor_timeout_ms=2000.0,
         )
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 # 1 回目 start (実行中のまま放置できるよう feed_immediately=False)
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
@@ -523,13 +484,13 @@ class TestMotorCheckRejectedWhenAlreadyRunning:
                 # runner 起動を待つ
                 for _ in range(50):
                     await asyncio.sleep(0.01)
-                    runner = server._motor_check_runners.get("main_hand")
+                    runner = fx.motor_check_runner("main_hand")
                     if runner is not None and runner.is_running:
                         break
                 else:
                     raise AssertionError("1 回目 runner が起動しなかった")
 
-                await _drain(ws)
+                await drain(ws)
 
                 # 2 回目 start → 拒否される
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
@@ -548,9 +509,9 @@ class TestMotorCheckRejectedWhenAlreadyRunning:
                 assert got_error
 
                 # 中断して片付け
-                runner = server._motor_check_runners["main_hand"]
+                runner = fx.motor_check_runner("main_hand")
                 runner.abort()
-                await _wait_until_idle(server, "main_hand", timeout=4.0)
+                await fx.wait_motor_check_idle("main_hand", timeout=4.0)
                 await ws.close()
         finally:
             bus.shutdown()
@@ -566,7 +527,7 @@ class TestMotorCheckAbort:
             "m2": _MockMotor("m2", 2),
             "m3": _MockMotor("m3", 3),
         }
-        server, mgr, _, bus = _build_server_with_motors(
+        fx, mgr, _, bus = _build_fixture_with_motors(
             bus_channel="vsrvchk_abort",
             motors=motors,
             feed_immediately=False,
@@ -585,17 +546,17 @@ class TestMotorCheckAbort:
                 count = send_counts[motor_name]
                 if count == 1:
                     # check_command 直後 → 即時フィードバック
-                    mgr._last_rx_at[motor_name] = time.time() + 0.001
+                    mark_feedback_at(mgr, motor_name, time.time() + 0.001)
                 elif motor_name == "m1" and count == 2:
                     # reset 中に abort が処理される時間を稼ぐ
                     await asyncio.sleep(0.05)
 
             mgr.send = _patched_send  # type: ignore[method-assign]
 
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
 
@@ -614,9 +575,9 @@ class TestMotorCheckAbort:
 
                 await ws.send_json({"type": "motor_check_abort", "robot": "main_hand"})
 
-                await _wait_until_idle(server, "main_hand", timeout=3.0)
+                await fx.wait_motor_check_idle("main_hand", timeout=3.0)
 
-                snapshot = server._motor_check_last.get("main_hand")
+                snapshot = fx.last_motor_check("main_hand")
                 assert snapshot is not None
                 # m1 PASSED, m2 / m3 は SKIPPED で抜ける
                 results = {r.motor: r.result.value for r in snapshot.records}
@@ -631,16 +592,16 @@ class TestMotorCheckAbort:
 class TestPostMotorCheckEndpoint:
     async def test_post_motor_check_endpoint(self) -> None:
         # POST /robots/main_hand/motor_check → 200 + {started: true}
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_post_ok")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_post_ok")
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post("/robots/main_hand/motor_check")
                 assert resp.status == 200
                 data = await resp.json()
                 assert data["started"] is True
 
-                await _wait_until_idle(server, "main_hand")
+                await fx.wait_motor_check_idle("main_hand")
 
                 # 知らないロボットは 404
                 resp2 = await client.post("/robots/unknown_robot/motor_check")
@@ -652,10 +613,10 @@ class TestPostMotorCheckEndpoint:
 class TestPostMotorCheckEndpointReturns409WhenRejected:
     async def test_post_motor_check_endpoint_returns_409_when_rejected(self) -> None:
         # e_stop 中の POST は 409
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_post_409")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_post_409")
         try:
-            server._e_stop_active = True
-            app = server.create_app()
+            await fx.activate_e_stop()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 resp = await client.post("/robots/main_hand/motor_check")
                 assert resp.status == 409
@@ -668,9 +629,9 @@ class TestPostMotorCheckEndpointReturns409WhenRejected:
 class TestGetMotorCheckLastEndpoint:
     async def test_get_motor_check_last_endpoint(self) -> None:
         # 実行前は {snapshot: null}、実行後はスナップショット dict
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_last")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_last")
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 resp = await client.get("/robots/main_hand/motor_check/last")
                 assert resp.status == 200
@@ -680,7 +641,7 @@ class TestGetMotorCheckLastEndpoint:
                 # 実行
                 resp = await client.post("/robots/main_hand/motor_check")
                 assert resp.status == 200
-                await _wait_until_idle(server, "main_hand", timeout=3.0)
+                await fx.wait_motor_check_idle("main_hand", timeout=3.0)
 
                 resp = await client.get("/robots/main_hand/motor_check/last")
                 assert resp.status == 200
@@ -699,20 +660,20 @@ class TestGetMotorCheckLastEndpoint:
 class TestMotorCheckUnknownRobotSilentIgnoreOnWs:
     async def test_motor_check_unknown_robot_silent_ignore_on_ws(self) -> None:
         # 知らないロボット名の motor_check_start は無視 (例外で接続が切れない)
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_unk")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_unk")
         try:
-            app = server.create_app()
+            app = fx.create_app()
             async with TestClient(TestServer(app)) as client:
                 ws = await client.ws_connect("/ws")
-                await _drain(ws)
+                await drain(ws)
 
                 await ws.send_json({"type": "motor_check_start", "robot": "ghost"})
                 await asyncio.sleep(0.1)
 
                 # 接続維持 + runner 未起動
                 assert not ws.closed
-                assert "ghost" not in server._motor_check_runners
-                assert "main_hand" not in server._motor_check_runners
+                assert fx.motor_check_runner("ghost") is None
+                assert fx.motor_check_runner("main_hand") is None
                 await ws.close()
         finally:
             bus.shutdown()
@@ -722,16 +683,16 @@ class TestPositionLoopExclusion:
     """動作確認と M3508 位置制御ループ (0x200) の排他。"""
 
     async def test_position_loop_sends_no_frame_during_motor_check(self) -> None:
-        server, mgr, _, bus = _build_server_with_motors(
+        fx, mgr, _, bus = _build_fixture_with_motors(
             bus_channel="vsrvchk_loop_busy",
             feed_immediately=False,
             motor_check_per_motor_timeout_ms=2000.0,
         )
         probe = _LoopProbe(mgr)
-        server._robots["main_hand"].position_loops = [probe.loop]
+        fx.set_position_loops("main_hand", [probe.loop])
         try:
-            assert await server._start_motor_check("main_hand") is True
-            runner = await _wait_for_running_runner(server, "main_hand")
+            assert await fx.start_motor_check("main_hand") is True
+            runner = await fx.wait_motor_check_running("main_hand")
 
             assert probe.loop.is_paused is True
             before = len(probe.frames)
@@ -740,17 +701,17 @@ class TestPositionLoopExclusion:
             assert len(probe.frames) == before
 
             runner.abort()
-            await _wait_until_idle(server, "main_hand", timeout=4.0)
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
         finally:
             bus.shutdown()
 
     async def test_position_loop_resumed_after_motor_check(self) -> None:
-        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_resume")
+        fx, mgr, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_loop_resume")
         probe = _LoopProbe(mgr)
-        server._robots["main_hand"].position_loops = [probe.loop]
+        fx.set_position_loops("main_hand", [probe.loop])
         try:
-            assert await server._start_motor_check("main_hand") is True
-            await _wait_until_idle(server, "main_hand", timeout=4.0)
+            assert await fx.start_motor_check("main_hand") is True
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
 
             assert probe.loop.is_paused is False
             before = len(probe.frames)
@@ -760,27 +721,27 @@ class TestPositionLoopExclusion:
             bus.shutdown()
 
     async def test_position_loop_resumed_after_abort(self) -> None:
-        server, mgr, _, bus = _build_server_with_motors(
+        fx, mgr, _, bus = _build_fixture_with_motors(
             bus_channel="vsrvchk_loop_abort",
             feed_immediately=False,
             motor_check_per_motor_timeout_ms=2000.0,
         )
         probe = _LoopProbe(mgr)
-        server._robots["main_hand"].position_loops = [probe.loop]
+        fx.set_position_loops("main_hand", [probe.loop])
         try:
-            assert await server._start_motor_check("main_hand") is True
-            runner = await _wait_for_running_runner(server, "main_hand")
+            assert await fx.start_motor_check("main_hand") is True
+            runner = await fx.wait_motor_check_running("main_hand")
             runner.abort()
-            await _wait_until_idle(server, "main_hand", timeout=4.0)
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
 
             assert probe.loop.is_paused is False
         finally:
             bus.shutdown()
 
     async def test_position_loop_resumed_when_runner_raises(self) -> None:
-        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_raise")
+        fx, mgr, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_loop_raise")
         probe = _LoopProbe(mgr)
-        server._robots["main_hand"].position_loops = [probe.loop]
+        fx.set_position_loops("main_hand", [probe.loop])
         try:
             with patch.object(
                 MotorCheckRunner,
@@ -788,8 +749,8 @@ class TestPositionLoopExclusion:
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("テスト用例外"),
             ):
-                assert await server._start_motor_check("main_hand") is True
-                await _wait_until_idle(server, "main_hand", timeout=4.0)
+                assert await fx.start_motor_check("main_hand") is True
+                await fx.wait_motor_check_idle("main_hand", timeout=4.0)
 
             # 復帰しないとリフトが保持電流を失ったままになる
             assert probe.loop.is_paused is False
@@ -797,9 +758,9 @@ class TestPositionLoopExclusion:
             bus.shutdown()
 
     async def test_pid_integral_not_carried_over_after_motor_check(self) -> None:
-        server, mgr, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_integral")
+        fx, mgr, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_loop_integral")
         probe = _LoopProbe(mgr, ki=10.0)
-        server._robots["main_hand"].position_loops = [probe.loop]
+        fx.set_position_loops("main_hand", [probe.loop])
         try:
             probe.feed(0.0)
             await probe.loop.set_target(probe.motor_name, ControlMode.POSITION, 10.0)
@@ -807,8 +768,8 @@ class TestPositionLoopExclusion:
             await probe.loop.step()
             assert probe.loop.pid(probe.motor_name).integral != 0.0
 
-            assert await server._start_motor_check("main_hand") is True
-            await _wait_until_idle(server, "main_hand", timeout=4.0)
+            assert await fx.start_motor_check("main_hand") is True
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
 
             # 動作確認でモータが動かされた後に古い積分が残ると復帰時に暴れる
             assert probe.loop.pid(probe.motor_name).integral == 0.0
@@ -818,22 +779,266 @@ class TestPositionLoopExclusion:
 
     async def test_motor_check_works_without_position_loops(self) -> None:
         # sub_hand 等 M3508 が居ない構成でも従来どおり動く
-        server, _, _, bus = _build_server_with_motors(bus_channel="vsrvchk_loop_absent")
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_loop_absent")
         try:
-            assert server._robots["main_hand"].position_loops == []
+            assert fx.position_loops("main_hand") == []
 
-            assert await server._start_motor_check("main_hand") is True
-            await _wait_until_idle(server, "main_hand", timeout=4.0)
+            assert await fx.start_motor_check("main_hand") is True
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
 
-            snapshot = server._motor_check_last.get("main_hand")
+            snapshot = fx.last_motor_check("main_hand")
             assert snapshot is not None
             assert snapshot.overall == "ok"
         finally:
             bus.shutdown()
 
     async def test_add_robot_defaults_to_no_position_loops(self) -> None:
-        server = RobotServer()
-        mgr = CANManager()
-        server.add_robot("sub_hand", _DummySequence(), mgr)
+        fx = ServerFixture.build()
+        fx.add_robot("sub_hand", _DummySequence(), CANManager())
 
-        assert server._robots["sub_hand"].position_loops == []
+        assert fx.position_loops("sub_hand") == []
+        assert fx.target_refreshers("sub_hand") == []
+
+
+class TestTargetRefreshExclusion:
+    """動作確認と自作モタドラ向け目標値再送の排他。
+
+    再送は「最後に送った目標値」を 20Hz で送り続ける。動作確認中に被せると
+    確認用の指令が打ち消され、健全なモータが FAILED と判定される。
+    """
+
+    def _refresher(self, mgr: CANManager) -> GenericTargetRefresher:
+        driver = GenericDriver("conveyor", can_id=9, control_type=ControlMode.DUTY)
+        handle = MotorHandle("conveyor", driver, mgr)
+        return GenericTargetRefresher([handle])
+
+    async def test_refresher_paused_during_motor_check(self) -> None:
+        fx, mgr, _, bus = _build_fixture_with_motors(
+            bus_channel="vsrvchk_refresh_busy",
+            feed_immediately=False,
+            motor_check_per_motor_timeout_ms=2000.0,
+        )
+        refresher = self._refresher(mgr)
+        fx.set_target_refreshers("main_hand", [refresher])
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            runner = await fx.wait_motor_check_running("main_hand")
+
+            assert refresher.is_paused is True
+
+            runner.abort()
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+        finally:
+            bus.shutdown()
+
+    async def test_refresher_resumed_after_motor_check(self) -> None:
+        """再開に失敗すると、以後コンベアが 500ms で止まる機体になる。"""
+        fx, mgr, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_refresh_resume")
+        refresher = self._refresher(mgr)
+        fx.set_target_refreshers("main_hand", [refresher])
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+
+            assert refresher.is_paused is False
+        finally:
+            bus.shutdown()
+
+
+# ---------------------------------------------------------------------- #
+#  起動の窓 (runner 登録 → run() 開始のあいだ)
+# ---------------------------------------------------------------------- #
+
+
+class _StallingPausable:
+    """`pause()` がテストの合図まで返らない一時停止対象 (位置制御ループの代役)。
+
+    実機の `pause()` は `_step_lock` を取るため、送信中の 1 周期ぶんブロックしうる。
+    その間 runner は `_motor_check_runners` に登録済みだが `run()` にはまだ入って
+    おらず `is_running` は False になる。この窓を実時間に依らず再現する。
+    """
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.pause_entered = asyncio.Event()
+        self.resumed = False
+
+    async def pause(self, *, reason: str = "") -> None:
+        self.pause_entered.set()
+        await self.release.wait()
+
+    def resume(self) -> None:
+        self.resumed = True
+
+
+def _record_sends(mgr: CANManager) -> list[tuple[str, can.Message]]:
+    """モータ宛の送信 (= 実駆動) を記録する。バス全体宛の停止フレームは含めない。"""
+    sent: list[tuple[str, can.Message]] = []
+    original_send = mgr.send
+
+    async def _recording(motor_name: str, msg: can.Message) -> None:
+        sent.append((motor_name, msg))
+        await original_send(motor_name, msg)
+
+    mgr.send = _recording  # type: ignore[method-assign]
+    return sent
+
+
+class TestMotorCheckStartupWindow:
+    """runner 登録から `run()` 開始までの窓で、止める操作と二重起動を取りこぼさない。
+
+    `_start_motor_check` は runner を登録してからタスクを起こすだけで、そのタスクは
+    先に送信経路の `pause()` を待つ。`is_running` を条件にすると、この窓のあいだ
+    緊急停止も abort も二重起動拒否もすべて素通りする。
+    """
+
+    async def test_窓の中の緊急停止でモータを駆動しない(self) -> None:
+        fx, mgr, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_window_estop")
+        stall = _StallingPausable()
+        fx.set_position_loops("main_hand", [stall])  # type: ignore[list-item]
+        sent = _record_sends(mgr)
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            await asyncio.wait_for(stall.pause_entered.wait(), timeout=2.0)
+
+            runner = fx.motor_check_runner("main_hand")
+            assert runner is not None
+            assert runner.is_running is False, "窓の再現に失敗 (既に run() へ入っている)"
+
+            await fx.command({"type": "e_stop"})
+            stall.release.set()
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+
+            assert sent == [], f"緊急停止中に動作確認がモータを駆動した: {sent}"
+            assert stall.resumed is True, "送信経路が一時停止のまま残った"
+        finally:
+            bus.shutdown()
+
+    async def test_起動前のrunnerも緊急停止で中断される(self) -> None:
+        """多重防護の 1 枚 —— 「登録済みの runner は状態を見ずに中断する」だけを見る。
+
+        他の 2 枚 (サーバー側の中止判定・runner 自身の緊急停止インターロック) を
+        持たない runner を置くことで、この経路が単独で止められることを確かめる。
+        `is_running` を条件にすると、登録済みで未起動の runner はここを素通りする。
+        """
+        fx, mgr, motors, bus = _build_fixture_with_motors(bus_channel="vsrvchk_abort_registered")
+        runner = MotorCheckRunner(
+            robot_name="main_hand",
+            can_manager=mgr,
+            motors=motors,
+            default_magnitude={"_MockMotor": 1.0},
+        )
+        fx.install_motor_check_runner("main_hand", runner)
+        sent = _record_sends(mgr)
+        try:
+            assert runner.is_running is False
+            await fx.command({"type": "e_stop"})
+
+            snapshot = await runner.run()
+
+            assert sent == [], f"中断されていない runner がモータを駆動した: {sent}"
+            assert all(r.result is MotorCheckResult.SKIPPED for r in snapshot.records)
+        finally:
+            bus.shutdown()
+
+    async def test_窓の中の緊急停止は中止理由を操縦者へ返す(self) -> None:
+        # 起動要求は受理されたのに何も起きない、では操縦者が原因を追えない
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_window_notice")
+        stall = _StallingPausable()
+        fx.set_position_loops("main_hand", [stall])  # type: ignore[list-item]
+        try:
+            app = fx.create_app()
+            async with TestClient(TestServer(app)) as client:
+                ws = await client.ws_connect("/ws")
+                await drain(ws)
+
+                assert await fx.start_motor_check("main_hand") is True
+                await asyncio.wait_for(stall.pause_entered.wait(), timeout=2.0)
+
+                await fx.command({"type": "e_stop"})
+                stall.release.set()
+                await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+
+                errors = [
+                    m
+                    for m in await drain(ws, timeout=0.2, limit=80)
+                    if m.get("type") == "motor_check_error"
+                ]
+                assert errors, "動作確認を中止したことが操縦者へ伝わらない"
+                assert "緊急停止" in errors[-1]["message"]
+
+                await ws.close()
+        finally:
+            bus.shutdown()
+
+    async def test_窓の中のabortでモータを駆動しない(self) -> None:
+        fx, mgr, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_window_abort")
+        stall = _StallingPausable()
+        fx.set_position_loops("main_hand", [stall])  # type: ignore[list-item]
+        sent = _record_sends(mgr)
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            await asyncio.wait_for(stall.pause_entered.wait(), timeout=2.0)
+
+            await fx.command({"type": "motor_check_abort", "robot": "main_hand"})
+            stall.release.set()
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+
+            assert sent == [], f"abort 済みなのにモータを駆動した: {sent}"
+        finally:
+            bus.shutdown()
+
+    async def test_実行中の動作確認は緊急停止で残りを駆動しない(self) -> None:
+        # 窓を抜けて走り出した後でも、停止は次のモータへ進ませない。
+        # 「起動判定で弾いたから安全」は、判定を通ってから駆動するまでの
+        # 時間を無いものとして扱っている
+        motors = {
+            "m1": _MockMotor("m1", 1),
+            "m2": _MockMotor("m2", 2),
+            "m3": _MockMotor("m3", 3),
+        }
+        fx, mgr, _, bus = _build_fixture_with_motors(
+            bus_channel="vsrvchk_estop_midrun", motors=motors
+        )
+        sent: list[tuple[str, can.Message]] = []
+        original_send = mgr.send
+
+        async def _recording(motor_name: str, msg: can.Message) -> None:
+            first = not sent
+            sent.append((motor_name, msg))
+            await original_send(motor_name, msg)
+            if first:
+                # 1 台目を駆動した直後に緊急停止 (同期監視の自動検知と同じ経路)
+                await fx.command({"type": "e_stop"})
+
+        mgr.send = _recording  # type: ignore[method-assign]
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+
+            driven = {name for name, _msg in sent}
+            assert driven == {"m1"}, f"緊急停止後のモータまで駆動した: {sorted(driven)}"
+        finally:
+            bus.shutdown()
+
+    async def test_窓の中の二重起動は拒否される(self) -> None:
+        # 素通しすると _motor_check_runners が上書きされて 1 台目が誰からも
+        # abort できなくなり、pause/resume に入れ子が無いため先に終わった側の
+        # resume() がもう一方の駆動中に 0x200 送信を再開させる
+        fx, _, _, bus = _build_fixture_with_motors(bus_channel="vsrvchk_window_double")
+        stall = _StallingPausable()
+        fx.set_position_loops("main_hand", [stall])  # type: ignore[list-item]
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            await asyncio.wait_for(stall.pause_entered.wait(), timeout=2.0)
+            first = fx.motor_check_runner("main_hand")
+
+            assert await fx.start_motor_check("main_hand") is False
+            assert fx.motor_check_runner("main_hand") is first, "1 台目の runner が失われた"
+
+            assert first is not None
+            first.abort()
+            stall.release.set()
+            await fx.wait_motor_check_idle("main_hand", timeout=4.0)
+        finally:
+            bus.shutdown()

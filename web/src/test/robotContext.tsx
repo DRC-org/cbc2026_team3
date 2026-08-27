@@ -1,23 +1,16 @@
 import { render } from "@testing-library/react";
-import type { ComponentProps, ReactElement } from "react";
+import type { ReactElement } from "react";
 import { vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
-import type { MatchState, MotorCheckState } from "@/hooks/useRobotSocket";
+import type { RobotContextValue } from "@/context/RobotContext";
+import type { MatchState } from "@/lib/protocol";
+import type { MotorCheckState } from "@/lib/robotReducer";
+import { emptyMotorCheckState } from "@/lib/robotReducer";
 
-// RobotContextValue は非公開なので、Provider の props から復元する
-export type RobotContextValue = ComponentProps<typeof RobotProvider>["value"];
+export type { RobotContextValue };
 
-export const EMPTY_MOTOR_CHECK: MotorCheckState = {
-  status: "idle",
-  current: null,
-  progress: null,
-  records: [],
-  snapshot: null,
-  error: null,
-  startedAt: null,
-  finishedAt: null,
-};
+export const EMPTY_MOTOR_CHECK: MotorCheckState = emptyMotorCheckState();
 
 export const DEFAULT_MATCH_STATE: MatchState = {
   court: "red",
@@ -32,6 +25,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     states: {},
     connected: true,
     eStopActive: false,
+    eStopReason: null,
     healthEvents: [],
     motorChecks: {},
     matchState: DEFAULT_MATCH_STATE,
@@ -42,7 +36,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     setWsUrl: vi.fn(() => true),
     resetWsUrl: vi.fn(),
     openWsSettings: vi.fn(),
-    send: vi.fn(),
+    send: vi.fn(() => true),
     onEStop: vi.fn(),
     onEStopRelease: vi.fn(),
     setCourt: vi.fn(),

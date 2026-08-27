@@ -3,8 +3,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+# 単位換算は制御層 (同期監視・位置制御ループ) と共有する。ここで再定義すると
+# 逆回転ペアの符号付き scale の逆換算がまた 2 実装に分かれる
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
+
+__all__ = [
+    "DEFAULT_TIMEOUT_S",
+    "AxisSpec",
+    "MotorSpec",
+    "PositionLookupError",
+    "PositionTable",
+    "load_position_table",
+]
 
 # 軸ごとの到達待ち上限 [s] の既定値。機構が引っかかったまま試合が止まるのを避けるため、
 # yaml で timeout_s を書かなかった軸にも必ずタイムアウトを与える
@@ -16,27 +28,6 @@ class PositionLookupError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class MotorSpec:
-    """論理軸を構成する 1 台のモータの単位換算。
-
-    逆回転で同一動作をするペア (y_axis / rotate) は ``scale`` の符号で表す。
-    専用の invert フラグを設けないのは、単位換算と回転方向が 2 箇所に分かれると
-    片方だけ直したときに気付けないため。
-    """
-
-    name: str
-    scale: float
-    offset: float
-
-    def to_command(self, value: float) -> float:
-        return value * self.scale + self.offset
-
-    def to_value(self, command: float) -> float:
-        """指令値・フィードバックを人間の単位へ戻す (同期監視の偏差計算で使う)。"""
-        return (command - self.offset) / self.scale
-
-
-@dataclass(frozen=True)
 class AxisSpec:
     """1 論理軸の単位換算とデフォルト待ち条件。
 
@@ -45,8 +36,10 @@ class AxisSpec:
     異なるため、換算はここに一元化してシーケンス本体には持ち込まない。
 
     1 つの論理軸が複数モータで駆動される場合 (左右直結のラックアンドピニオン等) は
-    ``motors`` に複数を並べる。この場合 ``scale`` / ``offset`` / ``to_command`` は
-    先頭モータへの委譲であり、実際の指令は ``motors`` 全体で組み立てる必要がある。
+    ``motors`` に複数を並べる。換算はモータごとに行う API しか公開しない
+    (``to_commands`` / ``MotorSpec.to_tolerance``)。「軸 = モータ 1 台」を前提に
+    先頭モータの値だけを返す API を置くと、逆回転ペアで左のモータに右の scale が
+    当たり、左が右向きに全ストローク動いて機構を壊す。
     """
 
     name: str
@@ -67,33 +60,22 @@ class AxisSpec:
             raise ValueError(f"axes.{self.name} にモータがありません")
 
     @property
-    def scale(self) -> float:
-        return self.motors[0].scale
-
-    @property
-    def offset(self) -> float:
-        return self.motors[0].offset
-
-    @property
     def motor_names(self) -> tuple[str, ...]:
         return tuple(motor.name for motor in self.motors)
-
-    @property
-    def is_paired(self) -> bool:
-        return len(self.motors) > 1
-
-    def to_command(self, value: float) -> float:
-        return self.motors[0].to_command(value)
 
     def to_commands(self, value: float) -> dict[str, float]:
         return {motor.name: motor.to_command(value) for motor in self.motors}
 
     @property
-    def command_tolerance(self) -> float | None:
-        if self.tolerance is None:
+    def sync_group(self) -> SyncGroup | None:
+        """同期監視の単位。``sync_tolerance`` を持たない軸は None。
+
+        ``motors`` をそのままメンバにするため、監視側で単位換算を詰め替える経路が
+        存在しない (詰め替えを挟むと逆回転の符号を落とす余地が生まれる)。
+        """
+        if self.sync_tolerance is None:
             return None
-        # 許容差は幅であって向きを持たないため、scale が負でも正の幅になるようにする
-        return abs(self.tolerance * self.scale)
+        return SyncGroup(name=self.name, members=self.motors, tolerance=self.sync_tolerance)
 
 
 _AXIS_KEYS = frozenset(
@@ -121,7 +103,13 @@ _COMMAND_MODES = {
 
 
 class PositionTable:
-    """機構位置の定数表。軸ごとの単位換算とコート差異を吸収する。"""
+    """機構位置の定数表。軸ごとの単位換算とコート差異を吸収する。
+
+    公開するのは「軸を引く」(``axis``) と「位置名を指令値へ換算する」(``commands``)
+    の 2 つに絞る。待ち条件や指令モードは ``axis(name)`` が返す ``AxisSpec`` から
+    直接読むこと。同じ値を読む道を 2 本置くと、どちらが正しいのかを毎回確かめる
+    ことになる。
+    """
 
     def __init__(
         self,
@@ -145,10 +133,6 @@ class PositionTable:
         return self._source
 
     @property
-    def is_empty(self) -> bool:
-        return not self._axes
-
-    @property
     def axes(self) -> tuple[str, ...]:
         return tuple(self._axes)
 
@@ -164,20 +148,8 @@ class PositionTable:
             )
         return spec
 
-    def timeout(self, axis: str) -> float:
-        return self.axis(axis).timeout_s
-
-    def tolerance(self, axis: str) -> float | None:
-        return self.axis(axis).command_tolerance
-
     def sync_tolerance(self, axis: str) -> float | None:
         return self.axis(axis).sync_tolerance
-
-    def command_mode(self, axis: str) -> ControlMode:
-        return self.axis(axis).command_mode
-
-    def settle_s(self, axis: str) -> float:
-        return self.axis(axis).settle_s
 
     def paired_axes(self) -> tuple[str, ...]:
         """同期監視の対象となる軸 (sync_tolerance を持つ軸)。"""
@@ -203,10 +175,6 @@ class PositionTable:
                 )
             return float(value[str(court)])
         return float(value)
-
-    def command(self, axis: str, name: str, *, court: Court | None = None) -> float:
-        """モータへそのまま渡せる指令値を返す (複数モータ軸では先頭モータの値)。"""
-        return self.axis(axis).to_command(self.raw(axis, name, court=court))
 
     def commands(self, axis: str, name: str, *, court: Court | None = None) -> dict[str, float]:
         """モータ名 → 指令値。逆回転ペアではモータごとに異なる scale が効く。"""

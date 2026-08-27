@@ -3,7 +3,7 @@ import { OctagonX } from "lucide-react";
 import { TabBar } from "@/components/shell/TabBar";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { COURT_LABEL, COURT_TONE, PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE } from "@/lib/phase";
 
@@ -19,7 +19,8 @@ import { COURT_LABEL, COURT_TONE, PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE } fr
  * 緊急停止は最優先操作なので、常に同じ位置・最大サイズでここに置く。
  */
 export function AppHeader() {
-  const { matchState, onEStop } = useRobot();
+  const { matchState } = useRobotStatus();
+  const { onEStop } = useRobotCommands();
   const { court, phase } = matchState;
 
   return (

@@ -1,4 +1,4 @@
-import type { MatchCourt, MatchPhase } from "@/hooks/useRobotSocket";
+import type { MatchCourt, MatchPhase } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
 
 export const COURT_LABEL: Record<MatchCourt, string> = {
@@ -48,7 +48,21 @@ export function isSetupPhase(phase: MatchPhase): boolean {
   return phase === "setup" || phase === "ready";
 }
 
-/** 試合フェーズ。finished は結果確認のため試合中と同じ情報密度を保つ。 */
-export function isMatchPhase(phase: MatchPhase): boolean {
-  return phase === "match" || phase === "finished";
+/**
+ * 試合中フェーズ。**サーバーのフェーズゲートの写しはここだけに置く。**
+ *
+ * `lib/match_state.py` の `PHASES_DURING_MATCH` (= {match}) と 1:1 で、
+ * 「試合中は不可」のコマンド (`set_param` / `motor_check_start` / `set_court`) が通る
+ * `PHASES_OUTSIDE_MATCH` はその補集合なので、この 1 つで両側に答えられる。
+ *
+ * 可否を決めるのはサーバー (`lib/commands.py`) であって UI ではない。ここは
+ * 送る前に理由を説明するためだけに使い、サーバーの判定を組み立て直さないこと。
+ * 画面ごとに `phase === "match"` と書き散らすと、フェーズが増えたときに
+ * 片方の画面だけが古い条件のまま残る。
+ *
+ * レイアウトの出し分けに使う `isSetupPhase` とは別物。あちらは finished を
+ * 「試合中と同じ情報密度」に寄せるための区分で、コマンドの可否とは一致しない。
+ */
+export function isDuringMatch(phase: MatchPhase): boolean {
+  return phase === "match";
 }

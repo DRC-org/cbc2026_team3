@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 
 import pytest
 
-from lib.control.sync_monitor import SyncGroup, SyncMember, SyncMonitor
+from lib.axis_sync import MotorSpec, SyncGroup
+from lib.control.sync_monitor import SyncMonitor
+from tests.fake_clock import FakeClock
 
 # 実機の y_axis (ラックアンドピニオン) と同じ構成。左右は逆回転で同一動作
 SCALE = 864.15
@@ -20,23 +23,12 @@ class _StubDriver:
         return self.position
 
 
-class _FakeClock:
-    def __init__(self, start: float = 5000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, dt: float) -> None:
-        self.now += dt
-
-
 def _pair_group(name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
     return SyncGroup(
         name=name,
         members=(
-            SyncMember(motor_name=f"{name}_r", scale=SCALE, offset=0.0),
-            SyncMember(motor_name=f"{name}_l", scale=-SCALE, offset=0.0),
+            MotorSpec(name=f"{name}_r", scale=SCALE, offset=0.0),
+            MotorSpec(name=f"{name}_l", scale=-SCALE, offset=0.0),
         ),
         tolerance=tolerance,
     )
@@ -54,13 +46,13 @@ class _Fixture:
         on_violation: object | None = None,
     ) -> None:
         self.groups = groups if groups is not None else (_pair_group(),)
-        self.clock = _FakeClock()
+        self.clock = FakeClock(start=5000.0)
         self.drivers: dict[str, _StubDriver] = {}
         self.feedback_at: dict[str, float] = {}
         for group in self.groups:
             for member in group.members:
-                self.drivers[member.motor_name] = _StubDriver()
-                self.feedback_at[member.motor_name] = self.clock.now
+                self.drivers[member.name] = _StubDriver()
+                self.feedback_at[member.name] = self.clock.now
         self.violations: list[tuple[str, float]] = []
         self.monitor = SyncMonitor(
             self.groups,
@@ -83,40 +75,12 @@ class _Fixture:
         if fresh:
             self.feedback_at[name] = self.clock.now
 
-    def _member(self, name: str) -> SyncMember:
+    def _member(self, name: str) -> MotorSpec:
         for group in self.groups:
             for member in group.members:
-                if member.motor_name == name:
+                if member.name == name:
                     return member
         raise KeyError(name)
-
-
-class TestSyncMember:
-    def test_to_value_is_inverse_of_command_conversion(self) -> None:
-        member = SyncMember(motor_name="y_axis_r", scale=SCALE, offset=100.0)
-        command = 10.0 * SCALE + 100.0
-        assert member.to_value(command) == pytest.approx(10.0)
-
-    def test_to_value_handles_negative_scale(self) -> None:
-        member = SyncMember(motor_name="y_axis_l", scale=-SCALE, offset=0.0)
-        assert member.to_value(-10.0 * SCALE) == pytest.approx(10.0)
-
-
-class TestSyncGroupDeviation:
-    def test_reverse_pair_in_sync_has_zero_deviation(self) -> None:
-        group = _pair_group()
-        positions = {"y_axis_r": 10.0 * SCALE, "y_axis_l": -10.0 * SCALE}
-        assert group.deviation(positions) == pytest.approx(0.0)
-
-    def test_deviation_reflects_mismatch_in_human_units(self) -> None:
-        group = _pair_group()
-        positions = {"y_axis_r": 10.0 * SCALE, "y_axis_l": -7.0 * SCALE}
-        assert group.deviation(positions) == pytest.approx(3.0)
-
-    def test_deviation_is_none_with_fewer_than_two_members(self) -> None:
-        group = _pair_group()
-        assert group.deviation({"y_axis_r": 0.0}) is None
-        assert group.deviation({}) is None
 
 
 class TestViolationDetection:
@@ -233,6 +197,43 @@ class TestCallbackRobustness:
         assert fx.monitor.violated == frozenset({"y_axis", "rotate"})
 
 
+class TestSamplingPeriod:
+    async def test_processing_time_does_not_inflate_period(self) -> None:
+        """「50Hz x 2 サンプル = 40ms なら機構破損に間に合う」という前提を実測で固定する。
+
+        後置 sleep だと実周期が ``interval + 判定時間`` になり、この前提が負荷に
+        比例して崩れる (lib/axis_sync.py のモジュール docstring が置いている前提)。
+        """
+        clock = FakeClock(start=0.0)
+        sampled: list[float] = []
+
+        async def _sleep(delay: float) -> None:
+            clock.advance(delay)
+
+        class _SlowMonitor(SyncMonitor):
+            def step(self) -> None:
+                sampled.append(clock.now)
+                # 1 回の判定に 8ms かかる状況 (CAN 受信と競合して重い周期)
+                clock.advance(0.008)
+                if len(sampled) >= 3:
+                    self.request_stop()
+                super().step()
+
+        monitor = _SlowMonitor(
+            (_pair_group(),),
+            {},
+            last_feedback_at=lambda _name: None,
+            interval_s=0.02,
+            time_source=clock,
+            sleep=_sleep,
+        )
+
+        await monitor.run()
+
+        periods = [b - a for a, b in itertools.pairwise(sampled)]
+        assert periods == pytest.approx([0.02, 0.02])
+
+
 class TestLifecycle:
     async def test_start_and_stop_leaves_no_task(self) -> None:
         fx = _Fixture(violation_samples=1)
@@ -248,13 +249,20 @@ class TestLifecycle:
         assert fx.monitor.is_running is False
         assert len(fx.violations) == 1
 
-    async def test_double_start_does_not_spawn_second_task(self) -> None:
+    async def test_double_start_raises_and_spawns_no_second_task(self) -> None:
+        """3 つの周期タスクで揃えた作法 (lib/control/periodic.py)。
+
+        黙って無視すると「起動したつもり」のまま止まっている監視に気付けない。
+        """
         fx = _Fixture()
         before = len(asyncio.all_tasks())
         fx.monitor.start()
-        fx.monitor.start()
-        assert len(asyncio.all_tasks()) == before + 1
-        await fx.monitor.stop()
+        try:
+            with pytest.raises(RuntimeError):
+                fx.monitor.start()
+            assert len(asyncio.all_tasks()) == before + 1
+        finally:
+            await fx.monitor.stop()
 
     async def test_stop_without_start_is_noop(self) -> None:
         fx = _Fixture()

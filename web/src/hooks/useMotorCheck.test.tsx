@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type { MotorCheckState } from "@/hooks/useRobotSocket";
+import type { MotorCheckState } from "@/lib/robotReducer";
 import { createRobotContext } from "@/test/robotContext";
 import type { RobotContextValue } from "@/test/robotContext";
 
@@ -36,8 +36,8 @@ describe("useMotorCheck", () => {
       records: [],
       snapshot: null,
       error: null,
-      startedAt: 100,
-      finishedAt: null,
+      startedAtMs: 100_000,
+      finishedAtMs: null,
     };
     const { result } = mount("main_hand", {
       motorChecks: { main_hand: running, sub_hand: { ...running, current: "other" } },

@@ -2,7 +2,7 @@ import { OctagonAlert, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Icon } from "@/components/ui/Icon";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 
 const REJECTION_TTL_MS = 5000;
 const HEALTH_TTL_MS = 6000;
@@ -65,7 +65,8 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
  * 表示位置と寿命の管理をここへ一本化し、常に右下から積み上げる。
  */
 export function Toaster() {
-  const { rejection, clearRejection, healthEvents } = useRobot();
+  const { rejection, healthEvents } = useRobotStatus();
+  const { clearRejection } = useRobotCommands();
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const push = useCallback((toast: ToastItem) => {
@@ -84,9 +85,10 @@ export function Toaster() {
   useEffect(() => {
     if (!rejection) return;
     push({
-      id: rejection.receivedAt,
+      id: rejection.receivedAtMs,
       tone: "danger",
-      title: "操作が拒否されました",
+      // サーバーが断ったのか、そもそも届いていないのかで操縦者の次の一手が変わる
+      title: rejection.source === "local" ? "操作が届きませんでした" : "操作が拒否されました",
       lines: [rejection.reason, `command: ${rejection.command}`],
       expiresAt: Date.now() + REJECTION_TTL_MS,
     });
@@ -97,7 +99,7 @@ export function Toaster() {
     const latest = healthEvents[0];
     if (!latest || latest.level === "info") return;
     push({
-      id: latest.receivedAt,
+      id: latest.receivedAtMs,
       tone: latest.level === "critical" ? "danger" : "warning",
       title: `${latest.level.toUpperCase()} — ${latest.robot}`,
       lines: [

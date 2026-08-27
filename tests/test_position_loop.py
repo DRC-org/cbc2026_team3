@@ -6,6 +6,7 @@ import struct
 import can
 import pytest
 
+from lib.axis_sync import MotorSpec, SyncGroup
 from lib.control.pid import PIDController
 from lib.control.position_loop import (
     DEFAULT_INTERVAL_S,
@@ -13,28 +14,22 @@ from lib.control.position_loop import (
     M3508PositionLoop,
     make_position_pid,
 )
-from lib.control.sync_monitor import SyncGroup, SyncMember
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
+from tests.fake_clock import FakeClock
+from tests.feedback_frames import feed_m3508, m3508_counts_for_deg
 
 BUS = "m3508_bus"
 
 
-class _FakeClock:
-    """単調増加クロックのスタブ。実時間 sleep に依存せず dt を制御する。"""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, dt: float) -> None:
-        self.now += dt
-
-
 class _StubCANManager:
-    """M3508PositionLoop が触る API だけを実装したスタブ。"""
+    """M3508PositionLoop が触る API だけを実装したスタブ。
+
+    同名のスタブが tests/test_target_refresh.py にもあるが 1 つにまとめてはならない。
+    位置制御ループはバス単位 (``send_to_bus``) でしか送ってはならず、モータ単位の
+    ``send`` を生やすと「同一バスの M3508 は 1 フレームに束ねる」制約を破る書き方が
+    テストの上では通ってしまう。持たせない API が制約の証明になっている。
+    """
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, can.Message]] = []
@@ -58,15 +53,6 @@ class _StubCANManager:
         return struct.unpack(">hhhh", self.sent[-1][1].data)
 
 
-def _feed(driver: M3508Driver, angle_raw: int, *, rpm: int = 0) -> None:
-    data = struct.pack(">HhhBB", angle_raw, rpm, 0, 25, 0)
-    driver.update_state(can.Message(arbitration_id=0x200 + driver.can_id, data=data))
-
-
-def _counts_for_deg(deg: float) -> int:
-    return round(deg / 360.0 * 8192)
-
-
 class _Fixture:
     """ループ + スタブ一式。各テストで使い回す。"""
 
@@ -78,8 +64,8 @@ class _Fixture:
         estop: bool = False,
         feedback_timeout_ms: float = 500.0,
     ) -> None:
-        self.mono = _FakeClock()
-        self.wall = _FakeClock(start=5000.0)
+        self.mono = FakeClock()
+        self.wall = FakeClock(start=5000.0)
         self.manager = _StubCANManager()
         self.estop = estop
         self.loop = M3508PositionLoop(
@@ -100,7 +86,7 @@ class _Fixture:
 
     def feed(self, name: str, deg: float, *, rpm: int = 0) -> None:
         driver = self.lift if name == "lift" else self.tilt
-        _feed(driver, _counts_for_deg(deg) % 8192, rpm=rpm)
+        feed_m3508(driver, angle_raw=m3508_counts_for_deg(deg) % 8192, rpm=rpm)
         self.manager.feedback_at[name] = self.wall.now
 
     async def tick(self, dt: float = DEFAULT_INTERVAL_S) -> None:
@@ -209,6 +195,54 @@ class TestEmergencyStop:
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
         await fx.tick()
         assert fx.manager.last_currents[0] == 1000
+
+
+class TestSendStopFrame:
+    """緊急停止の停止指令がループの生存に依存しないこと。"""
+
+    async def test_sends_all_zero_slots(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.CURRENT, 3000.0)
+        await fx.loop.set_target("tilt", ControlMode.CURRENT, -3000.0)
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_works_without_running_loop(self) -> None:
+        fx = _Fixture(kp=100.0)
+        assert fx.loop.is_running is False
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_sends_even_while_paused(self) -> None:
+        """動作確認中でも緊急停止の 0 電流は通す (むしろ上書きさせたい)。"""
+        fx = _Fixture(kp=100.0)
+        await fx.loop.pause(reason="動作確認")
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_clears_targets(self) -> None:
+        """目標が残ると、ループが動き出した瞬間に再び電流が出る。"""
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+
+        await fx.loop.send_stop_frame()
+
+        assert fx.loop.target("lift") is None
+        assert fx.loop.mode("lift") is None
+
+    async def test_send_failure_propagates(self) -> None:
+        """送信できなかったことは呼び出し側 (サーバー) が知る必要がある。"""
+        fx = _Fixture(kp=100.0)
+        fx.manager.fail_sends = 1
+
+        with pytest.raises(can.CanError):
+            await fx.loop.send_stop_frame()
 
 
 class TestFeedbackTimeout:
@@ -541,7 +575,7 @@ def _pair_group(*, name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
     """lift / tilt を逆回転ペアとして束ねたグループ (逆回転は scale の符号で表す)。"""
     return SyncGroup(
         name=name,
-        members=(SyncMember("lift", 1.0, 0.0), SyncMember("tilt", -1.0, 0.0)),
+        members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("tilt", -1.0, 0.0)),
         tolerance=tolerance,
     )
 
@@ -557,7 +591,7 @@ class TestSyncGroupRegistration:
         fx = _Fixture()
         group = SyncGroup(
             name="y_axis",
-            members=(SyncMember("lift", 1.0, 0.0), SyncMember("ghost", -1.0, 0.0)),
+            members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("ghost", -1.0, 0.0)),
             tolerance=2.0,
         )
         with pytest.raises(ValueError, match="ghost"):
@@ -701,6 +735,28 @@ class TestSyncDeviation:
         assert fx.manager.last_currents[0] == pytest.approx(1500, abs=5)
         assert fx.manager.last_currents[1] == pytest.approx(-1500, abs=5)
 
+    async def test_reset_does_not_disable_detection(self) -> None:
+        """解除は「監視を再び有効にする」であって「ずれを無かったことにする」ではない。
+
+        機構が直っていないまま解除された場合、次の周期で再びラッチして電流 0 に
+        戻らなければ、操縦者は復帰したつもりで左右直結の軸を押し込むことになる。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+
+        fx.feed("lift", 15.0)
+        fx.feed("tilt", -5.0)
+        await fx.tick()
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+
+        fx.loop.reset_sync_violation()
+        # ずれたまま次の周期へ (人間は機構を直していない)
+        await fx.tick()
+
+        assert fx.loop.sync_violations == frozenset({"y_axis"})
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
     async def test_reset_sync_violation_by_name(self) -> None:
         fx = _Fixture(kp=100.0)
         fx.loop.add_sync_group(_pair_group(tolerance=2.0))
@@ -799,3 +855,33 @@ class TestGroupOrigin:
         fx = _Fixture()
         with pytest.raises(KeyError):
             fx.loop.set_group_origin_here("y_axis")
+
+    async def test_set_origin_here_on_paired_motor_zeroes_whole_group(self) -> None:
+        """ペアの片側だけ原点確定すると、正常動作でも即座に偏差超過で止まる。
+
+        原点が左右で別々の瞬間に決まると、その差がそのまま消えないオフセットになる。
+        1 台ぶんの API から入っても機構の単位 (グループ) で確定させる。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group(tolerance=2.0))
+        await _target_pair(fx, 20.0)
+        fx.feed("lift", 12.0)
+        fx.feed("tilt", -12.0)
+        await fx.tick()
+
+        fx.loop.set_origin_here("lift")
+
+        assert fx.lift.multi_turn_position == pytest.approx(0.0)
+        assert fx.tilt.multi_turn_position == pytest.approx(0.0)
+        assert fx.loop.target("tilt") is None
+
+    async def test_set_origin_here_on_solo_motor_touches_only_itself(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        await fx.loop.set_target("tilt", ControlMode.POSITION, 10.0)
+        fx.feed("lift", 12.0)
+
+        fx.loop.set_origin_here("lift")
+
+        assert fx.loop.target("lift") is None
+        assert fx.loop.target("tilt") == pytest.approx(10.0)

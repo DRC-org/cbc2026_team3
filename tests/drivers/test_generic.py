@@ -7,6 +7,31 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.drivers.generic import CommandType, GenericDriver
+from tests.feedback_frames import feed_generic
+
+
+class TestCanIdRange:
+    """仕様書 §2.2 のデバイス ID 範囲 (0x01〜0xFE)。
+
+    M3508 (1〜4) と EDULITE 05 (0〜0xFF) には範囲検査があるのに、generic だけ
+    無検査だった。範囲外は静かに壊れる:
+
+    - ``0xFF`` は E_STOP ブロードキャストの予約 ID。``activation_steps()`` が
+      緊急停止**解除**フレームを 0x7FF へ送り、共有 can_generic バス上の
+      全基板のラッチをまとめて外す
+    - ``0x1FF`` はコマンド種別のビットを侵食し、SET_TARGET が FEEDBACK として
+      読まれるフレームになる。何も駆動せず永久に STALE
+    - ``0x00`` は「DIP 設定忘れ」の予約。ファームは駆動を拒否する
+    """
+
+    @pytest.mark.parametrize("can_id", [0x01, 0x05, 0x7F, 0xFE])
+    def test_ids_in_range_are_accepted(self, can_id: int):
+        assert GenericDriver("m", can_id).can_id == can_id
+
+    @pytest.mark.parametrize("can_id", [-1, 0x00, 0xFF, 0x100, 0x1FF])
+    def test_ids_out_of_range_are_rejected(self, can_id: int):
+        with pytest.raises(ValueError, match="can_id"):
+            GenericDriver("m", can_id)
 
 
 class TestBuildCanId:
@@ -149,14 +174,7 @@ class TestHealth:
         self.drv = GenericDriver("test_motor", 0x01)
 
     def _feed(self, *, temp: int = 25, flags: int = 0x00) -> None:
-        data = bytearray(8)
-        struct.pack_into("<h", data, 0, 0)
-        struct.pack_into("<h", data, 2, 0)
-        struct.pack_into("<h", data, 4, 0)
-        data[6] = temp
-        data[7] = flags
-        msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
-        self.drv.update_state(msg)
+        feed_generic(self.drv, temp=temp, flags=flags)
 
     def test_initial_flags_are_clear(self):
         # 初期化直後はどのフラグも立っていない
@@ -165,7 +183,7 @@ class TestHealth:
 
     def test_thermal_warning_via_temperature_byte(self):
         self._feed(temp=70, flags=0x00)
-        assert self.drv.has_thermal_warning(temp_warning_c=65.0, temp_critical_c=80.0) is True
+        assert self.drv.has_thermal_warning(temp_warning_c=65.0) is True
 
     def test_overcurrent_flag_bit1(self):
         # bit1 = 過電流警告
@@ -216,15 +234,15 @@ class TestMotorCheck:
         temp: int = 25,
         flags: int = 0x00,
     ) -> None:
-        # フィードバック byte0-1 は 0.1deg 単位 (raw_pos * 0.1 = position)
-        data = bytearray(8)
-        struct.pack_into("<h", data, 0, position_dg)
-        struct.pack_into("<h", data, 2, velocity_rpm)
-        struct.pack_into("<h", data, 4, current_ma)
-        data[6] = temp
-        data[7] = flags
-        msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
-        drv.update_state(msg)
+        # フィードバック byte0-1 は 0.1deg 単位。呼び出し側が生値で書いているため deg へ戻す
+        feed_generic(
+            drv,
+            position=position_dg / 10.0,
+            velocity=velocity_rpm,
+            current_ma=current_ma,
+            temp=temp,
+            flags=flags,
+        )
 
     def test_check_command_default_position(self):
         drv = GenericDriver("test_motor", 0x01)
@@ -233,8 +251,8 @@ class TestMotorCheck:
         assert msg.data[0] == 0  # position
         value = struct.unpack_from("<f", msg.data, 2)[0]
         assert value == pytest.approx(0.1)
-        assert context["target"] == pytest.approx(0.1)
-        assert context["mode"] == ControlMode.POSITION.value
+        assert context.target == pytest.approx(0.1)
+        assert context.mode is ControlMode.POSITION
 
     def test_check_command_velocity_mode(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
@@ -242,7 +260,7 @@ class TestMotorCheck:
         assert msg.data[0] == 1  # velocity
         value = struct.unpack_from("<f", msg.data, 2)[0]
         assert value == pytest.approx(50.0)
-        assert context["mode"] == ControlMode.VELOCITY.value
+        assert context.mode is ControlMode.VELOCITY
 
     def test_check_command_duty_mode(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
@@ -256,7 +274,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=10.0)
         # position=10.0deg, reached フラグ立ち上がり
         self._feed(drv, position_dg=100, flags=0x01)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is None
 
@@ -265,7 +283,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=10.0)
         # 目標 10.0deg に対して 5.0deg しか動いていない (許容 1.0 超え)
         self._feed(drv, position_dg=50, flags=0x00)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -274,7 +292,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=100.0)
         # velocity=100rpm (許容 5)
         self._feed(drv, velocity_rpm=98)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is None
 
@@ -282,7 +300,7 @@ class TestMotorCheck:
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
         _, context = drv.check_command(magnitude=100.0)
         self._feed(drv, velocity_rpm=20)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -291,14 +309,14 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=0.3)
         # 何らかの回転が観測されれば PASSED (|velocity| > 10)
         self._feed(drv, velocity_rpm=50)
-        passed, _ = drv.evaluate_check_result(drv.state, context)
+        passed, _ = drv.evaluate_check_result(context)
         assert passed is True
 
     def test_evaluate_duty_failed_when_no_rotation(self):
         drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
         _, context = drv.check_command(magnitude=0.3)
         self._feed(drv, velocity_rpm=2)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is False
         assert detail is not None
 
@@ -307,7 +325,7 @@ class TestMotorCheck:
         _, context = drv.check_command(magnitude=10.0)
         # 過電流フラグつき + 目標到達 → PASSED だが detail に注釈
         self._feed(drv, position_dg=100, flags=0b00000011)
-        passed, detail = drv.evaluate_check_result(drv.state, context)
+        passed, detail = drv.evaluate_check_result(context)
         assert passed is True
         assert detail is not None
         assert "過電流" in detail
@@ -408,11 +426,7 @@ class TestStatusFlagsBit3To5:
         self.drv = GenericDriver("test_motor", 0x01)
 
     def _feed(self, *, flags: int) -> None:
-        data = bytearray(8)
-        data[6] = 25
-        data[7] = flags
-        msg = can.Message(arbitration_id=0x101, data=bytes(data), is_extended_id=False)
-        self.drv.update_state(msg)
+        feed_generic(self.drv, flags=flags)
 
     def test_initial_flags_are_clear(self):
         assert self.drv.e_stop_active is False

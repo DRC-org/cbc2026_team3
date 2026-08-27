@@ -10,14 +10,15 @@ from unittest.mock import AsyncMock, MagicMock
 import can
 import pytest
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
+from tests.fake_drivers import StubFeedbackDriver
 
 
-class _EchoDriver(MotorDriver):
+class _EchoDriver(StubFeedbackDriver):
     """指令値をそのままフィードバックに反映する (常に即到達する) テスト用ドライバ。"""
 
     def __init__(self, name: str, *, reaches: bool = True, bias: float = 0.0) -> None:
@@ -30,14 +31,8 @@ class _EchoDriver(MotorDriver):
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
         self.commands.append((mode, value))
         if self._reaches:
-            self._state = MotorState(position=value + self._bias)
-        return can.Message(arbitration_id=0x100, data=bytes(8), is_extended_id=False)
-
-    def decode_feedback(self, msg: can.Message) -> MotorState:  # pragma: no cover
-        return self._state
-
-    def matches_feedback(self, msg: can.Message) -> bool:  # pragma: no cover
-        return False
+            self.set_observed(position=value + self._bias)
+        return super().encode_target(mode, value)
 
 
 def _make_group(*names: str, reaches: bool = True) -> tuple[MotorGroup, dict[str, _EchoDriver]]:

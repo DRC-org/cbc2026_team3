@@ -3,11 +3,11 @@ import { Ban, Check, Play } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Kbd } from "@/components/ui/Kbd";
+import type { SequenceKind } from "@/lib/sequenceStatus";
 
 interface TriggerButtonProps {
-  waiting: boolean;
-  stepIndex: number;
-  totalSteps: number;
+  /** 実行状態。`step_index` からの推測ではなくサーバー配信の `running` に由来する */
+  kind: SequenceKind;
   onTrigger: () => void;
   /** 試合中以外はサーバー側でも拒否されるため、UI でも押せなくする */
   disabled?: boolean;
@@ -18,17 +18,11 @@ interface TriggerButtonProps {
 const FILL_CLASS = "flex h-full w-full items-center justify-center gap-3 text-[1.4em]";
 
 export function TriggerButton({
-  waiting,
-  stepIndex,
-  totalSteps,
+  kind,
   onTrigger,
   disabled = false,
   disabledLabel = "試合開始前",
 }: TriggerButtonProps) {
-  // バックエンドは完走時 step_index = total_steps を返す。「最終ステップ実行中」と
-  // 「全完走」を分けるため、>= total での判定を採用する
-  const isComplete = totalSteps > 0 && stepIndex >= totalSteps && !waiting;
-
   if (disabled) {
     return (
       <Button disabled className={FILL_CLASS} aria-label={`操作不可: ${disabledLabel}`}>
@@ -38,7 +32,18 @@ export function TriggerButton({
     );
   }
 
-  if (isComplete) {
+  // シーケンスが 1 件も届いていない状態。最後の return (RUNNING) へ落とすと、
+  // 状態表示と主操作が同じ画面で食い違う
+  if (kind === "no_sequence") {
+    return (
+      <Button disabled className={FILL_CLASS} aria-label="操作不可: シーケンス未取得">
+        <Icon as={Ban} />
+        シーケンス未取得
+      </Button>
+    );
+  }
+
+  if (kind === "complete") {
     return (
       <Button disabled tone="ok" className={FILL_CLASS} aria-label="シーケンス完走">
         <Icon as={Check} />
@@ -49,7 +54,7 @@ export function TriggerButton({
 
   // 待機解除は試合中に最も多く押す操作。ここだけは地をベタ塗りして、
   // 「今 押すべきボタンはこれ」が周辺視野でも分かるようにする
-  if (waiting) {
+  if (kind === "waiting_trigger") {
     return (
       <Button
         tone="next"

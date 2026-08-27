@@ -1,3 +1,13 @@
+"""main.py の組み立て (composition root) が正しく配線されているかを検証する。
+
+``main`` の関数はすべて ``_`` 付きで、公開されているのは ``main()`` だけ。テストが
+private を掴んでいるのはカプセル化の破りではなく、モジュール全体が非公開だから。
+ここで確かめる事実 —— M3508 の載っていないバスに位置制御ループを作らない、
+同期グループをループへ結び付ける、未知の control_type を起動時に弾く —— は
+どれも取り違えると機構が壊れるものなので、``main()`` の起動 (実バスと実 config が
+要る) を通してしか触れない状態にはできない。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -9,7 +19,8 @@ import can
 import pytest
 import yaml
 
-from lib.control.sync_monitor import SyncGroup, SyncMember
+from lib.axis_sync import MotorSpec, SyncGroup
+from lib.config_schema import MotorConfig, RobotConfig, load_robot_config
 from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
@@ -24,7 +35,9 @@ from main import (
     _build_position_loops,
     _build_position_pid,
     _build_sync_groups,
+    _build_target_refresher,
     _create_motor,
+    _load_all_configs,
     _load_pid_config,
     _wire_robot_motors,
 )
@@ -66,6 +79,15 @@ class _DummySequence(Sequence):
     pass
 
 
+def _robot(config: dict) -> RobotConfig:
+    """検証済み設定へ通す。main.py 側は生 dict を受け取らない (誤記は起動時に弾く)。"""
+    return load_robot_config(config, source="test.yaml")
+
+
+def _motor(name: str, motor_cfg: dict) -> MotorConfig:
+    return _robot({"robot_name": "r", "motors": {name: motor_cfg}}).motors[name]
+
+
 def _m3508_config(**pid_overrides: object) -> dict:
     motor_cfg: dict = {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}
     if pid_overrides:
@@ -79,26 +101,21 @@ def _m3508_config(**pid_overrides: object) -> dict:
 class TestLoadPidConfig:
     def test_defaults_when_pid_section_missing(self) -> None:
         """pid セクションが無い M3508 は既定ゲインで動く (起動失敗にはしない)。"""
-        result = _load_pid_config("lift_motor", {"driver": "m3508", "bus": "b", "can_id": 1})
+        result = _load_pid_config("lift_motor", None)
 
         assert result == _DEFAULT_PID
 
     def test_uses_yaml_values(self) -> None:
-        motor_cfg = {
-            "driver": "m3508",
-            "bus": "b",
-            "can_id": 1,
-            "pid": {
-                "kp": 5.5,
-                "ki": 0.25,
-                "kd": 0.75,
-                "integral_limit": 1200,
-                "dead_band": 2.5,
-                "output_limit": 3000,
-            },
+        pid_cfg = {
+            "kp": 5.5,
+            "ki": 0.25,
+            "kd": 0.75,
+            "integral_limit": 1200,
+            "dead_band": 2.5,
+            "output_limit": 3000,
         }
 
-        result = _load_pid_config("lift_motor", motor_cfg)
+        result = _load_pid_config("lift_motor", pid_cfg)
 
         assert result["kp"] == 5.5
         assert result["ki"] == 0.25
@@ -108,7 +125,7 @@ class TestLoadPidConfig:
         assert result["output_limit"] == 3000.0
 
     def test_partial_override_fills_defaults(self) -> None:
-        result = _load_pid_config("lift_motor", {"pid": {"kp": 4.0}})
+        result = _load_pid_config("lift_motor", {"kp": 4.0})
 
         assert result["kp"] == 4.0
         assert result["ki"] == _DEFAULT_PID["ki"]
@@ -117,26 +134,26 @@ class TestLoadPidConfig:
         assert result["output_limit"] == _DEFAULT_PID["output_limit"]
 
     def test_null_integral_limit_is_allowed(self) -> None:
-        result = _load_pid_config("lift_motor", {"pid": {"integral_limit": None}})
+        result = _load_pid_config("lift_motor", {"integral_limit": None})
 
         assert result["integral_limit"] is None
 
     def test_null_integral_limit_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
         """integral_limit の null は「制限なし」という正当な指定なので警告しない。"""
         with caplog.at_level(logging.WARNING):
-            _load_pid_config("lift_motor", {"pid": {"integral_limit": None}})
+            _load_pid_config("lift_motor", {"integral_limit": None})
 
         assert caplog.records == []
 
     def test_null_numeric_key_falls_back_to_default(self) -> None:
         """書きかけの yaml (null) で起動を壊さず、安全側の既定値を使う。"""
-        result = _load_pid_config("lift_motor", {"pid": {"kp": None, "output_limit": None}})
+        result = _load_pid_config("lift_motor", {"kp": None, "output_limit": None})
 
         assert result["kp"] == _DEFAULT_PID["kp"]
         assert result["output_limit"] == _DEFAULT_PID["output_limit"]
 
     def test_unknown_key_is_ignored(self) -> None:
-        result = _load_pid_config("lift_motor", {"pid": {"kp": 1.0, "kf": 9.0}})
+        result = _load_pid_config("lift_motor", {"kp": 1.0, "kf": 9.0})
 
         assert "kf" not in result
         assert result["kp"] == 1.0
@@ -145,7 +162,7 @@ class TestLoadPidConfig:
 class TestBuildPositionPid:
     def test_gains_are_applied(self) -> None:
         pid = _build_position_pid(
-            "lift_motor", _m3508_config(kp=3.0, ki=0.5, kd=0.1)["motors"]["lift_motor"]
+            _motor("lift_motor", _m3508_config(kp=3.0, ki=0.5, kd=0.1)["motors"]["lift_motor"])
         )
 
         assert pid.kp == 3.0
@@ -154,24 +171,26 @@ class TestBuildPositionPid:
 
     def test_output_range_narrowed_by_output_limit(self) -> None:
         """機構未確定のうちは電流上限を絞る。C620 のフルスケールは使わない。"""
-        cfg = _m3508_config(output_limit=2000)["motors"]["lift_motor"]
+        cfg = _motor("lift_motor", _m3508_config(output_limit=2000)["motors"]["lift_motor"])
 
-        pid = _build_position_pid("lift_motor", cfg)
+        pid = _build_position_pid(cfg)
 
         assert pid.output_max == 2000.0
         assert pid.output_min == -2000.0
 
     def test_output_limit_capped_at_current_max(self) -> None:
         """config で C620 の範囲外を指定してもハード上限を超えない。"""
-        cfg = _m3508_config(output_limit=999999)["motors"]["lift_motor"]
+        cfg = _motor("lift_motor", _m3508_config(output_limit=999999)["motors"]["lift_motor"])
 
-        pid = _build_position_pid("lift_motor", cfg)
+        pid = _build_position_pid(cfg)
 
         assert pid.output_max == float(CURRENT_MAX)
         assert pid.output_min == -float(CURRENT_MAX)
 
     def test_default_output_limit_is_conservative(self) -> None:
-        pid = _build_position_pid("lift_motor", {"driver": "m3508"})
+        pid = _build_position_pid(
+            _motor("lift_motor", {"driver": "m3508", "bus": "b", "can_id": 1})
+        )
 
         assert 0 < pid.output_max < float(CURRENT_MAX)
 
@@ -193,7 +212,7 @@ class TestBuildPositionLoops:
         }
 
         loops = _build_position_loops(
-            config,
+            _robot(config),
             _StubCANManager(),
             motors,
             feedback_timeout_ms=500.0,
@@ -211,7 +230,7 @@ class TestBuildPositionLoops:
         motors = {"gripper": GenericDriver("gripper", can_id=1)}
 
         loops = _build_position_loops(
-            config,
+            _robot(config),
             _StubCANManager(),
             motors,
             feedback_timeout_ms=500.0,
@@ -235,7 +254,7 @@ class TestBuildPositionLoops:
         }
 
         loops = _build_position_loops(
-            config,
+            _robot(config),
             _StubCANManager(),
             motors,
             feedback_timeout_ms=500.0,
@@ -259,7 +278,7 @@ class TestBuildPositionLoops:
         }
 
         loops = _build_position_loops(
-            config,
+            _robot(config),
             _StubCANManager(),
             motors,
             feedback_timeout_ms=500.0,
@@ -278,7 +297,7 @@ class TestBuildPositionLoops:
         manager.feedback_at["lift_motor"] = time.time() - 0.3
 
         strict = _build_position_loops(
-            config,
+            _robot(config),
             manager,
             {"lift_motor": driver},
             feedback_timeout_ms=100.0,
@@ -289,7 +308,7 @@ class TestBuildPositionLoops:
         assert manager.last_currents == (0, 0, 0, 0)
 
         lenient = _build_position_loops(
-            config,
+            _robot(config),
             manager,
             {"lift_motor": driver},
             feedback_timeout_ms=500.0,
@@ -314,7 +333,7 @@ class TestWireRobotMotors:
         seq = _DummySequence("main_hand")
 
         loops = _wire_robot_motors(
-            config,
+            _robot(config),
             manager,
             motors,
             seq,
@@ -333,7 +352,7 @@ class TestWireRobotMotors:
         """target_sinks 経由になっていれば、set_position は直接 CAN 送信しない。"""
         _, manager, _, seq, loops = self._wire([False])
 
-        await seq.motors.lift_motor.set_position(42.0)
+        await seq.motors.lift_motor.set_target(ControlMode.POSITION, 42.0)
 
         assert loops[0].target("lift_motor") == 42.0
         assert loops[0].mode("lift_motor") is ControlMode.POSITION
@@ -342,7 +361,7 @@ class TestWireRobotMotors:
     async def test_non_m3508_still_sends_directly(self) -> None:
         _, manager, _, seq, _ = self._wire([False])
 
-        await seq.motors.gripper.set_position(1.0)
+        await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
 
         assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
 
@@ -354,9 +373,9 @@ class TestWireRobotMotors:
         flag[0] = True
 
         with pytest.raises(EStopActiveError):
-            await seq.motors.lift_motor.set_position(10.0)
+            await seq.motors.lift_motor.set_target(ControlMode.POSITION, 10.0)
         with pytest.raises(EStopActiveError):
-            await seq.motors.gripper.set_position(10.0)
+            await seq.motors.gripper.set_target(ControlMode.POSITION, 10.0)
 
     async def test_estop_checker_reaches_position_loop(self) -> None:
         """実行中ステップが出した目標も、緊急停止で位置制御ループ側が破棄する。"""
@@ -364,7 +383,7 @@ class TestWireRobotMotors:
         _, manager, _, seq, loops = self._wire(flag)
         loop = loops[0]
 
-        await seq.motors.lift_motor.set_position(100.0)
+        await seq.motors.lift_motor.set_target(ControlMode.POSITION, 100.0)
         assert loop.target("lift_motor") == 100.0
 
         flag[0] = True
@@ -374,14 +393,95 @@ class TestWireRobotMotors:
         assert manager.last_currents == (0, 0, 0, 0)
 
 
+class TestBuildTargetRefresher:
+    """自作モタドラのコマンドウォッチドッグ (500ms) 対策の配線。"""
+
+    def _wire(self) -> tuple:
+        config = _m3508_config()
+        config["motors"]["gripper"] = {
+            "driver": "generic",
+            "bus": "generic_bus",
+            "can_id": 1,
+        }
+        motors = {
+            "lift_motor": M3508Driver("lift_motor", can_id=1),
+            "gripper": GenericDriver("gripper", can_id=1),
+        }
+        manager = _StubCANManager()
+        seq = _DummySequence("main_hand")
+        _wire_robot_motors(
+            _robot(config),
+            manager,
+            motors,
+            seq,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+        return manager, motors, seq
+
+    def test_only_generic_motors_are_refreshed(self) -> None:
+        """M3508 は位置制御ループが 200Hz で送り続けるので再送対象ではない。"""
+        _, motors, seq = self._wire()
+
+        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
+
+        assert refresher is not None
+        assert refresher.motor_names == ("gripper",)
+
+    def test_none_without_generic_motors(self) -> None:
+        motors = {"lift_motor": M3508Driver("lift_motor", can_id=1)}
+        manager = _StubCANManager()
+        seq = _DummySequence("main_hand")
+        _wire_robot_motors(
+            _robot(_m3508_config()),
+            manager,
+            motors,
+            seq,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+
+        assert _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False) is None
+
+    async def test_estop_checker_blocks_resend(self) -> None:
+        """再送は停止指令を上書きする。緊急停止中は 1 通も出してはならない。"""
+        manager, motors, seq = self._wire()
+        flag = [False]
+        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: flag[0])
+        assert refresher is not None
+        await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
+        manager.sent_by_motor.clear()
+
+        flag[0] = True
+        await refresher.step()
+
+        assert manager.sent_by_motor == []
+
+    async def test_resends_last_target(self) -> None:
+        manager, motors, seq = self._wire()
+        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
+        assert refresher is not None
+        await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
+        manager.sent_by_motor.clear()
+
+        await refresher.step()
+
+        assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
+
+
 class TestServerEStopProperty:
-    def test_e_stop_active_property_reflects_state(self) -> None:
-        """main.py から private 属性を触らずに緊急停止状態を読めること。"""
+    async def test_e_stop_active_property_reflects_state(self) -> None:
+        """main.py から private 属性を触らずに緊急停止状態を読めること。
+
+        状態を作るのも公開経路 (activate_e_stop) から行う。private へ直接
+        代入すると、「停止したのにプロパティが追随しない」配線ミスを
+        テストの側が肩代わりして隠してしまう。
+        """
         server = RobotServer()
 
         assert server.e_stop_active is False
 
-        server._e_stop_active = True
+        await server.activate_e_stop(reason="配線確認")
         assert server.e_stop_active is True
 
     def test_e_stop_active_is_read_only(self) -> None:
@@ -401,7 +501,7 @@ class TestCreateMotorControlType:
     def _generic(self, **extra: object) -> GenericDriver:
         cfg: dict = {"driver": "generic", "bus": "generic_bus", "can_id": 1}
         cfg.update(extra)
-        motor = _create_motor("gripper", cfg)
+        motor = _create_motor(_motor("gripper", cfg))
         assert isinstance(motor, GenericDriver)
         return motor
 
@@ -420,32 +520,27 @@ class TestCreateMotorControlType:
     def test_missing_control_type_defaults_to_position(self) -> None:
         assert self._generic().control_type is ControlMode.POSITION
 
-    def test_unknown_control_type_falls_back_to_position_with_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        with caplog.at_level(logging.WARNING):
-            motor = self._generic(control_type="torque")
+    def test_unknown_control_type_aborts_startup(self) -> None:
+        """誤記を position へ落として起動を続けない。
 
-        assert motor.control_type is ControlMode.POSITION
-        assert any("control_type" in record.getMessage() for record in caplog.records)
+        duty 0.3 のつもりの指令が position 0.3deg としてファームへ届き、ファームは
+        それを正当なフレームとして受理する。警告ログでは事故を止められない。
+        """
+        with pytest.raises(ValueError, match="control_type"):
+            self._generic(control_type="torque")
 
-    def test_current_control_type_falls_back_to_position_with_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """GenericDriver は CURRENT を送れない。起動は続けたうえで警告する。"""
-        with caplog.at_level(logging.WARNING):
-            motor = self._generic(control_type="current")
+    def test_current_control_type_aborts_startup(self) -> None:
+        """GenericDriver は CURRENT を送れない。"""
+        with pytest.raises(ValueError, match="control_type"):
+            self._generic(control_type="current")
 
-        assert motor.control_type is ControlMode.POSITION
-        assert any("control_type" in record.getMessage() for record in caplog.records)
-
-    def test_control_type_is_ignored_for_non_generic_driver(self) -> None:
-        motor = _create_motor(
-            "y_axis_r",
-            {"driver": "m3508", "bus": "m3508_bus", "can_id": 1, "control_type": "duty"},
-        )
-
-        assert isinstance(motor, M3508Driver)
+    def test_control_type_on_non_generic_driver_aborts_startup(self) -> None:
+        """書いても効かないキーを黙って受け取らない。"""
+        with pytest.raises(ValueError, match="control_type"):
+            _motor(
+                "y_axis_r",
+                {"driver": "m3508", "bus": "m3508_bus", "can_id": 1, "control_type": "duty"},
+            )
 
 
 def _paired_table() -> PositionTable:
@@ -485,7 +580,7 @@ class TestBuildSyncGroups:
         group = groups[0]
         assert group.tolerance == 2.0
         # 逆回転ペアは scale の符号で表す。符号が落ちると偏差が常に過大に見えて誤発報する
-        assert [(m.motor_name, m.scale, m.offset) for m in group.members] == [
+        assert [(m.name, m.scale, m.offset) for m in group.members] == [
             ("y_axis_r", 55.02, 1.0),
             ("y_axis_l", -55.02, -1.0),
         ]
@@ -524,7 +619,7 @@ class TestAttachSyncGroups:
             "other": M3508Driver("other", can_id=1),
         }
         return _build_position_loops(
-            config,
+            _robot(config),
             _StubCANManager(),
             motors,
             feedback_timeout_ms=500.0,
@@ -535,7 +630,7 @@ class TestAttachSyncGroups:
         loops = self._loops()
         group = SyncGroup(
             "y_axis",
-            (SyncMember("y_axis_r", 55.02, 0.0), SyncMember("y_axis_l", -55.02, 0.0)),
+            (MotorSpec("y_axis_r", 55.02, 0.0), MotorSpec("y_axis_l", -55.02, 0.0)),
             tolerance=2.0,
         )
 
@@ -549,7 +644,7 @@ class TestAttachSyncGroups:
         loops = self._loops()
         group = SyncGroup(
             "rotate",
-            (SyncMember("rotate_r", 1.0, 0.0), SyncMember("rotate_l", -1.0, 0.0)),
+            (MotorSpec("rotate_r", 1.0, 0.0), MotorSpec("rotate_l", -1.0, 0.0)),
             tolerance=3.0,
         )
 
@@ -562,7 +657,7 @@ class TestAttachSyncGroups:
         loops = self._loops()
         group = SyncGroup(
             "mixed",
-            (SyncMember("y_axis_r", 1.0, 0.0), SyncMember("other", -1.0, 0.0)),
+            (MotorSpec("y_axis_r", 1.0, 0.0), MotorSpec("other", -1.0, 0.0)),
             tolerance=1.0,
         )
 
@@ -574,17 +669,16 @@ class TestAttachSyncGroups:
 class TestShippedMainHandConfig:
     """同梱 config と配線の結合を守る回帰テスト。"""
 
-    def _load(self) -> tuple[dict, PositionTable, dict]:
-        config = yaml.safe_load((_CONFIG_DIR / "main_hand.yaml").read_text())
+    def _load(self) -> tuple[RobotConfig, PositionTable, dict]:
+        config = load_robot_config(
+            yaml.safe_load((_CONFIG_DIR / "main_hand.yaml").read_text()),
+            source="main_hand.yaml",
+        )
         positions = load_position_table(
             yaml.safe_load((_CONFIG_DIR / "main_hand_positions.yaml").read_text()),
             source="main_hand_positions.yaml",
         )
-        motors = {}
-        for motor_name, motor_cfg in config["motors"].items():
-            motor = _create_motor(motor_name, motor_cfg)
-            assert motor is not None, motor_name
-            motors[motor_name] = motor
+        motors = {name: _create_motor(motor) for name, motor in config.motors.items()}
         return config, positions, motors
 
     def test_two_sync_groups_are_built(self) -> None:
@@ -613,3 +707,58 @@ class TestShippedMainHandConfig:
 
         assert motors["conveyor"].control_type is ControlMode.DUTY
         assert motors["gripper"].control_type is ControlMode.POSITION
+
+
+class TestLoadAllConfigs:
+    """設定の誤記で起動を止める経路。会場で読むのは操縦者なので traceback は出さない。"""
+
+    def _write(self, tmp_path: pathlib.Path, name: str, body: str) -> pathlib.Path:
+        path = tmp_path / name
+        path.write_text(body)
+        return path
+
+    def _system(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        return self._write(tmp_path, "system.yaml", "can_buses:\n  generic_bus: can_generic\n")
+
+    def test_shipped_configs_load(self) -> None:
+        system, loaded = _load_all_configs(
+            _CONFIG_DIR / "system.yaml",
+            [_CONFIG_DIR / "main_hand.yaml", _CONFIG_DIR / "sub_hand.yaml"],
+        )
+
+        assert set(system.can_buses) == {"m3508_bus", "edulite_bus", "generic_bus"}
+        assert [robot.robot_name for _, robot in loaded] == ["main_hand", "sub_hand"]
+
+    def test_missing_system_config_aborts(self, tmp_path: pathlib.Path) -> None:
+        with pytest.raises(SystemExit, match=r"system\.yaml"):
+            _load_all_configs(tmp_path / "system.yaml", [])
+
+    def test_invalid_robot_config_aborts(self, tmp_path: pathlib.Path) -> None:
+        system_path = self._system(tmp_path)
+        robot_path = self._write(
+            tmp_path,
+            "r.yaml",
+            "robot_name: r\nmotors:\n  conveyor:\n"
+            "    driver: generic\n    bus: generic_bus\n    can_id: 1\n"
+            "    control_type: duy\n",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            _load_all_configs(system_path, [robot_path])
+
+        message = str(exc.value)
+        assert "conveyor" in message
+        assert "control_type" in message
+        assert "duy" in message
+
+    def test_missing_robot_config_is_skipped(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """1 台ぶんの yaml が無いだけなら、もう 1 台の点検はできるようにする。"""
+        system_path = self._system(tmp_path)
+
+        with caplog.at_level(logging.WARNING):
+            _, loaded = _load_all_configs(system_path, [tmp_path / "absent.yaml"])
+
+        assert loaded == []
+        assert any("absent.yaml" in record.getMessage() for record in caplog.records)

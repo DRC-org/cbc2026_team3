@@ -1,4 +1,5 @@
-// ServoMotion（角度補間・可動範囲クランプ・到達推定）の native ユニットテスト。
+// ServoMotion（角度補間・可動範囲クランプ・到達推定）と ServoChannel
+// （安全機構と補間の結線）の native ユニットテスト。
 // 実機を用意せずにサーボ固有の取り違えを検出するのが目的なので、
 // ここで検証するのはすべて docs/motor_driver_can_protocol.md §7 に明記された挙動に限る。
 
@@ -7,6 +8,7 @@
 #include <math.h>
 
 #include "MotorCanProtocol.h"
+#include "ServoChannel.h"
 #include "ServoMotion.h"
 
 using namespace motorcan;
@@ -299,6 +301,147 @@ static void test_decode_servo_param_rejects_short_frame() {
     TEST_ASSERT_FALSE(decodeServoSetParam(frame, 5).valid);
 }
 
+// --------------------------------------------------------------------------
+// §7.5 ServoChannel（緊急停止・ウォッチドッグと補間の結線）
+// --------------------------------------------------------------------------
+
+// PC は §5.1 の契約どおり最後の指令を 20Hz で再送し続ける。緊急停止ラッチ中に
+// その再送を受け付けると、再送のたびに補間が再アンカーされ、次のモーションティックで
+// slew_rate × 5ms ずつ進んでから凍結する。既定なら 1 秒のラッチで 7.2 度。
+// グリッパの全ストロークは 5 度・壁は 6 度なので、緊急停止中に可動範囲を丸ごと動ける。
+static void test_latched_channel_does_not_creep_under_resent_targets() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.tick(0);
+
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+    const float held = channel.currentAngleDeg();
+
+    // 実機の loop() と同じ順序で 1 秒回す（pollCan が 50ms 周期、updateMotion が 5ms 周期）
+    for (uint32_t t = 1; t <= 1000; ++t) {
+        if (t % 50 == 0) {
+            channel.feed(t);
+            channel.setTarget(180.0f, t);
+        }
+        if (t % 5 == 0) {
+            channel.tick(t);
+        }
+    }
+
+    TEST_ASSERT_EQUAL_FLOAT(held, channel.currentAngleDeg());
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentSlewDegPerSec());
+}
+
+// 仕様書 §7.5 の「新しい角度指令の受け付けを止め」は文字どおり受け口で止める。
+// 補間側の凍結だけに頼ると、指令から次のティックまでの間、目標角だけが書き換わった
+// 状態が残る。その間 FEEDBACK bit0（到達）は偽の未到達を報告し、PC 側 move_to は
+// 緊急停止中の機体が動くのを待ち続ける。
+static void test_latched_channel_rejects_targets_at_the_entrance() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.tick(0);
+    TEST_ASSERT_TRUE(channel.isReached());
+
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+
+    channel.feed(10);
+    TEST_ASSERT_FALSE(channel.setTarget(180.0f, 10));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+    TEST_ASSERT_TRUE(channel.isReached());
+}
+
+// SET_TARGET と E_STOP 解除が同じ pollCan() のバッチに入ると、解除の時点では
+// まだ 1 度もモーションティックが走っていない。ラッチ中の指令を受け付けていると、
+// 解除直後の補間がその角度へ駆動する（＝ラッチ中に予約した動きが解除で実行される）。
+static void test_target_commanded_while_latched_does_not_survive_release() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.tick(0);
+
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+
+    // 同じバッチ内: SET_TARGET → E_STOP 解除
+    channel.feed(1);
+    channel.setTarget(30.0f, 1);
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
+    channel.handleEStopFrame(clear, 8, 1);
+
+    for (uint32_t t = 5; t <= 1000; t += 5) {
+        channel.tick(t);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+}
+
+// ウォッチドッグ満了には E_STOP フレームのような「その場で凍結する」きっかけが無い。
+// 補間を進めてから凍結すると、満了の瞬間に 1 ティック分だけ動く。
+static void test_watchdog_expiry_freezes_before_interpolating() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.setTarget(180.0f, 0);
+
+    for (uint32_t t = 5; t <= 495; t += 5) {
+        channel.tick(t);
+    }
+    const float atExpiry = channel.currentAngleDeg();
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 44.55f, atExpiry);
+
+    channel.tick(500);
+    TEST_ASSERT_EQUAL_FLOAT(atExpiry, channel.currentAngleDeg());
+    channel.tick(505);
+    TEST_ASSERT_EQUAL_FLOAT(atExpiry, channel.currentAngleDeg());
+}
+
+// 受理判定は「養ってから」でなければならない。順序を逆にすると、電源投入後の
+// 最初の 1 通が §5.4 の「未受信＝出力禁止」で捨てられ、以後も同じ理由で捨て続ける
+// （＝永久に動かない基板になる）。
+static void test_first_target_after_power_on_is_accepted() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+
+    channel.feed(0);
+    TEST_ASSERT_TRUE(channel.setTarget(90.0f, 0));
+
+    channel.tick(100);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 9.0f, channel.currentAngleDeg());
+}
+
+// 途絶から復帰したら動かせること（ウォッチドッグはラッチしない。仕様書 §5.1）。
+static void test_channel_recovers_after_watchdog_and_release() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.setTarget(180.0f, 0);
+    for (uint32_t t = 5; t <= 600; t += 5) {
+        channel.tick(t);
+    }
+    const float stopped = channel.currentAngleDeg();
+
+    channel.feed(600);
+    TEST_ASSERT_TRUE(channel.setTarget(stopped + 9.0f, 600));
+    channel.tick(700);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, stopped + 9.0f, channel.currentAngleDeg());
+}
+
+// 緊急停止の解除そのものでは動かない（§3.5 の「解除した瞬間に動き出さない」）。
+static void test_e_stop_release_alone_does_not_move() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.setTarget(180.0f, 0);
+    channel.tick(100);
+    const float held = channel.currentAngleDeg();
+
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 100);
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
+    channel.handleEStopFrame(clear, 8, 200);
+
+    for (uint32_t t = 205; t <= 2000; t += 5) {
+        channel.tick(t);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(held, channel.currentAngleDeg());
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_angle_to_pulse_at_range_ends);
@@ -324,5 +467,12 @@ int main(int, char **) {
     RUN_TEST(test_decode_servo_param_accepts_shared_ids);
     RUN_TEST(test_decode_servo_param_ignores_dc_only_ids);
     RUN_TEST(test_decode_servo_param_rejects_short_frame);
+    RUN_TEST(test_latched_channel_does_not_creep_under_resent_targets);
+    RUN_TEST(test_latched_channel_rejects_targets_at_the_entrance);
+    RUN_TEST(test_target_commanded_while_latched_does_not_survive_release);
+    RUN_TEST(test_watchdog_expiry_freezes_before_interpolating);
+    RUN_TEST(test_first_target_after_power_on_is_accepted);
+    RUN_TEST(test_channel_recovers_after_watchdog_and_release);
+    RUN_TEST(test_e_stop_release_alone_does_not_move);
     return UNITY_END();
 }

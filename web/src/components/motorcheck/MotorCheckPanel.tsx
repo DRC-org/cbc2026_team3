@@ -5,8 +5,8 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
+import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
@@ -40,10 +40,15 @@ function formatNumber(value: number): string {
 
 function describeRecord(record: MotorCheckRecord): string {
   switch (record.result) {
-    case "passed":
-      return record.observed === null
-        ? `期待 ${record.expected}`
-        : `期待 ${record.expected} → 観測 ${formatNumber(record.observed)}`;
+    case "passed": {
+      // 到達位置を判定しない項目 (グリッパの開閉等) は expected を持たない。
+      // 生値をそのまま埋め込むと画面に "期待 null" と出る
+      const parts = [
+        record.expected === null ? null : `期待 ${formatNumber(record.expected)}`,
+        record.observed === null ? null : `観測 ${formatNumber(record.observed)}`,
+      ].filter((part) => part !== null);
+      return parts.length > 0 ? parts.join(" → ") : "合格";
+    }
     case "failed":
       return record.detail ?? "失敗";
     case "timeout":

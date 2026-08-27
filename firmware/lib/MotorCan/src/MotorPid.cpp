@@ -27,12 +27,24 @@ void MotorPid::reset() {
 }
 
 float MotorPid::update(float error, float dtSec) {
+    if (error != error) {
+        // NaN の誤差を積分項・前回誤差へ入れると、以後**正常な目標に対しても**
+        // 出力が NaN のままになる（ワインドアップ制限は NaN を素通しする。
+        // integral_ > limit も < -limit も NaN では false）。内部状態を汚さずに 0 を返し、
+        // 次の正常な誤差でそのまま復帰できるようにする。
+        return 0.0f;
+    }
     if (!(dtSec > 0.0f)) {
         // dt が 0 や NaN だと微分が発散する。制御量を変えずに前回値を保つのが安全。
         return kp_ * error;
     }
 
     integral_ += error * dtSec;
+    if (integral_ != integral_) {
+        // 誤差・dt が有限でも積分は inf - inf などで NaN になりうる。
+        // 一度なると自力では戻らないので、その場で捨てて自己回復させる。
+        integral_ = 0.0f;
+    }
 
     // ワインドアップ制限は ki を掛けた後の寄与で見る。
     // 目標に長く届かない状態（機械的な突き当たりなど）で積分が育ち切ると、

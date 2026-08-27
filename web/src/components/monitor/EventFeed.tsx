@@ -1,6 +1,7 @@
-import { useRobot } from "@/context/RobotContext";
-import type { HealthChangeLevel } from "@/hooks/useRobotSocket";
+import { useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
+import type { HealthChangeLevel } from "@/lib/protocol";
+import { formatClock } from "@/lib/time";
 import type { Tone } from "@/lib/tone";
 import { TONE_STATUS_CLASS } from "@/lib/tone";
 
@@ -10,10 +11,6 @@ const LEVEL_TONE: Record<HealthChangeLevel, Tone> = {
   critical: "error",
 };
 
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString("ja-JP", { hour12: false });
-}
-
 /**
  * ヘルス変化の履歴。
  *
@@ -22,7 +19,7 @@ function formatTime(ms: number): string {
  * 数秒の間に起きた事象は痕跡ごと消えていた。試合中の画面に残す。
  */
 export function EventFeed() {
-  const { healthEvents } = useRobot();
+  const { healthEvents } = useRobotStatus();
 
   if (healthEvents.length === 0) {
     return (
@@ -38,7 +35,7 @@ export function EventFeed() {
         const tone = LEVEL_TONE[ev.level];
         return (
           <li
-            key={`${ev.receivedAt}-${ev.target}`}
+            key={`${ev.receivedAtMs}-${ev.target}`}
             className="flex min-w-0 items-baseline gap-2 px-1 py-[0.15rem]"
           >
             <span
@@ -46,7 +43,7 @@ export function EventFeed() {
               aria-hidden
             />
             <span className="shrink-0 font-mono text-[0.85em] text-base-content/60 tabular-nums">
-              {formatTime(ev.receivedAt)}
+              {formatClock(ev.receivedAtMs)}
             </span>
             <span className="shrink-0 text-base-content/70">{ev.robot}</span>
             <span className="min-w-0 flex-1 truncate">

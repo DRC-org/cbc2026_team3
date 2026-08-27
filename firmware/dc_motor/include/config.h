@@ -75,7 +75,9 @@ constexpr float kDefaultMaxDuty = 0.30f;
 // エンコーダ（位置・速度フィードバック）
 // ===========================================================================
 
+// TODO(実機で確認): 基板にエンコーダが載っているか。
 // エンコーダ無しの基板では 0 にする。位置・速度制御は使えなくなり duty のみになる。
+// 無いのに 1 のままだと位置・速度が 0 で張り付き、PID が出力を振り切る。
 #define HAS_ENCODER 1
 
 // TODO(実機で確認): エンコーダの 1 相あたりパルス数（モータ軸）。
@@ -99,26 +101,53 @@ constexpr float kEncoderCountsPerOutputRev =
 // 電流センス
 // ===========================================================================
 
-// 電流センスを実装していない基板では 0 にする。FEEDBACK の電流は常に 0 になり、
-// 過電流フラグも立たなくなる。
+// TODO(実機で確認): 基板に電流センス回路が載っているか。
+// 載っていない基板では 0 にする。FEEDBACK の電流は常に 0 になり、過電流フラグも立たない。
+// **無いのに 1 のままだと SENS ピン（A0）が浮き、ADC の振れがそのまま電流値として
+// しきい値を跨いで必ず誤発火する**（仕様書 §3.2）。
 #define HAS_CURRENT_SENSE 1
 
 // TODO(実機で確認): SENS の換算係数（ADC カウント → mA）。
 // 双方向センスを想定し、無電流時のカウントを 0 点として差分から電流を出す。
 // analogReadResolution は既定の 10bit（0–1023）のまま使う。
 constexpr uint16_t kCurrentSenseZeroCount = 512;
-constexpr float kCurrentSenseMaPerCount = 10.0f;
+constexpr float kCurrentSenseMaPerCount = 20.0f;
 
 // TODO(実機で確認): 過電流しきい値。モータとドライバ IC の連続定格から決める。
 constexpr float kDefaultOvercurrentThresholdMa = 5000.0f;
+
+// 双方向センスなので、表現できる電流の絶対値は 0 点から近い側のレールまで。
+constexpr uint16_t kAdcMaxCount = 1023;
+constexpr float kCurrentSenseFullScaleMa =
+    static_cast<float>(kAdcMaxCount - kCurrentSenseZeroCount < kCurrentSenseZeroCount
+                           ? kAdcMaxCount - kCurrentSenseZeroCount
+                           : kCurrentSenseZeroCount) *
+    kCurrentSenseMaPerCount;
+
+// 上の 3 つは独立した仮値なので、組み合わせが成立しないまま通電しうる。
+// しきい値がフルスケール偏差に近いと、**正常な回路でも ADC がレールに張り付く直前でしか
+// 発報できない**「効いているつもりの保護」になる（実際 10mA/count のままでは
+// フルスケール 5110mA に対してしきい値 5000mA だった）。しきい値は連続定格という
+// 物理量なので、センスの換算係数の側をそれに合わせる。ビルドで止めるのは、
+// この不一致が実機では「過電流を一度も検出しない」という無症状で現れるため。
+static_assert(kDefaultOvercurrentThresholdMa > 0.0f,
+              "過電流しきい値が 0 以下。過電流を常時報告するか一度も報告しなくなる");
+static_assert(kDefaultOvercurrentThresholdMa <= 0.8f * kCurrentSenseFullScaleMa,
+              "過電流しきい値が ADC のフルスケール偏差に近すぎる。"
+              "kCurrentSenseMaPerCount / kCurrentSenseZeroCount と併せて見直すこと");
 
 // ===========================================================================
 // 温度
 // ===========================================================================
 
-// この基板は温度センサを持たない。FEEDBACK の温度は常に 0 を送る（仕様書 §3.2 / §7）。
-// PC 側の温度警告（既定 65℃）は発火しない。基板改版で載ったらここを 1 にする。
-#define HAS_TEMPERATURE_SENSOR 0
+// この基板は温度センサを繋ぐピンを持たない（A0=電流センス / A1=エンコーダ Z 相 /
+// A2・A3=リミットスイッチ / A4・A5=I2C）。読み取る手段が無いため、FEEDBACK の温度は
+// src/main.cpp の encodeFeedback() へ 0 を直接渡している（仕様書 §3.2 / §8）。
+// PC 側の温度警告（既定 65℃）は発火しない。
+//
+// 基板改版でセンサが載ったら、HAS_CURRENT_SENSE と同じ形でピン・換算係数・
+// 過熱しきい値をここに足し、sendFeedback() の温度引数と buildStatusFlags() の
+// bit2（過熱）を実装すること。
 
 // ===========================================================================
 // 制御ループ
@@ -127,17 +156,23 @@ constexpr float kDefaultOvercurrentThresholdMa = 5000.0f;
 // 1kHz。PWM 周期（33kHz）より十分遅く、FEEDBACK 周期（100Hz）より十分速い。
 constexpr uint32_t kControlIntervalUs = 1000;
 
-// コマンドウォッチドッグ（仕様書 §5.1）。0 にすると SET_TARGET が途絶えても停止しない。
+// コマンドウォッチドッグ（仕様書 §5.1）。PC 側は最後に指令した目標値を
+// kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、途絶は PC の停止か
+// ケーブル断を意味する。止まらない基板は PC から止められない基板でもある。
 //
-// PC 側の目標値定期再送が未実装（仕様書 §7）のため、有効のままだとコンベアに run を
-// 指令しても kDefaultCommandTimeoutMs 後に止まる。PC 側が入るまでの暫定運用として
-// ここを 0 にするか、command_timeout_ms を大きく設定すること。
-// 安全側の既定は「有効」であり、無効化は必ず意識的に行う。
+// 0 にすると途絶しても駆動を続け、FEEDBACK の bit4 も報告しなくなる。これは
+// 手で cansend を打つようなベンチ確認（20Hz の再送を用意できない場合）のための
+// 逃げ道であって、試合では既定の 1 のまま使う。再送が間に合わない状態は運用上の
+// 異常なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
+//
+// この値は setup() が MotorSafety::setWatchdogEnabled() へ写す。判定を #if で
+// main.cpp 側に置くと、同じ分岐を両ファームが各自で持つことになり、片方に入れ忘れても
+// 誰も気付けない（実際そうなっていた）。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
-// 仕様書 §3.4 の既定値。
-constexpr uint32_t kDefaultCommandTimeoutMs = 500;
-constexpr uint32_t kDefaultFeedbackIntervalMs = 10;  // 100Hz
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
+// MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
+// 基板ごとに変えてよい値ではなく、両基板の config.h に同じ数字を書くと片方だけ古くなる。
 
 // TODO(実機で確認): PID ゲイン。
 // 仕様書 §3.4 の kp/ki/kd は position と velocity で共有する 1 組であり、
@@ -158,11 +193,11 @@ constexpr float kDefaultReachedToleranceRpm = 5.0f;
 // 表示
 // ===========================================================================
 
-// シリアル RGB LED による状態表示。
-// FastLED_NeoPixel が lib_deps に無い環境でもビルドが通るよう、main.cpp 側で
-// __has_include を見てオンボード LED のみのフォールバックへ落とす。
-// 実際に発光させるには platformio.ini の lib_deps にライブラリを追加すること。
-#define HAS_RGB_LED 1
+// シリアル RGB LED による状態表示。**点灯処理はまだ無い**（main.cpp の updateLed() の
+// #if HAS_RGB_LED は TODO コメントだけ）ので、1 にしても状態表示はオンボード LED の
+// 点滅のままで何も変わらない。発光させるには platformio.ini の lib_deps に
+// RGB LED ライブラリを追加したうえで中身を書くこと。
+#define HAS_RGB_LED 0
 
 // DIP が 0x00（設定忘れ）のときの赤点滅周期（仕様書 §2.2）。
 constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;

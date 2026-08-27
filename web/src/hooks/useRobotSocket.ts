@@ -1,389 +1,71 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useReducer } from "react";
 
+import { useWebSocket } from "@/hooks/useWebSocket";
+import { parseServerMessage } from "@/lib/protocol";
+import type { MatchState, RobotState } from "@/lib/protocol";
+import type { CommandRejectedEvent, HealthChangeEvent, MotorCheckState } from "@/lib/robotReducer";
+import { INITIAL_ROBOT_UI_STATE, robotReducer } from "@/lib/robotReducer";
 import { originWsUrl } from "@/lib/wsUrl";
-
-export interface MotorState {
-  pos: number;
-  vel: number;
-  torque: number;
-  temp: number;
-}
-
-export type BusHealthState = "ok" | "degraded" | "down";
-export type MotorHealthState = "ok" | "stale" | "warning" | "fault";
-
-export interface BusHealth {
-  name: string;
-  channel: string;
-  state: BusHealthState;
-  last_tx_at: number | null;
-  last_rx_at: number | null;
-  tx_error_count: number;
-  rx_error_count: number;
-  bus_off: boolean;
-}
-
-export interface MotorHealth {
-  name: string;
-  bus: string;
-  state: MotorHealthState;
-  last_feedback_at: number | null;
-  feedback_age_ms: number | null;
-  temperature: number;
-  detail: string | null;
-}
-
-export interface HealthSnapshot {
-  timestamp: number;
-  overall: BusHealthState;
-  buses: BusHealth[];
-  motors: MotorHealth[];
-}
-
-export type HealthChangeLevel = "info" | "warning" | "critical";
-
-export interface HealthChangeEvent {
-  robot: string;
-  level: HealthChangeLevel;
-  target: string;
-  from: string;
-  to: string;
-  message: string;
-  receivedAt: number;
-}
-
-export type MotorCheckResult = "pending" | "running" | "passed" | "failed" | "timeout" | "skipped";
-export type MotorCheckOverall = "running" | "ok" | "partial" | "failed";
-
-export interface MotorCheckRecord {
-  motor: string;
-  bus: string;
-  started_at: number;
-  finished_at: number | null;
-  result: MotorCheckResult;
-  expected: number;
-  observed: number | null;
-  detail: string | null;
-}
-
-export interface CheckRunSnapshot {
-  robot: string;
-  started_at: number;
-  finished_at: number | null;
-  overall: MotorCheckOverall;
-  records: MotorCheckRecord[];
-}
-
-export type MotorCheckStatus = "idle" | "running" | "completed" | "error";
-
-export interface MotorCheckState {
-  status: MotorCheckStatus;
-  current: string | null;
-  progress: { index: number; total: number } | null;
-  // 受信した record を時系列で。同じ motor の重複は最新で上書き
-  records: MotorCheckRecord[];
-  snapshot: CheckRunSnapshot | null;
-  error: string | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-}
-
-function emptyMotorCheckState(): MotorCheckState {
-  return {
-    status: "idle",
-    current: null,
-    progress: null,
-    records: [],
-    snapshot: null,
-    error: null,
-    startedAt: null,
-    finishedAt: null,
-  };
-}
-
-// motor 名で重複した record を最新で上書きしつつ、初出は末尾に追加して順序を保つ
-function mergeRecord(records: MotorCheckRecord[], next: MotorCheckRecord): MotorCheckRecord[] {
-  const idx = records.findIndex((r) => r.motor === next.motor);
-  if (idx === -1) return [...records, next];
-  const copy = records.slice();
-  copy[idx] = next;
-  return copy;
-}
-
-export type MatchCourt = "red" | "blue";
-export type MatchPhase = "setup" | "ready" | "match" | "finished";
-export type ChecklistRole = "main_hand" | "sub_hand";
-
-export interface ChecklistItem {
-  id: string;
-  label: string;
-  checked: boolean;
-}
-
-export interface ChecklistState {
-  items: ChecklistItem[];
-  completed: boolean;
-}
-
-export interface MatchState {
-  court: MatchCourt;
-  phase: MatchPhase;
-  can_start_match: boolean;
-  /** 完了が試合開始のゲートになるロールと、その進捗。キーの集合はサーバーが持つ */
-  checklists: Record<string, ChecklistState>;
-}
-
-export interface CommandRejectedEvent {
-  command: string;
-  reason: string;
-  receivedAt: number;
-}
-
-// WS 未接続時に UI を成立させるための初期値。サーバー接続直後に必ず上書きされる
-const INITIAL_MATCH_STATE: MatchState = {
-  court: "red",
-  phase: "setup",
-  can_start_match: false,
-  checklists: {},
-};
-
-export interface SequenceStepInfo {
-  index: number;
-  label: string;
-  require_trigger: boolean;
-}
-
-export interface RobotState {
-  robot: string;
-  sequence: string;
-  current_step: string | null;
-  step_index: number;
-  total_steps: number;
-  waiting_trigger: boolean;
-  motors: Record<string, MotorState>;
-  e_stop_active?: boolean;
-  health?: HealthSnapshot;
-  steps?: SequenceStepInfo[];
-}
 
 interface UseRobotSocketReturn {
   states: Record<string, RobotState>;
   connected: boolean;
   eStopActive: boolean;
+  /** 直近の緊急停止の理由。操縦者コマンドによる停止など、理由が無い場合は null */
+  eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
   motorChecks: Record<string, MotorCheckState>;
   matchState: MatchState;
   rejection: CommandRejectedEvent | null;
   clearRejection: () => void;
   setEStopActive: (active: boolean) => void;
-  send: (data: object) => void;
+  /** 切断中で送れなかった操作を通知枠へ流す (押したのに無反応、を作らない) */
+  reportUnsent: (command: string, reason: string) => void;
+  /** 送れたら true。切断中は false */
+  send: (data: object) => boolean;
 }
 
-const RECONNECT_INTERVAL = 3000;
-// 直近警告のフラッシュ表示用にのみ保持。長期履歴は不要なので少量で十分
-const HEALTH_EVENT_BUFFER = 5;
-
 /**
- * 指定 URL の WebSocket に接続し、切断中は RECONNECT_INTERVAL ごとに再接続する。
+ * WS 接続 (`useWebSocket`)・受信条件 (`lib/protocol`)・状態遷移 (`lib/robotReducer`) を
+ * 束ねて 1 つの UI 状態にする。
  *
  * 接続先は `lib/wsUrl.ts` が解決する（既定は配信元 origin の /ws）。
  * url が変わると現在の接続を畳んで新しい接続先へ張り直す。
  */
 export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketReturn {
-  const [states, setStates] = useState<Record<string, RobotState>>({});
-  const [connected, setConnected] = useState(false);
-  const [eStopActive, setEStopActive] = useState(false);
-  const [healthEvents, setHealthEvents] = useState<HealthChangeEvent[]>([]);
-  const [motorChecks, setMotorChecks] = useState<Record<string, MotorCheckState>>({});
-  const [matchState, setMatchState] = useState<MatchState>(INITIAL_MATCH_STATE);
-  const [rejection, setRejection] = useState<CommandRejectedEvent | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 接続先を切り替えた後も、旧接続の close/message は非同期に届く。世代番号で弾かないと
-  // 旧 URL への再接続タイマーが走り、古いサーバーの状態で画面が上書きされる
-  const generationRef = useRef(0);
+  const [state, dispatch] = useReducer(robotReducer, INITIAL_ROBOT_UI_STATE);
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    const generation = generationRef.current;
-    const isCurrent = () => generation === generationRef.current;
-
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.addEventListener("open", () => {
-      if (isCurrent()) setConnected(true);
-    });
-
-    ws.addEventListener("close", () => {
-      if (!isCurrent()) return;
-      setConnected(false);
-      reconnectTimer.current = setTimeout(connect, RECONNECT_INTERVAL);
-    });
-
-    ws.addEventListener("error", () => ws.close());
-
-    ws.addEventListener("message", (event: MessageEvent) => {
-      if (!isCurrent()) return;
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "state" && msg.robot) {
-          setStates((prev) => ({ ...prev, [msg.robot]: msg }));
-          if (typeof msg.e_stop_active === "boolean") {
-            setEStopActive(msg.e_stop_active);
-          }
-        } else if (msg.type === "match_state") {
-          // サーバーが正。接続直後のスナップショットと変化通知の両方がここに来る
-          setMatchState({
-            court: msg.court as MatchCourt,
-            phase: msg.phase as MatchPhase,
-            can_start_match: Boolean(msg.can_start_match),
-            checklists: msg.checklists ?? {},
-          });
-        } else if (msg.type === "command_rejected") {
-          setRejection({
-            command: typeof msg.command === "string" ? msg.command : "",
-            reason: typeof msg.reason === "string" ? msg.reason : "",
-            receivedAt: Date.now(),
-          });
-        } else if (msg.type === "e_stop_state" && typeof msg.active === "boolean") {
-          setEStopActive(msg.active);
-        } else if (msg.type === "health_change" && typeof msg.robot === "string") {
-          const evt: HealthChangeEvent = {
-            robot: msg.robot,
-            level: (msg.level as HealthChangeLevel) ?? "info",
-            target: typeof msg.target === "string" ? msg.target : "",
-            from: typeof msg.from === "string" ? msg.from : "",
-            to: typeof msg.to === "string" ? msg.to : "",
-            message: typeof msg.message === "string" ? msg.message : "",
-            receivedAt: Date.now(),
-          };
-          setHealthEvents((prev) => {
-            // 新しい順で先頭、最大 HEALTH_EVENT_BUFFER 件のリングバッファ
-            const next = [evt, ...prev];
-            return next.length > HEALTH_EVENT_BUFFER ? next.slice(0, HEALTH_EVENT_BUFFER) : next;
-          });
-        } else if (msg.type === "motor_check_progress" && typeof msg.robot === "string") {
-          const robot: string = msg.robot;
-          const current: string | null = typeof msg.current === "string" ? msg.current : null;
-          const index: number = typeof msg.index === "number" ? msg.index : 0;
-          const total: number = typeof msg.total === "number" ? msg.total : 0;
-          setMotorChecks((prev) => {
-            const base = prev[robot] ?? emptyMotorCheckState();
-            // 進捗の最初を受け取った時点で startedAt を確定する
-            const startedAt = base.startedAt ?? Date.now() / 1000;
-            return {
-              ...prev,
-              [robot]: {
-                ...base,
-                status: "running",
-                current,
-                progress: { index, total },
-                error: null,
-                snapshot: null,
-                finishedAt: null,
-                startedAt,
-              },
-            };
-          });
-        } else if (
-          msg.type === "motor_check_record" &&
-          typeof msg.robot === "string" &&
-          msg.record &&
-          typeof msg.record === "object"
-        ) {
-          const robot: string = msg.robot;
-          const record = msg.record as MotorCheckRecord;
-          setMotorChecks((prev) => {
-            const base = prev[robot] ?? emptyMotorCheckState();
-            return {
-              ...prev,
-              [robot]: {
-                ...base,
-                records: mergeRecord(base.records, record),
-              },
-            };
-          });
-        } else if (
-          msg.type === "motor_check_done" &&
-          typeof msg.robot === "string" &&
-          msg.snapshot &&
-          typeof msg.snapshot === "object"
-        ) {
-          const robot: string = msg.robot;
-          const snapshot = msg.snapshot as CheckRunSnapshot;
-          setMotorChecks((prev) => {
-            const base = prev[robot] ?? emptyMotorCheckState();
-            return {
-              ...prev,
-              [robot]: {
-                ...base,
-                status: "completed",
-                snapshot,
-                // snapshot.records が正となる。途中受信との差分を埋めるため上書き
-                records: snapshot.records ?? base.records,
-                current: null,
-                error: null,
-                startedAt: snapshot.started_at ?? base.startedAt,
-                finishedAt: snapshot.finished_at ?? Date.now() / 1000,
-              },
-            };
-          });
-        } else if (msg.type === "motor_check_error" && typeof msg.robot === "string") {
-          const robot: string = msg.robot;
-          const message: string = typeof msg.message === "string" ? msg.message : "unknown error";
-          setMotorChecks((prev) => {
-            const base = prev[robot] ?? emptyMotorCheckState();
-            return {
-              ...prev,
-              [robot]: {
-                ...base,
-                status: "error",
-                error: message,
-                current: null,
-                finishedAt: Date.now() / 1000,
-              },
-            };
-          });
-        }
-      } catch {
-        // 不正な JSON は無視
-      }
-    });
-  }, [url]);
-
-  useEffect(() => {
-    // 接続先切替の直後に旧接続の "Connected" 表示が残ると、届いていない指令を
-    // 届いたものと誤認する。張り直しの間は必ず切断表示にする
-    setConnected(false);
-    connect();
-    return () => {
-      generationRef.current += 1;
-      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
-      wsRef.current = null;
-    };
-  }, [connect]);
-
-  const send = useCallback((data: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
-    }
+  const handleMessage = useCallback((data: string) => {
+    const message = parseServerMessage(data);
+    // 壊れた JSON と未知の type はここで落ちる (画面へは何も伝えない)
+    if (message) dispatch({ type: "message", message, nowMs: Date.now() });
   }, []);
 
-  const clearRejection = useCallback(() => setRejection(null), []);
+  const { connected, send } = useWebSocket(url, handleMessage);
+
+  const clearRejection = useCallback(() => dispatch({ type: "clear_rejection" }), []);
+  const reportUnsent = useCallback(
+    (command: string, reason: string) =>
+      dispatch({ type: "command_unsent", command, reason, nowMs: Date.now() }),
+    [],
+  );
+  const setEStopActive = useCallback(
+    (active: boolean) => dispatch({ type: "e_stop_local", active }),
+    [],
+  );
 
   return {
-    states,
+    states: state.states,
     connected,
-    eStopActive,
-    healthEvents,
-    motorChecks,
-    matchState,
-    rejection,
+    eStopActive: state.eStopActive,
+    eStopReason: state.eStopReason,
+    healthEvents: state.healthEvents,
+    motorChecks: state.motorChecks,
+    matchState: state.matchState,
+    rejection: state.rejection,
     clearRejection,
     setEStopActive,
+    reportUnsent,
     send,
   };
 }

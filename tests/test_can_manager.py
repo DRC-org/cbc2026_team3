@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import struct
 import time
+from collections.abc import Awaitable, Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import can
@@ -11,12 +14,33 @@ import pytest
 from lib.can_manager import CANManager
 from lib.drivers.base import MotorState
 from lib.drivers.generic import CommandType, GenericDriver
+from lib.drivers.m3508 import M3508Driver
+from tests.fake_can import mark_feedback_at
 
 
 def _make_mock_bus() -> MagicMock:
     bus = MagicMock()
     bus.recv.return_value = None
     return bus
+
+
+def _direct_runner(
+    record: list[tuple[Any, tuple[Any, ...]]] | None = None,
+) -> Callable[..., Awaitable[Any]]:
+    """ブロッキング呼び出しをその場で実行する ``run_blocking`` (テスト用)。
+
+    エグゼキュータの差し替えを ``patch("asyncio.get_event_loop")`` で行うと、
+    「実装がどの API でループを取るか」にテストが固着し、正しい
+    ``get_running_loop()`` へ直した瞬間にテストが偽陽性で落ちる。
+    差し替え口はコンストラクタ引数として公開されているものだけを使う。
+    """
+
+    async def run(func: Callable[..., Any], *args: Any) -> Any:
+        if record is not None:
+            record.append((func, args))
+        return func(*args)
+
+    return run
 
 
 def _make_mock_motor(name: str, can_id: int) -> MagicMock:
@@ -59,7 +83,8 @@ class TestCANManager:
             mgr.get_motor("nonexistent")
 
     async def test_send_to_correct_bus(self) -> None:
-        mgr = CANManager()
+        calls: list[tuple[Any, tuple[Any, ...]]] = []
+        mgr = CANManager(run_blocking=_direct_runner(calls))
         bus0 = _make_mock_bus()
         bus1 = _make_mock_bus()
         motor = _make_mock_motor("m1", 1)
@@ -69,11 +94,9 @@ class TestCANManager:
         mgr.add_motor("can0", motor)
 
         msg = can.Message(arbitration_id=0x200, data=bytes(8))
+        await mgr.send("m1", msg)
 
-        with patch("asyncio.get_event_loop") as mock_loop:
-            mock_loop.return_value.run_in_executor = AsyncMock()
-            await mgr.send("m1", msg)
-            mock_loop.return_value.run_in_executor.assert_called_once_with(None, bus0.send, msg)
+        assert calls == [(bus0.send, (msg,))]
 
     async def test_initialize_motors_sends_steps_with_declared_delays(self) -> None:
         mgr = CANManager()
@@ -107,7 +130,7 @@ class TestCANManager:
         await mgr.shutdown()
 
     async def test_receive_updates_motor_state(self) -> None:
-        mgr = CANManager()
+        mgr = CANManager(run_blocking=_direct_runner())
         bus = _make_mock_bus()
         motor = _make_mock_motor("m1", 1)
         motor.matches_feedback.return_value = True
@@ -131,21 +154,14 @@ class TestCANManager:
 
         bus.recv.side_effect = recv_side_effect
 
-        with patch("asyncio.get_event_loop") as mock_loop:
-
-            async def fake_executor(executor, fn, *args):
-                return fn(*args)
-
-            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=fake_executor)
-
-            with pytest.raises(asyncio.CancelledError):
-                await mgr._receive_loop("can0")
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._receive_loop("can0")
 
         motor.matches_feedback.assert_called_once_with(feedback_msg)
         motor.update_state.assert_called_once_with(feedback_msg)
 
     async def test_state_update_callback(self) -> None:
-        mgr = CANManager()
+        mgr = CANManager(run_blocking=_direct_runner())
         bus = _make_mock_bus()
         motor = _make_mock_motor("m1", 1)
         motor.matches_feedback.return_value = True
@@ -171,15 +187,8 @@ class TestCANManager:
 
         bus.recv.side_effect = recv_side_effect
 
-        with patch("asyncio.get_event_loop") as mock_loop:
-
-            async def fake_executor(executor, fn, *args):
-                return fn(*args)
-
-            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=fake_executor)
-
-            with pytest.raises(asyncio.CancelledError):
-                await mgr._receive_loop("can0")
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._receive_loop("can0")
 
         callback.assert_called_once_with("m1", feedback_state)
 
@@ -194,6 +203,45 @@ class TestCANManager:
         await mgr.shutdown()
 
         bus0.shutdown.assert_called_once()
+        bus1.shutdown.assert_called_once()
+
+    async def test_shutdown_は死んだ受信タスクの例外で止まらない(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """止める処理が止まってはならない。
+
+        バスが down していると受信ループは ``CanOperationError`` で即死する。
+        その例外を ``shutdown()`` が再送出すると、``main()`` の finally が
+        そこで折れて 2 台目のロボットのバスが開いたまま残る。
+        """
+        # 既定のエグゼキュータ経由の runner を使う。同期実行の runner だと
+        # 正常な方のバスの受信ループがイベントループへ譲らず回り続けてしまう
+        mgr = CANManager()
+        bus0 = _make_mock_bus()
+        bus0.recv.side_effect = can.CanOperationError("インタフェース断")
+        bus1 = _make_mock_bus()
+        mgr.add_bus("can0", bus0)
+        mgr.add_bus("can1", bus1)
+
+        with caplog.at_level(logging.ERROR, logger="lib.can_manager"):
+            await mgr.run()
+            # 受信タスクが自力で死ぬまで待つ
+            await asyncio.sleep(0.01)
+            await mgr.shutdown()
+
+        bus0.shutdown.assert_called_once()
+        bus1.shutdown.assert_called_once()
+
+    async def test_shutdown_は1本のバス停止失敗で残りを諦めない(self) -> None:
+        mgr = CANManager()
+        bus0 = _make_mock_bus()
+        bus0.shutdown.side_effect = RuntimeError("デバイスが既に外れている")
+        bus1 = _make_mock_bus()
+        mgr.add_bus("can0", bus0)
+        mgr.add_bus("can1", bus1)
+
+        await mgr.shutdown()
+
         bus1.shutdown.assert_called_once()
 
 
@@ -227,26 +275,26 @@ class TestMotorActivation:
         enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
 
         # 待機開始前の受信は set_zero 前の可能性があるため、認めてはならない
-        mgr._last_rx_at["m1"] = time.time()
+        mark_feedback_at(mgr, "m1", time.time())
 
         seen_rx_at: list[float | None] = []
 
         def record_activation() -> list[tuple[can.Message, float]]:
-            seen_rx_at.append(mgr._last_rx_at.get("m1"))
+            seen_rx_at.append(mgr.last_feedback_at("m1"))
             return [(enable_msg, 0.0)]
 
         motor.activation_steps.side_effect = record_activation
 
         async def fake_send(name: str, msg: can.Message) -> None:
             # 問い合わせフレームへの応答としてフィードバックが届く状況を模す
-            mgr._last_rx_at[name] = time.time()
+            mark_feedback_at(mgr, name, time.time())
 
         with patch.object(mgr, "send", new_callable=AsyncMock, side_effect=fake_send):
             activated = await mgr.activate_motor("m1", feedback_timeout_s=0.5)
 
         assert activated is True
         assert seen_rx_at and seen_rx_at[0] is not None
-        assert seen_rx_at[0] > mgr._last_rx_at["m1"] - 1.0
+        assert seen_rx_at[0] > (mgr.last_feedback_at("m1") or 0.0) - 1.0
 
     async def test_activation_skipped_when_feedback_never_arrives(self) -> None:
         """現在角が分からないまま enable すると原点へ飛ぶため、無励磁のままにする。"""
@@ -269,7 +317,7 @@ class TestMotorActivation:
         motor.activation_steps.return_value = [
             (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
         ]
-        mgr._last_rx_at["m1"] = time.time()
+        mark_feedback_at(mgr, "m1", time.time())
 
         with patch.object(mgr, "send", new_callable=AsyncMock):
             activated = await mgr.activate_motor("m1", feedback_timeout_s=0.05)
@@ -317,22 +365,23 @@ class TestReceiveLoopRobustness:
             is_extended_id=False,
         )
 
+    @staticmethod
+    def _m3508_feedback(can_id: int, angle_raw: int) -> can.Message:
+        return can.Message(
+            arbitration_id=0x200 + can_id,
+            data=struct.pack(">hhhB", angle_raw, 0, 0, 30) + bytes(1),
+            is_extended_id=False,
+        )
+
     async def _run_loop(self, mgr: CANManager) -> None:
-        with patch("asyncio.get_event_loop") as mock_loop:
-
-            async def fake_executor(executor, fn, *args):
-                return fn(*args)
-
-            mock_loop.return_value.run_in_executor = AsyncMock(side_effect=fake_executor)
-
-            with pytest.raises(asyncio.CancelledError):
-                await mgr._receive_loop("can0")
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._receive_loop("can0")
 
     @pytest.mark.parametrize("reserved_command_type", [0b100, 0b101, 0b110])
     async def test_receive_loop_survives_reserved_command_type(
         self, reserved_command_type: int
     ) -> None:
-        mgr = CANManager()
+        mgr = CANManager(run_blocking=_direct_runner())
         bus = _make_mock_bus()
         motor = GenericDriver("gripper", 0x01)
         mgr.add_bus("can0", bus)
@@ -351,7 +400,7 @@ class TestReceiveLoopRobustness:
         assert motor.state.position == pytest.approx(90.0)
 
     async def test_receive_loop_survives_extended_frame(self) -> None:
-        mgr = CANManager()
+        mgr = CANManager(run_blocking=_direct_runner())
         bus = _make_mock_bus()
         motor = GenericDriver("gripper", 0x01)
         mgr.add_bus("can0", bus)
@@ -363,3 +412,241 @@ class TestReceiveLoopRobustness:
         await self._run_loop(mgr)
 
         assert motor.state.position == pytest.approx(45.0)
+
+    async def test_receive_loop_survives_short_m3508_frame(self) -> None:
+        """M3508 は DLC を検査せずに struct.unpack する。短いフレームは実際に届く。
+
+        M3508Driver.matches_feedback は arbitration_id しか見ないため、
+        バス上の別機器が 0x201〜0x204 を 8 バイト未満で流すだけで decode が落ちる。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        hit = M3508Driver("y_axis_r", 1)
+        other = M3508Driver("y_axis_l", 2)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", hit)
+        mgr.add_motor("can0", other)
+
+        short = can.Message(arbitration_id=0x201, data=bytes(4), is_extended_id=False)
+        self._drain_recv(bus, [short, self._m3508_feedback(2, angle_raw=2048)])
+
+        await self._run_loop(mgr)
+
+        # 巻き添えを受けずに、後続の正常フレームが取り込めていること
+        assert other.state.position == pytest.approx(90.0, abs=0.1)
+        assert mgr.last_feedback_at("y_axis_l") is not None
+        # デコードできなかった以上、当該モータは「受信した」ことにしてはならない
+        assert mgr.last_feedback_at("y_axis_r") is None
+        assert mgr._rx_error_count["can0"] == 1
+
+    async def test_receive_loop_survives_state_update_callback_error(self) -> None:
+        """配信コールバックの失敗はそのフレームだけの失敗として閉じ込める。"""
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        motor = GenericDriver("gripper", 0x01)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        delivered: list[str] = []
+
+        def callback(name: str, state: MotorState) -> None:
+            delivered.append(name)
+            raise RuntimeError("配信先で例外")
+
+        mgr.set_on_state_update(callback)
+        self._drain_recv(bus, [self._feedback_msg(0x01, 900), self._feedback_msg(0x01, 450)])
+
+        await self._run_loop(mgr)
+
+        # 1 通目で死なず、2 通目もコールバックまで到達している
+        assert delivered == ["gripper", "gripper"]
+        assert motor.state.position == pytest.approx(45.0)
+        # デコード自体は成功しているので、フィードバック鮮度は失わせない
+        assert mgr.last_feedback_at("gripper") is not None
+        assert mgr._rx_error_count["can0"] == 2
+
+    async def test_receive_loop_isolates_failing_matcher_to_one_motor(self) -> None:
+        """matches_feedback が投げるドライバが、同じバスの他モータ宛を巻き添えにしない。"""
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        broken = _make_mock_motor("broken", 0x02)
+        broken.matches_feedback.side_effect = ValueError("解析できない ID")
+        healthy = GenericDriver("gripper", 0x01)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", broken)
+        mgr.add_motor("can0", healthy)
+
+        self._drain_recv(bus, [self._feedback_msg(0x01, 900)])
+
+        await self._run_loop(mgr)
+
+        # 同じ 1 通が、壊れたドライバの後ろにいる健全なモータへ届いていること
+        assert healthy.state.position == pytest.approx(90.0)
+        assert mgr._rx_error_count["can0"] == 1
+
+    async def test_receive_loop_propagates_cancelled_error(self) -> None:
+        """CancelledError は shutdown の停止経路。握り潰すと止まらない受信ループが残る。"""
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        motor = GenericDriver("gripper", 0x01)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        def callback(name: str, state: MotorState) -> None:
+            raise asyncio.CancelledError
+
+        mgr.set_on_state_update(callback)
+        self._drain_recv(bus, [self._feedback_msg(0x01, 900), self._feedback_msg(0x01, 450)])
+
+        await self._run_loop(mgr)
+
+        # 1 通目で抜けている (2 通目を読みに行っていない) こと
+        assert bus.recv.call_count == 1
+        # 停止要求は受信エラーではない
+        assert mgr._rx_error_count["can0"] == 0
+
+    async def test_receive_loop_death_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        """受信 API 自体の失敗でループを降りるときは、必ず痕跡を残す。
+
+        _tasks は誰も await しないため、記録しないとタスクの死がどこにも現れない。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        bus.recv.side_effect = can.CanOperationError("インタフェース断")
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", GenericDriver("gripper", 0x01))
+
+        with (
+            caplog.at_level(logging.ERROR, logger="lib.can_manager"),
+            pytest.raises(can.CanOperationError),
+        ):
+            await mgr._receive_loop("can0")
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert errors[0].exc_info is not None
+
+    async def test_receive_error_logs_are_throttled(self, caplog: pytest.LogCaptureFixture) -> None:
+        """不正フレームが連続しても、1 通ごとにログを出すと他のログが読めなくなる。"""
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", M3508Driver("y_axis_r", 1))
+
+        short = can.Message(arbitration_id=0x201, data=bytes(4), is_extended_id=False)
+        self._drain_recv(bus, [short] * 5)
+
+        with caplog.at_level(logging.ERROR, logger="lib.can_manager"):
+            await self._run_loop(mgr)
+
+        assert mgr._rx_error_count["can0"] == 5
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        # トレースバックが無いと、どのデコードで落ちたか追えない
+        assert errors[0].exc_info is not None
+
+
+class TestDuplicateRegistration:
+    """名前 / CAN ID の重複はフィードバックの配り先を静かに壊すため構成時に弾く。"""
+
+    def test_duplicate_motor_name_is_rejected(self) -> None:
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+
+        with pytest.raises(ValueError) as excinfo:
+            mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x02))
+
+        assert "gripper" in str(excinfo.value)
+
+    def test_duplicate_motor_name_across_buses_is_rejected(self) -> None:
+        """名前は _motors の唯一のキーなので、別バスでも後勝ちで上書きされてしまう。"""
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_bus("can_edulite", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+
+        with pytest.raises(ValueError):
+            mgr.add_motor("can_edulite", _make_mock_motor("gripper", 0x01))
+
+    def test_duplicate_can_id_on_same_bus_is_rejected(self) -> None:
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+
+        with pytest.raises(ValueError) as excinfo:
+            mgr.add_motor("can_generic", _make_mock_motor("wall", 0x01))
+
+        message = str(excinfo.value)
+        # どのバスの・どの CAN ID が・どのモータと衝突したかが分からないと現物を追えない
+        assert "can_generic" in message
+        assert "0x01" in message
+        assert "gripper" in message
+        assert "wall" in message
+
+    def test_same_can_id_on_different_bus_is_allowed(self) -> None:
+        """バスが違えばフレームは混ざらない。ここまで弾くと現実の配線が組めない。"""
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        mgr.add_bus("can_edulite", _make_mock_bus())
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+        mgr.add_motor("can_edulite", _make_mock_motor("rotate_l", 0x01))
+
+        assert mgr.get_motor("gripper").can_id == mgr.get_motor("rotate_l").can_id
+
+    def test_rejected_motor_is_not_registered(self) -> None:
+        """弾いた後に _bus_motors 側だけ残ると、受信ループが孤児へフレームを配る。"""
+        mgr = CANManager()
+        mgr.add_bus("can_generic", _make_mock_bus())
+        first = _make_mock_motor("gripper", 0x01)
+        mgr.add_motor("can_generic", first)
+
+        with pytest.raises(ValueError):
+            mgr.add_motor("can_generic", _make_mock_motor("wall", 0x01))
+
+        assert mgr._bus_motors["can_generic"] == [first]
+        assert set(mgr._motors) == {"gripper"}
+
+
+class TestReadOnlyViews:
+    """構成の読み取り口。サーバー・動作確認がここを通れば private を触らずに済む。"""
+
+    def _mgr(self) -> CANManager:
+        mgr = CANManager()
+        mgr.add_bus("can_m3508", _make_mock_bus(), channel="vcan0")
+        mgr.add_bus("can_generic", _make_mock_bus(), channel="vcan1")
+        mgr.add_motor("can_m3508", _make_mock_motor("y_axis_r", 0x01))
+        mgr.add_motor("can_m3508", _make_mock_motor("y_axis_l", 0x02))
+        mgr.add_motor("can_generic", _make_mock_motor("gripper", 0x01))
+        return mgr
+
+    def test_motors_は宣言順を保つ(self) -> None:
+        # 動作確認は config の宣言順に 1 台ずつ動かす。順序が崩れると
+        # 指差喚呼の読み上げ順と画面の進捗が食い違う
+        mgr = self._mgr()
+        assert list(mgr.motors) == ["y_axis_r", "y_axis_l", "gripper"]
+        assert mgr.motors["gripper"] is mgr.get_motor("gripper")
+
+    def test_motors_は書き換えられない(self) -> None:
+        mgr = self._mgr()
+        with pytest.raises(TypeError):
+            mgr.motors["gripper"] = _make_mock_motor("gripper", 0x09)  # type: ignore[index]
+
+    def test_motors_は登録を追従する(self) -> None:
+        mgr = self._mgr()
+        view = mgr.motors
+        mgr.add_motor("can_generic", _make_mock_motor("wall", 0x02))
+        assert "wall" in view
+
+    def test_bus_names_で送信先バスを列挙できる(self) -> None:
+        mgr = self._mgr()
+        assert mgr.bus_names == ("can_m3508", "can_generic")
+
+    def test_bus_of_でモータの所属バスを引ける(self) -> None:
+        mgr = self._mgr()
+        assert mgr.bus_of("y_axis_l") == "can_m3508"
+        assert mgr.bus_of("gripper") == "can_generic"
+
+    def test_bus_of_は未登録モータで_None(self) -> None:
+        # 未登録を KeyError にすると、ヘルス表示のためだけに呼ぶ側が必ず握り潰す羽目になる
+        assert self._mgr().bus_of("unknown") is None

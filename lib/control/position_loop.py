@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from lib.axis_sync import SyncGroup
+from lib.config_schema import DEFAULT_HEALTH
+from lib.control.feedback import FeedbackFreshness
+from lib.control.periodic import PausablePeriodicTask
 from lib.control.pid import PIDController
-from lib.control.sync_monitor import SyncGroup
+from lib.control.sync_guard import SyncGuard
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 
@@ -18,7 +21,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_INTERVAL_S", "M3508PositionLoop", "make_position_pid"]
+__all__ = [
+    "DEFAULT_INTERVAL_S",
+    "MAX_TUNABLE_GAIN",
+    "TUNABLE_PID_KEYS",
+    "M3508PositionLoop",
+    "make_position_pid",
+]
+
+# 実行中に差し替えてよい PID パラメータ。出力レンジ・不感帯・積分上限は機構の
+# 保護値なので操縦者の調整対象にしない (誤って緩めると保護が消える)
+TUNABLE_PID_KEYS: tuple[str, ...] = ("kp", "ki", "kd")
+
+# 実行中に受け付けるゲインの上限。出力は ±CURRENT_MAX [counts] に飽和するので、
+# これを超えるゲインは「不感帯を出た瞬間に必ず上限へ張り付く」バンバン制御に
+# しかならず、調整の意味を持たない。下限 (負のゲイン = 正帰還) だけを弾いて
+# 上限を置かないと、kp=1e6 のような打ち間違いがそのまま通り、目標を入れた瞬間や
+# 緊急停止を解除した瞬間にフルスケール電流が出る
+MAX_TUNABLE_GAIN: float = float(CURRENT_MAX)
 
 # 制御周期 200Hz。C620 のフィードバックは 1kHz で届くので取りこぼしはなく、
 # asyncio のジッタ (数 ms) に対しても十分な余裕がある
@@ -27,9 +47,6 @@ DEFAULT_INTERVAL_S = 0.005
 # asyncio が詰まって周期が飛んだときの dt 上限 (制御周期の 10 倍)。
 # 実測 dt をそのまま渡すと、復帰した瞬間に積分項と微分項が跳ねて機構に衝撃が出る
 DEFAULT_MAX_DT_S = 0.05
-
-# 同一原因のログを毎周期出すと 200Hz でログが溢れるため、種類ごとに間引く
-_LOG_THROTTLE_S = 1.0
 
 TargetSink = Callable[[ControlMode, float], Awaitable[None]]
 EStopChecker = Callable[[], bool]
@@ -68,7 +85,7 @@ class _Axis:
     stale: bool = field(default=False)
 
 
-class M3508PositionLoop:
+class M3508PositionLoop(PausablePeriodicTask):
     """1 CAN バス上の M3508 群をまとめて位置制御する非同期ループ。
 
     M3508 は C620 ESC 経由で電流指令しか受け付けないため、位置決めは PC 側の PID で
@@ -77,6 +94,9 @@ class M3508PositionLoop:
     バス単位でまとめる理由: C620 の電流指令フレーム (0x200) は 1 通で 4 モータ分の
     スロットを持つ。モータごとに個別送信すると、自分以外のスロットを 0 で上書きして
     同一バス上の他モータがカクつくため、必ず全モータ分を 1 フレームに束ねて送る。
+    **このクラスが「M3508 かつバス単位」でなければならないのはこの 1 点に尽きる。**
+    周期タスクの骨格・鮮度判定・ペアの保護判断はいずれもバスに固有ではないので、
+    それぞれ ``PausablePeriodicTask`` / ``FeedbackFreshness`` / ``SyncGuard`` が持つ。
 
     安全側の挙動:
       - 緊急停止中は電流 0 + PID リセット + 目標解除
@@ -94,7 +114,7 @@ class M3508PositionLoop:
         *,
         interval_s: float = DEFAULT_INTERVAL_S,
         max_dt_s: float = DEFAULT_MAX_DT_S,
-        feedback_timeout_ms: float = 500.0,
+        feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         is_estop_active: EStopChecker | None = None,
         time_source: Callable[[], float] = time.monotonic,
         feedback_clock: Callable[[], float] = time.time,
@@ -113,34 +133,22 @@ class M3508PositionLoop:
             feedback_clock: CANManager の受信タイムスタンプと比較する壁時計
             sleep: 周期待ちに使う関数 (テストで差し替え可能)
         """
+        super().__init__(interval_s=interval_s, time_source=time_source, sleep=sleep, logger=logger)
         self._can_manager = can_manager
         self._bus_name = bus_name
-        self._interval_s = interval_s
         self._max_dt_s = max_dt_s
-        self._feedback_timeout_ms = feedback_timeout_ms
         self._is_estop_active = is_estop_active
-        self._time_source = time_source
-        self._feedback_clock = feedback_clock
-        self._sleep = sleep
+        self._freshness = FeedbackFreshness(
+            can_manager.last_feedback_at,
+            timeout_ms=feedback_timeout_ms,
+            clock=feedback_clock,
+        )
+        self._sync = SyncGuard(context=f"bus={bus_name}", logger=logger)
 
         self._axes: dict[str, _Axis] = {}
-        self._sync_groups: dict[str, SyncGroup] = {}
-        # モータ名 → 所属グループ名。周期処理でグループを引くための逆引き
-        self._group_of: dict[str, str] = {}
-        # 偏差超過のラッチ。reset_sync_violation() を通るまで電流 0 を維持する
-        self._sync_violations: set[str] = set()
-        # グループ単位のフィードバック途絶の遷移でのみログを出すためのフラグ
-        self._group_stale: set[str] = set()
         # 生成時を基準にしておく。run() 開始時に取り直すので、生成から起動までの
         # 待ち時間が最初の dt に化けることはない
         self._last_tick: float = time_source()
-        self._stop_event = asyncio.Event()
-        self._task: asyncio.Task[None] | None = None
-        self._log_at: dict[str, float] = {}
-        self._paused = False
-        # pause() が「送信中の 1 周期」を待ち合わせるための排他。これが無いと
-        # 送信途中の周期が動作確認の指令フレームを 0 電流で上書きしうる
-        self._step_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
     #  構成
@@ -160,31 +168,16 @@ class M3508PositionLoop:
 
         登録されたグループは「フィードバック途絶の判定単位」かつ「偏差監視の単位」になる。
         メンバが未登録のまま受け入れると、そのモータだけ保護から漏れて片側駆動になるため
-        構成時点で弾く。
+        構成時点で弾く。ここでしか分からないのは「このループが握っているモータか」だけで、
+        重複登録や二重所属の判定は ``SyncGuard`` が行う。
         """
-        if group.name in self._sync_groups:
-            raise ValueError(f"同期グループ '{group.name}' は既に登録済み")
-
         for member in group.members:
-            if member.motor_name not in self._axes:
+            if member.name not in self._axes:
                 raise ValueError(
-                    f"同期グループ '{group.name}' のモータ '{member.motor_name}' が"
+                    f"同期グループ '{group.name}' のモータ '{member.name}' が"
                     f"このループ (bus={self._bus_name}) に未登録"
                 )
-            # 1 台が 2 グループに属すると、どちらの許容値で止めるかが曖昧になる
-            existing = self._group_of.get(member.motor_name)
-            if existing is not None:
-                raise ValueError(
-                    f"モータ '{member.motor_name}' は既に同期グループ '{existing}' に所属"
-                )
-
-        self._sync_groups[group.name] = group
-        for member in group.members:
-            self._group_of[member.motor_name] = group.name
-
-    def set_sleep(self, sleep: SleepFunc) -> None:
-        """周期待ち関数を差し替える (テスト用)。"""
-        self._sleep = sleep
+        self._sync.add(group)
 
     @property
     def bus_name(self) -> str:
@@ -196,15 +189,51 @@ class M3508PositionLoop:
 
     @property
     def sync_group_names(self) -> tuple[str, ...]:
-        return tuple(self._sync_groups)
+        return self._sync.group_names
 
     @property
     def sync_violations(self) -> frozenset[str]:
         """偏差超過でラッチ中のグループ名。"""
-        return frozenset(self._sync_violations)
+        return self._sync.violations
+
+    def _label(self) -> str:
+        return f"位置制御ループ (bus={self._bus_name})"
 
     def pid(self, name: str) -> PIDController:
         return self._axes[name].pid
+
+    def set_pid_gain(self, name: str, key: str, value: float) -> tuple[str, ...]:
+        """実行中に PID ゲインを差し替え、実際に更新したモータ名を返す。
+
+        同期グループのメンバを指定した場合はグループ全員へ同じ値を入れる。
+        左右直結ペアで追従特性が変わると互いに押し合って機構が壊れるため、
+        「片側だけ別ゲイン」という状態をサーバー側で作れてはならない
+        (チューニング UI はモータ 1 基ずつしか送れない)。
+
+        Raises:
+            KeyError: このループに居ないモータ名
+            ValueError: 実行中の差し替え対象でないパラメータ名
+        """
+        if name not in self._axes:
+            raise KeyError(name)
+        if key not in TUNABLE_PID_KEYS:
+            raise ValueError(f"実行中に変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみ: {key}")
+
+        targets = self._paired_with(name)
+        for target in targets:
+            self._axes[target].pid.set_gains(**{key: float(value)})
+        return targets
+
+    def _paired_with(self, name: str) -> tuple[str, ...]:
+        """``name`` と機構的に連動するモータ名の組 (単独なら自分だけ)。
+
+        「1 台だけに効かせてよいか」を判断する場所を 1 つに保つ。ゲイン変更にも
+        原点確定にも同じ答えが要る (どちらも片側だけ適用すると機構が壊れる)。
+        """
+        group_name = self._sync.group_of(name)
+        if group_name is None:
+            return (name,)
+        return self._sync.members_of(group_name)
 
     def target(self, name: str) -> float | None:
         return self._axes[name].target
@@ -253,39 +282,39 @@ class M3508PositionLoop:
     def set_origin_here(self, name: str) -> None:
         """現在位置を累積角の原点にする (ホーミング完了時)。
 
+        ホーミングの手順そのもの (どの順にどこへ押し当てるか) はシーケンス側に置き、
+        このループが提供するのは「今の位置を 0 と定義し直す」という 1 操作だけに
+        留める。手順が変わってもここは触らない。
+
+        指定したモータが同期グループに属していればグループ全員を同時に確定する。
+        左右を別々の時刻に原点確定すると、その間に片方が動いた分だけ偏差が最初から
+        オフセットを持ち、正常な動作でも即座に偏差超過で止まってしまう。
+        await を挟まず 1 回で回すことで、制御周期が割り込む余地を無くしている。
+
         原点が動くと既存の目標値の意味も変わるため、目標は解除して静止させる。
         """
-        axis = self._axes[name]
-        axis.driver.reset_multi_turn_origin()
-        self.clear_target(name)
+        self._capture_origin(self._paired_with(name))
 
     def set_group_origin_here(self, name: str) -> None:
         """同期グループ全員の累積角原点を同時に確定する。
 
-        左右を別々の時刻に原点確定すると、その間に片方が動いた分だけ偏差が最初から
-        オフセットを持ち、正常な動作でも即座に偏差超過で止まってしまう。
-        await を挟まず 1 回で回すことで、制御周期が割り込む余地を無くしている。
+        Raises:
+            KeyError: 未登録のグループ名
         """
-        group = self._sync_groups[name]
-        for member in group.members:
-            self._axes[member.motor_name].driver.reset_multi_turn_origin()
-        for member in group.members:
-            self.clear_target(member.motor_name)
+        self._capture_origin(self._sync.members_of(name))
+
+    def _capture_origin(self, names: tuple[str, ...]) -> None:
+        for motor in names:
+            self._axes[motor].driver.reset_multi_turn_origin()
+        for motor in names:
+            self.clear_target(motor)
 
     def reset_sync_violation(self, name: str | None = None) -> None:
         """偏差超過のラッチを解除する (None で全グループ)。
 
-        緊急停止の解除 (``_disable_all``) や動作確認からの復帰 (``resume``) では
-        意図的に解除しない。機構が物理的にずれているという事実はそれらの操作では
-        直らず、自動解除すると人間が原因に気付かないまま再び駆動してしまうため、
-        「人間がずれを直した」という宣言としてこのメソッドを明示的に通させる。
+        解除の唯一の経路は操縦者の緊急停止解除。詳細は ``SyncGuard.reset``。
         """
-        if name is None:
-            self._sync_violations.clear()
-            return
-        if name not in self._sync_groups:
-            raise KeyError(name)
-        self._sync_violations.discard(name)
+        self._sync.reset(name)
 
     def target_sink(self, name: str) -> TargetSink:
         """MotorHandle に差し込む目標値シンクを返す。"""
@@ -305,12 +334,8 @@ class M3508PositionLoop:
     #  制御ループ
     # ------------------------------------------------------------------ #
 
-    async def step(self) -> None:
-        """1 周期分の制御を行う。run() から呼ばれるほか、テストから直接駆動できる。"""
-        async with self._step_lock:
-            await self._step_locked()
-
     async def _step_locked(self) -> None:
+        """1 周期分の制御。``step()`` (基底) から ``_step_lock`` 保持で呼ばれる。"""
         dt = self._elapsed()
 
         estop = self._is_estop_active is not None and self._is_estop_active()
@@ -328,9 +353,9 @@ class M3508PositionLoop:
             await self._send([0, 0, 0, 0])
             return
 
-        wall_now = self._feedback_clock()
-        stale = {name: self._is_feedback_stale(name, wall_now) for name in self._axes}
-        blocked = self._blocked_groups(stale)
+        wall_now = self._freshness.now()
+        stale = {name: self._freshness.is_stale(name, wall_now) for name in self._axes}
+        blocked = self._sync.blocked(stale=stale, position_of=self._feedback_position)
 
         currents = [0, 0, 0, 0]
         for name, axis in self._axes.items():
@@ -339,102 +364,52 @@ class M3508PositionLoop:
                 axis,
                 dt,
                 stale=stale[name],
-                blocked=self._group_of.get(name) in blocked,
+                blocked=self._sync.group_of(name) in blocked,
             )
 
         await self._send(currents)
 
-    async def pause(self, *, reason: str = "") -> None:
-        """送信を止める。戻り値時点で在庫の周期も送信済みでないことを保証する。
+    async def send_stop_frame(self) -> None:
+        """目標を落とし、全スロット 0 の電流指令フレームを即時に 1 通送る。
 
-        アクチュエータ動作確認は C620 の電流指令フレーム (0x200) を自前で送るため、
-        同一バスでこのループが走っていると互いのフレームを上書きし合う。
-        排他は「ループ側が黙る」方向で取る (動作確認は常に短時間 + 通常制御外)。
+        緊急停止の送信経路から呼ぶ。M3508 は ``emergency_stop_message()`` を持たず
+        自作モタドラ向けの 0x7FF も解釈しないため、この経路が無いと左右直結の
+        Y 軸だけは「ループが生きていて電流 0 を送り続けてくれること」に停止を
+        委ねることになる。ループが死んでいても止められる形にしておく。
+
+        ``_paused`` でも ``is_running`` でも止めない。動作確認が 0x200 を握って
+        いる最中であっても、緊急停止の 0 電流はそのまま上書きしてよい (むしろ
+        上書きさせたい)。``_step_lock`` も取らない。送信が詰まった相手を待つと
+        停止そのものが止まるため、在庫の 1 周期と競合しても全スロット 0 を
+        先に出すことを優先する (次の周期も緊急停止中なら 0 を出す)。
         """
-        async with self._step_lock:
-            if self._paused:
-                return
-            self._paused = True
-            logger.info(
-                "位置制御ループを一時停止 (bus=%s%s)",
-                self._bus_name,
-                f", 理由={reason}" if reason else "",
-            )
+        self._disable_all()
+        await self._send([0, 0, 0, 0])
 
-    def resume(self) -> None:
-        """一時停止を解除する。
-
-        同期メソッドにしてあるのは、動作確認側の ``finally`` から待ち合わせなしで
-        必ず呼べるようにするため。復帰に失敗するとリフトが保持電流を失う。
-        """
-        if not self._paused:
-            return
+    def _on_resume(self) -> None:
         # 停止中にモータが動かされている (動作確認の駆動) ため、古い積分と
         # 前回測定値を持ち越すと復帰した瞬間に大きな電流が出る
         for axis in self._axes.values():
             axis.pid.reset()
         # 停止していた時間が丸ごと dt に化けないよう基準時刻も取り直す
         self._last_tick = self._time_source()
-        self._paused = False
-        logger.info("位置制御ループを再開 (bus=%s)", self._bus_name)
 
-    @property
-    def is_paused(self) -> bool:
-        return self._paused
+    # ------------------------------------------------------------------ #
+    #  ライフサイクル (骨格は PausablePeriodicTask)
+    # ------------------------------------------------------------------ #
 
-    async def run(self) -> None:
-        """停止要求まで制御を回し続ける。
-
-        再開する場合は先に ``reset_stop_request()`` を呼ぶこと (start() は自動で呼ぶ)。
-        """
+    async def _on_run_start(self) -> None:
         self._last_tick = self._time_source()
-        try:
-            while not self._stop_event.is_set():
-                try:
-                    await self.step()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    # 例外でループを抜けると電流指令が止まる。C620 は指令断で
-                    # 惰走するため、握り潰さずログに残しつつ周期は維持する
-                    self._log_throttled("step", "位置制御ループの周期処理で例外", exc_info=True)
-                    await self._send_zero_safely()
-                await self._sleep(self._interval_s)
-        finally:
-            # 一時停止中でもここは送る。制御を降りる以上、0 電流で終えるのが最も安全
-            await self._send_zero_safely()
 
-    def start(self) -> None:
-        """run() をバックグラウンドタスクとして起動する。"""
-        if self.is_running:
-            raise RuntimeError(f"位置制御ループ (bus={self._bus_name}) は既に実行中です")
-        self.reset_stop_request()
-        self._task = asyncio.create_task(self.run())
+    async def _on_tick_error(self) -> None:
+        # 例外でループを抜けると電流指令が止まる。C620 は指令断で惰走するため、
+        # 握り潰さずログに残しつつ周期は維持し、その周期は 0 電流で埋める
+        self._log.exception("tick", "位置制御ループの周期処理で例外 (bus=%s)", self._bus_name)
+        await self._send_zero_safely()
 
-    def reset_stop_request(self) -> None:
-        """停止要求をクリアする。run() 開始前に呼ぶ。
-
-        run() 内でクリアしないのは、タスク起動前に stop() が呼ばれた場合に
-        その要求を取りこぼして走り続けてしまうため。
-        """
-        self._stop_event.clear()
-
-    def request_stop(self) -> None:
-        """次の周期でループを抜けるよう要求する (同期)。"""
-        self._stop_event.set()
-
-    async def stop(self) -> None:
-        """ループを止めてタスクの終了を待つ。"""
-        self.request_stop()
-        task = self._task
-        self._task = None
-        if task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    @property
-    def is_running(self) -> bool:
-        return self._task is not None and not self._task.done()
+    async def _on_run_exit(self) -> None:
+        # 一時停止中でもここは送る。制御を降りる以上、0 電流で終えるのが最も安全
+        await self._send_zero_safely()
 
     # ------------------------------------------------------------------ #
     #  内部処理
@@ -448,65 +423,8 @@ class M3508PositionLoop:
             return 0.0
         return min(dt, self._max_dt_s)
 
-    def _blocked_groups(self, stale: dict[str, bool]) -> frozenset[str]:
-        """この周期で電流 0 に落とすグループ名を決める。
-
-        判定は「メンバの誰かが途絶した」と「左右の偏差が許容を超えた」の 2 つ。どちらも
-        「左右のうち片方だけが動き続ける」状況を作らせないための保護で、グループ単位で
-        しか意味を持たない。
-
-        途絶しているグループでは偏差判定を行わない。欠けたメンバを含む比較は
-        「ずれていない」とも「ずれている」とも言えず、どのみち電流は 0 に落ちている。
-        """
-        blocked = set(self._sync_violations)
-        for group in self._sync_groups.values():
-            if any(stale[member.motor_name] for member in group.members):
-                # 左右直結の機構では片方だけ止めると残った側が押し続けて壊れるため、
-                # 1 台でも途絶したらグループ全員を電流 0 にする
-                blocked.add(group.name)
-                if group.name not in self._group_stale:
-                    self._group_stale.add(group.name)
-                    logger.warning(
-                        "同期グループのフィードバック途絶のため全員を電流 0 に落とす "
-                        "(axis=%s, bus=%s)",
-                        group.name,
-                        self._bus_name,
-                    )
-                continue
-            self._group_stale.discard(group.name)
-            if group.name in self._sync_violations:
-                continue
-            if self._check_deviation(group):
-                blocked.add(group.name)
-        return frozenset(blocked)
-
-    def _check_deviation(self, group: SyncGroup) -> bool:
-        """グループの左右ずれを判定し、超過ならラッチして True を返す。
-
-        SyncMonitor (50Hz) と意図的に二重の判定になっている。こちらは「電流を即 0 に
-        する」局所保護で、機構が壊れる前に力を抜くことだけを担う。SyncMonitor は
-        「試合を止めて人間に知らせる」全体保護で役割が違うため、片方があれば十分とは
-        しない。連続サンプル数による debounce も入れない (壊れるまでの猶予が短く、
-        1 周期でも早く力を抜く方が安全側)。
-        """
-        positions = {
-            member.motor_name: self._axes[member.motor_name].driver.feedback_position()
-            for member in group.members
-        }
-        deviation = group.deviation(positions)
-        if deviation is None or deviation <= group.tolerance:
-            return False
-
-        self._sync_violations.add(group.name)
-        # 試合中に「なぜ止まったか」が分からないと復旧手順を選べない
-        logger.error(
-            "同期ずれのため電流 0 にラッチ (axis=%s, deviation=%.3f, tolerance=%.3f, bus=%s)",
-            group.name,
-            deviation,
-            group.tolerance,
-            self._bus_name,
-        )
-        return True
+    def _feedback_position(self, name: str) -> float:
+        return self._axes[name].driver.feedback_position()
 
     def _compute_current(
         self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool
@@ -541,12 +459,6 @@ class M3508PositionLoop:
 
         return round(axis.pid.update(axis.target, axis.driver.multi_turn_position, dt))
 
-    def _is_feedback_stale(self, name: str, wall_now: float) -> bool:
-        last_rx = self._can_manager.last_feedback_at(name)
-        if last_rx is None:
-            return True
-        return (wall_now - last_rx) * 1000.0 > self._feedback_timeout_ms
-
     def _disable_all(self) -> None:
         for axis in self._axes.values():
             axis.mode = None
@@ -564,12 +476,4 @@ class M3508PositionLoop:
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._log_throttled("zero", "0 電流フレームの送信に失敗", exc_info=True)
-
-    def _log_throttled(self, key: str, message: str, *, exc_info: bool = False) -> None:
-        now = self._time_source()
-        last = self._log_at.get(key)
-        if last is not None and now - last < _LOG_THROTTLE_S:
-            return
-        self._log_at[key] = now
-        logger.error("%s (bus=%s)", message, self._bus_name, exc_info=exc_info)
+            self._log.exception("zero", "0 電流フレームの送信に失敗 (bus=%s)", self._bus_name)

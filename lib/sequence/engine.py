@@ -179,13 +179,15 @@ class Sequence:
                 f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
             )
 
-        # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない
+        # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない。
+        # 判定そのものは SyncGroup.violation (3 層共通) が持ち、ここは結果を例外に変えるだけ
         desynced = []
         for handle, _, _ in pending:
-            error = handle.sync_error()
-            allowed = table.sync_tolerance(handle.name)
-            if error is not None and allowed is not None and error > allowed:
-                desynced.append(f"{handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
+            error = handle.sync_violation()
+            if error is None:
+                continue
+            allowed = table.sync_tolerance(handle.name) or 0.0
+            desynced.append(f"{handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
         if desynced:
             raise AxisSyncError(
                 f"シーケンス '{self.name}': 軸内のモータ位置がずれています ({', '.join(desynced)})"
@@ -209,14 +211,36 @@ class Sequence:
         return self._waiting_trigger
 
     @property
+    def is_running(self) -> bool:
+        """run() の実行中か。
+
+        「今このシーケンスが制御権を握っているか」は動作確認の排他や停止処理の
+        判断材料になるため外から読めなければならない。実行フラグそのものは
+        run() だけが書き換えるので読み取り専用で公開する。
+        """
+        return self._running
+
+    @property
+    def steps(self) -> tuple[StepInfo, ...]:
+        """宣言順のステップ表 (読み取り専用ビュー)。
+
+        ``_steps`` は ``__init_subclass__`` が組み立てるクラス属性で、同じ
+        シーケンスクラスの全インスタンスで共有される。実体の list をそのまま
+        渡すと、受け取った側の 1 回の append/sort が以後生成される全インスタンスの
+        進行順を書き換えてしまうため、コピーした tuple しか外へ出さない。
+        """
+        return tuple(self._steps)
+
+    @property
     def steps_info(self) -> list[dict]:
+        """ステップ表を配信用の dict へ落としたもの (method_name は含めない)。"""
         return [
             {
                 "index": i,
                 "label": s.label,
                 "require_trigger": s.require_trigger,
             }
-            for i, s in enumerate(self._steps)
+            for i, s in enumerate(self.steps)
         ]
 
     @property
@@ -257,6 +281,44 @@ class Sequence:
         """先頭から実行開始。完走後・停止後の再起動に使う。"""
         self._jump_request = 0
         self._resume_event.set()
+
+    def discard_pending_start(self) -> None:
+        """まだ run_forever に拾われていない開始/ジャンプ要求を捨てる。
+
+        緊急停止の直前に届いた開始要求を残したままにすると、停止処理を終えた
+        次の瞬間にその要求が発火し、操縦者が何も押していないのに機体が動き出す。
+        """
+        self._resume_event.clear()
+        self._jump_request = None
+
+    async def run_forever(self) -> None:
+        """開始要求を待って run() し、通常停止なら先頭へ巻き戻して再び待つ常駐ループ。
+
+        起動時は resume を立てない。操縦者の明示的な開始合図 (request_start /
+        request_jump) があるまでロボットを動かしてはならない。
+
+        「停止したらどこへ戻るか」はシーケンス自身の状態遷移であって、呼び出し側に
+        持たせると同じ巻き戻しを各所で書き写すことになる (書き忘れた経路だけが
+        停止位置から再開し、操縦者の想定と違うステップが走る)。
+
+        run() 内部の例外はステップ単位で握られているが、それでも漏れた場合に
+        常駐ループごと終わらせてはならない。ループが死ぬとサーバーは生きたまま
+        以後の開始要求だけが無反応になり、操縦者には原因が見えない。
+        """
+        while True:
+            await self._resume_event.wait()
+            self._resume_event.clear()
+            try:
+                await self.run()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("シーケンス '%s' の実行中に例外", self.name)
+            # 通常停止された場合のみ先頭へ戻す。
+            # 完走 (current_index == total) は位置を保持したままにする。
+            if self._stop_event.is_set():
+                self._current_index = 0
+                self._stop_event.clear()
 
     async def run(self) -> None:
         self._running = True

@@ -32,7 +32,7 @@ def test_loads_valid_file(tmp_path: pathlib.Path) -> None:
 
     table = _load_position_table_file(path)
 
-    assert table.command("lift_motor", "home") == pytest.approx(6.0)
+    assert table.commands("lift_motor", "home") == {"lift_motor": pytest.approx(6.0)}
 
 
 def test_missing_file_warns_and_returns_empty_table(
@@ -44,10 +44,10 @@ def test_missing_file_warns_and_returns_empty_table(
     with caplog.at_level(logging.WARNING):
         table = _load_position_table_file(path)
 
-    assert table.is_empty is True
+    assert table.axes == ()
     assert "absent_positions.yaml" in caplog.text
     with pytest.raises(PositionLookupError):
-        table.command("lift_motor", "home")
+        table.commands("lift_motor", "home")
 
 
 def test_invalid_file_logs_error_and_returns_empty_table(
@@ -60,5 +60,5 @@ def test_invalid_file_logs_error_and_returns_empty_table(
     with caplog.at_level(logging.ERROR):
         table = _load_position_table_file(path)
 
-    assert table.is_empty is True
+    assert table.axes == ()
     assert "broken_positions.yaml" in caplog.text

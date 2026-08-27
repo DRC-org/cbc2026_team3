@@ -4,15 +4,24 @@
 // 機体依存の定数はすべて include/config.h にある。
 //
 // 責務の分割:
-//   MotorCan（Arduino 非依存）… フレームの符号化・復号、緊急停止ラッチ、ウォッチドッグ、PID
+//   MotorCan（Arduino 非依存）… フレームの符号化・復号、宛先判定、緊急停止ラッチ、
+//                                ウォッチドッグ、PID、周期タイマ、シリアル行組み立て
 //   このファイル              … ペリフェラル初期化、制御ループ、CAN 送受信の配線
+//
+// サーボ用（firmware/servo）と同じ判断をする箇所は MotorCan 側に置くこと。
+// 両 main.cpp が同じ分岐を各自で持つと、片方だけ直したことに誰も気付けない。
 
 #include <Arduino.h>
 #include <Arduino_CAN.h>
+#include <stdlib.h>
 
 #include "MotorCanProtocol.h"
+#include "MotorCanRouter.h"
+#include "MotorControlTarget.h"
+#include "MotorLoopTimer.h"
 #include "MotorPid.h"
 #include "MotorSafety.h"
+#include "SerialLineBuffer.h"
 #include "config.h"
 #include "pwm.h"
 
@@ -39,8 +48,9 @@ static PwmOut g_pwmL(kPinPwmL);
 static uint8_t g_deviceId = kDeviceIdUnconfigured;
 
 // 仕様書 §5.4: 起動時は出力停止・duty モード・目標 0・ラッチ解除済み。
-static ControlType g_mode = ControlType::Duty;
-static float g_target = 0.0f;
+// モードと目標値を別々の変数で持たないのは、モードだけ切り替えて前の目標値が残る
+// 経路を書けなくするため（仕様書 §3.3。ControlTarget が規則を持つ）。
+static ControlTarget g_control;
 static float g_appliedDuty = 0.0f;
 
 static float g_maxDuty = kDefaultMaxDuty;
@@ -58,16 +68,18 @@ static float g_velocityRpm = 0.0f;
 static float g_currentMa = 0.0f;
 static bool g_reached = false;
 
+// 制御ループだけ us 基準で、経過時間を PID の dt にも使うので PeriodicTimer に載せない。
 static uint32_t g_lastControlUs = 0;
-static uint32_t g_lastFeedbackMs = 0;
-static uint32_t g_lastBlinkMs = 0;
+static PeriodicTimer g_feedbackTimer;
+static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
 #if ENABLE_SERIAL_DEBUG
 // シリアルから duty を入力している間だけ true。
 // CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
 static bool g_serialOverride = false;
-static String g_serialLine;
+static char g_serialStorage[16];
+static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
 
 // ===========================================================================
@@ -135,6 +147,8 @@ static bool isDriveAllowed(uint32_t nowMs) {
     if (g_deviceId == kDeviceIdUnconfigured) {
         return false;
     }
+    // 緊急停止ラッチとウォッチドッグ（WATCHDOG_ENABLED による無効化を含む）の判定は
+    // MotorSafety が持つ。ここで isExpired() を直に見ると無効化フラグを迂回する。
     return g_safety.isOutputAllowed(nowMs);
 }
 
@@ -179,11 +193,18 @@ static void updateSensors(float dtSec) {
     g_velocityRpm = 0.0f;
 #endif
 
+#if HAS_CURRENT_SENSE
     const int32_t raw = analogRead(kPinSens);
     const float sensed =
         (static_cast<float>(raw) - static_cast<float>(kCurrentSenseZeroCount)) *
         kCurrentSenseMaPerCount;
     g_currentMa += 0.2f * (sensed - g_currentMa);
+#else
+    // センス未実装の基板では SENS ピンが浮き、ADC の振れがそのまま
+    // (raw - zero) * mAPerCount [mA] として過電流しきい値を跨いで誤発火する。
+    // 仕様書 §3.2 のとおり、センサを持たない項目は 0 を送る。
+    g_currentMa = 0.0f;
+#endif
 }
 
 // ===========================================================================
@@ -198,22 +219,22 @@ static void runControl(float dtSec, uint32_t nowMs) {
     }
 
     float duty = 0.0f;
-    switch (g_mode) {
+    switch (g_control.mode()) {
         case ControlType::Position: {
-            const float error = g_target - g_positionDeg;
+            const float error = g_control.value() - g_positionDeg;
             duty = g_pid.update(error, dtSec);
             g_reached = (error < 0.0f ? -error : error) <= g_reachedToleranceDeg;
             break;
         }
         case ControlType::Velocity: {
-            const float error = g_target - g_velocityRpm;
+            const float error = g_control.value() - g_velocityRpm;
             duty = g_pid.update(error, dtSec);
             g_reached = (error < 0.0f ? -error : error) <= g_reachedToleranceRpm;
             break;
         }
         case ControlType::Duty:
         default:
-            duty = g_target;
+            duty = g_control.value();
             // duty は開ループなので「指令した時点で到達」とみなす。
             // PC 側 GenericDriver も duty の到達判定にこのビットを使っていない。
             g_reached = true;
@@ -224,14 +245,12 @@ static void runControl(float dtSec, uint32_t nowMs) {
 }
 
 // 仕様書 §3.3: モード切替では目標値を 0 にリセットし積分項をクリアする。
-// 位置目標 90.0[deg] が duty 90.0（= 9000%）として解釈される事故を防ぐ。
+// 目標値を落とす規則そのものは ControlTarget が持つ（native テストで守られている）。
+// 残った積分項は解除直後の急発進になるので、切り替わったときだけ捨てる。
 static void switchMode(ControlType mode) {
-    if (mode == g_mode) {
-        return;
+    if (g_control.switchMode(mode)) {
+        g_pid.reset();
     }
-    g_mode = mode;
-    g_target = 0.0f;
-    g_pid.reset();
 }
 
 // ===========================================================================
@@ -239,15 +258,19 @@ static void switchMode(ControlType mode) {
 // ===========================================================================
 
 static uint8_t buildStatusFlags(uint32_t nowMs) {
+    // bit3（緊急停止）/ bit4（ウォッチドッグ）の判定は MotorSafety に集約されている。
+    // bit4 は指令を一度でも受けた後の満了でのみ立ち、無効化した基板では立たない。
     uint8_t flags = g_safety.statusFlags(nowMs);
     if (g_reached) {
         flags |= status_flag::kReached;
     }
+#if HAS_CURRENT_SENSE
     const float absCurrent = g_currentMa < 0.0f ? -g_currentMa : g_currentMa;
     if (absCurrent >= g_overcurrentThresholdMa) {
         flags |= status_flag::kOvercurrent;
     }
-    // 温度センサが無いので過熱ビットは立てない（仕様書 §7 の既知の制限）。
+#endif
+    // 温度センサが無いので過熱ビットは立てない（仕様書 §8 の既知の制限）。
     if (g_deviceId == kDeviceIdUnconfigured) {
         flags |= status_flag::kDeviceIdUnconfigured;
     }
@@ -272,31 +295,18 @@ static void sendFeedback(uint32_t nowMs) {
 }
 
 static void handleFrame(const CanMsg &msg) {
-    // 本プロトコルは Standard Frame のみ（仕様書 §1）。
-    if (!msg.isStandardId()) {
-        return;
-    }
-
-    const CanIdInfo info = parseCanId(static_cast<uint16_t>(msg.getStandardId()));
-    if (!info.valid) {
-        // 予約コマンド種別（仕様書 §2.1）や他プロトコルの相乗り。無視する。
-        return;
-    }
-
-    // ブロードキャスト E_STOP（0x7FF）と自分宛の両方を受理し、それ以外は無視する。
-    const bool broadcastEStop =
-        (info.command == CommandType::EStop && info.deviceId == kDeviceIdBroadcast);
-    if (!broadcastEStop && info.deviceId != g_deviceId) {
-        return;
-    }
-    // ID 未設定（0x00）の基板に「自分宛」は存在しない。ブロードキャストの緊急停止だけ受ける。
-    if (!broadcastEStop && g_deviceId == kDeviceIdUnconfigured) {
+    // Standard Frame 判定・予約コマンド種別・宛先判定（自分宛 / ブロードキャスト E_STOP /
+    // ID 未設定）はサーボ用と同じ規則なので MotorCanRouter に集約してある。
+    // DC 基板はチャンネルが 1 つなので、デバイス ID 表も 1 要素。
+    const FrameRoute route =
+        routeFrame(static_cast<uint16_t>(msg.getStandardId()), msg.isStandardId(), &g_deviceId, 1);
+    if (!route.accepted) {
         return;
     }
 
     const uint32_t nowMs = millis();
 
-    switch (info.command) {
+    switch (route.command) {
         case CommandType::SetTarget: {
             // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
             // 養わないと解除した直後に満了済みで動かない。
@@ -311,7 +321,7 @@ static void handleFrame(const CanMsg &msg) {
             // 仕様書 §3.1: Byte0 の制御タイプで即座に制御則を切り替える。
             // switchMode は目標値を 0 に落とすので、目標値の代入はそのあと。
             switchMode(cmd.type);
-            g_target = cmd.value;
+            g_control.setValue(cmd.value);
             break;
         }
         case CommandType::SetMode: {
@@ -341,12 +351,15 @@ static void handleFrame(const CanMsg &msg) {
                     g_maxDuty = clampDuty(cmd.value, 1.0f);
                     break;
                 case ParamId::CommandTimeoutMs:
-                    g_safety.setTimeoutMs(static_cast<uint32_t>(cmd.value));
+                    // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
+                    // SET_PARAM 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。
+                    // 範囲の根拠と NaN の扱いは MotorCanProtocol が持つ。
+                    g_safety.setTimeoutMs(
+                        sanitizeCommandTimeoutMs(cmd.value, g_safety.timeoutMs()));
                     break;
                 case ParamId::FeedbackIntervalMs:
-                    // 0 にすると送信が詰まってバスを埋めるので下限を置く
                     g_feedbackIntervalMs =
-                        cmd.value < 1.0f ? 1u : static_cast<uint32_t>(cmd.value);
+                        sanitizeFeedbackIntervalMs(cmd.value, g_feedbackIntervalMs);
                     break;
                 case ParamId::OvercurrentThresholdMa:
                     g_overcurrentThresholdMa = cmd.value;
@@ -354,7 +367,7 @@ static void handleFrame(const CanMsg &msg) {
                 case ParamId::ReachedTolerance:
                     // 仕様書 §3.4 の既定値が deg / rpm の 2 種あるとおり、
                     // 単位はモード依存。いま有効なモード側を書き換える。
-                    if (g_mode == ControlType::Velocity) {
+                    if (g_control.mode() == ControlType::Velocity) {
                         g_reachedToleranceRpm = cmd.value;
                     } else {
                         g_reachedToleranceDeg = cmd.value;
@@ -368,9 +381,10 @@ static void handleFrame(const CanMsg &msg) {
             if (action == EStopAction::Stop) {
                 applyOutput(0.0f, nowMs);
             } else if (action == EStopAction::Clear) {
-                // 仕様書 §3.5: 解除直後の目標値は 0 から始める。
-                // 停止前の目標を復元すると解除した瞬間にモータが動き出す。
-                g_target = 0.0f;
+                // 仕様書 §3.5: 解除直後は動き出さない目標値から始める。
+                // position では 0 が原点への移動指令になるため現在位置で凍結する
+                // （規則は ControlTarget が持つ）。
+                g_control.clearToHold(g_positionDeg);
                 g_pid.reset();
 #if ENABLE_SERIAL_DEBUG
                 g_serialOverride = false;
@@ -395,15 +409,11 @@ static void pollCan() {
 // デバイス ID（DIP スイッチ）
 // ===========================================================================
 
+// DC 用は DIP の値がそのままデバイス ID（サーボ用はチャンネル表へのオフセット）。
+// 負論理とビット順の対応は MotorCanRouter が持つ。
 static uint8_t readDeviceId() {
-    uint8_t id = 0;
-    for (uint8_t bit = 0; bit < 4; ++bit) {
-        // INPUT_PULLUP の負論理: LOW = ON = 1
-        if (digitalRead(kPinDip[bit]) == LOW) {
-            id |= static_cast<uint8_t>(1u << bit);
-        }
-    }
-    return id;
+    return readDipSwitch(
+        kPinDip, 4, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); }, LOW);
 }
 
 // ===========================================================================
@@ -413,13 +423,10 @@ static uint8_t readDeviceId() {
 static void updateLed(uint32_t nowMs) {
     // ID 未設定は赤（RGB 非搭載時はオンボード LED）の速い点滅で知らせる（仕様書 §2.2）。
     const bool unconfigured = (g_deviceId == kDeviceIdUnconfigured);
-    const uint32_t interval =
-        unconfigured ? kUnconfiguredBlinkIntervalMs : kHeartbeatIntervalMs;
-
-    if (nowMs - g_lastBlinkMs < interval) {
+    if (!g_blinkTimer.due(nowMs,
+                          unconfigured ? kUnconfiguredBlinkIntervalMs : kHeartbeatIntervalMs)) {
         return;
     }
-    g_lastBlinkMs = nowMs;
     g_ledOn = !g_ledOn;
     digitalWrite(kPinLed, g_ledOn ? HIGH : LOW);
 
@@ -440,26 +447,21 @@ static void updateLed(uint32_t nowMs) {
 // ここで指令しても駆動されない（仕様書 §5.2 の要求）。
 static void pollSerial(uint32_t nowMs) {
     while (Serial.available() > 0) {
-        const char c = static_cast<char>(Serial.read());
-        if (c != '\n' && c != '\r') {
-            if (g_serialLine.length() < 16) {
-                g_serialLine += c;
-            }
+        if (!g_serialLine.push(static_cast<char>(Serial.read()))) {
             continue;
         }
-        if (g_serialLine.length() == 0) {
-            continue;
-        }
+        const char *line = g_serialLine.line();
 
-        if (g_serialLine[0] == 's' || g_serialLine[0] == 'S') {
+        if (line[0] == 's' || line[0] == 'S') {
             g_serialOverride = false;
-            g_target = 0.0f;
+            // position モードのまま 's' を押しても原点へ走り出さないこと（§3.5 と同じ規則）。
+            g_control.clearToHold(g_positionDeg);
         } else {
             switchMode(ControlType::Duty);
-            g_target = g_serialLine.toFloat();
+            // 数値として読めない行は 0 になる。duty 0 = 停止なので安全側に落ちる。
+            g_control.setValue(strtof(line, nullptr));
             g_serialOverride = true;
         }
-        g_serialLine = "";
     }
 
     // シリアル操作中はウォッチドッグを養い続ける。
@@ -515,6 +517,10 @@ void setup() {
 
     g_deviceId = readDeviceId();
 
+    // config.h のビルド時フラグを実行時フラグへ写す（仕様書 §5.1 / §8）。
+    // 判定そのものは MotorSafety にしか無いので、写し忘れれば有効のまま動く。
+    g_safety.setWatchdogEnabled(WATCHDOG_ENABLED != 0);
+
     // 仕様書 §1: 1 Mbps。
     // CAN が上がらない基板を駆動させると PC から止められないので、
     // begin 失敗時は緊急停止ラッチに落として出力を封じる。
@@ -522,9 +528,10 @@ void setup() {
         g_safety.stop();
     }
 
+    const uint32_t startMs = millis();
     g_lastControlUs = micros();
-    g_lastFeedbackMs = millis();
-    g_lastBlinkMs = g_lastFeedbackMs;
+    g_feedbackTimer.reset(startMs);
+    g_blinkTimer.reset(startMs);
 }
 
 void loop() {
@@ -543,8 +550,7 @@ void loop() {
         runControl(dtSec, nowMs);
     }
 
-    if (nowMs - g_lastFeedbackMs >= g_feedbackIntervalMs) {
-        g_lastFeedbackMs = nowMs;
+    if (g_feedbackTimer.due(nowMs, g_feedbackIntervalMs)) {
         sendFeedback(nowMs);
     }
 

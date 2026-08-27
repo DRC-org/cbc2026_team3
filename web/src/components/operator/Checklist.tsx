@@ -1,11 +1,13 @@
 import { Check, RotateCcw } from "lucide-react";
+import { memo } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Panel } from "@/components/ui/Panel";
-import { useRobot } from "@/context/RobotContext";
-import type { ChecklistRole } from "@/hooks/useRobotSocket";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
+import { isSetupPhase } from "@/lib/phase";
+import type { ChecklistRole } from "@/lib/protocol";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 interface ChecklistProps {
@@ -20,11 +22,17 @@ interface ChecklistProps {
  * 上から順に指差して唱えながら潰していく運用なので、**次に唱える 1 項目**が
  * 分かることが最優先。全項目が同じ重さで並んでいると、どこまで進んだかを
  * 毎回目で数え直すことになる。未完の先頭だけを強調する。
+ *
+ * memo なのは親の都合。RobotControl はテレメトリ (20Hz) を読むため毎秒 40 回
+ * 再描画されるが、ここが読むのは試合状態だけで、props は安定した文字列しかない。
+ * 呼び出し側が毎描画 新しい関数やオブジェクトを渡すと切り離しは無効になる。
  */
-export function Checklist({ checklistRole, title }: ChecklistProps) {
-  const { matchState, setChecklistItem, resetChecklist } = useRobot();
+export const Checklist = memo(function Checklist({ checklistRole, title }: ChecklistProps) {
+  const { matchState } = useRobotStatus();
+  const { setChecklistItem, resetChecklist } = useRobotCommands();
   const checklist = matchState.checklists[checklistRole];
-  const locked = matchState.phase === "match" || matchState.phase === "finished";
+  // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)
+  const locked = !isSetupPhase(matchState.phase);
 
   const items = checklist?.items ?? [];
   const checkedCount = items.filter((i) => i.checked).length;
@@ -112,4 +120,4 @@ export function Checklist({ checklistRole, title }: ChecklistProps) {
       )}
     </Panel>
   );
-}
+});

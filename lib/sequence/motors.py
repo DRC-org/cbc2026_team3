@@ -72,23 +72,7 @@ class MotorHandle:
     def has_target(self) -> bool:
         return self._target is not None and self._mode is not None
 
-    def set_target_sink(self, sink: TargetSink | None) -> None:
-        """目標値の送り先を差し替える (PC 側 PID ループの後付け用)。"""
-        self._target_sink = sink
-
     # ---- 指令系 ----
-
-    async def set_position(self, value: float) -> None:
-        await self.set_target(ControlMode.POSITION, value)
-
-    async def set_velocity(self, value: float) -> None:
-        await self.set_target(ControlMode.VELOCITY, value)
-
-    async def set_current(self, value: float) -> None:
-        await self.set_target(ControlMode.CURRENT, value)
-
-    async def set_duty(self, value: float) -> None:
-        await self.set_target(ControlMode.DUTY, value)
 
     async def set_target(self, mode: ControlMode, value: float) -> None:
         """目標値を送信する。緊急停止中は送信せず EStopActiveError を送出する。"""
@@ -107,6 +91,30 @@ class MotorHandle:
 
         self._mode = mode
         self._target = value
+
+    async def resend_target(self) -> bool:
+        """最後に送った目標値をもう一度送る。送ったら True。
+
+        自作モータドライバのファームは 500ms 自分宛の SET_TARGET が来ないと出力を
+        止める (docs/motor_driver_can_protocol.md §5.1)。``set_target`` は値が
+        変わったときにしか送らないため、この再送が無いとコンベアは回し始めて
+        500ms で止まる。
+
+        目標が一度も設定されていなければ何も送らない (起動直後に意図しない駆動を
+        作らない)。緊急停止中も送らない — 例外にせず黙って見送るのは、これが
+        周期タスクからの呼び出しで、停止中は「送らないことが正常」だからである。
+        """
+        if self._target is None or self._mode is None:
+            return False
+        if self._is_estop_active is not None and self._is_estop_active():
+            return False
+
+        if self._target_sink is not None:
+            await self._target_sink(self._mode, self._target)
+        else:
+            msg = self._driver.encode_target(self._mode, self._target)
+            await self._can_manager.send(self._name, msg)
+        return True
 
     def clear_target(self) -> None:
         """到達待ちの対象から外す。"""
@@ -157,9 +165,6 @@ class MotorGroup:
     def handles(self) -> tuple[MotorHandle, ...]:
         return tuple(self._handles.values())
 
-    def items(self) -> list[tuple[str, MotorHandle]]:
-        return list(self._handles.items())
-
     def __getitem__(self, name: str) -> MotorHandle:
         return self._handles[name]
 
@@ -197,10 +202,6 @@ class MotorGroup:
             *(handle.wait_reached(tolerance=tolerance, timeout=timeout) for handle in pending)
         )
         return all(results)
-
-    def clear_targets(self) -> None:
-        for handle in self._handles.values():
-            handle.clear_target()
 
 
 class AxisHandle:
@@ -253,21 +254,19 @@ class AxisHandle:
         )
         return all(results)
 
-    def sync_error(self) -> float | None:
-        """モータ間のずれ (人間の単位)。監視対象でない軸は None。
+    def sync_violation(self) -> float | None:
+        """許容差を超えたモータ間のずれ (人間の単位)。超過していなければ None。
 
-        逆回転ペアは scale の符号で向きが吸収されるため、正しく追従していれば 0 に近づく。
+        判定は 3 層で共有する ``SyncGroup.violation`` に委ねる。ここは
+        ``move_to`` の完了時に 1 回だけ見る層で、静止後の 1 サンプルしか使わない
+        (層ごとの違いは lib/axis_sync.py のモジュール docstring を参照)。
         """
-        if self._spec.sync_tolerance is None:
+        group = self._spec.sync_group
+        if group is None:
             return None
-
-        values = [
-            self._motors[handle.name].to_value(handle.driver.feedback_position())
-            for handle in self._handles
-        ]
-        if not values:
-            return None
-        return max(values) - min(values)
+        return group.violation(
+            {handle.name: handle.driver.feedback_position() for handle in self._handles}
+        )
 
     def _tolerance_for(self, motor_name: str) -> float | None:
         """人間の単位の許容差をモータの指令単位へ換算する。
@@ -277,8 +276,7 @@ class AxisHandle:
         """
         if self._spec.tolerance is None:
             return None
-        # 許容差は幅であって向きを持たないため、scale が負でも正の幅になるようにする
-        return abs(self._spec.tolerance * self._motors[motor_name].scale)
+        return self._motors[motor_name].to_tolerance(self._spec.tolerance)
 
 
 def build_motor_group(

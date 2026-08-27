@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import type { SequenceStepInfo } from "@/hooks/useRobotSocket";
 import { cx } from "@/lib/cx";
+import type { SequenceStepInfo } from "@/lib/protocol";
 
 interface SequenceStepListProps {
   steps: SequenceStepInfo[];

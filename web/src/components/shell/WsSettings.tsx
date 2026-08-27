@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import type { WsUrlSource } from "@/lib/wsUrl";
 import { WS_URL_QUERY_KEY, normalizeWsUrl } from "@/lib/wsUrl";
 
@@ -35,7 +35,8 @@ function hasQueryOverride(): boolean {
  * 再ビルドせずに現場で解決できるようにするための逃げ道。
  */
 export function WsSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { wsUrl, wsUrlSource, setWsUrl, resetWsUrl, connected } = useRobot();
+  const { wsUrl, wsUrlSource, connected } = useRobotStatus();
+  const { setWsUrl, resetWsUrl } = useRobotCommands();
   const [draft, setDraft] = useState(wsUrl);
   const [error, setError] = useState<string | null>(null);
 

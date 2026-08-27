@@ -4,11 +4,13 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import can
 
+from lib.config_schema import DEFAULT_HEALTH, DEFAULT_MOTOR_CHECK
+from lib.drivers.base import CheckContext, ControlMode, MotorState
 from lib.health import (
     CheckRunSnapshot,
     MotorCheckRecord,
@@ -22,18 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# 1 モータあたりの観測タイムアウト既定値 (docs/impl_plan.md: 1.5s)。
-DEFAULT_PER_MOTOR_TIMEOUT_MS: float = 1500.0
-
-# ドライバ種別ごとの既定 magnitude。
-# 物理的に安全な微小量に固定し、各値は config の motor_check.default_magnitude で上書き可能。
-DEFAULT_MAGNITUDES: dict[str, float] = {
-    "m3508": 500.0,  # mA
-    "edulite05": 5.0,  # deg
-    "generic": 0.1,  # 0.1 rev / 10% duty 等 (control_type 依存)
-}
-
-# クラス名 → DEFAULT_MAGNITUDES のキーへの対応表。
+# クラス名 → config の motor_check.default_magnitude のキーへの対応表。
 # 実ドライバはこのテーブル経由で magnitude を引く。テスト用 mock など未登録クラスは
 # default_magnitude にクラス名そのものをキーとして渡せばフォールバックできる。
 _DRIVER_TYPE_KEY: dict[str, str] = {
@@ -45,6 +36,18 @@ _DRIVER_TYPE_KEY: dict[str, str] = {
 # 観測ループの poll 間隔。短すぎると CPU を食い、長すぎると判定が遅れるため 10ms 固定。
 _POLL_INTERVAL_S: float = 0.01
 
+# magnitude=0 で SKIPPED になったときの理由。セッティングタイムの操縦者はこの detail しか
+# 見ないため、「壊れている」と「わざと外してある」を取り違えないよう文言で分ける。
+SKIP_DETAIL_CONFIG_EXCLUDED: str = "設定で意図的に除外 (単独駆動が危険なため指差喚呼で目視確認)"
+SKIP_DETAIL_UNSUPPORTED_DRIVER: str = "未対応ドライバ種別 (既定 magnitude 未定義)"
+
+# 中断・緊急停止で駆動を打ち切ったときの detail。操縦者にとって意味が違う
+# (前者は自分が押した、後者は機体が止まっている) ので文言を分ける。
+STOP_DETAIL_ABORTED: str = "動作確認中断"
+STOP_DETAIL_E_STOP: str = "緊急停止中のため動作確認を中止"
+
+EStopChecker = Callable[[], bool]
+
 
 class MotorCheckRunner:
     """1 ロボット分のアクチュエータ動作確認シーケンスを実行する。
@@ -55,7 +58,11 @@ class MotorCheckRunner:
 
     安全策 (docs/impl_plan.md):
       - reset_after_check は PASSED/FAILED/TIMEOUT どの結末でも必ず送る (駆動状態を残さない)
-      - 緊急停止 / 通常シーケンス中の起動拒否は呼び出し側 (server.py) で行う
+      - 通常シーケンス中の起動拒否は呼び出し側 (server.py) で行う
+      - 緊急停止は起動拒否だけに頼らない。``is_estop_active`` を毎ステップ見て
+        駆動を打ち切る (M3508PositionLoop / MotorHandle と同じ多重防護)。
+        起動判定だけだと、判定を通ってから実際に駆動するまでの窓で停止が入った
+        場合に止められない
       - 二重実行は RuntimeError で拒否し、進行中スナップショットの破壊を防ぐ
     """
 
@@ -63,22 +70,26 @@ class MotorCheckRunner:
         self,
         robot_name: str,
         can_manager: CANManager,
-        motors: dict[str, MotorDriver],
+        motors: Mapping[str, MotorDriver],
         *,
-        per_motor_timeout_ms: float = DEFAULT_PER_MOTOR_TIMEOUT_MS,
-        feedback_freshness_ms: float = 500.0,
+        per_motor_timeout_ms: float = DEFAULT_MOTOR_CHECK.per_motor_timeout_ms,
+        feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         default_magnitude: dict[str, float] | None = None,
         per_motor_overrides: dict[str, dict] | None = None,
+        is_estop_active: EStopChecker | None = None,
     ) -> None:
         self._robot_name = robot_name
         self._can_manager = can_manager
         self._motors = motors
         self._per_motor_timeout_ms = per_motor_timeout_ms
-        self._feedback_freshness_ms = feedback_freshness_ms
+        self._feedback_timeout_ms = feedback_timeout_ms
         self._default_magnitude: dict[str, float] = (
-            dict(DEFAULT_MAGNITUDES) if default_magnitude is None else dict(default_magnitude)
+            dict(DEFAULT_MOTOR_CHECK.default_magnitude)
+            if default_magnitude is None
+            else dict(default_magnitude)
         )
         self._per_motor_overrides: dict[str, dict] = per_motor_overrides or {}
+        self._is_estop_active = is_estop_active
 
         self._running: bool = False
         self._aborted: bool = False
@@ -128,9 +139,22 @@ class MotorCheckRunner:
 
         観測ループ内でも参照されるため、現在モータの観測タイムアウト前に
         受信があれば判定まで進み、その後 SKIPPED に切り替わる。
+
+        ``run()`` より先に呼ばれても要求は失われない (``run()`` は中断状態を
+        リセットしない)。緊急停止は runner が起動する前 — 呼び出し側が送信経路の
+        一時停止を待っているあいだ — に届きうるため、その 1 通を捨てると
+        「停止したのに全モータが順に駆動される」という最悪の形になる。
         """
         self._aborted = True
         self._abort_event.set()
+
+    def _stop_detail(self) -> str | None:
+        """駆動を打ち切るべきなら記録に残す理由を返す。続行してよければ None。"""
+        if self._aborted:
+            return STOP_DETAIL_ABORTED
+        if self._is_estop_active is not None and self._is_estop_active():
+            return STOP_DETAIL_E_STOP
+        return None
 
     # ------------------------------------------------------------------ #
     #  メインループ
@@ -144,16 +168,21 @@ class MotorCheckRunner:
         if self._running:
             raise RuntimeError("MotorCheckRunner は既に実行中です")
 
+        # 中断状態はここでリセットしない。書き込むのは __init__ と abort() だけ。
+        # 起動前に届いた中断要求 (緊急停止・操縦者の abort) をここで捨てると、
+        # 要求を出した側からは止めたように見えたまま全モータが駆動される
         self._running = True
-        self._aborted = False
-        self._abort_event.clear()
 
         now = time.time()
+        # 開始時点のモータ一覧を確定させる。motors は CANManager の読み取り専用ビューでも
+        # よく、実行中に登録が増えると records の添字と駆動対象がずれる。
+        targets = list(self._motors.items())
+
         # 全レコードを PENDING で初期化してから順次更新していく。
         # 進行中も snapshot プロパティで参照可能にするため、ここで一度組み立てる。
         records: list[MotorCheckRecord] = []
-        for name in self._motors:
-            bus_name = self._can_manager._motor_bus.get(name, "")
+        for name, _motor in targets:
+            bus_name = self._can_manager.bus_of(name) or ""
             records.append(
                 MotorCheckRecord(
                     motor=name,
@@ -175,13 +204,15 @@ class MotorCheckRunner:
         )
 
         try:
-            total = len(self._motors)
-            for i, (name, motor) in enumerate(self._motors.items()):
+            total = len(targets)
+            for i, (name, motor) in enumerate(targets):
                 record = records[i]
 
-                # 中断要求 → 残りはすべて SKIPPED にして抜ける
-                if self._aborted:
+                # 中断要求・緊急停止 → 残りはすべて SKIPPED にして抜ける
+                stop_detail = self._stop_detail()
+                if stop_detail is not None:
                     record.result = MotorCheckResult.SKIPPED
+                    record.detail = stop_detail
                     record.finished_at = time.time()
                     continue
 
@@ -227,10 +258,20 @@ class MotorCheckRunner:
         magnitude = self._resolve_magnitude(motor, override)
         timeout_s = float(override.get("timeout_ms", self._per_motor_timeout_ms)) / 1000.0
 
-        # magnitude=0 (未対応ドライバ) は SKIPPED 扱い。reset も送らずに抜ける。
+        # magnitude=0 は駆動せず SKIPPED 扱い。reset も送らずに抜ける。
+        # 到達経路が 2 通りあり、操縦者にとって意味が正反対なので detail を分ける:
+        #   - config が明示的に 0 を指定 → 意図的な除外。左右直結のペア軸
+        #     (config/main_hand.yaml の y_axis_* / rotate_*) は MotorCheckRunner が
+        #     1 台ずつ駆動する以上どうしても片側だけが動き機構を壊すため、
+        #     config/checklist.yaml の指差喚呼による目視確認に回してある。
+        #   - 解決に失敗して 0 → そのドライバ種別の既定 magnitude が無い。設定の不備。
         if magnitude == 0.0:
             record.result = MotorCheckResult.SKIPPED
-            record.detail = "未対応ドライバ種別"
+            record.detail = (
+                SKIP_DETAIL_CONFIG_EXCLUDED
+                if "magnitude" in override
+                else SKIP_DETAIL_UNSUPPORTED_DRIVER
+            )
             return
 
         if not await self._guard_check(name, motor, record):
@@ -256,12 +297,12 @@ class MotorCheckRunner:
             return
         except Exception as exc:
             record.result = MotorCheckResult.FAILED
-            record.detail = f"prepare_check 例外: {exc!s}"
+            record.detail = f"prepare_check_steps 例外: {exc!s}"
             await self._safe_reset(name, motor)
             return
 
         # 初期化応答を動作確認の応答と誤認しないよう、指令送信直前の時刻を保存する。
-        saved_rx_at = self._can_manager._last_rx_at.get(name)
+        saved_rx_at = self._can_manager.last_feedback_at(name)
 
         try:
             msg, context = motor.check_command(magnitude=magnitude)
@@ -272,7 +313,7 @@ class MotorCheckRunner:
             await self._safe_reset(name, motor)
             return
 
-        record.expected = self._extract_expected(context)
+        record.expected = context.target
 
         if not await self._guard_check(name, motor, record):
             return
@@ -296,16 +337,15 @@ class MotorCheckRunner:
             return
 
         # 受信できた → ドライバの判定ロジックに委譲
-        state = motor.state
         try:
-            passed, detail = motor.evaluate_check_result(state, context)
+            passed, detail = motor.evaluate_check_result(context)
         except Exception as exc:
             record.result = MotorCheckResult.FAILED
             record.detail = f"evaluate 例外: {exc!s}"
             await self._safe_reset(name, motor)
             return
 
-        record.observed = self._extract_observed(state, context)
+        record.observed = self._extract_observed(motor.state, context)
 
         if passed:
             record.result = MotorCheckResult.PASSED
@@ -326,9 +366,10 @@ class MotorCheckRunner:
         motor: MotorDriver,
         record: MotorCheckRecord,
     ) -> bool:
-        if self._aborted:
+        stop_detail = self._stop_detail()
+        if stop_detail is not None:
             record.result = MotorCheckResult.SKIPPED
-            record.detail = "動作確認中断"
+            record.detail = stop_detail
             await self._safe_reset(name, motor)
             return False
 
@@ -343,14 +384,14 @@ class MotorCheckRunner:
             return False
 
         if motor.requires_fresh_feedback_for_check():
-            last_rx_at = self._can_manager._last_rx_at.get(name)
+            last_rx_at = self._can_manager.last_feedback_at(name)
             if last_rx_at is None:
                 record.result = MotorCheckResult.FAILED
                 record.detail = "動作確認前フィードバック未受信"
                 await self._safe_reset(name, motor)
                 return False
             age_ms = (time.time() - last_rx_at) * 1000.0
-            if age_ms > self._feedback_freshness_ms:
+            if age_ms > self._feedback_timeout_ms:
                 record.result = MotorCheckResult.FAILED
                 record.detail = f"動作確認前フィードバックSTALE ({age_ms:.0f}ms)"
                 await self._safe_reset(name, motor)
@@ -396,7 +437,7 @@ class MotorCheckRunner:
         """
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            new_rx = self._can_manager._last_rx_at.get(name)
+            new_rx = self._can_manager.last_feedback_at(name)
             if new_rx is not None and (saved_rx_at is None or new_rx > saved_rx_at):
                 return True
             if self._aborted:
@@ -422,20 +463,9 @@ class MotorCheckRunner:
             logger.warning("reset_after_check の送信に失敗 (motor=%s)", name, exc_info=True)
 
     @staticmethod
-    def _extract_expected(context: dict) -> float | None:
-        target = context.get("target")
-        if target is None:
-            return None
-        try:
-            return float(target)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _extract_observed(state, context: dict) -> float | None:
-        # mode="position" → position、それ以外 (current/velocity/duty) → velocity を採用。
+    def _extract_observed(state: MotorState, context: CheckContext) -> float:
+        # POSITION → position、それ以外 (current/velocity/duty) → velocity を採用。
         # M3508 の電流チェックは「rpm の符号一致」を見ているため velocity を保存する。
-        mode = context.get("mode")
-        if mode == "position":
+        if context.mode is ControlMode.POSITION:
             return float(state.position)
         return float(state.velocity)

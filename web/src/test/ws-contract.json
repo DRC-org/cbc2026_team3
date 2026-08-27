@@ -1,0 +1,238 @@
+{
+  "$comment": "サーバーが実際に配信した WS メッセージのサンプル。手書き禁止・自動生成。 再生成: UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py / タイムスタンプ等の変動値は固定値へ差し替えてある (値ではなく構造が契約)。",
+  "$placeholders": {
+    "duration_ms": 0.0,
+    "epoch_seconds": 1700000000.0
+  },
+  "samples": {
+    "command_rejected": {
+      "command": "trigger",
+      "reason": "試合中のみトリガーを送れます",
+      "type": "command_rejected"
+    },
+    "e_stop_state": {
+      "active": false,
+      "type": "e_stop_state"
+    },
+    "e_stop_state_with_reason": {
+      "active": true,
+      "reason": "同期ずれを検知しました (y_axis)",
+      "type": "e_stop_state"
+    },
+    "health_change": {
+      "from": "ok",
+      "level": "critical",
+      "message": "motor y_axis_r ok→fault",
+      "robot": "main_hand",
+      "target": "motor:y_axis_r",
+      "to": "fault",
+      "type": "health_change"
+    },
+    "health_change_bus": {
+      "from": "ok",
+      "level": "warning",
+      "message": "can_m3508 ok→degraded",
+      "robot": "main_hand",
+      "target": "bus:can_m3508",
+      "to": "degraded",
+      "type": "health_change"
+    },
+    "match_state": {
+      "can_start_match": false,
+      "checklists": {
+        "main_hand": {
+          "completed": false,
+          "items": [
+            {
+              "checked": false,
+              "id": "y_axis_sync",
+              "label": "Y 軸の左右が揃っている"
+            }
+          ]
+        },
+        "sub_hand": {
+          "completed": false,
+          "items": [
+            {
+              "checked": false,
+              "id": "sub_arm_home",
+              "label": "補助アームが初期位置"
+            }
+          ]
+        }
+      },
+      "court": "red",
+      "phase": "setup",
+      "type": "match_state"
+    },
+    "motor_check_done": {
+      "robot": "main_hand",
+      "snapshot": {
+        "finished_at": 1700000000.0,
+        "overall": "ok",
+        "records": [
+          {
+            "bus": "can_generic",
+            "detail": null,
+            "expected": 5.0,
+            "finished_at": 1700000000.0,
+            "motor": "gripper",
+            "observed": 4.9,
+            "result": "passed",
+            "started_at": 1700000000.0
+          }
+        ],
+        "robot": "main_hand",
+        "started_at": 1700000000.0
+      },
+      "type": "motor_check_done"
+    },
+    "motor_check_error": {
+      "message": "試合中は動作確認を実行できません",
+      "robot": "main_hand",
+      "type": "motor_check_error"
+    },
+    "motor_check_progress": {
+      "current": "gripper",
+      "index": 1,
+      "robot": "main_hand",
+      "total": 3,
+      "type": "motor_check_progress"
+    },
+    "motor_check_record": {
+      "record": {
+        "bus": "can_generic",
+        "detail": null,
+        "expected": 5.0,
+        "finished_at": 1700000000.0,
+        "motor": "gripper",
+        "observed": 4.9,
+        "result": "passed",
+        "started_at": 1700000000.0
+      },
+      "robot": "main_hand",
+      "type": "motor_check_record"
+    },
+    "state": {
+      "current_step": "初期位置へ移動",
+      "e_stop_active": false,
+      "health": {
+        "buses": [
+          {
+            "bus_off": false,
+            "channel": "can_m3508",
+            "last_rx_at": 1700000000.0,
+            "last_tx_at": 1700000000.0,
+            "name": "can_m3508",
+            "rx_error_count": 0,
+            "state": "ok",
+            "tx_error_count": 0
+          }
+        ],
+        "detail": null,
+        "motors": [
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "y_axis_r",
+            "state": "ok",
+            "temperature": 30.0
+          },
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "y_axis_l",
+            "state": "ok",
+            "temperature": 30.0
+          },
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "gripper",
+            "state": "ok",
+            "temperature": 30.0
+          }
+        ],
+        "overall": "ok",
+        "timestamp": 1700000000.0
+      },
+      "motors": {
+        "gripper": {
+          "pos": 5.0,
+          "temp": 30.0,
+          "torque": 0.0,
+          "vel": 0.0
+        },
+        "y_axis_l": {
+          "pos": -1500.0,
+          "temp": 34.5,
+          "torque": 0.2,
+          "vel": 0.0
+        },
+        "y_axis_r": {
+          "pos": 1500.0,
+          "temp": 35.0,
+          "torque": 0.2,
+          "vel": 0.0
+        }
+      },
+      "robot": "main_hand",
+      "running": false,
+      "safety": {
+        "loops_running": true,
+        "monitors_running": true,
+        "position_loops": [
+          {
+            "bus": "can_m3508",
+            "paused": false,
+            "running": true,
+            "sync_violations": []
+          }
+        ],
+        "refreshers_running": true,
+        "sync_monitors": [
+          {
+            "axes": [
+              "y_axis"
+            ],
+            "running": true,
+            "violated": []
+          }
+        ],
+        "sync_violations": [],
+        "target_refreshers": [
+          {
+            "motors": [
+              "gripper"
+            ],
+            "paused": false,
+            "running": true
+          }
+        ]
+      },
+      "sequence": "main_hand_seq",
+      "step_index": 0,
+      "steps": [
+        {
+          "index": 0,
+          "label": "初期位置へ移動",
+          "require_trigger": false
+        },
+        {
+          "index": 1,
+          "label": "ワーク投入待ち",
+          "require_trigger": true
+        }
+      ],
+      "total_steps": 2,
+      "type": "state",
+      "waiting_trigger": false
+    }
+  }
+}

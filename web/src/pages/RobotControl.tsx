@@ -12,10 +12,11 @@ import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
-import { useRobot } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import type { ChecklistRole } from "@/hooks/useRobotSocket";
-import { isSetupPhase } from "@/lib/phase";
+import { isDuringMatch, isSetupPhase } from "@/lib/phase";
+import type { ChecklistRole } from "@/lib/protocol";
+import { sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
   robotKey: string;
@@ -23,7 +24,9 @@ interface RobotControlProps {
 }
 
 export function RobotControl({ robotKey, label }: RobotControlProps) {
-  const { states, send, matchState } = useRobot();
+  const states = useRobotStates();
+  const { matchState } = useRobotStatus();
+  const { send } = useRobotCommands();
   const state = states[robotKey];
   const [healthCheckOpen, setHealthCheckOpen] = useState(false);
 
@@ -34,19 +37,12 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const handleStart = () => send({ type: "sequence_start", robot: robotKey });
 
   // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
-  const inMatch = matchState.phase === "match";
+  const inMatch = isDuringMatch(matchState.phase);
   const setupPhase = isSetupPhase(matchState.phase);
   const blockedLabel = matchState.phase === "finished" ? "試合終了" : "準備中";
 
-  const completed = state && state.total_steps > 0 && state.step_index >= state.total_steps;
-  const idleStopped =
-    state &&
-    state.total_steps > 0 &&
-    !state.waiting_trigger &&
-    state.step_index === 0 &&
-    !completed;
-  const inProgress = state && !state.waiting_trigger && !completed && !idleStopped;
-  const showStop = Boolean(inProgress || state?.waiting_trigger);
+  // 実行状態はサーバー配信の running が唯一の根拠。step_index からの推測をしない
+  const kind = state ? sequenceKind(state) : null;
 
   // Space に主操作を集約する。ルーターは表示中のタブしか描画しないので、
   // 表示中のロボットにだけ届く。トリガー待ちなら NEXT、待機中なら START に解決する
@@ -54,8 +50,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     {
       " ": () => {
         if (!inMatch || !state) return;
-        if (state.waiting_trigger) handleTrigger();
-        else if (!showStop) handleStart();
+        if (kind === "waiting_trigger") handleTrigger();
+        else if (kind === "idle") handleStart();
       },
     },
     inMatch,
@@ -113,7 +109,12 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             </Panel>
 
             <Panel legend="機体状態" className="min-h-0 flex-1">
-              <SubsystemStatus health={state.health} motors={state.motors} defaultOpen />
+              <SubsystemStatus
+                health={state.health}
+                motors={state.motors}
+                safety={state.safety}
+                defaultOpen
+              />
             </Panel>
 
             <Panel legend="シーケンス" className="shrink-0">
@@ -144,7 +145,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             state={state}
             inMatch={inMatch}
             blockedLabel={blockedLabel}
-            showStop={showStop}
             onStart={handleStart}
             onStop={handleStop}
             onTrigger={handleTrigger}
@@ -172,7 +172,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
         {/* 右は参照面。平常時は 1 行に畳み、異常が出たときだけ自分から開く */}
         <Panel legend="機体状態" className="self-start">
-          <SubsystemStatus health={state.health} motors={state.motors} />
+          <SubsystemStatus health={state.health} motors={state.motors} safety={state.safety} />
         </Panel>
       </Page>
       {motorCheckPanel}

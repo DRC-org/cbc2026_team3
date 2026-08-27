@@ -1,25 +1,29 @@
 from __future__ import annotations
 
+import inspect
 import time
+from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import can
 
-from lib.drivers.base import MotorDriver, MotorState
+from lib.config_schema import DEFAULT_MOTOR_CHECK
+from lib.drivers.base import CheckContext, ControlMode, MotorDriver
 from lib.health import MotorCheckResult
 from lib.motor_check import (
-    DEFAULT_MAGNITUDES,
-    DEFAULT_PER_MOTOR_TIMEOUT_MS,
+    SKIP_DETAIL_CONFIG_EXCLUDED,
+    SKIP_DETAIL_UNSUPPORTED_DRIVER,
     MotorCheckRunner,
 )
+from tests.fake_drivers import StubFeedbackDriver
 
 # ---------------------------------------------------------------------- #
 #  テスト用ダミー実装
 # ---------------------------------------------------------------------- #
 
 
-class _MockMotor(MotorDriver):
+class _MockMotor(StubFeedbackDriver):
     """MotorCheckRunner のロジックだけを検証するための最小ドライバ実装。
 
     本物のドライバが返す check_command/evaluate_check_result の挙動を
@@ -48,48 +52,31 @@ class _MockMotor(MotorDriver):
         # 動作確認後の reset_after_check が呼ばれた回数 (常に呼ばれることの検証用)
         self.reset_calls = 0
 
-    def encode_target(self, mode, value):  # pragma: no cover - 本テストでは未使用
-        return can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-
-    def decode_feedback(self, msg: can.Message) -> MotorState:  # pragma: no cover
-        return self._state
-
-    def matches_feedback(self, msg: can.Message) -> bool:  # pragma: no cover
-        return False
-
-    def check_command(self, *, magnitude: float) -> tuple[can.Message, dict]:
+    def check_command(self, *, magnitude: float) -> tuple[can.Message, CheckContext]:
         self.last_magnitude = magnitude
         msg = can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-        return msg, {"target": self.target_value, "mode": "current"}
+        return msg, CheckContext(mode=ControlMode.CURRENT, target=self.target_value)
 
-    def evaluate_check_result(
-        self,
-        state: MotorState,
-        context: dict,
-        *,
-        tolerance: float | None = None,
-    ) -> tuple[bool, str | None]:
+    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
         return self.evaluate_passed, self.evaluate_detail
 
     def reset_after_check(self) -> can.Message:
         self.reset_calls += 1
         return can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
 
-    def set_observed(self, position: float = 0.0, velocity: float = 0.0) -> None:
-        self._state = MotorState(position=position, velocity=velocity)
-
 
 class _MockCANManager:
-    """CANManager の MotorCheckRunner から触られる API のみ実装したスタブ。
+    """CANManager の MotorCheckRunner から触られる公開 API のみ実装したスタブ。
 
-    `_last_rx_at` を直接書き換えることでフィードバック受信を瞬時に模擬する。
-    `send` 後に自動でフィードバック更新するフックを切り替えできるようにする。
+    private 属性を持たせないことで「本物の CANManager でも公開 API だけで足りる」ことを
+    このスタブの形そのもので担保する。private を握った途端にここが動かなくなる。
+    受信時刻は set_rx_at で直接進め、フィードバック受信を実時間待ちなしに模擬する。
     """
 
     def __init__(self, motors: dict[str, MotorDriver]) -> None:
         self._motors = motors
-        self._motor_bus = {name: "test_bus" for name in motors}
-        self._last_rx_at: dict[str, float] = {}
+        self._bus_of = {name: "test_bus" for name in motors}
+        self._rx_at: dict[str, float] = {}
         # send が成功するたびに呼ばれるフック (フィードバック模擬)
         self._post_send_hook: Any = None
         self._send_failures: dict[str, Exception] = {}
@@ -99,6 +86,12 @@ class _MockCANManager:
     def get_motor(self, name: str) -> MotorDriver:
         return self._motors[name]
 
+    def bus_of(self, motor_name: str) -> str | None:
+        return self._bus_of.get(motor_name)
+
+    def last_feedback_at(self, motor_name: str) -> float | None:
+        return self._rx_at.get(motor_name)
+
     def set_post_send_hook(self, hook) -> None:
         self._post_send_hook = hook
 
@@ -106,7 +99,7 @@ class _MockCANManager:
         self._send_failures[motor_name] = exc
 
     def set_rx_at(self, motor_name: str, ts: float) -> None:
-        self._last_rx_at[motor_name] = ts
+        self._rx_at[motor_name] = ts
 
     async def send(self, motor_name: str, msg: can.Message) -> None:
         self.sent.append((motor_name, msg))
@@ -125,8 +118,62 @@ class TestMotorCheckRunnerBasics:
     """MotorCheckRunner の基本 API 形状と既定値の検証。"""
 
     def test_module_constants(self) -> None:
-        assert DEFAULT_PER_MOTOR_TIMEOUT_MS == 1500.0
-        assert DEFAULT_MAGNITUDES == {"m3508": 500.0, "edulite05": 5.0, "generic": 0.1}
+        assert DEFAULT_MOTOR_CHECK.per_motor_timeout_ms == 1500.0
+        assert dict(DEFAULT_MOTOR_CHECK.default_magnitude) == {
+            "m3508": 500.0,
+            "edulite05": 5.0,
+            "generic": 0.1,
+        }
+
+    def test_motors_accepts_read_only_mapping(self) -> None:
+        """サーバーは CANManager.motors (読み取り専用ビュー) をそのまま渡せる必要がある。
+
+        dict を要求すると呼び出し側ごとに防御的コピーを書かせることになり、
+        「モータ一覧をどう取り出すか」が再び呼び出し側に散る。
+        """
+        annotation = inspect.signature(MotorCheckRunner.__init__).parameters["motors"].annotation
+        assert annotation == "Mapping[str, MotorDriver]"
+
+        motors = {"m1": _MockMotor("m1")}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            MappingProxyType(motors),
+            default_magnitude={"_MockMotor": 1.0},
+        )
+        assert runner.snapshot.robot == "main_hand"
+
+    async def test_targets_are_fixed_at_run_start(self) -> None:
+        """実行中に登録が増えても、駆動対象と records の添字がずれないこと。
+
+        呼び出し側の防御的コピーを不要にしているのはこの確定処理。ここが緩むと、
+        「読み上げているモータ名と実際に動くモータが 1 つずれる」形の事故が
+        指差喚呼のさなかに起きる。
+        """
+        motors: dict[str, MotorDriver] = {"m1": _MockMotor("m1", evaluate_passed=True)}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            MappingProxyType(motors),
+            default_magnitude={"_MockMotor": 1.0},
+        )
+
+        def _register_more(name: str, index: int, total: int) -> None:
+            motors["m2"] = _MockMotor("m2", can_id=2, evaluate_passed=True)
+            manager._bus_of["m2"] = "test_bus"
+
+        async def _immediate_feedback(motor_name: str, _msg: can.Message) -> None:
+            manager.set_rx_at(motor_name, time.time() + 0.001)
+
+        runner.set_on_progress(_register_more)
+        manager.set_post_send_hook(_immediate_feedback)
+
+        snap = await runner.run()
+
+        assert [r.motor for r in snap.records] == ["m1"]
+        assert snap.overall == "ok"
 
     def test_initial_snapshot_state(self) -> None:
         motors = {"m1": _MockMotor("m1")}
@@ -171,10 +218,10 @@ class TestMotorCheckRunnerHappyPath:
 
     async def test_prepare_messages_are_sent_before_check_command(self) -> None:
         class _PreparingMotor(_MockMotor):
-            def prepare_check(self) -> list[can.Message]:
+            def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
                 return [
-                    can.Message(arbitration_id=0x201, data=bytes(8)),
-                    can.Message(arbitration_id=0x202, data=bytes(8)),
+                    (can.Message(arbitration_id=0x201, data=bytes(8)), 0.0),
+                    (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0),
                 ]
 
         motors = {"m1": _PreparingMotor("m1")}
@@ -224,8 +271,8 @@ class TestMotorCheckRunnerHappyPath:
             def check_safety_error(self) -> str | None:
                 return "既知fault"
 
-            def prepare_check(self) -> list[can.Message]:
-                raise AssertionError("prepare_check must not run")
+            def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
+                raise AssertionError("prepare_check_steps must not run")
 
         motors = {"m1": _UnsafeMotor("m1")}
         manager = _MockCANManager(motors)
@@ -253,7 +300,7 @@ class TestMotorCheckRunnerHappyPath:
                 "main_hand",
                 manager,
                 motors,
-                feedback_freshness_ms=500.0,
+                feedback_timeout_ms=500.0,
                 default_magnitude={"_FeedbackRequiredMotor": 1.0},
             )
 
@@ -288,7 +335,7 @@ class TestMotorCheckRunnerHappyPath:
             "main_hand",
             manager,
             motors,
-            feedback_freshness_ms=500.0,
+            feedback_timeout_ms=500.0,
             default_magnitude={"_FeedbackRequiredMotor": 1.0},
         )
 
@@ -366,7 +413,7 @@ class TestMotorCheckRunnerHappyPath:
 
 class TestMotorCheckRunnerTimeout:
     async def test_no_feedback_results_in_timeout(self) -> None:
-        # post_send_hook を設定しない → _last_rx_at が更新されない → タイムアウト
+        # post_send_hook を設定しない → 受信時刻が更新されない → タイムアウト
         motors = {"m1": _MockMotor("m1")}
         manager = _MockCANManager(motors)
         # テスト時間を短く保つため per_motor_timeout_ms を 50ms に縮める
@@ -410,6 +457,77 @@ class TestMotorCheckRunnerAbort:
         snap = await runner.run()
         assert snap.records[0].result is MotorCheckResult.SKIPPED
         # 残りも SKIPPED で完結する
+        assert snap.records[1].result is MotorCheckResult.SKIPPED
+        assert snap.records[2].result is MotorCheckResult.SKIPPED
+
+    async def test_run_開始前の中断要求を捨てない(self) -> None:
+        """中断要求は run() に入る前にも届く。
+
+        緊急停止は runner が起動する前 — サーバー側が pause() を待っている
+        あいだ — に abort を投げうる。run() が冒頭で要求をクリアすると、
+        その 1 通は無かったことにされて全モータが実際に駆動される。
+        """
+        motors = {"m1": _MockMotor("m1"), "m2": _MockMotor("m2")}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand", manager, motors, default_magnitude={"_MockMotor": 1.0}
+        )
+
+        runner.abort()
+        snap = await runner.run()
+
+        assert manager.sent == [], f"中断要求済みなのにモータを駆動した: {manager.sent}"
+        assert all(r.result is MotorCheckResult.SKIPPED for r in snap.records)
+
+
+class TestMotorCheckRunnerEStopInterlock:
+    """緊急停止インターロック (M3508PositionLoop / MotorHandle と同じ多重防護)。
+
+    緊急停止中にモータへ指令を出せる経路が 1 本でも残っていると、停止した
+    はずの機体が動く。動作確認は 1 モータずつ自前の指令を出すので、
+    「止まっている」と信じている操縦者の目の前で単独駆動が起きうる。
+    """
+
+    async def test_停止中は1台も駆動しない(self) -> None:
+        motors = {"m1": _MockMotor("m1"), "m2": _MockMotor("m2")}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            motors,
+            default_magnitude={"_MockMotor": 1.0},
+            is_estop_active=lambda: True,
+        )
+
+        snap = await runner.run()
+
+        assert manager.sent == [], f"緊急停止中にモータを駆動した: {manager.sent}"
+        assert all(r.result is MotorCheckResult.SKIPPED for r in snap.records)
+
+    async def test_実行途中で停止が入ると残りを駆動しない(self) -> None:
+        motors = {"m1": _MockMotor("m1"), "m2": _MockMotor("m2"), "m3": _MockMotor("m3")}
+        manager = _MockCANManager(motors)
+        estop = {"active": False}
+
+        async def hook(motor_name: str, _msg: can.Message) -> None:
+            manager.set_rx_at(motor_name, time.time() + 0.001)
+            if motor_name == "m1":
+                estop["active"] = True
+
+        manager.set_post_send_hook(hook)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            motors,
+            per_motor_timeout_ms=200.0,
+            default_magnitude={"_MockMotor": 1.0},
+            is_estop_active=lambda: estop["active"],
+        )
+
+        snap = await runner.run()
+
+        driven = {name for name, _msg in manager.sent}
+        assert driven == {"m1"}, f"緊急停止後のモータまで駆動した: {sorted(driven)}"
         assert snap.records[1].result is MotorCheckResult.SKIPPED
         assert snap.records[2].result is MotorCheckResult.SKIPPED
 
@@ -474,6 +592,51 @@ class TestMotorCheckRunnerCallbacks:
 
         await runner.run()
         assert progress_seen == [("m1", 0, 2), ("m2", 1, 2)]
+
+
+class TestMotorCheckRunnerSkipReason:
+    """magnitude=0 の SKIPPED で「意図的な除外」と「未対応ドライバ」を区別する。
+
+    セッティングタイムに画面を見る操縦者が、config で意図的に外したペア軸
+    (y_axis_* / rotate_*) を異常だと誤解しないことが目的。
+    """
+
+    async def test_config_excluded_motor_reports_intentional_skip(self) -> None:
+        motor = _MockMotor("y_axis_r")
+        motors = {"y_axis_r": motor}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner(
+            "main_hand",
+            manager,
+            motors,
+            default_magnitude={"_MockMotor": 1.0},
+            per_motor_overrides={"y_axis_r": {"magnitude": 0.0}},
+        )
+
+        snap = await runner.run()
+
+        assert snap.records[0].result is MotorCheckResult.SKIPPED
+        assert snap.records[0].detail == SKIP_DETAIL_CONFIG_EXCLUDED
+        # 意図的な除外なので CAN へは一切送らない
+        assert manager.sent == []
+        assert motor.last_magnitude is None
+
+    async def test_unsupported_driver_reports_unsupported_skip(self) -> None:
+        # default_magnitude にこのクラスの既定値が無く、magnitude が解決できないケース
+        motor = _MockMotor("unknown")
+        motors = {"unknown": motor}
+        manager = _MockCANManager(motors)
+        runner = MotorCheckRunner("main_hand", manager, motors, default_magnitude={})
+
+        snap = await runner.run()
+
+        assert snap.records[0].result is MotorCheckResult.SKIPPED
+        assert snap.records[0].detail == SKIP_DETAIL_UNSUPPORTED_DRIVER
+
+    def test_skip_details_are_distinguishable(self) -> None:
+        assert SKIP_DETAIL_CONFIG_EXCLUDED != SKIP_DETAIL_UNSUPPORTED_DRIVER
+        # 意図的な除外側は「壊れているのではない」と読める文言であること
+        assert "指差喚呼" in SKIP_DETAIL_CONFIG_EXCLUDED
 
 
 class TestMotorCheckRunnerOverrides:

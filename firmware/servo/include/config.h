@@ -124,19 +124,24 @@ constexpr uint32_t kMotionIntervalMs = 5;
 // ウォッチドッグもチャンネルごとに独立して動く。** 1 チャンネルへの指令が途絶えても
 // 他のチャンネルは動き続ける（片方の壁だけ通信が切れる、という状況が実在するため）。
 //
-// PC 側の目標値定期再送が未実装（仕様書 §8）のため、有効のままだと SET_TARGET から
-// kDefaultCommandTimeoutMs 後に新しい角度指令を受け付けなくなる。**サーボは満了しても
-// 現在角を保持するので機構が落ちることはない**が、そこから先は動かせない。
-// PC 側が入るまでの暫定運用としてここを 0 にするか、command_timeout_ms を大きく設定すること。
+// PC 側は最後に指令した角度を kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、
+// 満了は PC の停止かケーブル断を意味する。**サーボは満了しても現在角を保持するので
+// 機構が落ちることはない**が、そこから先は動かせない。
+//
+// 0 にすると途絶しても新しい角度指令を受け付け続け、FEEDBACK の bit4 も報告しなくなる。
+// 手で cansend を打つようなベンチ確認のための逃げ道であって、試合では既定の 1 のまま
+// 使う。再送が間に合わない状態は運用上の異常なので、ここや command_timeout_ms を
+// 触って覆い隠してはならない（仕様書 §8）。
+//
+// この値は setup() が MotorSafety::setWatchdogEnabled() へ写す。判定を #if で
+// main.cpp 側に置くと、同じ分岐を両ファームが各自で持つことになり、片方に入れ忘れても
+// 誰も気付けない（実際そうなっていた）。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
-// 仕様書 §3.4 の既定値。
-constexpr uint32_t kDefaultCommandTimeoutMs = 500;
-constexpr uint32_t kDefaultFeedbackIntervalMs = 10;  // 100Hz
-
-// 仕様書 §7.3 / §7.6。0 は「補間が完了した時点で到達」を意味する。
-// サーボは実測値を持たないので「目標角 - 指令角」がそのまま補間の残りになる。
-constexpr float kDefaultReachedToleranceDeg = motorcan::kDefaultServoReachedToleranceDeg;
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
+// MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
+// 到達許容差の既定値（§7.3 / §7.6 の 0）は ServoMotion.h の
+// kDefaultServoReachedToleranceDeg が持ち、ServoMotion が自分で適用する。
 
 // ===========================================================================
 // 緊急停止・ウォッチドッグ時の振る舞い（仕様書 §7.5）

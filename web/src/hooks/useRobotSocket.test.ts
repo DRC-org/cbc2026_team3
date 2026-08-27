@@ -1,8 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CheckRunSnapshot, MotorCheckRecord } from "@/hooks/useRobotSocket";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
+import type { CheckRunSnapshot, MotorCheckRecord } from "@/lib/protocol";
 import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 
 const URL = "ws://test/ws";
@@ -126,6 +126,23 @@ describe("送信", () => {
     const { result } = renderHook(() => useRobotSocket(URL));
     act(() => result.current.send({ type: "trigger" }));
     expect(latestSocket().sent).toHaveLength(0);
+  });
+
+  it("送れたかどうかを呼び出し側へ返す", () => {
+    // 呼び出し側が「届いた前提」で楽観的に状態を変えると、切断中に緊急停止を
+    // 押しただけで全画面が「停止しました」と表示する (機体は動き続けている)
+    const { result } = renderHook(() => useRobotSocket(URL));
+    let sent: boolean | undefined;
+    act(() => {
+      sent = result.current.send({ type: "trigger" });
+    });
+    expect(sent).toBe(false);
+
+    act(() => latestSocket().open());
+    act(() => {
+      sent = result.current.send({ type: "trigger" });
+    });
+    expect(sent).toBe(true);
   });
 });
 
@@ -293,7 +310,7 @@ describe("motor_check_* メッセージ", () => {
     expect(state.status).toBe("running");
     expect(state.current).toBe("lift");
     expect(state.progress).toEqual({ index: 1, total: 4 });
-    expect(state.startedAt).not.toBeNull();
+    expect(state.startedAtMs).not.toBeNull();
   });
 
   it("progress を重ねても開始時刻は最初の値を保つ", () => {
@@ -303,12 +320,12 @@ describe("motor_check_* メッセージ", () => {
     act(() =>
       socket.receive({ type: "motor_check_progress", robot: "main_hand", index: 0, total: 2 }),
     );
-    const startedAt = result.current.motorChecks.main_hand.startedAt;
+    const startedAtMs = result.current.motorChecks.main_hand.startedAtMs;
 
     act(() =>
       socket.receive({ type: "motor_check_progress", robot: "main_hand", index: 1, total: 2 }),
     );
-    expect(result.current.motorChecks.main_hand.startedAt).toBe(startedAt);
+    expect(result.current.motorChecks.main_hand.startedAtMs).toBe(startedAtMs);
   });
 
   it("record は初出を末尾に追加し、同じモータは順序を保ったまま上書きする", () => {
@@ -354,7 +371,8 @@ describe("motor_check_* メッセージ", () => {
     const state = result.current.motorChecks.main_hand;
     expect(state.status).toBe("completed");
     expect(state.current).toBeNull();
-    expect(state.finishedAt).toBe(20);
+    // ワイヤはエポック秒。UI 状態は ms へ正規化されている必要がある
+    expect(state.finishedAtMs).toBe(20_000);
     expect(state.records.map((r) => r.motor)).toEqual(["a", "z"]);
   });
 
