@@ -1,0 +1,47 @@
+# テンプレート。@PROJECT_DIR@ は install.sh が実パスに置換して
+# /etc/systemd/system/ へ配置する。
+#
+# enable はしない (install.sh も有効化しない)。電源投入だけで機体が通電・待機状態に
+# ならないようにするため、起動タイミングは操縦者が `systemctl start` で握る。
+
+[Unit]
+Description=CBC2026 Team3 中央制御プログラム (Web Controller 同梱)
+Documentation=file://@PROJECT_DIR@/docs/impl_plan.md
+# CAN が up していなければ実機モードは起動できない。python 側の
+# OSError より、依存関係として明示した方が journal から原因を追える
+Requires=cbc-can.service
+After=cbc-can.service network.target
+
+# 設定ミス等で即死し続ける場合に無限ループさせない。
+# systemd v229 以降、この 2 つは [Service] に書くと黙って無視される
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=@RUN_USER@
+WorkingDirectory=@PROJECT_DIR@
+
+# Web UI は同一プロセスが web/dist を配信する (lib/server.py)。その存在判定は
+# create_app() の 1 回きりなので、dist が無いまま起動すると UI のルートが登録
+# されないまま /health と /ws だけが応答し続ける (サービスは active のまま、
+# 画面だけ真っ白)。起動前に落として気付けるようにする
+ExecStartPre=/usr/bin/test -f @PROJECT_DIR@/web/dist/index.html
+
+# mise 配下の uv/python は shim が systemd の PATH に無く、`latest` が勝手に
+# 上がると試合当日に起動しなくなる。venv の実体を絶対パスで固定する
+# -u: journal へ即時に流す (バッファに溜めたまま停止すると死因が残らない)
+ExecStart=@PROJECT_DIR@/.venv/bin/python -u main.py
+
+# 異常終了時は上げ直す。再起動してもシーケンスは sequence_start 待ちで停止した
+# まま起動するので勝手には動かず、UI だけが復帰する。ファーム側の物理非常停止
+# ラッチも PC 再起動では解除されない (CAN の解除フレームのみが解除できる)
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM を受けた main.py が後始末 (ループ停止 → CAN shutdown) を終える猶予。
+# 通常は 1 秒未満で終わる。超過すると SIGKILL され「後始末完了」ログが残らない
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -138,6 +138,9 @@ scripts/setup_can.sh --strict      # 試合前点検。3 本揃わなければ�
 sudo scripts/install.sh --uninstall
 ```
 
+`install.sh` は制御プログラムの unit（`cbc-control.service`）も配置する。そちらは
+`enable` しない — 詳細は「サービス化（systemd）」を参照。
+
 PC 起動時は `cbc-can.service`（`Type=oneshot` + `RemainAfterExit=yes`）が
 `setup_can.sh --wait 15` を実行する。`--wait` は USB 列挙が起動直後に間に合わない場合の
 待ち時間。USB 抜き差し時も udev の `RUN+=` により service が再実行される。
@@ -199,6 +202,74 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 `cbc-can.service` により通常は起動時に up されるため実害は出にくいが、service が失敗した
 場合などに起きうる。**残る対策候補は `_create_bus()` にインターフェースの `operstate` 検証を
 追加し、down なら起動を止めること**で、これは未着手。
+
+---
+
+## サービス化（systemd）
+
+制御プログラムと Web Controller は**同一プロセス**である。`lib/server.py` が aiohttp で
+`web/dist/` を SPA 配信するため（`create_app`）、起動するプロセスは 1 つで足りる。
+
+| unit | 中身 | enable |
+|---|---|---|
+| `cbc-can.service` | `setup_can.sh --wait 15`（CAN バス up） | する（電源投入で up） |
+| `cbc-control.service` | `.venv/bin/python -u main.py` | **しない**（手動 `systemctl start`） |
+
+```bash
+sudo scripts/install.sh                  # 両 unit を配置（control は enable しない）
+scripts/deploy.sh                        # 依存導入 + Web UI ビルド + 再起動
+sudo systemctl start cbc-control         # 制御プログラム起動
+journalctl -u cbc-control -f             # ログ追跡
+```
+
+### 制御プログラムを自動起動しない理由
+
+`enable` すると電源投入だけで機体が通電・待機状態になる。起動タイミングは操縦者が
+握るべきなので、`install.sh` は unit を配置するだけで有効化しない。`install.sh` の再実行が
+走っている制御プログラムを落とさないよう、`cbc-control` は `restart` もしない
+（試合中に unit を入れ直しただけで機体が止まるのを避ける）。
+
+### SIGTERM を後始末経路へ合流させる
+
+`systemctl stop` / `restart` が送るのは SIGTERM で、既定の扱いはプロセスの即死。
+`main()` の `finally` に並べた後始末（位置制御ループ停止 → 目標値再送停止 → 同期監視停止
+→ CAN shutdown → サーバー終了処理）が **1 段も走らない**まま消える。サービス化した時点で
+「止める処理が止まる形を作らない」という不変条件がシグナルの扱いに依存するようになった。
+
+`_install_stop_signal_handler()` が SIGTERM を main タスクの `cancel()` へ変換し、既存の
+`except asyncio.CancelledError` → `finally` に載せる。SIGINT はこれまでどおり `asyncio.run`
+経由で同じ経路を通るため触らない。
+
+**2 通目のガードに `loop.remove_signal_handler()` を使ってはならない。** これは SIGTERM の
+扱いを SIG_DFL へ戻すため、2 通目が「無視」ではなく「即死」になり、後始末ごと消える
+（`systemctl restart` の連打で起きる）。フラグで無視し、ハンドラは付けたままにする。
+
+後始末の最終行で `後始末完了` をログに残す。この行が無いまま終了していれば
+`TimeoutStopSec` 超過で SIGKILL された、と journal から判別できる。
+
+### ビルドを service ではなく deploy スクリプトに置く理由
+
+`ExecStartPre` で `pnpm build` を走らせると、会場でのビルド失敗がそのまま起動失敗になる
+（直前まで動いていた `web/dist` があるのに立ち上がらない）。ビルドは `scripts/deploy.sh` が
+持ち、service は成果物を配るだけにする。
+
+ただし `web/dist` の**存在確認は service 側にも置く**（`ExecStartPre=/usr/bin/test -f`）。
+`create_app()` の `is_dir()` 判定は起動時 1 回きりなので、dist が無いまま起動すると UI の
+ルートが登録されないまま `/health` と `/ws` だけが応答し続け、「サービスは `active` で
+WS も繋がるのに画面だけ真っ白」という気付きにくい壊れ方になる。後から dist を置いても
+再起動するまで復活しない。
+
+### `.venv/bin/python` を絶対パスで指す理由
+
+`uv` / `pnpm` / `node` は mise 配下にあり、shim は systemd の PATH に無い。加えて mise の
+`latest` は勝手に上がるため、`uv run` 経由では「昨日まで動いていたのに当日起動しない」が
+起こりうる。unit は venv の実体を直接指す。
+
+### `Restart=on-failure` の安全性
+
+再起動してもシーケンスは `sequence_start` 待ちで停止したまま起動するので機体は勝手に
+動かない。ファーム側の物理非常停止ラッチも PC 再起動では解除されない（CAN の解除フレーム
+だけが解除できる）。`StartLimitBurst=3` で設定ミスによる無限再起動を止める。
 
 ---
 
@@ -578,6 +649,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 試合時間タイマーが全デバイスで一致する | 配信の `elapsed_ms` を 0 に固定する / クライアントがサーバーの経過値を無視して 0 から数える / 新しい配信でアンカーを取り直さない / 固定間隔で起こす | `test_match_state.py` / `test_server_match.py` / `MatchTimer.test.tsx` |
 | タイマーはフェーズ遷移が成立した後にだけ動く | `match_start` の起点をゲート判定より前へ移す / `match_finish` の凍結を外す / `match_reset` で起点を消し忘れる | `test_match_state.py` |
 | `config/system.yaml` の全セクションがサーバーまで届く | `main()` の `RobotServer(...)` から `health` / `motor_check_*` / `match_settings` を 1 本落とす | `test_main_wiring.py` |
+| SIGTERM で後始末が完走する | `_install_stop_signal_handler()` の呼び出しを外す（既定の SIGTERM に戻り即死）/ 2 通目のガードを `loop.remove_signal_handler()` へ変える（SIG_DFL に戻り 2 通目で即死） | `test_main_shutdown.py` |
 
 ### テスト対象とアプローチ
 
@@ -900,7 +972,9 @@ cbc2026_team3/
 ├── scripts/
 │   ├── can_config.py       # can_buses.yaml → TSV / udev ルール変換
 │   ├── setup_can.sh        # CAN バス up（冪等・--strict / --wait 対応）
-│   ├── cbc-can.service     # systemd unit テンプレート
+│   ├── cbc-can.service     # systemd unit テンプレート（CAN 初期化。enable する）
+│   ├── cbc-control.service # systemd unit テンプレート（制御 + Web UI。enable しない）
+│   ├── deploy.sh           # 依存導入 + Web UI ビルド + サービス再起動
 │   └── install.sh          # udev / systemd への配置と有効化
 ├── lib/
 │   ├── __init__.py

@@ -76,6 +76,27 @@ scripts/setup_can.sh --strict     # 試合前点検。3 本揃わなければ異
 vcan を使うテストは無い（`--dry-run` は python-can の `virtual` インタフェースで、
 vcan ではない）。詳細は `docs/impl_plan.md` の「vcan を使った統合テスト（未着手）」。
 
+### サービス運用（systemd）
+
+```bash
+sudo scripts/install.sh           # 両 unit を配置（cbc-control は enable しない）
+scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
+sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
+journalctl -u cbc-control -f      # ログ追跡
+```
+
+制御プログラムと Web Controller は同一プロセス（`lib/server.py` が `web/dist/` を
+SPA 配信する）。**`cbc-control.service` は enable しない** — 電源投入だけで機体が
+通電・待機状態にならないよう、起動タイミングは操縦者が握る。
+
+**`main()` の後始末はシグナルの扱いに依存する。** `systemctl stop` の SIGTERM は既定では
+プロセスを即死させ、`finally` に並べた後始末（ループ停止 → CAN shutdown）が 1 段も
+走らない。`_install_stop_signal_handler()` が main タスクの cancel へ変換して既存の経路に
+載せている。**2 通目のガードに `loop.remove_signal_handler()` を使ってはならない**
+（SIGTERM の扱いが SIG_DFL に戻り、2 通目が「無視」ではなく「即死」になる）。
+`web/dist` のビルドは service ではなく `deploy.sh` が持つ。理由は
+`docs/impl_plan.md` の「サービス化（systemd）」。
+
 ## アーキテクチャ
 
 asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバーを統合実行する。
