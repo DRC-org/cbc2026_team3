@@ -210,12 +210,16 @@ static void test_decode_e_stop_unknown_byte0_is_none() {
 
 static void test_encode_feedback_layout() {
     uint8_t out[8];
-    encodeFeedback(out, 900 /* 90.0deg */, -1500, 2500, 0,
+    memset(out, 0xFF, sizeof(out));
+    encodeFeedback(out, 900 /* 90.0deg */, -1500,
                    status_flag::kReached | status_flag::kEStop);
     TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[0] | (out[1] << 8)));
     TEST_ASSERT_EQUAL_INT16(-1500, static_cast<int16_t>(out[2] | (out[3] << 8)));
-    TEST_ASSERT_EQUAL_INT16(2500, static_cast<int16_t>(out[4] | (out[5] << 8)));
-    TEST_ASSERT_EQUAL_UINT8(0, out[6]);  // DC モタドラは温度センサ非搭載（§8）
+    // Byte4-6 は予約。**送信側が 0 で埋めること**（仕様書 §3）。埋め忘れると
+    // 電流・温度を持つ基板が現れたとき、古いファームのゴミが値として読まれる
+    TEST_ASSERT_EQUAL_UINT8(0, out[4]);
+    TEST_ASSERT_EQUAL_UINT8(0, out[5]);
+    TEST_ASSERT_EQUAL_UINT8(0, out[6]);
     TEST_ASSERT_EQUAL_UINT8(0x09, out[7]);
 }
 
@@ -224,18 +228,20 @@ static void test_encode_feedback_layout() {
 static void test_encode_feedback_saturates_position() {
     uint8_t out[8];
 
-    encodeFeedback(out, 40000 /* +4000.0deg */, 0, 0, 0, 0);
+    encodeFeedback(out, 40000 /* +4000.0deg */, 0, 0);
     TEST_ASSERT_EQUAL_INT16(32767, static_cast<int16_t>(out[0] | (out[1] << 8)));
 
-    encodeFeedback(out, -40000 /* -4000.0deg */, 0, 0, 0, 0);
+    encodeFeedback(out, -40000 /* -4000.0deg */, 0, 0);
     TEST_ASSERT_EQUAL_INT16(-32768, static_cast<int16_t>(out[0] | (out[1] << 8)));
 }
 
-static void test_encode_feedback_saturates_velocity_and_current() {
+static void test_encode_feedback_saturates_velocity() {
     uint8_t out[8];
-    encodeFeedback(out, 0, 100000, -100000, 0, 0);
+    encodeFeedback(out, 0, 100000, 0);
     TEST_ASSERT_EQUAL_INT16(32767, static_cast<int16_t>(out[2] | (out[3] << 8)));
-    TEST_ASSERT_EQUAL_INT16(-32768, static_cast<int16_t>(out[4] | (out[5] << 8)));
+
+    encodeFeedback(out, 0, -100000, 0);
+    TEST_ASSERT_EQUAL_INT16(-32768, static_cast<int16_t>(out[2] | (out[3] << 8)));
 }
 
 // --------------------------------------------------------------------------
@@ -714,10 +720,8 @@ static void test_dc_channel_ignores_nan_duty() {
 // 既存のビットと重なると、センサの ON がそのまま緊急停止やウォッチドッグの
 // 報告として読まれる（＝押していないのに機体が止まる／止まったのに気付けない）。
 static void test_status_flag_bits_do_not_overlap() {
-    const uint8_t all[] = {status_flag::kReached,  status_flag::kOvercurrent,
-                           status_flag::kOverheat, status_flag::kEStop,
-                           status_flag::kWatchdog, status_flag::kDeviceIdUnconfigured,
-                           status_flag::kSensor};
+    const uint8_t all[] = {status_flag::kReached, status_flag::kEStop, status_flag::kWatchdog,
+                           status_flag::kDeviceIdUnconfigured, status_flag::kSensor};
     uint8_t seen = 0;
     for (uint8_t bit : all) {
         TEST_ASSERT_NOT_EQUAL_UINT8(0, bit);
@@ -725,15 +729,15 @@ static void test_status_flag_bits_do_not_overlap() {
         seen = static_cast<uint8_t>(seen | bit);
     }
     TEST_ASSERT_EQUAL_UINT8(1 << 6, status_flag::kSensor);
-    // bit7 は予約のまま空けてある
-    TEST_ASSERT_EQUAL_UINT8(0, seen & (1 << 7));
+    // bit1（過電流）/ bit2（過熱）/ bit7 は予約。どちらの基板もセンサを持たない
+    TEST_ASSERT_EQUAL_UINT8(0, seen & ((1 << 1) | (1 << 2) | (1 << 7)));
 }
 
 // センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは
 // 1 つで足りる。位置・速度・電流・温度は持たないので 0 のまま。
 static void test_sensor_flag_rides_in_its_own_feedback() {
     uint8_t out[8];
-    encodeFeedback(out, 0, 0, 0, 0, status_flag::kSensor);
+    encodeFeedback(out, 0, 0, status_flag::kSensor);
     for (uint8_t i = 0; i < 7; ++i) {
         TEST_ASSERT_EQUAL_UINT8(0, out[i]);
     }
@@ -762,7 +766,7 @@ int main(int, char **) {
     RUN_TEST(test_sensor_flag_rides_in_its_own_feedback);
     RUN_TEST(test_encode_feedback_layout);
     RUN_TEST(test_encode_feedback_saturates_position);
-    RUN_TEST(test_encode_feedback_saturates_velocity_and_current);
+    RUN_TEST(test_encode_feedback_saturates_velocity);
     RUN_TEST(test_clamp_duty);
     RUN_TEST(test_clamp_duty_rejects_nan);
     RUN_TEST(test_watchdog_expires_and_recovers);

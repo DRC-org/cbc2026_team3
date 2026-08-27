@@ -30,8 +30,8 @@ class CommandType(IntEnum):
 
 # FEEDBACK Byte7 の状態フラグ (仕様書 §3.2)
 _FLAG_REACHED = 0x01
-_FLAG_OVERCURRENT = 0x02
-_FLAG_OVERHEAT = 0x04
+# bit1 (過電流) / bit2 (過熱) は予約。**どちらの基板も電流センスも温度センサも持たず、
+# 今後も持たない。** 名前を残すと「報告されうる」と読めてしまうので定数ごと置かない
 _FLAG_E_STOP = 0x08
 _FLAG_WATCHDOG = 0x10
 _FLAG_UNCONFIGURED_ID = 0x20
@@ -73,10 +73,8 @@ class GenericDriver(MotorDriver):
                 f"(0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約): {can_id}"
             )
         super().__init__(name, can_id)
-        # フィードバック Byte7 の bit1/bit2 は MotorState に持たせず、ドライバ側で保持する
+        # フィードバック Byte7 の bit3 以上は MotorState に持たせず、ドライバ側で保持する
         # (MotorState は frozen dataclass で他ドライバ共通のため、汎用化を避けて専用属性に分離)
-        self._overcurrent_flag: bool = False
-        self._overheat_flag: bool = False
         self._e_stop_flag: bool = False
         self._watchdog_flag: bool = False
         self._unconfigured_id_flag: bool = False
@@ -152,23 +150,20 @@ class GenericDriver(MotorDriver):
         d = msg.data
         raw_pos = struct.unpack_from("<h", d, 0)[0]
         raw_vel = struct.unpack_from("<h", d, 2)[0]
-        raw_cur = struct.unpack_from("<h", d, 4)[0]
-        temp = d[6]
+        # Byte4-6 は予約 (仕様書 §3.2)。**読まない。** どちらの基板もセンサを持たないので
+        # 値を持ち込むと「常に 0 の電流・温度」が UI とヘルス判定に流れ込む。
+        # MotorState の current / temperature は既定の 0.0 のままにする
         flags = d[7]
         return MotorState(
             position=raw_pos * 0.1,
             velocity=float(raw_vel),
-            current=float(raw_cur),
-            temperature=float(temp),
             reached=bool(flags & _FLAG_REACHED),
         )
 
     def update_state(self, msg: can.Message) -> MotorState:
         # decode_feedback は純粋関数のまま保ち、副作用 (フラグ保持) はここで処理する
-        # bit0 (到達) は MotorState.reached に反映、bit1 以上はドライバ属性に保持
+        # bit0 (到達) は MotorState.reached に反映、bit3 以上はドライバ属性に保持
         flags = msg.data[7]
-        self._overcurrent_flag = bool(flags & _FLAG_OVERCURRENT)
-        self._overheat_flag = bool(flags & _FLAG_OVERHEAT)
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)
@@ -241,15 +236,12 @@ class GenericDriver(MotorDriver):
         """
         return self._sensor_flag
 
-    def has_overcurrent_warning(self) -> bool:
-        return self._overcurrent_flag
-
     def is_fault(self) -> bool:
-        # 過熱は復帰不能リスクが高いので FAULT 扱い (シーケンス停止対象)。
         # デバイス ID 未設定は基板の設定ミスで駆動自体が拒否される状態であり、
-        # 試合前に必ず気付く必要があるため同じく FAULT にする。
-        # 緊急停止中 (bit3) とウォッチドッグ作動中 (bit4) は正常な安全動作なので含めない
-        return self._overheat_flag or self._unconfigured_id_flag
+        # 試合前に必ず気付く必要があるため FAULT にする。
+        # 緊急停止中 (bit3) とウォッチドッグ作動中 (bit4) は正常な安全動作なので含めない。
+        # 過電流・過熱はどちらの基板も検出手段を持たない (仕様書 §3.2)
+        return self._unconfigured_id_flag
 
     def check_safety_error(self) -> str | None:
         # 駆動が拒否される状態のまま動作確認しても必ず失敗し、しかも原因が
@@ -314,11 +306,11 @@ class GenericDriver(MotorDriver):
         passed, detail = self.evaluate_tracking(context)
 
         if context.mode is not ControlMode.POSITION:
-            return (True, self._overflow_note()) if passed else (False, detail)
+            return (True, None) if passed else (False, detail)
 
         # 位置決めの行き過ぎ・整定中はファームの到達フラグ (§3.2 bit0) が持つ
         if passed and self._state.reached:
-            return True, self._overflow_note()
+            return True, None
         if detail is None:
             detail = (
                 f"目標 {context.display(context.target)}, "
@@ -328,12 +320,3 @@ class GenericDriver(MotorDriver):
 
     def reset_after_check(self) -> can.Message:
         return self.encode_target(self.control_type, 0.0)
-
-    def _overflow_note(self) -> str | None:
-        """過電流/過熱フラグが立っている場合の注釈を返す (PASSED でも残す)。"""
-        notes: list[str] = []
-        if self._overcurrent_flag:
-            notes.append("過電流フラグあり")
-        if self._overheat_flag:
-            notes.append("過熱フラグあり")
-        return ", ".join(notes) if notes else None

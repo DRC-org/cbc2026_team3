@@ -324,7 +324,6 @@ static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
         // 脱調・過負荷・メカ干渉で実際には動いていなくても立つ。
         flags |= status_flag::kReached;
     }
-    // 仕様書 §7.4: 電流センスも温度センサも無いので bit1（過電流）/ bit2（過熱）は常に 0。
     return flags;
 }
 
@@ -342,7 +341,7 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
             ? 0
             : static_cast<int32_t>(lroundf(g_channel[slot].currentSlewDegPerSec() / 6.0f));
 
-    encodeFeedback(data, position, rpm, 0, 0, buildStatusFlags(slot, nowMs));
+    encodeFeedback(data, position, rpm, buildStatusFlags(slot, nowMs));
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。

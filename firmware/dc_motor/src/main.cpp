@@ -231,17 +231,17 @@ static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     if (!isChannelConfigured(ch)) {
         flags |= status_flag::kDeviceIdUnconfigured;
     }
-    // 観測手段が 1 つも無い基板なので bit0（到達）/ bit1（過電流）/ bit2（過熱）は
-    // 常に 0（仕様書 §3.2 / §8）。duty には到達の概念が無く、「指令したから到達した」と
-    // 報告するのは実測でも推定でもない嘘になる。
+    // 観測手段が 1 つも無い基板なので bit0（到達）は立てない（仕様書 §3.2 / §8）。
+    // duty には到達の概念が無く、「指令したから到達した」と報告するのは
+    // 実測でも推定でもない嘘になる。
     return flags;
 }
 
 static void sendFeedback(uint8_t ch, uint32_t nowMs) {
     uint8_t data[kFrameLength];
 
-    // 位置・速度・電流・温度はセンサが無いのですべて 0（仕様書 §3.2）。
-    encodeFeedback(data, 0, 0, 0, 0, buildStatusFlags(ch, nowMs));
+    // 位置・速度はエンコーダが無いので 0（仕様書 §3.2）。
+    encodeFeedback(data, 0, 0, buildStatusFlags(ch, nowMs));
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。

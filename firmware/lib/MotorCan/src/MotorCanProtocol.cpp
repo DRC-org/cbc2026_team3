@@ -155,12 +155,14 @@ EStopAction decodeEStop(const uint8_t *data, uint8_t length) {
     return EStopAction::None;
 }
 
-void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, int32_t current_ma,
-                    uint8_t temperature_c, uint8_t flags) {
+void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, uint8_t flags) {
     packInt16Le(&out[0], saturateToInt16(position_0p1deg));
     packInt16Le(&out[2], saturateToInt16(rpm));
-    packInt16Le(&out[4], saturateToInt16(current_ma));
-    out[6] = temperature_c;
+    // Byte4-6 は予約（電流・温度を持つ基板が現れたときのための場所）。
+    // 仕様書 §3 のとおり送信側は 0 で埋める。
+    out[4] = 0;
+    out[5] = 0;
+    out[6] = 0;
     out[7] = flags;
 }
 

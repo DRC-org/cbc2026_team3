@@ -44,8 +44,8 @@ enum class ParamId : uint8_t {
 // 仕様書 §3.2 FEEDBACK Byte7 の状態フラグ。
 namespace status_flag {
 constexpr uint8_t kReached = 1 << 0;
-constexpr uint8_t kOvercurrent = 1 << 1;
-constexpr uint8_t kOverheat = 1 << 2;
+// bit1（過電流）/ bit2（過熱）は予約。**どちらの基板も電流センスも温度センサも持たず、
+// 今後も持たない。** 名前を残すと「報告しうる」と読めてしまうので定数ごと置かない。
 constexpr uint8_t kEStop = 1 << 3;
 constexpr uint8_t kWatchdog = 1 << 4;
 constexpr uint8_t kDeviceIdUnconfigured = 1 << 5;
@@ -174,9 +174,12 @@ EStopAction decodeEStop(const uint8_t *data, uint8_t length);
 // ---------------------------------------------------------------------------
 
 // out には kFrameLength バイト以上の領域が必要。
-// 位置・速度・電流は int32 で受けて int16 に飽和させる（呼び出し側で丸め済みの値を渡す）。
-void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, int32_t current_ma,
-                    uint8_t temperature_c, uint8_t flags);
+// 位置・速度は int32 で受けて int16 に飽和させる（呼び出し側で丸め済みの値を渡す）。
+//
+// **電流（Byte4-5）と温度（Byte6）は取らない。** どちらの基板もセンサを持たず、
+// 引数に残すと呼び出し側が毎回 0 を書くだけの「意味のない 0」になる。
+// 予約バイトとして 0 で埋める（仕様書 §3.2）。
+void encodeFeedback(uint8_t *out, int32_t position_0p1deg, int32_t rpm, uint8_t flags);
 
 // ---------------------------------------------------------------------------
 // duty

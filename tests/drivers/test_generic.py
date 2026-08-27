@@ -104,9 +104,12 @@ class TestDecodeFeedback:
 
         assert state.position == pytest.approx(180.0)
         assert state.velocity == pytest.approx(300.0)
-        assert state.current == pytest.approx(1500.0)
-        assert state.temperature == pytest.approx(45.0)
         assert state.reached is False
+        # Byte4-6 は予約。**読んではならない** (仕様書 §3.2)。どちらの基板もセンサを
+        # 持たないので、値を持ち込むと「常に 0 の電流・温度」が UI とヘルス判定へ流れ込む。
+        # ここではあえて 0 以外を積んであり、素通しにすると 1500.0 / 45.0 が漏れて落ちる
+        assert state.current == pytest.approx(0.0)
+        assert state.temperature == pytest.approx(0.0)
 
     def test_decode_feedback_with_flags(self):
         data = bytearray(8)
@@ -164,37 +167,25 @@ class TestHealth:
         assert self.drv.has_overcurrent_warning() is False
         assert self.drv.is_fault() is False
 
-    def test_thermal_warning_via_temperature_byte(self):
-        self._feed(temp=70, flags=0x00)
-        assert self.drv.has_thermal_warning(temp_warning_c=65.0) is True
+    def test_reserved_sensor_bytes_never_raise_warnings(self):
+        """予約バイトに何が載っていてもヘルス判定を動かさないこと。
 
-    def test_overcurrent_flag_bit1(self):
-        # bit1 = 過電流警告
-        self._feed(flags=0b00000010)
-        assert self.drv.has_overcurrent_warning() is True
+        自作モタドラは電流センスも温度センサも持たない (仕様書 §3.2)。
+        素通しにすると、他プロトコルの相乗りフレームや古いファームのゴミが
+        そのまま過熱・過電流として読まれ、試合中に理由のない FAULT が出る。
+        """
+        feed_generic(self.drv, temp=90, current_ma=9000, flags=0b00000110)
+        assert self.drv.has_overcurrent_warning() is False
+        assert self.drv.has_thermal_warning(temp_warning_c=65.0) is False
+        assert self.drv.has_thermal_fault(temp_critical_c=80.0) is False
         assert self.drv.is_fault() is False
 
-    def test_overheat_flag_bit2_is_fault(self):
-        # bit2 = 過熱 (FAULT 扱い)
-        self._feed(flags=0b00000100)
-        assert self.drv.is_fault() is True
-        assert self.drv.has_overcurrent_warning() is False
-
-    def test_combined_flags_reached_overcurrent_overheat(self):
-        # bit0 (到達) + bit1 (過電流) + bit2 (過熱) 同時セット
-        self._feed(flags=0b00000111)
-        assert self.drv.state.reached is True
-        assert self.drv.has_overcurrent_warning() is True
+    def test_unconfigured_device_id_is_fault(self):
+        """bit5 (デバイス ID 未設定) だけが FAULT。設定ミスは試合前に必ず気付く必要がある。"""
+        feed_generic(self.drv, flags=0b00100000)
         assert self.drv.is_fault() is True
 
-    def test_flags_clear_on_recovery(self):
-        # 一度立ったフラグが新しいフレームで降りることを確認 (復帰挙動)
-        self._feed(flags=0b00000110)
-        assert self.drv.has_overcurrent_warning() is True
-        assert self.drv.is_fault() is True
-
-        self._feed(flags=0b00000000)
-        assert self.drv.has_overcurrent_warning() is False
+        feed_generic(self.drv, flags=0b00000000)
         assert self.drv.is_fault() is False
 
     def test_sensor_and_reserved_bits_do_not_affect_health(self):
@@ -354,16 +345,6 @@ class TestMotorCheck:
         assert detail is not None
         # 失敗理由が配線不良に見えないよう、除外の手順まで書いてあること
         assert "magnitude" in detail
-
-    def test_evaluate_passed_with_overcurrent_flag_adds_detail(self):
-        drv = GenericDriver("test_motor", 0x01)
-        _, context = drv.check_command(magnitude=10.0)
-        # 過電流フラグつき + 目標到達 → PASSED だが detail に注釈
-        self._feed(drv, position_dg=100, flags=0b00000011)
-        passed, detail = drv.evaluate_check_result(context)
-        assert passed is True
-        assert detail is not None
-        assert "過電流" in detail
 
     def test_reset_after_check_sends_zero(self):
         drv = GenericDriver("test_motor", 0x01)
