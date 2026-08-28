@@ -1,4 +1,4 @@
-import { Check, RotateCcw } from "lucide-react";
+import { Check, RotateCcw, Zap } from "lucide-react";
 import { memo } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -28,8 +28,8 @@ interface ChecklistProps {
  * 呼び出し側が毎描画 新しい関数やオブジェクトを渡すと切り離しは無効になる。
  */
 export const Checklist = memo(function Checklist({ checklistRole, title }: ChecklistProps) {
-  const { matchState } = useRobotStatus();
-  const { setChecklistItem, resetChecklist } = useRobotCommands();
+  const { matchState, serverInfo } = useRobotStatus();
+  const { setChecklistItem, resetChecklist, checkAllChecklist } = useRobotCommands();
   const checklist = matchState.checklists[checklistRole];
   // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)
   const locked = !isSetupPhase(matchState.phase);
@@ -45,14 +45,30 @@ export const Checklist = memo(function Checklist({ checklistRole, title }: Check
       legend={title}
       bodyClassName="p-0"
       actions={
-        <Button
-          disabled={locked || checkedCount === 0}
-          onClick={() => resetChecklist(checklistRole)}
-          aria-label={`${title} のチェックをすべて解除`}
-        >
-          <Icon as={RotateCcw} />
-          CLEAR
-        </Button>
+        <>
+          {/* 開発用。サーバーが --dev-tools で起動したときだけ出る。
+              試合運用では指差喚呼そのものが試合開始のゲートなので、
+              押せる状態のまま会場へ持ち込まないよう見た目でも区別する */}
+          {serverInfo.dev_tools ? (
+            <Button
+              tone="warn"
+              disabled={locked || completed}
+              onClick={() => checkAllChecklist(checklistRole)}
+              aria-label={`${title} を開発用に全てチェック`}
+            >
+              <Icon as={Zap} />
+              DEV 全チェック
+            </Button>
+          ) : null}
+          <Button
+            disabled={locked || checkedCount === 0}
+            onClick={() => resetChecklist(checklistRole)}
+            aria-label={`${title} のチェックをすべて解除`}
+          >
+            <Icon as={RotateCcw} />
+            CLEAR
+          </Button>
+        </>
       }
     >
       {/* 件数と進捗バーで「あと何項目か」を数えずに読ませる */}

@@ -10,9 +10,9 @@
 「表に無いから素通り」という暗黙の状態を作れない。全フェーズで通したいコマンドは
 `PHASES_ANY` を明示的に書く (= 素通りさせると宣言する)。
 
-判定そのものは 2 段。フェーズゲート (試合進行としての可否) と緊急停止ゲート
-(今この瞬間モータを動かしてよいか) は独立で、フェーズが `match` のままでも
-緊急停止中は止める必要がある。
+判定そのものは 3 段。開発用ゲート (この起動でそのコマンドが存在するか)、
+フェーズゲート (試合進行としての可否)、緊急停止ゲート (今この瞬間モータを
+動かしてよいか) は独立で、フェーズが `match` のままでも緊急停止中は止める必要がある。
 """
 
 from __future__ import annotations
@@ -28,6 +28,10 @@ from lib.match_state import (
     PHASES_START_GATE,
     Phase,
 )
+
+#: 開発用コマンドを本番起動 (--dev-tools なし) で受けたときの拒否文。
+#: 「操作を間違えた」ではなく「この起動には無い機能」だと分かる文言にする。
+DEV_TOOLS_DENY_MESSAGE = "開発用コマンドです (--dev-tools / CBC_DEV_TOOLS=1 で起動したときのみ有効)"
 
 
 class RejectChannel(StrEnum):
@@ -50,6 +54,9 @@ class CommandSpec:
     #: 緊急停止中に通すか。停止・復帰方向の操作は必ず True
     allowed_during_e_stop: bool
     e_stop_deny_message: str | None
+    #: 開発用フラグ (--dev-tools) を立てた起動でしか受け付けないか。
+    #: 試合運用の手順を飛ばすコマンドはここを True にして、本番起動では語彙ごと閉じる
+    requires_dev_tools: bool
     #: RobotServer 側のハンドラメソッド名。ゲートと実行が別々に増えないよう同じ行に置く
     handler: str
     reject_channel: RejectChannel
@@ -79,6 +86,12 @@ class CommandSpec:
         """緊急停止中に実行できなければ理由を返す。実行できるなら None。"""
         return None if self.allowed_during_e_stop else self.e_stop_deny_message
 
+    def dev_tools_deny_reason(self, dev_tools_enabled: bool) -> str | None:
+        """この起動で実行できなければ理由を返す。実行できるなら None。"""
+        if not self.requires_dev_tools or dev_tools_enabled:
+            return None
+        return DEV_TOOLS_DENY_MESSAGE
+
 
 def _spec(
     name: str,
@@ -87,6 +100,7 @@ def _spec(
     phase_deny_message: str | None = None,
     allowed_during_e_stop: bool,
     e_stop_deny_message: str | None = None,
+    requires_dev_tools: bool = False,
     handler: str,
     reject_channel: RejectChannel = RejectChannel.COMMAND_REJECTED,
 ) -> CommandSpec:
@@ -96,6 +110,7 @@ def _spec(
         phase_deny_message=phase_deny_message,
         allowed_during_e_stop=allowed_during_e_stop,
         e_stop_deny_message=e_stop_deny_message,
+        requires_dev_tools=requires_dev_tools,
         handler=handler,
         reject_channel=reject_channel,
     )
@@ -222,6 +237,17 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_checklist_reset",
     ),
     _spec(
+        # 開発用。指差喚呼を 1 操作で全部埋める。**試合開始ゲートを飛ばす操作**なので
+        # 本番起動 (--dev-tools 無し) では語彙ごと閉じる。フェーズと緊急停止の扱いは
+        # checklist_set と揃える (機体を動かさない = 緊急停止中も通す)
+        "checklist_check_all",
+        allowed_phases=PHASES_PREPARATION,
+        phase_deny_message="このフェーズではチェックリストを操作できません",
+        allowed_during_e_stop=True,
+        requires_dev_tools=True,
+        handler="_cmd_checklist_check_all",
+    ),
+    _spec(
         # モータを微小駆動するため試合中と緊急停止中は通さない。
         # HTTP POST 経路は _handle_command を通らないので _start_motor_check 側にも同じ判定がある
         "motor_check_start",
@@ -316,3 +342,9 @@ def e_stop_deny_reason(command: str) -> str | None:
     """緊急停止ゲートの単一判定点。許可なら None。"""
     spec = spec_for(command)
     return None if spec is None else spec.e_stop_deny_reason()
+
+
+def dev_tools_deny_reason(command: str, dev_tools_enabled: bool) -> str | None:
+    """開発用ゲートの単一判定点。許可なら None。"""
+    spec = spec_for(command)
+    return None if spec is None else spec.dev_tools_deny_reason(dev_tools_enabled)

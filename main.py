@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import importlib
 import logging
+import os
 import pathlib
 import signal
 from collections.abc import Awaitable, Callable, Mapping
@@ -72,6 +73,17 @@ _DEFAULT_PID: dict[str, float | None] = {
 }
 
 
+#: 開発用コマンドを解禁する環境変数。systemd unit や shell の export で渡せるように、
+#: CLI 引数と同じフラグをもう 1 経路用意してある (CLI 側が優先)。
+_DEV_TOOLS_ENV = "CBC_DEV_TOOLS"
+#: 真と見なす値。"0"/"false"/空文字を真にしないためにホワイトリストで判定する
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_VALUES
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CBC2026 Team3 中央制御プログラム")
     parser.add_argument(
@@ -91,6 +103,14 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="CAN バスなしで起動 (mock バスを使用)",
+    )
+    parser.add_argument(
+        "--dev-tools",
+        action="store_true",
+        help=(
+            "開発用コマンドを解禁する (指差喚呼の一括チェック等)。"
+            f"環境変数 {_DEV_TOOLS_ENV}=1 でも有効になる。試合運用では使わないこと"
+        ),
     )
     parser.add_argument(
         "--host",
@@ -605,6 +625,12 @@ async def main() -> None:
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
     logger.info("試合時間: %s 秒", system.match.duration_s)
 
+    # CLI 引数が優先。どちらか一方でも立っていれば解禁する
+    dev_tools = args.dev_tools or _env_flag(_DEV_TOOLS_ENV)
+    if dev_tools:
+        # 試合当日に開発用フラグのまま起動していないかを、起動ログだけで判断できるようにする
+        logger.warning("開発用コマンドが有効です (指差喚呼の一括チェック等)。試合運用では外すこと")
+
     checklist_path = (
         pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
     )
@@ -624,6 +650,7 @@ async def main() -> None:
         checklist_definitions=checklist_definitions,
         match_settings=system.match,
         dry_run=args.dry_run,
+        dev_tools=dev_tools,
     )
     can_managers: list[CANManager] = []
     position_loops: list[M3508PositionLoop] = []

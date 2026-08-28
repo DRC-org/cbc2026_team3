@@ -21,6 +21,7 @@ import type {
   RobotState,
   SafetyState,
   SequenceStepInfo,
+  ServerInfo,
   ServerMessage,
   SyncMonitorState,
   TargetRefresherState,
@@ -98,6 +99,15 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].safety).toEqual(sample.safety);
     // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
     expect(result.states[robot].manual).toEqual(sample.manual);
+  },
+
+  server_info: (result, sample) => {
+    // 開発用ボタンの表示可否はこの 1 通だけが決める。受信条件が弾くと
+    // 「--dev-tools で起動したのにボタンが出ない」が型検査を通ったまま成立する
+    expect(result.serverInfo).toEqual({
+      dev_tools: sample.dev_tools,
+      dry_run: sample.dry_run,
+    });
   },
 
   match_state: (result, sample) => {
@@ -434,6 +444,14 @@ const HEALTH_CHANGE_FIELDS = fieldsOf<Wire<HealthChange>>({
 /** サンプル名 → そのメッセージが持ちうる全フィールド (ドット区切り、配列要素は `[]`) */
 const DECLARED: Record<string, FieldSpec> = {
   state: STATE_FIELDS,
+
+  server_info: fieldsOf<Wire<ServerInfo>>({
+    type: "parser",
+    dev_tools: "ui",
+    // 機体が繋がっていないことは health 側 (モータの STALE) に出るため、
+    // ここでは表示に使わない。将来 UI に「dry-run 中」を出すならここを "ui" にする
+    dry_run: { unused: "現状 UI では表示しない (health の STALE で分かる)" },
+  }),
 
   match_state: {
     ...fieldsOf<Wire<MatchState>>({

@@ -4,7 +4,7 @@ import { vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
 import type { RobotContextValue } from "@/context/RobotContext";
-import type { MatchState } from "@/lib/protocol";
+import type { MatchState, ServerInfo } from "@/lib/protocol";
 import type { MotorCheckState } from "@/lib/robotReducer";
 import { emptyMotorCheckState } from "@/lib/robotReducer";
 
@@ -22,6 +22,9 @@ export const DEFAULT_MATCH_STATE: MatchState = {
   timer: null,
 };
 
+/** 既定は本番起動と同じ (開発用コマンドは閉じている) */
+export const DEFAULT_SERVER_INFO: ServerInfo = { dev_tools: false, dry_run: false };
+
 /** 全ハンドラを vi.fn() にした既定値。テストは関心のあるフィールドだけ上書きする */
 export function createRobotContext(overrides: Partial<RobotContextValue> = {}): RobotContextValue {
   return {
@@ -32,6 +35,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     healthEvents: [],
     motorChecks: {},
     matchState: DEFAULT_MATCH_STATE,
+    serverInfo: DEFAULT_SERVER_INFO,
     rejection: null,
     clearRejection: vi.fn(),
     wsUrl: "ws://localhost:8080/ws",
@@ -45,6 +49,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     setCourt: vi.fn(),
     setChecklistItem: vi.fn(),
     resetChecklist: vi.fn(),
+    checkAllChecklist: vi.fn(),
     matchStart: vi.fn(),
     matchFinish: vi.fn(),
     matchReset: vi.fn(),

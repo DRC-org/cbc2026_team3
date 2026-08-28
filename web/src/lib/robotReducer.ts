@@ -4,6 +4,7 @@ import type {
   MatchState,
   MotorCheckRecord,
   RobotState,
+  ServerInfo,
   ServerMessage,
 } from "@/lib/protocol";
 import type { EpochMs } from "@/lib/time";
@@ -57,6 +58,7 @@ export interface RobotUiState {
   healthEvents: HealthChangeEvent[];
   motorChecks: Record<string, MotorCheckState>;
   matchState: MatchState;
+  serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
 }
 
@@ -91,6 +93,10 @@ const INITIAL_MATCH_STATE: MatchState = {
   timer: null,
 };
 
+// 未接続時は開発用の入口を閉じておく。server_info を受けるまで開いていると、
+// 接続前の一瞬だけ本番でも開発用ボタンが出る
+const INITIAL_SERVER_INFO: ServerInfo = { dev_tools: false, dry_run: false };
+
 export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   states: {},
   eStopActive: false,
@@ -98,6 +104,7 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   healthEvents: [],
   motorChecks: {},
   matchState: INITIAL_MATCH_STATE,
+  serverInfo: INITIAL_SERVER_INFO,
   rejection: null,
 };
 
@@ -137,6 +144,9 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
       if (!message.state.e_stop_active) next.eStopReason = null;
       return next;
     }
+
+    case "server_info":
+      return { ...state, serverInfo: message.serverInfo };
 
     case "match_state":
       return { ...state, matchState: message.matchState };

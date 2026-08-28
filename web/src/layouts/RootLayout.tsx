@@ -133,6 +133,11 @@ export function RootLayout() {
     (role: ChecklistRole) => send({ type: "checklist_reset", role }),
     [send],
   );
+  // 開発用。サーバー側が --dev-tools 起動でなければ command_rejected で返ってくる
+  const checkAllChecklist = useCallback(
+    (role: ChecklistRole) => send({ type: "checklist_check_all", role }),
+    [send],
+  );
   const matchStart = useCallback(() => send({ type: "match_start" }), [send]);
   const matchFinish = useCallback(() => send({ type: "match_finish" }), [send]);
   const matchReset = useCallback(() => send({ type: "match_reset" }), [send]);
@@ -147,6 +152,7 @@ export function RootLayout() {
         healthEvents: socket.healthEvents,
         motorChecks: socket.motorChecks,
         matchState: socket.matchState,
+        serverInfo: socket.serverInfo,
         rejection: socket.rejection,
         clearRejection,
         wsUrl,
@@ -160,6 +166,7 @@ export function RootLayout() {
         setCourt,
         setChecklistItem,
         resetChecklist,
+        checkAllChecklist,
         matchStart,
         matchFinish,
         matchReset,

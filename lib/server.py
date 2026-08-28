@@ -113,6 +113,7 @@ class RobotServer:
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         match_settings: MatchSettings = DEFAULT_MATCH,
         dry_run: bool = False,
+        dev_tools: bool = False,
     ) -> None:
         self._host = host
         self._port = port
@@ -137,6 +138,9 @@ class RobotServer:
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
+        # 開発用コマンド (指差喚呼の一括チェック等) の解禁。試合運用の手順を飛ばすので
+        # 既定は False で、起動時に明示したときだけ立つ。UI へは server_info で配る
+        self._dev_tools: bool = dev_tools
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
         # 試合全体の状態 (コート / フェーズ / チェックリスト)。
@@ -162,6 +166,11 @@ class RobotServer:
         self._motor_check_last: dict[str, CheckRunSnapshot] = {}
         # asyncio.create_task で起動した実行タスク。シャットダウン時にキャンセルする
         self._motor_check_tasks: dict[str, asyncio.Task[None]] = {}
+
+    @property
+    def dev_tools(self) -> bool:
+        """開発用コマンドが解禁されているか。コマンドゲートと server_info が参照する。"""
+        return self._dev_tools
 
     @property
     def e_stop_active(self) -> bool:
@@ -300,9 +309,12 @@ class RobotServer:
         self._ws_clients.add(ws)
         logger.info("WebSocket 接続: %s", request.remote)
 
-        # match_state は変化時のみ配信するため、接続直後に一度スナップショットを送る。
-        # これがないとリロード直後のクライアントが現在のモード/フェーズを知れない。
+        # server_info と match_state は接続直後にしか送らない。
+        # server_info は起動オプション由来で試合中に変わらないため定期配信に載せず、
+        # match_state は変化時のみ配信するのでスナップショットが要る
+        # (これがないとリロード直後のクライアントが現在のモード/フェーズを知れない)。
         try:
+            await ws.send_str(json.dumps(self._server_info_dict(), ensure_ascii=False))
             await ws.send_str(json.dumps(self.match.to_dict(), ensure_ascii=False))
         except ConnectionResetError:
             self._ws_clients.discard(ws)
@@ -324,6 +336,19 @@ class RobotServer:
             logger.info("WebSocket 切断: %s", request.remote)
 
         return ws
+
+    def _server_info_dict(self) -> dict:
+        """起動オプション由来の、試合中に変わらない情報。接続直後に 1 度だけ送る。
+
+        開発用ボタンの表示可否をクライアント側のビルド時定数で決めると、同じ
+        `web/dist` を配る本番と開発で再ビルドが要る (= 切り替えとして機能しない)。
+        正はサーバーが持ち、UI は配られた値を表示に反映するだけにする。
+        """
+        return {
+            "type": "server_info",
+            "dev_tools": self._dev_tools,
+            "dry_run": self._dry_run,
+        }
 
     async def handle_command(
         self,
@@ -348,11 +373,15 @@ class RobotServer:
             logger.debug("未知のコマンド: %s", data.get("type"))
             return
 
-        # ゲートは 2 段。フェーズゲート (試合進行として許されるか) を先に見て、
-        # 通ったものだけ緊急停止ゲート (今モータを動かしてよいか) に掛ける。
-        # フェーズが MATCH のままでも緊急停止中は START を通してはならず、
-        # match_start は READY で受理されうるのでフェーズ遷移より手前で止める。
-        deny = spec.phase_deny_reason(self.match.phase)
+        # ゲートは 3 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
+        # 次にフェーズゲート (試合進行として許されるか)、通ったものだけ緊急停止ゲート
+        # (今モータを動かしてよいか) に掛ける。フェーズが MATCH のままでも緊急停止中は
+        # START を通してはならず、match_start は READY で受理されうるのでフェーズ遷移より
+        # 手前で止める。開発用ゲートを先頭に置くのは、無効な起動での拒否理由が
+        # 「フェーズが違う」ではなく「この起動には無い機能」であるべきだから。
+        deny = spec.dev_tools_deny_reason(self._dev_tools)
+        if deny is None:
+            deny = spec.phase_deny_reason(self.match.phase)
         if deny is None and self._e_stop_active:
             deny = spec.e_stop_deny_reason()
         if deny is not None:
@@ -648,6 +677,14 @@ class RobotServer:
                 await self._broadcast_match_state()
             else:
                 logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
+
+    async def _cmd_checklist_check_all(self, data: dict, _requester: WSOrNone = None) -> None:
+        role = data.get("role")
+        self.match.check_all_checklist_items(role if isinstance(role, str) else None)
+        # 指差喚呼を飛ばしたことは必ずログに残す。試合直前のログを追ったときに
+        # 「点検を実施したのか、開発用ボタンで埋めたのか」が区別できないと困る
+        logger.warning("開発用: 指差喚呼を一括チェックしました (role=%s)", role or "all")
+        await self._broadcast_match_state()
 
     async def _cmd_checklist_reset(self, data: dict, _requester: WSOrNone = None) -> None:
         role = data.get("role")

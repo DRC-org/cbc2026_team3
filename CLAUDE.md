@@ -23,6 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 uv run python main.py             # サーバー起動（localhost:8080）
 uv run python main.py --dry-run   # CAN バスなしで起動（virtual バス。配線確認に使える）
+uv run python main.py --dev-tools # 開発用コマンドを解禁（指差喚呼の一括チェック。CBC_DEV_TOOLS=1 でも可）
 uv run pytest                     # 全テスト実行
 uv run pytest tests/drivers/      # ドライバテストのみ
 uv run pytest -x                  # 最初の失敗で停止
@@ -297,6 +298,14 @@ config に宣言させる。書かない軸に残るのは位置名によるプ�
 `AxisHandle.set_target_value` が唯一の経路）。**ジョグの起点は直前の手動目標値**であって
 フィードバックではない（毎回フィードバックから取ると、追従が遅れているあいだの連打が
 吸われて「押した回数だけ動かない」）。
+
+**開発用コマンドは起動オプションで語彙ごと開閉する。** 指差喚呼の一括チェック
+（`checklist_check_all`）は `--dev-tools` / `CBC_DEV_TOOLS=1` で起動したときだけ受理する。
+既定を有効にすると「点検していないのに試合を開始できる」経路が常設される。フラグの正は
+サーバーが持ち、接続直後の `server_info` で UI へ配る — 表示可否を Vite のビルド時定数に
+すると、同じ `web/dist` を配る本番と開発で再ビルドが要り切り替えとして機能しない。
+ゲートは `CommandSpec.requires_dev_tools`（サーバー）と `serverInfo.dev_tools`（UI の描画）の
+2 重で、UI 側だけにするとフラグ配信が壊れた瞬間に本番でも押せるボタンが残る。
 
 **試合を開始できるかを決めるのはサーバーの `can_start_match` だけ。** UI は理由を説明する
 だけで、`checklists` から開始可否を導出し直してはならない。一度これを `StartGate` でやって、

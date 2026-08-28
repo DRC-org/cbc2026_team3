@@ -72,6 +72,7 @@ _DURATION_KEYS = frozenset({"feedback_age_ms"})
 REQUIRED_TYPES = frozenset(
     {
         "state",
+        "server_info",
         "match_state",
         "health_change",
         "e_stop_state",
@@ -260,7 +261,8 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
-            # 接続直後のスナップショット
+            # 接続直後のスナップショット (server_info → match_state の順で届く)
+            samples["server_info"] = await require_type(ws, "server_info")
             samples["match_state"] = await require_type(ws, "match_state")
 
             # 手動で 1 軸だけ動かしてから state を採る。target が null のままだと

@@ -93,6 +93,19 @@ export interface CheckRunSnapshot {
   records: MotorCheckRecord[];
 }
 
+/**
+ * 起動オプション由来の、試合中に変わらない情報。接続直後に 1 度だけ届く。
+ *
+ * 開発用ボタンの表示可否をビルド時定数で決めると、同じ `web/dist` を配る本番と
+ * 開発で再ビルドが要る (= 切り替えとして機能しない)。正はサーバーが持つ。
+ */
+export interface ServerInfo {
+  /** 開発用コマンド (指差喚呼の一括チェック等) が解禁されているか */
+  dev_tools: boolean;
+  /** CAN バス無しで起動しているか (機体は繋がっていない) */
+  dry_run: boolean;
+}
+
 export type MatchCourt = "red" | "blue";
 export type MatchPhase = "setup" | "ready" | "match" | "finished";
 export type ChecklistRole = "main_hand" | "sub_hand";
@@ -275,6 +288,7 @@ export interface RobotState {
 /** 受信条件を通ったメッセージ。UI 状態へ入れる形まで正規化してある */
 export type ServerMessage =
   | { type: "state"; robot: string; state: RobotState }
+  | { type: "server_info"; serverInfo: ServerInfo }
   | { type: "match_state"; matchState: MatchState }
   | { type: "e_stop_state"; active: boolean; reason: string | null }
   | { type: "command_rejected"; command: string; reason: string }
@@ -332,6 +346,16 @@ function parseKnown(raw: Raw): ServerMessage | null {
     case "state":
       // モータ名をハードコードしないため、配信内容はそのまま UI 状態へ入れる
       return robot === null ? null : { type: "state", robot, state: raw as unknown as RobotState };
+
+    case "server_info":
+      // 欠けたフラグは「無効」に倒す。開発用ボタンが本番で出るより出ない方が安全
+      return {
+        type: "server_info",
+        serverInfo: {
+          dev_tools: raw.dev_tools === true,
+          dry_run: raw.dry_run === true,
+        },
+      };
 
     case "match_state":
       // サーバーが正。接続直後のスナップショットと変化通知の両方がここに来る

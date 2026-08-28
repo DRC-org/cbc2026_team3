@@ -1413,7 +1413,8 @@ setup ⇄ ready → match → finished → setup
 「全フェーズ許可なのに拒否理由が書いてある」といった矛盾を import 時に弾く。
 
 `lib/server.py` は語彙を持たない。`handle_command` は `spec_for(type)` で仕様を引き、
-2 段のゲートを掛け、`spec.handler` の名前で `_cmd_*` を呼ぶだけになっている。
+3 段のゲート（開発用 → フェーズ → 緊急停止）を掛け、`spec.handler` の名前で `_cmd_*` を
+呼ぶだけになっている。
 
 ### フェーズによるコマンドゲート
 
@@ -1549,6 +1550,13 @@ M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_mes
 
 ### WebSocket プロトコル拡張
 
+Server → Client（**WS 接続直後に 1 回だけ**）。起動オプション由来で試合中に変わらないため
+定期配信には載せない:
+
+```jsonc
+{ "type": "server_info", "dev_tools": false, "dry_run": false }
+```
+
 Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後に送らないと、リロードした操縦者が
 現在のコート・フェーズを知れない。`checklists` のキーがそのまま試合開始のゲート対象ロール:
 
@@ -1575,6 +1583,7 @@ Client → Server:
 { "type": "set_court", "court": "blue" }
 { "type": "checklist_set", "role": "main_hand", "item_id": "home_position", "checked": true }
 { "type": "checklist_reset", "role": "main_hand" }   // role 省略で全ロール
+{ "type": "checklist_check_all", "role": "main_hand" } // 開発用。--dev-tools 起動時のみ受理
 { "type": "match_start" }
 { "type": "match_finish" }
 { "type": "match_reset" }
@@ -1649,6 +1658,34 @@ checklists:
 `id` はロール内で一意。`id` / `label` を欠くエントリは無視して起動する
 （yaml の記述ミスで起動が落ちるより、UI 上で項目欠落に気付ける方が競技当日の運用に適する）。
 `--checklist <path>` でパスを差し替え可能。ファイルが無ければ項目ゼロで起動する。
+
+### 開発用コマンド（`--dev-tools` / `CBC_DEV_TOOLS=1`）
+
+開発中は機構の動作を試すたびに指差喚呼 12 項目を手で埋めることになり、確認したい
+シーケンスへ入るまでの手間が本題を圧迫する。そこで**指差喚呼を 1 操作で埋める
+`checklist_check_all`** を用意し、起動オプションで解禁されたときだけ受け付ける。
+
+```bash
+uv run python main.py --dev-tools      # CLI 引数
+CBC_DEV_TOOLS=1 uv run python main.py  # 環境変数（systemd unit 等から渡す用）
+```
+
+**既定は無効。** 指差喚呼の完了は試合開始のゲートそのもの（`can_start_match`）なので、
+一括チェックが常時使えると「点検していないのに試合を開始できる」経路が常設される。
+
+**フラグの正はサーバーが持ち、UI へは `server_info` メッセージで配る。** ボタンの表示可否を
+Vite のビルド時定数で決めると、同じ `web/dist` を配る本番と開発で再ビルドが要り、
+切り替えとして機能しない（`lib/server.py` が `web/dist/` を SPA 配信する構成のため）。
+`server_info` は起動オプション由来で試合中に変わらないので、接続直後に 1 度だけ送る
+（定期配信に載せない）。
+
+**ゲートは 2 重。** `CommandSpec.requires_dev_tools` がサーバー側で語彙ごと閉じ、UI 側は
+`serverInfo.dev_tools` が偽ならボタンを描かない。UI だけの実装にすると、フラグの配信が
+壊れた瞬間に本番でも押せるボタンが残る。フェーズゲートは `checklist_set` と同じ
+`PHASES_PREPARATION` のままで、開発用でも試合中には触れない。
+
+一括チェックは `logger.warning` で必ずログに残す。試合直前のログを追ったときに
+「実際に点検したのか、開発用ボタンで埋めたのか」が区別できないと困るため。
 
 ---
 

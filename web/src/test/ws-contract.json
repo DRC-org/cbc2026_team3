@@ -118,6 +118,11 @@
       "robot": "main_hand",
       "type": "motor_check_record"
     },
+    "server_info": {
+      "dev_tools": false,
+      "dry_run": false,
+      "type": "server_info"
+    },
     "state": {
       "current_step": "初期位置へ移動",
       "e_stop_active": false,

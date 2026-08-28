@@ -14,15 +14,22 @@ const ITEMS: ChecklistState = {
   completed: false,
 };
 
-function mount(checklist: ChecklistState | undefined, phase: MatchPhase = "setup") {
+function mount(
+  checklist: ChecklistState | undefined,
+  phase: MatchPhase = "setup",
+  devTools = false,
+) {
   return renderWithRobot(<Checklist checklistRole="main_hand" title="メインハンド" />, {
     matchState: {
       ...DEFAULT_MATCH_STATE,
       phase,
       checklists: checklist ? { main_hand: checklist } : {},
     },
+    serverInfo: { dev_tools: devTools, dry_run: false },
   });
 }
+
+const DEV_BUTTON = /開発用に全てチェック/;
 
 describe("Checklist", () => {
   it("項目とチェック済み件数を表示する", () => {
@@ -98,5 +105,29 @@ describe("Checklist", () => {
   it.each<MatchPhase>(["setup", "ready"])("%s フェーズでは操作できる", (phase) => {
     mount(ITEMS, phase);
     expect(screen.getByLabelText("電源投入")).toBeEnabled();
+  });
+
+  describe("開発用の一括チェック", () => {
+    it("サーバーが開発用フラグを配っていなければボタンごと出さない", () => {
+      mount(ITEMS);
+      expect(screen.queryByRole("button", { name: DEV_BUTTON })).not.toBeInTheDocument();
+    });
+
+    it("開発用フラグが立っていれば押せる", async () => {
+      const { context } = mount(ITEMS, "setup", true);
+
+      await userEvent.click(screen.getByRole("button", { name: DEV_BUTTON }));
+      expect(context.checkAllChecklist).toHaveBeenCalledWith("main_hand");
+    });
+
+    it("完了済みなら押せない (押しても変わらない操作を残さない)", () => {
+      mount({ ...ITEMS, completed: true }, "setup", true);
+      expect(screen.getByRole("button", { name: DEV_BUTTON })).toBeDisabled();
+    });
+
+    it.each<MatchPhase>(["match", "finished"])("%s フェーズでは押せない", (phase) => {
+      mount(ITEMS, phase, true);
+      expect(screen.getByRole("button", { name: DEV_BUTTON })).toBeDisabled();
+    });
   });
 });

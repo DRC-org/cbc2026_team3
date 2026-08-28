@@ -96,6 +96,10 @@ class ChecklistState:
         for item in self.items:
             item.checked = False
 
+    def check_all(self) -> None:
+        for item in self.items:
+            item.checked = True
+
     def to_dict(self) -> dict:
         return {
             "role": self.role,
@@ -222,6 +226,26 @@ class MatchState:
                 self._sync_phase()
                 return True
         return False
+
+    def check_all_checklist_items(self, role: str | None = None) -> bool:
+        """指差喚呼を一括で完了扱いにする (開発用)。role=None なら全ロール。
+
+        試合開始ゲートを飛ばす操作なので、呼べるのは開発用フラグを立てた起動だけに
+        限る (ゲートは lib/commands.py の requires_dev_tools が持つ)。ここでは
+        reset_checklist と同じフェーズ条件だけを見る。
+        """
+        if not self.allows(PHASES_PREPARATION):
+            return False
+        if role is None:
+            for state in self.checklists.values():
+                state.check_all()
+        else:
+            state = self.checklists.get(role)
+            if state is None:
+                return False
+            state.check_all()
+        self._sync_phase()
+        return True
 
     def reset_checklist(self, role: str | None = None) -> bool:
         if not self.allows(PHASES_PREPARATION):

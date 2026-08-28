@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 
-import type { ChecklistRole, MatchCourt, MatchState, RobotState } from "@/lib/protocol";
+import type { ChecklistRole, MatchCourt, MatchState, RobotState, ServerInfo } from "@/lib/protocol";
 import type { CommandRejectedEvent, HealthChangeEvent, MotorCheckState } from "@/lib/robotReducer";
 import type { WsUrlSource } from "@/lib/wsUrl";
 
@@ -31,6 +31,8 @@ export interface RobotStatus {
   healthEvents: HealthChangeEvent[];
   motorChecks: Record<string, MotorCheckState>;
   matchState: MatchState;
+  /** 起動オプション由来。接続直後に 1 度届いたきり変わらない */
+  serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
   wsUrl: string;
   wsUrlSource: WsUrlSource;
@@ -48,6 +50,8 @@ export interface RobotCommands {
   setCourt: (court: MatchCourt) => void;
   setChecklistItem: (role: ChecklistRole, itemId: string, checked: boolean) => void;
   resetChecklist: (role: ChecklistRole) => void;
+  /** 開発用。サーバーが --dev-tools 起動でなければ拒否される */
+  checkAllChecklist: (role: ChecklistRole) => void;
   matchStart: () => void;
   matchFinish: () => void;
   matchReset: () => void;
@@ -77,6 +81,7 @@ export function RobotProvider({
     healthEvents,
     motorChecks,
     matchState,
+    serverInfo,
     rejection,
     wsUrl,
     wsUrlSource,
@@ -90,6 +95,7 @@ export function RobotProvider({
     setCourt,
     setChecklistItem,
     resetChecklist,
+    checkAllChecklist,
     matchStart,
     matchFinish,
     matchReset,
@@ -105,6 +111,7 @@ export function RobotProvider({
       healthEvents,
       motorChecks,
       matchState,
+      serverInfo,
       rejection,
       wsUrl,
       wsUrlSource,
@@ -116,6 +123,7 @@ export function RobotProvider({
       healthEvents,
       motorChecks,
       matchState,
+      serverInfo,
       rejection,
       wsUrl,
       wsUrlSource,
@@ -134,6 +142,7 @@ export function RobotProvider({
       setCourt,
       setChecklistItem,
       resetChecklist,
+      checkAllChecklist,
       matchStart,
       matchFinish,
       matchReset,
@@ -149,6 +158,7 @@ export function RobotProvider({
       setCourt,
       setChecklistItem,
       resetChecklist,
+      checkAllChecklist,
       matchStart,
       matchFinish,
       matchReset,
