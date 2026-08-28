@@ -102,3 +102,35 @@ describe("Dashboard (セッティングタイム)", () => {
     expect(screen.getByText("試合設定")).toBeInTheDocument();
   });
 });
+
+/**
+ * 試合中の Monitor。手動操縦は「機体は動いているのにシーケンスは進まない」
+ * 状態を作るので、その理由が Monitor から読めなければならない。
+ */
+describe("Dashboard (試合中の手動操縦)", () => {
+  const MATCH: MatchState = { ...SETUP, phase: "match", can_start_match: true };
+
+  it("手動中のハンドにチップが出る", () => {
+    renderWithRobot(<Dashboard />, {
+      matchState: MATCH,
+      states: {
+        main_hand: robot({ manual: { mode: "manual", axes: [] } }),
+        sub_hand: robot({ robot: "sub_hand" }),
+      },
+    });
+
+    expect(screen.getAllByText("手動操縦中")).toHaveLength(1);
+  });
+
+  it("半自動のままなら出さない", () => {
+    renderWithRobot(<Dashboard />, {
+      matchState: MATCH,
+      states: {
+        main_hand: robot({ manual: { mode: "sequence", axes: [] } }),
+        sub_hand: robot({ robot: "sub_hand" }),
+      },
+    });
+
+    expect(screen.queryByText("手動操縦中")).toBeNull();
+  });
+});

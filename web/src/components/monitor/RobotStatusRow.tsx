@@ -44,6 +44,10 @@ export function RobotStatusRow({ label, state }: RobotStatusRowProps) {
     );
   }
 
+  // 手動中はシーケンスが止まっているので、進行状態だけを見ると「待機中」に見える。
+  // Monitor から「どちらのハンドが手動か」が分からないと、機体が動いている理由も
+  // シーケンスが進まない理由も画面から説明できない
+  const inManual = state.manual?.mode === "manual";
   const activity = ACTIVITY[sequenceKind(state)];
   const { total_steps: total, step_index: index, waiting_trigger: waiting } = state;
   const isComplete = isSequenceComplete(state);
@@ -62,6 +66,7 @@ export function RobotStatusRow({ label, state }: RobotStatusRowProps) {
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5">
         <span className="text-[1.2em] font-semibold">{label}</span>
         <StatusBadge tone={activity.tone}>{activity.label}</StatusBadge>
+        {inManual ? <StatusBadge tone="warning">手動操縦中</StatusBadge> : null}
         <span className="ml-auto shrink-0 font-mono text-base-content/70 tabular-nums">
           {displayIndex}
           <span className="text-base-content/45">/{total}</span>

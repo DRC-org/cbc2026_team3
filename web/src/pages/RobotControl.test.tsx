@@ -2,7 +2,13 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import type { MatchPhase, MatchState, RobotState, SequenceStepInfo } from "@/lib/protocol";
+import type {
+  ManualState,
+  MatchPhase,
+  MatchState,
+  RobotState,
+  SequenceStepInfo,
+} from "@/lib/protocol";
 import { RobotControl } from "@/pages/RobotControl";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
@@ -251,5 +257,139 @@ describe("RobotControl の診断表示", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+  });
+});
+
+const MANUAL: ManualState = {
+  mode: "manual",
+  axes: [
+    {
+      name: "rotate",
+      unit: "deg",
+      command_mode: "position",
+      value: 3,
+      target: null,
+      manual: { min: -5, max: 30, steps: [1, 5] },
+      positions: ["home", "pick"],
+      motors: ["rotate_r", "rotate_l"],
+    },
+  ],
+};
+
+/** 手動モードで描く。モードの正はサーバー配信の state.manual.mode */
+function mountManual(
+  phase: MatchPhase,
+  overrides: Partial<Parameters<typeof renderWithRobot>[1]> = {},
+  manual: ManualState = MANUAL,
+) {
+  return renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+    states: { sub_hand: robotState({ manual }) },
+    matchState: { ...DEFAULT_MATCH_STATE, phase, checklists: CHECKLISTS, timer: null },
+    ...overrides,
+  });
+}
+
+describe("手動操縦モード", () => {
+  it("配信を受け取るまでは半自動として描く", () => {
+    // 機体を直接動かせる状態を、確証のないまま画面へ出さない
+    mount("match", robotState({ manual: undefined }));
+
+    expect(screen.getByRole("tab", { name: "半自動へ切り替え" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("モード帯はどのフェーズでも同じ位置に出る", () => {
+    // 「今この画面から機体を直接動かせるか」は準備中も試合中も同じ場所で読める
+    for (const phase of ["setup", "match", "finished"] as MatchPhase[]) {
+      const view = mount(phase);
+      expect(screen.getByRole("tab", { name: "手動操縦へ切り替え" })).toBeInTheDocument();
+      view.unmount();
+    }
+  });
+
+  it("切り替えは自分の担当機へ宛てて送る", async () => {
+    const { context } = mount("match");
+
+    await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
+
+    expect(context.send).toHaveBeenCalledWith({
+      type: "set_operation_mode",
+      robot: "sub_hand",
+      mode: "manual",
+    });
+  });
+
+  it("試合中は手動パネルがシーケンスの操作面を置き換える", () => {
+    // 同じ列に 2 つの操作面が並ぶと、どちらの指令が機体へ届くのか読めなくなる
+    mountManual("match");
+
+    expect(screen.getByLabelText("rotate を 1deg 進める")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "シーケンスを先頭から開始" })).toBeNull();
+  });
+
+  it("準備中は手動パネルが指差喚呼を置き換える", () => {
+    mountManual("setup");
+
+    expect(screen.getByLabelText("rotate を home へ")).toBeInTheDocument();
+    expect(screen.queryByText(/セッティング指差喚呼/)).toBeNull();
+  });
+
+  it("試合終了後も手動で動かせる", () => {
+    // 退避や片付けは試合が終わってからのほうが多い
+    mountManual("finished");
+
+    expect(screen.getByLabelText("rotate を 1deg 進める")).toBeEnabled();
+  });
+
+  it("手動中は Space が sequence_start にならない", async () => {
+    // 誤爆した Space でシーケンスが走り出すと、手動で動かしている機構とぶつかる
+    const { context } = mountManual("match");
+
+    pressSpace();
+
+    expect(context.send).not.toHaveBeenCalled();
+  });
+
+  it("緊急停止中は理由を出して指令を塞ぐ", async () => {
+    const { context } = mountManual("match", { eStopActive: true });
+
+    expect(screen.getAllByText("緊急停止中は手動操縦できません").length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByLabelText("rotate を home へ"));
+    expect(context.send).not.toHaveBeenCalled();
+  });
+
+  it("緊急停止中でもモード切替は送れる", async () => {
+    // 停止中に画面を手動へ寄せ、解除と同時に動かす手順を塞ぐ理由が無い
+    const { context } = mountManual(
+      "match",
+      { eStopActive: true },
+      { mode: "sequence", axes: MANUAL.axes },
+    );
+
+    await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
+
+    expect(context.send).toHaveBeenCalledWith({
+      type: "set_operation_mode",
+      robot: "sub_hand",
+      mode: "manual",
+    });
+  });
+
+  it("手動中は準備フェーズの動作確認を押す前に塞ぐ", () => {
+    // サーバーも拒否するが、押してから拒否トーストで気付くのでは遅い
+    mountManual("setup");
+
+    expect(screen.getByRole("button", { name: /動作確認を開始/ })).toBeDisabled();
+    expect(screen.getByText("手動操縦モードのため実行できません")).toBeInTheDocument();
+  });
+
+  it("手動中は機体状態を畳まない", () => {
+    // 機体を直接動かしている最中は「操縦者は機体を見ており画面は一瞬しか見ない」
+    // という前提が成り立たない
+    mountManual("match");
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 });

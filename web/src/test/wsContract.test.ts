@@ -9,6 +9,9 @@ import type {
   ChecklistState,
   HealthChange,
   HealthSnapshot,
+  ManualAxis,
+  ManualRange,
+  ManualState,
   MatchState,
   MatchTimer,
   MotorCheckRecord,
@@ -71,6 +74,10 @@ const STATE_FIELDS_UI_READS = [
   // 配信から落ちれば画面はグリッパ・コンベアの無反応を説明できなくなる
   "safety.refreshers_running",
   "safety.target_refreshers",
+  // 手動操縦。落ちれば操作モードの表示も軸一覧も出せなくなる
+  "manual",
+  "manual.mode",
+  "manual.axes",
 ] as const;
 
 /**
@@ -89,6 +96,8 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].running).toBe(sample.running);
     // 安全機構 (ラッチ中の軸・保護ループの生死) も配信そのまま
     expect(result.states[robot].safety).toEqual(sample.safety);
+    // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
+    expect(result.states[robot].manual).toEqual(sample.manual);
   },
 
   match_state: (result, sample) => {
@@ -317,6 +326,30 @@ const SAFETY = fieldsOf<SafetyState>({
   target_refreshers: "ui",
 });
 
+const MANUAL_RANGE = fieldsOf<ManualRange>({
+  min: "ui",
+  max: "ui",
+  steps: "ui",
+});
+
+const MANUAL_AXIS = fieldsOf<ManualAxis>({
+  name: "ui",
+  unit: "ui",
+  value: "ui",
+  target: "ui",
+  manual: "ui",
+  positions: "ui",
+  command_mode: "ui",
+  motors: {
+    unused: "軸行はモータ単位では操作させない (左右直結ペアが別々に動くと機構がねじれる)",
+  },
+});
+
+const MANUAL = fieldsOf<ManualState>({
+  mode: "ui",
+  axes: "ui",
+});
+
 const STEP = fieldsOf<SequenceStepInfo>({
   index: "ui",
   label: "ui",
@@ -365,6 +398,7 @@ const STATE_FIELDS: FieldSpec = {
     e_stop_active: "ui",
     health: "ui",
     safety: "ui",
+    manual: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
   ...nest("motors.*", MOTOR_STATE),
@@ -376,6 +410,9 @@ const STATE_FIELDS: FieldSpec = {
   ...nest("safety.sync_monitors[]", SYNC_MONITOR),
   ...nest("safety.target_refreshers[]", TARGET_REFRESHER),
   ...nest("steps[]", STEP),
+  ...nest("manual", MANUAL),
+  ...nest("manual.axes[]", MANUAL_AXIS),
+  ...nest("manual.axes[].manual", MANUAL_RANGE),
 };
 
 const E_STOP_FIELDS = fieldsOf<WireOf<"e_stop_state">>({

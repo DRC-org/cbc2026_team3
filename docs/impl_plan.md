@@ -644,6 +644,16 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | `SET_TARGET` を 1 通も受けるまで出力しない | `MotorSafety::isOutputAllowed` の `everFed_` を `watchdogEnabled_` の内側へ入れる | `firmware/test/test_protocol/` |
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |
+| 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
+| 手動と動作確認の排他 | `_start_motor_check` の手動拒否を落とす / 切替側の実行タスク判定を落とす | `test_server_motor_check.py`（`TestMotorCheckAndManualAreExclusive`） |
+| 手動でもペア軸は同一フレームで指令される | `ManualController._send` を `AxisHandle` 経由からモータ単体の逐次送信へ戻す | `test_manual.py` |
+| 手動指令は可動範囲を出ない | `ManualSpec.clamp` を素通しにする / `_require_manual` を外す / `_check_manual_range` を落とす | `test_manual.py` / `test_sequence_positions.py` |
+| 緊急停止中は手動指令が 1 通も出ない（切替は通る） | `manual_*` の `allowed_during_e_stop` を反転する / `set_operation_mode` を `False` にする | `test_commands.py` / `test_server_manual.py` |
+| 緊急停止でジョグの起点を捨てる | `ManualController.on_e_stop` を空にする / `activate_e_stop` の呼び出しを落とす | `test_manual.py` / `test_server_manual.py` |
+| ジョグの起点は目標値で積む | 起点を毎回フィードバックから取る形へ戻す（**フィードバックが追従しないドライバでしか検出できない**） | `test_manual.py` |
+| ロボット 1 台分の部品が main からサーバーへ届く | `main()` の `add_robot(...)` から `manual=` を落とす | `test_main_wiring.py` |
+| 押している間くり返すジョグが必ず止まる | `useHoldRepeat` の停止経路を 1 つ落とす / アンマウント時の解除を外す | `useHoldRepeat.test.ts` |
+| 手動中は UI もシーケンス操作を出さない | `RobotControl` の `inManual` 分岐を潰す / `Space` の無効化を外す | `RobotControl.test.tsx` |
 | 判定できないヘルスは DOWN | 例外時の既定を OK に倒す | `test_health.py` / `test_server_health.py` |
 | 解釈できたフレームでしか鮮度を進めない | `_last_rx_at` の更新を `update_state` より前へ動かす | `test_can_manager.py` / `test_can_manager_health.py` |
 | 試合時間タイマーが全デバイスで一致する | 配信の `elapsed_ms` を 0 に固定する / クライアントがサーバーの経過値を無視して 0 から数える / 新しい配信でアンカーを取り直さない / 固定間隔で起こす | `test_match_state.py` / `test_server_match.py` / `MatchTimer.test.tsx` |
@@ -852,6 +862,7 @@ tests/
 ├── test_can_manager.py          # 登録・送信先の解決・受信ループの堅牢性・励磁シーケンス
 ├── test_can_manager_health.py   # 受信タイムアウト → STALE、送信失敗 → DOWN
 ├── test_health.py               # ヘルス判定・状態遷移・JSON シリアライズ
+├── test_manual.py               # ManualController（クランプ・軸単位の同時指令・ジョグ起点）
 ├── test_motor_check.py          # MotorCheckRunner（PASSED/FAILED/TIMEOUT・abort）
 ├── test_match_state.py          # コート / フェーズ / チェックリスト
 ├── test_ws_protocol.py          # WebSocket JSON プロトコル
@@ -860,6 +871,7 @@ tests/
 ├── test_server_match.py         # 試合運用フローとフェーズゲート
 ├── test_server_motor_check.py   # 動作確認の WS イベント列と競合拒否
 ├── test_server_e_stop.py        # 緊急停止でのシーケンス停止とコマンドゲート
+├── test_server_manual.py        # 操作モードの遷移・制御権の排他・手動指令のゲート
 ├── test_server_set_param.py     # set_param の受理・拒否
 ├── test_server_command_rejected.py  # command_rejected を要求元だけに返すこと
 ├── test_server_broadcast_resilience.py  # 詰まったクライアントで配信を止めないこと
@@ -892,14 +904,14 @@ web/
     ├── {App,routes}.test.tsx
     ├── lib/{cx,phase,tabs,wsUrl,daisyPairs,healthVerdict,sequenceStatus}.test.ts(x)
     ├── lib/{protocol,robotReducer}.test.ts   # 接続を張らずに受信条件と状態遷移を検証する
-    ├── hooks/{useRobotSocket,useHotkeys,useMotorCheck,useWsUrl}.test.ts(x)
+    ├── hooks/{useRobotSocket,useHotkeys,useHoldRepeat,useMotorCheck,useWsUrl}.test.ts(x)
     ├── context/RobotContext.test.tsx   # 購読の分割が再描画を止めていること
     ├── layouts/RootLayout.test.tsx     # テレメトリで外枠が描き直されないこと
     ├── pages/{Dashboard,RobotControl,MotorTuning}.test.tsx
     └── components/          # テストは対象と同じグループディレクトリに置く
         ├── shell/{ConnectionBanner,Toaster,WsSettings,EStopOverlay,TabBar}.test.tsx
         ├── monitor/{StartGate,MatchControl}.test.tsx
-        ├── operator/{ActionPanel,Checklist,TriggerButton}.test.tsx
+        ├── operator/{ActionPanel,Checklist,TriggerButton,ModeSwitch,ManualPanel,ManualAxisRow}.test.tsx
         ├── motorcheck/{MotorCheckButton,MotorCheckPanel,MotorCheckSummary}.test.tsx
         ├── diagnostics/{HealthIndicator,SubsystemStatus}.test.tsx
         └── ui/Modal.test.tsx
@@ -916,6 +928,8 @@ web/
   再描画される範囲。再描画回数そのものを assert する（1 秒 40 回の描画は
   操作の取りこぼしとして現れるので、目視では原因にたどり着けない）
 - `useHotkeys` — 修飾キー・入力欄・モーダル表示中の抑止。競技中の誤爆は機体破損に直結する
+- `useHoldRepeat` — ジョグの長押しリピートが**必ず止まること**。停止経路を 1 つでも
+  取りこぼすと、指を離したのに機体が動き続ける。押し始めの発火より停止経路の網羅が重要
 - `Toaster` / `TriggerButton` / `Checklist` — 状態から表示・活性が一意に決まることの確認
 - `pages/RobotControl.tsx` / `pages/MotorTuning.tsx` — 画面が組み上がったときにしか
   現れない性質を見る。**主操作の宛先が担当機に揃っていること**（1 箇所でも相手機に
@@ -1203,6 +1217,34 @@ lossy にしない。
 操縦者が E-STOP を押すのは普通の流れで、そこで上書きすると説明が「機体が検知した原因」から
 「操縦者が押した」へ変わる。保持した理由は `e_stop_release` で捨てる。
 
+#### `state` の `manual`（操作モードと手動操縦の軸一覧）
+
+```jsonc
+"manual": {
+  "mode": "sequence",          // "sequence" | "manual"
+  "axes": [
+    {
+      "name": "y_axis",
+      "unit": "mm",
+      "command_mode": "position",
+      "value": 12.3,           // フィードバックの逆換算。位置を測れない軸は null
+      "target": 12.0,          // 直前の手動目標。一度も送っていなければ null
+      "manual": { "min": -2.0, "max": 20.0, "steps": [0.5, 2.0, 5.0] },  // 連続操作不可なら null
+      "positions": ["home", "work_3", "approach", "place"],
+      "motors": ["y_axis_r", "y_axis_l"]
+    }
+  ]
+}
+```
+
+軸定義（可動範囲・プリセット名）は静的だが、`steps`（シーケンスのステップ表）と同じく
+`state` に載せる。**UI に軸名も可動範囲も書かせない**ためで、機構が変わって軸が増減しても
+Web 側の変更は要らない。現在値だけがテレメトリなので配信周期はそちらに合わせる。
+
+`value` は位置指令の軸だけが持つ。DC 基板はエンコーダを持たないので、`conveyor` に
+逆換算した 0 を載せると「測ったように見える 0」が UI へ流れ込む（`null` を配って
+UI に「読めていない」ことを出させる）。
+
 ### Client → Server（操作）
 
 ```jsonc
@@ -1213,6 +1255,12 @@ lossy にしない。
 { "type": "e_stop" }
 { "type": "e_stop_release" }
 { "type": "set_param", "motor": "m3508_1", "key": "kp", "value": 1.5 }
+
+// 手動操縦 (調整時・緊急時の補助操縦)
+{ "type": "set_operation_mode", "robot": "main_hand", "mode": "manual" }  // "sequence" | "manual"
+{ "type": "manual_move", "robot": "main_hand", "axis": "gripper", "position": "open" }
+{ "type": "manual_set",  "robot": "main_hand", "axis": "y_axis", "value": 12.5 }   // 人間の単位
+{ "type": "manual_jog",  "robot": "main_hand", "axis": "y_axis", "delta": -0.5 }
 ```
 
 ### シーケンス制御コマンドのセマンティクス
@@ -1234,6 +1282,49 @@ lossy にしない。
 各所で書き写すことになり、書き忘れた経路だけが停止位置から再開する。緊急停止は
 `discard_pending_start()` で未処理の開始要求を捨てる。捨てないと、停止処理を終えた
 次の瞬間に直前の要求が発火し、操縦者が何も押していないのに機体が動き出す。
+
+### 手動操縦（`set_operation_mode` / `manual_*`）
+
+調整時と、シーケンスが想定外の状態で止まったときの退避に使う補助操縦。
+**運用の主体は半自動シーケンス制御のままで、手動はその代替ではない。**
+
+- **set_operation_mode**: そのロボットの制御権を切り替える。`sequence` ⇄ `manual`。
+  手動へ入るとき `_stop_sequence(ctx, discard_pending_start=True)` でシーケンスの
+  制御権を手放させ、動作確認の実行中（`_motor_check_tasks` の生死で判定）は拒否する
+- **manual_move**: 位置名で指令する。**全軸で使える**（既定義の点しか送らない）
+- **manual_set**: 人間の単位の絶対値で指令する。`axes.<軸>.manual` を持つ軸のみ
+- **manual_jog**: 直前の手動目標からの相対移動。同上
+
+**フェーズではゲートしない（`PHASES_ANY`）。** 調整は準備中に、退避は試合中に要るので、
+どちらかへ閉じると「要るときに使えない操作」になる。一方で**緊急停止ゲートは別軸**で、
+機体を動かさない `set_operation_mode` は通し、目標値を送る `manual_*` は通さない。
+ここを 1 つにまとめると「停止中に画面を手動へ寄せられない」か「停止中に機体が動く」の
+どちらかになる。
+
+**指令経路はシーケンスと同一。** `ManualController` は `main.py` でシーケンスと同じ
+`MotorGroup` を共有し、`AxisHandle` を通してしか送らない。したがって緊急停止
+インターロック（`MotorHandle.set_target`）、M3508 の PC 側 PID への迂回（`target_sink`）、
+自作モタドラの 20Hz 再送、左右ペアの 3 層保護はすべてそのまま効く。手動用に別の
+`MotorGroup` を組むと、これらが 2 セットに分かれて片方の配線落ちに気付けなくなる
+（`tests/test_main_wiring.py` の `TestBuildManualController` / `TestRobotContextReachesTheServer`）。
+
+**モータ単位の指令口を作らない。** 左右直結ペアが別々の時刻に動くと機構がねじれるため、
+指令は軸単位で 1 回だけ（`asyncio.gather` で束ねる `AxisHandle.set_target_value`）。
+UI にもモータ単位のジョグを出さない。
+
+**ジョグの起点は直前の手動目標値。** 毎回フィードバックから取ると、追従が遅れている
+あいだの連打が吸われて「押した回数だけ動かない」。起点が無い（初回・緊急停止後）
+ときだけフィードバックから逆換算する（`AxisSpec.to_value`）。緊急停止では必ず捨てる
+（停止中に自重で下がっていると、解除後 1 回目のジョグが古い起点から飛ぶ）。
+
+**モータの目標値はモード切替では消さない。** 消すと保持トルクを失って昇降軸が落ちる。
+消すのはジョグの起点だけ。
+
+**半自動へ戻してもシーケンスは自動再開しない。** 手動で機構を動かした後に先頭から
+流すと姿勢と手順が食い違う。再開ステップは操縦者が `sequence_jump` で選ぶ。
+
+**`match_reset` は全ロボットを `sequence` へ戻す。** 復帰操作は既知の状態へ戻すもので、
+手動のまま次の準備に入ると、切り替えたことを忘れたまま `sequence_start` が無反応になる。
 
 ### パラメータ変更（`set_param`）
 
@@ -1280,12 +1371,21 @@ lossy にしない。
 操縦者 2 名 + Monitor が**別ブラウザ**で接続するため、チェックリストの進捗をクライアント側に持つと
 「2 人とも完了」の判定ができない。**正は必ずサーバー側**に置く。
 
-### 2 つの直交する軸
+### 3 つの直交する軸
 
-| 軸 | 値 | 意味 |
-|---|---|---|
-| `court` | `red` / `blue` | 自陣コート。赤青で配置が左右反転する |
-| `phase` | `setup` → `ready` → `match` → `finished` | セッティングタイムと試合中を分離 |
+| 軸 | 値 | 範囲 | 意味 |
+|---|---|---|---|
+| `court` | `red` / `blue` | 全体で 1 つ | 自陣コート。赤青で配置が左右反転する |
+| `phase` | `setup` → `ready` → `match` → `finished` | 全体で 1 つ | セッティングタイムと試合中を分離 |
+| `mode` | `sequence` / `manual` | **ロボットごと** | 制御権を誰が握っているか（Phase 10 で追加） |
+
+`mode` だけがロボット単位なのは、メインハンドを調整しながらサブハンドの試合進行を
+続ける、という運用が成立しなければならないため。**正はいずれもサーバーが持つ**
+（操縦者 2 名 + Monitor が別ブラウザで繋がるので、片方の画面だけが別の状態に
+見えると、Monitor から機体の動きを説明できなくなる）。
+
+**`mode` は「制御権の持ち主」であって「シーケンスの走り方」ではない。** 全自動モードは
+存在せず、`require_trigger` は `sequence` モードでも常にトリガー待ちで止まる。
 
 ### フェーズ遷移
 
@@ -1576,7 +1676,47 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 | | setup / ready | match / finished |
 |---|---|---|
 | Monitor | `StartGate`（開始可否と阻害要因＝画面の主役）+ `MatchSettings` + 機体状態 + 操縦者の残項目 | `MatchStrip`（1 行）+ `RobotStatusRow` ×2 + `EventFeed` |
-| RobotControl | `Checklist`（主役）+ 動作確認 + `SubsystemStatus` | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
+| RobotControl（半自動） | `Checklist`（主役）+ 動作確認 + `SubsystemStatus` | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
+| RobotControl（手動） | `ManualPanel`（主役）+ 動作確認（不可・理由付き）+ `SubsystemStatus` | `ManualPanel`（主役）+ `SubsystemStatus`（右レール・展開） |
+
+### 操作モードの切り替え（`ModeSwitch`）
+
+RobotControl は最上段に**独立した帯**として `ModeSwitch` を置き、下の主役面を
+`ManualPanel` へ丸ごと明け渡す。**同じ列に 2 つの操作面を並べない** — どちらの指令が
+機体へ届くのかが画面から読めなくなる。
+
+帯をパネルの見出し行へ埋めないのは、「今この画面から機体を直接動かせる」ことが
+視線を戻した一瞬で読めなければならないため。手動中は帯の左端を警告色で塗り、
+Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「どちらのハンドが手動か」が
+分からないと、機体が動いている理由もシーケンスが進まない理由も説明できない）。
+
+**モード切替と手動指令は別の理由で塞がる。** サーバーは切替（機体を動かさない）を
+緊急停止中も通し、指令だけを塞ぐので、UI 側も `modeBlockedReason`（切断中のみ）と
+`manualBlockedReason`（切断中 / 緊急停止中）に分ける。1 つにまとめると、サーバーが
+受け付ける操作を画面が殺す（`can_start_match` を `StartGate` で導出し直したのと同じ誤り）。
+
+**手動中は `Space` を無効化する。** 誤爆した `Space` が `sequence_start` になると、
+手動で機構を動かしている最中にシーケンスが走り出す。
+
+**手動中は `SubsystemStatus` を畳まない。** 「操縦者は機体を見ており画面は一瞬しか
+見ない」という前提が、機体を直接動かしている最中には成り立たない。
+
+`ManualAxisRow` の見た目は軸の性格で 3 通りに分かれるが、分岐の根拠は配信された
+`manual` と `command_mode` だけで、**軸名は一切見ていない**。
+
+| 軸の性格 | 出すもの |
+|---|---|
+| `manual` を持つ連続軸（`y_axis` / `rotate` / `sub_arm_joint`） | ジョグ（±・ステップ量）+ 絶対値入力 + 可動範囲バー（表示専用）+ プリセット |
+| 離散状態アクチュエータ（`gripper` / `wall_*` / `sub_gripper`） | プリセットのみ |
+| duty 軸（`conveyor`） | プリセットのみ。現在値は `—`（測る手段が無い） |
+
+可動範囲バーは**ドラッグできる入力にしない**（触れた瞬間に機体が飛ぶ）。
+端に達したジョグボタンは無効化するが、判定に使うのは**現在値ではなく直前の手動目標**
+（追従が遅れているあいだ現在値で判定すると、目標が既に端でも押せてしまう）。
+ジョグの長押しリピートは `hooks/useHoldRepeat.ts` が持ち、`pointerup` /
+`pointerleave` / `pointercancel` / `blur` / アンマウントのすべてで止める
+（`setPointerCapture` を使うと `pointerleave` が飛ばなくなるので使ってはならない）。
+取りこぼした場合の最後の砦は可動範囲のクランプで、連続発火は必ず範囲の端で止まる。
 
 `MatchStrip` は必須。試合中に試合制御を全て隠すと `match_finish` の導線が消え、
 試合を終われなくなる（`match_finish` は MATCH フェーズ限定）。
@@ -1588,7 +1728,8 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 - `1`–`4`: タブ切替。表示中のタブは URL パス（`/main-hand` 等）そのものなので、リロードで復帰する。
   遷移時は `location.search` を引き継ぐ（`?ws=` の接続先上書きを落とさないため）
 - `Space`: 表示中のロボットの NEXT / START。ルーターは表示中のルートしか描画しないため、
-  ハンドラは表示中のロボットにだけ効く
+  ハンドラは表示中のロボットにだけ効く。**手動操縦モード中は無効**（誤爆した `Space` が
+  `sequence_start` になると、手動で機構を動かしている最中にシーケンスが走り出す）
 - 修飾キー併用・キーリピート・入力欄フォーカス中・モーダル表示中は一切発火しない。
   モーダル判定は `ModalContext` が持つ表示中モーダル数で行う（CSS クラスの DOM 検索には依存しない）
 
@@ -2781,6 +2922,63 @@ activation_steps()          LOC_REF = 実測角 → enable
   それでも通り抜けた enable のために停止フレームを再送する
 
 ---
+
+### Phase 10: 手動操縦（調整時・緊急時の補助操縦）— TDD
+
+**要求**: 開始前・試合中・終了後のどのフェーズでも、Web Controller の各ハンドのページから
+手動へ切り替えて軸を直接動かせるようにする。
+
+**この追加で本書の前提が 1 つ変わる。** 「操作モードという軸は存在しない」という
+Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という軸を 1 つ足した
+（`OperationMode` = `sequence` | `manual`、ロボットごとに独立）。撤回したのは
+持ち主の軸だけで、**シーケンスの走り方（半自動）は変えていない** —
+「全自動モード」は依然として存在せず、`require_trigger` は常にトリガー待ちで止まる。
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 10-1 | `tests/test_sequence_positions.py` | **テスト先行**: `axes.<軸>.manual` のパースと検証（`min >= max` / duty 軸 / 範囲外プリセットの起動拒否）、`AxisSpec.to_value` の逆換算 |
+| 10-2 | `lib/sequence/positions.py` (修正) | `ManualSpec` / `AxisSpec.manual` / `AxisSpec.to_value` / `_check_manual_range` |
+| 10-3 | `tests/test_manual.py` | **テスト先行**: クランプ、`manual` 未定義軸の拒否、軸単位の同時指令、ジョグ起点、緊急停止インターロック |
+| 10-4 | `lib/manual.py` (新規) | `OperationMode` / `ManualController` |
+| 10-5 | `tests/test_commands.py` | **テスト先行**: 4 コマンドが全フェーズ許可・`manual_*` だけ緊急停止で不可 |
+| 10-6 | `lib/commands.py` (修正) | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` |
+| 10-7 | `tests/test_server_manual.py` | **テスト先行**: モード遷移、制御権の排他、ゲート、配信、緊急停止での起点破棄 |
+| 10-8 | `lib/server.py` (修正) | `RobotContext.manual` / `.mode`、4 ハンドラ、`_apply_operation_mode`、`_stop_sequence`、`_manual_state`、動作確認の排他 |
+| 10-9 | `tests/test_main_wiring.py` | **テスト先行**: シーケンスと同じ `MotorGroup` を共有すること、`add_robot` の全引数が `main()` から渡ること |
+| 10-10 | `main.py` (修正) | `_build_manual_controller` と `add_robot(manual=...)` |
+| 10-11 | `web/src/test/ws-contract.json` | golden 再生成（`UPDATE_WS_CONTRACT=1`）。連続軸・離散軸・duty 軸の 3 形を含める |
+| 10-12 | `web/src/lib/protocol.ts` (修正) | `OperationMode` / `ManualRange` / `ManualAxis` / `ManualState` / `RobotState.manual` |
+| 10-13 | `web/src/hooks/useHoldRepeat.ts` (新規) | 長押しリピート。停止経路を多重に張る |
+| 10-14 | `web/src/components/operator/{ModeSwitch,ManualPanel,ManualAxisRow}.tsx` (新規) | モード帯と手動操作面 |
+| 10-15 | `web/src/pages/RobotControl.tsx` (修正) | モード帯の常設、手動時の主役面の差し替え、`Space` の無効化 |
+| 10-16 | `web/src/components/monitor/RobotStatusRow.tsx` (修正) | 手動中チップ（Monitor から判別できるようにする） |
+| 10-17 | `config/*_positions.yaml` (修正) | `y_axis` / `rotate` / `sub_arm_joint` に `manual` |
+
+#### 設計上の判断
+
+判断の詳細は「手動操縦（`set_operation_mode` / `manual_*`）」節と
+「操作モードの切り替え（`ModeSwitch`）」節にある。要点だけ再掲する。
+
+- **可動範囲の宣言を強制する**: 通常運用の `move_to` は位置名でしか値を引けず
+  「定義した状態以外を送れない」ことが構造的に保証されている。連続値を通す手動は
+  その保証を外すので、代わりの境界を config に宣言させ、無い軸は連続操作の対象外にする
+- **フェーズではゲートせず、緊急停止ゲートだけを効かせる**: 調整は準備中に、退避は
+  試合中に要る。一方、機体を動かさないモード切替は停止中も通し、目標値を送る指令は通さない
+- **指令経路はシーケンスと同一**: 手動用に別の `MotorGroup` を組まない。組むと
+  緊急停止インターロック・PID 迂回・再送対象が 2 セットに分かれ、片方の配線落ちに気付けない
+- **モード切替でモータの目標値を消さない**: 消すと保持トルクを失って昇降軸が落ちる。
+  消すのはジョグの起点だけ
+
+#### 未着手（この Phase では入れなかったもの）
+
+- **`conveyor` の押しっぱなし（デッドマン）操作**: 押している間だけ回す方式は
+  「100ms 間隔で hold を送り、300ms 途絶で自動停止する」周期監視を要する。
+  周期タスクが 1 本増え、「止める処理が止まる」形を作らない配慮が新たに必要になる。
+  現状は既存シーケンスと同じ `run` / `stop` のプリセットのみで、切断時のリスクは
+  シーケンス運用と同じ（新しい穴を開けていない）
+- **可動範囲の実測値**: `config/*_positions.yaml` の `manual.min` / `max` は
+  positions を包む安全側の仮値。機構完成後、実測のストローク端より内側へ詰めること
+
 
 ## 未解決の課題
 

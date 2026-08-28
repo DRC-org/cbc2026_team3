@@ -167,6 +167,64 @@
         "overall": "ok",
         "timestamp": 1700000000.0
       },
+      "manual": {
+        "axes": [
+          {
+            "command_mode": "position",
+            "manual": {
+              "max": 20.0,
+              "min": -2.0,
+              "steps": [
+                0.5,
+                2.0
+              ]
+            },
+            "motors": [
+              "y_axis_r",
+              "y_axis_l"
+            ],
+            "name": "y_axis",
+            "positions": [
+              "home",
+              "work"
+            ],
+            "target": 4.0,
+            "unit": "mm",
+            "value": 0.0
+          },
+          {
+            "command_mode": "position",
+            "manual": null,
+            "motors": [
+              "gripper"
+            ],
+            "name": "gripper",
+            "positions": [
+              "open",
+              "closed"
+            ],
+            "target": null,
+            "unit": "deg",
+            "value": 0.0
+          },
+          {
+            "command_mode": "duty",
+            "manual": null,
+            "motors": [
+              "conveyor"
+            ],
+            "name": "conveyor",
+            "positions": [
+              "stop",
+              "run"
+            ],
+            "target": null,
+            "unit": "duty",
+            "value": null
+          }
+        ],
+        "mode": "manual"
+      },
       "motors": {
         "gripper": {
           "pos": 5.0,

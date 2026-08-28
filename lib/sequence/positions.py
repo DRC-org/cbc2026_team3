@@ -12,6 +12,7 @@ from lib.match_state import Court
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
+    "ManualSpec",
     "MotorSpec",
     "PositionLookupError",
     "PositionTable",
@@ -25,6 +26,40 @@ DEFAULT_TIMEOUT_S = 5.0
 
 class PositionLookupError(RuntimeError):
     """位置定数の参照に失敗したときに送出される。"""
+
+
+@dataclass(frozen=True)
+class ManualSpec:
+    """手動操縦で連続値を送ってよい範囲とジョグ量。
+
+    通常運用 (``move_to``) は位置名でしか値を引けないため、**定義した状態以外を
+    送れないことが構造的に保証されている**。手動操縦はその保証を外して任意の値を
+    通す経路なので、代わりの境界をここで宣言させる。``manual:`` を書かなかった軸は
+    連続操作の対象にならず、位置名によるプリセット指令だけが残る (= 今までと同じ保証)。
+
+    ``min_value`` / ``max_value`` は機構の物理端そのものではなく、**その内側**に取る。
+    手動は操縦者が端へ寄せていく操作なので、境界を物理端に合わせると
+    「指令は範囲内なのに機構は突き当たっている」状態が作れてしまう。
+    """
+
+    min_value: float
+    max_value: float
+    #: UI が出すジョグ量の候補 [人間の単位]。先頭が既定値
+    steps: tuple[float, ...]
+
+    def clamp(self, value: float) -> float:
+        """範囲内へ丸める。範囲外を拒否しないのは、端で操作そのものが効かなくなるため。"""
+        if value < self.min_value:
+            return self.min_value
+        if value > self.max_value:
+            return self.max_value
+        return value
+
+    def contains(self, value: float) -> bool:
+        return self.min_value <= value <= self.max_value
+
+    def to_dict(self) -> dict[str, object]:
+        return {"min": self.min_value, "max": self.max_value, "steps": list(self.steps)}
 
 
 @dataclass(frozen=True)
@@ -54,6 +89,8 @@ class AxisSpec:
     command_mode: ControlMode = ControlMode.POSITION
     # 到達判定を持たない軸 (duty / velocity) の指令後固定待ち [s]
     settle_s: float = 0.0
+    # 手動操縦の可動範囲。None ならこの軸は連続操作の対象外 (プリセット指令のみ)
+    manual: ManualSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.motors:
@@ -65,6 +102,24 @@ class AxisSpec:
 
     def to_commands(self, value: float) -> dict[str, float]:
         return {motor.name: motor.to_command(value) for motor in self.motors}
+
+    def to_value(self, commands: Mapping[str, float]) -> float:
+        """モータの指令値・フィードバックを人間の単位の軸位置へ戻す (``to_commands`` の逆)。
+
+        逆換算そのものは ``MotorSpec.to_value`` に委ねる。ここで書き直すと、
+        逆回転ペアの符号付き ``scale`` の扱いが 2 実装に分かれる
+        (lib/axis_sync.py のモジュール docstring を参照)。
+
+        複数モータ軸では平均を返す。左右がずれていればどちらか一方の値は必ず
+        誤りなので「片側を代表にする」根拠が無く、ずれ自体は ``sync_group`` を
+        見る 3 層が別に検出する。値が 1 つも揃わなければ ``PositionLookupError``。
+        """
+        values = [
+            motor.to_value(commands[motor.name]) for motor in self.motors if motor.name in commands
+        ]
+        if not values:
+            raise PositionLookupError(f"軸 '{self.name}' の位置を算出できる値がありません")
+        return sum(values) / len(values)
 
     @property
     def sync_group(self) -> SyncGroup | None:
@@ -90,10 +145,17 @@ _AXIS_KEYS = frozenset(
         "sync_tolerance",
         "command_mode",
         "settle_s",
+        "manual",
     }
 )
 
 _MOTOR_KEYS = frozenset({"scale", "offset"})
+
+_MANUAL_KEYS = frozenset({"min", "max", "steps"})
+
+#: 手動のジョグ量候補を書かなかった軸に与える既定 (人間の単位)。
+#: UI は必ず 1 つ以上の候補を要求するため、空にはしない
+_DEFAULT_MANUAL_STEPS: tuple[float, ...] = (1.0,)
 
 # 位置定数から出してよい指令モード。CURRENT を除くのは、位置名に紐付けて開ループの
 # トルク指令を出す用途が無く、誤記のまま機構へ流れると破損に直結するため
@@ -150,6 +212,14 @@ class PositionTable:
 
     def sync_tolerance(self, axis: str) -> float | None:
         return self.axis(axis).sync_tolerance
+
+    def manual(self, axis: str) -> ManualSpec | None:
+        """手動操縦の可動範囲。連続操作を許していない軸は None。"""
+        return self.axis(axis).manual
+
+    def manual_axes(self) -> tuple[str, ...]:
+        """連続操作を許した軸 (``manual:`` を持つ軸)。"""
+        return tuple(name for name, spec in self._axes.items() if spec.manual is not None)
 
     def paired_axes(self) -> tuple[str, ...]:
         """同期監視の対象となる軸 (sync_tolerance を持つ軸)。"""
@@ -296,6 +366,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         sync_tolerance=sync_tolerance,
         command_mode=command_mode,
         settle_s=float(settle_s),
+        manual=_parse_manual(name, raw.get("manual"), command_mode),
     )
 
 
@@ -309,6 +380,55 @@ def _parse_command_mode(axis_name: str, raw: object) -> ControlMode:
             f"axes.{axis_name}.command_mode に未対応の値: {raw!r} (指定できるのは {allowed})"
         )
     return mode
+
+
+def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> ManualSpec | None:
+    """手動操縦の可動範囲を読む。``manual:`` を書かない軸は None (連続操作の対象外)。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.manual は辞書である必要があります: {raw!r}")
+
+    unknown = set(raw) - _MANUAL_KEYS
+    if unknown:
+        raise ValueError(f"axes.{axis_name}.manual に未知のキー: {', '.join(sorted(unknown))}")
+
+    if command_mode is not ControlMode.POSITION:
+        # duty / velocity 指令の軸に「可動範囲」は存在しない。書けてしまうと
+        # UI がジョグ行を描き、押しても機構が位置決めされない操作面が出来上がる
+        raise ValueError(
+            f"axes.{axis_name}.manual は command_mode: position の軸にのみ指定できます "
+            f"(現在 {command_mode.value})"
+        )
+
+    path = f"axes.{axis_name}.manual"
+    min_value = _number(path, raw, "min", None)
+    max_value = _number(path, raw, "max", None)
+    if min_value is None or max_value is None:
+        missing = ", ".join(key for key in ("min", "max") if raw.get(key) is None)
+        raise ValueError(f"{path} に {missing} がありません (可動範囲が決まりません)")
+    if min_value >= max_value:
+        raise ValueError(f"{path}.min は max より小さい必要があります: {min_value} >= {max_value}")
+
+    steps = _parse_manual_steps(path, raw.get("steps"))
+    return ManualSpec(min_value=float(min_value), max_value=float(max_value), steps=steps)
+
+
+def _parse_manual_steps(path: str, raw: object) -> tuple[float, ...]:
+    if raw is None:
+        return _DEFAULT_MANUAL_STEPS
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{path}.steps は 1 つ以上の数値のリストである必要があります: {raw!r}")
+
+    steps: list[float] = []
+    for entry in raw:
+        if isinstance(entry, bool) or not isinstance(entry, int | float):
+            raise ValueError(f"{path}.steps に数値でない要素: {entry!r}")
+        if entry <= 0.0:
+            # 0 や負のジョグ量は「押しても動かない」「押すと逆へ動く」ボタンになる
+            raise ValueError(f"{path}.steps は正の値である必要があります: {entry!r}")
+        steps.append(float(entry))
+    return tuple(steps)
 
 
 def _parse_value(axis: str, name: str, raw: object) -> float | dict[str, float]:
@@ -368,5 +488,37 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
         positions[axis] = {
             name: _parse_value(axis, name, raw_value) for name, raw_value in values.items()
         }
+        _check_manual_range(source, axes[axis], positions[axis])
 
     return PositionTable(axes, positions, source=source)
+
+
+def _check_manual_range(
+    source: str,
+    spec: AxisSpec,
+    values: Mapping[str, float | dict[str, float]],
+) -> None:
+    """プリセット位置が手動の可動範囲に収まっているか検証する。
+
+    範囲外の位置定数を通すと「シーケンスは行ける場所へ手動では行けない」軸ができる。
+    症状は「手動で戻そうとしても途中で止まる」だけで、原因が config からは見えない
+    (クランプは黙って効くため、指令値と実際に送られた値の食い違いがどこにも現れない)。
+    """
+    manual = spec.manual
+    if manual is None:
+        return
+
+    outside: list[str] = []
+    for name, value in values.items():
+        candidates = value.values() if isinstance(value, dict) else (value,)
+        for candidate in candidates:
+            if not manual.contains(float(candidate)):
+                outside.append(f"{name}={candidate}")
+                break
+
+    if outside:
+        raise ValueError(
+            f"{source}: positions.{spec.name} の {', '.join(outside)} が "
+            f"axes.{spec.name}.manual の範囲 [{manual.min_value}, {manual.max_value}] の外です "
+            "(シーケンスで行ける位置へ手動で行けない軸になるため起動を拒否します)"
+        )

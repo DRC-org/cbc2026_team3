@@ -194,6 +194,51 @@ export interface SafetyState {
   target_refreshers: TargetRefresherState[];
 }
 
+/**
+ * 操作モード。**モータの制御モード (position / velocity / duty) とは別物。**
+ * あちらはモータへ送る指令の種類、こちらは「制御権を誰が握っているか」。
+ */
+export type OperationMode = "sequence" | "manual";
+
+/**
+ * 手動操縦で連続値を送ってよい範囲とジョグ量の候補 (位置定数 yaml の `axes.<軸>.manual`)。
+ *
+ * これを持たない軸は連続操作の対象外で、位置名によるプリセット指令だけができる。
+ * 通常運用の `move_to` は位置名でしか値を引けず「定義した状態以外を送れない」ことが
+ * 構造的に保証されているので、その保証を外す手動には代わりの境界が要る。
+ */
+export interface ManualRange {
+  min: number;
+  max: number;
+  /** UI が出すジョグ量の候補。先頭が既定値。空にはならない */
+  steps: number[];
+}
+
+export interface ManualAxis {
+  name: string;
+  /** 人間が扱う単位 (mm / deg / duty)。表示にそのまま使う */
+  unit: string;
+  command_mode: "position" | "velocity" | "duty";
+  /**
+   * フィードバックから逆換算した現在値。**位置を測れない軸では null。**
+   * DC 基板はエンコーダを持たないので、0 を載せると「測ったように見える 0」になる。
+   * 数値へフォールバックせず「読めていない」ことを画面に出すこと。
+   */
+  value: number | null;
+  /** 直前に手動で送った目標値。一度も送っていなければ null */
+  target: number | null;
+  /** 連続操作を許した軸だけが持つ。null ならプリセット指令のみ */
+  manual: ManualRange | null;
+  /** 位置定数に定義された状態名。プリセットボタンはここからしか作らない */
+  positions: string[];
+  motors: string[];
+}
+
+export interface ManualState {
+  mode: OperationMode;
+  axes: ManualAxis[];
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -217,6 +262,14 @@ export interface RobotState {
   health?: HealthSnapshot;
   safety?: SafetyState;
   steps?: SequenceStepInfo[];
+  /**
+   * 操作モードと手動操縦の軸一覧。
+   *
+   * 軸定義 (可動範囲・プリセット名) は静的だが `steps` と同じく state に載っている。
+   * **軸名も可動範囲も UI 側へ書かないこと** — 機構が変わって軸が増減しても
+   * UI の変更が要らない性質は、ここをそのまま描くことで成り立っている。
+   */
+  manual?: ManualState;
 }
 
 /** 受信条件を通ったメッセージ。UI 状態へ入れる形まで正規化してある */

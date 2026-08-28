@@ -17,9 +17,11 @@ from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import MotorCheckResult
+from lib.manual import ManualController
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence, step
-from lib.sequence.motors import MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.positions import load_position_table
 from tests.fake_can import mark_feedback_at
 from tests.server_fixtures import ServerFixture, drain
 
@@ -110,6 +112,7 @@ def _build_fixture_with_motors(
     motor_check_default_magnitude: dict[str, float] | None = None,
     motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
     position_loops: list[M3508PositionLoop] | None = None,
+    manual: ManualController | None = None,
 ) -> tuple[ServerFixture, CANManager, dict[str, _MockMotor], can.Bus]:
     """RobotServer + 実 CANManager + virtual バス + MockMotor の構成を組む。
 
@@ -146,8 +149,23 @@ def _build_fixture_with_motors(
         mgr.send = _patched_send  # type: ignore[method-assign]
 
     seq = sequence if sequence is not None else _DummySequence()
-    fx.add_robot("main_hand", seq, mgr, position_loops=position_loops)
+    fx.add_robot("main_hand", seq, mgr, position_loops=position_loops, manual=manual)
     return fx, mgr, motors, bus
+
+
+def _manual_controller(mgr: CANManager, motors: dict[str, _MockMotor]) -> ManualController:
+    """動作確認と同じモータを手動からも触れる構成を組む (排他の検証用)。"""
+    table = load_position_table(
+        {
+            "axes": {name: {"unit": "deg", "command_unit": "deg"} for name in motors},
+            "positions": {name: {"home": 0.0} for name in motors},
+        },
+        source="<test>",
+    )
+    group = MotorGroup()
+    for name, motor in motors.items():
+        group.add(MotorHandle(name, motor, mgr))
+    return ManualController(group, table)
 
 
 class _AutoClock:
@@ -419,6 +437,50 @@ class TestMotorCheckRejectedDuringEStop:
                 assert fx.motor_check_runner("main_hand") is None
                 await ws.close()
         finally:
+            bus.shutdown()
+
+
+class TestMotorCheckAndManualAreExclusive:
+    """動作確認と手動操縦は同じモータを奪い合うため同時に走らせない。
+
+    動作確認は 1 台ずつ順に駆動して合否を見る手順なので、途中で手動指令が
+    割り込むと「動いたのは確認のせいか操縦者のせいか」が判別できなくなる。
+    """
+
+    async def test_手動モード中は動作確認を起動できない(self) -> None:
+        motors = {"m1": _MockMotor("m1", 1)}
+        fx, mgr, _, bus = _build_fixture_with_motors(
+            bus_channel="vsrvchk_manual_block", motors=motors
+        )
+        fx.add_robot("main_hand", _DummySequence(), mgr, manual=_manual_controller(mgr, motors))
+        try:
+            await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+            assert await fx.start_motor_check("main_hand") is False
+        finally:
+            bus.shutdown()
+
+    async def test_動作確認の実行中は手動へ切り替えられない(self) -> None:
+        # 判定は runner の is_running ではなく実行タスクの生死。runner 登録から
+        # run() 開始までの窓を素通しすると、駆動中の確認へ手動指令が割り込む
+        motors = {"m1": _MockMotor("m1", 1)}
+        # フィードバックを返さないので runner は per_motor_timeout まで待ち続ける。
+        # 即完了する構成だと「起動中に切り替えを試す」窓そのものが作れない
+        fx, mgr, _, bus = _build_fixture_with_motors(
+            bus_channel="vsrvchk_manual_during",
+            motors=motors,
+            feed_immediately=False,
+            motor_check_per_motor_timeout_ms=2000.0,
+        )
+        fx.add_robot("main_hand", _DummySequence(), mgr, manual=_manual_controller(mgr, motors))
+        try:
+            assert await fx.start_motor_check("main_hand") is True
+            await fx.wait_motor_check_running("main_hand")
+
+            await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+            assert fx.state_message("main_hand")["manual"]["mode"] == "sequence"
+        finally:
+            fx.motor_check_runner("main_hand").abort()
+            await fx.wait_motor_check_idle("main_hand")
             bus.shutdown()
 
 

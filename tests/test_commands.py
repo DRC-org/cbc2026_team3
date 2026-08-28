@@ -46,6 +46,10 @@ _EXPECTED_COMMANDS = {
     "match_start",
     "match_finish",
     "match_reset",
+    "set_operation_mode",
+    "manual_move",
+    "manual_set",
+    "manual_jog",
 }
 
 
@@ -170,6 +174,10 @@ class TestEStopGate:
             "match_start",
             "set_param",
             "motor_check_start",
+            # 手動指令は目標値を送る操作。通すと緊急停止が意味を失う
+            "manual_move",
+            "manual_set",
+            "manual_jog",
         }
 
     @pytest.mark.parametrize(
@@ -187,6 +195,31 @@ class TestEStopGate:
 
     def test_unknown_command_has_no_e_stop_reason(self) -> None:
         assert e_stop_deny_reason("totally_unknown") is None
+
+    def test_mode_switch_passes_but_manual_commands_do_not(self) -> None:
+        """モード切替は機体を動かさないので通す。指令は通さない。
+
+        ここを揃えてしまうと、片方が「停止中に画面を手動へ寄せられない」か
+        「停止中に機体が動く」のどちらかになる。
+        """
+        assert e_stop_deny_reason("set_operation_mode") is None
+        for command in ("manual_move", "manual_set", "manual_jog"):
+            assert e_stop_deny_reason(command) is not None
+
+
+class TestManualCommandsAreNotPhaseGated:
+    """手動操縦は開始前・試合中・終了後のどこでも使える (運用要件)。
+
+    調整は準備中に、シーケンスからの退避は試合中に要る。どちらかへ閉じると
+    「要るときに使えない操作」になる。可否の正はここで、UI は理由を説明するだけ。
+    """
+
+    @pytest.mark.parametrize(
+        "command", ["set_operation_mode", "manual_move", "manual_set", "manual_jog"]
+    )
+    @pytest.mark.parametrize("phase", list(Phase))
+    def test_every_phase_is_allowed(self, command: str, phase: Phase) -> None:
+        assert phase_deny_reason(command, phase) is None
 
 
 class TestPreparationOnlyCommands:

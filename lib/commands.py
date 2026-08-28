@@ -232,6 +232,48 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_motor_check_start",
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
     ),
+    # ------------------------------------------------------------------ #
+    #  手動操縦 — 調整時と、シーケンスからの退避に使う補助操縦。
+    #
+    #  **フェーズではゲートしない。** 機構の調整は準備中に、シーケンスが想定外の
+    #  状態で止まったときの退避は試合中に要る。どちらか一方に閉じると、要るときに
+    #  使えない操作になる。
+    #
+    #  **緊急停止ゲートは別軸で、指令だけを塞ぐ。** モード切替そのものは機体を
+    #  動かさないので停止中も通す (停止中に画面を手動へ寄せて、解除と同時に動かす
+    #  という手順を塞ぐ理由が無い)。一方 manual_* は目標値を送る操作なので、
+    #  通すと緊急停止が意味を失う。sequence_start / trigger と同じ扱いにする。
+    # ------------------------------------------------------------------ #
+    _spec(
+        "set_operation_mode",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=True,
+        handler="_cmd_set_operation_mode",
+    ),
+    _spec(
+        # 位置名によるプリセット指令。既定義の点しか送らないので全軸で使える
+        "manual_move",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため手動操縦できません",
+        handler="_cmd_manual_move",
+    ),
+    _spec(
+        # 人間の単位の絶対値指定。可動範囲 (axes.<軸>.manual) を持つ軸のみ
+        "manual_set",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため手動操縦できません",
+        handler="_cmd_manual_set",
+    ),
+    _spec(
+        # 直前の手動目標からの相対移動
+        "manual_jog",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため手動操縦できません",
+        handler="_cmd_manual_jog",
+    ),
     _spec(
         # 試合中の PID 差し替えは、走行中の位置制御の特性をその場で変える。
         # 左右直結ペアはグループ全員に同じ値が入るため、動いている機構が同時に別特性になる。

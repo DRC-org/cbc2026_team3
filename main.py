@@ -28,6 +28,7 @@ from lib.drivers.base import MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
+from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
@@ -419,6 +420,17 @@ def _build_target_refresher(
     return GenericTargetRefresher(handles, is_estop_active=is_estop_active)
 
 
+def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
+    """手動操縦の指令口を組み立てる。
+
+    ``MotorGroup`` はシーケンスへ bind したものをそのまま共有する。手動用に別の
+    グループを組むと、緊急停止インターロック・M3508 の PID 迂回・自作モタドラの
+    再送対象がシーケンス側と 2 セットに分かれ、片方だけ配線を落としても起動できて
+    しまう (落ちた側から出した指令だけが停止中も通る、といった形で現れる)。
+    """
+    return ManualController(sequence.motors, positions)
+
+
 def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver]) -> list[SyncGroup]:
     """位置定数のペア軸のうち、このロボットに実在するものだけを監視対象にする。
 
@@ -678,6 +690,9 @@ async def main() -> None:
 
         # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
         # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
+        # 手動操縦 (調整時・緊急時の補助操縦)。シーケンスと同じ MotorGroup を共有する
+        manual = _build_manual_controller(seq, positions)
+
         server.add_robot(
             robot_name,
             seq,
@@ -685,16 +700,18 @@ async def main() -> None:
             position_loops=loops,
             sync_monitors=robot_monitors,
             target_refreshers=robot_refreshers,
+            manual=manual,
         )
         logger.info(
             "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, "
-            "同期監視: %s, 目標値再送: %s)",
+            "同期監視: %s, 目標値再送: %s, 手動連続操作: %s)",
             robot_name,
             len(motors),
             [loop.bus_name for loop in loops] or "なし",
             list(positions.axes) or "なし",
             [group.name for group in sync_groups] or "なし",
             list(refresher.motor_names) if refresher is not None else "なし",
+            list(positions.manual_axes()) or "なし",
         )
 
     try:

@@ -37,9 +37,11 @@ from lib.health import (
     MotorCheckResult,
     MotorHealth,
 )
+from lib.manual import ManualController
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence, step
-from lib.sequence.motors import MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_health import ok_health_snapshot
 from tests.server_fixtures import ServerFixture, require_type
@@ -150,6 +152,49 @@ def _check_record() -> MotorCheckRecord:
     )
 
 
+def _manual_controller(
+    mgr: CANManager,
+    drivers: dict[str, object],
+    target_sinks: dict[str, object],
+) -> ManualController:
+    """手動操縦の軸一覧。**連続操作できる軸とできない軸を両方入れる。**
+
+    片方だけだと ``manual`` が null になる形か、値が入る形のどちらかしか
+    golden に現れず、UI が知らないほうの形を受信条件で弾いても誰も気付けない。
+    """
+    table = load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "manual": {"min": -2.0, "max": 20.0, "steps": [0.5, 2.0]},
+                    "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
+                },
+                "gripper": {"unit": "deg", "command_unit": "deg"},
+                # 位置を測れない軸。value が null になる形も golden に載せないと、
+                # UI が数値だけを受け付ける条件を書いても誰も気付けない
+                "conveyor": {"unit": "duty", "command_mode": "duty", "settle_s": 0.0},
+            },
+            "positions": {
+                "y_axis": {"home": 0.0, "work": 10.0},
+                "gripper": {"open": 5.0, "closed": 0.0},
+                "conveyor": {"stop": 0.0, "run": 0.3},
+            },
+        },
+        source="<ws-contract>",
+    )
+    # mock_can_manager の motors は MagicMock なので、逆換算に実ドライバを使う
+    # (MagicMock の feedback_position() は JSON にできず、配信そのものが落ちる)
+    # M3508 は電流指令しか受け付けないので、目標値は PC 側 PID ループへ迂回させる。
+    # 本番 (main.py の _wire_robot_motors) と同じ配線にしないと、golden を作る側だけが
+    # 「y_axis へ位置指令を直接送って失敗する」経路になる
+    group = MotorGroup()
+    for name, driver in drivers.items():
+        group.add(MotorHandle(name, driver, mgr, target_sink=target_sinks.get(name)))
+    return ManualController(group, table)
+
+
 def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     """指差喚呼の項目。空だと checklists の要素構造が golden に現れない。"""
     return {
@@ -179,15 +224,9 @@ def _build_fixture() -> _Fixture:
 
     # 目標値再送も 1 台ぶん載せる。空リストだと safety.target_refreshers の
     # 要素構造が golden に現れず、UI 側が形を知る手立てが無くなる
-    refresher = GenericTargetRefresher(
-        [
-            MotorHandle(
-                "gripper",
-                GenericDriver("gripper", can_id=9, control_type=ControlMode.POSITION),
-                mgr,
-            )
-        ]
-    )
+    gripper = GenericDriver("gripper", can_id=9, control_type=ControlMode.POSITION)
+    conveyor = GenericDriver("conveyor", can_id=10, control_type=ControlMode.DUTY)
+    refresher = GenericTargetRefresher([MotorHandle("gripper", gripper, mgr)])
 
     fx.add_robot(
         _ROBOT,
@@ -196,6 +235,11 @@ def _build_fixture() -> _Fixture:
         position_loops=[loop],
         sync_monitors=[monitor],
         target_refreshers=[refresher],
+        manual=_manual_controller(
+            mgr,
+            {**drivers, "gripper": gripper, "conveyor": conveyor},
+            loop.target_sinks(),
+        ),
     )
     # 周期配信に割り込まれるとヘルス差分の基準が動く。起動直後の 1 回だけ走らせ、
     # 以降はテストが明示的に呼んだ配信だけを捕まえる
@@ -219,6 +263,14 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             # 接続直後のスナップショット
             samples["match_state"] = await require_type(ws, "match_state")
 
+            # 手動で 1 軸だけ動かしてから state を採る。target が null のままだと
+            # 「手動目標を持っている軸」の形が golden に一度も現れない
+            await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "manual"})
+            await fx.command(
+                {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 4.0}
+            )
+            # 手動モードのまま採る。半自動へ戻すと target が捨てられ、
+            # 「手動目標を持っている軸」の形が golden から消える
             await fx.publish_state()
             samples["state"] = await require_type(ws, "state")
 
