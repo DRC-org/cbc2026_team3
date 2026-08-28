@@ -167,7 +167,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 打ち切るため、もう一方は永久にフィードバックを得られない。`tests/test_robot_sequences.py` で検証している。
 `generic` の `can_id` は `0x01`〜`0xFE`（仕様書 §2.2）で、`lib/config_schema.py` の
 `CAN_ID_RANGES` と `lib/drivers/generic.py` の両方が弾く。`0xFF` を許すと `activation_steps()` の
-緊急停止**解除**フレームが `0x7FF` ブロードキャストになり、共有バス上の全基板のラッチが外れる。
+緊急停止**解除**フレームが `0x0FF` ブロードキャストになり、共有バス上の全基板のラッチが外れる。
 
 **受信フレーム 1 通の失敗を、そのバス全体の失敗にしない。** バス上に解釈できない
 フレームが流れるのは構成上の正常である（`can_edulite` / `can_generic` は 2 台のロボットで
