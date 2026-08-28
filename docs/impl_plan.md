@@ -53,7 +53,7 @@ uv run ruff format .      # フォーマット
 | モータ | 位置ループの所在 | PC が送るもの |
 |---|---|---|
 | RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時に `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、`config` の `position_kp`）を書き込み、実測角を保持目標に書いてから励磁する（「Phase 9: 励磁の有効化」参照） | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
-| 自作モタドラ（DC / サーボ） | **モタドラのマイコン**。制御タイプは `SET_MODE` / `SET_PARAM` で設定 | 目標値のみ（`SET_TARGET` フレーム） |
+| 自作モタドラ（DC / サーボ） | **閉じていない。** DC は duty をそのまま出し、サーボは角度補間だけを行う（どちらも観測手段が無く PID を持たない） | 目標値のみ（`SET_TARGET` の Byte0 が制御タイプを毎通運ぶ） |
 | DJI M3508 (C620) | **電流ループのみ ESC 内。位置ループは PC 側**（`lib/control/position_loop.py`、既定 200Hz） | 電流指令（0x200 フレーム、4 モータ分を 1 通に束ねる） |
 
 C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は CURRENT 以外を `ValueError`）ため、
@@ -297,13 +297,14 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
 - **PC 側は最後に指令した目標値を `command_timeout_ms`（既定 500ms）以内に再送し続ける**
   （仕様書 §5.1）。これを満たすのが「目標値再送（`lib/control/target_refresh.py`）」で、
   再送が無いとコンベアは回し始めて 500ms で止まる
-- **緊急停止のブロードキャストは CAN ID `0x7FF`。データ部が要る**（仕様書 §3.5）。
+- **緊急停止のブロードキャストは CAN ID `0x0FF`。データ部が要る**（仕様書 §3.5）。
+  `E_STOP` は種別 `0b000` なので、Standard ID 全 2048 個のうち最も優先度が高い帯に居る
   解除はマジックバイト `0x5A` / `0xA5` が揃ったときだけ通る
 - **デバイス ID はバス単位でロボット横断に一意で、範囲は `0x01`〜`0xFE`**（仕様書 §2.2）。
   `0x00` は駆動拒否、`0xFF` はブロードキャスト予約なのでモータには割り当てない。範囲外は
   `lib/config_schema.py` の `CAN_ID_RANGES`（yaml のファイル名とモータ名を添えて起動拒否）と
   `GenericDriver.__init__`（生成そのものを拒否）の 2 段で弾く。とりわけ `0xFF` は
-  `activation_steps()` の緊急停止**解除**フレームが `0x7FF` ブロードキャストになり、
+  `activation_steps()` の緊急停止**解除**フレームが `0x0FF` ブロードキャストになり、
   共有 `can_generic` 上の全基板のラッチをまとめて外す
 - **サーボの到達フラグはファームの推定値**（仕様書 §7.3）。実際には動いていなくても到達を
   報告するため、危険な動作には `require_trigger` を付けて目視確認を挟む
@@ -627,7 +628,6 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 多重防護 | 層 | 1 枚だけを見るには |
 |---|---|---|
 | 動作確認中の緊急停止 | ①起動時の拒否 ②`pause()` を待つ窓の再判定 ③per-motor ループ冒頭 ④`_guard_check` | 上流の層を通過させた状態を作る（起動判定の後に停止する / runner を直接 `run()` する） |
-| NaN の目標 | ①`decodeSetTarget` ②`decodeSetParam` ③`DcChannel::setDuty` / `ServoMotion::setTarget` | 復号層を通さずに ③ を直接呼ぶ（シリアルデバッグは実際にその経路で入る） |
 | 左右ペア軸の偏差 | ①シーケンス停止 ②`M3508PositionLoop` の電流 0 ③`SyncMonitor` の全体緊急停止 | 層ごとに別テストファイルを持つ（下表） |
 
 **次の不変条件は安全に直結するため、関係するコードを変えたときは必ずこの確認を行う。**
@@ -658,7 +658,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | **M3508 プロトコル** | ◎ | エンコード/デコードの単体テスト。期待するバイト列との比較 |
 | **EDULITE 05 プロトコル** | ◎ | 29bit CAN ID 組み立て・パース、値マッピングの単体テスト |
 | **自作モタドラプロトコル（PC 側）** | ◎ | エンコード/デコードの単体テスト |
-| **自作モタドラプロトコル（ファーム側）** | ◎ | `pio test -e native`。`MotorCan` を実機・Arduino 非依存でテストする（プロトコル層・緊急停止ラッチ・ウォッチドッグ・PID・角度補間）|
+| **自作モタドラプロトコル（ファーム側）** | ◎ | `pio test -e native`。`MotorCan` を実機・Arduino 非依存でテストする（プロトコル層・緊急停止ラッチ・ウォッチドッグ・角度補間）|
 | **シーケンスエンジン** | ◎ | モータドライバを mock し、ステップ遷移・trigger 待ち・エラー処理をテスト |
 | **PID / 位置制御ループ** | ◎ | 時刻・sleep・CAN 送信を注入して差し替え、実時間を待たずに周期を駆動。積分ワインドアップ、dt 頭打ち、フィードバック途絶、pause/resume を単体テスト |
 | **モータアクセス層** | ◎ | `MotorHandle` / `MotorGroup` の目標送信・到達待ち・緊急停止拒否を mock ドライバで検証 |
@@ -687,8 +687,8 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 安全機構を壊しても気付けない）。
 
 ```bash
-pio test -e native -d firmware/dc_motor   # 118 ケース
-pio test -e native -d firmware/servo      # 同じ 118 ケース
+pio test -e native -d firmware/dc_motor   # 110 ケース
+pio test -e native -d firmware/servo      # 同じ 110 ケース
 ```
 
 | スイート | 対象 |
@@ -1010,14 +1010,14 @@ cbc2026_team3/
 │   ├── __init__.py
 │   ├── main_hand.py
 │   └── sub_hand.py
-├── firmware/                        # 自作モータドライバのファーム（PlatformIO / UNO R4 Minima）
+├── firmware/                        # 自作モータドライバのファーム（PlatformIO。2 枚は MCU が違う）
 │   ├── README.md                    # 通電前の要確認項目・デバイス ID・安全既定値
 │   ├── common.ini                   # 共通部のみ（MCU が違うので platform/board は各 ini）
 │   ├── lib/MotorCan/                # 両ファーム共有。Arduino 非依存の純 C++
 │   │   ├── library.json
 │   │   └── src/
-│   │       ├── MotorCanProtocol.{h,cpp}  # CAN ID / フレームの符号化・復号 + PC 側との契約既定値
-│   │       ├── MotorCanRouter.{h,cpp}    # 受信フレームの宛先判定・DIP オフセット・DIP 読み出し
+│   │       ├── MotorCanProtocol.{h,cpp}  # CAN ID / デバイス ID のビット分割 / int16 固定小数点の符号化・復号
+│   │       ├── MotorCanRouter.{h,cpp}    # 受信フレームの宛先判定・DIP 読み出し
 │   │       ├── MotorLoopTimer.h          # PeriodicTimer（millis() 折り返しに耐える周期判定）
 │   │       ├── MotorSafety.{h,cpp}       # 緊急停止ラッチ + ウォッチドッグ + 物理停止入力
 │   │       ├── SerialLineBuffer.{h,cpp}  # デバッグシリアルの行組み立て（解釈は各 main.cpp）
@@ -1395,12 +1395,12 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 | 停止理由を保持（保持済みなら上書きしない）| 停止理由を破棄 |
 | M3508 へ全スロット 0 の電流指令（`send_stop_frame`）| `_e_stop_active` を落として配信 |
 | ドライバ固有の停止フレーム（EDULITE）| EDULITE の再励磁（`activate_motors`）|
-| 全バスへ `0x7FF` ブロードキャスト（自作モタドラ）| |
+| 全バスへ `0x0FF` ブロードキャスト（自作モタドラ）| |
 | 目標値再送の保持目標を破棄（`clear_targets`）| |
 | 全シーケンスを停止（保留中の開始要求も破棄）| |
 
 M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_message()` は EDULITE しか
-持たず `0x7FF` は自作モタドラしか解釈しないため、これが無いと左右直結で最も危険な Y 軸だけ
+持たず `0x0FF` は自作モタドラしか解釈しないため、これが無いと左右直結で最も危険な Y 軸だけ
 「位置制御ループが生きて電流 0 を出し続けてくれること」に停止を委ねることになる。
 
 **動作確認の abort は runner の状態を問わない。** `is_running` を条件にすると、
@@ -1752,10 +1752,11 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 |---|---|---|---|---|---|
 | `y_axis` | `y_axis_r` / `y_axis_l` | m3508 | can_m3508 | 1 / 2 | y 軸前後移動（ラックアンドピニオン）。**逆回転で同一動作** |
 | `rotate` | `rotate_r` / `rotate_l` | edulite05 | can_edulite | 1 / 2 | エンドエフェクタ回転。**逆回転で同一動作** |
-| `gripper` | `gripper` | generic (サーボ) | can_generic | 0x01 | 開 / 閉 の 2 状態のみ |
-| `conveyor` | `conveyor` | generic (DC) | can_generic | 0x11 | 回転 / 停止 のみ。DC 基板 ch0 |
-| `wall_f` | `wall_f` | generic (サーボ) | can_generic | 0x03 | 初期 / 閉 / 開 の 3 状態のみ |
-| `wall_r` | `wall_r` | generic (サーボ) | can_generic | 0x04 | 初期 / 閉 / 開 の 3 状態のみ |
+| `gripper` | `gripper` | generic (サーボ) | can_generic | 0x40 | 開 / 閉 の 2 状態のみ。サーボ基板 #0 SV0 |
+| `conveyor` | `conveyor` | generic (DC) | can_generic | 0x80 | 回転 / 停止 のみ。DC 基板 ch0 |
+| `wall_f` | `wall_f` | generic (サーボ) | can_generic | 0x41 | 初期 / 閉 / 開 の 3 状態のみ。サーボ基板 #0 SV1 |
+| `wall_r` | `wall_r` | generic (サーボ) | can_generic | 0x42 | 初期 / 閉 / 開 の 3 状態のみ。サーボ基板 #0 SV2 |
+| （軸ではない） | `origin_sensor` | generic (センサ) | can_generic | 0x44 | 原点合わせ用タッチセンサ。サーボ基板 #0 SV4。**`sensors:` セクションに書く** |
 
 ### CAN ID をロボット横断で一意にする
 
@@ -1766,7 +1767,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 `requires_fresh_feedback_for_activation` が True のため**無励磁のまま運用に入る**。
 
 したがって can_id はバス単位でロボット横断に一意とする。メインハンドに若い番号を割り当て、
-サブハンドは後ろにずらす（`sub_arm_joint` は edulite の `3`、`sub_gripper` は generic の `0x05`）。
+サブハンドは後ろにずらす（`sub_arm_joint` は edulite の `3`、`sub_gripper` は generic の `0x43` = サーボ基板 #0 SV3）。
 
 `CANManager.add_motor` は**1 インスタンス内**のモータ名重複と同一バス内の can_id 重複を
 `ValueError` で弾く。名前が衝突すると `_motors` は後勝ちで上書きされる一方 `_bus_motors` には
@@ -2462,7 +2463,7 @@ health:
 |---|---|---|
 | **M3508** (電流制御) | 目標電流 ±500 mA を 1s 印加 | 1s 以内にフィードバック受信 + `velocity` の符号が指令電流と一致 |
 | **EDULITE 05** (位置制御) | 現在位置 ±5° を 1s 指令 | 1s 以内にフィードバック受信 + `position` が目標±許容に到達 |
-| **Generic** (位置/速度制御) | `control_type` に応じた微小目標 | フィードバック受信 + `reached` フラグ立ち上がり、過電流/過熱フラグなし |
+| **Generic** (位置制御) | 現在位置 ± 微小角を指令 | フィードバック受信 + `position` が目標±許容に到達 + `reached` フラグ立ち上がり。**position 以外は自動判定せず不合格を返す**（速度も電流もプロトコルに無い） |
 
 ##### ドライバ契約
 
@@ -2627,7 +2628,7 @@ motors:
   gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x01
+    can_id: 0x40
     control_type: position
     motor_check:
       magnitude: 5.0             # この個体のみ開状態（5deg）で確認
