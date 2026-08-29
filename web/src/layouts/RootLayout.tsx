@@ -150,7 +150,7 @@ export function RootLayout() {
         eStopActive: socket.eStopActive,
         eStopReason: socket.eStopReason,
         healthEvents: socket.healthEvents,
-        motorChecks: socket.motorChecks,
+        motorCheck: socket.motorCheck,
         matchState: socket.matchState,
         serverInfo: socket.serverInfo,
         rejection: socket.rejection,

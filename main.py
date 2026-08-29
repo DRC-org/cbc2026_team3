@@ -35,6 +35,7 @@ from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
+from robots.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,52 @@ def _load_position_table_file(path: pathlib.Path) -> PositionTable:
     except (OSError, ValueError, yaml.YAMLError) as exc:
         logger.error("位置定数ファイルを読み込めません: %s (%s) — 定数なしで起動", path, exc)
         return PositionTable.empty(source=str(path))
+
+
+def _wire_motor_check_sequence(
+    server: RobotServer,
+    groups: list[MotorGroup],
+    tables: list[PositionTable],
+) -> None:
+    """統合動作確認シーケンスを組み立ててサーバーへ登録する。
+
+    **必要な軸が揃っていない構成では登録しない。** 机上ベンチ (config/bench/*) は
+    本番の機構を持たないので、登録すると押した瞬間に `PositionLookupError` で
+    止まる。未登録なら動作確認は「シーケンスが読み込まれていません」として
+    拒否されるだけで、UI もその理由を表示できる。
+
+    軸名の衝突 (`PositionTable.merged`) はここで起動ごと落とす。動作確認が意図した
+    側とは別の機体の軸へ指令を飛ばす構成を、黙って起動させてはならない。
+    """
+    if not tables:
+        logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
+        return
+
+    merged = PositionTable.merged(tables)
+
+    required = {*MAIN_HOME, *SUB_HOME, *VALVE_AXES}
+    missing = required - set(merged.axes)
+    if missing:
+        logger.warning(
+            "統合動作確認: 必要な軸が足りないため登録しない (不足: %s)", sorted(missing)
+        )
+        return
+
+    motors = MotorGroup()
+    for group in groups:
+        for handle in group.handles:
+            motors.add(handle)
+
+    sequence = MotorCheckSequence()
+    sequence.bind_motors(motors)
+    sequence.bind_positions(merged)
+    server.set_motor_check_sequence(sequence)
+    logger.info(
+        "統合動作確認シーケンス登録: %d ステップ (モータ %d 台, 軸 %d 本)",
+        len(sequence.steps),
+        len(motors),
+        len(merged.axes),
+    )
 
 
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
@@ -618,14 +665,6 @@ async def main() -> None:
     health = system.health
     logger.info("health しきい値: %s", health)
 
-    motor_check_overrides = _collect_per_motor_overrides([robot for _, robot in loaded])
-    logger.info(
-        "motor_check 設定: per_motor_timeout_ms=%s default_magnitude=%s overrides=%s",
-        system.motor_check.per_motor_timeout_ms,
-        dict(system.motor_check.default_magnitude),
-        motor_check_overrides,
-    )
-
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
     logger.info("試合時間: %s 秒", system.match.duration_s)
 
@@ -648,15 +687,16 @@ async def main() -> None:
         host=args.host,
         port=args.port,
         health=health,
-        motor_check_per_motor_timeout_ms=system.motor_check.per_motor_timeout_ms,
-        motor_check_default_magnitude=dict(system.motor_check.default_magnitude),
-        motor_check_per_motor_overrides=motor_check_overrides,
         checklist_definitions=checklist_definitions,
         match_settings=system.match,
         dry_run=args.dry_run,
         dev_tools=dev_tools,
     )
     can_managers: list[CANManager] = []
+    # 統合動作確認シーケンスへ渡す材料。ロボット登録のループで集めて、
+    # ループを抜けてから 1 つに束ねる
+    check_motor_groups: list[MotorGroup] = []
+    check_position_tables: list[PositionTable] = []
     position_loops: list[M3508PositionLoop] = []
     sync_monitors: list[SyncMonitor] = []
     target_refreshers: list[GenericTargetRefresher] = []
@@ -744,6 +784,15 @@ async def main() -> None:
             list(refresher.motor_names) if refresher is not None else "なし",
             list(positions.manual_axes()) or "なし",
         )
+
+        if seq.has_motors:
+            check_motor_groups.append(seq.motors)
+        check_position_tables.append(positions)
+
+    # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
+    # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、
+    # 可動域の重なる位置で干渉しうる
+    _wire_motor_check_sequence(server, check_motor_groups, check_position_tables)
 
     try:
         for mgr in can_managers:

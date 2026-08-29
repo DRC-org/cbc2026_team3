@@ -75,6 +75,17 @@ describe("Dashboard (セッティングタイム)", () => {
     expect(screen.getAllByText(/非常停止解除/)).toHaveLength(1);
   });
 
+  it("動作確認の入口をこの画面に 1 つだけ置く", () => {
+    // 機体ごとの入口があると 2 つを同時に起動でき、両機が同時に動きうる。
+    // 統合後は両ハンドを 1 本のシーケンスで駆動するので入口も 1 つ
+    renderWithRobot(<Dashboard />, {
+      matchState: SETUP,
+      states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
+    });
+
+    expect(screen.getAllByRole("button", { name: "動作確認を開始" })).toHaveLength(1);
+  });
+
   it("指差喚呼をこの画面で完結させる (操縦者タブへ往復させない)", () => {
     // 操縦者 2 名は同じ場所に立つので、確認は Monitor 1 画面へ集約した
     renderWithRobot(<Dashboard />, {

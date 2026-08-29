@@ -17,7 +17,6 @@ from lib.commands import CommandSpec, RejectChannel, phase_deny_reason, spec_for
 from lib.config_schema import (
     DEFAULT_HEALTH,
     DEFAULT_MATCH,
-    DEFAULT_MOTOR_CHECK,
     HealthThresholds,
     MatchSettings,
 )
@@ -33,15 +32,12 @@ from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
     BusHealthInfo,
-    CheckRunSnapshot,
     HealthSnapshot,
-    MotorCheckRecord,
     MotorHealth,
     MotorHealthInfo,
 )
 from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import ChecklistItem, Court, MatchState
-from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
 
 logger = logging.getLogger(__name__)
@@ -112,9 +108,6 @@ class RobotServer:
         port: int = 8080,
         *,
         health: HealthThresholds = DEFAULT_HEALTH,
-        motor_check_per_motor_timeout_ms: float = DEFAULT_MOTOR_CHECK.per_motor_timeout_ms,
-        motor_check_default_magnitude: dict[str, float] | None = None,
-        motor_check_per_motor_overrides: dict[str, dict[str, float]] | None = None,
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         match_settings: MatchSettings = DEFAULT_MATCH,
         dry_run: bool = False,
@@ -158,19 +151,24 @@ class RobotServer:
         # 直近の HealthSnapshot をロボット名で保持し、_diff_health で前回と比較する
         self._last_health: dict[str, HealthSnapshot] = {}
 
-        # アクチュエータ動作確認 (Phase 6 段階⑨/⑩)。
-        # 設定値は段階⑩ で config/*.yaml から流し込まれる前提でキーワード引数化しておく。
-        self._motor_check_settings: dict[str, object] = {
-            "per_motor_timeout_ms": motor_check_per_motor_timeout_ms,
-            "default_magnitude": motor_check_default_magnitude,
-            "per_motor_overrides": motor_check_per_motor_overrides or {},
-        }
-        # ロボットごとの実行中ランナー (排他制御用)
-        self._motor_check_runners: dict[str, MotorCheckRunner] = {}
-        # 直近結果の保持。GET /robots/{robot}/motor_check/last はここを参照する
-        self._motor_check_last: dict[str, CheckRunSnapshot] = {}
-        # asyncio.create_task で起動した実行タスク。シャットダウン時にキャンセルする
-        self._motor_check_tasks: dict[str, asyncio.Task[None]] = {}
+        # アクチュエータ動作確認。**両ハンドを 1 本のシーケンスで順に駆動する**
+        # (robots/motor_check.py)。機体ごとに独立した確認だと 2 つを同時に起動でき、
+        # 可動域の重なる位置で干渉しうる。main.py が set_motor_check_sequence で注入する
+        self._motor_check: Sequence | None = None
+        # 実行タスク。二重起動の判定はこの生死で行う — シーケンスの `is_running` は
+        # タスク生成から run() 開始までのあいだ False で、そこを素通しすると
+        # 2 本目が走り出して pause/resume が食い違う (入れ子カウントを持たないため、
+        # 先に終わった側の resume がもう一方の駆動中に送信を再開させる)
+        self._motor_check_task: asyncio.Task[None] | None = None
+        # 中断要求。**`Sequence` の停止イベントとは別に持つ必要がある。**
+        # `Sequence.run()` は冒頭で停止イベントを clear するので、タスク生成から
+        # run() 開始までのあいだに届いた中断はそこで消える。その窓で緊急停止や
+        # 操縦者の中断が入ると「止めたはずなのに全アクチュエータが順に駆動される」
+        self._motor_check_abort_requested: bool = False
+        # 直近の拒否・失敗理由。実行状態と同じ 1 通に載せて配信する
+        self._motor_check_error: str | None = None
+        # 前回配信した内容。変化したときだけ送る (停止中は何も流れない)
+        self._last_motor_check_payload: dict | None = None
 
     @property
     def dev_tools(self) -> bool:
@@ -207,7 +205,18 @@ class RobotServer:
         if manual is not None:
             manual.set_court(self.match.court)
 
+    def set_motor_check_sequence(self, sequence: Sequence) -> None:
+        """統合動作確認シーケンスを登録する。
+
+        どのロボットにも属さない。両ハンドのアクチュエータを 1 つの順序で駆動するため、
+        `RobotContext` の下に置くと「どちらの機体のものか」が答えられなくなる。
+        """
+        self._motor_check = sequence
+        sequence.set_court(self.match.court)
+
     def _apply_court(self) -> None:
+        if self._motor_check is not None:
+            self._motor_check.set_court(self.match.court)
         for ctx in self._robots.values():
             ctx.sequence.set_court(self.match.court)
             # 手動のプリセットもコート別定義を持つ。流し忘れると、コートを変えた後の
@@ -222,9 +231,10 @@ class RobotServer:
         # 吸い込まれて 200 HTML になり、監視ツールが誤判定する。
         app.router.add_get("/health", self._health_handler)
         app.router.add_get("/ws", self._ws_handler)
-        # 動作確認エンドポイントも SPA フォールバックより前に登録する
-        app.router.add_post("/robots/{robot}/motor_check", self._motor_check_post)
-        app.router.add_get("/robots/{robot}/motor_check/last", self._motor_check_get_last)
+        # 動作確認エンドポイントも SPA フォールバックより前に登録する。
+        # 両ハンド統合の 1 本なので robot を取らない
+        app.router.add_post("/motor_check", self._motor_check_post)
+        app.router.add_get("/motor_check", self._motor_check_get)
 
         if _WEB_DIST_DIR.is_dir():
             app.router.add_static("/assets", _WEB_DIST_DIR / "assets")
@@ -314,13 +324,15 @@ class RobotServer:
         self._ws_clients.add(ws)
         logger.info("WebSocket 接続: %s", request.remote)
 
-        # server_info と match_state は接続直後にしか送らない。
+        # server_info と match_state と motor_check_state は接続直後にしか送らない。
         # server_info は起動オプション由来で試合中に変わらないため定期配信に載せず、
-        # match_state は変化時のみ配信するのでスナップショットが要る
-        # (これがないとリロード直後のクライアントが現在のモード/フェーズを知れない)。
+        # 残り 2 つは変化時のみ配信するのでスナップショットが要る
+        # (これがないとリロード直後のクライアントが現在のモード/フェーズを知れず、
+        # 動作確認の実行中に繋いだ画面は「未実行」を出したまま止まる)。
         try:
             await ws.send_str(json.dumps(self._server_info_dict(), ensure_ascii=False))
             await ws.send_str(json.dumps(self.match.to_dict(), ensure_ascii=False))
+            await ws.send_str(json.dumps(self._motor_check_payload(), ensure_ascii=False))
         except ConnectionResetError:
             self._ws_clients.discard(ws)
             return ws
@@ -408,7 +420,7 @@ class RobotServer:
     ) -> None:
         """拒否を、そのコマンドが宣言した経路で操縦者へ返す。"""
         if spec.reject_channel is RejectChannel.MOTOR_CHECK_ERROR:
-            await self._broadcast_motor_check_error(str(data.get("robot")), reason)
+            await self._set_motor_check_error(reason)
         else:
             await self._reject_command(requester, spec.name, reason)
 
@@ -479,16 +491,12 @@ class RobotServer:
             self._robots[robot_name].sequence.request_start()
             logger.info("sequence_start: %s", robot_name)
 
-    async def _cmd_motor_check_start(self, data: dict, _requester: WSOrNone = None) -> None:
-        robot_name = data.get("robot")
-        # 知らないロボットは silent ignore (ws を切断しないため)
-        if robot_name and robot_name in self._robots:
-            await self._start_motor_check(robot_name)
+    async def _cmd_motor_check_start(self, _data: dict, _requester: WSOrNone = None) -> None:
+        # 両ハンド統合の 1 本なので robot を取らない
+        await self._start_motor_check()
 
-    async def _cmd_motor_check_abort(self, data: dict, _requester: WSOrNone = None) -> None:
-        robot_name = data.get("robot")
-        if robot_name and robot_name in self._motor_check_runners:
-            self._motor_check_runners[robot_name].abort()
+    async def _cmd_motor_check_abort(self, _data: dict, _requester: WSOrNone = None) -> None:
+        self._abort_motor_check()
 
     # ------------------------------------------------------------------ #
     #  手動操縦
@@ -567,11 +575,12 @@ class RobotServer:
                     f"'{robot_name}' は手動操縦に対応していません (位置定数が未読込)",
                 )
                 return False
-            # 二重起動の判定と同じく実行タスクの生死で見る。runner の is_running は
-            # 登録から run() 開始までのあいだ False で、そこを素通しすると
-            # 駆動中の動作確認と手動指令が同じモータを奪い合う
-            task = self._motor_check_tasks.get(robot_name)
-            if task is not None and not task.done():
+            # 二重起動の判定と同じく実行タスクの生死で見る。シーケンスの is_running は
+            # タスク生成から run() 開始までのあいだ False で、そこを素通しすると
+            # 駆動中の動作確認と手動指令が同じモータを奪い合う。
+            # **動作確認は両ハンドを 1 本で駆動する**ので、どちらのロボットを手動へ
+            # 移そうとしても拒否する (片方だけ許すと確認の途中で干渉する)
+            if self._motor_check_running:
                 await self._reject_command(
                     requester,
                     "set_operation_mode",
@@ -882,11 +891,10 @@ class RobotServer:
         # 「機体が検知した原因」から「操縦者が押した」という正反対へ変わる
         if self._e_stop_reason is None:
             self._e_stop_reason = reason
-        # 動作確認は runner 登録から run() 開始までのあいだ is_running=False の窓を
+        # 動作確認はタスク生成から run() 開始までのあいだ is_running=False の窓を
         # 持つ。そこを条件にすると起動しかけの動作確認だけが停止をすり抜けるため、
-        # 状態を見ずに全 runner へ中断を要求する (run() 側は要求を捨てない)
-        for runner in self._motor_check_runners.values():
-            runner.abort()
+        # 状態を見ずに中断を要求する (要求は `_stop_event` に残り、run() が捨てない)
+        self._abort_motor_check()
         # ジョグの起点を捨てる。停止中に機構が自重で下がっていた場合、解除後の
         # 1 回目のジョグが古い起点から飛ぶ。停止フレームの送信より前に行うのは、
         # 送信が丸ごと失敗しても必ず捨てさせるため
@@ -1182,205 +1190,210 @@ class RobotServer:
     #  アクチュエータ動作確認 (Phase 6 段階⑨ — タスク 6-22)
     # ------------------------------------------------------------------ #
 
-    async def _start_motor_check(self, robot_name: str) -> bool:
-        """指定ロボットの動作確認を起動する。拒否時は False を返す。
+    @property
+    def _motor_check_running(self) -> bool:
+        """統合動作確認が走っているか。
+
+        シーケンスの `is_running` ではなく実行タスクの生死で見る。タスク生成から
+        `run()` 開始までのあいだ `is_running` は False で、そこを素通しすると
+        2 本目が走り出し、pause/resume が食い違う (入れ子カウントを持たないので、
+        先に終わった側の resume がもう一方の駆動中に送信を再開させる)。
+        """
+        return self._motor_check_task is not None and not self._motor_check_task.done()
+
+    def _motor_check_deny_reason(self) -> str | None:
+        """動作確認を起動できない理由。起動してよければ None。
 
         拒否条件の優先順:
-          1. 試合中 (モータを微小駆動するため試合進行を乱す)
-          2. 緊急停止中 (誤発火による微小駆動を完全に止める)
-          3. 手動操縦モード (制御権の二重取得を防ぐ)
-          4. 通常シーケンス実行中 (制御権の二重取得を防ぐ)
-          5. 既に動作確認実行中 (二重起動の防止)
+          1. シーケンス未登録 (位置定数を読めていない構成)
+          2. 試合中 (アクチュエータを一巡させるため試合進行を乱す)
+          3. 緊急停止中 (誤発火による駆動を完全に止める)
+          4. **どれかの**ロボットが手動操縦モード (制御権の二重取得を防ぐ)
+          5. **どれかの**ロボットで通常シーケンス実行中 (同上)
+          6. 既に動作確認実行中 (二重起動の防止)
+
+        両ハンドを 1 本で駆動するので、ゲートも全ロボットに対して掛ける。
+        片方だけ見ていると、確認中にもう一方が手動で動かされて干渉する。
 
         WS 経由は handle_command でも同じフェーズ判定を行うが、HTTP POST は
         そこを通らないため本メソッド側にもゲートを置く。
         """
-        if robot_name not in self._robots:
-            return False
+        if self._motor_check is None:
+            return "動作確認シーケンスが読み込まれていません"
 
         phase_deny = phase_deny_reason("motor_check_start", self.match.phase)
         if phase_deny is not None:
-            await self._broadcast_motor_check_error(robot_name, phase_deny)
-            return False
+            return phase_deny
 
         if self._e_stop_active:
-            await self._broadcast_motor_check_error(
-                robot_name, "緊急停止中のため動作確認を実行できません"
-            )
+            return "緊急停止中のため動作確認を実行できません"
+
+        for name, ctx in self._robots.items():
+            if ctx.mode is OperationMode.MANUAL:
+                # 手動は操縦者がいつ軸を動かすか分からない。動作確認は決まった順序で
+                # 一巡する手順なので、途中で別の指令が割り込むと結果が意味を失う
+                return f"'{name}' が手動操縦モードのため動作確認を実行できません"
+        for name, ctx in self._robots.items():
+            if ctx.sequence.is_running:
+                return f"'{name}' の通常シーケンス実行中のため動作確認を実行できません"
+
+        if self._motor_check_running:
+            return "既に動作確認を実行中です"
+        return None
+
+    async def _start_motor_check(self) -> bool:
+        """統合動作確認シーケンスを起動する。拒否時は False を返す。"""
+        deny = self._motor_check_deny_reason()
+        if deny is not None:
+            await self._set_motor_check_error(deny)
             return False
 
-        ctx = self._robots[robot_name]
-        if ctx.mode is OperationMode.MANUAL:
-            # 手動は操縦者がいつ軸を動かすか分からない。動作確認は 1 台ずつ順に
-            # 駆動していく手順なので、途中で別の指令が割り込むと結果が意味を失う
-            await self._broadcast_motor_check_error(
-                robot_name, "手動操縦モードのため動作確認を実行できません"
-            )
-            return False
-        if ctx.sequence.is_running:
-            await self._broadcast_motor_check_error(
-                robot_name, "通常シーケンス実行中のため動作確認を実行できません"
-            )
-            return False
+        sequence = self._motor_check
+        assert sequence is not None  # _motor_check_deny_reason が保証する
 
-        # 二重起動は runner の `is_running` ではなく実行タスクの生死で判定する。
-        # runner を登録してから `run()` へ入るまでのあいだ `is_running` は False で、
-        # そこを素通しすると `_motor_check_runners` が上書きされて 1 台目が誰からも
-        # abort できなくなる。さらに pause/resume に入れ子カウントが無いため、
-        # 先に終わった側の resume() がもう一方の駆動中に送信を再開させる
-        existing_task = self._motor_check_tasks.get(robot_name)
-        if existing_task is not None and not existing_task.done():
-            await self._broadcast_motor_check_error(robot_name, "既に動作確認を実行中です")
-            return False
-
-        # MotorCheckRunner にはロボットに登録された全モータを渡す。順序は登録順
-        # = config の宣言順で、指差喚呼の読み上げ順がこれに従う。
-        runner = MotorCheckRunner(
-            robot_name=robot_name,
-            can_manager=ctx.can_manager,
-            motors=ctx.can_manager.motors,
-            per_motor_timeout_ms=float(self._motor_check_settings["per_motor_timeout_ms"]),
-            feedback_timeout_ms=self._health.feedback_timeout_ms,
-            default_magnitude=self._motor_check_settings["default_magnitude"],  # type: ignore[arg-type]
-            per_motor_overrides=self._motor_check_settings["per_motor_overrides"],  # type: ignore[arg-type]
-            # 起動判定を通ってから実際に駆動するまでの窓で停止が入ることがある。
-            # M3508PositionLoop / build_motor_group と同じく、走り出した後も
-            # 毎ステップ緊急停止を見て駆動を打ち切る
-            is_estop_active=lambda: self._e_stop_active,
-        )
-
-        # コールバックは runner の同期コンテキストから呼ばれる。WS 配信は async なので
-        # asyncio.create_task で fire-and-forget する。
-        # GC で task が消失しないよう _bg_tasks セットに保持する (RUF006 対策)。
-        loop = asyncio.get_running_loop()
-        bg_tasks: set[asyncio.Task[None]] = set()
-
-        def _spawn(coro) -> None:
-            t = loop.create_task(coro)
-            bg_tasks.add(t)
-            t.add_done_callback(bg_tasks.discard)
-
-        def _on_progress(name: str, idx: int, total: int) -> None:
-            _spawn(self._broadcast_motor_check_progress(robot_name, name, idx, total))
-
-        def _on_record(record: MotorCheckRecord) -> None:
-            _spawn(self._broadcast_motor_check_record(robot_name, record))
-
-        runner.set_on_progress(_on_progress)
-        runner.set_on_record(_on_record)
-
-        self._motor_check_runners[robot_name] = runner
+        # **必ず先頭から流す。** 中断した位置から再開すると、そこまでの姿勢が
+        # 前提になっているステップを飛ばしたまま次を動かすことになる
+        await sequence.reset()
+        self._motor_check_error = None
+        self._motor_check_abort_requested = False
 
         # 動作確認はモータへ自前の指令を出すため、周期的に指令を出している側と
         # 指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
         # 目標値再送とは同じモータの SET_TARGET を奪い合うので、どちらも黙らせて
-        # 排他を取る。対象が居ないロボットでは空リストになる。
+        # 排他を取る。**全ロボットぶんを止める** (1 本のシーケンスが両機を動かす)。
         pausables: list[M3508PositionLoop | GenericTargetRefresher] = [
-            *ctx.position_loops,
-            *ctx.target_refreshers,
+            pausable
+            for ctx in self._robots.values()
+            for pausable in (*ctx.position_loops, *ctx.target_refreshers)
         ]
 
         async def _run() -> None:
             try:
                 for pausable in pausables:
-                    await pausable.pause(reason=f"{robot_name} 動作確認")
+                    await pausable.pause(reason="動作確認")
                 if self._e_stop_active:
                     # pause() は送信中の 1 周期ぶんブロックしうる。その窓のあいだに
                     # 緊急停止が入ったら 1 台も駆動せずに降りる (起動判定は既に
                     # 過去のもので、今この瞬間モータを動かしてよいかを答えていない)
-                    await self._broadcast_motor_check_error(
-                        robot_name, "緊急停止中のため動作確認を中止しました"
-                    )
+                    await self._set_motor_check_error("緊急停止中のため動作確認を中止しました")
                     return
-                snapshot = await runner.run()
-                self._motor_check_last[robot_name] = snapshot
-                await self._broadcast_motor_check_done(robot_name, snapshot)
+                if self._motor_check_abort_requested:
+                    # **`sequence.run()` に任せてはならない。** run() は冒頭で停止
+                    # イベントを clear するので、ここまでに届いた中断はそこで消え、
+                    # 「止めたはずなのに全アクチュエータが順に駆動される」ことになる
+                    await self._set_motor_check_error("動作確認を中断しました")
+                    return
+                await sequence.run()
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # pragma: no cover - 防御的
-                logger.exception("動作確認エラー (%s): %s", robot_name, exc)
-                await self._broadcast_motor_check_error(robot_name, str(exc))
+                logger.exception("動作確認エラー: %s", exc)
+                await self._set_motor_check_error(str(exc))
             finally:
                 # 中断・例外・キャンセルのいずれで抜けても必ず復帰させる。
                 # 止まったままだと昇降軸が保持電流を失って落下し、
                 # 再送が止まったままだとコンベアが 500ms で動かなくなる
                 for pausable in pausables:
                     pausable.resume()
-                self._motor_check_tasks.pop(robot_name, None)
-                # runners からは敢えて消さない: GET /motor_check/last の補助情報として
-                # 直近 runner を参照したい場合に備える。次回 start で上書きされる。
 
-        task = asyncio.create_task(_run())
-        self._motor_check_tasks[robot_name] = task
+        self._motor_check_task = asyncio.create_task(_run())
         return True
 
-    async def _broadcast_motor_check_progress(
-        self,
-        robot: str,
-        current: str,
-        index: int,
-        total: int,
-    ) -> None:
-        await self._broadcast_json(
-            {
-                "type": "motor_check_progress",
-                "robot": robot,
-                "current": current,
-                "index": index,
-                "total": total,
-            }
-        )
+    def _abort_motor_check(self) -> None:
+        """動作確認を中断する。走っていなくても要求は残す。
 
-    async def _broadcast_motor_check_record(self, robot: str, record: MotorCheckRecord) -> None:
-        await self._broadcast_json(
-            {
-                "type": "motor_check_record",
-                "robot": robot,
-                "record": record.to_dict(),
-            }
-        )
+        `cancel()` ではなく通常停止で降ろす。走行中のステップは完了まで待つので、
+        指令の途中でタスクが消えて「半分だけ動いた軸」が残ることがない。
 
-    async def _broadcast_motor_check_done(self, robot: str, snapshot: CheckRunSnapshot) -> None:
-        await self._broadcast_json(
-            {
-                "type": "motor_check_done",
-                "robot": robot,
-                "snapshot": snapshot.to_dict(),
-            }
-        )
+        **走っているかを条件にしない。** 起動タスクを作ってから `run()` に入るまでの
+        窓では `is_running` が False で、そこで押された停止をすり抜けた動作確認が
+        完走して全アクチュエータを駆動する。要求はフラグに残し、`_run()` が
+        駆動を始める直前に見る。
+        """
+        self._motor_check_abort_requested = True
+        if self._motor_check is not None:
+            self._motor_check.request_stop()
 
-    async def _broadcast_motor_check_error(self, robot: str, message: str) -> None:
-        await self._broadcast_json(
-            {
-                "type": "motor_check_error",
-                "robot": robot,
-                "message": message,
+    def _motor_check_payload(self) -> dict:
+        """動作確認の状態。**進捗と結果を 1 通で運ぶ。**
+
+        かつては progress / record / done / error の 4 種類を別々に配っていた。
+        受け取る側は 4 通を継ぎ合わせて 1 つの状態を組み立てることになり、
+        途中の 1 通を取りこぼすと画面と機体が食い違ったまま復旧しない
+        (再送も無いので、リロードするまで直らない)。
+
+        ステップ表 (`steps`) を毎回載せるのは、途中から繋いだクライアントにも
+        同じ 1 通で全体が伝わるようにするため。
+        """
+        if self._motor_check is None:
+            # **理由はここでも載せる。** 「読み込まれていません」という拒否理由自体が
+            # この分岐から出るので、捨てると押しても何も起きない画面になる
+            return {
+                "type": "motor_check_state",
+                "available": False,
+                "blocked_reason": self._motor_check_deny_reason(),
+                "running": False,
+                "current_step": None,
+                "step_index": 0,
+                "total_steps": 0,
+                "steps": [],
+                "error": self._motor_check_error,
             }
-        )
+
+        progress = self._motor_check.progress
+        return {
+            "type": "motor_check_state",
+            "available": True,
+            # 「今この瞬間起動できるか」もここで配る。UI はボタンを塞ぐ理由を
+            # 自分で導出してはならない (サーバーが許すのに画面が殺す状態を作らない)
+            "blocked_reason": self._motor_check_deny_reason(),
+            "running": self._motor_check_running,
+            "current_step": progress["current_step"],
+            "step_index": progress["step_index"],
+            "total_steps": progress["total_steps"],
+            "steps": progress["steps"],
+            "error": self._motor_check_error,
+        }
+
+    async def _set_motor_check_error(self, message: str) -> None:
+        """拒否・失敗の理由を保持し、状態として配信する。
+
+        次の起動が成功するまで消さない。押した直後に消えると、操縦者は
+        「押したのに何も起きなかった」としか読み取れない。
+        """
+        self._motor_check_error = message
+        logger.warning("動作確認を実行できません: %s", message)
+        await self._broadcast_motor_check_state()
+
+    async def _broadcast_motor_check_state(self) -> None:
+        """変化したときだけ配信する。
+
+        テレメトリと違って停止中は何も変わらないので、毎ティック流すと
+        「変化時のみ配信」を前提にした UI 側の再描画抑制が効かなくなる。
+        """
+        payload = self._motor_check_payload()
+        if payload == self._last_motor_check_payload:
+            return
+        self._last_motor_check_payload = payload
+        await self._broadcast_json(payload)
 
     async def _motor_check_post(self, request: web.Request) -> web.Response:
-        """POST /robots/{robot}/motor_check: 動作確認の起動エンドポイント。
+        """POST /motor_check: 動作確認の起動エンドポイント。
 
-        起動成功時は即時 200 を返し、結果は WS 経由で配信する。拒否時は 409 を返し
-        WS 側にもエラーイベントが流れる (両系統の購読側に通知)。
+        両ハンド統合の 1 本なので robot を取らない。起動成功時は即時 200 を返し、
+        進捗は WS 経由で配信する。拒否時は 409 を返し、理由も一緒に返す
+        (WS 側にも同じ理由が状態として流れる)。
         """
-        robot = request.match_info["robot"]
-        if robot not in self._robots:
-            return web.json_response({"error": "robot not found"}, status=404)
-
-        started = await self._start_motor_check(robot)
+        started = await self._start_motor_check()
         if not started:
-            return web.json_response({"started": False, "reason": "拒否"}, status=409)
+            return web.json_response(
+                {"started": False, "reason": self._motor_check_error}, status=409
+            )
         return web.json_response({"started": True}, status=200)
 
-    async def _motor_check_get_last(self, request: web.Request) -> web.Response:
-        """GET /robots/{robot}/motor_check/last: 直近の動作確認スナップショット。"""
-        robot = request.match_info["robot"]
-        if robot not in self._robots:
-            return web.json_response({"error": "robot not found"}, status=404)
-
-        snapshot = self._motor_check_last.get(robot)
-        if snapshot is None:
-            return web.json_response({"snapshot": None}, status=200)
-        return web.json_response({"snapshot": snapshot.to_dict()}, status=200)
+    async def _motor_check_get(self, request: web.Request) -> web.Response:
+        """GET /motor_check: 動作確認の現在状態 (WS が使えない環境向けの代替経路)。"""
+        return web.json_response(self._motor_check_payload(), status=200)
 
     async def _broadcast_loop(self) -> None:
         """テレメトリ配信ループ。1 回の例外でループごと終わらせてはならない。
@@ -1393,6 +1406,10 @@ class RobotServer:
         while True:
             try:
                 await self._broadcast_state()
+                # 動作確認の進捗はここに相乗りさせる。専用の配信ループを増やすと
+                # `_fanout` の約束事 (送信ごとの上限・切り離しの後始末) を守る経路が
+                # もう 1 本増える。変化が無ければ 1 通も流れない
+                await self._broadcast_motor_check_state()
             except asyncio.CancelledError:
                 raise
             except Exception:

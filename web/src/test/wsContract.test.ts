@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
 import type {
   BusHealth,
-  CheckRunSnapshot,
   ChecklistItem,
   ChecklistState,
   HealthChange,
@@ -14,7 +13,7 @@ import type {
   ManualState,
   MatchState,
   MatchTimer,
-  MotorCheckRecord,
+  MotorCheckSnapshot,
   MotorHealth,
   MotorPid,
   MotorState,
@@ -49,7 +48,6 @@ const URL = "ws://contract/ws";
 type Sample = Record<string, unknown>;
 
 const SAMPLES = contract.samples as unknown as Record<string, Sample>;
-const EPOCH_SECONDS: number = contract.$placeholders.epoch_seconds;
 
 type SocketResult = ReturnType<typeof useRobotSocket>;
 type Expectation = (result: SocketResult, sample: Sample) => void;
@@ -160,33 +158,16 @@ const EXPECTATIONS: Record<string, Expectation> = {
     });
   },
 
-  motor_check_progress: (result, sample) => {
-    const state = result.motorChecks[sample.robot as string];
-    expect(state.status).toBe("running");
-    expect(state.current).toBe(sample.current);
-    expect(state.progress).toEqual({ index: sample.index, total: sample.total });
-  },
+  motor_check_state: (result, sample) => {
+    // **robot を持たない 1 通**。受信条件が robot を要求していると 100% 捨てられる
+    expect(sample.robot).toBeUndefined();
 
-  motor_check_record: (result, sample) => {
-    const state = result.motorChecks[sample.robot as string];
-    expect(state.records).toEqual([sample.record]);
-  },
-
-  motor_check_done: (result, sample) => {
-    const snapshot = sample.snapshot as Record<string, unknown>;
-    const state = result.motorChecks[sample.robot as string];
-    expect(state.status).toBe("completed");
-    expect(state.snapshot).toEqual(snapshot);
-    expect(state.records).toEqual(snapshot.records);
-    // サーバーはエポック秒、Date はミリ秒。ここが取り違えられると実施時刻が 1970 年になる
-    expect(state.finishedAtMs).toBe(EPOCH_SECONDS * 1000);
-    expect(state.startedAtMs).toBe(EPOCH_SECONDS * 1000);
-  },
-
-  motor_check_error: (result, sample) => {
-    const state = result.motorChecks[sample.robot as string];
-    expect(state.status).toBe("error");
-    expect(state.error).toBe(sample.message);
+    const state = result.motorCheck;
+    expect(state.available).toBe(sample.available);
+    expect(state.running).toBe(sample.running);
+    expect(state.error).toBe(sample.error);
+    expect(state.total_steps).toBe(sample.total_steps);
+    expect(state.steps).toEqual(sample.steps);
   },
 };
 
@@ -377,25 +358,6 @@ const STEP = fieldsOf<SequenceStepInfo>({
   require_trigger: "ui",
 });
 
-const CHECK_RECORD = fieldsOf<MotorCheckRecord>({
-  motor: "ui",
-  bus: "ui",
-  result: "ui",
-  expected: "ui",
-  observed: "ui",
-  detail: "ui",
-  started_at: { unused: "項目ごとの所要時間は出していない。実施時刻は run 単位で足りる" },
-  finished_at: { unused: "同上" },
-});
-
-const CHECK_SNAPSHOT = fieldsOf<CheckRunSnapshot>({
-  overall: "ui",
-  records: "ui",
-  started_at: "ui",
-  finished_at: "ui",
-  robot: { unused: "宛先はエンベロープの robot で決まる (同じ値を二重に持っている)" },
-});
-
 const MATCH_TIMER = fieldsOf<MatchTimer>({
   running: "ui",
   elapsed_ms: "ui",
@@ -490,30 +452,22 @@ const DECLARED: Record<string, FieldSpec> = {
     reason: "ui",
   }),
 
-  motor_check_progress: fieldsOf<WireOf<"motor_check_progress">>({
-    type: "parser",
-    robot: "ui",
-    current: "ui",
-    index: "ui",
-    total: "ui",
-  }),
-
-  motor_check_record: {
-    ...fieldsOf<WireOf<"motor_check_record">>({ type: "parser", robot: "ui", record: "ui" }),
-    ...nest("record", CHECK_RECORD),
+  // ワイヤ形式と正規化後の形が違う唯一のメッセージ。受信時に `motorCheck` で
+  // 包み直しているので、`WireOf` ではなく素のペイロード型で宣言する
+  motor_check_state: {
+    ...fieldsOf<Wire<MotorCheckSnapshot>>({
+      type: "parser",
+      available: "ui",
+      blocked_reason: "ui",
+      running: "ui",
+      current_step: "ui",
+      step_index: "ui",
+      total_steps: "ui",
+      steps: "ui",
+      error: "ui",
+    }),
+    ...nest("steps[]", STEP),
   },
-
-  motor_check_done: {
-    ...fieldsOf<WireOf<"motor_check_done">>({ type: "parser", robot: "ui", snapshot: "ui" }),
-    ...nest("snapshot", CHECK_SNAPSHOT),
-    ...nest("snapshot.records[]", CHECK_RECORD),
-  },
-
-  motor_check_error: fieldsOf<WireOf<"motor_check_error">>({
-    type: "parser",
-    robot: "ui",
-    message: "ui",
-  }),
 };
 
 /**

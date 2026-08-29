@@ -22,17 +22,6 @@ class MotorHealth(Enum):
     FAULT = "fault"
 
 
-class MotorCheckResult(Enum):
-    """能動アクチュエータ動作確認の結果コード。"""
-
-    PENDING = "pending"
-    RUNNING = "running"
-    PASSED = "passed"
-    FAILED = "failed"
-    TIMEOUT = "timeout"
-    SKIPPED = "skipped"
-
-
 @dataclass
 class BusHealthInfo:
     name: str
@@ -126,66 +115,3 @@ class HealthSnapshot:
                 return state
         return BusHealth.OK
 
-
-@dataclass
-class MotorCheckRecord:
-    motor: str
-    bus: str
-    started_at: float
-    finished_at: float | None
-    result: MotorCheckResult
-    expected: float | None
-    observed: float | None
-    detail: str | None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "motor": self.motor,
-            "bus": self.bus,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "result": self.result.value,
-            "expected": self.expected,
-            "observed": self.observed,
-            "detail": self.detail,
-        }
-
-
-@dataclass
-class CheckRunSnapshot:
-    robot: str
-    started_at: float
-    finished_at: float | None
-    overall: str
-    records: list[MotorCheckRecord] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "robot": self.robot,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "overall": self.overall,
-            "records": [r.to_dict() for r in self.records],
-        }
-
-    @staticmethod
-    def compute_overall(records: list[MotorCheckRecord]) -> str:
-        # RUNNING/PENDING が含まれる間は確定しない
-        if any(r.result in (MotorCheckResult.RUNNING, MotorCheckResult.PENDING) for r in records):
-            return "running"
-
-        # SKIPPED は判定対象から除外する (動作確認していないため)
-        evaluated = [r for r in records if r.result is not MotorCheckResult.SKIPPED]
-        if not evaluated:
-            return "ok"
-
-        passed = sum(1 for r in evaluated if r.result is MotorCheckResult.PASSED)
-        failed = sum(
-            1 for r in evaluated if r.result in (MotorCheckResult.FAILED, MotorCheckResult.TIMEOUT)
-        )
-
-        if passed == len(evaluated):
-            return "ok"
-        if failed == len(evaluated):
-            return "failed"
-        return "partial"

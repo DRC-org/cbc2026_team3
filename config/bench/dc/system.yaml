@@ -28,12 +28,5 @@ health:
   temp_critical_c: 80
   tx_error_threshold: 96
 
-motor_check:
-  per_motor_timeout_ms: 1500
-  default_magnitude:
-    m3508: 500
-    edulite05: 5.0
-    generic: 0.1
-
 match:
   duration_s: 180

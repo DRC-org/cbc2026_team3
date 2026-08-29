@@ -1,9 +1,17 @@
+import { ListChecks } from "lucide-react";
+import { useState } from "react";
+
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { Checklist } from "@/components/monitor/Checklist";
 import { EventFeed } from "@/components/monitor/EventFeed";
 import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/monitor/MatchControl";
 import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
+import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
+import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
+import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
+import { Button } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
@@ -20,6 +28,7 @@ export function Dashboard() {
   const states = useRobotStates();
   const { matchState } = useRobotStatus();
   const { confirmModal, requestConfirm } = useMatchConfirm();
+  const [checkPanelOpen, setCheckPanelOpen] = useState(false);
 
   if (isSetupPhase(matchState.phase)) {
     return (
@@ -37,10 +46,27 @@ export function Dashboard() {
               (かつては各操縦者のタブに 1 つずつ置いて二度読み上げていた) */}
           <Checklist />
 
-          {/* 右は StartGate と指差喚呼が答えられないことだけを持つ参照面。
-              機体状態の判定チップは StartGate と重複するので出さない
-              (同じ画面に「要確認 3 件」が 2 回並ぶ状態を作らない) */}
+          {/* 右は StartGate と指差喚呼が答えられないことだけを持つ参照面 +
+              準備フェーズの唯一の操作。機体状態の判定チップは StartGate と
+              重複するので出さない (同じ画面に「要確認 3 件」が 2 回並ばない) */}
           <div className="flex min-h-0 flex-col gap-2">
+            {/* 動作確認は両ハンドで 1 本。指差喚呼の motor_check 項目と対になるので、
+                チェックリストと同じ画面に置く (以前は各操縦者のタブに 1 つずつあり、
+                2 つを同時に起動できたため両機が同時に動きうる状態だった) */}
+            <Panel
+              legend="アクチュエータ動作確認"
+              className="shrink-0"
+              actions={<MotorCheckSummary />}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <MotorCheckButton onPanelOpen={() => setCheckPanelOpen(true)} />
+                <Button onClick={() => setCheckPanelOpen(true)}>
+                  <Icon as={ListChecks} />
+                  進捗を表示
+                </Button>
+              </div>
+            </Panel>
+
             <Panel
               legend="機体状態 — どのバス・どのモータか"
               className="min-h-0 flex-1"
@@ -74,6 +100,7 @@ export function Dashboard() {
           </div>
         </Page>
         {confirmModal}
+        <MotorCheckPanel isOpen={checkPanelOpen} onOpenChange={setCheckPanelOpen} />
       </>
     );
   }

@@ -357,9 +357,15 @@ class TestPhaseGate:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "motor_check_start", "robot": "main_hand"})
-            msg = await recv_type(ws, "motor_check_error")
+            # 接続直後のスナップショット (実行中に繋いだ画面が「未実行」を出さないよう
+            # サーバーが 1 通送る) を読み捨ててから、拒否で流れる 1 通を見る
+            await recv_type(ws, "motor_check_state")
+
+            await ws.send_json({"type": "motor_check_start"})
+            # 拒否理由は動作確認の状態に載って流れる (専用の 1 通を増やさない)
+            msg = await recv_type(ws, "motor_check_state")
             assert msg is not None
+            assert "試合中" in (msg["error"] or "")
             await ws.close()
 
     async def test_motor_check_http_rejected_during_match(self) -> None:
@@ -369,7 +375,7 @@ class TestPhaseGate:
         fx.enter_match()
 
         async with TestClient(TestServer(app)) as client:
-            resp = await client.post("/robots/main_hand/motor_check")
+            resp = await client.post("/motor_check")
             assert resp.status == 409
 
 

@@ -200,9 +200,15 @@ class MotorDriver(abc.ABC):
         return False
 
     # ------------------------------------------------------------------ #
-    #  アクチュエータ動作確認 (Phase 6 段階⑦)
+    #  起動手順と、モータ単位の能動テスト用 API
     # ------------------------------------------------------------------ #
-    # MotorCheckRunner からの能動テスト用 API
+    # `initialization_steps` / `activation_steps` / `requires_fresh_feedback_for_activation`
+    # / `feedback_probe_message` は起動経路 (`CANManager.initialize_motors`) が使う。
+    #
+    # **`check_*` 系は現在どこからも呼ばれていない。** 動作確認をモータ単位で駆動する
+    # `MotorCheckRunner` のための API だったが、両ハンドを 1 本のシーケンスで駆動する形
+    # (robots/motor_check.py) へ移したので、判定はシーケンスエンジンの到達判定が担う。
+    # 新しいドライバを足す人に不要な実装を強いないよう、次に触るときへ撤去を残してある。
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
         """起動時に送る ``(message, delay_after_seconds)``。既定は初期化不要。

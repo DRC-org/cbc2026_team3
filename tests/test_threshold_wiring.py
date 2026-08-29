@@ -15,7 +15,6 @@ from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.drivers.base import MotorDriver
-from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
 from lib.server import RobotServer
 from tests.server_fixtures import ServerFixture
@@ -86,30 +85,9 @@ class TestDefaultsComeFromConfigSchema:
             == "DEFAULT_HEALTH.feedback_timeout_ms"
         )
 
-    def test_motor_check_feedback_timeout_default(self) -> None:
-        assert (
-            _default_source(MotorCheckRunner.__init__, "feedback_timeout_ms")
-            == "DEFAULT_HEALTH.feedback_timeout_ms"
-        )
-
-    def test_motor_check_per_motor_timeout_default(self) -> None:
-        assert (
-            _default_source(MotorCheckRunner.__init__, "per_motor_timeout_ms")
-            == "DEFAULT_MOTOR_CHECK.per_motor_timeout_ms"
-        )
-
-
-class TestFeedbackStalenessHasOneName:
-    """動作確認の鮮度判定は health.feedback_timeout_ms と同じ概念・同じ名前。"""
-
-    def test_motor_check_uses_feedback_timeout_ms(self) -> None:
-        params = inspect.signature(MotorCheckRunner.__init__).parameters
-        assert "feedback_timeout_ms" in params
-        assert "feedback_freshness_ms" not in params
-
-    def test_motor_check_default_magnitude_comes_from_config_schema(self) -> None:
-        """既定 magnitude は引数既定ではなく本体の fallback にある (None 判定を挟むため)。"""
-        assert _body_references(MotorCheckRunner.__init__, "DEFAULT_MOTOR_CHECK.default_magnitude")
+    # 動作確認のしきい値はここに無い。両ハンドを 1 本のシーケンスで駆動する形へ
+    # 変えたので、タイムアウトも許容差も config/*_positions.yaml の位置定数が持つ
+    # (`AxisSpec.timeout_s` / `tolerance`)。確認専用のしきい値そのものが存在しない。
 
 
 class _NoStepSequence(Sequence):

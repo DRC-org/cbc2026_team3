@@ -65,53 +65,27 @@
       },
       "type": "match_state"
     },
-    "motor_check_done": {
-      "robot": "main_hand",
-      "snapshot": {
-        "finished_at": 1700000000.0,
-        "overall": "ok",
-        "records": [
-          {
-            "bus": "can_generic",
-            "detail": null,
-            "expected": 5.0,
-            "finished_at": 1700000000.0,
-            "motor": "gripper",
-            "observed": 4.9,
-            "result": "passed",
-            "started_at": 1700000000.0
-          }
-        ],
-        "robot": "main_hand",
-        "started_at": 1700000000.0
-      },
-      "type": "motor_check_done"
-    },
-    "motor_check_error": {
-      "message": "試合中は動作確認を実行できません",
-      "robot": "main_hand",
-      "type": "motor_check_error"
-    },
-    "motor_check_progress": {
-      "current": "gripper",
-      "index": 1,
-      "robot": "main_hand",
-      "total": 3,
-      "type": "motor_check_progress"
-    },
-    "motor_check_record": {
-      "record": {
-        "bus": "can_generic",
-        "detail": null,
-        "expected": 5.0,
-        "finished_at": 1700000000.0,
-        "motor": "gripper",
-        "observed": 4.9,
-        "result": "passed",
-        "started_at": 1700000000.0
-      },
-      "robot": "main_hand",
-      "type": "motor_check_record"
+    "motor_check_state": {
+      "available": true,
+      "blocked_reason": "緊急停止中のため動作確認を実行できません",
+      "current_step": "メインハンド 初期姿勢へ",
+      "error": "緊急停止中のため動作確認を実行できません",
+      "running": false,
+      "step_index": 0,
+      "steps": [
+        {
+          "index": 0,
+          "label": "メインハンド 初期姿勢へ",
+          "require_trigger": false
+        },
+        {
+          "index": 1,
+          "label": "サブハンド 電磁弁 6 個 (打音・目視確認)",
+          "require_trigger": false
+        }
+      ],
+      "total_steps": 2,
+      "type": "motor_check_state"
     },
     "server_info": {
       "dev_tools": false,

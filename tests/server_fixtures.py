@@ -28,10 +28,9 @@ from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
-from lib.health import CheckRunSnapshot, HealthSnapshot
+from lib.health import HealthSnapshot
 from lib.manual import ManualController
 from lib.match_state import MatchState
-from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
 from lib.server import RobotServer
 from tests.fake_can import mock_can_manager
@@ -190,19 +189,12 @@ class ServerFixture:
     async def publish_e_stop_state(self) -> None:
         await self.server._broadcast_e_stop_state()
 
-    async def publish_motor_check_progress(
-        self, robot: str, motor: str, index: int, total: int
-    ) -> None:
-        await self.server._broadcast_motor_check_progress(robot, motor, index, total)
+    async def publish_motor_check_state(self) -> None:
+        """動作確認の状態を 1 通配信する (変化が無ければ流れない)。"""
+        await self.server._broadcast_motor_check_state()
 
-    async def publish_motor_check_record(self, robot: str, record: Any) -> None:
-        await self.server._broadcast_motor_check_record(robot, record)
-
-    async def publish_motor_check_done(self, robot: str, snapshot: CheckRunSnapshot) -> None:
-        await self.server._broadcast_motor_check_done(robot, snapshot)
-
-    async def publish_motor_check_error(self, robot: str, message: str) -> None:
-        await self.server._broadcast_motor_check_error(robot, message)
+    async def publish_motor_check_error(self, message: str) -> None:
+        await self.server._set_motor_check_error(message)
 
     def broadcast_loop(self) -> Any:
         """配信ループのコルーチン。1 回の例外で止まらないことを見るテスト用。"""
@@ -266,37 +258,41 @@ class ServerFixture:
     #  アクチュエータ動作確認
     # ------------------------------------------------------------------ #
 
-    async def start_motor_check(self, robot: str) -> bool:
+    def set_motor_check_sequence(self, sequence: Any) -> None:
+        """統合動作確認シーケンスを登録する。両ハンド共通の 1 本。"""
+        self.server.set_motor_check_sequence(sequence)
+
+    async def start_motor_check(self) -> bool:
         """動作確認を起動する。拒否されたら False (HTTP POST の 409 と同じ判定)。"""
-        return await self.server._start_motor_check(robot)
+        return await self.server._start_motor_check()
 
-    def motor_check_runner(self, robot: str) -> Any:
-        return self.server._motor_check_runners.get(robot)
+    def abort_motor_check(self) -> None:
+        self.server._abort_motor_check()
 
-    def install_motor_check_runner(self, robot: str, runner: Any) -> None:
-        self.server._motor_check_runners[robot] = runner
+    def motor_check_sequence(self) -> Any:
+        return self.server._motor_check
 
-    def last_motor_check(self, robot: str) -> CheckRunSnapshot | None:
-        return self.server._motor_check_last.get(robot)
+    def motor_check_state(self) -> dict:
+        """配信される動作確認状態。UI が読むのと同じ形。"""
+        return self.server._motor_check_payload()
 
-    async def wait_motor_check_idle(self, robot: str, *, timeout: float = 2.0) -> None:
-        task = self.server._motor_check_tasks.get(robot)
+    def motor_check_error(self) -> str | None:
+        return self.server._motor_check_error
+
+    async def wait_motor_check_idle(self, *, timeout: float = 2.0) -> None:
+        task = self.server._motor_check_task
         if task is None:
             return
         await asyncio.wait_for(task, timeout=timeout)
 
-    async def wait_motor_check_running(
-        self, robot: str, *, timeout: float = 2.0
-    ) -> MotorCheckRunner:
-        runner: Any = None
+    async def wait_motor_check_running(self, *, timeout: float = 2.0) -> Any:
+        sequence = self.server._motor_check
+        assert sequence is not None, "動作確認シーケンスが登録されていない"
 
-        def _running() -> bool:
-            nonlocal runner
-            runner = self.motor_check_runner(robot)
-            return runner is not None and runner.is_running
-
-        assert await wait_until(_running, timeout=timeout), "動作確認 runner が起動しなかった"
-        return runner
+        assert await wait_until(lambda: sequence.is_running, timeout=timeout), (
+            "動作確認シーケンスが起動しなかった"
+        )
+        return sequence
 
     # ------------------------------------------------------------------ #
     #  ロボット配線の後付け

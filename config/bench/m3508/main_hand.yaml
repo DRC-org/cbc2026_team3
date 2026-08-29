@@ -23,8 +23,6 @@ motors:
     driver: m3508
     bus: m3508_bus
     can_id: 1
-    motor_check:
-      magnitude: 0             # 片側だけ駆動する動作確認はペア軸では行わない (本番と同じ)
     pid:
       kp: 2.0
       ki: 0.0
@@ -41,8 +39,6 @@ motors:
     driver: m3508
     bus: m3508_bus
     can_id: 2
-    motor_check:
-      magnitude: 0
     pid:
       kp: 2.0
       ki: 0.0

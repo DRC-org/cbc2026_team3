@@ -452,11 +452,13 @@ class TestEStopKeepsRecoveryCommands:
 
             await ws.send_json({"type": "match_finish"})
             await _expect_no_rejection(ws, "match_finish", tries=5)
-            assert fx.match.phase is Phase.FINISHED
+            # 読み取った通数ではなく状態の変化を待つ。接続直後のスナップショットが
+            # 1 通増減しただけで結果が変わるテストは、何も守っていない
+            assert await wait_until(lambda: fx.match.phase is Phase.FINISHED)
 
             await ws.send_json({"type": "e_stop_release"})
             await _expect_no_rejection(ws, "e_stop_release", tries=5)
-            assert fx.e_stop_active is False
+            assert await wait_until(lambda: not fx.e_stop_active)
 
             await ws.close()
 

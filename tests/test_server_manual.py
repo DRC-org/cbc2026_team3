@@ -219,10 +219,10 @@ class TestControlOwnership:
     async def test_手動モード中は動作確認を起動できない(self) -> None:
         fx, _ = _fixture()
         await _switch(fx, "manual")
-        assert await fx.start_motor_check(_ROBOT) is False
+        assert await fx.start_motor_check() is False
 
-    # 動作確認が実際に駆動している最中の排他は、実 CANManager を要するため
-    # tests/test_server_motor_check.py の TestMotorCheckAndManualAreExclusive にある
+    # 動作確認の側から見た排他 (実行中の手動切替拒否・両ロボットへのゲート) は
+    # tests/test_server_motor_check.py にある
 
     async def test_半自動へ戻してもシーケンスは自動再開しない(self) -> None:
         # 手動で機構を動かした後に先頭から流すと、機構の姿勢と手順が食い違う

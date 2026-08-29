@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 # 単位換算は制御層 (同期監視・位置制御ループ) と共有する。ここで再定義すると
@@ -197,6 +197,41 @@ class PositionTable:
     @classmethod
     def empty(cls, *, source: str = "<inline>") -> PositionTable:
         return cls({}, {}, source=source)
+
+    @classmethod
+    def merged(cls, tables: Sequence[PositionTable]) -> PositionTable:
+        """複数の位置定数表を 1 つに束ねる。
+
+        統合動作確認シーケンス (robots/motor_check.py) は両ハンドのアクチュエータを
+        1 つの順序で駆動するため、両機の軸を同じ表から引く必要がある。
+
+        **軸名の衝突は起動時に拒否する。** 後勝ちで上書きすると、動作確認が意図した
+        側とは別の機体の軸へ指令が飛ぶ。症状は「指令したのに動かない機構」と
+        「触っていないのに動く機構」が同時に出る形で、しかもどちらの config を見ても
+        間違いが書かれていないので原因にたどり着けない。
+
+        Raises:
+            ValueError: 同じ軸名が 2 つ以上の表にある
+        """
+        axes: dict[str, AxisSpec] = {}
+        positions: dict[str, dict[str, float | dict[str, float]]] = {}
+        owner: dict[str, str] = {}
+
+        for table in tables:
+            for name, spec in table._axes.items():
+                if name in axes:
+                    raise ValueError(
+                        f"軸 '{name}' が複数の位置定数に定義されています "
+                        f"({owner[name]} と {table.source})。"
+                        "軸名はロボット横断に一意でなければなりません"
+                    )
+                axes[name] = spec
+                owner[name] = table.source
+            for name, values in table._positions.items():
+                positions[name] = dict(values)
+
+        source = " + ".join(table.source for table in tables) or "<merged>"
+        return cls(axes, positions, source=source)
 
     @property
     def source(self) -> str:

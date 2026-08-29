@@ -3,75 +3,82 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
-import type { MotorCheckRecord } from "@/lib/protocol";
-import type { MotorCheckState } from "@/lib/robotReducer";
+import type { MotorCheckSnapshot, SequenceStepInfo } from "@/lib/protocol";
 import { EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
-function record(over: Partial<MotorCheckRecord> = {}): MotorCheckRecord {
-  return {
-    motor: "gripper",
-    bus: "can_generic",
-    started_at: 1_700_000_000,
-    finished_at: 1_700_000_000,
-    result: "passed",
-    expected: 5,
-    observed: 4.9,
-    detail: null,
-    ...over,
-  };
-}
+const STEPS: SequenceStepInfo[] = [
+  { index: 0, label: "メインハンド 初期姿勢へ", require_trigger: false },
+  { index: 1, label: "メインハンド y 軸 (左右直結ペア)", require_trigger: false },
+  { index: 2, label: "サブハンド 電磁弁 6 個 (打音・目視確認)", require_trigger: false },
+];
 
-function mount(check: Partial<MotorCheckState> = {}) {
-  return renderWithRobot(<MotorCheckPanel robotName="main_hand" isOpen onOpenChange={vi.fn()} />, {
-    motorChecks: { main_hand: { ...EMPTY_MOTOR_CHECK, ...check } },
+function mount(check: Partial<MotorCheckSnapshot> = {}) {
+  return renderWithRobot(<MotorCheckPanel isOpen onOpenChange={vi.fn()} />, {
+    motorCheck: {
+      ...EMPTY_MOTOR_CHECK,
+      available: true,
+      blocked_reason: null,
+      steps: STEPS,
+      total_steps: STEPS.length,
+      ...check,
+    },
   });
 }
 
 describe("MotorCheckPanel", () => {
-  it("未実行ではその旨だけを出す", () => {
+  it("何を動かすかをステップ一覧で先に見せる", () => {
+    // 押す前に「両機の何がどの順で動くか」が読めないと、周囲の安全確認ができない
     mount();
-    expect(screen.getByText("動作確認はまだ実行されていません。")).toBeInTheDocument();
+
+    expect(screen.getByText("メインハンド 初期姿勢へ")).toBeInTheDocument();
+    expect(screen.getByText("サブハンド 電磁弁 6 個 (打音・目視確認)")).toBeInTheDocument();
   });
 
-  it("合格は期待値と観測値を並べる", () => {
-    mount({ status: "completed", records: [record()] });
-    expect(screen.getByText("期待 5 → 観測 4.90")).toBeInTheDocument();
+  it("実行中は今どのステップかを出す", () => {
+    mount({ running: true, step_index: 1, current_step: STEPS[1].label });
+
+    expect(screen.getByText("1 / 3")).toBeInTheDocument();
+    expect(screen.getAllByText("メインハンド y 軸 (左右直結ペア)").length).toBeGreaterThan(0);
+    expect(screen.getByText("実行中")).toBeInTheDocument();
   });
 
-  it("期待値を持たない項目に『期待 null』と書かない", () => {
-    // 到達位置を判定しない項目 (グリッパの開閉等) では expected が null で届く。
-    // TS 側が number と偽っていたため、画面にそのまま "期待 null" と出ていた
-    mount({ status: "completed", records: [record({ expected: null })] });
+  it("中断・失敗の理由を出す", () => {
+    mount({ error: "緊急停止中のため動作確認を中止しました" });
 
-    expect(screen.queryByText(/null/)).not.toBeInTheDocument();
-    expect(screen.getByText("観測 4.90")).toBeInTheDocument();
+    expect(screen.getByText("動作確認は完了していません")).toBeInTheDocument();
+    expect(screen.getByText("緊急停止中のため動作確認を中止しました")).toBeInTheDocument();
   });
 
-  it("失敗は理由を出す", () => {
-    mount({
-      status: "completed",
-      records: [record({ result: "failed", detail: "フィードバック無応答" })],
-    });
-    expect(screen.getByText("フィードバック無応答")).toBeInTheDocument();
+  it("合否の列を持たない", () => {
+    // 到達判定を持たない軸 (duty / on_off) に「合格」を出すと、動いたかどうかを
+    // 機械が見ていないのに見たように読めてしまう
+    mount({ running: false, step_index: 3 });
+
+    expect(screen.queryByText("合格")).not.toBeInTheDocument();
+    expect(screen.queryByText(/期待/)).not.toBeInTheDocument();
   });
 
-  it("実行中は中断でき、終了後はリトライできる", async () => {
-    const { context, unmount } = mount({
-      status: "running",
-      current: "gripper",
-      progress: { index: 1, total: 3 },
-      records: [record({ result: "pending" })],
-    });
+  it("実行中は中断でき、終了後はもう一度実行できる", async () => {
+    const { context, unmount } = mount({ running: true, step_index: 1 });
 
     await userEvent.click(screen.getByRole("button", { name: "中断" }));
-    expect(context.send).toHaveBeenCalledWith({ type: "motor_check_abort", robot: "main_hand" });
+    expect(context.send).toHaveBeenCalledWith({ type: "motor_check_abort" });
     unmount();
 
-    const retry = mount({ status: "completed", records: [record()] });
-    await userEvent.click(screen.getByRole("button", { name: "リトライ" }));
-    expect(retry.context.send).toHaveBeenCalledWith({
-      type: "motor_check_start",
-      robot: "main_hand",
+    const done = mount({ running: false, step_index: 3 });
+    await userEvent.click(screen.getByRole("button", { name: "もう一度実行" }));
+    expect(done.context.send).toHaveBeenCalledWith({ type: "motor_check_start" });
+  });
+
+  it("起動できない構成では実行ボタンを塞ぐ", () => {
+    mount({
+      available: false,
+      steps: [],
+      total_steps: 0,
+      blocked_reason: "動作確認シーケンスが読み込まれていません",
     });
+
+    expect(screen.getByRole("button", { name: /実行/ })).toBeDisabled();
+    expect(screen.getByText(/この構成では動作確認を実行できません/)).toBeInTheDocument();
   });
 });

@@ -8,8 +8,8 @@
 「壊れていても起動する」方針 (checklist.yaml) はここでは取らない。
 
 このモジュールは yaml が黙っていたときに使う既定値 (``DEFAULT_HEALTH`` /
-``DEFAULT_MOTOR_CHECK``) の単一情報源でもある。しきい値を使う側 (can_manager /
-server / control / motor_check) は自前のリテラルを持たず、ここを参照する。
+``DEFAULT_MATCH``) の単一情報源でもある。しきい値を使う側 (can_manager /
+server / control) は自前のリテラルを持たず、ここを参照する。
 同じ数値を各所に書くと、config を配線し忘れた 1 経路だけが古い境界で判定を続け、
 どこにも異常として現れない。
 そのため上位モジュールを import してはならない (依存は lib.drivers.base のみ)。
@@ -66,14 +66,13 @@ CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     }
 )
 
-_SYSTEM_KEYS = frozenset({"can_buses", "health", "motor_check", "match"})
+_SYSTEM_KEYS = frozenset({"can_buses", "health", "match"})
 _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold")
-_MOTOR_CHECK_KEYS = frozenset({"per_motor_timeout_ms", "default_magnitude"})
 _MATCH_KEYS = frozenset({"duration_s"})
 
 _ROBOT_KEYS = frozenset({"robot_name", "motors", "sensors"})
 _SENSOR_KEYS = frozenset({"bus", "can_id"})
-_COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id", "motor_check"})
+_COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id"})
 # ドライバ固有キー。他のドライバに書いても効かないため、混在は起動時に拒否する
 _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
     "m3508": frozenset({"pid"}),
@@ -82,13 +81,12 @@ _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
     ),
     "generic": frozenset({"control_type", "expected_firmware", "expected_angle_range_deg"}),
 }
-_MOTOR_CHECK_OVERRIDE_KEYS = frozenset({"magnitude", "timeout_ms"})
 # 値の解釈 (null 許容・既定値補完) は main._load_pid_config が持つ。ここではキー名だけ見る
 _PID_KEYS = frozenset({"kp", "ki", "kd", "integral_limit", "dead_band", "output_limit"})
 
 # robot yaml から system.yaml へ移した共通設定。移動前の yaml をそのまま起動すると
 # 「書いたのに効かない」状態になるため、残っていたら移動先を示して拒否する
-_MOVED_TO_SYSTEM = frozenset({"health", "motor_check", "can_buses", "match"})
+_MOVED_TO_SYSTEM = frozenset({"health", "can_buses", "match"})
 
 
 @dataclass(frozen=True)
@@ -108,20 +106,6 @@ class HealthThresholds:
 
 
 @dataclass(frozen=True)
-class MotorCheckSettings:
-    """アクチュエータ動作確認の共通設定。
-
-    ``default_magnitude`` はドライバ種別ごとの試験駆動量で、機構に触れても危険でない
-    微小量に固定してある (mA / deg / rev・duty と単位はドライバ種別で違う)。
-    """
-
-    per_motor_timeout_ms: float = 1500.0
-    default_magnitude: Mapping[str, float] = field(
-        default_factory=lambda: MappingProxyType({"m3508": 500.0, "edulite05": 5.0, "generic": 0.1})
-    )
-
-
-@dataclass(frozen=True)
 class MatchSettings:
     """試合そのものの設定 (config/system.yaml の match セクション)。
 
@@ -138,36 +122,23 @@ class SystemConfig:
 
     can_buses: Mapping[str, str]
     health: HealthThresholds
-    motor_check: MotorCheckSettings
     match: MatchSettings
     source: str = "<inline>"
 
 
 @dataclass(frozen=True)
-class MotorCheckOverride:
-    """モータ 1 台分の動作確認の上書き。未指定キーはドライバ既定値を使う。"""
-
-    magnitude: float | None = None
-    timeout_ms: float | None = None
-
-    def as_dict(self) -> dict[str, float]:
-        entry: dict[str, float] = {}
-        if self.magnitude is not None:
-            entry["magnitude"] = self.magnitude
-        if self.timeout_ms is not None:
-            entry["timeout_ms"] = self.timeout_ms
-        return entry
-
-
-@dataclass(frozen=True)
 class MotorConfig:
-    """モータ 1 台分の検証済み設定。ドライバ固有値は既定値まで解決済み。"""
+    """モータ 1 台分の検証済み設定。ドライバ固有値は既定値まで解決済み。
+
+    動作確認の駆動量はここに持たない。両ハンドを 1 本のシーケンスで駆動する形
+    (robots/motor_check.py) へ変えたので、確認は運用と同じ位置名へ動かす。
+    確認専用の値が存在しない = 位置定数とずれようがない。
+    """
 
     name: str
     driver: str
     bus: str
     can_id: int
-    motor_check: MotorCheckOverride = field(default_factory=MotorCheckOverride)
     # generic
     control_type: ControlMode = ControlMode.POSITION
     # INFO (1Hz の自己申告, 仕様書 §3.4) と突き合わせる期待値。**書かなければ照合しない。**
@@ -213,7 +184,6 @@ class RobotConfig:
 
 
 DEFAULT_HEALTH = HealthThresholds()
-DEFAULT_MOTOR_CHECK = MotorCheckSettings()
 DEFAULT_MATCH = MatchSettings()
 
 
@@ -308,31 +278,6 @@ def _parse_health(source: str, raw: object) -> HealthThresholds:
     )
 
 
-def _parse_motor_check(source: str, raw: object) -> MotorCheckSettings:
-    section = _require_mapping(source, "motor_check", raw)
-    _reject_unknown(source, "motor_check", section, _MOTOR_CHECK_KEYS)
-
-    timeout = DEFAULT_MOTOR_CHECK.per_motor_timeout_ms
-    if section.get("per_motor_timeout_ms") is not None:
-        timeout = _number(
-            source, "motor_check.per_motor_timeout_ms", section["per_motor_timeout_ms"]
-        )
-
-    magnitudes = dict(DEFAULT_MOTOR_CHECK.default_magnitude)
-    raw_magnitudes = _require_mapping(
-        source, "motor_check.default_magnitude", section.get("default_magnitude")
-    )
-    _reject_unknown(
-        source, "motor_check.default_magnitude", raw_magnitudes, frozenset(DRIVER_TYPES)
-    )
-    for driver, value in raw_magnitudes.items():
-        magnitudes[driver] = _number(source, f"motor_check.default_magnitude.{driver}", value)
-
-    return MotorCheckSettings(
-        per_motor_timeout_ms=timeout, default_magnitude=MappingProxyType(magnitudes)
-    )
-
-
 def _parse_match(source: str, raw: object) -> MatchSettings:
     section = _require_mapping(source, "match", raw)
     _reject_unknown(source, "match", section, _MATCH_KEYS)
@@ -357,28 +302,12 @@ def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> S
     return SystemConfig(
         can_buses=MappingProxyType(_parse_can_buses(source, raw.get("can_buses"))),
         health=_parse_health(source, raw.get("health")),
-        motor_check=_parse_motor_check(source, raw.get("motor_check")),
         match=_parse_match(source, raw.get("match")),
         source=source,
     )
 
 
 # ---- <robot>.yaml ----
-
-
-def _parse_motor_check_override(source: str, motor_name: str, raw: object) -> MotorCheckOverride:
-    path = f"motors.{motor_name}.motor_check"
-    section = _require_mapping(source, path, raw)
-    _reject_unknown(source, path, section, _MOTOR_CHECK_OVERRIDE_KEYS)
-
-    magnitude = section.get("magnitude")
-    timeout_ms = section.get("timeout_ms")
-    return MotorCheckOverride(
-        magnitude=None if magnitude is None else _number(source, f"{path}.magnitude", magnitude),
-        timeout_ms=(
-            None if timeout_ms is None else _number(source, f"{path}.timeout_ms", timeout_ms)
-        ),
-    )
 
 
 def _parse_pid(source: str, motor_name: str, raw: object) -> Mapping[str, object] | None:
@@ -515,7 +444,6 @@ def _parse_motor(
             f"{source}: {path}.can_id が {driver} の範囲外です: {can_id} "
             f"(指定できるのは {low:#04x}〜{high:#04x})"
         )
-    check = _parse_motor_check_override(source, motor_name, motor.get("motor_check"))
 
     if driver == "generic":
         control_type = _optional_mode(
@@ -526,7 +454,6 @@ def _parse_motor(
             driver=driver,
             bus=bus,
             can_id=can_id,
-            motor_check=check,
             control_type=control_type,
             expected_firmware=_parse_expected_firmware(source, path, motor),
             expected_angle_range_deg=_parse_expected_angle_range(source, path, motor, control_type),
@@ -538,7 +465,6 @@ def _parse_motor(
             driver=driver,
             bus=bus,
             can_id=can_id,
-            motor_check=check,
             host_id=_optional(_integer, source, path, motor, "host_id", 0xFD),
             mode=_optional_mode(source, path, motor, "mode", _EDULITE_MODES, ControlMode.POSITION),
             limit_speed=_optional(_number, source, path, motor, "limit_speed", 2.0),
@@ -552,7 +478,6 @@ def _parse_motor(
         driver=driver,
         bus=bus,
         can_id=can_id,
-        motor_check=check,
         pid=_parse_pid(source, motor_name, motor.get("pid")),
     )
 

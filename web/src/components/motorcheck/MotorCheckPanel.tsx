@@ -1,4 +1,4 @@
-import { Play, Square, TriangleAlert } from "lucide-react";
+import { Check, Play, Square, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -6,111 +6,36 @@ import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { cx } from "@/lib/cx";
-import type { MotorCheckOverall, MotorCheckRecord, MotorCheckResult } from "@/lib/protocol";
-import type { Tone } from "@/lib/tone";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 interface MotorCheckPanelProps {
-  robotName: string;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-const RESULT_STYLES: Record<MotorCheckResult, { tone: Tone; label: string }> = {
-  pending: { tone: "neutral", label: "待機中" },
-  running: { tone: "info", label: "確認中" },
-  passed: { tone: "success", label: "合格" },
-  failed: { tone: "error", label: "失敗" },
-  timeout: { tone: "warning", label: "タイムアウト" },
-  skipped: { tone: "neutral", label: "中断" },
-};
-
-const OVERALL_STYLES: Record<MotorCheckOverall, { tone: Tone; label: string }> = {
-  running: { tone: "info", label: "実行中" },
-  ok: { tone: "success", label: "全モータ合格" },
-  partial: { tone: "warning", label: "一部失敗" },
-  failed: { tone: "error", label: "失敗" },
-};
-
-function formatNumber(value: number): string {
-  if (Number.isInteger(value)) return value.toFixed(0);
-  if (Math.abs(value) >= 100) return value.toFixed(1);
-  return value.toFixed(2);
-}
-
-function describeRecord(record: MotorCheckRecord): string {
-  switch (record.result) {
-    case "passed": {
-      // 到達位置を判定しない項目 (グリッパの開閉等) は expected を持たない。
-      // 生値をそのまま埋め込むと画面に "期待 null" と出る
-      const parts = [
-        record.expected === null ? null : `期待 ${formatNumber(record.expected)}`,
-        record.observed === null ? null : `観測 ${formatNumber(record.observed)}`,
-      ].filter((part) => part !== null);
-      return parts.length > 0 ? parts.join(" → ") : "合格";
-    }
-    case "failed":
-      return record.detail ?? "失敗";
-    case "timeout":
-      return record.detail ?? "フィードバック無応答";
-    case "skipped":
-      return record.detail ?? "中断";
-    case "running":
-      return "応答待ち";
-    case "pending":
-    default:
-      return "未開始";
-  }
-}
-
 /**
- * daisyUI の table-xs は本文を .6875rem に固定する。ルートの clamp() 由来の
- * 相対サイズから外れて読みづらくなるため、セル側で明示的に上書きする。
+ * 統合動作確認の進捗パネル。**両ハンドで 1 つ**なので robot を取らない。
+ *
+ * 出すのはシーケンスのステップ一覧と、今どこを走っているか。
+ * かつてはモータごとの合否表 (期待値 / 観測値) を並べていたが、判定は
+ * シーケンスエンジンが担うようになり、失敗はシーケンスが止まる形で現れる
+ * (`SequenceTimeoutError` / `AxisSyncError`)。**「合格」の列は無い** —
+ * 到達判定を持たない軸 (duty / on_off) にそれを出すと、動いたかどうかを
+ * 機械が見ていないのに見たように読めてしまう。
  */
-const CELL_CLASS = "text-[0.85em]";
+export function MotorCheckPanel({ isOpen, onOpenChange }: MotorCheckPanelProps) {
+  const { state, start, abort } = useMotorCheck();
 
-function MotorRow({ record, isCurrent }: { record: MotorCheckRecord; isCurrent: boolean }) {
-  const result: MotorCheckResult =
-    isCurrent && record.result === "pending" ? "running" : record.result;
-  const style = RESULT_STYLES[result];
-  const description = describeRecord({ ...record, result });
+  const total = state.total_steps;
+  const done = state.running ? state.step_index : total > 0 && !state.error ? total : 0;
+  const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
 
-  return (
-    <tr>
-      <td className={CELL_CLASS}>
-        <div className="flex min-w-0 flex-col">
-          <span className="truncate font-medium">{record.motor}</span>
-          <span className="font-mono text-base-content/60">bus: {record.bus}</span>
-        </div>
-      </td>
-      <td className={`${CELL_CLASS} text-right`}>
-        <div className="flex flex-col items-end gap-px">
-          <StatusBadge tone={style.tone}>{style.label}</StatusBadge>
-          <span className="text-base-content/70">{description}</span>
-        </div>
-      </td>
-    </tr>
-  );
-}
-
-export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckPanelProps) {
-  const { state, start, abort } = useMotorCheck(robotName);
-
-  const isRunning = state.status === "running";
-  const isError = state.status === "error";
-  const overall = state.snapshot?.overall ?? (isRunning ? "running" : null);
-  const overallStyle = overall ? OVERALL_STYLES[overall] : null;
-
-  const total = state.progress?.total ?? state.records.length;
-  const index = state.progress?.index ?? state.records.length;
-  const percent = total > 0 ? Math.min(100, Math.round((index / total) * 100)) : 0;
-
-  const footerLabel = isRunning
+  const footerLabel = state.running
     ? "実行中..."
-    : state.status === "completed"
-      ? "完了"
-      : isError
-        ? "失敗"
+    : state.error
+      ? "中断・失敗"
+      : done > 0 && done === total
+        ? "完了"
         : "未実行";
 
   return (
@@ -118,43 +43,36 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
       open={isOpen}
       onClose={() => onOpenChange(false)}
       tone="danger"
-      title={`MOTOR CHECK — ${robotName}`}
+      title="アクチュエータ動作確認"
       boxClassName="min-w-[min(560px,80vw)]"
       bodyClassName="flex flex-col gap-3"
       footer={
         <div className="flex w-full items-center justify-between">
           <span className="text-base-content/70">{footerLabel}</span>
           <div className="flex gap-2">
-            {isRunning ? (
+            {state.running ? (
               <Button tone="danger" onClick={abort}>
                 <Icon as={Square} />
                 中断
               </Button>
-            ) : state.records.length > 0 || isError ? (
-              <Button tone="info" onClick={start}>
+            ) : (
+              <Button tone="info" disabled={state.blocked_reason !== null} onClick={start}>
                 <Icon as={Play} />
-                リトライ
+                {done > 0 ? "もう一度実行" : "実行"}
               </Button>
-            ) : null}
+            )}
             <Button onClick={() => onOpenChange(false)}>閉じる</Button>
           </div>
         </div>
       }
     >
-      {overallStyle ? (
-        <div className="flex items-center justify-between">
-          <span className="text-base-content/70">OVERALL</span>
-          <StatusBadge tone={overallStyle.tone}>{overallStyle.label}</StatusBadge>
-        </div>
-      ) : null}
-
-      {isRunning ? (
+      {state.running ? (
         <div className="flex flex-col gap-1">
           <div className="flex items-center justify-between">
             <span className="font-mono text-base-content/70 tabular-nums">
-              {index} / {total}
+              {done} / {total}
             </span>
-            <span className="truncate text-info">{state.current ?? "—"}</span>
+            <span className="min-w-0 truncate text-info">{state.current_step ?? "—"}</span>
           </div>
           <progress
             className={cx(
@@ -167,30 +85,49 @@ export function MotorCheckPanel({ robotName, isOpen, onOpenChange }: MotorCheckP
         </div>
       ) : null}
 
-      {isError ? (
+      {state.error ? (
         <div className="text-error">
           <p className="flex items-center gap-1.5 font-medium">
             <Icon as={TriangleAlert} />
-            エラー
+            動作確認は完了していません
           </p>
           <p className="mt-1">{state.error}</p>
         </div>
       ) : null}
 
-      {state.records.length === 0 && !isRunning && !isError ? (
-        <p className="px-1 py-3 text-base-content/70">動作確認はまだ実行されていません。</p>
+      {state.steps.length === 0 ? (
+        <p className="px-1 py-3 text-base-content/70">
+          {state.available
+            ? "動作確認のステップが読み込まれていません。"
+            : "この構成では動作確認を実行できません (位置定数が揃っていません)。"}
+        </p>
       ) : (
-        <table className="table table-zebra table-xs">
-          <tbody>
-            {state.records.map((record) => (
-              <MotorRow
-                key={record.motor}
-                record={record}
-                isCurrent={isRunning && state.current === record.motor}
-              />
-            ))}
-          </tbody>
-        </table>
+        <ol className="flex flex-col">
+          {state.steps.map((step) => {
+            const isCurrent = state.running && step.index === state.step_index;
+            const isDone = step.index < done;
+            return (
+              <li
+                key={step.index}
+                className={cx(
+                  "flex items-center gap-2 border-l-2 border-transparent px-2 py-[0.35rem]",
+                  isCurrent && "border-l-info bg-base-200 font-medium",
+                  isDone && "text-base-content/45",
+                )}
+              >
+                <span className="w-6 shrink-0 text-right font-mono text-base-content/50 tabular-nums">
+                  {step.index + 1}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{step.label}</span>
+                {isCurrent ? (
+                  <StatusBadge tone="info">実行中</StatusBadge>
+                ) : isDone ? (
+                  <Icon as={Check} className="shrink-0 text-success" />
+                ) : null}
+              </li>
+            );
+          })}
+        </ol>
       )}
     </Modal>
   );

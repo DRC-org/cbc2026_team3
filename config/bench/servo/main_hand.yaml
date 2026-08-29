@@ -53,15 +53,6 @@ motors:
     # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
     expected_firmware: 2
     expected_angle_range_deg: 270.0
-    motor_check:
-      # positions.servo_sv0.small と一致させること。ずれると「動作確認で動いた位置」と
-      # 「手動操縦で送る位置」が別物になり、確認が意味を失う (本番 config と同じ規則)。
-      #
-      # **この基板は位置を報告できる**ので、DC 基板と違って動作確認を自動判定できる。
-      # FEEDBACK は DLC=3 で Byte1-2 に現在角が載り、到達は Byte0 bit0 で分かる。
-      # ファームのスルーレートは 90deg/s なので 5deg は約 56ms、
-      # system.yaml の per_motor_timeout_ms (1500) に対して十分な余裕がある。
-      magnitude: 5.0
 
   # SV1 (D5)。本番では wall_f。
   servo_sv1:
@@ -71,8 +62,6 @@ motors:
     control_type: position
     expected_firmware: 2
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
-    motor_check:
-      magnitude: 5.0
 
   # SV2 (D6)。本番では wall_r。
   servo_sv2:
@@ -82,8 +71,6 @@ motors:
     control_type: position
     expected_firmware: 2
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
-    motor_check:
-      magnitude: 5.0
 
   # SV3 (D7)。本番ではサブハンドの sub_gripper。
   servo_sv3:
@@ -93,8 +80,6 @@ motors:
     control_type: position
     expected_firmware: 2
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
-    motor_check:
-      magnitude: 5.0
 
 # --- センサ入力 (スロット SV4 / D8) ---
 # **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも

@@ -35,13 +35,6 @@ motors:
     # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
     # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
     expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
-    motor_check:
-      # この基板はエンコーダも電流センスも持たず、FEEDBACK は状態フラグ 1 バイトだけ。
-      # 「回ったかどうか」を自動判定する手段が構造的に無いので動作確認から除外し、
-      # config/bench/dc/checklist.yaml の dc_ch0_run で目視確認する。
-      # magnitude を 0 以外にすると、実機では必ずタイムアウトし、しかも症状が
-      # 配線不良と区別できない。
-      magnitude: 0
 
   # ch1。本番では未使用。ベンチでは 3 チャンネルすべてを登録して、
   # どこにモータを繋いでも手動操縦パネルから回せるようにしておく。
@@ -51,8 +44,6 @@ motors:
     can_id: 0x81
     control_type: duty
     expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   # ch2。本番では未使用。
   dc_ch2:
@@ -61,5 +52,3 @@ motors:
     can_id: 0x82
     control_type: duty
     expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0

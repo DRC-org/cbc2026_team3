@@ -449,74 +449,35 @@ class TestShippedRobotConfig:
 
         assert duplicated == {}
 
-    @pytest.mark.parametrize(
-        ("robot_config", "yaml_name", "motor_name", "position_name"),
-        [
-            ("main_hand.yaml", "main_hand_positions.yaml", "gripper", "open"),
-            ("main_hand.yaml", "main_hand_positions.yaml", "wall_f", "open"),
-            ("main_hand.yaml", "main_hand_positions.yaml", "wall_r", "open"),
-            ("sub_hand.yaml", "sub_hand_positions.yaml", "sub_gripper", "open"),
-        ],
-    )
-    def test_motor_check_magnitude_matches_safe_position(
-        self, robot_config: str, yaml_name: str, motor_name: str, position_name: str
-    ) -> None:
-        """離散状態アクチュエータの動作確認は、実際に使う安全な状態値で行うこと。
+    def test_axis_names_are_unique_across_robots(self) -> None:
+        """論理軸名もロボット横断に一意であること。
 
-        generic 既定の 0.1deg は「どの状態でもない」無意味な指令になる。値がずれると
-        動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
+        統合動作確認シーケンス (robots/motor_check.py) は両ハンドのアクチュエータを
+        1 つの順序で駆動するため、両機の位置定数を 1 つの表へ束ねる
+        (``PositionTable.merged``)。衝突していると起動が拒否される。
+
+        ここで先に落としておくのは、起動時の失敗だと「試合直前に config を直す」
+        状況になりうるため。
         """
-        motors = _load_config(robot_config)["motors"]
-        table = _load_shipped(yaml_name)
+        owners: dict[str, list[str]] = collections.defaultdict(list)
 
-        magnitude = motors[motor_name]["motor_check"]["magnitude"]
+        for path in sorted(_CONFIG_DIR.glob("*_positions.yaml")):
+            config = yaml.safe_load(path.read_text()) or {}
+            for name in config.get("axes") or {}:
+                owners[name].append(path.name)
 
-        assert magnitude == pytest.approx(table.raw(motor_name, position_name))
+        duplicated = {name: places for name, places in owners.items() if len(places) > 1}
 
-    @pytest.mark.parametrize(("robot_config", "yaml_name"), _ROBOT_CONFIGS)
-    def test_every_generic_position_motor_checks_a_defined_state(
-        self, robot_config: str, yaml_name: str
-    ) -> None:
-        """位置指令の generic モータは、必ず定義済みの状態値で動作確認すること。
+        assert duplicated == {}
 
-        個別に列挙すると、モータを 1 台足したときに設定漏れが検出できない
-        (実際にサブハンドの sub_gripper は既定 0.1deg のまま放置され、
-        サーボが 0.1deg しか動かないのに PASSED になっていた)。
-        duty 指令の軸を除くのは、そこに「状態」という概念が無いため。
-        magnitude: 0 を除くのは「意図的に動作確認から外した」という明示の宣言だから
-        (既定値は system.yaml の default_magnitude で、0 になることはない)。
-        外したものが埋め合わされているかは下の checklist のテストが見る。
-        """
-        motors = _load_config(robot_config)["motors"]
-        table = _load_shipped(yaml_name)
+    def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
+        """自動判定できないものは、すべて目視確認項目で埋めること。
 
-        offenders: dict[str, object] = {}
-        for motor_name, motor_cfg in motors.items():
-            if motor_cfg["driver"] != "generic":
-                continue
-            if str(motor_cfg.get("control_type", "position")).lower() != "position":
-                continue
-            magnitude = (motor_cfg.get("motor_check") or {}).get("magnitude")
-            if magnitude == 0:
-                continue
-            states = [table.raw(motor_name, name) for name in table.names(motor_name)]
-            if magnitude is None or not any(magnitude == pytest.approx(v) for v in states):
-                offenders[motor_name] = magnitude
-
-        assert offenders == {}
-
-    @pytest.mark.parametrize("motor_name", ["y_axis_r", "y_axis_l", "rotate_r", "rotate_l"])
-    def test_paired_motors_are_excluded_from_motor_check(self, motor_name: str) -> None:
-        """左右直結のペア軸は 1 台ずつ動かすと機構を壊すため動作確認から除外する。"""
-        motors = _load_config("main_hand.yaml")["motors"]
-
-        assert motors[motor_name]["motor_check"]["magnitude"] == 0
-
-    def test_checklist_covers_everything_excluded_from_motor_check(self) -> None:
-        """動作確認から外したものは、すべて目視確認項目で埋めること。
-
-        magnitude: 0 で自動確認を外した以上、代わりの網が要る。センサも同じで、
-        死んだまま原点合わせを始めると「いつまでも当たらない」形でしか分からない。
+        統合動作確認シーケンス (robots/motor_check.py) は全アクチュエータを動かすが、
+        到達判定を持つのは位置指令の軸だけ。duty (DC 基板) と on_off (電磁弁) は
+        `settle_s` の固定待ちへ落ちるので、**動いたことを機械は誰も見ていない**。
+        センサも同じで、死んだまま原点合わせを始めると「いつまでも当たらない」
+        形でしか分からない。
         """
         checklist = yaml.safe_load((_CONFIG_DIR / "checklist.yaml").read_text())
         ids = {item["id"] for item in checklist["checklists"][ROLE_PRE_MATCH]}

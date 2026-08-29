@@ -42,8 +42,6 @@ motors:
     # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
     # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_ch1:
     driver: generic
@@ -51,8 +49,6 @@ motors:
     can_id: 0xC1
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_ch2:
     driver: generic
@@ -60,8 +56,6 @@ motors:
     can_id: 0xC2
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_ch3:
     driver: generic
@@ -69,8 +63,6 @@ motors:
     can_id: 0xC3
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_ch4:
     driver: generic
@@ -78,8 +70,6 @@ motors:
     can_id: 0xC4
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_ch5:
     driver: generic
@@ -87,5 +77,3 @@ motors:
     can_id: 0xC5
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0

@@ -89,27 +89,31 @@ export interface HealthChange {
   message: string;
 }
 
-export type MotorCheckResult = "pending" | "running" | "passed" | "failed" | "timeout" | "skipped";
-export type MotorCheckOverall = "running" | "ok" | "partial" | "failed";
-
-export interface MotorCheckRecord {
-  motor: string;
-  bus: string;
-  started_at: EpochSeconds;
-  finished_at: EpochSeconds | null;
-  result: MotorCheckResult;
-  /** 到達位置を判定しない項目 (グリッパの開閉等) では期待値を持たない */
-  expected: number | null;
-  observed: number | null;
-  detail: string | null;
-}
-
-export interface CheckRunSnapshot {
-  robot: string;
-  started_at: EpochSeconds;
-  finished_at: EpochSeconds | null;
-  overall: MotorCheckOverall;
-  records: MotorCheckRecord[];
+/**
+ * 統合動作確認の状態。**両ハンドで 1 つしかない**ので robot を持たない。
+ *
+ * 進捗も結果も拒否理由も 1 通に載る。かつては progress / record / done / error の
+ * 4 種類に分かれており、受け取る側が継ぎ合わせて 1 つの状態を組み立てていた。
+ * 途中の 1 通を取りこぼすと画面と機体が食い違ったまま、リロードするまで直らない。
+ */
+export interface MotorCheckSnapshot {
+  /** シーケンスが読み込まれているか。机上ベンチでは false になる */
+  available: boolean;
+  /**
+   * 今この瞬間起動できない理由。押せるなら null。
+   *
+   * **UI 側で導出し直さないこと。** サーバー (`_motor_check_deny_reason`) が
+   * 唯一の判定で、画面は理由を説明するだけ。両者で判定すると、サーバーが
+   * 「押せる」と言っているのに画面がボタンを殺す状態が生まれる。
+   */
+  blocked_reason: string | null;
+  running: boolean;
+  current_step: string | null;
+  step_index: number;
+  total_steps: number;
+  steps: SequenceStepInfo[];
+  /** 直近の拒否・失敗理由。次の起動が成功するまで消えない */
+  error: string | null;
 }
 
 /**
@@ -321,16 +325,7 @@ export type ServerMessage =
   | { type: "e_stop_state"; active: boolean; reason: string | null }
   | { type: "command_rejected"; command: string; reason: string }
   | { type: "health_change"; event: HealthChange }
-  | {
-      type: "motor_check_progress";
-      robot: string;
-      current: string | null;
-      index: number;
-      total: number;
-    }
-  | { type: "motor_check_record"; robot: string; record: MotorCheckRecord }
-  | { type: "motor_check_done"; robot: string; snapshot: CheckRunSnapshot }
-  | { type: "motor_check_error"; robot: string; message: string };
+  | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot };
 
 type Raw = Record<string, unknown>;
 
@@ -425,35 +420,23 @@ function parseKnown(raw: Raw): ServerMessage | null {
         },
       };
 
-    case "motor_check_progress":
-      if (robot === null) return null;
+    case "motor_check_state":
+      // **robot を要求しない。** 両ハンド統合の 1 本なので載っていない。
+      // ここで robot を必須にすると、動作確認の状態が 100% 捨てられる
+      // (health_change で実際にやらかした形)
       return {
-        type: "motor_check_progress",
-        robot,
-        current: typeof raw.current === "string" ? raw.current : null,
-        index: num(raw.index),
-        total: num(raw.total),
+        type: "motor_check_state",
+        motorCheck: {
+          available: raw.available === true,
+          blocked_reason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
+          running: raw.running === true,
+          current_step: typeof raw.current_step === "string" ? raw.current_step : null,
+          step_index: num(raw.step_index),
+          total_steps: num(raw.total_steps),
+          steps: Array.isArray(raw.steps) ? (raw.steps as SequenceStepInfo[]) : [],
+          error: typeof raw.error === "string" ? raw.error : null,
+        },
       };
-
-    case "motor_check_record":
-      if (robot === null || !isObject(raw.record)) return null;
-      return {
-        type: "motor_check_record",
-        robot,
-        record: raw.record as unknown as MotorCheckRecord,
-      };
-
-    case "motor_check_done":
-      if (robot === null || !isObject(raw.snapshot)) return null;
-      return {
-        type: "motor_check_done",
-        robot,
-        snapshot: raw.snapshot as unknown as CheckRunSnapshot,
-      };
-
-    case "motor_check_error":
-      if (robot === null) return null;
-      return { type: "motor_check_error", robot, message: str(raw.message, "unknown error") };
 
     default:
       // 未知の type は無視する。サーバーが送り始めたものを取りこぼしていないかは
