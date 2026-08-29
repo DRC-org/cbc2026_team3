@@ -1,5 +1,5 @@
 import { Info, RotateCcw, Square } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Panel } from "@/components/ui/Panel";
 import { Section } from "@/components/ui/Section";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
+import { useArmedPress } from "@/hooks/useArmedPress";
 import { cx } from "@/lib/cx";
 import { COURT_LABEL, isDuringMatch } from "@/lib/phase";
 import type { MatchCourt } from "@/lib/protocol";
@@ -17,37 +18,33 @@ const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }
   { value: "blue", label: "青コート", selectedClass: "border-info bg-info text-info-content" },
 ];
 
-export type ConfirmKind = "start" | "finish" | "reset";
-
 /**
- * フェーズ遷移の確認ダイアログ。
+ * リセットの確認ダイアログ。
  *
- * 開始は StartGate、終了は MatchStrip、リセットは MatchSettings と、
- * 呼び出し元が画面ごとに散る。ダイアログ本体と文言をここに一本化し、
- * 呼び出し側は `requestConfirm(kind)` を叩くだけにする。
+ * 試合の開始・終了は同じボタンの二度押しで確認を取る（`useArmedPress`）。試合中に
+ * 押すそれらと違い、リセットは試合と試合の間にしか押さず、しかも指差喚呼を
+ * やり直させる破壊的な操作なので、カーソルを運ぶ数百 ms より読ませることを取る。
+ *
+ * 呼び出し元は MatchSettings と MatchStrip に散るため、文言はここに一本化する。
  */
-export function useMatchConfirm() {
-  const { matchState } = useRobotStatus();
-  const { matchStart, matchFinish, matchReset } = useRobotCommands();
-  const { court } = matchState;
-  const [confirm, setConfirm] = useState<ConfirmKind | null>(null);
+export function useResetConfirm() {
+  const { matchReset } = useRobotCommands();
+  const [open, setOpen] = useState(false);
 
-  const requestConfirm = useCallback((kind: ConfirmKind) => setConfirm(kind), []);
-  const close = useCallback(() => setConfirm(null), []);
+  const requestReset = useCallback(() => setOpen(true), []);
+  const close = useCallback(() => setOpen(false), []);
 
   const handleConfirm = () => {
-    if (confirm === "start") matchStart();
-    if (confirm === "finish") matchFinish();
-    if (confirm === "reset") matchReset();
-    setConfirm(null);
+    matchReset();
+    setOpen(false);
   };
 
   const confirmModal = (
     <Modal
-      open={confirm !== null}
+      open={open}
       onClose={close}
       tone="danger"
-      title={confirm === "start" ? "START MATCH" : confirm === "finish" ? "FINISH MATCH" : "RESET"}
+      title="RESET"
       footer={
         <>
           <Button onClick={close}>キャンセル</Button>
@@ -57,35 +54,14 @@ export function useMatchConfirm() {
         </>
       }
     >
-      {confirm === "start" ? (
-        <>
-          <p>
-            <span className="font-medium text-info">{COURT_LABEL[court]}</span> で試合を開始します。
-          </p>
-          <p className="mt-2 text-base-content/70">
-            各操縦者が自分のタブで START を押すまで機体は動きません。
-          </p>
-          <p className="mt-1 text-base-content/70">周囲の安全を確認してください。</p>
-        </>
-      ) : confirm === "finish" ? (
-        <>
-          <p>試合を終了します。</p>
-          <p className="mt-2 text-base-content/70">
-            実行中のシーケンスは通常停止します (緊急停止ではありません)。
-          </p>
-        </>
-      ) : (
-        <>
-          <p>セッティングタイムに戻します。</p>
-          <p className="mt-2 text-base-content/70">
-            チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
-          </p>
-        </>
-      )}
+      <p>セッティングタイムに戻します。</p>
+      <p className="mt-2 text-base-content/70">
+        チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
+      </p>
     </Modal>
   );
 
-  return { confirmModal, requestConfirm };
+  return { confirmModal, requestReset };
 }
 
 /**
@@ -94,11 +70,7 @@ export function useMatchConfirm() {
  * 試合ごとに一度だけ触る設定なので、開始可否 (StartGate) より下に置く。
  * ただし誤ったコート設定のまま試合に入る事故は致命的なので、畳まずに常時見せる。
  */
-export function MatchSettings({
-  onRequestConfirm,
-}: {
-  onRequestConfirm: (kind: ConfirmKind) => void;
-}) {
+export function MatchSettings({ onRequestReset }: { onRequestReset: () => void }) {
   const { matchState, connected } = useRobotStatus();
   const { setCourt } = useRobotCommands();
   const { court, phase } = matchState;
@@ -128,7 +100,7 @@ export function MatchSettings({
           変更するとチェックリストは全てリセットされます
         </p>
         <div className="mt-1 flex flex-wrap items-center gap-2">
-          <Button onClick={() => onRequestConfirm("reset")} aria-label="セッティングタイムへ戻す">
+          <Button onClick={onRequestReset} aria-label="セッティングタイムへ戻す">
             <Icon as={RotateCcw} />
             チェックリストをリセット
           </Button>
@@ -143,14 +115,21 @@ export function MatchSettings({
  *
  * 試合中は画面をロボット状態に明け渡すが、`match_finish` は MATCH フェーズ限定なので
  * この導線を隠すと試合を終われなくなる。設定値の確認と終了導線だけを 1 行で残す。
+ *
+ * 終了の確認は同じボタンの二度押しで取る。ダイアログ本文が持っていた
+ * 「緊急停止ではない」ことは、武装中に隣へ出す。
  */
-export function MatchStrip({
-  onRequestConfirm,
-}: {
-  onRequestConfirm: (kind: ConfirmKind) => void;
-}) {
+export function MatchStrip({ onRequestReset }: { onRequestReset: () => void }) {
   const { matchState } = useRobotStatus();
+  const { matchFinish } = useRobotCommands();
   const { court, phase } = matchState;
+  const duringMatch = isDuringMatch(phase);
+  const { armed, press, disarm } = useArmedPress(matchFinish);
+
+  // 試合が終わった後まで武装を持ち越さない（ボタン自体が別物へ入れ替わる）
+  useEffect(() => {
+    if (!duringMatch) disarm();
+  }, [duringMatch, disarm]);
 
   return (
     <div className="flex shrink-0 items-center justify-between gap-2 border border-base-300 bg-base-100 px-2 py-1">
@@ -158,21 +137,26 @@ export function MatchStrip({
         <span className="text-base-content/70">MATCH </span>
         {COURT_LABEL[court]}
       </span>
-      {isDuringMatch(phase) ? (
-        <Button
-          tone="danger"
-          onClick={() => onRequestConfirm("finish")}
-          aria-label="試合を終了する"
-        >
-          <Icon as={Square} />
-          試合終了
-        </Button>
+      {duringMatch ? (
+        <span className="flex items-center gap-2">
+          {armed ? (
+            <span className="text-base-content/70">
+              実行中のシーケンスは通常停止します (緊急停止ではありません)
+            </span>
+          ) : null}
+          {/* 二度押しで文言が伸びてもボタンの左端を動かさない */}
+          <Button
+            tone="danger"
+            onClick={press}
+            aria-label={armed ? "もう一度押して試合を終了する" : "試合を終了する"}
+            className="w-[11em] whitespace-nowrap"
+          >
+            <Icon as={Square} />
+            {armed ? "もう一度押して終了" : "試合終了"}
+          </Button>
+        </span>
       ) : (
-        <Button
-          tone="warn"
-          onClick={() => onRequestConfirm("reset")}
-          aria-label="セッティングタイムへ戻す"
-        >
+        <Button tone="warn" onClick={onRequestReset} aria-label="セッティングタイムへ戻す">
           <Icon as={RotateCcw} />
           セッティングへ戻る
         </Button>

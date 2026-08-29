@@ -1,11 +1,11 @@
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { EventFeed } from "@/components/monitor/EventFeed";
-import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/monitor/MatchControl";
+import { MatchSettings, MatchStrip, useResetConfirm } from "@/components/monitor/MatchControl";
 import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
-import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
@@ -18,7 +18,8 @@ import { ROBOTS } from "@/lib/robots";
 export function Dashboard() {
   const states = useRobotStates();
   const { matchState } = useRobotStatus();
-  const { confirmModal, requestConfirm } = useMatchConfirm();
+  const { matchStart } = useRobotCommands();
+  const { confirmModal, requestReset } = useResetConfirm();
 
   if (isSetupPhase(matchState.phase)) {
     return (
@@ -28,7 +29,7 @@ export function Dashboard() {
               小さなグレー文字で、何が足りないかは書かれていなかった。
               「何が足りないか」(指差喚呼の残りと機体の要確認) はここだけが答える */}
           <div className="col-span-full">
-            <StartGate onStart={() => requestConfirm("start")} />
+            <StartGate onStart={matchStart} />
           </div>
 
           {/* 下の 2 枠は StartGate が答えられないことだけを持つ。
@@ -59,7 +60,7 @@ export function Dashboard() {
 
           {/* grid の子は既定で縦に伸びる。内容ぶんの高さに留めるには self-start が要る */}
           <div className="self-start">
-            <MatchSettings onRequestConfirm={requestConfirm} />
+            <MatchSettings onRequestReset={requestReset} />
           </div>
         </Page>
         {confirmModal}
@@ -71,7 +72,7 @@ export function Dashboard() {
     <>
       <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
         <div className="col-span-full">
-          <MatchStrip onRequestConfirm={requestConfirm} />
+          <MatchStrip onRequestReset={requestReset} />
         </div>
 
         {ROBOTS.map(({ key, label }) => (
