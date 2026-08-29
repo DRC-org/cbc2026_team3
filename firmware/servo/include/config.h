@@ -94,13 +94,17 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
 // 既定は config/main_hand.yaml / config/sub_hand.yaml の実構成に合わせてある。
 // **4ch あるので自作サーボはこの 1 枚で全部まかなえる。**
 //
+// 以下のデバイス ID は **DIP の基板番号が 0（全 OFF）のとき**の値。基板番号を N に
+// すると 8 ずつずれる（N=1 なら 0x48〜0x4C）ので、PC 側 yaml の can_id もそちらへ合わせる。
+// 実際の値は candump が教えてくれる: FEEDBACK の CAN ID は 0x300 + デバイス ID。
+//
 //   スロット | ピン | 役割        | デバイス ID | PC 側のモータ / 用途
 //   ---------+------+-------------+------------+---------------------------
-//   SV0      | D4   | Servo       | 0x01       | gripper       (メインハンド)
-//   SV1      | D5   | Servo       | 0x03       | wall_f        (メインハンド)
-//   SV2      | D6   | Servo       | 0x04       | wall_r        (メインハンド)
-//   SV3      | D7   | Servo       | 0x05       | sub_gripper   (サブハンド)
-//   SV4      | D8   | TouchSensor | 0x02       | origin_sensor (原点合わせ用)
+//   SV0      | D4   | Servo       | 0x40       | gripper       (メインハンド)
+//   SV1      | D5   | Servo       | 0x41       | wall_f        (メインハンド)
+//   SV2      | D6   | Servo       | 0x42       | wall_r        (メインハンド)
+//   SV3      | D7   | Servo       | 0x43       | sub_gripper   (サブハンド)
+//   SV4      | D8   | TouchSensor | 0x44       | origin_sensor (原点合わせ用)
 //
 // **Unused 以外のスロットはすべて CAN デバイスとして FEEDBACK を送る。**
 // センサも PC 側 yaml に 1 モータとして登録すること（登録しないと受信ループが

@@ -1,0 +1,110 @@
+# サーボ基板単体ベンチ (機構未装着) の位置定数。
+#
+# 本番の gripper / wall_f / wall_r は開 / 閉 のような離散状態しか取らないので manual: を
+# 書かず、位置名によるプリセット指令だけを許している (中途半端な開度でワークを潰す操作が
+# 構造的に作れない)。**ベンチはその逆で、manual: を書いて連続操作を許す。**
+# 確かめたいのが「機構の状態」ではなく「指令した角度どおりにサーボが動くか」だからで、
+# 角度を連続で振らないとスルーレートも可動範囲のクランプも確認できない。
+# 機構へ組み込むときは本番の config/main_hand_positions.yaml を使うこと。
+#
+# ---------------------------------------------------------------------------
+# 角度の範囲は**ファーム側のクランプ値と一致させてある**
+# ---------------------------------------------------------------------------
+# firmware/servo/include/config.h の kProvisionalLimits が {0.0, 30.0, 90.0} =
+# 可動範囲 0〜30deg・スルーレート 90deg/s。**ファームは範囲外の指令を拒否ではなく
+# クランプで受ける**ので、ここに 40deg と書いても基板は 30deg までしか動かない。
+# その状態は UI から見ると「送ったのに途中で止まる」だけで、原因が config からも
+# candump からも読めない (SET_TARGET には 40deg が載っているため)。
+# したがって min/max はファームのクランプ端そのものに合わせる。
+#
+# **可動範囲を広げたいときは、この yaml ではなくファームの kProvisionalLimits を直す。**
+# ただし config.h の TODO どおりこの値は仮値であり、機構が付いた状態で「当たらない
+# 範囲」を実測してから広げること。広すぎるとサーボがメカストッパに当たったまま停動し、
+# 短時間で焼損する (仕様書 §7.2)。SET_PARAM 0x04-0x06 で実行時にも変えられるが、
+# RAM 上のみで電源断で config.h の既定値に戻る。
+
+axes:
+  # 4 本とも同一仕様。scale は 1.0 = 指令値がそのまま角度 [deg] で、本番の
+  # gripper / wall_f / wall_r と同一にしてある (ベンチで確かめた指令量が本番でもそのまま出る)。
+  #
+  # timeout_s はスルーレート 90deg/s で全ストローク 30deg を動く時間 (約 0.33s) に
+  # 対する余裕を見た値。本番の 2.0s と同じにしてある。
+  servo_sv0:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    # 手動の可動範囲 [deg]。ファームの kProvisionalLimits と一致 (上のコメント参照)。
+    # 機構が付いていないので「物理端の内側に取る」原則が効く相手が無く、
+    # ここではクランプ端そのものが境界になる。
+    manual:
+      min: 0.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
+  servo_sv1:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    manual:
+      min: 0.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
+  servo_sv2:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    manual:
+      min: 0.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
+  servo_sv3:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    manual:
+      min: 0.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
+positions:
+  # 手動操縦パネルにこの名前のプリセットボタンが並ぶ。ジョグと併用できる。
+  #
+  # initial は firmware/servo/include/config.h の initialAngleDeg (0.0) と同値。
+  # **基板は電源投入時にこの角度へ駆動する**ので、initial を送ったときの動きが
+  # 起動直後の動きと一致していることを確認できる (瞬断時に機構がどう飛ぶかが分かる)。
+  #
+  # small は config/bench/servo/main_hand.yaml の motor_check.magnitude と一致させること。
+  # full はファームのクランプ端と同値で、これ以上は指令しても動かない。
+  servo_sv0:
+    initial: 0.0         # 起動時の角度 [deg]。基板が setup() で駆動する位置
+    small: 5.0           # まず動いたことの確認 (= main_hand.yaml の motor_check.magnitude)
+    mid: 15.0            # 中間
+    full: 30.0           # ファームの kProvisionalLimits の上端。これ以上は出ない
+
+  servo_sv1:
+    initial: 0.0
+    small: 5.0
+    mid: 15.0
+    full: 30.0
+
+  servo_sv2:
+    initial: 0.0
+    small: 5.0
+    mid: 15.0
+    full: 30.0
+
+  servo_sv3:
+    initial: 0.0
+    small: 5.0
+    mid: 15.0
+    full: 30.0
