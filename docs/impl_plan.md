@@ -1828,7 +1828,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 | ファイル | 本番との違い |
 |---|---|
 | `config/bench/system.yaml` | `can_buses` が `m3508_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
-| `config/bench/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts。`y_axis_r` の `can_id` はベンチ機に合わせた暫定の 4（本番は 1） |
+| `config/bench/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts。`can_id` は本番と同じ 1 / 2 |
 | `config/bench/main_hand_positions.yaml` | `y_axis` だけ。`sync_tolerance` 10.0mm、`manual` −10〜60mm |
 | `config/bench/checklist.yaml` | ベンチで通電前に確認する項目のみ |
 
