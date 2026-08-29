@@ -208,7 +208,14 @@ uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotK
     out[0] = firmwareVersion;
     out[1] = static_cast<uint8_t>(board);
     out[2] = static_cast<uint8_t>(slot);
-    return kInfoLength;
+    return kInfoBaseLength;
+}
+
+uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotKind slot,
+                   float angleRangeDeg) {
+    encodeInfo(out, firmwareVersion, board, slot);
+    packInt16Le(&out[3], toRaw(angleRangeDeg, kAngleScale));
+    return kInfoWithServoRangeLength;
 }
 
 // ---------------------------------------------------------------------------

@@ -268,19 +268,42 @@ class CANManager:
                 self._record_rx_error(bus_name, motor.name, "宛先判定")
                 continue
 
-            if not claimed:
-                continue
+            if claimed:
+                try:
+                    motor.update_state(msg)
+                    # フィードバック鮮度を MotorHealth の STALE 判定に使う。
+                    # デコードに失敗したフレームでは更新しない (解釈できていない値を
+                    # 「受信できている」と報告すると、途絶の検出そのものが効かなくなる)
+                    self._last_rx_at[motor.name] = time.time()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._record_rx_error(bus_name, motor.name, "状態更新")
+                return
 
+            # 自作モタドラの INFO (1Hz の自己申告, 仕様書 §3.4)。焼き忘れとサーボの
+            # 型違いを見つける唯一の経路なので、FEEDBACK と同じ粒度で囲って配る
             try:
-                motor.update_state(msg)
-                # フィードバック鮮度を MotorHealth の STALE 判定に使う。
-                # デコードに失敗したフレームでは更新しない (解釈できていない値を
-                # 「受信できている」と報告すると、途絶の検出そのものが効かなくなる)
-                self._last_rx_at[motor.name] = time.time()
+                info_claimed = motor.matches_info(msg)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._record_rx_error(bus_name, motor.name, "状態更新")
+                self._record_rx_error(bus_name, motor.name, "INFO 宛先判定")
+                continue
+
+            if not info_claimed:
+                continue
+
+            try:
+                # **_last_rx_at は更新しない。** INFO は 1Hz、FEEDBACK は 100Hz なので、
+                # 自己申告で鮮度を書き換えると feedback_timeout_ms (既定 500ms) を
+                # 満たし続け、**FEEDBACK が完全に途絶えてもモータが STALE にならない**。
+                # 途絶検出そのものが効かなくなるので、鮮度はフィードバックだけが動かす
+                motor.update_info(msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._record_rx_error(bus_name, motor.name, "INFO 解釈")
             return
 
     def _record_rx_error(self, bus_name: str, motor_name: str, phase: str) -> None:

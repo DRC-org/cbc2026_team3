@@ -117,7 +117,7 @@ static void test_encode_info_reports_solenoid_board() {
     uint8_t out[8] = {0};
     const uint8_t length = encodeInfo(out, 7, BoardKind::Solenoid, SlotKind::Actuator);
 
-    TEST_ASSERT_EQUAL_UINT8(kInfoLength, length);
+    TEST_ASSERT_EQUAL_UINT8(kInfoBaseLength, length);
     TEST_ASSERT_EQUAL_UINT8(7, out[0]);
     TEST_ASSERT_EQUAL_UINT8(3, out[1]);
     TEST_ASSERT_EQUAL_UINT8(0, out[2]);

@@ -232,7 +232,7 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
 // 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
 static void sendInfo(uint8_t ch) {
-    uint8_t data[kInfoLength];
+    uint8_t data[kInfoBaseLength];
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator);
     const CanMsg msg(CanStandardId(buildCanId(CommandType::Info, g_deviceId[ch])), len, data);
     CAN.write(msg);

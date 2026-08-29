@@ -154,6 +154,51 @@ def feed_generic(
     )
 
 
+def generic_info(
+    driver: GenericDriver,
+    *,
+    firmware_version: int = 1,
+    board_kind: int = 1,
+    slot_kind: int = 0,
+    angle_range_deg: float | None = None,
+) -> can.Message:
+    """自作モータドライバの INFO フレーム (仕様書 §3.4)。
+
+    Byte0=版 / Byte1=基板種別 / Byte2=スロット役割。**DLC は可変**で、サーボスロット
+    だけが Byte3-4 に可動レンジ [0.1deg] を足す。``angle_range_deg`` を省くと
+    「レンジを申告しない基板」—— DC・電磁弁・センサ、および**可動レンジ以前の
+    サーボファーム** —— の形になる。この 2 つは PC 側で区別できないので、
+    サーボ軸では「申告なし」自体が焼き忘れの証拠として扱われる。
+    """
+    data = bytearray([firmware_version, board_kind, slot_kind])
+    if angle_range_deg is not None:
+        data.extend(struct.pack("<h", round(angle_range_deg * 10)))
+    return can.Message(
+        arbitration_id=GenericDriver.build_can_id(CommandType.INFO, driver.can_id),
+        data=bytes(data),
+        is_extended_id=False,
+    )
+
+
+def feed_generic_info(
+    driver: GenericDriver,
+    *,
+    firmware_version: int = 1,
+    board_kind: int = 1,
+    slot_kind: int = 0,
+    angle_range_deg: float | None = None,
+) -> None:
+    driver.update_info(
+        generic_info(
+            driver,
+            firmware_version=firmware_version,
+            board_kind=board_kind,
+            slot_kind=slot_kind,
+            angle_range_deg=angle_range_deg,
+        )
+    )
+
+
 def edulite_feedback(
     driver: Edulite05Driver,
     *,

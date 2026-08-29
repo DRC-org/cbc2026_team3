@@ -214,7 +214,7 @@ void sendFeedback(uint8_t ch, uint32_t nowMs) {
 // 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
 void sendInfo(uint8_t ch) {
-    uint8_t data[kInfoLength];
+    uint8_t data[kInfoBaseLength];
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator);
     sendFrame(buildCanId(CommandType::Info, g_deviceId[ch]), data, len);
 }

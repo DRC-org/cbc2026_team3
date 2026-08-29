@@ -35,6 +35,13 @@ motors:
     bus: generic_bus
     can_id: 0x43               # サーボ基板 #0 SV3 (仕様書 §2.2)
     control_type: position
+    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
+    # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
+    # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
+    # 値は firmware/servo/include/config.h の kFirmwareVersion と
+    # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
+    expected_firmware: 2
+    expected_angle_range_deg: 270.0
     motor_check:
       magnitude: 5.0           # positions.sub_gripper.open と一致させること
 

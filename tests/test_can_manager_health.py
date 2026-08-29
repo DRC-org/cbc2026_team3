@@ -11,9 +11,11 @@ import pytest
 
 from lib.can_manager import CANManager
 from lib.config_schema import DEFAULT_HEALTH
+from lib.drivers.generic import GenericDriver
 from lib.health import BusHealth, HealthSnapshot, MotorHealth
 from tests.fake_can import deliver_frame, mark_bus_off, mark_feedback_at
 from tests.fake_drivers import HealthFlagDriver
+from tests.feedback_frames import generic_feedback, generic_info
 from tests.test_can_manager import _direct_runner
 
 
@@ -206,3 +208,53 @@ class TestCANManagerHealth:
         # (メインハンドとサブハンドは can_edulite / can_generic を物理的に共有する)
         # だけで DEGRADED になると、本物の送信障害の警告まで信用されなくなる
         assert snap.buses[0].state is BusHealth.OK
+
+
+class TestInfoDoesNotRefreshFeedbackAge:
+    """INFO (1Hz の自己申告) でフィードバック鮮度を更新してはならない (仕様書 §3.4)。
+
+    **鮮度を動かすのは FEEDBACK だけ。** 100Hz の FEEDBACK が完全に途絶えても、
+    1Hz の自己申告が ``_last_rx_at`` を書き換え続けると feedback_timeout_ms
+    (既定 500ms) を満たし続け、そのモータは**永久に STALE にならない**。
+    途絶検出そのものが効かなくなり、症状は「UI は正常なのに機体が動かない」になる。
+
+    この層は単独で確かめる。健全性の統合経路には他の判定も混ざっているので、
+    ここだけ壊しても他が拾ってしまい落ちない。
+    """
+
+    @pytest.fixture
+    def mgr_with_servo(self):
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_virtual_bus("vinfo0")
+        motor = GenericDriver("gripper", 0x40, expected_angle_range_deg=270.0)
+        mgr.add_bus("bus0", bus, channel="vinfo0")
+        mgr.add_motor("bus0", motor)
+        yield mgr, motor
+        bus.shutdown()
+
+    def test_info_is_delivered_without_touching_age(self, mgr_with_servo) -> None:
+        mgr, motor = mgr_with_servo
+        deliver_frame(mgr, "bus0", generic_info(motor, firmware_version=2, angle_range_deg=270.0))
+
+        # 配られてはいる (配らないと焼き忘れも型違いも検出できない)
+        assert motor.info is not None
+        assert motor.info.angle_range_deg == pytest.approx(270.0)
+        # 鮮度は 1 度も受信していないまま
+        assert mgr.last_feedback_at("gripper") is None
+
+    def test_info_does_not_rescue_a_stale_motor(self, mgr_with_servo) -> None:
+        """FEEDBACK が途絶えたモータは、INFO が届き続けても STALE のままであること。"""
+        mgr, motor = mgr_with_servo
+        mark_feedback_at(mgr, "gripper", time.time() - 1.0)
+
+        deliver_frame(mgr, "bus0", generic_info(motor, firmware_version=2, angle_range_deg=270.0))
+
+        snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=100.0))
+        assert snap.motors[0].state is MotorHealth.STALE
+
+    def test_feedback_still_refreshes_age(self, mgr_with_servo) -> None:
+        """対の確認。FEEDBACK 側まで止めてしまうと途絶検出が常に真になる。"""
+        mgr, motor = mgr_with_servo
+        deliver_frame(mgr, "bus0", generic_feedback(motor, position=1.0))
+
+        assert mgr.last_feedback_at("gripper") is not None

@@ -253,11 +253,36 @@ static void test_encode_feedback_with_position() {
 // 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 static void test_encode_info() {
     uint8_t out[8];
+    memset(out, 0xFF, sizeof(out));
     const uint8_t len = encodeInfo(out, 7, BoardKind::Servo, SlotKind::Sensor);
     TEST_ASSERT_EQUAL_UINT8(3, len);
     TEST_ASSERT_EQUAL_UINT8(7, out[0]);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(BoardKind::Servo), out[1]);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SlotKind::Sensor), out[2]);
+    // 仕様書 §3.4: 角度を持たないスロットに可動レンジを運ばせない。書き込むと
+    // PC 側には「レンジ 0deg」という測ったように見える値が届く
+    TEST_ASSERT_EQUAL_UINT8(0xFF, out[3]);
+    TEST_ASSERT_EQUAL_UINT8(0xFF, out[4]);
+}
+
+// 仕様書 §3.4 / §7.7: サーボスロットだけが可動レンジを足す（DLC=5）。
+// **この 2 バイトだけが、180 度サーボと 270 度サーボの取り違えを CAN 越しに
+// 見える形にしている。** ファームと実物が食い違っても、FEEDBACK が返すのは
+// クランプ後の指令角なので PC には正常に動いたようにしか見えない。
+static void test_encode_info_with_servo_range() {
+    uint8_t out[8];
+    memset(out, 0xFF, sizeof(out));
+    const uint8_t len = encodeInfo(out, 2, BoardKind::Servo, SlotKind::Actuator, 270.0f);
+    TEST_ASSERT_EQUAL_UINT8(5, len);
+    TEST_ASSERT_EQUAL_UINT8(2, out[0]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(BoardKind::Servo), out[1]);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SlotKind::Actuator), out[2]);
+    // 0.1deg 単位（仕様書 §4）。float は 1 バイトも流れない
+    TEST_ASSERT_EQUAL_INT16(2700, static_cast<int16_t>(out[3] | (out[4] << 8)));
+
+    // 180 度品では別の値になる。ここが同じ値になる実装だと照合が素通りする
+    encodeInfo(out, 2, BoardKind::Servo, SlotKind::Actuator, 180.0f);
+    TEST_ASSERT_EQUAL_INT16(1800, static_cast<int16_t>(out[3] | (out[4] << 8)));
 }
 
 // int16 をそのままキャストすると +4000deg が負値に化け、PC 側が逆方向へ位置制御しかねない。
@@ -772,6 +797,7 @@ int main(int, char **) {
     RUN_TEST(test_encode_feedback_flags_only);
     RUN_TEST(test_encode_feedback_with_position);
     RUN_TEST(test_encode_info);
+    RUN_TEST(test_encode_info_with_servo_range);
     RUN_TEST(test_encode_feedback_saturates_position);
     RUN_TEST(test_clamp_duty);
     RUN_TEST(test_watchdog_expires_and_recovers);

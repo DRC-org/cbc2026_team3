@@ -80,7 +80,7 @@ _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
     "edulite05": frozenset(
         {"host_id", "mode", "limit_speed", "limit_current", "position_kp", "set_zero_on_start"}
     ),
-    "generic": frozenset({"control_type"}),
+    "generic": frozenset({"control_type", "expected_firmware", "expected_angle_range_deg"}),
 }
 _MOTOR_CHECK_OVERRIDE_KEYS = frozenset({"magnitude", "timeout_ms"})
 # 値の解釈 (null 許容・既定値補完) は main._load_pid_config が持つ。ここではキー名だけ見る
@@ -170,6 +170,12 @@ class MotorConfig:
     motor_check: MotorCheckOverride = field(default_factory=MotorCheckOverride)
     # generic
     control_type: ControlMode = ControlMode.POSITION
+    # INFO (1Hz の自己申告, 仕様書 §3.4) と突き合わせる期待値。**書かなければ照合しない。**
+    # サーボの型 (180/270) は実物を測る手段が無く、照合できるのは「ファームに書いた値」と
+    # 「yaml に書いた値」の一致まで。それでも、型を取り違えたまま指令の 1.5 倍動く状態が
+    # PC からは正常にしか見えない (仕様書 §7.7) ので、この一致だけが検出の足がかりになる
+    expected_firmware: int | None = None
+    expected_angle_range_deg: float | None = None
     # edulite05
     host_id: int = 0xFD
     mode: ControlMode = ControlMode.POSITION
@@ -439,6 +445,43 @@ def _parse_sensor(
     return SensorConfig(name=sensor_name, bus=bus, can_id=can_id)
 
 
+def _parse_expected_firmware(source: str, path: str, motor: Mapping) -> int | None:
+    """INFO の Byte0 と突き合わせるファーム版 (仕様書 §3.4)。"""
+    value = _optional(_integer, source, path, motor, "expected_firmware", None)
+    if value is not None and not 0 <= value <= 0xFF:
+        raise ValueError(
+            f"{source}: {path}.expected_firmware が uint8 の範囲外です: {value} "
+            "(INFO の Byte0 は 1 バイト。仕様書 §3.4)"
+        )
+    return value
+
+
+def _parse_expected_angle_range(
+    source: str, path: str, motor: Mapping, control_type: ControlMode
+) -> float | None:
+    """INFO の Byte3-4 と突き合わせるサーボ可動レンジ [deg] (仕様書 §3.4 / §7.7)。"""
+    value = _optional(_number, source, path, motor, "expected_angle_range_deg", None)
+    if value is None:
+        return None
+
+    if value <= 0:
+        raise ValueError(
+            f"{source}: {path}.expected_angle_range_deg は正の値です: {value} "
+            "(0 以下だと角度 → パルス幅の変換そのものが定義できない)"
+        )
+
+    # **角度を持たない基板に書けてしまうと「書いたのに効かない設定」になる。**
+    # DC 基板と電磁弁基板は可動レンジを申告しないので、照合は永久に「申告なし」と
+    # 判定し続け、モータが起動直後から FAULT のまま復帰しない
+    if control_type is not ControlMode.POSITION:
+        raise ValueError(
+            f"{source}: {path}.expected_angle_range_deg は control_type: position の軸に"
+            f"しか書けません (この軸は {control_type.value})。角度を持たない基板は "
+            "INFO でも可動レンジを申告しない (仕様書 §3.4)"
+        )
+    return value
+
+
 def _parse_motor(
     source: str, motor_name: str, raw: object, buses: Mapping[str, str] | None
 ) -> MotorConfig:
@@ -475,15 +518,18 @@ def _parse_motor(
     check = _parse_motor_check_override(source, motor_name, motor.get("motor_check"))
 
     if driver == "generic":
+        control_type = _optional_mode(
+            source, path, motor, "control_type", _CONTROL_MODES, ControlMode.POSITION
+        )
         return MotorConfig(
             name=motor_name,
             driver=driver,
             bus=bus,
             can_id=can_id,
             motor_check=check,
-            control_type=_optional_mode(
-                source, path, motor, "control_type", _CONTROL_MODES, ControlMode.POSITION
-            ),
+            control_type=control_type,
+            expected_firmware=_parse_expected_firmware(source, path, motor),
+            expected_angle_range_deg=_parse_expected_angle_range(source, path, motor, control_type),
         )
 
     if driver == "edulite05":
