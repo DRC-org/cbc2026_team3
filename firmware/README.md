@@ -397,6 +397,38 @@ rpm 換算」である（仕様書 §7.4）。電流・温度と過電流・過�
 → サーバー全体の緊急停止 → ブロードキャスト `E_STOP`）。**DC 基板が繋がっていない
 構成では物理停止が効かない。**
 
+**`AutoBusOff` は有効にしてある**（`solenoid.ioc` の `CAN.ABOM=ENABLE`）。**CubeMX の
+既定は `DISABLE` で、そのままだと一度 Bus-Off に落ちた基板は電源を入れ直すまで復帰しない。**
+MCP2515（サーボ基板）も R4 内蔵 CAN（DC 基板）も自動復帰するので、既定のままだと
+この 1 枚だけが「試合中にノイズで落ちたらそれきり」という特性を持つことになる。
+
+実機で踏んだ形はこうだった —— CAN の配線が繋がっていない状態で通電したところ、
+送信エラーカウンタが 255 に達して Bus-Off（`CAN_ESR = 0x00F80057`: `BOFF=1` /
+`TEC=248` / `LEC=5`）。この状態は**配線を直しても直らない**ので、原因が配線なのか
+基板なのか切り分けられなくなる。`ABOM=ENABLE` にすると再送を試み続けるので、
+配線を直した瞬間に自力で復帰する。
+
+#### 実機で CAN が繋がらないときの切り分け（SWD だけでここまで分かる）
+
+ST-LINK が繋がっていれば、シリアルも CAN も無しで内部状態を読める。
+
+```bash
+OCD=~/.platformio/packages/tool-openocd
+$OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
+  -c "set WORKAREASIZE 0x2000" -f target/stm32f3x.cfg \
+  -c "init" -c "halt" -c "mdw 0x40006418 1" -c "mdw 0x48000010 1" -c "resume" -c "shutdown"
+```
+
+| 読む場所 | 意味 |
+|---|---|
+| `0x40006418`（`CAN_ESR`） | `bit2`=Bus-Off / `bit4-6`=最後のエラー種別 / `bit16-23`=送信エラーカウンタ |
+| `0x48000010`（`GPIOA_IDR`）の `bit11` | `CAN_RX`（PA11）の実レベル。**アイドルで 0 ならトランシーバが dominant に張り付いている**（未給電・CANH/CANL 短絡）。1 ならバスはアイドルとして読めている |
+| `_ZN12_GLOBAL__N_1L10g_deviceIdE`（`arm-none-eabi-nm` で引く） | DIP から解決した実効デバイス ID。0x00 が並んでいたら DIP の読みが失敗している |
+
+**`WORKAREASIZE` の指定は省略できない。** OpenOCD の `stm32f3x.cfg` は既定で 16KB の
+ワークエリアを取るが、**STM32F303K8 の RAM は 12KB しかない**ので、そのままだと
+`Failed to write memory at 0x20003008` で書き込みが失敗する（RAM 末尾は `0x20003000`）。
+
 ## 安全に関する既定値
 
 | 項目 | dc_motor | servo | 根拠 |
