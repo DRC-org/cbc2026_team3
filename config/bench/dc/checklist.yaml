@@ -12,7 +12,7 @@
 # magnitude: 0 で除外してある。回転の確認はここの目視項目が担う。
 
 checklists:
-  main_hand:
+  pre_match:
     - id: bench_bus_up
       label: can_generic が up していること確認 (ip -br link show)
     - id: bench_firmware

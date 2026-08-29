@@ -40,19 +40,14 @@
     "match_state": {
       "can_start_match": false,
       "checklists": {
-        "main_hand": {
+        "pre_match": {
           "completed": false,
           "items": [
             {
               "checked": false,
               "id": "y_axis_sync",
               "label": "Y 軸の左右が揃っている"
-            }
-          ]
-        },
-        "sub_hand": {
-          "completed": false,
-          "items": [
+            },
             {
               "checked": false,
               "id": "sub_arm_home",

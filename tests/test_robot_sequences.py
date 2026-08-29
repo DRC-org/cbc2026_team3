@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from lib.drivers.base import ControlMode
+from lib.match_state import ROLE_PRE_MATCH
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -511,20 +512,27 @@ class TestShippedRobotConfig:
 
         assert motors[motor_name]["motor_check"]["magnitude"] == 0
 
-    def test_main_hand_checklist_covers_excluded_pairs(self) -> None:
+    def test_checklist_covers_everything_excluded_from_motor_check(self) -> None:
         """動作確認から外したものは、すべて目視確認項目で埋めること。
 
         magnitude: 0 で自動確認を外した以上、代わりの網が要る。センサも同じで、
         死んだまま原点合わせを始めると「いつまでも当たらない」形でしか分からない。
         """
         checklist = yaml.safe_load((_CONFIG_DIR / "checklist.yaml").read_text())
-        ids = {item["id"] for item in checklist["checklists"]["main_hand"]}
+        ids = {item["id"] for item in checklist["checklists"][ROLE_PRE_MATCH]}
 
         assert {
+            # メインハンド: ペア軸 (y_axis / rotate)・DC 基板・原点センサ
             "y_axis_sync",
             "rotate_sync",
             "wall_initial",
             "conveyor_stop",
             "conveyor_run",
             "origin_sensor_react",
+            # サブハンド: 電磁弁 (到達を観測できない) と DC 基板のポンプ
+            "valves_closed",
+            "valves_actuate",
+            "pumps_run",
+            "suction_hold",
+            "suction_release",
         } <= ids

@@ -15,7 +15,7 @@
 # 確認は UI の緊急停止ボタン (= CAN のブロードキャスト E_STOP) で行う。
 
 checklists:
-  main_hand:
+  pre_match:
     - id: bench_bus_up
       label: can_generic が up していること確認 (ip -br link show)
     - id: bench_firmware

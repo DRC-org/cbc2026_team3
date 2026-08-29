@@ -6,7 +6,6 @@ import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
 import { ActionPanel } from "@/components/operator/ActionPanel";
-import { Checklist } from "@/components/operator/Checklist";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
@@ -17,8 +16,9 @@ import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
+import { cx } from "@/lib/cx";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
-import type { ChecklistRole, ManualState, OperationMode } from "@/lib/protocol";
+import type { ManualState, OperationMode } from "@/lib/protocol";
 import { sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
@@ -107,7 +107,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     <ModeSwitch mode={manual.mode} onChange={handleMode} blockedReason={modeBlockedReason} />
   );
 
-  // 手動の操作面。半自動側の主役 (Checklist / ActionPanel) と同じ列を占める
+  // 手動の操作面。半自動側の主役 (動作確認 / ActionPanel) と同じ列を占める
   const manualPanel = (
     <ManualPanel
       robotKey={robotKey}
@@ -118,27 +118,26 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   // --- セッティングタイム -------------------------------------------------
-  // 操縦者の仕事は 2 つだけ: 指差喚呼を終えることと、アクチュエータを動かして確かめること。
-  // 以前はここに操作不能な SEQUENCE PREVIEW が画面の半分を占めていた。試合前に
-  // 一覧を見たくなることはあるが、それは「今やること」ではないのでモーダルへ退避した。
+  // 指差喚呼は Monitor の設定面へ移した (操縦者 2 名が同じ場所に立つので、
+  // 同じ機体を 2 つの画面で二度読み上げるだけになっていた)。ここに残るのは
+  // 「アクチュエータを動かして確かめること」と、そのための手動操縦。
   if (setupPhase) {
     return (
       <>
         <Page className="flex flex-col">
           {modeSwitch}
-          <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
-            {inManual ? (
-              manualPanel
-            ) : (
-              <Checklist
-                checklistRole={robotKey as ChecklistRole}
-                title={`${label} セッティング指差喚呼`}
-              />
+          <div
+            className={cx(
+              "grid min-h-0 flex-1 gap-2",
+              // 手動中だけ操作面のために左列を開ける。半自動の準備中はこの画面に
+              // 操作が無いので (指差喚呼は Monitor)、参照面を 1 列に広げる
+              inManual ? "grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]" : "grid-cols-1",
             )}
+          >
+            {inManual ? manualPanel : null}
 
             <div className="flex min-h-0 flex-col gap-2">
-              {/* 動作確認は準備フェーズの主要アクション。以前は診断カラムの最下段に
-                  埋もれていたため、独立した枠で上に出す。手動モード中はサーバーが
+              {/* 動作確認は準備フェーズの主要アクション。手動モード中はサーバーが
                   拒否するので、押す前に理由を出せるようボタン側で塞ぐ */}
               <Panel
                 legend="アクチュエータ動作確認"

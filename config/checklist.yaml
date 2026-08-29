@@ -1,11 +1,12 @@
 # セッティングタイム中の指差喚呼チェックリスト。
 #
-# ロール:
-#   main_hand — メインハンド操縦者のタブに表示
-#   sub_hand  — サブハンド操縦者のタブに表示
+# ロールは pre_match 1 つだけ。かつては main_hand / sub_hand の 2 名が別々に
+# 指差喚呼し、両方揃って初めて試合に入れる構成だったが、実運用では 2 名が必ず
+# 同じ場所で操縦するため独立した 2 回の確認にはならず、同じ機体を二度読み上げる
+# だけになっていた。統合して Monitor の設定セクションに 1 つだけ置く。
 #
-# 両ロールが完了するまで試合フェーズに入れない。
-# 項目は id / label のみ必須。id はロール内で一意にすること。
+# 全項目が完了するまで試合フェーズに入れない。
+# 項目は id / label のみ必須。id は一覧内で一意にすること。
 
 checklists:
   # メインハンドの y_axis / rotate は左右 2 台が機構的に直結したペア軸で、片側だけ
@@ -14,62 +15,61 @@ checklists:
   # 自動判定できないので同じく除外してある。origin_sensor は駆動対象ではないので
   # 動作確認の枠に乗らないが、死んだまま原点合わせを始めると「いつまでも当たらない」
   # 形でしか分からないため、ここで反応を確認する。
-  # 自動確認が効かない分をここでの目視確認で埋めるので、下記の *_sync と
-  # conveyor_run は省略できない。
-  main_hand:
+  #
+  # 吸着系 (電磁弁 6 個 + 吸気/排気ポンプ) も動作確認から除外してある。電磁弁基板は
+  # 弁が開いたかを観測する手段を持たず (圧力センサもリミットスイッチも非搭載)、
+  # FEEDBACK の到達フラグも立てないため、自動判定すると必ず「動かなかった」で落ちる
+  # (仕様書 §9.3)。ポンプも DC 基板なので同じ。
+  #
+  # 自動確認が効かない分をここでの目視・打音確認で埋めるので、*_sync / conveyor_run /
+  # valves_* / pumps_run は省略できない。
+  pre_match:
+    # --- 通電前の安全確認 ---
     - id: estop_release
       label: 非常停止スイッチ解除確認
-    - id: home_position
+
+    # --- 機体の初期状態 ---
+    - id: main_home_position
       label: メインハンド初期位置確認
-    - id: gripper_open
+    - id: sub_home_position
+      label: サブハンド初期位置確認
+    - id: main_gripper_open
       label: グリッパ開状態確認
+    - id: sub_gripper_open
+      label: 補助ハンド開状態確認
+    - id: wall_initial
+      label: 壁 前後とも初期位置確認
+    - id: valves_closed
+      label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
+
+    # --- 自動判定できない機構の目視確認 ---
     - id: y_axis_sync
       label: y 軸 左右のずれがないこと確認
     - id: rotate_sync
       label: エンドエフェクタ回転 左右のずれがないこと確認
-    - id: wall_initial
-      label: 壁 前後とも初期位置確認
-    - id: conveyor_run
-      label: コンベア 正転・逆転の目視確認
-    - id: origin_sensor_react
-      label: 原点センサに触れて反応することを確認
     - id: firmware_match
       label: サーボ基板のファーム版・可動角の異常表示が出ていないこと確認
+    - id: origin_sensor_react
+      label: 原点センサに触れて反応することを確認
+    - id: conveyor_run
+      label: コンベア 正転・逆転の目視確認
     - id: conveyor_stop
       label: コンベア停止確認
-    - id: motor_check
-      label: アクチュエータ動作確認 完了
-    - id: court
-      label: コート設定 (赤/青) と実配置の一致確認
-    - id: field_clear
-      label: 可動範囲内に人・物がないこと確認
-
-  # 吸着系 (電磁弁 6 個 + 吸気/排気ポンプ) は動作確認 (motor_check) から除外してある。
-  # 電磁弁基板は弁が開いたかを観測する手段を持たず (圧力センサもリミットスイッチも
-  # 非搭載)、FEEDBACK の到達フラグも立てないため、自動判定すると必ず「動かなかった」で
-  # 落ちる (仕様書 §9.3)。ポンプも DC 基板なので同じ (conveyor と同じ理由)。
-  # 自動確認が効かない分をここでの目視・打音確認で埋めるので、valves_* と pumps_run は
-  # 省略できない。
-  sub_hand:
-    - id: estop_release
-      label: 非常停止スイッチ解除確認
-    - id: home_position
-      label: サブハンド初期位置確認
-    - id: gripper_open
-      label: 補助ハンド開状態確認
-    - id: valves_closed
-      label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
-    - id: valves_actuate
-      label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
     - id: pumps_run
       label: 吸気ポンプ・排気ポンプが個別に回ること確認 (聴音。DC 基板は回転を報告しない)
+    - id: valves_actuate
+      label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
     - id: suction_hold
       label: 吸気ポンプ運転中に弁を開き、ワークを吸着して保持できること確認
     - id: suction_release
       label: 弁を閉じ排気ポンプでワークが確実に離れること確認 (残圧で張り付かないこと)
+
+    # --- 動作確認と試合設定 ---
     - id: motor_check
       label: アクチュエータ動作確認 完了
     - id: court
       label: コート設定 (赤/青) と実配置の一致確認
+
+    # --- 開始直前 ---
     - id: field_clear
       label: 可動範囲内に人・物がないこと確認

@@ -19,6 +19,7 @@ from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.match_state import ALL_ROLES
 from lib.sequence.positions import load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -576,27 +577,18 @@ class TestShippedBenchConfigs:
         assert set(config.motors) == axis_motors
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
-    def test_bench_checklist_targets_the_registered_robot(self, bench: str) -> None:
-        """チェックリストのロールが、その config の robot_name と一致すること。
+    def test_bench_checklist_uses_a_known_role(self, bench: str) -> None:
+        """チェックリストのロールが ALL_ROLES に含まれること。
 
-        ずれるとチェックリストがどのタブにも出ず、**指差喚呼を 1 項目も踏まないまま
+        知らないロール名で書いた項目はどこにも読み込まれない。しかも定義の無い
+        ロールは「完了」とみなされるので、**指差喚呼を 1 項目も踏まないまま
         試合フェーズへ入れてしまう**。
         """
         bench_dir = _CONFIG_DIR / "bench" / bench
-
-        robot_yaml = next(
-            path
-            for path in bench_dir.iterdir()
-            if path.name.endswith(".yaml")
-            and not path.name.endswith("_positions.yaml")
-            and path.name not in ("system.yaml", "checklist.yaml")
-        )
-        robot_name = yaml.safe_load(robot_yaml.read_text())["robot_name"]
-
         checklist = yaml.safe_load((bench_dir / "checklist.yaml").read_text())["checklists"]
 
-        assert robot_name in checklist
-        assert checklist[robot_name]
+        assert set(checklist) <= set(ALL_ROLES)
+        assert any(checklist.values())
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
     def test_bench_opens_only_the_buses_on_the_desk(self, bench: str) -> None:

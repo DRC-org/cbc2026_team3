@@ -159,8 +159,8 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
     `import/no-cycle` を効かせたまま依存グラフを読めるようにするため）
   - `src/components/ui/` — 自前プリミティブ（`Page` / `Panel` / `Section` / `Button` /
     `StatusBadge` / `Kbd` / `Icon` / `Modal`）。レイアウト骨格は CSS ではなくここが持つ
-  - 画面の主役は `ActionPanel`（操縦者・試合中）/ `StartGate`（Monitor・準備中）/
-    `Checklist`（操縦者・準備中）。診断は `SubsystemStatus` が平常時 1 行へ畳む
+  - 画面の主役は `ActionPanel`（操縦者・試合中）/ `StartGate` と `Checklist`
+    （どちらも Monitor・準備中）。診断は `SubsystemStatus` が平常時 1 行へ畳む
   - アイコンは `lucide-react`。既定値は `ui/Icon.tsx` に閉じ込め、各所で個別指定しない
   - フォントは `@fontsource-variable/*` で自己ホスト（会場のネットワークに依存させない）
   - `src/test/` — vitest 共通ヘルパ（WebSocket スタブ、RobotProvider ラッパ）。テスト本体は対象ソースの隣に `*.test.ts(x)`
@@ -294,9 +294,19 @@ NTP 補正で試合中に残り時間が増える）。ずれは WS の片道遅
 **運用の主体は半自動シーケンス制御。手動操縦はその代替ではなく退避路。** 機体が動くのは
 操縦者がタブで `sequence_start` / `trigger` を押したときだけで、`match_start` はフェーズを
 進めるだけ。`require_trigger` のステップは常にトリガー待ちで止まる（「全自動なら素通り」
-のような例外は無い）。試合開始のゲートは `main_hand` / `sub_hand` 2 名の指差喚呼。
+のような例外は無い）。試合開始のゲートは指差喚呼（`config/checklist.yaml`）の全項目完了。
 **「全自動」という操作モードは無い** — 増やしてよいのは制御権の持ち主であって、
 シーケンスの走り方ではない。
+
+**指差喚呼はロール 1 つ（`pre_match`）に統合し、Monitor の設定面に置く。** かつては
+`main_hand` / `sub_hand` の 2 名が別々に確認し、両方揃って初めて試合に入れる構成だった。
+実運用では 2 名が必ず同じ場所で操縦するため独立した 2 回の確認にはならず、同じ機体を
+二度読み上げるだけになっていた。**ロールが 1 つでも `checklists` は辞書のまま運ぶ** —
+`can_start_match`（全ロールが完了）の判定と WS 契約の形を変えずに済ませるため。
+ロール名を書いてよいのはサーバーが `lib/match_state.py` の `ALL_ROLES`、UI が
+`web/src/lib/protocol.ts` の `CHECKLIST_ROLE` だけで、画面側は定数を参照する。
+**残っている項目名を出すのは `Checklist` だけ**（`StartGate` は残り件数しか言わない）。
+同じ画面に両方が並ぶので、先頭項目を繰り返すと操縦者は同じ 1 行を 2 箇所で読むことになる。
 
 **手動操縦は制御権をシーケンスから奪う操作であり、同時に 2 つは立たない。**
 `OperationMode`（`sequence` / `manual`）は**ロボットごとに独立**し、正はサーバーが持つ

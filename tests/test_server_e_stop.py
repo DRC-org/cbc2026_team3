@@ -19,8 +19,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, BusHealthInfo, HealthSnapshot, MotorHealth, MotorHealthInfo
 from lib.match_state import (
-    ROLE_MAIN_HAND,
-    ROLE_SUB_HAND,
+    ROLE_PRE_MATCH,
     ChecklistItem,
     Phase,
 )
@@ -33,8 +32,7 @@ from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
 _DEFS = {
-    ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
-    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
+    ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")],
 }
 
 

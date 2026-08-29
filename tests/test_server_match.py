@@ -6,8 +6,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.config_schema import MatchSettings
 from lib.match_state import (
-    ROLE_MAIN_HAND,
-    ROLE_SUB_HAND,
+    ROLE_PRE_MATCH,
     ChecklistItem,
     Court,
     Phase,
@@ -15,10 +14,23 @@ from lib.match_state import (
 from lib.sequence.engine import Sequence, step
 from tests.server_fixtures import ServerFixture, recv_type
 
+# 項目を 2 つ持たせるのは「1 つ埋めただけでは試合に入れない」を検証できる形にするため。
+# 1 項目だと最初のチェックで READY になり、ゲートが効いているのか区別が付かない。
 _DEFS = {
-    ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
-    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
+    ROLE_PRE_MATCH: [
+        ChecklistItem(id="home", label="初期位置確認"),
+        ChecklistItem(id="gripper", label="グリッパ開状態確認"),
+    ],
 }
+
+
+async def _complete_checklist(ws) -> None:
+    """試合開始ゲートを開ける。項目が 1 つでも残っていれば READY にならない。"""
+    for item in _DEFS[ROLE_PRE_MATCH]:
+        await ws.send_json(
+            {"type": "checklist_set", "role": ROLE_PRE_MATCH, "item_id": item.id, "checked": True}
+        )
+
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
@@ -57,7 +69,7 @@ class TestMatchStateSnapshotOnConnect:
             assert msg is not None
             assert msg["phase"] == "setup"
             assert msg["court"] == "red"
-            assert set(msg["checklists"]) == {ROLE_MAIN_HAND, ROLE_SUB_HAND}
+            assert set(msg["checklists"]) == {ROLE_PRE_MATCH}
             await ws.close()
 
 
@@ -109,10 +121,7 @@ class TestMatchTimerBroadcast:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            for role in (ROLE_MAIN_HAND, ROLE_SUB_HAND):
-                await ws.send_json(
-                    {"type": "checklist_set", "role": role, "item_id": "home", "checked": True}
-                )
+            await _complete_checklist(ws)
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
 
@@ -175,42 +184,30 @@ class TestChecklistCommands:
             await ws.send_json(
                 {
                     "type": "checklist_set",
-                    "role": ROLE_MAIN_HAND,
+                    "role": ROLE_PRE_MATCH,
                     "item_id": "home",
                     "checked": True,
                 }
             )
             msg = await recv_type(ws, "match_state")
             assert msg is not None
-            assert msg["checklists"][ROLE_MAIN_HAND]["completed"] is True
-            # 片方だけでは試合に入れない
+            assert msg["checklists"][ROLE_PRE_MATCH]["completed"] is False
+            # 1 項目でも残っている間は試合に入れない
             assert msg["can_start_match"] is False
             await ws.close()
 
-    async def test_both_operators_unlock_ready(self) -> None:
+    async def test_every_item_unlocks_ready(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            for role in (ROLE_MAIN_HAND, ROLE_SUB_HAND):
-                await ws.send_json(
-                    {"type": "checklist_set", "role": role, "item_id": "home", "checked": True}
-                )
+            await _complete_checklist(ws)
             await asyncio.sleep(0.05)
 
             assert fx.match.phase is Phase.READY
             assert fx.match.can_start_match is True
             await ws.close()
-
-
-_MULTI_DEFS = {
-    ROLE_MAIN_HAND: [
-        ChecklistItem(id="home", label="メイン初期位置確認"),
-        ChecklistItem(id="gripper", label="グリッパ開状態確認"),
-    ],
-    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
-}
 
 
 class TestServerInfoOnConnect:
@@ -244,7 +241,7 @@ class TestChecklistCheckAll:
     """開発用の一括チェック。**本番起動では効かない**ことまでが仕様。"""
 
     async def test_rejected_without_dev_tools(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS)
+        fx = ServerFixture.build(checklist_definitions=_DEFS)
         for name in _ROBOT_NAMES:
             fx.add_robot(name, DummySequence(name))
         app = fx.create_app()
@@ -261,7 +258,7 @@ class TestChecklistCheckAll:
             await ws.close()
 
     async def test_checks_every_role_with_dev_tools(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS, dev_tools=True)
+        fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
         for name in _ROBOT_NAMES:
             fx.add_robot(name, DummySequence(name))
         app = fx.create_app()
@@ -272,14 +269,18 @@ class TestChecklistCheckAll:
             await ws.send_json({"type": "checklist_check_all"})
             msg = await recv_type(ws, "match_state")
             assert msg is not None
-            for role in (ROLE_MAIN_HAND, ROLE_SUB_HAND):
-                assert all(item["checked"] for item in msg["checklists"][role]["items"])
+            assert all(item["checked"] for item in msg["checklists"][ROLE_PRE_MATCH]["items"])
             assert msg["can_start_match"] is True
             assert fx.match.phase is Phase.READY
             await ws.close()
 
-    async def test_role_argument_limits_the_effect(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS, dev_tools=True)
+    async def test_unknown_role_checks_nothing(self) -> None:
+        """role 指定は対象を絞るだけ。存在しないロールで全項目が埋まってはならない。
+
+        ロールは pre_match 1 つになったが、role を受け取る形は残っている。
+        綴り違いが「全部完了」に化けると、点検せずに試合を開始できてしまう。
+        """
+        fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
         for name in _ROBOT_NAMES:
             fx.add_robot(name, DummySequence(name))
         app = fx.create_app()
@@ -287,17 +288,17 @@ class TestChecklistCheckAll:
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await recv_type(ws, "match_state")
-            await ws.send_json({"type": "checklist_check_all", "role": ROLE_MAIN_HAND})
-            msg = await recv_type(ws, "match_state")
-            assert msg is not None
-            assert msg["checklists"][ROLE_MAIN_HAND]["completed"] is True
-            assert msg["checklists"][ROLE_SUB_HAND]["completed"] is False
-            assert msg["can_start_match"] is False
+            await ws.send_json({"type": "checklist_check_all", "role": "nobody"})
+            await asyncio.sleep(0.05)
+
+            assert fx.match.checklists[ROLE_PRE_MATCH].completed is False
+            assert fx.match.can_start_match is False
+            assert fx.match.phase is Phase.SETUP
             await ws.close()
 
     async def test_rejected_during_match(self) -> None:
         """開発用でもフェーズゲートは外れない (試合中に指差喚呼を触らせない)。"""
-        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS, dev_tools=True)
+        fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
         for name in _ROBOT_NAMES:
             fx.add_robot(name, DummySequence(name))
         fx.enter_match()
@@ -426,5 +427,5 @@ class TestMatchFinishAndReset:
             await asyncio.sleep(0.05)
 
             assert fx.match.phase is Phase.SETUP
-            assert fx.match.checklists[ROLE_MAIN_HAND].completed is False
+            assert fx.match.checklists[ROLE_PRE_MATCH].completed is False
             await ws.close()

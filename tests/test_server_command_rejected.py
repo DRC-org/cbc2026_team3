@@ -14,7 +14,7 @@ import contextlib
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.commands import COMMANDS
-from lib.match_state import ROLE_MAIN_HAND, ROLE_SUB_HAND, ChecklistItem, Court, Phase
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court, Phase
 from lib.sequence.engine import Sequence, step
 from tests.server_fixtures import ServerFixture, expect_no_type, recv_type
 
@@ -31,8 +31,7 @@ class _DummySequence(Sequence):
 #: 指差喚呼を 1 項目ずつ持たせる。項目ゼロだと全ロールが即完了扱いになり
 #: 起動直後から READY になるため、SETUP を前提にする検証が書けない
 _DEFS = {
-    ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
-    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
+    ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")],
 }
 
 

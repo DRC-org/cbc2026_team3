@@ -15,7 +15,7 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.manual import ManualController
-from lib.match_state import ChecklistItem, Phase
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Phase
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
@@ -97,11 +97,7 @@ def _fixture(
 ) -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
     # 指差喚呼の項目が 1 つも無いと can_start_match が最初から True になり、
     # フェーズが SETUP を素通りして READY から始まる
-    definitions = (
-        {"main_hand": [ChecklistItem(id="check", label="確認")], "sub_hand": []}
-        if checklist
-        else None
-    )
+    definitions = {ROLE_PRE_MATCH: [ChecklistItem(id="check", label="確認")]} if checklist else None
     fx = ServerFixture.build(checklist_definitions=definitions)
     fx.freeze_broadcast()
     manual, drivers = _make_manual()

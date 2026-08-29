@@ -150,22 +150,27 @@ describe("RobotControl の操作先", () => {
 });
 
 describe("RobotControl のフェーズ別レイアウト", () => {
-  it("準備中は指差喚呼と動作確認だけを出し、シーケンス操作は出さない", () => {
-    // このフェーズで操縦者がやることは 2 つだけ。押せない主操作ボタンを
+  it("準備中は動作確認だけを出し、シーケンス操作は出さない", () => {
+    // このフェーズで操縦者がやることは動作確認だけ。押せない主操作ボタンを
     // 並べると「今やること」が埋もれる
     mount("setup");
 
-    expect(screen.getByText("サブハンド セッティング指差喚呼")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "sub_hand の動作確認を開始" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "シーケンスを先頭から開始" })).toBeNull();
     expect(screen.queryByRole("button", { name: "シーケンスを通常停止" })).toBeNull();
   });
 
-  it("試合中は主操作を出し、指差喚呼を残さない", () => {
+  it("指差喚呼はこの画面に出さない (Monitor の設定面へ集約した)", () => {
+    // 操縦者 2 名は同じ場所に立つ。2 つの画面に置くと同じ機体を二度読み上げる
+    mount("setup");
+
+    expect(screen.queryByText(/セッティング指差喚呼/)).toBeNull();
+  });
+
+  it("試合中は主操作を出す", () => {
     mount("match");
 
     expect(screen.getByRole("button", { name: "シーケンスを先頭から開始" })).toBeEnabled();
-    expect(screen.queryByText("サブハンド セッティング指差喚呼")).toBeNull();
   });
 
   it("試合終了後は操作を塞ぎ、塞いでいる理由を主操作の位置に出す", () => {

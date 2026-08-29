@@ -34,26 +34,25 @@ function robot(health: HealthSnapshot): RobotState {
 const HEALTHY_STATES = { main_hand: robot(OK_HEALTH), sub_hand: robot(OK_HEALTH) };
 
 describe("StartGate", () => {
-  it("残っている項目名まで出す (件数だけでは担当者が動けない)", () => {
+  it("残り件数を出す (項目名は同じ画面の Checklist が出すので繰り返さない)", () => {
     renderWithRobot(<StartGate onStart={vi.fn()} />, {
       states: HEALTHY_STATES,
       matchState: {
         ...DEFAULT_MATCH_STATE,
         can_start_match: false,
         checklists: {
-          main_hand: checklist([
+          pre_match: checklist([
             { id: "a", label: "電源投入", checked: true },
             { id: "b", label: "非常停止解除", checked: false },
           ]),
-          sub_hand: checklist([{ id: "c", label: "初期位置確認", checked: true }]),
         },
       },
     });
 
     expect(screen.getByText("まだ開始できません")).toBeInTheDocument();
-    expect(screen.getByText(/非常停止解除/)).toBeInTheDocument();
-    // 完了しているロールは阻害要因に出さない
-    expect(screen.queryByText(/初期位置確認/)).not.toBeInTheDocument();
+    expect(screen.getByText("残り 1 件")).toBeInTheDocument();
+    // 項目名は Checklist の担当。ここで繰り返すと、同じ 1 行を 2 箇所で読むことになる
+    expect(screen.queryByText(/非常停止解除/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "試合を開始する" })).toBeDisabled();
   });
 
@@ -64,8 +63,7 @@ describe("StartGate", () => {
         ...DEFAULT_MATCH_STATE,
         can_start_match: true,
         checklists: {
-          main_hand: checklist([{ id: "a", label: "電源投入", checked: true }]),
-          sub_hand: checklist([{ id: "c", label: "初期位置確認", checked: true }]),
+          pre_match: checklist([{ id: "a", label: "電源投入", checked: true }]),
         },
       },
     });
@@ -83,8 +81,7 @@ describe("StartGate", () => {
         ...DEFAULT_MATCH_STATE,
         can_start_match: true,
         checklists: {
-          main_hand: checklist([{ id: "a", label: "電源投入", checked: true }]),
-          sub_hand: checklist([{ id: "c", label: "初期位置確認", checked: true }]),
+          pre_match: checklist([{ id: "a", label: "電源投入", checked: true }]),
           unknown_role: checklist([{ id: "z", label: "知らない項目", checked: false }]),
         },
       },
@@ -101,7 +98,7 @@ describe("StartGate", () => {
       matchState: {
         ...DEFAULT_MATCH_STATE,
         can_start_match: false,
-        checklists: { main_hand: checklist([{ id: "a", label: "電源投入", checked: true }]) },
+        checklists: { pre_match: checklist([{ id: "a", label: "電源投入", checked: true }]) },
       },
     });
 
@@ -149,8 +146,7 @@ describe("StartGate", () => {
         ...DEFAULT_MATCH_STATE,
         can_start_match: true,
         checklists: {
-          main_hand: checklist([{ id: "a", label: "電源投入", checked: true }]),
-          sub_hand: checklist([{ id: "c", label: "初期位置確認", checked: true }]),
+          pre_match: checklist([{ id: "a", label: "電源投入", checked: true }]),
         },
       },
     });

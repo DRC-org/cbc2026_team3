@@ -38,7 +38,7 @@ from lib.health import (
     MotorHealth,
 )
 from lib.manual import ManualController
-from lib.match_state import ChecklistItem
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
@@ -199,8 +199,10 @@ def _manual_controller(
 def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     """指差喚呼の項目。空だと checklists の要素構造が golden に現れない。"""
     return {
-        "main_hand": [ChecklistItem(id="y_axis_sync", label="Y 軸の左右が揃っている")],
-        "sub_hand": [ChecklistItem(id="sub_arm_home", label="補助アームが初期位置")],
+        ROLE_PRE_MATCH: [
+            ChecklistItem(id="y_axis_sync", label="Y 軸の左右が揃っている"),
+            ChecklistItem(id="sub_arm_home", label="補助アームが初期位置"),
+        ],
     }
 
 

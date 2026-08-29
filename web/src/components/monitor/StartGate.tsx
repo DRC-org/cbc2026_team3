@@ -13,8 +13,7 @@ interface Blocker {
 }
 
 const ROLE_LABEL: Record<string, string> = {
-  main_hand: "メインハンド 操縦者",
-  sub_hand: "サブハンド 操縦者",
+  pre_match: "指差喚呼",
 };
 
 /**
@@ -43,16 +42,16 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   // 説明するに留める。クライアントでも判定し直すと、サーバーは開始できると言っているのに
   // 画面がボタンを殺す状態が生まれる (実際に、配信ロールが 1 つ増えただけでそうなった)。
   if (!canStart) {
-    // どのロールの何項目が残っているかまで出す。件数だけでは担当者が動けない
+    // **残っている項目名はここに出さない。** 同じ画面の Checklist が全項目を並べ、
+    // 未完の先頭を「次」として強調している。ここで先頭項目を繰り返すと、
+    // 操縦者は同じ 1 行を 2 箇所で読むことになる (以前この画面には Checklist が
+    // 無く、右カラムの 16 行をスキャンさせないために項目名を出していた)。
     const incomplete = Object.entries(matchState.checklists).filter(([, c]) => !c.completed);
     for (const [role, checklist] of incomplete) {
       const remaining = checklist.items.filter((i) => !i.checked);
       blockers.push({
         label: ROLE_LABEL[role] ?? role,
-        detail:
-          remaining.length === 0
-            ? "未完了"
-            : `残り ${remaining.length} 件 — ${remaining[0].label}${remaining.length > 1 ? " ほか" : ""}`,
+        detail: remaining.length === 0 ? "未完了" : `残り ${remaining.length} 件`,
       });
     }
     // 理由を 1 つも挙げられないまま押せないボタンだけを見せない

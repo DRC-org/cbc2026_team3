@@ -127,7 +127,16 @@ export interface ServerInfo {
 
 export type MatchCourt = "red" | "blue";
 export type MatchPhase = "setup" | "ready" | "match" | "finished";
-export type ChecklistRole = "main_hand" | "sub_hand";
+/**
+ * 指差喚呼のロール。サーバーの `lib/match_state.py` の `ALL_ROLES` と 1:1 で対応する。
+ *
+ * かつては操縦者 2 名 (main_hand / sub_hand) に分かれていたが、2 名が必ず同じ場所で
+ * 操縦するため独立した確認にならず、1 つへ統合した。
+ */
+export type ChecklistRole = "pre_match";
+
+/** 唯一のロール。画面側がロール名の文字列を書かずに済ませるための定数。 */
+export const CHECKLIST_ROLE: ChecklistRole = "pre_match";
 
 export interface ChecklistItem {
   id: string;

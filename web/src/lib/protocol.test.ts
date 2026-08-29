@@ -89,7 +89,7 @@ describe("parseServerMessage", () => {
           court: "blue",
           phase: "match",
           can_start_match: true,
-          checklists: { main_hand: { items: [], completed: true } },
+          checklists: { pre_match: { items: [], completed: true } },
           timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         }),
       ).toEqual({
@@ -98,7 +98,7 @@ describe("parseServerMessage", () => {
           court: "blue",
           phase: "match",
           can_start_match: true,
-          checklists: { main_hand: { items: [], completed: true } },
+          checklists: { pre_match: { items: [], completed: true } },
           timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         },
       });

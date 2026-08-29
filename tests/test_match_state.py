@@ -12,8 +12,7 @@ from lib.match_state import (
     PHASES_OUTSIDE_MATCH,
     PHASES_PREPARATION,
     PHASES_START_GATE,
-    ROLE_MAIN_HAND,
-    ROLE_SUB_HAND,
+    ROLE_PRE_MATCH,
     ChecklistItem,
     Court,
     MatchState,
@@ -22,12 +21,9 @@ from lib.match_state import (
 from tests.fake_clock import FakeClock
 
 _DEFS = {
-    ROLE_MAIN_HAND: [
+    ROLE_PRE_MATCH: [
         ChecklistItem(id="power", label="電源投入確認"),
         ChecklistItem(id="home", label="メインハンド初期位置確認"),
-    ],
-    ROLE_SUB_HAND: [
-        ChecklistItem(id="home", label="サブハンド初期位置確認"),
     ],
 }
 
@@ -51,8 +47,7 @@ def _complete(state: MatchState, role: str) -> None:
 
 
 def _complete_all(state: MatchState) -> None:
-    _complete(state, ROLE_MAIN_HAND)
-    _complete(state, ROLE_SUB_HAND)
+    _complete(state, ROLE_PRE_MATCH)
 
 
 class TestDefaults:
@@ -62,27 +57,40 @@ class TestDefaults:
         assert state.phase is Phase.SETUP
         assert state.can_start_match is False
 
-    def test_definitions_are_copied_per_role(self) -> None:
-        """定義を共有すると 1 ロールのチェックが他ロールに伝播してしまう。"""
-        state = _make()
-        state.set_checklist_item(ROLE_MAIN_HAND, "home", True)
-        assert state.checklists[ROLE_SUB_HAND].items[0].checked is False
+    def test_definitions_are_copied_into_each_state(self) -> None:
+        """定義をそのまま持つと、ある MatchState のチェックが定義側を汚す。
 
-    def test_roles_are_the_two_operators(self) -> None:
-        """ロールが増減すると試合開始ゲートの対象がそのまま変わる。"""
-        assert set(_make().checklists) == {ROLE_MAIN_HAND, ROLE_SUB_HAND}
+        定義は yaml から 1 度だけ読んで使い回すため、複製しないと試合を
+        リセットしても前回のチェックが残ったまま READY で立ち上がる。
+        """
+        first = _make()
+        _complete(first, ROLE_PRE_MATCH)
+        assert first.can_start_match is True
+
+        second = _make()
+        assert second.can_start_match is False
+
+    def test_role_is_a_single_pre_match_list(self) -> None:
+        """ロールが増減すると試合開始ゲートの対象がそのまま変わる。
+
+        操縦者 2 名で分けていたものを 1 つへ統合した。分かれていた頃は
+        「片方だけ完了」で開始できない状態に意味があったが、2 名が同じ場所で
+        同じ機体を見る以上、独立した確認にはなっていなかった。
+        """
+        assert set(_make().checklists) == {ROLE_PRE_MATCH}
 
 
 class TestChecklistCompletion:
-    def test_needs_both_roles_complete(self) -> None:
+    def test_needs_every_item_complete(self) -> None:
         state = _make()
-        _complete(state, ROLE_MAIN_HAND)
-        assert state.checklists[ROLE_MAIN_HAND].completed is True
-        # 片方だけでは試合に入れない
+        # 1 項目でも残っている間は試合に入れない
+        state.set_checklist_item(ROLE_PRE_MATCH, "power", True)
+        assert state.checklists[ROLE_PRE_MATCH].completed is False
         assert state.can_start_match is False
         assert state.phase is Phase.SETUP
 
-        _complete(state, ROLE_SUB_HAND)
+        state.set_checklist_item(ROLE_PRE_MATCH, "home", True)
+        assert state.checklists[ROLE_PRE_MATCH].completed is True
         assert state.can_start_match is True
         assert state.phase is Phase.READY
 
@@ -91,18 +99,18 @@ class TestChecklistCompletion:
         _complete_all(state)
         assert state.phase is Phase.READY
 
-        state.set_checklist_item(ROLE_MAIN_HAND, "power", False)
+        state.set_checklist_item(ROLE_PRE_MATCH, "power", False)
         assert state.phase is Phase.SETUP
         assert state.can_start_match is False
 
     def test_unknown_role_or_item_is_rejected(self) -> None:
         state = _make()
         assert state.set_checklist_item("nobody", "power", True) is False
-        assert state.set_checklist_item(ROLE_MAIN_HAND, "no_such_item", True) is False
+        assert state.set_checklist_item(ROLE_PRE_MATCH, "no_such_item", True) is False
 
     def test_empty_checklist_counts_as_complete(self) -> None:
         """項目未定義のロールで永久にゲートが開かなくなるのを防ぐ。"""
-        state = MatchState(definitions={ROLE_MAIN_HAND: [], ROLE_SUB_HAND: []})
+        state = MatchState(definitions={ROLE_PRE_MATCH: []})
         assert state.phase is Phase.READY
 
 
@@ -160,7 +168,7 @@ class TestPhaseTransitions:
 
         assert state.match_reset() is True
         assert state.phase is Phase.SETUP
-        assert state.checklists[ROLE_MAIN_HAND].completed is False
+        assert state.checklists[ROLE_PRE_MATCH].completed is False
         # コートは試合後もそのまま維持する (次の試合も同条件が普通)
         assert state.court is Court.BLUE
 
@@ -168,7 +176,7 @@ class TestPhaseTransitions:
         state = _make()
         _complete_all(state)
         state.match_start()
-        assert state.set_checklist_item(ROLE_MAIN_HAND, "power", False) is False
+        assert state.set_checklist_item(ROLE_PRE_MATCH, "power", False) is False
         assert state.phase is Phase.MATCH
 
 
@@ -201,18 +209,21 @@ class TestPhaseSets:
 class TestSerialization:
     def test_to_dict_shape(self) -> None:
         state = _make()
-        state.set_checklist_item(ROLE_SUB_HAND, "home", True)
+        state.set_checklist_item(ROLE_PRE_MATCH, "home", True)
         payload = state.to_dict()
 
         assert payload["type"] == "match_state"
         assert payload["court"] == "red"
         assert payload["phase"] == "setup"
         assert payload["can_start_match"] is False
-        assert set(payload["checklists"]) == {ROLE_MAIN_HAND, ROLE_SUB_HAND}
+        assert set(payload["checklists"]) == {ROLE_PRE_MATCH}
 
-        sub = payload["checklists"][ROLE_SUB_HAND]
-        assert sub["completed"] is True
-        assert sub["items"] == [{"id": "home", "label": "サブハンド初期位置確認", "checked": True}]
+        checklist = payload["checklists"][ROLE_PRE_MATCH]
+        assert checklist["completed"] is False
+        assert checklist["items"] == [
+            {"id": "power", "label": "電源投入確認", "checked": False},
+            {"id": "home", "label": "メインハンド初期位置確認", "checked": True},
+        ]
 
 
 class TestMatchTimer:
@@ -337,13 +348,19 @@ class TestLoadDefinitions:
         defs = load_checklist_definitions(
             {
                 "checklists": {
-                    ROLE_MAIN_HAND: [{"id": "power", "label": "電源投入確認"}],
+                    ROLE_PRE_MATCH: [{"id": "power", "label": "電源投入確認"}],
                 }
             }
         )
-        assert defs[ROLE_MAIN_HAND] == [ChecklistItem(id="power", label="電源投入確認")]
-        # 未定義ロールも空リストで必ず存在させる (KeyError を UI 側に出さない)
-        assert defs[ROLE_SUB_HAND] == []
+        assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="power", label="電源投入確認")]
+
+    def test_load_always_defines_every_role(self) -> None:
+        """定義が空でもロールは必ず存在させる (KeyError を UI 側に出さない)。"""
+        from lib.match_state import ALL_ROLES, load_checklist_definitions
+
+        defs = load_checklist_definitions({})
+        assert set(defs) == set(ALL_ROLES)
+        assert defs[ROLE_PRE_MATCH] == []
 
     def test_load_skips_malformed_entries(self) -> None:
         from lib.match_state import load_checklist_definitions
@@ -351,7 +368,7 @@ class TestLoadDefinitions:
         defs = load_checklist_definitions(
             {
                 "checklists": {
-                    ROLE_MAIN_HAND: [
+                    ROLE_PRE_MATCH: [
                         {"id": "ok", "label": "有効"},
                         {"label": "id なし"},
                         "文字列",
@@ -359,4 +376,4 @@ class TestLoadDefinitions:
                 }
             }
         )
-        assert defs[ROLE_MAIN_HAND] == [ChecklistItem(id="ok", label="有効")]
+        assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="ok", label="有効")]
