@@ -93,6 +93,19 @@ export interface CheckRunSnapshot {
   records: MotorCheckRecord[];
 }
 
+/**
+ * 起動オプション由来の、試合中に変わらない情報。接続直後に 1 度だけ届く。
+ *
+ * 開発用ボタンの表示可否をビルド時定数で決めると、同じ `web/dist` を配る本番と
+ * 開発で再ビルドが要る (= 切り替えとして機能しない)。正はサーバーが持つ。
+ */
+export interface ServerInfo {
+  /** 開発用コマンド (指差喚呼の一括チェック等) が解禁されているか */
+  dev_tools: boolean;
+  /** CAN バス無しで起動しているか (機体は繋がっていない) */
+  dry_run: boolean;
+}
+
 export type MatchCourt = "red" | "blue";
 export type MatchPhase = "setup" | "ready" | "match" | "finished";
 export type ChecklistRole = "main_hand" | "sub_hand";
@@ -194,6 +207,51 @@ export interface SafetyState {
   target_refreshers: TargetRefresherState[];
 }
 
+/**
+ * 操作モード。**モータの制御モード (position / velocity / duty) とは別物。**
+ * あちらはモータへ送る指令の種類、こちらは「制御権を誰が握っているか」。
+ */
+export type OperationMode = "sequence" | "manual";
+
+/**
+ * 手動操縦で連続値を送ってよい範囲とジョグ量の候補 (位置定数 yaml の `axes.<軸>.manual`)。
+ *
+ * これを持たない軸は連続操作の対象外で、位置名によるプリセット指令だけができる。
+ * 通常運用の `move_to` は位置名でしか値を引けず「定義した状態以外を送れない」ことが
+ * 構造的に保証されているので、その保証を外す手動には代わりの境界が要る。
+ */
+export interface ManualRange {
+  min: number;
+  max: number;
+  /** UI が出すジョグ量の候補。先頭が既定値。空にはならない */
+  steps: number[];
+}
+
+export interface ManualAxis {
+  name: string;
+  /** 人間が扱う単位 (mm / deg / duty)。表示にそのまま使う */
+  unit: string;
+  command_mode: "position" | "velocity" | "duty";
+  /**
+   * フィードバックから逆換算した現在値。**位置を測れない軸では null。**
+   * DC 基板はエンコーダを持たないので、0 を載せると「測ったように見える 0」になる。
+   * 数値へフォールバックせず「読めていない」ことを画面に出すこと。
+   */
+  value: number | null;
+  /** 直前に手動で送った目標値。一度も送っていなければ null */
+  target: number | null;
+  /** 連続操作を許した軸だけが持つ。null ならプリセット指令のみ */
+  manual: ManualRange | null;
+  /** 位置定数に定義された状態名。プリセットボタンはここからしか作らない */
+  positions: string[];
+  motors: string[];
+}
+
+export interface ManualState {
+  mode: OperationMode;
+  axes: ManualAxis[];
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -217,11 +275,20 @@ export interface RobotState {
   health?: HealthSnapshot;
   safety?: SafetyState;
   steps?: SequenceStepInfo[];
+  /**
+   * 操作モードと手動操縦の軸一覧。
+   *
+   * 軸定義 (可動範囲・プリセット名) は静的だが `steps` と同じく state に載っている。
+   * **軸名も可動範囲も UI 側へ書かないこと** — 機構が変わって軸が増減しても
+   * UI の変更が要らない性質は、ここをそのまま描くことで成り立っている。
+   */
+  manual?: ManualState;
 }
 
 /** 受信条件を通ったメッセージ。UI 状態へ入れる形まで正規化してある */
 export type ServerMessage =
   | { type: "state"; robot: string; state: RobotState }
+  | { type: "server_info"; serverInfo: ServerInfo }
   | { type: "match_state"; matchState: MatchState }
   | { type: "e_stop_state"; active: boolean; reason: string | null }
   | { type: "command_rejected"; command: string; reason: string }
@@ -279,6 +346,16 @@ function parseKnown(raw: Raw): ServerMessage | null {
     case "state":
       // モータ名をハードコードしないため、配信内容はそのまま UI 状態へ入れる
       return robot === null ? null : { type: "state", robot, state: raw as unknown as RobotState };
+
+    case "server_info":
+      // 欠けたフラグは「無効」に倒す。開発用ボタンが本番で出るより出ない方が安全
+      return {
+        type: "server_info",
+        serverInfo: {
+          dev_tools: raw.dev_tools === true,
+          dry_run: raw.dry_run === true,
+        },
+      };
 
     case "match_state":
       // サーバーが正。接続直後のスナップショットと変化通知の両方がここに来る

@@ -9,6 +9,9 @@ import type {
   ChecklistState,
   HealthChange,
   HealthSnapshot,
+  ManualAxis,
+  ManualRange,
+  ManualState,
   MatchState,
   MatchTimer,
   MotorCheckRecord,
@@ -18,6 +21,7 @@ import type {
   RobotState,
   SafetyState,
   SequenceStepInfo,
+  ServerInfo,
   ServerMessage,
   SyncMonitorState,
   TargetRefresherState,
@@ -71,6 +75,10 @@ const STATE_FIELDS_UI_READS = [
   // 配信から落ちれば画面はグリッパ・コンベアの無反応を説明できなくなる
   "safety.refreshers_running",
   "safety.target_refreshers",
+  // 手動操縦。落ちれば操作モードの表示も軸一覧も出せなくなる
+  "manual",
+  "manual.mode",
+  "manual.axes",
 ] as const;
 
 /**
@@ -89,6 +97,17 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].running).toBe(sample.running);
     // 安全機構 (ラッチ中の軸・保護ループの生死) も配信そのまま
     expect(result.states[robot].safety).toEqual(sample.safety);
+    // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
+    expect(result.states[robot].manual).toEqual(sample.manual);
+  },
+
+  server_info: (result, sample) => {
+    // 開発用ボタンの表示可否はこの 1 通だけが決める。受信条件が弾くと
+    // 「--dev-tools で起動したのにボタンが出ない」が型検査を通ったまま成立する
+    expect(result.serverInfo).toEqual({
+      dev_tools: sample.dev_tools,
+      dry_run: sample.dry_run,
+    });
   },
 
   match_state: (result, sample) => {
@@ -317,6 +336,30 @@ const SAFETY = fieldsOf<SafetyState>({
   target_refreshers: "ui",
 });
 
+const MANUAL_RANGE = fieldsOf<ManualRange>({
+  min: "ui",
+  max: "ui",
+  steps: "ui",
+});
+
+const MANUAL_AXIS = fieldsOf<ManualAxis>({
+  name: "ui",
+  unit: "ui",
+  value: "ui",
+  target: "ui",
+  manual: "ui",
+  positions: "ui",
+  command_mode: "ui",
+  motors: {
+    unused: "軸行はモータ単位では操作させない (左右直結ペアが別々に動くと機構がねじれる)",
+  },
+});
+
+const MANUAL = fieldsOf<ManualState>({
+  mode: "ui",
+  axes: "ui",
+});
+
 const STEP = fieldsOf<SequenceStepInfo>({
   index: "ui",
   label: "ui",
@@ -365,6 +408,7 @@ const STATE_FIELDS: FieldSpec = {
     e_stop_active: "ui",
     health: "ui",
     safety: "ui",
+    manual: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
   ...nest("motors.*", MOTOR_STATE),
@@ -376,6 +420,9 @@ const STATE_FIELDS: FieldSpec = {
   ...nest("safety.sync_monitors[]", SYNC_MONITOR),
   ...nest("safety.target_refreshers[]", TARGET_REFRESHER),
   ...nest("steps[]", STEP),
+  ...nest("manual", MANUAL),
+  ...nest("manual.axes[]", MANUAL_AXIS),
+  ...nest("manual.axes[].manual", MANUAL_RANGE),
 };
 
 const E_STOP_FIELDS = fieldsOf<WireOf<"e_stop_state">>({
@@ -397,6 +444,14 @@ const HEALTH_CHANGE_FIELDS = fieldsOf<Wire<HealthChange>>({
 /** サンプル名 → そのメッセージが持ちうる全フィールド (ドット区切り、配列要素は `[]`) */
 const DECLARED: Record<string, FieldSpec> = {
   state: STATE_FIELDS,
+
+  server_info: fieldsOf<Wire<ServerInfo>>({
+    type: "parser",
+    dev_tools: "ui",
+    // 機体が繋がっていないことは health 側 (モータの STALE) に出るため、
+    // ここでは表示に使わない。将来 UI に「dry-run 中」を出すならここを "ui" にする
+    dry_run: { unused: "現状 UI では表示しない (health の STALE で分かる)" },
+  }),
 
   match_state: {
     ...fieldsOf<Wire<MatchState>>({

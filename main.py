@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import importlib
 import logging
+import os
 import pathlib
 import signal
 from collections.abc import Awaitable, Callable, Mapping
@@ -28,6 +29,7 @@ from lib.drivers.base import MotorDriver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
+from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
@@ -71,6 +73,17 @@ _DEFAULT_PID: dict[str, float | None] = {
 }
 
 
+#: 開発用コマンドを解禁する環境変数。systemd unit や shell の export で渡せるように、
+#: CLI 引数と同じフラグをもう 1 経路用意してある (CLI 側が優先)。
+_DEV_TOOLS_ENV = "CBC_DEV_TOOLS"
+#: 真と見なす値。"0"/"false"/空文字を真にしないためにホワイトリストで判定する
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUE_VALUES
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CBC2026 Team3 中央制御プログラム")
     parser.add_argument(
@@ -90,6 +103,14 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="CAN バスなしで起動 (mock バスを使用)",
+    )
+    parser.add_argument(
+        "--dev-tools",
+        action="store_true",
+        help=(
+            "開発用コマンドを解禁する (指差喚呼の一括チェック等)。"
+            f"環境変数 {_DEV_TOOLS_ENV}=1 でも有効になる。試合運用では使わないこと"
+        ),
     )
     parser.add_argument(
         "--host",
@@ -419,6 +440,17 @@ def _build_target_refresher(
     return GenericTargetRefresher(handles, is_estop_active=is_estop_active)
 
 
+def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
+    """手動操縦の指令口を組み立てる。
+
+    ``MotorGroup`` はシーケンスへ bind したものをそのまま共有する。手動用に別の
+    グループを組むと、緊急停止インターロック・M3508 の PID 迂回・自作モタドラの
+    再送対象がシーケンス側と 2 セットに分かれ、片方だけ配線を落としても起動できて
+    しまう (落ちた側から出した指令だけが停止中も通る、といった形で現れる)。
+    """
+    return ManualController(sequence.motors, positions)
+
+
 def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver]) -> list[SyncGroup]:
     """位置定数のペア軸のうち、このロボットに実在するものだけを監視対象にする。
 
@@ -593,6 +625,12 @@ async def main() -> None:
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
     logger.info("試合時間: %s 秒", system.match.duration_s)
 
+    # CLI 引数が優先。どちらか一方でも立っていれば解禁する
+    dev_tools = args.dev_tools or _env_flag(_DEV_TOOLS_ENV)
+    if dev_tools:
+        # 試合当日に開発用フラグのまま起動していないかを、起動ログだけで判断できるようにする
+        logger.warning("開発用コマンドが有効です (指差喚呼の一括チェック等)。試合運用では外すこと")
+
     checklist_path = (
         pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
     )
@@ -612,6 +650,7 @@ async def main() -> None:
         checklist_definitions=checklist_definitions,
         match_settings=system.match,
         dry_run=args.dry_run,
+        dev_tools=dev_tools,
     )
     can_managers: list[CANManager] = []
     position_loops: list[M3508PositionLoop] = []
@@ -678,6 +717,9 @@ async def main() -> None:
 
         # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
         # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
+        # 手動操縦 (調整時・緊急時の補助操縦)。シーケンスと同じ MotorGroup を共有する
+        manual = _build_manual_controller(seq, positions)
+
         server.add_robot(
             robot_name,
             seq,
@@ -685,16 +727,18 @@ async def main() -> None:
             position_loops=loops,
             sync_monitors=robot_monitors,
             target_refreshers=robot_refreshers,
+            manual=manual,
         )
         logger.info(
             "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, "
-            "同期監視: %s, 目標値再送: %s)",
+            "同期監視: %s, 目標値再送: %s, 手動連続操作: %s)",
             robot_name,
             len(motors),
             [loop.bus_name for loop in loops] or "なし",
             list(positions.axes) or "なし",
             [group.name for group in sync_groups] or "なし",
             list(refresher.motor_names) if refresher is not None else "なし",
+            list(positions.manual_axes()) or "なし",
         )
 
     try:

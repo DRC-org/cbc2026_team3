@@ -16,6 +16,7 @@ from lib.commands import (
     COMMANDS,
     CommandSpec,
     RejectChannel,
+    dev_tools_deny_reason,
     e_stop_deny_reason,
     phase_deny_reason,
 )
@@ -43,9 +44,14 @@ _EXPECTED_COMMANDS = {
     "set_court",
     "checklist_set",
     "checklist_reset",
+    "checklist_check_all",
     "match_start",
     "match_finish",
     "match_reset",
+    "set_operation_mode",
+    "manual_move",
+    "manual_set",
+    "manual_jog",
 }
 
 
@@ -93,6 +99,7 @@ class TestSpecValidation:
             "phase_deny_message": None,
             "allowed_during_e_stop": True,
             "e_stop_deny_message": None,
+            "requires_dev_tools": False,
             "handler": "_cmd_dummy",
             "reject_channel": RejectChannel.COMMAND_REJECTED,
         }
@@ -170,6 +177,10 @@ class TestEStopGate:
             "match_start",
             "set_param",
             "motor_check_start",
+            # 手動指令は目標値を送る操作。通すと緊急停止が意味を失う
+            "manual_move",
+            "manual_set",
+            "manual_jog",
         }
 
     @pytest.mark.parametrize(
@@ -187,6 +198,62 @@ class TestEStopGate:
 
     def test_unknown_command_has_no_e_stop_reason(self) -> None:
         assert e_stop_deny_reason("totally_unknown") is None
+
+    def test_mode_switch_passes_but_manual_commands_do_not(self) -> None:
+        """モード切替は機体を動かさないので通す。指令は通さない。
+
+        ここを揃えてしまうと、片方が「停止中に画面を手動へ寄せられない」か
+        「停止中に機体が動く」のどちらかになる。
+        """
+        assert e_stop_deny_reason("set_operation_mode") is None
+        for command in ("manual_move", "manual_set", "manual_jog"):
+            assert e_stop_deny_reason(command) is not None
+
+
+class TestManualCommandsAreNotPhaseGated:
+    """手動操縦は開始前・試合中・終了後のどこでも使える (運用要件)。
+
+    調整は準備中に、シーケンスからの退避は試合中に要る。どちらかへ閉じると
+    「要るときに使えない操作」になる。可否の正はここで、UI は理由を説明するだけ。
+    """
+
+    @pytest.mark.parametrize(
+        "command", ["set_operation_mode", "manual_move", "manual_set", "manual_jog"]
+    )
+    @pytest.mark.parametrize("phase", list(Phase))
+    def test_every_phase_is_allowed(self, command: str, phase: Phase) -> None:
+        assert phase_deny_reason(command, phase) is None
+
+
+class TestDevToolsGate:
+    """開発用コマンドは「起動オプションで解禁したときだけ存在する」ことを固定する。
+
+    指差喚呼は試合開始ゲートそのものなので、一括チェックが本番起動で通ると
+    「点検していないのに試合を開始できる」経路になる。
+    """
+
+    def test_only_declared_dev_commands_require_the_flag(self) -> None:
+        dev_only = {name for name, spec in COMMANDS.items() if spec.requires_dev_tools}
+        assert dev_only == {"checklist_check_all"}
+
+    def test_dev_command_is_denied_without_the_flag(self) -> None:
+        assert dev_tools_deny_reason("checklist_check_all", False) is not None
+        assert dev_tools_deny_reason("checklist_check_all", True) is None
+
+    @pytest.mark.parametrize("command", ["checklist_set", "e_stop", "match_start"])
+    def test_normal_commands_are_unaffected_by_the_flag(self, command: str) -> None:
+        assert dev_tools_deny_reason(command, False) is None
+        assert dev_tools_deny_reason(command, True) is None
+
+    def test_unknown_command_has_no_dev_reason(self) -> None:
+        assert dev_tools_deny_reason("totally_unknown", False) is None
+
+    def test_dev_command_shares_the_checklist_phase_gate(self) -> None:
+        """開発用でもフェーズ条件は checklist_set と同じ (試合中は触らせない)。"""
+        assert (
+            COMMANDS["checklist_check_all"].allowed_phases
+            == COMMANDS["checklist_set"].allowed_phases
+        )
 
 
 class TestPreparationOnlyCommands:

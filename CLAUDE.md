@@ -23,6 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 uv run python main.py             # サーバー起動（localhost:8080）
 uv run python main.py --dry-run   # CAN バスなしで起動（virtual バス。配線確認に使える）
+uv run python main.py --dev-tools # 開発用コマンドを解禁（指差喚呼の一括チェック。CBC_DEV_TOOLS=1 でも可）
 uv run pytest                     # 全テスト実行
 uv run pytest tests/drivers/      # ドライバテストのみ
 uv run pytest -x                  # 最初の失敗で停止
@@ -116,6 +117,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - `sequence/positions.py` — 位置定数 yaml の読み込み・単位換算・論理軸の解決
   - `sequence/motors.py` — `MotorHandle`（1 モータ）と `AxisHandle`（1 論理軸 = 1〜N モータ）
   - `sequence/engine.py` — `@step` デコレータベースのシーケンスエンジン。`require_trigger=True` で操縦者の許可待ち
+  - `manual.py` — 手動操縦（`OperationMode` / `ManualController`）。軸単位でしか指令せず、内部は `AxisHandle` を通る
   - `motor_check.py` — セッティングタイムのアクチュエータ動作確認
   - `server.py` — aiohttp で HTTP 静的配信 + WebSocket (`/ws`) を統合
 - `robots/` — ロボット固有のシーケンス定義（main_hand.py / sub_hand.py）
@@ -145,7 +147,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`motor_check`・`match` |
 | `config/can_buses.yaml` | CAN バス定義の単一情報源。udev ルールとセットアップスクリプトの双方がここから生成・参照する |
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID・動作確認の個別上書き） |
-| `config/<robot>_positions.yaml` | 論理軸の単位換算と機構位置の定数 |
+| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。`health` / `motor_check` /
@@ -256,10 +258,54 @@ NTP 補正で試合中に残り時間が増える）。ずれは WS の片道遅
 操縦者の `match_finish` のまま（公式の計時が正であり、こちらの時計のずれで機体が
 止まる経路を作らない）。
 
-**運用は半自動シーケンス制御のみ。操作モードという軸は存在しない。** 機体が動くのは
+**運用の主体は半自動シーケンス制御。手動操縦はその代替ではなく退避路。** 機体が動くのは
 操縦者がタブで `sequence_start` / `trigger` を押したときだけで、`match_start` はフェーズを
 進めるだけ。`require_trigger` のステップは常にトリガー待ちで止まる（「全自動なら素通り」
 のような例外は無い）。試合開始のゲートは `main_hand` / `sub_hand` 2 名の指差喚呼。
+**「全自動」という操作モードは無い** — 増やしてよいのは制御権の持ち主であって、
+シーケンスの走り方ではない。
+
+**手動操縦は制御権をシーケンスから奪う操作であり、同時に 2 つは立たない。**
+`OperationMode`（`sequence` / `manual`）は**ロボットごとに独立**し、正はサーバーが持つ
+（操縦者 2 名 + Monitor が別ブラウザで繋がるので、片方の画面だけが手動になっていると
+Monitor から機体の動きを説明できない）。手動へ入るときは `_stop_sequence` で
+**破棄が先・停止が後**の順にシーケンスの制御権を手放させ、動作確認の実行中は切替を拒否する。
+**半自動へ戻してもシーケンスは自動再開しない** — 手動で機構を動かした後に先頭から流すと
+姿勢と手順が食い違うため、再開ステップは操縦者が `sequence_jump` で選ぶ。
+**モータの目標値はモード切替で消さない**（消すと保持トルクを失って昇降軸が落ちる）。
+消すのはジョグの起点だけで、緊急停止でも同じく捨てる（停止中に自重で下がっていると
+解除後 1 回目のジョグが古い起点から飛ぶ）。
+
+**手動はフェーズでゲートしないが、緊急停止ゲートは別軸で効く。** 調整は準備中に、
+シーケンスからの退避は試合中に要るので `set_operation_mode` / `manual_*` はすべて
+`PHASES_ANY`。一方、機体を動かさない**モード切替は緊急停止中も通し、目標値を送る
+`manual_*` は通さない**（通すと緊急停止が意味を失う）。ここを 1 つにまとめると、
+「停止中に画面を手動へ寄せられない」か「停止中に機体が動く」のどちらかになる。
+UI 側も 2 つの理由（`modeBlockedReason` / `manualBlockedReason`）に分けてある。
+
+**手動で連続値を送ってよいのは `axes.<軸>.manual` を書いた軸だけ。** 通常運用の
+`move_to` は位置名でしか値を引けないため「定義した状態以外を送れない」ことが構造的に
+保証されている。手動はその保証を外すので、代わりの境界（`min` / `max` / `steps`）を
+config に宣言させる。書かない軸に残るのは位置名によるプリセット指令だけで、そちらは
+今までと同じ保証が効く。範囲外は**拒否ではなくクランプ**する（拒否だと端で操作そのものが
+効かなくなる）。`positions` に書いた値が範囲の外にあったら**起動を拒否**する
+（「シーケンスで行ける位置へ手動では行けない」軸ができ、症状は「手動で戻そうとしても
+途中で止まる」だけで原因が config から見えない）。duty 軸に `manual` は書けない。
+
+**手動でもモータ単位の指令口を作らない。** `ManualController` は `AxisHandle` を通してしか
+送らず、UI にもモータ単位のジョグを出さない。左右直結ペアが別々の時刻に動くと
+その場で機構が壊れるため、指令は必ず軸単位で 1 回だけ出す（`asyncio.gather` で束ねる
+`AxisHandle.set_target_value` が唯一の経路）。**ジョグの起点は直前の手動目標値**であって
+フィードバックではない（毎回フィードバックから取ると、追従が遅れているあいだの連打が
+吸われて「押した回数だけ動かない」）。
+
+**開発用コマンドは起動オプションで語彙ごと開閉する。** 指差喚呼の一括チェック
+（`checklist_check_all`）は `--dev-tools` / `CBC_DEV_TOOLS=1` で起動したときだけ受理する。
+既定を有効にすると「点検していないのに試合を開始できる」経路が常設される。フラグの正は
+サーバーが持ち、接続直後の `server_info` で UI へ配る — 表示可否を Vite のビルド時定数に
+すると、同じ `web/dist` を配る本番と開発で再ビルドが要り切り替えとして機能しない。
+ゲートは `CommandSpec.requires_dev_tools`（サーバー）と `serverInfo.dev_tools`（UI の描画）の
+2 重で、UI 側だけにするとフラグ配信が壊れた瞬間に本番でも押せるボタンが残る。
 
 **試合を開始できるかを決めるのはサーバーの `can_start_match` だけ。** UI は理由を説明する
 だけで、`checklists` から開始可否を導出し直してはならない。一度これを `StartGate` でやって、

@@ -29,6 +29,7 @@ from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.health import CheckRunSnapshot, HealthSnapshot
+from lib.manual import ManualController
 from lib.match_state import MatchState
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
@@ -52,6 +53,7 @@ class ServerFixture:
         self.server = server
         self._sequences: dict[str, Any] = {}
         self._can_managers: dict[str, Any] = {}
+        self._manuals: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ #
     #  構築
@@ -70,6 +72,7 @@ class ServerFixture:
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
         target_refreshers: list[GenericTargetRefresher] | None = None,
+        manual: ManualController | None = None,
     ) -> Any:
         mgr = can_manager if can_manager is not None else mock_can_manager()
         self.server.add_robot(
@@ -79,9 +82,11 @@ class ServerFixture:
             position_loops=position_loops,
             sync_monitors=sync_monitors,
             target_refreshers=target_refreshers,
+            manual=manual,
         )
         self._sequences[name] = sequence
         self._can_managers[name] = mgr
+        self._manuals[name] = manual
         return mgr
 
     def create_app(self) -> web.Application:
@@ -106,6 +111,17 @@ class ServerFixture:
 
     def can_managers(self) -> list[Any]:
         return list(self._can_managers.values())
+
+    def manual(self, name: str) -> Any:
+        return self._manuals[name]
+
+    def operation_mode(self, name: str) -> str:
+        """配信されている操作モード。サーバー内部ではなく state から読む。
+
+        テストが ``_robots[name].mode`` を直接見ると、配信し忘れても緑になる。
+        操縦者が見るのは配信された値なので、そこを正にする。
+        """
+        return self.state_message(name)["manual"]["mode"]
 
     # ------------------------------------------------------------------ #
     #  公開 API の素通し (テスト側の記述を短くするだけ)

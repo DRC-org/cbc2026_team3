@@ -34,6 +34,7 @@ from lib.health import (
     MotorHealth,
     MotorHealthInfo,
 )
+from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import ChecklistItem, Court, MatchState
 from lib.motor_check import MotorCheckRunner
 from lib.sequence.engine import Sequence
@@ -90,6 +91,13 @@ class RobotContext:
     # 自作モタドラ向けの目標値再送。動作確認中は確認用の指令を打ち消すため止め、
     # 緊急停止時は保持した目標を捨てる (解除だけで動き出させない)
     target_refreshers: list[GenericTargetRefresher] = field(default_factory=list)
+    # 手動操縦の指令口。位置定数を読めていないロボットでは None (手動不可)
+    manual: ManualController | None = None
+    # 制御権を誰が握っているか。ロボットごとに独立させる (片方だけ手動が成立する)。
+    # **正はサーバー側に置く。** 操縦者 2 名 + Monitor が別ブラウザで繋がるため、
+    # クライアント側に持つと「片方の画面だけが手動」という、Monitor から機体の
+    # 動きが説明できない状態が作れてしまう
+    mode: OperationMode = OperationMode.SEQUENCE
 
 
 class RobotServer:
@@ -105,6 +113,7 @@ class RobotServer:
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         match_settings: MatchSettings = DEFAULT_MATCH,
         dry_run: bool = False,
+        dev_tools: bool = False,
     ) -> None:
         self._host = host
         self._port = port
@@ -129,6 +138,9 @@ class RobotServer:
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
+        # 開発用コマンド (指差喚呼の一括チェック等) の解禁。試合運用の手順を飛ばすので
+        # 既定は False で、起動時に明示したときだけ立つ。UI へは server_info で配る
+        self._dev_tools: bool = dev_tools
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
         # 試合全体の状態 (コート / フェーズ / チェックリスト)。
@@ -156,6 +168,11 @@ class RobotServer:
         self._motor_check_tasks: dict[str, asyncio.Task[None]] = {}
 
     @property
+    def dev_tools(self) -> bool:
+        """開発用コマンドが解禁されているか。コマンドゲートと server_info が参照する。"""
+        return self._dev_tools
+
+    @property
     def e_stop_active(self) -> bool:
         """緊急停止状態。モータ指令経路のインターロックがこの値を参照する。
 
@@ -171,6 +188,7 @@ class RobotServer:
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
         target_refreshers: list[GenericTargetRefresher] | None = None,
+        manual: ManualController | None = None,
     ) -> None:
         self._robots[name] = RobotContext(
             sequence=sequence,
@@ -178,12 +196,19 @@ class RobotServer:
             position_loops=list(position_loops or []),
             sync_monitors=list(sync_monitors or []),
             target_refreshers=list(target_refreshers or []),
+            manual=manual,
         )
         sequence.set_court(self.match.court)
+        if manual is not None:
+            manual.set_court(self.match.court)
 
     def _apply_court(self) -> None:
         for ctx in self._robots.values():
             ctx.sequence.set_court(self.match.court)
+            # 手動のプリセットもコート別定義を持つ。流し忘れると、コートを変えた後の
+            # 手動操作だけが反対コートの座標へ機体を運ぶ
+            if ctx.manual is not None:
+                ctx.manual.set_court(self.match.court)
 
     def create_app(self) -> web.Application:
         app = web.Application()
@@ -284,9 +309,12 @@ class RobotServer:
         self._ws_clients.add(ws)
         logger.info("WebSocket 接続: %s", request.remote)
 
-        # match_state は変化時のみ配信するため、接続直後に一度スナップショットを送る。
-        # これがないとリロード直後のクライアントが現在のモード/フェーズを知れない。
+        # server_info と match_state は接続直後にしか送らない。
+        # server_info は起動オプション由来で試合中に変わらないため定期配信に載せず、
+        # match_state は変化時のみ配信するのでスナップショットが要る
+        # (これがないとリロード直後のクライアントが現在のモード/フェーズを知れない)。
         try:
+            await ws.send_str(json.dumps(self._server_info_dict(), ensure_ascii=False))
             await ws.send_str(json.dumps(self.match.to_dict(), ensure_ascii=False))
         except ConnectionResetError:
             self._ws_clients.discard(ws)
@@ -308,6 +336,19 @@ class RobotServer:
             logger.info("WebSocket 切断: %s", request.remote)
 
         return ws
+
+    def _server_info_dict(self) -> dict:
+        """起動オプション由来の、試合中に変わらない情報。接続直後に 1 度だけ送る。
+
+        開発用ボタンの表示可否をクライアント側のビルド時定数で決めると、同じ
+        `web/dist` を配る本番と開発で再ビルドが要る (= 切り替えとして機能しない)。
+        正はサーバーが持ち、UI は配られた値を表示に反映するだけにする。
+        """
+        return {
+            "type": "server_info",
+            "dev_tools": self._dev_tools,
+            "dry_run": self._dry_run,
+        }
 
     async def handle_command(
         self,
@@ -332,11 +373,15 @@ class RobotServer:
             logger.debug("未知のコマンド: %s", data.get("type"))
             return
 
-        # ゲートは 2 段。フェーズゲート (試合進行として許されるか) を先に見て、
-        # 通ったものだけ緊急停止ゲート (今モータを動かしてよいか) に掛ける。
-        # フェーズが MATCH のままでも緊急停止中は START を通してはならず、
-        # match_start は READY で受理されうるのでフェーズ遷移より手前で止める。
-        deny = spec.phase_deny_reason(self.match.phase)
+        # ゲートは 3 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
+        # 次にフェーズゲート (試合進行として許されるか)、通ったものだけ緊急停止ゲート
+        # (今モータを動かしてよいか) に掛ける。フェーズが MATCH のままでも緊急停止中は
+        # START を通してはならず、match_start は READY で受理されうるのでフェーズ遷移より
+        # 手前で止める。開発用ゲートを先頭に置くのは、無効な起動での拒否理由が
+        # 「フェーズが違う」ではなく「この起動には無い機能」であるべきだから。
+        deny = spec.dev_tools_deny_reason(self._dev_tools)
+        if deny is None:
+            deny = spec.phase_deny_reason(self.match.phase)
         if deny is None and self._e_stop_active:
             deny = spec.e_stop_deny_reason()
         if deny is not None:
@@ -440,6 +485,186 @@ class RobotServer:
         if robot_name and robot_name in self._motor_check_runners:
             self._motor_check_runners[robot_name].abort()
 
+    # ------------------------------------------------------------------ #
+    #  手動操縦
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone = None) -> None:
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            # 知らないロボットは silent ignore (WS を切断しないため)
+            return
+        try:
+            mode = OperationMode(data.get("mode"))
+        except ValueError:
+            await self._reject_command(
+                requester, "set_operation_mode", f"未知の操作モード: {data.get('mode')!r}"
+            )
+            return
+        await self._apply_operation_mode(robot_name, mode, requester=requester)
+
+    async def _cmd_manual_move(self, data: dict, requester: WSOrNone = None) -> None:
+        target = await self._manual_target(data, "manual_move", requester)
+        if target is None:
+            return
+        manual, axis = target
+        position = data.get("position")
+        if not isinstance(position, str) or not position:
+            await self._reject_command(requester, "manual_move", "位置名が指定されていません")
+            return
+        await self._run_manual("manual_move", requester, manual.move_to_position(axis, position))
+
+    async def _cmd_manual_set(self, data: dict, requester: WSOrNone = None) -> None:
+        target = await self._manual_target(data, "manual_set", requester)
+        if target is None:
+            return
+        manual, axis = target
+        value = await self._manual_number(data, "value", "manual_set", requester)
+        if value is None:
+            return
+        await self._run_manual("manual_set", requester, manual.set_value(axis, value))
+
+    async def _cmd_manual_jog(self, data: dict, requester: WSOrNone = None) -> None:
+        target = await self._manual_target(data, "manual_jog", requester)
+        if target is None:
+            return
+        manual, axis = target
+        delta = await self._manual_number(data, "delta", "manual_jog", requester)
+        if delta is None:
+            return
+        await self._run_manual("manual_jog", requester, manual.jog(axis, delta))
+
+    async def _apply_operation_mode(
+        self,
+        robot_name: str,
+        mode: OperationMode,
+        *,
+        requester: WSOrNone = None,
+    ) -> bool:
+        """1 ロボットの制御権を切り替える。切り替えたら True。
+
+        手動へ入る条件は「今このロボットの制御権を他の誰も握っていないこと」に尽きる。
+        シーケンスは止めれば手放せるが、動作確認は 1 台ずつ駆動する途中で奪えないので
+        拒否する (止めたければ motor_check_abort が別にある)。
+
+        **モータの目標値は切り替えでは消さない。** 消すと保持トルクを失い、
+        昇降軸が自重で落ちる。切り替えで消すのはジョグの起点だけ。
+        """
+        ctx = self._robots[robot_name]
+        if ctx.mode is mode:
+            return True
+
+        if mode is OperationMode.MANUAL:
+            if ctx.manual is None:
+                await self._reject_command(
+                    requester,
+                    "set_operation_mode",
+                    f"'{robot_name}' は手動操縦に対応していません (位置定数が未読込)",
+                )
+                return False
+            # 二重起動の判定と同じく実行タスクの生死で見る。runner の is_running は
+            # 登録から run() 開始までのあいだ False で、そこを素通しすると
+            # 駆動中の動作確認と手動指令が同じモータを奪い合う
+            task = self._motor_check_tasks.get(robot_name)
+            if task is not None and not task.done():
+                await self._reject_command(
+                    requester,
+                    "set_operation_mode",
+                    "動作確認の実行中は手動操縦へ切り替えられません",
+                )
+                return False
+            # 制御権を必ず手放させる。破棄しないと、切替直前に届いた開始要求が
+            # 手動で機構を動かしている最中に発火する
+            self._stop_sequence(ctx, discard_pending_start=True)
+
+        ctx.mode = mode
+        if ctx.manual is not None:
+            # 起点を捨てる。手動へ入る側では「シーケンスが動かした後の現在値」から
+            # 取り直させ、抜ける側では古い起点を次回まで持ち越させない
+            ctx.manual.reset()
+        logger.info("操作モード変更: robot=%s mode=%s", robot_name, mode.value)
+        return True
+
+    async def _manual_target(
+        self,
+        data: dict,
+        command: str,
+        requester: WSOrNone,
+    ) -> tuple[ManualController, str] | None:
+        """手動指令の宛先を解決する。受理できなければ理由を返して None。
+
+        モード判定をここ 1 箇所に置く。ハンドラごとに書くと、足したコマンドだけが
+        半自動運転中でも通る経路になる。
+        """
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            return None
+
+        ctx = self._robots[robot_name]
+        if ctx.manual is None:
+            await self._reject_command(
+                requester, command, f"'{robot_name}' は手動操縦に対応していません"
+            )
+            return None
+        if ctx.mode is not OperationMode.MANUAL:
+            await self._reject_command(
+                requester, command, "手動操縦モードではありません (モードを切り替えてください)"
+            )
+            return None
+
+        axis = data.get("axis")
+        if not isinstance(axis, str) or not axis:
+            await self._reject_command(requester, command, "軸が指定されていません")
+            return None
+        return ctx.manual, axis
+
+    async def _manual_number(
+        self,
+        data: dict,
+        key: str,
+        command: str,
+        requester: WSOrNone,
+    ) -> float | None:
+        """手動指令の数値を取り出す。受理できなければ理由を返して None。
+
+        NaN / inf を弾くのは、比較がすべて false になってクランプを素通りするため。
+        一度内部へ入ると「無言で止まったモータ」になり、診断ビットにも現れない
+        (CAN 上を float が 1 バイトも流れない設計と同じ理由)。
+        """
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            await self._reject_command(requester, command, f"{key} が数値ではありません: {value!r}")
+            return None
+        if not math.isfinite(value):
+            await self._reject_command(
+                requester, command, f"{key} が有限な数値ではありません: {value!r}"
+            )
+            return None
+        return float(value)
+
+    async def _run_manual(
+        self,
+        command: str,
+        requester: WSOrNone,
+        coro: Awaitable[float],
+    ) -> None:
+        """手動指令を実行し、拒否理由を要求元へ返す。
+
+        例外をここで受け止めるのは、``handle_command`` が ``_ws_handler`` の
+        受信ループから await されているため。抜けさせると操縦者の WS が切れ、
+        軸名を打ち間違えただけで画面ごと落ちる。
+        """
+        try:
+            await coro
+        except ManualControlError as exc:
+            await self._reject_command(requester, command, str(exc))
+        except Exception as exc:
+            # 位置名の誤り (PositionLookupError)・緊急停止の競合・送信失敗など。
+            # 握り潰さずログには必ず残す (原因が操縦者の画面からは追えない)
+            logger.exception("手動指令に失敗: %s", command)
+            # 例外クラス名を操縦者へ出しても復旧の判断材料にならない。空なら定型文にする
+            await self._reject_command(requester, command, str(exc) or "手動指令に失敗しました")
+
     async def _cmd_set_court(self, data: dict, requester: WSOrNone = None) -> None:
         await self._handle_set_court(data, requester)
 
@@ -452,6 +677,14 @@ class RobotServer:
                 await self._broadcast_match_state()
             else:
                 logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
+
+    async def _cmd_checklist_check_all(self, data: dict, _requester: WSOrNone = None) -> None:
+        role = data.get("role")
+        self.match.check_all_checklist_items(role if isinstance(role, str) else None)
+        # 指差喚呼を飛ばしたことは必ずログに残す。試合直前のログを追ったときに
+        # 「点検を実施したのか、開発用ボタンで埋めたのか」が区別できないと困る
+        logger.warning("開発用: 指差喚呼を一括チェックしました (role=%s)", role or "all")
+        await self._broadcast_match_state()
 
     async def _cmd_checklist_reset(self, data: dict, _requester: WSOrNone = None) -> None:
         role = data.get("role")
@@ -467,10 +700,16 @@ class RobotServer:
             self._stop_all_sequences()
             await self._broadcast_match_state()
 
-    async def _cmd_match_reset(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_match_reset(self, _data: dict, requester: WSOrNone = None) -> None:
         self.match.match_reset()
         logger.info("セッティングタイムへ復帰")
         self._stop_all_sequences()
+        # 復帰操作は既知の状態へ戻すもの。手動のまま次の試合の準備に入ると、
+        # 操縦者が切り替えたことを忘れたまま sequence_start が無反応になる
+        for robot_name in self._robots:
+            await self._apply_operation_mode(
+                robot_name, OperationMode.SEQUENCE, requester=requester
+            )
         self._apply_court()
         await self._broadcast_match_state()
 
@@ -629,6 +868,12 @@ class RobotServer:
         # 状態を見ずに全 runner へ中断を要求する (run() 側は要求を捨てない)
         for runner in self._motor_check_runners.values():
             runner.abort()
+        # ジョグの起点を捨てる。停止中に機構が自重で下がっていた場合、解除後の
+        # 1 回目のジョグが古い起点から飛ぶ。停止フレームの送信より前に行うのは、
+        # 送信が丸ごと失敗しても必ず捨てさせるため
+        for ctx in self._robots.values():
+            if ctx.manual is not None:
+                ctx.manual.on_e_stop()
         try:
             await self._send_e_stop_frames()
         except Exception:
@@ -780,10 +1025,19 @@ class RobotServer:
         緊急停止直前に届いた開始要求が停止処理の直後に発火するのを防ぐため。
         """
         for ctx in self._robots.values():
-            if discard_pending_start:
-                ctx.sequence.discard_pending_start()
-            if ctx.sequence.is_running:
-                ctx.sequence.request_stop()
+            self._stop_sequence(ctx, discard_pending_start=discard_pending_start)
+
+    def _stop_sequence(self, ctx: RobotContext, *, discard_pending_start: bool = False) -> None:
+        """1 台のシーケンスを通常停止する。**破棄が先、停止が後。**
+
+        逆順にすると、停止処理のあいだに届いた開始要求が破棄をすり抜けて残る。
+        順序を 1 箇所に持たないと、呼び出し側 (緊急停止 / 試合終了 / 手動への切替) の
+        どれか 1 つだけが書き写しを誤り、そこだけが「止めた直後に動き出す」。
+        """
+        if discard_pending_start:
+            ctx.sequence.discard_pending_start()
+        if ctx.sequence.is_running:
+            ctx.sequence.request_stop()
 
     async def _broadcast_match_state(self) -> None:
         await self._broadcast_json(self.match.to_dict())
@@ -915,8 +1169,9 @@ class RobotServer:
         拒否条件の優先順:
           1. 試合中 (モータを微小駆動するため試合進行を乱す)
           2. 緊急停止中 (誤発火による微小駆動を完全に止める)
-          3. 通常シーケンス実行中 (制御権の二重取得を防ぐ)
-          4. 既に動作確認実行中 (二重起動の防止)
+          3. 手動操縦モード (制御権の二重取得を防ぐ)
+          4. 通常シーケンス実行中 (制御権の二重取得を防ぐ)
+          5. 既に動作確認実行中 (二重起動の防止)
 
         WS 経由は handle_command でも同じフェーズ判定を行うが、HTTP POST は
         そこを通らないため本メソッド側にもゲートを置く。
@@ -936,6 +1191,13 @@ class RobotServer:
             return False
 
         ctx = self._robots[robot_name]
+        if ctx.mode is OperationMode.MANUAL:
+            # 手動は操縦者がいつ軸を動かすか分からない。動作確認は 1 台ずつ順に
+            # 駆動していく手順なので、途中で別の指令が割り込むと結果が意味を失う
+            await self._broadcast_motor_check_error(
+                robot_name, "手動操縦モードのため動作確認を実行できません"
+            )
+            return False
         if ctx.sequence.is_running:
             await self._broadcast_motor_check_error(
                 robot_name, "通常シーケンス実行中のため動作確認を実行できません"
@@ -1325,6 +1587,20 @@ class RobotServer:
             "e_stop_active": self.e_stop_active,
             "health": snapshot_dict,
             "safety": self._safety_state(robot_name),
+            "manual": self._manual_state(robot_name),
+        }
+
+    def _manual_state(self, robot_name: str) -> dict:
+        """操作モードと手動操縦の軸一覧。
+
+        軸定義 (可動範囲・プリセット名) は静的だが ``steps`` と同じく state に載せる。
+        UI に軸名も可動範囲もハードコードさせないためで、機構が変わって軸が増減しても
+        UI 側の変更は要らない。現在値だけがテレメトリなので配信周期はそちらに合わせる。
+        """
+        ctx = self._robots[robot_name]
+        return {
+            "mode": ctx.mode.value,
+            "axes": ctx.manual.axes_info() if ctx.manual is not None else [],
         }
 
     def _dry_run_motor_state(self, robot_name: str, motor_name: str) -> dict:

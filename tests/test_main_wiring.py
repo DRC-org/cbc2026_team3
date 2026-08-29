@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import inspect
 import logging
 import pathlib
 import struct
 import time
+from typing import ClassVar
 
 import can
 import pytest
 import yaml
 
+import main
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.config_schema import MotorConfig, RobotConfig, SystemConfig, load_robot_config
 from lib.drivers.base import ControlMode
@@ -30,11 +33,11 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError
 from lib.sequence.positions import PositionTable, load_position_table
-from lib.server import RobotServer
-import main
+from lib.server import RobotContext, RobotServer
 from main import (
     _DEFAULT_PID,
     _attach_sync_groups,
+    _build_manual_controller,
     _build_position_loops,
     _build_position_pid,
     _build_sync_groups,
@@ -396,6 +399,88 @@ class TestWireRobotMotors:
         assert manager.last_currents == (0, 0, 0, 0)
 
 
+class TestBuildManualController:
+    """手動操縦の指令口が、シーケンスと同じ MotorGroup を共有していること。
+
+    別の MotorGroup を組むと、緊急停止インターロック・M3508 の PID 迂回・
+    自作モタドラの再送対象が 2 セットに分かれる。片方の配線を落としても起動でき、
+    「そちらから出した指令だけが停止中も通る」形で現れるので気付けない。
+    """
+
+    def _build(self, estop_flag: list[bool]):
+        config = _m3508_config()
+        config["motors"]["gripper"] = {
+            "driver": "generic",
+            "bus": "generic_bus",
+            "can_id": 1,
+        }
+        motors = {
+            "lift_motor": M3508Driver("lift_motor", can_id=1),
+            "gripper": GenericDriver("gripper", can_id=1),
+        }
+        manager = _StubCANManager()
+        seq = _DummySequence("main_hand")
+        loops = _wire_robot_motors(
+            _robot(config),
+            manager,
+            motors,
+            seq,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: estop_flag[0],
+        )
+        positions = load_position_table(
+            {
+                "axes": {
+                    "lift": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "manual": {"min": 0.0, "max": 20.0},
+                        "motors": {"lift_motor": {"scale": 10.0}},
+                    },
+                    "gripper": {"unit": "deg", "command_unit": "deg"},
+                },
+                "positions": {"lift": {"home": 0.0}, "gripper": {"open": 5.0}},
+            },
+            source="<test>",
+        )
+        return manager, seq, loops, _build_manual_controller(seq, positions)
+
+    async def test_m3508_への手動指令も位置制御ループを経由する(self) -> None:
+        # 別グループを組むと M3508 へ位置指令が直接飛び、C620 に受理されず黙って効かない
+        manager, _, loops, manual = self._build([False])
+
+        await manual.set_value("lift", 4.0)
+
+        assert loops[0].target("lift_motor") == pytest.approx(40.0)
+        assert manager.sent_by_motor == []
+
+    async def test_緊急停止中は手動指令も遮断される(self) -> None:
+        flag = [False]
+        _, _, _, manual = self._build(flag)
+        flag[0] = True
+
+        with pytest.raises(EStopActiveError):
+            await manual.set_value("lift", 4.0)
+        with pytest.raises(EStopActiveError):
+            await manual.move_to_position("gripper", "open")
+
+    async def test_自作モタドラの手動目標が再送対象へ載る(self) -> None:
+        # 再送が効かないと、手動で開いたグリッパが 500ms で戻る
+        manager, seq, _, manual = self._build([False])
+        refresher = _build_target_refresher(
+            seq.motors,
+            {"gripper": GenericDriver("gripper", can_id=1)},
+            is_estop_active=lambda: False,
+        )
+        assert refresher is not None
+
+        await manual.move_to_position("gripper", "open")
+        manager.sent_by_motor.clear()
+        await refresher.step()
+
+        assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
+
+
 class TestBuildTargetRefresher:
     """自作モタドラのコマンドウォッチドッグ (500ms) 対策の配線。"""
 
@@ -712,7 +797,6 @@ class TestShippedMainHandConfig:
         assert motors["gripper"].control_type is ControlMode.POSITION
 
 
-
 class TestSystemConfigReachesTheServer:
     """config/system.yaml の各セクションが RobotServer まで届いていること。
 
@@ -726,7 +810,7 @@ class TestSystemConfigReachesTheServer:
 
     #: RobotServer へ渡さないフィールドと、その渡し先。
     #: 新しいセクションを足した人はここへ書くか、サーバーへ配線するかを選ぶことになる。
-    NOT_FOR_SERVER = {
+    NOT_FOR_SERVER: ClassVar[dict[str, str]] = {
         "can_buses": "CANManager の生成に使う (サーバーはバスを直接触らない)",
         "source": "エラーメッセージへ出すファイル名",
     }
@@ -761,6 +845,70 @@ class TestSystemConfigReachesTheServer:
         """存在しないフィールド名で免除を書くと、本物の配線漏れを隠せてしまう。"""
         names = {f.name for f in dataclasses.fields(SystemConfig)}
         assert set(self.NOT_FOR_SERVER) <= names
+
+
+class TestRobotContextReachesTheServer:
+    """ロボット 1 台に紐づく部品が ``main()`` からサーバーまで届いていること。
+
+    ``RobotContext`` にフィールドを足し、``add_robot`` に引数を足したのに
+    ``main()`` から渡し忘れる、という抜け方をする。症状はその機能が丸ごと
+    無反応になるだけで、起動ログにも UI にも現れない (実際に手動操縦を足したとき、
+    ``manual=`` を落としても全テストが緑のままだった)。
+
+    連鎖を 2 本に分けて見る:
+      RobotContext のフィールド → add_robot の引数 → main() の呼び出し
+    """
+
+    #: add_robot の引数にしないフィールドと、その理由。
+    NOT_A_PARAMETER: ClassVar[dict[str, str]] = {
+        "mode": "サーバーが持つ実行時状態 (起動時は必ず SEQUENCE から始まる)",
+    }
+
+    def _add_robot_call_arguments(self) -> set[str]:
+        """main() 内の server.add_robot(...) が渡している引数名。
+
+        位置引数は add_robot のシグネチャ順で名前へ解決する。名前でしか見ないと、
+        位置で渡している sequence / can_manager を配線漏れと誤判定する。
+        """
+        signature = inspect.signature(RobotServer.add_robot)
+        positional = [name for name in signature.parameters if name != "self"]
+
+        tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_robot"
+            ):
+                supplied = {kw.arg for kw in node.keywords if kw.arg is not None}
+                supplied |= set(positional[: len(node.args)])
+                return supplied
+        raise AssertionError("main.py に server.add_robot(...) の呼び出しが無い")
+
+    def test_every_context_field_is_a_parameter(self) -> None:
+        parameters = set(inspect.signature(RobotServer.add_robot).parameters)
+        for field in dataclasses.fields(RobotContext):
+            if field.name in self.NOT_A_PARAMETER:
+                continue
+            assert field.name in parameters, (
+                f"RobotContext.{field.name} を add_robot から渡せません。"
+                f" 渡さないなら {self.__class__.__name__}.NOT_A_PARAMETER に理由を書いてください。"
+            )
+
+    def test_main_supplies_every_parameter(self) -> None:
+        supplied = self._add_robot_call_arguments()
+        expected = {
+            name for name in inspect.signature(RobotServer.add_robot).parameters if name != "self"
+        }
+        missing = expected - supplied
+        assert not missing, (
+            f"main() の add_robot(...) が {sorted(missing)} を渡していません"
+            " (その機能が丸ごと無反応になり、ログにも UI にも現れません)"
+        )
+
+    def test_exemptions_are_real_fields(self) -> None:
+        names = {f.name for f in dataclasses.fields(RobotContext)}
+        assert set(self.NOT_A_PARAMETER) <= names
 
 
 class TestLoadAllConfigs:

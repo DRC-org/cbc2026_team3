@@ -204,6 +204,114 @@ class TestChecklistCommands:
             await ws.close()
 
 
+_MULTI_DEFS = {
+    ROLE_MAIN_HAND: [
+        ChecklistItem(id="home", label="メイン初期位置確認"),
+        ChecklistItem(id="gripper", label="グリッパ開状態確認"),
+    ],
+    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
+}
+
+
+class TestServerInfoOnConnect:
+    """開発用ボタンの表示可否はサーバーが配る (クライアントのビルド時定数にしない)。"""
+
+    async def test_flags_are_sent_on_connect(self) -> None:
+        fx = _build_fixture(dev_tools=True, dry_run=True)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            msg = await recv_type(ws, "server_info")
+            assert msg is not None
+            assert msg["dev_tools"] is True
+            assert msg["dry_run"] is True
+            await ws.close()
+
+    async def test_dev_tools_defaults_to_disabled(self) -> None:
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            msg = await recv_type(ws, "server_info")
+            assert msg is not None
+            assert msg["dev_tools"] is False
+            await ws.close()
+
+
+class TestChecklistCheckAll:
+    """開発用の一括チェック。**本番起動では効かない**ことまでが仕様。"""
+
+    async def test_rejected_without_dev_tools(self) -> None:
+        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS)
+        for name in _ROBOT_NAMES:
+            fx.add_robot(name, DummySequence(name))
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "checklist_check_all"})
+            msg = await recv_type(ws, "command_rejected")
+            assert msg is not None
+            assert msg["command"] == "checklist_check_all"
+            # 拒否されただけでなく、チェックが 1 つも付いていないこと
+            assert fx.match.can_start_match is False
+            assert fx.match.phase is Phase.SETUP
+            await ws.close()
+
+    async def test_checks_every_role_with_dev_tools(self) -> None:
+        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS, dev_tools=True)
+        for name in _ROBOT_NAMES:
+            fx.add_robot(name, DummySequence(name))
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await recv_type(ws, "match_state")
+            await ws.send_json({"type": "checklist_check_all"})
+            msg = await recv_type(ws, "match_state")
+            assert msg is not None
+            for role in (ROLE_MAIN_HAND, ROLE_SUB_HAND):
+                assert all(item["checked"] for item in msg["checklists"][role]["items"])
+            assert msg["can_start_match"] is True
+            assert fx.match.phase is Phase.READY
+            await ws.close()
+
+    async def test_role_argument_limits_the_effect(self) -> None:
+        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS, dev_tools=True)
+        for name in _ROBOT_NAMES:
+            fx.add_robot(name, DummySequence(name))
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await recv_type(ws, "match_state")
+            await ws.send_json({"type": "checklist_check_all", "role": ROLE_MAIN_HAND})
+            msg = await recv_type(ws, "match_state")
+            assert msg is not None
+            assert msg["checklists"][ROLE_MAIN_HAND]["completed"] is True
+            assert msg["checklists"][ROLE_SUB_HAND]["completed"] is False
+            assert msg["can_start_match"] is False
+            await ws.close()
+
+    async def test_rejected_during_match(self) -> None:
+        """開発用でもフェーズゲートは外れない (試合中に指差喚呼を触らせない)。"""
+        fx = ServerFixture.build(checklist_definitions=_MULTI_DEFS, dev_tools=True)
+        for name in _ROBOT_NAMES:
+            fx.add_robot(name, DummySequence(name))
+        fx.enter_match()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "checklist_check_all"})
+            msg = await recv_type(ws, "command_rejected")
+            assert msg is not None
+            assert msg["command"] == "checklist_check_all"
+            await ws.close()
+
+
 class TestPhaseGate:
     async def test_sequence_start_rejected_before_match(self) -> None:
         fx = _build_fixture()

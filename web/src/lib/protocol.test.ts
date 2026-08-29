@@ -57,6 +57,30 @@ describe("parseServerMessage", () => {
     });
   });
 
+  describe("server_info", () => {
+    it("開発用フラグをそのまま持つ", () => {
+      expect(parse({ type: "server_info", dev_tools: true, dry_run: true })).toEqual({
+        type: "server_info",
+        serverInfo: { dev_tools: true, dry_run: true },
+      });
+    });
+
+    it("フラグが欠けていたら無効に倒す", () => {
+      // 開発用ボタンが本番で出るより、開発用起動で出ない方が安全側
+      expect(parse({ type: "server_info" })).toEqual({
+        type: "server_info",
+        serverInfo: { dev_tools: false, dry_run: false },
+      });
+    });
+
+    it("真偽値以外を真として扱わない", () => {
+      expect(parse({ type: "server_info", dev_tools: "true", dry_run: 1 })).toEqual({
+        type: "server_info",
+        serverInfo: { dev_tools: false, dry_run: false },
+      });
+    });
+  });
+
   describe("match_state", () => {
     it("サーバー値をそのまま試合状態にする", () => {
       expect(

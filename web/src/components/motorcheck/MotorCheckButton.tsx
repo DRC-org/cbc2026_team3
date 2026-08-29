@@ -11,9 +11,22 @@ import { isDuringMatch } from "@/lib/phase";
 interface MotorCheckButtonProps {
   robotName: string;
   onPanelOpen?: () => void;
+  /**
+   * 呼び出し側だけが知っている無効化理由 (現状は手動操縦モード)。
+   *
+   * **ここで `useRobotStates()` を読んで導出してはならない。** 操作モードは
+   * 20Hz のテレメトリに載っているため、このボタンが毎秒 40 回再描画される
+   * (購読を頻度で 3 つに分けている意味が消える)。既に高頻度側を読んでいる
+   * 呼び出し元から降ろす。
+   */
+  blockedReason?: string | null;
 }
 
-export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonProps) {
+export function MotorCheckButton({
+  robotName,
+  onPanelOpen,
+  blockedReason = null,
+}: MotorCheckButtonProps) {
   const { eStopActive, connected, matchState } = useRobotStatus();
   const { state, start } = useMotorCheck(robotName);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -24,7 +37,7 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
   // ボタンが常時無効になっていた（サーバーはこのフェーズでこそ受け付ける）。
   const inMatch = isDuringMatch(matchState.phase);
   const checkRunning = state.status === "running";
-  const disabled = eStopActive || inMatch || checkRunning || !connected;
+  const disabled = eStopActive || inMatch || checkRunning || !connected || blockedReason !== null;
 
   const reasonLabel = !connected
     ? "切断中のため不可"
@@ -34,7 +47,7 @@ export function MotorCheckButton({ robotName, onPanelOpen }: MotorCheckButtonPro
         ? "試合中は動作確認を実行できません"
         : checkRunning
           ? "動作確認 実行中"
-          : null;
+          : blockedReason;
 
   const handleConfirmStart = () => {
     start();

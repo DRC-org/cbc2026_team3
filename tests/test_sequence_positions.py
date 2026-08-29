@@ -426,3 +426,180 @@ class TestAxisSchemaValidation:
     def test_motor_entry_must_be_mapping(self) -> None:
         with pytest.raises(ValueError, match="y_axis_r"):
             load_position_table({"axes": {"y_axis": {"motors": {"y_axis_r": 2.0}}}})
+
+
+class TestManualSpec:
+    """手動操縦の可動範囲 (axes.<軸>.manual)。
+
+    通常運用の ``move_to`` は位置名でしか値を引けないため「定義した状態以外を
+    送れない」ことが構造的に保証されている。手動はその保証を外す経路なので、
+    代わりの境界が config に無ければ連続操作そのものを許さない。
+    """
+
+    def test_manual_を書かない軸は連続操作の対象外(self) -> None:
+        table = _table()
+        assert table.manual("lift_motor") is None
+        assert table.manual_axes() == ()
+
+    def test_manual_を書いた軸だけが連続操作の対象になる(self) -> None:
+        table = _table(
+            axes={
+                "lift_motor": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "scale": 864.0,
+                    "manual": {"min": -2.0, "max": 20.0, "steps": [0.5, 2.0]},
+                },
+                "arm_joint": {"unit": "deg", "command_unit": "rad", "scale": math.pi / 180.0},
+            }
+        )
+        manual = table.manual("lift_motor")
+        assert manual is not None
+        assert (manual.min_value, manual.max_value) == (-2.0, 20.0)
+        assert manual.steps == (0.5, 2.0)
+        assert table.manual_axes() == ("lift_motor",)
+
+    def test_steps_を省くと既定のジョグ量が入る(self) -> None:
+        table = _table(
+            axes={
+                "lift_motor": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "scale": 864.0,
+                    "manual": {"min": 0.0, "max": 20.0},
+                },
+                "arm_joint": {"unit": "deg", "command_unit": "rad", "scale": math.pi / 180.0},
+            }
+        )
+        manual = table.manual("lift_motor")
+        assert manual is not None
+        assert len(manual.steps) >= 1
+        assert all(step > 0 for step in manual.steps)
+
+    def test_clamp_は範囲内へ丸める(self) -> None:
+        table = _table(
+            axes={
+                "lift_motor": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "scale": 864.0,
+                    "manual": {"min": -2.0, "max": 20.0},
+                },
+                "arm_joint": {"unit": "deg", "command_unit": "rad", "scale": math.pi / 180.0},
+            }
+        )
+        manual = table.manual("lift_motor")
+        assert manual is not None
+        assert manual.clamp(-99.0) == -2.0
+        assert manual.clamp(99.0) == 20.0
+        assert manual.clamp(5.0) == 5.0
+
+    def test_min_が_max_以上なら起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="min は max より小さい"):
+            _table(
+                axes={
+                    "lift_motor": {
+                        "unit": "mm",
+                        "scale": 864.0,
+                        "manual": {"min": 10.0, "max": 10.0},
+                    },
+                    "arm_joint": {"unit": "deg", "scale": 1.0},
+                }
+            )
+
+    def test_duty_軸への_manual_は起動を拒否する(self) -> None:
+        # duty に「可動範囲」は存在しない。書けると押しても位置決めされない操作面が出る
+        with pytest.raises(ValueError, match="command_mode: position"):
+            load_position_table(
+                {
+                    "axes": {
+                        "conveyor": {
+                            "unit": "duty",
+                            "command_mode": "duty",
+                            "scale": 1.0,
+                            "manual": {"min": -1.0, "max": 1.0},
+                        }
+                    },
+                    "positions": {"conveyor": {"stop": 0.0}},
+                },
+                source="<test>",
+            )
+
+    def test_steps_に非正の値があれば起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="正の値"):
+            _table(
+                axes={
+                    "lift_motor": {
+                        "unit": "mm",
+                        "scale": 864.0,
+                        "manual": {"min": 0.0, "max": 20.0, "steps": [1.0, 0.0]},
+                    },
+                    "arm_joint": {"unit": "deg", "scale": 1.0},
+                }
+            )
+
+    def test_範囲外のプリセット位置があれば起動を拒否する(self) -> None:
+        # 「シーケンスは行ける場所へ手動では行けない」軸を config の時点で塞ぐ
+        with pytest.raises(ValueError, match="manual の範囲"):
+            _table(
+                axes={
+                    "lift_motor": {
+                        "unit": "mm",
+                        "scale": 864.0,
+                        "manual": {"min": 0.0, "max": 5.0},
+                    },
+                    "arm_joint": {"unit": "deg", "scale": 1.0},
+                }
+            )
+
+    def test_コート別のプリセットも両方が範囲内であることを見る(self) -> None:
+        with pytest.raises(ValueError, match="manual の範囲"):
+            load_position_table(
+                {
+                    "axes": {
+                        "lift_motor": {
+                            "unit": "mm",
+                            "scale": 1.0,
+                            "manual": {"min": 0.0, "max": 10.0},
+                        }
+                    },
+                    "positions": {"lift_motor": {"work": {"red": 5.0, "blue": 50.0}}},
+                },
+                source="<test>",
+            )
+
+
+class TestAxisToValue:
+    """指令値・フィードバックを人間の単位へ戻す逆換算 (手動の現在値表示に使う)。"""
+
+    def test_単一モータ軸は_to_commands_の逆になる(self) -> None:
+        spec = _table().axis("lift_motor")
+        commands = spec.to_commands(12.5)
+        assert spec.to_value(commands) == pytest.approx(12.5)
+
+    def test_逆回転ペアでも符号を落とさず同じ値へ戻る(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "unit": "mm",
+                        "motors": {
+                            "y_axis_r": {"scale": 55.02},
+                            "y_axis_l": {"scale": -55.02},
+                        },
+                    }
+                },
+                "positions": {"y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        spec = table.axis("y_axis")
+        commands = spec.to_commands(8.0)
+        # 逆回転ペアは指令値の符号が逆。人間の単位へ戻せば両方 8.0 になる
+        assert commands["y_axis_r"] == pytest.approx(-commands["y_axis_l"])
+        assert spec.to_value(commands) == pytest.approx(8.0)
+
+    def test_値が揃わなければ例外にする(self) -> None:
+        spec = _table().axis("lift_motor")
+        with pytest.raises(PositionLookupError):
+            spec.to_value({})

@@ -11,8 +11,15 @@ axes:
     scale: 0.017453292519943295   # deg -> rad (pi/180)
     offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
     timeout_s: 3.0       # この時間で到達しなければシーケンスを停止する
+    # 手動操縦の可動範囲 [deg]。書き方と考え方は main_hand_positions.yaml を参照。
+    # TODO: 機構完成後、メインハンドと干渉しない角度範囲へ詰めること
+    manual:
+      min: -5.0
+      max: 15.0
+      steps: [1.0, 5.0]
 
   # 自作モータドライバの補助グリッパ。指令・フィードバックともに deg。
+  # 開 / 閉 の 2 状態しか取らないので manual: は書かない (手動でも位置名しか送れない)。
   sub_gripper:
     unit: deg
     command_unit: deg
