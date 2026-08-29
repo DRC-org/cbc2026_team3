@@ -1821,6 +1821,45 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 パスはいずれも `--system` / `--config`（複数可）/ `--checklist` で差し替えられる。
 
+### 机上ベンチ用の config セット（`config/bench/`）
+
+機構へ組み込む前に、M3508 2 台だけを CAN 通信の確認として動かすための一式。
+
+| ファイル | 本番との違い |
+|---|---|
+| `config/bench/system.yaml` | `can_buses` が `m3508_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
+| `config/bench/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts |
+| `config/bench/main_hand_positions.yaml` | `y_axis` だけ。`sync_tolerance` 10.0mm、`manual` −10〜60mm |
+| `config/bench/checklist.yaml` | ベンチで通電前に確認する項目のみ |
+
+```bash
+scripts/setup_can.sh
+uv run python main.py --system config/bench/system.yaml \
+    --config config/bench/main_hand.yaml --checklist config/bench/checklist.yaml
+```
+
+**バスを絞るために別 `system.yaml` が要る。** `main.py` の `_setup_robot()` は
+`can_buses` に並んだバスを**すべて** `socketcan` で open するため、本番の 3 本構成のままだと
+`can_edulite` / `can_generic` の CANable を挿していない机上では `OSError: [Errno 19]
+No such device` で**起動そのものが失敗する**。`--config` でロボットを絞っても、バス定義は
+`system.yaml` 側にあるので効かない。相手のいない実バスへ 20Hz 再送して TX エラーを
+積み上げないためにも、バスごと外すのが正しい。
+
+**`robot_name` は `main_hand` のまま変えない。** Web UI のロボットキーは
+`web/src/routes.tsx` で `main_hand` / `sub_hand` に固定されており、ベンチ専用の名前に
+するとどのタブにも現れず**手動操縦パネルを開けない**。位置定数の読み先は
+「robot config と同じディレクトリの `<robot_name>_positions.yaml`」（`_positions_path`）
+なので、ファイルを `config/bench/` に置くだけで `robot_name` を変えずに
+`config/bench/main_hand_positions.yaml` が読まれ、本番の位置定数は無傷で残る。
+
+**ベンチだけ緩めた値には本番へ戻す条件を書く。** `sync_tolerance` を 10.0mm にしてあるのは、
+機構未装着では左右がずれても壊れず、本番の 2.0mm のままだと無負荷での追従差だけで
+緊急停止が掛かって通信確認が進まないため。それでも「片方がまったく動かない」（配線・
+CAN ID の誤り）は確実に超過するので、同期監視の検出能力そのものは残る。`output_limit` を
+半分にしてあるのも同じ考えで、負荷の無い M3508 は同じ電流でも一気に回るため。
+一方 `scale` は本番と同じ値を使う — ここを変えると「ベンチで確かめた指令量」と「本番で出る
+指令量」が別物になり、通信確認としての意味が薄れる。
+
 ### 共通設定を 1 箇所に集約する理由
 
 `health` / `motor_check` / `can_buses` は PC 上に 1 組しか存在し得ない。ロボットごとの

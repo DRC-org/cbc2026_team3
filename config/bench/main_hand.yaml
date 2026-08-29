@@ -1,0 +1,49 @@
+# M3508 単体ベンチ (機構未装着) のモータ構成。
+#
+# robot_name を main_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
+# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
+# 現れず手動操縦パネルを開けない。
+#
+# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
+# (main.py の _positions_path) なので、このファイルを config/bench/ に置くことで
+# robot_name は main_hand のまま config/bench/main_hand_positions.yaml が読まれる。
+# 本番の config/main_hand_positions.yaml は無傷のまま残る。
+#
+# **このベンチでは M3508 の 2 台だけを登録する。** EDULITE と自作モタドラを外すことで
+# 登録されないバスへの送信も動作確認の対象も消え、CAN 通信の確認が M3508 だけに絞られる。
+
+robot_name: main_hand
+
+motors:
+  # 逆回転ペア軸 y_axis の右側。CAN ID は本番と同じ 1 (実機の C620 の設定を変えずに済む)。
+  y_axis_r:
+    driver: m3508
+    bus: m3508_bus
+    can_id: 1
+    motor_check:
+      magnitude: 0             # 片側だけ駆動する動作確認はペア軸では行わない (本番と同じ)
+    pid:
+      kp: 2.0
+      ki: 0.0
+      kd: 0.0
+      integral_limit: null
+      dead_band: 1.0
+      # 本番の 2000counts (≒2.4A) に対しベンチは半分に絞る。機構が付いていない M3508 は
+      # 負荷が無いぶん同じ電流でも一気に回るため、まず回ることの確認は低い上限で行う。
+      # ゲインを詰める段階になったら本番値へ戻すこと。
+      output_limit: 1000
+
+  # y_axis_r と対になる側。左右で追従特性が変わると押し合いになるため PID は同一値にする
+  y_axis_l:
+    driver: m3508
+    bus: m3508_bus
+    can_id: 2
+    motor_check:
+      magnitude: 0
+    pid:
+      kp: 2.0
+      ki: 0.0
+      kd: 0.0
+      integral_limit: null
+      dead_band: 1.0
+      output_limit: 1000

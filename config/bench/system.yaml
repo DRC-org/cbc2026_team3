@@ -1,0 +1,35 @@
+# M3508 単体ベンチ (機構未装着) 用の共通設定。
+#
+# 本番の config/system.yaml との違いは can_buses だけで、health / motor_check / match は
+# 同一値を持つ。main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
+# open するため、本番の 3 本構成のままでは can_edulite / can_generic の CANable を挿して
+# いない机上で [Errno 19] No such device となり、起動そのものが失敗する。
+#
+# ここを m3508_bus だけに絞ることで CANable 1 本 (can_m3508) だけで起動でき、
+# 相手のいない実バスへ 20Hz 再送して TX エラーを積み上げることも無くなる。
+#
+# 使い方:
+#   scripts/setup_can.sh
+#   uv run python main.py --system config/bench/system.yaml \
+#       --config config/bench/main_hand.yaml --checklist config/bench/checklist.yaml
+
+can_buses:
+  m3508_bus: can_m3508
+
+# 以下 3 ブロックは本番 config/system.yaml と同値。ベンチだけ判定基準を変えると
+# 「机上では OK なのに実運用で警告が出る」ことになり、確認の意味が薄れる。
+health:
+  feedback_timeout_ms: 500
+  temp_warning_c: 65
+  temp_critical_c: 80
+  tx_error_threshold: 96
+
+motor_check:
+  per_motor_timeout_ms: 1500
+  default_magnitude:
+    m3508: 500
+    edulite05: 5.0
+    generic: 0.1
+
+match:
+  duration_s: 180
