@@ -1936,6 +1936,89 @@ uv run python main.py --system config/bench/dc/system.yaml \
 `0x18x` は流れず `kNeverCommanded` も落ちないので、疎通確認では必ず 1 回指令を送ること
 （`stop` = duty 0 ならモータは回らない）。
 
+#### サーボ基板単体ベンチ（`config/bench/servo/`）
+
+自作モタドラ（サーボ）1 枚を、機構へ組み込む前にファーム込みで動かすための一式。
+DC ベンチと**同じ `can_generic` を開く**ので、両方の基板を繋いだまま片方の config で
+起動しても動く（登録していない基板のフレームは `_dispatch_frame` が誰にも配らず捨てる）。
+M3508 ベンチとは開くバスが違うので同居できない。
+
+| ファイル | 本番との違い |
+|---|---|
+| `config/bench/servo/system.yaml` | `can_buses` が `generic_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
+| `config/bench/servo/main_hand.yaml` | サーボ基板 1 枚の 4 スロット（`servo_sv0`〜`servo_sv3`）+ センサ 1（`servo_sv4`）。`can_id` は実機の DIP に合わせて 0x48〜0x4C |
+| `config/bench/servo/main_hand_positions.yaml` | 4 軸とも `command_mode: position`。**本番と違い `manual:` を書く**（後述）。範囲はファームのクランプ値と同じ 0〜30deg |
+| `config/bench/servo/checklist.yaml` | 可動範囲の端・センサ反応・非常停止時に脱力しないことの目視項目 |
+
+```bash
+scripts/setup_can.sh
+uv run python main.py --system config/bench/servo/system.yaml \
+    --config config/bench/servo/main_hand.yaml \
+    --checklist config/bench/servo/checklist.yaml
+```
+
+**ベンチだけ `manual:` を書く。** 本番の `gripper` / `wall_f` / `wall_r` は開 / 閉の離散状態
+しか取らないので `manual:` を書かず、「定義した状態以外を送れない」保証を残している。
+ベンチで確かめたいのは機構の状態ではなく「指令した角度どおりにサーボが動くか」で、
+角度を連続で振らないとスルーレートも可動範囲のクランプも確認できない。
+`command_mode: position` の軸なので `_parse_manual` に受理される（duty 軸の DC ベンチとの違い）。
+
+**可動範囲はファームのクランプ値と一致させる。** `firmware/servo/include/config.h` の
+`kProvisionalLimits`（現在 `{0.0, 30.0, 90.0}` = 0〜30deg / 90deg/s）が `setTarget` で
+クランプするため、位置定数に 40deg と書いても基板は 30deg までしか動かない。その状態は
+UI からは「送ったのに途中で止まる」だけで、`SET_TARGET` には 40deg が載っているので
+candump からも原因が読めない。広げるときは yaml ではなくファーム側を直すこと（ただし
+この値は仮値であり、機構が付いた状態で当たらない範囲を実測してから。広すぎると
+メカストッパに当たったまま停動して焼損する）。
+
+**この基板は DC 基板と違って動作確認（`motor_check`）にかけられる。** `FEEDBACK` が
+DLC=3 で Byte1-2 に現在角を載せ、到達を Byte0 bit0 で報告するため、「動いたか」を
+自動判定できる。`magnitude: 5.0` はスルーレート 90deg/s で約 56ms なので
+`per_motor_timeout_ms`（1500）に十分な余裕がある。値は位置定数の `small` と一致させること。
+
+**`can_id` は DIP の基板番号で 8 ずつずれる。** デバイス ID は「基板種別 | 基板番号 |
+スロット番号」の固定ビット分割（仕様書 §2.2）なので、サーボ基板（種別 1）の基板番号 N の
+SV0-SV4 は `0x40+8N`〜`0x44+8N` になる。
+
+| 基板番号 | SV0 | SV1 | SV2 | SV3 | SV4 |
+|---|---|---|---|---|---|
+| 0 | 0x40 | 0x41 | 0x42 | 0x43 | 0x44 |
+| 1 | 0x48 | 0x49 | 0x4A | 0x4B | 0x4C |
+
+**本番 `config/main_hand.yaml` は基板番号 0 を前提にしている。** 手元の実機は DIP が 1 に
+なっていたためベンチ config を 0x48〜0x4C にしてあるが、この基板を本番構成へ組み込む前に
+DIP を全 OFF へ戻すこと。戻し忘れると本番では `gripper` / `wall_f` / `wall_r` が指令を
+受け取らず `FEEDBACK` も来ない（全て STALE）状態になり、症状は「サーボ基板だけ丸ごと
+死んでいる」ようにしか見えない。ID を照合する仕組みはファームにも PC 側にも無く、
+`config.h` の DIP 読み取りと yaml の `can_id` が唯一の接点になる。
+
+**実機で確認できる 3 つの signature**（`candump can_generic`）:
+
+- `FEEDBACK`（`0x348`〜`0x34C`）が 100Hz で流れる。サーボスロットは DLC=3、センサ
+  （`0x34C`）は位置を持たないので DLC=1。ここが 0x340 番台でなければ DIP を疑う
+- Byte0 の状態フラグが `21` → `01`。`0x20` は `kNeverCommanded`（電源投入後まだ
+  `SET_TARGET` を 1 通も受けていない）で、これが落ちていれば指令が受理されている。
+  再送を止めると `0x04`（ウォッチドッグ満了）が立つが、**サーボは現在角を保持する**
+  （`kEStopDetach = false`。DC 基板の「PWM 0%」と意図的に振る舞いを変えている）
+- `SET_TARGET`（`0x148`〜`0x14B`）が `00 <lo> <hi>` 形式で 20Hz 流れる。先頭バイトの
+  `00` が制御タイプ POSITION、Byte1-2 が 0.1deg 単位の int16 リトルエンディアン
+
+`main.py` は目標値が一度も設定されていないモータへは何も送らないので、起動しただけでは
+`0x14x` は流れず `kNeverCommanded` も落ちない。疎通確認では必ず 1 回指令を送ること。
+
+**Nano のブートローダは個体によって baud が違う。** 手元の実機は**古いブートローダ
+（57600）**だったため `firmware/servo/platformio.ini` の `board` を `nanoatmega328` に
+してある（`nanoatmega328new` は 115200）。違うと avrdude が同期できないが、症状が
+紛らわしい: 同期待ちのあいだにスケッチが起動してシリアルへ喋り出し、avrdude がそれを
+応答として読むため `not in sync: resp=0x45` のように**意味のある ASCII が並ぶ**。
+配線やポートの誤りに見えて、実際はボーレート違いでしかない。切り分けは署名読みが速い:
+
+```bash
+avrdude -c arduino -p atmega328p -P /dev/ttyUSB0 -b 57600 -n   # 通れば古いブートローダ
+```
+
+ビルド成果物は `board` を変えても同一（MCU も F_CPU も同じ）で、違うのは書き込み時の baud だけ。
+
 ### 共通設定を 1 箇所に集約する理由
 
 `health` / `motor_check` / `can_buses` は PC 上に 1 組しか存在し得ない。ロボットごとの

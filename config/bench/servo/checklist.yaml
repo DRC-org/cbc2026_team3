@@ -1,0 +1,41 @@
+# サーボ基板単体ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は y_axis / rotate / conveyor など、この基板に存在しない
+# 機構の確認を求めるためそのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもサーボは動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+#
+# **この基板は DC 基板と違って位置を報告できる**ので、回ったかどうかは動作確認
+# (motor_check) で自動判定できる。ここの目視項目が担うのは、自動判定では分からない
+# こと — 向き・可動範囲の端・緊急停止時に脱力しないこと — に絞ってある。
+
+checklists:
+  main_hand:
+    - id: bench_bus_up
+      label: can_generic が up していること確認 (ip -br link show)
+    - id: bench_firmware
+      label: 基板の RGB LED が緑の点滅 (平常) であること確認。赤の速い点滅は CAN 不通か DIP 未設定
+    - id: bench_device_id
+      label: candump can_generic に 0x348-0x34C が届いていること確認 (DIP = 基板番号 1)
+    - id: bench_free
+      label: サーボホーンに何も付いておらず、全可動範囲で回っても干渉しないこと確認
+    - id: bench_power
+      label: サーボ電源が投入され、電圧がサーボの定格内であること確認
+    - id: servo_sv0_move
+      label: 手動操縦で servo_sv0 に small を送り、サーボが動くこと目視確認
+    - id: servo_sv0_full
+      label: 手動操縦で servo_sv0 に full を送り、可動範囲の端まで動くこと目視確認
+    - id: servo_sv0_return
+      label: 手動操縦で servo_sv0 に initial を送り、起動時と同じ角度へ戻ること目視確認
+    - id: servo_clamp
+      label: ジョグで max (30deg) を超えて送れないこと確認。ファーム側もクランプする
+    - id: sensor_react
+      label: SV4 のセンサを触り、UI のセンサ表示が反応すること確認 (接触は異常ではない)
+    - id: bench_estop
+      label: 動作中に非常停止を押し、サーボがその場で停止すること確認
+    - id: bench_estop_hold
+      label: 非常停止中もサーボが脱力せず角度を保持していること確認 (kEStopDetach = false)
+    - id: bench_estop_latch
+      label: 非常停止解除まで新しい角度指令が通らないこと確認 (ラッチ。解除は UI の Reset のみ)
