@@ -1,11 +1,15 @@
 import { CircleAlert, Play, TriangleAlert } from "lucide-react";
+import { useEffect } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
+import { useArmedPress } from "@/hooks/useArmedPress";
 import { cx } from "@/lib/cx";
 import { evaluateHealth } from "@/lib/healthVerdict";
+import { COURT_LABEL, COURT_TONE } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
+import { TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface Blocker {
   label: string;
@@ -25,11 +29,17 @@ const ROLE_LABEL: Record<string, string> = {
  * (`試合開始 不可: チェックリスト未完了`) だった。何が未完了なのかは書かれておらず、
  * Monitor は右側に並ぶ 16 行の項目を目でスキャンして差分を取る必要があった。
  * 開始が遅れている原因を探すのに操縦者へ聞きにいく、という運用がそこから生まれる。
+ *
+ * 開始の確認は**同じボタンの二度押し**で取る（`useArmedPress`）。確認ダイアログは
+ * ボタンから離れた位置に出るため、押す → カーソルを運ぶ → 押す、の往復が要った。
+ * ダイアログ本文が持っていた情報（コート・機体が動く条件・周囲の安全確認）は
+ * 武装中の説明行へ移してある。落とすと二度押しは単なる連打になる。
  */
 export function StartGate({ onStart }: { onStart: () => void }) {
   const { matchState, connected } = useRobotStatus();
   const states = useRobotStates();
-  const { phase, can_start_match: canStart } = matchState;
+  const { phase, court, can_start_match: canStart } = matchState;
+  const { armed, press, disarm } = useArmedPress(onStart);
 
   const blockers: Blocker[] = [];
   if (!connected) {
@@ -73,6 +83,12 @@ export function StartGate({ onStart }: { onStart: () => void }) {
 
   const ready = canStart && connected && phase !== "finished";
 
+  // 開始できない状況へ変わったら武装を解く。武装は押した瞬間の状況に紐づいており、
+  // 通信が切れた・チェックリストが外れた後の 1 回目を 2 回目として扱ってはならない
+  useEffect(() => {
+    if (!ready) disarm();
+  }, [ready, disarm]);
+
   return (
     <section
       className={cx(
@@ -85,9 +101,21 @@ export function StartGate({ onStart }: { onStart: () => void }) {
       <div className="flex flex-wrap items-center gap-3 p-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="text-[1.6em] leading-tight font-semibold">
-            {ready ? "試合を開始できます" : "まだ開始できません"}
+            {armed
+              ? "もう一度押すと開始します"
+              : ready
+                ? "試合を開始できます"
+                : "まだ開始できません"}
           </span>
-          {ready ? (
+          {armed ? (
+            <span className="text-base-content/70">
+              <span className={cx("font-medium", TONE_TEXT_CLASS[COURT_TONE[court]])}>
+                {COURT_LABEL[court]}
+              </span>{" "}
+              で試合を開始します。各操縦者が自分のタブで START
+              を押すまで機体は動きません。周囲の安全を確認してください。
+            </span>
+          ) : ready ? (
             <span className="text-base-content/70">
               {warnings.length === 0
                 ? "全ての指差喚呼が完了しています。周囲の安全を確認して開始してください。"
@@ -119,15 +147,17 @@ export function StartGate({ onStart }: { onStart: () => void }) {
           ) : null}
         </div>
 
+        {/* 二度押しで文言が伸びてもボタンの左端を動かさない。押す位置が 1 回目と
+            2 回目でずれると、二度押しの利点（カーソルを動かさない）が消える */}
         <Button
-          tone={ready ? "ok" : "default"}
+          tone={armed ? "danger" : ready ? "ok" : "default"}
           disabled={!ready}
-          onClick={onStart}
-          aria-label="試合を開始する"
-          className="h-[3.2rem] shrink-0 px-6 text-[1.2em]"
+          onClick={press}
+          aria-label={armed ? "もう一度押して試合を開始する" : "試合を開始する"}
+          className="h-[3.2rem] w-[14em] shrink-0 px-6 text-[1.2em] whitespace-nowrap"
         >
           <Icon as={Play} />
-          試合開始
+          {armed ? "もう一度押して開始" : "試合開始"}
         </Button>
       </div>
     </section>
