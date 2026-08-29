@@ -1,0 +1,43 @@
+# 電磁弁基板単体ベンチ (機構未装着) の位置定数。
+#
+# **on_off 軸には manual: を書けない** (lib/sequence/positions.py の _parse_manual)。
+# 弁は開か閉のどちらかしか取らないので「可動範囲」が存在せず、書けてしまうと UI が
+# ジョグ行を描き、押しても何も起きない操作面が出来上がるため。したがってベンチで弁を
+# 動かす手段は**手動操縦パネルのプリセット (位置名) 指令**になる。
+# ManualController.move_to_position は既定義の点しか送らないので on_off 軸でも常に許される。
+#
+# 値は 0 か非 0 かだけが意味を持つ (仕様書 §9.2)。0.5 のような中間値を書いても基板は
+# ON として扱うので、「半開」を意図した値を書かないこと。
+#
+# **この基板は弁が開いたかを報告できない。** FEEDBACK は状態フラグ 1 バイトだけで、
+# 到達フラグも立てない (仕様書 §9.3)。UI 上は指令を送った直後に settle_s ぶん待って
+# 完了するので、**実際に開いたかどうかは打音と目視でしか分からない**。
+
+axes:
+  # 本番 config/sub_hand_positions.yaml の valve_1〜6 と同一仕様。
+  # ベンチで確かめた指令がそのまま本番でも出る。
+  valve_ch0: &valve_axis
+    unit: on_off
+    command_unit: on_off
+    command_mode: on_off
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.2         # 弁の応答待ち [s]
+    timeout_s: 1.0
+  valve_ch1: *valve_axis
+  valve_ch2: *valve_axis
+  valve_ch3: *valve_axis
+  valve_ch4: *valve_axis
+  valve_ch5: *valve_axis
+
+positions:
+  # 手動操縦パネルにこの名前のプリセットボタンが並ぶ。
+  # 確認したいのは 2 つだけ: 開くこと (open) と閉じること (closed)。
+  valve_ch0: &valve_states
+    open: 1.0            # 開 (通電)
+    closed: 0.0          # 閉 (消磁)
+  valve_ch1: *valve_states
+  valve_ch2: *valve_states
+  valve_ch3: *valve_states
+  valve_ch4: *valve_states
+  valve_ch5: *valve_states

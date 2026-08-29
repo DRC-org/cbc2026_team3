@@ -68,20 +68,25 @@ pio run -e nano -d firmware/servo -t upload
 一方**実機ビルド（`pio run`）は両方必要**。共有しているのは `firmware/lib/MotorCan/`
 までで、`main.cpp` と `config.h` は別物のため。
 
-### ファームウェア（電磁弁 = STM32CubeMX + CMake）
+### ファームウェア（電磁弁 = CMake）
 
 **電磁弁基板だけビルド系が違う**（STM32F303K8 / CubeMX 生成の HAL）。
-`Drivers/` と `cmake/` は `.gitignore` されているので、clone 直後は CubeMX で
-`firmware/solenoid/solenoid.ioc` を開いて GENERATE CODE してからビルドする。
+`Drivers/` だけ `.gitignore` してあるので、clone 直後に 1 回取得すればビルドできる。
 
 ```bash
+firmware/solenoid/scripts/fetch_hal.sh          # 初回のみ。CubeMX は要らない
 cmake --preset Debug -S firmware/solenoid
 cmake --build firmware/solenoid/build/Debug
 ```
 
+**`arm-none-eabi-gcc` は 11 以降が要る。** CubeMX のリンカスクリプトが使う `READONLY`
+キーワードが GCC11 以降にしか無く、古い版では**コンパイルは全部通ってリンクだけが落ちる**
+（PlatformIO が renesas-ra 用に持っている gcc 7.2.1 では通らない）。
+
 `Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと
 （それ以外は再生成で消える）。ロジックは `src/app.cpp`、ピン割当と CAN の
-ビットタイミングは `solenoid.ioc` が持つ。詳細は `firmware/README.md`。
+ビットタイミングは `solenoid.ioc` が持つ。**CubeMX が要るのは `.ioc` を変えたときだけ。**
+詳細は `firmware/README.md`。
 
 ### CAN セットアップ
 
@@ -166,7 +171,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID・動作確認の個別上書き） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚）。`--system` / `--config` / `--checklist` で差し替える |
+| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚）。`--system` / `--config` / `--checklist` で差し替える。4 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守る |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。`health` / `motor_check` /
 `can_buses` / `match` は PC 上に 1 組しか存在し得ないため `config/<robot>.yaml` には書けず、

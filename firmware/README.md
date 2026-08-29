@@ -37,18 +37,19 @@ firmware/
     include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）
     src/main.cpp       ペリフェラル初期化・補間ループ・MCP2515 送受信
   solenoid/            電磁弁用モタドラのファーム（**STM32F303K8** / 1 枚で 6ch）
-    CMakeLists.txt     **PlatformIO ではなく CubeMX + CMake**。MotorCan を target_sources で共有
+    CMakeLists.txt     **PlatformIO ではなく CMake**。MotorCan を target_sources で共有
     CMakePresets.json  Debug / Release（generator は Ninja）
     solenoid.ioc       CubeMX のプロジェクト定義。ピン割当・CAN ビットタイミングの単一情報源
+    cmake/             ツールチェーン定義と HAL のソース一覧（CubeMX 生成だがコミットする）
+    scripts/fetch_hal.sh  HAL と CMSIS を ST の公式リポジトリから取得（CubeMX の代わり）
     Core/              CubeMX 生成（main.c は setup() / loop() を呼ぶだけ）
     include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
     src/app.cpp        ペリフェラル初期化・出力反映・bxCAN 送受信
 ```
 
-**`firmware/solenoid/` の `Drivers/` と `cmake/` は `.gitignore` されている**
-（サンプル元のリポジトリと同じ運用）。HAL ドライバと CMake ツールチェーンファイルは
-CubeMX が生成するもので、リポジトリにはコミットしない。**clone 直後はビルドできない**
-ので、下の「コマンド」の手順で先に生成すること。
+**`firmware/solenoid/Drivers/` は `.gitignore` されている**（HAL と CMSIS で数十 MB あり、
+ST の公式リポジトリから取り直せるため）。clone 直後は `scripts/fetch_hal.sh` を 1 回
+実行すればビルドできる。**`cmake/` はコミットしてある** —— 詳細は下の「コマンド」を参照。
 
 **3 枚とも別の MCU に載っている。**
 
@@ -102,18 +103,34 @@ pio device monitor -e uno_r4_minima -d firmware/dc_motor
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
 
-**電磁弁基板（STM32F303K8）は PlatformIO ではなく CubeMX + CMake でビルドする。**
-`Drivers/` と `cmake/` は `.gitignore` されているので、clone 直後は先に生成が要る。
+**電磁弁基板（STM32F303K8）は PlatformIO ではなく CMake でビルドする。**
+
+必要なツール:
+
+| ツール | 版 | 備考 |
+|---|---|---|
+| `arm-none-eabi-gcc` | **11 以降** | CubeMX のリンカスクリプトが使う `READONLY` キーワードが GCC11 以降にしか無い。古い版では**コンパイルは全部通ってリンクだけが落ちる**（`STM32F303XX_FLASH.ld:106: non constant or forward reference address expression for section .ARM.extab`）。PlatformIO が renesas-ra 用に持っている gcc 7.2.1 では通らない |
+| `cmake` | 3.22 以降 | `uv tool install cmake` で入る |
+| `ninja` | — | `CMakePresets.json` の generator。`uv tool install ninja` で入る |
+
+ツールチェーンは xPack 版が手軽（sudo 不要、tar を展開するだけ）:
+<https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases>
+
+**`Drivers/`（HAL と CMSIS）は生成物なのでコミットしていない。** CubeMX が無くても
+`scripts/fetch_hal.sh` で取得できる —— ST の公式リポジトリから、STM32CubeF3 が
+サブモジュールとして指している検証済みのコミットに固定して取る。
 
 ```bash
-# 1. HAL ドライバと CMake ツールチェーンを生成する（初回、および .ioc を変えたとき）
-#    STM32CubeMX で firmware/solenoid/solenoid.ioc を開き、
-#    Project Manager > Toolchain/IDE が CMake であることを確認して GENERATE CODE。
-#    CLI なら: STM32_Programmer/stm32cubemx -q <script>（環境依存のため GUI を推奨）
+# 1. HAL / CMSIS を取得（初回のみ）
+firmware/solenoid/scripts/fetch_hal.sh
 
-# 2. ビルド（arm-none-eabi-gcc と Ninja と CMake 3.22+ が要る）
-cmake --preset Debug -S firmware/solenoid
-cmake --build firmware/solenoid/build/Debug
+# 2. ビルド
+PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
+  cmake --preset Debug -S firmware/solenoid
+PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
+  cmake --build firmware/solenoid/build/Debug
+#   → Debug: FLASH 35.0% (22,964 B / 64KB) / RAM 19.6% (2,408 B / 12KB)
+#   → Release: FLASH 21.1% (13,848 B)
 
 # 3. 書き込み（ST-Link。STM32CubeProgrammer / OpenOCD いずれでも）
 STM32_Programmer_CLI -c port=SWD -w firmware/solenoid/build/Debug/solenoid.elf -rst
@@ -121,6 +138,15 @@ STM32_Programmer_CLI -c port=SWD -w firmware/solenoid/build/Debug/solenoid.elf -
 # 4. デバッグシリアル（USART1 / PA9-PA10 / 115200 baud）
 #    USB-UART 変換を繋いで任意のシリアルモニタで開く
 ```
+
+**CubeMX が要るのは `.ioc` を変更したときだけ。** ピン割当・クロック・CAN ビット
+タイミングを変えたら CubeMX で GENERATE CODE し、`Core/` と `cmake/` の差分を確認して
+コミットする。`Drivers/` の中身は `.ioc` では変わらないので `fetch_hal.sh` の再実行は要らない。
+
+**`cmake/` は CubeMX の生成物だがコミットしてある**（`.gitignore` から意図的に外した）。
+中身はツールチェーン定義と HAL のソース一覧だけで数 KB しかなく、無視すると
+**CubeMX を持っている人以外ビルドできない**リポジトリになる。試合前に基板へ焼ける人が
+1 人に絞られるのは避けたい。
 
 **`Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと。**
 ロジックを書くと、次に CubeMX で再生成した人が黙って壊す（USER CODE 以外は上書きされる）。

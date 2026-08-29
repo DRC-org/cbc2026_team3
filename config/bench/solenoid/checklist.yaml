@@ -1,0 +1,42 @@
+# 電磁弁基板単体ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は gripper / wall / origin_sensor など、この基板に
+# 存在しない機構の確認を求めるためそのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくても弁は動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+#
+# **この基板は弁が開いたかを自動判定できない。** 圧力センサもリミットスイッチも持たず、
+# FEEDBACK は状態フラグ 1 バイトだけで到達フラグも立てないので、動作確認 (motor_check)
+# は全チャンネル magnitude: 0 で除外してある。開閉の確認はここの打音・目視項目が担う。
+#
+# **この基板に物理非常停止入力 (DC 基板の REF) は無い** (仕様書 §9.4)。緊急停止の
+# 確認は UI の緊急停止ボタン (= CAN のブロードキャスト E_STOP) で行う。
+
+checklists:
+  main_hand:
+    - id: bench_bus_up
+      label: can_generic が up していること確認 (ip -br link show)
+    - id: bench_firmware
+      label: 基板の LED が 1 秒周期で点滅 (平常) していること確認。0.2 秒の速い点滅は CAN 不通か DIP 未設定
+    - id: bench_feedback
+      label: candump can_generic に 0x3C0〜0x3C5 が届いていること確認 (DIP = 基板番号 0)
+    - id: bench_info
+      label: candump に 0x4C0 (INFO) が 1 秒周期で流れ、版番号が config.h の kFirmwareVersion と一致すること確認
+    - id: bench_power
+      label: 弁の駆動電源が投入され、電圧が電磁弁の定格内であること確認
+    - id: bench_wiring
+      label: 各チャンネルの配線が config.h のチャンネル表 (ch0=PB7 … ch5=PA15) と一致すること確認
+    - id: valve_ch0_open
+      label: 手動操縦で valve_ch0 に open を送り、弁の作動音がすること確認
+    - id: valve_ch0_closed
+      label: 手動操縦で valve_ch0 に closed を送り、弁が戻ること確認
+    - id: valves_all
+      label: valve_ch1〜ch5 も同様に開閉し、6 個とも指令したチャンネルだけが動くこと確認
+    - id: bench_estop
+      label: 弁を開いた状態で UI の緊急停止を押し、その場で全チャンネルが消磁すること確認
+    - id: bench_estop_latch
+      label: 緊急停止中は open を送っても通電しないこと確認 (ラッチ。解除は UI の Reset のみ)
+    - id: bench_watchdog
+      label: 弁を開いたまま CAN ケーブルを抜き、0.5 秒以内に全チャンネルが消磁すること確認

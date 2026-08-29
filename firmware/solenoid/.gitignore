@@ -1,5 +1,14 @@
 build
 mx.scratch
 !.settings
+
+# HAL ドライバと CMSIS。数十 MB あり、ST の公式リポジトリから取り直せる。
+# CubeMX の GENERATE CODE か scripts/fetch_hal.sh が作る。
 Drivers
-cmake
+
+# **cmake/ は CubeMX の生成物だがコミットする**（サンプル元の運用から意図的に外している）。
+# 中身はツールチェーン定義（gcc-arm-none-eabi.cmake）と、HAL のどのソースを
+# ビルドするかの一覧（stm32cubemx/CMakeLists.txt）だけで、数 KB しかない。
+# 無視すると **CubeMX を持っている人以外ビルドできない**リポジトリになり、
+# 試合前に基板へ焼ける人が 1 人に絞られる。CubeMX で再生成すれば上書きされるが、
+# 同じ内容が出てくる。

@@ -1,0 +1,40 @@
+# 電磁弁基板単体ベンチ (機構未装着) 用の共通設定。
+#
+# 本番の config/system.yaml との違いは can_buses だけで、health / motor_check / match は
+# 同一値を持つ。main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
+# open するため、本番の 3 本構成のままでは can_m3508 / can_edulite の CANable を挿して
+# いない机上で [Errno 19] No such device となり、起動そのものが失敗する。
+#
+# ここを generic_bus だけに絞ることで CANable 1 本 (can_generic) だけで起動できる。
+#
+# DC 基板ベンチ (config/bench/dc/) とサーボ基板ベンチ (config/bench/servo/) も同じ
+# can_generic を使う。**3 つを 1 つの config にまとめないのは、登録したデバイスの
+# フィードバックが来ないと UI が STALE で埋まるため** — 机上に載っている基板だけを
+# 登録した方が、異常が本物の異常として見える。
+#
+# 使い方:
+#   scripts/setup_can.sh
+#   uv run python main.py --system config/bench/solenoid/system.yaml \
+#       --config config/bench/solenoid/main_hand.yaml \
+#       --checklist config/bench/solenoid/checklist.yaml
+
+can_buses:
+  generic_bus: can_generic
+
+# 以下 3 ブロックは本番 config/system.yaml と同値。ベンチだけ判定基準を変えると
+# 「机上では OK なのに実運用で警告が出る」ことになり、確認の意味が薄れる。
+health:
+  feedback_timeout_ms: 500
+  temp_warning_c: 65
+  temp_critical_c: 80
+  tx_error_threshold: 96
+
+motor_check:
+  per_motor_timeout_ms: 1500
+  default_magnitude:
+    m3508: 500
+    edulite05: 5.0
+    generic: 0.1
+
+match:
+  duration_s: 180

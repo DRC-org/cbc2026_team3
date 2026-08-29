@@ -1861,6 +1861,18 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 1 つしか作れない）。セットを足すときは `config/bench/<対象>/` を 1 つ掘り、4 ファイルを
 まとめてそこへ置くこと。
 
+**4 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
+1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
+しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
+書き直しを始める余裕は無い。見ているのは 3 つ:
+
+- system / robot / positions / checklist が揃っていて読めること
+- 登録したモータが**すべて**位置定数から指令できること（片方だけ足すと
+  「UI には出るのに動かせないモータ」になる）
+- 開くバスがそのセットで使うものだけであること（挿していない CANable が
+  1 本でもあると `[Errno 19] No such device` で起動そのものが落ちる）
+
 #### M3508 単体ベンチ（`config/bench/m3508/`）
 
 M3508 2 台だけを CAN 通信の確認として動かす。
@@ -2045,6 +2057,60 @@ avrdude -c arduino -p atmega328p -P /dev/ttyUSB0 -b 57600 -n   # 通れば古い
 ```
 
 ビルド成果物は `board` を変えても同一（MCU も F_CPU も同じ）で、違うのは書き込み時の baud だけ。
+
+#### 電磁弁基板単体ベンチ（`config/bench/solenoid/`）
+
+自作モタドラ（電磁弁）1 枚を、機構へ組み込む前にファーム込みで動かすための一式。
+DC ベンチ・サーボベンチと**同じ `can_generic` を開く**ので、複数の基板を繋いだまま
+片方の config で起動しても動く（登録していない基板のフレームは `_dispatch_frame` が
+誰にも配らず捨てる）。M3508 ベンチとは開くバスが違うので同居できない。
+
+| ファイル | 本番との違い |
+|---|---|
+| `config/bench/solenoid/system.yaml` | `can_buses` が `generic_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
+| `config/bench/solenoid/main_hand.yaml` | 電磁弁基板 1 枚の 6ch（`valve_ch0`〜`valve_ch5`）。`can_id` は DIP 全 OFF の 0xC0〜0xC5 |
+| `config/bench/solenoid/main_hand_positions.yaml` | 6 軸とも `command_mode: on_off` / `open`・`closed` の 2 状態。**`manual:` は書けない** |
+| `config/bench/solenoid/checklist.yaml` | 打音・目視の開閉確認、緊急停止での消磁、ウォッチドッグ満了での消磁 |
+
+```bash
+scripts/setup_can.sh
+uv run python main.py --system config/bench/solenoid/system.yaml \
+    --config config/bench/solenoid/main_hand.yaml \
+    --checklist config/bench/solenoid/checklist.yaml
+```
+
+**本番ではサブハンドの機構だが、ベンチの `robot_name` は `main_hand` にしてある。**
+他の 3 セットと手順を揃える方を優先している（どのベンチでも同じタブを開けばよい）。
+`robot_name` を変えると位置定数の読み先（`<robot_name>_positions.yaml`）も変わるので、
+両者は必ず一致させること。
+
+**サーボベンチと違い `manual:` は書けない。** `on_off` 軸に「可動範囲」は存在せず、
+`_parse_manual` が `command_mode: position` 以外を拒否する（duty 軸の DC ベンチと同じ）。
+弁を動かす手段は手動操縦パネルの**プリセット指令**（`open` / `closed`）になる。
+
+**この基板は DC 基板と同じく動作確認（`motor_check`）にかけられない。** 弁が開いたかを
+観測する手段が 1 つも無く（圧力センサもリミットスイッチも非搭載）、`FEEDBACK` の到達
+フラグも立てない（仕様書 §9.3）。6ch とも `magnitude: 0` で除外し、確認は
+`checklist.yaml` の打音・目視項目が担う。**除外を外すと必ず「動かなかった」で落ち、
+しかも症状が配線不良と区別できない。**
+
+**ベンチで確かめるべきは「消磁に倒れること」。** 電磁弁は通電している間だけ開くので、
+止める手段は消磁の一手しかない（仕様書 §9.4）。checklist に緊急停止（UI のボタン =
+ブロードキャスト `E_STOP`）とウォッチドッグ満了（CAN ケーブルを抜いて 0.5 秒）の
+2 経路を入れてあるのはそのため。**この基板に物理非常停止入力（DC 基板の `REF`）は無い**
+ので、物理スイッチでの確認はできない。
+
+**`can_id` は DIP の基板番号で 8 ずつずれる。** 電磁弁基板（種別 3）の基板番号 N の
+ch0-ch5 は `0xC0+8N`〜`0xC5+8N` になる。
+
+| 基板番号 | ch0 | ch1 | ch2 | ch3 | ch4 | ch5 |
+|---|---|---|---|---|---|---|
+| 0 | 0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC4 | 0xC5 |
+| 1 | 0xC8 | 0xC9 | 0xCA | 0xCB | 0xCC | 0xCD |
+
+`candump` に流れる `FEEDBACK` の ID（`0x300 + デバイス ID`）が実際の値を教えてくれる。
+ID を照合する仕組みはファームにも PC 側にも無く、`config.h` の DIP 読み取りと yaml の
+`can_id` が唯一の接点になる。
 
 ### 共通設定を 1 箇所に集約する理由
 

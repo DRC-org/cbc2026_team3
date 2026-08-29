@@ -19,6 +19,7 @@ from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.sequence.positions import load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -516,6 +517,111 @@ class TestShippedConfigs:
         defined = set(yaml.safe_load((_CONFIG_DIR / "can_buses.yaml").read_text())["buses"] or {})
 
         assert set(system.can_buses.values()) <= defined
+
+
+#: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
+_BENCH_DIRS = ("m3508", "dc", "servo", "solenoid")
+
+
+class TestShippedBenchConfigs:
+    """机上ベンチ用の config セット (config/bench/<対象>/) も同じスキーマで読めること。
+
+    **ベンチ config は誰も検証していなかった。** 本番の config は
+    TestShippedConfigs が守っているが、bench/ はスキーマを変えても壊れたことに
+    気付けない —— 気付くのは机上に基板を並べた当日で、しかも症状は
+    「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
+    始める余裕は無い。
+
+    4 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
+    見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
+    """
+
+    @pytest.mark.parametrize("bench", _BENCH_DIRS)
+    def test_bench_config_set_loads(self, bench: str) -> None:
+        bench_dir = _CONFIG_DIR / "bench" / bench
+
+        system = load_system_config(
+            yaml.safe_load((bench_dir / "system.yaml").read_text()),
+            source=f"bench/{bench}/system.yaml",
+        )
+
+        robot_yaml = next(
+            path
+            for path in bench_dir.iterdir()
+            if path.name.endswith(".yaml")
+            and not path.name.endswith("_positions.yaml")
+            and path.name not in ("system.yaml", "checklist.yaml")
+        )
+        config = load_robot_config(
+            yaml.safe_load(robot_yaml.read_text()),
+            source=f"bench/{bench}/{robot_yaml.name}",
+            buses=system.can_buses,
+        )
+
+        assert config.motors
+
+        # 位置定数は「robot config と同じディレクトリの <robot_name>_positions.yaml」を読む
+        # (main.py の _positions_path)。名前がずれると本番の位置定数が読まれてしまい、
+        # **机上に無い軸へ指令が飛ぶ**
+        positions_path = bench_dir / f"{config.robot_name}_positions.yaml"
+        assert positions_path.exists(), f"{positions_path} がありません"
+
+        table = load_position_table(
+            yaml.safe_load(positions_path.read_text()), source=str(positions_path)
+        )
+
+        # 登録したモータはすべて位置定数から指令できること。
+        # 片方だけ足すと「UI には出るのに動かせないモータ」になる
+        axis_motors = {name for axis in table.axes for name in table.axis(axis).motor_names}
+        assert set(config.motors) == axis_motors
+
+    @pytest.mark.parametrize("bench", _BENCH_DIRS)
+    def test_bench_checklist_targets_the_registered_robot(self, bench: str) -> None:
+        """チェックリストのロールが、その config の robot_name と一致すること。
+
+        ずれるとチェックリストがどのタブにも出ず、**指差喚呼を 1 項目も踏まないまま
+        試合フェーズへ入れてしまう**。
+        """
+        bench_dir = _CONFIG_DIR / "bench" / bench
+
+        robot_yaml = next(
+            path
+            for path in bench_dir.iterdir()
+            if path.name.endswith(".yaml")
+            and not path.name.endswith("_positions.yaml")
+            and path.name not in ("system.yaml", "checklist.yaml")
+        )
+        robot_name = yaml.safe_load(robot_yaml.read_text())["robot_name"]
+
+        checklist = yaml.safe_load((bench_dir / "checklist.yaml").read_text())["checklists"]
+
+        assert robot_name in checklist
+        assert checklist[robot_name]
+
+    @pytest.mark.parametrize("bench", _BENCH_DIRS)
+    def test_bench_opens_only_the_buses_on_the_desk(self, bench: str) -> None:
+        """ベンチが開くバスは、そのセットで使うものだけであること。
+
+        main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
+        open するため、机上に挿していない CANable が 1 本でも書いてあると
+        [Errno 19] No such device で起動そのものが落ちる。
+        """
+        bench_dir = _CONFIG_DIR / "bench" / bench
+
+        system = load_system_config(
+            yaml.safe_load((bench_dir / "system.yaml").read_text()),
+            source=f"bench/{bench}/system.yaml",
+        )
+        robot_yaml = next(
+            path
+            for path in bench_dir.iterdir()
+            if path.name.endswith(".yaml")
+            and not path.name.endswith("_positions.yaml")
+            and path.name not in ("system.yaml", "checklist.yaml")
+        )
+        used = {motor["bus"] for motor in yaml.safe_load(robot_yaml.read_text())["motors"].values()}
+
+        assert set(system.can_buses) == used
 
 
 def test_driver_types_match_the_driver_map() -> None:
