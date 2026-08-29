@@ -134,3 +134,42 @@ class TestPositionLoopSetPidGain:
         assert set(affected) == {"y_axis_r", "y_axis_l"}
         assert loop.pid("y_axis_r").kp == 4.0
         assert loop.pid("y_axis_l").kp == 4.0
+
+
+class TestPositionLoopPidGains:
+    """UI へ配る現在ゲインの読み口。
+
+    書き込み側 (`set_pid_gain`) と対で要る。読み口が無いと UI は現在値を知る手段が
+    無く、初期値 0 のまま送って全ゲインを 0 で潰す (実際にこの事故があった)。
+    """
+
+    def test_reports_the_gains_actually_in_effect(self) -> None:
+        loop, _ = _build_loop()
+        loop.set_pid_gain("solo", "kp", 3.0)
+        loop.set_pid_gain("solo", "ki", 0.5)
+        loop.set_pid_gain("solo", "kd", 0.25)
+
+        gains = loop.pid_gains("solo")
+
+        assert gains["kp"] == 3.0
+        assert gains["ki"] == 0.5
+        assert gains["kd"] == 0.25
+
+    def test_solo_motor_applies_to_itself_only(self) -> None:
+        loop, _ = _build_loop()
+        assert loop.pid_gains("solo")["applies_to"] == ["solo"]
+
+    def test_pair_member_reports_both_sides(self) -> None:
+        """左右直結ペアは「送ると両方に適用される」ことまで配る。
+
+        判断の正は `_paired_with()` の 1 箇所。UI に名前から推測させると
+        「1 台だけに効かせてよいか」の判断が 2 箇所に増える。
+        """
+        loop, _ = _build_loop()
+        assert loop.pid_gains("y_axis_r")["applies_to"] == ["y_axis_r", "y_axis_l"]
+        assert loop.pid_gains("y_axis_l")["applies_to"] == ["y_axis_r", "y_axis_l"]
+
+    def test_unknown_motor_raises_key_error(self) -> None:
+        loop, _ = _build_loop()
+        with pytest.raises(KeyError):
+            loop.pid_gains("nope")

@@ -16,6 +16,7 @@ import type {
   MatchTimer,
   MotorCheckRecord,
   MotorHealth,
+  MotorPid,
   MotorState,
   PositionLoopState,
   RobotState,
@@ -270,11 +271,21 @@ type Wire<T> = T & { type: string };
 /** 正規化後の型がそのままワイヤ形式と 1:1 のメッセージ */
 type WireOf<K extends ServerMessage["type"]> = Extract<ServerMessage, { type: K }>;
 
+const MOTOR_PID = fieldsOf<MotorPid>({
+  kp: "ui",
+  ki: "ui",
+  kd: "ui",
+  applies_to: "ui",
+});
+
 const MOTOR_STATE = fieldsOf<MotorState>({
   pos: "ui",
   vel: "ui",
   torque: "ui",
   temp: "ui",
+  // 落ちれば /pid-tuning は現在値を知る手段を失い、初期値 0 のまま送って
+  // 全ゲインを 0 で潰す経路が戻る
+  pid: "ui",
 });
 
 const BUS_HEALTH = fieldsOf<BusHealth>({
@@ -412,6 +423,7 @@ const STATE_FIELDS: FieldSpec = {
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
   ...nest("motors.*", MOTOR_STATE),
+  ...nest("motors.*.pid", MOTOR_PID),
   ...nest("health", HEALTH),
   ...nest("health.buses[]", BUS_HEALTH),
   ...nest("health.motors[]", MOTOR_HEALTH),

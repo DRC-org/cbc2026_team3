@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from lib.axis_sync import SyncGroup
 from lib.config_schema import DEFAULT_HEALTH
@@ -26,8 +26,23 @@ __all__ = [
     "MAX_TUNABLE_GAIN",
     "TUNABLE_PID_KEYS",
     "M3508PositionLoop",
+    "PidGains",
     "make_position_pid",
 ]
+
+
+class PidGains(TypedDict):
+    """UI へ配る 1 モータ分の現在ゲイン。
+
+    ``applies_to`` を同じ dict に入れてあるのは、「現在値」と「送ると誰に効くか」を
+    別々に運ぶと片方だけ更新された状態が作れてしまうため。
+    """
+
+    kp: float
+    ki: float
+    kd: float
+    applies_to: list[str]
+
 
 # 実行中に差し替えてよい PID パラメータ。出力レンジ・不感帯・積分上限は機構の
 # 保護値なので操縦者の調整対象にしない (誤って緩めると保護が消える)
@@ -201,6 +216,25 @@ class M3508PositionLoop(PausablePeriodicTask):
 
     def pid(self, name: str) -> PIDController:
         return self._axes[name].pid
+
+    def pid_gains(self, name: str) -> PidGains:
+        """UI へ配る現在ゲイン。``set_pid_gain`` の対になる読み口。
+
+        ``applies_to`` はこのモータへ送ったときに実際に適用されるモータ名で、
+        左右直結ペアなら両方が入る。ここまで含めて配るのは、「1 台だけに効かせて
+        よいか」の判断を ``_paired_with()`` の 1 箇所に保つため。UI に名前から
+        推測させると判断が 2 箇所に増え、片方だけ直したときに気付けない。
+
+        Raises:
+            KeyError: このループに居ないモータ名
+        """
+        pid = self._axes[name].pid
+        return {
+            "kp": pid.kp,
+            "ki": pid.ki,
+            "kd": pid.kd,
+            "applies_to": list(self._paired_with(name)),
+        }
 
     def set_pid_gain(self, name: str, key: str, value: float) -> tuple[str, ...]:
         """実行中に PID ゲインを差し替え、実際に更新したモータ名を返す。

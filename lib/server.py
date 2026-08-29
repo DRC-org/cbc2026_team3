@@ -21,7 +21,12 @@ from lib.config_schema import (
     HealthThresholds,
     MatchSettings,
 )
-from lib.control.position_loop import MAX_TUNABLE_GAIN, TUNABLE_PID_KEYS, M3508PositionLoop
+from lib.control.position_loop import (
+    MAX_TUNABLE_GAIN,
+    TUNABLE_PID_KEYS,
+    M3508PositionLoop,
+    PidGains,
+)
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
@@ -785,6 +790,17 @@ class RobotServer:
 
         affected = loop.set_pid_gain(motor_name, key, float(value))
         logger.info("set_param: %s=%s を適用 (%s)", key, value, ", ".join(affected))
+
+    def _motor_pid_state(self, motor_name: str) -> PidGains | None:
+        """UI へ配る現在ゲイン。PC 側 PID を持たないモータは None。
+
+        配らなかった頃、/pid-tuning は現在値を知る手段が無いまま初期値 0 を表示し、
+        そのまま送ると全ゲインが 0 になった。None は「ドライバ・ファーム側で
+        制御していて PC からは変更できない」の単一の表現でもあり、UI はこれだけで
+        調整対象を選り分ける (判定を UI 側に書き写さない)。
+        """
+        loop = self._find_position_loop(motor_name)
+        return None if loop is None else loop.pid_gains(motor_name)
 
     def _find_position_loop(self, motor_name: str) -> M3508PositionLoop | None:
         """指定モータを制御している M3508 位置制御ループを探す。"""
@@ -1561,6 +1577,10 @@ class RobotServer:
                     "torque": s.current,
                     "temp": s.temperature,
                 }
+            # ゲインはテレメトリではなく構成情報なので dry-run 分岐の外で足す。
+            # 擬似値を作る意味が無く、中に入れると dry-run で全モータが
+            # 「調整不可」になって机上で UI を確かめられない
+            motors[motor_name]["pid"] = self._motor_pid_state(motor_name)
 
         # snapshot が未指定 (テストや単独呼び出し) の場合はその場で計算する。
         # _broadcast_state からの呼び出しは事前計算済みのものを使い回して二重計算を避ける。

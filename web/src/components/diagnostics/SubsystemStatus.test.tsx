@@ -25,7 +25,9 @@ const HEALTH: HealthSnapshot = {
   detail: null,
 };
 
-const MOTORS: Record<string, MotorState> = { y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 30 } };
+const MOTORS: Record<string, MotorState> = {
+  y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 30, pid: null },
+};
 
 function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
@@ -158,7 +160,7 @@ describe("SubsystemStatus", () => {
     renderWithRobot(
       <SubsystemStatus
         health={HEALTH}
-        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90 } }}
+        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
         safety={safety()}
       />,
     );

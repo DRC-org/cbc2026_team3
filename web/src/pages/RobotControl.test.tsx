@@ -34,7 +34,7 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
     waiting_trigger: false,
     running: false,
     steps: STEPS,
-    motors: { rotate_l: { pos: 0, vel: 0, torque: 0, temp: 30 } },
+    motors: { rotate_l: { pos: 0, vel: 0, torque: 0, temp: 30, pid: null } },
     health: {
       timestamp: 0,
       overall: "ok",

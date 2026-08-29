@@ -13,11 +13,30 @@ import type { EpochSeconds } from "@/lib/time";
  * (型が合っていても条件が弾けば画面には何も出ない)。
  */
 
+/**
+ * PC 側 PID を持つモータの現在ゲイン。
+ *
+ * `applies_to` はこの 1 基へ送ったときに実際に適用されるモータ名で、左右直結ペアなら
+ * 両方が入る。**名前から対を推測してはならない** — 「1 台だけに効かせてよいか」の
+ * 判断はサーバーの `_paired_with()` 1 箇所が持つ。
+ */
+export interface MotorPid {
+  kp: number;
+  ki: number;
+  kd: number;
+  applies_to: string[];
+}
+
 export interface MotorState {
   pos: number;
   vel: number;
   torque: number;
   temp: number;
+  /**
+   * null なら PC 側 PID を持たない (ドライバ・ファーム側でループを閉じている)。
+   * 調整対象かどうかの判定はこれだけで行い、ドライバ種別を UI へ書き写さない。
+   */
+  pid: MotorPid | null;
 }
 
 export type BusHealthState = "ok" | "degraded" | "down";
