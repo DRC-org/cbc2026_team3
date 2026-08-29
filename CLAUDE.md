@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|
 | `docs/impl_plan.md` | 実装計画・設計判断の記録。**すべての実装判断はこれに従う。設計変更・追加作業を行ったら必ず更新すること** |
 | `docs/motor_driver_can_protocol.md` | 自作モータドライバ CAN プロトコルの**単一情報源**。PC 側 `lib/drivers/generic.py` と `firmware/` の双方がこれに従う |
+| `docs/checks_and_health.md` | 点検とヘルスの全体像。ヘルス監視 / 動作確認 / 常駐保護 / 指差喚呼の 4 系統がどこで境界を持つか。**「今どうなっているか」はこれを見る**（`impl_plan.md` は経緯を積んだ文書なので、章によっては統合前の記述が残る） |
 
 ## コマンド
 
