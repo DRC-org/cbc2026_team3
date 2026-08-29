@@ -165,6 +165,11 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 //
 // 2: INFO にサーボ可動レンジ（Byte3-4）を追加。v1 は DLC=3 のままなので、PC 側は
 //    「レンジ不明」として扱い、期待値が書かれていれば不一致（＝焼き忘れ）と判定する。
+//
+// **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
+// PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
+// これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
+// 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
 constexpr uint8_t kFirmwareVersion = 2;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
