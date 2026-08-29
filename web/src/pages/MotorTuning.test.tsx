@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { MatchPhase, MotorPid, MotorState, RobotState } from "@/lib/protocol";
 import { MotorTuning } from "@/pages/MotorTuning";
@@ -54,17 +54,17 @@ const SEND_LABEL = "lift の PID を送信";
  * 拒否トーストが出てから気付くのでは遅い。押す前に分かる必要がある。
  */
 describe("MotorTuning の送信ゲート", () => {
-  it("準備フェーズでは 3 値をまとめて送れる", async () => {
+  it("準備フェーズでは 3 値を 1 通で送れる", async () => {
     const { context } = mount("setup");
 
     await userEvent.click(screen.getByRole("button", { name: SEND_LABEL }));
 
-    expect(context.send).toHaveBeenCalledTimes(3);
+    // 3 通に分けると混ざった状態が制御周期をまたいで残り、拒否も 3 連発になる
+    expect(context.send).toHaveBeenCalledTimes(1);
     expect(context.send).toHaveBeenCalledWith({
       type: "set_param",
       motor: "lift",
-      key: "kp",
-      value: 2,
+      gains: { kp: 2, ki: 0, kd: 0 },
     });
   });
 
@@ -144,20 +144,7 @@ describe("MotorTuning の現在値", () => {
     expect(context.send).toHaveBeenCalledWith({
       type: "set_param",
       motor: "lift",
-      key: "kp",
-      value: 2.5,
-    });
-    expect(context.send).toHaveBeenCalledWith({
-      type: "set_param",
-      motor: "lift",
-      key: "ki",
-      value: 0.25,
-    });
-    expect(context.send).toHaveBeenCalledWith({
-      type: "set_param",
-      motor: "lift",
-      key: "kd",
-      value: 0.125,
+      gains: { kp: 2.5, ki: 0.25, kd: 0.125 },
     });
   });
 
@@ -172,14 +159,7 @@ describe("MotorTuning の現在値", () => {
     expect(context.send).toHaveBeenCalledWith({
       type: "set_param",
       motor: "lift",
-      key: "kp",
-      value: 4,
-    });
-    expect(context.send).toHaveBeenCalledWith({
-      type: "set_param",
-      motor: "lift",
-      key: "ki",
-      value: 0,
+      gains: { kp: 4, ki: 0, kd: 0 },
     });
   });
 
@@ -269,10 +249,12 @@ describe("MotorTuning の対象選択", () => {
     await userEvent.click(screen.getByRole("button", { name: /rotate_l/ }));
     await userEvent.click(screen.getByRole("button", { name: "rotate_l の PID を送信" }));
 
-    expect(context.send).toHaveBeenCalledTimes(3);
-    for (const [command] of vi.mocked(context.send).mock.calls) {
-      expect(command).toMatchObject({ motor: "rotate_l" });
-    }
+    expect(context.send).toHaveBeenCalledTimes(1);
+    expect(context.send).toHaveBeenCalledWith({
+      type: "set_param",
+      motor: "rotate_l",
+      gains: { kp: 2, ki: 0, kd: 0 },
+    });
   });
 
   it("PC 側 PID を持たないモータは一覧に出さない", () => {
@@ -305,8 +287,7 @@ describe("MotorTuning の対象選択", () => {
     expect(context.send).toHaveBeenCalledWith({
       type: "set_param",
       motor: "lift",
-      key: "kp",
-      value: 3,
+      gains: { kp: 3, ki: 0, kd: 0 },
     });
   });
 

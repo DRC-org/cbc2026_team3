@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
@@ -236,8 +236,12 @@ class M3508PositionLoop(PausablePeriodicTask):
             "applies_to": list(self._paired_with(name)),
         }
 
-    def set_pid_gain(self, name: str, key: str, value: float) -> tuple[str, ...]:
+    def set_pid_gains(self, name: str, gains: Mapping[str, float]) -> tuple[str, ...]:
         """実行中に PID ゲインを差し替え、実際に更新したモータ名を返す。
+
+        3 値を 1 回で入れる。項目ごとに分けて呼ぶと、混ざった状態が 200Hz の
+        制御周期をまたいで残る (kp だけ新しく ki は古い、という組み合わせで
+        1 周期以上回る)。指定しなかった項目は据え置く。
 
         同期グループのメンバを指定した場合はグループ全員へ同じ値を入れる。
         左右直結ペアで追従特性が変わると互いに押し合って機構が壊れるため、
@@ -246,16 +250,25 @@ class M3508PositionLoop(PausablePeriodicTask):
 
         Raises:
             KeyError: このループに居ないモータ名
-            ValueError: 実行中の差し替え対象でないパラメータ名
+            ValueError: 実行中の差し替え対象でないパラメータ名、または空の指定
         """
         if name not in self._axes:
             raise KeyError(name)
-        if key not in TUNABLE_PID_KEYS:
-            raise ValueError(f"実行中に変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみ: {key}")
+        if not gains:
+            # 何も指定しない差し替えは誤送信。黙って成功させると、操縦者は
+            # 送ったつもりで一切効いていない状態に気付けない
+            raise ValueError("差し替えるゲインが 1 つも指定されていません")
 
+        unknown = [key for key in gains if key not in TUNABLE_PID_KEYS]
+        if unknown:
+            raise ValueError(
+                f"実行中に変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみ: {', '.join(unknown)}"
+            )
+
+        applied = {key: float(value) for key, value in gains.items()}
         targets = self._paired_with(name)
         for target in targets:
-            self._axes[target].pid.set_gains(**{key: float(value)})
+            self._axes[target].pid.set_gains(**applied)
         return targets
 
     def _paired_with(self, name: str) -> tuple[str, ...]:

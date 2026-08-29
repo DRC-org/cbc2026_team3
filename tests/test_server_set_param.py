@@ -62,7 +62,7 @@ class TestSetParamApplies:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _send_set_param(ws, motor="y_axis_r", key="kp", value=3.5)
+            await _send_set_param(ws, motor="y_axis_r", gains={"kp": 3.5})
             await asyncio.sleep(0.05)
 
             assert loop.pid("y_axis_r").kp == 3.5
@@ -75,25 +75,42 @@ class TestSetParamApplies:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _send_set_param(ws, motor="y_axis_l", key="ki", value=0.25)
+            await _send_set_param(ws, motor="y_axis_l", gains={"ki": 0.25})
             await asyncio.sleep(0.05)
 
             assert loop.pid("y_axis_l").ki == 0.25
             assert loop.pid("y_axis_r").ki == 0.25
             await ws.close()
 
-    async def test_all_three_keys_are_accepted(self) -> None:
+    async def test_three_gains_arrive_in_one_message(self) -> None:
+        """3 値は 1 通で運ぶ。
+
+        分けて送ると混ざった状態が 200Hz の制御周期をまたいで残り、通らないときの
+        拒否も 3 通に増える。
+        """
         fx, loop = _build_fixture()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            for key, value in (("kp", 1.5), ("ki", 0.1), ("kd", 0.05)):
-                await _send_set_param(ws, motor="y_axis_r", key=key, value=value)
+            await _send_set_param(ws, motor="y_axis_r", gains={"kp": 1.5, "ki": 0.1, "kd": 0.05})
             await asyncio.sleep(0.05)
 
             pid = loop.pid("y_axis_r")
             assert (pid.kp, pid.ki, pid.kd) == (1.5, 0.1, 0.05)
+            await ws.close()
+
+    async def test_partial_request_leaves_the_others_alone(self) -> None:
+        fx, loop = _build_fixture()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _send_set_param(ws, motor="y_axis_r", gains={"kd": 0.4})
+            await asyncio.sleep(0.05)
+
+            pid = loop.pid("y_axis_r")
+            assert (pid.kp, pid.ki, pid.kd) == (2.0, 0.0, 0.4)
             await ws.close()
 
     async def test_accepted_request_is_not_rejected(self) -> None:
@@ -102,7 +119,7 @@ class TestSetParamApplies:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _send_set_param(ws, motor="y_axis_r", key="kp", value=1.0)
+            await _send_set_param(ws, motor="y_axis_r", gains={"kp": 1.0})
 
             await expect_no_type(ws, "command_rejected")
             await ws.close()
@@ -125,30 +142,37 @@ class TestSetParamRejections:
         return msg
 
     async def test_unknown_motor_is_rejected(self) -> None:
-        msg = await self._expect_rejection({"motor": "nope", "key": "kp", "value": 1.0})
+        msg = await self._expect_rejection({"motor": "nope", "gains": {"kp": 1.0}})
         assert "nope" in msg["reason"]
 
     async def test_motor_without_pc_side_pid_is_rejected(self) -> None:
         """generic / EDULITE はドライバ側で制御しており PC 側に PID が無い。"""
-        msg = await self._expect_rejection({"motor": "gripper", "key": "kp", "value": 1.0})
+        msg = await self._expect_rejection({"motor": "gripper", "gains": {"kp": 1.0}})
         assert "gripper" in msg["reason"]
 
     async def test_unsupported_key_is_rejected(self) -> None:
-        await self._expect_rejection({"motor": "y_axis_r", "key": "dead_band", "value": 1.0})
+        await self._expect_rejection({"motor": "y_axis_r", "gains": {"dead_band": 1.0}})
 
-    async def test_missing_key_is_rejected(self) -> None:
-        await self._expect_rejection({"motor": "y_axis_r", "value": 1.0})
+    async def test_missing_gains_is_rejected(self) -> None:
+        await self._expect_rejection({"motor": "y_axis_r"})
+
+    async def test_empty_gains_is_rejected(self) -> None:
+        """1 つも指定しない差し替えは誤送信。受理すると送ったつもりで効かない。"""
+        await self._expect_rejection({"motor": "y_axis_r", "gains": {}})
+
+    async def test_non_object_gains_is_rejected(self) -> None:
+        await self._expect_rejection({"motor": "y_axis_r", "gains": 1.0})
 
     async def test_non_numeric_value_is_rejected(self) -> None:
-        await self._expect_rejection({"motor": "y_axis_r", "key": "kp", "value": "1.0"})
+        await self._expect_rejection({"motor": "y_axis_r", "gains": {"kp": "1.0"}})
 
     async def test_boolean_value_is_rejected(self) -> None:
         """bool は Python では int だが、ゲインとしては明らかに誤送信。"""
-        await self._expect_rejection({"motor": "y_axis_r", "key": "kp", "value": True})
+        await self._expect_rejection({"motor": "y_axis_r", "gains": {"kp": True}})
 
     async def test_negative_gain_is_rejected(self) -> None:
         """負のゲインは正帰還になり発散する。"""
-        await self._expect_rejection({"motor": "y_axis_r", "key": "kp", "value": -1.0})
+        await self._expect_rejection({"motor": "y_axis_r", "gains": {"kp": -1.0}})
 
     async def test_過大なゲインは拒否される(self) -> None:
         """出力レンジを超えるゲインは調整ではなく打ち間違い。
@@ -158,7 +182,7 @@ class TestSetParamRejections:
         目標を入れた瞬間にフルスケール電流が出る形なので、下限と同じく上限も要る。
         """
         msg = await self._expect_rejection(
-            {"motor": "y_axis_r", "key": "kp", "value": MAX_TUNABLE_GAIN * 10}
+            {"motor": "y_axis_r", "gains": {"kp": MAX_TUNABLE_GAIN * 10}}
         )
         assert str(int(MAX_TUNABLE_GAIN)) in msg["reason"]
 
@@ -169,7 +193,7 @@ class TestSetParamRejections:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _send_set_param(ws, motor="y_axis_r", key="kp", value=MAX_TUNABLE_GAIN)
+            await _send_set_param(ws, motor="y_axis_r", gains={"kp": MAX_TUNABLE_GAIN})
             await expect_no_type(ws, "command_rejected")
             await ws.close()
 
@@ -183,7 +207,7 @@ class TestSetParamRejections:
             ws = await client.ws_connect("/ws")
             # JSON に NaN/Infinity のリテラルは無いので文字列経由で送る
             await ws.send_str(
-                '{"type": "set_param", "motor": "y_axis_r", "key": "kp", "value": Infinity}'
+                '{"type": "set_param", "motor": "y_axis_r", "gains": {"kp": Infinity}}'
             )
             msg = await recv_type(ws, "command_rejected")
             await ws.close()
@@ -198,7 +222,7 @@ class TestSetParamRejections:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _send_set_param(ws, motor="y_axis_r", key="kp", value=-3.0)
+            await _send_set_param(ws, motor="y_axis_r", gains={"kp": -3.0})
             await recv_type(ws, "command_rejected")
             await ws.close()
 
@@ -257,7 +281,7 @@ class TestPidGainsAreBroadcast:
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await require_type(ws, "state")
-            await _send_set_param(ws, motor="y_axis_r", key="kp", value=3.5)
+            await _send_set_param(ws, motor="y_axis_r", gains={"kp": 3.5})
             await asyncio.sleep(0.05)
 
             assert await _wait_for_gain(ws, "y_axis_r", "kp", 3.5)

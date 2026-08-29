@@ -161,11 +161,11 @@ export function MotorTuning() {
     setValues((prev) => ({ ...prev, [key]: { ...prev[key], [param]: val } }));
   };
 
-  // 3 項目を個別に送ると PID が中途半端に混ざった状態が一瞬できる。まとめて送る
+  // 3 項目を個別に送ると PID が中途半端に混ざった状態が制御周期をまたいで残り、
+  // 通らないときの拒否も 3 通になる。1 通にまとめてサーバーへ渡す
   const sendAll = (entry: Entry) => {
-    for (const { key } of PID_PARAMS) {
-      send({ type: "set_param", motor: entry.motor, key, value: getValue(entry, key) });
-    }
+    const gains = Object.fromEntries(PID_PARAMS.map(({ key }) => [key, getValue(entry, key)]));
+    send({ type: "set_param", motor: entry.motor, gains });
   };
 
   // 試合中の set_param はサーバーが拒否する (走行中の位置制御ループの特性が変わり、
