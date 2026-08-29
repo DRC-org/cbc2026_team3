@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 
 from lib.sequence.engine import Sequence, step
+from lib.sequence.homing import HomingRunner
+from lib.sequence.motors import AxisHandle
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,45 @@ class MotorCheckSequence(Sequence):
 
     def __init__(self, name: str = "motor_check") -> None:
         super().__init__(name)
+        self._homing: HomingRunner | None = None
+
+    def bind_homing(self, runner: HomingRunner) -> None:
+        """零点確定の実行口を注入する。
+
+        未注入でもシーケンスは走る (ホーミングのステップが「対象なし」で素通りする)。
+        机上ベンチや、センサをまだ配線していない構成で動作確認だけ試せるようにするため。
+        """
+        self._homing = runner
+
+    # ------------------------------------------------------------------ #
+    #  零点確定
+    # ------------------------------------------------------------------ #
+
+    @step("リミットスイッチで零点を確定する")
+    async def home_axes(self) -> None:
+        """`homing:` を書いた軸をリミットスイッチまで寄せ、原点を切り直す。
+
+        **必ず最初に走らせる。** 零点が未確定のまま位置指令を出すと、電源投入位置を
+        原点とみなして全ステップが同じだけずれた場所へ動く。
+
+        失敗 (`HomingError`) はシーケンスを止める。原点がずれたまま走るより、
+        動かないまま止まって操縦者に知らせるほうが安全なので、握り潰さない。
+        """
+        if self._homing is None:
+            logger.info("[motor_check] 零点確定: 実行口が未注入のため飛ばす")
+            return
+
+        table = self.positions
+        targets = [name for name in table.axes if table.axis(name).homing is not None]
+        if not targets:
+            logger.info("[motor_check] 零点確定: homing を持つ軸が無いため飛ばす")
+            return
+
+        for axis in targets:
+            spec = table.axis(axis)
+            logger.info("[motor_check] 零点確定: %s", axis)
+            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
+            await self._homing.home(spec, handle)
 
     # ------------------------------------------------------------------ #
     #  メインハンド

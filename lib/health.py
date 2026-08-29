@@ -114,4 +114,3 @@ class HealthSnapshot:
             if rank == worst_rank:
                 return state
         return BusHealth.OK
-

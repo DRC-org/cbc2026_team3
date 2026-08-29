@@ -21,6 +21,7 @@ from lib.config_schema import (
     load_robot_config,
     load_system_config,
 )
+from lib.control.feedback import FeedbackFreshness
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
@@ -32,6 +33,7 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
+from lib.sequence.homing import HomingError, HomingRunner
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
@@ -169,28 +171,6 @@ def _load_all_configs(
     return system, loaded
 
 
-def _collect_per_motor_overrides(
-    robots: list[RobotConfig],
-) -> dict[str, dict[str, float]]:
-    """各 config の motors[name].motor_check を集約してフラットな辞書に変換する。
-
-    返り値の例:
-        {
-            "lift_motor": {"magnitude": 800.0, "timeout_ms": 2000.0},
-            "gripper": {"timeout_ms": 2500.0},
-        }
-
-    モータ名衝突は実機構成では起きない想定だが、もし発生した場合は後勝ちとなる。
-    """
-    overrides: dict[str, dict[str, float]] = {}
-    for robot in robots:
-        for motor_name, motor in robot.motors.items():
-            entry = motor.motor_check.as_dict()
-            if entry:
-                overrides[motor_name] = entry
-    return overrides
-
-
 def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistItem]]:
     """チェックリスト yaml を読み込む。存在しなければ空定義で起動する。
 
@@ -225,10 +205,46 @@ def _load_position_table_file(path: pathlib.Path) -> PositionTable:
         return PositionTable.empty(source=str(path))
 
 
+def _make_capture_origin(
+    loops: list[M3508PositionLoop],
+    table: PositionTable,
+) -> Callable[[str], None]:
+    """軸名 → その軸の現在位置を原点として確定する関数。
+
+    **左右ペアはグループ単位でしか確定しない。** 別々の時刻に確定すると、その間に
+    片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に偏差超過で
+    止まる。判断は `M3508PositionLoop.set_group_origin_here` に委ねる。
+
+    対象が見つからなければ例外にする。黙って何もしないと「原点を確定したつもり」で
+    シーケンスが先へ進み、ずれた座標のまま全ステップが走る。
+    """
+
+    def capture(axis: str) -> None:
+        spec = table.axis(axis)
+        for loop in loops:
+            if axis in loop.sync_group_names:
+                loop.set_group_origin_here(axis)
+                return
+            for motor in spec.motor_names:
+                if motor in loop.motor_names:
+                    loop.set_origin_here(motor)
+                    return
+        raise HomingError(
+            f"軸 '{axis}' の原点を確定できません"
+            " (PC 側位置制御ループに載っていないモータでは零点確定を実行できない)"
+        )
+
+    return capture
+
+
 def _wire_motor_check_sequence(
     server: RobotServer,
     groups: list[MotorGroup],
     tables: list[PositionTable],
+    *,
+    loops: list[M3508PositionLoop],
+    can_managers: list[CANManager],
+    feedback_timeout_ms: float,
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
 
@@ -249,9 +265,7 @@ def _wire_motor_check_sequence(
     required = {*MAIN_HOME, *SUB_HOME, *VALVE_AXES}
     missing = required - set(merged.axes)
     if missing:
-        logger.warning(
-            "統合動作確認: 必要な軸が足りないため登録しない (不足: %s)", sorted(missing)
-        )
+        logger.warning("統合動作確認: 必要な軸が足りないため登録しない (不足: %s)", sorted(missing))
         return
 
     motors = MotorGroup()
@@ -262,13 +276,59 @@ def _wire_motor_check_sequence(
     sequence = MotorCheckSequence()
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
+
+    homing_axes = [name for name in merged.axes if merged.axis(name).homing is not None]
+    if homing_axes:
+        # センサはロボットをまたいで一意なので、全 CANManager から引ける形にする
+        sensors = {name: sensor for mgr in can_managers for name, sensor in mgr.sensors.items()}
+        freshness = FeedbackFreshness(
+            _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
+        )
+
+        def _sensor_active(name: str) -> bool:
+            sensor = sensors.get(name)
+            # 未登録のセンサは「触れていない」ではなく途絶として扱わせる
+            # (下の _sensor_is_stale が True を返すので 1 歩も動かさない)
+            return sensor is not None and bool(getattr(sensor, "sensor_active", False))
+
+        def _sensor_is_stale(name: str) -> bool:
+            if name not in sensors:
+                logger.error("零点確定: センサ '%s' が config の sensors: に居ません", name)
+                return True
+            return freshness.is_stale(name, freshness.now())
+
+        sequence.bind_homing(
+            HomingRunner(
+                sensor_active=_sensor_active,
+                sensor_is_stale=_sensor_is_stale,
+                capture_origin=_make_capture_origin(loops, merged),
+            )
+        )
+
     server.set_motor_check_sequence(sequence)
     logger.info(
-        "統合動作確認シーケンス登録: %d ステップ (モータ %d 台, 軸 %d 本)",
+        "統合動作確認シーケンス登録: %d ステップ (モータ %d 台, 軸 %d 本, 零点確定: %s)",
         len(sequence.steps),
         len(motors),
         len(merged.axes),
+        homing_axes or "なし",
     )
+
+
+def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
+    """全 CANManager を横断して最終受信時刻を引く。
+
+    センサ名はロボット横断に一意なので、どのマネージャが持っていても答えは 1 つ。
+    """
+
+    def last_feedback_at(name: str) -> float | None:
+        for mgr in managers:
+            at = mgr.last_feedback_at(name)
+            if at is not None:
+                return at
+        return None
+
+    return last_feedback_at
 
 
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
@@ -792,7 +852,14 @@ async def main() -> None:
     # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
     # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、
     # 可動域の重なる位置で干渉しうる
-    _wire_motor_check_sequence(server, check_motor_groups, check_position_tables)
+    _wire_motor_check_sequence(
+        server,
+        check_motor_groups,
+        check_position_tables,
+        loops=position_loops,
+        can_managers=can_managers,
+        feedback_timeout_ms=health.feedback_timeout_ms,
+    )
 
     try:
         for mgr in can_managers:

@@ -470,6 +470,32 @@ class TestShippedRobotConfig:
 
         assert duplicated == {}
 
+    def test_homing_sensors_are_registered(self) -> None:
+        """`homing.sensor` に書いた名前が config の `sensors:` に居ること。
+
+        居ないと零点確定は「センサが応答していません」で必ず失敗する。しかも
+        症状は配線不良と区別が付かないので、実機の前で切り分けることになる。
+
+        rotate の homing はハード追加待ちでコメントアウトしてある。外すときに
+        `sensors:` への追加を忘れると、ここで落ちる。
+        """
+        sensors: set[str] = set()
+        for path in sorted(_CONFIG_DIR.glob("*.yaml")):
+            if path.name.endswith("_positions.yaml"):
+                continue
+            config = yaml.safe_load(path.read_text()) or {}
+            sensors |= set(config.get("sensors") or {})
+
+        required: set[str] = set()
+        for path in sorted(_CONFIG_DIR.glob("*_positions.yaml")):
+            table = _load_shipped(path.name)
+            for axis in table.axes:
+                homing = table.axis(axis).homing
+                if homing is not None:
+                    required.add(homing.sensor)
+
+        assert required <= sensors
+
     def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
         """自動判定できないものは、すべて目視確認項目で埋めること。
 

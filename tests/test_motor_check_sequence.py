@@ -122,6 +122,29 @@ class TestFinalPosture:
             assert last[axis] == "closed"
 
 
+class TestHomingComesFirst:
+    def test_零点確定が最初のステップ(self) -> None:
+        """零点が未確定のまま位置指令を出すと、電源投入位置を原点とみなして
+        全ステップが同じだけずれた場所へ動く。"""
+        first = MotorCheckSequence("x").steps[0]
+
+        assert "零点" in first.label
+
+    async def test_零点確定は実行口が無ければ素通りする(self) -> None:
+        """机上ベンチやセンサ未配線の構成でも、動作確認そのものは試せること。"""
+        seq = MotorCheckSequence()
+        # bind_homing を呼ばない = 実行口が無い状態
+        await seq.home_axes()  # 例外にならなければよい
+
+    async def test_homing_を持つ軸だけを対象にする(self) -> None:
+        """`homing:` を書いていない軸を巻き込むと、原点の無い軸を動かし続ける。"""
+        table = _shipped_table()
+        homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
+
+        # 出荷 config では y_axis だけ (rotate はハード追加待ちでコメントアウト)
+        assert homing_axes == ["y_axis"]
+
+
 class TestStepShape:
     def test_操縦者のトリガー待ちを持たない(self) -> None:
         """20 個以上のアクチュエータを 1 つずつ送らせると操作の手数が確認を上回る。

@@ -235,4 +235,3 @@ class TestComputeOverall:
 
     def test_empty_inputs_default_ok(self) -> None:
         assert HealthSnapshot.compute_overall([], []) is BusHealth.OK
-
