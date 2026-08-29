@@ -645,6 +645,10 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |
 | 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
+| PID 調整画面が現在値を持つ | `_build_state_message` の `pid` 付与を消す / `pid` を dry-run 分岐の中だけに置く / UI の `getValue` を `?? 0` に戻す | `test_server_set_param.py` / `test_ws_contract.py` / `MotorTuning.test.tsx` |
+| ゲインの適用先を推測させない | `pid_gains()` の `applies_to` を `[name]` 固定にする | `test_runtime_pid_gain.py` / `test_server_set_param.py` / `MotorTuning.test.tsx` |
+| 3 値は 1 回で入る | `set_pid_gains` で `kp` だけ適用し `ki` / `kd` を捨てる | `test_runtime_pid_gain.py` / `test_server_set_param.py` |
+| モータ名はロボット横断に一意 | `config/sub_hand.yaml` のモータ名を `main_hand` と重複させる | `test_robot_sequences.py` |
 | 手動と動作確認の排他 | `_start_motor_check` の手動拒否を落とす / 切替側の実行タスク判定を落とす | `test_server_motor_check.py`（`TestMotorCheckAndManualAreExclusive`） |
 | 手動でもペア軸は同一フレームで指令される | `ManualController._send` を `AxisHandle` 経由からモータ単体の逐次送信へ戻す | `test_manual.py` |
 | 手動指令は可動範囲を出ない | `ManualSpec.clamp` を素通しにする / `_require_manual` を外す / `_check_manual_range` を落とす | `test_manual.py` / `test_sequence_positions.py` |
@@ -1145,8 +1149,14 @@ cbc2026_team3/
     { "index": 1, "label": "ワーク前まで前進", "require_trigger": true }
   ],
   "motors": {
-    "m3508_1": { "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0 },
-    "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0 }
+    // pid は PC 側 PID を持つモータだけが持つ。applies_to は「このモータへ送ると
+    // 実際に適用されるモータ名」で、左右直結ペアなら両方が入る
+    "m3508_1": {
+      "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0,
+      "pid": { "kp": 2.0, "ki": 0.0, "kd": 0.0, "applies_to": ["y_axis_r", "y_axis_l"] }
+    },
+    // ドライバ / ファーム側でループを閉じているモータは null
+    "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0, "pid": null }
   },
   "e_stop_active": false,
   "health": { /* HealthSnapshot */ },
@@ -1254,7 +1264,7 @@ UI に「読めていない」ことを出させる）。
 { "type": "sequence_start", "robot": "main_hand" }
 { "type": "e_stop" }
 { "type": "e_stop_release" }
-{ "type": "set_param", "motor": "m3508_1", "key": "kp", "value": 1.5 }
+{ "type": "set_param", "motor": "m3508_1", "gains": { "kp": 1.5, "ki": 0.0, "kd": 0.1 } }
 
 // 手動操縦 (調整時・緊急時の補助操縦)
 { "type": "set_operation_mode", "robot": "main_hand", "mode": "manual" }  // "sequence" | "manual"
@@ -1330,6 +1340,28 @@ UI にもモータ単位のジョグを出さない。
 
 `/pid-tuning` タブから実行中に PID ゲインを差し替える。
 
+**現在ゲインの単一の出どころは `state.motors[].pid`。** UI に初期値を持たせてはならない。
+かつてサーバーがゲインを配信しておらず、画面は `0` で初期化していた。開いた直後の表示
+`0.00` をそのまま送ると `kp=0, ki=0, kd=0` が適用され、`y_axis` の位置制御ループが無効に
+なる（検証は負値だけを弾くので 0 は正常値として通る）。しかも画面には元の値がどこにも
+無いため、操縦者には config を読む以外に戻す術が無かった。`pid` は `manual.axes` と同じく
+「静的だが state に載せる」情報で、載せる理由も同じ ── UI にモータ名も構成も書かせないため。
+
+- **`pid: null` が「PC 側 PID を持たない」の単一の表現。** UI の調整対象の選り分けもこれだけで
+  行い、ドライバ種別を UI へ書き写さない。欠けた配信は「調整不可」へ倒す（調整できる側へ
+  倒すと、値を持たないまま送る = 0 上書きの経路が戻る）
+- **`applies_to` はサーバーの `_paired_with()` の答えをそのまま配る。** UI に名前から対を
+  推測させると、「1 台だけに効かせてよいか」の判断が 2 箇所に増える
+- **`_motor_pid_state()` は dry-run 分岐の外で呼ぶ。** ゲインはテレメトリではなく構成情報で
+  擬似値を作る意味が無く、分岐の中に入れると dry-run では全モータが「調整不可」になり、
+  机上で UI を確かめられなくなる
+
+**3 値は 1 通で運ぶ**（`{ "motor": ..., "gains": { "kp": ..., "ki": ..., "kd": ... } }`）。
+項目ごとに分けると、混ざった状態が 200Hz の制御周期をまたいで残り（kp だけ新しく ki は古い、
+という組み合わせで 1 周期以上回る）、通らないときの拒否も 3 通に増える。指定しなかった項目は
+据え置く。1 つでも通らなければ 1 つも適用しない（半分だけ入ると、操縦者が意図しない PID の
+組み合わせで機体が動く）。
+
 - **対象は M3508 だけ。** 位置制御を PC 側の `PIDController` で閉じているのは M3508 の
   位置制御ループだけで、EDULITE 05 と自作モータドライバはドライバ / ファーム側でループを
   閉じているため、PC 側に書き換えられるゲインが存在しない（自作モタドラの `SET_PARAM` は
@@ -1337,13 +1369,14 @@ UI にもモータ単位のジョグを出さない。
   「見つかりません」ではなくその旨を理由として返す
 - **変更できるのは `kp` / `ki` / `kd`（`TUNABLE_PID_KEYS`）のみ。** `output_limit` / `dead_band` /
   `integral_limit` は起動時の config だけで決まる
-- **同期グループのメンバを指定したらグループ全員へ同じ値を入れる**（`M3508PositionLoop.set_pid_gain`）。
+- **同期グループのメンバを指定したらグループ全員へ同じ値を入れる**（`M3508PositionLoop.set_pid_gains`）。
   左右直結ペアで追従特性が変わると互いに押し合って機構が壊れるため、「片側だけ別ゲイン」という
   状態をサーバー側で作れてはならない（チューニング UI はモータ 1 基ずつしか送れない）
 - **通らない要求は必ず `command_rejected` で理由を返す。** 黙ってログを出すだけだと、操縦者は
   送信できたと信じたまま、効いていないゲインで調整を続けることになる。拒否する条件は
-  モータ名が空 / 対象キーでない / 値が数値でない（`bool` を含む）/ 非有限（NaN・inf）/ 負値 /
-  `MAX_TUNABLE_GAIN`（= `CURRENT_MAX` = 16384）超過。
+  モータ名が空 / `gains` が無い・空・オブジェクトでない / 対象キーでない / 値が数値でない
+  （`bool` を含む）/ 非有限（NaN・inf）/ 負値 / `MAX_TUNABLE_GAIN`（= `CURRENT_MAX` = 16384）超過。
+  **空の `gains` を受理してはならない** ── 送ったつもりで一切効いていない状態に気付けない。
   **負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する。**
   上限が無いと `kp=1e6` のような打ち間違いがそのまま通る。出力は ±`CURRENT_MAX` [counts] に
   飽和するので、それを超えるゲインは調整ではなくバンバン制御にしかならない
@@ -1352,8 +1385,19 @@ UI にもモータ単位のジョグを出さない。
   両方が負荷下で同時に特性変化する。チューニングはセッティングタイムか試合後に行う
 - 緊急停止中も拒否する（「緊急停止によるコマンドゲート」参照）
 
-検証は `tests/test_server_set_param.py`（受理・拒否の分岐）と
-`tests/test_runtime_pid_gain.py`（ペア軸を別特性にしないこと）。
+**UI 側の作業レンジ（Kp≤10 / Ki≤5 / Kd≤5）はサーバーの上限ではない。** config の値が
+これを超えていたらレンジ側を広げる。クランプすると、表示された値と機体の実際のゲインが
+食い違う。同じ理由で入力欄は固定小数点で丸めない（`kd: 0.125` が `0.13` と表示される）。
+
+**モータ名はロボット横断に一意でなければならない。** `_find_position_loop()` は全ロボットの
+位置制御ループを名前だけで走査して最初に見つかったものを返すため、同名が両機に居ると片方は
+永久にゲインを差し替えられない（症状は「送信しても効かない」だけで、拒否も出ないので画面から
+原因が分からない）。ヘルス表示・動作確認・チェックリストも同じく名前で突き合わせている。
+`tests/test_robot_sequences.py` が can_id と同じ形で固定している。
+
+検証は `tests/test_server_set_param.py`（受理・拒否の分岐と `pid` の配信）、
+`tests/test_runtime_pid_gain.py`（ペア軸を別特性にしないこと・3 値の同時適用）、
+`web/src/pages/MotorTuning.test.tsx`（現在値の表示と調整対象の絞り込み）。
 
 ### dry-run モード
 

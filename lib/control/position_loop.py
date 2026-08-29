@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from lib.axis_sync import SyncGroup
 from lib.config_schema import DEFAULT_HEALTH
@@ -26,8 +26,23 @@ __all__ = [
     "MAX_TUNABLE_GAIN",
     "TUNABLE_PID_KEYS",
     "M3508PositionLoop",
+    "PidGains",
     "make_position_pid",
 ]
+
+
+class PidGains(TypedDict):
+    """UI へ配る 1 モータ分の現在ゲイン。
+
+    ``applies_to`` を同じ dict に入れてあるのは、「現在値」と「送ると誰に効くか」を
+    別々に運ぶと片方だけ更新された状態が作れてしまうため。
+    """
+
+    kp: float
+    ki: float
+    kd: float
+    applies_to: list[str]
+
 
 # 実行中に差し替えてよい PID パラメータ。出力レンジ・不感帯・積分上限は機構の
 # 保護値なので操縦者の調整対象にしない (誤って緩めると保護が消える)
@@ -202,8 +217,31 @@ class M3508PositionLoop(PausablePeriodicTask):
     def pid(self, name: str) -> PIDController:
         return self._axes[name].pid
 
-    def set_pid_gain(self, name: str, key: str, value: float) -> tuple[str, ...]:
+    def pid_gains(self, name: str) -> PidGains:
+        """UI へ配る現在ゲイン。``set_pid_gain`` の対になる読み口。
+
+        ``applies_to`` はこのモータへ送ったときに実際に適用されるモータ名で、
+        左右直結ペアなら両方が入る。ここまで含めて配るのは、「1 台だけに効かせて
+        よいか」の判断を ``_paired_with()`` の 1 箇所に保つため。UI に名前から
+        推測させると判断が 2 箇所に増え、片方だけ直したときに気付けない。
+
+        Raises:
+            KeyError: このループに居ないモータ名
+        """
+        pid = self._axes[name].pid
+        return {
+            "kp": pid.kp,
+            "ki": pid.ki,
+            "kd": pid.kd,
+            "applies_to": list(self._paired_with(name)),
+        }
+
+    def set_pid_gains(self, name: str, gains: Mapping[str, float]) -> tuple[str, ...]:
         """実行中に PID ゲインを差し替え、実際に更新したモータ名を返す。
+
+        3 値を 1 回で入れる。項目ごとに分けて呼ぶと、混ざった状態が 200Hz の
+        制御周期をまたいで残る (kp だけ新しく ki は古い、という組み合わせで
+        1 周期以上回る)。指定しなかった項目は据え置く。
 
         同期グループのメンバを指定した場合はグループ全員へ同じ値を入れる。
         左右直結ペアで追従特性が変わると互いに押し合って機構が壊れるため、
@@ -212,16 +250,25 @@ class M3508PositionLoop(PausablePeriodicTask):
 
         Raises:
             KeyError: このループに居ないモータ名
-            ValueError: 実行中の差し替え対象でないパラメータ名
+            ValueError: 実行中の差し替え対象でないパラメータ名、または空の指定
         """
         if name not in self._axes:
             raise KeyError(name)
-        if key not in TUNABLE_PID_KEYS:
-            raise ValueError(f"実行中に変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみ: {key}")
+        if not gains:
+            # 何も指定しない差し替えは誤送信。黙って成功させると、操縦者は
+            # 送ったつもりで一切効いていない状態に気付けない
+            raise ValueError("差し替えるゲインが 1 つも指定されていません")
 
+        unknown = [key for key in gains if key not in TUNABLE_PID_KEYS]
+        if unknown:
+            raise ValueError(
+                f"実行中に変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみ: {', '.join(unknown)}"
+            )
+
+        applied = {key: float(value) for key, value in gains.items()}
         targets = self._paired_with(name)
         for target in targets:
-            self._axes[target].pid.set_gains(**{key: float(value)})
+            self._axes[target].pid.set_gains(**applied)
         return targets
 
     def _paired_with(self, name: str) -> tuple[str, ...]:

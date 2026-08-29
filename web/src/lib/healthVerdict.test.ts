@@ -54,7 +54,7 @@ function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
 }
 
 function motor(temp: number): MotorState {
-  return { pos: 0, vel: 0, torque: 0, temp };
+  return { pos: 0, vel: 0, torque: 0, temp, pid: null };
 }
 
 function safety(over: Partial<SafetyState> = {}): SafetyState {

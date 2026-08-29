@@ -350,6 +350,29 @@ class TestShippedRobotConfig:
 
         assert duplicated == {}
 
+    def test_motor_names_are_unique_across_robots(self) -> None:
+        """モータ名はロボット横断に一意であること。
+
+        サーバーはモータを名前で引く。``_find_position_loop`` は全ロボットの位置制御
+        ループを名前だけで走査して最初に見つかったものを返すため、同名が両機に居ると
+        片方は永久に PID を差し替えられない (症状は「送信しても効かない」だけで、
+        拒否も出ないので画面からは原因が分からない)。
+
+        ヘルス表示・動作確認・チェックリストも同じく名前で突き合わせているので、
+        can_id と同様ここで固定しておく。
+        """
+        owners: dict[str, list[str]] = collections.defaultdict(list)
+
+        for path in sorted(_CONFIG_DIR.glob("*.yaml")):
+            config = yaml.safe_load(path.read_text()) or {}
+            for section in ("motors", "sensors"):
+                for name in config.get(section) or {}:
+                    owners[name].append(f"{path.name}:{section}")
+
+        duplicated = {name: places for name, places in owners.items() if len(places) > 1}
+
+        assert duplicated == {}
+
     @pytest.mark.parametrize(
         ("robot_config", "yaml_name", "motor_name", "position_name"),
         [

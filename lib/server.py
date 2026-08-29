@@ -21,7 +21,12 @@ from lib.config_schema import (
     HealthThresholds,
     MatchSettings,
 )
-from lib.control.position_loop import MAX_TUNABLE_GAIN, TUNABLE_PID_KEYS, M3508PositionLoop
+from lib.control.position_loop import (
+    MAX_TUNABLE_GAIN,
+    TUNABLE_PID_KEYS,
+    M3508PositionLoop,
+    PidGains,
+)
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
@@ -720,6 +725,9 @@ class RobotServer:
     ) -> None:
         """PID ゲインを実行中に差し替える (/pid-tuning タブ)。
 
+        3 値を 1 通で受ける。項目ごとに分けると混ざった状態が 200Hz の制御周期を
+        またいで残り、通らないときの拒否も 3 通に増える。
+
         対象は M3508 だけ。位置制御を PC 側の PIDController で閉じているのは M3508 の
         位置制御ループのみで、EDULITE 05 と自作モータドライバはドライバ/ファーム側で
         ループを閉じているため PC 側に書き換えられるゲインが存在しない
@@ -729,46 +737,21 @@ class RobotServer:
         送信できたと信じたまま効いていないゲインで調整を続けることになる。
         """
         motor_name = data.get("motor")
-        key = data.get("key")
-        value = data.get("value")
+        gains = data.get("gains")
 
         if not isinstance(motor_name, str) or not motor_name:
             await self._reject_command(requester, "set_param", "モータが指定されていません")
             return
 
-        if not isinstance(key, str) or key not in TUNABLE_PID_KEYS:
+        if not isinstance(gains, dict) or not gains:
             await self._reject_command(
-                requester,
-                "set_param",
-                f"変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみです (受け取った: {key!r})",
+                requester, "set_param", "差し替えるゲインが指定されていません"
             )
             return
 
-        # bool は Python では int だが、ゲインとして送られてきた時点で誤送信
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            await self._reject_command(
-                requester, "set_param", f"{key} の値が数値ではありません: {value!r}"
-            )
-            return
-        if not math.isfinite(value):
-            await self._reject_command(
-                requester, "set_param", f"{key} の値が有限ではありません: {value!r}"
-            )
-            return
-        if value < 0:
-            # 負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する
-            await self._reject_command(
-                requester, "set_param", f"{key} に負の値は指定できません: {value}"
-            )
-            return
-        if value > MAX_TUNABLE_GAIN:
-            # 上限が無いと kp=1e6 のような打ち間違いがそのまま通る。出力は
-            # ±CURRENT_MAX に飽和するので、その先は調整ではなくバンバン制御になる
-            await self._reject_command(
-                requester,
-                "set_param",
-                f"{key} の上限は {MAX_TUNABLE_GAIN:.0f} です (受け取った: {value})",
-            )
+        reason = self._invalid_gain_reason(gains)
+        if reason is not None:
+            await self._reject_command(requester, "set_param", reason)
             return
 
         loop = self._find_position_loop(motor_name)
@@ -783,8 +766,44 @@ class RobotServer:
             await self._reject_command(requester, "set_param", reason)
             return
 
-        affected = loop.set_pid_gain(motor_name, key, float(value))
-        logger.info("set_param: %s=%s を適用 (%s)", key, value, ", ".join(affected))
+        affected = loop.set_pid_gains(motor_name, gains)
+        applied = ", ".join(f"{key}={gains[key]}" for key in sorted(gains))
+        logger.info("set_param: %s を適用 (%s)", applied, ", ".join(affected))
+
+    def _invalid_gain_reason(self, gains: dict) -> str | None:
+        """受け取ったゲイン一式を検証する。問題が無ければ None。
+
+        1 つでも通らなければ 1 つも適用しない。半分だけ入ると、操縦者が意図しない
+        PID の組み合わせで機体が動く。
+        """
+        for key, value in gains.items():
+            if not isinstance(key, str) or key not in TUNABLE_PID_KEYS:
+                return f"変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみです (受け取った: {key!r})"
+
+            # bool は Python では int だが、ゲインとして送られてきた時点で誤送信
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return f"{key} の値が数値ではありません: {value!r}"
+            if not math.isfinite(value):
+                return f"{key} の値が有限ではありません: {value!r}"
+            if value < 0:
+                # 負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する
+                return f"{key} に負の値は指定できません: {value}"
+            if value > MAX_TUNABLE_GAIN:
+                # 上限が無いと kp=1e6 のような打ち間違いがそのまま通る。出力は
+                # ±CURRENT_MAX に飽和するので、その先は調整ではなくバンバン制御になる
+                return f"{key} の上限は {MAX_TUNABLE_GAIN:.0f} です (受け取った: {value})"
+        return None
+
+    def _motor_pid_state(self, motor_name: str) -> PidGains | None:
+        """UI へ配る現在ゲイン。PC 側 PID を持たないモータは None。
+
+        配らなかった頃、/pid-tuning は現在値を知る手段が無いまま初期値 0 を表示し、
+        そのまま送ると全ゲインが 0 になった。None は「ドライバ・ファーム側で
+        制御していて PC からは変更できない」の単一の表現でもあり、UI はこれだけで
+        調整対象を選り分ける (判定を UI 側に書き写さない)。
+        """
+        loop = self._find_position_loop(motor_name)
+        return None if loop is None else loop.pid_gains(motor_name)
 
     def _find_position_loop(self, motor_name: str) -> M3508PositionLoop | None:
         """指定モータを制御している M3508 位置制御ループを探す。"""
@@ -1561,6 +1580,10 @@ class RobotServer:
                     "torque": s.current,
                     "temp": s.temperature,
                 }
+            # ゲインはテレメトリではなく構成情報なので dry-run 分岐の外で足す。
+            # 擬似値を作る意味が無く、中に入れると dry-run で全モータが
+            # 「調整不可」になって机上で UI を確かめられない
+            motors[motor_name]["pid"] = self._motor_pid_state(motor_name)
 
         # snapshot が未指定 (テストや単独呼び出し) の場合はその場で計算する。
         # _broadcast_state からの呼び出しは事前計算済みのものを使い回して二重計算を避ける。

@@ -105,23 +105,46 @@ def _build_loop() -> tuple[M3508PositionLoop, _StubCANManager]:
     return loop, manager
 
 
-class TestPositionLoopSetPidGain:
+class TestPositionLoopSetPidGains:
     def test_unknown_motor_raises_key_error(self) -> None:
         loop, _ = _build_loop()
         with pytest.raises(KeyError):
-            loop.set_pid_gain("nope", "kp", 1.0)
+            loop.set_pid_gains("nope", {"kp": 1.0})
 
     def test_unknown_key_raises_value_error(self) -> None:
         loop, _ = _build_loop()
         with pytest.raises(ValueError, match="kp"):
-            loop.set_pid_gain("solo", "integral_limit", 1.0)
+            loop.set_pid_gains("solo", {"integral_limit": 1.0})
+
+    def test_empty_request_raises_value_error(self) -> None:
+        """1 つも指定しない差し替えは誤送信。黙って成功させない。"""
+        loop, _ = _build_loop()
+        with pytest.raises(ValueError):
+            loop.set_pid_gains("solo", {})
 
     def test_solo_motor_is_updated_alone(self) -> None:
         loop, _ = _build_loop()
-        affected = loop.set_pid_gain("solo", "kp", 7.5)
+        affected = loop.set_pid_gains("solo", {"kp": 7.5})
         assert affected == ("solo",)
         assert loop.pid("solo").kp == 7.5
         assert loop.pid("y_axis_r").kp == 2.0
+
+    def test_three_gains_are_applied_together(self) -> None:
+        """3 値は 1 回で入れる。分けて入れると混ざった状態が周期をまたいで残る。"""
+        loop, _ = _build_loop()
+        affected = loop.set_pid_gains("solo", {"kp": 1.5, "ki": 0.1, "kd": 0.05})
+
+        assert affected == ("solo",)
+        pid = loop.pid("solo")
+        assert (pid.kp, pid.ki, pid.kd) == (1.5, 0.1, 0.05)
+
+    def test_partial_request_leaves_the_others_alone(self) -> None:
+        loop, _ = _build_loop()
+        loop.set_pid_gains("solo", {"kp": 1.5, "ki": 0.1, "kd": 0.05})
+        loop.set_pid_gains("solo", {"kd": 0.2})
+
+        pid = loop.pid("solo")
+        assert (pid.kp, pid.ki, pid.kd) == (1.5, 0.1, 0.2)
 
     def test_sync_group_members_share_the_gain(self) -> None:
         """左右直結ペアは必ず同じゲインにする。
@@ -130,7 +153,44 @@ class TestPositionLoopSetPidGain:
         送れないため、片側だけ変わった状態がサーバー側で作れてはならない。
         """
         loop, _ = _build_loop()
-        affected = loop.set_pid_gain("y_axis_r", "kp", 4.0)
+        affected = loop.set_pid_gains("y_axis_r", {"kp": 4.0})
         assert set(affected) == {"y_axis_r", "y_axis_l"}
         assert loop.pid("y_axis_r").kp == 4.0
         assert loop.pid("y_axis_l").kp == 4.0
+
+
+class TestPositionLoopPidGains:
+    """UI へ配る現在ゲインの読み口。
+
+    書き込み側 (`set_pid_gain`) と対で要る。読み口が無いと UI は現在値を知る手段が
+    無く、初期値 0 のまま送って全ゲインを 0 で潰す (実際にこの事故があった)。
+    """
+
+    def test_reports_the_gains_actually_in_effect(self) -> None:
+        loop, _ = _build_loop()
+        loop.set_pid_gains("solo", {"kp": 3.0, "ki": 0.5, "kd": 0.25})
+
+        gains = loop.pid_gains("solo")
+
+        assert gains["kp"] == 3.0
+        assert gains["ki"] == 0.5
+        assert gains["kd"] == 0.25
+
+    def test_solo_motor_applies_to_itself_only(self) -> None:
+        loop, _ = _build_loop()
+        assert loop.pid_gains("solo")["applies_to"] == ["solo"]
+
+    def test_pair_member_reports_both_sides(self) -> None:
+        """左右直結ペアは「送ると両方に適用される」ことまで配る。
+
+        判断の正は `_paired_with()` の 1 箇所。UI に名前から推測させると
+        「1 台だけに効かせてよいか」の判断が 2 箇所に増える。
+        """
+        loop, _ = _build_loop()
+        assert loop.pid_gains("y_axis_r")["applies_to"] == ["y_axis_r", "y_axis_l"]
+        assert loop.pid_gains("y_axis_l")["applies_to"] == ["y_axis_r", "y_axis_l"]
+
+    def test_unknown_motor_raises_key_error(self) -> None:
+        loop, _ = _build_loop()
+        with pytest.raises(KeyError):
+            loop.pid_gains("nope")

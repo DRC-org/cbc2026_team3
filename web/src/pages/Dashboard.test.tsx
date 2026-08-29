@@ -79,7 +79,7 @@ describe("Dashboard (セッティングタイム)", () => {
   });
 
   it("機体の判定文言を画面に 1 度しか描かない", () => {
-    const hot = { pos: 0, vel: 0, torque: 0, temp: 90 };
+    const hot = { pos: 0, vel: 0, torque: 0, temp: 90, pid: null };
     renderWithRobot(<Dashboard />, {
       matchState: { ...SETUP, can_start_match: true },
       states: {

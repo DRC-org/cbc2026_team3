@@ -232,18 +232,37 @@
       },
       "motors": {
         "gripper": {
+          "pid": null,
           "pos": 5.0,
           "temp": 30.0,
           "torque": 0.0,
           "vel": 0.0
         },
         "y_axis_l": {
+          "pid": {
+            "applies_to": [
+              "y_axis_r",
+              "y_axis_l"
+            ],
+            "kd": 0.0,
+            "ki": 0.0,
+            "kp": 2.0
+          },
           "pos": -1500.0,
           "temp": 34.5,
           "torque": 0.2,
           "vel": 0.0
         },
         "y_axis_r": {
+          "pid": {
+            "applies_to": [
+              "y_axis_r",
+              "y_axis_l"
+            ],
+            "kd": 0.0,
+            "ki": 0.0,
+            "kp": 2.0
+          },
           "pos": 1500.0,
           "temp": 35.0,
           "torque": 0.2,
