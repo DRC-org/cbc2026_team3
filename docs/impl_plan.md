@@ -1823,7 +1823,13 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 ### 机上ベンチ用の config セット（`config/bench/`）
 
-機構へ組み込む前に、M3508 2 台だけを CAN 通信の確認として動かすための一式。
+機構へ組み込む前に、アクチュエータを単体で動かすための一式。**開くバスが違うので 1 つに
+まとめられない**（挿していない CANable が 1 本でもあると起動そのものが失敗する）ため、
+確認したい対象ごとに別セットになっている。
+
+#### M3508 単体ベンチ（`config/bench/` 直下）
+
+M3508 2 台だけを CAN 通信の確認として動かす。
 
 | ファイル | 本番との違い |
 |---|---|
@@ -1873,6 +1879,60 @@ CAN ID の誤り）は確実に超過するので、同期監視の検出能力�
 半分にしてあるのも同じ考えで、負荷の無い M3508 は同じ電流でも一気に回るため。
 一方 `scale` は本番と同じ値を使う — ここを変えると「ベンチで確かめた指令量」と「本番で出る
 指令量」が別物になり、通信確認としての意味が薄れる。
+
+#### DC モータ基板単体ベンチ（`config/bench/dc/`）
+
+自作モタドラ（DC）1 枚を、機構へ組み込む前にファーム込みで動かすための一式。
+M3508 ベンチ（`config/bench/` 直下）とは**開くバスが違うので同居できない**。
+
+| ファイル | 本番との違い |
+|---|---|
+| `config/bench/dc/system.yaml` | `can_buses` が `generic_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
+| `config/bench/dc/main_hand.yaml` | DC 基板 1 枚の 3 チャンネル（`dc_ch0` / `dc_ch1` / `dc_ch2` = `can_id` 0x80 / 0x81 / 0x82）だけ。全チャンネル `motor_check.magnitude: 0` |
+| `config/bench/dc/main_hand_positions.yaml` | 3 軸とも `command_mode: duty`。`manual:` は書けない（後述）ので duty プリセットのみ |
+| `config/bench/dc/checklist.yaml` | 回転・逆転・停止・非常停止ラッチの目視項目 |
+
+```bash
+scripts/setup_can.sh
+uv run python main.py --system config/bench/dc/system.yaml \
+    --config config/bench/dc/main_hand.yaml --checklist config/bench/dc/checklist.yaml
+```
+
+**サブディレクトリに置くのは位置定数の読み先が決まっているから。** `_positions_path` は
+「robot config と同じディレクトリの `<robot_name>_positions.yaml`」を読み、`robot_name` は
+Web UI の都合で `main_hand` 固定にせざるを得ない。したがって**同一ディレクトリに
+2 つ目のベンチセットは置けない**（`main_hand_positions.yaml` が 1 つしか作れない）。
+M3508 ベンチを `config/bench/` 直下に残したまま DC 用を足すには階層を 1 段掘るしかない。
+
+**duty 軸を手動で回す手段はプリセット指令だけ。** `_parse_manual` は
+`command_mode: position` 以外の軸に `manual:` を書くと**起動を拒否する** — duty に
+「可動範囲」は存在せず、書けてしまうと UI がジョグ行を描き、押しても機構が位置決め
+されない操作面が出来上がるため。一方 `ManualController.move_to_position` は既定義の点しか
+送らないので全軸で常に許されている。よってベンチでは `stop` / `slow` / `run` / `fast` /
+`rev` を位置定数として定義し、手動操縦パネルのプリセットから送る。
+
+**プリセットの上限はファームの `max_duty` と揃える。** `firmware/dc_motor/include/config.h`
+の `kDefaultMaxDuty`（現在 0.30）が `splitDuty` でクランプするため、位置定数に 0.30 より
+大きい値を書いても出力は 30% で頭打ちになり、「指令したのに速くならない」という
+切り分けの難しい症状になる。上げるならファーム側（または `SET_PARAM 0x00`）も一緒に上げる。
+
+**この基板は動作確認（`motor_check`）の対象にできない。** エンコーダも電流センスも持たず
+`FEEDBACK` は状態フラグ 1 バイトだけなので、「回ったか」を判定する手段が構造的に無い。
+`magnitude` を 0 以外にすると実機では必ずタイムアウトし、しかも症状が配線不良と区別
+できない。回転の確認は `config/bench/dc/checklist.yaml` の目視項目が担う。
+
+**実機で確認できる 2 つの signature**（`candump can_generic`）:
+
+- `FEEDBACK`（`0x380` / `0x381` / `0x382`）のデータが `20` → `00`。`0x20` は
+  `kNeverCommanded`（電源投入後まだ `SET_TARGET` を 1 通も受けていない）で、これが
+  落ちていれば PC の指令が基板に受理されている。落ちないなら CAN ID か DIP を疑う
+- `SET_TARGET`（`0x180` / `0x181` / `0x182`）が `02 00 00` 形式で **20Hz** 流れる。
+  先頭バイトの `02` が制御タイプ DUTY。この再送が止まるとウォッチドッグが満了して
+  出力が落ちるので、フレーム数が 5 秒で 100 に届くかを数えれば契約（§5.1）を確かめられる
+
+なお `main.py` は**目標値が一度も設定されていないモータへは何も送らない**。起動しただけでは
+`0x18x` は流れず `kNeverCommanded` も落ちないので、疎通確認では必ず 1 回指令を送ること
+（`stop` = duty 0 ならモータは回らない）。
 
 ### 共通設定を 1 箇所に集約する理由
 
