@@ -1,0 +1,196 @@
+// 電磁弁用自作モタドラの機体依存定数（仕様書 §9）。
+//
+// 基板は **STM32F303K8T6**（Cortex-M4F / 32bit / 3.3V / 64KB Flash / 12KB SRAM）。
+// DC 用の UNO R4 Minima ともサーボ用の Arduino Nano とも MCU が別物なので、
+// ピン配置を他の 2 枚から類推してはならない。
+//   - CAN は STM32 内蔵の bxCAN（PA11 = RX / PA12 = TX 固定）
+//   - 出力は GPIO の ON/OFF が 6 本。PWM も方向ピンも無い
+//   - ビルドは STM32CubeMX + CMake（PlatformIO ではない。firmware/README.md 参照）
+//
+// ここに集約してあるのは「基板を見ないと確定できない値」と「機構が決まるまで動かせない値」。
+// TODO(実機で確認) が付いた定数は仮置きであり、通電前に必ず基板・回路図・実測と
+// 突き合わせること。
+//
+// パラメータの一部は SET_PARAM で実行時に変更できるが、RAM 上のみで電源断で
+// ここの既定値に戻る（仕様書 §3.3）。恒久的に変えたい値はこのファイルを直すこと。
+//
+// **STM32 HAL を include しない。** ポートを自前の enum で持つことで、
+// チャンネル表の重複検査を constexpr（＝ビルド時）で回せる。HAL の GPIOA /
+// GPIOB はポインタへのキャストを含むマクロなので constexpr 文脈では比較できず、
+// 取り込むと「同じピンを 2 つのチャンネルに割り当てた」が実機まで分からなくなる。
+
+#pragma once
+
+#include <stdint.h>
+
+#include "MotorCanProtocol.h"
+
+// ===========================================================================
+// ピン配置
+// ===========================================================================
+
+// GPIO ポート。HAL の GPIO_TypeDef* への変換は src/app.cpp が 1 箇所で持つ。
+enum class Port : uint8_t {
+    A = 0,
+    B = 1,
+};
+
+// CAN（PA11 / PA12）と SWD（PA13 / PA14）と USART1（PA9 / PA10）は
+// ペリフェラルが占有する。コードからは触らないが、電磁弁の出力へ割り当てると
+// CAN もデバッガも死ぬので、衝突検査の対象に入れてある（src/app.cpp の static_assert）。
+constexpr Port kPortCanRx = Port::A;
+constexpr uint16_t kPinCanRx = 1u << 11;
+constexpr Port kPortCanTx = Port::A;
+constexpr uint16_t kPinCanTx = 1u << 12;
+constexpr Port kPortUartTx = Port::A;
+constexpr uint16_t kPinUartTx = 1u << 9;
+constexpr Port kPortUartRx = Port::A;
+constexpr uint16_t kPinUartRx = 1u << 10;
+
+// 状態表示 LED（PA5）。基板に 1 本しかないので、点滅の速さで状態を伝える。
+constexpr Port kPortLed = Port::A;
+constexpr uint16_t kPinLed = 1u << 5;
+
+// DIP スイッチ 4bit。**内部プルアップの負論理で、LOW = 1**（既存 2 枚と同じ作法）。
+// 添字がビット位置: {DIP1=bit0, DIP2=bit1, DIP3=bit2, DIP4=bit3}。
+//
+// TODO(実機で確認): 基板の DIP がコモンを GND へ落とす配線であること。
+// VCC 側へ引く配線だった場合はここの極性（kDipActiveLevel）と solenoid.ioc の
+// GPIO_PuPd を揃えて反転すること。**プルアップを外すと読みが不定になり、
+// 電源投入のたびに違うデバイス ID を名乗る。**
+constexpr uint8_t kDipBitCount = 4;
+constexpr Port kDipPorts[kDipBitCount] = {Port::B, Port::B, Port::A, Port::A};
+constexpr uint16_t kDipPins[kDipBitCount] = {1u << 1, 1u << 0, 1u << 7, 1u << 6};
+
+// INPUT_PULLUP の負論理なので LOW（0）が「ON」。
+constexpr int kDipActiveLevel = 0;
+
+// ===========================================================================
+// チャンネル表（仕様書 §9.1）
+// ===========================================================================
+
+// **6ch はすべて同じ役割**（電磁弁またはそれに準じる ON/OFF 負荷の駆動口）。
+// サーボ基板のようなスロットごとの役割切り替えは無いので、表が持つのは
+// ピンと表示名だけでよい。
+//
+// 回路図の PUMP1_SW〜PUMP6_SW がそのままチャンネル 0〜5 に対応する。
+// **名前は基板のシルク（PUMP*）ではなく PC 側 yaml のモータ名に合わせてある** —
+// candump とシリアルログと config/sub_hand.yaml を突き合わせるとき、
+// 同じものが 2 つの名前で呼ばれていると対応表を頭の中で引くことになる。
+constexpr uint8_t kSolenoidChannelCount = 6;
+
+struct SolenoidChannelConfig {
+    // デバイス ID は表に持たない。**チャンネルの添字がそのままデバイス ID の
+    // 下位 3bit** になるので（仕様書 §2.2）、配線を差し替えても ID は動かない。
+    Port port;
+    uint16_t pin;
+    const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
+};
+
+// チャンネル | ピン  | 回路図    | デバイス ID | PC 側のモータ
+// -----------+-------+-----------+------------+---------------
+//   ch0      | PB7   | PUMP1_SW  | 0xC0       | valve_1
+//   ch1      | PB6   | PUMP2_SW  | 0xC1       | valve_2
+//   ch2      | PB5   | PUMP3_SW  | 0xC2       | valve_3
+//   ch3      | PB4   | PUMP4_SW  | 0xC3       | valve_4
+//   ch4      | PB3   | PUMP5_SW  | 0xC4       | valve_5
+//   ch5      | PA15  | PUMP6_SW  | 0xC5       | valve_6
+//
+// デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
+// ずれるとその弁は指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
+constexpr SolenoidChannelConfig kSolenoidChannels[kSolenoidChannelCount] = {
+    {Port::B, 1u << 7, "valve_1"},
+    {Port::B, 1u << 6, "valve_2"},
+    {Port::B, 1u << 5, "valve_3"},
+    {Port::B, 1u << 4, "valve_4"},
+    {Port::B, 1u << 3, "valve_5"},
+    {Port::A, 1u << 15, "valve_6"},
+};
+
+// ===========================================================================
+// デバイス ID（仕様書 §2.2）
+// ===========================================================================
+
+// デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割。
+// DIP は基板番号そのもので、チャンネルの添字がそのまま ID の下位 3bit になる。
+//
+//   基板番号 | ch0  | ch1  | ch2  | ch3  | ch4  | ch5
+//   ---------+------+------+------+------+------+------
+//      0     | 0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC4 | 0xC5
+//      1     | 0xC8 | 0xC9 | 0xCA | 0xCB | 0xCC | 0xCD
+//
+// candump に 0xC2 が流れていれば「電磁弁基板 1 枚目の ch2」と直接読める。
+// DIP は 4bit だが基板番号は 3bit なので、8 以上を設定した基板は全チャンネルが
+// 未設定になる（LED 速点滅・駆動拒否）。黙って丸めると別の基板の ID を名乗る。
+constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Solenoid;
+
+// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.4）。
+// **プロトコルかピン配置を変えたら必ず上げること。**
+constexpr uint8_t kFirmwareVersion = 1;
+
+// INFO（版番号の自己申告）の送信周期。1Hz なら 14 デバイスでもバス負荷は無視できる。
+constexpr uint32_t kInfoIntervalMs = 1000;
+
+// ===========================================================================
+// 制御ループ
+// ===========================================================================
+
+// **時刻は HAL_GetTick()（SysTick / 1ms）で取る。** サンプルは TIM1 の 1kHz 割り込みを
+// ms カウンタに使っていたが、ここでは使わない（CubeMX の生成は残してあるが
+// HAL_TIM_Base_Start_IT() を呼ばないので割り込みは起きない）。時刻源を 2 つ持つと、
+// 片方だけが止まったときに「ウォッチドッグは満了しているのに FEEDBACK は流れ続ける」
+// のような噛み合わない状態になる。
+//
+// **出力の反映に周期は設けない**（loop() ごとに書き直す）。GPIO 6 本の書き込みは
+// 数百 ns で、間引いてもバス負荷も CPU 負荷も変わらない。一方、間引くと
+// ウォッチドッグ満了の反映がその周期ぶん遅れる —— 止める処理を遅らせて得るものが無い。
+
+// コマンドウォッチドッグ（仕様書 §5.1）。**宛先がデバイス ID ＝ チャンネルなので、
+// ウォッチドッグもチャンネルごとに独立して動く。** 1 つの弁への指令が途絶えても
+// 他の弁は動き続ける。
+//
+// PC 側は最後に指令した状態を kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、
+// 満了は PC の停止かケーブル断を意味する。**満了すると全チャンネルが消磁するので、
+// 吸着で保持しているワークは落ちる**（仕様書 §9.4）。それでも消磁に倒すのは、
+// 通電したまま復旧不能になった弁を現場で切り分ける手段が無いため。
+//
+// 0 にすると途絶しても指令を受け付け続け、FEEDBACK のウォッチドッグビットも
+// 報告しなくなる。手で cansend を打つようなベンチ確認のための逃げ道であって、
+// 試合では既定の 1 のまま使う。
+//
+// この値は setup() が MotorSafety::setWatchdogEnabled() へ写す。判定を #if で
+// app.cpp 側に置くと、同じ分岐を 3 つのファームが各自で持つことになり、
+// 1 つに入れ忘れても誰も気付けない。有効/無効の判定は MotorSafety にだけある。
+#define WATCHDOG_ENABLED 1
+
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.3 の既定値）は PC 側との契約なので
+// MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
+
+// ===========================================================================
+// 表示
+// ===========================================================================
+
+// LED は 1 本しかないので、点滅の速さだけが状態を伝える手段になる。
+// 0 にすると状態を知る手段が丸ごと無くなる（現場で切り分けができない）。
+#define HAS_STATUS_LED 1
+
+// デバイス ID が未設定のチャンネルがあるとき、および CAN が上がらなかったときの速い点滅。
+constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;
+
+// 緊急停止ラッチ中の点滅。**「今すぐ直すべき異常」と「意図して止めている状態」は
+// 別の速さで示す** — 同じにすると、操縦者が緊急停止を押しただけの基板を
+// 設定ミスと読み違えて DIP を回し始める。
+constexpr uint32_t kEStopBlinkIntervalMs = 500;
+
+// 正常時のハートビート点滅周期。ファームが生きていることを目視で確認するため。
+constexpr uint32_t kHeartbeatIntervalMs = 1000;
+
+// ===========================================================================
+// デバッグ用シリアル
+// ===========================================================================
+
+// USART1（PA9 / PA10、115200 baud）から「<チャンネル番号> <0|1>」で開閉を直接指令できる
+// （0 で無効）。緊急停止ラッチ中はシリアルからも駆動できない
+// （SolenoidChannel が入口で指令を拒否する）。
+#define ENABLE_SERIAL_DEBUG 1
+constexpr uint32_t kSerialBaud = 115200;

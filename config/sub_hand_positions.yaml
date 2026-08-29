@@ -27,6 +27,53 @@ axes:
     offset: 0.0
     timeout_s: 2.0
 
+  # 電磁弁 6 個。**6 軸とも同じ定義**なので、settle_s などを変えるときは
+  # 6 箇所すべてを直すこと (1 つだけ残ると、その弁だけ待ち時間が違う)。
+  #
+  # on_off 軸は到達判定を持たない (基板が弁の開閉を観測できない。仕様書 §9.3)。
+  # 指令の直後に次のステップへ進まないよう settle_s で待つ。
+  # duty 軸と同じく manual: は書けない (書くと起動を拒否する) ので、手動操縦でも
+  # open / closed のプリセットだけを送る。
+  #
+  # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
+  # 機構が付いたら「離した直後に持ち上げても落ちない」ところまで実測して詰めること。
+  valve_1: &valve_axis
+    unit: on_off
+    command_unit: on_off
+    command_mode: on_off
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.2
+    timeout_s: 1.0
+  valve_2: *valve_axis
+  valve_3: *valve_axis
+  valve_4: *valve_axis
+  valve_5: *valve_axis
+  valve_6: *valve_axis
+
+  # 吸気ポンプ / 排気ポンプ。DC 基板なので duty 指令 (conveyor と同じ扱い)。
+  # duty 軸に可動範囲は存在しないので manual: は書けない。
+  #
+  # TODO(実機で確認): settle_s はポンプが規定の負圧 / 正圧に達するまでの時間。
+  # 短すぎると「回し始めた直後に弁を開けて吸着し損ねる」ことになる。
+  pump_vac:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5
+    timeout_s: 1.0
+
+  pump_blow:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5
+    timeout_s: 1.0
+
 positions:
   # TODO: 機構完成後に実測値へ。現状は微小可動量のみ。
   sub_arm_joint:
@@ -40,3 +87,27 @@ positions:
   sub_gripper:
     open: 5.0            # 開 [deg] (= sub_hand.yaml sub_gripper.motor_check.magnitude)
     closed: 0.0          # 閉 (把持) [deg]
+
+  # 電磁弁は開 / 閉の 2 状態しか取らない。**値は 0 か非 0 かだけが意味を持つ**
+  # (仕様書 §9.2)。0.5 のような中間値を書いても基板は ON として扱うので、
+  # 「半開」を意図した値を書かないこと。
+  valve_1: &valve_states
+    open: 1.0            # 開 (吸着パッドへ吸気経路をつなぐ)
+    closed: 0.0          # 閉 (吸気経路を遮断)
+  valve_2: *valve_states
+  valve_3: *valve_states
+  valve_4: *valve_states
+  valve_5: *valve_states
+  valve_6: *valve_states
+
+  # ポンプの duty。**ファーム側の max_duty (既定 0.30) でクランプされる**ので、
+  # ここに 0.30 を超える値を書いても 0.30 で回る (仕様書 §5.3)。
+  # TODO(実機で確認): 吸引力が足りなければファームの max_duty を上げてから
+  # ここを上げること。ここだけ上げても効かない。
+  pump_vac:
+    stop: 0.0            # 停止 [duty]
+    run: 0.3             # 吸気 [duty]
+
+  pump_blow:
+    stop: 0.0            # 停止 [duty]
+    run: 0.3             # 排気 (ワークを離すときの正圧) [duty]

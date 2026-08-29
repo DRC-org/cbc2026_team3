@@ -106,6 +106,14 @@ C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は C
 | DJI M3508 | 2 | C620 ESC | CAN 2.0A Standard Frame |
 | RobStride EDULITE 05 | 2 | 内蔵 | CAN 2.0B Extended Frame (29bit) |
 | DC モータ / サーボ | 多数 | 自作モータドライバ | CAN 2.0A Standard Frame（後述） |
+| 真空ポンプ（吸気 / 排気） | 2 | 自作モータドライバ（DC 基板の空き ch） | CAN 2.0A Standard Frame |
+| 電磁弁（吸着パッド） | 6 | 自作モータドライバ（電磁弁基板 / STM32F303K8） | CAN 2.0A Standard Frame |
+
+**吸着系はサブハンドの機構。** 吸気ポンプは試合中回しっぱなしにし、吸着 / 解放は
+電磁弁だけで切り替える（ポンプを都度起動すると立ち上がりの待ちが毎サイクル入る）。
+**ポンプは電磁弁基板ではなく DC 基板が動かす** —— 電磁弁基板の 6ch はすべて弁で埋まって
+おり、またポンプは起動電流が大きく `max_duty` で立ち上がりを抑えられる DC 基板の側が
+適している（仕様書 §9.6）。
 
 ### CAN バス構成（3 系統）
 
@@ -288,6 +296,12 @@ WS も繋がるのに画面だけ真っ白」という気付きにくい壊れ�
 | PC 側ドライバ | `lib/drivers/generic.py` |
 | DC 用ファーム | `firmware/dc_motor/` + 共有ライブラリ `firmware/lib/MotorCan/` |
 | サーボ用ファーム | `firmware/servo/` + 共有ライブラリ `firmware/lib/MotorCan/` |
+| 電磁弁用ファーム | `firmware/solenoid/` + 共有ライブラリ `firmware/lib/MotorCan/` |
+
+**電磁弁用だけビルド系が違う**（STM32CubeMX + CMake / STM32F303K8）。それでも
+`MotorCan` は同じソースを参照し、ロジック層のテストは PlatformIO の native 環境
+（`firmware/test/test_solenoid/`）で走る。`MotorCan` が `Arduino.h` も
+`stm32f3xx_hal.h` も include しないという制約が、この共有を成立させている。
 
 物理層は CAN 2.0A Standard Frame（11bit ID）/ 1Mbps、バスは `can_generic`。
 RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にしてある。
@@ -308,6 +322,15 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
   共有 `can_generic` 上の全基板のラッチをまとめて外す
 - **サーボの到達フラグはファームの推定値**（仕様書 §7.3）。実際には動いていなくても到達を
   報告するため、危険な動作には `require_trigger` を付けて目視確認を挟む
+- **電磁弁は `on_off`（制御タイプ 3）でしか動かず、到達フラグを立てない**（仕様書 §9.2 / §9.3）。
+  弁が開いたかを観測する手段が基板に無いので、`FEEDBACK` は状態フラグ 1 バイトだけ。
+  PC 側も到達を待たず `settle_s` の固定待ちへ落ち、動作確認からは
+  `motor_check.magnitude: 0` で外す。**吸着したかどうかは操縦者の目視でしか分からない**ため、
+  `robots/sub_hand.py` の吸着ステップには `require_trigger` を付けてある
+- **電磁弁基板は停止時に全 ch 消磁する**（仕様書 §9.4）。緊急停止・ウォッチドッグ満了・
+  CAN 不通のいずれでも通電を落とすので、吸着で保持しているワークは落ちる。サーボの
+  「現在角を保持」に相当する扱いは持たせていない —— 通電したまま復旧不能になった弁を
+  現場で切り分ける手段が無いため
 
 ---
 
@@ -642,6 +665,10 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 配信はクライアント集合のスナップショットを回す | `_fanout` の `list(...)` を外して集合そのものを反復する | `test_server_broadcast_resilience.py` |
 | ラッチ中のサーボは補間より先に凍結する | `ServoChannel::setTarget` の受理ガードを外す / `tick()` の凍結を補間の後ろへ動かす | `firmware/test/test_servo/` |
 | `SET_TARGET` を 1 通も受けるまで出力しない | `MotorSafety::isOutputAllowed` の `everFed_` を `watchdogEnabled_` の内側へ入れる | `firmware/test/test_protocol/` |
+| 電磁弁は出力ゲートを通してしか通電しない | `SolenoidChannel::outputOn` の `isOutputAllowed` を外して目標をそのまま返す / `setOn` の受理ガードを外す | `firmware/test/test_solenoid/` |
+| ブロードキャスト ID を名乗る基板を作らない | `makeDeviceId` の `0xFF` ガードを外す（電磁弁基板の基板番号 7 × スロット 7 が `0xFF` を名乗る） | `firmware/test/test_solenoid/` |
+| `on_off` の目標値にスケールを掛けない | `_TARGET_SCALE[ON_OFF]` を `_DUTY_SCALE` にする（**基板は 0 か非 0 かしか見ないので実機では症状が出ない**） | `tests/drivers/test_generic.py` |
+| `on_off` 軸に連続値の可動範囲を持たせない | `_parse_manual` の `command_mode is not POSITION` 判定を外す | `tests/test_sequence_positions.py` |
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |
 | 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
@@ -668,7 +695,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | **M3508 プロトコル** | ◎ | エンコード/デコードの単体テスト。期待するバイト列との比較 |
 | **EDULITE 05 プロトコル** | ◎ | 29bit CAN ID 組み立て・パース、値マッピングの単体テスト |
 | **自作モタドラプロトコル（PC 側）** | ◎ | エンコード/デコードの単体テスト |
-| **自作モタドラプロトコル（ファーム側）** | ◎ | `pio test -e native`。`MotorCan` を実機・Arduino 非依存でテストする（プロトコル層・緊急停止ラッチ・ウォッチドッグ・角度補間）|
+| **自作モタドラプロトコル（ファーム側）** | ◎ | `pio test -e native`。`MotorCan` を実機・Arduino 非依存でテストする（プロトコル層・緊急停止ラッチ・ウォッチドッグ・角度補間・電磁弁の出力ゲート）。**電磁弁基板は実機ビルドが CMake だが、ロジック層は `MotorCan` にあるのでここで同じように走る**（`firmware/test/test_solenoid/`）|
 | **シーケンスエンジン** | ◎ | モータドライバを mock し、ステップ遷移・trigger 待ち・エラー処理をテスト |
 | **PID / 位置制御ループ** | ◎ | 時刻・sleep・CAN 送信を注入して差し替え、実時間を待たずに周期を駆動。積分ワインドアップ、dt 頭打ち、フィードバック途絶、pause/resume を単体テスト |
 | **モータアクセス層** | ◎ | `MotorHandle` / `MotorGroup` の目標送信・到達待ち・緊急停止拒否を mock ドライバで検証 |
@@ -2194,11 +2221,29 @@ debounce もラッチも要らない。`y_axis` はループ層と監視層で�
 避けられない。ペア軸のモータは `motor_check.magnitude: 0` を指定して SKIPPED にし、
 指差喚呼チェックリストでの手動確認に回す。ペア同時駆動に対応した動作確認は将来課題。
 
-### 離散状態アクチュエータ（`gripper` / `conveyor` / `wall_f` / `wall_r`）
+### 離散状態アクチュエータ（`gripper` / `conveyor` / `wall_f` / `wall_r` / `valve_1`〜`valve_6`）
 
 CAN で指定するのは状態のみで、連続値の指令は行わない。新しいドライバは作らず、
 **位置定数 yaml の「名前付き状態」として表現する**（`positions.gripper.open` 等）。
 `move_to` は位置名でしか値を引けないため、定義した状態以外を送れないことが構造的に保証される。
+
+**電磁弁は `control_type: on_off`（CAN の制御タイプ 3）で表す。** `duty` を流用しなかったのは、
+「duty 0.3 の電磁弁」という意味を持たない指令が config に書けてしまうため。しかも基板は
+0 か非 0 かしか見ないので、**単位が食い違っても実機では一切症状が出ない**。専用の制御タイプに
+しておけば、DC 基板宛のつもりで書いた値は電磁弁基板が黙って捨てる（逆も同じ）。
+
+`on_off` を通す許可表は 3 箇所ある。1 つでも漏れると別々の壊れ方をする。
+
+| 場所 | 漏れたときに起きること |
+|---|---|
+| `lib/drivers/base.py` の `ControlMode` | そもそも値が存在しない |
+| `lib/drivers/generic.py` の `_MODE_MAP` / `_TARGET_SCALE` | 起動はできるが最初の指令で `KeyError`（試合中に落ちる） |
+| `lib/config_schema.py` の `_CONTROL_MODES` | yaml に書いた瞬間に起動拒否 |
+| `lib/sequence/positions.py` の `_COMMAND_MODES` | 位置定数 yaml に書いた瞬間に起動拒否 |
+
+`on_off` 軸は `position` ではないので **到達判定を持たず、`settle_s` の固定待ちへ落ちる**
+（`AxisHandle.wait_reached`）。同じ理由で `manual:`（連続値の可動範囲）は書けず、
+手動操縦でも `open` / `closed` のプリセットだけが送れる。
 
 `conveyor` は DC モータで位置の概念がないため duty 指令とする。これには `move_to` 側の
 拡張が要る（従来は `set_position` 固定だった）。

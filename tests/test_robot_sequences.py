@@ -128,13 +128,31 @@ _MAIN_HOME_TARGETS = [
     ("conveyor", 0.0),
 ]
 
+# 吸着パッドの電磁弁。**6 軸とも同じ定義**で、on_off 軸は到達判定を持たない
+# (基板が弁の開閉を観測できない)。試験では固定待ちを入れない
+_VALVE_AXES = [f"valve_{i}" for i in range(1, 7)]
+
 _SUB_POSITIONS = {
-    "axes": _axes(["sub_arm_joint", "sub_gripper"]),
+    "axes": {
+        **_axes(["sub_arm_joint", "sub_gripper"]),
+        **{name: _axis(command_mode="on_off", settle_s=0.0) for name in _VALVE_AXES},
+        "pump_vac": _axis(command_mode="duty", settle_s=0.0),
+        "pump_blow": _axis(command_mode="duty", settle_s=0.0),
+    },
     "positions": {
         "sub_arm_joint": {"home": 0.0, "extended": 21.0, "handoff": 23.0, "place": 24.0},
         "sub_gripper": {"open": 31.0, "closed": 32.0},
+        **{name: {"open": 1.0, "closed": 0.0} for name in _VALVE_AXES},
+        "pump_vac": {"stop": 0.0, "run": 0.61},
+        "pump_blow": {"stop": 0.0, "run": 0.62},
     },
 }
+
+
+# 全パッドの弁を同じ状態にしたときの指令。robots/sub_hand.py の _all_valves と
+# 同じ順序 (valve_1 → valve_6) で並ぶ
+def _valves(value: float) -> list[tuple[str, float]]:
+    return [(name, value) for name in _VALVE_AXES]
 
 
 class TestMainHandSteps:
@@ -233,13 +251,43 @@ class TestSubHandSteps:
     @pytest.mark.parametrize(
         ("method_name", "expected"),
         [
-            ("move_to_home", [("sub_arm_joint", 0.0), ("sub_gripper", 31.0)]),
+            # **弁を閉じてから吸気ポンプを回す。** 逆順だと、前サイクルで開いたままの
+            # 弁からいきなり吸引が始まり、置いたばかりのワークを吸い直す
+            (
+                "move_to_home",
+                [
+                    *_valves(0.0),
+                    ("pump_blow", 0.0),
+                    ("sub_arm_joint", 0.0),
+                    ("sub_gripper", 31.0),
+                    ("pump_vac", 0.61),
+                ],
+            ),
             ("extend_sub_arm", [("sub_arm_joint", 21.0)]),
             ("move_to_handoff", [("sub_arm_joint", 23.0)]),
             ("grip_handoff", [("sub_gripper", 32.0)]),
+            ("grip_by_suction", _valves(1.0)),
             ("move_to_place", [("sub_arm_joint", 24.0)]),
-            ("release_at_place", [("sub_gripper", 31.0)]),
-            ("return_home", [("sub_arm_joint", 0.0), ("sub_gripper", 31.0)]),
+            # **吸気ポンプは止めず弁だけを閉じ、残圧は排気で押し離す。**
+            # ポンプを止めて解放しようとすると、配管の負圧が抜けるまで張り付く
+            (
+                "release_at_place",
+                [
+                    *_valves(0.0),
+                    ("pump_blow", 0.62),
+                    ("pump_blow", 0.0),
+                    ("sub_gripper", 31.0),
+                ],
+            ),
+            (
+                "return_home",
+                [
+                    *_valves(0.0),
+                    ("pump_blow", 0.0),
+                    ("sub_arm_joint", 0.0),
+                    ("sub_gripper", 31.0),
+                ],
+            ),
         ],
     )
     async def test_step_sends_expected_targets(
@@ -260,8 +308,9 @@ class TestSubHandSteps:
             "補助ハンド展開",
             "ワーク受け取り位置へ",
             "ハンド閉じる (受け取り)",
+            "ワーク吸着",
             "配置位置へ移動",
-            "ハンド開く (配置)",
+            "ワーク解放 (配置)",
             "初期位置へ復帰",
         ]
 
@@ -271,6 +320,32 @@ class TestSubHandSteps:
         grip = next(s for s in seq.steps_info if s["label"].startswith("ハンド閉じる"))
 
         assert grip["require_trigger"] is True
+
+    def test_suction_requires_trigger(self) -> None:
+        """吸着できたかは PC から観測できないので操縦者の目視確認を要求する。
+
+        電磁弁基板は圧力センサもリミットスイッチも持たず、FEEDBACK の到達フラグも
+        立てない (仕様書 §9.3)。弁を開けて settle_s 待つだけなので、吸い付いていなくても
+        シーケンスは先へ進む。ここを素通りにすると、ワークを掴んでいないまま
+        搬送・配置まで走る。
+        """
+        seq = SubHandSequence()
+        suction = next(s for s in seq.steps_info if s["label"] == "ワーク吸着")
+
+        assert suction["require_trigger"] is True
+
+    async def test_release_does_not_stop_vacuum_pump(self) -> None:
+        """解放時に吸気ポンプを止めないこと (仕様書 §9.6: 試合中は回しっぱなし)。
+
+        止めると配管の負圧が抜けるまでワークが張り付き、しかも次のサイクルで
+        ポンプの立ち上がりを待つことになる。解放は弁と排気ポンプだけで行う。
+        """
+        seq = SubHandSequence()
+        sink, _ = _wire(seq, _SUB_POSITIONS)
+
+        await seq.release_at_place()
+
+        assert "pump_vac" not in [name for name, _ in sink]
 
 
 def _load_shipped(yaml_name: str) -> PositionTable:

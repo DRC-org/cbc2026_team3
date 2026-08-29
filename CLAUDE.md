@@ -50,7 +50,7 @@ WS 接続先は UI のステータスバー（接続表示）から変更でき�
 タブは URL パス（`/monitor` `/main-hand` `/sub-hand` `/pid-tuning`）。旧ハッシュ形式の
 ブックマーク（`#main-hand` 等）は起動時にパスへ読み替える。
 
-### ファームウェア（PlatformIO）
+### ファームウェア（DC / サーボ = PlatformIO）
 
 `-d` にプロジェクトディレクトリを渡せばリポジトリ直下から実行できる。
 
@@ -58,13 +58,30 @@ WS 接続先は UI のステータスバー（接続表示）から変更でき�
 pio test -e native -d firmware/dc_motor   # 実機不要。firmware/test/ の全ケース
 pio test -e native -d firmware/servo      # 実機不要。上とまったく同じ全ケース
 pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e uno_r4_minima -d firmware/servo -t upload
+pio run -e nano -d firmware/servo -t upload
 ```
 
 テストは `firmware/test/` にあり、両プロジェクトが `test_dir` で共有するので、
 **native テストはどちらか一方で足りる**（どちらから回しても同じ全ケースが走る）。
+**電磁弁基板のロジック層（`test_solenoid`）もここに含まれる** —— 実機ビルドが CMake でも、
+`MotorCan` を共有しているのでテストは PlatformIO 側から回る。
 一方**実機ビルド（`pio run`）は両方必要**。共有しているのは `firmware/lib/MotorCan/`
 までで、`main.cpp` と `config.h` は別物のため。
+
+### ファームウェア（電磁弁 = STM32CubeMX + CMake）
+
+**電磁弁基板だけビルド系が違う**（STM32F303K8 / CubeMX 生成の HAL）。
+`Drivers/` と `cmake/` は `.gitignore` されているので、clone 直後は CubeMX で
+`firmware/solenoid/solenoid.ioc` を開いて GENERATE CODE してからビルドする。
+
+```bash
+cmake --preset Debug -S firmware/solenoid
+cmake --build firmware/solenoid/build/Debug
+```
+
+`Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと
+（それ以外は再生成で消える）。ロジックは `src/app.cpp`、ピン割当と CAN の
+ビットタイミングは `solenoid.ioc` が持つ。詳細は `firmware/README.md`。
 
 ### CAN セットアップ
 
@@ -122,7 +139,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - `server.py` — aiohttp で HTTP 静的配信 + WebSocket (`/ws`) を統合
 - `robots/` — ロボット固有のシーケンス定義（main_hand.py / sub_hand.py）
 - `config/` — YAML 設定（後述）
-- `firmware/` — 自作モータドライバのファームウェア（PlatformIO / Arduino UNO R4）
+- `firmware/` — 自作モータドライバのファームウェア（DC = UNO R4 / サーボ = Nano / 電磁弁 = STM32F303K8）
 - `web/` — Vite + React + TypeScript + Tailwind v4 / daisyUI 5 の操作 UI
   - 画面切替は React Router（library mode / `createBrowserRouter`）。ルートは `src/routes.tsx`、
     共通の外枠と WebSocket 接続は `src/layouts/RootLayout.tsx`（タブ帯は `AppHeader` の中）
@@ -238,9 +255,16 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 1 例外で以降が丸ごと飛び、2 台目のロボットのバスが開いたまま残る。既に異常終了していた
 タスクの例外をここで再送出しないのも同じ理由（死因は降りる前にログへ残している）。
 
-**離散状態アクチュエータは新ドライバを作らず位置定数で表す。** グリッパの開/閉、壁の初期/閉/開は
-`positions` の名前付き状態として書く。`move_to` は位置名でしか値を引けないため、
+**離散状態アクチュエータは新ドライバを作らず位置定数で表す。** グリッパの開/閉、壁の初期/閉/開、
+電磁弁の開/閉は `positions` の名前付き状態として書く。`move_to` は位置名でしか値を引けないため、
 定義した状態以外を送れないことが構造的に保証される。
+
+**電磁弁は `control_type: on_off`（CAN の制御タイプ 3）で、`duty` を流用しない。**
+duty を使うと「duty 0.3 の電磁弁」という意味を持たない指令が config に書けてしまい、
+しかも基板は 0 か非 0 かしか見ないので**症状が一切出ないまま**単位が食い違う。
+専用の制御タイプにしておけば、DC 基板宛のつもりで書いた値は電磁弁基板が黙って捨てる
+（逆も同じ）。`on_off` 軸は到達判定を持たない（基板が弁の開閉を観測できない）ので、
+`duty` 軸と同じく `settle_s` の固定待ちへ落ち、`manual:` は書けない。
 
 **試合時間タイマーは「時刻」ではなく「配信瞬間の経過ミリ秒」を配る。** 操縦者 2 名 +
 Monitor は別ブラウザ・別 PC で繋がるため、開始時刻（エポック秒）を配って各自が引き算する
@@ -341,17 +365,22 @@ UI は送る前に理由を説明するだけ。画面ごとに `phase === "matc
 片方だけを変更してはならない。`firmware/lib/MotorCan/` が `Arduino.h` を include しないのは、
 native 環境（`pio test -e native`）でプロトコル層と安全機構をテストできるようにするため。
 
-**2 枚の基板は MCU も CAN の持ち方も違う。ピン配置を片方から類推してはならない。**
+**3 枚の基板は MCU も CAN の持ち方もビルド系も違う。ピン配置を他の基板から類推してはならない。**
 DC 用は UNO R4 Minima + 内蔵 CAN（`D4`/`D5` 固定）、サーボ用は **Arduino Nano + MCP2515
 （SPI 外付け）** で、Nano 側は `D11`/`D12`/`D13` を SPI が占有する（`D13` は SCK なので
 ステータス LED に使えず、RGB LED が担う）。Nano は Flash 32KB / SRAM 2KB しかないので、
 ライブラリを足したら使用率を必ず確認すること（RGB に FastLED を使うと収まらない）。
-各 `main.cpp` の `static_assert` が `config.h` のピン衝突をビルド時に検出する。
+電磁弁用は **STM32F303K8 + 内蔵 bxCAN（`PA11`/`PA12` 固定）** で、出力は GPIO の ON/OFF が
+6 本だけ（PWM も方向ピンも無い）。**この 1 枚だけ PlatformIO ではなく CubeMX + CMake** で、
+ピン割当は `solenoid.ioc` が持つ。
+各 `main.cpp` / `app.cpp` の `static_assert` が `config.h` のピン衝突をビルド時に検出する。
+STM32 側は HAL の `GPIOA` / `GPIOB` が `constexpr` 文脈で使えないため、`config.h` は
+**自前の `Port` enum でポートを持つ**（HAL を取り込むと重複検査ごと消える）。
 **`static_assert` は CAN ピンだけでなく全ピンの重複も見ること。** かつては CAN との衝突しか
 見ておらず、`config.h` の想定と実基板の配線がまるごと食い違ってもビルドが通った
 （`DIS` として LOW/HIGH を振っていた `D7` が、実機では ch2 の方向ピンだった）。
 
-**電流・温度・過電流・過熱は自作モタドラのプロトコルに無い。** どちらの基板も測る手段を
+**電流・温度・過電流・過熱は自作モタドラのプロトコルに無い。** どの基板も測る手段を
 持たないので、`FEEDBACK` の Byte4-6 と bit5-7 は予約にしてあり、**組み立てる側も
 読む側もコードを持たない**。常に 0 の値を運ぶと、UI にもヘルス判定にも「測ったように
 見える 0」が流れ込む。センサを積んだ基板が現れたら予約領域に定義し直すこと。
@@ -363,6 +392,26 @@ DC 用は UNO R4 Minima + 内蔵 CAN（`D4`/`D5` 固定）、サーボ用は **A
 `conveyor` は `motor_check.magnitude: 0` で除外し、`config/checklist.yaml` の
 `conveyor_run` で目視確認する。「回ったか」を `FEEDBACK` の velocity で見る実装は
 実機では必ず失敗し、しかも原因が配線不良にしか見えない。
+
+**電磁弁基板は「止める = 消磁」の一手しか持たない。停止時は全 ch OFF に倒す。**
+緊急停止・ウォッチドッグ満了・CAN 不通のいずれでも通電を落とすので、**吸着で
+保持しているワークは落ちる**。サーボの「現在角を保持」に相当する扱いは持たせていない —
+通電したまま復旧不能になった弁は現場で切り分ける手段が無く、断線でも確実に無通電へ
+倒れる方を選んでいる。出力へ至る経路は `SolenoidChannel::outputOn()` の 1 本だけで、
+そこが必ず `MotorSafety::isOutputAllowed()` を通る。**`app.cpp` に GPIO を直に叩く
+経路を作ってはならない。**
+
+**電磁弁基板は弁が開いたかを観測できない。到達フラグを立ててはならない。**
+圧力センサもリミットスイッチも無く、分かるのは「指令どおり GPIO を駆動した」ことだけ。
+指令の瞬間に到達を立てると、断線したソレノイドも抜けたコネクタも「到達」と報告され、
+UI にもヘルス判定にも**測ったように見える到達**が流れ込む。PC 側も到達を待たず
+`settle_s` で待つ。動作確認（`motor_check.magnitude: 0`）からも外し、
+`config/checklist.yaml` の `valves_actuate` で打音・目視確認する
+（DC 基板の `conveyor_run` と同じ扱い）。
+
+**この基板に物理非常停止入力（`REF`）は無い。** 物理停止は DC 基板が受けて PC 経由で
+伝わる（`FEEDBACK` の緊急停止ビット → サーバー全体の緊急停止 → ブロードキャスト `E_STOP`）。
+**DC 基板が繋がっていない構成では物理停止が効かない。**
 
 **物理非常停止（DC 基板の `REF`）はラッチで受ける。離しても自動復帰させてはならない。**
 PC は §5.1 の契約どおり 20Hz で目標値を再送し続けるので、レベル追従にすると

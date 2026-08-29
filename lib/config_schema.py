@@ -28,9 +28,17 @@ from lib.drivers.base import ControlMode
 DRIVER_TYPES = ("m3508", "edulite05", "generic")
 
 # generic ドライバの control_type に書ける制御モード。CURRENT を除くのは
-# GenericDriver が電流指令フレームを持たないため
+# GenericDriver が電流指令フレームを持たないため。
+# ON_OFF は電磁弁基板専用 (仕様書 §9.2)。他の 2 枚は受け取っても黙って捨てるので、
+# control_type の書き間違いはファーム側で「動かない」として現れる
 _CONTROL_MODES = {
-    mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY, ControlMode.DUTY)
+    mode.value: mode
+    for mode in (
+        ControlMode.POSITION,
+        ControlMode.VELOCITY,
+        ControlMode.DUTY,
+        ControlMode.ON_OFF,
+    )
 }
 
 # EDULITE 05 の mode に書ける制御モード (Edulite05Driver._CONTROL_TO_RUN_MODE と対)

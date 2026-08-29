@@ -158,9 +158,17 @@ _MANUAL_KEYS = frozenset({"min", "max", "steps"})
 _DEFAULT_MANUAL_STEPS: tuple[float, ...] = (1.0,)
 
 # 位置定数から出してよい指令モード。CURRENT を除くのは、位置名に紐付けて開ループの
-# トルク指令を出す用途が無く、誤記のまま機構へ流れると破損に直結するため
+# トルク指令を出す用途が無く、誤記のまま機構へ流れると破損に直結するため。
+# ON_OFF は電磁弁のような離散状態アクチュエータ用で、DUTY と同じく到達判定を
+# 持たない (指令後は settle_s で待つ)
 _COMMAND_MODES = {
-    mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY, ControlMode.DUTY)
+    mode.value: mode
+    for mode in (
+        ControlMode.POSITION,
+        ControlMode.VELOCITY,
+        ControlMode.DUTY,
+        ControlMode.ON_OFF,
+    )
 }
 
 

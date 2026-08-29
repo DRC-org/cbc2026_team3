@@ -22,10 +22,12 @@ firmware/
       src/DcChannel.{h,cpp}          DC 1ch 分の結線（安全機構 + duty 目標。DC 用のみ使用）
       src/ServoMotion.{h,cpp}        角度補間・可動範囲クランプ・到達推定（サーボ用のみ使用）
       src/ServoChannel.{h,cpp}       上 2 つの結線（出力禁止中は指令を受け付けず先に凍結する）
-  test/                native 環境の Unity テスト。両プロジェクトが test_dir = ../test で共有
+      src/SolenoidChannel.{h,cpp}    電磁弁 1ch 分の結線（安全機構 + ON/OFF 目標。電磁弁用のみ使用）
+  test/                native 環境の Unity テスト。PlatformIO の 2 つが test_dir = ../test で共有
     test_protocol/     プロトコル層・安全機構・物理停止・duty 分解・DcChannel
     test_board/        宛先判定・デバイス ID 解決・周期タイマ・シリアル行
     test_servo/        角度補間・可動範囲クランプ・到達推定・安全機構との結線
+    test_solenoid/     電磁弁のデバイス ID・on_off の復号・SolenoidChannel の安全機構
   dc_motor/            DC モータ用モタドラのファーム（1 枚で 3 チャンネル）
     platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
@@ -34,24 +36,39 @@ firmware/
     platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）
     src/main.cpp       ペリフェラル初期化・補間ループ・MCP2515 送受信
+  solenoid/            電磁弁用モタドラのファーム（**STM32F303K8** / 1 枚で 6ch）
+    CMakeLists.txt     **PlatformIO ではなく CubeMX + CMake**。MotorCan を target_sources で共有
+    CMakePresets.json  Debug / Release（generator は Ninja）
+    solenoid.ioc       CubeMX のプロジェクト定義。ピン割当・CAN ビットタイミングの単一情報源
+    Core/              CubeMX 生成（main.c は setup() / loop() を呼ぶだけ）
+    include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
+    src/app.cpp        ペリフェラル初期化・出力反映・bxCAN 送受信
 ```
 
-**2 枚は別の MCU に載っている。**
+**`firmware/solenoid/` の `Drivers/` と `cmake/` は `.gitignore` されている**
+（サンプル元のリポジトリと同じ運用）。HAL ドライバと CMake ツールチェーンファイルは
+CubeMX が生成するもので、リポジトリにはコミットしない。**clone 直後はビルドできない**
+ので、下の「コマンド」の手順で先に生成すること。
 
-| | DC 用 | サーボ用 |
-|---|---|---|
-| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** |
-| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） |
-| PWM | `PwmOut`（R4 専用） | **`Servo` ライブラリ**（`writeMicroseconds`） |
-| Flash / RAM | 256KB / 32KB | **32KB / 2KB** |
-| PlatformIO env | `uno_r4_minima` | `nano` |
+**3 枚とも別の MCU に載っている。**
 
-`MotorCan` が `Arduino.h` を include しないのは意図的で、PC 上の native 環境で
-そのままコンパイルしてテストできるようにするため。**MCU が違ってもここは共有できる。**
-`dc_motor/` と `servo/` は `lib_extra_dirs = ../lib` で同じ `MotorCan` を共有し、
-テストも `firmware/test/` を共有するので、
-**`pio test -e native` はどちらのプロジェクトから回しても同じ全ケースが走る。**
-一方**実機ビルド（`pio run`）は両方で確認すること。**
+| | DC 用 | サーボ用 | 電磁弁用 |
+|---|---|---|---|
+| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** | **STM32F303K8T6（Cortex-M4F / 32bit / 3.3V）** |
+| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） | **STM32 内蔵 bxCAN**（PA11/PA12 固定） |
+| 出力 | `PwmOut`（R4 専用）+ 方向ピン | **`Servo` ライブラリ**（`writeMicroseconds`） | **GPIO の ON/OFF だけ**（PWM も方向ピンも無い） |
+| Flash / RAM | 256KB / 32KB | **32KB / 2KB** | 64KB / 12KB |
+| ビルド | PlatformIO（env `uno_r4_minima`） | PlatformIO（env `nano`） | **STM32CubeMX + CMake** |
+
+`MotorCan` が `Arduino.h` も `stm32f3xx_hal.h` も include しないのは意図的で、PC 上の
+native 環境でそのままコンパイルしてテストできるようにするため。**MCU もビルド系も
+違ってよく、3 枚が同じソースを共有する。** `dc_motor/` と `servo/` は
+`lib_extra_dirs = ../lib`、`solenoid/` は CMake の `target_sources` で同じ `MotorCan` を指す。
+
+テストも `firmware/test/` を共有するので、**`pio test -e native` はどちらの
+PlatformIO プロジェクトから回しても同じ全ケース（`test_solenoid` を含む）が走る。**
+電磁弁基板のロジック層も、実機ビルドが CMake であることとは無関係にここでテストされる。
+一方**実機ビルド（`pio run` / `cmake --build`）は 3 つとも確認すること。**
 
 `common.ini` が持つのは本当に共通の部分（`lib_extra_dirs` / `test_framework` / native env と、
 実機ビルドの共通フラグ）だけ。**`platform` / `board` / `lib_deps` は MCU が違うので
@@ -84,6 +101,35 @@ pio device monitor -e uno_r4_minima -d firmware/dc_motor
 # クリーン
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
+
+**電磁弁基板（STM32F303K8）は PlatformIO ではなく CubeMX + CMake でビルドする。**
+`Drivers/` と `cmake/` は `.gitignore` されているので、clone 直後は先に生成が要る。
+
+```bash
+# 1. HAL ドライバと CMake ツールチェーンを生成する（初回、および .ioc を変えたとき）
+#    STM32CubeMX で firmware/solenoid/solenoid.ioc を開き、
+#    Project Manager > Toolchain/IDE が CMake であることを確認して GENERATE CODE。
+#    CLI なら: STM32_Programmer/stm32cubemx -q <script>（環境依存のため GUI を推奨）
+
+# 2. ビルド（arm-none-eabi-gcc と Ninja と CMake 3.22+ が要る）
+cmake --preset Debug -S firmware/solenoid
+cmake --build firmware/solenoid/build/Debug
+
+# 3. 書き込み（ST-Link。STM32CubeProgrammer / OpenOCD いずれでも）
+STM32_Programmer_CLI -c port=SWD -w firmware/solenoid/build/Debug/solenoid.elf -rst
+
+# 4. デバッグシリアル（USART1 / PA9-PA10 / 115200 baud）
+#    USB-UART 変換を繋いで任意のシリアルモニタで開く
+```
+
+**`Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと。**
+ロジックを書くと、次に CubeMX で再生成した人が黙って壊す（USER CODE 以外は上書きされる）。
+`src/app.cpp` に書けば再生成の影響を受けない。
+
+**`solenoid.ioc` はピン割当と CAN ビットタイミングの単一情報源。** DIP の内部プルアップも
+ここが持つ（既定の `GPIO_NOPULL` のままだと、外部プルアップの無い基板で DIP の読みが
+不定になり、電源投入のたびに違うデバイス ID を名乗る）。`Core/` を手で直すのではなく
+`.ioc` を直して再生成すること。
 
 **DC 用基板（UNO R4 Minima）の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている。**
 このピンを他用途へ割り当ててはならない。割り当てると CAN が上がらず**PC から止められない
@@ -136,7 +182,7 @@ USB CDC の `Serial`（115200 baud）から角度を直接入力できる。
 ### デバイス ID は固定ビット分割
 
 ```
-Bit7..6 : 基板種別 (1=サーボ / 2=DC。0 と 3 は予約)
+Bit7..6 : 基板種別 (1=サーボ / 2=DC / 3=電磁弁。0 は予約)
 Bit5..3 : 基板番号 (DIP そのもの。0-7)
 Bit2..0 : スロット番号 (0-7)
 ```
@@ -147,14 +193,20 @@ Bit2..0 : スロット番号 (0-7)
 
 | 基板 | 基板番号 0 の ID | モータ |
 |---|---|---|
-| **DC** ch0 / ch1 / ch2 | `0x80` / `0x81` / `0x82` | `conveyor` / 未使用 / 未使用 |
+| **DC** ch0 / ch1 / ch2 | `0x80` / `0x81` / `0x82` | `conveyor` / `pump_vac` / `pump_blow` |
 | **サーボ** SV0 – SV4 | `0x40` – `0x44` | `gripper` / `wall_f` / `wall_r` / `sub_gripper` / `origin_sensor` |
+| **電磁弁** ch0 – ch5 | `0xC0` – `0xC5` | `valve_1` 〜 `valve_6` |
 
-2 枚目は DIP=1 で DC が `0x88`〜、サーボが `0x48`〜。
+2 枚目は DIP=1 で DC が `0x88`〜、サーボが `0x48`〜、電磁弁が `0xC8`〜。
 
 **範囲外は未設定（駆動拒否）へ倒す。** 黙って丸めると、DIP を回しすぎた基板が
-別の基板の ID を名乗る。未設定にしておけば LED が赤く速く点滅し、設定ミスがその場で
-目に見える（サーボ基板の DIP は 4bit だが基板番号は 3bit なので、8 以上は全スロット未設定）。
+別の基板の ID を名乗る。未設定にしておけば LED が速く点滅し、設定ミスがその場で
+目に見える（DIP は 4bit だが基板番号は 3bit なので、8 以上は全スロット未設定）。
+
+**`0xFF`（E_STOP ブロードキャストの予約）に着地する 1 個も未設定へ倒す。**
+電磁弁基板の「基板番号 7 × スロット 7」だけがそこへ落ちる。ブロードキャストと同じ
+デバイス ID を名乗る基板が居ると、そのスロット宛の `SET_TARGET` と全基板向けの
+`E_STOP` がデバイス ID の上で区別できなくなる。潰れるのは 512 個中 1 個。
 
 かつては「スロット表の基準 ID」「ブロックオフセット（刻み幅 = スロット数）」
 「基板種別ごとの帯」「帯からのはみ出し判定」の 4 つの規則が重なっており、
@@ -191,6 +243,49 @@ Bit2..0 : スロット番号 (0-7)
 
 デバイス ID の割り当ては仕様書 §2.2 の表と `config/*.yaml` を参照。
 **デバイス ID はバス単位でロボット横断に一意**でなければならない。
+
+### solenoid — チャンネル表
+
+電磁弁基板は **6ch すべてが同じ役割**（電磁弁またはそれに準じる ON/OFF 負荷の駆動口）で、
+サーボ基板のような役割の切り替えは無い。`config.h` の `kSolenoidChannels[]` が持つのは
+ピンと表示名だけ。
+
+| チャンネル | ピン | 回路図 | デバイス ID | モータ |
+|---|---|---|---|---|
+| ch0 | PB7 | `PUMP1_SW` | `0xC0` | `valve_1`（サブハンド） |
+| ch1 | PB6 | `PUMP2_SW` | `0xC1` | `valve_2` |
+| ch2 | PB5 | `PUMP3_SW` | `0xC2` | `valve_3` |
+| ch3 | PB4 | `PUMP4_SW` | `0xC3` | `valve_4` |
+| ch4 | PB3 | `PUMP5_SW` | `0xC4` | `valve_5` |
+| ch5 | PA15 | `PUMP6_SW` | `0xC5` | `valve_6` |
+
+**基板のシルクは `PUMP*` だが、ファームの表示名は PC 側 yaml のモータ名に合わせてある。**
+`candump` とシリアルログと `config/sub_hand.yaml` を突き合わせるとき、同じものが
+2 つの名前で呼ばれていると対応表を頭の中で引くことになる。
+
+**吸気ポンプ・排気ポンプはこの基板ではなく DC 基板が動かす**（仕様書 §9.6）。
+6ch はすべて弁で埋まっており、またポンプは起動電流が大きく `max_duty` で立ち上がりを
+抑えられる DC 基板の側が適している。
+
+`config.h` は STM32 HAL を include せず、ポートを自前の `Port` enum で持つ。
+HAL の `GPIOA` / `GPIOB` はポインタへのキャストを含むマクロで `constexpr` 文脈に
+持ち込めないため、取り込むと**ピンの重複検査がビルド時にできなくなる**。
+`src/app.cpp` の `static_assert` が、ポートとピンの組で全ピン（CAN / UART / LED / DIP を
+含む）の重複を検査し、あわせて CubeMX 生成の `main.h` と表が一致していることも見る。
+
+## 電磁弁の動作は自動判定できない（重要）
+
+**電磁弁基板は弁が実際に開いたかを観測する手段を持たない。** 圧力センサも
+リミットスイッチも無く、分かるのは「指令どおり GPIO を駆動した」ことだけである。
+
+そこで **`FEEDBACK` の到達フラグは常に 0 にする**（DC 基板と同じ扱い）。指令を出した
+瞬間に到達を立てると、断線したソレノイドも抜けたコネクタも「到達」と報告され、
+UI にもヘルス判定にも**測ったように見える到達**が流れ込む。
+
+PC 側も到達を待たない。`on_off` 軸は `command_mode` が `position` ではないので
+固定待ち（`settle_s`）へ落ちる。**動作確認（`motor_check`）からも除外**し
+（`config/sub_hand.yaml` の `magnitude: 0`）、`config/checklist.yaml` の
+`valves_actuate` で打音・目視確認する。
 
 ## サーボの到達フラグは推定値（重要）
 
@@ -261,6 +356,20 @@ rpm 換算」である（仕様書 §7.4）。電流・温度と過電流・過�
 **MCP2515 を 16MHz 水晶で 1Mbps** はサンプルポイントの余裕が乏しい設定として
 知られている。実機で通信エラーが出るなら、バス全体を 500kbps へ下げる判断が要る
 （M3508・EDULITE 側も揃える必要がある）。
+
+### solenoid
+
+| 定数 | 現在値 | 確認すること |
+|---|---|---|
+| `kSolenoidChannels[].pin` | PB7 / PB6 / PB5 / PB4 / PB3 / PA15 | 回路図の `PUMP1_SW`〜`PUMP6_SW` と一致すること（`static_assert` が `main.h` と突き合わせる） |
+| `kDipActiveLevel` | `0`（LOW = ON） | **DIP のコモンが GND へ落ちていること。** VCC 側へ引く配線なら極性と `solenoid.ioc` の `GPIO_PuPd` を揃えて反転する |
+| DIP の `GPIO_PuPd` | `GPIO_PULLUP`（`solenoid.ioc`） | 外部プルアップが無い前提。**外すと読みが不定になり、電源投入のたびに違うデバイス ID を名乗る** |
+| `kFirmwareVersion` | `1` | プロトコルかピン配置を変えたら上げる |
+
+**この基板に物理非常停止入力（DC 用の `REF`）は無い。** サンプル基板にそのピンが
+存在しないためで、物理停止は DC 基板が受けて PC 経由で伝わる（`FEEDBACK` の緊急停止ビット
+→ サーバー全体の緊急停止 → ブロードキャスト `E_STOP`）。**DC 基板が繋がっていない
+構成では物理停止が効かない。**
 
 ## 安全に関する既定値
 

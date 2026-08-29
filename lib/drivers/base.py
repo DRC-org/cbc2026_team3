@@ -15,6 +15,12 @@ class ControlMode(Enum):
     VELOCITY = "velocity"
     CURRENT = "current"
     DUTY = "duty"
+    # 離散状態アクチュエータ (電磁弁) の 2 値指令。0 = OFF / 非 0 = ON。
+    # duty を流用しないのは、「duty 0.3 の電磁弁」という意味を持たない指令を
+    # 構造的に作れなくするため (docs/motor_driver_can_protocol.md §9.2)。
+    # DUTY と同じく到達判定の対象外 (default_tolerance が inf を返す) で、
+    # 待ちは位置定数 yaml の settle_s が持つ。
+    ON_OFF = "on_off"
 
 
 @dataclass(frozen=True)

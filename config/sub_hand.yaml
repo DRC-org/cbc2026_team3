@@ -37,3 +37,92 @@ motors:
     control_type: position
     motor_check:
       magnitude: 5.0           # positions.sub_gripper.open と一致させること
+
+  # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---
+  # 電磁弁基板 #0 の ch0-5 = 0xC0〜0xC5 (仕様書 §2.2 / §9)。
+  #
+  # 開 / 閉の 2 状態しか取らないので control_type: on_off。duty を流用しないのは、
+  # 「duty 0.3 の電磁弁」という意味を持たない指令を構造的に作れなくするため。
+  # DC 基板とサーボ基板は on_off を黙って捨てるので、can_id の書き間違いは
+  # 「その弁が動かない」として現れる (別の機構が動くことはない)。
+  #
+  # !!! motor_check.magnitude: 0 は省略できない !!!
+  # この基板は弁が実際に開いたかを観測する手段を持たず (圧力センサもリミット
+  # スイッチも非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。
+  # 除外せずに動作確認へ載せると必ず「動かなかった」で落ち、しかも原因が
+  # 配線不良にしか見えない。代わりに config/checklist.yaml の valves_actuate で
+  # 打音・目視確認する。
+  valve_1:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC0               # 電磁弁基板 #0 ch0 (PB7)
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_2:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC1               # 電磁弁基板 #0 ch1 (PB6)
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_3:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC2               # 電磁弁基板 #0 ch2 (PB5)
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_4:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC3               # 電磁弁基板 #0 ch3 (PB4)
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_5:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC4               # 電磁弁基板 #0 ch4 (PB3)
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_6:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC5               # 電磁弁基板 #0 ch5 (PA15)
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  # --- 吸着系: ポンプ (自作モータドライバ / DC 基板) ---
+  # **ポンプは電磁弁基板ではなく DC 基板が動かす** (仕様書 §9.6)。電磁弁基板の 6ch は
+  # すべて弁で埋まっており、またポンプは起動電流が大きく max_duty で立ち上がりを
+  # 抑えられる DC 基板の側が適している。
+  #
+  # DC 基板 #0 の ch1 / ch2 は空いていたのでそこへ載せる。**メインハンドの conveyor
+  # (0x80) と同じ基板を共有する**ので、サブハンド側に基板をもう 1 枚置くなら
+  # can_id を 0x88 / 0x89 (DC 基板 #1 = DIP 1) へ移すこと。
+  #
+  # duty 指令で、回ったかどうかを観測する手段は無い (conveyor と同じ)。
+  # 動作確認から除外し、checklist の pumps_run で目視・聴音確認する。
+  pump_vac:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x81               # DC 基板 #0 ch1
+    control_type: duty
+    motor_check:
+      magnitude: 0
+
+  pump_blow:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x82               # DC 基板 #0 ch2
+    control_type: duty
+    motor_check:
+      magnitude: 0

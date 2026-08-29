@@ -255,6 +255,19 @@ class TestControlType:
         assert "duy" in message
         assert "duty" in message
 
+    def test_on_off_is_applied(self) -> None:
+        """電磁弁の control_type: on_off (仕様書 §9.2)。
+
+        許可表に無いと yaml に書いた瞬間に起動が拒否される。逆に許可表だけ通って
+        GenericDriver 側の _MODE_MAP に無いと、起動はできるのに最初の指令で
+        KeyError になる (試合中に落ちる)。
+        """
+        config = load_robot_config(
+            _robot(valve_1=_generic(control_type="on_off")), source="test.yaml"
+        )
+
+        assert config.motors["valve_1"].control_type is ControlMode.ON_OFF
+
     def test_current_is_rejected(self) -> None:
         """GenericDriver は電流指令フレームを持たない。"""
         with pytest.raises(ValueError, match="control_type"):
@@ -287,6 +300,19 @@ class TestCanIdRange:
     def test_generic_id_out_of_range_is_rejected(self, can_id: int) -> None:
         with pytest.raises(ValueError, match="can_id"):
             load_robot_config(_robot(gripper=_generic(can_id=can_id)), source="test.yaml")
+
+    @pytest.mark.parametrize("can_id", [0xC0, 0xC5, 0xFE])
+    def test_solenoid_board_ids_are_accepted(self, can_id: int) -> None:
+        """電磁弁基板の帯 (0xC0-0xFE) が generic の範囲に収まっていること。
+
+        範囲は仕様書 §2.2 と揃えてある。ここが狭いと、実在する基板の ID を
+        yaml に書けないまま「範囲外」で起動を拒否される。
+        """
+        config = load_robot_config(
+            _robot(valve_1=_generic(can_id=can_id, control_type="on_off")), source="test.yaml"
+        )
+
+        assert config.motors["valve_1"].can_id == can_id
 
     @pytest.mark.parametrize("can_id", [0, 5])
     def test_m3508_id_out_of_range_is_rejected(self, can_id: int) -> None:

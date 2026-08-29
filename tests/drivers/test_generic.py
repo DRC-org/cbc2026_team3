@@ -101,6 +101,64 @@ class TestEncodeTarget:
         assert msg.data[0] == 2  # duty
         assert struct.unpack_from("<h", msg.data, 1)[0] == 7500  # 1/10000 単位
 
+    def test_encode_target_on_off(self):
+        """電磁弁の 2 値指令 (仕様書 §9.2)。**制御タイプは 3 で、値はスケールしない。**
+
+        duty のスケール (1/10000) を掛けると 1 が 10000 になる。この基板は
+        「0 か非 0 か」しか見ないのでどちらでも弁は開き、単位の食い違いが
+        実機では一切症状として現れないまま残る。
+        """
+        msg = self.drv.encode_target(ControlMode.ON_OFF, 1.0)
+        assert msg.arbitration_id == 0x101
+        assert len(msg.data) == 3
+        assert msg.data[0] == 3  # on_off
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 1
+
+        msg = self.drv.encode_target(ControlMode.ON_OFF, 0.0)
+        assert msg.data[0] == 3
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
+
+    def test_on_off_reset_after_check_closes_the_valve(self):
+        """動作確認の後始末は「閉じる」側であること。
+
+        0 = OFF なので reset は必ず消磁になる。ここが非 0 になると、
+        動作確認を流した直後に弁が開いたまま残る。
+        """
+        drv = GenericDriver("valve", 0xC0, control_type=ControlMode.ON_OFF)
+        msg = drv.reset_after_check()
+
+        assert msg.data[0] == 3
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
+
+    def test_encode_target_on_off(self):
+        """電磁弁の 2 値指令 (仕様書 §9.2)。**制御タイプは 3 で、値はスケールしない。**
+
+        duty のスケール (1/10000) を掛けると 1 が 10000 になる。この基板は
+        「0 か非 0 か」しか見ないのでどちらでも弁は開き、単位の食い違いが
+        実機では一切症状として現れないまま残る。
+        """
+        msg = self.drv.encode_target(ControlMode.ON_OFF, 1.0)
+        assert msg.arbitration_id == 0x101
+        assert len(msg.data) == 3
+        assert msg.data[0] == 3  # on_off
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 1
+
+        msg = self.drv.encode_target(ControlMode.ON_OFF, 0.0)
+        assert msg.data[0] == 3
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
+
+    def test_on_off_reset_after_check_closes_the_valve(self):
+        """動作確認の後始末は「閉じる」側であること。
+
+        0 = OFF なので reset は必ず消磁になる。ここが非 0 になると、
+        動作確認を流した直後に弁が開いたまま残る。
+        """
+        drv = GenericDriver("valve", 0xC0, control_type=ControlMode.ON_OFF)
+        msg = drv.reset_after_check()
+
+        assert msg.data[0] == 3
+        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
+
     def test_encode_target_keeps_sign(self):
         msg = self.drv.encode_target(ControlMode.DUTY, -0.75)
         assert struct.unpack_from("<h", msg.data, 1)[0] == -7500
