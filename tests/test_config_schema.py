@@ -631,3 +631,55 @@ def test_driver_types_match_the_driver_map() -> None:
     ドライバができる。
     """
     assert set(DRIVER_TYPES) == set(main._DRIVER_MAP)
+
+
+class TestExpectedInfoValues:
+    """INFO と突き合わせる期待値の検証 (仕様書 §3.4 / §7.7)。"""
+
+    def _load(self, **extra: object):
+        raw = _robot(gripper=_generic(can_id=0x40, control_type="position", **extra))
+        return load_robot_config(raw, source="test.yaml", buses=_BUSES)
+
+    def test_values_are_accepted(self) -> None:
+        motor = self._load(expected_firmware=2, expected_angle_range_deg=270.0).motors["gripper"]
+        assert motor.expected_firmware == 2
+        assert motor.expected_angle_range_deg == pytest.approx(270.0)
+
+    def test_omitted_values_stay_none(self) -> None:
+        """書かない軸は照合しない (既存 config をそのまま起動できる)。"""
+        motor = self._load().motors["gripper"]
+        assert motor.expected_firmware is None
+        assert motor.expected_angle_range_deg is None
+
+    def test_angle_range_rejected_on_duty_axis(self) -> None:
+        """**角度を持たない基板に書けると「書いたのに効かない設定」になる。**
+
+        DC 基板と電磁弁基板は可動レンジを申告しないので、照合は永久に
+        「申告なし」と判定し続け、そのモータは起動直後から FAULT のまま復帰しない。
+        """
+        raw = _robot(
+            conveyor=_generic(can_id=0x80, control_type="duty", expected_angle_range_deg=270.0)
+        )
+        with pytest.raises(ValueError, match="expected_angle_range_deg"):
+            load_robot_config(raw, source="test.yaml", buses=_BUSES)
+
+    def test_non_positive_angle_range_rejected(self) -> None:
+        with pytest.raises(ValueError, match="expected_angle_range_deg"):
+            self._load(expected_angle_range_deg=0.0)
+
+    def test_firmware_out_of_uint8_rejected(self) -> None:
+        with pytest.raises(ValueError, match="expected_firmware"):
+            self._load(expected_firmware=256)
+
+    def test_expected_keys_rejected_on_other_drivers(self) -> None:
+        """M3508 に書いても効かないので、混在は起動時に弾く。"""
+        raw = _robot(
+            y_axis_r={
+                "driver": "m3508",
+                "bus": "m3508_bus",
+                "can_id": 1,
+                "expected_firmware": 2,
+            }
+        )
+        with pytest.raises(ValueError):
+            load_robot_config(raw, source="test.yaml", buses=_BUSES)

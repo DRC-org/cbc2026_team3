@@ -82,6 +82,9 @@ cmake --build firmware/solenoid/build/Debug
 **`arm-none-eabi-gcc` は 11 以降が要る。** CubeMX のリンカスクリプトが使う `READONLY`
 キーワードが GCC11 以降にしか無く、古い版では**コンパイルは全部通ってリンクだけが落ちる**
 （PlatformIO が renesas-ra 用に持っている gcc 7.2.1 では通らない）。
+Ubuntu 24.04 以降なら `sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi
+libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib` で入る（**libstdc++ を省くと
+リンクだけが落ちる**）。詳細と xPack 版の手順は `firmware/README.md`。
 
 `Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと
 （それ以外は再生成で消える）。ロジックは `src/app.cpp`、ピン割当と CAN の

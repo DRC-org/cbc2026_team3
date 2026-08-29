@@ -83,7 +83,22 @@ struct ServoSlotConfig {
 // **サンプルのように 180/270 を掛けて write() の 0-180 に押し込む変換はしない。**
 // 分解能が 2/3 に落ち、可動範囲の端が表現できなくなるため（ServoMotion.h 参照）。
 // ファームは Servo::writeMicroseconds() でパルス幅を直接指令する。
+//
+// **サーボの型（180 / 270）を知っているのはここだけ**である（仕様書 §7.7）。PC 側の
+// yaml も CAN も出力軸の絶対角 [deg] しか扱わないので、型を載せ替えても
+// config/<robot>_positions.yaml は 1 行も変わらない。直すのは下の 1 行と、
+// それを使う kServoSlots[] の行だけ。
+//
+// **3 値セットで直すこと。** angleRangeDeg だけ 180 にして minUs/maxUs を 270 度用の
+// まま残すと、載せ替えた意味がないままずれ方だけが変わる。実物とファームが食い違っても
+// 指令どおり動いたようにしか見えないので（FEEDBACK が返すのはクランプ後の指令角）、
+// 気付く手段は INFO の自己申告と PC 側 expected_angle_range_deg の照合しかない。
 constexpr motorcan::ServoPulseSpec kServoPulse270{500, 2400, 270.0f};
+
+// TODO(実機で確認): 180 度サーボを挿すときのパルス幅。**下の値は仮置きである。**
+// 180 度品のパルス幅は 500-2400 とは限らず、1000-2000 や 500-2500 も普通にある。
+// データシートを見て 3 値とも実物へ合わせ、kServoSlots[] のその行を差し替えること。
+constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 
 // TODO(実機で確認): angle_min / angle_max は機構が付いた状態で「当たらない範囲」を
 // 実測して入れること。現状は config/main_hand_positions.yaml が 0〜6deg の微小ストロークしか
@@ -147,7 +162,15 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 
 // 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
 // **プロトコルかピン配置を変えたら必ず上げること。**
-constexpr uint8_t kFirmwareVersion = 1;
+//
+// 2: INFO にサーボ可動レンジ（Byte3-4）を追加。v1 は DLC=3 のままなので、PC 側は
+//    「レンジ不明」として扱い、期待値が書かれていれば不一致（＝焼き忘れ）と判定する。
+//
+// **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
+// PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
+// これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
+// 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
+constexpr uint8_t kFirmwareVersion = 2;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;

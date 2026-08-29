@@ -84,6 +84,11 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Dc;
 
 // 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
 // **プロトコルかピン配置を変えたら必ず上げること。**
+//
+// **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
+// PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
+// これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
+// 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
 constexpr uint8_t kFirmwareVersion = 1;
 
 struct DcChannelConfig {

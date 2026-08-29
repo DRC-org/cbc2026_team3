@@ -7,7 +7,12 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.drivers.generic import CommandType, GenericDriver
-from tests.feedback_frames import feed_generic
+from tests.feedback_frames import (
+    feed_generic,
+    feed_generic_info,
+    generic_feedback,
+    generic_info,
+)
 
 #: FEEDBACK Byte7 の予約ビット (仕様書 §3.2)。名前が付いていない = 誰も報告しない
 _RESERVED_BITS = 0xE0
@@ -537,3 +542,121 @@ class TestSafetyStatusFlags:
         assert self.drv.device_id_unconfigured is False
         assert self.drv.is_fault() is False
         assert self.drv.check_safety_error() is None
+
+
+class TestInfoFrame:
+    """INFO の解釈 (仕様書 §3.4)。基板が 1Hz で自己申告する。"""
+
+    def test_decodes_servo_range(self):
+        driver = GenericDriver("gripper", 0x40)
+        feed_generic_info(driver, firmware_version=2, angle_range_deg=270.0)
+
+        assert driver.info is not None
+        assert driver.info.firmware_version == 2
+        assert driver.info.angle_range_deg == pytest.approx(270.0)
+
+    def test_absent_range_is_none_not_zero(self):
+        """レンジを申告しない基板は None。**0 と混ぜてはならない。**
+
+        DC 基板と電磁弁基板はそもそも角度を持たないので送らないのが正しく、
+        サーボ基板が送ってこないのは古いファームが焼かれている証拠になる。
+        0 で埋めると、この 2 つが「測ったように見える 0」として同じ顔で届く。
+        """
+        driver = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+        feed_generic_info(driver, firmware_version=1, board_kind=2)
+
+        assert driver.info is not None
+        assert driver.info.angle_range_deg is None
+
+    def test_no_info_yet_is_none(self):
+        assert GenericDriver("gripper", 0x40).info is None
+
+    def test_matches_only_own_info_frames(self):
+        driver = GenericDriver("gripper", 0x40)
+        other = GenericDriver("wall_f", 0x41)
+
+        assert driver.matches_info(generic_info(driver)) is True
+        # FEEDBACK を INFO として拾うと、鮮度と自己申告の意味が入れ替わる
+        assert driver.matches_info(generic_feedback(driver)) is False
+        assert driver.matches_info(generic_info(other)) is False
+
+    def test_info_frame_is_not_feedback(self):
+        """逆向きの取り違えも起きてはならない (INFO で鮮度が進むと途絶が隠れる)。"""
+        driver = GenericDriver("gripper", 0x40)
+        assert driver.matches_feedback(generic_info(driver)) is False
+
+
+class TestInfoMismatch:
+    """自己申告と config の期待値の照合 (仕様書 §3.4 / §7.7)。
+
+    **180 度サーボと 270 度サーボの取り違えは、この照合以外に気付く手段が無い。**
+    型を間違えると実機は指令の 1.5 倍 (または 2/3) 動くが、FEEDBACK が返すのは
+    クランプ後の指令角なので、PC からは正常に動いたようにしか見えない。
+    """
+
+    def _servo(self) -> GenericDriver:
+        return GenericDriver("gripper", 0x40, expected_firmware=2, expected_angle_range_deg=270.0)
+
+    def test_matching_info_is_not_fault(self):
+        driver = self._servo()
+        feed_generic_info(driver, firmware_version=2, angle_range_deg=270.0)
+
+        assert driver.info_mismatch is None
+        assert driver.is_fault() is False
+
+    def test_wrong_angle_range_is_fault(self):
+        """270 度用の期待値に 180 度サーボのファームが応えた場合。"""
+        driver = self._servo()
+        feed_generic_info(driver, firmware_version=2, angle_range_deg=180.0)
+
+        assert driver.info_mismatch is not None
+        assert "180" in driver.info_mismatch
+        assert driver.is_fault() is True
+
+    def test_wrong_firmware_is_fault(self):
+        driver = self._servo()
+        feed_generic_info(driver, firmware_version=1, angle_range_deg=270.0)
+
+        assert driver.info_mismatch is not None
+        assert driver.is_fault() is True
+
+    def test_missing_range_is_fault_when_expected(self):
+        """**「申告なし」を一致へ倒さない。** 倒すと焼き忘れの検出が効かなくなる。"""
+        driver = self._servo()
+        feed_generic_info(driver, firmware_version=2)
+
+        assert driver.info_mismatch is not None
+        assert driver.is_fault() is True
+
+    def test_no_info_yet_is_not_fault(self):
+        """**未受信は照合しない。** 起動直後は必ず未受信で、1Hz なので数秒で埋まる。
+
+        未受信を不一致に倒すと起動のたびに全サーボが FAULT になり、
+        「いつもの赤」として無視されるようになる。
+        """
+        driver = self._servo()
+
+        assert driver.info_mismatch is None
+        assert driver.is_fault() is False
+
+    def test_no_expectation_never_faults(self):
+        """期待値を書かない軸は照合しない (既存 config をそのまま起動できる)。"""
+        driver = GenericDriver("gripper", 0x40)
+        feed_generic_info(driver, firmware_version=99, angle_range_deg=1.0)
+
+        assert driver.info_mismatch is None
+        assert driver.is_fault() is False
+
+    def test_small_rounding_difference_is_tolerated(self):
+        """CAN 上の刻みは 0.1deg (仕様書 §4)。往復の丸めで落ちてはならない。"""
+        driver = GenericDriver("gripper", 0x40, expected_angle_range_deg=270.04)
+        feed_generic_info(driver, angle_range_deg=270.0)
+
+        assert driver.info_mismatch is None
+
+    def test_check_safety_error_reports_mismatch(self):
+        """型違いのまま動作確認すると指令の 1.5 倍動く。動かす前に打ち切る。"""
+        driver = self._servo()
+        feed_generic_info(driver, firmware_version=2, angle_range_deg=180.0)
+
+        assert driver.check_safety_error() is not None

@@ -113,7 +113,22 @@ pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 | `cmake` | 3.22 以降 | `uv tool install cmake` で入る |
 | `ninja` | — | `CMakePresets.json` の generator。`uv tool install ninja` で入る |
 
-ツールチェーンは xPack 版が手軽（sudo 不要、tar を展開するだけ）:
+ツールチェーンの入れ方は 2 通り。
+
+**Ubuntu 24.04 以降なら apt が最短**（26.04 で 14.2 が入る。sudo が要る代わりに
+`PATH` を通す必要が無く、`/usr/bin/arm-none-eabi-gcc` として見える）:
+
+```bash
+sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi \
+                 libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+```
+
+**`libstdc++-arm-none-eabi-newlib` を省かないこと。** `src/app.cpp` は C++ なので、
+これが無いとコンパイルは全部通ってリンクだけが落ちる（GCC の版が古いときと
+同じ壊れ方をするので、版を疑って時間を溶かす）。
+
+古い Ubuntu では apt の版が 10 以下のことがある（`apt-cache policy gcc-arm-none-eabi`
+で確認）。その場合は xPack 版を使う（sudo 不要、tar を展開するだけ）:
 <https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases>
 
 **`Drivers/`（HAL と CMSIS）は生成物なのでコミットしていない。** CubeMX が無くても
@@ -124,13 +139,16 @@ pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 # 1. HAL / CMSIS を取得（初回のみ）
 firmware/solenoid/scripts/fetch_hal.sh
 
-# 2. ビルド
-PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
-  cmake --preset Debug -S firmware/solenoid
-PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
-  cmake --build firmware/solenoid/build/Debug
-#   → Debug: FLASH 35.0% (22,964 B / 64KB) / RAM 19.6% (2,408 B / 12KB)
-#   → Release: FLASH 21.1% (13,848 B)
+# 2. ビルド（apt で入れたなら PATH の指定は要らない）
+cmake --preset Debug -S firmware/solenoid
+cmake --build firmware/solenoid/build/Debug
+
+#    xPack 版を展開して使う場合はその bin を PATH の先頭に置く:
+# PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
+#   cmake --preset Debug -S firmware/solenoid
+#   → Debug: FLASH 35.9% (23,496 B / 64KB) / RAM 19.6% (2,408 B / 12KB)
+#   → Release: FLASH 21.3% (13,972 B)
+#   （数値は GCC 14.2 / apt 版での実測。コンパイラの版で数 % 前後する）
 
 # 3. 書き込み（ST-Link。STM32CubeProgrammer / OpenOCD いずれでも）
 STM32_Programmer_CLI -c port=SWD -w firmware/solenoid/build/Debug/solenoid.elf -rst

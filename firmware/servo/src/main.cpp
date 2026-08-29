@@ -313,7 +313,18 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
 // 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
 static void sendInfo(uint8_t slot) {
-    uint8_t data[kInfoLength];
+    uint8_t data[kInfoWithServoRangeLength];
+    // **可動レンジを足すのはサーボスロットだけ**（仕様書 §3.4）。センサスロットは
+    // 角度そのものを持たないので、載せると PC 側に「測ったように見える 0」が届く。
+    // この申告だけが、config.h の ServoPulseSpec と実物の型（180/270）の食い違いを
+    // CAN 越しに見える形にしている（仕様書 §7.7）。
+    if (isServoSlot(slot)) {
+        const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator,
+                                       kServoSlots[slot].pulse.angleRangeDeg);
+        g_can.sendMsgBuf(buildCanId(CommandType::Info, g_deviceId[slot]), 0, len, data);
+        return;
+    }
+
     const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, kind);
     g_can.sendMsgBuf(buildCanId(CommandType::Info, g_deviceId[slot]), 0, len, data);

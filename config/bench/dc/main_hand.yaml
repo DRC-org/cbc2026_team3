@@ -29,6 +29,12 @@ motors:
     bus: generic_bus
     can_id: 0x80
     control_type: duty
+    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
+    # ファームを一部の基板にだけ焼き忘れると、症状は「そのモータが応答しない」か、
+    # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
+    # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
+    # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
+    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
     motor_check:
       # この基板はエンコーダも電流センスも持たず、FEEDBACK は状態フラグ 1 バイトだけ。
       # 「回ったかどうか」を自動判定する手段が構造的に無いので動作確認から除外し、
@@ -44,6 +50,7 @@ motors:
     bus: generic_bus
     can_id: 0x81
     control_type: duty
+    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
     motor_check:
       magnitude: 0
 
@@ -53,5 +60,6 @@ motors:
     bus: generic_bus
     can_id: 0x82
     control_type: duty
+    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
     motor_check:
       magnitude: 0

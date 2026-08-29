@@ -322,6 +322,19 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
   共有 `can_generic` 上の全基板のラッチをまとめて外す
 - **サーボの到達フラグはファームの推定値**（仕様書 §7.3）。実際には動いていなくても到達を
   報告するため、危険な動作には `require_trigger` を付けて目視確認を挟む
+- **サーボの可動角（180 / 270）を知っているのは `firmware/servo/include/config.h` だけ**
+  （仕様書 §7.7）。`SET_TARGET` も `FEEDBACK` も `config/<robot>_positions.yaml` も
+  **出力軸の絶対角 [deg] しか扱わない**ので、型を載せ替えても positions は 1 行も変わらない。
+  代わりに、ファームの `ServoPulseSpec` と実物が食い違っても**症状が一切出ない** ——
+  270 度用の設定で 180 度サーボを回すと指令の 1.5 倍動くが、`FEEDBACK` が返すのは
+  クランプ後の指令角なので、PC からは正常に動いたようにしか見えない。
+  そこで `INFO` の Byte3-4（仕様書 §3.4）で `angleRangeDeg` を自己申告させ、
+  `config/<robot>.yaml` の `expected_angle_range_deg` / `expected_firmware` と突き合わせて
+  `GenericDriver.is_fault()` へ倒す。**この照合だけが型の取り違えと焼き忘れを可視化している。**
+  照合の 3 つの約束: ①**未受信は照合しない**（起動直後は必ず未受信。倒すと毎回全サーボが
+  FAULT になり「いつもの赤」として無視される） ②**「申告なし」を一致へ倒さない**
+  （DLC=3 の `INFO` は古いファームの証拠） ③**`INFO` は `_last_rx_at` を更新しない**
+  （1Hz の自己申告で 100Hz の `FEEDBACK` の途絶が隠れると、STALE 判定そのものが効かなくなる）
 - **電磁弁は `on_off`（制御タイプ 3）でしか動かず、到達フラグを立てない**（仕様書 §9.2 / §9.3）。
   弁が開いたかを観測する手段が基板に無いので、`FEEDBACK` は状態フラグ 1 バイトだけ。
   PC 側も到達を待たず `settle_s` の固定待ちへ落ち、動作確認からは
@@ -668,6 +681,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 電磁弁は出力ゲートを通してしか通電しない | `SolenoidChannel::outputOn` の `isOutputAllowed` を外して目標をそのまま返す / `setOn` の受理ガードを外す | `firmware/test/test_solenoid/` |
 | ブロードキャスト ID を名乗る基板を作らない | `makeDeviceId` の `0xFF` ガードを外す（電磁弁基板の基板番号 7 × スロット 7 が `0xFF` を名乗る） | `firmware/test/test_solenoid/` |
 | `on_off` の目標値にスケールを掛けない | `_TARGET_SCALE[ON_OFF]` を `_DUTY_SCALE` にする（**基板は 0 か非 0 かしか見ないので実機では症状が出ない**） | `tests/drivers/test_generic.py` |
+| `INFO` はフィードバック鮮度を更新しない | `_dispatch_frame` の `INFO` 経路で `_last_rx_at` を書く（**1Hz の自己申告が 100Hz の途絶を隠し、モータが永久に STALE にならない**） | `tests/test_can_manager_health.py` |
+| サーボ可動レンジの「申告なし」を一致へ倒さない | `info_mismatch` の `angle_range_deg is None` 分岐を `return None` にする（古いファームの焼き忘れが素通りする） | `tests/drivers/test_generic.py` |
+| サーボスロット以外は `INFO` に可動レンジを載せない | `encodeInfo`（3 引数版）が Byte3-4 を書くようにする（**測る対象を持たない基板から「レンジ 0deg」が届く**） | `firmware/test/test_protocol/` |
 | `on_off` 軸に連続値の可動範囲を持たせない | `_parse_manual` の `command_mode is not POSITION` 判定を外す | `tests/test_sequence_positions.py` |
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |

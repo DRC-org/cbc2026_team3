@@ -33,6 +33,8 @@ checklists:
       label: コンベア 正転・逆転の目視確認
     - id: origin_sensor_react
       label: 原点センサに触れて反応することを確認
+    - id: firmware_match
+      label: サーボ基板のファーム版・可動角の異常表示が出ていないこと確認
     - id: conveyor_stop
       label: コンベア停止確認
     - id: motor_check

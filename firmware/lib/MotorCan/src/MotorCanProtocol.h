@@ -189,8 +189,20 @@ uint8_t encodeFeedback(uint8_t *out, uint8_t flags);
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg);
 
 // 仕様書 §3.6。焼き忘れた基板をセッティングタイムに見つけるための自己申告。
-constexpr uint8_t kInfoLength = 3;
+//
+// **DLC 可変。** サーボスロットだけが可動レンジ（仕様書 §3.4 の Byte3-4）を足す。
+// FEEDBACK で位置を持つ基板だけが位置を足すのと同じ形で、**測る対象を持たない基板に
+// 0 を運ばせない**（常に 0 の値は PC 側に「測ったように見える 0」として届く）。
+//
+// レンジを申告するのは、**180 度サーボと 270 度サーボの取り違えが CAN 越しに
+// 一切見えない**ため（仕様書 §7.7）。角度 → パルス幅の変換は config.h の
+// ServoPulseSpec にしかなく、270 度用の設定で 180 度サーボを回すと指令の 1.5 倍
+// 動くのに、FEEDBACK が返すのはクランプ後の指令角なので PC には正常に見える。
+constexpr uint8_t kInfoBaseLength = 3;
+constexpr uint8_t kInfoWithServoRangeLength = 5;
 uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotKind slot);
+uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotKind slot,
+                   float angleRangeDeg);
 
 // ---------------------------------------------------------------------------
 // SET_TARGET / SET_PARAM の値域（仕様書 §3.4 / §5.3）

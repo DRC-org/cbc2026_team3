@@ -255,6 +255,10 @@ def _create_motor(motor: MotorConfig) -> MotorDriver:
             name=motor.name,
             can_id=motor.can_id,
             control_type=motor.control_type,
+            # 焼き忘れとサーボの型違いは、この照合以外に気付く手段が無い
+            # (機体は指令どおり動いたようにしか見えない。仕様書 §3.4 / §7.7)
+            expected_firmware=motor.expected_firmware,
+            expected_angle_range_deg=motor.expected_angle_range_deg,
         )
 
     return _DRIVER_MAP[motor.driver](name=motor.name, can_id=motor.can_id)

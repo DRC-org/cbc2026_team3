@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 from enum import IntEnum
 
 import can
@@ -78,6 +79,28 @@ _TARGET_SCALE = {
 }
 
 
+@dataclass(frozen=True)
+class InfoFrame:
+    """INFO フレームの中身 (仕様書 §3.4)。基板が 1Hz で自己申告する。
+
+    ``angle_range_deg`` が None なのは **可動レンジを申告しなかった** ことを意味し、
+    「レンジ 0deg」とは別物である。混ぜてはならない —— DC 基板と電磁弁基板は
+    そもそも角度を持たないので送らないのが正しく、サーボ基板が送ってこないのは
+    可動レンジ以前のバージョンが焼かれている証拠になる。0 で埋めると、この 2 つが
+    「測ったように見える 0」として同じ顔で届く。
+    """
+
+    firmware_version: int
+    board_kind: int
+    slot_kind: int
+    angle_range_deg: float | None
+
+
+#: 可動レンジの一致とみなす差 [deg]。CAN 上の刻みは 0.1deg (仕様書 §4) なので、
+#: それ未満の差は往復の丸めでしか生まれない
+_ANGLE_RANGE_EPSILON = 0.05
+
+
 def _to_raw(value: float, scale: int) -> int:
     """float を固定小数点の int16 へ。範囲外と NaN は飽和させる。
 
@@ -105,6 +128,8 @@ class GenericDriver(MotorDriver):
         can_id: int,
         *,
         control_type: ControlMode = ControlMode.POSITION,
+        expected_firmware: int | None = None,
+        expected_angle_range_deg: float | None = None,
     ) -> None:
         # 範囲外の can_id は静かに壊れる。特に 0xFF は activation_steps() が
         # 緊急停止**解除**フレームを 0x7FF (ブロードキャスト) へ送ることになり、
@@ -127,6 +152,14 @@ class GenericDriver(MotorDriver):
         self._never_commanded_flag: bool = False
         # 動作確認や reset の指令を出す制御モード。config から渡される値で上書き可能。
         self.control_type: ControlMode = control_type
+        # INFO (1Hz の自己申告, 仕様書 §3.4)。未受信は None のままで、
+        # **未受信を不一致に倒さない** (起動直後は必ず未受信になる)
+        self._info: InfoFrame | None = None
+        # config に書かれた期待値。**書かなければ照合そのものをしない。**
+        # サーボの可動レンジは実物を測る手段が無く、照合できるのは
+        # 「ファームに書いた値」と「yaml に書いた値」の一致まで (仕様書 §7.7)
+        self._expected_firmware = expected_firmware
+        self._expected_angle_range_deg = expected_angle_range_deg
 
     # ---- CAN ID ユーティリティ ----
 
@@ -241,6 +274,83 @@ class GenericDriver(MotorDriver):
         cmd, dev = parsed
         return cmd == CommandType.FEEDBACK and dev == self.can_id
 
+    def decode_info(self, msg: can.Message) -> InfoFrame:
+        """INFO フレーム (仕様書 §3.4)。Byte0=版 / Byte1=基板種別 / Byte2=スロット役割。
+
+        **DLC は可変。** サーボスロットだけが Byte3-4 に可動レンジ [0.1deg] を足す。
+        角度を持たない基板 (DC・電磁弁・センサ) は 3 バイトで送るので None になる。
+        """
+        d = msg.data
+        angle_range = struct.unpack_from("<h", d, 3)[0] / _ANGLE_SCALE if len(d) >= 5 else None
+        return InfoFrame(
+            firmware_version=d[0],
+            board_kind=d[1],
+            slot_kind=d[2],
+            angle_range_deg=angle_range,
+        )
+
+    def update_info(self, msg: can.Message) -> None:
+        self._info = self.decode_info(msg)
+
+    def matches_info(self, msg: can.Message) -> bool:
+        # 判定の作法は matches_feedback と同じ。ここから例外を投げると受信ループごと
+        # 死ぬので、解釈できないフレームは「自分宛ではない」として無視する
+        if msg.is_extended_id:
+            return False
+
+        parsed = self.try_parse_can_id(msg.arbitration_id)
+        if parsed is None:
+            return False
+
+        cmd, dev = parsed
+        return cmd == CommandType.INFO and dev == self.can_id
+
+    @property
+    def info(self) -> InfoFrame | None:
+        """最後に受け取った自己申告 (仕様書 §3.4)。1 通も来ていなければ None。"""
+        return self._info
+
+    @property
+    def info_mismatch(self) -> str | None:
+        """自己申告が config の期待値と食い違っていれば、その理由を返す。
+
+        **INFO を 1 通も受けていない間は照合しない。** 起動直後は必ず未受信で、
+        1Hz なので数秒で埋まる。未受信を不一致に倒すと起動のたびに全サーボが FAULT に
+        なり、「いつもの赤」として無視されるようになる。
+        """
+        info = self._info
+        if info is None:
+            return None
+
+        expected_fw = self._expected_firmware
+        if expected_fw is not None and info.firmware_version != expected_fw:
+            return (
+                f"ファーム版が不一致 (期待 {expected_fw} / 申告 {info.firmware_version})。"
+                "焼き忘れの可能性"
+            )
+
+        expected_range = self._expected_angle_range_deg
+        if expected_range is None:
+            return None
+
+        if info.angle_range_deg is None:
+            # 可動レンジを申告しない = それ以前のファーム。**「不明」を一致へ倒すと
+            # 焼き忘れの検出そのものが効かなくなる** (仕様書 §3.4)
+            return (
+                f"サーボ可動レンジが申告されていない (期待 {expected_range:g}deg)。"
+                "可動レンジ以前のファームが焼かれている"
+            )
+
+        if abs(info.angle_range_deg - expected_range) > _ANGLE_RANGE_EPSILON:
+            # **これが 180/270 の取り違えを CAN 越しに見える形にしている唯一の経路。**
+            # 実機は指令の 1.5 倍 (または 2/3) 動くが、FEEDBACK が返すのはクランプ後の
+            # 指令角なので、この照合が無ければ PC からは正常にしか見えない (仕様書 §7.7)
+            return (
+                f"サーボ可動レンジが不一致 (期待 {expected_range:g}deg / "
+                f"申告 {info.angle_range_deg:g}deg)。180/270 の取り違えの可能性"
+            )
+        return None
+
     # ------------------------------------------------------------------ #
     #  目標到達判定
     # ------------------------------------------------------------------ #
@@ -306,7 +416,11 @@ class GenericDriver(MotorDriver):
         # 試合前に必ず気付く必要があるため FAULT にする。
         # 緊急停止中とウォッチドッグ作動中は正常な安全動作なので含めない。
         # 過電流・過熱はどちらの基板も検出手段を持たない (仕様書 §3.2)
-        return self._unconfigured_id_flag
+        #
+        # 自己申告の不一致 (焼き忘れ・サーボの型違い) も同じ扱いにする。どちらも
+        # **機体は指令どおり動いたようにしか見えない**設定ミスで、ここで FAULT に
+        # しないと試合まで誰も気付けない (仕様書 §3.4 / §7.7)
+        return self._unconfigured_id_flag or self.info_mismatch is not None
 
     def check_safety_error(self) -> str | None:
         # 駆動が拒否される状態のまま動作確認しても必ず失敗し、しかも原因が
@@ -317,6 +431,11 @@ class GenericDriver(MotorDriver):
             return "緊急停止中 (解除してから動作確認すること)"
         if self._watchdog_flag:
             return "コマンドウォッチドッグ作動中 (CAN 通信途絶を確認すること)"
+        # 型違いのまま動作確認すると、指令の 1.5 倍 (または 2/3) 動く。「確認できた」
+        # という記録だけが残るのが最も悪いので、動かす前に打ち切る
+        mismatch = self.info_mismatch
+        if mismatch is not None:
+            return mismatch
         return None
 
     # ------------------------------------------------------------------ #

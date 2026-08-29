@@ -89,6 +89,13 @@ motors:
     bus: generic_bus
     can_id: 0x40               # サーボ基板 #0 SV0
     control_type: position
+    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
+    # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
+    # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
+    # 値は firmware/servo/include/config.h の kFirmwareVersion と
+    # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
+    expected_firmware: 2
+    expected_angle_range_deg: 270.0
     motor_check:
       magnitude: 5.0           # positions.gripper.open と一致させること
 
@@ -100,6 +107,12 @@ motors:
     bus: generic_bus
     can_id: 0x80               # DC 基板 #0 ch0
     control_type: duty
+    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
+    # ファームを一部の基板にだけ焼き忘れると、症状は「そのモータが応答しない」か、
+    # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
+    # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
+    # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
+    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
     motor_check:
       # この基板はエンコーダも電流センスも持たず、FEEDBACK の velocity は常に 0。
       # 「回ったかどうか」を自動判定する手段が無いので動作確認から除外し、
@@ -112,6 +125,8 @@ motors:
     bus: generic_bus
     can_id: 0x41               # サーボ基板 #0 SV1
     control_type: position
+    expected_firmware: 2
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
     motor_check:
       magnitude: 6.0           # positions.wall_f.open と一致させること
 
@@ -120,6 +135,8 @@ motors:
     bus: generic_bus
     can_id: 0x42               # サーボ基板 #0 SV2
     control_type: position
+    expected_firmware: 2
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
     motor_check:
       magnitude: 6.0           # positions.wall_r.open と一致させること
 
