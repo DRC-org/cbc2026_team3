@@ -130,8 +130,22 @@ static void test_decode_set_target_keeps_sign() {
 
 static void test_decode_set_target_rejects_unknown_type() {
     uint8_t data[3] = {0};
-    data[0] = 3;  // position/velocity/duty 以外
+    data[0] = 4;  // position/velocity/duty/on_off 以外（仕様書 §4 の表に無い値）
     TEST_ASSERT_FALSE(decodeSetTarget(data, 3).valid);
+    data[0] = 0xFF;
+    TEST_ASSERT_FALSE(decodeSetTarget(data, 3).valid);
+}
+
+// 制御タイプ 3 は電磁弁用の on_off（仕様書 §9.2）。復号層が知らないと SET_TARGET が
+// 丸ごと捨てられ、PC からは「指令しても反応しない基板」にしか見えない。
+// **受理するのは復号層まで**で、on_off を実際に駆動へ通すかは各基板の main / app が決める
+// （DC 基板とサーボ基板は黙って捨てる。仕様書 §3.1）。
+static void test_decode_set_target_accepts_on_off() {
+    const uint8_t data[3] = {static_cast<uint8_t>(ControlType::OnOff), 0x01, 0x00};
+    const SetTargetCommand cmd = decodeSetTarget(data, 3);
+    TEST_ASSERT_TRUE(cmd.valid);
+    TEST_ASSERT_EQUAL_UINT8(3, static_cast<uint8_t>(cmd.type));
+    TEST_ASSERT_EQUAL_INT16(1, cmd.raw);
 }
 
 static void test_decode_set_target_rejects_short_frame() {
@@ -744,6 +758,7 @@ int main(int, char **) {
     RUN_TEST(test_decode_set_target);
     RUN_TEST(test_decode_set_target_keeps_sign);
     RUN_TEST(test_decode_set_target_rejects_unknown_type);
+    RUN_TEST(test_decode_set_target_accepts_on_off);
     RUN_TEST(test_decode_set_target_rejects_short_frame);
     RUN_TEST(test_decode_set_param);
     RUN_TEST(test_param_ids_are_packed);

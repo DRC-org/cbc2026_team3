@@ -42,6 +42,12 @@ checklists:
     - id: field_clear
       label: 可動範囲内に人・物がないこと確認
 
+  # 吸着系 (電磁弁 6 個 + 吸気/排気ポンプ) は動作確認 (motor_check) から除外してある。
+  # 電磁弁基板は弁が開いたかを観測する手段を持たず (圧力センサもリミットスイッチも
+  # 非搭載)、FEEDBACK の到達フラグも立てないため、自動判定すると必ず「動かなかった」で
+  # 落ちる (仕様書 §9.3)。ポンプも DC 基板なので同じ (conveyor と同じ理由)。
+  # 自動確認が効かない分をここでの目視・打音確認で埋めるので、valves_* と pumps_run は
+  # 省略できない。
   sub_hand:
     - id: estop_release
       label: 非常停止スイッチ解除確認
@@ -49,6 +55,16 @@ checklists:
       label: サブハンド初期位置確認
     - id: gripper_open
       label: 補助ハンド開状態確認
+    - id: valves_closed
+      label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
+    - id: valves_actuate
+      label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
+    - id: pumps_run
+      label: 吸気ポンプ・排気ポンプが個別に回ること確認 (聴音。DC 基板は回転を報告しない)
+    - id: suction_hold
+      label: 吸気ポンプ運転中に弁を開き、ワークを吸着して保持できること確認
+    - id: suction_release
+      label: 弁を閉じ排気ポンプでワークが確実に離れること確認 (残圧で張り付かないこと)
     - id: motor_check
       label: アクチュエータ動作確認 完了
     - id: court

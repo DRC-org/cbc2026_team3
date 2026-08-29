@@ -11,6 +11,7 @@ _MODE_MAP = {
     ControlMode.POSITION: 0,
     ControlMode.VELOCITY: 1,
     ControlMode.DUTY: 2,
+    ControlMode.ON_OFF: 3,
 }
 
 # 動作確認の detail に出す単位。操縦者は config に書いた値の単位しか知らない
@@ -70,6 +71,10 @@ _TARGET_SCALE = {
     ControlMode.POSITION: _ANGLE_SCALE,
     ControlMode.VELOCITY: _ANGLE_SCALE,
     ControlMode.DUTY: _DUTY_SCALE,
+    # on_off は 0 と非 0 の区別しか使わないのでスケールは掛けない。
+    # 掛けると 1 が 10000 になり、この基板では症状が出ないままファームと単位が
+    # 食い違う (「0 でなければ ON」なのでどちらでも動いてしまう)
+    ControlMode.ON_OFF: _PLAIN_SCALE,
 }
 
 

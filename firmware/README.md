@@ -22,10 +22,12 @@ firmware/
       src/DcChannel.{h,cpp}          DC 1ch 分の結線（安全機構 + duty 目標。DC 用のみ使用）
       src/ServoMotion.{h,cpp}        角度補間・可動範囲クランプ・到達推定（サーボ用のみ使用）
       src/ServoChannel.{h,cpp}       上 2 つの結線（出力禁止中は指令を受け付けず先に凍結する）
-  test/                native 環境の Unity テスト。両プロジェクトが test_dir = ../test で共有
+      src/SolenoidChannel.{h,cpp}    電磁弁 1ch 分の結線（安全機構 + ON/OFF 目標。電磁弁用のみ使用）
+  test/                native 環境の Unity テスト。PlatformIO の 2 つが test_dir = ../test で共有
     test_protocol/     プロトコル層・安全機構・物理停止・duty 分解・DcChannel
     test_board/        宛先判定・デバイス ID 解決・周期タイマ・シリアル行
     test_servo/        角度補間・可動範囲クランプ・到達推定・安全機構との結線
+    test_solenoid/     電磁弁のデバイス ID・on_off の復号・SolenoidChannel の安全機構
   dc_motor/            DC モータ用モタドラのファーム（1 枚で 3 チャンネル）
     platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
@@ -34,24 +36,40 @@ firmware/
     platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）
     src/main.cpp       ペリフェラル初期化・補間ループ・MCP2515 送受信
+  solenoid/            電磁弁用モタドラのファーム（**STM32F303K8** / 1 枚で 6ch）
+    CMakeLists.txt     **PlatformIO ではなく CMake**。MotorCan を target_sources で共有
+    CMakePresets.json  Debug / Release（generator は Ninja）
+    solenoid.ioc       CubeMX のプロジェクト定義。ピン割当・CAN ビットタイミングの単一情報源
+    cmake/             ツールチェーン定義と HAL のソース一覧（CubeMX 生成だがコミットする）
+    scripts/fetch_hal.sh  HAL と CMSIS を ST の公式リポジトリから取得（CubeMX の代わり）
+    Core/              CubeMX 生成（main.c は setup() / loop() を呼ぶだけ）
+    include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
+    src/app.cpp        ペリフェラル初期化・出力反映・bxCAN 送受信
 ```
 
-**2 枚は別の MCU に載っている。**
+**`firmware/solenoid/Drivers/` は `.gitignore` されている**（HAL と CMSIS で数十 MB あり、
+ST の公式リポジトリから取り直せるため）。clone 直後は `scripts/fetch_hal.sh` を 1 回
+実行すればビルドできる。**`cmake/` はコミットしてある** —— 詳細は下の「コマンド」を参照。
 
-| | DC 用 | サーボ用 |
-|---|---|---|
-| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** |
-| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） |
-| PWM | `PwmOut`（R4 専用） | **`Servo` ライブラリ**（`writeMicroseconds`） |
-| Flash / RAM | 256KB / 32KB | **32KB / 2KB** |
-| PlatformIO env | `uno_r4_minima` | `nano` |
+**3 枚とも別の MCU に載っている。**
 
-`MotorCan` が `Arduino.h` を include しないのは意図的で、PC 上の native 環境で
-そのままコンパイルしてテストできるようにするため。**MCU が違ってもここは共有できる。**
-`dc_motor/` と `servo/` は `lib_extra_dirs = ../lib` で同じ `MotorCan` を共有し、
-テストも `firmware/test/` を共有するので、
-**`pio test -e native` はどちらのプロジェクトから回しても同じ全ケースが走る。**
-一方**実機ビルド（`pio run`）は両方で確認すること。**
+| | DC 用 | サーボ用 | 電磁弁用 |
+|---|---|---|---|
+| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** | **STM32F303K8T6（Cortex-M4F / 32bit / 3.3V）** |
+| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） | **STM32 内蔵 bxCAN**（PA11/PA12 固定） |
+| 出力 | `PwmOut`（R4 専用）+ 方向ピン | **`Servo` ライブラリ**（`writeMicroseconds`） | **GPIO の ON/OFF だけ**（PWM も方向ピンも無い） |
+| Flash / RAM | 256KB / 32KB | **32KB / 2KB** | 64KB / 12KB |
+| ビルド | PlatformIO（env `uno_r4_minima`） | PlatformIO（env `nano`） | **STM32CubeMX + CMake** |
+
+`MotorCan` が `Arduino.h` も `stm32f3xx_hal.h` も include しないのは意図的で、PC 上の
+native 環境でそのままコンパイルしてテストできるようにするため。**MCU もビルド系も
+違ってよく、3 枚が同じソースを共有する。** `dc_motor/` と `servo/` は
+`lib_extra_dirs = ../lib`、`solenoid/` は CMake の `target_sources` で同じ `MotorCan` を指す。
+
+テストも `firmware/test/` を共有するので、**`pio test -e native` はどちらの
+PlatformIO プロジェクトから回しても同じ全ケース（`test_solenoid` を含む）が走る。**
+電磁弁基板のロジック層も、実機ビルドが CMake であることとは無関係にここでテストされる。
+一方**実機ビルド（`pio run` / `cmake --build`）は 3 つとも確認すること。**
 
 `common.ini` が持つのは本当に共通の部分（`lib_extra_dirs` / `test_framework` / native env と、
 実機ビルドの共通フラグ）だけ。**`platform` / `board` / `lib_deps` は MCU が違うので
@@ -84,6 +102,60 @@ pio device monitor -e uno_r4_minima -d firmware/dc_motor
 # クリーン
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
+
+**電磁弁基板（STM32F303K8）は PlatformIO ではなく CMake でビルドする。**
+
+必要なツール:
+
+| ツール | 版 | 備考 |
+|---|---|---|
+| `arm-none-eabi-gcc` | **11 以降** | CubeMX のリンカスクリプトが使う `READONLY` キーワードが GCC11 以降にしか無い。古い版では**コンパイルは全部通ってリンクだけが落ちる**（`STM32F303XX_FLASH.ld:106: non constant or forward reference address expression for section .ARM.extab`）。PlatformIO が renesas-ra 用に持っている gcc 7.2.1 では通らない |
+| `cmake` | 3.22 以降 | `uv tool install cmake` で入る |
+| `ninja` | — | `CMakePresets.json` の generator。`uv tool install ninja` で入る |
+
+ツールチェーンは xPack 版が手軽（sudo 不要、tar を展開するだけ）:
+<https://github.com/xpack-dev-tools/arm-none-eabi-gcc-xpack/releases>
+
+**`Drivers/`（HAL と CMSIS）は生成物なのでコミットしていない。** CubeMX が無くても
+`scripts/fetch_hal.sh` で取得できる —— ST の公式リポジトリから、STM32CubeF3 が
+サブモジュールとして指している検証済みのコミットに固定して取る。
+
+```bash
+# 1. HAL / CMSIS を取得（初回のみ）
+firmware/solenoid/scripts/fetch_hal.sh
+
+# 2. ビルド
+PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
+  cmake --preset Debug -S firmware/solenoid
+PATH="$HOME/.local/opt/xpack-arm-none-eabi-gcc-15.2.1-1.1/bin:$PATH" \
+  cmake --build firmware/solenoid/build/Debug
+#   → Debug: FLASH 35.0% (22,964 B / 64KB) / RAM 19.6% (2,408 B / 12KB)
+#   → Release: FLASH 21.1% (13,848 B)
+
+# 3. 書き込み（ST-Link。STM32CubeProgrammer / OpenOCD いずれでも）
+STM32_Programmer_CLI -c port=SWD -w firmware/solenoid/build/Debug/solenoid.elf -rst
+
+# 4. デバッグシリアル（USART1 / PA9-PA10 / 115200 baud）
+#    USB-UART 変換を繋いで任意のシリアルモニタで開く
+```
+
+**CubeMX が要るのは `.ioc` を変更したときだけ。** ピン割当・クロック・CAN ビット
+タイミングを変えたら CubeMX で GENERATE CODE し、`Core/` と `cmake/` の差分を確認して
+コミットする。`Drivers/` の中身は `.ioc` では変わらないので `fetch_hal.sh` の再実行は要らない。
+
+**`cmake/` は CubeMX の生成物だがコミットしてある**（`.gitignore` から意図的に外した）。
+中身はツールチェーン定義と HAL のソース一覧だけで数 KB しかなく、無視すると
+**CubeMX を持っている人以外ビルドできない**リポジトリになる。試合前に基板へ焼ける人が
+1 人に絞られるのは避けたい。
+
+**`Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと。**
+ロジックを書くと、次に CubeMX で再生成した人が黙って壊す（USER CODE 以外は上書きされる）。
+`src/app.cpp` に書けば再生成の影響を受けない。
+
+**`solenoid.ioc` はピン割当と CAN ビットタイミングの単一情報源。** DIP の内部プルアップも
+ここが持つ（既定の `GPIO_NOPULL` のままだと、外部プルアップの無い基板で DIP の読みが
+不定になり、電源投入のたびに違うデバイス ID を名乗る）。`Core/` を手で直すのではなく
+`.ioc` を直して再生成すること。
 
 **DC 用基板（UNO R4 Minima）の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている。**
 このピンを他用途へ割り当ててはならない。割り当てると CAN が上がらず**PC から止められない
@@ -136,7 +208,7 @@ USB CDC の `Serial`（115200 baud）から角度を直接入力できる。
 ### デバイス ID は固定ビット分割
 
 ```
-Bit7..6 : 基板種別 (1=サーボ / 2=DC。0 と 3 は予約)
+Bit7..6 : 基板種別 (1=サーボ / 2=DC / 3=電磁弁。0 は予約)
 Bit5..3 : 基板番号 (DIP そのもの。0-7)
 Bit2..0 : スロット番号 (0-7)
 ```
@@ -147,14 +219,20 @@ Bit2..0 : スロット番号 (0-7)
 
 | 基板 | 基板番号 0 の ID | モータ |
 |---|---|---|
-| **DC** ch0 / ch1 / ch2 | `0x80` / `0x81` / `0x82` | `conveyor` / 未使用 / 未使用 |
+| **DC** ch0 / ch1 / ch2 | `0x80` / `0x81` / `0x82` | `conveyor` / `pump_vac` / `pump_blow` |
 | **サーボ** SV0 – SV4 | `0x40` – `0x44` | `gripper` / `wall_f` / `wall_r` / `sub_gripper` / `origin_sensor` |
+| **電磁弁** ch0 – ch5 | `0xC0` – `0xC5` | `valve_1` 〜 `valve_6` |
 
-2 枚目は DIP=1 で DC が `0x88`〜、サーボが `0x48`〜。
+2 枚目は DIP=1 で DC が `0x88`〜、サーボが `0x48`〜、電磁弁が `0xC8`〜。
 
 **範囲外は未設定（駆動拒否）へ倒す。** 黙って丸めると、DIP を回しすぎた基板が
-別の基板の ID を名乗る。未設定にしておけば LED が赤く速く点滅し、設定ミスがその場で
-目に見える（サーボ基板の DIP は 4bit だが基板番号は 3bit なので、8 以上は全スロット未設定）。
+別の基板の ID を名乗る。未設定にしておけば LED が速く点滅し、設定ミスがその場で
+目に見える（DIP は 4bit だが基板番号は 3bit なので、8 以上は全スロット未設定）。
+
+**`0xFF`（E_STOP ブロードキャストの予約）に着地する 1 個も未設定へ倒す。**
+電磁弁基板の「基板番号 7 × スロット 7」だけがそこへ落ちる。ブロードキャストと同じ
+デバイス ID を名乗る基板が居ると、そのスロット宛の `SET_TARGET` と全基板向けの
+`E_STOP` がデバイス ID の上で区別できなくなる。潰れるのは 512 個中 1 個。
 
 かつては「スロット表の基準 ID」「ブロックオフセット（刻み幅 = スロット数）」
 「基板種別ごとの帯」「帯からのはみ出し判定」の 4 つの規則が重なっており、
@@ -191,6 +269,49 @@ Bit2..0 : スロット番号 (0-7)
 
 デバイス ID の割り当ては仕様書 §2.2 の表と `config/*.yaml` を参照。
 **デバイス ID はバス単位でロボット横断に一意**でなければならない。
+
+### solenoid — チャンネル表
+
+電磁弁基板は **6ch すべてが同じ役割**（電磁弁またはそれに準じる ON/OFF 負荷の駆動口）で、
+サーボ基板のような役割の切り替えは無い。`config.h` の `kSolenoidChannels[]` が持つのは
+ピンと表示名だけ。
+
+| チャンネル | ピン | 回路図 | デバイス ID | モータ |
+|---|---|---|---|---|
+| ch0 | PB7 | `PUMP1_SW` | `0xC0` | `valve_1`（サブハンド） |
+| ch1 | PB6 | `PUMP2_SW` | `0xC1` | `valve_2` |
+| ch2 | PB5 | `PUMP3_SW` | `0xC2` | `valve_3` |
+| ch3 | PB4 | `PUMP4_SW` | `0xC3` | `valve_4` |
+| ch4 | PB3 | `PUMP5_SW` | `0xC4` | `valve_5` |
+| ch5 | PA15 | `PUMP6_SW` | `0xC5` | `valve_6` |
+
+**基板のシルクは `PUMP*` だが、ファームの表示名は PC 側 yaml のモータ名に合わせてある。**
+`candump` とシリアルログと `config/sub_hand.yaml` を突き合わせるとき、同じものが
+2 つの名前で呼ばれていると対応表を頭の中で引くことになる。
+
+**吸気ポンプ・排気ポンプはこの基板ではなく DC 基板が動かす**（仕様書 §9.6）。
+6ch はすべて弁で埋まっており、またポンプは起動電流が大きく `max_duty` で立ち上がりを
+抑えられる DC 基板の側が適している。
+
+`config.h` は STM32 HAL を include せず、ポートを自前の `Port` enum で持つ。
+HAL の `GPIOA` / `GPIOB` はポインタへのキャストを含むマクロで `constexpr` 文脈に
+持ち込めないため、取り込むと**ピンの重複検査がビルド時にできなくなる**。
+`src/app.cpp` の `static_assert` が、ポートとピンの組で全ピン（CAN / UART / LED / DIP を
+含む）の重複を検査し、あわせて CubeMX 生成の `main.h` と表が一致していることも見る。
+
+## 電磁弁の動作は自動判定できない（重要）
+
+**電磁弁基板は弁が実際に開いたかを観測する手段を持たない。** 圧力センサも
+リミットスイッチも無く、分かるのは「指令どおり GPIO を駆動した」ことだけである。
+
+そこで **`FEEDBACK` の到達フラグは常に 0 にする**（DC 基板と同じ扱い）。指令を出した
+瞬間に到達を立てると、断線したソレノイドも抜けたコネクタも「到達」と報告され、
+UI にもヘルス判定にも**測ったように見える到達**が流れ込む。
+
+PC 側も到達を待たない。`on_off` 軸は `command_mode` が `position` ではないので
+固定待ち（`settle_s`）へ落ちる。**動作確認（`motor_check`）からも除外**し
+（`config/sub_hand.yaml` の `magnitude: 0`）、`config/checklist.yaml` の
+`valves_actuate` で打音・目視確認する。
 
 ## サーボの到達フラグは推定値（重要）
 
@@ -261,6 +382,163 @@ rpm 換算」である（仕様書 §7.4）。電流・温度と過電流・過�
 **MCP2515 を 16MHz 水晶で 1Mbps** はサンプルポイントの余裕が乏しい設定として
 知られている。実機で通信エラーが出るなら、バス全体を 500kbps へ下げる判断が要る
 （M3508・EDULITE 側も揃える必要がある）。
+
+### solenoid
+
+| 定数 | 現在値 | 確認すること |
+|---|---|---|
+| `kSolenoidChannels[].pin` | PB7 / PB6 / PB5 / PB4 / PB3 / PA15 | 回路図の `PUMP1_SW`〜`PUMP6_SW` と一致すること（`static_assert` が `main.h` と突き合わせる） |
+| `kDipActiveLevel` | `0`（LOW = ON） | **DIP のコモンが GND へ落ちていること。** VCC 側へ引く配線なら極性と `solenoid.ioc` の `GPIO_PuPd` を揃えて反転する |
+| DIP の `GPIO_PuPd` | `GPIO_PULLUP`（`solenoid.ioc`） | 外部プルアップが無い前提。**外すと読みが不定になり、電源投入のたびに違うデバイス ID を名乗る** |
+| `kFirmwareVersion` | `1` | プロトコルかピン配置を変えたら上げる |
+
+**この基板に物理非常停止入力（DC 用の `REF`）は無い。** サンプル基板にそのピンが
+存在しないためで、物理停止は DC 基板が受けて PC 経由で伝わる（`FEEDBACK` の緊急停止ビット
+→ サーバー全体の緊急停止 → ブロードキャスト `E_STOP`）。**DC 基板が繋がっていない
+構成では物理停止が効かない。**
+
+**`AutoBusOff` は有効にしてある**（`solenoid.ioc` の `CAN.ABOM=ENABLE`）。**CubeMX の
+既定は `DISABLE` で、そのままだと一度 Bus-Off に落ちた基板は電源を入れ直すまで復帰しない。**
+MCP2515（サーボ基板）も R4 内蔵 CAN（DC 基板）も自動復帰するので、既定のままだと
+この 1 枚だけが「試合中にノイズで落ちたらそれきり」という特性を持つことになる。
+
+実機で踏んだ形はこうだった —— CAN の配線が繋がっていない状態で通電したところ、
+送信エラーカウンタが 255 に達して Bus-Off（`CAN_ESR = 0x00F80057`: `BOFF=1` /
+`TEC=248` / `LEC=5`）。この状態は**配線を直しても直らない**ので、原因が配線なのか
+基板なのか切り分けられなくなる。`ABOM=ENABLE` にすると再送を試み続けるので、
+配線を直した瞬間に自力で復帰する。
+
+**CAN のビットタイミングはサンプルの `.ioc` から直してある。** サンプルは
+`BS1=2TQ` / `BS2=7TQ` / `Prescaler=3` で、**ビットレートこそ 1Mbps だが
+サンプルポイントが (1+2)/10 = 30% しかない**。`can_generic`（CANable）は 74.7% なので、
+この組み合わせでは通信できない。
+
+現在は `Prescaler=3` / `BS1=6TQ` / `BS2=3TQ` / **`SJW=3TQ`** = 10tq / **70%**
+（APB1 30MHz、tq = 100ns）。
+
+**`SJW` を 3TQ 取れることがこの構成の理由。** CAN が許容するクロック誤差は
+`SJW / (2 × 10 × bit_tq)` で決まる。
+
+| 構成 | サンプルポイント | 許容クロック誤差 |
+|---|---|---|
+| 15tq / `SJW=1TQ` | 73.3%（CANable に近い） | 1/300 = **0.33%** |
+| **10tq / `SJW=3TQ`（現行）** | 70% | 3/200 = **1.5%** |
+
+**この基板は水晶を持たず HSI（内蔵 RC / ±1%）で動く**（`.ioc` の `Mcu.Pin` に
+`PF0`/`PF1` が無く、`SystemClock_Config` も `RCC_OSCILLATORTYPE_HSI`）。
+`SJW=1TQ` の 0.33% では HSI の誤差に対して規格を満たさないので、サンプルポイントを
+CANable へ近づけるより **`SJW` を大きく取れる構成を優先**している。STM32 の `SJW` は
+最大 4TQ なので、tq 数を減らすほど許容誤差が上がる。
+
+**ビットレートが合っていてもサンプルポイントがずれていると 1 通も通らない。**
+症状は `CAN_ESR` の `LEC=5`（Bit dominant error）—— ビットの立ち上がり途中、まだ前の
+ビットの dominant が残っている領域をサンプルするために起きる。`candump` には何も
+出ないので、そのままだと配線を疑って時間を使うことになる。`.ioc` を CubeMX で
+再生成するときは、この 4 つの値が戻っていないか必ず確認すること。
+
+#### 実機で確認済みの動作（2026-08-29 / CAN_TX・CAN_RX のジャンパ修正後）
+
+実基板 1 枚を `can_generic` へ繋いで、仕様書の主要な項目を一通り確認した。
+確認は `candump` / `cansend` と、SWD 経由の GPIO 出力レジスタ読みで行っている。
+
+| 確認したこと | 結果 |
+|---|---|
+| `FEEDBACK` 送信（§3.2） | `0x3C0`〜`0x3C5` の 6ch すべてが 100Hz で流れる |
+| 起動直後の状態フラグ（§5.4） | `0x20` = bit5（起動後まだ `SET_TARGET` を受けていない）のみ |
+| `INFO` 送信（§3.4） | `0x4C0`〜 に `01 03 00` = 版 1 / 基板種別 3（電磁弁）/ 役割 0（アクチュエータ） |
+| `SET_TARGET` の受理（§9.2） | `1C0#030100` で `on_=1`、`everFed_=1`、フラグが `0x00` へ |
+| 出力（§9.1） | 6ch 同時 ON で `GPIOB_ODR=0xF8`（PB3-PB7）+ `GPIOA_ODR` bit15（PA15）。**`config.h` のチャンネル表と実配線が一致** |
+| 到達フラグを立てない（§9.3） | 指令を受けてもフラグは `0x00` のまま（bit0 が立たない） |
+| コマンドウォッチドッグ（§5.1） | 送信を止めて 500ms で全 ch 消磁。フラグに bit2 が立つ |
+| 緊急停止のラッチ（§3.5 / §9.4） | `0FF#000000` で即消磁・`latched_=1`・**`on_=0`**（目標ごと落ちる）。フラグ `0x06` |
+| マジックバイトの検証（§3.5） | `0FF#010000`（`0x5A`/`0xA5` なし）では**解除されない**（`0x06` のまま） |
+| 正規の解除（§3.5） | `0FF#015AA5` で緊急停止ビットが消える（`0x04` = ウォッチドッグのみ残る） |
+
+#### !!! 基板の既知問題: CAN_TX / CAN_RX が逆配線 !!!
+
+**2026-08 時点の実機は、MCU の 21 番ピン（PA11 = CAN_RX）と 22 番ピン
+（PA12 = CAN_TX）がトランシーバの TXD / RXD と逆に繋がっている。**
+STM32F303K8 の CAN は PA11=RX / PA12=TX に固定で、LQFP32 には代替ピンが無いため
+**ファームウェアでは直せない。** パターンカットとジャンパで入れ替えること。
+
+**修正するまで長時間通電しないこと。** MCU の PA12（AF push-pull 出力）と
+トランシーバの RXD（push-pull 出力）が出力同士でぶつかる。応急処置として
+PA12 を入力へ落とせば衝突は止まる（リセットで元に戻る）:
+
+```bash
+# GPIOA_MODER の PA12 (bit24-25) を 00 = 入力にする
+$OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
+  -c "set WORKAREASIZE 0x2000" -f target/stm32f3x.cfg \
+  -c "init" -c "halt" -c "mww 0x48000000 0x68A80400" -c "resume" -c "shutdown"
+```
+
+**この配線ミスを最短で見抜く方法は 2 つある。**
+
+1. **バスから物理的に切り離して `CAN_ESR` を読む。** 誰もいないバスなら送信は
+   本来 `LEC=3`（ACK error）になる。それが `LEC=5`（Bit dominant error）のままなら、
+   **自分の RXD が dominant を返している** —— バスではなく基板内部の問題だと分かる
+2. **内部ループバックを試す。** ループバックは RXD ピンを一切見ないモードなので、
+   ここで成功すれば送信ロジックは正常で、原因は RXD 経路に絞られる
+
+CANH / CANL に recessive の 2.45V が出ていても、それはトランシーバが自分で
+バイアスしているだけで、**送受信できることの証拠にはならない**。
+
+#### 実機で CAN が繋がらないときの切り分け（SWD だけでここまで分かる）
+
+ST-LINK が繋がっていれば、シリアルも CAN も無しで内部状態を読める。
+
+```bash
+OCD=~/.platformio/packages/tool-openocd
+$OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
+  -c "set WORKAREASIZE 0x2000" -f target/stm32f3x.cfg \
+  -c "init" -c "halt" -c "mdw 0x40006418 1" -c "mdw 0x48000010 1" -c "resume" -c "shutdown"
+```
+
+| 読む場所 | 意味 |
+|---|---|
+| `0x40006418`（`CAN_ESR`） | `bit2`=Bus-Off / `bit4-6`=最後のエラー種別 / `bit16-23`=送信エラーカウンタ |
+| `0x48000010`（`GPIOA_IDR`）の `bit11` | `CAN_RX`（PA11）の実レベル。**アイドルで 0 ならトランシーバが dominant に張り付いている**（未給電・CANH/CANL 短絡）。1 ならバスはアイドルとして読めている |
+| `_ZN12_GLOBAL__N_1L10g_deviceIdE`（`arm-none-eabi-nm` で引く） | DIP から解決した実効デバイス ID。0x00 が並んでいたら DIP の読みが失敗している |
+
+**`WORKAREASIZE` の指定は省略できない。** OpenOCD の `stm32f3x.cfg` は既定で 16KB の
+ワークエリアを取るが、**STM32F303K8 の RAM は 12KB しかない**ので、そのままだと
+`Failed to write memory at 0x20003008` で書き込みが失敗する（RAM 末尾は `0x20003000`）。
+
+**受信できているかは `g_channel[0]` を読めば分かる。** `arm-none-eabi-nm` で
+`g_channel` のアドレスを引き、先頭 16 バイトを読む。
+
+| オフセット | 中身 | 見かた |
+|---|---|---|
+| +0 | `timeoutMs_` | 既定 500（`0x1F4`） |
+| +4 | `lastFedMs_` | **0 のままなら `SET_TARGET` を 1 通も受けていない** |
+| +8 | `everFed_` | 同上。0 なら受信経路が死んでいる |
+| +9 | `latched_` | 緊急停止ラッチ |
+| +10 | `watchdogEnabled_` | `config.h` の `WATCHDOG_ENABLED` が写っているか |
+| +12 | `on_` | 目標の ON/OFF |
+
+`cansend can_generic 1C0#030100`（デバイス 0xC0 へ `on_off` = ON）を数通投げてから
+読むと、**送信と受信のどちらが死んでいるか**が分かる。
+
+**MCU 側だけを切り分けるには内部ループバックが早い。** 再ビルドも再書き込みも要らず、
+レジスタを 3 本書くだけでよい（`INRQ` で初期化モード → `BTR` の `LBKM` を立てる → `INRQ` を戻す）。
+
+```bash
+$OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
+  -c "set WORKAREASIZE 0x2000" -f target/stm32f3x.cfg \
+  -c "init" -c "halt" \
+  -c "mww 0x40006400 0x00010011" -c "mww 0x4000641c 0x40390001" \
+  -c "mww 0x40006400 0x00010010" -c "resume" -c "shutdown"
+```
+
+そのあと `CAN_ESR`（`0x40006418`）が **0**、`CAN_TSR`（`0x40006408`）の各メールボックスに
+**`TXOK`（bit1）が立つ**なら、MCU・ビットタイミング・フィルタ・ファームはすべて正常で、
+原因はトランシーバ以降（`TJA1441` の電源、`CANH`/`CANL` の配線、終端）に確定できる。
+戻すときは普通に再書き込みすればよい（リセットで `LBKM` は消える）。
+
+**トランシーバの電源は MCU とは別系統。** `TJA1441` の `VCC` は 5V で、基板上の
+`SI-8050Y`（DC-DC）が主電源から作る。**ST-LINK が供給するのは MCU の 3.3V だけ**なので、
+主電源を入れずに SWD だけ繋ぐと「MCU は動いていて LED も点滅しているのに CAN だけ
+まったく通らない」状態になる。実機で最初に踏んだのがこれ。
 
 ## 安全に関する既定値
 

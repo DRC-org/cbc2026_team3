@@ -1,0 +1,80 @@
+# 電磁弁基板単体ベンチ (機構未装着) のモータ構成。
+#
+# robot_name を main_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
+# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
+# 現れず手動操縦パネルを開けない。**本番では吸着系はサブハンドの機構だが、ベンチでは
+# 他の 3 セットと手順を揃える方を優先している** (どのベンチでも同じタブを開けばよい)。
+#
+# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
+# (main.py の _positions_path) なので、このファイルを config/bench/solenoid/ に置くことで
+# robot_name は main_hand のまま config/bench/solenoid/main_hand_positions.yaml が読まれる。
+# 本番の config/main_hand_positions.yaml も他のベンチのものも無傷のまま残る。
+#
+# **このベンチでは電磁弁基板 1 枚の 6 チャンネルだけを登録する。** M3508 / EDULITE /
+# DC 基板 / サーボ基板を外すことで、登録されないバスへの送信も動作確認の対象も消え、
+# 確認が電磁弁基板の 1 枚に絞られる。ポンプ (本番では DC 基板) もここには載せない。
+#
+# デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割 (仕様書 §2.2)。
+# 電磁弁基板 (種別 3) の基板番号 0 (DIP 全 OFF)、ch0-ch5 が 0xC0-0xC5。
+# DIP を回して基板番号を 1 にした基板は 0xC8-0xCD になるので、その場合はここも直すこと
+# (candump に流れる FEEDBACK の ID 0x3Cx が実際のデバイス ID を教えてくれる)。
+
+robot_name: main_hand
+
+motors:
+  # 本番 (config/sub_hand.yaml) では valve_1〜valve_6 として登録するチャンネル。
+  # ベンチでは機構が付いていないので、本番の役割名ではなくチャンネル名で登録する
+  # (どのチャンネルに弁を繋いでも同じ手順で試せる)。
+  #
+  # !!! motor_check.magnitude: 0 は 6 チャンネルとも省略できない !!!
+  # この基板は弁が開いたかを観測する手段を持たず (圧力センサもリミットスイッチも
+  # 非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。除外せずに動作確認へ
+  # 載せると必ず「動かなかった」で落ち、しかも症状が配線不良と区別できない。
+  # 開閉の確認は config/bench/solenoid/checklist.yaml の打音・目視項目が担う。
+  valve_ch0:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC0
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_ch1:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC1
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_ch2:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC2
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_ch3:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC3
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_ch4:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC4
+    control_type: on_off
+    motor_check:
+      magnitude: 0
+
+  valve_ch5:
+    driver: generic
+    bus: generic_bus
+    can_id: 0xC5
+    control_type: on_off
+    motor_check:
+      magnitude: 0

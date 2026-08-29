@@ -12,7 +12,8 @@ constexpr uint8_t kValueOffset = 1;
 bool isKnownControlType(uint8_t raw) {
     return raw == static_cast<uint8_t>(ControlType::Position) ||
            raw == static_cast<uint8_t>(ControlType::Velocity) ||
-           raw == static_cast<uint8_t>(ControlType::Duty);
+           raw == static_cast<uint8_t>(ControlType::Duty) ||
+           raw == static_cast<uint8_t>(ControlType::OnOff);
 }
 
 bool isKnownParamId(uint8_t raw) {
@@ -41,8 +42,17 @@ uint8_t makeDeviceId(BoardKind board, uint8_t boardNumber, uint8_t slot) {
         // 未設定にしておけば LED が赤く速く点滅し、設定ミスがその場で目に見える。
         return kDeviceIdUnconfigured;
     }
-    return static_cast<uint8_t>((static_cast<uint8_t>(board) << kBoardKindShift) |
-                                (boardNumber << kBoardNumberShift) | slot);
+    const uint8_t deviceId =
+        static_cast<uint8_t>((static_cast<uint8_t>(board) << kBoardKindShift) |
+                             (boardNumber << kBoardNumberShift) | slot);
+    if (deviceId == kDeviceIdBroadcast) {
+        // 電磁弁基板（種別 3）の「基板番号 7 × スロット 7」だけがここへ落ちる。
+        // ブロードキャストと同じデバイス ID を名乗る基板が居ると、そのスロット宛の
+        // SET_TARGET と全基板向けの E_STOP がデバイス ID の上で区別できなくなる。
+        // 潰れるのは 512 個中 1 個で、8 枚目の基板の 8ch 目という最も使われない場所。
+        return kDeviceIdUnconfigured;
+    }
+    return deviceId;
 }
 
 // ---------------------------------------------------------------------------

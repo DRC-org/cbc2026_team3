@@ -349,6 +349,53 @@ class TestCommandMode:
 
         assert table.axis("conveyor").command_mode is ControlMode.VELOCITY
 
+    def test_on_off_mode_with_settle(self) -> None:
+        """電磁弁のような離散状態アクチュエータの軸 (仕様書 §9.2 / §9.3)。
+
+        基板が弁の開閉を観測できないので到達判定を持てない。position 以外の軸は
+        settle_s の固定待ちへ落ちるため、ここを書き忘れると指令の直後に次の
+        ステップへ進む (弁が開き切る前に機体が動く)。
+        """
+        table = load_position_table(
+            {
+                "axes": {
+                    "valve_1": {
+                        "unit": "on_off",
+                        "command_unit": "on_off",
+                        "command_mode": "on_off",
+                        "settle_s": 0.2,
+                    }
+                },
+                "positions": {"valve_1": {"open": 1.0, "closed": 0.0}},
+            }
+        )
+
+        assert table.axis("valve_1").command_mode is ControlMode.ON_OFF
+        assert table.axis("valve_1").settle_s == pytest.approx(0.2)
+        assert table.commands("valve_1", "open") == {"valve_1": 1.0}
+        assert table.commands("valve_1", "closed") == {"valve_1": 0.0}
+
+    def test_on_off_axis_rejects_manual_range(self) -> None:
+        """on_off 軸に manual: は書けないこと。
+
+        弁は開か閉のどちらかしか取らないので「可動範囲」が存在しない。書けてしまうと
+        UI がジョグ行を描き、押しても何も起きない操作面ができる。
+        """
+        with pytest.raises(ValueError, match="command_mode: position"):
+            load_position_table(
+                {
+                    "axes": {
+                        "valve_1": {
+                            "unit": "on_off",
+                            "command_unit": "on_off",
+                            "command_mode": "on_off",
+                            "manual": {"min": 0.0, "max": 1.0},
+                        }
+                    },
+                    "positions": {"valve_1": {"open": 1.0, "closed": 0.0}},
+                }
+            )
+
     def test_current_mode_is_rejected(self) -> None:
         """電流指令は位置定数から出す用途が無く、誤記のまま機構へ流すと危険なため拒否する。"""
         with pytest.raises(ValueError, match="command_mode"):

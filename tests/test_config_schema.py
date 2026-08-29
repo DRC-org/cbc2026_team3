@@ -19,6 +19,7 @@ from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.sequence.positions import load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -255,6 +256,19 @@ class TestControlType:
         assert "duy" in message
         assert "duty" in message
 
+    def test_on_off_is_applied(self) -> None:
+        """電磁弁の control_type: on_off (仕様書 §9.2)。
+
+        許可表に無いと yaml に書いた瞬間に起動が拒否される。逆に許可表だけ通って
+        GenericDriver 側の _MODE_MAP に無いと、起動はできるのに最初の指令で
+        KeyError になる (試合中に落ちる)。
+        """
+        config = load_robot_config(
+            _robot(valve_1=_generic(control_type="on_off")), source="test.yaml"
+        )
+
+        assert config.motors["valve_1"].control_type is ControlMode.ON_OFF
+
     def test_current_is_rejected(self) -> None:
         """GenericDriver は電流指令フレームを持たない。"""
         with pytest.raises(ValueError, match="control_type"):
@@ -287,6 +301,19 @@ class TestCanIdRange:
     def test_generic_id_out_of_range_is_rejected(self, can_id: int) -> None:
         with pytest.raises(ValueError, match="can_id"):
             load_robot_config(_robot(gripper=_generic(can_id=can_id)), source="test.yaml")
+
+    @pytest.mark.parametrize("can_id", [0xC0, 0xC5, 0xFE])
+    def test_solenoid_board_ids_are_accepted(self, can_id: int) -> None:
+        """電磁弁基板の帯 (0xC0-0xFE) が generic の範囲に収まっていること。
+
+        範囲は仕様書 §2.2 と揃えてある。ここが狭いと、実在する基板の ID を
+        yaml に書けないまま「範囲外」で起動を拒否される。
+        """
+        config = load_robot_config(
+            _robot(valve_1=_generic(can_id=can_id, control_type="on_off")), source="test.yaml"
+        )
+
+        assert config.motors["valve_1"].can_id == can_id
 
     @pytest.mark.parametrize("can_id", [0, 5])
     def test_m3508_id_out_of_range_is_rejected(self, can_id: int) -> None:
@@ -490,6 +517,111 @@ class TestShippedConfigs:
         defined = set(yaml.safe_load((_CONFIG_DIR / "can_buses.yaml").read_text())["buses"] or {})
 
         assert set(system.can_buses.values()) <= defined
+
+
+#: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
+_BENCH_DIRS = ("m3508", "dc", "servo", "solenoid")
+
+
+class TestShippedBenchConfigs:
+    """机上ベンチ用の config セット (config/bench/<対象>/) も同じスキーマで読めること。
+
+    **ベンチ config は誰も検証していなかった。** 本番の config は
+    TestShippedConfigs が守っているが、bench/ はスキーマを変えても壊れたことに
+    気付けない —— 気付くのは机上に基板を並べた当日で、しかも症状は
+    「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
+    始める余裕は無い。
+
+    4 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
+    見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
+    """
+
+    @pytest.mark.parametrize("bench", _BENCH_DIRS)
+    def test_bench_config_set_loads(self, bench: str) -> None:
+        bench_dir = _CONFIG_DIR / "bench" / bench
+
+        system = load_system_config(
+            yaml.safe_load((bench_dir / "system.yaml").read_text()),
+            source=f"bench/{bench}/system.yaml",
+        )
+
+        robot_yaml = next(
+            path
+            for path in bench_dir.iterdir()
+            if path.name.endswith(".yaml")
+            and not path.name.endswith("_positions.yaml")
+            and path.name not in ("system.yaml", "checklist.yaml")
+        )
+        config = load_robot_config(
+            yaml.safe_load(robot_yaml.read_text()),
+            source=f"bench/{bench}/{robot_yaml.name}",
+            buses=system.can_buses,
+        )
+
+        assert config.motors
+
+        # 位置定数は「robot config と同じディレクトリの <robot_name>_positions.yaml」を読む
+        # (main.py の _positions_path)。名前がずれると本番の位置定数が読まれてしまい、
+        # **机上に無い軸へ指令が飛ぶ**
+        positions_path = bench_dir / f"{config.robot_name}_positions.yaml"
+        assert positions_path.exists(), f"{positions_path} がありません"
+
+        table = load_position_table(
+            yaml.safe_load(positions_path.read_text()), source=str(positions_path)
+        )
+
+        # 登録したモータはすべて位置定数から指令できること。
+        # 片方だけ足すと「UI には出るのに動かせないモータ」になる
+        axis_motors = {name for axis in table.axes for name in table.axis(axis).motor_names}
+        assert set(config.motors) == axis_motors
+
+    @pytest.mark.parametrize("bench", _BENCH_DIRS)
+    def test_bench_checklist_targets_the_registered_robot(self, bench: str) -> None:
+        """チェックリストのロールが、その config の robot_name と一致すること。
+
+        ずれるとチェックリストがどのタブにも出ず、**指差喚呼を 1 項目も踏まないまま
+        試合フェーズへ入れてしまう**。
+        """
+        bench_dir = _CONFIG_DIR / "bench" / bench
+
+        robot_yaml = next(
+            path
+            for path in bench_dir.iterdir()
+            if path.name.endswith(".yaml")
+            and not path.name.endswith("_positions.yaml")
+            and path.name not in ("system.yaml", "checklist.yaml")
+        )
+        robot_name = yaml.safe_load(robot_yaml.read_text())["robot_name"]
+
+        checklist = yaml.safe_load((bench_dir / "checklist.yaml").read_text())["checklists"]
+
+        assert robot_name in checklist
+        assert checklist[robot_name]
+
+    @pytest.mark.parametrize("bench", _BENCH_DIRS)
+    def test_bench_opens_only_the_buses_on_the_desk(self, bench: str) -> None:
+        """ベンチが開くバスは、そのセットで使うものだけであること。
+
+        main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
+        open するため、机上に挿していない CANable が 1 本でも書いてあると
+        [Errno 19] No such device で起動そのものが落ちる。
+        """
+        bench_dir = _CONFIG_DIR / "bench" / bench
+
+        system = load_system_config(
+            yaml.safe_load((bench_dir / "system.yaml").read_text()),
+            source=f"bench/{bench}/system.yaml",
+        )
+        robot_yaml = next(
+            path
+            for path in bench_dir.iterdir()
+            if path.name.endswith(".yaml")
+            and not path.name.endswith("_positions.yaml")
+            and path.name not in ("system.yaml", "checklist.yaml")
+        )
+        used = {motor["bus"] for motor in yaml.safe_load(robot_yaml.read_text())["motors"].values()}
+
+        assert set(system.can_buses) == used
 
 
 def test_driver_types_match_the_driver_map() -> None:
