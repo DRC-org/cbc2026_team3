@@ -1828,7 +1828,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 | ファイル | 本番との違い |
 |---|---|
 | `config/bench/system.yaml` | `can_buses` が `m3508_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
-| `config/bench/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts |
+| `config/bench/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts。`y_axis_r` の `can_id` はベンチ機に合わせた暫定の 4（本番は 1） |
 | `config/bench/main_hand_positions.yaml` | `y_axis` だけ。`sync_tolerance` 10.0mm、`manual` −10〜60mm |
 | `config/bench/checklist.yaml` | ベンチで通電前に確認する項目のみ |
 
@@ -1851,6 +1851,20 @@ No such device` で**起動そのものが失敗する**。`--config` でロボ�
 「robot config と同じディレクトリの `<robot_name>_positions.yaml`」（`_positions_path`）
 なので、ファイルを `config/bench/` に置くだけで `robot_name` を変えずに
 `config/bench/main_hand_positions.yaml` が読まれ、本番の位置定数は無傷で残る。
+
+**片肺のペア軸は「指令は通るのに動かない」形で現れる。** `SyncGuard.blocked()` は
+メンバの**誰か**が途絶したらグループ**全員**を電流 0 に落とし、`FeedbackFreshness.is_stale()`
+は未受信（`last_rx is None`）でも True を返す。したがって `y_axis_r` を繋がずに
+`y_axis_l` だけ回そうとしても、健全な `y_axis_l` まで `_compute_current()` が 0 を返す。
+ジョグの指令自体は受理されるので、UI 上は成功しているように見える。実機で
+「手動指令は通るのに 2 台とも動かない」ときは、まず `candump can_m3508` で
+**両方の ID が届いているか**を確認すること。ログには
+`同期グループのフィードバック途絶のため全員を電流 0 に落とす (axis=y_axis)` が出続ける。
+
+この保護は抑止せず、構成側で回避する。1 台だけで回したい場合は位置定数の
+`axes.y_axis.motors` を 1 台にし、`sync_tolerance` を書かない（`AxisSpec.sync_group` は
+モータ台数ではなく `sync_tolerance` の有無で `SyncGroup` を作る）。ただしその config を
+機構へ組み込んだ状態で使ってはならない — 片側だけが動いてその場で機構が壊れる。
 
 **ベンチだけ緩めた値には本番へ戻す条件を書く。** `sync_tolerance` を 10.0mm にしてあるのは、
 機構未装着では左右がずれても壊れず、本番の 2.0mm のままだと無負荷での追従差だけで

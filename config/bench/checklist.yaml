@@ -12,7 +12,7 @@ checklists:
     - id: bench_bus_up
       label: can_m3508 が up していること確認 (ip -br link show)
     - id: bench_wiring
-      label: C620 の CAN ID が 1 / 2 になっていること確認
+      label: candump で 0x204 / 0x202 の 2 本が届いていること確認
     - id: bench_free
       label: 出力軸に何も繋がっておらず、回っても干渉しないこと確認
     - id: bench_feedback
