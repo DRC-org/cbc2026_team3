@@ -1,20 +1,24 @@
-# M3508 単体ベンチ (機構未装着) 用の共通設定。
+# DC モータ基板単体ベンチ (機構未装着) 用の共通設定。
 #
 # 本番の config/system.yaml との違いは can_buses だけで、health / motor_check / match は
 # 同一値を持つ。main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
-# open するため、本番の 3 本構成のままでは can_edulite / can_generic の CANable を挿して
+# open するため、本番の 3 本構成のままでは can_m3508 / can_edulite の CANable を挿して
 # いない机上で [Errno 19] No such device となり、起動そのものが失敗する。
 #
-# ここを m3508_bus だけに絞ることで CANable 1 本 (can_m3508) だけで起動でき、
+# ここを generic_bus だけに絞ることで CANable 1 本 (can_generic) だけで起動でき、
 # 相手のいない実バスへ 20Hz 再送して TX エラーを積み上げることも無くなる。
+#
+# M3508 単体ベンチは config/bench/m3508/ にある別セット。あちらは can_m3508 だけを開く。
+# 2 つを 1 つの config にまとめられないのは、開くバスの本数がそのまま起動の可否に
+# なるため (挿していない CANable が 1 本でもあると起動しない)。
 #
 # 使い方:
 #   scripts/setup_can.sh
-#   uv run python main.py --system config/bench/system.yaml \
-#       --config config/bench/main_hand.yaml --checklist config/bench/checklist.yaml
+#   uv run python main.py --system config/bench/dc/system.yaml \
+#       --config config/bench/dc/main_hand.yaml --checklist config/bench/dc/checklist.yaml
 
 can_buses:
-  m3508_bus: can_m3508
+  generic_bus: can_generic
 
 # 以下 3 ブロックは本番 config/system.yaml と同値。ベンチだけ判定基準を変えると
 # 「机上では OK なのに実運用で警告が出る」ことになり、確認の意味が薄れる。

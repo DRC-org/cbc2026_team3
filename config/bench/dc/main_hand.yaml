@@ -1,0 +1,57 @@
+# DC モータ基板単体ベンチ (機構未装着) のモータ構成。
+#
+# robot_name を main_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
+# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
+# 現れず手動操縦パネルを開けない。
+#
+# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
+# (main.py の _positions_path) なので、このファイルを config/bench/dc/ に置くことで
+# robot_name は main_hand のまま config/bench/dc/main_hand_positions.yaml が読まれる。
+# 本番の config/main_hand_positions.yaml も M3508 ベンチのものも無傷のまま残る。
+#
+# **このベンチでは DC 基板 1 枚の 3 チャンネルだけを登録する。** M3508 / EDULITE /
+# サーボ基板を外すことで、登録されないバスへの送信も動作確認の対象も消え、確認が
+# 自作モタドラ (DC) の 1 枚に絞られる。
+#
+# デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割 (仕様書 §2.2)。
+# DC 基板 (種別 2) の基板番号 0 (DIP 全 OFF)、ch0-ch2 が 0x80-0x82。
+# DIP を回して基板番号を 1 にした基板は 0x88-0x8A になるので、その場合はここも直すこと
+# (candump に流れる FEEDBACK の ID 0x38x が実際のデバイス ID を教えてくれる)。
+
+robot_name: main_hand
+
+motors:
+  # ch0。本番 (config/main_hand.yaml) では conveyor が載っているチャンネル。
+  # ベンチでは機構が付いていないので、本番の役割名ではなくチャンネル名で登録する
+  # (どのチャンネルにモータを繋いでも同じ手順で試せる)。
+  dc_ch0:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x80
+    control_type: duty
+    motor_check:
+      # この基板はエンコーダも電流センスも持たず、FEEDBACK は状態フラグ 1 バイトだけ。
+      # 「回ったかどうか」を自動判定する手段が構造的に無いので動作確認から除外し、
+      # config/bench/dc/checklist.yaml の dc_ch0_run で目視確認する。
+      # magnitude を 0 以外にすると、実機では必ずタイムアウトし、しかも症状が
+      # 配線不良と区別できない。
+      magnitude: 0
+
+  # ch1。本番では未使用。ベンチでは 3 チャンネルすべてを登録して、
+  # どこにモータを繋いでも手動操縦パネルから回せるようにしておく。
+  dc_ch1:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x81
+    control_type: duty
+    motor_check:
+      magnitude: 0
+
+  # ch2。本番では未使用。
+  dc_ch2:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x82
+    control_type: duty
+    motor_check:
+      magnitude: 0

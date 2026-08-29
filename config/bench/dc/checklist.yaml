@@ -1,0 +1,35 @@
+# DC モータ基板単体ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は gripper / wall / origin_sensor など、この基板に
+# 存在しない機構の確認を求めるためそのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもモータは回せる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+#
+# **この基板は回ったかどうかを自動判定できない。** エンコーダも電流センスも持たず、
+# FEEDBACK は状態フラグ 1 バイトだけなので、動作確認 (motor_check) は全チャンネル
+# magnitude: 0 で除外してある。回転の確認はここの目視項目が担う。
+
+checklists:
+  main_hand:
+    - id: bench_bus_up
+      label: can_generic が up していること確認 (ip -br link show)
+    - id: bench_firmware
+      label: 基板の RGB LED が緑の点滅 (平常) であること確認。赤の速い点滅は CAN 不通か DIP 未設定
+    - id: bench_feedback
+      label: candump can_generic に 0x380 / 0x381 / 0x382 が届いていること確認
+    - id: bench_free
+      label: モータ出力軸に何も繋がっておらず、回っても干渉しないこと確認
+    - id: bench_power
+      label: モータ電源が投入され、電流計が過大値を示していないこと確認
+    - id: dc_ch0_run
+      label: 手動操縦で dc_ch0 に slow を送り、モータが回ること目視確認
+    - id: dc_ch0_rev
+      label: 手動操縦で dc_ch0 に rev を送り、逆向きに回ること目視確認
+    - id: dc_ch0_stop
+      label: 手動操縦で dc_ch0 に stop を送り、モータが止まること目視確認
+    - id: bench_estop
+      label: 回転中に非常停止 (REF スイッチ) を押し、その場で止まること確認
+    - id: bench_estop_latch
+      label: 非常停止を離してもモータが回り出さないこと確認 (ラッチ。解除は UI の Reset のみ)

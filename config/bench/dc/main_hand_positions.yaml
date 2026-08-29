@@ -1,0 +1,70 @@
+# DC モータ基板単体ベンチ (機構未装着) の位置定数。
+#
+# **duty 軸には manual: を書けない** (lib/sequence/positions.py の _parse_manual)。
+# duty に「可動範囲」は存在せず、書けてしまうと UI がジョグ行を描き、押しても機構が
+# 位置決めされない操作面が出来上がるため。したがってベンチでモータを回す手段は
+# **手動操縦パネルのプリセット (位置名) 指令**になる。ManualController.move_to_position は
+# 既定義の点しか送らないので duty 軸でも常に許されている。
+#
+# duty は -1.0 .. +1.0 で、符号が回転方向。実際に出る PWM は
+# firmware/dc_motor/include/config.h の kDefaultMaxDuty (現在 0.30) でクランプされる。
+# **ここのプリセットを 0.30 より大きくしても出力は 30% で頭打ちになり、
+# 「指令したのに速くならない」という切り分けの難しい症状になる。** 上げたいときは
+# ファーム側の max_duty も一緒に上げること (または SET_PARAM 0x00 で実行時に変更する)。
+
+axes:
+  # scale は 1.0 = 指令値がそのまま duty。本番 config/main_hand_positions.yaml の
+  # conveyor と同一仕様にしてあるので、ベンチで確かめた指令量が本番でもそのまま出る。
+  dc_ch0:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5         # DC モータの起動・停止待ち [s]
+    timeout_s: 1.0
+
+  dc_ch1:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5
+    timeout_s: 1.0
+
+  dc_ch2:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5
+    timeout_s: 1.0
+
+positions:
+  # 手動操縦パネルにこの名前のプリセットボタンが並ぶ。
+  # 値はすべてファームの max_duty (0.30) 以内に収めてあり、クランプされない。
+  #
+  # 確認したいのは 3 つ: 回ること (slow/run) / 逆に回ること (rev) / 止まること (stop)。
+  # 無負荷の DC モータは低い duty でも回るので、まず slow から入れること。
+  dc_ch0:
+    stop: 0.0            # 停止 [duty]
+    slow: 0.10           # 微速。まず回ったことの確認
+    run: 0.20            # 常用
+    fast: 0.30           # ファームの max_duty と同値。これ以上は出ない
+    rev: -0.20           # 逆転。方向ピンの論理 (kDirForwardIsLow) の確認
+
+  dc_ch1:
+    stop: 0.0
+    slow: 0.10
+    run: 0.20
+    fast: 0.30
+    rev: -0.20
+
+  dc_ch2:
+    stop: 0.0
+    slow: 0.10
+    run: 0.20
+    fast: 0.30
+    rev: -0.20
