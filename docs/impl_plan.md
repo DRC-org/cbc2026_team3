@@ -1825,23 +1825,31 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 機構へ組み込む前に、アクチュエータを単体で動かすための一式。**開くバスが違うので 1 つに
 まとめられない**（挿していない CANable が 1 本でもあると起動そのものが失敗する）ため、
-確認したい対象ごとに別セットになっている。
+確認したい対象ごとに別セットにし、それぞれをサブディレクトリへ分ける。
 
-#### M3508 単体ベンチ（`config/bench/` 直下）
+**セットごとにディレクトリを分けるのは位置定数の読み先が決まっているから。**
+`_positions_path` は「robot config と同じディレクトリの `<robot_name>_positions.yaml`」を
+読み、`robot_name` は Web UI の都合で `main_hand` 固定にせざるを得ない。したがって
+**同一ディレクトリに 2 つ目のベンチセットは置けない**（`main_hand_positions.yaml` が
+1 つしか作れない）。セットを足すときは `config/bench/<対象>/` を 1 つ掘り、4 ファイルを
+まとめてそこへ置くこと。
+
+#### M3508 単体ベンチ（`config/bench/m3508/`）
 
 M3508 2 台だけを CAN 通信の確認として動かす。
 
 | ファイル | 本番との違い |
 |---|---|
-| `config/bench/system.yaml` | `can_buses` が `m3508_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
-| `config/bench/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts。`can_id` は本番と同じ 1 / 2 |
-| `config/bench/main_hand_positions.yaml` | `y_axis` だけ。`sync_tolerance` 10.0mm、`manual` −10〜60mm |
-| `config/bench/checklist.yaml` | ベンチで通電前に確認する項目のみ |
+| `config/bench/m3508/system.yaml` | `can_buses` が `m3508_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
+| `config/bench/m3508/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts。`can_id` は本番と同じ 1 / 2 |
+| `config/bench/m3508/main_hand_positions.yaml` | `y_axis` だけ。`sync_tolerance` 10.0mm、`manual` −10〜60mm |
+| `config/bench/m3508/checklist.yaml` | ベンチで通電前に確認する項目のみ |
 
 ```bash
 scripts/setup_can.sh
-uv run python main.py --system config/bench/system.yaml \
-    --config config/bench/main_hand.yaml --checklist config/bench/checklist.yaml
+uv run python main.py --system config/bench/m3508/system.yaml \
+    --config config/bench/m3508/main_hand.yaml \
+    --checklist config/bench/m3508/checklist.yaml
 ```
 
 **バスを絞るために別 `system.yaml` が要る。** `main.py` の `_setup_robot()` は
@@ -1855,8 +1863,8 @@ No such device` で**起動そのものが失敗する**。`--config` でロボ�
 `web/src/routes.tsx` で `main_hand` / `sub_hand` に固定されており、ベンチ専用の名前に
 するとどのタブにも現れず**手動操縦パネルを開けない**。位置定数の読み先は
 「robot config と同じディレクトリの `<robot_name>_positions.yaml`」（`_positions_path`）
-なので、ファイルを `config/bench/` に置くだけで `robot_name` を変えずに
-`config/bench/main_hand_positions.yaml` が読まれ、本番の位置定数は無傷で残る。
+なので、ファイルを `config/bench/m3508/` に置くだけで `robot_name` を変えずに
+`config/bench/m3508/main_hand_positions.yaml` が読まれ、本番の位置定数は無傷で残る。
 
 **片肺のペア軸は「指令は通るのに動かない」形で現れる。** `SyncGuard.blocked()` は
 メンバの**誰か**が途絶したらグループ**全員**を電流 0 に落とし、`FeedbackFreshness.is_stale()`
@@ -1883,7 +1891,7 @@ CAN ID の誤り）は確実に超過するので、同期監視の検出能力�
 #### DC モータ基板単体ベンチ（`config/bench/dc/`）
 
 自作モタドラ（DC）1 枚を、機構へ組み込む前にファーム込みで動かすための一式。
-M3508 ベンチ（`config/bench/` 直下）とは**開くバスが違うので同居できない**。
+M3508 ベンチ（`config/bench/m3508/`）とは**開くバスが違うので同居できない**。
 
 | ファイル | 本番との違い |
 |---|---|
@@ -1897,12 +1905,6 @@ scripts/setup_can.sh
 uv run python main.py --system config/bench/dc/system.yaml \
     --config config/bench/dc/main_hand.yaml --checklist config/bench/dc/checklist.yaml
 ```
-
-**サブディレクトリに置くのは位置定数の読み先が決まっているから。** `_positions_path` は
-「robot config と同じディレクトリの `<robot_name>_positions.yaml`」を読み、`robot_name` は
-Web UI の都合で `main_hand` 固定にせざるを得ない。したがって**同一ディレクトリに
-2 つ目のベンチセットは置けない**（`main_hand_positions.yaml` が 1 つしか作れない）。
-M3508 ベンチを `config/bench/` 直下に残したまま DC 用を足すには階層を 1 段掘るしかない。
 
 **duty 軸を手動で回す手段はプリセット指令だけ。** `_parse_manual` は
 `command_mode: position` 以外の軸に `manual:` を書くと**起動を拒否する** — duty に

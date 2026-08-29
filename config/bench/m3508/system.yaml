@@ -15,8 +15,9 @@
 #
 # 使い方:
 #   scripts/setup_can.sh
-#   uv run python main.py --system config/bench/system.yaml \
-#       --config config/bench/main_hand.yaml --checklist config/bench/checklist.yaml
+#   uv run python main.py --system config/bench/m3508/system.yaml \
+#       --config config/bench/m3508/main_hand.yaml \
+#       --checklist config/bench/m3508/checklist.yaml
 
 can_buses:
   m3508_bus: can_m3508

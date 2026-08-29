@@ -5,8 +5,8 @@
 # 現れず手動操縦パネルを開けない。
 #
 # 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
-# (main.py の _positions_path) なので、このファイルを config/bench/ に置くことで
-# robot_name は main_hand のまま config/bench/main_hand_positions.yaml が読まれる。
+# (main.py の _positions_path) なので、このファイルを config/bench/m3508/ に置くことで
+# robot_name は main_hand のまま config/bench/m3508/main_hand_positions.yaml が読まれる。
 # 本番の config/main_hand_positions.yaml は無傷のまま残る。
 #
 # **このベンチでは M3508 の 2 台だけを登録する。** EDULITE と自作モタドラを外すことで
