@@ -118,10 +118,15 @@ export function MatchSettings({ onRequestReset }: { onRequestReset: () => void }
  *
  * 終了の確認は同じボタンの二度押しで取る。ダイアログ本文が持っていた
  * 「緊急停止ではない」ことは、武装中に隣へ出す。
+ *
+ * **セッティングへ戻る操作に確認は挟まない。** 試合が終わった後の唯一の進み先であり、
+ * 失うのは消化済みのチェックリストだけで、機体は動かない。次の試合の準備を
+ * 1 クリック遅らせる理由がない（同じ `match_reset` でも、準備中に押す
+ * MatchSettings のリセットはまだ使っていない指差喚呼を捨てるので確認を残してある）。
  */
-export function MatchStrip({ onRequestReset }: { onRequestReset: () => void }) {
+export function MatchStrip() {
   const { matchState } = useRobotStatus();
-  const { matchFinish } = useRobotCommands();
+  const { matchFinish, matchReset } = useRobotCommands();
   const { court, phase } = matchState;
   const duringMatch = isDuringMatch(phase);
   const { armed, press, disarm } = useArmedPress(matchFinish);
@@ -156,7 +161,7 @@ export function MatchStrip({ onRequestReset }: { onRequestReset: () => void }) {
           </Button>
         </span>
       ) : (
-        <Button tone="warn" onClick={onRequestReset} aria-label="セッティングタイムへ戻す">
+        <Button tone="warn" onClick={matchReset} aria-label="セッティングタイムへ戻す">
           <Icon as={RotateCcw} />
           セッティングへ戻る
         </Button>
