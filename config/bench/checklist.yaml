@@ -1,0 +1,21 @@
+# M3508 単体ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は gripper / wall / conveyor / origin_sensor など
+# ベンチに存在しない機構の確認を求めるため、そのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくても機体は動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+
+checklists:
+  main_hand:
+    - id: bench_bus_up
+      label: can_m3508 が up していること確認 (ip -br link show)
+    - id: bench_wiring
+      label: candump で 0x201 / 0x202 の 2 本が届いていること確認
+    - id: bench_free
+      label: 出力軸に何も繋がっておらず、回っても干渉しないこと確認
+    - id: bench_feedback
+      label: y_axis_r / y_axis_l 双方のフィードバックが届いていること確認
+    - id: bench_estop
+      label: 非常停止で電流が 0 に落ちること確認
