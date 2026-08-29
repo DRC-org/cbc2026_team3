@@ -46,6 +46,20 @@ describe("MatchSettings のコート選択", () => {
     expect(screen.getByRole("button", { name: "赤コート" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "青コート" })).toBeDisabled();
   });
+
+  it("準備中のリセットは確認を挟む（まだ使っていない指差喚呼を捨てるため）", () => {
+    // MatchStrip の「セッティングへ戻る」は即実行だが、こちらは同じ match_reset でも
+    // 失うものが違う。押した時点で完了済みの指差喚呼が全て消える
+    const onRequestReset = vi.fn();
+    const { context } = renderWithRobot(<MatchSettings onRequestReset={onRequestReset} />, {
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", court: "red" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "セッティングタイムへ戻す" }));
+
+    expect(onRequestReset).toHaveBeenCalledTimes(1);
+    expect(context.matchReset).not.toHaveBeenCalled();
+  });
 });
 
 /**
@@ -58,11 +72,10 @@ describe("MatchStrip の試合終了", () => {
 
   // fake timer 下では userEvent の内部待ちが解けないため fireEvent を使う
   function mountStrip(phase: MatchPhase = "match") {
-    const onRequestReset = vi.fn();
-    const view = renderWithRobot(<MatchStrip onRequestReset={onRequestReset} />, {
+    const view = renderWithRobot(<MatchStrip />, {
       matchState: { ...DEFAULT_MATCH_STATE, phase, court: "red" },
     });
-    return { onRequestReset, view };
+    return { view };
   }
 
   const finishButton = () => screen.getByRole("button", { name: /試合を終了する/ });
@@ -112,18 +125,20 @@ describe("MatchStrip の試合終了", () => {
     expect(view.context.matchFinish).not.toHaveBeenCalled();
   });
 
-  it("試合が終わっていればリセット導線を出す（こちらはダイアログのまま）", () => {
-    const { onRequestReset, view } = mountStrip("finished");
+  it("セッティングへ戻るは確認を挟まず 1 回で送る", () => {
+    // 試合後の唯一の進み先で、失うのは消化済みのチェックリストだけ。
+    // 次の試合の準備を 1 クリック遅らせない
+    const { view } = mountStrip("finished");
 
     fireEvent.click(screen.getByRole("button", { name: "セッティングタイムへ戻す" }));
 
-    expect(onRequestReset).toHaveBeenCalledTimes(1);
+    expect(view.context.matchReset).toHaveBeenCalledTimes(1);
     expect(view.context.matchFinish).not.toHaveBeenCalled();
   });
   it("試合が終わったら武装を持ち越さない", () => {
     // リセットして次の試合へ入ったとき、前の試合で押しかけた 1 回が残っていると
     // 最初の 1 回で試合が終わる
-    const view = renderWithRobot(<MatchStrip onRequestReset={vi.fn()} />, {
+    const view = renderWithRobot(<MatchStrip />, {
       matchState: { ...DEFAULT_MATCH_STATE, phase: "match", court: "red" },
     });
 
@@ -138,7 +153,7 @@ describe("MatchStrip の試合終了", () => {
             matchState: { ...DEFAULT_MATCH_STATE, phase, court: "red" },
           })}
         >
-          <MatchStrip onRequestReset={vi.fn()} />
+          <MatchStrip />
         </RobotProvider>,
       );
 

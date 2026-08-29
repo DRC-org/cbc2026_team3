@@ -69,25 +69,22 @@ export function Dashboard() {
   }
 
   return (
-    <>
-      <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
-        <div className="col-span-full">
-          <MatchStrip onRequestReset={requestReset} />
-        </div>
+    <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
+      <div className="col-span-full">
+        <MatchStrip />
+      </div>
 
-        {ROBOTS.map(({ key, label }) => (
-          <RobotStatusRow key={key} label={label} state={states[key]} />
-        ))}
+      {ROBOTS.map(({ key, label }) => (
+        <RobotStatusRow key={key} label={label} state={states[key]} />
+      ))}
 
-        {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
+      {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
             Monitor は起きたことを拾う役なので、履歴を画面に残す */}
-        <div className="col-span-full min-h-0">
-          <Panel legend="イベント" className="h-full" bodyClassName="p-0">
-            <EventFeed />
-          </Panel>
-        </div>
-      </Page>
-      {confirmModal}
-    </>
+      <div className="col-span-full min-h-0">
+        <Panel legend="イベント" className="h-full" bodyClassName="p-0">
+          <EventFeed />
+        </Panel>
+      </div>
+    </Page>
   );
 }
