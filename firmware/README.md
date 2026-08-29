@@ -408,6 +408,18 @@ MCP2515（サーボ基板）も R4 内蔵 CAN（DC 基板）も自動復帰す�
 基板なのか切り分けられなくなる。`ABOM=ENABLE` にすると再送を試み続けるので、
 配線を直した瞬間に自力で復帰する。
 
+**CAN のビットタイミングはサンプルの `.ioc` から直してある。** サンプルは
+`BS1=2TQ` / `BS2=7TQ` / `Prescaler=3` で、**ビットレートこそ 1Mbps だが
+サンプルポイントが (1+2)/10 = 30% しかない**。`can_generic`（CANable）は 74.7% なので、
+この組み合わせでは通信できない。現在は `Prescaler=2` / `BS1=10TQ` / `BS2=4TQ` =
+15tq / **73.3%** にしてある（APB1 30MHz、tq = 66.7ns）。
+
+**ビットレートが合っていてもサンプルポイントがずれていると 1 通も通らない。**
+症状は `CAN_ESR` の `LEC=5`（Bit dominant error）—— ビットの立ち上がり途中、まだ前の
+ビットの dominant が残っている領域をサンプルするために起きる。`candump` には何も
+出ないので、そのままだと配線を疑って時間を使うことになる。`.ioc` を CubeMX で
+再生成するときは、この 3 つの値が戻っていないか必ず確認すること。
+
 #### 実機で CAN が繋がらないときの切り分け（SWD だけでここまで分かる）
 
 ST-LINK が繋がっていれば、シリアルも CAN も無しで内部状態を読める。
@@ -428,6 +440,42 @@ $OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
 **`WORKAREASIZE` の指定は省略できない。** OpenOCD の `stm32f3x.cfg` は既定で 16KB の
 ワークエリアを取るが、**STM32F303K8 の RAM は 12KB しかない**ので、そのままだと
 `Failed to write memory at 0x20003008` で書き込みが失敗する（RAM 末尾は `0x20003000`）。
+
+**受信できているかは `g_channel[0]` を読めば分かる。** `arm-none-eabi-nm` で
+`g_channel` のアドレスを引き、先頭 16 バイトを読む。
+
+| オフセット | 中身 | 見かた |
+|---|---|---|
+| +0 | `timeoutMs_` | 既定 500（`0x1F4`） |
+| +4 | `lastFedMs_` | **0 のままなら `SET_TARGET` を 1 通も受けていない** |
+| +8 | `everFed_` | 同上。0 なら受信経路が死んでいる |
+| +9 | `latched_` | 緊急停止ラッチ |
+| +10 | `watchdogEnabled_` | `config.h` の `WATCHDOG_ENABLED` が写っているか |
+| +12 | `on_` | 目標の ON/OFF |
+
+`cansend can_generic 1C0#030100`（デバイス 0xC0 へ `on_off` = ON）を数通投げてから
+読むと、**送信と受信のどちらが死んでいるか**が分かる。
+
+**MCU 側だけを切り分けるには内部ループバックが早い。** 再ビルドも再書き込みも要らず、
+レジスタを 3 本書くだけでよい（`INRQ` で初期化モード → `BTR` の `LBKM` を立てる → `INRQ` を戻す）。
+
+```bash
+$OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
+  -c "set WORKAREASIZE 0x2000" -f target/stm32f3x.cfg \
+  -c "init" -c "halt" \
+  -c "mww 0x40006400 0x00010011" -c "mww 0x4000641c 0x40390001" \
+  -c "mww 0x40006400 0x00010010" -c "resume" -c "shutdown"
+```
+
+そのあと `CAN_ESR`（`0x40006418`）が **0**、`CAN_TSR`（`0x40006408`）の各メールボックスに
+**`TXOK`（bit1）が立つ**なら、MCU・ビットタイミング・フィルタ・ファームはすべて正常で、
+原因はトランシーバ以降（`TJA1441` の電源、`CANH`/`CANL` の配線、終端）に確定できる。
+戻すときは普通に再書き込みすればよい（リセットで `LBKM` は消える）。
+
+**トランシーバの電源は MCU とは別系統。** `TJA1441` の `VCC` は 5V で、基板上の
+`SI-8050Y`（DC-DC）が主電源から作る。**ST-LINK が供給するのは MCU の 3.3V だけ**なので、
+主電源を入れずに SWD だけ繋ぐと「MCU は動いていて LED も点滅しているのに CAN だけ
+まったく通らない」状態になる。実機で最初に踏んだのがこれ。
 
 ## 安全に関する既定値
 
