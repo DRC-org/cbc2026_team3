@@ -21,8 +21,16 @@ export const DEFAULT_MATCH_STATE: MatchState = {
   timer: null,
 };
 
-/** 既定は本番起動と同じ (開発用コマンドは閉じている) */
-export const DEFAULT_SERVER_INFO: ServerInfo = { dev_tools: false, dry_run: false };
+/**
+ * 既定は本番起動と同じ (開発用コマンドは閉じている)。
+ * 温度しきい値は `server_info` を受け取るまで未取得なので null にしておく。
+ */
+export const DEFAULT_SERVER_INFO: ServerInfo = {
+  dev_tools: false,
+  dry_run: false,
+  temp_warning_c: null,
+  temp_critical_c: null,
+};
 
 /** 全ハンドラを vi.fn() にした既定値。テストは関心のあるフィールドだけ上書きする */
 export function createRobotContext(overrides: Partial<RobotContextValue> = {}): RobotContextValue {

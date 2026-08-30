@@ -103,10 +103,16 @@ const EXPECTATIONS: Record<string, Expectation> = {
   server_info: (result, sample) => {
     // 開発用ボタンの表示可否はこの 1 通だけが決める。受信条件が弾くと
     // 「--dev-tools で起動したのにボタンが出ない」が型検査を通ったまま成立する
+    // 温度しきい値も同じ 1 通で届く。受信条件が弾くと UI 側は「未取得」に倒れ、
+    // 温度の色分けが config を変えても一切出ないまま型検査だけ通る
     expect(result.serverInfo).toEqual({
       dev_tools: sample.dev_tools,
       dry_run: sample.dry_run,
+      temp_warning_c: sample.temp_warning_c,
+      temp_critical_c: sample.temp_critical_c,
     });
+    expect(typeof result.serverInfo.temp_warning_c).toBe("number");
+    expect(typeof result.serverInfo.temp_critical_c).toBe("number");
   },
 
   match_state: (result, sample) => {
@@ -425,6 +431,10 @@ const DECLARED: Record<string, FieldSpec> = {
     // 機体が繋がっていないことは health 側 (モータの STALE) に出るため、
     // ここでは表示に使わない。将来 UI に「dry-run 中」を出すならここを "ui" にする
     dry_run: { unused: "現状 UI では表示しない (health の STALE で分かる)" },
+    // モータ温度の色分けの境界。UI 側に定数を持つと config を変えても画面だけが
+    // 古い境界で判定するため、サーバーの config を唯一の出どころにしてある
+    temp_warning_c: "ui",
+    temp_critical_c: "ui",
   }),
 
   match_state: {

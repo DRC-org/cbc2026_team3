@@ -1,5 +1,4 @@
-import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
-import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
+import type { HealthSnapshot, MotorHealth, SafetyState, ServerInfo } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
 
 export interface HealthVerdict {
@@ -16,9 +15,50 @@ export interface SafetyIssue {
   hint: string;
 }
 
-/** 警告温度に達しているモータの基数。「異常 N 件」の N をここでしか数えない */
-export function countHotMotors(motors: Record<string, MotorState>): number {
-  return Object.values(motors).filter((m) => m.temp >= TEMP_WARNING).length;
+/** モータ温度の色分けに使うしきい値 [℃]。正はサーバーの config にしかない */
+export interface TempThresholds {
+  warning: number;
+  critical: number;
+}
+
+/**
+ * `server_info` の 2 値からしきい値を作る。片方でも欠けていたら null。
+ *
+ * 片方だけで判定すると「warning は出ないのに danger だけ出る」中途半端な色分けになり、
+ * 画面からはしきい値が届いていないことも読み取れない。揃っているときだけ判定する。
+ */
+export function tempThresholdsOf(serverInfo: ServerInfo | undefined): TempThresholds | null {
+  const warning = serverInfo?.temp_warning_c;
+  const critical = serverInfo?.temp_critical_c;
+  if (typeof warning !== "number" || typeof critical !== "number") return null;
+  return { warning, critical };
+}
+
+/**
+ * モータ一覧の見出しチップ (MotorSummary) の判定。
+ *
+ * 判定を MotorSummary 側に置くと、同じ画面に並ぶ 3 つの表示 —— 診断カラムの
+ * 見出しチップ (evaluateHealth)・各行のバッジ (MotorHealth.state)・このサマリー ——
+ * が別々の根拠で答えることになる。実際にサマリーだけが温度しきい値しか見ておらず、
+ * FAULT のモータが行では赤バッジなのにサマリーは緑の「All operational」を出していた。
+ *
+ * **入力はサーバーのモータ健全性だけで、温度テレメトリは見ない。** 温度警告は
+ * サーバーが config の `temp_warning_c` で既に `warning` を立てている。UI が別の
+ * しきい値で重ねて数えると、サーバー判定と食い違った件数が画面に出る。
+ *
+ * 未配信・空配列を success へ倒さないのは `evaluateHealth` と同じ理由で、
+ * 「異常の有無が分からない」は安全側では異常であって正常ではない。
+ */
+export function summarizeMotors(healthMotors: MotorHealth[] | undefined): HealthVerdict {
+  if (!healthMotors || healthMotors.length === 0) {
+    return { tone: "neutral", label: "ヘルス未取得" };
+  }
+
+  const anomalies = healthMotors.filter((m) => m.state !== "ok");
+  if (anomalies.length === 0) return { tone: "success", label: "All operational" };
+
+  const tone: Tone = anomalies.some((m) => m.state === "fault") ? "error" : "warning";
+  return { tone, label: `異常 ${anomalies.length} 件` };
 }
 
 /**
@@ -27,11 +67,19 @@ export function countHotMotors(motors: Record<string, MotorState>): number {
  * 以前 `MotorStatus` と `MotorTuning` に別実装があり、片方は独自の
  * `StatTone`、もう片方は `Tone` を返していた。しきい値の変更が片方にしか
  * 効かない構造だったので、判定はここ 1 箇所に置く。
+ *
+ * **しきい値は `server_info` 由来のものしか使わず、UI 側のフォールバック値を持たない。**
+ * 持つと、config を変えても画面だけが古い境界で判定する二重管理が戻る。届いていない間は
+ * `neutral` (色を付けない) にする —— 適当な既定値で「正常」とも「警告」とも言わない。
  */
-export function motorTempTone(temp: number | null | undefined): Tone {
+export function motorTempTone(
+  temp: number | null | undefined,
+  thresholds: TempThresholds | null,
+): Tone {
   if (temp === null || temp === undefined) return "neutral";
-  if (temp >= TEMP_DANGER) return "error";
-  if (temp >= TEMP_WARNING) return "warning";
+  if (!thresholds) return "neutral";
+  if (temp >= thresholds.critical) return "error";
+  if (temp >= thresholds.warning) return "warning";
   return "success";
 }
 
@@ -108,10 +156,14 @@ export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIss
  * **サーバーの `overall` より楽観的な結論を出してはならない。** サーバーは健全性を
  * 計算できなかったときに overall=down・内訳空で「判定不能」を配信する。内訳だけを見て
  * 「異常なし」を返すと、そのフェイルセーフが画面上で消える。
+ *
+ * **温度テレメトリは入力に取らない。** 高温は config の `temp_warning_c` を見た
+ * サーバーが `MotorHealth.state = warning` として既に配信している。UI が別途数えると
+ * 同じ 1 基が 2 件として計上され、しかも UI 側のしきい値がサーバーとずれていれば
+ * 件数そのものがサーバー判定と食い違う。数えるのは配信された健全性だけにする。
  */
 export function evaluateHealth(
   health: HealthSnapshot | undefined,
-  motors: Record<string, MotorState>,
   safety?: SafetyState,
 ): HealthVerdict {
   // 判定と詳細表示を同じ列挙から作る。チップは「種別 + 対象」、詳細行は復旧手順を担う
@@ -154,7 +206,7 @@ export function evaluateHealth(
 
   const degraded = health.buses.filter((b) => b.state !== "ok").length;
   const badMotors = health.motors.filter((m) => m.state !== "ok").length;
-  const warnCount = degraded + badMotors + countHotMotors(motors);
+  const warnCount = degraded + badMotors;
   if (warnCount > 0) return { tone: "warning", label: `要確認 ${warnCount} 件` };
 
   // 内訳に異常が無くてもサーバーの総合判定より楽観的になってはならない

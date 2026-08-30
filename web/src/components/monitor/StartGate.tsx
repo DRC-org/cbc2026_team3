@@ -76,7 +76,7 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   const warnings = ROBOTS.flatMap(({ key, label }) => {
     const robot = states[key];
     if (!robot) return [{ label, detail: "データ未受信" }];
-    const verdict = evaluateHealth(robot.health, robot.motors, robot.safety);
+    const verdict = evaluateHealth(robot.health, robot.safety);
     return verdict.tone === "success" ? [] : [{ label, detail: verdict.label }];
   });
 

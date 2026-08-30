@@ -156,10 +156,24 @@ describe("SubsystemStatus", () => {
   });
 
   it("モータ過熱の警告でも自分から開く (安全機構の異常に限らない)", () => {
-    // 開く条件を error だけに絞ると、焼損に向かう温度上昇を畳んだまま見逃す
+    // 開く条件を error だけに絞ると、焼損に向かう温度上昇を畳んだまま見逃す。
+    // 過熱の判定はサーバー (config の temp_warning_c) が持ち、warning として届く
     renderWithRobot(
       <SubsystemStatus
-        health={HEALTH}
+        health={{
+          ...HEALTH,
+          motors: [
+            {
+              name: "y_axis_r",
+              bus: "can_m3508",
+              state: "warning",
+              last_feedback_at: null,
+              feedback_age_ms: 0,
+              temperature: 90,
+              detail: null,
+            },
+          ],
+        }}
         motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
         safety={safety()}
       />,
@@ -167,6 +181,40 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.getByText("要確認 1 件")).toBeInTheDocument();
+  });
+
+  /**
+   * 温度の色分けの境界はサーバーの config だけが持つ。呼び出し元 → SubsystemStatus →
+   * MotorSummary → MotorStatus の受け渡しが 1 段でも切れると、config を変えても
+   * 画面の色だけが変わらない (数値は出続けるので画面からは気付けない)。
+   */
+  it("温度しきい値を渡すと過熱モータに色が付く", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
+        safety={safety()}
+        tempThresholds={{ warning: 65, critical: 80 }}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByText("90.0")).toHaveClass("text-error");
+  });
+
+  it("しきい値が未取得なら色を付けない (UI が独自の境界を持たない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        health={HEALTH}
+        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
+        safety={safety()}
+        defaultOpen
+      />,
+    );
+
+    const temp = screen.getByText("90.0");
+    expect(temp).not.toHaveClass("text-error");
+    expect(temp).not.toHaveClass("text-warning");
   });
 
   it("平常時は操縦者の操作で開閉できる", async () => {

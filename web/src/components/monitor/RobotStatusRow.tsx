@@ -4,6 +4,7 @@ import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
+import type { TempThresholds } from "@/lib/healthVerdict";
 import type { RobotState } from "@/lib/protocol";
 import { isSequenceComplete, sequenceKind } from "@/lib/sequenceStatus";
 import type { SequenceKind } from "@/lib/sequenceStatus";
@@ -13,6 +14,8 @@ import { TONE_BORDER_L_CLASS, TONE_PROGRESS_CLASS } from "@/lib/tone";
 interface RobotStatusRowProps {
   label: string;
   state: RobotState | undefined;
+  /** 温度の色分けに使うしきい値。サーバー由来で、Dashboard から流れてくる */
+  tempThresholds?: TempThresholds | null;
 }
 
 /**
@@ -34,7 +37,7 @@ const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
  * 画面を埋め、肝心の「どちらの機体が止まっていて誰の操作待ちか」が沈んでいた。
  * 進行状態を主役に据え、数値は SubsystemStatus の判定 1 行へ畳んでいる。
  */
-export function RobotStatusRow({ label, state }: RobotStatusRowProps) {
+export function RobotStatusRow({ label, state, tempThresholds = null }: RobotStatusRowProps) {
   if (!state) {
     return (
       <div className="card flex shrink-0 items-center gap-3 border-base-300 bg-base-100 p-2 card-border">
@@ -97,6 +100,7 @@ export function RobotStatusRow({ label, state }: RobotStatusRowProps) {
           health={state.health}
           motors={state.motors}
           safety={state.safety}
+          tempThresholds={tempThresholds}
           defaultOpen
         />
       </div>

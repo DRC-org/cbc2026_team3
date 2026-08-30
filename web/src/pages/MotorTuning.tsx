@@ -8,7 +8,8 @@ import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
-import { motorTempTone } from "@/lib/healthVerdict";
+import { motorTempTone, tempThresholdsOf } from "@/lib/healthVerdict";
+import type { TempThresholds } from "@/lib/healthVerdict";
 import { isDuringMatch } from "@/lib/phase";
 import type { MotorPid, MotorState } from "@/lib/protocol";
 import { ROBOTS } from "@/lib/robots";
@@ -122,7 +123,7 @@ function PidRow({ label, max, value, onChange }: PidRowProps) {
  */
 export function MotorTuning() {
   const states = useRobotStates();
-  const { matchState, connected, eStopActive } = useRobotStatus();
+  const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
   const { send } = useRobotCommands();
   const [values, setValues] = useState<Record<string, Partial<Record<PidKey, number>>>>({});
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -248,6 +249,7 @@ export function MotorTuning() {
           setValue={setValue}
           onSend={() => sendAll(active)}
           blockedReason={blockedReason}
+          tempThresholds={tempThresholdsOf(serverInfo)}
         />
       ) : null}
     </Page>
@@ -263,6 +265,7 @@ function MotorDetail({
   setValue,
   onSend,
   blockedReason,
+  tempThresholds,
 }: {
   entry: Entry;
   getValue: (entry: Entry, param: PidKey) => number;
@@ -270,6 +273,8 @@ function MotorDetail({
   onSend: () => void;
   /** 送信できない理由。null なら送れる */
   blockedReason: string | null;
+  /** 温度の色分けに使うしきい値。正はサーバーの config (`server_info` で届く) */
+  tempThresholds: TempThresholds | null;
 }) {
   const { motor, motorState, pid } = entry;
   // 左右直結ペアはサーバーがグループ全員へ同じ値を入れる (片側だけ別特性にすると
@@ -280,7 +285,7 @@ function MotorDetail({
     <Panel
       legend={`${entry.robotLabel} / ${motor}`}
       actions={
-        <StatusBadge tone={motorTempTone(motorState.temp)}>
+        <StatusBadge tone={motorTempTone(motorState.temp, tempThresholds)}>
           {motorState.temp.toFixed(1)}℃
         </StatusBadge>
       }

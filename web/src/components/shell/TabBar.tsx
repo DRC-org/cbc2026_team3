@@ -28,7 +28,7 @@ const TONE_LABEL: Record<Tone, string> = {
  */
 function tabIndicator(state: RobotState | undefined): { tone: Tone; label: string } | null {
   if (!state) return null;
-  const verdict = evaluateHealth(state.health, state.motors, state.safety);
+  const verdict = evaluateHealth(state.health, state.safety);
   if (verdict.tone === "error") return { tone: "error", label: TONE_LABEL.error };
   // 操縦者の操作を待っている方が行動に直結するため、同じ警告レベルでは先に出す
   if (state.waiting_trigger) return { tone: "warning", label: "許可待ち" };

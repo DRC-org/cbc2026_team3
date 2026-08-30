@@ -1327,7 +1327,8 @@ cbc2026_team3/
 │       │   ├── tabs.ts             # タブ定義・数字キー割当・旧ハッシュ URL の読み替え
 │       │   ├── time.ts             # エポック秒 / ミリ秒を型名で分ける（EpochSeconds / EpochMs）
 │       │   ├── tone.ts             # 状態色 → daisyUI セマンティッククラスの対応表
-│       │   ├── healthVerdict.ts    # 機体の健全性判定。Monitor と操縦者画面で同じ答えを出す
+│       │   ├── healthVerdict.ts    # 機体の健全性判定（見出しチップ / モータ一覧 / 温度色）。
+│       │   │                       #   画面によらず同じ答えを出す。温度しきい値は server_info 由来
 │       │   ├── sequenceStatus.ts   # シーケンスの状態判定（running を推測しない）
 │       │   └── wsUrl.ts            # WS 接続先の優先順位解決・入力の正規化・永続化
 │       ├── pages/
@@ -1361,7 +1362,7 @@ cbc2026_team3/
 │           │   └── MotorCheckSummary.tsx
 │           ├── diagnostics/      # SubsystemStatus を頂点とする診断ツリー
 │           │   ├── SubsystemStatus.tsx  # 平常時 1 行に畳み、異常時は開閉操作を上書きして開く
-│           │   ├── MotorSummary.tsx
+│           │   ├── MotorSummary.tsx     # 判定は summarizeMotors。ここに条件を書き足さない
 │           │   ├── MotorStatus.tsx
 │           │   └── HealthIndicator.tsx  # 判定は lib/healthVerdict.ts に一本化
 │           └── ui/               # 自前プリミティブ（Page / Panel / Section / Button /
@@ -2415,6 +2416,17 @@ yaml がキーを書かなかったときに使う値（`DEFAULT_HEALTH` / `DEFA
 （`MotorCheckRunner(feedback_timeout_ms=...)`）。別名を付けると同じ境界を 2 つの
 名前で調整することになる。
 
+**UI が使う温度 2 値は `server_info` で配る。**「1 箇所しか持たない」を PC 内で閉じると、
+ブラウザ側だけが自前のリテラルを持つ経路が残る（実際に `web/src/lib/robots.ts` が
+`TEMP_WARNING = 60` / `TEMP_DANGER = 80` を持ち、config の `temp_warning_c: 65` と
+ずれていた）。しきい値は `dev_tools` / `dry_run` と同じ「config 由来で試合中に変わらない
+情報」なので、接続直後に 1 度だけ届く `server_info`（`lib/server.py` の
+`_server_info_dict()`）に載せる。**UI 側にフォールバック値は置かず、届いていない間は
+`neutral`（色を付けない）に倒す** —— 既定値を置けばそれがそのまま二度目の写しになり、
+適当な値で「正常」とも「警告」とも言うことになる。載せるのは UI が温度の色分けに使う
+2 値だけで、使わない値（`feedback_timeout_ms` / `tx_error_threshold`）は配らない
+（配ると「配られているのだから使ってよい」という別の写しの根拠になる）。
+
 `config_schema` は依存の向きの都合上 `lib.drivers.base` 以外を import しない。
 上位モジュールを import した瞬間に、しきい値を使う側から参照できなくなる。
 
@@ -2945,6 +2957,8 @@ MOTOR CHECK・緊急停止）、1366x768 と 1280x720 で溢れなし、配色�
 - **判定ロジックを 2 箇所に書かない。** 機体の健全性判定は `lib/healthVerdict.ts`、
   シーケンスの状態判定は `lib/sequenceStatus.ts` に一本化する。
   分けて書くと「Monitor は READY と言うのに操縦者の画面は異常と言う」状態が生まれる。
+  実例: `MotorSummary` だけが自前で温度しきい値しか見ておらず、FAULT のモータが行では
+  赤バッジなのにサマリーは緑の「All operational」を出していた（2026-08-30 に修正）。
 - **カスタムコンポーネントの prop に `role` を使わない。** JSX 上で ARIA の `role` 属性と
   区別が付かず、jsx-a11y が誤検出する（`checklistRole` に改名）。
 - **行内に装飾を足すときは入力の読み上げ名を固定する。** チェックリストの行に「次」バッジを
@@ -3119,6 +3133,65 @@ import 33 行のみで、振る舞いの変更はない（`git diff -M` 上で 3
 変異は 8 種すべてで狙ったテストが落ちることを確認済み（「変異テスト」の表）。
 確認の要否は**両方向**に変異を入れてある — 即実行のはずの導線を二度押しの裏へ回す変異と、
 ダイアログのはずの導線から確認を外す変異の双方で、対応するテストだけが落ちる。
+
+#### 健全性判定の一本化と温度しきい値の配信（2026-08-30）
+
+診断カラムは 1 つの機体について **3 つの表示**を同時に出す —— 見出しチップ
+（`evaluateHealth`）・モータ一覧のサマリーチップ・各行のバッジ（`MotorHealth.state`）。
+このうち**サマリーだけが別の根拠で答えていた。**
+
+- `MotorSummary` は `countHotMotors(motors)` —— 温度テレメトリだけ —— を数えて
+  「異常 N 件 / All operational」を出していた。**モータが FAULT でも温度が正常なら
+  緑の「All operational」が出る。** 同じ画面で見出しチップと行のバッジは赤を出しており、
+  操縦者は食い違う 3 つの表示を前に、どれを信じるか判断できない。
+- その `countHotMotors` が見ていたしきい値は `web/src/lib/robots.ts` の
+  `TEMP_WARNING = 60` / `TEMP_DANGER = 80` で、`config/system.yaml` の
+  `temp_warning_c: 65` / `temp_critical_c: 80` と**ずれていた**。結果は 2 つ。
+  (a) 60〜65℃ のモータはサーバー判定 OK なのに UI だけが異常に数える。
+  (b) `evaluateHealth` の `warnCount` が `degraded + badMotors + countHotMotors(motors)`
+  だったので、65℃ を超えた 1 基がサーバー判定と温度カウントの両方に乗り
+  **1 基の過熱が「要確認 2 件」**として出る。
+
+**判定は `web/src/lib/healthVerdict.ts` へ移した。** サマリーの判定は
+`summarizeMotors(healthMotors)` になり、`MotorSummary` は結果（`tone` / `label`）を
+描くだけになった。入力は**サーバーのモータ健全性だけで、温度テレメトリは見ない** ——
+高温はサーバーが `temp_warning_c` を見て `MotorHealth.state = warning` として既に
+配信しているので、UI が別に数えれば必ず二重計上になる。`fault` が 1 件でもあれば
+`error`、無ければ `warning`。未配信・空配列を `success` へ倒さないのは `evaluateHealth`
+と同じ理由で、**「異常の有無が分からない」は安全側では異常であって正常ではない。**
+
+**しきい値の正は config だけが持ち、UI へは `server_info` で配る。** UI 側の
+リテラルは消し、フォールバック値も置かない。`dev_tools` / `dry_run` と同じ「config 由来で
+試合中に変わらない情報」なので、接続直後に 1 度だけ届く経路に相乗りさせている
+（`_server_info_dict()`）。届いていない間は `motorTempTone` が `neutral` を返して
+**色を付けない** —— 既定値を置けばそれがそのまま二度目の写しになり、適当な値で
+「正常」とも「警告」とも言うことになる。`tempThresholdsOf(serverInfo)` は 2 値が揃った
+ときだけ `TempThresholds` を返す（片方だけで判定すると「warning は出ないのに danger だけ
+出る」中途半端な色分けになり、しきい値が届いていないことも画面から読み取れない）。
+配るのは UI が使う 2 値だけで、`feedback_timeout_ms` / `tx_error_threshold` は載せない。
+
+しきい値は **props で末端まで流す**（`Dashboard` / `RobotControl` / `MotorTuning` が
+`tempThresholdsOf` を呼び、`RobotStatusRow` → `SubsystemStatus` → `MotorSummary` →
+`MotorStatus` へ渡す）。末端の表示部品が context を読み始めると、`health` / `motors` を
+props で受けている現在の一貫性が崩れ、表示のテストのたびに Provider が要る。
+
+`countHotMotors` は廃止し、`evaluateHealth` は配信された健全性だけを数える。
+使われなくなった `motors` 引数も落とした（残すと「温度も見ている」という誤読が残る）。
+
+検証:
+
+- `MotorSummary.test.tsx`（新設）— **FAULT のモータがあれば温度が正常でも
+  All operational を出さない**、`stale` は `warning` で件数を出す、未配信を `success` へ
+  倒さない、モータ 0 基なら一覧ごと出さない。
+- `healthVerdict.test.ts` — `summarizeMotors` の 5 件、`tempThresholdsOf` の 3 件
+  （2 値が揃ったときだけ返す）、`motorTempTone` の「しきい値未取得なら温度に関わらず
+  `neutral`」、`evaluateHealth` の「高温モータをサーバー判定と二重に数えない」。
+- `SubsystemStatus.test.tsx` — しきい値を渡せば過熱モータに色が付き、
+  **未取得なら色を付けない**（UI が独自の境界を持たないことを画面越しに固定する）。
+- `tests/test_threshold_wiring.py::TestServerInfoCarriesTempThresholds` — config に
+  入れた値そのものが `server_info` で届くこと（既定値 65 / 80 が漏れていないことまで見る。
+  「配ってはいるが既定値のまま」では二重管理が復活する）と、UI が使わない 2 値を
+  配っていないこと。
 
 #### 現在のファイル構成
 

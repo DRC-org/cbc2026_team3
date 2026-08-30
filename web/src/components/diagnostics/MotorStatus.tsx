@@ -2,6 +2,7 @@ import { formatAge } from "@/components/diagnostics/HealthIndicator";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import { motorTempTone } from "@/lib/healthVerdict";
+import type { TempThresholds } from "@/lib/healthVerdict";
 import type { MotorHealth, MotorHealthState, MotorState } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
 import { TONE_TEXT_CLASS } from "@/lib/tone";
@@ -10,6 +11,8 @@ interface MotorStatusProps {
   name: string;
   state: MotorState;
   health?: MotorHealth;
+  /** 温度の色分けに使うしきい値。サーバー由来で、MotorSummary から流れてくる */
+  tempThresholds?: TempThresholds | null;
   className?: string;
 }
 
@@ -23,9 +26,10 @@ const HEALTH_TONE: Record<MotorHealthState, Tone> = {
 /**
  * 温度帯に応じた文字色。正常域は地の文字色のままにする
  * (全モータが緑に光ると、本当に見るべき 1 基が沈む)。
+ * しきい値が未取得なら `motorTempTone` が neutral を返すので、色は付かない。
  */
-function tempTextClass(temp: number): string {
-  const tone = motorTempTone(temp);
+function tempTextClass(temp: number, thresholds: TempThresholds | null): string {
+  const tone = motorTempTone(temp, thresholds);
   return tone === "warning" || tone === "error" ? cx(TONE_TEXT_CLASS[tone], "font-medium") : "";
 }
 
@@ -58,7 +62,13 @@ function Cell({ value, unit, toneClass }: { value: string; unit?: string; toneCl
   );
 }
 
-export function MotorStatus({ name, state, health, className }: MotorStatusProps) {
+export function MotorStatus({
+  name,
+  state,
+  health,
+  tempThresholds = null,
+  className,
+}: MotorStatusProps) {
   // モータ名と数値を同じ行に並べると、サイドカラム幅ではモータ名が "li..." まで
   // 削られて識別できなくなる。名前を独立した行に出して常に読めるようにする
   return (
@@ -79,7 +89,11 @@ export function MotorStatus({ name, state, health, className }: MotorStatusProps
         <Cell value={state.pos.toFixed(1)} />
         <Cell value={state.vel.toFixed(1)} />
         <Cell value={state.torque.toFixed(1)} />
-        <Cell value={state.temp.toFixed(1)} unit="℃" toneClass={tempTextClass(state.temp)} />
+        <Cell
+          value={state.temp.toFixed(1)}
+          unit="℃"
+          toneClass={tempTextClass(state.temp, tempThresholds)}
+        />
       </div>
     </div>
   );
