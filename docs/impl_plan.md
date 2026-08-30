@@ -2134,7 +2134,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 #### Damiao DM3520 単体ベンチ（`config/bench/dm3520/`）
 
-DM3520 1 台だけを CAN 通信の確認として動かす。`can_dm3520` だけを開く。
+DM3520 2 台（`sub_y_axis` / `sub_lift`）だけを CAN 通信の確認として動かす。`can_dm3520` だけを開く。
 このセットだけ `robot_name` が `sub_hand`（実機でもこのモータはサブハンド側にある）。
 
 ```bash
