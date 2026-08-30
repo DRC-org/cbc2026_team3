@@ -1,0 +1,43 @@
+# Damiao DM3520 単体ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は y_axis / rotate / conveyor など、このベンチに存在しない
+# 機構の確認を求めるためそのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもモータは動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+#
+# **本機は位置を報告できる**ので、指令どおり動いたかは動作確認 (motor_check) で
+# 自動判定できる。ここの目視項目が担うのは、自動判定では分からないこと ——
+# 回転方向・ID の一致・停止時に脱力すること —— に絞ってある。
+
+checklists:
+  pre_match:
+    - id: bench_bus_up
+      label: can_dm3520 が up していること確認 (ip -br link show)
+    - id: bench_serial
+      label: config/can_buses.yaml の can_dm3520 に serial が入っていること確認 (TBD なら固定名が付かない)
+    - id: bench_power
+      label: ドライバに 24V が入り、モータの三相線・エンコーダ線が確実に嵌まっていること確認
+    - id: bench_free
+      label: 出力軸に何も繋がっておらず、回っても干渉しないこと確認
+    - id: bench_device_id
+      label: candump can_dm3520 でフィードバックが MST_ID (既定 0x000) に届いていること確認
+    - id: bench_feedback
+      label: 操縦していない間もフィードバックが途切れないこと確認 (問い合わせ駆動なので PC が 20Hz で送り続けている)
+    - id: bench_mapping
+      label: p_max/v_max/t_max が実機のレジスタ 0x15/0x16/0x17 と一致していること確認 (ずれると位置が比例倍で読める)
+    - id: slide_small
+      label: 手動操縦で sub_slide に small を送り、出力軸が動くこと目視確認
+    - id: slide_direction
+      label: 正の指令で機構が「伸びる」向きに回ること確認。逆なら positions の scale の符号を反転する
+    - id: slide_full
+      label: 手動操縦で sub_slide に full を送り、指令量と実際の回転角が比例していること確認
+    - id: slide_return
+      label: 手動操縦で sub_slide に home を送り、電源投入位置へ戻ること確認
+    - id: bench_estop
+      label: 動作中に非常停止を押し、その場で停止すること確認
+    - id: bench_estop_detach
+      label: 非常停止中は無励磁になり手で回せること確認 (**保持トルクは残らない**)
+    - id: bench_estop_release
+      label: 非常停止を解除しても勝手に動き出さないこと確認 (解除時の保持目標は解除時点の実測角)

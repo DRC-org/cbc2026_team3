@@ -231,6 +231,26 @@ class TestListTsv:
         assert can_config.cmd_list(config, assigned_only=False).split("\t")[3] == "4000"
 
 
+#: **まだ serial を採取していないバス。試合までに空にすること。**
+#:
+#: 「全バス採取済み」を無条件で要求すると、実機を挿す前にバス定義を足した時点で
+#: スイートが赤くなり、赤いまま日をまたぐ。かといって仮の serial を書くと、
+#: どのデバイスにも一致しない udev ルールが生成されたうえでテストは緑になる ——
+#: 「設定は正しいのにバスが上がらない」という最も切り分けにくい状態を、
+#: テストが保証してしまう。
+#:
+#: そこで**両側から**縛る。ここに載っているバスは未採取でよいが、
+#: 載っていないバスが未採取なら落ちる (書き忘れ) し、載っているバスの serial を
+#: 採取したら「もうここに書く必要がない」として落ちる (消し忘れ)。
+#: どちらの向きにも気付けるので、この一覧は必ず現実と一致する。
+#:
+#: can_dm3520: 予備の CANable を 1 本割り当て済みだが serial 未採取。
+#:   udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
+#:   採取して config/can_buses.yaml に書いたら、ここから消して
+#:   sudo scripts/install.sh を再実行する。
+_SERIAL_PENDING_BUSES = frozenset({"can_dm3520"})
+
+
 class TestRealConfig:
     """実際に試合で使う config/can_buses.yaml が要件を満たしているか。
 
@@ -254,13 +274,15 @@ class TestRealConfig:
 
     def test_every_bus_has_a_serial(self) -> None:
         # TBD が残っていると setup_can.sh --strict は落ちる。試合当日ではなく
-        # 開発中に気付けるようにする
+        # 開発中に気付けるようにする。
+        # 未採取が許されるのは _SERIAL_PENDING_BUSES に明記したバスだけで、
+        # 採取済みになったらその一覧からも消さないと落ちる (両側から縛る)
         config = self._load()
 
-        unassigned = [
+        unassigned = {
             name for name, entry in config["buses"].items() if not can_config._is_assigned(entry)
-        ]
-        assert unassigned == []
+        }
+        assert unassigned == set(_SERIAL_PENDING_BUSES)
 
     def test_serials_are_unique(self) -> None:
         # 同じ serial を 2 バスに書くと両方のルールが同一デバイスに一致し、
@@ -271,11 +293,12 @@ class TestRealConfig:
         assert len(set(serials)) == len(serials)
 
     def test_setup_can_strict_can_bring_up_every_bus(self) -> None:
-        # --assigned-only の出力が全バスを含む = strict の「未採取 0 件」条件を満たす
+        # --assigned-only の出力が採取済みバスを漏れなく含む = strict の
+        # 「未採取 0 件」条件を、_SERIAL_PENDING_BUSES を空にした時点で満たす
         config = self._load()
         listed = can_config.cmd_list(config, assigned_only=True).splitlines()
 
-        assert len(listed) == len(config["buses"])
+        assert len(listed) == len(config["buses"]) - len(_SERIAL_PENDING_BUSES)
         for line in listed:
             name, serial, bitrate, txqueuelen = line.split("\t")
             assert serial != can_config.UNASSIGNED
@@ -288,6 +311,11 @@ class TestRealConfig:
         rules = can_config.cmd_udev(self._load())
 
         for name in self._load()["buses"]:
+            if name in _SERIAL_PENDING_BUSES:
+                # 未採取のバスはルールを生成せず、生成しなかったことを書き残す。
+                # 黙って飛ばすと「ルールが無い」と「書き忘れた」が区別できない
+                assert f"# {name}: serial 未採取" in rules
+                continue
             assert f'NAME="{name}"' in rules
 
 

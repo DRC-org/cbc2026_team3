@@ -1,0 +1,42 @@
+# Damiao DM3520 単体ベンチ (機構未装着) のモータ構成。
+#
+# robot_name を sub_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
+# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
+# 現れず手動操縦パネルを開けない。実機でもこのモータはサブハンド側なので sub_hand を使う。
+#
+# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
+# (main.py の _positions_path) なので、このファイルを config/bench/dm3520/ に置くことで
+# robot_name は sub_hand のまま config/bench/dm3520/sub_hand_positions.yaml が読まれる。
+# 本番の config/sub_hand_positions.yaml は無傷のまま残る。
+#
+# **このベンチでは DM3520 の 1 台だけを登録する。** EDULITE と自作モタドラを外すことで
+# 登録されないバスへの送信も消え、CAN 通信の確認が DM3520 だけに絞られる。
+#
+# --- 最初に確かめること ------------------------------------------------------
+# 1. can_id (ESC_ID) と master_id (MST_ID) が実機と一致しているか。
+#    /home/drc/repos/dm3520_test の dm_s3519_scan_can_id 環境が ESC_ID を走査できる。
+#    ID が違うと **1 通も届かず、しかも指令も通らない**ので「配線不良」にしか見えない。
+# 2. p_max / v_max / t_max が実機のレジスタと一致しているか (下記コメント参照)。
+#    ここがずれていると「回っているのに位置が合わない」形で現れる。
+
+robot_name: sub_hand
+
+motors:
+  sub_slide:
+    driver: dm3520
+    bus: dm3520_bus
+    can_id: 0x01               # ESC_ID (レジスタ 0x08)。工場出荷値
+    master_id: 0x00            # MST_ID (レジスタ 0x07)。工場出荷値
+    mode: position
+    # 本番の 2.0rad/s に対しベンチは半分に絞る。機構が付いていない DM3520 は
+    # 負荷が無いぶん同じ指令でも一気に回るため、まず回ることの確認は低い速度上限で行う。
+    # 出力軸 1.0rad/s は本番の scale (0.05rad/mm) 換算で 20mm/s 相当。
+    limit_speed: 1.0
+    # !!! フィードバックの固定小数点レンジ。実機のレジスタと一致させること !!!
+    # CAN で読める: ID=0x7FF / D0-D1=can_id / D2=0x33 / D3=レジスタ番号。
+    # 応答は MST_ID に D2=0x33 で返り、D4-D7 が float32 (リトルエンディアン)。
+    # TODO: 実機で読んで確定させること。以下は本機の定格からの推定値。
+    p_max: 12.566              # レジスタ 0x15 [rad]
+    v_max: 45.0                # レジスタ 0x16 [rad/s]
+    t_max: 10.0                # レジスタ 0x17 [Nm]
+    set_zero_on_start: false   # 原点は電源投入位置 (本機は投入時に 0.0rad へ固定される)

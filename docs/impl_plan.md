@@ -112,6 +112,7 @@ C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は C
 |---|---|---|---|
 | DJI M3508 | 2 | C620 ESC | CAN 2.0A Standard Frame |
 | RobStride EDULITE 05 | 2 | 内蔵 | CAN 2.0B Extended Frame (29bit) |
+| Damiao DM-S3519-1EC | 1 | DM3520-1EC ドライバ | CAN 2.0A Standard Frame |
 | DC モータ / サーボ | 多数 | 自作モータドライバ | CAN 2.0A Standard Frame（後述） |
 | 真空ポンプ（吸気 / 排気） | 2 | 自作モータドライバ（DC 基板の空き ch） | CAN 2.0A Standard Frame |
 | 電磁弁（吸着パッド） | 6 | 自作モータドライバ（電磁弁基板 / STM32F303K8） | CAN 2.0A Standard Frame |
@@ -122,13 +123,14 @@ C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は C
 おり、またポンプは起動電流が大きく `max_duty` で立ち上がりを抑えられる DC 基板の側が
 適している（仕様書 §9.6）。
 
-### CAN バス構成（3 系統）
+### CAN バス構成（4 系統）
 
 | バス（固定名） | CANable | 接続デバイス | ビットレート |
 |---|---|---|---|
 | `can_m3508` | #1 | M3508 × 2 | 1 Mbps |
 | `can_edulite` | #2 | EDULITE 05 × 2 | 1 Mbps |
-| `can_generic` | #3 | DC モータ / サーボ（自作モタドラ） | 1 Mbps |
+| `can_generic` | #3 | DC モータ / サーボ / 電磁弁（自作モタドラ） | 1 Mbps |
+| `can_dm3520` | #4 | Damiao DM3520 × 1 | 1 Mbps |
 
 **USB serial・bitrate・txqueuelen の実値は `config/can_buses.yaml` にしかない。**
 本書へ書き写すと、CANable を交換したときに片方だけが古くなる。しかも誤った serial は
@@ -568,6 +570,120 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 - `resume()` は `_last_tick` も取り直す（停止していた時間が丸ごと `dt` に化けるのを防ぐ。
   `max_dt_s` の頭打ちがあるが、意味のない大 `dt` を PID に渡さない）
 
+### Damiao DM3520（ドライバ内蔵の位置ループ）
+
+サブハンドのラックアンドピニオン直動軸（`sub_slide`）を駆動する。**M3508 と違い
+PC 側 PID は持たない** —— DM3520-1EC は Position Velocity Mode（位置 → 速度 → 電流の
+三重ループ）を内蔵しており、PC は `p_des` [rad] と `v_des` [rad/s] を float32 で
+送るだけでよい。位置ループを PC 側にも置くと二重ループになって必ず干渉する。
+`/pid-tuning` に現れないのはこのためで、`_motor_pid_state()` が `None` を返す
+（「ドライバ・ファーム側で制御していて PC からは変更できない」の単一の表現）。
+ゲイン調整は Damiao の調整アシスタント側（レジスタ `KP_APR` / `KI_APR` / `KP_ASR` / `KI_ASR`）。
+
+情報源は `DM-S3519-1EC User Manual`（`/home/drc/repos/dm3520_test` に PDF と
+ESP32 のサンプルコードがある）。
+
+#### 専用バス（`can_dm3520`）を立てた理由
+
+本機は 11bit 標準 ID を**帯で**使い、受信 ID の**下位 8bit だけ**を見て自分宛かを
+判定する（上位 3bit は「どの制御モードの指令か」を表す）。
+
+| フレーム ID | 意味 |
+|---|---|
+| `0x000 + ID` | MIT モードの指令 / 特殊コマンド（enable `0xFC` / disable `0xFD` / set zero `0xFE`） |
+| `0x100 + ID` | 位置速度モードの指令（`p_des` / `v_des` の float32 2 つ） |
+| `0x200 + ID` | 速度モードの指令（`v_des` の float32 1 つ） |
+| `0x7FF` | パラメータ読み書き（対象は D0/D1 の CAN ID で選ぶ） |
+| `MST_ID` | フィードバックとパラメータ応答（本機 → PC） |
+
+**既存 3 本のうち 2 本は物理的に相乗り不可**である。
+
+- `can_generic` は `E_STOP=0x000+ID` / `SET_TARGET=0x100+ID` / `SET_PARAM=0x200+ID`
+  （`docs/motor_driver_can_protocol.md` §2）で、**3 帯とも上の表と重なる**。自作基板宛の
+  目標値がそのまま本機への位置指令として解釈される
+- `can_m3508` は C620 のフィードバックが `0x201`〜`0x204`。本機から見るとこれは
+  `0x200 + ID`、すなわち**速度指令**である。C620 が返す角度・回転数の 4 バイトが
+  float32 の速度目標として読まれる。しかも発生源はモータ自身なので、PC 側を止めても続く
+
+`can_edulite` だけは相乗りできる（EDULITE 05 は 29bit 拡張 ID 専用、本機は 11bit 標準
+ID 専用で、ID 空間そのものが分かれる）。それでも**専用バスを選んだ**のは、相乗りが
+「本機のファームが拡張フレームを確実に無視する」ことに寄りかかっており、その根拠が
+マニュアルに無いため。`can0/can1/can2` を捨てて serial 固定名にしたのと同じ
+「バス 1 本 = ドライバ種別 1 つ」を崩さない判断でもある。
+
+#### フィードバックは問い合わせ駆動である（このドライバだけ）
+
+本機は**自分の CAN ID 宛のフレームを受けたときにしか**状態を返さない。M3508（C620 が
+自発的に送る）や EDULITE 05 と根本的に違い、PC が黙ると 1 通も届かなくなる。
+`health.feedback_timeout_ms`（既定 500ms）を過ぎればモータは `MotorHealth.STALE` になり、
+症状は「操縦していない間ずっと赤い」だけで**配線不良と区別が付かない**。
+
+そこで `Dm3520TargetRefresher`（`lib/control/target_refresh.py`、20Hz）が送り続ける。
+`GenericTargetRefresher` と形は同じだが、**目標を持たないモータの扱いが正反対**である。
+
+| | `GenericTargetRefresher`（自作モタドラ） | `Dm3520TargetRefresher` |
+|---|---|---|
+| 送る理由 | ファームのコマンドウォッチドッグ（500ms）を養う | ①フィードバックを引き出す ②ドライバの `TIMEOUT` レジスタを養う |
+| 目標が無いとき | **送らない**（起動直後にコンベアが回り出す） | **送る**（送らないとフィードバックが来ない） |
+| 緊急停止中 | 送らない（再送が停止指令を上書きする） | 送る（後述） |
+
+目標を持たないときに送るのは `idle_target_value()` を**ラッチした値**で、位置モードなら
+「目標を失った瞬間の実測角」。これは指令として無害である —— 無励磁なら何も起きず、
+励磁中なら既に保っている位置を書き直すだけになる。
+**毎周期そのときの実測角を書き直してはならない。** 負荷で下がったぶんへ目標が追従していき、
+誰も操作していないのに軸がじりじり動く（クリープする）。
+
+緊急停止中も送り続けるのは、停止中だけ画面から機体の状態が消えるのを避けるため。
+このフレームは機構を動かせない（緊急停止の解除は CAN の enable でしか起きず、この
+タスクは enable を 1 通も送らない）。ただし**停止中はラッチを取らず毎回測り直す** ——
+停止直後の惰走中にラッチすると、解除後 1 周期目にその位置へ戻す動きが出る。
+
+#### 起動手順（EDULITE 05 と同じ形）
+
+1. `disable`（`0xFD`）
+2. `CTRL_MODE`（レジスタ `0x0A`）へ制御モードを書く。**フラッシュへ保存されず電源断で
+   失われる**ので起動のたびに書く。副作用としてドライバ内部の指令値（位置・速度・
+   トルク・MIT の Kp/Kd）がクリアされる
+3. （`set_zero_on_start: true` なら）`set zero`（`0xFE`）
+4. **実測角を `p_des` として書く** → `enable`（`0xFC`）
+
+**4 の順序が命綱。** 2 で `p_des` が 0 に落ちているので、目標を書かずに励磁すると
+ラックが 0.0rad へ向かってストローク端まで走る。`requires_fresh_feedback_for_activation()`
+が `True` を返すのはこのためで、実測角を確認できないうちは無励磁のまま残す
+（`MotorState` の初期値 0.0rad を実測角と取り違えると、まさにその事故が起きる）。
+
+#### パラメータ応答をフィードバックとして取り込まない
+
+**パラメータの読み書き応答も `MST_ID` で返ってくる。** 起動時の `CTRL_MODE` 書き込みは
+必ず 1 通の応答を生むので、これを状態フィードバックとして解釈すると、直後の
+`activation_steps` が保持目標に使う実測角がその瞬間だけ嘘になり、励磁した瞬間に機構が飛ぶ。
+
+判別は `D0`/`D1` = 対象 CAN ID（リトルエンディアン）かつ `D2` ∈ {`0x33`, `0x55`}。
+状態フィードバックがこの形に一致するには、無励磁（`D0` 上位 4bit = 0）でかつ位置の生値が
+`0x0033` / `0x0055` 相当 —— 可動範囲の最も負の端 —— に居る必要があり、電源投入位置が
+0.0rad である本機では起こらない。
+
+#### `p_max` / `v_max` / `t_max` は実機のレジスタと一致させる
+
+フィードバックの位置・速度・トルクは `[-max, +max]` を固定小数点（16bit / 12bit / 12bit）へ
+線形写像して運ぶ。**config の値が実機のレジスタ（`0x15` / `0x16` / `0x17`）とずれていると、
+値が比例倍で読める。** 指令は float なので効かず、症状は「指令どおり動いたのに到達判定を
+通らない」だけになる。
+
+**この誤りは動作確認シーケンス（`robots/motor_check.py` の「サブハンド スライド軸」）が
+検出する** —— 位置定数の `tolerance`（1mm）で到達を判定するので、比例倍で読めていれば
+必ず落ちる。実値は Damiao 調整アシスタント、または CAN の read（`0x7FF` / `D2=0x33`）で
+読んで確かめること。
+
+#### 未対応: リミットスイッチによる零点確定
+
+原点は**電源投入位置**である（本機は投入時に位置が 0.0rad へ固定される）。搬送中に手で
+動かしたぶんはそのまま座標のずれになる。`config/sub_hand_positions.yaml` に `homing:` の
+雛形をコメントで置いてあるが、**有効化するには実装が要る** ——
+`main.py` の `_make_capture_origin()` は `M3508PositionLoop` 経由でしか原点を確定できず、
+本機では `SET_ZERO`（`0xFE`）を送る経路を足す必要がある。同じ制約は
+`config/main_hand_positions.yaml` の `rotate`（EDULITE 05 ペア）にもある。
+
 ### main.py での配線
 
 `main.py` が config から部品を組み立て、シーケンスに注入する。
@@ -697,6 +813,11 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | サーボ可動レンジの「申告なし」を一致へ倒さない | `info_mismatch` の `angle_range_deg is None` 分岐を `return None` にする（古いファームの焼き忘れが素通りする） | `tests/drivers/test_generic.py` |
 | サーボスロット以外は `INFO` に可動レンジを載せない | `encodeInfo`（3 引数版）が Byte3-4 を書くようにする（**測る対象を持たない基板から「レンジ 0deg」が届く**） | `firmware/test/test_protocol/` |
 | `on_off` 軸に連続値の可動範囲を持たせない | `_parse_manual` の `command_mode is not POSITION` 判定を外す | `tests/test_sequence_positions.py` |
+| DM3520 は目標が無い間も問い合わせ続ける | `Dm3520TargetRefresher._step_locked` の `_send_idle_target` を落とす（**フィードバックが問い合わせ駆動なので、操縦していない時間はまるごと STALE になる**） | `tests/test_target_refresh.py` |
+| DM3520 の保持目標はラッチした値 | `_send_idle_target` の `setdefault` を毎回の `idle_target_value()` へ変える（**負荷で下がったぶんへ目標が追従し、誰も操作していないのに軸がクリープする**） | `tests/test_target_refresh.py` |
+| DM3520 のパラメータ応答をフィードバックとして取り込まない | `matches_feedback` の `_is_config_response` ガードを外す（起動時の CTRL_MODE 書き込みの応答が実測角として入り、励磁した瞬間に機構が飛ぶ） | `tests/drivers/test_dm3520.py` |
+| DM3520 の位置レンジは `p_max` | `decode_feedback` の `p_max` を `v_max` に取り違える（**指令どおり動いても到達判定が永久に成立しない**） | `tests/drivers/test_dm3520.py` |
+| DM3520 は励磁前に実測角を書く | `activation_steps` の保持目標を `0.0` にする（モード切替で p_des が 0 に落ちているので、そのままラックがストローク端まで走る） | `tests/drivers/test_dm3520.py` |
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | 二重起動の拒否を落とす（0x200 の奪い合いに戻る） / 二重起動の判定を `_motor_check_tasks` の生死から runner の `is_running` へ戻す | `test_server_motor_check.py` / `test_motor_check.py` |
 | 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
@@ -1933,12 +2054,12 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 **セットごとにディレクトリを分けるのは位置定数の読み先が決まっているから。**
 `_positions_path` は「robot config と同じディレクトリの `<robot_name>_positions.yaml`」を
-読み、`robot_name` は Web UI の都合で `main_hand` 固定にせざるを得ない。したがって
-**同一ディレクトリに 2 つ目のベンチセットは置けない**（`main_hand_positions.yaml` が
-1 つしか作れない）。セットを足すときは `config/bench/<対象>/` を 1 つ掘り、4 ファイルを
-まとめてそこへ置くこと。
+読み、`robot_name` は Web UI の都合で `main_hand` / `sub_hand` のどちらかにせざるを得ない
+（それ以外の名前にするとどのタブにも現れず手動操縦パネルを開けない）。したがって
+**同一ディレクトリに同じ `robot_name` のベンチセットを 2 つ置けない**。セットを足すときは
+`config/bench/<対象>/` を 1 つ掘り、4 ファイルをまとめてそこへ置くこと。
 
-**4 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+**5 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
 本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
 1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
 しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
@@ -1949,6 +2070,25 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
   「UI には出るのに動かせないモータ」になる）
 - 開くバスがそのセットで使うものだけであること（挿していない CANable が
   1 本でもあると `[Errno 19] No such device` で起動そのものが落ちる）
+
+#### Damiao DM3520 単体ベンチ（`config/bench/dm3520/`）
+
+DM3520 1 台だけを CAN 通信の確認として動かす。`can_dm3520` だけを開く。
+このセットだけ `robot_name` が `sub_hand`（実機でもこのモータはサブハンド側にある）。
+
+```bash
+uv run python main.py --system config/bench/dm3520/system.yaml \
+    --config config/bench/dm3520/sub_hand.yaml \
+    --checklist config/bench/dm3520/checklist.yaml
+```
+
+**最初に確かめるのは `can_id`（ESC_ID）と `master_id`（MST_ID）**。違うと 1 通も届かず、
+しかも指令も通らないので「配線不良」にしか見えない。ESC_ID の走査は
+`/home/drc/repos/dm3520_test` の `dm_s3519_scan_can_id` 環境が使える。
+次が `p_max` / `v_max` / `t_max`（前述）で、ずれていると「回っているのに位置が合わない」。
+
+`limit_speed` だけ本番の半分（1.0rad/s）に絞ってある。機構が付いていないぶん
+同じ指令でも一気に回るため、まず回ることの確認は低い速度上限で行う。
 
 #### M3508 単体ベンチ（`config/bench/m3508/`）
 

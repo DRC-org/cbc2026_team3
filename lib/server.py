@@ -27,7 +27,7 @@ from lib.control.position_loop import (
     PidGains,
 )
 from lib.control.sync_monitor import SyncMonitor
-from lib.control.target_refresh import GenericTargetRefresher
+from lib.control.target_refresh import TargetRefresher
 from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
@@ -91,7 +91,7 @@ class RobotContext:
     sync_monitors: list[SyncMonitor] = field(default_factory=list)
     # 自作モタドラ向けの目標値再送。動作確認中は確認用の指令を打ち消すため止め、
     # 緊急停止時は保持した目標を捨てる (解除だけで動き出させない)
-    target_refreshers: list[GenericTargetRefresher] = field(default_factory=list)
+    target_refreshers: list[TargetRefresher] = field(default_factory=list)
     # 手動操縦の指令口。位置定数を読めていないロボットでは None (手動不可)
     manual: ManualController | None = None
     # 制御権を誰が握っているか。ロボットごとに独立させる (片方だけ手動が成立する)。
@@ -190,7 +190,7 @@ class RobotServer:
         can_manager: CANManager,
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
-        target_refreshers: list[GenericTargetRefresher] | None = None,
+        target_refreshers: list[TargetRefresher] | None = None,
         manual: ManualController | None = None,
     ) -> None:
         self._robots[name] = RobotContext(
@@ -1261,7 +1261,7 @@ class RobotServer:
         # 指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
         # 目標値再送とは同じモータの SET_TARGET を奪い合うので、どちらも黙らせて
         # 排他を取る。**全ロボットぶんを止める** (1 本のシーケンスが両機を動かす)。
-        pausables: list[M3508PositionLoop | GenericTargetRefresher] = [
+        pausables: list[M3508PositionLoop | TargetRefresher] = [
             pausable
             for ctx in self._robots.values()
             for pausable in (*ctx.position_loops, *ctx.target_refreshers)

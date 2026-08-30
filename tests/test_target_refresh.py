@@ -9,11 +9,14 @@ import pytest
 from lib.control.target_refresh import (
     DEFAULT_INTERVAL_S,
     FIRMWARE_COMMAND_TIMEOUT_S,
+    Dm3520TargetRefresher,
     GenericTargetRefresher,
 )
 from lib.drivers.base import ControlMode
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.generic import GenericDriver
 from lib.sequence.motors import MotorHandle
+from tests.feedback_frames import feed_dm3520
 
 
 class _StubCANManager:
@@ -220,3 +223,207 @@ class TestWatchdogMargin:
     def test_interval_has_margin_over_firmware_watchdog(self) -> None:
         """ファームの猶予 500ms に対し、取りこぼしが数回続いても止まらない周期であること。"""
         assert DEFAULT_INTERVAL_S * 5 <= FIRMWARE_COMMAND_TIMEOUT_S
+
+
+class _Dm3520Fixture:
+    """DM3520 の再送タスク + モータ 1 台。"""
+
+    def __init__(self, **driver_kwargs: object) -> None:
+        self.manager = _StubCANManager()
+        self.estop = False
+        params: dict = {"master_id": 0x11}
+        params.update(driver_kwargs)
+        self.slide = Dm3520Driver("sub_slide", 0x05, **params)  # type: ignore[arg-type]
+        self.handle = MotorHandle(
+            "sub_slide",
+            self.slide,
+            self.manager,  # type: ignore[arg-type]
+            is_estop_active=lambda: self.estop,
+        )
+        self.refresher = Dm3520TargetRefresher(
+            [self.handle],
+            self.manager,  # type: ignore[arg-type]
+            is_estop_active=lambda: self.estop,
+        )
+
+    def clear_sent(self) -> None:
+        self.manager.sent.clear()
+
+    @staticmethod
+    def position_of(msg: can.Message) -> float:
+        p_des, _ = struct.unpack("<ff", msg.data)
+        return p_des
+
+
+class TestDm3520PollsEvenWithoutTarget:
+    """**ここが自作モタドラと正反対**。送らないとフィードバックが 1 通も来ない。
+
+    本機のフィードバックは問い合わせ駆動で、自分宛のフレームを受けたときにしか
+    返らない。目標が無い間も送り続けないと、操縦していない時間はまるごと
+    ``MotorHealth.STALE`` になり、症状は「常に赤い」だけで配線不良と区別が付かない。
+    """
+
+    async def test_sends_hold_target_before_any_command(self) -> None:
+        fx = _Dm3520Fixture()
+        feed_dm3520(fx.slide, position=1.5)
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert fx.manager.names() == ["sub_slide"]
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(1.5, abs=1e-3)
+
+    async def test_hold_target_is_latched_not_re_measured(self) -> None:
+        """**毎周期の実測角を書き直すとクリープする。**
+
+        負荷で下がったぶんへ目標が追従していき、誰も操作していないのに軸が
+        じりじり動く。ラッチした値を送り続けなければならない。
+        """
+        fx = _Dm3520Fixture()
+        feed_dm3520(fx.slide, position=1.5)
+        await fx.refresher.step()
+        fx.clear_sent()
+
+        # 負荷で 0.5rad ぶん下がった、という状況
+        feed_dm3520(fx.slide, position=1.0)
+        await fx.refresher.step()
+
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(1.5, abs=1e-3)
+
+    async def test_velocity_mode_holds_stop(self) -> None:
+        fx = _Dm3520Fixture(mode=ControlMode.VELOCITY)
+        feed_dm3520(fx.slide, velocity=3.0)
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert struct.unpack("<f", fx.manager.sent[0][1].data)[0] == 0.0
+
+    async def test_resends_the_operator_target_once_it_exists(self) -> None:
+        fx = _Dm3520Fixture()
+        await fx.handle.set_target(ControlMode.POSITION, 2.5)
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(2.5)
+
+    async def test_latch_is_retaken_after_the_target_is_cleared(self) -> None:
+        """目標を失った時点の姿勢でラッチを取り直すこと。
+
+        古いラッチが残っていると、次に励磁したときそこへ戻る動きが出る。
+        """
+        fx = _Dm3520Fixture()
+        await fx.handle.set_target(ControlMode.POSITION, 2.5)
+        await fx.refresher.step()
+
+        fx.handle.clear_target()
+        feed_dm3520(fx.slide, position=0.25)
+        fx.clear_sent()
+        await fx.refresher.step()
+
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(0.25, abs=1e-3)
+
+
+class TestDm3520EStop:
+    """停止中も送るが、送ってよいのは「今の姿勢を保て」だけ。"""
+
+    async def test_keeps_polling_during_estop(self) -> None:
+        """停止中に黙ると、停止した瞬間から画面が機体の状態を映さなくなる。
+
+        送るのは実測角そのものなので、この経路で機構が動くことはない
+        (励磁は enable でしか起きず、このタスクは enable を 1 通も送らない)。
+        """
+        fx = _Dm3520Fixture()
+        feed_dm3520(fx.slide, position=1.0)
+        fx.estop = True
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert fx.manager.names() == ["sub_slide"]
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(1.0, abs=1e-3)
+
+    async def test_never_sends_enable(self) -> None:
+        # 停止中に励磁フレームが 1 通でも出ると緊急停止が意味を失う
+        fx = _Dm3520Fixture()
+        await fx.handle.set_target(ControlMode.POSITION, 2.5)
+        fx.estop = True
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        for _, msg in fx.manager.sent:
+            assert bytes(msg.data)[-1] != 0xFC
+
+    async def test_does_not_resend_the_pre_estop_target(self) -> None:
+        """停止前の目標を送り続けると、解除して励磁した瞬間にそこへ戻る。"""
+        fx = _Dm3520Fixture()
+        await fx.handle.set_target(ControlMode.POSITION, 2.5)
+        feed_dm3520(fx.slide, position=0.5)
+        fx.estop = True
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(0.5, abs=1e-3)
+
+    async def test_does_not_latch_during_estop(self) -> None:
+        """停止直後の惰走中にラッチすると、解除後 1 周期目にその位置へ戻す動きが出る。
+
+        無励磁なのでクリープは起こり得ず、停止中は測り直してよい。
+        """
+        fx = _Dm3520Fixture()
+        fx.estop = True
+        feed_dm3520(fx.slide, position=1.0)
+        await fx.refresher.step()
+
+        feed_dm3520(fx.slide, position=0.2)
+        fx.clear_sent()
+        await fx.refresher.step()
+
+        assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(0.2, abs=1e-3)
+
+    async def test_clear_targets_drops_the_target(self) -> None:
+        fx = _Dm3520Fixture()
+        await fx.handle.set_target(ControlMode.POSITION, 2.5)
+
+        fx.refresher.clear_targets()
+
+        assert fx.handle.has_target is False
+
+
+class TestDm3520PauseForMotorCheck:
+    async def test_paused_refresher_sends_nothing(self) -> None:
+        """動作確認は同じモータへ自前の指令を出す。並行して送ると打ち消し合う。"""
+        fx = _Dm3520Fixture()
+        feed_dm3520(fx.slide, position=1.0)
+        await fx.refresher.pause(reason="動作確認")
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert fx.manager.sent == []
+
+    async def test_resume_restores_sending(self) -> None:
+        fx = _Dm3520Fixture()
+        feed_dm3520(fx.slide, position=1.0)
+        await fx.refresher.pause(reason="動作確認")
+        fx.refresher.resume()
+        fx.clear_sent()
+
+        await fx.refresher.step()
+
+        assert fx.manager.names() == ["sub_slide"]
+
+
+class TestDm3520FailureIsolation:
+    async def test_send_failure_does_not_escape(self) -> None:
+        """1 台の送信失敗でループを降りると、そのモータは永久に STALE のまま。"""
+        fx = _Dm3520Fixture()
+        feed_dm3520(fx.slide, position=1.0)
+        fx.manager.fail_motors.add("sub_slide")
+
+        await fx.refresher.step()  # 例外が漏れないこと
+
+        assert fx.manager.sent == []

@@ -29,3 +29,27 @@ buses:
     serial: "0068005C4E4D501520343332"
     bitrate: 1000000
     txqueuelen: 1000
+
+  # Damiao DM3520-1EC（サブハンドのスライド軸）専用。
+  #
+  # **相乗りできる既存バスが無いので 1 本増やしている。** DM3520 は 11bit 標準 ID を
+  # 帯で使い、下位 8bit だけを見て自分宛かを判定する（上位 3bit は制御モードの区別）。
+  #   0x000+ID = MIT / 特殊コマンド, 0x100+ID = 位置速度, 0x200+ID = 速度
+  # can_generic は E_STOP=0x000+ID / SET_TARGET=0x100+ID / SET_PARAM=0x200+ID
+  # （docs/motor_driver_can_protocol.md §2）で 3 帯とも重なり、can_m3508 は C620 の
+  # フィードバック 0x201〜0x204 が DM3520 から見て**速度指令**になる。後者は発生源が
+  # モータ自身なので、PC 側を止めても流れ続ける。
+  # can_edulite だけは ID 空間が分かれる（EDULITE 05 は 29bit 拡張専用）が、それは
+  # 「DM3520 のファームが拡張フレームを確実に無視する」ことに寄りかかった判断で、
+  # マニュアルに根拠が無い。バス 1 本 = ドライバ種別 1 つを崩さない方を採った。
+  #
+  # !!! serial は TBD のまま。実機を挿して採取すること !!!
+  #   udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
+  #   （対象 1 個だけを挿した状態で。採取後 sudo scripts/install.sh を再実行する）
+  # TBD の間は udev ルールが生成されず setup_can.sh の対象からも外れる。
+  # **その状態で main.py を起動すると can_dm3520 が存在せず [Errno 19] で落ちる**
+  # （_setup_robot は can_buses に並んだバスを全部 open するため）。
+  can_dm3520:
+    serial: "TBD"
+    bitrate: 1000000
+    txqueuelen: 1000

@@ -30,6 +30,51 @@ axes:
       max: 15.0
       steps: [1.0, 5.0]
 
+  # ラックアンドピニオンの直動軸 (Damiao DM3520)。指令・フィードバックともに
+  # **出力軸の rad** —— 減速比 3591/187 は本機のドライバが内部で吸収済みなので、
+  # M3508 の y_axis と違って減速比は scale に現れない。
+  #
+  # scale = 2*pi / (pi * m * z) = 2 / (m * z)   [rad / mm]
+  #   ラックピニオンは基準円で転がるので、出力軸 1 回転 = 基準円周 pi*m*z [mm]
+  #   ピニオンは モジュール 1 / 歯数 40 (基準円 40.0mm) を仮置き
+  #   -> 2 / 40 = 0.05 rad/mm (出力軸 1 回転 = 125.664mm)
+  # TODO: ピニオンが確定したら m と z を実機に合わせること。組み立て後に一度だけ
+  # 実測で確かめる。ずれていたら scale_new = scale_old * 指令値 / 実測値。
+  # **測るときは必ず同じ方向から寄せる** — バックラッシュは scale では吸収できず、
+  # 往復で測ると遊びのぶんが scale の誤差として紛れ込む (main_hand の y_axis と同じ)。
+  #
+  # 可動範囲は p_max (12.566rad) が上限で、scale 換算で ±251mm。ここを超えた位置は
+  # ドライバ側で頭打ちになり、フィードバックも張り付くので「送ったのに途中で止まる」
+  # という形でしか現れない。
+  #
+  # !!! 原点は電源投入位置 !!! 本機は投入時に 0.0rad へ固定されるので、搬送中に手で
+  # 動かしたぶんがそのまま座標のずれになる。リミットスイッチを付けたら下の homing:
+  # を有効化すること —— ただし現状 lib/sequence/homing.py の零点確定は
+  # M3508PositionLoop 経由 (main.py の _make_capture_origin) にしか対応しておらず、
+  # 本機で有効化するには SET_ZERO (0xFE) を送る経路を足す必要がある
+  # (config/main_hand_positions.yaml の rotate も同じ状態)。
+  # homing:
+  #   sensor: sub_slide_origin_sensor
+  #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
+  #   search_distance: 40.0   # [mm] TODO: ストローク全長より少し長い値へ
+  #   step: 0.5               # [mm]
+  #   settle_s: 0.05
+  sub_slide:
+    unit: mm
+    command_unit: rad
+    scale: 0.05          # mm -> rad (出力軸)。導出は上のコメント
+    offset: 0.0
+    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
+    tolerance: 1.0       # 到達許容差 [mm]
+    # 手動操縦の可動範囲 [mm]。**機構の物理端ではなくその内側に取る** ——
+    # 手動は操縦者が端へ寄せていく操作なので、境界を物理端に合わせると
+    # 「指令は範囲内なのに機構は突き当たっている」状態が作れてしまう。
+    # TODO: 機構完成後、実測のストローク端より内側へ詰めること
+    manual:
+      min: -5.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
   # 自作モータドライバの補助グリッパ。指令・フィードバックともに deg。
   # 開 / 閉 の 2 状態しか取らないので manual: は書かない (手動でも位置名しか送れない)。
   sub_gripper:
@@ -94,10 +139,14 @@ positions:
     handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
     place: 10.0          # 配置姿勢 [deg]
 
-  # !!! 以下の値は config/sub_hand.yaml の motor_check.magnitude と一致させること。
-  #     ずれると動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
+  # スライド軸 [mm]。原点 (0.0) は電源投入位置。
+  # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
+  sub_slide:
+    home: 0.0            # 収納位置 = 電源投入位置
+    extended: 20.0       # 展開位置 [mm] (出力軸で約 57deg)
+
   sub_gripper:
-    open: 5.0            # 開 [deg] (= sub_hand.yaml sub_gripper.motor_check.magnitude)
+    open: 5.0            # 開 [deg]
     closed: 0.0          # 閉 (把持) [deg]
 
   # 電磁弁は開 / 閉の 2 状態しか取らない。**値は 0 か非 0 かだけが意味を持つ**

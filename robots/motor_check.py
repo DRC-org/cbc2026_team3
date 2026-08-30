@@ -55,6 +55,7 @@ MAIN_HOME: dict[str, str] = {
 #: サブハンドの初期姿勢。電磁弁とポンプは「止める = 消磁 / 停止」に倒す。
 SUB_HOME: dict[str, str] = {
     "sub_arm_joint": "home",
+    "sub_slide": "home",
     "sub_gripper": "open",
     "pump_vac": "stop",
     "pump_blow": "stop",
@@ -170,6 +171,16 @@ class MotorCheckSequence(Sequence):
         logger.info("[motor_check] サブハンド アーム関節")
         await self.move_to({"sub_arm_joint": "extended"})
         await self.move_to({"sub_arm_joint": "home"})
+
+    @step("サブハンド スライド軸")
+    async def sub_slide(self) -> None:
+        # Damiao DM3520。位置ループはドライバ内蔵なので、到達判定は
+        # 位置定数の tolerance (1mm) にそのまま乗る。
+        # **ここが落ちるときは config の p_max を最初に疑う** —— レジスタ 0x15 と
+        # ずれていると位置が比例倍で読め、指令どおり動いても到達しない
+        logger.info("[motor_check] サブハンド スライド軸")
+        await self.move_to({"sub_slide": "extended"})
+        await self.move_to({"sub_slide": "home"})
 
     @step("サブハンド 補助ハンド")
     async def sub_gripper(self) -> None:
