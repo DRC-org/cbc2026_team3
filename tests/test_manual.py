@@ -346,3 +346,28 @@ class TestAxesInfo:
         assert self._by_name(manual)["rotate"]["target"] is None
         await manual.set_value("rotate", 9.0)
         assert self._by_name(manual)["rotate"]["target"] == pytest.approx(9.0)
+
+    def test_ペア軸の左右偏差を軸の単位で載せる(self) -> None:
+        # 逆回転ペアなので指令単位のまま引き算しても意味を持たない。
+        # 判定と同じ SyncGroup を通し、人間の単位 (mm) へ戻した差を配る
+        manual, drivers, _ = _build()
+        drivers["y_axis_r"].set_observed(position=7.0 * 55.0)
+        drivers["y_axis_l"].set_observed(position=-5.0 * 55.0)
+        assert self._by_name(manual)["y_axis"]["deviation"] == pytest.approx(2.0)
+
+    def test_許容差も一緒に配る(self) -> None:
+        # UI はしきい値のフォールバック値を持たない。正は config だけが持つ
+        manual, _, _ = _build()
+        axes = self._by_name(manual)
+        assert axes["y_axis"]["sync_tolerance"] == pytest.approx(2.0)
+        assert axes["rotate"]["sync_tolerance"] is None
+
+    def test_単独モータ軸の偏差は_None(self) -> None:
+        # 比較対象が 1 つしかない軸に 0.0 を載せると「揃っていることを測った」
+        # ように見える。ずれようのない軸と、ずれを測れない軸を区別できなくなる
+        manual, _, _ = _build()
+        assert self._by_name(manual)["rotate"]["deviation"] is None
+
+    def test_位置を測れない軸の偏差は_None(self) -> None:
+        manual, _, _ = _build()
+        assert self._by_name(manual)["conveyor"]["deviation"] is None

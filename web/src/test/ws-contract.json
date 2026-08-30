@@ -147,6 +147,7 @@
         "axes": [
           {
             "command_mode": "position",
+            "deviation": 0.0,
             "manual": {
               "max": 20.0,
               "min": -2.0,
@@ -164,12 +165,14 @@
               "home",
               "work"
             ],
+            "sync_tolerance": 2.0,
             "target": 4.0,
             "unit": "mm",
             "value": 0.0
           },
           {
             "command_mode": "position",
+            "deviation": null,
             "manual": null,
             "motors": [
               "gripper"
@@ -179,12 +182,14 @@
               "open",
               "closed"
             ],
+            "sync_tolerance": null,
             "target": null,
             "unit": "deg",
             "value": 0.0
           },
           {
             "command_mode": "duty",
+            "deviation": null,
             "manual": null,
             "motors": [
               "conveyor"
@@ -194,6 +199,7 @@
               "stop",
               "run"
             ],
+            "sync_tolerance": null,
             "target": null,
             "unit": "duty",
             "value": null
