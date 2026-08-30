@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import type { MotorHealth, MotorState } from "@/lib/protocol";
+import { motorState } from "@/test/motorState";
 
 /** 温度は常に正常域。サマリーが温度ではなくヘルスを見ていることを確かめるため */
 const MOTORS: Record<string, MotorState> = {
-  y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 30, pid: null },
-  y_axis_l: { pos: 0, vel: 0, torque: 0, temp: 30, pid: null },
+  y_axis_r: motorState(),
+  y_axis_l: motorState(),
 };
 
 function motorHealth(over: Partial<MotorHealth> = {}): MotorHealth {

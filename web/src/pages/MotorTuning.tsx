@@ -1,6 +1,9 @@
 import { CircleHelp, Link2, Send } from "lucide-react";
 import { useState } from "react";
 
+import { AdviceList } from "@/components/tuning/AdviceList";
+import { MetricsPanel } from "@/components/tuning/MetricsPanel";
+import { ResponseChart } from "@/components/tuning/ResponseChart";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
@@ -11,7 +14,8 @@ import { cx } from "@/lib/cx";
 import { motorTempTone, tempThresholdsOf } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
 import { isDuringMatch } from "@/lib/phase";
-import type { MotorPid, MotorState } from "@/lib/protocol";
+import type { MotorPid, MotorState, TuningCapture } from "@/lib/protocol";
+import { tuningKey } from "@/lib/robotReducer";
 import { ROBOTS } from "@/lib/robots";
 
 const PID_PARAMS = [
@@ -39,16 +43,47 @@ interface Selection {
 }
 
 /** 調整対象の 1 値を大きく出す。応答を見ながら詰める作業なので視認性を優先する */
-function Readout({ label, value, unit }: { label: string; value: string; unit?: string }) {
+function Readout({
+  label,
+  value,
+  unit,
+  emphasize,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  /** 偏差だけは他より強く出す。調整で見たい量そのもの */
+  emphasize?: boolean;
+}) {
   return (
     <div className="flex min-w-0 flex-col items-end">
       <span className="text-[0.8em] text-base-content/60">{label}</span>
-      <span className="font-mono text-[1.5em] leading-tight tabular-nums">
+      <span
+        className={cx(
+          "font-mono text-[1.5em] leading-tight tabular-nums",
+          emphasize && "font-medium text-info",
+        )}
+      >
         {value}
         {unit ? <span className="text-[0.7em] text-base-content/60">{unit}</span> : null}
       </span>
     </div>
   );
+}
+
+/**
+ * 目標との差。目標を持たないモータ・停止中は null。
+ *
+ * **0 を返してはならない。** 「目標に完璧に追従している」と「そもそも目標が無い」が
+ * 同じ表示になり、停止中の機体を追従できていると読む経路ができる。
+ */
+function deviationOf(motor: MotorState): number | null {
+  return motor.target === null ? null : motor.target - motor.pos;
+}
+
+/** 測っていない値は「—」。数字で埋めると、測った値と区別が付かなくなる */
+function fixed1(value: number | null): string {
+  return value === null ? "—" : value.toFixed(1);
 }
 
 interface PidRowProps {
@@ -123,7 +158,7 @@ function PidRow({ label, max, value, onChange }: PidRowProps) {
  */
 export function MotorTuning() {
   const states = useRobotStates();
-  const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
+  const { matchState, connected, eStopActive, serverInfo, tuningCaptures } = useRobotStatus();
   const { send } = useRobotCommands();
   const [values, setValues] = useState<Record<string, Partial<Record<PidKey, number>>>>({});
   const [selected, setSelected] = useState<Selection | null>(null);
@@ -198,6 +233,8 @@ export function MotorTuning() {
     );
   }
 
+  const captures = active ? (tuningCaptures[tuningKey(active.robot, active.motor)] ?? []) : [];
+
   return (
     <Page className="grid grid-cols-[minmax(13rem,18rem)_minmax(0,1fr)]">
       <Panel legend="モータ" bodyClassName="p-0">
@@ -242,17 +279,72 @@ export function MotorTuning() {
       </Panel>
 
       {active ? (
-        <MotorDetail
-          key={editKey(active)}
-          entry={active}
-          getValue={getValue}
-          setValue={setValue}
-          onSend={() => sendAll(active)}
-          blockedReason={blockedReason}
-          tempThresholds={tempThresholdsOf(serverInfo)}
-        />
+        <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
+          <MotorDetail
+            key={editKey(active)}
+            entry={active}
+            getValue={getValue}
+            setValue={setValue}
+            onSend={() => sendAll(active)}
+            blockedReason={blockedReason}
+            tempThresholds={tempThresholdsOf(serverInfo)}
+          />
+          <ResponsePanel motor={active.motor} captures={captures} />
+        </div>
       ) : null}
     </Page>
+  );
+}
+
+/**
+ * 直近のステップ応答。**この画面が「感覚」でなくなるかどうかはここに掛かっている。**
+ *
+ * 記録は操縦者が手動ジョグで動かした 1 回、あるいはシーケンスの移動 1 回から
+ * 自動的に取れる。**記録のために機体を動かすボタンは無い** — 機体が動く条件を
+ * 増やさないため、既にある操作の結果をそのまま測る形にしてある。
+ */
+function ResponsePanel({ motor, captures }: { motor: string; captures: TuningCapture[] }) {
+  const [latest, previous] = captures;
+
+  if (!latest) {
+    return (
+      <Panel legend="ステップ応答">
+        <div className="flex min-h-0 flex-col gap-1 text-base-content/70">
+          <p>まだ記録がありません。</p>
+          <p className="text-[0.9em] text-base-content/60">
+            手動操縦のジョグかシーケンスの移動で {motor} を動かすと、その応答が
+            自動で記録されて波形・指標・助言がここに出ます (記録のために機体を動かす
+            ボタンはありません)。試合中は配信されません。
+          </p>
+        </div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      legend="ステップ応答"
+      actions={
+        <span className="font-mono text-[0.85em] text-base-content/60 tabular-nums">
+          kp {latest.gains.kp} / ki {latest.gains.ki} / kd {latest.gains.kd}
+        </span>
+      }
+      bodyClassName="scroll gap-3"
+    >
+      <ResponseChart capture={latest} previous={previous} />
+      {latest.metrics ? (
+        <div className="grid gap-3 lg:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)]">
+          <div className="self-start">
+            <MetricsPanel metrics={latest.metrics} previous={previous?.metrics ?? undefined} />
+          </div>
+          <div className="self-start">
+            <AdviceList advice={latest.advice} />
+          </div>
+        </div>
+      ) : (
+        <AdviceList advice={latest.advice} />
+      )}
+    </Panel>
   );
 }
 
@@ -290,13 +382,29 @@ function MotorDetail({
         </StatusBadge>
       }
     >
-      {/* 応答を見ながら詰めるので、選択中 1 基の現在値は大きく出す */}
+      {/* 応答を見ながら詰めるので、選択中 1 基の現在値は大きく出す。
+          **偏差と飽和がこの行の主役。** 以前は POS/VEL/TORQUE/TEMP の 4 つしか
+          無く、調整で最も見たい「目標からどれだけ外れているか」が画面のどこにも
+          存在しなかった (操縦者の頭の中の引き算にしかなかった) */}
       <div className="flex shrink-0 justify-between gap-4 border-b border-base-300 pb-2">
         <Readout label="POS" value={motorState.pos.toFixed(1)} />
-        <Readout label="VEL" value={motorState.vel.toFixed(1)} />
+        <Readout label="TARGET" value={fixed1(motorState.target)} />
+        <Readout label="ERROR" value={fixed1(deviationOf(motorState))} emphasize />
         <Readout label="TORQUE" value={motorState.torque.toFixed(2)} />
         <Readout label="TEMP" value={motorState.temp.toFixed(1)} unit="℃" />
       </div>
+
+      {/* 飽和は平常時に出さない。**異常時にだけ自分から主張する。**
+          出力が上限に張り付いている間はゲインを変えても応答が変わらないので、
+          これを知らずに kp を動かすと「効かない」という誤った結論に至る */}
+      {motorState.saturated ? (
+        <div className="mt-2 flex shrink-0 items-center gap-2">
+          <StatusBadge tone="warning">出力が上限</StatusBadge>
+          <span className="text-[0.9em] text-base-content/70">
+            飽和している間はゲインを変えても応答は変わりません。
+          </span>
+        </div>
+      ) : null}
 
       {paired ? (
         <div className="mt-3 flex shrink-0 items-center gap-1.5 text-[0.9em] text-base-content/70">

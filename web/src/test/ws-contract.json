@@ -211,6 +211,8 @@
         "gripper": {
           "pid": null,
           "pos": 5.0,
+          "saturated": false,
+          "target": null,
           "temp": 30.0,
           "torque": 0.0,
           "vel": 0.0
@@ -226,6 +228,8 @@
             "kp": 2.0
           },
           "pos": -1500.0,
+          "saturated": false,
+          "target": -220.0,
           "temp": 34.5,
           "torque": 0.2,
           "vel": 0.0
@@ -241,6 +245,8 @@
             "kp": 2.0
           },
           "pos": 1500.0,
+          "saturated": false,
+          "target": 220.0,
           "temp": 35.0,
           "torque": 0.2,
           "vel": 0.0
@@ -298,6 +304,138 @@
       "total_steps": 2,
       "type": "state",
       "waiting_trigger": false
+    },
+    "tuning_capture": {
+      "advice": [
+        {
+          "code": "saturated",
+          "message": "出力が全周期の 38% で上限に達しています。飽和している間はゲインを変えても応答は変わりません。ステップ幅・config の output_limit・機構の負荷を先に確認してください。",
+          "severity": "warning"
+        },
+        {
+          "code": "overshoot",
+          "message": "行き過ぎが 35% あります。kd を足すか kp を下げると収まります。",
+          "severity": "info"
+        }
+      ],
+      "captured_at": 1700000000.0,
+      "gains": {
+        "kd": 0.0,
+        "ki": 0.0,
+        "kp": 2.0
+      },
+      "metrics": {
+        "damping_ratio": null,
+        "duration_s": 0.14,
+        "oscillation_hz": null,
+        "overshoot_pct": 35.0,
+        "peak_output": 900.0,
+        "peak_time_s": 0.08,
+        "rise_time_s": 0.0487,
+        "sample_count": 8,
+        "saturation_ratio": 0.375,
+        "settle_band": 1.0,
+        "settling_time_s": 0.12,
+        "steady_state_error": 0.0,
+        "step_from": 0.0,
+        "step_size": 10.0,
+        "step_to": 10.0
+      },
+      "motor": "y_axis_r",
+      "robot": "main_hand",
+      "samples": {
+        "output": [
+          900.0,
+          860.0,
+          820.0,
+          780.0,
+          740.0,
+          700.0,
+          660.0,
+          620.0
+        ],
+        "pos": [
+          0.0,
+          3.0,
+          7.0,
+          9.6,
+          13.5,
+          11.5,
+          9.8,
+          10.0
+        ],
+        "sat": [
+          true,
+          true,
+          true,
+          false,
+          false,
+          false,
+          false,
+          false
+        ],
+        "t": [
+          0.0,
+          0.02,
+          0.04,
+          0.06,
+          0.08,
+          0.1,
+          0.12,
+          0.14
+        ],
+        "target": [
+          10.0,
+          10.0,
+          10.0,
+          10.0,
+          10.0,
+          10.0,
+          10.0,
+          10.0
+        ]
+      },
+      "type": "tuning_capture"
+    },
+    "tuning_capture_not_a_step": {
+      "advice": [],
+      "captured_at": 1700000000.0,
+      "gains": {
+        "kd": 0.0,
+        "ki": 0.0,
+        "kp": 2.0
+      },
+      "metrics": null,
+      "motor": "y_axis_r",
+      "robot": "main_hand",
+      "samples": {
+        "output": [
+          900.0,
+          860.0,
+          820.0
+        ],
+        "pos": [
+          10.0,
+          10.0,
+          10.0
+        ],
+        "sat": [
+          true,
+          true,
+          true
+        ],
+        "t": [
+          0.0,
+          0.02,
+          0.04
+        ],
+        "target": [
+          10.0,
+          10.0,
+          10.0
+        ]
+      },
+      "type": "tuning_capture"
     }
   }
 }

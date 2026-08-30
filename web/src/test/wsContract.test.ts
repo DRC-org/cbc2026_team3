@@ -25,6 +25,10 @@ import type {
   ServerMessage,
   SyncMonitorState,
   TargetRefresherState,
+  TuningAdvice,
+  TuningCapture,
+  TuningMetrics,
+  TuningSamples,
 } from "@/lib/protocol";
 import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 import contract from "@/test/ws-contract.json";
@@ -175,6 +179,31 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(state.total_steps).toBe(sample.total_steps);
     expect(state.steps).toEqual(sample.steps);
   },
+
+  tuning_capture: (result, sample) => {
+    const captures = result.tuningCaptures[`${sample.robot}/${sample.motor}`];
+    expect(captures).toHaveLength(1);
+
+    // 波形・指標・助言は 1 通で運ぶ。受信条件がどれか 1 つを弾くと、
+    // 残り 2 つだけが画面に出て食い違ったまま固まる
+    expect(captures[0].samples).toEqual(sample.samples);
+    expect(captures[0].metrics).toEqual(sample.metrics);
+    expect(captures[0].advice).toEqual(sample.advice);
+    expect(captures[0].gains).toEqual(sample.gains);
+    // 実配信には指標も助言も載っている。空で通ると「受信できている」の検証にならない
+    expect(captures[0].metrics).not.toBeNull();
+    expect(captures[0].advice.length).toBeGreaterThan(0);
+  },
+
+  tuning_capture_not_a_step: (result, sample) => {
+    const captures = result.tuningCaptures[`${sample.robot}/${sample.motor}`];
+    expect(captures).toHaveLength(1);
+    // **metrics が null の形も受信経路を通ること。** 指標を出せなかった記録を
+    // 弾いてしまうと、波形だけは見たい場面 (何が起きたか確かめたい) で何も出ない
+    expect(captures[0].metrics).toBeNull();
+    expect(captures[0].advice).toEqual([]);
+    expect(captures[0].samples).toEqual(sample.samples);
+  },
 };
 
 function renderConnected() {
@@ -273,6 +302,11 @@ const MOTOR_STATE = fieldsOf<MotorState>({
   // 落ちれば /pid-tuning は現在値を知る手段を失い、初期値 0 のまま送って
   // 全ゲインを 0 で潰す経路が戻る
   pid: "ui",
+  // 落ちれば画面から偏差そのものが消える。調整で最も見たい量が
+  // 操縦者の頭の中の引き算にしか存在しない状態へ戻る
+  target: "ui",
+  // 落ちれば「ゲインを変えても応答が変わらない」理由が画面から読めなくなる
+  saturated: "ui",
 });
 
 const BUS_HEALTH = fieldsOf<BusHealth>({
@@ -424,6 +458,55 @@ const HEALTH_CHANGE_FIELDS = fieldsOf<Wire<HealthChange>>({
   message: "ui",
 });
 
+const TUNING_METRICS = fieldsOf<TuningMetrics>({
+  step_from: "ui",
+  step_to: "ui",
+  step_size: "ui",
+  rise_time_s: "ui",
+  overshoot_pct: "ui",
+  peak_time_s: "ui",
+  settling_time_s: "ui",
+  steady_state_error: "ui",
+  oscillation_hz: "ui",
+  damping_ratio: "ui",
+  saturation_ratio: "ui",
+  peak_output: "ui",
+  settle_band: "ui",
+  sample_count: { unused: "解析に使った点数。波形の見た目からは読めないが判断は変えない" },
+  duration_s: "ui",
+});
+
+const TUNING_ADVICE = fieldsOf<TuningAdvice>({
+  code: { unused: "UI は message をそのまま出す。code はテストが名前で参照するための識別子" },
+  severity: "ui",
+  message: "ui",
+});
+
+const TUNING_SAMPLES = fieldsOf<TuningSamples>({
+  t: "ui",
+  target: "ui",
+  pos: "ui",
+  output: "ui",
+  sat: "ui",
+});
+
+const TUNING_CAPTURE_FIELDS: FieldSpec = {
+  ...fieldsOf<Wire<TuningCapture>>({
+    type: "parser",
+    robot: "ui",
+    motor: "ui",
+    captured_at: "ui",
+    gains: "ui",
+    metrics: "ui",
+    advice: "ui",
+    samples: "ui",
+  }),
+  ...nest("gains", fieldsOf<TuningCapture["gains"]>({ kp: "ui", ki: "ui", kd: "ui" })),
+  ...nest("metrics", TUNING_METRICS),
+  ...nest("advice[]", TUNING_ADVICE),
+  ...nest("samples", TUNING_SAMPLES),
+};
+
 /** サンプル名 → そのメッセージが持ちうる全フィールド (ドット区切り、配列要素は `[]`) */
 const DECLARED: Record<string, FieldSpec> = {
   state: STATE_FIELDS,
@@ -481,6 +564,13 @@ const DECLARED: Record<string, FieldSpec> = {
     }),
     ...nest("steps[]", STEP),
   },
+
+  // 波形・指標・助言を 1 通で運ぶ。motor_check_state と同じく受信時に `capture` で
+  // 包み直しているので、素のペイロード型で宣言する
+  tuning_capture: TUNING_CAPTURE_FIELDS,
+  // 指標を出せなかった記録。**この形も宣言に含める** — metrics が null の側だけ
+  // 契約から漏れると、UI が null を弾く条件を書いても誰も気付けない
+  tuning_capture_not_a_step: TUNING_CAPTURE_FIELDS,
 };
 
 /**

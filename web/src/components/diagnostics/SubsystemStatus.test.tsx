@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
+import { motorState } from "@/test/motorState";
 import { renderWithRobot } from "@/test/robotContext";
 
 const HEALTH: HealthSnapshot = {
@@ -26,7 +27,7 @@ const HEALTH: HealthSnapshot = {
 };
 
 const MOTORS: Record<string, MotorState> = {
-  y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 30, pid: null },
+  y_axis_r: motorState(),
 };
 
 function safety(over: Partial<SafetyState> = {}): SafetyState {
@@ -175,7 +176,7 @@ describe("SubsystemStatus", () => {
             },
           ],
         }}
-        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
+        motors={{ y_axis_r: motorState({ temp: 90 }) }}
         safety={safety()}
       />,
     );
@@ -193,7 +194,7 @@ describe("SubsystemStatus", () => {
     renderWithRobot(
       <SubsystemStatus
         health={HEALTH}
-        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
+        motors={{ y_axis_r: motorState({ temp: 90 }) }}
         safety={safety()}
         tempThresholds={{ warning: 65, critical: 80 }}
         defaultOpen
@@ -207,7 +208,7 @@ describe("SubsystemStatus", () => {
     renderWithRobot(
       <SubsystemStatus
         health={HEALTH}
-        motors={{ y_axis_r: { pos: 0, vel: 0, torque: 0, temp: 90, pid: null } }}
+        motors={{ y_axis_r: motorState({ temp: 90 }) }}
         safety={safety()}
         defaultOpen
       />,
