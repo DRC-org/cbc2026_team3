@@ -8,13 +8,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
 from lib.axis_sync import SyncGroup
-from lib.config_schema import DEFAULT_HEALTH
+from lib.config_schema import DEFAULT_HEALTH, TuningSettings
 from lib.control.feedback import FeedbackFreshness
 from lib.control.periodic import PausablePeriodicTask
 from lib.control.pid import PIDController
 from lib.control.sync_guard import SyncGuard
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
+from lib.tuning.recorder import Capture, MotorStepRecorder, PidSnapshot
 
 if TYPE_CHECKING:
     from lib.can_manager import CANManager
@@ -66,6 +67,8 @@ DEFAULT_MAX_DT_S = 0.05
 TargetSink = Callable[[ControlMode, float], Awaitable[None]]
 EStopChecker = Callable[[], bool]
 SleepFunc = Callable[[float], Awaitable[None]]
+#: 記録の受け渡し先。制御周期の中から呼ばれるので同期かつ O(1) であること
+CaptureSink = Callable[[Capture], None]
 
 
 def make_position_pid(
@@ -98,6 +101,14 @@ class _Axis:
     target: float | None = None
     # フィードバック途絶の遷移でのみログを出すためのフラグ
     stale: bool = field(default=False)
+    # 直近周期の出力と飽和。テレメトリ (20Hz) が読む値なので、制御周期ごとに
+    # 更新して持たせる。**PID の内部状態から後で計算し直してはならない** —
+    # 途絶や緊急停止で PID を reset した後は last_output が 0 に戻り、
+    # 「飽和していたのに飽和していないと見える」周期ができる
+    last_output: float = field(default=0.0)
+    saturated: bool = field(default=False)
+    # ステップ応答の記録器。tuning が無効なら None
+    recorder: MotorStepRecorder | None = field(default=None)
 
 
 class M3508PositionLoop(PausablePeriodicTask):
@@ -131,6 +142,8 @@ class M3508PositionLoop(PausablePeriodicTask):
         max_dt_s: float = DEFAULT_MAX_DT_S,
         feedback_timeout_ms: float = DEFAULT_HEALTH.feedback_timeout_ms,
         is_estop_active: EStopChecker | None = None,
+        tuning: TuningSettings | None = None,
+        capture_sink: CaptureSink | None = None,
         time_source: Callable[[], float] = time.monotonic,
         feedback_clock: Callable[[], float] = time.time,
         sleep: SleepFunc = asyncio.sleep,
@@ -144,6 +157,11 @@ class M3508PositionLoop(PausablePeriodicTask):
             feedback_timeout_ms: この時間フィードバックが無ければ電流 0 に落とす
                 (config の health.feedback_timeout_ms と揃える)
             is_estop_active: 緊急停止判定 (server.py の状態を後から注入する)
+            tuning: ステップ応答の記録設定。None または enabled=False で記録しない
+            capture_sink: 窓が閉じた記録の受け渡し先。**同期関数で、O(1) で返ること。**
+                ここで await したり解析を行ったりすると、200Hz の制御周期が
+                配信の都合で伸びる (解析と配信は lib/tuning/report.py と
+                server.py が受け持つ)
             time_source: 制御周期の計測に使う単調クロック
             feedback_clock: CANManager の受信タイムスタンプと比較する壁時計
             sleep: 周期待ちに使う関数 (テストで差し替え可能)
@@ -159,6 +177,11 @@ class M3508PositionLoop(PausablePeriodicTask):
             clock=feedback_clock,
         )
         self._sync = SyncGuard(context=f"bus={bus_name}", logger=logger)
+        self._tuning = tuning
+        self._capture_sink = capture_sink
+        # 窓が閉じた記録は、送信を終えてから渡す。制御の送信より先に配信側の
+        # 都合を挟むと、記録機能の不具合がそのまま指令の遅れになる
+        self._pending_captures: list[Capture] = []
 
         self._axes: dict[str, _Axis] = {}
         # 生成時を基準にしておく。run() 開始時に取り直すので、生成から起動までの
@@ -176,7 +199,27 @@ class M3508PositionLoop(PausablePeriodicTask):
         for existing_name, axis in self._axes.items():
             if axis.driver.can_id == driver.can_id:
                 raise ValueError(f"can_id {driver.can_id} が重複 ('{name}' と '{existing_name}')")
-        self._axes[name] = _Axis(driver=driver, pid=pid)
+        self._axes[name] = _Axis(driver=driver, pid=pid, recorder=self._make_recorder(name, pid))
+
+    def _make_recorder(self, name: str, pid: PIDController) -> MotorStepRecorder | None:
+        if self._tuning is None or not self._tuning.enabled:
+            return None
+        return MotorStepRecorder(
+            name,
+            # ゲインは記録の起点で読み直す。生成時に値をコピーすると、調整で
+            # 差し替えたゲインが記録には古いまま載り、波形とゲインの対応が崩れる
+            gains_snapshot=lambda: PidSnapshot(
+                kp=pid.kp, ki=pid.ki, kd=pid.kd, dead_band=pid.dead_band
+            ),
+            window_s=self._tuning.window_s,
+            pre_trigger_s=self._tuning.pre_trigger_s,
+            min_step=self._tuning.min_step_deg,
+            # 時刻が進まない異常時の歯止め。窓の長さから決まるので設定を増やさない
+            max_samples=int(
+                (self._tuning.window_s + self._tuning.pre_trigger_s) / max(self._interval_s, 1e-6)
+            )
+            + 16,
+        )
 
     def add_sync_group(self, group: SyncGroup) -> None:
         """機構的に直結したモータ組を登録する。
@@ -269,6 +312,10 @@ class M3508PositionLoop(PausablePeriodicTask):
         targets = self._paired_with(name)
         for target in targets:
             self._axes[target].pid.set_gains(**applied)
+        # 記録中の窓は捨てる。前半を旧ゲイン・後半を新ゲインで動いた波形は
+        # どちらの結果でもなく、しかも「送ってすぐ届いた記録」なので操縦者は
+        # 新しいゲインの応答だと読む
+        self._abort_recording(targets)
         return targets
 
     def _paired_with(self, name: str) -> tuple[str, ...]:
@@ -287,6 +334,19 @@ class M3508PositionLoop(PausablePeriodicTask):
 
     def mode(self, name: str) -> ControlMode | None:
         return self._axes[name].mode
+
+    def is_saturated(self, name: str) -> bool:
+        """直近周期の出力が出力レンジの端に張り付いたか。
+
+        テレメトリに載せる。飽和している間はゲインを変えても応答が変わらないので、
+        これが見えないと操縦者は「kp を上げても下げても同じ」という観察から
+        制御以外の原因 (機構の負荷・``output_limit``) へ辿り着けない。
+        """
+        return self._axes[name].saturated
+
+    def last_output(self, name: str) -> float:
+        """直近周期の PID 出力 [counts]。C620 が返す実測電流とは別物。"""
+        return self._axes[name].last_output
 
     # ------------------------------------------------------------------ #
     #  目標値
@@ -325,6 +385,9 @@ class M3508PositionLoop(PausablePeriodicTask):
         axis.mode = None
         axis.target = None
         axis.pid.reset()
+        axis.last_output = 0.0
+        axis.saturated = False
+        self._abort_recording((name,))
 
     def set_origin_here(self, name: str) -> None:
         """現在位置を累積角の原点にする (ホーミング完了時)。
@@ -393,7 +456,10 @@ class M3508PositionLoop(PausablePeriodicTask):
 
         if self._paused:
             # 動作確認が同一バスの 0x200 を占有している。0 電流フレームでも
-            # 送れば動作確認の指令を上書きしてしまうため 1 通も送らない
+            # 送れば動作確認の指令を上書きしてしまうため 1 通も送らない。
+            # 記録もここでは触らない — 停止中の動きはこのループの指令ではないが、
+            # 窓を捨てる責務は `_on_resume` が 1 箇所で持つ (ここにも書くと、
+            # 片方を消しても falls back して落ちない層ができる)
             return
 
         if estop:
@@ -412,9 +478,13 @@ class M3508PositionLoop(PausablePeriodicTask):
                 dt,
                 stale=stale[name],
                 blocked=self._sync.group_of(name) in blocked,
+                now=self._last_tick,
             )
 
         await self._send(currents)
+        # 送信を終えてから渡す。指令より先に記録機能の都合を挟むと、そちらの
+        # 不具合がそのまま指令の遅れになる
+        self._flush_captures()
 
     async def send_stop_frame(self) -> None:
         """目標を落とし、全スロット 0 の電流指令フレームを即時に 1 通送る。
@@ -438,6 +508,9 @@ class M3508PositionLoop(PausablePeriodicTask):
         # 前回測定値を持ち越すと復帰した瞬間に大きな電流が出る
         for axis in self._axes.values():
             axis.pid.reset()
+        # 停止していた間の動きは記録できていない。窓を持ち越すと停止前後が
+        # 地続きの 1 回の応答として綴じられる (時間の飛んだ波形になる)
+        self._abort_recording()
         # 停止していた時間が丸ごと dt に化けないよう基準時刻も取り直す
         self._last_tick = self._time_source()
 
@@ -447,6 +520,9 @@ class M3508PositionLoop(PausablePeriodicTask):
 
     async def _on_run_start(self) -> None:
         self._last_tick = self._time_source()
+        # 停止していた間の動きは記録できていない。窓を持ち越すと、起動前後が
+        # 地続きの 1 回の応答として綴じられる (時間の飛んだ波形になる)
+        self._abort_recording()
 
     async def _on_tick_error(self) -> None:
         # 例外でループを抜けると電流指令が止まる。C620 は指令断で惰走するため、
@@ -474,10 +550,50 @@ class M3508PositionLoop(PausablePeriodicTask):
         return self._axes[name].driver.feedback_position()
 
     def _compute_current(
-        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool
+        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool, now: float
     ) -> int:
+        """1 モータ分の電流指令を決め、同じ周期の観測を記録する。
+
+        制御と記録を同じ場所に置くのは、「どの周期の指令がどの実測に対応するか」を
+        ずらさないため。別の場所で後から集め直すと、途絶や緊急停止で PID を reset
+        した後の値を読むことになり、飽和していた周期が飽和していないと記録される。
+        """
+        output, closed_loop = self._control_output(name, axis, dt, stale=stale, blocked=blocked)
+
+        axis.last_output = output
+        axis.saturated = closed_loop and self._is_saturated(axis, output)
+        # 位置制御が閉じている周期だけがステップ応答として意味を持つ。開ループの
+        # 電流指令 (ホーミングの押し当て) や途絶中を混ぜると、ゲインと無関係な
+        # 波形が「応答」として記録される
+        self._record(axis, now, target=axis.target if closed_loop else None)
+        return round(output)
+
+    @staticmethod
+    def _is_saturated(axis: _Axis, output: float) -> bool:
+        # 出力レンジの端に届いているかを、レンジ幅に対する相対誤差ではなく
+        # 絶対値の近さで見る。C620 の指令は整数 counts なので 1 counts 未満の
+        # 差は指令として区別できない
+        return output >= axis.pid.output_max - 1.0 or output <= axis.pid.output_min + 1.0
+
+    def _record(self, axis: _Axis, now: float, *, target: float | None) -> None:
+        if axis.recorder is None:
+            return
+        capture = axis.recorder.record(
+            now,
+            target=target,
+            position=axis.driver.multi_turn_position,
+            output=axis.last_output,
+            saturated=axis.saturated,
+        )
+        if capture is not None:
+            self._pending_captures.append(capture)
+
+    def _control_output(
+        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool
+    ) -> tuple[float, bool]:
+        """電流指令 [counts] と、それが位置制御ループの出力かどうかを返す。"""
         if axis.target is None or axis.mode is None:
-            return 0
+            return 0.0, False
 
         if stale:
             if not axis.stale:
@@ -489,7 +605,7 @@ class M3508PositionLoop(PausablePeriodicTask):
                 )
             # 古い実測値のまま PID を回すと偏差が実態から外れて暴走する
             axis.pid.reset()
-            return 0
+            return 0.0, False
 
         if axis.stale:
             axis.stale = False
@@ -499,18 +615,44 @@ class M3508PositionLoop(PausablePeriodicTask):
             # 自分は健全でも、同じ機構に直結した相方が止まっている (途絶 or 偏差超過)。
             # 目標は残したまま力だけ抜く (復帰時に保持位置を作り直さずに済む)
             axis.pid.reset()
-            return 0
+            return 0.0, False
 
         if axis.mode is ControlMode.CURRENT:
-            return round(axis.target)
+            return float(axis.target), False
 
-        return round(axis.pid.update(axis.target, axis.driver.multi_turn_position, dt))
+        return axis.pid.update(axis.target, axis.driver.multi_turn_position, dt), True
 
     def _disable_all(self) -> None:
         for axis in self._axes.values():
             axis.mode = None
             axis.target = None
             axis.pid.reset()
+            axis.last_output = 0.0
+            axis.saturated = False
+        self._abort_recording()
+
+    def _abort_recording(self, names: tuple[str, ...] | None = None) -> None:
+        """記録中の窓を捨てる。
+
+        **応答の意味が変わる事象では必ず呼ぶ。** 途中で電流 0 に落とされた波形を
+        残すと「行き過ぎもせず整定もしない応答」として記録され、操縦者はゲインが
+        悪いのだと読む。溜まっていた完成品も一緒に捨てるのは、同じ理由で
+        「配る価値のある記録かどうか」がこの時点で分からなくなるため。
+        """
+        for name in names if names is not None else tuple(self._axes):
+            recorder = self._axes[name].recorder
+            if recorder is not None:
+                recorder.abort()
+        if names is None:
+            self._pending_captures.clear()
+
+    def _flush_captures(self) -> None:
+        if self._capture_sink is None:
+            self._pending_captures.clear()
+            return
+        for capture in self._pending_captures:
+            self._capture_sink(capture)
+        self._pending_captures.clear()
 
     async def _send(self, currents: list[int]) -> None:
         await self._can_manager.send_to_bus(

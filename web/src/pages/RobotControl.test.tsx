@@ -10,6 +10,7 @@ import type {
   SequenceStepInfo,
 } from "@/lib/protocol";
 import { RobotControl } from "@/pages/RobotControl";
+import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
 // ステップ一覧は現在地を画面内へ送るために scrollIntoView を呼ぶが、jsdom は
@@ -34,7 +35,7 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
     waiting_trigger: false,
     running: false,
     steps: STEPS,
-    motors: { rotate_l: { pos: 0, vel: 0, torque: 0, temp: 30, pid: null } },
+    motors: { rotate_l: motorState() },
     health: {
       timestamp: 0,
       overall: "ok",

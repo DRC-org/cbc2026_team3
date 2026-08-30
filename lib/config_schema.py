@@ -77,9 +77,10 @@ CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     }
 )
 
-_SYSTEM_KEYS = frozenset({"can_buses", "health", "match"})
+_SYSTEM_KEYS = frozenset({"can_buses", "health", "match", "tuning"})
 _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold")
 _MATCH_KEYS = frozenset({"duration_s"})
+_TUNING_KEYS = frozenset({"enabled", "window_s", "pre_trigger_s", "min_step_deg", "max_points"})
 
 _ROBOT_KEYS = frozenset({"robot_name", "motors", "sensors"})
 _SENSOR_KEYS = frozenset({"bus", "can_id"})
@@ -100,7 +101,7 @@ _PID_KEYS = frozenset({"kp", "ki", "kd", "integral_limit", "dead_band", "output_
 
 # robot yaml から system.yaml へ移した共通設定。移動前の yaml をそのまま起動すると
 # 「書いたのに効かない」状態になるため、残っていたら移動先を示して拒否する
-_MOVED_TO_SYSTEM = frozenset({"health", "can_buses", "match"})
+_MOVED_TO_SYSTEM = frozenset({"health", "can_buses", "match", "tuning"})
 
 
 @dataclass(frozen=True)
@@ -131,12 +132,39 @@ class MatchSettings:
 
 
 @dataclass(frozen=True)
+class TuningSettings:
+    """PID 調整支援 (ステップ応答の記録) の設定。
+
+    記録器は PC 側 PID を持つモータ、すなわち M3508 の位置制御ループにしか無く、
+    しかも 1 台の PC に 1 組しか存在しない。ロボットごとの yaml に書けると
+    「メインハンドは 3 秒・サブハンドは 5 秒」という、読み込み側が片方しか
+    採用できない設定が書けてしまう (health / match と同じ理由で system.yaml)。
+
+    ``health`` の 4 値と同じく**必ず 1 組で運ぶ**。バラの引数に分解すると、
+    一部だけ配線した経路が作れて残りが黙って既定値のまま効く。
+    """
+
+    #: 記録そのものの有無。切ると波形も指標も出ない (機体の動作には影響しない)
+    enabled: bool = True
+    #: ステップ 1 回あたりの記録長 [s]。整定まで含められる長さにする
+    window_s: float = 3.0
+    #: ステップ直前も残す長さ [s]。静止していたか既に動いていたかで応答の読み方が変わる
+    pre_trigger_s: float = 0.2
+    #: これ以上目標が動いたらステップとみなす [deg] (モータの累積角。軸の単位ではない)。
+    #: 小さすぎると微小な揺れで窓が開き続け、大きすぎるとジョグ 1 目盛を取りこぼす
+    min_step_deg: float = 0.5
+    #: 配信する波形の最大点数。解析は常に全点で行い、間引くのは表示だけ
+    max_points: int = 300
+
+
+@dataclass(frozen=True)
 class SystemConfig:
     """両ロボットで共有する設定 (config/system.yaml)。"""
 
     can_buses: Mapping[str, str]
     health: HealthThresholds
     match: MatchSettings
+    tuning: TuningSettings
     source: str = "<inline>"
 
 
@@ -209,6 +237,7 @@ class RobotConfig:
 
 DEFAULT_HEALTH = HealthThresholds()
 DEFAULT_MATCH = MatchSettings()
+DEFAULT_TUNING = TuningSettings()
 
 
 def _require_mapping(source: str, path: str, raw: object) -> dict:
@@ -318,6 +347,40 @@ def _parse_match(source: str, raw: object) -> MatchSettings:
     return MatchSettings(duration_s=duration)
 
 
+def _parse_tuning(source: str, raw: object) -> TuningSettings:
+    if raw is None:
+        return TuningSettings()
+    section = _require_mapping(source, "tuning", raw)
+    _reject_unknown(source, "tuning", section, _TUNING_KEYS)
+
+    defaults = TuningSettings()
+    enabled = section.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError(f"{source}: tuning.enabled は真偽値である必要があります: {enabled!r}")
+
+    values: dict[str, float] = {}
+    for key in ("window_s", "pre_trigger_s", "min_step_deg", "max_points"):
+        value = section.get(key)
+        if value is None:
+            continue
+        number = _number(source, f"tuning.{key}", value)
+        # 0 以下だと記録が成立しない。黙って既定値へ倒すと「設定したのに効かない」
+        # 状態になり、波形が出ない原因が config から読めなくなる
+        if number <= 0 and key != "pre_trigger_s":
+            raise ValueError(f"{source}: tuning.{key} は正の値である必要があります: {value!r}")
+        if number < 0:
+            raise ValueError(f"{source}: tuning.{key} は 0 以上である必要があります: {value!r}")
+        values[key] = number
+
+    return TuningSettings(
+        enabled=defaults.enabled if enabled is None else enabled,
+        window_s=values.get("window_s", defaults.window_s),
+        pre_trigger_s=values.get("pre_trigger_s", defaults.pre_trigger_s),
+        min_step_deg=values.get("min_step_deg", defaults.min_step_deg),
+        max_points=int(values.get("max_points", defaults.max_points)),
+    )
+
+
 def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> SystemConfig:
     """両ロボット共通の設定 yaml を検証して読み込む。"""
     raw = _require_mapping(source, "(最上位)", config)
@@ -327,6 +390,7 @@ def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> S
         can_buses=MappingProxyType(_parse_can_buses(source, raw.get("can_buses"))),
         health=_parse_health(source, raw.get("health")),
         match=_parse_match(source, raw.get("match")),
+        tuning=_parse_tuning(source, raw.get("tuning")),
         source=source,
     )
 

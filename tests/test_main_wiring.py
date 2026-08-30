@@ -25,7 +25,13 @@ import yaml
 
 import main
 from lib.axis_sync import MotorSpec, SyncGroup
-from lib.config_schema import MotorConfig, RobotConfig, SystemConfig, load_robot_config
+from lib.config_schema import (
+    MotorConfig,
+    RobotConfig,
+    SystemConfig,
+    TuningSettings,
+    load_robot_config,
+)
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -324,6 +330,72 @@ class TestBuildPositionLoops:
         await lenient.set_target("lift_motor", ControlMode.POSITION, 100.0)
         await lenient.step()
         assert manager.last_currents[0] != 0
+
+    async def test_tuning_settings_reach_the_loop(self) -> None:
+        """config の tuning が届かないと、波形が 1 本も出ない。
+
+        既定を「記録しない」に倒してあるぶん、配線漏れは例外ではなく沈黙として
+        現れる。ここで通し 1 回ぶんを実際に閉じさせて、経路が生きていることを見る。
+        """
+        config = {
+            "robot_name": "main_hand",
+            "motors": {"lift_motor": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}},
+        }
+        driver = M3508Driver("lift_motor", can_id=1)
+        manager = _StubCANManager()
+        _feed(driver, 0.0)
+        manager.feedback_at["lift_motor"] = time.time()
+        captures: list[object] = []
+
+        loop = _build_position_loops(
+            _robot(config),
+            manager,
+            {"lift_motor": driver},
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            tuning=TuningSettings(
+                enabled=True,
+                window_s=0.02,
+                pre_trigger_s=0.0,
+                min_step_deg=0.5,
+                max_points=300,
+            ),
+            capture_sink=captures.append,
+        )["m3508_bus"]
+
+        await loop.set_target("lift_motor", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            manager.feedback_at["lift_motor"] = time.time()
+            await loop.step()
+
+        assert captures
+
+    async def test_no_recording_without_tuning_settings(self) -> None:
+        config = {
+            "robot_name": "main_hand",
+            "motors": {"lift_motor": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}},
+        }
+        driver = M3508Driver("lift_motor", can_id=1)
+        manager = _StubCANManager()
+        _feed(driver, 0.0)
+        manager.feedback_at["lift_motor"] = time.time()
+        captures: list[object] = []
+
+        loop = _build_position_loops(
+            _robot(config),
+            manager,
+            {"lift_motor": driver},
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            capture_sink=captures.append,
+        )["m3508_bus"]
+
+        await loop.set_target("lift_motor", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            manager.feedback_at["lift_motor"] = time.time()
+            await loop.step()
+
+        assert captures == []
 
 
 class TestWireRobotMotors:

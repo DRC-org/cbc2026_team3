@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import struct
 
 import can
 import pytest
 
 from lib.axis_sync import MotorSpec, SyncGroup
+from lib.config_schema import TuningSettings
 from lib.control.pid import PIDController
 from lib.control.position_loop import (
     DEFAULT_INTERVAL_S,
@@ -16,6 +18,7 @@ from lib.control.position_loop import (
 )
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
+from lib.tuning.recorder import Capture
 from tests.fake_clock import FakeClock
 from tests.feedback_frames import feed_m3508, m3508_counts_for_deg
 
@@ -63,16 +66,21 @@ class _Fixture:
         ki: float = 0.0,
         estop: bool = False,
         feedback_timeout_ms: float = 500.0,
+        tuning: TuningSettings | None = None,
     ) -> None:
         self.mono = FakeClock()
         self.wall = FakeClock(start=5000.0)
         self.manager = _StubCANManager()
         self.estop = estop
+        #: capture_sink が受け取った記録。記録を有効にしたテストだけが使う
+        self.captures: list[Capture] = []
         self.loop = M3508PositionLoop(
             self.manager,
             BUS,
             feedback_timeout_ms=feedback_timeout_ms,
             is_estop_active=lambda: self.estop,
+            tuning=tuning,
+            capture_sink=self.captures.append,
             time_source=self.mono,
             feedback_clock=self.wall,
         )
@@ -885,3 +893,226 @@ class TestGroupOrigin:
 
         assert fx.loop.target("lift") is None
         assert fx.loop.target("tilt") == pytest.approx(10.0)
+
+
+# 記録用の設定。窓を短くしてテストの周期数を抑える (制御周期 5ms が 10 回で 50ms)
+RECORDING = TuningSettings(
+    enabled=True, window_s=0.05, pre_trigger_s=0.01, min_step_deg=0.5, max_points=300
+)
+
+
+def _max_gap(capture: Capture) -> float:
+    """記録内の最大時間差。連続していない波形を炙り出すために使う。
+
+    「捨てたか」を件数で見ると、捨て損ねた窓がたまたま閉じないだけのケースを
+    緑にしてしまう。見るべきは**時間が飛んだ波形が残っていないこと**そのもの。
+    """
+    times = [s.t for s in capture.samples]
+    return max((b - a for a, b in itertools.pairwise(times)), default=0.0)
+
+
+class TestStepRecording:
+    """PID 調整支援のためのステップ応答記録。
+
+    **記録は制御に一切影響してはならない**ことと、**意味の変わった記録を残さない**
+    ことの 2 つを見る。後者を外すと、途中で電流 0 に落とされた波形が
+    「行き過ぎもせず整定もしない応答」として画面に出て、操縦者はゲインが悪いと読む。
+    """
+
+    async def test_recording_is_off_without_tuning_settings(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            await fx.tick()
+        assert fx.captures == []
+
+    async def test_target_step_produces_a_capture(self) -> None:
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            await fx.tick()
+
+        assert [c.motor for c in fx.captures] == ["lift"]
+        assert len(fx.captures[0].samples) > 1
+
+    async def test_capture_records_the_gains_in_effect(self) -> None:
+        """波形とゲインの対応が崩れると、届いた記録が新旧どちらのものか分からない。"""
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            await fx.tick()
+
+        assert fx.captures[0].gains.kp == pytest.approx(100.0)
+
+    async def test_open_loop_current_command_is_not_recorded(self) -> None:
+        """ホーミングの押し当てはゲインと無関係。応答として残すと誤読される。"""
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.CURRENT, 500.0)
+        for _ in range(20):
+            await fx.tick()
+        assert fx.captures == []
+
+    async def test_stale_feedback_discards_the_window(self) -> None:
+        fx = _Fixture(kp=100.0, tuning=RECORDING, feedback_timeout_ms=20.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            await fx.tick()
+        assert fx.captures == []
+
+    async def test_e_stop_does_not_leave_a_window_spanning_the_stop(self) -> None:
+        """緊急停止をまたいだ波形を 1 本に綴じてはならない。
+
+        停止中は記録関数そのものが呼ばれないので、窓を捨てずに残すと**時間の
+        飛んだ波形**ができる。解除後に同じ目標で動かした場合はステップとしても
+        検出されないため、停止前後が地続きの 1 回の応答として解析される。
+        """
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(4):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        fx.estop = True
+        for _ in range(10):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        fx.estop = False
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        for capture in fx.captures:
+            assert _max_gap(capture) <= 3 * DEFAULT_INTERVAL_S
+
+    async def test_pause_does_not_leave_a_window_spanning_the_pause(self) -> None:
+        """動作確認が同じバスを握っている間の動きは、このループの指令ではない。"""
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(4):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        await fx.loop.pause()
+        for _ in range(10):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        fx.loop.resume()
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        for capture in fx.captures:
+            assert _max_gap(capture) <= 3 * DEFAULT_INTERVAL_S
+
+    async def test_gain_change_discards_the_window(self) -> None:
+        """前半が旧ゲイン・後半が新ゲインの波形はどちらの結果でもない。
+        しかも送信直後に届くので、操縦者は新しいゲインの応答だと読む。"""
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(4):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        fx.loop.set_pid_gains("lift", {"kp": 5.0})
+        for _ in range(20):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        # 差し替え後に開いた窓しか残らない = 記録されたゲインは新しい方
+        assert all(c.gains.kp == pytest.approx(5.0) for c in fx.captures)
+
+    async def test_clear_target_discards_the_window(self) -> None:
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(4):
+            await fx.tick()
+
+        fx.loop.clear_target("lift")
+        for _ in range(20):
+            await fx.tick()
+
+        assert fx.captures == []
+
+    async def test_restarting_the_loop_does_not_join_windows(self) -> None:
+        """停止していた間の動きは記録できていない。窓を持ち越すと時間の飛んだ波形になる。"""
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(4):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        # 停止と再起動を挟む (シーケンス切替や再接続で起きる)
+        fx.mono.advance(5.0)
+        fx.wall.advance(5.0)
+        await fx.loop._on_run_start()
+
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            fx.feed("lift", 1.0)
+            await fx.tick()
+
+        for capture in fx.captures:
+            assert _max_gap(capture) <= 3 * DEFAULT_INTERVAL_S
+
+    async def test_paired_motors_are_recorded_separately(self) -> None:
+        """左右で追従が違うことを見るのが調整の目的なので、束ねてはならない。"""
+        fx = _Fixture(kp=100.0, tuning=RECORDING)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        await fx.loop.set_target("tilt", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            await fx.tick()
+
+        assert sorted(c.motor for c in fx.captures) == ["lift", "tilt"]
+
+    async def test_recording_does_not_change_the_command(self) -> None:
+        """記録は制御に一切影響してはならない。"""
+        plain = _Fixture(kp=100.0)
+        recorded = _Fixture(kp=100.0, tuning=RECORDING)
+        for fx in (plain, recorded):
+            await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+            await fx.tick()
+
+        assert plain.manager.last_currents == recorded.manager.last_currents
+
+
+class TestSaturationReadout:
+    """飽和の可視化。ゲインを変えても応答が変わらない理由が画面から読めるようにする。"""
+
+    async def test_saturated_when_output_hits_the_limit(self) -> None:
+        fx = _Fixture(kp=100000.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        await fx.tick()
+        assert fx.loop.is_saturated("lift") is True
+
+    async def test_not_saturated_in_the_normal_range(self) -> None:
+        fx = _Fixture(kp=1.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 1.0)
+        await fx.tick()
+        assert fx.loop.is_saturated("lift") is False
+
+    async def test_not_saturated_without_a_target(self) -> None:
+        """目標を持たない周期の 0 出力を「下限に張り付いている」と読んではならない。"""
+        fx = _Fixture(kp=100.0)
+        await fx.tick()
+        assert fx.loop.is_saturated("lift") is False
+
+    async def test_saturation_clears_on_e_stop(self) -> None:
+        fx = _Fixture(kp=100000.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        await fx.tick()
+
+        fx.estop = True
+        await fx.tick()
+
+        assert fx.loop.is_saturated("lift") is False
+        assert fx.loop.last_output("lift") == pytest.approx(0.0)
+
+    async def test_last_output_is_the_pid_command(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+        await fx.tick()
+        assert fx.loop.last_output("lift") == pytest.approx(1000.0)

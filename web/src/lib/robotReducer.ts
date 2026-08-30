@@ -5,6 +5,7 @@ import type {
   RobotState,
   ServerInfo,
   ServerMessage,
+  TuningCapture,
 } from "@/lib/protocol";
 import type { EpochMs } from "@/lib/time";
 
@@ -49,6 +50,19 @@ export interface RobotUiState {
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
+  /**
+   * モータごとのステップ応答。キーは `robot/motor`、**新しい順で最大 2 件**。
+   *
+   * 2 件持つのは、調整が「変える前より良くなったか」を判断する作業だからで、
+   * 最新の 1 件だけだと操縦者は前回の数字を記憶に頼って比べることになる。
+   * 3 件以上は画面に出す場所が無く、持っても読まれないまま容量だけ増える。
+   */
+  tuningCaptures: Record<string, TuningCapture[]>;
+}
+
+/** `tuningCaptures` のキー。モータ名はロボット横断に一意だが、画面はロボットで分ける */
+export function tuningKey(robot: string, motor: string): string {
+  return `${robot}/${motor}`;
 }
 
 export type RobotAction =
@@ -108,10 +122,14 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   matchState: INITIAL_MATCH_STATE,
   serverInfo: INITIAL_SERVER_INFO,
   rejection: null,
+  tuningCaptures: {},
 };
 
 // 直近警告のフラッシュ表示用にのみ保持。長期履歴は不要なので少量で十分
 const HEALTH_EVENT_BUFFER = 5;
+
+// 1 モータあたりに残す応答の数。最新と直前の 1 件で「良くなったか」に答えられる
+const TUNING_CAPTURE_BUFFER = 2;
 
 function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochMs): RobotUiState {
   switch (message.type) {
@@ -162,6 +180,20 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
       // 進捗を UI 側で組み立てると、1 通落としたときに画面だけが古い状態で
       // 固まり、再送も無いのでリロードするまで直らない
       return { ...state, motorCheck: message.motorCheck };
+
+    case "tuning_capture": {
+      const key = tuningKey(message.capture.robot, message.capture.motor);
+      // 新しい順。触るのはこのモータのぶんだけで、他のモータの配列は
+      // 参照ごと据え置く (グラフの再描画を無関係な記録で起こさない)
+      const next = [message.capture, ...(state.tuningCaptures[key] ?? [])];
+      return {
+        ...state,
+        tuningCaptures: {
+          ...state.tuningCaptures,
+          [key]: next.length > TUNING_CAPTURE_BUFFER ? next.slice(0, TUNING_CAPTURE_BUFFER) : next,
+        },
+      };
+    }
   }
 }
 

@@ -280,4 +280,65 @@ describe("parseServerMessage", () => {
       expect(message.motorCheck.steps).toEqual([]);
     });
   });
+
+  describe("tuning_capture", () => {
+    const payload = (overrides: object = {}) => ({
+      type: "tuning_capture",
+      robot: "main_hand",
+      motor: "y_axis_r",
+      captured_at: 1700000000,
+      gains: { kp: 2, ki: 0, kd: 0 },
+      metrics: null,
+      advice: [],
+      samples: { t: [0, 1], target: [10, 10], pos: [0, 9], output: [500, 100], sat: [true, false] },
+      ...overrides,
+    });
+
+    it("波形・指標・助言を 1 通で受け取る", () => {
+      const message = parse(
+        payload({
+          metrics: { overshoot_pct: 12 },
+          advice: [{ code: "overshoot", severity: "info", message: "行き過ぎ" }],
+        }),
+      );
+
+      expect(message?.type).toBe("tuning_capture");
+      if (message?.type !== "tuning_capture") return;
+      expect(message.capture.samples.pos).toEqual([0, 9]);
+      expect(message.capture.metrics).not.toBeNull();
+      expect(message.capture.advice).toHaveLength(1);
+    });
+
+    it("指標が null の記録も受け取る", () => {
+      /** 弾いてしまうと、波形だけは見たい場面で画面に何も出ない */
+      const message = parse(payload());
+
+      expect(message?.type).toBe("tuning_capture");
+      if (message?.type !== "tuning_capture") return;
+      expect(message.capture.metrics).toBeNull();
+    });
+
+    it("列の長さが揃っていない波形は捨てる", () => {
+      /**
+       * 揃っていない列を描くと、`t` の長さでループした先で `pos` が undefined になり、
+       * 例外も出ないままグラフだけが静かに途切れる。
+       */
+      const message = parse(
+        payload({
+          samples: { t: [0, 1], target: [10], pos: [0, 9], output: [1, 1], sat: [false] },
+        }),
+      );
+
+      expect(message).toBeNull();
+    });
+
+    it("波形そのものが欠けていたら捨てる", () => {
+      expect(parse(payload({ samples: undefined }))).toBeNull();
+    });
+
+    it("robot が無ければ捨てる", () => {
+      /** 画面はロボットごとに分けて出すので、宛先の無い記録は置き場所が無い */
+      expect(parse(payload({ robot: undefined }))).toBeNull();
+    });
+  });
 });

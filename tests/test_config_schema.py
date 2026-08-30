@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -76,6 +77,58 @@ class TestSystemConfig:
         )
 
         assert config.match.duration_s == 120.0
+
+    def test_tuning_defaults_when_section_is_absent(self) -> None:
+        config = load_system_config({"can_buses": {"a_bus": "can_a"}}, source="system.yaml")
+
+        assert config.tuning.enabled is True
+        assert config.tuning.window_s == 3.0
+
+    def test_tuning_values_are_read_from_yaml(self) -> None:
+        config = load_system_config(
+            {
+                "can_buses": {"a_bus": "can_a"},
+                "tuning": {
+                    "enabled": False,
+                    "window_s": 5.0,
+                    "pre_trigger_s": 0.5,
+                    "min_step_deg": 2.0,
+                    "max_points": 120,
+                },
+            },
+            source="system.yaml",
+        )
+
+        assert config.tuning.enabled is False
+        assert config.tuning.window_s == 5.0
+        assert config.tuning.pre_trigger_s == 0.5
+        assert config.tuning.min_step_deg == 2.0
+        assert config.tuning.max_points == 120
+
+    def test_unknown_tuning_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sample_rate"):
+            load_system_config(
+                {"can_buses": {"a_bus": "can_a"}, "tuning": {"sample_rate": 200}},
+                source="system.yaml",
+            )
+
+    @pytest.mark.parametrize("key", ["window_s", "min_step_deg", "max_points"])
+    def test_non_positive_tuning_value_is_rejected(self, key: str) -> None:
+        """黙って既定値へ倒すと「設定したのに効かない」状態になり、
+        波形が出ない原因が config から読めなくなる。"""
+        with pytest.raises(ValueError, match=rf"tuning\.{re.escape(key)}"):
+            load_system_config(
+                {"can_buses": {"a_bus": "can_a"}, "tuning": {key: 0}},
+                source="system.yaml",
+            )
+
+    def test_tuning_in_robot_yaml_is_rejected(self) -> None:
+        """ロボットごとに書けると、読み込み側が片方しか採用できない設定になる。"""
+        with pytest.raises(ValueError, match=r"system\.yaml"):
+            load_robot_config(
+                {"robot_name": "main_hand", "motors": {}, "tuning": {"window_s": 1.0}},
+                source="main_hand.yaml",
+            )
 
     def test_unknown_match_key_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="countdown"):
