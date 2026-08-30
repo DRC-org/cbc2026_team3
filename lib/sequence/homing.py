@@ -25,7 +25,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from lib.sequence.motors import AxisHandle
-from lib.sequence.positions import AxisSpec, HomingSpec
+from lib.sequence.positions import AxisSpec
 
 logger = logging.getLogger(__name__)
 
