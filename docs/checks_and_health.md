@@ -118,6 +118,32 @@ SocketCAN の `restart-ms` は**ドライバが `do_set_mode` を実装してい
 戻れば表示も戻る。**自動復帰が要るなら、カーネルではなく userspace で
 （bus-off を検出して `down`/`up` する常駐）用意するしかない。**
 
+### 実測: CANable2 は bus-off を報告しないし、自動復帰もしない
+
+2026-08-30 に `can_edulite`（CANable2 / STM32G431・`clock 170000000` = FDCAN）を
+**CAN 側に何も繋がない状態**で up し、`cangen` で ACK の返らないフレームを送って確認した。
+
+- 送信は数通で**完全に停止する**（TX packets が増えず、`tc -s qdisc` の backlog が減らない）
+- **30 秒待っても復帰しない。** ABOM 相当の自動復帰は無い。bxCAN 版の candleLight は
+  `can_init()` で `CAN_MCR_ABOM` を立てるので自動復帰するが、CANable2 は FDCAN で、
+  bus-off では `CCCR.INIT` がセットされたままホストの明示的な復帰要求を待つ。ファーム上流
+  （`candle-usb/candleLight_fw` の `src/can/m_can.c`）は `GS_CAN_FEATURE_BUS_OFF_RECOVERY`
+  を申告するが、**カーネル 7.0 の `gs_usb` はこの feature を知らない**（実装は
+  `GS_CAN_FEATURE_GET_STATE` = BIT(13) まで）
+- **`down` → `up`（＝ `scripts/setup_can.sh` の再実行）で確実に復旧する。** 再現性あり
+- **PC 側からは状態が一切見えない**:
+  - `can state` は落ちている間も **`ERROR-ACTIVE` のまま**。`bus-off` / `error-warn` /
+    `error-pass` / `bus-errors` のカウンタも全部 0 のまま
+  - エラーフレームが 1 通も届かない
+  - `berr-reporting` は `requested control mode BERR-REPORTING not supported` で有効化できず、
+    `GET_STATE` も未対応（`ip -details -s link show` に `txerr`/`rxerr` が出ない）
+
+**したがって `_handle_error_frame()` の bus-off 検出は、この実機構成では発火しない。**
+`30863fd` は「bus-off を立てる経路が存在しなかった」ことを直したが、アダプタが
+エラーフレームを送らない以上、経路は依然として無い。実機で bus-off が現れるのは
+**送信の失敗**（`tx_error_count` と送信スコア）と **qdisc の滞留**だけである。
+自動復旧を作るなら、検出条件はエラーフレームではなくこの 2 つに置くこと。
+
 ### 「励磁されていない」はヘルスに現れない
 
 DM3520 は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの通信途絶保護や
