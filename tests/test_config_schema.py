@@ -562,7 +562,7 @@ class TestShippedConfigs:
 
 
 #: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
-_BENCH_DIRS = ("m3508", "dc", "servo", "solenoid", "dm3520")
+_BENCH_DIRS = ("m3508", "edulite", "dc", "servo", "solenoid", "dm3520")
 
 
 class TestShippedBenchConfigs:
@@ -574,7 +574,7 @@ class TestShippedBenchConfigs:
     「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
     始める余裕は無い。
 
-    5 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
+    6 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
     見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
     """
 

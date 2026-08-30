@@ -1,0 +1,34 @@
+# RobStride EDULITE 05 単体ベンチ (機構未装着) 用の共通設定。
+#
+# 本番の config/system.yaml との違いは can_buses だけで、health / match は同一値を持つ。
+# main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で open する
+# ため、本番の 4 本構成のままでは挿していない CANable のぶんが [Errno 19] No such device
+# となり、起動そのものが失敗する。
+#
+# ここを edulite_bus だけに絞ることで CANable 1 本 (can_edulite) だけで起動でき、
+# 相手のいない実バスへ 20Hz 再送して TX エラーを積み上げることも無くなる。
+#
+# **can_edulite は実機でも自作モタドラ (can_generic) とは別のバス。** 本機は 29bit 拡張
+# フレーム専用で ID 空間は分かれるが、それは「相手のファームが拡張フレームを確実に
+# 無視する」というマニュアルに無い前提に寄りかかるので相乗りさせない
+# (詳細は CLAUDE.md の「知っておくべき設計上の制約」)。
+#
+# 使い方:
+#   scripts/setup_can.sh
+#   uv run python main.py --system config/bench/edulite/system.yaml \
+#       --config config/bench/edulite/main_hand.yaml \
+#       --checklist config/bench/edulite/checklist.yaml
+
+can_buses:
+  edulite_bus: can_edulite
+
+# 以下 2 ブロックは本番 config/system.yaml と同値。ベンチだけ判定基準を変えると
+# 「机上では OK なのに実運用で警告が出る」ことになり、確認の意味が薄れる。
+health:
+  feedback_timeout_ms: 500
+  temp_warning_c: 65
+  temp_critical_c: 80
+  tx_error_threshold: 96
+
+match:
+  duration_s: 180
