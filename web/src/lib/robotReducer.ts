@@ -1,20 +1,18 @@
 import type {
-  CheckRunSnapshot,
   HealthChange,
   MatchState,
-  MotorCheckRecord,
+  MotorCheckSnapshot,
   RobotState,
   ServerInfo,
   ServerMessage,
 } from "@/lib/protocol";
 import type { EpochMs } from "@/lib/time";
-import { epochSecondsToMs } from "@/lib/time";
 
 /**
  * WS 受信から UI 状態への遷移。**純関数**なので接続を張らずに検証できる。
  *
  * 触っていない領域は参照ごと据え置くこと。20Hz × 2 台の `state` 配信で
- * `matchState` や `motorChecks` の参照まで作り直すと、それらを読むだけの画面
+ * `matchState` や `motorCheck` の参照まで作り直すと、それらを読むだけの画面
  * (チェックリスト・タブ・トースト) が毎秒 40 回再描画される。
  */
 
@@ -34,29 +32,20 @@ export interface CommandRejectedEvent {
   source: "server" | "local";
 }
 
-export type MotorCheckStatus = "idle" | "running" | "completed" | "error";
-
-export interface MotorCheckState {
-  status: MotorCheckStatus;
-  current: string | null;
-  progress: { index: number; total: number } | null;
-  // 受信した record を時系列で。同じ motor の重複は最新で上書き
-  records: MotorCheckRecord[];
-  snapshot: CheckRunSnapshot | null;
-  error: string | null;
-  // 受信境界で ms へ正規化する。ワイヤの started_at/finished_at は秒なので、
-  // フィールド名で単位を分けないと `new Date()` へ秒が渡って 1970 年になる
-  startedAtMs: EpochMs | null;
-  finishedAtMs: EpochMs | null;
-}
-
 export interface RobotUiState {
   states: Record<string, RobotState>;
   eStopActive: boolean;
   /** 直近の緊急停止の理由。操縦者コマンドによる停止など、理由が無い場合は null */
   eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
-  motorChecks: Record<string, MotorCheckState>;
+  /**
+   * 統合動作確認の状態。**両ハンドで 1 つ**なので Record ではない。
+   *
+   * サーバーが組み立てた 1 通をそのまま持つ。UI 側で進捗を継ぎ足して状態を
+   * 作らないのは、途中の 1 通を落としたときに画面と機体が食い違ったまま
+   * 復旧しなくなるため (再送も無いのでリロードするまで直らない)。
+   */
+  motorCheck: MotorCheckSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -70,17 +59,23 @@ export type RobotAction =
   | { type: "command_unsent"; command: string; reason: string; nowMs: EpochMs }
   | { type: "clear_rejection" };
 
-/** 未実行の初期値。UI 側 (`useMotorCheck` / テストヘルパ) も必ずこれを使う */
-export function emptyMotorCheckState(): MotorCheckState {
+/**
+ * 受信前の初期値。UI 側 (`useMotorCheck` / テストヘルパ) も必ずこれを使う。
+ *
+ * **`available: false` から始める。** 「起動できる」へ倒すと、配信が届く前の
+ * 一瞬だけ押せるボタンが出る。押しても拒否されるだけだが、操縦者には
+ * 「押したのに何も起きない」としか見えない。
+ */
+export function emptyMotorCheckState(): MotorCheckSnapshot {
   return {
-    status: "idle",
-    current: null,
-    progress: null,
-    records: [],
-    snapshot: null,
+    available: false,
+    blocked_reason: "サーバーから動作確認の状態を受信していません",
+    running: false,
+    current_step: null,
+    step_index: 0,
+    total_steps: 0,
+    steps: [],
     error: null,
-    startedAtMs: null,
-    finishedAtMs: null,
   };
 }
 
@@ -102,7 +97,7 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   eStopActive: false,
   eStopReason: null,
   healthEvents: [],
-  motorChecks: {},
+  motorCheck: emptyMotorCheckState(),
   matchState: INITIAL_MATCH_STATE,
   serverInfo: INITIAL_SERVER_INFO,
   rejection: null,
@@ -110,25 +105,6 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
 
 // 直近警告のフラッシュ表示用にのみ保持。長期履歴は不要なので少量で十分
 const HEALTH_EVENT_BUFFER = 5;
-
-// motor 名で重複した record を最新で上書きしつつ、初出は末尾に追加して順序を保つ
-function mergeRecord(records: MotorCheckRecord[], next: MotorCheckRecord): MotorCheckRecord[] {
-  const idx = records.findIndex((r) => r.motor === next.motor);
-  if (idx === -1) return [...records, next];
-  const copy = records.slice();
-  copy[idx] = next;
-  return copy;
-}
-
-/** 1 ロボットぶんの動作確認状態だけを差し替える。他ロボットの参照は据え置く */
-function patchCheck(
-  state: RobotUiState,
-  robot: string,
-  patch: (base: MotorCheckState) => MotorCheckState,
-): RobotUiState {
-  const base = state.motorChecks[robot] ?? emptyMotorCheckState();
-  return { ...state, motorChecks: { ...state.motorChecks, [robot]: patch(base) } };
-}
 
 function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochMs): RobotUiState {
   switch (message.type) {
@@ -174,53 +150,11 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
       };
     }
 
-    case "motor_check_progress":
-      return patchCheck(state, message.robot, (base) => ({
-        ...base,
-        status: "running",
-        current: message.current,
-        progress: { index: message.index, total: message.total },
-        error: null,
-        snapshot: null,
-        finishedAtMs: null,
-        // 進捗の最初を受け取った時点で開始時刻を確定する
-        startedAtMs: base.startedAtMs ?? nowMs,
-      }));
-
-    case "motor_check_record":
-      return patchCheck(state, message.robot, (base) => ({
-        ...base,
-        records: mergeRecord(base.records, message.record),
-      }));
-
-    case "motor_check_done":
-      return patchCheck(state, message.robot, (base) => ({
-        ...base,
-        status: "completed",
-        snapshot: message.snapshot,
-        // snapshot.records が正となる。途中受信との差分を埋めるため上書き
-        records: message.snapshot.records ?? base.records,
-        current: null,
-        error: null,
-        // ワイヤはエポック秒。ここで ms へ正規化し、以後 UI は ms しか触らない
-        startedAtMs:
-          message.snapshot.started_at === null || message.snapshot.started_at === undefined
-            ? base.startedAtMs
-            : epochSecondsToMs(message.snapshot.started_at),
-        finishedAtMs:
-          message.snapshot.finished_at === null || message.snapshot.finished_at === undefined
-            ? nowMs
-            : epochSecondsToMs(message.snapshot.finished_at),
-      }));
-
-    case "motor_check_error":
-      return patchCheck(state, message.robot, (base) => ({
-        ...base,
-        status: "error",
-        error: message.message,
-        current: null,
-        finishedAtMs: nowMs,
-      }));
+    case "motor_check_state":
+      // サーバーが組み立てた状態をそのまま置く。**ここで継ぎ足さない** —
+      // 進捗を UI 側で組み立てると、1 通落としたときに画面だけが古い状態で
+      // 固まり、再送も無いのでリロードするまで直らない
+      return { ...state, motorCheck: message.motorCheck };
   }
 }
 

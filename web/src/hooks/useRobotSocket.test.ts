@@ -2,24 +2,9 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useRobotSocket } from "@/hooks/useRobotSocket";
-import type { CheckRunSnapshot, MotorCheckRecord } from "@/lib/protocol";
 import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 
 const URL = "ws://test/ws";
-
-function record(motor: string, over: Partial<MotorCheckRecord> = {}): MotorCheckRecord {
-  return {
-    motor,
-    bus: "can0",
-    started_at: 1,
-    finished_at: 2,
-    result: "passed",
-    expected: 100,
-    observed: 100,
-    detail: null,
-    ...over,
-  };
-}
 
 /** 接続確立済みの hook を返す */
 function renderConnected() {
@@ -200,7 +185,7 @@ describe("match_state メッセージ", () => {
         court: "blue",
         phase: "match",
         can_start_match: true,
-        checklists: { main_hand: { items: [], completed: true } },
+        checklists: { pre_match: { items: [], completed: true } },
         timer: { running: true, elapsed_ms: 3_000, duration_ms: 180_000 },
       }),
     );
@@ -209,7 +194,7 @@ describe("match_state メッセージ", () => {
       court: "blue",
       phase: "match",
       can_start_match: true,
-      checklists: { main_hand: { items: [], completed: true } },
+      checklists: { pre_match: { items: [], completed: true } },
       timer: { running: true, elapsed_ms: 3_000, duration_ms: 180_000 },
     });
   });
@@ -294,118 +279,63 @@ describe("health_change メッセージ", () => {
   });
 });
 
-describe("motor_check_* メッセージ", () => {
-  it("progress で running になり進捗を持つ", () => {
+describe("motor_check_state メッセージ", () => {
+  it("サーバーが配った状態でまるごと置き換える", () => {
+    // **継ぎ足さない。** UI 側で進捗を組み立てると、1 通落としたときに画面だけが
+    // 古い状態で固まり、再送も無いのでリロードするまで直らない
     const { result } = renderConnected();
 
     act(() =>
       latestSocket().receive({
-        type: "motor_check_progress",
-        robot: "main_hand",
-        current: "lift",
-        index: 1,
-        total: 4,
+        type: "motor_check_state",
+        available: true,
+        blocked_reason: null,
+        running: true,
+        current_step: "サブハンド 電磁弁 6 個",
+        step_index: 4,
+        total_steps: 6,
+        steps: [],
+        error: null,
       }),
     );
 
-    const state = result.current.motorChecks.main_hand;
-    expect(state.status).toBe("running");
-    expect(state.current).toBe("lift");
-    expect(state.progress).toEqual({ index: 1, total: 4 });
-    expect(state.startedAtMs).not.toBeNull();
+    expect(result.current.motorCheck.running).toBe(true);
+    expect(result.current.motorCheck.step_index).toBe(4);
+    expect(result.current.motorCheck.current_step).toBe("サブハンド 電磁弁 6 個");
   });
 
-  it("progress を重ねても開始時刻は最初の値を保つ", () => {
-    const { result } = renderConnected();
-    const socket = latestSocket();
-
-    act(() =>
-      socket.receive({ type: "motor_check_progress", robot: "main_hand", index: 0, total: 2 }),
-    );
-    const startedAtMs = result.current.motorChecks.main_hand.startedAtMs;
-
-    act(() =>
-      socket.receive({ type: "motor_check_progress", robot: "main_hand", index: 1, total: 2 }),
-    );
-    expect(result.current.motorChecks.main_hand.startedAtMs).toBe(startedAtMs);
-  });
-
-  it("record は初出を末尾に追加し、同じモータは順序を保ったまま上書きする", () => {
-    const { result } = renderConnected();
-    const socket = latestSocket();
-
-    act(() =>
-      socket.receive({ type: "motor_check_record", robot: "main_hand", record: record("a") }),
-    );
-    act(() =>
-      socket.receive({ type: "motor_check_record", robot: "main_hand", record: record("b") }),
-    );
-    act(() =>
-      socket.receive({
-        type: "motor_check_record",
-        robot: "main_hand",
-        record: record("a", { result: "failed" }),
-      }),
-    );
-
-    const records = result.current.motorChecks.main_hand.records;
-    expect(records.map((r) => r.motor)).toEqual(["a", "b"]);
-    expect(records[0].result).toBe("failed");
-  });
-
-  it("done では snapshot の records を正として上書きする", () => {
-    const { result } = renderConnected();
-    const socket = latestSocket();
-
-    act(() =>
-      socket.receive({ type: "motor_check_record", robot: "main_hand", record: record("a") }),
-    );
-
-    const snapshot: CheckRunSnapshot = {
-      robot: "main_hand",
-      started_at: 10,
-      finished_at: 20,
-      overall: "partial",
-      records: [record("a", { result: "failed" }), record("z")],
-    };
-    act(() => socket.receive({ type: "motor_check_done", robot: "main_hand", snapshot }));
-
-    const state = result.current.motorChecks.main_hand;
-    expect(state.status).toBe("completed");
-    expect(state.current).toBeNull();
-    // ワイヤはエポック秒。UI 状態は ms へ正規化されている必要がある
-    expect(state.finishedAtMs).toBe(20_000);
-    expect(state.records.map((r) => r.motor)).toEqual(["a", "z"]);
-  });
-
-  it("error で status を error にしてメッセージを保持する", () => {
+  it("後から届いた状態が前の進捗を残さない", () => {
     const { result } = renderConnected();
 
     act(() =>
       latestSocket().receive({
-        type: "motor_check_error",
-        robot: "main_hand",
-        message: "CAN タイムアウト",
+        type: "motor_check_state",
+        available: true,
+        running: true,
+        current_step: "途中",
+        step_index: 2,
+        total_steps: 6,
+      }),
+    );
+    act(() =>
+      latestSocket().receive({
+        type: "motor_check_state",
+        available: true,
+        running: false,
+        error: "動作確認を中断しました",
       }),
     );
 
-    const state = result.current.motorChecks.main_hand;
-    expect(state.status).toBe("error");
-    expect(state.error).toBe("CAN タイムアウト");
-    expect(state.current).toBeNull();
+    expect(result.current.motorCheck.running).toBe(false);
+    expect(result.current.motorCheck.current_step).toBeNull();
+    expect(result.current.motorCheck.error).toBe("動作確認を中断しました");
   });
 
-  it("robot ごとに独立した状態を持つ", () => {
+  it("受信するまでは起動できない状態のまま", () => {
     const { result } = renderConnected();
-    const socket = latestSocket();
 
-    act(() =>
-      socket.receive({ type: "motor_check_progress", robot: "main_hand", index: 0, total: 1 }),
-    );
-    act(() => socket.receive({ type: "motor_check_error", robot: "sub_hand", message: "ng" }));
-
-    expect(result.current.motorChecks.main_hand.status).toBe("running");
-    expect(result.current.motorChecks.sub_hand.status).toBe("error");
+    expect(result.current.motorCheck.available).toBe(false);
+    expect(result.current.motorCheck.blocked_reason).not.toBeNull();
   });
 });
 

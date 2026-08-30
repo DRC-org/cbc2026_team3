@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import pytest
-
 from lib.health import (
     BusHealth,
     BusHealthInfo,
-    CheckRunSnapshot,
     HealthSnapshot,
-    MotorCheckRecord,
-    MotorCheckResult,
     MotorHealth,
     MotorHealthInfo,
 )
@@ -25,14 +20,6 @@ class TestEnumValues:
         assert MotorHealth.STALE.value == "stale"
         assert MotorHealth.WARNING.value == "warning"
         assert MotorHealth.FAULT.value == "fault"
-
-    def test_motor_check_result_values(self) -> None:
-        assert MotorCheckResult.PENDING.value == "pending"
-        assert MotorCheckResult.RUNNING.value == "running"
-        assert MotorCheckResult.PASSED.value == "passed"
-        assert MotorCheckResult.FAILED.value == "failed"
-        assert MotorCheckResult.TIMEOUT.value == "timeout"
-        assert MotorCheckResult.SKIPPED.value == "skipped"
 
 
 class TestBusHealthInfo:
@@ -248,160 +235,3 @@ class TestComputeOverall:
 
     def test_empty_inputs_default_ok(self) -> None:
         assert HealthSnapshot.compute_overall([], []) is BusHealth.OK
-
-
-class TestMotorCheckRecord:
-    def test_construct_with_all_fields(self) -> None:
-        rec = MotorCheckRecord(
-            motor="lift_motor",
-            bus="m3508_bus",
-            started_at=1714377600.0,
-            finished_at=1714377601.0,
-            result=MotorCheckResult.PASSED,
-            expected=500.0,
-            observed=487.2,
-            detail=None,
-        )
-        assert rec.motor == "lift_motor"
-        assert rec.result is MotorCheckResult.PASSED
-
-    def test_to_dict_passed(self) -> None:
-        rec = MotorCheckRecord(
-            motor="lift_motor",
-            bus="m3508_bus",
-            started_at=1714377600.0,
-            finished_at=1714377601.0,
-            result=MotorCheckResult.PASSED,
-            expected=500.0,
-            observed=487.2,
-            detail=None,
-        )
-        d = rec.to_dict()
-        assert d["motor"] == "lift_motor"
-        assert d["bus"] == "m3508_bus"
-        assert d["started_at"] == 1714377600.0
-        assert d["finished_at"] == 1714377601.0
-        assert d["result"] == "passed"
-        assert d["expected"] == 500.0
-        assert d["observed"] == 487.2
-        assert d["detail"] is None
-
-    def test_to_dict_handles_none_optionals(self) -> None:
-        rec = MotorCheckRecord(
-            motor="lift_motor",
-            bus="m3508_bus",
-            started_at=1714377600.0,
-            finished_at=None,
-            result=MotorCheckResult.RUNNING,
-            expected=500.0,
-            observed=None,
-            detail=None,
-        )
-        d = rec.to_dict()
-        assert d["finished_at"] is None
-        assert d["observed"] is None
-        assert d["detail"] is None
-        assert d["result"] == "running"
-
-
-def _make_record(name: str, result: MotorCheckResult) -> MotorCheckRecord:
-    return MotorCheckRecord(
-        motor=name,
-        bus="bus",
-        started_at=0.0,
-        finished_at=1.0 if result is not MotorCheckResult.RUNNING else None,
-        result=result,
-        expected=1.0,
-        observed=1.0 if result is MotorCheckResult.PASSED else None,
-        detail=None,
-    )
-
-
-class TestCheckRunSnapshot:
-    def test_construct_with_records(self) -> None:
-        snap = CheckRunSnapshot(
-            robot="main_hand",
-            started_at=1714377600.0,
-            finished_at=1714377610.0,
-            overall="ok",
-            records=[
-                _make_record("m1", MotorCheckResult.PASSED),
-                _make_record("m2", MotorCheckResult.PASSED),
-            ],
-        )
-        assert snap.robot == "main_hand"
-        assert snap.overall == "ok"
-        assert len(snap.records) == 2
-
-    def test_to_dict_serializes_records(self) -> None:
-        snap = CheckRunSnapshot(
-            robot="main_hand",
-            started_at=1714377600.0,
-            finished_at=1714377610.0,
-            overall="partial",
-            records=[
-                _make_record("m1", MotorCheckResult.PASSED),
-                _make_record("m2", MotorCheckResult.FAILED),
-            ],
-        )
-        d = snap.to_dict()
-        assert d["robot"] == "main_hand"
-        assert d["started_at"] == 1714377600.0
-        assert d["finished_at"] == 1714377610.0
-        assert d["overall"] == "partial"
-        assert isinstance(d["records"], list)
-        assert len(d["records"]) == 2
-        assert d["records"][0]["result"] == "passed"
-        assert d["records"][1]["result"] == "failed"
-
-    def test_to_dict_handles_none_finished_at(self) -> None:
-        snap = CheckRunSnapshot(
-            robot="main_hand",
-            started_at=1714377600.0,
-            finished_at=None,
-            overall="running",
-            records=[_make_record("m1", MotorCheckResult.RUNNING)],
-        )
-        d = snap.to_dict()
-        assert d["finished_at"] is None
-        assert d["overall"] == "running"
-
-    @pytest.mark.parametrize(
-        ("results", "expected"),
-        [
-            (
-                [MotorCheckResult.PASSED, MotorCheckResult.PASSED],
-                "ok",
-            ),
-            (
-                [MotorCheckResult.PASSED, MotorCheckResult.FAILED],
-                "partial",
-            ),
-            (
-                [MotorCheckResult.FAILED, MotorCheckResult.TIMEOUT],
-                "failed",
-            ),
-            (
-                [MotorCheckResult.PENDING, MotorCheckResult.PENDING],
-                "running",
-            ),
-            (
-                [MotorCheckResult.PASSED, MotorCheckResult.RUNNING],
-                "running",
-            ),
-            (
-                [MotorCheckResult.PASSED, MotorCheckResult.SKIPPED],
-                "ok",
-            ),
-            (
-                [MotorCheckResult.SKIPPED, MotorCheckResult.SKIPPED],
-                "ok",
-            ),
-        ],
-    )
-    def test_compute_overall(self, results: list[MotorCheckResult], expected: str) -> None:
-        records = [_make_record(f"m{i}", r) for i, r in enumerate(results)]
-        assert CheckRunSnapshot.compute_overall(records) == expected
-
-    def test_compute_overall_empty(self) -> None:
-        assert CheckRunSnapshot.compute_overall([]) == "ok"

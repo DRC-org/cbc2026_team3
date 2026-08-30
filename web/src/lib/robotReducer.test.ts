@@ -36,7 +36,7 @@ describe("robotReducer", () => {
 
     expect(next.states).not.toBe(first.states);
     expect(next.matchState).toBe(first.matchState);
-    expect(next.motorChecks).toBe(first.motorChecks);
+    expect(next.motorCheck).toBe(first.motorCheck);
     expect(next.healthEvents).toBe(first.healthEvents);
     expect(next.rejection).toBe(first.rejection);
   });
@@ -48,14 +48,15 @@ describe("robotReducer", () => {
       step_index: 1,
     });
     const next = receive(first, {
-      type: "motor_check_progress",
-      robot: "main_hand",
-      index: 1,
-      total: 4,
+      type: "motor_check_state",
+      available: true,
+      running: true,
+      step_index: 1,
+      total_steps: 4,
     });
 
     expect(next.states).toBe(first.states);
-    expect(next.motorChecks.main_hand.status).toBe("running");
+    expect(next.motorCheck.running).toBe(true);
   });
 
   it("state の e_stop_active 解除で理由を畳む", () => {
@@ -117,106 +118,30 @@ describe("robotReducer", () => {
     });
   });
 
-  describe("motor_check_*", () => {
-    it("progress → record → done を 1 本の実行として畳む", () => {
-      const running = receive(INITIAL_ROBOT_UI_STATE, {
-        type: "motor_check_progress",
-        robot: "main_hand",
-        current: "lift",
-        index: 0,
-        total: 2,
-      });
-      expect(running.motorChecks.main_hand.startedAtMs).toBe(NOW);
+  it("動作確認は継ぎ足さず、届いた状態でまるごと置き換える", () => {
+    // UI 側で進捗を組み立てると、1 通落としたときに画面だけが古い状態で固まる。
+    // 再送も無いのでリロードするまで直らない
+    const running = receive(INITIAL_ROBOT_UI_STATE, {
+      type: "motor_check_state",
+      available: true,
+      running: true,
+      current_step: "メインハンド y 軸",
+      step_index: 1,
+      total_steps: 3,
+    });
+    expect(running.motorCheck.current_step).toBe("メインハンド y 軸");
 
-      const withRecord = receive(running, {
-        type: "motor_check_record",
-        robot: "main_hand",
-        record: { motor: "lift", result: "passed" },
-      });
-      expect(withRecord.motorChecks.main_hand.records).toHaveLength(1);
-      // 途中経過なので進捗も開始時刻もそのまま
-      expect(withRecord.motorChecks.main_hand.status).toBe("running");
-      expect(withRecord.motorChecks.main_hand.startedAtMs).toBe(NOW);
-
-      const done = receive(withRecord, {
-        type: "motor_check_done",
-        robot: "main_hand",
-        snapshot: {
-          robot: "main_hand",
-          started_at: 10,
-          finished_at: 20,
-          overall: "ok",
-          records: [{ motor: "lift", result: "passed" }],
-        },
-      });
-      const state = done.motorChecks.main_hand;
-      expect(state.status).toBe("completed");
-      expect(state.current).toBeNull();
-      // ワイヤはエポック秒。UI 状態は ms でなければ実施時刻が 1970 年になる
-      expect(state.startedAtMs).toBe(10_000);
-      expect(state.finishedAtMs).toBe(20_000);
+    const finished = receive(running, {
+      type: "motor_check_state",
+      available: true,
+      running: false,
+      step_index: 3,
+      total_steps: 3,
     });
 
-    it("done に時刻が無ければ受信時刻と直前の開始時刻で補う", () => {
-      const running = receive(INITIAL_ROBOT_UI_STATE, {
-        type: "motor_check_progress",
-        robot: "main_hand",
-        index: 0,
-        total: 1,
-      });
-      const done = receive(
-        running,
-        {
-          type: "motor_check_done",
-          robot: "main_hand",
-          snapshot: {
-            robot: "main_hand",
-            started_at: null,
-            finished_at: null,
-            overall: "ok",
-            records: [],
-          },
-        },
-        NOW + 5000,
-      );
-
-      expect(done.motorChecks.main_hand.startedAtMs).toBe(NOW);
-      expect(done.motorChecks.main_hand.finishedAtMs).toBe(NOW + 5000);
-    });
-
-    it("error は実行中の表示を残さず失敗として畳む", () => {
-      const running = receive(INITIAL_ROBOT_UI_STATE, {
-        type: "motor_check_progress",
-        robot: "main_hand",
-        current: "lift",
-        index: 0,
-        total: 2,
-      });
-      const failed = receive(running, {
-        type: "motor_check_error",
-        robot: "main_hand",
-        message: "CAN タイムアウト",
-      });
-
-      const state = failed.motorChecks.main_hand;
-      expect(state.status).toBe("error");
-      expect(state.error).toBe("CAN タイムアウト");
-      expect(state.current).toBeNull();
-      expect(state.finishedAtMs).toBe(NOW);
-    });
-
-    it("ロボットごとに独立した実行状態を持つ", () => {
-      const a = receive(INITIAL_ROBOT_UI_STATE, {
-        type: "motor_check_progress",
-        robot: "main_hand",
-        index: 0,
-        total: 1,
-      });
-      const b = receive(a, { type: "motor_check_error", robot: "sub_hand", message: "ng" });
-
-      expect(b.motorChecks.main_hand.status).toBe("running");
-      expect(b.motorChecks.sub_hand.status).toBe("error");
-    });
+    expect(finished.motorCheck.running).toBe(false);
+    // 前の current_step が残らないこと (継ぎ足していたら残る)
+    expect(finished.motorCheck.current_step).toBeNull();
   });
 
   it("ヘルス変化は新しい順に 5 件だけ残す", () => {

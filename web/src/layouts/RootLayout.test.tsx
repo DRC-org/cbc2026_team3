@@ -39,7 +39,7 @@ vi.mock("@/components/shell/TabBar", async () => {
  * 指差喚呼リストは memo で切り離してある (試合状態しか読まない)。差し替えも memo に
  * しておくと、切り離しを壊すのは「親が毎描画 新しい props を渡す」場合だけになる。
  */
-vi.mock("@/components/operator/Checklist", async () => {
+vi.mock("@/components/monitor/Checklist", async () => {
   const { memo } = await import("react");
   return {
     Checklist: memo(function Checklist() {
@@ -89,9 +89,9 @@ describe("RootLayout のテレメトリ再描画", () => {
     expect(counts.tabBar).toBeGreaterThan(tabsBefore);
   });
 
-  it("操縦者画面の指差喚呼リストをテレメトリで描き直さない", async () => {
-    // 準備フェーズの主役。8 行のチェックリストを毎秒 40 回描き直す理由は無い
-    await renderApp("/main-hand");
+  it("Monitor の指差喚呼リストをテレメトリで描き直さない", async () => {
+    // 準備フェーズの主役。20 行のチェックリストを毎秒 40 回描き直す理由は無い
+    await renderApp("/monitor");
     act(() => latestSocket().open());
     act(() => latestSocket().receive(stateMessage(0)));
 

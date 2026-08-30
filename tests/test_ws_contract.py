@@ -32,13 +32,10 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import (
     BusHealth,
-    CheckRunSnapshot,
-    MotorCheckRecord,
-    MotorCheckResult,
     MotorHealth,
 )
 from lib.manual import ManualController
-from lib.match_state import ChecklistItem
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
@@ -77,10 +74,9 @@ REQUIRED_TYPES = frozenset(
         "health_change",
         "e_stop_state",
         "command_rejected",
-        "motor_check_progress",
-        "motor_check_record",
-        "motor_check_done",
-        "motor_check_error",
+        # 動作確認は進捗も結果も拒否理由も 1 通に載る。4 種類に分けていた頃は、
+        # 途中の 1 通を落とした画面が復旧しなかった
+        "motor_check_state",
     }
 )
 
@@ -140,17 +136,19 @@ def _fault_motor_snapshot(mgr: CANManager):
     return snap
 
 
-def _check_record() -> MotorCheckRecord:
-    return MotorCheckRecord(
-        motor="gripper",
-        bus="can_generic",
-        started_at=FIXED_EPOCH,
-        finished_at=FIXED_EPOCH + 0.4,
-        result=MotorCheckResult.PASSED,
-        expected=5.0,
-        observed=4.9,
-        detail=None,
-    )
+class _ContractCheckSequence(Sequence):
+    """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。"""
+
+    def __init__(self) -> None:
+        super().__init__("motor_check")
+
+    @step("メインハンド 初期姿勢へ")
+    async def home(self) -> None:
+        return
+
+    @step("サブハンド 電磁弁 6 個 (打音・目視確認)")
+    async def valves(self) -> None:
+        return
 
 
 def _manual_controller(
@@ -199,8 +197,10 @@ def _manual_controller(
 def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     """指差喚呼の項目。空だと checklists の要素構造が golden に現れない。"""
     return {
-        "main_hand": [ChecklistItem(id="y_axis_sync", label="Y 軸の左右が揃っている")],
-        "sub_hand": [ChecklistItem(id="sub_arm_home", label="補助アームが初期位置")],
+        ROLE_PRE_MATCH: [
+            ChecklistItem(id="y_axis_sync", label="Y 軸の左右が揃っている"),
+            ChecklistItem(id="sub_arm_home", label="補助アームが初期位置"),
+        ],
     }
 
 
@@ -242,6 +242,8 @@ def _build_fixture() -> _Fixture:
             loop.target_sinks(),
         ),
     )
+    # 動作確認は両ハンド統合の 1 本で、どのロボットにも属さない
+    fx.set_motor_check_sequence(_ContractCheckSequence())
     # 周期配信に割り込まれるとヘルス差分の基準が動く。起動直後の 1 回だけ走らせ、
     # 以降はテストが明示的に呼んだ配信だけを捕まえる
     fx.freeze_broadcast()
@@ -295,25 +297,10 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             await fx.activate_e_stop(reason="同期ずれを検知しました (y_axis)")
             samples["e_stop_state_with_reason"] = await require_type(ws, "e_stop_state")
 
-            await fx.publish_motor_check_progress(_ROBOT, "gripper", 1, 3)
-            samples["motor_check_progress"] = await require_type(ws, "motor_check_progress")
-
-            record = _check_record()
-            await fx.publish_motor_check_record(_ROBOT, record)
-            samples["motor_check_record"] = await require_type(ws, "motor_check_record")
-
-            snapshot = CheckRunSnapshot(
-                robot=_ROBOT,
-                started_at=FIXED_EPOCH,
-                finished_at=FIXED_EPOCH + 1.2,
-                overall="ok",
-                records=[record],
-            )
-            await fx.publish_motor_check_done(_ROBOT, snapshot)
-            samples["motor_check_done"] = await require_type(ws, "motor_check_done")
-
-            await fx.publish_motor_check_error(_ROBOT, "試合中は動作確認を実行できません")
-            samples["motor_check_error"] = await require_type(ws, "motor_check_error")
+            # 進捗も結果も拒否理由も 1 通に載る。理由が入った状態を golden にする
+            # (error が null の形は接続直後のスナップショットで既に配られている)
+            await fx.publish_motor_check_error("緊急停止中のため動作確認を実行できません")
+            samples["motor_check_state"] = await require_type(ws, "motor_check_state")
 
             await ws.close()
     finally:

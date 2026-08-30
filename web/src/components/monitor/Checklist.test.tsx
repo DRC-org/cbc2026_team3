@@ -2,7 +2,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { Checklist } from "@/components/operator/Checklist";
+import { Checklist } from "@/components/monitor/Checklist";
 import type { ChecklistState, MatchPhase } from "@/lib/protocol";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
@@ -19,11 +19,11 @@ function mount(
   phase: MatchPhase = "setup",
   devTools = false,
 ) {
-  return renderWithRobot(<Checklist checklistRole="main_hand" title="メインハンド" />, {
+  return renderWithRobot(<Checklist />, {
     matchState: {
       ...DEFAULT_MATCH_STATE,
       phase,
-      checklists: checklist ? { main_hand: checklist } : {},
+      checklists: checklist ? { pre_match: checklist } : {},
     },
     serverInfo: { dev_tools: devTools, dry_run: false },
   });
@@ -51,21 +51,21 @@ describe("Checklist", () => {
     const { context } = mount(ITEMS);
 
     await userEvent.click(screen.getByLabelText("非常停止解除"));
-    expect(context.setChecklistItem).toHaveBeenCalledWith("main_hand", "estop", true);
+    expect(context.setChecklistItem).toHaveBeenCalledWith("pre_match", "estop", true);
   });
 
   it("チェック済み項目を外す操作も送る", async () => {
     const { context } = mount(ITEMS);
 
     await userEvent.click(screen.getByLabelText("電源投入"));
-    expect(context.setChecklistItem).toHaveBeenCalledWith("main_hand", "power", false);
+    expect(context.setChecklistItem).toHaveBeenCalledWith("pre_match", "power", false);
   });
 
   it("CLEAR で一括解除を送る", async () => {
     const { context } = mount(ITEMS);
 
     await userEvent.click(screen.getByRole("button", { name: /チェックをすべて解除/ }));
-    expect(context.resetChecklist).toHaveBeenCalledWith("main_hand");
+    expect(context.resetChecklist).toHaveBeenCalledWith("pre_match");
   });
 
   it("チェックが 0 件なら CLEAR を押せない", () => {
@@ -117,7 +117,7 @@ describe("Checklist", () => {
       const { context } = mount(ITEMS, "setup", true);
 
       await userEvent.click(screen.getByRole("button", { name: DEV_BUTTON }));
-      expect(context.checkAllChecklist).toHaveBeenCalledWith("main_hand");
+      expect(context.checkAllChecklist).toHaveBeenCalledWith("pre_match");
     });
 
     it("完了済みなら押せない (押しても変わらない操作を残さない)", () => {

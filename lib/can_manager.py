@@ -461,7 +461,8 @@ class CANManager:
         """現在の受動監視状態から HealthSnapshot を組み立てる (同期処理)。
 
         サーバの WS 配信ループや GET /health から呼ばれる前提で副作用を持たない。
-        能動 ping は段階⑥ の MotorCheckRunner が担うため本メソッドでは行わない。
+        能動的にモータを動かして確かめるのは統合動作確認シーケンス
+        (robots/motor_check.py) の仕事で、本メソッドは受信状態を読むだけ。
         """
         now = time.time()
 

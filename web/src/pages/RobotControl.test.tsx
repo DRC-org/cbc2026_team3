@@ -150,22 +150,29 @@ describe("RobotControl の操作先", () => {
 });
 
 describe("RobotControl のフェーズ別レイアウト", () => {
-  it("準備中は指差喚呼と動作確認だけを出し、シーケンス操作は出さない", () => {
-    // このフェーズで操縦者がやることは 2 つだけ。押せない主操作ボタンを
-    // 並べると「今やること」が埋もれる
+  it("準備中はシーケンス操作を出さない", () => {
+    // このフェーズに操縦者の主操作は無い。押せない主操作ボタンを並べると
+    // 「今やること」が埋もれる
     mount("setup");
 
-    expect(screen.getByText("サブハンド セッティング指差喚呼")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "sub_hand の動作確認を開始" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "シーケンスを先頭から開始" })).toBeNull();
     expect(screen.queryByRole("button", { name: "シーケンスを通常停止" })).toBeNull();
   });
 
-  it("試合中は主操作を出し、指差喚呼を残さない", () => {
+  it("指差喚呼と動作確認はこの画面に出さない (Monitor の設定面へ集約した)", () => {
+    // 指差喚呼: 操縦者 2 名は同じ場所に立つので、2 画面に置くと二度読み上げになる。
+    // 動作確認: 両ハンドを 1 本のシーケンスで駆動するので、機体ごとの入口が
+    // あると 2 つを同時に起動できてしまう (両機が同時に動きうる)
+    mount("setup");
+
+    expect(screen.queryByText(/セッティング指差喚呼/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /動作確認を開始/ })).toBeNull();
+  });
+
+  it("試合中は主操作を出す", () => {
     mount("match");
 
     expect(screen.getByRole("button", { name: "シーケンスを先頭から開始" })).toBeEnabled();
-    expect(screen.queryByText("サブハンド セッティング指差喚呼")).toBeNull();
   });
 
   it("試合終了後は操作を塞ぎ、塞いでいる理由を主操作の位置に出す", () => {
@@ -377,13 +384,8 @@ describe("手動操縦モード", () => {
     });
   });
 
-  it("手動中は準備フェーズの動作確認を押す前に塞ぐ", () => {
-    // サーバーも拒否するが、押してから拒否トーストで気付くのでは遅い
-    mountManual("setup");
-
-    expect(screen.getByRole("button", { name: /動作確認を開始/ })).toBeDisabled();
-    expect(screen.getByText("手動操縦モードのため実行できません")).toBeInTheDocument();
-  });
+  // 手動中に動作確認を塞ぐことは Monitor 側 (MotorCheckButton) が受け持つ。
+  // サーバーが `blocked_reason` に理由を載せて配るので、画面はそれを出すだけ
 
   it("手動中は機体状態を畳まない", () => {
     // 機体を直接動かしている最中は「操縦者は機体を見ており画面は一瞬しか見ない」

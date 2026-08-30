@@ -7,30 +7,31 @@ import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { isSetupPhase } from "@/lib/phase";
-import type { ChecklistRole } from "@/lib/protocol";
+import { CHECKLIST_ROLE } from "@/lib/protocol";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
-interface ChecklistProps {
-  checklistRole: ChecklistRole;
-  title: string;
-}
+const TITLE = "セッティング指差喚呼";
 
 /**
- * セッティングタイム中の指差喚呼チェックリスト。
- * 状態はサーバー保持なので、同じロールを複数画面で開いても進捗が共有される。
+ * セッティングタイム中の指差喚呼チェックリスト。Monitor の設定面に 1 つだけ置く。
+ * 状態はサーバー保持なので、複数画面で開いても進捗が共有される。
  *
  * 上から順に指差して唱えながら潰していく運用なので、**次に唱える 1 項目**が
  * 分かることが最優先。全項目が同じ重さで並んでいると、どこまで進んだかを
  * 毎回目で数え直すことになる。未完の先頭だけを強調する。
  *
- * memo なのは親の都合。RobotControl はテレメトリ (20Hz) を読むため毎秒 40 回
- * 再描画されるが、ここが読むのは試合状態だけで、props は安定した文字列しかない。
- * 呼び出し側が毎描画 新しい関数やオブジェクトを渡すと切り離しは無効になる。
+ * ロールを props で受け取らないのは、ロールが 1 つしかないため。操縦者 2 名で
+ * 分けていた頃の名残で「どのロールを描くか」を呼び出し側に選ばせると、
+ * 画面ごとに違うロールを指した実装が作れてしまう。
+ *
+ * memo なのは親の都合。Dashboard はテレメトリ (20Hz) を読むため毎秒 40 回
+ * 再描画されるが、ここが読むのは試合状態だけ。props を足すときは、呼び出し側が
+ * 毎描画 新しい関数やオブジェクトを渡すと切り離しが無効になることに注意する。
  */
-export const Checklist = memo(function Checklist({ checklistRole, title }: ChecklistProps) {
+export const Checklist = memo(function Checklist() {
   const { matchState, serverInfo } = useRobotStatus();
   const { setChecklistItem, resetChecklist, checkAllChecklist } = useRobotCommands();
-  const checklist = matchState.checklists[checklistRole];
+  const checklist = matchState.checklists[CHECKLIST_ROLE];
   // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)
   const locked = !isSetupPhase(matchState.phase);
 
@@ -42,7 +43,7 @@ export const Checklist = memo(function Checklist({ checklistRole, title }: Check
 
   return (
     <Panel
-      legend={title}
+      legend={TITLE}
       bodyClassName="p-0"
       actions={
         <>
@@ -53,8 +54,8 @@ export const Checklist = memo(function Checklist({ checklistRole, title }: Check
             <Button
               tone="warn"
               disabled={locked || completed}
-              onClick={() => checkAllChecklist(checklistRole)}
-              aria-label={`${title} を開発用に全てチェック`}
+              onClick={() => checkAllChecklist(CHECKLIST_ROLE)}
+              aria-label={`${TITLE} を開発用に全てチェック`}
             >
               <Icon as={Zap} />
               DEV 全チェック
@@ -62,8 +63,8 @@ export const Checklist = memo(function Checklist({ checklistRole, title }: Check
           ) : null}
           <Button
             disabled={locked || checkedCount === 0}
-            onClick={() => resetChecklist(checklistRole)}
-            aria-label={`${title} のチェックをすべて解除`}
+            onClick={() => resetChecklist(CHECKLIST_ROLE)}
+            aria-label={`${TITLE} のチェックをすべて解除`}
           >
             <Icon as={RotateCcw} />
             CLEAR
@@ -120,7 +121,7 @@ export const Checklist = memo(function Checklist({ checklistRole, title }: Check
                   checked={item.checked}
                   disabled={locked}
                   onChange={(e) =>
-                    setChecklistItem(checklistRole, item.id, e.currentTarget.checked)
+                    setChecklistItem(CHECKLIST_ROLE, item.id, e.currentTarget.checked)
                   }
                 />
                 <span className={cx("min-w-0 flex-1", item.checked && "line-through")}>

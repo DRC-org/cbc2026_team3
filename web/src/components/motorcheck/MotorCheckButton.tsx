@@ -6,48 +6,22 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import { isDuringMatch } from "@/lib/phase";
 
-interface MotorCheckButtonProps {
-  robotName: string;
-  onPanelOpen?: () => void;
-  /**
-   * 呼び出し側だけが知っている無効化理由 (現状は手動操縦モード)。
-   *
-   * **ここで `useRobotStates()` を読んで導出してはならない。** 操作モードは
-   * 20Hz のテレメトリに載っているため、このボタンが毎秒 40 回再描画される
-   * (購読を頻度で 3 つに分けている意味が消える)。既に高頻度側を読んでいる
-   * 呼び出し元から降ろす。
-   */
-  blockedReason?: string | null;
-}
-
-export function MotorCheckButton({
-  robotName,
-  onPanelOpen,
-  blockedReason = null,
-}: MotorCheckButtonProps) {
-  const { eStopActive, connected, matchState } = useRobotStatus();
-  const { state, start } = useMotorCheck(robotName);
+/**
+ * 統合動作確認の起動ボタン。**両ハンドで 1 つ**なので robot を取らない。
+ *
+ * 可否の判定はサーバー (`_motor_check_deny_reason`) が唯一の持ち主で、ここは
+ * 理由を表示するだけ。フェーズや緊急停止から導出し直すと、サーバーが受け付ける
+ * 操作を画面が殺す状態が生まれる (かつて `StartGate` で作った失敗と同じ形)。
+ */
+export function MotorCheckButton({ onPanelOpen }: { onPanelOpen?: () => void }) {
+  const { connected } = useRobotStatus();
+  const { state, start } = useMotorCheck();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // 可否の判定はサーバー側 (`lib/commands.py` の motor_check_start) に合わせてフェーズで行う。
-  // 以前はステップ番号から「シーケンス実行中か」を推定していたが、準備中は step_index=0 /
-  // total_steps>0 が常に成立するため、動作確認が主役のセッティングタイムで
-  // ボタンが常時無効になっていた（サーバーはこのフェーズでこそ受け付ける）。
-  const inMatch = isDuringMatch(matchState.phase);
-  const checkRunning = state.status === "running";
-  const disabled = eStopActive || inMatch || checkRunning || !connected || blockedReason !== null;
-
-  const reasonLabel = !connected
-    ? "切断中のため不可"
-    : eStopActive
-      ? "緊急停止中は不可"
-      : inMatch
-        ? "試合中は動作確認を実行できません"
-        : checkRunning
-          ? "動作確認 実行中"
-          : blockedReason;
+  // 切断中だけは画面側でしか分からない (サーバーへ届かないので理由も返らない)
+  const reasonLabel = connected ? state.blocked_reason : "切断中のため不可";
+  const disabled = reasonLabel !== null;
 
   const handleConfirmStart = () => {
     start();
@@ -61,14 +35,14 @@ export function MotorCheckButton({
         tone="info"
         disabled={disabled}
         onClick={() => setConfirmOpen(true)}
-        aria-label={`${robotName} の動作確認を開始`}
+        aria-label="動作確認を開始"
       >
-        {checkRunning ? (
+        {state.running ? (
           <span className="loading loading-xs loading-spinner" />
         ) : (
           <Icon as={Activity} />
         )}
-        {checkRunning ? "確認実行中..." : "動作確認"}
+        {state.running ? "確認実行中..." : "動作確認"}
       </Button>
       {/* Tooltip は使えないため無効化理由をテキストで併記する。
           理由文は長く、ボタンと同じ行に流すと折り返して行が 2 段に化ける。
@@ -84,23 +58,23 @@ export function MotorCheckButton({
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
         tone="danger"
-        title="Operational Check"
+        title="アクチュエータ動作確認"
         footer={
           <>
-            <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+            <Button onClick={() => setConfirmOpen(false)}>キャンセル</Button>
             <Button tone="info" onClick={handleConfirmStart}>
-              Start
+              開始
             </Button>
           </>
         }
       >
         <p>
-          <span className="font-medium text-info">{robotName}</span>{" "}
-          の全モータを順番に微小駆動します。
+          <span className="font-medium text-info">メインハンドとサブハンドの全アクチュエータ</span>
+          を、決まった順序で 1 つずつ動かします。
         </p>
         <p className="mt-2 flex items-center gap-1.5 text-error">
           <Icon as={TriangleAlert} />
-          周囲の安全を確認してから開始してください。
+          両機の可動範囲に人・物がないことを確認してから開始してください。
         </p>
         <p className="mt-1 text-base-content/70">
           実行中も緊急停止 (EMG STOP) は即時優先で動作します。

@@ -1,24 +1,16 @@
-import { ListChecks } from "lucide-react";
-import { useState } from "react";
-
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
-import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
-import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
-import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
 import { ActionPanel } from "@/components/operator/ActionPanel";
-import { Checklist } from "@/components/operator/Checklist";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
-import { Button } from "@/components/ui/Button";
-import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
+import { cx } from "@/lib/cx";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
-import type { ChecklistRole, ManualState, OperationMode } from "@/lib/protocol";
+import type { ManualState, OperationMode } from "@/lib/protocol";
 import { sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
@@ -31,7 +23,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const { matchState, connected, eStopActive } = useRobotStatus();
   const { send } = useRobotCommands();
   const state = states[robotKey];
-  const [healthCheckOpen, setHealthCheckOpen] = useState(false);
 
   const handleTrigger = () => send({ type: "trigger", robot: robotKey });
   const handleJump = (stepIndex: number) =>
@@ -93,21 +84,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     );
   }
 
-  const motorCheckPanel = (
-    <MotorCheckPanel
-      robotName={robotKey}
-      isOpen={healthCheckOpen}
-      onOpenChange={setHealthCheckOpen}
-    />
-  );
-
   // モード帯はどのフェーズでも同じ位置に出す。「今この画面から機体を直接
   // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない
   const modeSwitch = (
     <ModeSwitch mode={manual.mode} onChange={handleMode} blockedReason={modeBlockedReason} />
   );
 
-  // 手動の操作面。半自動側の主役 (Checklist / ActionPanel) と同じ列を占める
+  // 手動の操作面。半自動側の主役 (動作確認 / ActionPanel) と同じ列を占める
   const manualPanel = (
     <ManualPanel
       robotKey={robotKey}
@@ -118,68 +101,45 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   // --- セッティングタイム -------------------------------------------------
-  // 操縦者の仕事は 2 つだけ: 指差喚呼を終えることと、アクチュエータを動かして確かめること。
-  // 以前はここに操作不能な SEQUENCE PREVIEW が画面の半分を占めていた。試合前に
-  // 一覧を見たくなることはあるが、それは「今やること」ではないのでモーダルへ退避した。
+  // 指差喚呼と動作確認は Monitor の設定面へ移した。指差喚呼は操縦者 2 名が
+  // 同じ場所に立つので二度読み上げになっていたため、動作確認は両ハンドを 1 本の
+  // シーケンスで駆動するので機体ごとの入口が意味を失ったため。
+  // ここに残るのは手動操縦と、その手元で見る機体状態。
   if (setupPhase) {
     return (
-      <>
-        <Page className="flex flex-col">
-          {modeSwitch}
-          <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
-            {inManual ? (
-              manualPanel
-            ) : (
-              <Checklist
-                checklistRole={robotKey as ChecklistRole}
-                title={`${label} セッティング指差喚呼`}
+      <Page className="flex flex-col">
+        {modeSwitch}
+        <div
+          className={cx(
+            "grid min-h-0 flex-1 gap-2",
+            // 手動中だけ操作面のために左列を開ける。半自動の準備中はこの画面に
+            // 操作が無いので、参照面を 1 列に広げる
+            inManual ? "grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]" : "grid-cols-1",
+          )}
+        >
+          {inManual ? manualPanel : null}
+
+          <div className="flex min-h-0 flex-col gap-2">
+            <Panel legend="機体状態" className="min-h-0 flex-1">
+              <SubsystemStatus
+                health={state.health}
+                motors={state.motors}
+                safety={state.safety}
+                defaultOpen
               />
-            )}
+            </Panel>
 
-            <div className="flex min-h-0 flex-col gap-2">
-              {/* 動作確認は準備フェーズの主要アクション。以前は診断カラムの最下段に
-                  埋もれていたため、独立した枠で上に出す。手動モード中はサーバーが
-                  拒否するので、押す前に理由を出せるようボタン側で塞ぐ */}
-              <Panel
-                legend="アクチュエータ動作確認"
-                className="shrink-0"
-                actions={<MotorCheckSummary robotName={robotKey} />}
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <MotorCheckButton
-                    robotName={robotKey}
-                    onPanelOpen={() => setHealthCheckOpen(true)}
-                    blockedReason={inManual ? "手動操縦モードのため実行できません" : null}
-                  />
-                  <Button onClick={() => setHealthCheckOpen(true)}>
-                    <Icon as={ListChecks} />
-                    結果を表示
-                  </Button>
-                </div>
-              </Panel>
-
-              <Panel legend="機体状態" className="min-h-0 flex-1">
-                <SubsystemStatus
-                  health={state.health}
-                  motors={state.motors}
-                  safety={state.safety}
-                  defaultOpen
-                />
-              </Panel>
-
-              <Panel legend="シーケンス" className="shrink-0">
-                <div className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate font-mono">{state.sequence}</span>
-                  <span className="shrink-0 text-base-content/70">
-                    全 {state.total_steps} ステップ
-                  </span>
-                </div>
-              </Panel>
-            </div>
+            <Panel legend="シーケンス" className="shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono">{state.sequence}</span>
+                <span className="shrink-0 text-base-content/70">
+                  全 {state.total_steps} ステップ
+                </span>
+              </div>
+            </Panel>
           </div>
-        </Page>
-        {motorCheckPanel}
-      </>
+        </div>
+      </Page>
     );
   }
 
@@ -248,7 +208,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           </div>
         </div>
       </Page>
-      {motorCheckPanel}
     </>
   );
 }

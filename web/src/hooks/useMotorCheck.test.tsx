@@ -3,67 +3,69 @@ import { describe, expect, it, vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
-import type { MotorCheckState } from "@/lib/robotReducer";
+import type { MotorCheckSnapshot } from "@/lib/protocol";
 import { createRobotContext } from "@/test/robotContext";
 import type { RobotContextValue } from "@/test/robotContext";
 
-function mount(robot: string, overrides: Partial<RobotContextValue> = {}) {
+function mount(overrides: Partial<RobotContextValue> = {}) {
   const context = createRobotContext(overrides);
-  const view = renderHook(() => useMotorCheck(robot), {
+  const view = renderHook(() => useMotorCheck(), {
     wrapper: ({ children }) => <RobotProvider value={context}>{children}</RobotProvider>,
   });
   return { ...view, context };
 }
 
+const RUNNING: MotorCheckSnapshot = {
+  available: true,
+  blocked_reason: "既に動作確認を実行中です",
+  running: true,
+  current_step: "メインハンド y 軸 (左右直結ペア)",
+  step_index: 1,
+  total_steps: 3,
+  steps: [
+    { index: 0, label: "メインハンド 初期姿勢へ", require_trigger: false },
+    { index: 1, label: "メインハンド y 軸 (左右直結ペア)", require_trigger: false },
+    { index: 2, label: "両ハンドを初期姿勢へ戻す", require_trigger: false },
+  ],
+  error: null,
+};
+
 describe("useMotorCheck", () => {
-  it("未実施のロボットには idle の既定状態を返す", () => {
-    const { result } = mount("main_hand");
+  it("受信前は起動できない状態を返す", () => {
+    // 「起動できる」へ倒すと、配信が届く前の一瞬だけ押せるボタンが出る
+    const { result } = mount();
 
-    expect(result.current.state).toMatchObject({
-      status: "idle",
-      current: null,
-      progress: null,
-      records: [],
-      error: null,
-    });
+    expect(result.current.state.available).toBe(false);
+    expect(result.current.state.blocked_reason).not.toBeNull();
+    expect(result.current.state.running).toBe(false);
   });
 
-  it("該当ロボットの状態だけを取り出す", () => {
-    const running: MotorCheckState = {
-      status: "running",
-      current: "lift",
-      progress: { index: 1, total: 3 },
-      records: [],
-      snapshot: null,
-      error: null,
-      startedAtMs: 100_000,
-      finishedAtMs: null,
-    };
-    const { result } = mount("main_hand", {
-      motorChecks: { main_hand: running, sub_hand: { ...running, current: "other" } },
-    });
+  it("サーバーが配った状態をそのまま返す", () => {
+    const { result } = mount({ motorCheck: RUNNING });
 
-    expect(result.current.state.current).toBe("lift");
+    expect(result.current.state.current_step).toBe("メインハンド y 軸 (左右直結ペア)");
+    expect(result.current.state.step_index).toBe(1);
+    expect(result.current.state.total_steps).toBe(3);
   });
 
-  it("start で対象ロボットの開始コマンドを送る", () => {
+  it("start は robot を載せない (両ハンド統合の 1 本)", () => {
     const send = vi.fn();
-    const { result } = mount("sub_hand", { send });
+    const { result } = mount({ send });
 
     result.current.start();
-    expect(send).toHaveBeenCalledWith({ type: "motor_check_start", robot: "sub_hand" });
+    expect(send).toHaveBeenCalledWith({ type: "motor_check_start" });
   });
 
-  it("abort で中断コマンドを送る", () => {
+  it("abort も robot を載せない", () => {
     const send = vi.fn();
-    const { result } = mount("sub_hand", { send });
+    const { result } = mount({ send });
 
     result.current.abort();
-    expect(send).toHaveBeenCalledWith({ type: "motor_check_abort", robot: "sub_hand" });
+    expect(send).toHaveBeenCalledWith({ type: "motor_check_abort" });
   });
 
   it("再レンダーしても start/abort の参照が変わらない", () => {
-    const { result, rerender } = mount("main_hand");
+    const { result, rerender } = mount();
     const before = result.current;
 
     rerender();

@@ -8,7 +8,7 @@
 # ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
 
 checklists:
-  main_hand:
+  pre_match:
     - id: bench_bus_up
       label: can_m3508 が up していること確認 (ip -br link show)
     - id: bench_wiring

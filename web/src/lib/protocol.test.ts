@@ -89,7 +89,7 @@ describe("parseServerMessage", () => {
           court: "blue",
           phase: "match",
           can_start_match: true,
-          checklists: { main_hand: { items: [], completed: true } },
+          checklists: { pre_match: { items: [], completed: true } },
           timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         }),
       ).toEqual({
@@ -98,7 +98,7 @@ describe("parseServerMessage", () => {
           court: "blue",
           phase: "match",
           can_start_match: true,
-          checklists: { main_hand: { items: [], completed: true } },
+          checklists: { pre_match: { items: [], completed: true } },
           timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         },
       });
@@ -186,34 +186,64 @@ describe("parseServerMessage", () => {
     });
   });
 
-  describe("motor_check_*", () => {
-    it("progress は index / total の欠落を 0 で埋める", () => {
-      expect(parse({ type: "motor_check_progress", robot: "main_hand" })).toEqual({
-        type: "motor_check_progress",
-        robot: "main_hand",
-        current: null,
-        index: 0,
-        total: 0,
+  describe("motor_check_state", () => {
+    it("robot を要求しない (両ハンド統合の 1 本なので載っていない)", () => {
+      // ここで robot を必須にすると動作確認の状態が 100% 捨てられる。
+      // health_change で実際にやらかした形なので、受信条件として固定する
+      const message = parse({ type: "motor_check_state", available: true, running: false });
+
+      expect(message).not.toBeNull();
+      expect(message?.type).toBe("motor_check_state");
+    });
+
+    it("欠けたフィールドを安全側の既定で埋める", () => {
+      const message = parse({ type: "motor_check_state" });
+
+      expect(message).toEqual({
+        type: "motor_check_state",
+        motorCheck: {
+          // available は「押せる」へ倒さない (押しても拒否されるボタンを出さない)
+          available: false,
+          blocked_reason: null,
+          running: false,
+          current_step: null,
+          step_index: 0,
+          total_steps: 0,
+          steps: [],
+          error: null,
+        },
       });
     });
 
-    it("record / snapshot がオブジェクトでなければ捨てる", () => {
-      expect(parse({ type: "motor_check_record", robot: "main_hand" })).toBeNull();
-      expect(parse({ type: "motor_check_record", robot: "main_hand", record: 1 })).toBeNull();
-      expect(parse({ type: "motor_check_done", robot: "main_hand" })).toBeNull();
-    });
-
-    it("error は message 省略時に既定文を入れる", () => {
-      expect(parse({ type: "motor_check_error", robot: "main_hand" })).toEqual({
-        type: "motor_check_error",
-        robot: "main_hand",
-        message: "unknown error",
+    it("ステップ表と進捗をそのまま運ぶ", () => {
+      const message = parse({
+        type: "motor_check_state",
+        available: true,
+        blocked_reason: null,
+        running: true,
+        current_step: "メインハンド y 軸",
+        step_index: 1,
+        total_steps: 2,
+        steps: [
+          { index: 0, label: "メインハンド 初期姿勢へ", require_trigger: false },
+          { index: 1, label: "メインハンド y 軸", require_trigger: false },
+        ],
+        error: null,
       });
+
+      expect(message?.type).toBe("motor_check_state");
+      if (message?.type !== "motor_check_state") return;
+      expect(message.motorCheck.running).toBe(true);
+      expect(message.motorCheck.steps).toHaveLength(2);
+      expect(message.motorCheck.current_step).toBe("メインハンド y 軸");
     });
 
-    it("robot を持たない motor_check_* は捨てる", () => {
-      expect(parse({ type: "motor_check_progress" })).toBeNull();
-      expect(parse({ type: "motor_check_error", message: "ng" })).toBeNull();
+    it("steps が配列でなければ空配列にする", () => {
+      const message = parse({ type: "motor_check_state", steps: "壊れた値" });
+
+      expect(message?.type).toBe("motor_check_state");
+      if (message?.type !== "motor_check_state") return;
+      expect(message.motorCheck.steps).toEqual([]);
     });
   });
 });

@@ -19,8 +19,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, BusHealthInfo, HealthSnapshot, MotorHealth, MotorHealthInfo
 from lib.match_state import (
-    ROLE_MAIN_HAND,
-    ROLE_SUB_HAND,
+    ROLE_PRE_MATCH,
     ChecklistItem,
     Phase,
 )
@@ -33,8 +32,7 @@ from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
 _DEFS = {
-    ROLE_MAIN_HAND: [ChecklistItem(id="home", label="メイン初期位置確認")],
-    ROLE_SUB_HAND: [ChecklistItem(id="home", label="サブ初期位置確認")],
+    ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")],
 }
 
 
@@ -454,11 +452,13 @@ class TestEStopKeepsRecoveryCommands:
 
             await ws.send_json({"type": "match_finish"})
             await _expect_no_rejection(ws, "match_finish", tries=5)
-            assert fx.match.phase is Phase.FINISHED
+            # 読み取った通数ではなく状態の変化を待つ。接続直後のスナップショットが
+            # 1 通増減しただけで結果が変わるテストは、何も守っていない
+            assert await wait_until(lambda: fx.match.phase is Phase.FINISHED)
 
             await ws.send_json({"type": "e_stop_release"})
             await _expect_no_rejection(ws, "e_stop_release", tries=5)
-            assert fx.e_stop_active is False
+            assert await wait_until(lambda: not fx.e_stop_active)
 
             await ws.close()
 

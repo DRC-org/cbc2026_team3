@@ -2,8 +2,8 @@ import { useCallback, useReducer } from "react";
 
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { parseServerMessage } from "@/lib/protocol";
-import type { MatchState, RobotState, ServerInfo } from "@/lib/protocol";
-import type { CommandRejectedEvent, HealthChangeEvent, MotorCheckState } from "@/lib/robotReducer";
+import type { MatchState, MotorCheckSnapshot, RobotState, ServerInfo } from "@/lib/protocol";
+import type { CommandRejectedEvent, HealthChangeEvent } from "@/lib/robotReducer";
 import { INITIAL_ROBOT_UI_STATE, robotReducer } from "@/lib/robotReducer";
 import { originWsUrl } from "@/lib/wsUrl";
 
@@ -14,7 +14,8 @@ interface UseRobotSocketReturn {
   /** 直近の緊急停止の理由。操縦者コマンドによる停止など、理由が無い場合は null */
   eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
-  motorChecks: Record<string, MotorCheckState>;
+  /** 統合動作確認の状態。両ハンドで 1 つなので Record ではない */
+  motorCheck: MotorCheckSnapshot;
   matchState: MatchState;
   /** 起動オプション由来の情報 (開発用コマンドの解禁など) */
   serverInfo: ServerInfo;
@@ -62,7 +63,7 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
     eStopActive: state.eStopActive,
     eStopReason: state.eStopReason,
     healthEvents: state.healthEvents,
-    motorChecks: state.motorChecks,
+    motorCheck: state.motorCheck,
     matchState: state.matchState,
     serverInfo: state.serverInfo,
     rejection: state.rejection,

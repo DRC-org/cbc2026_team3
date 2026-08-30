@@ -1,8 +1,15 @@
 import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 
-import type { ChecklistRole, MatchCourt, MatchState, RobotState, ServerInfo } from "@/lib/protocol";
-import type { CommandRejectedEvent, HealthChangeEvent, MotorCheckState } from "@/lib/robotReducer";
+import type {
+  ChecklistRole,
+  MatchCourt,
+  MatchState,
+  MotorCheckSnapshot,
+  RobotState,
+  ServerInfo,
+} from "@/lib/protocol";
+import type { CommandRejectedEvent, HealthChangeEvent } from "@/lib/robotReducer";
 import type { WsUrlSource } from "@/lib/wsUrl";
 
 /**
@@ -29,7 +36,8 @@ export interface RobotStatus {
   /** 直近の緊急停止の理由 (SyncMonitor の発報等)。操縦者コマンドなら null */
   eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
-  motorChecks: Record<string, MotorCheckState>;
+  /** 統合動作確認の状態。両ハンドで 1 つ */
+  motorCheck: MotorCheckSnapshot;
   matchState: MatchState;
   /** 起動オプション由来。接続直後に 1 度届いたきり変わらない */
   serverInfo: ServerInfo;
@@ -79,7 +87,7 @@ export function RobotProvider({
     eStopActive,
     eStopReason,
     healthEvents,
-    motorChecks,
+    motorCheck,
     matchState,
     serverInfo,
     rejection,
@@ -109,7 +117,7 @@ export function RobotProvider({
       eStopActive,
       eStopReason,
       healthEvents,
-      motorChecks,
+      motorCheck,
       matchState,
       serverInfo,
       rejection,
@@ -121,7 +129,7 @@ export function RobotProvider({
       eStopActive,
       eStopReason,
       healthEvents,
-      motorChecks,
+      motorCheck,
       matchState,
       serverInfo,
       rejection,

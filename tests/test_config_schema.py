@@ -10,7 +10,6 @@ from lib.config_schema import (
     CAN_ID_RANGES,
     DEFAULT_HEALTH,
     DEFAULT_MATCH,
-    DEFAULT_MOTOR_CHECK,
     DRIVER_TYPES,
     load_robot_config,
     load_system_config,
@@ -19,6 +18,7 @@ from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.match_state import ALL_ROLES
 from lib.sequence.positions import load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -47,10 +47,6 @@ class TestSystemConfig:
                     "temp_critical_c": 70,
                     "tx_error_threshold": 64,
                 },
-                "motor_check": {
-                    "per_motor_timeout_ms": 2000,
-                    "default_magnitude": {"m3508": 600, "edulite05": 7.5, "generic": 0.2},
-                },
             },
             source="system.yaml",
         )
@@ -60,14 +56,11 @@ class TestSystemConfig:
         assert config.health.temp_warning_c == 50.0
         assert config.health.temp_critical_c == 70.0
         assert config.health.tx_error_threshold == 64
-        assert config.motor_check.per_motor_timeout_ms == 2000.0
-        assert config.motor_check.default_magnitude["m3508"] == 600.0
 
     def test_missing_sections_fall_back_to_defaults(self) -> None:
         config = load_system_config({"can_buses": {"a_bus": "can_a"}}, source="system.yaml")
 
         assert config.health == DEFAULT_HEALTH
-        assert config.motor_check == DEFAULT_MOTOR_CHECK
         assert config.match == DEFAULT_MATCH
 
     def test_match_duration_is_read_from_yaml(self) -> None:
@@ -104,17 +97,17 @@ class TestSystemConfig:
         assert config.health.temp_critical_c == 90.0
         assert config.health.feedback_timeout_ms == DEFAULT_HEALTH.feedback_timeout_ms
 
-    def test_partial_default_magnitude_fills_defaults(self) -> None:
-        config = load_system_config(
-            {"can_buses": {"a_bus": "can_a"}, "motor_check": {"default_magnitude": {"m3508": 750}}},
-            source="system.yaml",
-        )
+    def test_motor_check_section_is_rejected(self) -> None:
+        """動作確認の設定は無くなった。残っていたら「書いたのに効かない」状態になる。
 
-        assert config.motor_check.default_magnitude["m3508"] == 750.0
-        assert (
-            config.motor_check.default_magnitude["generic"]
-            == DEFAULT_MOTOR_CHECK.default_magnitude["generic"]
-        )
+        駆動量もタイムアウトも config/*_positions.yaml の位置定数が持つ
+        (robots/motor_check.py は運用と同じ位置名へ動かす)。
+        """
+        with pytest.raises(ValueError, match="motor_check"):
+            load_system_config(
+                {"can_buses": {"a_bus": "can_a"}, "motor_check": {"per_motor_timeout_ms": 1500}},
+                source="system.yaml",
+            )
 
     def test_unknown_top_level_key_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="motors"):
@@ -133,16 +126,6 @@ class TestSystemConfig:
         with pytest.raises(ValueError, match="temp_warning_c"):
             load_system_config(
                 {"can_buses": {"a_bus": "can_a"}, "health": {"temp_warning_c": "hot"}},
-                source="system.yaml",
-            )
-
-    def test_unknown_driver_in_default_magnitude_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="edulight05"):
-            load_system_config(
-                {
-                    "can_buses": {"a_bus": "can_a"},
-                    "motor_check": {"default_magnitude": {"edulight05": 5.0}},
-                },
                 source="system.yaml",
             )
 
@@ -179,7 +162,7 @@ class TestRobotConfigStructure:
                 source="test.yaml",
             )
 
-    @pytest.mark.parametrize("section", ["health", "motor_check", "can_buses", "match"])
+    @pytest.mark.parametrize("section", ["health", "can_buses", "match"])
     def test_shared_sections_point_at_system_yaml(self, section: str) -> None:
         """共通設定を robot yaml に書いても効かない。黙って無視せず移動先を教える。"""
         with pytest.raises(ValueError, match=r"system\.yaml"):
@@ -433,34 +416,18 @@ class TestDriverSpecificKeys:
         assert config.motors["y_axis_r"].pid == {"kp": 3.0}
 
 
-class TestMotorCheckOverride:
-    def test_values_are_parsed(self) -> None:
-        config = load_robot_config(
-            _robot(gripper=_generic(motor_check={"magnitude": 5.0, "timeout_ms": 2500})),
-            source="test.yaml",
-        )
-        override = config.motors["gripper"].motor_check
+class TestMotorCheckIsNotAMotorSetting:
+    """モータごとの動作確認設定は無くなった。
 
-        assert override.magnitude == 5.0
-        assert override.timeout_ms == 2500.0
+    両ハンドを 1 本のシーケンスで駆動する形 (robots/motor_check.py) へ変えたので、
+    確認は運用と同じ位置名へ動かす。**確認専用の駆動量が存在しない**ため、
+    位置定数と食い違いようがない。書いてあったら起動時に落とす。
+    """
 
-    def test_absent_override_is_empty(self) -> None:
-        config = load_robot_config(_robot(gripper=_generic()), source="test.yaml")
-        override = config.motors["gripper"].motor_check
-
-        assert override.magnitude is None
-        assert override.timeout_ms is None
-
-    def test_unknown_key_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="tolerance"):
+    def test_motor_check_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="motor_check"):
             load_robot_config(
-                _robot(gripper=_generic(motor_check={"tolerance": 1.0})), source="test.yaml"
-            )
-
-    def test_non_numeric_magnitude_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="magnitude"):
-            load_robot_config(
-                _robot(gripper=_generic(motor_check={"magnitude": "open"})), source="test.yaml"
+                _robot(gripper=_generic(motor_check={"magnitude": 5.0})), source="test.yaml"
             )
 
 
@@ -480,12 +447,6 @@ class TestShippedConfigs:
         assert system.health.temp_warning_c == 65.0
         assert system.health.temp_critical_c == 80.0
         assert system.health.tx_error_threshold == 96
-        assert system.motor_check.per_motor_timeout_ms == 1500.0
-        assert system.motor_check.default_magnitude == {
-            "m3508": 500.0,
-            "edulite05": 5.0,
-            "generic": 0.1,
-        }
         assert system.match.duration_s == 180.0
 
     @pytest.mark.parametrize("name", ["main_hand.yaml", "sub_hand.yaml"])
@@ -576,27 +537,18 @@ class TestShippedBenchConfigs:
         assert set(config.motors) == axis_motors
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
-    def test_bench_checklist_targets_the_registered_robot(self, bench: str) -> None:
-        """チェックリストのロールが、その config の robot_name と一致すること。
+    def test_bench_checklist_uses_a_known_role(self, bench: str) -> None:
+        """チェックリストのロールが ALL_ROLES に含まれること。
 
-        ずれるとチェックリストがどのタブにも出ず、**指差喚呼を 1 項目も踏まないまま
+        知らないロール名で書いた項目はどこにも読み込まれない。しかも定義の無い
+        ロールは「完了」とみなされるので、**指差喚呼を 1 項目も踏まないまま
         試合フェーズへ入れてしまう**。
         """
         bench_dir = _CONFIG_DIR / "bench" / bench
-
-        robot_yaml = next(
-            path
-            for path in bench_dir.iterdir()
-            if path.name.endswith(".yaml")
-            and not path.name.endswith("_positions.yaml")
-            and path.name not in ("system.yaml", "checklist.yaml")
-        )
-        robot_name = yaml.safe_load(robot_yaml.read_text())["robot_name"]
-
         checklist = yaml.safe_load((bench_dir / "checklist.yaml").read_text())["checklists"]
 
-        assert robot_name in checklist
-        assert checklist[robot_name]
+        assert set(checklist) <= set(ALL_ROLES)
+        assert any(checklist.values())
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
     def test_bench_opens_only_the_buses_on_the_desk(self, bench: str) -> None:

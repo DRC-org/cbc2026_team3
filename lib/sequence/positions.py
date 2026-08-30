@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 # 単位換算は制御層 (同期監視・位置制御ループ) と共有する。ここで再定義すると
@@ -63,6 +63,46 @@ class ManualSpec:
 
 
 @dataclass(frozen=True)
+class HomingSpec:
+    """リミットスイッチで零点を確定する手順。**軸の機構的性質**なのでここに置く。
+
+    動作確認固有の値ではない。「その軸はどちら向きに、どれだけ動かせば原点に
+    当たるか」は機構が変われば変わるので、位置定数と同じ場所で管理する。
+
+    **`search_distance` は省略できない。** ホーミングは「当たるまで動かす」動作で、
+    配線が抜けていたりセンサが死んでいたりすると機構端まで押し込み続ける。
+    探索距離を超えたら止めるのが唯一の歯止めになる (緊急停止は操縦者が押さないと
+    効かないので、無人の歯止けが要る)。
+    """
+
+    #: 監視するセンサ名 (config の `sensors:` に登録された名前)
+    sensor: str
+    #: 探索方向。+1 か -1 のみ。人間の単位での増減方向を表す
+    direction: float
+    #: 探索距離の上限 [軸の unit]。ここまで動かして当たらなければ失敗として止める
+    search_distance: float
+    #: 1 回あたりの移動量 [軸の unit]。小さいほど原点の精度が上がり、時間が延びる
+    step: float
+    #: 1 ステップごとの待ち [s]。指令が機構へ届き、センサの状態が返る余裕を取る
+    settle_s: float
+
+    def __post_init__(self) -> None:
+        if self.direction not in (1.0, -1.0):
+            raise ValueError(f"homing.direction は +1 か -1: {self.direction!r}")
+        if self.search_distance <= 0.0:
+            raise ValueError(f"homing.search_distance は正の値: {self.search_distance!r}")
+        if self.step <= 0.0:
+            raise ValueError(f"homing.step は正の値: {self.step!r}")
+        if self.settle_s < 0.0:
+            raise ValueError(f"homing.settle_s は 0 以上: {self.settle_s!r}")
+        if self.step > self.search_distance:
+            # 1 歩も踏めないまま失敗するだけの設定を通さない
+            raise ValueError(
+                f"homing.step ({self.step}) が search_distance ({self.search_distance}) を超えています"
+            )
+
+
+@dataclass(frozen=True)
 class AxisSpec:
     """1 論理軸の単位換算とデフォルト待ち条件。
 
@@ -91,10 +131,20 @@ class AxisSpec:
     settle_s: float = 0.0
     # 手動操縦の可動範囲。None ならこの軸は連続操作の対象外 (プリセット指令のみ)
     manual: ManualSpec | None = None
+    # リミットスイッチによる零点確定。None ならこの軸はホーミングしない
+    # (電源投入位置をそのまま原点として使う)
+    homing: HomingSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.motors:
             raise ValueError(f"axes.{self.name} にモータがありません")
+        # 到達判定を持たない軸へホーミングを書かせない。duty / on_off は指令が
+        # 届いたかを観測できないので、「当たるまで少しずつ動かす」が成立しない
+        if self.homing is not None and self.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"axes.{self.name}: homing は位置指令の軸にのみ書けます "
+                f"(command_mode={self.command_mode.value})"
+            )
 
     @property
     def motor_names(self) -> tuple[str, ...]:
@@ -146,12 +196,18 @@ _AXIS_KEYS = frozenset(
         "command_mode",
         "settle_s",
         "manual",
+        "homing",
     }
 )
 
 _MOTOR_KEYS = frozenset({"scale", "offset"})
 
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
+
+_HOMING_KEYS = frozenset({"sensor", "direction", "search_distance", "step", "settle_s"})
+#: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
+#: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
+_HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
 
 #: 手動のジョグ量候補を書かなかった軸に与える既定 (人間の単位)。
 #: UI は必ず 1 つ以上の候補を要求するため、空にはしない
@@ -197,6 +253,41 @@ class PositionTable:
     @classmethod
     def empty(cls, *, source: str = "<inline>") -> PositionTable:
         return cls({}, {}, source=source)
+
+    @classmethod
+    def merged(cls, tables: Sequence[PositionTable]) -> PositionTable:
+        """複数の位置定数表を 1 つに束ねる。
+
+        統合動作確認シーケンス (robots/motor_check.py) は両ハンドのアクチュエータを
+        1 つの順序で駆動するため、両機の軸を同じ表から引く必要がある。
+
+        **軸名の衝突は起動時に拒否する。** 後勝ちで上書きすると、動作確認が意図した
+        側とは別の機体の軸へ指令が飛ぶ。症状は「指令したのに動かない機構」と
+        「触っていないのに動く機構」が同時に出る形で、しかもどちらの config を見ても
+        間違いが書かれていないので原因にたどり着けない。
+
+        Raises:
+            ValueError: 同じ軸名が 2 つ以上の表にある
+        """
+        axes: dict[str, AxisSpec] = {}
+        positions: dict[str, dict[str, float | dict[str, float]]] = {}
+        owner: dict[str, str] = {}
+
+        for table in tables:
+            for name, spec in table._axes.items():
+                if name in axes:
+                    raise ValueError(
+                        f"軸 '{name}' が複数の位置定数に定義されています "
+                        f"({owner[name]} と {table.source})。"
+                        "軸名はロボット横断に一意でなければなりません"
+                    )
+                axes[name] = spec
+                owner[name] = table.source
+            for name, values in table._positions.items():
+                positions[name] = dict(values)
+
+        source = " + ".join(table.source for table in tables) or "<merged>"
+        return cls(axes, positions, source=source)
 
     @property
     def source(self) -> str:
@@ -375,7 +466,48 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         command_mode=command_mode,
         settle_s=float(settle_s),
         manual=_parse_manual(name, raw.get("manual"), command_mode),
+        homing=_parse_homing(name, raw.get("homing")),
     )
+
+
+def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
+    """リミットスイッチによる零点確定の設定を読む。書かない軸は None。
+
+    値の妥当性 (方向が ±1 か、探索距離が正か) は ``HomingSpec.__post_init__`` が見る。
+    ここで見るのはキーの綴りと型だけ。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.homing は辞書である必要があります: {raw!r}")
+
+    unknown = sorted(set(raw) - _HOMING_KEYS)
+    if unknown:
+        raise ValueError(
+            f"axes.{axis_name}.homing に未知のキー: {', '.join(unknown)} "
+            f"(指定できるのは {', '.join(sorted(_HOMING_KEYS))})"
+        )
+
+    missing = sorted(_HOMING_REQUIRED - set(raw))
+    if missing:
+        # 探索距離を省けるようにすると、既定値のまま機構端まで押し込む経路ができる
+        raise ValueError(f"axes.{axis_name}.homing に必須キーがありません: {', '.join(missing)}")
+
+    sensor = raw["sensor"]
+    if not isinstance(sensor, str) or not sensor:
+        raise ValueError(f"axes.{axis_name}.homing.sensor はセンサ名の文字列: {sensor!r}")
+
+    path = f"axes.{axis_name}.homing"
+    try:
+        return HomingSpec(
+            sensor=sensor,
+            direction=float(raw["direction"]),
+            search_distance=float(raw["search_distance"]),
+            step=float(raw["step"]),
+            settle_s=float(raw.get("settle_s", 0.05)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
 
 
 def _parse_command_mode(axis_name: str, raw: object) -> ControlMode:

@@ -48,16 +48,12 @@ const SETUP: MatchState = {
   phase: "setup",
   can_start_match: false,
   checklists: {
-    main_hand: {
+    pre_match: {
       items: [
         { id: "a", label: "電源投入", checked: true },
         { id: "b", label: "非常停止解除", checked: false },
       ],
       completed: false,
-    },
-    sub_hand: {
-      items: [{ id: "c", label: "初期位置確認", checked: true }],
-      completed: true,
     },
   },
 };
@@ -74,8 +70,32 @@ describe("Dashboard (セッティングタイム)", () => {
       states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
     });
 
-    // 以前は StartGate と右カラムの OperatorProgress が同じ項目を 2 度並べていた
+    // 項目名を出すのは Checklist だけ。StartGate は残り件数しか言わない
+    // (以前は StartGate と右カラムの OperatorProgress が同じ項目を 2 度並べていた)
     expect(screen.getAllByText(/非常停止解除/)).toHaveLength(1);
+  });
+
+  it("動作確認の入口をこの画面に 1 つだけ置く", () => {
+    // 機体ごとの入口があると 2 つを同時に起動でき、両機が同時に動きうる。
+    // 統合後は両ハンドを 1 本のシーケンスで駆動するので入口も 1 つ
+    renderWithRobot(<Dashboard />, {
+      matchState: SETUP,
+      states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
+    });
+
+    expect(screen.getAllByRole("button", { name: "動作確認を開始" })).toHaveLength(1);
+  });
+
+  it("指差喚呼をこの画面で完結させる (操縦者タブへ往復させない)", () => {
+    // 操縦者 2 名は同じ場所に立つので、確認は Monitor 1 画面へ集約した
+    renderWithRobot(<Dashboard />, {
+      matchState: SETUP,
+      states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
+    });
+
+    expect(screen.getByText("セッティング指差喚呼")).toBeInTheDocument();
+    // チェックは操作できる形で出ていること (表示だけでは点検を進められない)
+    expect(screen.getByLabelText("非常停止解除")).toBeEnabled();
   });
 
   it("機体の判定文言を画面に 1 度しか描かない", () => {

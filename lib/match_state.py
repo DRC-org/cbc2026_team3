@@ -5,7 +5,7 @@
 全クライアント共通の状態をここで一元管理する。
 
 操縦者 2 名 + Monitor が別ブラウザで接続するため、チェックリストの進捗を
-クライアント側に持つと「2 人とも完了」の判定ができない。正はサーバー側に置く。
+クライアント側に持つと「どこまで確認したか」が画面ごとに食い違う。正はサーバー側に置く。
 """
 
 from __future__ import annotations
@@ -17,12 +17,18 @@ from enum import StrEnum
 
 from lib.config_schema import DEFAULT_MATCH, MatchSettings
 
-ROLE_MAIN_HAND = "main_hand"
-ROLE_SUB_HAND = "sub_hand"
+#: 試合前点検のロール。**現在これ 1 つしかない。**
+#: かつては操縦者 2 名 (main_hand / sub_hand) が別々に指差喚呼し、両方揃って初めて
+#: 試合に入れる構成だった。実運用では 2 名が必ず同じ場所で操縦するため、独立した
+#: 2 回の確認にはならず、同じ機体を 2 人で二度読み上げるだけになっていた。
+#: 統合後は Monitor の設定セクションに 1 つだけ置く。
+ROLE_PRE_MATCH = "pre_match"
 
 #: チェックリストを持ちうる全ロール。UI が KeyError にならないよう常にこの順で埋める。
-#: 操縦者 2 名分が揃うまで試合に入れない (= 全ロールが試合開始のゲートを兼ねる)。
-ALL_ROLES: tuple[str, ...] = (ROLE_MAIN_HAND, ROLE_SUB_HAND)
+#: 全ロールの完了が試合開始のゲートを兼ねる (``can_start_match``)。
+#: ロールが 1 つでも辞書のまま運ぶのは、``can_start_match`` の判定 (全ロールが完了)
+#: と WS 契約の形を変えずに済ませるため。
+ALL_ROLES: tuple[str, ...] = (ROLE_PRE_MATCH,)
 
 
 class Court(StrEnum):
@@ -64,7 +70,7 @@ PHASES_OUTSIDE_MATCH: frozenset[Phase] = frozenset({Phase.SETUP, Phase.READY, Ph
 #: 準備中のみ。指差喚呼は試合が終わるまでやり直させない (結果確認の前に消させない)。
 PHASES_PREPARATION: frozenset[Phase] = frozenset({Phase.SETUP, Phase.READY})
 
-#: 試合開始ゲート。READY = 2 名の指差喚呼が揃った状態でしか試合へ入れない。
+#: 試合開始ゲート。READY = 指差喚呼が全項目そろった状態でしか試合へ入れない。
 PHASES_START_GATE: frozenset[Phase] = frozenset({Phase.READY})
 
 

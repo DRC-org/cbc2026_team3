@@ -650,3 +650,42 @@ class TestAxisToValue:
         spec = _table().axis("lift_motor")
         with pytest.raises(PositionLookupError):
             spec.to_value({})
+
+
+class TestMerged:
+    """統合動作確認シーケンスは両ハンドの軸を 1 つの表から引く。
+
+    軸名がロボット横断に一意であることに依存しているので、崩れたら起動時に
+    弾けなければならない。
+    """
+
+    @staticmethod
+    def _one(axis: str, position: str) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {axis: {"unit": "deg", "command_unit": "deg"}},
+                "positions": {axis: {position: 1.0}},
+            },
+            source=f"<{axis}>",
+        )
+
+    def test_両方の軸を引ける(self) -> None:
+        merged = PositionTable.merged([self._one("y_axis", "home"), self._one("valve_1", "open")])
+
+        assert set(merged.axes) == {"y_axis", "valve_1"}
+        assert merged.raw("y_axis", "home") == 1.0
+        assert merged.raw("valve_1", "open") == 1.0
+
+    def test_軸名が衝突したら拒否する(self) -> None:
+        # 後勝ちで上書きすると、動作確認が意図した側とは別の機体の軸を動かす。
+        # 「指令したのに動かない機構」と「触っていないのに動く機構」が同時に出る
+        with pytest.raises(ValueError, match="gripper"):
+            PositionTable.merged([self._one("gripper", "open"), self._one("gripper", "closed")])
+
+    def test_出どころを引き継ぐ(self) -> None:
+        # 位置が見つからないときの例外メッセージは source を頼りに config を探す
+        merged = PositionTable.merged([self._one("y_axis", "home")])
+        assert "y_axis" in merged.source
+
+    def test_空でも成立する(self) -> None:
+        assert PositionTable.merged([]).axes == ()

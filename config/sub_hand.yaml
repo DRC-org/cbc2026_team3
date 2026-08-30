@@ -1,6 +1,6 @@
 robot_name: sub_hand
 
-# バス別名 (m3508_bus 等) の定義・health・motor_check の共通設定は config/system.yaml。
+# バス別名 (m3508_bus 等) の定義・health の共通設定は config/system.yaml。
 # 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
 
 # !!! can_id はバス単位でロボット横断に一意にすること !!!
@@ -25,11 +25,10 @@ motors:
     set_zero_on_start: false
 
   # --- 離散状態アクチュエータ (自作モータドライバ) ---
-  # 開 / 閉 の 2 状態しか取らないため、generic 既定の 0.1deg は「どの状態でもない」
-  # 無意味な指令になる。しかもサーボは補間完了で reached を立てるので、0.1deg しか
-  # 動いていなくても動作確認は PASSED になる。安全な状態そのものを指令する。
-  # !!! magnitude は config/sub_hand_positions.yaml の対応する位置定数と同じ値にすること。
-  #     ずれると「動作確認で動いた位置」と「運用で使う位置」が別物になり、確認が意味を失う。
+  # 開 / 閉 の 2 状態しか取らない。動作確認も運用と同じ位置名へ動かすので
+  # (robots/motor_check.py)、確認専用の駆動量は存在しない。かつては magnitude を
+  # 別に持っており、微小量を指令すると「サーボは補間完了で reached を立てるので、
+  # 0.1deg しか動いていなくても PASSED になる」という形で確認が意味を失っていた。
   sub_gripper:
     driver: generic
     bus: generic_bus
@@ -42,8 +41,6 @@ motors:
     # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
     expected_firmware: 2
     expected_angle_range_deg: 270.0
-    motor_check:
-      magnitude: 5.0           # positions.sub_gripper.open と一致させること
 
   # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---
   # 電磁弁基板 #0 の ch0-5 = 0xC0〜0xC5 (仕様書 §2.2 / §9)。
@@ -53,12 +50,13 @@ motors:
   # DC 基板とサーボ基板は on_off を黙って捨てるので、can_id の書き間違いは
   # 「その弁が動かない」として現れる (別の機構が動くことはない)。
   #
-  # !!! motor_check.magnitude: 0 は省略できない !!!
-  # この基板は弁が実際に開いたかを観測する手段を持たず (圧力センサもリミット
-  # スイッチも非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。
-  # 除外せずに動作確認へ載せると必ず「動かなかった」で落ち、しかも原因が
-  # 配線不良にしか見えない。代わりに config/checklist.yaml の valves_actuate で
-  # 打音・目視確認する。
+  # !!! この基板の動作は自動判定できない !!!
+  # 弁が実際に開いたかを観測する手段を持たず (圧力センサもリミットスイッチも
+  # 非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。動作確認は弁を
+  # 開閉するところまでを担い、鳴ったかどうかは config/checklist.yaml の
+  # valves_actuate で打音・目視確認する。
+  # on_off 軸は到達判定を持たないので、シーケンスは settle_s の固定待ちへ落ちる
+  # (config/sub_hand_positions.yaml)。
   valve_1:
     driver: generic
     bus: generic_bus
@@ -70,8 +68,6 @@ motors:
     # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
     # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_2:
     driver: generic
@@ -79,8 +75,6 @@ motors:
     can_id: 0xC1               # 電磁弁基板 #0 ch1 (PB6)
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_3:
     driver: generic
@@ -88,8 +82,6 @@ motors:
     can_id: 0xC2               # 電磁弁基板 #0 ch2 (PB5)
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_4:
     driver: generic
@@ -97,8 +89,6 @@ motors:
     can_id: 0xC3               # 電磁弁基板 #0 ch3 (PB4)
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_5:
     driver: generic
@@ -106,8 +96,6 @@ motors:
     can_id: 0xC4               # 電磁弁基板 #0 ch4 (PB3)
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   valve_6:
     driver: generic
@@ -115,8 +103,6 @@ motors:
     can_id: 0xC5               # 電磁弁基板 #0 ch5 (PA15)
     control_type: on_off
     expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   # --- 吸着系: ポンプ (自作モータドライバ / DC 基板) ---
   # **ポンプは電磁弁基板ではなく DC 基板が動かす** (仕様書 §9.6)。電磁弁基板の 6ch は
@@ -128,15 +114,14 @@ motors:
   # can_id を 0x88 / 0x89 (DC 基板 #1 = DIP 1) へ移すこと。
   #
   # duty 指令で、回ったかどうかを観測する手段は無い (conveyor と同じ)。
-  # 動作確認から除外し、checklist の pumps_run で目視・聴音確認する。
+  # 動作確認は回して止めるところまでを担い、鳴ったかどうかは checklist の
+  # pumps_run で聴音確認する。
   pump_vac:
     driver: generic
     bus: generic_bus
     can_id: 0x81               # DC 基板 #0 ch1
     control_type: duty
     expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0
 
   pump_blow:
     driver: generic
@@ -144,5 +129,3 @@ motors:
     can_id: 0x82               # DC 基板 #0 ch2
     control_type: duty
     expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
-    motor_check:
-      magnitude: 0

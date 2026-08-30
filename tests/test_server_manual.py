@@ -15,7 +15,7 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.manual import ManualController
-from lib.match_state import ChecklistItem, Phase
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Phase
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
@@ -97,11 +97,7 @@ def _fixture(
 ) -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
     # 指差喚呼の項目が 1 つも無いと can_start_match が最初から True になり、
     # フェーズが SETUP を素通りして READY から始まる
-    definitions = (
-        {"main_hand": [ChecklistItem(id="check", label="確認")], "sub_hand": []}
-        if checklist
-        else None
-    )
+    definitions = {ROLE_PRE_MATCH: [ChecklistItem(id="check", label="確認")]} if checklist else None
     fx = ServerFixture.build(checklist_definitions=definitions)
     fx.freeze_broadcast()
     manual, drivers = _make_manual()
@@ -223,10 +219,10 @@ class TestControlOwnership:
     async def test_手動モード中は動作確認を起動できない(self) -> None:
         fx, _ = _fixture()
         await _switch(fx, "manual")
-        assert await fx.start_motor_check(_ROBOT) is False
+        assert await fx.start_motor_check() is False
 
-    # 動作確認が実際に駆動している最中の排他は、実 CANManager を要するため
-    # tests/test_server_motor_check.py の TestMotorCheckAndManualAreExclusive にある
+    # 動作確認の側から見た排他 (実行中の手動切替拒否・両ロボットへのゲート) は
+    # tests/test_server_motor_check.py にある
 
     async def test_半自動へ戻してもシーケンスは自動再開しない(self) -> None:
         # 手動で機構を動かした後に先頭から流すと、機構の姿勢と手順が食い違う
