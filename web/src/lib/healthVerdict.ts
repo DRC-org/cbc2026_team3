@@ -1,4 +1,4 @@
-import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
+import type { HealthSnapshot, MotorHealth, MotorState, SafetyState } from "@/lib/protocol";
 import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
 import type { Tone } from "@/lib/tone";
 
@@ -19,6 +19,33 @@ export interface SafetyIssue {
 /** 警告温度に達しているモータの基数。「異常 N 件」の N をここでしか数えない */
 export function countHotMotors(motors: Record<string, MotorState>): number {
   return Object.values(motors).filter((m) => m.temp >= TEMP_WARNING).length;
+}
+
+/**
+ * モータ一覧の見出しチップ (MotorSummary) の判定。
+ *
+ * 判定を MotorSummary 側に置くと、同じ画面に並ぶ 3 つの表示 —— 診断カラムの
+ * 見出しチップ (evaluateHealth)・各行のバッジ (MotorHealth.state)・このサマリー ——
+ * が別々の根拠で答えることになる。実際にサマリーだけが温度しきい値しか見ておらず、
+ * FAULT のモータが行では赤バッジなのにサマリーは緑の「All operational」を出していた。
+ *
+ * **入力はサーバーのモータ健全性だけで、温度テレメトリは見ない。** 温度警告は
+ * サーバーが config の `temp_warning_c` で既に `warning` を立てている。UI が別の
+ * しきい値で重ねて数えると、サーバー判定と食い違った件数が画面に出る。
+ *
+ * 未配信・空配列を success へ倒さないのは `evaluateHealth` と同じ理由で、
+ * 「異常の有無が分からない」は安全側では異常であって正常ではない。
+ */
+export function summarizeMotors(healthMotors: MotorHealth[] | undefined): HealthVerdict {
+  if (!healthMotors || healthMotors.length === 0) {
+    return { tone: "neutral", label: "ヘルス未取得" };
+  }
+
+  const anomalies = healthMotors.filter((m) => m.state !== "ok");
+  if (anomalies.length === 0) return { tone: "success", label: "All operational" };
+
+  const tone: Tone = anomalies.some((m) => m.state === "fault") ? "error" : "warning";
+  return { tone, label: `異常 ${anomalies.length} 件` };
 }
 
 /**

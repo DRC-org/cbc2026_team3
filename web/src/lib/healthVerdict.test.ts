@@ -5,6 +5,7 @@ import {
   describeSafetyIssues,
   evaluateHealth,
   motorTempTone,
+  summarizeMotors,
 } from "@/lib/healthVerdict";
 import type {
   BusHealth,
@@ -286,6 +287,44 @@ describe("motorTempTone", () => {
 
   it("温度を返さないモータは neutral", () => {
     expect(motorTempTone(null)).toBe("neutral");
+  });
+});
+
+/**
+ * サマリーが独自判定を持っていた頃、温度が正常なら FAULT のモータがあっても
+ * 「All operational」を出していた。判定はここ 1 箇所だけが持つ。
+ */
+describe("summarizeMotors", () => {
+  it("全て ok なら All operational", () => {
+    expect(summarizeMotors([motorHealth(), motorHealth({ name: "y_axis_l" })])).toEqual({
+      tone: "success",
+      label: "All operational",
+    });
+  });
+
+  it("fault が 1 件でもあれば error", () => {
+    const verdict = summarizeMotors([motorHealth({ state: "fault" }), motorHealth({ name: "b" })]);
+    expect(verdict.tone).toBe("error");
+    expect(verdict.label).toBe("異常 1 件");
+  });
+
+  it("fault が無く stale / warning だけなら warning", () => {
+    expect(summarizeMotors([motorHealth({ state: "stale" })]).tone).toBe("warning");
+    expect(summarizeMotors([motorHealth({ state: "warning" })]).tone).toBe("warning");
+  });
+
+  it("件数は ok 以外の総数 (fault も stale もまとめて数える)", () => {
+    const verdict = summarizeMotors([
+      motorHealth({ name: "a", state: "fault" }),
+      motorHealth({ name: "b", state: "stale" }),
+      motorHealth({ name: "c" }),
+    ]);
+    expect(verdict.label).toBe("異常 2 件");
+  });
+
+  it("未配信・空配列は success へ倒さない (異常の有無が分からない)", () => {
+    expect(summarizeMotors(undefined)).toEqual({ tone: "neutral", label: "ヘルス未取得" });
+    expect(summarizeMotors([])).toEqual({ tone: "neutral", label: "ヘルス未取得" });
   });
 });
 
