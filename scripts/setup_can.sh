@@ -65,7 +65,7 @@ wait_for_iface() {
 }
 
 setup_one() {
-    local iface="$1" bitrate="$2" txqueuelen="$3"
+    local iface="$1" bitrate="$2" txqueuelen="$3" restart_ms="$4"
 
     if ! wait_for_iface "$iface"; then
         return 2   # デバイス欠け。strict かどうかは呼び出し元が判断する
@@ -74,8 +74,13 @@ setup_one() {
     # 設定変更は down 状態でしか通らない。up 済みでも失敗しないよう || true。
     "${IP[@]}" link set "$iface" down 2>/dev/null || true
 
-    if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate"; then
-        log_err "${iface}: bitrate ${bitrate} の設定に失敗"
+    # bitrate と restart-ms は同じ `type can` の設定で入れる。
+    # **restart-ms を省くとカーネル既定の 0 = 自動復帰しない、になる。**
+    # bus-off に落ちたインタフェースは手動で down/up するまで送受信とも死ぬので、
+    # 専用バスに 1 台しか居ない構成 (can_dm3520) では相手が電源を失っただけで
+    # 試合中に復旧不能になる。
+    if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate" restart-ms "$restart_ms"; then
+        log_err "${iface}: bitrate ${bitrate} / restart-ms ${restart_ms} の設定に失敗"
         return 1
     fi
 
@@ -97,7 +102,7 @@ setup_one() {
         return 1
     fi
 
-    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} state=${state}"
+    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${restart_ms} state=${state}"
     return 0
 }
 
@@ -136,19 +141,19 @@ missing=()
 unassigned=()
 
 # serial 未採取のバスを控えておく（strict では未完了として扱う）
-while IFS=$'\t' read -r name serial _bitrate _txq; do
+while IFS=$'\t' read -r name serial _bitrate _txq _restart; do
     [[ -z "${name:-}" ]] && continue
     if [[ "$serial" == "TBD" ]]; then
         unassigned+=("$name")
     fi
 done < <("$PYTHON" "$CAN_CONFIG" list)
 
-while IFS=$'\t' read -r name _serial bitrate txqueuelen; do
+while IFS=$'\t' read -r name _serial bitrate txqueuelen restart_ms; do
     [[ -z "${name:-}" ]] && continue
     configured=$(( configured + 1 ))
 
     set +e
-    setup_one "$name" "$bitrate" "$txqueuelen"
+    setup_one "$name" "$bitrate" "$txqueuelen" "$restart_ms"
     rc=$?
     set -e
 

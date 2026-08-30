@@ -151,6 +151,82 @@ class TestCANManagerHealth:
         assert snap.buses[0].state is BusHealth.DEGRADED
         assert snap.buses[0].tx_error_count == 3
 
+    async def test_degraded_clears_once_sending_recovers(self) -> None:
+        """**送信が復旧したら DEGRADED は消えなければならない。**
+
+        判定を累計カウンタで行っていた頃は、一度しきい値を超えたバスが永久に
+        DEGRADED のまま残った。実機では物理緊急停止で DM3520 の電源が数秒落ちた
+        だけで 6000 件積み上がり、CAN が完全に復旧した後 (ip -s link が
+        ERROR-ACTIVE・bus-off 0 回・送受信ともエラー 0) も UI が異常を出し続けた。
+        操縦者には「直したのに直らない」としか見えず、本物の異常と区別が付かない。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = MagicMock()
+        mgr.add_bus("bus0", bus)
+        mgr.add_motor("bus0", HealthFlagDriver("m1", 1))
+        thresholds = replace(DEFAULT_HEALTH, tx_error_threshold=16)
+        msg = can.Message(arbitration_id=0x100, data=bytes(8))
+
+        bus.send.side_effect = can.CanError("相手が電源を失って ACK が返らない")
+        for _ in range(5):
+            with pytest.raises(can.CanError):
+                await mgr.send_to_bus("bus0", msg)
+        assert mgr.health(thresholds=thresholds).buses[0].state is BusHealth.DEGRADED
+
+        bus.send.side_effect = None
+        for _ in range(64):
+            await mgr.send_to_bus("bus0", msg)
+
+        snap = mgr.health(thresholds=thresholds)
+        assert snap.buses[0].state is BusHealth.OK
+        # 累計は残す。「この試合で何回失敗したか」は判定とは別に記録が要る
+        assert snap.buses[0].tx_error_count == 5
+
+    async def test_error_frame_marks_bus_off_and_is_not_delivered_to_motors(self) -> None:
+        """SocketCAN のエラーフレームは bus-off を立て、モータへは配らない。
+
+        python-can は既定でエラーフレームを受信する。これを通常フレームとして
+        配ると、エラー種別のビット列がそのまま arbitration_id として宛先判定に
+        掛かる (DM3520 の MST_ID 0x11 は CAN_ERR_TRX|CAN_ERR_TX_TIMEOUT と同値)。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = MagicMock()
+        motor = HealthFlagDriver("m1", 1)
+        mgr.add_bus("bus0", bus)
+        mgr.add_motor("bus0", motor)
+
+        bus_off_frame = can.Message(
+            arbitration_id=motor.FEEDBACK_ID_BASE + motor.can_id | 0x40,
+            data=bytes(8),
+            is_error_frame=True,
+        )
+        # 受信ループと同じ判定を通す (recv が 1 通返して次で降りる)
+        bus.recv.side_effect = [bus_off_frame, asyncio.CancelledError()]
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._receive_loop("bus0")
+
+        snap = mgr.health()
+        assert snap.buses[0].bus_off is True
+        assert snap.buses[0].state is BusHealth.DOWN
+        # 鮮度は 1ms も進んではならない (エラーフレームはモータの応答ではない)
+        assert mgr.last_feedback_at("m1") is None
+
+    async def test_bus_off_clears_once_traffic_returns(self) -> None:
+        """bus-off ラッチは実通信が戻ったら外れる。
+
+        `restart-ms` が 0 のインタフェースは復帰通知 (CAN_ERR_RESTARTED) を送らない。
+        実通信を根拠に外す経路が無いと、一度立った DOWN が永久に残る。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = MagicMock()
+        mgr.add_bus("bus0", bus)
+        mgr.add_motor("bus0", HealthFlagDriver("m1", 1))
+        mark_bus_off(mgr, "bus0")
+
+        await mgr.send_to_bus("bus0", can.Message(arbitration_id=0x100, data=bytes(8)))
+
+        assert mgr.health().buses[0].bus_off is False
+
     def test_bus_off_marks_down(self, mgr_with_motors) -> None:
         mgr, _ = mgr_with_motors
         mark_bus_off(mgr, "bus0")

@@ -48,6 +48,11 @@ _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 #: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
 _WS_SEND_TIMEOUT_S = 1.0
 
+#: 「励磁されているはず」の起点から、無励磁を異常として報告し始めるまでの猶予。
+#: enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓がある。
+#: DM3520 の再送は 20Hz (50ms) なので、その 10 倍を取れば偽報告は出ない。
+_ENERGIZE_GRACE_S = 0.5
+
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
 
@@ -133,6 +138,18 @@ class RobotServer:
         # フィードバックに残った緊急停止ビットをそのまま信じると、解除した瞬間に
         # サーバーが自分で緊急停止をかけ直して二度と解除できなくなる
         self._board_e_stop_ignore_before: float = 0.0
+        # 「この時刻以降は全モータが励磁されているはず」。起動直後と緊急停止解除の
+        # 直後に置き、緊急停止中は None にする。無励磁の報告をこの猶予つきで行うのは、
+        # enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓があり、
+        # そこを無条件に異常とすると解除のたびに偽の警告が 1 回出るため
+        self._energize_expected_since: float | None = None
+        # 直近の有効化で励磁できなかったモータ (ロボット名 -> モータ名)。
+        # 送信失敗もフィードバック待ちの失敗もここへ集約し、`safety` に載せて配信する。
+        # **緊急停止で消さない。** 停止中に報告を止めるのは `_unenergized_motors` の
+        # 緊急停止ガード 1 箇所の役目で、こちらでも消すと「壊しても落ちない層」が
+        # 増えるだけになる (どちらか片方を消しても症状が出ないので、後で誰かが
+        # 本物のガードの方を消しても気付けない)
+        self._inactive_motors: dict[str, list[str]] = {}
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
@@ -280,6 +297,10 @@ class RobotServer:
         )
 
     async def _on_startup(self, app: web.Application) -> None:
+        # `main()` は CANManager.run() (= 起動時設定と励磁) を終えてから
+        # `server.start()` を呼ぶので、この時点以降は全モータが励磁されているのが
+        # 正しい状態になる。起動時に励磁できなかったモータも同じ経路で画面に出す
+        self._energize_expected_since = time.time()
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
         # 各ロボットのシーケンス常駐ループを起動。停止/ジャンプで再起動可能な
         # 永続タスクとして保持し、shutdown でキャンセルする。
@@ -1001,6 +1022,7 @@ class RobotServer:
 
         return {
             "sync_violations": sorted(violations),
+            "unenergized_motors": self._unenergized_motors(robot_name),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
             "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
             "refreshers_running": all(r.is_running for r in ctx.target_refreshers),
@@ -1031,6 +1053,39 @@ class RobotServer:
             ],
         }
 
+    def _unenergized_motors(self, robot_name: str) -> list[str]:
+        """励磁されているべきなのに無励磁のモータ。
+
+        **これは「画面が正常に見えるのに機体が動かない」型の異常である。**
+        DM3520 はドライバの通信途絶保護や電源の瞬断で励磁が外れるが、その後も
+        フィードバックは正常に届き、`is_fault()` にも掛からないのでモータのヘルスは
+        OK のまま。PC は 20Hz で位置指令を送り続け、CAN のカウンタにも異常は出ない。
+        操縦者から見えるのは「指令しても動かない」だけで、原因を示す表示がどこにも無い。
+
+        励磁状態を報告しないドライバ (`is_energized()` が None) は対象外。
+        「分からない」を「無励磁」へ倒すと、自作モタドラと C620 が常時警告を出す。
+
+        緊急停止中は無励磁が正しいので何も返さない。解除・起動の直後も、enable が
+        次のフィードバックへ反映されるまでの 1 周期ぶんは猶予する。
+        """
+        since = self._energize_expected_since
+        if self._e_stop_active or since is None:
+            return []
+        if time.time() - since < _ENERGIZE_GRACE_S:
+            return []
+
+        ctx = self._robots[robot_name]
+        names = {
+            motor_name
+            for motor_name, motor in ctx.can_manager.motors.items()
+            if motor.is_energized() is False
+        }
+        # 有効化そのものに失敗したモータは、フィードバックが届いていなくても出す
+        # (`is_energized()` は最後に届いた値しか見ないので、応答の無いモータは
+        # 「無励磁と分かっている」側に入らない)
+        names.update(self._inactive_motors.get(robot_name, ()))
+        return sorted(names)
+
     async def _reactivate_motors(self) -> None:
         """緊急停止解除後にモータの励磁を戻す。
 
@@ -1040,9 +1095,24 @@ class RobotServer:
         """
         for name, ctx in self._robots.items():
             try:
-                await ctx.can_manager.activate_motors(should_abort=lambda: self._e_stop_active)
+                inactive = await ctx.can_manager.activate_motors(
+                    should_abort=lambda: self._e_stop_active
+                )
             except Exception:
                 logger.exception("緊急停止解除後のモータ有効化に失敗: robot=%s", name)
+                # 例外で丸ごと落ちた場合は 1 台も励磁できていない
+                inactive = list(ctx.can_manager.motors)
+            if inactive:
+                logger.error(
+                    "緊急停止解除後も無励磁のまま残ったモータ: robot=%s motors=%s",
+                    name,
+                    ", ".join(inactive),
+                )
+            self._inactive_motors[name] = list(inactive)
+
+        # 解除して有効化を試みた以上、以降は励磁されているのが正しい状態になる。
+        # 起点を置くのはここだけで、猶予の判定は `_unenergized_motors` が行う
+        self._energize_expected_since = time.time()
 
         # 有効化の途中で再び緊急停止が入ると、中断判定をすり抜けた enable が
         # 停止フレームより後に届きうる。念のため停止フレームを送り直す。

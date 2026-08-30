@@ -326,6 +326,7 @@ const TARGET_REFRESHER = fieldsOf<TargetRefresherState>({
 
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
+  unenergized_motors: "ui",
   loops_running: "ui",
   monitors_running: "ui",
   refreshers_running: "ui",

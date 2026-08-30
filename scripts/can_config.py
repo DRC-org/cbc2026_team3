@@ -26,6 +26,15 @@ _IFNAME_MAX = 15
 
 _SERVICE_NAME = "cbc-can.service"
 
+# bus-off からの自動復帰までの待ち時間 [ms]。**0 (カーネル既定) にしてはならない。**
+# 0 は「自動復帰しない」の意味で、一度 bus-off に落ちたインタフェースは
+# 手動で down/up するまで送受信とも死んだままになる。専用バスに 1 台しか
+# 居ない構成 (can_dm3520) では相手が電源を失うだけで ACK が返らなくなり、
+# TEC が 256 に達して bus-off へ落ちる。試合中にそれが起きると、
+# 相手の電源が戻っても機体は二度と動かない。
+# 100ms はカーネルの推奨値で、復帰を試みる周期でもある。
+DEFAULT_RESTART_MS = 100
+
 
 class ConfigError(Exception):
     """can_buses.yaml の内容が不正な場合に送出する。"""
@@ -72,7 +81,8 @@ def cmd_list(config: dict, *, assigned_only: bool) -> str:
         serial = str(entry.get("serial", UNASSIGNED)).strip() or UNASSIGNED
         bitrate = int(entry["bitrate"])
         txqueuelen = int(entry.get("txqueuelen", 1000))
-        lines.append(f"{name}\t{serial}\t{bitrate}\t{txqueuelen}")
+        restart_ms = int(entry.get("restart_ms", DEFAULT_RESTART_MS))
+        lines.append(f"{name}\t{serial}\t{bitrate}\t{txqueuelen}\t{restart_ms}")
     return "\n".join(lines)
 
 

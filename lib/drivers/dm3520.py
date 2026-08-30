@@ -380,6 +380,17 @@ class Dm3520Driver(MotorDriver):
     def is_fault(self) -> bool:
         return self.error_code >= _FIRST_ERROR_CODE
 
+    def is_energized(self) -> bool:
+        """FEEDBACK D0 の上位 4bit が `ENABLED` のときだけ励磁されている。
+
+        本機は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの TIMEOUT
+        (通信途絶保護) や電源の瞬断で励磁が外れると、PC は 20Hz で位置指令を送り続け、
+        フィードバックも正常に届き続けるのに機構だけが 1mm も動かない。
+        `is_fault()` は 0x5 以上しか見ないのでここには掛からず、モータのヘルスは
+        OK のまま —— **画面のどこにも現れない**。それを見えるようにするための判定。
+        """
+        return self.error_code == Dm3520Error.ENABLED
+
     def has_overcurrent_warning(self) -> bool:
         return self.error_code == Dm3520Error.OVERCURRENT
 

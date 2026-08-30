@@ -54,6 +54,7 @@ const THRESHOLDS = { warning: 65, critical: 80 };
 function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
+    unenergized_motors: [],
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -200,6 +201,20 @@ describe("describeSafetyIssues", () => {
     expect(issues[0].detail).toMatch(/y_axis/);
     expect(issues[0].detail).toMatch(/rotate/);
     expect(issues[0].hint).toMatch(/解除/);
+  });
+
+  it("無励磁のまま残ったモータを名前付きで返す", () => {
+    // **この異常は他のどこにも現れない。** フィードバックは正常に届き、ヘルスは OK、
+    // CAN のカウンタも平常で、操縦者に見えるのは「指令しても動かない」だけになる
+    const issues = describeSafetyIssues(safety({ unenergized_motors: ["sub_lift"] }));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].detail).toMatch(/sub_lift/);
+    expect(issues[0].hint).toMatch(/励磁/);
+  });
+
+  it("無励磁のモータがあると異常判定へ倒す", () => {
+    const verdict = evaluateHealth(health(), {}, safety({ unenergized_motors: ["sub_lift"] }));
+    expect(verdict.tone).toBe("error");
   });
 
   it("止まっている保護ループをバス名付きで返す", () => {
