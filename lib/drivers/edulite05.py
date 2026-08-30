@@ -222,6 +222,21 @@ class Edulite05Driver(MotorDriver):
             (self.encode_enable(), 0.1),
         ]
 
+    def idle_target_value(self) -> float:
+        """目標を持たない間に書き続ける指令値。
+
+        ``QueryDrivenTargetRefresher`` がこれをラッチして毎周期送り直すことで、
+        操縦者が何も操作していない間もフィードバックが届き続ける。**本機の
+        フィードバックは問い合わせ駆動で、送らなければ 1 通も来ない** (実機で確認:
+        励磁したまま 13 秒放置してもフィードバックは 0 通だった)。
+
+        値は ``activation_steps()`` の保持目標と同じもの。**指令として無害である**
+        ことが要点 —— 位置モードなら「今居る場所を保て」、それ以外なら「止まれ」で、
+        どちらも新しい動きを作らない。片方だけ直すと、励磁の瞬間と再送とで別の値を
+        書くことになり、enable した瞬間にアームがラッチ位置へ飛ぶ。
+        """
+        return self._state.position if self.mode is ControlMode.POSITION else 0.0
+
     def requires_fresh_feedback_for_activation(self) -> bool:
         # 位置モードの保持目標は実測角そのもの。MotorState の初期値 0.0 を実測角と
         # 取り違えると原点へ飛ぶため、フィードバック未受信では励磁させない。

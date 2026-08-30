@@ -615,17 +615,22 @@ ID 専用で、ID 空間そのものが分かれる）。それでも**専用バ
 マニュアルに無いため。`can0/can1/can2` を捨てて serial 固定名にしたのと同じ
 「バス 1 本 = ドライバ種別 1 つ」を崩さない判断でもある。
 
-#### フィードバックは問い合わせ駆動である（このドライバだけ）
+#### フィードバックは問い合わせ駆動である（EDULITE 05 も同じ）
 
 本機は**自分の CAN ID 宛のフレームを受けたときにしか**状態を返さない。M3508（C620 が
-自発的に送る）や EDULITE 05 と根本的に違い、PC が黙ると 1 通も届かなくなる。
+自発的に送る）と根本的に違い、PC が黙ると 1 通も届かなくなる。
+
+**EDULITE 05 も同じ性質だった。** 当初は「自発的に送る」と書いていたが誤りで、実機で
+確認した結果 —— 励磁したまま 13 秒放置してフィードバック 0 通、届くのは PC が送った
+フレームへの応答だけ —— DM3520 と同じ扱いが要ると判明した。2 種は
+`QueryDrivenTargetRefresher` が 1 つのタスクとして受け持つ。
 `health.feedback_timeout_ms`（既定 500ms）を過ぎればモータは `MotorHealth.STALE` になり、
 症状は「操縦していない間ずっと赤い」だけで**配線不良と区別が付かない**。
 
-そこで `Dm3520TargetRefresher`（`lib/control/target_refresh.py`、20Hz）が送り続ける。
+そこで `QueryDrivenTargetRefresher`（`lib/control/target_refresh.py`、20Hz）が送り続ける。
 `GenericTargetRefresher` と形は同じだが、**目標を持たないモータの扱いが正反対**である。
 
-| | `GenericTargetRefresher`（自作モタドラ） | `Dm3520TargetRefresher` |
+| | `GenericTargetRefresher`（自作モタドラ） | `QueryDrivenTargetRefresher` |
 |---|---|---|
 | 送る理由 | ファームのコマンドウォッチドッグ（500ms）を養う | ①フィードバックを引き出す ②ドライバの `TIMEOUT` レジスタを養う |
 | 目標が無いとき | **送らない**（起動直後にコンベアが回り出す） | **送る**（送らないとフィードバックが来ない） |
@@ -726,7 +731,7 @@ VMAX が 200 なので速度の分解能は 400/4095 ≒ 0.098rad/s になり、
   もう一方の軸は静止したままで、**ID の割り当てに交錯が無い**ことも同時に確認できる
 - **緊急停止**: フィードバックの状態バイトが `0x11`（励磁中）→ `0x01`（**無励磁**）→ `0x11`
   と遷移し、**停止中もフィードバックが 20Hz で届き続けた**（鮮度 28〜49ms、閾値 500ms）。
-  `Dm3520TargetRefresher` が停止中も問い合わせ続ける設計の効き目がここに出る
+  `QueryDrivenTargetRefresher` が停止中も問い合わせ続ける設計の効き目がここに出る
 - **解除**: 解除で勝手に動かない（保持目標は解除時点の実測角）
 
 #### 実機で踏んだ罠: CAN の H/L 逆結線は「沈黙」としてしか現れない
@@ -771,8 +776,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 再送タスクが無いとコンベアは回し始めて 500ms で止まる。
 
 - 周期 20Hz（猶予 500ms の 1/10。9 回連続で落ちても出力は止まらない）
-- 対象は generic ドライバのモータのみ。M3508 は位置制御ループが 200Hz で送り続け、
-  EDULITE はドライバ内蔵の位置ループが目標を保持するため不要
+- 対象は generic ドライバのモータのみ（問い合わせ駆動の DM3520 / EDULITE 05 は
+  `QueryDrivenTargetRefresher` が別に受け持つ）。M3508 だけが再送不要で、位置制御ループが
+  200Hz で送り続けるうえ C620 がフィードバックを自発的に送る
 - 緊急停止中は 1 通も送らない（再送は最後の目標値なので停止指令を上書きしてしまう）
 - 目標が一度も設定されていないモータへは送らない（起動直後の暴発防止）
 - 緊急停止時は保持した目標ごと捨てる（`clear_targets()`）。残すと解除した瞬間に
@@ -879,7 +885,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | サーボ可動レンジの「申告なし」を一致へ倒さない | `info_mismatch` の `angle_range_deg is None` 分岐を `return None` にする（古いファームの焼き忘れが素通りする） | `tests/drivers/test_generic.py` |
 | サーボスロット以外は `INFO` に可動レンジを載せない | `encodeInfo`（3 引数版）が Byte3-4 を書くようにする（**測る対象を持たない基板から「レンジ 0deg」が届く**） | `firmware/test/test_protocol/` |
 | `on_off` 軸に連続値の可動範囲を持たせない | `_parse_manual` の `command_mode is not POSITION` 判定を外す | `tests/test_sequence_positions.py` |
-| DM3520 は目標が無い間も問い合わせ続ける | `Dm3520TargetRefresher._step_locked` の `_send_idle_target` を落とす（**フィードバックが問い合わせ駆動なので、操縦していない時間はまるごと STALE になる**） | `tests/test_target_refresh.py` |
+| DM3520 は目標が無い間も問い合わせ続ける | `QueryDrivenTargetRefresher._step_locked` の `_send_idle_target` を落とす（**フィードバックが問い合わせ駆動なので、操縦していない時間はまるごと STALE になる**） | `tests/test_target_refresh.py` |
 | DM3520 の保持目標はラッチした値 | `_send_idle_target` の `setdefault` を毎回の `idle_target_value()` へ変える（**負荷で下がったぶんへ目標が追従し、誰も操作していないのに軸がクリープする**） | `tests/test_target_refresh.py` |
 | DM3520 のパラメータ応答をフィードバックとして取り込まない | `matches_feedback` の `_is_config_response` ガードを外す（起動時の CTRL_MODE 書き込みの応答が実測角として入り、励磁した瞬間に機構が飛ぶ） | `tests/drivers/test_dm3520.py` |
 | DM3520 の位置レンジは `p_max` | `decode_feedback` の `p_max` を `v_max` に取り違える（**指令どおり動いても到達判定が永久に成立しない**） | `tests/drivers/test_dm3520.py` |

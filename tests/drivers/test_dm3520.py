@@ -356,7 +356,7 @@ class TestStartupSequence:
 
 
 class TestIdleTarget:
-    """目標を持たない間に書き続ける値 (``Dm3520TargetRefresher`` が使う)。"""
+    """目標を持たない間に書き続ける値 (``QueryDrivenTargetRefresher`` が使う)。"""
 
     def test_position_mode_holds_the_measured_position(self) -> None:
         drv = _driver()

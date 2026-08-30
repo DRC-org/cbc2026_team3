@@ -9,8 +9,8 @@ import pytest
 from lib.control.target_refresh import (
     DEFAULT_INTERVAL_S,
     FIRMWARE_COMMAND_TIMEOUT_S,
-    Dm3520TargetRefresher,
     GenericTargetRefresher,
+    QueryDrivenTargetRefresher,
 )
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
@@ -240,7 +240,7 @@ class _Dm3520Fixture:
             self.manager,  # type: ignore[arg-type]
             is_estop_active=lambda: self.estop,
         )
-        self.refresher = Dm3520TargetRefresher(
+        self.refresher = QueryDrivenTargetRefresher(
             [self.handle],
             self.manager,  # type: ignore[arg-type]
             is_estop_active=lambda: self.estop,

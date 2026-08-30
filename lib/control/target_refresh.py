@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from lib.control.periodic import PausablePeriodicTask
 from lib.drivers.dm3520 import Dm3520Driver
+from lib.drivers.edulite05 import Edulite05Driver
 from lib.sequence.motors import MotorHandle
 
 if TYPE_CHECKING:
@@ -18,8 +19,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DEFAULT_INTERVAL_S",
     "FIRMWARE_COMMAND_TIMEOUT_S",
-    "Dm3520TargetRefresher",
     "GenericTargetRefresher",
+    "QueryDrivenTargetRefresher",
     "TargetRefresher",
 ]
 
@@ -34,6 +35,12 @@ DEFAULT_INTERVAL_S = 0.05
 
 EStopChecker = Callable[[], bool]
 SleepFunc = Callable[[float], Awaitable[None]]
+
+#: フィードバックが問い合わせ駆動のドライバ。**PC が黙ると 1 通も届かない**ので、
+#: 目標を持たない間も送り続けないと操縦していない時間がまるごと STALE になる。
+#: ここへ足す条件は「自分宛のフレームを受けたときにしか状態を返さない」ことと
+#: ``idle_target_value()`` を持つこと (無害な指令値を自分で決められること) の 2 つ。
+_QUERY_DRIVEN_DRIVERS = (Dm3520Driver, Edulite05Driver)
 
 
 class GenericTargetRefresher(PausablePeriodicTask):
@@ -132,17 +139,24 @@ class GenericTargetRefresher(PausablePeriodicTask):
         """
 
 
-class Dm3520TargetRefresher(PausablePeriodicTask):
-    """DM3520 へ 20Hz で目標値を送り続ける非同期タスク。
+class QueryDrivenTargetRefresher(PausablePeriodicTask):
+    """**問い合わせ駆動のドライバ**へ 20Hz で目標値を送り続ける非同期タスク。
+
+    対象は DM3520 と EDULITE 05 の 2 種 (``_QUERY_DRIVEN_DRIVERS``)。どちらも
+    「自分宛のフレームを受けたときにしか状態を返さない」性質を共有するので、
+    タスクを分けない —— 分けると片方だけラッチの規則を直した状態が作れてしまい、
+    しかも症状 (クリープ / 解除後の飛び) が出るのは直し忘れた側だけになる。
 
     ``GenericTargetRefresher`` と形は同じだが、**送る理由が 1 つ多い**。
 
-    1. **本機のフィードバックは問い合わせ駆動である。** 自分の CAN ID 宛のフレームを
-       受けたときにしか状態を返さない (DM-S3519-1EC マニュアル「Control Protocol
-       Description」節)。PC が黙ると 1 通も届かなくなり、``feedback_timeout_ms``
+    1. **フィードバックが問い合わせ駆動である。** 自分の CAN ID 宛のフレームを
+       受けたときにしか状態を返さない (DM3520 は DM-S3519-1EC マニュアル
+       「Control Protocol Description」節。EDULITE 05 は実機で確認 —— 励磁した
+       まま 13 秒放置してフィードバックは 0 通、届くのは送ったフレームへの応答
+       だけだった)。PC が黙ると 1 通も届かなくなり、``feedback_timeout_ms``
        (既定 500ms) を過ぎた時点でモータは ``MotorHealth.STALE`` になる。症状は
-       「操縦していない間ずっと赤い」だけで、配線不良と区別が付かない
-    2. ドライバの TIMEOUT レジスタ (0x09) が有効な個体では、指令の途絶がそのまま
+       「手動操縦すると動くのに常に赤い」だけで、配線不良と区別が付かない
+    2. DM3520 の TIMEOUT レジスタ (0x09) が有効な個体では、指令の途絶がそのまま
        励磁解除になる (マニュアル「Characteristic Parameters」の Communication
        loss protection)。自作モタドラのウォッチドッグと同じ扱いが要る
 
@@ -201,7 +215,7 @@ class Dm3520TargetRefresher(PausablePeriodicTask):
         return tuple(handle.name for handle in self._handles)
 
     def _label(self) -> str:
-        return f"DM3520 目標値再送 ({', '.join(self.motor_names) or '対象なし'})"
+        return f"問い合わせ駆動 目標値再送 ({', '.join(self.motor_names) or '対象なし'})"
 
     # ------------------------------------------------------------------ #
     #  再送
@@ -233,7 +247,7 @@ class Dm3520TargetRefresher(PausablePeriodicTask):
     async def _send_idle_target(self, handle: MotorHandle) -> None:
         """目標を持たないモータへ「今の姿勢を保て」を書き直す。"""
         driver = handle.driver
-        if not isinstance(driver, Dm3520Driver):
+        if not isinstance(driver, _QUERY_DRIVEN_DRIVERS):
             return
 
         if self._is_estop_active is not None and self._is_estop_active():
@@ -275,4 +289,4 @@ class Dm3520TargetRefresher(PausablePeriodicTask):
 #: 目標値再送タスクの共通型。``RobotServer`` は動作確認との排他 (pause/resume)、
 #: 緊急停止時の ``clear_targets()``、診断表示にしかこれらを使わないため、
 #: 種別を区別せず 1 つのリストで扱う。
-TargetRefresher = GenericTargetRefresher | Dm3520TargetRefresher
+TargetRefresher = GenericTargetRefresher | QueryDrivenTargetRefresher
