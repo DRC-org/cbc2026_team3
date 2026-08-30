@@ -177,7 +177,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 1 台）。`--system` / `--config` / `--checklist` で差し替える。5 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守る |
+| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台）。`--system` / `--config` / `--checklist` で差し替える。5 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守る |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。`health` /
 `can_buses` / `match` は PC 上に 1 組しか存在し得ないため `config/<robot>.yaml` には書けず、
