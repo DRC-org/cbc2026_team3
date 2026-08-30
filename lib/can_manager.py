@@ -26,6 +26,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _RECV_TIMEOUT = 0.01
+# 受信 API が失敗したときに次の再試行まで待つ時間 [s]。
+# インタフェース断は 1 秒以内に戻ることがほとんどなので、復帰の取りこぼしは
+# この 1 周期ぶんに収まる。一方で戻らない場合に全速で回さないための下限でもある
+# (受信の再試行がコアを埋めると、同居する 200Hz の位置制御ループが痩せる)。
+_RECV_RETRY_INTERVAL_S = 0.1
 
 # --- SocketCAN エラーフレーム (linux/can/error.h) ------------------------------
 # python-can の socketcan バスは既定でエラーフレームの受信を有効にする
@@ -272,32 +277,52 @@ class CANManager:
         self._bus_off[bus_name] = False
 
     async def _receive_loop(self, bus_name: str) -> None:
-        """バス 1 本ぶんの受信ループ。フレームの解釈失敗では降りない。
+        """バス 1 本ぶんの受信ループ。フレームの解釈失敗でも受信 API の失敗でも降りない。
 
-        降りる (= 受信の口そのものが失われた) 場合だけは必ずログに残す。
-        ``_tasks`` は誰も await しないため、ここで記録しないとタスクの死が
-        どこにも現れず、「UI は接続中のまま全モータが STALE」の原因が
-        試合後まで分からない。
+        **受信 API の失敗で降りてはならない。** かつては伝播させて降りていたが、
+        `bus.recv` を失敗させる事象 —— **``cbc-can-watchdog.service`` が bus-off から
+        復旧させるための down/up**、`ip link set down`、CANable の抜き差し、
+        `setup_can.sh` の再実行、udev 経由の `cbc-can.service` 再起動 —— はどれも
+        1 秒以内に戻る一過性のもので、socketcan のソケットは down/up をまたいでも
+        生き続ける (実測済み)。降りると**送信側だけが次の周期で自動復帰し、受信は
+        二度と戻らない**。症状は「指令は効くのにフィードバックだけ永久に無い」で、
+        機体は動くのに全モータが STALE のまま試合を終える。実際にこれで沈黙した
+        (`ip link` の再設定が入った 0.6 秒後に受信ループが死に、以後 3 分間 1 通も
+        取り込まないまま手動操縦だけが効き続けた)。
+
+        代わりに待ってから再試行する。素の ``continue`` にしないのは、戻らない
+        インタフェースを相手に全速で失敗を繰り返すと 1 コアを食い潰し、**同じ
+        プロセスに同居している位置制御ループ (200Hz) と偏差監視 (50Hz) の周期まで
+        巻き添えにする**ため。
+
+        失敗はログに残す。``_tasks`` は誰も await しないので、ここで記録しないと
+        受信の異常がどこにも現れない。ただし ``LogThrottle`` を通す —— 戻らない
+        インタフェースでは同じ失敗が延々続くので、素の出力だとログが溢れて
+        本当の死因が流れる。
         """
         bus = self._buses[bus_name]
         motors = self._bus_motors[bus_name]
 
-        try:
-            while True:
+        while True:
+            try:
                 msg: can.Message | None = await self._run_blocking(bus.recv, _RECV_TIMEOUT)
-                if msg is None:
-                    continue
-                if msg.is_error_frame:
-                    self._handle_error_frame(bus_name, msg)
-                    continue
-                self._dispatch_frame(bus_name, motors, msg)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # 受信 API 自体の失敗 (インタフェース断など) はフレーム 1 通の問題ではなく、
-            # 握り潰して回り続けても全速で失敗を繰り返すだけなので伝播させる
-            logger.exception("CAN 受信ループが停止しました (bus=%s)", bus_name)
-            raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._rx_log.exception(
+                    f"recv:{bus_name}",
+                    "CAN 受信に失敗しました。再試行します (bus=%s)",
+                    bus_name,
+                )
+                await asyncio.sleep(_RECV_RETRY_INTERVAL_S)
+                continue
+
+            if msg is None:
+                continue
+            if msg.is_error_frame:
+                self._handle_error_frame(bus_name, msg)
+                continue
+            self._dispatch_frame(bus_name, motors, msg)
 
     def _dispatch_frame(
         self, bus_name: str, motors: Sequence[MotorDriver], msg: can.Message

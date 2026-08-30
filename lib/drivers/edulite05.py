@@ -162,6 +162,29 @@ class Edulite05Driver(MotorDriver):
     def encode_set_zero(self) -> can.Message:
         return self._message(self.COMM_TYPE_SET_ZERO, b"\x01" + bytes(7))
 
+    def encode_set_id(self, new_can_id: int) -> can.Message:
+        """モータの CAN ID を書き換える (通信タイプ 7)。
+
+        **出荷値は 2 台とも 0x7F。** そのまま同一バスへ載せると 2 台が同じ ID で
+        応答し、`CANManager._dispatch_frame` は最初にマッチした 1 台で打ち切るので
+        もう 1 台は永久にフィードバックを得られない。症状は「片方だけ配線不良」に
+        しか見えないため、バスへ載せる前に 1 台ずつ書き換える。
+
+        新 ID はデータエリア2 の上位バイトへ、host_id は下位バイトへ載る。
+        **宛先は現在の ID のまま**にすること —— 新 ID を宛先にすると、まだその ID を
+        名乗っていないモータへ宛てることになり 1 台も受け取らない。
+
+        起動・励磁・動作確認のどの手順からも呼ばない。自動経路に混ざると電源を
+        入れ直すたびに ID が書き換わる。呼び出し口は scripts/edulite_set_id.py だけ。
+        """
+        if not 0 <= new_can_id <= 0xFF:
+            raise ValueError("new_can_id は 0..255 の範囲で指定してください")
+        return self._message(
+            self.COMM_TYPE_SET_ID,
+            b"\x01" + bytes(7),
+            data_area2=((new_can_id & 0xFF) << 8) | self.host_id,
+        )
+
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
         steps = [
             (self.encode_disable(), 0.05),
@@ -198,6 +221,21 @@ class Edulite05Driver(MotorDriver):
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
         ]
+
+    def idle_target_value(self) -> float:
+        """目標を持たない間に書き続ける指令値。
+
+        ``QueryDrivenTargetRefresher`` がこれをラッチして毎周期送り直すことで、
+        操縦者が何も操作していない間もフィードバックが届き続ける。**本機の
+        フィードバックは問い合わせ駆動で、送らなければ 1 通も来ない** (実機で確認:
+        励磁したまま 13 秒放置してもフィードバックは 0 通だった)。
+
+        値は ``activation_steps()`` の保持目標と同じもの。**指令として無害である**
+        ことが要点 —— 位置モードなら「今居る場所を保て」、それ以外なら「止まれ」で、
+        どちらも新しい動きを作らない。片方だけ直すと、励磁の瞬間と再送とで別の値を
+        書くことになり、enable した瞬間にアームがラッチ位置へ飛ぶ。
+        """
+        return self._state.position if self.mode is ControlMode.POSITION else 0.0
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         # 位置モードの保持目標は実測角そのもの。MotorState の初期値 0.0 を実測角と

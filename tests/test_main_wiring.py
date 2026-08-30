@@ -562,6 +562,48 @@ class TestBuildTargetRefresher:
 
         assert [r.motor_names for r in refreshers] == [("gripper",), ("sub_slide",)]
 
+    def test_edulite_gets_a_refresher_too(self) -> None:
+        """**EDULITE 05 も問い合わせ駆動である。** 自発的にはフィードバックを返さない。
+
+        かつて ``_build_target_refreshers`` は「EDULITE は自発的にフィードバックを
+        返すので対象外」として除外していたが、実機はそうではなかった —— 励磁したまま
+        13 秒放置しても 1 通も届かず、届いたのは起動時に PC が送ったフレームへの
+        応答 20 通だけだった。
+
+        再送しないと、操縦していない間じゅう ``MotorHealth.STALE`` になる。症状は
+        「手動操縦すると動くのに常に赤い」だけで、配線不良と区別が付かない。
+        """
+        manager, motors, seq = self._wire(
+            extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
+            extra_config={"rotate_r": {"driver": "edulite05", "bus": "generic_bus", "can_id": 1}},
+        )
+
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
+
+        assert ("rotate_r",) in [r.motor_names for r in refreshers]
+
+    async def test_edulite_is_polled_even_without_a_target(self) -> None:
+        """**目標を持たないモータへも送る。** ここが自作モタドラとの決定的な違い。
+
+        送らないと「励磁して待機しているだけの状態」が丸ごと観測できなくなる
+        (フィードバックが 1 通も来ないので STALE になる)。
+        """
+        manager, motors, seq = self._wire(
+            extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
+            extra_config={"rotate_r": {"driver": "edulite05", "bus": "generic_bus", "can_id": 1}},
+        )
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
+        manager.sent_by_motor.clear()
+
+        for refresher in refreshers:
+            await refresher.step()
+
+        assert "rotate_r" in [name for name, _ in manager.sent_by_motor]
+
     async def test_estop_checker_blocks_resend(self) -> None:
         """再送は停止指令を上書きする。緊急停止中は 1 通も出してはならない。"""
         manager, motors, seq = self._wire()

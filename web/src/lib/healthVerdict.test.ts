@@ -213,7 +213,7 @@ describe("describeSafetyIssues", () => {
   });
 
   it("無励磁のモータがあると異常判定へ倒す", () => {
-    const verdict = evaluateHealth(health(), {}, safety({ unenergized_motors: ["sub_lift"] }));
+    const verdict = evaluateHealth(health(), safety({ unenergized_motors: ["sub_lift"] }));
     expect(verdict.tone).toBe("error");
   });
 

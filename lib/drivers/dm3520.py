@@ -3,7 +3,7 @@
 情報源は `DM-S3519-1EC User Manual`「Control Protocol Description」節。
 **このドライバだけ、フィードバックが問い合わせ駆動である。** 自分の CAN ID 宛の
 フレームを受けたときにしか状態を返さないので、PC 側が定期的に問い合わせないと
-1 通も届かない (`lib/control/target_refresh.py` の ``Dm3520TargetRefresher``)。
+1 通も届かない (`lib/control/target_refresh.py` の ``QueryDrivenTargetRefresher``)。
 
 M3508 と違い位置ループはドライバ内蔵 (Position Velocity Mode = 三重ループ) なので、
 PC 側 PID は持たない。この点は EDULITE 05 と同じ扱いになる。
@@ -362,7 +362,7 @@ class Dm3520Driver(MotorDriver):
     def idle_target_value(self) -> float:
         """目標を持たない間に書き続ける指令値。
 
-        ``Dm3520TargetRefresher`` がこれをラッチして毎周期送り直すことで、操縦者が
+        ``QueryDrivenTargetRefresher`` がこれをラッチして毎周期送り直すことで、操縦者が
         何も操作していない間もフィードバックが届き続ける (本機のフィードバックは
         問い合わせ駆動で、送らなければ 1 通も来ない)。**指令として無害である**
         ことが要点 —— 位置モードなら「今居る場所を保て」、速度モードなら「止まれ」

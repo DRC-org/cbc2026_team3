@@ -47,6 +47,9 @@ motors:
   # y_axis と同じく軸単位で駆動する。左右のずれは checklist.yaml の rotate_sync で確認。
 
   # RobStride EDULITE 05 — CAN Extended Frame
+  # ID は 2026-08-30 に実機へ書き込み済み (出荷値は 2 台とも 0x7F)。
+  # 書き換えは scripts/edulite_set_id.py。**同じ ID の個体を 2 台ぶら下げたまま
+  # 書き換えてはならない** — 1 通で両方が同じ新 ID になる (ツールが拒否する)。
   rotate_r:
     driver: edulite05
     bus: edulite_bus

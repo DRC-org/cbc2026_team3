@@ -21,6 +21,8 @@ checklists:
       label: ドライバに電源が入り、モータの動力線・エンコーダ線が確実に嵌まっていること確認
     - id: bench_free
       label: 出力軸に何も繋がっておらず、2 台とも回っても干渉しないこと確認
+    - id: bench_can_id
+      label: 2 台の can_id が 1 / 2 に分かれていること確認 (**出荷値は 2 台とも 0x7F**。scripts/edulite_set_id.py scan で 2 個の ID が 1 通ずつ応答すること)
     - id: bench_wiring
       label: candump can_edulite で拡張 ID 0x02____01 / 0x02____02 の 2 本が届いていること確認
     - id: bench_host_id
