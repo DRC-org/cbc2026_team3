@@ -68,7 +68,9 @@ def mock_can_manager(
     mgr.get_motor.side_effect = drivers.__getitem__
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
-    mgr.activate_motors = AsyncMock()
+    # 戻り値は「励磁できなかったモータ名」。既定の MagicMock を返させると
+    # `_reactivate_motors` が真値として受け取り、無励磁の誤報告が全テストに出る
+    mgr.activate_motors = AsyncMock(return_value=[])
     mgr.last_feedback_at.return_value = None
     mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
     return mgr

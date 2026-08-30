@@ -55,6 +55,49 @@ RobotServer._compute_health()      ← 例外は必ず DOWN へ倒す
 かったとき `overall=down` + 内訳空で「判定不能」を配る。内訳だけを見て「異常なし」を
 返すと、そのフェイルセーフが画面上で消える。
 
+### 判定に使う数は「今も壊れているか」に答えられなければならない
+
+`BusHealthInfo.tx_error_count` は**起動からの累計**で、表示専用である。判定は
+`CANManager._tx_error_score`（失敗 +8 / 成功 -1 / 上限 255 の TEC 相当）が持つ。
+
+累計で判定していた頃、物理緊急停止で DM3520 の電源が数秒落ちただけで
+`tx_error_count` が 6320 まで積み上がり、**CAN が完全に復旧した後も
+`dm3520_bus` が永久に DEGRADED のまま残った**（`ip -s link` は ERROR-ACTIVE・
+bus-off 0 回・送受信ともエラー 0、フィードバックも 44ms 前まで届いていた）。
+単調増加する数は「壊れたことがあるか」にしか答えられない。
+
+### bus-off はエラーフレームでしか観測できない
+
+python-can 4.6 の `SocketcanBus` は `state` を実装していない（基底クラスの既定
+`BusState.ACTIVE` が返る）。つまり `health()` の `ERROR` / `PASSIVE` 分岐は
+**SocketCAN では永久に成立しない**。実バスの bus-off は
+`CANManager._handle_error_frame()` が SocketCAN のエラーフレームから拾う。
+
+ラッチは**実通信（送信成功・フィードバック受信）で外す**。`restart-ms` が 0 の
+インタフェースは復帰通知（`CAN_ERR_RESTARTED`）を送らないので、それ以外に
+外す経路が無いと一度立った DOWN が永久に残る（上の `tx_error_count` と同じ壊れ方）。
+
+**`restart-ms` は 0 にしてはならない。** 0 は「bus-off から自動復帰しない」で、
+カーネル既定でもある。バス上に 1 台しか居ない構成（`can_dm3520`）では相手の電源断
+だけで ACK が返らなくなり TEC が 256 に達する。値は `config/can_buses.yaml` の
+`restart_ms`（既定 100ms）が持ち、`scripts/setup_can.sh` が `ip link` へ渡す。
+
+### 「励磁されていない」はヘルスに現れない
+
+DM3520 は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの通信途絶保護や
+電源の瞬断で励磁が外れると、PC は 20Hz で位置指令を送り続け、フィードバックも正常に
+届き、`is_fault()`（エラー符号 0x5 以上）にも掛からないのでモータのヘルスは **OK の
+まま**になる。操縦者に見えるのは「指令しても動かない」だけで、原因はどこにも出ない。
+
+そこで `MotorDriver.is_energized()`（判定手段が無いドライバは `None`）を
+`RobotServer._unenergized_motors()` が読み、`state.safety.unenergized_motors` として
+配信する。緊急停止中は無励磁が正しい状態なので報告しない。**この緊急停止ガードが
+唯一の抑止で、`activate_e_stop` 側にも同じ判定を置いてはならない**（片方を消しても
+症状が出なくなり、後で本物のガードを消しても気付けなくなる）。
+
+`None` を「無励磁」へ倒さないこと。自作モタドラも C620 も励磁の有無を報告しないので、
+倒すと常時警告になる（「測ったように見える 0」と同じ罠）。
+
 ---
 
 ## ② 統合動作確認 — 動くか

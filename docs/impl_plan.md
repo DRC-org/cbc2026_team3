@@ -865,6 +865,11 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 緊急停止中は動作確認が 1 台も駆動しない | `MotorCheckRunner` の `is_estop_active` を外す / `run()` の冒頭で中断状態をクリアする / `activate_e_stop` の abort を `is_running` 条件に戻す | `test_motor_check.py` / `test_server_motor_check.py` |
 | 停止理由は解除まで保たれ、後から上書きされない | `_broadcast_e_stop_state` を呼び出し元の理由で配信する形へ戻す / `_e_stop_reason` の「保持済みなら書かない」ガードを外す | `test_server_e_stop.py` |
 | 配信はクライアント集合のスナップショットを回す | `_fanout` の `list(...)` を外して集合そのものを反復する | `test_server_broadcast_resilience.py` |
+| 送信が復旧したらバスの DEGRADED は消える | `health()` の判定を累計 `tx_error_count` へ戻す / `_record_tx_success` のスコア減算を落とす | `test_can_manager_health.py::test_degraded_clears_once_sending_recovers` |
+| bus-off はエラーフレームで検出し、実通信で外れる | `_receive_loop` のエラーフレーム分岐を落とす / `_record_tx_success` のラッチ解除を落とす | `test_can_manager_health.py::test_error_frame_marks_bus_off_and_is_not_delivered_to_motors` / `::test_bus_off_clears_once_traffic_returns` |
+| 1 台の失敗で残りのモータの励磁を諦めない | `activate_motors` / `initialize_motors` の per-motor `except` を `raise` へ戻す | `test_can_manager.py::test_activate_motors_continues_after_one_motor_fails` / `::test_initialize_motors_continues_after_one_motor_fails` |
+| 無励磁のまま取り残されたモータは画面に出る | `_safety_state` の `unenergized_motors` を空固定にする / `_unenergized_motors` の緊急停止ガードを外す / `is_energized() is False` を `not is_energized()` へ（不明を無励磁へ倒す） | `test_server_e_stop.py::TestUnenergizedMotorsAreVisible` / `web: healthVerdict.test.ts` |
+| bus-off から自動復帰できる設定で立ち上がる | `can_config.DEFAULT_RESTART_MS` を 0 にする | `test_can_config.py::test_restart_ms_defaults_to_a_nonzero_value` |
 | ラッチ中のサーボは補間より先に凍結する | `ServoChannel::setTarget` の受理ガードを外す / `tick()` の凍結を補間の後ろへ動かす | `firmware/test/test_servo/` |
 | `SET_TARGET` を 1 通も受けるまで出力しない | `MotorSafety::isOutputAllowed` の `everFed_` を `watchdogEnabled_` の内側へ入れる | `firmware/test/test_protocol/` |
 | 電磁弁は出力ゲートを通してしか通電しない | `SolenoidChannel::outputOn` の `isOutputAllowed` を外して目標をそのまま返す / `setOn` の受理ガードを外す | `firmware/test/test_solenoid/` |
@@ -3271,7 +3276,7 @@ health:
 | ヘルスチェックループが CAN 受信を阻害 | 受動監視主体・能動 ping は明示要求時のみ |
 | しきい値が厳しすぎて誤警報（チャタリング） | config で上書き可能。STALE→OK 復帰には連続 N フレーム受信を要求 |
 | 送信エラーで `_receive_loop` が落ちる | `send_to_bus` の例外を握って health に反映、ループは継続 |
-| bus_off からの自動復帰 | `bus.recover()` を試行回数制限付きで呼び、ログに残す |
+| bus_off からの自動復帰 | カーネルに任せる（`config/can_buses.yaml` の `restart_ms`、既定 100ms）。PC 側のラッチは実通信が戻った時点で外す |
 
 #### アクチュエータ動作確認シーケンス
 

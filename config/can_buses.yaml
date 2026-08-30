@@ -7,6 +7,12 @@
 #
 # udev ルール (99-canable.rules) も setup_can.sh もこのファイルから生成/参照する。
 # serial の採取手順は docs/impl_plan.md「CAN バス命名規約」を参照。
+#
+# restart_ms は bus-off からの自動復帰までの待ち時間 [ms]。省略時は 100。
+# **0 にしてはならない** —— 0 は「自動復帰しない」の意味で、一度 bus-off に落ちた
+# インタフェースは手動で down/up するまで送受信とも死んだままになる。
+# バス上に 1 台しか居ない構成 (can_dm3520) では、相手が電源を失うだけで ACK が
+# 返らなくなり TEC が 256 に達して bus-off へ落ちる。
 
 # CANable2 (candleLight FW) の USB ID。全個体共通。
 usb:

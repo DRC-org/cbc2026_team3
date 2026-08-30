@@ -231,6 +231,15 @@ export interface TargetRefresherState {
  */
 export interface SafetyState {
   sync_violations: string[];
+  /**
+   * 励磁されているべきなのに無励磁のモータ。
+   *
+   * 緊急停止を解除して有効化を試みた後も残っているものだけが載る。**この異常は
+   * 他のどこにも現れない** —— フィードバックは正常に届き、ヘルスは OK、CAN の
+   * カウンタも平常で、操縦者から見えるのは「指令しても動かない」だけになる。
+   * 励磁状態を報告しないドライバ (自作モタドラ・C620) は最初から対象外。
+   */
+  unenergized_motors: string[];
   loops_running: boolean;
   monitors_running: boolean;
   refreshers_running: boolean;

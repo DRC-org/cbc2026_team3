@@ -301,9 +301,59 @@ class TestMotorActivation:
         ]
 
         with patch.object(mgr, "send", new_callable=AsyncMock) as send:
-            await mgr.activate_motors(should_abort=lambda: True)
+            inactive = await mgr.activate_motors(should_abort=lambda: True)
 
         assert send.await_count == 0
+        # 中断で飛ばしたモータも「励磁できていない」として報告する
+        assert inactive == ["m1"]
+
+    async def test_activate_motors_continues_after_one_motor_fails(self) -> None:
+        """**1 台の送信失敗で残りのモータの有効化を諦めてはならない。**
+
+        緊急停止の原因がそのまま送信失敗を招く場面がある —— 専用バスに 1 台しか
+        居ない DM3520 が電源を失うと ACK が返らず、そのバスの送信は全滅する。
+        素の for に並べると最初のモータの例外で以降へ enable が 1 通も飛ばず、
+        しかも `RobotServer._reactivate_motors` はそれをログに落とすだけなので、
+        画面は「解除できた」ように見えたまま機体が無励磁で取り残される。
+        """
+        mgr = CANManager()
+        mgr.add_bus("can0", _make_mock_bus())
+        enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
+        for index, name in enumerate(("m1", "m2", "m3"), start=1):
+            motor = _make_mock_motor(name, index)
+            motor.activation_steps.return_value = [(enable_msg, 0.0)]
+            mgr.add_motor("can0", motor)
+
+        async def fail_first(name: str, msg: can.Message) -> None:
+            if name == "m1":
+                raise can.CanError("ACK が返らない")
+
+        with patch.object(mgr, "send", new_callable=AsyncMock, side_effect=fail_first) as send:
+            inactive = await mgr.activate_motors()
+
+        assert inactive == ["m1"]
+        assert [call.args[0] for call in send.await_args_list] == ["m1", "m2", "m3"]
+
+    async def test_initialize_motors_continues_after_one_motor_fails(self) -> None:
+        """起動時も同じ。1 台の失敗でそのバスのモータが全部無励磁になってはならない。"""
+        mgr = CANManager()
+        mgr.add_bus("can0", _make_mock_bus())
+        msg = can.Message(arbitration_id=0x202, data=bytes(8))
+        for index, name in enumerate(("m1", "m2"), start=1):
+            motor = _make_mock_motor(name, index)
+            motor.initialization_steps.return_value = [(msg, 0.0)]
+            motor.activation_steps.return_value = [(msg, 0.0)]
+            mgr.add_motor("can0", motor)
+
+        async def fail_first(name: str, _msg: can.Message) -> None:
+            if name == "m1":
+                raise can.CanError("ACK が返らない")
+
+        with patch.object(mgr, "send", new_callable=AsyncMock, side_effect=fail_first) as send:
+            inactive = await mgr.initialize_motors()
+
+        assert inactive == ["m1"]
+        assert "m2" in [call.args[0] for call in send.await_args_list]
 
 
 class TestReceiveLoopRobustness:

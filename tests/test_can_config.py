@@ -180,12 +180,12 @@ class TestUdevRules:
 class TestListTsv:
     """setup_can.sh が `while IFS=$'\t' read` で読む書式。"""
 
-    def test_every_line_has_four_tab_separated_fields(self) -> None:
+    def test_every_line_has_five_tab_separated_fields(self) -> None:
         config = _config({"can_m3508": _bus("AAA"), "can_edulite": _bus("BBB")})
 
         for line in can_config.cmd_list(config, assigned_only=False).splitlines():
             fields = line.split("\t")
-            assert len(fields) == 4, line
+            assert len(fields) == 5, line
             # シェル側は空フィールドを検出できない。空なら ip link に空文字が渡る
             assert all(fields), line
             assert " " not in line, line
@@ -216,7 +216,7 @@ class TestListTsv:
 
         output = can_config.cmd_list(config, assigned_only=True)
 
-        assert output.splitlines() == ["can_m3508\tAAA\t1000000\t1000"]
+        assert output.splitlines() == ["can_m3508\tAAA\t1000000\t1000\t100"]
 
     def test_txqueuelen_defaults_to_1000(self) -> None:
         # カーネル既定の 10 では 200Hz の位置制御ループで送信キューが溢れる
@@ -229,6 +229,21 @@ class TestListTsv:
         config = _config({"can_m3508": _bus("AAA", txqueuelen=4000)})
 
         assert can_config.cmd_list(config, assigned_only=False).split("\t")[3] == "4000"
+
+    def test_restart_ms_defaults_to_a_nonzero_value(self) -> None:
+        # **0 は「bus-off から自動復帰しない」の意味**で、カーネル既定でもある。
+        # 既定で 0 が渡ると、一度 bus-off に落ちたバスは手動で down/up するまで
+        # 送受信とも死んだままになる。バス上に 1 台しか居ない can_dm3520 では
+        # 相手の電源断だけで ACK が返らなくなり、試合中に復旧不能になる
+        config = _config({"can_m3508": _bus("AAA")})
+        assert "restart_ms" not in config["buses"]["can_m3508"]
+
+        assert int(can_config.cmd_list(config, assigned_only=False).split("\t")[4]) > 0
+
+    def test_explicit_restart_ms_is_kept(self) -> None:
+        config = _config({"can_m3508": _bus("AAA", restart_ms=250)})
+
+        assert can_config.cmd_list(config, assigned_only=False).split("\t")[4] == "250"
 
 
 class TestRealConfig:
@@ -277,11 +292,13 @@ class TestRealConfig:
 
         assert len(listed) == len(config["buses"])
         for line in listed:
-            name, serial, bitrate, txqueuelen = line.split("\t")
+            name, serial, bitrate, txqueuelen, restart_ms = line.split("\t")
             assert serial != can_config.UNASSIGNED
             # 全ドライバ (C620 / EDULITE / 自作) を 1Mbps で統一している
             assert bitrate == "1000000"
             assert int(txqueuelen) >= 1000
+            # bus-off から自動復帰しないバスは、相手の電源断だけで試合中に死ぬ
+            assert int(restart_ms) > 0
             assert len(name) <= can_config._IFNAME_MAX
 
     def test_udev_rules_cover_every_bus(self) -> None:

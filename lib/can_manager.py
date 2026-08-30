@@ -27,6 +27,23 @@ logger = logging.getLogger(__name__)
 
 _RECV_TIMEOUT = 0.01
 
+# --- SocketCAN エラーフレーム (linux/can/error.h) ------------------------------
+# python-can の socketcan バスは既定でエラーフレームの受信を有効にする
+# (CAN_RAW_ERR_FILTER = 0x1FFFFFFF)。フレームは `is_error_frame` が立ち、
+# エラー種別は arbitration_id のビットとして載る。標準 ID 扱いで届くので
+# 11bit へ切り詰められるが、定義済みの種別は全て 0x200 以下なので欠けない。
+_CAN_ERR_BUSOFF = 0x00000040
+_CAN_ERR_RESTARTED = 0x00000100
+
+# 送信エラースコアの増減幅と上限。CAN コントローラの TEC と同じ規則
+# (失敗 +8 / 成功 -1 / 上限 255) に合わせてある。
+_TX_ERROR_SCORE_FAIL = 8
+_TX_ERROR_SCORE_MAX = 255
+
+# バスからの通信が観測できたら bus-off ラッチを外すまでの猶予は置かない。
+# bus-off はコントローラがバスから切り離された状態そのものなので、1 通でも
+# 送受信できた時点で「切り離されていない」が確定する。
+
 
 class BlockingRunner(Protocol):
     """``bus.send`` / ``bus.recv`` のような同期呼び出しを実行する口。
@@ -75,6 +92,19 @@ class CANManager:
         self._last_rx_at: dict[str, float] = {}
         self._last_tx_at: dict[str, float] = {}
         self._tx_error_count: dict[str, int] = {}
+        # **健全性の判定はこちらで行う。** `_tx_error_count` は起動からの累計で、
+        # 一度でもしきい値を超えると二度と下がらない。実機では物理緊急停止で
+        # DM3520 の電源が落ちた数秒間に 6000 件積み上がり、CAN が完全に復旧した後も
+        # バスが永久に DEGRADED のまま残った (`ip -s link` は ERROR-ACTIVE・
+        # bus-off 0 回、送受信ともエラー 0 なのに UI だけが異常を出し続ける)。
+        # 「今も壊れているか」に答えられない指標で判定してはならない。
+        #
+        # 増減は CAN コントローラの送信エラーカウンタ (TEC) に合わせる ——
+        # 失敗で +8、成功で -1、上限 255。config の `tx_error_threshold` は
+        # 「CAN error_passive 境界」として書かれているので、同じ土俵の値でなければ
+        # 意味が合わない。20Hz の再送なら 12 回続けて失敗して警告に入り、
+        # 復旧後は約 2.4 秒で警告が消える。
+        self._tx_error_score: dict[str, int] = {}
         self._rx_error_count: dict[str, int] = {}
         self._bus_off: dict[str, bool] = {}
         self._bus_channels: dict[str, str] = {}
@@ -94,6 +124,7 @@ class CANManager:
         self._bus_channels[name] = channel
 
         self._tx_error_count.setdefault(name, 0)
+        self._tx_error_score.setdefault(name, 0)
         self._rx_error_count.setdefault(name, 0)
         self._bus_off.setdefault(name, False)
 
@@ -206,16 +237,39 @@ class CANManager:
         try:
             await self._run_blocking(bus.send, msg)
         except can.CanError:
-            # CAN プロトコル層の送信失敗。tx_error_count を増やしつつ、
-            # 既存呼び出し元 (server.py の e_stop など) との互換性のため例外を再 raise する。
-            self._tx_error_count[bus_name] = self._tx_error_count.get(bus_name, 0) + 1
+            # CAN プロトコル層の送信失敗。カウンタを進めつつ、既存呼び出し元
+            # (server.py の e_stop など) との互換性のため例外を再 raise する。
+            self._record_tx_failure(bus_name)
             raise
         except Exception:
             # OS / executor / その他の異常も健全性カウンタに反映してから上位へ伝搬。
-            self._tx_error_count[bus_name] = self._tx_error_count.get(bus_name, 0) + 1
+            self._record_tx_failure(bus_name)
             raise
         else:
             self._last_tx_at[bus_name] = time.time()
+            self._record_tx_success(bus_name)
+
+    def _record_tx_failure(self, bus_name: str) -> None:
+        """送信 1 回の失敗を、累計 (表示用) と現況スコア (判定用) の両方へ積む。"""
+        self._tx_error_count[bus_name] = self._tx_error_count.get(bus_name, 0) + 1
+        self._tx_error_score[bus_name] = min(
+            _TX_ERROR_SCORE_MAX, self._tx_error_score.get(bus_name, 0) + _TX_ERROR_SCORE_FAIL
+        )
+
+    def _record_tx_success(self, bus_name: str) -> None:
+        """送信 1 回の成功でスコアを 1 だけ戻す。**累計は減らさない。**
+
+        累計を減らすと「今日このバスで何回送信に失敗したか」が誰にも分からなくなる。
+        判定と記録は別の役目なので、別の数で持つ。
+
+        送信できたということはコントローラがバスから切り離されていないので、
+        bus-off ラッチもここで外す。**外す経路が必要**なのは、`restart-ms` が 0 の
+        インタフェースでは復帰通知 (CAN_ERR_RESTARTED) が届かないためで、
+        それが無いと一度立った DOWN が二度と消えない ——
+        いま直している `tx_error_count` と同じ壊れ方を bus-off 側に作ることになる。
+        """
+        self._tx_error_score[bus_name] = max(0, self._tx_error_score.get(bus_name, 0) - 1)
+        self._bus_off[bus_name] = False
 
     async def _receive_loop(self, bus_name: str) -> None:
         """バス 1 本ぶんの受信ループ。フレームの解釈失敗では降りない。
@@ -232,6 +286,9 @@ class CANManager:
             while True:
                 msg: can.Message | None = await self._run_blocking(bus.recv, _RECV_TIMEOUT)
                 if msg is None:
+                    continue
+                if msg.is_error_frame:
+                    self._handle_error_frame(bus_name, msg)
                     continue
                 self._dispatch_frame(bus_name, motors, msg)
         except asyncio.CancelledError:
@@ -275,6 +332,10 @@ class CANManager:
                     # デコードに失敗したフレームでは更新しない (解釈できていない値を
                     # 「受信できている」と報告すると、途絶の検出そのものが効かなくなる)
                     self._last_rx_at[motor.name] = time.time()
+                    # 受信できている = コントローラはバスから切り離されていない。
+                    # `restart-ms` が 0 のインタフェースは復帰通知を送らないので、
+                    # 実通信を根拠に外す経路が無いと DOWN が永久に残る
+                    self._bus_off[bus_name] = False
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -306,6 +367,35 @@ class CANManager:
                 self._record_rx_error(bus_name, motor.name, "INFO 解釈")
             return
 
+    def _handle_error_frame(self, bus_name: str, msg: can.Message) -> None:
+        """SocketCAN のエラーフレームでバス状態を更新する。**モータへは配らない。**
+
+        python-can の socketcan バスは既定でエラーフレームを受信する。これを
+        通常のフレームとして `_dispatch_frame` へ流すと、エラー種別のビット列
+        (0x40 = bus-off など) がそのまま arbitration_id として宛先判定に掛かる。
+        DM3520 の MST_ID は 0x11 / 0x12 で、`CAN_ERR_TRX|CAN_ERR_TX_TIMEOUT` の
+        0x11 や `CAN_ERR_TRX|CAN_ERR_LOSTARB` の 0x12 と衝突しうる —— つまり
+        **バスのエラーがモータの実測角として取り込まれる**余地がある。
+
+        **bus-off はここでしか観測できない。** `health()` は `bus.state` も見ているが、
+        python-can 4.6 の `SocketcanBus` は `state` を実装しておらず、基底クラスの
+        既定 (`BusState.ACTIVE`) が返る。つまり SocketCAN では ERROR / PASSIVE の
+        分岐は永久に成立せず、bus-off を立てる経路は今まで 1 つも無かった
+        (`_bus_off` はテストからしか True にならなかった)。
+
+        鮮度 (`_last_rx_at`) は動かさない。エラーフレームは「モータからの応答」では
+        ないので、これで途絶検出を止めると本物の途絶が見えなくなる。
+        """
+        if msg.arbitration_id & _CAN_ERR_BUSOFF:
+            if not self._bus_off.get(bus_name, False):
+                logger.error("CAN バスが bus-off になりました (bus=%s)", bus_name)
+            self._bus_off[bus_name] = True
+        if msg.arbitration_id & _CAN_ERR_RESTARTED:
+            # `restart-ms` を設定したインタフェースだけが送ってくる。0 のままだと
+            # カーネルは自動復帰しないので、この通知も永久に来ない
+            logger.warning("CAN バスが bus-off から自動復帰しました (bus=%s)", bus_name)
+            self._bus_off[bus_name] = False
+
     def _record_rx_error(self, bus_name: str, motor_name: str, phase: str) -> None:
         """握り潰した受信失敗を、数として残しつつ間引いて記録する。
 
@@ -331,32 +421,72 @@ class CANManager:
             self._tasks.append(task)
         await self.initialize_motors()
 
-    async def initialize_motors(self) -> None:
-        """各モータの起動時設定を宣言順に送り、続けて励磁を有効化する。"""
+    async def initialize_motors(self) -> list[str]:
+        """各モータの起動時設定を宣言順に送り、続けて励磁を有効化する。
+
+        **1 台の送信失敗で残りの起動を諦めない。** 素の for に並べると、最初の
+        モータで CAN の送信が失敗しただけで以降のモータは設定も励磁も受けられず、
+        しかも症状は「そのバスのモータが全部無励磁」でしかない。
+        `shutdown()` や `main()` の後始末と同じ理由 (止める処理・立ち上げる処理を
+        途中の 1 例外で丸ごと飛ばさない)。
+
+        Returns:
+            有効化できなかったモータ名。呼び出し側が操縦者へ見せる。
+        """
+        inactive: list[str] = []
         for motor_name, motor in self._motors.items():
-            await self._send_steps(motor_name, motor.initialization_steps())
-            await self.activate_motor(motor_name)
+            try:
+                await self._send_steps(motor_name, motor.initialization_steps())
+                if not await self.activate_motor(motor_name):
+                    inactive.append(motor_name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("モータ '%s' の起動時設定に失敗しました", motor_name)
+                inactive.append(motor_name)
+        return inactive
 
     async def activate_motors(
         self,
         *,
         should_abort: Callable[[], bool] | None = None,
         feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
-    ) -> None:
+    ) -> list[str]:
         """全モータの励磁を有効化する。緊急停止解除後の復帰にも使う。
 
         should_abort は「途中で有効化をやめるべきか」を返す。緊急停止が再び入った
         場合に、残りのモータへ enable を送らないための中断口。
+
+        **1 台の送信失敗で残りの有効化を諦めない。** 緊急停止の原因がそのまま
+        CAN の送信失敗を招いている場面 (専用バスに 1 台しか居ない DM3520 が電源を
+        失うと ACK が返らず送信が全滅する) では、解除操作のたびに最初のモータで
+        例外が上がり、**残りのモータへ enable が 1 通も飛ばない**。しかも
+        `RobotServer._reactivate_motors` はこれをログに落とすだけなので、画面上は
+        「解除できた」ように見えたまま機体が無励磁で取り残される。
+
+        Returns:
+            有効化できなかったモータ名 (中断で飛ばしたものを含む)。
         """
-        for motor_name in self._motors:
+        inactive: list[str] = []
+        motor_names = list(self._motors)
+        for index, motor_name in enumerate(motor_names):
             if should_abort is not None and should_abort():
                 logger.warning("モータの有効化を中断しました (残り: %s 以降)", motor_name)
-                return
-            await self.activate_motor(
-                motor_name,
-                should_abort=should_abort,
-                feedback_timeout_s=feedback_timeout_s,
-            )
+                inactive.extend(motor_names[index:])
+                return inactive
+            try:
+                if not await self.activate_motor(
+                    motor_name,
+                    should_abort=should_abort,
+                    feedback_timeout_s=feedback_timeout_s,
+                ):
+                    inactive.append(motor_name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("モータ '%s' の有効化に失敗しました", motor_name)
+                inactive.append(motor_name)
+        return inactive
 
     async def activate_motor(
         self,
@@ -518,20 +648,26 @@ class CANManager:
         # バス情報
         for bus_name, bus in self._buses.items():
             tx_err = self._tx_error_count.get(bus_name, 0)
+            tx_score = self._tx_error_score.get(bus_name, 0)
             rx_err = self._rx_error_count.get(bus_name, 0)
             bus_off = self._bus_off.get(bus_name, False)
 
-            # python-can の bus.state は virtual バスでは未提供のため getattr で防御的に読む。
-            # ACTIVE 以外で ERROR/PASSIVE のときだけ降格判定に使う。
+            # python-can の bus.state は実装しないインタフェースが多い (SocketCAN も
+            # その 1 つで、基底クラスの既定 ACTIVE が返る) ため getattr で防御的に読む。
+            # **SocketCAN では下の 2 つは永久に False になる。** 実バスの bus-off は
+            # エラーフレーム (`_handle_error_frame`) が拾う。
             can_state = getattr(bus, "state", None)
             error_state = getattr(can.BusState, "ERROR", None)
             passive_state = getattr(can.BusState, "PASSIVE", None)
             is_error = can_state is not None and can_state == error_state
             is_passive = can_state is not None and can_state == passive_state
 
+            # **判定に使うのは累計 (`tx_err`) ではなく現況スコア (`tx_score`)。**
+            # 累計は単調増加なので、一度超えたバスは復旧しても DEGRADED から戻れない。
+            # 表示には累計をそのまま載せる (この試合で何回失敗したかは残す)
             if bus_off or is_error:
                 state = BusHealth.DOWN
-            elif tx_err >= thresholds.tx_error_threshold or is_passive:
+            elif tx_score >= thresholds.tx_error_threshold or is_passive:
                 state = BusHealth.DEGRADED
             else:
                 state = BusHealth.OK

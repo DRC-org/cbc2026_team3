@@ -32,6 +32,7 @@ const MOTORS: Record<string, MotorState> = {
 function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
+    unenergized_motors: [],
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],

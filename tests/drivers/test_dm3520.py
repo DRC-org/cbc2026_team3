@@ -194,6 +194,27 @@ class TestFeedbackDecode:
 
         assert drv.is_fault() is False
 
+    def test_energized_only_when_error_nibble_says_enabled(self) -> None:
+        """**無励磁は `is_fault()` に掛からないので、別に読めなければ見えない。**
+
+        本機は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの TIMEOUT や
+        電源の瞬断で励磁が外れると、PC は 20Hz で位置指令を送り続け、フィードバックも
+        正常に届き、ヘルスも OK のまま —— 操縦者に見えるのは「指令しても動かない」だけで、
+        原因を示す表示がどこにも無い。実機で実際にこの状態が起きた。
+        """
+        drv = _driver()
+
+        feed_dm3520(drv, error=int(Dm3520Error.ENABLED))
+        assert drv.is_energized() is True
+
+        feed_dm3520(drv, error=int(Dm3520Error.DISABLED))
+        assert drv.is_energized() is False
+        assert drv.is_fault() is False
+
+        # 異常で自ら励磁を切った状態も「励磁されていない」
+        feed_dm3520(drv, error=int(Dm3520Error.COMM_LOSS))
+        assert drv.is_energized() is False
+
     def test_comm_loss_is_a_fault(self) -> None:
         """ドライバの TIMEOUT が満了して自分で励磁を切った状態。
 

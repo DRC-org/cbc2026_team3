@@ -58,6 +58,16 @@ export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIss
     });
   }
 
+  // 緊急停止は解除されているのに励磁が戻っていない。指令は 20Hz で飛び続け、
+  // フィードバックもヘルスも正常なので、ここで言わないと誰も気付けない
+  if (safety.unenergized_motors.length > 0) {
+    issues.push({
+      label: "無励磁のまま",
+      detail: safety.unenergized_motors.join(", "),
+      hint: "指令は届いていますが励磁されていません。緊急停止をもう一度押して解除し直してください (直らなければドライバの電源と CAN 配線を確認)",
+    });
+  }
+
   // paused は動作確認中の意図的な停止なので異常に数えない
   const deadLoops = safety.position_loops.filter((l) => !l.running).map((l) => l.bus);
   if (deadLoops.length > 0 || !safety.loops_running) {

@@ -539,6 +539,93 @@ class TestEStopReleaseReactivatesMotors:
             await ws.close()
 
 
+class TestUnenergizedMotorsAreVisible:
+    """**「解除できたのに機体が動かない」を画面に出せなければならない。**
+
+    実機で起きた形: 物理緊急停止で DM3520 の電源が落ち、専用バスに 1 台しか
+    居ないので ACK が返らず送信が全滅する。解除しても再励磁は最初のモータの
+    例外で打ち切られ、以降へ enable が 1 通も飛ばない。それでもフィードバックは
+    復電後に正常に届き、`is_fault()` にも掛からないのでモータのヘルスは OK、
+    PC は 20Hz で位置指令を送り続ける。操縦者に見えるのは
+    「指令しても動かない」だけで、原因を示す表示がどこにも無い。
+    """
+
+    async def test_release_reports_motors_that_failed_to_energize(self) -> None:
+        fx = _build_fixture()
+        app = fx.create_app()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["m1"])
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _enter_e_stop(fx, ws)
+
+            await ws.send_json({"type": "e_stop_release"})
+            await wait_until(lambda: not fx.e_stop_active)
+            reported = await wait_until(
+                lambda: fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["m1"]
+            )
+
+            assert reported, "励磁に失敗したモータが safety に載っていない"
+            # 成功した側へ巻き添えを出さない
+            assert fx.state_message("sub_hand")["safety"]["unenergized_motors"] == []
+            await ws.close()
+
+    async def test_nothing_is_reported_while_e_stopped(self) -> None:
+        """停止中は無励磁が正しい状態。ここで報告すると本物の 1 行が押し流される。"""
+        fx = _build_fixture()
+        app = fx.create_app()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["m1"])
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _enter_e_stop(fx, ws)
+
+            await ws.send_json({"type": "e_stop_release"})
+            await wait_until(
+                lambda: fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["m1"]
+            )
+            await fx.activate_e_stop(reason="再度停止")
+
+            assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == []
+            await ws.close()
+
+    async def test_driver_reported_disable_is_surfaced(self) -> None:
+        """有効化に成功した後でドライバ側が励磁を落とした場合も拾う。
+
+        DM3520 は通信途絶保護や電源の瞬断で自ら励磁を切る。有効化の戻り値だけを
+        見ていると、この経路が丸ごと抜ける。
+        """
+        fx = _build_fixture()
+        app = fx.create_app()
+        energized = MagicMock()
+        energized.name = "energized"
+        energized.is_energized.return_value = True
+        dropped = MagicMock()
+        dropped.name = "dropped"
+        dropped.is_energized.return_value = False
+        unknown = MagicMock()
+        unknown.name = "unknown"
+        # 励磁状態を報告しないドライバ (自作モタドラ・C620)。
+        # 「分からない」を「無励磁」へ倒すと常時警告が出る
+        unknown.is_energized.return_value = None
+        set_motors(
+            fx.can_manager("main_hand"),
+            {"energized": energized, "dropped": dropped, "unknown": unknown},
+        )
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _enter_e_stop(fx, ws)
+
+            await ws.send_json({"type": "e_stop_release"})
+            reported = await wait_until(
+                lambda: fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["dropped"]
+            )
+
+            assert reported, "ドライバが報告した無励磁が safety に載っていない"
+            await ws.close()
+
+
 class TestActivateEStopFromInside:
     """同期監視など内部の異常検知から、操縦者の e_stop と同じ経路で止められること。"""
 

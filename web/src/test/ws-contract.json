@@ -270,7 +270,8 @@
             "paused": false,
             "running": true
           }
-        ]
+        ],
+        "unenergized_motors": []
       },
       "sequence": "main_hand_seq",
       "step_index": 0,
