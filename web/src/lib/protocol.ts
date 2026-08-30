@@ -290,6 +290,21 @@ export interface ManualAxis {
   target: number | null;
   /** 連続操作を許した軸だけが持つ。null ならプリセット指令のみ */
   manual: ManualRange | null;
+  /**
+   * 左右直結ペアの現在のずれ (軸の単位)。**ずれようのない軸と測れない軸は null。**
+   *
+   * サーバーが 3 層の保護と同じ `SyncGroup.deviation()` で算出した値をそのまま配る。
+   * UI 側で `motors` の位置から計算し直してはならない —— 逆回転ペアは scale の符号で
+   * 表されており、符号を 1 つ落とすと画面だけが別の「ずれ」を言い出す。
+   *
+   * **0.0 は正常な値であって欠落ではない** (揃っている状態)。falsy 判定で捨てないこと。
+   */
+  deviation: number | null;
+  /**
+   * 偏差の許容差 (軸の単位)。`config` の `sync_tolerance` が唯一の正で、
+   * UI はフォールバック値を持たない。null なら色を付けず数値も判定しない。
+   */
+  sync_tolerance: number | null;
   /** 位置定数に定義された状態名。プリセットボタンはここからしか作らない */
   positions: string[];
   motors: string[];

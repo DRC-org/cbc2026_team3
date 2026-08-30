@@ -347,6 +347,8 @@ const MANUAL_AXIS = fieldsOf<ManualAxis>({
   value: "ui",
   target: "ui",
   manual: "ui",
+  deviation: "ui",
+  sync_tolerance: "ui",
   positions: "ui",
   command_mode: "ui",
   motors: {

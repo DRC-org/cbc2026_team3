@@ -167,6 +167,10 @@ def _manual_controller(
                 "y_axis": {
                     "unit": "mm",
                     "command_unit": "deg",
+                    # 左右偏差を配る軸。**揃っている状態 (deviation = 0.0) を載せる**のが
+                    # 狙いで、0.0 は JS では falsy なので `deviation ? ... : null` のような
+                    # 受信条件を書くと即座に落ちる。null で埋めた golden ではここが素通りする
+                    "sync_tolerance": 2.0,
                     "manual": {"min": -2.0, "max": 20.0, "steps": [0.5, 2.0]},
                     "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
                 },

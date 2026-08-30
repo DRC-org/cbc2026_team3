@@ -3,32 +3,40 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { ManualPanel } from "@/components/operator/ManualPanel";
-import type { ManualState } from "@/lib/protocol";
+import type { ManualAxis, ManualState } from "@/lib/protocol";
 
-const MANUAL: ManualState = {
+const Y_AXIS: ManualAxis = {
+  name: "y_axis",
+  unit: "mm",
+  command_mode: "position",
+  value: 5,
+  target: 4,
+  manual: { min: -2, max: 20, steps: [0.5, 2] },
+  deviation: 0.2,
+  sync_tolerance: 2.0,
+  positions: ["home", "work"],
+  motors: ["y_axis_r", "y_axis_l"],
+};
+
+const GRIPPER: ManualAxis = {
+  name: "gripper",
+  unit: "deg",
+  command_mode: "position",
+  value: 5,
+  target: null,
+  manual: null,
+  deviation: null,
+  sync_tolerance: null,
+  positions: ["open", "closed"],
+  motors: ["gripper"],
+};
+
+const MANUAL: ManualState = { mode: "manual", axes: [Y_AXIS, GRIPPER] };
+
+/** 連続操作できる軸が 2 本ある構成。軸選択の移動を見るために要る */
+const TWO_STEERABLE: ManualState = {
   mode: "manual",
-  axes: [
-    {
-      name: "y_axis",
-      unit: "mm",
-      command_mode: "position",
-      value: 5,
-      target: 4,
-      manual: { min: -2, max: 20, steps: [0.5, 2] },
-      positions: ["home", "work"],
-      motors: ["y_axis_r", "y_axis_l"],
-    },
-    {
-      name: "gripper",
-      unit: "deg",
-      command_mode: "position",
-      value: 5,
-      target: null,
-      manual: null,
-      positions: ["open", "closed"],
-      motors: ["gripper"],
-    },
-  ],
+  axes: [Y_AXIS, { ...Y_AXIS, name: "rotate", unit: "deg", motors: ["rotate_r", "rotate_l"] }],
 };
 
 function renderPanel(manual: ManualState = MANUAL, blockedReason: string | null = null) {
@@ -50,7 +58,7 @@ describe("ManualPanel", () => {
   it("軸が増えれば行も増える (UI 側にハードコードが無い)", () => {
     const extra = {
       ...MANUAL,
-      axes: [...MANUAL.axes, { ...MANUAL.axes[1], name: "wall_f", motors: ["wall_f"] }],
+      axes: [...MANUAL.axes, { ...GRIPPER, name: "wall_f", motors: ["wall_f"] }],
     };
     renderPanel(extra);
     expect(screen.getByText("wall_f")).toBeInTheDocument();
@@ -74,8 +82,10 @@ describe("ManualPanel", () => {
   it("絶対値は manual_set を送る", async () => {
     const user = userEvent.setup();
     const { send } = renderPanel();
+    const input = screen.getByLabelText("y_axis の目標値");
 
-    await user.type(screen.getByLabelText("y_axis の目標値"), "7");
+    await user.clear(input);
+    await user.type(input, "7");
     await user.click(screen.getByLabelText("y_axis を入力値へ移動"));
 
     expect(send).toHaveBeenCalledWith({
@@ -114,5 +124,98 @@ describe("ManualPanel", () => {
     // 「壊れている」のか「そういうものなのか」が画面から分からない
     renderPanel({ mode: "manual", axes: [] });
     expect(screen.getByText(/手動操縦できる軸がありません/)).toBeInTheDocument();
+  });
+
+  describe("キーボードの操作対象", () => {
+    it("既定では先頭の連続軸が選ばれている", async () => {
+      const user = userEvent.setup();
+      const { send } = renderPanel();
+
+      await user.keyboard("{ArrowRight}");
+
+      expect(send).toHaveBeenCalledWith({
+        type: "manual_jog",
+        robot: "main_hand",
+        axis: "y_axis",
+        delta: 0.5,
+      });
+    });
+
+    it("↑ ↓ で操作対象が移る", async () => {
+      const user = userEvent.setup();
+      const { send } = renderPanel(TWO_STEERABLE);
+
+      await user.keyboard("{ArrowDown}");
+      await user.keyboard("{ArrowRight}");
+
+      expect(send).toHaveBeenLastCalledWith({
+        type: "manual_jog",
+        robot: "main_hand",
+        axis: "rotate",
+        delta: 0.5,
+      });
+    });
+
+    it("端では選択が止まる (巡回しない)", async () => {
+      // 巡回すると、下端で 1 回押しすぎただけで先頭の軸へ飛ぶ。
+      // どの軸を操作しているかは画面を見ずに把握できる必要がある
+      const user = userEvent.setup();
+      const { send } = renderPanel(TWO_STEERABLE);
+
+      await user.keyboard("{ArrowUp}{ArrowUp}{ArrowUp}");
+      await user.keyboard("{ArrowRight}");
+
+      expect(send).toHaveBeenLastCalledWith({
+        type: "manual_jog",
+        robot: "main_hand",
+        axis: "y_axis",
+        delta: 0.5,
+      });
+    });
+
+    it("連続操作できない軸は選択対象に入らない", async () => {
+      // ← → が何も起こさない行へ降りられると、キーが効かないのか
+      // 軸が動かないのかを画面から区別できない
+      const user = userEvent.setup();
+      const { send } = renderPanel();
+
+      await user.keyboard("{ArrowDown}{ArrowDown}");
+      await user.keyboard("{ArrowRight}");
+
+      expect(send).toHaveBeenLastCalledWith({
+        type: "manual_jog",
+        robot: "main_hand",
+        axis: "y_axis",
+        delta: 0.5,
+      });
+    });
+
+    it("行を触るとその軸が操作対象になる", async () => {
+      const user = userEvent.setup();
+      const { send } = renderPanel(TWO_STEERABLE);
+
+      await user.click(screen.getByText("rotate"));
+      await user.keyboard("{ArrowRight}");
+
+      expect(send).toHaveBeenLastCalledWith({
+        type: "manual_jog",
+        robot: "main_hand",
+        axis: "rotate",
+        delta: 0.5,
+      });
+    });
+
+    it("キーの割り当てを画面に出す", () => {
+      // 凡例と実装が別の場所にあると必ず食い違う
+      renderPanel();
+      for (const key of ["↑", "↓", "←", "→", "[", "]", "Home", "End"]) {
+        expect(screen.getByText(key)).toBeInTheDocument();
+      }
+    });
+
+    it("連続操作できる軸が無ければ凡例を出さない", () => {
+      renderPanel({ mode: "manual", axes: [GRIPPER] });
+      expect(screen.queryByText("Home")).toBeNull();
+    });
   });
 });

@@ -7,8 +7,12 @@ export type HotkeyMap = Record<string, (() => void) | undefined>;
 /**
  * 入力中・修飾キー併用など、グローバルショートカットを受け付けない状況。
  * 競技中の誤爆は機体の破損に直結するため、少しでも曖昧な状況では発火させない。
+ *
+ * **押しっぱなしのジョグ (`useHoldKey`) もこの判定を共有する。** 目標値の入力欄で
+ * 数字を打ちながら `←` を押すのはカーソル移動であって、機体を動かす操作ではない。
+ * 判定を写すと、片方だけが入力欄を素通しにしても画面からは区別が付かない。
  */
-function isBlockedByTarget(event: KeyboardEvent): boolean {
+export function isHotkeyBlocked(event: KeyboardEvent): boolean {
   // 押しっぱなしによる連続発火はトリガーの多重送信になるため弾く
   if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return true;
 
@@ -42,7 +46,7 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
     if (!enabled) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (modalOpenRef.current || isBlockedByTarget(event)) return;
+      if (modalOpenRef.current || isHotkeyBlocked(event)) return;
       const handler = mapRef.current[event.key];
       if (!handler) return;
       event.preventDefault();
