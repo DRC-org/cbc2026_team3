@@ -74,13 +74,27 @@ setup_one() {
     # 設定変更は down 状態でしか通らない。up 済みでも失敗しないよう || true。
     "${IP[@]}" link set "$iface" down 2>/dev/null || true
 
-    # bitrate と restart-ms は同じ `type can` の設定で入れる。
-    # **restart-ms を省くとカーネル既定の 0 = 自動復帰しない、になる。**
-    # bus-off に落ちたインタフェースは手動で down/up するまで送受信とも死ぬので、
-    # 専用バスに 1 台しか居ない構成 (can_dm3520) では相手が電源を失っただけで
-    # 試合中に復旧不能になる。
-    if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate" restart-ms "$restart_ms"; then
-        log_err "${iface}: bitrate ${bitrate} / restart-ms ${restart_ms} の設定に失敗"
+    if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate"; then
+        log_err "${iface}: bitrate ${bitrate} の設定に失敗"
+        return 1
+    fi
+
+    # **restart-ms はドライバが対応していなければ設定できない。** カーネルは
+    # do_set_mode を持たないドライバに対して EOPNOTSUPP
+    # ("Device doesn't support restart from Bus Off") を返し、CANable2 が使う
+    # gs_usb がこれに当たる (手動の `type can restart` も同じ理由で通らない)。
+    # bitrate と同じ 1 コマンドに束ねると、対応していない環境では **1 本も
+    # up できない** —— しかも bitrate 側は先に適用されるので、症状は
+    # 「設定に失敗したのに bitrate だけ入っている」形になる。
+    # 非対応なら restart-ms 0 のまま続行し、後段でまとめて警告する
+    # (復旧手段が無いことは隠さないが、全バスを落とす理由にはしない)。
+    local restart_err
+    if restart_err=$("${IP[@]}" link set "$iface" type can restart-ms "$restart_ms" 2>&1); then
+        :
+    elif [[ "$restart_err" == *"restart from Bus Off"* ]]; then
+        restart_unsupported+=("$iface")
+    else
+        log_err "${iface}: restart-ms ${restart_ms} の設定に失敗: ${restart_err}"
         return 1
     fi
 
@@ -102,7 +116,11 @@ setup_one() {
         return 1
     fi
 
-    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${restart_ms} state=${state}"
+    # restart-ms は要求値ではなく実効値を読み戻して出す。要求値を出すと、
+    # ドライバが受け付けなかった環境で「設定したつもり」のログだけが残る。
+    local effective_restart
+    effective_restart=$(ip -details link show "$iface" | grep -oE 'restart-ms [0-9]+' | head -1 | awk '{print $2}')
+    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${effective_restart:-不明} state=${state}"
     return 0
 }
 
@@ -139,6 +157,7 @@ configured=0
 up_count=0
 missing=()
 unassigned=()
+restart_unsupported=()
 
 # serial 未採取のバスを控えておく（strict では未完了として扱う）
 while IFS=$'\t' read -r name serial _bitrate _txq _restart; do
@@ -171,6 +190,16 @@ done
 for name in "${missing[@]}"; do
     log_warn "${name}: デバイスが見つかりません"
 done
+
+# 非対応は恒久的なドライバの性質であって、点検で直せる不備ではない。strict でも
+# 失敗にしないのは、毎回必ず落ちる点検は点検として機能しないため。ただし
+# 「bus-off に落ちたら自力では戻らない」ことは毎回目に入る場所に出す。
+for name in "${restart_unsupported[@]}"; do
+    log_warn "${name}: ドライバが bus-off からの自動復帰に非対応 (restart-ms=0 のまま)"
+done
+if [[ ${#restart_unsupported[@]} -gt 0 ]]; then
+    log_warn "  -> bus-off へ落ちた場合は scripts/setup_can.sh の再実行 (down/up) でしか戻せません"
+fi
 
 echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 欠け ${#missing[@]}) ---"
 

@@ -3349,7 +3349,7 @@ health:
 | ヘルスチェックループが CAN 受信を阻害 | 受動監視主体・能動 ping は明示要求時のみ |
 | しきい値が厳しすぎて誤警報（チャタリング） | config で上書き可能。STALE→OK 復帰には連続 N フレーム受信を要求 |
 | 送信エラーで `_receive_loop` が落ちる | `send_to_bus` の例外を握って health に反映、ループは継続 |
-| bus_off からの自動復帰 | カーネルに任せる（`config/can_buses.yaml` の `restart_ms`、既定 100ms）。PC 側のラッチは実通信が戻った時点で外す |
+| bus_off からの自動復帰 | カーネルに任せる（`config/can_buses.yaml` の `restart_ms`、既定 100ms）。**ただし CANable2 の `gs_usb` は `restart-ms` に非対応で、実効値は 0 になる**（`docs/checks_and_health.md`）。PC 側のラッチは実通信が戻った時点で外す |
 
 #### アクチュエータ動作確認シーケンス
 

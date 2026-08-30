@@ -99,6 +99,25 @@ python-can 4.6 の `SocketcanBus` は `state` を実装していない（基底�
 だけで ACK が返らなくなり TEC が 256 に達する。値は `config/can_buses.yaml` の
 `restart_ms`（既定 100ms）が持ち、`scripts/setup_can.sh` が `ip link` へ渡す。
 
+### だが現行の CANable2 では `restart-ms` を設定できない
+
+SocketCAN の `restart-ms` は**ドライバが `do_set_mode` を実装している場合しか
+受け付けられない**。CANable2 が使う `gs_usb` は実装しておらず、カーネルは
+`EOPNOTSUPP`（`Error: Device doesn't support restart from Bus Off.`）を返す。
+手動の `ip link set <if> type can restart` も同じ理由で通らない。ドライバ側の
+恒久的な制約なので、`config` を変えても回避できない。
+
+`setup_can.sh` は `bitrate` と `restart-ms` を**別のコマンドに分けて**発行し、
+非対応を検出したら `restart-ms` 0 のまま続行して警告する。1 コマンドに束ねていた
+頃は、非対応環境で**1 本も up できなかった**（しかも `bitrate` は先に適用されるので
+「設定に失敗したのに bitrate だけ入っている」形になり、原因が読み取れない）。
+起動ログの `restart-ms=` は要求値ではなく**インタフェースから読み戻した実効値**。
+
+したがって現状、bus-off へ落ちたバスを戻す経路は `scripts/setup_can.sh` の再実行
+（＝ `down`/`up`）しかない。PC 側のラッチは実通信で外れる設計なので、バスさえ
+戻れば表示も戻る。**自動復帰が要るなら、カーネルではなく userspace で
+（bus-off を検出して `down`/`up` する常駐）用意するしかない。**
+
 ### 「励磁されていない」はヘルスに現れない
 
 DM3520 は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの通信途絶保護や
