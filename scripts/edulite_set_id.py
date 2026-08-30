@@ -83,8 +83,7 @@ def scan(bus: can.BusABC, host_id: int, targets: range) -> list[ScanResult]:
         try:
             result = probe_id(bus, host_id, target)
         except can.CanOperationError:
-            # 送信が詰まった = ACK を返す相手がバス上に居ない。1 通ごとに数えて
-            # おき、最後にまとめて物理層の疑いとして報告する
+            # 送信が詰まった。1 通ごとに数えておき、最後にまとめて報告する
             stalled += 1
             time.sleep(0.05)
             continue
@@ -93,17 +92,37 @@ def scan(bus: can.BusABC, host_id: int, targets: range) -> list[ScanResult]:
         time.sleep(_PROBE_INTERVAL_S)
 
     if stalled and not found:
-        raise BusSilentError(stalled, len(targets))
+        raise BusStalledError(stalled, len(targets))
     return found
 
 
-class BusSilentError(RuntimeError):
-    """送信が詰まり、応答も 0 件だった。物理層を疑うべき状態。"""
+class BusStalledError(RuntimeError):
+    """送信が詰まり、応答も 0 件だった。**原因を断定してはならない状態。**
+
+    2 つの原因が同じ症状を出す:
+
+    1. ACK を返すノードがバス上に居ない (無通電・H/L 逆・断線)
+    2. **直前の走査で送信キューが詰まったまま残っている**
+
+    2 が厄介なのは、バスが完全に正常でも起きること。一度詰まると滞留した
+    フレームが送信スロットを占有し続け、以降の probe は誰にも届かないまま
+    キューの後ろに並ぶ。この状態で走査すると「応答 0 件」になり、**1 と
+    見分けが付かない**。
+
+    実際にこれで「モータが繋がっていない」と誤診した (2 台とも生きていた)。
+    断定せず、先にバスの張り直しを促すこと —— 張り直しはキューごと作り直すので、
+    1 通目から正しく測れる。
+    """
 
     def __init__(self, stalled: int, total: int) -> None:
         super().__init__(
             f"{total} 通中 {stalled} 通の送信が詰まり、応答は 0 件でした。\n"
-            "  ACK を返すノードがバス上に居ません。次を確認してください:\n"
+            "  **この結果だけでは原因を断定できません。** まずバスを張り直してください:\n"
+            "      scripts/setup_can.sh\n"
+            "  直前の走査で詰まったキューが残っているだけなら、これで直ります\n"
+            "  (バスが正常でも同じ「応答 0 件」になるため、見分けが付きません)。\n"
+            "\n"
+            "  張り直しても応答 0 件なら、ACK を返すノードがバス上に居ません:\n"
             "    - モータに 24V が入っているか (**本機は CAN トランシーバも\n"
             "      モータ電源から取る**ので、無通電の個体はバス上に存在しない)\n"
             "    - CAN の H/L が入れ替わっていないか\n"
@@ -235,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     bus = can.interface.Bus(channel=args.bus, interface="socketcan")
     try:
         return args.func(args, bus)
-    except BusSilentError as exc:
+    except BusStalledError as exc:
         print(f"[ERR ] {exc}", file=sys.stderr)
         return 3
     finally:

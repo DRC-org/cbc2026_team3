@@ -75,3 +75,18 @@ def test_refuses_a_no_op_rewrite() -> None:
 @pytest.mark.parametrize("responses", [2, 3, 7])
 def test_any_number_of_duplicates_is_refused(responses: int) -> None:
     assert plan_set_id(0x7F, 0x01, [ScanResult(0x7F, responses)]) is not None
+
+
+def test_stalled_bus_message_offers_the_recoverable_cause_first() -> None:
+    """「応答 0 件」から物理層の断線を**断定してはならない**。
+
+    直前の走査で詰まった送信キューが残っているだけでも、まったく同じ
+    「送信が詰まる + 応答 0 件」になる。実際にこれで「モータが繋がっていない」と
+    誤診した (2 台とも生きていた)。復旧できる側の原因とその手順を先に出すこと。
+    """
+    message = str(edulite_set_id.BusStalledError(8, 256))
+
+    assert "setup_can.sh" in message, "張り直しの手順を出していない"
+    assert "断定できません" in message, "原因を断定しない旨が消えている"
+    # 張り直しの案内が、物理層の疑いより先に来ること
+    assert message.index("setup_can.sh") < message.index("24V")
