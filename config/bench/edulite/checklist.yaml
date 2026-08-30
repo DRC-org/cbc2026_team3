@@ -1,45 +1,44 @@
 # RobStride EDULITE 05 単体ベンチ (機構未装着) の確認項目。
 #
-# 本番の config/checklist.yaml は y_axis / gripper / conveyor / origin_sensor など、
-# このベンチに存在しない機構の確認を求めるためそのままでは使えない。
+# 本番の config/checklist.yaml は y_axis / gripper / conveyor / origin_sensor など
+# このベンチに存在しない機構の確認を求めるため、そのままでは使えない。
 #
 # 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもモータは動かせる
 # (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
 # ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
 #
-# **統合動作確認 (robots/motor_check.py) はこのベンチでは登録されない。** 両ハンドの
-# 全軸が揃っていないと起動時に「必要な軸が足りない」で見送られるため、確認は手動操縦
-# パネルからのプリセット送信と UI の位置表示で行う。
-# 本機は位置を報告できるので、指令どおり動いたかは UI の位置表示で読める。ここの
-# 目視項目が担うのは、それでも分からないこと —— 回転方向・ID の一致・停止時に
-# 脱力すること —— に絞ってある。
+# **本機は位置を報告できる**ので、指令どおり動いたかは動作確認 (motor_check) で
+# 自動判定できる。ここの目視項目が担うのは、自動判定では分からないこと ——
+# 回転方向・左右のずれ・停止時に脱力すること —— に絞ってある。
 
 checklists:
   pre_match:
     - id: bench_bus_up
       label: can_edulite が up していること確認 (ip -br link show)
+    - id: bench_serial
+      label: config/can_buses.yaml の can_edulite に serial が入っていること確認 (TBD なら固定名が付かない)
     - id: bench_power
-      label: 2 台とも 24V が入っていること確認 (**本機は CAN トランシーバもモータ電源から取る**ので、無通電の個体はバス上に存在しないのと同じ挙動になる)
-    - id: bench_wiring
-      label: CAN の H/L が入れ替わっていないこと確認 (逆結線した個体は 1 通も応答せず、配線不良と区別が付かない)
-    - id: bench_termination
-      label: バス両端に 120Ω の終端が入っていること確認
-    - id: bench_can_id
-      label: 2 台の can_id が 1 / 2 に書き換わっていること確認 (**出荷値は 2 台とも 0x7F**。scripts/edulite_set_id.py --scan で確かめる)
+      label: ドライバに電源が入り、モータの動力線・エンコーダ線が確実に嵌まっていること確認
     - id: bench_free
-      label: 出力軸に何も繋がっておらず、回っても干渉しないこと確認
+      label: 出力軸に何も繋がっておらず、2 台とも回っても干渉しないこと確認
+    - id: bench_can_id
+      label: 2 台の can_id が 1 / 2 に分かれていること確認 (**出荷値は 2 台とも 0x7F**。scripts/edulite_set_id.py scan で 2 個の ID が 1 通ずつ応答すること)
+    - id: bench_wiring
+      label: candump can_edulite で拡張 ID 0x02____01 / 0x02____02 の 2 本が届いていること確認
+    - id: bench_host_id
+      label: フィードバックの宛先 (拡張 ID 下位 8bit) が host_id 0xFD であること確認 (ずれると動くのに STALE のまま)
     - id: bench_feedback
-      label: rotate_r / rotate_l 双方のフィードバックが届いていること確認 (片方でも欠けるとペア単位の途絶判定で 2 台とも止まる)
-    - id: bench_zero
-      label: "起動時に現在角が原点になっていること確認 (set_zero_on_start: true。UI の位置表示が 0deg 付近)"
+      label: rotate_r / rotate_l 双方のフィードバックが届いていること確認
     - id: rotate_small
       label: 手動操縦で rotate に small を送り、2 台とも動くこと目視確認
     - id: rotate_direction
-      label: 左右が**逆向き**に回ること確認。同じ向きなら positions の scale の符号が誤っている
+      label: 左右が逆向きに回ること確認。同じ向きなら positions の scale の符号が片方落ちている
     - id: rotate_full
-      label: 手動操縦で rotate に full を送り、指令量と実際の回転角が比例していること確認 (比例していなければ POS_MIN/POS_MAX のレンジ取り違え)
+      label: 手動操縦で rotate に full を送り、指令量と実際の回転角が比例していること確認
+    - id: rotate_sync
+      label: full まで動かした状態で左右の角度が揃っていること確認 (ずれるなら本番の 3.0deg では止まる)
     - id: rotate_return
-      label: 手動操縦で rotate に home を送り、起動時の姿勢へ戻ること確認
+      label: 手動操縦で rotate に home を送り、電源投入位置へ戻ること確認
     - id: bench_estop
       label: 動作中に非常停止を押し、その場で停止すること確認
     - id: bench_estop_detach

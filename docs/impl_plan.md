@@ -876,6 +876,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 1 台の失敗で残りのモータの励磁を諦めない | `activate_motors` / `initialize_motors` の per-motor `except` を `raise` へ戻す | `test_can_manager.py::test_activate_motors_continues_after_one_motor_fails` / `::test_initialize_motors_continues_after_one_motor_fails` |
 | 無励磁のまま取り残されたモータは画面に出る | `_safety_state` の `unenergized_motors` を空固定にする / `_unenergized_motors` の緊急停止ガードを外す / `is_energized() is False` を `not is_energized()` へ（不明を無励磁へ倒す） | `test_server_e_stop.py::TestUnenergizedMotorsAreVisible` / `web: healthVerdict.test.ts` |
 | bus-off から自動復帰できる設定で立ち上がる | `can_config.DEFAULT_RESTART_MS` を 0 にする | `test_can_config.py::test_restart_ms_defaults_to_a_nonzero_value` |
+| 送信が滞留したバスだけを復旧する | `can_watchdog.sh` の滞留判定から backlog 条件を落とす（平常時のバスを落とす）/ TX packets の比較を落とす（連続送信中のバスを落とす） | `test_can_watchdog.py::TestStallDetection::test_idle_bus_is_never_recovered` / `::test_busy_bus_making_progress_is_not_recovered` |
+| 復旧しないバスで down/up を回し続けない | `can_watchdog.sh` の `recover()` から最短間隔の `return` を外す | `test_can_watchdog.py::TestRecoveryRateLimit::test_repeated_stall_recovers_only_once_within_the_interval` |
+| 復旧は必ず up まで到達する | `can_watchdog.sh` の `link set <if> up` を落とす（バスが落ちたまま残る） | `test_can_watchdog.py::TestStallDetection::test_stalled_bus_is_recovered` |
 | ラッチ中のサーボは補間より先に凍結する | `ServoChannel::setTarget` の受理ガードを外す / `tick()` の凍結を補間の後ろへ動かす | `firmware/test/test_servo/` |
 | `SET_TARGET` を 1 通も受けるまで出力しない | `MotorSafety::isOutputAllowed` の `everFed_` を `watchdogEnabled_` の内側へ入れる | `firmware/test/test_protocol/` |
 | 電磁弁は出力ゲートを通してしか通電しない | `SolenoidChannel::outputOn` の `isOutputAllowed` を外して目標をそのまま返す / `setOn` の受理ガードを外す | `firmware/test/test_solenoid/` |
@@ -2217,6 +2220,49 @@ CAN ID の誤り）は確実に超過するので、同期監視の検出能力�
 一方 `scale` は本番と同じ値を使う — ここを変えると「ベンチで確かめた指令量」と「本番で出る
 指令量」が別物になり、通信確認としての意味が薄れる。
 
+#### RobStride EDULITE 05 単体ベンチ（`config/bench/edulite/`）
+
+EDULITE 05 2 台（`rotate_r` / `rotate_l`）だけを CAN 通信の確認として動かす。`can_edulite` だけを開く。
+M3508 ベンチと同じく `robot_name` は `main_hand`（実機でもこの 2 台はメインハンド側にある）。
+
+| ファイル | 本番との違い |
+|---|---|
+| `config/bench/edulite/system.yaml` | `can_buses` が `edulite_bus` のみ。`health` / `match` は本番と同値 |
+| `config/bench/edulite/main_hand.yaml` | `rotate_r` / `rotate_l` だけ。`limit_speed` 2.0 → 1.0rad/s、`limit_current` 5.0 → 2.5A。`can_id` / `host_id` / `position_kp` は本番と同じ |
+| `config/bench/edulite/main_hand_positions.yaml` | `rotate` だけ。`sync_tolerance` 15.0deg、`manual` −15〜90deg、`timeout_s` 3.0 → 5.0s |
+| `config/bench/edulite/checklist.yaml` | ベンチで通電前に確認する項目のみ |
+
+```bash
+scripts/setup_can.sh
+uv run python main.py --system config/bench/edulite/system.yaml \
+    --config config/bench/edulite/main_hand.yaml \
+    --checklist config/bench/edulite/checklist.yaml
+```
+
+**最初に確かめるのは `can_id` と `host_id`。** 本機は 29bit 拡張 ID の下位 8bit が宛先なので、
+`can_id` が違う個体には 1 通も届かず、しかも指令も通らない ——「配線不良」にしか見えない。
+`host_id` のずれはもっと厄介で、**指令は受理されるのに返ってきたフィードバックを PC が
+自分宛と判定しない**。症状は「機体は動いているのに UI は STALE のまま赤い」になる。
+`candump can_edulite` でフィードバック（通信タイプ 2 = 拡張 ID `0x02______`）の
+bit8-15 に相手の `can_id`、下位 8bit に `host_id` が載っていることを読むこと。
+
+**ペア軸なので片肺は「指令は通るのに 2 台とも動かない」形で現れる。** これは M3508 ベンチと
+同じ現れ方で、理由も同じ（`SyncGuard.blocked()` がメンバの誰かの途絶でグループ全員を止める）。
+上の M3508 ベンチの節を参照。
+
+**ベンチだけ緩めた値には本番へ戻す条件を書く。** `sync_tolerance` を 15.0deg にしてあるのは、
+機構未装着では左右がずれても壊れず、本番の 3.0deg のままだと無負荷での追従差だけで
+緊急停止が掛かって通信確認が進まないため。`limit_speed` / `limit_current` を半分にしてあるのも
+同じ考えで、負荷の無い EDULITE は同じ指令でも一気に回る。`timeout_s` を 3.0 → 5.0s へ
+**延ばして**いるのは速度上限を絞った副作用で、そのままだと「モータは正常なのに到達前に
+タイムアウトする」ことになる。一方 `tolerance`（2.0deg）と `scale` と `position_kp` は本番のまま
+—— 前者を緩めると uint16 ↔ rad のレンジ取り違えを見逃し、後 2 つを変えると
+「ベンチで確かめた指令量・追従」と「本番で出るもの」が別物になる。
+
+**`homing` は書かない。** 本番でも `rotate` のリミットスイッチは未装着（コメントアウト）で、
+しかもセンサは自作サーボ基板 = `can_generic` 側に居る。このベンチは `can_edulite` しか
+開かないので、書いても「センサが応答していません」で必ず失敗する。
+
 #### DC モータ基板単体ベンチ（`config/bench/dc/`）
 
 自作モタドラ（DC）1 枚を、機構へ組み込む前にファーム込みで動かすための一式。
@@ -3355,7 +3401,7 @@ health:
 | ヘルスチェックループが CAN 受信を阻害 | 受動監視主体・能動 ping は明示要求時のみ |
 | しきい値が厳しすぎて誤警報（チャタリング） | config で上書き可能。STALE→OK 復帰には連続 N フレーム受信を要求 |
 | 送信エラーで `_receive_loop` が落ちる | `send_to_bus` の例外を握って health に反映、ループは継続 |
-| bus_off からの自動復帰 | カーネルに任せる（`config/can_buses.yaml` の `restart_ms`、既定 100ms）。PC 側のラッチは実通信が戻った時点で外す |
+| bus_off からの自動復帰 | **`scripts/can_watchdog.sh`（`cbc-can-watchdog.service`）が送信の滞留を見て `down`/`up` する。** カーネルには任せられない —— CANable2 の `gs_usb` は `restart-ms` に非対応で、実効値は 0 になる。落ちている間もカーネルから見える状態は正常なままなので、判定は `ip link` の state ではなく qdisc の backlog と TX packets の AND で行う（`docs/checks_and_health.md`）。PC 側のラッチは実通信が戻った時点で外す |
 
 #### アクチュエータ動作確認シーケンス
 

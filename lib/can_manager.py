@@ -280,7 +280,8 @@ class CANManager:
         """バス 1 本ぶんの受信ループ。フレームの解釈失敗でも受信 API の失敗でも降りない。
 
         **受信 API の失敗で降りてはならない。** かつては伝播させて降りていたが、
-        `bus.recv` を失敗させる事象 —— `ip link set down`、CANable の抜き差し、
+        `bus.recv` を失敗させる事象 —— **``cbc-can-watchdog.service`` が bus-off から
+        復旧させるための down/up**、`ip link set down`、CANable の抜き差し、
         `setup_can.sh` の再実行、udev 経由の `cbc-can.service` 再起動 —— はどれも
         1 秒以内に戻る一過性のもので、socketcan のソケットは down/up をまたいでも
         生き続ける (実測済み)。降りると**送信側だけが次の周期で自動復帰し、受信は
@@ -406,6 +407,13 @@ class CANManager:
         既定 (`BusState.ACTIVE`) が返る。つまり SocketCAN では ERROR / PASSIVE の
         分岐は永久に成立せず、bus-off を立てる経路は今まで 1 つも無かった
         (`_bus_off` はテストからしか True にならなかった)。
+
+        **ただし現行の CANable2 はエラーフレームを 1 通も送ってこない** ——
+        実測で確認済み (`docs/checks_and_health.md`)。落ちている間も `can state` は
+        ERROR-ACTIVE のままで、`berr-reporting` も `GET_STATE` も未対応。
+        つまりこの経路は実機では発火しない。**残しているのは、エラーフレームを送る
+        アダプタ (別のブリッジや vcan) へ載せ替えたときに検出が消えないため**で、
+        実機で bus-off が現れるのは送信失敗 (`tx_error_count` と送信スコア) だけである。
 
         鮮度 (`_last_rx_at`) は動かさない。エラーフレームは「モータからの応答」では
         ないので、これで途絶検出を止めると本物の途絶が見えなくなる。

@@ -106,15 +106,27 @@ vcan ではない）。詳細は `docs/impl_plan.md` の「vcan を使った統�
 ### サービス運用（systemd）
 
 ```bash
-sudo scripts/install.sh           # 両 unit を配置（cbc-control は enable しない）
+sudo scripts/install.sh           # 3 unit を配置（cbc-control だけ enable しない）
 scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
 sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
 journalctl -u cbc-control -f      # ログ追跡
+journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
 ```
 
 制御プログラムと Web Controller は同一プロセス（`lib/server.py` が `web/dist/` を
 SPA 配信する）。**`cbc-control.service` は enable しない** — 電源投入だけで機体が
-通電・待機状態にならないよう、起動タイミングは操縦者が握る。
+通電・待機状態にならないよう、起動タイミングは操縦者が握る。`cbc-can.service` と
+`cbc-can-watchdog.service` は enable する（どちらも機体を動かさない）。
+
+**bus-off からの復旧は `cbc-can-watchdog.service` が持つ。カーネルには任せられない。**
+`restart-ms` は SocketCAN のドライバが `do_set_mode` を実装している場合しか設定できず、
+CANable2 の `gs_usb` は実装していない（`setup_can.sh` は非対応を検出して警告付きで
+続行する）。さらに実測では、bus-off で送信が完全に止まっている間も `ip link` の
+`can state` は `ERROR-ACTIVE` のまま、エラーフレームも 1 通も届かない。**したがって
+判定を `state` やエラーフレームに置いた実装は永久に発火しない。** ウォッチドッグは
+qdisc の backlog が残っていることと TX packets が進んでいないことの **AND** で
+判定する（どちらか片方では、動いているバスを落とすか、平常時を異常と読む）。
+詳細と実測値は `docs/checks_and_health.md`。
 
 **`main()` の後始末はシグナルの扱いに依存する。** `systemctl stop` の SIGTERM は既定では
 プロセスを即死させ、`finally` に並べた後始末（ループ停止 → CAN shutdown）が 1 段も
@@ -232,9 +244,10 @@ STALE・UI は「接続中」のまま**という最も復旧しにくい壊れ�
   解釈できないフレームで DEGRADED を出すと、本物の送信障害の警告まで信用されなくなる。
   実害はそのモータの `MotorHealth.STALE` として別に現れる
 - **`bus.recv` 自体の失敗でもループを降りない。待ってから再試行し、失敗はログに残す。**
-  かつては伝播させて降りていたが、`bus.recv` を失敗させる事象 —— `ip link set down` /
-  CANable の抜き差し / `setup_can.sh` の再実行 / udev 経由の `cbc-can.service` 再起動 ——
-  はどれも 1 秒以内に戻る一過性のもので、**socketcan のソケットは down/up をまたいでも
+  かつては伝播させて降りていたが、`bus.recv` を失敗させる事象 —— **`cbc-can-watchdog.service`
+  による bus-off 復旧の down/up** / `ip link set down` / CANable の抜き差し /
+  `setup_can.sh` の再実行 / udev 経由の `cbc-can.service` 再起動 —— はどれも 1 秒以内に
+  戻る一過性のもので、**socketcan のソケットは down/up をまたいでも
   生き続ける**（実測済み。同じ `Bus` のまま recv を再試行するだけで復帰する）。
   降りると**送信側だけが次の周期で自動復帰し、受信は二度と戻らない** —— 症状は
   「指令は効くのにフィードバックだけ永久に無い」で、機体は動くのに全モータが STALE の
@@ -242,7 +255,10 @@ STALE・UI は「接続中」のまま**という最も復旧しにくい壊れ�
   以後 3 分間 1 通も取り込まないまま手動操縦だけが効き続けた）。
   素の `continue` にしないのは、戻らないインタフェース相手に全速で失敗を繰り返すと
   1 コアを食い潰し、**同居する位置制御ループ（200Hz）と偏差監視（50Hz）の周期まで
-  巻き添えにする**ため。ログは `LogThrottle` を通す（間引かないと本当の死因が流れる）
+  巻き添えにする**ため。ログは `LogThrottle` を通す（間引かないと本当の死因が流れる）。
+  **`cbc-can-watchdog.service` を入れた以上、この再試行は必須になった** —— 復旧のたびに
+  意図的に down/up が起きるので、降りる実装のままだと「ウォッチドッグがバスを直した
+  そのときに受信が永久停止する」という、直すほど壊れる関係になる
 
 **`lib/` で `asyncio.get_event_loop()` を使わない（`get_running_loop()` を使う）。**
 前者は実行中のループが無い文脈で新しいループを黙って作る。そこへ渡した CAN 送信や

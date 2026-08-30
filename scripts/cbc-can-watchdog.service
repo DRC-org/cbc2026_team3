@@ -1,0 +1,20 @@
+# テンプレート。@PROJECT_DIR@ は install.sh が実パスに置換して
+# /etc/systemd/system/ へ配置する。
+
+[Unit]
+Description=CBC2026 Team3 CAN bus-off 復旧ウォッチドッグ
+Documentation=file://@PROJECT_DIR@/docs/checks_and_health.md
+# バスが up していない状態で監視しても復旧するものが無い
+After=cbc-can.service
+Requires=cbc-can.service
+
+[Service]
+Type=simple
+ExecStart=@PROJECT_DIR@/scripts/can_watchdog.sh
+# 落ちたまま気付かれないと bus-off が復旧しなくなる。後始末は持たないので
+# いつ殺しても再開してよい (状態はすべてプロセス内で、次の周期に作り直される)
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

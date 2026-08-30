@@ -99,6 +99,77 @@ python-can 4.6 の `SocketcanBus` は `state` を実装していない（基底�
 だけで ACK が返らなくなり TEC が 256 に達する。値は `config/can_buses.yaml` の
 `restart_ms`（既定 100ms）が持ち、`scripts/setup_can.sh` が `ip link` へ渡す。
 
+### だが現行の CANable2 では `restart-ms` を設定できない
+
+SocketCAN の `restart-ms` は**ドライバが `do_set_mode` を実装している場合しか
+受け付けられない**。CANable2 が使う `gs_usb` は実装しておらず、カーネルは
+`EOPNOTSUPP`（`Error: Device doesn't support restart from Bus Off.`）を返す。
+手動の `ip link set <if> type can restart` も同じ理由で通らない。ドライバ側の
+恒久的な制約なので、`config` を変えても回避できない。
+
+`setup_can.sh` は `bitrate` と `restart-ms` を**別のコマンドに分けて**発行し、
+非対応を検出したら `restart-ms` 0 のまま続行して警告する。1 コマンドに束ねていた
+頃は、非対応環境で**1 本も up できなかった**（しかも `bitrate` は先に適用されるので
+「設定に失敗したのに bitrate だけ入っている」形になり、原因が読み取れない）。
+起動ログの `restart-ms=` は要求値ではなく**インタフェースから読み戻した実効値**。
+
+したがって bus-off へ落ちたバスを戻す経路は `down`/`up` しかない。カーネルには
+任せられないので、**userspace の常駐（`scripts/can_watchdog.sh`）が受け持つ**。
+PC 側のラッチは実通信で外れる設計なので、バスさえ戻れば表示も戻る。
+
+### 実測: CANable2 は bus-off を報告しないし、自動復帰もしない
+
+2026-08-30 に `can_edulite`（CANable2 / STM32G431・`clock 170000000` = FDCAN）を
+**CAN 側に何も繋がない状態**で up し、`cangen` で ACK の返らないフレームを送って確認した。
+
+- 送信は数通で**完全に停止する**（TX packets が増えず、`tc -s qdisc` の backlog が減らない）
+- **30 秒待っても復帰しない。** ABOM 相当の自動復帰は無い。bxCAN 版の candleLight は
+  `can_init()` で `CAN_MCR_ABOM` を立てるので自動復帰するが、CANable2 は FDCAN で、
+  bus-off では `CCCR.INIT` がセットされたままホストの明示的な復帰要求を待つ。ファーム上流
+  （`candle-usb/candleLight_fw` の `src/can/m_can.c`）は `GS_CAN_FEATURE_BUS_OFF_RECOVERY`
+  を申告するが、**カーネル 7.0 の `gs_usb` はこの feature を知らない**（実装は
+  `GS_CAN_FEATURE_GET_STATE` = BIT(13) まで）
+- **`down` → `up`（＝ `scripts/setup_can.sh` の再実行）で確実に復旧する。** 再現性あり
+- **PC 側からは状態が一切見えない**:
+  - `can state` は落ちている間も **`ERROR-ACTIVE` のまま**。`bus-off` / `error-warn` /
+    `error-pass` / `bus-errors` のカウンタも全部 0 のまま
+  - エラーフレームが 1 通も届かない
+  - `berr-reporting` は `requested control mode BERR-REPORTING not supported` で有効化できず、
+    `GET_STATE` も未対応（`ip -details -s link show` に `txerr`/`rxerr` が出ない）
+
+**したがって `_handle_error_frame()` の bus-off 検出は、この実機構成では発火しない。**
+`30863fd` は「bus-off を立てる経路が存在しなかった」ことを直したが、アダプタが
+エラーフレームを送らない以上、経路は依然として無い。実機で bus-off が現れるのは
+**送信の失敗**（`tx_error_count` と送信スコア）と **qdisc の滞留**だけである。
+自動復旧を作るなら、検出条件はエラーフレームではなくこの 2 つに置くこと。
+
+### bus-off 復旧ウォッチドッグ（`scripts/can_watchdog.sh`）
+
+`cbc-can-watchdog.service` として常駐し、1 秒周期で全バスを見る。機体を動かさない
+（`down`/`up` しかしない）ので `cbc-can.service` と同じく **enable する** ——
+制御プログラムだけが「電源投入で機体が待機状態にならない」ために enable されない。
+
+**判定は `ip link` の state ではなく送信の滞留で行う。** 上の実測のとおり、落ちている
+間もカーネルから見える状態は正常なままなので、state を見る実装は永久に発火しない。
+条件は 2 つの AND:
+
+- `tc -s qdisc` の backlog が 0 でない（＝送るものがキューに残っている）
+- `ip -s link` の TX packets が前周期から 1 つも進んでいない
+
+**どちらか片方では足りない。** backlog だけだと正常な連続送信の一瞬を拾って
+**動いているバスを落とす**。TX packets だけだと「送るものが無いだけ」の平常時を
+異常と読む。3 周期（既定）連続で成立したときにだけ `down`/`up` を出す。
+
+**復旧には最短間隔（既定 5 秒）を置く。** 相手が最初から居ないバス（試合前で機体の
+電源が入っていない）では復旧しても滞留は解消しないので、制限しないと `down`/`up` を
+回し続ける。害はログ量だけだが、その害が大きい（journal が埋まって本物の異常が
+沈む）。同じ理由で、連続復旧のログは 1 回目と 12 回に 1 回だけ出す。
+
+**`bitrate` と `txqueuelen` は入れ直さない。** `down`/`up` をまたいで保たれることを
+実測で確認済みで、入れ直すとその途中で失敗したときに元より悪い状態で残る。
+
+判定ロジックは `tests/test_can_watchdog.py` が `ip` / `tc` のスタブで固定している。
+
 ### 「励磁されていない」はヘルスに現れない
 
 DM3520 は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの通信途絶保護や
