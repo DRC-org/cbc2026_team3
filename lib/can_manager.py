@@ -44,6 +44,19 @@ _TX_ERROR_SCORE_MAX = 255
 # bus-off はコントローラがバスから切り離された状態そのものなので、1 通でも
 # 送受信できた時点で「切り離されていない」が確定する。
 
+# 受信が読めなくなったときの再試行間隔 [秒]。平常時は 1 度も使われない
+# (`_RECV_TIMEOUT` のタイムアウトは成功であって失敗ではない)。
+#
+# **同一 socket は `ip link` の down/up を跨いで生き残る。** 実測では down 中の
+# `recv` が `Network is down [Errno 100]` で失敗し、up 後は同じ socket のまま
+# 何事もなく再開した。bus を作り直す必要はないので、ここは待って呼び直すだけでよい。
+#
+# 短いほど M3508 の累積角が欠ける窓が縮む (欠落中の回転は折り返し推定を狂わせる。
+# `lib/drivers/m3508.py` の `_MAX_TRUSTED_GAP_S` を参照) が、down が続く間は
+# 呼ぶたびに例外を作るので上限を置く。復旧ウォッチドッグの down/up 窓は実測で約 1 秒。
+_RECV_RETRY_MIN_S = 0.02
+_RECV_RETRY_MAX_S = 0.2
+
 
 class BlockingRunner(Protocol):
     """``bus.send`` / ``bus.recv`` のような同期呼び出しを実行する口。
@@ -107,6 +120,11 @@ class CANManager:
         self._tx_error_score: dict[str, int] = {}
         self._rx_error_count: dict[str, int] = {}
         self._bus_off: dict[str, bool] = {}
+        # 受信の口そのものが読めない状態。**送信の成否では外さない** ——
+        # インタフェースが戻っても受信だけが死んでいる形を見逃さないため、
+        # 外せるのは `bus.recv` が実際に返ったときだけ。
+        self._rx_down: dict[str, bool] = {}
+        self._rx_down_since: dict[str, float] = {}
         self._bus_channels: dict[str, str] = {}
 
         # 受信エラーは不正フレームが続く限り毎フレーム発生する。1Mbps の CAN では
@@ -127,6 +145,7 @@ class CANManager:
         self._tx_error_score.setdefault(name, 0)
         self._rx_error_count.setdefault(name, 0)
         self._bus_off.setdefault(name, False)
+        self._rx_down.setdefault(name, False)
 
     def add_motor(self, bus_name: str, motor: MotorDriver) -> None:
         """バスにモータを登録する。名前・CAN ID の重複は構成時に弾く。
@@ -272,32 +291,86 @@ class CANManager:
         self._bus_off[bus_name] = False
 
     async def _receive_loop(self, bus_name: str) -> None:
-        """バス 1 本ぶんの受信ループ。フレームの解釈失敗では降りない。
+        """バス 1 本ぶんの受信ループ。**フレームの解釈失敗でも受信の断絶でも降りない。**
 
-        降りる (= 受信の口そのものが失われた) 場合だけは必ずログに残す。
-        ``_tasks`` は誰も await しないため、ここで記録しないとタスクの死が
-        どこにも現れず、「UI は接続中のまま全モータが STALE」の原因が
-        試合後まで分からない。
+        **かつてはインタフェース断でこのタスクごと降りていた。** 「握り潰して回り続けても
+        全速で失敗を繰り返すだけ」という判断だったが、その前提が実測で覆った ——
+        SocketCAN の socket は `ip link` の down/up を跨いで生き残り、up 後は同じ socket
+        のまま受信を再開する。つまり待って呼び直せば戻る。
+
+        戻る経路が無いことの害は大きい。bus-off 復旧ウォッチドッグ
+        (`scripts/can_watchdog.sh`) は復旧のたびに down/up を出すので、その 1 秒で
+        受信タスクが永久に失われていた。``_tasks`` は誰も await しないため死は
+        ログ 1 行にしか現れず、症状は「UI は接続中のまま全モータが STALE」——
+        最も復旧しにくい壊れ方そのものだった。
+
+        送信側 (`PeriodicTask._run`) は tick ごとに例外を捕まえて回り続け、復旧すれば
+        自力で戻る。**受信側だけが片道だったのが不具合の本体で、ここで対称にする。**
+
+        黙って回り続けてはならないので、読めていないあいだは `_rx_down` を立てて
+        `health()` から `BusHealth.DOWN` として見えるようにする。
         """
         bus = self._buses[bus_name]
         motors = self._bus_motors[bus_name]
+        retry_s = _RECV_RETRY_MIN_S
 
-        try:
-            while True:
+        while True:
+            try:
                 msg: can.Message | None = await self._run_blocking(bus.recv, _RECV_TIMEOUT)
-                if msg is None:
-                    continue
-                if msg.is_error_frame:
-                    self._handle_error_frame(bus_name, msg)
-                    continue
-                self._dispatch_frame(bus_name, motors, msg)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # 受信 API 自体の失敗 (インタフェース断など) はフレーム 1 通の問題ではなく、
-            # 握り潰して回り続けても全速で失敗を繰り返すだけなので伝播させる
-            logger.exception("CAN 受信ループが停止しました (bus=%s)", bus_name)
-            raise
+            except asyncio.CancelledError:
+                # `shutdown()` が畳む唯一の経路。握り潰すと停止できないタスクになる
+                raise
+            except Exception:
+                # 受信 API 自体の失敗 (インタフェース断など)。降りずに待って呼び直す。
+                # 呼ぶたびに失敗するので、トレースバックは間引いて残す
+                self._record_rx_down(bus_name)
+                self._rx_log.exception(
+                    f"{bus_name}:recv",
+                    "CAN 受信に失敗しました。再試行を続けます (bus=%s)",
+                    bus_name,
+                )
+                await asyncio.sleep(retry_s)
+                retry_s = min(_RECV_RETRY_MAX_S, retry_s * 2)
+                continue
+
+            retry_s = _RECV_RETRY_MIN_S
+
+            # **タイムアウト (None) を復帰の証拠にしてはならない。** python-can の
+            # socketcan は select がタイムアウトした時点で socket に触れずに None を
+            # 返すので、インタフェースが down していても None は返り続ける。実測でも
+            # down 中に「30ms で受信が再開しました」と誤判定した。
+            # 復帰を確定できるのは**実際に 1 通読めたとき**だけ。
+            if msg is None:
+                continue
+
+            self._clear_rx_down(bus_name)
+            if msg.is_error_frame:
+                self._handle_error_frame(bus_name, msg)
+                continue
+            self._dispatch_frame(bus_name, motors, msg)
+
+    def _record_rx_down(self, bus_name: str) -> None:
+        """受信が読めなくなったことを記録する。状態の遷移だけを 1 行残す。"""
+        if not self._rx_down.get(bus_name, False):
+            self._rx_down_since[bus_name] = time.time()
+            logger.error("CAN 受信が中断しました。復帰まで再試行を続けます (bus=%s)", bus_name)
+        self._rx_down[bus_name] = True
+
+    def _clear_rx_down(self, bus_name: str) -> None:
+        """フレームを 1 通読めたことを記録する。**外せる経路はここだけ。**
+
+        呼ぶのは実際に 1 通読めたときに限る (タイムアウトの None では呼ばない ——
+        down 中も None は返り続けるので、復帰の証拠にならない)。送信の成否でも
+        外さない。インタフェースが戻って送信だけが通り、受信は死んだままという形を
+        見逃さないため。中断していた時間をログに残すのは、
+        M3508 の累積角がその窓で飛びうる (`lib/drivers/m3508.py`) ので、後から
+        「あのときの緊急停止はこれか」を突き合わせられるようにするため。
+        """
+        if self._rx_down.get(bus_name, False):
+            since = self._rx_down_since.pop(bus_name, None)
+            gap_s = time.time() - since if since is not None else 0.0
+            logger.warning("CAN 受信が再開しました (bus=%s, 中断 %.2f 秒)", bus_name, gap_s)
+        self._rx_down[bus_name] = False
 
     def _dispatch_frame(
         self, bus_name: str, motors: Sequence[MotorDriver], msg: can.Message
@@ -620,9 +693,16 @@ class CANManager:
             stale = last_fb is None or (
                 age_ms is not None and age_ms > thresholds.feedback_timeout_ms
             )
+            # **ドライバが言うことを持っているなら状態も OK ではない。**
+            # detail だけを載せて状態を OK に置くと、`summarizeMotors` が
+            # 「All operational」を出して `SubsystemStatus` は畳んだままになり、
+            # 報告はどの画面にも現れない ——「報告した」つもりの黙殺が成立する。
+            # 出したい詳細があることと、状態が平常でないことを 1 つに束ねておく
+            detail = motor.health_detail()
             warning = (
                 motor.has_thermal_warning(thresholds.temp_warning_c)
                 or motor.has_overcurrent_warning()
+                or detail is not None
             )
 
             if motor.is_fault() or motor.has_thermal_fault(thresholds.temp_critical_c):
@@ -642,7 +722,10 @@ class CANManager:
                     last_feedback_at=last_fb,
                     feedback_age_ms=age_ms,
                     temperature=motor.state.temperature,
-                    detail=None,
+                    # ドライバ固有の事情 (M3508 の累積角再アンカーなど) をそのまま載せる。
+                    # 状態 (OK/STALE) では表せない「値は届いているが意味が変わった」を
+                    # 運ぶ唯一の口で、ここを None 固定に戻すと報告が画面から消える
+                    detail=detail,
                 )
             )
 
@@ -658,6 +741,7 @@ class CANManager:
             tx_score = self._tx_error_score.get(bus_name, 0)
             rx_err = self._rx_error_count.get(bus_name, 0)
             bus_off = self._bus_off.get(bus_name, False)
+            rx_down = self._rx_down.get(bus_name, False)
 
             # python-can の bus.state は実装しないインタフェースが多い (SocketCAN も
             # その 1 つで、基底クラスの既定 ACTIVE が返る) ため getattr で防御的に読む。
@@ -672,7 +756,11 @@ class CANManager:
             # **判定に使うのは累計 (`tx_err`) ではなく現況スコア (`tx_score`)。**
             # 累計は単調増加なので、一度超えたバスは復旧しても DEGRADED から戻れない。
             # 表示には累計をそのまま載せる (この試合で何回失敗したかは残す)
-            if bus_off or is_error:
+            # **受信が読めていないバスは DOWN。** 受信ループが断絶を握って再試行を
+            # 続けるようになったので、ここで出さないと「黙って回り続ける」だけになり、
+            # 症状は全モータの STALE にしか現れない (原因がバスなのかモータなのか
+            # 区別が付かない、いちばん切り分けにくい形)。
+            if bus_off or is_error or rx_down:
                 state = BusHealth.DOWN
             elif tx_score >= thresholds.tx_error_threshold or is_passive:
                 state = BusHealth.DEGRADED
@@ -689,6 +777,7 @@ class CANManager:
                     tx_error_count=tx_err,
                     rx_error_count=rx_err,
                     bus_off=bus_off,
+                    rx_down=rx_down,
                 )
             )
 

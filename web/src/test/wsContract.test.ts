@@ -282,6 +282,7 @@ const BUS_HEALTH = fieldsOf<BusHealth>({
   tx_error_count: "ui",
   rx_error_count: "ui",
   bus_off: "ui",
+  rx_down: "ui",
   last_tx_at: { unused: "鮮度の判定はサーバーが済ませて state に畳んである" },
   last_rx_at: { unused: "同上。UI が閾値を持つと判定が 2 箇所になる" },
 });
@@ -293,7 +294,9 @@ const MOTOR_HEALTH = fieldsOf<MotorHealth>({
   bus: { unused: "モータ行はテレメトリ側と名前で突き合わせる" },
   last_feedback_at: { unused: "経過時間 (feedback_age_ms) の方を出す" },
   temperature: { unused: "温度はテレメトリの motors[].temp を唯一の表示元にする" },
-  detail: { unused: "モータ個別の補足はどの画面も出していない" },
+  // 累積角の再アンカーなど、状態 (OK/STALE) では表せない事情の唯一の出口。
+  // 落とすと「原点がずれた」ことが操縦者にどこからも見えなくなる
+  detail: "ui",
 });
 
 const HEALTH = fieldsOf<HealthSnapshot>({

@@ -95,6 +95,16 @@ export function MotorStatus({
           toneClass={tempTextClass(state.temp, tempThresholds)}
         />
       </div>
+      {/*
+        ドライバからの補足。平常時は null なので 1px も占めない。
+        状態バッジ (WARNING) が目を引く役、この行が「何をすればよいか」を伝える役で、
+        色は付けない —— 状態はチップが示す約束なので、着色テキストを重ねない
+      */}
+      {health?.detail ? (
+        <p className="px-1 pt-0.5 text-[0.8em] leading-snug text-base-content/80">
+          {health.detail}
+        </p>
+      ) : null}
     </div>
   );
 }

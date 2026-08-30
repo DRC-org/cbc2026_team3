@@ -18,6 +18,7 @@ function snapshot(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
         tx_error_count: 0,
         rx_error_count: 0,
         bus_off: false,
+        rx_down: false,
       },
     ],
     motors: [],
@@ -108,6 +109,7 @@ describe("HealthIndicator", () => {
         state: "down",
         tx_error_count: 7,
         bus_off: true,
+        rx_down: false,
       };
       render(<HealthIndicator health={health} />);
 

@@ -51,6 +51,12 @@ export interface BusHealth {
   tx_error_count: number;
   rx_error_count: number;
   bus_off: boolean;
+  /**
+   * 受信の口そのものが読めない状態。bus_off とは原因が別なので相乗りさせない ——
+   * bus_off はコントローラがバスから切り離された状態、こちらはインタフェースが
+   * down している状態で、復旧の手当ても別になる。
+   */
+  rx_down: boolean;
 }
 
 export interface MotorHealth {

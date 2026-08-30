@@ -32,6 +32,11 @@ class BusHealthInfo:
     tx_error_count: int
     rx_error_count: int
     bus_off: bool
+    # 受信の口そのものが読めない状態。**`bus_off` とは原因が別**なので相乗りさせない ——
+    # bus-off はコントローラがバスから切り離された状態、こちらはインタフェースが
+    # down している (あるいは socket が読めない) 状態で、復旧の手当ても別になる。
+    # 1 つにまとめると、どちらが起きているのか画面からもログからも区別できなくなる。
+    rx_down: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +48,7 @@ class BusHealthInfo:
             "tx_error_count": self.tx_error_count,
             "rx_error_count": self.rx_error_count,
             "bus_off": self.bus_off,
+            "rx_down": self.rx_down,
         }
 
 

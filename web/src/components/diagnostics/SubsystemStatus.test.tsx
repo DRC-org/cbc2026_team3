@@ -19,6 +19,7 @@ const HEALTH: HealthSnapshot = {
       tx_error_count: 0,
       rx_error_count: 0,
       bus_off: false,
+      rx_down: false,
     },
   ],
   motors: [],

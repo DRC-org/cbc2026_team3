@@ -7,6 +7,7 @@ import pytest
 
 from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.m3508 import GEAR_RATIO, M3508Driver
+from tests.fake_clock import FakeClock
 from tests.feedback_frames import feed_m3508
 
 
@@ -394,3 +395,110 @@ class TestFeedbackPosition:
         for raw in (0, 6144, 4096, 2048, 0):
             self._feed_angle(raw)
         assert self.driver.feedback_position() == pytest.approx(-360.0)
+
+
+class TestWrapInferenceAcrossFeedbackGap:
+    """フィードバックが途切れた窓を跨いだときの折り返し推定。
+
+    単回転角のアンラップは「半周を超える差分は 0 を跨いだ折り返し」という推定に
+    立っており、**これはフィードバックが 1kHz で途切れず届いている間しか成り立たない**。
+    途切れた窓でモータ軸が半周以上回ると方向を取り違え、累積角に 360deg が乗る。
+    `config/main_hand_positions.yaml` の scale 55.0131deg/mm では 6.54mm 相当で、
+    同じ y_axis の `sync_tolerance` 2.0mm の 3 倍を超える —— 実在しないずれで
+    全体緊急停止が掛かる。
+
+    窓は CAN 受信の中断で実際に開く (`scripts/can_watchdog.sh` の down/up は約 1 秒)。
+    """
+
+    def setup_method(self) -> None:
+        self.clock = FakeClock()
+        self.driver = M3508Driver("y_axis_r", can_id=1, time_source=self.clock)
+
+    def _feed(self, angle_raw: int, *, rpm: int = 0, after_s: float = 0.001) -> None:
+        self.clock.advance(after_s)
+        feed_m3508(self.driver, angle_raw=angle_raw, rpm=rpm)
+
+    @staticmethod
+    def _deg(counts: float) -> float:
+        return counts / 8192 * 360.0
+
+    def test_平常の1ms間隔では従来どおり折り返しを推定する(self) -> None:
+        # 途切れていないので推定は正しい。ここが壊れると多回転機構が動かなくなる
+        self._feed(8000)
+        self._feed(100)
+
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(292), abs=1e-6)
+        assert self.driver.origin_trusted is True
+        assert self.driver.health_detail() is None
+
+    def test_長い窓を跨いだ差分は折り返しを推定せず累積しない(self) -> None:
+        """1 回転ぶんの偽の飛びを作らない。
+
+        実際に +4300 カウント (0.52 回転) 回ったとき、単回転角は
+        (8000 + 4300) % 8192 = 4108 になる。差分は -3892 で半周に届かないため、
+        推定を続けると「-3892 カウント動いた」と読む —— 真値との差は
+        ちょうど 1 回転 (-8192 カウント = -360deg) になる。
+        """
+        self._feed(8000)
+        self._feed(4108, after_s=1.0)
+
+        # 偽の -3892 カウントを積んでいないこと (推定を諦めて再アンカーする)
+        assert self.driver.multi_turn_position == pytest.approx(0.0)
+        assert self.driver.origin_trusted is False
+        assert self.driver.reanchor_count == 1
+
+    def test_再アンカーはヘルスの詳細として報告される(self) -> None:
+        # 黙って再アンカーすると、位置がずれたまま平常どおりに見える機体ができる
+        self._feed(8000)
+        self._feed(4108, after_s=1.0)
+
+        detail = self.driver.health_detail()
+        assert detail is not None
+        assert "原点" in detail
+
+    def test_高速回転なら短い窓でも折り返しを推定しない(self) -> None:
+        # 3000rpm では 20ms で 1 回転する。窓が短くても半周を越えうる
+        self._feed(8000, rpm=3000)
+        self._feed(4108, rpm=3000, after_s=0.02)
+
+        assert self.driver.origin_trusted is False
+
+    def test_低速なら同じ窓でも折り返しを推定する(self) -> None:
+        # 100rpm では 20ms で 0.033 回転。半周には遠く、推定は安全
+        self._feed(8000, rpm=100)
+        self._feed(100, rpm=100, after_s=0.02)
+
+        assert self.driver.multi_turn_position == pytest.approx(self._deg(292), abs=1e-6)
+        assert self.driver.origin_trusted is True
+
+    def test_rpmが両端で0でも長すぎる窓は信じない(self) -> None:
+        """窓の中で回って戻った場合、両端の rpm は上限にならない。
+
+        rpm による見積もりだけだと「両端が 0 だから動いていない」と読むので、
+        窓の長さそのものに歯止めが要る。
+        """
+        self._feed(8000, rpm=0)
+        self._feed(4108, rpm=0, after_s=0.2)
+
+        assert self.driver.origin_trusted is False
+
+    def test_原点確定で信頼が戻る(self) -> None:
+        # 「今どこにいるか」が改めて確定するので、それ以前のずれは意味を持たなくなる
+        self._feed(8000)
+        self._feed(4108, after_s=1.0)
+        assert self.driver.origin_trusted is False
+
+        self.driver.reset_multi_turn_origin()
+
+        assert self.driver.origin_trusted is True
+        assert self.driver.health_detail() is None
+
+    def test_受信復帰だけでは信頼は戻らない(self) -> None:
+        """ずれは受信が戻っても消えない。戻す経路は原点確定だけ。"""
+        self._feed(8000)
+        self._feed(4108, after_s=1.0)
+
+        for _ in range(50):
+            self._feed(4108)
+
+        assert self.driver.origin_trusted is False

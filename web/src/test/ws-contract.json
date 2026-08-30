@@ -105,6 +105,7 @@
             "last_rx_at": 1700000000.0,
             "last_tx_at": 1700000000.0,
             "name": "can_m3508",
+            "rx_down": false,
             "rx_error_count": 0,
             "state": "ok",
             "tx_error_count": 0
