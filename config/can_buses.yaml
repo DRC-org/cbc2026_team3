@@ -13,6 +13,13 @@
 # インタフェースは手動で down/up するまで送受信とも死んだままになる。
 # バス上に 1 台しか居ない構成 (can_dm3520) では、相手が電源を失うだけで ACK が
 # 返らなくなり TEC が 256 に達して bus-off へ落ちる。
+#
+# **ただし現行の CANable2 では実際には効かない。** SocketCAN の restart-ms は
+# ドライバが do_set_mode を実装している場合しか設定できず、CANable2 の gs_usb は
+# 持たない (カーネルが EOPNOTSUPP =「Device doesn't support restart from Bus Off」
+# を返す)。setup_can.sh は非対応を検出したら restart-ms 0 のまま続行して警告する。
+# この値は「ドライバが対応していれば使う要求値」であって、実効値は setup_can.sh の
+# ログ (実インタフェースから読み戻したもの) で確認すること。
 
 # CANable2 (candleLight FW) の USB ID。全個体共通。
 usb:

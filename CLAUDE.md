@@ -106,15 +106,27 @@ vcan ではない）。詳細は `docs/impl_plan.md` の「vcan を使った統�
 ### サービス運用（systemd）
 
 ```bash
-sudo scripts/install.sh           # 両 unit を配置（cbc-control は enable しない）
+sudo scripts/install.sh           # 3 unit を配置（cbc-control だけ enable しない）
 scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
 sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
 journalctl -u cbc-control -f      # ログ追跡
+journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
 ```
 
 制御プログラムと Web Controller は同一プロセス（`lib/server.py` が `web/dist/` を
 SPA 配信する）。**`cbc-control.service` は enable しない** — 電源投入だけで機体が
-通電・待機状態にならないよう、起動タイミングは操縦者が握る。
+通電・待機状態にならないよう、起動タイミングは操縦者が握る。`cbc-can.service` と
+`cbc-can-watchdog.service` は enable する（どちらも機体を動かさない）。
+
+**bus-off からの復旧は `cbc-can-watchdog.service` が持つ。カーネルには任せられない。**
+`restart-ms` は SocketCAN のドライバが `do_set_mode` を実装している場合しか設定できず、
+CANable2 の `gs_usb` は実装していない（`setup_can.sh` は非対応を検出して警告付きで
+続行する）。さらに実測では、bus-off で送信が完全に止まっている間も `ip link` の
+`can state` は `ERROR-ACTIVE` のまま、エラーフレームも 1 通も届かない。**したがって
+判定を `state` やエラーフレームに置いた実装は永久に発火しない。** ウォッチドッグは
+qdisc の backlog が残っていることと TX packets が進んでいないことの **AND** で
+判定する（どちらか片方では、動いているバスを落とすか、平常時を異常と読む）。
+詳細と実測値は `docs/checks_and_health.md`。
 
 **`main()` の後始末はシグナルの扱いに依存する。** `systemctl stop` の SIGTERM は既定では
 プロセスを即死させ、`finally` に並べた後始末（ループ停止 → CAN shutdown）が 1 段も
