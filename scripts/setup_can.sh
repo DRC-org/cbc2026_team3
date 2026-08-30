@@ -79,9 +79,21 @@ setup_one() {
     # bus-off に落ちたインタフェースは手動で down/up するまで送受信とも死ぬので、
     # 専用バスに 1 台しか居ない構成 (can_dm3520) では相手が電源を失っただけで
     # 試合中に復旧不能になる。
-    if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate" restart-ms "$restart_ms"; then
-        log_err "${iface}: bitrate ${bitrate} / restart-ms ${restart_ms} の設定に失敗"
-        return 1
+    # **restart-ms に対応しないドライバがある。** CANable2 の candleLight ファーム
+    # (gs_usb) は bus-off からの自動復帰を実装しておらず、カーネルは
+    # 「Device doesn't support restart from Bus Off」で設定ごと拒否する。
+    # ここで諦めるとバスは down のまま残り、**自動復帰が無い**どころか
+    # **通信そのものができない**という一段悪い状態になる。bitrate だけで上げ直し、
+    # 失われた保護を毎回警告する (黙って落とすと、bus-off に落ちた試合中に
+    # 「なぜ復帰しないのか」を調べる手掛かりが無くなる)。
+    if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate" restart-ms "$restart_ms" 2>/dev/null; then
+        if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate"; then
+            log_err "${iface}: bitrate ${bitrate} の設定に失敗"
+            return 1
+        fi
+        log_warn "${iface}: restart-ms 非対応のドライバです (bus-off からの自動復帰なし)"
+        log_warn "  -> bus-off に落ちたら scripts/setup_can.sh で手動復帰が要ります"
+        no_restart+=("$iface")
     fi
 
     if ! "${IP[@]}" link set "$iface" txqueuelen "$txqueuelen"; then
@@ -102,7 +114,11 @@ setup_one() {
         return 1
     fi
 
-    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${restart_ms} state=${state}"
+    # 実際に入った restart-ms を読み直して出す。要求値をそのまま書くと、
+    # 非対応で 0 のまま上がったバスが「restart-ms=100」と表示される
+    local applied_restart
+    applied_restart=$(ip -details link show "$iface" | grep -oE 'restart-ms [0-9]+' | head -1 | awk '{print $2}')
+    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${applied_restart:-?} state=${state}"
     return 0
 }
 
@@ -139,6 +155,9 @@ configured=0
 up_count=0
 missing=()
 unassigned=()
+# restart-ms を適用できなかったバス。ドライバが bus-off 自動復帰に対応していないと
+# ここへ積まれる。試合前点検の要約に出して、手動復帰が要ることを明示する
+no_restart=()
 
 # serial 未採取のバスを控えておく（strict では未完了として扱う）
 while IFS=$'\t' read -r name serial _bitrate _txq _restart; do
@@ -171,6 +190,11 @@ done
 for name in "${missing[@]}"; do
     log_warn "${name}: デバイスが見つかりません"
 done
+
+if [[ ${#no_restart[@]} -gt 0 ]]; then
+    log_warn "bus-off 自動復帰なしで起動: ${no_restart[*]}"
+    log_warn "  -> 相手の電源断などで bus-off に落ちると、手動で上げ直すまで送受信とも死にます"
+fi
 
 echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 欠け ${#missing[@]}) ---"
 

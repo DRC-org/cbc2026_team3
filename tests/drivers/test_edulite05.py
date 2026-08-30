@@ -60,6 +60,45 @@ def test_fault_clear_requires_explicit_request() -> None:
     assert driver.encode_disable(clear_fault=True).data == b"\x01" + bytes(7)
 
 
+def test_set_id_carries_the_new_id_above_the_host_id() -> None:
+    """新 ID は データエリア2 の上位バイト、host_id は下位バイトに載る。
+
+    宛先 (dest_id) は**現在の** ID のまま。ここを新 ID にすると、まだその ID を
+    名乗っていないモータへ宛てることになり 1 台も受け取らない。
+    """
+    driver = Edulite05Driver("m1", can_id=0x7F, host_id=0xFD)
+
+    msg = driver.encode_set_id(0x01)
+
+    assert msg.arbitration_id == driver.build_can_id(driver.COMM_TYPE_SET_ID, 0x01FD, 0x7F)
+    assert msg.data == b"\x01" + bytes(7)
+    assert msg.is_extended_id
+
+
+def test_set_id_rejects_ids_that_do_not_fit_the_id_field() -> None:
+    """モータ ID フィールドは 8bit。範囲外を黙って丸めると別の個体の ID を名乗る。"""
+    driver = Edulite05Driver("m1", can_id=0x7F)
+
+    with pytest.raises(ValueError):
+        driver.encode_set_id(0x100)
+    with pytest.raises(ValueError):
+        driver.encode_set_id(-1)
+
+
+def test_set_id_is_not_part_of_any_automatic_startup_path() -> None:
+    """起動・励磁・動作確認のどの手順にも ID 書き換えを混ぜないこと。
+
+    混ざると電源を入れ直すたびに ID が書き換わり、しかも 2 台が同じ ID を
+    名乗った瞬間に片方のフィードバックが永久に届かなくなる。
+    """
+    driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+
+    steps = driver.initialization_steps() + driver.activation_steps() + driver.prepare_check_steps()
+    comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages_of(steps)]
+
+    assert driver.COMM_TYPE_SET_ID not in comm_types
+
+
 def test_write_parameter_uses_little_endian_parameter_and_float() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     msg = driver.encode_write_param_float(driver.PARAM_LOC_REF, 1.0)

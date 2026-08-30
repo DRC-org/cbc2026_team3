@@ -1,0 +1,71 @@
+# RobStride EDULITE 05 ベンチ (機構未装着) のモータ構成。
+#
+# robot_name を main_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
+# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
+# 現れず手動操縦パネルを開けない。実機でもこの 2 台はメインハンド側なので main_hand を使う。
+#
+# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
+# (main.py の _positions_path) なので、このファイルを config/bench/edulite/ に置くことで
+# robot_name は main_hand のまま config/bench/edulite/main_hand_positions.yaml が読まれる。
+# 本番の config/main_hand_positions.yaml は無傷のまま残る。
+#
+# **このベンチでは EDULITE 05 の 2 台だけを登録する。** M3508 と自作モタドラを外すことで
+# 登録されないバスへの送信も動作確認の対象も消え、CAN 通信の確認が EDULITE だけに絞られる。
+#
+# --- 最初に確かめること ------------------------------------------------------
+# 1. can_id が実機と一致しているか。**出荷値は 0x7F で、2 台とも同じ値のまま届く。**
+#    そのまま繋ぐと 2 台が同じ ID で応答し、CANManager は最初にマッチした 1 台で
+#    打ち切るのでもう 1 台は永久にフィードバックを得られない。
+#    書き換えは scripts/edulite_set_id.py で行う (走査 → 書き込み → 照合まで 1 本)。
+# 2. **CAN の H/L が逆になっていないか。** 逆結線した個体は 1 通も応答せず、
+#    しかも「送信はできているように見える」ので配線不良と区別が付きにくい。
+#    切り分けは送信の成否で行う —— candump に出る自分のフレームはカーネルの
+#    ローカルループバックなので、バスへ出た証拠にならない。ACK を返す相手が
+#    居ないと数通で送信が詰まる (TX packets が伸びなくなる)。
+# 3. 24V が入っているか。本機は CAN トランシーバもモータ電源から取るため、
+#    無通電の個体はバス上に存在しないのと同じ挙動になる (上と同じ症状)。
+
+robot_name: main_hand
+
+motors:
+  # --- 逆回転ペア軸 rotate (エンドエフェクタ回転) の右側 ---
+  # can_id は本番 (config/main_hand.yaml) と同じ 1。ここが実機とずれていると
+  # rotate_r のフィードバックが永久に届かず、ペア単位の途絶判定が両方を止めるため
+  # 「指令は通るのに 2 台とも微動だにしない」状態になる。
+  rotate_r:
+    driver: edulite05
+    bus: edulite_bus
+    can_id: 1
+    host_id: 0xFD             # 本番と同じ。フィードバックの宛先 ID になる
+    mode: position
+    # 本番の 2.0rad/s に対しベンチは半分に絞る。機構が付いていない EDULITE は
+    # 負荷が無いぶん同じ指令でも一気に回るため、まず回ることの確認は低い速度上限で行う。
+    # ゲインと速度を詰める段階になったら本番値へ戻すこと。
+    limit_speed: 1.0
+    # 本番 5.0A に対し 3.0A。無負荷で回すだけなら足り、機構を巻き込んだときの
+    # トルクを抑えられる
+    limit_current: 3.0
+    # 位置ループはドライバ内蔵。本番と同じ値を使う —— ここを変えると
+    # 「ベンチで確かめた追従」と「本番の追従」が別物になり、通信確認の意味が薄れる
+    position_kp: 30.0
+    # **ベンチだけ true。** 本番 (config/main_hand.yaml) は false のまま。
+    # 本機の原点はドライバに保存された機械原点であって電源投入位置ではないので、
+    # 未装着のまま home (0.0deg) を送ると最大 ±720deg 走りうる。起動時に
+    # 現在位置を原点へ書き換えておけば、位置定数はすべて「今の姿勢からの相対」になり、
+    # ベンチで目視する動きが指令量と 1:1 で対応する。
+    # 副作用として**ドライバ内の機械原点が上書きされる**ので、機構へ組み込むときは
+    # 原点を取り直すこと (このベンチを回した後の原点は机上での姿勢のまま)。
+    set_zero_on_start: true
+
+  # rotate_r と対になる側。左右で追従特性が変わると機構を組んだ後に押し合いになるため、
+  # PID 相当のパラメータ (position_kp / limit_speed / limit_current) は同一値にする
+  rotate_l:
+    driver: edulite05
+    bus: edulite_bus
+    can_id: 2
+    host_id: 0xFD
+    mode: position
+    limit_speed: 1.0
+    limit_current: 3.0
+    position_kp: 30.0
+    set_zero_on_start: true

@@ -13,6 +13,12 @@
 # インタフェースは手動で down/up するまで送受信とも死んだままになる。
 # バス上に 1 台しか居ない構成 (can_dm3520) では、相手が電源を失うだけで ACK が
 # 返らなくなり TEC が 256 に達して bus-off へ落ちる。
+#
+# **ただしドライバが対応していないことがある。** CANable2 の candleLight ファーム
+# (gs_usb) は bus-off 自動復帰を実装しておらず、カーネルが「Device doesn't support
+# restart from Bus Off」で設定ごと拒否する。setup_can.sh は bitrate だけで上げ直し、
+# 失われた保護を毎回警告する —— バスを down のまま残すと「自動復帰が無い」どころか
+# 「通信そのものができない」という一段悪い状態になるため。
 
 # CANable2 (candleLight FW) の USB ID。全個体共通。
 usb:

@@ -162,6 +162,29 @@ class Edulite05Driver(MotorDriver):
     def encode_set_zero(self) -> can.Message:
         return self._message(self.COMM_TYPE_SET_ZERO, b"\x01" + bytes(7))
 
+    def encode_set_id(self, new_can_id: int) -> can.Message:
+        """モータの CAN ID を書き換える (通信タイプ 7)。
+
+        **出荷値は 2 台とも 0x7F。** そのまま同一バスへ載せると 2 台が同じ ID で
+        応答し、`CANManager._dispatch_frame` は最初にマッチした 1 台で打ち切るので
+        もう 1 台は永久にフィードバックを得られない。症状は「片方だけ配線不良」に
+        しか見えないため、バスへ載せる前に 1 台ずつ書き換える。
+
+        新 ID はデータエリア2 の上位バイトへ、host_id は下位バイトへ載る。
+        **宛先は現在の ID のまま**にすること —— 新 ID を宛先にすると、まだその ID を
+        名乗っていないモータへ宛てることになり 1 台も受け取らない。
+
+        起動・励磁・動作確認のどの手順からも呼ばない。自動経路に混ざると電源を
+        入れ直すたびに ID が書き換わる。呼び出し口は scripts/edulite_set_id.py だけ。
+        """
+        if not 0 <= new_can_id <= 0xFF:
+            raise ValueError("new_can_id は 0..255 の範囲で指定してください")
+        return self._message(
+            self.COMM_TYPE_SET_ID,
+            b"\x01" + bytes(7),
+            data_area2=((new_can_id & 0xFF) << 8) | self.host_id,
+        )
+
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
         steps = [
             (self.encode_disable(), 0.05),

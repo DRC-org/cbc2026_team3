@@ -2126,7 +2126,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 **同一ディレクトリに同じ `robot_name` のベンチセットを 2 つ置けない**。セットを足すときは
 `config/bench/<対象>/` を 1 つ掘り、4 ファイルをまとめてそこへ置くこと。
 
-**5 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+**6 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
 本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
 1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
 しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
