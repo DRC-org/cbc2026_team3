@@ -712,6 +712,8 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | ジョグの起点は目標値で積む | 起点を毎回フィードバックから取る形へ戻す（**フィードバックが追従しないドライバでしか検出できない**） | `test_manual.py` |
 | ロボット 1 台分の部品が main からサーバーへ届く | `main()` の `add_robot(...)` から `manual=` を落とす | `test_main_wiring.py` |
 | 押している間くり返すジョグが必ず止まる | `useHoldRepeat` の停止経路を 1 つ落とす / アンマウント時の解除を外す | `useHoldRepeat.test.ts` |
+| 試合の開始・終了は 1 回では成立しない | `useArmedPress` の不感時間ガードを外す（ダブルクリック 1 回が二度押しになる）/ 自動解除のタイマーを張らない / 発火後に未武装へ戻さない / 呼び出し側の `disarm()` を落とす | `useArmedPress.test.ts` / `StartGate.test.tsx` / `MatchControl.test.tsx` |
+| `match_reset` の確認の要否は導線ごとに違う | `MatchStrip` の「セッティングへ戻る」を二度押し／ダイアログの裏へ回す / `MatchSettings` のリセットから確認を外して直接 `matchReset` を呼ぶ | `MatchControl.test.tsx` |
 | 手動中は UI もシーケンス操作を出さない | `RobotControl` の `inManual` 分岐を潰す / `Space` の無効化を外す | `RobotControl.test.tsx` |
 | 判定できないヘルスは DOWN | 例外時の既定を OK に倒す | `test_health.py` / `test_server_health.py` |
 | 解釈できたフレームでしか鮮度を進めない | `_last_rx_at` の更新を `update_state` より前へ動かす | `test_can_manager.py` / `test_can_manager_health.py` |
@@ -963,7 +965,7 @@ web/
     ├── {App,routes}.test.tsx
     ├── lib/{cx,phase,tabs,wsUrl,daisyPairs,healthVerdict,sequenceStatus}.test.ts(x)
     ├── lib/{protocol,robotReducer}.test.ts   # 接続を張らずに受信条件と状態遷移を検証する
-    ├── hooks/{useRobotSocket,useHotkeys,useHoldRepeat,useMotorCheck,useWsUrl}.test.ts(x)
+    ├── hooks/{useRobotSocket,useHotkeys,useHoldRepeat,useArmedPress,useMotorCheck,useWsUrl}.test.ts(x)
     ├── context/RobotContext.test.tsx   # 購読の分割が再描画を止めていること
     ├── layouts/RootLayout.test.tsx     # テレメトリで外枠が描き直されないこと
     ├── pages/{Dashboard,RobotControl,MotorTuning}.test.tsx
@@ -989,6 +991,8 @@ web/
 - `useHotkeys` — 修飾キー・入力欄・モーダル表示中の抑止。競技中の誤爆は機体破損に直結する
 - `useHoldRepeat` — ジョグの長押しリピートが**必ず止まること**。停止経路を 1 つでも
   取りこぼすと、指を離したのに機体が動き続ける。押し始めの発火より停止経路の網羅が重要
+- `useArmedPress` — 試合の開始・終了が**1 回では成立しないこと**。不感時間が抜けると
+  ダブルクリック 1 回で試合が始まり、自動解除が抜けると武装したままのボタンが画面に残る
 - `Toaster` / `TriggerButton` / `Checklist` — 状態から表示・活性が一意に決まることの確認
 - `pages/RobotControl.tsx` / `pages/MotorTuning.tsx` — 画面が組み上がったときにしか
   現れない性質を見る。**主操作の宛先が担当機に揃っていること**（1 箇所でも相手機に
@@ -1130,6 +1134,7 @@ cbc2026_team3/
 │       │   ├── useRobotSocket.ts   # protocol + robotReducer + useWebSocket を束ねる
 │       │   ├── useWsUrl.ts         # WS 接続先の解決結果を保持し、保存・リセットする
 │       │   ├── useHotkeys.ts
+│       │   ├── useArmedPress.ts    # 二度押しで実行する操作の発火制御（試合開始・終了）
 │       │   └── useMotorCheck.ts
 │       ├── lib/
 │       │   ├── cx.ts
@@ -2720,7 +2725,7 @@ MOTOR CHECK・緊急停止）、1366x768 と 1280x720 で溢れなし、配色�
 - **`RobotStatusRow` を新設**（`RobotReadiness` を置換）。進行状態を主役に据え、数値は下段へ。
 - **ステップ一覧は現在位置へ自動スクロール**。一覧が縦に収まらない機体では、進むほど現在地が
   枠外へ出て「今どこか」を一覧から読めなくなっていた。
-- **`MatchControl` を 3 つに分解** — `useMatchConfirm`（確認ダイアログ）/ `MatchSettings`（準備中）/
+- **`MatchControl` を 3 つに分解** — `useResetConfirm`（リセットの確認ダイアログ）/ `MatchSettings`（準備中）/
   `MatchStrip`（試合中の 1 行）。呼び出し元が画面ごとに散るため、文言と遷移を 1 箇所へ集約した。
 - **PID Tuning をマスタ・ディテール化**。以前は両機の全モータを縦に展開しており、1 基を触るだけで
   スクロールが要り「今どのモータを見ているか」が視界から外れていた。左で選び、右をその 1 基に
@@ -2863,6 +2868,56 @@ barrel（`index.ts`）は置かない。oxlint の `import/no-cycle` を効か�
 
 移動対象 30 ファイルはすべて `@/` エイリアス参照だったため、書き換えは他ファイルからの
 import 33 行のみで、振る舞いの変更はない（`git diff -M` 上で 30 件すべてが 100% rename）。
+
+#### 試合開始・終了の確認を二度押しへ（2026-08-29）
+
+試合開始は `StartGate` のボタン → 確認ダイアログ → 「実行」の 2 段だった。ダイアログは
+画面中央に出るため、押したボタンから**カーソルを運ぶ往復**が挟まる。試合開始は計時の
+開始点であり、終了は残り時間との勝負の最後に押す。**確認のために視線とカーソルを
+別の場所へ移す数百 ms は、この 2 つに限っては払う価値がない。**
+
+そこで開始と終了だけ、**同じボタンの二度押し**へ移した（`hooks/useArmedPress.ts`）。
+1 回目は武装するだけでボタン自身が確認を求め、2 回目で実行する。カーソルも視線も
+動かない。
+
+**`match_reset` は同じコマンドのまま、確認の要否を呼び出し元で分けた。判断軸は
+「何を失うか」であって、コマンド名ではない。**
+
+| 導線 | フェーズ | 確認 | 失うもの |
+|---|---|---|---|
+| `MatchStrip`「セッティングへ戻る」 | 試合終了後 | **なし**（1 回で送る） | 消化済みのチェックリストだけ。機体は動かず、試合後の唯一の進み先でもある |
+| `MatchSettings`「チェックリストをリセット」 | 準備中 | ダイアログ | **まだ使っていない指差喚呼が全項目**。押し間違いの代償が全部のやり直しになる |
+
+**誤爆を防ぐのは 2 つの時間で、どちらが欠けても確認の役目を果たさない。**
+
+| 時間 | 値 | 無いとどうなるか |
+|---|---|---|
+| 不感時間 | 400ms | マウスのダブルクリック（既定でおよそ 500ms 以内の 2 連打）1 回がそのまま二度押しとして成立し、**実質 1 クリックで試合が始まる** |
+| 自動解除 | 4s | 武装したまま忘れられたボタンが「次に触れた 1 回で試合が始まる」状態で画面に残り続ける |
+
+不感時間中の 2 回目は**捨てるだけで武装は解かない**（解くと連打が永久に 1 回目へ戻り、
+ボタンが効かなくなる）。自動解除までの猶予も引き直さない — 猶予は 1 回目からの 4 秒である。
+
+**武装は押した瞬間の状況に紐づく。** 通信が切れた・指差喚呼が外れた・試合が終わった、
+のいずれでも呼び出し側が `disarm()` する。状況が変わった後の 1 回目を 2 回目として
+扱うと、操縦者が意図していない時点で機体が動く。判定そのものは変えていない
+（開始可否は今もサーバーの `can_start_match` だけが決める）。
+
+**ダイアログ本文が持っていた情報は捨てずに武装中の表示へ移した。** 開始はコート名・
+「各操縦者が START を押すまで機体は動かない」・周囲の安全確認、終了は「緊急停止では
+ない」。落とすと二度押しは単なる連打になり、確認の中身が消える。
+
+**ボタンの幅は文言が伸びても固定する**（`w-[14em]` / `w-[11em]`）。1 回目と 2 回目で
+押す位置がずれると、カーソルを動かさないという利点がそのまま失われる。位置も変えない
+（「主操作は状態によって位置を動かさない」）。
+
+検証: `useArmedPress.test.ts`（10 件）に加え、`StartGate.test.tsx` / `MatchControl.test.tsx`
+へ**画面ごとの二度押しテスト**を置いた。フックのテストだけだと、画面が `press` を配線し
+忘れても緑になる。fake timer 下では `userEvent` の内部待ちが解けないため `fireEvent` を
+使う（時間を進めずに click を 2 発、という形が物理的なダブルクリックの再現にもなる）。
+変異は 8 種すべてで狙ったテストが落ちることを確認済み（「変異テスト」の表）。
+確認の要否は**両方向**に変異を入れてある — 即実行のはずの導線を二度押しの裏へ回す変異と、
+ダイアログのはずの導線から確認を外す変異の双方で、対応するテストだけが落ちる。
 
 #### 現在のファイル構成
 

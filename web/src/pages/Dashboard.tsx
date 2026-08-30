@@ -4,7 +4,7 @@ import { useState } from "react";
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { Checklist } from "@/components/monitor/Checklist";
 import { EventFeed } from "@/components/monitor/EventFeed";
-import { MatchSettings, MatchStrip, useMatchConfirm } from "@/components/monitor/MatchControl";
+import { MatchSettings, MatchStrip, useResetConfirm } from "@/components/monitor/MatchControl";
 import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
 import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
-import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
+import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
@@ -27,7 +27,8 @@ import { ROBOTS } from "@/lib/robots";
 export function Dashboard() {
   const states = useRobotStates();
   const { matchState } = useRobotStatus();
-  const { confirmModal, requestConfirm } = useMatchConfirm();
+  const { matchStart } = useRobotCommands();
+  const { confirmModal, requestReset } = useResetConfirm();
   const [checkPanelOpen, setCheckPanelOpen] = useState(false);
 
   if (isSetupPhase(matchState.phase)) {
@@ -38,7 +39,7 @@ export function Dashboard() {
               小さなグレー文字で、何が足りないかは書かれていなかった。
               「何が足りないか」(指差喚呼の残りと機体の要確認) はここだけが答える */}
           <div className="col-span-full">
-            <StartGate onStart={() => requestConfirm("start")} />
+            <StartGate onStart={matchStart} />
           </div>
 
           {/* 左は指差喚呼。準備フェーズの作業そのものなので、画面の広い面を割く。
@@ -95,7 +96,7 @@ export function Dashboard() {
             </Panel>
 
             <div className="shrink-0">
-              <MatchSettings onRequestConfirm={requestConfirm} />
+              <MatchSettings onRequestReset={requestReset} />
             </div>
           </div>
         </Page>
@@ -106,25 +107,22 @@ export function Dashboard() {
   }
 
   return (
-    <>
-      <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
-        <div className="col-span-full">
-          <MatchStrip onRequestConfirm={requestConfirm} />
-        </div>
+    <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
+      <div className="col-span-full">
+        <MatchStrip />
+      </div>
 
-        {ROBOTS.map(({ key, label }) => (
-          <RobotStatusRow key={key} label={label} state={states[key]} />
-        ))}
+      {ROBOTS.map(({ key, label }) => (
+        <RobotStatusRow key={key} label={label} state={states[key]} />
+      ))}
 
-        {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
+      {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
             Monitor は起きたことを拾う役なので、履歴を画面に残す */}
-        <div className="col-span-full min-h-0">
-          <Panel legend="イベント" className="h-full" bodyClassName="p-0">
-            <EventFeed />
-          </Panel>
-        </div>
-      </Page>
-      {confirmModal}
-    </>
+      <div className="col-span-full min-h-0">
+        <Panel legend="イベント" className="h-full" bodyClassName="p-0">
+          <EventFeed />
+        </Panel>
+      </div>
+    </Page>
   );
 }
