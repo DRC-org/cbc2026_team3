@@ -79,7 +79,7 @@ def _handle(spec: AxisSpec, recorder: _Recorder) -> AxisHandle:
     handle = AxisHandle(spec, handles)
     original = handle.set_target_value
 
-    async def _record(commands):  # noqa: ANN001, ANN202
+    async def _record(commands):
         recorder.commands.append(dict(commands))
         return await original(commands)
 

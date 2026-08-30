@@ -98,7 +98,8 @@ class HomingSpec:
         if self.step > self.search_distance:
             # 1 歩も踏めないまま失敗するだけの設定を通さない
             raise ValueError(
-                f"homing.step ({self.step}) が search_distance ({self.search_distance}) を超えています"
+                f"homing.step ({self.step}) が "
+                f"search_distance ({self.search_distance}) を超えています"
             )
 
 
