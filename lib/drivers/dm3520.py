@@ -137,10 +137,25 @@ class Dm3520Driver(MotorDriver):
         set_zero_on_start: bool = False,
     ) -> None:
         super().__init__(name, can_id)
-        if not 0x01 <= can_id <= 0xFF:
-            # 本機は受信 ID の**下位 8bit だけ**を見るので、0xFF を超える ESC_ID は
-            # 「設定できるのに宛先として区別できない」値になる。0x00 は未設定
-            raise ValueError("can_id (ESC_ID) は 0x01..0xFF の範囲で指定してください")
+        if not 0x01 <= can_id <= 0x0F:
+            # **フィードバックには CAN ID の下位 4bit しか載らない** (マニュアル
+            # 「Feedback Frame」節の D0)。MST_ID を共有する 2 台を見分ける手掛かりは
+            # それだけなので、下位 4bit が重なる ID (0x01 と 0x11 など) を許すと
+            # 「2 台目のフィードバックが 1 台目の状態を上書きする」構成が config に
+            # 書けてしまう。0x01..0x0F に閉じれば「ID が違う = 下位 4bit も違う」が
+            # 構造的に成立する。
+            #
+            # 副次的に、パラメータ応答との取り違え余地も無励磁時だけに閉じ込められる。
+            # 応答は D0 = ESC_ID、フィードバックは D0 = エラー<<4 | ID下位4bit なので、
+            # 両者が一致するには エラー == ESC_ID>>4 が要る。ESC_ID <= 0x0F なら
+            # これは「エラー == 0 = 無励磁」に限られ、励磁して運転している間は起こらない
+            # (0x10..0x1F を許すと「エラー == 1 = 励磁中」、つまり通常運転中に成立する)。
+            #
+            # 実機の出荷値がこの範囲外なら、レジスタ 0x08 を書き換えて 0xAA で保存する。
+            raise ValueError(
+                f"can_id (ESC_ID) は 0x01..0x0F の範囲で指定してください: {can_id:#x} "
+                "(フィードバックには下位 4bit しか載らないため。レジスタ 0x08 を書き換えること)"
+            )
         if not 0 <= master_id <= 0x7FF:
             raise ValueError("master_id (MST_ID) は 0x000..0x7FF の範囲で指定してください")
 

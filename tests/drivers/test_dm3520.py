@@ -26,12 +26,32 @@ def _driver(**kwargs: object) -> Dm3520Driver:
 
 
 class TestConstruction:
-    @pytest.mark.parametrize("can_id", [0x00, 0x100])
+    @pytest.mark.parametrize("can_id", [0x00, 0x10, 0x13, 0xFF, 0x100])
     def test_can_id_out_of_range_is_rejected(self, can_id: int) -> None:
-        # 本機は受信 ID の下位 8bit だけを見る。0x100 以上は設定できるのに
-        # 宛先として区別できない値になる (0x00 は未設定)
+        """**フィードバックには CAN ID の下位 4bit しか載らない。**
+
+        0x10 / 0x13 は実機の出荷値だが、下位 4bit が 0x00 / 0x03 と重なるため
+        「2 台目のフィードバックが 1 台目の状態を上書きする」構成を書けてしまう。
+        レジスタ 0x08 を書き換えて 0x01..0x0F へ寄せる運用にする。
+        """
         with pytest.raises(ValueError, match="can_id"):
             Dm3520Driver("slide", can_id)
+
+    def test_enabled_feedback_is_never_read_as_a_config_response(self) -> None:
+        """ESC_ID を下位ニブルに閉じたことの効き目を、境界そのもので確かめる。
+
+        パラメータ応答は D0 = ESC_ID、フィードバックは D0 = エラー<<4 | ID下位4bit。
+        両者が一致するには エラー == ESC_ID>>4 が要るので、ESC_ID <= 0x0F なら
+        「エラー == 0 = 無励磁」に限られる。**励磁して運転している間は起こらない。**
+        位置は生値が最も小さくなる端 (-p_max) に置き、D1/D2 の側の条件も
+        わざと成立させたうえで見る。
+        """
+        drv = Dm3520Driver("slide", 0x03, master_id=0x13)
+
+        enabled = dm3520_feedback(drv, position=-drv.p_max, error=int(Dm3520Error.ENABLED))
+
+        assert enabled.data[0] == 0x13  # ESC_ID が 0x13 なら一致してしまう並び
+        assert drv.matches_feedback(enabled) is True
 
     def test_mit_mode_is_not_supported(self) -> None:
         with pytest.raises(ValueError, match=r"mit|ControlMode"):

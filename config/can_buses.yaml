@@ -43,13 +43,7 @@ buses:
   # 「DM3520 のファームが拡張フレームを確実に無視する」ことに寄りかかった判断で、
   # マニュアルに根拠が無い。バス 1 本 = ドライバ種別 1 つを崩さない方を採った。
   #
-  # !!! serial は TBD のまま。実機を挿して採取すること !!!
-  #   udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
-  #   （対象 1 個だけを挿した状態で。採取後 sudo scripts/install.sh を再実行する）
-  # TBD の間は udev ルールが生成されず setup_can.sh の対象からも外れる。
-  # **その状態で main.py を起動すると can_dm3520 が存在せず [Errno 19] で落ちる**
-  # （_setup_robot は can_buses に並んだバスを全部 open するため）。
   can_dm3520:
-    serial: "TBD"
+    serial: "0069003F4E4D501820343332"
     bitrate: 1000000
     txqueuelen: 1000

@@ -63,15 +63,17 @@ _DM3520_MODES = {mode.value: mode for mode in (ControlMode.POSITION, ControlMode
 #   m3508     … C620 の電流指令フレームが 1 通に 4 台分のスロットしか持たない
 #   edulite05 … Extended Frame のモータ ID フィールドが 8bit
 #   generic   … 仕様書 §2.2 (0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約)
-#   dm3520    … 本機は受信 ID の**下位 8bit だけ**を見て自分宛かを判定する。それより
-#               大きい ESC_ID もレジスタには書けるが、宛先として区別できない値になる
-#               (0x00 は未設定)
+#   dm3520    … **フィードバックには CAN ID の下位 4bit しか載らない**。MST_ID を
+#               共有する 2 台を見分ける手掛かりはそれだけなので、下位 4bit が重なる
+#               ID (0x01 と 0x11 など) を許すと「2 台目のフィードバックが 1 台目の
+#               状態を上書きする」構成が書けてしまう。範囲を 1 バイト目の下位ニブルに
+#               閉じれば「ID が違う = 下位 4bit も違う」が構造的に成立する
 CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     {
         "m3508": (1, 4),
         "edulite05": (0x00, 0xFF),
         "generic": (0x01, 0xFE),
-        "dm3520": (0x01, 0xFF),
+        "dm3520": (0x01, 0x0F),
     }
 )
 

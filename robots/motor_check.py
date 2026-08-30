@@ -55,7 +55,8 @@ MAIN_HOME: dict[str, str] = {
 #: サブハンドの初期姿勢。電磁弁とポンプは「止める = 消磁 / 停止」に倒す。
 SUB_HOME: dict[str, str] = {
     "sub_arm_joint": "home",
-    "sub_slide": "home",
+    "sub_y_axis": "home",
+    "sub_lift": "home",
     "sub_gripper": "open",
     "pump_vac": "stop",
     "pump_blow": "stop",
@@ -172,15 +173,25 @@ class MotorCheckSequence(Sequence):
         await self.move_to({"sub_arm_joint": "extended"})
         await self.move_to({"sub_arm_joint": "home"})
 
-    @step("サブハンド スライド軸")
-    async def sub_slide(self) -> None:
+    @step("サブハンド 前後スライド (Y 方向)")
+    async def sub_y_axis(self) -> None:
         # Damiao DM3520。位置ループはドライバ内蔵なので、到達判定は
         # 位置定数の tolerance (1mm) にそのまま乗る。
         # **ここが落ちるときは config の p_max を最初に疑う** —— レジスタ 0x15 と
         # ずれていると位置が比例倍で読め、指令どおり動いても到達しない
-        logger.info("[motor_check] サブハンド スライド軸")
-        await self.move_to({"sub_slide": "extended"})
-        await self.move_to({"sub_slide": "home"})
+        logger.info("[motor_check] サブハンド 前後スライド")
+        await self.move_to({"sub_y_axis": "extended"})
+        await self.move_to({"sub_y_axis": "home"})
+
+    @step("サブハンド 昇降")
+    async def sub_lift(self) -> None:
+        # 前後軸と別ステップにするのは、2 軸を同時に動かすと機構の姿勢が
+        # 1 ステップで 2 つ変わり、どちらが引っかかったのか目で追えなくなるため。
+        # **上げてから必ず下ろす** —— 上がったまま次のステップへ進むと、
+        # 以降の確認をすべて持ち上がった姿勢で行うことになる
+        logger.info("[motor_check] サブハンド 昇降")
+        await self.move_to({"sub_lift": "lifted"})
+        await self.move_to({"sub_lift": "home"})
 
     @step("サブハンド 補助ハンド")
     async def sub_gripper(self) -> None:
