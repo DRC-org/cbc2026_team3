@@ -43,13 +43,30 @@ RobotServer._compute_health()      ← 例外は必ず DOWN へ倒す
 **受動**なので、モータを動かさずに分かることしか answer しない。「フィードバックが
 来ているか」「ドライバが異常フラグを立てているか」「温度が閾値を超えたか」の 3 つ。
 
-判定を書いてよい場所は 2 つだけ:
+判定を書いてよい場所は 2 つだけ。**関数ではなくファイル単位の境界**である:
 
 - サーバー側 — `lib/can_manager.py` の `health()`（優先度もここ）
-- UI 側 — `web/src/lib/healthVerdict.ts` の `evaluateHealth()`
+- UI 側 — `web/src/lib/healthVerdict.ts`（`evaluateHealth()` の見出しチップ、
+  `summarizeMotors()` のモータ一覧サマリー、`motorTempTone()` の温度色）
+
+**画面の部品側に判定を書き足してはならない。** 一度 `MotorSummary` が自前で
+「異常 N 件 / All operational」を出しており、FAULT のモータが行では赤バッジなのに
+サマリーだけが緑を出していた（同じ画面に食い違う 3 つの表示が並んだ）。
 
 しきい値の既定値は `lib/config_schema.py` の `HealthThresholds` にしかない。
 **4 値は必ず 1 組で運ぶ**（バラすと 3 本だけ配線した経路が作れる）。
+
+**UI が使う温度 2 値（`temp_warning_c` / `temp_critical_c`）は `server_info` で配る。**
+接続直後に 1 度だけ届く（`lib/server.py` の `_server_info_dict()`）。UI 側にフォールバック値は
+置かない —— 持つと config を変えても画面だけが古い境界で判定する二重管理が戻り、同じモータに
+ついてサーバーと UI が違う答えを出す。**届いていない間は `neutral`（色を付けない）に倒す**。
+適当な既定値で「正常」とも「警告」とも言わない。UI が使わない値（`feedback_timeout_ms` /
+`tx_error_threshold`）は配らない（配ると「配られているのだから使ってよい」という別の写しの
+根拠になる）。
+
+**高温を UI が数え直してはならない。** 温度警告はサーバーが `temp_warning_c` を見て
+`MotorHealth.state = warning` として既に配信している。`evaluateHealth()` が数えるのは
+配信された健全性だけで、UI が別に数えると同じ 1 基が 2 件として計上される。
 
 **UI はサーバーより楽観的な結論を出してはならない。** サーバーは健全性を計算できな
 かったとき `overall=down` + 内訳空で「判定不能」を配る。内訳だけを見て「異常なし」を
