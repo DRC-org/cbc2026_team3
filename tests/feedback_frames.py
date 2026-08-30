@@ -17,6 +17,7 @@ import struct
 
 import can
 
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import (
     _FLAG_E_STOP,
@@ -233,3 +234,59 @@ def edulite_feedback(
 
 def feed_edulite(driver: Edulite05Driver, **kwargs: float | int | None) -> None:
     driver.update_state(edulite_feedback(driver, **kwargs))  # type: ignore[arg-type]
+
+
+def _dm3520_to_raw(value: float, max_abs: float, bits: int) -> int:
+    """実数 → 固定小数点。``Dm3520Driver.uint_to_float`` の逆変換。
+
+    逆変換をここに置くのは、ドライバ本体には要らない (PC は受信するだけで
+    固定小数点を組み立てない) ため。**本体側へ生やすと、テストの都合で作った
+    関数が本番コードに常駐する。**
+    """
+    span = (1 << bits) - 1
+    clamped = min(max(value, -max_abs), max_abs)
+    return round((clamped + max_abs) * span / (2.0 * max_abs))
+
+
+def dm3520_feedback(
+    driver: Dm3520Driver,
+    *,
+    position: float = 0.0,
+    velocity: float = 0.0,
+    torque: float = 0.0,
+    t_mos: int = 25,
+    t_rotor: int = 25,
+    error: int = 1,
+    master_id: int | None = None,
+    can_id_nibble: int | None = None,
+) -> can.Message:
+    """DM3520 のフィードバックフレーム (標準 ID = MST_ID / 8 byte)。
+
+    ``error`` の既定は 1 (Enabled)。``master_id`` / ``can_id_nibble`` を明示できるのは
+    「自分宛でないフレームを無視する」ことを確かめるため。
+    """
+    pos = _dm3520_to_raw(position, driver.p_max, driver._POS_BITS)
+    vel = _dm3520_to_raw(velocity, driver.v_max, driver._VEL_BITS)
+    trq = _dm3520_to_raw(torque, driver.t_max, driver._TORQUE_BITS)
+    nibble = driver.can_id & 0x0F if can_id_nibble is None else can_id_nibble
+    data = bytes(
+        [
+            ((error & 0x0F) << 4) | (nibble & 0x0F),
+            (pos >> 8) & 0xFF,
+            pos & 0xFF,
+            (vel >> 4) & 0xFF,
+            ((vel & 0x0F) << 4) | ((trq >> 8) & 0x0F),
+            trq & 0xFF,
+            t_mos & 0xFF,
+            t_rotor & 0xFF,
+        ]
+    )
+    return can.Message(
+        arbitration_id=driver.master_id if master_id is None else master_id,
+        data=data,
+        is_extended_id=False,
+    )
+
+
+def feed_dm3520(driver: Dm3520Driver, **kwargs: float | int | None) -> None:
+    driver.update_state(dm3520_feedback(driver, **kwargs))  # type: ignore[arg-type]

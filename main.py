@@ -25,8 +25,13 @@ from lib.control.feedback import FeedbackFreshness
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
-from lib.control.target_refresh import GenericTargetRefresher
+from lib.control.target_refresh import (
+    Dm3520TargetRefresher,
+    GenericTargetRefresher,
+    TargetRefresher,
+)
 from lib.drivers.base import MotorDriver
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
@@ -46,6 +51,7 @@ _DRIVER_MAP: dict[str, type[MotorDriver]] = {
     "m3508": M3508Driver,
     "edulite05": Edulite05Driver,
     "generic": GenericDriver,
+    "dm3520": Dm3520Driver,
 }
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
@@ -355,6 +361,21 @@ def _create_motor(motor: MotorConfig) -> MotorDriver:
             set_zero_on_start=motor.set_zero_on_start,
         )
 
+    if motor.driver == "dm3520":
+        return Dm3520Driver(
+            name=motor.name,
+            can_id=motor.can_id,
+            master_id=motor.master_id,
+            mode=motor.mode,
+            limit_speed=motor.limit_speed,
+            # フィードバックの固定小数点レンジ。実機のレジスタ 0x15/0x16/0x17 と
+            # ずれると位置が比例倍で読め、指令どおり動いても到達判定を通らない
+            p_max=motor.p_max,
+            v_max=motor.v_max,
+            t_max=motor.t_max,
+            set_zero_on_start=motor.set_zero_on_start,
+        )
+
     if motor.driver == "generic":
         # control_type を渡さないと duty 指令の DC モータが位置制御で生成され、
         # 動作確認も reset も config と別物の指令になる
@@ -531,24 +552,41 @@ def _wire_robot_motors(
     return list(loops.values())
 
 
-def _build_target_refresher(
+def _build_target_refreshers(
     group: MotorGroup,
     motors: dict[str, MotorDriver],
+    can_manager: CANManager,
     *,
     is_estop_active: EStopChecker,
-) -> GenericTargetRefresher | None:
-    """自作モタドラのモータだけを集めた目標値再送タスクを作る (居なければ None)。
+) -> list[TargetRefresher]:
+    """周期的に指令を送り続ける必要があるモータを種別ごとに束ねる (居なければ空)。
 
     自作モタドラのファームは 500ms 自分宛の SET_TARGET が来ないと出力を止める
     (docs/motor_driver_can_protocol.md §5.1)。PC 側は目標値が変わったときにしか
     送らないため、再送が無いとコンベアは回し始めて 500ms で止まる。
+
+    DM3520 は理由が違う。**フィードバックが問い合わせ駆動**で、自分宛のフレームを
+    受けたときにしか状態を返さない。送らなければ操縦していない間じゅう
+    ``MotorHealth.STALE`` になり、症状は「常時赤い」だけで配線不良と区別が付かない。
+    2 つを 1 つのタスクにまとめないのは、目標を持たないモータの扱いが正反対のため
+    (自作モタドラは送ってはならず、DM3520 は送らなければならない)。
+
     M3508 は位置制御ループが 200Hz で電流指令を送り続けるので対象外、EDULITE は
-    ドライバ内蔵の位置ループが目標を保持するので対象外。
+    ドライバ内蔵の位置ループが目標を保持し、かつ自発的にフィードバックを返すので対象外。
     """
-    handles = [group[name] for name, driver in motors.items() if isinstance(driver, GenericDriver)]
-    if not handles:
-        return None
-    return GenericTargetRefresher(handles, is_estop_active=is_estop_active)
+    refreshers: list[TargetRefresher] = []
+
+    generic = [group[name] for name, drv in motors.items() if isinstance(drv, GenericDriver)]
+    if generic:
+        refreshers.append(GenericTargetRefresher(generic, is_estop_active=is_estop_active))
+
+    dm3520 = [group[name] for name, drv in motors.items() if isinstance(drv, Dm3520Driver)]
+    if dm3520:
+        refreshers.append(
+            Dm3520TargetRefresher(dm3520, can_manager, is_estop_active=is_estop_active)
+        )
+
+    return refreshers
 
 
 def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
@@ -759,7 +797,7 @@ async def main() -> None:
     check_position_tables: list[PositionTable] = []
     position_loops: list[M3508PositionLoop] = []
     sync_monitors: list[SyncMonitor] = []
-    target_refreshers: list[GenericTargetRefresher] = []
+    target_refreshers: list[TargetRefresher] = []
     # 同期ずれから起動した緊急停止タスクの強参照置き場 (GC で消えると停止しない)
     e_stop_tasks: set[asyncio.Task[None]] = set()
 
@@ -793,12 +831,12 @@ async def main() -> None:
 
         # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと
         # 500ms で出力が止まる (docs/motor_driver_can_protocol.md §5.1)
-        refresher = _build_target_refresher(
+        robot_refreshers = _build_target_refreshers(
             seq.motors,
             motors,
+            can_manager,
             is_estop_active=is_estop_active,
         )
-        robot_refreshers = [refresher] if refresher is not None else []
         target_refreshers.extend(robot_refreshers)
 
         # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
@@ -841,7 +879,7 @@ async def main() -> None:
             [loop.bus_name for loop in loops] or "なし",
             list(positions.axes) or "なし",
             [group.name for group in sync_groups] or "なし",
-            list(refresher.motor_names) if refresher is not None else "なし",
+            [name for r in robot_refreshers for name in r.motor_names] or "なし",
             list(positions.manual_axes()) or "なし",
         )
 

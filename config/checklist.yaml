@@ -41,6 +41,8 @@ checklists:
       label: 壁 前後とも初期位置確認
     - id: valves_closed
       label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
+    - id: sub_dm3520_origin
+      label: サブハンド 前後・昇降が原点位置にあること確認 (DM3520 は電源投入位置が原点)
 
     # --- 自動判定できない機構の目視確認 ---
     - id: y_axis_sync
@@ -51,6 +53,8 @@ checklists:
       label: サーボ基板のファーム版・可動角の異常表示が出ていないこと確認
     - id: origin_sensor_react
       label: 原点センサに触れて反応することを確認
+    - id: sub_lift_holds
+      label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)
     - id: conveyor_run
       label: コンベア 正転・逆転の目視確認
     - id: conveyor_stop

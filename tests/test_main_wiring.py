@@ -27,6 +27,7 @@ import main
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.config_schema import MotorConfig, RobotConfig, SystemConfig, load_robot_config
 from lib.drivers.base import ControlMode
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
@@ -41,7 +42,7 @@ from main import (
     _build_position_loops,
     _build_position_pid,
     _build_sync_groups,
-    _build_target_refresher,
+    _build_target_refreshers,
     _create_motor,
     _load_all_configs,
     _load_pid_config,
@@ -467,12 +468,14 @@ class TestBuildManualController:
     async def test_自作モタドラの手動目標が再送対象へ載る(self) -> None:
         # 再送が効かないと、手動で開いたグリッパが 500ms で戻る
         manager, seq, _, manual = self._build([False])
-        refresher = _build_target_refresher(
+        refreshers = _build_target_refreshers(
             seq.motors,
             {"gripper": GenericDriver("gripper", can_id=1)},
+            manager,
             is_estop_active=lambda: False,
         )
-        assert refresher is not None
+        assert len(refreshers) == 1
+        refresher = refreshers[0]
 
         await manual.move_to_position("gripper", "open")
         manager.sent_by_motor.clear()
@@ -482,18 +485,20 @@ class TestBuildManualController:
 
 
 class TestBuildTargetRefresher:
-    """自作モタドラのコマンドウォッチドッグ (500ms) 対策の配線。"""
+    """周期送信が要るモータだけを、種別ごとに別のタスクへ束ねる配線。"""
 
-    def _wire(self) -> tuple:
+    def _wire(self, extra_motors: dict | None = None, extra_config: dict | None = None) -> tuple:
         config = _m3508_config()
         config["motors"]["gripper"] = {
             "driver": "generic",
             "bus": "generic_bus",
             "can_id": 1,
         }
+        config["motors"].update(extra_config or {})
         motors = {
             "lift_motor": M3508Driver("lift_motor", can_id=1),
             "gripper": GenericDriver("gripper", can_id=1),
+            **(extra_motors or {}),
         }
         manager = _StubCANManager()
         seq = _DummySequence("main_hand")
@@ -507,16 +512,21 @@ class TestBuildTargetRefresher:
         )
         return manager, motors, seq
 
+    @staticmethod
+    def _slide_config() -> dict:
+        return {"sub_slide": {"driver": "dm3520", "bus": "generic_bus", "can_id": 1}}
+
     def test_only_generic_motors_are_refreshed(self) -> None:
         """M3508 は位置制御ループが 200Hz で送り続けるので再送対象ではない。"""
-        _, motors, seq = self._wire()
+        manager, motors, seq = self._wire()
 
-        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
 
-        assert refresher is not None
-        assert refresher.motor_names == ("gripper",)
+        assert [r.motor_names for r in refreshers] == [("gripper",)]
 
-    def test_none_without_generic_motors(self) -> None:
+    def test_empty_without_periodic_motors(self) -> None:
         motors = {"lift_motor": M3508Driver("lift_motor", can_id=1)}
         manager = _StubCANManager()
         seq = _DummySequence("main_hand")
@@ -529,30 +539,55 @@ class TestBuildTargetRefresher:
             is_estop_active=lambda: False,
         )
 
-        assert _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False) is None
+        assert (
+            _build_target_refreshers(seq.motors, motors, manager, is_estop_active=lambda: False)
+            == []
+        )
+
+    def test_dm3520_gets_its_own_refresher(self) -> None:
+        """**自作モタドラと同じタスクに束ねてはならない。**
+
+        目標を持たないモータの扱いが正反対で、自作モタドラは送ってはならず
+        (起動直後にコンベアが回り出す)、DM3520 は送らなければならない
+        (問い合わせ駆動なのでフィードバックが 1 通も来ない)。
+        """
+        manager, motors, seq = self._wire(
+            extra_motors={"sub_slide": Dm3520Driver("sub_slide", can_id=1)},
+            extra_config=self._slide_config(),
+        )
+
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
+
+        assert [r.motor_names for r in refreshers] == [("gripper",), ("sub_slide",)]
 
     async def test_estop_checker_blocks_resend(self) -> None:
         """再送は停止指令を上書きする。緊急停止中は 1 通も出してはならない。"""
         manager, motors, seq = self._wire()
         flag = [False]
-        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: flag[0])
-        assert refresher is not None
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: flag[0]
+        )
         await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
         manager.sent_by_motor.clear()
 
         flag[0] = True
-        await refresher.step()
+        for refresher in refreshers:
+            await refresher.step()
 
         assert manager.sent_by_motor == []
 
     async def test_resends_last_target(self) -> None:
         manager, motors, seq = self._wire()
-        refresher = _build_target_refresher(seq.motors, motors, is_estop_active=lambda: False)
-        assert refresher is not None
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
         await seq.motors.gripper.set_target(ControlMode.POSITION, 1.0)
         manager.sent_by_motor.clear()
 
-        await refresher.step()
+        for refresher in refreshers:
+            await refresher.step()
 
         assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
 
@@ -928,7 +963,12 @@ class TestLoadAllConfigs:
             [_CONFIG_DIR / "main_hand.yaml", _CONFIG_DIR / "sub_hand.yaml"],
         )
 
-        assert set(system.can_buses) == {"m3508_bus", "edulite_bus", "generic_bus"}
+        assert set(system.can_buses) == {
+            "m3508_bus",
+            "edulite_bus",
+            "generic_bus",
+            "dm3520_bus",
+        }
         assert [robot.robot_name for _, robot in loaded] == ["main_hand", "sub_hand"]
 
     def test_missing_system_config_aborts(self, tmp_path: pathlib.Path) -> None:

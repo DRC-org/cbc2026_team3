@@ -15,6 +15,7 @@ from lib.config_schema import (
     load_system_config,
 )
 from lib.drivers.base import ControlMode
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
@@ -23,7 +24,12 @@ from lib.sequence.positions import load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
-_BUSES = {"m3508_bus": "can_m3508", "edulite_bus": "can_edulite", "generic_bus": "can_generic"}
+_BUSES = {
+    "m3508_bus": "can_m3508",
+    "edulite_bus": "can_edulite",
+    "generic_bus": "can_generic",
+    "dm3520_bus": "can_dm3520",
+}
 
 
 def _robot(**motors: dict) -> dict:
@@ -324,6 +330,7 @@ class TestCanIdRange:
             "m3508": lambda i: M3508Driver("m", i),
             "edulite05": lambda i: Edulite05Driver("m", i),
             "generic": lambda i: GenericDriver("m", i),
+            "dm3520": lambda i: Dm3520Driver("m", i),
         }
         assert set(builders) == set(DRIVER_TYPES)
 
@@ -363,6 +370,75 @@ class TestDriverSpecificKeys:
         assert motor.limit_current == 4.0
         assert motor.position_kp == 25.0
         assert motor.set_zero_on_start is False
+
+    def test_dm3520_keys_are_parsed(self) -> None:
+        config = load_robot_config(
+            _robot(
+                slide={
+                    "driver": "dm3520",
+                    "bus": "dm3520_bus",
+                    "can_id": "0x05",
+                    "master_id": "0x11",
+                    "mode": "position",
+                    "limit_speed": 3.0,
+                    "p_max": 12.5,
+                    "v_max": 40.0,
+                    "t_max": 8.0,
+                    "set_zero_on_start": True,
+                }
+            ),
+            source="test.yaml",
+            buses=_BUSES,
+        )
+        motor = config.motors["slide"]
+
+        assert motor.can_id == 5
+        assert motor.master_id == 0x11
+        assert motor.mode is ControlMode.POSITION
+        assert motor.limit_speed == 3.0
+        assert (motor.p_max, motor.v_max, motor.t_max) == (12.5, 40.0, 8.0)
+        assert motor.set_zero_on_start is True
+
+    def test_dm3520_mit_mode_is_rejected(self) -> None:
+        """MIT モードを書けるようにしない。
+
+        書けてしまうと Kp/Kd を PC 側で持つ構成が config だけで成立し、
+        「ドライバ内蔵の三重ループを使う」という本機を選んだ理由が消える。
+        しかも指令フレームの形が変わるので、症状は「まったく動かない」になる。
+        """
+        with pytest.raises(ValueError, match="mit"):
+            load_robot_config(
+                _robot(
+                    slide={
+                        "driver": "dm3520",
+                        "bus": "dm3520_bus",
+                        "can_id": 1,
+                        "mode": "mit",
+                    }
+                ),
+                source="test.yaml",
+                buses=_BUSES,
+            )
+
+    def test_dm3520_rejects_edulite_only_keys(self) -> None:
+        """host_id は EDULITE 05 のキー。DM3520 に書いても効かない。
+
+        効かないキーを黙って捨てると、「書いたのに反映されない」を config からは
+        読めない (本機の宛先は MST_ID であって host_id ではない)。
+        """
+        with pytest.raises(ValueError, match="host_id"):
+            load_robot_config(
+                _robot(
+                    slide={
+                        "driver": "dm3520",
+                        "bus": "dm3520_bus",
+                        "can_id": 1,
+                        "host_id": "0xFD",
+                    }
+                ),
+                source="test.yaml",
+                buses=_BUSES,
+            )
 
     def test_edulite_mode_typo_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="postion"):
@@ -442,7 +518,12 @@ class TestShippedConfigs:
     def test_system_yaml_loads(self) -> None:
         system = self._system()
 
-        assert set(system.can_buses) == {"m3508_bus", "edulite_bus", "generic_bus"}
+        assert set(system.can_buses) == {
+            "m3508_bus",
+            "edulite_bus",
+            "generic_bus",
+            "dm3520_bus",
+        }
         assert system.health.feedback_timeout_ms == 500.0
         assert system.health.temp_warning_c == 65.0
         assert system.health.temp_critical_c == 80.0
@@ -481,7 +562,7 @@ class TestShippedConfigs:
 
 
 #: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
-_BENCH_DIRS = ("m3508", "dc", "servo", "solenoid")
+_BENCH_DIRS = ("m3508", "dc", "servo", "solenoid", "dm3520")
 
 
 class TestShippedBenchConfigs:

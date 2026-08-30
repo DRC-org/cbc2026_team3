@@ -16,6 +16,9 @@ can_buses:
   m3508_bus: can_m3508
   edulite_bus: can_edulite
   generic_bus: can_generic
+  # Damiao DM3520 専用バス。相乗りできる既存バスが無い理由は
+  # config/can_buses.yaml の can_dm3520 に書いてある
+  dm3520_bus: can_dm3520
 
 health:
   feedback_timeout_ms: 500   # この時間フィードバックなければ STALE

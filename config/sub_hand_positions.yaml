@@ -30,6 +30,76 @@ axes:
       max: 15.0
       steps: [1.0, 5.0]
 
+  # ラックアンドピニオンの直動 2 軸 (Damiao DM3520)。指令・フィードバックともに
+  # **出力軸の rad** —— 減速比 3591/187 は本機のドライバが内部で吸収済みなので、
+  # M3508 の y_axis と違って減速比は scale に現れない。
+  #
+  # scale = 2*pi / (pi * m * z) = 2 / (m * z)   [rad / mm]
+  #   ラックピニオンは基準円で転がるので、出力軸 1 回転 = 基準円周 pi*m*z [mm]
+  #   ピニオンは モジュール 1 / 歯数 36 (基準円 36.0mm)
+  #   -> 2 / 36 = 0.0555556 rad/mm (出力軸 1 回転 = 113.097mm)
+  # 組み立て後に一度だけ実測で確かめること。ずれていたら
+  #   scale_new = scale_old * 指令値 / 実測値
+  # **測るときは必ず同じ方向から寄せる** — バックラッシュは scale では吸収できず、
+  # 往復で測ると遊びのぶんが scale の誤差として紛れ込む (main_hand の y_axis と同じ)。
+  # TODO: 昇降側のピニオンが前後軸と違うなら、sub_lift の scale だけ差し替えること。
+  #
+  # 可動範囲は p_max (12.5rad) が上限で、scale 換算で ±225mm。ここを超えた位置は
+  # ドライバ側で頭打ちになり、フィードバックも張り付くので「送ったのに途中で止まる」
+  # という形でしか現れない。
+  #
+  # !!! 原点は電源投入位置 !!! 本機は投入時に 0.0rad へ固定されるので、搬送中に手で
+  # 動かしたぶんがそのまま座標のずれになる。リミットスイッチを付けたら下の homing:
+  # を有効化すること —— ただし現状 lib/sequence/homing.py の零点確定は
+  # M3508PositionLoop 経由 (main.py の _make_capture_origin) にしか対応しておらず、
+  # 本機で有効化するには SET_ZERO (0xFE) を送る経路を足す必要がある
+  # (config/main_hand_positions.yaml の rotate も同じ状態)。
+  #
+  # 前後方向 (Y 方向)。**軸名に sub_ を付けるのは main_hand の y_axis と衝突させない
+  # ため** —— 統合動作確認は両ハンドの位置定数を PositionTable.merged で 1 つに
+  # まとめるので、軸名が重なると起動ごと落ちる (main.py の _wire_motor_check_sequence)。
+  # homing:
+  #   sensor: sub_y_axis_origin_sensor
+  #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
+  #   search_distance: 40.0   # [mm] TODO: ストローク全長より少し長い値へ
+  #   step: 0.5               # [mm]
+  #   settle_s: 0.05
+  sub_y_axis:
+    unit: mm
+    command_unit: rad
+    scale: 0.0555556     # mm -> rad (出力軸)。導出は上のコメント
+    offset: 0.0
+    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
+    tolerance: 1.0       # 到達許容差 [mm]
+    # 手動操縦の可動範囲 [mm]。**機構の物理端ではなくその内側に取る** ——
+    # 手動は操縦者が端へ寄せていく操作なので、境界を物理端に合わせると
+    # 「指令は範囲内なのに機構は突き当たっている」状態が作れてしまう。
+    # TODO: 機構完成後、実測のストローク端より内側へ詰めること
+    manual:
+      min: -5.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
+  # 昇降。正が上、負が下 (TODO: 実機で確認し、逆なら scale の符号を反転する)。
+  #
+  # **緊急停止では無励磁になる。** 本機の「止める」は消磁の一手しか無く、サーボの
+  # ような「現在角を保持」は持たない。減速比 19.2 のギヤで自重落下しない前提に
+  # 乗っているので、機構が付いたら config/checklist.yaml の sub_lift_holds で
+  # 必ず実機確認すること。
+  sub_lift:
+    unit: mm
+    command_unit: rad
+    scale: 0.0555556     # TODO: 昇降側のピニオンが違うなら差し替える
+    offset: 0.0
+    timeout_s: 4.0
+    tolerance: 1.0
+    # 下端側を 0 未満まで許していないのは、原点 (電源投入位置) を最下点に取る想定のため。
+    # TODO: 機構完成後、実測のストローク端より内側へ詰めること
+    manual:
+      min: -2.0
+      max: 30.0
+      steps: [1.0, 5.0, 10.0]
+
   # 自作モータドライバの補助グリッパ。指令・フィードバックともに deg。
   # 開 / 閉 の 2 状態しか取らないので manual: は書かない (手動でも位置名しか送れない)。
   sub_gripper:
@@ -94,10 +164,18 @@ positions:
     handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
     place: 10.0          # 配置姿勢 [deg]
 
-  # !!! 以下の値は config/sub_hand.yaml の motor_check.magnitude と一致させること。
-  #     ずれると動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
+  # 直動 2 軸 [mm]。原点 (0.0) は電源投入位置。
+  # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
+  sub_y_axis:
+    home: 0.0            # 収納位置 = 電源投入位置
+    extended: 20.0       # 前方への展開位置 [mm] (出力軸で約 64deg)
+
+  sub_lift:
+    home: 0.0            # 下端 = 電源投入位置
+    lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
+
   sub_gripper:
-    open: 5.0            # 開 [deg] (= sub_hand.yaml sub_gripper.motor_check.magnitude)
+    open: 5.0            # 開 [deg]
     closed: 0.0          # 閉 (把持) [deg]
 
   # 電磁弁は開 / 閉の 2 状態しか取らない。**値は 0 か非 0 かだけが意味を持つ**

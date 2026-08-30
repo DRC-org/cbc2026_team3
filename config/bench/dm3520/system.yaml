@@ -1,0 +1,32 @@
+# Damiao DM3520 単体ベンチ (機構未装着) 用の共通設定。
+#
+# 本番の config/system.yaml との違いは can_buses だけで、health / match は同一値を持つ。
+# main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で open する
+# ため、本番の 4 本構成のままでは挿していない CANable のぶんが [Errno 19] No such device
+# となり、起動そのものが失敗する。
+#
+# ここを dm3520_bus だけに絞ることで CANable 1 本 (can_dm3520) だけで起動できる。
+#
+# **can_dm3520 の serial を採取していないとこのベンチも起動しない。**
+#   udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
+# 採取して config/can_buses.yaml に書き、sudo scripts/install.sh を再実行すること。
+#
+# 使い方:
+#   scripts/setup_can.sh
+#   uv run python main.py --system config/bench/dm3520/system.yaml \
+#       --config config/bench/dm3520/sub_hand.yaml \
+#       --checklist config/bench/dm3520/checklist.yaml
+
+can_buses:
+  dm3520_bus: can_dm3520
+
+# 以下 2 ブロックは本番 config/system.yaml と同値。ベンチだけ判定基準を変えると
+# 「机上では OK なのに実運用で警告が出る」ことになり、確認の意味が薄れる。
+health:
+  feedback_timeout_ms: 500
+  temp_warning_c: 65
+  temp_critical_c: 80
+  tx_error_threshold: 96
+
+match:
+  duration_s: 180

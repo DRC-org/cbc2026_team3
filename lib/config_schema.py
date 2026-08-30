@@ -25,7 +25,7 @@ from lib.drivers.base import ControlMode
 
 # 対応するドライバ種別。main._DRIVER_MAP と対で維持する
 # (対応が崩れていないことは tests/test_config_schema.py が検証する)
-DRIVER_TYPES = ("m3508", "edulite05", "generic")
+DRIVER_TYPES = ("m3508", "edulite05", "generic", "dm3520")
 
 # generic ドライバの control_type に書ける制御モード。CURRENT を除くのは
 # GenericDriver が電流指令フレームを持たないため。
@@ -46,6 +46,11 @@ _EDULITE_MODES = {
     mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY, ControlMode.CURRENT)
 }
 
+# DM3520 の mode に書ける制御モード (Dm3520Driver._CONTROL_TO_CTRL_MODE と対)。
+# MIT モードを載せないのは、Kp/Kd を PC 側で持つことになり「ドライバ内蔵の三重ループを
+# 使う」という本機を選んだ理由そのものが消えるため
+_DM3520_MODES = {mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY)}
+
 # ドライバ種別ごとの can_id の範囲 (両端を含む)。
 #
 # 範囲そのものは各ドライバの __init__ も持っているが、そちらで捕まえると
@@ -58,11 +63,17 @@ _EDULITE_MODES = {
 #   m3508     … C620 の電流指令フレームが 1 通に 4 台分のスロットしか持たない
 #   edulite05 … Extended Frame のモータ ID フィールドが 8bit
 #   generic   … 仕様書 §2.2 (0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約)
+#   dm3520    … **フィードバックには CAN ID の下位 4bit しか載らない**。MST_ID を
+#               共有する 2 台を見分ける手掛かりはそれだけなので、下位 4bit が重なる
+#               ID (0x01 と 0x11 など) を許すと「2 台目のフィードバックが 1 台目の
+#               状態を上書きする」構成が書けてしまう。範囲を 1 バイト目の下位ニブルに
+#               閉じれば「ID が違う = 下位 4bit も違う」が構造的に成立する
 CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     {
         "m3508": (1, 4),
         "edulite05": (0x00, 0xFF),
         "generic": (0x01, 0xFE),
+        "dm3520": (0x01, 0x0F),
     }
 )
 
@@ -80,6 +91,9 @@ _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
         {"host_id", "mode", "limit_speed", "limit_current", "position_kp", "set_zero_on_start"}
     ),
     "generic": frozenset({"control_type", "expected_firmware", "expected_angle_range_deg"}),
+    "dm3520": frozenset(
+        {"master_id", "mode", "limit_speed", "p_max", "v_max", "t_max", "set_zero_on_start"}
+    ),
 }
 # 値の解釈 (null 許容・既定値補完) は main._load_pid_config が持つ。ここではキー名だけ見る
 _PID_KEYS = frozenset({"kp", "ki", "kd", "integral_limit", "dead_band", "output_limit"})
@@ -154,6 +168,16 @@ class MotorConfig:
     limit_current: float = 5.0
     position_kp: float = 30.0
     set_zero_on_start: bool = False
+    # dm3520。mode / limit_speed / set_zero_on_start は edulite05 と共有する
+    # (どちらも「ドライバ内蔵の位置ループへ rad で指令する」同じ形なので、別名を
+    # 与えると同じ概念が 2 つの名前で config に並ぶ)
+    master_id: int = 0x00
+    # フィードバックの固定小数点レンジ。**実機のレジスタ 0x15/0x16/0x17 と一致させること。**
+    # 指令は float なのでずれても効かないが、位置・速度・トルクが比例倍で読める。
+    # 症状は「指令した量だけ動いたのに到達判定を通らない」で、動作確認が検出する
+    p_max: float = 12.566
+    v_max: float = 45.0
+    t_max: float = 10.0
     # m3508。ゲイン値の解釈は main._load_pid_config が持つためここでは生のまま運ぶ
     pid: Mapping[str, object] | None = None
 
@@ -457,6 +481,21 @@ def _parse_motor(
             control_type=control_type,
             expected_firmware=_parse_expected_firmware(source, path, motor),
             expected_angle_range_deg=_parse_expected_angle_range(source, path, motor, control_type),
+        )
+
+    if driver == "dm3520":
+        return MotorConfig(
+            name=motor_name,
+            driver=driver,
+            bus=bus,
+            can_id=can_id,
+            master_id=_optional(_integer, source, path, motor, "master_id", 0x00),
+            mode=_optional_mode(source, path, motor, "mode", _DM3520_MODES, ControlMode.POSITION),
+            limit_speed=_optional(_number, source, path, motor, "limit_speed", 2.0),
+            p_max=_optional(_number, source, path, motor, "p_max", 12.566),
+            v_max=_optional(_number, source, path, motor, "v_max", 45.0),
+            t_max=_optional(_number, source, path, motor, "t_max", 10.0),
+            set_zero_on_start=_optional(_boolean, source, path, motor, "set_zero_on_start", False),
         )
 
     if driver == "edulite05":
