@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { Checklist } from "@/components/monitor/Checklist";
 import type { ChecklistState, MatchPhase } from "@/lib/protocol";
-import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
+import { DEFAULT_MATCH_STATE, DEFAULT_SERVER_INFO, renderWithRobot } from "@/test/robotContext";
 
 const ITEMS: ChecklistState = {
   items: [
@@ -25,7 +25,7 @@ function mount(
       phase,
       checklists: checklist ? { pre_match: checklist } : {},
     },
-    serverInfo: { dev_tools: devTools, dry_run: false },
+    serverInfo: { ...DEFAULT_SERVER_INFO, dev_tools: devTools },
   });
 }
 

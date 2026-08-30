@@ -61,7 +61,12 @@ describe("parseServerMessage", () => {
     it("開発用フラグをそのまま持つ", () => {
       expect(parse({ type: "server_info", dev_tools: true, dry_run: true })).toEqual({
         type: "server_info",
-        serverInfo: { dev_tools: true, dry_run: true },
+        serverInfo: {
+          dev_tools: true,
+          dry_run: true,
+          temp_warning_c: null,
+          temp_critical_c: null,
+        },
       });
     });
 
@@ -69,14 +74,43 @@ describe("parseServerMessage", () => {
       // 開発用ボタンが本番で出るより、開発用起動で出ない方が安全側
       expect(parse({ type: "server_info" })).toEqual({
         type: "server_info",
-        serverInfo: { dev_tools: false, dry_run: false },
+        serverInfo: {
+          dev_tools: false,
+          dry_run: false,
+          temp_warning_c: null,
+          temp_critical_c: null,
+        },
       });
     });
 
     it("真偽値以外を真として扱わない", () => {
       expect(parse({ type: "server_info", dev_tools: "true", dry_run: 1 })).toEqual({
         type: "server_info",
-        serverInfo: { dev_tools: false, dry_run: false },
+        serverInfo: {
+          dev_tools: false,
+          dry_run: false,
+          temp_warning_c: null,
+          temp_critical_c: null,
+        },
+      });
+    });
+
+    it("温度しきい値をそのまま持つ", () => {
+      // UI 側に既定値を置かないので、config の値はこの 1 通でしか入らない
+      expect(parse({ type: "server_info", temp_warning_c: 65, temp_critical_c: 80 })).toMatchObject(
+        {
+          serverInfo: { temp_warning_c: 65, temp_critical_c: 80 },
+        },
+      );
+    });
+
+    it("しきい値が number でなければ null (代わりの既定値を持たない)", () => {
+      // 数値でない値を通すと比較が常に false になり、警告が一切出ないまま
+      // 「しきい値は届いている」ように見える
+      expect(
+        parse({ type: "server_info", temp_warning_c: "65", temp_critical_c: null }),
+      ).toMatchObject({
+        serverInfo: { temp_warning_c: null, temp_critical_c: null },
       });
     });
   });

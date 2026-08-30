@@ -90,7 +90,14 @@ const INITIAL_MATCH_STATE: MatchState = {
 
 // 未接続時は開発用の入口を閉じておく。server_info を受けるまで開いていると、
 // 接続前の一瞬だけ本番でも開発用ボタンが出る
-const INITIAL_SERVER_INFO: ServerInfo = { dev_tools: false, dry_run: false };
+const INITIAL_SERVER_INFO: ServerInfo = {
+  dev_tools: false,
+  dry_run: false,
+  // server_info を受け取るまでしきい値は分からない。既定値を置くと、それが
+  // サーバーの config と食い違ったまま表示される二重管理になる
+  temp_warning_c: null,
+  temp_critical_c: null,
+};
 
 export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   states: {},

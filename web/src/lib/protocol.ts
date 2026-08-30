@@ -117,16 +117,23 @@ export interface MotorCheckSnapshot {
 }
 
 /**
- * 起動オプション由来の、試合中に変わらない情報。接続直後に 1 度だけ届く。
+ * 起動オプション・config 由来の、試合中に変わらない情報。接続直後に 1 度だけ届く。
  *
  * 開発用ボタンの表示可否をビルド時定数で決めると、同じ `web/dist` を配る本番と
  * 開発で再ビルドが要る (= 切り替えとして機能しない)。正はサーバーが持つ。
+ *
+ * 温度しきい値も同じで、UI 側に定数を持つと config を変えても画面の判定だけが
+ * 古い値のまま残り、同じモータについてサーバーと UI が違う答えを出す。
  */
 export interface ServerInfo {
   /** 開発用コマンド (指差喚呼の一括チェック等) が解禁されているか */
   dev_tools: boolean;
   /** CAN バス無しで起動しているか (機体は繋がっていない) */
   dry_run: boolean;
+  /** モータ温度の警告しきい値 [℃]。未配信は null (UI は色を付けない) */
+  temp_warning_c: number | null;
+  /** モータ温度の危険しきい値 [℃]。未配信は null (UI は色を付けない) */
+  temp_critical_c: number | null;
 }
 
 export type MatchCourt = "red" | "blue";
@@ -371,12 +378,16 @@ function parseKnown(raw: Raw): ServerMessage | null {
       return robot === null ? null : { type: "state", robot, state: raw as unknown as RobotState };
 
     case "server_info":
-      // 欠けたフラグは「無効」に倒す。開発用ボタンが本番で出るより出ない方が安全
+      // 欠けたフラグは「無効」に倒す。開発用ボタンが本番で出るより出ない方が安全。
+      // しきい値も同じで、number でなければ null にして「判定しない」へ倒す
+      // (代わりの既定値を UI が持つと、それがそのまま二重管理になる)
       return {
         type: "server_info",
         serverInfo: {
           dev_tools: raw.dev_tools === true,
           dry_run: raw.dry_run === true,
+          temp_warning_c: typeof raw.temp_warning_c === "number" ? raw.temp_warning_c : null,
+          temp_critical_c: typeof raw.temp_critical_c === "number" ? raw.temp_critical_c : null,
         },
       };
 

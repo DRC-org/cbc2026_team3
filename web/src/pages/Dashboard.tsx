@@ -15,6 +15,7 @@ import { Icon } from "@/components/ui/Icon";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
+import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
@@ -26,10 +27,12 @@ import { ROBOTS } from "@/lib/robots";
  */
 export function Dashboard() {
   const states = useRobotStates();
-  const { matchState } = useRobotStatus();
+  const { matchState, serverInfo } = useRobotStatus();
   const { matchStart } = useRobotCommands();
   const { confirmModal, requestReset } = useResetConfirm();
   const [checkPanelOpen, setCheckPanelOpen] = useState(false);
+  // 温度しきい値の正はサーバーの config。表示部品は props で受け取る
+  const tempThresholds = tempThresholdsOf(serverInfo);
 
   if (isSetupPhase(matchState.phase)) {
     return (
@@ -84,6 +87,7 @@ export function Dashboard() {
                           health={robot.health}
                           motors={robot.motors}
                           safety={robot.safety}
+                          tempThresholds={tempThresholds}
                           showVerdict={false}
                         />
                       ) : (
@@ -113,7 +117,12 @@ export function Dashboard() {
       </div>
 
       {ROBOTS.map(({ key, label }) => (
-        <RobotStatusRow key={key} label={label} state={states[key]} />
+        <RobotStatusRow
+          key={key}
+          label={label}
+          state={states[key]}
+          tempThresholds={tempThresholds}
+        />
       ))}
 
       {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。

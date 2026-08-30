@@ -99,11 +99,25 @@ describe("Dashboard (セッティングタイム)", () => {
   });
 
   it("機体の判定文言を画面に 1 度しか描かない", () => {
+    // 過熱の判定はサーバーが持つ (config の temp_warning_c)。UI へは warning で届く
     const hot = { pos: 0, vel: 0, torque: 0, temp: 90, pid: null };
+    const hotHealth = health({
+      motors: [
+        {
+          name: "y_axis_r",
+          bus: "can_m3508",
+          state: "warning",
+          last_feedback_at: null,
+          feedback_age_ms: 0,
+          temperature: 90,
+          detail: null,
+        },
+      ],
+    });
     renderWithRobot(<Dashboard />, {
       matchState: { ...SETUP, can_start_match: true },
       states: {
-        main_hand: robot({ motors: { y_axis_r: hot } }),
+        main_hand: robot({ motors: { y_axis_r: hot }, health: hotHealth }),
         sub_hand: robot({ robot: "sub_hand" }),
       },
     });

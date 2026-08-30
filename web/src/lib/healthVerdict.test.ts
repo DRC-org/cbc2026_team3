@@ -1,20 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  countHotMotors,
   describeSafetyIssues,
   evaluateHealth,
   motorTempTone,
   summarizeMotors,
+  tempThresholdsOf,
 } from "@/lib/healthVerdict";
-import type {
-  BusHealth,
-  HealthSnapshot,
-  MotorHealth,
-  MotorState,
-  SafetyState,
-} from "@/lib/protocol";
-import { TEMP_DANGER, TEMP_WARNING } from "@/lib/robots";
+import type { BusHealth, HealthSnapshot, MotorHealth, SafetyState } from "@/lib/protocol";
+import { DEFAULT_SERVER_INFO } from "@/test/robotContext";
 
 function bus(over: Partial<BusHealth> = {}): BusHealth {
   return {
@@ -54,9 +48,8 @@ function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
   };
 }
 
-function motor(temp: number): MotorState {
-  return { pos: 0, vel: 0, torque: 0, temp, pid: null };
-}
+/** 配信されたしきい値。値そのものはサーバーの config が決めるので固定値で良い */
+const THRESHOLDS = { warning: 65, critical: 80 };
 
 function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
@@ -78,36 +71,39 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
  */
 describe("evaluateHealth", () => {
   it("ヘルス未取得は neutral", () => {
-    expect(evaluateHealth(undefined, {})).toEqual({ tone: "neutral", label: "ヘルス未取得" });
+    expect(evaluateHealth(undefined)).toEqual({ tone: "neutral", label: "ヘルス未取得" });
   });
 
   it("異常が無ければ success", () => {
-    expect(evaluateHealth(health(), { y_axis_r: motor(30) }).tone).toBe("success");
+    expect(evaluateHealth(health()).tone).toBe("success");
   });
 
   it("バス停止は error", () => {
-    const verdict = evaluateHealth(health({ buses: [bus({ state: "down" })] }), {});
+    const verdict = evaluateHealth(health({ buses: [bus({ state: "down" })] }));
     expect(verdict.tone).toBe("error");
     expect(verdict.label).toMatch(/can_m3508/);
   });
 
   it("バス劣化 (degraded) は warning であって error ではない", () => {
     // タブの LED だけが degraded を error 扱いしていた
-    expect(evaluateHealth(health({ buses: [bus({ state: "degraded" })] }), {}).tone).toBe(
-      "warning",
-    );
+    expect(evaluateHealth(health({ buses: [bus({ state: "degraded" })] })).tone).toBe("warning");
   });
 
   it("モータ fault は error", () => {
-    expect(evaluateHealth(health({ motors: [motorHealth({ state: "fault" })] }), {}).tone).toBe(
+    expect(evaluateHealth(health({ motors: [motorHealth({ state: "fault" })] })).tone).toBe(
       "error",
     );
   });
 
-  it("高温モータは件数に数えて warning", () => {
-    const verdict = evaluateHealth(health(), { a: motor(TEMP_WARNING), b: motor(30) });
+  /**
+   * 高温はサーバーが config の `temp_warning_c` で `MotorHealth.state = warning` として
+   * 既に配信している。UI が温度テレメトリから重ねて数えていた頃は、同じ 1 基が
+   * 「異常 2 件」として出ていた (しかも UI の境界 60℃ はサーバーの 65℃ とずれていた)。
+   */
+  it("高温モータをサーバー判定と二重に数えない", () => {
+    const verdict = evaluateHealth(health({ motors: [motorHealth({ state: "warning" })] }));
     expect(verdict.tone).toBe("warning");
-    expect(verdict.label).toMatch(/1 件/);
+    expect(verdict.label).toMatch(/要確認 1 件/);
   });
 
   /**
@@ -125,7 +121,6 @@ describe("evaluateHealth", () => {
           motors: [],
           detail: "ヘルス計算に失敗しました: boom",
         }),
-        {},
       );
       expect(verdict.tone).toBe("error");
     });
@@ -138,27 +133,23 @@ describe("evaluateHealth", () => {
           motors: [],
           detail: "ヘルス計算に失敗しました: boom",
         }),
-        {},
       );
       expect(verdict.detail).toBe("ヘルス計算に失敗しました: boom");
     });
 
     it("detail が無くても判定不能であることは伝える", () => {
-      const verdict = evaluateHealth(health({ overall: "down", buses: [], motors: [] }), {});
+      const verdict = evaluateHealth(health({ overall: "down", buses: [], motors: [] }));
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toMatch(/判定不能/);
     });
 
     it("内訳から理由を挙げられるならそちらを優先する (対処に直結する)", () => {
-      const verdict = evaluateHealth(
-        health({ overall: "down", buses: [bus({ state: "down" })] }),
-        {},
-      );
+      const verdict = evaluateHealth(health({ overall: "down", buses: [bus({ state: "down" })] }));
       expect(verdict.label).toMatch(/can_m3508/);
     });
 
     it("内訳が空でも overall=degraded なら warning に倒す", () => {
-      const verdict = evaluateHealth(health({ overall: "degraded", buses: [], motors: [] }), {});
+      const verdict = evaluateHealth(health({ overall: "degraded", buses: [], motors: [] }));
       expect(verdict.tone).toBe("warning");
     });
   });
@@ -166,33 +157,30 @@ describe("evaluateHealth", () => {
   describe("安全機構", () => {
     it("同期ずれラッチは error にし、どの軸かを出す", () => {
       // 緊急停止を解除してもこの軸は動かない。復旧手順の選択に直結する
-      const verdict = evaluateHealth(health(), {}, safety({ sync_violations: ["y_axis"] }));
+      const verdict = evaluateHealth(health(), safety({ sync_violations: ["y_axis"] }));
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toMatch(/y_axis/);
     });
 
     it("保護ループの停止は error", () => {
       // WS は繋がったままモータ状態も届き続けるので、配信を読まない限り誰も気付けない
-      expect(evaluateHealth(health(), {}, safety({ loops_running: false })).tone).toBe("error");
-      expect(evaluateHealth(health(), {}, safety({ monitors_running: false })).tone).toBe("error");
+      expect(evaluateHealth(health(), safety({ loops_running: false })).tone).toBe("error");
+      expect(evaluateHealth(health(), safety({ monitors_running: false })).tone).toBe("error");
     });
 
     it("目標値再送の停止は error (ファーム側ウォッチドッグで generic が全停止する)", () => {
       // 20Hz の再送が途切れると 500ms 後にグリッパ・コンベア・壁が無反応になる。
       // 位置制御ループ・同期監視の停止と同格の異常として扱う
-      expect(evaluateHealth(health(), {}, safety({ refreshers_running: false })).tone).toBe(
-        "error",
-      );
+      expect(evaluateHealth(health(), safety({ refreshers_running: false })).tone).toBe("error");
     });
 
     it("safety が未受信でも判定は成立する", () => {
-      expect(evaluateHealth(health(), {}, undefined).tone).toBe("success");
+      expect(evaluateHealth(health(), undefined).tone).toBe("success");
     });
 
     it("同期ずれラッチはバス停止より先に主張する (復旧操作が別物のため)", () => {
       const verdict = evaluateHealth(
         health({ buses: [bus({ state: "down" })] }),
-        {},
         safety({ sync_violations: ["rotate"] }),
       );
       expect(verdict.label).toMatch(/rotate/);
@@ -279,14 +267,49 @@ describe("describeSafetyIssues", () => {
 });
 
 describe("motorTempTone", () => {
-  it("しきい値でトーンが上がる", () => {
-    expect(motorTempTone(TEMP_WARNING - 1)).toBe("success");
-    expect(motorTempTone(TEMP_WARNING)).toBe("warning");
-    expect(motorTempTone(TEMP_DANGER)).toBe("error");
+  it("配信されたしきい値でトーンが上がる", () => {
+    expect(motorTempTone(THRESHOLDS.warning - 1, THRESHOLDS)).toBe("success");
+    expect(motorTempTone(THRESHOLDS.warning, THRESHOLDS)).toBe("warning");
+    expect(motorTempTone(THRESHOLDS.critical, THRESHOLDS)).toBe("error");
   });
 
   it("温度を返さないモータは neutral", () => {
-    expect(motorTempTone(null)).toBe("neutral");
+    expect(motorTempTone(null, THRESHOLDS)).toBe("neutral");
+  });
+
+  /**
+   * UI 側のフォールバック値を持つと、それがサーバーの config とずれたまま
+   * 効き続ける (二重管理そのもの)。しきい値が届いていない間は色を付けない。
+   */
+  it("しきい値が未取得なら温度に関わらず neutral (独自の既定値を持たない)", () => {
+    expect(motorTempTone(0, null)).toBe("neutral");
+    expect(motorTempTone(70, null)).toBe("neutral");
+    expect(motorTempTone(999, null)).toBe("neutral");
+  });
+});
+
+/**
+ * 片方だけで判定すると「warning は出ないのに danger だけ出る」中途半端な色分けになり、
+ * しきい値が届いていないことも画面から読み取れない。
+ */
+describe("tempThresholdsOf", () => {
+  it("2 値が揃っていれば server_info の値をそのまま使う", () => {
+    expect(
+      tempThresholdsOf({ ...DEFAULT_SERVER_INFO, temp_warning_c: 65, temp_critical_c: 80 }),
+    ).toEqual({ warning: 65, critical: 80 });
+  });
+
+  it("片方でも欠けていたら null", () => {
+    expect(
+      tempThresholdsOf({ ...DEFAULT_SERVER_INFO, temp_warning_c: 65, temp_critical_c: null }),
+    ).toBeNull();
+    expect(
+      tempThresholdsOf({ ...DEFAULT_SERVER_INFO, temp_warning_c: null, temp_critical_c: 80 }),
+    ).toBeNull();
+  });
+
+  it("server_info 未受信なら null", () => {
+    expect(tempThresholdsOf(undefined)).toBeNull();
   });
 });
 
@@ -325,11 +348,5 @@ describe("summarizeMotors", () => {
   it("未配信・空配列は success へ倒さない (異常の有無が分からない)", () => {
     expect(summarizeMotors(undefined)).toEqual({ tone: "neutral", label: "ヘルス未取得" });
     expect(summarizeMotors([])).toEqual({ tone: "neutral", label: "ヘルス未取得" });
-  });
-});
-
-describe("countHotMotors", () => {
-  it("警告温度以上の基数を数える", () => {
-    expect(countHotMotors({ a: motor(TEMP_WARNING), b: motor(0), c: motor(TEMP_DANGER) })).toBe(2);
   });
 });

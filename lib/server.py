@@ -355,16 +355,24 @@ class RobotServer:
         return ws
 
     def _server_info_dict(self) -> dict:
-        """起動オプション由来の、試合中に変わらない情報。接続直後に 1 度だけ送る。
+        """起動オプション・config 由来の、試合中に変わらない情報。接続直後に 1 度だけ送る。
 
         開発用ボタンの表示可否をクライアント側のビルド時定数で決めると、同じ
         `web/dist` を配る本番と開発で再ビルドが要る (= 切り替えとして機能しない)。
         正はサーバーが持ち、UI は配られた値を表示に反映するだけにする。
+
+        温度しきい値も同じ性質 (config 由来で試合中には変わらない) なのでここに載せる。
+        UI が独自のしきい値を持つと、config を変えても画面の判定だけが古い値のまま残り、
+        同じモータについてサーバーと UI が違う答えを出す。載せるのは UI が温度の色分けに
+        使う 2 値だけで、使わない値は配らない (配ると「配られているのだから使ってよい」
+        という別の写しの根拠になる)。
         """
         return {
             "type": "server_info",
             "dev_tools": self._dev_tools,
             "dry_run": self._dry_run,
+            "temp_warning_c": self._health.temp_warning_c,
+            "temp_critical_c": self._health.temp_critical_c,
         }
 
     async def handle_command(

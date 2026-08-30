@@ -6,6 +6,7 @@ import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { describeSafetyIssues, evaluateHealth } from "@/lib/healthVerdict";
+import type { TempThresholds } from "@/lib/healthVerdict";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
@@ -13,6 +14,12 @@ interface SubsystemStatusProps {
   motors: Record<string, MotorState>;
   /** 安全機構 (同期ずれラッチ・保護ループの生死)。未受信でも表示は成立する */
   safety?: SafetyState;
+  /**
+   * 温度の色分けに使うしきい値。正はサーバーの config で、`server_info` から届く。
+   * 末端の表示部品が context を読み始めると `health` / `motors` を props で受けている
+   * 現在の一貫性が崩れ、テストのたびに Provider が要る。呼び出し元が渡す。
+   */
+  tempThresholds?: TempThresholds | null;
   /** 準備中は中身を開いた状態から始める（配線確認が目的のフェーズなので） */
   defaultOpen?: boolean;
   /**
@@ -63,10 +70,11 @@ export function SubsystemStatus({
   health,
   motors,
   safety,
+  tempThresholds = null,
   defaultOpen = false,
   showVerdict = true,
 }: SubsystemStatusProps) {
-  const verdict = evaluateHealth(health, motors, safety);
+  const verdict = evaluateHealth(health, safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
 
   // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない
@@ -107,7 +115,11 @@ export function SubsystemStatus({
           ) : null}
           <SafetyIssues safety={safety} />
           <HealthIndicator health={health} />
-          <MotorSummary motors={motors} healthMotors={health?.motors} />
+          <MotorSummary
+            motors={motors}
+            healthMotors={health?.motors}
+            tempThresholds={tempThresholds}
+          />
         </div>
       ) : null}
     </div>

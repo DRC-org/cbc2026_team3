@@ -9,6 +9,7 @@ import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { cx } from "@/lib/cx";
+import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import type { ManualState, OperationMode } from "@/lib/protocol";
 import { sequenceKind } from "@/lib/sequenceStatus";
@@ -20,7 +21,7 @@ interface RobotControlProps {
 
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
-  const { matchState, connected, eStopActive } = useRobotStatus();
+  const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
   const { send } = useRobotCommands();
   const state = states[robotKey];
 
@@ -125,6 +126,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 health={state.health}
                 motors={state.motors}
                 safety={state.safety}
+                tempThresholds={tempThresholdsOf(serverInfo)}
                 defaultOpen
               />
             </Panel>
@@ -202,6 +204,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 health={state.health}
                 motors={state.motors}
                 safety={state.safety}
+                tempThresholds={tempThresholdsOf(serverInfo)}
                 defaultOpen={inManual}
               />
             </Panel>

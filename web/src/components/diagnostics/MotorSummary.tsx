@@ -1,14 +1,17 @@
 import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { summarizeMotors } from "@/lib/healthVerdict";
+import type { TempThresholds } from "@/lib/healthVerdict";
 import type { MotorHealth, MotorState } from "@/lib/protocol";
 
 interface MotorSummaryProps {
   motors: Record<string, MotorState>;
   healthMotors?: MotorHealth[];
+  /** 温度の色分けに使うしきい値。サーバー由来で、SubsystemStatus から流れてくる */
+  tempThresholds?: TempThresholds | null;
 }
 
-export function MotorSummary({ motors, healthMotors }: MotorSummaryProps) {
+export function MotorSummary({ motors, healthMotors, tempThresholds = null }: MotorSummaryProps) {
   const total = Object.keys(motors).length;
   const healthMap = Object.fromEntries((healthMotors ?? []).map((m) => [m.name, m]));
 
@@ -30,7 +33,13 @@ export function MotorSummary({ motors, healthMotors }: MotorSummaryProps) {
           行が 2 段組みで table には収まらないため、変則的な行の縞は変種セレクタで表す */}
       <div className="scroll min-h-0 flex-1 [&>*:nth-child(odd)]:bg-base-200">
         {Object.entries(motors).map(([name, state]) => (
-          <MotorStatus key={name} name={name} state={state} health={healthMap[name]} />
+          <MotorStatus
+            key={name}
+            name={name}
+            state={state}
+            health={healthMap[name]}
+            tempThresholds={tempThresholds}
+          />
         ))}
       </div>
     </div>

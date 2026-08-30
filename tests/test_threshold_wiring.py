@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import inspect
 
+from aiohttp.test_utils import TestClient, TestServer
+
 from lib.can_manager import CANManager
 from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
 from lib.control.position_loop import M3508PositionLoop
@@ -17,7 +19,7 @@ from lib.control.sync_monitor import SyncMonitor
 from lib.drivers.base import MotorDriver
 from lib.sequence.engine import Sequence
 from lib.server import RobotServer
-from tests.server_fixtures import ServerFixture
+from tests.server_fixtures import ServerFixture, require_type
 
 
 def _default_of(func, name: str) -> object:
@@ -130,3 +132,40 @@ class TestThermalWarningTakesOnlyWarningThreshold:
     def test_signature_has_no_critical_argument(self) -> None:
         params = inspect.signature(MotorDriver.has_thermal_warning).parameters
         assert list(params) == ["self", "temp_warning_c"]
+
+
+class TestServerInfoCarriesTempThresholds:
+    """温度しきい値が UI へ配られること。UI 側に写しを持たせないための配線。
+
+    UI が独自のしきい値を持っていた頃、同じモータについてサーバーは OK・画面は
+    異常という食い違いが出ていた。config の値がそのまま届くことまで見ないと、
+    「配ってはいるが既定値のまま」という形で二重管理が復活する。
+    """
+
+    async def test_config_values_reach_the_client(self) -> None:
+        thresholds = HealthThresholds(
+            feedback_timeout_ms=11.0,
+            temp_warning_c=22.0,
+            temp_critical_c=33.0,
+            tx_error_threshold=44,
+        )
+        fx = ServerFixture.build(health=thresholds)
+
+        async with TestClient(TestServer(fx.create_app())) as client:
+            ws = await client.ws_connect("/ws")
+            msg = await require_type(ws, "server_info")
+            # 既定値 (65 / 80) が漏れていないこと。config の値そのものが届く
+            assert msg["temp_warning_c"] == 22.0
+            assert msg["temp_critical_c"] == 33.0
+            await ws.close()
+
+    async def test_unused_thresholds_are_not_broadcast(self) -> None:
+        # UI が使わない値を配ると、そこから別の写しが生まれる
+        fx = ServerFixture.build()
+
+        async with TestClient(TestServer(fx.create_app())) as client:
+            ws = await client.ws_connect("/ws")
+            msg = await require_type(ws, "server_info")
+            assert "feedback_timeout_ms" not in msg
+            assert "tx_error_threshold" not in msg
+            await ws.close()

@@ -90,6 +90,8 @@
     "server_info": {
       "dev_tools": false,
       "dry_run": false,
+      "temp_critical_c": 80.0,
+      "temp_warning_c": 65.0,
       "type": "server_info"
     },
     "state": {
