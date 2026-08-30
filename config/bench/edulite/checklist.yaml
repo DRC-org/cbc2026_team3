@@ -1,0 +1,45 @@
+# RobStride EDULITE 05 単体ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は y_axis / gripper / conveyor / origin_sensor など
+# このベンチに存在しない機構の確認を求めるため、そのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもモータは動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+#
+# **本機は位置を報告できる**ので、指令どおり動いたかは動作確認 (motor_check) で
+# 自動判定できる。ここの目視項目が担うのは、自動判定では分からないこと ——
+# 回転方向・左右のずれ・停止時に脱力すること —— に絞ってある。
+
+checklists:
+  pre_match:
+    - id: bench_bus_up
+      label: can_edulite が up していること確認 (ip -br link show)
+    - id: bench_serial
+      label: config/can_buses.yaml の can_edulite に serial が入っていること確認 (TBD なら固定名が付かない)
+    - id: bench_power
+      label: ドライバに電源が入り、モータの動力線・エンコーダ線が確実に嵌まっていること確認
+    - id: bench_free
+      label: 出力軸に何も繋がっておらず、2 台とも回っても干渉しないこと確認
+    - id: bench_wiring
+      label: candump can_edulite で拡張 ID 0x02____01 / 0x02____02 の 2 本が届いていること確認
+    - id: bench_host_id
+      label: フィードバックの宛先 (拡張 ID 下位 8bit) が host_id 0xFD であること確認 (ずれると動くのに STALE のまま)
+    - id: bench_feedback
+      label: rotate_r / rotate_l 双方のフィードバックが届いていること確認
+    - id: rotate_small
+      label: 手動操縦で rotate に small を送り、2 台とも動くこと目視確認
+    - id: rotate_direction
+      label: 左右が逆向きに回ること確認。同じ向きなら positions の scale の符号が片方落ちている
+    - id: rotate_full
+      label: 手動操縦で rotate に full を送り、指令量と実際の回転角が比例していること確認
+    - id: rotate_sync
+      label: full まで動かした状態で左右の角度が揃っていること確認 (ずれるなら本番の 3.0deg では止まる)
+    - id: rotate_return
+      label: 手動操縦で rotate に home を送り、電源投入位置へ戻ること確認
+    - id: bench_estop
+      label: 動作中に非常停止を押し、その場で停止すること確認
+    - id: bench_estop_detach
+      label: 非常停止中は無励磁になり手で回せること確認 (**保持トルクは残らない**)
+    - id: bench_estop_release
+      label: 非常停止を解除しても勝手に動き出さないこと確認 (解除時の保持目標は解除時点の実測角)

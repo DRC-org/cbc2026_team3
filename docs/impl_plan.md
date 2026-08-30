@@ -2129,7 +2129,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 **同一ディレクトリに同じ `robot_name` のベンチセットを 2 つ置けない**。セットを足すときは
 `config/bench/<対象>/` を 1 つ掘り、4 ファイルをまとめてそこへ置くこと。
 
-**5 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+**6 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
 本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
 1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
 しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
@@ -2213,6 +2213,49 @@ CAN ID の誤り）は確実に超過するので、同期監視の検出能力�
 半分にしてあるのも同じ考えで、負荷の無い M3508 は同じ電流でも一気に回るため。
 一方 `scale` は本番と同じ値を使う — ここを変えると「ベンチで確かめた指令量」と「本番で出る
 指令量」が別物になり、通信確認としての意味が薄れる。
+
+#### RobStride EDULITE 05 単体ベンチ（`config/bench/edulite/`）
+
+EDULITE 05 2 台（`rotate_r` / `rotate_l`）だけを CAN 通信の確認として動かす。`can_edulite` だけを開く。
+M3508 ベンチと同じく `robot_name` は `main_hand`（実機でもこの 2 台はメインハンド側にある）。
+
+| ファイル | 本番との違い |
+|---|---|
+| `config/bench/edulite/system.yaml` | `can_buses` が `edulite_bus` のみ。`health` / `match` は本番と同値 |
+| `config/bench/edulite/main_hand.yaml` | `rotate_r` / `rotate_l` だけ。`limit_speed` 2.0 → 1.0rad/s、`limit_current` 5.0 → 2.5A。`can_id` / `host_id` / `position_kp` は本番と同じ |
+| `config/bench/edulite/main_hand_positions.yaml` | `rotate` だけ。`sync_tolerance` 15.0deg、`manual` −15〜90deg、`timeout_s` 3.0 → 5.0s |
+| `config/bench/edulite/checklist.yaml` | ベンチで通電前に確認する項目のみ |
+
+```bash
+scripts/setup_can.sh
+uv run python main.py --system config/bench/edulite/system.yaml \
+    --config config/bench/edulite/main_hand.yaml \
+    --checklist config/bench/edulite/checklist.yaml
+```
+
+**最初に確かめるのは `can_id` と `host_id`。** 本機は 29bit 拡張 ID の下位 8bit が宛先なので、
+`can_id` が違う個体には 1 通も届かず、しかも指令も通らない ——「配線不良」にしか見えない。
+`host_id` のずれはもっと厄介で、**指令は受理されるのに返ってきたフィードバックを PC が
+自分宛と判定しない**。症状は「機体は動いているのに UI は STALE のまま赤い」になる。
+`candump can_edulite` でフィードバック（通信タイプ 2 = 拡張 ID `0x02______`）の
+bit8-15 に相手の `can_id`、下位 8bit に `host_id` が載っていることを読むこと。
+
+**ペア軸なので片肺は「指令は通るのに 2 台とも動かない」形で現れる。** これは M3508 ベンチと
+同じ現れ方で、理由も同じ（`SyncGuard.blocked()` がメンバの誰かの途絶でグループ全員を止める）。
+上の M3508 ベンチの節を参照。
+
+**ベンチだけ緩めた値には本番へ戻す条件を書く。** `sync_tolerance` を 15.0deg にしてあるのは、
+機構未装着では左右がずれても壊れず、本番の 3.0deg のままだと無負荷での追従差だけで
+緊急停止が掛かって通信確認が進まないため。`limit_speed` / `limit_current` を半分にしてあるのも
+同じ考えで、負荷の無い EDULITE は同じ指令でも一気に回る。`timeout_s` を 3.0 → 5.0s へ
+**延ばして**いるのは速度上限を絞った副作用で、そのままだと「モータは正常なのに到達前に
+タイムアウトする」ことになる。一方 `tolerance`（2.0deg）と `scale` と `position_kp` は本番のまま
+—— 前者を緩めると uint16 ↔ rad のレンジ取り違えを見逃し、後 2 つを変えると
+「ベンチで確かめた指令量・追従」と「本番で出るもの」が別物になる。
+
+**`homing` は書かない。** 本番でも `rotate` のリミットスイッチは未装着（コメントアウト）で、
+しかもセンサは自作サーボ基板 = `can_generic` 側に居る。このベンチは `can_edulite` しか
+開かないので、書いても「センサが応答していません」で必ず失敗する。
 
 #### DC モータ基板単体ベンチ（`config/bench/dc/`）
 
