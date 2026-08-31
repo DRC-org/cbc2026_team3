@@ -12,38 +12,23 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CAN_CONFIG="${SCRIPT_DIR}/can_config.py"
+# shellcheck source=scripts/_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-# systemd から root で起動されるため venv ではなくシステム python を使う
-PYTHON="/usr/bin/python3"
+# journal ではこの接頭辞で発生元を見分ける
+LOG_PREFIX="[ OK ]"
 
 STRICT=0
 WAIT_SEC=0
 
-log_ok()   { echo "[ OK ] $*"; }
-log_warn() { echo "[WARN] $*" >&2; }
-log_err()  { echo "[ERR ] $*" >&2; }
-
-usage() {
-    sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-    exit 0
-}
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --strict) STRICT=1; shift ;;
-        --wait)   WAIT_SEC="${2:?--wait には秒数が必要です}"; shift 2 ;;
+        --wait)   require_integer --wait "${2-}"; WAIT_SEC="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) log_err "不明な引数: $1"; exit 2 ;;
     esac
 done
-
-if [[ $EUID -eq 0 ]]; then
-    IP=(ip)
-else
-    IP=(sudo ip)
-fi
 
 # デバイスが現れるまで待つ。USB の列挙は起動直後だと間に合わないことがあるため、
 # systemd から呼ぶ際は --wait を指定する。
@@ -120,19 +105,19 @@ setup_one() {
     # ドライバが受け付けなかった環境で「設定したつもり」のログだけが残る。
     local effective_restart
     effective_restart=$(ip -details link show "$iface" | grep -oE 'restart-ms [0-9]+' | head -1 | awk '{print $2}')
-    log_ok "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${effective_restart:-不明} state=${state}"
+    log_info "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${effective_restart:-不明} state=${state}"
     return 0
 }
 
-if [[ ! -f "$CAN_CONFIG" ]]; then
-    log_err "can_config.py が見つかりません: ${CAN_CONFIG}"
-    exit 1
-fi
+require_can_config
 
 # can_buses.yaml を編集しても install.sh を再実行しなければ udev には反映されない。
 # 反映漏れは「serial を書いたのに固定名にならない」形で現れ、原因が分かりにくいため
-# ここで検出する。パスは install.sh の UDEV_RULE_PATH と一致させること。
-UDEV_RULE_PATH="/etc/udev/rules.d/99-canable.rules"
+# ここで検出する。パスは can_config.py が単一情報源 (install.sh も同じ答えを引く)。
+if ! UDEV_RULE_PATH="$(can_config_path udev_rule_path)"; then
+    log_err "udev ルールの配置先を取得できません: ${CAN_CONFIG}"
+    exit 1
+fi
 udev_stale=0
 
 check_udev_sync() {
@@ -157,6 +142,7 @@ configured=0
 up_count=0
 missing=()
 unassigned=()
+failed=()
 restart_unsupported=()
 
 # **プロセス置換 (`done < <(cmd)`) は cmd の終了コードをどこにも伝えない。**
@@ -165,11 +151,11 @@ restart_unsupported=()
 # strict の条件を 1 つも満たさないので、**1 本も up していないのに試合前点検が
 # 成功終了する**。一度変数へ受けて終了コードを見るのが唯一の歯止めになる
 # (今まではたまたま check_udev_sync の diff が同じ不正を拾っていただけ)。
-if ! bus_list=$("$PYTHON" "$CAN_CONFIG" list); then
+if ! bus_list=$(can_config_list); then
     log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
     exit 1
 fi
-if ! assigned_list=$("$PYTHON" "$CAN_CONFIG" list --assigned-only); then
+if ! assigned_list=$(can_config_list --assigned-only); then
     log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
     exit 1
 fi
@@ -194,7 +180,12 @@ while IFS=$'\t' read -r name _serial bitrate txqueuelen restart_ms; do
     case $rc in
         0) up_count=$(( up_count + 1 )) ;;
         2) missing+=("$name") ;;
-        *) exit 1 ;;   # デバイスはあるのに設定に失敗 → 常に異常
+        # デバイスはあるのに設定に失敗 → 常に異常。**ただしその場では降りない。**
+        # 即 exit していた頃は、それまでに up したバスは up・以降のバスは未設定
+        # という中途半端な状態で止まり、しかも下のサマリ (未採取 / 欠け /
+        # restart-ms 非対応) が 1 行も出ないので何本まで通ったのかログから
+        # 読めなかった。全バスを試してからサマリを出し、最後に異常終了する。
+        *) failed+=("$name") ;;
     esac
 done <<< "$assigned_list"
 
@@ -204,6 +195,10 @@ done
 
 for name in "${missing[@]}"; do
     log_warn "${name}: デバイスが見つかりません"
+done
+
+for name in "${failed[@]}"; do
+    log_err "${name}: デバイスはあるのに設定に失敗しました"
 done
 
 # 非対応は恒久的なドライバの性質であって、点検で直せる不備ではない。strict でも
@@ -216,7 +211,12 @@ if [[ ${#restart_unsupported[@]} -gt 0 ]]; then
     log_warn "  -> bus-off へ落ちた場合は scripts/setup_can.sh の再実行 (down/up) でしか戻せません"
 fi
 
-echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 欠け ${#missing[@]}) ---"
+echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 欠け ${#missing[@]} / 失敗 ${#failed[@]}) ---"
+
+# 設定に失敗したバスがあれば strict でなくても異常終了する (判断は変えていない)
+if [[ ${#failed[@]} -gt 0 ]]; then
+    exit 1
+fi
 
 if [[ $STRICT -eq 1 ]]; then
     # 「立ち上げるものが 1 本も無かった」は成功ではない。試合前点検が答えるのは

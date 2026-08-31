@@ -14,10 +14,33 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-UDEV_RULE_PATH="/etc/udev/rules.d/99-canable.rules"
+# journal ではこの接頭辞で発生元を見分ける。install.sh は通常ログも警告も同じ
+LOG_PREFIX="[install]"
+LOG_WARN_PREFIX="[install]"
+LOG_ERR_PREFIX="[install]"
+
+ORIGINAL_ARGS="$*"
+UNINSTALL=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --uninstall) UNINSTALL=1; shift ;;
+        -h|--help) usage ;;
+        # 黙って無視すると `--uninstal` (typo) が**フルインストールを実行する**
+        *) log_err "不明な引数: $1"; exit 2 ;;
+    esac
+done
+
+require_can_config
+
+# udev ルールのパスと、そのルールの RUN+= が restart する unit 名は
+# can_config.py が持つ。ここに書き写すと、ルールだけが古い名前を指す形が作れる。
+# **設定が壊れていても答えられる必要がある** (--uninstall が撤去先を知るため)
+UDEV_RULE_PATH="$(can_config_path udev_rule_path)"
+CAN_SERVICE_NAME="$(can_config_path service_name)"
 
 # **配置する unit は 1 つの表でしか列挙しない。** 配置・enable・撤去を別々の場所に
 # 書き並べると unit を 1 つ足すたびに 3 箇所へ手で書き足すことになり、実際に
@@ -26,7 +49,7 @@ UDEV_RULE_PATH="/etc/udev/rules.d/99-canable.rules"
 # 消えているので起動不能な unit が居座る (しかも生き残った常駐は ip link を
 # down/up し続ける)。
 UNITS=(
-    "cbc-can.service"
+    "$CAN_SERVICE_NAME"
     "cbc-can-watchdog.service"
     "cbc-control.service"
 )
@@ -35,20 +58,16 @@ UNITS=(
 # しない)。**cbc-control.service をここへ入れてはならない** —— 通電しただけで
 # 機体が待機状態になる。
 AUTOSTART_UNITS=(
-    "cbc-can.service"
+    "$CAN_SERVICE_NAME"
     "cbc-can-watchdog.service"
 )
 
 CONTROL_SERVICE_NAME="cbc-control.service"
-PYTHON="/usr/bin/python3"
 
 # 制御プログラムを走らせるユーザー。root で走らせると venv も CAN ソケットも
 # root 所有になり、開発時の手動起動と実行条件が食い違う。SocketCAN の bind に
 # 特権は要らない (up は root の cbc-can.service が済ませている)
 RUN_USER="${SUDO_USER:-}"
-
-log()     { echo "[install] $*"; }
-log_err() { echo "[install] $*" >&2; }
 
 # **生成物は一時ファイルへ書いてから mv する。** `cmd > "$dest"` はシェルが先に
 # dest を truncate するので、生成が途中で失敗すると空 / 欠けたファイルが残る。
@@ -69,11 +88,11 @@ generate_to() {
 }
 
 if [[ $EUID -ne 0 ]]; then
-    log_err "root 権限が必要です: sudo $0 $*"
+    log_err "root 権限が必要です: sudo $0 ${ORIGINAL_ARGS}"
     exit 1
 fi
 
-if [[ "${1:-}" == "--uninstall" ]]; then
+if [[ $UNINSTALL -eq 1 ]]; then
     for unit in "${UNITS[@]}"; do
         systemctl disable --now "$unit" 2>/dev/null || true
         rm -f "/etc/systemd/system/${unit}"
@@ -81,45 +100,45 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     rm -f "$UDEV_RULE_PATH"
     systemctl daemon-reload
     udevadm control --reload-rules
-    log "撤去しました。CAN インターフェース名は再起動後に can0 等へ戻ります。"
+    log_info "撤去しました。CAN インターフェース名は再起動後に can0 等へ戻ります。"
     exit 0
 fi
 
 if [[ -z "$RUN_USER" || "$RUN_USER" == "root" ]]; then
     log_err "制御プログラムの実行ユーザーを特定できません。"
-    log_err "一般ユーザーから sudo で実行してください: sudo $0 $*"
+    log_err "一般ユーザーから sudo で実行してください: sudo $0 ${ORIGINAL_ARGS}"
     exit 1
 fi
 
 # 設定不正なら何も配置せずに止める
-"$PYTHON" "${SCRIPT_DIR}/can_config.py" list >/dev/null
+can_config_list >/dev/null
 
-log "udev ルールを生成: ${UDEV_RULE_PATH}"
-generate_to "$UDEV_RULE_PATH" "$PYTHON" "${SCRIPT_DIR}/can_config.py" udev
+log_info "udev ルールを生成: ${UDEV_RULE_PATH}"
+generate_to "$UDEV_RULE_PATH" "$PYTHON" "$CAN_CONFIG" udev
 
 for unit in "${UNITS[@]}"; do
-    log "systemd unit を配置: /etc/systemd/system/${unit}"
+    log_info "systemd unit を配置: /etc/systemd/system/${unit}"
     generate_to "/etc/systemd/system/${unit}" sed \
         -e "s|@PROJECT_DIR@|${PROJECT_DIR}|g" \
         -e "s|@RUN_USER@|${RUN_USER}|g" \
         "${SCRIPT_DIR}/${unit}"
 done
-log "  (${CONTROL_SERVICE_NAME} の実行ユーザー: ${RUN_USER})"
+log_info "  (${CONTROL_SERVICE_NAME} の実行ユーザー: ${RUN_USER})"
 
 # rename は down 状態でしか通らない。既存の can* を落としてから udev を再適用する。
 for iface in /sys/class/net/can*; do
     [[ -e "$iface" ]] || continue
     name="$(basename "$iface")"
-    log "既存インターフェースを down: ${name}"
+    log_info "既存インターフェースを down: ${name}"
     ip link set "$name" down 2>/dev/null || true
 done
 
-log "udev ルールを再読み込みして適用"
+log_info "udev ルールを再読み込みして適用"
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=net --action=add
 udevadm settle
 
-log "systemd を再読み込みして有効化"
+log_info "systemd を再読み込みして有効化"
 systemctl daemon-reload
 for unit in "${AUTOSTART_UNITS[@]}"; do
     systemctl enable "$unit"
@@ -128,9 +147,9 @@ done
 
 # cbc-control は enable も restart もしない。試合中に unit を入れ直しただけで
 # 制御プログラムが落ちる (= 機体が止まる) のを避けるため、反映は次の start から
-log "${CONTROL_SERVICE_NAME} を配置しました (自動起動は無効。手動 start で使う)"
+log_info "${CONTROL_SERVICE_NAME} を配置しました (自動起動は無効。手動 start で使う)"
 
-log "完了。状態:"
+log_info "完了。状態:"
 for unit in "${AUTOSTART_UNITS[@]}"; do
     systemctl --no-pager --lines=5 status "$unit" || true
 done
