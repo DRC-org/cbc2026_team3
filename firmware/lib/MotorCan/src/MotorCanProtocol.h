@@ -268,8 +268,9 @@ uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg);
 //     DC 基板はエンコーダを持たず（§3.2 / §8）、電磁弁基板は弁が開いたかを
 //     観測できない（§9.3）ので、reached に何を渡しても立たない
 //   - **センサスロットは緊急停止・ウォッチドッグ・到達を立てない**（仕様書 §5.2）。
-//     駆動されないので意味を持たず、立てると PC 側 check_safety_error() が
-//     「駆動できない状態」と読んで動作確認を打ち切る
+//     駆動されないので意味を持たず、立てると PC 側の e_stop_active を
+//     RobotServer._detect_board_e_stop() が拾い、サーバー全体を緊急停止させて
+//     動作確認どころか全操作を止めてしまう
 //
 // safetyFlags は MotorSafety::statusFlags() の戻り値をそのまま渡すこと
 // （緊急停止 / ウォッチドッグ / 起動後未受信の判定はあちらが単独で持つ）。
