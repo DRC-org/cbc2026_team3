@@ -51,3 +51,17 @@ export const TONE_BORDER_L_CLASS: Record<Tone, string> = {
   info: "border-l-info",
   neutral: "border-l-base-300",
 };
+
+/**
+ * 通知バナー (トースト) の配色。daisyUI の `alert` は色修飾子と対で書かないと
+ * 配色ルールごと CSS から消える。ここに置くのは `daisyPairs.test.tsx` の
+ * 検査に載せるためで、トースト側にローカル定義を持たせてはならない。
+ */
+export const TONE_ALERT_CLASS: Record<Tone, string> = {
+  success: "alert alert-success",
+  warning: "alert alert-warning",
+  error: "alert alert-error",
+  info: "alert alert-info",
+  // 既定の alert (色無し)。daisyUI に alert-neutral は無い
+  neutral: "alert",
+};

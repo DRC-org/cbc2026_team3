@@ -101,6 +101,25 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     />
   );
 
+  /**
+   * 機体状態のパネル。**既定の開閉だけが役割で違う。**
+   *
+   * 準備中は配線確認が目的のフェーズなので開いた状態から始め、試合中は
+   * 平常時 1 行へ畳む (操縦者は機体を見ており、画面へ視線を戻すのは一瞬しかない)。
+   * ただし手動中は畳まない —— 機体を直接動かしている最中は、その前提が成り立たない。
+   */
+  const subsystemPanel = (open: boolean, className: string) => (
+    <Panel legend="機体状態" className={className}>
+      <SubsystemStatus
+        health={state.health}
+        motors={state.motors}
+        safety={state.safety}
+        tempThresholds={tempThresholdsOf(serverInfo)}
+        defaultOpen={open}
+      />
+    </Panel>
+  );
+
   // --- セッティングタイム -------------------------------------------------
   // 指差喚呼と動作確認は Monitor の設定面へ移した。指差喚呼は操縦者 2 名が
   // 同じ場所に立つので二度読み上げになっていたため、動作確認は両ハンドを 1 本の
@@ -121,15 +140,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           {inManual ? manualPanel : null}
 
           <div className="flex min-h-0 flex-col gap-2">
-            <Panel legend="機体状態" className="min-h-0 flex-1">
-              <SubsystemStatus
-                health={state.health}
-                motors={state.motors}
-                safety={state.safety}
-                tempThresholds={tempThresholdsOf(serverInfo)}
-                defaultOpen
-              />
-            </Panel>
+            {subsystemPanel(true, "min-h-0 flex-1")}
 
             <Panel legend="シーケンス" className="shrink-0">
               <div className="flex items-center gap-2">
@@ -150,67 +161,55 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // 「今 NEXT を押すのか」「押すと何が起きるか」の 2 つだけ。
   // 左を操作面、右を参照面に割り切り、参照面の診断は平常時 1 行へ畳む。
   return (
-    <>
-      <Page className="flex flex-col">
-        {modeSwitch}
-        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
-          {/* 左は操作面。主役を内容ぶんの高さに留め、余った縦はステップ一覧へ渡す。
+    <Page className="flex flex-col">
+      {modeSwitch}
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
+        {/* 左は操作面。主役を内容ぶんの高さに留め、余った縦はステップ一覧へ渡す。
             手動中はここを手動パネルへ明け渡す — 同じ列に 2 つの操作面が並ぶと、
             どちらの指令が機体へ届くのかが画面から読めなくなる */}
-          {inManual ? (
-            manualPanel
-          ) : (
-            <div className="flex min-h-0 flex-col gap-2">
-              <ActionPanel
-                state={state}
-                inMatch={inMatch}
-                blockedLabel={blockedLabel}
-                onStart={handleStart}
-                onStop={handleStop}
-                onTrigger={handleTrigger}
-              />
-
-              <Panel
-                legend="ステップ"
-                className="min-h-0 flex-1"
-                bodyClassName="p-0"
-                actions={
-                  <span className="text-[0.85em] text-base-content/60">
-                    {inMatch ? "クリックで再開" : "試合中のみ操作可"}
-                  </span>
-                }
-              >
-                <SequenceStepList
-                  steps={state.steps ?? []}
-                  stepIndex={state.step_index}
-                  waitingTrigger={state.waiting_trigger}
-                  onJump={handleJump}
-                  disabled={!inMatch}
-                />
-              </Panel>
-            </div>
-          )}
-
-          {/* 右は参照面。試合時間は操作面へ置かない — 主操作 (ActionPanel) の位置は
-            状態によって動かさない約束なので、上に何かを積むと押す前に探し直しになる。
-            診断は平常時 1 行に畳み、異常が出たときだけ自分から開く */}
+        {inManual ? (
+          manualPanel
+        ) : (
           <div className="flex min-h-0 flex-col gap-2">
-            <MatchTimer timer={matchState.timer} />
+            <ActionPanel
+              state={state}
+              inMatch={inMatch}
+              blockedLabel={blockedLabel}
+              onStart={handleStart}
+              onStop={handleStop}
+              onTrigger={handleTrigger}
+            />
 
-            {/* 手動中は畳まない。機体を直接動かしている最中は、平常時 1 行へ
-              畳む前提 (操縦者は機体を見ており画面は一瞬しか見ない) が成り立たない */}
-            <Panel legend="機体状態" className={inManual ? "min-h-0 flex-1" : "self-start"}>
-              <SubsystemStatus
-                health={state.health}
-                motors={state.motors}
-                safety={state.safety}
-                tempThresholds={tempThresholdsOf(serverInfo)}
-                defaultOpen={inManual}
+            <Panel
+              legend="ステップ"
+              className="min-h-0 flex-1"
+              bodyClassName="p-0"
+              actions={
+                <span className="text-[0.85em] text-base-content/60">
+                  {inMatch ? "クリックで再開" : "試合中のみ操作可"}
+                </span>
+              }
+            >
+              <SequenceStepList
+                steps={state.steps ?? []}
+                stepIndex={state.step_index}
+                waitingTrigger={state.waiting_trigger}
+                onJump={handleJump}
+                disabled={!inMatch}
               />
             </Panel>
           </div>
+        )}
+
+        {/* 右は参照面。試合時間は操作面へ置かない — 主操作 (ActionPanel) の位置は
+            状態によって動かさない約束なので、上に何かを積むと押す前に探し直しになる。
+            診断は平常時 1 行に畳み、異常が出たときだけ自分から開く */}
+        <div className="flex min-h-0 flex-col gap-2">
+          <MatchTimer timer={matchState.timer} />
+
+          {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : "self-start")}
         </div>
-      </Page>
-    </>
+      </div>
+    </Page>
   );
 }

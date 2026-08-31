@@ -1,9 +1,9 @@
-import { formatAge } from "@/components/diagnostics/HealthIndicator";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import { motorTempTone } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
 import type { MotorHealth, MotorHealthState, MotorState } from "@/lib/protocol";
+import { formatAge } from "@/lib/time";
 import type { Tone } from "@/lib/tone";
 import { TONE_TEXT_CLASS } from "@/lib/tone";
 

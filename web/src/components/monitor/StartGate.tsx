@@ -3,6 +3,7 @@ import { useEffect } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { Panel } from "@/components/ui/Panel";
 import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useArmedPress } from "@/hooks/useArmedPress";
 import { cx } from "@/lib/cx";
@@ -10,6 +11,7 @@ import { evaluateHealth } from "@/lib/healthVerdict";
 import { COURT_LABEL, COURT_TONE } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
 import { ROBOTS } from "@/lib/robots";
+import type { Tone } from "@/lib/tone";
 import { TONE_TEXT_CLASS } from "@/lib/tone";
 
 interface Blocker {
@@ -88,6 +90,9 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   });
 
   const ready = canStart && connected && phase !== "finished";
+  // 帯の色は TONE_BORDER_L_CLASS が唯一の出どころ (Panel が引く)。ここで
+  // `border-l-[0.4rem] border-l-*` を三項で組み立てると、色の規則が 2 つになる
+  const accentTone: Tone = !ready ? "warning" : warnings.length > 0 ? "error" : "success";
 
   // 開始できない状況へ変わったら武装を解く。武装は押した瞬間の状況に紐づいており、
   // 通信が切れた・チェックリストが外れた後の 1 回目を 2 回目として扱ってはならない
@@ -96,14 +101,7 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   }, [ready, disarm]);
 
   return (
-    <section
-      className={cx(
-        "card card-border flex shrink-0 flex-col border-base-300 bg-base-100",
-        ready && warnings.length === 0 ? "border-l-[0.4rem] border-l-success" : null,
-        ready && warnings.length > 0 ? "border-l-[0.4rem] border-l-error" : null,
-        !ready ? "border-l-[0.4rem] border-l-warning" : null,
-      )}
-    >
+    <Panel accentTone={accentTone} className="shrink-0" bodyClassName="p-0">
       <div className="flex flex-wrap items-center gap-3 p-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="text-[1.6em] leading-tight font-semibold">
@@ -166,6 +164,6 @@ export function StartGate({ onStart }: { onStart: () => void }) {
           {armed ? "もう一度押して開始" : "試合開始"}
         </Button>
       </div>
-    </section>
+    </Panel>
   );
 }

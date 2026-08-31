@@ -18,15 +18,6 @@ function busTone(state: BusHealthState): HealthTone {
   return "error";
 }
 
-export function formatAge(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined || Number.isNaN(ms)) return "—";
-  if (ms < 0) return "—";
-  if (ms < 1000) return `${Math.round(ms)}ms 前`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s 前`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m 前`;
-  return `${Math.floor(ms / 3_600_000)}h 前`;
-}
-
 /**
  * daisyUI の table-xs は本文を .6875rem に固定する。ルートの clamp() 由来の
  * 相対サイズから外れて読みづらくなるため、セル側で明示的に上書きする

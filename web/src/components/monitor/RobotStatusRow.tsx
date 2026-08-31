@@ -2,14 +2,15 @@ import { Hand } from "lucide-react";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { Icon } from "@/components/ui/Icon";
+import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import type { TempThresholds } from "@/lib/healthVerdict";
 import type { RobotState } from "@/lib/protocol";
-import { isSequenceComplete, sequenceKind } from "@/lib/sequenceStatus";
+import { isSequenceComplete, sequenceKind, sequenceProgress } from "@/lib/sequenceStatus";
 import type { SequenceKind } from "@/lib/sequenceStatus";
 import type { Tone } from "@/lib/tone";
-import { TONE_BORDER_L_CLASS, TONE_PROGRESS_CLASS } from "@/lib/tone";
+import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 interface RobotStatusRowProps {
   label: string;
@@ -52,20 +53,14 @@ export function RobotStatusRow({ label, state, tempThresholds = null }: RobotSta
   // シーケンスが進まない理由も画面から説明できない
   const inManual = state.manual?.mode === "manual";
   const activity = ACTIVITY[sequenceKind(state)];
-  const { total_steps: total, step_index: index, waiting_trigger: waiting } = state;
+  const { waiting_trigger: waiting } = state;
   const isComplete = isSequenceComplete(state);
-  const displayIndex = total > 0 ? Math.min(index + 1, total) : 0;
-  const percent = total > 0 ? Math.min(100, ((isComplete ? total : index + 1) / total) * 100) : 0;
-  const steps = state.steps ?? [];
-  const current = isComplete ? null : steps[index];
+  // 進捗の算術は `lib/sequenceStatus.ts` の 1 箇所だけが持つ。ここへ写すと、
+  // 同じ瞬間に操縦者の画面と Monitor が違う進捗を出す経路が戻る
+  const { displayIndex, total, percent, current } = sequenceProgress(state);
 
   return (
-    <section
-      className={cx(
-        "card card-border flex min-h-0 flex-col border-base-300 border-l-[0.3rem] bg-base-100",
-        TONE_BORDER_L_CLASS[activity.tone],
-      )}
-    >
+    <Panel accentTone={activity.tone} bodyClassName="p-0">
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5">
         <span className="text-[1.2em] font-semibold">{label}</span>
         <StatusBadge tone={activity.tone}>{activity.label}</StatusBadge>
@@ -104,6 +99,6 @@ export function RobotStatusRow({ label, state, tempThresholds = null }: RobotSta
           defaultOpen
         />
       </div>
-    </section>
+    </Panel>
   );
 }
