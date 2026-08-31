@@ -118,6 +118,16 @@ SPA 配信する）。**`cbc-control.service` は enable しない** — 電源�
 通電・待機状態にならないよう、起動タイミングは操縦者が握る。`cbc-can.service` と
 `cbc-can-watchdog.service` は enable する（どちらも機体を動かさない）。
 
+**4 本のシェルスクリプトの土台は `scripts/_common.sh`。** `SCRIPT_DIR` / `PYTHON` /
+`CAN_CONFIG` の存在確認 / EUID による sudo の有無 / `log_*` / 引数解析の作法（未知の
+引数は `exit 2`。黙って無視すると `--uninstal` がフルインストールを走らせる）を持つ。
+udev ルールのパスと service 名は `can_config.py paths` が答える（`install.sh` と
+`setup_can.sh` でずれると、配置されているのに「未配置」と警告し続ける）。
+**ログの接頭辞だけは統一していない** — journal では `[ OK ]` / `[ WD ]` / `[install]` /
+`[deploy]` で発生元の unit を見分けるので、各スクリプトが `LOG_PREFIX` を上書きする。
+`_common.sh` はどこへもコピーされない（unit はリポジトリ内の `scripts/*.sh` をその場で
+実行するので、実行属性も要らない）。
+
 **bus-off からの復旧は `cbc-can-watchdog.service` が持つ。カーネルには任せられない。**
 `restart-ms` は SocketCAN のドライバが `do_set_mode` を実装している場合しか設定できず、
 CANable2 の `gs_usb` は実装していない（`setup_can.sh` は非対応を検出して警告付きで
@@ -135,6 +145,28 @@ qdisc の backlog が残っていることと TX packets が進んでいない�
 （SIGTERM の扱いが SIG_DFL に戻り、2 通目が「無視」ではなく「即死」になる）。
 `web/dist` のビルドは service ではなく `deploy.sh` が持つ。理由は
 `docs/impl_plan.md` の「サービス化（systemd）」。
+
+**`main()` は「読む → 配線する → 起動する → 畳む」の 4 段で、ロボット 1 台ぶんの配線は
+`_wire_one_robot` が持つ。** 起動は `_start_all`、後始末は `_shutdown_all`。
+**後始末の順序（位置制御ループ → 目標値再送 → 同期監視 → CAN → サーバー）は不変条件で、
+段を入れ替えてはならない** — 位置制御ループは生き残ると電流指令を出し続けるので CAN より
+先に止める、同期監視だけが生き残ると停止済みのモータのフィードバックを見て誤発報する、
+という理由が段ごとに付いている（`_shutdown_all` の docstring）。
+`_shutdown_step` の「1 つが失敗しても残りを続ける」性質も外さないこと
+（素の for で並べた後始末は途中の 1 例外で以降が丸ごと飛び、2 台目のロボットのバスが
+開いたまま残る）。
+
+**起動時に構成の曖昧さを黙って解決しない。** シーケンスの登録
+（`main._load_sequence`）は**そのモジュール自身が定義した** `Sequence` サブクラスだけを
+候補にし、**2 つ以上見つかったら起動を拒否する**。かつては `dir()` の並び（アルファベット順）で
+最初の 1 つを返しており、`robots/sub_hand.py` が何かの都合で `MotorCheckSequence` を
+import しただけで `"MotorCheckSequence" < "SubHandSequence"` が成立し、サブハンドとして
+動作確認シーケンスが登録された。症状は「sub_hand の `sequence_start` でなぜか両ハンドが
+動く」だけで、config からもログからも理由が読めない。`SEQUENCE_CLASS` のような明示公開に
+しないのは、3 本すべてに宣言が要るうえ、書き忘れが「今までどおり動く」形で通るため
+（軸名の衝突を `PositionTable.merged` が起動ごとに落とすのと同じ方針）。
+同じ理由で **`main._DRIVER_MAP` は「種別 → 生成関数」のファクトリ表**で、4 種すべてが
+そこを通る。if 連鎖に戻すと、足し忘れが「引数の足りない別物が黙って生成される」形に落ちる。
 
 ## アーキテクチャ
 
@@ -158,7 +190,15 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - `sequence/motors.py` — `MotorHandle`（1 モータ）と `AxisHandle`（1 論理軸 = 1〜N モータ）
   - `sequence/engine.py` — `@step` デコレータベースのシーケンスエンジン。`require_trigger=True` で操縦者の許可待ち
   - `manual.py` — 手動操縦（`OperationMode` / `ManualController`）。軸単位でしか指令せず、内部は `AxisHandle` を通る
+  - `tuning/` — PID 調整支援。`metrics.py`（純関数の指標）/ `advice.py`（指標の言い換え）/
+    `recorder.py`（制御ループが呼ぶ記録器）/ `report.py`（配信 1 通への組み立て）
+  - `health.py` — ヘルスの語彙と集約（`BusHealth` / `MotorHealth` / `worst_bus_health`）
+  - `match_state.py` — フェーズ・コート・指差喚呼・試合時間（`ALL_ROLES` はここだけが持つ）
   - `server.py` — aiohttp で HTTP 静的配信 + WebSocket (`/ws`) を統合
+  - `ws_hub.py` — WS クライアント集合と**唯一の配信経路**（`WsHub`）。後述の 4 つの約束を閉じ込める
+  - `server_motor_check.py` — アクチュエータ動作確認の統括（`MotorCheckController`）。
+    環境側の条件だけをサーバーが `environment_deny` として渡す
+  - `server_dryrun.py` — dry-run の擬似値。**見栄えの値しか作らず、判定も構成情報も置かない**
 - `robots/` — シーケンス定義。ロボット固有（main_hand.py / sub_hand.py）と、
   両ハンド統合のアクチュエータ動作確認（motor_check.py）
 - `config/` — YAML 設定（後述）
@@ -169,9 +209,15 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - 配色は `src/index.css` の daisyUI カスタムテーマ `cbc`（ライト基調）に集約。組み込みテーマは使わない
   - `src/components/` は**誰が描くか**で分ける。`shell/`（RootLayout が全画面へ出す外枠）/
     `monitor/`（Dashboard 専用）/ `operator/`（RobotControl 専用）/ `motorcheck/`（セッティング
-    タイムの動作確認）/ `diagnostics/`（`SubsystemStatus` を頂点とする診断ツリー）/ `ui/` の 6 つで、
+    タイムの動作確認）/ `diagnostics/`（`SubsystemStatus` を頂点とする診断ツリー）/
+    `tuning/`（MotorTuning 専用）/ `ui/` の 7 つで、
     直下には何も置かない。barrel（`index.ts`）は作らず常に実ファイルまで指す（oxlint の
-    `import/no-cycle` を効かせたまま依存グラフを読めるようにするため）
+    `import/no-cycle` を効かせたまま依存グラフを読めるようにするため）。
+    **同じ方針を Python にも通す** — `lib/control/` と `lib/tuning/` の `__init__.py` は
+    再エクスポートを持たない（`__all__` は実体の増減に追従しないので、放置すると API 一覧として
+    嘘をつく。実際に `control` の barrel は 200Hz の `DEFAULT_INTERVAL_S` だけを再輸出しており、
+    同名の定数を持つ `sync_monitor`（50Hz）/ `target_refresh`（20Hz）がある以上、
+    「control の既定周期は 200Hz」と読ませていた）
   - `src/components/ui/` — 自前プリミティブ（`Page` / `Panel` / `Section` / `Button` /
     `StatusBadge` / `Kbd` / `Icon` / `Modal`）。レイアウト骨格は CSS ではなくここが持つ
   - 画面の主役は `ActionPanel`（操縦者・試合中）/ `StartGate` と `Checklist`
@@ -184,7 +230,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 
 | ファイル | 持つもの |
 |---|---|
-| `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`match` |
+| `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`match`・`tuning` |
 | `config/can_buses.yaml` | CAN バス定義の単一情報源。udev ルールとセットアップスクリプトの双方がここから生成・参照する |
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
@@ -360,8 +406,9 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 **緊急停止は「押した瞬間の状態」に依存させない。** `activate_e_stop` は状態を問わず動作確認へ
 中断を要求する（`is_running` を条件にすると、実行タスク生成から `run()` 開始までの窓だけ
 False になり、そこで押された停止をすり抜けた動作確認が完走してアクチュエータを駆動する）。
-**中断要求はサーバー側のフラグ（`_motor_check_abort_requested`）に残す** — `Sequence.run()` は
-冒頭で停止イベントを `clear()` するので、シーケンス側に預けた 1 通はその窓で消える。
+**中断要求はシーケンスの外側のフラグ（`MotorCheckController._abort_requested`）に残す** —
+`Sequence.run()` は冒頭で停止イベントを `clear()` するので、シーケンス側に預けた 1 通は
+その窓で消える。
 `_run()` は駆動を始める直前にこのフラグを見る。**停止理由はサーバーが保持し、解除まで
 再配信のたびに載せる**（定期再配信が理由なしだと、画面の説明が 50ms 後に消えて正反対の文言へ
 置き換わる）。**最初に判明した理由を優先する** — 機体の自動検知で止まった後に操縦者が押しても
@@ -426,8 +473,10 @@ Monitor の設定面から起動する。** かつては機体ごとに独立し
 - **ゲートも排他も全ロボットに掛かる。** どちらかが手動モード / シーケンス実行中なら起動を
   拒否し、実行中は両機の位置制御ループと目標値再送を止める。片方だけ見ていると、確認中に
   もう一方が手動で動かされて干渉する
-- **可否の判定はサーバー（`_motor_check_deny_reason`）にしかない。** UI は
-  `blocked_reason` を表示するだけで、フェーズや緊急停止から導出し直さない
+- **可否の判定は `MotorCheckController.deny_reason()` にしかない。** サーバーが答えるのは
+  環境側の条件（フェーズ・緊急停止・各ロボットの制御権）だけで、`environment_deny` として
+  預ける。UI は `blocked_reason` を表示するだけで、フェーズや緊急停止から導出し直さない
+  （切断中だけは例外。サーバーへ届かないので理由も返らず、画面側でしか分からない）
 - **進捗も結果も拒否理由も `motor_check_state` 1 通で運ぶ。** 4 種類に分けていた頃は、
   途中の 1 通を落とした画面が古い状態のまま固まり、再送も無いので直らなかった
 
@@ -590,9 +639,11 @@ STM32 側は HAL の `GPIOA` / `GPIOB` が `constexpr` 文脈で使えないた�
 （`DIS` として LOW/HIGH を振っていた `D7` が、実機では ch2 の方向ピンだった）。
 
 **電流・温度・過電流・過熱は自作モタドラのプロトコルに無い。** どの基板も測る手段を
-持たないので、`FEEDBACK` の Byte4-6 と bit5-7 は予約にしてあり、**組み立てる側も
-読む側もコードを持たない**。常に 0 の値を運ぶと、UI にもヘルス判定にも「測ったように
-見える 0」が流れ込む。センサを積んだ基板が現れたら予約領域に定義し直すこと。
+持たないので、**組み立てる側も読む側もコードを持たない**。常に 0 の値を運ぶと、UI にも
+ヘルス判定にも「測ったように見える 0」が流れ込む。`FEEDBACK` に予約バイトは 1 つも無く
+（状態フラグ 1 バイト + 位置を持つ基板だけが 2 バイト。DLC は 1 か 3）、空きは状態フラグの
+**bit6-7 だけ**である（bit0-5 は `MotorCanProtocol.h` の `status_flag` が使い切っている。
+bit5 は `kNeverCommanded`）。センサを積んだ基板が現れたらそこに定義し直すこと。
 
 **DC 基板はフィードバックを一切持たず、出力禁止ピン（`DIS`）も無い。** エンコーダ・
 電流センス・温度センサとも非搭載で、受理するのは `duty` だけ（位置・速度制御と PID は
@@ -618,6 +669,14 @@ UI にもヘルス判定にも**測ったように見える到達**が流れ込�
 `settle_s` で待つ。動作確認シーケンスは 6 個を 1 個ずつ開閉するところまでを担い、
 鳴ったかどうかは `config/checklist.yaml` の `valves_actuate` で打音・目視確認する
 （DC 基板の `conveyor_run` と同じ扱い）。
+
+**この保証は `motorcan::composeFeedbackFlags()` が持つ。3 枚の `main.cpp` / `app.cpp` に
+書き写してはならない。** 状態フラグの組み立ては GPIO も CAN も Arduino.h も HAL も
+触らない純関数で、**到達を立てられるのはサーボスロットだけ**という規則を `BoardKind` で
+持つ（呼び出し側が `reached` に何を渡しても DC / 電磁弁では立たない）。**センサスロットは
+緊急停止・ウォッチドッグ・到達を立てない**という §5.2 の規則も同じ関数が持つ。
+写しがペリフェラルの翻訳単位にあった頃は native テストが 1 件も届かず、**DC 基板と
+電磁弁基板に `flags |= status_flag::kReached;` を 1 行足しても全ケース緑**だった。
 
 **この基板に物理非常停止入力（`REF`）は無い。** 物理停止は DC 基板が受けて PC 経由で
 伝わる（`FEEDBACK` の緊急停止ビット → サーバー全体の緊急停止 → ブロードキャスト `E_STOP`）。
@@ -687,8 +746,9 @@ PC 側 yaml の `can_id` が無変更で済む）。`Unused` にしたスロッ�
 `config.h` の `kFirmwareVersion` を必ず上げること。**
 
 **基板のセンサ入力は「報告するだけ」。判断は PC 側が持つ。** **接触は異常ではない** —
-`is_fault()` にも `check_safety_error()` にも入れてはならない。入れると原点合わせで
-触れさせるたびに機体が FAULT になりシーケンスが止まる。**センサは `motors:` ではなく `sensors:` セクションへ書く** — `motors:` に置くと
+ドライバの異常判定は `is_fault()` ただ 1 つなので、そこへ入れてはならない。入れると
+原点合わせで触れさせるたびに機体が FAULT になりシーケンスが止まる
+（`tests/drivers/test_generic.py::TestSensorInput::test_contact_is_not_an_abnormality` が固定）。**センサは `motors:` ではなく `sensors:` セクションへ書く** — `motors:` に置くと
 動作確認・目標値再送・UI のモータ一覧に「常に 0 のモータ」として並ぶ。
 `CANManager.add_sensor` は受信の振り分けとヘルス監視だけを行う。**登録し忘れると
 受信ループがフレームを誰にも配らず、接触が PC まで届かない**（照合する仕組みは無い）。
@@ -708,16 +768,27 @@ native テストが 1 件も掛からない。規則は 2 つ — 出力が許�
 `MotorSafety::isOutputAllowed()` ただ 1 つで、`everFed_`（仕様書 §5.4「`SET_TARGET` を 1 通も
 受け取るまで出力しない」）は `WATCHDOG_ENABLED 0` でも外れない。
 
-**テレメトリ配信は 1 クライアントの不調で止めてはならない。** `_broadcast_state` は全
-クライアントへ直列に送るため、詰まった 1 台を無期限に待つと他の全員（Monitor 含む）の
-値が凍る。しかも WebSocket は開いたままなので UI は「接続中」を出し続け、操縦者は
-凍った値を最新だと思って見続ける。送信には `_WS_SEND_TIMEOUT_S` を必ず通し
-(`_send_or_drop`)、切り離しの `close()` は別タスクへ逃がす（`close()` も相手の応答を待つので、
-配信ループ上で await すると同じ場所で詰まる）。`_broadcast_loop` の例外ガードも外さないこと。
-**`_fanout` の反復は必ずクライアント集合のスナップショットに対して行う。** 送信 1 通ごとに
-await が入り、その隙に `_ws_handler` が同じ集合を触る（操縦者のリロード 1 回で起きる）。
-集合をそのまま回すと `RuntimeError: Set changed size during iteration` になり、例外ガードの
-無い `activate_e_stop` の経路では E-STOP を押した本人の WS が切れる。
+**テレメトリ配信は 1 クライアントの不調で止めてはならない。** 配信は全クライアントへ
+直列に送るため、詰まった 1 台を無期限に待つと他の全員（Monitor 含む）の値が凍る。
+しかも WebSocket は開いたままなので UI は「接続中」を出し続け、操縦者は凍った値を
+最新だと思って見続ける。守る約束は 4 つ ——
+①送信には `_WS_SEND_TIMEOUT_S` を必ず通す（`WsHub.send_or_drop`）
+②切り離しの `close()` は別タスクへ逃がす（`close()` も相手の応答を待つので、配信ループ上で
+await すると送信上限を設けた意味がなくなり同じ場所で詰まる）
+③**`WsHub.fanout` の反復は必ずクライアント集合のスナップショットに対して行う**（送信 1 通ごとに
+await が入り、その隙に `_ws_handler` が同じ集合を触る。操縦者のリロード 1 回で起きる。集合を
+そのまま回すと `RuntimeError: Set changed size during iteration` になり、例外ガードの無い
+`activate_e_stop` の経路では E-STOP を押した本人の WS が切れる）
+④`_broadcast_loop` の例外ガードを外さない。
+
+**この 4 つはどれも「配信経路が 1 本であること」に依存しているので、集合と送信は
+`lib/ws_hub.py` の `WsHub` に閉じてある。** サーバー本体に置いていた頃は、経路を 1 つ足す
+たびに 4 つを守り直す必要があり、実際に接続直後の 3 通（`server_info` / `match_state` /
+`motor_check_state`）が生の `send_str` で送られていて①も②も通っていなかった
+（aiohttp の `send_str` は相手が読まなくなると無期限に待つので、スリープに入りかけた
+ノート PC が 1 台繋いだだけで接続ハンドラが返らず、`finally` の切り離しも走らない）。
+`WsHub` に閉じてあれば**経路を増やすにはここへメソッドを足すしかない**。
+`RobotServer` に配信の生 API を戻してはならない。
 
 **WS メッセージの契約は 1 箇所で定義し、サーバーと UI が同じものを見る。** 両者が
 それぞれ自分のサンプルを持つと、契約が食い違ったまま両方のテストが緑になる。一度これで
@@ -833,6 +904,30 @@ padding だけでなく本文の `font-size` も直接指定する。ルート�
 **UI はしきい値のフォールバック値を持たない** — 正は config だけが持ち `server_info` で
 届く。持つと config を変えても画面だけが古い境界で判定するので、未配信の間は
 `neutral`（色を付けない）に倒し、適当な既定値で「正常」とも「警告」とも言わない。
+サーバー側も同じで、**最悪値への集約は `lib/health.worst_bus_health` だけが持つ**
+（`compute_overall` も `/health` もそれを呼ぶ）。かつてランク表とその集約ループが
+`lib/server.py` に丸写しされており、片方だけ直せる状態そのものだった。
+
+**動作確認の完了判定は `lib/motorCheckStatus.ts` にしかない。** かつて `MotorCheckPanel` と
+`MotorCheckSummary` に別々に書かれ、実際に食い違っていた —— パネル側は「実行中でなく、
+エラーも無く、ステップ表が届いている」を完了と読むので、**一度も実行していない状態が
+「完了」**になり全ステップに緑の ✓ が付いた（`running:false, step_index:0, total_steps:2`）。
+`config/checklist.yaml` の「アクチュエータ動作確認 完了」は、その誤表示のままチェックが
+付く経路だった。**ステップ数 0 は「未読込」であって完了ではない。**
+
+**受信境界では「読めなかった配信」を `MALFORMED` として異常側へ倒す。**
+`protocol.ts` の `parseSafety` / `parseChecklists` / `parseTuningMetrics` と
+`healthVerdict.ts` がこの形で、**`?? []` のような黙った既定値を置いてはならない** ——
+埋めると「ラッチしているのに画面は平常」へ化け、埋めたこと自体が画面から読めなくなる
+（サーバーの `overall=down` を「健全性 判定不能」へ倒すのと同じ）。未配信（`undefined`）とは
+別物として区別する。一度これで `safety` の 1 欄が落ちただけで全画面が白くなった
+（`describeSafetyIssues` が無検査で `.length` を呼び、レンダー本体なので React ツリーごと
+アンマウントした）。**`motors` と `steps` は素通しのまま** — モータ名を UI へ書かない
+性質はそこで成立している。
+
+**`RouteErrorBoundary` は `<Outlet />` だけに掛ける。** ヘッダー・接続バナー・緊急停止
+オーバーレイは境界の外に置く。画面全体を包むと、描画が落ちたときに**止める手段
+（EMG STOP）ごと消える**。
 
 **状態は色付きテキストではなくチップで示す。** ライト地では警告色を AA (4.5:1) まで暗くすると
 もはや警告色に見えない。`components/ui/StatusBadge.tsx` に一本化してあるので、
@@ -874,6 +969,14 @@ TDD でプロトコル層とシーケンスエンジンを開発する。テス�
 来たことにする」関数が本番に存在してよい理由は無い）、テスト本体は公開 API で書く。
 特権も最小に使う — `deliver_frame`（宛先判定とデコードを実際に通す）で足りるなら
 `mark_feedback_at`（時刻だけを置く）は使わない。後者だけのテストは途絶検出が壊れても緑になる。
+本番のモジュール private を書き換える操作（送信上限の縮小など）もこの 2 ファイルに置く
+（散らすと、定数が別名へ移ったときに書き換え先だけが古いまま残り、「上限を縮めたつもりで
+縮めていない」テストが 1 秒待ちながら緑を返す）。
+**`tests/feedback_frames.py` は特権を持たない 3 つ目のヘルパで、役割が違う** ——
+実機と同じフレームを組み立てて `update_state` へ流し込む唯一の場所であり、
+**`driver._state = MotorState(...)` を書かないためにある**（直接代入はデコード層を丸ごと
+迂回する）。組み立てが各テストに写されていた頃は書式が実際にずれていた
+（M3508 の単回転角を符号付きで pack しており、実機の 8192 カウント域を表現できなかった）。
 
 ## 言語
 
