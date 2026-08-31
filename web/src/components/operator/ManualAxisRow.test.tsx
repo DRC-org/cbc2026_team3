@@ -92,10 +92,44 @@ describe("ManualAxisRow", () => {
       const user = userEvent.setup();
       const { onJog } = renderRow(PAIRED);
 
-      await user.selectOptions(screen.getByLabelText("y_axis のジョグ量"), "2");
+      // 画面に出ている候補で選ぶ。option の value が数値かインデックスかは
+      // 実装の都合であって、操縦者が触るのは表示されている量の方
+      await user.selectOptions(
+        screen.getByLabelText("y_axis のジョグ量"),
+        screen.getByRole("option", { name: "2 mm" }),
+      );
       await user.click(screen.getByLabelText("y_axis を 2mm 進める"));
 
       expect(onJog).toHaveBeenCalledWith("y_axis", 2);
+    });
+
+    /**
+     * config の `steps` に浮動小数が入っていると、`<option value={候補の数値}>` を
+     * `Number()` で戻して `indexOf` で引き直す実装では一致せず -1 になり、
+     * 刻みが**黙って 1** へ落ちていた。症状は「選んだ量と違う量で動く」だけで、
+     * config にも画面にも痕跡が残らない。
+     */
+    it("浮動小数の候補でも選んだ量がそのまま飛ぶ", async () => {
+      const user = userEvent.setup();
+      const { onJog } = renderRow({
+        ...PAIRED,
+        manual: { min: -2, max: 20, steps: [0.5, 0.05, 1.25] },
+      });
+
+      await user.selectOptions(
+        screen.getByLabelText("y_axis のジョグ量"),
+        screen.getByRole("option", { name: "0.05 mm" }),
+      );
+      await user.click(screen.getByLabelText("y_axis を 0.05mm 進める"));
+
+      expect(onJog).toHaveBeenCalledWith("y_axis", 0.05);
+    });
+
+    it("刻みの候補が 1 つも無ければ連続操作を出さない (1 を捏造しない)", () => {
+      renderRow({ ...PAIRED, manual: { min: -2, max: 20, steps: [] } });
+
+      expect(screen.queryByLabelText("y_axis のジョグ量")).toBeNull();
+      expect(screen.queryByLabelText(/y_axis を .* 進める/)).toBeNull();
     });
 
     it("絶対値は入力して送信したときだけ飛ぶ", async () => {

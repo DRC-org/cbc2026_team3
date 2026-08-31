@@ -111,7 +111,9 @@ export function ManualAxisRow({
         </span>
       </div>
 
-      {range ? (
+      {/* `steps` は config が「空にはならない」と保証する境界だが、空で届いたら
+          刻みを 1 と捏造せず連続操作ごと出さない (捏造すると config に無い量が飛ぶ) */}
+      {range && range.steps.length > 0 ? (
         <ContinuousControls
           axis={axis}
           min={range.min}
@@ -230,8 +232,13 @@ function ContinuousControls({
   onJog,
   onSet,
 }: ContinuousControlsProps) {
+  // **インデックスで扱う。** かつては `<option value={候補の数値}>` に戻して
+  // `steps.indexOf(Number(...))` で引き直していたが、config の `steps` に浮動小数
+  // (0.05 等) が入ると往復変換で一致せず `indexOf` が -1 を返し、刻みが**黙って 1**
+  // へ落ちた。症状は「選んだ量と違う量で動く」だけで、config にも画面にも痕跡が残らない。
+  // 可動範囲と刻みは config が宣言する境界であって、UI が値を捏造してよい所ではない
   const [stepIndex, setStepIndex] = useState(0);
-  const step = steps[Math.min(stepIndex, steps.length - 1)] ?? 1;
+  const step = steps[Math.min(stepIndex, steps.length - 1)];
   const maxMultiplier = maxMultiplierFor(min, max, step);
 
   // 端に達したら押しても動かない。理由を画面から読めるようにボタン側で塞ぐ
@@ -291,12 +298,12 @@ function ContinuousControls({
           <select
             className="select w-24 border-base-300 bg-base-100 font-mono tabular-nums select-sm"
             aria-label={`${axis.name} のジョグ量`}
-            value={step}
+            value={stepIndex}
             disabled={disabled}
-            onChange={(e) => setStepIndex(steps.indexOf(Number(e.target.value)))}
+            onChange={(e) => setStepIndex(Number(e.target.value))}
           >
-            {steps.map((candidate) => (
-              <option key={candidate} value={candidate}>
+            {steps.map((candidate, index) => (
+              <option key={candidate} value={index}>
                 {candidate} {axis.unit}
               </option>
             ))}

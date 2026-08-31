@@ -12,8 +12,9 @@ const STEPS: SequenceStepInfo[] = [
   { index: 2, label: "サブハンド 電磁弁 6 個 (打音・目視確認)", require_trigger: false },
 ];
 
-function mount(check: Partial<MotorCheckSnapshot> = {}) {
+function mount(check: Partial<MotorCheckSnapshot> = {}, connected = true) {
   return renderWithRobot(<MotorCheckPanel isOpen onOpenChange={vi.fn()} />, {
+    connected,
     motorCheck: {
       ...EMPTY_MOTOR_CHECK,
       available: true,
@@ -68,6 +69,41 @@ describe("MotorCheckPanel", () => {
     const done = mount({ running: false, step_index: 3 });
     await userEvent.click(screen.getByRole("button", { name: "もう一度実行" }));
     expect(done.context.send).toHaveBeenCalledWith({ type: "motor_check_start" });
+  });
+
+  /**
+   * **既定の mount() がまさにこの状態** (running:false, step_index:0, ステップ表あり)。
+   * 実配信のスナップショットもこの形で、以前はフッタが「完了」、全ステップに緑の ✓ が
+   * 付いていた。同じ瞬間に MotorCheckSummary は正しく「未実行」を出していた。
+   *
+   * `config/checklist.yaml` の「アクチュエータ動作確認 完了」は、この誤表示のまま
+   * チェックが付く経路になっていた。
+   */
+  it("未実行を完了と表示しない", () => {
+    mount();
+
+    expect(screen.getByText("未実行")).toBeInTheDocument();
+    expect(screen.queryByText("完了")).not.toBeInTheDocument();
+    // ✓ が付いた行が 1 つも無いこと (走っていないのに通過済みには見せない)
+    expect(document.querySelectorAll(".text-success")).toHaveLength(0);
+    // まだ 1 度も走っていないので「もう一度」ではない
+    expect(screen.getByRole("button", { name: "実行" })).toBeInTheDocument();
+  });
+
+  it("完走したときだけ完了を出す", () => {
+    mount({ step_index: STEPS.length });
+
+    expect(screen.getByText("完了")).toBeInTheDocument();
+    expect(document.querySelectorAll(".text-success")).toHaveLength(STEPS.length);
+  });
+
+  it("切断中は実行できず、理由も出す", () => {
+    // サーバーへ届かないので拒否も返らない。押せてしまうと「押したのに何も
+    // 起きない」だけが残る (起動ボタン側は既に切断を見ていた)
+    mount({}, false);
+
+    expect(screen.getByRole("button", { name: /実行/ })).toBeDisabled();
+    expect(screen.getByText("切断中のため不可")).toBeInTheDocument();
   });
 
   it("起動できない構成では実行ボタンを塞ぐ", () => {

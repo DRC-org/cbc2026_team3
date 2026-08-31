@@ -6,6 +6,7 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
+import { motorCheckStatus } from "@/lib/motorCheckStatus";
 
 /**
  * 統合動作確認の起動ボタン。**両ハンドで 1 つ**なので robot を取らない。
@@ -19,8 +20,9 @@ export function MotorCheckButton({ onPanelOpen }: { onPanelOpen?: () => void }) 
   const { state, start } = useMotorCheck();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // 切断中だけは画面側でしか分からない (サーバーへ届かないので理由も返らない)
-  const reasonLabel = connected ? state.blocked_reason : "切断中のため不可";
+  // 可否の判定はパネル側と共有する。かつてパネルは `blocked_reason` しか見ておらず、
+  // 切断中でも押せて、押しても何も起きず理由も出なかった
+  const { reasonLabel } = motorCheckStatus(state, connected);
   const disabled = reasonLabel !== null;
 
   const handleConfirmStart = () => {

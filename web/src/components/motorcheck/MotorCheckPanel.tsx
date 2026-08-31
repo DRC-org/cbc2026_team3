@@ -1,12 +1,22 @@
-import { Check, Play, Square, TriangleAlert } from "lucide-react";
+import { Check, CircleHelp, Play, Square, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { cx } from "@/lib/cx";
+import { motorCheckStatus } from "@/lib/motorCheckStatus";
+import type { MotorCheckOutcome } from "@/lib/motorCheckStatus";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
+
+const FOOTER_LABEL: Record<MotorCheckOutcome, string> = {
+  running: "実行中...",
+  failed: "中断・失敗",
+  done: "完了",
+  idle: "未実行",
+};
 
 interface MotorCheckPanelProps {
   isOpen: boolean;
@@ -24,19 +34,14 @@ interface MotorCheckPanelProps {
  * 機械が見ていないのに見たように読めてしまう。
  */
 export function MotorCheckPanel({ isOpen, onOpenChange }: MotorCheckPanelProps) {
+  const { connected } = useRobotStatus();
   const { state, start, abort } = useMotorCheck();
 
+  // 完了判定は `lib/motorCheckStatus.ts` の 1 箇所だけが持つ。ここで書き直すと
+  // 同じ瞬間にパネルは「完了」、サマリーは「未実行」を出す状態が戻る
+  const { outcome, completedSteps: done, reasonLabel } = motorCheckStatus(state, connected);
   const total = state.total_steps;
-  const done = state.running ? state.step_index : total > 0 && !state.error ? total : 0;
   const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-
-  const footerLabel = state.running
-    ? "実行中..."
-    : state.error
-      ? "中断・失敗"
-      : done > 0 && done === total
-        ? "完了"
-        : "未実行";
 
   return (
     <Modal
@@ -48,7 +53,17 @@ export function MotorCheckPanel({ isOpen, onOpenChange }: MotorCheckPanelProps) 
       bodyClassName="flex flex-col gap-3"
       footer={
         <div className="flex w-full items-center justify-between">
-          <span className="text-base-content/70">{footerLabel}</span>
+          <span className="flex min-w-0 items-center gap-2 text-base-content/70">
+            {FOOTER_LABEL[outcome]}
+            {/* Tooltip が使えないので無効化理由はテキストで併記する。
+                起動ボタンと同じ文言・同じ判定を使う (両者で導出すると食い違う) */}
+            {reasonLabel && outcome !== "running" ? (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <Icon as={CircleHelp} />
+                <span className="min-w-0 truncate">{reasonLabel}</span>
+              </span>
+            ) : null}
+          </span>
           <div className="flex gap-2">
             {state.running ? (
               <Button tone="danger" onClick={abort}>
@@ -56,9 +71,9 @@ export function MotorCheckPanel({ isOpen, onOpenChange }: MotorCheckPanelProps) 
                 中断
               </Button>
             ) : (
-              <Button tone="info" disabled={state.blocked_reason !== null} onClick={start}>
+              <Button tone="info" disabled={reasonLabel !== null} onClick={start}>
                 <Icon as={Play} />
-                {done > 0 ? "もう一度実行" : "実行"}
+                {outcome === "idle" ? "実行" : "もう一度実行"}
               </Button>
             )}
             <Button onClick={() => onOpenChange(false)}>閉じる</Button>
