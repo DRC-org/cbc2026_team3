@@ -14,6 +14,7 @@ import { cx } from "@/lib/cx";
 import { motorTempTone, tempThresholdsOf } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
 import { isDuringMatch } from "@/lib/phase";
+import { MALFORMED, readableMetrics } from "@/lib/protocol";
 import type { MotorPid, MotorState, TuningCapture } from "@/lib/protocol";
 import { tuningKey } from "@/lib/robotReducer";
 import { ROBOTS } from "@/lib/robots";
@@ -305,6 +306,7 @@ export function MotorTuning() {
  */
 function ResponsePanel({ motor, captures }: { motor: string; captures: TuningCapture[] }) {
   const [latest, previous] = captures;
+  const metrics = latest ? readableMetrics(latest.metrics) : null;
 
   if (!latest) {
     return (
@@ -332,10 +334,21 @@ function ResponsePanel({ motor, captures }: { motor: string; captures: TuningCap
       bodyClassName="scroll gap-3"
     >
       <ResponseChart capture={latest} previous={previous} />
-      {latest.metrics ? (
+      {/* 指標が出せない理由は 2 つあり、操縦者の次の一手が違う。**まとめてはならない** —
+          「ステップとして解釈できなかった」は動かし方の問題 (もう一度大きく動かす)、
+          「配信を読めていない」はサーバー側の問題で、波形の数字も信用できない */}
+      {latest.metrics === MALFORMED ? (
+        <p className="text-warning">
+          指標の配信を読めていません。波形だけ表示しています (サーバーのログを確認してください)。
+        </p>
+      ) : null}
+      {metrics ? (
         <div className="grid gap-3 lg:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)]">
           <div className="self-start">
-            <MetricsPanel metrics={latest.metrics} previous={previous?.metrics ?? undefined} />
+            <MetricsPanel
+              metrics={metrics}
+              previous={readableMetrics(previous?.metrics ?? null) ?? undefined}
+            />
           </div>
           <div className="self-start">
             <AdviceList advice={latest.advice} />

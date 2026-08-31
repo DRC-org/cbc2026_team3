@@ -6,14 +6,14 @@ import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { describeSafetyIssues, evaluateHealth } from "@/lib/healthVerdict";
-import type { TempThresholds } from "@/lib/healthVerdict";
-import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
+import type { SafetyPayload, TempThresholds } from "@/lib/healthVerdict";
+import type { HealthSnapshot, MotorState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
   health: HealthSnapshot | undefined;
   motors: Record<string, MotorState>;
   /** 安全機構 (同期ずれラッチ・保護ループの生死)。未受信でも表示は成立する */
-  safety?: SafetyState;
+  safety?: SafetyPayload;
   /**
    * 温度の色分けに使うしきい値。正はサーバーの config で、`server_info` から届く。
    * 末端の表示部品が context を読み始めると `health` / `motors` を props で受けている
@@ -37,7 +37,7 @@ interface SubsystemStatusProps {
  * モータ状態が届き続ける。どちらも「画面が正常に見えるのに機体は正常でない」型の異常で、
  * 自分から主張しない限り誰も気付けない。
  */
-function SafetyIssues({ safety }: { safety: SafetyState | undefined }) {
+function SafetyIssues({ safety }: { safety: SafetyPayload | undefined }) {
   const issues = describeSafetyIssues(safety);
   if (issues.length === 0) return null;
 

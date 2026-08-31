@@ -1,5 +1,6 @@
 import { useId } from "react";
 
+import { readableMetrics } from "@/lib/protocol";
 import type { TuningCapture } from "@/lib/protocol";
 
 /**
@@ -24,7 +25,9 @@ export function ResponseChart({
   previous?: TuningCapture;
 }) {
   const clipId = useId();
-  const { samples, metrics } = capture;
+  const { samples } = capture;
+  // 読めない指標から整定帯を描かない (画面に「測ったように見える帯」が出る)
+  const metrics = readableMetrics(capture.metrics);
   if (samples.t.length < 2) {
     return <p className="text-base-content/60">波形を描くにはサンプルが足りません。</p>;
   }
@@ -168,11 +171,9 @@ function layout(capture: TuningCapture, previous?: TuningCapture): View {
     ...capture.samples.target,
     ...(previous?.samples.pos ?? []),
   ];
-  if (capture.metrics) {
-    values.push(
-      capture.metrics.step_to + capture.metrics.settle_band,
-      capture.metrics.step_to - capture.metrics.settle_band,
-    );
+  const metrics = readableMetrics(capture.metrics);
+  if (metrics) {
+    values.push(metrics.step_to + metrics.settle_band, metrics.step_to - metrics.settle_band);
   }
 
   const tMin = Math.min(...times);

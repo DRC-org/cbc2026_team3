@@ -8,6 +8,7 @@ import { useArmedPress } from "@/hooks/useArmedPress";
 import { cx } from "@/lib/cx";
 import { evaluateHealth } from "@/lib/healthVerdict";
 import { COURT_LABEL, COURT_TONE } from "@/lib/phase";
+import { MALFORMED } from "@/lib/protocol";
 import { ROBOTS } from "@/lib/robots";
 import { TONE_TEXT_CLASS } from "@/lib/tone";
 
@@ -56,7 +57,9 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     // 未完の先頭を「次」として強調している。ここで先頭項目を繰り返すと、
     // 操縦者は同じ 1 行を 2 箇所で読むことになる (以前この画面には Checklist が
     // 無く、右カラムの 16 行をスキャンさせないために項目名を出していた)。
-    const incomplete = Object.entries(matchState.checklists).filter(([, c]) => !c.completed);
+    const checklists = matchState.checklists;
+    const incomplete =
+      checklists === MALFORMED ? [] : Object.entries(checklists).filter(([, c]) => !c.completed);
     for (const [role, checklist] of incomplete) {
       const remaining = checklist.items.filter((i) => !i.checked);
       blockers.push({
@@ -64,9 +67,13 @@ export function StartGate({ onStart }: { onStart: () => void }) {
         detail: remaining.length === 0 ? "未完了" : `残り ${remaining.length} 件`,
       });
     }
-    // 理由を 1 つも挙げられないまま押せないボタンだけを見せない
+    // 理由を 1 つも挙げられないまま押せないボタンだけを見せない。
+    // 配信が読めていない場合は「残り何件か」も言えないので、そう書く
     if (incomplete.length === 0) {
-      blockers.push({ label: "指差喚呼", detail: "未完了の項目があります" });
+      blockers.push({
+        label: "指差喚呼",
+        detail: checklists === MALFORMED ? "配信を読めていません" : "未完了の項目があります",
+      });
     }
   }
 

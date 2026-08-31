@@ -2,7 +2,14 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import type { MatchPhase, MotorPid, MotorState, RobotState, TuningCapture } from "@/lib/protocol";
+import type {
+  MatchPhase,
+  MotorPid,
+  MotorState,
+  RobotState,
+  TuningCapture,
+  TuningMetrics,
+} from "@/lib/protocol";
 import { MotorTuning } from "@/pages/MotorTuning";
 import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
@@ -43,6 +50,25 @@ function mount(phase: MatchPhase = "setup", connected = true, eStopActive = fals
   });
 }
 
+/** 指標の既定値。差分だけを上書きしたいテストが素直に spread できるよう外へ出す */
+const METRICS: TuningMetrics = {
+  step_from: 0,
+  step_to: 10,
+  step_size: 10,
+  rise_time_s: 0.05,
+  overshoot_pct: 35,
+  peak_time_s: 0.08,
+  settling_time_s: 0.12,
+  steady_state_error: 0,
+  oscillation_hz: null,
+  damping_ratio: null,
+  saturation_ratio: 0.375,
+  peak_output: 900,
+  settle_band: 1,
+  sample_count: 8,
+  duration_s: 0.14,
+};
+
 /** 波形 1 本ぶんの記録。指標と助言は既定で「出る」形にしておく */
 function capture(overrides: Partial<TuningCapture> = {}): TuningCapture {
   return {
@@ -50,23 +76,7 @@ function capture(overrides: Partial<TuningCapture> = {}): TuningCapture {
     motor: "lift",
     captured_at: 1700000000,
     gains: { kp: 2, ki: 0, kd: 0 },
-    metrics: {
-      step_from: 0,
-      step_to: 10,
-      step_size: 10,
-      rise_time_s: 0.05,
-      overshoot_pct: 35,
-      peak_time_s: 0.08,
-      settling_time_s: 0.12,
-      steady_state_error: 0,
-      oscillation_hz: null,
-      damping_ratio: null,
-      saturation_ratio: 0.375,
-      peak_output: 900,
-      settle_band: 1,
-      sample_count: 8,
-      duration_s: 0.14,
-    },
+    metrics: METRICS,
     advice: [{ code: "overshoot", severity: "info", message: "行き過ぎが 35% あります。" }],
     samples: {
       t: [0, 0.02, 0.04, 0.06],
@@ -446,7 +456,7 @@ describe("MotorTuning のステップ応答", () => {
   });
 
   it("測れなかった指標は 0 ではなく「—」", () => {
-    mountWithCaptures([capture({ metrics: { ...capture().metrics!, settling_time_s: null } })]);
+    mountWithCaptures([capture({ metrics: { ...METRICS, settling_time_s: null } })]);
 
     // 「窓の終端まで整定しなかった」を 0ms と出すと正反対の意味になる
     expect(screen.getByText("整定")).toBeInTheDocument();
@@ -455,7 +465,7 @@ describe("MotorTuning のステップ応答", () => {
 
   it("前回の記録があれば並べて出す", () => {
     // 調整は「変える前より良くなったか」の判断。数字が 1 つだと記憶に頼ることになる
-    const previous = capture({ metrics: { ...capture().metrics!, overshoot_pct: 60 } });
+    const previous = capture({ metrics: { ...METRICS, overshoot_pct: 60 } });
     mountWithCaptures([capture(), previous]);
 
     // 波形の凡例と指標の列見出しの 2 箇所に出る (薄い線と数字は別の手掛かり)

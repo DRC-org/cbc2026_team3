@@ -1,5 +1,15 @@
-import type { HealthSnapshot, MotorHealth, SafetyState, ServerInfo } from "@/lib/protocol";
+import { MALFORMED, safetyShapeErrors } from "@/lib/protocol";
+import type {
+  HealthSnapshot,
+  Malformed,
+  MotorHealth,
+  SafetyState,
+  ServerInfo,
+} from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
+
+/** `state.safety` として画面まで来うる形。未配信は undefined */
+export type SafetyPayload = SafetyState | Malformed;
 
 export interface HealthVerdict {
   tone: Tone;
@@ -84,6 +94,20 @@ export function motorTempTone(
 }
 
 /**
+ * 安全機構を判定できなかったことを、異常 1 件として出す。
+ *
+ * 「読めなかったから何も出さない」は最悪の選択肢になる —— 同期ずれラッチも
+ * 保護ループの停止も検知できていないのに、画面は平常時と 1 ピクセルも変わらない。
+ */
+function safetyUnknown(detail: string): SafetyIssue {
+  return {
+    label: "安全機構 判定不能",
+    detail,
+    hint: "安全機構の配信を読めていません。同期ずれラッチも保護ループの停止も検知できない状態です — 機体を動かす前にサーバーのログを確認してください",
+  };
+}
+
+/**
  * 安全機構の異常を列挙する。平常時は空配列 (画面に何も足さない)。
  *
  * ラッチ中の軸が分からないと操縦者は復旧手順を選べず、200Hz の位置制御ループ・
@@ -94,8 +118,19 @@ export function motorTempTone(
  * 1 タスク種別につき 1 件へ畳む。内訳から対象を挙げられるときはそれを、
  * 挙げられないときだけ「全〜」を detail に置く。
  */
-export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIssue[] {
+export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyIssue[] {
   if (!safety) return [];
+
+  // 受信境界 (`parseSafety`) を通っていても、`safety` を props で受け取る経路
+  // (SubsystemStatus) は残る。型は実行時に消えるので、ここでも形を確かめる。
+  //
+  // **欠けた欄を `?? []` や `?? false` で埋めてはならない。** 埋めた瞬間に
+  // 「ラッチしているのに画面は平常」へ化け、埋めたことは画面から読めない。
+  // サーバーの overall=down を「健全性 判定不能」へ倒すのと同じ扱いにする。
+  if (safety === MALFORMED) return [safetyUnknown("安全機構の配信全体")];
+  const broken = safetyShapeErrors(safety);
+  if (broken.length > 0) return [safetyUnknown(broken.join(", "))];
+
   const issues: SafetyIssue[] = [];
 
   if (safety.sync_violations.length > 0) {
@@ -174,7 +209,7 @@ export function describeSafetyIssues(safety: SafetyState | undefined): SafetyIss
  */
 export function evaluateHealth(
   health: HealthSnapshot | undefined,
-  safety?: SafetyState,
+  safety?: SafetyPayload,
 ): HealthVerdict {
   // 判定と詳細表示を同じ列挙から作る。チップは「種別 + 対象」、詳細行は復旧手順を担う
   const [safetyIssue] = describeSafetyIssues(safety);

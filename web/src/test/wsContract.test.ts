@@ -74,6 +74,14 @@ const STATE_FIELDS_UI_READS = [
   "e_stop_active",
   "health",
   "safety",
+  // 安全機構は 8 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
+  // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
+  "safety.sync_violations",
+  "safety.unenergized_motors",
+  "safety.loops_running",
+  "safety.monitors_running",
+  "safety.position_loops",
+  "safety.sync_monitors",
   // 20Hz の目標値再送が止まると 500ms 後に generic アクチュエータが全停止する。
   // 配信から落ちれば画面はグリッパ・コンベアの無反応を説明できなくなる
   "safety.refreshers_running",
@@ -595,6 +603,47 @@ function flattenPaths(value: unknown, prefix = ""): string[] {
   });
 }
 
+/**
+ * そのサンプルには正当に載らない欄。**理由を必須にする。**
+ *
+ * 同じメッセージ型が 2 つの形で配信されることがある (理由付き / 理由なしの
+ * 緊急停止)。例外を無条件に許すと「サーバーが落とした欄」と「元からこの形には
+ * 無い欄」の区別が付かなくなるので、`unused` と同じく理由を書かせる。
+ */
+const SAMPLE_OMITS: Record<string, Record<string, string>> = {
+  e_stop_state: {
+    reason: "理由なしで停止した形。理由付きの配信は e_stop_state_with_reason が受け持つ",
+  },
+};
+
+/** ドット区切りパスの親。トップレベルの親は根 (`""`) */
+function parentOf(path: string): string {
+  const cut = path.lastIndexOf(".");
+  return cut < 0 ? "" : path.slice(0, cut);
+}
+
+/**
+ * 宣言に `"ui"` と書いたのにサンプルから消えている欄を挙げる。
+ *
+ * **逆方向の突き合わせだけでは足りない。** あちらは「宣言に無いパスがサンプルに在る」
+ * ことしか見ないので、**宣言にあるのにサンプルから消えた欄**は素通りする。実際に
+ * `safety` の 6 欄はどの存在検査にも載っておらず、サーバーが 1 欄落として契約を
+ * 焼き直しても Python も TS も全テスト緑のまま、UI は起動直後に白画面になった。
+ *
+ * 親が null / 空配列のサンプルでは子が無いのが正しい (`metrics` が null の記録、
+ * `manual` を持たない軸)。親が 1 度でも展開されている場合だけ子を要求する。
+ */
+function missingDeclaredPaths(name: string, declared: FieldSpec, sample: Sample): string[] {
+  const present = new Set(flattenPaths(sample));
+  const expanded = new Set(["", ...[...present].map(parentOf)]);
+  const omitted = SAMPLE_OMITS[name] ?? {};
+  return Object.entries(declared)
+    .filter(([path, use]) => use === "ui" && expanded.has(parentOf(path)) && !present.has(path))
+    .map(([path]) => path)
+    .filter((path) => !(path in omitted))
+    .toSorted();
+}
+
 describe("WS 契約 (逆方向 — サーバーが送るものを TS が知っているか)", () => {
   it("全サンプルに宣言がある", () => {
     expect(Object.keys(SAMPLES).toSorted()).toEqual(Object.keys(DECLARED).toSorted());
@@ -611,6 +660,24 @@ describe("WS 契約 (逆方向 — サーバーが送るものを TS が知っ�
       // 型へ足して読むか、読まないなら unused に理由を書いて明示する
       expect(undeclared).toEqual([]);
     });
+
+    it("UI が読むと宣言した欄が実配信から消えていない", () => {
+      // 落ちたら、UI が読んでいる欄をサーバーが送らなくなったということ。
+      // 表示が黙って空になるだけでは済まず、`.length` / `.filter` を呼ぶ側は
+      // レンダー本体で投げて React ツリーごと落ちる (ヘッダーの緊急停止ボタンごと)
+      expect(missingDeclaredPaths(name, DECLARED[name], SAMPLES[name])).toEqual([]);
+    });
+  });
+
+  it("サンプルに載らないと決めた欄には理由が書いてあり、実際に載っていない", () => {
+    for (const [name, omits] of Object.entries(SAMPLE_OMITS)) {
+      const present = new Set(flattenPaths(SAMPLES[name]));
+      for (const [path, reason] of Object.entries(omits)) {
+        expect(reason.length, `${name}.${path}`).toBeGreaterThan(0);
+        // 例外が古くなって残っていると、その欄だけ存在検査が永久に効かなくなる
+        expect(present.has(path), `${name}.${path} は実配信に載っている`).toBe(false);
+      }
+    }
   });
 
   it("使わないと決めたフィールドには理由が書いてある", () => {

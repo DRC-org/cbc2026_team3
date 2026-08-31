@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseServerMessage } from "@/lib/protocol";
+import { MALFORMED, parseServerMessage } from "@/lib/protocol";
 import type { RobotState } from "@/lib/protocol";
 
 /**
@@ -54,6 +54,67 @@ describe("parseServerMessage", () => {
       expect(msg).not.toBeNull();
       const state = (msg as { state: RobotState }).state;
       expect(state.health?.detail).toBe("計算失敗");
+    });
+
+    /**
+     * `safety` だけは UI が `.length` / `.filter` を直に呼ぶので、受信境界で形を
+     * 確定させる。ここを素通しにすると 1 欄欠けた配信でレンダーが投げ、React
+     * ツリーごとアンマウントしてヘッダーの緊急停止ボタンまで消える。
+     */
+    describe("safety", () => {
+      const SAFETY = {
+        sync_violations: [],
+        unenergized_motors: [],
+        loops_running: true,
+        monitors_running: true,
+        refreshers_running: true,
+        position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
+        sync_monitors: [{ axes: ["y_axis"], running: true, violated: [] }],
+        target_refreshers: [{ motors: ["gripper"], running: true, paused: false }],
+      };
+
+      it("読める配信は配信オブジェクトのまま通す (未使用欄も落とさない)", () => {
+        const msg = parse({ type: "state", robot: "main_hand", safety: SAFETY });
+        expect((msg as { state: RobotState }).state.safety).toEqual(SAFETY);
+      });
+
+      it("未配信は undefined のまま (未受信は異常にしない)", () => {
+        const msg = parse({ type: "state", robot: "main_hand" });
+        expect((msg as { state: RobotState }).state.safety).toBeUndefined();
+      });
+
+      it.each([
+        "sync_violations",
+        "unenergized_motors",
+        "loops_running",
+        "monitors_running",
+        "refreshers_running",
+        "position_loops",
+        "sync_monitors",
+        "target_refreshers",
+      ])("%s が欠けたら MALFORMED (空の SafetyState へ倒さない)", (key) => {
+        const broken: Record<string, unknown> = { ...SAFETY };
+        delete broken[key];
+        const msg = parse({ type: "state", robot: "main_hand", safety: broken });
+        expect((msg as { state: RobotState }).state.safety).toBe(MALFORMED);
+      });
+    });
+
+    /**
+     * **`motors` と `steps` は素通しのまま保つ。** モータ名を UI 側へ書かない性質は
+     * 配信をそのまま状態へ入れることで成立しており、ここで組み立て直すと
+     * モータが 1 基増えるたびに UI の変更が要る形へ逆戻りする。
+     */
+    it("motors と steps は知らないモータ・欄ごとそのまま通す", () => {
+      const motors = {
+        brand_new_motor: { pos: 1, vel: 2, torque: 3, temp: 4, future_field: "keep" },
+      };
+      const steps = [{ index: 0, label: "把持", require_trigger: true, future_field: 1 }];
+      const msg = parse({ type: "state", robot: "main_hand", motors, steps });
+
+      const state = (msg as { state: RobotState }).state;
+      expect(state.motors).toEqual(motors);
+      expect(state.steps).toEqual(steps);
     });
   });
 
@@ -143,6 +204,29 @@ describe("parseServerMessage", () => {
       expect(msg).toMatchObject({
         matchState: { checklists: {}, can_start_match: false },
       });
+    });
+
+    it.each([
+      ["items が配列でない", { pre_match: { items: null, completed: false } }],
+      ["completed が無い", { pre_match: { items: [] } }],
+      [
+        "項目の checked が boolean でない",
+        {
+          pre_match: { items: [{ id: "a", label: "A", checked: "yes" }], completed: false },
+        },
+      ],
+      ["そもそもオブジェクトでない", "pre_match"],
+    ])("checklists が読めない形なら MALFORMED (%s)", (_name, checklists) => {
+      // **空へ倒してはならない。** 空は「config に項目が無い」の表現として既に
+      // 使っており、混ぜると操縦者は config/checklist.yaml を疑って探しに行く
+      const msg = parse({ type: "match_state", court: "red", phase: "ready", checklists });
+      expect(msg).toMatchObject({ matchState: { checklists: MALFORMED } });
+    });
+
+    it("読めない checklists でもフェーズは捨てない", () => {
+      // タイマーと同じ理由。試合の進行そのものを握っている値を巻き添えにしない
+      const msg = parse({ type: "match_state", court: "red", phase: "match", checklists: 7 });
+      expect(msg).toMatchObject({ matchState: { phase: "match", court: "red" } });
     });
 
     it("タイマーが欠けても match_state ごと捨てない", () => {
@@ -282,6 +366,25 @@ describe("parseServerMessage", () => {
   });
 
   describe("tuning_capture", () => {
+    /** 実配信と同じく全欄が揃った指標。半端な形は受信境界で MALFORMED になる */
+    const METRICS = {
+      step_from: 0,
+      step_to: 10,
+      step_size: 10,
+      rise_time_s: 0.05,
+      overshoot_pct: 12,
+      peak_time_s: 0.08,
+      settling_time_s: null,
+      steady_state_error: 0.1,
+      oscillation_hz: null,
+      damping_ratio: null,
+      saturation_ratio: 0.2,
+      peak_output: 900,
+      settle_band: 1,
+      sample_count: 8,
+      duration_s: 0.14,
+    };
+
     const payload = (overrides: object = {}) => ({
       type: "tuning_capture",
       robot: "main_hand",
@@ -297,7 +400,7 @@ describe("parseServerMessage", () => {
     it("波形・指標・助言を 1 通で受け取る", () => {
       const message = parse(
         payload({
-          metrics: { overshoot_pct: 12 },
+          metrics: METRICS,
           advice: [{ code: "overshoot", severity: "info", message: "行き過ぎ" }],
         }),
       );
@@ -305,8 +408,35 @@ describe("parseServerMessage", () => {
       expect(message?.type).toBe("tuning_capture");
       if (message?.type !== "tuning_capture") return;
       expect(message.capture.samples.pos).toEqual([0, 9]);
-      expect(message.capture.metrics).not.toBeNull();
+      expect(message.capture.metrics).toEqual(METRICS);
       expect(message.capture.advice).toHaveLength(1);
+    });
+
+    it.each(["overshoot_pct", "settle_band", "step_to", "duration_s"])(
+      "%s が欠けた指標は MALFORMED (null へ倒さない)",
+      (key) => {
+        // null は「ステップとして解釈できなかった」の表現。混ぜると、配信側の
+        // 不具合が「そういう記録もある」として画面から見えなくなる。
+        // 半端な形をそのまま通していた頃は `m.overshoot_pct.toFixed(0)` が
+        // MetricsPanel のレンダー本体で投げていた
+        const broken: Record<string, unknown> = { ...METRICS };
+        delete broken[key];
+        const message = parse(payload({ metrics: broken }));
+
+        expect(message?.type).toBe("tuning_capture");
+        if (message?.type !== "tuning_capture") return;
+        expect(message.capture.metrics).toBe(MALFORMED);
+      },
+    );
+
+    it("測れなかった項目の null は通す (欠落と区別する)", () => {
+      // rise_time_s の null は「窓の中で目標の 90% へ届かなかった」の意味で、
+      // 正常な配信。ここを弾くと指標そのものが出なくなる
+      const message = parse(payload({ metrics: { ...METRICS, rise_time_s: null } }));
+
+      expect(message?.type).toBe("tuning_capture");
+      if (message?.type !== "tuning_capture") return;
+      expect(message.capture.metrics).toMatchObject({ rise_time_s: null });
     });
 
     it("指標が null の記録も受け取る", () => {

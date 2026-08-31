@@ -7,7 +7,7 @@ import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { isSetupPhase } from "@/lib/phase";
-import { CHECKLIST_ROLE } from "@/lib/protocol";
+import { CHECKLIST_ROLE, MALFORMED } from "@/lib/protocol";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 const TITLE = "セッティング指差喚呼";
@@ -31,7 +31,11 @@ const TITLE = "セッティング指差喚呼";
 export const Checklist = memo(function Checklist() {
   const { matchState, serverInfo } = useRobotStatus();
   const { setChecklistItem, resetChecklist, checkAllChecklist } = useRobotCommands();
-  const checklist = matchState.checklists[CHECKLIST_ROLE];
+  const checklists = matchState.checklists;
+  // 読めない配信を空へ倒さない。空は「config に項目が無い」の表現として既に使っており、
+  // 混ぜると操縦者は config/checklist.yaml を疑って探しに行く
+  const unreadable = checklists === MALFORMED;
+  const checklist = unreadable ? undefined : checklists[CHECKLIST_ROLE];
   // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)
   const locked = !isSetupPhase(matchState.phase);
 
@@ -96,7 +100,12 @@ export const Checklist = memo(function Checklist() {
         )}
       </div>
 
-      {items.length === 0 ? (
+      {unreadable ? (
+        <p className="p-2 text-error">
+          指差喚呼の配信を読めていません。進捗を画面から確認できません
+          (サーバーのログを確認してください)
+        </p>
+      ) : items.length === 0 ? (
         <p className="p-2 text-base-content/70">チェック項目が未定義です (config/checklist.yaml)</p>
       ) : (
         <div className="scroll flex min-h-0 flex-1 flex-col">

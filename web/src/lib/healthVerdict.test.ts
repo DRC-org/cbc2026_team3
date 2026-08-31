@@ -7,6 +7,7 @@ import {
   summarizeMotors,
   tempThresholdsOf,
 } from "@/lib/healthVerdict";
+import { MALFORMED } from "@/lib/protocol";
 import type { BusHealth, HealthSnapshot, MotorHealth, SafetyState } from "@/lib/protocol";
 import { DEFAULT_SERVER_INFO } from "@/test/robotContext";
 
@@ -279,6 +280,69 @@ describe("describeSafetyIssues", () => {
       }),
     );
     expect(issues).toEqual([]);
+  });
+
+  /**
+   * サーバーが安全機構の 1 欄を落として契約を焼き直すと、Python も TS も
+   * 全テスト緑のまま UI が起動直後に白画面になっていた (呼び出し元は
+   * SubsystemStatus / TabBar / StartGate のレンダー本体で、投げれば
+   * React ツリーごとアンマウントしヘッダーの緊急停止ボタンまで消える)。
+   *
+   * **`?? []` で埋めてはならない。** 埋めるとラッチしているのに画面は平常になる。
+   */
+  describe("欠けた配信", () => {
+    // 型は実行時に消えるので、欠落は「型に無い形」としてしか作れない
+    const drop = (key: keyof SafetyState) => {
+      const broken: Record<string, unknown> = { ...safety() };
+      delete broken[key];
+      return broken as unknown as SafetyState;
+    };
+
+    it.each([
+      "sync_violations",
+      "unenergized_motors",
+      "loops_running",
+      "monitors_running",
+      "refreshers_running",
+      "position_loops",
+      "sync_monitors",
+      "target_refreshers",
+    ] as const)("%s が欠けても投げず、判定不能を 1 件返す", (key) => {
+      const issues = describeSafetyIssues(drop(key));
+
+      expect(issues).toHaveLength(1);
+      expect(issues[0].label).toBe("安全機構 判定不能");
+      // どの欄が読めなかったかを出す。出さないと配信側を直す手掛かりが残らない
+      expect(issues[0].detail).toContain(key);
+      expect(issues[0].hint.length).toBeGreaterThan(0);
+    });
+
+    it("周期タスクの要素が読めなくても投げない", () => {
+      const broken = safety();
+      // 型に無い形 = サーバーが要素の構造を変えた場合
+      (broken.sync_monitors as unknown[])[0] = { running: true };
+
+      const issues = describeSafetyIssues(broken);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].detail).toContain("sync_monitors");
+    });
+
+    it("受信境界が MALFORMED を立てた配信も判定不能へ倒す", () => {
+      const issues = describeSafetyIssues(MALFORMED);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].label).toBe("安全機構 判定不能");
+    });
+
+    it("判定不能は evaluateHealth でも error になる (平常へ倒さない)", () => {
+      // ここが success へ倒れると、保護ループが死んでいても画面は「異常なし」になる
+      expect(evaluateHealth(health(), MALFORMED).tone).toBe("error");
+      expect(evaluateHealth(health(), drop("sync_violations")).tone).toBe("error");
+    });
+
+    it("未配信 (undefined) は判定不能にしない", () => {
+      // 届いていないことと、届いたものが読めないことは操縦者の次の一手が違う
+      expect(describeSafetyIssues(undefined)).toEqual([]);
+    });
   });
 });
 
