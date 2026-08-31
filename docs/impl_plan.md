@@ -206,15 +206,17 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 | インターフェースの状態 | `_create_bus()` | 受信ループ |
 |---|---|---|
 | 存在しない | `OSError: [Errno 19] No such device` で起動失敗 | — |
-| 存在するが down | **オープン成功。例外は出ない** | `bus.recv` が `CanOperationError` を投げて即死 |
+| 存在するが down | **オープン成功。例外は出ない** | `bus.recv` が `CanOperationError` を投げ続ける |
 | up | 正常 | 正常 |
 
 問題は 2 行目。`CANManager.run()` は `_receive_loop` を `asyncio.create_task` で起こす
-だけで、`_tasks` を誰も await しない。受信タスクが死ぬとモータ状態が一切更新されなくなり、
-ヘルスチェックが全モータを STALE と報告するが、原因が「バスが down」だとは分からない。
+だけで、`_tasks` を誰も await しない。かつてはここで受信タスクごと降りていたため、
+モータ状態が一切更新されなくなり、ヘルスチェックが全モータを STALE と報告しても
+原因が「バスが down」だとは分からなかった。
 
-そのため**受信ループは降りる前に必ず `logger.exception` を残す**（「CAN 受信ループの
-堅牢性」参照）。ログが唯一の痕跡なので、この 1 行を外すとループの死が無痕跡に戻る。
+現在は降りずに待って呼び直し、読めていないあいだ `rx_down` を立てて `BusHealth.DOWN`
+として見せる（「CAN 受信ループの堅牢性」と `docs/checks_and_health.md` の
+「受信ループは断絶で降りない」を参照）。失敗は `LogThrottle` を通して残す。
 
 `cbc-can.service` により通常は起動時に up されるため実害は出にくいが、service が失敗した
 場合などに起きうる。**残る対策候補は `_create_bus()` にインターフェースの `operstate` 検証を
@@ -450,7 +452,7 @@ UI は「接続中」のまま**という、試合中に最も復旧しにくい
 |---|---|---|
 | `matches_feedback` が例外 | そのモータを飛ばして次のモータへ | 巻き添えを当該ドライバ 1 台に閉じる |
 | `update_state` が例外 | その 1 通を捨てる。`_last_rx_at` は更新しない | **解釈できていないフレームを「受信できている」と記録すると、途絶検出そのものが効かなくなる** |
-| `bus.recv` が例外 | `logger.exception` を残して伝播 | フレーム 1 通の問題ではない。握り潰して回り続けても全速で失敗を繰り返すだけ |
+| `bus.recv` が例外 | 降りずに待って呼び直す。`rx_down` を立て、ログは `LogThrottle` へ通す | 同一 socket は `ip link` の down/up を跨いで生き残るので、待てば戻る。降りると送信側だけが自動復帰し、受信は二度と戻らない |
 | `asyncio.CancelledError` | 素通し（`Exception` しか捕まえない） | 握り潰すと shutdown で止められない受信ループができる |
 
 握り潰した件数は `BusHealthInfo.rx_error_count` に積み、ログは `LogThrottle` で 1 秒に
@@ -874,6 +876,12 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 送信が復旧したらバスの DEGRADED は消える | `health()` の判定を累計 `tx_error_count` へ戻す / `_record_tx_success` のスコア減算を落とす | `test_can_manager_health.py::test_degraded_clears_once_sending_recovers` |
 | bus-off はエラーフレームで検出し、実通信で外れる | `_receive_loop` のエラーフレーム分岐を落とす / `_record_tx_success` のラッチ解除を落とす | `test_can_manager_health.py::test_error_frame_marks_bus_off_and_is_not_delivered_to_motors` / `::test_bus_off_clears_once_traffic_returns` |
 | 1 台の失敗で残りのモータの励磁を諦めない | `activate_motors` / `initialize_motors` の per-motor `except` を `raise` へ戻す | `test_can_manager.py::test_activate_motors_continues_after_one_motor_fails` / `::test_initialize_motors_continues_after_one_motor_fails` |
+| 受信ループはインタフェース断で降りない | `_receive_loop` の再試行を外して `raise` へ戻す | `test_can_manager.py::TestReceiveLoopSurvivesInterfaceDown::test_インタフェース断で降りず復帰後に受信を再開する` / `::TestReceiveLoopRobustness::test_受信断は降りずに必ず記録される` |
+| 断絶中に全速で再試行しない | `_receive_loop` のバックオフ (`asyncio.sleep(retry_s)`) を落とす（**1 コアを食い潰し、同居する位置制御ループ 200Hz と偏差監視 50Hz の周期まで巻き添えにする**） | `test_can_manager.py::TestReceiveLoopRobustness::test_receive_loop_backs_off_after_a_receive_failure` |
+| 受信ループは止められる | 捕捉を `BaseException` へ広げ、明示の `except asyncio.CancelledError: raise` を外す（**片方だけでは効かない**。`CancelledError` は `BaseException` 側なので `except Exception` では捕まらない） | `test_can_manager.py::TestReceiveLoopSurvivesInterfaceDown::test_recvが投げたキャンセルも握り潰さない` |
+| 読めていないバスは DOWN として見える | `health()` の `rx_down` 参照を落とす / 受信成功時の `_clear_rx_down` を落とす / **`_clear_rx_down` をタイムアウト (`msg is None`) でも呼ぶ**（down 中も `None` は返り続けるので数十 ms で勝手に外れる） | `test_can_manager.py::TestReceiveLoopSurvivesInterfaceDown::test_断絶中はヘルスがDOWNになり復帰でOKへ戻る` / `::test_タイムアウトは復帰の証拠にならない` |
+| 受信の中断を跨いで折り返しを推定しない | `_can_trust_wrap` の窓の上限判定を外す / rpm による見積もりを外す（**2 つは別々のテストが受け持つ**） | `tests/drivers/test_m3508.py::TestWrapInferenceAcrossFeedbackGap::test_長い窓を跨いだ差分は折り返しを推定せず累積しない` / `::test_高速回転なら短い窓でも折り返しを推定しない` |
+| 再アンカーは黙って行われない | `health()` で `detail is not None` を warning 条件から外す（状態が OK のままだと画面はどこにも出さない） | `test_can_manager_health.py::TestReanchorSurfacesInHealth::test_再アンカーしたモータは詳細付きのWARNINGになる` |
 | 無励磁のまま取り残されたモータは画面に出る | `_safety_state` の `unenergized_motors` を空固定にする / `_unenergized_motors` の緊急停止ガードを外す / `is_energized() is False` を `not is_energized()` へ（不明を無励磁へ倒す） | `test_server_e_stop.py::TestUnenergizedMotorsAreVisible` / `web: healthVerdict.test.ts` |
 | bus-off から自動復帰できる設定で立ち上がる | `can_config.DEFAULT_RESTART_MS` を 0 にする | `test_can_config.py::test_restart_ms_defaults_to_a_nonzero_value` |
 | 送信が滞留したバスだけを復旧する | `can_watchdog.sh` の滞留判定から backlog 条件を落とす（平常時のバスを落とす）/ TX packets の比較を落とす（連続送信中のバスを落とす） | `test_can_watchdog.py::TestStallDetection::test_idle_bus_is_never_recovered` / `::test_busy_bus_making_progress_is_not_recovered` |
@@ -934,7 +942,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | **ロボット固有シーケンス** | ◎ | モータを mock し「どの軸にどの値を送ったか」を検証。値は試験用の定数表で与えるので、実機の位置定数を変えてもテストは追随不要 |
 | **config パース** | ○ | YAML → ドライバインスタンス生成の単体テスト |
 | **CAN 実通信** | ✗ | **未着手。** `tests/test_can_manager.py` は `can.Bus` をモックしており、SocketCAN の層は通っていない（下記「vcan を使った統合テスト（未着手）」） |
-| **CAN 受信ループの堅牢性** | ◎ | 解釈できないフレーム・落ちるドライバ・コールバックの例外を流し、他モータの受信が続くことを検証。`bus.recv` の失敗は伝播しつつログが残ること、`CancelledError` が握り潰されないこと、ログが間引かれることも含む |
+| **CAN 受信ループの堅牢性** | ◎ | 解釈できないフレーム・落ちるドライバ・コールバックの例外を流し、他モータの受信が続くことを検証。`bus.recv` の失敗で降りずに再試行しログが残ること、断絶中は `rx_down` が立って復帰で外れること、`CancelledError` が握り潰されないこと、ログが間引かれることも含む |
 | **CAN バス命名（udev ルール生成）** | ◎ | `scripts/can_config.py` の出力書式を固定する。`setup_can.sh` が TSV の列と `udev` の標準出力に直接依存しており、試合前点検（`--strict`）の合否がこの出力そのものを根拠にするため |
 | **WebSocket プロトコル** | ○ | JSON パース/生成の単体テスト |
 | **WS メッセージ契約（サーバー ↔ Web UI）** | ◎ | 実サーバーに配信させたメッセージを golden JSON へ焼き付け、Python 側は現在の配信との一致を、TS 側は同じ JSON を受信経路へ流して状態が更新されることを検証 |
@@ -4028,7 +4036,7 @@ Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という�
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は Phase 9 で `activate_motors()`（現在角を書いてから enable）を呼ぶようになったが、`encode_disable(clear_fault=True)` は送らない | EDULITE 05 が過電流等の障害フラグを保持したままだと、再有効化しても指令が効かない。fault の自動クリアは原因を隠すため意図的に行っていない。実機で「解除しても動かない」場合は fault の内容を確認して電源再投入で対処する（`health` の `FAULT` 表示で判別できる） |
 | フィードバックが得られないと EDULITE が無励磁のまま残る | Phase 9 の `activate_motor()` は待機（既定 0.5s）の間にフィードバックを受け取れないと enable を送らず、WARNING をログに出すだけ | 電源断・配線ミス・CAN 断のときは「シーケンスは進むのに軸だけ動かない」状態になる。ログを見ないと気づけないので、有効化を見送ったモータを UI（health / 起動時バナー）に出す仕組みが欲しい。なお `--dry-run` は virtual バスで応答が無いため、この WARNING が必ず 2 件出るのが正常 |
 | M3508 のホーミングが未実装 | `multi_turn_position` の原点は初回フィードバック受信時の姿勢。`reset_multi_turn_origin()` / `M3508PositionLoop.set_origin_here()` を呼ぶ経路がシーケンスにも `main.py` にも無い | 「目標 0 = 電源投入時の位置」であり機械原点ではない。電源投入時の姿勢が毎回違うと `positions` の値がそのままズレる。機構端への押し当て（`ControlMode.CURRENT` の素通し）は用意してあるが、それを使うステップがまだ無い |
-| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。`operstate` の検証は未実装 | 受信ループは `bus.recv` の失敗で降りる。降りたことは `logger.exception` に残る（`_tasks` を誰も await しないのでログが唯一の痕跡）が、プロセスは動き続け、UI 上はそのバスの全モータが STALE になるだけ。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
+| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。`operstate` の検証は未実装 | 受信ループは `bus.recv` の失敗で降りずに待って呼び直し、そのあいだ `rx_down` を立てるので、UI にはそのバスが `BusHealth.DOWN` として出る（up すればそのまま復帰する）。起動そのものを止める仕組みは無いままなので、`--strict` の点検を通していない構成では「立ち上がったが 1 通も読めていない」状態で始まりうる。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
 
 ### 制御・チューニング
 

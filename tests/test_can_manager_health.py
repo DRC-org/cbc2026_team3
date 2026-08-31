@@ -12,10 +12,12 @@ import pytest
 from lib.can_manager import CANManager
 from lib.config_schema import DEFAULT_HEALTH
 from lib.drivers.generic import GenericDriver
+from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, HealthSnapshot, MotorHealth
 from tests.fake_can import deliver_frame, mark_bus_off, mark_feedback_at
+from tests.fake_clock import FakeClock
 from tests.fake_drivers import HealthFlagDriver
-from tests.feedback_frames import generic_feedback, generic_info
+from tests.feedback_frames import generic_feedback, generic_info, m3508_feedback
 from tests.test_can_manager import _direct_runner
 
 
@@ -334,3 +336,52 @@ class TestInfoDoesNotRefreshFeedbackAge:
         deliver_frame(mgr, "bus0", generic_feedback(motor, position=1.0))
 
         assert mgr.last_feedback_at("gripper") is not None
+
+
+class TestReanchorSurfacesInHealth:
+    """累積角の再アンカーが操縦者に届くこと。
+
+    detail だけを載せて状態を OK に置くと、`summarizeMotors` が「All operational」を
+    出して `SubsystemStatus` は畳んだままになり、報告はどの画面にも現れない ——
+    「報告した」つもりの黙殺が成立する。状態と詳細を 1 つに束ねておく。
+    """
+
+    def test_再アンカーしたモータは詳細付きのWARNINGになる(self) -> None:
+        clock = FakeClock()
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_virtual_bus("vhealth_reanchor")
+        motor = M3508Driver("y_axis_r", 1, time_source=clock)
+        mgr.add_bus("bus0", bus, channel="vhealth_reanchor")
+        mgr.add_motor("bus0", motor)
+
+        try:
+            deliver_frame(mgr, "bus0", m3508_feedback(motor, angle_raw=8000))
+            # 受信が 1 秒途切れた窓を跨ぐ (watchdog の down/up と同じ長さ)
+            clock.advance(1.0)
+            deliver_frame(mgr, "bus0", m3508_feedback(motor, angle_raw=4108))
+
+            info = next(m for m in mgr.health().motors if m.name == "y_axis_r")
+            assert info.state is MotorHealth.WARNING, "再アンカーが平常として扱われている"
+            assert info.detail is not None, "再アンカーの理由がどこにも出ていない"
+        finally:
+            bus.shutdown()
+
+    def test_平常時は詳細もWARNINGも出さない(self) -> None:
+        """静かであることも同じだけ重要。常に出る警告は読まれなくなる。"""
+        clock = FakeClock()
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_virtual_bus("vhealth_quiet")
+        motor = M3508Driver("y_axis_r", 1, time_source=clock)
+        mgr.add_bus("bus0", bus, channel="vhealth_quiet")
+        mgr.add_motor("bus0", motor)
+
+        try:
+            deliver_frame(mgr, "bus0", m3508_feedback(motor, angle_raw=8000))
+            clock.advance(0.001)
+            deliver_frame(mgr, "bus0", m3508_feedback(motor, angle_raw=8100))
+
+            info = next(m for m in mgr.health().motors if m.name == "y_axis_r")
+            assert info.state is MotorHealth.OK
+            assert info.detail is None
+        finally:
+            bus.shutdown()

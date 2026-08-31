@@ -50,6 +50,8 @@ function BusRow({ bus }: { bus: BusHealth }) {
   // 0 のときは出さない。平常時に無音であることが、出たときに意味を持つ条件
   const notes = [
     bus.bus_off ? "bus_off" : null,
+    // bus_off とは原因が別 (インタフェース断)。同じ語で出すと復旧の手当てを誤る
+    bus.rx_down ? "rx_down" : null,
     bus.tx_error_count > 0 ? `tx_err ${bus.tx_error_count}` : null,
     bus.rx_error_count > 0 ? `rx_err ${bus.rx_error_count}` : null,
   ].filter(Boolean);

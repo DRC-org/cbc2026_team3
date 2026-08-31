@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import struct
+import time
+from collections.abc import Callable
 
 import can
 
@@ -24,6 +27,34 @@ _ANGLE_MAX = 8191
 _COUNTS_PER_REV = 8192
 _COUNTS_HALF_REV = _COUNTS_PER_REV // 2
 
+# --- 折り返し推定を信頼してよい条件 -------------------------------------------
+# 単回転角のアンラップは「半周を超える差分は 0 を跨いだ折り返し」という推定に立つ。
+# **これはフィードバックが 1kHz で途切れなく届いている間しか成り立たない。**
+# 途切れた窓でモータ軸が半周以上回ると方向を取り違え、累積角が 1 回転ぶん飛ぶ。
+#
+# 飛ぶ量は 360deg。`config/main_hand_positions.yaml` の scale 55.0131deg/mm では
+# **6.54mm** に相当し、同じ y_axis の `sync_tolerance` 2.0mm の 3 倍を超える。
+# 左右の片方だけに乗れば、その瞬間に偏差超過で全体緊急停止になる ——
+# 実在しないずれで試合が止まるので、推定できない窓では推定しないほうが安全。
+#
+# 判定は 2 つ。どちらか一方でも引っ掛かれば推定をやめる:
+#   ① 窓の間に回りえた回転数が半周に届くか (フィードバックの rpm から見積もる)
+#   ② 窓そのものが長すぎるか (rpm が両端でたまたま 0 に見える場合の歯止め)
+#
+# ①の見積もりには窓の前後で観測した rpm の大きいほうを使い、さらに余裕を掛ける。
+# 昇降軸は窓の間フィードバック途絶で電流 0 に落ちるため重力で加速する —— 窓の
+# 入口の rpm だけでは上限にならない。出口の rpm も見ることで、加速していれば
+# 「信頼できない」側へ倒れる。
+_GAP_SPEED_MARGIN = 2.0
+
+# ②の上限 [秒]。1kHz のフィードバックに対し 100 通ぶんの欠落で、平常時の揺らぎでは
+# 到達しない。`health` の `feedback_timeout_ms` (既定 500ms) を流用しないのは、
+# あちらが「途絶とみなす境界」であってこちらの「折り返しを推定できる境界」とは
+# 別概念のため。同じ数を共有すると、片方の都合で動かしたときにもう片方が黙って狂う。
+_MAX_TRUSTED_GAP_S = 0.1
+
+logger = logging.getLogger(__name__)
+
 # M3508 に内蔵される遊星減速機の減速比 (DJI 公称 3591/187 ≒ 19.2)。
 # エンコーダは減速前のロータ側にあるため、フィードバック角・multi_turn_position は
 # すべてモータ軸基準であり、出力軸の角度に直すにはこの値で割る
@@ -42,7 +73,13 @@ def _clamp(value: int, lo: int, hi: int) -> int:
 class M3508Driver(MotorDriver):
     """DJI M3508 モータドライバ (C620 ESC 経由 CAN 通信)。"""
 
-    def __init__(self, name: str, can_id: int) -> None:
+    def __init__(
+        self,
+        name: str,
+        can_id: int,
+        *,
+        time_source: Callable[[], float] = time.monotonic,
+    ) -> None:
         if not 1 <= can_id <= 4:
             raise ValueError(f"can_id は 1〜4 の範囲: {can_id}")
         super().__init__(name, can_id)
@@ -52,6 +89,18 @@ class M3508Driver(MotorDriver):
         self._prev_angle_raw: int | None = None
         self._accumulated_counts: int = 0
         self._origin_counts: int = 0
+
+        # 折り返し推定の可否を測るための、前回フィードバックの時刻と回転数。
+        # 単調クロックを使うのは壁時計だと NTP 補正で窓が伸縮するため
+        # (`lib/control/periodic.py` の LogThrottle と同じ理由)
+        self._time_source = time_source
+        self._prev_at: float | None = None
+        self._prev_rpm: int = 0
+
+        # 推定を諦めて再アンカーした記録。**原点は以後ずれている可能性がある。**
+        self._reanchor_count: int = 0
+        self._last_reanchor_gap_s: float | None = None
+        self._origin_trusted: bool = True
 
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
         if mode is not ControlMode.CURRENT:
@@ -88,33 +137,109 @@ class M3508Driver(MotorDriver):
     def update_state(self, msg: can.Message) -> MotorState:
         # decode_feedback の position は 0〜360 のまま保つ規約なので、
         # 累積はここ (副作用を持てる場所) で別管理する
-        angle_raw = struct.unpack(">H", msg.data[:2])[0]
+        angle_raw, rpm = struct.unpack(">Hh", msg.data[:4])
+        now = self._time_source()
 
         if self._prev_angle_raw is not None:
-            diff = angle_raw - self._prev_angle_raw
-            # 半周を超える差分は 0 を跨いだ折り返しとみなす。
-            # M3508 のフィードバック周期 (1kHz) に対し半周分回るには 3600rpm 超が必要で、
-            # 減速機出力側の実回転数では起こり得ない
-            if diff > _COUNTS_HALF_REV:
-                diff -= _COUNTS_PER_REV
-            elif diff < -_COUNTS_HALF_REV:
-                diff += _COUNTS_PER_REV
-            self._accumulated_counts += diff
+            gap_s = now - self._prev_at if self._prev_at is not None else 0.0
+            if self._can_trust_wrap(gap_s, rpm):
+                diff = angle_raw - self._prev_angle_raw
+                # 半周を超える差分は 0 を跨いだ折り返しとみなす。
+                # M3508 のフィードバック周期 (1kHz) に対し半周分回るには 3600rpm 超が
+                # 必要で、減速機出力側の実回転数では起こり得ない ——
+                # **ただしフィードバックが途切れていない限りにおいて。**
+                # 途切れた窓の扱いは _can_trust_wrap が上で切り分けている
+                if diff > _COUNTS_HALF_REV:
+                    diff -= _COUNTS_PER_REV
+                elif diff < -_COUNTS_HALF_REV:
+                    diff += _COUNTS_PER_REV
+                self._accumulated_counts += diff
+            else:
+                self._reanchor(gap_s, rpm)
 
         # 初回は差分を取れない。起動姿勢を原点にすることで、目標 0 が
         # 「電源投入時の位置を保持」を意味するようになり、起動直後の暴走を防ぐ
         self._prev_angle_raw = angle_raw
+        self._prev_rpm = rpm
+        self._prev_at = now
 
         return super().update_state(msg)
+
+    def _can_trust_wrap(self, gap_s: float, rpm_now: int) -> bool:
+        """この間隔を跨いで折り返しを推定してよいか。
+
+        推定が成り立つのは「窓の間に半周以上回っていない」ときだけ。回りえた量は
+        窓の前後で観測した rpm の大きいほうから見積もる (窓の中で加速していれば
+        出口の rpm に現れる)。
+        """
+        if gap_s > _MAX_TRUSTED_GAP_S:
+            return False
+
+        max_rpm = max(abs(self._prev_rpm), abs(rpm_now))
+        plausible_rev = gap_s * max_rpm / 60.0 * _GAP_SPEED_MARGIN
+        return plausible_rev < 0.5
+
+    def _reanchor(self, gap_s: float, rpm_now: int) -> None:
+        """折り返しを推定せず、今の角度を新しい起点にする。
+
+        **差分を積まないので、窓の間に実際に動いたぶんは累積角から失われる。**
+        それでも 1 回転を捏造するよりましで、誤差は窓の中の実移動量に収まる
+        (推定を続けると、実移動量に加えて必ず 360deg が乗る)。
+
+        失った量は原理的に測れないので、代わりに「原点はもう信用できない」ことを
+        記録して操縦者へ渡す (`health_detail`)。黙って再アンカーすると、
+        位置がずれたまま平常どおりに見える機体ができる。
+        """
+        self._reanchor_count += 1
+        self._last_reanchor_gap_s = gap_s
+        self._origin_trusted = False
+        logger.warning(
+            "フィードバックが %.0fms 途切れたため累積角の折り返し推定を中止しました "
+            "(motor=%s, 前後の rpm=%d/%d)。原点がずれている可能性があります",
+            gap_s * 1000.0,
+            self.name,
+            self._prev_rpm,
+            rpm_now,
+        )
 
     @property
     def multi_turn_position(self) -> float:
         """原点からの累積回転角 [deg]。複数回転しても折り返さない。"""
         return (self._accumulated_counts - self._origin_counts) / _COUNTS_PER_REV * 360.0
 
+    @property
+    def origin_trusted(self) -> bool:
+        """累積角の原点が起動時 (または前回の原点確定時) のまま信用できるか。
+
+        False になるのはフィードバックの途切れで再アンカーしたときだけ。
+        戻す唯一の経路は原点の確定 (`reset_multi_turn_origin`) で、
+        時間経過や受信の復帰では戻らない —— ずれは復帰しても消えないため。
+        """
+        return self._origin_trusted
+
+    @property
+    def reanchor_count(self) -> int:
+        """折り返し推定を諦めた回数。0 でないかぎり原点はずれている。"""
+        return self._reanchor_count
+
+    def health_detail(self) -> str | None:
+        if self._origin_trusted:
+            return None
+        gap_ms = (self._last_reanchor_gap_s or 0.0) * 1000.0
+        return (
+            f"フィードバック途切れ ({gap_ms:.0f}ms) で累積角を再アンカーしました。"
+            f"原点がずれている可能性があります (計 {self._reanchor_count} 回)。"
+            "原点を確定し直してください"
+        )
+
     def reset_multi_turn_origin(self) -> None:
-        """現在位置を累積角の原点にする (ホーミング完了後に呼ぶ)。"""
+        """現在位置を累積角の原点にする (ホーミング完了後に呼ぶ)。
+
+        再アンカーで失われた原点の信頼はここでだけ回復する。原点を確定した時点で
+        「今どこにいるか」が改めて確定するので、それ以前のずれは意味を持たなくなる。
+        """
         self._origin_counts = self._accumulated_counts
+        self._origin_trusted = True
 
     # ------------------------------------------------------------------ #
     #  目標到達判定

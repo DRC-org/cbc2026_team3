@@ -11,10 +11,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import can
 import pytest
 
-from lib.can_manager import _RECV_RETRY_INTERVAL_S, CANManager
+from lib.can_manager import _RECV_RETRY_MIN_S, CANManager
 from lib.drivers.base import MotorState
 from lib.drivers.generic import CommandType, GenericDriver
 from lib.drivers.m3508 import M3508Driver
+from lib.health import BusHealth
 from tests.fake_can import mark_feedback_at
 
 
@@ -173,14 +174,13 @@ class TestCANManager:
         bus0.shutdown.assert_called_once()
         bus1.shutdown.assert_called_once()
 
-    async def test_shutdown_は死んだ受信タスクの例外で止まらない(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_shutdown_は受信し続けているバスも畳んで全バスを閉じる(self) -> None:
         """止める処理が止まってはならない。
 
-        バスが down していると受信ループは ``CanOperationError`` で即死する。
-        その例外を ``shutdown()`` が再送出すると、``main()`` の finally が
-        そこで折れて 2 台目のロボットのバスが開いたまま残る。
+        **かつてはここで「バスが down していると受信ループは即死する」ことを
+        前提にしていた。** いまは降りずに再試行を続けるので、片方が再試行中でも
+        `shutdown()` が両方のバスを閉じ切ることを見る。畳めないタスクが 1 つでも
+        あると、`main()` の finally がそこで折れて 2 台目のバスが開いたまま残る。
         """
         # 既定のエグゼキュータ経由の runner を使う。同期実行の runner だと
         # 正常な方のバスの受信ループがイベントループへ譲らず回り続けてしまう
@@ -191,14 +191,39 @@ class TestCANManager:
         mgr.add_bus("can0", bus0)
         mgr.add_bus("can1", bus1)
 
-        with caplog.at_level(logging.ERROR, logger="lib.can_manager"):
-            await mgr.run()
-            # 受信タスクが自力で死ぬまで待つ
-            await asyncio.sleep(0.01)
-            await mgr.shutdown()
+        await mgr.run()
+        # 再試行のバックオフに入っているタイミングで畳む
+        await asyncio.sleep(0.03)
+        await mgr.shutdown()
 
         bus0.shutdown.assert_called_once()
         bus1.shutdown.assert_called_once()
+
+    async def test_shutdown_は既に死んでいる受信タスクの例外で止まらない(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """受信ループが降りない今も、この防護は単独で効いている必要がある。
+
+        受信ループ側で握るようになったぶん、ここが壊れても普段は誰も気付けない。
+        層を 1 枚ずつ確かめる原則に従い、**既に例外で終わったタスク**を直接
+        持たせて、`shutdown()` がそれを握って残りのバスを閉じ切ることを見る。
+        """
+
+        async def _die() -> None:
+            raise RuntimeError("受信ループが想定外の理由で降りた")
+
+        mgr = CANManager()
+        bus0 = _make_mock_bus()
+        mgr.add_bus("can0", bus0)
+
+        dead = asyncio.create_task(_die())
+        await asyncio.sleep(0)
+        mgr._tasks.append(dead)
+
+        with caplog.at_level(logging.ERROR, logger="lib.can_manager"):
+            await mgr.shutdown()
+
+        bus0.shutdown.assert_called_once()
 
     async def test_shutdown_は1本のバス停止失敗で残りを諦めない(self) -> None:
         mgr = CANManager()
@@ -530,13 +555,16 @@ class TestReceiveLoopRobustness:
         pytest-asyncio ごと巻き添えにしてテストセッションが停止する
         (実際にこれでハングさせた)。実時間で「呼ばれた回数」を測れば、
         待っていることは外から確かめられる。
+
+        待ち時間は失敗のたびに伸びる (`_RECV_RETRY_MIN_S` から `_RECV_RETRY_MAX_S`
+        まで) ので、最短の間隔で回り続けた場合を上限として見る。
         """
         mgr = CANManager(run_blocking=_direct_runner())
         bus = _make_mock_bus()
         mgr.add_bus("can0", bus)
         bus.recv.side_effect = can.CanOperationError("Network is down")
 
-        window_s = _RECV_RETRY_INTERVAL_S * 3
+        window_s = _RECV_RETRY_MIN_S * 15
         task = asyncio.create_task(mgr._receive_loop("can0"))
         await asyncio.sleep(window_s)
         task.cancel()
@@ -544,7 +572,7 @@ class TestReceiveLoopRobustness:
             await task
 
         # 待たずに回すと、この窓のあいだに数千回の recv が走る
-        spin_free_limit = int(window_s / _RECV_RETRY_INTERVAL_S) + 2
+        spin_free_limit = int(window_s / _RECV_RETRY_MIN_S) + 2
         assert bus.recv.call_count <= spin_free_limit, (
             f"失敗のたびに待たずに再試行している (recv 呼び出し {bus.recv.call_count} 回)"
         )
@@ -577,23 +605,18 @@ class TestReceiveLoopRobustness:
         # 停止要求は受信エラーではない
         assert mgr._rx_error_count["can0"] == 0
 
-    async def test_receive_failure_is_logged_without_killing_the_loop(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_受信断は降りずに必ず記録される(self, caplog: pytest.LogCaptureFixture) -> None:
         """受信 API 自体の失敗は、痕跡を残したうえで**再試行する**。
 
-        2 つを同時に満たす必要がある:
+        **かつてはここで「降りるときは必ず痕跡を残す」ことを見ていた。**
+        降りなくなったぶん、黙って再試行し続けるのが最も危ない失敗になった ——
+        ログにも UI にも出ないまま、そのバスの全モータが STALE になる。
 
-        - 記録する: ``_tasks`` は誰も await しないので、ここで残さないと
-          受信の異常がどこにも現れない
-        - **降りない**: 降りると送信側だけが次の周期で自動復帰し、受信は二度と
-          戻らない。症状は「指令は効くのにフィードバックだけ永久に無い」で、
-          機体は動くのに全モータが STALE のまま試合を終える
-
-        かつては後者が満たされておらず、``ip link`` の再設定が入っただけで
-        受信ループが死んだ (実機で発生)。
+        降りないことも同時に見る。降りると送信側だけが次の周期で自動復帰し、
+        受信は二度と戻らない。症状は「指令は効くのにフィードバックだけ永久に無い」で、
+        機体は動くのに全モータが STALE のまま試合を終える (実機で発生済み)。
         """
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager()
         bus = _make_mock_bus()
         bus.recv.side_effect = can.CanOperationError("インタフェース断")
         mgr.add_bus("can0", bus)
@@ -601,7 +624,7 @@ class TestReceiveLoopRobustness:
 
         with caplog.at_level(logging.ERROR, logger="lib.can_manager"):
             task = asyncio.create_task(mgr._receive_loop("can0"))
-            await asyncio.sleep(_RECV_RETRY_INTERVAL_S * 2)
+            await asyncio.sleep(0.05)
             still_running = not task.done()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -609,8 +632,8 @@ class TestReceiveLoopRobustness:
 
         assert still_running, "受信 API の失敗でループが降りている"
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert errors, "受信の失敗が記録されていない"
-        assert errors[0].exc_info is not None
+        assert errors, "受信断がどこにも記録されていない"
+        assert any(r.exc_info is not None for r in errors), "トレースバックが残っていない"
 
     async def test_receive_error_logs_are_throttled(self, caplog: pytest.LogCaptureFixture) -> None:
         """不正フレームが連続しても、1 通ごとにログを出すと他のログが読めなくなる。"""
@@ -736,3 +759,150 @@ class TestReadOnlyViews:
     def test_bus_of_は未登録モータで_None(self) -> None:
         # 未登録を KeyError にすると、ヘルス表示のためだけに呼ぶ側が必ず握り潰す羽目になる
         assert self._mgr().bus_of("unknown") is None
+
+
+class TestReceiveLoopSurvivesInterfaceDown:
+    """受信の断絶で降りないこと、降りないことが黙殺にならないこと。
+
+    `scripts/can_watchdog.sh` は bus-off 復旧のたびに `ip link` の down/up を出す。
+    その約 1 秒のあいだ `bus.recv` は `Network is down` で失敗し続けるが、
+    **同一 socket は down/up を跨いで生き残る** (実測) ので、待って呼び直せば戻る。
+
+    かつてはここで受信タスクごと降りていた。``_tasks`` は誰も await しないため死は
+    ログ 1 行にしか現れず、症状は「UI は接続中のまま全モータが STALE」という
+    最も切り分けにくい形になっていた。
+    """
+
+    async def test_インタフェース断で降りず復帰後に受信を再開する(self) -> None:
+        mgr = CANManager()
+        bus = _make_mock_bus()
+        calls = {"n": 0}
+
+        def recv(timeout: float) -> can.Message | None:
+            calls["n"] += 1
+            # 最初の 2 回は down 中。以降は復帰して読めるようになる
+            if calls["n"] <= 2:
+                raise can.CanOperationError("Network is down [Error Code 100]")
+            return None
+
+        bus.recv.side_effect = recv
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        # 再試行のバックオフ (20ms -> 40ms) を跨ぐだけ待つ
+        await asyncio.sleep(0.15)
+
+        assert not task.done(), "受信ループが降りている (断絶で死んではならない)"
+        assert calls["n"] > 2, "復帰後に呼び直していない"
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_断絶中はヘルスがDOWNになり復帰でOKへ戻る(self) -> None:
+        """降りないだけでは足りない。読めていないことが見えなければ黙殺と同じ。"""
+        mgr = CANManager()
+        bus = _make_mock_bus()
+        state = {"phase": "down"}
+        frame = can.Message(arbitration_id=0x201, data=bytes(8), is_extended_id=False)
+
+        def recv(timeout: float) -> can.Message | None:
+            if state["phase"] == "down":
+                raise can.CanOperationError("Network is down [Error Code 100]")
+            return frame
+
+        bus.recv.side_effect = recv
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(0.05)
+        assert mgr.health().buses[0].state is BusHealth.DOWN
+        assert mgr.health().buses[0].rx_down is True
+
+        state["phase"] = "up"
+        await asyncio.sleep(0.3)  # 伸びたバックオフを跨いで復帰させる
+
+        assert mgr.health().buses[0].rx_down is False
+        assert mgr.health().buses[0].state is BusHealth.OK
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_タイムアウトは復帰の証拠にならない(self) -> None:
+        """`recv` が None を返しても、インタフェースが戻ったとは言えない。
+
+        python-can の socketcan は select がタイムアウトした時点で socket に
+        触れずに None を返すので、**down している間も None は返り続ける**。
+        これを復帰扱いにすると `rx_down` が数十 ms で勝手に外れ、画面は
+        「読めていない」ことを一度も出さないまま平常を映す。
+
+        実際に vcan で down させたまま「30ms で受信が再開しました」と
+        誤判定した回帰。
+        """
+        mgr = CANManager()
+        bus = _make_mock_bus()
+        calls = {"n": 0}
+
+        def recv(timeout: float) -> can.Message | None:
+            calls["n"] += 1
+            # 最初の 1 回だけ実エラー。以降は down のままタイムアウトし続ける
+            if calls["n"] == 1:
+                raise can.CanOperationError("Network is down [Error Code 100]")
+            return None
+
+        bus.recv.side_effect = recv
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(0.2)
+
+        assert calls["n"] > 2, "タイムアウトを繰り返す状況になっていない"
+        assert mgr.health().buses[0].rx_down is True, (
+            "タイムアウトを復帰扱いにしている (down 中でも None は返り続ける)"
+        )
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_キャンセルは握り潰さない(self) -> None:
+        """``shutdown()`` が畳む唯一の経路。握ると停止できないタスクになる。"""
+        mgr = CANManager()
+        bus = _make_mock_bus()
+        bus.recv.side_effect = can.CanOperationError("Network is down")
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(0.03)
+        task.cancel()
+
+        # **`await task` を直に書かないこと。** 握り潰されているとそこで永久に
+        # 止まり、テストは「落ちる」のではなく「終わらない」形になる。
+        # 期限付きで待って、止まらないことを失敗として言い切る
+        done, _pending = await asyncio.wait({task}, timeout=1.0)
+        assert task in done, "cancel() が効いていない (CancelledError を握り潰している)"
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_recvが投げたキャンセルも握り潰さない(self) -> None:
+        """`bus.recv` の中から来た `CancelledError` も素通しする。
+
+        `CancelledError` は `BaseException` 側にあるので `except Exception` では
+        捕まらない —— **つまりここは既定で正しい。** それでも独立した試験を置くのは、
+        捕捉を `BaseException` へ広げる変更が入った瞬間に「止められない受信ループ」が
+        できるため。しかもその壊れ方は、期限を付けずに待つ試験では「落ちる」ではなく
+        「終わらない」形で現れ、原因が読めない。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        bus.recv.side_effect = asyncio.CancelledError
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        done, _pending = await asyncio.wait({task}, timeout=1.0)
+
+        assert task in done, "recv 由来のキャンセルを握り潰している (止められない受信ループ)"
+        with pytest.raises(asyncio.CancelledError):
+            await task
