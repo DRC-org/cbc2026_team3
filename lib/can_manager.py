@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 import can
 
@@ -19,9 +19,6 @@ from lib.health import (
     MotorHealth,
     MotorHealthInfo,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +149,7 @@ class CANManager:
 
         名前が衝突すると _motors は後勝ちで上書きされる一方 _bus_motors には両方残り、
         受信ループは孤児になった先勝ちドライバへフィードバックを配り続ける
-        (get_motor は後勝ちを返すので、状態が永久に更新されないモータができる)。
+        (motors は後勝ちを返すので、状態が永久に更新されないモータができる)。
         同一バスの can_id 衝突は受信ループが最初にマッチした 1 台で打ち切るため、
         もう一方が永久にフィードバックを得られない。
 
@@ -202,9 +199,6 @@ class CANManager:
         self._add_device(bus_name, sensor)
         self._sensors[sensor.name] = sensor
 
-    def get_motor(self, name: str) -> MotorDriver:
-        return self._motors[name]
-
     @property
     def sensors(self) -> Mapping[str, MotorDriver]:
         """登録済みセンサの読み取り専用ビュー (宣言順を保つ)。"""
@@ -231,14 +225,6 @@ class CANManager:
         「正常」と言い続ける経路ができる。
         """
         return tuple(self._buses)
-
-    def bus_of(self, motor_name: str) -> str | None:
-        """モータが所属するバス名。未登録なら None。
-
-        どのバスに繋がったモータかは動作確認結果の表示に必要で、
-        未登録は「表示できない」だけなので例外にせず None を返す。
-        """
-        return self._motor_bus.get(motor_name)
 
     def last_feedback_at(self, motor_name: str) -> float | None:
         """最後にフィードバックを受信した時刻 (time.time 基準)。未受信なら None。

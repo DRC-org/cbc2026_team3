@@ -428,7 +428,6 @@ class TestWireRobotMotors:
         await seq.motors.lift_motor.set_target(ControlMode.POSITION, 42.0)
 
         assert loops[0].target("lift_motor") == 42.0
-        assert loops[0].mode("lift_motor") is ControlMode.POSITION
         assert manager.sent_by_motor == []
 
     async def test_non_m3508_still_sends_directly(self) -> None:

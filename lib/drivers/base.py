@@ -40,40 +40,6 @@ _DEFAULT_REACH_TOLERANCES: dict[ControlMode, float] = {
     ControlMode.VELOCITY: 5.0,
 }
 
-# 動作確認で「指令変位のうち何割動けば合格とみなすか」。
-# 許容差が指令変位以上だと |静止 - 目標| <= 許容差 が成立し、まったく動いていない
-# モータが合格する。config の magnitude と許容差の大小関係は config 側からは保証
-# できないため、判定側で許容差を指令変位で頭打ちにして構造的に塞ぐ
-_CHECK_MOTION_RATIO = 0.5
-
-
-@dataclass(frozen=True)
-class CheckContext:
-    """``check_command`` が ``evaluate_check_result`` へ渡す指令内容。
-
-    文字列キーの辞書だと、キー名の綴りやモード表現 (``ControlMode.value`` と生文字列)
-    がドライバごとにずれても誰も気付けないため型を付ける。
-    """
-
-    mode: ControlMode
-    # 目標値。単位はドライバの内部単位 (EDULITE 05 なら rad / rad/s)
-    target: float
-    # 指令直前の観測値。``target`` との差が「この指令で動くはずの量」になる。
-    # 静止と区別できる指令かどうかの判定に要る
-    reference: float = 0.0
-    # 内部単位 → 操縦者向け表示単位への係数と単位名。
-    # 操縦者は config に書いた deg / rpm しか知らないため、内部単位のまま出すと原因を追えない
-    display_scale: float = 1.0
-    display_unit: str = ""
-
-    @property
-    def commanded_displacement(self) -> float:
-        """この指令で動くはずの量 (絶対値)。"""
-        return abs(self.target - self.reference)
-
-    def display(self, value: float) -> str:
-        return f"{value * self.display_scale:.2f}{self.display_unit}"
-
 
 class MotorDriver(abc.ABC):
     """モータドライバの基底クラス。各プロトコル固有のドライバはこれを継承する。"""
@@ -131,9 +97,8 @@ class MotorDriver(abc.ABC):
     def default_tolerance(self, mode: ControlMode) -> float:
         """許容差の単一情報源 (POSITION=1deg / VELOCITY=5rpm)。
 
-        到達判定 (``is_target_reached``) と動作確認 (``check_tolerance``) の双方が
-        ここから引く。ドライバ側に別の定数を置くと、片方だけ直したときに
-        「到達判定は新しい値、動作確認は古い値」という乖離が起きる。
+        到達判定 (``is_target_reached``) はここだけから引く。ドライバ側に別の定数を
+        置くと、位置定数 yaml の tolerance を省いた軸だけが古い値のまま残る。
         CURRENT / DUTY は開ループ指令でフィードバック量と目標値の次元が一致しないため、
         「到達判定しない」意味で無限大を返す。
         """
@@ -226,15 +191,14 @@ class MotorDriver(abc.ABC):
         return None
 
     # ------------------------------------------------------------------ #
-    #  起動手順と、モータ単位の能動テスト用 API
+    #  起動手順
     # ------------------------------------------------------------------ #
     # `initialization_steps` / `activation_steps` / `requires_fresh_feedback_for_activation`
     # / `feedback_probe_message` は起動経路 (`CANManager.initialize_motors`) が使う。
     #
-    # **`check_*` 系は現在どこからも呼ばれていない。** 動作確認をモータ単位で駆動する
-    # `MotorCheckRunner` のための API だったが、両ハンドを 1 本のシーケンスで駆動する形
-    # (robots/motor_check.py) へ移したので、判定はシーケンスエンジンの到達判定が担う。
-    # 新しいドライバを足す人に不要な実装を強いないよう、次に触るときへ撤去を残してある。
+    # 動作確認 (セッティングタイム) はここに専用 API を持たない。両ハンドを 1 本の
+    # シーケンス (robots/motor_check.py) で駆動する形にしたので、合否はシーケンス
+    # エンジンの到達判定 (`is_target_reached`) がそのまま担う。
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
         """起動時に送る ``(message, delay_after_seconds)``。既定は初期化不要。
@@ -269,74 +233,6 @@ class MotorDriver(abc.ABC):
         """
         return None
 
-    def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
-        """動作確認前に順次送る ``(message, delay_after_seconds)``。既定は初期化不要。"""
-        return []
-
-    def check_safety_error(self) -> str | None:
-        """既知の異常により動作確認できない場合、その理由を返す。"""
-        return None
-
-    def requires_fresh_feedback_for_check(self) -> bool:
-        """動作確認前と初期化中に新鮮なfeedbackを要求するか。"""
-        return False
-
     def emergency_stop_message(self) -> can.Message | None:
         """ドライバ固有の非常停止フレーム。共通停止だけで足りる場合は ``None``。"""
         return None
-
-    @abc.abstractmethod
-    def check_command(self, *, magnitude: float) -> tuple[can.Message, CheckContext]:
-        """動作確認用の指令メッセージと ``CheckContext`` を返す。"""
-
-    @abc.abstractmethod
-    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
-        """現在のフィードバックが check_command の指令に追従したか判定する。
-
-        戻り値:
-            (passed, detail)
-            detail は失敗時の人間向け説明。成功時は基本 None。
-        """
-
-    @abc.abstractmethod
-    def reset_after_check(self) -> can.Message:
-        """動作確認後に元の安全状態に戻す指令メッセージを返す。
-
-        駆動状態を残さないための最後の砦なので、実装しない選択肢を与えない。
-        """
-
-    def check_tolerance(self, context: CheckContext) -> float:
-        """動作確認の合否に使う許容差。
-
-        既定許容差 (``default_tolerance``) と「指令変位の一定割合」の小さい方を採る。
-        許容差が指令変位以上のときに素通しすると、静止したままのモータが
-        「目標との差が許容差以内」で合格してしまう。
-        """
-        return min(
-            self.default_tolerance(context.mode),
-            context.commanded_displacement * _CHECK_MOTION_RATIO,
-        )
-
-    def evaluate_tracking(self, context: CheckContext) -> tuple[bool, str | None]:
-        """目標値とフィードバックが同次元のモード共通の追従判定。
-
-        CURRENT / DUTY のように指令とフィードバックの次元が違うモードは
-        「追従」を定義できないため、各ドライバが回転検出などの別基準を持つ。
-        """
-        observed = self._observed_for(context.mode)
-        if observed is None:
-            return False, f"追従を判定できない制御モード: {context.mode.value}"
-
-        if abs(observed - context.target) <= self.check_tolerance(context):
-            return True, None
-
-        detail = f"目標 {context.display(context.target)}, 観測 {context.display(observed)}"
-        if context.commanded_displacement <= self.default_tolerance(context.mode):
-            # 指令量が小さすぎて合否そのものが成立しない。「動かなかった」と
-            # 混同されないよう、操縦者に config を直す先を示す
-            detail += (
-                f" (指令量 {context.display(context.commanded_displacement)} が"
-                f"許容差 {context.display(self.default_tolerance(context.mode))} 以下で"
-                "静止と区別できない。config の motor_check.magnitude を大きくすること)"
-            )
-        return False, detail

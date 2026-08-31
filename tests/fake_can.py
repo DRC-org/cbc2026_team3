@@ -66,7 +66,6 @@ def mock_can_manager(
     mgr = MagicMock(spec=CANManager)
     mgr.motors = drivers
     mgr.bus_names = (bus_name,)
-    mgr.get_motor.side_effect = drivers.__getitem__
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
     # 戻り値は「励磁できなかったモータ名」。既定の MagicMock を返させると
@@ -143,7 +142,6 @@ def set_motors(mgr: CANManager, drivers: Mapping[str, object]) -> None:
     必ずこの 1 経路を通す (2 箇所へ書くと構成とヘルスが食い違う)。
     """
     mgr.motors = dict(drivers)
-    mgr.get_motor.side_effect = mgr.motors.__getitem__
 
 
 # ---------------------------------------------------------------------- #

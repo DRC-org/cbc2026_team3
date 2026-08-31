@@ -84,16 +84,8 @@ class ManualController:
     #  参照
     # ------------------------------------------------------------------ #
 
-    @property
-    def court(self) -> Court:
-        return self._court
-
     def set_court(self, court: Court) -> None:
         self._court = court
-
-    @property
-    def axis_names(self) -> tuple[str, ...]:
-        return self._positions.axes
 
     # ------------------------------------------------------------------ #
     #  指令

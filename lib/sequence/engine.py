@@ -106,24 +106,12 @@ class Sequence:
             )
         return self._motors
 
-    async def wait_all_reached(
-        self,
-        *,
-        tolerance: float | None = None,
-        timeout: float | None = None,
-    ) -> bool:
-        return await self.motors.wait_all_reached(tolerance=tolerance, timeout=timeout)
-
     # ------------------------------------------------------------------ #
     #  機構位置の定数
     # ------------------------------------------------------------------ #
 
     def bind_positions(self, table: PositionTable) -> None:
         self._positions = table
-
-    @property
-    def has_positions(self) -> bool:
-        return self._positions is not None
 
     @property
     def positions(self) -> PositionTable:

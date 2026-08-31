@@ -332,9 +332,6 @@ class M3508PositionLoop(PausablePeriodicTask):
     def target(self, name: str) -> float | None:
         return self._axes[name].target
 
-    def mode(self, name: str) -> ControlMode | None:
-        return self._axes[name].mode
-
     def is_saturated(self, name: str) -> bool:
         """直近周期の出力が出力レンジの端に張り付いたか。
 
@@ -343,10 +340,6 @@ class M3508PositionLoop(PausablePeriodicTask):
         制御以外の原因 (機構の負荷・``output_limit``) へ辿り着けない。
         """
         return self._axes[name].saturated
-
-    def last_output(self, name: str) -> float:
-        """直近周期の PID 出力 [counts]。C620 が返す実測電流とは別物。"""
-        return self._axes[name].last_output
 
     # ------------------------------------------------------------------ #
     #  目標値

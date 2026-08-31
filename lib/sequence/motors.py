@@ -188,21 +188,6 @@ class MotorGroup:
         available = ", ".join(handles) or "(なし)"
         raise AttributeError(f"モータ '{name}' は存在しません。利用可能なモータ: {available}")
 
-    async def wait_all_reached(
-        self,
-        *,
-        tolerance: float | None = None,
-        timeout: float | None = None,
-    ) -> bool:
-        """目標値が設定されている全モータの到達を待つ。1 つでも未到達なら False。"""
-        pending = [handle for handle in self._handles.values() if handle.has_target]
-        if not pending:
-            return True
-        results = await asyncio.gather(
-            *(handle.wait_reached(tolerance=tolerance, timeout=timeout) for handle in pending)
-        )
-        return all(results)
-
 
 class AxisHandle:
     """1 論理軸 (1〜N モータ) への指令と到達待ちをまとめるハンドル。

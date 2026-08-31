@@ -27,22 +27,11 @@ class TestCANManager:
         mgr.add_bus("can0", bus)
         mgr.add_motor("can0", motor)
 
-        assert mgr.get_motor("m1") is motor
+        assert mgr.motors["m1"] is motor
 
-    def test_get_motor(self) -> None:
+    def test_unknown_motor_is_not_registered(self) -> None:
         mgr = CANManager()
-        bus = mock_bus()
-        motor = mock_driver("drive", 2)
-
-        mgr.add_bus("can0", bus)
-        mgr.add_motor("can0", motor)
-
-        assert mgr.get_motor("drive") is motor
-
-    def test_get_motor_not_found(self) -> None:
-        mgr = CANManager()
-        with pytest.raises(KeyError):
-            mgr.get_motor("nonexistent")
+        assert "nonexistent" not in mgr.motors
 
     async def test_send_to_correct_bus(self) -> None:
         calls: list[tuple[Any, tuple[Any, ...]]] = []
@@ -645,7 +634,7 @@ class TestDuplicateRegistration:
         mgr.add_motor("can_generic", mock_driver("gripper", 0x01))
         mgr.add_motor("can_edulite", mock_driver("rotate_l", 0x01))
 
-        assert mgr.get_motor("gripper").can_id == mgr.get_motor("rotate_l").can_id
+        assert mgr.motors["gripper"].can_id == mgr.motors["rotate_l"].can_id
 
     def test_rejected_motor_is_not_registered(self) -> None:
         """弾いた後に _bus_motors 側だけ残ると、受信ループが孤児へフレームを配る。"""
@@ -678,7 +667,6 @@ class TestReadOnlyViews:
         # 指差喚呼の読み上げ順と画面の進捗が食い違う
         mgr = self._mgr()
         assert list(mgr.motors) == ["y_axis_r", "y_axis_l", "gripper"]
-        assert mgr.motors["gripper"] is mgr.get_motor("gripper")
 
     def test_motors_は書き換えられない(self) -> None:
         mgr = self._mgr()
@@ -694,15 +682,6 @@ class TestReadOnlyViews:
     def test_bus_names_で送信先バスを列挙できる(self) -> None:
         mgr = self._mgr()
         assert mgr.bus_names == ("can_m3508", "can_generic")
-
-    def test_bus_of_でモータの所属バスを引ける(self) -> None:
-        mgr = self._mgr()
-        assert mgr.bus_of("y_axis_l") == "can_m3508"
-        assert mgr.bus_of("gripper") == "can_generic"
-
-    def test_bus_of_は未登録モータで_None(self) -> None:
-        # 未登録を KeyError にすると、ヘルス表示のためだけに呼ぶ側が必ず握り潰す羽目になる
-        assert self._mgr().bus_of("unknown") is None
 
 
 class TestReceiveLoopSurvivesInterfaceDown:

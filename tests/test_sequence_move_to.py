@@ -77,11 +77,6 @@ class _MoveSequence(Sequence):
 
 
 class TestBindPositions:
-    def test_unbound_sequence_reports_no_positions(self) -> None:
-        seq = _MoveSequence()
-
-        assert seq.has_positions is False
-
     def test_accessing_unbound_positions_raises(self) -> None:
         seq = _MoveSequence()
 
@@ -94,7 +89,6 @@ class TestBindPositions:
 
         seq.bind_positions(table)
 
-        assert seq.has_positions is True
         assert seq.positions is table
 
 

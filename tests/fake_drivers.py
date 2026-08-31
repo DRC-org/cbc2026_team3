@@ -1,43 +1,17 @@
 """テスト用 MotorDriver のひな型。
 
-``CheckStubDriver`` は動作確認 API に関心のないテスト向け、
-``StubFeedbackDriver`` はさらに CAN プロトコルにも関心のないテスト向け、
+``StubFeedbackDriver`` は CAN プロトコルに関心のないテスト向け、
 ``HealthFlagDriver`` はヘルス判定の分岐だけを見るテスト向け。
-
-``check_command`` / ``evaluate_check_result`` / ``reset_after_check`` は
-``@abc.abstractmethod`` である。未実装のドライバが起動できてしまうと、
-``reset_after_check`` が送られないまま次のモータへ進む (駆動状態が残る) 事故を
-実行時まで検出できないため、本番の契約を緩められない。
-
-一方でヘルス判定など動作確認と無関係なテストにまで 3 メソッドを書き写させると、
-「テストの都合で契約を緩めよう」という圧力が戻ってくる。呼ばれない前提の最小実装を
-ここに 1 つだけ置いて共有する。
 """
 
 from __future__ import annotations
 
 import can
 
-from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorDriver, MotorState
 
 
-class CheckStubDriver(MotorDriver):
-    """動作確認 API だけを埋めたテスト用基底 (プロトコル層は派生側で実装する)。"""
-
-    def check_command(self, *, magnitude: float) -> tuple[can.Message, CheckContext]:
-        return (
-            can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8)),
-            CheckContext(mode=ControlMode.CURRENT, target=float(magnitude)),
-        )
-
-    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
-        return True, None
-
-    def reset_after_check(self) -> can.Message:
-        return can.Message(arbitration_id=0x100 + self.can_id, data=bytes(8))
-
-
-class StubFeedbackDriver(CheckStubDriver):
+class StubFeedbackDriver(MotorDriver):
     """CAN プロトコルを持たず、観測値をテストから直接与えられるドライバ。
 
     到達判定・偏差監視・ヘルス判定は ``MotorState`` しか読まないため、これらを
@@ -64,7 +38,7 @@ class StubFeedbackDriver(CheckStubDriver):
         self._state = MotorState(**kwargs)
 
 
-class HealthFlagDriver(CheckStubDriver):
+class HealthFlagDriver(MotorDriver):
     """ヘルス判定 (温度・過電流・fault) の分岐だけを属性で制御できるドライバ。
 
     ``health()`` の優先順位は「ハード fault > 温度 critical > 途絶 > warning > OK」で、
