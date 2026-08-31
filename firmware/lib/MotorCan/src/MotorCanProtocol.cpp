@@ -4,7 +4,7 @@ namespace motorcan {
 
 namespace {
 
-// SET_TARGET / SET_PARAM とも Byte0 が種別、Byte1-2 が値（仕様書 §3.1 / §3.4）。
+// SET_TARGET / SET_PARAM とも Byte0 が種別、Byte1-2 が値（仕様書 §3.1 / §3.3）。
 // 途中に予約バイトを挟まないので、DLC 3 で足りる。
 constexpr uint8_t kCommandLength = 3;
 constexpr uint8_t kValueOffset = 1;
@@ -164,7 +164,7 @@ SetParamCommand decodeSetParam(const uint8_t *data, uint8_t length) {
         return cmd;
     }
     if (!isKnownParamId(data[0])) {
-        // 未知のパラメータ ID は無視する（仕様書 §3.4）。
+        // 未知のパラメータ ID は無視する（仕様書 §3.3）。
         return cmd;
     }
     cmd.id = static_cast<ParamId>(data[0]);

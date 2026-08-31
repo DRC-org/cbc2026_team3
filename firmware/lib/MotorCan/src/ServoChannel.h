@@ -47,7 +47,7 @@ class ServoChannel {
 
     bool isOutputAllowed(uint32_t nowMs) const;
 
-    // FEEDBACK Byte7 の緊急停止 / ウォッチドッグのビット（他は呼び出し側で OR する）。
+    // FEEDBACK Byte0 の緊急停止 / ウォッチドッグのビット（他は呼び出し側で OR する）。
     uint8_t safetyStatusFlags(uint32_t nowMs) const;
 
     // ---- 目標角（仕様書 §7.2 / §7.5）----
@@ -65,7 +65,7 @@ class ServoChannel {
     // 補間を 1 ティック進める。出力禁止中は進める前に凍結する。
     void tick(uint32_t nowMs);
 
-    // ---- SET_PARAM 0x07 / 0x10-0x12（仕様書 §7.6）----
+    // ---- SET_PARAM 0x03-0x06（仕様書 §7.6）----
 
     void setLimits(const ServoLimits &limits);
     const ServoLimits &limits() const;

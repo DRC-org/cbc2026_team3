@@ -2,7 +2,7 @@
 //
 // 現在時刻を millis() で内部取得せず uint32_t nowMs で受け取るのは、
 // native 環境で満了・折り返しを実時間を待たずに検証できるようにするため。
-// DC 用とサーボ用のファームで共有する。
+// DC 用・サーボ用・電磁弁用のファームで共有する。
 
 #pragma once
 
@@ -88,7 +88,7 @@ class MotorSafety {
         return !latched_ && everFed_ && !(watchdogEnabled_ && isExpired(nowMs));
     }
 
-    // FEEDBACK Byte7 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
+    // FEEDBACK Byte0 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
     // ウォッチドッグのビットは isCommandLost() に従うので、起動直後の未受信では立たない。
     uint8_t statusFlags(uint32_t nowMs) const;
 

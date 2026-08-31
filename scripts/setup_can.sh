@@ -159,13 +159,28 @@ missing=()
 unassigned=()
 restart_unsupported=()
 
+# **プロセス置換 (`done < <(cmd)`) は cmd の終了コードをどこにも伝えない。**
+# set -e でも pipefail でも捕まらないので、can_config.py が落ちるとループは
+# 空回りし、configured=0 / unassigned=0 / missing=0 のまま先へ進む。その状態は
+# strict の条件を 1 つも満たさないので、**1 本も up していないのに試合前点検が
+# 成功終了する**。一度変数へ受けて終了コードを見るのが唯一の歯止めになる
+# (今まではたまたま check_udev_sync の diff が同じ不正を拾っていただけ)。
+if ! bus_list=$("$PYTHON" "$CAN_CONFIG" list); then
+    log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
+    exit 1
+fi
+if ! assigned_list=$("$PYTHON" "$CAN_CONFIG" list --assigned-only); then
+    log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
+    exit 1
+fi
+
 # serial 未採取のバスを控えておく（strict では未完了として扱う）
 while IFS=$'\t' read -r name serial _bitrate _txq _restart; do
     [[ -z "${name:-}" ]] && continue
     if [[ "$serial" == "TBD" ]]; then
         unassigned+=("$name")
     fi
-done < <("$PYTHON" "$CAN_CONFIG" list)
+done <<< "$bus_list"
 
 while IFS=$'\t' read -r name _serial bitrate txqueuelen restart_ms; do
     [[ -z "${name:-}" ]] && continue
@@ -181,7 +196,7 @@ while IFS=$'\t' read -r name _serial bitrate txqueuelen restart_ms; do
         2) missing+=("$name") ;;
         *) exit 1 ;;   # デバイスはあるのに設定に失敗 → 常に異常
     esac
-done < <("$PYTHON" "$CAN_CONFIG" list --assigned-only)
+done <<< "$assigned_list"
 
 for name in "${unassigned[@]}"; do
     log_warn "${name}: serial 未採取 (config/can_buses.yaml が TBD)"
@@ -204,8 +219,19 @@ fi
 echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 欠け ${#missing[@]}) ---"
 
 if [[ $STRICT -eq 1 ]]; then
+    # 「立ち上げるものが 1 本も無かった」は成功ではない。試合前点検が答えるのは
+    # 「定義したバスが全部使えるか」なので、対象 0 本は必ず異常として扱う
+    if [[ $configured -eq 0 ]]; then
+        log_err "strict モード: 起動対象の CAN バスが 1 本もありません"
+        exit 1
+    fi
     if [[ ${#unassigned[@]} -gt 0 || ${#missing[@]} -gt 0 ]]; then
         log_err "strict モード: 全 CAN バスが揃っていません"
+        exit 1
+    fi
+    # 欠けも未採取も無いのに up が足りないなら、途中で設定に失敗している
+    if [[ $up_count -ne $configured ]]; then
+        log_err "strict モード: ${up_count}/${configured} 本しか up していません"
         exit 1
     fi
     # バスが揃っていても定義と実態がズレていれば、意図しない個体に

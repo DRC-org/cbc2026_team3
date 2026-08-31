@@ -1,7 +1,7 @@
 {
   "name": "MotorCan",
   "version": "0.1.0",
-  "description": "自作モータドライバの CAN プロトコル層と安全機構。docs/motor_driver_can_protocol.md に準拠。DC 用とサーボ用のファームで共有する。Arduino 非依存のため native 環境でユニットテストできる。",
+  "description": "自作モータドライバの CAN プロトコル層と安全機構。docs/motor_driver_can_protocol.md に準拠。DC 用・サーボ用・電磁弁用のファームで共有する。Arduino 非依存のため native 環境でユニットテストできる。",
   "keywords": "can, motor, protocol",
   "frameworks": "*",
   "platforms": "*",

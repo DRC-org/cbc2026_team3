@@ -17,7 +17,7 @@ constexpr float kDefaultSlewRateDegPerSec = 90.0f;
 
 // 仕様書 §7.3 の到達判定は「補間が完了した時点」。既定の許容差を 0 にしてあるのは、
 // サーボが実測値を持たず「目標角 - 指令角」がそのまま補間の残りだから。
-// SET_PARAM 0x07 で 0 以外にすると、補間完了より手前で到達を報告する。
+// SET_PARAM 0x03（reached_tolerance）で 0 以外にすると、補間完了より手前で到達を報告する。
 constexpr float kDefaultServoReachedToleranceDeg = 0.0f;
 
 // 仕様書 §7.2 の可動範囲と §7.6 のスルーレート。チャンネル単位で持つ。
@@ -78,13 +78,13 @@ class ServoMotion {
     // 倒れ、グリッパが把持中のワークを落とす。出力を切らずに目標角を現在角へ落とす。
     void holdHere(uint32_t nowMs);
 
-    // SET_PARAM 0x10-0x12。angle_min > angle_max は入れ替えて正規化し、
+    // SET_PARAM 0x04-0x06（slew_rate / angle_min / angle_max）。angle_min > angle_max は入れ替えて正規化し、
     // 非正の slew_rate は採用せず従来値を維持する（どちらの解釈でも危険なため）。
     // 現在の目標角は新しい可動範囲へクランプし直す。
     void setLimits(const ServoLimits &limits);
     const ServoLimits &limits() const { return limits_; }
 
-    // SET_PARAM 0x07。
+    // SET_PARAM 0x03（reached_tolerance）。
     void setReachedToleranceDeg(float toleranceDeg);
 
    private:
@@ -108,7 +108,4 @@ class ServoMotion {
     uint32_t lastNowMs_;
 };
 
-// 仕様書 §7.6。サーボ基板が処理する SET_PARAM の ID。
-// MotorCanProtocol の decodeSetParam は共通 ID（0x00-0x07）しか通さないので、
-// 0x10 番台を含むサーボ側の受け付けはここで行う。
 }  // namespace motorcan

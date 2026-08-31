@@ -9,7 +9,7 @@
 // PID は実装ごと存在しない。
 //
 // パラメータの一部は SET_PARAM で実行時に変更できるが、RAM 上のみで電源断で
-// ここの既定値に戻る（仕様書 §3.4）。恒久的に変えたい値はこのファイルを直すこと。
+// ここの既定値に戻る（仕様書 §3.3）。恒久的に変えたい値はこのファイルを直すこと。
 
 #pragma once
 
@@ -37,7 +37,7 @@ constexpr bool kDirForwardIsLow = true;
 //
 // この基板にはゲートドライバの出力禁止（DIS）が無く、PC から止める手段は
 // duty 0 だけしかない。REF はその一重の防壁に対する数少ない追加情報なので、
-// 押下は緊急停止ラッチへ落として FEEDBACK bit3 で PC へ知らせる（仕様書 §5.2）。
+// 押下は緊急停止ラッチへ落として FEEDBACK bit1 で PC へ知らせる（仕様書 §5.2）。
 constexpr uint8_t kPinRef = 2;
 constexpr bool kRefActiveLow = true;
 
@@ -82,7 +82,7 @@ constexpr uint8_t kDcChannelCount = 3;
 // candump に 0x8A が流れていれば「DC 基板 1 枚目の ch2」と直接読める。
 constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Dc;
 
-// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
+// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.4）。
 // **プロトコルかピン配置を変えたら必ず上げること。**
 //
 // **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
@@ -131,7 +131,7 @@ constexpr float kPwmFrequencyHz = 30000.0f;
 // kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、途絶は PC の停止か
 // ケーブル断を意味する。止まらない基板は PC から止められない基板でもある。
 //
-// 0 にすると途絶しても駆動を続け、FEEDBACK の bit4 も報告しなくなる。これは
+// 0 にすると途絶しても駆動を続け、FEEDBACK の bit2 も報告しなくなる。これは
 // 手で cansend を打つようなベンチ確認（20Hz の再送を用意できない場合）のための
 // 逃げ道であって、試合では既定の 1 のまま使う。再送が間に合わない状態は運用上の
 // 異常なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
@@ -141,7 +141,7 @@ constexpr float kPwmFrequencyHz = 30000.0f;
 // 誰も気付けない。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
-// command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.3 の既定値）は PC 側との契約なので
 // MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
 // 基板ごとに変えてよい値ではなく、両基板の config.h に同じ数字を書くと片方だけ古くなる。
 

@@ -147,7 +147,7 @@ static void test_slew_sign_follows_direction() {
     TEST_ASSERT_FLOAT_WITHIN(0.01f, -90.0f, motion.currentSlewDegPerSec());
 }
 
-// SET_PARAM 0x07（reached_tolerance）。既定 0 は「補間完了＝到達」を意味する。
+// SET_PARAM 0x03（reached_tolerance）。既定 0 は「補間完了＝到達」を意味する。
 static void test_reached_tolerance_reports_early() {
     ServoMotion motion(0.0f, wideLimits());
     motion.setReachedToleranceDeg(5.0f);
@@ -197,7 +197,7 @@ static void test_hold_here_freezes_target_at_current_angle() {
 }
 
 // --------------------------------------------------------------------------
-// §7.6 SET_PARAM 0x10-0x12（可動範囲・スルーレートの実行時変更）
+// §7.6 SET_PARAM 0x04-0x06（可動範囲・スルーレートの実行時変更）
 // --------------------------------------------------------------------------
 
 static void test_set_limits_clamps_existing_target() {
@@ -247,7 +247,7 @@ static void test_set_limits_does_not_jump() {
 }
 
 // --------------------------------------------------------------------------
-// §3.4 SET_PARAM（サーボが使う ID）
+// §3.3 SET_PARAM（サーボが使う ID）
 // --------------------------------------------------------------------------
 
 // かつてはサーボ専用の ServoParamId / decodeServoSetParam があり、同じフレームに

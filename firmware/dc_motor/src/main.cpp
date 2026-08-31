@@ -229,7 +229,7 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
     CAN.write(msg);
 }
 
-// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
 static void sendInfo(uint8_t ch) {
     uint8_t data[kInfoBaseLength];
@@ -257,7 +257,7 @@ static void applyParam(uint8_t ch, const SetParamCommand &cmd) {
         case ParamId::SlewRate:
         case ParamId::AngleMin:
         case ParamId::AngleMax:
-            // 仕様書 §3.4: サーボ固有のパラメータ。この基板は持たないので無視する。
+            // 仕様書 §3.3: サーボ固有のパラメータ。この基板は持たないので無視する。
             // 受け付けて内部に持つと、PC 側から「設定できたのに効かない値」に見える。
             break;
     }
@@ -294,7 +294,7 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
         case CommandType::SetParam: {
             const SetParamCommand cmd = decodeSetParam(msg.data, msg.data_length);
             if (cmd.valid) {
-                // 未知のパラメータ ID は decodeSetParam が弾く（仕様書 §3.4）。
+                // 未知のパラメータ ID は decodeSetParam が弾く（仕様書 §3.3）。
                 applyParam(ch, cmd);
             }
             break;
@@ -568,7 +568,7 @@ void loop() {
         }
     }
 
-    // 仕様書 §3.6: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
+    // 仕様書 §3.4: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
     // PC が基板より後から起動しても拾えるようにするため。
     if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
         for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {

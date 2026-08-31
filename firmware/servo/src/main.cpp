@@ -310,7 +310,7 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
     g_can.sendMsgBuf(buildCanId(CommandType::Feedback, g_deviceId[slot]), 0, len, data);
 }
 
-// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
 static void sendInfo(uint8_t slot) {
     uint8_t data[kInfoWithServoRangeLength];
@@ -363,7 +363,7 @@ static void applyParam(uint8_t slot, const SetParamCommand &cmd) {
             break;
         }
         case ParamId::MaxDuty:
-            // 仕様書 §3.4: DC 固有。この基板は制御則を持たないので無視する。
+            // 仕様書 §3.3: DC 固有。この基板は制御則を持たないので無視する。
             break;
     }
 }
@@ -404,8 +404,9 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
             break;
         }
         case CommandType::SetParam: {
-            // 仕様書 §7.6: 0x04 / 0x05 / 0x07 / 0x10 / 0x11 / 0x12 のみ処理し、
-            // kp / ki / kd / max_duty / overcurrent は制御則を持たないので無視する。
+            // 仕様書 §7.6: command_timeout_ms(0x01) / feedback_interval_ms(0x02) /
+            // reached_tolerance(0x03) / slew_rate(0x04) / angle_min(0x05) /
+            // angle_max(0x06) を処理し、max_duty(0x00) は制御則を持たないので無視する。
             const SetParamCommand cmd = decodeSetParam(data, len);
             if (cmd.valid) {
                 applyParam(slot, cmd);
@@ -709,7 +710,7 @@ void loop() {
         }
     }
 
-    // 仕様書 §3.6: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
+    // 仕様書 §3.4: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
     // PC が基板より後から起動しても拾えるようにするため。
     if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
         for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {

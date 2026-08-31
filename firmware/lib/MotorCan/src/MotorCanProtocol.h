@@ -3,7 +3,7 @@
 // 対になる。片方だけを変更してはならない。
 //
 // Arduino.h を include しないのは意図的で、native 環境（pio test -e native）で
-// そのままコンパイルしてテストできるようにするため。DC 用とサーボ用のファームで共有する。
+// そのままコンパイルしてテストできるようにするため。DC 用・サーボ用・電磁弁用のファームで共有する。
 
 #pragma once
 
@@ -20,7 +20,7 @@ enum class CommandType : uint8_t {
     SetTarget = 1,  // PC → モタドラ
     SetParam = 2,   // PC → モタドラ
     Feedback = 3,   // モタドラ → PC
-    Info = 4,       // モタドラ → PC。低頻度の自己申告（仕様書 §3.6）
+    Info = 4,       // モタドラ → PC。低頻度の自己申告（仕様書 §3.4）
 };
 
 // 仕様書 §4。
@@ -35,7 +35,7 @@ enum class ControlType : uint8_t {
     OnOff = 3,
 };
 
-// 仕様書 §3.4 のパラメータ ID。**穴を空けずに詰める。**
+// 仕様書 §3.3 のパラメータ ID。**穴を空けずに詰める。**
 // 「将来のための予約」を挟むと、対応表を読むたびに使われていない ID を数えることになる。
 // 必要になった時点で末尾へ足せばよい。
 enum class ParamId : uint8_t {
@@ -90,7 +90,7 @@ constexpr uint8_t kBoardNumberShift = 3;
 constexpr uint8_t kMaxBoardNumber = 7;
 constexpr uint8_t kMaxSlotNumber = 7;
 
-// スロットの役割（INFO で自己申告する。仕様書 §3.6）。
+// スロットの役割（INFO で自己申告する。仕様書 §3.4）。
 enum class SlotKind : uint8_t {
     Actuator = 0,
     Sensor = 1,
@@ -166,7 +166,7 @@ SetTargetCommand decodeSetTarget(const uint8_t *data, uint8_t length);
 struct SetParamCommand {
     ParamId id;
     int16_t raw;
-    bool valid;  // 未知のパラメータ ID は false（仕様書 §3.4: 無視する）
+    bool valid;  // 未知のパラメータ ID は false（仕様書 §3.3: 無視する）
 };
 SetParamCommand decodeSetParam(const uint8_t *data, uint8_t length);
 
@@ -188,7 +188,7 @@ constexpr uint8_t kFeedbackWithPositionLength = 3;
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags);
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg);
 
-// 仕様書 §3.6。焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 仕様書 §3.4。焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 //
 // **DLC 可変。** サーボスロットだけが可動レンジ（仕様書 §3.4 の Byte3-4）を足す。
 // FEEDBACK で位置を持つ基板だけが位置を足すのと同じ形で、**測る対象を持たない基板に
@@ -205,10 +205,10 @@ uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotK
                    float angleRangeDeg);
 
 // ---------------------------------------------------------------------------
-// SET_TARGET / SET_PARAM の値域（仕様書 §3.4 / §5.3）
+// SET_TARGET / SET_PARAM の値域（仕様書 §3.3 / §5.3）
 // ---------------------------------------------------------------------------
 
-// 仕様書 §3.4 の既定値のうち、PC 側との契約になっているもの。
+// 仕様書 §3.3 の既定値のうち、PC 側との契約になっているもの。
 // command_timeout_ms は PC 側の目標値再送周期の根拠であり、feedback_interval_ms は
 // PC 側の STALE 判定が前提にしている送信周期。基板ごとに変えてよい値ではないので、
 // 基板の config.h ではなくここが単一定義を持つ。

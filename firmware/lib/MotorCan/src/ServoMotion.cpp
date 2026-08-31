@@ -24,8 +24,6 @@ float clampFloat(float value, float low, float high) {
     return value;
 }
 
-// 仕様書 §7.6 の共通 ID とサーボ固有 ID の集合。
-
 }  // namespace
 
 uint16_t angleToPulseUs(float angleDeg, const ServoPulseSpec &spec) {

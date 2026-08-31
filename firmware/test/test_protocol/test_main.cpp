@@ -155,7 +155,7 @@ static void test_decode_set_target_rejects_short_frame() {
 
 
 // --------------------------------------------------------------------------
-// §3.4 SET_PARAM
+// §3.3 SET_PARAM
 // --------------------------------------------------------------------------
 
 static void test_decode_set_param() {
@@ -167,7 +167,7 @@ static void test_decode_set_param() {
     TEST_ASSERT_EQUAL_FLOAT(0.5f, fromRaw(cmd.raw, kDutyScale));
 }
 
-// パラメータ ID は穴を空けずに詰めてある（仕様書 §3.4）。
+// パラメータ ID は穴を空けずに詰めてある（仕様書 §3.3）。
 // 途中に「予約」を挟むと、対応表を読むたびに使われていない ID を数えることになる。
 static void test_param_ids_are_packed() {
     TEST_ASSERT_EQUAL_UINT8(0x00, static_cast<uint8_t>(ParamId::MaxDuty));
@@ -182,7 +182,7 @@ static void test_param_ids_are_packed() {
     TEST_ASSERT_FALSE(decodeSetParam(data, 3).valid);
 }
 
-// 未知のパラメータ ID は無視する（新ファームと旧基板の混在で止まらないため。仕様書 §3.4）
+// 未知のパラメータ ID は無視する（新ファームと旧基板の混在で止まらないため。仕様書 §3.3）
 static void test_decode_set_param_unknown_id_is_ignored() {
     uint8_t data[3] = {0x42, 0, 0};
     TEST_ASSERT_FALSE(decodeSetParam(data, 3).valid);
@@ -250,7 +250,7 @@ static void test_encode_feedback_with_position() {
     TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[1] | (out[2] << 8)));
 }
 
-// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 static void test_encode_info() {
     uint8_t out[8];
     memset(out, 0xFF, sizeof(out));
@@ -416,8 +416,8 @@ static void test_status_flags_are_reported() {
                             safety.statusFlags(600));
 }
 
-// 起動直後は出力を止めるが、FEEDBACK bit4（ウォッチドッグ作動中）は立てない。
-// bit4 は「CAN 通信が途絶した」ことの報告であり、指令をまだ 1 通も送っていない
+// 起動直後は出力を止めるが、FEEDBACK bit2（ウォッチドッグ作動中）は立てない。
+// bit2 は「CAN 通信が途絶した」ことの報告であり、指令をまだ 1 通も送っていない
 // 状態はそれに当たらない。立ててしまうと PC 側 check_safety_error() が
 // セッティングタイムの動作確認を指令送信前に FAILED で打ち切り、
 // 健全な基板に対して配線を疑わせる誤誘導になる。
@@ -439,7 +439,7 @@ static void test_status_flags_omit_watchdog_before_first_feed() {
                             safety.statusFlags(100000));
 }
 
-// 一度でも指令を受けた後の満了は本物の通信途絶なので bit4 を立てる
+// 一度でも指令を受けた後の満了は本物の通信途絶なので bit2 を立てる
 static void test_status_flags_report_watchdog_after_first_feed() {
     MotorSafety safety(500);
     safety.feed(1000);
@@ -452,7 +452,7 @@ static void test_status_flags_report_watchdog_after_first_feed() {
 }
 
 // 「起動直後で未受信」と「受信後に途絶」を呼び出し側が区別できること。
-// サーボ側 main.cpp は bit3/bit4 を手書きで組み立てているため、
+// サーボ側 main.cpp は bit2/bit3 を手書きで組み立てているため、
 // 同じ判定を共有できないと基板ごとに挙動がずれる。
 static void test_command_lost_separates_startup_from_dropout() {
     MotorSafety safety(500);
@@ -479,10 +479,10 @@ static void test_watchdog_is_enabled_by_default() {
     TEST_ASSERT_FALSE(safety.isOutputAllowed(500));
 }
 
-// 無効化した基板は途絶しても駆動を続け、bit4 も報告しない（仕様書 §5.1 / §8）。
+// 無効化した基板は途絶しても駆動を続け、bit2 も報告しない（仕様書 §5.1 / §8）。
 // 以前は両 main.cpp が #if で同じ分岐を持っており、servo にだけ実装されて
 // dc_motor では「設定しても効かないフラグ」になっていた。判定は MotorSafety に 1 つだけ置く。
-static void test_disabled_watchdog_allows_output_and_hides_bit4() {
+static void test_disabled_watchdog_allows_output_and_hides_bit2() {
     MotorSafety safety(500);
     safety.setWatchdogEnabled(false);
 
@@ -540,7 +540,7 @@ static void test_watchdog_can_be_re_enabled() {
 }
 
 // --------------------------------------------------------------------------
-// §3.4 パラメータ既定値
+// §3.3 パラメータ既定値
 // --------------------------------------------------------------------------
 
 // PC 側の再送周期（command_timeout_ms の数分の 1）と STALE 判定は、この 2 つの値が
@@ -552,10 +552,10 @@ static void test_protocol_defaults_match_spec() {
 }
 
 // --------------------------------------------------------------------------
-// §3.4 / §5.1 タイミングパラメータの受け付け範囲
+// §3.3 / §5.1 タイミングパラメータの受け付け範囲
 // --------------------------------------------------------------------------
 
-// command_timeout_ms（0x04）に上限が無いと、1 フレームでウォッチドッグを実質無効に
+// command_timeout_ms（0x01）に上限が無いと、1 フレームでウォッチドッグを実質無効に
 // できる。仕様書 §5.1 が「このフラグの ID は無く CAN からは変更できない」と書いて
 // 最後の砦を守っているのに、猶予そのものを 49.7 日へ伸ばせば同じ結果になる。
 static void test_command_timeout_param_has_upper_bound() {
@@ -744,7 +744,7 @@ static void test_dc_channel_physical_stop_blocks_until_cleared() {
 // §3.2 状態フラグのビット割り当て
 // --------------------------------------------------------------------------
 
-// センサ入力は予約ビットの bit6 に載せる。フレーム長も他のビットの位置も
+// センサ入力は bit4 に載せる。フレーム長も他のビットの位置も
 // 変えないので、対応していない PC 側・基板が混在しても壊れない。
 // 既存のビットと重なると、センサの ON がそのまま緊急停止やウォッチドッグの
 // 報告として読まれる（＝押していないのに機体が止まる／止まったのに気付けない）。
@@ -813,7 +813,7 @@ int main(int, char **) {
     RUN_TEST(test_status_flags_report_watchdog_after_first_feed);
     RUN_TEST(test_command_lost_separates_startup_from_dropout);
     RUN_TEST(test_watchdog_is_enabled_by_default);
-    RUN_TEST(test_disabled_watchdog_allows_output_and_hides_bit4);
+    RUN_TEST(test_disabled_watchdog_allows_output_and_hides_bit2);
     RUN_TEST(test_disabled_watchdog_still_requires_first_command);
     RUN_TEST(test_disabled_watchdog_still_honors_e_stop_latch);
     RUN_TEST(test_watchdog_can_be_re_enabled);
