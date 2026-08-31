@@ -175,10 +175,13 @@ positions:
     place: 0.0           # 配置姿勢 [deg]。home と分けてあるのは、ワークを持った状態の
                          # 姿勢だけを後から詰められるようにするため
 
-  # !!! 以下 3 軸の値は config/main_hand.yaml の motor_check.magnitude と一致させること。
-  #     ずれると動作確認で動く位置と運用で使う位置が別物になり、確認が意味を失う。
+  # 以下 3 軸は離散状態アクチュエータ。動作確認 (robots/motor_check.py) も運用と
+  # 同じ位置名へ動かすので、確認専用の駆動量は存在しない。かつては main_hand.yaml が
+  # motor_check.magnitude を別に持っており、この値とずれた瞬間に「動作確認で動く位置」と
+  # 「運用で使う位置」が別物になって確認が意味を失っていた。**そのキーは config ごと
+  # 消えている**ので、ここに合わせる先も無い (書けば起動時に未知キーとして拒否される)。
   gripper:
-    open: 5.0            # 開 [deg] (= main_hand.yaml gripper.motor_check.magnitude)
+    open: 5.0            # 開 [deg]
     closed: 0.0          # 閉 (把持) [deg]
 
   conveyor:
@@ -188,9 +191,9 @@ positions:
   wall_f:
     initial: 0.0         # 初期 (退避) [deg]
     closed: 3.0          # 閉 (ワーク保持) [deg]
-    open: 6.0            # 開 [deg] (= main_hand.yaml wall_f.motor_check.magnitude)
+    open: 6.0            # 開 [deg]
 
   wall_r:
     initial: 0.0         # 初期 (退避) [deg]
     closed: 3.0          # 閉 (ワーク保持) [deg]
-    open: 6.0            # 開 [deg] (= main_hand.yaml wall_r.motor_check.magnitude)
+    open: 6.0            # 開 [deg]
