@@ -97,7 +97,7 @@ libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib` で入る（**libstdc++ 
 ```bash
 sudo scripts/install.sh           # udev ルール配置 + systemd 有効化（初回のみ）
 scripts/setup_can.sh              # 手動 up。見つかったバスだけ立ち上げる（開発用）
-scripts/setup_can.sh --strict     # 試合前点検。3 本揃わなければ異常終了
+scripts/setup_can.sh --strict     # 試合前点検。定義済みの全バス（現行 4 本）が揃わなければ異常終了
 ```
 
 vcan を使うテストは無い（`--dry-run` は python-can の `virtual` インタフェースで、

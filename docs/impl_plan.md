@@ -151,7 +151,7 @@ CANable2（candleLight FW）は STM32 UID 由来の USB serial を持つため�
 ```bash
 sudo scripts/install.sh            # udev ルール配置 + systemd 有効化（初回のみ）
 scripts/setup_can.sh               # 手動 up。見つかったバスだけ立ち上げる（開発用）
-scripts/setup_can.sh --strict      # 試合前点検。3 本揃わなければ異常終了
+scripts/setup_can.sh --strict      # 試合前点検。定義済みの全バスが揃わなければ異常終了
 sudo scripts/install.sh --uninstall
 ```
 
@@ -232,10 +232,16 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 | unit | 中身 | enable |
 |---|---|---|
 | `cbc-can.service` | `setup_can.sh --wait 15`（CAN バス up） | する（電源投入で up） |
+| `cbc-can-watchdog.service` | `can_watchdog.sh`（bus-off 復旧の常駐） | する（機体を動かさない） |
 | `cbc-control.service` | `.venv/bin/python -u main.py` | **しない**（手動 `systemctl start`） |
 
+配置・enable・撤去の 3 つは `install.sh` の 1 つの配列（`UNITS` / `AUTOSTART_UNITS`）が
+まとめて回す。別々に書き並べていた頃は `--uninstall` だけ `cbc-can-watchdog.service` を
+書き忘れており、撤去したつもりで `Requires` の相手が消えた起動不能な unit が enable された
+まま残っていた。
+
 ```bash
-sudo scripts/install.sh                  # 両 unit を配置（control は enable しない）
+sudo scripts/install.sh                  # 3 unit を配置（control は enable しない）
 scripts/deploy.sh                        # 依存導入 + Web UI ビルド + 再起動
 sudo systemctl start cbc-control         # 制御プログラム起動
 journalctl -u cbc-control -f             # ログ追跡
@@ -1241,19 +1247,31 @@ cbc2026_team3/
 ├── pyproject.toml
 ├── docs/
 │   ├── impl_plan.md                # 本書。実装計画・設計判断の記録
+│   ├── checks_and_health.md        # 点検とヘルスの全体像（「今どうなっているか」）
 │   └── motor_driver_can_protocol.md  # 自作モタドラ CAN プロトコルの単一情報源
 ├── config/
-│   ├── system.yaml         # 両ロボット共通（バス別名 / health / motor_check / match）
+│   ├── system.yaml         # 両ロボット共通（バス別名 / health / match / tuning）
 │   ├── main_hand.yaml
 │   ├── sub_hand.yaml
 │   ├── can_buses.yaml      # CAN バス定義の単一情報源（serial ↔ 固定名）
 │   ├── checklist.yaml      # 指差喚呼チェックリスト定義
 │   ├── main_hand_positions.yaml  # メインハンドの機構位置定数（単位換算込み）
-│   └── sub_hand_positions.yaml   # サブハンドの機構位置定数（単位換算込み）
+│   ├── sub_hand_positions.yaml   # サブハンドの機構位置定数（単位換算込み）
+│   └── bench/              # 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリ
+│       ├── m3508/          # M3508 2 台
+│       ├── edulite/        # EDULITE 05 2 台
+│       ├── dm3520/         # Damiao DM3520 2 台
+│       ├── dc/             # 自作モタドラ DC 基板 1 枚
+│       ├── servo/          # 自作モタドラ サーボ基板 1 枚
+│       └── solenoid/       # 自作モタドラ 電磁弁基板 1 枚
 ├── scripts/
-│   ├── can_config.py       # can_buses.yaml → TSV / udev ルール変換
+│   ├── _common.sh          # 4 本のシェルが source する土台（ログ / IP / 引数検証）
+│   ├── can_config.py       # can_buses.yaml → TSV / udev ルール / 固定パス変換
+│   ├── edulite_set_id.py   # EDULITE 05 の CAN ID 走査・書き換え（uv run 専用）
 │   ├── setup_can.sh        # CAN バス up（冪等・--strict / --wait 対応）
+│   ├── can_watchdog.sh     # bus-off で送信停止したバスを down/up で復旧させる常駐
 │   ├── cbc-can.service     # systemd unit テンプレート（CAN 初期化。enable する）
+│   ├── cbc-can-watchdog.service # systemd unit テンプレート（bus-off 復旧。enable する）
 │   ├── cbc-control.service # systemd unit テンプレート（制御 + Web UI。enable しない）
 │   ├── deploy.sh           # 依存導入 + Web UI ビルド + サービス再起動
 │   └── install.sh          # udev / systemd への配置と有効化
@@ -1265,12 +1283,13 @@ cbc2026_team3/
 │   ├── config_schema.py    # yaml の検証と読み込み（誤記は起動拒否）。しきい値既定値の単一情報源
 │   ├── match_state.py      # コート / フェーズ / チェックリスト
 │   ├── health.py           # ヘルス状態の列挙・スナップショット・動作確認レコード
-│   ├── motor_check.py      # MotorCheckRunner（アクチュエータ動作確認）
+│   ├── manual.py           # 手動操縦（OperationMode / ManualController。軸単位でしか指令しない）
 │   ├── drivers/
 │   │   ├── __init__.py
 │   │   ├── base.py
 │   │   ├── m3508.py
 │   │   ├── edulite05.py
+│   │   ├── dm3520.py
 │   │   └── generic.py
 │   ├── control/
 │   │   ├── __init__.py
@@ -1284,13 +1303,16 @@ cbc2026_team3/
 │   ├── sequence/
 │   │   ├── __init__.py
 │   │   ├── engine.py
+│   │   ├── homing.py          # リミットスイッチによる零点確定（HomingRunner）
 │   │   ├── motors.py          # シーケンスからのモータ指令・到達待ち
 │   │   └── positions.py       # 機構位置定数の読み込みと単位換算
+│   ├── tuning/                # PID 調整支援（記録・指標算出・助言・レポート）
 │   └── server.py
 ├── robots/
 │   ├── __init__.py
 │   ├── main_hand.py
-│   └── sub_hand.py
+│   ├── sub_hand.py
+│   └── motor_check.py         # 両ハンド統合のアクチュエータ動作確認シーケンス
 ├── firmware/                        # 自作モータドライバのファーム（PlatformIO。2 枚は MCU が違う）
 │   ├── README.md                    # 通電前の要確認項目・デバイス ID・安全既定値
 │   ├── common.ini                   # 共通部のみ（MCU が違うので platform/board は各 ini）
@@ -1313,10 +1335,14 @@ cbc2026_team3/
 │   │   ├── platformio.ini           # 固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
 │   │   ├── include/config.h         # ピン配置・チャンネル表・機体依存定数（TODO(実機で確認) はここ）
 │   │   └── src/main.cpp
-│   └── servo/                       # Arduino Nano + MCP2515。1 枚 5 スロット
-│       ├── platformio.ini           # 固有行のみ（env は nano。platform/board/lib_deps はここ）
-│       ├── include/config.h         # ピン配置・チャンネル表・機体依存定数
-│       └── src/main.cpp
+│   ├── servo/                       # Arduino Nano + MCP2515。1 枚 5 スロット
+│   │   ├── platformio.ini           # 固有行のみ（env は nano。platform/board/lib_deps はここ）
+│   │   ├── include/config.h         # ピン配置・チャンネル表・機体依存定数
+│   │   └── src/main.cpp
+│   └── solenoid/                    # STM32F303K8 + 内蔵 bxCAN。**この 1 枚だけ CubeMX + CMake**
+│       ├── solenoid.ioc             # ピン割当と CAN のビットタイミング（CubeMX）
+│       ├── include/config.h         # ピン配置（自前の Port enum。HAL を取り込むと重複検査が消える）
+│       └── src/app.cpp              # setup() / loop()。main.c の USER CODE からはこれしか呼ばない
 ├── web/
 │   ├── package.json
 │   ├── tsconfig.json
