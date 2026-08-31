@@ -125,7 +125,7 @@ static uint8_t g_deviceId[kDcChannelCount] = {0, 0, 0};
 // PwmOut::begin() を通したかどうか。ID 未設定チャンネルは begin() すらしない。
 static bool g_pwmStarted[kDcChannelCount] = {false, false, false};
 
-// SET_PARAM 0x03 はチャンネル（＝デバイス）ごとの値。
+// SET_PARAM 0x00（max_duty）はチャンネル（＝デバイス）ごとの値。
 static float g_maxDuty[kDcChannelCount] = {
     kDcChannels[0].maxDuty,
     kDcChannels[1].maxDuty,
