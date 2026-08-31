@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
-from lib.commands import CommandSpec, RejectChannel, phase_deny_reason, spec_for
+from lib.commands import COMMANDS, CommandSpec, RejectChannel, phase_deny_reason, spec_for
 from lib.config_schema import (
     DEFAULT_HEALTH,
     DEFAULT_MATCH,
@@ -205,6 +205,28 @@ class RobotServer:
         # 前回配信した内容。変化したときだけ送る (停止中は何も流れない)
         self._last_motor_check_payload: dict | None = None
 
+        self._verify_command_handlers()
+
+    def _verify_command_handlers(self) -> None:
+        """語彙が宣言したハンドラが実在することを起動時に 1 度だけ確かめる。
+
+        ディスパッチは ``getattr(self, spec.handler)`` の文字列引きなので、
+        メソッド名を変えても静的には何も検出されない。起動もするが、操縦者が
+        そのボタンを押した瞬間に ``AttributeError`` になる —— 試合中に初めて
+        分かる壊れ方で、しかも拒否通知も出ないので画面から原因が読めない。
+        ``CommandSpec`` がゲート方針を必ず宣言させているのと同じで、ハンドラ名の
+        実在確認はその宣言の完結にあたる。
+        """
+        missing = [
+            f"{spec.name} -> {spec.handler}"
+            for spec in COMMANDS.values()
+            if not callable(getattr(self, spec.handler, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                "コマンド語彙が宣言したハンドラが実装されていません: " + ", ".join(missing)
+            )
+
     @property
     def dev_tools(self) -> bool:
         """開発用コマンドが解禁されているか。コマンドゲートと server_info が参照する。"""
@@ -368,13 +390,19 @@ class RobotServer:
         # 残り 2 つは変化時のみ配信するのでスナップショットが要る
         # (これがないとリロード直後のクライアントが現在のモード/フェーズを知れず、
         # 動作確認の実行中に繋いだ画面は「未実行」を出したまま止まる)。
-        try:
-            await ws.send_str(json.dumps(self._server_info_dict(), ensure_ascii=False))
-            await ws.send_str(json.dumps(self.match.to_dict(), ensure_ascii=False))
-            await ws.send_str(json.dumps(self._motor_check_payload(), ensure_ascii=False))
-        except ConnectionResetError:
-            self._ws_clients.discard(ws)
-            return ws
+        #
+        # **この 3 通も `_send_or_drop` を通す。** 生の `send_str` は相手が読まなく
+        # なると無期限に待つので、スリープに入りかけたノート PC が 1 台繋いだだけで
+        # この接続ハンドラが返らなくなり、`finally` の `_ws_clients.discard` も
+        # 走らない (配信ループは `ws.closed` にならない相手へ送り続ける)。
+        for snapshot in (
+            self._server_info_dict(),
+            self.match.to_dict(),
+            self._motor_check_payload(),
+        ):
+            if not await self._send_or_drop(ws, json.dumps(snapshot, ensure_ascii=False)):
+                await self._drop_clients({ws})
+                return ws
 
         try:
             async for msg in ws:
@@ -418,7 +446,7 @@ class RobotServer:
         self,
         data: dict,
         *,
-        requester: web.WebSocketResponse | None = None,
+        requester: WSOrNone = None,
     ) -> None:
         """1 コマンドを受理して 2 段のゲートに掛け、通ったものだけ実行する。
 
@@ -453,16 +481,14 @@ class RobotServer:
             await self._reject_by_channel(spec, data, requester, deny)
             return
 
-        handler: Callable[[dict, web.WebSocketResponse | None], Awaitable[None]] = getattr(
-            self, spec.handler
-        )
+        handler: Callable[[dict, WSOrNone], Awaitable[None]] = getattr(self, spec.handler)
         await handler(data, requester)
 
     async def _reject_by_channel(
         self,
         spec: CommandSpec,
         data: dict,
-        requester: web.WebSocketResponse | None,
+        requester: WSOrNone,
         reason: str,
     ) -> None:
         """拒否を、そのコマンドが宣言した経路で操縦者へ返す。"""
@@ -476,16 +502,16 @@ class RobotServer:
     #  ゲートは handle_command で済んでいるので、ここでは実行だけを行う。
     # ------------------------------------------------------------------ #
 
-    async def _cmd_trigger(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_trigger(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
             self._robots[robot_name].sequence.trigger()
             logger.info("trigger: %s", robot_name)
 
-    async def _cmd_e_stop(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_e_stop(self, _data: dict, _requester: WSOrNone) -> None:
         await self.activate_e_stop()
 
-    async def _cmd_e_stop_release(self, _data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_e_stop_release(self, _data: dict, requester: WSOrNone) -> None:
         if not self._e_stop_active:
             # 「解除」は解除すべき状態があるときだけ通す。停止していない試合中に
             # 1 通届くだけで同期ずれラッチが全解除され、全モータへ再励磁が飛ぶ
@@ -507,14 +533,14 @@ class RobotServer:
         # (物理停止スイッチが押されたまま等) ということなので、改めて停止させる
         self._board_e_stop_ignore_before = time.time()
 
-    async def _cmd_health_check(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_health_check(self, _data: dict, _requester: WSOrNone) -> None:
         # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
         await self._broadcast_state()
 
-    async def _cmd_set_param(self, data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_set_param(self, data: dict, requester: WSOrNone) -> None:
         await self._handle_set_param(data, requester)
 
-    async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         step_index = data.get("step_index")
         # bool は Python では int だが、ステップ番号として送られてきた時点で誤送信。
@@ -526,30 +552,30 @@ class RobotServer:
             self._robots[robot_name].sequence.request_jump(step_index)
             logger.info("sequence_jump: %s -> %d", robot_name, step_index)
 
-    async def _cmd_sequence_stop(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_sequence_stop(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
             self._robots[robot_name].sequence.request_stop()
             logger.info("sequence_stop: %s", robot_name)
 
-    async def _cmd_sequence_start(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_sequence_start(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
             self._robots[robot_name].sequence.request_start()
             logger.info("sequence_start: %s", robot_name)
 
-    async def _cmd_motor_check_start(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_motor_check_start(self, _data: dict, _requester: WSOrNone) -> None:
         # 両ハンド統合の 1 本なので robot を取らない
         await self._start_motor_check()
 
-    async def _cmd_motor_check_abort(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_motor_check_abort(self, _data: dict, _requester: WSOrNone) -> None:
         self._abort_motor_check()
 
     # ------------------------------------------------------------------ #
     #  手動操縦
     # ------------------------------------------------------------------ #
 
-    async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if not isinstance(robot_name, str) or robot_name not in self._robots:
             # 知らないロボットは silent ignore (WS を切断しないため)
@@ -563,7 +589,7 @@ class RobotServer:
             return
         await self._apply_operation_mode(robot_name, mode, requester=requester)
 
-    async def _cmd_manual_move(self, data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_manual_move(self, data: dict, requester: WSOrNone) -> None:
         target = await self._manual_target(data, "manual_move", requester)
         if target is None:
             return
@@ -574,7 +600,7 @@ class RobotServer:
             return
         await self._run_manual("manual_move", requester, manual.move_to_position(axis, position))
 
-    async def _cmd_manual_set(self, data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_manual_set(self, data: dict, requester: WSOrNone) -> None:
         target = await self._manual_target(data, "manual_set", requester)
         if target is None:
             return
@@ -584,7 +610,7 @@ class RobotServer:
             return
         await self._run_manual("manual_set", requester, manual.set_value(axis, value))
 
-    async def _cmd_manual_jog(self, data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_manual_jog(self, data: dict, requester: WSOrNone) -> None:
         target = await self._manual_target(data, "manual_jog", requester)
         if target is None:
             return
@@ -726,10 +752,10 @@ class RobotServer:
             # 例外クラス名を操縦者へ出しても復旧の判断材料にならない。空なら定型文にする
             await self._reject_command(requester, command, str(exc) or "手動指令に失敗しました")
 
-    async def _cmd_set_court(self, data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_set_court(self, data: dict, requester: WSOrNone) -> None:
         await self._handle_set_court(data, requester)
 
-    async def _cmd_checklist_set(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_checklist_set(self, data: dict, _requester: WSOrNone) -> None:
         role = data.get("role")
         item_id = data.get("item_id")
         checked = bool(data.get("checked"))
@@ -739,7 +765,7 @@ class RobotServer:
             else:
                 logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
 
-    async def _cmd_checklist_check_all(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_checklist_check_all(self, data: dict, _requester: WSOrNone) -> None:
         role = data.get("role")
         self.match.check_all_checklist_items(role if isinstance(role, str) else None)
         # 指差喚呼を飛ばしたことは必ずログに残す。試合直前のログを追ったときに
@@ -747,21 +773,21 @@ class RobotServer:
         logger.warning("開発用: 指差喚呼を一括チェックしました (role=%s)", role or "all")
         await self._broadcast_match_state()
 
-    async def _cmd_checklist_reset(self, data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_checklist_reset(self, data: dict, _requester: WSOrNone) -> None:
         role = data.get("role")
         self.match.reset_checklist(role if isinstance(role, str) else None)
         await self._broadcast_match_state()
 
-    async def _cmd_match_start(self, _data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_match_start(self, _data: dict, requester: WSOrNone) -> None:
         await self._handle_match_start(requester)
 
-    async def _cmd_match_finish(self, _data: dict, _requester: WSOrNone = None) -> None:
+    async def _cmd_match_finish(self, _data: dict, _requester: WSOrNone) -> None:
         if self.match.match_finish():
             logger.info("試合終了")
             self._stop_all_sequences()
             await self._broadcast_match_state()
 
-    async def _cmd_match_reset(self, _data: dict, requester: WSOrNone = None) -> None:
+    async def _cmd_match_reset(self, _data: dict, requester: WSOrNone) -> None:
         self.match.match_reset()
         logger.info("セッティングタイムへ復帰")
         self._stop_all_sequences()
@@ -777,7 +803,7 @@ class RobotServer:
     async def _handle_set_param(
         self,
         data: dict,
-        requester: web.WebSocketResponse | None,
+        requester: WSOrNone,
     ) -> None:
         """PID ゲインを実行中に差し替える (/pid-tuning タブ)。
 
@@ -940,7 +966,7 @@ class RobotServer:
     async def _handle_set_court(
         self,
         data: dict,
-        requester: web.WebSocketResponse | None = None,
+        requester: WSOrNone = None,
     ) -> None:
         raw = data.get("court")
         try:
@@ -960,7 +986,7 @@ class RobotServer:
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
-    async def _handle_match_start(self, requester: web.WebSocketResponse | None = None) -> None:
+    async def _handle_match_start(self, requester: WSOrNone = None) -> None:
         if not self.match.match_start():
             await self._reject_command(
                 requester,
@@ -1223,7 +1249,7 @@ class RobotServer:
 
     async def _reject_command(
         self,
-        requester: web.WebSocketResponse | None,
+        requester: WSOrNone,
         command: str,
         reason: str,
     ) -> None:

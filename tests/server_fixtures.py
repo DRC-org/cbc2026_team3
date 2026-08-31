@@ -255,6 +255,21 @@ class ServerFixture:
     def is_connected(self, client: Any) -> bool:
         return client in self.server._ws_clients
 
+    async def run_ws_handler(self, client: Any) -> Any:
+        """接続ハンドラを偽ソケット 1 本で走らせる。
+
+        接続直後に送るスナップショット 3 通 (server_info / match_state /
+        motor_check_state) が送信上限を通っているかは、実ソケットでは検証できない
+        (「読まないまま繋がり続ける相手」を作れない)。``web.WebSocketResponse`` を
+        差し替えてハンドラだけを踏ませる。
+
+        **本ファイル以外でクラスを差し替えないこと。** 生成箇所が増えると、
+        ハンドラの構造が変わったときにどのテストが古い偽物を掴んだまま緑に
+        なっているのか分からなくなる。
+        """
+        with patch("lib.server.web.WebSocketResponse", return_value=client):
+            return await self.server._ws_handler(AsyncMock())
+
     @property
     def client_count(self) -> int:
         return len(self.server._ws_clients)

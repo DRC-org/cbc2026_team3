@@ -9,6 +9,7 @@ import os
 import pathlib
 import signal
 from collections.abc import Awaitable, Callable, Mapping
+from types import ModuleType
 
 import can
 import yaml
@@ -696,7 +697,16 @@ def _make_sync_violation_handler(
 
 
 def _load_sequence(robot_name: str) -> Sequence | None:
-    """robots/<robot_name>.py からシーケンスクラスを動的にロードする。"""
+    """robots/<robot_name>.py からシーケンスクラスを動的にロードする。
+
+    **候補は「そのモジュールが定義した」クラスに限り、2 つ以上あったら起動を拒否する。**
+    かつては ``dir()`` の並び (アルファベット順) で最初に見つかったサブクラスを
+    返していたため、``robots/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を
+    import しただけで ``"MotorCheckSequence" < "SubHandSequence"`` が成立し、
+    サブハンドとして動作確認シーケンスが登録される。症状は「sub_hand の
+    sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
+    理由が読めない。曖昧な構成は黙って起動させず、その場で落とす。
+    """
     module_name = f"robots.{robot_name}"
     try:
         module = importlib.import_module(module_name)
@@ -704,13 +714,36 @@ def _load_sequence(robot_name: str) -> Sequence | None:
         logger.info("シーケンスモジュール %s が見つかりません。ダミーを使用します。", module_name)
         return None
 
-    for attr_name in dir(module):
-        attr = getattr(module, attr_name)
-        if isinstance(attr, type) and issubclass(attr, Sequence) and attr is not Sequence:
-            return attr(robot_name)
+    sequence_cls = _sequence_class_defined_in(module)
+    if sequence_cls is None:
+        logger.warning("モジュール %s に Sequence サブクラスが見つかりません。", module_name)
+        return None
+    return sequence_cls(robot_name)
 
-    logger.warning("モジュール %s に Sequence サブクラスが見つかりません。", module_name)
-    return None
+
+def _sequence_class_defined_in(module: ModuleType) -> type[Sequence] | None:
+    """そのモジュール自身が定義した Sequence サブクラス。無ければ None。
+
+    2 つ以上あったら ``SystemExit``。どちらを登録すべきかは構成からしか決まらず、
+    黙って片方を選ぶと「意図した側とは別の機体のシーケンス」がそのロボットとして
+    動き出す。
+    """
+    found = [
+        attr
+        for attr_name in dir(module)
+        if isinstance(attr := getattr(module, attr_name), type)
+        and issubclass(attr, Sequence)
+        and attr is not Sequence
+        # import しただけの他モジュール由来のクラスを候補にしない
+        and attr.__module__ == module.__name__
+    ]
+    if len(found) > 1:
+        names = ", ".join(cls.__name__ for cls in found)
+        raise SystemExit(
+            f"モジュール {module.__name__} が Sequence サブクラスを複数定義しています"
+            f" ({names})。どれを登録すべきか決められないため起動できません。"
+        )
+    return found[0] if found else None
 
 
 class _PlaceholderSequence(Sequence):

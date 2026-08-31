@@ -210,6 +210,34 @@ class TestMotorActivation:
 
         assert [call.args[1] for call in send.await_args_list] == [init_msg, enable_msg]
 
+    async def test_設定と励磁はモータ単位で交互に送る(self) -> None:
+        """「全モータの設定 → 全モータの励磁」に組み替えてはならない。
+
+        EDULITE 05 / DM3520 は activation_steps を組み立てるときに実測角を読み、
+        それを目標として書いてから励磁する。並べ替えると、読む実測角が
+        「自分の設定を送った直後」ではなく「他機の設定を挟んだ後」のものになる。
+        """
+        mgr = CANManager()
+        mgr.add_bus("can0", mock_bus())
+        msgs = {}
+        for name, base in (("m1", 0x210), ("m2", 0x220)):
+            motor = mock_driver(name, base & 0xFF)
+            msgs[f"{name}_init"] = can.Message(arbitration_id=base, data=bytes(8))
+            msgs[f"{name}_enable"] = can.Message(arbitration_id=base + 1, data=bytes(8))
+            motor.initialization_steps.return_value = [(msgs[f"{name}_init"], 0.0)]
+            motor.activation_steps.return_value = [(msgs[f"{name}_enable"], 0.0)]
+            mgr.add_motor("can0", motor)
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            await mgr.initialize_motors()
+
+        assert [call.args[1] for call in send.await_args_list] == [
+            msgs["m1_init"],
+            msgs["m1_enable"],
+            msgs["m2_init"],
+            msgs["m2_enable"],
+        ]
+
     async def test_activation_reads_position_after_fresh_feedback_arrives(self) -> None:
         """set_zero 後の原点を反映した実測角でなければ、目標として書いてはいけない。"""
         mgr, motor = self._prepare()
