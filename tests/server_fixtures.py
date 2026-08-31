@@ -189,20 +189,20 @@ class ServerFixture:
         return self.server._compute_health(robot)
 
     async def publish(self, payload: dict) -> None:
-        await self.server._broadcast_json(payload)
+        await self.server._ws.broadcast_json(payload)
 
     async def fanout(self, payloads: list[dict]) -> None:
-        await self.server._fanout(payloads)
+        await self.server._ws.fanout(payloads)
 
     async def publish_e_stop_state(self) -> None:
         await self.server._broadcast_e_stop_state()
 
     async def publish_motor_check_state(self) -> None:
         """動作確認の状態を 1 通配信する (変化が無ければ流れない)。"""
-        await self.server._broadcast_motor_check_state()
+        await self.server._motor_check.publish()
 
     async def publish_motor_check_error(self, message: str) -> None:
-        await self.server._set_motor_check_error(message)
+        await self.server._motor_check.report_error(message)
 
     def broadcast_loop(self) -> Any:
         """配信ループのコルーチン。1 回の例外で止まらないことを見るテスト用。"""
@@ -239,10 +239,10 @@ class ServerFixture:
         (monkeypatch.setattr は存在しない属性なら例外を出すが、別の定数へ
         名前が移ったときは書き換え先だけが古いまま残る)。
         """
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", seconds)
+        monkeypatch.setattr("lib.ws_hub._WS_SEND_TIMEOUT_S", seconds)
 
     def attach_clients(self, *clients: Any) -> None:
-        self.server._ws_clients = set(clients)
+        self.server._ws._clients = set(clients)
 
     def connect_client(self, client: Any) -> None:
         """配信の最中に 1 台繋がってきた状況を作る (``_ws_handler`` の ``add`` 相当)。
@@ -250,10 +250,10 @@ class ServerFixture:
         実機では操縦者がリロードするだけで起きる。配信は ``await`` を挟むので、
         その隙にハンドラが同じ集合を書き換える。
         """
-        self.server._ws_clients.add(client)
+        self.server._ws._clients.add(client)
 
     def is_connected(self, client: Any) -> bool:
-        return client in self.server._ws_clients
+        return client in self.server._ws._clients
 
     async def run_ws_handler(self, client: Any) -> Any:
         """接続ハンドラを偽ソケット 1 本で走らせる。
@@ -272,18 +272,18 @@ class ServerFixture:
 
     @property
     def client_count(self) -> int:
-        return len(self.server._ws_clients)
+        return len(self.server._ws._clients)
 
     def only_client(self) -> Any:
         """接続中のクライアントが 1 台だけであることを確認して返す。"""
-        clients = self.server._ws_clients
+        clients = self.server._ws._clients
         assert len(clients) == 1, f"接続中のクライアントが 1 台ではない: {len(clients)}"
         return next(iter(clients))
 
     @property
     def has_closing_tasks(self) -> bool:
         """切り離したクライアントを閉じるタスクの参照が残っているか (GC 対策)。"""
-        return bool(self.server._closing_tasks)
+        return bool(self.server._ws._closing_tasks)
 
     async def shutdown(self, app: web.Application) -> None:
         await self.server._on_shutdown(app)
@@ -302,29 +302,29 @@ class ServerFixture:
 
     async def start_motor_check(self) -> bool:
         """動作確認を起動する。拒否されたら False (HTTP POST の 409 と同じ判定)。"""
-        return await self.server._start_motor_check()
+        return await self.server._motor_check.start()
 
     def abort_motor_check(self) -> None:
-        self.server._abort_motor_check()
+        self.server._motor_check.abort()
 
     def motor_check_sequence(self) -> Any:
-        return self.server._motor_check
+        return self.server._motor_check.sequence
 
     def motor_check_state(self) -> dict:
         """配信される動作確認状態。UI が読むのと同じ形。"""
-        return self.server._motor_check_payload()
+        return self.server._motor_check.payload()
 
     def motor_check_error(self) -> str | None:
-        return self.server._motor_check_error
+        return self.server._motor_check.error
 
     async def wait_motor_check_idle(self, *, timeout: float = 2.0) -> None:
-        task = self.server._motor_check_task
+        task = self.server._motor_check._task
         if task is None:
             return
         await asyncio.wait_for(task, timeout=timeout)
 
     async def wait_motor_check_running(self, *, timeout: float = 2.0) -> Any:
-        sequence = self.server._motor_check
+        sequence = self.server._motor_check.sequence
         assert sequence is not None, "動作確認シーケンスが登録されていない"
 
         assert await wait_until(lambda: sequence.is_running, timeout=timeout), (

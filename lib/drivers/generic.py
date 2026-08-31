@@ -252,10 +252,13 @@ class GenericDriver(MotorDriver):
         return super().update_state(msg)
 
     def matches_feedback(self, msg: can.Message) -> bool:
-        # 自分宛でないフレームの解釈失敗はここで握りつぶす。CANManager._receive_loop は
-        # 例外を捕捉しないため、ここから例外を投げると想定外のフレーム 1 通で
-        # そのバスの受信ループタスクごと死に、バス上の全モータが永久に STALE になる。
-        # 判定できないフレームを「自分宛ではない」として無視する方が明らかに安全。
+        # 自分宛でないフレームの解釈失敗はここで握りつぶす。受信ループ
+        # (CANManager._dispatch_frame) は宛先判定とデコードをモータ 1 台単位で
+        # 囲うのでバス全体は死なないが、ここから例外を投げるとそのモータ宛の
+        # フレームが 1 通落ち、鮮度も進まない (握った件数は rx_error_count に積まれる)。
+        # 判定できないフレームは「自分宛ではない」として無視する方が明らかに安全 ——
+        # can_generic は 2 台のロボットで物理共有しており、解釈できないフレームが
+        # 流れるのは構成上の正常である。
         if msg.is_extended_id:
             # 本プロトコルは Standard Frame のみ (仕様書 §1)。
             # 他プロトコルが同一バスに相乗りしても壊れないよう、ID 解析前に弾く

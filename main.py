@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import functools
 import importlib
 import logging
@@ -814,7 +815,208 @@ async def _shutdown_step(label: str, awaitable: Awaitable[None]) -> None:
         logger.exception("終了処理に失敗しました (%s)。残りの後始末は続行します", label)
 
 
+@dataclasses.dataclass(frozen=True)
+class _RobotWiring:
+    """ロボット 1 台ぶんの配線結果。
+
+    起動・後始末・統合動作確認への受け渡しが、これ 1 つを回すだけで済むようにする。
+    かつては `main()` の中でロボットごとの部品を 5 本のリストへ ``extend`` していた
+    ため、「どの部品がどの機体のものか」がループを抜けた時点で失われていた。
+    """
+
+    name: str
+    sequence: Sequence
+    can_manager: CANManager
+    positions: PositionTable
+    position_loops: list[M3508PositionLoop]
+    sync_monitors: list[SyncMonitor]
+    target_refreshers: list[TargetRefresher]
+    #: 統合動作確認へ渡すモータ束。モータを 1 台も bind できなかった構成では None
+    motor_group: MotorGroup | None
+
+
+def _wire_one_robot(
+    server: RobotServer,
+    config_path: pathlib.Path,
+    robot: RobotConfig,
+    system: SystemConfig,
+    *,
+    dry_run: bool,
+    is_estop_active: EStopChecker,
+    e_stop_tasks: set[asyncio.Task[None]],
+) -> _RobotWiring:
+    """1 台ぶんの CAN・シーケンス・制御ループ・監視・手動を組み、サーバーへ登録する。
+
+    **どの部品も「作って渡す」だけで、ここでは 1 つも起動しない。** 起動は
+    `_start_all` が全機ぶんまとめて行う —— CAN の受信ループが立つ前に位置制御
+    ループを回すと、フィードバック未受信のまま途絶判定を踏んで警告が出る。
+    """
+    robot_name = robot.robot_name
+    can_manager, motors = _setup_robot(robot, system.can_buses, dry_run=dry_run)
+
+    seq = _load_sequence(robot_name)
+    if seq is None:
+        seq = _PlaceholderSequence(robot_name)
+
+    positions = _load_position_table_file(_positions_path(config_path, robot_name))
+    seq.bind_positions(positions)
+
+    loops = _wire_robot_motors(
+        robot,
+        can_manager,
+        motors,
+        seq,
+        feedback_timeout_ms=system.health.feedback_timeout_ms,
+        is_estop_active=is_estop_active,
+        tuning=system.tuning,
+        # 記録はロボット名とセットで運ぶ。モータ名はロボット横断に一意だが、
+        # 画面はロボットごとに分けて出すので、配信の時点で決めておく
+        capture_sink=functools.partial(server.record_tuning_capture, robot_name),
+    )
+
+    # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと
+    # 500ms で出力が止まる (docs/motor_driver_can_protocol.md §5.1)
+    refreshers = _build_target_refreshers(
+        seq.motors,
+        motors,
+        can_manager,
+        is_estop_active=is_estop_active,
+    )
+
+    # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
+    sync_groups = _build_sync_groups(positions, motors)
+    _attach_sync_groups(sync_groups, loops)
+    monitors: list[SyncMonitor] = []
+    if sync_groups:
+        monitors.append(
+            SyncMonitor(
+                sync_groups,
+                motors,
+                last_feedback_at=can_manager.last_feedback_at,
+                feedback_timeout_ms=system.health.feedback_timeout_ms,
+                on_violation=_make_sync_violation_handler(
+                    server, robot_name, positions, e_stop_tasks
+                ),
+            )
+        )
+
+    # 手動操縦 (調整時・緊急時の補助操縦)。シーケンスと同じ MotorGroup を共有する
+    manual = _build_manual_controller(seq, positions)
+
+    # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
+    # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
+    server.add_robot(
+        robot_name,
+        seq,
+        can_manager,
+        position_loops=loops,
+        sync_monitors=monitors,
+        target_refreshers=refreshers,
+        manual=manual,
+    )
+    logger.info(
+        "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, "
+        "同期監視: %s, 目標値再送: %s, 手動連続操作: %s)",
+        robot_name,
+        len(motors),
+        [loop.bus_name for loop in loops] or "なし",
+        list(positions.axes) or "なし",
+        [group.name for group in sync_groups] or "なし",
+        [name for r in refreshers for name in r.motor_names] or "なし",
+        list(positions.manual_axes()) or "なし",
+    )
+
+    return _RobotWiring(
+        name=robot_name,
+        sequence=seq,
+        can_manager=can_manager,
+        positions=positions,
+        position_loops=loops,
+        sync_monitors=monitors,
+        target_refreshers=refreshers,
+        motor_group=seq.motors if seq.has_motors else None,
+    )
+
+
+async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
+    """CAN → 制御ループ → 監視 → 再送 → サーバー、の順に立ち上げる。
+
+    **CAN の受信ループを先に立てる。** フィードバック未受信のまま PID を回しても
+    途絶判定で電流 0 に落ちるだけだが、起動のたびに無駄な警告ログが出る。
+    """
+    for wiring in wirings:
+        await wiring.can_manager.run()
+    for wiring in wirings:
+        for loop in wiring.position_loops:
+            loop.start()
+    for wiring in wirings:
+        for monitor in wiring.sync_monitors:
+            monitor.start()
+    for wiring in wirings:
+        for refresher in wiring.target_refreshers:
+            refresher.start()
+    await server.start()
+
+
+async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
+    """後始末。**1 手順が失敗しても残りを必ず続ける** (`_shutdown_step`)。
+
+    順序に意味がある:
+      1. 位置制御ループ —— 生き残ると電流指令が出続けるので CAN より先に止める
+      2. 目標値再送 —— 止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
+         停止指令をここから送らないのは、PC が落ちた場合と経路を 1 本に保つため
+      3. 同期監視 —— これだけ生き残ると、停止済みのモータのフィードバックを見て誤発報する
+      4. CAN シャットダウン
+      5. サーバー終了処理
+    """
+    for wiring in wirings:
+        for loop in wiring.position_loops:
+            await _shutdown_step(f"位置制御ループ (bus={loop.bus_name})", loop.stop())
+    for wiring in wirings:
+        for refresher in wiring.target_refreshers:
+            await _shutdown_step("目標値再送", refresher.stop())
+    for wiring in wirings:
+        for monitor in wiring.sync_monitors:
+            await _shutdown_step("同期監視", monitor.stop())
+    for wiring in wirings:
+        await _shutdown_step("CAN シャットダウン", wiring.can_manager.shutdown())
+    await _shutdown_step("サーバー終了処理", server.cleanup())
+    # 完走したことを journal に残す。この行が無いまま終了していれば、
+    # 後始末の途中で SIGKILL された (TimeoutStopSec 超過) と判別できる
+    logger.info("後始末完了")
+
+
+def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer:
+    """CLI 引数と共通設定からサーバーを 1 台建てる (ロボットはまだ登録しない)。"""
+    # CLI 引数が優先。どちらか一方でも立っていれば解禁する
+    dev_tools = args.dev_tools or _env_flag(_DEV_TOOLS_ENV)
+    if dev_tools:
+        # 試合当日に開発用フラグのまま起動していないかを、起動ログだけで判断できるようにする
+        logger.warning("開発用コマンドが有効です (指差喚呼の一括チェック等)。試合運用では外すこと")
+
+    checklist_path = (
+        pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
+    )
+    checklist_definitions = _load_checklist_definitions(checklist_path)
+    logger.info(
+        "チェックリスト項目数: %s",
+        {role: len(items) for role, items in checklist_definitions.items()},
+    )
+
+    return RobotServer(
+        host=args.host,
+        port=args.port,
+        health=system.health,
+        checklist_definitions=checklist_definitions,
+        match_settings=system.match,
+        tuning=system.tuning,
+        dry_run=args.dry_run,
+        dev_tools=dev_tools,
+    )
+
+
 async def main() -> None:
+    """読む → 配線する → 起動する → 畳む。"""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -834,45 +1036,12 @@ async def main() -> None:
     # 1 パス目: yaml をすべて読み込んで検証する。RobotServer 生成時にしきい値を渡す
     # 必要があるため、ロボット登録より先に全 config を確定させる。
     system, loaded = _load_all_configs(system_path, config_paths)
-    health = system.health
-    logger.info("health しきい値: %s", health)
-
+    logger.info("health しきい値: %s", system.health)
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
     logger.info("試合時間: %s 秒", system.match.duration_s)
 
-    # CLI 引数が優先。どちらか一方でも立っていれば解禁する
-    dev_tools = args.dev_tools or _env_flag(_DEV_TOOLS_ENV)
-    if dev_tools:
-        # 試合当日に開発用フラグのまま起動していないかを、起動ログだけで判断できるようにする
-        logger.warning("開発用コマンドが有効です (指差喚呼の一括チェック等)。試合運用では外すこと")
+    server = _build_server(args, system)
 
-    checklist_path = (
-        pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
-    )
-    checklist_definitions = _load_checklist_definitions(checklist_path)
-    logger.info(
-        "チェックリスト項目数: %s",
-        {role: len(items) for role, items in checklist_definitions.items()},
-    )
-
-    server = RobotServer(
-        host=args.host,
-        port=args.port,
-        health=health,
-        checklist_definitions=checklist_definitions,
-        match_settings=system.match,
-        tuning=system.tuning,
-        dry_run=args.dry_run,
-        dev_tools=dev_tools,
-    )
-    can_managers: list[CANManager] = []
-    # 統合動作確認シーケンスへ渡す材料。ロボット登録のループで集めて、
-    # ループを抜けてから 1 つに束ねる
-    check_motor_groups: list[MotorGroup] = []
-    check_position_tables: list[PositionTable] = []
-    position_loops: list[M3508PositionLoop] = []
-    sync_monitors: list[SyncMonitor] = []
-    target_refreshers: list[TargetRefresher] = []
     # 同期ずれから起動した緊急停止タスクの強参照置き場 (GC で消えると停止しない)
     e_stop_tasks: set[asyncio.Task[None]] = set()
 
@@ -881,135 +1050,39 @@ async def main() -> None:
     def is_estop_active() -> bool:
         return server.e_stop_active
 
-    # 2 パス目: 既存の robot 登録ロジック
-    for config_path, robot in loaded:
-        robot_name = robot.robot_name
-        can_manager, motors = _setup_robot(robot, system.can_buses, dry_run=args.dry_run)
-        can_managers.append(can_manager)
-
-        seq = _load_sequence(robot_name)
-        if seq is None:
-            seq = _PlaceholderSequence(robot_name)
-
-        positions = _load_position_table_file(_positions_path(config_path, robot_name))
-        seq.bind_positions(positions)
-
-        loops = _wire_robot_motors(
+    # 2 パス目: ロボットごとの配線
+    wirings = [
+        _wire_one_robot(
+            server,
+            config_path,
             robot,
-            can_manager,
-            motors,
-            seq,
-            feedback_timeout_ms=health.feedback_timeout_ms,
+            system,
+            dry_run=args.dry_run,
             is_estop_active=is_estop_active,
-            tuning=system.tuning,
-            # 記録はロボット名とセットで運ぶ。モータ名はロボット横断に一意だが、
-            # 画面はロボットごとに分けて出すので、配信の時点で決めておく
-            capture_sink=functools.partial(server.record_tuning_capture, robot_name),
+            e_stop_tasks=e_stop_tasks,
         )
-        position_loops.extend(loops)
-
-        # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと
-        # 500ms で出力が止まる (docs/motor_driver_can_protocol.md §5.1)
-        robot_refreshers = _build_target_refreshers(
-            seq.motors,
-            motors,
-            can_manager,
-            is_estop_active=is_estop_active,
-        )
-        target_refreshers.extend(robot_refreshers)
-
-        # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
-        sync_groups = _build_sync_groups(positions, motors)
-        _attach_sync_groups(sync_groups, loops)
-        robot_monitors: list[SyncMonitor] = []
-        if sync_groups:
-            robot_monitors.append(
-                SyncMonitor(
-                    sync_groups,
-                    motors,
-                    last_feedback_at=can_manager.last_feedback_at,
-                    feedback_timeout_ms=health.feedback_timeout_ms,
-                    on_violation=_make_sync_violation_handler(
-                        server, robot_name, positions, e_stop_tasks
-                    ),
-                )
-            )
-            sync_monitors.extend(robot_monitors)
-
-        # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
-        # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
-        # 手動操縦 (調整時・緊急時の補助操縦)。シーケンスと同じ MotorGroup を共有する
-        manual = _build_manual_controller(seq, positions)
-
-        server.add_robot(
-            robot_name,
-            seq,
-            can_manager,
-            position_loops=loops,
-            sync_monitors=robot_monitors,
-            target_refreshers=robot_refreshers,
-            manual=manual,
-        )
-        logger.info(
-            "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, "
-            "同期監視: %s, 目標値再送: %s, 手動連続操作: %s)",
-            robot_name,
-            len(motors),
-            [loop.bus_name for loop in loops] or "なし",
-            list(positions.axes) or "なし",
-            [group.name for group in sync_groups] or "なし",
-            [name for r in robot_refreshers for name in r.motor_names] or "なし",
-            list(positions.manual_axes()) or "なし",
-        )
-
-        if seq.has_motors:
-            check_motor_groups.append(seq.motors)
-        check_position_tables.append(positions)
+        for config_path, robot in loaded
+    ]
 
     # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
     # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、
     # 可動域の重なる位置で干渉しうる
     _wire_motor_check_sequence(
         server,
-        check_motor_groups,
-        check_position_tables,
-        loops=position_loops,
-        can_managers=can_managers,
-        feedback_timeout_ms=health.feedback_timeout_ms,
+        [w.motor_group for w in wirings if w.motor_group is not None],
+        [w.positions for w in wirings],
+        loops=[loop for w in wirings for loop in w.position_loops],
+        can_managers=[w.can_manager for w in wirings],
+        feedback_timeout_ms=system.health.feedback_timeout_ms,
     )
 
     try:
-        for mgr in can_managers:
-            await mgr.run()
-        # 受信ループ起動後に始める。フィードバック未受信のまま PID を回すと
-        # 途絶判定で電流 0 に落ちるだけだが、無駄な警告ログを避ける
-        for loop in position_loops:
-            loop.start()
-        for monitor in sync_monitors:
-            monitor.start()
-        for refresher in target_refreshers:
-            refresher.start()
-        await server.start()
+        await _start_all(server, wirings)
     except asyncio.CancelledError:
         pass
     finally:
-        # 例外・キャンセルのどちらで抜けてもここを通す。ループが生き残ると
-        # 電流指令が出続けるため、CAN シャットダウンより先に必ず止める
-        for loop in position_loops:
-            await _shutdown_step(f"位置制御ループ (bus={loop.bus_name})", loop.stop())
-        # 再送を止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
-        # 停止指令をここから送らないのは、PC が落ちた場合と経路を 1 本に保つため
-        for refresher in target_refreshers:
-            await _shutdown_step("目標値再送", refresher.stop())
-        # 監視だけが生き残ると、停止済みのモータのフィードバックを見て誤発報する
-        for monitor in sync_monitors:
-            await _shutdown_step("同期監視", monitor.stop())
-        for mgr in can_managers:
-            await _shutdown_step("CAN シャットダウン", mgr.shutdown())
-        await _shutdown_step("サーバー終了処理", server.cleanup())
-        # 完走したことを journal に残す。この行が無いまま終了していれば、
-        # 後始末の途中で SIGKILL された (TimeoutStopSec 超過) と判別できる
-        logger.info("後始末完了")
+        # 例外・キャンセルのどちらで抜けてもここを通す
+        await _shutdown_all(server, wirings)
 
 
 if __name__ == "__main__":
