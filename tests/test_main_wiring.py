@@ -54,6 +54,7 @@ from main import (
     _load_pid_config,
     _wire_robot_motors,
 )
+from tests.feedback_frames import feed_m3508
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -79,13 +80,6 @@ class _StubCANManager:
     def last_currents(self) -> tuple[int, int, int, int]:
         assert self.sent, "CAN フレームが 1 つも送信されていない"
         return struct.unpack(">hhhh", self.sent[-1][1].data)
-
-
-def _feed(driver: M3508Driver, deg: float) -> None:
-    """M3508 のフィードバックフレームを 1 通流し込む。"""
-    angle_raw = round(deg / 360.0 * 8192) % 8192
-    data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-    driver.update_state(can.Message(arbitration_id=0x200 + driver.can_id, data=data))
 
 
 class _DummySequence(Sequence):
@@ -305,7 +299,7 @@ class TestBuildPositionLoops:
         config = _m3508_config()
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
-        _feed(driver, 0.0)
+        feed_m3508(driver, deg=0.0)
         # 0.3 秒前のフィードバックを最後の受信とする
         manager.feedback_at["lift_motor"] = time.time() - 0.3
 
@@ -343,7 +337,7 @@ class TestBuildPositionLoops:
         }
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
-        _feed(driver, 0.0)
+        feed_m3508(driver, deg=0.0)
         manager.feedback_at["lift_motor"] = time.time()
         captures: list[object] = []
 
@@ -377,7 +371,7 @@ class TestBuildPositionLoops:
         }
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
-        _feed(driver, 0.0)
+        feed_m3508(driver, deg=0.0)
         manager.feedback_at["lift_motor"] = time.time()
         captures: list[object] = []
 

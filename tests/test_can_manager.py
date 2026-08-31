@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import struct
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,10 +11,11 @@ import pytest
 
 from lib.can_manager import _RECV_RETRY_MIN_S, CANManager
 from lib.drivers.base import MotorState
-from lib.drivers.generic import CommandType, GenericDriver
+from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth
 from tests.fake_can import direct_runner, mark_feedback_at, mock_bus, mock_driver
+from tests.feedback_frames import generic_feedback, m3508_feedback
 
 
 class TestCANManager:
@@ -359,25 +359,6 @@ class TestReceiveLoopRobustness:
 
         bus.recv.side_effect = recv_side_effect
 
-    @staticmethod
-    def _feedback_msg(device_id: int, position_dg: int) -> can.Message:
-        # Byte0=状態フラグ / Byte1-2=位置 (仕様書 §3.2)
-        data = bytearray([0x00])
-        data.extend(struct.pack("<h", position_dg))
-        return can.Message(
-            arbitration_id=GenericDriver.build_can_id(CommandType.FEEDBACK, device_id),
-            data=bytes(data),
-            is_extended_id=False,
-        )
-
-    @staticmethod
-    def _m3508_feedback(can_id: int, angle_raw: int) -> can.Message:
-        return can.Message(
-            arbitration_id=0x200 + can_id,
-            data=struct.pack(">hhhB", angle_raw, 0, 0, 30) + bytes(1),
-            is_extended_id=False,
-        )
-
     async def _run_loop(self, mgr: CANManager) -> None:
         with pytest.raises(asyncio.CancelledError):
             await mgr._receive_loop("can0")
@@ -397,7 +378,7 @@ class TestReceiveLoopRobustness:
             data=bytes(8),
             is_extended_id=False,
         )
-        self._drain_recv(bus, [bogus, self._feedback_msg(0x01, 900)])
+        self._drain_recv(bus, [bogus, generic_feedback(motor, position=90.0)])
 
         await self._run_loop(mgr)
 
@@ -412,7 +393,7 @@ class TestReceiveLoopRobustness:
         mgr.add_motor("can0", motor)
 
         alien = can.Message(arbitration_id=0x12345678, data=bytes(8), is_extended_id=True)
-        self._drain_recv(bus, [alien, self._feedback_msg(0x01, 450)])
+        self._drain_recv(bus, [alien, generic_feedback(motor, position=45.0)])
 
         await self._run_loop(mgr)
 
@@ -433,7 +414,7 @@ class TestReceiveLoopRobustness:
         mgr.add_motor("can0", other)
 
         short = can.Message(arbitration_id=0x201, data=bytes(4), is_extended_id=False)
-        self._drain_recv(bus, [short, self._m3508_feedback(2, angle_raw=2048)])
+        self._drain_recv(bus, [short, m3508_feedback(other, angle_raw=2048)])
 
         await self._run_loop(mgr)
 
@@ -455,7 +436,7 @@ class TestReceiveLoopRobustness:
         mgr.add_motor("can0", broken)
         mgr.add_motor("can0", healthy)
 
-        self._drain_recv(bus, [self._feedback_msg(0x01, 900)])
+        self._drain_recv(bus, [generic_feedback(healthy, position=90.0)])
 
         await self._run_loop(mgr)
 
@@ -483,7 +464,7 @@ class TestReceiveLoopRobustness:
 
         queue: list[can.Message | Exception] = [
             can.CanOperationError("Error receiving: Network is down [Error Code 100]"),
-            self._feedback_msg(0x01, 900),
+            generic_feedback(motor, position=90.0),
         ]
 
         def recv_side_effect(timeout: float) -> can.Message | None:
@@ -557,7 +538,9 @@ class TestReceiveLoopRobustness:
         motor = CancellingDriver("gripper", 0x01)
         mgr.add_bus("can0", bus)
         mgr.add_motor("can0", motor)
-        self._drain_recv(bus, [self._feedback_msg(0x01, 900), self._feedback_msg(0x01, 450)])
+        self._drain_recv(
+            bus, [generic_feedback(motor, position=90.0), generic_feedback(motor, position=45.0)]
+        )
 
         await self._run_loop(mgr)
 

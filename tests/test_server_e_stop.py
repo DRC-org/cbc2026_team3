@@ -26,7 +26,7 @@ from lib.match_state import (
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorHandle
 from tests.fake_can import mock_can_manager, set_motors
-from tests.feedback_frames import feed_generic
+from tests.feedback_frames import feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
@@ -723,17 +723,6 @@ class TestActivateEStopFromInside:
 # ---------------------------------------------------------------------- #
 
 
-def _feed(driver: M3508Driver, deg: float) -> None:
-    """M3508 のフィードバックフレームを 1 通流し込む。"""
-    raw = round(deg / 360.0 * 8192) % 8192
-    driver.update_state(
-        can.Message(
-            arbitration_id=0x200 + driver.can_id,
-            data=struct.pack(">HhhBB", raw, 0, 0, 25, 0),
-        )
-    )
-
-
 class _SyncFixture:
     """位置制御ループと同期監視を実物のまま RobotServer へ配線した一式。
 
@@ -785,8 +774,8 @@ class _SyncFixture:
         )
         # 累積角の原点は初回フィードバックで確定する。先に 0deg を流しておかないと
         # 「ずれた姿勢」がそのまま原点になり、偏差 0 と判定されてしまう
-        _feed(self.right, 0.0)
-        _feed(self.left, 0.0)
+        feed_m3508(self.right, deg=0.0)
+        feed_m3508(self.left, deg=0.0)
 
     def _on_violation(self, axis: str, deviation: float) -> None:
         self.violations.append((axis, deviation))
@@ -811,13 +800,13 @@ class _SyncFixture:
 
     def deviate(self) -> None:
         """左右が逆向きに 10deg ずれた状態にする (人間の単位で 20 のずれ)。"""
-        _feed(self.right, 10.0)
-        _feed(self.left, 10.0)
+        feed_m3508(self.right, deg=10.0)
+        feed_m3508(self.left, deg=10.0)
 
     def aligned(self) -> None:
         """逆回転ペアが正しく揃っている状態にする。"""
-        _feed(self.right, 10.0)
-        _feed(self.left, -10.0)
+        feed_m3508(self.right, deg=10.0)
+        feed_m3508(self.left, deg=-10.0)
 
     async def settle(self) -> None:
         for _ in range(5):
