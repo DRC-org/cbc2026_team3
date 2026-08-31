@@ -146,7 +146,8 @@ static bool g_attached[kServoSlotCount] = {false, false, false, false, false};
 // センサの現在値。スロットごとに独立で、そのスロット自身の FEEDBACK で報告する。
 static bool g_sensorActive[kServoSlotCount] = {false, false, false, false, false};
 
-static uint32_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
+// 送信周期は基板全体で 1 つ（スロットごとに変えると送信位相の分散が崩れる）。
+static uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 static PeriodicTimer g_feedbackTimer[kServoSlotCount];
 
 static PeriodicTimer g_motionTimer;
@@ -162,7 +163,7 @@ static Adafruit_NeoPixel g_strip(1, kPinRgb, NEO_GRB + NEO_KHZ800);
 // シリアルから角度を入力している間だけ true。
 // CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
 static bool g_serialOverride = false;
-static char g_serialStorage[24];
+static char g_serialStorage[kSerialLineCapacity];
 static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
 
@@ -313,15 +314,14 @@ static void sendInfo(uint8_t slot) {
 }
 
 static void applyParam(uint8_t slot, const SetParamCommand &cmd) {
+    // command_timeout_ms / feedback_interval_ms は 3 枚に共通なので MotorCan が持つ。
+    if (applyCommonParam(cmd, g_channel[slot], g_feedbackIntervalMs)) {
+        return;
+    }
     switch (cmd.id) {
         case ParamId::CommandTimeoutMs:
-            // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
-            // SET_PARAM 1 フレームで実質外れる。範囲の根拠は MotorCanProtocol が持つ。
-            g_channel[slot].setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
-            break;
         case ParamId::FeedbackIntervalMs:
-            // 周期は基板全体で 1 つ（スロットごとに変えると位相の分散が崩れる）。
-            g_feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
+            // applyCommonParam が処理済み。ここへは来ない。
             break;
         case ParamId::ReachedTolerance:
             g_channel[slot].setReachedToleranceDeg(fromRaw(cmd.raw, kAngleScale));
@@ -473,11 +473,8 @@ static void resolveDeviceIds() {
     const uint8_t boardNumber = readDipSwitch(
         kPinDip, kDipBitCount, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); },
         LOW);
-    for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
-        g_deviceId[slot] =
-            isDeviceSlot(slot) ? makeDeviceId(kBoardKind, boardNumber, slot)
-                               : kDeviceIdUnconfigured;
-    }
+    motorcan::resolveDeviceIds(g_deviceId, kServoSlotCount, kBoardKind, boardNumber,
+                               isDeviceSlot);
 }
 
 // ===========================================================================
@@ -485,25 +482,25 @@ static void resolveDeviceIds() {
 // ===========================================================================
 
 static void updateLed(uint32_t nowMs) {
-    bool unconfigured = false;
-    bool stopped = false;
+    BoardIndication indication(g_canFailed);
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
+        // Unused スロットは ID を名乗らないので「未設定」に数えない（数えると
+        // 空きスロットのある基板が常に赤く点滅する）。緊急停止はサーボスロットだけが持つ。
         if (!isDeviceSlot(slot)) {
             continue;
         }
-        if (!isSlotConfigured(slot)) {
-            unconfigured = true;
-        }
-        if (isServoSlot(slot) &&
-            (g_channel[slot].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0) {
-            stopped = true;
-        }
+        indication.observe(
+            isSlotConfigured(slot),
+            isServoSlot(slot) &&
+                (g_channel[slot].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
     }
 
     // CAN が上がらない・ID 未設定は「この基板は今すぐ直さないと使えない」状態なので、
     // 平常のハートビートと区別が付くよう速い点滅にする（仕様書 §2.2）。
-    const bool urgent = g_canFailed || unconfigured;
-    if (!g_blinkTimer.due(nowMs, urgent ? kUnconfiguredBlinkIntervalMs : kHeartbeatIntervalMs)) {
+    // **この基板は緊急停止を色（橙）で示す**ので、点滅の速さは平常と同じにする。
+    const uint32_t interval = blinkIntervalFor(indication, kUnconfiguredBlinkIntervalMs,
+                                               kHeartbeatIntervalMs, kHeartbeatIntervalMs);
+    if (!g_blinkTimer.due(nowMs, interval)) {
         return;
     }
     g_ledOn = !g_ledOn;
@@ -514,9 +511,9 @@ static void updateLed(uint32_t nowMs) {
     // 赤（速い点滅）= CAN 不通 / ID 未設定、橙 = 緊急停止ラッチ中、緑 = 平常。
     uint8_t r = 0;
     uint8_t g = 0;
-    if (urgent) {
+    if (indication.urgent) {
         r = g_ledOn ? 255 : 0;
-    } else if (stopped) {
+    } else if (indication.stopped) {
         r = 255;
         g = 96;
     } else {
@@ -524,8 +521,6 @@ static void updateLed(uint32_t nowMs) {
     }
     g_strip.setPixelColor(0, g_strip.Color(r, g, 0));
     g_strip.show();
-#else
-    (void)stopped;
 #endif
 }
 
@@ -543,33 +538,25 @@ static void pollSerial(uint32_t nowMs) {
         if (!g_serialLine.push(static_cast<char>(Serial.read()))) {
             continue;
         }
-        const char *line = g_serialLine.line();
-
-        if (line[0] == 's' || line[0] == 'S') {
+        // 行の骨格の解釈（'s' / '<番号> <値>'）は parseSerialCommand が持つ。
+        // 値の読み取りと「サーボスロットか」の判定だけを基板ごとに行う。
+        const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kServoSlotCount);
+        if (cmd.kind == SerialCommand::Kind::StopAll) {
             g_serialOverride = false;
             for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
                 if (isServoSlot(slot)) {
                     g_channel[slot].hold(nowMs);
                 }
             }
-        } else {
-            // スロット番号と角度が空白で区切られていない行は捨てる。
-            // 番号を読み違えると別のサーボが動くので、曖昧な入力は指令にしない。
-            char *sep = nullptr;
-            const long slot = strtol(line, &sep, 10);
-            if (sep != line && *sep == ' ' && slot >= 0 &&
-                slot < static_cast<long>(kServoSlotCount) &&
-                isServoSlot(static_cast<uint8_t>(slot))) {
-                // 緊急停止ラッチ中はシリアルからも角度を通さない（ServoChannel が拒否する）。
-                // avr-libc に strtof は無い。AVR では double が 32bit float なので strtod で足りる
-                // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
-                // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
-                const float deg = fromRaw(
-                    toRaw(static_cast<float>(strtod(sep + 1, nullptr)), kAngleScale),
-                    kAngleScale);
-                g_channel[slot].setTarget(deg, nowMs);
-                g_serialOverride = true;
-            }
+        } else if (cmd.kind == SerialCommand::Kind::Channel && isServoSlot(cmd.channel)) {
+            // 緊急停止ラッチ中はシリアルからも角度を通さない（ServoChannel が拒否する）。
+            // **avr-libc に strtof は無い。** AVR では double が 32bit float なので strtod で足りる。
+            // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
+            // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
+            const float deg = fromRaw(
+                toRaw(static_cast<float>(strtod(cmd.value, nullptr)), kAngleScale), kAngleScale);
+            g_channel[cmd.channel].setTarget(deg, nowMs);
+            g_serialOverride = true;
         }
     }
 
@@ -623,12 +610,10 @@ void setup() {
     const uint32_t startMs = millis();
 
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
-        // 全スロットが同じ周期で同時に送るとフレームのバーストになり、他バスの
-        // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
-        // 周期を等分した位相をスロットごとにずらして平準化する。
-        // ID 未設定のスロットも「デバイス ID 未設定」を知らせるために送るので、ここは全スロット分やる。
-        g_feedbackTimer[slot].setLastMs(startMs - g_feedbackIntervalMs +
-                                        (g_feedbackIntervalMs * slot) / kServoSlotCount);
+        // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
+        // ID 未設定のスロットも「デバイス ID 未設定」を知らせるために送るので、
+        // ここは全スロット分やる。
+        g_feedbackTimer[slot].stagger(startMs, g_feedbackIntervalMs, slot, kServoSlotCount);
 
         if (!isServoSlot(slot) || !isSlotConfigured(slot)) {
             continue;

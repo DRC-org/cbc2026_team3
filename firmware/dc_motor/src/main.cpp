@@ -132,7 +132,8 @@ static float g_maxDuty[kDcChannelCount] = {
     kDcChannels[2].maxDuty,
 };
 
-static uint32_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
+// 送信周期は基板全体で 1 つ（チャンネルごとに変えると送信位相の分散が崩れる）。
+static uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 static PeriodicTimer g_feedbackTimer[kDcChannelCount];
 
 static PeriodicTimer g_infoTimer;
@@ -150,7 +151,7 @@ static Adafruit_NeoPixel g_strip(1, kPinRgb, NEO_GRB + NEO_KHZ800);
 // シリアルから duty を入力している間だけ true。
 // CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
 static bool g_serialOverride = false;
-static char g_serialStorage[24];
+static char g_serialStorage[kSerialLineCapacity];
 static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
 
@@ -235,19 +236,17 @@ static void sendInfo(uint8_t ch) {
 }
 
 static void applyParam(uint8_t ch, const SetParamCommand &cmd) {
+    // command_timeout_ms / feedback_interval_ms は 3 枚に共通なので MotorCan が持つ。
+    if (applyCommonParam(cmd, g_channel[ch], g_feedbackIntervalMs)) {
+        return;
+    }
     switch (cmd.id) {
         case ParamId::MaxDuty:
             g_maxDuty[ch] = clampDuty(fromRaw(cmd.raw, kDutyScale), 1.0f);
             break;
         case ParamId::CommandTimeoutMs:
-            // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が
-            // SET_PARAM 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。
-            // 範囲の根拠と NaN の扱いは MotorCanProtocol が持つ。
-            g_channel[ch].setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
-            break;
         case ParamId::FeedbackIntervalMs:
-            // 周期は基板全体で 1 つ（チャンネルごとに変えると位相の分散が崩れる）。
-            g_feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
+            // applyCommonParam が処理済み。ここへは来ない。
             break;
         case ParamId::ReachedTolerance:
         case ParamId::SlewRate:
@@ -353,9 +352,7 @@ static void resolveDeviceIds() {
     const uint8_t boardNumber = readDipSwitch(
         kPinDip, kDipBitCount, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); },
         LOW);
-    for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        g_deviceId[ch] = makeDeviceId(kBoardKind, boardNumber, ch);
-    }
+    motorcan::resolveDeviceIds(g_deviceId, kDcChannelCount, kBoardKind, boardNumber, nullptr);
 }
 
 // ===========================================================================
@@ -363,21 +360,18 @@ static void resolveDeviceIds() {
 // ===========================================================================
 
 static void updateLed(uint32_t nowMs) {
-    bool unconfigured = false;
-    bool stopped = false;
+    BoardIndication indication(g_canFailed);
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        if (!isChannelConfigured(ch)) {
-            unconfigured = true;
-        }
-        if ((g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0) {
-            stopped = true;
-        }
+        indication.observe(isChannelConfigured(ch),
+                           (g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
     }
 
     // CAN が上がらない・ID 未設定は「この基板は今すぐ直さないと使えない」状態なので、
     // 平常のハートビートと区別が付くよう速い点滅にする（仕様書 §2.2）。
-    const bool urgent = g_canFailed || unconfigured;
-    if (!g_blinkTimer.due(nowMs, urgent ? kUnconfiguredBlinkIntervalMs : kHeartbeatIntervalMs)) {
+    // **この基板は緊急停止を色（橙）で示す**ので、点滅の速さは平常と同じにする。
+    const uint32_t interval = blinkIntervalFor(indication, kUnconfiguredBlinkIntervalMs,
+                                               kHeartbeatIntervalMs, kHeartbeatIntervalMs);
+    if (!g_blinkTimer.due(nowMs, interval)) {
         return;
     }
     g_ledOn = !g_ledOn;
@@ -389,9 +383,9 @@ static void updateLed(uint32_t nowMs) {
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
-    if (urgent) {
+    if (indication.urgent) {
         r = g_ledOn ? 255 : 0;
-    } else if (stopped) {
+    } else if (indication.stopped) {
         r = 255;
         g = 96;
     } else {
@@ -399,8 +393,6 @@ static void updateLed(uint32_t nowMs) {
     }
     g_strip.setPixelColor(0, g_strip.Color(r, g, b));
     g_strip.show();
-#else
-    (void)stopped;
 #endif
 }
 
@@ -418,26 +410,20 @@ static void pollSerial(uint32_t nowMs) {
         if (!g_serialLine.push(static_cast<char>(Serial.read()))) {
             continue;
         }
-        const char *line = g_serialLine.line();
-
-        if (line[0] == 's' || line[0] == 'S') {
+        // 行の骨格の解釈（'s' / '<番号> <値>'）は parseSerialCommand が持つ。
+        // 値の読み取りだけを基板ごとに行う（DC は duty の float）。
+        const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kDcChannelCount);
+        if (cmd.kind == SerialCommand::Kind::StopAll) {
             g_serialOverride = false;
             for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
                 g_channel[ch].hold();
             }
-        } else {
-            // チャンネル番号と duty が空白で区切られていない行は捨てる。
-            // 番号を読み違えると別のモータが回るので、曖昧な入力は指令にしない。
-            char *sep = nullptr;
-            const long ch = strtol(line, &sep, 10);
-            if (sep != line && *sep == ' ' && ch >= 0 &&
-                ch < static_cast<long>(kDcChannelCount)) {
-                // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
-                // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
-                g_channel[ch].setDuty(
-                    fromRaw(toRaw(strtof(sep + 1, nullptr), kDutyScale), kDutyScale), nowMs);
-                g_serialOverride = true;
-            }
+        } else if (cmd.kind == SerialCommand::Kind::Channel) {
+            // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
+            // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
+            g_channel[cmd.channel].setDuty(
+                fromRaw(toRaw(strtof(cmd.value, nullptr), kDutyScale), kDutyScale), nowMs);
+            g_serialOverride = true;
         }
     }
 
@@ -493,12 +479,10 @@ void setup() {
     const uint32_t startMs = millis();
 
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        // 全チャンネルが同じ周期で同時に送ると 3 フレームのバーストになり、他バスの
-        // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
-        // 周期を等分した位相をチャンネルごとにずらして平準化する。
-        // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送るので、ここは全チャンネル分やる。
-        g_feedbackTimer[ch].setLastMs(startMs - g_feedbackIntervalMs +
-                                      (g_feedbackIntervalMs * ch) / kDcChannelCount);
+        // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
+        // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送るので、
+        // ここは全チャンネル分やる。
+        g_feedbackTimer[ch].stagger(startMs, g_feedbackIntervalMs, ch, kDcChannelCount);
 
         if (!isChannelConfigured(ch)) {
             continue;

@@ -46,4 +46,18 @@ FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceId
 uint8_t readDipSwitch(const uint8_t *pins, uint8_t count, int (*readPin)(uint8_t pin),
                       int activeLevel);
 
+// out[0..count) を「基板種別 | 基板番号 | スロット番号」で埋める（仕様書 §2.2）。
+//
+// isDevice が nullptr でなければ、false を返したスロットだけ未設定（0x00）にする。
+// **サーボ基板の Unused スロットのためにある**（仕様書 §7.1）—— そのスロット宛の
+// フレームで何かが起きる経路を構造的に無くすには、ID を持たせないのが唯一の手段。
+// 一方で ID の予約はやめない（やめるとブロックの幅が縮んで隣の基板と重なる）ので、
+// 「番号は消費するが名乗らない」というこの形になる。
+//
+// **DIP の読み出し（GPIO）は呼び出し側に残す。** ピンの読み方が 3 枚で違う
+// （digitalRead / HAL_GPIO_ReadPin）ので、ここへ持ち込むと Arduino.h と HAL の
+// どちらかを include することになり、native テストが掛からなくなる。
+void resolveDeviceIds(uint8_t *out, uint8_t count, BoardKind board, uint8_t boardNumber,
+                      bool (*isDevice)(uint8_t slot));
+
 }  // namespace motorcan

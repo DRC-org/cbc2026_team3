@@ -256,12 +256,33 @@ static void test_periodic_timer_survives_millis_wraparound() {
     TEST_ASSERT_TRUE(timer.due(0x00000002u, 10));
 }
 
-// サーボは全チャンネルが同時に送らないよう、起点をずらして初期化する。
-static void test_periodic_timer_accepts_phase_offset() {
+// 3 枚とも全チャンネルが同時に送らないよう、起点をずらして初期化する。
+// 位相がずれていないと FEEDBACK が N フレームのバーストになり、他バスの周期送信と
+// 重なったときに調停待ちが伸びて間隔が波打つ。
+static void test_periodic_timer_staggers_phase() {
+    // 2 チャンネル / 周期 10ms の 1 番目 → 起点は 5ms 過去、次の満了は 5ms 後
+    PeriodicTimer second;
+    second.stagger(1000, 10, 1, 2);
+    TEST_ASSERT_FALSE(second.due(1000, 10));
+    TEST_ASSERT_TRUE(second.due(1005, 10));
+
+    // 0 番目は「ちょうど 1 周期ぶん過去」なので、その場で 1 回満了する
+    PeriodicTimer first;
+    first.stagger(1000, 10, 0, 2);
+    TEST_ASSERT_TRUE(first.due(1000, 10));
+
+    // 以後は互いに半周期ずれたまま進む
+    TEST_ASSERT_TRUE(first.due(1010, 10));
+    TEST_ASSERT_TRUE(second.due(1015, 10));
+}
+
+// count が 0 のときに 0 除算で落ちないこと（チャンネルを持たない構成は
+// static_assert が先に弾くが、ここが最後の防壁）。
+static void test_periodic_timer_stagger_handles_zero_count() {
     PeriodicTimer timer;
-    timer.setLastMs(1000u - 10u + 5u);
-    TEST_ASSERT_FALSE(timer.due(1000, 10));
-    TEST_ASSERT_TRUE(timer.due(1005, 10));
+    timer.stagger(1000, 10, 0, 0);
+    TEST_ASSERT_FALSE(timer.due(1009, 10));
+    TEST_ASSERT_TRUE(timer.due(1010, 10));
 }
 
 // --------------------------------------------------------------------------
@@ -319,6 +340,108 @@ static void test_line_buffer_caps_length() {
     TEST_ASSERT_EQUAL_STRING("0123456", last);
 }
 
+// --------------------------------------------------------------------------
+// §2.2 / §7.1 デバイス ID の一括解決
+// --------------------------------------------------------------------------
+
+// 3 枚とも同じループを各自で持っていた。スロットの添字がそのまま ID の下位 3bit に
+// なることと、DIP が基板番号そのものであることをここで固定する。
+static void test_resolve_device_ids_fills_the_table() {
+    uint8_t ids[3] = {0xFF, 0xFF, 0xFF};
+    resolveDeviceIds(ids, 3, BoardKind::Dc, 1, nullptr);
+    TEST_ASSERT_EQUAL_UINT8(0x88, ids[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x89, ids[1]);
+    TEST_ASSERT_EQUAL_UINT8(0x8A, ids[2]);
+}
+
+// **サーボ基板の Unused スロットだけ 0x00 のままにする**（仕様書 §7.1）。
+// そのスロット宛のフレームで何かが起きる経路を構造的に無くすため。
+// **ID の予約はやめない**ので、隣のスロットの番号は詰まらない。
+static bool onlySlotOneIsUnused(uint8_t slot) { return slot != 1; }
+
+static void test_resolve_device_ids_skips_non_device_slots() {
+    uint8_t ids[3] = {0xFF, 0xFF, 0xFF};
+    resolveDeviceIds(ids, 3, BoardKind::Servo, 0, onlySlotOneIsUnused);
+    TEST_ASSERT_EQUAL_UINT8(0x40, ids[0]);
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, ids[1]);
+    // 番号は詰まらない。詰めるとブロックの幅が縮んで隣の基板と重なる
+    TEST_ASSERT_EQUAL_UINT8(0x42, ids[2]);
+}
+
+// DIP を回しすぎた基板は全スロットが未設定になる（黙って丸めると別の基板を名乗る）。
+static void test_resolve_device_ids_out_of_range_board_number() {
+    uint8_t ids[2] = {0xFF, 0xFF};
+    resolveDeviceIds(ids, 2, BoardKind::Servo, 8, nullptr);
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, ids[0]);
+    TEST_ASSERT_EQUAL_UINT8(kDeviceIdUnconfigured, ids[1]);
+}
+
+// --------------------------------------------------------------------------
+// デバッグ用シリアルの行解釈
+// --------------------------------------------------------------------------
+
+static void test_serial_command_stop_all() {
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::StopAll),
+                            static_cast<uint8_t>(parseSerialCommand("s", 3).kind));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::StopAll),
+                            static_cast<uint8_t>(parseSerialCommand("S", 3).kind));
+}
+
+static void test_serial_command_splits_channel_and_value() {
+    const SerialCommand cmd = parseSerialCommand("2 -0.35", 3);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::Channel),
+                            static_cast<uint8_t>(cmd.kind));
+    TEST_ASSERT_EQUAL_UINT8(2, cmd.channel);
+    TEST_ASSERT_EQUAL_STRING("-0.35", cmd.value);
+}
+
+// **番号を読み違えると別のアクチュエータが動く。** 曖昧な行は指令にしない。
+static void test_serial_command_rejects_ambiguous_lines() {
+    // 区切りが空白でない
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::None),
+                            static_cast<uint8_t>(parseSerialCommand("1,0.3", 3).kind));
+    // 番号が読めない
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::None),
+                            static_cast<uint8_t>(parseSerialCommand(" 0.3", 3).kind));
+    // 値が無い
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::None),
+                            static_cast<uint8_t>(parseSerialCommand("1", 3).kind));
+    // チャンネル数の外（配列外アクセスになる）
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::None),
+                            static_cast<uint8_t>(parseSerialCommand("3 0.3", 3).kind));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(SerialCommand::Kind::None),
+                            static_cast<uint8_t>(parseSerialCommand("-1 0.3", 3).kind));
+}
+
+// --------------------------------------------------------------------------
+// LED の点滅間隔
+// --------------------------------------------------------------------------
+
+// 「今すぐ直さないと使えない」（CAN 不通 / ID 未設定）が最優先。
+// 緊急停止より先に出さないと、設定ミスの基板を「止めてあるだけ」と読み違える。
+static void test_blink_interval_prefers_urgent() {
+    BoardIndication canDown(true);
+    canDown.observe(true, /*latched=*/true);
+    TEST_ASSERT_EQUAL_UINT32(200, blinkIntervalFor(canDown, 200, 500, 1000));
+
+    BoardIndication unconfigured(false);
+    unconfigured.observe(/*configured=*/false, false);
+    TEST_ASSERT_EQUAL_UINT32(200, blinkIntervalFor(unconfigured, 200, 500, 1000));
+}
+
+// LED が 1 本しかない電磁弁基板は、緊急停止に専用の速さを割り当てる。
+// DC 用・サーボ用は色で示すので stoppedMs に heartbeatMs と同じ値を渡す。
+static void test_blink_interval_separates_stop_from_heartbeat() {
+    BoardIndication stopped(false);
+    stopped.observe(true, /*latched=*/true);
+    TEST_ASSERT_EQUAL_UINT32(500, blinkIntervalFor(stopped, 200, 500, 1000));
+    TEST_ASSERT_EQUAL_UINT32(1000, blinkIntervalFor(stopped, 200, 1000, 1000));
+
+    BoardIndication healthy(false);
+    healthy.observe(true, false);
+    TEST_ASSERT_EQUAL_UINT32(1000, blinkIntervalFor(healthy, 200, 500, 1000));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_broadcast_e_stop_reaches_every_channel);
@@ -339,9 +462,18 @@ int main(int, char **) {
     RUN_TEST(test_dip_is_active_low_and_lsb_first);
     RUN_TEST(test_periodic_timer_fires_on_interval);
     RUN_TEST(test_periodic_timer_survives_millis_wraparound);
-    RUN_TEST(test_periodic_timer_accepts_phase_offset);
+    RUN_TEST(test_periodic_timer_staggers_phase);
+    RUN_TEST(test_periodic_timer_stagger_handles_zero_count);
     RUN_TEST(test_line_buffer_completes_on_lf_and_cr);
     RUN_TEST(test_line_buffer_ignores_empty_lines);
     RUN_TEST(test_line_buffer_caps_length);
+    RUN_TEST(test_resolve_device_ids_fills_the_table);
+    RUN_TEST(test_resolve_device_ids_skips_non_device_slots);
+    RUN_TEST(test_resolve_device_ids_out_of_range_board_number);
+    RUN_TEST(test_serial_command_stop_all);
+    RUN_TEST(test_serial_command_splits_channel_and_value);
+    RUN_TEST(test_serial_command_rejects_ambiguous_lines);
+    RUN_TEST(test_blink_interval_prefers_urgent);
+    RUN_TEST(test_blink_interval_separates_stop_from_heartbeat);
     return UNITY_END();
 }

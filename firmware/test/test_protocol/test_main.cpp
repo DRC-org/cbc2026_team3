@@ -880,6 +880,111 @@ static void test_actuator_slot_relays_safety_flags() {
     TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, stopped);
 }
 
+// --------------------------------------------------------------------------
+// §3.3 3 枚に共通する SET_PARAM（applyCommonParam）
+// --------------------------------------------------------------------------
+
+// **command_timeout_ms はチャンネル単位、feedback_interval_ms は基板全体で 1 つ。**
+// この非対称を 3 枚に書き写していたので、いつか片方だけが逆になる形だった。
+static void test_common_param_routes_timeout_and_interval() {
+    DcChannel channel(500);
+    uint16_t interval = kDefaultFeedbackIntervalMs;
+
+    uint8_t frame[3] = {static_cast<uint8_t>(ParamId::CommandTimeoutMs), 0, 0};
+    packInt16Le(&frame[1], 800);
+    TEST_ASSERT_TRUE(applyCommonParam(decodeSetParam(frame, 3), channel, interval));
+    TEST_ASSERT_EQUAL_UINT32(800, channel.commandTimeoutMs());
+    TEST_ASSERT_EQUAL_UINT16(kDefaultFeedbackIntervalMs, interval);
+
+    frame[0] = static_cast<uint8_t>(ParamId::FeedbackIntervalMs);
+    packInt16Le(&frame[1], 20);
+    TEST_ASSERT_TRUE(applyCommonParam(decodeSetParam(frame, 3), channel, interval));
+    TEST_ASSERT_EQUAL_UINT16(20, interval);
+    TEST_ASSERT_EQUAL_UINT32(800, channel.commandTimeoutMs());
+}
+
+// 範囲外は境界値へ丸める。上限が効かないと、仕様書 §5.1 が守っている最後の砦が
+// SET_PARAM 1 フレームで実質外れる。
+static void test_common_param_clamps_out_of_range() {
+    DcChannel channel(500);
+    uint16_t interval = kDefaultFeedbackIntervalMs;
+
+    uint8_t frame[3] = {static_cast<uint8_t>(ParamId::CommandTimeoutMs), 0, 0};
+    packInt16Le(&frame[1], 30000);
+    applyCommonParam(decodeSetParam(frame, 3), channel, interval);
+    TEST_ASSERT_EQUAL_UINT32(kMaxCommandTimeoutMs, channel.commandTimeoutMs());
+
+    frame[0] = static_cast<uint8_t>(ParamId::FeedbackIntervalMs);
+    packInt16Le(&frame[1], 0);
+    applyCommonParam(decodeSetParam(frame, 3), channel, interval);
+    TEST_ASSERT_EQUAL_UINT16(kMinFeedbackIntervalMs, interval);
+}
+
+// 基板固有の ID は触らずに false を返す。true を返すと、各 applyParam が
+// 自分の switch へ進まなくなって max_duty も angle_min も効かなくなる。
+static void test_common_param_leaves_board_specific_ids() {
+    DcChannel channel(500);
+    uint16_t interval = kDefaultFeedbackIntervalMs;
+    const ParamId others[] = {ParamId::MaxDuty, ParamId::ReachedTolerance, ParamId::SlewRate,
+                              ParamId::AngleMin, ParamId::AngleMax};
+    for (ParamId id : others) {
+        uint8_t frame[3] = {static_cast<uint8_t>(id), 0, 0};
+        packInt16Le(&frame[1], 123);
+        TEST_ASSERT_FALSE(applyCommonParam(decodeSetParam(frame, 3), channel, interval));
+    }
+    TEST_ASSERT_EQUAL_UINT32(500, channel.commandTimeoutMs());
+    TEST_ASSERT_EQUAL_UINT16(kDefaultFeedbackIntervalMs, interval);
+}
+
+// --------------------------------------------------------------------------
+// §2.1 受信フィルタ（電磁弁基板の bxCAN が使う ID 範囲）
+// --------------------------------------------------------------------------
+
+// **PC → モタドラ方向の 3 種別は必ず通す。** ここが落ちると、その基板だけが
+// 緊急停止を受け取れないのに FEEDBACK は流れ続け、PC からは正常に見える。
+static void test_pc_to_board_commands_pass_the_filter() {
+    const CommandType passing[] = {CommandType::EStop, CommandType::SetTarget,
+                                   CommandType::SetParam};
+    for (CommandType command : passing) {
+        // デバイス ID 側のビットは素通しでなければならない（宛先判定は routeFrame の仕事）
+        for (uint16_t dev = 0; dev <= 0xFF; ++dev) {
+            TEST_ASSERT_TRUE(
+                passesPcToBoardFilters(buildCanId(command, static_cast<uint8_t>(dev))));
+        }
+    }
+}
+
+// **モタドラ → PC 方向と予約値は落とす。** 通すと、共有バス上の FEEDBACK
+// （自作モタドラ 14 台 × 100Hz）が受信 FIFO（深さ 3）へ流れ込み、loop() が
+// 一瞬伸びた隙に E_STOP を取りこぼす。
+static void test_board_to_pc_frames_are_filtered_out() {
+    for (uint16_t dev = 0; dev <= 0xFF; ++dev) {
+        TEST_ASSERT_FALSE(
+            passesPcToBoardFilters(buildCanId(CommandType::Feedback, static_cast<uint8_t>(dev))));
+        TEST_ASSERT_FALSE(
+            passesPcToBoardFilters(buildCanId(CommandType::Info, static_cast<uint8_t>(dev))));
+    }
+    for (uint16_t command = 5; command <= 7; ++command) {
+        TEST_ASSERT_FALSE(passesPcToBoardFilters(
+            static_cast<uint16_t>((command << kCommandTypeShift) | 0x2A)));
+    }
+}
+
+// フィルタ値は CommandType から導く。**リテラルで再宣言してはならない** ——
+// この enum は一度動いており（かつて E_STOP は 0b111）、次に動いたときに
+// 電磁弁基板だけがフィルタで緊急停止を落とす形になる。
+static void test_filter_ranges_are_derived_from_the_enum() {
+    TEST_ASSERT_EQUAL_UINT16(commandIdBase(CommandType::EStop), kEStopAndSetTargetFilter.id);
+    TEST_ASSERT_EQUAL_UINT16(commandIdBase(CommandType::SetParam), kSetParamFilter.id);
+    // SET_PARAM 用のバンクは種別 3bit をすべて見る（1 種別だけを通す）
+    TEST_ASSERT_EQUAL_UINT16(kCommandTypeMask, kSetParamFilter.mask);
+    // E_STOP と SET_TARGET を 1 バンクで通すので、両者の差分ビットだけがマスクから落ちる
+    const uint16_t differingBits = static_cast<uint16_t>(
+        commandIdBase(CommandType::EStop) ^ commandIdBase(CommandType::SetTarget));
+    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(kCommandTypeMask & ~differingBits),
+                             kEStopAndSetTargetFilter.mask);
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_build_can_id);
@@ -951,5 +1056,11 @@ int main(int, char **) {
     RUN_TEST(test_sensor_slot_reports_only_its_own_contact);
     RUN_TEST(test_unconfigured_is_reported_on_every_slot_kind);
     RUN_TEST(test_actuator_slot_relays_safety_flags);
+    RUN_TEST(test_common_param_routes_timeout_and_interval);
+    RUN_TEST(test_common_param_clamps_out_of_range);
+    RUN_TEST(test_common_param_leaves_board_specific_ids);
+    RUN_TEST(test_pc_to_board_commands_pass_the_filter);
+    RUN_TEST(test_board_to_pc_frames_are_filtered_out);
+    RUN_TEST(test_filter_ranges_are_derived_from_the_enum);
     return UNITY_END();
 }

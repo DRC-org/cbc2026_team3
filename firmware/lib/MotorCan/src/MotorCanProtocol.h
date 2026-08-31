@@ -132,7 +132,73 @@ int16_t saturateToInt16(int32_t value);
 // CAN ID
 // ---------------------------------------------------------------------------
 
+// 仕様書 §2.1 の CAN ID レイアウト。上位 3bit がコマンド種別、下位 8bit がデバイス ID。
+constexpr uint8_t kCommandTypeShift = 8;
+constexpr uint16_t kCommandTypeMask = static_cast<uint16_t>(0x7u << kCommandTypeShift);
+
+constexpr uint16_t commandIdBase(CommandType command) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(command) << kCommandTypeShift);
+}
+
 uint16_t buildCanId(CommandType command, uint8_t deviceId);
+
+// ---------------------------------------------------------------------------
+// 受信フィルタ（PC → モタドラ方向だけを通す）
+// ---------------------------------------------------------------------------
+
+// **CommandType のビット配置を基板側に再宣言させないためにある。**
+// 電磁弁基板の bxCAN フィルタは `0x000 << 5` / `0x600 << 5` / `0x200 << 5` /
+// `0x700 << 5` というリテラルで「上位 3bit が種別」「E_STOP=0b000 /
+// SET_TARGET=0b001 / SET_PARAM=0b010」を再宣言しており、CommandType への参照が
+// 1 つも無かった。**この enum は実際に一度動いている**（かつて E_STOP は 0b111 で、
+// ブロードキャスト停止が最も優先度の低い ID だった。§2.1）。次に動かすと DC 用と
+// サーボ用は parseCanId 経由で自動追従するが、電磁弁だけがフィルタで E_STOP を
+// 落とし始める。症状は「電磁弁だけ緊急停止が効かない」で、FEEDBACK は流れ続けるので
+// **PC からは正常に見える**。
+//
+// マスクをハードウェアのレジスタへどう載せるか（bxCAN の 32bit スケールでは
+// STID が FilterIdHigh の bit15..5）は MCU 固有なので、そこは呼び出し側に残す。
+struct CanIdFilter {
+    uint16_t id;
+    uint16_t mask;  // このビットが id と一致するフレームだけを通す
+};
+
+constexpr bool canIdPassesFilter(const CanIdFilter &filter, uint16_t canId) {
+    return (canId & filter.mask) == filter.id;
+}
+
+// E_STOP と SET_TARGET は値が隣接するので 1 バンクで通す。**「隣接している」ことを
+// 式で表す** —— 2 つの ID の差分ビットをマスクから落とせば、値が動いても追随する。
+constexpr CanIdFilter kEStopAndSetTargetFilter{
+    commandIdBase(CommandType::EStop),
+    static_cast<uint16_t>(kCommandTypeMask & ~(commandIdBase(CommandType::EStop) ^
+                                               commandIdBase(CommandType::SetTarget)))};
+
+constexpr CanIdFilter kSetParamFilter{commandIdBase(CommandType::SetParam), kCommandTypeMask};
+
+constexpr bool passesPcToBoardFilters(uint16_t canId) {
+    return canIdPassesFilter(kEStopAndSetTargetFilter, canId) ||
+           canIdPassesFilter(kSetParamFilter, canId);
+}
+
+// **CommandType の値を動かしたらここでビルドが落ちる。** 落ちない形にすると、
+// 電磁弁基板だけが緊急停止を取りこぼす状態が実機まで見えない。
+static_assert(passesPcToBoardFilters(commandIdBase(CommandType::EStop)),
+              "E_STOP が受信フィルタを通らない（電磁弁基板だけ緊急停止が効かなくなる）");
+static_assert(passesPcToBoardFilters(commandIdBase(CommandType::SetTarget)),
+              "SET_TARGET が受信フィルタを通らない");
+static_assert(passesPcToBoardFilters(commandIdBase(CommandType::SetParam)),
+              "SET_PARAM が受信フィルタを通らない");
+// モタドラ → PC 方向は落とす。通すと共有バス上の FEEDBACK（14 台 × 100Hz）が
+// 受信 FIFO（深さ 3）へ流れ込み、loop() が一瞬伸びた隙に E_STOP を取りこぼす。
+static_assert(!passesPcToBoardFilters(commandIdBase(CommandType::Feedback)),
+              "FEEDBACK が受信フィルタを通ってしまう");
+static_assert(!passesPcToBoardFilters(commandIdBase(CommandType::Info)),
+              "INFO が受信フィルタを通ってしまう");
+static_assert(!passesPcToBoardFilters(static_cast<uint16_t>(0x5u << kCommandTypeShift)) &&
+                  !passesPcToBoardFilters(static_cast<uint16_t>(0x6u << kCommandTypeShift)) &&
+                  !passesPcToBoardFilters(static_cast<uint16_t>(0x7u << kCommandTypeShift)),
+              "予約コマンド種別が受信フィルタを通ってしまう");
 
 struct CanIdInfo {
     CommandType command;
@@ -255,6 +321,36 @@ constexpr uint16_t kMaxFeedbackIntervalMs = 1000;
 // 負値は下限へ。int16 なので float32 のような未定義動作の心配は無い。
 uint16_t clampCommandTimeoutMs(int16_t raw);
 uint16_t clampFeedbackIntervalMs(int16_t raw);
+
+// 3 枚に共通する SET_PARAM 2 件（仕様書 §3.3 の `0x01` / `0x02`）を処理する。
+// 処理したら true を返すので、各基板の applyParam は先頭でこれを呼び、
+// false のときだけ自分固有の ID を見る。
+//
+// 引数の Channel は DcChannel / ServoChannel / SolenoidChannel のどれか。
+// テンプレートにしてあるのは、この 3 つに共通の基底型が無いのと、ファームごとに
+// 1 種類しか実体化されないので Nano でもコード量が増えないため。
+//
+// **feedback_interval_ms は基板全体で 1 つ**（チャンネルごとに変えると
+// PeriodicTimer::stagger が割り当てた送信位相の分散が崩れる）。
+// **command_timeout_ms はチャンネル単位**（宛先がデバイス ID ＝ チャンネルなので、
+// 1 チャンネルへの指令が途絶えても他は動き続ける）。この非対称を 3 箇所に書き写すと、
+// いつか片方だけが逆になる。
+template <typename Channel>
+bool applyCommonParam(const SetParamCommand &cmd, Channel &channel,
+                      uint16_t &feedbackIntervalMs) {
+    switch (cmd.id) {
+        case ParamId::CommandTimeoutMs:
+            // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が SET_PARAM
+            // 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。範囲の根拠は上の定数。
+            channel.setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
+            return true;
+        case ParamId::FeedbackIntervalMs:
+            feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
+            return true;
+        default:
+            return false;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // duty

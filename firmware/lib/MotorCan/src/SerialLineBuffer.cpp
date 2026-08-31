@@ -1,5 +1,7 @@
 #include "SerialLineBuffer.h"
 
+#include <stdlib.h>
+
 namespace motorcan {
 
 SerialLineBuffer::SerialLineBuffer(char *storage, uint8_t capacity)
@@ -34,6 +36,26 @@ bool SerialLineBuffer::push(char c) {
     }
     pendingReset_ = true;
     return true;
+}
+
+SerialCommand parseSerialCommand(const char *line, uint8_t channelCount) {
+    const SerialCommand none{SerialCommand::Kind::None, 0, nullptr};
+    if (line == nullptr) {
+        return none;
+    }
+    if (line[0] == 's' || line[0] == 'S') {
+        return SerialCommand{SerialCommand::Kind::StopAll, 0, nullptr};
+    }
+
+    // 番号と値が空白で区切られていない行は捨てる。
+    // 番号を読み違えると別のアクチュエータが動くので、曖昧な入力は指令にしない。
+    char *sep = nullptr;
+    const long channel = strtol(line, &sep, 10);
+    if (sep == line || *sep != ' ' || channel < 0 ||
+        channel >= static_cast<long>(channelCount)) {
+        return none;
+    }
+    return SerialCommand{SerialCommand::Kind::Channel, static_cast<uint8_t>(channel), sep + 1};
 }
 
 }  // namespace motorcan
