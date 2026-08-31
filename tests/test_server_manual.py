@@ -15,13 +15,13 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Phase
+from lib.match_state import Phase
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
-from tests.server_fixtures import ServerFixture
+from tests.server_fixtures import DEFAULT_CHECKLIST, ServerFixture
 
 _ROBOT = "main_hand"
 
@@ -97,8 +97,7 @@ def _fixture(
 ) -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
     # 指差喚呼の項目が 1 つも無いと can_start_match が最初から True になり、
     # フェーズが SETUP を素通りして READY から始まる
-    definitions = {ROLE_PRE_MATCH: [ChecklistItem(id="check", label="確認")]} if checklist else None
-    fx = ServerFixture.build(checklist_definitions=definitions)
+    fx = ServerFixture.build(checklist_definitions=DEFAULT_CHECKLIST if checklist else None)
     fx.freeze_broadcast()
     manual, drivers = _make_manual()
     fx.add_robot(

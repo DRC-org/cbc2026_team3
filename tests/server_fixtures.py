@@ -30,10 +30,16 @@ from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.health import HealthSnapshot
 from lib.manual import ManualController
-from lib.match_state import MatchState
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
 from lib.server import RobotServer
 from tests.fake_can import mock_can_manager
+
+#: 指差喚呼の既定定義。**項目が 1 つ以上あること自体に意味がある** ——
+#: 空だと `can_start_match` が最初から True になり、フェーズが SETUP を素通りして
+#: READY から始まる。中身 (id / label) を見るテストは自分の定義を明示すること。
+#: 逆に「項目が 1 つも無い」状態を作りたいときは `checklist_definitions=None` を渡す。
+DEFAULT_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")]}
 
 #: 周期配信に割り込まれるとヘルス差分の基準が動く。テストが明示的に呼んだ配信
 #: だけを観測したいときは、この間隔まで伸ばして実質止める
@@ -60,6 +66,7 @@ class ServerFixture:
 
     @classmethod
     def build(cls, **server_kwargs: Any) -> ServerFixture:
+        server_kwargs.setdefault("checklist_definitions", DEFAULT_CHECKLIST)
         return cls(RobotServer(**server_kwargs))
 
     def add_robot(

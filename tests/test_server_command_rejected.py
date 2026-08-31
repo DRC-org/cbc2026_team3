@@ -14,7 +14,7 @@ import contextlib
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.commands import COMMANDS
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court, Phase
+from lib.match_state import Court, Phase
 from lib.sequence.engine import Sequence, step
 from tests.server_fixtures import ServerFixture, expect_no_type, recv_type
 
@@ -30,13 +30,8 @@ class _DummySequence(Sequence):
 
 #: 指差喚呼を 1 項目ずつ持たせる。項目ゼロだと全ロールが即完了扱いになり
 #: 起動直後から READY になるため、SETUP を前提にする検証が書けない
-_DEFS = {
-    ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")],
-}
-
-
 def _build_fixture() -> ServerFixture:
-    fx = ServerFixture.build(checklist_definitions=_DEFS)
+    fx = ServerFixture.build()
     fx.add_robot("main_hand", _DummySequence())
     return fx
 
@@ -238,7 +233,7 @@ class TestSequenceJumpArgumentValidation:
     """
 
     async def test_真偽値のstep_indexではシーケンスが動き出さない(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_DEFS)
+        fx = ServerFixture.build()
         seq = _TwoStepSequence()
         fx.add_robot("main_hand", seq)
         fx.enter_match()
@@ -255,7 +250,7 @@ class TestSequenceJumpArgumentValidation:
 
     async def test_整数のstep_indexは従来どおり通る(self) -> None:
         # 上の検証が「ジャンプ自体が効かなくなった」ことを見ているのではないと示す
-        fx = ServerFixture.build(checklist_definitions=_DEFS)
+        fx = ServerFixture.build()
         seq = _TwoStepSequence()
         fx.add_robot("main_hand", seq)
         fx.enter_match()

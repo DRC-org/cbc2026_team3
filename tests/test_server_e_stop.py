@@ -19,8 +19,6 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, BusHealthInfo, HealthSnapshot, MotorHealth, MotorHealthInfo
 from lib.match_state import (
-    ROLE_PRE_MATCH,
-    ChecklistItem,
     Phase,
 )
 from lib.sequence.engine import Sequence, step
@@ -30,10 +28,6 @@ from tests.feedback_frames import feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
-
-_DEFS = {
-    ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")],
-}
 
 
 class GatedSequence(Sequence):
@@ -59,7 +53,7 @@ class GatedSequence(Sequence):
 
 
 def _build_fixture() -> ServerFixture:
-    fx = ServerFixture.build(checklist_definitions=_DEFS)
+    fx = ServerFixture.build()
     for name in _ROBOT_NAMES:
         fx.add_robot(name, GatedSequence(name))
     return fx
@@ -746,7 +740,7 @@ class _SyncFixture:
             tolerance=tolerance,
         )
 
-        self._server_fx = ServerFixture.build(checklist_definitions=_DEFS)
+        self._server_fx = ServerFixture.build()
         self.loop = M3508PositionLoop(
             self.mgr,
             "can_m3508",

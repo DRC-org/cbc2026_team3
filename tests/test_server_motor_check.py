@@ -24,15 +24,11 @@ from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.server_fixtures import ServerFixture
-
-_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="ready", label="準備確認")]}
-
 
 # ---------------------------------------------------------------------- #
 #  テスト用ダミー実装
@@ -142,7 +138,7 @@ def _build(
     manual: bool = False,
 ) -> tuple[ServerFixture, _CheckSequence]:
     """サーバー + 登録済みロボット + 統合動作確認シーケンス。"""
-    fx = ServerFixture.build(checklist_definitions=_CHECKLIST)
+    fx = ServerFixture.build()
     fx.freeze_broadcast()
     for name in robots:
         seq = (sequences or {}).get(name) or _IdleSequence(name)
@@ -164,7 +160,7 @@ class TestStartGate:
 
         理由を出さずに黙って何も起きないと、操縦者は押し直し続けることになる。
         """
-        fx = ServerFixture.build(checklist_definitions=_CHECKLIST)
+        fx = ServerFixture.build()
         fx.add_robot("main_hand", _IdleSequence("main_hand"))
 
         assert await fx.start_motor_check() is False
