@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import importlib
 import logging
 import os
@@ -18,16 +19,17 @@ from lib.config_schema import (
     MotorConfig,
     RobotConfig,
     SystemConfig,
+    TuningSettings,
     load_robot_config,
     load_system_config,
 )
 from lib.control.feedback import FeedbackFreshness
 from lib.control.pid import PIDController
-from lib.control.position_loop import M3508PositionLoop, make_position_pid
+from lib.control.position_loop import CaptureSink, M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import (
-    Dm3520TargetRefresher,
     GenericTargetRefresher,
+    QueryDrivenTargetRefresher,
     TargetRefresher,
 )
 from lib.drivers.base import MotorDriver
@@ -487,6 +489,10 @@ def _build_position_loops(
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
+    # 既定は「記録しない」に倒す。配線を忘れた経路の症状が「波形が出ない」に
+    # なり、config と違う設定が黙って効く形にはならない
+    tuning: TuningSettings | None = None,
+    capture_sink: CaptureSink | None = None,
 ) -> dict[str, M3508PositionLoop]:
     """config 中の M3508 をバス単位でまとめた位置制御ループ群を作る。
 
@@ -510,6 +516,10 @@ def _build_position_loops(
                 feedback_timeout_ms=feedback_timeout_ms,
                 # 緊急停止インターロック: 実行中ステップが出した目標を破棄し電流 0 に落とす
                 is_estop_active=is_estop_active,
+                # PID 調整支援。目標値のステップを検出して応答を記録する
+                # (記録のために機体を動かす経路は無い)
+                tuning=tuning,
+                capture_sink=capture_sink,
             )
             loops[bus_name] = loop
         loop.add_motor(motor_name, driver, _build_position_pid(motor_cfg))
@@ -525,6 +535,10 @@ def _wire_robot_motors(
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
+    # 既定は「記録しない」に倒す。配線を忘れた経路の症状が「波形が出ない」に
+    # なり、config と違う設定が黙って効く形にはならない
+    tuning: TuningSettings | None = None,
+    capture_sink: CaptureSink | None = None,
 ) -> list[M3508PositionLoop]:
     """シーケンスにモータアクセス層を注入し、必要な位置制御ループを返す。"""
     loops = _build_position_loops(
@@ -533,6 +547,8 @@ def _wire_robot_motors(
         motors,
         feedback_timeout_ms=feedback_timeout_ms,
         is_estop_active=is_estop_active,
+        tuning=tuning,
+        capture_sink=capture_sink,
     )
 
     # M3508 は電流指令しか受け付けないため、目標値は PC 側 PID ループへ迂回させる
@@ -565,14 +581,20 @@ def _build_target_refreshers(
     (docs/motor_driver_can_protocol.md §5.1)。PC 側は目標値が変わったときにしか
     送らないため、再送が無いとコンベアは回し始めて 500ms で止まる。
 
-    DM3520 は理由が違う。**フィードバックが問い合わせ駆動**で、自分宛のフレームを
-    受けたときにしか状態を返さない。送らなければ操縦していない間じゅう
-    ``MotorHealth.STALE`` になり、症状は「常時赤い」だけで配線不良と区別が付かない。
-    2 つを 1 つのタスクにまとめないのは、目標を持たないモータの扱いが正反対のため
-    (自作モタドラは送ってはならず、DM3520 は送らなければならない)。
+    DM3520 と EDULITE 05 は理由が違う。**フィードバックが問い合わせ駆動**で、
+    自分宛のフレームを受けたときにしか状態を返さない。送らなければ操縦していない
+    間じゅう ``MotorHealth.STALE`` になり、症状は「手動操縦すると動くのに常に赤い」
+    だけで配線不良と区別が付かない。自作モタドラと 1 つのタスクにまとめないのは、
+    目標を持たないモータの扱いが正反対のため (自作モタドラは送ってはならず、
+    問い合わせ駆動の 2 種は送らなければならない)。
 
-    M3508 は位置制御ループが 200Hz で電流指令を送り続けるので対象外、EDULITE は
-    ドライバ内蔵の位置ループが目標を保持し、かつ自発的にフィードバックを返すので対象外。
+    **EDULITE 05 を対象外にしてはならない。** かつて「ドライバ内蔵の位置ループが
+    目標を保持し、かつ自発的にフィードバックを返す」として除外していたが、後半が
+    誤りだった (実機で確認: 励磁したまま 13 秒放置してフィードバックは 0 通)。
+    前半は正しいので位置制御ループは要らず、要るのは生存問い合わせだけになる。
+
+    M3508 だけが対象外。位置制御ループが 200Hz で電流指令を送り続けるうえ、
+    C620 はフィードバックを自発的に送るため問い合わせも要らない。
     """
     refreshers: list[TargetRefresher] = []
 
@@ -580,10 +602,14 @@ def _build_target_refreshers(
     if generic:
         refreshers.append(GenericTargetRefresher(generic, is_estop_active=is_estop_active))
 
-    dm3520 = [group[name] for name, drv in motors.items() if isinstance(drv, Dm3520Driver)]
-    if dm3520:
+    query_driven = [
+        group[name]
+        for name, drv in motors.items()
+        if isinstance(drv, Dm3520Driver | Edulite05Driver)
+    ]
+    if query_driven:
         refreshers.append(
-            Dm3520TargetRefresher(dm3520, can_manager, is_estop_active=is_estop_active)
+            QueryDrivenTargetRefresher(query_driven, can_manager, is_estop_active=is_estop_active)
         )
 
     return refreshers
@@ -787,6 +813,7 @@ async def main() -> None:
         health=health,
         checklist_definitions=checklist_definitions,
         match_settings=system.match,
+        tuning=system.tuning,
         dry_run=args.dry_run,
         dev_tools=dev_tools,
     )
@@ -826,6 +853,10 @@ async def main() -> None:
             seq,
             feedback_timeout_ms=health.feedback_timeout_ms,
             is_estop_active=is_estop_active,
+            tuning=system.tuning,
+            # 記録はロボット名とセットで運ぶ。モータ名はロボット横断に一意だが、
+            # 画面はロボットごとに分けて出すので、配信の時点で決めておく
+            capture_sink=functools.partial(server.record_tuning_capture, robot_name),
         )
         position_loops.extend(loops)
 

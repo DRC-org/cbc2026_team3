@@ -25,7 +25,13 @@ import yaml
 
 import main
 from lib.axis_sync import MotorSpec, SyncGroup
-from lib.config_schema import MotorConfig, RobotConfig, SystemConfig, load_robot_config
+from lib.config_schema import (
+    MotorConfig,
+    RobotConfig,
+    SystemConfig,
+    TuningSettings,
+    load_robot_config,
+)
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -325,6 +331,72 @@ class TestBuildPositionLoops:
         await lenient.step()
         assert manager.last_currents[0] != 0
 
+    async def test_tuning_settings_reach_the_loop(self) -> None:
+        """config の tuning が届かないと、波形が 1 本も出ない。
+
+        既定を「記録しない」に倒してあるぶん、配線漏れは例外ではなく沈黙として
+        現れる。ここで通し 1 回ぶんを実際に閉じさせて、経路が生きていることを見る。
+        """
+        config = {
+            "robot_name": "main_hand",
+            "motors": {"lift_motor": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}},
+        }
+        driver = M3508Driver("lift_motor", can_id=1)
+        manager = _StubCANManager()
+        _feed(driver, 0.0)
+        manager.feedback_at["lift_motor"] = time.time()
+        captures: list[object] = []
+
+        loop = _build_position_loops(
+            _robot(config),
+            manager,
+            {"lift_motor": driver},
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            tuning=TuningSettings(
+                enabled=True,
+                window_s=0.02,
+                pre_trigger_s=0.0,
+                min_step_deg=0.5,
+                max_points=300,
+            ),
+            capture_sink=captures.append,
+        )["m3508_bus"]
+
+        await loop.set_target("lift_motor", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            manager.feedback_at["lift_motor"] = time.time()
+            await loop.step()
+
+        assert captures
+
+    async def test_no_recording_without_tuning_settings(self) -> None:
+        config = {
+            "robot_name": "main_hand",
+            "motors": {"lift_motor": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}},
+        }
+        driver = M3508Driver("lift_motor", can_id=1)
+        manager = _StubCANManager()
+        _feed(driver, 0.0)
+        manager.feedback_at["lift_motor"] = time.time()
+        captures: list[object] = []
+
+        loop = _build_position_loops(
+            _robot(config),
+            manager,
+            {"lift_motor": driver},
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            capture_sink=captures.append,
+        )["m3508_bus"]
+
+        await loop.set_target("lift_motor", ControlMode.POSITION, 10.0)
+        for _ in range(20):
+            manager.feedback_at["lift_motor"] = time.time()
+            await loop.step()
+
+        assert captures == []
+
 
 class TestWireRobotMotors:
     def _wire(self, estop_flag: list[bool]) -> tuple:
@@ -561,6 +633,48 @@ class TestBuildTargetRefresher:
         )
 
         assert [r.motor_names for r in refreshers] == [("gripper",), ("sub_slide",)]
+
+    def test_edulite_gets_a_refresher_too(self) -> None:
+        """**EDULITE 05 も問い合わせ駆動である。** 自発的にはフィードバックを返さない。
+
+        かつて ``_build_target_refreshers`` は「EDULITE は自発的にフィードバックを
+        返すので対象外」として除外していたが、実機はそうではなかった —— 励磁したまま
+        13 秒放置しても 1 通も届かず、届いたのは起動時に PC が送ったフレームへの
+        応答 20 通だけだった。
+
+        再送しないと、操縦していない間じゅう ``MotorHealth.STALE`` になる。症状は
+        「手動操縦すると動くのに常に赤い」だけで、配線不良と区別が付かない。
+        """
+        manager, motors, seq = self._wire(
+            extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
+            extra_config={"rotate_r": {"driver": "edulite05", "bus": "generic_bus", "can_id": 1}},
+        )
+
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
+
+        assert ("rotate_r",) in [r.motor_names for r in refreshers]
+
+    async def test_edulite_is_polled_even_without_a_target(self) -> None:
+        """**目標を持たないモータへも送る。** ここが自作モタドラとの決定的な違い。
+
+        送らないと「励磁して待機しているだけの状態」が丸ごと観測できなくなる
+        (フィードバックが 1 通も来ないので STALE になる)。
+        """
+        manager, motors, seq = self._wire(
+            extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
+            extra_config={"rotate_r": {"driver": "edulite05", "bus": "generic_bus", "can_id": 1}},
+        )
+        refreshers = _build_target_refreshers(
+            seq.motors, motors, manager, is_estop_active=lambda: False
+        )
+        manager.sent_by_motor.clear()
+
+        for refresher in refreshers:
+            await refresher.step()
+
+        assert "rotate_r" in [name for name, _ in manager.sent_by_motor]
 
     async def test_estop_checker_blocks_resend(self) -> None:
         """再送は停止指令を上書きする。緊急停止中は 1 通も出してはならない。"""

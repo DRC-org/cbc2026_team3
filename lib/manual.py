@@ -146,12 +146,7 @@ class ManualController:
     def observed_value(self, axis: str) -> float:
         """フィードバックから逆換算した現在の軸位置 (人間の単位)。"""
         spec = self._axis(axis)
-        commands = {
-            name: getattr(self._motors, name).driver.feedback_position()
-            for name in spec.motor_names
-            if name in self._motors
-        }
-        return spec.to_value(commands)
+        return spec.to_value(self._feedback_positions(spec))
 
     def axes_info(self) -> list[dict]:
         """WS 配信用の軸一覧。
@@ -171,6 +166,8 @@ class ManualController:
                     "value": self._safe_observed_value(spec),
                     "target": self._targets.get(name),
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
+                    "deviation": self._safe_deviation(spec),
+                    "sync_tolerance": spec.sync_tolerance,
                     "positions": list(self._positions.names(name)),
                     "motors": list(spec.motor_names),
                 }
@@ -226,6 +223,40 @@ class ManualController:
         """
         handle = AxisHandle(spec, [getattr(self._motors, name) for name in spec.motor_names])
         await handle.set_target_value(commands)
+
+    def _feedback_positions(self, spec: AxisSpec) -> dict[str, float]:
+        """軸のモータ名 → 指令単位のフィードバック位置。未登録のモータは載せない。
+
+        載せないことに意味がある。``SyncGroup.deviation`` は比較対象が 2 個未満なら
+        None を返すので、途絶したモータを 0 で埋めない限り「揃っていないのに
+        揃って見える」偏差は作れない。
+        """
+        return {
+            name: getattr(self._motors, name).driver.feedback_position()
+            for name in spec.motor_names
+            if name in self._motors
+        }
+
+    def _safe_deviation(self, spec: AxisSpec) -> float | None:
+        """配信用の左右偏差 (人間の単位)。測れない軸は None を返す。
+
+        **判定と同じ ``SyncGroup.deviation`` を通す。** 逆換算をここへ書き写すと、
+        符号を 1 つ落としただけで画面の言う「ずれ」と 3 層の保護が見ている「ずれ」が
+        食い違い、しかも画面側だけが壊れるので気付けない。
+
+        ずれようのない軸 (単独モータ・``sync_tolerance`` なし) と、ずれを測れない軸
+        (位置指令でない) をどちらも None にするのは、0.0 が「揃っていることを測った」
+        ように見えるため。区別が要るなら ``sync_tolerance`` と ``motors`` で付く。
+        """
+        group = spec.sync_group
+        if group is None or spec.command_mode is not ControlMode.POSITION:
+            return None
+        try:
+            return group.deviation(self._feedback_positions(spec))
+        except Exception:
+            # 20Hz の配信経路から呼ばれる。1 軸の算出失敗で state 全体を落とさない
+            logger.debug("軸 '%s' の左右偏差を算出できません", spec.name, exc_info=True)
+            return None
 
     def _safe_observed_value(self, spec: AxisSpec) -> float | None:
         """配信用の現在値。読めない軸は None を返す。

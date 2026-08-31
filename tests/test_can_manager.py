@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import can
 import pytest
 
-from lib.can_manager import CANManager
+from lib.can_manager import _RECV_RETRY_MIN_S, CANManager
 from lib.drivers.base import MotorState
 from lib.drivers.generic import CommandType, GenericDriver
 from lib.drivers.m3508 import M3508Driver
@@ -502,6 +502,82 @@ class TestReceiveLoopRobustness:
         assert healthy.state.position == pytest.approx(90.0)
         assert mgr._rx_error_count["can0"] == 1
 
+    async def test_receive_loop_survives_interface_down_and_resumes(self) -> None:
+        """**インタフェース断で受信ループを終わらせてはならない。**
+
+        `ip link set down` / CANable の抜き差し / `setup_can.sh` の再実行はいずれも
+        `bus.recv` を `Network is down` で失敗させるが、どれも 1 秒以内に戻る一過性の
+        事象である。ここで降りると、**送信側だけが自動復帰して受信は二度と戻らない**
+        —— 症状は「指令は効くのにフィードバックだけ永久に無い」で、機体は動くのに
+        全モータが STALE のまま試合を終える。実際にこれで 1 回沈黙した。
+
+        socketcan のソケットは down/up をまたいでも生き続けるので (実測済み)、
+        同じ Bus のまま recv を再試行するだけで復帰する。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        motor = GenericDriver("gripper", 0x01)
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        queue: list[can.Message | Exception] = [
+            can.CanOperationError("Error receiving: Network is down [Error Code 100]"),
+            self._feedback_msg(0x01, 900),
+        ]
+
+        def recv_side_effect(timeout: float) -> can.Message | None:
+            if not queue:
+                raise asyncio.CancelledError
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        bus.recv.side_effect = recv_side_effect
+
+        await self._run_loop(mgr)
+
+        # 断のあとに届いた 1 通が、ちゃんとモータへ配られていること
+        assert motor.state.position == pytest.approx(90.0)
+        assert mgr.last_feedback_at("gripper") is not None
+
+    async def test_receive_loop_backs_off_after_a_receive_failure(self) -> None:
+        """復帰を待つ間、全速で再試行してはならない。
+
+        インタフェースが戻らない場合、失敗は同じ速さで繰り返される。素の
+        ``continue`` だと 1 コアを食い潰したままログを溢れさせ、**同じプロセスに
+        同居している位置制御ループ (200Hz) と偏差監視 (50Hz) の周期まで
+        巻き添えにする**。
+
+        ``asyncio.sleep`` を patch して回数を数える書き方は採らない ——
+        ``lib.can_manager.asyncio`` は共有のモジュールオブジェクトなので、
+        patch するとプロセス全体の ``asyncio.sleep`` が差し替わり、
+        pytest-asyncio ごと巻き添えにしてテストセッションが停止する
+        (実際にこれでハングさせた)。実時間で「呼ばれた回数」を測れば、
+        待っていることは外から確かめられる。
+
+        待ち時間は失敗のたびに伸びる (`_RECV_RETRY_MIN_S` から `_RECV_RETRY_MAX_S`
+        まで) ので、最短の間隔で回り続けた場合を上限として見る。
+        """
+        mgr = CANManager(run_blocking=_direct_runner())
+        bus = _make_mock_bus()
+        mgr.add_bus("can0", bus)
+        bus.recv.side_effect = can.CanOperationError("Network is down")
+
+        window_s = _RECV_RETRY_MIN_S * 15
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(window_s)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 待たずに回すと、この窓のあいだに数千回の recv が走る
+        spin_free_limit = int(window_s / _RECV_RETRY_MIN_S) + 2
+        assert bus.recv.call_count <= spin_free_limit, (
+            f"失敗のたびに待たずに再試行している (recv 呼び出し {bus.recv.call_count} 回)"
+        )
+        assert bus.recv.call_count >= 1, "1 度も再試行していない"
+
     async def test_receive_loop_propagates_cancelled_error(self) -> None:
         """CancelledError は shutdown の停止経路。握り潰すと止まらない受信ループが残る。"""
         mgr = CANManager(run_blocking=_direct_runner())
@@ -530,11 +606,15 @@ class TestReceiveLoopRobustness:
         assert mgr._rx_error_count["can0"] == 0
 
     async def test_受信断は降りずに必ず記録される(self, caplog: pytest.LogCaptureFixture) -> None:
-        """受信 API 自体の失敗で降りなくなった今も、痕跡は必ず残す。
+        """受信 API 自体の失敗は、痕跡を残したうえで**再試行する**。
 
         **かつてはここで「降りるときは必ず痕跡を残す」ことを見ていた。**
         降りなくなったぶん、黙って再試行し続けるのが最も危ない失敗になった ——
         ログにも UI にも出ないまま、そのバスの全モータが STALE になる。
+
+        降りないことも同時に見る。降りると送信側だけが次の周期で自動復帰し、
+        受信は二度と戻らない。症状は「指令は効くのにフィードバックだけ永久に無い」で、
+        機体は動くのに全モータが STALE のまま試合を終える (実機で発生済み)。
         """
         mgr = CANManager()
         bus = _make_mock_bus()
@@ -545,10 +625,12 @@ class TestReceiveLoopRobustness:
         with caplog.at_level(logging.ERROR, logger="lib.can_manager"):
             task = asyncio.create_task(mgr._receive_loop("can0"))
             await asyncio.sleep(0.05)
+            still_running = not task.done()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
+        assert still_running, "受信 API の失敗でループが降りている"
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors, "受信断がどこにも記録されていない"
         assert any(r.exc_info is not None for r in errors), "トレースバックが残っていない"

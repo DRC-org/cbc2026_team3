@@ -2,25 +2,24 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import type { MatchPhase, MotorPid, MotorState, RobotState } from "@/lib/protocol";
+import type { MatchPhase, MotorPid, MotorState, RobotState, TuningCapture } from "@/lib/protocol";
 import { MotorTuning } from "@/pages/MotorTuning";
+import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
 /** PC 側 PID を持つモータ。`applies_to` は既定で自分だけ (単独軸) */
 function tunable(pid: Partial<MotorPid> = {}, state: Partial<MotorState> = {}): MotorState {
-  return {
+  return motorState({
     pos: 1,
-    vel: 0,
-    torque: 0,
     temp: 42,
     pid: { kp: 2, ki: 0, kd: 0, applies_to: ["lift"], ...pid },
     ...state,
-  };
+  });
 }
 
 /** ドライバ・ファーム側でループを閉じているモータ。PC からゲインを変更できない */
 function fixed(state: Partial<MotorState> = {}): MotorState {
-  return { pos: 2, vel: 0, torque: 0, temp: 30, pid: null, ...state };
+  return motorState({ pos: 2, ...state });
 }
 
 function robotState(): RobotState {
@@ -41,6 +40,53 @@ function mount(phase: MatchPhase = "setup", connected = true, eStopActive = fals
     connected,
     eStopActive,
     matchState: { ...DEFAULT_MATCH_STATE, phase },
+  });
+}
+
+/** 波形 1 本ぶんの記録。指標と助言は既定で「出る」形にしておく */
+function capture(overrides: Partial<TuningCapture> = {}): TuningCapture {
+  return {
+    robot: "main_hand",
+    motor: "lift",
+    captured_at: 1700000000,
+    gains: { kp: 2, ki: 0, kd: 0 },
+    metrics: {
+      step_from: 0,
+      step_to: 10,
+      step_size: 10,
+      rise_time_s: 0.05,
+      overshoot_pct: 35,
+      peak_time_s: 0.08,
+      settling_time_s: 0.12,
+      steady_state_error: 0,
+      oscillation_hz: null,
+      damping_ratio: null,
+      saturation_ratio: 0.375,
+      peak_output: 900,
+      settle_band: 1,
+      sample_count: 8,
+      duration_s: 0.14,
+    },
+    advice: [{ code: "overshoot", severity: "info", message: "行き過ぎが 35% あります。" }],
+    samples: {
+      t: [0, 0.02, 0.04, 0.06],
+      target: [10, 10, 10, 10],
+      pos: [0, 5, 13.5, 10],
+      output: [900, 700, 300, 100],
+      sat: [true, false, false, false],
+    },
+    ...overrides,
+  };
+}
+
+function mountWithCaptures(captures: TuningCapture[], motorOverrides: Partial<MotorState> = {}) {
+  return renderWithRobot(<MotorTuning />, {
+    states: {
+      main_hand: { ...robotState(), motors: { lift: tunable({}, motorOverrides) } },
+    },
+    connected: true,
+    matchState: { ...DEFAULT_MATCH_STATE, phase: "setup" },
+    tuningCaptures: { "main_hand/lift": captures },
   });
 }
 
@@ -332,5 +378,102 @@ describe("MotorTuning の編集と送信の分離", () => {
     // 塞ぐのは送信だけ。入力欄まで殺すと、試合が終わってから値を作り直すことになる
     expect(screen.getByLabelText("Kp")).toBeEnabled();
     expect(screen.getByLabelText("Kp スライダー")).toBeEnabled();
+  });
+});
+
+/**
+ * この画面が「感覚で操作するしかない」状態でなくなるかどうかは、偏差と飽和が
+ * 見えるかに掛かっている。以前は POS / VEL / TORQUE / TEMP の 4 つしか無く、
+ * 調整で最も見たい「目標からどれだけ外れているか」が画面のどこにも無かった。
+ */
+describe("MotorTuning の偏差と飽和", () => {
+  it("目標と偏差を出す", () => {
+    mountWithCaptures([], { pos: 8, target: 10 });
+
+    expect(screen.getByText("TARGET")).toBeInTheDocument();
+    expect(screen.getByText("ERROR")).toBeInTheDocument();
+    // 10 - 8 = 2.0
+    expect(screen.getByText("2.0")).toBeInTheDocument();
+  });
+
+  it("目標を持たないモータの偏差は 0 ではなく「—」", () => {
+    // 0 と出すと「完璧に追従している」と「そもそも目標が無い」が同じ表示になる
+    mountWithCaptures([], { pos: 8, target: null });
+
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("飽和しているときだけ警告を出す", () => {
+    mountWithCaptures([], { saturated: true });
+
+    expect(screen.getByText("出力が上限")).toBeInTheDocument();
+    expect(
+      screen.getByText("飽和している間はゲインを変えても応答は変わりません。"),
+    ).toBeInTheDocument();
+  });
+
+  it("平常時は飽和の表示を出さない", () => {
+    // 平常時に静かで、異常時に自分から主張する
+    mountWithCaptures([], { saturated: false });
+
+    expect(screen.queryByText("出力が上限")).not.toBeInTheDocument();
+  });
+});
+
+describe("MotorTuning のステップ応答", () => {
+  it("記録が無いときは取り方を書く", () => {
+    mountWithCaptures([]);
+
+    expect(screen.getByText("まだ記録がありません。")).toBeInTheDocument();
+    // 「記録用のボタンを探して見つからない」を作らない
+    expect(screen.getByText(/記録のために機体を動かす/)).toBeInTheDocument();
+  });
+
+  it("波形・指標・助言を同時に出す", () => {
+    mountWithCaptures([capture()]);
+
+    expect(screen.getByRole("img", { name: "ステップ応答の波形" })).toBeInTheDocument();
+    expect(screen.getByText("行き過ぎ")).toBeInTheDocument();
+    expect(screen.getByText("35%")).toBeInTheDocument();
+    expect(screen.getByText("行き過ぎが 35% あります。")).toBeInTheDocument();
+  });
+
+  it("記録時のゲインを添える", () => {
+    // 波形とゲインの対応が崩れると、届いた記録が新旧どちらのものか分からない
+    mountWithCaptures([capture()]);
+
+    expect(screen.getByText("kp 2 / ki 0 / kd 0")).toBeInTheDocument();
+  });
+
+  it("測れなかった指標は 0 ではなく「—」", () => {
+    mountWithCaptures([capture({ metrics: { ...capture().metrics!, settling_time_s: null } })]);
+
+    // 「窓の終端まで整定しなかった」を 0ms と出すと正反対の意味になる
+    expect(screen.getByText("整定")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("前回の記録があれば並べて出す", () => {
+    // 調整は「変える前より良くなったか」の判断。数字が 1 つだと記憶に頼ることになる
+    const previous = capture({ metrics: { ...capture().metrics!, overshoot_pct: 60 } });
+    mountWithCaptures([capture(), previous]);
+
+    // 波形の凡例と指標の列見出しの 2 箇所に出る (薄い線と数字は別の手掛かり)
+    expect(screen.getAllByText("前回").length).toBe(2);
+    expect(screen.getByText("60%")).toBeInTheDocument();
+  });
+
+  it("前回が無ければ比較列も薄い線も出さない", () => {
+    mountWithCaptures([capture()]);
+
+    expect(screen.queryAllByText("前回")).toHaveLength(0);
+  });
+
+  it("指標を出せなかった記録でもその旨を出す", () => {
+    mountWithCaptures([capture({ metrics: null, advice: [] })]);
+
+    expect(
+      screen.getByText("ステップとして解釈できなかったため、指標と助言はありません。"),
+    ).toBeInTheDocument();
   });
 });

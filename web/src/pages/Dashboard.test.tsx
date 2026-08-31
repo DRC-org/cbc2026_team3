@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { HealthSnapshot, MatchState, RobotState } from "@/lib/protocol";
 import { Dashboard } from "@/pages/Dashboard";
+import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
 function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
@@ -101,7 +102,7 @@ describe("Dashboard (セッティングタイム)", () => {
 
   it("機体の判定文言を画面に 1 度しか描かない", () => {
     // 過熱の判定はサーバーが持つ (config の temp_warning_c)。UI へは warning で届く
-    const hot = { pos: 0, vel: 0, torque: 0, temp: 90, pid: null };
+    const hot = motorState({ temp: 90 });
     const hotHealth = health({
       motors: [
         {

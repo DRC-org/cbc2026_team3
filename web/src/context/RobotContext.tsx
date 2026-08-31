@@ -8,6 +8,7 @@ import type {
   MotorCheckSnapshot,
   RobotState,
   ServerInfo,
+  TuningCapture,
 } from "@/lib/protocol";
 import type { CommandRejectedEvent, HealthChangeEvent } from "@/lib/robotReducer";
 import type { WsUrlSource } from "@/lib/wsUrl";
@@ -42,6 +43,13 @@ export interface RobotStatus {
   /** 起動オプション由来。接続直後に 1 度届いたきり変わらない */
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
+  /**
+   * モータごとのステップ応答 (キーは `robot/motor`、新しい順で最大 2 件)。
+   *
+   * テレメトリではなく**イベント**なので `useRobotStatus()` に置く。記録が
+   * 閉じたときにしか変わらないので、毎秒 40 回の再描画には巻き込まれない。
+   */
+  tuningCaptures: Record<string, TuningCapture[]>;
   wsUrl: string;
   wsUrlSource: WsUrlSource;
 }
@@ -91,6 +99,7 @@ export function RobotProvider({
     matchState,
     serverInfo,
     rejection,
+    tuningCaptures,
     wsUrl,
     wsUrlSource,
     clearRejection,
@@ -121,6 +130,7 @@ export function RobotProvider({
       matchState,
       serverInfo,
       rejection,
+      tuningCaptures,
       wsUrl,
       wsUrlSource,
     }),
@@ -133,6 +143,7 @@ export function RobotProvider({
       matchState,
       serverInfo,
       rejection,
+      tuningCaptures,
       wsUrl,
       wsUrlSource,
     ],

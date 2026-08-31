@@ -13,6 +13,8 @@ const PAIRED: ManualAxis = {
   value: 5.0,
   target: 4.0,
   manual: { min: -2, max: 20, steps: [0.5, 2] },
+  deviation: 0.2,
+  sync_tolerance: 2.0,
   positions: ["home", "work"],
   motors: ["y_axis_r", "y_axis_l"],
 };
@@ -25,6 +27,8 @@ const DISCRETE: ManualAxis = {
   value: 5.0,
   target: null,
   manual: null,
+  deviation: null,
+  sync_tolerance: null,
   positions: ["open", "closed"],
   motors: ["gripper"],
 };
@@ -37,24 +41,29 @@ const DUTY: ManualAxis = {
   value: null,
   target: null,
   manual: null,
+  deviation: null,
+  sync_tolerance: null,
   positions: ["stop", "run"],
   motors: ["conveyor"],
 };
 
-function renderRow(axis: ManualAxis, blockedReason: string | null = null) {
+function renderRow(axis: ManualAxis, blockedReason: string | null = null, selected = false) {
   const onJog = vi.fn();
   const onSet = vi.fn();
   const onMove = vi.fn();
-  render(
+  const onSelect = vi.fn();
+  const view = render(
     <ManualAxisRow
       axis={axis}
       blockedReason={blockedReason}
+      selected={selected}
+      onSelect={onSelect}
       onJog={onJog}
       onSet={onSet}
       onMove={onMove}
     />,
   );
-  return { onJog, onSet, onMove };
+  return { onJog, onSet, onMove, onSelect, view };
 }
 
 describe("ManualAxisRow", () => {
@@ -94,6 +103,7 @@ describe("ManualAxisRow", () => {
       const { onSet } = renderRow(PAIRED);
       const input = screen.getByLabelText("y_axis の目標値");
 
+      await user.clear(input);
       await user.type(input, "12.5");
       // 入力しただけでは送らない (打っている途中の値で機体が動く)
       expect(onSet).not.toHaveBeenCalled();
@@ -102,8 +112,10 @@ describe("ManualAxisRow", () => {
       expect(onSet).toHaveBeenCalledWith("y_axis", 12.5);
     });
 
-    it("空欄では送信できない", () => {
+    it("空欄では送信できない", async () => {
+      const user = userEvent.setup();
       renderRow(PAIRED);
+      await user.clear(screen.getByLabelText("y_axis の目標値"));
       expect(screen.getByLabelText("y_axis を入力値へ移動")).toBeDisabled();
     });
 
@@ -129,6 +141,198 @@ describe("ManualAxisRow", () => {
       // 追従が遅れているあいだ現在値で判定すると、目標が既に端でも押せてしまう
       renderRow({ ...PAIRED, value: 0, target: 20 });
       expect(screen.getByLabelText("y_axis を 0.5mm 進める")).toBeDisabled();
+    });
+  });
+
+  describe("大きく動かす", () => {
+    it("可動範囲の端へ 1 回で飛べる", async () => {
+      // これが無いと、可動域 22mm を刻み 0.5mm のジョグで渡ることになる。
+      // 送る値は config が宣言した境界そのものなので、クランプ後と必ず一致する
+      const user = userEvent.setup();
+      const { onSet } = renderRow(PAIRED);
+
+      await user.click(screen.getByLabelText("y_axis を上限 20mm へ"));
+      await user.click(screen.getByLabelText("y_axis を下限 -2mm へ"));
+
+      expect(onSet.mock.calls).toEqual([
+        ["y_axis", 20],
+        ["y_axis", -2],
+      ]);
+    });
+
+    it("端に居るならその端へのボタンは塞ぐ", () => {
+      renderRow({ ...PAIRED, target: 20 });
+      expect(screen.getByLabelText("y_axis を上限 20mm へ")).toBeDisabled();
+      expect(screen.getByLabelText("y_axis を下限 -2mm へ")).toBeEnabled();
+    });
+
+    it("入力欄には直前の目標値が入っている", () => {
+      // 空欄始まりだと「今 4mm、7mm にしたい」でも毎回打ち直しになる
+      renderRow(PAIRED);
+      expect(screen.getByLabelText("y_axis の目標値")).toHaveValue(4);
+    });
+
+    it("目標値が無ければ現在値が入る", () => {
+      renderRow({ ...PAIRED, target: null, value: 12.5 });
+      expect(screen.getByLabelText("y_axis の目標値")).toHaveValue(12.5);
+    });
+
+    it("編集していない間はサーバーの目標値へ追従する", () => {
+      // クランプされた値がここへ返るので、丸められたことが画面に残る
+      const { view } = renderRow(PAIRED);
+      view.rerender(
+        <ManualAxisRow
+          axis={{ ...PAIRED, target: 20 }}
+          blockedReason={null}
+          selected={false}
+          onSelect={vi.fn()}
+          onJog={vi.fn()}
+          onSet={vi.fn()}
+          onMove={vi.fn()}
+        />,
+      );
+      expect(screen.getByLabelText("y_axis の目標値")).toHaveValue(20);
+    });
+
+    it("編集中は追従しない (打っている最中に値が書き換わらない)", async () => {
+      const user = userEvent.setup();
+      const { view } = renderRow(PAIRED);
+      const input = screen.getByLabelText("y_axis の目標値");
+
+      await user.clear(input);
+      await user.type(input, "1");
+      view.rerender(
+        <ManualAxisRow
+          axis={{ ...PAIRED, target: 20 }}
+          blockedReason={null}
+          selected={false}
+          onSelect={vi.fn()}
+          onJog={vi.fn()}
+          onSet={vi.fn()}
+          onMove={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByLabelText("y_axis の目標値")).toHaveValue(1);
+    });
+
+    it("範囲外を打ったら丸められる先を送信前に伝える", async () => {
+      // 拒否ではなくクランプ (拒否だと端で操作そのものが効かなくなる)。
+      // ここは説明であって判定ではないので、送信自体は塞がない
+      const user = userEvent.setup();
+      renderRow(PAIRED);
+      const input = screen.getByLabelText("y_axis の目標値");
+
+      await user.clear(input);
+      await user.type(input, "999");
+
+      expect(screen.getByText(/範囲外/)).toHaveTextContent("20 mm へ丸めます");
+      expect(screen.getByLabelText("y_axis を入力値へ移動")).toBeEnabled();
+    });
+
+    it("範囲内なら警告を出さない", async () => {
+      const user = userEvent.setup();
+      renderRow(PAIRED);
+      const input = screen.getByLabelText("y_axis の目標値");
+
+      await user.clear(input);
+      await user.type(input, "10");
+
+      expect(screen.queryByText(/範囲外/)).toBeNull();
+    });
+  });
+
+  describe("左右のずれ", () => {
+    it("平常時は数値だけを静かに出す", () => {
+      renderRow(PAIRED);
+      const shown = screen.getByText(/ずれ/);
+      expect(shown).toHaveTextContent("ずれ 0.20 mm");
+      // 平常時に色付きチップを出すと、本当に見るべきときに沈む
+      expect(shown.closest(".badge")).toBeNull();
+    });
+
+    it("揃っていることと測れていないことを区別する", () => {
+      // 0 は正常な測定値。falsy 判定で捨てると最も健全な状態だけが空欄になる
+      renderRow({ ...PAIRED, deviation: 0 });
+      expect(screen.getByText(/ずれ/)).toHaveTextContent("ずれ 0.00 mm");
+    });
+
+    it("許容差へ近づいたら自分から主張する", () => {
+      renderRow({ ...PAIRED, deviation: 1.5, sync_tolerance: 2.0 });
+      expect(screen.getByText(/ずれ/).closest(".badge")).not.toBeNull();
+    });
+
+    it("ずれようのない軸には何も出さない", () => {
+      renderRow(DISCRETE);
+      expect(screen.queryByText(/ずれ/)).toBeNull();
+    });
+  });
+
+  describe("キーボード", () => {
+    it("選択中の行は矢印キーでジョグできる", async () => {
+      const user = userEvent.setup();
+      const { onJog } = renderRow(PAIRED, null, true);
+
+      await user.keyboard("{ArrowRight}");
+      await user.keyboard("{ArrowLeft}");
+
+      expect(onJog.mock.calls).toEqual([
+        ["y_axis", 0.5],
+        ["y_axis", -0.5],
+      ]);
+    });
+
+    it("選択されていない行はキーで動かない", async () => {
+      // 同じキーを全行が張ると、どの軸へ飛ぶかが登録順で決まってしまう
+      const user = userEvent.setup();
+      const { onJog } = renderRow(PAIRED, null, false);
+
+      await user.keyboard("{ArrowRight}");
+
+      expect(onJog).not.toHaveBeenCalled();
+    });
+
+    it("操作が塞がれていればキーでも動かない", async () => {
+      const user = userEvent.setup();
+      const { onJog } = renderRow(PAIRED, "緊急停止中は手動操縦できません", true);
+
+      await user.keyboard("{ArrowRight}");
+
+      expect(onJog).not.toHaveBeenCalled();
+    });
+
+    it("Home / End で可動範囲の端へ飛ぶ", async () => {
+      const user = userEvent.setup();
+      const { onSet } = renderRow(PAIRED, null, true);
+
+      await user.keyboard("{End}");
+      await user.keyboard("{Home}");
+
+      expect(onSet.mock.calls).toEqual([
+        ["y_axis", 20],
+        ["y_axis", -2],
+      ]);
+    });
+
+    it("[ ] でジョグ量を変える", async () => {
+      const user = userEvent.setup();
+      const { onJog } = renderRow(PAIRED, null, true);
+
+      await user.keyboard("]");
+      await user.keyboard("{ArrowRight}");
+
+      expect(onJog).toHaveBeenCalledWith("y_axis", 2);
+    });
+
+    it("目標値を打っている間は矢印キーで機体が動かない", async () => {
+      // 入力欄の ← → はカーソル移動であって、機体を動かす操作ではない
+      const user = userEvent.setup();
+      const { onJog } = renderRow(PAIRED, null, true);
+
+      await user.click(screen.getByLabelText("y_axis の目標値"));
+      await user.keyboard("{ArrowLeft}");
+
+      expect(onJog).not.toHaveBeenCalled();
     });
   });
 
@@ -179,6 +383,7 @@ describe("ManualAxisRow", () => {
       expect(screen.getByLabelText("y_axis を 0.5mm 進める")).toBeDisabled();
       expect(screen.getByLabelText("y_axis の目標値")).toBeDisabled();
       expect(screen.getByLabelText("y_axis を home へ")).toBeDisabled();
+      expect(screen.getByLabelText("y_axis を上限 20mm へ")).toBeDisabled();
     });
   });
 

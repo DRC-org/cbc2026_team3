@@ -7,6 +7,7 @@ import logging
 import math
 import pathlib
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -17,8 +18,10 @@ from lib.commands import CommandSpec, RejectChannel, phase_deny_reason, spec_for
 from lib.config_schema import (
     DEFAULT_HEALTH,
     DEFAULT_MATCH,
+    DEFAULT_TUNING,
     HealthThresholds,
     MatchSettings,
+    TuningSettings,
 )
 from lib.control.position_loop import (
     MAX_TUNABLE_GAIN,
@@ -37,8 +40,10 @@ from lib.health import (
     MotorHealthInfo,
 )
 from lib.manual import ManualControlError, ManualController, OperationMode
-from lib.match_state import ChecklistItem, Court, MatchState
+from lib.match_state import PHASES_DURING_MATCH, ChecklistItem, Court, MatchState
 from lib.sequence.engine import Sequence
+from lib.tuning.recorder import Capture
+from lib.tuning.report import summarize
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,12 @@ _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 #: 1 クライアントへの送信を諦めるまでの秒数。
 #: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
 _WS_SEND_TIMEOUT_S = 1.0
+
+#: 配信を待つステップ応答の在庫上限。あふれたら古いものから捨てる。
+#: 調整では最後に試した 1 回が最も重要なので、新しい記録を捨てて古いものを
+#: 残す形にはしない。動作確認では両ハンドの複数軸が続けて動くため、
+#: 1 回の配信周期 (50ms) に複数の記録が閉じることがある
+_TUNING_CAPTURE_BACKLOG = 8
 
 #: 「励磁されているはず」の起点から、無励磁を異常として報告し始めるまでの猶予。
 #: enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓がある。
@@ -115,6 +126,7 @@ class RobotServer:
         health: HealthThresholds = DEFAULT_HEALTH,
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         match_settings: MatchSettings = DEFAULT_MATCH,
+        tuning: TuningSettings = DEFAULT_TUNING,
         dry_run: bool = False,
         dev_tools: bool = False,
     ) -> None:
@@ -127,6 +139,12 @@ class RobotServer:
         self._closing_tasks: set[asyncio.Task[None]] = set()
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
+        self._tuning = tuning
+        # 位置制御ループ (200Hz) が置いていく記録の受け皿。**制御周期から呼ばれる
+        # ので、受け取りは O(1) の append だけに留める** (解析と配信は配信ループ側)。
+        # 上限を置くのは、誰も見ていない間に記録が溜まり続けるのを防ぐため。
+        # 古いものから捨てるのは、調整では最後に試した 1 回が最も重要だから
+        self._tuning_captures: deque[tuple[str, Capture]] = deque(maxlen=_TUNING_CAPTURE_BACKLOG)
         self._e_stop_active: bool = False
         # 停止理由は停止が続くかぎり保持する。`_broadcast_state` は停止中に毎ティック
         # e_stop_state を送り直すため、保持しないと自動検知の直後 1 通だけが本当の
@@ -832,6 +850,47 @@ class RobotServer:
                 return f"{key} の上限は {MAX_TUNABLE_GAIN:.0f} です (受け取った: {value})"
         return None
 
+    def record_tuning_capture(self, robot_name: str, capture: Capture) -> None:
+        """位置制御ループから 1 回ぶんのステップ応答を受け取る。
+
+        **200Hz の制御周期から同期に呼ばれる。** ここで解析や送信を行うと、
+        調整支援の都合で制御周期が伸びる。在庫へ積むだけにして、解析と配信は
+        配信ループ (20Hz) が行う。
+        """
+        self._tuning_captures.append((robot_name, capture))
+
+    def _drain_tuning_captures(self) -> list[dict]:
+        """溜まった記録を配信 1 通ずつへ変換する。
+
+        **試合中は配らず捨てる。** 試合中に調整はしないうえ、1 通が数十 KB あるので
+        テレメトリの帯域を奪う (詰まった 1 台の切り離しまで誘発しうる)。記録そのものを
+        止めないのは、止めると試合直前の設定フェーズへ戻った瞬間に「記録が始まる
+        までの空白」ができ、最初の 1 回が必ず取れなくなるため。
+        """
+        if not self._tuning_captures:
+            return []
+        captures = list(self._tuning_captures)
+        self._tuning_captures.clear()
+
+        if self.match.phase in PHASES_DURING_MATCH:
+            return []
+
+        payloads: list[dict] = []
+        for robot_name, capture in captures:
+            try:
+                report = summarize(robot_name, capture)
+                payloads.append(report.to_payload(max_points=self._tuning.max_points))
+            except Exception:
+                # 解析の失敗でテレメトリ配信ごと止めない。調整支援は補助機能であり、
+                # ヘルスや緊急停止の配信を巻き添えにしてよい理由が無い
+                logger.warning(
+                    "ステップ応答の解析に失敗しました (robot=%s, motor=%s)",
+                    robot_name,
+                    capture.motor,
+                    exc_info=True,
+                )
+        return payloads
+
     def _motor_pid_state(self, motor_name: str) -> PidGains | None:
         """UI へ配る現在ゲイン。PC 側 PID を持たないモータは None。
 
@@ -842,6 +901,21 @@ class RobotServer:
         """
         loop = self._find_position_loop(motor_name)
         return None if loop is None else loop.pid_gains(motor_name)
+
+    def _motor_control_state(self, motor_name: str) -> dict[str, object]:
+        """UI へ配る位置目標と飽和。PC 側 PID を持たないモータは target=None。
+
+        目標値を配るのは、これが無いと画面に**偏差そのものが出ない**ため。
+        調整で最も見たい量が、以前は操縦者の頭の中の引き算にしか存在しなかった。
+
+        飽和を配るのは、出力が上限に張り付いている間はゲインを変えても応答が
+        変わらないため。これが見えないと「kp を上げても下げても同じ」という観察から
+        制御以外の原因 (機構の負荷・config の output_limit) へ辿り着けない。
+        """
+        loop = self._find_position_loop(motor_name)
+        if loop is None:
+            return {"target": None, "saturated": False}
+        return {"target": loop.target(motor_name), "saturated": loop.is_saturated(motor_name)}
 
     def _find_position_loop(self, motor_name: str) -> M3508PositionLoop | None:
         """指定モータを制御している M3508 位置制御ループを探す。"""
@@ -1644,9 +1718,13 @@ class RobotServer:
             prev = self._last_health.get(robot_name)
             change_events.extend(self._diff_health(robot_name, prev, snap))
 
-        await self._fanout([*state_messages, *change_events])
+        # 5) 溜まったステップ応答を同じ配信で流す。専用の配信経路を作らないのは、
+        #    `_fanout` が守っている約束事 (送信ごとのタイムアウト・切り離しの
+        #    別タスク化・集合のスナップショット) を経路のぶんだけ守り続けることに
+        #    なるため。1 通が数十 KB あるので、詰まった相手の切り離しは特に効く
+        await self._fanout([*state_messages, *change_events, *self._drain_tuning_captures()])
 
-        # 5) 差分検出後にスナップショットを更新する。順序を逆にすると
+        # 6) 差分検出後にスナップショットを更新する。順序を逆にすると
         #    1 回目の broadcast で health_change が出てしまう。
         self._last_health = snapshots
 
@@ -1679,6 +1757,10 @@ class RobotServer:
             # 擬似値を作る意味が無く、中に入れると dry-run で全モータが
             # 「調整不可」になって机上で UI を確かめられない
             motors[motor_name]["pid"] = self._motor_pid_state(motor_name)
+            # 目標値と飽和は PC 側 PID を持つモータにしか無い。持たないモータで
+            # None を配るのは「測っていない」の表現で、0 を配ってはならない
+            # (偏差 0 = 完璧に追従している、と読めてしまう)
+            motors[motor_name].update(self._motor_control_state(motor_name))
 
         # snapshot が未指定 (テストや単独呼び出し) の場合はその場で計算する。
         # _broadcast_state からの呼び出しは事前計算済みのものを使い回して二重計算を避ける。
