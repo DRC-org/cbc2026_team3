@@ -188,6 +188,29 @@ constexpr uint8_t kFeedbackWithPositionLength = 3;
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags);
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg);
 
+// FEEDBACK Byte0 を組み立てる**唯一の場所**（仕様書 §3.2）。
+//
+// 3 枚の main.cpp / app.cpp が各自でフラグを OR していた頃、ここの規則は
+// Arduino / HAL の翻訳単位にあって native テストが 1 件も届かなかった。
+// **DC 基板の buildStatusFlags() に `flags |= kReached;` を 1 行足しても
+// 131 件すべて緑**という状態で、仕様書 §9.3 が「断線したソレノイドも到達と
+// 報告される」と警告している不変条件を誰も検査していなかった。
+//
+// 規則は 2 つ。どちらも「観測手段を持たない基板に測ったように見える値を
+// 運ばせない」ことが理由で、板ごとの例外を作ってはならない。
+//
+//   - **到達フラグを立てられるのはサーボスロットだけ**（仕様書 §7.3 の推定値）。
+//     DC 基板はエンコーダを持たず（§3.2 / §8）、電磁弁基板は弁が開いたかを
+//     観測できない（§9.3）ので、reached に何を渡しても立たない
+//   - **センサスロットは緊急停止・ウォッチドッグ・到達を立てない**（仕様書 §5.2）。
+//     駆動されないので意味を持たず、立てると PC 側 check_safety_error() が
+//     「駆動できない状態」と読んで動作確認を打ち切る
+//
+// safetyFlags は MotorSafety::statusFlags() の戻り値をそのまま渡すこと
+// （緊急停止 / ウォッチドッグ / 起動後未受信の判定はあちらが単独で持つ）。
+uint8_t composeFeedbackFlags(BoardKind board, SlotKind slot, uint8_t safetyFlags,
+                             bool configured, bool reached, bool sensorActive);
+
 // 仕様書 §3.4。焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 //
 // **DLC 可変。** サーボスロットだけが可動レンジ（仕様書 §3.4 の Byte3-4）を足す。

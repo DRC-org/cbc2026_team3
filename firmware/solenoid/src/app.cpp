@@ -82,6 +82,13 @@ constexpr bool pinsAreUnique() {
 
 static_assert(pinsAreUnique(), "config.h のピンが重複している（CAN / UART / LED / DIP 含む）");
 
+// **上の kAllPins[] と下の g_channel[] は各チャンネルを明示的に初期化している。**
+// チャンネル数だけ増やすと、ch6 / ch7 のピンが衝突検査から静かに漏れ（重複した
+// ピンを 2 つの弁に割り当ててもビルドが通る）、g_channel[] の初期化子も足りなくなる。
+// DC 用 main.cpp とサーボ用 main.cpp には同じ番人が居るので、ここだけ無いと
+// 「3 枚のうち 1 枚だけ検査が抜けている」状態になる。
+static_assert(kSolenoidChannelCount == 6,
+              "チャンネル数を変えたら kAllPins / g_channel の初期化子も更新すること");
 static_assert(kSolenoidChannelCount <= motorcan::kMaxSlotNumber + 1,
               "チャンネル数がデバイス ID のスロット幅（3bit）を超えている");
 static_assert(kSolenoidChannelCount <= motorcan::kMaxChannels,
@@ -167,17 +174,15 @@ void applyAllOutputs(uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
+// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
+// **ここで OR を足してはならない。** 到達フラグを立てないこと（仕様書 §9.3: 弁が
+// 開いたかを観測する手段が 1 つも無い）は board == Solenoid から導かれるので、
+// この呼び出しが規則の全てになる。以前はここで組み立てていて、HAL の翻訳単位に
+// あるせいで `flags |= kReached;` を足しても native テストが 1 件も落ちなかった。
 uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
-    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
-    // ここで手で組み立て直すと、他の 2 枚と同じ条件で立つ保証が無くなる。
-    uint8_t flags = g_channel[ch].safetyStatusFlags(nowMs);
-    if (!isChannelConfigured(ch)) {
-        flags |= status_flag::kDeviceIdUnconfigured;
-    }
-    // **到達フラグは立てない**（仕様書 §9.3）。弁が実際に開いたかを観測する手段が
-    // 1 つも無いので、「指令したから到達した」と報告するのは実測でも推定でもない嘘になる。
-    // 断線したソレノイドも抜けたコネクタも「到達」と報告されてしまう。
-    return flags;
+    return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
+                                g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
+                                /*reached=*/false, /*sensorActive=*/false);
 }
 
 // 送信は空きメールボックスが無ければ諦める。**待ってはならない** — 詰まった
@@ -367,7 +372,11 @@ bool configureCanFilters() {
 // DIP の添字を readDipSwitch へ渡し、読み出しはラムダが (port, pin) へ引き直す。
 // 負論理とビット順の対応、はみ出しの扱いは MotorCanRouter / makeDeviceId が持つ
 // （native テストで守られている）。
+//
+// **添字を並べた表なので、kDipBitCount を増やしたらここも足すこと。**
+// 足し忘れると読まないビットが出て、DIP を回しても基板番号が変わらなくなる。
 const uint8_t kDipIndices[kDipBitCount] = {0, 1, 2, 3};
+static_assert(kDipBitCount == 4, "kDipBitCount を変えたら kDipIndices も更新すること");
 
 void resolveDeviceIds() {
     const uint8_t boardNumber = readDipSwitch(

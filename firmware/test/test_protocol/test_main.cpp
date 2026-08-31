@@ -740,6 +740,24 @@ static void test_dc_channel_physical_stop_blocks_until_cleared() {
 }
 
 
+// シリアルデバッグの 's' からその場で止める経路（DC 基板の pollSerial）。
+// ラッチはしないので、次の SET_TARGET で通常どおり回る。
+// **no-op にしても他のテストは 1 件も落ちない**ため、ここで単独に押さえる
+// （SolenoidChannel::hold() / ServoMotion::holdHere() には既にある）。
+static void test_dc_channel_hold_stops_without_latching() {
+    DcChannel ch(500);
+    ch.feed(1000);
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 1000));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(1000));
+
+    ch.hold();
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(1000));
+    TEST_ASSERT_TRUE(ch.isOutputAllowed(1000));
+
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 1000));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(1000));
+}
+
 // --------------------------------------------------------------------------
 // §3.2 状態フラグのビット割り当て
 // --------------------------------------------------------------------------
@@ -769,6 +787,97 @@ static void test_sensor_flag_rides_in_its_own_feedback() {
     const uint8_t len = encodeFeedback(out, status_flag::kSensor);
     TEST_ASSERT_EQUAL_UINT8(1, len);
     TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[0]);
+}
+
+// --------------------------------------------------------------------------
+// §3.2 / §7.3 / §9.3 FEEDBACK Byte0 の組み立て（composeFeedbackFlags）
+// --------------------------------------------------------------------------
+
+// **DC 基板は到達フラグを立てない**（仕様書 §3.2 / §8）。エンコーダも電流センスも
+// 無いので「到達」を観測する手段が 1 つも無く、指令を出したことを到達として報告すると
+// 断線したモータも「到達」になる。reached に true を渡しても立たないことを見る
+// （呼び出し側の引数ではなく規則そのものを検査するため）。
+static void test_dc_board_never_reports_reached() {
+    const uint8_t flags = composeFeedbackFlags(BoardKind::Dc, SlotKind::Actuator, 0,
+                                               /*configured=*/true, /*reached=*/true,
+                                               /*sensorActive=*/false);
+    TEST_ASSERT_EQUAL_UINT8(0, flags & status_flag::kReached);
+}
+
+// **電磁弁基板も到達フラグを立てない**（仕様書 §9.3）。圧力センサもリミットスイッチも
+// 無く、分かるのは「指令どおり GPIO を駆動した」ことだけ。立てると、断線したソレノイドも
+// 抜けたコネクタも「到達」と報告され、UI にもヘルス判定にも測ったように見える到達が流れ込む。
+static void test_solenoid_board_never_reports_reached() {
+    const uint8_t flags = composeFeedbackFlags(BoardKind::Solenoid, SlotKind::Actuator, 0,
+                                               /*configured=*/true, /*reached=*/true,
+                                               /*sensorActive=*/false);
+    TEST_ASSERT_EQUAL_UINT8(0, flags & status_flag::kReached);
+}
+
+// サーボスロットだけが到達を報告する（仕様書 §7.3 の推定値）。
+// ここが立たなくなると PC 側 move_to が次のステップへ進めない。
+static void test_servo_slot_reports_reached() {
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached,
+                            composeFeedbackFlags(BoardKind::Servo, SlotKind::Actuator, 0, true,
+                                                 /*reached=*/true, false) &
+                                status_flag::kReached);
+    TEST_ASSERT_EQUAL_UINT8(0, composeFeedbackFlags(BoardKind::Servo, SlotKind::Actuator, 0, true,
+                                                    /*reached=*/false, false) &
+                                   status_flag::kReached);
+}
+
+// **センサスロットは緊急停止・ウォッチドッグ・到達を立てない**（仕様書 §5.2）。
+// 駆動されないのでどれも意味を持たず、立てると PC 側 check_safety_error() が
+// 「駆動できない状態」と読んで動作確認を打ち切る。
+// safetyFlags を素通しにする実装を弾くため、全ビットを立てて渡す。
+static void test_sensor_slot_drops_safety_flags() {
+    const uint8_t safety = static_cast<uint8_t>(status_flag::kEStop | status_flag::kWatchdog |
+                                                status_flag::kNeverCommanded);
+    const uint8_t flags = composeFeedbackFlags(BoardKind::Servo, SlotKind::Sensor, safety,
+                                               /*configured=*/true, /*reached=*/true,
+                                               /*sensorActive=*/true);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, flags);
+}
+
+// センサの接触は自分の FEEDBACK でだけ報告する。触れていなければ 0。
+static void test_sensor_slot_reports_only_its_own_contact() {
+    TEST_ASSERT_EQUAL_UINT8(0, composeFeedbackFlags(BoardKind::Servo, SlotKind::Sensor, 0, true,
+                                                    false, /*sensorActive=*/false));
+    // アクチュエータスロットにセンサ入力は乗らない（サーボのフレームに相乗りさせない）
+    TEST_ASSERT_EQUAL_UINT8(0, composeFeedbackFlags(BoardKind::Servo, SlotKind::Actuator, 0, true,
+                                                    false, /*sensorActive=*/true) &
+                                   status_flag::kSensor);
+}
+
+// デバイス ID 未設定はどの基板・どの役割でも報告する（仕様書 §2.2）。
+// PC 側 is_fault() を True にする唯一の手がかりなので、センサでも落としてはならない。
+static void test_unconfigured_is_reported_on_every_slot_kind() {
+    const BoardKind boards[] = {BoardKind::Servo, BoardKind::Dc, BoardKind::Solenoid};
+    for (BoardKind board : boards) {
+        TEST_ASSERT_EQUAL_UINT8(status_flag::kDeviceIdUnconfigured,
+                                composeFeedbackFlags(board, SlotKind::Actuator, 0,
+                                                     /*configured=*/false, false, false) &
+                                    status_flag::kDeviceIdUnconfigured);
+    }
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kDeviceIdUnconfigured,
+                            composeFeedbackFlags(BoardKind::Servo, SlotKind::Sensor, 0,
+                                                 /*configured=*/false, false, false));
+}
+
+// 緊急停止 / ウォッチドッグ / 起動後未受信の判定は MotorSafety が単独で持ち、
+// アクチュエータスロットではその戻り値をそのまま中継する。ここで作り直すと、
+// 「無効化した基板ではウォッチドッグのビットを立てない」等の規則が基板ごとにずれる。
+static void test_actuator_slot_relays_safety_flags() {
+    MotorSafety safety(500);
+    const uint8_t fresh = composeFeedbackFlags(BoardKind::Dc, SlotKind::Actuator,
+                                               safety.statusFlags(0), true, false, false);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kNeverCommanded, fresh);
+
+    safety.feed(1000);
+    safety.stop();
+    const uint8_t stopped = composeFeedbackFlags(BoardKind::Dc, SlotKind::Actuator,
+                                                 safety.statusFlags(1000), true, false, false);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, stopped);
 }
 
 int main(int, char **) {
@@ -834,5 +943,13 @@ int main(int, char **) {
     RUN_TEST(test_dc_channel_rejects_duty_while_latched);
     RUN_TEST(test_dc_channel_output_stops_on_watchdog_and_recovers);
     RUN_TEST(test_dc_channel_physical_stop_blocks_until_cleared);
+    RUN_TEST(test_dc_channel_hold_stops_without_latching);
+    RUN_TEST(test_dc_board_never_reports_reached);
+    RUN_TEST(test_solenoid_board_never_reports_reached);
+    RUN_TEST(test_servo_slot_reports_reached);
+    RUN_TEST(test_sensor_slot_drops_safety_flags);
+    RUN_TEST(test_sensor_slot_reports_only_its_own_contact);
+    RUN_TEST(test_unconfigured_is_reported_on_every_slot_kind);
+    RUN_TEST(test_actuator_slot_relays_safety_flags);
     return UNITY_END();
 }

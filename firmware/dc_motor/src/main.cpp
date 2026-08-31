@@ -199,19 +199,15 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
+// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
+// **ここで OR を足してはならない。** かつて 3 枚がそれぞれフラグを組み立てており、
+// この基板に `flags |= kReached;` を 1 行足しても native テストは 1 件も落ちなかった。
+// 到達フラグを立てないこと（仕様書 §3.2 / §8: 観測手段が 1 つも無い）は
+// board == Dc から導かれるので、この呼び出しが規則の全てになる。
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
-    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
-    // ウォッチドッグのビットは指令を一度でも受けた後の満了でのみ立ち、
-    // 無効化した基板では立たない。
-    // ここで手で組み立て直すと、サーボ用と同じ条件で立つ保証が無くなる。
-    uint8_t flags = g_channel[ch].safetyStatusFlags(nowMs);
-    if (!isChannelConfigured(ch)) {
-        flags |= status_flag::kDeviceIdUnconfigured;
-    }
-    // 観測手段が 1 つも無い基板なので到達フラグは立てない（仕様書 §3.2 / §8）。
-    // duty には到達の概念が無く、「指令したから到達した」と報告するのは
-    // 実測でも推定でもない嘘になる。
-    return flags;
+    return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
+                                g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
+                                /*reached=*/false, /*sensorActive=*/false);
 }
 
 static void sendFeedback(uint8_t ch, uint32_t nowMs) {

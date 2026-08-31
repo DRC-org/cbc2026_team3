@@ -415,6 +415,24 @@ static void test_e_stop_release_alone_does_not_move() {
     TEST_ASSERT_EQUAL_FLOAT(held, channel.currentAngleDeg());
 }
 
+// ウォッチドッグの無効化（config.h の WATCHDOG_ENABLED 0）でも、仕様書 §5.4 の
+// 「SET_TARGET を 1 通も受け取るまで出力を許可しない」ゲートは外れない。
+// **層ごとに単独で確かめる。** MotorSafety 層と SolenoidChannel 層には既にあるが、
+// ServoChannel だけ無く、この結線を素通しにしても 1 件も落ちなかった。
+// 外れると、CAN 通信を 1 通も受けないまま setup() の初期角へ駆動できる基板になる。
+static void test_disabled_watchdog_still_requires_first_command() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.setWatchdogEnabled(false);
+
+    TEST_ASSERT_FALSE(channel.isOutputAllowed(0));
+    TEST_ASSERT_FALSE(channel.setTarget(90.0f, 0));
+
+    channel.feed(1000);
+    TEST_ASSERT_TRUE(channel.setTarget(90.0f, 1000));
+    // 無効化してあるので途絶しても受け付け続ける
+    TEST_ASSERT_TRUE(channel.isOutputAllowed(1000 + 500 * 10));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_angle_to_pulse_at_range_ends);
@@ -445,5 +463,6 @@ int main(int, char **) {
     RUN_TEST(test_first_target_after_power_on_is_accepted);
     RUN_TEST(test_channel_recovers_after_watchdog_and_release);
     RUN_TEST(test_e_stop_release_alone_does_not_move);
+    RUN_TEST(test_disabled_watchdog_still_requires_first_command);
     return UNITY_END();
 }

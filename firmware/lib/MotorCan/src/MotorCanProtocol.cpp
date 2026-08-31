@@ -204,6 +204,38 @@ uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg) {
     return kFeedbackWithPositionLength;
 }
 
+uint8_t composeFeedbackFlags(BoardKind board, SlotKind slot, uint8_t safetyFlags,
+                             bool configured, bool reached, bool sensorActive) {
+    uint8_t flags = 0;
+
+    if (slot == SlotKind::Sensor) {
+        // 仕様書 §5.2: センサは駆動されないので、緊急停止もウォッチドッグも到達も
+        // 意味を持たない。safetyFlags を素通しにすると PC 側 check_safety_error() が
+        // 「駆動できない状態」と読んで動作確認を打ち切る（センサに駆動できない状態は無い）。
+        if (!configured) {
+            flags |= status_flag::kDeviceIdUnconfigured;
+        }
+        if (sensorActive) {
+            flags |= status_flag::kSensor;
+        }
+        return flags;
+    }
+
+    flags = safetyFlags;
+    if (!configured) {
+        // 仕様書 §2.2: 設定ミスは運用前に必ず気付くべきなので、PC 側 is_fault() へ倒す。
+        flags |= status_flag::kDeviceIdUnconfigured;
+    }
+    if (board == BoardKind::Servo && reached) {
+        // 仕様書 §7.3: サーボの到達は補間完了の**推定値**であって実測ではない。
+        // DC 基板（§3.2 / §8）と電磁弁基板（§9.3）は観測手段を 1 つも持たないので、
+        // ここで board を見て弾く。**「指令したから到達した」は実測でも推定でもない嘘**で、
+        // 断線したソレノイドも抜けたコネクタも「到達」と報告されることになる。
+        flags |= status_flag::kReached;
+    }
+    return flags;
+}
+
 uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotKind slot) {
     out[0] = firmwareVersion;
     out[1] = static_cast<uint8_t>(board);

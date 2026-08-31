@@ -259,33 +259,15 @@ static void updateMotion(uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
+// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
+// **ここで OR を足してはならない。** 「センサスロットは緊急停止・ウォッチドッグ・到達を
+// 立てない」（仕様書 §5.2）は SlotKind::Sensor から導かれ、以前はこの early-return が
+// 唯一の実装だったので `return flags;` を消してもテストが 1 件も落ちなかった。
 static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
-    uint8_t flags = 0;
-    if (!isSlotConfigured(slot)) {
-        flags |= status_flag::kDeviceIdUnconfigured;
-    }
-
-    if (isSensorSlot(slot)) {
-        // センサは駆動されないので、緊急停止もウォッチドッグも到達も意味を持たない。
-        // 立てると PC 側 check_safety_error() が「駆動できない状態」と読んで
-        // 動作確認を打ち切る（センサに駆動できない状態は無い）。
-        if (g_sensorActive[slot]) {
-            flags |= status_flag::kSensor;
-        }
-        return flags;
-    }
-
-    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
-    // ウォッチドッグのビットは指令を一度でも受けた後の満了でのみ立ち、
-    // 無効化した基板では立たない。
-    // ここで手で組み立て直すと、DC 用と同じ条件で立つ保証が無くなる。
-    flags |= g_channel[slot].safetyStatusFlags(nowMs);
-    if (g_channel[slot].isReached()) {
-        // 仕様書 §7.3: これは実測ではなく補間の完了を示す推定値。
-        // 脱調・過負荷・メカ干渉で実際には動いていなくても立つ。
-        flags |= status_flag::kReached;
-    }
-    return flags;
+    const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
+    return composeFeedbackFlags(kBoardKind, kind, g_channel[slot].safetyStatusFlags(nowMs),
+                                isSlotConfigured(slot), g_channel[slot].isReached(),
+                                g_sensorActive[slot]);
 }
 
 static void sendFeedback(uint8_t slot, uint32_t nowMs) {
