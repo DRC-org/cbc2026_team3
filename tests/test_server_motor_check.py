@@ -14,8 +14,6 @@
 from __future__ import annotations
 
 import asyncio
-import struct
-import time
 
 import can
 from aiohttp.test_utils import TestClient, TestServer
@@ -30,7 +28,7 @@ from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
-from tests.fake_can import mark_feedback_at, mock_can_manager
+from tests.fake_can import mock_can_manager
 from tests.server_fixtures import ServerFixture
 
 _CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="ready", label="準備確認")]}
@@ -115,19 +113,11 @@ class _LoopProbe:
 
         mgr.send_to_bus = _counting  # type: ignore[method-assign]
 
-        self.mgr = mgr
-        self.motor_name = motor_name
         self.driver = M3508Driver(motor_name, can_id=4)
         self.loop = M3508PositionLoop(
             mgr, bus, is_estop_active=lambda: False, time_source=_AutoClock()
         )
         self.loop.add_motor(motor_name, self.driver, make_position_pid(kp=1.0))
-
-    def feed(self, deg: float = 0.0) -> None:
-        angle_raw = round(deg / 360.0 * 8192) % 8192
-        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-        self.driver.update_state(can.Message(arbitration_id=0x200 + self.driver.can_id, data=data))
-        mark_feedback_at(self.mgr, self.motor_name, time.time())
 
 
 def _manual_controller() -> ManualController:

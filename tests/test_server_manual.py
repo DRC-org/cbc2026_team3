@@ -399,13 +399,6 @@ class TestEStopClearsJogOrigin:
 # ---------------------------------------------------------------------- #
 
 
-class _IdleSequence(Sequence):
-    """ステップを持たない (= 常に停止している) シーケンス。"""
-
-    def __init__(self, name: str = _ROBOT) -> None:
-        super().__init__(name)
-
-
 class _FakeClient:
     """拒否通知の宛先。``_reject_command`` は要求元 1 台にだけ返す。"""
 
