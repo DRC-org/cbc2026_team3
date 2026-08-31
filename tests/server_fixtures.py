@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Iterable
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -332,6 +333,46 @@ class ServerFixture:
 
     def target_refreshers(self, robot: str) -> list[GenericTargetRefresher]:
         return self.server._robots[robot].target_refreshers
+
+
+# ---------------------------------------------------------------------- #
+#  記録用 WS クライアント
+# ---------------------------------------------------------------------- #
+
+
+class RecordingClient:
+    """配信された JSON を溜めるだけの WS クライアント代役。
+
+    実 WebSocket を張ると「何通目に何が流れたか」を待ち合わせ越しにしか見られず、
+    「変化が無ければ流れない」ような *送らないこと* の検証ができない。
+
+    **生の文字列で溜める。** 受け取った時点で dict へ直すと、配信が JSON として
+    壊れていても記録側が先に落ちるため、配信経路の不具合が
+    「テストヘルパの中の例外」として出る。
+
+    障害を作るクライアント (送信が返らない・例外を投げる) はこれとは別物なので
+    統合しない。あちらは ``tests/test_server_broadcast_resilience.py`` が
+    それぞれの障害ごとに持つ。
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.closed = False
+
+    async def send_str(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def messages(self) -> list[dict]:
+        return [json.loads(msg) for msg in self.sent]
+
+    def types(self) -> list[str]:
+        return [msg["type"] for msg in self.messages()]
+
+    def of_type(self, name: str) -> list[dict]:
+        return [msg for msg in self.messages() if msg.get("type") == name]
 
 
 # ---------------------------------------------------------------------- #
