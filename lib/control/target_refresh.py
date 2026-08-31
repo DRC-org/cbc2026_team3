@@ -43,7 +43,69 @@ SleepFunc = Callable[[float], Awaitable[None]]
 _QUERY_DRIVEN_DRIVERS = (Dm3520Driver, Edulite05Driver)
 
 
-class GenericTargetRefresher(PausablePeriodicTask):
+class _TargetRefresherBase(PausablePeriodicTask):
+    """目標値を周期送信する 2 タスクの共通部。
+
+    **差は 3 つだけで、そこは各サブクラスに残す**:
+      1. 緊急停止中に送るか (自作モタドラは送らない / 問い合わせ駆動は送る)
+      2. 目標を持たないモータへ何を書くか (前者は何も送らない / 後者はラッチ値)
+      3. ``can_manager`` を直接持つか (後者だけが「目標として記録されない送信」を要る)
+
+    骨格 (対象ハンドルの保持・名前の列挙・目標の破棄・降り際の扱い) は同じで、
+    書き写すと片方だけ直した状態が作れる。共通の約束は 2 つ:
+      - 1 台の送信失敗で他のモータの送信を諦めない
+      - 周期処理で例外が出てもループは継続する
+    """
+
+    def __init__(
+        self,
+        handles: Sequence[MotorHandle],
+        *,
+        interval_s: float = DEFAULT_INTERVAL_S,
+        is_estop_active: EStopChecker | None = None,
+        time_source: Callable[[], float] = time.monotonic,
+        sleep: SleepFunc = asyncio.sleep,
+    ) -> None:
+        """
+        Args:
+            handles: 送信対象のモータハンドル
+            interval_s: 送信周期 [s]
+            is_estop_active: 緊急停止判定 (server.py の状態を後から注入する)
+            time_source: 周期とログ間引きに使う単調クロック
+            sleep: 周期待ちに使う関数 (テストで差し替え可能)
+        """
+        super().__init__(interval_s=interval_s, time_source=time_source, sleep=sleep, logger=logger)
+        self._handles = tuple(handles)
+        self._is_estop_active = is_estop_active
+
+    @property
+    def motor_names(self) -> tuple[str, ...]:
+        return tuple(handle.name for handle in self._handles)
+
+    def clear_targets(self) -> None:
+        """保持している目標を捨てる (緊急停止時に呼ぶ)。
+
+        目標が残っていると、緊急停止を解除した瞬間に再送が走り、操縦者が
+        何も操作していないのにコンベアが回り出す。停止操作そのものが次の
+        駆動指令にならないよう、停止の時点で目標ごと落とす。
+        """
+        for handle in self._handles:
+            handle.clear_target()
+
+    async def _on_run_exit(self) -> None:
+        """**降り際に停止指令も無励磁化も送らない。** 理由は 2 タスクで別々にある。
+
+        自作モタドラ: 指令が途切れればファーム側のウォッチドッグが 500ms 以内に
+        出力を止める。PC が落ちる場合も含めてそちらに委ねる方が経路が 1 本で済む。
+
+        問い合わせ駆動 (DM3520 / EDULITE 05): 最後に受けた目標を内部の位置ループで
+        保持し続ける。``main()`` の後始末が走る場面 —— systemd の停止や Ctrl-C ——
+        で機構が保持を失って自重で落ちる方が危険なので、無励磁化しない。意図した
+        停止は緊急停止 (``emergency_stop_message``) が担う。
+        """
+
+
+class GenericTargetRefresher(_TargetRefresherBase):
     """自作モータドライバ宛の目標値を低頻度で再送し続ける非同期タスク。
 
     ファームは ``command_timeout_ms`` (既定 500ms) の間 SET_TARGET を 1 通も
@@ -59,35 +121,6 @@ class GenericTargetRefresher(PausablePeriodicTask):
 
     ライフサイクル (start / stop / pause / resume) は ``PausablePeriodicTask`` と共通。
     """
-
-    def __init__(
-        self,
-        handles: Sequence[MotorHandle],
-        *,
-        interval_s: float = DEFAULT_INTERVAL_S,
-        is_estop_active: EStopChecker | None = None,
-        time_source: Callable[[], float] = time.monotonic,
-        sleep: SleepFunc = asyncio.sleep,
-    ) -> None:
-        """
-        Args:
-            handles: 再送対象のモータハンドル (generic ドライバのモータ)
-            interval_s: 再送周期 [s]
-            is_estop_active: 緊急停止判定 (server.py の状態を後から注入する)
-            time_source: 周期とログ間引きに使う単調クロック
-            sleep: 周期待ちに使う関数 (テストで差し替え可能)
-        """
-        super().__init__(interval_s=interval_s, time_source=time_source, sleep=sleep, logger=logger)
-        self._handles = tuple(handles)
-        self._is_estop_active = is_estop_active
-
-    # ------------------------------------------------------------------ #
-    #  状態
-    # ------------------------------------------------------------------ #
-
-    @property
-    def motor_names(self) -> tuple[str, ...]:
-        return tuple(handle.name for handle in self._handles)
 
     def _label(self) -> str:
         return f"目標値再送 ({', '.join(self.motor_names) or '対象なし'})"
@@ -117,29 +150,8 @@ class GenericTargetRefresher(PausablePeriodicTask):
                     handle.name,
                 )
 
-    def clear_targets(self) -> None:
-        """保持している目標を捨てる (緊急停止時に呼ぶ)。
 
-        目標が残っていると、緊急停止を解除した瞬間に再送が走り、操縦者が
-        何も操作していないのにコンベアが回り出す。停止操作そのものが次の
-        駆動指令にならないよう、停止の時点で目標ごと落とす。
-        """
-        for handle in self._handles:
-            handle.clear_target()
-
-    # ------------------------------------------------------------------ #
-    #  ライフサイクル
-    # ------------------------------------------------------------------ #
-
-    async def _on_run_exit(self) -> None:
-        """終了時に停止指令は送らない。
-
-        指令が途切れればファーム側のウォッチドッグが 500ms 以内に出力を止めるため、
-        PC が落ちる場合も含めてそちらに委ねる方が経路が 1 本で済む。
-        """
-
-
-class QueryDrivenTargetRefresher(PausablePeriodicTask):
+class QueryDrivenTargetRefresher(_TargetRefresherBase):
     """**問い合わせ駆動のドライバ**へ 20Hz で目標値を送り続ける非同期タスク。
 
     対象は DM3520 と EDULITE 05 の 2 種 (``_QUERY_DRIVEN_DRIVERS``)。どちらも
@@ -199,20 +211,16 @@ class QueryDrivenTargetRefresher(PausablePeriodicTask):
             time_source: 周期とログ間引きに使う単調クロック
             sleep: 周期待ちに使う関数 (テストで差し替え可能)
         """
-        super().__init__(interval_s=interval_s, time_source=time_source, sleep=sleep, logger=logger)
-        self._handles = tuple(handles)
+        super().__init__(
+            handles,
+            interval_s=interval_s,
+            is_estop_active=is_estop_active,
+            time_source=time_source,
+            sleep=sleep,
+        )
         self._can_manager = can_manager
-        self._is_estop_active = is_estop_active
         # 目標を持たない間に書き続ける値。モータ名 -> ラッチ済みの指令値
         self._idle_targets: dict[str, float] = {}
-
-    # ------------------------------------------------------------------ #
-    #  状態
-    # ------------------------------------------------------------------ #
-
-    @property
-    def motor_names(self) -> tuple[str, ...]:
-        return tuple(handle.name for handle in self._handles)
 
     def _label(self) -> str:
         return f"問い合わせ駆動 目標値再送 ({', '.join(self.motor_names) or '対象なし'})"
@@ -261,29 +269,13 @@ class QueryDrivenTargetRefresher(PausablePeriodicTask):
         await self._can_manager.send(handle.name, driver.encode_target(driver.mode, value))
 
     def clear_targets(self) -> None:
-        """保持している目標とラッチを捨てる (緊急停止時に呼ぶ)。
+        """保持している目標に加えてラッチも捨てる (緊急停止時に呼ぶ)。
 
-        ``GenericTargetRefresher`` と同じ理由 (停止操作が次の駆動指令にならないよう
-        目標ごと落とす) に加え、ラッチも捨てる。停止前の目標を保持位置として
-        書き直し続けると、解除して励磁した瞬間にそこへ戻る動きになる。
+        停止前の目標を保持位置として書き直し続けると、解除して励磁した瞬間に
+        そこへ戻る動きになる。
         """
-        for handle in self._handles:
-            handle.clear_target()
+        super().clear_targets()
         self._idle_targets.clear()
-
-    # ------------------------------------------------------------------ #
-    #  ライフサイクル
-    # ------------------------------------------------------------------ #
-
-    async def _on_run_exit(self) -> None:
-        """終了時に停止指令は送らない。
-
-        本機は最後に受けた目標を内部の位置ループで保持し続ける (自作モタドラの
-        ように指令途絶で出力を落とす保証は個体設定次第)。**降り際に無励磁化しない**
-        のは、``main()`` の後始末が走る場面 —— systemd の停止や Ctrl-C —— で
-        機構が保持を失って自重で落ちる方が危険なため。意図した停止は緊急停止
-        (``emergency_stop_message``) が担う。
-        """
 
 
 #: 目標値再送タスクの共通型。``RobotServer`` は動作確認との排他 (pause/resume)、

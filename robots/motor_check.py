@@ -27,32 +27,19 @@ import logging
 from lib.sequence.engine import Sequence, step
 from lib.sequence.homing import HomingRunner
 from lib.sequence.motors import AxisHandle
+from robots.main_hand import HOME as MAIN_HOME
+from robots.sub_hand import VALVE_AXES
 
 logger = logging.getLogger(__name__)
 
-#: 電磁弁の軸名。6 個を 1 ステップで順に開閉する。
-#: 打音と動作の目視は `config/checklist.yaml` の `valves_actuate` が受け持つ
-#: (基板は弁が開いたかを観測できないので、到達フラグは立たない)。
-VALVE_AXES: tuple[str, ...] = (
-    "valve_1",
-    "valve_2",
-    "valve_3",
-    "valve_4",
-    "valve_5",
-    "valve_6",
-)
-
-#: メインハンドの初期姿勢。`robots/main_hand.py` の `move_to_home` と同じ組み合わせ。
-MAIN_HOME: dict[str, str] = {
-    "y_axis": "home",
-    "rotate": "home",
-    "gripper": "open",
-    "wall_f": "initial",
-    "wall_r": "initial",
-    "conveyor": "stop",
-}
+#: 初期姿勢と電磁弁の軸名は**運用のシーケンスが持つものをそのまま使う**。
+#: ここへ書き写すと、機構が変わったときに「動作確認で戻る姿勢」と「運用で戻る姿勢」が
+#: 別物になり、しかも確認は通ってしまうので気付けない。
 
 #: サブハンドの初期姿勢。電磁弁とポンプは「止める = 消磁 / 停止」に倒す。
+#: **`robots/sub_hand.py` の `move_to_home` とは意図的に別物** —— あちらは
+#: 吸気ポンプを回したまま次のサイクルへ入る運用上の待機姿勢で、こちらは
+#: 前後スライドと昇降も含めた機構の原位置 (ポンプは停止)。
 SUB_HOME: dict[str, str] = {
     "sub_arm_joint": "home",
     "sub_y_axis": "home",
@@ -61,6 +48,13 @@ SUB_HOME: dict[str, str] = {
     "pump_vac": "stop",
     "pump_blow": "stop",
 }
+
+
+#: このシーケンスが指令する軸。**登録可否の判定はこれ 1 つで行う** ——
+#: 呼び出し側 (main._register_motor_check) が定数を寄せ集めて組み直すと、
+#: ステップが軸を 1 つ増やしたときに判定だけが古いまま残り、机上ベンチで
+#: 押した瞬間に PositionLookupError で止まる。
+REQUIRED_AXES: frozenset[str] = frozenset({*MAIN_HOME, *SUB_HOME, *VALVE_AXES})
 
 
 class MotorCheckSequence(Sequence):

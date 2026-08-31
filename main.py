@@ -45,17 +45,9 @@ from lib.sequence.homing import HomingError, HomingRunner
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
-from robots.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
+from robots.motor_check import REQUIRED_AXES, MotorCheckSequence
 
 logger = logging.getLogger(__name__)
-
-# ドライバ種別名 -> 実装クラス。名前の一覧は lib/config_schema.DRIVER_TYPES が持つ
-_DRIVER_MAP: dict[str, type[MotorDriver]] = {
-    "m3508": M3508Driver,
-    "edulite05": Edulite05Driver,
-    "generic": GenericDriver,
-    "dm3520": Dm3520Driver,
-}
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
 _DEFAULT_CONFIGS = ["main_hand.yaml", "sub_hand.yaml"]
@@ -271,8 +263,7 @@ def _wire_motor_check_sequence(
 
     merged = PositionTable.merged(tables)
 
-    required = {*MAIN_HOME, *SUB_HOME, *VALVE_AXES}
-    missing = required - set(merged.axes)
+    missing = REQUIRED_AXES - set(merged.axes)
     if missing:
         logger.warning("統合動作確認: 必要な軸が足りないため登録しない (不足: %s)", sorted(missing))
         return
@@ -346,53 +337,77 @@ def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
     return can.Bus(interface="socketcan", channel=channel)
 
 
+def _make_m3508(motor: MotorConfig) -> MotorDriver:
+    # 位置制御は PC 側の PID ループ (lib/control/position_loop.py) が持つので、
+    # ドライバへ渡す設定は無い (C620 は電流指令しか受け付けない)
+    return M3508Driver(name=motor.name, can_id=motor.can_id)
+
+
+def _make_edulite05(motor: MotorConfig) -> MotorDriver:
+    return Edulite05Driver(
+        name=motor.name,
+        can_id=motor.can_id,
+        host_id=motor.host_id,
+        mode=motor.mode,
+        limit_speed=motor.limit_speed,
+        limit_current=motor.limit_current,
+        position_kp=motor.position_kp,
+        set_zero_on_start=motor.set_zero_on_start,
+    )
+
+
+def _make_dm3520(motor: MotorConfig) -> MotorDriver:
+    return Dm3520Driver(
+        name=motor.name,
+        can_id=motor.can_id,
+        master_id=motor.master_id,
+        mode=motor.mode,
+        limit_speed=motor.limit_speed,
+        # フィードバックの固定小数点レンジ。実機のレジスタ 0x15/0x16/0x17 と
+        # ずれると位置が比例倍で読め、指令どおり動いても到達判定を通らない
+        p_max=motor.p_max,
+        v_max=motor.v_max,
+        t_max=motor.t_max,
+        set_zero_on_start=motor.set_zero_on_start,
+    )
+
+
+def _make_generic(motor: MotorConfig) -> MotorDriver:
+    # control_type を渡さないと duty 指令の DC モータが位置制御で生成され、
+    # 指令が config と別物になる
+    return GenericDriver(
+        name=motor.name,
+        can_id=motor.can_id,
+        control_type=motor.control_type,
+        # 焼き忘れとサーボの型違いは、この照合以外に気付く手段が無い
+        # (機体は指令どおり動いたようにしか見えない。仕様書 §3.4 / §7.7)
+        expected_firmware=motor.expected_firmware,
+        expected_angle_range_deg=motor.expected_angle_range_deg,
+    )
+
+
+#: ドライバ種別名 -> 生成関数。**全種別がこの表を通る。**
+#: かつては 3 種を if 連鎖で個別に生成し、表に届くのは m3508 だけだった。
+#: 名前は「種別 → 実装クラスの対応表」なのに実態は 1 行のフォールバックで、
+#: lib/config_schema.DRIVER_TYPES が「この表と対で維持する」と言っている以上、
+#: 読んだ人は全種別がここで生成されると読む。
+#: 種別を足す人は DRIVER_TYPES とこの表の両方を触ることになり、
+#: 対応は tests/test_config_schema.py が検証する。
+_DRIVER_MAP: dict[str, Callable[[MotorConfig], MotorDriver]] = {
+    "m3508": _make_m3508,
+    "edulite05": _make_edulite05,
+    "generic": _make_generic,
+    "dm3520": _make_dm3520,
+}
+
+
 def _create_motor(motor: MotorConfig) -> MotorDriver:
     """検証済み設定からモータを生成する。
 
     未対応のドライバ種別や control_type の誤記は lib/config_schema が起動時に弾くため、
     ここには常に生成可能な設定しか来ない。
     """
-    if motor.driver == "edulite05":
-        return Edulite05Driver(
-            name=motor.name,
-            can_id=motor.can_id,
-            host_id=motor.host_id,
-            mode=motor.mode,
-            limit_speed=motor.limit_speed,
-            limit_current=motor.limit_current,
-            position_kp=motor.position_kp,
-            set_zero_on_start=motor.set_zero_on_start,
-        )
-
-    if motor.driver == "dm3520":
-        return Dm3520Driver(
-            name=motor.name,
-            can_id=motor.can_id,
-            master_id=motor.master_id,
-            mode=motor.mode,
-            limit_speed=motor.limit_speed,
-            # フィードバックの固定小数点レンジ。実機のレジスタ 0x15/0x16/0x17 と
-            # ずれると位置が比例倍で読め、指令どおり動いても到達判定を通らない
-            p_max=motor.p_max,
-            v_max=motor.v_max,
-            t_max=motor.t_max,
-            set_zero_on_start=motor.set_zero_on_start,
-        )
-
-    if motor.driver == "generic":
-        # control_type を渡さないと duty 指令の DC モータが位置制御で生成され、
-        # 動作確認も reset も config と別物の指令になる
-        return GenericDriver(
-            name=motor.name,
-            can_id=motor.can_id,
-            control_type=motor.control_type,
-            # 焼き忘れとサーボの型違いは、この照合以外に気付く手段が無い
-            # (機体は指令どおり動いたようにしか見えない。仕様書 §3.4 / §7.7)
-            expected_firmware=motor.expected_firmware,
-            expected_angle_range_deg=motor.expected_angle_range_deg,
-        )
-
-    return _DRIVER_MAP[motor.driver](name=motor.name, can_id=motor.can_id)
+    return _DRIVER_MAP[motor.driver](motor)
 
 
 def _setup_robot(

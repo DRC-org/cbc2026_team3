@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from aiohttp import WSMsgType, web
 
 from lib.can_manager import CANManager
-from lib.commands import COMMANDS, CommandSpec, RejectChannel, phase_deny_reason, spec_for
+from lib.commands import COMMANDS, CommandSpec, RejectChannel, spec_for
 from lib.config_schema import (
     DEFAULT_HEALTH,
     DEFAULT_MATCH,
@@ -38,6 +38,7 @@ from lib.health import (
     HealthSnapshot,
     MotorHealth,
     MotorHealthInfo,
+    worst_bus_health,
 )
 from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import PHASES_DURING_MATCH, ChecklistItem, Court, MatchState
@@ -66,15 +67,6 @@ _ENERGIZE_GRACE_S = 0.5
 
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
-
-
-# overall を最悪値で集約するためのランク。lib.health._BUS_SEVERITY_RANK と一致させる
-# (重複定義を避けたいが、health.py 側を private 扱いにしているため局所コピーする)。
-_BUS_SEVERITY_RANK: dict[BusHealth, int] = {
-    BusHealth.OK: 0,
-    BusHealth.DEGRADED: 1,
-    BusHealth.DOWN: 2,
-}
 
 
 def _level_for_state(state: BusHealth) -> str:
@@ -317,17 +309,15 @@ class RobotServer:
         CI・監視ツール・curl 動作確認用。WS が使えない環境向けの代替経路。
         """
         robots_payload: dict[str, dict] = {}
-        worst_rank = 0
+        overalls: list[BusHealth] = []
         for robot_name in self._robots:
             snap = self._compute_health(robot_name)
             robots_payload[robot_name] = snap.to_dict()
-            worst_rank = max(worst_rank, _BUS_SEVERITY_RANK[snap.overall])
+            overalls.append(snap.overall)
 
-        overall = BusHealth.OK
-        for state, rank in _BUS_SEVERITY_RANK.items():
-            if rank == worst_rank:
-                overall = state
-                break
+        # 最悪値への集約は lib.health だけが知っている。ランク表をここへ写すと
+        # 「Monitor は READY と言うのに操縦者の画面は異常と言う」状態が作れる
+        overall = worst_bus_health(overalls)
 
         # OK 以外は監視系から異常を検出できるよう 503 を返す
         status = 200 if overall is BusHealth.OK else 503
@@ -991,7 +981,8 @@ class RobotServer:
             await self._reject_command(
                 requester,
                 "match_start",
-                phase_deny_reason("match_start", self.match.phase) or "試合を開始できません",
+                COMMANDS["match_start"].phase_deny_reason(self.match.phase)
+                or "試合を開始できません",
             )
             return
 
@@ -1399,7 +1390,7 @@ class RobotServer:
         if self._motor_check is None:
             return "動作確認シーケンスが読み込まれていません"
 
-        phase_deny = phase_deny_reason("motor_check_start", self.match.phase)
+        phase_deny = COMMANDS["motor_check_start"].phase_deny_reason(self.match.phase)
         if phase_deny is not None:
             return phase_deny
 
@@ -1503,35 +1494,35 @@ class RobotServer:
         ステップ表 (`steps`) を毎回載せるのは、途中から繋いだクライアントにも
         同じ 1 通で全体が伝わるようにするため。
         """
-        if self._motor_check is None:
-            # **理由はここでも載せる。** 「読み込まれていません」という拒否理由自体が
-            # この分岐から出るので、捨てると押しても何も起きない画面になる
-            return {
-                "type": "motor_check_state",
-                "available": False,
-                "blocked_reason": self._motor_check_deny_reason(),
-                "running": False,
-                "current_step": None,
-                "step_index": 0,
-                "total_steps": 0,
-                "steps": [],
-                "error": self._motor_check_error,
-            }
-
-        progress = self._motor_check.progress
-        return {
+        # **キー集合は 1 箇所でしか作らない。** シーケンス未登録の分岐と通常分岐で
+        # 別々に組み立てると、キーを足したときに片方へ書き忘れられる。受け取る側は
+        # 「1 通で全体が伝わる」前提で描くので、欠けたキーは古い状態のまま固まる。
+        #
+        # 「今この瞬間起動できるか」もここで配る。UI はボタンを塞ぐ理由を自分で
+        # 導出してはならない (サーバーが許すのに画面が殺す状態を作らない)。
+        # 未登録のときも理由を載せる —— 「読み込まれていません」という拒否理由自体が
+        # この分岐から出るので、捨てると押しても何も起きない画面になる
+        payload = {
             "type": "motor_check_state",
-            "available": True,
-            # 「今この瞬間起動できるか」もここで配る。UI はボタンを塞ぐ理由を
-            # 自分で導出してはならない (サーバーが許すのに画面が殺す状態を作らない)
+            "available": self._motor_check is not None,
             "blocked_reason": self._motor_check_deny_reason(),
-            "running": self._motor_check_running,
-            "current_step": progress["current_step"],
-            "step_index": progress["step_index"],
-            "total_steps": progress["total_steps"],
-            "steps": progress["steps"],
+            "running": False,
+            "current_step": None,
+            "step_index": 0,
+            "total_steps": 0,
+            "steps": [],
             "error": self._motor_check_error,
         }
+        if self._motor_check is None:
+            return payload
+
+        progress = self._motor_check.progress
+        payload["running"] = self._motor_check_running
+        payload["current_step"] = progress["current_step"]
+        payload["step_index"] = progress["step_index"]
+        payload["total_steps"] = progress["total_steps"]
+        payload["steps"] = progress["steps"]
+        return payload
 
     async def _set_motor_check_error(self, message: str) -> None:
         """拒否・失敗の理由を保持し、状態として配信する。

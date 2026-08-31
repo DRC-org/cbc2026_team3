@@ -12,14 +12,7 @@ import inspect
 
 import pytest
 
-from lib.commands import (
-    COMMANDS,
-    CommandSpec,
-    RejectChannel,
-    dev_tools_deny_reason,
-    e_stop_deny_reason,
-    phase_deny_reason,
-)
+from lib.commands import COMMANDS, CommandSpec, RejectChannel, spec_for
 from lib.match_state import (
     PHASES_ANY,
     PHASES_DURING_MATCH,
@@ -27,6 +20,28 @@ from lib.match_state import (
     Phase,
 )
 from lib.server import RobotServer
+
+
+def phase_deny_reason(command: str, phase: Phase) -> str | None:
+    """ゲート判定の入口は `spec_for()` → メソッドの 1 本だけ。
+
+    かつては同じ判定へモジュール関数からも入れ、どちらを使うかの根拠が
+    どこにも無かった (本番は spec のメソッド、`match_start` と動作確認だけが
+    名前引き)。テストの読みやすさのためのラッパはここに置く。
+    """
+    spec = spec_for(command)
+    return None if spec is None else spec.phase_deny_reason(phase)
+
+
+def e_stop_deny_reason(command: str) -> str | None:
+    spec = spec_for(command)
+    return None if spec is None else spec.e_stop_deny_reason()
+
+
+def dev_tools_deny_reason(command: str, dev_tools_enabled: bool) -> str | None:
+    spec = spec_for(command)
+    return None if spec is None else spec.dev_tools_deny_reason(dev_tools_enabled)
+
 
 #: 操縦者 UI と Web ソケット越しに実際にやり取りする全コマンド。
 #: 増減させるときはここも直す (テストが落ちることで宣言漏れに気付ける)。

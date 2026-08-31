@@ -81,13 +81,7 @@ class MotorHandle:
             raise EStopActiveError(f"緊急停止中のためモータ '{self._name}' に指令できません")
 
         value = float(value)
-        if self._target_sink is not None:
-            # M3508 のようにドライバ単体では目標モードを表現できないモータ向けの差し込み口。
-            # PC 側の制御ループが目標値を受け取り、実際の CAN 送信を代行する
-            await self._target_sink(mode, value)
-        else:
-            msg = self._driver.encode_target(mode, value)
-            await self._can_manager.send(self._name, msg)
+        await self._dispatch(mode, value)
 
         self._mode = mode
         self._target = value
@@ -109,12 +103,26 @@ class MotorHandle:
         if self._is_estop_active is not None and self._is_estop_active():
             return False
 
-        if self._target_sink is not None:
-            await self._target_sink(self._mode, self._target)
-        else:
-            msg = self._driver.encode_target(self._mode, self._target)
-            await self._can_manager.send(self._name, msg)
+        await self._dispatch(self._mode, self._target)
         return True
+
+    async def _dispatch(self, mode: ControlMode, value: float) -> None:
+        """1 指令を送る唯一の経路。**インターロックと状態更新は呼び出し側が持つ。**
+
+        初回 (``set_target``) と再送 (``resend_target``) で経路が分かれていると、
+        片方だけ差し込み口を通す形に直せてしまう —— 症状は「初回だけ PID を通り、
+        再送は生の CAN へ出る」で、M3508 の位置制御ループが同じ周期に 2 種類の
+        電流指令を出すことになる。
+
+        緊急停止の扱いを共通化しないのは、2 つの呼び出し元で正しい振る舞いが
+        違うため (``set_target`` は例外、``resend_target`` は黙って False)。
+        """
+        if self._target_sink is not None:
+            # M3508 のようにドライバ単体では目標モードを表現できないモータ向けの差し込み口。
+            # PC 側の制御ループが目標値を受け取り、実際の CAN 送信を代行する
+            await self._target_sink(mode, value)
+        else:
+            await self._can_manager.send(self._name, self._driver.encode_target(mode, value))
 
     def clear_target(self) -> None:
         """到達待ちの対象から外す。"""

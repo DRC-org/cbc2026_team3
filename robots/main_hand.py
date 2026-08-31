@@ -6,6 +6,20 @@ from lib.sequence.engine import Sequence, step
 
 logger = logging.getLogger(__name__)
 
+#: メインハンドの初期姿勢。**軸名と位置名の一覧であって数値ではない**ので
+#: robots/ に置いてよい (単位換算・許容差・待ち時間はすべて位置定数 yaml が持つ)。
+#: シーケンスの往路 (`move_to_home`) と復路 (`return_home`)、および
+#: 動作確認 (`robots/motor_check.py`) が同じ 1 つを参照する。書き写すと、機構が
+#: 変わったときに片方だけ直った状態が作れる。
+HOME: dict[str, str] = {
+    "y_axis": "home",
+    "rotate": "home",
+    "gripper": "open",
+    "wall_f": "initial",
+    "wall_r": "initial",
+    "conveyor": "stop",
+}
+
 
 class MainHandSequence(Sequence):
     """メインハンドのシーケンス。
@@ -34,16 +48,7 @@ class MainHandSequence(Sequence):
     @step("初期位置へ移動")
     async def move_to_home(self) -> None:
         logger.info("[main_hand] 初期位置へ移動")
-        await self.move_to(
-            {
-                "y_axis": "home",
-                "rotate": "home",
-                "gripper": "open",
-                "wall_f": "initial",
-                "wall_r": "initial",
-                "conveyor": "stop",
-            }
-        )
+        await self.move_to(HOME)
 
     @step("自陣ワーク 3 列目まで前進", require_trigger=True)
     async def move_to_work_3(self) -> None:
@@ -105,13 +110,4 @@ class MainHandSequence(Sequence):
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
         logger.info("[main_hand] 初期位置へ復帰")
-        await self.move_to(
-            {
-                "y_axis": "home",
-                "rotate": "home",
-                "gripper": "open",
-                "wall_f": "initial",
-                "wall_r": "initial",
-                "conveyor": "stop",
-            }
-        )
+        await self.move_to(HOME)

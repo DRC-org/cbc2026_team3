@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -89,6 +90,17 @@ _BUS_SEVERITY_RANK: dict[BusHealth, int] = {
 }
 
 
+def worst_bus_health(states: Iterable[BusHealth]) -> BusHealth:
+    """最悪値への集約。**機体の健全性判定はここ 1 箇所だけが行う。**
+
+    ランク表を呼び出し側へ写すと、判定材料が 2 箇所に分かれて片方だけ直せる
+    状態になり、「Monitor は READY と言うのに操縦者の画面は異常と言う」という
+    最も信用を失う壊れ方になる。空なら OK (判定材料が無いことを異常には倒さない
+    —— 判定不能の扱いは `HealthSnapshot.detail` が別に持つ)。
+    """
+    return max(states, key=_BUS_SEVERITY_RANK.__getitem__, default=BusHealth.OK)
+
+
 @dataclass
 class HealthSnapshot:
     timestamp: float
@@ -111,12 +123,6 @@ class HealthSnapshot:
 
     @staticmethod
     def compute_overall(buses: list[BusHealthInfo], motors: list[MotorHealthInfo]) -> BusHealth:
-        worst_rank = 0
-        for b in buses:
-            worst_rank = max(worst_rank, _BUS_SEVERITY_RANK[b.state])
-        for m in motors:
-            worst_rank = max(worst_rank, _BUS_SEVERITY_RANK[_MOTOR_TO_BUS_SEVERITY[m.state]])
-        for state, rank in _BUS_SEVERITY_RANK.items():
-            if rank == worst_rank:
-                return state
-        return BusHealth.OK
+        return worst_bus_health(
+            [b.state for b in buses] + [_MOTOR_TO_BUS_SEVERITY[m.state] for m in motors]
+        )
