@@ -87,7 +87,7 @@ class _ExplodingClient:
 class TestBroadcastResilience:
     async def test_詰まったクライアントは切り離され配信は完了する(self, monkeypatch) -> None:
         # 実時間で 1 秒待たされるとテストが遅くなるだけなので上限を縮めて等価に検証する
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         stalled = _StalledClient()
@@ -168,7 +168,7 @@ class TestFanout:
         assert healthy.sent == ['{"type": "a"}', '{"type": "b"}']
 
     async def test_テレメトリ配信も詰まった相手を切り離す(self, monkeypatch) -> None:
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         fx.add_robot("main_hand", _NoopSequence(), _bare_can_manager())
@@ -191,7 +191,7 @@ class TestShutdownDoesNotHang:
     """
 
     async def test_on_shutdown_は詰まったクライアントを待たない(self, monkeypatch) -> None:
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         app = fx.create_app()
@@ -204,7 +204,7 @@ class TestShutdownDoesNotHang:
         assert stalled.close_called
 
     async def test_cleanup_は詰まったクライアントを待たない(self, monkeypatch) -> None:
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         stalled = _StalledClient()

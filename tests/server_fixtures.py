@@ -218,6 +218,21 @@ class ServerFixture:
     #  (1 台の不調で全員のテレメトリを止めない) はこれでしか検証できない。
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def shrink_ws_send_timeout(monkeypatch: Any, seconds: float = 0.05) -> None:
+        """WS 送信の上限を縮める (詰まった相手の切り離しを実時間で待たないため)。
+
+        本番の上限は 1 秒なので、そのまま検証するとテスト 1 件ごとに 1 秒待つ。
+        縮めても見ているもの (上限を超えたら切り離す) は変わらない。
+
+        **モジュール private の書き換えなので、経路はここ 1 本に閉じる。**
+        テスト側に散らすと、定数名が変わったときにどのファイルが黙って
+        「上限を縮めたつもりで縮めていない」状態になったか分からなくなる
+        (monkeypatch.setattr は存在しない属性なら例外を出すが、別の定数へ
+        名前が移ったときは書き換え先だけが古いまま残る)。
+        """
+        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", seconds)
+
     def attach_clients(self, *clients: Any) -> None:
         self.server._ws_clients = set(clients)
 

@@ -75,9 +75,52 @@ if [[ ! -f "$CAN_CONFIG" ]]; then
 fi
 
 # バス一覧は can_config.py が単一情報源。ここに名前を書き写さない。
-mapfile -t IFACES < <("$PYTHON" "$CAN_CONFIG" list --assigned-only | cut -f1)
+#
+# **プロセス置換 (`mapfile < <(cmd)`) は cmd の終了コードをどこにも伝えない。**
+# can_config.py が落ちても、全バスの serial が TBD でも IFACES は空のまま通り、
+# 「監視開始: 」とだけ出して**何も監視しない常駐**が Restart=always で永久に
+# 生き続ける。bus-off 復旧が丸ごと無効なのに journal からは正常に見えるので、
+# 空なら非 0 で降りて unit を failed にする (そこで初めて気付ける)。
+if ! bus_list=$("$PYTHON" "$CAN_CONFIG" list --assigned-only); then
+    log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
+    exit 1
+fi
+
+IFACES=()
+while IFS=$'\t' read -r name _rest; do
+    [[ -z "${name:-}" ]] && continue
+    IFACES+=("$name")
+done <<< "$bus_list"
+
+if [[ ${#IFACES[@]} -eq 0 ]]; then
+    log_err "監視対象の CAN バスが 1 本もありません (config/can_buses.yaml の serial が全て未採取?)"
+    exit 1
+fi
 
 declare -A stall_count=() last_tx=() last_recover=() recover_streak=()
+
+# **down と up の間で殺されると、動いていたバスが down のまま残る。**
+# systemctl stop / restart (install.sh も打つ) の SIGTERM は既定でプロセスを
+# 即死させるので、down 済みのバスを誰も up し直さない。Restart=always の次の
+# インスタンスも、滞留 (backlog + TX 停滞) を検出するまでは戻さない ——
+# down したバスには送信要求も溜まらないので、実際には永久に戻らない。
+#
+# **`trap '' TERM` で無視する形は採らない。** ignore は届いた 1 通を捨てるので
+# stop そのものが失われ、systemd は TimeoutStopSec (既定 90 秒) 待ってから
+# SIGKILL することになる。「殺されはするが、降りる前に必ず up し直す」形にする。
+# bash はシグナルハンドラを実行中の前景コマンドが終わってから走らせるため、
+# down の最中に届いた TERM も down の完了後に処理され、EXIT トラップが up を打てる。
+RECOVERING_IFACE=""
+
+on_exit() {
+    if [[ -n "$RECOVERING_IFACE" ]]; then
+        "${IP[@]}" link set "$RECOVERING_IFACE" up 2>/dev/null || true
+        RECOVERING_IFACE=""
+    fi
+}
+trap on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # 送信できた累計フレーム数。デバイスが無ければ空を返す (呼び出し側が周期を捨てる)。
 # `|| true` は必須 —— pipefail の下では `ip` の失敗がそのまま代入の失敗になり、
@@ -116,8 +159,13 @@ recover() {
     # **bitrate と txqueuelen は down/up をまたいで保たれるので入れ直さない。**
     # 入れ直すと、その途中で失敗したときに元より悪い状態で残る。復旧は
     # 触る対象が少ないほどよい。
+    #
+    # ここから up までがクリティカルセクション。RECOVERING_IFACE を立てておくと、
+    # 途中で降ろされても EXIT トラップが up を打ち直す。
+    RECOVERING_IFACE="$iface"
     "${IP[@]}" link set "$iface" down 2>/dev/null || true
     "${IP[@]}" link set "$iface" up 2>/dev/null || true
+    RECOVERING_IFACE=""
 
     # 復旧直後から数え直す。残したままだと次の周期で即座に再判定へ入り、
     # 実際に効いたかどうかを見る猶予が無くなる。
