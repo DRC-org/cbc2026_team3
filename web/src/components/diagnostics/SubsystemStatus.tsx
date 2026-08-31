@@ -1,19 +1,19 @@
 import { ChevronDown, ChevronRight, ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { describeSafetyIssues, evaluateHealth } from "@/lib/healthVerdict";
-import type { TempThresholds } from "@/lib/healthVerdict";
-import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
+import type { SafetyPayload, TempThresholds } from "@/lib/healthVerdict";
+import type { HealthSnapshot, MotorState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
   health: HealthSnapshot | undefined;
   motors: Record<string, MotorState>;
   /** 安全機構 (同期ずれラッチ・保護ループの生死)。未受信でも表示は成立する */
-  safety?: SafetyState;
+  safety?: SafetyPayload;
   /**
    * 温度の色分けに使うしきい値。正はサーバーの config で、`server_info` から届く。
    * 末端の表示部品が context を読み始めると `health` / `motors` を props で受けている
@@ -37,7 +37,7 @@ interface SubsystemStatusProps {
  * モータ状態が届き続ける。どちらも「画面が正常に見えるのに機体は正常でない」型の異常で、
  * 自分から主張しない限り誰も気付けない。
  */
-function SafetyIssues({ safety }: { safety: SafetyState | undefined }) {
+function SafetyIssues({ safety }: { safety: SafetyPayload | undefined }) {
   const issues = describeSafetyIssues(safety);
   if (issues.length === 0) return null;
 
@@ -76,6 +76,8 @@ export function SubsystemStatus({
 }: SubsystemStatusProps) {
   const verdict = evaluateHealth(health, safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
+  // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
+  const detailsId = useId();
 
   // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない
   const forcedOpen = verdict.tone === "error" || verdict.tone === "warning";
@@ -94,6 +96,7 @@ export function SubsystemStatus({
           // 数字が並んだまま試合の残り時間ずっと開きっぱなしになる
           onClick={() => setManualOpen(!open)}
           aria-expanded={open}
+          aria-controls={detailsId}
           className="flex shrink-0 cursor-pointer items-center gap-2 px-1 py-1 text-left hover:bg-base-200"
         >
           <Icon as={open ? ChevronDown : ChevronRight} className="text-base-content/60" />
@@ -105,7 +108,7 @@ export function SubsystemStatus({
       ) : null}
 
       {open ? (
-        <div className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
+        <div id={detailsId} className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
           {/* 判定の理由をラベルへ収められなかった場合の逃し先。
               サーバーが「判定不能」を配信したときの原因文はここにしか残らない */}
           {verdict.detail ? (

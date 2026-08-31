@@ -5,7 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 import can
 
@@ -19,9 +19,6 @@ from lib.health import (
     MotorHealth,
     MotorHealthInfo,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +149,7 @@ class CANManager:
 
         名前が衝突すると _motors は後勝ちで上書きされる一方 _bus_motors には両方残り、
         受信ループは孤児になった先勝ちドライバへフィードバックを配り続ける
-        (get_motor は後勝ちを返すので、状態が永久に更新されないモータができる)。
+        (motors は後勝ちを返すので、状態が永久に更新されないモータができる)。
         同一バスの can_id 衝突は受信ループが最初にマッチした 1 台で打ち切るため、
         もう一方が永久にフィードバックを得られない。
 
@@ -202,9 +199,6 @@ class CANManager:
         self._add_device(bus_name, sensor)
         self._sensors[sensor.name] = sensor
 
-    def get_motor(self, name: str) -> MotorDriver:
-        return self._motors[name]
-
     @property
     def sensors(self) -> Mapping[str, MotorDriver]:
         """登録済みセンサの読み取り専用ビュー (宣言順を保つ)。"""
@@ -231,14 +225,6 @@ class CANManager:
         「正常」と言い続ける経路ができる。
         """
         return tuple(self._buses)
-
-    def bus_of(self, motor_name: str) -> str | None:
-        """モータが所属するバス名。未登録なら None。
-
-        どのバスに繋がったモータかは動作確認結果の表示に必要で、
-        未登録は「表示できない」だけなので例外にせず None を返す。
-        """
-        return self._motor_bus.get(motor_name)
 
     def last_feedback_at(self, motor_name: str) -> float | None:
         """最後にフィードバックを受信した時刻 (time.time 基準)。未受信なら None。
@@ -523,18 +509,15 @@ class CANManager:
         Returns:
             有効化できなかったモータ名。呼び出し側が操縦者へ見せる。
         """
-        inactive: list[str] = []
-        for motor_name, motor in self._motors.items():
-            try:
-                await self._send_steps(motor_name, motor.initialization_steps())
-                if not await self.activate_motor(motor_name):
-                    inactive.append(motor_name)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("モータ '%s' の起動時設定に失敗しました", motor_name)
-                inactive.append(motor_name)
-        return inactive
+
+        async def initialize_and_activate(motor_name: str) -> bool:
+            # **設定と励磁はモータ単位で交互に送る。** 「全モータの設定 → 全モータの
+            # 励磁」に組み替えると、EDULITE 05 / DM3520 が activation_steps で読む
+            # 実測角が「設定直後」ではなく「他機の設定を挟んだ後」のものになる
+            await self._send_steps(motor_name, self._motors[motor_name].initialization_steps())
+            return await self.activate_motor(motor_name)
+
+        return await self._activate_each_motor("起動時設定", initialize_and_activate)
 
     async def activate_motors(
         self,
@@ -557,6 +540,33 @@ class CANManager:
         Returns:
             有効化できなかったモータ名 (中断で飛ばしたものを含む)。
         """
+
+        async def activate(motor_name: str) -> bool:
+            return await self.activate_motor(
+                motor_name,
+                should_abort=should_abort,
+                feedback_timeout_s=feedback_timeout_s,
+            )
+
+        return await self._activate_each_motor("有効化", activate, should_abort=should_abort)
+
+    async def _activate_each_motor(
+        self,
+        what: str,
+        action: Callable[[str], Awaitable[bool]],
+        *,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> list[str]:
+        """全モータへ ``action`` を宣言順に適用し、失敗したモータ名を返す。
+
+        **1 台の送信失敗で残りを諦めない。** 素の for に並べると、最初のモータで
+        CAN の送信が失敗しただけで以降のモータは何も受け取れず、しかも症状は
+        「そのバスのモータが全部無励磁」でしかない。起動経路と緊急停止解除の経路が
+        同じ骨格をそれぞれ持っていると、片方だけ握りを外した状態を作れてしまう。
+
+        中断は「次のモータへ進む直前」にだけ見る。送信の途中で降りると、
+        設定だけ入って励磁されていないモータが残る。
+        """
         inactive: list[str] = []
         motor_names = list(self._motors)
         for index, motor_name in enumerate(motor_names):
@@ -565,16 +575,12 @@ class CANManager:
                 inactive.extend(motor_names[index:])
                 return inactive
             try:
-                if not await self.activate_motor(
-                    motor_name,
-                    should_abort=should_abort,
-                    feedback_timeout_s=feedback_timeout_s,
-                ):
+                if not await action(motor_name):
                     inactive.append(motor_name)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("モータ '%s' の有効化に失敗しました", motor_name)
+                logger.exception("モータ '%s' の%sに失敗しました", motor_name, what)
                 inactive.append(motor_name)
         return inactive
 

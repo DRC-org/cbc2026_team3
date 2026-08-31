@@ -12,6 +12,8 @@ import asyncio
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from lib.can_manager import CANManager
 from lib.sequence.engine import Sequence, step
 from tests.server_fixtures import ServerFixture
@@ -69,6 +71,41 @@ class _HealthyClient:
         self.closed = True
 
 
+class _HandshakeClient:
+    """``_ws_handler`` に渡せる偽ソケット。受信ループはすぐ終わる。
+
+    ``stall_after`` 通目の送信で永久に返らなくなる。接続直後のスナップショット
+    3 通のうち何通目で詰まっても同じ結果になることを見るためにパラメータ化する。
+    """
+
+    def __init__(self, *, stall_after: int | None = None) -> None:
+        self.closed = False
+        self.close_called = False
+        self.sent: list[str] = []
+        self._stall_after = stall_after
+
+    async def prepare(self, request: object) -> None:
+        return None
+
+    async def send_str(self, msg: str) -> None:
+        if self._stall_after is not None and len(self.sent) >= self._stall_after:
+            await asyncio.Event().wait()
+        self.sent.append(msg)
+
+    async def close(self) -> None:
+        self.close_called = True
+        await asyncio.Event().wait()
+
+    def exception(self) -> BaseException | None:
+        return None
+
+    def __aiter__(self) -> _HandshakeClient:
+        return self
+
+    async def __anext__(self) -> object:
+        raise StopAsyncIteration
+
+
 class _ExplodingClient:
     """送信で例外を投げるクライアント。"""
 
@@ -87,7 +124,7 @@ class _ExplodingClient:
 class TestBroadcastResilience:
     async def test_詰まったクライアントは切り離され配信は完了する(self, monkeypatch) -> None:
         # 実時間で 1 秒待たされるとテストが遅くなるだけなので上限を縮めて等価に検証する
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         stalled = _StalledClient()
@@ -168,7 +205,7 @@ class TestFanout:
         assert healthy.sent == ['{"type": "a"}', '{"type": "b"}']
 
     async def test_テレメトリ配信も詰まった相手を切り離す(self, monkeypatch) -> None:
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         fx.add_robot("main_hand", _NoopSequence(), _bare_can_manager())
@@ -183,6 +220,45 @@ class TestFanout:
         assert json.loads(healthy.sent[0])["type"] == "state"
 
 
+class TestConnectHandshakeIsNotUnbounded:
+    """接続直後の 3 通も送信上限を通ること。
+
+    生の ``send_str`` は相手が読まなくなると無期限に待つ。スリープに入りかけた
+    ノート PC が 1 台繋いだだけで接続ハンドラが返らなくなり、``finally`` の
+    ``_ws_clients.discard`` も走らない。配信ループは ``ws.closed`` にならない
+    その相手へ送り続けることになる。
+    """
+
+    @pytest.mark.parametrize("stall_after", [0, 1, 2])
+    async def test_詰まった相手でも接続ハンドラは返る(self, monkeypatch, stall_after: int) -> None:
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
+
+        fx = ServerFixture.build()
+        client = _HandshakeClient(stall_after=stall_after)
+
+        await asyncio.wait_for(fx.run_ws_handler(client), timeout=2.0)
+
+        # 詰まった相手は接続集合に残らない (残ると配信ループが毎周期そこで待つ)
+        assert not fx.is_connected(client)
+        assert len(client.sent) == stall_after
+        # クローズは別タスクへ逃がす (close() も相手の応答を待つ)
+        await asyncio.sleep(0.01)
+        assert client.close_called
+        assert fx.has_closing_tasks
+
+    async def test_正常な相手にはスナップショット3通が届く(self) -> None:
+        fx = ServerFixture.build()
+        client = _HandshakeClient()
+
+        await asyncio.wait_for(fx.run_ws_handler(client), timeout=2.0)
+
+        assert [json.loads(m)["type"] for m in client.sent] == [
+            "server_info",
+            "match_state",
+            "motor_check_state",
+        ]
+
+
 class TestShutdownDoesNotHang:
     """終了処理も送信と同じ上限を通す。
 
@@ -191,7 +267,7 @@ class TestShutdownDoesNotHang:
     """
 
     async def test_on_shutdown_は詰まったクライアントを待たない(self, monkeypatch) -> None:
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         app = fx.create_app()
@@ -204,7 +280,7 @@ class TestShutdownDoesNotHang:
         assert stalled.close_called
 
     async def test_cleanup_は詰まったクライアントを待たない(self, monkeypatch) -> None:
-        monkeypatch.setattr("lib.server._WS_SEND_TIMEOUT_S", 0.05)
+        ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
         stalled = _StalledClient()

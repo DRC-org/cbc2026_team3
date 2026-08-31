@@ -9,7 +9,7 @@
 // PID は実装ごと存在しない。
 //
 // パラメータの一部は SET_PARAM で実行時に変更できるが、RAM 上のみで電源断で
-// ここの既定値に戻る（仕様書 §3.4）。恒久的に変えたい値はこのファイルを直すこと。
+// ここの既定値に戻る（仕様書 §3.3）。恒久的に変えたい値はこのファイルを直すこと。
 
 #pragma once
 
@@ -37,17 +37,16 @@ constexpr bool kDirForwardIsLow = true;
 //
 // この基板にはゲートドライバの出力禁止（DIS）が無く、PC から止める手段は
 // duty 0 だけしかない。REF はその一重の防壁に対する数少ない追加情報なので、
-// 押下は緊急停止ラッチへ落として FEEDBACK bit3 で PC へ知らせる（仕様書 §5.2）。
+// 押下は緊急停止ラッチへ落として FEEDBACK bit1 で PC へ知らせる（仕様書 §5.2）。
 constexpr uint8_t kPinRef = 2;
 constexpr bool kRefActiveLow = true;
 
 // CAN。UNO R4 Minima の CAN ペリフェラルは D4(TX) / D5(RX) に固定されており、
 // Arduino_CAN の CAN インスタンスが variant の PIN_CAN0_TX / PIN_CAN0_RX を使う。
-// ここの定数は配線確認用で、コードから直接は使わない。
-// これらのピンを他用途へ割り当てると PC から止められない基板になるため、
-// src/main.cpp の static_assert が衝突をビルド時に検出する。
-constexpr uint8_t kPinCanTx = PIN_CAN0_TX;
-constexpr uint8_t kPinCanRx = PIN_CAN0_RX;
+// **ここに写しを置かない** —— 正は variant のマクロで、写すと片方だけが古くなる。
+// これらのピンを他用途へ割り当てると PC から止められない基板になるので、
+// src/main.cpp の pinsAvoidCan() が PIN_CAN0_TX / PIN_CAN0_RX を直接見て衝突を
+// ビルド時に検出する。
 
 constexpr uint8_t kPinLed = 13;  // オンボード LED
 constexpr uint8_t kPinRgb = 6;   // シリアル RGB LED（1 個）
@@ -82,7 +81,7 @@ constexpr uint8_t kDcChannelCount = 3;
 // candump に 0x8A が流れていれば「DC 基板 1 枚目の ch2」と直接読める。
 constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Dc;
 
-// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
+// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.4）。
 // **プロトコルかピン配置を変えたら必ず上げること。**
 //
 // **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
@@ -94,8 +93,11 @@ constexpr uint8_t kFirmwareVersion = 1;
 struct DcChannelConfig {
     uint8_t pwmPin;
     uint8_t dirPin;
-    float maxDuty;     // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
-    const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
+    float maxDuty;  // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
+    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
+    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
+    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
+    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // TODO(実機で確認): max_duty はモータとギヤ比が決まってから詰めること。
@@ -105,9 +107,9 @@ constexpr float kDefaultMaxDuty = 0.30f;
 // 既定は config/main_hand.yaml の実構成に合わせてある。ch1 / ch2 は現在未使用で、
 // PC 側の yaml にモータとして登録されていない（指令が来ないので回らない）。
 constexpr DcChannelConfig kDcChannels[kDcChannelCount] = {
-    {kPinPwm[0], kPinDir[0], kDefaultMaxDuty, "conveyor"},
-    {kPinPwm[1], kPinDir[1], kDefaultMaxDuty, "ch1"},
-    {kPinPwm[2], kPinDir[2], kDefaultMaxDuty, "ch2"},
+    {kPinPwm[0], kPinDir[0], kDefaultMaxDuty},  // ch0 = conveyor（メインハンド）
+    {kPinPwm[1], kPinDir[1], kDefaultMaxDuty},  // ch1 = pump_vac（サブハンド）
+    {kPinPwm[2], kPinDir[2], kDefaultMaxDuty},  // ch2 = pump_blow（サブハンド）
 };
 
 // ===========================================================================
@@ -131,7 +133,7 @@ constexpr float kPwmFrequencyHz = 30000.0f;
 // kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、途絶は PC の停止か
 // ケーブル断を意味する。止まらない基板は PC から止められない基板でもある。
 //
-// 0 にすると途絶しても駆動を続け、FEEDBACK の bit4 も報告しなくなる。これは
+// 0 にすると途絶しても駆動を続け、FEEDBACK の bit2 も報告しなくなる。これは
 // 手で cansend を打つようなベンチ確認（20Hz の再送を用意できない場合）のための
 // 逃げ道であって、試合では既定の 1 のまま使う。再送が間に合わない状態は運用上の
 // 異常なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
@@ -141,7 +143,7 @@ constexpr float kPwmFrequencyHz = 30000.0f;
 // 誰も気付けない。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
-// command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.3 の既定値）は PC 側との契約なので
 // MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
 // 基板ごとに変えてよい値ではなく、両基板の config.h に同じ数字を書くと片方だけ古くなる。
 

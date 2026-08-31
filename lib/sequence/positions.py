@@ -313,10 +313,6 @@ class PositionTable:
     def sync_tolerance(self, axis: str) -> float | None:
         return self.axis(axis).sync_tolerance
 
-    def manual(self, axis: str) -> ManualSpec | None:
-        """手動操縦の可動範囲。連続操作を許していない軸は None。"""
-        return self.axis(axis).manual
-
     def manual_axes(self) -> tuple[str, ...]:
         """連続操作を許した軸 (``manual:`` を持つ軸)。"""
         return tuple(name for name, spec in self._axes.items() if spec.manual is not None)

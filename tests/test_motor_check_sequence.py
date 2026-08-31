@@ -17,9 +17,11 @@ from collections.abc import Mapping
 import pytest
 import yaml
 
+import robots.main_hand as main_hand
+import robots.sub_hand as sub_hand
 from lib.match_state import Court
 from lib.sequence.positions import PositionTable, load_position_table
-from robots.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
+from robots.motor_check import MAIN_HOME, REQUIRED_AXES, SUB_HOME, VALVE_AXES, MotorCheckSequence
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -161,3 +163,38 @@ class TestStepShape:
         assert len(opened) == 1
         # 同じ指令で他の弁を巻き込んでいないこと
         assert set(opened[0]) == {axis}
+
+
+class TestConstantsHaveASingleOwner:
+    """初期姿勢と電磁弁の軸名を、運用と動作確認で書き写さない。
+
+    書き写すと、機構が変わったときに片方だけ直った状態が作れる。しかも
+    動作確認は「自分の写し」で走るので必ず成功し、食い違いは試合で初めて出る。
+    """
+
+    def test_メインハンドの初期姿勢は_main_hand_が持つ(self) -> None:
+        assert MAIN_HOME is main_hand.HOME
+
+    def test_電磁弁の軸名は_sub_hand_が持つ(self) -> None:
+        assert VALVE_AXES is sub_hand.VALVE_AXES
+
+    async def test_メインハンドは同じ初期姿勢へ往復する(self) -> None:
+        """往路 (move_to_home) と復路 (return_home) が別の姿勢になってはならない。
+
+        かつては同じ 6 軸の dict がリテラルで 2 回書かれており、片方だけ直せた。
+        """
+        seq = main_hand.MainHandSequence()
+        calls: list[dict[str, str]] = []
+
+        async def _record(targets, *, timeout: float | None = None) -> None:
+            calls.append(dict(targets))
+
+        seq.move_to = _record  # type: ignore[method-assign]
+        await seq.move_to_home()
+        await seq.return_home()
+
+        assert calls == [MAIN_HOME, MAIN_HOME]
+
+    def test_必要な軸は初期姿勢と電磁弁から導かれる(self) -> None:
+        """登録可否の判定材料を呼び出し側で組み直させない。"""
+        assert {*MAIN_HOME, *SUB_HOME, *VALVE_AXES} == REQUIRED_AXES

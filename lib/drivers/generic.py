@@ -6,19 +6,13 @@ from enum import IntEnum
 
 import can
 
-from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorDriver, MotorState
 
 _MODE_MAP = {
     ControlMode.POSITION: 0,
     ControlMode.VELOCITY: 1,
     ControlMode.DUTY: 2,
     ControlMode.ON_OFF: 3,
-}
-
-# 動作確認の detail に出す単位。操縦者は config に書いた値の単位しか知らない
-_DISPLAY_UNITS = {
-    ControlMode.POSITION: "deg",
-    ControlMode.VELOCITY: "rpm",
 }
 
 
@@ -258,10 +252,13 @@ class GenericDriver(MotorDriver):
         return super().update_state(msg)
 
     def matches_feedback(self, msg: can.Message) -> bool:
-        # 自分宛でないフレームの解釈失敗はここで握りつぶす。CANManager._receive_loop は
-        # 例外を捕捉しないため、ここから例外を投げると想定外のフレーム 1 通で
-        # そのバスの受信ループタスクごと死に、バス上の全モータが永久に STALE になる。
-        # 判定できないフレームを「自分宛ではない」として無視する方が明らかに安全。
+        # 自分宛でないフレームの解釈失敗はここで握りつぶす。受信ループ
+        # (CANManager._dispatch_frame) は宛先判定とデコードをモータ 1 台単位で
+        # 囲うのでバス全体は死なないが、ここから例外を投げるとそのモータ宛の
+        # フレームが 1 通落ち、鮮度も進まない (握った件数は rx_error_count に積まれる)。
+        # 判定できないフレームは「自分宛ではない」として無視する方が明らかに安全 ——
+        # can_generic は 2 台のロボットで物理共有しており、解釈できないフレームが
+        # 流れるのは構成上の正常である。
         if msg.is_extended_id:
             # 本プロトコルは Standard Frame のみ (仕様書 §1)。
             # 他プロトコルが同一バスに相乗りしても壊れないよう、ID 解析前に弾く
@@ -403,9 +400,9 @@ class GenericDriver(MotorDriver):
         基板のセンサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
         「何番のセンサか」はこのドライバのモータ名と can_id が表す。
 
-        原点合わせ用の入力で、**異常ではない**。is_fault() にも check_safety_error()
-        にも入れない。ここに入れると、センサに触れているだけでヘルスが FAULT になり
-        動作確認もシーケンスも止まる (原点合わせは「触れさせる」操作なので必ず起きる)。
+        原点合わせ用の入力で、**異常ではない**。is_fault() に入れてはならない。
+        ここに入れると、センサに触れているだけでヘルスが FAULT になり動作確認も
+        シーケンスも止まる (原点合わせは「触れさせる」操作なので必ず起きる)。
 
         基板は状態を報告するだけで、判断は PC 側が持つ (仕様書 §5.2)。
         """
@@ -421,22 +418,6 @@ class GenericDriver(MotorDriver):
         # **機体は指令どおり動いたようにしか見えない**設定ミスで、ここで FAULT に
         # しないと試合まで誰も気付けない (仕様書 §3.4 / §7.7)
         return self._unconfigured_id_flag or self.info_mismatch is not None
-
-    def check_safety_error(self) -> str | None:
-        # 駆動が拒否される状態のまま動作確認しても必ず失敗し、しかも原因が
-        # 「動かなかった」としか出ないため、先に理由を明示して打ち切る
-        if self._unconfigured_id_flag:
-            return "デバイス ID 未設定 (基板の DIP スイッチを確認)"
-        if self._e_stop_flag:
-            return "緊急停止中 (解除してから動作確認すること)"
-        if self._watchdog_flag:
-            return "コマンドウォッチドッグ作動中 (CAN 通信途絶を確認すること)"
-        # 型違いのまま動作確認すると、指令の 1.5 倍 (または 2/3) 動く。「確認できた」
-        # という記録だけが残るのが最も悪いので、動かす前に打ち切る
-        mismatch = self.info_mismatch
-        if mismatch is not None:
-            return mismatch
-        return None
 
     # ------------------------------------------------------------------ #
     #  励磁 (緊急停止ラッチの解除)
@@ -457,47 +438,3 @@ class GenericDriver(MotorDriver):
         飛び出さない。よって requires_fresh_feedback_for_activation は既定の False。
         """
         return [(self.encode_e_stop_clear(self.can_id), 0.0)]
-
-    # ------------------------------------------------------------------ #
-    #  動作確認 (Phase 6 段階⑦)
-    # ------------------------------------------------------------------ #
-
-    def check_command(self, *, magnitude: float = 0.1) -> tuple[can.Message, CheckContext]:
-        # 位置指令は絶対値なので、実際に動くはずの量は「現在位置との差」になる。
-        # reference を省くと、既に目標位置に居るモータが動かないまま合格する
-        reference = self._observed_for(self.control_type)
-        context = CheckContext(
-            mode=self.control_type,
-            target=float(magnitude),
-            reference=0.0 if reference is None else reference,
-            display_unit=_DISPLAY_UNITS.get(self.control_type, ""),
-        )
-        return self.encode_target(self.control_type, magnitude), context
-
-    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
-        if context.mode is not ControlMode.POSITION:
-            # **自作モタドラが返すのは位置だけ** (仕様書 §3.2)。速度も電流も
-            # プロトコルから外れているので、position 以外は「動いたかどうか」を
-            # 自動判定する手段が 1 つも存在しない。以前は velocity を見ており、
-            # 実機では必ず「回転検出なし」で落ちるうえ、原因が配線不良にしか
-            # 見えない失敗を出していた。
-            return False, (
-                f"{context.mode.value} 指令はフィードバックが無く自動判定できない "
-                f"({self.name} は motor_check.magnitude: 0 で除外し、"
-                "config/checklist.yaml の指差喚呼で目視確認すること)"
-            )
-
-        passed, detail = self.evaluate_tracking(context)
-
-        # 位置決めの行き過ぎ・整定中はファームの到達フラグ (§3.2) が持つ
-        if passed and self._state.reached:
-            return True, None
-        if detail is None:
-            detail = (
-                f"目標 {context.display(context.target)}, "
-                f"観測 {context.display(self._state.position)}"
-            )
-        return False, f"{detail} (reached={self._state.reached})"
-
-    def reset_after_check(self) -> can.Message:
-        return self.encode_target(self.control_type, 0.0)

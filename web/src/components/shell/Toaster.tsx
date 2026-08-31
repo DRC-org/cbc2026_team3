@@ -3,40 +3,48 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Icon } from "@/components/ui/Icon";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
+import { cx } from "@/lib/cx";
+import type { Tone } from "@/lib/tone";
+import { TONE_ALERT_CLASS } from "@/lib/tone";
 
 const REJECTION_TTL_MS = 5000;
 const HEALTH_TTL_MS = 6000;
 // 同時表示を絞らないと古い通知が画面下部を埋め、直近の異常が読めなくなる
 const MAX_TOASTS = 3;
 
-type Tone = "warning" | "danger";
+/**
+ * トーストに出るのは「要確認」と「異常」だけ。成功や情報を積むと、直近の異常が
+ * 古い通知に押し出される (同時表示は MAX_TOASTS で絞ってある)。
+ *
+ * **`lib/tone.ts` の `Tone` をローカル定義で覆い隠さない。** 以前ここは
+ * `"warning" | "danger"` を自前で名乗り、配色表も `lib/tone.ts` の外にあったため、
+ * daisyUI の対を守る検査 (`lib/daisyPairs.test.tsx`) の対象から外れていた。
+ */
+type ToastTone = Extract<Tone, "warning" | "error">;
 
 interface ToastItem {
   id: number;
-  tone: Tone;
+  tone: ToastTone;
   title: string;
   lines: string[];
   expiresAt: number;
 }
 
-/** daisyUI の alert は「alert + 色修飾子」で 1 組。片方だけだと配色ルールごと消える */
-const TONE_ALERT_CLASS: Record<Tone, string> = {
-  warning: "alert alert-warning",
-  danger: "alert alert-error",
-};
-
-const TONE_ICON = {
+const TOAST_ICON = {
   warning: TriangleAlert,
-  danger: OctagonAlert,
+  error: OctagonAlert,
 } as const;
 
 function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => void }) {
   return (
     <div
       role="alert"
-      className={`${TONE_ALERT_CLASS[toast.tone]} w-[22rem] max-w-[calc(100vw-2rem)] items-start gap-2 p-2`}
+      className={cx(
+        TONE_ALERT_CLASS[toast.tone],
+        "w-[22rem] max-w-[calc(100vw-2rem)] items-start gap-2 p-2",
+      )}
     >
-      <Icon as={TONE_ICON[toast.tone]} className="mt-[0.15em] text-[1.1em]" />
+      <Icon as={TOAST_ICON[toast.tone]} className="mt-[0.15em] text-[1.1em]" />
       <div className="min-w-0 flex-1">
         <div className="font-bold">{toast.title}</div>
         {toast.lines.map((line) => (
@@ -86,7 +94,7 @@ export function Toaster() {
     if (!rejection) return;
     push({
       id: rejection.receivedAtMs,
-      tone: "danger",
+      tone: "error",
       // サーバーが断ったのか、そもそも届いていないのかで操縦者の次の一手が変わる
       title: rejection.source === "local" ? "操作が届きませんでした" : "操作が拒否されました",
       lines: [rejection.reason, `command: ${rejection.command}`],
@@ -100,7 +108,7 @@ export function Toaster() {
     if (!latest || latest.level === "info") return;
     push({
       id: latest.receivedAtMs,
-      tone: latest.level === "critical" ? "danger" : "warning",
+      tone: latest.level === "critical" ? "error" : "warning",
       title: `${latest.level.toUpperCase()} — ${latest.robot}`,
       lines: [
         `${latest.target}: ${latest.from} → ${latest.to}`,

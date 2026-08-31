@@ -1,5 +1,13 @@
-#!/usr/bin/env python3
 """RobStride EDULITE 05 の CAN ID を走査・書き換えする。
+
+**shebang は持たない (実行属性も付けない)。** このスクリプトは python-can と
+lib.drivers.edulite05 を import するのでプロジェクトの venv でしか動かず、
+`uv run python scripts/edulite_set_id.py ...` としてしか呼ばれない。
+`#!/usr/bin/env python3` を残して chmod +x すると、`./scripts/edulite_set_id.py`
+という**必ず ImportError で落ちる呼び方**が生まれる (システム python には
+python-can が入っていない)。同じ scripts/ にある can_config.py が 0755 なのは、
+あちらが systemd から `/usr/bin/python3` で起動される — venv に依存しないことが
+設計の要件 — ためで、性質が逆である。
 
 **出荷値は 0x7F で、複数台を買うと全台が同じ ID で届く。** そのまま同一バスへ
 載せると全台が同じ ID で応答し、`CANManager._dispatch_frame` は最初にマッチした

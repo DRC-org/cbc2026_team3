@@ -36,8 +36,14 @@ _M3508_COUNTS_PER_REV = 8192
 
 
 def m3508_counts_for_deg(deg: float) -> int:
-    """出力角 [deg] を M3508 フィードバックの生カウントへ換算する。"""
-    return round(deg / 360.0 * _M3508_COUNTS_PER_REV)
+    """出力角 [deg] を M3508 フィードバックの生カウント (0〜8191) へ換算する。
+
+    **1 回転で折り返す。** C620 が載せるのは単回転角なので、負の角や 360deg を
+    超える角に対しても実機は必ずこの範囲の値を返す。折り返さずに素の値を流すと、
+    ``-10deg`` が生カウント ``-228`` として 8192 カウント上の別の位置に化け、
+    多回転アンラップ (``update_state``) が実機では起こり得ない差分を見ることになる。
+    """
+    return round(deg / 360.0 * _M3508_COUNTS_PER_REV) % _M3508_COUNTS_PER_REV
 
 
 def m3508_feedback(

@@ -82,6 +82,13 @@ constexpr bool pinsAreUnique() {
 
 static_assert(pinsAreUnique(), "config.h のピンが重複している（CAN / UART / LED / DIP 含む）");
 
+// **上の kAllPins[] と下の g_channel[] は各チャンネルを明示的に初期化している。**
+// チャンネル数だけ増やすと、ch6 / ch7 のピンが衝突検査から静かに漏れ（重複した
+// ピンを 2 つの弁に割り当ててもビルドが通る）、g_channel[] の初期化子も足りなくなる。
+// DC 用 main.cpp とサーボ用 main.cpp には同じ番人が居るので、ここだけ無いと
+// 「3 枚のうち 1 枚だけ検査が抜けている」状態になる。
+static_assert(kSolenoidChannelCount == 6,
+              "チャンネル数を変えたら kAllPins / g_channel の初期化子も更新すること");
 static_assert(kSolenoidChannelCount <= motorcan::kMaxSlotNumber + 1,
               "チャンネル数がデバイス ID のスロット幅（3bit）を超えている");
 static_assert(kSolenoidChannelCount <= motorcan::kMaxChannels,
@@ -128,7 +135,7 @@ bool g_canFailed = false;
 bool g_ledOn = false;
 
 #if ENABLE_SERIAL_DEBUG
-char g_serialStorage[24];
+char g_serialStorage[kSerialLineCapacity];
 SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 bool g_serialOverride = false;
 #endif
@@ -167,17 +174,15 @@ void applyAllOutputs(uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
+// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
+// **ここで OR を足してはならない。** 到達フラグを立てないこと（仕様書 §9.3: 弁が
+// 開いたかを観測する手段が 1 つも無い）は board == Solenoid から導かれるので、
+// この呼び出しが規則の全てになる。以前はここで組み立てていて、HAL の翻訳単位に
+// あるせいで `flags |= kReached;` を足しても native テストが 1 件も落ちなかった。
 uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
-    // 緊急停止ラッチ / ウォッチドッグのビットの判定は MotorSafety に集約されている。
-    // ここで手で組み立て直すと、他の 2 枚と同じ条件で立つ保証が無くなる。
-    uint8_t flags = g_channel[ch].safetyStatusFlags(nowMs);
-    if (!isChannelConfigured(ch)) {
-        flags |= status_flag::kDeviceIdUnconfigured;
-    }
-    // **到達フラグは立てない**（仕様書 §9.3）。弁が実際に開いたかを観測する手段が
-    // 1 つも無いので、「指令したから到達した」と報告するのは実測でも推定でもない嘘になる。
-    // 断線したソレノイドも抜けたコネクタも「到達」と報告されてしまう。
-    return flags;
+    return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
+                                g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
+                                /*reached=*/false, /*sensorActive=*/false);
 }
 
 // 送信は空きメールボックスが無ければ諦める。**待ってはならない** — 詰まった
@@ -220,14 +225,14 @@ void sendInfo(uint8_t ch) {
 }
 
 void applyParam(uint8_t ch, const SetParamCommand &cmd) {
+    // command_timeout_ms / feedback_interval_ms は 3 枚に共通なので MotorCan が持つ。
+    if (applyCommonParam(cmd, g_channel[ch], g_feedbackIntervalMs)) {
+        return;
+    }
     switch (cmd.id) {
         case ParamId::CommandTimeoutMs:
-            // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が SET_PARAM
-            // 1 フレームで実質外れる。範囲の根拠は MotorCanProtocol が持つ。
-            g_channel[ch].setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
-            break;
         case ParamId::FeedbackIntervalMs:
-            g_feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
+            // applyCommonParam が処理済み。ここへは来ない。
             break;
         case ParamId::MaxDuty:
         case ParamId::ReachedTolerance:
@@ -326,15 +331,26 @@ void pollCan() {
     }
 }
 
-// **PC → モタドラ方向のフレームだけを通す**（コマンド種別 0-2）。
+// **PC → モタドラ方向のフレームだけを通す**（E_STOP / SET_TARGET / SET_PARAM）。
 //
 // 全通過にすると、共有バス上の FEEDBACK（自作モタドラ 14 台 × 100Hz）まで受信
 // FIFO（深さ 3）へ流れ込み、loop() が一瞬でも伸びた隙に取りこぼす。落ちるのが
 // E_STOP や SET_TARGET だと、症状は「たまに指令が効かない」という最も追いにくい形になる。
 //
-// Standard ID は上位 3bit がコマンド種別（仕様書 §2.1）。1 本のマスクでは 0/1/2 の
-// 3 値を表せないので、0x000-0x1FF と 0x200-0x2FF の 2 バンクに分ける。
-// bxCAN の 32bit スケールでは STID が FilterIdHigh の bit15..5 に載る。
+// **どの ID を通すかは CommandType から導く**（`kEStopAndSetTargetFilter` /
+// `kSetParamFilter`）。以前はここに `0x000` / `0x600` / `0x200` / `0x700` という
+// リテラルが並び、CommandType への参照が 1 つも無かった —— この enum は実際に
+// 一度動いているので（かつて E_STOP は 0b111）、次に動かすと**電磁弁だけが
+// 緊急停止を落とし始める**（DC 用とサーボ用は parseCanId 経由で自動追従する）。
+//
+// **1 本のマスクでは 3 値を表せない**ので 2 バンクに分ける。ここに残っているのは
+// bxCAN 固有の事情だけ —— 32bit スケールでは STID が FilterIdHigh の bit15..5 に載る。
+constexpr uint16_t kStdIdShiftInFilterReg = 5;
+
+constexpr uint16_t toFilterReg(uint16_t stdId) {
+    return static_cast<uint16_t>(stdId << kStdIdShiftInFilterReg);
+}
+
 bool configureCanFilters() {
     CAN_FilterTypeDef filter{};
     filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -343,20 +359,18 @@ bool configureCanFilters() {
     filter.FilterActivation = CAN_FILTER_ENABLE;
     filter.SlaveStartFilterBank = 14;
 
-    // E_STOP(0b000) と SET_TARGET(0b001): 上位 2bit が 00
     filter.FilterBank = 0;
-    filter.FilterIdHigh = static_cast<uint16_t>(0x000 << 5);
+    filter.FilterIdHigh = toFilterReg(kEStopAndSetTargetFilter.id);
     filter.FilterIdLow = 0;
-    filter.FilterMaskIdHigh = static_cast<uint16_t>(0x600 << 5);
+    filter.FilterMaskIdHigh = toFilterReg(kEStopAndSetTargetFilter.mask);
     filter.FilterMaskIdLow = 0;
     if (HAL_CAN_ConfigFilter(&hcan, &filter) != HAL_OK) {
         return false;
     }
 
-    // SET_PARAM(0b010): 上位 3bit が 010
     filter.FilterBank = 1;
-    filter.FilterIdHigh = static_cast<uint16_t>(0x200 << 5);
-    filter.FilterMaskIdHigh = static_cast<uint16_t>(0x700 << 5);
+    filter.FilterIdHigh = toFilterReg(kSetParamFilter.id);
+    filter.FilterMaskIdHigh = toFilterReg(kSetParamFilter.mask);
     return HAL_CAN_ConfigFilter(&hcan, &filter) == HAL_OK;
 }
 
@@ -367,7 +381,11 @@ bool configureCanFilters() {
 // DIP の添字を readDipSwitch へ渡し、読み出しはラムダが (port, pin) へ引き直す。
 // 負論理とビット順の対応、はみ出しの扱いは MotorCanRouter / makeDeviceId が持つ
 // （native テストで守られている）。
+//
+// **添字を並べた表なので、kDipBitCount を増やしたらここも足すこと。**
+// 足し忘れると読まないビットが出て、DIP を回しても基板番号が変わらなくなる。
 const uint8_t kDipIndices[kDipBitCount] = {0, 1, 2, 3};
+static_assert(kDipBitCount == 4, "kDipBitCount を変えたら kDipIndices も更新すること");
 
 void resolveDeviceIds() {
     const uint8_t boardNumber = readDipSwitch(
@@ -377,9 +395,8 @@ void resolveDeviceIds() {
         },
         kDipActiveLevel);
 
-    for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-        g_deviceId[ch] = makeDeviceId(kBoardKind, boardNumber, ch);
-    }
+    motorcan::resolveDeviceIds(g_deviceId, kSolenoidChannelCount, kBoardKind, boardNumber,
+                               nullptr);
 }
 
 // ===========================================================================
@@ -388,27 +405,19 @@ void resolveDeviceIds() {
 
 void updateLed(uint32_t nowMs) {
 #if HAS_STATUS_LED
-    bool unconfigured = false;
-    bool stopped = false;
+    BoardIndication indication(g_canFailed);
     for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-        if (!isChannelConfigured(ch)) {
-            unconfigured = true;
-        }
-        if ((g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0) {
-            stopped = true;
-        }
+        indication.observe(isChannelConfigured(ch),
+                           (g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
     }
 
-    // LED は 1 本しかないので、色ではなく点滅の速さが状態を伝える唯一の手段になる。
+    // **LED は 1 本しかないので、点滅の速さが状態を伝える唯一の手段になる。**
+    // 他の 2 枚と違って緊急停止に専用の速さを割り当てるのはそのため。
     //   速い（200ms）  … CAN 不通 / デバイス ID 未設定。今すぐ直さないと使えない
     //   中間（500ms）  … 緊急停止ラッチ中。直す対象ではないが動かない
     //   遅い（1000ms） … 平常のハートビート
-    uint32_t interval = kHeartbeatIntervalMs;
-    if (g_canFailed || unconfigured) {
-        interval = kUnconfiguredBlinkIntervalMs;
-    } else if (stopped) {
-        interval = kEStopBlinkIntervalMs;
-    }
+    const uint32_t interval = blinkIntervalFor(indication, kUnconfiguredBlinkIntervalMs,
+                                               kEStopBlinkIntervalMs, kHeartbeatIntervalMs);
 
     if (!g_blinkTimer.due(nowMs, interval)) {
         return;
@@ -445,23 +454,17 @@ void pollSerial(uint32_t nowMs) {
         if (!g_serialLine.push(c)) {
             continue;
         }
-        const char *line = g_serialLine.line();
-
-        if (line[0] == 's' || line[0] == 'S') {
+        // 行の骨格の解釈（'s' / '<番号> <値>'）は parseSerialCommand が持つ。
+        // 値の読み取りだけを基板ごとに行う（電磁弁は 0/1 の整数）。
+        const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kSolenoidChannelCount);
+        if (cmd.kind == SerialCommand::Kind::StopAll) {
             g_serialOverride = false;
             for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
                 g_channel[ch].hold();
             }
-        } else {
-            // チャンネル番号と状態が空白で区切られていない行は捨てる。
-            // 番号を読み違えると別の弁が開くので、曖昧な入力は指令にしない。
-            char *sep = nullptr;
-            const long ch = strtol(line, &sep, 10);
-            if (sep != line && *sep == ' ' && ch >= 0 &&
-                ch < static_cast<long>(kSolenoidChannelCount)) {
-                g_channel[ch].setOn(strtol(sep + 1, nullptr, 10) != 0, nowMs);
-                g_serialOverride = true;
-            }
+        } else if (cmd.kind == SerialCommand::Kind::Channel) {
+            g_channel[cmd.channel].setOn(strtol(cmd.value, nullptr, 10) != 0, nowMs);
+            g_serialOverride = true;
         }
     }
 
@@ -501,12 +504,9 @@ extern "C" void setup() {
     const uint32_t startMs = HAL_GetTick();
 
     for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-        // 全チャンネルが同じ周期で同時に送ると 6 フレームのバーストになり、他バスの
-        // 周期送信と重なったときに調停待ちが伸びて FEEDBACK の間隔が波打つ。
-        // 周期を等分した位相をチャンネルごとにずらして平準化する。
+        // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
         // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送る。
-        g_feedbackTimer[ch].setLastMs(startMs - g_feedbackIntervalMs +
-                                      (g_feedbackIntervalMs * ch) / kSolenoidChannelCount);
+        g_feedbackTimer[ch].stagger(startMs, g_feedbackIntervalMs, ch, kSolenoidChannelCount);
     }
 
     // 仕様書 §1: 1 Mbps（ビットタイミングは solenoid.ioc が持つ）。

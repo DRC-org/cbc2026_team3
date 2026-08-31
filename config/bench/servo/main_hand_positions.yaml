@@ -89,11 +89,12 @@ positions:
   # **基板は電源投入時にこの角度へ駆動する**ので、initial を送ったときの動きが
   # 起動直後の動きと一致していることを確認できる (瞬断時に機構がどう飛ぶかが分かる)。
   #
-  # small は config/bench/servo/main_hand.yaml の motor_check.magnitude と一致させること。
+  # 動作確認 (robots/motor_check.py) も運用と同じ位置名へ動かすので、確認専用の
+  # 駆動量は無い (かつての motor_check.magnitude は config ごと消えている)。
   # full はファームのクランプ端と同値で、これ以上は指令しても動かない。
   servo_sv0:
     initial: 0.0         # 起動時の角度 [deg]。基板が setup() で駆動する位置
-    small: 5.0           # まず動いたことの確認 (= main_hand.yaml の motor_check.magnitude)
+    small: 5.0           # まず動いたことの確認
     mid: 15.0            # 中間
     full: 30.0           # ファームの kProvisionalLimits の上端。これ以上は出ない
 

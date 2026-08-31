@@ -14,11 +14,10 @@ from lib.config_schema import DEFAULT_HEALTH
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, HealthSnapshot, MotorHealth
-from tests.fake_can import deliver_frame, mark_bus_off, mark_feedback_at
+from tests.fake_can import deliver_frame, direct_runner, mark_bus_off, mark_feedback_at
 from tests.fake_clock import FakeClock
 from tests.fake_drivers import HealthFlagDriver
 from tests.feedback_frames import generic_feedback, generic_info, m3508_feedback
-from tests.test_can_manager import _direct_runner
 
 
 def _make_virtual_bus(channel: str) -> can.Bus:
@@ -27,20 +26,25 @@ def _make_virtual_bus(channel: str) -> can.Bus:
 
 @pytest.fixture
 def mgr_with_motors():
-    """共通 fixture: 1 バス + 1 モータの CANManager を返す。"""
-    mgr = CANManager(run_blocking=_direct_runner())
+    """共通 fixture: 1 バス + 1 モータの CANManager を返す。
+
+    bus も一緒に返すのは、受信ループを直接回すテストが ``mgr._buses`` から
+    取り直さずに済ませるため。組み立てた本人が持っているものを、内部辞書を
+    経由して取り直す理由は無い。
+    """
+    mgr = CANManager(run_blocking=direct_runner())
     bus = _make_virtual_bus("vhealth0")
     motor = HealthFlagDriver("m1", 1)
     mgr.add_bus("bus0", bus, channel="vhealth0")
     mgr.add_motor("bus0", motor)
-    yield mgr, motor
+    yield mgr, motor, bus
     bus.shutdown()
 
 
 class TestCANManagerHealth:
     def test_initial_snapshot_all_stale(self, mgr_with_motors) -> None:
         # 受信ゼロの初期状態では全モータ STALE、バスは OK のはず
-        mgr, _ = mgr_with_motors
+        mgr, _, _ = mgr_with_motors
         snap = mgr.health()
         assert isinstance(snap, HealthSnapshot)
         assert len(snap.buses) == 1
@@ -51,7 +55,7 @@ class TestCANManagerHealth:
 
     def test_health_snapshot_structure(self, mgr_with_motors) -> None:
         # WS 配信で使う dataclass の基本フィールドが揃っていることを担保
-        mgr, _ = mgr_with_motors
+        mgr, _, _ = mgr_with_motors
         snap = mgr.health()
         assert isinstance(snap.timestamp, float)
         assert isinstance(snap.overall, BusHealth)
@@ -64,7 +68,7 @@ class TestCANManagerHealth:
 
     async def test_receive_records_last_rx_and_marks_ok(self, mgr_with_motors) -> None:
         # 受信ループがフィードバック鮮度を進め、十分新しければ OK 判定
-        mgr, motor = mgr_with_motors
+        mgr, motor, bus = mgr_with_motors
         feedback_msg = can.Message(arbitration_id=0x200 + motor.can_id, data=bytes(8))
 
         call_count = 0
@@ -76,7 +80,6 @@ class TestCANManagerHealth:
                 return feedback_msg
             raise asyncio.CancelledError
 
-        bus = mgr._buses["bus0"]
         with (
             patch.object(bus, "recv", side_effect=recv_side_effect),
             pytest.raises(asyncio.CancelledError),
@@ -91,14 +94,14 @@ class TestCANManagerHealth:
 
     def test_feedback_timeout_transitions_to_stale(self, mgr_with_motors) -> None:
         # last_rx_at が timeout を超えていると STALE
-        mgr, motor = mgr_with_motors
+        mgr, motor, _ = mgr_with_motors
         mark_feedback_at(mgr, motor.name, time.time() - 1.0)
         snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=100.0))
         assert snap.motors[0].state is MotorHealth.STALE
 
     def test_thermal_warning(self, mgr_with_motors) -> None:
         # 受信は新鮮 + 温度 WARNING フラグ → MotorHealth.WARNING
-        mgr, motor = mgr_with_motors
+        mgr, motor, _ = mgr_with_motors
         deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.thermal_warning = True
         snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
@@ -108,7 +111,7 @@ class TestCANManagerHealth:
 
     def test_thermal_fault(self, mgr_with_motors) -> None:
         # 温度 FAULT フラグは STALE/WARNING より優先される
-        mgr, motor = mgr_with_motors
+        mgr, motor, _ = mgr_with_motors
         deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.thermal_fault = True
         snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
@@ -116,7 +119,7 @@ class TestCANManagerHealth:
         assert snap.overall is BusHealth.DOWN
 
     def test_overcurrent_warning(self, mgr_with_motors) -> None:
-        mgr, motor = mgr_with_motors
+        mgr, motor, _ = mgr_with_motors
         deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.overcurrent = True
         snap = mgr.health(thresholds=replace(DEFAULT_HEALTH, feedback_timeout_ms=500.0))
@@ -124,7 +127,7 @@ class TestCANManagerHealth:
 
     def test_is_fault_takes_priority(self, mgr_with_motors) -> None:
         # is_fault() True は最優先で FAULT
-        mgr, motor = mgr_with_motors
+        mgr, motor, _ = mgr_with_motors
         deliver_frame(mgr, "bus0", motor.feedback_message())
         motor.fault = True
         motor.thermal_warning = True  # 同時に warning でも FAULT 維持
@@ -162,7 +165,7 @@ class TestCANManagerHealth:
         ERROR-ACTIVE・bus-off 0 回・送受信ともエラー 0) も UI が異常を出し続けた。
         操縦者には「直したのに直らない」としか見えず、本物の異常と区別が付かない。
         """
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = MagicMock()
         mgr.add_bus("bus0", bus)
         mgr.add_motor("bus0", HealthFlagDriver("m1", 1))
@@ -191,7 +194,7 @@ class TestCANManagerHealth:
         配ると、エラー種別のビット列がそのまま arbitration_id として宛先判定に
         掛かる (DM3520 の MST_ID 0x11 は CAN_ERR_TRX|CAN_ERR_TX_TIMEOUT と同値)。
         """
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = MagicMock()
         motor = HealthFlagDriver("m1", 1)
         mgr.add_bus("bus0", bus)
@@ -219,7 +222,7 @@ class TestCANManagerHealth:
         `restart-ms` が 0 のインタフェースは復帰通知 (CAN_ERR_RESTARTED) を送らない。
         実通信を根拠に外す経路が無いと、一度立った DOWN が永久に残る。
         """
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = MagicMock()
         mgr.add_bus("bus0", bus)
         mgr.add_motor("bus0", HealthFlagDriver("m1", 1))
@@ -230,7 +233,7 @@ class TestCANManagerHealth:
         assert mgr.health().buses[0].bus_off is False
 
     def test_bus_off_marks_down(self, mgr_with_motors) -> None:
-        mgr, _ = mgr_with_motors
+        mgr, _, _ = mgr_with_motors
         mark_bus_off(mgr, "bus0")
         snap = mgr.health()
         assert snap.buses[0].state is BusHealth.DOWN
@@ -239,7 +242,7 @@ class TestCANManagerHealth:
 
     async def test_send_success_records_last_tx_at(self) -> None:
         # 送信成功時は _last_tx_at が更新され、tx_error_count は据え置き
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = MagicMock()
         motor = HealthFlagDriver("m1", 1)
         mgr.add_bus("bus0", bus)
@@ -257,7 +260,7 @@ class TestCANManagerHealth:
 
         ヘルス配信が「全部 OK」と言い続けるなら、握り潰しはバグの隠蔽と同じになる。
         """
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = MagicMock()
         motor = HealthFlagDriver("m1", 1)
         motor.decode_feedback = MagicMock(  # type: ignore[method-assign]
@@ -302,7 +305,7 @@ class TestInfoDoesNotRefreshFeedbackAge:
 
     @pytest.fixture
     def mgr_with_servo(self):
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = _make_virtual_bus("vinfo0")
         motor = GenericDriver("gripper", 0x40, expected_angle_range_deg=270.0)
         mgr.add_bus("bus0", bus, channel="vinfo0")
@@ -348,7 +351,7 @@ class TestReanchorSurfacesInHealth:
 
     def test_再アンカーしたモータは詳細付きのWARNINGになる(self) -> None:
         clock = FakeClock()
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = _make_virtual_bus("vhealth_reanchor")
         motor = M3508Driver("y_axis_r", 1, time_source=clock)
         mgr.add_bus("bus0", bus, channel="vhealth_reanchor")
@@ -369,7 +372,7 @@ class TestReanchorSurfacesInHealth:
     def test_平常時は詳細もWARNINGも出さない(self) -> None:
         """静かであることも同じだけ重要。常に出る警告は読まれなくなる。"""
         clock = FakeClock()
-        mgr = CANManager(run_blocking=_direct_runner())
+        mgr = CANManager(run_blocking=direct_runner())
         bus = _make_virtual_bus("vhealth_quiet")
         motor = M3508Driver("y_axis_r", 1, time_source=clock)
         mgr.add_bus("bus0", bus, channel="vhealth_quiet")

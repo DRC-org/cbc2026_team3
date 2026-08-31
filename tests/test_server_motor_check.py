@@ -14,8 +14,6 @@
 from __future__ import annotations
 
 import asyncio
-import struct
-import time
 
 import can
 from aiohttp.test_utils import TestClient, TestServer
@@ -26,15 +24,11 @@ from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
-from tests.fake_can import mark_feedback_at, mock_can_manager
-from tests.server_fixtures import ServerFixture
-
-_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="ready", label="準備確認")]}
-
+from tests.fake_can import mock_can_manager
+from tests.server_fixtures import RecordingClient, ServerFixture
 
 # ---------------------------------------------------------------------- #
 #  テスト用ダミー実装
@@ -115,19 +109,11 @@ class _LoopProbe:
 
         mgr.send_to_bus = _counting  # type: ignore[method-assign]
 
-        self.mgr = mgr
-        self.motor_name = motor_name
         self.driver = M3508Driver(motor_name, can_id=4)
         self.loop = M3508PositionLoop(
             mgr, bus, is_estop_active=lambda: False, time_source=_AutoClock()
         )
         self.loop.add_motor(motor_name, self.driver, make_position_pid(kp=1.0))
-
-    def feed(self, deg: float = 0.0) -> None:
-        angle_raw = round(deg / 360.0 * 8192) % 8192
-        data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-        self.driver.update_state(can.Message(arbitration_id=0x200 + self.driver.can_id, data=data))
-        mark_feedback_at(self.mgr, self.motor_name, time.time())
 
 
 def _manual_controller() -> ManualController:
@@ -152,7 +138,7 @@ def _build(
     manual: bool = False,
 ) -> tuple[ServerFixture, _CheckSequence]:
     """サーバー + 登録済みロボット + 統合動作確認シーケンス。"""
-    fx = ServerFixture.build(checklist_definitions=_CHECKLIST)
+    fx = ServerFixture.build()
     fx.freeze_broadcast()
     for name in robots:
         seq = (sequences or {}).get(name) or _IdleSequence(name)
@@ -174,7 +160,7 @@ class TestStartGate:
 
         理由を出さずに黙って何も起きないと、操縦者は押し直し続けることになる。
         """
-        fx = ServerFixture.build(checklist_definitions=_CHECKLIST)
+        fx = ServerFixture.build()
         fx.add_robot("main_hand", _IdleSequence("main_hand"))
 
         assert await fx.start_motor_check() is False
@@ -501,7 +487,7 @@ class TestBroadcast:
     async def test_変化が無ければ配信しない(self) -> None:
         """停止中は何も変わらない。毎ティック流すと UI 側の再描画抑制が効かなくなる。"""
         fx, _ = _build()
-        client = _RecordingClient()
+        client = RecordingClient()
         fx.attach_clients(client)
 
         await fx.publish_motor_check_state()
@@ -510,20 +496,6 @@ class TestBroadcast:
 
         await fx.publish_motor_check_state()
         assert len(client.sent) == first
-
-
-class _RecordingClient:
-    """送信された JSON を記録するだけの WS クライアント代役。"""
-
-    def __init__(self) -> None:
-        self.sent: list[str] = []
-        self.closed = False
-
-    async def send_str(self, data: str) -> None:
-        self.sent.append(data)
-
-    async def close(self) -> None:
-        self.closed = True
 
 
 # ---------------------------------------------------------------------- #

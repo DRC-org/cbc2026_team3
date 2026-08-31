@@ -242,7 +242,6 @@ class TestSendStopFrame:
         await fx.loop.send_stop_frame()
 
         assert fx.loop.target("lift") is None
-        assert fx.loop.mode("lift") is None
 
     async def test_send_failure_propagates(self) -> None:
         """送信できなかったことは呼び出し側 (サーバー) が知る必要がある。"""
@@ -485,7 +484,6 @@ class TestPauseForMotorCheck:
 
         # 保持目標を失うと復帰時に昇降軸が落ちるため、目標そのものは残す
         assert fx.loop.target("lift") == 10.0
-        assert fx.loop.mode("lift") is ControlMode.POSITION
 
     async def test_resume_clears_pid_integral(self) -> None:
         fx = _Fixture(kp=0.0, ki=10.0)
@@ -1109,10 +1107,10 @@ class TestSaturationReadout:
         await fx.tick()
 
         assert fx.loop.is_saturated("lift") is False
-        assert fx.loop.last_output("lift") == pytest.approx(0.0)
+        assert fx.manager.last_currents[0] == 0
 
-    async def test_last_output_is_the_pid_command(self) -> None:
+    async def test_output_is_the_pid_command(self) -> None:
         fx = _Fixture(kp=100.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
         await fx.tick()
-        assert fx.loop.last_output("lift") == pytest.approx(1000.0)
+        assert fx.manager.last_currents[0] == 1000

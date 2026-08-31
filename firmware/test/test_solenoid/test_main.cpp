@@ -55,7 +55,11 @@ static void test_broadcast_slot_falls_back_to_unconfigured() {
 }
 
 // 基板種別が 3 つに増えても、基板番号とスロットがどう組み合わさっても衝突しない。
-// 予約されている 0x00 / 0xFF にも決して着地しない。
+// 予約されている 0x00（未設定）/ 0xFF（ブロードキャスト）にも決して着地しない。
+//
+// かつては test_board 側にサーボ + DC だけを見る同名の検査があり、電磁弁が
+// 抜けている一方で 0x00 への非着地はこちらに無い、という食い違った 2 本になっていた。
+// 3 枚ぶんと予約 ID の両方をここで見る。
 static void test_device_ids_never_collide_across_three_boards() {
     for (uint8_t board = 0; board <= kMaxBoardNumber; ++board) {
         for (uint8_t slot = 0; slot <= kMaxSlotNumber; ++slot) {
@@ -70,6 +74,18 @@ static void test_device_ids_never_collide_across_three_boards() {
             TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, servo);
             TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, dc);
             TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, solenoid);
+
+            // 0x00 は「DIP 設定忘れ」の印なので、正規の組み合わせが着地してはならない。
+            // 着地すると駆動を拒否されたスロットが黙って生まれる（仕様書 §2.2）。
+            //
+            // **唯一の例外は電磁弁の「基板番号 7 × スロット 7」。** そこだけは 0xFF
+            // （ブロードキャスト）と重なるので意図的に未設定へ倒している
+            // （test_broadcast_slot_falls_back_to_unconfigured が単独で押さえる）。
+            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, servo);
+            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, dc);
+            if (board != kMaxBoardNumber || slot != kMaxSlotNumber) {
+                TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, solenoid);
+            }
         }
     }
 }
@@ -78,16 +94,9 @@ static void test_device_ids_never_collide_across_three_boards() {
 // §3.1 / §9.2 on_off の復号
 // --------------------------------------------------------------------------
 
-// 制御タイプ 3 を復号層が知らないと、SET_TARGET が丸ごと捨てられて弁が一度も動かない
-// （PC 側からは「指令したのに反応しない基板」にしか見えない）。
-static void test_decode_set_target_accepts_on_off() {
-    const uint8_t frame[3] = {static_cast<uint8_t>(ControlType::OnOff), 0x01, 0x00};
-    const SetTargetCommand cmd = decodeSetTarget(frame, sizeof(frame));
-
-    TEST_ASSERT_TRUE(cmd.valid);
-    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ControlType::OnOff), static_cast<uint8_t>(cmd.type));
-    TEST_ASSERT_EQUAL_INT16(1, cmd.raw);
-}
+// 制御タイプ 3 そのものの復号は test_protocol の
+// test_decode_set_target_accepts_on_off が持つ（同じ MotorCanProtocol を直接叩くので
+// 層が違わない）。ここは電磁弁固有の扱い —— スケールが掛からないこと —— だけを見る。
 
 // **on_off の目標値に固定小数点のスケールは掛からない**（仕様書 §4 の表）。
 // kDutyScale を掛けると 1 が 10000 になり、0 との区別しか使わないこの基板では
@@ -315,7 +324,6 @@ int main() {
     RUN_TEST(test_solenoid_device_id_is_a_fixed_bit_split);
     RUN_TEST(test_broadcast_slot_falls_back_to_unconfigured);
     RUN_TEST(test_device_ids_never_collide_across_three_boards);
-    RUN_TEST(test_decode_set_target_accepts_on_off);
     RUN_TEST(test_on_off_target_is_zero_or_not_zero);
     RUN_TEST(test_decode_set_target_rejects_reserved_control_type);
     RUN_TEST(test_encode_info_reports_solenoid_board);

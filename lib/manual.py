@@ -84,16 +84,8 @@ class ManualController:
     #  参照
     # ------------------------------------------------------------------ #
 
-    @property
-    def court(self) -> Court:
-        return self._court
-
     def set_court(self, court: Court) -> None:
         self._court = court
-
-    @property
-    def axis_names(self) -> tuple[str, ...]:
-        return self._positions.axes
 
     # ------------------------------------------------------------------ #
     #  指令
@@ -190,8 +182,12 @@ class ManualController:
 
         停止中に機構が自重で下がっていると、解除後 1 回目のジョグが古い起点から
         飛ぶ。次のジョグでフィードバックから取り直させる。
+
+        捨てる対象はモード切替と同じ (ジョグの起点だけ) なので ``reset`` を呼ぶ。
+        メソッドを 2 つ残すのは、呼ばれる文脈が別々に意味を持つため —— 片方の
+        扱いを変えたくなったときに、もう片方を巻き込まずに済む。
         """
-        self._targets.clear()
+        self.reset()
 
     # ------------------------------------------------------------------ #
     #  内部

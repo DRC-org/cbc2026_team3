@@ -17,6 +17,7 @@ import logging
 import pathlib
 import struct
 import time
+import types
 from typing import ClassVar
 
 import can
@@ -54,6 +55,7 @@ from main import (
     _load_pid_config,
     _wire_robot_motors,
 )
+from tests.feedback_frames import feed_m3508
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -79,13 +81,6 @@ class _StubCANManager:
     def last_currents(self) -> tuple[int, int, int, int]:
         assert self.sent, "CAN フレームが 1 つも送信されていない"
         return struct.unpack(">hhhh", self.sent[-1][1].data)
-
-
-def _feed(driver: M3508Driver, deg: float) -> None:
-    """M3508 のフィードバックフレームを 1 通流し込む。"""
-    angle_raw = round(deg / 360.0 * 8192) % 8192
-    data = struct.pack(">HhhBB", angle_raw, 0, 0, 25, 0)
-    driver.update_state(can.Message(arbitration_id=0x200 + driver.can_id, data=data))
 
 
 class _DummySequence(Sequence):
@@ -305,7 +300,7 @@ class TestBuildPositionLoops:
         config = _m3508_config()
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
-        _feed(driver, 0.0)
+        feed_m3508(driver, deg=0.0)
         # 0.3 秒前のフィードバックを最後の受信とする
         manager.feedback_at["lift_motor"] = time.time() - 0.3
 
@@ -343,7 +338,7 @@ class TestBuildPositionLoops:
         }
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
-        _feed(driver, 0.0)
+        feed_m3508(driver, deg=0.0)
         manager.feedback_at["lift_motor"] = time.time()
         captures: list[object] = []
 
@@ -377,7 +372,7 @@ class TestBuildPositionLoops:
         }
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
-        _feed(driver, 0.0)
+        feed_m3508(driver, deg=0.0)
         manager.feedback_at["lift_motor"] = time.time()
         captures: list[object] = []
 
@@ -434,7 +429,6 @@ class TestWireRobotMotors:
         await seq.motors.lift_motor.set_target(ControlMode.POSITION, 42.0)
 
         assert loops[0].target("lift_motor") == 42.0
-        assert loops[0].mode("lift_motor") is ControlMode.POSITION
         assert manager.sent_by_motor == []
 
     async def test_non_m3508_still_sends_directly(self) -> None:
@@ -1118,3 +1112,54 @@ class TestLoadAllConfigs:
 
         assert loaded == []
         assert any("absent.yaml" in record.getMessage() for record in caplog.records)
+
+
+class TestSequenceClassSelection:
+    """robots/<name>.py から登録するシーケンスの決め方。
+
+    かつては ``dir()`` の並び (アルファベット順) の先頭を採っていたため、
+    モジュールが他機体のシーケンスを import しただけで乗っ取られえた
+    (``"MotorCheckSequence" < "SubHandSequence"``)。症状は「sub_hand の
+    sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
+    理由が読めない。
+    """
+
+    def _module(self, source: str) -> types.ModuleType:
+        module = types.ModuleType("fakerobots.r1")
+        exec(compile(source, "<fakerobots.r1>", "exec"), module.__dict__)
+        return module
+
+    _PREAMBLE = "from lib.sequence.engine import Sequence\n"
+
+    def test_単一のサブクラスをそのまま返す(self) -> None:
+        module = self._module(self._PREAMBLE + "class OnlyOne(Sequence):\n    pass\n")
+
+        assert main._sequence_class_defined_in(module).__name__ == "OnlyOne"
+
+    def test_複数定義されていたら起動を拒否する(self) -> None:
+        """どちらを登録すべきかは構成からしか決まらない。黙って片方を選ばない。"""
+        module = self._module(
+            self._PREAMBLE
+            + "class AaaFirst(Sequence):\n    pass\n"
+            + "class ZzzSecond(Sequence):\n    pass\n"
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            main._sequence_class_defined_in(module)
+
+        message = str(exc.value)
+        assert "AaaFirst" in message
+        assert "ZzzSecond" in message
+
+    def test_import_しただけのシーケンスは候補にならない(self) -> None:
+        """名前順で先頭に来る import 済みクラスに乗っ取られないこと。"""
+        module = self._module(
+            self._PREAMBLE
+            + "from robots.motor_check import MotorCheckSequence\n"
+            + "class ZzzOwn(Sequence):\n    pass\n"
+        )
+
+        assert main._sequence_class_defined_in(module).__name__ == "ZzzOwn"
+
+    def test_サブクラスが無ければ_None(self) -> None:
+        assert main._sequence_class_defined_in(self._module("x = 1\n")) is None

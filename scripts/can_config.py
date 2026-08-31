@@ -26,6 +26,14 @@ _IFNAME_MAX = 15
 
 _SERVICE_NAME = "cbc-can.service"
 
+# install.sh が配置し、setup_can.sh が同期を確認する udev ルールの置き場所。
+# **この 2 本が別々に文字列を持ってはならない。** かつては両方に書いてあり、
+# setup_can.sh 側は「install.sh の UDEV_RULE_PATH と一致させること」とコメントで
+# 運用を要求していた。ずれると setup_can.sh は存在しないファイルを見て「未配置」と
+# 警告し続け、strict では試合前点検が必ず落ちる (install.sh は正しく配置しているのに)。
+# ルール本体と service 名の生成元がここなので、パスもここが持つ。
+_UDEV_RULE_PATH = "/etc/udev/rules.d/99-canable.rules"
+
 # bus-off からの自動復帰までの待ち時間 [ms]。**0 (カーネル既定) にしてはならない。**
 # 0 は「自動復帰しない」の意味で、一度 bus-off に落ちたインタフェースは
 # 手動で down/up するまで送受信とも死んだままになる。専用バスに 1 台しか
@@ -128,12 +136,22 @@ def cmd_udev(config: dict) -> str:
     return "\n".join(lines)
 
 
+def cmd_paths() -> str:
+    """シェル側が参照する固定名を TSV (key\\tvalue) で返す。"""
+    return "\n".join(
+        [
+            f"udev_rule_path\t{_UDEV_RULE_PATH}",
+            f"service_name\t{_SERVICE_NAME}",
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="CAN バス定義の変換ツール")
     parser.add_argument(
         "command",
-        choices=["list", "udev"],
-        help="list: TSV 出力 / udev: udev ルール生成",
+        choices=["list", "udev", "paths"],
+        help="list: TSV 出力 / udev: udev ルール生成 / paths: 固定パスの TSV 出力",
     )
     parser.add_argument(
         "--assigned-only",
@@ -142,6 +160,13 @@ def main() -> int:
     )
     parser.add_argument("--config", type=pathlib.Path, default=_CONFIG_PATH)
     args = parser.parse_args()
+
+    # paths は yaml を 1 行も読まない。**設定が壊れていても答えられなければならない**
+    # —— install.sh --uninstall は撤去先を知るためにこれを呼ぶので、ここで
+    # load_config を通すと「設定を壊すと撤去もできない」状態が生まれる。
+    if args.command == "paths":
+        print(cmd_paths())
+        return 0
 
     try:
         config = load_config(args.config)

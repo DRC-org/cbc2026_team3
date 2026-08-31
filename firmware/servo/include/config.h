@@ -12,7 +12,7 @@
 // 停動し、短時間で焼損する（仕様書 §7.2）。
 //
 // パラメータの一部は SET_PARAM で実行時に変更できるが、RAM 上のみで電源断で
-// ここの既定値に戻る（仕様書 §3.4）。恒久的に変えたい値はこのファイルを直すこと。
+// ここの既定値に戻る（仕様書 §3.3）。恒久的に変えたい値はこのファイルを直すこと。
 
 #pragma once
 
@@ -61,7 +61,7 @@ constexpr uint8_t kServoSlotCount = 5;
 
 enum class SlotRole : uint8_t {
     Servo,        // サーボ出力。deviceId 宛の SET_TARGET で動く
-    TouchSensor,  // デジタル入力。自分のデバイス ID で FEEDBACK を送り bit6 で報告するだけ
+    TouchSensor,  // デジタル入力。自分のデバイス ID で FEEDBACK を送り bit4 で報告するだけ
     Unused,       // 何も繋がない。pinMode すら触らない
 };
 
@@ -76,7 +76,10 @@ struct ServoSlotConfig {
     // TouchSensor のとき、LOW を「入力あり」とみなすか。
     // 報告ビットは常に FEEDBACK のセンサ入力（自分のデバイス ID で送るので 1 つで足りる）。
     bool sensorActiveLow;
-    const char *name;     // シリアルデバッグ表示用。CAN の挙動には影響しない
+    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
+    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
+    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
+    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // TODO(実機で確認): 角度 → パルス幅の対応。サンプルの attach(pin, 500, 2400) に合わせてある。
@@ -133,13 +136,14 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
 // デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
 // ずれるとそのモータは指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
 constexpr ServoSlotConfig kServoSlots[kServoSlotCount] = {
-    {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false, "gripper"},
-    {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_f"},
-    {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_r"},
-    {SlotRole::Servo, 7, 0.0f, kProvisionalLimits, kServoPulse270, false, "sub_gripper"},
+    {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 = gripper
+    {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 = wall_f
+    {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 = wall_r
+    {SlotRole::Servo, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 = sub_gripper
+    // SV4 = origin_sensor。
     // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
     // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
-    {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true, "origin_sensor"},
+    {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},
 };
 
 // ===========================================================================
@@ -160,7 +164,7 @@ constexpr ServoSlotConfig kServoSlots[kServoSlotCount] = {
 // 未設定になる（LED 赤点滅・駆動拒否）。黙って丸めると別の基板の ID を名乗る。
 constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 
-// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.6）。
+// 焼き忘れた基板をセッティングタイムに見つけるための版番号（仕様書 §3.4）。
 // **プロトコルかピン配置を変えたら必ず上げること。**
 //
 // 2: INFO にサーボ可動レンジ（Byte3-4）を追加。v1 は DLC=3 のままなので、PC 側は
@@ -192,7 +196,7 @@ constexpr uint32_t kMotionIntervalMs = 5;
 // 満了は PC の停止かケーブル断を意味する。**サーボは満了しても現在角を保持するので
 // 機構が落ちることはない**が、そこから先は動かせない。
 //
-// 0 にすると途絶しても新しい角度指令を受け付け続け、FEEDBACK の bit4 も報告しなくなる。
+// 0 にすると途絶しても新しい角度指令を受け付け続け、FEEDBACK の bit2 も報告しなくなる。
 // 手で cansend を打つようなベンチ確認のための逃げ道であって、試合では既定の 1 のまま
 // 使う。再送が間に合わない状態は運用上の異常なので、ここや command_timeout_ms を
 // 触って覆い隠してはならない（仕様書 §8）。
@@ -202,7 +206,7 @@ constexpr uint32_t kMotionIntervalMs = 5;
 // 誰も気付けない。有効/無効の判定は MotorSafety にだけある。
 #define WATCHDOG_ENABLED 1
 
-// command_timeout_ms / feedback_interval_ms（仕様書 §3.4 の既定値）は PC 側との契約なので
+// command_timeout_ms / feedback_interval_ms（仕様書 §3.3 の既定値）は PC 側との契約なので
 // MotorCanProtocol.h の kDefaultCommandTimeoutMs / kDefaultFeedbackIntervalMs が持つ。
 // 到達許容差の既定値（§7.3 / §7.6 の 0）は ServoMotion.h の
 // kDefaultServoReachedToleranceDeg が持ち、ServoMotion が自分で適用する。

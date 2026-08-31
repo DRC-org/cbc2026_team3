@@ -326,25 +326,3 @@ def spec_for(command: object) -> CommandSpec | None:
     if not isinstance(command, str):
         return None
     return COMMANDS.get(command)
-
-
-def phase_deny_reason(command: str, phase: Phase) -> str | None:
-    """フェーズゲートの単一判定点。許可なら None。
-
-    UI でボタンを隠すだけでは WS 直叩きやリロード直後を防げないため、
-    サーバー側にも同じ制約を置く。
-    """
-    spec = spec_for(command)
-    return None if spec is None else spec.phase_deny_reason(phase)
-
-
-def e_stop_deny_reason(command: str) -> str | None:
-    """緊急停止ゲートの単一判定点。許可なら None。"""
-    spec = spec_for(command)
-    return None if spec is None else spec.e_stop_deny_reason()
-
-
-def dev_tools_deny_reason(command: str, dev_tools_enabled: bool) -> str | None:
-    """開発用ゲートの単一判定点。許可なら None。"""
-    spec = spec_for(command)
-    return None if spec is None else spec.dev_tools_deny_reason(dev_tools_enabled)

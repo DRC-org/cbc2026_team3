@@ -59,7 +59,12 @@ def _private_accesses(source: str) -> list[str]:
 
 
 #: CANManager / Sequence を外から使うモジュール。ここに載せた分だけ再発を止められる
-_CONSUMER_MODULES = ("lib/server.py", "robots/motor_check.py")
+_CONSUMER_MODULES = (
+    "lib/server.py",
+    "lib/server_motor_check.py",
+    "lib/ws_hub.py",
+    "robots/motor_check.py",
+)
 
 
 @pytest.mark.parametrize("module_path", _CONSUMER_MODULES)

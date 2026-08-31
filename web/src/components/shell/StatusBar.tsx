@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Kbd } from "@/components/ui/Kbd";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
+import { TABS } from "@/lib/tabs";
 import { TONE_STATUS_CLASS } from "@/lib/tone";
 
 /** ステータスバーは横幅が限られるため host:port だけ出す（全体は title 属性で見せる） */
@@ -49,11 +50,12 @@ export function StatusBar() {
 
       <Clock />
 
+      {/* 凡例はタブ定義から描く。直書きするとタブが増減したときにここだけ古くなる
+          (割り当ての正は `lib/tabs.ts` の TABS[].hotkey) */}
       <span className="flex items-center gap-1">
-        <Kbd>1</Kbd>
-        <Kbd>2</Kbd>
-        <Kbd>3</Kbd>
-        <Kbd>4</Kbd>
+        {TABS.map((tab) => (
+          <Kbd key={tab.path}>{tab.hotkey}</Kbd>
+        ))}
         タブ切替
       </span>
 

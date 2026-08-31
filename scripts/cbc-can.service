@@ -3,7 +3,7 @@
 
 [Unit]
 Description=CBC2026 Team3 CAN バス初期化
-Documentation=file://@PROJECT_DIR@/impl_plan.md
+Documentation=file://@PROJECT_DIR@/docs/impl_plan.md
 After=network-pre.target
 
 [Service]

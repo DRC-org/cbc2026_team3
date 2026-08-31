@@ -4,12 +4,13 @@ import { TriggerButton } from "@/components/operator/TriggerButton";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Kbd } from "@/components/ui/Kbd";
+import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import type { RobotState } from "@/lib/protocol";
-import { isSequenceComplete, sequenceKind } from "@/lib/sequenceStatus";
+import { isSequenceComplete, sequenceKind, sequenceProgress } from "@/lib/sequenceStatus";
 import type { Tone } from "@/lib/tone";
-import { TONE_BORDER_L_CLASS, TONE_PROGRESS_CLASS } from "@/lib/tone";
+import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 interface ActionPanelProps {
   state: RobotState;
@@ -50,7 +51,7 @@ export function ActionPanel({
   const isComplete = isSequenceComplete(state);
   // 止められるのは動いているときだけ。トリガー待ちもシーケンスは生きている
   const canStop = kind === "running" || kind === "waiting_trigger";
-  const current = isComplete ? null : steps[stepIndex];
+  const { displayIndex, percent, current } = sequenceProgress(state);
   // NEXT 後に走る一連のステップ。次の許可待ち (require_trigger) を含めてそこで切る。
   // 許可待ちが無いまま延々続く場合に画面を埋めないよう表示は数件で打ち切る
   const UPCOMING_LIMIT = 4;
@@ -67,12 +68,6 @@ export function ActionPanel({
   // ここへ含めると、開始しようのないシーケンスの START を押させることになる
   const idle = inMatch && kind === "idle";
 
-  const displayIndex = totalSteps > 0 ? Math.min(stepIndex + 1, totalSteps) : 0;
-  const percent =
-    totalSteps > 0
-      ? Math.min(100, ((isComplete ? totalSteps : stepIndex + 1) / totalSteps) * 100)
-      : 0;
-
   // 状態表示と主操作 (TriggerButton) は同じ kind から作る。どちらかを暗黙の
   // フォールバックに任せると、同じ画面が相反する 2 つの事実を出す
   const status: { label: string; tone: Tone } = !inMatch
@@ -88,13 +83,8 @@ export function ActionPanel({
             : { label: "待機中 — START で開始", tone: "neutral" };
 
   return (
-    <section
-      className={cx(
-        "card card-border flex shrink-0 flex-col border-base-300 border-l-[0.4rem] bg-base-100",
-        // 周辺視野でも状態の変化に気付けるよう、左端を状態色で塗る
-        TONE_BORDER_L_CLASS[status.tone],
-      )}
-    >
+    // 周辺視野でも状態の変化に気付けるよう、左端を状態色で塗る (Panel が引く)
+    <Panel accentTone={status.tone} className="shrink-0" bodyClassName="p-0">
       {/* 状態と進捗を 1 行に畳む。別々のパネルに分けると同じことを 2 度読ませる */}
       <div className="flex shrink-0 items-center gap-2 border-b border-base-300 px-2 py-1">
         <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
@@ -200,6 +190,6 @@ export function ActionPanel({
           />
         )}
       </div>
-    </section>
+    </Panel>
   );
 }

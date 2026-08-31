@@ -15,13 +15,13 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Phase
+from lib.match_state import Phase
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
-from tests.server_fixtures import ServerFixture
+from tests.server_fixtures import DEFAULT_CHECKLIST, RecordingClient, ServerFixture
 
 _ROBOT = "main_hand"
 
@@ -97,8 +97,7 @@ def _fixture(
 ) -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
     # 指差喚呼の項目が 1 つも無いと can_start_match が最初から True になり、
     # フェーズが SETUP を素通りして READY から始まる
-    definitions = {ROLE_PRE_MATCH: [ChecklistItem(id="check", label="確認")]} if checklist else None
-    fx = ServerFixture.build(checklist_definitions=definitions)
+    fx = ServerFixture.build(checklist_definitions=DEFAULT_CHECKLIST if checklist else None)
     fx.freeze_broadcast()
     manual, drivers = _make_manual()
     fx.add_robot(
@@ -131,21 +130,21 @@ class TestModeSwitch:
 
     async def test_未知のモードは理由付きで拒否する(self) -> None:
         fx, _ = _fixture()
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await fx.command(
             {"type": "set_operation_mode", "robot": _ROBOT, "mode": "全自動"}, requester=client
         )
         assert fx.operation_mode(_ROBOT) == "sequence"
-        assert client.rejections()[-1]["reason"].startswith("未知の操作モード")
+        assert client.of_type("command_rejected")[-1]["reason"].startswith("未知の操作モード")
 
     async def test_手動を持たないロボットは切り替えを拒否する(self) -> None:
         fx, _ = _fixture(with_manual=False)
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await _switch_as(fx, "manual", client)
         assert fx.operation_mode(_ROBOT) == "sequence"
-        assert "手動操縦に対応していません" in client.rejections()[-1]["reason"]
+        assert "手動操縦に対応していません" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_モードはロボットごとに独立する(self) -> None:
         # メインハンドだけ手動、サブハンドは半自動、が成立しないと
@@ -241,14 +240,14 @@ class TestControlOwnership:
 class TestManualCommandGate:
     async def test_半自動運転中の手動指令は拒否する(self) -> None:
         fx, drivers = _fixture()
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await fx.command(
             {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "open"},
             requester=client,
         )
         assert drivers["gripper"].commands == []
-        assert "手動操縦モードではありません" in client.rejections()[-1]["reason"]
+        assert "手動操縦モードではありません" in client.of_type("command_rejected")[-1]["reason"]
 
     @pytest.mark.parametrize(
         "payload",
@@ -262,12 +261,12 @@ class TestManualCommandGate:
         fx, drivers = _fixture()
         await _switch(fx, "manual")
         await fx.activate_e_stop()
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
 
         await fx.command({**payload, "robot": _ROBOT}, requester=client)
         assert all(driver.commands == [] for driver in drivers.values())
-        assert "緊急停止中" in client.rejections()[-1]["reason"]
+        assert "緊急停止中" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_緊急停止中でもモード切替はできる(self) -> None:
         # 停止中に画面を手動へ寄せ、解除と同時に動かす手順を塞ぐ理由は無い
@@ -279,49 +278,49 @@ class TestManualCommandGate:
     async def test_軸未指定は理由付きで拒否する(self) -> None:
         fx, _ = _fixture()
         await _switch(fx, "manual")
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await fx.command({"type": "manual_jog", "robot": _ROBOT, "delta": 1.0}, requester=client)
-        assert "軸が指定されていません" in client.rejections()[-1]["reason"]
+        assert "軸が指定されていません" in client.of_type("command_rejected")[-1]["reason"]
 
     @pytest.mark.parametrize("value", [None, "3.0", True, float("nan"), float("inf")])
     async def test_数値でない指令値は拒否する(self, value: object) -> None:
         # NaN は比較がすべて false になるのでクランプを素通りする
         fx, drivers = _fixture()
         await _switch(fx, "manual")
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await fx.command(
             {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": value},
             requester=client,
         )
         assert drivers["y_axis_r"].commands == []
-        assert client.rejections()
+        assert client.of_type("command_rejected")
 
     async def test_連続操作できない軸への絶対値指定は理由付きで拒否する(self) -> None:
         fx, drivers = _fixture()
         await _switch(fx, "manual")
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await fx.command(
             {"type": "manual_set", "robot": _ROBOT, "axis": "gripper", "value": 2.5},
             requester=client,
         )
         assert drivers["gripper"].commands == []
-        assert "連続操作の対象外" in client.rejections()[-1]["reason"]
+        assert "連続操作の対象外" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_位置名の誤りで_WS_が切れない(self) -> None:
         # 打ち間違いで画面ごと落ちると、試合中に復旧手段が無くなる
         fx, _ = _fixture()
         await _switch(fx, "manual")
-        client = _FakeClient()
+        client = RecordingClient()
         fx.attach_clients(client)
         await fx.command(
             {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "半開き"},
             requester=client,
         )
         assert fx.is_connected(client)
-        assert client.rejections()
+        assert client.of_type("command_rejected")
 
 
 class TestManualCommandEffect:
@@ -399,32 +398,6 @@ class TestEStopClearsJogOrigin:
 # ---------------------------------------------------------------------- #
 
 
-class _IdleSequence(Sequence):
-    """ステップを持たない (= 常に停止している) シーケンス。"""
-
-    def __init__(self, name: str = _ROBOT) -> None:
-        super().__init__(name)
-
-
-class _FakeClient:
-    """拒否通知の宛先。``_reject_command`` は要求元 1 台にだけ返す。"""
-
-    def __init__(self) -> None:
-        self.sent: list[dict] = []
-        self.closed = False
-
-    async def send_str(self, payload: str) -> None:
-        import json
-
-        self.sent.append(json.loads(payload))
-
-    async def close(self) -> None:
-        self.closed = True
-
-    def rejections(self) -> list[dict]:
-        return [msg for msg in self.sent if msg.get("type") == "command_rejected"]
-
-
 async def _advance_to(fx: ServerFixture, phase: str) -> None:
     """SETUP から目的のフェーズまで正規の遷移で進める。"""
     if phase == "setup":
@@ -438,7 +411,7 @@ async def _advance_to(fx: ServerFixture, phase: str) -> None:
     await fx.command({"type": "match_finish"})
 
 
-async def _switch_as(fx: ServerFixture, mode: str, client: _FakeClient) -> None:
+async def _switch_as(fx: ServerFixture, mode: str, client: RecordingClient) -> None:
     await fx.command(
         {"type": "set_operation_mode", "robot": _ROBOT, "mode": mode}, requester=client
     )

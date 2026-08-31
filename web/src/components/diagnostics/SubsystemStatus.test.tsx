@@ -257,6 +257,18 @@ describe("SubsystemStatus", () => {
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 
+  it("開閉ボタンが開閉対象と結ばれている", async () => {
+    // aria-expanded だけでは「何が開くのか」が読み上げに伝わらない
+    renderWithRobot(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+
+    const button = screen.getByRole("button", { expanded: false });
+    await userEvent.click(button);
+
+    const controls = button.getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    expect(document.getElementById(controls as string)).not.toBeNull();
+  });
+
   it("判定を別の要素が担う画面では、判定チップも開閉も持たない", () => {
     // Monitor の準備画面は StartGate が「異常があるか」を最大の要素で答える。
     // 同じ文字列をこの見出しにも出すと、同じ事実が同じ画面に 2 回並ぶ

@@ -12,14 +12,7 @@ import inspect
 
 import pytest
 
-from lib.commands import (
-    COMMANDS,
-    CommandSpec,
-    RejectChannel,
-    dev_tools_deny_reason,
-    e_stop_deny_reason,
-    phase_deny_reason,
-)
+from lib.commands import COMMANDS, CommandSpec, RejectChannel, spec_for
 from lib.match_state import (
     PHASES_ANY,
     PHASES_DURING_MATCH,
@@ -27,6 +20,28 @@ from lib.match_state import (
     Phase,
 )
 from lib.server import RobotServer
+
+
+def phase_deny_reason(command: str, phase: Phase) -> str | None:
+    """ゲート判定の入口は `spec_for()` → メソッドの 1 本だけ。
+
+    かつては同じ判定へモジュール関数からも入れ、どちらを使うかの根拠が
+    どこにも無かった (本番は spec のメソッド、`match_start` と動作確認だけが
+    名前引き)。テストの読みやすさのためのラッパはここに置く。
+    """
+    spec = spec_for(command)
+    return None if spec is None else spec.phase_deny_reason(phase)
+
+
+def e_stop_deny_reason(command: str) -> str | None:
+    spec = spec_for(command)
+    return None if spec is None else spec.e_stop_deny_reason()
+
+
+def dev_tools_deny_reason(command: str, dev_tools_enabled: bool) -> str | None:
+    spec = spec_for(command)
+    return None if spec is None else spec.dev_tools_deny_reason(dev_tools_enabled)
+
 
 #: 操縦者 UI と Web ソケット越しに実際にやり取りする全コマンド。
 #: 増減させるときはここも直す (テストが落ちることで宣言漏れに気付ける)。
@@ -68,6 +83,31 @@ class TestRegistryCoverage:
             handler = getattr(RobotServer, spec.handler, None)
             assert handler is not None, f"{spec.name} のハンドラ {spec.handler} が無い"
             assert inspect.iscoroutinefunction(handler)
+
+    def test_missing_handler_aborts_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """名前引きのディスパッチは、押した瞬間まで欠落を教えてくれない。
+
+        `getattr(self, spec.handler)` は文字列引きなので、メソッド名を変えても
+        静的には何も検出されず、起動もする。壊れていることが分かるのは操縦者が
+        そのボタンを押した瞬間で、しかも拒否通知も出ないため画面から原因が読めない。
+        """
+        broken = CommandSpec(
+            name="broken_command",
+            allowed_phases=PHASES_ANY,
+            phase_deny_message="",
+            allowed_during_e_stop=True,
+            e_stop_deny_message="",
+            handler="_cmd_does_not_exist",
+            reject_channel=RejectChannel.COMMAND_REJECTED,
+            requires_dev_tools=False,
+        )
+        monkeypatch.setitem(COMMANDS, broken.name, broken)
+
+        with pytest.raises(RuntimeError) as exc:
+            RobotServer()
+
+        assert "broken_command" in str(exc.value)
+        assert "_cmd_does_not_exist" in str(exc.value)
 
     def test_no_handler_bypasses_the_registry(self) -> None:
         """登録されていない _cmd_* を書いても呼ばれない (= 宣言漏れが残らない)。"""

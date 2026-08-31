@@ -17,7 +17,8 @@ API になる (「フィードバックが来たことにする」関数が本�
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import can
@@ -65,7 +66,6 @@ def mock_can_manager(
     mgr = MagicMock(spec=CANManager)
     mgr.motors = drivers
     mgr.bus_names = (bus_name,)
-    mgr.get_motor.side_effect = drivers.__getitem__
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
     # 戻り値は「励磁できなかったモータ名」。既定の MagicMock を返させると
@@ -76,6 +76,65 @@ def mock_can_manager(
     return mgr
 
 
+# ---------------------------------------------------------------------- #
+#  実 CANManager を組み立てるための部品
+#
+#  上の `mock_can_manager` は CAN 層に関心の無いテスト用 (CANManager ごとモック)。
+#  こちらは **実 CANManager を建てて受信ループや送信経路を通す** テスト用に、
+#  そこへ挿すバス・ドライバ・エグゼキュータを作る。CAN 層のモック組み立ては
+#  この 1 ファイルに集約する約束なので、テストファイル同士で貸し借りしない。
+# ---------------------------------------------------------------------- #
+
+
+def mock_bus() -> MagicMock:
+    """``recv`` が常に None を返すだけのバス。
+
+    None は python-can の「タイムアウトで 1 通も来なかった」なので、受信ループは
+    回り続けるが誰にも配らない。送信側だけを見たいテストの土台になる。
+    """
+    bus = MagicMock()
+    bus.recv.return_value = None
+    return bus
+
+
+def mock_driver(name: str, can_id: int) -> MagicMock:
+    """``CANManager`` が呼ぶ面をひととおり持つドライバのモック。
+
+    ``matches_feedback`` の既定を False にしておくのは、宛先判定を素通りさせない
+    ため。True 既定にすると「誰宛でも配られる」状態が土台になり、振り分けの
+    テストが自分で False を書き戻さない限り常に緑になる。
+    """
+    motor = MagicMock()
+    motor.name = name
+    motor.can_id = can_id
+    motor.matches_feedback.return_value = False
+    motor.update_state.return_value = MotorState()
+    motor.initialization_steps.return_value = []
+    motor.activation_steps.return_value = []
+    motor.requires_fresh_feedback_for_activation.return_value = False
+    motor.feedback_probe_message.return_value = None
+    return motor
+
+
+def direct_runner(
+    record: list[tuple[Any, tuple[Any, ...]]] | None = None,
+) -> Callable[..., Awaitable[Any]]:
+    """ブロッキング呼び出しをその場で実行する ``run_blocking`` (テスト用)。
+
+    エグゼキュータの差し替えを ``patch("asyncio.get_event_loop")`` で行うと、
+    「実装がどの API でループを取るか」にテストが固着し、正しい
+    ``get_running_loop()`` へ直した瞬間にテストが偽陽性で落ちる。
+    差し替え口はコンストラクタ引数として公開されているものだけを使う。
+    """
+
+    async def run(func: Callable[..., Any], *args: Any) -> Any:
+        if record is not None:
+            record.append((func, args))
+        return func(*args)
+
+    return run
+
+
 def set_motors(mgr: CANManager, drivers: Mapping[str, object]) -> None:
     """モックのモータ構成を実ドライバへ差し替える。
 
@@ -83,7 +142,6 @@ def set_motors(mgr: CANManager, drivers: Mapping[str, object]) -> None:
     必ずこの 1 経路を通す (2 箇所へ書くと構成とヘルスが食い違う)。
     """
     mgr.motors = dict(drivers)
-    mgr.get_motor.side_effect = mgr.motors.__getitem__
 
 
 # ---------------------------------------------------------------------- #

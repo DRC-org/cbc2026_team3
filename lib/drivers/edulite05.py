@@ -7,7 +7,7 @@ from typing import ClassVar
 
 import can
 
-from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorDriver, MotorState
 
 
 class Edulite05RunMode(IntEnum):
@@ -295,76 +295,5 @@ class Edulite05Driver(MotorDriver):
             return super().default_tolerance(mode) * self._RPM_TO_RAD_PER_S
         return super().default_tolerance(mode)
 
-    def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
-        """設定 → 保持目標 → 励磁。起動経路と同じ手順をそのまま合成する。
-
-        励磁手順をここに書き写すと、片方だけ直したときに「保持目標を書かずに
-        enable してアームが原点へ飛ぶ」が動作確認経路だけで再発する。
-        run_mode も設定値のまま使う。ここで POSITION を強制すると、動作確認後に
-        戻す経路が無いぶん速度指令で運用する機体の run_mode が書き換わったまま残る。
-        """
-        return self.initialization_steps() + self.activation_steps(
-            after_set_zero=self.set_zero_on_start
-        )
-
-    def check_safety_error(self) -> str | None:
-        # 電流モードの指令は [A]、本機のフィードバックはトルク [Nm] で次元が違うため、
-        # 指令に追従したかを判定する術がない。「動かなかった」と区別できない合否を
-        # 出すより、動作確認の対象外だと明示して打ち切る。
-        if self.mode is ControlMode.CURRENT:
-            return (
-                "EDULITE 05 電流モードは動作確認の対象外 "
-                "(指令[A] とフィードバック[Nm] は次元が違う)"
-            )
-        if self.is_fault():
-            return f"EDULITE 05 fault=0x{int(self.fault_bits):02X}"
-        if self._state.temperature >= 60.0:
-            return f"EDULITE 05 過温 {self._state.temperature:.1f}C"
-        return None
-
-    def requires_fresh_feedback_for_check(self) -> bool:
-        return True
-
     def emergency_stop_message(self) -> can.Message:
-        return self.encode_disable()
-
-    def check_command(self, *, magnitude: float = 5.0) -> tuple[can.Message, CheckContext]:
-        # 動作確認は運用と同じ run_mode のまま行う。位置設定の機体へ速度指令を送っても
-        # 無反応にしかならず、逆に run_mode を書き換えると運用時の指令が効かなくなる。
-        if self.mode is ControlMode.VELOCITY:
-            # magnitude は共通単位の rpm。encode_target と同じクランプを context にも
-            # 効かせないと、limit_speed で頭打ちになった瞬間に必ず不合格になる。
-            target = self._clamp(
-                magnitude * self._RPM_TO_RAD_PER_S, -self.limit_speed, self.limit_speed
-            )
-            context = CheckContext(
-                mode=ControlMode.VELOCITY,
-                target=target,
-                reference=self._state.velocity,
-                # 内部単位は rad/s だが、yaml の magnitude と揃わないと操縦者が原因を追えない
-                display_scale=1.0 / self._RPM_TO_RAD_PER_S,
-                display_unit="rpm",
-            )
-            return self.encode_target(ControlMode.VELOCITY, target), context
-        if self.mode is not ControlMode.POSITION:
-            raise ValueError(f"Edulite05Driver は {self.mode} モードの動作確認に対応していません")
-
-        target = self._clamp(
-            self._state.position + math.radians(magnitude), self.POS_MIN, self.POS_MAX
-        )
-        context = CheckContext(
-            mode=ControlMode.POSITION,
-            target=target,
-            reference=self._state.position,
-            display_scale=180.0 / math.pi,
-            display_unit="deg",
-        )
-        return self.encode_target(ControlMode.POSITION, target), context
-
-    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
-        return self.evaluate_tracking(context)
-
-    def reset_after_check(self) -> can.Message:
-        # prepare_check_steps が run_mode を設定値のまま使うので、戻す作業は無く
-        # 無励磁化だけで原状に復帰する
         return self.encode_disable()

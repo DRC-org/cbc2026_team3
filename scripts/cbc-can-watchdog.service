@@ -11,8 +11,12 @@ Requires=cbc-can.service
 [Service]
 Type=simple
 ExecStart=@PROJECT_DIR@/scripts/can_watchdog.sh
-# 落ちたまま気付かれないと bus-off が復旧しなくなる。後始末は持たないので
-# いつ殺しても再開してよい (状態はすべてプロセス内で、次の周期に作り直される)
+# 落ちたまま気付かれないと bus-off が復旧しなくなる。判定に使う状態はすべて
+# プロセス内にあり、次の周期に作り直されるので再開に前提は要らない。
+# **ただし後始末が 1 つだけある** —— 復旧の down/up の途中で殺されると、
+# 動いていたバスが down のまま残る (次のインスタンスは滞留を検出できないので
+# 永久に戻らない)。can_watchdog.sh は TERM/INT を受けて EXIT トラップで
+# up し直すので、SIGTERM の既定 (即死) には戻さないこと。
 Restart=always
 RestartSec=5
 

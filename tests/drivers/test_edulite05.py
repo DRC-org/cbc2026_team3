@@ -86,14 +86,14 @@ def test_set_id_rejects_ids_that_do_not_fit_the_id_field() -> None:
 
 
 def test_set_id_is_not_part_of_any_automatic_startup_path() -> None:
-    """起動・励磁・動作確認のどの手順にも ID 書き換えを混ぜないこと。
+    """起動・励磁のどの手順にも ID 書き換えを混ぜないこと。
 
     混ざると電源を入れ直すたびに ID が書き換わり、しかも 2 台が同じ ID を
     名乗った瞬間に片方のフィードバックが永久に届かなくなる。
     """
     driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
 
-    steps = driver.initialization_steps() + driver.activation_steps() + driver.prepare_check_steps()
+    steps = driver.initialization_steps() + driver.activation_steps()
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages_of(steps)]
 
     assert driver.COMM_TYPE_SET_ID not in comm_types
@@ -249,160 +249,12 @@ def test_decode_rejects_unrelated_frame() -> None:
         driver.decode_feedback(edulite_feedback(driver, host_id=0))
 
 
-def test_check_uses_position_parameter_and_current_position() -> None:
-    driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(edulite_feedback(driver, position=0.5))
-    target = driver.state.position + math.radians(5.0)
-
-    msg, context = driver.check_command(magnitude=5.0)
-
-    assert msg.data == struct.pack("<Hxxf", driver.PARAM_LOC_REF, target)
-    assert context.mode is ControlMode.POSITION
-    assert context.target == pytest.approx(target)
-    # 指令直前の実測角を持たないと「既に目標角に居るのに動いた」と判定できてしまう
-    assert context.reference == pytest.approx(driver.state.position)
-
-
-def test_prepare_check_writes_hold_target_before_enable() -> None:
-    """保持目標を書かずに励磁すると、動作確認の瞬間にアームが原点へ飛ぶ。"""
-    driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(edulite_feedback(driver, position=0.8))
-    messages = messages_of(driver.prepare_check_steps())
-    comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
-
-    enable_index = comm_types.index(driver.COMM_TYPE_ENABLE)
-    hold_index = next(
-        i
-        for i, msg in enumerate(messages)
-        if comm_types[i] == driver.COMM_TYPE_WRITE_PARAM
-        and struct.unpack("<H", msg.data[:2])[0] == driver.PARAM_LOC_REF
-    )
-
-    assert hold_index < enable_index
-    # 実測角は 16bit 量子化を経た値なので、書き戻す保持目標も厳密一致はしない
-    assert struct.unpack("<f", messages[hold_index].data[4:])[0] == pytest.approx(0.8, abs=0.01)
-    assert comm_types == [4, 18, 18, 18, 18, 18, 3]
-    assert [delay for _message, delay in driver.prepare_check_steps()] == [
-        0.05,
-        0.05,
-        0.05,
-        0.05,
-        0.05,
-        0.05,
-        0.1,
-    ]
-    assert messages[0].data == bytes(8)
-
-
-def test_prepare_check_is_initialization_plus_activation() -> None:
-    """励磁手順が動作確認経路に複製されると、片方だけ直すたびに S6 が再発する。"""
-    driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(edulite_feedback(driver, position=0.3))
-
-    assert steps_as_frames(driver.prepare_check_steps()) == steps_as_frames(
-        driver.initialization_steps() + driver.activation_steps()
-    )
-
-
-def test_prepare_check_after_set_zero_holds_new_origin() -> None:
-    """set_zero で原点が付け替わった後の保持目標は、付け替え前の実測角であってはならない。"""
-    driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
-    driver.update_state(edulite_feedback(driver, position=0.8))
-
-    messages = messages_of(driver.prepare_check_steps())
-    comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
-
-    set_zero_index = comm_types.index(driver.COMM_TYPE_SET_ZERO)
-    hold_index = next(
-        i
-        for i, msg in enumerate(messages)
-        if comm_types[i] == driver.COMM_TYPE_WRITE_PARAM
-        and struct.unpack("<H", msg.data[:2])[0] == driver.PARAM_LOC_REF
-    )
-    enable_index = comm_types.index(driver.COMM_TYPE_ENABLE)
-
-    assert set_zero_index < hold_index < enable_index
-    assert messages[hold_index].data == struct.pack("<Hxxf", driver.PARAM_LOC_REF, 0.0)
-
-
-def test_prepare_check_keeps_configured_run_mode() -> None:
-    """動作確認が run_mode を書き換えると、以後その機体の速度指令が効かなくなる。"""
-    driver = Edulite05Driver("m1", can_id=5, mode="velocity")
-    driver.update_state(edulite_feedback(driver, velocity=3.0))
-
-    messages = messages_of(driver.prepare_check_steps())
-    run_mode_frames = [
-        msg
-        for msg in messages
-        if driver.parse_can_id(msg.arbitration_id)[0] == driver.COMM_TYPE_WRITE_PARAM
-        and struct.unpack("<H", msg.data[:2])[0] == driver.PARAM_RUN_MODE
-    ]
-
-    assert [msg.data for msg in run_mode_frames] == [
-        struct.pack("<HxxBxxx", driver.PARAM_RUN_MODE, int(Edulite05RunMode.VELOCITY))
-    ]
-    # run_mode を書き換えないので、復帰は無励磁化の 1 フレームだけで足りる
-    reset = driver.reset_after_check()
-    assert driver.parse_can_id(reset.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
-
-
-def test_check_command_and_evaluation_follow_configured_mode() -> None:
-    driver = Edulite05Driver("m1", can_id=5, mode="velocity", limit_speed=2.0)
-    driver.update_state(edulite_feedback(driver, velocity=0.0))
-
-    msg, context = driver.check_command(magnitude=5.0)
-    expected = 5.0 * 2.0 * math.pi / 60.0
-
-    assert struct.unpack("<H", msg.data[:2])[0] == driver.PARAM_SPD_REF
-    assert struct.unpack("<f", msg.data[4:])[0] == pytest.approx(expected)
-    assert context.mode is ControlMode.VELOCITY
-    assert context.target == pytest.approx(expected)
-
-    driver.update_state(edulite_feedback(driver, velocity=expected))
-    passed, _detail = driver.evaluate_check_result(context)
-    assert passed is True
-
-    driver.update_state(edulite_feedback(driver, velocity=-expected))
-    failed, detail = driver.evaluate_check_result(context)
-    assert failed is False
-    assert "rpm" in detail
-
-
-def test_check_safety_error_rejects_current_mode() -> None:
-    """電流指令[A]とフィードバックのトルク[Nm]は次元が違い、合否を判定できない。"""
-    driver = Edulite05Driver("m1", can_id=5, mode="current")
-    assert driver.check_safety_error() is not None
-
-
-def test_check_safety_rejects_known_fault_and_overtemperature() -> None:
-    driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(edulite_feedback(driver, fault_bits=int(Edulite05Fault.UNDERVOLTAGE)))
-    assert "fault=0x01" in driver.check_safety_error()
-
-    driver.update_state(edulite_feedback(driver, temperature=60.0))
-    assert "過温" in driver.check_safety_error()
-
-
 def test_emergency_stop_uses_extended_disable_without_fault_clear() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     message = driver.emergency_stop_message()
     assert message.is_extended_id is True
     assert driver.parse_can_id(message.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
     assert message.data == bytes(8)
-
-
-def test_evaluate_check_result_and_reset() -> None:
-    driver = Edulite05Driver("m1", can_id=5)
-    driver.update_state(edulite_feedback(driver, position=0.0))
-    _msg, context = driver.check_command(magnitude=5.0)
-    driver.update_state(edulite_feedback(driver, position=math.radians(4.5)))
-    passed, detail = driver.evaluate_check_result(context)
-
-    assert passed is True
-    assert detail is None
-    reset = driver.reset_after_check()
-    assert reset.data == bytes(8)
-    assert driver.parse_can_id(reset.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
 
 
 def test_activation_writes_current_position_before_enable() -> None:

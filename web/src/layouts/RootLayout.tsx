@@ -4,6 +4,7 @@ import { Outlet, useLocation, useNavigate } from "react-router";
 import { AppHeader } from "@/components/shell/AppHeader";
 import { ConnectionBanner } from "@/components/shell/ConnectionBanner";
 import { EStopOverlay } from "@/components/shell/EStopOverlay";
+import { RouteErrorBoundary } from "@/components/shell/RouteErrorBoundary";
 import { StatusBar } from "@/components/shell/StatusBar";
 import { Toaster } from "@/components/shell/Toaster";
 import { WsSettings } from "@/components/shell/WsSettings";
@@ -37,6 +38,25 @@ function TabHotkeys() {
 }
 
 /**
+ * タブの中身と、その描画例外を閉じ込める境界。
+ *
+ * 境界は `<Outlet />` だけを囲う。ヘッダー (EMG STOP)・接続バナー・緊急停止
+ * オーバーレイは外に置き、1 画面が落ちても止める手段が画面に残るようにする。
+ *
+ * パスを `key` にするのは、落ちた境界がタブを切り替えても解けないため。
+ * 1 枚の画面の不具合で全タブが「描画に失敗しました」のまま固まると、
+ * 操縦者は退避先を失う。
+ */
+function RoutedOutlet() {
+  const { pathname } = useLocation();
+  return (
+    <RouteErrorBoundary key={pathname}>
+      <Outlet />
+    </RouteErrorBoundary>
+  );
+}
+
+/**
  * 外枠の中身。**memo が本体で、飾りではない。**
  *
  * RootLayout は 20Hz × 2 台のテレメトリで毎秒 40 回再描画される。子要素は
@@ -65,7 +85,7 @@ const AppShell = memo(function AppShell({
         <AppHeader />
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <Outlet />
+          <RoutedOutlet />
         </div>
 
         <StatusBar />

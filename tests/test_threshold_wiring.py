@@ -13,7 +13,7 @@ import inspect
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
-from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
+from lib.config_schema import _HEALTH_KEYS, DEFAULT_HEALTH, HealthThresholds, _parse_health
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.drivers.base import MotorDriver
@@ -90,6 +90,22 @@ class TestDefaultsComeFromConfigSchema:
     # 動作確認のしきい値はここに無い。両ハンドを 1 本のシーケンスで駆動する形へ
     # 変えたので、タイムアウトも許容差も config/*_positions.yaml の位置定数が持つ
     # (`AxisSpec.timeout_s` / `tolerance`)。確認専用のしきい値そのものが存在しない。
+
+    def test_yaml_省略時の_fallback_も参照で書かれている(self) -> None:
+        """yaml が health を書かなかったときに使う値も、リテラルで持たないこと。
+
+        ここは引数の既定値ではなく関数本体の ``values.get(key, ...)`` なので
+        ``_default_source`` では見えない。**値の一致では守れない層**でもある ——
+        既定と同じ数値をリテラルで書き戻すと、値を見るテスト
+        (`test_missing_sections_fall_back_to_defaults`) は緑のまま通り、
+        以後 ``HealthThresholds`` の既定を変えても yaml 省略時だけが古い境界に
+        残る。「フィードバック途絶は config どおりなのに温度警告だけ 65℃」は
+        ログにも UI にも現れない壊れ方なので、書かれ方そのものを固定する。
+        """
+        for key in _HEALTH_KEYS:
+            assert _body_references(_parse_health, f"DEFAULT_HEALTH.{key}"), (
+                f"health.{key} 省略時の既定値が DEFAULT_HEALTH を参照していない"
+            )
 
 
 class _NoStepSequence(Sequence):

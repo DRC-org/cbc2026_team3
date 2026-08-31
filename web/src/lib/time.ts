@@ -17,12 +17,24 @@ export type EpochSeconds = number;
 /** エポックミリ秒。Date / Date.now() と同じ土俵の値 */
 export type EpochMs = number;
 
-export function epochSecondsToMs(seconds: EpochSeconds): EpochMs {
-  return seconds * 1000;
-}
-
 /** 壁時計表示 (HH:MM:SS)。引数は必ずエポック**ミリ秒** */
 export function formatClock(ms: EpochMs | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
   return new Date(ms).toLocaleTimeString("ja-JP", { hour12: false });
+}
+
+/**
+ * 経過時間を「n 前」の形にする。**測れていないものはダッシュ**で、0 にしない。
+ *
+ * フィードバックの鮮度表示に使う。null を `0ms 前` と書くと「今まさに届いた」に
+ * 化け、途絶したモータが最も健康に見える。負値も同じ扱いにする (時刻ずれであって
+ * 「未来に受信した」ではない)。
+ */
+export function formatAge(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || Number.isNaN(ms)) return "—";
+  if (ms < 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms 前`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s 前`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m 前`;
+  return `${Math.floor(ms / 3_600_000)}h 前`;
 }

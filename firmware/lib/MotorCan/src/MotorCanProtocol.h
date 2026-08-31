@@ -3,7 +3,7 @@
 // 対になる。片方だけを変更してはならない。
 //
 // Arduino.h を include しないのは意図的で、native 環境（pio test -e native）で
-// そのままコンパイルしてテストできるようにするため。DC 用とサーボ用のファームで共有する。
+// そのままコンパイルしてテストできるようにするため。DC 用・サーボ用・電磁弁用のファームで共有する。
 
 #pragma once
 
@@ -20,7 +20,7 @@ enum class CommandType : uint8_t {
     SetTarget = 1,  // PC → モタドラ
     SetParam = 2,   // PC → モタドラ
     Feedback = 3,   // モタドラ → PC
-    Info = 4,       // モタドラ → PC。低頻度の自己申告（仕様書 §3.6）
+    Info = 4,       // モタドラ → PC。低頻度の自己申告（仕様書 §3.4）
 };
 
 // 仕様書 §4。
@@ -35,7 +35,7 @@ enum class ControlType : uint8_t {
     OnOff = 3,
 };
 
-// 仕様書 §3.4 のパラメータ ID。**穴を空けずに詰める。**
+// 仕様書 §3.3 のパラメータ ID。**穴を空けずに詰める。**
 // 「将来のための予約」を挟むと、対応表を読むたびに使われていない ID を数えることになる。
 // 必要になった時点で末尾へ足せばよい。
 enum class ParamId : uint8_t {
@@ -90,7 +90,7 @@ constexpr uint8_t kBoardNumberShift = 3;
 constexpr uint8_t kMaxBoardNumber = 7;
 constexpr uint8_t kMaxSlotNumber = 7;
 
-// スロットの役割（INFO で自己申告する。仕様書 §3.6）。
+// スロットの役割（INFO で自己申告する。仕様書 §3.4）。
 enum class SlotKind : uint8_t {
     Actuator = 0,
     Sensor = 1,
@@ -117,7 +117,6 @@ uint8_t makeDeviceId(BoardKind board, uint8_t boardNumber, uint8_t slot);
 constexpr int32_t kAngleScale = 10;     // 0.1deg 単位
 constexpr int32_t kDutyScale = 10000;   // 1/10000 単位（duty -1.0～+1.0）
 constexpr int32_t kRateScale = 10;      // 0.1deg/s 単位
-constexpr int32_t kPlainScale = 1;      // ms などそのままの値
 
 // float を固定小数点の int16 へ。**NaN と範囲外はここで飽和させる。**
 // CAN 経路は int16 しか運ばないので NaN は入らない。float が入るのはシリアル
@@ -133,7 +132,73 @@ int16_t saturateToInt16(int32_t value);
 // CAN ID
 // ---------------------------------------------------------------------------
 
+// 仕様書 §2.1 の CAN ID レイアウト。上位 3bit がコマンド種別、下位 8bit がデバイス ID。
+constexpr uint8_t kCommandTypeShift = 8;
+constexpr uint16_t kCommandTypeMask = static_cast<uint16_t>(0x7u << kCommandTypeShift);
+
+constexpr uint16_t commandIdBase(CommandType command) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(command) << kCommandTypeShift);
+}
+
 uint16_t buildCanId(CommandType command, uint8_t deviceId);
+
+// ---------------------------------------------------------------------------
+// 受信フィルタ（PC → モタドラ方向だけを通す）
+// ---------------------------------------------------------------------------
+
+// **CommandType のビット配置を基板側に再宣言させないためにある。**
+// 電磁弁基板の bxCAN フィルタは `0x000 << 5` / `0x600 << 5` / `0x200 << 5` /
+// `0x700 << 5` というリテラルで「上位 3bit が種別」「E_STOP=0b000 /
+// SET_TARGET=0b001 / SET_PARAM=0b010」を再宣言しており、CommandType への参照が
+// 1 つも無かった。**この enum は実際に一度動いている**（かつて E_STOP は 0b111 で、
+// ブロードキャスト停止が最も優先度の低い ID だった。§2.1）。次に動かすと DC 用と
+// サーボ用は parseCanId 経由で自動追従するが、電磁弁だけがフィルタで E_STOP を
+// 落とし始める。症状は「電磁弁だけ緊急停止が効かない」で、FEEDBACK は流れ続けるので
+// **PC からは正常に見える**。
+//
+// マスクをハードウェアのレジスタへどう載せるか（bxCAN の 32bit スケールでは
+// STID が FilterIdHigh の bit15..5）は MCU 固有なので、そこは呼び出し側に残す。
+struct CanIdFilter {
+    uint16_t id;
+    uint16_t mask;  // このビットが id と一致するフレームだけを通す
+};
+
+constexpr bool canIdPassesFilter(const CanIdFilter &filter, uint16_t canId) {
+    return (canId & filter.mask) == filter.id;
+}
+
+// E_STOP と SET_TARGET は値が隣接するので 1 バンクで通す。**「隣接している」ことを
+// 式で表す** —— 2 つの ID の差分ビットをマスクから落とせば、値が動いても追随する。
+constexpr CanIdFilter kEStopAndSetTargetFilter{
+    commandIdBase(CommandType::EStop),
+    static_cast<uint16_t>(kCommandTypeMask & ~(commandIdBase(CommandType::EStop) ^
+                                               commandIdBase(CommandType::SetTarget)))};
+
+constexpr CanIdFilter kSetParamFilter{commandIdBase(CommandType::SetParam), kCommandTypeMask};
+
+constexpr bool passesPcToBoardFilters(uint16_t canId) {
+    return canIdPassesFilter(kEStopAndSetTargetFilter, canId) ||
+           canIdPassesFilter(kSetParamFilter, canId);
+}
+
+// **CommandType の値を動かしたらここでビルドが落ちる。** 落ちない形にすると、
+// 電磁弁基板だけが緊急停止を取りこぼす状態が実機まで見えない。
+static_assert(passesPcToBoardFilters(commandIdBase(CommandType::EStop)),
+              "E_STOP が受信フィルタを通らない（電磁弁基板だけ緊急停止が効かなくなる）");
+static_assert(passesPcToBoardFilters(commandIdBase(CommandType::SetTarget)),
+              "SET_TARGET が受信フィルタを通らない");
+static_assert(passesPcToBoardFilters(commandIdBase(CommandType::SetParam)),
+              "SET_PARAM が受信フィルタを通らない");
+// モタドラ → PC 方向は落とす。通すと共有バス上の FEEDBACK（14 台 × 100Hz）が
+// 受信 FIFO（深さ 3）へ流れ込み、loop() が一瞬伸びた隙に E_STOP を取りこぼす。
+static_assert(!passesPcToBoardFilters(commandIdBase(CommandType::Feedback)),
+              "FEEDBACK が受信フィルタを通ってしまう");
+static_assert(!passesPcToBoardFilters(commandIdBase(CommandType::Info)),
+              "INFO が受信フィルタを通ってしまう");
+static_assert(!passesPcToBoardFilters(static_cast<uint16_t>(0x5u << kCommandTypeShift)) &&
+                  !passesPcToBoardFilters(static_cast<uint16_t>(0x6u << kCommandTypeShift)) &&
+                  !passesPcToBoardFilters(static_cast<uint16_t>(0x7u << kCommandTypeShift)),
+              "予約コマンド種別が受信フィルタを通ってしまう");
 
 struct CanIdInfo {
     CommandType command;
@@ -166,7 +231,7 @@ SetTargetCommand decodeSetTarget(const uint8_t *data, uint8_t length);
 struct SetParamCommand {
     ParamId id;
     int16_t raw;
-    bool valid;  // 未知のパラメータ ID は false（仕様書 §3.4: 無視する）
+    bool valid;  // 未知のパラメータ ID は false（仕様書 §3.3: 無視する）
 };
 SetParamCommand decodeSetParam(const uint8_t *data, uint8_t length);
 
@@ -188,7 +253,31 @@ constexpr uint8_t kFeedbackWithPositionLength = 3;
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags);
 uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg);
 
-// 仕様書 §3.6。焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// FEEDBACK Byte0 を組み立てる**唯一の場所**（仕様書 §3.2）。
+//
+// 3 枚の main.cpp / app.cpp が各自でフラグを OR していた頃、ここの規則は
+// Arduino / HAL の翻訳単位にあって native テストが 1 件も届かなかった。
+// **DC 基板の buildStatusFlags() に `flags |= kReached;` を 1 行足しても
+// 131 件すべて緑**という状態で、仕様書 §9.3 が「断線したソレノイドも到達と
+// 報告される」と警告している不変条件を誰も検査していなかった。
+//
+// 規則は 2 つ。どちらも「観測手段を持たない基板に測ったように見える値を
+// 運ばせない」ことが理由で、板ごとの例外を作ってはならない。
+//
+//   - **到達フラグを立てられるのはサーボスロットだけ**（仕様書 §7.3 の推定値）。
+//     DC 基板はエンコーダを持たず（§3.2 / §8）、電磁弁基板は弁が開いたかを
+//     観測できない（§9.3）ので、reached に何を渡しても立たない
+//   - **センサスロットは緊急停止・ウォッチドッグ・到達を立てない**（仕様書 §5.2）。
+//     駆動されないので意味を持たず、立てると PC 側の e_stop_active を
+//     RobotServer._detect_board_e_stop() が拾い、サーバー全体を緊急停止させて
+//     動作確認どころか全操作を止めてしまう
+//
+// safetyFlags は MotorSafety::statusFlags() の戻り値をそのまま渡すこと
+// （緊急停止 / ウォッチドッグ / 起動後未受信の判定はあちらが単独で持つ）。
+uint8_t composeFeedbackFlags(BoardKind board, SlotKind slot, uint8_t safetyFlags,
+                             bool configured, bool reached, bool sensorActive);
+
+// 仕様書 §3.4。焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 //
 // **DLC 可変。** サーボスロットだけが可動レンジ（仕様書 §3.4 の Byte3-4）を足す。
 // FEEDBACK で位置を持つ基板だけが位置を足すのと同じ形で、**測る対象を持たない基板に
@@ -205,10 +294,10 @@ uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotK
                    float angleRangeDeg);
 
 // ---------------------------------------------------------------------------
-// SET_TARGET / SET_PARAM の値域（仕様書 §3.4 / §5.3）
+// SET_TARGET / SET_PARAM の値域（仕様書 §3.3 / §5.3）
 // ---------------------------------------------------------------------------
 
-// 仕様書 §3.4 の既定値のうち、PC 側との契約になっているもの。
+// 仕様書 §3.3 の既定値のうち、PC 側との契約になっているもの。
 // command_timeout_ms は PC 側の目標値再送周期の根拠であり、feedback_interval_ms は
 // PC 側の STALE 判定が前提にしている送信周期。基板ごとに変えてよい値ではないので、
 // 基板の config.h ではなくここが単一定義を持つ。
@@ -233,6 +322,36 @@ constexpr uint16_t kMaxFeedbackIntervalMs = 1000;
 // 負値は下限へ。int16 なので float32 のような未定義動作の心配は無い。
 uint16_t clampCommandTimeoutMs(int16_t raw);
 uint16_t clampFeedbackIntervalMs(int16_t raw);
+
+// 3 枚に共通する SET_PARAM 2 件（仕様書 §3.3 の `0x01` / `0x02`）を処理する。
+// 処理したら true を返すので、各基板の applyParam は先頭でこれを呼び、
+// false のときだけ自分固有の ID を見る。
+//
+// 引数の Channel は DcChannel / ServoChannel / SolenoidChannel のどれか。
+// テンプレートにしてあるのは、この 3 つに共通の基底型が無いのと、ファームごとに
+// 1 種類しか実体化されないので Nano でもコード量が増えないため。
+//
+// **feedback_interval_ms は基板全体で 1 つ**（チャンネルごとに変えると
+// PeriodicTimer::stagger が割り当てた送信位相の分散が崩れる）。
+// **command_timeout_ms はチャンネル単位**（宛先がデバイス ID ＝ チャンネルなので、
+// 1 チャンネルへの指令が途絶えても他は動き続ける）。この非対称を 3 箇所に書き写すと、
+// いつか片方だけが逆になる。
+template <typename Channel>
+bool applyCommonParam(const SetParamCommand &cmd, Channel &channel,
+                      uint16_t &feedbackIntervalMs) {
+    switch (cmd.id) {
+        case ParamId::CommandTimeoutMs:
+            // 猶予に上限が無いと、仕様書 §5.1 が守っている最後の砦が SET_PARAM
+            // 1 フレームで実質外れる（49.7 日の猶予 = 無効化）。範囲の根拠は上の定数。
+            channel.setCommandTimeoutMs(clampCommandTimeoutMs(cmd.raw));
+            return true;
+        case ParamId::FeedbackIntervalMs:
+            feedbackIntervalMs = clampFeedbackIntervalMs(cmd.raw);
+            return true;
+        default:
+            return false;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // duty

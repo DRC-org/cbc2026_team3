@@ -4,7 +4,7 @@ namespace motorcan {
 
 namespace {
 
-// SET_TARGET / SET_PARAM とも Byte0 が種別、Byte1-2 が値（仕様書 §3.1 / §3.4）。
+// SET_TARGET / SET_PARAM とも Byte0 が種別、Byte1-2 が値（仕様書 §3.1 / §3.3）。
 // 途中に予約バイトを挟まないので、DLC 3 で足りる。
 constexpr uint8_t kCommandLength = 3;
 constexpr uint8_t kValueOffset = 1;
@@ -95,7 +95,7 @@ float fromRaw(int16_t raw, int32_t scale) {
 // ---------------------------------------------------------------------------
 
 uint16_t buildCanId(CommandType command, uint8_t deviceId) {
-    return static_cast<uint16_t>((static_cast<uint16_t>(command) << 8) | deviceId);
+    return static_cast<uint16_t>(commandIdBase(command) | deviceId);
 }
 
 CanIdInfo parseCanId(uint16_t canId) {
@@ -107,7 +107,7 @@ CanIdInfo parseCanId(uint16_t canId) {
         return info;
     }
 
-    const uint8_t raw = static_cast<uint8_t>((canId >> 8) & 0x07);
+    const uint8_t raw = static_cast<uint8_t>((canId >> kCommandTypeShift) & 0x07);
     switch (raw) {
         case static_cast<uint8_t>(CommandType::EStop):
         case static_cast<uint8_t>(CommandType::SetTarget):
@@ -164,7 +164,7 @@ SetParamCommand decodeSetParam(const uint8_t *data, uint8_t length) {
         return cmd;
     }
     if (!isKnownParamId(data[0])) {
-        // 未知のパラメータ ID は無視する（仕様書 §3.4）。
+        // 未知のパラメータ ID は無視する（仕様書 §3.3）。
         return cmd;
     }
     cmd.id = static_cast<ParamId>(data[0]);
@@ -202,6 +202,38 @@ uint8_t encodeFeedback(uint8_t *out, uint8_t flags, int32_t position_0p1deg) {
     out[0] = flags;
     packInt16Le(&out[1], saturateToInt16(position_0p1deg));
     return kFeedbackWithPositionLength;
+}
+
+uint8_t composeFeedbackFlags(BoardKind board, SlotKind slot, uint8_t safetyFlags,
+                             bool configured, bool reached, bool sensorActive) {
+    uint8_t flags = 0;
+
+    if (slot == SlotKind::Sensor) {
+        // 仕様書 §5.2: センサは駆動されないので、緊急停止もウォッチドッグも到達も
+        // 意味を持たない。safetyFlags を素通しにすると PC 側 check_safety_error() が
+        // 「駆動できない状態」と読んで動作確認を打ち切る（センサに駆動できない状態は無い）。
+        if (!configured) {
+            flags |= status_flag::kDeviceIdUnconfigured;
+        }
+        if (sensorActive) {
+            flags |= status_flag::kSensor;
+        }
+        return flags;
+    }
+
+    flags = safetyFlags;
+    if (!configured) {
+        // 仕様書 §2.2: 設定ミスは運用前に必ず気付くべきなので、PC 側 is_fault() へ倒す。
+        flags |= status_flag::kDeviceIdUnconfigured;
+    }
+    if (board == BoardKind::Servo && reached) {
+        // 仕様書 §7.3: サーボの到達は補間完了の**推定値**であって実測ではない。
+        // DC 基板（§3.2 / §8）と電磁弁基板（§9.3）は観測手段を 1 つも持たないので、
+        // ここで board を見て弾く。**「指令したから到達した」は実測でも推定でもない嘘**で、
+        // 断線したソレノイドも抜けたコネクタも「到達」と報告されることになる。
+        flags |= status_flag::kReached;
+    }
+    return flags;
 }
 
 uint8_t encodeInfo(uint8_t *out, uint8_t firmwareVersion, BoardKind board, SlotKind slot) {

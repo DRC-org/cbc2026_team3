@@ -332,9 +332,6 @@ class M3508PositionLoop(PausablePeriodicTask):
     def target(self, name: str) -> float | None:
         return self._axes[name].target
 
-    def mode(self, name: str) -> ControlMode | None:
-        return self._axes[name].mode
-
     def is_saturated(self, name: str) -> bool:
         """直近周期の出力が出力レンジの端に張り付いたか。
 
@@ -343,10 +340,6 @@ class M3508PositionLoop(PausablePeriodicTask):
         制御以外の原因 (機構の負荷・``output_limit``) へ辿り着けない。
         """
         return self._axes[name].saturated
-
-    def last_output(self, name: str) -> float:
-        """直近周期の PID 出力 [counts]。C620 が返す実測電流とは別物。"""
-        return self._axes[name].last_output
 
     # ------------------------------------------------------------------ #
     #  目標値
@@ -381,13 +374,27 @@ class M3508PositionLoop(PausablePeriodicTask):
 
     def clear_target(self, name: str) -> None:
         """目標を解除して電流 0 にする。"""
-        axis = self._axes[name]
+        self._reset_axis(self._axes[name])
+        self._abort_recording((name,))
+
+    @staticmethod
+    def _reset_axis(axis: _Axis) -> None:
+        """1 軸を「指令も履歴も持たない」状態へ戻す。
+
+        1 軸ぶんのリセットを 2 箇所 (``clear_target`` / ``_disable_all``) に書くと、
+        後から項目を足したときに片方を落とせる。``saturated`` を落とすと
+        「緊急停止中だけ飽和表示が残る」形になり、操縦者は止まっている機体の
+        テレメトリを見て出力が張り付いていると読む。
+
+        **記録の破棄 (``_abort_recording``) はここに含めない。** 1 軸だけを畳む
+        ``clear_target`` と全軸を畳む ``_disable_all`` では、溜まっていた完成品を
+        捨てるかどうかが違う (前者は残す) ため、呼び分けを潰してはならない。
+        """
         axis.mode = None
         axis.target = None
         axis.pid.reset()
         axis.last_output = 0.0
         axis.saturated = False
-        self._abort_recording((name,))
 
     def set_origin_here(self, name: str) -> None:
         """現在位置を累積角の原点にする (ホーミング完了時)。
@@ -624,11 +631,7 @@ class M3508PositionLoop(PausablePeriodicTask):
 
     def _disable_all(self) -> None:
         for axis in self._axes.values():
-            axis.mode = None
-            axis.target = None
-            axis.pid.reset()
-            axis.last_output = 0.0
-            axis.saturated = False
+            self._reset_axis(axis)
         self._abort_recording()
 
     def _abort_recording(self, names: tuple[str, ...] | None = None) -> None:

@@ -24,7 +24,7 @@ firmware/
       src/ServoChannel.{h,cpp}       上 2 つの結線（出力禁止中は指令を受け付けず先に凍結する）
       src/SolenoidChannel.{h,cpp}    電磁弁 1ch 分の結線（安全機構 + ON/OFF 目標。電磁弁用のみ使用）
   test/                native 環境の Unity テスト。PlatformIO の 2 つが test_dir = ../test で共有
-    test_protocol/     プロトコル層・安全機構・物理停止・duty 分解・DcChannel
+    test_protocol/     プロトコル層・安全機構・物理停止・duty 分解・DcChannel・状態フラグの組み立て
     test_board/        宛先判定・デバイス ID 解決・周期タイマ・シリアル行
     test_servo/        角度補間・可動範囲クランプ・到達推定・安全機構との結線
     test_solenoid/     電磁弁のデバイス ID・on_off の復号・SolenoidChannel の安全機構
@@ -343,9 +343,11 @@ PC 側 `move_to` はこのフラグで次のステップへ進むため、**機�
 シーケンスは進んでしまう。** 危険な動作には必ず `require_trigger` を付けて
 人間の目視確認を挟むこと（`robots/main_hand.py` のハンド閉じ等）。
 
-同じ理由で `FEEDBACK` の位置は「補間中の指令角」、速度は「そのときのスルーレートの
-rpm 換算」である（仕様書 §7.4）。電流・温度と過電流・過熱はどちらの基板も測る手段を
-持たないため、**プロトコルから外してある**（`FEEDBACK` の Byte4-6 と bit5-7 は予約）。
+同じ理由で `FEEDBACK` の位置は「補間中の指令角」であって実測ではない（仕様書 §7.4）。
+速度・電流・温度と過電流・過熱はどの基板も測る手段を持たないため、**プロトコルから
+外してある**。`FEEDBACK` に予約バイトは 1 つも無く（状態フラグ 1 バイト + 位置を持つ
+基板だけが 2 バイト。DLC は 1 か 3）、空きは状態フラグの **bit6-7 だけ**である
+（仕様書 §3.2。bit5 は「起動後まだ指令を受けていない」が使っている）。
 
 ## config.h の要確認項目（通電前に必ず）
 
@@ -584,7 +586,7 @@ $OCD/bin/openocd -s $OCD/openocd/scripts -f interface/stlink.cfg \
 
 **`command_timeout_ms`（`SET_PARAM` `0x04`）は 50〜2000ms に丸められる。**
 上限が無いと、`WATCHDOG_ENABLED` を CAN から触れないようにしていても、猶予を
-49.7 日へ伸ばすだけで同じ結果（ウォッチドッグの実質無効化）になるため（仕様書 §3.4）。
+49.7 日へ伸ばすだけで同じ結果（ウォッチドッグの実質無効化）になるため（仕様書 §3.3）。
 
 **`command_timeout_ms` と `feedback_interval_ms` の既定値は `config.h` に無い。**
 PC 側の再送周期と STALE 判定が前提にしている値、つまり PC 側との契約なので、
@@ -611,22 +613,33 @@ PC 側の再送周期と STALE 判定が前提にしている値、つまり PC 
 全ケースが走る。片方のプロジェクトの下にだけ置くと、もう一方だけを回した人が共有
 ライブラリの回帰を検出できない。
 
-`test_protocol/` はプロトコル層・安全機構・PID・制御目標を対象とする。
+`test_protocol/` はプロトコル層・安全機構・`DcChannel`・`composeFeedbackFlags()` /
+`applyCommonParam()` を対象とする。
+**PID と速度・電流・温度は実装ごと存在しない**ので、対象にも入らない（仕様書 §8）。
 実機が無くても以下を検出できる。
 
-- CAN ID の組み立て／解析（予約値 `0b100`/`0b101`/`0b110` を無効として弾くこと）
-- float32 リトルエンディアンの往復と既知バイト列の一致
+- CAN ID の組み立て／解析（予約値 `0b101`/`0b110`/`0b111` を無効として弾くこと）
+- `E_STOP` が他のどのフレームよりも小さい ID になること（調停順。仕様書 §2.1）
+- int16 固定小数点の往復と、`toRaw` が NaN と範囲外を飽和させること（仕様書 §4）
 - `E_STOP` の解除がマジックバイト `0x5A` `0xA5` 揃いのときだけ通ること
-- `FEEDBACK` の位置・速度が int16 で折り返さず飽和すること
+- 状態フラグのビットが重ならず、頭から詰まっていること（仕様書 §3.2）
+- `composeFeedbackFlags()` の 3 規則 —— **到達を立てられるのはサーボスロットだけ**（DC 基板と
+  電磁弁基板では `reached` に何を渡しても立たない。仕様書 §8 / §9.3）、**センサスロットは
+  緊急停止・ウォッチドッグ・到達を立てない**（§5.2）、アクチュエータスロットは
+  `MotorSafety::statusFlags()` をそのまま中継すること。**この判断が 3 枚の `main.cpp` /
+  `app.cpp` に書き写されていた頃は、DC 基板と電磁弁基板に `flags |= status_flag::kReached;` を
+  1 行足しても全ケース緑だった**（写しが Arduino / HAL の翻訳単位にあり native テストが届かない）
+- `FEEDBACK` / `INFO` の DLC 可変（位置・可動レンジを持つ基板だけが足すこと）
+- `FEEDBACK` の位置が int16 で折り返さず飽和すること
 - ウォッチドッグの満了・復帰・`millis()` 折り返し、ラッチ中も養えること
 - ウォッチドッグを無効にしても緊急停止ラッチと「最初の指令まで出力禁止」は効くこと
-- `command_timeout_ms` / `feedback_interval_ms` が範囲へ丸められ、NaN では現在値を保つこと
-- `SET_TARGET` / `SET_PARAM` の NaN を捨てること、PID が NaN から自己回復すること
-- duty クランプ（`max_duty` 超過・負値・0・NaN）
-- PID のリセットとワインドアップ制限
-- モード切替で目標値が 0 に落ち、同じモードの再指令では落ちないこと
+- `command_timeout_ms` / `feedback_interval_ms` が範囲へ丸められること
+- duty クランプ（`max_duty` 超過・負値・0）と、`splitDuty` が duty 0 で方向を反転しないこと
+- 物理非常停止（`REF`）がラッチし、離しても自動復帰しないこと（仕様書 §5.2）
+- 出力禁止中の `SET_TARGET` を `DcChannel` が入口で拒否すること
 
-`test_board/` は基板共通部（`MotorCanRouter` / `PeriodicTimer` / `SerialLineBuffer`）を
+`test_board/` は基板共通部（`MotorCanRouter` / `PeriodicTimer`（`stagger()` を含む）/
+`SerialLineBuffer` / `resolveDeviceIds()` / `parseSerialCommand()` / `blinkIntervalFor()`）を
 対象とする。`main.cpp` の「配線」だった部分で、宛先判定を間違えると
 「他のアクチュエータ宛のフレームで自分が動く」「ブロードキャスト緊急停止が届かない」の
 どちらも起こりうる。
@@ -646,9 +659,9 @@ PC 側の再送周期と STALE 判定が前提にしている値、つまり PC 
 
 - 角度 → パルス幅の線形変換（0deg → `minUs`、`angleRangeDeg` → `maxUs`、範囲外のクランプ）
   と、180 度サーボ向けのスケール変換をしていないこと
-- `angle_min` / `angle_max` でのクランプ、NaN 目標の拒否（仕様書 §7.2）
+- `angle_min` / `angle_max` でのクランプ（仕様書 §7.2）と、固定小数点経路が NaN を通さないこと
 - スルーレート制限と、到達までの所要時間が `距離 / slew_rate` と一致すること（§7.3）
-- 静止中は `currentSlewDegPerSec()` が 0 になること（§7.4 の速度欄の元）
+- 到達後は時間が経っても角度が動かないこと、目標が小さいときは減る方向へ補間すること
 - `holdHere()` が目標を現在角で凍結し、それ以上動かないこと（§7.5）
 - `setLimits()` が可動範囲を狭めたときに現在の目標をクランプし直し、角度を飛ばさないこと（§7.6）
 - `SET_PARAM` が 1 つの ID 表（`0x00`〜`0x06`）で復号され、各基板が使わない ID を無視すること

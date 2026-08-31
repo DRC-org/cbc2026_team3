@@ -15,17 +15,14 @@ MotorSafety::MotorSafety(uint32_t timeoutMs)
 
 void MotorSafety::stop() { latched_ = true; }
 
-bool MotorSafety::tryClear() {
-    latched_ = false;
-    return true;
-}
+void MotorSafety::clear() { latched_ = false; }
 
 EStopAction MotorSafety::handleEStopFrame(const uint8_t *data, uint8_t length) {
     const EStopAction action = decodeEStop(data, length);
     if (action == EStopAction::Stop) {
         stop();
     } else if (action == EStopAction::Clear) {
-        tryClear();
+        clear();
     }
     return action;
 }

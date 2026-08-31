@@ -23,7 +23,8 @@ from types import MappingProxyType
 
 from lib.drivers.base import ControlMode
 
-# 対応するドライバ種別。main._DRIVER_MAP と対で維持する
+# 対応するドライバ種別。main._DRIVER_MAP (種別 → 生成関数) と対で維持する。
+# 全種別がその表を通って生成されるので、片方だけ足すと起動時に KeyError になる
 # (対応が崩れていないことは tests/test_config_schema.py が検証する)
 DRIVER_TYPES = ("m3508", "edulite05", "generic", "dm3520")
 
@@ -347,6 +348,18 @@ def _parse_match(source: str, raw: object) -> MatchSettings:
     return MatchSettings(duration_s=duration)
 
 
+#: tuning の各キーが 0 を許すか。**0 以下だと記録が成立しない**のが既定で、
+#: pre_trigger_s だけが 0 (トリガー前を記録しない) を意味のある設定として許す。
+#: 黙って既定値へ倒さないのは、「設定したのに効かない」状態になると波形が出ない
+#: 原因が config から読めなくなるため。
+_TUNING_ALLOWS_ZERO: dict[str, bool] = {
+    "window_s": False,
+    "pre_trigger_s": True,
+    "min_step_deg": False,
+    "max_points": False,
+}
+
+
 def _parse_tuning(source: str, raw: object) -> TuningSettings:
     if raw is None:
         return TuningSettings()
@@ -359,17 +372,14 @@ def _parse_tuning(source: str, raw: object) -> TuningSettings:
         raise ValueError(f"{source}: tuning.enabled は真偽値である必要があります: {enabled!r}")
 
     values: dict[str, float] = {}
-    for key in ("window_s", "pre_trigger_s", "min_step_deg", "max_points"):
+    for key, allows_zero in _TUNING_ALLOWS_ZERO.items():
         value = section.get(key)
         if value is None:
             continue
         number = _number(source, f"tuning.{key}", value)
-        # 0 以下だと記録が成立しない。黙って既定値へ倒すと「設定したのに効かない」
-        # 状態になり、波形が出ない原因が config から読めなくなる
-        if number <= 0 and key != "pre_trigger_s":
-            raise ValueError(f"{source}: tuning.{key} は正の値である必要があります: {value!r}")
-        if number < 0:
-            raise ValueError(f"{source}: tuning.{key} は 0 以上である必要があります: {value!r}")
+        if number < 0 or (number == 0 and not allows_zero):
+            bound = " 0 以上" if allows_zero else "正の値"
+            raise ValueError(f"{source}: tuning.{key} は{bound}である必要があります: {value!r}")
         values[key] = number
 
     return TuningSettings(

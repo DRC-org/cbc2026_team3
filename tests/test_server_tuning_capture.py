@@ -14,7 +14,7 @@ from lib.can_manager import CANManager
 from lib.sequence.engine import Sequence, step
 from lib.tuning.metrics import Sample
 from lib.tuning.recorder import Capture, PidSnapshot
-from tests.server_fixtures import ServerFixture
+from tests.server_fixtures import RecordingClient, ServerFixture
 
 
 class _NoopSequence(Sequence):
@@ -45,35 +45,11 @@ def _capture(motor: str = "y_axis_r", *, positions: list[float] | None = None) -
     )
 
 
-class _RecordingClient:
-    """配信された JSON を溜めるだけのクライアント。"""
-
-    def __init__(self) -> None:
-        self.sent: list[str] = []
-        self.closed = False
-
-    async def send_str(self, msg: str) -> None:
-        self.sent.append(msg)
-
-    async def close(self) -> None:
-        self.closed = True
-
-    def types(self) -> list[str]:
-        import json
-
-        return [json.loads(msg)["type"] for msg in self.sent]
-
-    def of_type(self, name: str) -> list[dict]:
-        import json
-
-        return [json.loads(msg) for msg in self.sent if json.loads(msg)["type"] == name]
-
-
-def _fixture() -> tuple[ServerFixture, _RecordingClient]:
+def _fixture() -> tuple[ServerFixture, RecordingClient]:
     fx = ServerFixture.build()
     fx.add_robot("main_hand", _NoopSequence(), _bare_can_manager())
     fx.freeze_broadcast()
-    client = _RecordingClient()
+    client = RecordingClient()
     fx.attach_clients(client)
     return fx, client
 

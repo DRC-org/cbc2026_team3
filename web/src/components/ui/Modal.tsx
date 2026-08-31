@@ -1,10 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
 
 import { useModalRegistry } from "@/context/ModalContext";
 import { cx } from "@/lib/cx";
 
 export type ModalTone = "default" | "danger" | "estop";
+
+/** Tab で到達しうる要素。`disabled` の除外は取得後に行う */
+const FOCUSABLE_SELECTOR =
+  'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 interface ModalProps {
   open: boolean;
@@ -65,11 +69,73 @@ export function Modal({
   children,
 }: ModalProps) {
   const { register } = useModalRegistry();
+  const titleId = useId();
+  const boxRef = useRef<HTMLDivElement>(null);
+  const restoreRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
     return register();
   }, [open, register]);
+
+  /**
+   * 開いたら中へフォーカスを入れ、閉じたら元の要素へ戻す。
+   *
+   * 初期フォーカスは**箱そのもの**で、中のボタンには当てない。当てると
+   * 「最初に Enter で押されるもの」がモーダルごとに変わり、確認ダイアログの
+   * 既定が「開始」や「Reset」になる並びを作れてしまう。
+   */
+  useEffect(() => {
+    if (!open) return;
+    restoreRef.current = document.activeElement as HTMLElement | null;
+    boxRef.current?.focus();
+    return () => restoreRef.current?.focus?.();
+  }, [open]);
+
+  /**
+   * Tab を箱の中へ閉じ込める。**`onClose` を持つモーダルだけ。**
+   *
+   * ホットキーは `ModalContext` で封じてあるが、Tab + Enter は素通りするので
+   * 背後の画面の操作へ届いてしまう。一方、緊急停止オーバーレイ (`onClose` 無し)
+   * は一時的なダイアログではなく停止状態の表示そのもので、閉じるまでの間ずっと
+   * 続く。ここを閉じ込めると停止中は画面の他のどこへもキーボードで到達できなく
+   * なるため、トラップは掛けない。**閉じる手段が増えるわけではない**
+   * (Tab で抜けてもオーバーレイは開いたまま)。
+   */
+  useEffect(() => {
+    if (!open || !onClose) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const box = boxRef.current;
+      if (!box) return;
+
+      const focusable = [...box.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+        (el) => !el.hasAttribute("disabled") && el.getAttribute("aria-hidden") !== "true",
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        box.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+
+      if (!box.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && (active === first || active === box)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
 
   useEffect(() => {
     if (!open || !onClose) return;
@@ -89,16 +155,22 @@ export function Modal({
       role="presentation"
     >
       <div
+        ref={boxRef}
+        // 初期フォーカスの受け皿。Tab 順には入れない (-1)
+        tabIndex={-1}
         className={cx(
-          "modal-box flex max-h-[90vh] flex-col gap-2 border p-3",
+          "modal-box flex max-h-[90vh] flex-col gap-2 border p-3 outline-none",
           TONE_BOX_CLASS[tone],
           boxClassName,
         )}
         role={role}
         aria-modal="true"
+        // 読み上げ名は見出しから取る。別名を与えたいときだけ ariaLabel が勝つ
         aria-label={ariaLabel}
+        aria-labelledby={ariaLabel ? undefined : titleId}
       >
         <h3
+          id={titleId}
           className={cx(
             "shrink-0 border-b border-current/15 pb-1 text-[1.05em] font-bold tracking-wide",
             TONE_TITLE_CLASS[tone],

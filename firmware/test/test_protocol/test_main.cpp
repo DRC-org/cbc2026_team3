@@ -155,7 +155,7 @@ static void test_decode_set_target_rejects_short_frame() {
 
 
 // --------------------------------------------------------------------------
-// §3.4 SET_PARAM
+// §3.3 SET_PARAM
 // --------------------------------------------------------------------------
 
 static void test_decode_set_param() {
@@ -167,7 +167,7 @@ static void test_decode_set_param() {
     TEST_ASSERT_EQUAL_FLOAT(0.5f, fromRaw(cmd.raw, kDutyScale));
 }
 
-// パラメータ ID は穴を空けずに詰めてある（仕様書 §3.4）。
+// パラメータ ID は穴を空けずに詰めてある（仕様書 §3.3）。
 // 途中に「予約」を挟むと、対応表を読むたびに使われていない ID を数えることになる。
 static void test_param_ids_are_packed() {
     TEST_ASSERT_EQUAL_UINT8(0x00, static_cast<uint8_t>(ParamId::MaxDuty));
@@ -182,7 +182,7 @@ static void test_param_ids_are_packed() {
     TEST_ASSERT_FALSE(decodeSetParam(data, 3).valid);
 }
 
-// 未知のパラメータ ID は無視する（新ファームと旧基板の混在で止まらないため。仕様書 §3.4）
+// 未知のパラメータ ID は無視する（新ファームと旧基板の混在で止まらないため。仕様書 §3.3）
 static void test_decode_set_param_unknown_id_is_ignored() {
     uint8_t data[3] = {0x42, 0, 0};
     TEST_ASSERT_FALSE(decodeSetParam(data, 3).valid);
@@ -250,7 +250,7 @@ static void test_encode_feedback_with_position() {
     TEST_ASSERT_EQUAL_INT16(900, static_cast<int16_t>(out[1] | (out[2] << 8)));
 }
 
-// 仕様書 §3.6: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
+// 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 static void test_encode_info() {
     uint8_t out[8];
     memset(out, 0xFF, sizeof(out));
@@ -359,7 +359,7 @@ static void test_e_stop_latch() {
     TEST_ASSERT_FALSE(safety.isLatched());  // 起動時は解除済み（仕様書 §5.4）
     safety.stop();
     TEST_ASSERT_TRUE(safety.isLatched());
-    TEST_ASSERT_TRUE(safety.tryClear());
+    safety.clear();
     TEST_ASSERT_FALSE(safety.isLatched());
 }
 
@@ -398,7 +398,7 @@ static void test_safety_output_permission() {
 
     safety.stop();
     TEST_ASSERT_FALSE(safety.isOutputAllowed(100));
-    safety.tryClear();
+    safety.clear();
     TEST_ASSERT_TRUE(safety.isOutputAllowed(100));
 
     TEST_ASSERT_FALSE(safety.isOutputAllowed(600));  // ウォッチドッグ満了
@@ -416,8 +416,8 @@ static void test_status_flags_are_reported() {
                             safety.statusFlags(600));
 }
 
-// 起動直後は出力を止めるが、FEEDBACK bit4（ウォッチドッグ作動中）は立てない。
-// bit4 は「CAN 通信が途絶した」ことの報告であり、指令をまだ 1 通も送っていない
+// 起動直後は出力を止めるが、FEEDBACK bit2（ウォッチドッグ作動中）は立てない。
+// bit2 は「CAN 通信が途絶した」ことの報告であり、指令をまだ 1 通も送っていない
 // 状態はそれに当たらない。立ててしまうと PC 側 check_safety_error() が
 // セッティングタイムの動作確認を指令送信前に FAILED で打ち切り、
 // 健全な基板に対して配線を疑わせる誤誘導になる。
@@ -439,7 +439,7 @@ static void test_status_flags_omit_watchdog_before_first_feed() {
                             safety.statusFlags(100000));
 }
 
-// 一度でも指令を受けた後の満了は本物の通信途絶なので bit4 を立てる
+// 一度でも指令を受けた後の満了は本物の通信途絶なので bit2 を立てる
 static void test_status_flags_report_watchdog_after_first_feed() {
     MotorSafety safety(500);
     safety.feed(1000);
@@ -452,7 +452,7 @@ static void test_status_flags_report_watchdog_after_first_feed() {
 }
 
 // 「起動直後で未受信」と「受信後に途絶」を呼び出し側が区別できること。
-// サーボ側 main.cpp は bit3/bit4 を手書きで組み立てているため、
+// サーボ側 main.cpp は bit2/bit3 を手書きで組み立てているため、
 // 同じ判定を共有できないと基板ごとに挙動がずれる。
 static void test_command_lost_separates_startup_from_dropout() {
     MotorSafety safety(500);
@@ -479,10 +479,10 @@ static void test_watchdog_is_enabled_by_default() {
     TEST_ASSERT_FALSE(safety.isOutputAllowed(500));
 }
 
-// 無効化した基板は途絶しても駆動を続け、bit4 も報告しない（仕様書 §5.1 / §8）。
+// 無効化した基板は途絶しても駆動を続け、bit2 も報告しない（仕様書 §5.1 / §8）。
 // 以前は両 main.cpp が #if で同じ分岐を持っており、servo にだけ実装されて
 // dc_motor では「設定しても効かないフラグ」になっていた。判定は MotorSafety に 1 つだけ置く。
-static void test_disabled_watchdog_allows_output_and_hides_bit4() {
+static void test_disabled_watchdog_allows_output_and_hides_bit2() {
     MotorSafety safety(500);
     safety.setWatchdogEnabled(false);
 
@@ -523,7 +523,7 @@ static void test_disabled_watchdog_still_honors_e_stop_latch() {
     TEST_ASSERT_FALSE(safety.isOutputAllowed(100));
     TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, safety.statusFlags(100));
 
-    safety.tryClear();
+    safety.clear();
     TEST_ASSERT_TRUE(safety.isOutputAllowed(100));
 }
 
@@ -540,7 +540,7 @@ static void test_watchdog_can_be_re_enabled() {
 }
 
 // --------------------------------------------------------------------------
-// §3.4 パラメータ既定値
+// §3.3 パラメータ既定値
 // --------------------------------------------------------------------------
 
 // PC 側の再送周期（command_timeout_ms の数分の 1）と STALE 判定は、この 2 つの値が
@@ -552,10 +552,10 @@ static void test_protocol_defaults_match_spec() {
 }
 
 // --------------------------------------------------------------------------
-// §3.4 / §5.1 タイミングパラメータの受け付け範囲
+// §3.3 / §5.1 タイミングパラメータの受け付け範囲
 // --------------------------------------------------------------------------
 
-// command_timeout_ms（0x04）に上限が無いと、1 フレームでウォッチドッグを実質無効に
+// command_timeout_ms（0x01）に上限が無いと、1 フレームでウォッチドッグを実質無効に
 // できる。仕様書 §5.1 が「このフラグの ID は無く CAN からは変更できない」と書いて
 // 最後の砦を守っているのに、猶予そのものを 49.7 日へ伸ばせば同じ結果になる。
 static void test_command_timeout_param_has_upper_bound() {
@@ -740,11 +740,29 @@ static void test_dc_channel_physical_stop_blocks_until_cleared() {
 }
 
 
+// シリアルデバッグの 's' からその場で止める経路（DC 基板の pollSerial）。
+// ラッチはしないので、次の SET_TARGET で通常どおり回る。
+// **no-op にしても他のテストは 1 件も落ちない**ため、ここで単独に押さえる
+// （SolenoidChannel::hold() / ServoMotion::holdHere() には既にある）。
+static void test_dc_channel_hold_stops_without_latching() {
+    DcChannel ch(500);
+    ch.feed(1000);
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 1000));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(1000));
+
+    ch.hold();
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(1000));
+    TEST_ASSERT_TRUE(ch.isOutputAllowed(1000));
+
+    TEST_ASSERT_TRUE(ch.setDuty(0.4f, 1000));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(1000));
+}
+
 // --------------------------------------------------------------------------
 // §3.2 状態フラグのビット割り当て
 // --------------------------------------------------------------------------
 
-// センサ入力は予約ビットの bit6 に載せる。フレーム長も他のビットの位置も
+// センサ入力は bit4 に載せる。フレーム長も他のビットの位置も
 // 変えないので、対応していない PC 側・基板が混在しても壊れない。
 // 既存のビットと重なると、センサの ON がそのまま緊急停止やウォッチドッグの
 // 報告として読まれる（＝押していないのに機体が止まる／止まったのに気付けない）。
@@ -769,6 +787,202 @@ static void test_sensor_flag_rides_in_its_own_feedback() {
     const uint8_t len = encodeFeedback(out, status_flag::kSensor);
     TEST_ASSERT_EQUAL_UINT8(1, len);
     TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, out[0]);
+}
+
+// --------------------------------------------------------------------------
+// §3.2 / §7.3 / §9.3 FEEDBACK Byte0 の組み立て（composeFeedbackFlags）
+// --------------------------------------------------------------------------
+
+// **DC 基板は到達フラグを立てない**（仕様書 §3.2 / §8）。エンコーダも電流センスも
+// 無いので「到達」を観測する手段が 1 つも無く、指令を出したことを到達として報告すると
+// 断線したモータも「到達」になる。reached に true を渡しても立たないことを見る
+// （呼び出し側の引数ではなく規則そのものを検査するため）。
+static void test_dc_board_never_reports_reached() {
+    const uint8_t flags = composeFeedbackFlags(BoardKind::Dc, SlotKind::Actuator, 0,
+                                               /*configured=*/true, /*reached=*/true,
+                                               /*sensorActive=*/false);
+    TEST_ASSERT_EQUAL_UINT8(0, flags & status_flag::kReached);
+}
+
+// **電磁弁基板も到達フラグを立てない**（仕様書 §9.3）。圧力センサもリミットスイッチも
+// 無く、分かるのは「指令どおり GPIO を駆動した」ことだけ。立てると、断線したソレノイドも
+// 抜けたコネクタも「到達」と報告され、UI にもヘルス判定にも測ったように見える到達が流れ込む。
+static void test_solenoid_board_never_reports_reached() {
+    const uint8_t flags = composeFeedbackFlags(BoardKind::Solenoid, SlotKind::Actuator, 0,
+                                               /*configured=*/true, /*reached=*/true,
+                                               /*sensorActive=*/false);
+    TEST_ASSERT_EQUAL_UINT8(0, flags & status_flag::kReached);
+}
+
+// サーボスロットだけが到達を報告する（仕様書 §7.3 の推定値）。
+// ここが立たなくなると PC 側 move_to が次のステップへ進めない。
+static void test_servo_slot_reports_reached() {
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kReached,
+                            composeFeedbackFlags(BoardKind::Servo, SlotKind::Actuator, 0, true,
+                                                 /*reached=*/true, false) &
+                                status_flag::kReached);
+    TEST_ASSERT_EQUAL_UINT8(0, composeFeedbackFlags(BoardKind::Servo, SlotKind::Actuator, 0, true,
+                                                    /*reached=*/false, false) &
+                                   status_flag::kReached);
+}
+
+// **センサスロットは緊急停止・ウォッチドッグ・到達を立てない**（仕様書 §5.2）。
+// 駆動されないのでどれも意味を持たず、立てると PC 側 check_safety_error() が
+// 「駆動できない状態」と読んで動作確認を打ち切る。
+// safetyFlags を素通しにする実装を弾くため、全ビットを立てて渡す。
+static void test_sensor_slot_drops_safety_flags() {
+    const uint8_t safety = static_cast<uint8_t>(status_flag::kEStop | status_flag::kWatchdog |
+                                                status_flag::kNeverCommanded);
+    const uint8_t flags = composeFeedbackFlags(BoardKind::Servo, SlotKind::Sensor, safety,
+                                               /*configured=*/true, /*reached=*/true,
+                                               /*sensorActive=*/true);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kSensor, flags);
+}
+
+// センサの接触は自分の FEEDBACK でだけ報告する。触れていなければ 0。
+static void test_sensor_slot_reports_only_its_own_contact() {
+    TEST_ASSERT_EQUAL_UINT8(0, composeFeedbackFlags(BoardKind::Servo, SlotKind::Sensor, 0, true,
+                                                    false, /*sensorActive=*/false));
+    // アクチュエータスロットにセンサ入力は乗らない（サーボのフレームに相乗りさせない）
+    TEST_ASSERT_EQUAL_UINT8(0, composeFeedbackFlags(BoardKind::Servo, SlotKind::Actuator, 0, true,
+                                                    false, /*sensorActive=*/true) &
+                                   status_flag::kSensor);
+}
+
+// デバイス ID 未設定はどの基板・どの役割でも報告する（仕様書 §2.2）。
+// PC 側 is_fault() を True にする唯一の手がかりなので、センサでも落としてはならない。
+static void test_unconfigured_is_reported_on_every_slot_kind() {
+    const BoardKind boards[] = {BoardKind::Servo, BoardKind::Dc, BoardKind::Solenoid};
+    for (BoardKind board : boards) {
+        TEST_ASSERT_EQUAL_UINT8(status_flag::kDeviceIdUnconfigured,
+                                composeFeedbackFlags(board, SlotKind::Actuator, 0,
+                                                     /*configured=*/false, false, false) &
+                                    status_flag::kDeviceIdUnconfigured);
+    }
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kDeviceIdUnconfigured,
+                            composeFeedbackFlags(BoardKind::Servo, SlotKind::Sensor, 0,
+                                                 /*configured=*/false, false, false));
+}
+
+// 緊急停止 / ウォッチドッグ / 起動後未受信の判定は MotorSafety が単独で持ち、
+// アクチュエータスロットではその戻り値をそのまま中継する。ここで作り直すと、
+// 「無効化した基板ではウォッチドッグのビットを立てない」等の規則が基板ごとにずれる。
+static void test_actuator_slot_relays_safety_flags() {
+    MotorSafety safety(500);
+    const uint8_t fresh = composeFeedbackFlags(BoardKind::Dc, SlotKind::Actuator,
+                                               safety.statusFlags(0), true, false, false);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kNeverCommanded, fresh);
+
+    safety.feed(1000);
+    safety.stop();
+    const uint8_t stopped = composeFeedbackFlags(BoardKind::Dc, SlotKind::Actuator,
+                                                 safety.statusFlags(1000), true, false, false);
+    TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, stopped);
+}
+
+// --------------------------------------------------------------------------
+// §3.3 3 枚に共通する SET_PARAM（applyCommonParam）
+// --------------------------------------------------------------------------
+
+// **command_timeout_ms はチャンネル単位、feedback_interval_ms は基板全体で 1 つ。**
+// この非対称を 3 枚に書き写していたので、いつか片方だけが逆になる形だった。
+static void test_common_param_routes_timeout_and_interval() {
+    DcChannel channel(500);
+    uint16_t interval = kDefaultFeedbackIntervalMs;
+
+    uint8_t frame[3] = {static_cast<uint8_t>(ParamId::CommandTimeoutMs), 0, 0};
+    packInt16Le(&frame[1], 800);
+    TEST_ASSERT_TRUE(applyCommonParam(decodeSetParam(frame, 3), channel, interval));
+    TEST_ASSERT_EQUAL_UINT32(800, channel.commandTimeoutMs());
+    TEST_ASSERT_EQUAL_UINT16(kDefaultFeedbackIntervalMs, interval);
+
+    frame[0] = static_cast<uint8_t>(ParamId::FeedbackIntervalMs);
+    packInt16Le(&frame[1], 20);
+    TEST_ASSERT_TRUE(applyCommonParam(decodeSetParam(frame, 3), channel, interval));
+    TEST_ASSERT_EQUAL_UINT16(20, interval);
+    TEST_ASSERT_EQUAL_UINT32(800, channel.commandTimeoutMs());
+}
+
+// 範囲外は境界値へ丸める。上限が効かないと、仕様書 §5.1 が守っている最後の砦が
+// SET_PARAM 1 フレームで実質外れる。
+static void test_common_param_clamps_out_of_range() {
+    DcChannel channel(500);
+    uint16_t interval = kDefaultFeedbackIntervalMs;
+
+    uint8_t frame[3] = {static_cast<uint8_t>(ParamId::CommandTimeoutMs), 0, 0};
+    packInt16Le(&frame[1], 30000);
+    applyCommonParam(decodeSetParam(frame, 3), channel, interval);
+    TEST_ASSERT_EQUAL_UINT32(kMaxCommandTimeoutMs, channel.commandTimeoutMs());
+
+    frame[0] = static_cast<uint8_t>(ParamId::FeedbackIntervalMs);
+    packInt16Le(&frame[1], 0);
+    applyCommonParam(decodeSetParam(frame, 3), channel, interval);
+    TEST_ASSERT_EQUAL_UINT16(kMinFeedbackIntervalMs, interval);
+}
+
+// 基板固有の ID は触らずに false を返す。true を返すと、各 applyParam が
+// 自分の switch へ進まなくなって max_duty も angle_min も効かなくなる。
+static void test_common_param_leaves_board_specific_ids() {
+    DcChannel channel(500);
+    uint16_t interval = kDefaultFeedbackIntervalMs;
+    const ParamId others[] = {ParamId::MaxDuty, ParamId::ReachedTolerance, ParamId::SlewRate,
+                              ParamId::AngleMin, ParamId::AngleMax};
+    for (ParamId id : others) {
+        uint8_t frame[3] = {static_cast<uint8_t>(id), 0, 0};
+        packInt16Le(&frame[1], 123);
+        TEST_ASSERT_FALSE(applyCommonParam(decodeSetParam(frame, 3), channel, interval));
+    }
+    TEST_ASSERT_EQUAL_UINT32(500, channel.commandTimeoutMs());
+    TEST_ASSERT_EQUAL_UINT16(kDefaultFeedbackIntervalMs, interval);
+}
+
+// --------------------------------------------------------------------------
+// §2.1 受信フィルタ（電磁弁基板の bxCAN が使う ID 範囲）
+// --------------------------------------------------------------------------
+
+// **PC → モタドラ方向の 3 種別は必ず通す。** ここが落ちると、その基板だけが
+// 緊急停止を受け取れないのに FEEDBACK は流れ続け、PC からは正常に見える。
+static void test_pc_to_board_commands_pass_the_filter() {
+    const CommandType passing[] = {CommandType::EStop, CommandType::SetTarget,
+                                   CommandType::SetParam};
+    for (CommandType command : passing) {
+        // デバイス ID 側のビットは素通しでなければならない（宛先判定は routeFrame の仕事）
+        for (uint16_t dev = 0; dev <= 0xFF; ++dev) {
+            TEST_ASSERT_TRUE(
+                passesPcToBoardFilters(buildCanId(command, static_cast<uint8_t>(dev))));
+        }
+    }
+}
+
+// **モタドラ → PC 方向と予約値は落とす。** 通すと、共有バス上の FEEDBACK
+// （自作モタドラ 14 台 × 100Hz）が受信 FIFO（深さ 3）へ流れ込み、loop() が
+// 一瞬伸びた隙に E_STOP を取りこぼす。
+static void test_board_to_pc_frames_are_filtered_out() {
+    for (uint16_t dev = 0; dev <= 0xFF; ++dev) {
+        TEST_ASSERT_FALSE(
+            passesPcToBoardFilters(buildCanId(CommandType::Feedback, static_cast<uint8_t>(dev))));
+        TEST_ASSERT_FALSE(
+            passesPcToBoardFilters(buildCanId(CommandType::Info, static_cast<uint8_t>(dev))));
+    }
+    for (uint16_t command = 5; command <= 7; ++command) {
+        TEST_ASSERT_FALSE(passesPcToBoardFilters(
+            static_cast<uint16_t>((command << kCommandTypeShift) | 0x2A)));
+    }
+}
+
+// フィルタ値は CommandType から導く。**リテラルで再宣言してはならない** ——
+// この enum は一度動いており（かつて E_STOP は 0b111）、次に動いたときに
+// 電磁弁基板だけがフィルタで緊急停止を落とす形になる。
+static void test_filter_ranges_are_derived_from_the_enum() {
+    TEST_ASSERT_EQUAL_UINT16(commandIdBase(CommandType::EStop), kEStopAndSetTargetFilter.id);
+    TEST_ASSERT_EQUAL_UINT16(commandIdBase(CommandType::SetParam), kSetParamFilter.id);
+    // SET_PARAM 用のバンクは種別 3bit をすべて見る（1 種別だけを通す）
+    TEST_ASSERT_EQUAL_UINT16(kCommandTypeMask, kSetParamFilter.mask);
+    // E_STOP と SET_TARGET を 1 バンクで通すので、両者の差分ビットだけがマスクから落ちる
+    const uint16_t differingBits = static_cast<uint16_t>(
+        commandIdBase(CommandType::EStop) ^ commandIdBase(CommandType::SetTarget));
+    TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(kCommandTypeMask & ~differingBits),
+                             kEStopAndSetTargetFilter.mask);
 }
 
 int main(int, char **) {
@@ -813,7 +1027,7 @@ int main(int, char **) {
     RUN_TEST(test_status_flags_report_watchdog_after_first_feed);
     RUN_TEST(test_command_lost_separates_startup_from_dropout);
     RUN_TEST(test_watchdog_is_enabled_by_default);
-    RUN_TEST(test_disabled_watchdog_allows_output_and_hides_bit4);
+    RUN_TEST(test_disabled_watchdog_allows_output_and_hides_bit2);
     RUN_TEST(test_disabled_watchdog_still_requires_first_command);
     RUN_TEST(test_disabled_watchdog_still_honors_e_stop_latch);
     RUN_TEST(test_watchdog_can_be_re_enabled);
@@ -834,5 +1048,19 @@ int main(int, char **) {
     RUN_TEST(test_dc_channel_rejects_duty_while_latched);
     RUN_TEST(test_dc_channel_output_stops_on_watchdog_and_recovers);
     RUN_TEST(test_dc_channel_physical_stop_blocks_until_cleared);
+    RUN_TEST(test_dc_channel_hold_stops_without_latching);
+    RUN_TEST(test_dc_board_never_reports_reached);
+    RUN_TEST(test_solenoid_board_never_reports_reached);
+    RUN_TEST(test_servo_slot_reports_reached);
+    RUN_TEST(test_sensor_slot_drops_safety_flags);
+    RUN_TEST(test_sensor_slot_reports_only_its_own_contact);
+    RUN_TEST(test_unconfigured_is_reported_on_every_slot_kind);
+    RUN_TEST(test_actuator_slot_relays_safety_flags);
+    RUN_TEST(test_common_param_routes_timeout_and_interval);
+    RUN_TEST(test_common_param_clamps_out_of_range);
+    RUN_TEST(test_common_param_leaves_board_specific_ids);
+    RUN_TEST(test_pc_to_board_commands_pass_the_filter);
+    RUN_TEST(test_board_to_pc_frames_are_filtered_out);
+    RUN_TEST(test_filter_ranges_are_derived_from_the_enum);
     return UNITY_END();
 }

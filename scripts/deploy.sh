@@ -13,15 +13,26 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+
+# journal ではこの接頭辞で発生元を見分ける。deploy.sh は通常ログも警告も同じ
+LOG_PREFIX="[deploy]"
+LOG_WARN_PREFIX="[deploy]"
+LOG_ERR_PREFIX="[deploy]"
+
 SERVICE_NAME="cbc-control.service"
 
 RESTART=1
-[[ "${1:-}" == "--no-restart" ]] && RESTART=0
 
-log()     { echo "[deploy] $*"; }
-log_err() { echo "[deploy] $*" >&2; }
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-restart) RESTART=0; shift ;;
+        -h|--help) usage ;;
+        # 黙って無視すると `--no-restarts` (typo) が**本番サービスを再起動する**
+        *) log_err "不明な引数: $1"; exit 2 ;;
+    esac
+done
 
 # root で実行すると .venv と node_modules が root 所有になり、以降の一般ユーザー
 # での手動起動・ビルドが軒並み権限エラーになる
@@ -41,13 +52,13 @@ done
 
 cd "$PROJECT_DIR"
 
-log "Python 依存を同期 (uv sync --frozen)"
+log_info "Python 依存を同期 (uv sync --frozen)"
 uv sync --frozen
 
-log "Web UI の依存を導入 (pnpm install --frozen-lockfile)"
+log_info "Web UI の依存を導入 (pnpm install --frozen-lockfile)"
 pnpm --dir web install --frozen-lockfile
 
-log "Web UI をビルド (pnpm build)"
+log_info "Web UI をビルド (pnpm build)"
 pnpm --dir web build
 
 # service の ExecStartPre と同じ条件をここでも確かめる。ビルドが黙って
@@ -58,21 +69,21 @@ if [[ ! -f "${PROJECT_DIR}/web/dist/index.html" ]]; then
 fi
 
 if [[ $RESTART -eq 0 ]]; then
-    log "ビルド完了 (--no-restart のためサービスには触れていません)"
+    log_info "ビルド完了 (--no-restart のためサービスには触れていません)"
     exit 0
 fi
 
 if ! systemctl list-unit-files "$SERVICE_NAME" >/dev/null 2>&1 \
     || ! systemctl cat "$SERVICE_NAME" >/dev/null 2>&1; then
-    log "${SERVICE_NAME} は未インストールです。sudo scripts/install.sh を先に実行してください"
+    log_info "${SERVICE_NAME} は未インストールです。sudo scripts/install.sh を先に実行してください"
     exit 0
 fi
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
-    log "${SERVICE_NAME} を再起動"
+    log_info "${SERVICE_NAME} を再起動"
     sudo systemctl restart "$SERVICE_NAME"
     sudo systemctl --no-pager --lines=20 status "$SERVICE_NAME" || true
 else
     # 停止中に勝手に start しない。起動タイミングは操縦者が握る方針のため
-    log "ビルド完了。起動する場合: sudo systemctl start ${SERVICE_NAME}"
+    log_info "ビルド完了。起動する場合: sudo systemctl start ${SERVICE_NAME}"
 fi

@@ -280,32 +280,6 @@ class TestMotorGroup:
         assert drivers["lift_motor"].encoded == [(ControlMode.CURRENT, 300.0)]
         assert mgr.send.await_args.args[0] == "lift_motor"
 
-    async def test_wait_all_reached_true(self) -> None:
-        group, drivers, _mgr = self._group()
-        await group.lift_motor.set_target(ControlMode.POSITION, 10.0)
-        await group.arm_joint.set_target(ControlMode.POSITION, 20.0)
-        drivers["lift_motor"].set_observed(position=10.0)
-        drivers["arm_joint"].set_observed(position=20.0)
-
-        assert await group.wait_all_reached(timeout=0.05) is True
-
-    async def test_wait_all_reached_false_when_one_lags(self) -> None:
-        group, drivers, _mgr = self._group()
-        await group.lift_motor.set_target(ControlMode.POSITION, 10.0)
-        await group.arm_joint.set_target(ControlMode.POSITION, 20.0)
-        drivers["lift_motor"].set_observed(position=10.0)
-        drivers["arm_joint"].set_observed(position=200.0)
-
-        assert await group.wait_all_reached(timeout=0.05) is False
-
-    async def test_wait_all_reached_ignores_motors_without_target(self) -> None:
-        group, drivers, _mgr = self._group()
-        await group.lift_motor.set_target(ControlMode.POSITION, 10.0)
-        drivers["lift_motor"].set_observed(position=10.0)
-        drivers["arm_joint"].set_observed(position=999.0)
-
-        assert await group.wait_all_reached(timeout=0.05) is True
-
     async def test_estop_and_sink_propagate_from_builder(self) -> None:
         mgr = _make_can_manager()
         drivers = {"lift_motor": _FakeDriver("lift_motor", 1)}
@@ -333,7 +307,7 @@ class _BoundSequence(Sequence):
     @step("持ち上げ")
     async def lift(self) -> None:
         await self.motors.lift_motor.set_target(ControlMode.POSITION, 100.0)
-        self.reached = await self.wait_all_reached(timeout=0.05)
+        self.reached = await self.motors.lift_motor.wait_reached(timeout=0.05)
 
 
 class TestSequenceMotorBinding:
@@ -352,11 +326,6 @@ class TestSequenceMotorBinding:
         with pytest.raises(RuntimeError) as excinfo:
             _ = seq.motors
         assert "unbound" in str(excinfo.value)
-
-    async def test_wait_all_reached_unbound_raises(self) -> None:
-        seq = _UnboundSequence()
-        with pytest.raises(RuntimeError):
-            await seq.wait_all_reached(timeout=0.01)
 
     async def test_bound_sequence_can_drive_motors(self) -> None:
         mgr = _make_can_manager()

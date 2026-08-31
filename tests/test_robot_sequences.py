@@ -25,13 +25,6 @@ _ROBOTS = [
     ("sub_hand_positions.yaml", "sub_hand.yaml", SubHandSequence),
 ]
 
-# 同梱 config と位置定数の対応。設定漏れの検出は片方のロボットだけでは意味がないため、
-# 全ロボットを回す試験でこれを共有する
-_ROBOT_CONFIGS = [
-    ("main_hand.yaml", "main_hand_positions.yaml"),
-    ("sub_hand.yaml", "sub_hand_positions.yaml"),
-]
-
 
 class _RecordingDriver(StubFeedbackDriver):
     """指令を共有リストに記録し、即座に到達したことにするテスト用ドライバ。"""

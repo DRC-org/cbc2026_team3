@@ -1,6 +1,7 @@
 import { Hand, Workflow } from "lucide-react";
 
 import { Icon } from "@/components/ui/Icon";
+import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import type { OperationMode } from "@/lib/protocol";
@@ -32,11 +33,11 @@ export function ModeSwitch({ mode, onChange, blockedReason }: ModeSwitchProps) {
   const manual = mode === "manual";
 
   return (
-    <div
-      className={cx(
-        "card card-border flex shrink-0 flex-row items-center gap-3 border-base-300 border-l-[0.4rem] bg-base-100 px-2 py-1",
-        manual ? "border-l-warning" : "border-l-base-300",
-      )}
+    // 手動中は帯そのものを警告色にする。色は TONE_BORDER_L_CLASS が唯一の出どころ
+    <Panel
+      accentTone={manual ? "warning" : "neutral"}
+      className="shrink-0"
+      bodyClassName="flex-row items-center gap-3 p-0 px-2 py-1"
     >
       {/* daisyUI の tabs は「親クラス + 状態クラス」が揃って初めて成立する。
           tab-active を分離して組み立てると選択中の見た目ごと消える */}
@@ -67,6 +68,6 @@ export function ModeSwitch({ mode, onChange, blockedReason }: ModeSwitchProps) {
       {blockedReason ? (
         <span className="ml-auto min-w-0 truncate text-base-content/70">{blockedReason}</span>
       ) : null}
-    </div>
+    </Panel>
   );
 }

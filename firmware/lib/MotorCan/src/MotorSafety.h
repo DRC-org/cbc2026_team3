@@ -2,7 +2,7 @@
 //
 // 現在時刻を millis() で内部取得せず uint32_t nowMs で受け取るのは、
 // native 環境で満了・折り返しを実時間を待たずに検証できるようにするため。
-// DC 用とサーボ用のファームで共有する。
+// DC 用・サーボ用・電磁弁用のファームで共有する。
 
 #pragma once
 
@@ -22,8 +22,15 @@ class MotorSafety {
     void stop();
 
     // ラッチを解除する。解除の可否判定（マジックバイト）は handleEStopFrame 側の責務。
-    // 戻り値は「解除によって状態が変わったか」ではなく「解除後に非ラッチか」。
-    bool tryClear();
+    //
+    // **失敗経路は無いので void を返す。** 以前は tryClear() という名前で常に true を
+    // 返しており、呼び出し側 3 箇所とも戻り値を捨てていた。「try」+ bool は
+    // 「失敗しうる」と読ませるが、この層で解除が拒まれることは無い —— マジックバイトの
+    // 検証は decodeEStop、物理非常停止の再ラッチは applyPhysicalStop（毎ループの
+    // レベル入力であって、この関数の失敗ではない）が持つ。偽の失敗経路を残すと、
+    // いずれ誰かが物理非常停止中の解除を「失敗」として扱う分岐を書き、
+    // 「押している間は絶対に動かない」の成立条件を呼び出し順序へ移してしまう。
+    void clear();
 
     bool isLatched() const { return latched_; }
 
@@ -88,7 +95,7 @@ class MotorSafety {
         return !latched_ && everFed_ && !(watchdogEnabled_ && isExpired(nowMs));
     }
 
-    // FEEDBACK Byte7 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
+    // FEEDBACK Byte0 の緊急停止 / ウォッチドッグのビットを返す（他は呼び出し側で OR する）。
     // ウォッチドッグのビットは isCommandLost() に従うので、起動直後の未受信では立たない。
     uint8_t statusFlags(uint32_t nowMs) const;
 

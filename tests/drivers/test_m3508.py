@@ -162,67 +162,6 @@ class TestHealth:
         assert self.driver.is_fault() is False
 
 
-class TestMotorCheck:
-    """アクチュエータ動作確認 API (Phase 6 段階⑦)。"""
-
-    def setup_method(self) -> None:
-        self.driver = M3508Driver("test_motor", can_id=1)
-
-    def _feed(self, *, velocity: int, current: int = 0, temp: int = 25) -> None:
-        # M3508 フィードバックの velocity 符号は電流符号と一致する想定
-        feed_m3508(self.driver, angle_raw=0, rpm=velocity, current=current, temp=temp)
-
-    def test_check_command_uses_specified_magnitude(self) -> None:
-        msg, context = self.driver.check_command(magnitude=500.0)
-        assert msg.arbitration_id == 0x200
-        assert msg.is_extended_id is False
-        values = struct.unpack(">hhhh", msg.data)
-        # can_id=1 → スロット 0 に 500 mA 投入
-        assert values[0] == 500
-        assert values[1] == 0
-        assert context.target == pytest.approx(500.0)
-        assert context.mode is ControlMode.CURRENT
-
-    def test_check_command_negative_magnitude(self) -> None:
-        msg, context = self.driver.check_command(magnitude=-500.0)
-        values = struct.unpack(">hhhh", msg.data)
-        assert values[0] == -500
-        assert context.target == pytest.approx(-500.0)
-
-    def test_evaluate_passed_when_velocity_sign_matches(self) -> None:
-        _, context = self.driver.check_command(magnitude=500.0)
-        # 電流指令と同符号の rpm がフィードバック → PASSED
-        self._feed(velocity=300)
-        passed, detail = self.driver.evaluate_check_result(context)
-        assert passed is True
-        assert detail is None
-
-    def test_evaluate_failed_when_velocity_sign_mismatch(self) -> None:
-        _, context = self.driver.check_command(magnitude=500.0)
-        # 電流指令は正だが rpm が逆方向 → FAILED
-        self._feed(velocity=-300)
-        passed, detail = self.driver.evaluate_check_result(context)
-        assert passed is False
-        assert detail is not None
-
-    def test_evaluate_failed_when_velocity_near_zero(self) -> None:
-        _, context = self.driver.check_command(magnitude=500.0)
-        # |rpm| < 50 は「回転検出なし」
-        self._feed(velocity=10)
-        passed, detail = self.driver.evaluate_check_result(context)
-        assert passed is False
-        assert detail is not None
-        assert "回転" in detail
-
-    def test_reset_after_check_sends_zero_current(self) -> None:
-        msg = self.driver.reset_after_check()
-        values = struct.unpack(">hhhh", msg.data)
-        assert values[0] == 0
-        assert values[1] == 0
-        assert values[2] == 0
-        assert values[3] == 0
-
-
 class TestMultiTurn:
     """多回転累積角 (リフト軸の位置制御用)。"""
 

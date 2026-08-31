@@ -271,11 +271,12 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 Monitor の設定面 [動作確認]
         │  motor_check_start (WS) / POST /motor_check
         ▼
-RobotServer._motor_check_deny_reason()   ← 起動できるかの唯一の判定
-        │  ①未登録 ②試合中 ③緊急停止中
-        │  ④どれかが手動 ⑤どれかがシーケンス実行中 ⑥既に実行中
+MotorCheckController.deny_reason()       ← 起動できるかの唯一の判定
+        │  ①未登録 ⑥既に実行中          ← コントローラ自身の条件
+        │  ②試合中 ③緊急停止中 ④どれかが手動 ⑤どれかがシーケンス実行中
+        │                                 ← RobotServer._motor_check_environment_deny()
         ▼
-RobotServer._start_motor_check()
+MotorCheckController.start()
         │  全ロボットの position_loop / target_refresher を pause
         ▼
 MotorCheckSequence.run()          ← robots/motor_check.py
@@ -309,14 +310,14 @@ motor_check_state (変化時のみ配信)  ──> web: useMotorCheck()
 ### 排他は全ロボットに掛かる
 
 1 本のシーケンスが両機を動かすので、片方だけ見ると確認中にもう一方が手動で動かされる。
-起動ゲート（`_motor_check_deny_reason`）も、送信経路の停止（`pause`）も、手動切替の
+起動ゲート（`MotorCheckController.deny_reason()`）も、送信経路の停止（`pause`）も、手動切替の
 拒否も、全ロボットが対象。
 
 ### 起動の窓
 
 タスクを作ってから `run()` が駆動を始めるまでに停止が届きうる。`Sequence.run()` は
-冒頭で停止イベントを `clear()` するので、**サーバー側のフラグ
-（`_motor_check_abort_requested`）で覚えておかないとその 1 通が消える**。
+冒頭で停止イベントを `clear()` するので、**シーケンスの外側のフラグ
+（`MotorCheckController._abort_requested`）で覚えておかないとその 1 通が消える**。
 消えると「止めたはずなのに全アクチュエータが順に駆動される」。
 
 ---
@@ -407,9 +408,11 @@ homing:
 | 判定 | 唯一の持ち主 |
 |---|---|
 | 機体の健全性（UI 側） | `web/src/lib/healthVerdict.ts` |
+| ヘルスの最悪値への集約（サーバー側） | `lib/health.py` の `worst_bus_health()` |
+| 動作確認が完了したか（UI 側） | `web/src/lib/motorCheckStatus.ts` |
 | ヘルスのしきい値 | `lib/config_schema.py` の `HealthThresholds` |
 | 左右ずれの境界 | `lib/axis_sync.py` の `SyncGroup.violation()` |
-| 動作確認を起動できるか | `RobotServer._motor_check_deny_reason()` |
+| 動作確認を起動できるか | `MotorCheckController.deny_reason()`（`lib/server_motor_check.py`） |
 | 試合を開始できるか | `MatchState.can_start_match` |
 | フェーズによる可否 | `lib/commands.py` の `CommandSpec` / UI は `lib/phase.ts` |
 

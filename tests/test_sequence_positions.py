@@ -485,7 +485,7 @@ class TestManualSpec:
 
     def test_manual_を書かない軸は連続操作の対象外(self) -> None:
         table = _table()
-        assert table.manual("lift_motor") is None
+        assert table.axis("lift_motor").manual is None
         assert table.manual_axes() == ()
 
     def test_manual_を書いた軸だけが連続操作の対象になる(self) -> None:
@@ -500,7 +500,7 @@ class TestManualSpec:
                 "arm_joint": {"unit": "deg", "command_unit": "rad", "scale": math.pi / 180.0},
             }
         )
-        manual = table.manual("lift_motor")
+        manual = table.axis("lift_motor").manual
         assert manual is not None
         assert (manual.min_value, manual.max_value) == (-2.0, 20.0)
         assert manual.steps == (0.5, 2.0)
@@ -518,7 +518,7 @@ class TestManualSpec:
                 "arm_joint": {"unit": "deg", "command_unit": "rad", "scale": math.pi / 180.0},
             }
         )
-        manual = table.manual("lift_motor")
+        manual = table.axis("lift_motor").manual
         assert manual is not None
         assert len(manual.steps) >= 1
         assert all(step > 0 for step in manual.steps)
@@ -535,7 +535,7 @@ class TestManualSpec:
                 "arm_joint": {"unit": "deg", "command_unit": "rad", "scale": math.pi / 180.0},
             }
         )
-        manual = table.manual("lift_motor")
+        manual = table.axis("lift_motor").manual
         assert manual is not None
         assert manual.clamp(-99.0) == -2.0
         assert manual.clamp(99.0) == 20.0

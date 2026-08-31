@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Iterable
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -30,10 +31,16 @@ from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.health import HealthSnapshot
 from lib.manual import ManualController
-from lib.match_state import MatchState
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
 from lib.server import RobotServer
 from tests.fake_can import mock_can_manager
+
+#: 指差喚呼の既定定義。**項目が 1 つ以上あること自体に意味がある** ——
+#: 空だと `can_start_match` が最初から True になり、フェーズが SETUP を素通りして
+#: READY から始まる。中身 (id / label) を見るテストは自分の定義を明示すること。
+#: 逆に「項目が 1 つも無い」状態を作りたいときは `checklist_definitions=None` を渡す。
+DEFAULT_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")]}
 
 #: 周期配信に割り込まれるとヘルス差分の基準が動く。テストが明示的に呼んだ配信
 #: だけを観測したいときは、この間隔まで伸ばして実質止める
@@ -60,6 +67,7 @@ class ServerFixture:
 
     @classmethod
     def build(cls, **server_kwargs: Any) -> ServerFixture:
+        server_kwargs.setdefault("checklist_definitions", DEFAULT_CHECKLIST)
         return cls(RobotServer(**server_kwargs))
 
     def add_robot(
@@ -181,20 +189,20 @@ class ServerFixture:
         return self.server._compute_health(robot)
 
     async def publish(self, payload: dict) -> None:
-        await self.server._broadcast_json(payload)
+        await self.server._ws.broadcast_json(payload)
 
     async def fanout(self, payloads: list[dict]) -> None:
-        await self.server._fanout(payloads)
+        await self.server._ws.fanout(payloads)
 
     async def publish_e_stop_state(self) -> None:
         await self.server._broadcast_e_stop_state()
 
     async def publish_motor_check_state(self) -> None:
         """動作確認の状態を 1 通配信する (変化が無ければ流れない)。"""
-        await self.server._broadcast_motor_check_state()
+        await self.server._motor_check.publish()
 
     async def publish_motor_check_error(self, message: str) -> None:
-        await self.server._set_motor_check_error(message)
+        await self.server._motor_check.report_error(message)
 
     def broadcast_loop(self) -> Any:
         """配信ループのコルーチン。1 回の例外で止まらないことを見るテスト用。"""
@@ -218,8 +226,23 @@ class ServerFixture:
     #  (1 台の不調で全員のテレメトリを止めない) はこれでしか検証できない。
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def shrink_ws_send_timeout(monkeypatch: Any, seconds: float = 0.05) -> None:
+        """WS 送信の上限を縮める (詰まった相手の切り離しを実時間で待たないため)。
+
+        本番の上限は 1 秒なので、そのまま検証するとテスト 1 件ごとに 1 秒待つ。
+        縮めても見ているもの (上限を超えたら切り離す) は変わらない。
+
+        **モジュール private の書き換えなので、経路はここ 1 本に閉じる。**
+        テスト側に散らすと、定数名が変わったときにどのファイルが黙って
+        「上限を縮めたつもりで縮めていない」状態になったか分からなくなる
+        (monkeypatch.setattr は存在しない属性なら例外を出すが、別の定数へ
+        名前が移ったときは書き換え先だけが古いまま残る)。
+        """
+        monkeypatch.setattr("lib.ws_hub._WS_SEND_TIMEOUT_S", seconds)
+
     def attach_clients(self, *clients: Any) -> None:
-        self.server._ws_clients = set(clients)
+        self.server._ws._clients = set(clients)
 
     def connect_client(self, client: Any) -> None:
         """配信の最中に 1 台繋がってきた状況を作る (``_ws_handler`` の ``add`` 相当)。
@@ -227,25 +250,40 @@ class ServerFixture:
         実機では操縦者がリロードするだけで起きる。配信は ``await`` を挟むので、
         その隙にハンドラが同じ集合を書き換える。
         """
-        self.server._ws_clients.add(client)
+        self.server._ws._clients.add(client)
 
     def is_connected(self, client: Any) -> bool:
-        return client in self.server._ws_clients
+        return client in self.server._ws._clients
+
+    async def run_ws_handler(self, client: Any) -> Any:
+        """接続ハンドラを偽ソケット 1 本で走らせる。
+
+        接続直後に送るスナップショット 3 通 (server_info / match_state /
+        motor_check_state) が送信上限を通っているかは、実ソケットでは検証できない
+        (「読まないまま繋がり続ける相手」を作れない)。``web.WebSocketResponse`` を
+        差し替えてハンドラだけを踏ませる。
+
+        **本ファイル以外でクラスを差し替えないこと。** 生成箇所が増えると、
+        ハンドラの構造が変わったときにどのテストが古い偽物を掴んだまま緑に
+        なっているのか分からなくなる。
+        """
+        with patch("lib.server.web.WebSocketResponse", return_value=client):
+            return await self.server._ws_handler(AsyncMock())
 
     @property
     def client_count(self) -> int:
-        return len(self.server._ws_clients)
+        return len(self.server._ws._clients)
 
     def only_client(self) -> Any:
         """接続中のクライアントが 1 台だけであることを確認して返す。"""
-        clients = self.server._ws_clients
+        clients = self.server._ws._clients
         assert len(clients) == 1, f"接続中のクライアントが 1 台ではない: {len(clients)}"
         return next(iter(clients))
 
     @property
     def has_closing_tasks(self) -> bool:
         """切り離したクライアントを閉じるタスクの参照が残っているか (GC 対策)。"""
-        return bool(self.server._closing_tasks)
+        return bool(self.server._ws._closing_tasks)
 
     async def shutdown(self, app: web.Application) -> None:
         await self.server._on_shutdown(app)
@@ -264,29 +302,29 @@ class ServerFixture:
 
     async def start_motor_check(self) -> bool:
         """動作確認を起動する。拒否されたら False (HTTP POST の 409 と同じ判定)。"""
-        return await self.server._start_motor_check()
+        return await self.server._motor_check.start()
 
     def abort_motor_check(self) -> None:
-        self.server._abort_motor_check()
+        self.server._motor_check.abort()
 
     def motor_check_sequence(self) -> Any:
-        return self.server._motor_check
+        return self.server._motor_check.sequence
 
     def motor_check_state(self) -> dict:
         """配信される動作確認状態。UI が読むのと同じ形。"""
-        return self.server._motor_check_payload()
+        return self.server._motor_check.payload()
 
     def motor_check_error(self) -> str | None:
-        return self.server._motor_check_error
+        return self.server._motor_check.error
 
     async def wait_motor_check_idle(self, *, timeout: float = 2.0) -> None:
-        task = self.server._motor_check_task
+        task = self.server._motor_check._task
         if task is None:
             return
         await asyncio.wait_for(task, timeout=timeout)
 
     async def wait_motor_check_running(self, *, timeout: float = 2.0) -> Any:
-        sequence = self.server._motor_check
+        sequence = self.server._motor_check.sequence
         assert sequence is not None, "動作確認シーケンスが登録されていない"
 
         assert await wait_until(lambda: sequence.is_running, timeout=timeout), (
@@ -310,6 +348,46 @@ class ServerFixture:
 
     def target_refreshers(self, robot: str) -> list[GenericTargetRefresher]:
         return self.server._robots[robot].target_refreshers
+
+
+# ---------------------------------------------------------------------- #
+#  記録用 WS クライアント
+# ---------------------------------------------------------------------- #
+
+
+class RecordingClient:
+    """配信された JSON を溜めるだけの WS クライアント代役。
+
+    実 WebSocket を張ると「何通目に何が流れたか」を待ち合わせ越しにしか見られず、
+    「変化が無ければ流れない」ような *送らないこと* の検証ができない。
+
+    **生の文字列で溜める。** 受け取った時点で dict へ直すと、配信が JSON として
+    壊れていても記録側が先に落ちるため、配信経路の不具合が
+    「テストヘルパの中の例外」として出る。
+
+    障害を作るクライアント (送信が返らない・例外を投げる) はこれとは別物なので
+    統合しない。あちらは ``tests/test_server_broadcast_resilience.py`` が
+    それぞれの障害ごとに持つ。
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.closed = False
+
+    async def send_str(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def messages(self) -> list[dict]:
+        return [json.loads(msg) for msg in self.sent]
+
+    def types(self) -> list[str]:
+        return [msg["type"] for msg in self.messages()]
+
+    def of_type(self, name: str) -> list[dict]:
+        return [msg for msg in self.messages() if msg.get("type") == name]
 
 
 # ---------------------------------------------------------------------- #

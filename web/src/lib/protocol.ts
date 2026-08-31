@@ -14,6 +14,20 @@ import type { EpochSeconds } from "@/lib/time";
  */
 
 /**
+ * 受信条件を満たさなかったペイロードの印。
+ *
+ * **欠けた欄を既定値で埋めてはならない。** 空配列や 0 で埋めると「ラッチしているのに
+ * 画面は平常」「測っていないのに測ったように見える値」へ化け、しかも埋めたことは
+ * 画面のどこからも読めない。読めなかったことを 1 つの値で表し、表示側は
+ * サーバーの `overall=down` を「健全性 判定不能」へ倒すのと同じ扱い (異常側) にする。
+ *
+ * **未配信 (undefined) とは区別する。** 未受信は異常にしない — 届いていないことと
+ * 届いたものが読めないことは、操縦者が次に取る行動が違う。
+ */
+export const MALFORMED = "malformed";
+export type Malformed = typeof MALFORMED;
+
+/**
  * PC 側 PID を持つモータの現在ゲイン。
  *
  * `applies_to` はこの 1 基へ送ったときに実際に適用されるモータ名で、左右直結ペアなら
@@ -182,6 +196,36 @@ export interface ChecklistState {
   completed: boolean;
 }
 
+function isChecklistState(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (typeof value.completed !== "boolean") return false;
+  return (
+    Array.isArray(value.items) &&
+    value.items.every(
+      (item) =>
+        isObject(item) &&
+        typeof item.id === "string" &&
+        typeof item.label === "string" &&
+        typeof item.checked === "boolean",
+    )
+  );
+}
+
+/**
+ * 指差喚呼の進捗を受信境界で確定させる。未配信は空 (サーバーが古い / 未実装)。
+ *
+ * **形が違うものを空へ倒してはならない。** `Checklist` は空を「項目が未定義
+ * (config/checklist.yaml)」と説明するので、読めなかった配信がそこへ紛れると
+ * 操縦者は config を疑って探しに行く。開始可否そのものはサーバーの
+ * `can_start_match` が決めるので、ここが判定不能でも試合は始められる。
+ */
+export function parseChecklists(raw: unknown): Record<string, ChecklistState> | Malformed {
+  if (raw === undefined) return {};
+  if (!isObject(raw)) return MALFORMED;
+  if (!Object.values(raw).every(isChecklistState)) return MALFORMED;
+  return raw as Record<string, ChecklistState>;
+}
+
 /**
  * 試合時間タイマー。**残り時間ではなく「この配信瞬間の経過ミリ秒」**が載る。
  *
@@ -206,8 +250,11 @@ export interface MatchState {
   court: MatchCourt;
   phase: MatchPhase;
   can_start_match: boolean;
-  /** 完了が試合開始のゲートになるロールと、その進捗。キーの集合はサーバーが持つ */
-  checklists: Record<string, ChecklistState>;
+  /**
+   * 完了が試合開始のゲートになるロールと、その進捗。キーの集合はサーバーが持つ。
+   * 読めなかった配信は `MALFORMED` (空へ倒すと「項目が未定義」と見分けが付かない)。
+   */
+  checklists: Record<string, ChecklistState> | Malformed;
   /**
    * タイマーが読めなければ null。**match_state ごと捨ててはならない** —
    * フェーズと指差喚呼の進捗は試合の進行そのものを握っており、タイマーが
@@ -275,6 +322,59 @@ export interface SafetyState {
   position_loops: PositionLoopState[];
   sync_monitors: SyncMonitorState[];
   target_refreshers: TargetRefresherState[];
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+/**
+ * 周期タスク 1 本ぶんの検査。**UI が実際に読む欄しか見ない** ——
+ * `paused` や `violated` は契約上 `unused` と宣言してあり、欠けても表示は成立する。
+ * 読まない欄まで必須にすると、判定不能へ倒す理由が「表示に影響しない欠落」で埋まる。
+ */
+const SAFETY_TASK_SHAPES: Record<string, (task: Raw) => boolean> = {
+  position_loops: (t) => typeof t.bus === "string" && typeof t.running === "boolean",
+  sync_monitors: (t) => isStringArray(t.axes) && typeof t.running === "boolean",
+  target_refreshers: (t) => isStringArray(t.motors) && typeof t.running === "boolean",
+};
+
+/**
+ * `SafetyState` として読めない欄を挙げる (空なら読める)。
+ *
+ * 型は実行時に消えるので、`safety.sync_violations.length` のような読み方は
+ * 配信から 1 欄落ちただけで例外になる。しかも呼び出し元はどれもレンダー本体なので、
+ * 投げれば React ツリーごとアンマウントし、ヘッダーの緊急停止ボタンまで消える。
+ */
+export function safetyShapeErrors(value: unknown): string[] {
+  if (!isObject(value)) return ["safety"];
+
+  const broken: string[] = [];
+  for (const key of ["sync_violations", "unenergized_motors"]) {
+    if (!isStringArray(value[key])) broken.push(key);
+  }
+  for (const key of ["loops_running", "monitors_running", "refreshers_running"]) {
+    if (typeof value[key] !== "boolean") broken.push(key);
+  }
+  for (const [key, isValidTask] of Object.entries(SAFETY_TASK_SHAPES)) {
+    const tasks = value[key];
+    if (!Array.isArray(tasks) || !tasks.every((t) => isObject(t) && isValidTask(t))) {
+      broken.push(key);
+    }
+  }
+  return broken;
+}
+
+/**
+ * 安全機構ペイロードを受信境界で確定させる。
+ *
+ * 検証を通ったら**配信オブジェクトをそのまま返す** (組み立て直さない)。`paused` の
+ * ような UI が読まない欄まで写し取る責務をここに持たせると、サーバーが欄を足すたびに
+ * ここが取りこぼす側になる。
+ */
+export function parseSafety(raw: unknown): SafetyState | Malformed | undefined {
+  if (raw === undefined) return undefined;
+  return safetyShapeErrors(raw).length === 0 ? (raw as SafetyState) : MALFORMED;
 }
 
 /**
@@ -358,7 +458,12 @@ export interface RobotState {
   motors: Record<string, MotorState>;
   e_stop_active?: boolean;
   health?: HealthSnapshot;
-  safety?: SafetyState;
+  /**
+   * 安全機構。受信境界の `parseSafety` が形を確定させるので、読めなかった配信は
+   * `MALFORMED` としてここに載る (**空の SafetyState へ倒さない** — 平常時と
+   * 見分けが付かなくなる)。未配信は undefined。
+   */
+  safety?: SafetyState | Malformed;
   steps?: SequenceStepInfo[];
   /**
    * 操作モードと手動操縦の軸一覧。
@@ -404,6 +509,60 @@ export interface TuningMetrics {
   duration_s: number;
 }
 
+function isNum(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/** 測れなかったときだけ null になる欄。それ以外の null は配信の欠落 */
+const NULLABLE_METRICS = [
+  "rise_time_s",
+  "peak_time_s",
+  "settling_time_s",
+  "oscillation_hz",
+  "damping_ratio",
+] as const;
+
+const REQUIRED_METRICS = [
+  "step_from",
+  "step_to",
+  "step_size",
+  "overshoot_pct",
+  "steady_state_error",
+  "saturation_ratio",
+  "peak_output",
+  "settle_band",
+  "sample_count",
+  "duration_s",
+] as const;
+
+/**
+ * 指標を受信境界で確定させる。
+ *
+ * `isObject` だけを条件にしていた頃は、半端な形がそのまま `MetricsPanel` へ渡り
+ * `m.overshoot_pct.toFixed(0)` がレンダー本体で投げていた。**測れなかった項目の
+ * null (`rise_time_s` 等) と、配信が欠けたことを混ぜてはならない** — 前者は
+ * 「—」と出すのが正しく、後者は指標そのものを信用してはいけない。
+ */
+export function parseTuningMetrics(raw: unknown): TuningMetrics | Malformed | null {
+  // null は「ステップとして解釈できなかった」の表現であって欠落ではない
+  if (raw === null || raw === undefined) return null;
+  if (!isObject(raw)) return MALFORMED;
+  if (!REQUIRED_METRICS.every((key) => isNum(raw[key]))) return MALFORMED;
+  if (!NULLABLE_METRICS.every((key) => raw[key] === null || isNum(raw[key]))) return MALFORMED;
+  return raw as unknown as TuningMetrics;
+}
+
+/**
+ * 描画に使える指標だけを取り出す。未解釈 (null) も判定不能 (MALFORMED) も null。
+ *
+ * **どちらも「数字を出してはいけない」点では同じ**なので、グラフの整定帯のように
+ * 値そのものを使う箇所はこれを通す。両者を言い分ける必要があるのは、操縦者へ
+ * 理由を説明する 1 箇所 (`ResponsePanel`) だけ。
+ */
+export function readableMetrics(metrics: TuningMetrics | Malformed | null): TuningMetrics | null {
+  return metrics === null || metrics === MALFORMED ? null : metrics;
+}
+
 /** 波形。点ごとのオブジェクトではなく列で運ぶ (同じキー名の繰り返しを避ける) */
 export interface TuningSamples {
   t: number[];
@@ -425,8 +584,11 @@ export interface TuningCapture {
   motor: string;
   captured_at: number;
   gains: { kp: number; ki: number; kd: number };
-  /** ステップとして解釈できなかった記録では null (助言も空になる) */
-  metrics: TuningMetrics | null;
+  /**
+   * ステップとして解釈できなかった記録では null (助言も空になる)。
+   * 読めなかった配信は `MALFORMED` — null へ倒すと「解釈できなかった」と混ざる。
+   */
+  metrics: TuningMetrics | Malformed | null;
   advice: TuningAdvice[];
   samples: TuningSamples;
 }
@@ -514,9 +676,17 @@ function parseKnown(raw: Raw): ServerMessage | null {
   const robot = robotOf(raw);
 
   switch (raw.type) {
-    case "state":
-      // モータ名をハードコードしないため、配信内容はそのまま UI 状態へ入れる
-      return robot === null ? null : { type: "state", robot, state: raw as unknown as RobotState };
+    case "state": {
+      if (robot === null) return null;
+      // **`motors` と `steps` は素通しのまま。** モータ名をハードコードしない性質は
+      // 配信をそのまま UI 状態へ入れることで成り立っており、ここで組み立て直すと
+      // モータが 1 基増えるたびに UI 側の変更が要る形へ逆戻りする。
+      // 形を確定させるのは、UI が `.length` / `.filter` を直に呼ぶ `safety` だけ
+      const state = { ...(raw as unknown as RobotState) };
+      const safety = parseSafety(raw.safety);
+      if (safety !== undefined) state.safety = safety;
+      return { type: "state", robot, state };
+    }
 
     case "server_info":
       // 欠けたフラグは「無効」に倒す。開発用ボタンが本番で出るより出ない方が安全。
@@ -540,7 +710,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           court: raw.court as MatchCourt,
           phase: raw.phase as MatchPhase,
           can_start_match: Boolean(raw.can_start_match),
-          checklists: (raw.checklists as MatchState["checklists"]) ?? {},
+          checklists: parseChecklists(raw.checklists),
           timer: parseTimer(raw.timer),
         },
       };
@@ -608,8 +778,9 @@ function parseKnown(raw: Raw): ServerMessage | null {
             kd: num((raw.gains as Raw | undefined)?.kd),
           },
           // metrics が null なのは「ステップとして解釈できなかった」の表現。
-          // 欠けた配信と区別する必要は無く、どちらも指標を出さないのが正しい
-          metrics: isObject(raw.metrics) ? (raw.metrics as unknown as TuningMetrics) : null,
+          // 読めない形は MALFORMED として区別する (null へ倒すと、指標を出せなかった
+          // 記録と欠けた配信が同じ表示になり、配信側の不具合が誰にも見えない)
+          metrics: parseTuningMetrics(raw.metrics),
           advice: Array.isArray(raw.advice) ? (raw.advice as TuningAdvice[]) : [],
           samples,
         },

@@ -42,7 +42,7 @@ from typing import ClassVar
 
 import can
 
-from lib.drivers.base import CheckContext, ControlMode, MotorDriver, MotorState
+from lib.drivers.base import ControlMode, MotorDriver, MotorState
 
 
 class Dm3520CtrlMode(IntEnum):
@@ -412,66 +412,3 @@ class Dm3520Driver(MotorDriver):
         if mode is ControlMode.VELOCITY:
             return super().default_tolerance(mode) * self._RPM_TO_RAD_PER_S
         return super().default_tolerance(mode)
-
-    def prepare_check_steps(self) -> list[tuple[can.Message, float]]:
-        """設定 → 保持目標 → 励磁。起動経路をそのまま合成する。
-
-        励磁手順を書き写すと、片方だけ直したときに「保持目標を書かずに enable して
-        機構が原点へ飛ぶ」が動作確認経路だけで再発する。
-        """
-        return self.initialization_steps() + self.activation_steps(
-            after_set_zero=self.set_zero_on_start
-        )
-
-    def requires_fresh_feedback_for_check(self) -> bool:
-        return True
-
-    def check_safety_error(self) -> str | None:
-        if self.is_fault():
-            label = self.error_label() or f"0x{self.error_code:X}"
-            return f"DM3520 異常: {label}"
-        if self._state.temperature >= 60.0:
-            return f"DM3520 過温 {self._state.temperature:.1f}C"
-        return None
-
-    def check_command(self, *, magnitude: float = 5.0) -> tuple[can.Message, CheckContext]:
-        """運用と同じ制御モードのまま微小量を指令する。
-
-        **この確認は p_max の誤りも同時に検出する。** p_max はフィードバックの
-        固定小数点レンジで、実機のレジスタ (0x15) と config がずれていると位置が
-        比例倍で読めるため、指令した量だけ動いても追従判定を通らない。
-        """
-        if self.mode is ControlMode.VELOCITY:
-            # magnitude は共通単位の rpm。encode_target と同じクランプを context にも
-            # 効かせないと、limit_speed で頭打ちになった瞬間に必ず不合格になる
-            target = self._clamp(
-                magnitude * self._RPM_TO_RAD_PER_S, -self.limit_speed, self.limit_speed
-            )
-            context = CheckContext(
-                mode=ControlMode.VELOCITY,
-                target=target,
-                reference=self._state.velocity,
-                display_scale=1.0 / self._RPM_TO_RAD_PER_S,
-                display_unit="rpm",
-            )
-            return self.encode_target(ControlMode.VELOCITY, target), context
-
-        target = self._clamp(
-            self._state.position + math.radians(magnitude), -self.p_max, self.p_max
-        )
-        context = CheckContext(
-            mode=ControlMode.POSITION,
-            target=target,
-            reference=self._state.position,
-            display_scale=180.0 / math.pi,
-            display_unit="deg",
-        )
-        return self.encode_target(ControlMode.POSITION, target), context
-
-    def evaluate_check_result(self, context: CheckContext) -> tuple[bool, str | None]:
-        return self.evaluate_tracking(context)
-
-    def reset_after_check(self) -> can.Message:
-        # prepare_check_steps が CTRL_MODE を設定値のまま使うので、戻す作業は無く
-        # 無励磁化だけで原状に復帰する
-        return self.encode_disable()

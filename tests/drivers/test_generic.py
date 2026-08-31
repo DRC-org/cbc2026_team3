@@ -123,18 +123,6 @@ class TestEncodeTarget:
         assert msg.data[0] == 3
         assert struct.unpack_from("<h", msg.data, 1)[0] == 0
 
-    def test_on_off_reset_after_check_closes_the_valve(self):
-        """動作確認の後始末は「閉じる」側であること。
-
-        0 = OFF なので reset は必ず消磁になる。ここが非 0 になると、
-        動作確認を流した直後に弁が開いたまま残る。
-        """
-        drv = GenericDriver("valve", 0xC0, control_type=ControlMode.ON_OFF)
-        msg = drv.reset_after_check()
-
-        assert msg.data[0] == 3
-        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
-
     def test_encode_target_keeps_sign(self):
         msg = self.drv.encode_target(ControlMode.DUTY, -0.75)
         assert struct.unpack_from("<h", msg.data, 1)[0] == -7500
@@ -317,7 +305,6 @@ class TestSensorInput:
         self._feed(sensor=True)
         assert self.drv.is_fault() is False
         assert self.drv.has_overcurrent_warning() is False
-        assert self.drv.check_safety_error() is None
 
     def test_does_not_disturb_other_flags(self):
         # 同じ Byte7 に載るので、ビットを取り違えると緊急停止やウォッチドッグと混ざる
@@ -326,93 +313,6 @@ class TestSensorInput:
         assert self.drv.e_stop_active is True
         assert self.drv.watchdog_active is True
         assert self.drv.device_id_unconfigured is False
-
-
-class TestMotorCheck:
-    """アクチュエータ動作確認 API (Phase 6 段階⑦)。"""
-
-    def _feed(self, drv: GenericDriver, *, position_dg: int = 0, **kwargs: object) -> None:
-        # フィードバックの位置は 0.1deg 単位。呼び出し側が生値で書いているため deg へ戻す
-        feed_generic(drv, position=position_dg / 10.0, **kwargs)  # type: ignore[arg-type]
-
-    def test_check_command_default_position(self):
-        drv = GenericDriver("test_motor", 0x01)
-        msg, context = drv.check_command(magnitude=0.1)
-        # control_type デフォルトは POSITION
-        assert msg.data[0] == 0  # position
-        assert struct.unpack_from("<h", msg.data, 1)[0] == 1  # 0.1deg → 生値 1
-        assert context.target == pytest.approx(0.1)
-        assert context.mode is ControlMode.POSITION
-
-    def test_check_command_velocity_mode(self):
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
-        msg, context = drv.check_command(magnitude=50.0)
-        assert msg.data[0] == 1  # velocity
-        assert struct.unpack_from("<h", msg.data, 1)[0] == 500
-        assert context.mode is ControlMode.VELOCITY
-
-    def test_check_command_duty_mode(self):
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
-        msg, _context = drv.check_command(magnitude=0.3)
-        assert msg.data[0] == 2  # duty
-        assert struct.unpack_from("<h", msg.data, 1)[0] == 3000  # 1/10000 単位
-
-    def test_evaluate_position_passed_when_reached_and_within_tolerance(self):
-        drv = GenericDriver("test_motor", 0x01)
-        _, context = drv.check_command(magnitude=10.0)
-        # position=10.0deg, reached フラグ立ち上がり
-        self._feed(drv, position_dg=100, reached=True)
-        passed, detail = drv.evaluate_check_result(context)
-        assert passed is True
-        assert detail is None
-
-    def test_evaluate_position_failed_when_not_reached(self):
-        drv = GenericDriver("test_motor", 0x01)
-        _, context = drv.check_command(magnitude=10.0)
-        # 目標 10.0deg に対して 5.0deg しか動いていない (許容 1.0 超え)
-        self._feed(drv, position_dg=50)
-        passed, detail = drv.evaluate_check_result(context)
-        assert passed is False
-        assert detail is not None
-
-    def test_evaluate_velocity_is_never_auto_judged(self):
-        """速度もプロトコルから外れたので自動判定できない (仕様書 §3.2)。"""
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
-        _, context = drv.check_command(magnitude=100.0)
-        self._feed(drv)
-        passed, detail = drv.evaluate_check_result(context)
-        assert passed is False
-        assert detail is not None
-        assert "magnitude" in detail
-
-    def test_evaluate_duty_is_never_auto_judged(self):
-        """duty は自動判定できない。回転が観測されたように見えても PASSED にしない。
-
-        duty を使うのは自作 DC モタドラだけで、その基板はエンコーダを持たず
-        FEEDBACK の velocity は常に 0 (仕様書 §8)。ここで velocity を信じると、
-        バス上の別フレームを取り違えた値で「動作確認 PASSED」を出しかねない。
-        目視確認 (config/checklist.yaml) へ回すのが唯一正しい扱い。
-        """
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.DUTY)
-        _, context = drv.check_command(magnitude=0.3)
-        self._feed(drv)
-        passed, detail = drv.evaluate_check_result(context)
-        assert passed is False
-        assert detail is not None
-        # 失敗理由が配線不良に見えないよう、除外の手順まで書いてあること
-        assert "magnitude" in detail
-
-    def test_reset_after_check_sends_zero(self):
-        drv = GenericDriver("test_motor", 0x01)
-        msg = drv.reset_after_check()
-        assert msg.data[0] == 0  # POSITION
-        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
-
-    def test_reset_after_check_velocity_mode_sends_zero(self):
-        drv = GenericDriver("test_motor", 0x01, control_type=ControlMode.VELOCITY)
-        msg = drv.reset_after_check()
-        assert msg.data[0] == 1  # VELOCITY
-        assert struct.unpack_from("<h", msg.data, 1)[0] == 0
 
 
 class TestMatchesFeedbackRobustness:
@@ -509,28 +409,21 @@ class TestSafetyStatusFlags:
         assert self.drv.e_stop_active is True
         # 緊急停止中は異常ではないので FAULT にはしない
         assert self.drv.is_fault() is False
-        assert "緊急停止" in (self.drv.check_safety_error() or "")
 
     def test_watchdog_flag(self):
         self._feed(watchdog=True)
         assert self.drv.watchdog_active is True
         assert self.drv.is_fault() is False
-        assert "ウォッチドッグ" in (self.drv.check_safety_error() or "")
 
     def test_unconfigured_device_id_is_fault(self):
         """デバイス ID 未設定だけが FAULT。設定ミスは試合前に必ず気付く必要がある。"""
         self._feed(unconfigured_id=True)
         assert self.drv.device_id_unconfigured is True
         assert self.drv.is_fault() is True
-        assert "デバイス ID" in (self.drv.check_safety_error() or "")
 
         # 新しいフレームで降りること (DIP を直したのに FAULT が残ると原因を追えない)
         self._feed()
         assert self.drv.is_fault() is False
-
-    def test_no_safety_error_when_flags_clear(self):
-        self._feed(reached=True)
-        assert self.drv.check_safety_error() is None
 
     def test_flags_clear_on_recovery(self):
         self._feed(e_stop=True, watchdog=True, unconfigured_id=True)
@@ -541,7 +434,6 @@ class TestSafetyStatusFlags:
         assert self.drv.watchdog_active is False
         assert self.drv.device_id_unconfigured is False
         assert self.drv.is_fault() is False
-        assert self.drv.check_safety_error() is None
 
 
 class TestInfoFrame:
@@ -653,10 +545,3 @@ class TestInfoMismatch:
         feed_generic_info(driver, angle_range_deg=270.0)
 
         assert driver.info_mismatch is None
-
-    def test_check_safety_error_reports_mismatch(self):
-        """型違いのまま動作確認すると指令の 1.5 倍動く。動かす前に打ち切る。"""
-        driver = self._servo()
-        feed_generic_info(driver, firmware_version=2, angle_range_deg=180.0)
-
-        assert driver.check_safety_error() is not None

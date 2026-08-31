@@ -153,6 +153,8 @@ describe("robotReducer", () => {
   });
 
   describe("ステップ応答の保持", () => {
+    // この describe の外で使う場面が無いので、内側に置いたままにする
+    // oxlint-disable-next-line unicorn/consistent-function-scoping
     const capture = (motor: string, kp: number, robot = "main_hand") => ({
       type: "tuning_capture",
       robot,

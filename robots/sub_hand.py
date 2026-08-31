@@ -6,9 +6,10 @@ from lib.sequence.engine import Sequence, step
 
 logger = logging.getLogger(__name__)
 
-# 吸着パッドの電磁弁。config/sub_hand_positions.yaml の axes と 1:1 で対応する。
-# 数値ではなく軸名の一覧なので robots/ に置いてよい (値・待ち時間は yaml が持つ)。
-_VALVE_AXES = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
+#: 吸着パッドの電磁弁。config/sub_hand_positions.yaml の axes と 1:1 で対応する。
+#: 数値ではなく軸名の一覧なので robots/ に置いてよい (値・待ち時間は yaml が持つ)。
+#: 動作確認 (`robots/motor_check.py`) も同じ 1 つを参照する。
+VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
 
 
 def _all_valves(state: str) -> dict[str, str]:
@@ -18,7 +19,7 @@ def _all_valves(state: str) -> dict[str, str]:
     asyncio.gather で並列に回すので、まとめれば待ちは settle_s 1 回分で済む。
     1 個ずつ move_to を呼ぶと弁の応答待ちが個数ぶん直列に積み上がる。
     """
-    return dict.fromkeys(_VALVE_AXES, state)
+    return dict.fromkeys(VALVE_AXES, state)
 
 
 class SubHandSequence(Sequence):

@@ -100,9 +100,9 @@ constexpr int kDipActiveLevel = 0;
 // ピンと表示名だけでよい。
 //
 // 回路図の PUMP1_SW〜PUMP6_SW がそのままチャンネル 0〜5 に対応する。
-// **名前は基板のシルク（PUMP*）ではなく PC 側 yaml のモータ名に合わせてある** —
-// candump とシリアルログと config/sub_hand.yaml を突き合わせるとき、
-// 同じものが 2 つの名前で呼ばれていると対応表を頭の中で引くことになる。
+// **行コメントには基板のシルク（PUMP*）と PC 側 yaml のモータ名を両方書く** —
+// candump と回路図と config/sub_hand.yaml を突き合わせるとき、同じものが 2 つの
+// 名前で呼ばれていると対応表を頭の中で引くことになる。
 constexpr uint8_t kSolenoidChannelCount = 6;
 
 struct SolenoidChannelConfig {
@@ -110,7 +110,10 @@ struct SolenoidChannelConfig {
     // 下位 3bit** になるので（仕様書 §2.2）、配線を差し替えても ID は動かない。
     Port port;
     uint16_t pin;
-    const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
+    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
+    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
+    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
+    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // チャンネル | ピン  | 回路図    | デバイス ID | PC 側のモータ
@@ -125,12 +128,12 @@ struct SolenoidChannelConfig {
 // デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
 // ずれるとその弁は指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
 constexpr SolenoidChannelConfig kSolenoidChannels[kSolenoidChannelCount] = {
-    {Port::B, 1u << 7, "valve_1"},
-    {Port::B, 1u << 6, "valve_2"},
-    {Port::B, 1u << 5, "valve_3"},
-    {Port::B, 1u << 4, "valve_4"},
-    {Port::B, 1u << 3, "valve_5"},
-    {Port::A, 1u << 15, "valve_6"},
+    {Port::B, 1u << 7},   // ch0 = valve_1 (PB7 / PUMP1_SW)
+    {Port::B, 1u << 6},   // ch1 = valve_2 (PB6 / PUMP2_SW)
+    {Port::B, 1u << 5},   // ch2 = valve_3 (PB5 / PUMP3_SW)
+    {Port::B, 1u << 4},   // ch3 = valve_4 (PB4 / PUMP4_SW)
+    {Port::B, 1u << 3},   // ch4 = valve_5 (PB3 / PUMP5_SW)
+    {Port::A, 1u << 15},  // ch5 = valve_6 (PA15 / PUMP6_SW)
 };
 
 // ===========================================================================
@@ -220,8 +223,10 @@ constexpr uint32_t kHeartbeatIntervalMs = 1000;
 // デバッグ用シリアル
 // ===========================================================================
 
-// USART1（PA9 / PA10、115200 baud）から「<チャンネル番号> <0|1>」で開閉を直接指令できる
-// （0 で無効）。緊急停止ラッチ中はシリアルからも駆動できない
-// （SolenoidChannel が入口で指令を拒否する）。
+// USART1（PA9 / PA10）から「<チャンネル番号> <0|1>」で開閉を直接指令できる（0 で無効）。
+// 緊急停止ラッチ中はシリアルからも駆動できない（SolenoidChannel が入口で指令を拒否する）。
+//
+// **ボーレートはここに書かない。** この基板の USART1 は CubeMX が初期化するので、
+// 正は solenoid.ioc（`MX_USART1_UART_Init`）だけが持つ。かつてここに定数があったが
+// 誰も読んでおらず、直しても何も変わらない —— 最も危険な種類の死んだ定数だった。
 #define ENABLE_SERIAL_DEBUG 1
-constexpr uint32_t kSerialBaud = 115200;
