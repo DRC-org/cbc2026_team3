@@ -22,8 +22,6 @@ class PeriodicTimer {
     // 起点を直接置く。サーボ基板が全チャンネル同時送信を避けて位相をずらすのに使う。
     void setLastMs(uint32_t ms) { lastMs_ = ms; }
 
-    uint32_t lastMs() const { return lastMs_; }
-
     // 満了していれば起点を nowMs へ進めて true を返す。
     // 起点を「前回 + interval」ではなく nowMs にするのは、処理が詰まって遅れたときに
     // 取り戻そうとして連続発火するのを避けるため（送信バーストでバスを埋める）。

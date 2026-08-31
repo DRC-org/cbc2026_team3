@@ -64,9 +64,6 @@ class ServoMotion {
     float currentAngleDeg() const { return currentAngleDeg_; }
     float targetAngleDeg() const { return targetAngleDeg_; }
 
-    // 仕様書 §7.4: FEEDBACK の速度欄の元になる値。静止中は 0。
-    float currentSlewDegPerSec() const { return slewDegPerSec_; }
-
     // 仕様書 §7.3 の到達推定。**実測ではなく推定であり、脱調・過負荷・メカ干渉で
     // 実際には動いていなくても true を返す。** PC 側 move_to はこのフラグで次の
     // ステップへ進むため、機構が引っかかっていてもシーケンスは進んでしまう。
@@ -101,7 +98,6 @@ class ServoMotion {
 
     float currentAngleDeg_;
     float targetAngleDeg_;
-    float slewDegPerSec_;
     bool reached_;
 
     // setLimits() が補間をアンカーし直すために使う、直近に観測した時刻。

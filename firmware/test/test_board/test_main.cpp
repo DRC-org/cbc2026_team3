@@ -176,23 +176,10 @@ static void test_device_id_is_a_fixed_bit_split() {
     TEST_ASSERT_EQUAL_UINT8(0x88, makeDeviceId(BoardKind::Dc, 1, 0));
 }
 
-// 基板番号とスロット番号がどう組み合わさっても、種別が違えば衝突しない。
-// かつては帯と刻み幅を人が噛み合わせる必要があり、サーボ基板の DIP を上げると
-// DC 基板の帯を踏む、という穴があった。
-static void test_device_ids_never_collide_across_boards() {
-    for (uint8_t board = 0; board <= kMaxBoardNumber; ++board) {
-        for (uint8_t slot = 0; slot <= kMaxSlotNumber; ++slot) {
-            const uint8_t servo = makeDeviceId(BoardKind::Servo, board, slot);
-            const uint8_t dc = makeDeviceId(BoardKind::Dc, board, slot);
-            TEST_ASSERT_NOT_EQUAL_UINT8(servo, dc);
-            // 予約されている 0x00 / 0xFF には決して着地しない
-            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, servo);
-            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, servo);
-            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdUnconfigured, dc);
-            TEST_ASSERT_NOT_EQUAL_UINT8(kDeviceIdBroadcast, dc);
-        }
-    }
-}
+// 基板番号とスロット番号がどう組み合わさっても種別が違えば衝突しないこと、および
+// 予約されている 0x00 / 0xFF に着地しないことは、電磁弁を含む 3 枚ぶんを
+// test_solenoid の test_device_ids_never_collide_across_three_boards が見る。
+// ここに 2 枚ぶんの版を残すと、片方だけが古くなる形の重複になる。
 
 // DIP を回しすぎた基板を黙って丸めると、別の基板の ID を名乗る。
 // 未設定にしておけば LED が赤く速く点滅し、設定ミスがその場で目に見える。
@@ -347,7 +334,6 @@ int main(int, char **) {
     RUN_TEST(test_reserved_and_out_of_range_ids_are_dropped);
     RUN_TEST(test_feedback_of_other_boards_is_dropped);
     RUN_TEST(test_device_id_is_a_fixed_bit_split);
-    RUN_TEST(test_device_ids_never_collide_across_boards);
     RUN_TEST(test_device_id_out_of_range_is_unconfigured);
     RUN_TEST(test_dip_reads_two_bits);
     RUN_TEST(test_dip_is_active_low_and_lsb_first);

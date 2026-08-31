@@ -43,11 +43,10 @@ constexpr bool kRefActiveLow = true;
 
 // CAN。UNO R4 Minima の CAN ペリフェラルは D4(TX) / D5(RX) に固定されており、
 // Arduino_CAN の CAN インスタンスが variant の PIN_CAN0_TX / PIN_CAN0_RX を使う。
-// ここの定数は配線確認用で、コードから直接は使わない。
-// これらのピンを他用途へ割り当てると PC から止められない基板になるため、
-// src/main.cpp の static_assert が衝突をビルド時に検出する。
-constexpr uint8_t kPinCanTx = PIN_CAN0_TX;
-constexpr uint8_t kPinCanRx = PIN_CAN0_RX;
+// **ここに写しを置かない** —— 正は variant のマクロで、写すと片方だけが古くなる。
+// これらのピンを他用途へ割り当てると PC から止められない基板になるので、
+// src/main.cpp の pinsAvoidCan() が PIN_CAN0_TX / PIN_CAN0_RX を直接見て衝突を
+// ビルド時に検出する。
 
 constexpr uint8_t kPinLed = 13;  // オンボード LED
 constexpr uint8_t kPinRgb = 6;   // シリアル RGB LED（1 個）
@@ -94,8 +93,11 @@ constexpr uint8_t kFirmwareVersion = 1;
 struct DcChannelConfig {
     uint8_t pwmPin;
     uint8_t dirPin;
-    float maxDuty;     // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
-    const char *name;  // シリアルデバッグ表示用。CAN の挙動には影響しない
+    float maxDuty;  // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
+    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
+    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
+    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
+    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // TODO(実機で確認): max_duty はモータとギヤ比が決まってから詰めること。
@@ -105,9 +107,9 @@ constexpr float kDefaultMaxDuty = 0.30f;
 // 既定は config/main_hand.yaml の実構成に合わせてある。ch1 / ch2 は現在未使用で、
 // PC 側の yaml にモータとして登録されていない（指令が来ないので回らない）。
 constexpr DcChannelConfig kDcChannels[kDcChannelCount] = {
-    {kPinPwm[0], kPinDir[0], kDefaultMaxDuty, "conveyor"},
-    {kPinPwm[1], kPinDir[1], kDefaultMaxDuty, "ch1"},
-    {kPinPwm[2], kPinDir[2], kDefaultMaxDuty, "ch2"},
+    {kPinPwm[0], kPinDir[0], kDefaultMaxDuty},  // ch0 = conveyor（メインハンド）
+    {kPinPwm[1], kPinDir[1], kDefaultMaxDuty},  // ch1 = pump_vac（サブハンド）
+    {kPinPwm[2], kPinDir[2], kDefaultMaxDuty},  // ch2 = pump_blow（サブハンド）
 };
 
 // ===========================================================================

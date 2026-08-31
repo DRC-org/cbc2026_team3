@@ -112,7 +112,10 @@ static void test_slew_rate_limits_motion() {
     // 90deg/s × 0.1s = 9deg を超えて動いてはならない
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 9.0f, motion.currentAngleDeg());
     TEST_ASSERT_FALSE(motion.isReached());
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 90.0f, motion.currentSlewDegPerSec());
+
+    // 次の 0.1s でも同じだけしか進まない（定速であること）
+    motion.update(200);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 18.0f, motion.currentAngleDeg());
 }
 
 static void test_reach_time_matches_distance_over_slew_rate() {
@@ -128,23 +131,29 @@ static void test_reach_time_matches_distance_over_slew_rate() {
     TEST_ASSERT_EQUAL_FLOAT(90.0f, motion.currentAngleDeg());
 }
 
-static void test_slew_is_zero_while_idle() {
+// 目標に達したら、以後どれだけ時間が経っても角度が動かないこと。
+// 「静止中」を進行の有無で見る（速度の観測値そのものはプロトコルに無い。仕様書 §3.2）。
+static void test_angle_is_still_while_idle() {
     ServoMotion motion(0.0f, wideLimits());
     motion.update(100);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentSlewDegPerSec());
     TEST_ASSERT_TRUE(motion.isReached());
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentAngleDeg());
 
     motion.setTarget(45.0f, 100);
     motion.update(600);
     TEST_ASSERT_TRUE(motion.isReached());
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentSlewDegPerSec());
+    TEST_ASSERT_EQUAL_FLOAT(45.0f, motion.currentAngleDeg());
+    motion.update(60000);
+    TEST_ASSERT_EQUAL_FLOAT(45.0f, motion.currentAngleDeg());
 }
 
-static void test_slew_sign_follows_direction() {
+// 目標が現在角より小さいときは減る方向へ補間する。符号を落とすと、
+// 戻す指令のたびにサーボが逆側のメカストッパへ走る。
+static void test_motion_follows_direction() {
     ServoMotion motion(90.0f, wideLimits());
     motion.setTarget(0.0f, 0);
     motion.update(100);
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, -90.0f, motion.currentSlewDegPerSec());
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 81.0f, motion.currentAngleDeg());
 }
 
 // SET_PARAM 0x03（reached_tolerance）。既定 0 は「補間完了＝到達」を意味する。
@@ -193,7 +202,6 @@ static void test_hold_here_freezes_target_at_current_angle() {
 
     motion.update(5000);
     TEST_ASSERT_EQUAL_FLOAT(held, motion.currentAngleDeg());
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentSlewDegPerSec());
 }
 
 // --------------------------------------------------------------------------
@@ -303,7 +311,6 @@ static void test_latched_channel_does_not_creep_under_resent_targets() {
     }
 
     TEST_ASSERT_EQUAL_FLOAT(held, channel.currentAngleDeg());
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentSlewDegPerSec());
 }
 
 // 仕様書 §7.5 の「新しい角度指令の受け付けを止め」は文字どおり受け口で止める。
@@ -445,8 +452,8 @@ int main(int, char **) {
     RUN_TEST(test_fixed_point_keeps_nan_out_of_the_motion_layer);
     RUN_TEST(test_slew_rate_limits_motion);
     RUN_TEST(test_reach_time_matches_distance_over_slew_rate);
-    RUN_TEST(test_slew_is_zero_while_idle);
-    RUN_TEST(test_slew_sign_follows_direction);
+    RUN_TEST(test_angle_is_still_while_idle);
+    RUN_TEST(test_motion_follows_direction);
     RUN_TEST(test_reached_tolerance_reports_early);
     RUN_TEST(test_survives_millis_wraparound);
     RUN_TEST(test_hold_here_freezes_target_at_current_angle);

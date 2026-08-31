@@ -74,7 +74,6 @@ class ServoChannel {
     // ---- 観測値（FEEDBACK 用。仕様書 §7.4）----
 
     float currentAngleDeg() const;
-    float currentSlewDegPerSec() const;
     bool isReached() const;
 
    private:

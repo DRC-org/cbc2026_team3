@@ -66,8 +66,6 @@ void ServoChannel::setReachedToleranceDeg(float toleranceDeg) {
 
 float ServoChannel::currentAngleDeg() const { return motion_.currentAngleDeg(); }
 
-float ServoChannel::currentSlewDegPerSec() const { return motion_.currentSlewDegPerSec(); }
-
 bool ServoChannel::isReached() const { return motion_.isReached(); }
 
 }  // namespace motorcan

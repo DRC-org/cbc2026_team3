@@ -117,7 +117,6 @@ uint8_t makeDeviceId(BoardKind board, uint8_t boardNumber, uint8_t slot);
 constexpr int32_t kAngleScale = 10;     // 0.1deg 単位
 constexpr int32_t kDutyScale = 10000;   // 1/10000 単位（duty -1.0～+1.0）
 constexpr int32_t kRateScale = 10;      // 0.1deg/s 単位
-constexpr int32_t kPlainScale = 1;      // ms などそのままの値
 
 // float を固定小数点の int16 へ。**NaN と範囲外はここで飽和させる。**
 // CAN 経路は int16 しか運ばないので NaN は入らない。float が入るのはシリアル

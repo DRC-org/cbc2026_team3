@@ -359,7 +359,7 @@ static void test_e_stop_latch() {
     TEST_ASSERT_FALSE(safety.isLatched());  // 起動時は解除済み（仕様書 §5.4）
     safety.stop();
     TEST_ASSERT_TRUE(safety.isLatched());
-    TEST_ASSERT_TRUE(safety.tryClear());
+    safety.clear();
     TEST_ASSERT_FALSE(safety.isLatched());
 }
 
@@ -398,7 +398,7 @@ static void test_safety_output_permission() {
 
     safety.stop();
     TEST_ASSERT_FALSE(safety.isOutputAllowed(100));
-    safety.tryClear();
+    safety.clear();
     TEST_ASSERT_TRUE(safety.isOutputAllowed(100));
 
     TEST_ASSERT_FALSE(safety.isOutputAllowed(600));  // ウォッチドッグ満了
@@ -523,7 +523,7 @@ static void test_disabled_watchdog_still_honors_e_stop_latch() {
     TEST_ASSERT_FALSE(safety.isOutputAllowed(100));
     TEST_ASSERT_EQUAL_UINT8(status_flag::kEStop, safety.statusFlags(100));
 
-    safety.tryClear();
+    safety.clear();
     TEST_ASSERT_TRUE(safety.isOutputAllowed(100));
 }
 

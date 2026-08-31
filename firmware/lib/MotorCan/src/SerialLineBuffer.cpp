@@ -4,12 +4,6 @@ namespace motorcan {
 
 SerialLineBuffer::SerialLineBuffer(char *storage, uint8_t capacity)
     : storage_(storage), capacity_(capacity), length_(0), pendingReset_(false) {
-    clear();
-}
-
-void SerialLineBuffer::clear() {
-    length_ = 0;
-    pendingReset_ = false;
     if (storage_ != nullptr && capacity_ > 0) {
         storage_[0] = '\0';
     }

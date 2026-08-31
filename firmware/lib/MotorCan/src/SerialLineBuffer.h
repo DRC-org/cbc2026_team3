@@ -27,8 +27,6 @@ class SerialLineBuffer {
 
     const char *line() const { return storage_; }
 
-    void clear();
-
    private:
     char *storage_;
     uint8_t capacity_;

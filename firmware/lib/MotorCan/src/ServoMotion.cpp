@@ -55,7 +55,6 @@ ServoMotion::ServoMotion(float initialAngleDeg, const ServoLimits &limits)
       startMs_(0),
       currentAngleDeg_(0.0f),
       targetAngleDeg_(0.0f),
-      slewDegPerSec_(0.0f),
       reached_(true),
       lastNowMs_(0) {
     // setLimits の正規化（min/max の入れ替え・非正 slew_rate の拒否）を一箇所に集めるため、
@@ -83,7 +82,6 @@ void ServoMotion::setTarget(float angleDeg, uint32_t nowMs) {
     // 入る唯一の経路であるシリアルデバッグは motorcan::toRaw を通す。
     anchorAt(nowMs);
     targetAngleDeg_ = clampAngle(angleDeg);
-    slewDegPerSec_ = 0.0f;
 
     const float remaining = targetAngleDeg_ - currentAngleDeg_;
     reached_ = fabsf(remaining) <= reachedToleranceDeg_;
@@ -102,14 +100,8 @@ void ServoMotion::update(uint32_t nowMs) {
 
     if (travel + kTravelEpsilonDeg >= absDistance) {
         currentAngleDeg_ = targetAngleDeg_;
-        slewDegPerSec_ = 0.0f;
     } else {
-        currentAngleDeg_ =
-            startAngleDeg_ + (distance < 0.0f ? -travel : travel);
-        // 仕様書 §7.4: FEEDBACK の速度は「そのときのスルーレート」。
-        // 補間中は定速なので、符号だけ進行方向に合わせる。
-        slewDegPerSec_ =
-            distance < 0.0f ? -limits_.slewRateDegPerSec : limits_.slewRateDegPerSec;
+        currentAngleDeg_ = startAngleDeg_ + (distance < 0.0f ? -travel : travel);
     }
 
     reached_ = fabsf(targetAngleDeg_ - currentAngleDeg_) <= reachedToleranceDeg_;
@@ -118,7 +110,6 @@ void ServoMotion::update(uint32_t nowMs) {
 void ServoMotion::holdHere(uint32_t nowMs) {
     anchorAt(nowMs);
     targetAngleDeg_ = currentAngleDeg_;
-    slewDegPerSec_ = 0.0f;
     reached_ = true;
 }
 

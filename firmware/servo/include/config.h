@@ -76,7 +76,10 @@ struct ServoSlotConfig {
     // TouchSensor のとき、LOW を「入力あり」とみなすか。
     // 報告ビットは常に FEEDBACK のセンサ入力（自分のデバイス ID で送るので 1 つで足りる）。
     bool sensorActiveLow;
-    const char *name;     // シリアルデバッグ表示用。CAN の挙動には影響しない
+    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
+    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
+    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
+    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // TODO(実機で確認): 角度 → パルス幅の対応。サンプルの attach(pin, 500, 2400) に合わせてある。
@@ -133,13 +136,14 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
 // デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
 // ずれるとそのモータは指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
 constexpr ServoSlotConfig kServoSlots[kServoSlotCount] = {
-    {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false, "gripper"},
-    {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_f"},
-    {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false, "wall_r"},
-    {SlotRole::Servo, 7, 0.0f, kProvisionalLimits, kServoPulse270, false, "sub_gripper"},
+    {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 = gripper
+    {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 = wall_f
+    {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 = wall_r
+    {SlotRole::Servo, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 = sub_gripper
+    // SV4 = origin_sensor。
     // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
     // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
-    {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true, "origin_sensor"},
+    {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},
 };
 
 // ===========================================================================
