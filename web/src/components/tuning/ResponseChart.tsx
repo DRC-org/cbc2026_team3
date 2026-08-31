@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, memo } from "react";
 
 import { readableMetrics } from "@/lib/protocol";
 import type { TuningCapture } from "@/lib/protocol";
@@ -10,13 +10,19 @@ import type { TuningCapture } from "@/lib/protocol";
  * いたのは POS / VEL / TORQUE / TEMP の 4 つの数字だけで、ピークの高さも整定の
  * 有無も操縦者の記憶に頼るしかなかった。ここが「感覚で操作するしかない」の本体。
  *
+ * **memo は飾りではない。** `/pid-tuning` はテレメトリ (20Hz × 2 台) を購読するため、
+ * 記録が 1 件も増えていなくても毎秒 40 回描き直される。ここは最大 300 点 × 3 本の
+ * SVG path 文字列を組み立てるので、素通しにすると調整中ずっと無駄な文字列生成が
+ * 走り続ける。記録 (`tuningCaptures`) は変化時しか参照が変わらないので memo が
+ * 完全に効く形になっている —— **親が毎描画 新しい props を作らないこと**が条件。
+ *
  * 描画は素の SVG で行う。会場のネットワークに依存させないため外部ライブラリを
  * 足さない方針で、この用途 (折れ線 2〜3 本と帯) なら自前で足りる。
  *
  * 色は daisyUI のセマンティックカラーを `currentColor` 経由で受ける。SVG 属性へ
  * 直接カラーコードを書くと、ライト / ダークの切り替えから外れる。
  */
-export function ResponseChart({
+export const ResponseChart = memo(function ResponseChart({
   capture,
   previous,
 }: {
@@ -131,7 +137,7 @@ export function ResponseChart({
       </div>
     </div>
   );
-}
+});
 
 function Legend({ className, children }: { className: string; children: string }) {
   return (

@@ -385,6 +385,9 @@ describe("parseServerMessage", () => {
       duration_s: 0.14,
     };
 
+    // eslint の consistent-function-scoping はここを外へ出せと言うが、payload は
+    // tuning_capture 用の組み立てで、この describe の外で使う場面が無い
+    // oxlint-disable-next-line unicorn/consistent-function-scoping
     const payload = (overrides: object = {}) => ({
       type: "tuning_capture",
       robot: "main_hand",

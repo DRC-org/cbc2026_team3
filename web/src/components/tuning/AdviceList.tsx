@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { AdviceSeverity, TuningAdvice } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
@@ -10,10 +12,13 @@ import type { Tone } from "@/lib/tone";
  * 状態が作れてしまい、操縦者はどちらを信じればよいか分からなくなる
  * (`lib/healthVerdict.ts` を 1 箇所に置いているのと同じ理由)。
  *
+ * memo なのは `ResponseChart` と同じ理由。記録が増えていないのに、テレメトリで
+ * 毎秒 40 回描き直されていた。
+ *
  * 並び順もサーバーが決めた順のまま出す。飽和を先頭に置くことに意味があり
  * (飽和中はゲインを変えても応答が変わらない)、ここで並べ替えるとその順序が消える。
  */
-export function AdviceList({ advice }: { advice: TuningAdvice[] }) {
+export const AdviceList = memo(function AdviceList({ advice }: { advice: TuningAdvice[] }) {
   if (advice.length === 0) {
     return (
       <p className="text-base-content/60">
@@ -34,7 +39,7 @@ export function AdviceList({ advice }: { advice: TuningAdvice[] }) {
       ))}
     </ul>
   );
-}
+});
 
 const TONE_OF: Record<AdviceSeverity, Tone> = {
   ok: "success",

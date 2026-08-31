@@ -509,6 +509,10 @@ export interface TuningMetrics {
   duration_s: number;
 }
 
+function isNum(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 /** 測れなかったときだけ null になる欄。それ以外の null は配信の欠落 */
 const NULLABLE_METRICS = [
   "rise_time_s",
@@ -543,7 +547,6 @@ export function parseTuningMetrics(raw: unknown): TuningMetrics | Malformed | nu
   // null は「ステップとして解釈できなかった」の表現であって欠落ではない
   if (raw === null || raw === undefined) return null;
   if (!isObject(raw)) return MALFORMED;
-  const isNum = (v: unknown) => typeof v === "number" && Number.isFinite(v);
   if (!REQUIRED_METRICS.every((key) => isNum(raw[key]))) return MALFORMED;
   if (!NULLABLE_METRICS.every((key) => raw[key] === null || isNum(raw[key]))) return MALFORMED;
   return raw as unknown as TuningMetrics;

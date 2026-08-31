@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, ShieldAlert } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
@@ -76,6 +76,8 @@ export function SubsystemStatus({
 }: SubsystemStatusProps) {
   const verdict = evaluateHealth(health, safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
+  // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
+  const detailsId = useId();
 
   // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない
   const forcedOpen = verdict.tone === "error" || verdict.tone === "warning";
@@ -94,6 +96,7 @@ export function SubsystemStatus({
           // 数字が並んだまま試合の残り時間ずっと開きっぱなしになる
           onClick={() => setManualOpen(!open)}
           aria-expanded={open}
+          aria-controls={detailsId}
           className="flex shrink-0 cursor-pointer items-center gap-2 px-1 py-1 text-left hover:bg-base-200"
         >
           <Icon as={open ? ChevronDown : ChevronRight} className="text-base-content/60" />
@@ -105,7 +108,7 @@ export function SubsystemStatus({
       ) : null}
 
       {open ? (
-        <div className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
+        <div id={detailsId} className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
           {/* 判定の理由をラベルへ収められなかった場合の逃し先。
               サーバーが「判定不能」を配信したときの原因文はここにしか残らない */}
           {verdict.detail ? (

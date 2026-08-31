@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { cx } from "@/lib/cx";
 import type { TuningMetrics } from "@/lib/protocol";
 
@@ -7,10 +9,13 @@ import type { TuningMetrics } from "@/lib/protocol";
  * **測れなかった項目は「—」と出す。** 0 で埋めると、行き過ぎが無かった応答と
  * 窓の中で目標へ届かなかった応答が同じ表示になり、次に取るべき行動が正反対になる。
  *
+ * memo なのは `ResponseChart` と同じ理由。記録が増えていないのに、テレメトリで
+ * 毎秒 40 回描き直されていた。
+ *
  * 前回の値を並べるのは、調整が「変える前より良くなったか」を判断する作業だから。
  * 数字が 1 つだけだと、操縦者は前回を記憶に頼って比べることになる。
  */
-export function MetricsPanel({
+export const MetricsPanel = memo(function MetricsPanel({
   metrics,
   previous,
 }: {
@@ -57,7 +62,7 @@ export function MetricsPanel({
       </table>
     </div>
   );
-}
+});
 
 interface Row {
   label: string;

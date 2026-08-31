@@ -38,6 +38,8 @@ export class RouteErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // 画面には要約しか出せない。原因の特定に要る stack はコンソールへ残す
+    // (ここを消すと、境界に落ちた例外の痕跡がどこにも残らなくなる)
+    // oxlint-disable-next-line no-console
     console.error("画面の描画に失敗しました", error, info.componentStack);
   }
 
