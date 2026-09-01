@@ -15,7 +15,11 @@ import { COURT_LABEL, isDuringMatch } from "@/lib/phase";
  * 押すそれらと違い、リセットは試合と試合の間にしか押さず、しかも指差喚呼を
  * やり直させる破壊的な操作なので、カーソルを運ぶ数百 ms より読ませることを取る。
  *
- * 呼び出し元は MatchPrep（準備中）と Dashboard に散るため、文言はここに一本化する。
+ * **準備中のやり直しはこれ 1 つに寄せてある。** かつて `MatchPrep` のヘッダには
+ * 指差喚呼のチェックだけを外す CLEAR（`checklist_reset`）が別にあったが、準備フェーズでは
+ * フェーズもタイマーも既に初期状態なので `match_reset` と結果が変わらず、**結果が同じ
+ * ボタンが 2 つ**並んでいた。どちらを押すべきかは画面から判断できず、片方だけ確認を
+ * 挟むという食い違いも生まれる。
  */
 export function useResetConfirm() {
   const { matchReset } = useRobotCommands();

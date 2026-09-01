@@ -149,10 +149,6 @@ export function RootLayout() {
       send({ type: "checklist_set", role, item_id: itemId, checked }),
     [send],
   );
-  const resetChecklist = useCallback(
-    (role: ChecklistRole) => send({ type: "checklist_reset", role }),
-    [send],
-  );
   // 開発用。サーバー側が --dev-tools 起動でなければ command_rejected で返ってくる
   const checkAllChecklist = useCallback(
     (role: ChecklistRole) => send({ type: "checklist_check_all", role }),
@@ -186,7 +182,6 @@ export function RootLayout() {
         onEStopRelease,
         setCourt,
         setChecklistItem,
-        resetChecklist,
         checkAllChecklist,
         matchStart,
         matchFinish,

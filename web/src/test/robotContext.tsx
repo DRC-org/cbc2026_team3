@@ -56,7 +56,6 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     onEStopRelease: vi.fn(),
     setCourt: vi.fn(),
     setChecklistItem: vi.fn(),
-    resetChecklist: vi.fn(),
     checkAllChecklist: vi.fn(),
     matchStart: vi.fn(),
     matchFinish: vi.fn(),

@@ -2016,9 +2016,10 @@ Client → Server:
 
 ```jsonc
 { "type": "set_court", "court": "blue" }
-{ "type": "checklist_set", "role": "main_hand", "item_id": "home_position", "checked": true }
-{ "type": "checklist_reset", "role": "main_hand" }   // role 省略で全ロール
-{ "type": "checklist_check_all", "role": "main_hand" } // 開発用。--dev-tools 起動時のみ受理
+{ "type": "checklist_set", "role": "pre_match", "item_id": "court", "checked": true }
+{ "type": "checklist_reset", "role": "pre_match" }   // role 省略で全ロール。現在 UI からは送らない
+                                                    // (準備中のやり直しは match_reset 1 つに寄せてある)
+{ "type": "checklist_check_all", "role": "pre_match" } // 開発用。--dev-tools 起動時のみ受理
 { "type": "match_start" }
 { "type": "match_finish" }
 { "type": "match_reset" }

@@ -73,7 +73,7 @@ export const MatchPrep = memo(function MatchPrep({
   onPanelOpen: () => void;
 }) {
   const { matchState, serverInfo, connected } = useRobotStatus();
-  const { setChecklistItem, resetChecklist, checkAllChecklist, setCourt } = useRobotCommands();
+  const { setChecklistItem, checkAllChecklist, setCourt } = useRobotCommands();
   const { court, phase } = matchState;
 
   // 読めない配信を空へ倒さない。空は「config に項目が無い」の表現として既に使っており、
@@ -125,13 +125,19 @@ export const MatchPrep = memo(function MatchPrep({
               DEV 全チェック
             </Button>
           ) : null}
+          {/* **やり直しの導線はこの 1 つだけ。** かつてここに CLEAR (checklist_reset)
+              があり、最下段に match_reset のボタンが別にあった。準備フェーズでは
+              フェーズもタイマーも既に初期状態なので**結果が同じ 2 つのボタン**になり、
+              操縦者はどちらを押すべきか画面から判断できなかった。
+              配信を読めていない間は「済んだ項目が 0 件」に見えるので、
+              そのときだけは件数で殺さない (直す手段まで消さない) */}
           <Button
-            disabled={locked || checkedCount === 0}
-            onClick={() => resetChecklist(CHECKLIST_ROLE)}
-            aria-label="指差喚呼のチェックをすべて解除"
+            disabled={locked || (!unreadable && checkedCount === 0)}
+            onClick={onRequestReset}
+            aria-label="指差喚呼をリセットしてセッティングタイムへ戻す"
           >
             <Icon as={RotateCcw} />
-            CLEAR
+            RESET
           </Button>
         </>
       }
@@ -250,17 +256,6 @@ export const MatchPrep = memo(function MatchPrep({
             {itemsOf("final")}
           </Section>
         ) : null}
-
-        {/* 破壊的な操作なので最下段。上の CLEAR (指差喚呼のチェックだけを外す) と違い、
-            試合状態ごとセッティングタイムへ戻す。確認ダイアログは呼び出し側が持つ */}
-        <Section>
-          <div>
-            <Button onClick={onRequestReset} aria-label="セッティングタイムへ戻す">
-              <Icon as={RotateCcw} />
-              試合状態ごとリセット
-            </Button>
-          </div>
-        </Section>
       </div>
     </Panel>
   );

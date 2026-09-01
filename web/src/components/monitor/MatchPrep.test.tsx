@@ -115,15 +115,10 @@ describe("MatchPrep のチェック操作", () => {
     expect(screen.getByLabelText("コート一致")).toBeDisabled();
   });
 
-  it("CLEAR で指差喚呼のチェックだけを外す", async () => {
-    const { context } = mount({
-      items: [item("a", "preflight", true)],
-      completed: false,
-    });
+  it("何もチェックしていなければ RESET を押させない (無意味な確認を出さない)", () => {
+    mount({ items: [item("a", "preflight")], completed: false });
 
-    await userEvent.click(screen.getByRole("button", { name: /チェックをすべて解除/ }));
-
-    expect(context.resetChecklist).toHaveBeenCalledWith("pre_match");
+    expect(screen.getByRole("button", { name: /リセット/ })).toBeDisabled();
   });
 
   it("DEV 全チェックは --dev-tools 起動でしか出さない", () => {
@@ -174,13 +169,35 @@ describe("MatchPrep のコート選択", () => {
     const onRequestReset = vi.fn();
     const { context } = renderWithRobot(
       <MatchPrep onRequestReset={onRequestReset} onPanelOpen={vi.fn()} />,
-      { matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", court: "red" } },
+      {
+        matchState: {
+          ...DEFAULT_MATCH_STATE,
+          phase: "setup",
+          court: "red",
+          checklists: { pre_match: { items: [item("a", "preflight", true)], completed: false } },
+        },
+      },
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "セッティングタイムへ戻す" }));
+    fireEvent.click(screen.getByRole("button", { name: /リセット/ }));
 
     expect(onRequestReset).toHaveBeenCalledTimes(1);
     expect(context.matchReset).not.toHaveBeenCalled();
+  });
+
+  it("やり直しの導線は 1 つだけ (結果が同じボタンを 2 つ並べない)", () => {
+    // かつてヘッダの CLEAR (checklist_reset) と最下段の match_reset が並んでいたが、
+    // 準備フェーズではフェーズもタイマーも初期状態なので結果が同じで、
+    // 操縦者はどちらを押すべきか画面から判断できなかった
+    mount({ items: [item("a", "preflight", true)], completed: false });
+
+    expect(screen.getAllByRole("button", { name: /リセット|解除/ })).toHaveLength(1);
+  });
+
+  it("配信を読めていない間もリセットは押せる (直す手段まで消さない)", () => {
+    mount(MALFORMED);
+
+    expect(screen.getByRole("button", { name: /リセット/ })).toBeEnabled();
   });
 });
 

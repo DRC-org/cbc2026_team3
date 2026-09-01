@@ -65,7 +65,6 @@ export interface RobotCommands {
   onEStopRelease: () => void;
   setCourt: (court: MatchCourt) => void;
   setChecklistItem: (role: ChecklistRole, itemId: string, checked: boolean) => void;
-  resetChecklist: (role: ChecklistRole) => void;
   /** 開発用。サーバーが --dev-tools 起動でなければ拒否される */
   checkAllChecklist: (role: ChecklistRole) => void;
   matchStart: () => void;
@@ -111,7 +110,6 @@ export function RobotProvider({
     onEStopRelease,
     setCourt,
     setChecklistItem,
-    resetChecklist,
     checkAllChecklist,
     matchStart,
     matchFinish,
@@ -160,7 +158,6 @@ export function RobotProvider({
       onEStopRelease,
       setCourt,
       setChecklistItem,
-      resetChecklist,
       checkAllChecklist,
       matchStart,
       matchFinish,
@@ -176,7 +173,6 @@ export function RobotProvider({
       onEStopRelease,
       setCourt,
       setChecklistItem,
-      resetChecklist,
       checkAllChecklist,
       matchStart,
       matchFinish,
