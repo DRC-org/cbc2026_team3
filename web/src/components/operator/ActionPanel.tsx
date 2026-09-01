@@ -1,4 +1,4 @@
-import { ArrowRight, Hand, Play, Square } from "lucide-react";
+import { ArrowRight, Ban, Hand, Play, Square, TriangleAlert } from "lucide-react";
 
 import { TriggerButton } from "@/components/operator/TriggerButton";
 import { Button } from "@/components/ui/Button";
@@ -8,7 +8,12 @@ import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import type { RobotState } from "@/lib/protocol";
-import { isSequenceComplete, sequenceKind, sequenceProgress } from "@/lib/sequenceStatus";
+import {
+  isRestartFromTop,
+  isSequenceComplete,
+  sequenceKind,
+  sequenceProgress,
+} from "@/lib/sequenceStatus";
 import type { Tone } from "@/lib/tone";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
@@ -16,6 +21,13 @@ interface ActionPanelProps {
   state: RobotState;
   inMatch: boolean;
   blockedLabel: string;
+  /**
+   * 試合中でも送れない理由 (切断中など)。null なら送れる。
+   *
+   * **フェーズによる不可 (`blockedLabel`) とは別軸。** 切断は画面側でしか
+   * 分からず、塞がないと「押したのに何も起きない」だけが操縦者に残る。
+   */
+  blockedReason: string | null;
   onStart: () => void;
   onStop: () => void;
   onTrigger: () => void;
@@ -39,15 +51,20 @@ export function ActionPanel({
   state,
   inMatch,
   blockedLabel,
+  blockedReason,
   onStart,
   onStop,
   onTrigger,
 }: ActionPanelProps) {
   const { total_steps: totalSteps, step_index: stepIndex } = state;
   const steps = state.steps ?? [];
+  const blocked = blockedReason !== null;
 
   // 実行状態はサーバーの running を唯一の根拠にする (step_index からの推測をしない)
   const kind = sequenceKind(state);
+  // START が「先頭へ戻して全工程を走り直す」意味になっている状態。判定は
+  // `lib/sequenceStatus.ts` が持ち、確認の要否 (RobotControl) と必ず同じ条件で動く
+  const restartFromTop = isRestartFromTop(state);
   const isComplete = isSequenceComplete(state);
   // 止められるのは動いているときだけ。トリガー待ちもシーケンスは生きている
   const canStop = kind === "running" || kind === "waiting_trigger";
@@ -70,6 +87,10 @@ export function ActionPanel({
 
   // 状態表示と主操作 (TriggerButton) は同じ kind から作る。どちらかを暗黙の
   // フォールバックに任せると、同じ画面が相反する 2 つの事実を出す
+  //
+  // 中断位置から押す START は先頭へ戻るので、そこだけ「待機中 — START で開始」と
+  // 言ってはならない。表示は中断位置 (8/13) を出したまま、押すと全工程が走り直す ——
+  // 表示と動作が食い違う唯一の経路だった
   const status: { label: string; tone: Tone } = !inMatch
     ? { label: blockedLabel, tone: "neutral" }
     : kind === "no_sequence"
@@ -80,7 +101,9 @@ export function ActionPanel({
           ? { label: "許可待ち — NEXT を押してください", tone: "warning" }
           : kind === "running"
             ? { label: "実行中", tone: "info" }
-            : { label: "待機中 — START で開始", tone: "neutral" };
+            : restartFromTop
+              ? { label: "停止中 — START は先頭から走り直します", tone: "warning" }
+              : { label: "待機中 — START で開始", tone: "neutral" };
 
   return (
     // 周辺視野でも状態の変化に気付けるよう、左端を状態色で塗る (Panel が引く)
@@ -101,6 +124,23 @@ export function ActionPanel({
         value={percent}
         max={100}
       />
+
+      {/* シーケンスが落ちた理由。**平常時は 1 ピクセルも出さない。**
+          これが無い間、左右ずれ検出で止まっても画面は「待機中」へ戻るだけで、
+          3 層保護の第 1 層が操縦者から無音だった (押し直せば直ると読める) */}
+      {state.last_error ? (
+        <div className="flex shrink-0 items-start gap-1.5 border-l-[0.25rem] border-l-error bg-error/5 px-3 py-1">
+          <Icon as={TriangleAlert} className="mt-[0.2em] shrink-0 text-error" />
+          <span className="min-w-0">
+            {/* どのステップで落ちたかを先に出す。理由だけでは、どこまで動いて
+                止まったのか (= 今の機体の姿勢) が操縦者に分からない */}
+            <span className="mr-2 font-medium">
+              ステップ {state.last_error.step_index + 1}「{state.last_error.step}」で停止
+            </span>
+            <span className="text-base-content/80">{state.last_error.message}</span>
+          </span>
+        </div>
+      ) : null}
 
       {/* 現在ステップ。視線を戻した一瞬で読めることだけが要件なので、
           画面で最も大きい文字にする */}
@@ -161,7 +201,7 @@ export function ActionPanel({
             時間が生まれるため、ここは 1 アクションで即座に止める */}
         <Button
           tone="danger"
-          disabled={!inMatch || !canStop}
+          disabled={!inMatch || !canStop || blocked}
           onClick={onStop}
           aria-label="シーケンスを通常停止"
           className={PRIMARY_CLASS}
@@ -172,21 +212,28 @@ export function ActionPanel({
 
         {idle ? (
           <Button
-            tone="ok"
+            tone={restartFromTop ? "warn" : "ok"}
+            disabled={blocked}
             onClick={onStart}
-            aria-label="シーケンスを先頭から開始"
+            aria-label={
+              blocked
+                ? `操作不可: ${blockedReason}`
+                : restartFromTop
+                  ? "シーケンスを先頭から再開"
+                  : "シーケンスを先頭から開始"
+            }
             className={PRIMARY_CLASS}
           >
-            <Icon as={Play} />
-            START
-            <Kbd>Space</Kbd>
+            <Icon as={blocked ? Ban : Play} />
+            {blocked ? blockedReason : restartFromTop ? "先頭から再開" : "START"}
+            {blocked ? null : <Kbd>Space</Kbd>}
           </Button>
         ) : (
           <TriggerButton
             kind={kind}
             onTrigger={onTrigger}
-            disabled={!inMatch}
-            disabledLabel={blockedLabel}
+            disabled={!inMatch || blocked}
+            disabledLabel={blockedReason ?? blockedLabel}
           />
         )}
       </div>

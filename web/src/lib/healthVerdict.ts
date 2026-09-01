@@ -1,4 +1,4 @@
-import { MALFORMED, safetyShapeErrors } from "@/lib/protocol";
+import { MALFORMED, healthShapeErrors, safetyShapeErrors } from "@/lib/protocol";
 import type {
   HealthSnapshot,
   Malformed,
@@ -10,6 +10,20 @@ import type { Tone } from "@/lib/tone";
 
 /** `state.safety` として画面まで来うる形。未配信は undefined */
 export type SafetyPayload = SafetyState | Malformed;
+
+/** `state.health` として画面まで来うる形。未配信は undefined */
+export type HealthPayload = HealthSnapshot | Malformed;
+
+/**
+ * 描画にそのまま使えるヘルスだけを取り出す。読めなかった配信 (`MALFORMED`) は undefined。
+ *
+ * 内訳を並べる部品 (`HealthIndicator` / `MotorSummary`) は「読めなかった」を
+ * 表現する手段を持たないので、そこへ渡す前にここで落とす。**判定側
+ * (`evaluateHealth`) は落とさない** —— あちらは MALFORMED を異常として出す役。
+ */
+export function readableHealth(health: HealthPayload | undefined): HealthSnapshot | undefined {
+  return health === undefined || health === MALFORMED ? undefined : health;
+}
 
 export interface HealthVerdict {
   tone: Tone;
@@ -206,11 +220,28 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
  * サーバーが `MotorHealth.state = warning` として既に配信している。UI が別途数えると
  * 同じ 1 基が 2 件として計上され、しかも UI 側のしきい値がサーバーとずれていれば
  * 件数そのものがサーバー判定と食い違う。数えるのは配信された健全性だけにする。
+ *
+ * **`connected` を必ず渡す。** 切断中の判定は「通信が切れた瞬間の値」であって
+ * 今の機体ではない。既定値を持たせて省略できるようにすると、書き忘れた画面だけが
+ * 凍った緑の「異常なし」を出し続ける (`motorCheckStatus` が切断を判定へ織り込んで
+ * いるのと同じ理由で、ここも呼び出し側に宣言させる)。
  */
 export function evaluateHealth(
-  health: HealthSnapshot | undefined,
-  safety?: SafetyPayload,
+  health: HealthPayload | undefined,
+  safety: SafetyPayload | undefined,
+  connected: boolean,
 ): HealthVerdict {
+  // 通信が落ちている間、手元にあるのは切れた瞬間の値でしかない。緑の「異常なし」を
+  // 出し続けると、操縦者はそれを今の機体の状態として読む。色は付けない (neutral) ——
+  // 異常だと言い切ることもできないため
+  if (!connected) {
+    return {
+      tone: "neutral",
+      label: "通信断のため判定不能",
+      detail: "サーバーと切断しています。表示は切断時点の値で、今の機体の状態ではありません",
+    };
+  }
+
   // 判定と詳細表示を同じ列挙から作る。チップは「種別 + 対象」、詳細行は復旧手順を担う
   const [safetyIssue] = describeSafetyIssues(safety);
   if (safetyIssue) {
@@ -218,6 +249,26 @@ export function evaluateHealth(
   }
 
   if (!health) return { tone: "neutral", label: "ヘルス未取得" };
+
+  // 受信境界 (`parseHealth`) を通っていても、`health` を props で受け取る経路
+  // (SubsystemStatus) は残る。型は実行時に消えるので、ここでも形を確かめる。
+  // **`?? []` で埋めてはならない** —— 埋めると「バスが 1 本も無いから異常なし」に
+  // 化け、埋めたこと自体が画面から読めなくなる
+  if (health === MALFORMED) {
+    return {
+      tone: "error",
+      label: "健全性 判定不能",
+      detail: "ヘルスの配信を読めていません。CAN もモータも異常を検知できない状態です",
+    };
+  }
+  const brokenHealth = healthShapeErrors(health);
+  if (brokenHealth.length > 0) {
+    return {
+      tone: "error",
+      label: "健全性 判定不能",
+      detail: `ヘルスの配信を読めていません (${brokenHealth.join(", ")})`,
+    };
+  }
 
   const downBuses = health.buses.filter((b) => b.state === "down");
   if (downBuses.length > 0) {

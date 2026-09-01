@@ -491,11 +491,20 @@ class CANManager:
             motor_name,
         )
 
-    async def run(self) -> None:
+    async def run(self) -> list[str]:
+        """受信ループを立ててから起動時設定と励磁を行う。
+
+        Returns:
+            有効化できなかったモータ名。**呼び出し側は捨ててはならない** ——
+            起動時の励磁失敗はここ以外に現れる場所が無く、捨てると症状は
+            「指令しても動かない」だけになる。フィードバックは
+            `QueryDrivenTargetRefresher` の問い合わせで流れ出すので、
+            ヘルスは OK のまま無励磁だけが残る。
+        """
         for bus_name in self._buses:
             task = asyncio.create_task(self._receive_loop(bus_name))
             self._tasks.append(task)
-        await self.initialize_motors()
+        return await self.initialize_motors()
 
     async def initialize_motors(self) -> list[str]:
         """各モータの起動時設定を宣言順に送り、続けて励磁を有効化する。

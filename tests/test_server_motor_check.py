@@ -24,7 +24,7 @@ from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.manual import ManualController
-from lib.sequence.engine import Sequence, step
+from lib.sequence.engine import AxisSyncError, Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
@@ -476,6 +476,47 @@ class TestBroadcast:
         sequence.gate.set()
         await fx.wait_motor_check_idle()
         assert fx.motor_check_state()["running"] is False
+
+    async def test_失敗したステップと理由を状態に載せる(self) -> None:
+        """**動作確認が失敗したことが画面に出なければ、確認そのものが意味を失う。**
+
+        到達タイムアウトも左右ずれもシーケンスのステップ単位 try で握られるため、
+        載せない限り `error:None` / `step_index:0` のまま「一度も実行していない」と
+        同じ表示に戻る。`config/checklist.yaml` の「アクチュエータ動作確認 完了」は、
+        その誤表示のままチェックが付く経路になる。
+        """
+
+        class _FailingCheck(Sequence):
+            @step("グリッパ 開閉")
+            async def grip(self) -> None:
+                raise AxisSyncError("軸内のモータ位置がずれています (y_axis: 偏差 3.0 > 許容 2.0)")
+
+        fx, _ = _build(check=_FailingCheck("motor_check"))
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_idle()
+
+        state = fx.motor_check_state()
+        assert state["last_error"] == {
+            "step_index": 0,
+            "step": "グリッパ 開閉",
+            "message": "軸内のモータ位置がずれています (y_axis: 偏差 3.0 > 許容 2.0)",
+        }
+        # 表示 1 行 (error) にも必ず出す。既存 UI はここしか読んでいない
+        assert "グリッパ 開閉" in (state["error"] or "")
+        assert "ずれています" in (state["error"] or "")
+
+    async def test_成功した動作確認は理由を残さない(self) -> None:
+        fx, sequence = _build()
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_running()
+        sequence.gate.set()
+        await fx.wait_motor_check_idle()
+
+        state = fx.motor_check_state()
+        assert state["last_error"] is None
+        assert state["error"] is None
 
     async def test_起動できない理由を状態に載せる(self) -> None:
         """UI は理由を説明するだけ。可否をクライアントで導出し直させない。"""

@@ -132,8 +132,12 @@ void ServoMotion::setLimits(const ServoLimits &limits) {
     // 直近に観測した時刻へアンカーし直す。し直さないと、変更後のスルーレートが
     // 変更前の経過時間にさかのぼって効いて角度が飛ぶ。
     anchorAt(lastNowMs_);
-    currentAngleDeg_ = clampAngle(currentAngleDeg_);
-    startAngleDeg_ = currentAngleDeg_;
+
+    // **現在角には手を付けない。** 現在角はサーボが実際に居る位置の推定値であって、
+    // 範囲を狭めた瞬間にそこへ書き換えると、スルーレート制限の外側で 1 ティックも
+    // 待たずに飛ぶ（可動範囲を 20deg 上げただけで指令パルスが 20deg 分ジャンプする）。
+    // §7.6 の変更は**目標に対する制約**なので、クランプするのは目標角だけにして、
+    // 範囲の外に出た現在角はクランプ後の目標へ向かって補間で戻す。
     targetAngleDeg_ = clampAngle(targetAngleDeg_);
     reached_ = fabsf(targetAngleDeg_ - currentAngleDeg_) <= reachedToleranceDeg_;
 }

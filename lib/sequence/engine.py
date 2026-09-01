@@ -40,6 +40,26 @@ class StepInfo:
     require_trigger: bool
 
 
+@dataclass(frozen=True)
+class StepFailure:
+    """失敗したステップと理由。**操縦者が失敗を知る唯一の手掛かり。**
+
+    到達タイムアウト・左右ずれ・零点確定失敗はどれもステップ単位の try で握られる。
+    握った結果を残さないと journal 以外どこにも出ず、画面は「待機中」と同じ表示に
+    戻る (3 層保護の第 1 層である `AxisSyncError` が画面から無音になる)。
+
+    メソッド名は載せない。`StepInfo.method_name` を配信に含めないのと同じ理由で、
+    操縦者に見せて意味があるのはラベルと理由だけ。
+    """
+
+    step_index: int
+    label: str
+    message: str
+
+    def to_dict(self) -> dict:
+        return {"step_index": self.step_index, "step": self.label, "message": self.message}
+
+
 def step(label: str, *, require_trigger: bool = False) -> Callable:
     def decorator(method: Callable) -> Callable:
         method._step_label = label  # type: ignore[attr-defined]
@@ -78,6 +98,9 @@ class Sequence:
         self._resume_event: asyncio.Event = asyncio.Event()
         # request_jump で次の反復に反映する目標 index
         self._jump_request: int | None = None
+        # 直近の実行で失敗したステップ。次の実行が始まるまで保持する
+        # (平常時は None。値が無いことを空文字で表さない)
+        self._last_error: StepFailure | None = None
         # 自陣コート。赤青で配置が左右反転するため各 step 内で参照して動作を分ける
         self._court: Court = Court.RED
         # モータアクセス層。bind_motors で外部から注入する (未注入でもシーケンスは動作する)
@@ -208,6 +231,15 @@ class Sequence:
         return self._running
 
     @property
+    def last_error(self) -> StepFailure | None:
+        """直近の実行で失敗したステップ。失敗していなければ None。
+
+        次の実行 (`run()`) が始まった時点で捨てる。残すと、走り直した後の画面に
+        前回の失敗が出たままになり、操縦者は今の実行が失敗したのだと読む。
+        """
+        return self._last_error
+
+    @property
     def steps(self) -> tuple[StepInfo, ...]:
         """宣言順のステップ表 (読み取り専用ビュー)。
 
@@ -240,6 +272,9 @@ class Sequence:
             "waiting_trigger": self._waiting_trigger,
             "running": self._running,
             "steps": self.steps_info,
+            # 失敗を配信に載せる唯一の経路。載せないと、止まった理由が journal に
+            # しか残らず、画面は「待機中 — START で開始」と描くだけになる
+            "last_error": self._last_error.to_dict() if self._last_error is not None else None,
         }
 
     def trigger(self) -> None:
@@ -250,13 +285,7 @@ class Sequence:
         """指定インデックスへジャンプ。実行中なら次の境界で反映、停止中なら再開。"""
         if not (0 <= index < len(self._steps)):
             return
-        self._jump_request = index
-        if self._running:
-            # 実行中: トリガー待機を解除してジャンプを反映させる
-            self._trigger_event.set()
-        else:
-            # 通常停止後・完走後: 再開イベントで run() ループを起こす
-            self._resume_event.set()
+        self._request_index(index)
 
     def request_stop(self) -> None:
         """通常停止 (緊急停止と異なり CAN 層には介入しない)。"""
@@ -266,14 +295,41 @@ class Sequence:
 
     def request_start(self) -> None:
         """先頭から実行開始。完走後・停止後の再起動に使う。"""
-        self._jump_request = 0
-        self._resume_event.set()
+        self._request_index(0)
+
+    def _request_index(self, index: int) -> None:
+        """次に実行するステップを予約する。開始要求もジャンプ要求もここを通る。
+
+        **実行中は再開イベントを立てない。** 立てると、その 1 通が次の通常停止まで
+        イベントとして残り、`run()` が降りた瞬間に `run_forever` が拾って、操縦者が
+        何も押していないのに先頭から全工程を走り直す。実行中に届く 2 通目の開始要求は
+        現実に起きる —— 操縦者 2 名 + 予備タブが同じ画面を開いており、配信周期
+        (50ms) 以内の二度押しでも、詰まったクライアントが最大 1 秒古い `running:false`
+        を描いていても届く。`match_finish` 経由なら、フェーズが `finished` なのに
+        機体だけが動き続けることになる (`run_forever` はフェーズを見ない)。
+
+        開始とジャンプで分岐を書き分けないのは、片方だけがこの規則を失うのを
+        防ぐため (症状は書き直した側にしか出ない)。
+        """
+        self._jump_request = index
+        if self._running:
+            # 実行中: トリガー待機を解除して次の境界で反映させる
+            self._trigger_event.set()
+        else:
+            # 通常停止後・完走後: 再開イベントで run() ループを起こす
+            self._resume_event.set()
 
     def discard_pending_start(self) -> None:
         """まだ run_forever に拾われていない開始/ジャンプ要求を捨てる。
 
         緊急停止の直前に届いた開始要求を残したままにすると、停止処理を終えた
         次の瞬間にその要求が発火し、操縦者が何も押していないのに機体が動き出す。
+
+        **破棄したことの正は `_jump_request` が None であることに置く。**
+        `_resume_event.clear()` だけでは、既に待機に入っている `run_forever` の
+        1 回を取り消せない (`asyncio.Event` は `set()` の時点で待機中の future を
+        解決してしまう)。イベントを落とすのは、まだ待機に入っていない場合に
+        余計な起床そのものを省くため。
         """
         self._resume_event.clear()
         self._jump_request = None
@@ -295,6 +351,15 @@ class Sequence:
         while True:
             await self._resume_event.wait()
             self._resume_event.clear()
+            if self._jump_request is None:
+                # **`clear()` だけでは要求を取り消せない。** `asyncio.Event` は
+                # `set()` の時点で待機中の future を解決してしまうので、その後の
+                # `clear()` は既に起きることが決まった 1 回を止められない
+                # (`run_forever` は常にここで待っているので、本番では必ずこの形になる)。
+                # 破棄されたかどうかは要求そのもの (`_jump_request`) で判断する ——
+                # 無ければ、緊急停止や通常停止が捨てた要求で起こされただけなので
+                # 1 歩も動かさずに待ち直す
+                continue
             try:
                 await self.run()
             except asyncio.CancelledError:
@@ -310,6 +375,9 @@ class Sequence:
     async def run(self) -> None:
         self._running = True
         self._stop_event.clear()
+        # 前回の失敗は今回の実行には掛からない。残すと、走り直した後の画面に
+        # 前回の理由が出たままになる
+        self._last_error = None
         try:
             while not self._stop_event.is_set():
                 if self._jump_request is not None:
@@ -334,9 +402,16 @@ class Sequence:
                     await method()
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as exc:
                     logger.exception(
                         "シーケンス '%s' のステップ '%s' で例外", self.name, step_info.label
+                    )
+                    # ログだけでは操縦者に届かない。到達タイムアウトも左右ずれも
+                    # 零点確定失敗もここへ集まるので、配信できる形にして残す
+                    self._last_error = StepFailure(
+                        step_index=self._current_index,
+                        label=step_info.label,
+                        message=str(exc) or "ステップの実行に失敗しました",
                     )
                     break
 
@@ -353,3 +428,4 @@ class Sequence:
         self._trigger_event.clear()
         self._stop_event.clear()
         self._jump_request = None
+        self._last_error = None

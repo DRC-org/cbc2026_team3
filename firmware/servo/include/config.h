@@ -169,12 +169,18 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 //
 // 2: INFO にサーボ可動レンジ（Byte3-4）を追加。v1 は DLC=3 のままなので、PC 側は
 //    「レンジ不明」として扱い、期待値が書かれていれば不一致（＝焼き忘れ）と判定する。
+// 3: デバイス ID 未設定のスロットが FEEDBACK / INFO を 1 通も送らなくなった（§2.2）。
+//    v2 までは CAN ID 0x300（デバイス ID 0x00）で送っていたが、PC 側は can_id を
+//    0x01〜0xFE に限るので**そのフレームを claim できるドライバが存在せず**、
+//    「デバイス ID 未設定」の報告経路は構造的に死んでいた。しかも複数の基板が同時に
+//    未設定だと、異なるノードが同じ ID で異なるデータを送ってバスがエラーフレームで
+//    埋まる。設定ミスの通知は LED（赤の速い点滅）が担う。
 //
 // **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
 // PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
 // これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
 // 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
-constexpr uint8_t kFirmwareVersion = 2;
+constexpr uint8_t kFirmwareVersion = 3;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;
@@ -236,6 +242,11 @@ constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;
 
 // 正常時のハートビート点滅周期。ファームが生きていることを目視で確認するため。
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
+
+// CAN 送信が連続して失敗した回数がこれを超えたら「今すぐ直さないと使えない」表示へ倒す。
+// FEEDBACK は 5 スロット × 100Hz = 500 通/秒 出るので、50 連続失敗は約 100ms 分の
+// 全滅に相当する。1 通の取りこぼし（調停負けや一過性の TX 詰まり）で赤くしないための下限。
+constexpr uint16_t kCanTxFailStreakAlarm = 50;
 
 // ===========================================================================
 // デバッグ用シリアル

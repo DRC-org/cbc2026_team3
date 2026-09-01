@@ -39,6 +39,19 @@ bool DcChannel::isOutputAllowed(uint32_t nowMs) const { return safety_.isOutputA
 
 uint8_t DcChannel::safetyStatusFlags(uint32_t nowMs) const { return safety_.statusFlags(nowMs); }
 
+bool DcChannel::applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs) {
+    if (!cmd.valid) {
+        return false;
+    }
+    // 仕様書 §4: この基板はフィードバックを持たないので duty のみ受理する。
+    // position の 90.0[deg] を duty として解釈すると 9000% の全力指令になるため、
+    // position / velocity / on_off は黙って捨てる。
+    if (cmd.type != ControlType::Duty) {
+        return false;
+    }
+    return setDuty(fromRaw(cmd.raw, kDutyScale), nowMs);
+}
+
 bool DcChannel::setDuty(float duty, uint32_t nowMs) {
     if (!safety_.isOutputAllowed(nowMs)) {
         return false;

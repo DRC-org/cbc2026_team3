@@ -36,14 +36,14 @@ from lib.health import (
 )
 from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
-from lib.sequence.engine import Sequence, step
+from lib.sequence.engine import AxisSyncError, Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from lib.tuning.metrics import Sample
 from lib.tuning.recorder import Capture, PidSnapshot
 from tests.fake_can import mock_can_manager
 from tests.fake_health import ok_health_snapshot
-from tests.server_fixtures import ServerFixture, require_type
+from tests.server_fixtures import ServerFixture, require_type, wait_until
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONTRACT_PATH = _REPO_ROOT / "web" / "src" / "test" / "ws-contract.json"
@@ -106,6 +106,16 @@ class _ContractSequence(Sequence):
     @step("ワーク投入待ち", require_trigger=True)
     async def wait_work(self) -> None:
         return None
+
+    # **失敗した形も golden に載せる。** `last_error` が null の形しか無いと、
+    # UI が値の入った形を受信条件で弾いても誰も気付けない (到達タイムアウト・
+    # 左右ずれ・零点確定失敗はすべてこの形で届く)
+    @step("Y 軸を投入位置へ")
+    async def fail_on_sync(self) -> None:
+        raise AxisSyncError(
+            "シーケンス 'main_hand_seq': 軸内のモータ位置がずれています "
+            "(y_axis: 偏差 3.100 > 許容 2.000)"
+        )
 
 
 def _contract_capture(positions: list[float], *, target: float) -> Capture:
@@ -319,6 +329,16 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             # 「手動目標を持っている軸」の形が golden から消える
             await fx.publish_state()
             samples["state"] = await require_type(ws, "state")
+
+            # 失敗して止まったシーケンス。常駐ループへ直接ジャンプ要求を出すのは、
+            # 準備フェーズでは `sequence_jump` がフェーズゲートで弾かれるため
+            sequence = fx.sequence(_ROBOT)
+            sequence.request_jump(2)
+            assert await wait_until(lambda: sequence.last_error is not None), (
+                "失敗するステップが実行されなかった"
+            )
+            await fx.publish_state()
+            samples["state_with_last_error"] = await require_type(ws, "state")
 
             mgr = fx.can_manager(_ROBOT)
             mgr.health.side_effect = lambda **_kwargs: _degraded_bus_snapshot(mgr)

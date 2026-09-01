@@ -16,8 +16,9 @@ describe("MatchStrip の試合終了", () => {
   afterEach(() => vi.useRealTimers());
 
   // fake timer 下では userEvent の内部待ちが解けないため fireEvent を使う
-  function mountStrip(phase: MatchPhase = "match") {
+  function mountStrip(phase: MatchPhase = "match", connected = true) {
     const view = renderWithRobot(<MatchStrip />, {
+      connected,
       matchState: { ...DEFAULT_MATCH_STATE, phase, court: "red" },
     });
     return { view };
@@ -107,5 +108,65 @@ describe("MatchStrip の試合終了", () => {
 
     fireEvent.click(finishButton());
     expect(view.context.matchFinish).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * **武装は押した瞬間の状況に紐づく。** 切断中に押した 1 回目を復帰後の 1 回目と
+ * 繋げると、確認なしで `match_finish` が飛ぶ。`StartGate` は最初から `connected` を
+ * 武装解除の条件に含めており、ここだけが切断を見ていなかった。
+ */
+describe("MatchStrip の切断中", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const finishButton = () => screen.getByRole("button", { name: /試合を終了する|操作不可/ });
+
+  it("切断中は試合終了を押せず、理由を出す", () => {
+    renderWithRobot(<MatchStrip />, {
+      connected: false,
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", court: "red" },
+    });
+
+    expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();
+    expect(screen.getByText("切断中")).toBeInTheDocument();
+  });
+
+  it("切断を跨いだ 2 回目を「確認済み」として扱わない", () => {
+    const view = renderWithRobot(<MatchStrip />, {
+      connected: true,
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", court: "red" },
+    });
+
+    fireEvent.click(finishButton());
+    act(() => vi.advanceTimersByTime(ARM_GUARD_MS));
+
+    const rerenderWith = (connected: boolean) =>
+      view.rerender(
+        <RobotProvider
+          value={createRobotContext({
+            ...view.context,
+            connected,
+            matchState: { ...DEFAULT_MATCH_STATE, phase: "match", court: "red" },
+          })}
+        >
+          <MatchStrip />
+        </RobotProvider>,
+      );
+
+    rerenderWith(false);
+    rerenderWith(true);
+
+    fireEvent.click(finishButton());
+    expect(view.context.matchFinish).not.toHaveBeenCalled();
+  });
+
+  it("切断中はセッティングへ戻るも押せない", () => {
+    renderWithRobot(<MatchStrip />, {
+      connected: false,
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "finished", court: "red" },
+    });
+
+    expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();
   });
 });

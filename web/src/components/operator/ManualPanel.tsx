@@ -15,12 +15,18 @@ interface ManualPanelProps {
   send: (data: object) => boolean;
 }
 
-/** キーボードの割り当て。凡例と実装が別々の場所にあると必ず食い違う */
+/**
+ * キーボードの割り当て。凡例と実装が別々の場所にあると必ず食い違う。
+ *
+ * 端への移動だけ `Shift` を併記するのは、そこだけ実装が修飾キー併用だから
+ * (`ContinuousControls`)。凡例を単打のまま残すと、押しても動かないキーを
+ * 画面が案内し続けることになる。
+ */
 const KEY_LEGEND: { keys: string[]; label: string }[] = [
   { keys: ["↑", "↓"], label: "軸" },
   { keys: ["←", "→"], label: "ジョグ" },
   { keys: ["[", "]"], label: "量" },
-  { keys: ["Home", "End"], label: "端" },
+  { keys: ["Shift", "Home", "End"], label: "端" },
 ];
 
 /**

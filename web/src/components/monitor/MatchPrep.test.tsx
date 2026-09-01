@@ -224,3 +224,30 @@ describe("MatchPrep の配信異常", () => {
     expect(screen.getByRole("button", { name: "動作確認を開始" })).toBeInTheDocument();
   });
 });
+
+/**
+ * チェック状態はサーバー配信が唯一の出どころ。切断中に押せるままにすると
+ * **チェックが付かないだけで理由も出ない** —— 試合前の最も忙しい時間帯に、
+ * 最も紛らわしい挙動になる。同じ画面のコート選択は最初から `connected` を見ており、
+ * `StartGate` も「通信 — サーバーに接続できていません」を出している。
+ */
+describe("MatchPrep の切断中", () => {
+  it("指差喚呼のチェックボックスを押せなくする", () => {
+    mount(ITEMS, "setup", { connected: false });
+
+    expect(screen.getByLabelText("非常停止解除")).toBeDisabled();
+    expect(screen.getByLabelText("コート一致")).toBeDisabled();
+  });
+
+  it("コート選択と同じ扱いにする (片方だけ生きている状態を作らない)", () => {
+    mount(ITEMS, "setup", { connected: false });
+
+    expect(screen.getByRole("button", { name: "赤コート" })).toBeDisabled();
+  });
+
+  it("接続中は今までどおり押せる", () => {
+    mount(ITEMS, "setup", { connected: true });
+
+    expect(screen.getByLabelText("非常停止解除")).toBeEnabled();
+  });
+});

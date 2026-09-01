@@ -13,6 +13,7 @@
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
 #include "SerialLineBuffer.h"
+#include "SerialOverride.h"
 
 using namespace motorcan;
 
@@ -442,6 +443,93 @@ static void test_blink_interval_separates_stop_from_heartbeat() {
     TEST_ASSERT_EQUAL_UINT32(1000, blinkIntervalFor(healthy, 200, 500, 1000));
 }
 
+// --------------------------------------------------------------------------
+// §5.1 シリアルデバッグ中のウォッチドッグ上書き
+// --------------------------------------------------------------------------
+
+// **養うのは操作したチャンネルだけ。** かつて 3 枚とも全チャンネルを養っており、
+// 電磁弁基板の UART へ `2 1` と 1 行打つと、触っていない 5ch のウォッチドッグまで
+// 外れた。その状態で PC が落ちると、本来 500ms で全 6ch が消磁するはずのところ
+// 6ch すべてが通電したまま残る（CAN も PC も死んでいるので E_STOP も届かない）。
+static void test_serial_override_feeds_only_the_touched_channel() {
+    SerialOverride override;
+    override.note(2, 1000);
+
+    TEST_ASSERT_TRUE(override.shouldFeed(2, 1000));
+    TEST_ASSERT_FALSE(override.shouldFeed(0, 1000));
+    TEST_ASSERT_FALSE(override.shouldFeed(1, 1000));
+    TEST_ASSERT_FALSE(override.shouldFeed(5, 1000));
+}
+
+// 起動直後は 1 チャンネルも上書きしていない。
+static void test_serial_override_starts_inactive() {
+    SerialOverride override;
+    TEST_ASSERT_FALSE(override.active(0));
+    for (uint8_t ch = 0; ch < kMaxChannels; ++ch) {
+        TEST_ASSERT_FALSE(override.shouldFeed(ch, 0));
+    }
+}
+
+// **時間切れが要る。** 解除が 's' 入力・CAN の SET_TARGET・電源断だけだと、
+// 1 行打ったまま席を離れた基板が無期限にウォッチドッグを外したままになる。
+static void test_serial_override_expires_without_new_input() {
+    SerialOverride override;
+    override.note(1, 1000);
+
+    TEST_ASSERT_TRUE(override.shouldFeed(1, 1000 + kSerialOverrideHoldMs));
+    TEST_ASSERT_FALSE(override.shouldFeed(1, 1000 + kSerialOverrideHoldMs + 1));
+    TEST_ASSERT_FALSE(override.active(1000 + kSerialOverrideHoldMs + 1));
+}
+
+// **満了した分は復活させない。** 復活させると、ch1 を放置して満了させた後に
+// ch2 を 1 行打っただけで ch1 まで養われ直し、期限が期限として機能しなくなる。
+static void test_serial_override_does_not_revive_expired_channels() {
+    SerialOverride override;
+    override.note(1, 1000);
+    override.note(2, 1000 + kSerialOverrideHoldMs + 1);
+
+    TEST_ASSERT_TRUE(override.shouldFeed(2, 1000 + kSerialOverrideHoldMs + 1));
+    TEST_ASSERT_FALSE(override.shouldFeed(1, 1000 + kSerialOverrideHoldMs + 1));
+}
+
+// 期限内に触った複数チャンネルは同時に生きる（`0 1` `1 1` と続けて打つ形）。
+static void test_serial_override_keeps_channels_touched_within_the_window() {
+    SerialOverride override;
+    override.note(0, 1000);
+    override.note(3, 1500);
+
+    TEST_ASSERT_TRUE(override.shouldFeed(0, 1500));
+    TEST_ASSERT_TRUE(override.shouldFeed(3, 1500));
+    TEST_ASSERT_FALSE(override.shouldFeed(1, 1500));
+}
+
+// 's' 入力・CAN の SET_TARGET / E_STOP で即座に降りる。
+static void test_serial_override_clears_immediately() {
+    SerialOverride override;
+    override.note(4, 1000);
+    override.clear();
+
+    TEST_ASSERT_FALSE(override.active(1000));
+    TEST_ASSERT_FALSE(override.shouldFeed(4, 1000));
+}
+
+// **上書きの猶予が SET_PARAM の上限を超えてはならない**（仕様書 §5.1）。
+// 超えると、CAN 経由では設定できない長さの猶予をシリアル 1 行で作れることになる。
+static void test_serial_override_hold_is_within_the_command_timeout_ceiling() {
+    TEST_ASSERT_TRUE(kSerialOverrideHoldMs <= kMaxCommandTimeoutMs);
+}
+
+// millis() は約 49.7 日で 0 に戻る。折り返しの瞬間に「満了していない」と読むと、
+// そこだけウォッチドッグが外れたままになる。
+static void test_serial_override_survives_millis_wraparound() {
+    SerialOverride override;
+    const uint32_t start = 0xFFFFFF00u;
+    override.note(0, start);
+
+    TEST_ASSERT_TRUE(override.shouldFeed(0, start + kSerialOverrideHoldMs));
+    TEST_ASSERT_FALSE(override.shouldFeed(0, start + kSerialOverrideHoldMs + 1));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_broadcast_e_stop_reaches_every_channel);
@@ -475,5 +563,13 @@ int main(int, char **) {
     RUN_TEST(test_serial_command_rejects_ambiguous_lines);
     RUN_TEST(test_blink_interval_prefers_urgent);
     RUN_TEST(test_blink_interval_separates_stop_from_heartbeat);
+    RUN_TEST(test_serial_override_feeds_only_the_touched_channel);
+    RUN_TEST(test_serial_override_starts_inactive);
+    RUN_TEST(test_serial_override_expires_without_new_input);
+    RUN_TEST(test_serial_override_does_not_revive_expired_channels);
+    RUN_TEST(test_serial_override_keeps_channels_touched_within_the_window);
+    RUN_TEST(test_serial_override_clears_immediately);
+    RUN_TEST(test_serial_override_hold_is_within_the_command_timeout_ceiling);
+    RUN_TEST(test_serial_override_survives_millis_wraparound);
     return UNITY_END();
 }

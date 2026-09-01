@@ -264,3 +264,62 @@ class TestSequenceJumpArgumentValidation:
             await task
 
         assert seq.executed == ["second"]
+
+
+class TestHandlerExceptionsNeverKillTheConnection:
+    """**ハンドラが投げても操縦者の WS を切ってはならない。**
+
+    `handle_command` は `_ws_handler` の受信ループから await されている。例外を
+    抜けさせると `async for msg in ws` ごと降り、その操縦者は画面から何も送れなく
+    なる —— 試合中なら E-STOP を押す手段まで失う。以前は `_run_manual` だけが
+    自前で握っており、`set_param` → `set_pid_gains` のように投げうる経路が
+    無防備なまま残っていた。握りはディスパッチ 1 箇所に置く。
+    """
+
+    async def test_ハンドラの例外は理由付きで返る(self) -> None:
+        fx = _build_fixture()
+        fx.break_command_handler("health_check", RuntimeError("ハンドラ内部の異常"))
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            requester = await client.ws_connect("/ws")
+
+            await requester.send_json({"type": "health_check"})
+            msg = await recv_type(requester, "command_rejected")
+
+            assert msg is not None
+            assert msg["command"] == "health_check"
+            assert "ハンドラ内部の異常" in msg["reason"]
+
+            # 接続は生きたままで、次のコマンドも処理される
+            await requester.send_json({"type": "set_court", "court": "green"})
+            follow_up = await recv_type(requester, "command_rejected")
+            assert follow_up is not None
+            assert follow_up["command"] == "set_court"
+
+            await requester.close()
+
+    async def test_例外は呼び出し元へ伝播しない(self) -> None:
+        """内部呼び出し (HTTP POST・安全機構) の経路も同じ握りで守る。"""
+        fx = _build_fixture()
+        fx.break_command_handler("health_check", RuntimeError("ハンドラ内部の異常"))
+
+        await fx.command({"type": "health_check"})
+
+    async def test_動作確認の失敗は動作確認の状態として返る(self) -> None:
+        """拒否の経路はコマンドが宣言したものを使う (専用チャネルを迂回しない)。"""
+        fx = _build_fixture()
+        fx.break_command_handler("motor_check_start", RuntimeError("起動処理の異常"))
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            requester = await client.ws_connect("/ws")
+            await recv_type(requester, "motor_check_state")
+
+            await requester.send_json({"type": "motor_check_start"})
+            msg = await recv_type(requester, "motor_check_state")
+
+            assert msg is not None
+            assert "起動処理の異常" in (msg["error"] or "")
+
+            await requester.close()

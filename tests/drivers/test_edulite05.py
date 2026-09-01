@@ -307,3 +307,29 @@ def test_feedback_probe_is_disable_without_fault_clear() -> None:
     assert probe is not None
     assert driver.parse_can_id(probe.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
     assert probe.data == bytes(8)
+
+
+class TestIsEnergized:
+    """**「画面は正常なのに機体が動かない」型の異常を見えるようにする判定。**
+
+    起動時の励磁に失敗した EDULITE でも、`QueryDrivenTargetRefresher` の 20Hz の
+    問い合わせでフィードバックは流れ出す。鮮度は満たされ fault にも掛からないので、
+    この判定が無いとモータのヘルスは OK のまま無励磁だけが残る。
+    """
+
+    def test_未受信では判定しない(self) -> None:
+        # 「分からない」を「無励磁」へ倒すと、CAN を立てる前の状態が警告になる
+        assert Edulite05Driver("m1", can_id=5).is_energized() is None
+
+    def test_モータモードなら励磁されている(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        driver.update_state(edulite_feedback(driver, mode_state=2))
+
+        assert driver.is_energized() is True
+
+    @pytest.mark.parametrize("mode_state", [0, 1])
+    def test_リセット中と校正中は無励磁(self, mode_state: int) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        driver.update_state(edulite_feedback(driver, mode_state=mode_state))
+
+        assert driver.is_energized() is False

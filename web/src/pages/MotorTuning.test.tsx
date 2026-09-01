@@ -392,6 +392,61 @@ describe("MotorTuning の編集と送信の分離", () => {
 });
 
 /**
+ * 編集値がローカルに残り続けると、**そのモータで実際に効いているゲインが画面の
+ * どこにも出なくなる。** かつて「元の値へ戻す術が config を読むしかない」状態で
+ * 全ゲイン 0 上書きの事故が起きており、編集後にそれが再現していた。
+ */
+describe("MotorTuning の編集値と現在値", () => {
+  const kpInput = () => screen.getByLabelText("Kp") as HTMLInputElement;
+
+  it("送信できたら配信値へ再同期する (編集値を抱え続けない)", async () => {
+    const { context } = mount("setup");
+
+    await userEvent.clear(kpInput());
+    await userEvent.type(kpInput(), "9");
+    expect(kpInput().value).toBe("9");
+
+    await userEvent.click(screen.getByLabelText("lift の PID を送信"));
+
+    expect(context.send).toHaveBeenCalled();
+    // 配信されている現在値 (kp=2) へ戻る。サーバーに拒否されてもここが正
+    expect(kpInput().value).toBe("2");
+  });
+
+  it("送れなかったら編集を捨てない (機体には何も届いていない)", async () => {
+    const { context } = renderWithRobot(<MotorTuning />, {
+      states: { main_hand: robotState() },
+      connected: true,
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup" },
+      send: () => false,
+    });
+
+    await userEvent.clear(kpInput());
+    await userEvent.type(kpInput(), "9");
+    await userEvent.click(screen.getByLabelText("lift の PID を送信"));
+
+    expect(kpInput().value).toBe("9");
+    expect(context.send).toBeDefined();
+  });
+
+  it("編集中は機体で効いているゲインを併記し、戻す導線を出す", async () => {
+    mount("setup");
+
+    expect(screen.queryByText(/適用中/)).toBeNull();
+
+    await userEvent.clear(kpInput());
+    await userEvent.type(kpInput(), "9");
+
+    expect(screen.getByText(/適用中/)).toBeInTheDocument();
+    expect(screen.getByText(/Kp 2/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("lift の編集を破棄して現在値へ戻す"));
+    expect(kpInput().value).toBe("2");
+    expect(screen.queryByText(/適用中/)).toBeNull();
+  });
+});
+
+/**
  * この画面が「感覚で操作するしかない」状態でなくなるかどうかは、偏差と飽和が
  * 見えるかに掛かっている。以前は POS / VEL / TORQUE / TEMP の 4 つしか無く、
  * 調整で最も見たい「目標からどれだけ外れているか」が画面のどこにも無かった。

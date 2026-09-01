@@ -74,12 +74,17 @@ export function ContinuousControls({
   const minusBoost = Math.max(minus.multiplier, keyMinus.multiplier);
   const plusBoost = Math.max(plus.multiplier, keyPlus.multiplier);
 
+  // **端への移動だけは修飾キーを併用する。** 1 打で軸が可動端まで走る唯一の操作で、
+  // しかも `Home` / `End` はジョグの `←` `→` と同じナビゲーションクラスタにある
+  // (ノート PC では `Fn+←/→` がそのまま `Home/End` になる機種が多い)。押し間違いが
+  // そのまま端までの全速移動になるのは、同じ動作をポインタで行うボタンと比べて
+  // 桁違いに危険なので、単打では発火させない。凡例 (`ManualPanel`) も対で持つこと
   useHotkeys(
     {
       "[": () => setStepIndex((i) => Math.max(0, i - 1)),
       "]": () => setStepIndex((i) => Math.min(steps.length - 1, i + 1)),
-      Home: () => onSet(axis.name, min),
-      End: () => onSet(axis.name, max),
+      "Shift+Home": () => onSet(axis.name, min),
+      "Shift+End": () => onSet(axis.name, max),
     },
     selected && !disabled,
   );

@@ -293,8 +293,11 @@ class TestEStopBlocksSequenceCommands:
             ws = await client.ws_connect("/ws")
             seqs = await _enter_e_stop(fx, ws)
 
+            # 停止経路が実際に踏まれたことを見る。走行中でなければ `request_stop` は
+            # 呼ばれない (止めるものが無い) ので、停止のたびに必ず行う
+            # 「未処理の開始要求の破棄」で観測する
             stop_spy = MagicMock()
-            seqs[0].request_stop = stop_spy  # type: ignore[method-assign]
+            seqs[0].discard_pending_start = stop_spy  # type: ignore[method-assign]
 
             await ws.send_json({"type": "sequence_stop", "robot": "main_hand"})
             await _expect_no_rejection(ws, "sequence_stop")
@@ -530,6 +533,49 @@ class TestEStopReleaseReactivatesMotors:
             await fx.activate_e_stop()
             assert should_abort() is True
 
+            await ws.close()
+
+
+class TestReleaseDoesNotBlockTheCommandLoop:
+    """**再励磁のあいだ、その操縦者のコマンド受信を止めてはならない。**
+
+    `async for msg in ws` は 1 接続あたり完全に直列なので、解除ハンドラが全モータの
+    再励磁を待つと次の 1 通が処理されない。フィードバックの返らないモータは 1 台
+    0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を押した状況 —— では
+    数秒に達する。そのあいだ **E-STOP の押し直しすら効かない**。
+    """
+
+    async def test_再励磁の完了を待たずに次のコマンドを処理する(self) -> None:
+        fx = _build_fixture()
+        # 応答の返らないモータ (実機では 1 台 0.5 秒待つ) の代わりに、
+        # テスト側が明示的に解放するまで返らない有効化にする
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _enter_e_stop(fx, ws)
+
+            try:
+                await ws.send_json({"type": "e_stop_release"})
+                assert await wait_until(lambda: not fx.e_stop_active)
+
+                # 再励磁は止まったまま。この状態で押し直しが効かなければならない
+                await ws.send_json({"type": "e_stop"})
+                assert await wait_until(lambda: fx.e_stop_active), (
+                    "再励磁の完了を待つあいだ E-STOP の押し直しが処理されていない"
+                )
+            finally:
+                # 失敗しても必ず解放する。待たせたままだと接続の後始末が返らず、
+                # テストが「落ちる」のではなく「固まる」
+                gate.set()
+            await fx.wait_reactivation()
             await ws.close()
 
 
@@ -1233,12 +1279,45 @@ class TestBoardReportedEStop:
         stale_at = time.time()
         await fx.command({"type": "e_stop_release"})
         assert fx.e_stop_active is False
+        # 解除フレームを送り終えるまで (= 再励磁の完了まで) 待つ。基板の報告を
+        # 信じてよいのはそれ以降に届いたフィードバックだけ
+        await fx.wait_reactivation()
 
         # 解除フレームより前に届いていたフィードバック (緊急停止ビットは立ったまま)
         mgr.health.side_effect = lambda **_kwargs: _health_with_feedback_at(mgr, stale_at)
         await fx.publish_state()
 
         assert fx.e_stop_active is False
+
+    async def test_再励磁の最中は基板の報告で止め直さない(self) -> None:
+        """解除フレームがまだ届いていない基板の報告を信じないこと。
+
+        再励磁は別タスクで走るので、そのあいだは「解除済みだが基板はまだ停止中」と
+        いう窓ができる。ここで基板の緊急停止ビットを拾うと、解除した瞬間に
+        サーバーが自分で止め直し、**二度と解除できない機体**になる
+        (判定に使う `_board_e_stop_ignore_before` が確定するのも再励磁の後)。
+        """
+        fx, _ = self._fixture_with_generic(e_stop=True)
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        await fx.publish_state()
+        assert fx.e_stop_active is True
+
+        try:
+            await fx.command({"type": "e_stop_release"})
+            assert fx.e_stop_active is False
+
+            # 再励磁の最中に、まだ緊急停止ビットの立ったフィードバックが届く
+            await fx.publish_state()
+            assert fx.e_stop_active is False, "再励磁の最中に基板の報告で止め直した"
+        finally:
+            gate.set()
+        await fx.wait_reactivation()
 
     async def test_still_pressed_after_release_stops_again(self) -> None:
         """解除しても基板がまだ止まっているなら、改めて停止させること。
@@ -1252,6 +1331,7 @@ class TestBoardReportedEStop:
 
         await fx.command({"type": "e_stop_release"})
         assert fx.e_stop_active is False
+        await fx.wait_reactivation()
 
         # 解除後に届いたフィードバックでも緊急停止ビットが立っている
         await fx.publish_state()

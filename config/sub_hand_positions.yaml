@@ -51,7 +51,7 @@ axes:
   # !!! 原点は電源投入位置 !!! 本機は投入時に 0.0rad へ固定されるので、搬送中に手で
   # 動かしたぶんがそのまま座標のずれになる。リミットスイッチを付けたら下の homing:
   # を有効化すること —— ただし現状 lib/sequence/homing.py の零点確定は
-  # M3508PositionLoop 経由 (main.py の _make_capture_origin) にしか対応しておらず、
+  # M3508PositionLoop 経由 (main.py の _make_origin_resolver) にしか対応しておらず、
   # 本機で有効化するには SET_ZERO (0xFE) を送る経路を足す必要がある
   # (config/main_hand_positions.yaml の rotate も同じ状態)。
   #

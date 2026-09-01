@@ -34,7 +34,7 @@ motors:
     # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
     # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
     # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
-    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
   # ch1。本番では未使用。ベンチでは 3 チャンネルすべてを登録して、
   # どこにモータを繋いでも手動操縦パネルから回せるようにしておく。
@@ -43,7 +43,7 @@ motors:
     bus: generic_bus
     can_id: 0x81
     control_type: duty
-    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
   # ch2。本番では未使用。
   dc_ch2:
@@ -51,4 +51,4 @@ motors:
     bus: generic_bus
     can_id: 0x82
     control_type: duty
-    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion

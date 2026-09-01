@@ -163,6 +163,10 @@ class RobotServer:
         # 増えるだけになる (どちらか片方を消しても症状が出ないので、後で誰かが
         # 本物のガードの方を消しても気付けない)
         self._inactive_motors: dict[str, list[str]] = {}
+        # 緊急停止解除の再励磁タスク。解除ハンドラはこれを待たずに返る (待つと
+        # その操縦者の WS が数秒間 1 通も処理しなくなる)。GC で消えないよう
+        # 参照を保持する — 取りこぼすと、再励磁が途中で消えたことに誰も気付けない
+        self._reactivate_tasks: set[asyncio.Task[None]] = set()
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
@@ -219,6 +223,11 @@ class RobotServer:
     def dev_tools(self) -> bool:
         """開発用コマンドが解禁されているか。コマンドゲートと server_info が参照する。"""
         return self._dev_tools
+
+    @property
+    def _reactivating(self) -> bool:
+        """緊急停止解除の再励磁が進行中か。"""
+        return any(not task.done() for task in self._reactivate_tasks)
 
     @property
     def e_stop_active(self) -> bool:
@@ -345,6 +354,12 @@ class RobotServer:
                 await task
         self._sequence_tasks.clear()
 
+        # 再励磁は応答の返らないモータで 1 台 0.5 秒待つ。終了処理がそれを
+        # 待つと、CAN を落とす後始末まで到達するのが遅れる
+        for task in self._reactivate_tasks:
+            task.cancel()
+        self._reactivate_tasks.clear()
+
         self._ws.cancel_closing_tasks()
         await self._ws.close_all()
 
@@ -451,7 +466,22 @@ class RobotServer:
             return
 
         handler: Callable[[dict, WSOrNone], Awaitable[None]] = getattr(self, spec.handler)
-        await handler(data, requester)
+        try:
+            await handler(data, requester)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # **ここは `_ws_handler` の受信ループから await されている。** 抜けさせると
+            # `async for msg in ws` ごと降り、その操縦者は画面から何も送れなくなる
+            # (試合中なら E-STOP を押す手段まで失う)。かつては `_run_manual` だけが
+            # 自前で握っており、`set_param` → `set_pid_gains` のように投げうる経路は
+            # 無防備なままだった。握りをディスパッチ 1 箇所に置けば、コマンドを
+            # 足す人が同じ握りを書き写す必要が無くなる。
+            # 拒否経路はそのコマンドが宣言したものを使う (動作確認だけは専用チャネル)
+            logger.exception("コマンド処理に失敗: %s", spec.name)
+            await self._reject_by_channel(
+                spec, data, requester, f"コマンドの処理に失敗しました ({exc})"
+            )
 
     async def _reject_by_channel(
         self,
@@ -496,11 +526,15 @@ class RobotServer:
         self._e_stop_active = False
         self._e_stop_reason = None
         await self._broadcast_e_stop_state()
-        await self._reactivate_motors()
-        # 解除フレームはこの時点で送り終えている。以降に届いたフィードバックで
-        # まだ緊急停止ビットが立っていれば、それは基板側にまだ止まる理由がある
-        # (物理停止スイッチが押されたまま等) ということなので、改めて停止させる
-        self._board_e_stop_ignore_before = time.time()
+        # **再励磁を待たない。** `async for msg in ws` は 1 接続あたり完全に直列なので、
+        # ここで待つとそのあいだ次の 1 通が処理されない。フィードバックの返らない
+        # モータは 1 台 0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を
+        # 押した状況 —— では数秒に達し、**E-STOP の押し直しすら効かなくなる**。
+        # 進捗は `safety.unenergized_motors` として配信され続ける
+        task = asyncio.create_task(self._reactivate_motors())
+        # GC で消えないよう参照を保持する (WsHub の切り離しタスクと同じ形)
+        self._reactivate_tasks.add(task)
+        task.add_done_callback(self._reactivate_tasks.discard)
 
     async def _cmd_health_check(self, _data: dict, _requester: WSOrNone) -> None:
         # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
@@ -524,7 +558,9 @@ class RobotServer:
     async def _cmd_sequence_stop(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
-            self._robots[robot_name].sequence.request_stop()
+            # 停止経路は 1 本に寄せる。`request_stop` を直に呼ぶと未処理の開始要求が
+            # 残り、STOP の直後にそれが発火して先頭から全工程を走り切る
+            self._stop_sequence(self._robots[robot_name])
             logger.info("sequence_stop: %s", robot_name)
 
     async def _cmd_sequence_start(self, data: dict, _requester: WSOrNone) -> None:
@@ -631,7 +667,7 @@ class RobotServer:
                 return False
             # 制御権を必ず手放させる。破棄しないと、切替直前に届いた開始要求が
             # 手動で機構を動かしている最中に発火する
-            self._stop_sequence(ctx, discard_pending_start=True)
+            self._stop_sequence(ctx)
 
         ctx.mode = mode
         if ctx.manual is not None:
@@ -706,20 +742,16 @@ class RobotServer:
     ) -> None:
         """手動指令を実行し、拒否理由を要求元へ返す。
 
-        例外をここで受け止めるのは、``handle_command`` が ``_ws_handler`` の
-        受信ループから await されているため。抜けさせると操縦者の WS が切れ、
-        軸名を打ち間違えただけで画面ごと落ちる。
+        握るのは ``ManualControlError`` だけ。これは「可動範囲外」「連続操作の
+        対象外」のように**操縦者がそのまま読める理由**を持つ拒否で、想定内の応答に
+        あたる。位置名の誤りや送信失敗のような想定外の例外は ``handle_command`` の
+        ガードが受け止める —— 同じ握りをここにも置くと、握りが 2 箇所に増えた
+        ぶんだけ「片方だけ直された」状態が作れる。
         """
         try:
             await coro
         except ManualControlError as exc:
             await self._reject_command(requester, command, str(exc))
-        except Exception as exc:
-            # 位置名の誤り (PositionLookupError)・緊急停止の競合・送信失敗など。
-            # 握り潰さずログには必ず残す (原因が操縦者の画面からは追えない)
-            logger.exception("手動指令に失敗: %s", command)
-            # 例外クラス名を操縦者へ出しても復旧の判断材料にならない。空なら定型文にする
-            await self._reject_command(requester, command, str(exc) or "手動指令に失敗しました")
 
     async def _cmd_set_court(self, data: dict, requester: WSOrNone) -> None:
         await self._handle_set_court(data, requester)
@@ -956,6 +988,17 @@ class RobotServer:
         await self._broadcast_match_state()
 
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
+        # **動作確認の実行中は試合に入れない。** フェーズが MATCH になると
+        # sequence_start が解禁され、両ハンドを一巡している統合動作確認と通常
+        # シーケンスが同じアクチュエータへ同時に指令を出す。ここで `abort()` へ
+        # 倒さないのは、操縦者が意図していない中断より拒否のほうが安全だから
+        # (止めたければ motor_check_abort が別にある)
+        if self._motor_check.running:
+            await self._reject_command(
+                requester, "match_start", "動作確認の実行中は試合を開始できません"
+            )
+            return
+
         if not self.match.match_start():
             await self._reject_command(
                 requester,
@@ -1009,7 +1052,7 @@ class RobotServer:
         finally:
             # 停止フレームの成否に関わらずシーケンスを止める。走らせたままだと
             # 次のステップが新しいモータ目標値を送り、緊急停止を上書きしてしまう
-            self._stop_all_sequences(discard_pending_start=True)
+            self._stop_all_sequences()
             await self._broadcast_e_stop_state()
 
     async def _send_e_stop_frames(self) -> None:
@@ -1162,6 +1205,12 @@ class RobotServer:
         EDULITE 05 は非常停止で無励磁になるため、解除で再励磁しないと以後の位置指令が
         一切効かない。再励磁自体はドライバ側が現在角を保持目標に書いてから行うので、
         解除操作そのものでロボットが動くことはない。
+
+        **別タスクで走る。** 解除ハンドラはこの完了を待たない (待つと、その操縦者の
+        WS が数秒間 1 通も処理しなくなる)。そのため、解除フレームを送り終えた
+        時刻を記録するのもここの責務になる —— 送信より前にその時刻を置くと、
+        まだ解除フレームが届いていない基板のフィードバックを「解除後の報告」として
+        信じてしまい、解除した瞬間にサーバーが自分で止め直す。
         """
         for name, ctx in self._robots.items():
             try:
@@ -1184,6 +1233,11 @@ class RobotServer:
         # 起点を置くのはここだけで、猶予の判定は `_unenergized_motors` が行う
         self._energize_expected_since = time.time()
 
+        # 解除フレームはこの時点で送り終えている。以降に届いたフィードバックで
+        # まだ緊急停止ビットが立っていれば、それは基板側にまだ止まる理由がある
+        # (物理停止スイッチが押されたまま等) ということなので、改めて停止させる
+        self._board_e_stop_ignore_before = time.time()
+
         # 有効化の途中で再び緊急停止が入ると、中断判定をすり抜けた enable が
         # 停止フレームより後に届きうる。念のため停止フレームを送り直す。
         if self._e_stop_active:
@@ -1193,26 +1247,44 @@ class RobotServer:
             except Exception:
                 logger.exception("E-STOP 停止フレーム再送に失敗")
 
-    def _stop_all_sequences(self, *, discard_pending_start: bool = False) -> None:
-        """全ロボットのシーケンスを通常停止する (緊急停止と異なり CAN 層は触らない)。
-
-        discard_pending_start=True では未処理の開始/ジャンプ要求も破棄する。
-        緊急停止直前に届いた開始要求が停止処理の直後に発火するのを防ぐため。
-        """
+    def _stop_all_sequences(self) -> None:
+        """全ロボットのシーケンスを通常停止する (緊急停止と異なり CAN 層は触らない)。"""
         for ctx in self._robots.values():
-            self._stop_sequence(ctx, discard_pending_start=discard_pending_start)
+            self._stop_sequence(ctx)
 
-    def _stop_sequence(self, ctx: RobotContext, *, discard_pending_start: bool = False) -> None:
+    def _stop_sequence(self, ctx: RobotContext) -> None:
         """1 台のシーケンスを通常停止する。**破棄が先、停止が後。**
 
         逆順にすると、停止処理のあいだに届いた開始要求が破棄をすり抜けて残る。
         順序を 1 箇所に持たないと、呼び出し側 (緊急停止 / 試合終了 / 手動への切替) の
         どれか 1 つだけが書き写しを誤り、そこだけが「止めた直後に動き出す」。
+
+        **破棄しない停止は用意しない。** かつては緊急停止だけが破棄を要求しており、
+        通常停止と試合終了はまだ拾われていない開始要求を残したまま降りていた。
+        その 1 通は次に `run()` が降りた瞬間に `run_forever` が拾うので、症状は
+        「STOP を押したのに先頭から全工程を走り切る」になる (試合終了なら、
+        フェーズは `finished` なのに機体だけが動き続ける)。選べるようにしておくと、
+        経路を 1 つ足すたびに同じ穴が開き直る。
         """
-        if discard_pending_start:
-            ctx.sequence.discard_pending_start()
+        ctx.sequence.discard_pending_start()
         if ctx.sequence.is_running:
             ctx.sequence.request_stop()
+
+    def set_initial_inactive_motors(self, robot_name: str, motor_names: list[str]) -> None:
+        """起動時に有効化できなかったモータを記録する (サーバー起動前に呼ばれる)。
+
+        `_inactive_motors` は緊急停止解除の経路でしか埋まらなかったため、**起動時の
+        励磁失敗はログの外にも画面にも出なかった**。操縦者に見えるのは「指令しても
+        動かない」だけで、原因を示す表示がどこにも無い。ここへ預けた名前は
+        `safety.unenergized_motors` として、解除後の失敗とまったく同じ経路で配信される。
+        """
+        if motor_names:
+            logger.error(
+                "起動時に励磁できなかったモータ: robot=%s motors=%s",
+                robot_name,
+                ", ".join(motor_names),
+            )
+        self._inactive_motors[robot_name] = list(motor_names)
 
     async def _broadcast_match_state(self) -> None:
         await self._ws.broadcast_json(self.match.to_dict())
@@ -1446,6 +1518,13 @@ class RobotServer:
             # 「最初に判明したもの」から基板の報告へ塗り替わりかねない
             return None
 
+        if self._reactivating:
+            # 再励磁の最中は、まだ解除フレームの届いていない基板が「停止中」を
+            # 報告し続ける。それを信じると解除した瞬間にサーバーが自分で止め直し、
+            # **二度と解除できない機体**になる。判定に使う
+            # `_board_e_stop_ignore_before` が確定するのも再励磁を終えた後
+            return None
+
         for robot_name, ctx in self._robots.items():
             snapshot = snapshots.get(robot_name)
             if snapshot is None:
@@ -1557,6 +1636,10 @@ class RobotServer:
             # シーケンス側が持っている実行フラグをそのまま配信する
             "running": progress["running"],
             "steps": progress.get("steps", []),
+            # 止まった理由。到達タイムアウト・左右ずれ・零点確定失敗はステップ単位の
+            # try で握られるので、ここに載せない限り journal 以外どこにも出ない
+            # (画面は「待機中 — START で開始」と描くだけになる)。平常時は null
+            "last_error": progress["last_error"],
             "motors": motors,
             "e_stop_active": self.e_stop_active,
             "health": snapshot_dict,

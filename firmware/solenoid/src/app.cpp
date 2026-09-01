@@ -16,6 +16,7 @@
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
 #include "SerialLineBuffer.h"
+#include "SerialOverride.h"
 #include "SolenoidChannel.h"
 #include "config.h"
 #include "main.h"
@@ -137,7 +138,8 @@ bool g_ledOn = false;
 #if ENABLE_SERIAL_DEBUG
 char g_serialStorage[kSerialLineCapacity];
 SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
-bool g_serialOverride = false;
+// シリアルで開閉しているチャンネルと、その期限（規則は SerialOverride.h）。
+SerialOverride g_serialOverride;
 #endif
 
 // ===========================================================================
@@ -213,6 +215,7 @@ void sendFeedback(uint8_t ch, uint32_t nowMs) {
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。止めると PC 側が STALE になり、
     // なぜ動かないのかを操縦者が判別できなくなる。
+    // **ID 未設定チャンネルはここへ来ない**（呼び出し側が isChannelConfigured で弾く。§2.2）。
     sendFrame(buildCanId(CommandType::Feedback, g_deviceId[ch]), data, len);
 }
 
@@ -260,17 +263,15 @@ void handleChannelFrame(uint8_t ch, CommandType command, const uint8_t *data, ui
             if (!cmd.valid) {
                 return;
             }
-            // 仕様書 §9.2: この基板は on_off のみ受理する。
-            // position の 90.0[deg] や duty の 0.3 を「非 0 = ON」として解釈すると、
-            // 別の基板宛のつもりで書いた値で弁が開く。
-            if (cmd.type != ControlType::OnOff) {
-                return;
-            }
 #if ENABLE_SERIAL_DEBUG
-            g_serialOverride = false;
+            // PC がこのチャンネルへ指令を出している以上、シリアルの上書きは終わり。
+            g_serialOverride.clear();
 #endif
-            // setOn は緊急停止ラッチ中・ウォッチドッグ満了中は受け付けない。
-            g_channel[ch].setOn(cmd.raw != 0, nowMs);
+            // **制御タイプの受理判定（§9.2: on_off のみ）は SolenoidChannel が持つ。**
+            // ここに `if (cmd.type != ...)` を戻すと、この翻訳単位は native テストの
+            // 対象外なので消しても全ケース緑になる。
+            // 続けて緊急停止ラッチ中・ウォッチドッグ満了中は受け付けない。
+            g_channel[ch].applySetTarget(cmd, nowMs);
             break;
         }
         case CommandType::SetParam: {
@@ -288,7 +289,7 @@ void handleChannelFrame(uint8_t ch, CommandType command, const uint8_t *data, ui
                 // 通電し続ける（loop() の周期は保証されていない）。
                 applyChannelOutput(ch, nowMs);
 #if ENABLE_SERIAL_DEBUG
-                g_serialOverride = false;
+                g_serialOverride.clear();
 #endif
             }
             break;
@@ -458,21 +459,25 @@ void pollSerial(uint32_t nowMs) {
         // 値の読み取りだけを基板ごとに行う（電磁弁は 0/1 の整数）。
         const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kSolenoidChannelCount);
         if (cmd.kind == SerialCommand::Kind::StopAll) {
-            g_serialOverride = false;
+            g_serialOverride.clear();
             for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
                 g_channel[ch].hold();
             }
         } else if (cmd.kind == SerialCommand::Kind::Channel) {
             g_channel[cmd.channel].setOn(strtol(cmd.value, nullptr, 10) != 0, nowMs);
-            g_serialOverride = true;
+            g_serialOverride.note(cmd.channel, nowMs);
         }
     }
 
     // シリアル操作中はウォッチドッグを養い続ける。1 回だけ養う実装だと
     // command_timeout_ms 後に必ず止まってデバッグにならない。
-    // 'S' 入力・CAN の SET_TARGET・電源断のいずれでもこのモードは解除される。
-    if (g_serialOverride) {
-        for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
+    // **養う範囲と期限の規則は SerialOverride が持つ**（打ったチャンネルだけ /
+    // 最後の入力から kSerialOverrideHoldMs）。ここで全チャンネルを養うと、
+    // `2 1` と 1 行打っただけで 6ch すべての最後の砦が無期限に外れ、その後 PC が
+    // 落ちても**触っていない 5ch まで通電したまま**残る（CAN も PC も死んでいるので
+    // E_STOP も届かない）。
+    for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
+        if (g_serialOverride.shouldFeed(ch, nowMs)) {
             g_channel[ch].feed(nowMs);
         }
     }
@@ -505,7 +510,8 @@ extern "C" void setup() {
 
     for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
         // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
-        // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送る。
+        // ID 未設定のチャンネルは 1 通も送らない（§2.2）が、位相の割り当てはチャンネルの
+        // 添字で決まるので、ここは全チャンネル分やる（飛ばすと隣とずれ方が変わる）。
         g_feedbackTimer[ch].stagger(startMs, g_feedbackIntervalMs, ch, kSolenoidChannelCount);
     }
 
@@ -545,7 +551,8 @@ extern "C" void loop() {
     applyAllOutputs(nowMs);
 
     for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-        if (g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
+        // **ID を名乗れるチャンネルだけが FEEDBACK を送る**（仕様書 §2.2）。
+        if (isChannelConfigured(ch) && g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(ch, nowMs);
         }
     }

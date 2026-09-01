@@ -22,7 +22,7 @@ import { ROBOTS } from "@/lib/robots";
  */
 export function Dashboard() {
   const states = useRobotStates();
-  const { matchState, serverInfo } = useRobotStatus();
+  const { matchState, serverInfo, connected } = useRobotStatus();
   const { matchStart } = useRobotCommands();
   const { confirmModal, requestReset } = useResetConfirm();
   const [checkPanelOpen, setCheckPanelOpen] = useState(false);
@@ -60,6 +60,7 @@ export function Dashboard() {
                         health={robot.health}
                         motors={robot.motors}
                         safety={robot.safety}
+                        connected={connected}
                         tempThresholds={tempThresholds}
                         showVerdict={false}
                       />
@@ -89,6 +90,7 @@ export function Dashboard() {
           key={key}
           label={label}
           state={states[key]}
+          connected={connected}
           tempThresholds={tempThresholds}
         />
       ))}

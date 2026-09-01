@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
+from lib.sequence.positions import PositionLookupError
 
 if TYPE_CHECKING:
     from lib.can_manager import CANManager
@@ -246,6 +247,29 @@ class AxisHandle:
             )
         )
         return all(results)
+
+    def observed_value(self) -> float:
+        """フィードバックから逆換算した現在の軸位置 (人間の単位)。
+
+        逆換算は ``AxisSpec.to_value`` に委ねる。ここで書き直すと、逆回転ペアの
+        符号付き ``scale`` の扱いがまた 2 実装に分かれる。
+
+        **位置指令でない軸は測る術が無いので拒否する。** DC 基板も電磁弁基板も
+        位置を持たず ``MotorState.position`` は常に 0 なので、逆換算すると
+        「測ったように見える 0」を返してしまう (``ManualController`` が配信用の
+        現在値を None へ倒しているのと同じ理由)。
+
+        Raises:
+            PositionLookupError: 位置を持たない軸 / 逆換算できる値が 1 つも無い
+        """
+        if self._spec.command_mode is not ControlMode.POSITION:
+            raise PositionLookupError(
+                f"軸 '{self.name}' は位置フィードバックを持ちません"
+                f" (command_mode={self._spec.command_mode.value})"
+            )
+        return self._spec.to_value(
+            {handle.name: handle.driver.feedback_position() for handle in self._handles}
+        )
 
     def sync_violation(self) -> float | None:
         """許容差を超えたモータ間のずれ (人間の単位)。超過していなければ None。

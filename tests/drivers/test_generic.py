@@ -416,7 +416,15 @@ class TestSafetyStatusFlags:
         assert self.drv.is_fault() is False
 
     def test_unconfigured_device_id_is_fault(self):
-        """デバイス ID 未設定だけが FAULT。設定ミスは試合前に必ず気付く必要がある。"""
+        """デバイス ID 未設定だけが FAULT。
+
+        **ここで流し込むフレームを実機は生成しない。** 未設定のチャンネルは
+        FEEDBACK も INFO も 1 通も送らない (仕様書 §2.2) ので、実機でこのビットが
+        PC まで届くことはなく、PC から見える症状は「その基板の全チャンネルが
+        STALE」だけになる。**切り分けは基板の LED (赤の速い点滅) が担う。**
+        このケースが守っているのは「ビットが立ったフレームを受けたら FAULT へ倒す」
+        というデコードの対応関係だけで、設定ミスの検出そのものではない。
+        """
         self._feed(unconfigured_id=True)
         assert self.drv.device_id_unconfigured is True
         assert self.drv.is_fault() is True

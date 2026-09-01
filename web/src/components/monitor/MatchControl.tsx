@@ -73,16 +73,19 @@ export function useResetConfirm() {
  * MatchPrep 最下段のリセットはまだ使っていない指差喚呼を捨てるので確認を残してある）。
  */
 export function MatchStrip() {
-  const { matchState } = useRobotStatus();
+  const { matchState, connected } = useRobotStatus();
   const { matchFinish, matchReset } = useRobotCommands();
   const { court, phase } = matchState;
   const duringMatch = isDuringMatch(phase);
   const { armed, press, disarm } = useArmedPress(matchFinish);
 
-  // 試合が終わった後まで武装を持ち越さない（ボタン自体が別物へ入れ替わる）
+  // 試合が終わった後まで武装を持ち越さない（ボタン自体が別物へ入れ替わる）。
+  // **切断でも解く。** 武装は押した瞬間の状況に紐づいており、届かなかった 1 回目を
+  // 復帰後の 1 回目と繋げると、確認なしで match_finish が飛ぶ（StartGate は
+  // 最初から connected を武装解除の条件に含めている）
   useEffect(() => {
-    if (!duringMatch) disarm();
-  }, [duringMatch, disarm]);
+    if (!duringMatch || !connected) disarm();
+  }, [duringMatch, connected, disarm]);
 
   return (
     <div className="flex shrink-0 items-center justify-between gap-2 border border-base-300 bg-base-100 px-2 py-1">
@@ -100,18 +103,32 @@ export function MatchStrip() {
           {/* 二度押しで文言が伸びてもボタンの左端を動かさない */}
           <Button
             tone="danger"
+            disabled={!connected}
             onClick={press}
-            aria-label={armed ? "もう一度押して試合を終了する" : "試合を終了する"}
+            aria-label={
+              !connected
+                ? "操作不可: 切断中のため送信できません"
+                : armed
+                  ? "もう一度押して試合を終了する"
+                  : "試合を終了する"
+            }
             className="w-[11em] whitespace-nowrap"
           >
             <Icon as={Square} />
-            {armed ? "もう一度押して終了" : "試合終了"}
+            {!connected ? "切断中" : armed ? "もう一度押して終了" : "試合終了"}
           </Button>
         </span>
       ) : (
-        <Button tone="warn" onClick={matchReset} aria-label="セッティングタイムへ戻す">
+        <Button
+          tone="warn"
+          disabled={!connected}
+          onClick={matchReset}
+          aria-label={
+            !connected ? "操作不可: 切断中のため送信できません" : "セッティングタイムへ戻す"
+          }
+        >
           <Icon as={RotateCcw} />
-          セッティングへ戻る
+          {connected ? "セッティングへ戻る" : "切断中"}
         </Button>
       )}
     </div>

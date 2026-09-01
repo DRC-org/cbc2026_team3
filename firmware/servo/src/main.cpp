@@ -37,6 +37,7 @@
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
 #include "SerialLineBuffer.h"
+#include "SerialOverride.h"
 #include "ServoChannel.h"
 #include "ServoMotion.h"
 #include "config.h"
@@ -123,6 +124,13 @@ static_assert(kDipBitCount == sizeof(kPinDip) / sizeof(kPinDip[0]),
 static MCP_CAN g_can(kPinMcpCs);
 static bool g_canFailed = false;
 
+// 連続して送信に失敗した回数。**sendMsgBuf の戻り値を捨ててはならない** ——
+// mcp_can の sendMsg() は空き TX バッファ待ちと TXREQ クリア待ちの二段で
+// TIMEOUTVALUE(2500us) まで回るので、バス不通・bus-off・調停混雑では 1 通あたり
+// 最大 5ms を食う。捨てると「loop() だけが伸び続けて誰にも何も届かない基板」が
+// 平常時と同じ緑のハートビートを出し続ける。
+static uint16_t g_txFailStreak = 0;
+
 static Servo g_servo[kServoSlotCount];
 
 // 仕様書 §5.4: 起動時の緊急停止ラッチは解除済み。§7.1 のとおり宛先がスロットなので
@@ -160,9 +168,9 @@ static Adafruit_NeoPixel g_strip(1, kPinRgb, NEO_GRB + NEO_KHZ800);
 #endif
 
 #if ENABLE_SERIAL_DEBUG
-// シリアルから角度を入力している間だけ true。
+// シリアルから角度を入力しているスロットと、その期限（規則は SerialOverride.h）。
 // CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
-static bool g_serialOverride = false;
+static SerialOverride g_serialOverride;
 static char g_serialStorage[kSerialLineCapacity];
 static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
@@ -271,6 +279,18 @@ static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
                                 g_sensorActive[slot]);
 }
 
+// CAN 送信 1 通ぶんの結果を記録する。**戻り値を捨てないための唯一の口**にしてあるので、
+// g_can.sendMsgBuf() を直に呼ぶ経路を作らないこと。
+static void sendFrame(uint16_t canId, uint8_t length, uint8_t *data) {
+    if (g_can.sendMsgBuf(canId, 0, length, data) == CAN_OK) {
+        g_txFailStreak = 0;
+        return;
+    }
+    if (g_txFailStreak < 0xFFFF) {
+        ++g_txFailStreak;
+    }
+}
+
 static void sendFeedback(uint8_t slot, uint32_t nowMs) {
     uint8_t data[kFeedbackWithPositionLength];
     const uint8_t flags = buildStatusFlags(slot, nowMs);
@@ -288,9 +308,8 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
-    // ID 未設定スロットは CAN ID 0x100 で送ることになるが、PC 側へ「デバイス ID 未設定」を
-    // 届ける方を優先する。
-    g_can.sendMsgBuf(buildCanId(CommandType::Feedback, g_deviceId[slot]), 0, len, data);
+    // **ID 未設定スロットはここへ来ない**（呼び出し側が isSlotConfigured で弾く。§2.2）。
+    sendFrame(buildCanId(CommandType::Feedback, g_deviceId[slot]), len, data);
 }
 
 // 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
@@ -304,16 +323,19 @@ static void sendInfo(uint8_t slot) {
     if (isServoSlot(slot)) {
         const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator,
                                        kServoSlots[slot].pulse.angleRangeDeg);
-        g_can.sendMsgBuf(buildCanId(CommandType::Info, g_deviceId[slot]), 0, len, data);
+        sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
         return;
     }
 
     const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, kind);
-    g_can.sendMsgBuf(buildCanId(CommandType::Info, g_deviceId[slot]), 0, len, data);
+    sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
 }
 
-static void applyParam(uint8_t slot, const SetParamCommand &cmd) {
+// **nowMs を受け取るのは、出力禁止中の SET_PARAM を ServoChannel が保留するため**
+// （仕様書 §7.5）。ここで判断すると main.cpp にゲートが増え、native テストの
+// 圏外で規則が 2 箇所に分かれる。
+static void applyParam(uint8_t slot, const SetParamCommand &cmd, uint32_t nowMs) {
     // command_timeout_ms / feedback_interval_ms は 3 枚に共通なので MotorCan が持つ。
     if (applyCommonParam(cmd, g_channel[slot], g_feedbackIntervalMs)) {
         return;
@@ -324,24 +346,24 @@ static void applyParam(uint8_t slot, const SetParamCommand &cmd) {
             // applyCommonParam が処理済み。ここへは来ない。
             break;
         case ParamId::ReachedTolerance:
-            g_channel[slot].setReachedToleranceDeg(fromRaw(cmd.raw, kAngleScale));
+            g_channel[slot].setReachedToleranceDeg(fromRaw(cmd.raw, kAngleScale), nowMs);
             break;
         case ParamId::SlewRate: {
             ServoLimits limits = g_channel[slot].limits();
             limits.slewRateDegPerSec = fromRaw(cmd.raw, kRateScale);
-            g_channel[slot].setLimits(limits);
+            g_channel[slot].setLimits(limits, nowMs);
             break;
         }
         case ParamId::AngleMin: {
             ServoLimits limits = g_channel[slot].limits();
             limits.angleMinDeg = fromRaw(cmd.raw, kAngleScale);
-            g_channel[slot].setLimits(limits);
+            g_channel[slot].setLimits(limits, nowMs);
             break;
         }
         case ParamId::AngleMax: {
             ServoLimits limits = g_channel[slot].limits();
             limits.angleMaxDeg = fromRaw(cmd.raw, kAngleScale);
-            g_channel[slot].setLimits(limits);
+            g_channel[slot].setLimits(limits, nowMs);
             break;
         }
         case ParamId::MaxDuty:
@@ -372,17 +394,16 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
             if (!cmd.valid) {
                 return;
             }
-            // 仕様書 §7.2: サーボは position のみ受理する。duty 値を角度として解釈すると
-            // 想定外の位置へ飛ぶので、velocity / duty は黙って捨てる。
-            if (cmd.type != ControlType::Position) {
-                return;
-            }
 #if ENABLE_SERIAL_DEBUG
-            g_serialOverride = false;
+            // PC がこのスロットへ指令を出している以上、シリアルの上書きは終わり。
+            g_serialOverride.clear();
 #endif
-            // setTarget が angle_min / angle_max でクランプし（§7.2）、緊急停止ラッチ中・
+            // **制御タイプの受理判定（§7.2: position のみ）は ServoChannel が持つ。**
+            // ここに `if (cmd.type != ...)` を戻すと、この翻訳単位は native テストの
+            // 対象外なので消しても全ケース緑になる。
+            // 続けて angle_min / angle_max でクランプし（§7.2）、緊急停止ラッチ中・
             // ウォッチドッグ満了中は受け付けない（§7.5）。
-            g_channel[slot].setTarget(fromRaw(cmd.raw, kAngleScale), nowMs);
+            g_channel[slot].applySetTarget(cmd, nowMs);
             break;
         }
         case CommandType::SetParam: {
@@ -391,7 +412,7 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
             // angle_max(0x06) を処理し、max_duty(0x00) は制御則を持たないので無視する。
             const SetParamCommand cmd = decodeSetParam(data, len);
             if (cmd.valid) {
-                applyParam(slot, cmd);
+                applyParam(slot, cmd, nowMs);
             }
             break;
         }
@@ -402,14 +423,15 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
             if (action != EStopAction::None) {
                 applyChannelOutput(slot, nowMs);
 #if ENABLE_SERIAL_DEBUG
-                g_serialOverride = false;
+                g_serialOverride.clear();
 #endif
             }
             break;
         }
         case CommandType::Feedback:
         case CommandType::Info:
-            // 他基板がモタドラ → PC 方向へ送るフレーム。ID は衝突しないが念のため無視する。
+            // 他基板がモタドラ → PC 方向へ送るフレーム。受信フィルタで落としているが、
+            // フィルタ設定を変えたときに素通りしないよう明示的に無視する。
             break;
     }
 }
@@ -436,6 +458,64 @@ static void handleFrame(uint32_t rxId, const uint8_t *data, uint8_t len) {
             handleSlotFrame(slot, route.command, data, len, nowMs);
         }
     }
+}
+
+// **PC → モタドラ方向のフレームだけを通す**（E_STOP / SET_TARGET / SET_PARAM）。
+//
+// 全通過（MCP_ANY）にすると、共有バス上の FEEDBACK（自作モタドラ 14 台 × 100Hz）と
+// INFO まで MCP2515 の受信バッファ（**RXB0 / RXB1 の 2 段しかない**）へ流れ込み、
+// SPI で読み出しては捨てるだけの仕事が loop() に乗る。この基板の loop() は
+// sendMsgBuf が 1 通あたり最大 5ms（空き TX 待ち + TXREQ クリア待ち）まで伸びうるので、
+// 2 段は 1.4ms 相当で溢れる。落ちるのがブロードキャスト E_STOP だと、症状は
+// 「たまに緊急停止が効かないサーボ基板」という最も追いにくい形になる。
+//
+// **どの ID を通すかは CommandType から導く**（`kEStopAndSetTargetFilter` /
+// `kSetParamFilter`）。ここに残しているのは MCP2515 固有の事情だけ ——
+// mcp2515_write_mf は ext=0 のとき ulData の **bit16 以降**を SIDH/SIDL へ詰めるので、
+// 標準 ID はそこへ載せる（低位 16bit は拡張 ID のマスクになるので 0 にする。
+// 非 0 にすると標準フレームでもデータ 1-2 バイト目と比較され始める）。
+//
+// **1 本のマスクでは 3 値を表せない**ので 2 バンクに分ける。
+//   RXB0（マスク 0）… E_STOP + SET_TARGET。時間に厳しい方を優先度の高い RXB0 に置く
+//   RXB1（マスク 1）… SET_PARAM
+// RXB0 は BUKT（ロールオーバー）付きなので、RXB0 が埋まっている間に来た E_STOP は
+// RXB1 のフィルタに関係なく RXB1 へ落ちる。
+constexpr uint32_t kStdIdShiftInFilterReg = 16;
+
+constexpr uint32_t toFilterReg(uint16_t stdId) {
+    return static_cast<uint32_t>(stdId) << kStdIdShiftInFilterReg;
+}
+
+// **ビット位置を取り違えるとフィルタが全通過にも全遮断にもなる。**
+// 全遮断なら「CAN が生きているのに指令が 1 通も効かない」、全通過なら
+// この修正そのものが無効になり、どちらも実機でしか気付けない。
+static_assert(toFilterReg(0x7FF) == 0x07FF0000UL,
+              "標準 ID がマスク/フィルタレジスタの想定位置（bit16 以降）に載っていない");
+static_assert((toFilterReg(kEStopAndSetTargetFilter.mask) & 0xFFFFUL) == 0,
+              "拡張 ID 側のマスクが 0 でない（標準フレームがデータ 1-2 バイト目と比較される）");
+
+static bool configureCanFilters() {
+    // RXB0: E_STOP + SET_TARGET。フィルタ 2 本とも同じ値にしないと、
+    // 初期化時の 0x000 が別のマスクで残って予期しない ID を通す。
+    if (g_can.init_Mask(0, 0, toFilterReg(kEStopAndSetTargetFilter.mask)) != MCP2515_OK) {
+        return false;
+    }
+    for (uint8_t f = 0; f <= 1; ++f) {
+        if (g_can.init_Filt(f, 0, toFilterReg(kEStopAndSetTargetFilter.id)) != MCP2515_OK) {
+            return false;
+        }
+    }
+
+    // RXB1: SET_PARAM。フィルタは 4 本あるので全部同じ値で埋める。
+    if (g_can.init_Mask(1, 0, toFilterReg(kSetParamFilter.mask)) != MCP2515_OK) {
+        return false;
+    }
+    for (uint8_t f = 2; f <= 5; ++f) {
+        if (g_can.init_Filt(f, 0, toFilterReg(kSetParamFilter.id)) != MCP2515_OK) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void pollCan() {
@@ -482,7 +562,10 @@ static void resolveDeviceIds() {
 // ===========================================================================
 
 static void updateLed(uint32_t nowMs) {
-    BoardIndication indication(g_canFailed);
+    // **送信が続けて失敗している基板も「今すぐ直さないと使えない」側に入れる。**
+    // FEEDBACK も INFO も出ていないので PC 側からは STALE にしか見えず、
+    // 配線不良と区別が付かない。ここが唯一の切り分け手段になる（仕様書 §2.2 と同じ扱い）。
+    BoardIndication indication(g_canFailed || g_txFailStreak >= kCanTxFailStreakAlarm);
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
         // Unused スロットは ID を名乗らないので「未設定」に数えない（数えると
         // 空きスロットのある基板が常に赤く点滅する）。緊急停止はサーボスロットだけが持つ。
@@ -508,7 +591,7 @@ static void updateLed(uint32_t nowMs) {
 #if HAS_RGB_LED
     // DC 用と同じ表示規則にしてある。基板が違うたびに色の意味が変わると、
     // 現場で 2 種類の対応表を覚えることになる。
-    // 赤（速い点滅）= CAN 不通 / ID 未設定、橙 = 緊急停止ラッチ中、緑 = 平常。
+    // 赤（速い点滅）= CAN 不通 / 送信失敗 / ID 未設定、橙 = 緊急停止ラッチ中、緑 = 平常。
     uint8_t r = 0;
     uint8_t g = 0;
     if (indication.urgent) {
@@ -519,8 +602,23 @@ static void updateLed(uint32_t nowMs) {
     } else {
         g = g_ledOn ? 255 : 32;
     }
-    g_strip.setPixelColor(0, g_strip.Color(r, g, 0));
-    g_strip.show();
+
+    // **AVR 版 Adafruit_NeoPixel::show() は 1 LED あたり約 30us 割り込みを禁止する。**
+    // その窓に Servo ライブラリの Timer1 割り込み（パルス終端）が当たると、
+    // **そのパルスだけが最大 30us 伸びる** —— kServoPulse270 は 7.04us/deg なので
+    // 約 4.3deg のヒゲになる（grip 5deg / 壁 6deg の微小ストロークではほぼ全域に相当）。
+    // 次のフレーム（20ms 後）で正しい幅に戻るので機構への影響は一瞬だが、
+    // **呼ぶ回数を増やしてはならない**（updateMotion の直後や毎ループの位置へ
+    // 動かすと、当たる確率がそのまま比例して上がる）。色が変わらないときに
+    // 送らないのは、緊急停止ラッチ中（橙で固定）に毎秒 1 回叩き続けないため。
+    static uint8_t lastR = 0xFF;
+    static uint8_t lastG = 0xFF;
+    if (r != lastR || g != lastG) {
+        lastR = r;
+        lastG = g;
+        g_strip.setPixelColor(0, g_strip.Color(r, g, 0));
+        g_strip.show();
+    }
 #endif
 }
 
@@ -542,7 +640,7 @@ static void pollSerial(uint32_t nowMs) {
         // 値の読み取りと「サーボスロットか」の判定だけを基板ごとに行う。
         const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kServoSlotCount);
         if (cmd.kind == SerialCommand::Kind::StopAll) {
-            g_serialOverride = false;
+            g_serialOverride.clear();
             for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
                 if (isServoSlot(slot)) {
                     g_channel[slot].hold(nowMs);
@@ -556,18 +654,18 @@ static void pollSerial(uint32_t nowMs) {
             const float deg = fromRaw(
                 toRaw(static_cast<float>(strtod(cmd.value, nullptr)), kAngleScale), kAngleScale);
             g_channel[cmd.channel].setTarget(deg, nowMs);
-            g_serialOverride = true;
+            g_serialOverride.note(cmd.channel, nowMs);
         }
     }
 
-    // シリアル操作中はウォッチドッグを養い続ける。
-    // 1 回だけ養う実装だと command_timeout_ms 後に必ず止まってデバッグにならない。
-    // 'S' 入力・CAN の SET_TARGET・電源断のいずれでもこのモードは解除される。
-    if (g_serialOverride) {
-        for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
-            if (isServoSlot(slot)) {
-                g_channel[slot].feed(nowMs);
-            }
+    // シリアル操作中はウォッチドッグを養い続ける。1 回だけ養う実装だと
+    // command_timeout_ms 後に必ず止まってデバッグにならない。
+    // **養う範囲と期限の規則は SerialOverride が持つ**（打ったスロットだけ /
+    // 最後の入力から kSerialOverrideHoldMs）。ここで全スロットを養うと、
+    // 1 行打っただけで基板ぜんぶの最後の砦が無期限に外れる。
+    for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
+        if (isServoSlot(slot) && g_serialOverride.shouldFeed(slot, nowMs)) {
+            g_channel[slot].feed(nowMs);
         }
     }
 }
@@ -611,8 +709,8 @@ void setup() {
 
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
         // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
-        // ID 未設定のスロットも「デバイス ID 未設定」を知らせるために送るので、
-        // ここは全スロット分やる。
+        // ID 未設定のスロットは 1 通も送らない（§2.2）が、位相の割り当てはスロットの
+        // 添字で決まるので、ここは全スロット分やる（飛ばすと隣とずれ方が変わる）。
         g_feedbackTimer[slot].stagger(startMs, g_feedbackIntervalMs, slot, kServoSlotCount);
 
         if (!isServoSlot(slot) || !isSlotConfigured(slot)) {
@@ -632,9 +730,16 @@ void setup() {
 
     // 仕様書 §1: 1 Mbps。MCP2515 の水晶は 16MHz。
     // CAN が上がらない基板を駆動させると PC から止められないので、
-    // begin 失敗時は緊急停止ラッチに落として新しい角度指令を受け付けなくする
-    // （§7.5 のとおり出力は切らず、初期角を保持したままになる）。
-    if (g_can.begin(MCP_ANY, CAN_1000KBPS, MCP_16MHZ) != CAN_OK) {
+    // begin / フィルタ設定が失敗したら緊急停止ラッチに落として新しい角度指令を
+    // 受け付けなくする（§7.5 のとおり出力は切らず、初期角を保持したままになる）。
+    //
+    // **MCP_ANY ではなく MCP_STDEXT を渡す。** MCP_ANY はマスク／フィルタを丸ごと
+    // 無効化するので configureCanFilters() が効かない。**MCP_STD は使えない** ——
+    // mcp_can では「シリコンのバグ」としてコメントアウトされており、渡すと
+    // begin() が MCP2515_FAIL を返して基板がまるごと止まる。MCP_STDEXT は
+    // フィルタを有効にしたまま標準・拡張の両方を各フィルタの EXIDE で判別する設定で、
+    // 下で全 6 本を標準 ID として書き直すので拡張フレームは 1 通も通らない。
+    if (g_can.begin(MCP_STDEXT, CAN_1000KBPS, MCP_16MHZ) != CAN_OK || !configureCanFilters()) {
         g_canFailed = true;
         for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
             g_channel[slot].stop(startMs);
@@ -671,8 +776,9 @@ void loop() {
     }
 
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
-        // Unused 以外はすべて FEEDBACK を送る。センサだけの基板でも PC が読めるようにする。
-        if (isDeviceSlot(slot) && g_feedbackTimer[slot].due(nowMs, g_feedbackIntervalMs)) {
+        // **ID を名乗れるスロットだけが FEEDBACK を送る**（仕様書 §2.2）。
+        // Unused 以外なら役割は問わない（センサだけの基板でも PC が読める）。
+        if (isSlotConfigured(slot) && g_feedbackTimer[slot].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(slot, nowMs);
         }
     }

@@ -15,10 +15,12 @@ import dataclasses
 import inspect
 import logging
 import pathlib
+import socket
 import struct
 import time
 import types
 from typing import ClassVar
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import can
 import pytest
@@ -33,6 +35,7 @@ from lib.config_schema import (
     TuningSettings,
     load_robot_config,
 )
+from lib.control.position_loop import M3508PositionLoop
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -1163,3 +1166,218 @@ class TestSequenceClassSelection:
 
     def test_サブクラスが無ければ_None(self) -> None:
         assert main._sequence_class_defined_in(self._module("x = 1\n")) is None
+
+
+class TestRobotBusSelection:
+    """**そのロボットが使うバスだけを開く。**
+
+    全バスを開くと、メインハンドは DM3520 を 1 台も持たないのに `can_dm3520` を
+    開くことになり、CANable が 1 本欠けているだけで**両ハンドとも起動できなくなる**
+    (片方だけの運用も動作確認も UI の起動もできない)。受信ループが物理バス 1 本に
+    つき 2 本立つのも同じ原因。
+    """
+
+    _BUSES: ClassVar[dict[str, str]] = {
+        "m3508_bus": "can_m3508",
+        "edulite_bus": "can_edulite",
+        "generic_bus": "can_generic",
+        "dm3520_bus": "can_dm3520",
+    }
+
+    def test_出荷_config_で使わないバスを開かない(self) -> None:
+        _system, loaded = _load_all_configs(
+            _CONFIG_DIR / "system.yaml",
+            [_CONFIG_DIR / "main_hand.yaml", _CONFIG_DIR / "sub_hand.yaml"],
+        )
+        robots = {robot.robot_name: robot for _, robot in loaded}
+
+        main_buses = main._robot_bus_names(robots["main_hand"], self._BUSES)
+        sub_buses = main._robot_bus_names(robots["sub_hand"], self._BUSES)
+
+        # メインハンドは DM3520 を 1 台も持たない / サブハンドは M3508 を持たない
+        assert "dm3520_bus" not in main_buses
+        assert "m3508_bus" not in sub_buses
+
+    def test_モータとセンサが載るバスだけを列挙する(self) -> None:
+        robot = _robot(
+            {
+                "robot_name": "r",
+                "motors": {"conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1}},
+                "sensors": {"origin": {"bus": "edulite_bus", "can_id": 2}},
+            }
+        )
+
+        # 宣言順を保つ (バス番号の入れ替わりを config の並びで固定するため)
+        assert main._robot_bus_names(robot, self._BUSES) == ["edulite_bus", "generic_bus"]
+
+    def test_setup_robot_は使うバスだけを開く(self) -> None:
+        robot = _robot(
+            {
+                "robot_name": "r",
+                "motors": {"conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1}},
+            }
+        )
+
+        can_manager, _motors = main._setup_robot(robot, self._BUSES, dry_run=True)
+
+        assert can_manager.bus_names == ("generic_bus",)
+
+    def test_バスを開けなければ一行のメッセージで落とす(self) -> None:
+        """down しているインタフェースで生の traceback を出さない。
+
+        この呼び出しは `main()` の try の外にあるので、素通しすると後始末も
+        1 段も走らない。会場で読むのは操縦者なので直し方まで書いて止める。
+        """
+        with (
+            patch("main.can.Bus", side_effect=OSError(19, "No such device")),
+            pytest.raises(SystemExit) as exc,
+        ):
+            main._create_bus("can_dm3520", dry_run=False)
+
+        message = str(exc.value)
+        assert "can_dm3520" in message
+        assert "setup_can.sh" in message
+
+
+class TestEnsurePortAvailable:
+    """**bind の可否は CAN を開くより前に見る。**
+
+    立ち上げ順は「CAN → 制御ループ → 目標値再送 → サーバー bind」なので、
+    ポートが埋まっていると**機体を励磁して 200Hz の制御ループを回し始めた後**に
+    落ちる。「起動したか分からず二度叩く」は会場で普通に起きる操作。
+    """
+
+    def test_空いていれば通る(self) -> None:
+        main._ensure_port_available("127.0.0.1", 0)
+
+    def test_使用中なら起動を拒否する(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+
+            with pytest.raises(SystemExit) as exc:
+                main._ensure_port_available("127.0.0.1", port)
+
+        assert "使用中" in str(exc.value)
+
+    def test_CAN_を開く前に呼ばれる(self) -> None:
+        """`main()` の並び順そのものを固定する。後ろへ移すと意味が無くなる。"""
+        source = inspect.getsource(main.main)
+        assert source.index("_ensure_port_available") < source.index("_wire_one_robot")
+
+
+class TestStartAll:
+    """起動の順序と、起動時に励磁できなかったモータの受け渡し。"""
+
+    def _wiring(self, name: str, inactive: list[str]) -> main._RobotWiring:
+        can_manager = MagicMock()
+        can_manager.run = AsyncMock(return_value=inactive)
+        return main._RobotWiring(
+            name=name,
+            sequence=_DummySequence(name),
+            can_manager=can_manager,
+            positions=PositionTable.empty(),
+            position_loops=[],
+            sync_monitors=[],
+            target_refreshers=[],
+            motor_group=None,
+        )
+
+    async def test_起動時に励磁できなかったモータをサーバーへ渡す(self) -> None:
+        """**捨ててはならない。** 捨てると `safety.unenergized_motors` は緊急停止
+        解除の経路でしか埋まらず、起動時の励磁失敗は画面のどこにも出ない。
+        """
+        server = MagicMock()
+        server.start = AsyncMock()
+
+        await main._start_all(server, [self._wiring("main_hand", ["rotate_r"])])
+
+        server.set_initial_inactive_motors.assert_called_once_with("main_hand", ["rotate_r"])
+
+    async def test_ロボットごとに渡す(self) -> None:
+        server = MagicMock()
+        server.start = AsyncMock()
+
+        await main._start_all(
+            server,
+            [self._wiring("main_hand", []), self._wiring("sub_hand", ["sub_lift"])],
+        )
+
+        assert [call.args for call in server.set_initial_inactive_motors.call_args_list] == [
+            ("main_hand", []),
+            ("sub_hand", ["sub_lift"]),
+        ]
+
+
+class TestOriginResolver:
+    """零点確定の実行手段を、**探索を始める前に**問える形で解決する。
+
+    センサまで押し込んでから「確定できません」で降りると、機構を動かした意味が
+    無いまま姿勢だけが変わる。
+    """
+
+    def _table(self) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "sync_tolerance": 2.0,
+                        "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                    },
+                    "rotate": {
+                        "unit": "deg",
+                        "command_unit": "rad",
+                        "sync_tolerance": 3.0,
+                        "motors": {"rotate_r": {"scale": 1.0}, "rotate_l": {"scale": -1.0}},
+                    },
+                },
+                "positions": {"y_axis": {"home": 0.0}, "rotate": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    def _loop(self) -> M3508PositionLoop:
+        config = {
+            "robot_name": "main_hand",
+            "motors": {
+                "y_axis_r": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1},
+                "y_axis_l": {"driver": "m3508", "bus": "m3508_bus", "can_id": 2},
+            },
+        }
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+        }
+        loops = _build_position_loops(
+            _robot(config),
+            _StubCANManager(),
+            motors,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+        loop = loops["m3508_bus"]
+        _attach_sync_groups([self._table().axis("y_axis").sync_group], [loop])
+        return loop
+
+    def test_ペア軸はグループ単位で確定する(self) -> None:
+        """左右を別々の時刻に確定すると、その間に動いたぶんのオフセットが残る。"""
+        loop = self._loop()
+        resolve = main._make_origin_resolver([loop], self._table())
+
+        capture = resolve("y_axis")
+
+        assert capture is not None
+        assert capture.func == loop.set_group_origin_here
+        assert capture.args == ("y_axis",)
+
+    def test_位置制御ループに載らない軸は手段が無い(self) -> None:
+        """EDULITE 05 / DM3520 は原点をドライバ内部に持ち、切り直すには
+        SET_ZERO を送る経路が要る。**「確定したつもり」で先へ進ませない。**
+        """
+        resolve = main._make_origin_resolver([self._loop()], self._table())
+
+        assert resolve("rotate") is None

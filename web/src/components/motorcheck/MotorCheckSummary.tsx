@@ -16,7 +16,7 @@ import { motorCheckStatus } from "@/lib/motorCheckStatus";
 export function MotorCheckSummary() {
   const { connected } = useRobotStatus();
   const { state } = useMotorCheck();
-  const { outcome } = motorCheckStatus(state, connected);
+  const { outcome, failureReason } = motorCheckStatus(state, connected);
 
   if (outcome === "running") {
     return (
@@ -33,7 +33,7 @@ export function MotorCheckSummary() {
     return (
       <span className="flex min-w-0 items-center gap-2">
         <StatusBadge tone="warning">未完了</StatusBadge>
-        <span className="min-w-0 truncate text-base-content/70">{state.error}</span>
+        <span className="min-w-0 truncate text-base-content/70">{failureReason}</span>
       </span>
     );
   }

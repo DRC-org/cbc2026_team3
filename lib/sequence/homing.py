@@ -4,18 +4,29 @@
 ぶんがそのまま座標のずれになる。位置定数はすべて原点からの相対値なので、
 ずれた原点のまま走らせると全ステップが同じだけずれた場所へ動く。
 
-**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 3 つ用意してある:
+**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 5 つ用意してある:
 
 1. **探索距離の上限** (`HomingSpec.search_distance`) — 超えたら失敗として降りる。
-   配線が抜けている・センサが死んでいる場合の唯一の無人の歯止め
+   配線が抜けている・センサが死んでいる場合の唯一の無人の歯止め。
+   **数えるのは実測位置の移動量**であって、送った指令の積算ではない
+   (指令の積算で数えると、指令が実位置から離れているぶんが上限を素通りする)
 2. **センサ鮮度の事前確認** — フィードバックが途絶しているセンサでは 1 歩も動かさない。
    死んだセンサは「いつまでも当たらない」形でしか現れず、探索距離いっぱいまで
    機構を押し込んでから初めて分かる
-3. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
+3. **対象軸のフィードバック鮮度の事前確認** — 実測位置が読めないまま始めると、
+   未受信の 0.0 を現在位置と信じて全ストロークぶんの指令を 1 回で出す
+4. **1 歩ごとの再アンカー** — 指令は毎回**そのときの実測位置** + `step` で組む。
+   指令が実位置を追い越して先行し続けることが構造的に起こらず、機構が引っかかった
+   ときも 1 step ぶんの偏差しか掛からない
+5. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
 
 **原点確定はグループ単位でしか行わない。** 左右直結ペアを別々の時刻に確定すると、
 その間に片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に
 偏差超過で止まる (`M3508PositionLoop.set_group_origin_here` と同じ理由)。
+
+**原点を確定できない軸では 1 歩も動かさない。** 確定手段の有無は探索の前に問う
+(`origin_capturable`)。センサまで押し込んでから「確定できません」で降りると、
+機構を動かした意味が無いまま姿勢だけが変わる。
 """
 
 from __future__ import annotations
@@ -24,12 +35,23 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from lib.drivers.base import ControlMode
 from lib.sequence.motors import AxisHandle
-from lib.sequence.positions import AxisSpec
+from lib.sequence.positions import AxisSpec, HomingSpec
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["HomingError", "HomingRunner"]
+
+#: 1 歩ぶんの追従を待つ最大回数 (`settle_s` ごとに再確認する)。
+#: 待たずに次の指令を出すと、追従の遅い機構では指令だけが先へ進み、
+#: 「step ずつ確かめながら寄せる」動作にならない。
+_FOLLOW_ATTEMPTS = 5
+
+#: 実測が進まないまま許す連続ステップ数。超えたら失敗として降りる。
+#: 指令を実測へ再アンカーしているので、引っかかった機構は「指令しても進まない」形で
+#: しか現れず、探索距離の上限だけでは永久に降りられない。
+_STALL_LIMIT = 3
 
 
 class HomingError(RuntimeError):
@@ -42,6 +64,8 @@ class HomingError(RuntimeError):
 
 SensorActive = Callable[[str], bool]
 SensorStale = Callable[[str], bool]
+MotorStale = Callable[[str], bool]
+OriginCapturable = Callable[[str], bool]
 CaptureOrigin = Callable[[str], None]
 SleepFunc = Callable[[float], Awaitable[None]]
 
@@ -58,6 +82,8 @@ class HomingRunner:
         *,
         sensor_active: SensorActive,
         sensor_is_stale: SensorStale,
+        motor_is_stale: MotorStale,
+        origin_capturable: OriginCapturable,
         capture_origin: CaptureOrigin,
         sleep: SleepFunc = asyncio.sleep,
     ) -> None:
@@ -65,41 +91,48 @@ class HomingRunner:
         Args:
             sensor_active: センサ名 → 接触しているか (`GenericDriver.sensor_active`)
             sensor_is_stale: センサ名 → フィードバックが途絶しているか
+            motor_is_stale: モータ名 → フィードバックが途絶しているか。
+                **既定値を持たせない** —— 配線を忘れると「未受信の 0.0 を現在位置と
+                信じて全ストローク動く」という、この修正が消したはずの経路が戻る
+            origin_capturable: 軸名 → 原点を確定できるか。探索の前に問う
             capture_origin: 軸名 → その軸の現在位置を原点として確定する
                 (左右ペアはグループ全員へ展開されること)
             sleep: 1 ステップごとの待ち (テストで差し替える)
         """
         self._sensor_active = sensor_active
         self._sensor_is_stale = sensor_is_stale
+        self._motor_is_stale = motor_is_stale
+        self._origin_capturable = origin_capturable
         self._capture_origin = capture_origin
         self._sleep = sleep
 
-    async def home(self, spec: AxisSpec, handle: AxisHandle, *, start_value: float = 0.0) -> float:
+    async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
         """`spec.homing` に従って軸を寄せ、当たった位置を原点として確定する。
+
+        探索の起点は**実測位置**であって 0 ではない。起点を 0 に固定すると、
+        1 歩目が「現在位置から 1 step」ではなく原点近傍への 1 回のジャンプになり、
+        その移動が探索距離の上限を 1mm も消費しない (手動操縦で軸を動かした後や、
+        一度原点確定した後に踏む。どちらもセッティングタイムに普通に起きる)。
 
         Args:
             spec: 対象軸。`homing` を持たない軸を渡すのは呼び出し側の誤り
             handle: 目標値の送り口。**軸単位で 1 回だけ指令する**
                 (左右が別々の時刻に動くとその場で機構が壊れる)
-            start_value: 探索を始める位置 [軸の unit]。現在位置が読めない場合は 0
 
         Returns:
-            原点確定までに動かした距離 [軸の unit]。ログと検証用。
+            原点確定までに実際に動いた距離 [軸の unit]。ログと検証用。
 
         Raises:
-            HomingError: センサが途絶している / 探索距離を超えても当たらなかった
+            HomingError: 原点を確定する手段が無い / センサまたは軸のフィードバックが
+                途絶している / 実測が進まない / 探索距離を超えても当たらなかった
         """
         homing = spec.homing
         if homing is None:
             raise HomingError(f"軸 '{spec.name}' に homing 設定がありません")
 
-        # **1 歩も動かす前に見る。** 死んだセンサは「いつまでも当たらない」形でしか
-        # 現れず、探索距離いっぱいまで機構を押し込んでから初めて分かる
-        if self._sensor_is_stale(homing.sensor):
-            raise HomingError(
-                f"軸 '{spec.name}' の原点センサ '{homing.sensor}' が応答していません"
-                " (配線・基板の電源を確認してください)"
-            )
+        self._check_preconditions(spec, homing)
+
+        origin = self._observe(spec, handle)
 
         if self._sensor_active(homing.sensor):
             # 既に触れている。動かさずに確定する (押し込む方向へ動かさない)
@@ -107,23 +140,106 @@ class HomingRunner:
             self._capture_origin(spec.name)
             return 0.0
 
-        travelled = 0.0
-        value = start_value
-        while travelled < homing.search_distance:
-            value += homing.direction * homing.step
-            travelled += homing.step
-            await handle.set_target_value(spec.to_commands(value))
-            await self._sleep(homing.settle_s)
+        observed = origin
+        stalled = 0
+        while True:
+            travelled = abs(observed - origin)
+            if travelled >= homing.search_distance:
+                raise HomingError(
+                    f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
+                    f" 原点センサ '{homing.sensor}' に到達しませんでした"
+                    " (探索方向・機構の引っかかり・センサの配線を確認してください)"
+                )
 
-            if self._sensor_active(homing.sensor):
+            # **毎回そのときの実測位置へアンカーし直す。** 指令の積算で組むと、
+            # 追従が遅れているあいだ指令だけが先行し続け、機構には常に大きな偏差が
+            # 掛かったままになる (位置制御ループは電流上限まで使って押す)
+            commanded = observed + homing.direction * homing.step
+            await handle.set_target_value(spec.to_commands(commanded))
+
+            hit = await self._wait_step(spec, handle, homing, commanded)
+
+            previous = observed
+            observed = self._observe(spec, handle)
+
+            if hit:
+                travelled = abs(observed - origin)
                 logger.info(
                     "[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit
                 )
                 self._capture_origin(spec.name)
                 return travelled
 
-        raise HomingError(
-            f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
-            f" 原点センサ '{homing.sensor}' に到達しませんでした"
-            " (探索方向・機構の引っかかり・センサの配線を確認してください)"
-        )
+            # 指令を実測へ再アンカーしている以上、引っかかった機構は「指令しても
+            # 進まない」形でしか現れない。実測の移動量で数える探索距離だけでは
+            # 永久に降りられないので、進まないことそのものを失敗として扱う
+            stalled = 0 if abs(observed - previous) >= homing.step / 2.0 else stalled + 1
+            if stalled >= _STALL_LIMIT:
+                raise HomingError(
+                    f"軸 '{spec.name}' が指令しても動きません"
+                    f" ({_STALL_LIMIT} 歩連続で {homing.step}{spec.unit} 進まなかった)。"
+                    " 機構の引っかかり・探索方向・モータの励磁を確認してください"
+                )
+
+    def _check_preconditions(self, spec: AxisSpec, homing: HomingSpec) -> None:
+        """**1 歩も動かす前に**、止められない探索になっていないかを確かめる。"""
+        if spec.command_mode is not ControlMode.POSITION:
+            # 位置定数の読み込みが既に拒否しているが、ここでも降りる。到達も現在位置も
+            # 観測できない軸で「当たるまで少しずつ動かす」は成立しない
+            raise HomingError(
+                f"軸 '{spec.name}' は位置指令ではないため零点確定できません"
+                f" (command_mode={spec.command_mode.value})"
+            )
+
+        if not self._origin_capturable(spec.name):
+            raise HomingError(
+                f"軸 '{spec.name}' の原点を確定する手段がありません。"
+                " 零点確定を実行できないため探索を開始しません"
+            )
+
+        if self._sensor_is_stale(homing.sensor):
+            raise HomingError(
+                f"軸 '{spec.name}' の原点センサ '{homing.sensor}' が応答していません"
+                " (配線・基板の電源を確認してください)"
+            )
+
+        stale = [name for name in spec.motor_names if self._motor_is_stale(name)]
+        if stale:
+            # 未受信の 0.0 を現在位置と信じると、1 歩目が原点近傍への
+            # ジャンプになり、その移動は探索距離の上限に掛からない
+            raise HomingError(
+                f"軸 '{spec.name}' の現在位置を読めません"
+                f" (モータ {', '.join(stale)} のフィードバックが途絶しています)"
+            )
+
+    async def _wait_step(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        commanded: float,
+    ) -> bool:
+        """1 歩ぶんの追従を待つ。待っている間にセンサへ当たったら True。
+
+        追従を待たずに次の指令を出すと、指令だけが `step` ずつ進んで実位置から
+        離れ続ける (`settle_s` は 50ms 程度なので、機構の応答より速い)。
+        待ち切れなくても失敗にはしない —— 進まないことは呼び出し側の停滞判定が
+        まとめて拾う (同じ事象に 2 つの判定を置くと、片方だけ直せてしまう)。
+        """
+        tolerance = spec.tolerance if spec.tolerance is not None else homing.step
+        for _ in range(_FOLLOW_ATTEMPTS):
+            await self._sleep(homing.settle_s)
+            if self._sensor_active(homing.sensor):
+                return True
+            if abs(self._observe(spec, handle) - commanded) <= tolerance:
+                return False
+        return False
+
+    def _observe(self, spec: AxisSpec, handle: AxisHandle) -> float:
+        """実測の軸位置。読めなければ探索そのものを止める。"""
+        try:
+            return handle.observed_value()
+        except HomingError:
+            raise
+        except Exception as exc:
+            raise HomingError(f"軸 '{spec.name}' の現在位置を読めません ({exc})") from exc

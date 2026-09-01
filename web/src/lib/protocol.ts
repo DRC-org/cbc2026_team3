@@ -69,8 +69,16 @@ export interface MotorState {
   pid: MotorPid | null;
 }
 
-export type BusHealthState = "ok" | "degraded" | "down";
-export type MotorHealthState = "ok" | "stale" | "warning" | "fault";
+/**
+ * ヘルスの語彙。**実行時の集合と型を 1 つの宣言から作る** ——
+ * 受信境界で既知値かを確かめる以上、集合を型と別に書き写すと
+ * 「型には無いのに検査は通る」値が生まれる。
+ */
+export const BUS_HEALTH_STATES = ["ok", "degraded", "down"] as const;
+export type BusHealthState = (typeof BUS_HEALTH_STATES)[number];
+
+export const MOTOR_HEALTH_STATES = ["ok", "stale", "warning", "fault"] as const;
+export type MotorHealthState = (typeof MOTOR_HEALTH_STATES)[number];
 
 export interface BusHealth {
   name: string;
@@ -113,6 +121,57 @@ export interface HealthSnapshot {
   detail: string | null;
 }
 
+/** `name` と既知の `state` を持つ配列か。ヘルスの内訳 (buses / motors) 共通の形 */
+function isHealthEntryArray(value: unknown, states: readonly string[]): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        isObject(entry) &&
+        typeof entry.name === "string" &&
+        typeof entry.state === "string" &&
+        states.includes(entry.state),
+    )
+  );
+}
+
+/**
+ * `HealthSnapshot` として読めない欄を挙げる (空なら読める)。
+ *
+ * **UI が実際に読む欄しか見ない** (`safetyShapeErrors` と同じ方針)。
+ * `evaluateHealth` は `buses.filter(...)` / `motors.filter(...)` を無検査で呼ぶので、
+ * 内訳が配列でないだけでレンダー本体から TypeError が飛ぶ。しかも呼び出し元の 1 つ
+ * (`TabBar`) は `RouteErrorBoundary` の**外**にあるため、例外は React ツリーごと
+ * アンマウントさせ、**ヘッダーの緊急停止ボタンまで画面から消える**。
+ * `safety` の 1 欄欠落で全画面が白くなった事故と同型。
+ */
+export function healthShapeErrors(value: unknown): string[] {
+  if (!isObject(value)) return ["health"];
+
+  const broken: string[] = [];
+  if (typeof value.overall !== "string" || !BUS_HEALTH_STATES.includes(value.overall as never)) {
+    broken.push("overall");
+  }
+  if (!isHealthEntryArray(value.buses, BUS_HEALTH_STATES)) broken.push("buses");
+  if (!isHealthEntryArray(value.motors, MOTOR_HEALTH_STATES)) broken.push("motors");
+  // 判定不能の理由はここにしか無く、そのまま画面へ文字として出る
+  if (value.detail !== null && value.detail !== undefined && typeof value.detail !== "string") {
+    broken.push("detail");
+  }
+  return broken;
+}
+
+/**
+ * ヘルスを受信境界で確定させる。未配信は undefined、読めない形は `MALFORMED`。
+ *
+ * **空の `HealthSnapshot` へ倒してはならない** —— 内訳が空の判定は
+ * 「ヘルス未取得」(色を付けない) になり、読めなかったことが画面から消える。
+ */
+export function parseHealth(raw: unknown): HealthSnapshot | Malformed | undefined {
+  if (raw === undefined) return undefined;
+  return healthShapeErrors(raw).length === 0 ? (raw as HealthSnapshot) : MALFORMED;
+}
+
 export type HealthChangeLevel = "info" | "warning" | "critical";
 
 /** ヘルス変化 1 件。受信時刻は UI 側で付ける (`lib/robotReducer.ts`) */
@@ -150,6 +209,14 @@ export interface MotorCheckSnapshot {
   steps: SequenceStepInfo[];
   /** 直近の拒否・失敗理由。次の起動が成功するまで消えない */
   error: string | null;
+  /**
+   * どのステップで失敗したか。平常時は null。
+   *
+   * `error` (表示 1 行) と同じ失敗を機械的に読める形で持つ配信なので、
+   * **表示は 1 つに畳む** (`lib/motorCheckStatus.ts` が唯一の畳み先)。
+   * 欠落と null は同じ「出すものが無い」へ倒す。
+   */
+  last_error: SequenceFailure | null;
 }
 
 /**
@@ -172,8 +239,19 @@ export interface ServerInfo {
   temp_critical_c: number | null;
 }
 
-export type MatchCourt = "red" | "blue";
-export type MatchPhase = "setup" | "ready" | "match" | "finished";
+/**
+ * コートとフェーズの語彙。**実行時の集合と型を 1 つの宣言から作る。**
+ *
+ * どちらも `Record` の索引として使われる (`PHASE_LABEL[phase]` 等) ので、
+ * 未知の値が素通しで入ると索引が `undefined` になり、**チップが無地・無文字で
+ * 消える**。フェーズはさらに `isDuringMatch()` を false にして画面全体を
+ * 「準備中」へ倒すため、読めなかったこと自体が画面のどこにも現れない。
+ */
+export const MATCH_COURTS = ["red", "blue"] as const;
+export type MatchCourt = (typeof MATCH_COURTS)[number];
+
+export const MATCH_PHASES = ["setup", "ready", "match", "finished"] as const;
+export type MatchPhase = (typeof MATCH_PHASES)[number];
 /**
  * 指差喚呼のロール。サーバーの `lib/match_state.py` の `ALL_ROLES` と 1:1 で対応する。
  *
@@ -260,8 +338,14 @@ export interface MatchTimer {
 }
 
 export interface MatchState {
-  court: MatchCourt;
-  phase: MatchPhase;
+  /**
+   * 既知値でなければ `MALFORMED`。**適当な既定 (`red`) へ倒してはならない** ——
+   * コートは誤設定のまま試合に入る事故を防ぐために常時表示している要素で、
+   * 埋めた瞬間に「読めていない」ことが画面から消える。
+   */
+  court: MatchCourt | Malformed;
+  /** 既知値でなければ `MALFORMED`。倒す先が無いので「フェーズ不明」として見せる */
+  phase: MatchPhase | Malformed;
   can_start_match: boolean;
   /**
    * 完了が試合開始のゲートになるロールと、その進捗。キーの集合はサーバーが持つ。
@@ -280,6 +364,36 @@ export interface SequenceStepInfo {
   index: number;
   label: string;
   require_trigger: boolean;
+}
+
+/**
+ * 直近の実行で失敗したステップと理由 (サーバー `lib/sequence/engine.py` の `StepFailure`)。
+ *
+ * 到達タイムアウト・左右ずれ・零点確定失敗はどれもステップ単位の try で握られるので、
+ * これが無いと画面は「待機中」と同じ表示へ戻る —— **3 層保護の第 1 層
+ * (`AxisSyncError`) が操縦者から無音になる。** 次の実行が始まるまで保持される。
+ */
+export interface SequenceFailure {
+  step_index: number;
+  /** 失敗したステップのラベル。メソッド名は載らない */
+  step: string;
+  message: string;
+}
+
+/**
+ * 失敗理由を受信境界で確定させる。**null と欠落を同じ「出すものが無い」へ倒す。**
+ *
+ * 3 欄すべてが揃っていなければ表示しない —— 半端な形をそのまま渡すと、
+ * `step_index + 1` が `NaN` になった行が「ステップ NaN で停止」として画面に出る。
+ * 型だけ足して受信条件を書かないと「型は合っているのに画面に出ない」になるので、
+ * ここが唯一の入口。
+ */
+export function parseSequenceFailure(raw: unknown): SequenceFailure | null {
+  if (!isObject(raw)) return null;
+  if (typeof raw.step_index !== "number" || !Number.isFinite(raw.step_index)) return null;
+  if (typeof raw.step !== "string") return null;
+  if (typeof raw.message !== "string" || raw.message.length === 0) return null;
+  return { step_index: raw.step_index, step: raw.step, message: raw.message };
 }
 
 /** 位置制御ループ 1 本 (= 同一バス上の M3508 を束ねる 200Hz ループ) の状態 */
@@ -470,7 +584,20 @@ export interface RobotState {
   running?: boolean;
   motors: Record<string, MotorState>;
   e_stop_active?: boolean;
-  health?: HealthSnapshot;
+  /**
+   * ヘルス。受信境界の `parseHealth` が形を確定させるので、読めなかった配信は
+   * `MALFORMED` としてここに載る (**空の HealthSnapshot へ倒さない**)。未配信は undefined。
+   */
+  health?: HealthSnapshot | Malformed;
+  /**
+   * シーケンスが最後に落ちた理由 (`SequenceTimeoutError` / `AxisSyncError` 等)。
+   * 平常時は null。
+   *
+   * これが無い間、左右ずれ検出でシーケンスが止まっても画面は「待機中」に戻るだけで、
+   * 3 層保護の第 1 層が操縦者から無音になっていた。**平常時は主張せず、
+   * 失敗したときだけ自分から出す** (`ActionPanel`)。
+   */
+  last_error?: SequenceFailure | null;
   /**
    * 安全機構。受信境界の `parseSafety` が形を確定させるので、読めなかった配信は
    * `MALFORMED` としてここに載る (**空の SafetyState へ倒さない** — 平常時と
@@ -646,6 +773,13 @@ function parseTimer(raw: unknown): MatchTimer | null {
   return { running: raw.running, elapsed_ms: raw.elapsed_ms, duration_ms: raw.duration_ms };
 }
 
+/** 既知の語彙に載っていなければ `MALFORMED`。黙って既定値へ倒さない */
+function parseEnum<T extends string>(raw: unknown, allowed: readonly T[]): T | Malformed {
+  return typeof raw === "string" && (allowed as readonly string[]).includes(raw)
+    ? (raw as T)
+    : MALFORMED;
+}
+
 /** どのロボットの話か決められないメッセージは捨てるしかない */
 function robotOf(raw: Raw): string | null {
   return typeof raw.robot === "string" && raw.robot.length > 0 ? raw.robot : null;
@@ -694,10 +828,17 @@ function parseKnown(raw: Raw): ServerMessage | null {
       // **`motors` と `steps` は素通しのまま。** モータ名をハードコードしない性質は
       // 配信をそのまま UI 状態へ入れることで成り立っており、ここで組み立て直すと
       // モータが 1 基増えるたびに UI 側の変更が要る形へ逆戻りする。
-      // 形を確定させるのは、UI が `.length` / `.filter` を直に呼ぶ `safety` だけ
+      // 形を確定させるのは、UI が `.length` / `.filter` を直に呼ぶ `safety` と
+      // `health` だけ。どちらもレンダー本体から呼ばれるので、投げれば
+      // React ツリーごとアンマウントする (`health` の呼び出し元 TabBar は
+      // RouteErrorBoundary の外なので、緊急停止ボタンまで巻き添えになる)
       const state = { ...(raw as unknown as RobotState) };
       const safety = parseSafety(raw.safety);
       if (safety !== undefined) state.safety = safety;
+      const health = parseHealth(raw.health);
+      if (health !== undefined) state.health = health;
+      // 型だけ足して受信条件を書かないと「型は合っているのに画面に出ない」になる
+      state.last_error = parseSequenceFailure(raw.last_error);
       return { type: "state", robot, state };
     }
 
@@ -720,8 +861,10 @@ function parseKnown(raw: Raw): ServerMessage | null {
       return {
         type: "match_state",
         matchState: {
-          court: raw.court as MatchCourt,
-          phase: raw.phase as MatchPhase,
+          // **無検査キャストにしない。** どちらも Record の索引に使うので、
+          // 未知の値はチップを無地・無文字にして画面から消す
+          court: parseEnum(raw.court, MATCH_COURTS),
+          phase: parseEnum(raw.phase, MATCH_PHASES),
           can_start_match: Boolean(raw.can_start_match),
           checklists: parseChecklists(raw.checklists),
           timer: parseTimer(raw.timer),
@@ -770,6 +913,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           total_steps: num(raw.total_steps),
           steps: Array.isArray(raw.steps) ? (raw.steps as SequenceStepInfo[]) : [],
           error: typeof raw.error === "string" ? raw.error : null,
+          last_error: parseSequenceFailure(raw.last_error),
         },
       };
 

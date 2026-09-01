@@ -758,6 +758,46 @@ static void test_dc_channel_hold_stops_without_latching() {
     TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(1000));
 }
 
+// **この関門は main.cpp にしか無かった。** ペリフェラルの翻訳単位は native テストの
+// 対象外（common.ini の `test_ignore = *`）なので、
+// `if (cmd.type != ControlType::Duty) return;` を消しても全ケース緑だった。
+// position の 90.0[deg] は raw 900 で届くので、duty として解釈すると 0.09 ではなく
+// **9000% の全力指令**になる（kDutyScale が 10000 なので raw 900 = 0.09 だが、
+// 位置指令の raw は 0.1deg 単位で桁が違う）。
+static void test_dc_channel_accepts_only_duty_targets() {
+    DcChannel ch(500);
+    ch.feed(0);
+
+    const SetTargetCommand position{ControlType::Position, 900, true};
+    TEST_ASSERT_FALSE(ch.applySetTarget(position, 0));
+    const SetTargetCommand velocity{ControlType::Velocity, 900, true};
+    TEST_ASSERT_FALSE(ch.applySetTarget(velocity, 0));
+    const SetTargetCommand onOff{ControlType::OnOff, 1, true};
+    TEST_ASSERT_FALSE(ch.applySetTarget(onOff, 0));
+    // 復号に失敗したフレーム（予約された制御タイプ・DLC 不足）も同じく捨てる
+    const SetTargetCommand invalid{ControlType::Duty, 4000, false};
+    TEST_ASSERT_FALSE(ch.applySetTarget(invalid, 0));
+
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(0));
+
+    // duty だけが通り、1/10000 単位の固定小数点として解釈される（§4）
+    const SetTargetCommand duty{ControlType::Duty, 4000, true};
+    TEST_ASSERT_TRUE(ch.applySetTarget(duty, 0));
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(0));
+}
+
+// 制御タイプの判定より安全ゲートが優先する（ラッチ中は duty でも通さない）。
+static void test_dc_apply_set_target_still_honors_the_output_gate() {
+    DcChannel ch(500);
+    ch.feed(0);
+    ch.stop();
+
+    const SetTargetCommand duty{ControlType::Duty, 4000, true};
+    ch.feed(10);
+    TEST_ASSERT_FALSE(ch.applySetTarget(duty, 10));
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(10));
+}
+
 // --------------------------------------------------------------------------
 // §3.2 状態フラグのビット割り当て
 // --------------------------------------------------------------------------
@@ -1049,6 +1089,8 @@ int main(int, char **) {
     RUN_TEST(test_dc_channel_output_stops_on_watchdog_and_recovers);
     RUN_TEST(test_dc_channel_physical_stop_blocks_until_cleared);
     RUN_TEST(test_dc_channel_hold_stops_without_latching);
+    RUN_TEST(test_dc_channel_accepts_only_duty_targets);
+    RUN_TEST(test_dc_apply_set_target_still_honors_the_output_gate);
     RUN_TEST(test_dc_board_never_reports_reached);
     RUN_TEST(test_solenoid_board_never_reports_reached);
     RUN_TEST(test_servo_slot_reports_reached);

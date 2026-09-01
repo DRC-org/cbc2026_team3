@@ -143,20 +143,52 @@ export function RootLayout() {
     );
   }, [send, setEStopActive, reportUnsent]);
 
-  const setCourt = useCallback((court: MatchCourt) => send({ type: "set_court", court }), [send]);
+  /**
+   * 送れなかったことを必ず通知枠へ流す送信口。
+   *
+   * `send` は切断中に false を返すだけなので、戻り値を捨てた呼び出しは
+   * 「押したのにボタンは有効なまま・機体は動かない・トーストも出ない」になる。
+   * 緊急停止の 2 つだけがこれを守っていて、試合中に最も多く押す NEXT を含む
+   * 主操作が全部その形だった。**送信経路をここ 1 つに寄せて、押した操作が
+   * 消える経路を作らせない。**
+   */
+  const sendOrReport = useCallback(
+    (data: Record<string, unknown> & { type: string }, what: string) => {
+      if (send(data)) return true;
+      reportUnsent(data.type, `切断中のため${what}を送信できませんでした`);
+      return false;
+    },
+    [send, reportUnsent],
+  );
+
+  const setCourt = useCallback(
+    (court: MatchCourt) => {
+      sendOrReport({ type: "set_court", court }, "コート設定");
+    },
+    [sendOrReport],
+  );
   const setChecklistItem = useCallback(
-    (role: ChecklistRole, itemId: string, checked: boolean) =>
-      send({ type: "checklist_set", role, item_id: itemId, checked }),
-    [send],
+    (role: ChecklistRole, itemId: string, checked: boolean) => {
+      sendOrReport({ type: "checklist_set", role, item_id: itemId, checked }, "指差喚呼のチェック");
+    },
+    [sendOrReport],
   );
   // 開発用。サーバー側が --dev-tools 起動でなければ command_rejected で返ってくる
   const checkAllChecklist = useCallback(
-    (role: ChecklistRole) => send({ type: "checklist_check_all", role }),
-    [send],
+    (role: ChecklistRole) => {
+      sendOrReport({ type: "checklist_check_all", role }, "指差喚呼の一括チェック");
+    },
+    [sendOrReport],
   );
-  const matchStart = useCallback(() => send({ type: "match_start" }), [send]);
-  const matchFinish = useCallback(() => send({ type: "match_finish" }), [send]);
-  const matchReset = useCallback(() => send({ type: "match_reset" }), [send]);
+  const matchStart = useCallback(() => {
+    sendOrReport({ type: "match_start" }, "試合開始");
+  }, [sendOrReport]);
+  const matchFinish = useCallback(() => {
+    sendOrReport({ type: "match_finish" }, "試合終了");
+  }, [sendOrReport]);
+  const matchReset = useCallback(() => {
+    sendOrReport({ type: "match_reset" }, "リセット");
+  }, [sendOrReport]);
 
   return (
     <RobotProvider
@@ -178,6 +210,7 @@ export function RootLayout() {
         resetWsUrl,
         openWsSettings,
         send,
+        sendOrReport,
         onEStop,
         onEStopRelease,
         setCourt,

@@ -319,6 +319,52 @@ static void test_disabled_watchdog_still_requires_first_command() {
     TEST_ASSERT_TRUE(channel.outputOn(1000 + kTimeoutMs * 10));
 }
 
+// --------------------------------------------------------------------------
+// §9.2 受理する制御タイプ（SolenoidChannel が持つ）
+// --------------------------------------------------------------------------
+
+// **この関門は app.cpp にしか無かった。** HAL の翻訳単位は native テストの対象外
+// （common.ini の `test_ignore = *`）なので、
+// `if (cmd.type != ControlType::OnOff) return;` を消しても全ケース緑だった。
+// 消すと、DC 基板宛のつもりで書いた duty 0.3（raw 3000）も、サーボ宛の
+// position 90.0deg（raw 900）も「非 0 = ON」として弁を開ける。
+static void test_solenoid_channel_accepts_only_on_off_targets() {
+    SolenoidChannel channel = makeFedChannel(1000);
+
+    const SetTargetCommand duty{ControlType::Duty, 3000, true};
+    TEST_ASSERT_FALSE(channel.applySetTarget(duty, 1000));
+    const SetTargetCommand position{ControlType::Position, 900, true};
+    TEST_ASSERT_FALSE(channel.applySetTarget(position, 1000));
+    const SetTargetCommand velocity{ControlType::Velocity, 900, true};
+    TEST_ASSERT_FALSE(channel.applySetTarget(velocity, 1000));
+    // 復号に失敗したフレーム（予約された制御タイプ・DLC 不足）も同じく捨てる
+    const SetTargetCommand invalid{ControlType::OnOff, 1, false};
+    TEST_ASSERT_FALSE(channel.applySetTarget(invalid, 1000));
+
+    TEST_ASSERT_FALSE(channel.outputOn(1000));
+
+    // on_off だけが通り、**スケールは掛からない**（§4 の表: 0 か非 0 かだけを見る）
+    const SetTargetCommand on{ControlType::OnOff, 1, true};
+    TEST_ASSERT_TRUE(channel.applySetTarget(on, 1000));
+    TEST_ASSERT_TRUE(channel.outputOn(1000));
+
+    const SetTargetCommand off{ControlType::OnOff, 0, true};
+    TEST_ASSERT_TRUE(channel.applySetTarget(off, 1000));
+    TEST_ASSERT_FALSE(channel.outputOn(1000));
+}
+
+// 制御タイプの判定より安全ゲートが優先する（ラッチ中は on_off でも通さない）。
+static void test_apply_set_target_still_honors_the_output_gate() {
+    SolenoidChannel channel = makeFedChannel(1000);
+    const uint8_t stop[3] = {0x00, 0x00, 0x00};
+    channel.handleEStopFrame(stop, sizeof(stop));
+
+    const SetTargetCommand on{ControlType::OnOff, 1, true};
+    channel.feed(1000);
+    TEST_ASSERT_FALSE(channel.applySetTarget(on, 1000));
+    TEST_ASSERT_FALSE(channel.outputOn(1000));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_solenoid_device_id_is_a_fixed_bit_split);
@@ -339,5 +385,7 @@ int main() {
     RUN_TEST(test_hold_de_energizes_without_latching);
     RUN_TEST(test_status_flags_follow_safety);
     RUN_TEST(test_disabled_watchdog_still_requires_first_command);
+    RUN_TEST(test_solenoid_channel_accepts_only_on_off_targets);
+    RUN_TEST(test_apply_set_target_still_honors_the_output_gate);
     return UNITY_END();
 }

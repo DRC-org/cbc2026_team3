@@ -48,7 +48,9 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
 describe("SubsystemStatus", () => {
   it("平常時は 1 行に畳み、安全機構の行を足さない", () => {
     // 試合中の操縦者が画面へ視線を戻すのは一瞬しかない。平常時は静かに保つ
-    renderWithRobot(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+    renderWithRobot(
+      <SubsystemStatus connected health={HEALTH} motors={MOTORS} safety={safety()} />,
+    );
 
     expect(screen.getByText("異常なし")).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
@@ -59,6 +61,7 @@ describe("SubsystemStatus", () => {
     // 緊急停止を解除してもその軸は動かない。解除操作だけを繰り返させてはならない
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={MOTORS}
         safety={safety({ sync_violations: ["y_axis"] })}
@@ -75,6 +78,7 @@ describe("SubsystemStatus", () => {
     // WS は繋がったままモータ状態も届き続けるので、ここに出さないと誰も気付けない
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={MOTORS}
         safety={safety({
@@ -95,6 +99,7 @@ describe("SubsystemStatus", () => {
     // グリッパ・コンベア・壁が無反応になる。WS は繋がったままなので画面からは原因が分からない
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={MOTORS}
         safety={safety({
@@ -114,6 +119,7 @@ describe("SubsystemStatus", () => {
     // その後に出た異常も畳んだままになり、見逃しの経路がそのまま残る
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={MOTORS}
         safety={safety({ sync_violations: ["y_axis"] })}
@@ -132,6 +138,7 @@ describe("SubsystemStatus", () => {
     // rerender で異常の解消を再現するため、ここは素の render を使う
     const { rerender } = render(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={MOTORS}
         safety={safety({ sync_violations: ["y_axis"] })}
@@ -139,7 +146,7 @@ describe("SubsystemStatus", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { expanded: true }));
-    rerender(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+    rerender(<SubsystemStatus connected health={HEALTH} motors={MOTORS} safety={safety()} />);
 
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
   });
@@ -147,13 +154,14 @@ describe("SubsystemStatus", () => {
   it("異常中に触っていなければ、解消後も畳んだまま", async () => {
     const { rerender } = render(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={MOTORS}
         safety={safety({ sync_violations: ["y_axis"] })}
       />,
     );
 
-    rerender(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+    rerender(<SubsystemStatus connected health={HEALTH} motors={MOTORS} safety={safety()} />);
 
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
   });
@@ -163,6 +171,7 @@ describe("SubsystemStatus", () => {
     // 過熱の判定はサーバー (config の temp_warning_c) が持ち、warning として届く
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={{
           ...HEALTH,
           motors: [
@@ -194,6 +203,7 @@ describe("SubsystemStatus", () => {
   it("温度しきい値を渡すと過熱モータに色が付く", () => {
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={{ y_axis_r: motorState({ temp: 90 }) }}
         safety={safety()}
@@ -208,6 +218,7 @@ describe("SubsystemStatus", () => {
   it("しきい値が未取得なら色を付けない (UI が独自の境界を持たない)", () => {
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={HEALTH}
         motors={{ y_axis_r: motorState({ temp: 90 }) }}
         safety={safety()}
@@ -222,7 +233,9 @@ describe("SubsystemStatus", () => {
 
   it("平常時は操縦者の操作で開閉できる", async () => {
     // 強制開示は異常時だけ。平常時まで開きっぱなしにすると数字の海に戻る
-    renderWithRobot(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+    renderWithRobot(
+      <SubsystemStatus connected health={HEALTH} motors={MOTORS} safety={safety()} />,
+    );
 
     await userEvent.click(screen.getByRole("button", { expanded: false }));
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
@@ -239,6 +252,7 @@ describe("SubsystemStatus", () => {
   it("サーバーが判定不能を配信したら、理由まで出して自分から開く", () => {
     renderWithRobot(
       <SubsystemStatus
+        connected
         health={{
           timestamp: 0,
           overall: "down",
@@ -259,7 +273,9 @@ describe("SubsystemStatus", () => {
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {
     // aria-expanded だけでは「何が開くのか」が読み上げに伝わらない
-    renderWithRobot(<SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} />);
+    renderWithRobot(
+      <SubsystemStatus connected health={HEALTH} motors={MOTORS} safety={safety()} />,
+    );
 
     const button = screen.getByRole("button", { expanded: false });
     await userEvent.click(button);
@@ -273,7 +289,13 @@ describe("SubsystemStatus", () => {
     // Monitor の準備画面は StartGate が「異常があるか」を最大の要素で答える。
     // 同じ文字列をこの見出しにも出すと、同じ事実が同じ画面に 2 回並ぶ
     renderWithRobot(
-      <SubsystemStatus health={HEALTH} motors={MOTORS} safety={safety()} showVerdict={false} />,
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety()}
+        showVerdict={false}
+      />,
     );
 
     expect(screen.queryByText("異常なし")).not.toBeInTheDocument();

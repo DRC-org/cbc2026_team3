@@ -17,6 +17,20 @@ class Edulite05RunMode(IntEnum):
     CURRENT = 3
 
 
+class Edulite05ModeState(IntEnum):
+    """フィードバックが報告する本機の動作状態 (拡張 ID の bit22-23)。
+
+    励磁されているのは `MOTOR` のときだけで、`RESET` は無励磁、`CALIBRATION` は
+    校正中を表す。**「値が来ていない」はこの enum で表さない** (`None` を使う) ——
+    未受信を `RESET` と同じ 0 に潰すと、1 通も届いていないモータが
+    「無励磁だと分かっている」側に混ざる。
+    """
+
+    RESET = 0
+    CALIBRATION = 1
+    MOTOR = 2
+
+
 class Edulite05Fault(IntFlag):
     NONE = 0
     UNDERVOLTAGE = 1
@@ -91,7 +105,9 @@ class Edulite05Driver(MotorDriver):
         self.limit_current = float(limit_current)
         self.position_kp = self._clamp(position_kp, self.KP_MIN, self.KP_MAX)
         self.set_zero_on_start = bool(set_zero_on_start)
-        self.mode_state = 0
+        #: 最後に受信したフィードバックの動作状態。**未受信は None のまま**
+        #: (0 = RESET と潰すと、1 通も届いていないモータが無励磁の報告に混ざる)
+        self.mode_state: int | None = None
         self.fault_bits = Edulite05Fault.NONE
 
     @staticmethod
@@ -276,6 +292,23 @@ class Edulite05Driver(MotorDriver):
             and motor_id == self.can_id
             and dest_id == self.host_id
         )
+
+    def is_energized(self) -> bool | None:
+        """フィードバックの動作状態が `MOTOR` のときだけ励磁されている。
+
+        **これが無いと「起動時に励磁できなかった EDULITE」がどこにも現れない。**
+        `activate_motor` は新しいフィードバックを 0.5 秒待って来なければ enable を
+        送らずに降りるが、その後 `QueryDrivenTargetRefresher` が 20Hz で問い合わせを
+        始めるとフィードバックは流れ出す。鮮度は満たされ `is_fault()` にも掛からない
+        ので、モータのヘルスは OK のまま無励磁だけが残る —— 操縦者から見えるのは
+        「指令しても動かない」だけになる (DM3520 と同じ型の異常)。
+
+        未受信 (`mode_state is None`) は None を返す。「分からない」を「無励磁」へ
+        倒すと、CAN を立てる前の状態がそのまま警告になる。
+        """
+        if self.mode_state is None:
+            return None
+        return self.mode_state == Edulite05ModeState.MOTOR
 
     def has_overcurrent_warning(self) -> bool:
         return bool(self.fault_bits & Edulite05Fault.OVERCURRENT)

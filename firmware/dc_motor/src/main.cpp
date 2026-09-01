@@ -33,6 +33,7 @@
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
 #include "SerialLineBuffer.h"
+#include "SerialOverride.h"
 #include "config.h"
 #include "pwm.h"
 
@@ -148,9 +149,9 @@ static Adafruit_NeoPixel g_strip(1, kPinRgb, NEO_GRB + NEO_KHZ800);
 #endif
 
 #if ENABLE_SERIAL_DEBUG
-// シリアルから duty を入力している間だけ true。
+// シリアルから duty を入力しているチャンネルと、その期限（規則は SerialOverride.h）。
 // CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
-static bool g_serialOverride = false;
+static SerialOverride g_serialOverride;
 static char g_serialStorage[kSerialLineCapacity];
 static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
@@ -219,8 +220,7 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
 
     // 緊急停止中・ウォッチドッグ作動中も送り続ける。
     // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
-    // ID 未設定チャンネルは CAN ID 0x100 で送ることになり、複数チャンネルが未設定だと
-    // 同じ ID のフレームが重複するが、PC 側へ「デバイス ID 未設定」を届ける方を優先する。
+    // **ID 未設定チャンネルはここへ来ない**（呼び出し側が isChannelConfigured で弾く。§2.2）。
     const CanMsg msg(CanStandardId(buildCanId(CommandType::Feedback, g_deviceId[ch])), len,
                      data);
     CAN.write(msg);
@@ -273,17 +273,15 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
             if (!cmd.valid) {
                 return;
             }
-            // 仕様書 §4: この基板はフィードバックを持たないので duty のみ受理する。
-            // position の 90.0[deg] を duty として解釈すると 9000% の全力指令になるため、
-            // position / velocity は黙って捨てる。
-            if (cmd.type != ControlType::Duty) {
-                return;
-            }
 #if ENABLE_SERIAL_DEBUG
-            g_serialOverride = false;
+            // PC がこのチャンネルへ指令を出している以上、シリアルの上書きは終わり。
+            g_serialOverride.clear();
 #endif
-            // setDuty は緊急停止ラッチ中・ウォッチドッグ満了中は受け付けない。
-            g_channel[ch].setDuty(fromRaw(cmd.raw, kDutyScale), nowMs);
+            // **制御タイプの受理判定（§4: duty のみ）は DcChannel が持つ。**
+            // ここに `if (cmd.type != ...)` を戻すと、この翻訳単位は native テストの
+            // 対象外なので消しても全ケース緑になる。
+            // 続けて緊急停止ラッチ中・ウォッチドッグ満了中は受け付けない。
+            g_channel[ch].applySetTarget(cmd, nowMs);
             break;
         }
         case CommandType::SetParam: {
@@ -301,7 +299,7 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
                 // 回り続ける（loop() の周期は保証されていない）。
                 applyChannelOutput(ch, nowMs);
 #if ENABLE_SERIAL_DEBUG
-                g_serialOverride = false;
+                g_serialOverride.clear();
 #endif
             }
             break;
@@ -414,7 +412,7 @@ static void pollSerial(uint32_t nowMs) {
         // 値の読み取りだけを基板ごとに行う（DC は duty の float）。
         const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kDcChannelCount);
         if (cmd.kind == SerialCommand::Kind::StopAll) {
-            g_serialOverride = false;
+            g_serialOverride.clear();
             for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
                 g_channel[ch].hold();
             }
@@ -423,15 +421,18 @@ static void pollSerial(uint32_t nowMs) {
             // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
             g_channel[cmd.channel].setDuty(
                 fromRaw(toRaw(strtof(cmd.value, nullptr), kDutyScale), kDutyScale), nowMs);
-            g_serialOverride = true;
+            g_serialOverride.note(cmd.channel, nowMs);
         }
     }
 
-    // シリアル操作中はウォッチドッグを養い続ける。
-    // 1 回だけ養う実装だと command_timeout_ms 後に必ず止まってデバッグにならない。
-    // 'S' 入力・CAN の SET_TARGET・電源断のいずれでもこのモードは解除される。
-    if (g_serialOverride) {
-        for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
+    // シリアル操作中はウォッチドッグを養い続ける。1 回だけ養う実装だと
+    // command_timeout_ms 後に必ず止まってデバッグにならない。
+    // **養う範囲と期限の規則は SerialOverride が持つ**（打ったチャンネルだけ /
+    // 最後の入力から kSerialOverrideHoldMs）。ここで全チャンネルを養うと、
+    // 1 行打っただけで基板ぜんぶの最後の砦が無期限に外れ、PC が落ちても
+    // 触っていないコンベアまで回り続ける。
+    for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
+        if (g_serialOverride.shouldFeed(ch, nowMs)) {
             g_channel[ch].feed(nowMs);
         }
     }
@@ -480,8 +481,8 @@ void setup() {
 
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
-        // ID 未設定のチャンネルも「デバイス ID 未設定」を知らせるために送るので、
-        // ここは全チャンネル分やる。
+        // ID 未設定のチャンネルは 1 通も送らない（§2.2）が、位相の割り当てはチャンネルの
+        // 添字で決まるので、ここは全チャンネル分やる（飛ばすと隣とずれ方が変わる）。
         g_feedbackTimer[ch].stagger(startMs, g_feedbackIntervalMs, ch, kDcChannelCount);
 
         if (!isChannelConfigured(ch)) {
@@ -543,7 +544,8 @@ void loop() {
     }
 
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        if (g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
+        // **ID を名乗れるチャンネルだけが FEEDBACK を送る**（仕様書 §2.2）。
+        if (isChannelConfigured(ch) && g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(ch, nowMs);
         }
     }

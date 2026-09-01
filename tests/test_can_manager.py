@@ -80,6 +80,21 @@ class TestCANManager:
         assert len(mgr._tasks) == 1
         await mgr.shutdown()
 
+    async def test_run_は有効化できなかったモータ名を返す(self) -> None:
+        """**起動時の励磁失敗はここ以外に現れる場所が無い。**
+
+        捨てると `safety.unenergized_motors` は緊急停止解除の経路でしか埋まらず、
+        操縦者に見えるのは「指令しても動かない」だけになる。
+        """
+        mgr = CANManager()
+        mgr.add_bus("can0", mock_bus())
+
+        with patch.object(mgr, "initialize_motors", new_callable=AsyncMock, return_value=["m1"]):
+            inactive = await mgr.run()
+
+        assert inactive == ["m1"]
+        await mgr.shutdown()
+
     async def test_receive_updates_motor_state(self) -> None:
         mgr = CANManager(run_blocking=direct_runner())
         bus = mock_bus()

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { readableHealth } from "@/lib/healthVerdict";
 import { MALFORMED, parseServerMessage } from "@/lib/protocol";
 import type { RobotState } from "@/lib/protocol";
 
@@ -35,7 +36,8 @@ describe("parseServerMessage", () => {
       expect(msg).toEqual({
         type: "state",
         robot: "main_hand",
-        state: { type: "state", robot: "main_hand", step_index: 3 },
+        // last_error だけは受信境界が形を確定させるので、配信に無くても null が載る
+        state: { type: "state", robot: "main_hand", step_index: 3, last_error: null },
       });
     });
 
@@ -53,7 +55,47 @@ describe("parseServerMessage", () => {
       });
       expect(msg).not.toBeNull();
       const state = (msg as { state: RobotState }).state;
-      expect(state.health?.detail).toBe("計算失敗");
+      expect(readableHealth(state.health)?.detail).toBe("計算失敗");
+    });
+
+    /**
+     * `health` も UI が `.filter` を直に呼ぶ (`evaluateHealth`)。しかも呼び出し元の
+     * 1 つ (`TabBar`) は `RouteErrorBoundary` の**外**にあるため、投げれば React
+     * ツリーごとアンマウントして**ヘッダーの緊急停止ボタンまで消える**。
+     */
+    describe("health", () => {
+      const HEALTH = {
+        timestamp: 0,
+        overall: "ok",
+        buses: [{ name: "can_m3508", state: "ok" }],
+        motors: [{ name: "y_axis_r", state: "ok" }],
+        detail: null,
+      };
+
+      const healthOf = (health: unknown) => {
+        const msg = parse({ type: "state", robot: "main_hand", health });
+        return (msg as { state: RobotState }).state.health;
+      };
+
+      it("読める配信はそのまま持つ (組み立て直さない)", () => {
+        expect(healthOf(HEALTH)).toEqual(HEALTH);
+      });
+
+      it.each(["buses", "motors", "overall"])("%s が欠けたら MALFORMED", (key) => {
+        const broken: Record<string, unknown> = { ...HEALTH };
+        delete broken[key];
+        expect(healthOf(broken)).toBe(MALFORMED);
+      });
+
+      it("未知の state が載っていたら MALFORMED (ok と同じ扱いにしない)", () => {
+        expect(healthOf({ ...HEALTH, buses: [{ name: "can_m3508", state: "exploded" }] })).toBe(
+          MALFORMED,
+        );
+      });
+
+      it("未配信は MALFORMED にしない (届いていないことと読めないことは別)", () => {
+        expect(healthOf(undefined)).toBeUndefined();
+      });
     });
 
     /**
@@ -304,6 +346,44 @@ describe("parseServerMessage", () => {
     });
   });
 
+  /**
+   * `court` / `phase` はどちらも `Record` の索引として使われる
+   * (`PHASE_LABEL[phase]` / `COURT_TONE[court]`)。無検査キャストのままだと未知の値で
+   * 索引が undefined になり、**フェーズチップとコートチップが無地・無文字で消える**。
+   * さらに `isDuringMatch()` が false になって全画面が「準備中」へ倒れ、
+   * 読めなかったこと自体が画面のどこにも現れない。
+   */
+  describe("match_state のコートとフェーズ", () => {
+    const base = { type: "match_state", can_start_match: false };
+
+    /** 受信後の match_state。読めなかった欄も値として載るので広い型で受ける */
+    const matchStateOf = (payload: object) =>
+      (parse(payload) as unknown as { matchState: Record<string, unknown> }).matchState;
+
+    it("既知の値はそのまま通す", () => {
+      const msg = parse({ ...base, court: "blue", phase: "match" });
+      expect(msg).toMatchObject({ matchState: { court: "blue", phase: "match" } });
+    });
+
+    it.each([
+      ["court", { ...base, court: "green", phase: "match" }],
+      ["phase", { ...base, court: "red", phase: "paused" }],
+    ])("未知の %s は MALFORMED にする (既定値へ倒さない)", (key, payload) => {
+      expect(matchStateOf(payload)[key]).toBe(MALFORMED);
+    });
+
+    it("欠落も MALFORMED にする", () => {
+      expect(matchStateOf(base).court).toBe(MALFORMED);
+      expect(matchStateOf(base).phase).toBe(MALFORMED);
+    });
+
+    it("片方が読めなくてももう片方は落とさない", () => {
+      // フェーズと指差喚呼は試合の進行そのものを握っている。コートが読めない
+      // ことを理由にそちらまで捨てるほうがはるかに悪い
+      expect(matchStateOf({ ...base, court: "green", phase: "match" }).phase).toBe("match");
+    });
+  });
+
   describe("motor_check_state", () => {
     it("robot を要求しない (両ハンド統合の 1 本なので載っていない)", () => {
       // ここで robot を必須にすると動作確認の状態が 100% 捨てられる。
@@ -329,6 +409,7 @@ describe("parseServerMessage", () => {
           total_steps: 0,
           steps: [],
           error: null,
+          last_error: null,
         },
       });
     });
