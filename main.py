@@ -9,6 +9,7 @@ import logging
 import os
 import pathlib
 import signal
+import socket
 from collections.abc import Awaitable, Callable, Mapping
 from types import ModuleType
 
@@ -207,36 +208,37 @@ def _load_position_table_file(path: pathlib.Path) -> PositionTable:
         return PositionTable.empty(source=str(path))
 
 
-def _make_capture_origin(
+def _make_origin_resolver(
     loops: list[M3508PositionLoop],
     table: PositionTable,
-) -> Callable[[str], None]:
-    """軸名 → その軸の現在位置を原点として確定する関数。
+) -> Callable[[str], Callable[[], None] | None]:
+    """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
 
     **左右ペアはグループ単位でしか確定しない。** 別々の時刻に確定すると、その間に
     片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に偏差超過で
     止まる。判断は `M3508PositionLoop.set_group_origin_here` に委ねる。
 
-    対象が見つからなければ例外にする。黙って何もしないと「原点を確定したつもり」で
-    シーケンスが先へ進み、ずれた座標のまま全ステップが走る。
+    「確定できるか」と「確定する」を同じ解決器から出すのは、探索を始める前に
+    可否を問えるようにするため。センサまで押し込んでから「確定できません」で
+    降りると、機構を動かした意味が無いまま姿勢だけが変わる。
+
+    **PC 側位置制御ループに載っていないモータ (EDULITE 05 / DM3520) は確定できない。**
+    それらは原点をドライバ内部に持ち、切り直すには CAN フレーム (SET_ZERO) を
+    送る経路が要る。手段が無いことを None として素直に返し、呼び出し側が
+    起動ログと `HomingError` の両方で見せる。
     """
 
-    def capture(axis: str) -> None:
+    def resolve(axis: str) -> Callable[[], None] | None:
         spec = table.axis(axis)
         for loop in loops:
             if axis in loop.sync_group_names:
-                loop.set_group_origin_here(axis)
-                return
+                return functools.partial(loop.set_group_origin_here, axis)
             for motor in spec.motor_names:
                 if motor in loop.motor_names:
-                    loop.set_origin_here(motor)
-                    return
-        raise HomingError(
-            f"軸 '{axis}' の原点を確定できません"
-            " (PC 側位置制御ループに載っていないモータでは零点確定を実行できない)"
-        )
+                    return functools.partial(loop.set_origin_here, motor)
+        return None
 
-    return capture
+    return resolve
 
 
 def _wire_motor_check_sequence(
@@ -298,11 +300,42 @@ def _wire_motor_check_sequence(
                 return True
             return freshness.is_stale(name, freshness.now())
 
+        def _motor_is_stale(name: str) -> bool:
+            # 対象軸の実測位置が読めるかを、探索を始める前に問う。未受信の 0.0 を
+            # 現在位置と信じると、1 歩目が原点近傍への 1 回のジャンプになり、
+            # その移動は search_distance の歯止めに 1mm も掛からない
+            return freshness.is_stale(name, freshness.now())
+
+        resolve_origin = _make_origin_resolver(loops, merged)
+
+        def _origin_capturable(axis: str) -> bool:
+            return resolve_origin(axis) is not None
+
+        def _capture_origin(axis: str) -> None:
+            capture = resolve_origin(axis)
+            if capture is None:
+                raise HomingError(
+                    f"軸 '{axis}' の原点を確定できません"
+                    " (PC 側位置制御ループに載っていないモータでは零点確定を実行できない)"
+                )
+            capture()
+
+        unsupported = [name for name in homing_axes if not _origin_capturable(name)]
+        if unsupported:
+            # 起動ログに出す。押した瞬間に失敗する構成のまま試合当日を迎えないため
+            logger.error(
+                "零点確定: 軸 %s は原点を確定する手段がありません"
+                " (PC 側位置制御ループに載っていないモータ。動作確認はこの軸で失敗する)",
+                unsupported,
+            )
+
         sequence.bind_homing(
             HomingRunner(
                 sensor_active=_sensor_active,
                 sensor_is_stale=_sensor_is_stale,
-                capture_origin=_make_capture_origin(loops, merged),
+                motor_is_stale=_motor_is_stale,
+                origin_capturable=_origin_capturable,
+                capture_origin=_capture_origin,
             )
         )
 
@@ -333,9 +366,40 @@ def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], floa
 
 
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
+    """1 本の CAN インタフェースを開く。開けなければ 1 行のメッセージで落とす。
+
+    down しているインタフェース (CANable が 1 本抜けている・`setup_can.sh` を
+    流していない) を開こうとすると python-can は `OSError [Errno 19]` を投げる。
+    この呼び出しは `main()` の try の外にあるので、素通しすると生の traceback で
+    落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、
+    config 系のエラー (`_load_all_configs`) と同じく直し方まで書いて止める。
+    """
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
-    return can.Bus(interface="socketcan", channel=channel)
+    try:
+        return can.Bus(interface="socketcan", channel=channel)
+    except (OSError, can.CanError) as exc:
+        raise SystemExit(
+            f"CAN インタフェース '{channel}' を開けません ({exc})。"
+            " scripts/setup_can.sh を実行してバスが up しているか確認してください"
+            " (点検は scripts/setup_can.sh --strict)"
+        ) from exc
+
+
+def _robot_bus_names(robot: RobotConfig, can_buses: Mapping[str, str]) -> list[str]:
+    """そのロボットが実際に使うバス名 (`can_buses` の宣言順)。
+
+    **全バスを開いてはならない。** メインハンドは DM3520 を 1 台も持たないのに
+    `can_dm3520` を、サブハンドは `can_m3508` を開くことになり、CANable が 1 本
+    欠けているだけで**どちらのハンドも起動できなくなる**。片方だけの運用も
+    動作確認も UI の起動もできない。
+
+    副次的に、受信ループが物理バス 1 本につき 2 本立つ (executor スレッドを
+    常時 8 本占有し、E-STOP のブロードキャストも 2 通ずつ出る) のも解消する。
+    """
+    used = {cfg.bus for cfg in robot.motors.values()}
+    used |= {cfg.bus for cfg in robot.sensors.values()}
+    return [name for name in can_buses if name in used]
 
 
 def _make_m3508(motor: MotorConfig) -> MotorDriver:
@@ -414,11 +478,14 @@ def _create_motor(motor: MotorConfig) -> MotorDriver:
 def _setup_robot(
     robot: RobotConfig, can_buses: Mapping[str, str], *, dry_run: bool
 ) -> tuple[CANManager, dict[str, MotorDriver]]:
-    """検証済み設定から CANManager とモータ群をセットアップする。"""
+    """検証済み設定から CANManager とモータ群をセットアップする。
+
+    開くのは**このロボットが実際に使うバスだけ** (`_robot_bus_names`)。
+    """
     can_manager = CANManager()
 
-    for bus_name, channel in can_buses.items():
-        can_manager.add_bus(bus_name, _create_bus(channel, dry_run=dry_run))
+    for bus_name in _robot_bus_names(robot, can_buses):
+        can_manager.add_bus(bus_name, _create_bus(can_buses[bus_name], dry_run=dry_run))
 
     motors: dict[str, MotorDriver] = {}
     for motor_name, motor_cfg in robot.motors.items():
@@ -938,14 +1005,54 @@ def _wire_one_robot(
     )
 
 
+def _ensure_port_available(host: str, port: int) -> None:
+    """サーバーの bind 可否を **CAN を開くより前に**確かめる。
+
+    立ち上げ順 (`_start_all`) は「CAN → 制御ループ → 目標値再送 → サーバー bind」で、
+    これは変えられない —— フィードバック未受信のまま PID を回すと、起動のたびに
+    途絶の警告ログが出る。だがその順序のままだと、ポートが埋まっているときに
+    **機体を励磁して 200Hz の制御ループを回し始めた後**で bind が失敗する。
+    「起動したか分からず二度叩く」は会場で普通に起きる操作で、そのたびに機体が
+    数百 ms 励磁される。順序は変えず、bind の可能性だけを先に見る。
+
+    ここで確保した socket は閉じて手放す (aiohttp が自分で bind し直す)。その間に
+    別プロセスが割り込む余地は残るが、防ぎたいのは「自分の二重起動」であって
+    競合そのものではない。
+    """
+    try:
+        family, socktype, proto, _canonname, sockaddr = socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        )[0]
+    except OSError as exc:
+        raise SystemExit(f"サーバーのアドレス {host}:{port} を解決できません ({exc})") from exc
+
+    with socket.socket(family, socktype, proto) as probe:
+        # aiohttp の TCPSite と同じ条件で試す (POSIX では既定で reuse_address が立つ)。
+        # 揃えないと TIME_WAIT のポートを「使用中」と誤判定して起動を拒否する
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(sockaddr)
+        except OSError as exc:
+            raise SystemExit(
+                f"ポート {port} は既に使用中です ({exc})。"
+                " 制御プログラムが既に起動していないか確認してください"
+                " (systemctl status cbc-control / ss -ltnp)"
+            ) from exc
+
+
 async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
     """CAN → 制御ループ → 監視 → 再送 → サーバー、の順に立ち上げる。
 
     **CAN の受信ループを先に立てる。** フィードバック未受信のまま PID を回しても
     途絶判定で電流 0 に落ちるだけだが、起動のたびに無駄な警告ログが出る。
+
+    **起動時に励磁できなかったモータは必ずサーバーへ渡す。** 捨てると
+    `safety.unenergized_motors` は緊急停止解除の経路でしか埋まらず、起動時の
+    励磁失敗は画面のどこにも出ない。フィードバックは問い合わせ駆動の再送で
+    流れ出すのでヘルスは OK のまま、症状は「指令しても動かない」だけになる。
     """
     for wiring in wirings:
-        await wiring.can_manager.run()
+        server.set_initial_inactive_motors(wiring.name, await wiring.can_manager.run())
     for wiring in wirings:
         for loop in wiring.position_loops:
             loop.start()
@@ -1039,6 +1146,10 @@ async def main() -> None:
     logger.info("health しきい値: %s", system.health)
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
     logger.info("試合時間: %s 秒", system.match.duration_s)
+
+    # **CAN を開くより前に bind の可否を見る。** ポートが埋まっているときに
+    # 機体を励磁してから落ちる経路を作らない (会場での二重起動)
+    _ensure_port_available(args.host, args.port)
 
     server = _build_server(args, system)
 
