@@ -37,6 +37,19 @@ uint8_t SolenoidChannel::safetyStatusFlags(uint32_t nowMs) const {
     return safety_.statusFlags(nowMs);
 }
 
+bool SolenoidChannel::applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs) {
+    if (!cmd.valid) {
+        return false;
+    }
+    // 仕様書 §9.2: この基板は on_off のみ受理する。position の 90.0[deg] や duty の 0.3 を
+    // 「非 0 = ON」として解釈すると、別の基板宛のつもりで書いた値で弁が開く。
+    if (cmd.type != ControlType::OnOff) {
+        return false;
+    }
+    // **on_off に固定小数点のスケールは掛からない**（仕様書 §4 の表）。0 か非 0 かだけを見る。
+    return setOn(cmd.raw != 0, nowMs);
+}
+
 bool SolenoidChannel::setOn(bool on, uint32_t nowMs) {
     if (!safety_.isOutputAllowed(nowMs)) {
         return false;

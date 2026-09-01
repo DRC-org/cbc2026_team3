@@ -9,6 +9,8 @@
 // この 2 つを組み合わせる規則はここだけが持つ。
 //   - 出力が許可されていない間は新しい目標角を受け付けない
 //   - 出力が許可されていない間は、補間を進める**前に**現在角で凍結する
+//   - 出力が許可されていない間は SET_PARAM 0x03-0x06 も効かせない（保留する）
+//   - 受理する制御タイプは position だけ（仕様書 §7.2）
 // main.cpp には ServoMotion / MotorSafety を直に触る経路を残さない（残すと
 // 「凍結しない setTarget」「凍結より先に進む update」を書き直せてしまう）。
 //
@@ -52,6 +54,13 @@ class ServoChannel {
 
     // ---- 目標角（仕様書 §7.2 / §7.5）----
 
+    // 自分宛の SET_TARGET 1 通をそのまま渡す。**受理できる制御タイプの判定はここが
+    // 唯一の持ち主**（仕様書 §7.2: position のみ）。main.cpp 側で判定すると、
+    // ペリフェラルの翻訳単位は native テストの対象外（common.ini の `test_ignore = *`）
+    // なので、その 1 行を消しても全ケース緑のままになる。
+    // **feed() を先に呼ぶこと**（§6: 受理できないタイプでも通信自体は生きている）。
+    bool applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs);
+
     // 出力が許可されていない間は受け付けず false を返す（仕様書 §7.5:
     // 「新しい角度指令の受け付けを止め、その時点の角度を保持し続ける」）。
     // 受け付けると、ラッチ中の再送のたびに補間が再アンカーされて緊急停止中に動き、
@@ -67,9 +76,17 @@ class ServoChannel {
 
     // ---- SET_PARAM 0x03-0x06（仕様書 §7.6）----
 
-    void setLimits(const ServoLimits &limits);
+    // **出力禁止中は効かせず、範囲だけを覚えて解除時に取り込む**（仕様書 §7.5）。
+    // ServoMotion::setLimits は目標角を新しい範囲へクランプするので、ラッチ中に
+    // 通すと「新しい角度指令の受け付けを止める」というゲートの外側から目標が動く
+    // （setTarget が入口で拒否しているのに、SET_PARAM が同じことをできてしまう）。
+    void setLimits(const ServoLimits &limits, uint32_t nowMs);
+
+    // 保留中なら保留値を返す。**返さないと、ラッチ中に angle_min → angle_max と
+    // 2 通届いたとき、呼び出し側の read-modify-write が 1 通目を取りこぼす。**
     const ServoLimits &limits() const;
-    void setReachedToleranceDeg(float toleranceDeg);
+
+    void setReachedToleranceDeg(float toleranceDeg, uint32_t nowMs);
 
     // ---- 観測値（FEEDBACK 用。仕様書 §7.4）----
 
@@ -77,8 +94,17 @@ class ServoChannel {
     bool isReached() const;
 
    private:
+    // 保留していた SET_PARAM を取り込む。出力が許可されている文脈でのみ呼ぶこと。
+    void applyPendingParams(uint32_t nowMs);
+
     MotorSafety safety_;
     ServoMotion motion_;
+
+    // 出力禁止中に届いた SET_PARAM 0x03-0x06 の保留値（仕様書 §7.5）。
+    ServoLimits pendingLimits_;
+    float pendingToleranceDeg_;
+    bool hasPendingLimits_;
+    bool hasPendingTolerance_;
 };
 
 }  // namespace motorcan

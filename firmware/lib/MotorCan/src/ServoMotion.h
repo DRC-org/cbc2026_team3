@@ -77,7 +77,11 @@ class ServoMotion {
 
     // SET_PARAM 0x04-0x06（slew_rate / angle_min / angle_max）。angle_min > angle_max は入れ替えて正規化し、
     // 非正の slew_rate は採用せず従来値を維持する（どちらの解釈でも危険なため）。
-    // 現在の目標角は新しい可動範囲へクランプし直す。
+    // 現在の目標角は新しい可動範囲へクランプし直すが、**現在角は動かさない**
+    // （動かすとスルーレート制限の外側で指令パルスが飛ぶ。範囲外へ出た現在角は補間で戻る）。
+    //
+    // **出力禁止中に呼んでよいかの判断はここには無い。** それは安全機構との結線なので
+    // ServoChannel が持つ（ここで判断すると main.cpp から直に呼ぶ迂回路が書ける）。
     void setLimits(const ServoLimits &limits);
     const ServoLimits &limits() const { return limits_; }
 

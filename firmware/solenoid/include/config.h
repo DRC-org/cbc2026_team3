@@ -160,7 +160,14 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Solenoid;
 // PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
 // これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
 // 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
-constexpr uint8_t kFirmwareVersion = 1;
+//
+// 2: デバイス ID 未設定のチャンネルが FEEDBACK / INFO を 1 通も送らなくなった（§2.2）。
+//    v1 は CAN ID 0x300（デバイス ID 0x00）で送っていたが、PC 側は can_id を
+//    0x01〜0xFE に限るので**そのフレームを claim できるドライバが存在せず**、
+//    「デバイス ID 未設定」の報告経路は構造的に死んでいた。しかも複数の基板が同時に
+//    未設定だと、異なるノードが同じ ID で異なるデータを送ってバスがエラーフレームで
+//    埋まる。設定ミスの通知は LED（赤の速い点滅）が担う。
+constexpr uint8_t kFirmwareVersion = 2;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 14 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;

@@ -241,6 +241,28 @@ static void test_set_limits_normalizes_inverted_range() {
     TEST_ASSERT_EQUAL_FLOAT(50.0f, motion.limits().angleMaxDeg);
 }
 
+// **現在角が新しい範囲の外へ出るケース。** かつて setLimits は
+// `currentAngleDeg_ = clampAngle(currentAngleDeg_)` で現在角そのものを書き換えており、
+// 可動範囲を狭めた瞬間に**スルーレート制限の外側で**指令パルスが飛んだ。
+// 上の 2 本は「範囲を広げる」「現在角が既に新範囲内」しか見ておらず、この形を
+// 1 件も押さえていなかった。
+static void test_set_limits_does_not_teleport_current_angle() {
+    ServoMotion motion(0.0f, ServoLimits{0.0f, 30.0f, 90.0f});
+    motion.update(100);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentAngleDeg());
+
+    motion.setLimits(ServoLimits{20.0f, 30.0f, 90.0f});
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, motion.currentAngleDeg());
+    // 制約が掛かるのは目標だけ
+    TEST_ASSERT_EQUAL_FLOAT(20.0f, motion.targetAngleDeg());
+
+    // 範囲内へはスルーレート制限に従って戻る（90deg/s なので 100ms で 9deg）
+    motion.update(200);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 9.0f, motion.currentAngleDeg());
+    motion.update(500);
+    TEST_ASSERT_EQUAL_FLOAT(20.0f, motion.currentAngleDeg());
+}
+
 // setLimits は直近に観測した時刻へ補間をアンカーし直す。
 // し直さないと、スルーレート変更が過去の経過時間にさかのぼって効いて角度が飛ぶ。
 static void test_set_limits_does_not_jump() {
@@ -440,6 +462,172 @@ static void test_disabled_watchdog_still_requires_first_command() {
     TEST_ASSERT_TRUE(channel.isOutputAllowed(1000 + 500 * 10));
 }
 
+// --------------------------------------------------------------------------
+// §7.5 出力禁止中の SET_PARAM（ServoChannel が持つ出力ゲート）
+// --------------------------------------------------------------------------
+
+// **SET_PARAM は setTarget と同じ入口の拒否を持っていなかった。** angle_min /
+// angle_max は ServoChannel を素通りして ServoMotion へ届くので、緊急停止ラッチ中でも
+// 目標角が新しい範囲へクランプされ、FEEDBACK bit0（到達）が偽の未到達を報告する
+// —— PC 側 move_to は緊急停止中の機体が動くのを待ち続ける
+// （test_latched_channel_rejects_targets_at_the_entrance と同じ壊れ方が、
+// SET_TARGET ではなく SET_PARAM の側に残っていた）。
+static void test_latched_channel_defers_limit_change() {
+    ServoChannel channel(0.0f, ServoLimits{0.0f, 30.0f, 90.0f}, 500);
+    channel.feed(0);
+    channel.tick(0);
+
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+    TEST_ASSERT_TRUE(channel.isReached());
+
+    ServoLimits narrowed = channel.limits();
+    narrowed.angleMinDeg = 20.0f;
+    channel.setLimits(narrowed, 10);
+
+    TEST_ASSERT_TRUE(channel.isReached());
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+
+    // 解除そのものでは動かない（§3.5）。取り込んだ範囲で現在角を引きずらないこと。
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
+    channel.handleEStopFrame(clear, 8, 20);
+    for (uint32_t t = 25; t <= 400; t += 5) {
+        channel.tick(t);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+
+    // **範囲は覚えている。** 解除後の SET_TARGET は新しい下限でクランプされる。
+    channel.feed(400);
+    TEST_ASSERT_TRUE(channel.setTarget(0.0f, 400));
+    for (uint32_t t = 405; t <= 1400; t += 5) {
+        channel.tick(t);
+    }
+    TEST_ASSERT_EQUAL_FLOAT(20.0f, channel.currentAngleDeg());
+}
+
+// **層を 1 枚だけにして見る。** 緊急停止ラッチを持たず、ウォッチドッグ満了だけで
+// 出力が禁止されている状態でも同じ拒否が要る（ラッチ経路だけを塞いだ実装は
+// 上のテストでは落ちない）。
+static void test_watchdog_expired_channel_defers_limit_change() {
+    ServoChannel channel(0.0f, ServoLimits{0.0f, 30.0f, 90.0f}, 500);
+    channel.feed(0);
+    channel.tick(0);
+
+    channel.tick(600);
+    TEST_ASSERT_FALSE(channel.isOutputAllowed(600));
+    TEST_ASSERT_TRUE(channel.isReached());
+
+    ServoLimits narrowed = channel.limits();
+    narrowed.angleMinDeg = 20.0f;
+    channel.setLimits(narrowed, 600);
+
+    TEST_ASSERT_TRUE(channel.isReached());
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+}
+
+// 実機の applyParam は limits() を読んで 1 項目だけ書き換えて戻す。保留中に
+// limits() が古い値を返すと、angle_min → angle_max と 2 通届いたときに 1 通目が消える。
+static void test_limit_changes_while_latched_compose() {
+    ServoChannel channel(0.0f, ServoLimits{0.0f, 30.0f, 90.0f}, 500);
+    channel.feed(0);
+    channel.tick(0);
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+
+    ServoLimits limits = channel.limits();
+    limits.angleMinDeg = 5.0f;
+    channel.setLimits(limits, 10);
+
+    limits = channel.limits();
+    limits.angleMaxDeg = 12.0f;
+    channel.setLimits(limits, 20);
+
+    TEST_ASSERT_EQUAL_FLOAT(5.0f, channel.limits().angleMinDeg);
+    TEST_ASSERT_EQUAL_FLOAT(12.0f, channel.limits().angleMaxDeg);
+
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
+    channel.handleEStopFrame(clear, 8, 30);
+    channel.tick(35);
+    TEST_ASSERT_EQUAL_FLOAT(5.0f, channel.limits().angleMinDeg);
+    TEST_ASSERT_EQUAL_FLOAT(12.0f, channel.limits().angleMaxDeg);
+}
+
+// 保留した reached_tolerance は捨てない。捨てると、ラッチ中に設定した値が
+// 「設定できたのに効かない」形で消える（PC 側からは区別が付かない）。
+static void test_reached_tolerance_change_while_latched_survives_release() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    channel.tick(0);
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+
+    channel.setReachedToleranceDeg(5.0f, 10);
+
+    uint8_t clear[8] = {0x01, 0x5A, 0xA5, 0, 0, 0, 0, 0};
+    channel.handleEStopFrame(clear, 8, 20);
+
+    channel.feed(20);
+    TEST_ASSERT_TRUE(channel.setTarget(90.0f, 20));
+    // PC は §5.1 の契約どおり再送し続ける（養わないと途中でウォッチドッグが満了する）
+    for (uint32_t t = 25; t <= 920; t += 5) {
+        channel.feed(t);
+        channel.tick(t);
+    }
+    TEST_ASSERT_FALSE(channel.isReached());  // 残り 9deg
+
+    for (uint32_t t = 925; t <= 970; t += 5) {
+        channel.feed(t);
+        channel.tick(t);
+    }
+    TEST_ASSERT_TRUE(channel.isReached());  // 残り 4.5deg → 許容差 5deg 以内
+}
+
+// --------------------------------------------------------------------------
+// §7.2 受理する制御タイプ（ServoChannel が持つ）
+// --------------------------------------------------------------------------
+
+// **この関門は 3 枚の main.cpp にしか無かった。** ペリフェラルの翻訳単位は
+// native テストの対象外（common.ini の `test_ignore = *`）なので、
+// `if (cmd.type != ControlType::Position) return;` を消しても全ケース緑だった。
+// duty の 0.3 が 0.3deg として、on_off の 1 が 0.1deg として通ってしまう。
+static void test_servo_channel_accepts_only_position_targets() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+
+    const SetTargetCommand duty{ControlType::Duty, 900, true};
+    TEST_ASSERT_FALSE(channel.applySetTarget(duty, 0));
+    const SetTargetCommand velocity{ControlType::Velocity, 900, true};
+    TEST_ASSERT_FALSE(channel.applySetTarget(velocity, 0));
+    const SetTargetCommand onOff{ControlType::OnOff, 1, true};
+    TEST_ASSERT_FALSE(channel.applySetTarget(onOff, 0));
+    // 復号に失敗したフレーム（予約された制御タイプ・DLC 不足）も同じく捨てる
+    const SetTargetCommand invalid{ControlType::Position, 900, false};
+    TEST_ASSERT_FALSE(channel.applySetTarget(invalid, 0));
+
+    channel.tick(0);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+
+    // position だけが通り、0.1deg 単位の固定小数点として解釈される（§4）
+    const SetTargetCommand position{ControlType::Position, 300, true};
+    TEST_ASSERT_TRUE(channel.applySetTarget(position, 0));
+    channel.tick(400);  // 30deg / 90deg/s = 334ms（ウォッチドッグ満了より手前）
+    TEST_ASSERT_EQUAL_FLOAT(30.0f, channel.currentAngleDeg());
+}
+
+// 制御タイプの判定より安全ゲートが優先する（ラッチ中は position でも通さない）。
+static void test_apply_set_target_still_honors_the_output_gate() {
+    ServoChannel channel(0.0f, wideLimits(), 500);
+    channel.feed(0);
+    uint8_t stop[8] = {0};
+    channel.handleEStopFrame(stop, 8, 0);
+
+    const SetTargetCommand position{ControlType::Position, 900, true};
+    channel.feed(10);
+    TEST_ASSERT_FALSE(channel.applySetTarget(position, 10));
+    channel.tick(10000);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_angle_to_pulse_at_range_ends);
@@ -460,6 +648,7 @@ int main(int, char **) {
     RUN_TEST(test_set_limits_clamps_existing_target);
     RUN_TEST(test_set_limits_rejects_non_positive_slew_rate);
     RUN_TEST(test_set_limits_normalizes_inverted_range);
+    RUN_TEST(test_set_limits_does_not_teleport_current_angle);
     RUN_TEST(test_set_limits_does_not_jump);
     RUN_TEST(test_servo_params_share_one_table);
     RUN_TEST(test_unknown_param_id_is_ignored);
@@ -471,5 +660,11 @@ int main(int, char **) {
     RUN_TEST(test_channel_recovers_after_watchdog_and_release);
     RUN_TEST(test_e_stop_release_alone_does_not_move);
     RUN_TEST(test_disabled_watchdog_still_requires_first_command);
+    RUN_TEST(test_latched_channel_defers_limit_change);
+    RUN_TEST(test_watchdog_expired_channel_defers_limit_change);
+    RUN_TEST(test_limit_changes_while_latched_compose);
+    RUN_TEST(test_reached_tolerance_change_while_latched_survives_release);
+    RUN_TEST(test_servo_channel_accepts_only_position_targets);
+    RUN_TEST(test_apply_set_target_still_honors_the_output_gate);
     return UNITY_END();
 }
