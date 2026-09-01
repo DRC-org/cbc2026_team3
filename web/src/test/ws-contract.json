@@ -72,6 +72,7 @@
       "blocked_reason": "緊急停止中のため動作確認を実行できません",
       "current_step": "メインハンド 初期姿勢へ",
       "error": "緊急停止中のため動作確認を実行できません",
+      "last_error": null,
       "running": false,
       "step_index": 0,
       "steps": [
@@ -146,6 +147,7 @@
         "overall": "ok",
         "timestamp": 1700000000.0
       },
+      "last_error": null,
       "manual": {
         "axes": [
           {
@@ -302,9 +304,236 @@
           "index": 1,
           "label": "ワーク投入待ち",
           "require_trigger": true
+        },
+        {
+          "index": 2,
+          "label": "Y 軸を投入位置へ",
+          "require_trigger": false
         }
       ],
-      "total_steps": 2,
+      "total_steps": 3,
+      "type": "state",
+      "waiting_trigger": false
+    },
+    "state_with_last_error": {
+      "current_step": "Y 軸を投入位置へ",
+      "e_stop_active": false,
+      "health": {
+        "buses": [
+          {
+            "bus_off": false,
+            "channel": "can_m3508",
+            "last_rx_at": 1700000000.0,
+            "last_tx_at": 1700000000.0,
+            "name": "can_m3508",
+            "rx_down": false,
+            "rx_error_count": 0,
+            "state": "ok",
+            "tx_error_count": 0
+          }
+        ],
+        "detail": null,
+        "motors": [
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "y_axis_r",
+            "state": "ok",
+            "temperature": 30.0
+          },
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "y_axis_l",
+            "state": "ok",
+            "temperature": 30.0
+          },
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "gripper",
+            "state": "ok",
+            "temperature": 30.0
+          }
+        ],
+        "overall": "ok",
+        "timestamp": 1700000000.0
+      },
+      "last_error": {
+        "message": "シーケンス 'main_hand_seq': 軸内のモータ位置がずれています (y_axis: 偏差 3.100 > 許容 2.000)",
+        "step": "Y 軸を投入位置へ",
+        "step_index": 2
+      },
+      "manual": {
+        "axes": [
+          {
+            "command_mode": "position",
+            "deviation": 0.0,
+            "manual": {
+              "max": 20.0,
+              "min": -2.0,
+              "steps": [
+                0.5,
+                2.0
+              ]
+            },
+            "motors": [
+              "y_axis_r",
+              "y_axis_l"
+            ],
+            "name": "y_axis",
+            "positions": [
+              "home",
+              "work"
+            ],
+            "sync_tolerance": 2.0,
+            "target": 4.0,
+            "unit": "mm",
+            "value": 0.0
+          },
+          {
+            "command_mode": "position",
+            "deviation": null,
+            "manual": null,
+            "motors": [
+              "gripper"
+            ],
+            "name": "gripper",
+            "positions": [
+              "open",
+              "closed"
+            ],
+            "sync_tolerance": null,
+            "target": null,
+            "unit": "deg",
+            "value": 0.0
+          },
+          {
+            "command_mode": "duty",
+            "deviation": null,
+            "manual": null,
+            "motors": [
+              "conveyor"
+            ],
+            "name": "conveyor",
+            "positions": [
+              "stop",
+              "run"
+            ],
+            "sync_tolerance": null,
+            "target": null,
+            "unit": "duty",
+            "value": null
+          }
+        ],
+        "mode": "manual"
+      },
+      "motors": {
+        "gripper": {
+          "pid": null,
+          "pos": 5.0,
+          "saturated": false,
+          "target": null,
+          "temp": 30.0,
+          "torque": 0.0,
+          "vel": 0.0
+        },
+        "y_axis_l": {
+          "pid": {
+            "applies_to": [
+              "y_axis_r",
+              "y_axis_l"
+            ],
+            "kd": 0.0,
+            "ki": 0.0,
+            "kp": 2.0
+          },
+          "pos": -1500.0,
+          "saturated": false,
+          "target": -220.0,
+          "temp": 34.5,
+          "torque": 0.2,
+          "vel": 0.0
+        },
+        "y_axis_r": {
+          "pid": {
+            "applies_to": [
+              "y_axis_r",
+              "y_axis_l"
+            ],
+            "kd": 0.0,
+            "ki": 0.0,
+            "kp": 2.0
+          },
+          "pos": 1500.0,
+          "saturated": false,
+          "target": 220.0,
+          "temp": 35.0,
+          "torque": 0.2,
+          "vel": 0.0
+        }
+      },
+      "robot": "main_hand",
+      "running": false,
+      "safety": {
+        "loops_running": true,
+        "monitors_running": true,
+        "position_loops": [
+          {
+            "bus": "can_m3508",
+            "paused": false,
+            "running": true,
+            "sync_violations": []
+          }
+        ],
+        "refreshers_running": true,
+        "sync_monitors": [
+          {
+            "axes": [
+              "y_axis"
+            ],
+            "running": true,
+            "violated": []
+          }
+        ],
+        "sync_violations": [],
+        "target_refreshers": [
+          {
+            "motors": [
+              "gripper"
+            ],
+            "paused": false,
+            "running": true
+          }
+        ],
+        "unenergized_motors": []
+      },
+      "sequence": "main_hand_seq",
+      "step_index": 2,
+      "steps": [
+        {
+          "index": 0,
+          "label": "初期位置へ移動",
+          "require_trigger": false
+        },
+        {
+          "index": 1,
+          "label": "ワーク投入待ち",
+          "require_trigger": true
+        },
+        {
+          "index": 2,
+          "label": "Y 軸を投入位置へ",
+          "require_trigger": false
+        }
+      ],
+      "total_steps": 3,
       "type": "state",
       "waiting_trigger": false
     },

@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 
 from lib.can_manager import CANManager
+from lib.commands import COMMANDS
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -148,6 +149,34 @@ class ServerFixture:
 
     async def activate_e_stop(self, *, reason: str | None = None) -> None:
         await self.server.activate_e_stop(reason=reason)
+
+    async def wait_reactivation(self, *, timeout: float = 2.0) -> None:
+        """緊急停止解除の再励磁 (別タスク) の完了を待つ。
+
+        解除ハンドラは再励磁を待たずに返る (待つと、その操縦者の WS が数秒間
+        1 通も処理しなくなる)。**「解除フレームを送り終えた後」の振る舞いを見る
+        テストは、この完了を待ってから観測しなければならない** ——
+        `_board_e_stop_ignore_before` が確定するのも再励磁が終わってからで、
+        待たずに配信を 1 回回すと「解除したのに基板の停止が拾われない」ように見える。
+        """
+        tasks = [task for task in self.server._reactivate_tasks if not task.done()]
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+
+    def break_command_handler(self, command: str, exc: Exception) -> None:
+        """指定コマンドのハンドラを、必ず例外を投げるものへ差し替える。
+
+        トップレベルの例外ガードが見たいのは「**どの**ハンドラが投げても操縦者の
+        WS が切れないこと」なので、特定コマンドの内部事情 (どの引数で何が起きるか)
+        に寄りかからない形で壊す必要がある。**差し替えはここだけの特権にする** ——
+        各テストがハンドラ名を書き写すと、名前を変えた瞬間に「壊したつもりで
+        壊せていない」テストが緑を返す。
+        """
+
+        async def _raise(_data: dict, _requester: Any) -> None:
+            raise exc
+
+        setattr(self.server, COMMANDS[command].handler, _raise)
 
     # ------------------------------------------------------------------ #
     #  試合フェーズ

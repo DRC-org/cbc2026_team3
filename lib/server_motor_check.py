@@ -177,6 +177,16 @@ class MotorCheckController:
                     await self.report_error("動作確認を中断しました")
                     return
                 await sequence.run()
+                # **失敗はここでしか受け取れない。** 到達タイムアウト・左右ずれ・
+                # 零点確定失敗はどれも `Sequence.run()` のステップ単位 try が握るので、
+                # 下の `except` は構造上決して発火しない。拾わないと、失敗した確認が
+                # `error:None` / `step_index:0` のまま「一度も実行していない」と同じ
+                # 表示に戻り、指差喚呼の「動作確認 完了」がその誤表示のまま付く
+                failure = sequence.last_error
+                if failure is not None:
+                    await self.report_error(
+                        f"ステップ '{failure.label}' で失敗しました: {failure.message}"
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # pragma: no cover - 防御的
@@ -237,7 +247,11 @@ class MotorCheckController:
             "step_index": 0,
             "total_steps": 0,
             "steps": [],
+            # 表示 1 行。拒否理由も失敗理由もここへ集約する
             "error": self._error,
+            # どのステップで失敗したか。平常時は null で、`error` と違って
+            # 「どこまで確認できたか」を機械的に読める形で持つ
+            "last_error": None,
         }
         if self._sequence is None:
             return payload
@@ -248,6 +262,7 @@ class MotorCheckController:
         payload["step_index"] = progress["step_index"]
         payload["total_steps"] = progress["total_steps"]
         payload["steps"] = progress["steps"]
+        payload["last_error"] = progress["last_error"]
         return payload
 
     async def report_error(self, message: str) -> None:
@@ -257,7 +272,7 @@ class MotorCheckController:
         「押したのに何も起きなかった」としか読み取れない。
         """
         self._error = message
-        logger.warning("動作確認を実行できません: %s", message)
+        logger.warning("動作確認: %s", message)
         await self.publish()
 
     async def publish(self) -> None:

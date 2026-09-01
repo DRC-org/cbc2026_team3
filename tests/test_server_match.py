@@ -50,6 +50,18 @@ class DummySequence(Sequence):
         self.executed.append("wait_step")
 
 
+class _GatedCheckSequence(Sequence):
+    """統合動作確認の代役。ゲートを開けるまで実行中のまま留まる。"""
+
+    def __init__(self) -> None:
+        super().__init__("motor_check")
+        self.gate = asyncio.Event()
+
+    @step("ゲート待ち")
+    async def hold(self) -> None:
+        await self.gate.wait()
+
+
 def _build_fixture(**server_kwargs: object) -> ServerFixture:
     fx = ServerFixture.build(checklist_definitions=_DEFS, **server_kwargs)
     for name in _ROBOT_NAMES:
@@ -377,6 +389,59 @@ class TestPhaseGate:
         async with TestClient(TestServer(app)) as client:
             resp = await client.post("/motor_check")
             assert resp.status == 409
+
+
+class TestMatchStartDuringMotorCheck:
+    """**動作確認の実行中に試合を開始できてはならない。**
+
+    フェーズが `match` になると `sequence_start` が解禁され、両ハンドを一巡している
+    統合動作確認と通常シーケンスが同じアクチュエータへ同時に指令を出す。
+    `abort()` へ倒さないのは、操縦者が意図していない中断より拒否のほうが安全なため
+    (止めたければ `motor_check_abort` が別にある)。
+    """
+
+    async def test_動作確認中の試合開始は理由付きで拒否される(self) -> None:
+        fx = _build_fixture()
+        check = _GatedCheckSequence()
+        fx.set_motor_check_sequence(check)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            fx.complete_all_checklists()
+            assert await fx.start_motor_check() is True
+            await fx.wait_motor_check_running()
+
+            await ws.send_json({"type": "match_start"})
+            msg = await recv_type(ws, "command_rejected")
+
+            assert msg is not None
+            assert msg["command"] == "match_start"
+            assert "動作確認" in msg["reason"]
+            assert fx.match.phase is not Phase.MATCH
+
+            check.gate.set()
+            await fx.wait_motor_check_idle()
+            await ws.close()
+
+    async def test_動作確認が終われば開始できる(self) -> None:
+        fx = _build_fixture()
+        check = _GatedCheckSequence()
+        fx.set_motor_check_sequence(check)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            fx.complete_all_checklists()
+            check.gate.set()
+            assert await fx.start_motor_check() is True
+            await fx.wait_motor_check_idle()
+
+            await ws.send_json({"type": "match_start"})
+            await asyncio.sleep(0.05)
+
+            assert fx.match.phase is Phase.MATCH
+            await ws.close()
 
 
 class TestMatchStartDoesNotMoveRobots:

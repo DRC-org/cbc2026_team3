@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 
-from lib.sequence.engine import Sequence, StepInfo, step
+from lib.sequence.engine import AxisSyncError, Sequence, StepInfo, step
 
 
 class SampleSequence(Sequence):
@@ -23,6 +23,23 @@ class SampleSequence(Sequence):
     @step("ステップ3")
     async def step3(self):
         self.executed.append("step3")
+
+
+class FailingSequence(Sequence):
+    """2 番目のステップで実運用と同じ例外 (左右ずれ) を投げるシーケンス。"""
+
+    def __init__(self):
+        super().__init__("failing")
+        self.fail = True
+
+    @step("先に通るステップ")
+    async def ok_step(self):
+        return None
+
+    @step("必ず失敗する")
+    async def bad_step(self):
+        if self.fail:
+            raise AxisSyncError("シーケンス 'failing': 軸内のモータ位置が左右がずれています")
 
 
 @contextlib.asynccontextmanager
@@ -150,6 +167,7 @@ class TestProgress:
                 {"index": 1, "label": "ステップ2", "require_trigger": True},
                 {"index": 2, "label": "ステップ3", "require_trigger": False},
             ],
+            "last_error": None,
         }
 
     async def test_progress_waiting_trigger(self):
@@ -179,6 +197,52 @@ class TestReset:
         assert seq.progress["step_index"] == 0
         assert seq.is_running is False
         assert seq.waiting_trigger is False
+
+
+class TestLastError:
+    """失敗したステップと理由が外から読めること。
+
+    到達タイムアウト・左右ずれ・零点確定失敗はすべてステップ単位の try で握られる。
+    握ったまま捨てると journal 以外どこにも出ず、操縦者の画面は「待機中」と
+    区別が付かない (**3 層保護の第 1 層である `AxisSyncError` が画面から無音になる**)。
+    """
+
+    async def test_平常時はNone(self):
+        seq = SampleSequence()
+
+        async with _auto_trigger(seq):
+            await seq.run()
+
+        assert seq.last_error is None
+        assert seq.progress["last_error"] is None
+
+    async def test_失敗したステップと理由を保持する(self):
+        seq = FailingSequence()
+
+        await seq.run()
+
+        failure = seq.last_error
+        assert failure is not None
+        assert failure.step_index == 1
+        assert failure.label == "必ず失敗する"
+        assert "左右がずれています" in failure.message
+        assert seq.progress["last_error"] == {
+            "step_index": 1,
+            "step": "必ず失敗する",
+            "message": failure.message,
+        }
+
+    async def test_再実行で消える(self):
+        """次の実行が始まったら古い失敗は残さない (平常時は null)。"""
+        seq = FailingSequence()
+        await seq.run()
+        assert seq.last_error is not None
+
+        seq.fail = False
+        await seq.reset()
+        await seq.run()
+
+        assert seq.last_error is None
 
 
 class TestLifecycle:
@@ -254,6 +318,35 @@ class TestLifecycle:
         assert calls["n"] == 2
         task.cancel()
 
+    async def test_実行中に届いた2通目の開始要求は停止後に発火しない(self):
+        """**STOP を押した後、先頭から全工程を走り切ってはならない。**
+
+        2 通目の START は現実に届く —— 操縦者 2 名 + 予備タブが同じ画面を開き、
+        配信周期 (50ms) 以内の二度押しでも、詰まったクライアントが最大 1 秒古い
+        `running:false` を描いていても起きる。それを再開イベントとして残すと、
+        次の通常停止で `run()` が降りた瞬間に `run_forever` が拾い、操縦者が何も
+        押していないのに機体が先頭から動き出す。
+        """
+        seq = SampleSequence()
+        task = asyncio.create_task(seq.run_forever())
+        seq.request_start()
+        await asyncio.sleep(0.05)
+        assert seq.is_running is True
+
+        # 実行中に届いた 2 通目
+        seq.request_start()
+        await asyncio.sleep(0.05)
+        executed_at_stop = list(seq.executed)
+
+        seq.request_stop()
+        # 以後、操縦者は何も押さない
+        await asyncio.sleep(0.1)
+
+        assert seq.is_running is False
+        assert seq.executed == executed_at_stop
+        assert seq.progress["step_index"] == 0
+        task.cancel()
+
     async def test_未処理の開始要求を破棄できる(self):
         seq = SampleSequence()
         seq.request_start()
@@ -263,6 +356,26 @@ class TestLifecycle:
         await asyncio.sleep(0.05)
 
         assert seq.executed == []
+        task.cancel()
+
+    async def test_常駐ループが待っている最中の破棄も効く(self):
+        """**`clear()` だけでは、既に待機に入っている常駐ループを止められない。**
+
+        `asyncio.Event.set()` は待機中の future をその場で解決するので、直後の
+        `clear()` は「起きることが決まった 1 回」を取り消せない。本番の
+        `run_forever` は常に待機に入っているため、こちらが実運用での形になる
+        (待機前に破棄する形だけを見ていると、この穴が丸ごと素通りする)。
+        """
+        seq = SampleSequence()
+        task = asyncio.create_task(seq.run_forever())
+        await asyncio.sleep(0.02)
+
+        seq.request_start()
+        seq.discard_pending_start()
+        await asyncio.sleep(0.05)
+
+        assert seq.executed == []
+        assert seq.is_running is False
         task.cancel()
 
     async def test_未処理のジャンプ要求も破棄される(self):
