@@ -75,51 +75,80 @@ class MainHandSequence(Sequence):
         logger.info("[main_hand] 自陣ワーク 3 列目を把持")
         await self.move_to({"gripper": "closed"})
 
-    @step("ワークをコンベアの位置へ")
-    async def move_work_to_conveyor(self) -> None:
-        logger.info("[main_hand] ワークをコンベアの位置へ")
+    @step("3 列目ワークをコンベアの位置へ")
+    async def move_work_3_to_conveyor(self) -> None:
+        logger.info("[main_hand] 3 列目ワークをコンベアの位置へ")
         await self.move_to(TO_CONVEYOR)
 
     @step("ワークをリリースして共通ワークへ移動")
-    async def release_work_and_move_to_shared_work(self) -> None:
+    async def release_work_and_move_to_work_shared(self) -> None:
         logger.info("[main_hand] ワークをリリースして共通ワークへ移動")
         await self.move_to({"gripper": "open"} | _pick_at("work_shared"))
 
-    @step("コンベアの壁を閉じる")
-    async def close_wall_f(self) -> None:
-        logger.info("[main_hand] 壁を閉じる")
-        await self.move_to({"wall_f": "closed"})
+    @step("コンベアの壁を閉じてワークを寄せる")
+    async def close_wall_f_3(self) -> None:
+        logger.info("[main_hand] コンベアの壁を閉じてワークを寄せる")
+        await self.move_to({"wall_f": "closed", "conveyor": "run"})
 
-    @step("エンドエフェクタを戻す")
-    async def rotate_to_home(self) -> None:
-        logger.info("[main_hand] エンドエフェクタを戻す")
-        await self.move_to({"rotate": "home"})
+    @step("共通ワークを把持", require_trigger=True)
+    async def grab_work_shared(self) -> None:
+        logger.info("[main_hand] 共通ワークを把持")
+        await self.move_to({"gripper": "closed"})
 
-    @step("配置位置へ搬送", require_trigger=True)
-    async def carry_to_target(self) -> None:
-        logger.info("[main_hand] 配置位置へ搬送")
-        await self.move_to({"y_axis": "place"})
+    @step("共通ワークをコンベアの位置へ")
+    async def move_work_shared_to_conveyor(self) -> None:
+        logger.info("[main_hand] 共通ワークをコンベアの位置へ")
+        await self.move_to(TO_CONVEYOR)
 
-    @step("壁を開く")
-    async def open_walls(self) -> None:
-        logger.info("[main_hand] 壁を開く")
-        await self.move_to({"wall_f": "open", "wall_r": "open"})
+    @step("ワークをリリースして 1 列目ワークへ移動")
+    async def release_work_and_move_to_work_1(self) -> None:
+        logger.info("[main_hand] ワークをリリースして 1 列目ワークへ移動")
+        await self.move_to({"gripper": "open"} | _pick_at("work_1"))
 
-    @step("コンベア稼働")
-    async def start_conveyor(self) -> None:
-        logger.info("[main_hand] コンベア稼働")
-        await self.move_to({"conveyor": "run"})
+    @step("コンベアの壁を閉じてワークを寄せる")
+    async def close_wall_f_shared(self) -> None:
+        logger.info("[main_hand] コンベアの壁を閉じてワークを寄せる")
+        await self.move_to({"wall_f": "closed", "conveyor": "run"})
 
-    # リリースは一度やり直しが利かないので、配置位置到達を目視で確認させる
-    @step("ハンド開く (リリース)", require_trigger=True)
+    @step("1 列目ワークを把持", require_trigger=True)
+    async def grab_work_1(self) -> None:
+        logger.info("[main_hand] 1 列目ワークを把持")
+        await self.move_to({"gripper": "closed"})
+
+    @step("1 列目ワークをコンベアの位置へ")
+    async def move_work_1_to_conveyor(self) -> None:
+        logger.info("[main_hand] 1 列目ワークをコンベアの位置へ")
+        await self.move_to(TO_CONVEYOR)
+
+    @step("ワークをリリースして 2 列目ワークへ移動")
+    async def release_work_and_move_to_work_2(self) -> None:
+        logger.info("[main_hand] ワークをリリースして 2 列目ワークへ移動")
+        await self.move_to({"gripper": "open"} | _pick_at("work_2"))
+
+    @step("コンベアの壁を閉じてワークを寄せる")
+    async def close_wall_f_1(self) -> None:
+        logger.info("[main_hand] コンベアの壁を閉じてワークを寄せる")
+        await self.move_to({"wall_f": "closed", "conveyor": "run"})
+
+    @step("2 列目ワークを把持", require_trigger=True)
+    async def grab_work_2(self) -> None:
+        logger.info("[main_hand] 2 列目ワークを把持")
+        await self.move_to({"gripper": "closed"})
+
+    @step("2 列目ワークをコンベアの位置へ")
+    async def move_work_2_to_conveyor(self) -> None:
+        logger.info("[main_hand] 2 列目ワークをコンベアの位置へ")
+        await self.move_to(TO_CONVEYOR)
+
+    @step("ワークをリリースする")
     async def release_work(self) -> None:
-        logger.info("[main_hand] ハンド開く")
+        logger.info("[main_hand] ワークをリリースする")
         await self.move_to({"gripper": "open"})
 
-    @step("コンベア停止")
-    async def stop_conveyor(self) -> None:
-        logger.info("[main_hand] コンベア停止")
-        await self.move_to({"conveyor": "stop"})
+    @step("コンベアの壁を閉じてワークを寄せる")
+    async def close_wall_f_2(self) -> None:
+        logger.info("[main_hand] コンベアの壁を閉じてワークを寄せる")
+        await self.move_to({"wall_f": "closed", "conveyor": "run"})
 
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
