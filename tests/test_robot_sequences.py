@@ -101,7 +101,13 @@ _MAIN_POSITIONS = {
         "wall_r": _axis(),
     },
     "positions": {
-        "y_axis": {"home": 11.0, "work_3": 13.0, "approach": 14.0, "place": 15.0},
+        "y_axis": {
+            "home": 11.0,
+            "work_3": 13.0,
+            "work_shared": 16.0,
+            "approach": 14.0,
+            "place": 15.0,
+        },
         "rotate": {"home": 20.0, "pick": 21.0, "place": 22.0},
         "gripper": {"open": 31.0, "closed": 32.0},
         "conveyor": {"stop": 0.0, "run": 0.4},
@@ -154,11 +160,25 @@ class TestMainHandSteps:
         ("method_name", "expected"),
         [
             ("move_to_home", _MAIN_HOME_TARGETS),
-            ("move_to_work_3", [("y_axis_r", 13.0), ("y_axis_l", -13.0)]),
-            ("approach_work", [("y_axis_r", 14.0), ("y_axis_l", -14.0)]),
-            ("rotate_to_pick", [("rotate_r", 21.0), ("rotate_l", -21.0)]),
-            ("grip_work", [("gripper", 32.0)]),
-            ("close_walls", [("wall_f", 42.0), ("wall_r", 45.0)]),
+            # 把持姿勢は _pick_at が組み立てる。列 (y_axis) だけが変わり rotate は pick で固定
+            (
+                "move_to_work_3",
+                [("y_axis_r", 13.0), ("y_axis_l", -13.0), ("rotate_r", 21.0), ("rotate_l", -21.0)],
+            ),
+            ("grab_work_3", [("gripper", 32.0)]),
+            ("move_work_to_conveyor", [("rotate_r", 22.0), ("rotate_l", -22.0), ("wall_f", 43.0)]),
+            # リリースと次の列への移動を 1 回の move_to で送る (待ちが直列に積み上がらない)
+            (
+                "release_work_and_move_to_shared_work",
+                [
+                    ("gripper", 31.0),
+                    ("y_axis_r", 16.0),
+                    ("y_axis_l", -16.0),
+                    ("rotate_r", 21.0),
+                    ("rotate_l", -21.0),
+                ],
+            ),
+            ("close_wall_f", [("wall_f", 42.0)]),
             ("rotate_to_home", [("rotate_r", 20.0), ("rotate_l", -20.0)]),
             ("carry_to_target", [("y_axis_r", 15.0), ("y_axis_l", -15.0)]),
             ("open_walls", [("wall_f", 43.0), ("wall_r", 46.0)]),
@@ -182,7 +202,8 @@ class TestMainHandSteps:
         ("method_name", "right", "left"),
         [
             ("move_to_work_3", "y_axis_r", "y_axis_l"),
-            ("rotate_to_pick", "rotate_r", "rotate_l"),
+            ("move_to_work_3", "rotate_r", "rotate_l"),
+            ("rotate_to_home", "rotate_r", "rotate_l"),
         ],
     )
     async def test_paired_axis_commands_are_opposite_signs(
@@ -213,10 +234,10 @@ class TestMainHandSteps:
         assert [s["label"] for s in seq.steps_info] == [
             "初期位置へ移動",
             "自陣ワーク 3 列目まで前進",
-            "ワーク前まで前進",
-            "エンドエフェクタを把持姿勢へ",
-            "ハンド閉じる (ワーク把持)",
-            "壁を閉じる (ワーク保持)",
+            "自陣ワーク 3 列目を把持",
+            "ワークをコンベアの位置へ",
+            "ワークをリリースして共通ワークへ移動",
+            "コンベアの壁を閉じる",
             "エンドエフェクタを戻す",
             "配置位置へ搬送",
             "壁を開く",
@@ -229,16 +250,16 @@ class TestMainHandSteps:
     def test_grip_requires_trigger(self) -> None:
         """把持は失敗すると機構破損に直結するため操縦者の目視確認を要求する。"""
         seq = MainHandSequence()
-        grip = next(s for s in seq.steps_info if s["label"].startswith("ハンド閉じる"))
+        grip = next(s for s in seq.steps if s.method_name == "grab_work_3")
 
-        assert grip["require_trigger"] is True
+        assert grip.require_trigger is True
 
     def test_release_requires_trigger(self) -> None:
         """リリースはやり直しが利かないため配置位置到達の目視確認を要求する。"""
         seq = MainHandSequence()
-        release = next(s for s in seq.steps_info if s["label"].startswith("ハンド開く"))
+        release = next(s for s in seq.steps if s.method_name == "release_work")
 
-        assert release["require_trigger"] is True
+        assert release.require_trigger is True
 
 
 class TestSubHandSteps:

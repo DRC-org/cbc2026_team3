@@ -21,6 +21,21 @@ HOME: dict[str, str] = {
 }
 
 
+def _pick_at(work: str) -> dict[str, str]:
+    """ワーク列へ把持姿勢で寄せる move_to の引数。
+
+    **列が変わっても把持姿勢 (`rotate: pick`) は共通**なので、変わる列名だけを
+    引数で受ける。列ごとに組を書き写すと、把持姿勢を変えたときに直し忘れた列だけが
+    別の姿勢でワークへ向かう。
+    """
+    return {"y_axis": work, "rotate": "pick"}
+
+
+#: ワークをコンベアへ渡すときの指定。ワーク列を増やすたびに同じ組が繰り返されるので
+#: 1 か所に置く (書き写すと、姿勢と壁のどちらか片方だけ直った列ができる)。
+TO_CONVEYOR: dict[str, str] = {"rotate": "place", "wall_f": "open"}
+
+
 class MainHandSequence(Sequence):
     """メインハンドのシーケンス。
 
@@ -53,28 +68,27 @@ class MainHandSequence(Sequence):
     @step("自陣ワーク 3 列目まで前進", require_trigger=True)
     async def move_to_work_3(self) -> None:
         logger.info("[main_hand] 自陣ワーク 3 列目まで前進")
-        await self.move_to({"y_axis": "work_3"})
+        await self.move_to(_pick_at("work_3"))
 
-    @step("ワーク前まで前進", require_trigger=True)
-    async def approach_work(self) -> None:
-        logger.info("[main_hand] ワーク前まで前進")
-        await self.move_to({"y_axis": "approach"})
-
-    @step("エンドエフェクタを把持姿勢へ")
-    async def rotate_to_pick(self) -> None:
-        logger.info("[main_hand] エンドエフェクタを把持姿勢へ")
-        await self.move_to({"rotate": "pick"})
-
-    # 位置ずれのまま閉じるとワークと機構の双方を壊すため、操縦者の目視確認で止める
-    @step("ハンド閉じる (ワーク把持)", require_trigger=True)
-    async def grip_work(self) -> None:
-        logger.info("[main_hand] ハンド閉じる")
+    @step("自陣ワーク 3 列目を把持", require_trigger=True)
+    async def grab_work_3(self) -> None:
+        logger.info("[main_hand] 自陣ワーク 3 列目を把持")
         await self.move_to({"gripper": "closed"})
 
-    @step("壁を閉じる (ワーク保持)")
-    async def close_walls(self) -> None:
+    @step("ワークをコンベアの位置へ")
+    async def move_work_to_conveyor(self) -> None:
+        logger.info("[main_hand] ワークをコンベアの位置へ")
+        await self.move_to(TO_CONVEYOR)
+
+    @step("ワークをリリースして共通ワークへ移動")
+    async def release_work_and_move_to_shared_work(self) -> None:
+        logger.info("[main_hand] ワークをリリースして共通ワークへ移動")
+        await self.move_to({"gripper": "open"} | _pick_at("work_shared"))
+
+    @step("コンベアの壁を閉じる")
+    async def close_wall_f(self) -> None:
         logger.info("[main_hand] 壁を閉じる")
-        await self.move_to({"wall_f": "closed", "wall_r": "closed"})
+        await self.move_to({"wall_f": "closed"})
 
     @step("エンドエフェクタを戻す")
     async def rotate_to_home(self) -> None:
