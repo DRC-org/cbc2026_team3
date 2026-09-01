@@ -165,7 +165,10 @@ positions:
   # TODO: 機構完成後に実測値へ。現状は微小ストロークのみ。
   y_axis:
     home: 0.0            # 電源投入位置 = 原点 [mm]
+    work_1: 5.0          # 自陣ワーク 1 列目 [mm]
+    work_2: 7.5          # 自陣ワーク 2 列目 [mm]
     work_3: 10.0         # 自陣ワーク 3 列目 [mm]
+    work_shared: 15.0    # 共通ワーク [mm]
     approach: 15.0       # ワーク直前 [mm]
     place: 5.0           # 配置位置 [mm]
 
