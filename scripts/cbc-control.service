@@ -8,12 +8,33 @@
 Description=CBC2026 Team3 中央制御プログラム (Web Controller 同梱)
 Documentation=file://@PROJECT_DIR@/docs/impl_plan.md
 # CAN が up していなければ実機モードは起動できない。python 側の
-# OSError より、依存関係として明示した方が journal から原因を追える
+# OSError より、依存関係として明示した方が journal から原因を追える。
+#
+# **ただしこの Requires= は「CAN が揃っていること」を保証しない。**
+# cbc-can.service は --strict なしで setup_can.sh を呼ぶので、1 本も up しなくても
+# success で終わる (理由は cbc-can.service のコメント)。揃っているかを答えるのは
+# 指差喚呼の can_bus_strict (config/checklist.yaml) —— 人が --strict を回す。
 Requires=cbc-can.service
 After=cbc-can.service network.target
 
 # 設定ミス等で即死し続ける場合に無限ループさせない。
 # systemd v229 以降、この 2 つは [Service] に書くと黙って無視される
+#
+# !!! ここに掛かるとユニットが failed で固定され、`systemctl start` すら通らない !!!
+# RestartSec=2 なので **6 秒で 3 回**使い切る。CANable が 1 本欠けていると main.py は
+# バスを開けずに 1 秒未満で落ちるため、抜けかけた USB を 1 本挿し直すより早く固定される。
+# その状態から復帰させるには、原因を直したうえで
+#
+#     sudo systemctl reset-failed cbc-control && sudo systemctl start cbc-control
+#
+# が要る。**reset-failed を知らないと「直したのに起動しない」で詰まる。**
+# 会場での切り分け手順は docs/venue_recovery.md にある。
+#
+# 値そのものは 3/60 のままにしてある。欠けた CANable は**恒久的な条件**であって
+# 待てば直るものではないので、回数を増やしても固定されるまでの数秒が延びるだけで、
+# そのあいだ journal が同じトレースバックで埋まる。緩めても救えない一方、
+# RestartSec を延ばすと**試合中にクラッシュしたときの復帰が遅くなる**ため、
+# 「即死し続けたら止める」という元の判断を変える理由が無い。
 StartLimitIntervalSec=60
 StartLimitBurst=3
 

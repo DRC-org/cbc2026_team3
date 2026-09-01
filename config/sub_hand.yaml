@@ -9,8 +9,31 @@ robot_name: sub_hand
 # 同じ can_id を両者が使うと CANManager._receive_loop が最初にマッチした 1 台で break し、
 # もう一方は永久にフィードバックを得られない。EDULITE 05 は
 # requires_fresh_feedback_for_activation が True なので、無励磁のまま運用に入ってしまう。
-# メインハンド (config/main_hand.yaml) が edulite:1,2 / generic:0x01〜0x04 を使うため、
-# サブハンドは後ろにずらしてある。
+#
+# --- バスごとに ID の決め方が違う -------------------------------------------
+# **「メインハンドが前を使うからサブハンドは後ろへずらす」という割り当てではない。**
+# かつてここにその趣旨の一文 (generic:0x01〜0x04 を根拠にしたもの) が残っていたが、
+# generic はとうに固定ビット分割へ移行しており、**その一文を根拠に新しい基板の ID を
+# 決めると既存の基板と衝突する**。現行は次のとおり:
+#
+#   can_generic … デバイス ID は固定ビット分割 (種別 2bit / 基板番号 3bit /
+#     スロット番号 3bit。仕様書 §2.2)。**ID は基板の種別・DIP・スロットで決まり、
+#     どちらのロボットが使うかとは無関係。** 現在の割り当ては
+#       0x40-0x44 サーボ基板 #0 SV0-SV4 … main: gripper(0x40) / wall_f(0x41) /
+#                                          wall_r(0x42) / origin_sensor(0x44)
+#                                          sub : sub_gripper(0x43)
+#       0x80-0x82 DC 基板 #0 ch0-ch2   … main: conveyor(0x80)
+#                                          sub : pump_vac(0x81) / pump_blow(0x82)
+#       0xC0-0xC5 電磁弁基板 #0 ch0-ch5 … sub : valve_1〜valve_6
+#     **1 枚の基板を両ロボットが分け合う**ので、ロボット単位で帯を切ることはできない。
+#     基板を足すときは DIP (基板番号) を上げる: サーボ #1 = 0x48-0x4C、DC #1 = 0x88-。
+#
+#   can_edulite … EDULITE 05 の ID は 1 バイトの任意値で、ビット分割の規則は無い
+#     (出荷時は 2 台とも 0x7F。バスへ載せる前に scripts/edulite_set_id.py で
+#     1 台ずつ書き換える)。main が 1,2 (rotate_r / rotate_l) を取っているので
+#     sub は 3 から続けている。**ここだけは「先着順に続ける」割り当て。**
+#
+#   can_dm3520 … 専用バスで sub しか居ない。ESC_ID は 0x01-0x0F に限る (後述)。
 motors:
   # RobStride EDULITE 05 — 補助アーム関節
   sub_arm_joint:
@@ -110,7 +133,7 @@ motors:
     # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
     # 値は firmware/servo/include/config.h の kFirmwareVersion と
     # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
-    expected_firmware: 2
+    expected_firmware: 3
     expected_angle_range_deg: 270.0
 
   # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---
@@ -138,42 +161,42 @@ motors:
     # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
     # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
     # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
-    expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_2:
     driver: generic
     bus: generic_bus
     can_id: 0xC1               # 電磁弁基板 #0 ch1 (PB6)
     control_type: on_off
-    expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_3:
     driver: generic
     bus: generic_bus
     can_id: 0xC2               # 電磁弁基板 #0 ch2 (PB5)
     control_type: on_off
-    expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_4:
     driver: generic
     bus: generic_bus
     can_id: 0xC3               # 電磁弁基板 #0 ch3 (PB4)
     control_type: on_off
-    expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_5:
     driver: generic
     bus: generic_bus
     can_id: 0xC4               # 電磁弁基板 #0 ch4 (PB3)
     control_type: on_off
-    expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_6:
     driver: generic
     bus: generic_bus
     can_id: 0xC5               # 電磁弁基板 #0 ch5 (PA15)
     control_type: on_off
-    expected_firmware: 1          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   # --- 吸着系: ポンプ (自作モータドライバ / DC 基板) ---
   # **ポンプは電磁弁基板ではなく DC 基板が動かす** (仕様書 §9.6)。電磁弁基板の 6ch は
@@ -192,11 +215,11 @@ motors:
     bus: generic_bus
     can_id: 0x81               # DC 基板 #0 ch1
     control_type: duty
-    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
   pump_blow:
     driver: generic
     bus: generic_bus
     can_id: 0x82               # DC 基板 #0 ch2
     control_type: duty
-    expected_firmware: 1          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion

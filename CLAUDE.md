@@ -15,7 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |---|---|
 | `docs/impl_plan.md` | 実装計画・設計判断の記録。**すべての実装判断はこれに従う。設計変更・追加作業を行ったら必ず更新すること** |
 | `docs/motor_driver_can_protocol.md` | 自作モータドライバ CAN プロトコルの**単一情報源**。PC 側 `lib/drivers/generic.py` と `firmware/` の双方がこれに従う |
-| `docs/checks_and_health.md` | 点検とヘルスの全体像。ヘルス監視 / 動作確認 / 常駐保護 / 指差喚呼の 4 系統がどこで境界を持つか。**「今どうなっているか」はこれを見る**（`impl_plan.md` は経緯を積んだ文書なので、章によっては統合前の記述が残る） |
+| `docs/checks_and_health.md` | 点検とヘルスの全体像。ヘルス監視 / 動作確認 / 常駐保護 / 指差喚呼の 4 系統がどこで境界を持つか。**「今どうなっているか」はこれを見る**（`impl_plan.md` は経緯を積んだ文書なので、章によっては統合前の記述が残る。古い章には章頭に `【…統合前の記述】` を付けてある） |
+| `docs/venue_recovery.md` | **会場カード。試合当日に手が止まったときはこれ 1 枚を見る。** 起動しない / UI を直したい / 動いているのに様子がおかしい、の切り分けと手順 |
+| `docs/mechanism_handoff.md` | 機構が付いた日に埋める値の棚卸し。**機構担当と共有する表。** 位置定数・可動範囲・PID・ファームのサーボ可動域が全部仮値なので、何を埋めるかを 1 箇所にまとめてある |
 
 ## コマンド
 
@@ -100,6 +102,12 @@ scripts/setup_can.sh              # 手動 up。見つかったバスだけ立�
 scripts/setup_can.sh --strict     # 試合前点検。定義済みの全バス（現行 4 本）が揃わなければ異常終了
 ```
 
+**`--strict` を打つ導線は指差喚呼（`config/checklist.yaml` の `can_bus_strict`）。**
+`cbc-can.service` は `--strict` を付けずに呼ぶので **CAN が 0 本でも success で終わり**、
+`cbc-control.service` の `Requires=cbc-can.service` は揃っていることを保証しない。
+付けない理由は `scripts/cbc-can.service` のコメント（付けると片ハンドだけの練習・
+机上ベンチ・`--dry-run` が一律にできなくなる）。**「揃っているか」に答えるのは人である。**
+
 vcan を使うテストは無い（`--dry-run` は python-can の `virtual` インタフェースで、
 vcan ではない）。詳細は `docs/impl_plan.md` の「vcan を使った統合テスト（未着手）」。
 
@@ -108,10 +116,24 @@ vcan ではない）。詳細は `docs/impl_plan.md` の「vcan を使った統�
 ```bash
 sudo scripts/install.sh           # 3 unit を配置（cbc-control だけ enable しない）
 scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
+scripts/deploy.sh --no-install    # 会場用。依存導入を飛ばしてビルドと再起動だけ
 sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
 journalctl -u cbc-control -f      # ログ追跡
 journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
 ```
+
+**会場では `--no-install` を使う。** 素の `deploy.sh` は `uv sync --frozen` と
+`pnpm install --frozen-lockfile` を無条件に走らせ、ロックが満たされていなければ
+依存解決へ降りる ——「UI を 1 行直して反映」しようとした瞬間にネットワークで止まる。
+**会場入りの前に一度ネットワークのある場所で素の `deploy.sh` を回してキャッシュを
+温めておくこと。**
+
+**`cbc-control` は `StartLimitBurst=3` / `RestartSec=2` なので、約 6 秒で `failed` に
+固定され、以後 `systemctl start` すら通らなくなる。** CANable が 1 本欠けていると
+`main.py` は 1 秒未満で落ちるため、抜けかけた USB を挿し直すより早く固定される。
+復帰には原因を直したうえで **`sudo systemctl reset-failed cbc-control`** が要る
+（これを知らないと「直したのに起動しない」で詰まる）。会場での切り分けは
+`docs/venue_recovery.md` §1。
 
 制御プログラムと Web Controller は同一プロセス（`lib/server.py` が `web/dist/` を
 SPA 配信する）。**`cbc-control.service` は enable しない** — 電源投入だけで機体が
@@ -148,6 +170,9 @@ qdisc の backlog が残っていることと TX packets が進んでいない�
 
 **`main()` は「読む → 配線する → 起動する → 畳む」の 4 段で、ロボット 1 台ぶんの配線は
 `_wire_one_robot` が持つ。** 起動は `_start_all`、後始末は `_shutdown_all`。
+**bind の可否（`_ensure_port_available`）は「配線する」より前に見る** — ポートが埋まって
+いる（会場での二重起動）ときに、CAN を 1 本も開かず・機体を励磁せずに終わるため。
+`_start_all` の立ち上げ順そのものは変えていない。
 **後始末の順序（位置制御ループ → 目標値再送 → 同期監視 → CAN → サーバー）は不変条件で、
 段を入れ替えてはならない** — 位置制御ループは生き残ると電流指令を出し続けるので CAN より
 先に止める、同期監視だけが生き残ると停止済みのモータのフィードバックを見て誤発報する、
@@ -499,6 +524,26 @@ Monitor の設定面から起動する。** かつては機体ごとに独立し
 `homing.sensor` が `sensors:` に登録されていることは `tests/test_robot_sequences.py` が
 固定する（居ないと「センサが応答していません」で必ず失敗し、配線不良と区別が付かない）。
 
+**探索の起点は実測位置であって 0 ではない。** `HomingRunner` は毎ステップ
+`AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step` を
+組み、`travelled` も実測位置の差分で数える。起点を呼び出し側の引数にすると渡し忘れが
+0 起点へ黙って戻るので、引数そのものを持たせていない。**指令の積算で数えると、
+1 歩目が原点近傍への 1 回のジャンプになり、その移動が `search_distance` を 1mm も
+消費しない**（手動で軸を動かした後の動作確認で普通に踏む）。再アンカー方式では
+「進まない機構」が探索距離を消費しないので、**停滞判定**（`step/2` 未満が 3 歩連続で
+`HomingError`）が対になる。
+
+**事前確認は 4 つで、どれも 1 歩も動かさずに落ちる** —— 位置指令の軸か / 原点を確定する
+手段があるか / センサの鮮度 / **対象軸モータの鮮度**。最後の 1 つが欠けると、未受信の
+`0.0` を現在位置と信じて全ストロークぶんの指令を 1 回で出す。
+
+**残っている穴は 1 つ: 原点を確定できるのは M3508 の軸だけ**（`rotate` = EDULITE、
+`sub_y_axis` / `sub_lift` = DM3520 はスイッチを付けても `HomingError` になる。
+`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は disable すると自重で
+落ちるため）。**手段が無い軸は探索を始める前に落ち、起動ログにも `ERROR` で出る。**
+現況は `docs/checks_and_health.md` の「零点確定（ホーミング）」節が正で、
+直したときは両方を同時に更新すること。
+
 **指差喚呼はロール 1 つ（`pre_match`）に統合し、Monitor の設定面に置く。** かつては
 `main_hand` / `sub_hand` の 2 名が別々に確認し、両方揃って初めて試合に入れる構成だった。
 実運用では 2 名が必ず同じ場所で操縦するため独立した 2 回の確認にはならず、同じ機体を
@@ -678,6 +723,13 @@ bit5 は `kNeverCommanded`）。センサを積んだ基板が現れたらそこ
 そこが必ず `MotorSafety::isOutputAllowed()` を通る。**`app.cpp` に GPIO を直に叩く
 経路を作ってはならない。**
 
+**これは `cbc-can-watchdog.service` の復旧と噛み合う。** bus-off 復旧の `down`/`up` は
+1 秒弱 CAN を止めるので、`command_timeout_ms`（既定 500ms）のウォッチドッグが満了し、
+**復旧 1 回で吸着中のワークが落ちうる**。試合中かどうかのゲートは意図的に置いていない
+（「バスが戻らない」ほうが重い）ので、運用で受ける —— **journal に `[ WD ]` が出たら
+ワーク落下を疑う**。UI には落ちたことを知らせる手段が無い（そもそも弁の開閉を観測
+できない）。詳細は `docs/checks_and_health.md`、手順は `docs/venue_recovery.md` §3-1。
+
 **電磁弁基板は弁が開いたかを観測できない。到達フラグを立ててはならない。**
 圧力センサもリミットスイッチも無く、分かるのは「指令どおり GPIO を駆動した」ことだけ。
 指令の瞬間に到達を立てると、断線したソレノイドも抜けたコネクタも「到達」と報告され、
@@ -719,6 +771,17 @@ PC は §5.1 の契約どおり 20Hz で目標値を再送し続けるので、�
 DIP を回しすぎた基板が別の基板の ID を名乗る。`candump` の ID からどの基板のどの
 スロットかが直接読めるのも利点。
 
+**未設定のチャンネルは `FEEDBACK` も `INFO` も 1 通も送らない。設定ミスの通知は
+基板の LED（赤の速い点滅）だけが担う。** かつては CAN ID `0x300`（デバイス ID `0x00`）で
+送っていたが、PC 側の `can_id` は `0x01`〜`0xFE` に限られるので **`0x300` を claim できる
+ドライバは存在し得ず**、その報告は誰にも届いていなかった。しかも未設定は「DIP を 8 以上へ
+回した」形で起きて基板 1 枚の全チャンネルが同時に未設定になるため、2 枚が同時に未設定だと
+**異なるノードが同じ ID で異なるデータを送ってバスがエラーフレームで埋まる**。
+**PC 側から見た症状は「その基板の全チャンネルが STALE」で、配線不良と区別が付かない。**
+`GenericDriver.device_id_unconfigured` と `is_fault()` のその項は残してあるが
+（ビット位置を詰め直すと bit4/bit5 が動き、PC とファームを同時に差し替えることになる）、
+**実機からは立たない。ここを設定ミスの防護と読んではならない。**
+
 **CAN ID のコマンド種別は調停順に合わせる。** CAN は ID が小さいほど優先なので、
 `E_STOP` を最小（`0b000`）に置く。かつては `0b111` で、ブロードキャスト停止の `0x7FF` は
 Standard ID 全 2048 個のうち**最も優先度が低かった**。止めるフレームが目標値や
@@ -759,7 +822,13 @@ PC 側 yaml の `can_id` が無変更で済む）。`Unused` にしたスロッ�
 **ファームの版番号は `INFO` フレームで 1Hz 自己申告する。** ピン配置やデバイス ID を
 変えたファームを一部の基板にだけ焼き忘れると、症状は「そのモータが応答しない」か
 「違うものが動く」だけで CAN 越しには見えない。**プロトコルかピン配置を変えたら
-`config.h` の `kFirmwareVersion` を必ず上げること。**
+`config.h` の `kFirmwareVersion` を必ず上げ、`config/**/*.yaml` の `expected_firmware`
+も同じコミットで揃えること。** 片方だけ動かすと、PC は INFO の申告値と期待値の不一致を
+FAULT として出すので、症状は**「正しく焼いたのに全モータ FAULT」**になる。
+**この対はテストが機械的に守る** — `tests/test_firmware_version_sync.py` が 3 つの
+`config.h` を実際にパースし、can_id の上位 2bit（仕様書 §2.2 のビット分割）で基板種別を
+決めて同梱の全 yaml（bench 6 セットを含む）と突き合わせる。実際に一度、ファームだけを
+上げて config 側 26 箇所が丸ごと取り残された。
 
 **基板のセンサ入力は「報告するだけ」。判断は PC 側が持つ。** **接触は異常ではない** —
 ドライバの異常判定は `is_fault()` ただ 1 つなので、そこへ入れてはならない。入れると

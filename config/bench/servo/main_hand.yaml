@@ -51,7 +51,7 @@ motors:
     # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
     # 値は firmware/servo/include/config.h の kFirmwareVersion と
     # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
-    expected_firmware: 2
+    expected_firmware: 3
     expected_angle_range_deg: 270.0
 
   # SV1 (D5)。本番では wall_f。
@@ -60,7 +60,7 @@ motors:
     bus: generic_bus
     can_id: 0x49               # サーボ基板 #1 SV1
     control_type: position
-    expected_firmware: 2
+    expected_firmware: 3
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   # SV2 (D6)。本番では wall_r。
@@ -69,7 +69,7 @@ motors:
     bus: generic_bus
     can_id: 0x4A               # サーボ基板 #1 SV2
     control_type: position
-    expected_firmware: 2
+    expected_firmware: 3
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   # SV3 (D7)。本番ではサブハンドの sub_gripper。
@@ -78,7 +78,7 @@ motors:
     bus: generic_bus
     can_id: 0x4B               # サーボ基板 #1 SV3
     control_type: position
-    expected_firmware: 2
+    expected_firmware: 3
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
 # --- センサ入力 (スロット SV4 / D8) ---

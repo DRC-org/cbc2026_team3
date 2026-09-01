@@ -56,6 +56,21 @@ checklists:
   # 動作確認を回した直後、同じ場所で続けて唱えられるように隣へ並べる。
   pre_match:
     # --- 通電前の安全確認・機体の初期状態 ---
+    #
+    # can_bus_strict / health_ready は「機械が既に知っているのに、人が見る手順へ
+    # 結び付いていなかった」ぶんである。
+    #   - scripts/setup_can.sh --strict は試合前点検として作ってあるが、操縦者に
+    #     実行させる導線がどこにも無かった。CANable が 1 本欠けたまま起動すると
+    #     制御プログラムはそのバスを開けずに落ち、systemd の再起動制限に掛かって
+    #     failed で固定される (復旧手順は docs/venue_recovery.md)
+    #   - 無励磁 (state.safety.unenergized_motors) は配信されているが、
+    #     「指令しても動かない」としてしか現れないので試合が始まってから気付く
+    - id: can_bus_strict
+      label: scripts/setup_can.sh --strict が全バス起動で通ること確認 (欠け 0 / 失敗 0)
+      group: preflight
+    - id: health_ready
+      label: Monitor のヘルスが READY・無励磁のモータが 0 台であること確認
+      group: preflight
     - id: estop_release
       label: 非常停止スイッチ解除確認
       group: preflight
@@ -96,8 +111,11 @@ checklists:
     - id: rotate_sync
       label: エンドエフェクタ回転 左右のずれがないこと確認
       group: motor_check
+    # 版番号の照合は自作モタドラ 3 種すべてに掛かる (サーボ / DC / 電磁弁)。
+    # 一部の基板にだけ焼き忘れると症状は「そのモータが応答しない」だけなので、
+    # 不一致の表示が出ていないことを 1 度だけ人が確かめる。
     - id: firmware_match
-      label: サーボ基板のファーム版・可動角の異常表示が出ていないこと確認
+      label: 自作モタドラ 3 種のファーム版・サーボ可動角の異常表示が出ていないこと確認
       group: motor_check
     - id: origin_sensor_react
       label: 原点センサに触れて反応することを確認
@@ -125,6 +143,16 @@ checklists:
       group: motor_check
 
     # --- 開始直前 ---
+    #
+    # estop_functional は estop_release (解除されていることの確認) とは別物である。
+    # 物理非常停止は DC 基板の REF が受け、FEEDBACK の緊急停止ビット → サーバー全体の
+    # 緊急停止 → ブロードキャスト E_STOP という経路で伝わるので、**配線 1 本・基板 1 枚で
+    # 機能ごと失われる**。しかも失われても画面は平常のままで、押しても何も起きない
+    # ことでしか分からない。押す側の確認は試合直前に 1 度だけ、実際に押して確かめる。
+    # (DC 基板が繋がっていない構成では物理停止そのものが効かない)
+    - id: estop_functional
+      label: 非常停止を実際に押し、機体が止まり画面が緊急停止表示になること確認。解除で復帰すること
+      group: final
     - id: field_clear
       label: 可動範囲内に人・物がないこと確認
       group: final
