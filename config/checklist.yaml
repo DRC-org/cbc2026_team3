@@ -7,6 +7,24 @@
 #
 # 全項目が完了するまで試合フェーズに入れない。
 # 項目は id / label のみ必須。id は一覧内で一意にすること。
+#
+# ## group — その項目を画面のどこに置くか
+#
+# 指差喚呼を 1 本の長いリストにすると、操作 (コート選択・動作確認の起動) と
+# それを確認する項目が画面の別の場所に離れ、操縦者は「押す → リストを探す →
+# チェックする」を項目ごとに往復することになる。group はその往復を無くすための
+# 宣言で、UI は同じ group の項目を対応するコントロールの直下へ並べる。
+#
+#   preflight    通電前・機体の初期状態。対応する操作は無く、列の先頭に並ぶ
+#   court        コート選択ボタンの直下
+#   motor_check  動作確認の起動ボタンと進捗の直下
+#   final        開始直前。列の末尾に並ぶ
+#
+# **省略してよい。** 書かなかった項目と、UI が知らない group 名の項目は
+# 「その他」としてまとめて描かれる (どこにも出ない項目は作らない)。
+# 機構を持たないベンチ設定 (config/bench/*/checklist.yaml) は group を持たない。
+# 語彙を増やすときは web/src/lib/checklistGroups.ts の CHECKLIST_GROUPS も足すこと
+# — 足さないと項目は「その他」へ落ちる (消えはしない)。
 
 checklists:
   # **動作確認 (robots/motor_check.py) から除外されているアクチュエータは 1 つも無い。**
@@ -33,58 +51,80 @@ checklists:
   # 反応を確認する。
   #
   # したがって *_sync / conveyor_* / valves_* / pumps_run / suction_* /
-  # origin_sensor_react は省略できない。
+  # origin_sensor_react は省略できない。**これらが group: motor_check なのは、
+  # どれも動作確認シーケンスが駆動したものを人が確かめるぶんだからである** —
+  # 動作確認を回した直後、同じ場所で続けて唱えられるように隣へ並べる。
   pre_match:
-    # --- 通電前の安全確認 ---
+    # --- 通電前の安全確認・機体の初期状態 ---
     - id: estop_release
       label: 非常停止スイッチ解除確認
-
-    # --- 機体の初期状態 ---
+      group: preflight
     - id: main_home_position
       label: メインハンド初期位置確認
+      group: preflight
     - id: sub_home_position
       label: サブハンド初期位置確認
+      group: preflight
     - id: main_gripper_open
       label: グリッパ開状態確認
+      group: preflight
     - id: sub_gripper_open
       label: 補助ハンド開状態確認
+      group: preflight
     - id: wall_initial
       label: 壁 前後とも初期位置確認
+      group: preflight
     - id: valves_closed
       label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
+      group: preflight
     - id: sub_dm3520_origin
       label: サブハンド 前後・昇降が原点位置にあること確認 (DM3520 は電源投入位置が原点)
+      group: preflight
 
-    # --- 自動判定できない機構の目視確認 ---
-    - id: y_axis_sync
-      label: y 軸 左右のずれがないこと確認
-    - id: rotate_sync
-      label: エンドエフェクタ回転 左右のずれがないこと確認
-    - id: firmware_match
-      label: サーボ基板のファーム版・可動角の異常表示が出ていないこと確認
-    - id: origin_sensor_react
-      label: 原点センサに触れて反応することを確認
-    - id: sub_lift_holds
-      label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)
-    - id: conveyor_run
-      label: コンベア 正転・逆転の目視確認
-    - id: conveyor_stop
-      label: コンベア停止確認
-    - id: pumps_run
-      label: 吸気ポンプ・排気ポンプが個別に回ること確認 (聴音。DC 基板は回転を報告しない)
-    - id: valves_actuate
-      label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
-    - id: suction_hold
-      label: 吸気ポンプ運転中に弁を開き、ワークを吸着して保持できること確認
-    - id: suction_release
-      label: 弁を閉じ排気ポンプでワークが確実に離れること確認 (残圧で張り付かないこと)
-
-    # --- 動作確認と試合設定 ---
-    - id: motor_check
-      label: アクチュエータ動作確認 完了
+    # --- コート設定 ---
     - id: court
       label: コート設定 (赤/青) と実配置の一致確認
+      group: court
+
+    # --- 動作確認の結果と、自動判定できない機構の目視確認 ---
+    - id: motor_check
+      label: アクチュエータ動作確認 完了
+      group: motor_check
+    - id: y_axis_sync
+      label: y 軸 左右のずれがないこと確認
+      group: motor_check
+    - id: rotate_sync
+      label: エンドエフェクタ回転 左右のずれがないこと確認
+      group: motor_check
+    - id: firmware_match
+      label: サーボ基板のファーム版・可動角の異常表示が出ていないこと確認
+      group: motor_check
+    - id: origin_sensor_react
+      label: 原点センサに触れて反応することを確認
+      group: motor_check
+    - id: sub_lift_holds
+      label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)
+      group: motor_check
+    - id: conveyor_run
+      label: コンベア 正転・逆転の目視確認
+      group: motor_check
+    - id: conveyor_stop
+      label: コンベア停止確認
+      group: motor_check
+    - id: pumps_run
+      label: 吸気ポンプ・排気ポンプが個別に回ること確認 (聴音。DC 基板は回転を報告しない)
+      group: motor_check
+    - id: valves_actuate
+      label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
+      group: motor_check
+    - id: suction_hold
+      label: 吸気ポンプ運転中に弁を開き、ワークを吸着して保持できること確認
+      group: motor_check
+    - id: suction_release
+      label: 弁を閉じ排気ポンプでワークが確実に離れること確認 (残圧で張り付かないこと)
+      group: motor_check
 
     # --- 開始直前 ---
     - id: field_clear
       label: 可動範囲内に人・物がないこと確認
+      group: final

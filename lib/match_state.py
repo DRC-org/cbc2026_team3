@@ -76,14 +76,27 @@ PHASES_START_GATE: frozenset[Phase] = frozenset({Phase.READY})
 
 @dataclass
 class ChecklistItem:
-    """指差喚呼 1 項目。"""
+    """指差喚呼 1 項目。
+
+    ``group`` は「画面上でどのコントロールの隣に置くか」の宣言 (``court`` なら
+    コート選択ボタンの直下、``motor_check`` なら動作確認ボタンの直下)。**サーバーは
+    語彙を検証せず素通しする** — 既知の名前だけを許すと、UI がまだ知らない group を
+    書いた瞬間に起動しなくなり、区分を持たないベンチ設定 (config/bench/*) も通らない。
+    未知・未指定の項目が画面から消えないことは UI 側が守る (「その他」として必ず描く)。
+    """
 
     id: str
     label: str
     checked: bool = False
+    group: str | None = None
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "label": self.label, "checked": self.checked}
+        return {
+            "id": self.id,
+            "label": self.label,
+            "checked": self.checked,
+            "group": self.group,
+        }
 
 
 @dataclass
@@ -134,7 +147,14 @@ def load_checklist_definitions(config: dict) -> dict[str, list[ChecklistItem]]:
             label = entry.get("label")
             if not item_id or not label:
                 continue
-            items.append(ChecklistItem(id=str(item_id), label=str(label)))
+            group = entry.get("group")
+            items.append(
+                ChecklistItem(
+                    id=str(item_id),
+                    label=str(label),
+                    group=str(group) if group else None,
+                )
+            )
         definitions[role] = items
 
     return definitions
@@ -307,7 +327,8 @@ class MatchState:
             role: ChecklistState(
                 role=role,
                 items=[
-                    ChecklistItem(id=i.id, label=i.label) for i in self._definitions.get(role, [])
+                    ChecklistItem(id=i.id, label=i.label, group=i.group)
+                    for i in self._definitions.get(role, [])
                 ],
             )
             for role in ALL_ROLES

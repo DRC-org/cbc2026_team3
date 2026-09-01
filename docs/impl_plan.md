@@ -1199,8 +1199,8 @@ web/
     ├── pages/{Dashboard,RobotControl,MotorTuning}.test.tsx
     └── components/          # テストは対象と同じグループディレクトリに置く
         ├── shell/{ConnectionBanner,Toaster,WsSettings,EStopOverlay,TabBar}.test.tsx
-        ├── monitor/{StartGate,MatchControl}.test.tsx
-        ├── operator/{ActionPanel,Checklist,TriggerButton,ModeSwitch,ManualPanel,ManualAxisRow}.test.tsx
+        ├── monitor/{StartGate,MatchControl,MatchPrep}.test.tsx
+        ├── operator/{ActionPanel,TriggerButton,ModeSwitch,ManualPanel,ManualAxisRow}.test.tsx
         ├── motorcheck/{MotorCheckButton,MotorCheckPanel,MotorCheckSummary}.test.tsx
         ├── diagnostics/{HealthIndicator,SubsystemStatus}.test.tsx
         └── ui/Modal.test.tsx
@@ -1221,7 +1221,10 @@ web/
   取りこぼすと、指を離したのに機体が動き続ける。押し始めの発火より停止経路の網羅が重要
 - `useArmedPress` — 試合の開始・終了が**1 回では成立しないこと**。不感時間が抜けると
   ダブルクリック 1 回で試合が始まり、自動解除が抜けると武装したままのボタンが画面に残る
-- `Toaster` / `TriggerButton` / `Checklist` — 状態から表示・活性が一意に決まることの確認
+- `Toaster` / `TriggerButton` / `MatchPrep` — 状態から表示・活性が一意に決まることの確認。
+  `MatchPrep` は加えて**どの項目も必ずどこかの区分に描かれること**を見る（`group` を
+  書き足した瞬間に項目が画面から消えると、指差喚呼が 1 つ足りないまま試合開始の
+  ゲートだけが開かず、原因は画面のどこにも出ない）
 - `pages/RobotControl.tsx` / `pages/MotorTuning.tsx` — 画面が組み上がったときにしか
   現れない性質を見る。**主操作の宛先が担当機に揃っていること**（1 箇所でも相手機に
   向くと、操縦者は自分の画面から相手の機体を動かす）、フェーズ別に何を出し何を塞ぐか、
@@ -1422,14 +1425,15 @@ cbc2026_team3/
 │           │   ├── RouteErrorBoundary.tsx # <Outlet /> だけに掛ける（EMG STOP を生存させる）
 │           │   └── WsSettings.tsx       # WS 接続先の確認・変更ダイアログ
 │           ├── monitor/          # Dashboard（Monitor 画面）専用
-│           │   ├── MatchControl.tsx     # コート切替 + 試合開始・終了
+│           │   ├── MatchControl.tsx     # 試合終了・リセット導線（MatchStrip）と確認ダイアログ
 │           │   ├── StartGate.tsx        # 指差喚呼の充足状況。開始可否は can_start_match が決める
+│           │   ├── MatchPrep.tsx        # 準備の面。コート設定・動作確認と指差喚呼を同じ場所に置く
+│           │   ├── ChecklistItems.tsx   # 指差喚呼 1 行の描き方（どの区分でも同じ見た目）
 │           │   ├── RobotStatusRow.tsx   # ロボット 1 台ぶんの 1 行サマリ
 │           │   └── EventFeed.tsx        # ヘルス変化・操作拒否の履歴
 │           ├── operator/         # RobotControl（操縦者画面）専用
 │           │   ├── ActionPanel.tsx      # 右＝今押すボタン / 左＝STOP で位置固定
 │           │   ├── TriggerButton.tsx
-│           │   ├── Checklist.tsx        # 指差喚呼チェックリスト
 │           │   └── SequenceStepList.tsx
 │           ├── motorcheck/       # セッティングタイムの動作確認
 │           │   ├── MotorCheckButton.tsx # 緊急停止中 / シーケンス中 / バス DOWN で無効化
@@ -1998,8 +2002,8 @@ Server → Client（**WS 接続直後に 1 回 + 変化時**）。接続直後�
   "phase": "setup",
   "can_start_match": false,
   "checklists": {
-    "main_hand": { "items": [{ "id": "home_position", "label": "メインハンド初期位置確認", "checked": false }], "completed": false },
-    "sub_hand":  { "items": [/* ... */], "completed": false }
+    // group は「画面のどこへ置くか」の宣言。未指定・未知は UI が「その他」として必ず描く
+    "pre_match": { "items": [{ "id": "court", "label": "コート設定 (赤/青) と実配置の一致確認", "checked": false, "group": "court" }], "completed": false }
   },
   // 試合時間タイマー。残り時間ではなく「この配信瞬間の経過ミリ秒」を配る（後述）
   "timer": { "running": false, "elapsed_ms": 0, "duration_ms": 180000 }
@@ -2012,9 +2016,10 @@ Client → Server:
 
 ```jsonc
 { "type": "set_court", "court": "blue" }
-{ "type": "checklist_set", "role": "main_hand", "item_id": "home_position", "checked": true }
-{ "type": "checklist_reset", "role": "main_hand" }   // role 省略で全ロール
-{ "type": "checklist_check_all", "role": "main_hand" } // 開発用。--dev-tools 起動時のみ受理
+{ "type": "checklist_set", "role": "pre_match", "item_id": "court", "checked": true }
+{ "type": "checklist_reset", "role": "pre_match" }   // role 省略で全ロール。現在 UI からは送らない
+                                                    // (準備中のやり直しは match_reset 1 つに寄せてある)
+{ "type": "checklist_check_all", "role": "pre_match" } // 開発用。--dev-tools 起動時のみ受理
 { "type": "match_start" }
 { "type": "match_finish" }
 { "type": "match_reset" }
@@ -2078,17 +2083,28 @@ Client → Server:
 
 ```yaml
 checklists:
-  monitor:
-    - { id: power, label: 電源投入・バッテリ電圧確認 }
-  main_hand:
-    - { id: home_position, label: メインハンド初期位置確認 }
-  sub_hand:
-    - { id: home_position, label: サブハンド初期位置確認 }
+  pre_match:
+    - { id: estop_release, label: 非常停止スイッチ解除確認, group: preflight }
+    - { id: court, label: コート設定 (赤/青) と実配置の一致確認, group: court }
+    - { id: motor_check, label: アクチュエータ動作確認 完了, group: motor_check }
+    - { id: field_clear, label: 可動範囲内に人・物がないこと確認, group: final }
 ```
 
 `id` はロール内で一意。`id` / `label` を欠くエントリは無視して起動する
 （yaml の記述ミスで起動が落ちるより、UI 上で項目欠落に気付ける方が競技当日の運用に適する）。
 `--checklist <path>` でパスを差し替え可能。ファイルが無ければ項目ゼロで起動する。
+
+`group` は**その項目を画面のどのコントロールの隣に置くか**の宣言で、`config/checklist.yaml`
+だけが持つ（`preflight` / `court` / `motor_check` / `final`）。`MatchPrep` はコート選択の
+直下に `court` の項目を、動作確認の起動ボタンの直下に `motor_check` の項目を並べる。
+1 本の長いリストだと、操作とそれを確認する項目が画面の別の場所に離れ、操縦者は項目ごとに
+「押す → リストを探す → チェックする」を往復することになる。
+
+**省略してよく、サーバーは語彙を検証しない。** 既知の名前だけを許すと、UI がまだ知らない
+group を書いた瞬間に起動しなくなり、区分を持たないベンチ設定（`config/bench/*`）も通らない。
+未指定・未知の項目は UI が「その他」としてまとめて描く（**どこにも出ない項目は作らない** —
+消えると指差喚呼が 1 つ足りないまま試合開始のゲートだけが開かず、原因が画面から読めない）。
+語彙を増やすときは `web/src/lib/checklistGroups.ts` の `CHECKLIST_GROUPS` も足す。
 
 ### 開発用コマンド（`--dev-tools` / `CBC_DEV_TOOLS=1`）
 
@@ -2126,7 +2142,7 @@ Vite のビルド時定数で決めると、同じ `web/dist` を配る本番と
 
 | タブ | キー | ページ | 内容 |
 |---|---|---|---|
-| Monitor | `1` | `pages/Dashboard.tsx` | 試合制御 (`MatchControl`)、指差喚呼、両ロボット監視 |
+| Monitor | `1` | `pages/Dashboard.tsx` | 試合制御、準備の面 (`MatchPrep`: コート設定・動作確認・指差喚呼)、両ロボット監視 |
 | Main Hand | `2` | `pages/RobotControl.tsx` | 準備中は指差喚呼＋動作確認、試合中はシーケンス操作 |
 | Sub Hand | `3` | `pages/RobotControl.tsx` | 同上 |
 | PID Tuning | `4` | `pages/MotorTuning.tsx` | モータ個別調整 |
@@ -2143,8 +2159,8 @@ Monitor / RobotControl は `phase` でレイアウトごと切り替える（`li
 
 | | setup / ready | match / finished |
 |---|---|---|
-| Monitor | `StartGate`（開始可否と阻害要因＝画面の主役）+ `MatchSettings` + 機体状態 + 操縦者の残項目 | `MatchStrip`（1 行）+ `RobotStatusRow` ×2 + `EventFeed` |
-| RobotControl（半自動） | `Checklist`（主役）+ 動作確認 + `SubsystemStatus` | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
+| Monitor | `StartGate`（開始可否と阻害要因＝画面の主役・全幅）+ 2 カラム（左 `MatchPrep` / 右 機体状態） | `MatchStrip`（1 行）+ `RobotStatusRow` ×2 + `EventFeed` |
+| RobotControl（半自動） | `ModeSwitch` + `SubsystemStatus`（準備中の操作はこの画面に無い） | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
 | RobotControl（手動） | `ManualPanel`（主役）+ 動作確認（不可・理由付き）+ `SubsystemStatus` | `ManualPanel`（主役）+ `SubsystemStatus`（右レール・展開） |
 
 ### 操作モードの切り替え（`ModeSwitch`）
