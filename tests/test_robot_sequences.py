@@ -10,7 +10,7 @@ import yaml
 
 from lib.drivers.base import ControlMode
 from lib.match_state import ROLE_PRE_MATCH
-from lib.sequence.engine import Sequence
+from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from robots.main_hand import MainHandSequence
@@ -103,6 +103,8 @@ _MAIN_POSITIONS = {
     "positions": {
         "y_axis": {
             "home": 11.0,
+            "work_1": 12.0,
+            "work_2": 12.5,
             "work_3": 13.0,
             "work_shared": 16.0,
             "approach": 14.0,
@@ -155,111 +157,166 @@ def _valves(value: float) -> list[tuple[str, float]]:
     return [(name, value) for name in _VALVE_AXES]
 
 
+async def _run_each_step(
+    seq: Sequence, position_config: dict
+) -> tuple[list[tuple[StepInfo, list[tuple[str, float]]]], MotorGroup]:
+    """全ステップを定義順に走らせ、ステップ 1 つぶんの指令に切り分けて返す。
+
+    **メソッド名やラベルを試験側へ書き写さないための入口。** メインハンドの
+    シーケンス構成は戦略が未確定のあいだ差し替わり続けるので、名前を 1 対 1 で
+    固定すると、機構ではなく試験を直す作業だけが毎回発生する。ここで拾うのは
+    「どのステップが何を指令したか」だけで、性質の検証は呼び出し側が行う。
+    """
+    sink, group = _wire(seq, position_config)
+    per_step: list[tuple[StepInfo, list[tuple[str, float]]]] = []
+    for info in seq.steps:
+        first = len(sink)
+        await getattr(seq, info.method_name)()
+        per_step.append((info, sink[first:]))
+    return per_step, group
+
+
+def _single_motor_value(table: PositionTable, axis: str, position: str) -> float:
+    (value,) = table.commands(axis, position).values()
+    return value
+
+
+def _paired_motor_names(table: PositionTable) -> list[tuple[str, str]]:
+    """左右 2 台で 1 動作をする軸のモータ名。**位置定数表から導き、試験へ書き写さない。**"""
+    pairs: list[tuple[str, str]] = []
+    for axis in table.axes:
+        names = table.axis(axis).motor_names
+        if len(names) == 2:
+            pairs.append((names[0], names[1]))
+    return pairs
+
+
 class TestMainHandSteps:
-    @pytest.mark.parametrize(
-        ("method_name", "expected"),
-        [
-            ("move_to_home", _MAIN_HOME_TARGETS),
-            # 把持姿勢は _pick_at が組み立てる。列 (y_axis) だけが変わり rotate は pick で固定
-            (
-                "move_to_work_3",
-                [("y_axis_r", 13.0), ("y_axis_l", -13.0), ("rotate_r", 21.0), ("rotate_l", -21.0)],
-            ),
-            ("grab_work_3", [("gripper", 32.0)]),
-            ("move_work_to_conveyor", [("rotate_r", 22.0), ("rotate_l", -22.0), ("wall_f", 43.0)]),
-            # リリースと次の列への移動を 1 回の move_to で送る (待ちが直列に積み上がらない)
-            (
-                "release_work_and_move_to_shared_work",
-                [
-                    ("gripper", 31.0),
-                    ("y_axis_r", 16.0),
-                    ("y_axis_l", -16.0),
-                    ("rotate_r", 21.0),
-                    ("rotate_l", -21.0),
-                ],
-            ),
-            ("close_wall_f", [("wall_f", 42.0)]),
-            ("rotate_to_home", [("rotate_r", 20.0), ("rotate_l", -20.0)]),
-            ("carry_to_target", [("y_axis_r", 15.0), ("y_axis_l", -15.0)]),
-            ("open_walls", [("wall_f", 43.0), ("wall_r", 46.0)]),
-            ("start_conveyor", [("conveyor", 0.4)]),
-            ("release_work", [("gripper", 31.0)]),
-            ("stop_conveyor", [("conveyor", 0.0)]),
-            ("return_home", _MAIN_HOME_TARGETS),
-        ],
-    )
-    async def test_step_sends_expected_targets(
-        self, method_name: str, expected: list[tuple[str, float]]
-    ) -> None:
-        seq = MainHandSequence()
-        sink, _ = _wire(seq, _MAIN_POSITIONS)
+    """メインハンドのシーケンスが持つべき性質。
 
-        await getattr(seq, method_name)()
+    ステップ名・ラベル・列を回る順序は `robots/main_hand.py` の docstring が
+    宣言するとおり暫定なので、ここでは固定しない。固定するのは、差し替えても
+    壊れてはいけない側 —— 初期姿勢に始まり初期姿勢に終わること、ワークを持った
+    まま開くグリッパが単独指令かつトリガー待ちであること、左右直結ペアが逆符号で
+    動くこと、コンベアが duty で回ること。
+    """
 
-        assert sink == expected
+    async def test_starts_and_ends_at_home(self) -> None:
+        """先頭と末尾は同じ初期姿勢であること。
 
-    @pytest.mark.parametrize(
-        ("method_name", "right", "left"),
-        [
-            ("move_to_work_3", "y_axis_r", "y_axis_l"),
-            ("move_to_work_3", "rotate_r", "rotate_l"),
-            ("rotate_to_home", "rotate_r", "rotate_l"),
-        ],
-    )
-    async def test_paired_axis_commands_are_opposite_signs(
-        self, method_name: str, right: str, left: str
-    ) -> None:
-        """左右直結のペア軸は逆回転で同一動作するため、指令は符号が反転していること。"""
-        seq = MainHandSequence()
-        sink, _ = _wire(seq, _MAIN_POSITIONS)
+        末尾が初期姿勢でないと、次のサイクルの先頭 (`move_to_home`) が
+        「前のサイクルの終了姿勢からいきなり全軸を動かす」ことになる。
+        `HOME` を 1 か所に置いてある意味もそこにある。
+        """
+        per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
 
-        await getattr(seq, method_name)()
+        assert dict(per_step[0][1]) == dict(_MAIN_HOME_TARGETS)
+        assert dict(per_step[-1][1]) == dict(_MAIN_HOME_TARGETS)
 
-        commands = dict(sink)
-        assert commands[right] != 0.0
-        assert commands[left] == pytest.approx(-commands[right])
+    async def test_release_is_a_step_of_its_own(self) -> None:
+        """ワークを持ったままグリッパを開くステップは、他の軸を一緒に動かさないこと。
+
+        `move_to` は軸ごとの指令を asyncio.gather で**同時に**出すので、開く指令と
+        y 軸の移動指令を 1 回にまとめると、グリッパが開き切る前に機体が走り出して
+        ワークを搬送経路の外へ落とす。
+
+        「持ったまま開く」の判定はメソッド名ではなくグリッパの状態遷移
+        (閉 -> 開) で行う。名前で拾うと、改名しただけで検査が素通りになる。
+        """
+        table = load_position_table(_MAIN_POSITIONS)
+        gripper = table.axis("gripper").motor_names[0]
+        opened = _single_motor_value(table, "gripper", "open")
+        closed = _single_motor_value(table, "gripper", "closed")
+        per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
+
+        holding = False
+        releases = 0
+        for info, commands in per_step:
+            issued = dict(commands)
+            if issued.get(gripper) == closed:
+                holding = True
+                continue
+            if issued.get(gripper) != opened or not holding:
+                continue
+            releases += 1
+            holding = False
+            assert set(issued) == {gripper}, f"{info.method_name} がリリースと同時に他軸を動かす"
+
+        assert releases > 0, "ワークを持ったまま開くステップが 1 つも無い"
+
+    async def test_grab_and_release_require_trigger(self) -> None:
+        """把持とリリースは操縦者の目視確認を挟むこと。
+
+        把持は失敗すると機構破損に直結し、リリースはやり直しが利かない
+        (落としたワークは拾えない)。掴めていない / 位置がずれているまま次の
+        ステップへ流れると、そのまま搬送・投下まで走る。
+        """
+        table = load_position_table(_MAIN_POSITIONS)
+        gripper = table.axis("gripper").motor_names[0]
+        opened = _single_motor_value(table, "gripper", "open")
+        closed = _single_motor_value(table, "gripper", "closed")
+        per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
+
+        holding = False
+        checked = 0
+        for info, commands in per_step:
+            issued = dict(commands)
+            if issued.get(gripper) == closed:
+                holding = True
+            elif issued.get(gripper) == opened and holding:
+                holding = False
+            else:
+                continue
+            checked += 1
+            assert info.require_trigger is True, f"{info.method_name} がトリガー待ちを持たない"
+
+        # 把持 4 回 + リリース 4 回。初期姿勢の「開いたまま開く」は数に入らない
+        assert checked >= 2
+
+    async def test_paired_axes_are_commanded_with_opposite_signs(self) -> None:
+        """左右直結のペア軸は、どのステップでも逆符号で指令されること。
+
+        符号を 1 か所落とすと左右が押し合い、その場で機構が壊れる。
+        対象の軸は位置定数表 (motors: が 2 台) から導くので、ペア軸が増えても
+        試験を書き換えなくてよい。
+        """
+        table = load_position_table(_MAIN_POSITIONS)
+        pairs = _paired_motor_names(table)
+        assert pairs, "ペア軸が 1 つも無い位置定数では検査にならない"
+        per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
+
+        checked = 0
+        for info, commands in per_step:
+            issued = dict(commands)
+            for right, left in pairs:
+                if right not in issued or left not in issued:
+                    continue
+                checked += 1
+                assert issued[right] != 0.0, (
+                    f"{info.method_name}: {right} が 0 で符号を検査できない"
+                )
+                assert issued[left] == pytest.approx(-issued[right]), (
+                    f"{info.method_name}: {right} と {left} が同符号"
+                )
+
+        assert checked > 0
 
     async def test_conveyor_is_commanded_as_duty(self) -> None:
-        """コンベアは DC モータで位置の概念がないため duty で指令されること。"""
+        """コンベアは DC モータで位置の概念がないため duty で指令されること。
+
+        位置指令で送ると自作 DC 基板は単位を取り違えたまま黙って受け付ける
+        (基板はフィードバックを持たないので症状が出ない)。
+        """
         seq = MainHandSequence()
-        _, group = _wire(seq, _MAIN_POSITIONS)
+        per_step, group = await _run_each_step(seq, _MAIN_POSITIONS)
 
-        await seq.start_conveyor()
-
-        assert group["conveyor"].mode is ControlMode.DUTY
-
-    def test_step_labels(self) -> None:
-        seq = MainHandSequence()
-
-        assert [s["label"] for s in seq.steps_info] == [
-            "初期位置へ移動",
-            "自陣ワーク 3 列目まで前進",
-            "自陣ワーク 3 列目を把持",
-            "ワークをコンベアの位置へ",
-            "ワークをリリースして共通ワークへ移動",
-            "コンベアの壁を閉じる",
-            "エンドエフェクタを戻す",
-            "配置位置へ搬送",
-            "壁を開く",
-            "コンベア稼働",
-            "ハンド開く (リリース)",
-            "コンベア停止",
-            "初期位置へ復帰",
+        run = _single_motor_value(load_position_table(_MAIN_POSITIONS), "conveyor", "run")
+        commanded = [
+            value for _, commands in per_step for name, value in commands if name == "conveyor"
         ]
 
-    def test_grip_requires_trigger(self) -> None:
-        """把持は失敗すると機構破損に直結するため操縦者の目視確認を要求する。"""
-        seq = MainHandSequence()
-        grip = next(s for s in seq.steps if s.method_name == "grab_work_3")
-
-        assert grip.require_trigger is True
-
-    def test_release_requires_trigger(self) -> None:
-        """リリースはやり直しが利かないため配置位置到達の目視確認を要求する。"""
-        seq = MainHandSequence()
-        release = next(s for s in seq.steps if s.method_name == "release_work")
-
-        assert release.require_trigger is True
+        assert group["conveyor"].mode is ControlMode.DUTY
+        assert run in commanded, "シーケンス中にコンベアを一度も回していない"
 
 
 class TestSubHandSteps:

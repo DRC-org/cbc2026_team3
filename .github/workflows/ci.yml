@@ -1,0 +1,95 @@
+# 回帰検出網。**赤いままマージできる状態を作らないためにある。**
+# 一度これが無いまま「テストが 12 件落ちる PR」がマージされ、以後どの変更が
+# 壊したのかを追う手がかりが消えた。
+#
+# 3 系統をそれぞれ独立した job に分けてある (直列に並べない) —— 1 系統が落ちても
+# 残り 2 系統の結果は見たいため。どれが落ちたかで「PC 側 / UI / ファーム」の
+# どこを触ったのが原因かが job 名から直接読める。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# 同じブランチへ続けて push したとき、古い実行は打ち切る (会場前の連続 push で
+# runner を待たされないため)。ただし main は打ち切らない —— main の緑は
+# 「今の main が動く」ことの記録なので、途中で消えると後から追えない。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  python:
+    name: Python (pytest + ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --locked: uv.lock を更新しないこと自体を検査に含める。
+      # 更新を許すと、手元と CI で違う依存が入った状態で緑になる
+      - name: 依存を同期
+        run: uv sync --locked --dev
+
+      - name: リント
+        run: uv run ruff check .
+
+      - name: フォーマット検査
+        run: uv run ruff format --check .
+
+      - name: テスト
+        run: uv run pytest
+
+  web:
+    name: Web UI (lint + 型検査 + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # バージョンは web/package.json の packageManager が単一情報源。
+      # ここに版を書くと、手元と CI で違う pnpm が動く
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 依存を導入
+        run: pnpm install --frozen-lockfile
+
+      # lint + format:check + tsc + vitest を 1 本で回す (web/package.json の check)
+      - name: 検査
+        run: pnpm check
+
+  firmware:
+    name: Firmware (native テスト)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: PlatformIO を導入
+        run: pip install platformio
+
+      # native env は MotorCan (Arduino 非依存) のユニットテスト。**電磁弁基板の
+      # ロジック層もここに含まれる** —— 実機ビルドが CMake でも MotorCan を共有
+      # しているため。firmware/test/ を dc_motor と servo が test_dir で共有して
+      # いるので、どちらか一方から回せば全ケースが走る。
+      # 実機ビルド (pio run) は CI に載せていない —— ツールチェーンの取得だけで
+      # 数分かかるうえ、実機 3 枚のうち電磁弁基板は CMake で系が違うため、
+      # 「一部の基板だけビルドされる CI」になって緑の意味が読めなくなる
+      - name: native テスト
+        run: pio test -e native -d firmware/dc_motor
