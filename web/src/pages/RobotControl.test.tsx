@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -122,17 +122,26 @@ describe("RobotControl の操作先", () => {
     const { context } = mount("match");
 
     await userEvent.click(screen.getByRole("button", { name: "シーケンスを先頭から開始" }));
-    expect(context.send).toHaveBeenCalledWith({ type: "sequence_start", robot: "sub_hand" });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_start", robot: "sub_hand" },
+      expect.any(String),
+    );
   });
 
   it("トリガーと通常停止も同じ宛先に揃える", async () => {
     const { context } = mount("match", robotState({ running: true, waiting_trigger: true }));
 
     await userEvent.click(screen.getByRole("button", { name: "次のステップへ進む" }));
-    expect(context.send).toHaveBeenCalledWith({ type: "trigger", robot: "sub_hand" });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "trigger", robot: "sub_hand" },
+      expect.any(String),
+    );
 
     await userEvent.click(screen.getByRole("button", { name: "シーケンスを通常停止" }));
-    expect(context.send).toHaveBeenCalledWith({ type: "sequence_stop", robot: "sub_hand" });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_stop", robot: "sub_hand" },
+      expect.any(String),
+    );
   });
 
   it("ステップジャンプは確認を経てから宛先付きで送る", async () => {
@@ -141,14 +150,13 @@ describe("RobotControl の操作先", () => {
     const { context } = mount("match");
 
     await userEvent.click(screen.getByRole("button", { name: "ステップ 3: 搬送" }));
-    expect(context.send).not.toHaveBeenCalled();
+    expect(context.sendOrReport).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByRole("button", { name: "再開" }));
-    expect(context.send).toHaveBeenCalledWith({
-      type: "sequence_jump",
-      robot: "sub_hand",
-      step_index: 2,
-    });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_jump", robot: "sub_hand", step_index: 2 },
+      expect.any(String),
+    );
   });
 });
 
@@ -201,8 +209,11 @@ describe("RobotControl の Space ホットキー", () => {
 
     pressSpace();
 
-    expect(context.send).toHaveBeenCalledTimes(1);
-    expect(context.send).toHaveBeenCalledWith({ type: "sequence_start", robot: "sub_hand" });
+    expect(context.sendOrReport).toHaveBeenCalledTimes(1);
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_start", robot: "sub_hand" },
+      expect.any(String),
+    );
   });
 
   it("許可待ちの Space は NEXT に解決する", () => {
@@ -210,7 +221,10 @@ describe("RobotControl の Space ホットキー", () => {
 
     pressSpace();
 
-    expect(context.send).toHaveBeenCalledWith({ type: "trigger", robot: "sub_hand" });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "trigger", robot: "sub_hand" },
+      expect.any(String),
+    );
   });
 
   it("実行中の Space は何も送らない (多重トリガーを作らない)", () => {
@@ -218,7 +232,7 @@ describe("RobotControl の Space ホットキー", () => {
 
     pressSpace();
 
-    expect(context.send).not.toHaveBeenCalled();
+    expect(context.sendOrReport).not.toHaveBeenCalled();
   });
 
   it("準備中の Space は機体を動かさない", () => {
@@ -227,7 +241,7 @@ describe("RobotControl の Space ホットキー", () => {
 
     pressSpace();
 
-    expect(context.send).not.toHaveBeenCalled();
+    expect(context.sendOrReport).not.toHaveBeenCalled();
   });
 });
 
@@ -327,11 +341,10 @@ describe("手動操縦モード", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
 
-    expect(context.send).toHaveBeenCalledWith({
-      type: "set_operation_mode",
-      robot: "sub_hand",
-      mode: "manual",
-    });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
+      expect.any(String),
+    );
   });
 
   it("試合中は手動パネルがシーケンスの操作面を置き換える", () => {
@@ -362,7 +375,7 @@ describe("手動操縦モード", () => {
 
     pressSpace();
 
-    expect(context.send).not.toHaveBeenCalled();
+    expect(context.sendOrReport).not.toHaveBeenCalled();
   });
 
   it("緊急停止中は理由を出して指令を塞ぐ", async () => {
@@ -383,11 +396,10 @@ describe("手動操縦モード", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
 
-    expect(context.send).toHaveBeenCalledWith({
-      type: "set_operation_mode",
-      robot: "sub_hand",
-      mode: "manual",
-    });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
+      expect.any(String),
+    );
   });
 
   // 手動中に動作確認を塞ぐことは Monitor 側 (MotorCheckButton) が受け持つ。
@@ -399,5 +411,100 @@ describe("手動操縦モード", () => {
     mountManual("match");
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+  });
+});
+
+/**
+ * `sequence_stop` は `step_index` を保持したまま降りるので、画面は「2/3・現在
+ * ステップ○○」を出したままになる。そこで押す START (と Space 1 打) は**ステップ 0 へ
+ * 戻って全工程を走り直す** —— 中断姿勢のまま先頭の動作が走る。同じ「任意ステップから
+ * 再開」である `sequence_jump` には確認モーダルと「物理状態が安全であることを必ず
+ * 確認してください」があるのに、より危険なこちらだけが素通しだった。
+ */
+describe("中断位置から押す START", () => {
+  const stopped = () => robotState({ step_index: 1, running: false });
+
+  it("確認を経てから sequence_start を送る", async () => {
+    const { context } = mount("match", stopped());
+
+    await userEvent.click(screen.getByRole("button", { name: "シーケンスを先頭から再開" }));
+    expect(context.sendOrReport).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "先頭から実行" }));
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_start", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+
+  it("何が起きるかと、途中から再開する手段を書く", async () => {
+    mount("match", stopped());
+
+    await userEvent.click(screen.getByRole("button", { name: "シーケンスを先頭から再開" }));
+
+    expect(screen.getByText(/全工程を走り直します/)).toBeInTheDocument();
+    // これを書かないと、操縦者は他に手が無いと思って全工程のやり直しを選ぶ
+    expect(screen.getByText(/ステップ一覧から再開するステップを選んで/)).toBeInTheDocument();
+    expect(screen.getByText(/物理状態が安全であることを必ず確認/)).toBeInTheDocument();
+  });
+
+  it("キャンセルすれば 1 通も送らない", async () => {
+    const { context } = mount("match", stopped());
+
+    await userEvent.click(screen.getByRole("button", { name: "シーケンスを先頭から再開" }));
+    await userEvent.click(screen.getByRole("button", { name: "キャンセル" }));
+
+    expect(context.sendOrReport).not.toHaveBeenCalled();
+  });
+
+  it("Space 1 打では走り出さない (キーの方がボタンより危ない)", () => {
+    const { context } = mount("match", stopped());
+
+    act(() => pressSpace());
+
+    expect(context.sendOrReport).not.toHaveBeenCalled();
+    // 無反応で終わらせない。同じ確認を出して次の一手を示す
+    expect(screen.getByText(/全工程を走り直します/)).toBeInTheDocument();
+  });
+
+  it("一度も走っていない状態は確認を挟まない (試合開始直後の 1 回目)", async () => {
+    const { context } = mount("match", robotState({ step_index: 0, running: false }));
+
+    await userEvent.click(screen.getByRole("button", { name: "シーケンスを先頭から開始" }));
+
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_start", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+});
+
+/**
+ * `send` は切断中に false を返すだけなので、塞がないと「押したのにボタンは有効な
+ * まま・機体は動かない・トーストも出ない」になる。手動操縦・動作確認・PID・
+ * コート選択・StartGate は最初から `connected` を見ており、**主操作だけが例外**だった。
+ */
+describe("RobotControl の切断中", () => {
+  it("主操作を押せなくし、理由を出す", () => {
+    // `mount` の既定は connected: true なので、切断は明示的に組む
+    const view = renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      connected: false,
+      states: { sub_hand: robotState({ running: true, waiting_trigger: true }) },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", checklists: CHECKLISTS },
+    });
+
+    expect(screen.queryByRole("button", { name: "次のステップへ進む" })).toBeNull();
+    expect(view.container.querySelectorAll("button[disabled]").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("切断中のため送信できません").length).toBeGreaterThan(0);
+  });
+
+  it("ステップジャンプも押せなくする", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      connected: false,
+      states: { sub_hand: robotState() },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", checklists: CHECKLISTS },
+    });
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeDisabled();
   });
 });

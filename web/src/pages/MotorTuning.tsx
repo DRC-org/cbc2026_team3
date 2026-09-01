@@ -68,11 +68,27 @@ export function MotorTuning() {
     setValues((prev) => ({ ...prev, [key]: { ...prev[key], [param]: val } }));
   };
 
+  /** 編集を捨てて配信値へ戻す。**送信の成否に関わらず、表示の正はサーバー配信** */
+  const discardEdits = (entry: TuningEntry) => {
+    const key = entryKey(entry);
+    setValues((prev) => {
+      if (!(key in prev)) return prev;
+      const { [key]: _dropped, ...rest } = prev;
+      return rest;
+    });
+  };
+
   // 3 項目を個別に送ると PID が中途半端に混ざった状態が制御周期をまたいで残り、
-  // 通らないときの拒否も 3 通になる。1 通にまとめてサーバーへ渡す
+  // 通らないときの拒否も 3 通になる。1 通にまとめてサーバーへ渡す。
+  //
+  // **送れたら編集値を捨てて配信へ再同期する。** 残すと、そのモータで実際に
+  // 効いているゲインが画面のどこにも出なくなる (サーバーに拒否されても編集値を
+  // 出し続ける)。かつて「画面に元の値がどこにも無い」状態で 0 上書き事故が
+  // 起きており、編集後にそれが再現していた。送れなかったときは捨てない ——
+  // 機体には何も届いていないので、編集はまだ操縦者のものである
   const sendAll = (entry: TuningEntry) => {
     const gains = Object.fromEntries(PID_PARAMS.map(({ key }) => [key, getValue(entry, key)]));
-    send({ type: "set_param", motor: entry.motor, gains });
+    if (send({ type: "set_param", motor: entry.motor, gains })) discardEdits(entry);
   };
 
   // 試合中の set_param はサーバーが拒否する (走行中の位置制御ループの特性が変わり、
@@ -157,6 +173,8 @@ export function MotorTuning() {
             getValue={getValue}
             setValue={setValue}
             onSend={() => sendAll(active)}
+            edited={entryKey(active) in values}
+            onDiscard={() => discardEdits(active)}
             blockedReason={blockedReason}
             tempThresholds={tempThresholdsOf(serverInfo)}
           />

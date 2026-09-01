@@ -61,6 +61,15 @@ export interface RobotCommands {
   openWsSettings: () => void;
   /** 送れたら true。切断中は false (楽観的更新の可否を呼び出し側が判断できる) */
   send: (data: object) => boolean;
+  /**
+   * 送信し、切断中で送れなかったら通知枠へ流す。送れたら true。
+   *
+   * **戻り値を見ない操作はこちらを使う。** `send` の false を捨てると
+   * 「押したのにボタンは有効なまま・機体は動かない・トーストも出ない」になり、
+   * 操縦者には無反応としか見えない。`what` は「〜を送信できませんでした」に
+   * そのまま埋まる操作名。
+   */
+  sendOrReport: (data: Record<string, unknown> & { type: string }, what: string) => boolean;
   onEStop: () => void;
   onEStopRelease: () => void;
   setCourt: (court: MatchCourt) => void;
@@ -106,6 +115,7 @@ export function RobotProvider({
     resetWsUrl,
     openWsSettings,
     send,
+    sendOrReport,
     onEStop,
     onEStopRelease,
     setCourt,
@@ -154,6 +164,7 @@ export function RobotProvider({
       resetWsUrl,
       openWsSettings,
       send,
+      sendOrReport,
       onEStop,
       onEStopRelease,
       setCourt,
@@ -169,6 +180,7 @@ export function RobotProvider({
       resetWsUrl,
       openWsSettings,
       send,
+      sendOrReport,
       onEStop,
       onEStopRelease,
       setCourt,

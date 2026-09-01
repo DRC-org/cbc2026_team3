@@ -335,17 +335,33 @@ describe("ManualAxisRow", () => {
       expect(onJog).not.toHaveBeenCalled();
     });
 
-    it("Home / End で可動範囲の端へ飛ぶ", async () => {
+    it("Shift+Home / Shift+End で可動範囲の端へ飛ぶ", async () => {
+      const user = userEvent.setup();
+      const { onSet } = renderRow(PAIRED, null, true);
+
+      await user.keyboard("{Shift>}{End}{/Shift}");
+      await user.keyboard("{Shift>}{Home}{/Shift}");
+
+      expect(onSet.mock.calls).toEqual([
+        ["y_axis", 20],
+        ["y_axis", -2],
+      ]);
+    });
+
+    /**
+     * **単打では端まで走らせない。** `Home` / `End` はジョグの `←` `→` と同じ
+     * ナビゲーションクラスタにあり、ノート PC では `Fn+←/→` がそのまま
+     * `Home/End` になる機種が多い。押し間違いが「可動域の端まで全速で走る」に
+     * なるのは、同じ動作をポインタで行うボタンと比べて桁違いに危険。
+     */
+    it("修飾キー無しの Home / End では 1 通も送らない", async () => {
       const user = userEvent.setup();
       const { onSet } = renderRow(PAIRED, null, true);
 
       await user.keyboard("{End}");
       await user.keyboard("{Home}");
 
-      expect(onSet.mock.calls).toEqual([
-        ["y_axis", 20],
-        ["y_axis", -2],
-      ]);
+      expect(onSet).not.toHaveBeenCalled();
     });
 
     it("[ ] でジョグ量を変える", async () => {

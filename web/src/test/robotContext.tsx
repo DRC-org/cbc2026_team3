@@ -52,6 +52,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     resetWsUrl: vi.fn(),
     openWsSettings: vi.fn(),
     send: vi.fn(() => true),
+    sendOrReport: vi.fn(() => true),
     onEStop: vi.fn(),
     onEStopRelease: vi.fn(),
     setCourt: vi.fn(),

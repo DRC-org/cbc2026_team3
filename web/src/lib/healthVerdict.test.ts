@@ -50,6 +50,17 @@ function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
   };
 }
 
+/**
+ * 接続中の判定。切断中は判定そのものを止める仕様なので、それを見るテストだけが
+ * `evaluateHealth` を直接呼ぶ (下の「切断中」節)。
+ */
+function verdictWhenConnected(
+  snapshot: Parameters<typeof evaluateHealth>[0],
+  safetyPayload?: Parameters<typeof evaluateHealth>[1],
+) {
+  return evaluateHealth(snapshot, safetyPayload, true);
+}
+
 /** 配信されたしきい値。値そのものはサーバーの config が決めるので固定値で良い */
 const THRESHOLDS = { warning: 65, critical: 80 };
 
@@ -74,26 +85,28 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
  */
 describe("evaluateHealth", () => {
   it("ヘルス未取得は neutral", () => {
-    expect(evaluateHealth(undefined)).toEqual({ tone: "neutral", label: "ヘルス未取得" });
+    expect(verdictWhenConnected(undefined)).toEqual({ tone: "neutral", label: "ヘルス未取得" });
   });
 
   it("異常が無ければ success", () => {
-    expect(evaluateHealth(health()).tone).toBe("success");
+    expect(verdictWhenConnected(health()).tone).toBe("success");
   });
 
   it("バス停止は error", () => {
-    const verdict = evaluateHealth(health({ buses: [bus({ state: "down" })] }));
+    const verdict = verdictWhenConnected(health({ buses: [bus({ state: "down" })] }));
     expect(verdict.tone).toBe("error");
     expect(verdict.label).toMatch(/can_m3508/);
   });
 
   it("バス劣化 (degraded) は warning であって error ではない", () => {
     // タブの LED だけが degraded を error 扱いしていた
-    expect(evaluateHealth(health({ buses: [bus({ state: "degraded" })] })).tone).toBe("warning");
+    expect(verdictWhenConnected(health({ buses: [bus({ state: "degraded" })] })).tone).toBe(
+      "warning",
+    );
   });
 
   it("モータ fault は error", () => {
-    expect(evaluateHealth(health({ motors: [motorHealth({ state: "fault" })] })).tone).toBe(
+    expect(verdictWhenConnected(health({ motors: [motorHealth({ state: "fault" })] })).tone).toBe(
       "error",
     );
   });
@@ -104,7 +117,7 @@ describe("evaluateHealth", () => {
    * 「異常 2 件」として出ていた (しかも UI の境界 60℃ はサーバーの 65℃ とずれていた)。
    */
   it("高温モータをサーバー判定と二重に数えない", () => {
-    const verdict = evaluateHealth(health({ motors: [motorHealth({ state: "warning" })] }));
+    const verdict = verdictWhenConnected(health({ motors: [motorHealth({ state: "warning" })] }));
     expect(verdict.tone).toBe("warning");
     expect(verdict.label).toMatch(/要確認 1 件/);
   });
@@ -117,7 +130,7 @@ describe("evaluateHealth", () => {
    */
   describe("サーバーの総合判定", () => {
     it("内訳が空でも overall=down なら error に倒す", () => {
-      const verdict = evaluateHealth(
+      const verdict = verdictWhenConnected(
         health({
           overall: "down",
           buses: [],
@@ -129,7 +142,7 @@ describe("evaluateHealth", () => {
     });
 
     it("判定不能の理由 (detail) を捨てない", () => {
-      const verdict = evaluateHealth(
+      const verdict = verdictWhenConnected(
         health({
           overall: "down",
           buses: [],
@@ -141,18 +154,20 @@ describe("evaluateHealth", () => {
     });
 
     it("detail が無くても判定不能であることは伝える", () => {
-      const verdict = evaluateHealth(health({ overall: "down", buses: [], motors: [] }));
+      const verdict = verdictWhenConnected(health({ overall: "down", buses: [], motors: [] }));
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toMatch(/判定不能/);
     });
 
     it("内訳から理由を挙げられるならそちらを優先する (対処に直結する)", () => {
-      const verdict = evaluateHealth(health({ overall: "down", buses: [bus({ state: "down" })] }));
+      const verdict = verdictWhenConnected(
+        health({ overall: "down", buses: [bus({ state: "down" })] }),
+      );
       expect(verdict.label).toMatch(/can_m3508/);
     });
 
     it("内訳が空でも overall=degraded なら warning に倒す", () => {
-      const verdict = evaluateHealth(health({ overall: "degraded", buses: [], motors: [] }));
+      const verdict = verdictWhenConnected(health({ overall: "degraded", buses: [], motors: [] }));
       expect(verdict.tone).toBe("warning");
     });
   });
@@ -160,33 +175,114 @@ describe("evaluateHealth", () => {
   describe("安全機構", () => {
     it("同期ずれラッチは error にし、どの軸かを出す", () => {
       // 緊急停止を解除してもこの軸は動かない。復旧手順の選択に直結する
-      const verdict = evaluateHealth(health(), safety({ sync_violations: ["y_axis"] }));
+      const verdict = verdictWhenConnected(health(), safety({ sync_violations: ["y_axis"] }));
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toMatch(/y_axis/);
     });
 
     it("保護ループの停止は error", () => {
       // WS は繋がったままモータ状態も届き続けるので、配信を読まない限り誰も気付けない
-      expect(evaluateHealth(health(), safety({ loops_running: false })).tone).toBe("error");
-      expect(evaluateHealth(health(), safety({ monitors_running: false })).tone).toBe("error");
+      expect(verdictWhenConnected(health(), safety({ loops_running: false })).tone).toBe("error");
+      expect(verdictWhenConnected(health(), safety({ monitors_running: false })).tone).toBe(
+        "error",
+      );
     });
 
     it("目標値再送の停止は error (ファーム側ウォッチドッグで generic が全停止する)", () => {
       // 20Hz の再送が途切れると 500ms 後にグリッパ・コンベア・壁が無反応になる。
       // 位置制御ループ・同期監視の停止と同格の異常として扱う
-      expect(evaluateHealth(health(), safety({ refreshers_running: false })).tone).toBe("error");
+      expect(verdictWhenConnected(health(), safety({ refreshers_running: false })).tone).toBe(
+        "error",
+      );
     });
 
     it("safety が未受信でも判定は成立する", () => {
-      expect(evaluateHealth(health(), undefined).tone).toBe("success");
+      expect(verdictWhenConnected(health(), undefined).tone).toBe("success");
     });
 
     it("同期ずれラッチはバス停止より先に主張する (復旧操作が別物のため)", () => {
-      const verdict = evaluateHealth(
+      const verdict = verdictWhenConnected(
         health({ buses: [bus({ state: "down" })] }),
         safety({ sync_violations: ["rotate"] }),
       );
       expect(verdict.label).toMatch(/rotate/);
+    });
+  });
+
+  /**
+   * **読めなかったヘルスは異常側へ倒す。**
+   *
+   * ここが素通しだった頃、`health.buses` を欠いた配信 1 通で `buses.filter(...)` が
+   * レンダー本体から投げていた。呼び出し元の 1 つ (`TabBar`) は `RouteErrorBoundary`
+   * の外にあるため、例外は React ツリーごとアンマウントし、**ヘッダーの緊急停止
+   * ボタンまで画面から消える**。`safety` の 1 欄欠落で全画面が白くなった事故と同型。
+   */
+  describe("欠けたヘルス配信", () => {
+    // 型は実行時に消えるので、欠落は「型に無い形」としてしか作れない
+    const drop = (key: keyof HealthSnapshot) => {
+      const broken: Record<string, unknown> = { ...health() };
+      delete broken[key];
+      return broken as unknown as HealthSnapshot;
+    };
+
+    it.each(["buses", "motors", "overall"] as const)("%s が欠けても投げず判定不能", (key) => {
+      const verdict = verdictWhenConnected(drop(key));
+
+      expect(verdict.tone).toBe("error");
+      expect(verdict.label).toBe("健全性 判定不能");
+      // どの欄が読めなかったかを出す。出さないと配信側を直す手掛かりが残らない
+      expect(verdict.detail).toContain(key);
+    });
+
+    it("未知の state が載っていても判定不能へ倒す", () => {
+      // 語彙の追加をサーバーだけが行うと、UI は知らない値を ok と同じ扱いにする
+      const broken = health();
+      (broken.buses as unknown[])[0] = { name: "can_m3508", state: "exploded" };
+      expect(verdictWhenConnected(broken).tone).toBe("error");
+    });
+
+    it("受信境界が MALFORMED を立てた配信も判定不能へ倒す", () => {
+      const verdict = verdictWhenConnected(MALFORMED);
+      expect(verdict.tone).toBe("error");
+      expect(verdict.label).toBe("健全性 判定不能");
+      // **欄の欠落とは言い分ける。** MALFORMED は配信そのものが読めなかった形で、
+      // 「どの欄が」を挙げられない。ここを欄欠落と同じ文言へ畳むと、この層だけを
+      // 消してももう一方の層 (`healthShapeErrors`) が拾って緑のまま通ってしまう
+      expect(verdict.detail).toMatch(/CAN もモータも異常を検知できない/);
+    });
+
+    it("欄の欠落は「どの欄が」を言う (MALFORMED と言い分ける)", () => {
+      const verdict = verdictWhenConnected(drop("buses"));
+      expect(verdict.detail).not.toMatch(/CAN もモータも異常を検知できない/);
+      expect(verdict.detail).toContain("buses");
+    });
+
+    it("未配信 (undefined) は判定不能にしない (ヘルス未取得)", () => {
+      // 届いていないことと、届いたものが読めないことは操縦者の次の一手が違う
+      expect(verdictWhenConnected(undefined).label).toBe("ヘルス未取得");
+    });
+  });
+
+  /**
+   * 切断中に手元にあるのは「切れた瞬間の値」でしかない。緑の「異常なし」を
+   * 出し続けると、操縦者はそれを今の機体の状態として読む。
+   * (`motorCheckStatus` が切断を判定へ織り込んでいるのと同じ扱い)
+   */
+  describe("切断中", () => {
+    it("正常な配信が手元にあっても判定不能へ倒す", () => {
+      const verdict = evaluateHealth(health(), safety(), false);
+      expect(verdict.tone).toBe("neutral");
+      expect(verdict.label).toMatch(/通信断/);
+    });
+
+    it("異常が残っていても凍った判定を出さない", () => {
+      // 「切れた瞬間の異常」を今の異常として出すのも同じ誤りなので、通信断で統一する
+      const verdict = evaluateHealth(health({ buses: [bus({ state: "down" })] }), safety(), false);
+      expect(verdict.label).toMatch(/通信断/);
+    });
+
+    it("なぜ判定できないかを添える", () => {
+      expect(evaluateHealth(health(), undefined, false).detail).toMatch(/切断/);
     });
   });
 });
@@ -215,7 +311,7 @@ describe("describeSafetyIssues", () => {
   });
 
   it("無励磁のモータがあると異常判定へ倒す", () => {
-    const verdict = evaluateHealth(health(), safety({ unenergized_motors: ["sub_lift"] }));
+    const verdict = verdictWhenConnected(health(), safety({ unenergized_motors: ["sub_lift"] }));
     expect(verdict.tone).toBe("error");
   });
 
@@ -335,8 +431,8 @@ describe("describeSafetyIssues", () => {
 
     it("判定不能は evaluateHealth でも error になる (平常へ倒さない)", () => {
       // ここが success へ倒れると、保護ループが死んでいても画面は「異常なし」になる
-      expect(evaluateHealth(health(), MALFORMED).tone).toBe("error");
-      expect(evaluateHealth(health(), drop("sync_violations")).tone).toBe("error");
+      expect(verdictWhenConnected(health(), MALFORMED).tone).toBe("error");
+      expect(verdictWhenConnected(health(), drop("sync_violations")).tone).toBe("error");
     });
 
     it("未配信 (undefined) は判定不能にしない", () => {

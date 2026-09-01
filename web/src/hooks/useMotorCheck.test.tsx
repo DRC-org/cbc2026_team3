@@ -28,6 +28,7 @@ const RUNNING: MotorCheckSnapshot = {
     { index: 2, label: "両ハンドを初期姿勢へ戻す", require_trigger: false },
   ],
   error: null,
+  last_error: null,
 };
 
 describe("useMotorCheck", () => {

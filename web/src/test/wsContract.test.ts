@@ -20,6 +20,7 @@ import type {
   PositionLoopState,
   RobotState,
   SafetyState,
+  SequenceFailure,
   SequenceStepInfo,
   ServerInfo,
   ServerMessage,
@@ -110,6 +111,19 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].safety).toEqual(sample.safety);
     // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
     expect(result.states[robot].manual).toEqual(sample.manual);
+  },
+
+  /**
+   * 失敗して止まった直後の配信。**この形が受信経路を通ることが本題** ——
+   * 通らないと、左右ずれで止まっても画面は「待機中」へ戻るだけになり、
+   * 3 層保護の第 1 層が操縦者から無音になる。
+   */
+  state_with_last_error: (result, sample) => {
+    const robot = sample.robot as string;
+    expect(result.states[robot].last_error).toEqual(sample.last_error);
+    // 理由だけでなく「どこで止まったか」まで残す (今の機体の姿勢に直結する)
+    expect(result.states[robot].last_error?.step.length).toBeGreaterThan(0);
+    expect(result.states[robot].last_error?.message.length).toBeGreaterThan(0);
   },
 
   server_info: (result, sample) => {
@@ -406,6 +420,13 @@ const MANUAL = fieldsOf<ManualState>({
   axes: "ui",
 });
 
+/** 失敗したステップと理由。`state` と `motor_check_state` の双方に載る */
+const SEQUENCE_FAILURE = fieldsOf<SequenceFailure>({
+  step_index: "ui",
+  step: "ui",
+  message: "ui",
+});
+
 const STEP = fieldsOf<SequenceStepInfo>({
   index: "ui",
   label: "ui",
@@ -442,6 +463,9 @@ const STATE_FIELDS: FieldSpec = {
     health: "ui",
     safety: "ui",
     manual: "ui",
+    // シーケンスが落ちた理由 (左右ずれ・到達しない等)。これが無い間、保護が
+    // 効いて止まっても画面は「待機中」へ戻るだけで、操縦者から無音だった
+    last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
   ...nest("motors.*", MOTOR_STATE),
@@ -457,6 +481,7 @@ const STATE_FIELDS: FieldSpec = {
   ...nest("manual", MANUAL),
   ...nest("manual.axes[]", MANUAL_AXIS),
   ...nest("manual.axes[].manual", MANUAL_RANGE),
+  ...nest("last_error", SEQUENCE_FAILURE),
 };
 
 const E_STOP_FIELDS = fieldsOf<WireOf<"e_stop_state">>({
@@ -527,6 +552,10 @@ const TUNING_CAPTURE_FIELDS: FieldSpec = {
 /** サンプル名 → そのメッセージが持ちうる全フィールド (ドット区切り、配列要素は `[]`) */
 const DECLARED: Record<string, FieldSpec> = {
   state: STATE_FIELDS,
+  // 失敗して止まった形。**null 側だけを契約に載せると、`last_error` の中身を
+  // UI が読めているかを誰も確かめない** (metrics が null の記録を別サンプルで
+  // 持っているのと同じ理由)
+  state_with_last_error: STATE_FIELDS,
 
   server_info: fieldsOf<Wire<ServerInfo>>({
     type: "parser",
@@ -578,8 +607,13 @@ const DECLARED: Record<string, FieldSpec> = {
       total_steps: "ui",
       steps: "ui",
       error: "ui",
+      // 失敗理由のもう 1 つの置き場所。`error` と合わせて 1 つへ畳んで出す
+      // (`lib/motorCheckStatus.ts`)。片方だけを読むと、サーバーが置き場所を
+      // 変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
+      last_error: "ui",
     }),
     ...nest("steps[]", STEP),
+    ...nest("last_error", SEQUENCE_FAILURE),
   },
 
   // 波形・指標・助言を 1 通で運ぶ。motor_check_state と同じく受信時に `capture` で

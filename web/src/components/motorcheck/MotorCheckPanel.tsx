@@ -39,7 +39,12 @@ export function MotorCheckPanel({ isOpen, onOpenChange }: MotorCheckPanelProps) 
 
   // 完了判定は `lib/motorCheckStatus.ts` の 1 箇所だけが持つ。ここで書き直すと
   // 同じ瞬間にパネルは「完了」、サマリーは「未実行」を出す状態が戻る
-  const { outcome, completedSteps: done, reasonLabel } = motorCheckStatus(state, connected);
+  const {
+    outcome,
+    completedSteps: done,
+    reasonLabel,
+    failureReason,
+  } = motorCheckStatus(state, connected);
   const total = state.total_steps;
   const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
 
@@ -100,13 +105,15 @@ export function MotorCheckPanel({ isOpen, onOpenChange }: MotorCheckPanelProps) 
         </div>
       ) : null}
 
-      {state.error ? (
+      {/* 失敗理由はサーバーが `error` / `last_error` の 2 欄で言ってくるので、
+          `motorCheckStatus` が畳んだ 1 つだけを出す (両方出すと同じ 1 行が 2 度並ぶ) */}
+      {failureReason ? (
         <div className="text-error">
           <p className="flex items-center gap-1.5 font-medium">
             <Icon as={TriangleAlert} />
             動作確認は完了していません
           </p>
-          <p className="mt-1">{state.error}</p>
+          <p className="mt-1">{failureReason}</p>
         </div>
       ) : null}
 

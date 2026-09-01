@@ -90,6 +90,7 @@ export function emptyMotorCheckState(): MotorCheckSnapshot {
     total_steps: 0,
     steps: [],
     error: null,
+    last_error: null,
   };
 }
 
@@ -153,7 +154,12 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
       return { ...state, matchState: message.matchState };
 
     case "e_stop_state":
-      return { ...state, eStopActive: message.active, eStopReason: message.reason };
+      // **同値なら参照ごと据え置く。** 緊急停止中はこの 1 通が 20Hz で再配信され続け、
+      // 毎回新しい state を返すと停止中ずっと全消費者が描き直される
+      // (`e_stop_local` が既に同じガードを持っている)
+      return state.eStopActive === message.active && state.eStopReason === message.reason
+        ? state
+        : { ...state, eStopActive: message.active, eStopReason: message.reason };
 
     case "command_rejected":
       return {

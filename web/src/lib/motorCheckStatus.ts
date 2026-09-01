@@ -29,6 +29,14 @@ export interface MotorCheckStatus {
    * それ以外の可否はサーバーの `blocked_reason` が正で、UI は導出し直さない。
    */
   reasonLabel: string | null;
+  /**
+   * 直近の失敗理由 (表示 1 行)。無ければ null。
+   *
+   * サーバーは `error` (表示用の文) と `last_error` (どのステップで失敗したか) の
+   * 2 欄で同じ失敗を言うので、**表示はここ 1 つに畳む**
+   * (両方を出すと同じ失敗が画面に 2 度並ぶ)。
+   */
+  failureReason: string | null;
 }
 
 /** 完走判定。ステップ数 0 は「未読込」であって完了ではない */
@@ -38,15 +46,20 @@ function isComplete(state: MotorCheckSnapshot): boolean {
 
 export function motorCheckStatus(state: MotorCheckSnapshot, connected: boolean): MotorCheckStatus {
   const reasonLabel = connected ? state.blocked_reason : "切断中のため不可";
+  // どちらの欄で届いても「完了していない」を意味する。片方だけを見ると、
+  // サーバーが理由の置き場所を変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
+  // (動作確認が失敗しても画面が黙る、という元の壊れ方そのもの)。
+  // `error` はステップ名まで含んだ表示 1 行なので、あれば優先する
+  const failureReason = state.error ?? state.last_error?.message ?? null;
 
   if (state.running) {
-    return { outcome: "running", completedSteps: state.step_index, reasonLabel };
+    return { outcome: "running", completedSteps: state.step_index, reasonLabel, failureReason };
   }
-  if (state.error) {
-    return { outcome: "failed", completedSteps: state.step_index, reasonLabel };
+  if (failureReason) {
+    return { outcome: "failed", completedSteps: state.step_index, reasonLabel, failureReason };
   }
   if (isComplete(state)) {
-    return { outcome: "done", completedSteps: state.total_steps, reasonLabel };
+    return { outcome: "done", completedSteps: state.total_steps, reasonLabel, failureReason };
   }
-  return { outcome: "idle", completedSteps: 0, reasonLabel };
+  return { outcome: "idle", completedSteps: 0, reasonLabel, failureReason };
 }

@@ -5,12 +5,13 @@ import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { describeSafetyIssues, evaluateHealth } from "@/lib/healthVerdict";
-import type { SafetyPayload, TempThresholds } from "@/lib/healthVerdict";
-import type { HealthSnapshot, MotorState } from "@/lib/protocol";
+import { describeSafetyIssues, evaluateHealth, readableHealth } from "@/lib/healthVerdict";
+import type { HealthPayload, SafetyPayload, TempThresholds } from "@/lib/healthVerdict";
+import type { MotorState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
-  health: HealthSnapshot | undefined;
+  /** 受信境界を通っていない props 経路が残るので、読めなかった配信も受ける */
+  health: HealthPayload | undefined;
   motors: Record<string, MotorState>;
   /** 安全機構 (同期ずれラッチ・保護ループの生死)。未受信でも表示は成立する */
   safety?: SafetyPayload;
@@ -20,6 +21,12 @@ interface SubsystemStatusProps {
    * 現在の一貫性が崩れ、テストのたびに Provider が要る。呼び出し元が渡す。
    */
   tempThresholds?: TempThresholds | null;
+  /**
+   * サーバーと繋がっているか。切断中の判定は切れた瞬間の値でしかないので、
+   * `evaluateHealth` が「通信断のため判定不能」へ倒す。**省略できない** ——
+   * 渡し忘れた画面だけが凍った緑の「異常なし」を出し続ける
+   */
+  connected: boolean;
   /** 準備中は中身を開いた状態から始める（配線確認が目的のフェーズなので） */
   defaultOpen?: boolean;
   /**
@@ -70,11 +77,14 @@ export function SubsystemStatus({
   health,
   motors,
   safety,
+  connected,
   tempThresholds = null,
   defaultOpen = false,
   showVerdict = true,
 }: SubsystemStatusProps) {
-  const verdict = evaluateHealth(health, safety);
+  const verdict = evaluateHealth(health, safety, connected);
+  // 内訳を並べる部品は「読めなかった」を表現できない。判定 (上) だけがそれを担う
+  const readable = readableHealth(health);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
   // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
@@ -83,7 +93,7 @@ export function SubsystemStatus({
   const forcedOpen = verdict.tone === "error" || verdict.tone === "warning";
   const open = !showVerdict || forcedOpen || manualOpen;
 
-  const busCount = health?.buses.length ?? 0;
+  const busCount = readable?.buses.length ?? 0;
   const motorCount = Object.keys(motors).length;
 
   return (
@@ -117,10 +127,10 @@ export function SubsystemStatus({
             </p>
           ) : null}
           <SafetyIssues safety={safety} />
-          <HealthIndicator health={health} />
+          <HealthIndicator health={readable} />
           <MotorSummary
             motors={motors}
-            healthMotors={health?.motors}
+            healthMotors={readable?.motors}
             tempThresholds={tempThresholds}
           />
         </div>

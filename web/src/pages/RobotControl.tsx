@@ -1,9 +1,15 @@
+import { TriangleAlert } from "lucide-react";
+import { useState } from "react";
+
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
+import { Button } from "@/components/ui/Button";
+import { Icon } from "@/components/ui/Icon";
+import { Modal } from "@/components/ui/Modal";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
@@ -11,8 +17,9 @@ import { useHotkeys } from "@/hooks/useHotkeys";
 import { cx } from "@/lib/cx";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
+import { MALFORMED } from "@/lib/protocol";
 import type { ManualState, OperationMode } from "@/lib/protocol";
-import { sequenceKind } from "@/lib/sequenceStatus";
+import { isRestartFromTop, sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
   robotKey: string;
@@ -22,21 +29,37 @@ interface RobotControlProps {
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
   const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
-  const { send } = useRobotCommands();
+  const { send, sendOrReport } = useRobotCommands();
   const state = states[robotKey];
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
 
-  const handleTrigger = () => send({ type: "trigger", robot: robotKey });
+  // **主操作は戻り値を捨てない。** 切断中の `send` は false を返して黙るので、
+  // 捨てると「押したのにボタンは有効なまま・機体は動かない・トーストも出ない」になる。
+  // 試合中に最も多く押す NEXT を含む全操作がその形だった
+  const handleTrigger = () => sendOrReport({ type: "trigger", robot: robotKey }, "トリガー");
   const handleJump = (stepIndex: number) =>
-    send({ type: "sequence_jump", robot: robotKey, step_index: stepIndex });
-  const handleStop = () => send({ type: "sequence_stop", robot: robotKey });
-  const handleStart = () => send({ type: "sequence_start", robot: robotKey });
+    sendOrReport(
+      { type: "sequence_jump", robot: robotKey, step_index: stepIndex },
+      "ステップジャンプ",
+    );
+  const handleStop = () => sendOrReport({ type: "sequence_stop", robot: robotKey }, "通常停止");
+  const handleStart = () =>
+    sendOrReport({ type: "sequence_start", robot: robotKey }, "シーケンス開始");
   const handleMode = (mode: OperationMode) =>
-    send({ type: "set_operation_mode", robot: robotKey, mode });
+    sendOrReport({ type: "set_operation_mode", robot: robotKey, mode }, "操作モードの切り替え");
 
   // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
   const inMatch = isDuringMatch(matchState.phase);
   const setupPhase = isSetupPhase(matchState.phase);
-  const blockedLabel = matchState.phase === "finished" ? "試合終了" : "準備中";
+  const blockedLabel =
+    matchState.phase === "finished"
+      ? "試合終了"
+      : matchState.phase === MALFORMED
+        ? "フェーズ不明"
+        : "準備中";
+  // 可否の正はサーバーだが、切断中は届かないので画面側でしか分からない。
+  // 塞がずに押させると「押したのに何も起きない」だけが操縦者に残る
+  const sequenceBlockedReason = connected ? null : "切断中のため送信できません";
 
   // 実行状態はサーバー配信の running が唯一の根拠。step_index からの推測をしない
   const kind = state ? sequenceKind(state) : null;
@@ -60,6 +83,25 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       ? "緊急停止中は手動操縦できません"
       : null;
 
+  /**
+   * START が「先頭へ戻して全工程を走り直す」意味になっているか。
+   *
+   * `sequence_stop` は `step_index` を保持したまま降りるので、画面は中断位置を
+   * 出したまま START を差し出す。そこで押すと中断姿勢のまま先頭の動作が走る ——
+   * `sequence_jump` (同じ「任意ステップから再開」) が確認を挟むのに、より危険な
+   * こちらだけが素通しだった。**Space も同じ経路を通す** (キー 1 打で全工程が
+   * 走り出す方が、ボタンより危ない)。
+   */
+  const needsRestartConfirm = state ? isRestartFromTop(state) : false;
+  const requestStart = () => {
+    if (needsRestartConfirm) setRestartConfirmOpen(true);
+    else handleStart();
+  };
+  const confirmRestart = () => {
+    setRestartConfirmOpen(false);
+    handleStart();
+  };
+
   // Space に主操作を集約する。ルーターは表示中のタブしか描画しないので、
   // 表示中のロボットにだけ届く。トリガー待ちなら NEXT、待機中なら START に解決する
   // 手動モード中は無効化する。誤爆した Space が sequence_start になると、
@@ -69,7 +111,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       " ": () => {
         if (!inMatch || !state || inManual) return;
         if (kind === "waiting_trigger") handleTrigger();
-        else if (kind === "idle") handleStart();
+        else if (kind === "idle") requestStart();
       },
     },
     inMatch && !inManual,
@@ -114,6 +156,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         health={state.health}
         motors={state.motors}
         safety={state.safety}
+        connected={connected}
         tempThresholds={tempThresholdsOf(serverInfo)}
         defaultOpen={open}
       />
@@ -175,7 +218,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               state={state}
               inMatch={inMatch}
               blockedLabel={blockedLabel}
-              onStart={handleStart}
+              blockedReason={sequenceBlockedReason}
+              onStart={requestStart}
               onStop={handleStop}
               onTrigger={handleTrigger}
             />
@@ -186,7 +230,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               bodyClassName="p-0"
               actions={
                 <span className="text-[0.85em] text-base-content/60">
-                  {inMatch ? "クリックで再開" : "試合中のみ操作可"}
+                  {sequenceBlockedReason ?? (inMatch ? "クリックで再開" : "試合中のみ操作可")}
                 </span>
               }
             >
@@ -195,7 +239,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 stepIndex={state.step_index}
                 waitingTrigger={state.waiting_trigger}
                 onJump={handleJump}
-                disabled={!inMatch}
+                disabled={!inMatch || sequenceBlockedReason !== null}
               />
             </Panel>
           </div>
@@ -210,6 +254,37 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : "self-start")}
         </div>
       </div>
+
+      {/* 中断位置から押した START の確認。**モーダルの中身は「押すと何が起きるか」**
+          を書く場所で、ここでは「先頭へ戻る」ことと「中断姿勢のまま先頭の動作が走る」
+          ことがそれに当たる。**途中から再開したいときの導線もここで示す** —
+          示さないと、操縦者は他に手が無いと思って全工程のやり直しを選ぶ */}
+      <Modal
+        open={restartConfirmOpen}
+        onClose={() => setRestartConfirmOpen(false)}
+        tone="danger"
+        title="先頭から再開"
+        footer={
+          <>
+            <Button onClick={() => setRestartConfirmOpen(false)}>キャンセル</Button>
+            <Button tone="warn" onClick={confirmRestart}>
+              先頭から実行
+            </Button>
+          </>
+        }
+      >
+        <p>
+          ステップ {state.step_index + 1} で停止しています。
+          <span className="font-medium">ステップ 1 へ戻って全工程を走り直します。</span>
+        </p>
+        <p className="mt-2 text-base-content/70">
+          中断した位置から続けるときは、ステップ一覧から再開するステップを選んでください。
+        </p>
+        <p className="mt-2 flex items-center gap-1.5 text-warning">
+          <Icon as={TriangleAlert} />
+          現在の姿勢のまま先頭の動作が走ります。物理状態が安全であることを必ず確認してください。
+        </p>
+      </Modal>
     </Page>
   );
 }

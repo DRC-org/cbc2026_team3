@@ -34,6 +34,23 @@ export function sequenceKind(state: Progress): SequenceKind {
   return "idle";
 }
 
+/**
+ * START が「先頭へ戻して全工程を走り直す」意味になる状態か。
+ *
+ * `sequence_stop` は `step_index` を保持したままシーケンスを降ろすので、画面は
+ * 「8/13・現在ステップ○○・待機中」を出したままになる。そこで押す START (と
+ * Space 1 打) はステップ 0 へ戻り、**中断姿勢のまま先頭の動作が走る**。
+ * 同じ「任意ステップから再開」である `sequence_jump` は確認モーダルを挟むのに、
+ * より危険なこちらだけが素通しだった。
+ *
+ * 判定をここに置くのは、**ボタンの文言 (`ActionPanel`) と確認の要否
+ * (`RobotControl` の Space / onStart) が必ず同じ条件で動く**ようにするため。
+ * 片方だけに書くと「文言は『先頭から再開』なのに Space は確認なしで走る」が作れる。
+ */
+export function isRestartFromTop(state: Progress): boolean {
+  return sequenceKind(state) === "idle" && state.step_index > 0;
+}
+
 /** 進捗の算出に要るぶんだけ。ステップ表そのものが要るのは `current` のため */
 type ProgressWithSteps = Progress & Pick<RobotState, "steps">;
 

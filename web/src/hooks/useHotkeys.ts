@@ -23,7 +23,20 @@ export function isHotkeyBlocked(event: KeyboardEvent): boolean {
 }
 
 /**
+ * 押されたキーに対応する登録名。修飾キー併用は `Shift+` を前置する。
+ *
+ * **Shift 併用と単打を別物として引く。** 誤爆すると機体が可動端まで走るような
+ * 操作 (`Shift+Home` / `Shift+End`) を単打と同じ名前で引くと、修飾キーを付ける
+ * 意味そのものが消える。逆に単打の登録が Shift 押下時に発火しないのも意図どおりで、
+ * 「少しでも曖昧な状況では発火させない」という `isHotkeyBlocked` と同じ方針。
+ */
+function hotkeyNameOf(event: KeyboardEvent): string {
+  return event.shiftKey ? `Shift+${event.key}` : event.key;
+}
+
+/**
  * window 単位のキーバインドを登録する。キーは KeyboardEvent.key（スペースは " "）。
+ * 修飾キー併用は `Shift+Home` の形で書く。
  *
  * ハンドラが見つかった場合は preventDefault する。直前にクリックしたボタンへ
  * フォーカスが残っていても Space が「そのボタンの再実行」にならず、常に
@@ -47,7 +60,7 @@ export function useHotkeys(map: HotkeyMap, enabled = true): void {
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (modalOpenRef.current || isHotkeyBlocked(event)) return;
-      const handler = mapRef.current[event.key];
+      const handler = mapRef.current[hotkeyNameOf(event)];
       if (!handler) return;
       event.preventDefault();
       handler();

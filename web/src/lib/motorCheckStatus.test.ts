@@ -13,6 +13,7 @@ function snapshot(over: Partial<MotorCheckSnapshot> = {}): MotorCheckSnapshot {
     total_steps: 3,
     steps: [],
     error: null,
+    last_error: null,
     ...over,
   };
 }
@@ -54,6 +55,40 @@ describe("motorCheckStatus", () => {
 
   it("ステップ数 0 は未読込であって完了ではない", () => {
     expect(motorCheckStatus(snapshot({ total_steps: 0 }), true).outcome).toBe("idle");
+  });
+
+  /**
+   * サーバーは同じ失敗を `error` (表示 1 行) と `last_error` (どのステップで
+   * 失敗したか) の 2 欄で言う。片方だけを読むと、置き場所が変わった瞬間に失敗が
+   * 「未実行」と同じ表示へ落ちる —— 動作確認が失敗しても画面が黙る、という
+   * 元の壊れ方そのものになる。
+   */
+  describe("失敗理由の畳み込み", () => {
+    const failure = { step_index: 2, step: "メインハンド y 軸", message: "偏差 3.1 > 許容 2.0" };
+
+    it("error が無くても last_error だけで失敗と読む", () => {
+      const status = motorCheckStatus(snapshot({ step_index: 3, last_error: failure }), true);
+
+      expect(status.outcome).toBe("failed");
+      expect(status.failureReason).toBe("偏差 3.1 > 許容 2.0");
+    });
+
+    it("両方来たら error を優先する (ステップ名まで含んだ表示 1 行のため)", () => {
+      const status = motorCheckStatus(
+        snapshot({
+          step_index: 3,
+          error: "ステップ 'X' で失敗しました: 偏差",
+          last_error: failure,
+        }),
+        true,
+      );
+
+      expect(status.failureReason).toBe("ステップ 'X' で失敗しました: 偏差");
+    });
+
+    it("平常時は null (出すものが無い)", () => {
+      expect(motorCheckStatus(snapshot(), true).failureReason).toBeNull();
+    });
   });
 
   describe("起動可否", () => {

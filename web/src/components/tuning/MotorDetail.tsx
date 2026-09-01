@@ -1,4 +1,4 @@
-import { CircleHelp, Link2, Send } from "lucide-react";
+import { CircleHelp, Link2, Send, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -114,6 +114,8 @@ export function MotorDetail({
   getValue,
   setValue,
   onSend,
+  edited,
+  onDiscard,
   blockedReason,
   tempThresholds,
 }: {
@@ -121,6 +123,10 @@ export function MotorDetail({
   getValue: (entry: TuningEntry, param: PidKey) => number;
   setValue: (entry: TuningEntry, param: PidKey, val: number) => void;
   onSend: () => void;
+  /** 未送信の編集を抱えているか。抱えている間だけ機体の実ゲインを併記する */
+  edited: boolean;
+  /** 編集を捨てて配信値へ戻す */
+  onDiscard: () => void;
   /** 送信できない理由。null なら送れる */
   blockedReason: string | null;
   /** 温度の色分けに使うしきい値。正はサーバーの config (`server_info` で届く) */
@@ -187,6 +193,26 @@ export function MotorDetail({
           );
         })}
       </div>
+
+      {/* **編集中は機体で実際に効いているゲインを併記する。** 入力欄は編集値を
+          出すので、書き換えた瞬間から現在値が画面のどこにも無くなる。かつて
+          「元の値へ戻す術が config を読むしかない」状態で全ゲイン 0 上書きの
+          事故が起きており、編集後にそれが再現していた。**平常時 (未編集) は
+          出さない** — 同じ 3 値が入力欄のすぐ上に並ぶだけになる */}
+      {edited ? (
+        <div className="mt-3 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-base-content/70">
+            適用中:{" "}
+            <span className="font-mono tabular-nums">
+              {PID_PARAMS.map(({ key, label }) => `${label} ${display(pid[key])}`).join(" / ")}
+            </span>
+          </span>
+          <Button onClick={onDiscard} aria-label={`${motor} の編集を破棄して現在値へ戻す`}>
+            <Icon as={Undo2} />
+            現在値へ戻す
+          </Button>
+        </div>
+      ) : null}
 
       {/* 送信は明示操作のみ。スライダーを触っただけでは set_param を飛ばさない。
           値の編集自体は塞がない (試合中に次の値を用意しておけるほうが実務に合う) */}

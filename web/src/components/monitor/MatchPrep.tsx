@@ -83,8 +83,12 @@ export const MatchPrep = memo(function MatchPrep({
   const checklist = unreadable ? undefined : checklists[CHECKLIST_ROLE];
   const items = checklist?.items ?? [];
 
-  // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)
-  const locked = !isSetupPhase(phase);
+  // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)。
+  // **切断中も塞ぐ。** チェック状態はサーバー配信が唯一の出どころなので、
+  // 押せるままにすると「チェックが付かないだけで理由も出ない」になる —— 同じ画面の
+  // コート選択は既に connected を見ており、StartGate も「通信 — サーバーに
+  // 接続できていません」を出している。ここだけが黙っていた
+  const locked = !isSetupPhase(phase) || !connected;
   // コート変更はサーバーも試合中だけ拒む (PHASES_OUTSIDE_MATCH)
   const courtLocked = isDuringMatch(phase) || !connected;
 

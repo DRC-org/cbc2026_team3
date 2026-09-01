@@ -152,6 +152,39 @@ describe("robotReducer", () => {
     expect(state.healthEvents.map((e) => e.target)).toEqual(["m7", "m6", "m5", "m4", "m3"]);
   });
 
+  /**
+   * 緊急停止中、サーバーは `e_stop_state` を 20Hz で再配信し続ける。値が同じでも
+   * 新しい state を返すと、停止しているあいだずっと全消費者 (チェックリスト・タブ・
+   * トースト) が余分に描き直される。`e_stop_local` は最初からこのガードを持っていた。
+   */
+  describe("同値の再配信", () => {
+    it("同じ e_stop_state を受けても参照を作り直さない", () => {
+      const first = receive(INITIAL_ROBOT_UI_STATE, { type: "e_stop_state", active: true });
+      const second = receive(first, { type: "e_stop_state", active: true });
+
+      expect(second).toBe(first);
+    });
+
+    it("理由が変われば取り込む (最初の理由を優先する仕組みはサーバー側)", () => {
+      const first = receive(INITIAL_ROBOT_UI_STATE, { type: "e_stop_state", active: true });
+      const second = receive(first, {
+        type: "e_stop_state",
+        active: true,
+        reason: "同期ずれを検知しました (y_axis)",
+      });
+
+      expect(second).not.toBe(first);
+      expect(second.eStopReason).toBe("同期ずれを検知しました (y_axis)");
+    });
+
+    it("解除は当然取り込む", () => {
+      const first = receive(INITIAL_ROBOT_UI_STATE, { type: "e_stop_state", active: true });
+      const second = receive(first, { type: "e_stop_state", active: false });
+
+      expect(second.eStopActive).toBe(false);
+    });
+  });
+
   describe("ステップ応答の保持", () => {
     // この describe の外で使う場面が無いので、内側に置いたままにする
     // oxlint-disable-next-line unicorn/consistent-function-scoping
