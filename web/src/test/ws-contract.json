@@ -45,11 +45,13 @@
           "items": [
             {
               "checked": false,
+              "group": null,
               "id": "y_axis_sync",
               "label": "Y 軸の左右が揃っている"
             },
             {
               "checked": false,
+              "group": null,
               "id": "sub_arm_home",
               "label": "補助アームが初期位置"
             }

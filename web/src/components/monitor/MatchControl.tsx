@@ -1,22 +1,12 @@
-import { Info, RotateCcw, Square } from "lucide-react";
+import { RotateCcw, Square } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
-import { Panel } from "@/components/ui/Panel";
-import { Section } from "@/components/ui/Section";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { useArmedPress } from "@/hooks/useArmedPress";
-import { cx } from "@/lib/cx";
 import { COURT_LABEL, isDuringMatch } from "@/lib/phase";
-import type { MatchCourt } from "@/lib/protocol";
-
-/** 選択中のコートは面で塗る。誤ったコート設定は試合をそのまま落とすため */
-const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }[] = [
-  { value: "red", label: "赤コート", selectedClass: "border-error bg-error text-error-content" },
-  { value: "blue", label: "青コート", selectedClass: "border-info bg-info text-info-content" },
-];
 
 /**
  * リセットの確認ダイアログ。
@@ -25,7 +15,7 @@ const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }
  * 押すそれらと違い、リセットは試合と試合の間にしか押さず、しかも指差喚呼を
  * やり直させる破壊的な操作なので、カーソルを運ぶ数百 ms より読ませることを取る。
  *
- * 呼び出し元は MatchSettings と MatchStrip に散るため、文言はここに一本化する。
+ * 呼び出し元は MatchPrep（準備中）と Dashboard に散るため、文言はここに一本化する。
  */
 export function useResetConfirm() {
   const { matchReset } = useRobotCommands();
@@ -65,52 +55,6 @@ export function useResetConfirm() {
 }
 
 /**
- * コートの設定。セッティングタイム専用。
- *
- * 試合ごとに一度だけ触る設定なので、開始可否 (StartGate) より下に置く。
- * ただし誤ったコート設定のまま試合に入る事故は致命的なので、畳まずに常時見せる。
- */
-export function MatchSettings({ onRequestReset }: { onRequestReset: () => void }) {
-  const { matchState, connected } = useRobotStatus();
-  const { setCourt } = useRobotCommands();
-  const { court, phase } = matchState;
-  const settingsLocked = isDuringMatch(phase) || !connected;
-
-  return (
-    <Panel legend="試合設定">
-      <Section title="COURT">
-        <div className="join">
-          {COURT_OPTIONS.map((opt) => (
-            <Button
-              key={opt.value}
-              className={cx("join-item", court === opt.value && opt.selectedClass)}
-              disabled={settingsLocked}
-              onClick={() => setCourt(opt.value)}
-              aria-pressed={court === opt.value}
-            >
-              {opt.label}
-            </Button>
-          ))}
-        </div>
-      </Section>
-
-      <Section>
-        <p className="flex items-center gap-1.5 text-base-content/70">
-          <Icon as={Info} />
-          変更するとチェックリストは全てリセットされます
-        </p>
-        <div className="mt-1 flex flex-wrap items-center gap-2">
-          <Button onClick={onRequestReset} aria-label="セッティングタイムへ戻す">
-            <Icon as={RotateCcw} />
-            チェックリストをリセット
-          </Button>
-        </div>
-      </Section>
-    </Panel>
-  );
-}
-
-/**
  * 試合中・試合終了後の 1 行帯。
  *
  * 試合中は画面をロボット状態に明け渡すが、`match_finish` は MATCH フェーズ限定なので
@@ -122,7 +66,7 @@ export function MatchSettings({ onRequestReset }: { onRequestReset: () => void }
  * **セッティングへ戻る操作に確認は挟まない。** 試合が終わった後の唯一の進み先であり、
  * 失うのは消化済みのチェックリストだけで、機体は動かない。次の試合の準備を
  * 1 クリック遅らせる理由がない（同じ `match_reset` でも、準備中に押す
- * MatchSettings のリセットはまだ使っていない指差喚呼を捨てるので確認を残してある）。
+ * MatchPrep 最下段のリセットはまだ使っていない指差喚呼を捨てるので確認を残してある）。
  */
 export function MatchStrip() {
   const { matchState } = useRobotStatus();

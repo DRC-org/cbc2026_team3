@@ -418,7 +418,13 @@ const MATCH_TIMER = fieldsOf<MatchTimer>({
   duration_ms: "ui",
 });
 
-const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({ id: "ui", label: "ui", checked: "ui" });
+const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({
+  id: "ui",
+  label: "ui",
+  checked: "ui",
+  // 項目をどのコントロールの隣に置くか (lib/checklistGroups.ts が対応表を持つ)
+  group: "ui",
+});
 const CHECKLIST_STATE = fieldsOf<ChecklistState>({ items: "ui", completed: "ui" });
 
 const STATE_FIELDS: FieldSpec = {

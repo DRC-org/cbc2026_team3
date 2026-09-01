@@ -221,8 +221,8 @@ class TestSerialization:
         checklist = payload["checklists"][ROLE_PRE_MATCH]
         assert checklist["completed"] is False
         assert checklist["items"] == [
-            {"id": "power", "label": "電源投入確認", "checked": False},
-            {"id": "home", "label": "メインハンド初期位置確認", "checked": True},
+            {"id": "power", "label": "電源投入確認", "checked": False, "group": None},
+            {"id": "home", "label": "メインハンド初期位置確認", "checked": True, "group": None},
         ]
 
 
@@ -377,3 +377,36 @@ class TestLoadDefinitions:
             }
         )
         assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="ok", label="有効")]
+
+    def test_load_carries_group(self) -> None:
+        """group は「その項目をどのコントロールの隣に置くか」の唯一の宣言。
+
+        サーバーは語彙を検証せず素通しする。未知の名前を弾くと、UI が知らない
+        group を書いた瞬間に起動しなくなり、区分を持たないベンチ設定 6 セットも
+        通らない。項目が画面から消えないことは UI 側 (未知は「その他」へ描く) が守る。
+        """
+        from lib.match_state import load_checklist_definitions
+
+        defs = load_checklist_definitions(
+            {
+                "checklists": {
+                    ROLE_PRE_MATCH: [
+                        {"id": "court", "label": "コート一致", "group": "court"},
+                        {"id": "power", "label": "電源投入"},
+                    ],
+                }
+            }
+        )
+        assert defs[ROLE_PRE_MATCH] == [
+            ChecklistItem(id="court", label="コート一致", group="court"),
+            ChecklistItem(id="power", label="電源投入", group=None),
+        ]
+
+    def test_group_survives_rebuild_and_reaches_the_wire(self) -> None:
+        """定義の複製 (_rebuild_checklists) で group を落とすと、画面では全項目が
+        「その他」へ落ちる。症状は「配置だけが効かない」で、config からもログからも
+        理由が読めない。"""
+        state = MatchState({ROLE_PRE_MATCH: [ChecklistItem(id="court", label="C", group="court")]})
+
+        items = state.to_dict()["checklists"][ROLE_PRE_MATCH]["items"]
+        assert items == [{"id": "court", "label": "C", "checked": False, "group": "court"}]

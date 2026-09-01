@@ -49,13 +49,13 @@ vi.mock("@/components/shell/TabBar", async () => {
 });
 
 /**
- * 指差喚呼リストは memo で切り離してある (試合状態しか読まない)。差し替えも memo に
+ * 準備の面 (MatchPrep) は memo で切り離してある (試合状態しか読まない)。差し替えも memo に
  * しておくと、切り離しを壊すのは「親が毎描画 新しい props を渡す」場合だけになる。
  */
-vi.mock("@/components/monitor/Checklist", async () => {
+vi.mock("@/components/monitor/MatchPrep", async () => {
   const { memo } = await import("react");
   return {
-    Checklist: memo(function Checklist() {
+    MatchPrep: memo(function MatchPrep() {
       counts.checklist += 1;
       return null;
     }),

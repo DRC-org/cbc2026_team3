@@ -19,7 +19,7 @@ describe("ルーティング", () => {
 
   it("各タブのパスが対応する画面を描画する", async () => {
     renderAt("/monitor");
-    expect(await screen.findByText("試合設定")).toBeInTheDocument();
+    expect(await screen.findByText("試合準備")).toBeInTheDocument();
 
     renderAt("/main-hand");
     expect(await screen.findByText("メインハンド")).toBeInTheDocument();

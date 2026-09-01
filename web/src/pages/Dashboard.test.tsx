@@ -95,7 +95,7 @@ describe("Dashboard (セッティングタイム)", () => {
       states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
     });
 
-    expect(screen.getByText("セッティング指差喚呼")).toBeInTheDocument();
+    expect(screen.getByText("試合準備")).toBeInTheDocument();
     // チェックは操作できる形で出ていること (表示だけでは点検を進められない)
     expect(screen.getByLabelText("非常停止解除")).toBeEnabled();
   });
@@ -135,7 +135,7 @@ describe("Dashboard (セッティングタイム)", () => {
     });
 
     expect(screen.getAllByText("can_m3508")).toHaveLength(2);
-    expect(screen.getByText("試合設定")).toBeInTheDocument();
+    expect(screen.getByText(/機体状態/)).toBeInTheDocument();
   });
 });
 

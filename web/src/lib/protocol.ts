@@ -189,6 +189,15 @@ export interface ChecklistItem {
   id: string;
   label: string;
   checked: boolean;
+  /**
+   * 画面上でどのコントロールの隣に置くかの宣言 (`config/checklist.yaml` の `group`)。
+   *
+   * **未指定・未知の名前でも項目を落としてはならない。** 語彙と配置の対応は
+   * `lib/checklistGroups.ts` が持ち、そこに無い group は「その他」として描く。
+   * ここで既知の値へ型を狭めないのは、UI の型が config の語彙より遅れたときに
+   * 「配信には居るのに画面から消えた項目」を作らないため。
+   */
+  group?: string | null;
 }
 
 export interface ChecklistState {
@@ -206,7 +215,11 @@ function isChecklistState(value: unknown): boolean {
         isObject(item) &&
         typeof item.id === "string" &&
         typeof item.label === "string" &&
-        typeof item.checked === "boolean",
+        typeof item.checked === "boolean" &&
+        // group は省略可 (区分を持たない設定がある)。ただし文字列以外が載っていたら
+        // 配信そのものを疑う。黙って「その他」へ倒すと、配置だけが効かない状態が
+        // 画面のどこにも現れない
+        (item.group === undefined || item.group === null || typeof item.group === "string"),
     )
   );
 }

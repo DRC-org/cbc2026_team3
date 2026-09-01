@@ -381,8 +381,14 @@ homing:
 
 ## ④ 指差喚呼 — 人が見る
 
-`config/checklist.yaml` のロールは `pre_match` 1 つで、Monitor の設定面に置く。
+`config/checklist.yaml` のロールは `pre_match` 1 つで、Monitor の準備の面（`MatchPrep`）に置く。
 全項目の完了が試合開始のゲート（`can_start_match`）。
+
+項目は 1 本のリストではなく、**それを確かめる操作の隣**に並ぶ。置き場所は同じ yaml の
+`group` が宣言し（`preflight` / `court` / `motor_check` / `final`）、コート選択ボタンの直下に
+`court` が、動作確認の起動ボタンの直下に②を埋める `motor_check` の項目が出る。
+`group` を書かなかった項目・UI が知らない `group` の項目は「その他」として必ず描かれる
+（ベンチ設定 `config/bench/*` は `group` を持たない）。
 
 ②が自動判定できないものを、ここが埋める:
 
