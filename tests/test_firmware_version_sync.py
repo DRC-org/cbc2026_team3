@@ -47,7 +47,7 @@ def _firmware_version(project: str) -> int:
 
 
 def _generic_motors() -> list[tuple[pathlib.Path, str, dict]]:
-    """同梱の全 yaml (bench の 6 セットを含む) から generic のモータ定義を拾う。"""
+    """同梱の全 yaml (bench の 7 セットを含む) から generic のモータ定義を拾う。"""
     found: list[tuple[pathlib.Path, str, dict]] = []
     for path in sorted(_CONFIG_DIR.rglob("*.yaml")):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))

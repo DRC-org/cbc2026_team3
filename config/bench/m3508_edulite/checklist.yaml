@@ -1,0 +1,64 @@
+# M3508 + EDULITE 05 同時ベンチ (機構未装着) の確認項目。
+#
+# 本番の config/checklist.yaml は gripper / wall / conveyor / origin_sensor など
+# このベンチに存在しない機構の確認を求めるため、そのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくても機体は動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
+#
+# **単体ベンチの項目をただ足し合わせたものではない。** 単体で 1 種ずつ確かめた後に
+# 通す想定なので、CAN ID の書き換えや配線そのものの確認は最小限にし、
+# **2 種を同時に載せたときにしか現れないこと** —— バスの取り違え・軸をまたいだ
+# 混信・2 本の受信ループが同時に回ること —— に重心を置いてある。
+#
+# id は単体ベンチと重複しないよう軸ごとの接頭辞を付けてある (同じ id が 2 つ並ぶと、
+# 片方をチェックしたつもりでもう片方が残る)。
+
+checklists:
+  pre_match:
+    # --- 通電前 --------------------------------------------------------------
+    - id: bench_buses_up
+      label: can_m3508 と can_edulite の**両方**が up していること確認 (ip -br link show)。片方でも欠けると [Errno 19] で起動しない
+    - id: bench_bus_serial
+      label: config/can_buses.yaml の serial が実機 2 本と一致していること確認。**入れ替わると C620 に EDULITE 用の指令が飛ぶ**
+    - id: bench_free
+      label: 4 台とも出力軸に何も繋がっておらず、回っても互いに干渉しないこと確認
+    - id: edulite_power
+      label: EDULITE ドライバに電源が入り、動力線・エンコーダ線が確実に嵌まっていること確認
+    - id: edulite_can_id
+      label: EDULITE 2 台の can_id が 1 / 2 に分かれていること確認 (**出荷値は 2 台とも 0x7F**。scripts/edulite_set_id.py scan で 2 個の ID が 1 通ずつ応答すること)
+
+    # --- 配線・フィードバック ------------------------------------------------
+    - id: m3508_wiring
+      label: candump can_m3508 で 0x201 / 0x202 の 2 本が届いていること確認
+    - id: edulite_wiring
+      label: candump can_edulite で拡張 ID 0x02____01 / 0x02____02 の 2 本が届いていること確認
+    - id: edulite_host_id
+      label: EDULITE のフィードバックの宛先 (拡張 ID 下位 8bit) が host_id 0xFD であること確認 (ずれると動くのに STALE のまま)
+    - id: bench_feedback_all
+      label: y_axis_r / y_axis_l / rotate_r / rotate_l の 4 台すべてのフィードバックが届き、STALE が 1 つも無いこと確認
+
+    # --- 動作 (ここからがこのセットの本題) ------------------------------------
+    - id: y_axis_move
+      label: 手動操縦で y_axis に half を送り、M3508 2 台が逆向きに回ること目視確認。同じ向きなら scale の符号が片方落ちている
+    - id: rotate_move
+      label: 手動操縦で rotate に half を送り、EDULITE 2 台が逆向きに回ること目視確認
+    - id: bench_no_crosstalk
+      label: y_axis を動かしている間 rotate が 1 度も動かないこと、逆も同様であること確認。**動いたらバスの割り当てが入れ替わっている**
+    - id: bench_both_axes
+      label: y_axis と rotate を続けて動かし、その間どちらの軸もフィードバックが途切れないこと確認 (受信ループ 2 本が同時に回っていること)
+    - id: bench_sync_pairs
+      label: 両軸を full まで動かした状態で、y_axis / rotate とも左右の位置が揃っていること確認 (ずれるなら本番の許容差では止まる)
+    - id: bench_return_home
+      label: 両軸に home を送り、どちらも電源投入位置へ戻ること確認
+
+    # --- 停止 ----------------------------------------------------------------
+    - id: bench_estop
+      label: 両軸を動かしている最中に非常停止を押し、**4 台ともその場で止まる**こと確認
+    - id: m3508_estop_current
+      label: 非常停止中は M3508 の電流指令が 0 に落ちていること確認 (保持トルクは残らない)
+    - id: edulite_estop_detach
+      label: 非常停止中は EDULITE が無励磁になり手で回せること確認 (**保持トルクは残らない**)
+    - id: bench_estop_release
+      label: 非常停止を解除しても 4 台とも勝手に動き出さないこと確認 (解除時の保持目標は解除時点の実測角)
