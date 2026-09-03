@@ -615,7 +615,16 @@ class TestShippedConfigs:
 
 
 #: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
-_BENCH_DIRS = ("m3508", "edulite", "m3508_edulite", "dc", "servo", "solenoid", "dm3520")
+_BENCH_DIRS = (
+    "m3508",
+    "edulite",
+    "m3508_edulite",
+    "dc",
+    "servo",
+    "solenoid",
+    "dm3520",
+    "y_axis_tuning",
+)
 
 
 class TestShippedBenchConfigs:

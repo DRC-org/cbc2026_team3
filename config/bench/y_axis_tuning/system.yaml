@@ -1,0 +1,26 @@
+# y_axis の実機チューニング用の共通設定。
+#
+# **既存の config/bench/m3508/ とは前提が逆である。** あちらは「機構未装着」で、
+# 左右がずれても壊れないので sync_tolerance を 10mm まで緩めてある。こちらは
+# **機構が組み上がって左右が直結した状態**を対象にするので、保護値は本番と同じに
+# 保ち、代わりに出力上限だけを下げる (詰めている最中は行き過ぎも振動も起きる)。
+#
+# can_buses を m3508_bus だけに絞る理由は config/bench/m3508/system.yaml と同じ ——
+# main.py は can_buses に並んだバスを**すべて** open するので、繋いでいない CANable
+# のぶんが [Errno 19] で起動そのものを失敗させる。
+#
+# 使い方:
+#   uv run python main.py --system config/bench/y_axis_tuning/system.yaml \
+#       --config config/bench/y_axis_tuning/main_hand.yaml \
+#       --checklist config/bench/y_axis_tuning/checklist.yaml
+#
+# 左右のずれは別プロセスで観測する (送信しないので同時に走らせてよい):
+#   uv run python scripts/sync_probe.py \
+#       --config config/bench/y_axis_tuning/main_hand.yaml \
+#       --system config/bench/y_axis_tuning/system.yaml
+
+can_buses:
+  m3508_bus: can_m3508
+
+# health / match / tuning は書かない。既定値は lib/config_schema.py にしかないので、
+# 書き写すとベンチと本番で判定基準がずれる余地が生まれる (bench 各セットと同じ方針)。

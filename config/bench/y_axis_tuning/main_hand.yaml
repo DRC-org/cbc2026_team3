@@ -1,0 +1,42 @@
+robot_name: main_hand
+
+# y_axis の実機チューニング用。M3508 2 台だけを載せる。
+#
+# **機構が組み上がった状態を対象にする。** 位置定数と保護値は
+# config/bench/y_axis_tuning/main_hand_positions.yaml を参照。
+#
+# --- output_limit を本番より下げてある ------------------------------------
+# 本番は 2000 counts (≒2.4A)。チューニング中は kp を上げて振動を出したり、
+# 可動範囲の端へ寄せたりするので、突き当たったときの押し付け力をそのぶん
+# 小さくしておく。800 counts ≒ 0.98A で、出力軸トルクは約 0.3N・m
+# (ピニオン基準円 20mm で 15N ほど)。
+# **詰め終わったら本番 config の値へ戻すこと。** ここを上げたまま本番へ
+# 持っていくと、この config だけが「弱い機体」として残る。
+#
+# 左右で PID を必ず同じ値に保つ。追従特性が違うと押し合いになる
+# (UI から変える限り set_pid_gain がグループ全員へ展開するので自動で守られる)。
+
+motors:
+  y_axis_r:
+    driver: m3508
+    bus: m3508_bus
+    can_id: 1
+    pid:
+      kp: 2.0              # 本番と同じ出発点。ここから実機で上げていく
+      ki: 0.0
+      kd: 0.0
+      integral_limit: null # ki を入れるときに出力寄与の上限 [counts] を必ず設定する
+      dead_band: 1.0       # モータ軸 [deg]。y_axis の scale で約 0.018mm 相当
+      output_limit: 800    # 上のコメント参照。本番 (2000) より低い
+
+  y_axis_l:
+    driver: m3508
+    bus: m3508_bus
+    can_id: 2
+    pid:
+      kp: 2.0
+      ki: 0.0
+      kd: 0.0
+      integral_limit: null
+      dead_band: 1.0
+      output_limit: 800

@@ -1,0 +1,18 @@
+# y_axis 実機チューニングの確認項目。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくても軸は動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+# 通電前に確認したいことを操縦者の画面へ並べておくために置いている。
+
+checklists:
+  pre_match:
+    - id: tuning_bus_up
+      label: can_m3508 が up していること確認 (ip -br link show)
+    - id: tuning_feedback
+      label: candump で 0x201 / 0x202 の 2 本が届いていること確認
+    - id: tuning_clear
+      label: y_axis の可動範囲に人・工具・配線が無いこと確認
+    - id: tuning_stroke_known
+      label: 可動範囲 (manual の min/max) が実測ストロークの内側であること確認
+    - id: tuning_estop
+      label: 非常停止に手が届き、押すと電流が 0 に落ちること確認
