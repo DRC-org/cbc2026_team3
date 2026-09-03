@@ -43,6 +43,7 @@
 | `positions.rotate` | **0〜8deg**（home 0 / pick 8 / place 0） | **干渉角が未確認。** エンドエフェクタが他の機構に当たらない範囲を先に決める |
 | `axes.rotate.manual` | **−5.0〜15.0deg** | 同上。干渉しない範囲へ詰める |
 | `axes.rotate.homing` | **コメントアウト（有効化できない）** | スイッチ未装着に加え、**載せるスロットが無く**（サーボ基板 #0 は SV0〜SV4 の 5 本とも使用中）、**EDULITE には原点確定の経路そのものが無い**。詳細は `docs/checks_and_health.md` の「零点確定」節 |
+| `motors.rotate_r` / `.rotate_l` の `set_zero_on_start`（`config/main_hand.yaml`） | **`true`（暫定）** | 上の `homing` が入るまでの代替。**EDULITE の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として出る**（実機で 175.879deg → 起動直後に全体緊急停止）。起動のたびに `set_zero` を送って電源投入時の姿勢を原点にしている。**機構が付いたら「起動前に rotate を収納姿勢へ戻す」ことが人の責任になる。** `homing` を有効化する日に 2 台とも `false` へ戻すこと（左右で値が食い違うと揃うどころか偏差が残る） |
 | `positions.gripper` / `wall_f` / `wall_r`（サーボ 3 軸） | **0〜6deg**（gripper 0/5、wall 0/3/6） | **実可動域が未確認。** 上の `kProvisionalLimits` と必ずセットで決める（ファームが黙ってクランプするので、超えた値は「送ったのに途中で止まる」としか現れない） |
 | `positions.wall_r.closed` / `.open` | 3.0 / 6.0 | **試合シーケンスから未参照**（後壁を使う手順が未確定）。動作確認は 3 状態とも駆動する |
 | `positions.conveyor.run` | **0.3 duty** | ファーム側 `max_duty` でクランプされる。ここだけ上げても効かない |
