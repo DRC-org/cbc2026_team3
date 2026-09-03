@@ -38,9 +38,9 @@ motors:
     bus: m3508_bus
     can_id: 1
     pid:
-      kp: 2.0
-      ki: 0.0
-      kd: 0.0
+      kp: 10.00
+      ki: 3.57
+      kd: 1.35
       integral_limit: null
       dead_band: 1.0
       # 本番の 2000counts (≒2.4A) に対しベンチは半分に絞る。機構が付いていない M3508 は
@@ -54,9 +54,9 @@ motors:
     bus: m3508_bus
     can_id: 2
     pid:
-      kp: 2.0
-      ki: 0.0
-      kd: 0.0
+      kp: 10.00
+      ki: 3.57
+      kd: 1.35
       integral_limit: null
       dead_band: 1.0
       output_limit: 1000
