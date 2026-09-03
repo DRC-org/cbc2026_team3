@@ -185,3 +185,120 @@ class TestReset:
         _blocked(guard, positions)
         guard.reset()
         assert _blocked(guard, positions) == frozenset({"y_axis"})
+
+
+def _pair_with_gain(
+    name: str = "y_axis",
+    *,
+    sync_kp: float = 2.0,
+    sync_limit: float = 1e9,
+    tolerance: float = 2.0,
+) -> SyncGroup:
+    """同期補正を有効にした逆回転ペア。"""
+    return SyncGroup(
+        name=name,
+        members=(MotorSpec(f"{name}_r", 1.0, 0.0), MotorSpec(f"{name}_l", -1.0, 0.0)),
+        tolerance=tolerance,
+        sync_kp=sync_kp,
+        sync_limit=sync_limit,
+    )
+
+
+class TestCorrections:
+    """この周期で補正を出してよいグループの選別。
+
+    換算そのものは SyncGroup が持つので、ここが固定するのは「出さない条件」だけ。
+    """
+
+    def test_corrections_are_produced_for_a_configured_group(self) -> None:
+        guard = SyncGuard()
+        guard.add(_pair_with_gain())
+
+        corrections = guard.corrections(
+            position_of={"y_axis_r": 3.0, "y_axis_l": -1.0}.__getitem__,
+            skip_groups=frozenset(),
+        )
+
+        # 人間の単位で r=3.0 / l=1.0 (平均 2.0)
+        assert corrections["y_axis_r"] == pytest.approx(2.0 * (2.0 - 3.0) * 1.0)
+        assert corrections["y_axis_l"] == pytest.approx(2.0 * (2.0 - 1.0) * -1.0)
+
+    def test_no_corrections_without_gain(self) -> None:
+        """sync_kp を設定していないグループには 1 台も出さない。"""
+        guard = SyncGuard()
+        guard.add(_pair())
+
+        corrections = guard.corrections(
+            position_of={"y_axis_r": 3.0, "y_axis_l": -1.0}.__getitem__,
+            skip_groups=frozenset(),
+        )
+
+        assert corrections == {}
+
+    def test_skipped_group_gets_no_corrections(self) -> None:
+        """電流 0 に落とすグループへ補正だけが生き残ってはならない。
+
+        力を抜いたはずの周期で左右が押し合う。
+        """
+        guard = SyncGuard()
+        guard.add(_pair_with_gain())
+
+        corrections = guard.corrections(
+            position_of={"y_axis_r": 3.0, "y_axis_l": -1.0}.__getitem__,
+            skip_groups=frozenset({"y_axis"}),
+        )
+
+        assert corrections == {}
+
+    def test_position_is_not_read_for_skipped_group(self) -> None:
+        """途絶したグループでは現在位置を読みに行かない。
+
+        未受信のモータの 0.0 を現在位置として平均へ混ぜると、実在しない補正が出る。
+        """
+        guard = SyncGuard()
+        guard.add(_pair_with_gain())
+        read: list[str] = []
+
+        def position_of(name: str) -> float:
+            read.append(name)
+            return 0.0
+
+        guard.corrections(position_of=position_of, skip_groups=frozenset({"y_axis"}))
+
+        assert read == []
+
+    def test_only_the_requested_group_is_skipped(self) -> None:
+        """グループが複数あるとき、止めた側だけが落ちる。"""
+        guard = SyncGuard()
+        guard.add(_pair_with_gain("y_axis"))
+        guard.add(_pair_with_gain("rotate"))
+        positions = {
+            "y_axis_r": 3.0,
+            "y_axis_l": -1.0,
+            "rotate_r": 3.0,
+            "rotate_l": -1.0,
+        }
+
+        corrections = guard.corrections(
+            position_of=positions.__getitem__,
+            skip_groups=frozenset({"y_axis"}),
+        )
+
+        assert set(corrections) == {"rotate_r", "rotate_l"}
+
+    def test_latched_violation_can_be_skipped_by_the_caller(self) -> None:
+        """偏差ラッチ中のグループは blocked() 経由で skip_groups に入る。
+
+        ラッチは「人間がずれを直すまで力を抜く」宣言なので、補正で自動的に
+        揃えにいってはならない (人間が原因に気付かないまま駆動が続く)。
+        """
+        guard = SyncGuard()
+        guard.add(_pair_with_gain(tolerance=2.0))
+        positions = {"y_axis_r": 5.0, "y_axis_l": 0.0}
+
+        blocked = _blocked(guard, positions)
+        assert "y_axis" in blocked
+
+        corrections = guard.corrections(position_of=positions.__getitem__, skip_groups=blocked)
+
+        assert corrections == {}

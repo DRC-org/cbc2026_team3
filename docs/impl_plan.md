@@ -887,6 +887,14 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 狙ったテストが落ちることを確認してから元に戻す**。落ちなければ、そのテストは
 「実装が正しいこと」ではなく「実装が存在すること」しか見ていない。
 
+**変異を入れる前と戻した後の両方で `__pycache__` を捨てること。** 変異と復元では
+ファイルサイズがほとんど変わらないため、mtime の解像度によっては Python が
+「変わっていない」と判断して古い `.pyc` を使い続ける。**戻したのに変異したままの
+コードが走り**、直したはずのテストが落ち続ける（逆に、変異を入れたのに元のコードが
+走って「検出できた」と誤読することもある —— こちらは網の検証そのものを無意味にする）。
+実際に同期補正の変異テストでこれを踏み、「実装は正しいのにテストだけ落ちる」状態に
+時間を使った。
+
 **特に危ないのは「private 依存を公開 API へ張り替える」作業**で、
 張り替えたつもりで守備範囲が狭まっていることがある。実例:
 
@@ -918,6 +926,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 不変条件 | 変異の例 | 落ちるべきテスト |
 |---|---|---|
 | 左右ペア軸の偏差検出 | `SyncGroup.violation()` の境界比較（`deviation <= tolerance`）を `<` へ、`scale` の符号を落とす | `test_axis_sync.py` / `test_sync_guard.py` / `test_sync_monitor.py` / `test_position_loop.py` |
+| 左右ペア軸の同期補正が軸を押し動かさない | `SyncGroup.corrections()` で `scale` の符号を落とす（**補正が逆符号になり、ずれを縮めないまま軸ごと動く**）/ 平均でなく先頭モータを基準にする（補正の総和が 0 でなくなる）/ `sync_limit` のクランプを外す | `test_axis_sync.py::TestSyncCorrections` / `test_position_loop.py::TestSyncCorrection` |
+| 電流 0 の周期に補正だけが生き残らない | `SyncGuard.corrections()` の `skip_groups` 判定を落とす（力を抜いたはずの周期で押し合う）/ `M3508PositionLoop._open_loop_groups()` を空集合へ（**片方が開ループの間、もう 1 台にだけ補正が乗る**） | `test_sync_guard.py::TestCorrections` / `test_position_loop.py::TestSyncCorrection` |
+| 飽和判定とアンチワインドアップは補正込み | `PIDController.update` の `feedforward` をクランプ前ではなく後に足す形へ戻す（**補正込みでは動けないのに積分だけが育ち、拘束が外れた瞬間に暴走する**） | `test_pid.py::TestFeedforward` |
 | フィードバック途絶で電流 0 | 途絶判定の分岐を落とし、古い実測値で PID を回す | `test_feedback_freshness.py` / `test_position_loop.py` |
 | 緊急停止インターロック | `CommandSpec` の緊急停止時可否を反転する | `test_commands.py` / `test_server_e_stop.py` |
 | 緊急停止中は動作確認が 1 台も駆動しない | `MotorCheckController` の `_abort_requested` を `_run()` の駆動直前で見ない / `deny_reason()` の緊急停止条件を外す / `activate_e_stop` の abort を `running` 条件に戻す | `test_server_motor_check.py` |
@@ -3078,6 +3089,80 @@ EDULITE は位置ループがドライバ内蔵で PC 側に常駐ループが�
   タスクは GC 回避のため `main()` の集合で強参照を保持する。
 - ライフサイクルは位置制御ループと同じ。CAN 受信ループ起動後に `start()`、`finally` で
   必ず `await stop()`（監視だけ生き残ると停止済みモータのフィードバックで誤発報する）。
+
+### 同期補正（クロスカップリング）
+
+`sync_tolerance` を見る 3 層はいずれも**ずれたら止める**側で、位置制御はモータごとに
+独立した PID である。左右で負荷や摩擦が違えば追従差は原理的に残り、**それを縮める力は
+どこからも働かない**。同期補正はその欠けている経路で、各モータの電流指令に
+「グループ平均へ引き戻す向き」の項を加える。
+
+実機で最初に問題になったのは「駆動中に開き、止まると戻る」という形の過渡差である。
+`move_to` はステップ目標を投げるので移動開始直後の偏差が全ストロークぶん立ち、
+現行値（`kp` 2.0 / `output_limit` 2000）では 15mm の移動が 1650counts と上限の 82% に
+達する。左右の負荷差が乗ると片方だけが先に飽和し、飽和した側は開ループになって
+加速が頭打ちになる。目標に近づけば両者とも線形領域へ戻るので差は縮む。
+
+#### 設計判断
+
+**補正は PID の外で足さず `PIDController.update(feedforward=...)` へ渡す。**
+外で足して後からクランプすると、クランプが二重になるだけでなく、PID 内部の
+conditional integration が補正を知らないまま積分を進める。「補正込みでは飽和していて
+機構が動けないのに、積分だけが育ち続ける」状態は、拘束が外れた瞬間の暴走として現れる。
+`ki=0` の現状では無害だが、実機調整で `ki` を入れた瞬間に成立する。
+
+**`sync_kp` の単位は位置制御 PID の `kp` と同じにする。** 人間の単位で平均からのずれを
+出し、`scale` で各メンバの指令単位へ戻してから掛ける。この順序により「`kp` の何割」で
+調整でき、実機での詰め方を手順として書ける（`docs/mechanism_handoff.md` §3-1）。
+単位が違うと、そもそも出発点を文章で指示できない。
+
+**逆回転ペアでは 2 台の補正が同符号・同じ大きさになる。** 人間の単位では `e_l = -e_r`
+だが `scale_l = -scale_r` なので、指令単位へ戻すと `e_l * scale_l == e_r * scale_r` が
+成立する。つまりこの補正は軸としての運動を一切動かさず、左右の内部のずれだけを縮める。
+**この方式が成立する根拠そのもの**なので、`scale` の符号を落としてはならない
+（落とすと補正が逆符号になり、ずれを縮めないまま軸ごと押し動かす力になる）。
+平均を基準にするのは 3 台以上でも同じ式で成立させるためで、補正の総和は定義から 0 になる。
+
+**`sync_limit` は `sync_kp` とセットで必須にする。** 押し合いは左右直結の機構をその場で
+壊すので、`homing.search_distance` と同格の唯一の歯止めとして扱う。ゲインだけを書けると、
+打ち間違えた 1 桁がそのまま押し合いのフルスケールになる。検証は `SyncGroup.__post_init__`
+（yaml を経由しない組み立ても塞ぐ）と `lib/sequence/positions.py`（軸名で説明する）の二重。
+
+**補正を出さない条件は 3 つで、いずれもグループ単位で判断する。** 電流 0 に落とす周期
+（途絶・偏差ラッチ・緊急停止）と、**全員が位置制御中でない周期**。後者をモータ単位で
+「自分が位置制御中なら補正する」と書いてはならない —— ホーミングの押し当て
+（`ControlMode.CURRENT`）で片方だけがモードを変えた瞬間、もう 1 台にだけ補正が乗り、
+左右で打ち消し合うはずの力が軸ごと押し動かす力になる。判断は
+`M3508PositionLoop._open_loop_groups()` が 1 箇所で持つ。
+
+#### 採らなかった案
+
+**マスタ・スレーブ方式**（片方を他方の実測に追従させる）は採らない。追従側が常に
+1 周期遅れる構造であるうえ、異常時に「どちらが正か」が非対称になる。既存の 3 層は
+すべてグループを対称に扱っているので、ここだけ非対称にすると保護の前提が崩れる。
+
+**目標のスルーレート制限（ramp）は入れていない。** 飽和が主因なら根治はこちらだが、
+`move_to` の `timeout_s`（`y_axis` は 4.0s）と直接干渉し、シーケンス全体の所要時間が
+変わる。判断材料は**移動中に飽和フラグが立つかどうか**で、テレメトリに既に出ている。
+立つなら `output_limit` を上げるか ramp を入れる、というのが次の一手になる。
+
+#### config
+
+`config/<robot>_positions.yaml` の `axes.<軸>.sync_kp` / `sync_limit`。既定は
+`sync_kp: 0.0` で、**同梱の config はすべて補正なし**（従来と 1 counts も変わらない）。
+機構が付いて左右が直結するまで有効にしない —— 直結していない 2 台に入れると、
+揃うべき前提が無いまま別々の負荷で回り続ける。`config/bench/m3508/` も同じ理由で 0.0。
+
+#### 変異テストの対応
+
+| 入れた不具合 | 落ちるテスト |
+|---|---|
+| `corrections` で `scale` の符号を落とす | `test_reversed_pair_gets_identical_corrections` |
+| 平均でなく先頭モータを基準にする | `test_corrections_sum_to_zero_with_three_members` |
+| `sync_limit` のクランプを外す | `test_correction_is_clamped_by_sync_limit` |
+| 電流 0 のグループにも補正を出す | `test_skipped_group_gets_no_corrections` / `test_no_correction_after_deviation_latch` |
+| 補正をクランプ前でなく後に足す | `test_output_is_clamped_including_feedforward` / `test_integral_does_not_grow_while_saturated_by_feedforward` |
+| モード判定をやめモータ単位で補正する | `test_no_correction_when_a_member_is_open_loop` |
 
 ---
 

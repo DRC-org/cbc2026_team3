@@ -129,6 +129,10 @@ class M3508PositionLoop(PausablePeriodicTask):
       - フィードバックが ``feedback_timeout_ms`` を超えて途絶したら電流 0 + PID リセット
       - ``add_sync_group`` で束ねた左右直結ペアは、途絶・偏差超過をペア単位で扱う
         (1 台でも異常ならペア全員を電流 0。片側だけ生かすと機構が壊れる)
+      - 同じペアには ``sync_kp`` を設定すると同期補正が加わる。**ずれを検出して
+        止める 3 層とは向きが逆で、こちらは駆動中にずれを縮める唯一の経路**
+        (独立した 2 つの PID には左右を揃える力がどこにも無い)。出さない周期は
+        電流 0 の周期と全員が位置制御中でない周期
       - 周期処理で例外が出てもループは継続する (指令が止まると C620 の挙動次第で危険)
       - ``pause()`` 中は 1 通も送らない (アクチュエータ動作確認と 0x200 を奪い合わないため)
     """
@@ -476,6 +480,10 @@ class M3508PositionLoop(PausablePeriodicTask):
         wall_now = self._freshness.now()
         stale = {name: self._freshness.is_stale(name, wall_now) for name in self._axes}
         blocked = self._sync.blocked(stale=stale, position_of=self._feedback_position)
+        corrections = self._sync.corrections(
+            position_of=self._feedback_position,
+            skip_groups=blocked | self._open_loop_groups(),
+        )
 
         currents = [0, 0, 0, 0]
         for name, axis in self._axes.items():
@@ -485,6 +493,7 @@ class M3508PositionLoop(PausablePeriodicTask):
                 dt,
                 stale=stale[name],
                 blocked=self._sync.group_of(name) in blocked,
+                correction=corrections.get(name, 0.0),
                 now=self._last_tick,
             )
 
@@ -556,16 +565,54 @@ class M3508PositionLoop(PausablePeriodicTask):
     def _feedback_position(self, name: str) -> float:
         return self._axes[name].driver.feedback_position()
 
+    def _open_loop_groups(self) -> frozenset[str]:
+        """全員が位置制御中とは言えない同期グループ名。
+
+        同期補正は「左右が同じ目標を追っている」ことを前提に、平均へ引き戻す向きの
+        操作量を作る。前提が崩れる周期では 1 台にも出さない。
+
+        判定を**グループ単位**にするのが要点で、モータ単位で「自分が位置制御中なら
+        補正する」と書いてはならない。ホーミングの押し当て (``ControlMode.CURRENT``)
+        のように片方だけがモードを変えた瞬間、その 1 台にだけ補正が乗り、左右で
+        打ち消し合うはずの力が軸ごと押し動かす力になる。
+
+        開ループ指令 (機構端への押し当て) に補正を混ぜないのも同じ判断で、
+        押し当ての力が「指令した電流」と一致しなくなる。
+        """
+        return frozenset(
+            group
+            for group in self._sync.group_names
+            if not all(
+                self._axes[member].mode is ControlMode.POSITION
+                and self._axes[member].target is not None
+                for member in self._sync.members_of(group)
+            )
+        )
+
     def _compute_current(
-        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool, now: float
+        self,
+        name: str,
+        axis: _Axis,
+        dt: float,
+        *,
+        stale: bool,
+        blocked: bool,
+        correction: float,
+        now: float,
     ) -> int:
         """1 モータ分の電流指令を決め、同じ周期の観測を記録する。
 
         制御と記録を同じ場所に置くのは、「どの周期の指令がどの実測に対応するか」を
         ずらさないため。別の場所で後から集め直すと、途絶や緊急停止で PID を reset
         した後の値を読むことになり、飽和していた周期が飽和していないと記録される。
+
+        同期補正も同じ理由でここを通す。補正込みの出力で飽和を判定し、補正込みの
+        出力を記録に載せる (補正を外側で足すと、飽和していた周期が飽和していないと
+        記録され、波形と実際の指令が食い違う)。
         """
-        output, closed_loop = self._control_output(name, axis, dt, stale=stale, blocked=blocked)
+        output, closed_loop = self._control_output(
+            name, axis, dt, stale=stale, blocked=blocked, correction=correction
+        )
 
         axis.last_output = output
         axis.saturated = closed_loop and self._is_saturated(axis, output)
@@ -596,9 +643,15 @@ class M3508PositionLoop(PausablePeriodicTask):
             self._pending_captures.append(capture)
 
     def _control_output(
-        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool
+        self, name: str, axis: _Axis, dt: float, *, stale: bool, blocked: bool, correction: float
     ) -> tuple[float, bool]:
-        """電流指令 [counts] と、それが位置制御ループの出力かどうかを返す。"""
+        """電流指令 [counts] と、それが位置制御ループの出力かどうかを返す。
+
+        ``correction`` は左右直結ペアを揃えるための同期補正 [counts]。PID の外で
+        足さずに ``feedforward`` として渡すのは、外で足すとクランプが二重になるうえ、
+        PID 側のアンチワインドアップが補正を知らないまま積分を進めるため
+        (詳細は ``PIDController.update``)。
+        """
         if axis.target is None or axis.mode is None:
             return 0.0, False
 
@@ -627,7 +680,15 @@ class M3508PositionLoop(PausablePeriodicTask):
         if axis.mode is ControlMode.CURRENT:
             return float(axis.target), False
 
-        return axis.pid.update(axis.target, axis.driver.multi_turn_position, dt), True
+        return (
+            axis.pid.update(
+                axis.target,
+                axis.driver.multi_turn_position,
+                dt,
+                feedforward=correction,
+            ),
+            True,
+        )
 
     def _disable_all(self) -> None:
         for axis in self._axes.values():

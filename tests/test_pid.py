@@ -260,3 +260,73 @@ class TestDefaults:
         assert pid.kd == pytest.approx(0.0)
         assert pid.output_min == -math.inf
         assert pid.output_max == math.inf
+
+
+class TestFeedforward:
+    """偏差以外の根拠で加える操作量 (左右直結ペアの同期補正がこれを使う)。
+
+    **呼び出し側で足して後からクランプする実装との違いを固定する。** 外で足すと
+    クランプが二重になるだけでなく、下の conditional integration が補正を知らない
+    まま積分を進める。「補正込みでは飽和していて機構が動けないのに、積分だけが
+    育ち続ける」状態は、拘束が外れた瞬間の暴走として現れる。
+    """
+
+    def test_default_is_zero_and_changes_nothing(self) -> None:
+        """既定では従来と 1 counts も変わらない (既存の全構成がそのまま動く)。"""
+        plain = PIDController(kp=2.0)
+        explicit = PIDController(kp=2.0)
+
+        assert plain.update(setpoint=10.0, measurement=4.0, dt=0.01) == pytest.approx(
+            explicit.update(setpoint=10.0, measurement=4.0, dt=0.01, feedforward=0.0)
+        )
+
+    def test_feedforward_is_added_to_output(self) -> None:
+        pid = PIDController(kp=2.0)
+
+        assert pid.update(
+            setpoint=10.0, measurement=4.0, dt=0.01, feedforward=5.0
+        ) == pytest.approx(17.0)
+
+    def test_output_is_clamped_including_feedforward(self) -> None:
+        """補正込みで出力レンジに収まる。外で足すと上限を超えた指令が出る。"""
+        pid = PIDController(kp=2.0, output_min=-100.0, output_max=100.0)
+
+        output = pid.update(setpoint=10.0, measurement=0.0, dt=0.01, feedforward=500.0)
+
+        assert output == pytest.approx(100.0)
+
+    def test_feedforward_survives_dead_band(self) -> None:
+        """不感帯の中でも補正は残る。
+
+        不感帯は「自分が目標に十分近い」ことを言うだけで、左右が揃っているかとは
+        無関係である。ここで補正まで消すと、目標付近で静止した状態のずれを
+        縮める手段が無くなる。
+        """
+        pid = PIDController(kp=2.0, dead_band=5.0)
+
+        output = pid.update(setpoint=1.0, measurement=0.0, dt=0.01, feedforward=30.0)
+
+        assert output == pytest.approx(30.0)
+
+    def test_integral_does_not_grow_while_saturated_by_feedforward(self) -> None:
+        """補正だけで飽和している間は積分を進めない (アンチワインドアップが補正込み)。
+
+        補正を PID の外側で足す実装では、PID 自身は飽和していないと判断して積分を
+        育て続ける。ここが落ちる実装は、機構が動けない間に溜めた積分を拘束が
+        外れた瞬間に吐き出す。
+        """
+        pid = PIDController(kp=1.0, ki=1.0, output_min=-1000.0, output_max=1000.0)
+
+        for _ in range(5):
+            pid.update(setpoint=10.0, measurement=0.0, dt=0.01, feedforward=1000.0)
+
+        assert pid.integral == pytest.approx(0.0)
+
+    def test_integral_grows_without_saturation(self) -> None:
+        """対照: 飽和していなければ同じ条件で積分は育つ (上のテストの前提を固定)。"""
+        pid = PIDController(kp=1.0, ki=1.0, output_min=-1000.0, output_max=1000.0)
+
+        for _ in range(5):
+            pid.update(setpoint=10.0, measurement=0.0, dt=0.01, feedforward=0.0)
+
+        assert pid.integral > 0.0

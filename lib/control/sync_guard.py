@@ -3,8 +3,8 @@
 位置制御ループの中でこの判断とラッチを抱えていたが、電流フレームの合成
 (C620 の 0x200 に 4 モータ分を詰める) とは関心が違う。片方は「どの機構を守るか」、
 もう片方は「どうバスへ出すか」で、混ざっていると保護の条件を読むために送信の
-コードを読むことになる。ここは判断とラッチだけを持ち、電流を落とす行為そのものは
-呼び出し側 (``M3508PositionLoop``) に残す。
+コードを読むことになる。ここは判断とラッチ、および同期補正量の算出だけを持ち、
+電流を落とす行為も補正を指令へ足す行為も呼び出し側 (``M3508PositionLoop``) に残す。
 
 超過の境界そのものは ``SyncGroup.violation`` に一本化してある。この層に固有なのは
 「debounce しない」「ラッチする」「グループ単位で扱う」の 3 点で、いずれも
@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 
 from lib.axis_sync import SyncGroup
 
@@ -154,6 +154,32 @@ class SyncGuard:
             if self._check_deviation(group, position_of):
                 blocked.add(group.name)
         return frozenset(blocked)
+
+    def corrections(
+        self, *, position_of: PositionReader, skip_groups: Collection[str]
+    ) -> dict[str, float]:
+        """この周期で各モータへ加える同期補正量 (モータ名 → 指令単位の操作量)。
+
+        判定と換算そのものは ``SyncGroup.corrections`` が持つ。この層に固有なのは
+        「今この周期で出してよいグループはどれか」だけで、``skip_groups`` に挙がった
+        グループは 1 台も辞書に載せない。
+
+        ``skip_groups`` には少なくとも ``blocked()`` の返り値を渡すこと。あちらは
+        「電流 0 に落とす」判断なので、そこへ補正だけが生き残ると、力を抜いたはずの
+        周期で左右が押し合う。**途絶したグループでは ``position_of`` を呼ばない**のも
+        同じ経路で担保される (未受信の 0.0 を現在位置として平均へ混ぜない)。
+
+        Args:
+            position_of: モータ名 → 現在位置 (指令単位)
+            skip_groups: 補正を出さないグループ名
+        """
+        corrections: dict[str, float] = {}
+        for group in self._groups.values():
+            if group.name in skip_groups or group.sync_kp == 0.0:
+                continue
+            positions = {member.name: position_of(member.name) for member in group.members}
+            corrections.update(group.corrections(positions))
+        return corrections
 
     def _check_deviation(self, group: SyncGroup, position_of: PositionReader) -> bool:
         """グループの左右ずれを判定し、超過ならラッチして True を返す。
