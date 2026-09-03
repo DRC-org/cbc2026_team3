@@ -78,6 +78,37 @@ class SyncGroup:
     name: str
     members: tuple[MotorSpec, ...]
     tolerance: float
+    #: 同期補正の比例ゲイン。単位は位置制御 PID の ``kp`` と同じ (指令単位あたりの
+    #: 操作量) で、0.0 なら補正を一切出さない (従来どおり各モータが独立に動く)
+    sync_kp: float = 0.0
+    #: 補正項 1 つあたりの上限 (操作量の単位)。``sync_kp`` を入れるなら必須
+    sync_limit: float | None = None
+
+    def __post_init__(self) -> None:
+        """補正を入れるなら歯止めも必ず持たせる。
+
+        押し合いは左右直結の機構をその場で壊すので、``sync_limit`` は
+        ``homing.search_distance`` と同格の「唯一の無人の歯止め」である。
+        ゲインだけを書けてしまうと、打ち間違えた 1 桁がそのまま押し合いの
+        フルスケールになる。config 側 (``lib/sequence/positions.py``) も同じ対を
+        検証するが、こちらは yaml を経由せずに組み立てた場合も塞ぐ。
+
+        負のゲインは正帰還であり、ずれを縮めるどころか発散させる。
+        """
+        if self.sync_kp < 0.0:
+            raise ValueError(
+                f"同期グループ '{self.name}' の sync_kp が負です ({self.sync_kp}): "
+                "正帰還になりずれが発散します"
+            )
+        if self.sync_limit is not None and self.sync_limit < 0.0:
+            raise ValueError(
+                f"同期グループ '{self.name}' の sync_limit が負です ({self.sync_limit})"
+            )
+        if self.sync_kp != 0.0 and self.sync_limit is None:
+            raise ValueError(
+                f"同期グループ '{self.name}' に sync_kp があるのに sync_limit がありません "
+                "(押し合いの歯止めが無くなります)"
+            )
 
     def deviation(self, positions: Mapping[str, float]) -> float | None:
         """人間の単位へ逆換算した位置の max - min。比較対象が 2 個未満なら None。
@@ -107,3 +138,49 @@ class SyncGroup:
         if deviation is None or deviation <= self.tolerance:
             return None
         return deviation
+
+    def corrections(self, positions: Mapping[str, float]) -> dict[str, float]:
+        """各メンバへ加える同期補正量を、そのメンバの**指令単位**で返す。
+
+        3 層の保護 (``violation``) は「ずれたら止める」しかできない。位置制御は
+        モータごとに独立した PID なので、左右で負荷や摩擦が違えば過渡の追従差は
+        原理的に残り、縮める力はどこからも働かない。ここが返すのはその欠けている
+        力 —— 「グループ平均へ引き戻す向きの操作量」である。
+
+        人間の単位で平均からのずれを出し、``scale`` で各メンバの指令単位へ戻して
+        から ``sync_kp`` を掛ける。この順序により **``sync_kp`` は位置制御 PID の
+        ``kp`` と同じ単位**になり、「kp の何割」で調整できる (単位が違うと実機での
+        詰め方を手順として書けない)。
+
+        **逆回転ペアでは 2 台の補正が同符号・同じ大きさになる。** 人間の単位では
+        ``e_l = -e_r`` だが ``scale_l = -scale_r`` なので、指令単位へ戻すと
+        ``e_l * scale_l == e_r * scale_r`` が成立する。つまりこの補正は軸としての
+        運動を一切動かさず、左右の内部のずれだけを縮める。**この方式が成立する
+        根拠そのもの**なので、``scale`` の符号を落としてはならない (落とすと補正が
+        逆符号になり、軸ごと押し動かしながらずれは縮まらない)。
+
+        平均を基準にするのは 3 台以上でも同じ式で成立させるため。補正の総和は
+        定義から 0 になるので、メンバが増えても軸の運動に対して中立である。
+
+        1 台でも位置が欠けていれば空を返す。欠けたメンバを外して平均を取ると、
+        残った側だけが「ずれている」と判定されて実在しない補正が出る。
+        """
+        if self.sync_kp == 0.0:
+            return {}
+        values = {
+            member.name: member.to_value(positions[member.name])
+            for member in self.members
+            if member.name in positions
+        }
+        if len(values) != len(self.members) or not values:
+            return {}
+
+        mean = sum(values.values()) / len(values)
+        corrections: dict[str, float] = {}
+        for member in self.members:
+            command_error = (mean - values[member.name]) * member.scale
+            correction = self.sync_kp * command_error
+            if self.sync_limit is not None:
+                correction = max(-self.sync_limit, min(self.sync_limit, correction))
+            corrections[member.name] = correction
+        return corrections

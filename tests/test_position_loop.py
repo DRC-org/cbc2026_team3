@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import struct
+from collections.abc import Awaitable, Callable
 
 import can
 import pytest
@@ -402,12 +403,12 @@ class TestRunLifecycle:
         calls = 0
         original_update = broken.update
 
-        def flaky_update(setpoint: float, measurement: float, dt: float) -> float:
+        def flaky_update(setpoint: float, measurement: float, dt: float, **kwargs: float) -> float:
             nonlocal calls
             calls += 1
             if calls == 1:
                 raise RuntimeError("PID 内部エラー (テスト)")
-            return original_update(setpoint, measurement, dt)
+            return original_update(setpoint, measurement, dt, **kwargs)
 
         broken.update = flaky_update  # type: ignore[method-assign]
 
@@ -1114,3 +1115,188 @@ class TestSaturationReadout:
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
         await fx.tick()
         assert fx.manager.last_currents[0] == 1000
+
+
+def _pair_group_with_gain(
+    *, sync_kp: float, sync_limit: float = 1e9, tolerance: float = 10.0
+) -> SyncGroup:
+    """同期補正を有効にした lift / tilt のペア。
+
+    ``tolerance`` を既定より緩めてあるのは、補正そのものを見たいテストで偏差ラッチが
+    先に効いてしまわないようにするため (ラッチの側は専用のテストが見る)。
+    """
+    return SyncGroup(
+        name="y_axis",
+        members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("tilt", -1.0, 0.0)),
+        tolerance=tolerance,
+        sync_kp=sync_kp,
+        sync_limit=sync_limit,
+    )
+
+
+async def _skew_pair(fx: _Fixture) -> None:
+    """ペアに同じ目標を与えたうえで、lift だけ進んだ状態にする。
+
+    人間の単位で lift が tilt より進むので、補正は「lift を減速し tilt を加速する」
+    向きに出る (逆回転ペアなのでどちらも同じ符号の操作量になる)。
+    """
+    await _target_pair(fx, 10.0)
+    fx.feed("lift", 2.0)
+    fx.feed("tilt", 0.0)
+
+
+async def _skew_pair_open_loop(fx: _Fixture) -> None:
+    """lift は位置制御、tilt は開ループ電流指令 (ホーミングの押し当てと同じ状態)。"""
+    await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+    await fx.loop.set_target("tilt", ControlMode.CURRENT, -300.0)
+    fx.feed("lift", 2.0)
+    fx.feed("tilt", 0.0)
+
+
+async def _skew_pair_half_targeted(fx: _Fixture) -> None:
+    """lift にだけ目標がある状態。"""
+    await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+    fx.feed("lift", 2.0)
+    fx.feed("tilt", 0.0)
+
+
+async def _currents(
+    setup: Callable[[_Fixture], Awaitable[None]],
+    *,
+    group: SyncGroup | None = None,
+    estop: bool = False,
+) -> tuple[int, int, int, int]:
+    """同じ状況を「補正あり / なし」で作り分け、その周期の電流指令を返す。
+
+    補正量そのものの正しさは tests/test_axis_sync.py が厳密に見る。ここが見るのは
+    経路の結線 —— 補正が電流指令まで届くか、届かない条件で本当に届かないか —— なので、
+    基準 (``group=None``) との差で判定する。電流は整数 counts なので、実数の補正を
+    丸めた差には 1 counts のずれが乗りうる。
+    """
+    fx = _Fixture(kp=100.0)
+    if group is not None:
+        fx.loop.add_sync_group(group)
+    await setup(fx)
+    fx.estop = estop
+    await fx.tick()
+    return fx.manager.last_currents
+
+
+class TestSyncCorrection:
+    """左右直結ペアを揃える同期補正が、電流指令として実際に出ること。
+
+    ずれを検出して止める 3 層とは向きが逆で、**駆動中にずれを縮める唯一の経路**。
+    独立した 2 つの PID には左右を揃える力がどこにも無いので、ここが効かないと
+    追従差は原理的に残り続ける。
+    """
+
+    async def test_correction_shifts_both_currents_equally(self) -> None:
+        """進んだ側は減速し、遅れた側は加速する。**逆回転ペアではその量が等しい。**
+
+        量が等しいことは「補正が軸としての運動を動かさず、左右の内部のずれだけを
+        縮める」ことと同じ意味である。片方にしか乗らない実装や、符号を落とした
+        実装ではここが崩れる。
+        """
+        baseline = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
+        corrected = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=50.0))
+
+        shift_lift = corrected[0] - baseline[0]
+        shift_tilt = corrected[1] - baseline[1]
+
+        assert shift_lift < 0, "進んだ側は減速する"
+        assert shift_tilt < 0, "遅れた側は加速する (逆回転なので指令は負方向)"
+        assert shift_lift == pytest.approx(shift_tilt, abs=1)
+
+    async def test_no_correction_without_gain(self) -> None:
+        """既定 (sync_kp=0.0) ではグループを登録していないときと同じ電流になる。"""
+        with_group = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
+
+        assert with_group == await _currents(_skew_pair)
+
+    async def test_no_correction_when_aligned(self) -> None:
+        """揃っている機体には余計な電流を出さない。"""
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0))
+        await _target_pair(fx, 10.0)
+
+        await fx.tick()
+
+        assert fx.manager.last_currents == (1000, -1000, 0, 0)
+
+    async def test_no_correction_while_group_is_stale(self) -> None:
+        """途絶したグループには補正も出ない (電流 0 が優先)。
+
+        補正だけが生き残ると、力を抜いたはずの周期で押し合う。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0))
+        await _skew_pair(fx)
+        await fx.tick()
+        assert fx.manager.last_currents != (0, 0, 0, 0)
+
+        # tilt だけ新鮮に保ち、lift を途絶させる
+        fx.mono.advance(0.6)
+        fx.wall.advance(0.6)
+        fx.feed("tilt", 0.0)
+        await fx.loop.step()
+
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_no_correction_after_deviation_latch(self) -> None:
+        """偏差ラッチ中も補正を出さない。
+
+        ラッチは「人間がずれを直すまで力を抜く」宣言なので、補正で自動的に
+        揃えにいってはならない (人間が原因に気付かないまま駆動が続く)。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0, tolerance=1.0))
+        await _skew_pair(fx)
+
+        await fx.tick()
+
+        assert "y_axis" in fx.loop.sync_violations
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+    async def test_no_correction_when_a_member_is_open_loop(self) -> None:
+        """片方が開ループ指令なら、グループの**どちらにも**補正を出さない。
+
+        モータ単位で「自分が位置制御中なら補正する」と書くと、ホーミングの押し当てで
+        片方だけがモードを変えた瞬間にもう 1 台へだけ補正が乗り、左右で打ち消し合う
+        はずの力が軸ごと押し動かす力になる。
+        """
+        corrected = await _currents(_skew_pair_open_loop, group=_pair_group_with_gain(sync_kp=50.0))
+
+        assert corrected == await _currents(_skew_pair_open_loop)
+
+    async def test_no_correction_when_a_member_has_no_target(self) -> None:
+        """目標を持たないメンバが居るグループにも出さない。"""
+        corrected = await _currents(
+            _skew_pair_half_targeted, group=_pair_group_with_gain(sync_kp=50.0)
+        )
+
+        assert corrected == await _currents(_skew_pair_half_targeted)
+
+    async def test_correction_is_clamped_to_output_range(self) -> None:
+        """補正込みで出力レンジに収まる (PID の外で足すと上限を超えた指令が出る)。"""
+        corrected = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=1e6))
+
+        assert corrected[0] == CURRENT_MIN
+        assert corrected[1] == CURRENT_MIN
+
+    async def test_sync_limit_caps_the_correction(self) -> None:
+        """押し合いの歯止め。大きなずれでも sync_limit を超える補正は出ない。"""
+        baseline = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
+        corrected = await _currents(
+            _skew_pair, group=_pair_group_with_gain(sync_kp=1e6, sync_limit=200.0)
+        )
+
+        assert corrected[0] - baseline[0] == -200
+        assert corrected[1] - baseline[1] == -200
+
+    async def test_no_correction_while_estop_active(self) -> None:
+        """緊急停止中は補正も出ない。"""
+        corrected = await _currents(
+            _skew_pair, group=_pair_group_with_gain(sync_kp=50.0), estop=True
+        )
+
+        assert corrected == (0, 0, 0, 0)

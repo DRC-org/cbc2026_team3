@@ -506,6 +506,14 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 3 層とも同じ関数を呼ぶ。層ごとに違うのは頻度と超過後の扱い（debounce・ラッチ・効果）
 だけで、境界がずれてはならない。
 
+**この 3 層はいずれも「ずれたら止める」側で、ずれを縮めるものは 1 つも無い。**
+位置制御はモータごとに独立した PID なので、左右で負荷や摩擦が違えば追従差は原理的に
+残る。縮める経路は 200Hz の位置制御ループに載る**同期補正**（`SyncGroup.corrections()`）
+だけで、`axes.<軸>.sync_kp` を書いた軸にしか出ない。**同梱の config はすべて 0.0
+（補正なし）** なので、現状はどの軸にも補正が出ていない —— 有効化は機構が左右直結して
+からで、手順は `docs/mechanism_handoff.md` §3-1。補正は電流 0 の周期には出ないので、
+上の 3 層の判断を上書きすることはない。
+
 **現在の偏差は手動操縦パネルの軸行に出る**（`state.manual.axes[].deviation`。算出は
 同じ `SyncGroup.deviation()`）。ここが無かった頃は「どれだけずれて止まったか」を読む
 手段が診断カラムのモータ生単位 `POS` しかなく、逆回転ペアでは符号まで反転して見えるため
@@ -579,6 +587,7 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 | 動作確認が完了したか（UI 側） | `web/src/lib/motorCheckStatus.ts` |
 | ヘルスのしきい値 | `lib/config_schema.py` の `HealthThresholds` |
 | 左右ずれの境界 | `lib/axis_sync.py` の `SyncGroup.violation()` |
+| 左右ずれを縮める補正量 | `lib/axis_sync.py` の `SyncGroup.corrections()` |
 | 動作確認を起動できるか | `MotorCheckController.deny_reason()`（`lib/server_motor_check.py`） |
 | 試合を開始できるか | `MatchState.can_start_match` |
 | フェーズによる可否 | `lib/commands.py` の `CommandSpec` / UI は `lib/phase.ts` |

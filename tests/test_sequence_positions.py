@@ -689,3 +689,106 @@ class TestMerged:
 
     def test_空でも成立する(self) -> None:
         assert PositionTable.merged([]).axes == ()
+
+
+class TestSyncGain:
+    """同期補正のゲインと歯止め (axes.<軸>.sync_kp / sync_limit)。
+
+    検証はすべて「書いたのに効かない設定」と「歯止めの無いゲイン」を起動時に潰す
+    ためにある。どちらも症状が出ないまま運用に入ってしまう種類の誤りで、前者は
+    「補正を入れたつもりで一切効かない」、後者は「打ち間違えた 1 桁がそのまま
+    押し合いのフルスケールになる」形で現れる。
+    """
+
+    def _paired(self, **extra: object) -> dict:
+        return {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "tolerance": 1.0,
+                    "sync_tolerance": 2.0,
+                    "motors": {
+                        "y_axis_r": {"scale": 55.0},
+                        "y_axis_l": {"scale": -55.0},
+                    },
+                    **extra,
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        }
+
+    def test_defaults_to_no_correction(self) -> None:
+        """未指定なら補正なし = 既存の config がそのまま動く。"""
+        table = load_position_table(self._paired(), source="<test>")
+        spec = table.axis("y_axis")
+
+        assert spec.sync_kp == pytest.approx(0.0)
+        assert spec.sync_limit is None
+
+    def test_gain_reaches_the_sync_group(self) -> None:
+        """config の値が監視・補正の単位 (SyncGroup) までそのまま届く。
+
+        途中で詰め替える経路があると、逆回転の符号や単位を落とす余地が生まれる。
+        """
+        table = load_position_table(self._paired(sync_kp=1.5, sync_limit=400.0), source="<test>")
+        group = table.axis("y_axis").sync_group
+
+        assert group is not None
+        assert group.sync_kp == pytest.approx(1.5)
+        assert group.sync_limit == pytest.approx(400.0)
+
+    def test_gain_without_limit_is_rejected(self) -> None:
+        """押し合いの歯止めが無いゲインは起動を拒否する。"""
+        with pytest.raises(ValueError, match="sync_limit"):
+            load_position_table(self._paired(sync_kp=1.5))
+
+    def test_limit_without_gain_is_rejected(self) -> None:
+        """歯止めだけ書いても補正は 1 通も出ない (書いたのに効かない設定)。"""
+        with pytest.raises(ValueError, match="sync_limit"):
+            load_position_table(self._paired(sync_limit=400.0))
+
+    def test_zero_gain_may_declare_a_limit(self) -> None:
+        """0.0 + 上限は正当 (今は無効だが、上げるときの上限を先に決めておく)。"""
+        table = load_position_table(self._paired(sync_kp=0.0, sync_limit=400.0), source="<test>")
+
+        assert table.axis("y_axis").sync_kp == pytest.approx(0.0)
+        assert table.axis("y_axis").sync_limit == pytest.approx(400.0)
+
+    def test_negative_gain_is_rejected(self) -> None:
+        """負のゲインは正帰還。ずれを縮めるどころか発散させる。"""
+        with pytest.raises(ValueError, match="sync_kp"):
+            load_position_table(self._paired(sync_kp=-1.0, sync_limit=400.0))
+
+    def test_negative_limit_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sync_limit"):
+            load_position_table(self._paired(sync_kp=1.0, sync_limit=-1.0))
+
+    def test_gain_on_single_motor_axis_is_rejected(self) -> None:
+        """1 台の軸に書いても揃える相手が居ない。"""
+        with pytest.raises(ValueError, match="sync_kp"):
+            load_position_table(
+                {"axes": {"gripper": {"scale": 1.0, "sync_kp": 1.0, "sync_limit": 100.0}}}
+            )
+
+    def test_gain_without_sync_tolerance_is_rejected(self) -> None:
+        """sync_tolerance が無いと同期グループ自体が作られず、補正も監視も効かない。"""
+        config = {
+            "axes": {
+                "y_axis": {
+                    "motors": {
+                        "y_axis_r": {"scale": 55.0},
+                        "y_axis_l": {"scale": -55.0},
+                    },
+                    "sync_kp": 1.0,
+                    "sync_limit": 400.0,
+                }
+            }
+        }
+        with pytest.raises(ValueError, match="sync_tolerance"):
+            load_position_table(config)
+
+    def test_unknown_key_is_still_rejected(self) -> None:
+        """キー名の打ち間違いが「黙って無視されるゲイン」にならないこと。"""
+        with pytest.raises(ValueError, match="sync_gain"):
+            load_position_table(self._paired(sync_gain=1.0))

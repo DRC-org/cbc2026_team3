@@ -110,13 +110,27 @@ class PIDController:
             self._integral = contribution / new_ki if new_ki != 0.0 else 0.0
             self.ki = new_ki
 
-    def update(self, setpoint: float, measurement: float, dt: float) -> float:
+    def update(
+        self,
+        setpoint: float,
+        measurement: float,
+        dt: float,
+        *,
+        feedforward: float = 0.0,
+    ) -> float:
         """偏差を 1 周期分処理して操作量を返す。
 
         Args:
             setpoint: 目標値
             measurement: 現在値 (モータフィードバック)
             dt: 前回 update からの経過時間 [s]
+            feedforward: 偏差以外の根拠で加える操作量 (出力と同じ単位)。
+                左右直結ペアの同期補正がこれを使う。**呼び出し側で足して
+                後からクランプしてはならない** — クランプが二重になるだけでなく、
+                下の conditional integration が補正を知らないまま積分を進める。
+                「補正込みでは出力が飽和していて機構が動けないのに、積分だけが
+                育ち続ける」状態になり、拘束が外れた瞬間に暴走する。ここへ渡せば
+                飽和判定もアンチワインドアップも補正込みの出力で回る。
 
         Returns:
             ``output_min``〜``output_max`` にクランプされた操作量。
@@ -147,13 +161,13 @@ class PIDController:
                 bound = self.integral_limit / abs(self.ki)
                 candidate_integral = _clamp(candidate_integral, -bound, bound)
 
-        unclamped = proportional + self.ki * candidate_integral + derivative
+        unclamped = proportional + self.ki * candidate_integral + derivative + feedforward
         output = _clamp(unclamped, self.output_min, self.output_max)
 
         # conditional integration: 出力が飽和していて、かつ今回の積分が飽和を深める向きなら
         # 積分を進めない。機構端に当たって動けない間に積分が育つと、拘束が外れた瞬間に暴走する
         if unclamped != output and error * (unclamped - output) > 0:
-            unclamped = proportional + self.ki * self._integral + derivative
+            unclamped = proportional + self.ki * self._integral + derivative + feedforward
             output = _clamp(unclamped, self.output_min, self.output_max)
         else:
             self._integral = candidate_integral

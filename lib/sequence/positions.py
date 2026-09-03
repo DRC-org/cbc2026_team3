@@ -127,6 +127,10 @@ class AxisSpec:
     motors: tuple[MotorSpec, ...]
     # 人間の単位でのモータ間ずれ許容差。超過で停止する。単一モータ軸では None
     sync_tolerance: float | None = None
+    # 同期補正の比例ゲイン (位置制御 PID の kp と同じ単位)。0.0 で補正なし
+    sync_kp: float = 0.0
+    # 補正項 1 つあたりの上限 [指令単位あたりの操作量]。sync_kp を入れるなら必須
+    sync_limit: float | None = None
     command_mode: ControlMode = ControlMode.POSITION
     # 到達判定を持たない軸 (duty / velocity) の指令後固定待ち [s]
     settle_s: float = 0.0
@@ -181,7 +185,13 @@ class AxisSpec:
         """
         if self.sync_tolerance is None:
             return None
-        return SyncGroup(name=self.name, members=self.motors, tolerance=self.sync_tolerance)
+        return SyncGroup(
+            name=self.name,
+            members=self.motors,
+            tolerance=self.sync_tolerance,
+            sync_kp=self.sync_kp,
+            sync_limit=self.sync_limit,
+        )
 
 
 _AXIS_KEYS = frozenset(
@@ -194,6 +204,8 @@ _AXIS_KEYS = frozenset(
         "tolerance",
         "motors",
         "sync_tolerance",
+        "sync_kp",
+        "sync_limit",
         "command_mode",
         "settle_s",
         "manual",
@@ -446,6 +458,8 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
                 f"axes.{name}.sync_tolerance は 0 以上である必要があります: {sync_tolerance!r}"
             )
 
+    sync_kp, sync_limit = _parse_sync_gain(name, path, raw, motors, sync_tolerance)
+
     command_mode = _parse_command_mode(name, raw.get("command_mode"))
 
     settle_s = _number(path, raw, "settle_s", 0.0)
@@ -460,11 +474,74 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         tolerance=tolerance,
         motors=motors,
         sync_tolerance=sync_tolerance,
+        sync_kp=sync_kp,
+        sync_limit=sync_limit,
         command_mode=command_mode,
         settle_s=float(settle_s),
         manual=_parse_manual(name, raw.get("manual"), command_mode),
         homing=_parse_homing(name, raw.get("homing")),
     )
+
+
+def _parse_sync_gain(
+    name: str,
+    path: str,
+    raw: Mapping[str, object],
+    motors: tuple[MotorSpec, ...],
+    sync_tolerance: float | None,
+) -> tuple[float, float | None]:
+    """左右直結ペアの同期補正ゲインを読む。
+
+    位置制御はモータごとに独立した PID なので、左右で負荷や摩擦が違えば駆動中の
+    追従差は原理的に残る。``sync_tolerance`` を見る 3 層は「ずれたら止める」しか
+    できず、縮める力はどこにも無い。この 2 値がその縮める力を宣言する。
+
+    検証は「書いたのに効かない設定を作らせない」ためにある:
+
+    - ``sync_limit`` を欠いた ``sync_kp`` は拒否する。押し合いは左右直結の機構を
+      その場で壊すので、``homing.search_distance`` と同格の唯一の歯止めになる。
+      ゲインだけを書けると、打ち間違えた 1 桁がそのまま押し合いのフルスケールになる
+    - ``sync_tolerance`` の無い軸では補正そのものが組み立てられない
+      (``AxisSpec.sync_group`` が None を返し、監視も補正も存在しない軸になる)。
+      黙って無視すると、config には書いてあるのに一切効かない状態で運用に入る
+    - 負のゲインは正帰還で、ずれを縮めるどころか発散させる
+    """
+    sync_kp = _number(path, raw, "sync_kp", 0.0)
+    sync_limit = _number(path, raw, "sync_limit", None)
+
+    if sync_kp is None:
+        raise ValueError(f"axes.{name}.sync_kp は数値である必要があります")
+    if sync_kp < 0.0:
+        raise ValueError(
+            f"axes.{name}.sync_kp は 0 以上である必要があります (負値は正帰還に"
+            f"なりずれが発散します): {sync_kp!r}"
+        )
+    if sync_limit is not None and sync_limit < 0.0:
+        raise ValueError(f"axes.{name}.sync_limit は 0 以上である必要があります: {sync_limit!r}")
+
+    if sync_kp == 0.0:
+        if "sync_limit" in raw and "sync_kp" not in raw:
+            raise ValueError(
+                f"axes.{name}.sync_limit だけが指定されています "
+                "(sync_kp が無いので同期補正は一切出ません)"
+            )
+        return 0.0, sync_limit
+
+    if len(motors) < 2:
+        raise ValueError(
+            f"axes.{name}.sync_kp はモータ 2 台以上の軸にのみ指定できます (現在 {len(motors)} 台)"
+        )
+    if sync_tolerance is None:
+        raise ValueError(
+            f"axes.{name}.sync_kp には sync_tolerance が必要です "
+            "(同期グループが作られないため補正も監視も効きません)"
+        )
+    if sync_limit is None:
+        raise ValueError(
+            f"axes.{name}.sync_kp を指定するなら sync_limit も必要です "
+            "(押し合いの歯止めが無くなります)"
+        )
+    return float(sync_kp), float(sync_limit)
 
 
 def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
