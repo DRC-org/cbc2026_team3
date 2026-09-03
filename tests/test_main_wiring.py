@@ -47,6 +47,7 @@ from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotContext, RobotServer
 from main import (
     _DEFAULT_PID,
+    _attach_motion_profiles,
     _attach_sync_groups,
     _build_manual_controller,
     _build_position_loops,
@@ -58,6 +59,7 @@ from main import (
     _load_pid_config,
     _wire_robot_motors,
 )
+from tests.fake_clock import FakeClock
 from tests.feedback_frames import feed_m3508
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -898,6 +900,227 @@ class TestAttachSyncGroups:
         _attach_sync_groups([group], list(loops.values()))
 
         assert all(loop.sync_group_names == () for loop in loops.values())
+
+
+#: y_axis の実測換算 [deg/mm]
+_Y_SCALE = 55.0131
+
+
+def _motion_table() -> PositionTable:
+    """``motion`` を書いた逆回転ペアと、位置制御ループに載らないペアを持つ表。"""
+    return load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "timeout_s": 4.0,
+                    "tolerance": 1.0,
+                    "sync_tolerance": 2.0,
+                    "motion": {
+                        "max_velocity": 10.0,
+                        "max_acceleration": 50.0,
+                        "velocity_ff": 0.5,
+                    },
+                    "motors": {
+                        "y_axis_r": {"scale": _Y_SCALE, "offset": 0.0},
+                        "y_axis_l": {"scale": -_Y_SCALE, "offset": 0.0},
+                    },
+                },
+                # ドライバが位置ループを内蔵する軸 (EDULITE)。位置制御ループには載らない
+                "rotate": {
+                    "unit": "deg",
+                    "command_unit": "rad",
+                    "tolerance": 2.0,
+                    "motion": {"max_velocity": 30.0, "max_acceleration": 100.0},
+                    "motors": {
+                        "rotate_r": {"scale": 0.017, "offset": 0.0},
+                        "rotate_l": {"scale": -0.017, "offset": 0.0},
+                    },
+                },
+                # motion を書かない軸。従来どおり最終目標をステップで入れる
+                "gripper": {"unit": "deg", "command_unit": "deg", "scale": 1.0},
+            }
+        },
+        source="<test>",
+    )
+
+
+class TestAttachMotionProfiles:
+    """位置定数の ``motion`` を位置制御ループへ結ぶ配線。
+
+    単位換算 (人間の単位 → 指令単位) を知るのはこの層だけで、位置制御ループは
+    指令単位しか扱わない。``add_motor`` の引数ではなく後付けにしてあるのは、
+    ``PositionTable`` を持たない呼び出し元 (``scripts/tune_y_axis.py`` 等) を
+    壊さないため —— 設定しなければ今までどおり動く。
+    """
+
+    def _rig(self) -> tuple[_StubCANManager, dict[str, M3508Driver], dict]:
+        config = {
+            "robot_name": "main_hand",
+            "motors": {
+                # 実機の y_axis と同じゲイン。偏差 1.14mm で P 項が上限に届く
+                "y_axis_r": {
+                    "driver": "m3508",
+                    "bus": "m3508_bus",
+                    "can_id": 1,
+                    "pid": {"kp": 32.0, "output_limit": 2000},
+                },
+                "y_axis_l": {
+                    "driver": "m3508",
+                    "bus": "m3508_bus",
+                    "can_id": 2,
+                    "pid": {"kp": 32.0, "output_limit": 2000},
+                },
+                "gripper_motor": {"driver": "m3508", "bus": "other_bus", "can_id": 1},
+            },
+        }
+        manager = _StubCANManager()
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+            "gripper_motor": M3508Driver("gripper_motor", can_id=1),
+        }
+        loops = _build_position_loops(
+            _robot(config),
+            manager,
+            motors,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+        )
+        now = time.time()
+        for name, driver in motors.items():
+            feed_m3508(driver, angle_raw=0)
+            manager.feedback_at[name] = now
+        return manager, motors, loops
+
+    async def test_逆回転ペアの両側に制限が載る(self) -> None:
+        """換算は ``abs(scale)`` で行うこと。
+
+        速度・加速度の制限は向きを持たない量なので、符号付きの ``scale`` を掛けると
+        逆回転側だけ負値になる。プロファイルは正の上限しか受け取らないため、
+        符号を落とすと**起動そのものが落ちる**か、制限として機能しない側が残る。
+        """
+        manager, _, loops = self._rig()
+
+        _attach_motion_profiles(_motion_table(), list(loops.values()))
+
+        loop = loops["m3508_bus"]
+        await loop.set_target("y_axis_r", ControlMode.POSITION, 15.0 * _Y_SCALE)
+        await loop.set_target("y_axis_l", ControlMode.POSITION, -15.0 * _Y_SCALE)
+        await loop.step()
+
+        # 15mm (825deg) をステップで入れれば kp=32 で必ず飽和する。中間目標が
+        # 実測から起きていれば、1 周期目の偏差はほとんど無い
+        assert not loop.is_saturated("y_axis_r")
+        assert not loop.is_saturated("y_axis_l")
+        assert max(abs(current) for current in manager.last_currents) < 100
+
+    async def test_motion_を書かない軸は従来どおりステップ入力(self) -> None:
+        _, _, loops = self._rig()
+
+        _attach_motion_profiles(_motion_table(), list(loops.values()))
+
+        loop = loops["other_bus"]
+        await loop.set_target("gripper_motor", ControlMode.POSITION, 5000.0)
+        await loop.step()
+
+        assert loop.is_saturated("gripper_motor")
+
+    def test_位置制御ループ外の軸はログに残して続行する(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """黙って飛ばすと「制限が効いているつもり」で config を読むことになる。"""
+        _, _, loops = self._rig()
+
+        with caplog.at_level(logging.INFO):
+            _attach_motion_profiles(_motion_table(), list(loops.values()))
+
+        assert any("rotate_r" in record.getMessage() for record in caplog.records)
+
+    def test_起動ログに3つのつまみが全部出る(self, caplog: pytest.LogCaptureFixture) -> None:
+        """``velocity_ff`` は**実行中に変更できず UI にも配信されない**。
+
+        ``pid_gains()`` に相当する読み口が無いので、起動ログが「今どの値で動いて
+        いるか」を知る唯一の経路になる。しかも巡航中の出力を最も大きく左右する値
+        (``kd`` と釣り合っていないと D 項が出力を食い潰す) なので、落とすと
+        「速くならない」原因が画面からもログからも読めなくなる。
+        """
+        _, _, loops = self._rig()
+
+        with caplog.at_level(logging.INFO):
+            _attach_motion_profiles(_motion_table(), list(loops.values()))
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "y_axis_r" in record.getMessage() and "台形プロファイル" in record.getMessage()
+        ]
+        assert messages
+        assert all("10.0" in message for message in messages)  # max_velocity
+        assert all("50.0" in message for message in messages)  # max_acceleration
+        assert all("velocity_ff=0.5" in message for message in messages)
+
+    async def test_velocity_ff_が位置制御ループまで届く(self) -> None:
+        """巡航中の出力は ``velocity_ff * 参照速度``。
+
+        速度 FF は config の ``motion.velocity_ff`` にしか無い値なので、配線で
+        落とすと「書いたのに効かない設定」になる (症状はどこにも出ない)。
+        kp=ki=kd=0 の軸で見れば、出力に残るのは FF だけになる。
+        """
+        mono = FakeClock()
+        wall = FakeClock(start=5000.0)
+        manager = _StubCANManager()
+        loop = M3508PositionLoop(
+            manager,
+            "m3508_bus",
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            time_source=mono,
+            feedback_clock=wall,
+        )
+        driver = M3508Driver("y_axis_r", can_id=1)
+        pid_config = _motor(
+            "y_axis_r",
+            {"driver": "m3508", "bus": "m3508_bus", "can_id": 1, "pid": {"kp": 0.0}},
+        )
+        loop.add_motor("y_axis_r", driver, _build_position_pid(pid_config))
+        _attach_motion_profiles(_motion_table(), [loop])
+
+        await loop.set_target("y_axis_r", ControlMode.POSITION, 15.0 * _Y_SCALE)
+        for _ in range(100):
+            mono.advance(0.005)
+            wall.advance(0.005)
+            feed_m3508(driver, angle_raw=0)
+            manager.feedback_at["y_axis_r"] = wall.now
+            await loop.step()
+
+        # 0.5s で巡航速度 10mm/s (= 550.131deg/s) に達している
+        assert manager.last_currents[0] == pytest.approx(0.5 * 10.0 * _Y_SCALE, abs=2)
+
+
+class TestAttachHelpersAreCalledFromTheCompositionRoot:
+    """後付けの配線は、呼び忘れても位置制御ループがそのまま動いてしまう。
+
+    ``add_motor`` の引数ではないので、``_wire_one_robot`` から 1 行落としても
+    全テストが緑のまま通る。症状は「config に書いた同期監視 / 速度制限が丸ごと
+    効かない」だけで、起動ログにも UI にも現れない。
+    """
+
+    def _called_names(self, function: str) -> set[str]:
+        tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == function:
+                return {
+                    call.func.id
+                    for call in ast.walk(node)
+                    if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                }
+        raise AssertionError(f"main.py に {function} の定義が無い")
+
+    @pytest.mark.parametrize("helper", ["_attach_sync_groups", "_attach_motion_profiles"])
+    def test_wire_one_robot_calls_the_helper(self, helper: str) -> None:
+        assert helper in self._called_names("_wire_one_robot")
 
 
 class TestShippedMainHandConfig:

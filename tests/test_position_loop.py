@@ -17,6 +17,7 @@ from lib.control.position_loop import (
     M3508PositionLoop,
     make_position_pid,
 )
+from lib.control.trajectory import TrapezoidalProfile
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 from lib.tuning.recorder import Capture
@@ -1300,3 +1301,415 @@ class TestSyncCorrection:
         )
 
         assert corrected == (0, 0, 0, 0)
+
+
+# --------------------------------------------------------------------------- #
+#  台形速度プロファイルの結線
+# --------------------------------------------------------------------------- #
+
+#: y_axis の実測換算 [deg/mm] (ピニオン モジュール 1 / 歯数 40 で確定)
+Y_AXIS_SCALE = 55.0131
+#: 実運用ストローク [mm]。最終目標をステップで入れると原理的に行き過ぎる距離
+LONG_MOVE_MM = 15.0
+#: 実機で詰めた y_axis の出力上限 [counts] (C620 フルスケールの約 12%)
+Y_AXIS_OUTPUT_LIMIT = 2000.0
+
+
+class _Plant:
+    """電流指令で駆動される 1 軸の機構模型。
+
+    表すのは 2 点だけ —— 電流はトルク (角加速度) を作る、速度は粘性で頭打ちになる。
+    飽和するかどうかは「PID にどれだけ大きな偏差を見せるか」で決まるので、係数が
+    多少違っても結論は動かない。**係数を実機に寄せることが目的ではない。**
+
+    速度が頭打ちになることは模型の飾りではなく前提条件で、これが無いと 1 周期で
+    半回転を超える移動が起こり、C620 の単回転角アンラップ (半周を超える差分は
+    0 を跨いだ折り返しと推定する) が破綻して測定そのものが無意味になる。
+    """
+
+    #: 電流 1 counts あたりの角加速度 [deg/s^2]。上限 2000 counts で 200mm/s^2 相当
+    GAIN = 5.5
+    #: 粘性 [1/s]。上限 2000 counts での終端速度が 3000deg/s (1 周期 15deg) になる値
+    DAMPING = GAIN * 2000.0 / 3000.0
+
+    def __init__(self) -> None:
+        self.position = 0.0
+        self.velocity = 0.0
+
+    def step(self, current: float, dt: float) -> None:
+        self.velocity += (self.GAIN * current - self.DAMPING * self.velocity) * dt
+        self.position += self.velocity * dt
+
+
+class _ProfileRig:
+    """y_axis の実測 PID を載せた 1 モータのループ + 機構模型。
+
+    ``motion`` を渡さなければ従来どおり最終目標をステップで PID へ入れる。同じ機構・
+    同じゲインのまま入力の作り方だけを変えられるので、飽和の有無がプロファイルに
+    由来することを他の条件を動かさずに示せる。
+    """
+
+    def __init__(self, *, motion: tuple[float, float] | None, velocity_ff: float = 0.0) -> None:
+        self.mono = FakeClock()
+        self.wall = FakeClock(start=5000.0)
+        self.manager = _StubCANManager()
+        self.loop = M3508PositionLoop(
+            self.manager,
+            BUS,
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            time_source=self.mono,
+            feedback_clock=self.wall,
+        )
+        self.driver = M3508Driver("y_axis_r", can_id=1)
+        # config/main_hand.yaml の実測値 (2026-09-03 に実機で詰めたもの)
+        pid = make_position_pid(32.0, 10.0, 1.0, integral_limit=400.0, dead_band=1.0)
+        pid.output_min = -Y_AXIS_OUTPUT_LIMIT
+        pid.output_max = Y_AXIS_OUTPUT_LIMIT
+        self.loop.add_motor("y_axis_r", self.driver, pid)
+        if motion is not None:
+            max_velocity, max_acceleration = motion
+            self.loop.set_motion_profile(
+                "y_axis_r",
+                TrapezoidalProfile(
+                    # 制限は指令単位 (deg) で渡す。mm からの換算は配線層 (main.py) の仕事
+                    max_velocity=max_velocity * Y_AXIS_SCALE,
+                    max_acceleration=max_acceleration * Y_AXIS_SCALE,
+                ),
+                velocity_ff=velocity_ff,
+            )
+        self.plant = _Plant()
+        self.outputs: list[int] = []
+        self.saturations: list[bool] = []
+        self.positions_mm: list[float] = []
+        self._feed()
+
+    def _feed(self) -> None:
+        feed_m3508(self.driver, angle_raw=m3508_counts_for_deg(self.plant.position) % 8192)
+        self.manager.feedback_at["y_axis_r"] = self.wall.now
+
+    async def move_to(self, millimetres: float) -> None:
+        await self.loop.set_target("y_axis_r", ControlMode.POSITION, millimetres * Y_AXIS_SCALE)
+
+    async def run(self, seconds: float) -> None:
+        for _ in range(round(seconds / DEFAULT_INTERVAL_S)):
+            self.mono.advance(DEFAULT_INTERVAL_S)
+            self.wall.advance(DEFAULT_INTERVAL_S)
+            await self.loop.step()
+            current = self.manager.last_currents[0]
+            self.outputs.append(current)
+            self.saturations.append(self.loop.is_saturated("y_axis_r"))
+            self.plant.step(current, DEFAULT_INTERVAL_S)
+            self._feed()
+            self.positions_mm.append(self.plant.position / Y_AXIS_SCALE)
+
+    @property
+    def peak_output(self) -> int:
+        return max(abs(value) for value in self.outputs)
+
+    @property
+    def position_mm(self) -> float:
+        return self.plant.position / Y_AXIS_SCALE
+
+
+class TestLongMoveDoesNotSaturate:
+    """**この作業の本題。** 実運用ストロークで P 項が飽和したままにならないこと。
+
+    偏差 1.14mm で P 項が上限に届く (scale 55.0131 / kp 32 / output_limit 2000) ため、
+    最終目標をステップで入れると移動距離が 2.3mm を超えた時点で「フル電流の定加速 →
+    減速に使える距離が足りない」に落ちる。飽和中は合計がクランプされるので D 項も
+    出力に現れず、``kd`` を上げても直らない。
+    """
+
+    async def test_15mm_の移動で出力が飽和しない(self) -> None:
+        rig = _ProfileRig(motion=(10.0, 50.0))
+
+        await rig.move_to(LONG_MOVE_MM)
+        await rig.run(2.5)
+
+        assert not any(rig.saturations)
+        assert rig.peak_output < Y_AXIS_OUTPUT_LIMIT
+        # 到達許容差 (config の tolerance 1.0mm) の中へ収まる
+        assert rig.position_mm == pytest.approx(LONG_MOVE_MM, abs=1.0)
+
+    async def test_同じ機構でも最終目標をステップで入れると飽和して行き過ぎる(self) -> None:
+        """プロファイルを外した対照。飽和が模型の作りではなく入力の作り方に由来する。"""
+        rig = _ProfileRig(motion=None)
+
+        await rig.move_to(LONG_MOVE_MM)
+        await rig.run(2.5)
+
+        assert any(rig.saturations)
+        assert max(rig.positions_mm) > LONG_MOVE_MM + 1.0
+
+    async def test_中間目標は速度制限を守って立ち上がる(self) -> None:
+        """飽和しない理由が「目標が届いていない」ではないこと。
+
+        実際に軸が動いていることまで見ておかないと、目標を捨てる実装でもこのクラスが
+        緑になる (飽和しないことは「動かない」でも成立してしまう)。
+        """
+        rig = _ProfileRig(motion=(10.0, 50.0))
+
+        await rig.move_to(LONG_MOVE_MM)
+        await rig.run(0.5)
+
+        # 加速 0.2s (1mm) + 巡航 0.3s (3mm) で 4mm 前後
+        assert 2.0 < rig.position_mm < 6.0
+
+
+def _flying(fx: _Fixture, name: str = "lift") -> None:
+    """``name`` に台形プロファイルを後付けする (制限は指令単位 deg のまま)。"""
+    fx.loop.set_motion_profile(
+        name,
+        TrapezoidalProfile(max_velocity=50.0, max_acceleration=500.0),
+        velocity_ff=0.0,
+    )
+
+
+async def _fly(fx: _Fixture, name: str = "lift", *, ticks: int = 100) -> float:
+    """中間目標を飛行中の状態にし、そこまでに進んだ中間目標 [deg] を返す。
+
+    実測を 0 に据え置くので、出力はそのまま ``kp * 中間目標`` になる。これで
+    「その周期に PID が見た中間目標」を公開 API だけで読める。
+    """
+    await fx.loop.set_target(name, ControlMode.POSITION, 1000.0)
+    for _ in range(ticks):
+        await fx.tick()
+        fx.feed(name, 0.0)
+    return fx.manager.last_currents[0] / 5.0
+
+
+class TestProfileIsDiscardedOnSafetyPaths:
+    """止まっていた間に進んだはずの中間目標へ、復帰 1 周期目に飛ばないこと。
+
+    復帰の瞬間に機構がどこに居るかは分からない (自重で落ちる・動作確認に動かされる)。
+    起点を据え置くと、その差がまるごと 1 周期の偏差として PID に入る。
+
+    **層ごとに 1 つずつ確かめる。** 5 つの経路 (緊急停止 = ``_reset_axis`` /
+    一時停止からの復帰 / フィードバック途絶 / 相方の異常による blocked / 開ループ
+    指令) はどれも単独で機体を守っているので、まとめて 1 本にすると 1 枚外しても
+    落ちない。
+    """
+
+    #: 復帰までに機構が落ちる量 [deg]。据え置いた起点との差がここまで開く
+    FALL_DEG = -30.0
+
+    def _rig(self) -> _Fixture:
+        # kp を小さくして出力レンジの端から離す (飽和で差が潰れると層が見えない)
+        fx = _Fixture(kp=5.0)
+        _flying(fx)
+        return fx
+
+    def _assert_reanchored(self, fx: _Fixture, flown: float) -> None:
+        current = fx.manager.last_currents[0]
+        # 実測から起こし直せば偏差は 1 周期の進みぶん (50deg/s * 5ms = 0.25deg) しかない
+        assert abs(current) < 5.0, f"中間目標が実測から離れている (出力 {current})"
+        # 据え置いた場合との差が本当に出る状況だったかも見る (前提が崩れていないか)
+        assert abs(flown - self.FALL_DEG) > 10.0
+
+    async def test_緊急停止からの復帰で中間目標が飛ばない(self) -> None:
+        fx = self._rig()
+        flown = await _fly(fx)
+
+        fx.estop = True
+        await fx.tick()
+        fx.estop = False
+        # 停止中に自重で落ちた
+        fx.feed("lift", self.FALL_DEG)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 1000.0)
+        await fx.tick()
+
+        self._assert_reanchored(fx, flown)
+
+    async def test_一時停止からの復帰で中間目標が飛ばない(self) -> None:
+        """動作確認が同一バスを握っている間、機構はこのループの指令と無関係に動く。"""
+        fx = self._rig()
+        flown = await _fly(fx)
+
+        await fx.loop.pause()
+        await fx.tick()
+        # 動作確認が動かした先
+        fx.feed("lift", self.FALL_DEG)
+        fx.loop.resume()
+        await fx.tick()
+
+        self._assert_reanchored(fx, flown)
+
+    async def test_フィードバック途絶からの復帰で中間目標が飛ばない(self) -> None:
+        fx = self._rig()
+        flown = await _fly(fx)
+
+        # 目標もモードも残るので、ここだけが起点を捨てる層になる
+        fx.wall.advance(1.0)
+        await fx.tick()
+        fx.feed("lift", self.FALL_DEG)
+        await fx.tick()
+
+        self._assert_reanchored(fx, flown)
+
+    async def test_相方の異常で力を抜いた後も中間目標が飛ばない(self) -> None:
+        """自分は健全でも、直結した相方が止まれば力は抜ける (その間に機構は動く)。"""
+        fx = self._rig()
+        fx.loop.add_sync_group(
+            SyncGroup(
+                "y_axis",
+                (MotorSpec("lift", 1.0, 0.0), MotorSpec("tilt", -1.0, 0.0)),
+                tolerance=1e6,
+            )
+        )
+        await fx.loop.set_target("tilt", ControlMode.POSITION, 0.0)
+        flown = await _fly(fx)
+
+        # tilt だけ途絶させる → lift は blocked (自分のフィードバックは新しいまま)
+        fx.wall.advance(1.0)
+        fx.feed("lift", 0.0)
+        await fx.tick()
+        fx.feed("lift", self.FALL_DEG)
+        fx.feed("tilt", 0.0)
+        await fx.tick()
+
+        self._assert_reanchored(fx, flown)
+
+    async def test_開ループの押し当ての後も中間目標が飛ばない(self) -> None:
+        """ホーミングは機構端まで開ループで押す。その間の移動は軌道に入っていない。"""
+        fx = self._rig()
+        flown = await _fly(fx)
+
+        await fx.loop.set_target("lift", ControlMode.CURRENT, -300.0)
+        await fx.tick()
+        fx.feed("lift", self.FALL_DEG)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 1000.0)
+        await fx.tick()
+
+        self._assert_reanchored(fx, flown)
+
+
+class TestProfileRetarget:
+    async def test_移動中の目標差し替えは起点を実測へ戻さない(self) -> None:
+        """左右直結ペアで実測から起こし直すと、追従誤差の差が軌道長の差になる。
+
+        差し替えのたびに実測起点へ戻す実装だと、追従が遅れているこの状況で中間目標
+        まで実測位置へ戻ってしまう。
+        """
+        fx = _Fixture(kp=5.0)
+        _flying(fx)
+        flown = await _fly(fx)
+
+        await fx.loop.set_target("lift", ControlMode.POSITION, 900.0)
+        await fx.tick()
+
+        # 進んでいた中間目標がそのまま続く (実測 0 へは戻らない)
+        assert fx.manager.last_currents[0] / 5.0 > flown
+
+
+class TestVelocityFeedforward:
+    """速度 FF は ``PIDController.update(feedforward=...)`` へ渡すこと。
+
+    外で足して後からクランプすると、アンチワインドアップが FF を知らないまま積分を
+    進める。「FF 込みでは出力が飽和していて機構が動けないのに、積分だけが育つ」
+    状態になり、拘束が外れた瞬間に暴走する。
+    """
+
+    async def test_FF_で飽和している間は積分が育たない(self) -> None:
+        fx = _Fixture(kp=0.0, ki=1.0)
+        pid = fx.loop.pid("lift")
+        # FF だけで上限に届く組み合わせにする (P 項では届かせない)
+        pid.output_min, pid.output_max = -500.0, 500.0
+        pid.dead_band = 0.0
+        fx.loop.set_motion_profile(
+            "lift",
+            TrapezoidalProfile(max_velocity=100.0, max_acceleration=500.0),
+            velocity_ff=10.0,
+        )
+
+        await _fly(fx, ticks=200)
+
+        # 実測は 0 のままなので偏差は開き続ける。FF を PID の内側へ渡していれば
+        # 飽和が見えて積分は止まり、外で足していれば PID からは余裕があるように
+        # 見えて積分だけが育つ
+        assert pid.integral < 0.1
+
+    async def test_FF_は参照速度に比例して出力へ乗る(self) -> None:
+        fx = _Fixture(kp=0.0, ki=0.0)
+        fx.loop.set_motion_profile(
+            "lift",
+            TrapezoidalProfile(max_velocity=100.0, max_acceleration=500.0),
+            velocity_ff=2.0,
+        )
+
+        await _fly(fx, ticks=100)
+
+        # 0.2s で v_max 100deg/s に達しているので FF = 2.0 * 100
+        assert fx.manager.last_currents[0] == pytest.approx(200, abs=1)
+
+    async def test_負の係数は受け付けない(self) -> None:
+        fx = _Fixture(kp=5.0)
+        with pytest.raises(ValueError, match="velocity_ff"):
+            fx.loop.set_motion_profile(
+                "lift",
+                TrapezoidalProfile(max_velocity=50.0, max_acceleration=500.0),
+                velocity_ff=-1.0,
+            )
+
+    async def test_未登録のモータには設定できない(self) -> None:
+        fx = _Fixture(kp=5.0)
+        with pytest.raises(KeyError):
+            fx.loop.set_motion_profile(
+                "missing", TrapezoidalProfile(max_velocity=50.0, max_acceleration=500.0)
+            )
+
+
+class TestProfileDoesNotChangeTheContract:
+    async def test_中間目標は_PID_と同じ_dt_で進む(self) -> None:
+        """周期が伸びた分だけ軌道も進むこと。
+
+        固定周期で進めると、asyncio が詰まって周期が伸びた瞬間に「PID は 20ms 分の
+        偏差を見ているのに軌道は 5ms しか進んでいない」状態になり、参照速度と実際の
+        中間目標の進み方が食い違う。
+        """
+        fx = _Fixture(kp=100.0)
+        _flying(fx)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 1000.0)
+        for _ in range(100):
+            await fx.tick()
+            fx.feed("lift", 0.0)
+        before = fx.manager.last_currents[0]
+
+        await fx.tick(dt=0.02)
+
+        # 巡航 (50deg/s) の 20ms なので中間目標は 1.0deg 進む (5ms なら 0.25deg)
+        assert (fx.manager.last_currents[0] - before) / 100.0 == pytest.approx(1.0, abs=0.05)
+
+    async def test_ゲイン差し替えでは軌道を捨てない(self) -> None:
+        """ゲインが変わっても軌道は変わらない。捨てると移動中の変更で機構が飛ぶ。"""
+        fx = _Fixture(kp=5.0)
+        _flying(fx)
+        flown = await _fly(fx)
+
+        fx.loop.set_pid_gains("lift", {"kp": 5.0})
+        await fx.tick()
+
+        assert fx.manager.last_currents[0] / 5.0 > flown
+
+    async def test_記録に載る目標は最終目標であって中間目標ではない(self) -> None:
+        """中間目標を記録の目標にすると、指標 (行き過ぎ・整定) の意味が変わる。
+
+        ランプは「ステップ」として検出されないので、記録そのものが起きなくなる方向へ
+        倒れる。件数だけを見ても最初の 1 回は必ずトリガされるので (記録器は初回を
+        無条件に起点にする)、**記録された目標値そのもの**を見る。
+        """
+        fx = _Fixture(kp=5.0, tuning=RECORDING)
+        _flying(fx)
+
+        await _fly(fx, ticks=60)
+
+        assert fx.captures, "最終目標のステップが記録の窓を開いていない"
+        assert {sample.target for sample in fx.captures[0].samples} == {1000.0}
+
+    async def test_プロファイルを持たない軸は従来どおりステップ入力(self) -> None:
+        fx = _Fixture(kp=100.0)
+        await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+
+        await fx.tick()
+
+        assert fx.manager.last_currents[0] == 1000

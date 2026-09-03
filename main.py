@@ -35,6 +35,7 @@ from lib.control.target_refresh import (
     QueryDrivenTargetRefresher,
     TargetRefresher,
 )
+from lib.control.trajectory import TrapezoidalProfile
 from lib.drivers.base import MotorDriver
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -754,6 +755,64 @@ def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop])
         logger.info("同期監視: %s を位置制御ループ (bus=%s) に登録", group.name, target.bus_name)
 
 
+def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionLoop]) -> None:
+    """``axes.<軸>.motion`` を書いた軸のモータへ台形速度プロファイルを後付けする。
+
+    位置定数 (人間の単位) とモータ構成 (指令単位) が出会うのはこの層だけなので、
+    **単位換算をここで済ませて位置制御ループへは指令単位で渡す**。
+
+    ``abs(scale)`` で換算するのは、速度・加速度の制限が向きを持たない量だから。
+    逆回転ペアは ``scale`` の符号が逆なので、符号付きで掛けると片側の制限が負値になり
+    制限として一切機能しない (プロファイルは正の上限しか受け取らない)。
+
+    ``_attach_sync_groups`` と同じく「登録できるものだけ登録し、できないものはログに
+    残して続行する」。位置制御ループに載らないモータ (EDULITE / DM3520 はドライバが
+    位置ループを内蔵する) は対象外で、書いても無害に無視される。
+    """
+    for axis_name in positions.axes:
+        spec = positions.axis(axis_name)
+        motion = spec.motion
+        if motion is None:
+            continue
+
+        for motor in spec.motors:
+            loop = next(
+                (candidate for candidate in loops if motor.name in candidate.motor_names), None
+            )
+            if loop is None:
+                logger.info(
+                    "台形プロファイル: 軸 %s のモータ %s は位置制御ループ外 "
+                    "(ドライバ内蔵の位置ループが持つため中間目標は要らない)",
+                    axis_name,
+                    motor.name,
+                )
+                continue
+            scale = abs(motor.scale)
+            loop.set_motion_profile(
+                motor.name,
+                TrapezoidalProfile(
+                    max_velocity=motion.max_velocity * scale,
+                    max_acceleration=motion.max_acceleration * scale,
+                ),
+                velocity_ff=motion.velocity_ff,
+            )
+            # velocity_ff も必ず出す。実行中に変更できず UI にも配信されないので、
+            # **起動ログが「今どの値で動いているか」を知る唯一の経路**である。
+            # かつ巡航中の出力を最も大きく左右する (kd と釣り合っていないと
+            # D 項が出力を食い潰す) 値なので、落とすと画面からもログからも読めない
+            logger.info(
+                "台形プロファイル: %s (軸 %s) に v<=%.1f %s/s, a<=%.1f %s/s^2, "
+                "velocity_ff=%g を設定",
+                motor.name,
+                axis_name,
+                motion.max_velocity,
+                spec.unit,
+                motion.max_acceleration,
+                spec.unit,
+                motion.velocity_ff,
+            )
+
+
 def _make_sync_violation_handler(
     server: RobotServer,
     robot_name: str,
@@ -953,6 +1012,9 @@ def _wire_one_robot(
     # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
     sync_groups = _build_sync_groups(positions, motors)
     _attach_sync_groups(sync_groups, loops)
+    # 位置定数が持つ速度・加速度の制限を位置制御ループへ渡す。書かない軸は従来どおり
+    # 最終目標をステップで PID に入れる
+    _attach_motion_profiles(positions, loops)
     monitors: list[SyncMonitor] = []
     if sync_groups:
         monitors.append(

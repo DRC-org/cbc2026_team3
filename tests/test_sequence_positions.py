@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 
@@ -792,3 +793,217 @@ class TestSyncGain:
         """キー名の打ち間違いが「黙って無視されるゲイン」にならないこと。"""
         with pytest.raises(ValueError, match="sync_gain"):
             load_position_table(self._paired(sync_gain=1.0))
+
+
+class TestMotionSpec:
+    """台形速度プロファイルの制限 (axes.<軸>.motion)。
+
+    位置制御ループへ渡す中間目標を作るための速度・加速度制限で、値は軸の人間の
+    単位のまま持つ (指令単位への換算は制御層が ``abs(scale)`` で行う)。
+    検証は「書いたのに制限として成立しない設定」と「必ずタイムアウトする軸」を
+    起動時に潰すためにある。後者は運用に入ってから「その軸だけ毎回失敗する」形で
+    しか現れず、原因が config からは読めない。
+    """
+
+    def _axis(self, *, motion: object, **extra: object) -> dict:
+        return {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "scale": 55.0,
+                    "motion": motion,
+                    **extra,
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0, "work": 15.0}},
+        }
+
+    def _suggested_timeout(self, message: str) -> float:
+        """エラーメッセージが提示した timeout_s を取り出す。"""
+        found = re.search(r"timeout_s を ([0-9.]+) 以上", message)
+        assert found is not None, message
+        return float(found.group(1))
+
+    def test_motion_を書かない軸は従来どおりステップ入力(self) -> None:
+        """既存 config がそのまま読める (motion は任意キー)。"""
+        table = _table()
+
+        assert table.axis("lift_motor").motion is None
+
+    def test_値がそのまま_MotionSpec_へ届く(self) -> None:
+        table = load_position_table(
+            self._axis(motion={"max_velocity": 60.0, "max_acceleration": 400.0}),
+            source="<test>",
+        )
+        motion = table.axis("y_axis").motion
+
+        assert motion is not None
+        assert motion.max_velocity == pytest.approx(60.0)
+        assert motion.max_acceleration == pytest.approx(400.0)
+        assert motion.velocity_ff == pytest.approx(0.0)
+
+    def test_velocity_ff_を指定できる(self) -> None:
+        table = load_position_table(
+            self._axis(
+                motion={"max_velocity": 60.0, "max_acceleration": 400.0, "velocity_ff": 1.5}
+            ),
+            source="<test>",
+        )
+        motion = table.axis("y_axis").motion
+
+        assert motion is not None
+        assert motion.velocity_ff == pytest.approx(1.5)
+
+    def test_max_velocity_だけの指定は拒否する(self) -> None:
+        """片方だけでは制限として成立しない (sync_kp / sync_limit と同じ方針)。"""
+        with pytest.raises(ValueError, match="max_acceleration"):
+            load_position_table(self._axis(motion={"max_velocity": 60.0}))
+
+    def test_max_acceleration_だけの指定は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="max_velocity"):
+            load_position_table(self._axis(motion={"max_acceleration": 400.0}))
+
+    def test_非正の_max_velocity_は拒否する(self) -> None:
+        """0 では中間目標が一切進まず、負値では目標から遠ざかる。"""
+        with pytest.raises(ValueError, match="max_velocity"):
+            load_position_table(self._axis(motion={"max_velocity": 0.0, "max_acceleration": 400.0}))
+
+    def test_非正の_max_acceleration_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="max_acceleration"):
+            load_position_table(self._axis(motion={"max_velocity": 60.0, "max_acceleration": -1.0}))
+
+    def test_負の_velocity_ff_は拒否する(self) -> None:
+        """負の速度フィードフォワードは進行方向と逆へ押す。"""
+        with pytest.raises(ValueError, match="velocity_ff"):
+            load_position_table(
+                self._axis(
+                    motion={
+                        "max_velocity": 60.0,
+                        "max_acceleration": 400.0,
+                        "velocity_ff": -1.0,
+                    }
+                )
+            )
+
+    def test_未知のキーは拒否する(self) -> None:
+        """綴り間違いが「黙って無視される制限」にならないこと。"""
+        with pytest.raises(ValueError, match="max_vel"):
+            load_position_table(self._axis(motion={"max_vel": 60.0, "max_acceleration": 400.0}))
+
+    def test_辞書でない_motion_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="辞書"):
+            load_position_table(self._axis(motion=60.0))
+
+    def test_位置指令でない軸への_motion_は拒否する(self) -> None:
+        """duty / on_off 軸には中間目標という概念が無い (到達を観測できない)。"""
+        config = {
+            "axes": {
+                "conveyor": {
+                    "scale": 1.0,
+                    "command_mode": "duty",
+                    "settle_s": 0.5,
+                    "motion": {"max_velocity": 60.0, "max_acceleration": 400.0},
+                }
+            },
+            "positions": {"conveyor": {"stop": 0.0, "run": 0.6}},
+        }
+        with pytest.raises(ValueError, match="位置指令"):
+            load_position_table(config)
+
+    def test_timeout_s_に収まる設定は通る(self) -> None:
+        """15mm を 60mm/s・400mm/s^2 で走ると約 0.4s。既定の 5s に収まる。"""
+        table = load_position_table(
+            self._axis(motion={"max_velocity": 60.0, "max_acceleration": 400.0}),
+            source="<test>",
+        )
+
+        assert table.axis("y_axis").motion is not None
+
+    def test_必ずタイムアウトする軸は起動を拒否する(self) -> None:
+        """15mm を 10mm/s で走ると 1.525s。timeout_s 1.0s では到達判定に届かない。"""
+        with pytest.raises(ValueError) as exc:
+            load_position_table(
+                self._axis(
+                    motion={"max_velocity": 10.0, "max_acceleration": 400.0},
+                    timeout_s=1.0,
+                ),
+                source="<test>",
+            )
+
+        message = str(exc.value)
+        assert "timeout_s" in message
+        # 必要な timeout_s を示さないと、いくつにすればよいかを config から
+        # 逆算することになる
+        assert self._suggested_timeout(message) >= 1.525
+
+    def test_提示された_timeout_s_をそのまま書けば通る(self) -> None:
+        """提示値を切り捨てて出すと、書き写した config がもう一度拒否される。"""
+        with pytest.raises(ValueError) as exc:
+            load_position_table(
+                self._axis(
+                    motion={"max_velocity": 10.0, "max_acceleration": 400.0},
+                    timeout_s=1.0,
+                ),
+                source="<test>",
+            )
+        suggested = self._suggested_timeout(str(exc.value))
+
+        table = load_position_table(
+            self._axis(
+                motion={"max_velocity": 10.0, "max_acceleration": 400.0},
+                timeout_s=suggested,
+            ),
+            source="<test>",
+        )
+
+        assert table.axis("y_axis").motion is not None
+
+    def test_三角プロファイルの所要時間で判定する(self) -> None:
+        """v_max へ達しない短距離を台形の式で見積もると、間に合う設定を拒否する。
+
+        15mm / 1000mm/s / 400mm/s^2 は 2*sqrt(d/a) = 0.39s で終わるが、
+        台形の式 (d/v + v/a) をそのまま当てると 2.5s と読める。
+        """
+        table = load_position_table(
+            self._axis(
+                motion={"max_velocity": 1000.0, "max_acceleration": 400.0},
+                timeout_s=1.0,
+            ),
+            source="<test>",
+        )
+
+        assert table.axis("y_axis").motion is not None
+
+    def test_コート別の位置も最大移動距離に数える(self) -> None:
+        """片コートでだけ必ずタイムアウトする軸を作れてはならない。"""
+        config = {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "scale": 55.0,
+                    "timeout_s": 1.0,
+                    "motion": {"max_velocity": 10.0, "max_acceleration": 400.0},
+                }
+            },
+            "positions": {"y_axis": {"pick": {"blue": 0.0, "red": 30.0}}},
+        }
+        with pytest.raises(ValueError, match="timeout_s"):
+            load_position_table(config, source="<test>")
+
+    def test_位置定数を持たない軸は距離が決まらないので通る(self) -> None:
+        """移動距離が config から読めない軸に、根拠の無い上限を課さない。"""
+        table = load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "scale": 55.0,
+                        "timeout_s": 0.1,
+                        "motion": {"max_velocity": 1.0, "max_acceleration": 1.0},
+                    }
+                }
+            },
+            source="<test>",
+        )
+
+        assert table.axis("y_axis").motion is not None

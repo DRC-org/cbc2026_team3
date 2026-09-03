@@ -13,6 +13,7 @@ from lib.control.feedback import FeedbackFreshness
 from lib.control.periodic import PausablePeriodicTask
 from lib.control.pid import PIDController
 from lib.control.sync_guard import SyncGuard
+from lib.control.trajectory import TrapezoidalProfile
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, CURRENT_MIN, M3508Driver
 from lib.tuning.recorder import Capture, MotorStepRecorder, PidSnapshot
@@ -109,6 +110,14 @@ class _Axis:
     saturated: bool = field(default=False)
     # ステップ応答の記録器。tuning が無効なら None
     recorder: MotorStepRecorder | None = field(default=None)
+    # 台形速度プロファイル。None なら最終目標をそのままステップで PID へ入れる (従来動作)
+    profile: TrapezoidalProfile | None = field(default=None)
+    # 参照速度に掛けて feedforward へ足す係数 [counts/(指令単位/s)]
+    velocity_ff: float = field(default=0.0)
+    # 軌道の起点が実測位置と地続きか。False の間は次に位置制御を回す周期で張り直す。
+    # 「起点を捨てる」ことが緊急停止・途絶・blocked・pause 復帰での唯一の破棄手段で、
+    # ここを False にし忘れた経路は「止まっていた間に進んだはずの中間目標へ飛ぶ」
+    profile_anchored: bool = field(default=False)
 
 
 class M3508PositionLoop(PausablePeriodicTask):
@@ -133,6 +142,10 @@ class M3508PositionLoop(PausablePeriodicTask):
         止める 3 層とは向きが逆で、こちらは駆動中にずれを縮める唯一の経路**
         (独立した 2 つの PID には左右を揃える力がどこにも無い)。出さない周期は
         電流 0 の周期と全員が位置制御中でない周期
+      - ``set_motion_profile`` を設定した軸は、最終目標ではなく速度・加速度で制限した
+        中間目標を PID へ入れる。**電流 0 に落とすどの経路でも軌道の起点を捨てる** —
+        止まっていた間に機構が動いていても軌道は元の位置から続くので、据え置くと
+        復帰 1 周期目に「進んだはずの中間目標」へ機構が飛ぶ
       - 周期処理で例外が出てもループは継続する (指令が止まると C620 の挙動次第で危険)
       - ``pause()`` 中は 1 通も送らない (アクチュエータ動作確認と 0x200 を奪い合わないため)
     """
@@ -240,6 +253,42 @@ class M3508PositionLoop(PausablePeriodicTask):
                     f"このループ (bus={self._bus_name}) に未登録"
                 )
         self._sync.add(group)
+
+    def set_motion_profile(
+        self, name: str, profile: TrapezoidalProfile, *, velocity_ff: float = 0.0
+    ) -> None:
+        """1 モータの中間目標生成器を後付けする。書かなければ従来どおりステップ入力。
+
+        **``add_motor`` の引数にしない。** プロファイルの制限値は位置定数
+        (``axes.<軸>.motion``) が持つのに対し、``add_motor`` を呼ぶ配線層はモータ構成
+        (``config/<robot>.yaml``) しか見ていない。引数に足すと位置定数を持たない
+        呼び出し元 (``scripts/tune_y_axis.py`` 等) が一斉に壊れる。後付けなら
+        「設定しなかった軸は今までどおり」で無害に済む。``add_sync_group`` が
+        同じ理由で後付けなのと揃えてある。
+
+        Args:
+            name: このループに登録済みのモータ名
+            profile: **モータの指令単位 (deg) へ換算済み**の制限を持つプロファイル。
+                人間の単位 (mm) からの換算は ``MotorSpec.scale`` を知る配線層が
+                ``abs(scale)`` で行う。このクラスは指令単位しか扱わない
+            velocity_ff: 参照速度に掛けて ``feedforward`` へ足す係数。単位は
+                ``kp`` / ``sync_kp`` と同じ出力側 (counts / (deg/s)) で、
+                巡航中に D 項が生む制動 (``-kd * 速度``) を打ち消すために使う
+
+        Raises:
+            KeyError: このループに居ないモータ名
+            ValueError: ``velocity_ff`` が負。進行方向と逆へ押すので追従を助けない
+        """
+        if name not in self._axes:
+            raise KeyError(name)
+        if velocity_ff < 0.0:
+            raise ValueError(f"velocity_ff は 0 以上: {velocity_ff}")
+        axis = self._axes[name]
+        axis.profile = profile
+        axis.velocity_ff = float(velocity_ff)
+        # 起点は使う直前に実測から張る。ここで張ると、配線時点の実測位置
+        # (フィードバック未受信なら 0.0) がそのまま軌道の起点として残る
+        axis.profile_anchored = False
 
     @property
     def bus_name(self) -> str:
@@ -363,11 +412,19 @@ class M3508PositionLoop(PausablePeriodicTask):
                 axis.pid.reset()
             axis.mode = ControlMode.POSITION
             axis.target = float(value)
+            if axis.profile is not None and axis.profile_anchored:
+                # 起点は前周期に出した中間目標のまま差し替える。ここで実測から
+                # 起こし直すと、左右の追従誤差の差がそのまま軌道長の差になり、
+                # 偏差監視が見ているずれを能動的に作りに行くことになる
+                axis.profile.retarget(axis.target)
             return
 
         if mode is ControlMode.CURRENT:
             # ホーミングで機構端に押し当てる等の開ループ指令。PID を通さず素通しする
             axis.pid.reset()
+            # 開ループで動かしている間、中間目標は据え置かれる。位置制御へ戻る周期に
+            # 実測から張り直さないと、押し当てで進んだぶんだけ機構が戻される
+            axis.profile_anchored = False
             axis.mode = ControlMode.CURRENT
             axis.target = float(value)
             return
@@ -393,12 +450,17 @@ class M3508PositionLoop(PausablePeriodicTask):
         **記録の破棄 (``_abort_recording``) はここに含めない。** 1 軸だけを畳む
         ``clear_target`` と全軸を畳む ``_disable_all`` では、溜まっていた完成品を
         捨てるかどうかが違う (前者は残す) ため、呼び分けを潰してはならない。
+
+        **中間目標の起点もここで捨てる。** 残すと、緊急停止や原点確定で止まって
+        いた間に機構が動いていても軌道は元の位置から続き、復帰 1 周期目に
+        「止まっていた間に進んだはずの中間目標」へ飛ぶ。
         """
         axis.mode = None
         axis.target = None
         axis.pid.reset()
         axis.last_output = 0.0
         axis.saturated = False
+        axis.profile_anchored = False
 
     def set_origin_here(self, name: str) -> None:
         """現在位置を累積角の原点にする (ホーミング完了時)。
@@ -524,6 +586,9 @@ class M3508PositionLoop(PausablePeriodicTask):
         # 前回測定値を持ち越すと復帰した瞬間に大きな電流が出る
         for axis in self._axes.values():
             axis.pid.reset()
+            # 停止中の駆動で機構は動いている。中間目標を持ち越すと、復帰 1 周期目に
+            # 「動作確認が動かす前の位置」へ戻す指令が出る (PID を reset するのと同じ理由)
+            axis.profile_anchored = False
         # 停止していた間の動きは記録できていない。窓を持ち越すと停止前後が
         # 地続きの 1 回の応答として綴じられる (時間の飛んだ波形になる)
         self._abort_recording()
@@ -665,6 +730,9 @@ class M3508PositionLoop(PausablePeriodicTask):
                 )
             # 古い実測値のまま PID を回すと偏差が実態から外れて暴走する
             axis.pid.reset()
+            # 途絶中に機構がどこへ動いたか分からない。軌道の起点は復帰した周期に
+            # 実測から張り直す (据え置くと復帰 1 周期目に途絶前の位置へ戻す指令が出る)
+            axis.profile_anchored = False
             return 0.0, False
 
         if axis.stale:
@@ -675,20 +743,52 @@ class M3508PositionLoop(PausablePeriodicTask):
             # 自分は健全でも、同じ機構に直結した相方が止まっている (途絶 or 偏差超過)。
             # 目標は残したまま力だけ抜く (復帰時に保持位置を作り直さずに済む)
             axis.pid.reset()
+            # 力を抜いている間に機構は自重で落ちたり相方に引かれたりする。
+            # 軌道の起点は復帰した周期に実測から張り直す
+            axis.profile_anchored = False
             return 0.0, False
 
         if axis.mode is ControlMode.CURRENT:
             return float(axis.target), False
 
+        setpoint = axis.target
+        feedforward = correction
+        if axis.profile is not None:
+            if not axis.profile_anchored:
+                self._anchor_profile(axis)
+            # **PID と同じ dt で進める。** 別の値を渡すと、返る参照速度と中間目標の
+            # 進み方が食い違い、速度フィードフォワードが実際の軌道と噛み合わなくなる
+            setpoint, reference_velocity = axis.profile.advance(dt)
+            # 速度 FF も PID の内側へ渡す。外で足すとクランプが二重になるうえ、
+            # アンチワインドアップが FF を知らないまま積分を進める
+            feedforward += axis.velocity_ff * reference_velocity
+
         return (
             axis.pid.update(
-                axis.target,
+                setpoint,
                 axis.driver.multi_turn_position,
                 dt,
-                feedforward=correction,
+                feedforward=feedforward,
             ),
             True,
         )
+
+    @staticmethod
+    def _anchor_profile(axis: _Axis) -> None:
+        """軌道の起点を実測位置へ張り直す。
+
+        実測を起点にしてよいのは位置制御へ入る最初の 1 周期だけで、以後は自分が
+        前周期に出した中間目標を起点にする。毎周期実測から起こし直すと、左右直結ペアの
+        追従誤差の差がそのまま軌道長の差になり、偏差監視が見ているずれを能動的に
+        作りに行くことになる。
+        """
+        profile = axis.profile
+        if profile is None:
+            return
+        profile.reset(axis.driver.multi_turn_position)
+        if axis.target is not None:
+            profile.retarget(axis.target)
+        axis.profile_anchored = True
 
     def _disable_all(self) -> None:
         for axis in self._axes.values():
