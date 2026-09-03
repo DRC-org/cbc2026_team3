@@ -41,7 +41,7 @@ motors:
       kp: 10.00
       ki: 3.57
       kd: 1.35
-      integral_limit: null
+      integral_limit: 200
       dead_band: 1.0
       # 本番の 2000counts (≒2.4A) に対しベンチは半分に絞る。機構が付いていない M3508 は
       # 負荷が無いぶん同じ電流でも一気に回るため、まず回ることの確認は低い上限で行う。
@@ -57,7 +57,7 @@ motors:
       kp: 10.00
       ki: 3.57
       kd: 1.35
-      integral_limit: null
+      integral_limit: 200
       dead_band: 1.0
       output_limit: 1000
 

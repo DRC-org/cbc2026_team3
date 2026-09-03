@@ -215,10 +215,11 @@ uv run python scripts/tune_y_axis.py --amplitude 1.5 --kp 24,32 --ki 10 --kd 1.0
        --amplitude 15 --dwell 3.0
    ```
 
-   - **`--config` に本番の `config/main_hand.yaml` を渡してはならない。** このツールは
-     モータ構成に現れるバスから 1 本を選んで開く実装で、本番 config は 3 本
-     （`m3508_bus` / `edulite_bus` / `generic_bus`）を持つため**どれが選ばれるか実行ごとに
-     変わる**。ベンチ側の robot config は `m3508_bus` の 1 本だけなので迷いようがない。
+   - **`--config` に本番の `config/main_hand.yaml` を渡してもよい。** このツールが開くのは
+     `--axis` で指定した軸のモータが載っているバス 1 本だけなので、3 本
+     （`m3508_bus` / `edulite_bus` / `generic_bus`）を持つ本番 config でも `m3508_bus` に
+     決まる。ただし**本番 config を渡すと `output_limit` も本番の 2000 になる**ので、
+     下の「ベンチ側は 800」の断りはベンチ側 robot config を使う場合の話になる。
    - `--positions` に本番の位置定数を渡すのは、**`motion` と広い `manual` がそちらにしか
      無い**ため。ベンチ側の位置定数（`manual` ±2mm）では実運用振幅がそもそも通らない。
    - **ただしベンチ側の `output_limit` は 800、本番は 2000。** 飽和の境界が

@@ -17,6 +17,7 @@ import sys
 import pytest
 import yaml
 
+from lib.config_schema import load_robot_config
 from lib.sequence.positions import MotionSpec, load_position_table
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -286,6 +287,128 @@ class TestSaturationReport:
         tune._print_comparison([(trial, [result])], "mm")
 
         assert "75%" in capsys.readouterr().out
+
+
+def _read_yaml(path: pathlib.Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _axis_spec(motor_names: tuple[str, str] = ("y_axis_r", "y_axis_l")):
+    """左右ペアの y_axis を 1 つだけ持つ最小の位置定数。"""
+    return load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "sync_tolerance": 2.0,
+                    "motors": {
+                        motor_names[0]: {"scale": Y_SCALE},
+                        motor_names[1]: {"scale": -Y_SCALE},
+                    },
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        },
+        source="test",
+    ).axis("y_axis")
+
+
+def _robot(buses_by_motor: dict[str, str]):
+    """モータ名 → バス別名だけを与えた最小の robot config。"""
+    return load_robot_config(
+        {
+            "robot_name": "main_hand",
+            "motors": {
+                name: {"driver": "m3508", "bus": bus, "can_id": index + 1}
+                for index, (name, bus) in enumerate(buses_by_motor.items())
+            },
+        },
+        source="test",
+    )
+
+
+class TestBusSelection:
+    """開くのは **``--axis`` で指定した軸のモータが載っているバス** ただ 1 本。
+
+    モータ構成に現れるバスの集合から 1 本選ぶと、複数バスを持つ config
+    (本番の config/main_hand.yaml は 3 本、config/bench/m3508_edulite/ は 2 本) では
+    選ばれるバスが実行ごとに変わる。対象軸の載っていないバスを開いた回は
+    フィードバックが 1 通も届かず、症状は「同じコマンドなのに動いたり動かなかったり
+    する」だけになる。
+    """
+
+    def _resolve(self, config: pathlib.Path, positions: pathlib.Path, axis: str = "y_axis") -> str:
+        robot = load_robot_config(_read_yaml(config), source=str(config))
+        table = load_position_table(_read_yaml(positions), source=str(positions))
+        return tune._resolve_bus_alias(robot, table.axis(axis))
+
+    def test_2バスのベンチでもm3508のバスを選ぶ(self) -> None:
+        """M3508 と EDULITE を同時に載せたセット。edulite_bus を開いた回は 1 台も動かない。"""
+        bench = _ROOT / "config" / "bench" / "m3508_edulite"
+
+        alias = self._resolve(bench / "main_hand.yaml", bench / "main_hand_positions.yaml")
+
+        assert alias == "m3508_bus"
+
+    def test_1バスのチューニング用ベンチ(self) -> None:
+        bench = _ROOT / "config" / "bench" / "y_axis_tuning"
+
+        alias = self._resolve(bench / "main_hand.yaml", bench / "main_hand_positions.yaml")
+
+        assert alias == "m3508_bus"
+
+    def test_3バスの本番configも選べる(self) -> None:
+        """本番 config を渡せることは手順 (docs/mechanism_handoff.md §3-2) の前提。"""
+        alias = self._resolve(
+            _ROOT / "config" / "main_hand.yaml",
+            _ROOT / "config" / "main_hand_positions.yaml",
+        )
+
+        assert alias == "m3508_bus"
+
+    def test_バスの並びが同じ2構成で対象軸の側を選ぶ(self) -> None:
+        """**バスの集合から 1 本選ぶ実装は、ここで必ず落ちる。**
+
+        set の反復順は文字列ハッシュと投入順で決まるので、1 例だけでは集合から
+        選ぶ実装が偶然通る回がある。2 つの構成でバス名も**その並びも**同じにして
+        対象軸だけを入れ替えれば、集合から選ぶ実装は同じ集合を同じ順で組み立てる
+        —— 2 つへ必ず同じ答えを返すので、どちらかが落ちる。
+        """
+        spec = _axis_spec()
+        on_alpha = _robot(
+            {
+                "y_axis_r": "alpha_bus",
+                "y_axis_l": "alpha_bus",
+                "other_r": "beta_bus",
+                "other_l": "beta_bus",
+            }
+        )
+        on_beta = _robot(
+            {
+                "other_r": "alpha_bus",
+                "other_l": "alpha_bus",
+                "y_axis_r": "beta_bus",
+                "y_axis_l": "beta_bus",
+            }
+        )
+
+        assert tune._resolve_bus_alias(on_alpha, spec) == "alpha_bus"
+        assert tune._resolve_bus_alias(on_beta, spec) == "beta_bus"
+
+    def test_左右が別バスなら落とす(self) -> None:
+        """C620 の電流指令は 1 通に同一バスの 4 モータ分。別バスでは同時に指令できない。"""
+        robot = _robot({"y_axis_r": "alpha_bus", "y_axis_l": "beta_bus"})
+
+        with pytest.raises(SystemExit, match="別のバス"):
+            tune._resolve_bus_alias(robot, _axis_spec())
+
+    def test_対象軸のモータがconfigに居なければ落とす(self) -> None:
+        """開くバスが決まらない。黙って別のバスを開くと 1 台も動かない試行が並ぶ。"""
+        robot = _robot({"rotate_r": "edulite_bus"})
+
+        with pytest.raises(SystemExit, match="y_axis_r"):
+            tune._resolve_bus_alias(robot, _axis_spec())
 
 
 def test_同梱の本番configがそのまま試行になる() -> None:
