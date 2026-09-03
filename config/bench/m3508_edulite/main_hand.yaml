@@ -127,3 +127,18 @@ motors:
     position_kp: 30.0
     # rotate_r と必ず同じ値にすること (上の理由)
     set_zero_on_start: true
+
+  # DC モータ。位置の概念がないので duty 指令。
+  # DC 基板 (種別 2) の基板番号 0、スロット 0-2 が 0x80-0x82。
+  # ch0=0x80(conveyor) / ch1=0x81 / ch2=0x82 で、ch1・ch2 は現在未使用。
+  conveyor:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x80               # DC 基板 #0 ch0
+    control_type: duty
+    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
+    # ファームを一部の基板にだけ焼き忘れると、症状は「そのモータが応答しない」か、
+    # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
+    # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
+    # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion

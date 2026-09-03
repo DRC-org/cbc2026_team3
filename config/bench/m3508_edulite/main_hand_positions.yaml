@@ -78,6 +78,21 @@ axes:
       rotate_r: { scale: 0.017453292519943295, offset: 0.0 }
       rotate_l: { scale: -0.017453292519943295, offset: 0.0 }   # 逆回転で同一動作
 
+  # ワーク搬送コンベア。DC モータなので位置の概念がなく duty 指令で回す。
+  # duty 軸に可動範囲は存在しないので manual: は書けない (書くと起動を拒否する)。
+  # 手動でも run / stop のプリセットだけを送る。
+  # duty 指令は到達フラグを持たないため、settle_s で待たないと指令直後に次の
+  # ステップへ進んでしまう (起動・停止し切る前に先へ行く)。
+  conveyor:
+    unit: duty
+    command_unit: duty
+    command_mode: duty
+    scale: 1.0
+    offset: 0.0
+    settle_s: 0.5         # DC モータの起動・停止待ち [s]
+    timeout_s: 1.0
+
+
 positions:
   # 起動時のロータ位置が原点になる (M3508Driver は最初のフィードバックを基準に累積角を積む)。
   # 手動操縦パネルからプリセットとして送れる。
@@ -97,3 +112,7 @@ positions:
     small: 10.0          # まず動いたことの確認
     half: 45.0           # 指令量と実際の回転角が比例していることの確認
     full: 90.0           # 回転方向が左右で逆になることの確認
+
+  conveyor:
+    stop: 0.0            # 停止 [duty]
+    run: 0.3             # 搬送 [duty]。符号が回転方向なので、逆転が必要になったら負値にする

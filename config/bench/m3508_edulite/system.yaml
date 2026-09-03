@@ -29,6 +29,7 @@
 can_buses:
   m3508_bus: can_m3508
   edulite_bus: can_edulite
+  generic_bus: can_generic
 
 # health / match は書かない。**しきい値の既定値は lib/config_schema.py にしかなく**
 # (HealthThresholds / MatchSettings)、省略した分はそこから埋まる。本番と同じ数値を
