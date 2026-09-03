@@ -11,9 +11,21 @@ UI の /pid-tuning でもステップ応答は見られるが、調整は「同�
 その差が指標の差と区別できない。ここは目標の入れ方・待ち時間・記録の窓を固定し、
 **ゲインだけを変えた同一条件の試行**を並べて出す。
 
-制御そのものは本番と同じ ``M3508PositionLoop`` が行う。ゲインの上書きは
-プロセス内に閉じるので config は書き換わらない —— 良い値が決まってから
+制御そのものは本番と同じ ``M3508PositionLoop`` が行う。ゲインと台形速度プロファイルの
+上書きはプロセス内に閉じるので config は書き換わらない —— 良い値が決まってから
 config へ書き戻す (途中の値が残らない)。
+
+--- 調整するのは PID ゲインだけではない ------------------------------------
+位置定数に ``axes.<軸>.motion`` を書いた軸は、最終目標ではなく速度・加速度で
+制限した中間目標が PID へ入る。したがってつまみは 3 つ増える:
+
+  ``max_velocity``     巡航速度 [mm/s]
+  ``max_acceleration`` 加減速度 [mm/s^2]
+  ``velocity_ff``      参照速度に掛けて feedforward へ足す係数
+
+**``motion`` を持つ config なら既定でそれを使う** (本番と同じ制御になる)。
+持たない config で ``--max-velocity`` / ``--max-acceleration`` を渡せば、その場だけ
+プロファイルを有効にできる。どちらも無ければ従来どおりのステップ入力。
 
 --- 安全機構 ---------------------------------------------------------------
 本番の保護のうち、機構を守る層はそのまま効く:
@@ -24,6 +36,12 @@ config へ書き戻す (途中の値が残らない)。
   - 試行中: 偏差ラッチが立ったら即座に中止して電流 0
   - 終了時: 必ず目標を解除し、0 電流フレームを送ってからバスを閉じる
 
+--- 飽和を最初に見る --------------------------------------------------------
+出力が上限に張り付いている間、**ゲインを変えても応答は変わらない**。飽和率を見ずに
+kp を振ると「上げても下げても同じ」という観察から抜け出せない。試行ごとに
+「飽和した周期の割合」を必ず出すので、まずそこを読むこと (プロファイルを有効にした
+なら、飽和はプロファイルが機構の能力を超えている合図でもある)。
+
 使い方:
     # まず一番小さい振幅で 1 往復 (現状のゲインの確認)
     uv run python scripts/tune_y_axis.py --amplitude 0.5 --cycles 1
@@ -33,6 +51,42 @@ config へ書き戻す (途中の値が残らない)。
 
     # 良い kp が決まったら同期補正を入れて比べる
     uv run python scripts/tune_y_axis.py --amplitude 2.0 --kp 8 --sync-kp 0,2
+
+--- 実運用ストローク (5〜15mm) の詰め方 --------------------------------------
+**振幅 1.5mm までしか実測していない。** 大きな移動は挙動が別物になるので、
+必ず次の順で上げる。順番を飛ばすと、どれが効いたのか読めない結果だけが残る。
+**手順の全文と各段の中止条件は ``docs/mechanism_handoff.md`` §3-2。**
+
+  0. 可動範囲を実測してから始める (``scripts/sync_probe.py`` を無励磁で走らせ、
+     手で端から端まで動かす)。``--amplitude`` は ``manual`` の可動範囲でしか
+     通らないので、実運用の振幅を出すには**位置定数だけ**を本番へ差し替える:
+       --positions config/main_hand_positions.yaml
+     **``--config`` に本番の config/main_hand.yaml を渡してはならない** ——
+     開くバスをモータ構成の集合から 1 本選ぶ実装なので、3 本のバスを持つ本番
+     config ではどれが選ばれるか実行ごとに変わる。robot config はバス 1 本の
+     ベンチ側 (config/bench/y_axis_tuning/) のままにする。**ただしそちらの
+     output_limit は 800 で本番は 2000** (飽和の境界が 0.45mm と 1.14mm で
+     2.5 倍違う) ので、実運用振幅を測る前に本番と同じ値へ上げること
+
+  1. 小さい振幅で現状を確認する (プロファイルが効いていることの確認)
+       --amplitude 1.5 --dwell 1.5
+
+  2. 実運用の振幅へ広げる。**ここで飽和率が跳ね上がるなら a_max か v_max が
+     機構の能力を超えている。**ゲインではなくそちらを下げる
+       --amplitude 15 --dwell 3.0
+
+  3. ``a_max`` を上げる (立ち上がりが速くなる。行き過ぎと飽和率を見る)
+       --amplitude 15 --dwell 3.0 --max-acceleration 300,600,1000
+
+  4. 最後に ``v_max`` を上げる。**velocity_ff と kd をセットで見直すこと。**
+     ``kd`` の単位は counts/(deg/s) なので、巡航速度がそのまま制動として出力に
+     乗る —— kd=1.0 では 50mm/s = 2750deg/s が D 項だけで -2750counts になり、
+     ``output_limit`` 2000 を超えて**逆向きに飽和する**。定常追従では実測速度が
+     参照速度にほぼ等しいので、参照速度へ kd と同じ係数 (velocity_ff = kd) を
+     掛けて足せばその制動をちょうど打ち消せる。**片方だけ動かすと巡航中に
+     D 項が出力を食い潰し、飽和率だけが上がって速くならない**
+       --amplitude 15 --dwell 3.0 --max-velocity 50,80
+       --amplitude 15 --dwell 3.0 --max-velocity 80 --velocity-ff 0,1.0,1.6
 """
 
 from __future__ import annotations
@@ -40,6 +94,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import math
 import pathlib
 import sys
 import time
@@ -54,9 +109,10 @@ from lib.axis_sync import SyncGroup
 from lib.can_manager import CANManager
 from lib.config_schema import load_robot_config, load_system_config
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
+from lib.control.trajectory import TrapezoidalProfile
 from lib.drivers.base import ControlMode
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
-from lib.sequence.positions import AxisSpec, load_position_table
+from lib.sequence.positions import AxisSpec, MotionSpec, load_position_table
 from lib.tuning.metrics import Sample, analyze_step_response, settle_band_for, step_span
 
 #: 記録の間隔 [s]。制御周期 (200Hz) と同じにする。これより粗いと行き過ぎのピークを
@@ -66,6 +122,10 @@ SAMPLE_INTERVAL_S = 0.005
 SETTLE_RATIO = 0.02
 #: 開始前にフィードバックの到着を待つ時間 [s]
 FEEDBACK_WAIT_S = 3.0
+#: プロファイルの所要時間に対して記録窓へ最低限残す余白 [s]。
+#: 窓が移動の途中で閉じると、行き過ぎも整定も**まだ起きていない**ものを測ることに
+#: なり、指標が一律に良い方へ嘘をつく (行き過ぎは減速が終わってから出る)
+MOTION_DWELL_MARGIN_S = 0.3
 
 
 @dataclass(frozen=True)
@@ -80,6 +140,11 @@ class MotorTrace:
     #: 実電流が指令に追いていれば「電流は流れているのに回らない」= 機構側、
     #: ほぼ 0 なら「そもそも電流が出ていない」= C620・配線・電源側
     peak_current: float = 0.0
+    #: 出力が上限に張り付いていた周期の割合 (0.0〜1.0)。**記録から直接数える。**
+    #: ``StepMetrics.saturation_ratio`` と同じ値だが、そちらは「ステップと呼べる
+    #: 入力が無かった」応答で None になる —— 動かなかった試行こそ飽和を知りたいので、
+    #: 指標が出せたかどうかに依存しない経路で持つ
+    saturation_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -142,6 +207,7 @@ class StepRunner:
         commands = self._spec.to_commands(target_value)
         traces: dict[str, list[Sample]] = {name: [] for name in self._drivers}
         peak_currents: dict[str, float] = dict.fromkeys(self._drivers, 0.0)
+        saturated_counts: dict[str, int] = dict.fromkeys(self._drivers, 0)
         peak_deviation = 0.0
         aborted: str | None = None
 
@@ -163,13 +229,15 @@ class StepRunner:
             for name, driver in self._drivers.items():
                 member = self._member(name)
                 peak_currents[name] = max(peak_currents[name], abs(driver.state.current))
+                saturated = self._loop.is_saturated(name)
+                saturated_counts[name] += int(saturated)
                 traces[name].append(
                     Sample(
                         t=elapsed,
                         target=member.to_value(commands[name]),
                         position=member.to_value(driver.multi_turn_position),
                         output=self._loop.pid(name).last_output,
-                        saturated=self._loop.is_saturated(name),
+                        saturated=saturated,
                     )
                 )
 
@@ -190,6 +258,7 @@ class StepRunner:
                     samples,
                     _analyze(samples, self._dead_band_value(name)),
                     peak_currents[name],
+                    saturated_counts[name] / len(samples) if samples else 0.0,
                 )
                 for name, samples in traces.items()
             ],
@@ -216,9 +285,16 @@ def _analyze(samples: list[Sample], dead_band_value: float):
 
 
 def _format_metrics(trace: MotorTrace, unit: str) -> str:
+    """1 モータ分の 1 行。**飽和率は指標が出せなかった応答でも必ず出す。**
+
+    飽和している間はゲインを変えても応答が変わらないので、これが読めないと
+    「上げても下げても同じ」という観察から抜け出せない。動かなかった試行
+    (指標が None になる) こそその状態でありうるため、指標とは別経路で持つ。
+    """
+    sat = f"飽和 {trace.saturation_ratio * 100:.0f}%"
     m = trace.metrics
     if m is None:
-        return f"    {trace.name}: 解析できるサンプルがありません"
+        return f"    {trace.name}: 解析できるサンプルがありません ({sat})"
 
     def opt(value, digits=2, suffix=""):
         return "—" if value is None else f"{value:.{digits}f}{suffix}"
@@ -229,19 +305,25 @@ def _format_metrics(trace: MotorTrace, unit: str) -> str:
         f"行き過ぎ {m.overshoot_pct:.1f}% / "
         f"整定 {opt(m.settling_time_s, 3, 's')} / "
         f"定常偏差 {m.steady_state_error:+.3f}{unit} / "
-        f"飽和 {m.saturation_ratio * 100:.0f}% / "
+        f"{sat} / "
         f"指令 {m.peak_output:.0f} → 実電流 {trace.peak_current:.0f} counts"
     )
 
 
 @dataclass(frozen=True)
 class TrialConfig:
-    """1 試行のゲイン。"""
+    """1 試行の条件。ゲインと台形速度プロファイルの両方を持つ。
+
+    ``motion`` が None なら**その試行だけ**従来どおり最終目標をステップで入れる。
+    値は軸の人間の単位のまま持ち、指令単位への換算は ``_build_profile`` が行う
+    (単位換算を 1 箇所へ閉じる)。
+    """
 
     kp: float
     ki: float
     kd: float
     sync_kp: float
+    motion: MotionSpec | None = None
 
     def label(self) -> str:
         parts = [f"kp={self.kp:g}"]
@@ -250,7 +332,45 @@ class TrialConfig:
         if self.kd:
             parts.append(f"kd={self.kd:g}")
         parts.append(f"sync_kp={self.sync_kp:g}")
+        if self.motion is not None:
+            parts.append(f"v={self.motion.max_velocity:g}")
+            parts.append(f"a={self.motion.max_acceleration:g}")
+            parts.append(f"vff={self.motion.velocity_ff:g}")
         return " ".join(parts)
+
+
+def _build_profile(motion: MotionSpec, scale: float) -> TrapezoidalProfile:
+    """人間の単位の制限を**モータの指令単位**へ換算したプロファイルを作る。
+
+    ``main._attach_motion_profiles`` と同じ換算。``abs(scale)`` で掛けるのは、
+    速度・加速度の制限が向きを持たない量だから —— 逆回転ペアは ``scale`` の符号が
+    逆なので、符号付きで掛けると片側の上限が負値になる (``TrapezoidalProfile`` は
+    正の上限しか受け取らないため、そこで落ちる)。
+    """
+    factor = abs(scale)
+    return TrapezoidalProfile(
+        max_velocity=motion.max_velocity * factor,
+        max_acceleration=motion.max_acceleration * factor,
+    )
+
+
+def _describe_profile(spec: AxisSpec, motion: MotionSpec) -> str:
+    """プロファイルの制限を指令単位まで展開した 1 行。
+
+    人間の単位のまま出すと、``scale`` の取り違え (符号・桁) が画面のどこにも
+    現れない。実際にループへ渡る値を出す。
+    """
+    per_motor = " / ".join(
+        f"{m.name} v<={motion.max_velocity * abs(m.scale):.1f} "
+        f"a<={motion.max_acceleration * abs(m.scale):.1f}"
+        for m in spec.motors
+    )
+    return (
+        f"プロファイル: v<={motion.max_velocity:g}{spec.unit}/s "
+        f"a<={motion.max_acceleration:g}{spec.unit}/s^2 "
+        f"velocity_ff={motion.velocity_ff:g} "
+        f"[{spec.command_unit} 換算: {per_motor}]"
+    )
 
 
 async def _wait_for_feedback(drivers: dict[str, M3508Driver], can_manager: CANManager) -> None:
@@ -298,6 +418,8 @@ async def _run_trial(
         )
     results: list[StepResult] = []
     print(f"\n=== {trial.label()} (起点 {origin:+.2f}{spec.unit}) ===")
+    if trial.motion is not None:
+        print(f"  {_describe_profile(spec, trial.motion)}")
 
     for _ in range(cycles):
         for target in (origin + amplitude, origin):
@@ -319,7 +441,7 @@ async def _run_trial(
 def _print_comparison(trials: list[tuple[TrialConfig, list[StepResult]]], unit: str) -> None:
     """試行を横に並べる。**比較こそがこのツールの目的。**"""
     print("\n================ 比較 ================")
-    print(f"{'ゲイン':<28} {'ずれ最大':>10} {'ずれ平均':>10} {'整定(代表)':>12} {'飽和':>7}")
+    print(f"{'条件':<46} {'ずれ最大':>10} {'ずれ平均':>10} {'整定(代表)':>12} {'飽和':>7}")
     for trial, results in trials:
         if not results:
             continue
@@ -331,13 +453,13 @@ def _print_comparison(trials: list[tuple[TrialConfig, list[StepResult]]], unit: 
             for m in r.motors
             if m.metrics is not None and m.metrics.settling_time_s is not None
         ]
-        saturations = [
-            m.metrics.saturation_ratio for r in results for m in r.motors if m.metrics is not None
-        ]
+        # 飽和は記録から直接数えた値を使う。指標 (StepMetrics) 経由にすると、
+        # 動かなかった試行 —— まさに飽和を疑うべき試行 —— で欄が「—」になる
+        saturations = [m.saturation_ratio for r in results for m in r.motors]
         settle_text = f"{sum(settles) / len(settles):.3f}s" if settles else "—"
         sat_text = f"{max(saturations) * 100:.0f}%" if saturations else "—"
         print(
-            f"{trial.label():<28} {peak:>9.3f}{unit} {mean:>9.3f}{unit} "
+            f"{trial.label():<46} {peak:>9.3f}{unit} {mean:>9.3f}{unit} "
             f"{settle_text:>12} {sat_text:>7}"
         )
 
@@ -364,35 +486,153 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--ki", default=None, help="ki")
     parser.add_argument("--kd", default=None, help="kd")
     parser.add_argument("--sync-kp", default=None, help="同期補正ゲイン (カンマ区切りでスイープ)")
+    parser.add_argument(
+        "--max-velocity",
+        default=None,
+        help="台形プロファイルの巡航速度 [単位/s] (カンマ区切りでスイープ)",
+    )
+    parser.add_argument(
+        "--max-acceleration",
+        default=None,
+        help="台形プロファイルの加減速度 [単位/s^2] (カンマ区切りでスイープ)",
+    )
+    parser.add_argument(
+        "--velocity-ff",
+        default=None,
+        help="参照速度に掛けて feedforward へ足す係数 (kd と同じ単位。カンマ区切りでスイープ)",
+    )
     return parser.parse_args(argv)
 
 
-def _build_trials(args: argparse.Namespace, base: dict[str, float]) -> list[TrialConfig]:
+def _build_trials(
+    args: argparse.Namespace, base: dict[str, float], base_motion: MotionSpec | None
+) -> list[TrialConfig]:
     """スイープするパラメータは 1 つだけ許す。
 
     2 つ同時に振ると組み合わせの数だけ機体が動き、しかもどちらが効いたのか
-    読めない結果が並ぶ。
+    読めない結果が並ぶ。**プロファイルのつまみ (v_max / a_max / velocity_ff) も
+    同じ 1 本の制限に入れる** —— ゲインと軌道を同時に振ったら、なおさら読めない。
+
+    ``base_motion`` は位置定数の ``axes.<軸>.motion``。書いてあればそれを既定に
+    使う (本番と同じ制御で測る)。書いていない config でも
+    ``--max-velocity`` / ``--max-acceleration`` を対で渡せばその場だけ有効にできる。
     """
     kps = _floats(args.kp) if args.kp else [base["kp"]]
     kis = _floats(args.ki) if args.ki else [base["ki"]]
     kds = _floats(args.kd) if args.kd else [base["kd"]]
     syncs = _floats(args.sync_kp) if args.sync_kp else [base["sync_kp"]]
 
+    # 空リスト = 「この試行にプロファイルは無い」。既定値で埋めない ——
+    # 埋めると motion を書いていない軸に勝手な制限が掛かり、config と実機の
+    # 挙動が食い違う (しかも画面からは読めない)
+    velocities = _floats(args.max_velocity) if args.max_velocity else _base_list(base_motion, "v")
+    accelerations = (
+        _floats(args.max_acceleration) if args.max_acceleration else _base_list(base_motion, "a")
+    )
+    ffs = _floats(args.velocity_ff) if args.velocity_ff else _base_list(base_motion, "ff")
+
+    if bool(velocities) != bool(accelerations):
+        # 片方だけでは軌道を組み立てられない。既定値で補うと「書いたのに効かない
+        # 制限」になる (位置定数の MotionSpec と同じ方針)
+        raise SystemExit(
+            "--max-velocity と --max-acceleration は対で指定してください"
+            " (片方だけでは台形プロファイルを組み立てられません)"
+        )
+    if not velocities and args.velocity_ff:
+        # プロファイルが無ければ参照速度が存在しないので、この係数は黙って
+        # 効かない値になる
+        raise SystemExit(
+            "--velocity-ff はプロファイルを有効にしたときだけ効きます。"
+            " --max-velocity と --max-acceleration も指定してください"
+        )
+    if not ffs:
+        ffs = [0.0]
+
     sweeping = [
         name
-        for name, values in (("kp", kps), ("ki", kis), ("kd", kds), ("sync_kp", syncs))
+        for name, values in (
+            ("kp", kps),
+            ("ki", kis),
+            ("kd", kds),
+            ("sync_kp", syncs),
+            ("max_velocity", velocities),
+            ("max_acceleration", accelerations),
+            ("velocity_ff", ffs),
+        )
         if len(values) > 1
     ]
     if len(sweeping) > 1:
         raise SystemExit(f"同時にスイープできるのは 1 つだけです: {', '.join(sweeping)}")
+
+    motions = _build_motions(velocities, accelerations, ffs)
 
     trials = []
     for kp in kps:
         for ki in kis:
             for kd in kds:
                 for sync_kp in syncs:
-                    trials.append(TrialConfig(kp=kp, ki=ki, kd=kd, sync_kp=sync_kp))
+                    for motion in motions:
+                        trials.append(
+                            TrialConfig(kp=kp, ki=ki, kd=kd, sync_kp=sync_kp, motion=motion)
+                        )
     return trials
+
+
+def _base_list(base_motion: MotionSpec | None, key: str) -> list[float]:
+    """位置定数の ``motion`` を既定値の 1 要素リストにする。無ければ空。"""
+    if base_motion is None:
+        return []
+    return [
+        {
+            "v": base_motion.max_velocity,
+            "a": base_motion.max_acceleration,
+            "ff": base_motion.velocity_ff,
+        }[key]
+    ]
+
+
+def _build_motions(
+    velocities: list[float], accelerations: list[float], ffs: list[float]
+) -> list[MotionSpec | None]:
+    """組み合わせを ``MotionSpec`` にする。値の検証はその ``__post_init__`` に委ねる。
+
+    検証をここへ書き写すと、位置定数の側と片方だけ直したときに気付けない
+    (「config では拒否されるのにツールでは通る値」が作れる)。
+    """
+    if not velocities:
+        return [None]
+    try:
+        return [
+            MotionSpec(max_velocity=v, max_acceleration=a, velocity_ff=ff)
+            for v in velocities
+            for a in accelerations
+            for ff in ffs
+        ]
+    except ValueError as exc:
+        raise SystemExit(f"プロファイルの値が不正です: {exc}") from exc
+
+
+def _check_dwell(trials: list[TrialConfig], *, amplitude: float, dwell_s: float) -> None:
+    """記録窓がプロファイルの移動を含みきれるか確かめる。
+
+    プロファイルを入れると移動そのものに時間が掛かる (振幅 15mm / v=50 / a=300 なら
+    0.47 秒)。窓が移動の途中で閉じると、行き過ぎも整定も**まだ起きていない**ものを
+    測ることになり、指標が一律に良い方へ嘘をつく。しかも「速いプロファイルほど
+    数字が良い」という逆向きの結論が出るので、気付く手掛かりが無い。
+    """
+    for trial in trials:
+        if trial.motion is None:
+            continue
+        travel_s = trial.motion.duration_for(amplitude)
+        required = travel_s + MOTION_DWELL_MARGIN_S
+        if dwell_s < required:
+            # 提案値は必ず切り上げる。表示のために丸めて下げると、言われたとおりに
+            # 打ち直しても同じ拒否が返る
+            raise SystemExit(
+                f"--dwell {dwell_s}s では {trial.label()} の移動 "
+                f"({travel_s:.2f}s) を記録しきれません。"
+                f" --dwell {math.ceil(required * 10.0) / 10.0:.1f} 以上を指定してください"
+            )
 
 
 async def _main_async(args: argparse.Namespace) -> int:
@@ -428,6 +668,10 @@ async def _main_async(args: argparse.Namespace) -> int:
     channel = system.can_buses[bus_alias]
     can_manager.add_bus(bus_alias, can.Bus(interface="socketcan", channel=channel))
 
+    # 単位換算 (人間の単位 → 指令単位) を知るのはこの層だけ。位置制御ループへは
+    # 指令単位で渡す
+    scales = {m.name: m.scale for m in spec.motors}
+
     drivers: dict[str, M3508Driver] = {}
     for name in spec.motor_names:
         cfg = robot.motors[name]
@@ -456,7 +700,8 @@ async def _main_async(args: argparse.Namespace) -> int:
     output_limit = min(abs(float(base_pid["output_limit"])), float(CURRENT_MAX))
     raw_integral_limit = base_pid.get("integral_limit")
     integral_limit = None if raw_integral_limit is None else float(raw_integral_limit)
-    trials = _build_trials(args, base)
+    trials = _build_trials(args, base, spec.motion)
+    _check_dwell(trials, amplitude=args.amplitude, dwell_s=args.dwell)
 
     if any(t.ki for t in trials) and integral_limit is None:
         # 上限の無い積分は、機構端に当たって動けない間に際限なく育ち、拘束が
@@ -471,6 +716,13 @@ async def _main_async(args: argparse.Namespace) -> int:
     print(f"  振幅       : {args.amplitude}{spec.unit} x {args.cycles} 往復")
     print(f"  出力上限   : {output_limit:.0f} counts")
     print(f"  sync_tolerance: {base_group.tolerance}{spec.unit}")
+    # プロファイルの有無は試行全体で共通 (スイープしても値が変わるだけ)。
+    # 「効いているつもり」で結果を読ませないため、無い場合も明示する ——
+    # 最終目標がそのまま PID へ入る軸では、大きな移動は飽和したまま加速する
+    if trials[0].motion is None:
+        print("  プロファイル: なし (最終目標をステップで入れる)")
+    else:
+        print(f"  {_describe_profile(spec, trials[0].motion)}")
     print(f"  試行       : {len(trials)} 通り")
     print("  ** 機体が動きます。可動範囲から離れてください **")
 
@@ -480,6 +732,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         ゲインだけを差し替えて使い回すと、前の試行で育った積分や偏差ラッチが
         次の試行へ持ち越される。**同一条件で比べるのがこのツールの目的**なので、
         状態ごと作り直す。同期グループは frozen なのでここで組み立てる。
+        プロファイルも位置と速度の状態を持つので、同じ理由で試行ごとに作り直す。
         """
         loop = M3508PositionLoop(can_manager, bus_alias)
         for name, driver in drivers.items():
@@ -493,6 +746,15 @@ async def _main_async(args: argparse.Namespace) -> int:
             pid.output_min = -output_limit
             pid.output_max = output_limit
             loop.add_motor(name, driver, pid)
+            if trial.motion is not None:
+                # 本番 (main._attach_motion_profiles) と同じく後付けで渡す。
+                # 起点の実測は位置制御ループが最初の指令で行うので、ここで
+                # フィードバック未受信の 0.0 が軌道の起点に焼き付くことはない
+                loop.set_motion_profile(
+                    name,
+                    _build_profile(trial.motion, scales[name]),
+                    velocity_ff=trial.motion.velocity_ff,
+                )
         group = SyncGroup(
             name=base_group.name,
             members=base_group.members,

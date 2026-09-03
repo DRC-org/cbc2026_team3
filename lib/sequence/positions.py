@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -13,6 +14,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
     "ManualSpec",
+    "MotionSpec",
     "MotorSpec",
     "PositionLookupError",
     "PositionTable",
@@ -104,6 +106,57 @@ class HomingSpec:
 
 
 @dataclass(frozen=True)
+class MotionSpec:
+    """台形速度プロファイルの制限。**軸の機構的性質**なのでここに置く。
+
+    位置制御ループは最終目標をステップで PID へ入れるため、移動距離が伸びるほど
+    P 項が飽和したままの定加速になり、減速に使える距離が足りなくなる
+    (飽和中は D 項も出力に現れないので ``kd`` では直らない)。速度と加速度で
+    制限した中間目標を毎周期作れば、PID に見せるのは追従誤差だけになる。
+
+    値は軸の人間の単位 (``axes.<軸>.unit``) のまま持つ。指令単位への換算は
+    制御層が ``abs(scale)`` で行う —— 速度・加速度の制限は向きを持たない量で、
+    符号付きの ``scale`` を掛けると逆回転側の制限が負値になり制限として働かない。
+
+    ``max_velocity`` と ``max_acceleration`` は必ず対で書く。片方だけでは
+    プロファイルを組み立てられず、既定値で埋めると「書いたのに効かない制限」に
+    なる (``sync_kp`` / ``sync_limit`` と同じ方針)。
+    """
+
+    #: 巡航速度の上限 [軸の unit/s]
+    max_velocity: float
+    #: 加減速度の上限 [軸の unit/s^2]
+    max_acceleration: float
+    #: 参照速度を PID の feedforward へ加算する係数。0.0 で追従誤差のみに任せる
+    velocity_ff: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.max_velocity <= 0.0:
+            raise ValueError(f"motion.max_velocity は正の値: {self.max_velocity!r}")
+        if self.max_acceleration <= 0.0:
+            raise ValueError(f"motion.max_acceleration は正の値: {self.max_acceleration!r}")
+        if self.velocity_ff < 0.0:
+            # 負の係数は進行方向と逆へ押す。追従を助けるどころか誤差を広げる
+            raise ValueError(f"motion.velocity_ff は 0 以上: {self.velocity_ff!r}")
+
+    def duration_for(self, distance: float) -> float:
+        """静止から静止まで ``distance`` を走るのに要る時間 [s]。
+
+        起動時に「必ずタイムアウトする軸」を弾くための見積もりであって、
+        中間目標そのものを作るのは制御層の仕事。時間だけを閉じた式で出すので
+        こちらは制御層を import しない (位置定数は制御層より下の層)。
+
+        巡航に入らない短距離 (三角プロファイル) を台形の式で見積もると所要時間を
+        過大に読み、実際には間に合う設定を起動時に拒否してしまう。
+        """
+        travel = abs(distance)
+        # v_max へ達する前に減速へ移る距離かどうかで式が変わる (境界では一致する)
+        if travel * self.max_acceleration <= self.max_velocity**2:
+            return 2.0 * math.sqrt(travel / self.max_acceleration)
+        return travel / self.max_velocity + self.max_velocity / self.max_acceleration
+
+
+@dataclass(frozen=True)
 class AxisSpec:
     """1 論理軸の単位換算とデフォルト待ち条件。
 
@@ -139,6 +192,8 @@ class AxisSpec:
     # リミットスイッチによる零点確定。None ならこの軸はホーミングしない
     # (電源投入位置をそのまま原点として使う)
     homing: HomingSpec | None = None
+    # 台形速度プロファイルの制限。None ならこの軸は従来どおり最終目標をステップで入れる
+    motion: MotionSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.motors:
@@ -148,6 +203,13 @@ class AxisSpec:
         if self.homing is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: homing は位置指令の軸にのみ書けます "
+                f"(command_mode={self.command_mode.value})"
+            )
+        # duty / on_off の軸に中間目標は存在しない。指令が届いたかを観測できないので
+        # 「目標へ向けて毎周期少しずつ進める」という前提が成り立たない
+        if self.motion is not None and self.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
 
@@ -210,6 +272,7 @@ _AXIS_KEYS = frozenset(
         "settle_s",
         "manual",
         "homing",
+        "motion",
     }
 )
 
@@ -221,6 +284,11 @@ _HOMING_KEYS = frozenset({"sensor", "direction", "search_distance", "step", "set
 #: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
 #: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
 _HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
+
+_MOTION_KEYS = frozenset({"max_velocity", "max_acceleration", "velocity_ff"})
+#: 対で書かせるキー。片方だけでは台形プロファイルを組み立てられず、欠けたほうを
+#: 既定値で埋めると「書いたのに制限として効かない」設定が通る
+_MOTION_REQUIRED = frozenset({"max_velocity", "max_acceleration"})
 
 #: 手動のジョグ量候補を書かなかった軸に与える既定 (人間の単位)。
 #: UI は必ず 1 つ以上の候補を要求するため、空にはしない
@@ -480,6 +548,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         settle_s=float(settle_s),
         manual=_parse_manual(name, raw.get("manual"), command_mode),
         homing=_parse_homing(name, raw.get("homing")),
+        motion=_parse_motion(name, raw.get("motion")),
     )
 
 
@@ -579,6 +648,42 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             search_distance=float(raw["search_distance"]),
             step=float(raw["step"]),
             settle_s=float(raw.get("settle_s", 0.05)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def _parse_motion(axis_name: str, raw: object) -> MotionSpec | None:
+    """台形速度プロファイルの制限を読む。書かない軸は None (従来どおりステップ入力)。
+
+    値の妥当性 (正の値か) は ``MotionSpec.__post_init__`` が見る。ここで見るのは
+    キーの綴りと、**速度と加速度が対で書かれていること**だけ。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.motion は辞書である必要があります: {raw!r}")
+
+    unknown = sorted(set(raw) - _MOTION_KEYS)
+    if unknown:
+        raise ValueError(
+            f"axes.{axis_name}.motion に未知のキー: {', '.join(unknown)} "
+            f"(指定できるのは {', '.join(sorted(_MOTION_KEYS))})"
+        )
+
+    missing = sorted(key for key in _MOTION_REQUIRED if raw.get(key) is None)
+    if missing:
+        raise ValueError(
+            f"axes.{axis_name}.motion に必須キーがありません: {', '.join(missing)} "
+            "(速度と加速度は対で初めて軌道が決まります)"
+        )
+
+    path = f"axes.{axis_name}.motion"
+    try:
+        return MotionSpec(
+            max_velocity=float(raw["max_velocity"]),
+            max_acceleration=float(raw["max_acceleration"]),
+            velocity_ff=float(raw.get("velocity_ff", 0.0)),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from exc
@@ -703,8 +808,52 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
             name: _parse_value(axis, name, raw_value) for name, raw_value in values.items()
         }
         _check_manual_range(source, axes[axis], positions[axis])
+        _check_motion_timeout(source, axes[axis], positions[axis])
 
     return PositionTable(axes, positions, source=source)
+
+
+def _check_motion_timeout(
+    source: str,
+    spec: AxisSpec,
+    values: Mapping[str, float | dict[str, float]],
+) -> None:
+    """プロファイルの所要時間が到達待ちの上限に収まっているか検証する。
+
+    速度と加速度を絞りすぎると、指令どおり動いているのに ``timeout_s`` の側が
+    先に切れる。症状は「その軸だけが毎回失敗する」で、機構にもモータにも異常が
+    無いため配線や PID を疑うことになる。**必ずタイムアウトする軸を config から
+    作れてはならない。**
+
+    見るのはその軸に定義された位置定数の端から端まで (コート別の値も含む)。
+    位置定数が 1 つ以下の軸は移動距離が config から決まらないので、根拠の無い
+    上限を課さずに通す。
+    """
+    motion = spec.motion
+    if motion is None:
+        return
+
+    candidates = [
+        float(candidate)
+        for value in values.values()
+        for candidate in (value.values() if isinstance(value, dict) else (value,))
+    ]
+    if len(candidates) < 2:
+        return
+
+    span = max(candidates) - min(candidates)
+    required = motion.duration_for(span)
+    if required <= spec.timeout_s:
+        return
+
+    # 切り上げないと、提示した値をそのまま書き写した config がもう一度拒否される
+    suggested = math.ceil(required * 100.0) / 100.0
+    raise ValueError(
+        f"{source}: axes.{spec.name} は motion の制限では最大移動 {span} {spec.unit} に "
+        f"{required:.3f} 秒かかり、timeout_s ({spec.timeout_s}) を必ず超えます "
+        f"(timeout_s を {suggested} 以上にするか、max_velocity / max_acceleration を"
+        "上げてください)"
+    )
 
 
 def _check_manual_range(
