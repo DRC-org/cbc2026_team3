@@ -1313,6 +1313,7 @@ cbc2026_team3/
 │   └── bench/              # 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリ
 │       ├── m3508/          # M3508 2 台
 │       ├── edulite/        # EDULITE 05 2 台
+│       ├── m3508_edulite/  # 上 2 種を同時に（CANable 2 本が要る）
 │       ├── dm3520/         # Damiao DM3520 2 台
 │       ├── dc/             # 自作モタドラ DC 基板 1 枚
 │       ├── servo/          # 自作モタドラ サーボ基板 1 枚
@@ -2312,7 +2313,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 ### 机上ベンチ用の config セット（`config/bench/`）
 
-> **【各ベンチの `magnitude` の記述は統合前】** 6 セットの構成・分けた理由・
+> **【各ベンチの `magnitude` の記述は統合前】** 7 セットの構成・分けた理由・
 > `TestShippedBenchConfigs` が守るものは現行だが、以下の各ベンチ節にある
 > `motor_check.magnitude` の設定（`magnitude: 0` で除外する / `magnitude: 5.0` に
 > するといった話）は**キーごと config から消えている**ので、そのまま書き写しても
@@ -2324,6 +2325,12 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 まとめられない**（挿していない CANable が 1 本でもあると起動そのものが失敗する）ため、
 確認したい対象ごとに別セットにし、それぞれをサブディレクトリへ分ける。
 
+**複数種を 1 セットに載せてよいのは「その本数の CANable を同時に挿せる」ことが前提の
+ときだけ。** `m3508_edulite/` がその唯一の例で、CANable 2 本を要求する代わりに、
+単体ベンチでは一度も通らない確認（バス名の取り違え・軸をまたいだ混信・受信ループ 2 本の
+同時稼働）を担う。**単体セットを置き換えるものではない** —— 1 本しか挿せない机では
+起動すらしないので、単体セットが無くなると確認手段そのものが消える。
+
 **セットごとにディレクトリを分けるのは位置定数の読み先が決まっているから。**
 `_positions_path` は「robot config と同じディレクトリの `<robot_name>_positions.yaml`」を
 読み、`robot_name` は Web UI の都合で `main_hand` / `sub_hand` のどちらかにせざるを得ない
@@ -2331,7 +2338,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 **同一ディレクトリに同じ `robot_name` のベンチセットを 2 つ置けない**。セットを足すときは
 `config/bench/<対象>/` を 1 つ掘り、4 ファイルをまとめてそこへ置くこと。
 
-**6 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+**7 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
 本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
 1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
 しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
@@ -2342,6 +2349,11 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
   「UI には出るのに動かせないモータ」になる）
 - 開くバスがそのセットで使うものだけであること（挿していない CANable が
   1 本でもあると `[Errno 19] No such device` で起動そのものが落ちる）
+
+**加えて「同梱のディレクトリが漏れなく `_BENCH_DIRS` に載っていること」も見る**
+（`test_every_shipped_bench_dir_is_covered`）。一覧は手書きなので、セットを足して
+書き足し忘れると**その 1 セットだけ誰も検証しないまま全部緑**になり、気付くのは
+このクラスを置いた理由とまったく同じ場面 —— 机上に基板を並べた当日になる。
 
 #### Damiao DM3520 単体ベンチ（`config/bench/dm3520/`）
 
@@ -2458,6 +2470,48 @@ bit8-15 に相手の `can_id`、下位 8bit に `host_id` が載っているこ�
 **`homing` は書かない。** 本番でも `rotate` のリミットスイッチは未装着（コメントアウト）で、
 しかもセンサは自作サーボ基板 = `can_generic` 側に居る。このベンチは `can_edulite` しか
 開かないので、書いても「センサが応答していません」で必ず失敗する。
+
+#### M3508 + EDULITE 05 同時ベンチ（`config/bench/m3508_edulite/`）
+
+上 2 つのセットで 1 種ずつ確かめた後に通す、**メインハンドの 2 種を同時に載せる**一式。
+`can_m3508` と `can_edulite` の 2 本を開くので、**CANable 2 本を同時に挿していないと
+起動しない**（[Errno 19] No such device）。
+
+| ファイル | 中身 |
+|---|---|
+| `config/bench/m3508_edulite/system.yaml` | `can_buses` が `m3508_bus` + `edulite_bus` の 2 本。`health` / `match` は書かない（既定へ委ねる） |
+| `config/bench/m3508_edulite/main_hand.yaml` | `y_axis_r` / `y_axis_l`（M3508）+ `rotate_r` / `rotate_l`（EDULITE 05）の 4 台。**値は単体ベンチと同一** |
+| `config/bench/m3508_edulite/main_hand_positions.yaml` | `y_axis` と `rotate` の 2 軸。数値も単体ベンチと同一 |
+| `config/bench/m3508_edulite/checklist.yaml` | 単体ベンチの足し合わせではなく、同時に載せたときにしか出ないことに重心を置いた一覧 |
+
+```bash
+uv run python main.py --system config/bench/m3508_edulite/system.yaml \
+    --config config/bench/m3508_edulite/main_hand.yaml \
+    --checklist config/bench/m3508_edulite/checklist.yaml
+```
+
+**単体ベンチ 2 つでは一度も通らない確認のために置いている。** `m3508/` も `edulite/` も
+CANable 1 本しか開かないので、次の 3 つはどちらでも確かめられない:
+
+- **バス名の取り違え。** バス名は udev が serial で固定するが、`config/can_buses.yaml` の
+  serial が実機とずれれば入れ替わる。**C620 へ EDULITE 用の指令が飛ぶ事故**（CLAUDE.md
+  「CAN バス名は udev で個体固定する」）は、2 本挿したこの構成でしか机上に現れない。
+  チェックリストの `bench_no_crosstalk`（一方を動かしている間もう一方が 1 度も動かないこと）が
+  それを見る項目
+- **受信ループ 2 本 + 位置制御ループ（200Hz）+ 目標値再送（20Hz）+ 同期監視（50Hz）が
+  同時に回った状態**でフィードバックが途切れないこと
+- **左右直結ペアが 2 組同時に監視される状態**（`y_axis` と `rotate` が別々のバスに居る）
+
+**`can_id` が両バスで 1 / 2 と重なっているのは意図的。** CAN ID の一意性はバス単位
+（CLAUDE.md「CAN ID はバス単位でロボット横断に一意」）なので衝突しないが、その前提が
+実際に成り立つことをここで初めて実物で確かめられる。
+
+**値は単体ベンチからコピーし、ずらさない。** ここだけ違う値にすると、単体との挙動差が
+「同時に載せたせい」なのか「値を変えたせい」なのか切り分けられなくなる。緩めた値を
+本番へ戻す条件は上の 2 節と同じ。
+
+**`homing` はどちらの軸にも書かない。** 原点センサは自作サーボ基板 = `can_generic` 側に
+居り、このセットは `can_generic` を開かない（書けば「センサが応答していません」で必ず失敗する）。
 
 #### DC モータ基板単体ベンチ（`config/bench/dc/`）
 

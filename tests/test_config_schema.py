@@ -615,7 +615,7 @@ class TestShippedConfigs:
 
 
 #: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
-_BENCH_DIRS = ("m3508", "edulite", "dc", "servo", "solenoid", "dm3520")
+_BENCH_DIRS = ("m3508", "edulite", "m3508_edulite", "dc", "servo", "solenoid", "dm3520")
 
 
 class TestShippedBenchConfigs:
@@ -627,9 +627,21 @@ class TestShippedBenchConfigs:
     「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
     始める余裕は無い。
 
-    6 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
+    7 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
     見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
     """
+
+    def test_every_shipped_bench_dir_is_covered(self) -> None:
+        """同梱の bench ディレクトリが漏れなく _BENCH_DIRS に載っていること。
+
+        _BENCH_DIRS は手書きの一覧なので、セットを 1 つ足して**ここへ書き足し忘れると
+        その 1 セットだけ誰も検証しない**。しかも症状は「テストは全部緑」なので、
+        気付くのは机上に基板を並べた当日になる (このクラスを置いた理由と同じ穴が、
+        一覧の側に開く)。
+        """
+        shipped = {path.name for path in (_CONFIG_DIR / "bench").iterdir() if path.is_dir()}
+
+        assert shipped == set(_BENCH_DIRS)
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
     def test_bench_config_set_loads(self, bench: str) -> None:
