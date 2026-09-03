@@ -34,7 +34,7 @@ sync_probe = _load_module()
 MoveTracker = sync_probe.MoveTracker
 
 
-def _tracker(**kwargs) -> "sync_probe.MoveTracker":
+def _tracker(**kwargs):
     params = {"still_speed": 2.0, "still_s": 0.15, "min_travel": 0.5}
     params.update(kwargs)
     return MoveTracker(**params)

@@ -75,6 +75,11 @@ class MotorTrace:
     name: str
     samples: list[Sample]
     metrics: object | None
+    #: C620 が返した実電流の最大絶対値 [counts]。指令と同じスケールなので直接比べられる。
+    #: **指令が出ているのに動かないとき、原因を 2 つに割れる唯一の値** ——
+    #: 実電流が指令に追いていれば「電流は流れているのに回らない」= 機構側、
+    #: ほぼ 0 なら「そもそも電流が出ていない」= C620・配線・電源側
+    peak_current: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -117,10 +122,26 @@ class StepRunner:
     def _commands(self) -> dict[str, float]:
         return {name: d.multi_turn_position for name, d in self._drivers.items()}
 
+    def _member(self, name: str):
+        return next(m for m in self._spec.motors if m.name == name)
+
+    def _dead_band_value(self, name: str) -> float:
+        """PID の不感帯を**人間の単位**へ戻す。
+
+        ``PIDController.dead_band`` はモータの指令単位 (M3508 ならモータ軸 deg) で
+        持っている。整定帯は人間の単位 (mm) のサンプルに対して使うので、換算せずに
+        渡すと帯が scale 倍だけ広くなる —— y_axis では 1.0deg がそのまま 1.0mm の
+        帯として効き、**0.5mm のステップが最初から帯の中に入って「整定 0.000s」**
+        になる (実際には 1mm も動いていないのに)。
+        幅なので符号は落とす。
+        """
+        return self._loop.pid(name).dead_band / abs(self._member(name).scale)
+
     async def step(self, target_value: float, dwell_s: float) -> StepResult:
         """``target_value`` へのステップを入れ、``dwell_s`` のあいだ記録する。"""
         commands = self._spec.to_commands(target_value)
         traces: dict[str, list[Sample]] = {name: [] for name in self._drivers}
+        peak_currents: dict[str, float] = dict.fromkeys(self._drivers, 0.0)
         peak_deviation = 0.0
         aborted: str | None = None
 
@@ -140,7 +161,8 @@ class StepRunner:
                 peak_deviation = max(peak_deviation, abs(deviation))
 
             for name, driver in self._drivers.items():
-                member = next(m for m in self._spec.motors if m.name == name)
+                member = self._member(name)
+                peak_currents[name] = max(peak_currents[name], abs(driver.state.current))
                 traces[name].append(
                     Sample(
                         t=elapsed,
@@ -163,7 +185,12 @@ class StepRunner:
         return StepResult(
             target=target_value,
             motors=[
-                MotorTrace(name, samples, _analyze(samples, self._loop.pid(name).dead_band))
+                MotorTrace(
+                    name,
+                    samples,
+                    _analyze(samples, self._dead_band_value(name)),
+                    peak_currents[name],
+                )
                 for name, samples in traces.items()
             ],
             peak_deviation=peak_deviation,
@@ -172,17 +199,19 @@ class StepRunner:
         )
 
 
-def _analyze(samples: list[Sample], dead_band_command: float):
-    """指標を出す。**帯の下限には不感帯を渡す。**
+def _analyze(samples: list[Sample], dead_band_value: float):
+    """指標を出す。**帯の下限には不感帯を (人間の単位で) 渡す。**
 
     不感帯の内側では偏差が 0 として扱われて制御が働かないので、それより狭い帯で
     「整定していない」と判定すると、正常な機構が永久に整定しない応答として出る。
+    逆に指令単位のまま渡すと帯が scale 倍に広がり、動いていない応答が
+    「即座に整定した」と出る (StepRunner._dead_band_value を参照)。
     """
     span = step_span(samples)
     if span is None:
         return None
     step_size = span[1] - span[0]
-    band = settle_band_for(step_size, ratio=SETTLE_RATIO, minimum=abs(dead_band_command))
+    band = settle_band_for(step_size, ratio=SETTLE_RATIO, minimum=abs(dead_band_value))
     return analyze_step_response(samples, settle_band=band)
 
 
@@ -201,7 +230,7 @@ def _format_metrics(trace: MotorTrace, unit: str) -> str:
         f"整定 {opt(m.settling_time_s, 3, 's')} / "
         f"定常偏差 {m.steady_state_error:+.3f}{unit} / "
         f"飽和 {m.saturation_ratio * 100:.0f}% / "
-        f"最大出力 {m.peak_output:.0f}counts"
+        f"指令 {m.peak_output:.0f} → 実電流 {trace.peak_current:.0f} counts"
     )
 
 
@@ -255,6 +284,18 @@ async def _run_trial(
 ) -> list[StepResult]:
     """1 つのゲインの組で往復させ、各ステップの結果を返す。"""
     origin = runner.observed_value()
+
+    # **起点は試行ごとにドリフトする** (定常偏差が残るので、往復しても完全には
+    # 戻らない)。振幅だけを可動範囲と照合しても、起点が寄っていけば到達点は
+    # 範囲外へ出る。動かす直前の実測起点で毎回見る
+    manual = spec.manual
+    peak = origin + amplitude
+    if manual is not None and manual.clamp(peak) != peak:
+        raise SystemExit(
+            f"到達点 {peak:+.2f} (起点 {origin:+.2f} + 振幅 {amplitude}) が"
+            f" 可動範囲 ({manual.min_value}〜{manual.max_value}) の外です。"
+            " 軸を範囲の中ほどへ戻してから再実行してください"
+        )
     results: list[StepResult] = []
     print(f"\n=== {trial.label()} (起点 {origin:+.2f}{spec.unit}) ===")
 
@@ -371,11 +412,13 @@ async def _main_async(args: argparse.Namespace) -> int:
         raise SystemExit(f"軸 '{args.axis}' に sync_tolerance がありません")
 
     manual = spec.manual
-    if manual is not None and not (
-        manual.min <= args.amplitude <= manual.max and manual.min <= -args.amplitude
-    ):
+    if manual is not None and manual.clamp(args.amplitude) != args.amplitude:
+        # 可動範囲は「この軸を動かしてよい範囲」の唯一の宣言なので、そこを
+        # 超える振幅を歯止め無しに通さない。判定は ManualSpec.clamp に委ねる
+        # (境界の解釈をここへ書き写すと、片方だけ直したときに気付けない)
         raise SystemExit(
-            f"振幅 {args.amplitude} が manual の可動範囲 ({manual.min}〜{manual.max}) の外です。"
+            f"振幅 {args.amplitude} が manual の可動範囲 "
+            f"({manual.min_value}〜{manual.max_value}) の外です。"
             " 範囲を広げるなら先に実測すること (scripts/sync_probe.py)"
         )
 
@@ -411,7 +454,17 @@ async def _main_async(args: argparse.Namespace) -> int:
     }
     dead_band = float(base_pid["dead_band"])
     output_limit = min(abs(float(base_pid["output_limit"])), float(CURRENT_MAX))
+    raw_integral_limit = base_pid.get("integral_limit")
+    integral_limit = None if raw_integral_limit is None else float(raw_integral_limit)
     trials = _build_trials(args, base)
+
+    if any(t.ki for t in trials) and integral_limit is None:
+        # 上限の無い積分は、機構端に当たって動けない間に際限なく育ち、拘束が
+        # 外れた瞬間に暴走する。**ki を振るなら config で上限を宣言させる**
+        raise SystemExit(
+            "ki を入れる試行があるのに integral_limit が null です。"
+            " config の pid.integral_limit に出力寄与の上限 [counts] を設定してください"
+        )
 
     print(f"--- {args.axis} のステップ応答を実測 ---")
     print(f"  バス       : {channel}")
@@ -430,7 +483,13 @@ async def _main_async(args: argparse.Namespace) -> int:
         """
         loop = M3508PositionLoop(can_manager, bus_alias)
         for name, driver in drivers.items():
-            pid = make_position_pid(trial.kp, trial.ki, trial.kd, dead_band=dead_band)
+            pid = make_position_pid(
+                trial.kp,
+                trial.ki,
+                trial.kd,
+                integral_limit=integral_limit,
+                dead_band=dead_band,
+            )
             pid.output_min = -output_limit
             pid.output_max = output_limit
             loop.add_motor(name, driver, pid)
