@@ -59,14 +59,14 @@ kp を振ると「上げても下げても同じ」という観察から抜け�
 
   0. 可動範囲を実測してから始める (``scripts/sync_probe.py`` を無励磁で走らせ、
      手で端から端まで動かす)。``--amplitude`` は ``manual`` の可動範囲でしか
-     通らないので、実運用の振幅を出すには**位置定数だけ**を本番へ差し替える:
+     通らないので、実運用の振幅を出すには位置定数を本番へ差し替える:
        --positions config/main_hand_positions.yaml
-     **``--config`` に本番の config/main_hand.yaml を渡してはならない** ——
-     開くバスをモータ構成の集合から 1 本選ぶ実装なので、3 本のバスを持つ本番
-     config ではどれが選ばれるか実行ごとに変わる。robot config はバス 1 本の
-     ベンチ側 (config/bench/y_axis_tuning/) のままにする。**ただしそちらの
-     output_limit は 800 で本番は 2000** (飽和の境界が 0.45mm と 1.14mm で
-     2.5 倍違う) ので、実運用振幅を測る前に本番と同じ値へ上げること
+     **``--config`` は本番の config/main_hand.yaml でもベンチ側でもよい** ——
+     開くのは ``--axis`` の軸が載っているバス 1 本だけなので、3 本のバスを持つ
+     本番 config でも m3508_bus に決まる。**ただしベンチ側 (config/bench/
+     y_axis_tuning/) の output_limit は 800 で本番は 2000** (飽和の境界が
+     0.45mm と 1.14mm で 2.5 倍違う) ので、ベンチ側の robot config で実運用振幅を
+     測るなら本番と同じ値へ上げること
 
   1. 小さい振幅で現状を確認する (プロファイルが効いていることの確認)
        --amplitude 1.5 --dwell 1.5
@@ -107,7 +107,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from lib.axis_sync import SyncGroup
 from lib.can_manager import CANManager
-from lib.config_schema import load_robot_config, load_system_config
+from lib.config_schema import RobotConfig, load_robot_config, load_system_config
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.trajectory import TrapezoidalProfile
 from lib.drivers.base import ControlMode
@@ -612,6 +612,38 @@ def _build_motions(
         raise SystemExit(f"プロファイルの値が不正です: {exc}") from exc
 
 
+def _resolve_bus_alias(robot: RobotConfig, spec: AxisSpec) -> str:
+    """対象軸のモータが載っているバス別名を返す。**開くのはこの 1 本だけ。**
+
+    このツールは 1 つの軸を詰めるものなので、その軸が使わないバスを開く理由が無い。
+    モータ構成に現れるバスの集合から選ぶ実装だと、複数バスを持つ config
+    (本番は 3 本、config/bench/m3508_edulite/ は 2 本) で開くバスが実行ごとに変わり、
+    対象軸の載っていないバスを開いた回はフィードバックが 1 通も届かない ——
+    症状は「同じコマンドなのに動いたり動かなかったりする」だけになる。
+    """
+    missing = [name for name in spec.motor_names if name not in robot.motors]
+    if missing:
+        raise SystemExit(
+            f"軸 '{spec.name}' のモータ {', '.join(missing)} が robot config"
+            f" ({robot.robot_name}) にありません。--config と --positions が"
+            " 同じ機体のものか確認してください"
+        )
+
+    buses = {name: robot.motors[name].bus for name in spec.motor_names}
+    aliases = set(buses.values())
+    if len(aliases) > 1:
+        # C620 の電流指令フレーム (0x200) は 1 通で同一バス上の 4 モータへ届く。
+        # 左右が別バスだと同時に指令できず、このツールの前提 (1 つのループが
+        # ペアを束ねる) が崩れる。黙って片方のバスを開くと、開かれなかった側は
+        # 力が入らないまま偏差だけが開く
+        detail = " / ".join(f"{name}={alias}" for name, alias in buses.items())
+        raise SystemExit(
+            f"軸 '{spec.name}' のモータが別のバスに分かれています ({detail})。"
+            " 左右を同じフレームで同時に指令できないので、config を見直してください"
+        )
+    return buses[spec.motor_names[0]]
+
+
 def _check_dwell(trials: list[TrialConfig], *, amplitude: float, dwell_s: float) -> None:
     """記録窓がプロファイルの移動を含みきれるか確かめる。
 
@@ -664,7 +696,12 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     # --- 配線 (本番と同じクラスを使う) ---
     can_manager = CANManager()
-    bus_alias = next(iter({m.bus for m in robot.motors.values()}))
+    bus_alias = _resolve_bus_alias(robot, spec)
+    if bus_alias not in system.can_buses:
+        raise SystemExit(
+            f"バス別名 '{bus_alias}' が --system の can_buses にありません"
+            f" (定義済みなのは {', '.join(system.can_buses)})"
+        )
     channel = system.can_buses[bus_alias]
     can_manager.add_bus(bus_alias, can.Bus(interface="socketcan", channel=channel))
 
