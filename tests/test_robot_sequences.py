@@ -567,6 +567,59 @@ class TestShippedRobotConfig:
 
         assert required <= sensors
 
+    def test_paired_axis_motors_agree_on_set_zero_on_start(self) -> None:
+        """左右ペア軸を構成するモータは `set_zero_on_start` が揃っていること。
+
+        起動時の `set_zero` は原点をその場へ付け替える。逆回転ペアは `scale` の符号で
+        向きを表すので、**片側だけ付け替えると揃うどころか機械ゼロの差がまるごと
+        偏差として残る** —— 物理的にずれ 0 のまま `SyncMonitor` が全体緊急停止を掛け、
+        機体は 1 ステップも動かせない (実機で 175.879deg を踏んでいる)。
+
+        「ペア軸に片側だけ効く操作を作らない」を config の側でも守るための試験。
+        本番と机上ベンチ (config/bench/<対象>/) の全セットを見るのは、ベンチ config を
+        誰も検証していない時期があり、気付くのが机上に基板を並べた当日だったため。
+
+        値は `lib/config_schema.py` の既定に合わせて「書かなければ False」で読む。
+        書き忘れた側が既定へ落ちる形の食い違いも、ここで同じように落ちる。
+        """
+        mismatched: dict[str, dict[str, bool]] = {}
+        inspected: set[str] = set()
+
+        for positions_path in sorted(_CONFIG_DIR.rglob("*_positions.yaml")):
+            robot_path = positions_path.with_name(
+                positions_path.name.removesuffix("_positions.yaml") + ".yaml"
+            )
+            motors = (yaml.safe_load(robot_path.read_text()) or {}).get("motors") or {}
+            table = load_position_table(
+                yaml.safe_load(positions_path.read_text()), source=str(positions_path)
+            )
+
+            for axis in table.axes:
+                names = [name for name in table.axis(axis).motor_names if name in motors]
+                if len(names) < 2:
+                    continue
+                key = f"{robot_path.relative_to(_CONFIG_DIR)}:{axis}"
+                inspected.add(key)
+                flags = {name: bool(motors[name].get("set_zero_on_start", False)) for name in names}
+                if len(set(flags.values())) > 1:
+                    mismatched[key] = flags
+
+        assert mismatched == {}
+
+        # 走査そのものが壊れたら気付けるようにする。ファイル名の規約 (位置定数は
+        # <robot_name>_positions.yaml、robot config は同じディレクトリの <robot_name>.yaml)
+        # が崩れると、上のループは 1 軸も見ないまま緑を返す。
+        # **ベンチセットを足したらここへも足すこと** (手書きの一覧なので追従が要る。
+        # tests/test_config_schema.py の _BENCH_DIRS が同じ性質を持つ)
+        assert {
+            "main_hand.yaml:y_axis",
+            "main_hand.yaml:rotate",
+            "bench/edulite/main_hand.yaml:rotate",
+            "bench/m3508/main_hand.yaml:y_axis",
+            "bench/m3508_edulite/main_hand.yaml:y_axis",
+            "bench/m3508_edulite/main_hand.yaml:rotate",
+        } <= inspected
+
     def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
         """自動判定できないものは、すべて目視確認項目で埋めること。
 
