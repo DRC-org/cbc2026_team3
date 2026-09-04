@@ -618,7 +618,7 @@ class TestShippedConfigs:
 _BENCH_DIRS = (
     "m3508",
     "edulite",
-    "m3508_edulite",
+    "main_hand",
     "dc",
     "servo",
     "solenoid",
@@ -636,7 +636,7 @@ class TestShippedBenchConfigs:
     「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
     始める余裕は無い。
 
-    7 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
+    8 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
     見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
     """
 

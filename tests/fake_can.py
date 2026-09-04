@@ -75,6 +75,9 @@ def mock_can_manager(
     # 戻り値は「励磁できなかったモータ名」。既定の MagicMock を返させると
     # `_reactivate_motors` が真値として受け取り、無励磁の誤報告が全テストに出る
     mgr.activate_motors = AsyncMock(return_value=[])
+    # 戻り値は「ラッチを解除できなかったモータ名」。既定の MagicMock を返させると
+    # `_reactivate_motors` が真値として受け取り、解除失敗の誤報告が全テストに出る
+    mgr.clear_e_stop_latches = AsyncMock(return_value=[])
     mgr.last_feedback_at.return_value = None
     mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
     return mgr

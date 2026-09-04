@@ -381,6 +381,82 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
   CAN 不通のいずれでも通電を落とすので、吸着で保持しているワークは落ちる。サーボの
   「現在角を保持」に相当する扱いは持たせていない —— 通電したまま復旧不能になった弁を
   現場で切り分ける手段が無いため
+- **送信 API の戻り値を捨ててはならない。空きが無ければ待たずに諦め、諦めたことを数える。**
+  3 枚とも `sendFrame()` を送信の唯一の口にし、`motorcan::TxFailCounter`
+  （`firmware/lib/MotorCan/src/MotorTxHealth.h`）が連続失敗を数えて
+  `kCanTxFailStreakAlarm`（3 枚とも 50）で LED を「今すぐ直さないと使えない」表示へ倒す。
+  **この契約は 1 つ上の「照合の 3 つの約束」が立っている土台である** —— 約束①
+  「未受信は照合しない」はそれ自体は正しいが、`INFO` が物理的に 1 通も出ない基板に対しては
+  **照合そのものを黙って無効にする**。次節がその実例
+
+### 送信バッファの本数は 3 枚で違う。同じコードが基板ごとに違う壊れ方をする
+
+3 枚とも `INFO`（1Hz の版番号自己申告）を 1 回の `loop()` 反復で全チャンネル分まとめて
+連続送信していた。ところが CAN コントローラが持つ送信バッファの本数が 3 枚とも違うため、
+**同じコードで症状の出方が違った。**
+
+| 基板 | 送信バッファ | 実機での症状 |
+|---|---|---|
+| DC（R4 内蔵 CAN） | **標準 ID はすべて mailbox 1 本**（`R7FA4M1_CAN.cpp` の `write()` が `CAN_MAILBOX_ID_0` 固定。拡張 ID だけが mailbox 16） | `INFO` が **1 通も出ない**（4 秒窓・10 秒窓とも 0 通） |
+| 電磁弁（bxCAN） | mailbox 3 本。うち 1 本は同じ反復で先に送る `FEEDBACK` が使う | `INFO` が **6ch 中 2ch しか出ない**。`FEEDBACK` の間隔も本来 10ms が最大 30〜50ms まで開く |
+| サーボ（MCP2515） | TX バッファ 3 本 + `mcp_can` が空きを待つ | 症状なし（5 スロット分すべて出ている） |
+
+**「たまに落ちる」ではなく「毎回同じチャンネルが落ちる」。** `kInfoIntervalMs`(1000) は
+`feedback_interval_ms`(10) の整数倍なので、`INFO` が due になる反復では**必ず** `FEEDBACK` も
+due になる。位相が固定されるため、押し出される相手は毎回同じで、そのチャンネルは
+**永久に 0 通**になる。
+
+**しかも誰にも見えなかった。** DC と電磁弁は送信 API の戻り値（`CAN.write()` /
+`HAL_CAN_AddTxMessage()`）を捨てていたので、この全滅が基板の LED にもログにも PC 側にも
+一切現れなかった（サーボ基板だけが `g_txFailStreak` で数えて LED を赤へ倒していた）。
+
+**PC 側は FAULT を出さない。出さないのが正しい。** `GenericDriver.info_mismatch` は
+「`INFO` を 1 通も受けていない間は照合しない」（前節の約束①。倒すと起動のたびに全モータが
+FAULT になり「いつもの赤」として無視される）ので、1 通も届かない基板は不一致にならない。
+結果として **§3.4 の焼き忘れ検出が DC 基板に対してだけ静かに無効**になっていた。
+前節に「この照合だけが型の取り違えと焼き忘れを可視化している」と書いてあるが、
+**その照合は `INFO` が届いていることに立っている。** 立っていないことは、
+PC 側にも基板側にも症状として現れない。
+
+直し方は 3 つ:
+
+1. **送信の唯一の口 `sendFrame()` を 3 枚すべてに置き、戻り値を必ず回収する。**
+   数える規則は `motorcan::TxFailCounter`（`firmware/lib/MotorCan/src/MotorTxHealth.h`）が
+   持ち、native テスト圏内にある。**閾値そのものはそこに置かない** —— 何通で倒すかは送信
+   周期と 1 通あたりの待ち時間（サーボの `mcp_can` は最大 5ms）に依存するので、
+   `kCanTxFailStreakAlarm` は各 `config.h` が持つ。3 枚とも同じ値（50）・同じ意味に揃えて
+   あるのは、現場で 3 種類の対応表を覚えないため
+2. **待ってはならない。空きが無ければ諦める。** これは電磁弁基板が元から持っていた判断で、
+   理由もそのコメントにあった —— 「詰まったバスの上で `loop()` が止まると、ウォッチドッグ
+   満了の反映も出力の更新も止まる」。当初は DC に上限付きビジーウェイト（300μs）を入れる
+   案だったが、**この既存判断と正面から衝突するので撤回した**。自前で空きを待つ経路は
+   3 枚とも持たない
+3. **`FEEDBACK` は落ちたら諦め、`INFO` だけは 1 反復 1 通に割る。** `FEEDBACK` は次の周期が
+   10ms 後に来るので、1 通落ちても PC 側の STALE 判定（既定 500ms）には遠く届かない。
+   `INFO` は 1Hz なので落とすと 1 秒欠けるうえ、上記の位相固定によって永久欠落になる。
+   そこで DC と電磁弁は 1 反復で 1 ch ぶんだけ送り、**落ちた ch は添字を進めずに次の反復で
+   送り直す**（`g_infoPendingCh`）。**再送キューは持たない** —— 「古い状態を後から送る」
+   経路を作らないため、やり直すのは次の反復での作り直しだけである
+
+**サーボ基板は動作不変。** 元から `sendFrame()` を持ち戻り値も数えていて、`mcp_can` が
+空きを待つので実機でも症状が無かった（5 スロットぶんすべて出ている）。`INFO` の
+まとめ送りもそのまま残してある。今回触ったのは `g_txFailStreak` を `TxFailCounter` へ
+置き換えて**語彙を 3 枚で揃えた**ことだけで、送信の振る舞いは 1 つも変わっていない。
+
+**実測（DC 基板・書き込み前後の 10 秒測定）**:
+
+| 項目 | 修正前 | 修正後 |
+|---|---|---|
+| `INFO`（`0x480`–`0x482`） | 0 通 | 各 10 通（平均間隔 1000.01ms、標準偏差 0.03–0.10ms） |
+| `FEEDBACK` 通数 | 1000 通（100Hz） | 1000 通（100Hz、欠けなし） |
+| `FEEDBACK` 最大間隔 | 10.10ms | 10.22ms |
+| `FEEDBACK` 標準偏差 | 0.027ms | 0.025–0.031ms |
+
+**1 反復 1 通に割っても `FEEDBACK` の周期は実質劣化しない。** `loop()` 1 周は `FEEDBACK`
+間隔よりはるかに短いので、`INFO` 3 通が出そろうまでの遅れはミリ秒オーダーに収まる。
+
+**この層は native テストで守れない。** mailbox の busy は実機の CAN ペリフェラルでしか
+再現せず、代わりに検証できる層も無い。唯一の網は実機検証である（「変異テスト」節）。
 
 ---
 
@@ -992,7 +1068,29 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 1 軸のリセットで飽和表示を落とさない | `M3508PositionLoop._reset_axis` から `saturated` のクリアを外す（**緊急停止中だけ飽和表示が残り、ゲインを変えても応答が変わらないという誤った助言が出続ける**） | `test_position_loop.py::test_saturation_clears_on_e_stop` |
 | 契約は「宣言にあるのに実配信から消えた欄」も検出する | `_build_state_message` から `safety` を落として golden を焼き直す（**片方向の検査だけだと Python も TS も全テスト緑のまま UI が白画面になる**） | `web/src/test/wsContract.test.ts`（「UI が読むと宣言した欄が実配信から消えていない」） |
 | 未実行の動作確認を「完了」と表示しない | `motorCheckStatus` の `total_steps > 0` を落とす（`running:false, step_index:0, total_steps:0` が完了になる）/ パネルとサマリーで別々に判定する形へ戻す | `motorCheckStatus.test.ts` / `MotorCheckPanel.test.tsx` |
+| 緊急停止のラッチ解除は中断されない | `CANManager.clear_e_stop_latches` に `should_abort` を通す（1 台目の最中に停止が再発動すると 2 台目へ 1 通も飛ばない）/ `_reactivate_motors` のラッチ解除ループを 1 台目で `break` する / ラッチ解除フェーズごと削除する | `test_server_e_stop.py::TestLatchClearIsNeverAborted` |
+| 解除はブロードキャストで全バスへ出る | `_send_e_stop_clear_broadcast()` の呼び出しを削除する / バスのループを 1 本目で `break` する（**PC の管轄外のチャンネルが永久にラッチされたまま残る**） | `test_server_e_stop.py::TestEStopClearIsBroadcast` |
+| 解除フレームを送り終えてから基板報告の起点を置く | `_send_e_stop_clear_broadcast()` を `_board_e_stop_ignore_before` の設定より後ろへ動かす（**まだ解除の届いていない基板の報告を信じて自分で止め直す**） | `test_server_e_stop.py::TestEStopClearIsBroadcast::test_ブロードキャスト解除は基板報告の起点より前に送る` |
 | 調整画面の重い描画は記録が増えたときだけ走る | `ResponseChart` / `MetricsPanel` / `AdviceList` の `memo` を外す（型を見るテストが落ちる）/ 親が毎描画 新しいオブジェクトを渡す形へ戻す（再描画回数のテストが落ちる。**2 つは別々のテストが受け持つ** —— memo の有無は DOM から観測できない） | `MotorTuning.test.tsx` / `ResponsePanel.test.tsx` |
+
+**この表に載せられない層が 1 つある: CAN 送信バッファの空き待ち。** `INFO` を 1 反復 1 通に
+割る規則と、送信 API の戻り値を回収する規則（「自作モータドライバ用 CAN プロトコル」節の
+「送信バッファの本数は 3 枚で違う」）を壊しても、**native テストは 1 件も落ちない。**
+mailbox が busy になる状況は実機の CAN ペリフェラルでしか再現せず、ホスト上の native 環境には
+送信ペリフェラルそのものが無い。**他の層で代替もできない** —— PC 側は `INFO` の未受信を
+照合しない（そうするのが正しい）ので、`INFO` が永久に 0 通でも FAULT にはならず、
+`tests/test_firmware_version_sync.py` が見ているのは `config.h` と yaml の突き合わせであって
+「その `INFO` が実際にバスへ出るか」ではない。
+
+`firmware/test/test_board/` の `TxFailCounter` のテストが見ているのは**数え方だけ**である
+—— 連続で数える / 成功で 0 に戻す / 閾値ちょうどで倒す / `0xFFFF` で飽和する。
+「1 反復 1 通に割ったか」「戻り値を回収しているか」「空きを待たずに諦めるか」には
+1 件も触れていない。**緑であることは、この層が守られている証拠ではない。**
+
+**したがってこの層の唯一の網は実機検証である。** 送信まわりを触ったら、3 枚それぞれに
+書き込んだうえで `candump` で次の 2 つを測ること —— ①`INFO`（種別 `0b100`）が
+**全チャンネル分**、欠けずに 1Hz で出ていること ②`FEEDBACK` の間隔が設定周期のままで、
+通数が欠けていないこと。判定者は緑のテストではなく `candump` である。
 
 ### テスト対象とアプローチ
 
@@ -1334,11 +1432,12 @@ cbc2026_team3/
 │   └── bench/              # 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリ
 │       ├── m3508/          # M3508 2 台
 │       ├── edulite/        # EDULITE 05 2 台
-│       ├── m3508_edulite/  # 上 2 種を同時に（CANable 2 本が要る）
+│       ├── main_hand/      # メインハンド一式を同時に（CANable 3 本が要る）
 │       ├── dm3520/         # Damiao DM3520 2 台
 │       ├── dc/             # 自作モタドラ DC 基板 1 枚
 │       ├── servo/          # 自作モタドラ サーボ基板 1 枚
-│       └── solenoid/       # 自作モタドラ 電磁弁基板 1 枚
+│       ├── solenoid/       # 自作モタドラ 電磁弁基板 1 枚
+│       └── y_axis_tuning/  # y_axis の PID 実機チューニング用（M3508 のみ）
 ├── scripts/
 │   ├── _common.sh          # 4 本のシェルが source する土台（ログ / IP / 引数検証）
 │   ├── can_config.py       # can_buses.yaml → TSV / udev ルール / 固定パス変換
@@ -1989,10 +2088,34 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 | 動作確認を abort（状態を問わず全 runner）| 同期ずれラッチを解除（`_reset_sync_latches`） |
 | 停止理由を保持（保持済みなら上書きしない）| 停止理由を破棄 |
 | M3508 へ全スロット 0 の電流指令（`send_stop_frame`）| `_e_stop_active` を落として配信 |
-| ドライバ固有の停止フレーム（EDULITE）| EDULITE の再励磁（`activate_motors`）|
-| 全バスへ `0x0FF` ブロードキャスト（自作モタドラ）| |
-| 目標値再送の保持目標を破棄（`clear_targets`）| |
+| ドライバ固有の停止フレーム（EDULITE）| ①全バスへ `0x0FF` のブロードキャスト解除 |
+| 全バスへ `0x0FF` ブロードキャスト（自作モタドラ）| ②管轄内の自作モタドラへ個別のラッチ解除（中断しない） |
+| 目標値再送の保持目標を破棄（`clear_targets`）| ③励磁（`activate_motors`。中断あり） |
 | 全シーケンスを停止（保留中の開始要求も破棄）| |
+
+**停止と解除は対称でなければならない。** 停止はブロードキャストなのでバス上の全基板・
+全チャンネルがラッチするのに、解除が `activation_steps()` の個別送信だけだと
+**yaml に登録されたモータにしか届かない**。実機ではベンチ設定
+（`config/bench/main_hand/main_hand.yaml`）で走っていたため、ラッチが外れたのは登録済みの
+`0x40`〜`0x42` / `0x80` だけで、`0x43` / `0x48`-`0x4B` / `0x81` / `0x82` / `0xC0`-`0xC5` は
+止まったまま残った。基板の LED は 1 チャンネルでもラッチがあれば橙になる（`BoardIndication`）
+ので、**全基板が橙のまま戻らず操縦者からは復帰不能に見える**。①がその唯一の救済経路で、
+②は「PC が把握しているモータへ確実に届ける」役割を持つ（重複は意図的）。
+
+**②のラッチ解除は中断しない。中断すべきは「励磁」であってラッチ解除ではない。**
+③はロボットを順に処理するので、同じ `should_abort` をラッチ解除にも掛けると
+1 台目の最中に停止が再発動しただけで 2 台目へ解除が 1 通も飛ばない。外れないラッチは
+緊急停止ビットを報告し続け、`_detect_board_e_stop` がそれを見て停止を再発動する ——
+**解除操作のたびに同じロボットだけが取り残される閉ループ**になる（実機で発生。sub_hand の
+全基板が `kNeverCommanded` を立てたまま戻らなかった）。ラッチ解除で機体が動かない根拠は
+2 つ: 停止時に目標値が捨てられていること（`DcChannel::stop()` は `duty_ = 0.0f`、
+`ServoChannel::stop()` は現在角保持、`SolenoidChannel::stop()` は `on_ = false`）と、
+ファーム側の `everFed_` ゲート（`SET_TARGET` を 1 通も受けるまで出力しない、仕様書 §5.4）。
+物理停止スイッチが押されている間はファームが毎ループ再ラッチするので
+「押している間は絶対に動かない」も保たれる。
+
+**`_board_e_stop_ignore_before` は①②③を送り終えた後に置く。** 先に置くと、まだ解除の
+届いていない基板のフィードバックを「解除後の報告」と信じて自分で止め直す。
 
 M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_message()` は EDULITE しか
 持たず `0x0FF` は自作モタドラしか解釈しないため、これが無いと左右直結で最も危険な Y 軸だけ
@@ -2334,7 +2457,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 
 ### 机上ベンチ用の config セット（`config/bench/`）
 
-> **【各ベンチの `magnitude` の記述は統合前】** 7 セットの構成・分けた理由・
+> **【各ベンチの `magnitude` の記述は統合前】** 8 セットの構成・分けた理由・
 > `TestShippedBenchConfigs` が守るものは現行だが、以下の各ベンチ節にある
 > `motor_check.magnitude` の設定（`magnitude: 0` で除外する / `magnitude: 5.0` に
 > するといった話）は**キーごと config から消えている**ので、そのまま書き写しても
@@ -2347,7 +2470,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 確認したい対象ごとに別セットにし、それぞれをサブディレクトリへ分ける。
 
 **複数種を 1 セットに載せてよいのは「その本数の CANable を同時に挿せる」ことが前提の
-ときだけ。** `m3508_edulite/` がその唯一の例で、CANable 2 本を要求する代わりに、
+ときだけ。** `main_hand/` がその唯一の例で、CANable 3 本を要求する代わりに、
 単体ベンチでは一度も通らない確認（バス名の取り違え・軸をまたいだ混信・受信ループ 2 本の
 同時稼働）を担う。**単体セットを置き換えるものではない** —— 1 本しか挿せない机では
 起動すらしないので、単体セットが無くなると確認手段そのものが消える。
@@ -2359,7 +2482,7 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 **同一ディレクトリに同じ `robot_name` のベンチセットを 2 つ置けない**。セットを足すときは
 `config/bench/<対象>/` を 1 つ掘り、4 ファイルをまとめてそこへ置くこと。
 
-**7 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+**8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
 本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
 1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
 しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
@@ -2492,23 +2615,23 @@ bit8-15 に相手の `can_id`、下位 8bit に `host_id` が載っているこ�
 しかもセンサは自作サーボ基板 = `can_generic` 側に居る。このベンチは `can_edulite` しか
 開かないので、書いても「センサが応答していません」で必ず失敗する。
 
-#### M3508 + EDULITE 05 同時ベンチ（`config/bench/m3508_edulite/`）
+#### メインハンド一式ベンチ（`config/bench/main_hand/`）
 
-上 2 つのセットで 1 種ずつ確かめた後に通す、**メインハンドの 2 種を同時に載せる**一式。
-`can_m3508` と `can_edulite` の 2 本を開くので、**CANable 2 本を同時に挿していないと
-起動しない**（[Errno 19] No such device）。
+上 2 つのセットで 1 種ずつ確かめた後に通す、**メインハンドのアクチュエータを丸ごと
+載せる**一式。`can_m3508` / `can_edulite` / `can_generic` の 3 本を開くので、
+**CANable 3 本を同時に挿していないと起動しない**（[Errno 19] No such device）。
 
 | ファイル | 中身 |
 |---|---|
-| `config/bench/m3508_edulite/system.yaml` | `can_buses` が `m3508_bus` + `edulite_bus` の 2 本。`health` / `match` は書かない（既定へ委ねる） |
-| `config/bench/m3508_edulite/main_hand.yaml` | `y_axis_r` / `y_axis_l`（M3508）+ `rotate_r` / `rotate_l`（EDULITE 05）の 4 台。**値は単体ベンチと同一** |
-| `config/bench/m3508_edulite/main_hand_positions.yaml` | `y_axis` と `rotate` の 2 軸。数値も単体ベンチと同一 |
-| `config/bench/m3508_edulite/checklist.yaml` | 単体ベンチの足し合わせではなく、同時に載せたときにしか出ないことに重心を置いた一覧 |
+| `config/bench/main_hand/system.yaml` | `can_buses` が `m3508_bus` + `edulite_bus` + `generic_bus` の 3 本。`health` / `match` は書かない（既定へ委ねる） |
+| `config/bench/main_hand/main_hand.yaml` | `y_axis_r` / `y_axis_l`（M3508）+ `rotate_r` / `rotate_l`（EDULITE 05）+ `gripper` / `conveyor` / `wall_f` / `wall_r`（自作モタドラ）の 8 台と `origin_sensor` |
+| `config/bench/main_hand/main_hand_positions.yaml` | `y_axis` / `rotate` / `gripper` / `conveyor` / `wall_f` / `wall_r` の 6 軸 |
+| `config/bench/main_hand/checklist.yaml` | 単体ベンチの足し合わせではなく、同時に載せたときにしか出ないことに重心を置いた一覧 |
 
 ```bash
-uv run python main.py --system config/bench/m3508_edulite/system.yaml \
-    --config config/bench/m3508_edulite/main_hand.yaml \
-    --checklist config/bench/m3508_edulite/checklist.yaml
+uv run python main.py --system config/bench/main_hand/system.yaml \
+    --config config/bench/main_hand/main_hand.yaml \
+    --checklist config/bench/main_hand/checklist.yaml
 ```
 
 **単体ベンチ 2 つでは一度も通らない確認のために置いている。** `m3508/` も `edulite/` も

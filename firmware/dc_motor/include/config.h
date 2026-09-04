@@ -170,6 +170,12 @@ constexpr uint32_t kUnconfiguredBlinkIntervalMs = 200;
 // 正常時のハートビート点滅周期。ファームが生きていることを目視で確認するため。
 constexpr uint32_t kHeartbeatIntervalMs = 1000;
 
+// CAN 送信が連続して失敗した回数がこれを超えたら「今すぐ直さないと使えない」表示へ倒す。
+// FEEDBACK は 3 チャンネル × 100Hz = 300 通/秒 出るので、50 連続失敗は約 170ms 分の
+// 全滅に相当する。1 通の取りこぼし（調停負けや一過性の TX 詰まり）で赤くしないための下限。
+// **サーボ基板と同じ値・同じ意味にしてある** —— 現場で 2 種類の対応表を覚えないため。
+constexpr uint16_t kCanTxFailStreakAlarm = 50;
+
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;
 

@@ -23,7 +23,14 @@ from lib.match_state import (
 )
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorHandle
-from tests.fake_can import mock_can_manager, set_motors
+from tests.fake_can import (
+    direct_runner,
+    mark_feedback_at,
+    mock_bus,
+    mock_can_manager,
+    mock_driver,
+    set_motors,
+)
 from tests.feedback_frames import feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
@@ -1337,3 +1344,219 @@ class TestBoardReportedEStop:
         await fx.publish_state()
 
         assert fx.e_stop_active is True
+
+
+# 自作モタドラ 1 枚と、本当に励磁の要るモータ (EDULITE 05 / DM3520 の代役) 1 台を
+# 各ロボットへ載せるための定数。励磁フレームは ID だけで見分けられればよい
+_BOARD_CAN_ID = 0x11
+_ENERGIZE_FRAME_ID = 0x123
+
+
+def _is_latch_clear(msg: object, device_id: int = _BOARD_CAN_ID) -> bool:
+    if not isinstance(msg, can.Message):
+        return False
+    expected = GenericDriver.encode_e_stop_clear(device_id)
+    return msg.arbitration_id == expected.arbitration_id and bytes(msg.data) == bytes(expected.data)
+
+
+def _is_energize(msg: object) -> bool:
+    return isinstance(msg, can.Message) and msg.arbitration_id == _ENERGIZE_FRAME_ID
+
+
+def _is_broadcast_clear(msg: object) -> bool:
+    """仕様書 §3.5 のブロードキャスト解除 (CAN ID 0x0FF / data 01 5A A5)。
+
+    エンコーダの戻り値と突き合わせると「実装が実装と一致する」ことしか見られない
+    ので、ワイヤ上の形をそのまま書く。
+    """
+    return (
+        isinstance(msg, can.Message)
+        and msg.arbitration_id == 0x0FF
+        and bytes(msg.data) == bytes((0x01, 0x5A, 0xA5))
+    )
+
+
+#: 送信 1 通の記録: (バス名, フレーム, 送信時刻)
+_Sent = list[tuple[str, object, float]]
+
+
+def _fixture_with_boards(*, with_energized_motor: bool = True) -> tuple[ServerFixture, _Sent, dict]:
+    """2 台のロボットへ実 CANManager を挿し、送信フレームを 1 本の列に記録する。
+
+    **バスごとに数えると見たい不変条件が消える。** 守りたいのは「全ロボットの
+    ラッチ解除が、どのロボットの励磁よりも先に出ること」で、これはロボットを
+    またいだ *順序* でしか表せない。
+
+    各ロボットの 2 本目のバスには自作モタドラを 1 台も登録しない (実機の
+    `can_m3508` に相当)。**ブロードキャスト解除はそこへも出なければならない** ——
+    PC が把握していないチャンネルを救えるのはその経路だけ。
+    """
+    fx = ServerFixture.build()
+    sent: _Sent = []
+    boards: dict[str, GenericDriver] = {}
+    for index, name in enumerate(_ROBOT_NAMES):
+        mgr = CANManager(run_blocking=direct_runner())
+        for bus_name in (f"can{index}", f"can{index}_spare"):
+            bus = mock_bus()
+            bus.send.side_effect = lambda msg, _bus=bus_name: sent.append((_bus, msg, time.time()))
+            mgr.add_bus(bus_name, bus)
+        board = GenericDriver(f"{name}_board", _BOARD_CAN_ID, control_type=ControlMode.DUTY)
+        mgr.add_motor(f"can{index}", board)
+        boards[name] = board
+        if with_energized_motor:
+            # 本当に励磁するモータ (EDULITE 05 / DM3520) の代役。こちらは従来どおり
+            # 中断ありの経路を通らなければならない
+            energized = mock_driver(f"{name}_arm", 0x21)
+            energized.emergency_stop_message.return_value = None
+            energized.activation_steps.return_value = [
+                (
+                    can.Message(
+                        arbitration_id=_ENERGIZE_FRAME_ID, data=bytes(8), is_extended_id=False
+                    ),
+                    0.0,
+                )
+            ]
+            mgr.add_motor(f"can{index}", energized)
+        fx.add_robot(name, GatedSequence(name), mgr)
+    return fx, sent, boards
+
+
+class TestLatchClearIsNeverAborted:
+    """**ラッチ解除は中断しない。中断すべきは「励磁」であってラッチ解除ではない。**
+
+    実機で起きた形: 解除の途中で緊急停止が再発動すると、ロボットを順に処理する
+    再励磁は 2 台目へ解除フレームを 1 通も送らない。ラッチの外れない基板は
+    緊急停止ビットを報告し続け、それを拾ったサーバーが停止を再発動する ——
+    解除操作のたびに同じロボットだけが取り残され、**永久に復帰できない**。
+    """
+
+    async def test_ラッチ解除は全ロボットの励磁より先に出る(self) -> None:
+        fx, sent, _boards = _fixture_with_boards()
+        await fx.activate_e_stop(reason="停止")
+        sent.clear()
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        first_energize = next(
+            (index for index, (_bus, msg, _at) in enumerate(sent) if _is_energize(msg)), None
+        )
+        assert first_energize is not None, "励磁フレームが 1 通も飛んでいない"
+        for index, name in enumerate(_ROBOT_NAMES):
+            bus_name = f"can{index}"
+            first_clear = next(
+                (
+                    i
+                    for i, (bus, msg, _at) in enumerate(sent)
+                    if bus == bus_name and _is_latch_clear(msg)
+                ),
+                None,
+            )
+            assert first_clear is not None, f"{name} へラッチ解除フレームが飛んでいない"
+            assert first_clear < first_energize, (
+                f"{name} のラッチ解除が、どこかのロボットの励磁より後になっている"
+            )
+
+    async def test_解除直後に停止が再発動しても2台目へ届く(self) -> None:
+        """1 台目の処理中に緊急停止が戻っても、2 台目のラッチは外しに行くこと。"""
+        fx, sent, _boards = _fixture_with_boards()
+        await fx.activate_e_stop(reason="停止")
+
+        main = fx.can_manager("main_hand")
+        clear_main_hand = main.clear_e_stop_latches
+
+        async def _clear_then_e_stop(**kwargs: object) -> list[str]:
+            uncleared = await clear_main_hand(**kwargs)
+            # 解除フレームを送った直後に基板がまだ止まっていた場合と同じ状況
+            await fx.activate_e_stop(reason="解除直後に再発動")
+            return uncleared
+
+        main.clear_e_stop_latches = _clear_then_e_stop
+        sent.clear()
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        assert any(bus == "can1" and _is_latch_clear(msg) for bus, msg, _at in sent), (
+            "2 台目のロボットへラッチ解除フレームが 1 通も飛んでいない"
+        )
+        assert fx.e_stop_active is True
+        # 励磁の中断は従来どおり効いていること (ラッチ解除だけを中断の外に出す)
+        assert not any(_is_energize(msg) for _bus, msg, _at in sent), (
+            "緊急停止が再発動しているのに励磁フレームが飛んでいる"
+        )
+
+
+class TestEStopClearIsBroadcast:
+    """**停止と解除は対称でなければならない。**
+
+    停止はブロードキャスト `0x0FF` でバス上の全基板・全チャンネルをラッチさせる
+    のに、解除が device_id 宛の個別送信だけだと **yaml に登録されたモータにしか
+    届かない**。ベンチ設定で一部だけ動かす / 増設した基板が yaml に無い /
+    片方のロボットだけ起動する、のいずれでも PC の管轄外は永久にラッチされ、
+    基板の LED は 1 チャンネルでもラッチがあれば橙になるので全基板が橙のまま
+    戻らない (実機で発生)。
+    """
+
+    async def test_全バスへブロードキャスト解除が飛ぶ(self) -> None:
+        fx, sent, _boards = _fixture_with_boards()
+        await fx.activate_e_stop(reason="停止")
+        sent.clear()
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        reached = {bus for bus, msg, _at in sent if _is_broadcast_clear(msg)}
+        assert reached == {"can0", "can0_spare", "can1", "can1_spare"}, (
+            f"ブロードキャスト解除が届いていないバスがある: {reached}"
+        )
+
+    async def test_yamlに無いdevice_idもブロードキャストで救われる(self) -> None:
+        """個別送信では届かない基板が、バスへの 1 通で救われることを見る。"""
+        fx, sent, _boards = _fixture_with_boards(with_energized_motor=False)
+        await fx.activate_e_stop(reason="停止")
+        sent.clear()
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        # 実機で取り残された sub_hand のサーボ。yaml に無いので個別解除は飛ばない
+        unregistered = 0x43
+        assert not any(_is_latch_clear(msg, unregistered) for _bus, msg, _at in sent)
+        for bus_name in ("can0", "can0_spare", "can1", "can1_spare"):
+            assert any(bus == bus_name and _is_broadcast_clear(msg) for bus, msg, _at in sent), (
+                f"{bus_name} に登録済みの自作モタドラが居なくても解除は出さねばならない"
+            )
+
+    async def test_ブロードキャスト解除は基板報告の起点より前に送る(self) -> None:
+        """順序が逆だと、まだ解除の届いていない基板の報告で自分で止め直す。
+
+        `_board_e_stop_ignore_before` は「これより後のフィードバックなら解除後の
+        報告として信じてよい」という起点なので、解除フレームを送り終えてから
+        置かなければならない。
+        """
+        fx, sent, boards = _fixture_with_boards(with_energized_motor=False)
+        board = boards["main_hand"]
+        mgr = fx.can_manager("main_hand")
+        feed_generic(board, e_stop=True)
+        mark_feedback_at(mgr, board.name, time.time())
+
+        await fx.publish_state()
+        assert fx.e_stop_active is True, "基板の報告でサーバーが停止していない"
+
+        sent.clear()
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        broadcast_at = next(
+            (at for bus, msg, at in sent if bus == "can0" and _is_broadcast_clear(msg)), None
+        )
+        assert broadcast_at is not None, "ブロードキャスト解除が送られていない"
+        # ブロードキャストを送ったのと同じ瞬間に届いたフィードバック。基板はまだ
+        # 解除を受け取っていないので、これを信じて止め直してはならない
+        mark_feedback_at(mgr, board.name, broadcast_at)
+        await fx.publish_state()
+
+        assert fx.e_stop_active is False, (
+            "解除フレームより前の起点で基板の報告を信じ、自分で止め直している"
+        )

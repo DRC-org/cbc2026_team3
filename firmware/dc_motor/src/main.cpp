@@ -32,6 +32,7 @@
 #include "MotorCanProtocol.h"
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
+#include "MotorTxHealth.h"
 #include "SerialLineBuffer.h"
 #include "SerialOverride.h"
 #include "config.h"
@@ -138,11 +139,21 @@ static uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 static PeriodicTimer g_feedbackTimer[kDcChannelCount];
 
 static PeriodicTimer g_infoTimer;
+
+// INFO は 1Hz で全チャンネル分を送るが、R4 の Arduino_CAN は標準 ID の mailbox を
+// 1 本しか使わない（R7FA4M1_CAN.cpp の write が CAN_MAILBOX_ID_0 固定）。同じ反復で
+// 連続送信すると 2 通目以降が必ず落ち、しかも kInfoIntervalMs が feedback_interval_ms の
+// 整数倍なので毎回同じ位相で落ちて永久に 1 通も出ない（実機で 4 秒間 0 通を観測）。
+// 1 反復 1 通に割り、落ちた ch はそのまま次の反復で送り直す。
+static uint8_t g_infoPendingCh = kDcChannelCount;  // kDcChannelCount = 送信待ちなし
 static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
 // CAN が上がらなかった基板は PC から止められない。LED でそれと分かるようにする。
 static bool g_canFailed = false;
+
+// 送信の連続失敗数。数える規則は TxFailCounter が持つ（native テスト圏内）。
+static TxFailCounter g_txFail;
 
 #if HAS_RGB_LED
 static Adafruit_NeoPixel g_strip(1, kPinRgb, NEO_GRB + NEO_KHZ800);
@@ -212,6 +223,23 @@ static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
                                 /*reached=*/false, /*sensorActive=*/false);
 }
 
+// CAN 送信 1 通ぶんの結果を記録する。**戻り値を捨てないための唯一の口**にしてあるので、
+// CAN.write() を直に呼ぶ経路を作らないこと。かつて戻り値を捨てていたため、INFO が
+// 4 秒間 1 通も出ていないことが LED にもログにも現れなかった。
+//
+// **空かなければ諦める。待ってはならない** —— 詰まったバスの上で loop() が止まると、
+// ウォッチドッグ満了の反映も出力の更新も止まる（電磁弁基板 app.cpp の sendFrame と
+// 同じ判断）。FEEDBACK は次の周期でまた送られるので、1 通落ちても PC 側の STALE 判定
+// （既定 500ms）には遠く届かない。
+static bool sendFrame(const CanMsg &msg) {
+    if (CAN.write(msg) > 0) {
+        g_txFail.onSuccess();
+        return true;
+    }
+    g_txFail.onFailure();
+    return false;
+}
+
 static void sendFeedback(uint8_t ch, uint32_t nowMs) {
     // **この基板は位置を持たないので状態フラグ 1 バイトだけ**（仕様書 §3.2）。
     // 位置・速度に常に 0 を詰めても、PC には「測ったように見える 0」が届くだけ。
@@ -223,16 +251,17 @@ static void sendFeedback(uint8_t ch, uint32_t nowMs) {
     // **ID 未設定チャンネルはここへ来ない**（呼び出し側が isChannelConfigured で弾く。§2.2）。
     const CanMsg msg(CanStandardId(buildCanId(CommandType::Feedback, g_deviceId[ch])), len,
                      data);
-    CAN.write(msg);
+    sendFrame(msg);
 }
 
 // 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
-static void sendInfo(uint8_t ch) {
+// **送れたかを返す。** 落とすと 1 秒欠けるので、呼び出し側が次の反復で送り直す。
+static bool sendInfo(uint8_t ch) {
     uint8_t data[kInfoBaseLength];
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator);
     const CanMsg msg(CanStandardId(buildCanId(CommandType::Info, g_deviceId[ch])), len, data);
-    CAN.write(msg);
+    return sendFrame(msg);
 }
 
 static void applyParam(uint8_t ch, const SetParamCommand &cmd) {
@@ -358,7 +387,7 @@ static void resolveDeviceIds() {
 // ===========================================================================
 
 static void updateLed(uint32_t nowMs) {
-    BoardIndication indication(g_canFailed);
+    BoardIndication indication(g_canFailed || g_txFail.isAlarming(kCanTxFailStreakAlarm));
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         indication.observe(isChannelConfigured(ch),
                            (g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
@@ -554,12 +583,18 @@ void loop() {
 
     // 仕様書 §3.4: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
     // PC が基板より後から起動しても拾えるようにするため。
+    // **1 反復 1 通**（理由は g_infoPendingCh の宣言に付けてある）。
     if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
-        for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-            if (isChannelConfigured(ch)) {
-                sendInfo(ch);
-            }
+        g_infoPendingCh = 0;
+    }
+    if (g_infoPendingCh < kDcChannelCount) {
+        // **ID を名乗れないチャンネルは 1 通も送らない**（仕様書 §2.2）。飛ばして次へ進む。
+        if (!isChannelConfigured(g_infoPendingCh)) {
+            ++g_infoPendingCh;
+        } else if (sendInfo(g_infoPendingCh)) {
+            ++g_infoPendingCh;
         }
+        // 送信に失敗した ch はインデックスを進めず、次の反復で送り直す。
     }
 
     updateLed(nowMs);

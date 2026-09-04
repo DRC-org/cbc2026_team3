@@ -15,6 +15,7 @@
 #include "MotorCanProtocol.h"
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
+#include "MotorTxHealth.h"
 #include "SerialLineBuffer.h"
 #include "SerialOverride.h"
 #include "SolenoidChannel.h"
@@ -127,6 +128,14 @@ SolenoidChannel g_channel[kSolenoidChannelCount] = {
 uint8_t g_deviceId[kSolenoidChannelCount] = {0};
 PeriodicTimer g_feedbackTimer[kSolenoidChannelCount];
 PeriodicTimer g_infoTimer;
+
+// INFO は 1Hz で全チャンネル分を送るが、bxCAN のメールボックスは 3 本しかなく、
+// 6 ch を同じ反復で連続送信すると 4 通目以降が必ず落ちる。しかも kInfoIntervalMs が
+// feedback_interval_ms の整数倍なので毎回同じ位相で落ち、後ろの ch は永久に 1 通も
+// 出ない（実機で 6ch 中 2ch しか出ていないことを観測）。
+// 1 反復 1 通に割り、落ちた ch はそのまま次の反復で送り直す。
+uint8_t g_infoPendingCh = kSolenoidChannelCount;  // kSolenoidChannelCount = 送信待ちなし
+
 PeriodicTimer g_blinkTimer;
 
 // FEEDBACK の送信周期は基板全体で 1 つ（チャンネルごとに変えると位相の分散が崩れる）。
@@ -134,6 +143,9 @@ uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 
 bool g_canFailed = false;
 bool g_ledOn = false;
+
+// 送信の連続失敗数。数える規則は TxFailCounter が持つ（native テスト圏内）。
+TxFailCounter g_txFail;
 
 #if ENABLE_SERIAL_DEBUG
 char g_serialStorage[kSerialLineCapacity];
@@ -191,9 +203,14 @@ uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
 // バスの上で loop() が止まると、ウォッチドッグ満了の反映も出力の更新も止まる。
 // FEEDBACK は次の周期でまた送られるので、1 通落ちても PC 側の STALE 判定
 // （既定 500ms）には遠く届かない。
-void sendFrame(uint16_t canId, uint8_t *data, uint8_t length) {
+//
+// 諦めた結果は捨てずに数える。**戻り値を捨てないための唯一の口**にしてあるので、
+// HAL_CAN_AddTxMessage() を直に呼ぶ経路を作らないこと。捨てていた頃は、6ch 中 4ch の
+// INFO が 1 通も出ていないことが LED にもログにも現れなかった。
+bool sendFrame(uint16_t canId, uint8_t *data, uint8_t length) {
     if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) == 0) {
-        return;
+        g_txFail.onFailure();
+        return false;
     }
     CAN_TxHeaderTypeDef header{};
     header.StdId = canId;
@@ -204,7 +221,12 @@ void sendFrame(uint16_t canId, uint8_t *data, uint8_t length) {
     header.TransmitGlobalTime = DISABLE;
 
     uint32_t mailbox = 0;
-    HAL_CAN_AddTxMessage(&hcan, &header, data, &mailbox);
+    if (HAL_CAN_AddTxMessage(&hcan, &header, data, &mailbox) != HAL_OK) {
+        g_txFail.onFailure();
+        return false;
+    }
+    g_txFail.onSuccess();
+    return true;
 }
 
 void sendFeedback(uint8_t ch, uint32_t nowMs) {
@@ -221,10 +243,11 @@ void sendFeedback(uint8_t ch, uint32_t nowMs) {
 
 // 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
-void sendInfo(uint8_t ch) {
+// **送れたかを返す。** 落とすと 1 秒欠けるので、呼び出し側が次の反復で送り直す。
+bool sendInfo(uint8_t ch) {
     uint8_t data[kInfoBaseLength];
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator);
-    sendFrame(buildCanId(CommandType::Info, g_deviceId[ch]), data, len);
+    return sendFrame(buildCanId(CommandType::Info, g_deviceId[ch]), data, len);
 }
 
 void applyParam(uint8_t ch, const SetParamCommand &cmd) {
@@ -406,7 +429,7 @@ void resolveDeviceIds() {
 
 void updateLed(uint32_t nowMs) {
 #if HAS_STATUS_LED
-    BoardIndication indication(g_canFailed);
+    BoardIndication indication(g_canFailed || g_txFail.isAlarming(kCanTxFailStreakAlarm));
     for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
         indication.observe(isChannelConfigured(ch),
                            (g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
@@ -559,12 +582,18 @@ extern "C" void loop() {
 
     // 仕様書 §3.4: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
     // PC が基板より後から起動しても拾えるようにするため。
+    // **1 反復 1 通**（理由は g_infoPendingCh の宣言に付けてある）。
     if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
-        for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-            if (isChannelConfigured(ch)) {
-                sendInfo(ch);
-            }
+        g_infoPendingCh = 0;
+    }
+    if (g_infoPendingCh < kSolenoidChannelCount) {
+        // **ID を名乗れないチャンネルは 1 通も送らない**（仕様書 §2.2）。飛ばして次へ進む。
+        if (!isChannelConfigured(g_infoPendingCh)) {
+            ++g_infoPendingCh;
+        } else if (sendInfo(g_infoPendingCh)) {
+            ++g_infoPendingCh;
         }
+        // 送信に失敗した ch はインデックスを進めず、次の反復で送り直す。
     }
 
     updateLed(nowMs);

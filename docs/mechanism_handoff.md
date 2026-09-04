@@ -399,14 +399,14 @@ uv run python scripts/tune_y_axis.py ... --amplitude 15 --dwell 3.0 --kp 24,32,4
 ## 3-3. 2026-09-03 の机上ベンチ実測 —— プロファイルを入れて測った結果
 
 **§3-2 の手順を机上ベンチで一度なぞった記録である。** 決まった値は
-`config/bench/m3508_edulite/` に入れてあり、**本番 `config/main_hand*.yaml` には
-持ってきていない**。
+`config/bench/main_hand/`（測定当時のディレクトリ名は `m3508_edulite/`）に入れてあり、
+**本番 `config/main_hand*.yaml` には持ってきていない**。
 
 ### 測定条件 —— この値をそのまま本番へ写してはならない
 
 | | |
 |---|---|
-| 構成 | `config/bench/m3508_edulite/`（M3508 ×2 + EDULITE 05 ×2） |
+| 構成 | `config/bench/main_hand/`（測定時点は M3508 ×2 + EDULITE 05 ×2 のみ） |
 | **機構** | **付いていない。左右の M3508 は直結しておらず、空回しである** |
 | `output_limit` | **1000 counts**（本番は 2000） |
 | `sync_tolerance` | **10.0mm**（本番は 2.0mm） |
