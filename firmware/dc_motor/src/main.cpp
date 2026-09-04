@@ -376,8 +376,10 @@ static void updateLed(uint32_t nowMs) {
     digitalWrite(kPinLed, g_ledOn ? HIGH : LOW);
 
 #if HAS_RGB_LED
-    // 赤（速い点滅）= CAN 不通 / ID 未設定、橙 = 緊急停止ラッチ中、緑 = 平常。
+    // 赤（速い点滅）= CAN 不通 / ID 未設定、橙 = 緊急停止ラッチ中、青 = 平常。
     // 緊急停止だけ消灯を挟まないのは、「止まっている」ことを見落とさせないため。
+    // **平常に緑を使ってはならない（緑のランプの使用が禁止されている）。**
+    // 橙は緑ダイを 96 で点けるが発色はオレンジなので、緑のランプには当たらない。
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
@@ -387,7 +389,7 @@ static void updateLed(uint32_t nowMs) {
         r = 255;
         g = 96;
     } else {
-        g = g_ledOn ? 255 : 32;
+        b = g_ledOn ? 255 : 32;
     }
     g_strip.setPixelColor(0, g_strip.Color(r, g, b));
     g_strip.show();

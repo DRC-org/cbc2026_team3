@@ -128,7 +128,7 @@ static bool g_canFailed = false;
 // mcp_can の sendMsg() は空き TX バッファ待ちと TXREQ クリア待ちの二段で
 // TIMEOUTVALUE(2500us) まで回るので、バス不通・bus-off・調停混雑では 1 通あたり
 // 最大 5ms を食う。捨てると「loop() だけが伸び続けて誰にも何も届かない基板」が
-// 平常時と同じ緑のハートビートを出し続ける。
+// 平常時と同じ青のハートビートを出し続ける。
 static uint16_t g_txFailStreak = 0;
 
 static Servo g_servo[kServoSlotCount];
@@ -591,16 +591,19 @@ static void updateLed(uint32_t nowMs) {
 #if HAS_RGB_LED
     // DC 用と同じ表示規則にしてある。基板が違うたびに色の意味が変わると、
     // 現場で 2 種類の対応表を覚えることになる。
-    // 赤（速い点滅）= CAN 不通 / 送信失敗 / ID 未設定、橙 = 緊急停止ラッチ中、緑 = 平常。
+    // 赤（速い点滅）= CAN 不通 / 送信失敗 / ID 未設定、橙 = 緊急停止ラッチ中、青 = 平常。
+    // **平常に緑を使ってはならない（緑のランプの使用が禁止されている）。**
+    // 橙は緑ダイを 96 で点けるが発色はオレンジなので、緑のランプには当たらない。
     uint8_t r = 0;
     uint8_t g = 0;
+    uint8_t b = 0;
     if (indication.urgent) {
         r = g_ledOn ? 255 : 0;
     } else if (indication.stopped) {
         r = 255;
         g = 96;
     } else {
-        g = g_ledOn ? 255 : 32;
+        b = g_ledOn ? 255 : 32;
     }
 
     // **AVR 版 Adafruit_NeoPixel::show() は 1 LED あたり約 30us 割り込みを禁止する。**
@@ -611,12 +614,16 @@ static void updateLed(uint32_t nowMs) {
     // **呼ぶ回数を増やしてはならない**（updateMotion の直後や毎ループの位置へ
     // 動かすと、当たる確率がそのまま比例して上がる）。色が変わらないときに
     // 送らないのは、緊急停止ラッチ中（橙で固定）に毎秒 1 回叩き続けないため。
+    // **キャッシュは 3 成分すべてを持つこと。** ここが show() を呼ぶ唯一の条件なので、
+    // 平常色が載っている青を外すと「色を計算しているのに一度も反映されない LED」になる。
     static uint8_t lastR = 0xFF;
     static uint8_t lastG = 0xFF;
-    if (r != lastR || g != lastG) {
+    static uint8_t lastB = 0xFF;
+    if (r != lastR || g != lastG || b != lastB) {
         lastR = r;
         lastG = g;
-        g_strip.setPixelColor(0, g_strip.Color(r, g, 0));
+        lastB = b;
+        g_strip.setPixelColor(0, g_strip.Color(r, g, b));
         g_strip.show();
     }
 #endif
