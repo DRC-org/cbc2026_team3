@@ -382,7 +382,7 @@ class TestLoadDefinitions:
         """group は「その項目をどのコントロールの隣に置くか」の唯一の宣言。
 
         サーバーは語彙を検証せず素通しする。未知の名前を弾くと、UI が知らない
-        group を書いた瞬間に起動しなくなり、区分を持たないベンチ設定 7 セットも
+        group を書いた瞬間に起動しなくなり、区分を持たないベンチ設定 8 セットも
         通らない。項目が画面から消えないことは UI 側 (未知は「その他」へ描く) が守る。
         """
         from lib.match_state import load_checklist_definitions

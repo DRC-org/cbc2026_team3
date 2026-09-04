@@ -365,7 +365,7 @@ class TestBusSelection:
     """開くのは **``--axis`` で指定した軸のモータが載っているバス** ただ 1 本。
 
     モータ構成に現れるバスの集合から 1 本選ぶと、複数バスを持つ config
-    (本番の config/main_hand.yaml は 3 本、config/bench/m3508_edulite/ は 2 本) では
+    (本番の config/main_hand.yaml も config/bench/main_hand/ も 3 本) では
     選ばれるバスが実行ごとに変わる。対象軸の載っていないバスを開いた回は
     フィードバックが 1 通も届かず、症状は「同じコマンドなのに動いたり動かなかったり
     する」だけになる。
@@ -376,9 +376,9 @@ class TestBusSelection:
         table = load_position_table(_read_yaml(positions), source=str(positions))
         return tune._resolve_bus_alias(robot, table.axis(axis))
 
-    def test_2バスのベンチでもm3508のバスを選ぶ(self) -> None:
+    def test_複数バスのベンチでもm3508のバスを選ぶ(self) -> None:
         """M3508 と EDULITE を同時に載せたセット。edulite_bus を開いた回は 1 台も動かない。"""
-        bench = _ROOT / "config" / "bench" / "m3508_edulite"
+        bench = _ROOT / "config" / "bench" / "main_hand"
 
         alias = self._resolve(bench / "main_hand.yaml", bench / "main_hand_positions.yaml")
 

@@ -260,7 +260,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `m3508_edulite/` = その 2 種を同時に載せる（CANable 2 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台）。`--system` / `--config` / `--checklist` で差し替える。7 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる） |
+| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `main_hand/` = メインハンド一式を同時に載せる（CANable 3 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台 / `y_axis_tuning/` = y_axis の PID 実機チューニング用）。`--system` / `--config` / `--checklist` で差し替える。8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる） |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。`health` /
 `can_buses` / `match` は PC 上に 1 組しか存在し得ないため `config/<robot>.yaml` には書けず、
@@ -921,7 +921,7 @@ PC 側 yaml の `can_id` が無変更で済む）。`Unused` にしたスロッ�
 FAULT として出すので、症状は**「正しく焼いたのに全モータ FAULT」**になる。
 **この対はテストが機械的に守る** — `tests/test_firmware_version_sync.py` が 3 つの
 `config.h` を実際にパースし、can_id の上位 2bit（仕様書 §2.2 のビット分割）で基板種別を
-決めて同梱の全 yaml（bench 7 セットを含む）と突き合わせる。実際に一度、ファームだけを
+決めて同梱の全 yaml（bench 8 セットを含む）と突き合わせる。実際に一度、ファームだけを
 上げて config 側 26 箇所が丸ごと取り残された。
 
 **基板のセンサ入力は「報告するだけ」。判断は PC 側が持つ。** **接触は異常ではない** —
