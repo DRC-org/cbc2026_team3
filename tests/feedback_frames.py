@@ -53,12 +53,21 @@ def m3508_feedback(
     rpm: int = 0,
     current: int = 0,
     temp: int = 25,
+    timestamp: float = 0.0,
 ) -> can.Message:
-    """C620 フィードバックフレーム (0x200 + can_id / 8 byte)。"""
+    """C620 フィードバックフレーム (0x200 + can_id / 8 byte)。
+
+    ``timestamp`` は SocketCAN がカーネル受信時刻として載せる値。多回転アンラップは
+    「バス上で途切れた時間」をこれで測るので、**取りこぼしを再現するテストは必ず
+    指定する**。既定の 0.0 は「時刻を持たないフレーム」で、ドライバは処理時刻
+    (単調クロック) へ落ちる —— 実機の virtual バスやこれを指定しないテストが
+    そこを通る。
+    """
     return can.Message(
         arbitration_id=0x200 + driver.can_id,
         data=struct.pack(">HhhBB", angle_raw & 0xFFFF, rpm, current, temp, 0),
         is_extended_id=False,
+        timestamp=timestamp,
     )
 
 
@@ -70,16 +79,24 @@ def feed_m3508(
     rpm: int = 0,
     current: int = 0,
     temp: int = 25,
+    timestamp: float = 0.0,
 ) -> None:
     """M3508 へフィードバックを 1 フレーム流す。
 
     ``deg`` を渡すと単回転角から生カウントへ換算する。多回転の累積は
     ``update_state`` 側が前回値との差分で行うため、連続して呼ぶ順序に意味がある。
+
+    ``timestamp`` は SocketCAN のカーネル受信時刻 (``m3508_feedback`` 参照)。
+    取りこぼしを再現するテストだけが指定する。
     """
     if (angle_raw is None) == (deg is None):
         raise ValueError("angle_raw と deg のどちらか一方を指定すること")
     raw = m3508_counts_for_deg(deg) if angle_raw is None else angle_raw
-    driver.update_state(m3508_feedback(driver, angle_raw=raw, rpm=rpm, current=current, temp=temp))
+    driver.update_state(
+        m3508_feedback(
+            driver, angle_raw=raw, rpm=rpm, current=current, temp=temp, timestamp=timestamp
+        )
+    )
 
 
 def generic_feedback(

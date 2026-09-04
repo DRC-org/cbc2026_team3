@@ -441,3 +441,115 @@ class TestWrapInferenceAcrossFeedbackGap:
             self._feed(4108)
 
         assert self.driver.origin_trusted is False
+
+
+class TestWrapInferenceWhenFramesAreDropped:
+    """**カーネルに捨てられた窓を「途切れていない」と読んではならない。**
+
+    受信が 1kHz に追いつかないとソケットバッファが溢れ、カーネルはフレームを捨てる
+    (実機の `can_m3508` は受信 369 万通に対し 77 万通 = 17% が `rx_dropped`)。
+    このとき残った分は**滞留を詰めて処理される**ので、処理時刻 (単調クロック) で
+    測った間隔は 1ms 程度にしか見えない —— 実際には数十 ms 途切れているのに。
+
+    巡航 200mm/s では減速比込みでモータ軸 1834rpm なので、**16ms 欠けるだけで
+    半周を越える**。そこへ「半周を超える差分は折り返し」という推定を当てると、
+    累積角に 360deg (`y_axis` の scale 55.0131deg/mm で 6.54mm) が入る。しかも
+    再アンカーの記録は残らないので、原点がずれたまま平常どおりに見える。
+
+    症状は「動作中に軸が荒れて (左右が押し合って) 同期ずれで緊急停止」で、
+    実機で発生済み。窓の長さは**フレーム自身のタイムスタンプ**で測るしかない。
+    """
+
+    # 巡航 200mm/s 相当。1834rpm = 8192counts * 1834 / 60 / 1000 ≒ 250counts/ms
+    CRUISE_RPM = 1834
+    COUNTS_PER_MS = 250
+
+    def setup_method(self) -> None:
+        self.clock = FakeClock()
+        self.driver = M3508Driver("y_axis_r", can_id=1, time_source=self.clock)
+        self.stamp = 5000.0
+        self.angle = 0
+
+    def _feed(self, *, elapsed_ms: float, processed_after_ms: float) -> None:
+        """``elapsed_ms`` ぶん機構が進んだフィードバックを 1 通流す。
+
+        ``processed_after_ms`` は「このプロセスが前の 1 通を処理してからの時間」で、
+        滞留を詰めて処理している間は実経過より短くなる。
+        """
+        self.angle += int(self.COUNTS_PER_MS * elapsed_ms)
+        self.stamp += elapsed_ms / 1000.0
+        self.clock.advance(processed_after_ms / 1000.0)
+        feed_m3508(
+            self.driver,
+            angle_raw=self.angle % 8192,
+            rpm=self.CRUISE_RPM,
+            timestamp=self.stamp,
+        )
+
+    def test_捨てられた窓は処理間隔が詰まっていても折り返しを推定しない(self) -> None:
+        """壊れていると、この 1 通で累積角が 1 回転ぶん (6.54mm) 巻き戻る。
+
+        30ms 欠けた間の実移動は 7500counts (0.92 回転)。単回転角の差分は
+        7500 % 8192 = 7500 で半周を超えるため、推定を続けると -692counts と読む
+        —— 真値との差はちょうど -8192counts = -360deg になる。
+        """
+        for _ in range(5):
+            self._feed(elapsed_ms=1, processed_after_ms=1)
+        before = self.driver.multi_turn_position
+
+        # 30 通ぶんがカーネルで捨てられる。滞留を詰めているので処理間隔は 1ms
+        self._feed(elapsed_ms=30, processed_after_ms=1)
+
+        advanced = self.driver.multi_turn_position - before
+        assert advanced == pytest.approx(0.0), (
+            f"捨てられた窓に折り返し推定を当てている (累積角が {advanced:.1f}deg 動いた)"
+        )
+        assert self.driver.reanchor_count == 1
+        assert self.driver.origin_trusted is False
+
+    def test_取りこぼしの報告はヘルスに出る(self) -> None:
+        """黙って再アンカーすると、ずれた原点のまま平常に見える機体ができる。"""
+        self._feed(elapsed_ms=1, processed_after_ms=1)
+        self._feed(elapsed_ms=30, processed_after_ms=1)
+
+        detail = self.driver.health_detail()
+        assert detail is not None
+        assert "原点" in detail
+
+    def test_滞留しているだけで取りこぼしが無ければ推定を続ける(self) -> None:
+        """**処理が遅れただけで再アンカーしてはならない。**
+
+        イベントループが 30ms 止まっても、フレームがバッファに残っていれば
+        1 通も失われていない。そこで再アンカーすると、原点の信頼を失う理由が
+        「処理が遅れた」だけになり、`health_detail` が実害の無い警告で埋まる。
+        """
+        self._feed(elapsed_ms=1, processed_after_ms=1)
+        self._feed(elapsed_ms=1, processed_after_ms=30)
+
+        assert self.driver.reanchor_count == 0
+        assert self.driver.origin_trusted is True
+
+    def test_時刻を持たないフレームでは処理時刻で測る(self) -> None:
+        """virtual バス (``--dry-run``) のフレームは時刻を持たない。
+
+        そこで「間隔 0」に倒すと、どれだけ途切れても推定を続けることになる。
+        時刻が無いなら処理時刻で測るのが唯一の手掛かりで、安全側でもある。
+        """
+        driver = M3508Driver("y_axis_r", can_id=1, time_source=self.clock)
+        feed_m3508(driver, angle_raw=8000, rpm=self.CRUISE_RPM)
+        self.clock.advance(1.0)
+        feed_m3508(driver, angle_raw=4108, rpm=self.CRUISE_RPM)
+
+        assert driver.origin_trusted is False
+
+    def test_時刻が巻き戻ったら処理時刻へ落ちる(self) -> None:
+        """カーネルの時刻は壁時計なので NTP 補正で飛びうる。
+
+        逆走した差は「途切れた時間」として意味を成さない。0 と読むと、そこだけ
+        推定の歯止めが外れる。
+        """
+        feed_m3508(self.driver, angle_raw=0, rpm=self.CRUISE_RPM, timestamp=5000.0)
+        self.clock.advance(1.0)
+        feed_m3508(self.driver, angle_raw=4108, rpm=self.CRUISE_RPM, timestamp=4999.0)
+
+        assert self.driver.origin_trusted is False

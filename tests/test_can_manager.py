@@ -9,12 +9,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import can
 import pytest
 
-from lib.can_manager import _RECV_RETRY_MIN_S, CANManager
+from lib.can_manager import _RECV_RETRY_MIN_S, _RX_BATCH_MAX, CANManager
 from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth
-from tests.fake_can import direct_runner, mark_feedback_at, mock_bus, mock_driver
+from tests.fake_can import (
+    ReadableBus,
+    direct_runner,
+    mark_feedback_at,
+    mock_bus,
+    mock_driver,
+)
 from tests.feedback_frames import generic_feedback, m3508_feedback
 
 
@@ -930,3 +936,152 @@ class TestReceiveLoopSurvivesInterfaceDown:
         assert task in done, "recv 由来のキャンセルを握り潰している (止められない受信ループ)"
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestReceiveLoopOnAPollableBus:
+    """**実機 (SocketCAN) が通る経路。** fd の可読通知で起きて滞留を出し切る。
+
+    ここを 1 通ずつエグゼキュータへ往復する形にすると、往復のコスト (実測 168us)
+    が受信速度の上限を決めてしまう。C620 は 1 台 1kHz なので M3508 2 台だけで
+    2000 通/秒あり、追いつかない分はカーネルがソケットバッファ溢れとして捨てる
+    (実機で 17%)。**捨てられた窓は M3508 の折り返し推定を狂わせ、累積角に
+    360deg = 6.54mm が入る** —— 症状は「動作中に軸が荒れて同期ずれで緊急停止」。
+
+    ``mock_bus`` (MagicMock) は ``fileno()`` が int を返さないのでこの経路に
+    入らない。本番の経路を踏むテストは ``ReadableBus`` を使うこと。
+    """
+
+    async def _run_until_idle(self, mgr: CANManager, bus_name: str = "can0") -> None:
+        """受信ループを起こし、配り終えたところで畳む。"""
+        task = asyncio.create_task(mgr._receive_loop(bus_name))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_滞留した複数通が1回の起床で全部配られる(self) -> None:
+        calls: list[tuple[Any, tuple[Any, ...]]] = []
+        mgr = CANManager(run_blocking=direct_runner(calls))
+        motor = GenericDriver("gripper", 0x01)
+        bus = ReadableBus()
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        bus.queue(*(generic_feedback(motor, position=float(deg)) for deg in (10, 20, 30)))
+
+        await self._run_until_idle(mgr)
+
+        # 最後の 1 通まで配られている (途中で往復を挟んで取りこぼしていない)
+        assert motor.state.position == pytest.approx(30.0)
+        assert mgr.last_feedback_at("gripper") is not None
+        # **エグゼキュータを 1 度も使っていないこと。** 使うなら 1 通ごとの往復に
+        # 戻っており、この経路を用意した意味が無い
+        assert calls == []
+
+    async def test_滞留を捌く途中で他のタスクが走る(self) -> None:
+        """滞留が深くても制御周期を締め出してはならない。
+
+        1 回の起床で在庫を無制限に捌くと、その間ずっと同期的に走り続けるので
+        **位置制御ループ (200Hz) と偏差監視 (50Hz) が滞留を捌き終わるまで
+        一切走れない**。`_RX_BATCH_MAX` はその 1 区切りの上限で、区切りごとに
+        `_ReadableFd.wait()` が必ずイベントループへ戻ることで成立する。
+
+        「途中で走った」ことは、配り終える前の中間状態を他のタスクが観測できたか
+        で見る。最終値しか観測できないなら、そのタスクは締め出されている。
+        """
+        mgr = CANManager(run_blocking=direct_runner())
+        motor = GenericDriver("gripper", 0x01)
+        bus = ReadableBus()
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        total = _RX_BATCH_MAX * 3
+        bus.queue(*(generic_feedback(motor, position=float(deg)) for deg in range(1, total + 1)))
+
+        seen: list[float] = []
+
+        async def competing_task() -> None:
+            while True:
+                seen.append(motor.state.position)
+                await asyncio.sleep(0)
+
+        rival = asyncio.create_task(competing_task())
+        await self._run_until_idle(mgr)
+        rival.cancel()
+
+        assert motor.state.position == pytest.approx(float(total)), "滞留を捌き切っていない"
+        mid = [pos for pos in seen if 0.0 < pos < float(total)]
+        assert mid, "配り終えるまで他のタスクが 1 度も走っていない (制御周期を締め出す)"
+
+    async def test_取り込み中の失敗でも既に引き取った分は捨てない(self) -> None:
+        """カーネルのバッファから出したフレームはもうどこにも残っていない。
+
+        ここで捨てると、その窓は M3508 の折り返し推定から永久に失われる
+        (=捨てた側が原因の同期ずれを作る)。失敗の報告は次の呼び出しで足りる。
+        """
+        mgr = CANManager(run_blocking=direct_runner())
+        motor = GenericDriver("gripper", 0x01)
+        bus = ReadableBus()
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+
+        bus.queue(
+            generic_feedback(motor, position=45.0),
+            can.CanOperationError("Error receiving: Network is down [Error Code 100]"),
+        )
+
+        await self._run_until_idle(mgr)
+
+        assert motor.state.position == pytest.approx(45.0)
+
+    async def test_復帰待ちのあいだは可読の監視を外す(self) -> None:
+        """down した socket は「読める」と報告され続ける。
+
+        監視に載せたまま復帰を待つと、**イベントループが毎周期そのコールバックで
+        起こされ**、待っているはずの時間が空回りになる。同居している位置制御ループ
+        (200Hz) と偏差監視 (50Hz) の周期まで巻き添えにするので、素の ``continue``
+        を禁じているのと同じ理由でここも外す。
+
+        ``remove_reader`` は「外すものがあったか」を返すので、実装が既に外して
+        いれば False になる。
+        """
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = ReadableBus()
+        mgr.add_bus("can0", bus)
+        # 何度読んでも失敗し続ける (インタフェースが戻らない状態)
+        bus.queue(*(can.CanOperationError("Network is down") for _ in range(20)))
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        for _ in range(5):
+            await asyncio.sleep(0)  # 1 度失敗してバックオフへ入るまで進める
+
+        loop = asyncio.get_running_loop()
+        assert loop.remove_reader(bus.fileno()) is False, (
+            "復帰待ちのあいだ可読の監視を載せたままにしている (イベントループが空回りする)"
+        )
+        assert mgr.health().buses[0].state is BusHealth.DOWN
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_監視できないバスは従来の経路へ落ちる(self) -> None:
+        """``--dry-run`` の virtual バスは ``fileno()`` を持たない。
+
+        ここで例外にすると、机上での配線確認ごと起動しなくなる。
+        """
+        calls: list[tuple[Any, tuple[Any, ...]]] = []
+        mgr = CANManager(run_blocking=direct_runner(calls))
+        motor = GenericDriver("gripper", 0x01)
+        bus = mock_bus()
+        mgr.add_bus("can0", bus)
+        mgr.add_motor("can0", motor)
+        bus.recv.side_effect = [generic_feedback(motor, position=12.0), asyncio.CancelledError]
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._receive_loop("can0")
+
+        assert motor.state.position == pytest.approx(12.0)
+        # フォールバックはエグゼキュータ経由 (ブロッキング呼び出しをループ上で行わない)
+        assert calls, "virtual バスでエグゼキュータを経由していない"

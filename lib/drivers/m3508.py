@@ -36,6 +36,11 @@ _COUNTS_HALF_REV = _COUNTS_PER_REV // 2
 # 左右の片方だけに乗れば、その瞬間に偏差超過で全体緊急停止になる ——
 # 実在しないずれで試合が止まるので、推定できない窓では推定しないほうが安全。
 #
+# **窓の長さはフレーム自身のタイムスタンプで測る (`_elapsed_since_previous`)。**
+# 処理時刻で測ると、取りこぼしが起きている最中 —— まさにこの判定が要る場面 ——
+# だけ窓が詰まって見え、ガードが素通りする。実機ではこれで累積角に 360deg が
+# 注入されていた (`lib/can_manager.py` の `_ReadableFd` に経緯がある)。
+#
 # 判定は 2 つ。どちらか一方でも引っ掛かれば推定をやめる:
 #   ① 窓の間に回りえた回転数が半周に届くか (フィードバックの rpm から見積もる)
 #   ② 窓そのものが長すぎるか (rpm が両端でたまたま 0 に見える場合の歯止め)
@@ -91,9 +96,13 @@ class M3508Driver(MotorDriver):
 
         # 折り返し推定の可否を測るための、前回フィードバックの時刻と回転数。
         # 単調クロックを使うのは壁時計だと NTP 補正で窓が伸縮するため
-        # (`lib/control/periodic.py` の LogThrottle と同じ理由)
+        # (`lib/control/periodic.py` の LogThrottle と同じ理由)。
+        # **ただし単調クロックは「このプロセスが処理した時刻」しか答えられない。**
+        # 実際に測りたいのは「バス上でフレームが途切れた時間」なので、
+        # フレーム自身のタイムスタンプがあればそちらを優先する (_elapsed_since)
         self._time_source = time_source
         self._prev_at: float | None = None
+        self._prev_stamp: float | None = None
         self._prev_rpm: int = 0
 
         # 推定を諦めて再アンカーした記録。**原点は以後ずれている可能性がある。**
@@ -140,7 +149,7 @@ class M3508Driver(MotorDriver):
         now = self._time_source()
 
         if self._prev_angle_raw is not None:
-            gap_s = now - self._prev_at if self._prev_at is not None else 0.0
+            gap_s = self._elapsed_since_previous(msg, now)
             if self._can_trust_wrap(gap_s, rpm):
                 diff = angle_raw - self._prev_angle_raw
                 # 半周を超える差分は 0 を跨いだ折り返しとみなす。
@@ -161,8 +170,48 @@ class M3508Driver(MotorDriver):
         self._prev_angle_raw = angle_raw
         self._prev_rpm = rpm
         self._prev_at = now
+        self._prev_stamp = self._frame_stamp(msg)
 
         return super().update_state(msg)
+
+    @staticmethod
+    def _frame_stamp(msg: can.Message) -> float | None:
+        """フレーム自身の受信時刻 [秒]。持っていなければ None。
+
+        SocketCAN はカーネルが受信した時刻を載せる (python-can が
+        ``Message.timestamp`` として渡す)。**0.0 は「時刻が無い」の意味**で、
+        テストが組み立てた素の ``can.Message`` がこれに当たる。
+        """
+        stamp = getattr(msg, "timestamp", None)
+        if stamp is None:
+            return None
+        stamp = float(stamp)
+        return stamp if stamp > 0.0 else None
+
+    def _elapsed_since_previous(self, msg: can.Message, now: float) -> float:
+        """前回フィードバックからの経過 [秒]。**フレーム自身の時刻を優先する。**
+
+        折り返し推定が知りたいのは「バス上でフィードバックが途切れた時間」であって
+        「このプロセスが処理した間隔」ではない。両者は普段は一致するが、**取りこぼしが
+        起きている間だけ食い違い、しかもそこが唯一この判定が要る場面**である ——
+        カーネルのバッファ溢れでフレームが捨てられると、残った分は滞留を詰めて
+        処理されるので処理間隔は 1ms 程度にしか見えない。単調クロックで測ると、
+        実際には数十 ms 途切れた窓を「途切れていない」と読み、半周を超えた回転に
+        折り返し推定を当てて**累積角に 360deg (y_axis で 6.54mm) を注入する**。
+        これは再アンカーの記録にも残らないので、原点がずれたまま平常に見える。
+
+        カーネルの時刻は壁時計 (CLOCK_REALTIME) なので NTP 補正で飛びうるが、
+        飛んだ結果は「窓が長く見える = 推定をやめて再アンカーする」側 (安全側) に
+        倒れる。逆走 (負の間隔) だけは意味を成さないので単調クロックへ落とす。
+        """
+        stamp = self._frame_stamp(msg)
+        if stamp is not None and self._prev_stamp is not None:
+            gap = stamp - self._prev_stamp
+            if gap >= 0.0:
+                return gap
+        if self._prev_at is None:
+            return 0.0
+        return now - self._prev_at
 
     def _can_trust_wrap(self, gap_s: float, rpm_now: int) -> bool:
         """この間隔を跨いで折り返しを推定してよいか。
