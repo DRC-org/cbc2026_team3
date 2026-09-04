@@ -17,6 +17,10 @@ API になる (「フィードバックが来たことにする」関数が本�
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import socket
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -97,6 +101,71 @@ def mock_bus() -> MagicMock:
     return bus
 
 
+class ReadableBus:
+    """``fileno()`` を持つバス。**本番の受信経路を通す唯一の土台。**
+
+    ``mock_bus`` (MagicMock) は ``fileno()`` が int を返さないので、受信ループは
+    エグゼキュータ経由のフォールバックへ落ちる。実機の SocketCAN が通るのは
+    そちらではなく「fd の可読通知で起きて滞留を出し切る」経路なので、モックだけで
+    固めると**本番の経路を 1 度も踏まないテスト群**ができあがる。
+
+    可読性は本物の socketpair で作る。イベントループの ``add_reader`` は実 fd しか
+    受け付けないため、ここを偽物にすると「起こされる」ことそのものを検証できない。
+    """
+
+    def __init__(self, messages: Iterable[can.Message] = ()) -> None:
+        self._trigger, self._watched = socket.socketpair()
+        self._queue: deque[can.Message | Exception] = deque(messages)
+        #: ``recv`` が呼ばれた回数。空回りしていないことの検証に使う
+        self.recv_calls = 0
+        # 可読を立てているか。**1 通ごとに 1 バイト送ってはならない** ——
+        # socketpair の受信バッファが埋まって send がブロックする (実際にハングした)。
+        # 実 socket と同じく「残っている間は読めるままにする」を守れば 1 バイトで足りる
+        self._signalled = False
+        self._notify()
+
+    # -- 本番が呼ぶ面 --------------------------------------------------- #
+
+    def fileno(self) -> int:
+        return self._watched.fileno()
+
+    def recv(self, timeout: float | None = None) -> can.Message | None:
+        self.recv_calls += 1
+        if not self._queue:
+            return None
+        item = self._queue.popleft()
+        if not self._queue:
+            self._consume()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def shutdown(self) -> None:
+        self._trigger.close()
+        self._watched.close()
+
+    # -- テストが呼ぶ面 ------------------------------------------------- #
+
+    def queue(self, *items: can.Message | Exception) -> None:
+        """届いたことにする。例外を混ぜると受信 API の失敗を再現できる。"""
+        self._queue.extend(items)
+        self._notify()
+
+    def _notify(self) -> None:
+        if self._queue and not self._signalled:
+            self._trigger.send(b"\0")
+            self._signalled = True
+
+    def _consume(self) -> None:
+        """在庫を出し切ったので可読を下ろす。"""
+        if not self._signalled:
+            return
+        self._watched.setblocking(False)
+        with contextlib.suppress(BlockingIOError, OSError):
+            self._watched.recv(64)
+        self._signalled = False
+
+
 def mock_driver(name: str, can_id: int) -> MagicMock:
     """``CANManager`` が呼ぶ面をひととおり持つドライバのモック。
 
@@ -130,6 +199,12 @@ def direct_runner(
     async def run(func: Callable[..., Any], *args: Any) -> Any:
         if record is not None:
             record.append((func, args))
+        # **本物と同じく必ず 1 度は制御を返す。** `run_in_executor` はスレッドの
+        # 起床を挟むので必ずイベントループへ戻るが、その場で実行するだけの
+        # スタブは戻らない。戻らないと、受信ループが 1 通も取れないまま回る状況
+        # (フォールバック経路 + 空のバス) でテスト側のタスクが永久に走れず、
+        # **失敗ではなくハングとして現れる**
+        await asyncio.sleep(0)
         return func(*args)
 
     return run

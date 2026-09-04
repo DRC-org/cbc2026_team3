@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 _RECV_TIMEOUT = 0.01
 
+# `fileno()` を持つバスで滞留を引き取るときの非ブロッキング呼び出し。
+# python-can の `recv` は timeout=0 を「select を 0 秒で打ち切る」と解釈する
+# (`None` は「今は 1 通も無い」であって失敗ではない)
+_RECV_NO_WAIT = 0.0
+
+# 1 回の起床で取り込むフレーム数の上限。**上限そのものより、上限に達したら
+# 明示的に譲ることに意味がある** —— 滞留が深いときにこのループが制御周期を
+# 締め出さないための区切りで、64 通 x 実測 47.5us ≒ 3ms は位置制御ループの
+# 周期 (5ms) を 1 回落とさない範囲に収まる。
+_RX_BATCH_MAX = 64
+
 # --- SocketCAN エラーフレーム (linux/can/error.h) ------------------------------
 # python-can の socketcan バスは既定でエラーフレームの受信を有効にする
 # (CAN_RAW_ERR_FILTER = 0x1FFFFFFF)。フレームは `is_error_frame` が立ち、
@@ -53,6 +64,90 @@ _TX_ERROR_SCORE_MAX = 255
 # 呼ぶたびに例外を作るので上限を置く。復旧ウォッチドッグの down/up 窓は実測で約 1 秒。
 _RECV_RETRY_MIN_S = 0.02
 _RECV_RETRY_MAX_S = 0.2
+
+
+class _ReadableFd:
+    """バスの受信 fd をイベントループの監視に載せ、「読める」を待てるようにする。
+
+    **1 通ごとにエグゼキュータへ往復する形は、受信そのものの上限を作る。**
+    `run_in_executor(bus.recv)` はスレッドの起床とイベントループへの復帰を伴い、
+    実測で 1 通あたり 168us かかる。C620 は 1 台 1kHz でフィードバックを流すので
+    M3508 2 台だけで 2000 通/秒、`can_generic` と合わせて 4000 通/秒を超え、
+    **受信だけで 1 コアが埋まる**。追いつかなくなった分はカーネルのソケット
+    バッファ溢れとして捨てられ、実機では `can_m3508` の受信 369 万通に対して
+    **77 万通 (17%) が `rx_dropped`** に積まれていた。
+
+    捨てられた窓は M3508 の累積角に化ける。滞留を詰めて処理している間は
+    ``time.monotonic()`` で測った処理間隔が詰まって見えるので、
+    `lib/drivers/m3508.py` の折り返し推定はその窓を「途切れていない」と読む。
+    巡航 200mm/s ではモータ軸 1834rpm なので、**16ms 分が欠けるだけで半周を超え、
+    累積角に 360deg (= 6.54mm) が注入される**。左右のどちらかにだけ乗れば
+    そのまま同期ずれになり、症状は「動作中に軸が荒れて緊急停止」になる。
+
+    そこで受信は fd の可読通知で起こし、起きたら滞留を出し切る。実測で
+    1 通 168us → 47.5us、バス 1 本ぶんの CPU で 37.5% → 10.6% になる。
+
+    ``fileno()`` を持たないバス (``--dry-run`` の virtual バス) では作れないので
+    ``for_bus`` が None を返し、呼び出し側は従来のエグゼキュータ経由へ落ちる。
+    """
+
+    def __init__(self, fd: int) -> None:
+        # コルーチンから呼ばれる前提。get_event_loop() は実行中のループが無い文脈で
+        # 新しいループを黙って作るので使わない (このファイルの他の箇所と同じ)
+        self._loop = asyncio.get_running_loop()
+        self._fd = fd
+        self._ready = asyncio.Event()
+        self._armed = False
+        self.resume()
+
+    @classmethod
+    def for_bus(cls, bus: can.Bus) -> _ReadableFd | None:
+        """監視できるならインスタンスを、できなければ None を返す。
+
+        **できない理由で落ちてはならない。** virtual バスもテストのモックも
+        `fileno()` を持たない (あるいは int を返さない) が、どちらも受信そのものは
+        従来経路で成立する。ここで例外にすると `--dry-run` が起動しなくなる。
+        """
+        fileno = getattr(bus, "fileno", None)
+        if not callable(fileno):
+            return None
+        try:
+            fd = fileno()
+        except Exception:
+            return None
+        if not isinstance(fd, int) or fd < 0:
+            return None
+        try:
+            return cls(fd)
+        except (NotImplementedError, OSError, ValueError):
+            # 監視できない fd (プラットフォームや socket の状態による)
+            return None
+
+    async def wait(self) -> None:
+        """読めるようになるまで待つ。
+
+        **クリアは取り込みの前に行う。** 後にすると、取り込んでいる間に届いた分の
+        通知を消してしまい、その滞留は次のフレームが届くまで引き取られない。
+        """
+        await self._ready.wait()
+        self._ready.clear()
+
+    def resume(self) -> None:
+        """監視を (再) 開始する。再開直後は 1 度必ず確かめる。"""
+        if not self._armed:
+            self._loop.add_reader(self._fd, self._ready.set)
+            self._armed = True
+        self._ready.set()
+
+    def suspend(self) -> None:
+        """監視を外す。down した socket で空回りしないための一時停止。"""
+        if self._armed:
+            self._loop.remove_reader(self._fd)
+            self._armed = False
+        self._ready.clear()
+
+    def close(self) -> None:
+        self.suspend()
 
 
 class BlockingRunner(Protocol):
@@ -305,45 +400,110 @@ class CANManager:
 
         黙って回り続けてはならないので、読めていないあいだは `_rx_down` を立てて
         `health()` から `BusHealth.DOWN` として見えるようにする。
+
+        **1 通ごとにエグゼキュータへ往復してはならない (`_ReadableFd` を参照)。**
+        往復のコストが受信可能な速度の上限を決めてしまい、C620 の 1kHz に追いつけずに
+        カーネルがフレームを捨てる。捨てられた窓は M3508 の折り返し推定を狂わせる。
         """
         bus = self._buses[bus_name]
         motors = self._bus_motors[bus_name]
         retry_s = _RECV_RETRY_MIN_S
+        readable = _ReadableFd.for_bus(bus)
 
-        while True:
+        try:
+            while True:
+                try:
+                    msgs = await self._receive_batch(bus, readable)
+                except asyncio.CancelledError:
+                    # `shutdown()` が畳む唯一の経路。握り潰すと停止できないタスクになる
+                    raise
+                except Exception:
+                    # 受信 API 自体の失敗 (インタフェース断など)。降りずに待って呼び直す。
+                    # 呼ぶたびに失敗するので、トレースバックは間引いて残す
+                    self._record_rx_down(bus_name)
+                    self._rx_log.exception(
+                        f"{bus_name}:recv",
+                        "CAN 受信に失敗しました。再試行を続けます (bus=%s)",
+                        bus_name,
+                    )
+                    # **待つあいだは fd の監視を外す。** down した socket は「読める」と
+                    # 報告され続けるので、載せたまま待つとイベントループが毎周期
+                    # 起こされ、位置制御ループ (200Hz) の周期まで巻き添えにする
+                    # (素の `continue` を禁じているのと同じ理由)
+                    if readable is not None:
+                        readable.suspend()
+                    await asyncio.sleep(retry_s)
+                    retry_s = min(_RECV_RETRY_MAX_S, retry_s * 2)
+                    if readable is not None:
+                        readable.resume()
+                    continue
+
+                retry_s = _RECV_RETRY_MIN_S
+
+                # **1 通も取れなかったことを復帰の証拠にしてはならない。** python-can の
+                # socketcan は select がタイムアウトした時点で socket に触れずに None を
+                # 返すので、インタフェースが down していても None は返り続ける。実測でも
+                # down 中に「30ms で受信が再開しました」と誤判定した。
+                # 復帰を確定できるのは**実際に 1 通読めたとき**だけ。
+                if not msgs:
+                    continue
+
+                self._clear_rx_down(bus_name)
+                for msg in msgs:
+                    if msg.is_error_frame:
+                        self._handle_error_frame(bus_name, msg)
+                        continue
+                    self._dispatch_frame(bus_name, motors, msg)
+
+                # **滞留が残っていても、次の 1 回は必ずイベントループへ戻る。**
+                # 可読通知のコールバックはループが回らないと呼ばれず、上の取り込みと
+                # 配布のあいだは 1 度も await しないので、`_ReadableFd.wait()` は
+                # 必ず一度サスペンドする。`_RX_BATCH_MAX` はその 1 区切りで同期的に
+                # 走る量の上限で、位置制御ループ (200Hz) を締め出さない幅に置いてある
+        finally:
+            if readable is not None:
+                readable.close()
+
+    async def _receive_batch(
+        self, bus: can.Bus, readable: _ReadableFd | None
+    ) -> Sequence[can.Message]:
+        """この起床で取り込めるだけのフレームを 1 回で引き取る。
+
+        ``readable`` を持つバス (SocketCAN) では、イベントループの fd 監視で
+        「読める」まで待ってから**滞留を出し切る**。1 通ごとにエグゼキュータへ
+        往復する形と比べて実測で 1 通あたり 168us → 47.5us、バス 1 本ぶんの CPU で
+        37.5% → 10.6% になる (can_m3508, 2225 フレーム/秒)。
+
+        ``fileno()`` を持たないバス (``--dry-run`` の virtual バス) では従来どおり
+        エグゼキュータ経由で 1 通ずつ読む。**1 回の呼び出しで recv を 1 回しか
+        呼ばない**性質はそのまま保つ ——ここで先読みすると、テストが並べた
+        「次の 1 通」を意図しない時点で引き取ってしまう。
+
+        取り込み中に失敗しても、**既に引き取った分は捨てない**。カーネルの
+        バッファから出したフレームはもうどこにも残っていないので、ここで捨てると
+        その窓は M3508 の折り返し推定から永久に失われる。失敗は次の呼び出しで
+        同じように起きるので、報告が 1 周遅れるだけで済む。
+        """
+        if readable is None:
+            msg: can.Message | None = await self._run_blocking(bus.recv, _RECV_TIMEOUT)
+            return () if msg is None else (msg,)
+
+        await readable.wait()
+
+        msgs: list[can.Message] = []
+        while len(msgs) < _RX_BATCH_MAX:
             try:
-                msg: can.Message | None = await self._run_blocking(bus.recv, _RECV_TIMEOUT)
+                msg = bus.recv(_RECV_NO_WAIT)
             except asyncio.CancelledError:
-                # `shutdown()` が畳む唯一の経路。握り潰すと停止できないタスクになる
                 raise
             except Exception:
-                # 受信 API 自体の失敗 (インタフェース断など)。降りずに待って呼び直す。
-                # 呼ぶたびに失敗するので、トレースバックは間引いて残す
-                self._record_rx_down(bus_name)
-                self._rx_log.exception(
-                    f"{bus_name}:recv",
-                    "CAN 受信に失敗しました。再試行を続けます (bus=%s)",
-                    bus_name,
-                )
-                await asyncio.sleep(retry_s)
-                retry_s = min(_RECV_RETRY_MAX_S, retry_s * 2)
-                continue
-
-            retry_s = _RECV_RETRY_MIN_S
-
-            # **タイムアウト (None) を復帰の証拠にしてはならない。** python-can の
-            # socketcan は select がタイムアウトした時点で socket に触れずに None を
-            # 返すので、インタフェースが down していても None は返り続ける。実測でも
-            # down 中に「30ms で受信が再開しました」と誤判定した。
-            # 復帰を確定できるのは**実際に 1 通読めたとき**だけ。
+                if msgs:
+                    return msgs
+                raise
             if msg is None:
-                continue
-
-            self._clear_rx_down(bus_name)
-            if msg.is_error_frame:
-                self._handle_error_frame(bus_name, msg)
-                continue
-            self._dispatch_frame(bus_name, motors, msg)
+                break
+            msgs.append(msg)
+        return msgs
 
     def _record_rx_down(self, bus_name: str) -> None:
         """受信が読めなくなったことを記録する。状態の遷移だけを 1 行残す。"""
