@@ -10,7 +10,7 @@ import can
 import pytest
 
 from lib.can_manager import _RECV_RETRY_MIN_S, CANManager
-from lib.drivers.base import MotorState
+from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth
@@ -372,6 +372,64 @@ class TestMotorActivation:
 
         assert inactive == ["m1"]
         assert "m2" in [call.args[0] for call in send.await_args_list]
+
+
+class TestClearEStopLatches:
+    """ラッチ解除は「励磁」ではないので、対象も中断の作法も励磁とは別物になる。"""
+
+    def _manager(self) -> tuple[CANManager, MagicMock]:
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = mock_bus()
+        mgr.add_bus("can0", bus)
+        return mgr, bus
+
+    async def test_自作モタドラ以外へは1通も送らない(self) -> None:
+        """EDULITE 05 / DM3520 の励磁は従来どおり中断ありの経路に残すこと。
+
+        こちらのフェーズは中断されないので、本当に励磁するドライバを混ぜると
+        「緊急停止が再発動しているのに機体が励磁される」経路ができる。
+        """
+        mgr, bus = self._manager()
+        board = GenericDriver("board", 0x11, control_type=ControlMode.DUTY)
+        energized = mock_driver("arm", 0x21)
+        energized.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x123, data=bytes(8), is_extended_id=False), 0.0)
+        ]
+        mgr.add_motor("can0", board)
+        mgr.add_motor("can0", energized)
+
+        uncleared = await mgr.clear_e_stop_latches()
+
+        assert uncleared == []
+        sent = [call.args[0] for call in bus.send.call_args_list]
+        assert [msg.arbitration_id for msg in sent] == [
+            GenericDriver.encode_e_stop_clear(0x11).arbitration_id
+        ]
+        energized.activation_steps.assert_not_called()
+
+    async def test_ブロードキャストではなく個別の宛先へ送る(self) -> None:
+        """共有バス上の他ロボットのラッチまで巻き添えで外さないこと。"""
+        mgr, bus = self._manager()
+        mgr.add_motor("can0", GenericDriver("board", 0x11, control_type=ControlMode.DUTY))
+
+        await mgr.clear_e_stop_latches()
+
+        sent = bus.send.call_args_list[0].args[0]
+        expected = GenericDriver.encode_e_stop_clear(0x11)
+        assert sent.arbitration_id == expected.arbitration_id
+        assert bytes(sent.data) == bytes(expected.data)
+
+    async def test_1台の送信失敗で残りを諦めない(self) -> None:
+        """緊急停止の原因がそのまま送信失敗を招いている場面が本番そのものである。"""
+        mgr, bus = self._manager()
+        mgr.add_motor("can0", GenericDriver("first", 0x11, control_type=ControlMode.DUTY))
+        mgr.add_motor("can0", GenericDriver("second", 0x12, control_type=ControlMode.DUTY))
+        bus.send.side_effect = [can.CanError("ACK が返らない"), None]
+
+        uncleared = await mgr.clear_e_stop_latches()
+
+        assert uncleared == ["first"]
+        assert bus.send.call_count == 2
 
 
 class TestReceiveLoopRobustness:

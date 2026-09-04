@@ -1099,6 +1099,38 @@ class RobotServer:
                 refresher.clear_targets()
             logger.info("E-STOP 送信試行完了: %s", name)
 
+    async def _send_e_stop_clear_broadcast(self) -> None:
+        """全バスへブロードキャストの緊急停止解除フレームを送る。
+
+        **停止と解除は対称でなければならない。** 停止は `_send_e_stop_frames` が
+        `0x0FF` をバスへ流すのでバス上の全基板・全チャンネルがラッチするのに対し、
+        解除は `activation_steps()` が device_id 宛に個別送信するため
+        **yaml に登録されたモータにしか届かない**。PC の管轄外のチャンネル
+        (ベンチ設定で一部だけ動かす / 増設した基板が yaml に無い / 片方のロボット
+        だけ起動する) は永久にラッチされたまま残り、基板の LED は 1 チャンネルでも
+        ラッチがあれば橙になるので **全基板が橙のまま戻らない**。操縦者からは
+        機体が復帰不能に見える (実機で発生)。
+
+        **ブロードキャストしても機体は動かない。** 停止時に目標値が捨てられており
+        (DC は duty 0 / サーボは現在角保持 / 電磁弁は OFF)、ファーム側の
+        `MotorSafety::isOutputAllowed()` は `SET_TARGET` を 1 通も受けるまで出力を
+        許可しない (仕様書 §5.4)。物理停止スイッチが押されている間はファームが
+        毎ループ再ラッチするので「押している間は絶対に動かない」も保たれる。
+
+        1 バスの送信失敗で他のバスを諦めないのは停止側と同じ。
+        """
+        clear_msg = GenericDriver.encode_e_stop_clear()
+        for name, ctx in self._robots.items():
+            for bus_name in ctx.can_manager.bus_names:
+                try:
+                    await ctx.can_manager.send_to_bus(bus_name, clear_msg)
+                except Exception:
+                    logger.exception(
+                        "E-STOP 解除ブロードキャスト送信失敗: robot=%s bus=%s",
+                        name,
+                        bus_name,
+                    )
+
     def _reset_sync_latches(self) -> None:
         """同期ずれのラッチを解除し、監視を再び有効な状態へ戻す。
 
@@ -1211,7 +1243,37 @@ class RobotServer:
         時刻を記録するのもここの責務になる —— 送信より前にその時刻を置くと、
         まだ解除フレームが届いていない基板のフィードバックを「解除後の報告」として
         信じてしまい、解除した瞬間にサーバーが自分で止め直す。
+
+        **自作モタドラのラッチ解除は励磁より先に、全ロボットぶんまとめて行う。**
+        励磁の中断 (`should_abort`) はロボットを順に処理するので、1 台目の最中に
+        緊急停止が再び入ると 2 台目へは解除フレームが 1 通も飛ばない。ラッチの
+        外れない基板は緊急停止ビットを報告し続け、それを `_detect_board_e_stop` が
+        拾って停止を再発動するため、**解除操作のたびに同じロボットだけが
+        取り残されて永久に復帰できなくなる** (実機で発生)。ラッチ解除は
+        それ自体では機体を動かさないので中断する理由が無い (根拠は
+        `CANManager.clear_e_stop_latches`)。
+
+        解除は 3 段になる: ①全バスへブロードキャスト解除 (バス上の全基板。PC の
+        管轄外のチャンネルを救う唯一の経路) → ②管轄内モータへ個別のラッチ解除
+        (中断しない) → ③励磁 (中断あり)。①と②が重なるのは意図的で、①は
+        「バス上の全基板へ届く」ことを、②は「PC が把握しているモータへ確実に
+        届く」ことをそれぞれ担う。
         """
+        await self._send_e_stop_clear_broadcast()
+
+        for name, ctx in self._robots.items():
+            try:
+                uncleared = await ctx.can_manager.clear_e_stop_latches()
+            except Exception:
+                logger.exception("緊急停止ラッチの解除に失敗: robot=%s", name)
+                uncleared = list(ctx.can_manager.motors)
+            if uncleared:
+                logger.error(
+                    "緊急停止ラッチを解除できなかったモータ: robot=%s motors=%s",
+                    name,
+                    ", ".join(uncleared),
+                )
+
         for name, ctx in self._robots.items():
             try:
                 inactive = await ctx.can_manager.activate_motors(

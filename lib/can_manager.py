@@ -12,6 +12,7 @@ import can
 from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
 from lib.control.periodic import LogThrottle
 from lib.drivers.base import MotorDriver
+from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
     BusHealthInfo,
@@ -558,6 +559,42 @@ class CANManager:
             )
 
         return await self._activate_each_motor("有効化", activate, should_abort=should_abort)
+
+    async def clear_e_stop_latches(self) -> list[str]:
+        """自作モタドラの緊急停止ラッチだけを外す。**中断口を持たない。**
+
+        `activate_motors` の `should_abort` は「励磁」を途中でやめるための口で、
+        ロボットを 1 台ずつ順に処理する `RobotServer._reactivate_motors` では
+        **後ろのロボットが構造的に不利**になる —— 1 台目の処理中に緊急停止が
+        再び入ると 2 台目へは解除フレームが 1 通も飛ばない。ラッチの外れない基板は
+        緊急停止ビットを報告し続け、それを `_detect_board_e_stop` が拾って停止を
+        再発動するので、解除操作のたびに同じ順序で同じロボットだけが取り残される
+        (実機で発生。sub_hand の全基板が `kNeverCommanded` のまま戻らなくなった)。
+
+        **ラッチ解除そのものでは機体は動かない**ので、中断する理由が無い:
+
+        - 停止時に目標値が捨てられている (`DcChannel::stop()` は duty 0、
+          `ServoChannel::stop()` は現在角で保持、`SolenoidChannel::stop()` は OFF)
+        - ファーム側の `MotorSafety::isOutputAllowed()` が `everFed_` を要求するので、
+          解除後に `SET_TARGET` を 1 通も受けるまで出力しない (仕様書 §5.4)
+
+        本当の励磁を伴う EDULITE 05 / DM3520 / M3508 は対象外で、従来どおり
+        `activate_motors` の中断ありの経路を通る。
+
+        Returns:
+            解除フレームを送れなかったモータ名。
+        """
+
+        async def clear(motor_name: str) -> bool:
+            motor = self._motors[motor_name]
+            if not isinstance(motor, GenericDriver):
+                return True
+            await self._send_steps(motor_name, motor.activation_steps())
+            return True
+
+        # 骨格は起動・励磁と共有する (「1 台の送信失敗で残りを諦めない」握りを
+        # 書き写すと、片方だけ外れた状態を作れてしまう)。中断口は渡さない
+        return await self._activate_each_motor("緊急停止ラッチの解除", clear)
 
     async def _activate_each_motor(
         self,

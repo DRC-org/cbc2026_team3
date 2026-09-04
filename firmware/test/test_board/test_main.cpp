@@ -12,6 +12,7 @@
 #include "MotorCanProtocol.h"
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
+#include "MotorTxHealth.h"
 #include "SerialLineBuffer.h"
 #include "SerialOverride.h"
 
@@ -530,6 +531,66 @@ static void test_serial_override_survives_millis_wraparound() {
     TEST_ASSERT_FALSE(override.shouldFeed(0, start + kSerialOverrideHoldMs + 1));
 }
 
+// --------------------------------------------------------------------------
+// CAN 送信の連続失敗
+// --------------------------------------------------------------------------
+
+static void test_tx_fail_counter_starts_silent() {
+    TxFailCounter counter;
+    TEST_ASSERT_EQUAL_UINT16(0, counter.streak());
+    TEST_ASSERT_FALSE(counter.isAlarming(1));
+}
+
+static void test_tx_fail_counter_accumulates_failures() {
+    TxFailCounter counter;
+    for (uint16_t i = 0; i < 3; ++i) {
+        counter.onFailure();
+    }
+    TEST_ASSERT_EQUAL_UINT16(3, counter.streak());
+}
+
+// **数えるのは「連続」失敗**。1 通でも通ったら 0 に戻さないと、
+// 起動から積み上げた総数がいつか閾値を越え、正常に送れている基板が赤くなる。
+static void test_tx_fail_counter_resets_on_success() {
+    TxFailCounter counter;
+    counter.onFailure();
+    counter.onFailure();
+    counter.onSuccess();
+
+    TEST_ASSERT_EQUAL_UINT16(0, counter.streak());
+    TEST_ASSERT_FALSE(counter.isAlarming(1));
+}
+
+// 閾値ちょうどで倒す（config.h の kCanTxFailStreakAlarm は「この通数で警告」の意味）。
+// 1 つずれると、警告に必要な失敗数が基板ごとの設定値と食い違う。
+static void test_tx_fail_counter_alarms_at_the_threshold() {
+    TxFailCounter counter;
+    const uint16_t threshold = 3;
+
+    counter.onFailure();
+    counter.onFailure();
+    TEST_ASSERT_FALSE(counter.isAlarming(threshold));
+
+    counter.onFailure();
+    TEST_ASSERT_TRUE(counter.isAlarming(threshold));
+
+    counter.onFailure();
+    TEST_ASSERT_TRUE(counter.isAlarming(threshold));
+}
+
+// 飽和させないと 0xFFFF の次で 0 へ折り返し、**バスが不通のままなのに警告が消える**。
+static void test_tx_fail_counter_saturates_instead_of_wrapping() {
+    TxFailCounter counter;
+    for (uint32_t i = 0; i < 0xFFFFu; ++i) {
+        counter.onFailure();
+    }
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF, counter.streak());
+
+    counter.onFailure();
+    counter.onFailure();
+    TEST_ASSERT_EQUAL_UINT16(0xFFFF, counter.streak());
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_broadcast_e_stop_reaches_every_channel);
@@ -571,5 +632,10 @@ int main(int, char **) {
     RUN_TEST(test_serial_override_clears_immediately);
     RUN_TEST(test_serial_override_hold_is_within_the_command_timeout_ceiling);
     RUN_TEST(test_serial_override_survives_millis_wraparound);
+    RUN_TEST(test_tx_fail_counter_starts_silent);
+    RUN_TEST(test_tx_fail_counter_accumulates_failures);
+    RUN_TEST(test_tx_fail_counter_resets_on_success);
+    RUN_TEST(test_tx_fail_counter_alarms_at_the_threshold);
+    RUN_TEST(test_tx_fail_counter_saturates_instead_of_wrapping);
     return UNITY_END();
 }

@@ -36,6 +36,7 @@
 #include "MotorCanProtocol.h"
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
+#include "MotorTxHealth.h"
 #include "SerialLineBuffer.h"
 #include "SerialOverride.h"
 #include "ServoChannel.h"
@@ -124,12 +125,12 @@ static_assert(kDipBitCount == sizeof(kPinDip) / sizeof(kPinDip[0]),
 static MCP_CAN g_can(kPinMcpCs);
 static bool g_canFailed = false;
 
-// 連続して送信に失敗した回数。**sendMsgBuf の戻り値を捨ててはならない** ——
-// mcp_can の sendMsg() は空き TX バッファ待ちと TXREQ クリア待ちの二段で
-// TIMEOUTVALUE(2500us) まで回るので、バス不通・bus-off・調停混雑では 1 通あたり
-// 最大 5ms を食う。捨てると「loop() だけが伸び続けて誰にも何も届かない基板」が
-// 平常時と同じ青のハートビートを出し続ける。
-static uint16_t g_txFailStreak = 0;
+// 送信の連続失敗数。数える規則は TxFailCounter が持つ（native テスト圏内）。
+// **sendMsgBuf の戻り値を捨ててはならない** —— mcp_can の sendMsg() は空き TX バッファ
+// 待ちと TXREQ クリア待ちの二段で TIMEOUTVALUE(2500us) まで回るので、バス不通・bus-off・
+// 調停混雑では 1 通あたり最大 5ms を食う。捨てると「loop() だけが伸び続けて誰にも何も
+// 届かない基板」が平常時と同じ青のハートビートを出し続ける。
+static TxFailCounter g_txFail;
 
 static Servo g_servo[kServoSlotCount];
 
@@ -283,12 +284,10 @@ static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
 // g_can.sendMsgBuf() を直に呼ぶ経路を作らないこと。
 static void sendFrame(uint16_t canId, uint8_t length, uint8_t *data) {
     if (g_can.sendMsgBuf(canId, 0, length, data) == CAN_OK) {
-        g_txFailStreak = 0;
+        g_txFail.onSuccess();
         return;
     }
-    if (g_txFailStreak < 0xFFFF) {
-        ++g_txFailStreak;
-    }
+    g_txFail.onFailure();
 }
 
 static void sendFeedback(uint8_t slot, uint32_t nowMs) {
@@ -565,7 +564,7 @@ static void updateLed(uint32_t nowMs) {
     // **送信が続けて失敗している基板も「今すぐ直さないと使えない」側に入れる。**
     // FEEDBACK も INFO も出ていないので PC 側からは STALE にしか見えず、
     // 配線不良と区別が付かない。ここが唯一の切り分け手段になる（仕様書 §2.2 と同じ扱い）。
-    BoardIndication indication(g_canFailed || g_txFailStreak >= kCanTxFailStreakAlarm);
+    BoardIndication indication(g_canFailed || g_txFail.isAlarming(kCanTxFailStreakAlarm));
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
         // Unused スロットは ID を名乗らないので「未設定」に数えない（数えると
         // 空きスロットのある基板が常に赤く点滅する）。緊急停止はサーボスロットだけが持つ。
