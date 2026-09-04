@@ -616,8 +616,8 @@ class TestShippedRobotConfig:
             "main_hand.yaml:rotate",
             "bench/edulite/main_hand.yaml:rotate",
             "bench/m3508/main_hand.yaml:y_axis",
-            "bench/m3508_edulite/main_hand.yaml:y_axis",
-            "bench/m3508_edulite/main_hand.yaml:rotate",
+            "bench/main_hand/main_hand.yaml:y_axis",
+            "bench/main_hand/main_hand.yaml:rotate",
         } <= inspected
 
     def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
