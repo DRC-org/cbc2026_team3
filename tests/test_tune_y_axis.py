@@ -43,7 +43,7 @@ tune = _load_module()
 #: y_axis の実測値。左右で符号が逆 (機構的に逆回転で同一動作)
 Y_SCALE = 55.0131
 
-BASE = {"kp": 32.0, "ki": 10.0, "kd": 1.0, "sync_kp": 8.0}
+BASE = {"kp": 32.0, "ki": 10.0, "kd": 1.0, "sync_kp": 8.0, "output_limit": 2000.0}
 
 
 def _args(*argv: str):
@@ -131,12 +131,43 @@ class TestSweep:
             ("--kp", "24,32", "--max-velocity", "50,80", "--max-acceleration", "300"),
             ("--max-velocity", "50,80", "--max-acceleration", "300,600"),
             ("--sync-kp", "0,8", "--max-velocity", "50,80", "--max-acceleration", "300"),
+            ("--output-limit", "2000,8000", "--kp", "24,32"),
+            ("--output-limit", "2000,8000", "--max-velocity", "50,80", "--max-acceleration", "300"),
         ],
     )
     def test_2つ同時のスイープは拒否する(self, argv: tuple[str, ...]) -> None:
         """どちらが効いたのか読めない結果が組み合わせの数だけ機体を動かして並ぶ。"""
         with pytest.raises(SystemExit, match="1 つだけ"):
             _trials(*argv)
+
+    def test_output_limitをスイープできる(self) -> None:
+        """実運用ストロークを速くするときの律速はここ。振れないと config を書き換えて
+        測り直すことになり、同一条件での比較にならない。"""
+        trials = _trials("--output-limit", "2000,4000,8000")
+
+        assert [t.output_limit for t in trials] == [2000.0, 4000.0, 8000.0]
+        # 変わってよいのは振っている 1 つだけ
+        assert {(t.kp, t.ki, t.kd, t.sync_kp) for t in trials} == {(32.0, 10.0, 1.0, 8.0)}
+
+    def test_output_limitはC620のフルスケールで頭打ちになる(self) -> None:
+        """ESC 側で頭打ちになる値をそのまま並べると、「上げたのに応答が変わらない」
+        試行が比較表に出て、機構の限界と区別が付かなくなる。"""
+        trials = _trials("--output-limit", "8000,20000")
+
+        assert [t.output_limit for t in trials] == [8000.0, 16384.0]
+
+    def test_output_limitを振らなければconfigの値になる(self) -> None:
+        trials = _trials()
+
+        assert [t.output_limit for t in trials] == [2000.0]
+
+    def test_ラベルにoutput_limitが出る(self) -> None:
+        """比較表で行を見分ける唯一の手掛かり。振った値が消えてはならない。"""
+        trials = _trials("--output-limit", "2000,8000")
+
+        labels = [t.label() for t in trials]
+        assert "olim=2000" in labels[0]
+        assert "olim=8000" in labels[1]
 
     def test_ラベルにプロファイルの値が出る(self) -> None:
         """比較表で行を見分ける唯一の手掛かりなので、振った値が消えてはならない。"""
@@ -226,7 +257,9 @@ class TestDwellWindow:
 
     def _trial(self, **kwargs) -> object:
         motion = MotionSpec(max_velocity=50.0, max_acceleration=300.0, **kwargs)
-        return tune.TrialConfig(kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0, motion=motion)
+        return tune.TrialConfig(
+            kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0, output_limit=2000.0, motion=motion
+        )
 
     def test_移動が窓に収まらなければ拒否する(self) -> None:
         # 15mm を v=50 / a=300 で走ると 0.467s。既定の窓 1.5s には収まるので、
@@ -251,7 +284,7 @@ class TestDwellWindow:
     def test_プロファイル無しの試行は対象外(self) -> None:
         """従来のステップ入力に「移動時間」は無い。既存の使い方を塞がない。"""
         tune._check_dwell(
-            [tune.TrialConfig(kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0)],
+            [tune.TrialConfig(kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0, output_limit=2000.0)],
             amplitude=15.0,
             dwell_s=0.1,
         )
@@ -276,7 +309,7 @@ class TestSaturationReport:
         assert "飽和 100%" in line
 
     def test_比較表の飽和欄も記録から数える(self, capsys: pytest.CaptureFixture) -> None:
-        trial = tune.TrialConfig(kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0)
+        trial = tune.TrialConfig(kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0, output_limit=2000.0)
         result = tune.StepResult(
             target=15.0,
             motors=[self._trace(metrics=None, saturation=0.75)],

@@ -23,6 +23,10 @@ config へ書き戻す (途中の値が残らない)。
   ``max_acceleration`` 加減速度 [mm/s^2]
   ``velocity_ff``      参照速度に掛けて feedforward へ足す係数
 
+さらに ``--output-limit`` で電流上限そのものも振れる。**上限が律速している間は
+ゲインを振っても応答が変わらない**ので、飽和率が 0 でないときはまずこれを疑う
+(2026-09-04 の実測では、実運用ストロークを速くするときの律速がここだった)。
+
 **``motion`` を持つ config なら既定でそれを使う** (本番と同じ制御になる)。
 持たない config で ``--max-velocity`` / ``--max-acceleration`` を渡せば、その場だけ
 プロファイルを有効にできる。どちらも無ければ従来どおりのステップ入力。
@@ -64,9 +68,9 @@ kp を振ると「上げても下げても同じ」という観察から抜け�
      **``--config`` は本番の config/main_hand.yaml でもベンチ側でもよい** ——
      開くのは ``--axis`` の軸が載っているバス 1 本だけなので、3 本のバスを持つ
      本番 config でも m3508_bus に決まる。**ただしベンチ側 (config/bench/
-     y_axis_tuning/) の output_limit は 800 で本番は 2000** (飽和の境界が
-     0.45mm と 1.14mm で 2.5 倍違う) ので、ベンチ側の robot config で実運用振幅を
-     測るなら本番と同じ値へ上げること
+     y_axis_tuning/) の output_limit は 800 で本番は 5000** ので、ベンチ側の
+     robot config で実運用振幅を測るなら ``--output-limit`` で本番と同じ値を
+     渡すこと (config を書き換えなくてよい)
 
   1. 小さい振幅で現状を確認する (プロファイルが効いていることの確認)
        --amplitude 1.5 --dwell 1.5
@@ -323,6 +327,7 @@ class TrialConfig:
     ki: float
     kd: float
     sync_kp: float
+    output_limit: float
     motion: MotionSpec | None = None
 
     def label(self) -> str:
@@ -332,6 +337,7 @@ class TrialConfig:
         if self.kd:
             parts.append(f"kd={self.kd:g}")
         parts.append(f"sync_kp={self.sync_kp:g}")
+        parts.append(f"olim={self.output_limit:g}")
         if self.motion is not None:
             parts.append(f"v={self.motion.max_velocity:g}")
             parts.append(f"a={self.motion.max_acceleration:g}")
@@ -487,6 +493,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--kd", default=None, help="kd")
     parser.add_argument("--sync-kp", default=None, help="同期補正ゲイン (カンマ区切りでスイープ)")
     parser.add_argument(
+        "--output-limit",
+        default=None,
+        help="電流指令の上限 [counts] (カンマ区切りでスイープ)",
+    )
+    parser.add_argument(
         "--max-velocity",
         default=None,
         help="台形プロファイルの巡航速度 [単位/s] (カンマ区切りでスイープ)",
@@ -521,6 +532,12 @@ def _build_trials(
     kis = _floats(args.ki) if args.ki else [base["ki"]]
     kds = _floats(args.kd) if args.kd else [base["kd"]]
     syncs = _floats(args.sync_kp) if args.sync_kp else [base["sync_kp"]]
+    # C620 のフルスケールを超える指令は ESC 側で頭打ちになるので、ここで落として
+    # おかないと「上げたのに応答が変わらない試行」が比較表に並ぶ
+    output_limits = [
+        min(abs(v), float(CURRENT_MAX))
+        for v in (_floats(args.output_limit) if args.output_limit else [base["output_limit"]])
+    ]
 
     # 空リスト = 「この試行にプロファイルは無い」。既定値で埋めない ——
     # 埋めると motion を書いていない軸に勝手な制限が掛かり、config と実機の
@@ -555,6 +572,7 @@ def _build_trials(
             ("ki", kis),
             ("kd", kds),
             ("sync_kp", syncs),
+            ("output_limit", output_limits),
             ("max_velocity", velocities),
             ("max_acceleration", accelerations),
             ("velocity_ff", ffs),
@@ -571,10 +589,18 @@ def _build_trials(
         for ki in kis:
             for kd in kds:
                 for sync_kp in syncs:
-                    for motion in motions:
-                        trials.append(
-                            TrialConfig(kp=kp, ki=ki, kd=kd, sync_kp=sync_kp, motion=motion)
-                        )
+                    for output_limit in output_limits:
+                        for motion in motions:
+                            trials.append(
+                                TrialConfig(
+                                    kp=kp,
+                                    ki=ki,
+                                    kd=kd,
+                                    sync_kp=sync_kp,
+                                    output_limit=output_limit,
+                                    motion=motion,
+                                )
+                            )
     return trials
 
 
@@ -732,9 +758,9 @@ async def _main_async(args: argparse.Namespace) -> int:
         "ki": float(base_pid["ki"]),
         "kd": float(base_pid["kd"]),
         "sync_kp": base_group.sync_kp,
+        "output_limit": float(base_pid["output_limit"]),
     }
     dead_band = float(base_pid["dead_band"])
-    output_limit = min(abs(float(base_pid["output_limit"])), float(CURRENT_MAX))
     raw_integral_limit = base_pid.get("integral_limit")
     integral_limit = None if raw_integral_limit is None else float(raw_integral_limit)
     trials = _build_trials(args, base, spec.motion)
@@ -751,7 +777,16 @@ async def _main_async(args: argparse.Namespace) -> int:
     print(f"--- {args.axis} のステップ応答を実測 ---")
     print(f"  バス       : {channel}")
     print(f"  振幅       : {args.amplitude}{spec.unit} x {args.cycles} 往復")
-    print(f"  出力上限   : {output_limit:.0f} counts")
+    limits = sorted({t.output_limit for t in trials})
+    print(f"  出力上限   : {', '.join(f'{v:.0f}' for v in limits)} counts")
+    if len(limits) > 1 and integral_limit is not None:
+        # integral_limit と sync_limit は counts の絶対値で config が持つので、
+        # output_limit だけを振ると「上限に対する積分の割合」が試行ごとに変わる。
+        # 比率を揃えた比較がしたいときにそれと気付けるよう明示する
+        print(
+            f"  ** integral_limit ({integral_limit:.0f}) と sync_limit は固定です。"
+            "出力上限に対する割合が試行ごとに変わります **"
+        )
     print(f"  sync_tolerance: {base_group.tolerance}{spec.unit}")
     # プロファイルの有無は試行全体で共通 (スイープしても値が変わるだけ)。
     # 「効いているつもり」で結果を読ませないため、無い場合も明示する ——
@@ -780,8 +815,8 @@ async def _main_async(args: argparse.Namespace) -> int:
                 integral_limit=integral_limit,
                 dead_band=dead_band,
             )
-            pid.output_min = -output_limit
-            pid.output_max = output_limit
+            pid.output_min = -trial.output_limit
+            pid.output_max = trial.output_limit
             loop.add_motor(name, driver, pid)
             if trial.motion is not None:
                 # 本番 (main._attach_motion_profiles) と同じく後付けで渡す。
