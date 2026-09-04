@@ -1068,6 +1068,9 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 1 軸のリセットで飽和表示を落とさない | `M3508PositionLoop._reset_axis` から `saturated` のクリアを外す（**緊急停止中だけ飽和表示が残り、ゲインを変えても応答が変わらないという誤った助言が出続ける**） | `test_position_loop.py::test_saturation_clears_on_e_stop` |
 | 契約は「宣言にあるのに実配信から消えた欄」も検出する | `_build_state_message` から `safety` を落として golden を焼き直す（**片方向の検査だけだと Python も TS も全テスト緑のまま UI が白画面になる**） | `web/src/test/wsContract.test.ts`（「UI が読むと宣言した欄が実配信から消えていない」） |
 | 未実行の動作確認を「完了」と表示しない | `motorCheckStatus` の `total_steps > 0` を落とす（`running:false, step_index:0, total_steps:0` が完了になる）/ パネルとサマリーで別々に判定する形へ戻す | `motorCheckStatus.test.ts` / `MotorCheckPanel.test.tsx` |
+| 緊急停止のラッチ解除は中断されない | `CANManager.clear_e_stop_latches` に `should_abort` を通す（1 台目の最中に停止が再発動すると 2 台目へ 1 通も飛ばない）/ `_reactivate_motors` のラッチ解除ループを 1 台目で `break` する / ラッチ解除フェーズごと削除する | `test_server_e_stop.py::TestLatchClearIsNeverAborted` |
+| 解除はブロードキャストで全バスへ出る | `_send_e_stop_clear_broadcast()` の呼び出しを削除する / バスのループを 1 本目で `break` する（**PC の管轄外のチャンネルが永久にラッチされたまま残る**） | `test_server_e_stop.py::TestEStopClearIsBroadcast` |
+| 解除フレームを送り終えてから基板報告の起点を置く | `_send_e_stop_clear_broadcast()` を `_board_e_stop_ignore_before` の設定より後ろへ動かす（**まだ解除の届いていない基板の報告を信じて自分で止め直す**） | `test_server_e_stop.py::TestEStopClearIsBroadcast::test_ブロードキャスト解除は基板報告の起点より前に送る` |
 | 調整画面の重い描画は記録が増えたときだけ走る | `ResponseChart` / `MetricsPanel` / `AdviceList` の `memo` を外す（型を見るテストが落ちる）/ 親が毎描画 新しいオブジェクトを渡す形へ戻す（再描画回数のテストが落ちる。**2 つは別々のテストが受け持つ** —— memo の有無は DOM から観測できない） | `MotorTuning.test.tsx` / `ResponsePanel.test.tsx` |
 
 **この表に載せられない層が 1 つある: CAN 送信バッファの空き待ち。** `INFO` を 1 反復 1 通に
@@ -2084,10 +2087,34 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 | 動作確認を abort（状態を問わず全 runner）| 同期ずれラッチを解除（`_reset_sync_latches`） |
 | 停止理由を保持（保持済みなら上書きしない）| 停止理由を破棄 |
 | M3508 へ全スロット 0 の電流指令（`send_stop_frame`）| `_e_stop_active` を落として配信 |
-| ドライバ固有の停止フレーム（EDULITE）| EDULITE の再励磁（`activate_motors`）|
-| 全バスへ `0x0FF` ブロードキャスト（自作モタドラ）| |
-| 目標値再送の保持目標を破棄（`clear_targets`）| |
+| ドライバ固有の停止フレーム（EDULITE）| ①全バスへ `0x0FF` のブロードキャスト解除 |
+| 全バスへ `0x0FF` ブロードキャスト（自作モタドラ）| ②管轄内の自作モタドラへ個別のラッチ解除（中断しない） |
+| 目標値再送の保持目標を破棄（`clear_targets`）| ③励磁（`activate_motors`。中断あり） |
 | 全シーケンスを停止（保留中の開始要求も破棄）| |
+
+**停止と解除は対称でなければならない。** 停止はブロードキャストなのでバス上の全基板・
+全チャンネルがラッチするのに、解除が `activation_steps()` の個別送信だけだと
+**yaml に登録されたモータにしか届かない**。実機ではベンチ設定
+（`config/bench/main_hand/main_hand.yaml`）で走っていたため、ラッチが外れたのは登録済みの
+`0x40`〜`0x42` / `0x80` だけで、`0x43` / `0x48`-`0x4B` / `0x81` / `0x82` / `0xC0`-`0xC5` は
+止まったまま残った。基板の LED は 1 チャンネルでもラッチがあれば橙になる（`BoardIndication`）
+ので、**全基板が橙のまま戻らず操縦者からは復帰不能に見える**。①がその唯一の救済経路で、
+②は「PC が把握しているモータへ確実に届ける」役割を持つ（重複は意図的）。
+
+**②のラッチ解除は中断しない。中断すべきは「励磁」であってラッチ解除ではない。**
+③はロボットを順に処理するので、同じ `should_abort` をラッチ解除にも掛けると
+1 台目の最中に停止が再発動しただけで 2 台目へ解除が 1 通も飛ばない。外れないラッチは
+緊急停止ビットを報告し続け、`_detect_board_e_stop` がそれを見て停止を再発動する ——
+**解除操作のたびに同じロボットだけが取り残される閉ループ**になる（実機で発生。sub_hand の
+全基板が `kNeverCommanded` を立てたまま戻らなかった）。ラッチ解除で機体が動かない根拠は
+2 つ: 停止時に目標値が捨てられていること（`DcChannel::stop()` は `duty_ = 0.0f`、
+`ServoChannel::stop()` は現在角保持、`SolenoidChannel::stop()` は `on_ = false`）と、
+ファーム側の `everFed_` ゲート（`SET_TARGET` を 1 通も受けるまで出力しない、仕様書 §5.4）。
+物理停止スイッチが押されている間はファームが毎ループ再ラッチするので
+「押している間は絶対に動かない」も保たれる。
+
+**`_board_e_stop_ignore_before` は①②③を送り終えた後に置く。** 先に置くと、まだ解除の
+届いていない基板のフィードバックを「解除後の報告」と信じて自分で止め直す。
 
 M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_message()` は EDULITE しか
 持たず `0x0FF` は自作モタドラしか解釈しないため、これが無いと左右直結で最も危険な Y 軸だけ
