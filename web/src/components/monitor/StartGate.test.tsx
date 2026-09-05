@@ -137,6 +137,8 @@ describe("StartGate", () => {
           rx_error_count: 0,
           bus_off: true,
           rx_down: false,
+          rx_down_episodes: 0,
+          may_affect_workpiece: false,
         },
       ],
       motors: [],

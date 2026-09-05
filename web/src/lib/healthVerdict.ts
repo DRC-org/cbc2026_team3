@@ -1,5 +1,6 @@
 import { MALFORMED, healthShapeErrors, safetyShapeErrors } from "@/lib/protocol";
 import type {
+  BusHealth,
   HealthSnapshot,
   Malformed,
   MotorHealth,
@@ -105,6 +106,28 @@ export function motorTempTone(
   if (temp >= thresholds.critical) return "error";
   if (temp >= thresholds.warning) return "warning";
   return "success";
+}
+
+/**
+ * CAN 受信の途絶がワーク落下に繋がりうるバスを挙げる。平常時は空配列。
+ *
+ * 電磁弁基板は「止める = 消磁」の一手しか持たず、コマンドウォッチドッグ
+ * (既定 500ms) が満了すると吸着中のワークが落ちる。CAN が 1 秒弱止まれば
+ * まず満了するので、`can_generic` (弁が載るバス) の途絶はワーク落下を疑うが、
+ * `can_dm3520` や `can_m3508` の途絶では落ちない。**判定はサーバー
+ * (`may_affect_workpiece`) が持ち、ここではその値をそのまま読むだけにする** ——
+ * バス名やドライバ種別を UI へ書き写すと、弁のバスを config で変えた瞬間に
+ * 判定が古いまま残る (`healthVerdict.ts` に判定を集約する既存の原則と同じ)。
+ *
+ * **`BusHealth.state` (OK/DEGRADED/DOWN) の判定そのものには触れない。** バスが
+ * 復旧して `ok` に戻ってもエピソード数 (`rx_down_episodes`) は試合中ずっと
+ * 残るので、この一覧も `evaluateHealth` の判定 (`tone`) とは独立に存在する ——
+ * ここが空でなくても `evaluateHealth` の結論を上書きしてはならない。
+ */
+export function workpieceRiskBuses(health: HealthPayload | undefined): BusHealth[] {
+  const readable = readableHealth(health);
+  if (!readable) return [];
+  return readable.buses.filter((b) => b.may_affect_workpiece && b.rx_down_episodes > 0);
 }
 
 /**

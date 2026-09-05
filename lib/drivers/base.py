@@ -219,6 +219,20 @@ class MotorDriver(abc.ABC):
         """ハード障害フラグ。デフォルトは False (各サブクラスで上書き)。"""
         return False
 
+    def has_on_off_control(self) -> bool:
+        """このモータが `ControlMode.ON_OFF` (電磁弁) で駆動されているか。
+
+        デフォルトは False (各サブクラスで上書き)。`CANManager.health()` が
+        バス単位で「CAN 途絶がワーク落下に繋がりうるか」を判定するために使う ——
+        電磁弁基板は `command_timeout_ms` のコマンドウォッチドッグ満了で
+        通電を落とす一手しか持たないため、同じバスの途絶でも on_off のモータが
+        載っているかどうかで意味が変わる。判定をここに置くのは、UI にドライバ種別を
+        書き写させない原則 (`TelemetrySupport` 等) と同じ理由 —— 呼び出し側
+        (`CANManager`) がバス別名や `control_type` を条件分岐に書くと、
+        config で弁のバスを変えた瞬間に判定が古いまま残る。
+        """
+        return False
+
     def is_energized(self) -> bool | None:
         """励磁されているか。**判定手段を持たないドライバは None を返す。**
 

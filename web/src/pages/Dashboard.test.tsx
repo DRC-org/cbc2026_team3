@@ -21,6 +21,8 @@ function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
         rx_error_count: 0,
         bus_off: false,
         rx_down: false,
+        rx_down_episodes: 0,
+        may_affect_workpiece: false,
       },
     ],
     motors: [],

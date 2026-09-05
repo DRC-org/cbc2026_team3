@@ -21,6 +21,8 @@ const HEALTH: HealthSnapshot = {
       rx_error_count: 0,
       bus_off: false,
       rx_down: false,
+      rx_down_episodes: 0,
+      may_affect_workpiece: false,
     },
   ],
   motors: [],
@@ -294,6 +296,78 @@ describe("SubsystemStatus", () => {
     expect(screen.getByText("健全性 判定不能")).toBeInTheDocument();
     expect(screen.getByText(/ヘルス計算に失敗しました: boom/)).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+  });
+
+  /**
+   * CAN 途絶がワーク落下に繋がりうるバスの通知 (`WorkpieceRiskNotice`)。
+   *
+   * バスは既に復旧して `state: "ok"` (= 判定チップは「異常なし」のまま) でも、
+   * このバスに乗っている電磁弁が吸着中のワークを落とした可能性は消えない。
+   * `evaluateHealth` の判定 (見出しチップ) は動かさず、別の主張として出す。
+   */
+  it("ワーク落下の恐れがあるバスを自分から主張する (判定は success のまま)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={{
+          ...HEALTH,
+          buses: [
+            {
+              ...HEALTH.buses[0],
+              name: "can_generic",
+              state: "ok",
+              may_affect_workpiece: true,
+              rx_down_episodes: 2,
+            },
+          ],
+        }}
+        motors={MOTORS}
+        safety={safety()}
+      />,
+    );
+
+    // 見出しの判定チップは変えない (BusHealth.state の判定そのものには触れない)
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+    // それでも自分から開いて主張する
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.getByText(/CAN 途絶 2回/)).toBeInTheDocument();
+    // バス名は通知欄と診断テーブルの両方に出るので複数ヒットする
+    expect(screen.getAllByText("can_generic").length).toBeGreaterThan(0);
+    expect(screen.getByText(/ワークが落ちた可能性/)).toBeInTheDocument();
+  });
+
+  it("ワーク落下に無関係なバスの途絶は主張しない (can_dm3520 / can_m3508 相当)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={{
+          ...HEALTH,
+          buses: [{ ...HEALTH.buses[0], may_affect_workpiece: false, rx_down_episodes: 5 }],
+        }}
+        motors={MOTORS}
+        safety={safety()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText(/CAN 途絶/)).not.toBeInTheDocument();
+  });
+
+  it("エピソード 0 件なら、ワーク落下しうるバスでも何も出さない", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={{
+          ...HEALTH,
+          buses: [{ ...HEALTH.buses[0], may_affect_workpiece: true, rx_down_episodes: 0 }],
+        }}
+        motors={MOTORS}
+        safety={safety()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText(/CAN 途絶/)).not.toBeInTheDocument();
   });
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {

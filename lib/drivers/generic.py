@@ -501,6 +501,14 @@ class GenericDriver(MotorDriver):
         # しないと試合まで誰も気付けない (仕様書 §3.4 / §7.7)
         return self._unconfigured_id_flag or self.info_mismatch is not None
 
+    def has_on_off_control(self) -> bool:
+        """`control_type: on_off` (電磁弁) で駆動されているか。
+
+        自作モタドラのうち on_off を持ちうるのはこのドライバだけ (DC は duty /
+        サーボは position)。基底の既定 False をここだけ上書きする。
+        """
+        return self.control_type is ControlMode.ON_OFF
+
     # ------------------------------------------------------------------ #
     #  励磁 (緊急停止ラッチの解除)
     # ------------------------------------------------------------------ #

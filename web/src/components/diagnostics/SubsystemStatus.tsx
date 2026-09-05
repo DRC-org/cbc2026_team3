@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, ShieldAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, PackageX, ShieldAlert } from "lucide-react";
 import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
@@ -7,9 +7,14 @@ import { SensorSummary } from "@/components/diagnostics/SensorSummary";
 import type { SensorPayload } from "@/components/diagnostics/SensorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { describeSafetyIssues, evaluateHealth, readableHealth } from "@/lib/healthVerdict";
+import {
+  describeSafetyIssues,
+  evaluateHealth,
+  readableHealth,
+  workpieceRiskBuses,
+} from "@/lib/healthVerdict";
 import type { HealthPayload, SafetyPayload, TempThresholds } from "@/lib/healthVerdict";
-import type { MotorState } from "@/lib/protocol";
+import type { BusHealth, MotorState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
   /** 受信境界を通っていない props 経路が残るので、読めなかった配信も受ける */
@@ -42,6 +47,36 @@ interface SubsystemStatusProps {
    * 同じ文字列を 2 度並べると、操縦者はどちらが最新か確かめる往復を強いられる。
    */
   showVerdict?: boolean;
+}
+
+/**
+ * CAN 途絶がワーク落下に繋がりうるバスの一覧。平常時 (0 件) は何も出さない。
+ *
+ * `evaluateHealth` の判定 (`tone`) を経由しない ——
+ * `BusHealth.state` は復旧すれば `ok` へ戻るが、この一覧が示す「試合中に
+ * 何回起きたか」は 0 に戻らない (`docs/checks_and_health.md` 参照)。判定その
+ * ものを動かさず、情報を 1 つ足すだけに留めるための独立表示。
+ */
+function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
+  if (buses.length === 0) return null;
+
+  return (
+    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-warning bg-warning/5 px-2 py-1">
+      {buses.map((bus) => (
+        <li key={bus.name} className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Icon as={PackageX} className="shrink-0 text-warning" />
+            <StatusBadge tone="warning">CAN 途絶 {bus.rx_down_episodes}回</StatusBadge>
+            <span className="min-w-0 truncate font-mono text-base-content/80">{bus.name}</span>
+          </span>
+          {/* 状態だけ出しても操縦者は何が起きたか分からない。理由まで書く */}
+          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+            吸着していたワークが落ちた可能性があります (基板のコマンドウォッチドッグが満了)
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /**
@@ -93,12 +128,17 @@ export function SubsystemStatus({
   const verdict = evaluateHealth(health, safety, connected);
   // 内訳を並べる部品は「読めなかった」を表現できない。判定 (上) だけがそれを担う
   const readable = readableHealth(health);
+  const riskyBuses = workpieceRiskBuses(health);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
   // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
 
-  // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない
-  const forcedOpen = verdict.tone === "error" || verdict.tone === "warning";
+  // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない。
+  // ワーク落下の恐れも同格 —— `verdict.tone` はバスが復旧すれば平常に戻るが、
+  // こちらは試合中ずっと自分から主張し続けるべき情報なので、判定 (tone) を
+  // 変えずにここへ OR で足す
+  const forcedOpen =
+    verdict.tone === "error" || verdict.tone === "warning" || riskyBuses.length > 0;
   const open = !showVerdict || forcedOpen || manualOpen;
 
   const busCount = readable?.buses.length ?? 0;
@@ -134,6 +174,7 @@ export function SubsystemStatus({
               {verdict.detail}
             </p>
           ) : null}
+          <WorkpieceRiskNotice buses={riskyBuses} />
           <SafetyIssues safety={safety} />
           <HealthIndicator health={readable} />
           {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、

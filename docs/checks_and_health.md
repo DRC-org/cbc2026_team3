@@ -265,8 +265,9 @@ PC 側のラッチは実通信で外れる設計なので、バスさえ戻れ�
 受ける**:
 
 > **試合中に journal へ `[ WD ]` が出たら、まず吸着ワークの落下を疑う。**
-> UI には落下を知らせる手段が無い（電磁弁基板は弁が開いたかを観測できないので、
-> 到達も落下も報告しない）。手順は `docs/venue_recovery.md` §3-1。
+> **UI にも残る**（電磁弁基板は弁が開いたかを観測できないので、到達も落下も
+> 直接は報告しない。届いた通り「CAN が何回途絶したか」までしか言えない —— 下の
+> 「途絶エピソード数と UI 表示」節を参照）。手順は `docs/venue_recovery.md` §3-1。
 
 ### 受信ループは断絶で降りない（`rx_down`）
 
@@ -309,6 +310,37 @@ ifindex を変えないので、待って呼び直せば戻る。バスを作り
   `None` は返り続ける**。最初これを復帰扱いにしていたところ、vcan を down させたまま
   「30ms で受信が再開しました」と誤判定し、`rx_down` は立った直後に外れて
   ヘルスは OK のままだった（実バスへの `ip link down/up` を通した検証で発覚）
+
+### 途絶エピソード数と UI 表示（`rx_down_episodes` / `may_affect_workpiece`）
+
+**`rx_down` は生の bool なので、1 秒に満たない一過性の途絶は画面に一瞬しか出ず、
+機体を見ている操縦者はまず見落とす。** 試合中に journal を見る人はいない。
+そこで `CANManager` はバス別に途絶の「立ち上がり」を数えるエピソード数
+(`rx_down_episodes`) を持つ。数える場所は `_record_rx_down`（立ち上がりの瞬間）で、
+`_clear_rx_down`（復帰の瞬間）ではない —— 復帰しないまま試合が終わったケース
+（＝ワーク落下が起きたまさにその場合）を取りこぼさないため。**復帰しても 0 に
+戻らない**。リセットは `CANManager.reset_rx_down_episodes()` が持ち、
+`lib/server.py` の `_handle_match_start` が試合開始のたびに全ロボットへ呼ぶ
+（`match_reset` ではなく `match_start` を選んだ理由は同メソッドのコメントを参照。
+準備中に踏んだ途絶を試合開始時点で洗い流し、試合中に見える件数を「この試合で
+実際に起きたこと」だけにするため）。
+
+**途絶が全部ワーク落下に繋がるわけではない。** 電磁弁 6 個と両ポンプは
+`config/sub_hand.yaml` で `generic_bus`（＝ `can_generic`）に載っているが、
+`can_dm3520` や `can_m3508` の途絶ではワークは落ちない。**どのバスかを言わない
+表示は意味を持たない。** 判定 (`BusHealthInfo.may_affect_workpiece`) は
+「そのバスに `control_type: on_off` のモータが載っているか」を `CANManager.health()`
+がドライバ自身 (`MotorDriver.has_on_off_control()`) に聞いて決める —— バス名や
+`control_type` の文字列比較にすると、config で弁のバスを変えた瞬間に判定が
+古いまま残る。
+
+**`BusHealth`（OK/DEGRADED/DOWN）の判定そのものはここでは動かさない。** エピソード数と
+`may_affect_workpiece` は付随情報として足すだけで、バスが復旧すれば従来どおり
+`state: ok` に戻る。UI (`SubsystemStatus` の `WorkpieceRiskNotice`) はこの 2 つが
+揃った (`may_affect_workpiece && rx_down_episodes > 0`) バスだけをチップで主張し、
+0 件なら何も出さない。判定チップ (`evaluateHealth` の tone) はこれによって
+変化しない —— バスが復旧すれば見出しは「異常なし」に戻るが、ワーク落下の通知は
+リセットされるまで残り続ける（2 つの表示が別の役目を持つ）。
 
 ### 受信の中断は M3508 の累積角を飛ばす
 

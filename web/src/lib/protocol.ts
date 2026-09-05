@@ -169,6 +169,21 @@ export interface BusHealth {
    * down している状態で、復旧の手当ても別になる。
    */
   rx_down: boolean;
+  /**
+   * 途絶の「立ち上がり」を数えた累積回数。`rx_down` は生の bool なので、
+   * bus-off 復旧の down/up (1 秒弱) のような一過性の途絶は画面に一瞬しか出ず、
+   * 機体を見ている操縦者はまず見落とす。復帰しても 0 に戻らない (サーバー側で
+   * 試合開始時にリセットされる)。
+   */
+  rx_down_episodes: number;
+  /**
+   * このバスの途絶がワーク落下に繋がりうるか。電磁弁基板はコマンド
+   * ウォッチドッグ (既定 500ms) の満了で通電を落とす一手しか持たず、CAN が
+   * 1 秒弱止まればまず満了する。**判定はサーバー (バスに `control_type: on_off`
+   * のモータが載っているか) だけが行う** —— バス名やドライバ種別を UI へ
+   * 書き写すと、弁のバスを config で変えた瞬間に判定が古いまま残る。
+   */
+  may_affect_workpiece: boolean;
 }
 
 export interface MotorHealth {
