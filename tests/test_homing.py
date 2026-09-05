@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from lib.sequence.homing import _STALL_LIMIT, HomingError, HomingRunner
+from lib.sequence.homing import _FOLLOW_ATTEMPTS, _STALL_LIMIT, HomingError, HomingRunner
 from lib.sequence.motors import AxisHandle, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
@@ -48,6 +50,42 @@ def _table(**homing_overrides: object):
     )
 
 
+def _rotate_table():
+    """実機の rotate (config/main_hand_positions.yaml) と同じ数値。
+
+    **``tolerance`` と ``homing.step`` がどちらも 2.0deg。** step は静止摩擦が
+    決める下限 (0.5deg では 1 歩も動かない) で、tolerance は原点の分解能から来る
+    上限なので、この軸では両者が一致する。1 歩ぶんの追従待ちに ``tolerance`` を
+    流用すると、**1 歩も動いていない実測 (指令との差はちょうど step)** がそのまま
+    追従完了に化ける構成である。
+    """
+    return load_position_table(
+        {
+            "axes": {
+                "rotate": {
+                    "unit": "deg",
+                    "command_unit": "rad",
+                    "tolerance": 2.0,
+                    "sync_tolerance": 5.0,
+                    "homing": {
+                        "sensor": "rotate_origin_sensor",
+                        "direction": -1,
+                        "search_distance": 180.0,
+                        "step": 2.0,
+                        "settle_s": 0.05,
+                    },
+                    "motors": {
+                        "rotate_r": {"scale": math.pi / 180.0},
+                        "rotate_l": {"scale": -math.pi / 180.0},
+                    },
+                }
+            },
+            "positions": {"rotate": {"home": 0.0}},
+        },
+        source="<test>",
+    )
+
+
 class _Recorder:
     """指令と原点確定を記録する。
 
@@ -75,6 +113,8 @@ class _Recorder:
         self.captured_at: list[float] = []
         #: `_handle` が組んだモータ名 → ドライバ (実測位置の差し替え口)
         self.drivers: dict[str, StubFeedbackDriver] = {}
+        #: `_handle` が組んだ軸。逆換算をテストへ書き写さないために持つ
+        self.spec: AxisSpec | None = None
         self.sleeps = 0
         self._active_after = active_after
         self._active_at_or_below = active_at_or_below
@@ -84,8 +124,11 @@ class _Recorder:
         self._capturable = capturable
 
     def axis_position(self) -> float:
-        """実測の軸位置。`_handle` が組んだ右モータの scale (+2.0) で戻す。"""
-        return self.drivers["y_axis_r"].state.position / 2.0
+        """実測の軸位置。逆換算は `AxisSpec` に委ねる (scale をテストへ書き写さない)。"""
+        assert self.spec is not None
+        return self.spec.to_value(
+            {name: driver.feedback_position() for name, driver in self.drivers.items()}
+        )
 
     def sensor_active(self, _name: str) -> bool:
         self._observations += 1
@@ -149,6 +192,43 @@ def _handle(
 
     handle.set_target_value = _record  # type: ignore[method-assign]
     recorder.drivers = drivers
+    recorder.spec = spec
+    return handle
+
+
+def _slow_handle(
+    spec: AxisSpec,
+    recorder: _Recorder,
+    *,
+    per_tick: float,
+    start_value: float = 0.0,
+) -> AxisHandle:
+    """1 回の待ち (`settle_s` ごとの再確認) につき ``per_tick`` [軸の unit] だけ指令へ寄る機構。
+
+    実機の機構は 1 歩ぶんを待ち 1 回では動き切らない (静止摩擦を超え直し、
+    加速してから止まる)。**その途中の実測を「進まなかった」と数えると、正常に
+    動いている機構が停滞判定で落ちる** —— 追従を待っているかどうかは、この
+    「歩幅の半分にも満たない 1 回目」を通せるかにしか現れない。
+
+    `sleep` を差し替えるので、**`_runner` はこの関数の後に組み立てること**
+    (`HomingRunner` は生成時に `recorder.sleep` を掴む)。
+    """
+    handle = _handle(spec, recorder, follows=False, start_value=start_value)
+    drivers = recorder.drivers
+    scales = {motor.name: abs(motor.scale) for motor in spec.motors}
+    base_sleep = recorder.sleep
+
+    async def _advance(seconds: float) -> None:
+        await base_sleep(seconds)
+        if not recorder.commands:
+            return
+        for name, target in recorder.commands[-1].items():
+            current = drivers[name].feedback_position()
+            remaining = target - current
+            moved = math.copysign(min(abs(remaining), per_tick * scales[name]), remaining)
+            drivers[name].set_observed(position=current + moved)
+
+    recorder.sleep = _advance  # type: ignore[method-assign]
     return handle
 
 
@@ -231,6 +311,66 @@ class TestStartsFromTheMeasuredPosition:
         # 実測との差が 1 step ぶんを超えない (超えると位置制御ループが電流上限まで押す)
         assert deviations
         assert max(deviations) <= 2.0 + 1e-9
+
+
+class TestWaitsForEachStep:
+    """**1 歩ぶんの追従を待つ許容差に `spec.tolerance` を使ってはならない。**
+
+    指令は「実測 + step」で組むので、1 歩も動いていないときの実測と指令の差は
+    ちょうど `step`。`step <= tolerance` の軸では**動く前に必ず追従完了**になり、
+    待ちが丸ごと消える。そのとき停滞判定が数えるのは「待ったのに進まなかった」
+    ではなく「待っていないので進んでいない」で、**正常に動いている機構が
+    0.3 秒で HomingError になる** (実機の rotate で発生)。
+
+    待つ側と数える側は同じ「歩幅の半分」を見る。片方だけを別の量にすると、
+    どちらの向きにも噛み合わない (待ちすぎるか、待たないか)。
+    """
+
+    async def test_到達許容差が歩幅以上でも一歩ぶんの追従を待つ(self) -> None:
+        """`tolerance` == `step` == 2.0deg (実機の rotate と同じ構成)。"""
+        spec = _rotate_table().axis("rotate")
+        rec = _Recorder()
+
+        with pytest.raises(HomingError, match="動きません"):
+            await _runner(rec).home(spec, _handle(spec, rec, follows=False))
+
+        # 1 歩につき _FOLLOW_ATTEMPTS 回まで待ってから「進まなかった」と数えている。
+        # tolerance (2.0deg) で判定すると 1 回目の確認で追従完了になり、
+        # 待ちの回数が歩数と同じ (_STALL_LIMIT) まで落ちる
+        assert rec.sleeps == _STALL_LIMIT * _FOLLOW_ATTEMPTS
+
+    async def test_ゆっくり追従する機構は停滞と数えず次の歩へ進む(self) -> None:
+        """1 回の待ちでは歩幅の半分も動かない機構でも、待てば 1 歩ぶん進む。"""
+        spec = _rotate_table().axis("rotate")
+        # 位置 <= -3.0deg が ON 区間。1 歩 2.0deg なので数歩かかる
+        rec = _Recorder(active_at_or_below=-3.0)
+        # 1 回の待ちで 0.6deg (歩幅 2.0 の半分に満たない) しか動かない機構
+        handle = _slow_handle(spec, rec, per_tick=0.6)
+
+        travelled = await _runner(rec).home(spec, handle)
+
+        assert rec.origins == ["rotate"]
+        assert rec.captured_at == pytest.approx([-3.0])
+        assert travelled == pytest.approx(3.0)
+        # 待ち切れずに _FOLLOW_ATTEMPTS を使い切ってはいない (使い切ると 1 歩あたり
+        # settle_s * 5 = 0.25 秒かかり、90 歩の探索が 20 秒を超える)
+        assert rec.sleeps < _FOLLOW_ATTEMPTS * len(rec.commands)
+
+    async def test_離脱でも一歩ぶんの追従を待つ(self) -> None:
+        """離脱と探索は同じ `_seek` を通る。片方だけ待つ実装を作らない。
+
+        触れた状態から始めると離脱が先に走るので、待ちが消えていれば**探索へ
+        入る前に**同じ形で落ちる (実機では離脱が 1 歩で終わったため露見しなかった)。
+        """
+        spec = _rotate_table().axis("rotate")
+        rec = _Recorder(active_after=0)  # 最初の観測から常に ON = 離脱段が続く
+        handle = _slow_handle(spec, rec, per_tick=0.6)
+
+        with pytest.raises(HomingError, match="離せませんでした"):
+            await _runner(rec).home(spec, handle)
+
+        # 1 歩ごとに複数回待っている (待っていなければ停滞判定で「動きません」になる)
+        assert rec.sleeps > len(rec.commands)
 
 
 class TestStops:
