@@ -413,7 +413,7 @@ MotorCheckController.deny_reason()       ← 起動できるかの唯一の判�
         │                                 ← RobotServer._motor_check_environment_deny()
         ▼
 MotorCheckController.start()
-        │  全ロボットの position_loop / target_refresher を pause
+        │  全ロボットの target_refresher を pause（position_loop は止めない）
         ▼
 MotorCheckSequence.run()          ← sequences/motor_check.py
         │
@@ -468,6 +468,18 @@ Monitor の 1 行サマリーに件数を出す。
 1 本のシーケンスが両機を動かすので、片方だけ見ると確認中にもう一方が手動で動かされる。
 起動ゲート（`MotorCheckController.deny_reason()`）も、送信経路の停止（`pause`）も、手動切替の
 拒否も、全ロボットが対象。
+
+### M3508 位置制御ループは止めない
+
+**動作確認はこのループを通ってしか M3508 を動かせない。** 確認は `move_to` でしか軸を
+動かさず、M3508 は電流指令しか受け付けないので、200Hz のループが C620 へ電流を出さない
+限り 1 通の指令も機構へ届かない。止めると目標だけが設定されて `SequenceTimeoutError` に
+なり（実機で発生。目標 520mm・実測 2mm・飽和なし）、しかも**確認が失敗して復帰した瞬間に
+残った目標へ向かって機体が動き出す**。
+
+0x200 の奪い合いは起きない。確認中は他の指令経路（通常シーケンス実行・手動モード）が
+`deny_reason()` の排他で塞がれており、ループは「シーケンスが設定した目標を実現する」側で
+あって競合相手ではない。止める対象は `RobotServer._motor_check_pausables` が単一情報源。
 
 ### 起動の窓
 

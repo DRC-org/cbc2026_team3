@@ -648,10 +648,13 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 
 #### アクチュエータ動作確認との排他（0x200 の奪い合い）
 
-> 統合後は `sequences/motor_check.py` のシーケンスが `move_to` 経由で指令を出す。
-> 排他の仕組み（`pause()` / `resume()`）はそのままで、**止める対象が全ロボットに
-> 広がった**点だけが違う（1 本のシーケンスが両機を動かすため）。以下の記述で
-> `lib/motor_check.py` とあるのは統合前の実装。
+> **【統合前の記述】この節の前提は現在の実装では成り立たない。** 以下は動作確認が
+> **モータ 1 台ずつ自前で 0x200 を組み立てて送っていた頃**（`lib/motor_check.py` の
+> `MotorCheckRunner`）の話で、そこでのみ位置制御ループとの奪い合いが成立していた。
+> 統合後（`sequences/motor_check.py`）は `move_to` 経由でしか指令を出さず、
+> **M3508 へはこの位置制御ループが電流を出すことでしか届かない**ので、
+> 動作確認はこのループを止めない（次の「動作確認は位置制御ループを止めない」）。
+> `pause()` / `resume()` の仕組み自体は残してあり、今の利用者は目標値再送だけ。
 
 アクチュエータ動作確認は `M3508Driver.encode_target()` で
 **自分のスロットだけ埋めて他を 0 にした 0x200 フレーム**を送る。一方この制御ループは
@@ -675,6 +678,31 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
   保持していた昇降軸が復帰時に落下しないようにするため
 - `resume()` は `_last_tick` も取り直す（停止していた時間が丸ごと `dt` に化けるのを防ぐ。
   `max_dt_s` の頭打ちがあるが、意味のない大 `dt` を PID に渡さない）
+
+#### 動作確認は位置制御ループを止めない
+
+**止める対象の単一情報源は `RobotServer._motor_check_pausables` で、そこに位置制御ループは
+含まれない。** 動作確認は `move_to` でしか軸を動かさず、M3508 は電流指令しか受け付けないので、
+200Hz のループが C620 へ電流を出さない限り指令は 1 通も機構へ届かない。
+
+止めたときに実機で起きたこと（`y_axis`）:
+
+| 観測 | 意味 |
+|---|---|
+| `command=28606.8deg`（520mm）/ `pos=116.7deg`（2.12mm） | 目標は設定されている。機構は動いていない |
+| `saturated: False` | 飽和以前に **PID が 1 周期も回っていない** |
+| `SequenceTimeoutError (y_axis->work_3)` | 到達待ちが時間切れになる |
+| 失敗表示の直後に軸が動き出した | `resume()` で残った目標へ向かって走り出す |
+
+最後の 1 行が安全上の本体である。操縦者が「失敗した = 動かない」と読んだ直後に機体が動く。
+
+奪い合いも起きない。動作確認中は他の指令経路（通常シーケンス実行・手動モード）が
+`MotorCheckController.deny_reason()` の排他で塞がれており、位置制御ループは
+「シーケンスが設定した目標を実現する」側であって競合相手ではない。
+
+守るテスト（`tests/test_server_motor_check.py::TestExclusion`）は 2 本に分けてある ——
+実行中に `is_paused` が立たないことと、`move_to` した目標が実際に 0 でない電流指令に
+なること。前者だけだと、目標が電流へ変換される経路が壊れても緑のままになる。
 
 ### Damiao DM3520（ドライバ内蔵の位置ループ）
 
@@ -1050,6 +1078,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | DM3520 は励磁前に実測角を書く | `activation_steps` の保持目標を `0.0` にする（モード切替で p_des が 0 に落ちているので、そのままラックがストローク端まで走る） | `tests/drivers/test_dm3520.py` |
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | `MotorCheckController.deny_reason()` の「既に実行中」を落とす（0x200 の奪い合いに戻る）/ `_motor_check_environment_deny` のシーケンス実行中判定を落とす | `test_server_motor_check.py` |
+| 動作確認中も位置制御ループは回る | `_motor_check_pausables` に `position_loops` を戻す（**M3508 は電流指令が出ないまま到達待ちが時間切れになり、復帰した瞬間に残った目標へ走り出す**）/ `M3508PositionLoop.set_target` を握り潰す（**止めていなくても目標が電流へ変換されない**。前者だけでは検出できないので 2 本に分けてある） | `test_server_motor_check.py::TestExclusion`（「実行中も位置制御ループは回り続ける」「実行中の指令が電流指令になる」） |
 | 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
 | PID 調整画面が現在値を持つ | `_build_state_message` の `pid` 付与を消す / `pid` を dry-run 分岐の中だけに置く / UI の `getValue` を `?? 0` に戻す | `test_server_set_param.py` / `test_ws_contract.py` / `MotorTuning.test.tsx` |
 | ゲインの適用先を推測させない | `pid_gains()` の `applies_to` を `[name]` 固定にする | `test_runtime_pid_gain.py` / `test_server_set_param.py` / `MotorTuning.test.tsx` |
@@ -4775,6 +4804,7 @@ Phase 5 で `move_to` の器はできたが、シーケンスから実モータ�
   既に走っているループ、または実行中ステップのどちらかが停止指令を上書きする
 - **0x200 の排他はループを黙らせる方向**: 動作確認側を待たせるのではなく
   `pause()` / `resume()` でループを止める。`resume()` は同期メソッドなので `finally` から確実に呼べる
+  （**統合後は動作確認がこのループを止めない。** 現行は「動作確認は位置制御ループを止めない」節が正）
 - **E-STOP はシーケンスも止める**: 停止フレームの送信可否に関わらず `finally` で停止する。
   シーケンスが走ったままだと次のステップが新しい目標値を送って停止を上書きする
 

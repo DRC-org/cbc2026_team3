@@ -118,8 +118,8 @@ def _level_for_motor_state(state: MotorHealth) -> str:
 class RobotContext:
     sequence: Sequence
     can_manager: CANManager
-    # そのロボットの M3508 位置制御ループ (バスごと 1 本)。動作確認中は
-    # 0x200 フレームの奪い合いになるため一時停止させる
+    # そのロボットの M3508 位置制御ループ (バスごと 1 本)。**動作確認中も回し続ける**
+    # (理由は _motor_check_pausables)
     position_loops: list[M3508PositionLoop] = field(default_factory=list)
     # そのロボットの同期監視。ラッチの解除経路がサーバー側に無いと、一度ずれを
     # 検知した軸は二度と発報せず、操縦者は無監視のまま機体を動かすことになる
@@ -1488,15 +1488,23 @@ class RobotServer:
     def _motor_check_pausables(self) -> list[Pausable]:
         """動作確認中に黙らせる周期タスク。**全ロボットぶんを返す。**
 
-        1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の再送と
-        指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
-        目標値再送とは同じモータの SET_TARGET を奪い合う。
+        1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の再送が
+        同じモータの SET_TARGET を奪い合う。
+
+        **M3508 の位置制御ループは止めない。動作確認と競合しないどころか、
+        動作確認が M3508 を動かす唯一の経路である。** 動作確認は `move_to` でしか
+        軸を動かさず、M3508 は電流指令しか受け付けないので、このループが C620 へ
+        電流を出すことでしか動かない。止めると目標だけが設定されて電流は 1 通も
+        出ず、偏差が残ったまま `SequenceTimeoutError` になる (飽和すらしない ——
+        PID が 1 周期も回っていないため)。しかも復帰した瞬間に**残った目標へ
+        向かって機体が動き出す**ので、操縦者が失敗表示を読んだ直後に動く。
+
+        0x200 の奪い合いも起きない。動作確認中は他の指令経路 (通常シーケンス実行・
+        手動モード) が `MotorCheckController.deny_reason()` の排他で塞がれており、
+        位置制御ループは「シーケンスが設定した目標を実現する」側であって
+        競合相手ではない。
         """
-        return [
-            pausable
-            for ctx in self._robots.values()
-            for pausable in (*ctx.position_loops, *ctx.target_refreshers)
-        ]
+        return [pausable for ctx in self._robots.values() for pausable in ctx.target_refreshers]
 
     async def _motor_check_post(self, request: web.Request) -> web.Response:
         """POST /motor_check: 動作確認の起動エンドポイント。
