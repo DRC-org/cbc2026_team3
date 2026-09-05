@@ -171,3 +171,6 @@ checklists:
     - id: field_clear
       label: 可動範囲内に人・物がないこと確認
       group: final
+    - id: operation_mode_sequence
+      label: 両ハンドとも半自動モードであること確認 (手動のままだと sequence_start が拒否される)
+      group: final

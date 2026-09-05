@@ -862,7 +862,7 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 **②から外れたものが④で埋まっていることは `tests/test_robot_sequences.py` が固定する。**
 （`test_checklist_covers_what_cannot_be_judged_automatically`）
 
-### 上の 3 項目は「機械が既に知っているのに、人が見る手順へ結び付いていなかった」ぶん
+### 上の 4 項目は「機械が既に知っているのに、人が見る手順へ結び付いていなかった」ぶん
 
 他の項目と成り立ちが違うので分けて書く。どれも**仕組みは前からあった**。
 
@@ -883,6 +883,11 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
   失われる**。失われても画面は平常のままで、**押しても何も起きないことでしか分からない**。
   DC 基板が繋がっていない構成ではそもそも物理停止が効かない。だから解除の確認とは別に、
   試合直前（`final`）に実際に 1 度押す
+- **`operation_mode_sequence`** — `OperationMode` はサーバーが管理し UI にも出ているが、
+  `can_start_match` は指差喚呼の完了しか見ず `OperationMode` を参照しない（意図的な設計。
+  「手動はフェーズでゲートしない」と同じ理由で `match_start` 側にもゲートを足していない）。
+  手動のまま試合が始まると `sequence_start` が「手動操縦中のためシーケンスを開始できません」
+  で拒否されるまで気付けない。「揃っているか」に答えるのはここだけである
 
 ---
 
