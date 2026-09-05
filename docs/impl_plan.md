@@ -5298,6 +5298,31 @@ uv run python main.py --system config/bench/main_hand/system.yaml \
 **残っている誤差**は探索の `step` 粒度（0.5mm）とスイッチ自身の繰り返し精度で、
 実測での確認は機構が付いてから（`docs/mechanism_handoff.md`）。
 
+#### 動作確認が M3508 を 1mm も動かせなかった【済】
+
+動作確認の開始時に `position_loops` と `target_refreshers` の両方を `pause()` していたが、
+**M3508 への指令は動作確認のものもその位置制御ループを通る**（`MotorHandle` の target_sink →
+`M3508PositionLoop.set_target` が唯一の経路で、`set_target` は目標を置くだけ・送信は
+`_step_locked` が行う）。pause 中の `_step_locked` は `if self._paused: return` で電流フレームを
+1 通も出さないので、**動作確認は `y_axis` を 1mm も動かせない**。
+
+症状は零点確定の停滞判定（「指令しても動きません」）で、`robots/motor_check.py` の
+**最初のステップ**がそれなので動作確認は必ずそこで落ちる。ホーミングを外しても次の
+「メインハンド y 軸」が到達タイムアウトになる。機構もモータも正常なので、症状からは
+配線の誤りにしか見えない。
+
+pause の根拠として書かれていた「動作確認が同一バスの 0x200 を占有している」は、
+**M3508 には当てはまらない** —— 占有する主体が存在しないからである。自作モタドラ /
+DM3520 / EDULITE は各 `MotorHandle` が自分で `SET_TARGET` を送るので目標値再送と本当に
+奪い合うが、M3508 はそのループ自身が唯一の送信者で、**止めるとそのバスへ電流指令を出せる
+ものが 1 つも無くなる**（「同一バスの M3508 は必ず 1 つの `M3508PositionLoop` が束ねる」
+という不変条件の裏返し）。
+
+`RobotServer._motor_check_pausables()` を目標値再送だけに絞った。テストは
+`is_paused` を見るだけでは足りない（指令の経路がループを通っていることまでは言えない）ので、
+**動作確認シーケンスの `move_to` と同じ経路で目標を入れて電流フレームが出ること**を見る
+（`TestExclusion::test_実行中に軸へ指令したら電流フレームが出る`）。
+
 #### `run_forever` が `CancelledError` を飲む
 
 `lib/sequence/engine.py` の `run_forever` が `except asyncio.CancelledError: break` で

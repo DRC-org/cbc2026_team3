@@ -30,7 +30,11 @@ __all__ = ["MotorCheckController", "Pausable"]
 
 
 class Pausable(Protocol):
-    """動作確認中に黙らせる周期タスク (位置制御ループ / 目標値再送)。"""
+    """動作確認中に黙らせる周期タスク (目標値再送)。
+
+    **M3508 位置制御ループは含まれない** —— 動作確認が M3508 へ出す指令もその
+    ループを通るため (`RobotServer._motor_check_pausables`)。
+    """
 
     async def pause(self, *, reason: str) -> None: ...
 
@@ -45,7 +49,7 @@ class MotorCheckController:
             通常シーケンス実行中)。許可なら None
         pausables: 起動時に黙らせる周期タスク。**全ロボットぶんを渡すこと** ——
             1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の
-            再送と指令を奪い合う
+            再送が確認用の指令を上書きする
         is_e_stop_active: 今この瞬間モータを動かしてよいか
         broadcast: 状態 1 通の配信口
     """
@@ -154,10 +158,10 @@ class MotorCheckController:
         self._error = None
         self._abort_requested = False
 
-        # 動作確認はモータへ自前の指令を出すため、周期的に指令を出している側と
-        # 指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
-        # 目標値再送とは同じモータの SET_TARGET を奪い合うので、どちらも黙らせて
-        # 排他を取る。
+        # 動作確認は自作モタドラ / DM3520 / EDULITE へ自前の SET_TARGET を出すので、
+        # 同じモータへ周期的に再送している側と奪い合う。黙らせて排他を取る。
+        # **M3508 位置制御ループは対象に含まれない** —— M3508 への指令は動作確認の
+        # ものもそのループを通るため (`RobotServer._motor_check_pausables`)。
         pausables = self._pausables()
 
         async def _run() -> None:

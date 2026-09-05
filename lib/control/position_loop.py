@@ -528,11 +528,14 @@ class M3508PositionLoop(PausablePeriodicTask):
             self._disable_all()
 
         if self._paused:
-            # 動作確認が同一バスの 0x200 を占有している。0 電流フレームでも
-            # 送れば動作確認の指令を上書きしてしまうため 1 通も送らない。
+            # 送信を止めている間は 0 電流フレームすら送らない。
             # 記録もここでは触らない — 停止中の動きはこのループの指令ではないが、
             # 窓を捨てる責務は `_on_resume` が 1 箇所で持つ (ここにも書くと、
-            # 片方を消しても falls back して落ちない層ができる)
+            # 片方を消しても falls back して落ちない層ができる)。
+            #
+            # **動作確認はこのループを止めない** (`RobotServer._motor_check_pausables`)。
+            # M3508 への指令は動作確認のものもこのループを通るので、止めると
+            # 目標だけが入って電流が 1 通も出ず、y_axis を 1mm も動かせなくなる。
             return
 
         if estop:

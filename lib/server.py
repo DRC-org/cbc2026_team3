@@ -1487,15 +1487,22 @@ class RobotServer:
     def _motor_check_pausables(self) -> list[Pausable]:
         """動作確認中に黙らせる周期タスク。**全ロボットぶんを返す。**
 
-        1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の再送と
-        指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
-        目標値再送とは同じモータの SET_TARGET を奪い合う。
+        黙らせるのは目標値再送だけ。1 本のシーケンスが両機を動かすので、片方だけ
+        止めると残った側の再送が同じモータの SET_TARGET を上書きする。
+
+        **M3508 位置制御ループを止めてはならない。** M3508 は電流指令しか受け付けず
+        位置制御は PC 側のループが担うので、**動作確認が M3508 へ出す指令もこのループを
+        通る** (`MotorHandle` の target_sink -> `M3508PositionLoop.set_target` が唯一の
+        経路)。止めると目標だけが入って電流フレームが 1 通も出ず、動作確認は
+        `y_axis` を 1mm も動かせない —— 症状は零点確定の停滞判定 (「指令しても
+        動きません」) か到達タイムアウトで、機構もモータも正常なので配線を疑うことになる。
+
+        0x200 のスロットを奪い合う相手も居ない。**同一バスの M3508 は必ず 1 つの
+        `M3508PositionLoop` が束ねる**ので、このループを止めればそのバスへ電流指令を
+        出せるものが 1 つも無くなる (自作モタドラの `SET_TARGET` を各 `MotorHandle` が
+        自分で送るのとは経路の形が違う)。
         """
-        return [
-            pausable
-            for ctx in self._robots.values()
-            for pausable in (*ctx.position_loops, *ctx.target_refreshers)
-        ]
+        return [pausable for ctx in self._robots.values() for pausable in ctx.target_refreshers]
 
     async def _motor_check_post(self, request: web.Request) -> web.Response:
         """POST /motor_check: 動作確認の起動エンドポイント。

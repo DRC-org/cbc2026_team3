@@ -25,7 +25,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.manual import ManualController
 from lib.sequence.engine import AxisSyncError, Sequence, step
-from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.server_fixtures import RecordingClient, ServerFixture
@@ -304,7 +304,9 @@ class _StallingPausable:
 class TestStartupWindow:
     @staticmethod
     def _install(fx: ServerFixture, robot: str, stall: _StallingPausable) -> None:
-        fx.set_position_loops(robot, [stall])  # type: ignore[list-item]
+        # 黙らせる対象は目標値再送だけ (位置制御ループは動作確認自身が M3508 へ
+        # 指令を通す経路なので止めない)。窓を作れるのはこちらに差し込んだときだけ
+        fx.set_target_refreshers(robot, [stall])  # type: ignore[list-item]
 
     async def test_窓の中の緊急停止で一歩も駆動しない(self) -> None:
         fx, sequence = _build()
@@ -359,9 +361,18 @@ class TestStartupWindow:
 
 
 class TestExclusion:
-    async def test_実行中は位置制御ループを黙らせる(self) -> None:
-        """0x200 は 1 通に 4 モータ分のスロットを持つ。動作確認中にループが送ると
-        確認用の指令が 0 電流で上書きされる。"""
+    async def test_実行中も位置制御ループは動かし続ける(self) -> None:
+        """**止めると動作確認が M3508 を 1mm も動かせない。**
+
+        M3508 は電流指令しか受け付けず、位置制御は PC 側のループが担うので、
+        動作確認が M3508 へ出す指令もこのループを通る (`MotorHandle` の
+        target_sink → `M3508PositionLoop.set_target` が唯一の経路)。止めると
+        目標だけが入って電流フレームが 1 通も出ず、症状は零点確定の停滞判定
+        (「指令しても動きません」) か到達タイムアウトになる。
+
+        0x200 のスロットを奪い合う相手も居ない —— 同一バスの M3508 は必ず 1 つの
+        ループが束ねるので、これを止めるとそのバスへ電流を出せるものが無くなる。
+        """
         fx, sequence = _build()
         mgr = fx.can_manager("main_hand")
         probe = _LoopProbe(mgr)
@@ -370,33 +381,66 @@ class TestExclusion:
         assert await fx.start_motor_check() is True
         await fx.wait_motor_check_running()
 
-        assert probe.loop.is_paused is True
-        before = len(probe.frames)
-        await probe.loop.step()
-        assert len(probe.frames) == before
-
-        sequence.gate.set()
-        await fx.wait_motor_check_idle()
-
-    async def test_終了後にループを復帰させる(self) -> None:
-        fx, sequence = _build()
-        probe = _LoopProbe(fx.can_manager("main_hand"))
-        fx.set_position_loops("main_hand", [probe.loop])
-        sequence.gate.set()
-
-        assert await fx.start_motor_check() is True
-        await fx.wait_motor_check_idle()
-
-        # 復帰しないと昇降軸が保持電流を失って落ちる
         assert probe.loop.is_paused is False
         before = len(probe.frames)
         await probe.loop.step()
         assert len(probe.frames) == before + 1
 
+        sequence.gate.set()
+        await fx.wait_motor_check_idle()
+
+    async def test_実行中に軸へ指令したら電流フレームが出る(self) -> None:
+        """動作確認シーケンスの `move_to` が通るのと同じ経路で確かめる。
+
+        `is_paused` だけを見るテストでは、指令の経路がループを通っていることまでは
+        言えない —— 実際、ループを黙らせていた頃はこの経路が丸ごと死んでいた。
+        """
+        fx, sequence = _build()
+        mgr = fx.can_manager("main_hand")
+        probe = _LoopProbe(mgr)
+        fx.set_position_loops("main_hand", [probe.loop])
+
+        table = load_position_table(
+            {
+                "axes": {"lift": {"unit": "mm", "command_unit": "deg", "scale": 10.0}},
+                "positions": {"lift": {"home": 0.0, "work": 5.0}},
+            },
+            source="<test>",
+        )
+        spec = table.axis("lift")
+        handle = AxisHandle(
+            spec,
+            [MotorHandle("lift", probe.driver, mgr, target_sink=probe.loop.target_sink("lift"))],
+        )
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_running()
+
+        before = len(probe.frames)
+        await handle.set_target_value(spec.to_commands(5.0))
+        await probe.loop.step()
+
+        assert len(probe.frames) == before + 1
+
+        sequence.gate.set()
+        await fx.wait_motor_check_idle()
+
+    async def test_終了後も目標値再送を復帰させる(self) -> None:
+        fx, sequence = _build()
+        refresher = GenericTargetRefresher([], is_estop_active=lambda: False)
+        fx.set_target_refreshers("main_hand", [refresher])
+        sequence.gate.set()
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_idle()
+
+        # 復帰しないとコンベアが 500ms で止まる (ファームのコマンドウォッチドッグ)
+        assert refresher.is_paused is False
+
     async def test_中断で降りても復帰させる(self) -> None:
         fx, sequence = _build()
-        probe = _LoopProbe(fx.can_manager("main_hand"))
-        fx.set_position_loops("main_hand", [probe.loop])
+        refresher = GenericTargetRefresher([], is_estop_active=lambda: False)
+        fx.set_target_refreshers("main_hand", [refresher])
 
         assert await fx.start_motor_check() is True
         await fx.wait_motor_check_running()
@@ -404,7 +448,7 @@ class TestExclusion:
         sequence.gate.set()
         await fx.wait_motor_check_idle()
 
-        assert probe.loop.is_paused is False
+        assert refresher.is_paused is False
 
     async def test_例外で降りても復帰させる(self) -> None:
         class _RaisingSequence(Sequence):
@@ -413,13 +457,13 @@ class TestExclusion:
                 raise RuntimeError("テスト用例外")
 
         fx, _ = _build(check=_RaisingSequence("motor_check"))
-        probe = _LoopProbe(fx.can_manager("main_hand"))
-        fx.set_position_loops("main_hand", [probe.loop])
+        refresher = GenericTargetRefresher([], is_estop_active=lambda: False)
+        fx.set_target_refreshers("main_hand", [refresher])
 
         assert await fx.start_motor_check() is True
         await fx.wait_motor_check_idle()
 
-        assert probe.loop.is_paused is False
+        assert refresher.is_paused is False
 
     async def test_両ロボットの送信経路を止める(self) -> None:
         """**片方だけ止めてはならない。** 1 本のシーケンスが両機を動かすので、
