@@ -1037,6 +1037,10 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 測れない温度を判定材料にしない | `has_thermal_warning` / `has_thermal_fault` の `telemetry.temperature` ガードを外す（**しきい値 0 以下の構成で「測っていない 0」が警告・FAULT に化ける**） | `tests/drivers/test_generic.py::TestTelemetrySupport::test_thermal_judgement_is_skipped_when_temperature_is_unmeasured` |
 | `null`（測れない）と `MALFORMED`（読めない）を混同しない | `readMeasured` の `null` 分岐を削って `MALFORMED` へ倒す（**DC 基板 1 枚で全画面が異常側へ倒れる**）/ 逆に欠落・型違いを `null` へ丸める（配信の不具合が「測れない」に化ける）/ `Cell` を `value.toFixed(1)` に戻す（欄の欠落でレンダー本体から TypeError が飛び React ツリーごとアンマウント）/ `deviationOf` で `pos === null` を 0 として引く | `web/src/lib/protocol.test.ts`（`readMeasured`）/ `MotorStatus.test.tsx` / `pidTuning.test.ts`（`deviationOf`） |
 | 契約フィクスチャに測れない基板が載っている | `ws-contract.json` の生成から `conveyor`（DC 基板）を落とす / `gripper` をモックの `MotorState(temperature=30.0)` へ戻す（**「4 値とも数値」の形しか golden に現れず、UI が `null` を受け取れなくても緑**） | `tests/test_ws_contract.py` / `web/src/test/wsContract.test.ts` |
+| 実測値を持つモータの POS 欄へ指令値を出さない | `PositionCell` の `readMeasured(state.pos)` 先読みを外して `command` を優先させる（**M3508 は緊急停止しても `command` が残る**ので、停止中の POS が `→220.0` になる。サーバー側はこの非対称を捨てておらず、守っているのは UI のこの 1 枚だけ） | `web/src/components/diagnostics/MotorStatus.test.tsx`（「実測値があるモータには指令値を出さない (同じ欄を実測と指令で読み分けさせない)」） |
+| 緊急停止では指令値も消える | `RobotServer.activate_e_stop` の `refresher.clear_targets()` を落とす（停止中も `→0.30` が残り、操縦者は「まだコンベアへ出し続けている」と読む） | `tests/test_ws_protocol.py::TestCommandValue::test_e_stop_clears_the_command` |
+| 一度も指令していないモータを 0 と言わない | `_motor_command_state()` の `handle.target` を `0.0` へフォールバックさせる（起動直後の全モータが「duty 0 を出している」と読める） | `tests/test_ws_protocol.py::TestCommandValue::test_never_commanded_motor_is_null` |
+| 指令値の未配信を異常にしない | `readCommand` を `readMeasured` に戻す（**この欄を配らない版のサーバーへ繋いだだけで全モータの POS が `?` で埋まる**）/ 逆に型違いを `null` へ丸める（壊れた配信が「指令が無い」に化ける） | `web/src/lib/protocol.test.ts`（`readCommand`）/ `MotorStatus.test.tsx`（「指令の欄そのものが未配信なら「—」。異常側へ倒さない」「指令の欄が型違いなら異常側 (未配信と混ぜない)」） |
 | `on_off` 軸に連続値の可動範囲を持たせない | `_parse_manual` の `command_mode is not POSITION` 判定を外す | `tests/test_sequence_positions.py` |
 | DM3520 は目標が無い間も問い合わせ続ける | `QueryDrivenTargetRefresher._step_locked` の `_send_idle_target` を落とす（**フィードバックが問い合わせ駆動なので、操縦していない時間はまるごと STALE になる**） | `tests/test_target_refresh.py` |
 | DM3520 の保持目標はラッチした値 | `_send_idle_target` の `setdefault` を毎回の `idle_target_value()` へ変える（**負荷で下がったぶんへ目標が追従し、誰も操作していないのに軸がクリープする**） | `tests/test_target_refresh.py` |
@@ -1615,6 +1619,7 @@ cbc2026_team3/
 │           │   ├── SubsystemStatus.tsx  # 平常時 1 行に畳み、異常時は開閉操作を上書きして開く
 │           │   ├── MotorSummary.tsx     # 判定は summarizeMotors。ここに条件を書き足さない
 │           │   ├── MotorStatus.tsx      # 測れない項目は「—」/ 読めない配信は「?」（readMeasured）
+│           │   │                        #   POS 欄だけ、測れないときに指令値「→0.30」を出す
 │           │   └── HealthIndicator.tsx  # 判定は lib/healthVerdict.ts に一本化
 │           └── ui/               # 自前プリミティブ（Page / Panel / Section / Button /
 │                                 #   StatusBadge / Kbd / Icon / Modal）
@@ -1652,8 +1657,12 @@ cbc2026_team3/
     // ドライバ / ファーム側でループを閉じているモータは null
     "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0, "pid": null },
     // 測る手段が無い項目は null。DC 基板は 4 値とも、サーボ基板は位置以外が null
-    // （「測れないフィードバックは null で配る」参照）
-    "conveyor": { "pos": null, "vel": null, "torque": null, "temp": null, "pid": null }
+    // （「測れないフィードバックは null で配る」参照）。command は PC が最後に送った
+    // 指令値で、**実出力ではない**。一度も指令していなければ null
+    "conveyor": {
+      "pos": null, "vel": null, "torque": null, "temp": null, "pid": null,
+      "command": 0.3, "command_mode": "duty"
+    }
   },
   "e_stop_active": false,
   "health": { /* HealthSnapshot */ },
@@ -1875,6 +1884,118 @@ UI が `null` を受け取れなくても誰も気付けない。
 - **`null` を `MALFORMED` と同じ扱いにする**（読めない値として一律に異常へ倒す）——
   実装は 1 行で済むが、**DC 基板を 1 枚積んだだけで全画面が異常側へ倒れる。** 常時
   異常が出ている画面では、本物の異常が区別できない
+
+#### 測れないモータの POS 欄には PC の指令値を出す
+
+測れない項目を `null` へ倒した結果、DC 基板と電磁弁基板は診断カラムの 4 欄がすべて `—` に
+なり、**そのモータについて画面が何も言えなくなった。** 正しくはあるが、`conveyor` を
+回している最中と止めた後の区別すら付かない。
+
+残っている手掛かりは 1 つだけある —— **PC が最後にそのモータへ送った指令値**である。
+出どころは `MotorHandle`（`lib/sequence/motors.py`）が `set_target()` で保持している
+`target` / `mode` で、`GenericTargetRefresher` が 20Hz で再送し続けているのはこの値
+そのものだから、「PC が今この基板へ何を流し続けているか」に等しい。ハンドルは
+手動・シーケンス・動作確認のどの経路からも共有される 1 つ（`main._wire_one_robot` が
+`MotorGroup` を 1 つだけ作る）ので、経路ごとに別の値が出ることもない。
+`state.motors[]` に `command` / `command_mode` を足し、`lib/server.py` の
+`_motor_command_state()` が組み立てる。
+
+**`target` と同じ欄に畳んではならない。** `target`（`_motor_control_state`）は M3508
+位置制御ループが持つ*軌道の中間目標*で、速度・加速度で制限しながら毎周期動く値である。
+`command` は*PC が基板へ最後に送った値そのもの*で、動くのは操縦者が指令したときだけ。
+1 つに畳むと、行き過ぎの観察に使う偏差（実測 − 中間目標）と「何を指令したか」が、
+同じ欄の中でモータごとに入れ替わる。
+
+##### 表示規則
+
+- **`pos` が測れないときだけ** POS 欄へ `→0.30` / `→ON` を描く。実測値があるモータには
+  指令値を出さない —— 同じ事実を 2 度描かない原則以前に、**その欄が実測なのか指令なのかを
+  行ごとに読み分けさせる**形になる
+- 丸め方と単位は `command_mode` だけで決める（`duty` は小数 2 桁。1 桁では 0.3 と 0.34 が
+  同じに見えるため。`on_off` は基板が 0 か非 0 かしか見ないので `ON` / `OFF` と書く）。
+  **モータ名や基板の種類から推測してはならない** —— ドライバ種別を UI へ書き写す形へ
+  逆戻りする。未知の `command_mode` は素通しで数値へ落とす（指差喚呼の `group` を
+  検証せず素通しするのと同じ理由で、UI がまだ知らない種別で表示が消えてはならない）
+- **VEL / TRQ / TMP は常に `—` のまま。** PC は速度も電流も温度も指令していないので、
+  埋めれば前節で消したはずの「測ったように見える値」がそのまま戻る
+
+##### これは指令値であって実出力ではない
+
+**ここがこの表示の唯一の弱点で、画面に出す以上は必ず伝えなければならない。** PC は
+送った値しか知らず、基板が実際に何を出しているかは観測できない（DC 基板も電磁弁基板も
+測る手段を持たないのだから当然である）。少なくとも次の 5 つで両者は食い違う:
+
+- **ファーム側の `max_duty` クランプ**（DC 基板の既定 0.30）。値を持つのはファームの
+  `firmware/dc_motor/include/config.h` で、**PC の config には無い。** つまり
+  **PC はクランプ後の値を知り得ない**
+- **`everFed_` ゲート** —— `SET_TARGET` を 1 通も受けるまで出力しない（仕様書 §5.4）
+- **コマンドウォッチドッグ満了** —— 500ms 自分宛が途絶えると出力を落とす（§5.1）。
+  `cbc-can-watchdog.service` の bus-off 復旧は 1 秒弱 CAN を止めるので、**復旧 1 回で
+  必ず起きる**
+- **緊急停止ラッチ**（物理 `REF` を含む）
+- **基板の再起動** —— `SET_PARAM` で入れた値ごと既定へ戻る
+
+**基板が止まっていても、この欄には値が載り続ける。** 画面の手当ては 2 つだけにした ——
+数値の前に置く `→` と、`title`（ホバー）に載せた「PC が最後に送った指令値です（実際の
+出力ではありません）…」の文。記号だけでは「送った値」と「出ている値」の差までは伝わらない。
+
+採らなかった案:
+
+- **凡例行を出す** —— 幅 300px の診断カラムに置く余地が無い。加えて、常時出す 1 行は
+  「平常時に静かで、異常時に自分から主張する」に正面から反する
+- **指令値だけ色を変える** —— 同じ欄に温度警告の着色が既にあり、色の意味が 2 つになる。
+  「状態は色付きテキストではなくチップで示す」原則にも触れる
+
+##### 緊急停止では消えるが、M3508 だけはサーバー側に残る
+
+緊急停止では `GenericTargetRefresher.clear_targets()` がハンドルの目標ごと捨てる
+（捨てないと解除した瞬間に再送が走り、操縦者の操作なしにコンベアが回り出す）。
+したがって**停止中の DC 基板・電磁弁基板は `command` が `null` に戻る。** 停止しているのに
+`→0.30` と出ていたら、操縦者は「まだ出し続けている」と読む。
+
+**一方、M3508 は緊急停止しても `command` が残る。** `clear_target()` を呼ぶのは目標値
+再送タスクだけで、**M3508 はどの refresher にも入っていない**（`main._build_target_refreshers`
+が対象外にしている。位置制御ループが 200Hz で電流指令を出すため）。
+
+ただし**画面には出ない。** M3508 は `TelemetrySupport.position=True` なので `pos` に必ず
+実測値が入り、UI は `pos` が測れないときしか `command` を見ないためである。
+**つまりこの非対称は現状 UI の 1 層だけで守られている。** 将来 POS 欄の表示規則を
+「実測と指令を併記する」等へ変えた人は、**停止中の M3508 に `→220.0` が出る**という
+形でしか気付けない。守っているのは
+`web/src/components/diagnostics/MotorStatus.test.tsx` の
+「実測値があるモータには指令値を出さない (同じ欄を実測と指令で読み分けさせない)」
+ただ 1 件なので、表示規則を触るときはこのテストを消さないこと。
+
+**サーバー側で M3508 の `command` も捨てる案は採らなかった。** 「停止時に何を捨てるか」は
+安全側の不変条件で、モータの目標値は**モード切替でも消さない**（消すと保持トルクを失って
+昇降軸が落ちる）という判断がすでに置いてある。**間違えたときの症状が昇降軸の落下である
+経路へ、実害の無い表示の都合で手を入れるべきではない。** 表示の問題は表示側で閉じる。
+
+##### 残る値についての事実
+
+- **動作確認シーケンスの実行後は最後に出した指令が残る**（`conveyor` なら
+  `command: 0.0, command_mode: "duty"`）。これは「duty 0 を出し続けている」という事実の
+  とおりで、再送も 0 を送り続けている
+- **手動モードへの切替でも残る。** `ManualController.reset()` が捨てるのはジョグの起点
+  だけで、モータの目標値そのものは消さない
+- **`command` は測定可否（`TelemetrySupport`）でマスクしない。** 指令は測定値ではないので、
+  測れないことを理由に落とす筋合いが無い（落とせば表示そのものが成立しない）
+- **dry-run でも擬似値を作らず実値を配る。** `_motor_command_state()` は測定値ではないので
+  `_measured_only()` を通らず、dry-run 分岐の外で足している。測れないモータの画面が指令値
+  だけを頼りにしている以上、**机上で見えている数字が「PC が実際に送った値」でなければ、
+  確かめたい対象そのものが消える**
+
+##### `readCommand` を `readMeasured` と分けた理由
+
+`command` はテレメトリに**後から足した欄**なので、これを配らない版のサーバーへ繋ぐことが
+起こりうる（会場で古い `web/dist` と新しいサーバー、あるいはその逆）。`readMeasured` を
+そのまま使うと未配信（`undefined`）が `MALFORMED` になり、**全モータの POS 欄が `?` で
+埋まる。** CLAUDE.md の「未配信は異常にしない」に従い、`readCommand()` は `undefined` だけを
+`null`（指令が無い）へ倒し、**型違いは `MALFORMED` のまま**にする。
+
+**既存の 4 値との非対称は意図的である。** `pos` / `vel` / `torque` / `temp` は長く必須だった
+欄なので、欠けていれば `undefined` = 壊れた配信で正しい。後から足した欄だけが「届かない
+こともある」を持つ。
 
 ### Client → Server（操作）
 

@@ -968,6 +968,42 @@ class RobotServer:
             return {"target": None, "saturated": False}
         return {"target": loop.target(motor_name), "saturated": loop.is_saturated(motor_name)}
 
+    def _motor_command_state(self, robot_name: str, motor_name: str) -> dict[str, object]:
+        """PC が基板へ最後に送った指令値と、その種別。一度も送っていなければ None。
+
+        **フィードバックを持たないモータ (DC 基板・電磁弁基板) に対する唯一の
+        「今どうなっているか」である。** どちらも測る手段を持たないので配信の 4 値は
+        すべて `None` になり、指令まで出さないと画面はそのモータについて何も言えない。
+
+        **`target` (`_motor_control_state`) と混ぜてはならない。** あちらは M3508
+        位置制御ループが持つ *軌道の中間目標* で、速度・加速度で制限しながら毎周期
+        動く値。こちらは *PC が基板へ最後に送った値そのもの* で、
+        `GenericTargetRefresher` が 20Hz で再送し続けているのはこの値である。
+        1 つに畳むと、行き過ぎの観察に使う偏差 (実測 - 中間目標) と、
+        「何を指令したか」が同じ欄の中で入れ替わる。
+
+        出どころは ``MotorHandle`` ただ 1 つで、手動・シーケンス・動作確認の
+        どの経路から出した指令も同じハンドルを通る (`main._wire_one_robot` が
+        `MotorGroup` を 1 つだけ作って共有している)。緊急停止では
+        `GenericTargetRefresher.clear_targets()` がハンドルの目標ごと捨てるので、
+        **停止中の DC 基板・電磁弁基板は `None` に戻る** —— 停止しているのに
+        `→0.30` と出ていたら、操縦者は「まだ出し続けている」と読む。
+
+        位置定数を読めていないロボット (`has_motors` が False) と、
+        `MotorGroup` に居ないモータは `None` へ倒す (ヘルスや配信を落とさない)。
+        """
+        sequence = self._robots[robot_name].sequence
+        if not sequence.has_motors:
+            return {"command": None, "command_mode": None}
+
+        group = sequence.motors
+        if motor_name not in group:
+            return {"command": None, "command_mode": None}
+
+        handle = group[motor_name]
+        mode = handle.mode
+        return {"command": handle.target, "command_mode": None if mode is None else mode.value}
+
     def _find_position_loop(self, motor_name: str) -> M3508PositionLoop | None:
         """指定モータを制御している M3508 位置制御ループを探す。"""
         for ctx in self._robots.values():
@@ -1704,6 +1740,10 @@ class RobotServer:
             # None を配るのは「測っていない」の表現で、0 を配ってはならない
             # (偏差 0 = 完璧に追従している、と読めてしまう)
             motors[motor_name].update(self._motor_control_state(motor_name))
+            # 指令値も dry-run 分岐の外で足す。**擬似値を作ってはならない** ——
+            # 測れないモータの画面が指令値だけを頼りにしている以上、机上で見えている
+            # 数字が「PC が実際に送った値」でなければ確かめたい対象そのものが消える
+            motors[motor_name].update(self._motor_command_state(robot_name, motor_name))
 
         # snapshot が未指定 (テストや単独呼び出し) の場合はその場で計算する。
         # _broadcast_state からの呼び出しは事前計算済みのものを使い回して二重計算を避ける。
