@@ -5298,6 +5298,39 @@ uv run python main.py --system config/bench/main_hand/system.yaml \
 **残っている誤差**は探索の `step` 粒度（0.5mm）とスイッチ自身の繰り返し精度で、
 実測での確認は機構が付いてから（`docs/mechanism_handoff.md`）。
 
+#### config どうしの「対」を機械的に守る【済】
+
+**片方だけ動かしても起動が通り、症状も出ない設定**が複数ある。ファーム側の
+`kFirmwareVersion` × `expected_firmware` は `tests/test_firmware_version_sync.py` が
+守っていたが、PC 側の config どうしには同じ仕組みが無く、実際に 2 件壊れていた。
+
+**① `homing.search_distance` ≦ `manual` の全幅**（`_check_homing_range` が起動時に拒否）
+
+`manual` は「この軸を動かしてよい範囲」の唯一の宣言。そこを超えて動かす歯止めを置くと、
+宣言と歯止めのどちらが正なのか config から読めなくなる。同一ファイル内で閉じる検証なので
+`_check_manual_range` / `_check_motion_timeout` と同じ場所に置く。
+
+**短い側は拒否しない。** `search_distance` は配線の抜けたセンサに対する唯一の無人の
+歯止めなので、短いほど安全側に倒れる（遠い位置から始めた探索が失敗するのは、機構を
+押し込み続けるより軽い）。
+
+**向きを逆に書いて一度 config を壊しかけた。** 「全幅以上」を要求して `y_axis` の
+`search_distance` を 22.0 → 650.0 へ広げたが、これは歯止めを 30 倍緩める変更で、
+センサが死んでいれば左右直結の y 軸を 650mm 押し込み続けることになる。`rotate` の
+コメント（`search_distance` は manual の全幅を超えないこと）が元の設計意図で、
+そちらが正しい。
+
+**② `motion.velocity_ff` × `pid.kd`**（`tests/test_config_pairs.py`）
+
+こちらは `config/<robot>_positions.yaml` と `config/<robot>.yaml` にまたがるので、
+起動時の検証ではなく同梱 config を突き合わせるテストで守る。`motion` を持たない軸は
+対象外 —— 参照速度そのものが無いので `velocity_ff` に打ち消す相手が居ない
+（`config/bench/y_axis_tuning` は台形プロファイルを外してステップ応答を測るセットなので、
+意図的に `kd`=1.0 / `velocity_ff` なしの状態にある）。
+
+**守れる対はまだ残っている**（`sync_kp` × `sync_limit` は起動時に見ているが、
+`p_max` / `v_max` / `t_max` × 実機レジスタは照合手段が無い）。
+
 #### `run_forever` が `CancelledError` を飲む
 
 `lib/sequence/engine.py` の `run_forever` が `except asyncio.CancelledError: break` で

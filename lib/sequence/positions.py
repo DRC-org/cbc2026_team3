@@ -795,6 +795,11 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
 
     axes = {name: _parse_axis(name, raw) for name, raw in axes_raw.items()}
 
+    for spec in axes.values():
+        # **positions を持たない軸でも見る。** homing は位置定数ではなく軸の機構的
+        # 性質なので、`positions:` に 1 つも登録が無い軸にも書ける
+        _check_homing_range(source, spec)
+
     positions: dict[str, dict[str, float | dict[str, float]]] = {}
     for axis, values in positions_raw.items():
         if axis not in axes:
@@ -853,6 +858,32 @@ def _check_motion_timeout(
         f"{required:.3f} 秒かかり、timeout_s ({spec.timeout_s}) を必ず超えます "
         f"(timeout_s を {suggested} 以上にするか、max_velocity / max_acceleration を"
         "上げてください)"
+    )
+
+
+def _check_homing_range(source: str, spec: AxisSpec) -> None:
+    """探索距離が可動範囲を超えていないか検証する。
+
+    `manual` は「この軸を動かしてよい範囲」の唯一の宣言。そこを超えて動かす歯止めを
+    置くと、宣言と歯止めのどちらが正なのか config から読めなくなる。
+
+    **短い側は拒否しない。** `search_distance` は配線の抜けたセンサに対する唯一の
+    無人の歯止めなので、短いほど安全側に倒れる (遠い位置から始めた探索が失敗するのは、
+    機構を押し込み続けるより軽い)。`manual` を書かない軸は可動範囲の宣言が無いので通す。
+    """
+    homing = spec.homing
+    manual = spec.manual
+    if homing is None or manual is None:
+        return
+
+    span = manual.max_value - manual.min_value
+    if homing.search_distance <= span:
+        return
+
+    raise ValueError(
+        f"{source}: axes.{spec.name}.homing.search_distance ({homing.search_distance}) が "
+        f"axes.{spec.name}.manual の全幅 ({span}) を超えています "
+        "(手動で動かしてよい範囲の外まで探索を許す値です)"
     )
 
 

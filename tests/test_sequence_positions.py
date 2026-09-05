@@ -1007,3 +1007,63 @@ class TestMotionSpec:
         )
 
         assert table.axis("y_axis").motion is not None
+
+
+class TestHomingRange:
+    """探索距離と可動範囲の対 (axes.<軸>.homing.search_distance と axes.<軸>.manual)。
+
+    `manual` は「この軸を動かしてよい範囲」の唯一の宣言。そこを超えて動かす歯止めを
+    置くと、宣言と歯止めのどちらが正なのか config から読めなくなる。
+
+    **短い側は塞がない。** `search_distance` は配線の抜けたセンサに対する唯一の
+    無人の歯止めなので、短いほど安全側に倒れる。
+    """
+
+    @staticmethod
+    def _config(*, search_distance: float, manual: dict | None) -> dict:
+        axis: dict = {
+            "unit": "mm",
+            "command_unit": "deg",
+            "scale": 55.0,
+            "homing": {
+                "sensor": "origin_sensor",
+                "direction": -1,
+                "search_distance": search_distance,
+                "step": 0.5,
+                "settle_s": 0.05,
+            },
+        }
+        if manual is not None:
+            axis["manual"] = manual
+        return {"axes": {"y_axis": axis}, "positions": {"y_axis": {"home": 0.0}}}
+
+    def test_可動範囲を超える探索距離は起動を拒否する(self) -> None:
+        config = self._config(search_distance=30.0, manual={"min": -2.0, "max": 20.0})
+
+        with pytest.raises(ValueError, match="search_distance"):
+            load_position_table(config, source="<test>")
+
+    def test_全幅ちょうどは通る(self) -> None:
+        config = self._config(search_distance=22.0, manual={"min": -2.0, "max": 20.0})
+
+        assert load_position_table(config, source="<test>").axis("y_axis").homing is not None
+
+    def test_全幅より短い探索距離は拒否しない(self) -> None:
+        """短いほど安全側に倒れる。遠い位置から始めた探索が失敗するのは、機構を
+        押し込み続けるより軽い。"""
+        config = self._config(search_distance=1.0, manual={"min": -2.0, "max": 20.0})
+
+        assert load_position_table(config, source="<test>").axis("y_axis").homing is not None
+
+    def test_manual_を書かない軸は可動範囲の宣言が無いので通る(self) -> None:
+        config = self._config(search_distance=999.0, manual=None)
+
+        assert load_position_table(config, source="<test>").axis("y_axis").homing is not None
+
+    def test_positions_を持たない軸でも見る(self) -> None:
+        """homing は位置定数ではなく軸の機構的性質なので、登録が無い軸にも書ける。"""
+        config = self._config(search_distance=30.0, manual={"min": -2.0, "max": 20.0})
+        config["positions"] = {}
+
+        with pytest.raises(ValueError, match="search_distance"):
+            load_position_table(config, source="<test>")
