@@ -97,6 +97,21 @@ describe("表示するもの", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  /**
+   * `Toaster` は `RootLayout` で `RouteErrorBoundary` (`<Outlet />` だけを包む) の
+   * 外に置かれているので、ここで投げると緊急停止オーバーレイごとアンマウントする。
+   * 受信境界 (`protocol.ts`) が読めなかった `level` を弾いていても、この層は
+   * それ単独で守れていることを確かめる (層ごとに単独で効くことの確認)。
+   */
+  it("level が非文字列でも投げずに描画する", () => {
+    expect(() =>
+      mount({
+        healthEvents: [healthEvent({ level: 42 as unknown as HealthChangeEvent["level"] })],
+      }),
+    ).not.toThrow();
+    expect(screen.getByText(/42 — main_hand/)).toBeInTheDocument();
+  });
+
   it("最新のヘルスイベントだけを通知する", () => {
     mount({
       healthEvents: [

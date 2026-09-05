@@ -344,18 +344,50 @@ describe("parseServerMessage", () => {
   });
 
   describe("health_change", () => {
-    it("level 省略時は info 扱いにする", () => {
+    it("既知の 3 値はそのまま通す", () => {
+      for (const level of ["info", "warning", "critical"] as const) {
+        const msg = parse({ type: "health_change", robot: "main_hand", target: "can0", level });
+        expect(msg).toMatchObject({ event: { level } });
+      }
+    });
+
+    /**
+     * `level` は `HealthChangeLevel`（3 値の union）で `MALFORMED` という
+     * 第 4 の値を持てない。読めなかったときに軽い側 (`"info"`) へ倒すと、
+     * 型不正のせいで本当に critical なイベントが画面から消える
+     * (`web/src/lib/protocol.ts:967` で実際に `?? "info"` になっていた事故)。
+     * ここでは異常側の `"critical"` へ倒すことを固定する。
+     */
+    it("level 省略時は critical (異常側) へ倒す", () => {
       expect(parse({ type: "health_change", robot: "main_hand", target: "can0" })).toEqual({
         type: "health_change",
         event: {
           robot: "main_hand",
-          level: "info",
+          level: "critical",
           target: "can0",
           from: "",
           to: "",
           message: "",
         },
       });
+    });
+
+    it.each([[42], [{ x: 1 }], [["critical"]], [null], [true]])(
+      "非文字列の level (%j) も critical へ倒す (無検査キャストで画面が落ちないように)",
+      (level) => {
+        const msg = parse({ type: "health_change", robot: "main_hand", target: "can0", level });
+        expect(msg).toMatchObject({ event: { level: "critical" } });
+      },
+    );
+
+    it("未知の文字列の level も critical へ倒す", () => {
+      const msg = parse({
+        type: "health_change",
+        robot: "main_hand",
+        target: "can0",
+        level: "debug",
+      });
+      expect(msg).toMatchObject({ event: { level: "critical" } });
     });
 
     it("robot を持たない health_change は捨てる", () => {
