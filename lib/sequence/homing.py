@@ -29,6 +29,13 @@
    (あちらは実ストローク相当まで伸びる値なので、反対側の機構端まで走り抜ける)
 6. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
 
+**探索の到達判定はラッチで見る。「今 ON か」では取りこぼす。** ON 区間が `step` より
+狭い機構では、指令 1 回で区間を跨いでしまい `settle_s` 後の観測ではもう OFF になって
+いる (`rotate` は step 2.0deg を約 18ms で通過する)。センサの FEEDBACK は 100Hz で
+届いているので、受信のたびにラッチしておけば 1 通も取りこぼさない
+(`GenericDriver.consume_sensor_latch`)。**離脱は現在値のまま**という非対称は意図した
+もので、理由は `HomingRunner._sensor_reached` に書いてある。
+
 **触れた状態から始めたら、一度離れてから寄せ直す。** リミットスイッチの ON 区間には
 幅があるので、触れたその場を原点にすると「区間のどこで探索を始めたか」がそのまま
 原点のばらつきになる。症状は「原点合わせをしたのに位置がずれる」だけで、始めた位置は
@@ -96,6 +103,10 @@ class HomingError(RuntimeError):
 
 
 SensorActive = Callable[[str], bool]
+#: センサ名 → 前回読んでから一度でも接触したか。**読むと消える**
+#: (`GenericDriver.consume_sensor_latch`)。読み手が複数いると片方が相手のぶんまで
+#: 消すので、呼び手は `HomingRunner` 1 つに限る。
+SensorLatched = Callable[[str], bool]
 SensorStale = Callable[[str], bool]
 MotorStale = Callable[[str], bool]
 OriginCapturable = Callable[[str], bool]
@@ -128,6 +139,7 @@ class HomingRunner:
         self,
         *,
         sensor_active: SensorActive,
+        sensor_latched: SensorLatched,
         sensor_is_stale: SensorStale,
         motor_is_stale: MotorStale,
         origin_capturable: OriginCapturable,
@@ -136,7 +148,13 @@ class HomingRunner:
     ) -> None:
         """
         Args:
-            sensor_active: センサ名 → 接触しているか (`GenericDriver.sensor_active`)
+            sensor_active: センサ名 → **今**接触しているか
+                (`GenericDriver.sensor_active`)。離脱の判定と、探索前の
+                「既に触れているか」がこちらを見る
+            sensor_latched: センサ名 → **前回読んでから一度でも**接触したか。
+                読むと消える (`GenericDriver.consume_sensor_latch`)。
+                **探索の到達判定だけがこちらを見る** (`_sensor_reached`)。
+                **既定値を持たせない** —— 未配線が「取りこぼす探索」に黙って戻る
             sensor_is_stale: センサ名 → フィードバックが途絶しているか
             motor_is_stale: モータ名 → フィードバックが途絶しているか。
                 **既定値を持たせない** —— 配線を忘れると「未受信の 0.0 を現在位置と
@@ -148,6 +166,7 @@ class HomingRunner:
             sleep: 1 ステップごとの待ち (テストで差し替える)
         """
         self._sensor_active = sensor_active
+        self._sensor_latched = sensor_latched
         self._sensor_is_stale = sensor_is_stale
         self._motor_is_stale = motor_is_stale
         self._origin_capturable = origin_capturable
@@ -183,6 +202,9 @@ class HomingRunner:
 
         self._check_preconditions(spec, homing)
 
+        # ここが問うのは「**今**触れているか」なのでラッチではない。ラッチで問うと、
+        # 前回の零点確定や手動操縦でスイッチを跨いだ痕跡だけで離脱段へ入り、
+        # 触れてもいない位置から _RELEASE_STEP_LIMIT 歩ぶん離れる向きへ動き出す
         if self._sensor_active(homing.sensor):
             # **触れた状態のまま確定してはならない。** リミットスイッチの ON 区間には
             # 幅があるので、その場を原点にすると「区間のどこで探索を始めたか」が
@@ -250,6 +272,12 @@ class HomingRunner:
             want_active: この状態になったら到達。探索は True、離脱は False
             limit: 実測の移動量の上限。超えたら `limit_message` で降りる
         """
+        if want_active:
+            # **探索を始める前に溜まったラッチを捨てる。** 離脱段のあいだ触れていた
+            # ぶんや、前回の零点確定・手動操縦でスイッチを跨いだぶんが残っていると、
+            # 1 歩目の観測でいきなり到達と読み、探索開始位置が原点になる
+            self._sensor_latched(homing.sensor)
+
         start = self._observe(spec, handle)
         observed = start
         stalled = 0
@@ -269,6 +297,13 @@ class HomingRunner:
             observed = self._observe(spec, handle)
 
             if hit:
+                # **その場で止める。** 最後に送った「実測 + step」の指令はまだ生きて
+                # おり、原点確定 (`capture_origin` の disable) が届くまでモータは
+                # スイッチを越えた先へ向かい続ける。検出位置を目標に送り直せば、
+                # 行き過ぎは「検出の遅れ」のぶんだけに縮む。
+                # 離脱でも同じ 1 本を通す —— 向きごとに書き分けると片方だけ直せる形が
+                # 残る (この関数を 1 本にしてある理由そのもの)
+                await handle.set_target_value(spec.to_commands(observed))
                 return observed
 
             # 指令を実測へ再アンカーしている以上、引っかかった機構は「指令しても
@@ -333,6 +368,7 @@ class HomingRunner:
         **待っている間も見る**のは探索と離脱で同じ理由による —— 1 歩の移動中に
         センサの状態が変わるので、歩き終えてからしか見ないと、変化した位置ではなく
         その歩の終点が原点になる (step ぶん余計に行き過ぎる)。
+        **見る対象は探索と離脱で違う** —— `_sensor_reached` を参照。
         """
         # **`spec.tolerance` を流用してはならない。** あちらは「軸が目標位置へ
         # 到達したか」の許容差で、ここが問うのは「1 歩ぶんの指令に追従したか」という
@@ -345,11 +381,32 @@ class HomingRunner:
         reached = _progress_threshold(homing)
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
-            if self._sensor_active(homing.sensor) is want_active:
+            if self._sensor_reached(homing.sensor, want_active=want_active):
                 return True
             if abs(self._observe(spec, handle) - commanded) <= reached:
                 return False
         return False
+
+    def _sensor_reached(self, sensor: str, *, want_active: bool) -> bool:
+        """センサが目的の状態になったか。**探索と離脱で見るものが違う。**
+
+        探索 (`want_active=True`) は**ラッチ**を見る —— 「前回読んでから一度でも
+        ON になったか」。リミットスイッチの ON 区間が `step` より狭いと、指令 1 回で
+        区間を跨いでしまい、`settle_s` 後の観測時にはもう OFF になっている
+        (`rotate` は step 2.0deg を約 18ms で通過する)。「今 ON か」を 50ms ごとに
+        見る方式では 100Hz で届いている接触を原理的に取りこぼし、**そのまま
+        スイッチを越えて回り続ける**。越えた先は機構の破損側である。
+
+        離脱 (`want_active=False`) は**現在値**を見る。対称に見えるが、揃えては
+        ならない —— 離脱に同じラッチ方式 (「一度でも OFF になったか」) を持ち込むと、
+        接点のチャタリングで OFF が 1 回混じっただけで離脱完了と読み、**まだ ON 区間の
+        中にいるのに探索を始めて、区間内のどこかを原点にする**。取りこぼしの向きも
+        非対称で、探索の取りこぼしは機構の破損側へ進み続けるのに対し、離脱の
+        取りこぼしは「余計に離れる」だけで、次の探索がそのぶんを寄せ直す。
+        """
+        if want_active:
+            return self._sensor_latched(sensor)
+        return self._sensor_active(sensor) is False
 
     def _observe(self, spec: AxisSpec, handle: AxisHandle) -> float:
         """実測の軸位置。読めなければ探索そのものを止める。"""

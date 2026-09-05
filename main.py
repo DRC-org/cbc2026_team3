@@ -379,6 +379,19 @@ def _wire_motor_check_sequence(
             # (下の _sensor_is_stale が True を返すので 1 歩も動かさない)
             return sensor is not None and bool(getattr(sensor, "sensor_active", False))
 
+        def _sensor_latched(name: str) -> bool:
+            # 探索の到達判定だけがこれを読む。ON 区間が homing.step より狭いと
+            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす (実機で発生)
+            sensor = sensors.get(name)
+            if sensor is None:
+                return False
+            consume = getattr(sensor, "consume_sensor_latch", None)
+            if callable(consume):
+                return bool(consume())
+            # ラッチを持たないドライバでは現在値へ落ちる (取りこぼしうるが、
+            # 「一度も到達しない探索」にはしない)。歯止めは search_distance が持つ
+            return bool(getattr(sensor, "sensor_active", False))
+
         def _sensor_is_stale(name: str) -> bool:
             if name not in sensors:
                 logger.error("零点確定: センサ '%s' が config の sensors: に居ません", name)
@@ -420,6 +433,7 @@ def _wire_motor_check_sequence(
         sequence.bind_homing(
             HomingRunner(
                 sensor_active=_sensor_active,
+                sensor_latched=_sensor_latched,
                 sensor_is_stale=_sensor_is_stale,
                 motor_is_stale=_motor_is_stale,
                 origin_capturable=_origin_capturable,
