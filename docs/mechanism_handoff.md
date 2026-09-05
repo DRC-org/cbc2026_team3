@@ -43,7 +43,7 @@
 | `axes.y_axis.manual` | **埋まった。** 0.0〜650.0mm（2026-09-04 のコミット `5aa89c3` で実ストロークへ更新済み） | 物理端ではなく**その内側**に取る。上の `search_distance`（22.0mm のまま）と対で動かす約束が崩れている点は §0 参照 |
 | `axes.y_axis.tolerance` / `sync_tolerance` | 1.0mm / 10.0mm | `sync_tolerance` を緩めるのは最後の手段。左右直結なのでずれはその場で機構を壊す |
 | `axes.y_axis.sync_kp` / `sync_limit` | **16.0** / 1250counts | **2026-09-04 に実運用ストローク（150mm）で実測済み。** 左右のずれを**縮める**唯一の経路（`sync_tolerance` の 3 層は止めるだけ）。 **最適値は振幅で変わる** —— 振幅 1.5mm では 8.0 が最良だったが、150mm では 8.0 が最悪（1 回 1.899mm。測定時点の `sync_tolerance` 2.0mm では 95%、現在の 10.0mm では 19%）で、16.0 が 2 回とも最良（最大 0.637mm）。**短距離（15mm）では取り直していない** |
-| `axes.y_axis.timeout_s` | 4.0s | 実動作時間 + 余裕へ |
+| `axes.y_axis.timeout_s` | 4.0s | 実測ストローク 650mm（`positions.y_axis` の `home` 0.0 〜 `work_shared` 650.0）に対し、`motion.duration_for(650.0)`（`max_velocity` 200.0mm/s / `max_acceleration` 1200.0mm/s²）の理論所要時間は 3.4167 秒、余裕は 0.5833 秒（約 15%）。起動時検証 `_check_motion_timeout`（`lib/sequence/positions.py`）はこの余裕の範囲内なので通る。**ただしこれは理想台形プロファイルの所要時間だけで、`tolerance` 1.0mm の帯へ整定するまでの時間を含まない。** 実機で `SequenceTimeoutError` が出たらまずここを疑うこと（症状は「その軸だけが毎回失敗する」で、機構にもモータにも異常が無い —— 説明は `_check_motion_timeout` の docstring）。`timeout_s` をいくつにすべきかは実機で測る人が決める |
 | `positions.rotate` | **埋まった。** 実測値（home 0.0 / pick 180.0 / place 10.0deg）が入っている | かつての 0〜8deg は機構未装着時の仮値。実機の値へ更新済み |
 | `axes.rotate.manual` | **埋まった。** 0.0〜180.0deg（2026-09-04 のコミット `5aa89c3` で実ストロークへ更新済み） | 同上 |
 | `axes.rotate.homing` | **コメントアウト（有効化できない）** | スイッチ未装着に加え、**載せるスロットが無く**（サーボ基板 #0 は SV0〜SV4 の 5 本とも使用中）、**EDULITE には原点確定の経路そのものが無い**。詳細は `docs/checks_and_health.md` の「零点確定」節 |
