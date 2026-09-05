@@ -49,7 +49,7 @@ from lib.sequence.homing import HomingError, HomingRunner
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
-from sequences.motor_check import REQUIRED_AXES, MotorCheckSequence
+from sequences.motor_check import MotorCheckSequence
 
 logger = logging.getLogger(__name__)
 
@@ -317,10 +317,19 @@ def _wire_motor_check_sequence(
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
 
-    **必要な軸が揃っていない構成では登録しない。** 机上ベンチ (config/bench/*) は
-    本番の機構を持たないので、登録すると押した瞬間に `PositionLookupError` で
-    止まる。未登録なら動作確認は「シーケンスが読み込まれていません」として
-    拒否されるだけで、UI もその理由を表示できる。
+    **構成に無い軸のステップは除外して登録する。** 機構が未装着のハンドを外して
+    実機を動かす構成 (config/bench/main_hand) や、机上ベンチ (config/bench/*) では
+    軸が揃わない。全ステップを登録すると押した瞬間に `PositionLookupError` で
+    止まり、逆に軸が 1 本でも欠けたら登録しない形にすると、残っているハンドの
+    動作確認まで一切できなくなる。
+
+    **除外の判定は `Sequence.restrict_to_axes()` が 1 箇所で持ち、ここはその結果を
+    ログと配信へ流すだけ。** 除外を黙って行うと、本番構成で 1 軸が config から
+    漏れていてもそのステップごと消えて全ステップが成功する。
+
+    指令できる軸が 1 本も残らない構成では登録しない。動作確認は
+    「シーケンスが読み込まれていません」として拒否されるだけで、UI もその理由を
+    表示できる。
 
     軸名の衝突 (`PositionTable.merged`) はここで起動ごと落とす。動作確認が意図した
     側とは別の機体の軸へ指令を飛ばす構成を、黙って起動させてはならない。
@@ -331,9 +340,21 @@ def _wire_motor_check_sequence(
 
     merged = PositionTable.merged(tables)
 
-    missing = REQUIRED_AXES - set(merged.axes)
-    if missing:
-        logger.warning("統合動作確認: 必要な軸が足りないため登録しない (不足: %s)", sorted(missing))
+    sequence = MotorCheckSequence(available_axes=merged.axes)
+    for excluded in sequence.excluded_steps:
+        # 起動ログにも必ず出す。画面を開かずに構成の食い違いへ気付ける唯一の経路
+        logger.warning(
+            "統合動作確認: ステップ '%s' を除外 (構成に無い軸: %s)",
+            excluded.label,
+            ", ".join(excluded.missing_axes),
+        )
+    # 軸を宣言しないステップ (零点確定) は構成に依らず残るので、ステップ数では
+    # 「1 つも駆動しない」を判定できない。指令する軸が 1 本も無ければ登録しない
+    if not any(info.axes for info in sequence.steps):
+        logger.warning(
+            "統合動作確認: 指令できる軸が 1 本も無いため登録しない (位置定数の軸: %s)",
+            sorted(merged.axes),
+        )
         return
 
     motors = MotorGroup()
@@ -341,7 +362,6 @@ def _wire_motor_check_sequence(
         for handle in group.handles:
             motors.add(handle)
 
-    sequence = MotorCheckSequence()
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
 
@@ -409,8 +429,9 @@ def _wire_motor_check_sequence(
 
     server.set_motor_check_sequence(sequence)
     logger.info(
-        "統合動作確認シーケンス登録: %d ステップ (モータ %d 台, 軸 %d 本, 零点確定: %s)",
+        "統合動作確認シーケンス登録: %d ステップ (除外 %d, モータ %d 台, 軸 %d 本, 零点確定: %s)",
         len(sequence.steps),
+        len(sequence.excluded_steps),
         len(motors),
         len(merged.axes),
         homing_axes or "なし",

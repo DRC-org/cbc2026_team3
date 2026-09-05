@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import pathlib
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 import pytest
 import yaml
@@ -20,40 +20,61 @@ import yaml
 import sequences.main_hand as main_hand
 import sequences.sub_hand as sub_hand
 from lib.match_state import Court
+from lib.sequence.engine import Sequence
 from lib.sequence.positions import PositionTable, load_position_table
-from sequences.motor_check import MAIN_HOME, REQUIRED_AXES, SUB_HOME, VALVE_AXES, MotorCheckSequence
+from sequences.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
 
-async def _collect() -> list[dict[str, str]]:
-    """全ステップを 1 度ずつ通し、`move_to` に渡った指令を順に集める。
+async def _collect(available: Collection[str] | None = None) -> list[dict[str, str]]:
+    """全ステップを 1 度ずつ通し、実際に指令された ``{軸: 位置}`` を順に集める。
 
-    サブクラスを作って `move_to` を override するのではなく、インスタンス属性で
-    差し替える。`Sequence.__init_subclass__` は `cls.__dict__` しか走査しないので、
-    サブクラス化すると親の `@step` が 1 つも引き継がれず、**ステップ 0 件のまま
-    全テストが緑になる**。
+    サブクラスを作って `move_to` を override するのではなく、**基底クラスの
+    `move_to` を差し替える**。`Sequence.__init_subclass__` は `cls.__dict__` しか
+    走査しないので、サブクラス化すると親の `@step` が 1 つも引き継がれず
+    **ステップ 0 件のまま全テストが緑になる**。インスタンス属性への代入では
+    構成による絞り込み (`Sequence.move_to` が持つ) を丸ごと迂回してしまい、
+    「存在しない軸へ指令していないこと」を見られない。
     """
-    seq = MotorCheckSequence()
+    seq = MotorCheckSequence(available_axes=available)
     calls: list[dict[str, str]] = []
 
-    async def _record(targets: Mapping[str, str], *, timeout: float | None = None) -> None:
+    async def _record(
+        _self: Sequence, targets: Mapping[str, str], *, timeout: float | None = None
+    ) -> None:
         calls.append(dict(targets))
 
-    seq.move_to = _record  # type: ignore[method-assign]
-
-    assert seq.steps, "ステップが 1 つも無い (収集方法が壊れている)"
-    for info in seq.steps:
-        await getattr(seq, info.method_name)()
+    original = Sequence.move_to
+    Sequence.move_to = _record  # type: ignore[method-assign, assignment]
+    try:
+        assert seq.steps, "ステップが 1 つも無い (収集方法が壊れている)"
+        for info in seq.steps:
+            await getattr(seq, info.method_name)()
+    finally:
+        Sequence.move_to = original  # type: ignore[method-assign]
     return calls
 
 
 def _shipped_table() -> PositionTable:
+    return _table_of(sorted(_CONFIG_DIR.glob("*_positions.yaml")))
+
+
+def _table_of(paths: list[pathlib.Path]) -> PositionTable:
     tables = [
         load_position_table(yaml.safe_load(path.read_text()) or {}, source=path.name)
-        for path in sorted(_CONFIG_DIR.glob("*_positions.yaml"))
+        for path in paths
     ]
     return PositionTable.merged(tables)
+
+
+def _main_hand_axes() -> tuple[str, ...]:
+    """メインハンドだけを載せた構成の軸。
+
+    `config/bench/main_hand/` は本番の `config/main_hand_positions.yaml` を
+    そのまま使い、サブハンド (Damiao DM3520 用 CANable 未接続) を持たない。
+    """
+    return _table_of([_CONFIG_DIR / "main_hand_positions.yaml"]).axes
 
 
 class TestShippedConfig:
@@ -196,6 +217,90 @@ class TestConstantsHaveASingleOwner:
 
         assert calls == [MAIN_HOME, MAIN_HOME]
 
-    def test_必要な軸は初期姿勢と電磁弁から導かれる(self) -> None:
-        """登録可否の判定材料を呼び出し側で組み直させない。"""
-        assert {*MAIN_HOME, *SUB_HOME, *VALVE_AXES} == REQUIRED_AXES
+    def test_ステップの宣言軸は初期姿勢と電磁弁から導かれる(self) -> None:
+        """登録可否の判定材料を呼び出し側で組み直させない。
+
+        かつては `REQUIRED_AXES` という 1 つの定数がステップ表と別の場所に
+        あり、ステップが軸を増やしたときに判定だけが古いまま残せた。宣言を
+        ステップの隣へ置いた今でも、**宣言の出どころは運用シーケンスの定数**
+        でなければならない (書き写すと動作確認だけが古い軸名で通る)。
+        """
+        declared = {axis for info in MotorCheckSequence("x").steps for axis in info.axes}
+
+        assert declared == {*MAIN_HOME, *SUB_HOME, *VALVE_AXES}
+
+
+class TestPartialConfiguration:
+    """機構が未装着のハンドを外した構成 (`config/bench/main_hand`)。
+
+    **除外は必ず読み取れる形で残す。** 存在しない軸のステップを黙って落とすと、
+    本番構成で 1 軸が config から漏れていてもそのステップごと消えて全ステップが
+    成功する。症状は「動作確認は通ったのに試合でその軸だけ動かない」だけで、
+    確認そのものが意味を失う。
+    """
+
+    def test_サブハンド系のステップが登録から外れる(self) -> None:
+        seq = MotorCheckSequence(available_axes=_main_hand_axes())
+        labels = [info.label for info in seq.steps]
+
+        assert not [label for label in labels if "サブハンド" in label]
+        # メインハンドの確認は 1 つも減らない (減らすと実機を確かめられない)
+        assert [label for label in labels if "メインハンド" in label] == [
+            "メインハンド 初期姿勢へ",
+            "メインハンド y 軸 (左右直結ペア)",
+            "メインハンド エンドエフェクタ回転 (左右直結ペア)",
+            "メインハンド グリッパ",
+            "メインハンド 壁 前後",
+            "メインハンド コンベア (目視確認)",
+        ]
+
+    def test_零点確定は軸を宣言しないので構成に依らず残る(self) -> None:
+        """対象を実行時に決めるステップまで消えると、原点が未確定のまま走る。"""
+        seq = MotorCheckSequence(available_axes=_main_hand_axes())
+
+        assert "零点" in seq.steps[0].label
+
+    def test_除外したステップと欠けている軸が読める(self) -> None:
+        """「機構が未装着だから減っている」のか「config の書き忘れで減っている」の
+        かを操縦者が区別できる唯一の材料。"""
+        seq = MotorCheckSequence(available_axes=_main_hand_axes())
+        excluded = {info.label: info.missing_axes for info in seq.excluded_steps}
+
+        assert excluded == {
+            "サブハンド 初期姿勢へ": tuple(sorted(SUB_HOME)),
+            "サブハンド アーム関節": ("sub_arm_joint",),
+            "サブハンド 前後スライド (Y 方向)": ("sub_y_axis",),
+            "サブハンド 昇降": ("sub_lift",),
+            "サブハンド 補助ハンド": ("sub_gripper",),
+            "サブハンド 電磁弁 6 個 (打音・目視確認)": tuple(sorted(VALVE_AXES)),
+            "サブハンド 吸気・排気ポンプ (聴音確認)": ("pump_blow", "pump_vac"),
+        }
+
+    def test_本番構成では一つも除外されない(self) -> None:
+        """除外が本番でも起きるようなら、それは config の書き忘れである。"""
+        seq = MotorCheckSequence(available_axes=_shipped_table().axes)
+
+        assert seq.excluded_steps == ()
+        assert len(seq.steps) == len(MotorCheckSequence("x").steps)
+
+    async def test_存在しない軸へは一度も指令しない(self) -> None:
+        """絞り込みを各ステップの本体に書くと、書き忘れた 1 行だけが
+        `PositionLookupError` で落ちる (しかもその構成でしか症状が出ない)。"""
+        available = set(_main_hand_axes())
+        touched = {axis for targets in await _collect(available) for axis in targets}
+
+        assert touched <= available
+
+    async def test_最後は存在する軸だけを初期姿勢へ戻す(self) -> None:
+        """片方のハンドが不在でも「必ず初期姿勢で終わる」性質は保つ。"""
+        available = set(_main_hand_axes())
+        calls = await _collect(available)
+
+        assert calls[-1] == {axis: pos for axis, pos in MAIN_HOME.items() if axis in available}
+        assert calls[-1] == MAIN_HOME, "メインハンドの初期姿勢が欠けている"
+
+    def test_軸が一本も無ければ指令するステップが残らない(self) -> None:
+        """登録しない判断 (`main._wire_motor_check_sequence`) の材料。"""
+        seq = MotorCheckSequence(available_axes=[])
+
+        assert not any(info.axes for info in seq.steps)

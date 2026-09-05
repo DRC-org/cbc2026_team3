@@ -108,6 +108,12 @@ struct ServoSlotConfig {
     motorcan::ServoPulseSpec pulse;
     // TouchSensor として使う基板があるとき、LOW を「入力あり」とみなすか。
     // 報告ビットは常に FEEDBACK のセンサ入力（自分のデバイス ID で送るので 1 つで足りる）。
+    //
+    // **極性はスロットごとの配線でしか決まらないので、1 スロットずつ実機で確かめる。**
+    // 隣のスロットや別の基板の値へ合わせてはならない。逆に設定すると、零点確定
+    // （lib/sequence/homing.py）が「触れている状態から一度離れて寄せ直す」段で
+    // **どこまで動かしても OFF にならず**、_RELEASE_STEP_LIMIT に掛かって
+    // HomingError で止まる（原点は確定できないまま動作確認が失敗する）。
     bool sensorActiveLow;
     // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
     // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
@@ -202,9 +208,9 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
         {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 gripper
         {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 wall_f
         {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 wall_r
-        // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
-        // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
-        {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV3 rotate
+        // **実機で確認済み**（CAN ID 0x343 の FEEDBACK を実測）: 非接触で LOW、
+        // 接触で HIGH。したがって sensorActiveLow は false。
+        {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 rotate
         // SV4 は y_axis の原点スイッチ用に予約したスロットだが、**スイッチが未装着**の
         // あいだは Unused にしておく。TouchSensor のままだと配線の有無に関わらず
         // FEEDBACK を 100Hz で送り続ける一方、PC 側は受け取り手（config/main_hand.yaml の
@@ -212,9 +218,16 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
         // **スイッチを付けたら TouchSensor へ戻す**（同時に config/main_hand.yaml の
         // sensors: と config/main_hand_positions.yaml の axes.y_axis.homing も戻す。
         // 3 つのうち 1 つでも欠けると「センサが応答していません」で動作確認が止まる）。
+        //
+        // TODO(実機で確認): sensorActiveLow は仮値。**同じ基板の SV3 が false だからと
+        // いって合わせてはならない** —— 極性はスロットごとの配線で決まる。スイッチを
+        // 付けた日に FEEDBACK の bit4 を非接触・接触の両方で実測して確定すること。
         {SlotRole::Unused, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis (未装着)
     },
     // 基板 #1（DIP=1）: サブハンド
+    //
+    // TODO(実機で確認): SV1〜SV4 の sensorActiveLow は仮値。TouchSensor にする日に
+    // 実測して確定すること（基板 #0 の SV3 の実測値は**この基板の配線を何も保証しない**）。
     {
         {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 sub_gripper
         {SlotRole::Unused, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1

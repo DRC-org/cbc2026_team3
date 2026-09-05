@@ -6,6 +6,7 @@ import type {
   BusHealth,
   ChecklistItem,
   ChecklistState,
+  ExcludedStep,
   HealthChange,
   HealthSnapshot,
   ManualAxis,
@@ -205,6 +206,17 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(state.running).toBe(sample.running);
     expect(state.error).toBe(sample.error);
     expect(state.total_steps).toBe(sample.total_steps);
+    expect(state.steps).toEqual(sample.steps);
+  },
+
+  motor_check_state_with_exclusions: (result, sample) => {
+    // **除外が受信経路を通ることを、除外が載った実配信で見る。** 空配列の形しか
+    // 通っていないと、UI が除外を受信条件で弾いても誰も気付けない (症状は
+    // 「サブハンド不在の構成でだけ全ステップ成功に見える」)
+    const state = result.motorCheck;
+    expect(state.excluded_steps).toEqual(sample.excluded_steps);
+    expect(state.excluded_steps).not.toHaveLength(0);
+    // ステップ表からは減っていることを読めない (除外は別の欄でしか届かない)
     expect(state.steps).toEqual(sample.steps);
   },
 
@@ -439,6 +451,13 @@ const MANUAL = fieldsOf<ManualState>({
   axes: "ui",
 });
 
+/** 構成に無い軸を指令するため登録されなかったステップ (`motor_check_state` のみ) */
+const EXCLUDED_STEP = fieldsOf<ExcludedStep>({
+  step: "ui",
+  // どの軸が無いか。これが落ちると「減っている理由」を画面から読めない
+  missing_axes: "ui",
+});
+
 /** 失敗したステップと理由。`state` と `motor_check_state` の双方に載る */
 const SEQUENCE_FAILURE = fieldsOf<SequenceFailure>({
   step_index: "ui",
@@ -466,6 +485,34 @@ const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({
   group: "ui",
 });
 const CHECKLIST_STATE = fieldsOf<ChecklistState>({ items: "ui", completed: "ui" });
+
+/**
+ * 動作確認の 1 通。ワイヤ形式と正規化後の形が違う唯一のメッセージで、受信時に
+ * `motorCheck` で包み直しているので `WireOf` ではなく素のペイロード型で宣言する。
+ */
+const MOTOR_CHECK_FIELDS: FieldSpec = {
+  ...fieldsOf<Wire<MotorCheckSnapshot>>({
+    type: "parser",
+    available: "ui",
+    blocked_reason: "ui",
+    running: "ui",
+    current_step: "ui",
+    step_index: "ui",
+    total_steps: "ui",
+    steps: "ui",
+    error: "ui",
+    // 失敗理由のもう 1 つの置き場所。`error` と合わせて 1 つへ畳んで出す
+    // (`lib/motorCheckStatus.ts`)。片方だけを読むと、サーバーが置き場所を
+    // 変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
+    last_error: "ui",
+    // 除外したステップ。**空でも必ず載る欄**なので、宣言から落とすと
+    // 「除外を配信しなくなった」変更が契約テストを素通りする
+    excluded_steps: "ui",
+  }),
+  ...nest("steps[]", STEP),
+  ...nest("last_error", SEQUENCE_FAILURE),
+  ...nest("excluded_steps[]", EXCLUDED_STEP),
+};
 
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
@@ -617,25 +664,10 @@ const DECLARED: Record<string, FieldSpec> = {
 
   // ワイヤ形式と正規化後の形が違う唯一のメッセージ。受信時に `motorCheck` で
   // 包み直しているので、`WireOf` ではなく素のペイロード型で宣言する
-  motor_check_state: {
-    ...fieldsOf<Wire<MotorCheckSnapshot>>({
-      type: "parser",
-      available: "ui",
-      blocked_reason: "ui",
-      running: "ui",
-      current_step: "ui",
-      step_index: "ui",
-      total_steps: "ui",
-      steps: "ui",
-      error: "ui",
-      // 失敗理由のもう 1 つの置き場所。`error` と合わせて 1 つへ畳んで出す
-      // (`lib/motorCheckStatus.ts`)。片方だけを読むと、サーバーが置き場所を
-      // 変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
-      last_error: "ui",
-    }),
-    ...nest("steps[]", STEP),
-    ...nest("last_error", SEQUENCE_FAILURE),
-  },
+  motor_check_state: MOTOR_CHECK_FIELDS,
+  // 構成に無い軸のステップを除外した形。**この形も契約に含める** — 除外が載った
+  // 側だけが漏れると、UI が除外を弾く条件を書いても誰も気付けない
+  motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
 
   // 波形・指標・助言を 1 通で運ぶ。motor_check_state と同じく受信時に `capture` で
   // 包み直しているので、素のペイロード型で宣言する

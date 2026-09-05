@@ -14,6 +14,7 @@ function snapshot(over: Partial<MotorCheckSnapshot> = {}): MotorCheckSnapshot {
     steps: [],
     error: null,
     last_error: null,
+    excluded_steps: [],
     ...over,
   };
 }

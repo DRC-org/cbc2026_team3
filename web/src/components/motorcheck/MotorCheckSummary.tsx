@@ -2,6 +2,21 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { motorCheckStatus } from "@/lib/motorCheckStatus";
+import { MALFORMED } from "@/lib/protocol";
+import type { MotorCheckSnapshot } from "@/lib/protocol";
+
+/**
+ * 除外の有無を 1 語で添える。**「完了」だけを出してはならない** ——
+ * 除外されたステップは走らないので、全ステップ成功と「サブハンドを丸ごと
+ * 飛ばした成功」が同じ表示になる。件数と内訳はパネルが出す。
+ */
+function ExcludedNote({ state }: { state: MotorCheckSnapshot }) {
+  if (state.excluded_steps === MALFORMED) {
+    return <span className="text-warning">除外 判定不能</span>;
+  }
+  if (state.excluded_steps.length === 0) return null;
+  return <span className="text-warning">{state.excluded_steps.length} ステップ除外</span>;
+}
 
 /**
  * 統合動作確認の状態を 1 行で出す。
@@ -34,13 +49,19 @@ export function MotorCheckSummary() {
       <span className="flex min-w-0 items-center gap-2">
         <StatusBadge tone="warning">未完了</StatusBadge>
         <span className="min-w-0 truncate text-base-content/70">{failureReason}</span>
+        <ExcludedNote state={state} />
       </span>
     );
   }
 
-  if (outcome === "done") {
-    return <StatusBadge tone="success">完了</StatusBadge>;
-  }
-
-  return <span className="text-base-content/60">未実行</span>;
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      {outcome === "done" ? (
+        <StatusBadge tone="success">完了</StatusBadge>
+      ) : (
+        <span className="text-base-content/60">未実行</span>
+      )}
+      <ExcludedNote state={state} />
+    </span>
+  );
 }

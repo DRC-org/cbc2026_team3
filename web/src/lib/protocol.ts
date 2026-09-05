@@ -291,6 +291,13 @@ export interface MotorCheckSnapshot {
    * 欠落と null は同じ「出すものが無い」へ倒す。
    */
   last_error: SequenceFailure | null;
+  /**
+   * 構成に無い軸を指令するため登録されなかったステップ。除外が無ければ空配列。
+   *
+   * 読めなかった配信は `MALFORMED` (**空配列へ倒さない** —— 空は「除外なし」という
+   * 別の意味を既に持っている)。
+   */
+  excluded_steps: ExcludedStep[] | Malformed;
 }
 
 /**
@@ -468,6 +475,42 @@ export function parseSequenceFailure(raw: unknown): SequenceFailure | null {
   if (typeof raw.step !== "string") return null;
   if (typeof raw.message !== "string" || raw.message.length === 0) return null;
   return { step_index: raw.step_index, step: raw.step, message: raw.message };
+}
+
+/**
+ * 構成に無い軸を指令するため登録されなかったステップ
+ * (サーバー `lib/sequence/engine.py` の `ExcludedStep`)。
+ *
+ * 動作確認の目的は「指令どおり動くか」を確かめること。存在しない軸のステップが
+ * 黙って消えると、本番構成で 1 軸が config から漏れていても全ステップが成功し、
+ * 「動作確認は通ったのに試合でその軸だけ動かない」が成立する。**欠けている軸まで
+ * 出す**ので、操縦者は「機構が未装着だから減っている」のか「書き忘れで減って
+ * いる」のかを画面で区別できる。
+ */
+export interface ExcludedStep {
+  /** 除外されたステップのラベル */
+  step: string;
+  /** そのステップが指令するはずで、構成に存在しない軸 */
+  missing_axes: string[];
+}
+
+/**
+ * 除外ステップを受信境界で確定させる。**読めない形も欠落も `MALFORMED`。**
+ *
+ * `?? []` で埋めてはならない —— 空配列は「除外なし = 全ステップが登録されている」
+ * を意味するので、読めなかった配信をそこへ倒すと、除外が起きているのに画面は
+ * 平常を描く (除外を黙って行うのと同じ壊れ方になる)。
+ */
+export function parseExcludedSteps(raw: unknown): ExcludedStep[] | Malformed {
+  if (!Array.isArray(raw)) return MALFORMED;
+  const ok = raw.every(
+    (item) =>
+      isObject(item) &&
+      typeof item.step === "string" &&
+      Array.isArray(item.missing_axes) &&
+      item.missing_axes.every((axis) => typeof axis === "string"),
+  );
+  return ok ? (raw as ExcludedStep[]) : MALFORMED;
 }
 
 /** 位置制御ループ 1 本 (= 同一バス上の M3508 を束ねる 200Hz ループ) の状態 */
@@ -1038,6 +1081,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           steps: Array.isArray(raw.steps) ? (raw.steps as SequenceStepInfo[]) : [],
           error: typeof raw.error === "string" ? raw.error : null,
           last_error: parseSequenceFailure(raw.last_error),
+          excluded_steps: parseExcludedSteps(raw.excluded_steps),
         },
       };
 

@@ -227,16 +227,21 @@ def _fault_motor_snapshot(mgr: CANManager):
 
 
 class _ContractCheckSequence(Sequence):
-    """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。"""
+    """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。
+
+    軸を宣言しておくのは、**除外されたステップが載った形**も golden へ焼き付ける
+    ため。除外が無い形しか無いと、UI が除外を受信条件で弾いても誰も気付けない
+    (サブハンド不在の構成でだけ全ステップ成功に見える、という壊れ方になる)。
+    """
 
     def __init__(self) -> None:
         super().__init__("motor_check")
 
-    @step("メインハンド 初期姿勢へ")
+    @step("メインハンド 初期姿勢へ", axes={"y_axis"})
     async def home(self) -> None:
         return
 
-    @step("サブハンド 電磁弁 6 個 (打音・目視確認)")
+    @step("サブハンド 電磁弁 6 個 (打音・目視確認)", axes={"valve_1", "valve_2"})
     async def valves(self) -> None:
         return
 
@@ -428,6 +433,18 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             # (error が null の形は接続直後のスナップショットで既に配られている)
             await fx.publish_motor_check_error("緊急停止中のため動作確認を実行できません")
             samples["motor_check_state"] = await require_type(ws, "motor_check_state")
+
+            # 構成に無い軸のステップを除外した形。**除外は黙って消してはならない**
+            # ので、欠けている軸まで載った 1 通を golden に固定する
+            restricted = _ContractCheckSequence()
+            restricted.restrict_to_axes({"y_axis"})
+            fx.set_motor_check_sequence(restricted)
+            await fx.publish_motor_check_error(
+                "サブハンドの軸が構成にありません (動作確認はメインハンドのみ)"
+            )
+            samples["motor_check_state_with_exclusions"] = await require_type(
+                ws, "motor_check_state"
+            )
 
             # ステップ応答は state と同じ配信周期に相乗りする。
             # **指標が出る形と出ない形を両方載せる。** 片方だけだと、UI が

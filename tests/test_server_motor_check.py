@@ -525,6 +525,41 @@ class TestBroadcast:
 
         assert "試合中" in (fx.motor_check_state()["blocked_reason"] or "")
 
+    async def test_除外したステップを状態に載せる(self) -> None:
+        """**除外を黙って行うと、動作確認そのものが意味を失う。**
+
+        構成に無い軸のステップが配信から消えるだけだと、サブハンド不在で減って
+        いるのか、本番構成なのに config の書き忘れで減っているのかを操縦者が
+        区別できない。どちらも「全ステップ成功」として同じに見え、症状は
+        「動作確認は通ったのに試合でその軸だけ動かない」になる。
+        """
+
+        class _PartialCheck(Sequence):
+            @step("メインハンド y 軸", axes={"y_axis"})
+            async def main_y(self) -> None:
+                return
+
+            @step("サブハンド 昇降", axes={"sub_lift"})
+            async def sub_lift(self) -> None:
+                return
+
+        sequence = _PartialCheck("motor_check")
+        sequence.restrict_to_axes({"y_axis"})
+        fx, _ = _build(check=sequence)
+
+        state = fx.motor_check_state()
+        # ステップ表からは「減っていること」を読めない。欠けている軸まで載せる
+        assert [s["label"] for s in state["steps"]] == ["メインハンド y 軸"]
+        assert state["excluded_steps"] == [
+            {"step": "サブハンド 昇降", "missing_axes": ["sub_lift"]}
+        ]
+
+    async def test_除外が無ければ空欄として載せる(self) -> None:
+        """欄そのものを落とすと、UI は「除外なし」と「読めていない」を混同する。"""
+        fx, _ = _build()
+
+        assert fx.motor_check_state()["excluded_steps"] == []
+
     async def test_変化が無ければ配信しない(self) -> None:
         """停止中は何も変わらない。毎ティック流すと UI 側の再描画抑制が効かなくなる。"""
         fx, _ = _build()

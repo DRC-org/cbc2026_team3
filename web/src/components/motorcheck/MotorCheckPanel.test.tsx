@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import type { MotorCheckSnapshot, SequenceStepInfo } from "@/lib/protocol";
+import { MALFORMED } from "@/lib/protocol";
 import { EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
 const STEPS: SequenceStepInfo[] = [
@@ -116,5 +117,36 @@ describe("MotorCheckPanel", () => {
 
     expect(screen.getByRole("button", { name: /実行/ })).toBeDisabled();
     expect(screen.getByText(/この構成では動作確認を実行できません/)).toBeInTheDocument();
+  });
+});
+
+describe("MotorCheckPanel の除外表示", () => {
+  it("除外したステップと欠けている軸を出す", () => {
+    // **黙って減らしてはならない。** 出さないと、サブハンド不在で減っているのか、
+    // 本番構成なのに config の書き忘れで減っているのかを操縦者が区別できない
+    // (どちらも「全ステップ成功」として同じに見える)
+    mount({
+      excluded_steps: [
+        { step: "サブハンド 昇降", missing_axes: ["sub_lift"] },
+        { step: "サブハンド 吸気・排気ポンプ (聴音確認)", missing_axes: ["pump_blow", "pump_vac"] },
+      ],
+    });
+
+    expect(screen.getByText(/2 件除外/)).toBeInTheDocument();
+    expect(screen.getByText("サブハンド 昇降")).toBeInTheDocument();
+    expect(screen.getByText(/sub_lift/)).toBeInTheDocument();
+    expect(screen.getByText(/pump_blow, pump_vac/)).toBeInTheDocument();
+  });
+
+  it("除外が無ければ何も出さない", () => {
+    mount({ excluded_steps: [] });
+
+    expect(screen.queryByText(/除外/)).not.toBeInTheDocument();
+  });
+
+  it("読めない配信は「除外なし」に見せず判定不能として出す", () => {
+    mount({ excluded_steps: MALFORMED });
+
+    expect(screen.getByText("除外ステップを読み取れませんでした")).toBeInTheDocument();
   });
 });

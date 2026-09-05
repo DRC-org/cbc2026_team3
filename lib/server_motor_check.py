@@ -252,6 +252,11 @@ class MotorCheckController:
             # どのステップで失敗したか。平常時は null で、`error` と違って
             # 「どこまで確認できたか」を機械的に読める形で持つ
             "last_error": None,
+            # 構成に無い軸を指令するため登録しなかったステップ。**空でも必ず載せる。**
+            # 除外を配信しないと、サブハンド不在でステップが減っているのか、本番構成
+            # なのに config の書き忘れで減っているのかを操縦者が画面で区別できない
+            # (どちらも「全ステップ成功」として同じに見える)
+            "excluded_steps": [],
         }
         if self._sequence is None:
             return payload
@@ -263,6 +268,9 @@ class MotorCheckController:
         payload["total_steps"] = progress["total_steps"]
         payload["steps"] = progress["steps"]
         payload["last_error"] = progress["last_error"]
+        payload["excluded_steps"] = [
+            excluded.to_dict() for excluded in self._sequence.excluded_steps
+        ]
         return payload
 
     async def report_error(self, message: str) -> None:

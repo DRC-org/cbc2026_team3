@@ -1773,3 +1773,77 @@ class TestOriginResolverViaSetZero:
         resolve = main._make_origin_resolver([], table, can_managers=[mgr])
 
         assert resolve("sub_lift") is None
+
+
+class TestMotorCheckWiring:
+    """統合動作確認の登録 (`main._wire_motor_check_sequence`)。
+
+    **構成に無い軸のステップを除外しつつ、除外したことを起動ログに出す。**
+    機構が未装着のハンドを外して実機を動かす構成 (`config/bench/main_hand`) で、
+    残っているハンドの動作確認まで一切できなくなってはならない。一方で除外を
+    黙って行うと、本番構成で 1 軸が config から漏れていてもそのステップごと
+    消えて全ステップが成功する。
+    """
+
+    _CONFIG_DIR: ClassVar[pathlib.Path] = pathlib.Path(__file__).resolve().parent.parent / "config"
+
+    def _table(self, *names: str) -> PositionTable:
+        return PositionTable.merged(
+            [
+                load_position_table(
+                    yaml.safe_load((self._CONFIG_DIR / name).read_text()) or {}, source=name
+                )
+                for name in names
+            ]
+        )
+
+    def _wire(self, tables: list[PositionTable]) -> MagicMock:
+        server = MagicMock()
+        main._wire_motor_check_sequence(
+            server,
+            [],
+            tables,
+            loops=[],
+            can_managers=[],
+            sync_monitors=[],
+            feedback_timeout_ms=500.0,
+        )
+        return server
+
+    def test_メインハンドだけの構成でも登録する(self, caplog: pytest.LogCaptureFixture) -> None:
+        """サブハンドが不在でも、メインハンド実機の動作確認は使えること。"""
+        with caplog.at_level(logging.WARNING):
+            server = self._wire([self._table("main_hand_positions.yaml")])
+
+        sequence = server.set_motor_check_sequence.call_args.args[0]
+        assert not [info for info in sequence.steps if "サブハンド" in info.label]
+        assert len(sequence.excluded_steps) == 7
+
+    def test_除外したステップを起動ログに出す(self, caplog: pytest.LogCaptureFixture) -> None:
+        """画面を開かずに構成の食い違いへ気付ける唯一の経路。"""
+        with caplog.at_level(logging.WARNING):
+            self._wire([self._table("main_hand_positions.yaml")])
+
+        excluded_logs = [rec.getMessage() for rec in caplog.records if "除外" in rec.getMessage()]
+        assert any("サブハンド 昇降" in msg and "sub_lift" in msg for msg in excluded_logs)
+
+    def test_出荷構成では一つも除外しない(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            server = self._wire(
+                [self._table("main_hand_positions.yaml", "sub_hand_positions.yaml")]
+            )
+
+        sequence = server.set_motor_check_sequence.call_args.args[0]
+        assert sequence.excluded_steps == ()
+
+    def test_指令できる軸が無ければ登録しない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """未登録なら「シーケンスが読み込まれていません」として拒否される。
+
+        零点確定のステップは軸を宣言しないので構成に依らず残る —— ステップ数で
+        判定すると、1 本も駆動しない構成が「登録された」状態で通る。
+        """
+        empty = load_position_table({"axes": {}, "positions": {}}, source="<test>")
+        with caplog.at_level(logging.WARNING):
+            server = self._wire([empty])
+
+        server.set_motor_check_sequence.assert_not_called()

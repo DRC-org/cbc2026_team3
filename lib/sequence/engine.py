@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Mapping
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from lib.match_state import Court
@@ -38,6 +38,30 @@ class StepInfo:
     label: str
     method_name: str
     require_trigger: bool
+    #: このステップが指令する軸。**空 = 宣言なしで、構成に依らず必ず登録する**
+    #: (宣言を省いたステップまで除外候補にすると、軸を持たないステップ ——
+    #: 零点確定のように対象を実行時に決めるもの —— が構成次第で消える)。
+    axes: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class ExcludedStep:
+    """構成に存在しない軸を指令するため登録しなかったステップ。
+
+    **除外を黙って行ってはならない。** 動作確認の目的は「指令どおり動くか」を
+    確かめることなので、存在しない軸のステップを黙って落とすと、本番構成で
+    1 軸が config から漏れていてもそのステップごと消えて全ステップが成功する。
+    症状は「動作確認は通ったのに試合でその軸だけ動かない」で、確認そのものが
+    意味を失う。除外したステップと欠けている軸を配信に載せれば、操縦者は
+    「機構が未装着だから減っている」のか「config の書き忘れで減っている」のかを
+    画面で判断できる。
+    """
+
+    label: str
+    missing_axes: tuple[str, ...]
+
+    def to_dict(self) -> dict:
+        return {"step": self.label, "missing_axes": list(self.missing_axes)}
 
 
 @dataclass(frozen=True)
@@ -60,10 +84,28 @@ class StepFailure:
         return {"step_index": self.step_index, "step": self.label, "message": self.message}
 
 
-def step(label: str, *, require_trigger: bool = False) -> Callable:
+def step(
+    label: str,
+    *,
+    require_trigger: bool = False,
+    axes: Collection[str] | None = None,
+) -> Callable:
+    """ステップを宣言する。
+
+    Args:
+        axes: このステップが ``move_to`` で指令する軸。省略したステップは
+            ``restrict_to_axes()`` の対象外で、構成に依らず必ず登録される。
+
+    **必要な軸はステップの隣で宣言する。** ステップと必要軸の表を別々に持つと
+    片方だけ直せてしまい、ステップが軸を 1 つ増やしたときに判定だけが古いまま
+    残る (軸名の衝突を `PositionTable.merged` が起動ごとに落とすのと同じ方針)。
+    """
+    declared = frozenset(axes or ())
+
     def decorator(method: Callable) -> Callable:
         method._step_label = label  # type: ignore[attr-defined]
         method._step_require_trigger = require_trigger  # type: ignore[attr-defined]
+        method._step_axes = declared  # type: ignore[attr-defined]
         return method
 
     return decorator
@@ -82,6 +124,7 @@ class Sequence:
                         label=value._step_label,
                         method_name=name,
                         require_trigger=value._step_require_trigger,
+                        axes=value._step_axes,
                     )
                 )
         cls._steps = steps
@@ -107,6 +150,11 @@ class Sequence:
         self._motors: MotorGroup | None = None
         # 機構位置の定数表。bind_positions で外部から注入する (未注入でもシーケンスは動作する)
         self._positions: PositionTable | None = None
+        # 構成に存在する軸。None = 制限なし (restrict_to_axes を呼んでいない)。
+        # 空集合と None を区別する: 前者は「軸が 1 本も無い構成」で、全ての指令が落ちる
+        self._available_axes: frozenset[str] | None = None
+        # 構成に無い軸を指令するため登録しなかったステップ
+        self._excluded_steps: tuple[ExcludedStep, ...] = ()
 
     # ------------------------------------------------------------------ #
     #  モータアクセス
@@ -145,6 +193,65 @@ class Sequence:
                 "(bind_positions を呼んでください)"
             )
         return self._positions
+
+    # ------------------------------------------------------------------ #
+    #  構成による絞り込み
+    # ------------------------------------------------------------------ #
+
+    def restrict_to_axes(self, available: Collection[str]) -> None:
+        """構成に存在する軸だけを対象にする。**絞り込みの判定はここにしかない。**
+
+        ``@step(axes=...)`` で宣言した軸のうち、1 本も存在しないステップは登録から
+        外し、`excluded_steps` へ理由 (欠けている軸) とともに残す。一部だけ存在する
+        ステップは残し、`move_to` が存在する軸だけへ指令する —— ステップの登録可否と
+        指令先の絞り込みを別の場所に置くと、片方だけが古い構成観のまま残る。
+
+        機構が未装着のハンドを外して実機を動かすため (config/bench/main_hand) に要る。
+        **除外したことは必ず外から読めるようにする** (`ExcludedStep` の docstring)。
+        """
+        allowed = frozenset(available)
+        self._available_axes = allowed
+
+        kept: list[StepInfo] = []
+        excluded: list[ExcludedStep] = []
+        # 元の宣言はクラス属性が持つ。self._steps を起点にすると、2 度呼んだときに
+        # 1 度目の絞り込み結果へさらに絞りが掛かり、除外理由も 1 度目のぶんが消える
+        for info in type(self)._steps:
+            if not info.axes:
+                kept.append(info)
+                continue
+            present = info.axes & allowed
+            if present:
+                kept.append(replace(info, axes=present))
+            else:
+                excluded.append(
+                    ExcludedStep(label=info.label, missing_axes=tuple(sorted(info.axes - allowed)))
+                )
+        self._steps = kept
+        self._excluded_steps = tuple(excluded)
+
+    @property
+    def excluded_steps(self) -> tuple[ExcludedStep, ...]:
+        """構成に無い軸を指令するため登録しなかったステップ。制限が無ければ空。"""
+        return self._excluded_steps
+
+    def available_targets(self, targets: Mapping[str, str]) -> dict[str, str]:
+        """``{軸名: 位置名}`` を、構成に存在する軸だけへ絞る。
+
+        複数軸をまとめて指令するステップ (初期姿勢への復帰など) は、片方のハンドが
+        不在でも残る必要がある —— 特に最後の復帰ステップを落とすと「必ず初期姿勢で
+        終わる」性質が消え、操縦者が試合前に手で戻すことになる。
+
+        絞り込みを掛けるのは `restrict_to_axes()` を呼んだシーケンス
+        (`MotorCheckSequence.move_to`) だけ。**通す口を 1 つに絞ってあるので、
+        各ステップの本体には絞り込みを書かない** —— 書き忘れた 1 行だけが
+        `PositionLookupError` で落ち、しかも症状はその構成でしか出ない。
+        """
+        if self._available_axes is None:
+            return dict(targets)
+        return {
+            axis: position for axis, position in targets.items() if axis in self._available_axes
+        }
 
     async def move_to(
         self,
