@@ -456,7 +456,7 @@ class RobotServer:
         *,
         requester: WSOrNone = None,
     ) -> None:
-        """1 コマンドを受理して 2 段のゲートに掛け、通ったものだけ実行する。
+        """1 コマンドを受理して 4 段のゲートに掛け、通ったものだけ実行する。
 
         操縦者のコマンドがサーバーへ入る唯一の口。経路 (WS / HTTP / 内部の
         安全機構) に依らずここへ合流させることで、ゲートを通らない実行経路が
@@ -473,17 +473,27 @@ class RobotServer:
             logger.debug("未知のコマンド: %s", data.get("type"))
             return
 
-        # ゲートは 3 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
+        # ゲートは 4 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
         # 次にフェーズゲート (試合進行として許されるか)、通ったものだけ緊急停止ゲート
         # (今モータを動かしてよいか) に掛ける。フェーズが MATCH のままでも緊急停止中は
         # START を通してはならず、match_start は READY で受理されうるのでフェーズ遷移より
         # 手前で止める。開発用ゲートを先頭に置くのは、無効な起動での拒否理由が
         # 「フェーズが違う」ではなく「この起動には無い機能」であるべきだから。
+        # 最後に手動操縦ゲート (対象ロボットが手動モードなら塞ぐ)。手動 → シーケンス
+        # 復帰の入口は 2 つあり、`_apply_operation_mode` は手動へ入る側で
+        # `_stop_sequence` により制御権を奪うが、**手動に入った後に届く
+        # sequence_start / sequence_jump / trigger を弾く経路がここまで無かった**
+        # (CommandSpec にモードゲートの概念自体が無く、`_manual_target` の判定は
+        # 逆方向 = 手動指令がシーケンスモード中に来た場合しか見ていなかった)。
+        # 手動とシーケンスは同じ `AxisHandle.set_target_value` を通るため、
+        # 塞がないとジョグ中の軸へシーケンスが別の目標値を書きに来る。
         deny = spec.dev_tools_deny_reason(self._dev_tools)
         if deny is None:
             deny = spec.phase_deny_reason(self.match.phase)
         if deny is None and self._e_stop_active:
             deny = spec.e_stop_deny_reason()
+        if deny is None:
+            deny = self._manual_mode_deny_reason(spec, data)
         if deny is not None:
             logger.info("コマンド拒否: %s (%s)", spec.name, deny)
             await self._reject_by_channel(spec, data, requester, deny)
@@ -519,6 +529,29 @@ class RobotServer:
             await self._motor_check.report_error(reason)
         else:
             await self._reject_command(requester, spec.name, reason)
+
+    def _manual_mode_deny_reason(self, spec: CommandSpec, data: dict) -> str | None:
+        """spec が手動操縦ゲートの対象で、かつ対象ロボットが今手動モードなら理由を返す。
+
+        `CommandSpec.manual_deny_reason()` は「このコマンドをゲート対象にしたか」
+        しか知らない (ロボットごとの `OperationMode` は `RobotContext` が持つため)。
+        ここで data["robot"] から実際のモードを引いて掛け合わせる。
+
+        ロボット名が無い・未知・見つからない場合は素通しする (deny しない) —
+        既存のハンドラ側 (`if robot_name and robot_name in self._robots:`) が
+        同じ条件で silent ignore しており、ここで先取りして拒否理由を返すと
+        「未知のロボット」という別の失敗が「手動操縦中」の理由で覆い隠される。
+        """
+        reason = spec.manual_deny_reason()
+        if reason is None:
+            return None
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str):
+            return None
+        ctx = self._robots.get(robot_name)
+        if ctx is None or ctx.mode is not OperationMode.MANUAL:
+            return None
+        return reason
 
     # ------------------------------------------------------------------ #
     #  コマンドハンドラ (lib/commands.py の CommandSpec.handler から引かれる)

@@ -690,6 +690,22 @@ Monitor から機体の動きを説明できない）。手動へ入るときは
 消すのはジョグの起点だけで、緊急停止でも同じく捨てる（停止中に自重で下がっていると
 解除後 1 回目のジョグが古い起点から飛ぶ）。
 
+**制御権の奪い合いは両方向を塞ぐ。** 手動へ「入る」側は上記の `_stop_sequence` が
+持つが、逆方向 — **手動に入った後に届く `sequence_start` / `sequence_jump` /
+`trigger`** — は別のゲートが要る。手動 (`lib/manual.py`) とシーケンス
+(`lib/sequence/engine.py`) は同じ `AxisHandle.set_target_value` を通るため、
+塞がないとジョグ中の軸へシーケンスが別の目標値を書きに来る。ここは
+`_manual_target` 側の判定（手動指令がシーケンスモード中に来た場合を拒否）とは逆で、
+片方だけでは片方向しか守れない。正は `CommandSpec.blocked_during_manual`
+（`lib/commands.py`）に置く — `_cmd_sequence_start` に `if` を足す形にすると、
+次にコマンドを足す人がまた片方向で書く。塞ぐのは対象ロボットの制御権を実際に奪う
+3 つだけで、**塞ぎすぎない**：`sequence_stop` は退避の逃げ道として手動中も通す
+（実行中のシーケンスは既に無いので実害も無い）。`set_operation_mode` /
+`manual_move` / `manual_set` / `manual_jog` はこのゲートの対象外（前者は機体を
+動かさない切替そのもの、後者は既存の `_manual_target` が別に判定を持つ）。
+`motor_check_start` も対象外 — 動作確認は両ハンドを 1 本で駆動するので排他は
+`_motor_check_environment_deny()` が両ロボット横断で持ち、ここへ重複させない。
+
 **手動はフェーズでゲートしないが、緊急停止ゲートは別軸で効く。** 調整は準備中に、
 シーケンスからの退避は試合中に要るので `set_operation_mode` / `manual_*` はすべて
 `PHASES_ANY`。一方、機体を動かさない**モード切替は緊急停止中も通し、目標値を送る

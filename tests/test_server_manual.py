@@ -236,6 +236,73 @@ class TestControlOwnership:
         assert not seq.is_running
         task.cancel()
 
+    # ------------------------------------------------------------------ #
+    #  逆方向: 手動モード中に届くシーケンス系コマンドを弾く。
+    #
+    #  `_apply_operation_mode` は手動へ「入る」側で `_stop_sequence` により制御権を
+    #  奪うが、手動に入った**後**に届く sequence_start / sequence_jump / trigger を
+    #  弾く経路が無かった (CommandSpec にモードゲートの概念自体が無く、
+    #  `_manual_target` の判定は逆方向 = 手動指令がシーケンスモード中に来た場合しか
+    #  見ていなかった)。手動 (lib/manual.py) とシーケンス (lib/sequence/engine.py) は
+    #  同じ AxisHandle.set_target_value を通るため、塞がないとジョグ中の軸へ
+    #  シーケンスが別の目標値を書きに来る。
+    # ------------------------------------------------------------------ #
+
+    async def test_手動モード中はsequence_startを拒否する(self) -> None:
+        seq = _SlowSequence()
+        fx, _ = _fixture(seq)
+        fx.enter_match()
+        await _switch(fx, "manual")
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command({"type": "sequence_start", "robot": _ROBOT}, requester=client)
+
+        assert not seq.is_running
+        assert "手動操縦中" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_手動モード中はsequence_jumpを拒否する(self) -> None:
+        seq = _SlowSequence()
+        fx, _ = _fixture(seq)
+        fx.enter_match()
+        await _switch(fx, "manual")
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "sequence_jump", "robot": _ROBOT, "step_index": 1}, requester=client
+        )
+
+        assert seq._jump_request is None
+        assert "手動操縦中" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_手動モード中はtriggerを拒否する(self) -> None:
+        seq = _SlowSequence()
+        fx, _ = _fixture(seq)
+        fx.enter_match()
+        await _switch(fx, "manual")
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command({"type": "trigger", "robot": _ROBOT}, requester=client)
+
+        assert "手動操縦中" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_半自動モード中はsequence_startが通る(self) -> None:
+        # ゲートが「フェーズが試合中でないこと」を誤検出していないかの対照実験。
+        # 半自動 (既定モード) では今までどおり通る
+        seq = _SlowSequence()
+        fx, _ = _fixture(seq)
+        fx.enter_match()
+        task = asyncio.create_task(seq.run_forever())
+
+        await fx.command({"type": "sequence_start", "robot": _ROBOT})
+        await asyncio.wait_for(seq.entered.wait(), timeout=1.0)
+
+        assert seq.is_running
+        seq.release.set()
+        task.cancel()
+
 
 class TestManualCommandGate:
     async def test_半自動運転中の手動指令は拒否する(self) -> None:
