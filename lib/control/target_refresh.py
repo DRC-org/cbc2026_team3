@@ -88,6 +88,12 @@ class _TargetRefresherBase(PausablePeriodicTask):
         目標が残っていると、緊急停止を解除した瞬間に再送が走り、操縦者が
         何も操作していないのにコンベアが回り出す。停止操作そのものが次の
         駆動指令にならないよう、停止の時点で目標ごと落とす。
+
+        **副作用として、その瞬間に ``move_to`` の到達待ちに入っている
+        ``MotorHandle.wait_reached`` があれば中断させる。** 待機開始時点で
+        目標を持っていたハンドルは ``WaitInterruptedError`` を送出するので、
+        中断された動作は「到達した」として扱われない
+        (詳細は ``lib.sequence.motors.WaitInterruptedError``)。
         """
         for handle in self._handles:
             handle.clear_target()

@@ -13,7 +13,7 @@ import pytest
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
-from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle, WaitInterruptedError
 from lib.sequence.positions import load_position_table
 from tests.fake_drivers import StubFeedbackDriver
 
@@ -166,6 +166,59 @@ class TestRunStopsOnTimeout:
         assert seq.executed == ["move"]
         assert seq.progress["running"] is False
         assert "移動" in caplog.text
+
+
+class TestMoveToInterruptedByEStop:
+    """緊急停止 (clear_target) が到達待ちを「到達」にすり替えない回帰テスト。
+
+    経路: MotorHandle.is_reached() は「目標が無ければ到達済み」を返す仕様のため、
+    move_to() の到達待ち中に緊急停止で目標がクリアされると、かつては黙って
+    「到達した」ことになり、中断された動作がステップ成功として記録されていた。
+    """
+
+    async def test_move_to_raises_when_target_cleared_mid_wait(self) -> None:
+        seq = _MoveSequence()
+        group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+
+        async def interrupt() -> None:
+            await asyncio.sleep(0.01)
+            for handle in group.handles:
+                handle.clear_target()
+
+        task = asyncio.create_task(interrupt())
+        try:
+            with pytest.raises(WaitInterruptedError):
+                await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
+        finally:
+            await task
+
+    async def test_run_records_interruption_not_timeout(self) -> None:
+        """run() が捕まえた失敗の文言はタイムアウトと取り違えてはならない。"""
+        seq = _MoveSequence()
+        group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+
+        async def interrupt() -> None:
+            await asyncio.sleep(0.01)
+            for handle in group.handles:
+                handle.clear_target()
+
+        task = asyncio.create_task(interrupt())
+        try:
+            await seq.run()
+        finally:
+            await task
+
+        # 中断されたので次のステップ ("after") へは進んでいない
+        assert seq.executed == ["move"]
+        assert seq.progress["running"] is False
+        assert seq.last_error is not None
+        # タイムアウトの文言 ("目標位置に到達しませんでした") と取り違えてはならない
+        assert "到達しませんでした" not in seq.last_error.message
+        assert "中断" in seq.last_error.message
 
 
 class TestBackwardCompatibility:
