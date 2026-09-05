@@ -44,6 +44,11 @@ function fixed1(value: number | null): string {
   return value === null ? "—" : value.toFixed(1);
 }
 
+/** トルクだけは 2 桁。`fixed1` と同じく、測れない値を 0 で埋めない */
+function fixed2(value: number | null): string {
+  return value === null ? "—" : value.toFixed(2);
+}
+
 interface PidRowProps {
   label: string;
   max: number;
@@ -141,9 +146,13 @@ export function MotorDetail({
     <Panel
       legend={`${entry.robotLabel} / ${motor}`}
       actions={
-        <StatusBadge tone={motorTempTone(motorState.temp, tempThresholds)}>
-          {motorState.temp.toFixed(1)}℃
-        </StatusBadge>
+        // 温度を測れないドライバではチップごと出さない。`—℃` は意味を持たず、
+        // 「測ったように見える 0」と同じく操縦者に読み取れる情報を与えない
+        motorState.temp === null ? null : (
+          <StatusBadge tone={motorTempTone(motorState.temp, tempThresholds)}>
+            {motorState.temp.toFixed(1)}℃
+          </StatusBadge>
+        )
       }
     >
       {/* 応答を見ながら詰めるので、選択中 1 基の現在値は大きく出す。
@@ -151,11 +160,16 @@ export function MotorDetail({
           無く、調整で最も見たい「目標からどれだけ外れているか」が画面のどこにも
           存在しなかった (操縦者の頭の中の引き算にしかなかった) */}
       <div className="flex shrink-0 justify-between gap-4 border-b border-base-300 pb-2">
-        <Readout label="POS" value={motorState.pos.toFixed(1)} />
+        <Readout label="POS" value={fixed1(motorState.pos)} />
         <Readout label="TARGET" value={fixed1(motorState.target)} />
         <Readout label="ERROR" value={fixed1(deviationOf(motorState))} emphasize />
-        <Readout label="TORQUE" value={motorState.torque.toFixed(2)} />
-        <Readout label="TEMP" value={motorState.temp.toFixed(1)} unit="℃" />
+        <Readout label="TORQUE" value={fixed2(motorState.torque)} />
+        {/* 単位は値があるときだけ付ける (`—℃` は意味を持たない) */}
+        <Readout
+          label="TEMP"
+          value={fixed1(motorState.temp)}
+          unit={motorState.temp === null ? undefined : "℃"}
+        />
       </div>
 
       {/* 飽和は平常時に出さない。**異常時にだけ自分から主張する。**

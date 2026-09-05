@@ -553,3 +553,63 @@ class TestInfoMismatch:
         feed_generic_info(driver, angle_range_deg=270.0)
 
         assert driver.info_mismatch is None
+
+
+class TestTelemetrySupport:
+    """何を測れるかの自己申告 (仕様書 §3.2)。
+
+    自作モタドラは電流センサも温度センサも持たず、位置を返すのは
+    サーボスロットだけ。``MotorState`` は制御経路の都合で float 固定なので、
+    測れない項目は 0.0 のまま流れてくる。**その 0.0 を配信へ素通しすると
+    UI に「測ったように見える 0」が出る。** 配信側 (`RobotServer` /
+    `CANManager.health`) はこの宣言だけを見て None へ倒すので、
+    ここが「全部測れる」に戻ると 0 がそのまま画面へ復活する。
+    """
+
+    def test_servo_board_measures_position_only(self):
+        driver = GenericDriver("gripper", 0x40, control_type=ControlMode.POSITION)
+
+        assert driver.telemetry.position is True
+        assert driver.telemetry.velocity is False
+        assert driver.telemetry.current is False
+        assert driver.telemetry.temperature is False
+
+    def test_dc_board_measures_nothing(self):
+        """DC 基板はエンコーダも電流センスも温度センサも持たない (FEEDBACK は DLC=1)。"""
+        driver = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+
+        assert driver.telemetry.position is False
+        assert driver.telemetry.velocity is False
+        assert driver.telemetry.current is False
+        assert driver.telemetry.temperature is False
+
+    def test_solenoid_board_measures_nothing(self):
+        """電磁弁基板は弁が開いたかすら観測できない (仕様書 §9.2)。"""
+        driver = GenericDriver("valve_1", 0x81, control_type=ControlMode.ON_OFF)
+
+        assert driver.telemetry.position is False
+        assert driver.telemetry.temperature is False
+
+    def test_position_stays_unmeasured_even_after_a_feedback_arrives(self):
+        """duty 軸へ届いた位置つきフレームも「測った位置」にはならない。
+
+        ``decode_feedback`` は DLC>=3 なら位置を読む (共通の ``MotorState`` に
+        収める必要があるため)。可否を状態から推測すると、たまたま長いフレームが
+        1 通流れただけで DC 基板に位置が生えることになる。
+        """
+        driver = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+        feed_generic(driver, position=12.0)
+
+        assert driver.state.position == pytest.approx(12.0)
+        assert driver.telemetry.position is False
+
+    def test_thermal_judgement_is_skipped_when_temperature_is_unmeasured(self):
+        """測っていない 0.0 を温度判定へ通さない。
+
+        しきい値を 0 以下にした構成では「測っていない 0」がそのまま警告・異常に
+        化ける。判定材料の有無は telemetry が単一情報源。
+        """
+        driver = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+
+        assert driver.has_thermal_warning(0.0) is False
+        assert driver.has_thermal_fault(0.0) is False

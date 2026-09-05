@@ -41,11 +41,50 @@ export interface MotorPid {
   applies_to: string[];
 }
 
+/**
+ * テレメトリの測定値 1 つ。**`null` は「そのドライバに測る手段が無い」という
+ * 正当な測定結果であって、配信が読めなかったことではない。**
+ *
+ * 自作モータドライバの DC 基板・電磁弁基板はエンコーダも電流センスも温度センサも
+ * 積んでおらず、CAN プロトコルにフィールド自体が無い (サーボ基板は位置だけ持つ)。
+ * そこへ `0.0` を流すと「測ったように見える 0」が画面にもヘルス判定にも入り、
+ * 操縦者は本当に 0 なのかフィードバックが来ていないのかを区別できない。
+ *
+ * **`null` を「読めなかった」と読み替えてはならない** —— 読み替えると、DC 基板を
+ * 1 枚積んだだけで画面全体が異常側へ倒れる。逆に、欄そのものの欠落や型違いを
+ * `null` へ丸めてもならない (配信の不具合が「測れない」に化けて誰にも見えなくなる)。
+ * 両者を分ける唯一の入口が `readMeasured()`。
+ */
+export type Measured = number | null;
+
+/**
+ * 測定値を表示境界で確定させる。
+ *
+ * - 数値 …… 測れた値。そのまま描く
+ * - `null` …… 測る手段が無い。`—` を描く (単位も付けない)
+ * - それ以外 (欠落・型違い) …… `MALFORMED`。読めなかったことを異常側として描く
+ *
+ * **`motors` は受信境界 (`parseKnown`) では素通しのまま**にしてある —— モータ名を
+ * UI へ書かない性質は配信をそのまま状態へ入れることで成立しており、そこで
+ * 組み立て直すとモータが 1 基増えるたびに UI の変更が要る形へ逆戻りする。
+ * 代わりに、数値を実際に読む側 (`MotorStatus` 等) がここを通す。型は実行時に
+ * 消えるので、`state.pos.toFixed(1)` のような読み方は欄が 1 つ落ちただけで
+ * レンダー本体から TypeError が飛び、React ツリーごとアンマウントする。
+ */
+export function readMeasured(value: unknown): Measured | Malformed {
+  if (value === null) return null;
+  return typeof value === "number" && Number.isFinite(value) ? value : MALFORMED;
+}
+
 export interface MotorState {
-  pos: number;
-  vel: number;
-  torque: number;
-  temp: number;
+  /**
+   * 位置・速度・トルク・温度。**測る手段が無いドライバでは `null`。**
+   * 実測できるかはサーバーが判定して配るので、**UI 側にドライバ種別を書き写さない。**
+   */
+  pos: Measured;
+  vel: Measured;
+  torque: Measured;
+  temp: Measured;
   /**
    * 位置目標。null なら PC 側に目標が無い (PID を持たないモータ・停止中・開ループ)。
    *

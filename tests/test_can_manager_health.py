@@ -11,6 +11,7 @@ import pytest
 
 from lib.can_manager import CANManager
 from lib.config_schema import DEFAULT_HEALTH
+from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, HealthSnapshot, MotorHealth
@@ -386,5 +387,49 @@ class TestReanchorSurfacesInHealth:
             info = next(m for m in mgr.health().motors if m.name == "y_axis_r")
             assert info.state is MotorHealth.OK
             assert info.detail is None
+        finally:
+            bus.shutdown()
+
+
+class TestUnmeasuredTemperature:
+    """温度を測れない基板は 0.0 ではなく None を配ること。
+
+    自作モタドラはどの基板も温度センサを持たない (仕様書 §3.2) ので、
+    `MotorState.temperature` の 0.0 は制御経路が float を要求するための詰め物に
+    すぎない。素通しにすると UI に 0.0℃ が並び、操縦者は「冷えている」と読む。
+    **この層だけを単独で見る** —— state 配信側にも同じ規則があるので、
+    統合経路のテストでは片方を壊しても落ちない。
+    """
+
+    def _mgr(self, motor, channel: str) -> tuple[CANManager, can.Bus]:
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = _make_virtual_bus(channel)
+        mgr.add_bus("bus0", bus, channel=channel)
+        mgr.add_motor("bus0", motor)
+        return mgr, bus
+
+    def test_dc_board_reports_no_temperature(self) -> None:
+        motor = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+        mgr, bus = self._mgr(motor, "vtemp_dc")
+        try:
+            # 実機と同じ FEEDBACK (DLC=1) を通す。フィードバックが届いている
+            # モータで None になることに意味がある (未受信なら STALE で別の話)
+            deliver_frame(mgr, "bus0", generic_feedback(motor))
+
+            info = next(m for m in mgr.health().motors if m.name == "conveyor")
+            assert info.state is MotorHealth.OK
+            assert info.temperature is None, "測っていない 0.0℃ が配信されている"
+        finally:
+            bus.shutdown()
+
+    def test_m3508_still_reports_its_temperature(self) -> None:
+        """対の確認。測れる側まで None にすると過熱警告の材料が画面から消える。"""
+        motor = M3508Driver("y_axis_r", 1)
+        mgr, bus = self._mgr(motor, "vtemp_m3508")
+        try:
+            deliver_frame(mgr, "bus0", m3508_feedback(motor, angle_raw=0, temp=42))
+
+            info = next(m for m in mgr.health().motors if m.name == "y_axis_r")
+            assert info.temperature == pytest.approx(42.0)
         finally:
             bus.shutdown()

@@ -32,6 +32,7 @@ from lib.control.position_loop import (
 )
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import TargetRefresher
+from lib.drivers.base import TelemetrySupport
 from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
@@ -69,6 +70,29 @@ _ENERGIZE_GRACE_S = 0.5
 
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
+
+
+def _measured_only(
+    values: dict[str, float], telemetry: TelemetrySupport
+) -> dict[str, float | None]:
+    """測る手段の無い項目を ``None`` へ倒す。**実機と dry-run が通る唯一の関門。**
+
+    DC 基板・電磁弁基板は電流も温度も速度も測れず、位置すら持たない
+    (仕様書 §3.2)。``MotorState`` は制御経路の都合で float 固定なので、そこには
+    0.0 が入ったまま流れてくる。それを配信へ素通しすると UI には
+    「測ったように見える 0」が出て、操縦者は「本当に 0」なのか
+    「そもそも測っていない」のかを区別できない。
+
+    可否を決めるのはドライバの `TelemetrySupport` だけで、ここは倒す場所に徹する。
+    ドライバ種別による分岐をここへ (まして UI へ) 書き写すと、ドライバを足した人が
+    配信側の表を直し忘れる形で 0 が復活する。
+    """
+    return {
+        "pos": values["pos"] if telemetry.position else None,
+        "vel": values["vel"] if telemetry.velocity else None,
+        "torque": values["torque"] if telemetry.current else None,
+        "temp": values["temp"] if telemetry.temperature else None,
+    }
 
 
 def _level_for_state(state: BusHealth) -> str:
@@ -1659,15 +1683,19 @@ class RobotServer:
         for motor_name, motor in ctx.can_manager.motors.items():
             if self._dry_run:
                 # dry-run: 実機フィードバックがないので、UI デモ向けに擬似値を生成
-                motors[motor_name] = server_dryrun.motor_state(robot_name, motor_name)
+                raw = server_dryrun.motor_state(robot_name, motor_name)
             else:
                 s = motor.state
-                motors[motor_name] = {
+                raw = {
                     "pos": s.position,
                     "vel": s.velocity,
                     "torque": s.current,
                     "temp": s.temperature,
                 }
+            # 測る手段の無い項目は None で配る。**dry-run にも同じ規則を通す** ——
+            # 擬似値を作ってよいのは実機が測れる項目だけで、DC 基板に温度や速度を
+            # 作ると机上で確かめている画面が実機と別物になる
+            motors[motor_name] = _measured_only(raw, motor.telemetry)
             # ゲインはテレメトリではなく構成情報なので dry-run 分岐の外で足す。
             # 擬似値を作る意味が無く、中に入れると dry-run で全モータが
             # 「調整不可」になって机上で UI を確かめられない

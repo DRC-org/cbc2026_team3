@@ -148,8 +148,11 @@ export function MotorTuning() {
                       )}
                     >
                       <span className="min-w-0 flex-1 truncate">{entry.motor}</span>
+                      {/* 温度を測れないドライバは「—」。単位は値があるときだけ付ける */}
                       <span className="shrink-0 font-mono text-[0.85em] text-base-content/60 tabular-nums">
-                        {entry.motorState.temp.toFixed(0)}℃
+                        {entry.motorState.temp === null
+                          ? "—"
+                          : `${entry.motorState.temp.toFixed(0)}℃`}
                       </span>
                     </button>
                   );

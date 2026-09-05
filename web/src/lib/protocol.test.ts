@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { readableHealth } from "@/lib/healthVerdict";
-import { MALFORMED, parseServerMessage } from "@/lib/protocol";
+import { MALFORMED, parseServerMessage, readMeasured } from "@/lib/protocol";
 import type { RobotState } from "@/lib/protocol";
 
 /**
@@ -157,6 +157,23 @@ describe("parseServerMessage", () => {
       const state = (msg as { state: RobotState }).state;
       expect(state.motors).toEqual(motors);
       expect(state.steps).toEqual(steps);
+    });
+
+    /**
+     * **測れない項目の null は正当な測定結果であって、読めなかった配信ではない。**
+     * 自作モータドライバの DC 基板・電磁弁基板は 4 値とも測る手段が無く、
+     * サーボ基板は位置しか持たない。ここを異常扱いにすると、DC 基板を 1 枚
+     * 積んだだけでそのロボットの state 配信が丸ごと捨てられる。
+     */
+    it("測れない項目が null のモータを異常扱いにしない", () => {
+      const motors = {
+        conveyor: { pos: null, vel: null, torque: null, temp: null, target: null, pid: null },
+        y_axis_r: { pos: 1.5, vel: 0, torque: 0.2, temp: 41, target: 1.5, pid: null },
+      };
+      const msg = parse({ type: "state", robot: "main_hand", motors });
+
+      expect(msg).not.toBeNull();
+      expect((msg as { state: RobotState }).state.motors).toEqual(motors);
     });
   });
 
@@ -554,5 +571,32 @@ describe("parseServerMessage", () => {
       /** 画面はロボットごとに分けて出すので、宛先の無い記録は置き場所が無い */
       expect(parse(payload({ robot: undefined }))).toBeNull();
     });
+  });
+});
+
+/**
+ * 測定値の読み取り。**「測る手段が無い (null)」と「配信が読めない (欠落・型違い)」を
+ * 混ぜてはならない** —— 前者は `—` を描くのが正しく、後者は異常側へ倒す。
+ * `motors` は受信境界で素通しなので (モータ名を UI へ書かない性質がそこで
+ * 成立している)、両者を分ける唯一の入口がここになる。
+ */
+describe("readMeasured", () => {
+  it("測れた値はそのまま返す", () => {
+    expect(readMeasured(41.2)).toBe(41.2);
+    expect(readMeasured(0)).toBe(0);
+    expect(readMeasured(-5)).toBe(-5);
+  });
+
+  it("null は測る手段が無いことの表現。MALFORMED へ倒さない", () => {
+    expect(readMeasured(null)).toBeNull();
+  });
+
+  it("欄の欠落・型違いは MALFORMED (黙って null や 0 へ丸めない)", () => {
+    expect(readMeasured(undefined)).toBe(MALFORMED);
+    expect(readMeasured("41.2")).toBe(MALFORMED);
+    expect(readMeasured({})).toBe(MALFORMED);
+    // NaN / Infinity は toFixed が "NaN" や "Infinity" を描いてしまう
+    expect(readMeasured(Number.NaN)).toBe(MALFORMED);
+    expect(readMeasured(Number.POSITIVE_INFINITY)).toBe(MALFORMED);
   });
 });
