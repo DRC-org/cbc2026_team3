@@ -468,15 +468,45 @@ def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], floa
     return last_feedback_at
 
 
-def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
+def _read_operstate(channel: str) -> str | None:
+    """`/sys/class/net/<channel>/operstate` を読む。python-can には依存しない。
+
+    仮想バス (`--dry-run`) やテスト環境には実体が無い。**判定できないことを
+    異常へ倒さず、`None` で「分からない」を表す** (このリポジトリの他の
+    「分からない」判定と同じ方針。「判定できない」自体はログに出さない —
+    平常時 (virtual バス) のログを埋めないため)。
+    """
+    path = pathlib.Path(f"/sys/class/net/{channel}/operstate")
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def _create_bus(
+    channel: str,
+    *,
+    dry_run: bool,
+    read_operstate: Callable[[str], str | None] = _read_operstate,
+) -> can.Bus:
     """1 本の CAN インタフェースを開く。開けなければ 1 行のメッセージで落とす。
 
     down しているインタフェース (CANable が 1 本抜けている・`setup_can.sh` を
-    流していない) を開こうとすると python-can は `OSError [Errno 19]` を投げる。
+    流していない) を開こうとすると python-can は例外を投げない
+    (`docs/impl_plan.md` の「既知の制約: バス down 時の失敗が分かりにくい」)。
+    **起動は拒否しない** (`--strict` を通していない構成の逃げ道を潰さないため)。
+    代わりに operstate を見て down なら起動ログへ 1 行 ERROR を残す —
+    「立ち上がったが 1 通も読めていない」の原因をインタフェース名付きで名指しする。
+
     この呼び出しは `main()` の try の外にあるので、素通しすると生の traceback で
     落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、
     config 系のエラー (`_load_all_configs`) と同じく直し方まで書いて止める。
     """
+    if not dry_run and read_operstate(channel) == "down":
+        logger.error(
+            "CAN インタフェース '%s' は down です。scripts/setup_can.sh を実行してください",
+            channel,
+        )
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
     try:
