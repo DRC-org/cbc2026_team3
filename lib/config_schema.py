@@ -595,6 +595,53 @@ def _parse_motor(
     )
 
 
+def _check_dm3520_master_id_collisions(
+    source: str,
+    motors: Mapping[str, MotorConfig],
+    sensors: Mapping[str, SensorConfig],
+) -> None:
+    """DM3520 の master_id (MST_ID) が同じバス上のどのノードの can_id (ESC_ID) とも
+    下位 8bit で衝突していないことを確認する。
+
+    本機は受信 ID の**下位 8bit だけ**を見て自分宛かを判定するため
+    (CLAUDE.md「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)、
+    一致すると自分または他ノードへのフィードバックが指令として解釈される。
+    DM3520 の出荷値は 2 台とも ESC_ID == MST_ID なので、この検査が無いと
+    「ESC_ID は書き換えたが MST_ID を書き換え忘れた」個体がそのまま config に
+    残っても起動を通してしまう (症状は実機でフィードバックが指令として誤解釈
+    されることで、config からもログからも読めない)。
+
+    **ここ (config_schema) で見るのは、1 台の CANManager では
+    ロボット横断の can_id 衝突を検出できない (add_motor の docstring参照) のと
+    対称的に、DM3520 専用バス (can_dm3520) は現状 1 ロボットの config 内でしか
+    使われておらず、1 ファイルの中で閉じた検査で足りるため。** バス単位で見るのは、
+    フレームが同じ物理バスに繋がったノードにしか届かないため (別バスの can_id と
+    偶然一致しても無害)。
+    """
+    all_nodes: list[tuple[str, str, int]] = [
+        (name, motor.bus, motor.can_id) for name, motor in motors.items()
+    ] + [(name, sensor.bus, sensor.can_id) for name, sensor in sensors.items()]
+
+    for motor_name, motor in motors.items():
+        if motor.driver != "dm3520":
+            continue
+        master_low = motor.master_id & 0xFF
+        for other_name, other_bus, other_can_id in all_nodes:
+            if other_bus != motor.bus:
+                continue
+            if (other_can_id & 0xFF) != master_low:
+                continue
+            raise ValueError(
+                f"{source}: motors.{motor_name}.master_id (0x{motor.master_id:03X}) の"
+                f"下位 8bit が同じバス '{motor.bus}' 上の '{other_name}' の "
+                f"can_id (0x{other_can_id:02X}) と衝突しています。本機は受信 ID の"
+                "下位 8bit だけを見て自分宛かを判定するため、一致するとフィードバックが"
+                "指令として解釈されます (仕様書 §2.2)。master_id (レジスタ 0x07) を、"
+                f"同じバス上のどの can_id (ESC_ID) の下位 8bit とも異なる値へ"
+                "書き換えてください"
+            )
+
+
 def load_robot_config(
     config: Mapping | None,
     *,
@@ -647,6 +694,8 @@ def load_robot_config(
         raise ValueError(
             f"{source}: motors と sensors で名前が重複しています: {', '.join(overlap)}"
         )
+
+    _check_dm3520_master_id_collisions(source, motors, sensors)
 
     return RobotConfig(
         robot_name=robot_name,

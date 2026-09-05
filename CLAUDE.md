@@ -397,7 +397,16 @@ patch する必要も無い。`tests/test_server_encapsulation.py` が AST で�
 「エラー == 0 = 無励磁」に限られる（出荷値の `0x010` 台を許すと**通常運転中に成立する**）。
 **MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする**（本機は受信 ID の下位 8bit
 だけを見るので、一致するとフィードバックが指令として解釈される）。実機は
-`0x01`/`0x02` + MST_ID `0x11`/`0x12` に書き換え済み。
+`0x01`/`0x02` + MST_ID `0x11`/`0x12` に書き換え済み。**この検査は
+`lib/config_schema.py` の `_check_dm3520_master_id_collisions` が起動時に行う**
+（同じバス上の全ノードの can_id と master_id の下位 8bit を突き合わせ、一致したら
+起動を拒否する）。DM3520 の出荷値は 2 台とも ESC_ID == MST_ID なので、ESC_ID だけ
+書き換えて MST_ID を書き換え忘れた個体もここで弾かれる。**1 ロボットの config
+ファイル内で閉じた検査**にしてあるのは、`can_id` の重複検査
+（`lib/can_manager.py` の `add_motor`）と違い、`can_dm3520` が現状 1 ロボットの
+config でしか使われないため（ロボット横断の `can_id` 重複は 1 つの `CANManager`
+からは検出できず `tests/test_robot_sequences.py` の静的テストが担うのと対称的な
+制約）。
 
 **DM3520 は位置ループをドライバが内蔵している。PC 側 PID を足してはならない。**
 二重ループになって必ず干渉する。`/pid-tuning` に現れないのはそのためで、`pid: null` が
