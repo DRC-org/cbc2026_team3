@@ -176,7 +176,14 @@ class Dm3520Driver(MotorDriver):
         self.limit_speed = min(float(limit_speed), self.v_max)
         self.set_zero_on_start = bool(set_zero_on_start)
 
+        # `error_code` は `is_fault()` / `has_overcurrent_warning()` / `error_label()`
+        # が無条件に読むため int のまま持つ (None にすると `>= _FIRST_ERROR_CODE` が
+        # TypeError になる)。フィードバック受信の有無は別フラグ
+        # (`_feedback_received`) で持ち、`is_energized()` だけがそれを見る
+        # (EDULITE 05 の `mode_state: int | None` とは異なる持ち方だが、
+        # 「未受信」と「分かっている」を混ぜない目的は同じ)。
         self.error_code = int(Dm3520Error.DISABLED)
+        self._feedback_received = False
 
     # ------------------------------------------------------------------ #
     #  固定小数点 <-> 実数
@@ -286,6 +293,7 @@ class Dm3520Driver(MotorDriver):
 
         data = msg.data
         self.error_code = (data[0] >> 4) & 0x0F
+        self._feedback_received = True
 
         pos_raw = (data[1] << 8) | data[2]
         vel_raw = (data[3] << 4) | (data[4] >> 4)
@@ -380,7 +388,7 @@ class Dm3520Driver(MotorDriver):
     def is_fault(self) -> bool:
         return self.error_code >= _FIRST_ERROR_CODE
 
-    def is_energized(self) -> bool:
+    def is_energized(self) -> bool | None:
         """FEEDBACK D0 の上位 4bit が `ENABLED` のときだけ励磁されている。
 
         本機は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの TIMEOUT
@@ -388,7 +396,17 @@ class Dm3520Driver(MotorDriver):
         フィードバックも正常に届き続けるのに機構だけが 1mm も動かない。
         `is_fault()` は 0x5 以上しか見ないのでここには掛からず、モータのヘルスは
         OK のまま —— **画面のどこにも現れない**。それを見えるようにするための判定。
+
+        未受信 (`_feedback_received` が False) は None を返す。`error_code` は
+        初期値が `DISABLED` (0) のままなので、ここで区別せず ``== ENABLED`` を
+        素通しすると「フィードバックを 1 通も受けていない」が「無励磁だと分かって
+        いる」に化ける。CAN を立てる前 (起動直後・バス瞬断中) の状態がそのまま
+        `_unenergized_motors()` の警告に乗ると、`MotorHealth.STALE` と二重に
+        出るだけでなく、`_ENERGIZE_GRACE_S` を超える起動の遅い個体や構成を
+        足したときに実害が出る (EDULITE 05 の `mode_state is None` と同じ理由)。
         """
+        if not self._feedback_received:
+            return None
         return self.error_code == Dm3520Error.ENABLED
 
     def has_overcurrent_warning(self) -> bool:
