@@ -13,8 +13,8 @@ from lib.match_state import ROLE_PRE_MATCH
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
-from robots.main_hand import MainHandSequence
-from robots.sub_hand import SubHandSequence
+from sequences.main_hand import MainHandSequence
+from sequences.sub_hand import SubHandSequence
 from tests.fake_drivers import StubFeedbackDriver
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -151,7 +151,7 @@ _SUB_POSITIONS = {
 }
 
 
-# 全パッドの弁を同じ状態にしたときの指令。robots/sub_hand.py の _all_valves と
+# 全パッドの弁を同じ状態にしたときの指令。sequences/sub_hand.py の _all_valves と
 # 同じ順序 (valve_1 → valve_6) で並ぶ
 def _valves(value: float) -> list[tuple[str, float]]:
     return [(name, value) for name in _VALVE_AXES]
@@ -194,7 +194,7 @@ def _paired_motor_names(table: PositionTable) -> list[tuple[str, str]]:
 class TestMainHandSteps:
     """メインハンドのシーケンスが持つべき性質。
 
-    ステップ名・ラベル・列を回る順序は `robots/main_hand.py` の docstring が
+    ステップ名・ラベル・列を回る順序は `sequences/main_hand.py` の docstring が
     宣言するとおり暫定なので、ここでは固定しない。固定するのは、差し替えても
     壊れてはいけない側 —— 初期姿勢に始まり初期姿勢に終わること、ワークを持った
     まま開くグリッパが単独指令かつトリガー待ちであること、左右直結ペアが逆符号で
@@ -464,7 +464,7 @@ class TestShippedPositionYaml:
         """同梱 yaml でも左右ペア軸が逆符号で指令されること (符号を落とすと機構が壊れる)。"""
         table = _load_shipped("main_hand_positions.yaml")
 
-        for axis, position in (("y_axis", "approach"), ("rotate", "pick")):
+        for axis, position in (("y_axis", "work_shared"), ("rotate", "pick")):
             commands = list(table.commands(axis, position).values())
             assert len(commands) == 2
             assert commands[0] != 0.0
@@ -523,7 +523,7 @@ class TestShippedRobotConfig:
     def test_axis_names_are_unique_across_robots(self) -> None:
         """論理軸名もロボット横断に一意であること。
 
-        統合動作確認シーケンス (robots/motor_check.py) は両ハンドのアクチュエータを
+        統合動作確認シーケンス (sequences/motor_check.py) は両ハンドのアクチュエータを
         1 つの順序で駆動するため、両機の位置定数を 1 つの表へ束ねる
         (``PositionTable.merged``)。衝突していると起動が拒否される。
 
@@ -610,20 +610,21 @@ class TestShippedRobotConfig:
         # <robot_name>_positions.yaml、robot config は同じディレクトリの <robot_name>.yaml)
         # が崩れると、上のループは 1 軸も見ないまま緑を返す。
         # **ベンチセットを足したらここへも足すこと** (手書きの一覧なので追従が要る。
-        # tests/test_config_schema.py の _BENCH_DIRS が同じ性質を持つ)
+        # tests/test_config_schema.py の _BENCH_DIRS が同じ性質を持つ)。
+        # bench/main_hand は実測値を本番へ移したことで自前の positions を持たなく
+        # なった (rglob は `*_positions.yaml` を起点にするので、もう対象に現れない)。
+        # 本番の main_hand.yaml:y_axis / :rotate は含んでいるので検査そのものは続く。
         assert {
             "main_hand.yaml:y_axis",
             "main_hand.yaml:rotate",
             "bench/edulite/main_hand.yaml:rotate",
             "bench/m3508/main_hand.yaml:y_axis",
-            "bench/main_hand/main_hand.yaml:y_axis",
-            "bench/main_hand/main_hand.yaml:rotate",
         } <= inspected
 
     def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
         """自動判定できないものは、すべて目視確認項目で埋めること。
 
-        統合動作確認シーケンス (robots/motor_check.py) は全アクチュエータを動かすが、
+        統合動作確認シーケンス (sequences/motor_check.py) は全アクチュエータを動かすが、
         到達判定を持つのは位置指令の軸だけ。duty (DC 基板) と on_off (電磁弁) は
         `settle_s` の固定待ちへ落ちるので、**動いたことを機械は誰も見ていない**。
         センサも同じで、死んだまま原点合わせを始めると「いつまでも当たらない」

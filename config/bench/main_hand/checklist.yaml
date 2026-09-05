@@ -1,7 +1,11 @@
-# M3508 + EDULITE 05 同時ベンチ (機構未装着) の確認項目。
+# メインハンド実機 (機構付き・サブハンド不在) の M3508 + EDULITE 05 確認項目。
 #
-# 本番の config/checklist.yaml は gripper / wall / conveyor / origin_sensor など
-# このベンチに存在しない機構の確認を求めるため、そのままでは使えない。
+# 本番の config/checklist.yaml は sub_gripper / sub_dm3520_origin / sub_lift_holds /
+# valves_actuate / pumps_run / suction_hold など、サブハンドが無ければ存在しない
+# 確認まで求めるため、そのままでは使えない。**メインハンド自体は機構の付いた実機
+# なので、gripper / wall / conveyor / origin_sensor はこのセットにも実在する** ——
+# ただしこの一覧はそれらの確認を持たない。自作モタドラ側の確認を M3508 + EDULITE 05
+# だけに絞っている境界は元からのもので、機構の有無とは関係なく変わっていない。
 #
 # 手動操縦は PHASES_ANY なので、この一覧を埋めなくても機体は動かせる
 # (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
@@ -23,7 +27,7 @@ checklists:
     - id: bench_bus_serial
       label: config/can_buses.yaml の serial が実機 2 本と一致していること確認。**入れ替わると C620 に EDULITE 用の指令が飛ぶ**
     - id: bench_free
-      label: 4 台とも出力軸に何も繋がっておらず、回っても互いに干渉しないこと確認
+      label: 可動範囲内に人・物がないこと確認
     - id: edulite_power
       label: EDULITE ドライバに電源が入り、動力線・エンコーダ線が確実に嵌まっていること確認
     - id: edulite_can_id

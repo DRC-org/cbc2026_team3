@@ -894,7 +894,7 @@ class CANManager:
 
         サーバの WS 配信ループや GET /health から呼ばれる前提で副作用を持たない。
         能動的にモータを動かして確かめるのは統合動作確認シーケンス
-        (robots/motor_check.py) の仕事で、本メソッドは受信状態を読むだけ。
+        (sequences/motor_check.py) の仕事で、本メソッドは受信状態を読むだけ。
         """
         now = time.time()
 

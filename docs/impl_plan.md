@@ -376,7 +376,7 @@ RobStride EDULITE 05 の Extended Frame とは物理バスから別系統にし�
   （統合前は `motor_check.magnitude: 0` で除外していたが、現在の動作確認は 6 個を 1 個ずつ
   開閉するところまでを担い、鳴ったかどうかを `config/checklist.yaml` の `valves_actuate` が
   受け持つ）。**吸着したかどうかは操縦者の目視でしか分からない**ため、
-  `robots/sub_hand.py` の吸着ステップには `require_trigger` を付けてある
+  `sequences/sub_hand.py` の吸着ステップには `require_trigger` を付けてある
 - **電磁弁基板は停止時に全 ch 消磁する**（仕様書 §9.4）。緊急停止・ウォッチドッグ満了・
   CAN 不通のいずれでも通電を落とすので、吸着で保持しているワークは落ちる。サーボの
   「現在角を保持」に相当する扱いは持たせていない —— 通電したまま復旧不能になった弁を
@@ -648,7 +648,7 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 
 #### アクチュエータ動作確認との排他（0x200 の奪い合い）
 
-> 統合後は `robots/motor_check.py` のシーケンスが `move_to` 経由で指令を出す。
+> 統合後は `sequences/motor_check.py` のシーケンスが `move_to` 経由で指令を出す。
 > 排他の仕組み（`pause()` / `resume()`）はそのままで、**止める対象が全ロボットに
 > 広がった**点だけが違う（1 本のシーケンスが両機を動かすため）。以下の記述で
 > `lib/motor_check.py` とあるのは統合前の実装。
@@ -810,7 +810,7 @@ ID 専用で、ID 空間そのものが分かれる）。それでも**専用バ
 値が比例倍で読める。** 指令は float なので効かず、症状は「指令どおり動いたのに到達判定を
 通らない」だけになる。
 
-**この誤りは動作確認シーケンス（`robots/motor_check.py`）が検出する** —— 位置定数の
+**この誤りは動作確認シーケンス（`sequences/motor_check.py`）が検出する** —— 位置定数の
 `tolerance`（1mm）で到達を判定するので、比例倍で読めていれば必ず落ちる。
 
 実測値（2026-08-30、2 台とも同一）。CAN の read（`0x7FF` / `D0-D1`=CAN ID / `D2=0x33` /
@@ -1289,7 +1289,7 @@ tests/
 ├── test_sequence_motors.py      # MotorHandle / MotorGroup / build_motor_group
 ├── test_sequence_positions.py   # 位置定数の読み込み・単位換算・コート差異
 ├── test_sequence_move_to.py     # bind_positions / move_to / タイムアウト時の停止
-├── test_robot_sequences.py      # robots/*.py の各ステップが送る指令の検証
+├── test_robot_sequences.py      # sequences/*.py の各ステップが送る指令の検証
 ├── test_can_config.py           # scripts/can_config.py（udev ルール / TSV の出力書式 / paths）
 ├── test_can_watchdog.py         # scripts/can_watchdog.sh（滞留判定・復旧の間隔制限）
 ├── test_edulite_set_id_tool.py  # scripts/edulite_set_id.py（走査・書き込み・照合）
@@ -1297,7 +1297,7 @@ tests/
 ├── test_can_manager_health.py   # 受信タイムアウト → STALE、送信失敗 → DOWN
 ├── test_health.py               # ヘルス判定・状態遷移・JSON シリアライズ
 ├── test_manual.py               # ManualController（クランプ・軸単位の同時指令・ジョグ起点）
-├── test_motor_check_sequence.py # robots/motor_check.py（両ハンド 1 本の駆動順とゲート）
+├── test_motor_check_sequence.py # sequences/motor_check.py（両ハンド 1 本の駆動順とゲート）
 ├── test_homing.py               # HomingRunner（探索距離の上限・センサ鮮度・既接触）
 ├── test_match_state.py          # コート / フェーズ / チェックリスト
 ├── test_ws_protocol.py          # WebSocket JSON プロトコル
@@ -1432,7 +1432,7 @@ cbc2026_team3/
 │   └── bench/              # 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリ
 │       ├── m3508/          # M3508 2 台
 │       ├── edulite/        # EDULITE 05 2 台
-│       ├── main_hand/      # メインハンド一式を同時に（CANable 3 本が要る）
+│       ├── main_hand/      # サブハンド不在でメインハンド実機を動かす構成（本番 config を使う。CANable 3 本が要る）
 │       ├── dm3520/         # Damiao DM3520 2 台
 │       ├── dc/             # 自作モタドラ DC 基板 1 枚
 │       ├── servo/          # 自作モタドラ サーボ基板 1 枚
@@ -1485,7 +1485,7 @@ cbc2026_team3/
 │   ├── ws_hub.py              # WS クライアント集合と唯一の配信経路（WsHub）
 │   ├── server_motor_check.py  # 動作確認の統括（MotorCheckController）。可否判定の単一情報源
 │   └── server_dryrun.py       # dry-run の擬似値。見栄えの値しか作らない
-├── robots/
+├── sequences/
 │   ├── __init__.py
 │   ├── main_hand.py
 │   ├── sub_hand.py
@@ -2468,10 +2468,13 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 機構へ組み込む前に、アクチュエータを単体で動かすための一式。**開くバスが違うので 1 つに
 まとめられない**（挿していない CANable が 1 本でもあると起動そのものが失敗する）ため、
 確認したい対象ごとに別セットにし、それぞれをサブディレクトリへ分ける。
+**`main_hand/` だけはこの前提が変わっている** —— メインハンドの機構が完成した今、
+この 1 セットに限っては「機構へ組み込む前」ではなく「サブハンド不在でメインハンド
+実機を動かす構成」になっている（詳細は下の節）。
 
 **複数種を 1 セットに載せてよいのは「その本数の CANable を同時に挿せる」ことが前提の
 ときだけ。** `main_hand/` がその唯一の例で、CANable 3 本を要求する代わりに、
-単体ベンチでは一度も通らない確認（バス名の取り違え・軸をまたいだ混信・受信ループ 2 本の
+単体ベンチでは一度も通らない確認（バス名の取り違え・軸をまたいだ混信・受信ループ複数本の
 同時稼働）を担う。**単体セットを置き換えるものではない** —— 1 本しか挿せない机では
 起動すらしないので、単体セットが無くなると確認手段そのものが消える。
 
@@ -2615,47 +2618,50 @@ bit8-15 に相手の `can_id`、下位 8bit に `host_id` が載っているこ�
 しかもセンサは自作サーボ基板 = `can_generic` 側に居る。このベンチは `can_edulite` しか
 開かないので、書いても「センサが応答していません」で必ず失敗する。
 
-#### メインハンド一式ベンチ（`config/bench/main_hand/`）
+#### サブハンド不在でメインハンド実機を動かす構成（`config/bench/main_hand/`）
 
-上 2 つのセットで 1 種ずつ確かめた後に通す、**メインハンドのアクチュエータを丸ごと
-載せる**一式。`can_m3508` / `can_edulite` / `can_generic` の 3 本を開くので、
-**CANable 3 本を同時に挿していないと起動しない**（[Errno 19] No such device）。
+**2026-09-05 に位置づけが変わった。** メインハンドの機構が完成する前は「メインハンドの
+アクチュエータを丸ごと載せる机上ベンチ（機構未装着）」として、このディレクトリに
+専用の `main_hand.yaml` / `main_hand_positions.yaml`（機構未装着でも壊れない安全側の
+仮値）を持たせていた。機構の付いた実機が完成した今は、**サブハンドを繋がずに
+メインハンド実機を動かす構成**になっている。`can_m3508` / `can_edulite` /
+`can_generic` の 3 本を開くので、依然**CANable 3 本を同時に挿していないと起動しない**
+（[Errno 19] No such device）。
+
+**専用の `main_hand.yaml`（本番と diff 0 行の完全コピー）と `main_hand_positions.yaml`
+（337 行中 321 行が同一）は削除した。** 実測値が本番 config へ入った今、二重管理の
+複製でしかなくなっていたため。テスト側は `tests/test_config_schema.py` の
+`_BENCH_USES_PRODUCTION_CONFIG` が「robot yaml / positions を持たず本番 config を
+使うセットである」ことを宣言させ、黙って検証を素通りさせない。
 
 | ファイル | 中身 |
 |---|---|
-| `config/bench/main_hand/system.yaml` | `can_buses` が `m3508_bus` + `edulite_bus` + `generic_bus` の 3 本。`health` / `match` は書かない（既定へ委ねる） |
-| `config/bench/main_hand/main_hand.yaml` | `y_axis_r` / `y_axis_l`（M3508）+ `rotate_r` / `rotate_l`（EDULITE 05）+ `gripper` / `conveyor` / `wall_f` / `wall_r`（自作モタドラ）の 8 台と `origin_sensor` |
-| `config/bench/main_hand/main_hand_positions.yaml` | `y_axis` / `rotate` / `gripper` / `conveyor` / `wall_f` / `wall_r` の 6 軸 |
+| `config/bench/main_hand/system.yaml` | `can_buses` が `m3508_bus` + `edulite_bus` + `generic_bus` の 3 本（DM3520 用 `dm3520_bus` を持たない）。`health` / `match` は書かない（既定へ委ねる） |
+| `config/main_hand.yaml`（本番） | **このセット専用の robot yaml は持たない。** モータ構成は実機の実測値入りの本番 config をそのまま使う |
+| `config/main_hand_positions.yaml`（本番） | 同上。位置定数も本番のものをそのまま使う |
 | `config/bench/main_hand/checklist.yaml` | 単体ベンチの足し合わせではなく、同時に載せたときにしか出ないことに重心を置いた一覧 |
 
 ```bash
 uv run python main.py --system config/bench/main_hand/system.yaml \
-    --config config/bench/main_hand/main_hand.yaml \
+    --config config/main_hand.yaml \
     --checklist config/bench/main_hand/checklist.yaml
 ```
 
-**単体ベンチ 2 つでは一度も通らない確認のために置いている。** `m3508/` も `edulite/` も
-CANable 1 本しか開かないので、次の 3 つはどちらでも確かめられない:
+**それでも、単体ベンチでは確かめられないことを確かめる場としての価値は変わらず残っている。**
+`m3508/` も `edulite/` も CANable 1 本しか開かないので、次の 3 つはどちらでも確かめられない:
 
 - **バス名の取り違え。** バス名は udev が serial で固定するが、`config/can_buses.yaml` の
   serial が実機とずれれば入れ替わる。**C620 へ EDULITE 用の指令が飛ぶ事故**（CLAUDE.md
-  「CAN バス名は udev で個体固定する」）は、2 本挿したこの構成でしか机上に現れない。
+  「CAN バス名は udev で個体固定する」）は、複数本挿したこの構成でしか机上に現れない。
   チェックリストの `bench_no_crosstalk`（一方を動かしている間もう一方が 1 度も動かないこと）が
   それを見る項目
-- **受信ループ 2 本 + 位置制御ループ（200Hz）+ 目標値再送（20Hz）+ 同期監視（50Hz）が
-  同時に回った状態**でフィードバックが途切れないこと
-- **左右直結ペアが 2 組同時に監視される状態**（`y_axis` と `rotate` が別々のバスに居る）
+- **受信ループ 3 本 + 位置制御ループ（200Hz）+ 目標値再送（20Hz）+ 同期監視（50Hz）が
+  同時に回った状態**でどの軸もフィードバックが途切れないこと
+- **左右直結ペアが 2 組（`y_axis` / `rotate`）同時に監視される状態**
 
 **`can_id` が両バスで 1 / 2 と重なっているのは意図的。** CAN ID の一意性はバス単位
 （CLAUDE.md「CAN ID はバス単位でロボット横断に一意」）なので衝突しないが、その前提が
 実際に成り立つことをここで初めて実物で確かめられる。
-
-**値は単体ベンチからコピーし、ずらさない。** ここだけ違う値にすると、単体との挙動差が
-「同時に載せたせい」なのか「値を変えたせい」なのか切り分けられなくなる。緩めた値を
-本番へ戻す条件は上の 2 節と同じ。
-
-**`homing` はどちらの軸にも書かない。** 原点センサは自作サーボ基板 = `can_generic` 側に
-居り、このセットは `can_generic` を開かない（書けば「センサが応答していません」で必ず失敗する）。
 
 #### DC モータ基板単体ベンチ（`config/bench/dc/`）
 
@@ -2854,7 +2860,7 @@ yaml に書けるようにすると、読み込み側は片方の値しか採用
 
 > **【一部が統合前の記述】** `DEFAULT_MOTOR_CHECK` と
 > `MotorCheckRunner(feedback_timeout_ms=...)` は**もう存在しない**（動作確認は
-> `robots/motor_check.py` の 1 本のシーケンスになり、鮮度判定は
+> `sequences/motor_check.py` の 1 本のシーケンスになり、鮮度判定は
 > `health.feedback_timeout_ms` をそのまま使う）。**「同じ概念に別名を付けない」という
 > 判断そのものは現在も生きている。** `health` の 4 値の扱いと `server_info` の話は現行。
 
@@ -2930,7 +2936,7 @@ traceback ではなく 1 行にするのは、会場でこれを読むのが操�
 `config/<robot_name>_positions.yaml` に一元化し、`lib/sequence/positions.py` が読む。
 
 機構が未完成の間は仮値（安全側の小さい可動量）を置いておき、
-**機構完成後はこの yaml の数値だけを差し替える**。`robots/*.py` は触らない。
+**機構完成後はこの yaml の数値だけを差し替える**。`sequences/*.py` は触らない。
 
 単一モータ軸の書き方（`scale` / `offset` を軸直下に書く）:
 
@@ -2967,7 +2973,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
   「必要になった位置だけスカラーを辞書に書き換える」方式なら追加コストがほぼ無いため。
   現状の同梱 yaml の `positions` はすべてスカラー（左右反転する位置がまだ無い）。
 
-### シーケンス側で共通化してよい単位（`robots/*.py`）
+### シーケンス側で共通化してよい単位（`sequences/*.py`）
 
 数値は yaml が持つ一方、**「どの軸をどの位置名へ動かすか」の組はシーケンス側にある**。
 同じ組が複数のステップに現れるときだけモジュール定数（`main_hand.HOME` /
@@ -4060,10 +4066,10 @@ Phase 4 の初期実装（HeroUI 期）・TUI リデザイン期のファイル�
 |---|---|---|
 | 5-1 | `lib/sequence/positions.py` | 機構位置定数の読み込み・単位換算・コート差異解決 |
 | 5-2 | `lib/sequence/engine.py` | `bind_positions()` / `move_to()` / `SequenceTimeoutError` を追加 |
-| 5-3 | `config/main_hand_positions.yaml` | メインハンドの位置定数（機構完成まで仮値） |
+| 5-3 | `config/main_hand_positions.yaml` | メインハンドの位置定数（**`y_axis` / `rotate` は実機完成に伴い実測値へ更新済み**。`gripper` / `wall_f` / `wall_r` / `conveyor` は仮値のまま。詳細は `docs/mechanism_handoff.md`） |
 | 5-4 | `config/sub_hand_positions.yaml` | サブハンドの位置定数（機構完成まで仮値） |
-| 5-5 | `robots/main_hand.py` | メインハンドのシーケンス（`move_to` で記述。数値は持たない） |
-| 5-6 | `robots/sub_hand.py` | サブハンドのシーケンス（同上） |
+| 5-5 | `sequences/main_hand.py` | メインハンドのシーケンス（`move_to` で記述。数値は持たない） |
+| 5-6 | `sequences/sub_hand.py` | サブハンドのシーケンス（同上） |
 | 5-7 | `main.py` | `<robot_name>_positions.yaml` を読んで `bind_positions()` |
 
 **機構完成後にやること**:
@@ -4093,7 +4099,7 @@ Phase 4 の初期実装（HeroUI 期）・TUI リデザイン期のファイル�
    |---|---|
    | `positions.*` の数値・`scale` / `offset` / `timeout_s` | 不要 |
    | 軸名・位置名の増減 | 要（`test_axis_motors_exist_in_robot_config` ほか） |
-   | **`robots/*.py` の `@step` メソッド名** | **要**（`test_step_sends_expected_targets` の parametrize） |
+   | **`sequences/*.py` の `@step` メソッド名** | **要**（`test_step_sends_expected_targets` の parametrize） |
    | **`@step` のラベル文字列・ステップの順序** | **要**（`test_step_labels_unchanged` が全ラベルを並びごと固定） |
    | 指差喚呼の項目 id | 要（`test_checklist_covers_what_cannot_be_judged_automatically`。**部分集合の検査**なので、足すぶんには落ちない） |
 
@@ -4220,7 +4226,7 @@ health:
 > **【統合前の記述】この節は現在の実装と一致しない。** ここに書かれた
 > `MotorCheckRunner`（機体ごと・モータ 1 台ずつ駆動）も `motor_check.magnitude`
 > （確認専用の駆動量）も**もう存在しない**。現在は両ハンド 1 本のシーケンス
-> （`robots/motor_check.py`）で、判定はシーケンスエンジンの `move_to` がそのまま担う。
+> （`sequences/motor_check.py`）で、判定はシーケンスエンジンの `move_to` がそのまま担う。
 > 何をなぜ変えたかは「Phase 11: アクチュエータ動作確認の統合」、今どうなっているかは
 > `docs/checks_and_health.md` の②。**この節は「1 台ずつ駆動する設計では何が問題だったか」
 > を読むためだけに残してある。**
@@ -4632,7 +4638,7 @@ Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という�
 
 #### 何を変えたか
 
-- **両ハンドを 1 本のシーケンスへ**（`robots/motor_check.py`）。順序が固定されるので、
+- **両ハンドを 1 本のシーケンスへ**（`sequences/motor_check.py`）。順序が固定されるので、
   いつ何が動くかがシーケンスの並びから読める
 - **判定はシーケンスエンジンがそのまま担う。** `move_to` は既に到達判定・タイムアウト・
   左右ずれ判定を持ち、到達判定を持たない軸は `settle_s` の固定待ちへ落ちる。
@@ -4828,7 +4834,7 @@ Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という�
 | `scripts/edulite_set_id.py` を `chmod 0755` するか | **shebang ごと落とした** | `can` と `lib.drivers.edulite05` を import するので venv でしか動かない。実行可能にすると `./scripts/edulite_set_id.py` という**必ず ImportError で落ちる呼び方**が生まれる。0755 の `can_config.py` は逆に「systemd から `/usr/bin/python3` で起動される」ことが設計要件なので、性質が違う |
 | `main._DRIVER_MAP` を if 連鎖のままにするか | **ファクトリ表に統一した** | 名前は対応表なのに実態は m3508 用フォールバック 1 行で、`config_schema` のコメントが「この表と対で維持する」と言う以上、読んだ人は全種別がここを通ると読む。if 連鎖だと足し忘れが「引数の足りない別物が黙って生成される」形に落ちる |
 | `_load_sequence` で `SEQUENCE_CLASS` を明示公開させるか | **採らなかった。自モジュール定義に限定し、複数見つかったら起動を拒否する** | 明示公開は 3 本すべてに宣言が要り、**書き忘れが「今までどおり動く」形で通る**（＝いつか黙って壊れる）。定義元で絞れば宣言は要らず、曖昧な構成だけがその場で落ちる |
-| `wait_all_reached` を「シーケンス記述の公開語彙」として残すか | **削除した** | 位置表由来でない `tolerance` / `timeout` を引数で受けるため、使えば `robots/*.py` に数値リテラルを書くことになる。`robots/*.py` に数値を書かせない不変条件と両立しない |
+| `wait_all_reached` を「シーケンス記述の公開語彙」として残すか | **削除した** | 位置表由来でない `tolerance` / `timeout` を引数で受けるため、使えば `sequences/*.py` に数値リテラルを書くことになる。`sequences/*.py` に数値を書かせない不変条件と両立しない |
 | `_safety_state` の集約値と内訳の二重表現を統合するか | **統合しなかった** | `healthVerdict.ts` が両方を `||` で読んでおり、**内訳の配信が壊れたときに集約値だけで「全ループ停止」を出せる二重防護**になっている。片方に寄せるとその冗長が消える |
 | WS 契約の型を `TypedDict` 化するか | **しなかった** | 型検査器が CI に無いので注釈は誰からも検査されず、「守っているように見える嘘」になる。契約を守っているのは `tests/test_ws_contract.py` の golden 焼き付けと、TS 側の逆方向検査（宣言にあるのに実配信から消えた欄）である |
 | `Sequence.reset()` を `async` 化するか | **見送った** | 利用者が 1 つなのでどちらでも保守コストは同じで、積極的に変える理由が薄い |
@@ -4886,6 +4892,78 @@ config にもテストにも痕跡が残らない形だった。
 **理由付きで用意されていたのに呼び出し元が無く、守っていたはずの層が無防備だった**。
 変異で確認すると、値ごと変えると落ちる一方、**既定と同じ値のリテラルへ書き戻すと 1447 件
 すべて緑のまま**だった。後者が「既定値の分散が復活した状態」そのものである。
+
+### `robots` → `sequences` ディレクトリ改名・メインハンド実機の実測値を本番 config へ反映（2026-09-05）
+
+**コードは変えず、ディレクトリ構成と config だけを実態へ合わせる整理。3 つに分かれる。**
+
+#### `robots` → `sequences` ディレクトリ改名
+
+このディレクトリの中身はシーケンス定義（`@step` で書いた `move_to` の並び）だけで、
+機体そのものの定義（モータ構成・ドライバ種別・CAN ID）は `config/<robot>.yaml` にあり、
+「ロボット」という旧ディレクトリ名は中身とずれていた。加えて `motor_check.py` は
+両ハンド統合の動作確認であってロボットではないため、ロボット名の名前空間に同居して
+いるのが不自然だった。`main._load_sequence` の動的 import 規約は `robots.{robot_name}`
+から `sequences.{robot_name}` へ変わった。**`motor_check.py` は元々この動的 import の
+対象ではなく、`main.py` が静的に import する**（旧名がロボット名の名前空間だった
+ときから変わっていない性質で、改名で初めて意識できるようになった違いである）。
+`tests/test_robot_sequences.py` のようにロボット名を含むテストファイル名は
+そのまま残した（実在するファイル名であって旧 `robots` ディレクトリへの参照ではない）。
+
+#### メインハンド実機の実測値を本番 config へ反映
+
+メインハンド実機が完成し、`config/main_hand_positions.yaml` の `positions:` へ
+実測値が入った：
+
+- `y_axis`: `home` 0.0 / `work_1` 120.0 / `work_2` 320.0 / `work_3` 520.0 /
+  `work_shared` 650.0（単位 mm）
+- `rotate`: `home` 0.0 / `pick` 180.0 / `place` 10.0（単位 deg）
+
+**`y_axis.approach` と `y_axis.place` は削除した。** 試合シーケンスから未参照のまま
+実測の対象が無かったため。戦略が決まった時点で実測して足す。**`rotate.place` は
+残した** —— `sequences/main_hand.py` の `TO_CONVEYOR` が参照している。
+
+`axes.y_axis.manual`（0.0〜650.0mm）と `axes.rotate.manual`（0.0〜180.0deg）は
+これより前、2026-09-04 のコミット `5aa89c3`「メインハンドの可動域を設定」で
+既に実ストロークへ更新済みだった。`docs/mechanism_handoff.md` の棚卸し表が
+それに追いついていなかったので、今回の `positions` 実測値反映と合わせて更新した。
+
+**`axes.y_axis.homing.search_distance`（22.0mm）は今回は変えていない。** かつては
+`manual` の全幅（`20.0 - (-2.0)` = 22.0）に一致させていたが、`manual` が
+0.0〜650.0mm へ広がった今、この対応関係は崩れている。次に実機で確認する人が
+実測ストロークへ詰めること（`docs/mechanism_handoff.md` §0）。
+
+#### `config/bench/main_hand/` から重複 config を削除
+
+`main_hand.yaml`（本番と diff 0 行の完全コピー）と `main_hand_positions.yaml`
+（337 行中 321 行が同一）を削除した。メインハンド実機が完成する前は「メインハンド
+一式の机上ベンチ（機構未装着）」の値をここに個別に持たせていたが、実測値が本番
+config へ入った今、二重管理の複製でしかなくなっていた。このセットは今後、本番
+config を `--config` に渡して使う：
+
+```bash
+uv run python main.py --system config/bench/main_hand/system.yaml \
+    --config config/main_hand.yaml \
+    --checklist config/bench/main_hand/checklist.yaml
+```
+
+**セットの位置づけも変わった。** 「メインハンド一式の机上ベンチ（機構未装着）」ではなく、
+「**サブハンド不在（Damiao DM3520 用の CANable 未接続）でメインハンド実機を動かす
+構成**」。`system.yaml` が `can_buses` を 3 本（`m3508_bus` / `edulite_bus` /
+`generic_bus`）に絞っていることだけが、DM3520 未接続で起動できる根拠になっている
+（本番の `config/system.yaml` は 4 本を `_setup_robot()` がすべて open するため、
+そのままでは `[Errno 19] No such device` で起動しない）。単体ベンチ（`m3508/` /
+`edulite/`）では一度も通らない確認（バス名の取り違え・受信ループ複数本の同時稼働・
+左右直結ペア 2 組の同時監視）を担う価値は変わらず残っている。
+
+テスト側は `tests/test_config_schema.py` に `_BENCH_USES_PRODUCTION_CONFIG` を
+新設し、「robot yaml / positions を持たず本番 config を使うセットである」ことを
+宣言させる形で追従した。黙って検証を素通りさせると、他のセットで誤って config を
+消したときに検出できなくなるため（`test_every_shipped_bench_dir_is_covered` の
+穴と同じ理由）。
+
+検証は `uv run pytest` 1756 passed（作業前 1756。テストは事前に張り替え済みで、
+今回は config とディレクトリ名だけの変更だったため件数は変わらない）。
 
 ## 未解決の課題
 
@@ -4967,7 +5045,7 @@ config にもテストにも痕跡が残らない形だった。
 |---|---|---|
 | PID ゲイン・機構定数がすべて仮値 | `main.py` の `_DEFAULT_PID`（kp=2.0 / ki=kd=0 / dead_band=1.0 / output_limit=2000）、`config/*_positions.yaml` の `scale` / `offset` / `positions` はいずれも安全側に振った仮値 | **実機チューニング必須**。現状のゲインでは重力負荷を持ち上げられない可能性が高い（ki=0 のため定常偏差が残る）。調整の判断材料は Phase 12 で `/pid-tuning` に出るようになった（波形・指標・助言）が、**どの値にするかを決めるのは実機で動かした人**である |
 | M3508 の位置制御が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は **2026-09-03 に振幅 1.5mm / `output_limit` 800 でだけ実測**（`docs/mechanism_handoff.md` §3-1） | ラップアラウンド判定のしきい値（半周＝3600rpm 相当）や減速比込みの許容差が実機で妥当かは未確認。**PID は実運用ストロークでの取り直しが必須** —— 本番の `output_limit` 2000 では偏差 1.14mm で飽和し、検証した振幅はその境界（2.3mm）の内側だった |
-| ~~台形速度プロファイルの値が実機未検証~~ → **2026-09-04 に実測済み**（`docs/mechanism_handoff.md` §3-4）| `axes.y_axis.motion` は `max_velocity` 200.0 / `max_acceleration` 1200.0 / `velocity_ff` 1.0、`pid.output_limit` は 5000、`sync_kp` は 16.0。150mm を 3.023s → 0.838s（3.6 倍）| **残る未検証は可動範囲そのもの** —— `manual`（−2.0〜20.0mm）と `positions`（0〜15mm）は仮値のままで、実運用の移動距離（150mm 以上が主）と食い違っている。ワーク保持力と機構強度も未評価（加速度の効く制約はそちら）|
+| ~~台形速度プロファイルの値が実機未検証~~ → **2026-09-04 に実測済み**（`docs/mechanism_handoff.md` §3-4）| `axes.y_axis.motion` は `max_velocity` 200.0 / `max_acceleration` 1200.0 / `velocity_ff` 1.0、`pid.output_limit` は 5000、`sync_kp` は 16.0。150mm を 3.023s → 0.838s（3.6 倍）| ~~残る未検証は可動範囲そのもの —— `manual`（−2.0〜20.0mm）と `positions`（0〜15mm）は仮値のままで、実運用の移動距離（150mm 以上が主）と食い違っている。~~ → **`manual`（0.0〜650.0mm）と `positions`（home 0.0 / work_1 120.0 / work_2 320.0 / work_3 520.0 / work_shared 650.0mm）は実測値へ更新済み**（下記「メインハンド実機の実測値を本番 config へ反映」節）。ワーク保持力と機構強度は依然未評価（加速度の効く制約はそちら）|
 | プロファイル導入で PID の問題の性質が変わった | ゲイン（kp 32 / ki 10 / kd 1.0）は「飽和したバンバン制御をなだめる」条件で詰めた値のまま | 中間目標を入れた後の PID の仕事は**追従誤差の最小化**であり、同じ数字でも意味が違う。**実運用振幅での再調整が要る**（`docs/mechanism_handoff.md` §3-2 の手順 4） |
 | 低速域のスティックスリップが未観測 | この軸は静止摩擦が大きい（実測で重い側 500counts 相当）。中間目標がゆっくり動く低速域では追従誤差が小さく、電流が静止摩擦を超えられない可能性がある | **予測であって観測ではない。** 出るなら「動かない → 誤差が溜まって急に動く」形で、`sync_tolerance` の発報として現れうる。対抗手段は `ki`（既に 10 が入っていて、まさにこの役割）と `velocity_ff`。それでも足りなければ静摩擦補償（参照速度の符号に応じた定数電流）—— **今回スコープ外**（単位が counts で `motion` 節の人間単位と混ざる / 必要性がまだ推測 / `ki` が部分的に代替している） |
 | `velocity_ff` は実行中に変更できず UI にも配信されない | `pid_gains()` に相当する読み口が `M3508PositionLoop` に無く、`/pid-tuning` にも出ない。値を知る経路は起動ログ（`_attach_motion_profiles`）だけ | 調整は **config 変更 + 再起動**が要る。`kd` は UI から変えられるので、**画面から `kd` だけを動かすと `velocity_ff` との対応が黙って崩れる**（症状は「巡航中だけ飽和して速くならない」）。実機で詰めるあいだは `scripts/tune_y_axis.py --velocity-ff` を使う |
@@ -4978,7 +5056,7 @@ config にもテストにも痕跡が残らない形だった。
 
 | 課題 | 現状 | 影響 |
 |---|---|---|
-| 位置定数の実機反映手順が手動 | 「Phase 5 > 機構完成後にやること」参照。機構担当と共有する棚卸し表は `docs/mechanism_handoff.md` へ切り出した | 未着手 |
+| 位置定数の実機反映手順が手動 | 「Phase 5 > 機構完成後にやること」参照。機構担当と共有する棚卸し表は `docs/mechanism_handoff.md` へ切り出した | **メインハンドの `y_axis` / `rotate` は着手済み**（2026-09-05 に実測値を反映）。`gripper` / `wall_f` / `wall_r` / `conveyor` とサブハンド側は未着手 |
 | CANable が 1 本欠けると起動できず、systemd で起動不能に固定される | `main.py` が open するのは**そのロボットが実際に使うバスだけ**（`_robot_bus_names`）になった。メインハンドは `can_dm3520` を、サブハンドは `can_m3508` を開かない（受信ループも 8 本 → 4 本）。ただし既定は両ハンドを読むので、**どの 1 本が欠けても既定構成は起動しない**ことは変わらない。`cbc-control.service` の `StartLimitBurst=3` / `RestartSec=2` により**約 6 秒で `failed` に固定**され、以後 `systemctl start` すら通らない | 復旧には `systemctl reset-failed` が要る。会場での切り分け手順は `docs/venue_recovery.md` §1（`--strict` で欠けを特定 → 挿し直し → `reset-failed` → 起動）。**片ハンドだけで出る逃げ道が実効になった** —— `can_m3508` が欠けたら `--config config/sub_hand.yaml`、`can_dm3520` なら `--config config/main_hand.yaml` でそのハンドは起動する（`can_edulite` / `can_generic` は両ハンドが使うので逃げられない）。バスが開けなければ `SystemExit` で 1 行のメッセージ |
 | `cbc-can.service` は CAN が 0 本でも success で終わる | `--strict` を付けずに `setup_can.sh` を呼び、`RemainAfterExit=yes` なので `cbc-control.service` の `Requires=` は何も守っていない | **意図的**（`--strict` を付けると片ハンドだけの練習・ベンチ・`--dry-run` が一律にできなくなる。理由は `scripts/cbc-can.service` のコメント）。揃っているかは指差喚呼 `can_bus_strict` が人に確認させる。**バスの絞り込み（`_robot_bus_names`）を入れた後に再検討したが、判断は変えない** —— 既定は両ハンドを読むのでどの 1 本が欠けても `cbc-control` は起動せず、`--strict` を足しても得るものが無い。一方、欠けたバスを使わないほうのハンドを手で起動する逃げ道は、この unit が `failed` になると `Requires=` に引きずられて塞がる |
 | `deploy.sh` が会場でネットワークを要求しうる | `uv sync --frozen` / `pnpm install --frozen-lockfile` は、ロックが満たされていなければ依存解決へ降りる | `--no-install` を足した（ビルドと再起動だけ）。**会場入りの前に一度ネットワークのある場所で素の `deploy.sh` を回してキャッシュを温めておくこと** |

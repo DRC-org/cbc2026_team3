@@ -184,7 +184,7 @@ qdisc の backlog が残っていることと TX packets が進んでいない�
 **起動時に構成の曖昧さを黙って解決しない。** シーケンスの登録
 （`main._load_sequence`）は**そのモジュール自身が定義した** `Sequence` サブクラスだけを
 候補にし、**2 つ以上見つかったら起動を拒否する**。かつては `dir()` の並び（アルファベット順）で
-最初の 1 つを返しており、`robots/sub_hand.py` が何かの都合で `MotorCheckSequence` を
+最初の 1 つを返しており、`sequences/sub_hand.py` が何かの都合で `MotorCheckSequence` を
 import しただけで `"MotorCheckSequence" < "SubHandSequence"` が成立し、サブハンドとして
 動作確認シーケンスが登録された。症状は「sub_hand の `sequence_start` でなぜか両ハンドが
 動く」だけで、config からもログからも理由が読めない。`SEQUENCE_CLASS` のような明示公開に
@@ -224,8 +224,14 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   - `server_motor_check.py` — アクチュエータ動作確認の統括（`MotorCheckController`）。
     環境側の条件だけをサーバーが `environment_deny` として渡す
   - `server_dryrun.py` — dry-run の擬似値。**見栄えの値しか作らず、判定も構成情報も置かない**
-- `robots/` — シーケンス定義。ロボット固有（main_hand.py / sub_hand.py）と、
-  両ハンド統合のアクチュエータ動作確認（motor_check.py）
+- `sequences/` — シーケンス定義（旧名 `robots`）。中身はシーケンス定義だけで、機体そのものの
+  定義（モータ構成・ドライバ種別・CAN ID）は `config/<robot>.yaml` にあり、旧名の
+  「ロボット」は中身とずれていたため改名した。ロボット固有（main_hand.py / sub_hand.py。
+  `main._load_sequence` が `sequences.{robot_name}` として動的 import する）と、
+  両ハンド統合のアクチュエータ動作確認（motor_check.py）に分かれる。**motor_check.py は
+  ロボットではなく両ハンド横断の確認なので動的 import の対象ではなく**、`main.py` が
+  静的に import する（旧名がロボット名の名前空間だったときは、ロボットでないものが
+  そこに同居している不自然さもあった）
 - `config/` — YAML 設定（後述）
 - `firmware/` — 自作モータドライバのファームウェア（DC = UNO R4 / サーボ = Nano / 電磁弁 = STM32F303K8）
 - `web/` — Vite + React + TypeScript + Tailwind v4 / daisyUI 5 の操作 UI
@@ -260,14 +266,14 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `main_hand/` = メインハンド一式を同時に載せる（CANable 3 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台 / `y_axis_tuning/` = y_axis の PID 実機チューニング用）。`--system` / `--config` / `--checklist` で差し替える。8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる） |
+| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `main_hand/` = **サブハンド不在**（Damiao DM3520 用 CANable 未接続）**でメインハンド実機を動かす構成**（メインハンド実機が完成したため、機構未装着の机上ベンチから役割が変わった。このセットだけ robot yaml / positions を持たず本番の `config/main_hand.yaml` / `config/main_hand_positions.yaml` をそのまま使う。CANable 3 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台 / `y_axis_tuning/` = y_axis の PID 実機チューニング用）。`--system` / `--config` / `--checklist` で差し替える。8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる）。**本番 config をそのまま使うセット（現在は `main_hand/` のみ）は `_BENCH_USES_PRODUCTION_CONFIG` に宣言させる**（黙って検証を素通りさせず、他のセットで誤って config を消したときに検出できるようにするため） |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。`health` /
 `can_buses` / `match` は PC 上に 1 組しか存在し得ないため `config/<robot>.yaml` には書けず、
 書いてあったら移動先を示して**起動を拒否**する。ロボットごとの yaml に書けてしまうと
 読み込み側は片方の値しか採用できず、もう片方が「書けるのに効かない設定」になるため。
 
-**`robots/*.py` に数値を書いてはならない。** シーケンスは `move_to({"軸名": "位置名"})` の形で書き、
+**`sequences/*.py` に数値を書いてはならない。** シーケンスは `move_to({"軸名": "位置名"})` の形で書き、
 単位換算・許容差・待ち時間はすべて位置定数 yaml が持つ。機構が変わったら yaml の数値だけを差し替える。
 
 ### 知っておくべき設計上の制約
@@ -408,8 +414,9 @@ EDULITE 05 と同じく、**現在角を目標に書いてから励磁する**�
 単回転角のアンラップは「半周を超える差分は 0 を跨いだ折り返し」という推定で、
 1kHz で届き続けている間しか成り立たない。途切れた窓でモータ軸が半周以上回ると
 方向を取り違え、累積角に 360deg が乗る —— `y_axis` の scale では **6.54mm** で、
-同じ軸の `sync_tolerance` 2.0mm の 3 倍を超える。**左右の片方だけに乗れば、
-実在しないずれで全体緊急停止が掛かる。** 窓は CAN 受信の中断で実際に開く。
+`sync_tolerance` は現在 10.0mm。1 回転の注入 (6.54mm) はこの内側に収まるので、
+**注入 1 発では止まらない**（検出経路は再アンカーの WARNING（`health_detail()`）
+だけになる）。窓は CAN 受信の中断で実際に開く。
 `M3508Driver` は窓を跨いだ推定を拒み、差分を積まずに再アンカーする（1 回転を
 捏造するより、誤差を窓の中の実移動量に留めるほうが小さい）。**再アンカーしたことは
 必ず報告する** —— `health_detail()` が `MotorHealth` を WARNING へ倒して
@@ -444,7 +451,7 @@ L=15mm で行き過ぎない `kp` は 4.85 まで落ちる一方、実測では 
 `axes.<軸>.motion` が持ち、書かない軸は従来どおりステップ入力。
 **減速の判定に連続時間の `v²/(2a)` をそのまま書かないこと** —— その式は「今の周期に
 進む分」を含まないので 1 周期ぶん取りこぼし、実測（200Hz / 60mm/s / 400mm/s²）で最大
-0.29mm（`sync_tolerance` 2.0mm の 15%）行き過ぎる。`_stoppable_velocity` は代わりに
+0.29mm（`sync_tolerance` 10.0mm の 2.9%）行き過ぎる。`_stoppable_velocity` は代わりに
 「この周期に出してよい速度の上限」を離散時間の停止距離から厳密に解く。
 
 **`motion.velocity_ff` は `pid.kd` と同値に保つ。2 つの config ファイルにまたがる対である。**
@@ -581,7 +588,7 @@ NTP 補正で試合中に残り時間が増える）。ずれは WS の片道遅
 **「全自動」という操作モードは無い** — 増やしてよいのは制御権の持ち主であって、
 シーケンスの走り方ではない。
 
-**アクチュエータ動作確認は両ハンド 1 本のシーケンス（`robots/motor_check.py`）で、
+**アクチュエータ動作確認は両ハンド 1 本のシーケンス（`sequences/motor_check.py`）で、
 Monitor の設定面から起動する。** かつては機体ごとに独立した確認（`MotorCheckRunner`）を
 持っていたが、2 つを同時に起動できるため両機が同時に動き、可動域の重なる位置で干渉しうる。
 順序を 1 本に固定すれば、いつ何が動くかがシーケンスの並びから読める。設計はこの 6 つ:

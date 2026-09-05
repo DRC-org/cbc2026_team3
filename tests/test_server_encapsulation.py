@@ -63,7 +63,7 @@ _CONSUMER_MODULES = (
     "lib/server.py",
     "lib/server_motor_check.py",
     "lib/ws_hub.py",
-    "robots/motor_check.py",
+    "sequences/motor_check.py",
 )
 
 

@@ -27,7 +27,7 @@ health:
   tx_error_threshold: 96     # CAN error_passive 境界
 
 # 動作確認 (motor_check) の設定はここには無い。両ハンドを 1 本のシーケンスで駆動する
-# 形へ変えたので (robots/motor_check.py)、駆動量・タイムアウト・許容差はすべて
+# 形へ変えたので (sequences/motor_check.py)、駆動量・タイムアウト・許容差はすべて
 # config/*_positions.yaml の位置定数が持つ。運用で使う値そのものへ動かすため、
 # 確認専用の設定が存在しない = 位置定数とずれようがない。
 

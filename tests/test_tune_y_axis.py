@@ -365,24 +365,15 @@ class TestBusSelection:
     """開くのは **``--axis`` で指定した軸のモータが載っているバス** ただ 1 本。
 
     モータ構成に現れるバスの集合から 1 本選ぶと、複数バスを持つ config
-    (本番の config/main_hand.yaml も config/bench/main_hand/ も 3 本) では
-    選ばれるバスが実行ごとに変わる。対象軸の載っていないバスを開いた回は
-    フィードバックが 1 通も届かず、症状は「同じコマンドなのに動いたり動かなかったり
-    する」だけになる。
+    (本番の config/main_hand.yaml は 3 本) では選ばれるバスが実行ごとに変わる。
+    対象軸の載っていないバスを開いた回はフィードバックが 1 通も届かず、
+    症状は「同じコマンドなのに動いたり動かなかったりする」だけになる。
     """
 
     def _resolve(self, config: pathlib.Path, positions: pathlib.Path, axis: str = "y_axis") -> str:
         robot = load_robot_config(_read_yaml(config), source=str(config))
         table = load_position_table(_read_yaml(positions), source=str(positions))
         return tune._resolve_bus_alias(robot, table.axis(axis))
-
-    def test_複数バスのベンチでもm3508のバスを選ぶ(self) -> None:
-        """M3508 と EDULITE を同時に載せたセット。edulite_bus を開いた回は 1 台も動かない。"""
-        bench = _ROOT / "config" / "bench" / "main_hand"
-
-        alias = self._resolve(bench / "main_hand.yaml", bench / "main_hand_positions.yaml")
-
-        assert alias == "m3508_bus"
 
     def test_1バスのチューニング用ベンチ(self) -> None:
         bench = _ROOT / "config" / "bench" / "y_axis_tuning"
@@ -392,7 +383,13 @@ class TestBusSelection:
         assert alias == "m3508_bus"
 
     def test_3バスの本番configも選べる(self) -> None:
-        """本番 config を渡せることは手順 (docs/mechanism_handoff.md §3-2) の前提。"""
+        """本番 config を渡せることは手順 (docs/mechanism_handoff.md §3-2) の前提。
+
+        M3508 と EDULITE が同居する 3 バス構成でもある。edulite_bus を開いた回は
+        1 台も動かない (以前は同じ 3 バス構成を持つ config/bench/main_hand/ でも
+        別途検証していたが、実測値を本番へ移して bench 側の複製を削除したため
+        この 1 本に集約した)。
+        """
         alias = self._resolve(
             _ROOT / "config" / "main_hand.yaml",
             _ROOT / "config" / "main_hand_positions.yaml",

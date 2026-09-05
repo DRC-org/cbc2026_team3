@@ -160,7 +160,7 @@ class TestSystemConfig:
         """動作確認の設定は無くなった。残っていたら「書いたのに効かない」状態になる。
 
         駆動量もタイムアウトも config/*_positions.yaml の位置定数が持つ
-        (robots/motor_check.py は運用と同じ位置名へ動かす)。
+        (sequences/motor_check.py は運用と同じ位置名へ動かす)。
         """
         with pytest.raises(ValueError, match="motor_check"):
             load_system_config(
@@ -548,7 +548,7 @@ class TestDriverSpecificKeys:
 class TestMotorCheckIsNotAMotorSetting:
     """モータごとの動作確認設定は無くなった。
 
-    両ハンドを 1 本のシーケンスで駆動する形 (robots/motor_check.py) へ変えたので、
+    両ハンドを 1 本のシーケンスで駆動する形 (sequences/motor_check.py) へ変えたので、
     確認は運用と同じ位置名へ動かす。**確認専用の駆動量が存在しない**ため、
     位置定数と食い違いようがない。書いてあったら起動時に落とす。
     """
@@ -626,6 +626,44 @@ _BENCH_DIRS = (
     "y_axis_tuning",
 )
 
+#: 自分の robot yaml / positions を持たず、本番 config (config/<値>.yaml,
+#: config/<値>_positions.yaml) をそのまま使うベンチセット。
+#: main_hand は実機が完成して実測値が本番 config へ移ったことで、bench 側に
+#: あった robot yaml (本番と完全一致) と positions (仮値のコピー) が
+#: 二重管理の複製でしかなくなったため削除した。ここへ載せないセットは従来どおり
+#: bench_dir 内の robot yaml / positions を要求する
+#: (test_bench_config_set_loads / test_bench_opens_only_the_buses_on_the_desk が見る)。
+_BENCH_USES_PRODUCTION_CONFIG: dict[str, str] = {
+    "main_hand": "main_hand",
+}
+
+
+def _bench_robot_yaml_path(bench: str, bench_dir: pathlib.Path) -> pathlib.Path:
+    """このベンチセットが読む robot yaml のパス。"""
+    production_robot = _BENCH_USES_PRODUCTION_CONFIG.get(bench)
+    if production_robot is not None:
+        return _CONFIG_DIR / f"{production_robot}.yaml"
+
+    return next(
+        path
+        for path in bench_dir.iterdir()
+        if path.name.endswith(".yaml")
+        and not path.name.endswith("_positions.yaml")
+        and path.name not in ("system.yaml", "checklist.yaml")
+    )
+
+
+def _bench_positions_path(bench: str, bench_dir: pathlib.Path, robot_name: str) -> pathlib.Path:
+    """このベンチセットが読む位置定数 yaml のパス。
+
+    本番 config を使うセットは main.py の _positions_path と同じ規則
+    (robot yaml と同じディレクトリの <robot_name>_positions.yaml) を本番側でたどる。
+    """
+    if bench in _BENCH_USES_PRODUCTION_CONFIG:
+        return _CONFIG_DIR / f"{robot_name}_positions.yaml"
+
+    return bench_dir / f"{robot_name}_positions.yaml"
+
 
 class TestShippedBenchConfigs:
     """机上ベンチ用の config セット (config/bench/<対象>/) も同じスキーマで読めること。
@@ -638,6 +676,10 @@ class TestShippedBenchConfigs:
 
     8 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
     見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
+    **robot yaml / positions が bench_dir に無いセットは `_BENCH_USES_PRODUCTION_CONFIG`
+    に載っていて本番 config を指す** —— 黙って検証を素通りさせると、他のセットで
+    誤って config を消したときに検出できなくなるため、どちらの構成であるかを
+    宣言させている (`test_every_shipped_bench_dir_is_covered` の穴と同じ理由)。
     """
 
     def test_every_shipped_bench_dir_is_covered(self) -> None:
@@ -661,13 +703,7 @@ class TestShippedBenchConfigs:
             source=f"bench/{bench}/system.yaml",
         )
 
-        robot_yaml = next(
-            path
-            for path in bench_dir.iterdir()
-            if path.name.endswith(".yaml")
-            and not path.name.endswith("_positions.yaml")
-            and path.name not in ("system.yaml", "checklist.yaml")
-        )
+        robot_yaml = _bench_robot_yaml_path(bench, bench_dir)
         config = load_robot_config(
             yaml.safe_load(robot_yaml.read_text()),
             source=f"bench/{bench}/{robot_yaml.name}",
@@ -679,7 +715,7 @@ class TestShippedBenchConfigs:
         # 位置定数は「robot config と同じディレクトリの <robot_name>_positions.yaml」を読む
         # (main.py の _positions_path)。名前がずれると本番の位置定数が読まれてしまい、
         # **机上に無い軸へ指令が飛ぶ**
-        positions_path = bench_dir / f"{config.robot_name}_positions.yaml"
+        positions_path = _bench_positions_path(bench, bench_dir, config.robot_name)
         assert positions_path.exists(), f"{positions_path} がありません"
 
         table = load_position_table(
@@ -719,13 +755,7 @@ class TestShippedBenchConfigs:
             yaml.safe_load((bench_dir / "system.yaml").read_text()),
             source=f"bench/{bench}/system.yaml",
         )
-        robot_yaml = next(
-            path
-            for path in bench_dir.iterdir()
-            if path.name.endswith(".yaml")
-            and not path.name.endswith("_positions.yaml")
-            and path.name not in ("system.yaml", "checklist.yaml")
-        )
+        robot_yaml = _bench_robot_yaml_path(bench, bench_dir)
         used = {motor["bus"] for motor in yaml.safe_load(robot_yaml.read_text())["motors"].values()}
 
         assert set(system.can_buses) == used

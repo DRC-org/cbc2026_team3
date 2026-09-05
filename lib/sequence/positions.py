@@ -339,7 +339,7 @@ class PositionTable:
     def merged(cls, tables: Sequence[PositionTable]) -> PositionTable:
         """複数の位置定数表を 1 つに束ねる。
 
-        統合動作確認シーケンス (robots/motor_check.py) は両ハンドのアクチュエータを
+        統合動作確認シーケンス (sequences/motor_check.py) は両ハンドのアクチュエータを
         1 つの順序で駆動するため、両機の軸を同じ表から引く必要がある。
 
         **軸名の衝突は起動時に拒否する。** 後勝ちで上書きすると、動作確認が意図した

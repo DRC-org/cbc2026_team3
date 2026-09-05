@@ -186,7 +186,7 @@ class RobotServer:
         self._last_health: dict[str, HealthSnapshot] = {}
 
         # アクチュエータ動作確認 (lib/server_motor_check.py)。**両ハンドを 1 本の
-        # シーケンスで順に駆動する** (robots/motor_check.py)。機体ごとに独立した確認だと
+        # シーケンスで順に駆動する** (sequences/motor_check.py)。機体ごとに独立した確認だと
         # 2 つを同時に起動でき、可動域の重なる位置で干渉しうる。
         # 環境側の条件 (フェーズ・緊急停止・各ロボットの制御権) だけをここから渡し、
         # 起動・中断・配信はあちらが持つ

@@ -48,7 +48,7 @@ from lib.sequence.homing import HomingError, HomingRunner
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
-from robots.motor_check import REQUIRED_AXES, MotorCheckSequence
+from sequences.motor_check import REQUIRED_AXES, MotorCheckSequence
 
 logger = logging.getLogger(__name__)
 
@@ -839,17 +839,17 @@ def _make_sync_violation_handler(
 
 
 def _load_sequence(robot_name: str) -> Sequence | None:
-    """robots/<robot_name>.py からシーケンスクラスを動的にロードする。
+    """sequences/<robot_name>.py からシーケンスクラスを動的にロードする。
 
     **候補は「そのモジュールが定義した」クラスに限り、2 つ以上あったら起動を拒否する。**
     かつては ``dir()`` の並び (アルファベット順) で最初に見つかったサブクラスを
-    返していたため、``robots/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を
+    返していたため、``sequences/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を
     import しただけで ``"MotorCheckSequence" < "SubHandSequence"`` が成立し、
     サブハンドとして動作確認シーケンスが登録される。症状は「sub_hand の
     sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
     理由が読めない。曖昧な構成は黙って起動させず、その場で落とす。
     """
-    module_name = f"robots.{robot_name}"
+    module_name = f"sequences.{robot_name}"
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError:

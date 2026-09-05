@@ -27,8 +27,8 @@ import logging
 from lib.sequence.engine import Sequence, step
 from lib.sequence.homing import HomingRunner
 from lib.sequence.motors import AxisHandle
-from robots.main_hand import HOME as MAIN_HOME
-from robots.sub_hand import VALVE_AXES
+from sequences.main_hand import HOME as MAIN_HOME
+from sequences.sub_hand import VALVE_AXES
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 #: 別物になり、しかも確認は通ってしまうので気付けない。
 
 #: サブハンドの初期姿勢。電磁弁とポンプは「止める = 消磁 / 停止」に倒す。
-#: **`robots/sub_hand.py` の `move_to_home` とは意図的に別物** —— あちらは
+#: **`sequences/sub_hand.py` の `move_to_home` とは意図的に別物** —— あちらは
 #: 吸気ポンプを回したまま次のサイクルへ入る運用上の待機姿勢で、こちらは
 #: 前後スライドと昇降も含めた機構の原位置 (ポンプは停止)。
 SUB_HOME: dict[str, str] = {
