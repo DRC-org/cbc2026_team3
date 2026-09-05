@@ -13,7 +13,6 @@ UI 側が `typeof msg.robot === "string"` を受信条件にしており、Pytho
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 import json
 import os
@@ -317,45 +316,21 @@ def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
 _Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher, MotorGroup]
 
 
-class _LockstepClock:
-    """周期タスクの実時間 sleep を `asyncio.sleep(0)` へ差し替え、golden 採取を
-    壁時計から切り離す。
-
-    導入時の動機 (`worst_jitter_ms` の値比較が OS 揺らぎで落ちる) は配信を
-    外したので今は無いが、3 タスクが何十 tick も回る golden 採取を CI 負荷に
-    関わらず高速・決定的に保つ効果はそのまま残るので維持する。
-    """
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    async def sleep(self, delay: float) -> None:
-        self.now += delay
-        await asyncio.sleep(0)
-
-
 def _build_fixture() -> _Fixture:
     fx = ServerFixture.build(checklist_definitions=_checklist_definitions())
     generics = _generic_drivers()
     mgr = _make_can_manager(generics, _sensor_drivers())
 
-    loop_clock = _LockstepClock()
-    loop = M3508PositionLoop(mgr, _M3508_BUS, time_source=loop_clock, sleep=loop_clock.sleep)
+    loop = M3508PositionLoop(mgr, _M3508_BUS)
     drivers = {"y_axis_r": M3508Driver("y_axis_r", 1), "y_axis_l": M3508Driver("y_axis_l", 2)}
     for name, driver in drivers.items():
         loop.add_motor(name, driver, make_position_pid(2.0))
     loop.add_sync_group(_sync_group())
 
-    monitor_clock = _LockstepClock()
     monitor = SyncMonitor(
         [_sync_group()],
         drivers,
         last_feedback_at=lambda _name: None,
-        time_source=monitor_clock,
-        sleep=monitor_clock.sleep,
     )
 
     # 目標値再送も 1 台ぶん載せる。空リストだと safety.target_refreshers の
@@ -369,12 +344,7 @@ def _build_fixture() -> _Fixture:
     )
     # 自作モタドラ 2 枚を再送対象にする。**緊急停止で目標を捨てるのはこのタスク**なので、
     # 指令値 (`command`) を持つモータを外すと、停止しても指令が残る構成になる
-    refresher_clock = _LockstepClock()
-    refresher = GenericTargetRefresher(
-        [group["gripper"], group["conveyor"]],
-        time_source=refresher_clock,
-        sleep=refresher_clock.sleep,
-    )
+    refresher = GenericTargetRefresher([group["gripper"], group["conveyor"]])
 
     sequence = _ContractSequence()
     # シーケンスにも同じ群を bind する。`state` の `command` はここから引かれるので、
