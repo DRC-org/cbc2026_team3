@@ -502,6 +502,9 @@ def _create_bus(
     落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、
     config 系のエラー (`_load_all_configs`) と同じく直し方まで書いて止める。
     """
+    # **`!= "up"` にしてはならない。** SocketCAN は carrier を管理しないので up でも
+    # `unknown` を返す (`down` は管理上 down のときだけ)。up を条件にすると健全な
+    # バスが毎回起動ログを汚す。
     if not dry_run and read_operstate(channel) == "down":
         logger.error(
             "CAN インタフェース '%s' は down です。scripts/setup_can.sh を実行してください",
