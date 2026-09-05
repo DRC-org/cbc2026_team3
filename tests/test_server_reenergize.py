@@ -561,3 +561,160 @@ class TestPairedAxisIsExpandedToPartner:
         can_manager = fx.can_manager("main_hand")
         can_manager.activate_motors.assert_awaited_once()
         assert can_manager.activate_motors.await_args.kwargs["only"] == set()
+
+
+class TestReactivationWaitsForPendingReenergize:
+    """逆方向の排他: 緊急停止解除の再励磁 (`_reactivate_motors`) は、同じロボットの
+    `reenergize_motors` が in-flight ならその完了を待ってから自分の
+    `activate_motors` を呼ぶ (敵対的レビュー指摘)。
+
+    両者が同じロボットへ並走すると、片方の `_wait_fresh_feedback` が送る
+    プローブ (`feedback_probe_message()` = disable) が、もう片方が enable した
+    ばかりのモータへ届く。DM3520 は disable で自重落下するので、「戻した直後に
+    もう一度落とす」形で `reenergize_motors` 自身の存在意義を壊す。
+
+    **解除コマンドの受理そのものは待たせない** —— 待たせる先はバックグラウンドの
+    再励磁タスクのほうで、解除の受理・ラッチ解除・状態配信は即座に進む
+    (`_cmd_e_stop_release` に手を入れていないことは他のテストが守る)。
+    """
+
+    async def test_reactivate_activate_motors_waits_for_pending_reenergize(self) -> None:
+        fx = _build_fixture()
+        order: list[str] = []
+        reenergize_gate = asyncio.Event()
+
+        async def _activate(**_kwargs: object) -> list[str]:
+            if not order:
+                order.append("reenergize_start")
+                await reenergize_gate.wait()
+                order.append("reenergize_done")
+            else:
+                order.append("reactivate")
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _activate
+        fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await asyncio.sleep(0)
+        assert order == ["reenergize_start"]
+
+        await fx.command({"type": "e_stop"})
+        await fx.command({"type": "e_stop_release"})
+        await asyncio.sleep(0)
+        # 解除は受理されているが、main_hand の再励磁がまだ処理中なので
+        # reactivate 側の activate_motors はまだ呼ばれていない
+        assert not fx.server._e_stop_active
+        assert order == ["reenergize_start"]
+
+        reenergize_gate.set()
+        await fx.wait_reenergize("main_hand")
+        await fx.wait_reactivation()
+
+        assert order == ["reenergize_start", "reenergize_done", "reactivate"]
+
+
+class TestMotorCheckDeniedWhileReenergizeInFlight:
+    """逆方向の排他: 動作確認は、どちらかのロボットの `reenergize_motors` が
+    in-flight なら起動できない (敵対的レビュー指摘)。
+
+    零点確定 (`rotate`) は disable → SET_ZERO → enable を伴う。同じモータへ
+    再励磁の `activate_motors` が並走すると、そちらのプローブ (disable) が
+    動作確認側の enable と競合しうる。
+    """
+
+    async def test_denied_while_pending(self) -> None:
+        fx = _build_fixture()
+        fx.set_motor_check_sequence(_EmptySequence("motor_check"))
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        try:
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await asyncio.sleep(0)
+
+            assert await fx.start_motor_check() is False
+            assert "main_hand" in (fx.motor_check_error() or "")
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_allowed_once_reenergize_finishes(self) -> None:
+        fx = _build_fixture()
+        fx.set_motor_check_sequence(_EmptySequence("motor_check"))
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+
+        assert await fx.start_motor_check() is True
+
+
+class TestSetOperationModeDeniedWhileReenergizeInFlight:
+    """逆方向の排他: 手動操縦への切替は、そのロボットの `reenergize_motors` が
+    in-flight なら拒否する (敵対的レビュー指摘)。
+
+    手動へ入った直後に送るジョグは、再励磁の `activate_motors` が書く
+    「フォルト前の現在角」目標と同じモータへ競合しうる。
+    """
+
+    def _fixture(self) -> ServerFixture:
+        table = load_position_table(
+            {
+                "axes": {
+                    "axis": {
+                        "unit": "rad",
+                        "command_unit": "rad",
+                        "manual": {"min": -1.0, "max": 1.0, "steps": [0.1]},
+                        "motors": {"m1": {"scale": 1.0}},
+                    },
+                },
+                "positions": {},
+            },
+            source="<test>",
+        )
+        can_manager = mock_can_manager()
+        group = MotorGroup()
+        group.add(MotorHandle("m1", can_manager.motors["m1"], can_manager))
+        manual = ManualController(group, table)
+
+        fx = ServerFixture.build()
+        fx.add_robot("main_hand", _EmptySequence("main_hand"), can_manager, manual=manual)
+        fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
+        return fx
+
+    async def test_denied_while_pending(self) -> None:
+        fx = self._fixture()
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        try:
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await asyncio.sleep(0)
+
+            await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+            assert fx.operation_mode("main_hand") == "sequence"
+            fx.server._reject_command.assert_awaited_once()
+            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_allowed_once_reenergize_finishes(self) -> None:
+        fx = self._fixture()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        assert fx.operation_mode("main_hand") == "manual"

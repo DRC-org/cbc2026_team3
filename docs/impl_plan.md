@@ -5884,7 +5884,38 @@ CLAUDE.md の「消すのはジョグの起点だけで、緊急停止でも同�
 拒否はサーバーが理由付きで返す。詳細は `docs/checks_and_health.md` の
 「『励磁されていない』はヘルスに現れない」節、手順は `docs/venue_recovery.md` §3-5。
 
-## 未解決の課題
+### 敵対的レビューで見つかった穴: 排他が片方向にしかなかった（2026-09-06）
+
+`reenergize_motors` は自分を守るガード（動作確認・緊急停止解除の再励磁・二重投入）
+を持つが、**逆方向**——他の操作が「同じロボットの再励磁が in-flight」を見ていな
+かった。`feedback_probe_message()` は EDULITE 05 / DM3520 とも disable フレームを
+返すため、再励磁の `activate_motors` が in-flight のまま別の `activate_motors` が
+同じモータへ並走すると、片方の enable をもう片方のプローブが disable し直す
+（DM3520 は disable で自重落下する）。
+
+3 箇所で塞いだ:
+
+- **`_reactivate_motors`（緊急停止解除）**: 対象ロボットの `_reenergize_tasks` が
+  in-flight なら `await` してから自分の `activate_motors` へ進む。**待つ・拒否
+  する・中断させるの 3 択で「待つ」を選んだ**——解除コマンドの受理自体を拒否・
+  遅延させると「解除のたびに同じロボットが取り残される」実機事故（本ファイル
+  上部、緊急停止のラッチ解除の節）と同型になる。待ちが長くならない根拠は、
+  古いタスクの `activate_motors` 自身が `should_abort=lambda: self._e_stop_active`
+  を持ち、解除の前提として既に `_e_stop_active` が真だった瞬間から中断へ向かって
+  いること
+- **`_motor_check_environment_deny`**: いずれかのロボットの再励磁が in-flight
+  なら動作確認の起動を拒否する。零点確定（`rotate`）が disable → SET_ZERO →
+  enable を伴うため
+- **`_apply_operation_mode`（手動へ入る側）**: 対象ロボットの再励磁が in-flight
+  なら拒否する。手動へ入った直後のジョグが、再励磁の書く「フォルト前の現在角」
+  目標と同じモータへ競合しうるため。手動から出る側（`SEQUENCE` へ戻る）は CAN
+  へ何も送らないので対象外
+
+**`_reenergize_motors` 本体を try/except で囲った（should-fix）。** fire-and-forget
+タスクで `add_done_callback` も辞書からの除去しか見ないため、無防備だと CLAUDE.md
+が名指しする「`_tasks` を誰も await しないので例外は消える」と同型になる。現状の
+処理（辞書操作と CAN 呼び出しのみ）で実際に踏む筋は無いが、将来の変更に備えた
+予防線。
 
 実装済みだが実機・運用面で未対応の項目。競技当日までに潰すか、意識的に許容するかを決める必要がある。
 

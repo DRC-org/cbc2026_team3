@@ -777,6 +777,15 @@ class RobotServer:
                     "動作確認の実行中は手動操縦へ切り替えられません",
                 )
                 return False
+            # このロボットの再励磁が in-flight なら拒否する。手動へ入った直後に
+            # ジョグを送ると、再励磁の `activate_motors` が書く「フォルト前の
+            # 現在角」で上書きされうる (同じモータへの目標書き込みが競合する)
+            pending = self._reenergize_tasks.get(robot_name)
+            if pending is not None and not pending.done():
+                await self._reject_command(
+                    requester, "set_operation_mode", f"'{robot_name}' の再励磁が処理中です"
+                )
+                return False
             # 制御権を必ず手放させる。破棄しないと、切替直前に届いた開始要求が
             # 手動で機構を動かしている最中に発火する
             self._stop_sequence(ctx)
@@ -1418,6 +1427,18 @@ class RobotServer:
         (中断しない) → ③励磁 (中断あり)。①と②が重なるのは意図的で、①は
         「バス上の全基板へ届く」ことを、②は「PC が把握しているモータへ確実に
         届く」ことをそれぞれ担う。
+
+        **③の直前に、同じロボットの `_reenergize_motors` が in-flight なら完了を待つ。**
+        両者が同じロボットの `activate_motors` を並走させると、片方の
+        `_wait_fresh_feedback` が送るプローブ (EDULITE 05 / DM3520 とも
+        `feedback_probe_message()` = disable) が、もう片方が enable したばかりの
+        モータへ届く —— DM3520 は disable で自重落下するので、「戻した直後に
+        もう一度落とす」形で `_reenergize_motors` 自身の存在意義を壊す。
+        **解除コマンドの受理そのものは拒否・待機させない** (拒否すると「解除の
+        たびに同じロボットが取り残される」実機事故と同型になる)。ここ
+        (バックグラウンドの再励磁タスク) だけが古いタスクの完了を待ってから
+        自分の励磁へ進む。古いタスクは既に `_e_stop_active` を見て中断へ
+        向かっているはずなので、待ちは長くならない。
         """
         await self._send_e_stop_clear_broadcast()
 
@@ -1435,6 +1456,10 @@ class RobotServer:
                 )
 
         for name, ctx in self._robots.items():
+            pending = self._reenergize_tasks.get(name)
+            if pending is not None and not pending.done():
+                with contextlib.suppress(Exception):
+                    await pending
             await self._activate_motors_for_robot(name, ctx)
 
         # 解除して有効化を試みた以上、以降は励磁されているのが正しい状態になる。
@@ -1529,29 +1554,42 @@ class RobotServer:
         実質 `rotate` だけが対象になる。相方の `wait_reached` が割り込まれるのは
         許容する —— そのペアは片側の無励磁で既に破綻していたので、割り込みは
         「壊れていた」ことの正しい反映であって新たな害ではない。
+
+        **`only` の計算から `activate_motors` 呼び出しまでを try/except で囲う。**
+        このタスクは fire-and-forget (`_cmd_reenergize_motors` が await しない) で、
+        `add_done_callback` も辞書からの取り除きだけしか見ない。無防備なままだと
+        ここでの例外は「`_tasks` を誰も await しないので例外は消える」
+        (CLAUDE.md) と同型で握り潰される —— 現状は辞書操作しか無く踏む筋は
+        無いが、将来ここへ処理を足したときに同じ穴を空けないための予防線。
         """
-        ctx = self._robots[robot_name]
-        dropped = {
-            name for name, motor in ctx.can_manager.motors.items() if motor.is_energized() is False
-        } | set(self._inactive_motors.get(robot_name, ()))
-        for monitor in ctx.sync_monitors:
-            for group in monitor.groups:
-                member_names = {member.name for member in group.members}
-                if dropped & member_names:
-                    dropped |= member_names
-        for refresher in ctx.target_refreshers:
-            for name in dropped.intersection(refresher.motor_names):
-                refresher.clear_target(name)
+        try:
+            ctx = self._robots[robot_name]
+            dropped = {
+                name
+                for name, motor in ctx.can_manager.motors.items()
+                if motor.is_energized() is False
+            } | set(self._inactive_motors.get(robot_name, ()))
+            for monitor in ctx.sync_monitors:
+                for group in monitor.groups:
+                    member_names = {member.name for member in group.members}
+                    if dropped & member_names:
+                        dropped |= member_names
+            for refresher in ctx.target_refreshers:
+                for name in dropped.intersection(refresher.motor_names):
+                    refresher.clear_target(name)
 
-        # ジョグの起点を捨てる。無励磁のあいだ機構が自重で下がっていた場合、
-        # 再励磁後 1 回目のジョグが古い起点から飛ぶ (activate_e_stop の
-        # on_e_stop() と同じ理由)。軸単位に絞る API が無いのでロボット全体を
-        # 対象にするが、次のジョグがフィードバックから取り直すだけなので無害。
-        # 対象が無ければ (画面が既に閉じたボタンを遅延で押した等) 触らない
-        if dropped and ctx.manual is not None:
-            ctx.manual.reset()
+            # ジョグの起点を捨てる。無励磁のあいだ機構が自重で下がっていた場合、
+            # 再励磁後 1 回目のジョグが古い起点から飛ぶ (activate_e_stop の
+            # on_e_stop() と同じ理由)。軸単位に絞る API が無いのでロボット全体を
+            # 対象にするが、次のジョグがフィードバックから取り直すだけなので無害。
+            # 対象が無ければ (画面が既に閉じたボタンを遅延で押した等) 触らない
+            if dropped and ctx.manual is not None:
+                ctx.manual.reset()
 
-        await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
+            await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
+        except Exception:
+            logger.exception("再励磁処理で予期しない例外: robot=%s", robot_name)
+            return
 
         # 有効化の途中で緊急停止が入ると、中断判定をすり抜けた enable が
         # 停止フレームより後に届きうる。念のため停止フレームを送り直す
@@ -1652,8 +1690,9 @@ class RobotServer:
         優先順:
           1. 試合中 (アクチュエータを一巡させるため試合進行を乱す)
           2. 緊急停止中 (誤発火による駆動を完全に止める)
-          3. **どれかの**ロボットが手動操縦モード (制御権の二重取得を防ぐ)
-          4. **どれかの**ロボットで通常シーケンス実行中 (同上)
+          3. **どれかの**ロボットで再励磁が in-flight (同じモータへの活性化が競合する)
+          4. **どれかの**ロボットが手動操縦モード (制御権の二重取得を防ぐ)
+          5. **どれかの**ロボットで通常シーケンス実行中 (同上)
 
         両ハンドを 1 本で駆動するので、ゲートも全ロボットに対して掛ける。
         片方だけ見ていると、確認中にもう一方が手動で動かされて干渉する。
@@ -1667,6 +1706,13 @@ class RobotServer:
 
         if self._e_stop_active:
             return "緊急停止中のため動作確認を実行できません"
+
+        for name, task in self._reenergize_tasks.items():
+            if not task.done():
+                # 零点確定 (rotate) は disable → SET_ZERO → enable を伴う。同じモータへ
+                # 再励磁の activate_motors が並走すると、`_wait_fresh_feedback` の
+                # プローブ (disable) が動作確認側の enable と衝突しうる
+                return f"'{name}' の再励磁が完了していないため動作確認を実行できません"
 
         for name, ctx in self._robots.items():
             if ctx.mode is OperationMode.MANUAL:
