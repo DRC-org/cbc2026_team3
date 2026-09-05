@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import struct
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,6 +12,7 @@ import pytest
 
 from lib.can_manager import _RECV_RETRY_MIN_S, _RX_BATCH_MAX, CANManager
 from lib.drivers.base import ControlMode, MotorState
+from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth
@@ -21,7 +23,7 @@ from tests.fake_can import (
     mock_bus,
     mock_driver,
 )
-from tests.feedback_frames import generic_feedback, m3508_feedback
+from tests.feedback_frames import feed_edulite, generic_feedback, m3508_feedback
 
 
 class TestCANManager:
@@ -209,6 +211,109 @@ class TestCANManager:
         bus1.shutdown.assert_called_once()
 
 
+class TestCaptureOriginViaSetZero:
+    """原点をドライバ内部に持つモータの零点確定 (EDULITE 05)。
+
+    順序は `initialization_steps()` が確立している **無励磁 → 付け替え → 再励磁**。
+    独自に組み替えると、励磁時の飛び出しを塞ぐ仕掛けが 2 箇所に分かれる。
+    """
+
+    def _prepare(self) -> tuple[CANManager, list[tuple[str, can.Message]]]:
+        sent: list[tuple[str, can.Message]] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        for name, can_id in (("rotate_r", 0x11), ("rotate_l", 0x12)):
+            mgr.add_motor("can_edulite", Edulite05Driver(name, can_id=can_id))
+
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            sent.append((motor_name, msg))
+            # 問い合わせへの応答としてフィードバックが届く状況を模す
+            mark_feedback_at(mgr, motor_name, time.time())
+
+        mgr.send = _send  # type: ignore[method-assign]
+        return mgr, sent
+
+    @staticmethod
+    def _comm_types(sent: list[tuple[str, can.Message]], name: str) -> list[int]:
+        return [Edulite05Driver.parse_can_id(msg.arbitration_id)[0] for n, msg in sent if n == name]
+
+    async def test_無励磁にしてから原点を切り直す(self) -> None:
+        """励磁したまま送るとドライバ内部の位置目標が旧座標のまま残り、軸が飛ぶ。"""
+        mgr, sent = self._prepare()
+
+        await mgr.capture_origin_via_set_zero(["rotate_r", "rotate_l"])
+
+        for name in ("rotate_r", "rotate_l"):
+            order = self._comm_types(sent, name)
+            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
+            assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
+
+    async def test_全員を無励磁にしてから全員を切り直す(self) -> None:
+        """モータ単位で「無励磁 → 付け替え」を回すと、先に付け替えた側だけが
+        新原点で報告する窓が段の待ち時間ぶん伸びる。
+        """
+        mgr, sent = self._prepare()
+
+        await mgr.capture_origin_via_set_zero(["rotate_r", "rotate_l"])
+
+        types = [Edulite05Driver.parse_can_id(msg.arbitration_id)[0] for _n, msg in sent]
+        first_zero = types.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
+        # 最初の SET_ZERO より前に disable が 2 通 (= 両方) 出ている
+        assert types[:first_zero].count(Edulite05Driver.COMM_TYPE_DISABLE) == 2
+
+    async def test_新原点を保持目標にして再励磁する(self) -> None:
+        """**`after_set_zero=True` を通す経路が要る。** `_wait_fresh_feedback` は
+        「待機開始より後に届いた 1 通」しか待たないので、SET_ZERO 直後に届いた
+        在庫のフィードバック (旧原点で測られたもの) を保持目標に使う余地が残る。
+        """
+        mgr, sent = self._prepare()
+        # 旧原点での実測角。これが保持目標に使われたら原点の差分だけ軸が動く
+        feed_edulite(mgr.motors["rotate_r"], position=1.5)
+        feed_edulite(mgr.motors["rotate_l"], position=1.5)
+
+        await mgr.capture_origin_via_set_zero(["rotate_r", "rotate_l"])
+
+        for name in ("rotate_r", "rotate_l"):
+            order = self._comm_types(sent, name)
+            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
+            enable = order.index(Edulite05Driver.COMM_TYPE_ENABLE, zero)
+            # SET_ZERO と enable の間に書いた LOC_REF が保持目標
+            writes = [
+                msg
+                for n, msg in sent
+                if n == name
+                and Edulite05Driver.parse_can_id(msg.arbitration_id)[0]
+                == Edulite05Driver.COMM_TYPE_WRITE_PARAM
+            ]
+            hold = writes[-1]
+            param_id, value = struct.unpack("<Hxxf", hold.data)
+            assert param_id == Edulite05Driver.PARAM_LOC_REF
+            assert value == pytest.approx(0.0), "旧原点の実測角 1.5rad を書いてはならない"
+            assert enable > zero
+
+    async def test_再励磁できなければ降りる(self) -> None:
+        """原点だけ切り直して無励磁のまま残ると、症状は「指令しても動かない」だけ。"""
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        mgr.add_motor("can_edulite", Edulite05Driver("rotate_r", can_id=0x11))
+
+        # フィードバックが 1 通も届かない = 実測角が確認できない
+        with (
+            patch.object(mgr, "send", new_callable=AsyncMock),
+            pytest.raises(RuntimeError, match="再励磁"),
+        ):
+            await mgr.capture_origin_via_set_zero(["rotate_r"])
+
+    async def test_手段を持たないモータは拒否する(self) -> None:
+        """自作モタドラのサーボへ送っても原点は動かない。黙って成功してはならない。"""
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_generic", mock_bus())
+        mgr.add_motor("can_generic", GenericDriver("servo", can_id=0x41))
+
+        with pytest.raises(ValueError, match="原点を切り直せません"):
+            await mgr.capture_origin_via_set_zero(["servo"])
+
+
 class TestMotorActivation:
     """励磁の有効化は「有効化した瞬間に動かない」ことを保証してからでないと行えない。"""
 
@@ -271,7 +376,7 @@ class TestMotorActivation:
 
         seen_rx_at: list[float | None] = []
 
-        def record_activation() -> list[tuple[can.Message, float]]:
+        def record_activation(*, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
             seen_rx_at.append(mgr.last_feedback_at("m1"))
             return [(enable_msg, 0.0)]
 

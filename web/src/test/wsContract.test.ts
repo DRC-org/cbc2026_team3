@@ -6,6 +6,7 @@ import type {
   BusHealth,
   ChecklistItem,
   ChecklistState,
+  ExcludedStep,
   HealthChange,
   HealthSnapshot,
   ManualAxis,
@@ -21,6 +22,7 @@ import type {
   RobotState,
   SafetyState,
   SequenceFailure,
+  SensorState,
   SequenceStepInfo,
   ServerInfo,
   ServerMessage,
@@ -72,6 +74,9 @@ const STATE_FIELDS_UI_READS = [
   "running",
   "steps",
   "motors",
+  // 原点スイッチの接触状態。落ちれば `origin_sensor_react` の指差喚呼を
+  // 画面から確かめる手段がなくなる (candump を打つしかない状態へ戻る)
+  "sensors",
   "e_stop_active",
   "health",
   "safety",
@@ -111,6 +116,8 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].safety).toEqual(sample.safety);
     // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
     expect(result.states[robot].manual).toEqual(sample.manual);
+    // センサも同じ理由で配信そのまま (センサ名を UI へ書き写さない)
+    expect(result.states[robot].sensors).toEqual(sample.sensors);
   },
 
   /**
@@ -199,6 +206,17 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(state.running).toBe(sample.running);
     expect(state.error).toBe(sample.error);
     expect(state.total_steps).toBe(sample.total_steps);
+    expect(state.steps).toEqual(sample.steps);
+  },
+
+  motor_check_state_with_exclusions: (result, sample) => {
+    // **除外が受信経路を通ることを、除外が載った実配信で見る。** 空配列の形しか
+    // 通っていないと、UI が除外を受信条件で弾いても誰も気付けない (症状は
+    // 「サブハンド不在の構成でだけ全ステップ成功に見える」)
+    const state = result.motorCheck;
+    expect(state.excluded_steps).toEqual(sample.excluded_steps);
+    expect(state.excluded_steps).not.toHaveLength(0);
+    // ステップ表からは減っていることを読めない (除外は別の欄でしか届かない)
     expect(state.steps).toEqual(sample.steps);
   },
 
@@ -390,6 +408,12 @@ const TARGET_REFRESHER = fieldsOf<TargetRefresherState>({
   paused: { unused: "動作確認中の意図的な停止なので異常に数えない" },
 });
 
+/** 自作基板のセンサ入力 1 個。接触は情報で、異常なのは途絶 (stale) の方 */
+const SENSOR_STATE = fieldsOf<SensorState>({
+  active: "ui",
+  stale: "ui",
+});
+
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
@@ -427,6 +451,13 @@ const MANUAL = fieldsOf<ManualState>({
   axes: "ui",
 });
 
+/** 構成に無い軸を指令するため登録されなかったステップ (`motor_check_state` のみ) */
+const EXCLUDED_STEP = fieldsOf<ExcludedStep>({
+  step: "ui",
+  // どの軸が無いか。これが落ちると「減っている理由」を画面から読めない
+  missing_axes: "ui",
+});
+
 /** 失敗したステップと理由。`state` と `motor_check_state` の双方に載る */
 const SEQUENCE_FAILURE = fieldsOf<SequenceFailure>({
   step_index: "ui",
@@ -455,6 +486,34 @@ const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({
 });
 const CHECKLIST_STATE = fieldsOf<ChecklistState>({ items: "ui", completed: "ui" });
 
+/**
+ * 動作確認の 1 通。ワイヤ形式と正規化後の形が違う唯一のメッセージで、受信時に
+ * `motorCheck` で包み直しているので `WireOf` ではなく素のペイロード型で宣言する。
+ */
+const MOTOR_CHECK_FIELDS: FieldSpec = {
+  ...fieldsOf<Wire<MotorCheckSnapshot>>({
+    type: "parser",
+    available: "ui",
+    blocked_reason: "ui",
+    running: "ui",
+    current_step: "ui",
+    step_index: "ui",
+    total_steps: "ui",
+    steps: "ui",
+    error: "ui",
+    // 失敗理由のもう 1 つの置き場所。`error` と合わせて 1 つへ畳んで出す
+    // (`lib/motorCheckStatus.ts`)。片方だけを読むと、サーバーが置き場所を
+    // 変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
+    last_error: "ui",
+    // 除外したステップ。**空でも必ず載る欄**なので、宣言から落とすと
+    // 「除外を配信しなくなった」変更が契約テストを素通りする
+    excluded_steps: "ui",
+  }),
+  ...nest("steps[]", STEP),
+  ...nest("last_error", SEQUENCE_FAILURE),
+  ...nest("excluded_steps[]", EXCLUDED_STEP),
+};
+
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
     type: "parser",
@@ -466,6 +525,7 @@ const STATE_FIELDS: FieldSpec = {
     running: "ui",
     steps: "ui",
     motors: "ui",
+    sensors: "ui",
     e_stop_active: "ui",
     health: "ui",
     safety: "ui",
@@ -477,6 +537,7 @@ const STATE_FIELDS: FieldSpec = {
   }),
   ...nest("motors.*", MOTOR_STATE),
   ...nest("motors.*.pid", MOTOR_PID),
+  ...nest("sensors.*", SENSOR_STATE),
   ...nest("health", HEALTH),
   ...nest("health.buses[]", BUS_HEALTH),
   ...nest("health.motors[]", MOTOR_HEALTH),
@@ -603,25 +664,10 @@ const DECLARED: Record<string, FieldSpec> = {
 
   // ワイヤ形式と正規化後の形が違う唯一のメッセージ。受信時に `motorCheck` で
   // 包み直しているので、`WireOf` ではなく素のペイロード型で宣言する
-  motor_check_state: {
-    ...fieldsOf<Wire<MotorCheckSnapshot>>({
-      type: "parser",
-      available: "ui",
-      blocked_reason: "ui",
-      running: "ui",
-      current_step: "ui",
-      step_index: "ui",
-      total_steps: "ui",
-      steps: "ui",
-      error: "ui",
-      // 失敗理由のもう 1 つの置き場所。`error` と合わせて 1 つへ畳んで出す
-      // (`lib/motorCheckStatus.ts`)。片方だけを読むと、サーバーが置き場所を
-      // 変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
-      last_error: "ui",
-    }),
-    ...nest("steps[]", STEP),
-    ...nest("last_error", SEQUENCE_FAILURE),
-  },
+  motor_check_state: MOTOR_CHECK_FIELDS,
+  // 構成に無い軸のステップを除外した形。**この形も契約に含める** — 除外が載った
+  // 側だけが漏れると、UI が除外を弾く条件を書いても誰も気付けない
+  motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
 
   // 波形・指標・助言を 1 通で運ぶ。motor_check_state と同じく受信時に `capture` で
   // 包み直しているので、素のペイロード型で宣言する
@@ -634,8 +680,9 @@ const DECLARED: Record<string, FieldSpec> = {
 /**
  * キー名が動的なマップ。ここを普通の入れ子として辿ると `motors.gripper.pos` の形で
  * モータ名が契約へ焼き付き、「UI はモータ名をハードコードしない」設計と食い違う。
+ * センサ名も同じ理由で焼き付けない (機構が変わって本数が増減しても UI は無変更)。
  */
-const DYNAMIC_MAPS = new Set(["motors", "checklists"]);
+const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists"]);
 
 /** サンプル 1 通のキーをドット区切りのパスへ平坦化する (配列要素はまとめて `[]`) */
 function flattenPaths(value: unknown, prefix = ""): string[] {

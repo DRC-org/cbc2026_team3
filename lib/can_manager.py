@@ -790,18 +790,68 @@ class CANManager:
                 inactive.append(motor_name)
         return inactive
 
+    async def capture_origin_via_set_zero(self, motor_names: Sequence[str]) -> None:
+        """指定したモータ群の原点を「今の位置」へまとめて切り直す (零点確定)。
+
+        **軸のモータ全員をまとめて受け取る。** 左右直結ペアを別々の時刻に確定すると、
+        その間に片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に
+        偏差超過で止まる (`M3508PositionLoop.set_group_origin_here` と同じ理由)。
+
+        順序は `initialization_steps()` が既に確立しているもの ——
+        **無励磁 → 原点付け替え → 再励磁** —— をそのまま使う。励磁したまま原点を
+        動かすとドライバ内部の位置目標が旧座標のまま残り、差分だけ軸が飛ぶ。
+        独自に組み替えると、励磁時の飛び出しを塞ぐ仕掛けが 2 箇所に分かれる。
+
+        再励磁で `after_set_zero=True` を通すのが要点。`_wait_fresh_feedback` は
+        「待機開始より後に届いた 1 通」しか待たないので、SET_ZERO を送った直後に
+        **旧原点で測られた在庫のフィードバックが届く**余地が残る。それを保持目標に
+        使うと原点の差分だけ機構が動くので、保持目標には新原点そのものである 0 を書く。
+
+        Raises:
+            ValueError: 原点を切り直す手段を持たないモータが混ざっている
+                (呼び出し側が `supports_origin_capture()` で先に弾く前提)
+            RuntimeError: 再励磁できなかった。**黙って戻ってはならない** ——
+                原点だけ切り直して無励磁のまま残ると、症状は「指令しても動かない」
+                だけになる
+        """
+        names = list(motor_names)
+        unsupported = [name for name in names if not self._motors[name].supports_origin_capture()]
+        if unsupported:
+            raise ValueError(f"モータ {', '.join(unsupported)} は CAN 経由で原点を切り直せません")
+
+        # **段ごとに全モータを回す。** モータ単位で「無励磁 → 付け替え」を回すと、
+        # 先に付け替えた側だけが新原点で報告する窓が段の待ち時間ぶん伸びる
+        for name in names:
+            await self._send_steps(name, self._motors[name].deactivation_steps())
+        for name in names:
+            await self._send_steps(name, self._motors[name].origin_capture_steps())
+
+        inactive = [
+            name for name in names if not await self.activate_motor(name, after_set_zero=True)
+        ]
+        if inactive:
+            raise RuntimeError(
+                f"原点を切り直しましたがモータ {', '.join(inactive)} を再励磁できません"
+                " (フィードバックが届いていません。配線・電源を確認してください)"
+            )
+
     async def activate_motor(
         self,
         motor_name: str,
         *,
         should_abort: Callable[[], bool] | None = None,
         feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
+        after_set_zero: bool = False,
     ) -> bool:
         """1 モータの励磁を有効化する。有効化しなかった場合は False。
 
         位置追従するモータは「現在角を目標に書いてから enable する」ことでしか
         有効化時の飛び出しを防げない。実測角を確認できないうちは有効化せず、
         無励磁のまま残すほうが安全なので、フィードバックが得られなければ諦める。
+
+        `after_set_zero` は直前に原点を切り直した経路 (`capture_origin_via_set_zero`)
+        からの呼び出しであることをドライバへ伝える。旧原点で測られた実測角を保持目標に
+        使わせないための宣言で、既定は False。
         """
         motor = self._motors[motor_name]
 
@@ -816,7 +866,7 @@ class CANManager:
             )
             return False
 
-        steps = motor.activation_steps()
+        steps = motor.activation_steps(after_set_zero=after_set_zero)
         if not steps:
             return True
         if should_abort is not None and should_abort():

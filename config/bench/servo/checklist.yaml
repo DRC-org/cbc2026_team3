@@ -10,6 +10,10 @@
 # **この基板は DC 基板と違って位置を報告できる**ので、回ったかどうかは動作確認
 # (motor_check) で自動判定できる。ここの目視項目が担うのは、自動判定では分からない
 # こと — 向き・可動範囲の端・緊急停止時に脱力しないこと — に絞ってある。
+#
+# **基板番号 0 として使う前提の一覧。** 基板番号 1 は SV0 しか駆動できず
+# (firmware/servo/include/config.h の kSlotsByBoard[基板][スロット])、SV1 以降が無応答なのを
+# 故障と区別できないため、ベンチは DIP 全 OFF で回す。
 
 checklists:
   pre_match:
@@ -17,8 +21,11 @@ checklists:
       label: can_generic が up していること確認 (ip -br link show)
     - id: bench_firmware
       label: 基板の RGB LED が緑の点滅 (平常) であること確認。赤の速い点滅は CAN 不通か DIP 未設定
+    # 0x344 (SV4) は届かない。**その 1 本だけファームが Unused として宣言している**
+    # ため (本番で y_axis の原点スイッチに充てるスロット。スイッチ未装着のあいだの
+    # 措置)、Unused のスロットは FEEDBACK も INFO も 1 通も送らない。
     - id: bench_device_id
-      label: candump can_generic に 0x348-0x34C が届いていること確認 (DIP = 基板番号 1)
+      label: candump can_generic に 0x340-0x343 が届いていること確認 (DIP 全 OFF = 基板番号 0)
     - id: bench_free
       label: サーボホーンに何も付いておらず、全可動範囲で回っても干渉しないこと確認
     - id: bench_power
@@ -32,7 +39,7 @@ checklists:
     - id: servo_clamp
       label: ジョグで max (30deg) を超えて送れないこと確認。ファーム側もクランプする
     - id: sensor_react
-      label: SV4 のセンサを触り、UI のセンサ表示が反応すること確認 (接触は異常ではない)
+      label: SV3 のセンサに触れ、UI のセンサ表示が反応すること確認 (接触は異常ではない)
     - id: bench_estop
       label: 動作中に非常停止を押し、サーボがその場で停止すること確認
     - id: bench_estop_hold

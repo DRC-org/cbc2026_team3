@@ -143,6 +143,55 @@ describe("parseServerMessage", () => {
     });
 
     /**
+     * センサ一覧も UI が `Object.entries` を直に呼ぶので受信境界で形を確定させる。
+     * **接触 (`active`) は異常ではない** ので値そのものは素通しで、異常側へ倒すのは
+     * 読めなかった配信だけ。
+     */
+    describe("sensors", () => {
+      const SENSORS = {
+        origin_sensor: { active: true, stale: false },
+        rotate_origin_sensor: { active: false, stale: true },
+      };
+
+      const sensorsOf = (sensors: unknown) => {
+        const msg = parse({ type: "state", robot: "main_hand", sensors });
+        return (msg as { state: RobotState }).state.sensors;
+      };
+
+      it("読める配信はセンサ名ごとそのまま通す (名前を UI へ書き写さない)", () => {
+        expect(sensorsOf(SENSORS)).toEqual(SENSORS);
+      });
+
+      it("センサを 1 本も持たない構成は空のまま (異常にしない)", () => {
+        expect(sensorsOf({})).toEqual({});
+      });
+
+      it("未配信は undefined のまま (古いサーバーを異常にしない)", () => {
+        const msg = parse({ type: "state", robot: "main_hand" });
+        expect((msg as { state: RobotState }).state.sensors).toBeUndefined();
+      });
+
+      it("接触を報告できないドライバの null を受ける (false と混ぜない)", () => {
+        const sensors = { origin_sensor: { active: null, stale: false } };
+        expect(sensorsOf(sensors)).toEqual(sensors);
+      });
+
+      it.each(["active", "stale"])("%s が欠けたら MALFORMED (空へ倒さない)", (key) => {
+        const broken: Record<string, unknown> = { active: true, stale: false };
+        delete broken[key];
+        expect(sensorsOf({ origin_sensor: broken })).toBe(MALFORMED);
+      });
+
+      it("stale が真偽値でなければ MALFORMED", () => {
+        expect(sensorsOf({ origin_sensor: { active: true, stale: "no" } })).toBe(MALFORMED);
+      });
+
+      it("オブジェクトでない配信は MALFORMED", () => {
+        expect(sensorsOf("origin_sensor")).toBe(MALFORMED);
+      });
+    });
+
+    /**
      * **`motors` と `steps` は素通しのまま保つ。** モータ名を UI 側へ書かない性質は
      * 配信をそのまま状態へ入れることで成立しており、ここで組み立て直すと
      * モータが 1 基増えるたびに UI の変更が要る形へ逆戻りする。
@@ -427,6 +476,10 @@ describe("parseServerMessage", () => {
           steps: [],
           error: null,
           last_error: null,
+          // **空配列へ倒さない。** 空は「除外なし = 全ステップが登録されている」を
+          // 既に意味するので、読めなかった配信をそこへ埋めると、除外が起きているのに
+          // 画面が平常を描く (除外を黙って行うのと同じ壊れ方)
+          excluded_steps: MALFORMED,
         },
       });
     });
@@ -460,6 +513,42 @@ describe("parseServerMessage", () => {
       expect(message?.type).toBe("motor_check_state");
       if (message?.type !== "motor_check_state") return;
       expect(message.motorCheck.steps).toEqual([]);
+    });
+
+    it("除外したステップと欠けている軸をそのまま運ぶ", () => {
+      // **除外が受信境界で消えると、動作確認そのものが意味を失う。**
+      // サブハンド不在で減っているのか config の書き忘れで減っているのかを、
+      // 操縦者はこれ以外に区別する材料を持たない
+      const message = parse({
+        type: "motor_check_state",
+        excluded_steps: [{ step: "サブハンド 昇降", missing_axes: ["sub_lift"] }],
+      });
+
+      expect(message?.type).toBe("motor_check_state");
+      if (message?.type !== "motor_check_state") return;
+      expect(message.motorCheck.excluded_steps).toEqual([
+        { step: "サブハンド 昇降", missing_axes: ["sub_lift"] },
+      ]);
+    });
+
+    it("除外が無ければ空配列で受ける", () => {
+      const message = parse({ type: "motor_check_state", excluded_steps: [] });
+
+      expect(message?.type).toBe("motor_check_state");
+      if (message?.type !== "motor_check_state") return;
+      expect(message.motorCheck.excluded_steps).toEqual([]);
+    });
+
+    it("除外が読めない形なら MALFORMED へ倒す", () => {
+      // 空配列 (= 除外なし) へ倒すと、読めなかった配信が「全ステップ登録済み」に化ける
+      const message = parse({
+        type: "motor_check_state",
+        excluded_steps: [{ step: "サブハンド 昇降" }],
+      });
+
+      expect(message?.type).toBe("motor_check_state");
+      if (message?.type !== "motor_check_state") return;
+      expect(message.motorCheck.excluded_steps).toBe(MALFORMED);
     });
   });
 

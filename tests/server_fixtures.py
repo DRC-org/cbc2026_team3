@@ -333,6 +333,25 @@ class ServerFixture:
         """動作確認を起動する。拒否されたら False (HTTP POST の 409 と同じ判定)。"""
         return await self.server._motor_check.start()
 
+    def set_motor_check_pausables(self, pausables: list[Any]) -> None:
+        """動作確認が黙らせる周期タスクの一覧を差し替える。
+
+        **本番の一覧は空である** (`RobotServer._motor_check_pausables`)。それでも
+        「タスク生成から `run()` が駆動を始めるまで」の窓と、`finally` の復帰保証は
+        実在するので、そこを決定的に観測するための代役をここから挿す。
+
+        ロボット配線 (`set_target_refreshers`) 経由で挿していた頃は、pause 対象が
+        空になった瞬間にテストの窓ごと消え、窓の中の緊急停止・中断を誰も見なくなった。
+        差し替えを本ファイルの特権にするのは、コントローラの private を各テストへ
+        書き写すと、注入口の名前が変わったときに「挿したつもりで挿していない」
+        テストが緑を返すため。
+        """
+        self.server._motor_check._pausables = lambda: list(pausables)
+
+    def motor_check_pausables(self) -> list[Any]:
+        """サーバーが「動作確認中に黙らせる」と答える周期タスク (本番の判定)。"""
+        return self.server._motor_check_pausables()
+
     def abort_motor_check(self) -> None:
         self.server._motor_check.abort()
 

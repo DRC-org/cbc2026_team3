@@ -74,6 +74,9 @@ def mock_can_manager(
 
     mgr = MagicMock(spec=CANManager)
     mgr.motors = drivers
+    # センサは既定で 0 個。MagicMock のままだと `sensors.items()` が反復できない
+    # MagicMock を返し、配信の組み立てが TypeError で落ちる
+    mgr.sensors = {}
     mgr.bus_names = (bus_name,)
     mgr.send = AsyncMock()
     mgr.send_to_bus = AsyncMock()
@@ -227,6 +230,25 @@ def set_motors(mgr: CANManager, drivers: Mapping[str, object]) -> None:
     必ずこの 1 経路を通す (2 箇所へ書くと構成とヘルスが食い違う)。
     """
     mgr.motors = dict(drivers)
+
+
+def set_sensors(mgr: CANManager, drivers: Mapping[str, object]) -> None:
+    """モックのセンサ構成を実ドライバへ差し替える。
+
+    センサは ``motors`` とは別の口 (``CANManager.add_sensor``) から登録されるので、
+    差し替えも別に持つ。**``motors`` へ混ぜてはならない** —— 動作確認・目標値再送・
+    UI のモータ一覧に「常に 0 のモータ」が並ぶ形になり、本番と別物の構成をテストする。
+    """
+    mgr.sensors = dict(drivers)
+
+
+def set_last_feedback(mgr: CANManager, times: Mapping[str, float]) -> None:
+    """デバイス名 → 最終受信時刻を置く (載っていない名前は未受信 = ``None``)。
+
+    モックの ``last_feedback_at`` は既定で常に ``None`` を返すため、そのままでは
+    「鮮度が生きている」状態を作れず、途絶側の分岐しか踏めない。
+    """
+    mgr.last_feedback_at.side_effect = lambda name: times.get(name)
 
 
 # ---------------------------------------------------------------------- #

@@ -628,6 +628,54 @@ static void test_apply_set_target_still_honors_the_output_gate() {
     TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
 }
 
+// --------------------------------------------------------------------------
+// §7.1 begin()（スロット設定が実行時に確定することへの対応）
+// --------------------------------------------------------------------------
+
+// サーボ基板のスロット設定は DIP の基板番号で選ぶので、g_channel[] は静的初期化子を
+// 持てず、既定構築されたまま setup() の begin() を待つ。**空きスロットは begin() されない
+// まま残る**ので、そこへ指令が届いても（PC 側 yaml の can_id を書き間違えれば実際に届く）
+// 1 発もパルスが出ない側へ落ちる必要がある。
+//
+// MotorSafety の everFed_ だけでは足りない —— こちらは「まだ 1 通も来ていない」であって、
+// 最初の SET_TARGET 1 通で外れる。
+static void test_channel_without_begin_never_allows_output() {
+    ServoChannel channel;
+
+    channel.feed(0);
+    TEST_ASSERT_FALSE(channel.isOutputAllowed(0));
+    TEST_ASSERT_FALSE(channel.setTarget(90.0f, 0));
+
+    const SetTargetCommand position{ControlType::Position, 900, true};
+    channel.feed(10);
+    TEST_ASSERT_FALSE(channel.applySetTarget(position, 10));
+
+    channel.tick(1000);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, channel.currentAngleDeg());
+}
+
+// begin() が渡した可動範囲は、その後の指令をクランプする範囲そのものになる。
+// 入れ忘れると既定（幅 0）のままで、症状は「どのスロットも初期角から動かない」だけ。
+static void test_begin_installs_the_limits_used_for_clamping() {
+    ServoChannel channel;
+    channel.begin(0.0f, ServoLimits{0.0f, 30.0f, 90.0f}, 500);
+
+    channel.feed(0);
+    TEST_ASSERT_TRUE(channel.setTarget(180.0f, 0));
+    channel.tick(400);  // 30deg / 90deg/s = 334ms（ウォッチドッグ満了より手前）
+    TEST_ASSERT_EQUAL_FLOAT(30.0f, channel.currentAngleDeg());
+}
+
+// 起動時の姿勢は config.h の初期角（仕様書 §5.4）。setup() は begin() の直後に
+// この角度のパルスを書くので、ここがずれると通電した瞬間に機構がその差だけ動く。
+static void test_begin_starts_at_the_given_initial_angle() {
+    ServoChannel channel;
+    channel.begin(12.0f, wideLimits(), 500);
+
+    TEST_ASSERT_EQUAL_FLOAT(12.0f, channel.currentAngleDeg());
+    TEST_ASSERT_TRUE(channel.isReached());
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_angle_to_pulse_at_range_ends);
@@ -666,5 +714,8 @@ int main(int, char **) {
     RUN_TEST(test_reached_tolerance_change_while_latched_survives_release);
     RUN_TEST(test_servo_channel_accepts_only_position_targets);
     RUN_TEST(test_apply_set_target_still_honors_the_output_gate);
+    RUN_TEST(test_channel_without_begin_never_allows_output);
+    RUN_TEST(test_begin_installs_the_limits_used_for_clamping);
+    RUN_TEST(test_begin_starts_at_the_given_initial_angle);
     return UNITY_END();
 }

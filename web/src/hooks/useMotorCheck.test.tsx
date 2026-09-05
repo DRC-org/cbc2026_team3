@@ -29,6 +29,7 @@ const RUNNING: MotorCheckSnapshot = {
   ],
   error: null,
   last_error: null,
+  excluded_steps: [],
 };
 
 describe("useMotorCheck", () => {

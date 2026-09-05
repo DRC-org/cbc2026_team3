@@ -262,15 +262,55 @@ class MotorDriver(abc.ABC):
         """
         return []
 
-    def activation_steps(self) -> list[tuple[can.Message, float]]:
+    def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
         """励磁を有効化する ``(message, delay_after_seconds)``。既定は有効化不要。
 
         有効化した瞬間にモータが動き出さない順序 (現在値を目標に書いてから enable する等)
         はドライバ自身が決める。``requires_fresh_feedback_for_activation`` が True の
         ドライバでは、呼び出し側が新しいフィードバックを受信してから呼ぶ契約になっている
         ため、本メソッドは常に「最新の ``state`` を読んでよい」前提で組み立ててよい。
+
+        ``after_set_zero`` は「直前に原点を切り直した」経路 (``origin_capture_steps``)
+        からの呼び出しであることを伝える。手元の実測角が旧原点で測られたものである
+        可能性が残るため、保持目標に使えるのは**新原点そのもの**だけになる。
+        原点を持たないドライバは無視してよい。
         """
         return []
+
+    # ------------------------------------------------------------------ #
+    #  原点の切り直し (零点確定)
+    # ------------------------------------------------------------------ #
+    # 原点をドライバ内部に持つモータ (EDULITE 05 / DM3520) では、PC 側に累積角が
+    # 無いので「今の位置を 0 と定義し直す」には CAN フレームを送るしかない。
+    # **可否はドライバ自身が宣言する** —— `main.py` や UI にドライバ種別を書き写して
+    # 導出し直すと、ドライバを足した人がそちらの表を直し忘れる。
+
+    def deactivation_steps(self) -> list[tuple[can.Message, float]]:
+        """励磁を落とす ``(message, delay_after_seconds)``。既定は手段なし。
+
+        原点の切り直しは無励磁でしか安全に行えない (励磁したまま原点を動かすと、
+        ドライバ内部の位置目標が旧座標のまま残り、その差分だけ軸が飛ぶ) ので、
+        この宣言が無いドライバは ``supports_origin_capture()`` も False になる。
+        """
+        return []
+
+    def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
+        """「今この位置」を原点として確定する ``(message, delay_after_seconds)``。
+
+        **無励磁であることを前提としてよい** —— 呼び出し側 (``CANManager``) が
+        ``deactivation_steps()`` を先に送る契約になっている。既定は手段なし。
+        """
+        return []
+
+    def supports_origin_capture(self) -> bool:
+        """CAN 経由で原点を切り直せるか。**2 つの宣言が揃ったときだけ True。**
+
+        「切り直すフレームはあるが無励磁にする手段が無い」ドライバを能力ありと
+        名乗らせない。名乗れてしまうと、励磁したまま原点を動かして機構が飛ぶ経路が
+        黙って通る。派生クラスが上書きするのは 2 つの steps だけで、可否は
+        そこから導く (可否を別に宣言させると、片方だけ直した状態が作れる)。
+        """
+        return bool(self.deactivation_steps()) and bool(self.origin_capture_steps())
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         """activation_steps を組み立てる前に新しいフィードバックが必要か。

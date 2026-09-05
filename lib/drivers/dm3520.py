@@ -215,6 +215,17 @@ class Dm3520Driver(MotorDriver):
         return self._special_command(self.SPECIAL_DISABLE)
 
     def encode_set_zero(self) -> can.Message:
+        """今の位置を原点として書き込む (特殊コマンド)。
+
+        **`deactivation_steps` / `origin_capture_steps` は宣言しない。** つまり
+        `supports_origin_capture()` は False のままで、リミットスイッチによる
+        零点確定 (`lib/sequence/homing.py`) の対象にならない —— このフレームを
+        安全に送れる状態が「無励磁」に限られる一方、`sub_lift` は disable すると
+        自重で落ちる (保持は減速比 19.2 のギヤ頼みで、保持ブレーキが無い)。
+        スイッチに当たった位置で無励磁にする操作は安全側と言えないため、
+        機構側に保持手段が入るまで経路を開けない。
+        呼び出し口は `set_zero_on_start` (起動時の一律 0) だけである。
+        """
         return self._special_command(self.SPECIAL_SET_ZERO)
 
     def encode_write_register_u32(self, register: int, value: int) -> can.Message:

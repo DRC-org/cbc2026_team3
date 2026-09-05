@@ -17,6 +17,7 @@ import difflib
 import json
 import os
 import pathlib
+import time
 from typing import Any
 
 import pytest
@@ -41,7 +42,7 @@ from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from lib.tuning.metrics import Sample
 from lib.tuning.recorder import Capture, PidSnapshot
-from tests.fake_can import mock_can_manager, set_motors
+from tests.fake_can import mock_can_manager, set_last_feedback, set_motors, set_sensors
 from tests.fake_health import ok_health_snapshot
 from tests.feedback_frames import feed_generic
 from tests.server_fixtures import ServerFixture, require_type, wait_until
@@ -163,7 +164,23 @@ def _generic_drivers() -> dict[str, GenericDriver]:
     return {"gripper": gripper, "conveyor": conveyor}
 
 
-def _make_can_manager(generics: dict[str, GenericDriver]) -> CANManager:
+def _sensor_drivers() -> dict[str, GenericDriver]:
+    """原点スイッチ 2 本。**接触した形と接触していない形を両方載せる。**
+
+    片方だけだと `active` が常に同じ値になり、UI がもう一方を受信条件で弾いても
+    誰も気付けない。鮮度 (`stale`) の 2 通りは `_make_can_manager` が作る。
+    """
+    touching = GenericDriver("origin_sensor", can_id=0x44, control_type=ControlMode.POSITION)
+    released = GenericDriver("rotate_origin_sensor", can_id=0x43, control_type=ControlMode.POSITION)
+    # センサスロットは状態フラグ 1 バイトだけを送る (位置を持たない)
+    feed_generic(touching, sensor=True)
+    feed_generic(released, sensor=False)
+    return {"origin_sensor": touching, "rotate_origin_sensor": released}
+
+
+def _make_can_manager(
+    generics: dict[str, GenericDriver], sensors: dict[str, GenericDriver]
+) -> CANManager:
     mgr = mock_can_manager(
         {
             "y_axis_r": MotorState(position=1500.0, velocity=0.0, current=0.2, temperature=35.0),
@@ -172,6 +189,11 @@ def _make_can_manager(generics: dict[str, GenericDriver]) -> CANManager:
         bus_name=_M3508_BUS,
     )
     set_motors(mgr, {**mgr.motors, **generics})
+    set_sensors(mgr, sensors)
+    # 途絶している形も golden に載せる。**片方だけを新鮮にする** ——
+    # 全センサが stale だと「反応を確かめられる状態」の形が 1 つも現れず、
+    # 逆に全て新鮮だと途絶の表示を UI が弾いても誰も気付けない
+    set_last_feedback(mgr, {"origin_sensor": time.time()})
     return mgr
 
 
@@ -205,16 +227,21 @@ def _fault_motor_snapshot(mgr: CANManager):
 
 
 class _ContractCheckSequence(Sequence):
-    """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。"""
+    """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。
+
+    軸を宣言しておくのは、**除外されたステップが載った形**も golden へ焼き付ける
+    ため。除外が無い形しか無いと、UI が除外を受信条件で弾いても誰も気付けない
+    (サブハンド不在の構成でだけ全ステップ成功に見える、という壊れ方になる)。
+    """
 
     def __init__(self) -> None:
         super().__init__("motor_check")
 
-    @step("メインハンド 初期姿勢へ")
+    @step("メインハンド 初期姿勢へ", axes={"y_axis"})
     async def home(self) -> None:
         return
 
-    @step("サブハンド 電磁弁 6 個 (打音・目視確認)")
+    @step("サブハンド 電磁弁 6 個 (打音・目視確認)", axes={"valve_1", "valve_2"})
     async def valves(self) -> None:
         return
 
@@ -292,7 +319,7 @@ _Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRef
 def _build_fixture() -> _Fixture:
     fx = ServerFixture.build(checklist_definitions=_checklist_definitions())
     generics = _generic_drivers()
-    mgr = _make_can_manager(generics)
+    mgr = _make_can_manager(generics, _sensor_drivers())
 
     loop = M3508PositionLoop(mgr, _M3508_BUS)
     drivers = {"y_axis_r": M3508Driver("y_axis_r", 1), "y_axis_l": M3508Driver("y_axis_l", 2)}
@@ -406,6 +433,18 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             # (error が null の形は接続直後のスナップショットで既に配られている)
             await fx.publish_motor_check_error("緊急停止中のため動作確認を実行できません")
             samples["motor_check_state"] = await require_type(ws, "motor_check_state")
+
+            # 構成に無い軸のステップを除外した形。**除外は黙って消してはならない**
+            # ので、欠けている軸まで載った 1 通を golden に固定する
+            restricted = _ContractCheckSequence()
+            restricted.restrict_to_axes({"y_axis"})
+            fx.set_motor_check_sequence(restricted)
+            await fx.publish_motor_check_error(
+                "サブハンドの軸が構成にありません (動作確認はメインハンドのみ)"
+            )
+            samples["motor_check_state_with_exclusions"] = await require_type(
+                ws, "motor_check_state"
+            )
 
             # ステップ応答は state と同じ配信周期に相乗りする。
             # **指標が出る形と出ない形を両方載せる。** 片方だけだと、UI が

@@ -39,4 +39,18 @@ describe("MotorCheckSummary", () => {
     // ここにも置くと、同じ理由が truncate 版と並んで 2 度読まれる
     expect(screen.queryByText("動作確認を中断しました")).not.toBeInTheDocument();
   });
+
+  it("除外があれば完了と一緒に件数を出す", () => {
+    // 「完了」だけだと、全ステップ成功と「サブハンドを丸ごと飛ばした成功」が
+    // 同じ表示になる。指差喚呼のチェックはこの 1 行を根拠に付く
+    mount({
+      running: false,
+      step_index: 6,
+      total_steps: 6,
+      excluded_steps: [{ step: "サブハンド 昇降", missing_axes: ["sub_lift"] }],
+    });
+
+    expect(screen.getByText("完了")).toBeInTheDocument();
+    expect(screen.getByText("1 ステップ除外")).toBeInTheDocument();
+  });
 });

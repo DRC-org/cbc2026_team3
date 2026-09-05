@@ -28,6 +28,23 @@ namespace motorcan {
 
 class ServoChannel {
    public:
+    // **begin() を呼ぶまで出力を許可しない。** サーボ基板のスロット設定は DIP の基板番号で
+    // 選ぶので実行時にしか確定せず、g_channel[] は静的初期化子を持てない（config.h の
+    // kSlotsByBoard）。既定の可動範囲は幅 0 で、どんな目標角も初期角へクランプされる。
+    //
+    // **未初期化のまま駆動側へ倒れないことがこのコンストラクタの要件。** 空きスロットは
+    // begin() されないまま残るので、そこへ SET_TARGET が届いても（PC 側 yaml の can_id を
+    // 書き間違えれば届く）1 度もパルスが出ない側に落ちる必要がある。
+    ServoChannel();
+
+    // 役割とスロット設定が確定した後に呼ぶ初期化（setup() から 1 回）。
+    // **setWatchdogEnabled() より先に呼ぶこと** —— 安全機構ごと作り直すので、
+    // 順序を逆にすると config.h の WATCHDOG_ENABLED 0 が既定の「有効」で上書きされる。
+    void begin(float initialAngleDeg, const ServoLimits &limits, uint32_t commandTimeoutMs);
+
+    // 初期値が静的に決まる呼び出し側（テストと、スロット設定を持たない基板）のための
+    // 短縮形。**規則の実装は begin() ただ 1 つ**で、ここはそこへ委譲するだけにする
+    // （2 通りに書くと、begin() だけに足した条件が構築経路から漏れる）。
     ServoChannel(float initialAngleDeg, const ServoLimits &limits, uint32_t commandTimeoutMs);
 
     // ---- 安全機構（仕様書 §5.1 / §5.2 / §7.5）----
@@ -47,6 +64,8 @@ class ServoChannel {
     void setCommandTimeoutMs(uint32_t timeoutMs);
     uint32_t commandTimeoutMs() const;
 
+    // begin() 前は常に false。駆動ゲートはすべてここを通るので、
+    // 未初期化のチャンネルは setTarget も tick も動かせない。
     bool isOutputAllowed(uint32_t nowMs) const;
 
     // FEEDBACK Byte0 の緊急停止 / ウォッチドッグのビット（他は呼び出し側で OR する）。
@@ -105,6 +124,11 @@ class ServoChannel {
     float pendingToleranceDeg_;
     bool hasPendingLimits_;
     bool hasPendingTolerance_;
+
+    // begin() 済みか。**everFed_ とは別の条件**なので MotorSafety へ寄せない ——
+    // あちらは「PC から 1 通も指令が来ていない」で、こちらは「このスロットは
+    // そもそも使わない」。混ぜると、空きスロットが最初の SET_TARGET 1 通で駆動側へ回る。
+    bool begun_;
 };
 
 }  // namespace motorcan

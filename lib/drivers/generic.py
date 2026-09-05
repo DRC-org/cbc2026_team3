@@ -158,6 +158,10 @@ class GenericDriver(MotorDriver):
         self._watchdog_flag: bool = False
         self._unconfigured_id_flag: bool = False
         self._sensor_flag: bool = False
+        # センサ入力のラッチ (consume_sensor_latch() が読んで消す)。
+        # FEEDBACK は 100Hz で届くが、読む側 (零点確定) は settle_s ごとにしか観測
+        # できないので、「今 ON か」だけでは観測と観測のあいだの接触が丸ごと消える
+        self._sensor_latched: bool = False
         self._never_commanded_flag: bool = False
         # 動作確認や reset の指令を出す制御モード。config から渡される値で上書き可能。
         self.control_type: ControlMode = control_type
@@ -282,7 +286,9 @@ class GenericDriver(MotorDriver):
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)
-        self._sensor_flag = bool(flags & _FLAG_SENSOR)
+        sensor = bool(flags & _FLAG_SENSOR)
+        self._sensor_flag = sensor
+        self._sensor_latched = self._sensor_latched or sensor
         self._never_commanded_flag = bool(flags & _FLAG_NEVER_COMMANDED)
         return super().update_state(msg)
 
@@ -454,8 +460,32 @@ class GenericDriver(MotorDriver):
         シーケンスも止まる (原点合わせは「触れさせる」操作なので必ず起きる)。
 
         基板は状態を報告するだけで、判断は PC 側が持つ (仕様書 §5.2)。
+
+        **「今どうなっているか」を描く側 (診断ツリー) はこちらを見る。**
+        観測と観測のあいだの接触まで拾いたい零点確定は `consume_sensor_latch()`。
         """
         return self._sensor_flag
+
+    def consume_sensor_latch(self) -> bool:
+        """前回この関数を呼んでから一度でもセンサ入力が入ったか。**読むと消える。**
+
+        零点確定の探索はリミットスイッチの ON 区間を**跨いで**しまうことがある。
+        `homing.step` (rotate は 2.0deg) より ON 区間が狭いと、指令 1 回で区間を
+        通り抜け、`settle_s` (50ms) 後の観測時にはもう OFF —— 実機ではこれで探索が
+        止まらず、スイッチを越えて回り続けた。FEEDBACK は 100Hz で届いているので、
+        受信のたびにラッチしておけば区間の通過を 1 通も取りこぼさない。
+
+        **読み手が複数いると壊れる。** 先に読んだ側が相手のぶんまで消すので、
+        **呼んでよいのは `HomingRunner` だけ**とする。今の状態が要るだけの用途
+        (診断ツリー・ヘルス) は `sensor_active` を見ること。
+
+        現在値も OR で見るのは、ラッチを消した直後に FEEDBACK が途絶えても
+        「触れているのに触れていないと答える」側へ倒れないようにするため
+        (この関数は現在値より弱い答えを返さない)。
+        """
+        latched = self._sensor_latched or self._sensor_flag
+        self._sensor_latched = False
+        return latched
 
     def is_fault(self) -> bool:
         # デバイス ID 未設定は基板の設定ミスで駆動自体が拒否される状態なので FAULT に
@@ -475,8 +505,12 @@ class GenericDriver(MotorDriver):
     #  励磁 (緊急停止ラッチの解除)
     # ------------------------------------------------------------------ #
 
-    def activation_steps(self) -> list[tuple[can.Message, float]]:
+    def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
         """緊急停止ラッチを解除する (仕様書 §3.5)。
+
+        ``after_set_zero`` は使わない。本機に原点の概念が無く (位置を持つのは
+        サーボスロットだけで、その原点はファームの可動域定義が持つ)、
+        ``supports_origin_capture()`` も False のままだからである。
 
         本機に励磁の概念はないが、緊急停止はファーム側でラッチされるため、
         解除フレームを送らない限り SET_TARGET を受け付けない。これを

@@ -306,6 +306,43 @@ class TestSensorInput:
         assert self.drv.is_fault() is False
         assert self.drv.has_overcurrent_warning() is False
 
+    def test_latch_keeps_a_contact_that_is_already_over(self):
+        """**零点確定はこれが無いと止まらない。**
+
+        探索は `settle_s` (50ms) ごとにしか観測できないのに、FEEDBACK は 100Hz で
+        届く。ON 区間が `homing.step` より狭い機構では指令 1 回で区間を通り抜け、
+        観測時にはもう OFF —— 実機ではスイッチに当たっているのに探索が止まらず、
+        機構の破損側へ回り続けた。
+        """
+        self._feed(sensor=True)
+        self._feed()  # 観測する前に抜けた
+
+        assert self.drv.sensor_active is False  # 今は触れていない
+        assert self.drv.consume_sensor_latch() is True
+
+    def test_latch_clears_on_read(self):
+        """読んだら消す。次の窓に前の窓の接触を持ち越すと、原点が 1 歩ずれる。"""
+        self._feed(sensor=True)
+        self._feed()
+
+        assert self.drv.consume_sensor_latch() is True
+        assert self.drv.consume_sensor_latch() is False
+
+    def test_latch_never_answers_weaker_than_the_current_state(self):
+        """触れたまま FEEDBACK が途絶えても「触れていない」へ倒れない。"""
+        self._feed(sensor=True)
+
+        assert self.drv.consume_sensor_latch() is True
+        # 読んで消した後も接触は続いている (新しい FEEDBACK は届いていない)
+        assert self.drv.consume_sensor_latch() is True
+
+    def test_latch_does_not_disturb_the_current_state(self):
+        """診断ツリーが描くのは `sensor_active` (今どうなっているか) のまま。"""
+        self._feed(sensor=True)
+        self.drv.consume_sensor_latch()
+
+        assert self.drv.sensor_active is True
+
     def test_does_not_disturb_other_flags(self):
         # 同じ Byte7 に載るので、ビットを取り違えると緊急停止やウォッチドッグと混ざる
         self._feed(e_stop=True, watchdog=True, sensor=True)

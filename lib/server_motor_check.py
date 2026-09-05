@@ -30,7 +30,16 @@ __all__ = ["MotorCheckController", "Pausable"]
 
 
 class Pausable(Protocol):
-    """動作確認中に黙らせる周期タスク (位置制御ループ / 目標値再送)。"""
+    """動作確認中に黙らせる周期タスク。
+
+    何を止めるかは `RobotServer._motor_check_pausables` だけが決める。ここで
+    種別を数え上げると、止める / 止めないの判断が 2 箇所に分かれる。
+
+    **現在その一覧は空である。** 動作確認は `move_to` でしか軸を動かさず、
+    周期タスクはどれもその目標を実現する側なので、止めると仕事ごと消える
+    (理由は `RobotServer._motor_check_pausables`)。骨組みを残すのは、
+    `paused` が WS 契約に載っているため。
+    """
 
     async def pause(self, *, reason: str) -> None: ...
 
@@ -43,9 +52,10 @@ class MotorCheckController:
     Args:
         environment_deny: 環境側の拒否理由を返す (フェーズ・緊急停止・手動モード・
             通常シーケンス実行中)。許可なら None
-        pausables: 起動時に黙らせる周期タスク。**全ロボットぶんを渡すこと** ——
-            1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の
-            再送と指令を奪い合う
+        pausables: 起動時に黙らせる周期タスク。**現在は空**で、位置制御ループも
+            目標値再送も含まれない —— どちらも動作確認が軸を動かす経路そのもの
+            だから (理由は `RobotServer._motor_check_pausables`)。足すときは
+            全ロボットぶんを渡すこと (1 本のシーケンスが両機を動かすため)
         is_e_stop_active: 今この瞬間モータを動かしてよいか
         broadcast: 状態 1 通の配信口
     """
@@ -154,10 +164,11 @@ class MotorCheckController:
         self._error = None
         self._abort_requested = False
 
-        # 動作確認はモータへ自前の指令を出すため、周期的に指令を出している側と
-        # 指令を奪い合う。M3508 位置制御ループとは C620 の電流指令フレーム (0x200) を、
-        # 目標値再送とは同じモータの SET_TARGET を奪い合うので、どちらも黙らせて
-        # 排他を取る。
+        # 何を黙らせるかは `RobotServer._motor_check_pausables` が 1 箇所で決める。
+        # **位置制御ループも目標値再送もそこに含まれない** —— 動作確認の `move_to`
+        # はどちらも通ってしか軸を動かせない (M3508 は電流指令が出ず、問い合わせ
+        # 駆動の 2 種はフィードバックが 1 通で止まり、自作モタドラは 500ms で
+        # 出力が切れる)
         pausables = self._pausables()
 
         async def _run() -> None:
@@ -252,6 +263,11 @@ class MotorCheckController:
             # どのステップで失敗したか。平常時は null で、`error` と違って
             # 「どこまで確認できたか」を機械的に読める形で持つ
             "last_error": None,
+            # 構成に無い軸を指令するため登録しなかったステップ。**空でも必ず載せる。**
+            # 除外を配信しないと、サブハンド不在でステップが減っているのか、本番構成
+            # なのに config の書き忘れで減っているのかを操縦者が画面で区別できない
+            # (どちらも「全ステップ成功」として同じに見える)
+            "excluded_steps": [],
         }
         if self._sequence is None:
             return payload
@@ -263,6 +279,9 @@ class MotorCheckController:
         payload["total_steps"] = progress["total_steps"]
         payload["steps"] = progress["steps"]
         payload["last_error"] = progress["last_error"]
+        payload["excluded_steps"] = [
+            excluded.to_dict() for excluded in self._sequence.excluded_steps
+        ]
         return payload
 
     async def report_error(self, message: str) -> None:

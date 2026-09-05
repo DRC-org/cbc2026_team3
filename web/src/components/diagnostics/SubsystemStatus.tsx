@@ -3,6 +3,8 @@ import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
+import { SensorSummary } from "@/components/diagnostics/SensorSummary";
+import type { SensorPayload } from "@/components/diagnostics/SensorSummary";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { describeSafetyIssues, evaluateHealth, readableHealth } from "@/lib/healthVerdict";
@@ -15,6 +17,11 @@ interface SubsystemStatusProps {
   motors: Record<string, MotorState>;
   /** 安全機構 (同期ずれラッチ・保護ループの生死)。未受信でも表示は成立する */
   safety?: SafetyPayload;
+  /**
+   * 自作基板のセンサ入力 (原点スイッチ)。**モータ一覧とは別に描く。**
+   * 未配信・センサ無しの構成では 1px も占めない
+   */
+  sensors?: SensorPayload;
   /**
    * 温度の色分けに使うしきい値。正はサーバーの config で、`server_info` から届く。
    * 末端の表示部品が context を読み始めると `health` / `motors` を props で受けている
@@ -77,6 +84,7 @@ export function SubsystemStatus({
   health,
   motors,
   safety,
+  sensors,
   connected,
   tempThresholds = null,
   defaultOpen = false,
@@ -128,6 +136,9 @@ export function SubsystemStatus({
           ) : null}
           <SafetyIssues safety={safety} />
           <HealthIndicator health={readable} />
+          {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、
+              後ろへ回すと本数によっては指差喚呼で見たい 1 行が畳まれた先に隠れる */}
+          <SensorSummary sensors={sensors} />
           <MotorSummary
             motors={motors}
             healthMotors={readable?.motors}

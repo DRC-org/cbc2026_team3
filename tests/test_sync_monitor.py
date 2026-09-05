@@ -134,6 +134,108 @@ class TestViolationDetection:
         assert len(fx.violations) == 2
 
 
+class TestSuspendGroup:
+    """**この層だけを見る。** 零点確定の統合経路では、無励磁だったり
+    フィードバックが届いていなかったりで他の条件が先に発報を止めうる。
+    その条件を 1 つも与えずに「一時停止だけが効いている」ことを確かめる。
+    """
+
+    def _violating(self, *, samples: int = 2) -> _Fixture:
+        """許容 2.0 に対して 10.0 ずれた、鮮度も揃った状態。
+
+        止めなければ ``samples`` 周期で必ず発報する。実機の `rotate` は原点が
+        揃っていないだけで 175.879deg を記録している。
+        """
+        fx = _Fixture(violation_samples=samples)
+        fx.place("y_axis_r", 10.0)
+        fx.place("y_axis_l", 20.0)
+        return fx
+
+    async def test_止めなければ発報する(self) -> None:
+        """下の 2 つが「止まっているから緑」ではないことの土台。"""
+        fx = self._violating()
+        fx.monitor.step()
+        fx.monitor.step()
+        assert len(fx.violations) == 1
+
+    async def test_一時停止中は発報しない(self) -> None:
+        """左右へ SET_ZERO を送るあいだ、2 台の座標系が違うので偏差という量が
+        定義を失う。CAN 送信 2 通が debounce の 40ms に収まる保証は無い。
+        """
+        fx = self._violating()
+
+        with fx.monitor.suspend_group("y_axis"):
+            for _ in range(10):
+                fx.monitor.step()
+
+        assert fx.violations == []
+        assert fx.monitor.violated == frozenset()
+
+    async def test_抜けたら判定が戻る(self) -> None:
+        """**戻し忘れると、以後の試合中ずっと監視が死んだまま残る。**"""
+        fx = self._violating()
+
+        with fx.monitor.suspend_group("y_axis"):
+            fx.monitor.step()
+
+        fx.monitor.step()
+        fx.monitor.step()
+        assert len(fx.violations) == 1
+
+    async def test_例外で抜けても判定が戻る(self) -> None:
+        fx = self._violating()
+
+        with pytest.raises(RuntimeError), fx.monitor.suspend_group("y_axis"):
+            raise RuntimeError("SET_ZERO の送信に失敗")
+
+        assert fx.monitor.is_suspended("y_axis") is False
+        fx.monitor.step()
+        fx.monitor.step()
+        assert len(fx.violations) == 1
+
+    async def test_停止前の連続カウントを持ち越さない(self) -> None:
+        """持ち越すと、再開後の 1 サンプルだけで debounce (2 サンプル) が成立する。"""
+        fx = self._violating(samples=2)
+        fx.monitor.step()  # 1 サンプル目を数えた状態で入る
+
+        with fx.monitor.suspend_group("y_axis"):
+            fx.monitor.step()
+
+        fx.monitor.step()
+        assert fx.violations == []
+        fx.monitor.step()
+        assert len(fx.violations) == 1
+
+    async def test_他の軸の監視は止めない(self) -> None:
+        """**全体 pause にしてはならない。** 零点確定は動作確認の最初のステップで、
+        そのあいだ他の軸も動く。
+        """
+        fx = _Fixture(groups=(_pair_group("y_axis"), _pair_group("rotate")), violation_samples=1)
+        fx.place("rotate_r", 10.0)
+        fx.place("rotate_l", 20.0)
+
+        with fx.monitor.suspend_group("y_axis"):
+            fx.monitor.step()
+
+        assert [name for name, _ in fx.violations] == ["rotate"]
+
+    async def test_入れ子でも内側の離脱で戻らない(self) -> None:
+        fx = self._violating()
+
+        with fx.monitor.suspend_group("y_axis"):
+            with fx.monitor.suspend_group("y_axis"):
+                pass
+            assert fx.monitor.is_suspended("y_axis") is True
+
+        assert fx.monitor.is_suspended("y_axis") is False
+
+    async def test_知らない軸は拒否する(self) -> None:
+        """呼び出し側の取り違えを黙って通すと、止めたつもりの監視が動き続ける。"""
+        fx = _Fixture()
+        with pytest.raises(KeyError), fx.monitor.suspend_group("sub_lift"):
+            pass
+
+
 class TestFeedbackFreshness:
     async def test_stale_member_is_excluded_and_skips_judgement(self) -> None:
         fx = _Fixture(violation_samples=1, feedback_timeout_ms=500.0)

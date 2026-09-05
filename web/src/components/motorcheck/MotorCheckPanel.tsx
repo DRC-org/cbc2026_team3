@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronRight, Square, TriangleAlert } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ListMinus, Square, TriangleAlert } from "lucide-react";
 import { useId, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -8,6 +8,7 @@ import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { cx } from "@/lib/cx";
 import { motorCheckStatus } from "@/lib/motorCheckStatus";
+import { MALFORMED } from "@/lib/protocol";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 /**
@@ -110,6 +111,40 @@ export function MotorCheckPanel() {
                 動作確認は完了していません
               </p>
               <p className="mt-1">{failureReason}</p>
+            </div>
+          ) : null}
+
+          {/* **除外は必ず出す。** 出さないと、サブハンド不在でステップが減っているのか、
+              本番構成なのに config の書き忘れで減っているのかを操縦者が区別できない
+              (どちらも「全ステップ成功」として同じに見える)。**内訳を出すのはここだけ** ——
+              区分見出しの `MotorCheckSummary` は件数 1 語しか出さない (畳んでいるあいだも
+              「除外がある」ことだけは見えている必要があるため、そちらは残してある) */}
+          {state.excluded_steps === MALFORMED ? (
+            <div className="text-warning">
+              <p className="flex items-center gap-1.5 font-medium">
+                <Icon as={TriangleAlert} />
+                除外ステップを読み取れませんでした
+              </p>
+              <p className="mt-1">
+                ステップ一覧が全てを表しているとは限りません (配信の形が読めていません)。
+              </p>
+            </div>
+          ) : state.excluded_steps.length > 0 ? (
+            <div className="rounded-sm border border-warning/40 bg-warning/10 px-3 py-2">
+              <p className="flex items-center gap-1.5 font-medium text-warning">
+                <Icon as={ListMinus} />
+                この構成に無い軸のステップを {state.excluded_steps.length} 件除外しています
+              </p>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {state.excluded_steps.map((excluded) => (
+                  <li key={excluded.step} className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="text-base-content/80">{excluded.step}</span>
+                    <span className="font-mono text-[0.85em] text-base-content/60">
+                      軸が無い: {excluded.missing_axes.join(", ")}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
 

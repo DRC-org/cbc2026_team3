@@ -72,6 +72,7 @@
       "blocked_reason": "緊急停止中のため動作確認を実行できません",
       "current_step": "メインハンド 初期姿勢へ",
       "error": "緊急停止中のため動作確認を実行できません",
+      "excluded_steps": [],
       "last_error": null,
       "running": false,
       "step_index": 0,
@@ -88,6 +89,33 @@
         }
       ],
       "total_steps": 2,
+      "type": "motor_check_state"
+    },
+    "motor_check_state_with_exclusions": {
+      "available": true,
+      "blocked_reason": "緊急停止中のため動作確認を実行できません",
+      "current_step": "メインハンド 初期姿勢へ",
+      "error": "サブハンドの軸が構成にありません (動作確認はメインハンドのみ)",
+      "excluded_steps": [
+        {
+          "missing_axes": [
+            "valve_1",
+            "valve_2"
+          ],
+          "step": "サブハンド 電磁弁 6 個 (打音・目視確認)"
+        }
+      ],
+      "last_error": null,
+      "running": false,
+      "step_index": 0,
+      "steps": [
+        {
+          "index": 0,
+          "label": "メインハンド 初期姿勢へ",
+          "require_trigger": false
+        }
+      ],
+      "total_steps": 1,
       "type": "motor_check_state"
     },
     "server_info": {
@@ -318,6 +346,16 @@
           }
         ],
         "unenergized_motors": []
+      },
+      "sensors": {
+        "origin_sensor": {
+          "active": true,
+          "stale": false
+        },
+        "rotate_origin_sensor": {
+          "active": false,
+          "stale": true
+        }
       },
       "sequence": "main_hand_seq",
       "step_index": 0,
@@ -567,6 +605,16 @@
           }
         ],
         "unenergized_motors": []
+      },
+      "sensors": {
+        "origin_sensor": {
+          "active": true,
+          "stale": false
+        },
+        "rotate_origin_sensor": {
+          "active": false,
+          "stale": true
+        }
       },
       "sequence": "main_hand_seq",
       "step_index": 2,

@@ -91,6 +91,10 @@ export function emptyMotorCheckState(): MotorCheckSnapshot {
     steps: [],
     error: null,
     last_error: null,
+    // 受信前は「除外なし」。available:false と blocked_reason が
+    // 「まだ何も届いていない」ことを既に言っているので、ここを MALFORMED から
+    // 始めると接続直後に必ず「除外を読み取れません」が出る
+    excluded_steps: [],
   };
 }
 
