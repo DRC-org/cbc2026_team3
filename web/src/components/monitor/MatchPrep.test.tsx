@@ -27,7 +27,7 @@ function mount(
   phase: MatchPhase = "setup",
   overrides: { devTools?: boolean; connected?: boolean } = {},
 ) {
-  return renderWithRobot(<MatchPrep onRequestReset={vi.fn()} onPanelOpen={vi.fn()} />, {
+  return renderWithRobot(<MatchPrep onRequestReset={vi.fn()} />, {
     connected: overrides.connected ?? true,
     matchState: {
       ...DEFAULT_MATCH_STATE,
@@ -68,6 +68,14 @@ describe("MatchPrep の項目配置", () => {
     expect(within(check).getByLabelText("動作 OK")).toBeInTheDocument();
     // 別区分の項目を巻き込んでいない (巻き込むと元の 1 本リストに戻る)
     expect(within(check).queryByLabelText("コート一致")).toBeNull();
+  });
+
+  it("動作確認の進捗と結果もその場で開く (モーダルへ追い出さない)", () => {
+    // かつてこれはモーダルで、駆動しているあいだヘッダーの EMG STOP を覆っていた
+    mount();
+
+    const check = section("アクチュエータ動作確認");
+    expect(within(check).getByRole("button", { name: "手順と結果" })).toBeInTheDocument();
   });
 
   it("group を持たない項目・未知の group の項目も必ず操作できる形で描く", () => {
@@ -167,17 +175,14 @@ describe("MatchPrep のコート選択", () => {
     // MatchStrip の「セッティングへ戻る」は即実行だが、こちらは同じ match_reset でも
     // 失うものが違う。押した時点で完了済みの指差喚呼が全て消える
     const onRequestReset = vi.fn();
-    const { context } = renderWithRobot(
-      <MatchPrep onRequestReset={onRequestReset} onPanelOpen={vi.fn()} />,
-      {
-        matchState: {
-          ...DEFAULT_MATCH_STATE,
-          phase: "setup",
-          court: "red",
-          checklists: { pre_match: { items: [item("a", "preflight", true)], completed: false } },
-        },
+    const { context } = renderWithRobot(<MatchPrep onRequestReset={onRequestReset} />, {
+      matchState: {
+        ...DEFAULT_MATCH_STATE,
+        phase: "setup",
+        court: "red",
+        checklists: { pre_match: { items: [item("a", "preflight", true)], completed: false } },
       },
-    );
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /リセット/ }));
 

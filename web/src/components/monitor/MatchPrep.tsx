@@ -1,8 +1,9 @@
-import { Check, Info, ListChecks, RotateCcw, Zap } from "lucide-react";
+import { Check, Info, RotateCcw, Zap } from "lucide-react";
 import { memo } from "react";
 
 import { ChecklistItems } from "@/components/monitor/ChecklistItems";
 import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
+import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -67,10 +68,8 @@ function GroupProgress({ items }: { items: readonly ChecklistItem[] }) {
  */
 export const MatchPrep = memo(function MatchPrep({
   onRequestReset,
-  onPanelOpen,
 }: {
   onRequestReset: () => void;
-  onPanelOpen: () => void;
 }) {
   const { matchState, serverInfo, connected } = useRobotStatus();
   const { setChecklistItem, checkAllChecklist, setCourt } = useRobotCommands();
@@ -219,9 +218,10 @@ export const MatchPrep = memo(function MatchPrep({
           {itemsOf("court")}
         </Section>
 
-        {/* 動作確認は両ハンドで 1 本。結果を確認する項目がこの直下に並ぶので、
-            回した操縦者はその場で唱えて潰せる (以前は右カラムのボタンを押してから
-            左のリストの中ほどにある 12 項目を探しに行っていた) */}
+        {/* 動作確認は両ハンドで 1 本。操作・進捗・結果・それを確認する指差喚呼が
+            この 1 区分に縦に並ぶので、回した操縦者はその場で唱えて潰せる
+            (以前は右カラムのボタンを押してから左のリストの中ほどにある 12 項目を
+            探しに行っており、進捗と結果はさらにモーダルの中だった) */}
         <Section
           title={CHECKLIST_GROUP_TITLE.motor_check}
           aside={
@@ -232,12 +232,11 @@ export const MatchPrep = memo(function MatchPrep({
           }
         >
           <div className="flex flex-wrap items-center gap-2">
-            <MotorCheckButton onPanelOpen={onPanelOpen} />
-            <Button onClick={onPanelOpen}>
-              <Icon as={ListChecks} />
-              進捗を表示
-            </Button>
+            <MotorCheckButton />
           </div>
+          {/* 進捗と結果は**この場で開く**。かつてはモーダルで、駆動しているあいだ
+              ずっとヘッダーの EMG STOP を覆っていた (`MotorCheckPanel` の docstring) */}
+          <MotorCheckPanel />
           {itemsOf("motor_check")}
         </Section>
 
