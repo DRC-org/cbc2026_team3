@@ -51,13 +51,18 @@ def _table(**homing_overrides: object):
 
 
 def _rotate_table():
-    """実機の rotate (config/main_hand_positions.yaml) と同じ数値。
+    """``tolerance`` と ``homing.step`` が一致する条件を作るためのテーブル。
 
-    **``tolerance`` と ``homing.step`` がどちらも 2.0deg。** step は静止摩擦が
-    決める下限 (0.5deg では 1 歩も動かない) で、tolerance は原点の分解能から来る
-    上限なので、この軸では両者が一致する。1 歩ぶんの追従待ちに ``tolerance`` を
-    流用すると、**1 歩も動いていない実測 (指令との差はちょうど step)** がそのまま
-    追従完了に化ける構成である。
+    1 歩ぶんの追従待ちに ``tolerance`` を流用すると、**1 歩も動いていない実測
+    (指令は実測 + step で組むので、差はちょうど step)** がそのまま追従完了に化ける。
+    壊れる条件は ``step <= tolerance`` で、**その境界が両者の一致点**にあるので、
+    ここは 2.0deg で揃えてある。
+
+    **実機の rotate (config/main_hand_positions.yaml) とは意図して違う**
+    (実機は step 1.0deg / tolerance 2.0deg)。実機の 2 つは別々の理由で決まる値
+    —— step は静止摩擦の下限 (0.5deg では 1 歩も動かない)、tolerance は到達の
+    許容差 —— なので、実機へ追随させるとこの境界は機構側の都合で動く。
+    離れた時点で検証したい条件そのものが消え、追従待ちを壊しても緑で通る。
     """
     return load_position_table(
         {
@@ -396,7 +401,7 @@ class TestWaitsForEachStep:
     """
 
     async def test_到達許容差が歩幅以上でも一歩ぶんの追従を待つ(self) -> None:
-        """`tolerance` == `step` == 2.0deg (実機の rotate と同じ構成)。"""
+        """`tolerance` == `step` == 2.0deg。`step <= tolerance` の境界。"""
         spec = _rotate_table().axis("rotate")
         rec = _Recorder()
 
