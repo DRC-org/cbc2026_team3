@@ -4,7 +4,7 @@
 ぶんがそのまま座標のずれになる。位置定数はすべて原点からの相対値なので、
 ずれた原点のまま走らせると全ステップが同じだけずれた場所へ動く。
 
-**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 5 つ用意してある:
+**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 6 つ用意してある:
 
 1. **探索距離の上限** (`HomingSpec.search_distance`) — 超えたら失敗として降りる。
    配線が抜けている・センサが死んでいる場合の唯一の無人の歯止め。
@@ -18,7 +18,18 @@
 4. **1 歩ごとの再アンカー** — 指令は毎回**そのときの実測位置** + `step` で組む。
    指令が実位置を追い越して先行し続けることが構造的に起こらず、機構が引っかかった
    ときも 1 step ぶんの偏差しか掛からない
-5. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
+5. **離脱の歩数上限** (`_RELEASE_STEP_LIMIT`) — 触れた状態から始めたときに
+   一度センサの外まで離れるが、その離脱にも上限が要る。接点が固着したセンサは
+   「いつまでも OFF にならない」形でしか現れない。**探索距離を流用してはならない**
+   (あちらは実ストローク相当まで伸びる値なので、反対側の機構端まで走り抜ける)
+6. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
+
+**触れた状態から始めたら、一度離れてから寄せ直す。** リミットスイッチの ON 区間には
+幅があるので、触れたその場を原点にすると「区間のどこで探索を始めたか」がそのまま
+原点のばらつきになる。症状は「原点合わせをしたのに位置がずれる」だけで、始めた位置は
+毎回違うので再現もしない。区間の外まで離してから通常の探索へ渡せば、確定位置は
+探索の `step` 粒度に収まる。**離脱は探索と逆向き**なので、機構端で始まったときに
+押し込まない性質はそのまま保たれる。
 
 **原点確定はグループ単位でしか行わない。** 左右直結ペアを別々の時刻に確定すると、
 その間に片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に
@@ -52,6 +63,13 @@ _FOLLOW_ATTEMPTS = 5
 #: 指令を実測へ再アンカーしているので、引っかかった機構は「指令しても進まない」形で
 #: しか現れず、探索距離の上限だけでは永久に降りられない。
 _STALL_LIMIT = 3
+
+#: 離脱 (センサに触れた状態から抜けるまで) に許す最大歩数。
+#: リミットスイッチの ON 区間は数 mm しかないので、step の数十倍動いても OFF に
+#: ならなければセンサが張り付いている (接点の固着・配線の短絡)。
+#: **`search_distance` を流用してはならない** —— あちらは実ストローク相当まで
+#: 伸びる値で、離脱の上限に使うと反対側の機構端まで走り抜ける。
+_RELEASE_STEP_LIMIT = 20
 
 
 class HomingError(RuntimeError):
@@ -120,11 +138,14 @@ class HomingRunner:
                 (左右が別々の時刻に動くとその場で機構が壊れる)
 
         Returns:
-            原点確定までに実際に動いた距離 [軸の unit]。ログと検証用。
+            **探索で**実際に動いた距離 [軸の unit]。ログと検証用。
+            離脱 (下記) のぶんは含めない —— 原点の精度を決めているのは
+            「どこから寄せて当たったか」であって、その前に離れた距離ではない。
 
         Raises:
             HomingError: 原点を確定する手段が無い / センサまたは軸のフィードバックが
-                途絶している / 実測が進まない / 探索距離を超えても当たらなかった
+                途絶している / 実測が進まない / 探索距離を超えても当たらなかった /
+                離脱してもセンサが OFF にならない
         """
         homing = spec.homing
         if homing is None:
@@ -132,46 +153,94 @@ class HomingRunner:
 
         self._check_preconditions(spec, homing)
 
-        origin = self._observe(spec, handle)
-
         if self._sensor_active(homing.sensor):
-            # 既に触れている。動かさずに確定する (押し込む方向へ動かさない)
-            logger.info("[homing] %s: 既にセンサに触れているためその場を原点にする", spec.name)
-            self._capture_origin(spec.name)
-            return 0.0
+            # **触れた状態のまま確定してはならない。** リミットスイッチの ON 区間には
+            # 幅があるので、その場を原点にすると「区間のどこで探索を始めたか」が
+            # そのまま原点のばらつきになる (区間幅ぶん = step の何倍にもなる)。
+            # いったん区間の外まで離れてから寄せ直せば、確定位置は探索の step 粒度に
+            # 収まり、どこから始めても同じ場所が原点になる。
+            # **離脱は探索と逆向き**なので押し込む方向へは動かない (機構端で始まった
+            # ときに壊さない、という元の性質は保たれる)。
+            logger.info("[homing] %s: 既にセンサに触れているため一度離れて寄せ直す", spec.name)
+            await self._seek(
+                spec,
+                handle,
+                homing,
+                direction=-homing.direction,
+                want_active=False,
+                limit=homing.step * _RELEASE_STEP_LIMIT,
+                limit_message=(
+                    f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
+                    f" ({homing.step * _RELEASE_STEP_LIMIT}{spec.unit} 動かしても OFF に"
+                    " ならない)。センサの固着・配線の短絡を確認してください"
+                ),
+            )
 
-        observed = origin
+        origin = self._observe(spec, handle)
+        observed = await self._seek(
+            spec,
+            handle,
+            homing,
+            direction=homing.direction,
+            want_active=True,
+            limit=homing.search_distance,
+            limit_message=(
+                f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
+                f" 原点センサ '{homing.sensor}' に到達しませんでした"
+                " (探索方向・機構の引っかかり・センサの配線を確認してください)"
+            ),
+        )
+
+        travelled = abs(observed - origin)
+        logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
+        self._capture_origin(spec.name)
+        return travelled
+
+    async def _seek(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        *,
+        direction: int,
+        want_active: bool,
+        limit: float,
+        limit_message: str,
+    ) -> float:
+        """センサが `want_active` になるまで `direction` 方向へ step ずつ動かす。
+
+        **探索と離脱の両方がこの 1 本を通る。** 歯止め (移動量の上限・停滞判定) を
+        向きごとに書き分けると、片方だけ直せてしまう —— 症状は「探索は止まるのに
+        離脱は永久に動き続ける」で、離脱は普段踏まない経路なので気付けない。
+
+        Args:
+            direction: 進む向き。探索は `homing.direction`、離脱はその反対
+            want_active: この状態になったら到達。探索は True、離脱は False
+            limit: 実測の移動量の上限。超えたら `limit_message` で降りる
+        """
+        start = self._observe(spec, handle)
+        observed = start
         stalled = 0
         while True:
-            travelled = abs(observed - origin)
-            if travelled >= homing.search_distance:
-                raise HomingError(
-                    f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
-                    f" 原点センサ '{homing.sensor}' に到達しませんでした"
-                    " (探索方向・機構の引っかかり・センサの配線を確認してください)"
-                )
+            if abs(observed - start) >= limit:
+                raise HomingError(limit_message)
 
             # **毎回そのときの実測位置へアンカーし直す。** 指令の積算で組むと、
             # 追従が遅れているあいだ指令だけが先行し続け、機構には常に大きな偏差が
             # 掛かったままになる (位置制御ループは電流上限まで使って押す)
-            commanded = observed + homing.direction * homing.step
+            commanded = observed + direction * homing.step
             await handle.set_target_value(spec.to_commands(commanded))
 
-            hit = await self._wait_step(spec, handle, homing, commanded)
+            hit = await self._wait_step(spec, handle, homing, commanded, want_active=want_active)
 
             previous = observed
             observed = self._observe(spec, handle)
 
             if hit:
-                travelled = abs(observed - origin)
-                logger.info(
-                    "[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit
-                )
-                self._capture_origin(spec.name)
-                return travelled
+                return observed
 
             # 指令を実測へ再アンカーしている以上、引っかかった機構は「指令しても
-            # 進まない」形でしか現れない。実測の移動量で数える探索距離だけでは
+            # 進まない」形でしか現れない。実測の移動量で数える上限だけでは
             # 永久に降りられないので、進まないことそのものを失敗として扱う
             stalled = 0 if abs(observed - previous) >= homing.step / 2.0 else stalled + 1
             if stalled >= _STALL_LIMIT:
@@ -218,18 +287,24 @@ class HomingRunner:
         handle: AxisHandle,
         homing: HomingSpec,
         commanded: float,
+        *,
+        want_active: bool,
     ) -> bool:
-        """1 歩ぶんの追従を待つ。待っている間にセンサへ当たったら True。
+        """1 歩ぶんの追従を待つ。待っている間にセンサが `want_active` になったら True。
 
         追従を待たずに次の指令を出すと、指令だけが `step` ずつ進んで実位置から
         離れ続ける (`settle_s` は 50ms 程度なので、機構の応答より速い)。
         待ち切れなくても失敗にはしない —— 進まないことは呼び出し側の停滞判定が
         まとめて拾う (同じ事象に 2 つの判定を置くと、片方だけ直せてしまう)。
+
+        **待っている間も見る**のは探索と離脱で同じ理由による —— 1 歩の移動中に
+        センサの状態が変わるので、歩き終えてからしか見ないと、変化した位置ではなく
+        その歩の終点が原点になる (step ぶん余計に行き過ぎる)。
         """
         tolerance = spec.tolerance if spec.tolerance is not None else homing.step
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
-            if self._sensor_active(homing.sensor):
+            if self._sensor_active(homing.sensor) is want_active:
                 return True
             if abs(self._observe(spec, handle) - commanded) <= tolerance:
                 return False
