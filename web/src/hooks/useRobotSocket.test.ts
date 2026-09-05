@@ -272,10 +272,12 @@ describe("health_change メッセージ", () => {
     ]);
   });
 
-  it("level 省略時は info 扱いにする", () => {
+  // 読めなかった level は異常側 (critical) へ倒す。詳細は protocol.test.ts の
+  // health_change スイート (この受信条件そのものは protocol.ts が持つ)
+  it("level 省略時は critical (異常側) 扱いにする", () => {
     const { result } = renderConnected();
     act(() => latestSocket().receive({ type: "health_change", robot: "main_hand" }));
-    expect(result.current.healthEvents[0].level).toBe("info");
+    expect(result.current.healthEvents[0].level).toBe("critical");
   });
 });
 

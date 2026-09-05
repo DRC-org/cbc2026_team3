@@ -943,6 +943,28 @@ function parseEnum<T extends string>(raw: unknown, allowed: readonly T[]): T | M
     : MALFORMED;
 }
 
+const HEALTH_CHANGE_LEVELS: readonly HealthChangeLevel[] = ["info", "warning", "critical"];
+
+/**
+ * `HealthChangeLevel` は 3 値の文字列 union で `MALFORMED` という第 4 の値を
+ * 持てない (`parseEnum` がそのまま使えない理由)。読めなかった場合に必ず 3 値の
+ * どれかへ倒す必要があり、ここでは **`"critical"`（異常側）を選ぶ** ——
+ * 読めなかった重大度を軽い側 (`"info"`) へ倒すと、本当に critical なイベントが
+ * 型不正のせいで無視されても画面もログも気付けない。
+ *
+ * **未配信 (`undefined`) と型違いを区別しない。** `health_change` は他の欄
+ * (`robot` / `target` / `from` / `to` / `message`) も含めて 1 通で完結するイベントで
+ * あり、`state` の `health` / `safety` のように「今回の配信には含めない」という
+ * 部分更新の余地が無い (サーバーは毎回 6 欄すべてを送る)。つまり `level` が
+ * 欠けているのは型が読めないのと同じ「サーバーが重大度を伝えられていない」
+ * 異常であり、区別しても操縦者の次の一手は変わらない。
+ */
+function parseHealthChangeLevel(raw: unknown): HealthChangeLevel {
+  return typeof raw === "string" && (HEALTH_CHANGE_LEVELS as readonly string[]).includes(raw)
+    ? (raw as HealthChangeLevel)
+    : "critical";
+}
+
 /** どのロボットの話か決められないメッセージは捨てるしかない */
 function robotOf(raw: Raw): string | null {
   return typeof raw.robot === "string" && raw.robot.length > 0 ? raw.robot : null;
@@ -1057,7 +1079,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
         type: "health_change",
         event: {
           robot,
-          level: (raw.level as HealthChangeLevel) ?? "info",
+          level: parseHealthChangeLevel(raw.level),
           target: str(raw.target),
           from: str(raw.from),
           to: str(raw.to),

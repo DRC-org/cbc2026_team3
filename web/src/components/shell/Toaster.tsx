@@ -109,7 +109,12 @@ export function Toaster() {
     push({
       id: latest.receivedAtMs,
       tone: latest.level === "critical" ? "error" : "warning",
-      title: `${latest.level.toUpperCase()} — ${latest.robot}`,
+      // **`latest.level` を無検査で `.toUpperCase()` しない。** ここは
+      // `RouteErrorBoundary`（`<Outlet />` だけを包む）の外にあるので、
+      // 想定外の型 (受信境界の検査漏れ・将来の型変更) が来ても投げてはならない
+      // ―― 投げれば緊急停止オーバーレイごと React ツリーがアンマウントする。
+      // `String()` は何を渡しても例外にならない
+      title: `${String(latest.level).toUpperCase()} — ${latest.robot}`,
       lines: [
         `${latest.target}: ${latest.from} → ${latest.to}`,
         ...(latest.message ? [latest.message] : []),
