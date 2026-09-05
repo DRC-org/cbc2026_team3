@@ -100,9 +100,11 @@ class InfoFrame:
 #: それ未満の差は往復の丸めでしか生まれない
 _ANGLE_RANGE_EPSILON = 0.05
 
-#: 位置を返す基板 (サーボスロット) の測定可否。速度・電流・温度は
+#: 位置指令の基板 (サーボスロット) の測定可否。速度・電流・温度は
 #: **プロトコルに存在しない** (仕様書 §3.2)。FEEDBACK は状態フラグ 1 バイト +
-#: 位置を持つ基板だけが 2 バイトで、電流センサも温度センサもどの基板にも載っていない
+#: 位置を持つ基板だけが 2 バイトで、電流センサも温度センサもどの基板にも載っていない。
+#: **センサスロットもここへ落ちる** (既定引数で生成され control_type が position に
+#: なるため)。実害が無い理由は下の `telemetry` の docstring にある
 _POSITION_ONLY_TELEMETRY = TelemetrySupport(
     position=True, velocity=False, current=False, temperature=False
 )

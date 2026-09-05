@@ -1032,6 +1032,11 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | `INFO` はフィードバック鮮度を更新しない | `_dispatch_frame` の `INFO` 経路で `_last_rx_at` を書く（**1Hz の自己申告が 100Hz の途絶を隠し、モータが永久に STALE にならない**） | `tests/test_can_manager_health.py` |
 | サーボ可動レンジの「申告なし」を一致へ倒さない | `info_mismatch` の `angle_range_deg is None` 分岐を `return None` にする（古いファームの焼き忘れが素通りする） | `tests/drivers/test_generic.py` |
 | サーボスロット以外は `INFO` に可動レンジを載せない | `encodeInfo`（3 引数版）が Byte3-4 を書くようにする（**測る対象を持たない基板から「レンジ 0deg」が届く**） | `firmware/test/test_protocol/` |
+| 測れない項目を 0 で配らない | `GenericDriver.telemetry` を `FULL_TELEMETRY` へ戻す / `_measured_only()` を素通しにする / `CANManager.health()` の `telemetry.temperature` 参照を落とす / dry-run を関門の外へ出す（**3 つは別々のテストが受け持つ**。統合経路では 1 枚壊しても他が拾う） | `tests/drivers/test_generic.py::TestTelemetrySupport` / `tests/test_can_manager_health.py::TestUnmeasuredTemperature` / `tests/test_ws_protocol.py::TestUnmeasuredTelemetryIsNull` |
+| 測定可否を受信した状態から推測しない | `GenericDriver.telemetry` を `control_type` ではなく直近の `MotorState` から決める（**たまたま DLC>=3 のフレームが 1 通流れただけで DC 基板に位置が生える**） | `tests/drivers/test_generic.py::TestTelemetrySupport::test_position_stays_unmeasured_even_after_a_feedback_arrives` |
+| 測れない温度を判定材料にしない | `has_thermal_warning` / `has_thermal_fault` の `telemetry.temperature` ガードを外す（**しきい値 0 以下の構成で「測っていない 0」が警告・FAULT に化ける**） | `tests/drivers/test_generic.py::TestTelemetrySupport::test_thermal_judgement_is_skipped_when_temperature_is_unmeasured` |
+| `null`（測れない）と `MALFORMED`（読めない）を混同しない | `readMeasured` の `null` 分岐を削って `MALFORMED` へ倒す（**DC 基板 1 枚で全画面が異常側へ倒れる**）/ 逆に欠落・型違いを `null` へ丸める（配信の不具合が「測れない」に化ける）/ `Cell` を `value.toFixed(1)` に戻す（欄の欠落でレンダー本体から TypeError が飛び React ツリーごとアンマウント）/ `deviationOf` で `pos === null` を 0 として引く | `web/src/lib/protocol.test.ts`（`readMeasured`）/ `MotorStatus.test.tsx` / `pidTuning.test.ts`（`deviationOf`） |
+| 契約フィクスチャに測れない基板が載っている | `ws-contract.json` の生成から `conveyor`（DC 基板）を落とす / `gripper` をモックの `MotorState(temperature=30.0)` へ戻す（**「4 値とも数値」の形しか golden に現れず、UI が `null` を受け取れなくても緑**） | `tests/test_ws_contract.py` / `web/src/test/wsContract.test.ts` |
 | `on_off` 軸に連続値の可動範囲を持たせない | `_parse_manual` の `command_mode is not POSITION` 判定を外す | `tests/test_sequence_positions.py` |
 | DM3520 は目標が無い間も問い合わせ続ける | `QueryDrivenTargetRefresher._step_locked` の `_send_idle_target` を落とす（**フィードバックが問い合わせ駆動なので、操縦していない時間はまるごと STALE になる**） | `tests/test_target_refresh.py` |
 | DM3520 の保持目標はラッチした値 | `_send_idle_target` の `setdefault` を毎回の `idle_target_value()` へ変える（**負荷で下がったぶんへ目標が追従し、誰も操作していないのに軸がクリープする**） | `tests/test_target_refresh.py` |
@@ -1212,6 +1217,14 @@ UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py
 - 「state サンプルに UI が読むフィールドが揃っている」（TS）— `running` / `safety` など UI が
   実際に読むフィールドの存在を固定する。型は実行時に消えるのでここでしか守れない
   （`running` が配信から落ちれば、UI は再び `step_index` からの実行状態の推測へ逆戻りする）
+
+**フィクスチャには「測れる項目が違うドライバ」を必ず両方載せる。** モータは実
+`GenericDriver` を `CANManager` へ挿し、状態は実機と同じ `FEEDBACK` フレームで作る
+（`tests/feedback_frames.py`）。モックの `MotorState` で作っていた頃、温度を測れない
+サーボ基板の `gripper` に `temperature: 30.0` が乗った**嘘の契約**が焼き付いていた。
+サーボ基板（位置だけ）と DC 基板（1 つも測れない）の片方しか載せないと、golden には
+「4 値とも数値」の形しか現れず、UI が `null` を受け取れなくても誰も気付けない
+（「測れないフィードバックは `null` で配る」参照）。
 
 **変動値は固定値へ差し替える**（`$placeholders` の `epoch_seconds` / `duration_ms`）。
 契約なのは値ではなく構造だからである。ただし `null` は潰さない — 「まだ受信していない」
@@ -1460,7 +1473,7 @@ cbc2026_team3/
 │   ├── manual.py           # 手動操縦（OperationMode / ManualController。軸単位でしか指令しない）
 │   ├── drivers/
 │   │   ├── __init__.py
-│   │   ├── base.py
+│   │   ├── base.py            # MotorDriver 基底 / MotorState / TelemetrySupport（測定可否の宣言）
 │   │   ├── m3508.py
 │   │   ├── edulite05.py
 │   │   ├── dm3520.py
@@ -1601,7 +1614,7 @@ cbc2026_team3/
 │           ├── diagnostics/      # SubsystemStatus を頂点とする診断ツリー
 │           │   ├── SubsystemStatus.tsx  # 平常時 1 行に畳み、異常時は開閉操作を上書きして開く
 │           │   ├── MotorSummary.tsx     # 判定は summarizeMotors。ここに条件を書き足さない
-│           │   ├── MotorStatus.tsx
+│           │   ├── MotorStatus.tsx      # 測れない項目は「—」/ 読めない配信は「?」（readMeasured）
 │           │   └── HealthIndicator.tsx  # 判定は lib/healthVerdict.ts に一本化
 │           └── ui/               # 自前プリミティブ（Page / Panel / Section / Button /
 │                                 #   StatusBadge / Kbd / Icon / Modal）
@@ -1637,7 +1650,10 @@ cbc2026_team3/
       "pid": { "kp": 2.0, "ki": 0.0, "kd": 0.0, "applies_to": ["y_axis_r", "y_axis_l"] }
     },
     // ドライバ / ファーム側でループを閉じているモータは null
-    "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0, "pid": null }
+    "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0, "pid": null },
+    // 測る手段が無い項目は null。DC 基板は 4 値とも、サーボ基板は位置以外が null
+    // （「測れないフィードバックは null で配る」参照）
+    "conveyor": { "pos": null, "vel": null, "torque": null, "temp": null, "pid": null }
   },
   "e_stop_active": false,
   "health": { /* HealthSnapshot */ },
@@ -1736,7 +1752,9 @@ Web 側の変更は要らない。現在値だけがテレメトリなので配�
 
 `value` は位置指令の軸だけが持つ。DC 基板はエンコーダを持たないので、`conveyor` に
 逆換算した 0 を載せると「測ったように見える 0」が UI へ流れ込む（`null` を配って
-UI に「読めていない」ことを出させる）。
+UI に「測る手段が無い」ことを出させる）。**モータレベル（`motors[].pos` 等）も
+2026-09-05 に同じ形へ揃えた**（それまではここだけが素通しで、軸は `—` なのに
+そのモータは `0.0` という非対称が残っていた。次節）。
 
 **`deviation` は 3 層の保護と同じ `SyncGroup.deviation()` が算出したものをそのまま配る。**
 UI 側で `motors` の位置から計算し直してはならない —— 逆回転ペアは `scale` の符号で
@@ -1754,6 +1772,109 @@ UI 側で `motors` の位置から計算し直してはならない —— 逆�
 この 2 つを載せたのは、ベンチ調整中に「どれだけずれて止まったか」が画面から読めず、
 `sync_tolerance` を勘で緩める以外に手が無かったため。モータ生単位の `POS` は
 逆回転ペアでは符号まで反転して見えるので、暗算では追えない。
+
+### 測れないフィードバックは `null` で配る（2026-09-05）
+
+診断カラムに `conveyor` が **「0.0 / 0.0 / 0.0 / 0.0℃」** と並んでいた。DC 基板は
+エンコーダも電流センスも温度センサも積んでおらず、`FEEDBACK` は状態フラグ 1 バイト
+（DLC=1）しか送らない（仕様書 §3.2）ので、この 4 つはどれも測った値ではない。
+**画面からは「本当に 0」と「そもそも測っていない」が区別できない。**
+
+出どころは `MotorState` の 4 値が `float` 固定であること。制御経路（位置制御ループ・
+偏差監視・ホーミング）が float を要求するので、測る手段の無い項目もそこでは 0.0 を
+詰めて運ぶ。**その詰め物が配信へ素通ししていた。** 軸レベル（`axes[].value`）では
+既に `null` へ倒してあり、`MotorHealthInfo.temperature` も型は `float | None` だった
+——「モータレベルの `motors[]` だけが素通し」という非対称が残っていたのが発端である。
+
+#### 測定可否はドライバが宣言し、倒すのは配信境界だけ
+
+`lib/drivers/base.py` の `TelemetrySupport`（frozen dataclass）が
+`position` / `velocity` / `current` / `temperature` の 4 つを**必ず 1 組で**持つ。
+バラの bool 引数へ分解すると一部だけ配線した経路が作れ、残りが黙って既定値のまま効く
+（`HealthThresholds` を 1 組で運ぶのとまったく同じ理由）。
+
+| 宣言 | 対象 |
+|---|---|
+| `FULL_TELEMETRY`（`MotorDriver` の既定） | M3508 / EDULITE 05 / DM3520。フィードバックに 4 値とも載る |
+| `_POSITION_ONLY_TELEMETRY` | 自作モタドラのサーボ基板（`control_type: position`）。位置 2 バイトだけ |
+| `NO_TELEMETRY` | DC 基板（`duty`）/ 電磁弁基板（`on_off`） |
+
+センサスロット（`sensors:`）は `GenericDriver` の既定 `control_type: position` で
+生成されるので `_POSITION_ONLY_TELEMETRY` を名乗るが、`state.motors` には並ばない
+（UI のモータ一覧に「常に 0 のモータ」を作らないため）。**ヘルスには並ぶ**
+（`health()` は `motors` と `sensors` を合わせて回す）ので、そこで読まれる温度は
+この宣言によって `None` へ倒れる。
+
+**可否は `control_type` から決め、受信した状態からは推測しない。** `decode_feedback` は
+DLC>=3 なら位置を読む（共通の `MotorState` に収めるため）ので、状態から推測する実装だと
+**たまたま長いフレームが 1 通流れただけで DC 基板に位置が生える**。
+
+倒す場所は 2 つだけで、どちらも「宣言を読んで `None` にする」以外のことをしない:
+
+- `lib/server.py` の `_measured_only()` —— `_build_state_message` が通る**唯一の関門**。
+  **dry-run の擬似値も同じ関門を通す。** 擬似値を作ってよいのは実機が測れる項目だけで、
+  DC 基板に温度や速度を作ると机上で確かめている画面が実機と別物になる
+- `lib/can_manager.py` の `health()` —— `MotorHealthInfo.temperature`
+
+**ドライバ種別による分岐をこの 2 つへ（まして UI へ）書き写してはならない。**
+写すと、ドライバを足した人が配信側の表を直し忘れる形で 0 が復活する。
+
+温度判定（`has_thermal_warning` / `has_thermal_fault`）も `telemetry.temperature` で
+ゲートした。測れない基板の 0.0 は動かないので通常のしきい値では警告に化けないが、
+**しきい値が 0 以下の構成では「測っていない 0」がそのまま警告・FAULT になる。**
+判定材料の有無を握っているのは `telemetry` だけなので、判定側もそこを見る。
+
+#### UI は `null`（測れない）と `MALFORMED`（読めない）を厳密に分ける
+
+`web/src/lib/protocol.ts` に `Measured = number | null` と `readMeasured()` を置いた。
+
+- 数値 …… そのまま描く
+- `null` …… 測る手段が無い。`—` を描き、**単位も付けない**（`—℃` は意味を持たない）
+- 欄の欠落・型違い …… `MALFORMED`。`?` を異常色で描く
+
+**両者を混同してはならない。** `null` を「読めなかった」へ寄せると、DC 基板を 1 枚
+積んだだけで画面全体が異常側へ倒れる。逆に欠落を `null` へ丸めると、配信の不具合が
+「測れない」に化けて誰にも見えなくなる（`parseSafety` / `parseChecklists` /
+`parseTuningMetrics` が `?? []` を置かないのと同じ原則）。分ける唯一の入口が
+`readMeasured()`。
+
+**`motors` は受信境界（`parseKnown`）では素通しのまま**にしてある —— モータ名を UI へ
+書かない性質は配信をそのまま状態へ入れることで成立しており、そこで組み立て直すと
+モータが 1 基増えるたびに UI の変更が要る形へ逆戻りする。代わりに、数値を実際に読む側
+（`MotorStatus` / `MotorDetail` / `MotorTuning` の一覧）が `readMeasured()` を通す。
+
+副産物として、従来の `state.pos.toFixed(1)` が塞がった。型は実行時に消えるので、
+欄が 1 つ落ちただけで**レンダー本体から TypeError が飛び、React ツリーごと
+アンマウント**する。`safety` の 1 欄が落ちて全画面が白くなった事故（`describeSafetyIssues`
+が無検査で `.length` を呼んでいた）とまったく同型である。
+
+`deviationOf()` も `pos === null` で `null` を返すようにした。**測れない位置を 0 として
+引き算すると、偏差そのものが目標値の符号違いに化けたうえで、測っていないことが
+画面から消える。**
+
+#### 契約フィクスチャが嘘をついていた
+
+`web/src/test/ws-contract.json` の `gripper` は**モックの `MotorState(temperature=30.0)`**
+で作られており、**温度を測れない基板が 30.0℃ を報告する契約**が焼き付いていた。
+実 `GenericDriver` を `CANManager` へ挿し、実機と同じ `FEEDBACK` フレームで状態を作る形へ
+張り替えたうえで、**測れる項目が違う 2 種類（サーボ基板 `gripper` / DC 基板 `conveyor`）を
+必ず両方載せる**ようにした。片方だけだと「4 値とも数値」の形しか golden に現れず、
+UI が `null` を受け取れなくても誰も気付けない。
+
+#### 採らなかった案
+
+- **`MotorState` のフィールドを `float | None` にする** —— 型のうえでは最も素直だが、
+  制御経路が全て float を前提にしている。位置制御ループ・偏差監視・ホーミングという
+  **安全に直結する 3 つの経路へ `None` が混入**し、`None` との比較や減算がそのまま
+  例外か誤判定になる。測定可否は制御値そのものではなくメタ情報なので、値の型ではなく
+  ドライバの宣言として持つ
+- **UI 側で `control_type` から測定可否を導出する** —— `manual.axes[].command_mode` は
+  既に配信されているので技術的には可能だが、**UI にドライバ種別を書き写さない**という
+  原則に正面から反する。ドライバを足した人は UI 側の対応表の存在を知らないので、
+  「新しい基板だけ 0 が出る」形で必ず取り残される
+- **`null` を `MALFORMED` と同じ扱いにする**（読めない値として一律に異常へ倒す）——
+  実装は 1 行で済むが、**DC 基板を 1 枚積んだだけで全画面が異常側へ倒れる。** 常時
+  異常が出ている画面では、本物の異常が区別できない
 
 ### Client → Server（操作）
 
@@ -1947,7 +2068,10 @@ UI にもモータ単位のジョグを出さない。
 
 `uv run python main.py --dry-run` 起動時、`RobotServer` は以下の変更を加えて Web UI を完全デモ可能にする:
 
-- 各モータの状態は `time.time()` ベースのサイン波で擬似生成（pos/vel/torque/temp）
+- 各モータの状態は `time.time()` ベースのサイン波で擬似生成（pos/vel/torque/temp）。
+  **擬似値も `_measured_only()` を通る** —— 作ってよいのは実機が測れる項目だけで、
+  DC 基板に温度や速度を作ると机上で確かめている画面が実機と別物になる
+  （「測れないフィードバックは `null` で配る」参照）
 - ヘルススナップショットは全モータ・全バスを `ok` に上書き（virtual バスではフィードバックが返らないため）
 - シーケンスタスクは `_on_startup` で起動されるが、実機同様に開始合図を待って停止したままになる
 

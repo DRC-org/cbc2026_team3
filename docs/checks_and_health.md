@@ -53,6 +53,8 @@ RobotServer._compute_health()      ← 例外は必ず DOWN へ倒す
 
 **受動**なので、モータを動かさずに分かることしか answer しない。「フィードバックが
 来ているか」「ドライバが異常フラグを立てているか」「温度が閾値を超えたか」の 3 つ。
+**3 つ目は温度を測れるモータだけが対象**
+（「温度を見ているのは温度センサを持つモータだけ」節）。
 
 判定を書いてよい場所は 2 つだけ。**関数ではなくファイル単位の境界**である:
 
@@ -82,6 +84,32 @@ RobotServer._compute_health()      ← 例外は必ず DOWN へ倒す
 **UI はサーバーより楽観的な結論を出してはならない。** サーバーは健全性を計算できな
 かったとき `overall=down` + 内訳空で「判定不能」を配る。内訳だけを見て「異常なし」を
 返すと、そのフェイルセーフが画面上で消える。
+
+### 温度を見ているのは温度センサを持つモータだけ
+
+**「全モータの温度を見ている」と読んではならない。** 温度が判定に効くのは M3508 /
+EDULITE 05 / DM3520 の 3 種だけで、**自作モタドラ（DC / サーボ / 電磁弁 / センサ）は
+どの基板も温度を測る手段を持たない**（仕様書 §3.2）。
+
+| | `MotorHealthInfo.temperature` | 温度警告 / FAULT | UI の温度欄 |
+|---|---|---|---|
+| M3508 / EDULITE 05 / DM3520 | 実測値 | `temp_warning_c` / `temp_critical_c` で判定 | 数値 + 温度色 |
+| 自作モタドラ（`can_generic`） | `None` | **判定しない** | `—`（色を付けない） |
+
+`MotorState.temperature` は制御経路が float を要求するため測れない基板でも 0.0 が
+入っているが、それは詰め物であって測った値ではない。**倒すのは `CANManager.health()`
+ただ 1 箇所**で、可否の宣言は `lib/drivers/base.py` の `TelemetrySupport` が単一情報源。
+判定側（`MotorDriver.has_thermal_warning` / `has_thermal_fault`）も同じ宣言を見て降りる
+—— しきい値を 0 以下にした構成では、素通しだと**「測っていない 0」がそのまま警告・
+FAULT に化ける**。
+
+したがって `can_generic` のモータが①に異常として出る経路は **STALE（フィードバック途絶）と
+`is_fault()`（状態フラグ）だけ**である。**動いているかどうかは①では分からない** ——
+そこは②の動作確認が指令を出すところまでを担い、回ったか・鳴ったかは④の指差喚呼
+（`conveyor_run` / `conveyor_stop` / `valves_actuate` など）が人の目と耳で受け持つ。
+
+`state.motors[]` の `pos` / `vel` / `torque` / `temp` も同じ規則で `null` になる
+（詳細は `docs/impl_plan.md` の「測れないフィードバックは `null` で配る」）。
 
 ### 判定に使う数は「今も壊れているか」に答えられなければならない
 
@@ -601,6 +629,7 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 | ヘルスの最悪値への集約（サーバー側） | `lib/health.py` の `worst_bus_health()` |
 | 動作確認が完了したか（UI 側） | `web/src/lib/motorCheckStatus.ts` |
 | ヘルスのしきい値 | `lib/config_schema.py` の `HealthThresholds` |
+| 何を測れるか（テレメトリの測定可否） | `lib/drivers/base.py` の `TelemetrySupport`（各ドライバが宣言） |
 | 左右ずれの境界 | `lib/axis_sync.py` の `SyncGroup.violation()` |
 | 左右ずれを縮める補正量 | `lib/axis_sync.py` の `SyncGroup.corrections()` |
 | 動作確認を起動できるか | `MotorCheckController.deny_reason()`（`lib/server_motor_check.py`） |
@@ -623,6 +652,15 @@ UI は理由を説明するだけで、可否を導出し直してはならな�
 電流・温度・過電流・過熱は自作モタドラのプロトコルに無い。到達フラグも電磁弁基板は
 立てない。**測れないものは運ばない** — 常に 0 の値を流すと、UI にもヘルス判定にも
 測ったように見える値が入り込む。
+
+測る手段の無い項目は配信の境界で `null` へ倒す（`state.motors[]` の 4 値・
+`axes[].value` / `deviation`・`MotorHealthInfo.temperature`）。可否の宣言は
+`lib/drivers/base.py` の `TelemetrySupport` が単一情報源で、**UI にドライバ種別を
+書き写さない。** 画面は `—` を描くだけで、色も判定も付けない。
+
+**`null`（測る手段が無い）と `MALFORMED`（欄の欠落・型違い）を混同しないこと。**
+前者を異常へ倒すと DC 基板を 1 枚積んだだけで全画面が異常側になり、後者を `null` へ
+丸めると配信の不具合が「測れない」に化けて誰にも見えなくなる。
 
 ### テストが噛むか確かめる
 

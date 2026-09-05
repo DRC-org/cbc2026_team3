@@ -825,6 +825,23 @@ DC（R4 内蔵 CAN）は**標準 ID の mailbox が 1 本だけ**、電磁弁（
 **bit6-7 だけ**である（bit0-5 は `MotorCanProtocol.h` の `status_flag` が使い切っている。
 bit5 は `kNeverCommanded`）。センサを積んだ基板が現れたらそこに定義し直すこと。
 
+**測れない項目は配信の境界で `null` へ倒す。`MotorState` の 4 値は float のままにする。**
+制御経路（位置制御ループ・偏差監視・ホーミング）が float を前提にしているので、そこへ
+`None` を混ぜてはならない —— 代わりに測定可否を `lib/drivers/base.py` の
+`TelemetrySupport`（`position` / `velocity` / `current` / `temperature` を **必ず 1 組**で
+持つ。バラすと一部だけ配線した経路が作れるのは `HealthThresholds` と同じ）が宣言し、
+倒すのは `lib/server.py` の `_measured_only()`（`_build_state_message` と dry-run が通る
+唯一の関門）と `CANManager.health()` の `MotorHealthInfo.temperature` の 2 箇所だけにする。
+可否は `control_type` で決め、**受信した状態から推測しない**（`decode_feedback` は DLC>=3 なら
+位置を読むので、長いフレームが 1 通流れただけで DC 基板に位置が生える）。温度判定
+（`has_thermal_warning` / `has_thermal_fault`）も同じ宣言でゲートする —— しきい値を 0 以下に
+した構成では「測っていない 0」がそのまま警告・FAULT に化ける。
+**UI はこれを `—` で描き、`null`（測る手段が無い）と `MALFORMED`（欄の欠落・型違い）を
+混同しない**（`web/src/lib/protocol.ts` の `readMeasured()` が唯一の入口）。前者を異常へ
+倒すと DC 基板を 1 枚積んだだけで全画面が異常側になり、後者を `null` へ丸めると配信の
+不具合が「測れない」に化けて消える。**UI にドライバ種別を書き写して可否を導出し直しては
+ならない**（ドライバを足した人が UI 側の表を直し忘れる）。
+
 **DC 基板はフィードバックを一切持たず、出力禁止ピン（`DIS`）も無い。** エンコーダ・
 電流センス・温度センサとも非搭載で、受理するのは `duty` だけ（位置・速度制御と PID は
 実装ごと存在しない）。止める手段は PWM 0% の一重しかないので、出力へ至る経路を
@@ -1134,7 +1151,8 @@ padding だけでなく本文の `font-size` も直接指定する。ルート�
 別物として区別する。一度これで `safety` の 1 欄が落ちただけで全画面が白くなった
 （`describeSafetyIssues` が無検査で `.length` を呼び、レンダー本体なので React ツリーごと
 アンマウントした）。**`motors` と `steps` は素通しのまま** — モータ名を UI へ書かない
-性質はそこで成立している。
+性質はそこで成立している。代わりに**数値を実際に読む側が `readMeasured()` を通す**
+（`state.pos.toFixed(1)` は欄が 1 つ落ちれば同じ形で全画面を落とす）。
 
 **`RouteErrorBoundary` は `<Outlet />` だけに掛ける。** ヘッダー・接続バナー・緊急停止
 オーバーレイは境界の外に置く。画面全体を包むと、描画が落ちたときに**止める手段

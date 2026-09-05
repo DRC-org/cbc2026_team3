@@ -60,7 +60,7 @@ class TelemetrySupport:
 #: 4 値すべてを測れるドライバ (M3508 / EDULITE 05 / DM3520) の宣言
 FULL_TELEMETRY = TelemetrySupport()
 
-#: 状態フラグしか返さない基板 (DC・電磁弁・センサ) の宣言
+#: 状態フラグしか返さない基板 (DC・電磁弁) の宣言
 NO_TELEMETRY = TelemetrySupport(position=False, velocity=False, current=False, temperature=False)
 
 
