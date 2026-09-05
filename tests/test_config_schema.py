@@ -493,6 +493,85 @@ class TestDriverSpecificKeys:
                 buses=_BUSES,
             )
 
+    def test_dm3520_master_id_colliding_with_another_can_id_is_rejected(self) -> None:
+        """MST_ID の下位 8bit が別モータの ESC_ID と交差する構成は拒否する。
+
+        本機は受信 ID の下位 8bit だけを見て自分宛かを判定するため、一致すると
+        フィードバックが指令として解釈される (CLAUDE.md
+        「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)。
+        """
+        with pytest.raises(ValueError, match="master_id"):
+            load_robot_config(
+                _robot(
+                    sub_y_axis={
+                        "driver": "dm3520",
+                        "bus": "dm3520_bus",
+                        "can_id": 1,
+                        "master_id": 2,
+                    },
+                    sub_lift={
+                        "driver": "dm3520",
+                        "bus": "dm3520_bus",
+                        "can_id": 2,
+                        "master_id": 1,
+                    },
+                ),
+                source="test.yaml",
+                buses=_BUSES,
+            )
+
+    def test_dm3520_master_id_equal_to_own_can_id_is_rejected(self) -> None:
+        """出荷値のまま (ESC_ID == MST_ID) 残った個体も拒否する。
+
+        DM3520 の出荷値は 2 台とも ESC_ID == MST_ID。ESC_ID だけ書き換えて
+        MST_ID を書き換え忘れた個体がそのまま config に混ざる事故を検出する。
+        """
+        with pytest.raises(ValueError, match="master_id"):
+            load_robot_config(
+                _robot(
+                    sub_y_axis={
+                        "driver": "dm3520",
+                        "bus": "dm3520_bus",
+                        "can_id": 1,
+                        "master_id": 1,
+                    },
+                    sub_lift={
+                        "driver": "dm3520",
+                        "bus": "dm3520_bus",
+                        "can_id": 2,
+                        "master_id": 0x12,
+                    },
+                ),
+                source="test.yaml",
+                buses=_BUSES,
+            )
+
+    def test_dm3520_master_id_colliding_on_a_different_bus_is_accepted(self) -> None:
+        """バスが違えば下位 8bit が一致しても衝突ではない。
+
+        フレームは同じ物理バスに繋がったノードにしか届かないため、他バスの
+        can_id とたまたま一致しても無害 (過剰検出で無関係な構成まで拒否しない)。
+        """
+        config = load_robot_config(
+            _robot(
+                sub_y_axis={
+                    "driver": "dm3520",
+                    "bus": "dm3520_bus",
+                    "can_id": 1,
+                    "master_id": 0x11,
+                },
+                arm={
+                    "driver": "generic",
+                    "bus": "generic_bus",
+                    "can_id": 0x11,
+                },
+            ),
+            source="test.yaml",
+            buses=_BUSES,
+        )
+
+        assert config.motors["sub_y_axis"].master_id == 0x11
+
     def test_edulite_mode_typo_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="postion"):
             load_robot_config(
