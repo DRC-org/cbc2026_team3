@@ -1077,7 +1077,11 @@ class TestTargetRefresherLivenessBroadcast:
             state = fx.state_message("main_hand")
             assert state["safety"]["refreshers_running"] is True
             assert state["safety"]["target_refreshers"] == [
-                {"motors": ["conveyor"], "running": True, "paused": False}
+                {
+                    "motors": ["conveyor"],
+                    "running": True,
+                    "paused": False,
+                }
             ]
         finally:
             await refresher.stop()

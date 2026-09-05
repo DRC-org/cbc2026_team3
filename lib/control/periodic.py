@@ -12,6 +12,15 @@
 後置 sleep では実周期が ``interval + 処理時間`` になり、公称 50Hz を前提に
 「2 サンプル = 40ms なら機構破損に間に合う」と書いている偏差監視の応答が
 負荷に比例して伸びてしまう (lib/axis_sync.py のモジュール docstring を参照)。
+
+実周期の実測もここに一本化する。継承先 3 クラスへ書き写すと、書き忘れた 1 つだけが
+乱れを検知できないまま残る。測るのは「連続する 2 回の tick 開始時刻の差」で、
+起床が遅れた分 (イベントループの混雑) と tick 自身の処理が長すぎた分 (処理落ち) の
+両方を区別せず 1 つの数字に落とす —— どちらも「次の周期までに終わらなかった」
+という意味では同じで、偏差監視の時間予算や `trajectory.py` の停止距離はこの実周期
+そのものに依存しているため、原因の内訳より「実際にどれだけ遅れたか」のほうが要る。
+サンプル列は持たず、最大値・超過回数だけを O(1) で積む (1 周期の仕事を定数時間に
+保つ制約は `lib/tuning/recorder.py` と同じ)。
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 __all__ = [
+    "JITTER_OVERRUN_FACTOR",
     "LOG_THROTTLE_S",
     "LogThrottle",
     "PausablePeriodicTask",
@@ -31,6 +41,13 @@ __all__ = [
 
 # 同一原因のログを毎周期出すと 200Hz でログが溢れ、本当に読みたい 1 行が流れる
 LOG_THROTTLE_S = 1.0
+
+# 実周期がこの割合を超えて公称値を上回ったら「乱れ」として数える。
+# `interval_s` からの相対値にするのは、200/50/20Hz の 3 種を跨ぐしきい値を
+# 絶対値で 1 組持つと読み手が都度換算する羽目になるため。
+# 値の根拠: 50Hz の偏差監視は「2 サンプル = 40ms で機構破損に間に合う」が
+# 前提 (`lib/axis_sync.py`)。1.5 倍 = 30ms は既にその予算の 75% を単独で食う。
+JITTER_OVERRUN_FACTOR = 0.5
 
 SleepFunc = Callable[[float], Awaitable[None]]
 TimeSource = Callable[[], float]
@@ -63,6 +80,20 @@ class LogThrottle:
             return
         self._last_at[key] = now
         self._logger.error(message, *args, exc_info=True)
+
+    def warning(self, key: str, message: str, *args: object) -> None:
+        """例外ではない警告を間引いて記録する (トレースバックは付けない)。
+
+        周期の乱れは例外を伴わない (tick は正常に完了したが遅かっただけ) ので、
+        ``exception()`` の ``exc_info=True`` は使えない。``key`` の名前空間は
+        ``exception()`` と共有しているので、呼び出し側で衝突しない名前を選ぶこと。
+        """
+        now = self._time_source()
+        last = self._last_at.get(key)
+        if last is not None and now - last < self._interval_s:
+            return
+        self._last_at[key] = now
+        self._logger.warning(message, *args)
 
 
 class PeriodicTask(abc.ABC):
@@ -98,6 +129,14 @@ class PeriodicTask(abc.ABC):
         self._logger = logger if logger is not None else logging.getLogger(type(self).__module__)
         self._log = LogThrottle(self._logger, time_source=time_source)
 
+        # 実周期のジッタ計測。サンプル列は持たず O(1) の集計だけを積む
+        # (`_last_tick_at` は前回 tick の開始時刻。`start()` で None に戻す —
+        # 停止していた間の空白を「乱れ」として数えないため)。
+        self._last_tick_at: float | None = None
+        self._jitter_overrun_count = 0
+        self._worst_jitter_s = 0.0
+        self._jitter_threshold_s = interval_s * JITTER_OVERRUN_FACTOR
+
     # ------------------------------------------------------------------ #
     #  サブクラスが実装する
     # ------------------------------------------------------------------ #
@@ -120,6 +159,63 @@ class PeriodicTask(abc.ABC):
     async def _on_run_exit(self) -> None:  # noqa: B027  (任意フック。既定は何もしない)
         """ループを降りるときのフック。異常終了・キャンセルでも必ず通る。"""
 
+    def _observe_tick_start(self, now: float) -> None:
+        """実周期を測り、超過回数と最悪値だけを O(1) で積む。
+
+        前回 tick からの経過 (= 実周期) と公称 ``interval_s`` の差を「乱れ」とする。
+        起床が遅れた分と tick 自身の処理が長すぎた分を区別しないのは、
+        `SyncMonitor` の時間予算にとってはどちらも同じ「次の周期までに終わらなかった」
+        だからである。初回 (直前の tick が無い) は比較対象が無いので何もしない。
+        """
+        last = self._last_tick_at
+        self._last_tick_at = now
+        if last is None:
+            return
+
+        jitter = (now - last) - self._interval_s
+        if jitter > self._worst_jitter_s:
+            self._worst_jitter_s = jitter
+        if jitter > self._jitter_threshold_s:
+            self._jitter_overrun_count += 1
+            self._log.warning(
+                "jitter",
+                "%s の実周期が乱れています (実測 %.1fms / 公称 %.1fms)",
+                self._label(),
+                (now - last) * 1000.0,
+                self._interval_s * 1000.0,
+            )
+
+    @property
+    def jitter_overrun_count(self) -> int:
+        """実周期が公称値を大きく (``JITTER_OVERRUN_FACTOR`` 超) 上回った回数。"""
+        return self._jitter_overrun_count
+
+    @property
+    def worst_jitter_s(self) -> float:
+        """観測した実周期の超過分 [s] の最大値。乱れが一度も無ければ 0.0。"""
+        return self._worst_jitter_s
+
+    def reset_jitter_stats(self) -> None:
+        """乱れの記録を落とす。呼ぶのは match_start だけ (試合ごとに 1 行 journal へ残す)。
+        画面・WS 配信には出していない (しきい値が実機未検証。経緯は
+        ``docs/checks_and_health.md`` の「3 層はどれも公称周期どおりに回っている
+        ことが前提」節)。
+
+        回数と最悪値は必ず両方一緒に落とす —— 片方だけ残ると数字が読めなくなる。
+        ``_last_tick_at`` は触らない —— ``None`` に戻すと直後の 1 tick 分の乱れ
+        検知を取りこぼす (`start()` が捨てる「停止していた空白」とは違い、
+        ここはタスクが動き続けたままの呼び出しなので空白が無い)。
+        """
+        if self._jitter_overrun_count > 0:
+            self._logger.info(
+                "%s の実周期の乱れを試合単位でリセット (超過 %d 回 / 最悪 %.1fms)",
+                self._label(),
+                self._jitter_overrun_count,
+                self._worst_jitter_s * 1000.0,
+            )
+        self._jitter_overrun_count = 0
+        self._worst_jitter_s = 0.0
+
     # ------------------------------------------------------------------ #
     #  ライフサイクル
     # ------------------------------------------------------------------ #
@@ -135,6 +231,7 @@ class PeriodicTask(abc.ABC):
         next_at = self._time_source() + self._interval_s
         try:
             while not self._stop_event.is_set():
+                self._observe_tick_start(self._time_source())
                 try:
                     await self._tick()
                 except asyncio.CancelledError:
@@ -163,6 +260,9 @@ class PeriodicTask(abc.ABC):
         if self.is_running:
             raise RuntimeError(f"{self._label()} は既に実行中です")
         self._stop_event.clear()
+        # 停止していた間の空白を実周期の乱れとして数えないため、直前 tick の
+        # 記録を捨てる (次の tick は「初回」として扱われ、比較対象を持たない)。
+        self._last_tick_at = None
         self._task = asyncio.create_task(self.run())
 
     def request_stop(self) -> None:

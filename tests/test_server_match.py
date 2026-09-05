@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.config_schema import MatchSettings
+from lib.control.position_loop import M3508PositionLoop
+from lib.control.sync_monitor import SyncMonitor
+from lib.control.target_refresh import GenericTargetRefresher
 from lib.match_state import (
     ROLE_PRE_MATCH,
     ChecklistItem,
@@ -12,7 +16,8 @@ from lib.match_state import (
     Phase,
 )
 from lib.sequence.engine import Sequence, step
-from tests.server_fixtures import ServerFixture, recv_type
+from tests.fake_can import mock_can_manager
+from tests.server_fixtures import ServerFixture, recv_type, seed_jitter_overrun
 
 # 項目を 2 つ持たせるのは「1 つ埋めただけでは試合に入れない」を検証できる形にするため。
 # 1 項目だと最初のチェックで READY になり、ゲートが効いているのか区別が付かない。
@@ -546,4 +551,119 @@ class TestMatchStartResetsRxDownEpisodes:
             assert fx.match.phase is Phase.SETUP, "拒否されず試合が始まってしまっている"
             for name in _ROBOT_NAMES:
                 fx.can_manager(name).reset_rx_down_episodes.assert_not_called()
+            await ws.close()
+
+
+class TestJitterResetOnMatchStart:
+    """周期タスクが測る実周期の乱れは、試合開始で洗い流す。
+
+    画面に求める性質 (持続する / 永久に残らない) の調停点が「試合」という
+    スコープであることの詳しい設計判断は `lib/server.py` の
+    `_handle_match_start` に書いてある。ここではその配線 —— `match_start` が
+    成立したときだけ全ロボットの位置制御ループ・同期監視・目標値再送を
+    リセットすること —— だけを固定する。実周期を実際に乱して検知させる経路は
+    `tests/test_periodic.py` が単体で尽くしているので、ここでは
+    `seed_jitter_overrun` でカウンタへ直接値を据える。
+    """
+
+    def _build_fixture_with_periodic_tasks(
+        self,
+    ) -> tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher]:
+        fx = ServerFixture.build(checklist_definitions=_DEFS)
+        mgr = mock_can_manager(("y_axis_r",))
+
+        position_loop = M3508PositionLoop(mgr, "bus0")
+        sync_monitor = SyncMonitor([], {}, last_feedback_at=lambda _name: None)
+        refresher = GenericTargetRefresher([])
+
+        fx.add_robot(
+            "main_hand",
+            DummySequence("main_hand"),
+            mgr,
+            position_loops=[position_loop],
+            sync_monitors=[sync_monitor],
+            target_refreshers=[refresher],
+        )
+        for task in (position_loop, sync_monitor, refresher):
+            seed_jitter_overrun(task, count=3, worst_s=0.04)
+        return fx, position_loop, sync_monitor, refresher
+
+    async def test_match_start_が成立すると全タスクの乱れをリセットする(self) -> None:
+        fx, position_loop, sync_monitor, refresher = self._build_fixture_with_periodic_tasks()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            fx.complete_all_checklists()
+
+            await ws.send_json({"type": "match_start"})
+            await asyncio.sleep(0.05)
+
+            assert fx.match.phase is Phase.MATCH
+            for task in (position_loop, sync_monitor, refresher):
+                assert task.jitter_overrun_count == 0
+                assert task.worst_jitter_s == pytest.approx(0.0)
+            await ws.close()
+
+    async def test_フェーズゲートで拒否されたときはリセットしない(self) -> None:
+        """指差喚呼未完了でフェーズが READY に達していなければ一切触らない。
+
+        `handle_command` は `CommandSpec.allowed_phases` (`match_start` は
+        `PHASES_START_GATE`) で `_handle_match_start` を呼ぶ前段からフェーズを
+        見ており、指差喚呼未完了ならここで拒否されて `_handle_match_start` の
+        中身 (リセットの呼び出しを含む) は 1 行も実行されない。
+        """
+        fx, position_loop, sync_monitor, refresher = self._build_fixture_with_periodic_tasks()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            # 指差喚呼を完了させない = フェーズが READY に達せずゲートで拒否される
+
+            await ws.send_json({"type": "match_start"})
+            msg = await recv_type(ws, "command_rejected")
+
+            assert msg is not None
+            assert msg["command"] == "match_start"
+            assert fx.match.phase is not Phase.MATCH
+            for task in (position_loop, sync_monitor, refresher):
+                assert task.jitter_overrun_count == 3
+                assert task.worst_jitter_s == pytest.approx(0.04)
+            await ws.close()
+
+    async def test_動作確認中の拒否ではリセットしない(self) -> None:
+        """フェーズゲートは通っても (指差喚呼は完了)、`_handle_match_start` 自身の
+        排他判定 (動作確認の実行中) で拒否されたときも触らない。
+
+        **この 1 本がリセット呼び出しの位置を固定する。** フェーズゲート側の
+        テスト (`test_フェーズゲートで拒否されたときはリセットしない`) は
+        `_handle_match_start` の中身を一切実行しないので、リセットの呼び出しを
+        関数の先頭 (排他判定より前) へ動かしてもそちらは落ちない。ここでは
+        フェーズゲートを通過させたうえで `_handle_match_start` 内部の排他判定に
+        引っかけるので、リセットが排他判定より前へ動くとここが落ちる。
+        """
+        fx, position_loop, sync_monitor, refresher = self._build_fixture_with_periodic_tasks()
+        check = _GatedCheckSequence()
+        fx.set_motor_check_sequence(check)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            fx.complete_all_checklists()
+            assert await fx.start_motor_check() is True
+            await fx.wait_motor_check_running()
+
+            await ws.send_json({"type": "match_start"})
+            msg = await recv_type(ws, "command_rejected")
+
+            assert msg is not None
+            assert msg["command"] == "match_start"
+            assert "動作確認" in msg["reason"]
+            assert fx.match.phase is not Phase.MATCH
+            for task in (position_loop, sync_monitor, refresher):
+                assert task.jitter_overrun_count == 3
+                assert task.worst_jitter_s == pytest.approx(0.04)
+
+            check.gate.set()
+            await fx.wait_motor_check_idle()
             await ws.close()

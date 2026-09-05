@@ -507,3 +507,13 @@ async def collect_types(ws: Any, wanted: Iterable[str], *, tries: int = 60) -> l
         if msg.get("type") in wanted_set:
             found.append(msg)
     return found
+
+
+def seed_jitter_overrun(task: Any, *, count: int = 1, worst_s: float = 0.05) -> None:
+    """周期タスクの乱れカウンタへ直接値を据える (リセット配線だけを見たいテスト専用)。
+
+    実際に実周期を乱して検知させる経路は ``tests/test_periodic.py`` が単体で
+    尽くしている。ここで本物のタイミングを乱すと非決定性がテストへ持ち込まれる。
+    """
+    task._jitter_overrun_count = count
+    task._worst_jitter_s = worst_s
