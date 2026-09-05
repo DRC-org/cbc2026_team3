@@ -25,6 +25,21 @@ class EStopActiveError(RuntimeError):
     """緊急停止中にモータ指令を出そうとしたときに送出される。"""
 
 
+class WaitInterruptedError(RuntimeError):
+    """目標を持った状態で到達待ちに入ったのに、待機中に目標が消えたときに送出される。
+
+    ``is_reached()`` は「目標が無ければ到達済み」を返す (一度も指令していない軸を
+    誤って待たせないための設計)。この意味そのものは正しいが、``wait_reached`` の
+    実行中に緊急停止 (``TargetRefresher.clear_targets()``) が目標を刈り取ると、
+    同じ判定が「中断」を「到達」にすり替えてしまい、``move_to`` は中断された
+    動作をそのままステップ成功として扱ってしまう。
+
+    ``SequenceTimeoutError`` にせず専用の例外にしたのは、操縦者に見せる文言が
+    嘘にならないようにするため —— 中断はタイムアウトではないので
+    「目標位置に到達しませんでした」は誤りになる。
+    """
+
+
 class MotorHandle:
     """1 モータへの目標値送信と到達待ちを担うハンドル。"""
 
@@ -133,6 +148,13 @@ class MotorHandle:
     # ---- 到達判定 ----
 
     def is_reached(self, *, tolerance: float | None = None) -> bool:
+        """目標に到達していれば True。目標を持っていなければ常に True。
+
+        後者は「一度も指令していない軸を待たせない」ための意図的な設計であり、
+        変えてはならない。**待機の途中で目標が消えた「中断」をここで検出しては
+        ならない** —— ここは 1 回きりの状態確認で「消えた」ことを言う立場に無く、
+        待ち始めた時点との比較が要る。その区別は ``wait_reached`` 側の責務。
+        """
         if self._target is None or self._mode is None:
             return True
         return self._driver.is_target_reached(self._target, self._mode, tolerance=tolerance)
@@ -143,9 +165,31 @@ class MotorHandle:
         tolerance: float | None = None,
         timeout: float | None = None,
     ) -> bool:
-        """目標到達を待つ。到達すれば True、タイムアウトなら False。"""
+        """目標到達を待つ。到達すれば True、タイムアウトなら False。
+
+        目標を持った状態で待ち始めたのに、待機中に目標が消えたら
+        (``clear_target`` —— 緊急停止の ``TargetRefresher.clear_targets()`` など)
+        ``WaitInterruptedError`` を送出する。``is_reached()`` は「目標が無ければ
+        到達済み」を返すため、この区別をここでしないと中断がそのまま「到達」に
+        すり替わり、``move_to`` は中断された動作を成功として記録してしまう。
+
+        目標を一度も持たずに待ち始めた場合 (``has_target`` が最初から False) は
+        従来どおり即座に True を返す —— こちらは中断ではなく「待つ必要が無い」。
+
+        既知の限界: 中断の検出は「待ち始めた時点で目標を持っていたか」の
+        スナップショットに拠るため、``move_to`` が複数軸へ ``set_target_value``
+        を順に送っている最中 (この関数が呼ばれる前) に目標が消えた場合は拾えない
+        (次に送る側は最初から目標無しで待ち始め、True を返す)。窓は送信 1 回分
+        (数 ms) に縮むだけで、待機期間全体を保護するものではない。
+        """
+        had_target = self.has_target
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
+            if had_target and not self.has_target:
+                raise WaitInterruptedError(
+                    f"モータ '{self._name}' の到達待ちが中断されました"
+                    " (緊急停止などで目標値がクリアされました)"
+                )
             if self.is_reached(tolerance=tolerance):
                 return True
             if deadline is not None:
@@ -232,7 +276,12 @@ class AxisHandle:
         )
 
     async def wait_reached(self, *, timeout: float | None = None) -> bool:
-        """軸の到達を待つ。到達すれば True、タイムアウトなら False。"""
+        """軸の到達を待つ。到達すれば True、タイムアウトなら False。
+
+        POSITION 軸では ``MotorHandle.wait_reached`` を束ねて呼ぶため、
+        待機中に目標が消えれば (緊急停止など) ``WaitInterruptedError`` が
+        そのまま伝播する (duty / velocity 軸は到達判定を持たないため無関係)。
+        """
         if self._spec.command_mode is not ControlMode.POSITION:
             # duty / velocity 指令の軸は目標値と同じ次元のフィードバックを持たず
             # 到達判定ができない。代わりに機構が動き切るまでの固定待ちだけを行う

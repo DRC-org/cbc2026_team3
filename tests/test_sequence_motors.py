@@ -13,6 +13,7 @@ from lib.sequence.motors import (
     EStopActiveError,
     MotorGroup,
     MotorHandle,
+    WaitInterruptedError,
     build_motor_group,
 )
 from lib.sequence.positions import AxisSpec, MotorSpec
@@ -232,6 +233,28 @@ class TestMotorHandleWaitReached:
 
         assert handle.has_target is False
         assert await handle.wait_reached(timeout=0.05) is True
+
+    async def test_target_cleared_mid_wait_raises_interrupted(self) -> None:
+        """緊急停止などが待機中に目標を刈り取ったら「到達」にすり替えず中断と分かる形にする。
+
+        回帰対象: MotorHandle.is_reached() は「目標が無ければ到達済み」を返すため、
+        wait_reached() の実行中に clear_target() が入ると、かつては黙って True を
+        返し、move_to() が中断された動作をステップ成功として記録していた。
+        """
+        handle, driver, _mgr = _make_handle()
+        await handle.set_target(ControlMode.POSITION, 10.0)
+        driver.set_observed(position=100.0)  # 到達しないまま待たせる
+
+        async def interrupt() -> None:
+            await asyncio.sleep(0.03)
+            handle.clear_target()
+
+        task = asyncio.create_task(interrupt())
+        try:
+            with pytest.raises(WaitInterruptedError):
+                await handle.wait_reached(timeout=1.0)
+        finally:
+            await task
 
 
 class TestMotorGroup:

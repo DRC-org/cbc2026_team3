@@ -264,7 +264,10 @@ class Sequence:
         単位換算・許容差・待ち時間はすべて位置定数 yaml の責務なので、
         シーケンス本体には生の数値が現れない。到達しない軸があれば
         SequenceTimeoutError を、到達しても左右がずれている軸があれば
-        AxisSyncError を送出して停止させる。
+        AxisSyncError を送出して停止させる。待機中に緊急停止などで目標が
+        消えれば ``lib.sequence.motors.WaitInterruptedError`` が伝播する
+        (到達しなかったのではなく中断されたので、タイムアウトとは別の例外にして
+        操縦者へ見せる文言が嘘にならないようにしてある)。
         指令値は保持したままにする (落下すると危険な軸で保持トルクを失わないため)。
         """
         table = self.positions
