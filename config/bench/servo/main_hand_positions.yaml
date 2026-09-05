@@ -34,7 +34,7 @@ axes:
   # gripper / wall_f / wall_r と同一にしてある (ベンチで確かめた指令量が本番でもそのまま出る)。
   #
   # **SV3 / SV4 はここに現れない。** ファームがこの 2 スロットを TouchSensor として
-  # 宣言しており (firmware/servo/include/config.h の kSlotRoleByBoard)、駆動できないので
+  # 宣言しており (firmware/servo/include/config.h の kSlotsByBoard[基板][スロット])、駆動できないので
   # 軸を持たない。config/bench/servo/main_hand.yaml では sensors: に登録してある。
   #
   # timeout_s はスルーレート 90deg/s で全ストローク 30deg を動く時間 (約 0.33s) に

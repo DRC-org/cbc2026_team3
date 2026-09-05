@@ -131,8 +131,9 @@ motors:
   # ID を見ればどの基板のどのスロットかが直接読めるので、candump を眺めるときに
   # 対応表を引かなくてよい。
   #
-  # **スロットの役割はファームが基板番号ごとに持つ** (firmware/servo/include/config.h の
-  # kSlotRoleByBoard)。サーボ基板 #0 の現在の割り当ては
+  # **スロット設定一式 (役割・ピン・初期角・可動範囲・パルス仕様・センサ極性) は
+  # ファームが基板番号ごと・スロットごとに持つ** (firmware/servo/include/config.h の
+  # kSlotsByBoard[基板][スロット])。サーボ基板 #0 の現在の割り当ては
   #   SV0 0x40 Servo       … gripper
   #   SV1 0x41 Servo       … wall_f
   #   SV2 0x42 Servo       … wall_r
@@ -149,7 +150,9 @@ motors:
     # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
     # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
     # 値は firmware/servo/include/config.h の kFirmwareVersion と
-    # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
+    # kSlotsByBoard[基板][スロット].pulse.angleRangeDeg に対応する。**サーボの型は
+    # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
+    # **ファームを直したらここも直す。**
     expected_firmware: 4
     expected_angle_range_deg: 270.0
 

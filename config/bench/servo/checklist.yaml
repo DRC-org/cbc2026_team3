@@ -12,7 +12,7 @@
 # こと — 向き・可動範囲の端・緊急停止時に脱力しないこと — に絞ってある。
 #
 # **基板番号 0 として使う前提の一覧。** 基板番号 1 は SV0 しか駆動できず
-# (firmware/servo/include/config.h の kSlotRoleByBoard)、SV1 以降が無応答なのを
+# (firmware/servo/include/config.h の kSlotsByBoard[基板][スロット])、SV1 以降が無応答なのを
 # 故障と区別できないため、ベンチは DIP 全 OFF で回す。
 
 checklists:

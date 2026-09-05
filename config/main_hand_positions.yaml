@@ -194,9 +194,10 @@ axes:
     # サーボ基板 #1 の SV0 (0x48) へ移す」。現在の基板 #0 は
     #   0x40 gripper / 0x41 wall_f / 0x42 wall_r /
     #   0x43 rotate_origin_sensor / 0x44 origin_sensor
-    # で、SV3 / SV4 の 2 本がスイッチになっている。**スロットの役割はファームが
-    # 基板番号ごとに持つ**ので、配線を差し替えるだけでは足りず
-    # firmware/servo/include/config.h の kSlotRoleByBoard も対応していなければならない。
+    # で、SV3 / SV4 の 2 本がスイッチになっている。**スロット設定一式はファームが
+    # 基板番号ごと・スロットごとに持つ**ので、配線を差し替えるだけでは足りず
+    # firmware/servo/include/config.h の kSlotsByBoard[基板][スロット] も対応して
+    # いなければならない。
     #
     # --- 前提 2 (未解消): EDULITE 軸は原点確定の経路そのものが無い --------------
     # 零点確定 (lib/sequence/homing.py) の原点確定は main.py の _make_origin_resolver

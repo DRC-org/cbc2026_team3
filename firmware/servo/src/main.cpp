@@ -56,36 +56,45 @@ using namespace motorcan;
 // 使うピンをすべて 1 つの表にまとめてから検証する。DC 用でこれを怠り、config.h の
 // 想定と実基板の配線がまるごと食い違ってもビルドが通る状態を作った経緯がある。
 // SPI の 3 本を含めるのは、そこを他用途へ割り当てると CAN が丸ごと死ぬため。
+//
+// **UART の 2 本（D0/D1）も ENABLE_SERIAL_DEBUG に依らず常に入れる。** 理由は 2 つで、
+// どちらも config.h の kPinUartRx / kPinUartTx のコメントにある —— シリアルを切っても
+// Nano の D0/D1 は USB-シリアル変換に繋がったままであること、そして kSlotsByBoard の
+// **ゼロ埋め（書き忘れた要素は pin=0 になる）をここで捕まえる**こと。
 static constexpr uint8_t kFixedPins[] = {
-    kPinMcpInt, kPinMcpCs, kPinSpiMosi, kPinSpiMiso, kPinSpiSck,
-    kPinRgb,    kPinDip[0], kPinDip[1], kPinDip[2],  kPinDip[3],
+    kPinUartRx, kPinUartTx, kPinMcpInt,  kPinMcpCs,  kPinSpiMosi, kPinSpiMiso,
+    kPinSpiSck, kPinRgb,    kPinDip[0],  kPinDip[1], kPinDip[2],  kPinDip[3],
 };
 static constexpr uint8_t kFixedPinCount = sizeof(kFixedPins) / sizeof(kFixedPins[0]);
 
-// **役割に関係なく全スロットのピンを見る。** 役割は基板番号ごとに変わるので、
-// 「今この表で Unused になっている行」を検査から外すと、別の基板でそのスロットを
-// 使い始めた瞬間に検査を通っていない配線が動き出す。
+// **全基板・全スロットのピンを見る。** 役割も型も基板番号ごとに変わるので、
+// 「今この行で Unused になっているスロット」を検査から外すと、別の基板でそのスロットを
+// 使い始めた瞬間に検査を通っていない配線が動き出す。基板 #1 の行だけ衝突していても
+// 症状はその 1 枚にしか出ないので、実機を挿すまで気付けない。
 //
 // **constexpr のループで continue を使わないこと。** avr-gcc 7.3 は constexpr 評価中の
 // continue で増分式を飛ばし、無限ループになって
 // 「constexpr loop iteration count exceeds limit」でビルドが落ちる。条件は if の入れ子で書く。
 static constexpr bool slotPinsAreSane() {
-    for (uint8_t i = 0; i < kServoSlotCount; ++i) {
-        for (uint8_t f = 0; f < kFixedPinCount; ++f) {
-            if (kServoSlots[i].pin == kFixedPins[f]) {
-                return false;
+    for (uint8_t b = 0; b < kServoBoardCount; ++b) {
+        for (uint8_t i = 0; i < kServoSlotCount; ++i) {
+            for (uint8_t f = 0; f < kFixedPinCount; ++f) {
+                if (kSlotsByBoard[b][i].pin == kFixedPins[f]) {
+                    return false;
+                }
             }
-        }
-        for (uint8_t j = static_cast<uint8_t>(i + 1); j < kServoSlotCount; ++j) {
-            if (kServoSlots[i].pin == kServoSlots[j].pin) {
-                return false;
+            for (uint8_t j = static_cast<uint8_t>(i + 1); j < kServoSlotCount; ++j) {
+                if (kSlotsByBoard[b][i].pin == kSlotsByBoard[b][j].pin) {
+                    return false;
+                }
             }
         }
     }
     return true;
 }
 static_assert(slotPinsAreSane(),
-              "config.h のスロットのピンが SPI/CAN/RGB/DIP と衝突しているか、重複している");
+              "config.h のスロットのピンが UART/SPI/CAN/RGB/DIP と衝突しているか、重複している"
+              "（pin が 0 なら kSlotsByBoard の要素の書き忘れでゼロ埋めされている）");
 
 static constexpr bool fixedPinsAreUnique() {
     for (uint8_t i = 0; i < kFixedPinCount; ++i) {
@@ -97,17 +106,13 @@ static constexpr bool fixedPinsAreUnique() {
     }
     return true;
 }
-static_assert(fixedPinsAreUnique(), "config.h の固定ピン（SPI/CAN/RGB/DIP）が重複している");
+static_assert(fixedPinsAreUnique(), "config.h の固定ピン（UART/SPI/CAN/RGB/DIP）が重複している");
 
 // デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
 // スロット間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）。
 // かつては基準 ID の表を持ち、重複・連続ブロック性・帯・センサのビット割り当ての
 // 4 つを static_assert で見張っていたが、ビット分割と 1 デバイス 1 ビットで規則ごと消えた。
 
-// 下の g_servo / g_channel は各スロットを明示的に初期化している。
-// スロットを増やすときはそれらの初期化子も一緒に足すこと。
-static_assert(kServoSlotCount == 5,
-              "スロット数を変えたら g_servo / g_channel の初期化子も更新すること");
 static_assert(kServoSlotCount <= motorcan::kMaxSlotNumber + 1,
               "スロット数がデバイス ID のスロット番号（3bit）に収まらない");
 
@@ -121,8 +126,8 @@ static_assert(kDipBitCount == sizeof(kPinDip) / sizeof(kPinDip[0]),
 // 行を足して kServoBoardCount を上げ忘れると、その基板は「表に無い番号」として全スロットが
 // 未設定へ倒れる —— 症状は「新しい基板だけ何も動かず LED が赤く点滅する」だけで、
 // 原因が config.h の 1 行の数字だと気付くまでに時間を食う。
-static_assert(sizeof(kSlotRoleByBoard) / sizeof(kSlotRoleByBoard[0]) == kServoBoardCount,
-              "kSlotRoleByBoard の行数と kServoBoardCount が一致していない");
+static_assert(sizeof(kSlotsByBoard) / sizeof(kSlotsByBoard[0]) == kServoBoardCount,
+              "kSlotsByBoard の行数と kServoBoardCount が一致していない");
 
 // ===========================================================================
 // ペリフェラルと状態（すべてスロット単位）
@@ -142,25 +147,24 @@ static Servo g_servo[kServoSlotCount];
 
 // 仕様書 §5.4: 起動時の緊急停止ラッチは解除済み。§7.1 のとおり宛先がスロットなので
 // ウォッチドッグも補間もスロットごとに独立して動く。
-static ServoChannel g_channel[kServoSlotCount] = {
-    ServoChannel(kServoSlots[0].initialAngleDeg, kServoSlots[0].limits, kDefaultCommandTimeoutMs),
-    ServoChannel(kServoSlots[1].initialAngleDeg, kServoSlots[1].limits, kDefaultCommandTimeoutMs),
-    ServoChannel(kServoSlots[2].initialAngleDeg, kServoSlots[2].limits, kDefaultCommandTimeoutMs),
-    ServoChannel(kServoSlots[3].initialAngleDeg, kServoSlots[3].limits, kDefaultCommandTimeoutMs),
-    ServoChannel(kServoSlots[4].initialAngleDeg, kServoSlots[4].limits, kDefaultCommandTimeoutMs),
-};
+//
+// **初期角と可動範囲は setup() の begin() で入れる。** 静的初期化子では書けない ——
+// どちらも config.h の kSlotsByBoard から取るが、行を選ぶ DIP の値は実行時にしか
+// 読めない。begin() 前は既定値（幅 0 の可動範囲・出力禁止）なので、Unused のスロットが
+// begin() されないまま残っても駆動側へ倒れない。
+static ServoChannel g_channel[kServoSlotCount];
 
 // DIP の基板番号を反映した実効デバイス ID。
 // **Unused のスロットだけ 0x00 にする。** そうしておくと routeFrame が自分宛と
 // 判定しないので、そのスロット宛のフレームで何かが動く経路が構造的に無くなる。
 // センサは自分の ID で FEEDBACK を送るので 0x00 にしてはならない。
-static uint8_t g_deviceId[kServoSlotCount] = {0, 0, 0, 0, 0};
+static uint8_t g_deviceId[kServoSlotCount] = {};
 
 // Servo::attach() を通したかどうか。ID 未設定スロットは attach すらしない。
-static bool g_attached[kServoSlotCount] = {false, false, false, false, false};
+static bool g_attached[kServoSlotCount] = {};
 
 // センサの現在値。スロットごとに独立で、そのスロット自身の FEEDBACK で報告する。
-static bool g_sensorActive[kServoSlotCount] = {false, false, false, false, false};
+static bool g_sensorActive[kServoSlotCount] = {};
 
 // 送信周期は基板全体で 1 つ（スロットごとに変えると送信位相の分散が崩れる）。
 static uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
@@ -184,21 +188,25 @@ static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 #endif
 
 // ===========================================================================
-// スロットの役割
+// スロット設定（実行時に選ばれた 1 行）
 // ===========================================================================
 
-// 役割は DIP の基板番号で決まるので実行時にしか確定しない（config.h の kSlotRoleByBoard）。
-// **既定を全 Unused にしてあるのは、確定前に読まれても駆動側へ倒れないようにするため。**
-// 表に無い基板番号のときはこの既定のまま据え置かれ、ID 未設定として扱われる。
-static SlotRole g_slotRole[kServoSlotCount] = {
-    SlotRole::Unused, SlotRole::Unused, SlotRole::Unused, SlotRole::Unused, SlotRole::Unused,
-};
+// DIP の基板番号で config.h の kSlotsByBoard から 1 行を選ぶので、実行時にしか確定しない。
+// **既定の nullptr が「表に無い基板番号」をそのまま表す。** 判定を別のフラグに持たせると、
+// ポインタとフラグが食い違う状態が作れてしまう（役割だけ Unused でピンは基板 #0 の値、
+// のような中間状態）。ピン・パルス仕様・可動範囲を読む側はすべて下の 3 つを先に通すので、
+// 行が選ばれていない基板では 1 本も pinMode されず 1 通も送らない。
+static const ServoSlotConfig *g_slots = nullptr;
 
-static bool isServoSlot(uint8_t slot) { return g_slotRole[slot] == SlotRole::Servo; }
-static bool isSensorSlot(uint8_t slot) { return g_slotRole[slot] == SlotRole::TouchSensor; }
+static SlotRole slotRole(uint8_t slot) {
+    return g_slots == nullptr ? SlotRole::Unused : g_slots[slot].role;
+}
+
+static bool isServoSlot(uint8_t slot) { return slotRole(slot) == SlotRole::Servo; }
+static bool isSensorSlot(uint8_t slot) { return slotRole(slot) == SlotRole::TouchSensor; }
 
 // Unused 以外はすべて CAN デバイスとして FEEDBACK を送る。
-static bool isDeviceSlot(uint8_t slot) { return g_slotRole[slot] != SlotRole::Unused; }
+static bool isDeviceSlot(uint8_t slot) { return slotRole(slot) != SlotRole::Unused; }
 
 // 仕様書 §2.2 / §7.1: オフセット適用後のデバイス ID が 0x00 のスロットは
 // 駆動も報告もしない（設定ミスで意図しないアクチュエータが動くより安全）。
@@ -218,9 +226,9 @@ static void readSensors() {
         if (!isSensorSlot(slot)) {
             continue;
         }
-        const int level = digitalRead(kServoSlots[slot].pin);
+        const int level = digitalRead(g_slots[slot].pin);
         g_sensorActive[slot] =
-            kServoSlots[slot].sensorActiveLow ? (level == LOW) : (level == HIGH);
+            g_slots[slot].sensorActiveLow ? (level == LOW) : (level == HIGH);
     }
 }
 
@@ -253,14 +261,14 @@ static void applyChannelOutput(uint8_t slot, uint32_t nowMs) {
     }
     if (kEStopDetach && !g_servo[slot].attached()) {
         // 脱力から復帰するときは、現在角のパルスを持って繋ぎ直す。
-        g_servo[slot].attach(kServoSlots[slot].pin, kServoSlots[slot].pulse.minUs,
-                             kServoSlots[slot].pulse.maxUs);
+        g_servo[slot].attach(g_slots[slot].pin, g_slots[slot].pulse.minUs,
+                             g_slots[slot].pulse.maxUs);
     }
 
     // ここに来る角度は ServoMotion が angle_min / angle_max でクランプ済み（仕様書 §7.2）。
     // angleToPulseUs 側でもパルス幅を [minUs, maxUs] に収める二重の防壁になっている。
     const uint16_t pulseUs =
-        angleToPulseUs(g_channel[slot].currentAngleDeg(), kServoSlots[slot].pulse);
+        angleToPulseUs(g_channel[slot].currentAngleDeg(), g_slots[slot].pulse);
     g_servo[slot].writeMicroseconds(static_cast<int>(pulseUs));
 }
 
@@ -335,7 +343,7 @@ static void sendInfo(uint8_t slot) {
     // CAN 越しに見える形にしている（仕様書 §7.7）。
     if (isServoSlot(slot)) {
         const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator,
-                                       kServoSlots[slot].pulse.angleRangeDeg);
+                                       g_slots[slot].pulse.angleRangeDeg);
         sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
         return;
     }
@@ -551,7 +559,7 @@ static void pollCan() {
 }
 
 // ===========================================================================
-// 役割とデバイス ID（どちらも DIP の基板番号で決まる）
+// スロット設定とデバイス ID（どちらも DIP の基板番号で決まる）
 // ===========================================================================
 
 // デバイス ID は「基板種別 2bit | 基板番号 3bit | スロット番号 3bit」の固定ビット分割
@@ -561,21 +569,19 @@ static void pollCan() {
 // 基板のブロックへ移る。組み立てと、DIP を回しすぎて 3bit からはみ出した番号を
 // 未設定へ倒す扱いは MotorCanRouter / makeDeviceId が持つ（native テストで守られている）。
 //
-// 同じ DIP が**役割表の行**も選ぶ（config.h の kSlotRoleByBoard）。表に無い番号では
-// 全スロットを Unused のまま据え置く —— 黙って基板 #0 の行を使うと、DIP を回しすぎた
-// 基板が別の基板の役割で動き出す。据え置けば ID も付かないので、既存の
-// 「デバイス ID 未設定 → LED 赤の速い点滅・駆動拒否」（§2.2）へそのまま乗る。
+// 同じ DIP が**スロット設定の行**も選ぶ（config.h の kSlotsByBoard）。表に無い番号では
+// g_slots を nullptr のまま据え置き、全スロットを Unused として扱う —— 黙って基板 #0 の
+// 行を使うと、DIP を回しすぎた基板が別の基板の役割で動き出す。据え置けば ID も付かないので、
+// 既存の「デバイス ID 未設定 → LED 赤の速い点滅・駆動拒否」（§2.2）へそのまま乗る。
 //
 // **Unused のスロットだけ 0x00 のままにする。** センサは自分のデバイス ID で
 // FEEDBACK を送るので ID を持つ（持たせないと「センサだけの基板」が何も報告できない）。
-static void resolveSlotRolesAndDeviceIds() {
+static void resolveSlotsAndDeviceIds() {
     const uint8_t boardNumber = readDipSwitch(
         kPinDip, kDipBitCount, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); },
         LOW);
     if (boardNumber < kServoBoardCount) {
-        for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
-            g_slotRole[slot] = kSlotRoleByBoard[boardNumber][slot];
-        }
+        g_slots = kSlotsByBoard[boardNumber];
     }
     motorcan::resolveDeviceIds(g_deviceId, kServoSlotCount, kBoardKind, boardNumber,
                                isDeviceSlot);
@@ -723,17 +729,29 @@ void setup() {
     g_strip.setBrightness(kRgbBrightness);
 #endif
 
-    // attach する前に役割と実効デバイス ID を確定させる。
+    // attach する前にスロット設定と実効デバイス ID を確定させる。
     // ID 未設定のスロットには Servo::attach() すら通さず、パルスを 1 発も出さない
     // （仕様書 §2.2: 設定ミスで意図しないアクチュエータが動くより動かない方が安全）。
-    // **DIP の読み取りより前には置けない**（役割が基板番号で決まるため）。
-    resolveSlotRolesAndDeviceIds();
+    // **DIP の読み取りより前には置けない**（役割もピンも基板番号で決まるため）。
+    resolveSlotsAndDeviceIds();
+
+    // 初期角と可動範囲を入れる。**サーボスロットだけ**を begin() する ——
+    // Unused とセンサは駆動しないので、既定のまま（幅 0 の可動範囲・出力禁止）に
+    // しておけば、そのスロット宛に何かが届いても 1 発もパルスが出ない。
+    // **setWatchdogEnabled より先**（begin は安全機構ごと作り直すので、後から呼ぶと
+    // config.h の WATCHDOG_ENABLED が既定の「有効」で上書きされる）。
+    for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
+        if (isServoSlot(slot)) {
+            g_channel[slot].begin(g_slots[slot].initialAngleDeg, g_slots[slot].limits,
+                                  kDefaultCommandTimeoutMs);
+        }
+    }
 
     // センサは attach より先に入力へ倒す。出力のまま放置すると、サーボ用の
     // ピンとして駆動されてセンサ回路を叩く。
     for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
         if (isSensorSlot(slot)) {
-            pinMode(kServoSlots[slot].pin, INPUT_PULLUP);
+            pinMode(g_slots[slot].pin, INPUT_PULLUP);
         }
     }
 
@@ -751,12 +769,12 @@ void setup() {
         // 仕様書 §5.4 / §7: 起動時は config.h の初期角へ。
         // attach の直後に角度を書かないと、Servo ライブラリの既定パルス幅で
         // サーボが意図しない位置へ飛ぶ。
-        g_servo[slot].attach(kServoSlots[slot].pin, kServoSlots[slot].pulse.minUs,
-                             kServoSlots[slot].pulse.maxUs);
+        g_servo[slot].attach(g_slots[slot].pin, g_slots[slot].pulse.minUs,
+                             g_slots[slot].pulse.maxUs);
         g_attached[slot] = g_servo[slot].attached();
         if (g_attached[slot]) {
             g_servo[slot].writeMicroseconds(static_cast<int>(
-                angleToPulseUs(g_channel[slot].currentAngleDeg(), kServoSlots[slot].pulse)));
+                angleToPulseUs(g_channel[slot].currentAngleDeg(), g_slots[slot].pulse)));
         }
     }
 
