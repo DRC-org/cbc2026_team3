@@ -34,6 +34,11 @@ class Pausable(Protocol):
 
     何を止めるかは `RobotServer._motor_check_pausables` だけが決める。ここで
     種別を数え上げると、止める / 止めないの判断が 2 箇所に分かれる。
+
+    **現在その一覧は空である。** 動作確認は `move_to` でしか軸を動かさず、
+    周期タスクはどれもその目標を実現する側なので、止めると仕事ごと消える
+    (理由は `RobotServer._motor_check_pausables`)。骨組みを残すのは、
+    `paused` が WS 契約に載っているため。
     """
 
     async def pause(self, *, reason: str) -> None: ...
@@ -47,10 +52,10 @@ class MotorCheckController:
     Args:
         environment_deny: 環境側の拒否理由を返す (フェーズ・緊急停止・手動モード・
             通常シーケンス実行中)。許可なら None
-        pausables: 起動時に黙らせる周期タスク。**全ロボットぶんを渡すこと** ——
-            1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の
-            再送が同じモータの指令を奪い合う。**M3508 の位置制御ループは
-            含まれない** (理由は `RobotServer._motor_check_pausables`)
+        pausables: 起動時に黙らせる周期タスク。**現在は空**で、位置制御ループも
+            目標値再送も含まれない —— どちらも動作確認が軸を動かす経路そのもの
+            だから (理由は `RobotServer._motor_check_pausables`)。足すときは
+            全ロボットぶんを渡すこと (1 本のシーケンスが両機を動かすため)
         is_e_stop_active: 今この瞬間モータを動かしてよいか
         broadcast: 状態 1 通の配信口
     """
@@ -160,9 +165,10 @@ class MotorCheckController:
         self._abort_requested = False
 
         # 何を黙らせるかは `RobotServer._motor_check_pausables` が 1 箇所で決める。
-        # **M3508 の位置制御ループはそこに含まれない** —— 動作確認の `move_to` は
-        # そのループを通ってしか M3508 を動かせないので、止めると電流が 1 通も
-        # 出ないまま到達待ちがタイムアウトする
+        # **位置制御ループも目標値再送もそこに含まれない** —— 動作確認の `move_to`
+        # はどちらも通ってしか軸を動かせない (M3508 は電流指令が出ず、問い合わせ
+        # 駆動の 2 種はフィードバックが 1 通で止まり、自作モタドラは 500ms で
+        # 出力が切れる)
         pausables = self._pausables()
 
         async def _run() -> None:

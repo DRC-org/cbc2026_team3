@@ -124,8 +124,9 @@ class RobotContext:
     # そのロボットの同期監視。ラッチの解除経路がサーバー側に無いと、一度ずれを
     # 検知した軸は二度と発報せず、操縦者は無監視のまま機体を動かすことになる
     sync_monitors: list[SyncMonitor] = field(default_factory=list)
-    # 自作モタドラ向けの目標値再送。動作確認中は確認用の指令を打ち消すため止め、
-    # 緊急停止時は保持した目標を捨てる (解除だけで動き出させない)
+    # 自作モタドラのウォッチドッグ対策と、問い合わせ駆動 2 種の生存問い合わせ。
+    # **動作確認中も回し続ける** (理由は _motor_check_pausables)。
+    # 緊急停止時だけは保持した目標を捨てる (解除だけで動き出させない)
     target_refreshers: list[TargetRefresher] = field(default_factory=list)
     # 手動操縦の指令口。位置定数を読めていないロボットでは None (手動不可)
     manual: ManualController | None = None
@@ -1486,25 +1487,49 @@ class RobotServer:
         return None
 
     def _motor_check_pausables(self) -> list[Pausable]:
-        """動作確認中に黙らせる周期タスク。**全ロボットぶんを返す。**
+        """動作確認中に黙らせる周期タスク。**1 つも無い。空を返すのが正しい。**
 
-        1 本のシーケンスが両機を動かすので、片方だけ止めると残った側の再送が
-        同じモータの SET_TARGET を奪い合う。
+        動作確認は `move_to` でしか軸を動かさず、`move_to` が出す指令は
+        シーケンスと同じ `MotorHandle` を通る。周期タスクはどれもその同じ
+        ハンドルの目標を実現する側であって、競合相手ではない。**止めると、
+        止めた側が担っていた仕事ごと消える。**
 
-        **M3508 の位置制御ループは止めない。動作確認と競合しないどころか、
-        動作確認が M3508 を動かす唯一の経路である。** 動作確認は `move_to` でしか
-        軸を動かさず、M3508 は電流指令しか受け付けないので、このループが C620 へ
-        電流を出すことでしか動かない。止めると目標だけが設定されて電流は 1 通も
-        出ず、偏差が残ったまま `SequenceTimeoutError` になる (飽和すらしない ——
+        **M3508 の位置制御ループ**: 動作確認が M3508 を動かす唯一の経路である。
+        M3508 は電流指令しか受け付けないので、このループが C620 へ電流を出す
+        ことでしか動かない。止めると目標だけが設定されて電流は 1 通も出ず、
+        偏差が残ったまま `SequenceTimeoutError` になる (飽和すらしない ——
         PID が 1 周期も回っていないため)。しかも復帰した瞬間に**残った目標へ
         向かって機体が動き出す**ので、操縦者が失敗表示を読んだ直後に動く。
 
+        **目標値再送**: 止めると 2 つが壊れる。
+          - **EDULITE 05 / DM3520 の到達を観測できなくなる。** この 2 種は
+            フィードバックが問い合わせ駆動で、自分の CAN ID 宛のフレームを受けた
+            ときにしか状態を返さない。`AxisHandle.wait_reached` はドライバの
+            キャッシュを polling するだけで再送しないので、止めるとそのモータ宛へ
+            飛ぶのは `move_to` の指令 1 通だけになり、返るフィードバックも
+            **動き出す前の位置 1 通**で以後は更新されない。0deg から 180deg へ
+            回す `rotate` は、実際に回りきっても到達判定を通らない
+          - **自作モタドラのウォッチドッグが、確認したい当のものを消す。**
+            3 枚とも `command_timeout_ms` 500ms で出力を落とす。`conveyor` と
+            ポンプの `settle_s` は 0.5s なので、目視・聴音で確認している最中に
+            出力が切れる。サーボスロットは現在角で凍結するので、500ms を超える
+            移動がある軸は `reached` が永久に立たない
+
+        再送が確認用の指令を上書きすることも無い。`main._build_target_refreshers`
+        はロボットのシーケンスと**同じ `MotorHandle` インスタンス**を受け取り、
+        `main._wire_motor_check_sequence` はそのハンドルをそのまま統合動作確認の
+        `MotorGroup` へ入れる。再送が書き直すのは動作確認自身が設定した目標である。
+        `idle_target_value()` のラッチ値が出るのは、そのハンドルが目標を 1 つも
+        持たないときだけで、中身は「今の姿勢を保て」でしかない。
+
         0x200 の奪い合いも起きない。動作確認中は他の指令経路 (通常シーケンス実行・
-        手動モード) が `MotorCheckController.deny_reason()` の排他で塞がれており、
-        位置制御ループは「シーケンスが設定した目標を実現する」側であって
-        競合相手ではない。
+        手動モード) が `MotorCheckController.deny_reason()` の排他で塞がれている。
+
+        `Pausable` の仕組み自体は残す。`safety.position_loops[].paused` /
+        `safety.target_refreshers[].paused` は WS 契約に載っており、緊急停止解除の
+        再励磁のように「送信経路を一時的に別の主が握る」用途は今後も起こりうる。
         """
-        return [pausable for ctx in self._robots.values() for pausable in ctx.target_refreshers]
+        return []
 
     async def _motor_check_post(self, request: web.Request) -> web.Response:
         """POST /motor_check: 動作確認の起動エンドポイント。

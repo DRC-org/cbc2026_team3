@@ -14,15 +14,19 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import struct
 import time
+from unittest.mock import AsyncMock
 
 import can
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
-from lib.control.target_refresh import GenericTargetRefresher
+from lib.control.target_refresh import GenericTargetRefresher, QueryDrivenTargetRefresher
+from lib.drivers.base import ControlMode
+from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.manual import ManualController
@@ -30,7 +34,7 @@ from lib.sequence.engine import AxisSyncError, Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager, set_last_feedback
-from tests.feedback_frames import feed_m3508
+from tests.feedback_frames import feed_edulite, feed_m3508
 from tests.server_fixtures import RecordingClient, ServerFixture
 
 # ---------------------------------------------------------------------- #
@@ -189,6 +193,95 @@ def _build_with_axis() -> tuple[ServerFixture, _MoveCheckSequence]:
     sequence.bind_motors(group)
     fx.set_motor_check_sequence(sequence)
     return fx, sequence
+
+
+def _generic_refresher(mgr: CANManager) -> tuple[GenericTargetRefresher, MotorHandle]:
+    """自作モタドラ 1 台ぶんの目標値再送と、その指令口。
+
+    空のハンドル一覧で組むと「送っていないこと」と「送る相手が居ないこと」が
+    区別できず、pause されていても緑になる。
+    """
+    driver = GenericDriver("conveyor", can_id=0x80, control_type=ControlMode.DUTY)
+    handle = MotorHandle("conveyor", driver, mgr)
+    return GenericTargetRefresher([handle], is_estop_active=lambda: False), handle
+
+
+class _QueryDrivenMotor:
+    """問い合わせ駆動のモータ (EDULITE 05) の模型。
+
+    **自分の CAN ID 宛のフレームを受けたときにしか状態を返さない。** 1 通につき
+    1 歩だけ目標へ近づいて応答するので、`move_to` の指令 1 通では到達しない ——
+    目標値再送が回り続けて初めて到達を観測できる、という実機と同じ関係になる。
+    """
+
+    def __init__(self, *, step_rad: float = 0.5) -> None:
+        self.driver = Edulite05Driver("rotate_l", can_id=1)
+        self._step = step_rad
+        #: 返したフィードバックの通数。指令 1 通ぶん (=1) で止まれば到達しない
+        self.replies = 0
+
+        self.can_manager = mock_can_manager()
+        self.can_manager.send = AsyncMock(side_effect=self._reply)  # type: ignore[method-assign]
+        self.handle = MotorHandle("rotate_l", self.driver, self.can_manager)
+        self.refresher = QueryDrivenTargetRefresher(
+            [self.handle],
+            self.can_manager,
+            interval_s=0.001,
+            is_estop_active=lambda: False,
+        )
+        feed_edulite(self.driver, position=0.0)
+
+    async def _reply(self, _name: str, _msg: can.Message) -> None:
+        goal = self.handle.target
+        current = self.driver.state.position
+        if goal is not None:
+            current += math.copysign(min(self._step, abs(goal - current)), goal - current)
+        feed_edulite(self.driver, position=current)
+        self.replies += 1
+
+
+class _QueryDrivenCheckSequence(Sequence):
+    """問い合わせ駆動の軸へ `move_to` する動作確認の代役。"""
+
+    @step("問い合わせ駆動の軸へ指令する")
+    async def drive(self) -> None:
+        await self.move_to({"rotate": "pick"})
+
+
+def _build_with_query_driven() -> tuple[ServerFixture, _QueryDrivenMotor]:
+    """問い合わせ駆動の軸 1 本を持つ構成。動作確認はその軸へ `move_to` する。"""
+    fx = ServerFixture.build()
+    fx.freeze_broadcast()
+    fx.add_robot("main_hand", _IdleSequence("main_hand"))
+
+    motor = _QueryDrivenMotor()
+    fx.set_target_refreshers("main_hand", [motor.refresher])
+
+    sequence = _QueryDrivenCheckSequence("motor_check")
+    sequence.bind_positions(
+        load_position_table(
+            {
+                "axes": {
+                    "rotate": {
+                        "unit": "rad",
+                        "command_unit": "rad",
+                        "tolerance": 0.05,
+                        # 止めた場合に「到達しない」が短時間で確定する値。
+                        # 長くしても症状は同じで、テストの実行時間だけが伸びる
+                        "timeout_s": 0.3,
+                        "motors": {"rotate_l": {"scale": 1.0, "offset": 0.0}},
+                    }
+                },
+                "positions": {"rotate": {"pick": 2.0}},
+            },
+            source="<test>",
+        )
+    )
+    group = MotorGroup()
+    group.add(motor.handle)
+    sequence.bind_motors(group)
+    fx.set_motor_check_sequence(sequence)
+    return fx, motor
 
 
 def _manual_controller() -> ManualController:
@@ -378,15 +471,19 @@ class _StallingPausable:
 
 class TestStartupWindow:
     @staticmethod
-    def _install(fx: ServerFixture, robot: str, stall: _StallingPausable) -> None:
-        # 黙らせる対象は目標値再送だけなので、窓を作れるのもそちら
-        # (位置制御ループは動作確認中も回り続ける)
-        fx.set_target_refreshers(robot, [stall])  # type: ignore[list-item]
+    def _install(fx: ServerFixture, stall: _StallingPausable) -> None:
+        """窓を確実に開くための代役を挿す。
+
+        **本番の pause 対象は空**なので、窓は「タスク生成から `run()` が
+        スケジュールされるまで」の一瞬になり、テストからは掴めない。窓そのものは
+        実在するので、`pause()` で待たせる代役を挿して固定する。
+        """
+        fx.set_motor_check_pausables([stall])
 
     async def test_窓の中の緊急停止で一歩も駆動しない(self) -> None:
         fx, sequence = _build()
         stall = _StallingPausable()
-        self._install(fx, "main_hand", stall)
+        self._install(fx, stall)
         sequence.gate.set()
 
         assert await fx.start_motor_check() is True
@@ -403,7 +500,7 @@ class TestStartupWindow:
         """`Sequence.run()` の停止イベントに任せると、run() 冒頭の clear で消える。"""
         fx, sequence = _build()
         stall = _StallingPausable()
-        self._install(fx, "main_hand", stall)
+        self._install(fx, stall)
         sequence.gate.set()
 
         assert await fx.start_motor_check() is True
@@ -419,7 +516,7 @@ class TestStartupWindow:
         """1 台も駆動せずに降りても、止めた送信経路は戻さなければならない。"""
         fx, _ = _build()
         stall = _StallingPausable()
-        self._install(fx, "main_hand", stall)
+        self._install(fx, stall)
 
         assert await fx.start_motor_check() is True
         await asyncio.wait_for(stall.entered.wait(), timeout=1.0)
@@ -479,66 +576,90 @@ class TestExclusion:
         sequence.gate.set()
         await fx.wait_motor_check_idle()
 
-    async def test_終了後に目標値再送を復帰させる(self) -> None:
+    async def test_実行中も目標値再送は止まらない(self) -> None:
+        """**止めると自作モタドラのウォッチドッグが確認したい当のものを消す。**
+
+        3 枚とも `command_timeout_ms` 500ms で出力を落とす。`conveyor` と
+        ポンプの `settle_s` は 0.5s なので、目視・聴音で確認している最中に
+        出力が切れる (「回っていない」を目で見ることになる)。
+        """
         fx, sequence = _build()
-        refresher = GenericTargetRefresher([], is_estop_active=lambda: False)
+        mgr = fx.can_manager("main_hand")
+        refresher, handle = _generic_refresher(mgr)
         fx.set_target_refreshers("main_hand", [refresher])
-        sequence.gate.set()
-
-        assert await fx.start_motor_check() is True
-        await fx.wait_motor_check_idle()
-
-        # 復帰しないと自作モタドラのウォッチドッグが 500ms で出力を落とす
-        assert refresher.is_paused is False
-
-    async def test_中断で降りても復帰させる(self) -> None:
-        fx, sequence = _build()
-        refresher = GenericTargetRefresher([], is_estop_active=lambda: False)
-        fx.set_target_refreshers("main_hand", [refresher])
+        # 目標を持たないハンドルへは 1 通も送らない (起動直後の暴発防止) ので、
+        # 「送り続けている」を見るにはまず目標を持たせる必要がある
+        await handle.set_target(ControlMode.DUTY, 0.5)
 
         assert await fx.start_motor_check() is True
         await fx.wait_motor_check_running()
-        fx.abort_motor_check()
+
+        assert refresher.is_paused is False
+        before = mgr.send.await_count
+        await refresher.step()
+        assert mgr.send.await_count == before + 1
+
         sequence.gate.set()
         await fx.wait_motor_check_idle()
 
-        assert refresher.is_paused is False
+    async def test_問い合わせ駆動のモータは実行中もフィードバックを更新し続ける(self) -> None:
+        """**EDULITE 05 / DM3520 は PC が黙ると 1 通も状態を返さない。**
 
-    async def test_例外で降りても復帰させる(self) -> None:
-        class _RaisingSequence(Sequence):
-            @step("必ず失敗する")
-            async def boom(self) -> None:
-                raise RuntimeError("テスト用例外")
+        `AxisHandle.wait_reached` はドライバのキャッシュを polling するだけで
+        再送しないので、目標値再送を止めるとそのモータ宛へ飛ぶのは `move_to` の
+        指令 1 通だけになる。返るフィードバックも**動き出す前の位置 1 通**で
+        以後は更新されず、実際に動ききっても到達判定を通らない。
 
-        fx, _ = _build(check=_RaisingSequence("motor_check"))
-        refresher = GenericTargetRefresher([], is_estop_active=lambda: False)
-        fx.set_target_refreshers("main_hand", [refresher])
+        実機で `rotate` の零点確定が通ったのは `HomingRunner` が 1 歩ごとに
+        指令を出して毎回応答を得ていたからで、`move_to` は同じ形にならない。
+        """
+        fx, motor = _build_with_query_driven()
+        motor.refresher.start()
+        try:
+            assert await fx.start_motor_check() is True
+            await fx.wait_motor_check_idle()
+        finally:
+            await motor.refresher.stop()
 
-        assert await fx.start_motor_check() is True
-        await fx.wait_motor_check_idle()
+        # 指令 1 通ぶんしか応答が無ければ、位置は 1 歩目で止まったまま到達しない
+        assert motor.replies > 1
+        assert fx.motor_check_error() is None
+        assert fx.motor_check_state()["last_error"] is None
 
-        assert refresher.is_paused is False
-
-    async def test_両ロボットの送信経路を止める(self) -> None:
-        """**片方だけ止めてはならない。** 1 本のシーケンスが両機を動かすので、
-        止め損ねた側の再送が確認用の指令を上書きする。"""
+    async def test_両ロボットの周期タスクを止めない(self) -> None:
+        """**片方だけ見てはならない。** 1 本のシーケンスが両機を動かすので、
+        片方を止めればそのハンドの軸だけが確認できないまま失敗する。"""
         fx, sequence = _build()
-        refreshers = {
-            name: GenericTargetRefresher([], is_estop_active=lambda: False)
-            for name in ("main_hand", "sub_hand")
-        }
-        for name, refresher in refreshers.items():
+        refreshers = {}
+        for name in ("main_hand", "sub_hand"):
+            refresher, _ = _generic_refresher(fx.can_manager(name))
+            refreshers[name] = refresher
             fx.set_target_refreshers(name, [refresher])
 
         assert await fx.start_motor_check() is True
         await fx.wait_motor_check_running()
 
-        assert [r.is_paused for r in refreshers.values()] == [True, True]
+        assert [r.is_paused for r in refreshers.values()] == [False, False]
 
         sequence.gate.set()
         await fx.wait_motor_check_idle()
 
         assert [r.is_paused for r in refreshers.values()] == [False, False]
+
+    async def test_本番の一覧は空である(self) -> None:
+        """**止める対象は 1 つも無い。**
+
+        位置制御ループも目標値再送も、動作確認が軸を動かす経路そのものである
+        (`RobotServer._motor_check_pausables`)。以降のテストが挿す代役は、
+        本番に存在しない窓を再現するためのもの。
+        """
+        fx, _ = _build()
+        probe = _LoopProbe(fx.can_manager("main_hand"))
+        fx.set_position_loops("main_hand", [probe.loop])
+        refresher, _handle = _generic_refresher(fx.can_manager("main_hand"))
+        fx.set_target_refreshers("main_hand", [refresher])
+
+        assert fx.motor_check_pausables() == []
 
     async def test_停止中の手動切替を拒否する(self) -> None:
         fx, sequence = _build(manual=True)
@@ -550,6 +671,85 @@ class TestExclusion:
 
         sequence.gate.set()
         await fx.wait_motor_check_idle()
+
+
+# ---------------------------------------------------------------------- #
+#  pause / resume の契約
+#
+#  本番の pause 対象は空 (`TestExclusion.test_本番の一覧は空である`) だが、
+#  `Pausable` の口そのものは残る —— `safety.*.paused` が WS 契約に載っており、
+#  送信経路を一時的に別の主が握る用途は今後も起こりうる。**止めたものを必ず
+#  戻す**という保証は、対象が空になっても失ってはならない。代役を挿して見る。
+# ---------------------------------------------------------------------- #
+
+
+class _RecordingPausable:
+    """pause / resume の呼ばれ方だけを記録する代役。"""
+
+    def __init__(self) -> None:
+        self.paused = False
+        self.resumed = False
+
+    async def pause(self, *, reason: str = "") -> None:
+        self.paused = True
+
+    def resume(self) -> None:
+        self.resumed = True
+
+
+class TestPauseContract:
+    async def test_渡された対象は起動時に止める(self) -> None:
+        fx, sequence = _build()
+        pausable = _RecordingPausable()
+        fx.set_motor_check_pausables([pausable])
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_running()
+
+        assert pausable.paused is True
+
+        sequence.gate.set()
+        await fx.wait_motor_check_idle()
+
+    async def test_終了後に復帰させる(self) -> None:
+        fx, sequence = _build()
+        pausable = _RecordingPausable()
+        fx.set_motor_check_pausables([pausable])
+        sequence.gate.set()
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_idle()
+
+        # 戻さないと、止めた送信経路がそのまま止まったまま試合へ入る
+        assert pausable.resumed is True
+
+    async def test_中断で降りても復帰させる(self) -> None:
+        fx, sequence = _build()
+        pausable = _RecordingPausable()
+        fx.set_motor_check_pausables([pausable])
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_running()
+        fx.abort_motor_check()
+        sequence.gate.set()
+        await fx.wait_motor_check_idle()
+
+        assert pausable.resumed is True
+
+    async def test_例外で降りても復帰させる(self) -> None:
+        class _RaisingSequence(Sequence):
+            @step("必ず失敗する")
+            async def boom(self) -> None:
+                raise RuntimeError("テスト用例外")
+
+        fx, _ = _build(check=_RaisingSequence("motor_check"))
+        pausable = _RecordingPausable()
+        fx.set_motor_check_pausables([pausable])
+
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_idle()
+
+        assert pausable.resumed is True
 
 
 # ---------------------------------------------------------------------- #

@@ -653,8 +653,8 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 > `MotorCheckRunner`）の話で、そこでのみ位置制御ループとの奪い合いが成立していた。
 > 統合後（`sequences/motor_check.py`）は `move_to` 経由でしか指令を出さず、
 > **M3508 へはこの位置制御ループが電流を出すことでしか届かない**ので、
-> 動作確認はこのループを止めない（次の「動作確認は位置制御ループを止めない」）。
-> `pause()` / `resume()` の仕組み自体は残してあり、今の利用者は目標値再送だけ。
+> 動作確認はこのループを止めない（次の「動作確認は周期タスクを 1 つも止めない」）。
+> `pause()` / `resume()` の仕組み自体は残してあるが、**利用者は 1 つも居ない**。
 
 アクチュエータ動作確認は `M3508Driver.encode_target()` で
 **自分のスロットだけ埋めて他を 0 にした 0x200 フレーム**を送る。一方この制御ループは
@@ -679,10 +679,13 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 - `resume()` は `_last_tick` も取り直す（停止していた時間が丸ごと `dt` に化けるのを防ぐ。
   `max_dt_s` の頭打ちがあるが、意味のない大 `dt` を PID に渡さない）
 
-#### 動作確認は位置制御ループを止めない
+#### 動作確認は周期タスクを 1 つも止めない
 
-**止める対象の単一情報源は `RobotServer._motor_check_pausables` で、そこに位置制御ループは
-含まれない。** 動作確認は `move_to` でしか軸を動かさず、M3508 は電流指令しか受け付けないので、
+**止める対象の単一情報源は `RobotServer._motor_check_pausables` で、そこは空を返す。**
+動作確認は `move_to` でしか軸を動かさず、その指令はシーケンスと同じ `MotorHandle` を通る。
+周期タスクはどれもその目標を実現する側であって、競合相手ではない。
+
+まず位置制御ループ。M3508 は電流指令しか受け付けないので、
 200Hz のループが C620 へ電流を出さない限り指令は 1 通も機構へ届かない。
 
 止めたときに実機で起きたこと（`y_axis`）:
@@ -703,6 +706,35 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 守るテスト（`tests/test_server_motor_check.py::TestExclusion`）は 2 本に分けてある ——
 実行中に `is_paused` が立たないことと、`move_to` した目標が実際に 0 でない電流指令に
 なること。前者だけだと、目標が電流へ変換される経路が壊れても緑のままになる。
+
+次に目標値再送。こちらは止めると 2 つが壊れる。
+
+- **EDULITE 05 / DM3520 の到達を原理的に観測できない。** この 2 種はフィードバックが
+  問い合わせ駆動で、自分の CAN ID 宛のフレームを受けたときにしか状態を返さない。
+  `AxisHandle.wait_reached` は**ドライバのキャッシュを polling するだけで再送しない**ので、
+  止めるとそのモータ宛へ飛ぶのは `move_to` の指令 1 通だけになる。返るフィードバックも
+  **動き出す前の位置 1 通**で以後は更新されず、`move_to({"rotate": "pick"})`（0→180deg）は
+  実際に回りきっても到達判定を通らない。実機で `rotate` の零点確定が通ったのは
+  `HomingRunner` が 1 歩ごとに指令を出して毎回応答を得ていたからで、「メインハンド
+  初期姿勢へ」が通ったのは直前の homing で既に目標位置に居たためである
+- **自作モタドラのウォッチドッグが、確認したい当のものを消す。** 3 枚とも
+  `WATCHDOG_ENABLED 1` で `command_timeout_ms` の既定は 500ms。`conveyor` と
+  `pump_vac` / `pump_blow` の `settle_s` は 0.5s なので、目視・聴音で確認している最中に
+  DC 出力が切れる（`config/checklist.yaml` の `conveyor_run` が「回っていない」を見る）。
+  サーボスロットは満了で現在角に凍結するので、500ms を超える移動がある軸は `reached` が
+  永久に立たず `move_to` がタイムアウトする
+
+**再送が確認用の指令を上書きすることも無い。** `main._build_target_refreshers` は
+`seq.motors`（ロボットのシーケンスに bind した `MotorGroup`）を受け取り、
+`main._wire_motor_check_sequence` はその**同じ `MotorHandle` インスタンス**を統合動作確認の
+`MotorGroup` へ入れる。したがって `resend_target()` が書き直すのは動作確認自身が設定した
+目標である。`_send_idle_target`（`idle_target_value()` のラッチ値）が出るのは
+`resend_target()` が False のとき ＝ そのハンドルが目標を 1 つも持たないときだけで、
+中身は「今の姿勢を保て」でしかない。
+
+`Pausable` の仕組み自体は残す。`safety.position_loops[].paused` /
+`safety.target_refreshers[].paused` は WS 契約に載っており、外すと UI まで波及する。
+**利用者が 1 つも居ない状態になったので、整理するなら WS 契約ごと別作業で扱う。**
 
 ### Damiao DM3520（ドライバ内蔵の位置ループ）
 
@@ -940,8 +972,10 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 - 目標が一度も設定されていないモータへは送らない（起動直後の暴発防止）
 - 緊急停止時は保持した目標ごと捨てる（`clear_targets()`）。残すと解除した瞬間に
   再送が走り、操縦者が何も操作していないのにコンベアが回り出す
-- 動作確認中は `pause()`。同じモータへ古い目標を 20Hz で被せると確認用の指令が
-  打ち消され、健全なモータが FAILED になる
+- **動作確認中も止めない。** 動作確認は `move_to` でしか軸を動かさず、その指令は
+  このタスクと同じ `MotorHandle` を通るので、再送が書き直すのは確認自身が設定した目標に
+  なる（打ち消し合いは起きない）。止めるとファームのウォッチドッグが `settle_s` 0.5s の
+  コンベア・ポンプの出力を確認の最中に落とす（「動作確認は周期タスクを 1 つも止めない」節）
 - 終了時に停止指令は送らない。指令が途切れればファーム側のウォッチドッグが止めるので、
   PC が落ちた場合と経路を 1 本に保つ
 
@@ -1079,6 +1113,8 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | フェーズゲート | 許可フェーズに `PHASES_ANY` を紛れ込ませる | `test_commands.py` / `test_server_match.py` |
 | 動作確認と通常シーケンスの排他 | `MotorCheckController.deny_reason()` の「既に実行中」を落とす（0x200 の奪い合いに戻る）/ `_motor_check_environment_deny` のシーケンス実行中判定を落とす | `test_server_motor_check.py` |
 | 動作確認中も位置制御ループは回る | `_motor_check_pausables` に `position_loops` を戻す（**M3508 は電流指令が出ないまま到達待ちが時間切れになり、復帰した瞬間に残った目標へ走り出す**）/ `M3508PositionLoop.set_target` を握り潰す（**止めていなくても目標が電流へ変換されない**。前者だけでは検出できないので 2 本に分けてある） | `test_server_motor_check.py::TestExclusion`（「実行中も位置制御ループは回り続ける」「実行中の指令が電流指令になる」） |
+| 動作確認中も目標値再送は回る | `_motor_check_pausables` に `target_refreshers` を戻す（**問い合わせ駆動の EDULITE 05 / DM3520 は指令 1 通ぶんしか状態を返さず、実際に動ききっても到達判定を通らない**。自作モタドラは 500ms で出力が切れ、`settle_s` 0.5s のコンベア・ポンプが確認の最中に止まる） | `test_server_motor_check.py::TestExclusion`（「本番の一覧は空である」「実行中も目標値再送は止まらない」「問い合わせ駆動のモータは実行中もフィードバックを更新し続ける」「両ロボットの周期タスクを止めない」） |
+| 止めたものは必ず戻す | `MotorCheckController.start()` の `finally` から `resume()` を落とす（対象が空になっても口は残るので、`Pausable` の代役を挿して層だけを見る） | `test_server_motor_check.py::TestPauseContract` |
 | 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
 | PID 調整画面が現在値を持つ | `_build_state_message` の `pid` 付与を消す / `pid` を dry-run 分岐の中だけに置く / UI の `getValue` を `?? 0` に戻す | `test_server_set_param.py` / `test_ws_contract.py` / `MotorTuning.test.tsx` |
 | ゲインの適用先を推測させない | `pid_gains()` の `applies_to` を `[name]` 固定にする | `test_runtime_pid_gain.py` / `test_server_set_param.py` / `MotorTuning.test.tsx` |
@@ -2421,9 +2457,10 @@ M3508 への 0 電流を**能動的に**送るのが要点。`emergency_stop_mes
 「位置制御ループが生きて電流 0 を出し続けてくれること」に停止を委ねることになる。
 
 **動作確認の abort は runner の状態を問わない。** `is_running` を条件にすると、
-`_start_motor_check` が runner を登録してから `run()` に入るまでの窓 —— 周期送信の `pause()` を
-待っているあいだ —— だけ False になり、その窓で緊急停止を押された動作確認だけが止まらずに
-完走してモータを駆動する。
+実行タスクを作ってから `run()` に入るまでの窓だけ False になり、その窓で緊急停止を
+押された動作確認だけが止まらずに完走してモータを駆動する（当時はその窓を周期送信の
+`pause()` 待ちが作っていた。**今は pause 対象が空でも窓自体は残る** —— `create_task` は
+コルーチンを次のスケジュールまで走らせないため）。
 
 **受け手の側は統合で作りが変わった。** `MotorCheckRunner.run()` は「中断状態を
 リセットしない」ことで起動前の 1 通を守っていたが、現在の `Sequence.run()` は冒頭で
@@ -4804,7 +4841,7 @@ Phase 5 で `move_to` の器はできたが、シーケンスから実モータ�
   既に走っているループ、または実行中ステップのどちらかが停止指令を上書きする
 - **0x200 の排他はループを黙らせる方向**: 動作確認側を待たせるのではなく
   `pause()` / `resume()` でループを止める。`resume()` は同期メソッドなので `finally` から確実に呼べる
-  （**統合後は動作確認がこのループを止めない。** 現行は「動作確認は位置制御ループを止めない」節が正）
+  （**統合後は動作確認が周期タスクを 1 つも止めない。** 現行は「動作確認は周期タスクを 1 つも止めない」節が正）
 - **E-STOP はシーケンスも止める**: 停止フレームの送信可否に関わらず `finally` で停止する。
   シーケンスが走ったままだと次のステップが新しい目標値を送って停止を上書きする
 
@@ -5030,7 +5067,7 @@ Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という�
 | 層 | 捨てる契機 | 単独で噛むテスト |
 |---|---|---|
 | `_disable_all()` | 緊急停止 | `test_e_stop_does_not_leave_a_window_spanning_the_stop` |
-| `_on_resume()` | 動作確認の一時停止からの復帰 | `test_pause_does_not_leave_a_window_spanning_the_pause` |
+| `_on_resume()` | 一時停止からの復帰（`pause()` の口。動作確認は使わない） | `test_pause_does_not_leave_a_window_spanning_the_pause` |
 | `_on_run_start()` | ループの停止 → 再起動 | `test_restarting_the_loop_does_not_join_windows` |
 | `set_pid_gains()` | ゲイン差し替え | `test_gain_change_discards_the_window` |
 
