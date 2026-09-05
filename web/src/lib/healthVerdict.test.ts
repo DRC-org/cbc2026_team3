@@ -6,6 +6,7 @@ import {
   motorTempTone,
   summarizeMotors,
   tempThresholdsOf,
+  workpieceRiskBuses,
 } from "@/lib/healthVerdict";
 import { MALFORMED } from "@/lib/protocol";
 import type { BusHealth, HealthSnapshot, MotorHealth, SafetyState } from "@/lib/protocol";
@@ -22,6 +23,8 @@ function bus(over: Partial<BusHealth> = {}): BusHealth {
     rx_error_count: 0,
     bus_off: false,
     rx_down: false,
+    rx_down_episodes: 0,
+    may_affect_workpiece: false,
     ...over,
   };
 }
@@ -284,6 +287,48 @@ describe("evaluateHealth", () => {
     it("なぜ判定できないかを添える", () => {
       expect(evaluateHealth(health(), undefined, false).detail).toMatch(/切断/);
     });
+  });
+});
+
+/**
+ * CAN 途絶がワーク落下に繋がりうるバスの一覧。**判定を UI 側で導出し直さない** ——
+ * `may_affect_workpiece` はサーバーが `control_type: on_off` のモータの有無を見て
+ * 決めた値をそのまま読むだけで、バス名やドライバ種別から推測してはならない。
+ */
+describe("workpieceRiskBuses", () => {
+  it("平常時 (エピソード 0) は返さない", () => {
+    const snap = health({ buses: [bus({ may_affect_workpiece: true, rx_down_episodes: 0 })] });
+    expect(workpieceRiskBuses(snap)).toEqual([]);
+  });
+
+  it("ワーク落下に無関係なバスの途絶は返さない (can_dm3520 / can_m3508 相当)", () => {
+    const snap = health({
+      buses: [bus({ may_affect_workpiece: false, rx_down_episodes: 3 })],
+    });
+    expect(workpieceRiskBuses(snap)).toEqual([]);
+  });
+
+  it("on_off を持つバスの途絶エピソードを返す (can_generic 相当)", () => {
+    const risky = bus({ name: "can_generic", may_affect_workpiece: true, rx_down_episodes: 2 });
+    const snap = health({ buses: [bus(), risky] });
+    expect(workpieceRiskBuses(snap)).toEqual([risky]);
+  });
+
+  it("復旧して state が ok に戻ってもエピソード数が残っていれば返し続ける", () => {
+    // BusHealth.state の判定そのものは動かさない。復旧後も操縦者へ主張し続けるのは
+    // このエピソード数の役目
+    const risky = bus({
+      name: "can_generic",
+      state: "ok",
+      may_affect_workpiece: true,
+      rx_down_episodes: 1,
+    });
+    expect(workpieceRiskBuses(health({ buses: [risky] }))).toEqual([risky]);
+  });
+
+  it("未配信・読めない配信は空 (evaluateHealth 側が判定不能を別に報告する)", () => {
+    expect(workpieceRiskBuses(undefined)).toEqual([]);
+    expect(workpieceRiskBuses(MALFORMED)).toEqual([]);
   });
 });
 

@@ -877,8 +877,15 @@ bit5 は `kNeverCommanded`）。センサを積んだ基板が現れたらそこ
 1 秒弱 CAN を止めるので、`command_timeout_ms`（既定 500ms）のウォッチドッグが満了し、
 **復旧 1 回で吸着中のワークが落ちうる**。試合中かどうかのゲートは意図的に置いていない
 （「バスが戻らない」ほうが重い）ので、運用で受ける —— **journal に `[ WD ]` が出たら
-ワーク落下を疑う**。UI には落ちたことを知らせる手段が無い（そもそも弁の開閉を観測
-できない）。詳細は `docs/checks_and_health.md`、手順は `docs/venue_recovery.md` §3-1。
+ワーク落下を疑う**。**UI にも残る**（かつては journal にしか出ず、試合中に journal を見る
+人はいなかった）。`CANManager` はバス別に途絶の立ち上がりを `rx_down_episodes` として
+数え、復帰しても 0 に戻らない（試合開始でリセット。理由は `lib/server.py` の
+`_handle_match_start` を参照）。**判定 (どのバスの途絶がワーク落下に繋がりうるか) は
+サーバーだけが持つ** —— そのバスに `control_type: on_off` のモータが載っているかを
+`BusHealthInfo.may_affect_workpiece` として配信し、`can_generic`（弁が載るバス）の
+途絶は疑うが `can_dm3520` / `can_m3508` の途絶では疑わない。UI (`SubsystemStatus`) は
+両方が揃ったバスだけをチップで主張する（0 件は無音のまま）。詳細は
+`docs/checks_and_health.md`、手順は `docs/venue_recovery.md` §3-1。
 
 **電磁弁基板は弁が開いたかを観測できない。到達フラグを立ててはならない。**
 圧力センサもリミットスイッチも無く、分かるのは「指令どおり GPIO を駆動した」ことだけ。

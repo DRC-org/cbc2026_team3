@@ -218,6 +218,13 @@ class CANManager:
         # 外せるのは `bus.recv` が実際に返ったときだけ。
         self._rx_down: dict[str, bool] = {}
         self._rx_down_since: dict[str, float] = {}
+        # 途絶の「立ち上がり」を数えたエピソード数。**`_record_rx_down` 側で
+        # 数える** (立ち上がりの瞬間) —— `_clear_rx_down` 側で数えると、復帰
+        # しないまま試合が終わったケース (=エピソードが 1 度も「復帰」しない)
+        # を取りこぼす。試合単位のリセットは `reset_rx_down_episodes()` が持ち、
+        # いつ呼ぶかは呼び出し元 (サーバー) が決める —— CANManager は「試合」を
+        # 知らない (lib/match_state.py の責務との境界)。
+        self._rx_down_episodes: dict[str, int] = {}
         self._bus_channels: dict[str, str] = {}
 
         # 受信エラーは不正フレームが続く限り毎フレーム発生する。1Mbps の CAN では
@@ -239,6 +246,7 @@ class CANManager:
         self._rx_error_count.setdefault(name, 0)
         self._bus_off.setdefault(name, False)
         self._rx_down.setdefault(name, False)
+        self._rx_down_episodes.setdefault(name, 0)
 
     def add_motor(self, bus_name: str, motor: MotorDriver) -> None:
         """バスにモータを登録する。名前・CAN ID の重複は構成時に弾く。
@@ -507,9 +515,16 @@ class CANManager:
         return msgs
 
     def _record_rx_down(self, bus_name: str) -> None:
-        """受信が読めなくなったことを記録する。状態の遷移だけを 1 行残す。"""
+        """受信が読めなくなったことを記録する。状態の遷移だけを 1 行残す。
+
+        エピソード数もここ (立ち上がりの瞬間) で数える。`_clear_rx_down` 側の
+        「復帰した瞬間」で数えると、復帰しないまま (`rx_down` が立ったまま)
+        試合が終わったケースが 1 件も数えられない —— ワーク落下が起きた
+        まさにその場合を取りこぼすことになり、本末転倒になる。
+        """
         if not self._rx_down.get(bus_name, False):
             self._rx_down_since[bus_name] = time.time()
+            self._rx_down_episodes[bus_name] = self._rx_down_episodes.get(bus_name, 0) + 1
             logger.error("CAN 受信が中断しました。復帰まで再試行を続けます (bus=%s)", bus_name)
         self._rx_down[bus_name] = True
 
@@ -528,6 +543,26 @@ class CANManager:
             gap_s = time.time() - since if since is not None else 0.0
             logger.warning("CAN 受信が再開しました (bus=%s, 中断 %.2f 秒)", bus_name, gap_s)
         self._rx_down[bus_name] = False
+
+    def reset_rx_down_episodes(self) -> None:
+        """途絶エピソード数を全バス 0 に戻す。
+
+        CANManager は「試合」という概念を知らない (層の境界は
+        `lib/match_state.py` が試合の状態、`lib/can_manager.py` が CAN の状態を
+        持つこと)。いつリセットするかは呼び出し元 (`lib/server.py`) が決める —
+        現在は試合開始 (`match_start`) の成立時に呼んでいる。準備中 (機体の
+        配線確認・動作確認) に踏んだ途絶を試合開始時点で洗い流すことで、
+        試合中に見えるエピソード数が「この試合で実際に起きたこと」だけを
+        表すようにするため (次の試合の準備が始まる `match_reset` まで待つと、
+        準備フェーズで踏んだ途絶が次の試合の表示に紛れ込む)。
+
+        現在進行中の途絶 (`_rx_down` が True のまま) はここでは触らない ——
+        復帰していないバスを「無かったこと」にしてはならない。次に復帰した
+        ときの `_clear_rx_down` はそのまま働き、次の立ち上がりからまた
+        1 件目として数え直される。
+        """
+        for bus_name in self._rx_down_episodes:
+            self._rx_down_episodes[bus_name] = 0
 
     def _dispatch_frame(
         self, bus_name: str, motors: Sequence[MotorDriver], msg: can.Message
@@ -969,6 +1004,14 @@ class CANManager:
             rx_err = self._rx_error_count.get(bus_name, 0)
             bus_off = self._bus_off.get(bus_name, False)
             rx_down = self._rx_down.get(bus_name, False)
+            rx_down_episodes = self._rx_down_episodes.get(bus_name, 0)
+            # **バス名や `control_type` の文字列比較ではなく、ドライバ自身に聞く。**
+            # `has_on_off_control()` の既定は False で、電磁弁用の GenericDriver
+            # だけが True を返す。ここで名前判定 (例: "can_generic" かどうか) に
+            # 倒すと、config で弁のバスを変えた瞬間に UI の判定が古いまま残る
+            may_affect_workpiece = any(
+                motor.has_on_off_control() for motor in self._bus_motors.get(bus_name, [])
+            )
 
             # python-can の bus.state は実装しないインタフェースが多い (SocketCAN も
             # その 1 つで、基底クラスの既定 ACTIVE が返る) ため getattr で防御的に読む。
@@ -1005,6 +1048,8 @@ class CANManager:
                     rx_error_count=rx_err,
                     bus_off=bus_off,
                     rx_down=rx_down,
+                    rx_down_episodes=rx_down_episodes,
+                    may_affect_workpiece=may_affect_workpiece,
                 )
             )
 

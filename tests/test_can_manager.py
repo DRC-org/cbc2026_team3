@@ -913,9 +913,6 @@ class TestReceiveLoopSurvivesInterfaceDown:
         done, _pending = await asyncio.wait({task}, timeout=1.0)
         assert task in done, "cancel() が効いていない (CancelledError を握り潰している)"
 
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
     async def test_recvが投げたキャンセルも握り潰さない(self) -> None:
         """`bus.recv` の中から来た `CancelledError` も素通しする。
 
@@ -936,6 +933,123 @@ class TestReceiveLoopSurvivesInterfaceDown:
         assert task in done, "recv 由来のキャンセルを握り潰している (止められない受信ループ)"
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestRxDownEpisodes:
+    """途絶の「立ち上がり」を数えるエピソード数 (``rx_down_episodes``)。
+
+    ``rx_down`` は生の bool なので、1 秒に満たない一過性の途絶 (bus-off 復旧の
+    down/up 等) は画面に一瞬しか出ず、機体を見ている操縦者はまず見落とす。
+    エピソード数は復帰しても 0 に戻らない累積値で、リセットできるのは
+    ``reset_rx_down_episodes()`` だけ (試合単位でのリセットは呼び出し元の責務)。
+    """
+
+    async def test_1回の途絶で1件だけ数える(self) -> None:
+        mgr = CANManager()
+        bus = mock_bus()
+        bus.recv.side_effect = can.CanOperationError("Network is down [Error Code 100]")
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        # 再試行のバックオフ (20ms -> 40ms -> ...) を何度か跨いでも、
+        # 立ち上がりは 1 回だけなので 1 件のまま
+        await asyncio.sleep(0.15)
+        assert mgr.health().buses[0].rx_down_episodes == 1
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_復帰してもエピソード数は0に戻らない(self) -> None:
+        """rx_down (bool) は復帰で外れるが、rx_down_episodes は残る。"""
+        mgr = CANManager()
+        bus = mock_bus()
+        state = {"phase": "down"}
+        frame = can.Message(arbitration_id=0x201, data=bytes(8), is_extended_id=False)
+
+        def recv(timeout: float) -> can.Message | None:
+            if state["phase"] == "down":
+                raise can.CanOperationError("Network is down [Error Code 100]")
+            return frame
+
+        bus.recv.side_effect = recv
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(0.05)
+        assert mgr.health().buses[0].rx_down_episodes == 1
+
+        state["phase"] = "up"
+        await asyncio.sleep(0.3)  # 伸びたバックオフを跨いで復帰させる
+
+        assert mgr.health().buses[0].rx_down is False, "復帰が反映されていない"
+        assert mgr.health().buses[0].rx_down_episodes == 1, (
+            "復帰しただけでエピソード数が消えている (見落とし防止の値が意味を失う)"
+        )
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_2回目の途絶で2件目を数える(self) -> None:
+        mgr = CANManager()
+        bus = mock_bus()
+        state = {"phase": "down"}
+        frame = can.Message(arbitration_id=0x201, data=bytes(8), is_extended_id=False)
+
+        def recv(timeout: float) -> can.Message | None:
+            if state["phase"] == "down":
+                raise can.CanOperationError("Network is down [Error Code 100]")
+            return frame
+
+        bus.recv.side_effect = recv
+        mgr.add_bus("can0", bus)
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(0.05)
+        assert mgr.health().buses[0].rx_down_episodes == 1
+
+        state["phase"] = "up"
+        await asyncio.sleep(0.2)
+        assert mgr.health().buses[0].rx_down is False
+
+        state["phase"] = "down"
+        await asyncio.sleep(0.1)
+        assert mgr.health().buses[0].rx_down is True
+        assert mgr.health().buses[0].rx_down_episodes == 2, "2 回目の立ち上がりを数えていない"
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    def test_reset_rx_down_episodesで0に戻す(self) -> None:
+        mgr = CANManager()
+        mgr.add_bus("can0", mock_bus())
+        mgr._record_rx_down("can0")
+        assert mgr.health().buses[0].rx_down_episodes == 1
+
+        mgr.reset_rx_down_episodes()
+
+        assert mgr.health().buses[0].rx_down_episodes == 0
+        # リセットは「エピソード数」だけを対象にする。途絶が今も続いている
+        # 事実そのもの (rx_down) を消してはならない —— 見えなくなるだけで
+        # バスは直っていない
+        assert mgr.health().buses[0].rx_down is True
+
+    def test_reset_rx_down_episodesは全バスを対象にする(self) -> None:
+        mgr = CANManager()
+        mgr.add_bus("can0", mock_bus())
+        mgr.add_bus("can1", mock_bus())
+        mgr._record_rx_down("can0")
+        mgr._record_rx_down("can1")
+        mgr._record_rx_down("can1")
+
+        mgr.reset_rx_down_episodes()
+
+        snap = mgr.health()
+        by_name = {b.name: b for b in snap.buses}
+        assert by_name["can0"].rx_down_episodes == 0
+        assert by_name["can1"].rx_down_episodes == 0
 
 
 class TestReceiveLoopOnAPollableBus:

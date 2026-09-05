@@ -433,3 +433,55 @@ class TestUnmeasuredTemperature:
             assert info.temperature == pytest.approx(42.0)
         finally:
             bus.shutdown()
+
+
+class TestMayAffectWorkpiece:
+    """バスの途絶がワーク落下に繋がりうるかの判定 (``BusHealthInfo.may_affect_workpiece``)。
+
+    電磁弁基板 (``control_type: on_off``) はコマンドウォッチドッグ (既定 500ms)
+    が満了すると通電を落とす一手しか持たない。CAN 途絶が 1 秒弱続けば満了する
+    ので、そのバスの途絶は吸着中のワークを落としうる。一方 DM3520 や M3508 の
+    バスが途絶しても、それだけではワークは落ちない。判定はバス名や
+    ドライバ種別の文字列比較ではなく、ドライバ自身 (``has_on_off_control()``) に
+    聞く形で行う —— config で弁のバスを変えても判定が古いまま残らないようにするため。
+    """
+
+    def _mgr_with_bus(self, channel: str) -> tuple[CANManager, can.Bus]:
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = _make_virtual_bus(channel)
+        mgr.add_bus("bus0", bus, channel=channel)
+        return mgr, bus
+
+    def test_on_offのモータが載っていればTrue(self) -> None:
+        mgr, bus = self._mgr_with_bus("vworkpiece_on_off")
+        try:
+            mgr.add_motor("bus0", GenericDriver("valve_1", 0x10, control_type=ControlMode.ON_OFF))
+            assert mgr.health().buses[0].may_affect_workpiece is True
+        finally:
+            bus.shutdown()
+
+    def test_on_off以外だけならFalse(self) -> None:
+        mgr, bus = self._mgr_with_bus("vworkpiece_position")
+        try:
+            mgr.add_motor("bus0", GenericDriver("servo_1", 0x40, control_type=ControlMode.POSITION))
+            mgr.add_motor("bus0", M3508Driver("y_axis_l", 1))
+            assert mgr.health().buses[0].may_affect_workpiece is False
+        finally:
+            bus.shutdown()
+
+    def test_モータの無いバスはFalse(self) -> None:
+        mgr, bus = self._mgr_with_bus("vworkpiece_empty")
+        try:
+            assert mgr.health().buses[0].may_affect_workpiece is False
+        finally:
+            bus.shutdown()
+
+    def test_on_offと他ドライバが混在してもTrue(self) -> None:
+        """1 台でも on_off が居れば足りる (全台が on_off である必要は無い)。"""
+        mgr, bus = self._mgr_with_bus("vworkpiece_mixed")
+        try:
+            mgr.add_motor("bus0", M3508Driver("y_axis_l", 1))
+            mgr.add_motor("bus0", GenericDriver("valve_1", 0x10, control_type=ControlMode.ON_OFF))
+            assert mgr.health().buses[0].may_affect_workpiece is True
+        finally:
+            bus.shutdown()

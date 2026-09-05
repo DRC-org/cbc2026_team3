@@ -346,6 +346,8 @@ const BUS_HEALTH = fieldsOf<BusHealth>({
   rx_error_count: "ui",
   bus_off: "ui",
   rx_down: "ui",
+  rx_down_episodes: "ui",
+  may_affect_workpiece: "ui",
   last_tx_at: { unused: "鮮度の判定はサーバーが済ませて state に畳んである" },
   last_rx_at: { unused: "同上。UI が閾値を持つと判定が 2 箇所になる" },
 });

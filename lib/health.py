@@ -38,6 +38,20 @@ class BusHealthInfo:
     # down している (あるいは socket が読めない) 状態で、復旧の手当ても別になる。
     # 1 つにまとめると、どちらが起きているのか画面からもログからも区別できなくなる。
     rx_down: bool = False
+    # `rx_down` は生の bool で、途絶が 1 秒で復帰すれば画面には 1 秒しか出ず、
+    # 機体を見ている操縦者はまず見落とす (`cbc-can-watchdog.service` の bus-off
+    # 復旧は journal に `[ WD ]` として残るだけで UI には何も出ない)。
+    # 途絶の「立ち上がり」を数えたエピソード数をここに持たせ、試合中ずっと
+    # 残す (リセットは `CANManager.reset_rx_down_episodes()` が持ち、呼び出しの
+    # タイミングはサーバー側が決める)。**`rx_down` の判定そのもの (DOWN/DEGRADED
+    # の出し方) はここでは動かさない** —— 回数はあくまで付随情報。
+    rx_down_episodes: int = 0
+    # このバスの途絶がワーク落下に繋がりうるか。電磁弁基板はコマンド
+    # ウォッチドッグ (既定 500ms) が満了すると通電を落とす一手しかなく、
+    # CAN が 1 秒弱止まればまず満了する。**バスに乗っているモータの
+    # `control_type: on_off` の有無で決まる**ので、UI にバス名やドライバ種別を
+    # 書き写させないよう判定はサーバー (`CANManager.health`) だけが持つ。
+    may_affect_workpiece: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +64,8 @@ class BusHealthInfo:
             "rx_error_count": self.rx_error_count,
             "bus_off": self.bus_off,
             "rx_down": self.rx_down,
+            "rx_down_episodes": self.rx_down_episodes,
+            "may_affect_workpiece": self.may_affect_workpiece,
         }
 
 

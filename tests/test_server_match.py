@@ -500,3 +500,50 @@ class TestMatchFinishAndReset:
             assert fx.match.phase is Phase.SETUP
             assert fx.match.checklists[ROLE_PRE_MATCH].completed is False
             await ws.close()
+
+
+class TestMatchStartResetsRxDownEpisodes:
+    """試合開始のたびに CAN 途絶エピソード数 (``rx_down_episodes``) を洗い流す。
+
+    準備中 (配線確認・動作確認) に踏んだ途絶をここでリセットしておかないと、
+    試合中に見えるエピソード数へ準備フェーズのぶんが紛れ込み、「この試合で
+    本当に何回起きたか」が読めなくなる。``match_reset`` ではなく ``match_start``
+    でリセットする理由は `lib/server.py` の `_handle_match_start` に書いてある
+    (``match_reset`` でリセットすると、結果確認中 (FINISHED) の操縦者が
+    直前の試合の記録を見返せなくなる)。
+    """
+
+    async def test_試合開始で全ロボットのエピソード数をリセットする(self) -> None:
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _complete_checklist(ws)
+            await ws.send_json({"type": "match_start"})
+            await asyncio.sleep(0.05)
+
+            for name in _ROBOT_NAMES:
+                fx.can_manager(name).reset_rx_down_episodes.assert_called_once()
+            await ws.close()
+
+    async def test_ゲートで拒否された試みではリセットしない(self) -> None:
+        """指差喚呼が残ったままの ``match_start`` は拒否される (フェーズが進まない)。
+
+        拒否された試みでもリセットしてしまうと、次の正当な試合開始を待つ間に
+        準備中の途絶が既に消え、「この試合で何回起きたか」が試合が始まる前から
+        ズレた状態になる。
+        """
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            # 指差喚呼を完了させないまま送る (ゲートで拒否されるはず)
+            await ws.send_json({"type": "match_start"})
+            await asyncio.sleep(0.05)
+
+            assert fx.match.phase is Phase.SETUP, "拒否されず試合が始まってしまっている"
+            for name in _ROBOT_NAMES:
+                fx.can_manager(name).reset_rx_down_episodes.assert_not_called()
+            await ws.close()
