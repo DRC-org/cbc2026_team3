@@ -463,6 +463,27 @@ class TestMotorActivation:
         assert inactive == ["m1"]
         assert [call.args[0] for call in send.await_args_list] == ["m1", "m2", "m3"]
 
+    async def test_activate_motors_only_filters_target_motors(self) -> None:
+        """``only`` を渡すと、そこに無いモータへは 1 通も送らない。
+
+        再励磁 (`RobotServer._reenergize_motors`) が無励磁のモータだけを対象に
+        絞る根拠。絞らずに全モータへ送ると、健全で移動中のモータまで
+        「現在角を書いてから enable」に巻き込まれる (advisor 指摘)。
+        """
+        mgr = CANManager()
+        mgr.add_bus("can0", mock_bus())
+        enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
+        for index, name in enumerate(("m1", "m2", "m3"), start=1):
+            motor = mock_driver(name, index)
+            motor.activation_steps.return_value = [(enable_msg, 0.0)]
+            mgr.add_motor("can0", motor)
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            inactive = await mgr.activate_motors(only={"m2"})
+
+        assert inactive == []
+        assert [call.args[0] for call in send.await_args_list] == ["m2"]
+
     async def test_initialize_motors_continues_after_one_motor_fails(self) -> None:
         """起動時も同じ。1 台の失敗でそのバスのモータが全部無励磁になってはならない。"""
         mgr = CANManager()

@@ -98,6 +98,19 @@ class _TargetRefresherBase(PausablePeriodicTask):
         for handle in self._handles:
             handle.clear_target()
 
+    def clear_target(self, name: str) -> None:
+        """指定した 1 台ぶんだけ目標を捨てる。
+
+        ``clear_targets()`` は全ハンドルを対象にする (緊急停止で機構ごと止める用途)。
+        こちらは無励磁から戻す再励磁 (`RobotServer._reenergize_motors`) が使う ——
+        フォルトが起きたのは同じバスの 1 台だけで、残りは正常に動作中かもしれない。
+        全台へ広げると、無関係な軸の `wait_reached` まで巻き込んで中断させてしまう。
+        """
+        for handle in self._handles:
+            if handle.name == name:
+                handle.clear_target()
+                return
+
     async def _on_run_exit(self) -> None:
         """**降り際に停止指令も無励磁化も送らない。** 理由は 2 タスクで別々にある。
 
@@ -292,6 +305,16 @@ class QueryDrivenTargetRefresher(_TargetRefresherBase):
         """
         super().clear_targets()
         self._idle_targets.clear()
+
+    def clear_target(self, name: str) -> None:
+        """1 台ぶんだけ目標とラッチを捨てる (`_TargetRefresherBase.clear_target` 参照)。
+
+        ラッチを残したまま呼び出し元 (再励磁) が enable すると、次の再送
+        (最大 20Hz = 50ms 後) がフォルト前に凍結された古い位置で上書きし、
+        「現在角を書いてから励磁する」保証を 1 周期で無効化してしまう。
+        """
+        super().clear_target(name)
+        self._idle_targets.pop(name, None)
 
 
 #: 目標値再送タスクの共通型。``RobotServer`` は動作確認との排他 (pause/resume)、

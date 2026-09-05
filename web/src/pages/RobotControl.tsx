@@ -47,6 +47,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     sendOrReport({ type: "sequence_start", robot: robotKey }, "シーケンス開始");
   const handleMode = (mode: OperationMode) =>
     sendOrReport({ type: "set_operation_mode", robot: robotKey, mode }, "操作モードの切り替え");
+  // 可否の判定は持たない。押せば送るだけで、拒否はサーバーが理由付きで返す
+  const handleReenergize = () =>
+    sendOrReport({ type: "reenergize_motors", robot: robotKey }, "再励磁");
 
   // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
   const inMatch = isDuringMatch(matchState.phase);
@@ -160,6 +163,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         connected={connected}
         tempThresholds={tempThresholdsOf(serverInfo)}
         defaultOpen={open}
+        onReenergize={handleReenergize}
       />
     </Panel>
   );

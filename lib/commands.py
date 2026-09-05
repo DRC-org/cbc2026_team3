@@ -302,6 +302,25 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_motor_check_start",
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
     ),
+    _spec(
+        # 励磁が落ちたモータ (EDULITE 05 / DM3520 の fault) を、機体を止めずに
+        # 戻す明示操作 (docs/checks_and_health.md「復帰には…が要る」)。**自動再励磁には
+        # しない** — fault が再発するモータへ無限に励磁し直す経路を作らないため、
+        # 操縦者がこのコマンドを送ったときにしか実行しない。
+        #
+        # 試合中に使えないと直したい状況そのものが直せないので PHASES_ANY。
+        # 一方 **緊急停止中は励磁してはならない** — 緊急停止の意味が消える。
+        # 手動操縦中は塞がない — 手動はシーケンスからの退避路そのものなので、
+        # 手動中に落ちた励磁を手動のまま戻せないと退避路自体が詰む。動作確認との
+        # 排他は `MotorCheckController.running` をハンドラ側で見る (両ハンド横断の
+        # 排他で、単一ロボットの data["robot"] では表せないため motor_check_start と
+        # 同じ理由で CommandSpec の外に置く)。
+        "reenergize_motors",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中は再励磁できません",
+        handler="_cmd_reenergize_motors",
+    ),
     # ------------------------------------------------------------------ #
     #  手動操縦 — 調整時と、シーケンスからの退避に使う補助操縦。
     #

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -729,8 +729,11 @@ class CANManager:
         *,
         should_abort: Callable[[], bool] | None = None,
         feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
+        only: Collection[str] | None = None,
     ) -> list[str]:
-        """全モータの励磁を有効化する。緊急停止解除後の復帰にも使う。
+        """全モータ (または ``only`` で絞った一部) の励磁を有効化する。
+
+        緊急停止解除後の復帰にも使う。
 
         should_abort は「途中で有効化をやめるべきか」を返す。緊急停止が再び入った
         場合に、残りのモータへ enable を送らないための中断口。
@@ -742,8 +745,14 @@ class CANManager:
         `RobotServer._reactivate_motors` はこれをログに落とすだけなので、画面上は
         「解除できた」ように見えたまま機体が無励磁で取り残される。
 
+        ``only`` は無励磁のモータだけを再励磁したい呼び出し (`RobotServer._reenergize_motors`)
+        のための絞り込み。EDULITE 05 / DM3520 の `activate_motor` は現在角を目標に
+        書いてから enable するので、指定しなかった健全なモータまで含めると、
+        移動中の軸を「今の位置で止めてから再度動かす」形で割り込ませてしまう。
+
         Returns:
-            有効化できなかったモータ名 (中断で飛ばしたものを含む)。
+            有効化できなかったモータ名 (中断で飛ばしたものを含む)。``only`` を渡した
+            場合は対象外のモータ名を含まない。
         """
 
         async def activate(motor_name: str) -> bool:
@@ -753,7 +762,9 @@ class CANManager:
                 feedback_timeout_s=feedback_timeout_s,
             )
 
-        return await self._activate_each_motor("有効化", activate, should_abort=should_abort)
+        return await self._activate_each_motor(
+            "有効化", activate, should_abort=should_abort, only=only
+        )
 
     async def clear_e_stop_latches(self) -> list[str]:
         """自作モタドラの緊急停止ラッチだけを外す。**中断口を持たない。**
@@ -797,8 +808,9 @@ class CANManager:
         action: Callable[[str], Awaitable[bool]],
         *,
         should_abort: Callable[[], bool] | None = None,
+        only: Collection[str] | None = None,
     ) -> list[str]:
-        """全モータへ ``action`` を宣言順に適用し、失敗したモータ名を返す。
+        """``only`` (省略時は全モータ) へ ``action`` を宣言順に適用し、失敗したモータ名を返す。
 
         **1 台の送信失敗で残りを諦めない。** 素の for に並べると、最初のモータで
         CAN の送信が失敗しただけで以降のモータは何も受け取れず、しかも症状は
@@ -807,9 +819,12 @@ class CANManager:
 
         中断は「次のモータへ進む直前」にだけ見る。送信の途中で降りると、
         設定だけ入って励磁されていないモータが残る。
+
+        ``only`` で絞っても宣言順そのものは全モータの順序を保つ (対象外は素通りする)。
+        絞り込みを理由に順序が変わると、他の呼び出しと挙動が食い違って読みにくい。
         """
         inactive: list[str] = []
-        motor_names = list(self._motors)
+        motor_names = [name for name in self._motors if only is None or name in only]
         for index, motor_name in enumerate(motor_names):
             if should_abort is not None and should_abort():
                 logger.warning("モータの有効化を中断しました (残り: %s 以降)", motor_name)

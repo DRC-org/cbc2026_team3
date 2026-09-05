@@ -102,6 +102,17 @@ class SyncMonitor(PeriodicTask):
         return tuple(group.name for group in self._groups)
 
     @property
+    def groups(self) -> tuple[SyncGroup, ...]:
+        """監視対象のグループそのもの (読み取り専用)。
+
+        `RobotServer._reenergize_motors` が「無励磁のモータが直結ペアの一員なら
+        相方も対象に含める」判定に使う (`SyncGroup.members` からモータ名を引く)。
+        ペアの片側だけへ効く操作を作らない、という CLAUDE.md の不変条件を
+        再励磁にも適用するための参照であって、書き換えは想定しない。
+        """
+        return self._groups
+
+    @property
     def violated(self) -> frozenset[str]:
         """発報済み (ラッチ中) の軸名。"""
         return frozenset(self._violated)

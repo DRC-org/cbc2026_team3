@@ -163,6 +163,31 @@ class ServerFixture:
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
 
+    async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
+        """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。"""
+        task = self.server._reenergize_tasks.get(robot_name)
+        if task is not None and not task.done():
+            await asyncio.wait_for(task, timeout=timeout)
+
+    def has_pending_reenergize(self, robot_name: str) -> bool:
+        """このロボット名ぶんの再励磁タスクが (実行中か完了済みかに関わらず) 存在するか。
+
+        入力検証 (未知のロボット名を弾く) が抜けていないかを見るテスト用。
+        `wait_reenergize` の「実行中か」判定 (`not task.done()`) だと、無効な
+        ロボット名で立てたタスクが検証をすり抜けて中で即座に例外落ちした場合に
+        `done()` が True になり「実行中でない」へ紛れて検証漏れを見逃す。
+        """
+        return robot_name in self.server._reenergize_tasks
+
+    def set_motor_check_task(self, task: asyncio.Task[None] | None) -> None:
+        """動作確認の実行中フラグ (`MotorCheckController.running`) を直接操作する。
+
+        `running` は実行タスクの生死で判定する。`start()` は環境ゲートとシーケンス
+        登録を要求するため、それらに関心の無いテスト (排他だけを見たいテスト) の
+        ために「今実行中」を直接作る口をここへ置く。
+        """
+        self.server._motor_check._task = task
+
     def break_command_handler(self, command: str, exc: Exception) -> None:
         """指定コマンドのハンドラを、必ず例外を投げるものへ差し替える。
 
