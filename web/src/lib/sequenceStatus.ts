@@ -72,8 +72,16 @@ export interface SequenceProgress {
  * あったのにその先の算術だけが分かれており、片方だけ直せば同じ瞬間に 2 つの画面が
  * 違う進捗を出す。
  *
- * 完走時に `stepIndex + 1` を使わないのは、バックエンドが完走で
- * `step_index === total_steps` を返すため (そのまま +1 すると総数を超える)。
+ * **バーの分子は「完了したステップ数」= `step_index` であって、操縦者に見せる現在
+ * ステップ番号 (`displayIndex` = `step_index + 1`) ではない。** サーバーはステップを
+ * 完了した時点で `step_index` を進めるので、この値がそのまま完了件数を意味する。
+ * 両方に同じ式を使うとバーが常に 1 ステップ先行し、シーケンスを開始していない試合
+ * 開始直後の画面が「1 マス進んだバー」を出す (実際にそう見えていた)。走行中のステップを
+ * 0.5 件のように按分しないのは、そのステップの進み具合を測る手段がどこにも無いため ——
+ * 実行中であることは状態表示 (`sequenceKind`) が言う。
+ *
+ * 完走が 100% になるのも同じ式で足りる。バックエンドは完走で
+ * `step_index === total_steps` を返す (= 全件完了)。
  */
 export function sequenceProgress(state: ProgressWithSteps): SequenceProgress {
   const total = state.total_steps;
@@ -85,7 +93,7 @@ export function sequenceProgress(state: ProgressWithSteps): SequenceProgress {
   return {
     displayIndex: Math.min(index + 1, total),
     total,
-    percent: Math.min(100, ((complete ? total : index + 1) / total) * 100),
+    percent: Math.min(100, (index / total) * 100),
     current: complete ? undefined : state.steps?.[index],
   };
 }
