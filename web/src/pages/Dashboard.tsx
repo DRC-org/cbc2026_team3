@@ -1,12 +1,9 @@
-import { useCallback, useState } from "react";
-
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { EventFeed } from "@/components/monitor/EventFeed";
 import { MatchStrip, useResetConfirm } from "@/components/monitor/MatchControl";
 import { MatchPrep } from "@/components/monitor/MatchPrep";
 import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
-import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
@@ -25,9 +22,6 @@ export function Dashboard() {
   const { matchState, serverInfo, connected } = useRobotStatus();
   const { matchStart } = useRobotCommands();
   const { confirmModal, requestReset } = useResetConfirm();
-  const [checkPanelOpen, setCheckPanelOpen] = useState(false);
-  // MatchPrep は memo。毎描画 新しい関数を渡すと切り離しが無効になる
-  const openCheckPanel = useCallback(() => setCheckPanelOpen(true), []);
   // 温度しきい値の正はサーバーの config。表示部品は props で受け取る
   const tempThresholds = tempThresholdsOf(serverInfo);
 
@@ -44,7 +38,7 @@ export function Dashboard() {
 
           {/* 左は準備そのもの。コート設定・動作確認の操作と、それを確認する指差喚呼を
               同じ場所に置く (以前は操作が右、確認が左に分かれ、項目ごとに往復していた) */}
-          <MatchPrep onRequestReset={requestReset} onPanelOpen={openCheckPanel} />
+          <MatchPrep onRequestReset={requestReset} />
 
           {/* 右は準備の面が答えられないことだけを持つ参照面。機体状態の判定チップは
               StartGate と重複するので出さない (同じ画面に「要確認 3 件」が 2 回並ばない) */}
@@ -74,7 +68,6 @@ export function Dashboard() {
           </Panel>
         </Page>
         {confirmModal}
-        <MotorCheckPanel isOpen={checkPanelOpen} onOpenChange={setCheckPanelOpen} />
       </>
     );
   }
