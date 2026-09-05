@@ -31,7 +31,7 @@ def ok_health_snapshot(can_manager: Any) -> HealthSnapshot:
     """
     now = time.time()
     buses = list(getattr(can_manager, "bus_names", ()) or ())
-    motors = list(getattr(can_manager, "motors", {}) or {})
+    motors = dict(getattr(can_manager, "motors", {}) or {})
     bus_name = buses[0] if buses else "bus0"
 
     return HealthSnapshot(
@@ -57,9 +57,24 @@ def ok_health_snapshot(can_manager: Any) -> HealthSnapshot:
                 state=MotorHealth.OK,
                 last_feedback_at=now,
                 feedback_age_ms=0.0,
-                temperature=30.0,
+                # **測れない基板は None。** 本物の `CANManager.health` が
+                # `telemetry` を見て温度を落とすので、ここが 30.0 固定だと
+                # 「モックだけ温度が付いている」状態になり、null が届く形を
+                # 誰も検証しないまま通る
+                temperature=30.0 if _measures_temperature(driver) else None,
                 detail=None,
             )
-            for name in motors
+            for name, driver in motors.items()
         ],
     )
+
+
+def _measures_temperature(driver: Any) -> bool:
+    """ドライバが温度を測れると宣言しているか。
+
+    宣言を持たないモック (``telemetry`` を生やしていないもの) は従来どおり
+    温度ありとして扱う。ここで False へ倒すと、CAN 層に関心の無いテストが
+    まとめて「温度不明」の経路を通ることになる。
+    """
+    telemetry = getattr(driver, "telemetry", None)
+    return telemetry is None or bool(telemetry.temperature)

@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 import can
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorState
+from lib.drivers.base import FULL_TELEMETRY, MotorState
 from tests.fake_health import ok_health_snapshot
 
 #: 特に指定が無いモータの状態。値そのものに意味は無い (存在することだけが要る)
@@ -41,10 +41,15 @@ def mock_motor(name: str, state: MotorState | None = None) -> MagicMock:
     ``emergency_stop_message()`` は敢えてスタブしない。MagicMock の既定戻り値
     (None ではない) のままにすることで、緊急停止がドライバ固有フレームを
     送る経路をテストが素通りせずに通る。
+
+    ``telemetry`` だけは明示する。MagicMock のままだと属性が truthy な MagicMock に
+    なり「4 値とも測れる」と同じ振る舞いになるが、それは**偶然そう見えている**だけで、
+    測定可否の宣言を配信側が読まなくなっても誰も気付けない。
     """
     motor = MagicMock()
     motor.name = name
     motor.state = state if state is not None else DEFAULT_MOTOR_STATE
+    motor.telemetry = FULL_TELEMETRY
     return motor
 
 
@@ -181,6 +186,8 @@ def mock_driver(name: str, can_id: int) -> MagicMock:
     motor.can_id = can_id
     motor.matches_feedback.return_value = False
     motor.update_state.return_value = MotorState()
+    # ヘルスは測定可否を見て温度を落とすので、宣言だけは実体と同じ形にしておく
+    motor.telemetry = FULL_TELEMETRY
     motor.initialization_steps.return_value = []
     motor.activation_steps.return_value = []
     motor.requires_fresh_feedback_for_activation.return_value = False

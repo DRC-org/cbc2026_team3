@@ -45,11 +45,14 @@ export const NO_PC_SIDE_PID_NOTE =
   "EDULITE 05 と自作モータドライバはドライバ側で制御しており、PC からゲインを変更できません。";
 
 /**
- * 目標との差。目標を持たないモータ・停止中は null。
+ * 目標との差。目標を持たないモータ・停止中・**位置を測れないモータ**は null。
  *
  * **0 を返してはならない。** 「目標に完璧に追従している」と「そもそも目標が無い」が
- * 同じ表示になり、停止中の機体を追従できていると読む経路ができる。
+ * 同じ表示になり、停止中の機体を追従できていると読む経路ができる。位置を測れない
+ * モータ (`pos === null`) を 0 として引き算するのも同じ罠 —— 偏差そのものが
+ * 目標値の符号違いに化けたうえで、測っていないことが画面から消える。
  */
 export function deviationOf(motor: MotorState): number | null {
-  return motor.target === null ? null : motor.target - motor.pos;
+  if (motor.target === null || motor.pos === null) return null;
+  return motor.target - motor.pos;
 }

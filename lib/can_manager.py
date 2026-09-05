@@ -943,7 +943,12 @@ class CANManager:
                     state=state,
                     last_feedback_at=last_fb,
                     feedback_age_ms=age_ms,
-                    temperature=motor.state.temperature,
+                    # **温度を測れない基板は 0.0 ではなく None を配る。**
+                    # 自作モタドラはどの基板も温度センサを持たない (仕様書 §3.2) ので、
+                    # `MotorState.temperature` の 0.0 は「測った値」ではなく制御経路が
+                    # float を要求するための詰め物にすぎない。素通しにすると
+                    # UI に 0.0℃ が並び、操縦者は「冷えている」と読む
+                    temperature=(motor.state.temperature if motor.telemetry.temperature else None),
                     # ドライバ固有の事情 (M3508 の累積角再アンカーなど) をそのまま載せる。
                     # 状態 (OK/STALE) では表せない「値は届いているが意味が変わった」を
                     # 運ぶ唯一の口で、ここを None 固定に戻すと報告が画面から消える

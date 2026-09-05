@@ -6,7 +6,13 @@ from enum import IntEnum
 
 import can
 
-from lib.drivers.base import ControlMode, MotorDriver, MotorState
+from lib.drivers.base import (
+    NO_TELEMETRY,
+    ControlMode,
+    MotorDriver,
+    MotorState,
+    TelemetrySupport,
+)
 
 _MODE_MAP = {
     ControlMode.POSITION: 0,
@@ -94,6 +100,13 @@ class InfoFrame:
 #: それ未満の差は往復の丸めでしか生まれない
 _ANGLE_RANGE_EPSILON = 0.05
 
+#: 位置を返す基板 (サーボスロット) の測定可否。速度・電流・温度は
+#: **プロトコルに存在しない** (仕様書 §3.2)。FEEDBACK は状態フラグ 1 バイト +
+#: 位置を持つ基板だけが 2 バイトで、電流センサも温度センサもどの基板にも載っていない
+_POSITION_ONLY_TELEMETRY = TelemetrySupport(
+    position=True, velocity=False, current=False, temperature=False
+)
+
 
 def _to_raw(value: float, scale: int) -> int:
     """float を固定小数点の int16 へ。範囲外と NaN は飽和させる。
@@ -154,6 +167,26 @@ class GenericDriver(MotorDriver):
         # 「ファームに書いた値」と「yaml に書いた値」の一致まで (仕様書 §7.7)
         self._expected_firmware = expected_firmware
         self._expected_angle_range_deg = expected_angle_range_deg
+
+    @property
+    def telemetry(self) -> TelemetrySupport:
+        """自作モタドラが測れるのは位置だけで、それも位置指令の基板に限る。
+
+        - サーボ基板 (``control_type: position``) は FEEDBACK Byte1-2 に位置を載せる
+        - DC 基板 (``duty``) と電磁弁基板 (``on_off``) は状態フラグ 1 バイトだけを送る
+          (DLC=1)。``decode_feedback`` が返す ``position=0.0`` は「位置が無いフレームを
+          共通の ``MotorState`` に収めるための詰め物」であって、測った値ではない
+        - ``velocity`` に設定した軸も位置は返らない。速度指令を実装した基板は無く、
+          速度フィードバックはプロトコルから外れている
+
+        電流・温度はどの基板も測る手段を持たない (仕様書 §3.2)。センサスロットも
+        既定の ``control_type: position`` で生成されるが、位置は state 配信に載らず
+        (``sensors:`` は UI のモータ一覧に並ばない)、ヘルスが読む温度はここで
+        ``None`` へ倒れる。
+        """
+        if self.control_type is ControlMode.POSITION:
+            return _POSITION_ONLY_TELEMETRY
+        return NO_TELEMETRY
 
     # ---- CAN ID ユーティリティ ----
 

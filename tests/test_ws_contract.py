@@ -41,8 +41,9 @@ from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from lib.tuning.metrics import Sample
 from lib.tuning.recorder import Capture, PidSnapshot
-from tests.fake_can import mock_can_manager
+from tests.fake_can import mock_can_manager, set_motors
 from tests.fake_health import ok_health_snapshot
+from tests.feedback_frames import feed_generic
 from tests.server_fixtures import ServerFixture, require_type, wait_until
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -144,15 +145,34 @@ def _contract_capture(positions: list[float], *, target: float) -> Capture:
     )
 
 
-def _make_can_manager() -> CANManager:
-    return mock_can_manager(
+def _generic_drivers() -> dict[str, GenericDriver]:
+    """自作モタドラの 2 枚。**測れる項目が違う 2 種類を必ず両方載せる。**
+
+    サーボ基板 (position) は位置だけを、DC 基板 (duty) は 1 つも測れない
+    (仕様書 §3.2)。実ドライバを CANManager へ挿すのは、測定可否の宣言が
+    ドライバ側にしか無いため —— モックのままだと「4 値とも数値」の形しか
+    golden に現れず、UI が null を受け取れなくても誰も気付けない。
+
+    状態は実機と同じ FEEDBACK フレームで作る (``driver._state`` への直接代入は
+    デコード層を丸ごと迂回する)。DC 基板は位置を持たないので DLC=1 で送る。
+    """
+    gripper = GenericDriver("gripper", can_id=9, control_type=ControlMode.POSITION)
+    conveyor = GenericDriver("conveyor", can_id=10, control_type=ControlMode.DUTY)
+    feed_generic(gripper, position=5.0, reached=True)
+    feed_generic(conveyor)
+    return {"gripper": gripper, "conveyor": conveyor}
+
+
+def _make_can_manager(generics: dict[str, GenericDriver]) -> CANManager:
+    mgr = mock_can_manager(
         {
             "y_axis_r": MotorState(position=1500.0, velocity=0.0, current=0.2, temperature=35.0),
             "y_axis_l": MotorState(position=-1500.0, velocity=0.0, current=0.2, temperature=34.5),
-            "gripper": MotorState(position=5.0, velocity=0.0, current=0.0, temperature=30.0),
         },
         bus_name=_M3508_BUS,
     )
+    set_motors(mgr, {**mgr.motors, **generics})
+    return mgr
 
 
 def _sync_group() -> SyncGroup:
@@ -261,7 +281,8 @@ _Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRef
 
 def _build_fixture() -> _Fixture:
     fx = ServerFixture.build(checklist_definitions=_checklist_definitions())
-    mgr = _make_can_manager()
+    generics = _generic_drivers()
+    mgr = _make_can_manager(generics)
 
     loop = M3508PositionLoop(mgr, _M3508_BUS)
     drivers = {"y_axis_r": M3508Driver("y_axis_r", 1), "y_axis_l": M3508Driver("y_axis_l", 2)}
@@ -276,9 +297,11 @@ def _build_fixture() -> _Fixture:
     )
 
     # 目標値再送も 1 台ぶん載せる。空リストだと safety.target_refreshers の
-    # 要素構造が golden に現れず、UI 側が形を知る手立てが無くなる
-    gripper = GenericDriver("gripper", can_id=9, control_type=ControlMode.POSITION)
-    conveyor = GenericDriver("conveyor", can_id=10, control_type=ControlMode.DUTY)
+    # 要素構造が golden に現れず、UI 側が形を知る手立てが無くなる。
+    # **CANManager に挿したのと同じドライバを使う** —— 別インスタンスを作ると、
+    # 手動操縦や再送が触るモータと配信に載るモータが別物になる
+    gripper = generics["gripper"]
+    conveyor = generics["conveyor"]
     refresher = GenericTargetRefresher([MotorHandle("gripper", gripper, mgr)])
 
     fx.add_robot(

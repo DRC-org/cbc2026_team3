@@ -141,7 +141,16 @@
             "last_feedback_at": 1700000000.0,
             "name": "gripper",
             "state": "ok",
-            "temperature": 30.0
+            "temperature": null
+          },
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "conveyor",
+            "state": "ok",
+            "temperature": null
           }
         ],
         "overall": "ok",
@@ -190,7 +199,7 @@
             "sync_tolerance": null,
             "target": null,
             "unit": "deg",
-            "value": 0.0
+            "value": 5.0
           },
           {
             "command_mode": "duty",
@@ -213,14 +222,23 @@
         "mode": "manual"
       },
       "motors": {
+        "conveyor": {
+          "pid": null,
+          "pos": null,
+          "saturated": false,
+          "target": null,
+          "temp": null,
+          "torque": null,
+          "vel": null
+        },
         "gripper": {
           "pid": null,
           "pos": 5.0,
           "saturated": false,
           "target": null,
-          "temp": 30.0,
-          "torque": 0.0,
-          "vel": 0.0
+          "temp": null,
+          "torque": null,
+          "vel": null
         },
         "y_axis_l": {
           "pid": {
@@ -359,7 +377,16 @@
             "last_feedback_at": 1700000000.0,
             "name": "gripper",
             "state": "ok",
-            "temperature": 30.0
+            "temperature": null
+          },
+          {
+            "bus": "can_m3508",
+            "detail": null,
+            "feedback_age_ms": 0.0,
+            "last_feedback_at": 1700000000.0,
+            "name": "conveyor",
+            "state": "ok",
+            "temperature": null
           }
         ],
         "overall": "ok",
@@ -412,7 +439,7 @@
             "sync_tolerance": null,
             "target": null,
             "unit": "deg",
-            "value": 0.0
+            "value": 5.0
           },
           {
             "command_mode": "duty",
@@ -435,14 +462,23 @@
         "mode": "manual"
       },
       "motors": {
+        "conveyor": {
+          "pid": null,
+          "pos": null,
+          "saturated": false,
+          "target": null,
+          "temp": null,
+          "torque": null,
+          "vel": null
+        },
         "gripper": {
           "pid": null,
           "pos": 5.0,
           "saturated": false,
           "target": null,
-          "temp": 30.0,
-          "torque": 0.0,
-          "vel": 0.0
+          "temp": null,
+          "torque": null,
+          "vel": null
         },
         "y_axis_l": {
           "pid": {

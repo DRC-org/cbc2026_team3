@@ -32,6 +32,38 @@ class MotorState:
     reached: bool = False
 
 
+@dataclass(frozen=True)
+class TelemetrySupport:
+    """このドライバが **実際に測れる** フィードバック項目の宣言。
+
+    ``MotorState`` の 4 値は制御経路 (位置制御ループ・偏差監視・ホーミング) が
+    float であることに依存しているので、測る手段が無い項目もそこでは 0.0 のまま
+    運ぶ。**その 0.0 をそのまま UI やヘルス判定へ流すと「測ったように見える 0」に
+    なる** —— 自作モタドラの DC 基板と電磁弁基板は電流も温度も測る手段を持たず
+    (仕様書 §3.2)、操縦者は「本当に 0」なのか「そもそも測っていない」のかを
+    画面から区別できない。測定可否を制御値とは別のメタ情報として持ち、
+    配信の境界 (`RobotServer._build_state_message` / `CANManager.health`) で
+    測れない項目を ``None`` へ倒すために使う。
+
+    **4 値は必ずこの 1 組で運ぶ。** バラの bool 引数に分解すると、一部だけ配線した
+    経路が作れてしまい、残りが黙って既定値のまま効く (`HealthThresholds` を
+    1 組で運ぶのと同じ理由)。判定をドライバ側に置くのは、UI にドライバ種別を
+    書き写さないため。
+    """
+
+    position: bool = True
+    velocity: bool = True
+    current: bool = True
+    temperature: bool = True
+
+
+#: 4 値すべてを測れるドライバ (M3508 / EDULITE 05 / DM3520) の宣言
+FULL_TELEMETRY = TelemetrySupport()
+
+#: 状態フラグしか返さない基板 (DC・電磁弁・センサ) の宣言
+NO_TELEMETRY = TelemetrySupport(position=False, velocity=False, current=False, temperature=False)
+
+
 # 許容差の単一情報源 (POSITION=1deg / VELOCITY=5rpm)。
 # 到達判定 (シーケンス) と動作確認 (セッティングタイム) の双方がここだけを見る。
 # ドライバ固有の単位や減速比は default_tolerance のオーバーライドで換算する
@@ -52,6 +84,16 @@ class MotorDriver(abc.ABC):
     @property
     def state(self) -> MotorState:
         return self._state
+
+    @property
+    def telemetry(self) -> TelemetrySupport:
+        """測れるフィードバック項目の宣言 (``TelemetrySupport`` の docstring 参照)。
+
+        既定は「4 値とも測れる」。C620 (M3508) / EDULITE 05 / DM3520 は
+        フィードバックに位置・速度・電流・温度をすべて載せるので、
+        オーバーライドが要るのは測れない項目を持つドライバだけになる。
+        """
+        return FULL_TELEMETRY
 
     @abc.abstractmethod
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
@@ -149,11 +191,24 @@ class MotorDriver(abc.ABC):
     # サブクラスは過電流フラグや fault フラグを持つ場合のみオーバーライドする
 
     def has_thermal_warning(self, temp_warning_c: float) -> bool:
-        """温度警告判定。基底実装は MotorState.temperature と warning しきい値の比較。"""
+        """温度警告判定。基底実装は MotorState.temperature と warning しきい値の比較。
+
+        **温度を測れないドライバでは判定そのものを行わない。** 測れない基板の
+        ``temperature`` は 0.0 のまま動かないので比較しても警告は出ないが、
+        しきい値が 0 以下になった構成では「測っていない 0」が警告に化ける。
+        判定材料の有無は `telemetry` が単一情報源なので、ここもそれを見る。
+        """
+        if not self.telemetry.temperature:
+            return False
         return self._state.temperature >= temp_warning_c
 
     def has_thermal_fault(self, temp_critical_c: float) -> bool:
-        """温度異常 (FAULT) 判定。基底実装は MotorState.temperature と critical しきい値の比較。"""
+        """温度異常 (FAULT) 判定。基底実装は MotorState.temperature と critical しきい値の比較。
+
+        測れないドライバで判定しないのは ``has_thermal_warning`` と同じ理由。
+        """
+        if not self.telemetry.temperature:
+            return False
         return self._state.temperature >= temp_critical_c
 
     def has_overcurrent_warning(self) -> bool:

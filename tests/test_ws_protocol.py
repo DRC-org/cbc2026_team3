@@ -6,11 +6,14 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
-from lib.drivers.base import MotorState
+from lib.drivers.base import ControlMode, MotorState
+from lib.drivers.generic import GenericDriver
+from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, MotorHealth
 from lib.sequence.engine import Sequence, step
-from tests.fake_can import mock_can_manager
+from tests.fake_can import mock_can_manager, set_motors
 from tests.fake_health import ok_health_snapshot
+from tests.feedback_frames import feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, recv_type
 
 
@@ -312,3 +315,94 @@ class TestHealthChangeIncludesRobot:
             assert msg["target"] == "motor:m3508_1"
 
             await ws.close()
+
+
+def _telemetry_fixture(*, dry_run: bool = False) -> ServerFixture:
+    """測れる項目が違う 3 台を 1 台のロボットへ載せる。
+
+    M3508 (4 値とも測れる) / サーボ基板 (位置だけ) / DC 基板 (1 つも測れない)。
+    実ドライバを挿すのは、測定可否の宣言がドライバ側にしか無いため。状態は実機と
+    同じフィードバックフレームで作る (``driver._state`` への直接代入はデコード層を
+    丸ごと迂回する)。
+    """
+    fx = ServerFixture.build(dry_run=dry_run)
+    mgr = mock_can_manager(["y_axis_r"], bus_name="can_m3508")
+
+    y_axis_r = M3508Driver("y_axis_r", 1)
+    gripper = GenericDriver("gripper", 0x40, control_type=ControlMode.POSITION)
+    conveyor = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+    feed_m3508(y_axis_r, deg=90.0, rpm=120, current=200, temp=42)
+    feed_generic(gripper, position=5.0, reached=True)
+    # DC 基板は状態フラグ 1 バイトだけ (DLC=1)
+    feed_generic(conveyor)
+
+    set_motors(mgr, {"y_axis_r": y_axis_r, "gripper": gripper, "conveyor": conveyor})
+    fx.add_robot("main_hand", DummySequence(), mgr)
+    return fx
+
+
+class TestUnmeasuredTelemetryIsNull:
+    """測る手段の無い項目は 0 ではなく null で配ること。
+
+    自作モタドラの DC 基板・電磁弁基板は電流も温度も測れず、位置も持たない
+    (仕様書 §3.2)。0.0 を配ると UI には「測ったように見える 0」が出て、操縦者は
+    「本当に 0 なのか、フィードバックが無いのか」を区別できない。
+    """
+
+    async def _motors(self, fx: ServerFixture) -> dict:
+        app = fx.create_app()
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await fx.publish_state()
+            msg = await recv_type(ws, "state")
+            assert msg is not None
+            await ws.close()
+            return msg["motors"]
+
+    async def test_dc_board_carries_no_numbers_at_all(self) -> None:
+        motors = await self._motors(_telemetry_fixture())
+
+        assert motors["conveyor"] == {
+            "pos": None,
+            "vel": None,
+            "torque": None,
+            "temp": None,
+            "pid": None,
+            "target": None,
+            "saturated": False,
+        }
+
+    async def test_servo_board_carries_position_only(self) -> None:
+        motors = await self._motors(_telemetry_fixture())
+
+        assert motors["gripper"]["pos"] == pytest.approx(5.0)
+        assert motors["gripper"]["vel"] is None
+        assert motors["gripper"]["torque"] is None
+        assert motors["gripper"]["temp"] is None
+
+    async def test_m3508_carries_all_four(self) -> None:
+        """対の確認。測れる側まで落とすと、過熱も追従も画面から読めなくなる。"""
+        motors = await self._motors(_telemetry_fixture())
+
+        # 位置はエンコーダの刻み (8192 カウント/回転) ぶんだけずれる
+        assert motors["y_axis_r"]["pos"] == pytest.approx(90.0, abs=0.1)
+        assert motors["y_axis_r"]["vel"] == pytest.approx(120.0)
+        assert motors["y_axis_r"]["torque"] is not None
+        assert motors["y_axis_r"]["temp"] == pytest.approx(42.0)
+
+    async def test_dry_run_follows_the_same_rule(self) -> None:
+        """dry-run の擬似値も同じ関門を通す。
+
+        見栄えの値を作ってよいのは実機が測れる項目だけで、DC 基板に温度や速度を
+        作ると、机上で確かめている画面が実機と別物になる。
+        """
+        motors = await self._motors(_telemetry_fixture(dry_run=True))
+
+        assert motors["conveyor"]["pos"] is None
+        assert motors["conveyor"]["vel"] is None
+        assert motors["conveyor"]["torque"] is None
+        assert motors["conveyor"]["temp"] is None
+        assert motors["gripper"]["pos"] is not None, "机上で位置の描画を確かめられない"
+        assert motors["gripper"]["temp"] is None
+        # 実機が 4 値とも測れるモータには擬似値が入る (dry-run の目的そのもの)
+        assert motors["y_axis_r"]["temp"] is not None
