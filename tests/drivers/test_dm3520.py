@@ -215,6 +215,23 @@ class TestFeedbackDecode:
         feed_dm3520(drv, error=int(Dm3520Error.COMM_LOSS))
         assert drv.is_energized() is False
 
+    def test_unreceived_feedback_is_energized_none(self) -> None:
+        """**フィードバックを 1 通も受けていない状態は `None`(分からない)。**
+
+        `error_code` の初期値は `DISABLED` (0) だが、これは「無励磁だと分かって
+        いる」のではなく「まだ何も届いていない」だけである。ここを区別せず
+        `error_code == ENABLED` を素通しすると、起動直後や CAN 瞬断中の DM3520 が
+        `_unenergized_motors()` の警告 (`is_energized() is False`) に化ける
+        (EDULITE 05 の `mode_state is None` と対になる契約)。
+        """
+        drv = _driver()
+
+        assert drv.is_energized() is None
+
+        # 1 通でも受ければ (無励磁の DISABLED であっても) 以後は判定できる
+        feed_dm3520(drv, error=int(Dm3520Error.DISABLED))
+        assert drv.is_energized() is False
+
     def test_comm_loss_is_a_fault(self) -> None:
         """ドライバの TIMEOUT が満了して自分で励磁を切った状態。
 
