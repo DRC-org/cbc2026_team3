@@ -219,11 +219,29 @@ class _ContractCheckSequence(Sequence):
         return
 
 
-def _manual_controller(
+def _motor_group(
     mgr: CANManager,
     drivers: dict[str, object],
     target_sinks: dict[str, object],
-) -> ManualController:
+) -> MotorGroup:
+    """指令の出どころ。**本番と同じく 1 つだけ作って全員で共有する。**
+
+    `main._wire_one_robot` はシーケンス・手動・目標値再送へ同じ ``MotorGroup`` を
+    渡す。ここで別々のハンドルを作ると、緊急停止で目標を捨てられる側と `state` の
+    `command` が読む側が別物になり、**golden だけが「停止しても指令が残る」形**を
+    UI へ見せることになる。
+
+    mock_can_manager の motors は MagicMock なので、逆換算に実ドライバを使う
+    (MagicMock の feedback_position() は JSON にできず、配信そのものが落ちる)。
+    M3508 は電流指令しか受け付けないので、目標値は PC 側 PID ループへ迂回させる。
+    """
+    group = MotorGroup()
+    for name, driver in drivers.items():
+        group.add(MotorHandle(name, driver, mgr, target_sink=target_sinks.get(name)))
+    return group
+
+
+def _manual_controller(group: MotorGroup) -> ManualController:
     """手動操縦の軸一覧。**連続操作できる軸とできない軸を両方入れる。**
 
     片方だけだと ``manual`` が null になる形か、値が入る形のどちらかしか
@@ -255,14 +273,6 @@ def _manual_controller(
         },
         source="<ws-contract>",
     )
-    # mock_can_manager の motors は MagicMock なので、逆換算に実ドライバを使う
-    # (MagicMock の feedback_position() は JSON にできず、配信そのものが落ちる)
-    # M3508 は電流指令しか受け付けないので、目標値は PC 側 PID ループへ迂回させる。
-    # 本番 (main.py の _wire_robot_motors) と同じ配線にしないと、golden を作る側だけが
-    # 「y_axis へ位置指令を直接送って失敗する」経路になる
-    group = MotorGroup()
-    for name, driver in drivers.items():
-        group.add(MotorHandle(name, driver, mgr, target_sink=target_sinks.get(name)))
     return ManualController(group, table)
 
 
@@ -276,7 +286,7 @@ def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     }
 
 
-_Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher]
+_Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher, MotorGroup]
 
 
 def _build_fixture() -> _Fixture:
@@ -300,34 +310,40 @@ def _build_fixture() -> _Fixture:
     # 要素構造が golden に現れず、UI 側が形を知る手立てが無くなる。
     # **CANManager に挿したのと同じドライバを使う** —— 別インスタンスを作ると、
     # 手動操縦や再送が触るモータと配信に載るモータが別物になる
-    gripper = generics["gripper"]
-    conveyor = generics["conveyor"]
-    refresher = GenericTargetRefresher([MotorHandle("gripper", gripper, mgr)])
+    group = _motor_group(
+        mgr,
+        {**drivers, "gripper": generics["gripper"], "conveyor": generics["conveyor"]},
+        loop.target_sinks(),
+    )
+    # 自作モタドラ 2 枚を再送対象にする。**緊急停止で目標を捨てるのはこのタスク**なので、
+    # 指令値 (`command`) を持つモータを外すと、停止しても指令が残る構成になる
+    refresher = GenericTargetRefresher([group["gripper"], group["conveyor"]])
+
+    sequence = _ContractSequence()
+    # シーケンスにも同じ群を bind する。`state` の `command` はここから引かれるので、
+    # bind しない golden には「指令値を持つモータ」の形が 1 つも現れない
+    sequence.bind_motors(group)
 
     fx.add_robot(
         _ROBOT,
-        _ContractSequence(),
+        sequence,
         mgr,
         position_loops=[loop],
         sync_monitors=[monitor],
         target_refreshers=[refresher],
-        manual=_manual_controller(
-            mgr,
-            {**drivers, "gripper": gripper, "conveyor": conveyor},
-            loop.target_sinks(),
-        ),
+        manual=_manual_controller(group),
     )
     # 動作確認は両ハンド統合の 1 本で、どのロボットにも属さない
     fx.set_motor_check_sequence(_ContractCheckSequence())
     # 周期配信に割り込まれるとヘルス差分の基準が動く。起動直後の 1 回だけ走らせ、
     # 以降はテストが明示的に呼んだ配信だけを捕まえる
     fx.freeze_broadcast()
-    return fx, loop, monitor, refresher
+    return fx, loop, monitor, refresher, group
 
 
 async def collect_samples() -> dict[str, dict[str, Any]]:
     """実際の RobotServer に配信させたメッセージを型ごとに 1 通ずつ集める。"""
-    fx, loop, monitor, refresher = _build_fixture()
+    fx, loop, monitor, refresher, group = _build_fixture()
     app = fx.create_app()
     samples: dict[str, dict[str, Any]] = {}
 
@@ -348,6 +364,10 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             await fx.command(
                 {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 4.0}
             )
+            # DC 基板へ duty を 1 回出しておく。**実測 4 値がすべて null になる
+            # モータで、指令値だけが入っている形**を golden に載せるため
+            # (これが無いと UI は「測れないモータの唯一の情報」を検証できない)
+            await group["conveyor"].set_target(ControlMode.DUTY, 0.3)
             # 手動モードのまま採る。半自動へ戻すと target が捨てられ、
             # 「手動目標を持っている軸」の形が golden から消える
             await fx.publish_state()

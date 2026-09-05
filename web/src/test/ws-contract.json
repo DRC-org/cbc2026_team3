@@ -223,6 +223,8 @@
       },
       "motors": {
         "conveyor": {
+          "command": 0.3,
+          "command_mode": "duty",
           "pid": null,
           "pos": null,
           "saturated": false,
@@ -232,6 +234,8 @@
           "vel": null
         },
         "gripper": {
+          "command": null,
+          "command_mode": null,
           "pid": null,
           "pos": 5.0,
           "saturated": false,
@@ -241,6 +245,8 @@
           "vel": null
         },
         "y_axis_l": {
+          "command": -220.0,
+          "command_mode": "position",
           "pid": {
             "applies_to": [
               "y_axis_r",
@@ -258,6 +264,8 @@
           "vel": 0.0
         },
         "y_axis_r": {
+          "command": 220.0,
+          "command_mode": "position",
           "pid": {
             "applies_to": [
               "y_axis_r",
@@ -302,7 +310,8 @@
         "target_refreshers": [
           {
             "motors": [
-              "gripper"
+              "gripper",
+              "conveyor"
             ],
             "paused": false,
             "running": true
@@ -463,6 +472,8 @@
       },
       "motors": {
         "conveyor": {
+          "command": 0.3,
+          "command_mode": "duty",
           "pid": null,
           "pos": null,
           "saturated": false,
@@ -472,6 +483,8 @@
           "vel": null
         },
         "gripper": {
+          "command": null,
+          "command_mode": null,
           "pid": null,
           "pos": 5.0,
           "saturated": false,
@@ -481,6 +494,8 @@
           "vel": null
         },
         "y_axis_l": {
+          "command": -220.0,
+          "command_mode": "position",
           "pid": {
             "applies_to": [
               "y_axis_r",
@@ -498,6 +513,8 @@
           "vel": 0.0
         },
         "y_axis_r": {
+          "command": 220.0,
+          "command_mode": "position",
           "pid": {
             "applies_to": [
               "y_axis_r",
@@ -542,7 +559,8 @@
         "target_refreshers": [
           {
             "motors": [
-              "gripper"
+              "gripper",
+              "conveyor"
             ],
             "paused": false,
             "running": true

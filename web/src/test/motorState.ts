@@ -20,6 +20,10 @@ export function motorState(overrides: Partial<MotorState> = {}): MotorState {
     temp: 30,
     pid: null,
     target: null,
+    // 既定は「一度も指令していない」。値を入れると、指令値を出すかどうかを
+    // 見ていないテストにまで `→` 付きの表示が紛れ込む
+    command: null,
+    command_mode: null,
     saturated: false,
     ...overrides,
   };

@@ -76,6 +76,19 @@ export function readMeasured(value: unknown): Measured | Malformed {
   return typeof value === "number" && Number.isFinite(value) ? value : MALFORMED;
 }
 
+/**
+ * 指令値を表示境界で確定させる。`readMeasured` との違いは **未配信 (undefined) を
+ * 異常にしない**ことだけ。
+ *
+ * `command` はテレメトリに後から足された欄なので、これを配らない版のサーバーへ
+ * 繋ぐことが起こりうる。そこを `MALFORMED` へ倒すと、**全モータの POS 欄が
+ * `?` で埋まる** —— 届いていないことと届いたものが読めないことは、操縦者が次に
+ * 取る行動が違う (CLAUDE.md の「未配信は異常にしない」)。型違いだけを異常にする。
+ */
+export function readCommand(value: unknown): Measured | Malformed {
+  return value === undefined ? null : readMeasured(value);
+}
+
 export interface MotorState {
   /**
    * 位置・速度・トルク・温度。**測る手段が無いドライバでは `null`。**
@@ -85,6 +98,28 @@ export interface MotorState {
   vel: Measured;
   torque: Measured;
   temp: Measured;
+  /**
+   * PC が最後にそのモータへ送った目標値。一度も指令していなければ null。
+   *
+   * **指令値であって実出力ではない。** PC は送った値しか知らず、基板が実際に
+   * 何を出しているかは観測できない。両者は少なくとも 4 つの理由で食い違う ——
+   * ファーム側の `max_duty` クランプ (既定 0.30。値はファームの `config.h` が持ち
+   * PC の config には無い) / `everFed_` ゲート (`SET_TARGET` を 1 通も受けるまで
+   * 出力しない) / コマンドウォッチドッグ満了 (500ms 途絶。`cbc-can-watchdog` の
+   * bus-off 復旧でも起きる) / 緊急停止ラッチと基板の再起動。
+   * **基板が止まっていてもここには値が載り続ける。**
+   *
+   * **`target` と混同しないこと。** あちらは M3508 の位置制御ループが刻む
+   * 軌道の中間目標で、こちらは 20Hz で基板へ再送されている値そのもの。
+   */
+  command: Measured;
+  /**
+   * `command` の指令種別 (`position` / `duty` / `on_off` 等)。指令が無ければ null。
+   *
+   * 表示の丸め方と単位はこれだけで決める。**ドライバ種別を UI へ書き写さない**
+   * ための欄で、`command_mode` を見ずにモータ名や基板の種類から推測してはならない。
+   */
+  command_mode: string | null;
   /**
    * 位置目標。null なら PC 側に目標が無い (PID を持たないモータ・停止中・開ループ)。
    *

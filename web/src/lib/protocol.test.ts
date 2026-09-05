@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { readableHealth } from "@/lib/healthVerdict";
-import { MALFORMED, parseServerMessage, readMeasured } from "@/lib/protocol";
+import { MALFORMED, parseServerMessage, readCommand, readMeasured } from "@/lib/protocol";
 import type { RobotState } from "@/lib/protocol";
 
 /**
@@ -598,5 +598,27 @@ describe("readMeasured", () => {
     // NaN / Infinity は toFixed が "NaN" や "Infinity" を描いてしまう
     expect(readMeasured(Number.NaN)).toBe(MALFORMED);
     expect(readMeasured(Number.POSITIVE_INFINITY)).toBe(MALFORMED);
+  });
+});
+
+/**
+ * 指令値の読み取り。`readMeasured` との違いは **未配信を異常にしない**ことだけ。
+ * `command` は後から足された欄なので、配らない版のサーバーへ繋いだだけで
+ * 全モータの POS 欄が `?` で埋まってはならない。
+ */
+describe("readCommand", () => {
+  it("未配信 (undefined) は「指令が無い」へ倒す。MALFORMED にしない", () => {
+    expect(readCommand(undefined)).toBeNull();
+  });
+
+  it("型違いは MALFORMED のまま (未配信と混ぜない)", () => {
+    expect(readCommand("0.3")).toBe(MALFORMED);
+    expect(readCommand(Number.NaN)).toBe(MALFORMED);
+  });
+
+  it("値と null は readMeasured と同じ", () => {
+    expect(readCommand(0.3)).toBe(0.3);
+    expect(readCommand(0)).toBe(0);
+    expect(readCommand(null)).toBeNull();
   });
 });

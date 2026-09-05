@@ -6,11 +6,13 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.can_manager import CANManager
+from lib.control.target_refresh import GenericTargetRefresher
 from lib.drivers.base import ControlMode, MotorState
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, MotorHealth
 from lib.sequence.engine import Sequence, step
+from lib.sequence.motors import MotorGroup, MotorHandle
 from tests.fake_can import mock_can_manager, set_motors
 from tests.fake_health import ok_health_snapshot
 from tests.feedback_frames import feed_generic, feed_m3508
@@ -370,6 +372,9 @@ class TestUnmeasuredTelemetryIsNull:
             "pid": None,
             "target": None,
             "saturated": False,
+            # 指令もまだ出していない (出した後の形は TestCommandValue が見る)
+            "command": None,
+            "command_mode": None,
         }
 
     async def test_servo_board_carries_position_only(self) -> None:
@@ -406,3 +411,101 @@ class TestUnmeasuredTelemetryIsNull:
         assert motors["gripper"]["temp"] is None
         # 実機が 4 値とも測れるモータには擬似値が入る (dry-run の目的そのもの)
         assert motors["y_axis_r"]["temp"] is not None
+
+
+def _command_fixture() -> tuple[ServerFixture, MotorGroup, GenericTargetRefresher]:
+    """指令値を追える最小構成。**本番と同じく `MotorGroup` を 1 つだけ作って共有する。**
+
+    シーケンス・手動・目標値再送が別々のハンドルを持つと、緊急停止で捨てられる
+    目標と画面に出る指令が別物になる (`main._wire_one_robot` は 1 つを共有する)。
+    """
+    fx = ServerFixture.build()
+    mgr = mock_can_manager(["conveyor"], bus_name="can_generic")
+
+    conveyor = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
+    gripper = GenericDriver("gripper", 0x40, control_type=ControlMode.POSITION)
+    set_motors(mgr, {"conveyor": conveyor, "gripper": gripper})
+
+    group = MotorGroup()
+    for driver in (conveyor, gripper):
+        group.add(MotorHandle(driver.name, driver, mgr, is_estop_active=lambda: fx.e_stop_active))
+
+    sequence = DummySequence()
+    sequence.bind_motors(group)
+    # 目標値再送は緊急停止で目標を捨てる側でもある。登録しないと、停止しても
+    # 指令が残り続ける構成 (本番には存在しない) をテストしてしまう
+    refresher = GenericTargetRefresher(list(group.handles))
+    fx.add_robot("main_hand", sequence, mgr, target_refreshers=[refresher])
+    return fx, group, refresher
+
+
+class TestCommandValue:
+    """PC が最後に送った指令値を配ること。
+
+    **フィードバックを持たない基板 (DC・電磁弁) では、これが画面に出せる唯一の
+    「今どうなっているか」である。** 実測 4 値はすべて null になるので、指令まで
+    落とすと画面はそのモータについて何も言えなくなる。
+    """
+
+    async def test_duty_command_appears_with_its_mode(self) -> None:
+        fx, group, _ = _command_fixture()
+        await group["conveyor"].set_target(ControlMode.DUTY, 0.3)
+
+        motor = fx.state_message("main_hand")["motors"]["conveyor"]
+        assert motor["command"] == pytest.approx(0.3)
+        assert motor["command_mode"] == "duty"
+        # 実測値は測れないので null のまま。**指令が実測へ化けてはならない**
+        assert motor["pos"] is None
+
+    async def test_never_commanded_motor_is_null(self) -> None:
+        """起動直後に 0 を出さない。0 は「duty 0 を出している」と読める。"""
+        fx, _group, _ = _command_fixture()
+
+        motor = fx.state_message("main_hand")["motors"]["gripper"]
+        assert motor["command"] is None
+        assert motor["command_mode"] is None
+
+    async def test_e_stop_clears_the_command(self) -> None:
+        """**緊急停止中は指令も消える。**
+
+        停止中に `→0.30` と出ていると、操縦者は「まだコンベアへ 0.3 を出し続けて
+        いる」と読む。実際には停止時に `GenericTargetRefresher.clear_targets()` が
+        ハンドルの目標ごと捨てており (捨てないと解除した瞬間に再送が走って
+        操縦者の操作なしにコンベアが回り出す)、再送は 1 通も出ていない。
+        """
+        fx, group, _ = _command_fixture()
+        await group["conveyor"].set_target(ControlMode.DUTY, 0.3)
+
+        await fx.activate_e_stop(reason="テスト")
+
+        motor = fx.state_message("main_hand")["motors"]["conveyor"]
+        assert motor["command"] is None, "停止中なのに指令が出続けているように見える"
+        assert motor["command_mode"] is None
+
+    async def test_motor_outside_the_group_is_null(self) -> None:
+        """``MotorGroup`` に居ないモータでも配信を落とさない。"""
+        fx, _group, _ = _command_fixture()
+        mgr = fx.can_manager("main_hand")
+        # 電磁弁を 1 枚だけ増設し、MotorGroup へは登録しない
+        spare = GenericDriver("spare_valve", 0x81, control_type=ControlMode.ON_OFF)
+        set_motors(mgr, {**mgr.motors, "spare_valve": spare})
+
+        motor = fx.state_message("main_hand")["motors"]["spare_valve"]
+        assert motor["command"] is None
+        assert motor["command_mode"] is None
+
+    async def test_robot_without_bound_motors_does_not_raise(self) -> None:
+        """位置定数を読めていないロボット (`has_motors` が False) でも配信は続く。
+
+        ここで例外にすると state 配信ごと落ち、そのロボットの画面が全部止まる。
+        """
+        fx = ServerFixture.build()
+        mgr = mock_can_manager(["conveyor"], bus_name="can_generic")
+        set_motors(
+            mgr, {"conveyor": GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)}
+        )
+        fx.add_robot("main_hand", DummySequence(), mgr)
+
+        motor = fx.state_message("main_hand")["motors"]["conveyor"]
+        assert motor["command"] is None
+        assert motor["command_mode"] is None

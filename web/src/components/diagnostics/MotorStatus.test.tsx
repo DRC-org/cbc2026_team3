@@ -104,4 +104,110 @@ describe("MotorStatus", () => {
     expect(pos).toHaveClass("text-error");
     expect(vel).toHaveTextContent("?");
   });
+
+  /**
+   * フィードバックを持たない基板 (DC = duty / 電磁弁 = on_off) は 4 欄すべてが
+   * 「—」になり、何を指令したのかが画面のどこにも無かった。POS 欄にだけ
+   * **PC が最後に送った指令値**を出す。
+   *
+   * **これは実出力ではない。** ファームの `max_duty` クランプ・`everFed_` ゲート・
+   * ウォッチドッグ満了・緊急停止ラッチのどれでも基板の出力は 0 になりうるが、
+   * PC は送った値しか知らないのでここの値は変わらない。
+   */
+  describe("指令値の表示 (フィードバックを持たない基板)", () => {
+    it("DC 基板の duty 指令を POS 欄へ「→」付きで出す (小数 2 桁)", () => {
+      render(
+        <MotorStatus
+          name="conveyor"
+          state={motorState({
+            pos: null,
+            vel: null,
+            torque: null,
+            temp: null,
+            command: 0.3,
+            command_mode: "duty",
+          })}
+        />,
+      );
+
+      // 0.3 と 0.34 が同じに見えないよう 2 桁。残り 3 欄は指令が無いので「—」のまま
+      expect(cells().map((c) => c.textContent)).toEqual(["→0.30", "—", "—", "—"]);
+    });
+
+    it("電磁弁の on_off 指令は数値ではなく ON / OFF", () => {
+      // 基板は 0 か非 0 かしか見ない。0.0 / 1.0 と出すと duty と見分けが付かない
+      const valve = (command: number) =>
+        motorState({
+          pos: null,
+          vel: null,
+          torque: null,
+          temp: null,
+          command,
+          command_mode: "on_off",
+        });
+
+      const { unmount } = render(<MotorStatus name="valve_1" state={valve(1)} />);
+      expect(cells()[0]).toHaveTextContent("→ON");
+      unmount();
+
+      render(<MotorStatus name="valve_1" state={valve(0)} />);
+      expect(cells()[0]).toHaveTextContent("→OFF");
+    });
+
+    it("実測値があるモータには指令値を出さない (同じ欄を実測と指令で読み分けさせない)", () => {
+      render(
+        <MotorStatus
+          name="y_axis_r"
+          state={motorState({ pos: 1500, command: 1500, command_mode: "position" })}
+        />,
+      );
+
+      expect(cells()[0]).toHaveTextContent("1500.0");
+      expect(cells()[0].textContent).not.toContain("→");
+    });
+
+    it("一度も指令していないモータは「—」のまま (0 とも ON とも言わない)", () => {
+      render(
+        <MotorStatus
+          name="conveyor"
+          state={motorState({ pos: null, vel: null, torque: null, temp: null, command: null })}
+        />,
+      );
+
+      expect(cells().map((c) => c.textContent)).toEqual(["—", "—", "—", "—"]);
+    });
+
+    it("指令値であって実出力ではないことを言葉でも出す", () => {
+      // `→` の記号だけでは「送った値」と「基板が出している値」の差までは伝わらない。
+      // 幅 300px の診断カラムに凡例を置く余地が無いのでホバーに載せる
+      render(
+        <MotorStatus
+          name="conveyor"
+          state={motorState({ pos: null, command: 0.3, command_mode: "duty" })}
+        />,
+      );
+
+      expect(cells()[0]).toHaveAttribute(
+        "title",
+        expect.stringContaining("実際の出力ではありません"),
+      );
+    });
+
+    it("指令の欄そのものが未配信なら「—」。異常側へ倒さない", () => {
+      // この欄を配らない版のサーバーへ繋いだだけで全モータの POS が「?」で
+      // 埋まってはならない (届いていないことと読めないことは別)
+      const old = { ...motorState({ pos: null }), command: undefined } as unknown as MotorState;
+      render(<MotorStatus name="conveyor" state={old} />);
+
+      expect(cells()[0]).toHaveTextContent("—");
+    });
+
+    it("指令の欄が型違いなら異常側 (未配信と混ぜない)", () => {
+      const broken = { ...motorState({ pos: null }), command: "0.3" } as unknown as MotorState;
+      render(<MotorStatus name="conveyor" state={broken} />);
+
+      expect(cells()[0]).toHaveTextContent("?");
+      expect(cells()[0]).toHaveClass("text-error");
+    });
+  });
 });

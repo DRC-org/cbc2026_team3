@@ -2,7 +2,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import { motorTempTone } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
-import { MALFORMED, readMeasured } from "@/lib/protocol";
+import { MALFORMED, readCommand, readMeasured } from "@/lib/protocol";
 import type {
   Malformed,
   Measured,
@@ -48,6 +48,33 @@ const UNMEASURED = "—";
 
 /** 読めなかった配信の印。`—` (測れない) と同じ記号にしてはならない */
 const UNREADABLE = "?";
+
+/** 実測値ではなく指令値であることの印。数値の前に置く */
+const COMMAND_MARK = "→";
+
+/**
+ * 指令値であって実出力ではないことを、記号だけに頼らず言葉でも出す。
+ *
+ * 幅 300px の診断カラムに凡例を置く余地は無いので、ホバー (title) に載せる。
+ * **「送った」と「出ている」の差はここでしか説明できない** —— PC は送った値しか
+ * 知らず、ファームの `max_duty` クランプ・`everFed_` ゲート・ウォッチドッグ満了・
+ * 緊急停止ラッチのどれでも実出力は 0 になりうるが、この欄の値は変わらない。
+ */
+const COMMAND_TITLE =
+  "PC が最後に送った指令値です（実際の出力ではありません）。この基板は出力を測る手段を持たないため、緊急停止・ウォッチドッグ満了・ファーム側の上限クランプで基板が出していなくても、ここには値が残ります。";
+
+/**
+ * 指令値 1 つの表示文字列。**丸め方は `command_mode` だけで決める** ——
+ * モータ名や基板の種類から推測すると、ドライバ種別を UI へ書き写すことになる。
+ *
+ * `on_off` は電磁弁の開閉指令で、基板は 0 か非 0 かしか見ない。0.0 / 1.0 と
+ * 数字で出すと duty と見分けが付かないので `ON` / `OFF` と書く。
+ */
+function commandText(value: number, mode: string | null): string {
+  if (mode === "on_off") return value === 0 ? "OFF" : "ON";
+  // duty は 0.30 のような値なので 1 桁では 0.3 と 0.34 が同じに見える
+  return mode === "duty" ? value.toFixed(2) : value.toFixed(1);
+}
 
 /** 4 値の桁位置をモータ間で揃えるためのグリッド。ヘッダーと値行で共有する */
 const STAT_GRID_CLASS = "grid grid-cols-4 gap-1 px-1 text-right";
@@ -108,6 +135,35 @@ function Cell({
   );
 }
 
+/**
+ * POS 欄。**位置を測れるモータでは実測値だけを出す。**
+ *
+ * 実測値がある行に指令値を併記しない —— 同じ事実を 2 度描かない原則もあるが、
+ * それ以上に、この欄が実測なのか指令なのかを行ごとに読み分けさせる形になる。
+ *
+ * 位置を測れないモータ (DC 基板の duty・電磁弁基板の on_off) だけが、代わりに
+ * **PC が最後に送った指令値**を出す。**これは実出力ではない** (`MotorState.command`
+ * の説明を参照)。実測との取り違えを防ぐのが `→` と `title` の 2 つで、記号だけでは
+ * 「送った値」と「出ている値」の差までは伝わらない。
+ */
+function PositionCell({ state }: { state: MotorState }) {
+  const measured = readMeasured(state.pos);
+  if (measured !== null) return <Cell value={measured} />;
+
+  const commanded = readCommand(state.command);
+  // 一度も指令していない / 緊急停止で目標値を捨てた場合は素直に「無い」と出す
+  if (commanded === null || commanded === MALFORMED) return <Cell value={commanded} />;
+
+  // 型は実行時に消えるので、丸め方を決める前に文字列であることを確かめる
+  const mode = typeof state.command_mode === "string" ? state.command_mode : null;
+  return (
+    <span className="truncate font-mono tabular-nums" title={COMMAND_TITLE}>
+      <span className="text-base-content/50">{COMMAND_MARK}</span>
+      {commandText(commanded, mode)}
+    </span>
+  );
+}
+
 export function MotorStatus({
   name,
   state,
@@ -135,7 +191,9 @@ export function MotorStatus({
       </div>
       {/* 見出しは MotorStatHeader が一覧に 1 行だけ出す。同じグリッドを使って桁位置を揃える */}
       <div className={STAT_GRID_CLASS}>
-        <Cell value={readMeasured(state.pos)} />
+        {/* 指令値を出すのは POS 欄だけ。速度も電流も温度も PC は指令していないので、
+            測れない残り 3 欄は常に「—」のまま (埋めると「測ったように見える値」になる) */}
+        <PositionCell state={state} />
         <Cell value={readMeasured(state.vel)} />
         <Cell value={readMeasured(state.torque)} />
         <Cell
