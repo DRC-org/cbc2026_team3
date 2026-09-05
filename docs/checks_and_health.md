@@ -443,6 +443,24 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 **まず励磁状態（`state.safety.unenergized_motors`）を見る**。CAN のフィードバックは
 無励磁でも正常に届くので、鮮度（STALE）からもヘルスからも区別が付かない。
 
+### 「焼き忘れ検出が働いていない」もヘルスに現れない
+
+自作モタドラ（`GenericDriver`）の焼き忘れ検出（`info_mismatch`、§3.4）は `INFO` を
+1 通でも受けて初めて働く。ところが `INFO` は送信バッファの都合だけで 1 通も出ないことが
+ある（`CLAUDE.md` 「送信バッファの本数は 3 枚で違う」節。DC 基板は mailbox が 1 本しか
+無く、1 反復で全 ch ぶんまとめて送るコードでは `INFO` が丸ごと落ちる）。PC 側は `INFO`
+の未受信を FAULT にしない（それが正しい —— 未受信を不一致にすると起動のたびに全サーボが
+FAULT になる）ので、この壊れ方は上の「励磁されていない」と同じ形で **ヘルスにも
+`is_fault()` にも一切現れない**。
+
+そこで `MotorDriver.firmware_confirmed()`（`INFO` を送らないドライバ = M3508 /
+EDULITE 05 / DM3520 は `None`）を `RobotServer._firmware_unconfirmed_motors()` が読み、
+起動から `_FIRMWARE_INFO_GRACE_S`（3 秒。`INFO` は 1Hz なので数秒で埋まるのが正常）を
+過ぎても未受信のモータを `state.safety.firmware_unconfirmed_motors` として配信する。
+診断ツリーには青チップ（`FirmwareUnconfirmedNotice`）で出るだけで、`evaluateHealth` の
+判定（tone）は動かさない —— **これは「壊れている」ではなく「焼き忘れがあっても
+気付けない状態」の報告**であり、機体そのものは正常なことが多い。
+
 ---
 
 ## ② 統合動作確認 — 動くか

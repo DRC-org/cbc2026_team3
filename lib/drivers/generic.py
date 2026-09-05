@@ -348,6 +348,10 @@ class GenericDriver(MotorDriver):
         """最後に受け取った自己申告 (仕様書 §3.4)。1 通も来ていなければ None。"""
         return self._info
 
+    def firmware_confirmed(self) -> bool | None:
+        """`INFO` を一度でも受けたか。基底の docstring 参照。"""
+        return self._info is not None
+
     @property
     def info_mismatch(self) -> str | None:
         """自己申告が config の期待値と食い違っていれば、その理由を返す。

@@ -316,6 +316,7 @@
       "robot": "main_hand",
       "running": false,
       "safety": {
+        "firmware_unconfirmed_motors": [],
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [
@@ -577,6 +578,7 @@
       "robot": "main_hand",
       "running": false,
       "safety": {
+        "firmware_unconfirmed_motors": [],
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [

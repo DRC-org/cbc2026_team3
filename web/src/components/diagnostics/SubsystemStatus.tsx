@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, PackageX, ShieldAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, PackageX, ShieldAlert, ShieldQuestion } from "lucide-react";
 import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
@@ -10,6 +10,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   describeSafetyIssues,
   evaluateHealth,
+  firmwareUnconfirmedMotors,
   readableHealth,
   workpieceRiskBuses,
 } from "@/lib/healthVerdict";
@@ -80,6 +81,36 @@ function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
 }
 
 /**
+ * 起動の猶予を過ぎても `INFO` を一度も受けていない自作モタドラの一覧。平常時 (0 件) は
+ * 何も出さない。
+ *
+ * **「異常」として赤くしない** —— `evaluateHealth` の判定 (`tone`) はここを経由しない。
+ * ここが空でないのは「焼き忘れ検出 (info_mismatch) が今は働いていない」という事実で、
+ * 機体そのものが壊れているとは限らない。
+ */
+function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
+  if (motors.length === 0) return null;
+
+  return (
+    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1">
+      <li className="flex min-w-0 flex-col">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Icon as={ShieldQuestion} className="shrink-0 text-info" />
+          <StatusBadge tone="info">版番号 未確認</StatusBadge>
+          <span className="min-w-0 truncate font-mono text-base-content/80">
+            {motors.join(", ")}
+          </span>
+        </span>
+        {/* 状態だけ出しても操縦者は何が起きたか分からない。何を確かめればよいかまで書く */}
+        <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+          焼き忘れの照合が働いていません。基板の電源・CAN 配線を確認してください
+        </span>
+      </li>
+    </ul>
+  );
+}
+
+/**
  * 安全機構の異常。平常時は 1 件も出ない。
  *
  * ラッチ中の軸は緊急停止を解除しても動かず、保護ループが死んでも WS は繋がったまま
@@ -129,6 +160,7 @@ export function SubsystemStatus({
   // 内訳を並べる部品は「読めなかった」を表現できない。判定 (上) だけがそれを担う
   const readable = readableHealth(health);
   const riskyBuses = workpieceRiskBuses(health);
+  const unconfirmedMotors = firmwareUnconfirmedMotors(safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
   // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
@@ -136,7 +168,14 @@ export function SubsystemStatus({
   // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない。
   // ワーク落下の恐れも同格 —— `verdict.tone` はバスが復旧すれば平常に戻るが、
   // こちらは試合中ずっと自分から主張し続けるべき情報なので、判定 (tone) を
-  // 変えずにここへ OR で足す
+  // 変えずにここへ OR で足す。
+  //
+  // **版番号未確認 (`unconfirmedMotors`) はここに含めない。** `_info` は一度受ければ
+  // 二度と None へ戻らないラッチなので、猶予を過ぎても空でないのは大半が
+  // 「起動直後のわずかな遅れ」ではなく「その基板は焼き忘れ検出そのものが
+  // 効かない」という試合中ずっと変わらない状態になる。ワーク落下のように
+  // 試合中の 1 事象ではなく、しかも操縦者は試合中にこれを直せない —— 畳める
+  // ままにして、開いたときに見える情報として残す (`defaultOpen` の準備中は開く)
   const forcedOpen =
     verdict.tone === "error" || verdict.tone === "warning" || riskyBuses.length > 0;
   const open = !showVerdict || forcedOpen || manualOpen;
@@ -175,6 +214,7 @@ export function SubsystemStatus({
             </p>
           ) : null}
           <WorkpieceRiskNotice buses={riskyBuses} />
+          <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
           <SafetyIssues safety={safety} />
           <HealthIndicator health={readable} />
           {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、

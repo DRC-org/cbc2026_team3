@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeSafetyIssues,
   evaluateHealth,
+  firmwareUnconfirmedMotors,
   motorTempTone,
   summarizeMotors,
   tempThresholdsOf,
@@ -71,6 +72,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    firmware_unconfirmed_motors: [],
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -332,6 +334,33 @@ describe("workpieceRiskBuses", () => {
   });
 });
 
+/**
+ * 起動の猶予を過ぎても `INFO` を一度も受けていない自作モタドラの一覧。
+ * `describeSafetyIssues` には含めない —— 「壊れている」ではなく「確認できていない」
+ * なので、`evaluateHealth` の判定 (tone) を動かしてはならない。
+ */
+describe("firmwareUnconfirmedMotors", () => {
+  it("平常時は返さない", () => {
+    expect(firmwareUnconfirmedMotors(safety({ firmware_unconfirmed_motors: [] }))).toEqual([]);
+  });
+
+  it("未受信のモータをそのまま返す", () => {
+    expect(firmwareUnconfirmedMotors(safety({ firmware_unconfirmed_motors: ["gripper"] }))).toEqual(
+      ["gripper"],
+    );
+  });
+
+  it("未配信・読めない配信は空 (evaluateHealth 側が判定不能を別に報告する)", () => {
+    expect(firmwareUnconfirmedMotors(undefined)).toEqual([]);
+    expect(firmwareUnconfirmedMotors(MALFORMED)).toEqual([]);
+  });
+
+  it("describeSafetyIssues には現れない (tone を動かさない)", () => {
+    const payload = safety({ firmware_unconfirmed_motors: ["gripper"] });
+    expect(describeSafetyIssues(payload)).toEqual([]);
+  });
+});
+
 describe("describeSafetyIssues", () => {
   it("平常時は 1 件も返さない (静かにする)", () => {
     expect(describeSafetyIssues(safety())).toEqual([]);
@@ -442,6 +471,7 @@ describe("describeSafetyIssues", () => {
     it.each([
       "sync_violations",
       "unenergized_motors",
+      "firmware_unconfirmed_motors",
       "loops_running",
       "monitors_running",
       "refreshers_running",

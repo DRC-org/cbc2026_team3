@@ -1091,6 +1091,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 受信の中断を跨いで折り返しを推定しない | `_can_trust_wrap` の窓の上限判定を外す / rpm による見積もりを外す（**2 つは別々のテストが受け持つ**） | `tests/drivers/test_m3508.py::TestWrapInferenceAcrossFeedbackGap::test_長い窓を跨いだ差分は折り返しを推定せず累積しない` / `::test_高速回転なら短い窓でも折り返しを推定しない` |
 | 再アンカーは黙って行われない | `health()` で `detail is not None` を warning 条件から外す（状態が OK のままだと画面はどこにも出さない） | `test_can_manager_health.py::TestReanchorSurfacesInHealth::test_再アンカーしたモータは詳細付きのWARNINGになる` |
 | 無励磁のまま取り残されたモータは画面に出る | `_safety_state` の `unenergized_motors` を空固定にする / `_unenergized_motors` の緊急停止ガードを外す / `is_energized() is False` を `not is_energized()` へ（不明を無励磁へ倒す） | `test_server_e_stop.py::TestUnenergizedMotorsAreVisible` / `web: healthVerdict.test.ts` |
+| `INFO` 未受信で焼き忘れ検出が沈黙していることが画面に出る | `GenericDriver.firmware_confirmed()` を常に `True` へ / `_firmware_unconfirmed_motors` の猶予判定を外す / `is False` を `is not True` へ（`INFO` を送らない M3508 等まで巻き込む）/ dry-run ガードを外す（机上で全モータが恒久的に「未確認」になる） | `tests/drivers/test_generic.py::TestFirmwareConfirmed` / `tests/drivers/test_driver_contract.py::TestFirmwareConfirmedCapability` / `test_server_firmware_confirmed.py` / `web: healthVerdict.test.ts::firmwareUnconfirmedMotors` |
 | bus-off から自動復帰できる設定で立ち上がる | `can_config.DEFAULT_RESTART_MS` を 0 にする | `test_can_config.py::test_restart_ms_defaults_to_a_nonzero_value` |
 | 送信が滞留したバスだけを復旧する | `can_watchdog.sh` の滞留判定から backlog 条件を落とす（平常時のバスを落とす）/ TX packets の比較を落とす（連続送信中のバスを落とす） | `test_can_watchdog.py::TestStallDetection::test_idle_bus_is_never_recovered` / `::test_busy_bus_making_progress_is_not_recovered` |
 | 復旧しないバスで down/up を回し続けない | `can_watchdog.sh` の `recover()` から最短間隔の `return` を外す | `test_can_watchdog.py::TestRecoveryRateLimit::test_repeated_stall_recovers_only_once_within_the_interval` |
@@ -5786,6 +5787,44 @@ enable を 1 通も送らない（CLAUDE.md「このフレームは機構を動�
 **切り分けの教訓**: 「指令しても動かない」ときは、機構側を疑う前に**励磁状態を見る**。
 CAN のフィードバックは無励磁でも正常に届くので、鮮度からもヘルスからも区別が付かない。
 `step` のように「動かない」で説明の付く値が近くにあると、そちらを先に触ってしまう。
+
+### `INFO` を一度も受けていない基板があると焼き忘れ検出が黙って無効になる穴を閉じた（2026-09-06）
+
+CLAUDE.md「送信バッファの本数は 3 枚で違う」節が自ら予告していた穴: DC 基板は
+mailbox が 1 本しか無く、1 反復で全 ch ぶんまとめて送るコードでは `INFO` が
+**1 通も出ない**。PC 側は `INFO` の未受信を照合しない（それが正しい —— 未受信を
+不一致にすると起動のたびに全サーボが FAULT になる）ので、この壊れ方は FAULT に
+ならない。だが同時に、`GenericDriver.info_mismatch` による焼き忘れ検出
+（§3.4）も `INFO` を一度受けて初めて働くため、**未受信の間は焼き忘れがあっても
+気付ける経路そのものが存在しなかった**。ヘルスにも `is_fault()` にも一切出ない点は
+「励磁されていない」（1 つ上の節）と同型の異常である。
+
+**方針は「INFO 未受信を FAULT にする」ではない。** それは正しい既存の判断で、
+やり方を変えると起動直後の一時的な未受信で全サーボが赤くなる。代わりに
+FAULT でも STALE でもない**第 3 の状態**を足した:
+
+- `MotorDriver.firmware_confirmed()`（`lib/drivers/base.py`）—— `is_energized()` と
+  同じ形。既定は `None`（「そもそも `INFO` を送らない」の意味）で、`GenericDriver`
+  だけが `self._info is not None` を返す。M3508 / EDULITE 05 / DM3520 は `INFO` を
+  送らないので `None` のまま —— ここを `False` へ倒すと全モータが常時「未確認」になる
+- `RobotServer._firmware_unconfirmed_motors()`（`lib/server.py`）—— 起動から
+  `_FIRMWARE_INFO_GRACE_S`（3 秒。`INFO` は 1Hz なので数秒で埋まるのが正常。
+  `_ENERGIZE_GRACE_S` と同じ発想だが、緊急停止のたびには置き直さない ——
+  `INFO` は励磁状態と無関係に送られ続けるので、起点はサーバー起動 1 回で足りる）を
+  過ぎても `firmware_confirmed() is False` のモータを拾い、`state.safety` へ
+  `unenergized_motors` と並べて `firmware_unconfirmed_motors` として配信する
+- **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないため、猶予を
+  過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
+  なる（`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由）
+- UI 側 (`web/src/lib/healthVerdict.ts` の `firmwareUnconfirmedMotors`) は
+  `evaluateHealth` の判定 (tone) を経由しない —— `workpieceRiskBuses` と同じ位置付け。
+  **「壊れている」ではなく「確認できていない」なので赤くしない**（`StatusBadge
+  tone="info"`）。開閉の強制も入れていない —— `_info` は一度受ければ二度と `None`
+  へ戻らないラッチなので、猶予を過ぎても空でないのは大半が「起動直後のわずかな
+  遅れ」ではなく「その基板は焼き忘れ検出そのものが効かない」という試合中ずっと
+  変わらない状態になる。ワーク落下（`workpieceRiskBuses`）のような 1 事象ではなく、
+  しかも操縦者は試合中にこれを直せないので、畳めるままにして開いたときに見える
+  情報として残した
 
 ## 未解決の課題
 

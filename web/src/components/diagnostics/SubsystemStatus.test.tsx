@@ -37,6 +37,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    firmware_unconfirmed_motors: [],
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -368,6 +369,63 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
     expect(screen.queryByText(/CAN 途絶/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * `INFO` 未受信の通知 (`FirmwareUnconfirmedNotice`)。
+   *
+   * 「確認できていない」であって「壊れている」ではないので、判定チップ (見出し) も
+   * 開閉 (`forcedOpen`) も動かさない —— `_info` は一度受ければ二度と外れないラッチ
+   * なので、猶予を過ぎても残るのは大半が試合中ずっと変わらない状態であり、
+   * ワーク落下のような 1 事象ではない。開いたときに見える情報として畳める。
+   */
+  it("開いたときだけ INFO 未確認のモータを出す (判定・開閉は動かさない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: ["gripper"] })}
+      />,
+    );
+
+    // 見出しの判定チップは変えない (「異常」ではないため)
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+    // 自分から開かせない (畳んだままにできる)
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
+  });
+
+  it("開けば INFO 未確認のモータが見える", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: ["gripper"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText("版番号 未確認")).toBeInTheDocument();
+    expect(screen.getByText("gripper")).toBeInTheDocument();
+  });
+
+  it("INFO 未確認が 0 件なら開いても何も出さない", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: [] })}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
   });
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {
