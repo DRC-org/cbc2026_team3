@@ -60,6 +60,7 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
     safety: {
       sync_violations: [],
       unenergized_motors: [],
+      firmware_unconfirmed_motors: [],
       loops_running: true,
       monitors_running: true,
       refreshers_running: true,
@@ -272,6 +273,7 @@ describe("RobotControl の診断表示", () => {
         safety: {
           sync_violations: ["rotate"],
           unenergized_motors: [],
+          firmware_unconfirmed_motors: [],
           loops_running: true,
           monitors_running: true,
           refreshers_running: true,

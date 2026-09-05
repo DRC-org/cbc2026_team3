@@ -80,10 +80,13 @@ const STATE_FIELDS_UI_READS = [
   "e_stop_active",
   "health",
   "safety",
-  // 安全機構は 8 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
+  // 安全機構は 9 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
   // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
   "safety.sync_violations",
   "safety.unenergized_motors",
+  // 焼き忘れ検出 (info_mismatch) が沈黙している自作モタドラ。落ちれば診断ツリーの
+  // チップが出せなくなる (`describeSafetyIssues` には乗らないので判定不能には倒れない)
+  "safety.firmware_unconfirmed_motors",
   "safety.loops_running",
   "safety.monitors_running",
   "safety.position_loops",
@@ -419,6 +422,7 @@ const SENSOR_STATE = fieldsOf<SensorState>({
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
+  firmware_unconfirmed_motors: "ui",
   loops_running: "ui",
   monitors_running: "ui",
   refreshers_running: "ui",
