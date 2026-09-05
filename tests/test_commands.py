@@ -100,6 +100,8 @@ class TestRegistryCoverage:
             handler="_cmd_does_not_exist",
             reject_channel=RejectChannel.COMMAND_REJECTED,
             requires_dev_tools=False,
+            blocked_during_manual=False,
+            manual_deny_message=None,
         )
         monkeypatch.setitem(COMMANDS, broken.name, broken)
 
@@ -130,6 +132,13 @@ class TestRegistryCoverage:
             else:
                 assert spec.e_stop_deny_message
 
+    def test_manual_gate_policy_is_declared_for_every_command(self) -> None:
+        for spec in COMMANDS.values():
+            if spec.blocked_during_manual:
+                assert spec.manual_deny_message
+            else:
+                assert spec.manual_deny_message is None
+
 
 class TestSpecValidation:
     def _spec(self, **overrides: object) -> CommandSpec:
@@ -140,6 +149,8 @@ class TestSpecValidation:
             "allowed_during_e_stop": True,
             "e_stop_deny_message": None,
             "requires_dev_tools": False,
+            "blocked_during_manual": False,
+            "manual_deny_message": None,
             "handler": "_cmd_dummy",
             "reject_channel": RejectChannel.COMMAND_REJECTED,
         }
@@ -167,6 +178,14 @@ class TestSpecValidation:
         """空集合は「どのフェーズでも実行できない」= 事実上の死んだコマンド。"""
         with pytest.raises(ValueError):
             self._spec(allowed_phases=frozenset(), phase_deny_message="常に不可")
+
+    def test_manual_gated_command_requires_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(blocked_during_manual=True, manual_deny_message=None)
+
+    def test_manual_ungated_command_must_not_carry_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(manual_deny_message="使われない理由")
 
 
 class TestPhaseGate:
@@ -248,6 +267,44 @@ class TestEStopGate:
         assert e_stop_deny_reason("set_operation_mode") is None
         for command in ("manual_move", "manual_set", "manual_jog"):
             assert e_stop_deny_reason(command) is not None
+
+
+class TestManualModeGate:
+    """手動操縦モード中に塞ぐべきコマンドは、対象ロボットの制御権を奪うもの限り。
+
+    実際に「対象ロボットが今手動モードか」まで掛け合わせた判定は
+    `RobotServer._manual_mode_deny_reason` にある (ロボットごとの `OperationMode` は
+    `CommandSpec` の外、`RobotContext` が持つため)。ここで固定するのは
+    「どのコマンドをゲート対象として宣言したか」という語彙側の事実だけ。
+    """
+
+    def test_blocked_commands(self) -> None:
+        blocked = {name for name, spec in COMMANDS.items() if spec.blocked_during_manual}
+        assert blocked == {"sequence_start", "sequence_jump", "trigger"}
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # 止める側は手動中でも塞がない (退避の逃げ道を残す)
+            "sequence_stop",
+            "e_stop",
+            "e_stop_release",
+            "match_reset",
+            "health_check",
+            # モード切替そのものと手動指令自身は、手動モードゲートの対象外
+            # (指令の可否は ctx.mode が MANUAL でないと拒否する既存の
+            # `_manual_target` が別に持っており、ここで重複させない)
+            "set_operation_mode",
+            "manual_move",
+            "manual_set",
+            "manual_jog",
+            # 動作確認の手動モードとの排他は `_motor_check_environment_deny()` が
+            # 両ロボット横断で持つ (ここで重複させない)
+            "motor_check_start",
+        ],
+    )
+    def test_not_gated_by_manual_mode(self, command: str) -> None:
+        assert COMMANDS[command].blocked_during_manual is False
 
 
 class TestManualCommandsAreNotPhaseGated:

@@ -57,6 +57,13 @@ class CommandSpec:
     #: 開発用フラグ (--dev-tools) を立てた起動でしか受け付けないか。
     #: 試合運用の手順を飛ばすコマンドはここを True にして、本番起動では語彙ごと閉じる
     requires_dev_tools: bool
+    #: 対象ロボット (data["robot"]) が手動操縦モードのとき塞ぐか。
+    #: 手動操縦は制御権をシーケンスから奪う操作で、同時に 2 つは立たない
+    #: (CLAUDE.md)。塞ぐのは「シーケンスの制御権を使う」コマンドだけで、
+    #: モード切替そのもの・停止方向の操作・ロボットを指定しないコマンドは
+    #: 対象外 (False)。True にする側にだけ理由文を書かせる
+    blocked_during_manual: bool
+    manual_deny_message: str | None
     #: RobotServer 側のハンドラメソッド名。ゲートと実行が別々に増えないよう同じ行に置く
     handler: str
     reject_channel: RejectChannel
@@ -76,6 +83,11 @@ class CommandSpec:
         if self.allowed_during_e_stop and self.e_stop_deny_message:
             raise ValueError(f"{self.name}: 緊急停止中も通すのに拒否理由が書かれている")
 
+        if self.blocked_during_manual and not self.manual_deny_message:
+            raise ValueError(f"{self.name}: 手動操縦ゲートに理由文が無い")
+        if not self.blocked_during_manual and self.manual_deny_message:
+            raise ValueError(f"{self.name}: 手動操縦ゲートを掛けないのに拒否理由が書かれている")
+
     def phase_deny_reason(self, phase: Phase) -> str | None:
         """phase で実行できなければ理由を返す。実行できるなら None。"""
         if phase in self.allowed_phases:
@@ -85,6 +97,15 @@ class CommandSpec:
     def e_stop_deny_reason(self) -> str | None:
         """緊急停止中に実行できなければ理由を返す。実行できるなら None。"""
         return None if self.allowed_during_e_stop else self.e_stop_deny_message
+
+    def manual_deny_reason(self) -> str | None:
+        """このコマンドが手動操縦ゲートの対象でなければ None、対象なら理由文を返す。
+
+        実際に塞ぐかどうか (対象ロボットが今手動モードか) の判定は呼び出し側が持つ
+        (`RobotServer` はロボットごとの `OperationMode` を data["robot"] から引く必要が
+        あり、`CommandSpec` はロボット状態を知らない)。
+        """
+        return self.manual_deny_message if self.blocked_during_manual else None
 
     def dev_tools_deny_reason(self, dev_tools_enabled: bool) -> str | None:
         """この起動で実行できなければ理由を返す。実行できるなら None。"""
@@ -101,6 +122,8 @@ def _spec(
     allowed_during_e_stop: bool,
     e_stop_deny_message: str | None = None,
     requires_dev_tools: bool = False,
+    blocked_during_manual: bool = False,
+    manual_deny_message: str | None = None,
     handler: str,
     reject_channel: RejectChannel = RejectChannel.COMMAND_REJECTED,
 ) -> CommandSpec:
@@ -111,6 +134,8 @@ def _spec(
         allowed_during_e_stop=allowed_during_e_stop,
         e_stop_deny_message=e_stop_deny_message,
         requires_dev_tools=requires_dev_tools,
+        blocked_during_manual=blocked_during_manual,
+        manual_deny_message=manual_deny_message,
         handler=handler,
         reject_channel=reject_channel,
     )
@@ -120,6 +145,13 @@ _SPECS: tuple[CommandSpec, ...] = (
     # ------------------------------------------------------------------ #
     #  シーケンス進行 — 試合中のみ、かつ緊急停止中は通さない。
     #  緊急停止中に次のステップが走ると、新しいモータ目標値が停止指令を上書きする。
+    #
+    #  **`blocked_during_manual=True` の 3 つは、対象ロボットが手動操縦モードなら
+    #  塞ぐ。** 手動 (`lib/manual.py`) とシーケンス (`lib/sequence/engine.py`) は
+    #  同じ `AxisHandle.set_target_value` を通るので、手動でジョグ中の軸へ
+    #  シーケンスが別の目標値を書きに来ると衝突する。手動へ入る側の防御
+    #  (`_apply_operation_mode` が `_stop_sequence` で制御権を奪う) は既にあったが、
+    #  逆方向 (手動中に飛んできた `sequence_start` 等を弾く) が無かった。
     # ------------------------------------------------------------------ #
     _spec(
         "sequence_start",
@@ -127,6 +159,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         phase_deny_message="試合中のみシーケンスを開始できます",
         allowed_during_e_stop=False,
         e_stop_deny_message="緊急停止中のためシーケンスを開始できません",
+        blocked_during_manual=True,
+        manual_deny_message="手動操縦中のためシーケンスを開始できません",
         handler="_cmd_sequence_start",
     ),
     _spec(
@@ -135,6 +169,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         phase_deny_message="試合中のみステップ移動できます",
         allowed_during_e_stop=False,
         e_stop_deny_message="緊急停止中のためステップ移動できません",
+        blocked_during_manual=True,
+        manual_deny_message="手動操縦中のためステップ移動できません",
         handler="_cmd_sequence_jump",
     ),
     _spec(
@@ -143,6 +179,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         phase_deny_message="試合中のみトリガーを送れます",
         allowed_during_e_stop=False,
         e_stop_deny_message="緊急停止中のためトリガーを送れません",
+        blocked_during_manual=True,
+        manual_deny_message="手動操縦中のためトリガーを送れません",
         handler="_cmd_trigger",
     ),
     # ------------------------------------------------------------------ #
@@ -151,6 +189,9 @@ _SPECS: tuple[CommandSpec, ...] = (
     #  フェーズにも緊急停止にも依存させない。
     # ------------------------------------------------------------------ #
     _spec(
+        # 手動操縦モード中でも塞がない (`blocked_during_manual` を書かず既定 False
+        # のまま)。実行中のシーケンスは無いはずなので実害は無いうえ、塞ぐと
+        # 「手動中は sequence_stop も送れない」という止める側の操作を減らすだけになる
         "sequence_stop",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=True,
@@ -249,7 +290,10 @@ _SPECS: tuple[CommandSpec, ...] = (
     ),
     _spec(
         # モータを微小駆動するため試合中と緊急停止中は通さない。
-        # HTTP POST 経路は _handle_command を通らないので _start_motor_check 側にも同じ判定がある
+        # HTTP POST 経路は _handle_command を通らないので _start_motor_check 側にも同じ判定がある。
+        # 手動操縦モードとの排他は `blocked_during_manual` ではなくここでは
+        # `_motor_check_environment_deny()` が持つ (両ハンド横断で「どれか 1 台でも
+        # 手動なら拒否」を見る必要があり、単一ロボットの data["robot"] では表せない)
         "motor_check_start",
         allowed_phases=PHASES_OUTSIDE_MATCH,
         phase_deny_message="試合中は動作確認を実行できません",

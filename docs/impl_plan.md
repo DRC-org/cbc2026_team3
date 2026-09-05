@@ -2715,7 +2715,12 @@ Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「�
 受け付ける操作を画面が殺す（`can_start_match` を `StartGate` で導出し直したのと同じ誤り）。
 
 **手動中は `Space` を無効化する。** 誤爆した `Space` が `sequence_start` になると、
-手動で機構を動かしている最中にシーケンスが走り出す。
+手動で機構を動かしている最中にシーケンスが走り出す。**この防御は UI 側の即応性
+（ボタン押下前に弾く）のためであって、唯一の防御ではない。** サーバー側にも
+`CommandSpec.blocked_during_manual`（`lib/commands.py`）で `sequence_start` /
+`sequence_jump` / `trigger` を手動操縦中は拒否するゲートがあり（操縦者 2 名 +
+Monitor が別ブラウザで繋がる以上、正はサーバーが持つ）、UI をバイパスして直接
+WS を叩いた場合や UI の判定漏れに対してもここが最終防御線になる。
 
 **手動中は `SubsystemStatus` を畳まない。** 「操縦者は機体を見ており画面は一瞬しか
 見ない」という前提が、機体を直接動かしている最中には成り立たない。
