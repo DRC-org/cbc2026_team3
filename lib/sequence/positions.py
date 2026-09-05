@@ -795,6 +795,11 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
 
     axes = {name: _parse_axis(name, raw) for name, raw in axes_raw.items()}
 
+    for spec in axes.values():
+        # **positions を持たない軸でも見る。** homing は位置定数ではなく軸の機構的
+        # 性質なので、`positions:` に 1 つも登録が無い軸にも書ける
+        _check_homing_range(source, spec)
+
     positions: dict[str, dict[str, float | dict[str, float]]] = {}
     for axis, values in positions_raw.items():
         if axis not in axes:
@@ -853,6 +858,42 @@ def _check_motion_timeout(
         f"{required:.3f} 秒かかり、timeout_s ({spec.timeout_s}) を必ず超えます "
         f"(timeout_s を {suggested} 以上にするか、max_velocity / max_acceleration を"
         "上げてください)"
+    )
+
+
+def _check_homing_range(source: str, spec: AxisSpec) -> None:
+    """探索距離が可動範囲の全幅を覆っているか検証する。
+
+    `manual` は「この軸を動かしてよい範囲」の唯一の宣言なので、その全幅が
+    そのまま「原点から最も遠い場所」になる。`search_distance` がそれより短いと、
+    **可動範囲の端から始めた探索がセンサへ届く前に上限で打ち切られる** ——
+    症状は「機構もセンサも正常なのに零点確定だけが失敗する」で、しかも原点の
+    近くから始めたときは成功するため、配線や探索方向を疑うことになる。
+
+    実際に踏んだ: `manual` を -2.0〜20.0 から 0.0〜650.0 へ広げたときに
+    `search_distance` が 22.0 のまま取り残され、原点から 22mm より遠い位置で
+    動作確認を始めると必ず失敗する状態になっていた。
+
+    **超過は拒否しない。** 探索はセンサに当たった時点で止まるので、長すぎる上限の
+    実害は「失敗の検出が遅れる」ことに留まる (短すぎる側は正常な機構を失敗させる)。
+
+    `manual` を書かない軸は可動範囲の宣言そのものが無いので、根拠の無い上限を
+    課さずに通す。
+    """
+    homing = spec.homing
+    manual = spec.manual
+    if homing is None or manual is None:
+        return
+
+    span = manual.max_value - manual.min_value
+    if homing.search_distance >= span:
+        return
+
+    raise ValueError(
+        f"{source}: axes.{spec.name}.homing.search_distance ({homing.search_distance}) が "
+        f"axes.{spec.name}.manual の全幅 ({span} = {manual.max_value} - {manual.min_value}) "
+        "より短いため、可動範囲の端から始めた零点確定が原点センサへ届く前に打ち切られます "
+        f"(search_distance を {span} 以上にするか、manual の範囲を実測へ詰めてください)"
     )
 
 

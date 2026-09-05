@@ -4975,6 +4975,42 @@ config にもテストにも痕跡が残らない形だった。
 **残っている誤差**は探索の `step` 粒度（0.5mm）とスイッチ自身の繰り返し精度で、
 実測での確認は機構が付いてから（`docs/mechanism_handoff.md`）。
 
+#### config どうしの「対」を機械的に守る【済】
+
+**片方だけ動かしても起動が通り、症状も出ない設定**が複数ある。ファーム側の
+`kFirmwareVersion` × `expected_firmware` は `tests/test_firmware_version_sync.py` が
+守っていたが、PC 側の config どうしには同じ仕組みが無く、実際に 2 件壊れていた。
+
+**① `homing.search_distance` × `manual` の全幅**（起動時に拒否）
+
+`manual` は「この軸を動かしてよい範囲」の唯一の宣言なので、その全幅がそのまま
+「原点から最も遠い場所」になる。`search_distance` がそれより短いと、可動範囲の端から
+始めた零点確定がセンサへ届く前に打ち切られる。**症状は「機構もセンサも正常なのに
+零点確定だけが失敗する」で、しかも原点の近くから始めたときは成功する**ため、配線や
+探索方向の誤りにしか見えない。
+
+実際に `5aa89c3`（メインハンドの可動域を設定）で `manual` を -2.0〜20.0 から
+0.0〜650.0 へ広げたときに `search_distance` が 22.0 のまま取り残されており、
+原点から 22mm より遠い位置で動作確認を始めると必ず失敗する状態だった。yaml の
+コメントも古い式（`max - min = 20.0 - (-2.0) = 22.0mm`）のまま残っていた。
+
+`_check_homing_range`（`lib/sequence/positions.py`）が起動時に拒否する。同一ファイル内で
+閉じる検証なので、`_check_manual_range` / `_check_motion_timeout` と同じ場所に置く。
+**長い側は拒否しない** —— 探索はセンサに当たった時点で止まるので実害は「失敗の検出が
+遅れる」ことに留まり、短い側（正常な機構を失敗させる）と同じ強さで塞ぐと、実測へ詰める
+途中の安全側の値まで起動を拒否することになる。
+
+**② `motion.velocity_ff` × `pid.kd`**（`tests/test_config_pairs.py`）
+
+こちらは `config/<robot>_positions.yaml` と `config/<robot>.yaml` にまたがるので、
+起動時の検証ではなく同梱 config を突き合わせるテストで守る。`motion` を持たない軸は
+対象外 —— 参照速度そのものが無いので `velocity_ff` に打ち消す相手が居ない
+（`config/bench/y_axis_tuning` は台形プロファイルを外してステップ応答を測るセットなので、
+意図的に `kd`=1.0 / `velocity_ff` なしの状態にある）。
+
+**守れる対はまだ残っている**（`sync_kp` × `sync_limit` は起動時に見ているが、
+`p_max` / `v_max` / `t_max` × 実機レジスタは照合手段が無い）。
+
 #### `run_forever` が `CancelledError` を飲む
 
 `lib/sequence/engine.py` の `run_forever` が `except asyncio.CancelledError: break` で

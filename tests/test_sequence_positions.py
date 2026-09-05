@@ -1007,3 +1007,73 @@ class TestMotionSpec:
         )
 
         assert table.axis("y_axis").motion is not None
+
+
+class TestHomingRange:
+    """探索距離と可動範囲の対 (axes.<軸>.homing.search_distance と axes.<軸>.manual)。
+
+    `manual` は「この軸を動かしてよい範囲」の唯一の宣言なので、その全幅がそのまま
+    「原点から最も遠い場所」になる。`search_distance` がそれより短いと、可動範囲の
+    端から始めた零点確定が原点センサへ届く前に打ち切られる —— **機構もセンサも
+    正常なのに失敗し、しかも原点の近くから始めたときは成功する**ので、症状からは
+    配線や探索方向の誤りにしか見えない。
+
+    実際に踏んだ形: `manual` を -2.0〜20.0 から 0.0〜650.0 へ広げたときに
+    `search_distance` が 22.0 のまま取り残された。
+    """
+
+    @staticmethod
+    def _config(*, search_distance: float, manual: dict | None) -> dict:
+        axis: dict = {
+            "unit": "mm",
+            "command_unit": "deg",
+            "scale": 55.0,
+            "homing": {
+                "sensor": "origin_sensor",
+                "direction": -1,
+                "search_distance": search_distance,
+                "step": 0.5,
+                "settle_s": 0.05,
+            },
+        }
+        if manual is not None:
+            axis["manual"] = manual
+        return {"axes": {"y_axis": axis}, "positions": {"y_axis": {"home": 0.0}}}
+
+    def test_可動範囲の全幅に届かない探索距離は起動を拒否する(self) -> None:
+        config = self._config(search_distance=22.0, manual={"min": 0.0, "max": 650.0})
+
+        with pytest.raises(ValueError, match="search_distance"):
+            load_position_table(config, source="<test>")
+
+    def test_全幅ちょうどは通る(self) -> None:
+        """「上端から始めても下端までは必ず届く」の境界そのもの。"""
+        config = self._config(search_distance=650.0, manual={"min": 0.0, "max": 650.0})
+
+        table = load_position_table(config, source="<test>")
+
+        assert table.axis("y_axis").homing is not None
+
+    def test_全幅より長い探索距離は拒否しない(self) -> None:
+        """探索はセンサに当たった時点で止まるので、実害は失敗の検出が遅れることだけ。
+
+        短い側 (正常な機構を失敗させる) と同じ強さで塞ぐと、実測へ詰める途中の
+        安全側の値まで起動を拒否することになる。
+        """
+        config = self._config(search_distance=700.0, manual={"min": 0.0, "max": 650.0})
+
+        assert load_position_table(config, source="<test>").axis("y_axis").homing is not None
+
+    def test_manual_を書かない軸は可動範囲の宣言が無いので通る(self) -> None:
+        """根拠の無い上限を課さない。"""
+        config = self._config(search_distance=1.0, manual=None)
+
+        assert load_position_table(config, source="<test>").axis("y_axis").homing is not None
+
+    def test_positions_を持たない軸でも見る(self) -> None:
+        """homing は位置定数ではなく軸の機構的性質なので、登録が無い軸にも書ける。"""
+        config = self._config(search_distance=22.0, manual={"min": 0.0, "max": 650.0})
+        config["positions"] = {}
+
+        with pytest.raises(ValueError, match="search_distance"):
+            load_position_table(config, source="<test>")
