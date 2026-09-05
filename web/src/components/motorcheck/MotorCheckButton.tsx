@@ -14,8 +14,13 @@ import { motorCheckStatus } from "@/lib/motorCheckStatus";
  * 可否の判定はサーバー (`_motor_check_deny_reason`) が唯一の持ち主で、ここは
  * 理由を表示するだけ。フェーズや緊急停止から導出し直すと、サーバーが受け付ける
  * 操作を画面が殺す状態が生まれる (かつて `StartGate` で作った失敗と同じ形)。
+ *
+ * **起動前の確認だけはダイアログのまま。** 押した瞬間に両ハンドの全アクチュエータが
+ * 動き出すので、周囲の安全確認を促す文面を出す場所が要る。進捗パネルと違って機体が
+ * 動く前に閉じるため、EMG STOP を覆っている時間は駆動と重ならない
+ * (`MotorCheckPanel` をモーダルにしてはならない理由はそちらの docstring にある)。
  */
-export function MotorCheckButton({ onPanelOpen }: { onPanelOpen?: () => void }) {
+export function MotorCheckButton() {
   const { connected } = useRobotStatus();
   const { state, start } = useMotorCheck();
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -28,7 +33,6 @@ export function MotorCheckButton({ onPanelOpen }: { onPanelOpen?: () => void }) 
   const handleConfirmStart = () => {
     start();
     setConfirmOpen(false);
-    onPanelOpen?.();
   };
 
   return (

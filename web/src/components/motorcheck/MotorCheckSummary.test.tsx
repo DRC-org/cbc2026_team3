@@ -17,13 +17,12 @@ describe("MotorCheckSummary", () => {
     expect(screen.getByText("未実行")).toBeInTheDocument();
   });
 
-  it("実行中は進み具合を出す", () => {
-    // 指差喚呼で「アクチュエータ動作確認 完了」にチェックする前の判断材料。
-    // モーダルを開かずにここで読み切れるようにする
+  it("実行中は実行中と出す", () => {
     mount({ running: true, step_index: 4, total_steps: 12 });
 
     expect(screen.getByText("実行中")).toBeInTheDocument();
-    expect(screen.getByText("4 / 12")).toBeInTheDocument();
+    // 進み具合は同じ区分の `MotorCheckPanel` が出す。数行のあいだに 2 度並べない
+    expect(screen.queryByText("4 / 12")).not.toBeInTheDocument();
   });
 
   it("最後まで進んだら完了と出す", () => {
@@ -31,11 +30,13 @@ describe("MotorCheckSummary", () => {
     expect(screen.getByText("完了")).toBeInTheDocument();
   });
 
-  it("途中で降りたら未完了として理由まで出す", () => {
+  it("途中で降りたら未完了と出す", () => {
     // 「完了」と紛らわしい表示にしないこと。チェックを付ける根拠が変わる
     mount({ running: false, step_index: 5, total_steps: 12, error: "動作確認を中断しました" });
 
     expect(screen.getByText("未完了")).toBeInTheDocument();
-    expect(screen.getByText("動作確認を中断しました")).toBeInTheDocument();
+    // 理由の全文は同じ区分の `MotorCheckPanel` が出す (そちらは失敗時に自分から開く)。
+    // ここにも置くと、同じ理由が truncate 版と並んで 2 度読まれる
+    expect(screen.queryByText("動作確認を中断しました")).not.toBeInTheDocument();
   });
 });

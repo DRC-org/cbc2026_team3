@@ -4,11 +4,15 @@ import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { motorCheckStatus } from "@/lib/motorCheckStatus";
 
 /**
- * 統合動作確認の状態を 1 行で出す。
+ * 統合動作確認の状態を区分見出しに 1 語で出す。
  *
- * 指差喚呼には「アクチュエータ動作確認 完了」の項目がある。結果を知るために
- * 毎回モーダルを開かせるのは、チェックを付ける前の確認としては手数が多い。
- * 進み具合だけならここで読み切れる。
+ * 指差喚呼には「アクチュエータ動作確認 完了」の項目がある。チェックを付ける前に
+ * 「そもそも完走したのか」だけは、項目の隣で読み切れる必要がある。
+ *
+ * **状態しか出さない。** 進み具合 (何 / 何) と失敗理由は同じ区分の中で
+ * `MotorCheckPanel` が出す —— かつてパネルがモーダルだった頃はここが唯一の
+ * 常時表示だったので進捗も理由も持っていたが、インライン化した今は同じ事実が
+ * 数行のあいだに 2 度並ぶ (しかも片方は truncate された半端な理由になる)。
  *
  * 判定は `lib/motorCheckStatus.ts` が持つ。こことパネルで別々に判定していた頃は、
  * 同じ瞬間にパネルが「完了」、ここが「未実行」を出していた。
@@ -16,26 +20,14 @@ import { motorCheckStatus } from "@/lib/motorCheckStatus";
 export function MotorCheckSummary() {
   const { connected } = useRobotStatus();
   const { state } = useMotorCheck();
-  const { outcome, failureReason } = motorCheckStatus(state, connected);
+  const { outcome } = motorCheckStatus(state, connected);
 
   if (outcome === "running") {
-    return (
-      <span className="flex min-w-0 items-center gap-2">
-        <StatusBadge tone="info">実行中</StatusBadge>
-        <span className="font-mono text-base-content/70 tabular-nums">
-          {state.step_index} / {state.total_steps}
-        </span>
-      </span>
-    );
+    return <StatusBadge tone="info">実行中</StatusBadge>;
   }
 
   if (outcome === "failed") {
-    return (
-      <span className="flex min-w-0 items-center gap-2">
-        <StatusBadge tone="warning">未完了</StatusBadge>
-        <span className="min-w-0 truncate text-base-content/70">{failureReason}</span>
-      </span>
-    );
+    return <StatusBadge tone="warning">未完了</StatusBadge>;
   }
 
   if (outcome === "done") {
