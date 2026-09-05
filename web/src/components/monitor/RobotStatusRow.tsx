@@ -102,6 +102,7 @@ export function RobotStatusRow({
           health={state.health}
           motors={state.motors}
           safety={state.safety}
+          sensors={state.sensors}
           connected={connected}
           tempThresholds={tempThresholds}
           defaultOpen

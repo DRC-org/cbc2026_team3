@@ -60,6 +60,7 @@ export function Dashboard() {
                         health={robot.health}
                         motors={robot.motors}
                         safety={robot.safety}
+                        sensors={robot.sensors}
                         connected={connected}
                         tempThresholds={tempThresholds}
                         showVerdict={false}

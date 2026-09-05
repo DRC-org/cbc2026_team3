@@ -19,7 +19,8 @@
    指令が実位置を追い越して先行し続けることが構造的に起こらず、機構が引っかかった
    ときも 1 step ぶんの偏差しか掛からない
 5. **離脱の歩数上限** (`_RELEASE_STEP_LIMIT`) — 触れた状態から始めたときに
-   一度センサの外まで離れるが、その離脱にも上限が要る。接点が固着したセンサは
+   一度センサの外まで離れるが、その離脱にも上限が要る。接点の固着と**極性の
+   取り違え** (ファーム側 `sensorActiveLow` の設定ミス) はどちらも
    「いつまでも OFF にならない」形でしか現れない。**探索距離を流用してはならない**
    (あちらは実ストローク相当まで伸びる値なので、反対側の機構端まで走り抜ける)
 6. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
@@ -84,7 +85,12 @@ SensorActive = Callable[[str], bool]
 SensorStale = Callable[[str], bool]
 MotorStale = Callable[[str], bool]
 OriginCapturable = Callable[[str], bool]
-CaptureOrigin = Callable[[str], None]
+#: 原点の確定は CAN の往復を伴いうる (EDULITE 05 は無励磁 → SET_ZERO → 再励磁の
+#: 3 段で、途中に応答待ちが入る) ため非同期。**可否を問う `OriginCapturable` は
+#: 同期のまま**にしておくこと —— 探索を始める前に 1 度だけ問う判定であり、
+#: 非同期にすると「押し込んでから確定できませんで降りる」経路を塞いでいる
+#: 事前確認が、待ちを挟む重い操作に見えてしまう。
+CaptureOrigin = Callable[[str], Awaitable[None]]
 SleepFunc = Callable[[float], Awaitable[None]]
 
 
@@ -114,7 +120,8 @@ class HomingRunner:
                 信じて全ストローク動く」という、この修正が消したはずの経路が戻る
             origin_capturable: 軸名 → 原点を確定できるか。探索の前に問う
             capture_origin: 軸名 → その軸の現在位置を原点として確定する
-                (左右ペアはグループ全員へ展開されること)
+                (左右ペアはグループ全員へ展開されること)。CAN の往復を挟む
+                実装があるので非同期
             sleep: 1 ステップごとの待ち (テストで差し替える)
         """
         self._sensor_active = sensor_active
@@ -172,7 +179,9 @@ class HomingRunner:
                 limit_message=(
                     f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
                     f" ({homing.step * _RELEASE_STEP_LIMIT}{spec.unit} 動かしても OFF に"
-                    " ならない)。センサの固着・配線の短絡を確認してください"
+                    " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
+                    " なるので、ファーム側の極性設定 (sensorActiveLow) を"
+                    "接点の固着・配線の短絡と併せて確認してください"
                 ),
             )
 
@@ -193,7 +202,7 @@ class HomingRunner:
 
         travelled = abs(observed - origin)
         logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
-        self._capture_origin(spec.name)
+        await self._capture_origin(spec.name)
         return travelled
 
     async def _seek(

@@ -1664,6 +1664,16 @@ cbc2026_team3/
       "command": 0.3, "command_mode": "duty"
     }
   },
+  // 自作基板のセンサ入力（原点スイッチ）。**motors とは別に運ぶ** ——
+  // `config/<robot>.yaml` の `sensors:` と同じ分け方で、モータ一覧に
+  // 「常に 0 のモータ」を並べないため。センサ名は素通し（UI へ書き写さない）
+  "sensors": {
+    // active は接触しているか。**接触は異常ではない**ので情報として配る。
+    // 接触を報告する手段が無いドライバでは null（false と混ぜない）
+    // stale はフィードバック鮮度で、境界は health.feedback_timeout_ms が唯一の正
+    "origin_sensor": { "active": true, "stale": false },
+    "rotate_origin_sensor": { "active": false, "stale": true }
+  },
   "e_stop_active": false,
   "health": { /* HealthSnapshot */ },
   "safety": {
@@ -1690,6 +1700,20 @@ cbc2026_team3/
 常時無効になり、STOP 直後にも効かず「止まっているのに RUNNING」を出し続けた。
 受け手側の判定も `web/src/lib/sequenceStatus.ts`（`sequenceKind` / `isSequenceComplete`）に
 一本化してあり、画面ごとにラベルと配色だけを変える。
+
+`sensors` は自作基板のセンサスロット（原点スイッチ）の接触状態。**これが無い間、
+`config/checklist.yaml` の `origin_sensor_react`（原点センサ 2 本に 1 本ずつ触れて反応を
+確認する）は確認する手段が画面に無いまま項目だけが存在していた** —— 操縦者は `candump` を
+打たない限り反応を確かめられない。しかも**未配線・極性違いのセンサは STALE にならない**:
+基板は役割が `TouchSensor` なら配線の有無に関わらず `FEEDBACK` を送り、`INPUT_PULLUP` の
+負論理で「接触なし」を報告し続けるので、ヘルスも UI も平常のまま、押してみる以外に検出
+手段が無い。零点確定は「当たるまで動かす」動作なので、事前に目で確かめられることに意味が
+ある。**接触は異常ではない**（`GenericDriver.sensor_active` / ドライバの `is_fault()` に
+入れてはならない、と同じ判断）ので UI も警告色を使わず、異常として描くのは `stale` の方
+だけにする。組み立ては `RobotServer._sensor_states`、鮮度は `FeedbackFreshness` に
+`HealthThresholds.feedback_timeout_ms` を渡した 1 つの判定だけを使う（サーバーにも UI にも
+別の既定値を置かない）。UI は `web/src/components/diagnostics/SensorSummary.tsx` が
+`SubsystemStatus` の配下で描き、**モータ一覧には混ぜない**。
 
 `safety` は安全機構そのものの状態を運ぶ。`sync_violations` はラッチ中の軸名
 （位置制御ループと `SyncMonitor` の和集合）で、どの軸が電流 0 に固定されているかを

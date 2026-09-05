@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.sequence.homing import HomingError, HomingRunner
+from lib.sequence.homing import _STALL_LIMIT, HomingError, HomingRunner
 from lib.sequence.motors import AxisHandle, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
@@ -104,7 +104,8 @@ class _Recorder:
     def origin_capturable(self, _axis: str) -> bool:
         return self._capturable
 
-    def capture_origin(self, axis: str) -> None:
+    async def capture_origin(self, axis: str) -> None:
+        """原点確定は非同期。CAN の往復 (EDULITE 05 の SET_ZERO) を挟む実装がある。"""
         self.origins.append(axis)
         if self.drivers:
             self.captured_at.append(self.axis_position())
@@ -392,6 +393,35 @@ class TestReleasesBeforeSeeking:
             await _runner(rec).home(spec, _handle(spec, rec))
 
         assert rec.origins == []
+
+    async def test_離脱が進まなくなったら降りる(self) -> None:
+        """逆向きの機構端に当たると、離脱は「動かないのに OFF にならない」形になる。
+
+        歩数上限だけでは `step * 20` ぶん押し当て続けてから降りることになるので、
+        停滞判定 (探索と共有する `_seek` の 1 本) が離脱にも効いている必要がある。
+        """
+        table = _table(step=1.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_after=0)  # 最初の観測から常に ON
+
+        with pytest.raises(HomingError, match="動きません"):
+            # 引っかかって 1mm も動かない機構 (離脱の向きの機構端に当たった状態)
+            await _runner(rec).home(spec, _handle(spec, rec, follows=False))
+
+        # 停滞判定 (3 歩) で降りる。歩数上限 (20 歩) まで押し当て続けない
+        assert len(rec.commands) <= _STALL_LIMIT + 1
+        assert rec.origins == []
+
+    async def test_極性の取り違えを疑わせる(self) -> None:
+        """**極性が逆だとどこへ動かしても ON のまま**になる。実際に起こりうる
+        設定ミスなので、接点の固着だけを疑わせるメッセージでは切り分けられない。
+        """
+        table = _table(step=1.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_after=0)
+
+        with pytest.raises(HomingError, match="sensorActiveLow"):
+            await _runner(rec).home(spec, _handle(spec, rec))
 
     async def test_離脱の上限は探索距離を使わない(self) -> None:
         """流用すると、実ストロークまで伸びた探索距離ぶん反対端へ走り抜ける。"""

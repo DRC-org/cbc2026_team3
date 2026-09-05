@@ -80,3 +80,60 @@ class TestAbstractSurfaceIsProtocolOnly:
     def test_protocol_only_driver_can_be_instantiated(self) -> None:
         driver = _ProtocolOnlyDriver("x", 1)
         assert driver.name == "x"
+
+
+class TestOriginCaptureCapability:
+    """「`SET_ZERO` で原点を切り直せるか」はドライバ自身が宣言する。
+
+    `main.py` や UI にドライバ種別を書き写して導出し直すと、ドライバを足した人が
+    そちらの表を直し忘れる (`TelemetrySupport` と同じ方針)。
+    """
+
+    def test_既定は手段なし(self) -> None:
+        driver = _ProtocolOnlyDriver("x", 1)
+        assert driver.supports_origin_capture() is False
+        assert driver.deactivation_steps() == []
+        assert driver.origin_capture_steps() == []
+
+    def test_edulite_は切り直せる(self) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+        assert driver.supports_origin_capture() is True
+
+    def test_edulite_は無励磁にしてから切り直す(self) -> None:
+        """励磁したまま送るとドライバ内部の位置目標が旧座標のまま残り、軸が飛ぶ。"""
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+
+        ((disable, _delay),) = driver.deactivation_steps()
+        ((set_zero, _zero_delay),) = driver.origin_capture_steps()
+
+        assert Edulite05Driver.parse_can_id(disable.arbitration_id)[0] == (
+            Edulite05Driver.COMM_TYPE_DISABLE
+        )
+        assert Edulite05Driver.parse_can_id(set_zero.arbitration_id)[0] == (
+            Edulite05Driver.COMM_TYPE_SET_ZERO
+        )
+
+    def test_dm3520_は対象外(self) -> None:
+        """`SET_ZERO` の安全な順序は disable を要求するが、`sub_lift` は disable
+        すると自重で落ちる (減速比 19.2 のギヤに乗っているだけで保持ブレーキが無い)。
+        """
+        driver = Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11)
+        assert driver.supports_origin_capture() is False
+
+    def test_generic_は対象外(self) -> None:
+        assert GenericDriver("servo", can_id=0x41).supports_origin_capture() is False
+
+    def test_m3508_は対象外(self) -> None:
+        """累積角の原点は PC 側 (`M3508PositionLoop`) が持つ。CAN で送る原点は無い。"""
+        assert M3508Driver("y_axis_r", can_id=1).supports_origin_capture() is False
+
+    def test_切り直すフレームだけでは名乗れない(self) -> None:
+        """無励磁にする手段が無いまま能力ありと名乗ると、**励磁したまま原点を
+        動かす経路が黙って通る。**
+        """
+
+        class _HalfDeclared(_ProtocolOnlyDriver):
+            def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
+                return [(can.Message(arbitration_id=1, data=bytes(8)), 0.0)]
+
+        assert _HalfDeclared("x", 1).supports_origin_capture() is False

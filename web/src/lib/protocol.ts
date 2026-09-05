@@ -638,6 +638,44 @@ export interface ManualState {
   axes: ManualAxis[];
 }
 
+/**
+ * 自作基板のセンサ入力 (原点スイッチ) 1 個の状態。
+ *
+ * **接触 (`active`) は異常ではない。** 原点合わせは「触れさせる」操作なので、
+ * サーバー側もドライバの異常判定 (`is_fault()`) には入れていない。異常なのは
+ * `stale` の方で、こちらはフィードバックが途絶していることを表す。
+ *
+ * `active` の `null` は「接触を報告する手段が無いドライバ」で、`—` を描く
+ * (`Measured` の `null` と同じ扱い。`false` = 触れていない と混ぜてはならない)。
+ */
+export interface SensorState {
+  active: boolean | null;
+  stale: boolean;
+}
+
+function isSensorState(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  if (typeof value.stale !== "boolean") return false;
+  return value.active === null || typeof value.active === "boolean";
+}
+
+/**
+ * センサ一覧を受信境界で確定させる。未配信 (センサを配らない版のサーバー) は undefined。
+ *
+ * **`?? {}` で埋めてはならない。** 埋めると「センサが 1 本も繋がっていない構成」と
+ * 見分けが付かなくなり、原点スイッチの反応を確かめる導線 (`origin_sensor_react` の
+ * 指差喚呼) が画面から消えたことすら読めない。
+ *
+ * **センサ名は検査しない。** モータ名と同じく、増減で UI 側の変更が要らない性質は
+ * 配信をそのまま持つことで成立している。見るのは値の形だけ。
+ */
+export function parseSensors(raw: unknown): Record<string, SensorState> | Malformed | undefined {
+  if (raw === undefined) return undefined;
+  if (!isObject(raw)) return MALFORMED;
+  if (!Object.values(raw).every(isSensorState)) return MALFORMED;
+  return raw as Record<string, SensorState>;
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -657,6 +695,14 @@ export interface RobotState {
    */
   running?: boolean;
   motors: Record<string, MotorState>;
+  /**
+   * 自作基板のセンサ入力 (原点スイッチ)。受信境界の `parseSensors` が形を確定させる
+   * ので、読めなかった配信は `MALFORMED` としてここに載る。未配信は undefined。
+   *
+   * **`motors` とは別に持つ。** サーバーも `sensors:` を別セクションに分けており
+   * (モータ一覧に「常に 0 のモータ」を並べないため)、UI 側で混ぜるとその判断が消える。
+   */
+  sensors?: Record<string, SensorState> | Malformed;
   e_stop_active?: boolean;
   /**
    * ヘルス。受信境界の `parseHealth` が形を確定させるので、読めなかった配信は
@@ -911,6 +957,10 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (safety !== undefined) state.safety = safety;
       const health = parseHealth(raw.health);
       if (health !== undefined) state.health = health;
+      // センサも `Object.entries` を直に呼ばれるので形を確定させる。素通しだと
+      // 配信が 1 欄崩れただけでレンダー本体から TypeError が飛ぶ
+      const sensors = parseSensors(raw.sensors);
+      if (sensors !== undefined) state.sensors = sensors;
       // 型だけ足して受信条件を書かないと「型は合っているのに画面に出ない」になる
       state.last_error = parseSequenceFailure(raw.last_error);
       return { type: "state", robot, state };

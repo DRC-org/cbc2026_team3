@@ -24,6 +24,7 @@ from lib.config_schema import (
     MatchSettings,
     TuningSettings,
 )
+from lib.control.feedback import FeedbackFreshness
 from lib.control.position_loop import (
     MAX_TUNABLE_GAIN,
     TUNABLE_PID_KEYS,
@@ -1771,11 +1772,58 @@ class RobotServer:
             # (画面は「待機中 — START で開始」と描くだけになる)。平常時は null
             "last_error": progress["last_error"],
             "motors": motors,
+            "sensors": self._sensor_states(robot_name),
             "e_stop_active": self.e_stop_active,
             "health": snapshot_dict,
             "safety": self._safety_state(robot_name),
             "manual": self._manual_state(robot_name),
         }
+
+    def _sensor_states(self, robot_name: str) -> dict[str, dict]:
+        """自作基板のセンサ入力 (原点スイッチ) の接触状態。
+
+        **接触は異常ではない** (`GenericDriver.sensor_active`) ので、`active` は
+        情報として配る。異常なのは `stale` の方で、ヘルス判定 (`CANManager.health`)
+        は同じ鮮度でセンサを STALE に倒している。
+
+        配る理由は 3 つ:
+
+        1. `config/checklist.yaml` の `origin_sensor_react` (原点センサに 1 本ずつ
+           触れて反応を確認する) は、確認する手段が画面に無いまま項目だけがあった。
+           操縦者は `candump` を打たない限り反応を確かめられない
+        2. **未配線・極性違いのセンサは STALE にならない。** 基板は役割が
+           TouchSensor なら配線の有無に関わらず FEEDBACK を送り、`INPUT_PULLUP` の
+           負論理で「接触なし」を報告し続けるので、ヘルスも平常のままになる。
+           押してみる以外に検出手段が無い
+        3. 零点確定は「当たるまで動かす」動作 (`lib/sequence/homing.py`) なので、
+           センサが死んでいると探索距離いっぱいまで機構を押し込む
+
+        鮮度のしきい値は `HealthThresholds` から来た 1 つだけを使う。ここに別の
+        既定値を置くと、config を直しても画面の判定だけが古い境界のまま残る。
+        """
+        ctx = self._robots[robot_name]
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        # 1 周期に 1 回だけ取る。センサごとに取り直すと、同じ配信の中で別々の
+        # 瞬間を基準にした鮮度が並ぶ
+        now = freshness.now()
+
+        sensors: dict[str, dict] = {}
+        for sensor_name, sensor in ctx.can_manager.sensors.items():
+            if self._dry_run:
+                sensors[sensor_name] = server_dryrun.sensor_state(robot_name, sensor_name)
+                continue
+            sensors[sensor_name] = {
+                # 接触を報告できるのは自作基板のセンサスロットだけ (仕様書 §5.2)。
+                # config の `sensors:` は driver を選べないので実機では必ず該当するが、
+                # **報告する手段を持たないドライバを False で埋めてはならない** ——
+                # 「触れていない」と区別が付かなくなる (`_measured_only` と同じ扱いで
+                # null へ倒し、UI には「—」を描かせる)
+                "active": sensor.sensor_active if isinstance(sensor, GenericDriver) else None,
+                "stale": freshness.is_stale(sensor_name, now),
+            }
+        return sensors
 
     def _manual_state(self, robot_name: str) -> dict:
         """操作モードと手動操縦の軸一覧。

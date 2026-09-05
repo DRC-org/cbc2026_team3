@@ -354,6 +354,30 @@ OR で、どちらか一方でも引っ掛かれば推定をやめる:
 報告はどの画面にも現れない（「報告した」つもりの黙殺が成立する）。信頼を戻す経路は
 原点の確定（`reset_multi_turn_origin`）だけで、受信の復帰では戻らない。
 
+### センサの接触は「異常」ではなく「情報」として配る
+
+自作基板のセンサスロット（原点スイッチ）は `state.sensors` に
+`{ "<センサ名>": { "active": bool|null, "stale": bool } }` として載る
+（`RobotServer._sensor_states`）。UI は `SubsystemStatus` の配下の `SensorSummary` が
+描き、**モータ一覧には混ぜない**（サーバーが `sensors:` を `motors:` と分けているのと
+同じ理由 —— モータ一覧に「常に 0 のモータ」が並ぶ）。
+
+- **接触に警告色を使わない。** 原点合わせは「触れさせる」操作なので、接触は平常の
+  情報である。ドライバの `is_fault()` に入れてはならないのと同じ判断
+  （`tests/drivers/test_generic.py::TestSensorInput::test_contact_is_not_an_abnormality`）
+- **異常なのは `stale` の方。** 鮮度の境界は `HealthThresholds.feedback_timeout_ms`
+  ただ 1 つで、サーバーにも UI にも別の既定値を置かない。`CANManager.health()` も
+  同じ鮮度でセンサを STALE に倒しているので、**件数の集計はそちらが持つ**
+  （UI 側で 2 つ目の判定を作らない）
+- `active` の `null` は「接触を報告する手段が無いドライバ」で、`false`（触れていない）
+  と混ぜない。`—` を描く
+
+**これは①が答えられる範囲を広げただけで、④の `origin_sensor_react` は要る。**
+未配線・極性違いのセンサは STALE にならない —— 基板は役割が `TouchSensor` なら配線の
+有無に関わらず `FEEDBACK` を送り、`INPUT_PULLUP` の負論理で「接触なし」を報告し続ける。
+**触れてみる以外に検出手段が無い。** 変わったのは「触れた結果を画面で読めるように
+なった」ことで、それまでは `candump` を打つしかなかった。
+
 ### 「励磁されていない」はヘルスに現れない
 
 DM3520 は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの通信途絶保護や
@@ -623,7 +647,7 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 | `pumps_run` | 同上（ポンプも DC 基板） |
 | `valves_closed` / `valves_actuate` | 電磁弁基板は弁が開いたかを観測できない |
 | `suction_hold` / `suction_release` | 吸着の成否を測るセンサが無い |
-| `origin_sensor_react` | センサが死んでいても「いつまでも当たらない」としか出ない |
+| `origin_sensor_react` | 未配線・極性違いのセンサは STALE にならず「接触なし」を報告し続ける（触れてみる以外に検出手段が無い）。触れた結果は `state.sensors` として画面に出る |
 | `firmware_match` | 版の不一致は CAN 越しには「応答しない」としか見えない |
 
 **②から外れたものが④で埋まっていることは `tests/test_robot_sequences.py` が固定する。**

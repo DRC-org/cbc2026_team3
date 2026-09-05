@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from lib.axis_sync import SyncGroup
@@ -88,6 +89,9 @@ class SyncMonitor(PeriodicTask):
 
         self._counts: dict[str, int] = {}
         self._violated: set[str] = set()
+        # グループ名 -> 一時停止の入れ子段数。0 になった時点で監視へ戻る。
+        # bool で持つと、入れ子になった 2 つのうち内側が抜けた瞬間に監視が戻る
+        self._suspended: dict[str, int] = {}
 
     # ------------------------------------------------------------------ #
     #  状態
@@ -113,6 +117,53 @@ class SyncMonitor(PeriodicTask):
         self._counts.clear()
         self._violated.clear()
 
+    @contextlib.contextmanager
+    def suspend_group(self, name: str) -> Iterator[None]:
+        """1 グループの偏差判定だけを一時的に止める。
+
+        通す経路は零点確定 (`CANManager.capture_origin_via_set_zero`) だけ。
+        左右へ `SET_ZERO` を送るあいだ、片方は新原点・もう片方は旧原点で報告するので、
+        直結ペアでは機械ゼロの差がまるごと偏差として現れる (実機の `rotate` は
+        起動直後に 175.879deg を記録している)。CAN 送信 2 通が debounce の
+        40ms 以内に収まる確率へ安全機構を預けるわけにいかない。
+
+        **止めてよい根拠は 2 つある。**
+
+        - 原点の付け替え中は、偏差という量そのものが定義を失う (比較する座標系が
+          2 台で違うので、差を取っても機構のずれを表していない)
+        - その間モータは**無励磁**なので、この保護が防ぐ「押し合い」は原理的に起きない
+
+        **全体 pause にしてはならない。** 零点確定は動作確認の最初のステップで、
+        そのあいだ他の軸も動く。全体を止めると、関係の無いペア軸の保護まで消える。
+
+        再開は `finally` で必ず行う。取りこぼすと、その後の試合中ずっとこのグループの
+        偏差監視が死んだまま残り、しかも画面には何も出ない。
+
+        Raises:
+            KeyError: 監視対象に無いグループ名 (呼び出し側の取り違えを黙って通さない)
+        """
+        if name not in self.group_names:
+            raise KeyError(f"同期監視は軸 '{name}' を持っていません")
+
+        self._suspended[name] = self._suspended.get(name, 0) + 1
+        logger.info("同期監視を一時停止 (axis=%s, 理由=原点の付け替え)", name)
+        try:
+            yield
+        finally:
+            depth = self._suspended.get(name, 1) - 1
+            if depth > 0:
+                self._suspended[name] = depth
+            else:
+                self._suspended.pop(name, None)
+                # 停止前に数えた連続超過を持ち越さない。持ち越すと、再開後の
+                # 1 サンプルだけで debounce (2 サンプル) が成立してしまう
+                self._counts[name] = 0
+                logger.info("同期監視を再開 (axis=%s)", name)
+
+    def is_suspended(self, name: str) -> bool:
+        """そのグループの判定が一時停止中か。"""
+        return self._suspended.get(name, 0) > 0
+
     def _label(self) -> str:
         return f"同期監視 ({', '.join(self.group_names) or '対象なし'})"
 
@@ -130,6 +181,11 @@ class SyncMonitor(PeriodicTask):
         self.step()
 
     def _check_group(self, group: SyncGroup, now: float) -> None:
+        if self.is_suspended(group.name):
+            # 原点の付け替え中。比較する座標系が 2 台で違うので、差を取っても
+            # 機構のずれを表していない (かつ無励磁なので押し合いも起こらない)
+            return
+
         positions = self._fresh_positions(group, now)
         deviation = group.violation(positions)
         if deviation is None:

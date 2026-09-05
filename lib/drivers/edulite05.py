@@ -238,6 +238,23 @@ class Edulite05Driver(MotorDriver):
             (self.encode_enable(), 0.1),
         ]
 
+    def deactivation_steps(self) -> list[tuple[can.Message, float]]:
+        """原点を切り直す前に無励磁へ落とす。
+
+        励磁したまま `set_zero` を送ると、ドライバ内部の位置目標 (`LOC_REF`) が
+        旧座標のまま残り、原点の差分だけアームが飛ぶ。待ちは
+        `initialization_steps()` の先頭の `disable` と同じ 0.05 秒。
+        """
+        return [(self.encode_disable(), 0.05)]
+
+    def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
+        """今の位置を機械原点として書き込む (通信タイプ 0x06)。
+
+        待ちが `disable` より長いのは、フラッシュへの書き込みを伴うため
+        (`initialization_steps()` の `set_zero_on_start` と同じ 0.2 秒)。
+        """
+        return [(self.encode_set_zero(), 0.2)]
+
     def idle_target_value(self) -> float:
         """目標を持たない間に書き続ける指令値。
 

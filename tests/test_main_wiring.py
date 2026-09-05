@@ -28,6 +28,7 @@ import yaml
 
 import main
 from lib.axis_sync import MotorSpec, SyncGroup
+from lib.can_manager import CANManager
 from lib.config_schema import (
     MotorConfig,
     RobotConfig,
@@ -36,6 +37,7 @@ from lib.config_schema import (
     load_robot_config,
 )
 from lib.control.position_loop import M3508PositionLoop
+from lib.control.sync_monitor import SyncMonitor
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -59,6 +61,7 @@ from main import (
     _load_pid_config,
     _wire_robot_motors,
 )
+from tests.fake_can import direct_runner, mark_feedback_at, mock_bus
 from tests.fake_clock import FakeClock
 from tests.feedback_frames import feed_m3508
 
@@ -1563,7 +1566,7 @@ class TestOriginResolver:
             source="<test>",
         )
 
-    def _loop(self) -> M3508PositionLoop:
+    def _loop(self, motors: dict[str, M3508Driver] | None = None) -> M3508PositionLoop:
         config = {
             "robot_name": "main_hand",
             "motors": {
@@ -1571,10 +1574,11 @@ class TestOriginResolver:
                 "y_axis_l": {"driver": "m3508", "bus": "m3508_bus", "can_id": 2},
             },
         }
-        motors = {
-            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
-            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
-        }
+        if motors is None:
+            motors = {
+                "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+                "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+            }
         loops = _build_position_loops(
             _robot(config),
             _StubCANManager(),
@@ -1586,21 +1590,186 @@ class TestOriginResolver:
         _attach_sync_groups([self._table().axis("y_axis").sync_group], [loop])
         return loop
 
-    def test_ペア軸はグループ単位で確定する(self) -> None:
-        """左右を別々の時刻に確定すると、その間に動いたぶんのオフセットが残る。"""
-        loop = self._loop()
-        resolve = main._make_origin_resolver([loop], self._table())
+    async def test_ペア軸はグループ単位で確定する(self) -> None:
+        """左右を別々の時刻に確定すると、その間に動いたぶんのオフセットが残る。
 
-        capture = resolve("y_axis")
+        **解決器が何を返したかではなく、実際に両方の原点が動いたかを見る。**
+        片方だけへ効く実装 (`set_origin_here` を 1 台へ) でも「解決器が
+        callable を返した」ことは変わらないので、そこを見るだけでは噛まない。
+        """
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+        }
+        loop = self._loop(motors)
+        # 実機と同じフレームで動かす (直接代入はデコード層を丸ごと迂回する)。
+        # 1 通目は累積角の起点になるだけなので、動かすには 2 通要る
+        for driver, deg in ((motors["y_axis_r"], 30.0), (motors["y_axis_l"], -30.0)):
+            feed_m3508(driver, deg=0.0)
+            feed_m3508(driver, deg=deg)
+        assert motors["y_axis_r"].multi_turn_position != 0.0
+        assert motors["y_axis_l"].multi_turn_position != 0.0
+
+        capture = main._make_origin_resolver([loop], self._table())("y_axis")
 
         assert capture is not None
-        assert capture.func == loop.set_group_origin_here
-        assert capture.args == ("y_axis",)
+        await capture()
 
-    def test_位置制御ループに載らない軸は手段が無い(self) -> None:
-        """EDULITE 05 / DM3520 は原点をドライバ内部に持ち、切り直すには
-        SET_ZERO を送る経路が要る。**「確定したつもり」で先へ進ませない。**
+        assert motors["y_axis_r"].multi_turn_position == pytest.approx(0.0)
+        assert motors["y_axis_l"].multi_turn_position == pytest.approx(0.0)
+
+    def test_位置制御ループにも_set_zero_にも載らない軸は手段が無い(self) -> None:
+        """自作モタドラのサーボのように原点を切り直す手段が無いドライバでは、
+        **「確定したつもり」で先へ進ませない。**
         """
-        resolve = main._make_origin_resolver([self._loop()], self._table())
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_generic", mock_bus())
+        for name, can_id in (("rotate_r", 0x41), ("rotate_l", 0x42)):
+            mgr.add_motor("can_generic", GenericDriver(name, can_id=can_id))
+
+        resolve = main._make_origin_resolver([self._loop()], self._table(), can_managers=[mgr])
 
         assert resolve("rotate") is None
+
+
+class TestOriginResolverViaSetZero:
+    """原点をドライバ内部に持つモータ (EDULITE 05) は `SET_ZERO` で切り直す。
+
+    `M3508PositionLoop` に載らないので PC 側に累積角が無く、CAN フレームを
+    送る以外に「今の位置を 0 と定義し直す」手段が無い。
+    """
+
+    def _table(self) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {
+                    "rotate": {
+                        "unit": "deg",
+                        "command_unit": "rad",
+                        "sync_tolerance": 3.0,
+                        "motors": {"rotate_r": {"scale": 1.0}, "rotate_l": {"scale": -1.0}},
+                    },
+                },
+                "positions": {"rotate": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    def _manager(self) -> tuple[CANManager, list[tuple[str, can.Message]]]:
+        """実 CANManager に EDULITE 2 台を載せ、送信フレームを記録する。"""
+        sent: list[tuple[str, can.Message]] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        for name, can_id in (("rotate_r", 0x11), ("rotate_l", 0x12)):
+            mgr.add_motor("can_edulite", Edulite05Driver(name, can_id=can_id))
+
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            sent.append((motor_name, msg))
+            # 問い合わせへの応答としてフィードバックが届く状況を模す
+            mark_feedback_at(mgr, motor_name, time.time())
+
+        mgr.send = _send  # type: ignore[method-assign]
+        return mgr, sent
+
+    def _monitor(self) -> SyncMonitor:
+        group = self._table().axis("rotate").sync_group
+        assert group is not None
+        return SyncMonitor(
+            [group],
+            {name: MagicMock() for name in ("rotate_r", "rotate_l")},
+            last_feedback_at=lambda _name: None,
+        )
+
+    async def test_edulite_のペア軸は_set_zero_で確定できる(self) -> None:
+        mgr, sent = self._manager()
+
+        capture = main._make_origin_resolver([], self._table(), can_managers=[mgr])("rotate")
+
+        assert capture is not None
+        await capture()
+
+        comm_types = [
+            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
+        ]
+        # 無励磁 → SET_ZERO → (問い合わせ) → 目標書き込み → enable の順
+        assert ("rotate_r", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
+        assert ("rotate_l", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
+        for name in ("rotate_r", "rotate_l"):
+            order = [t for n, t in comm_types if n == name]
+            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
+            # SET_ZERO の前に必ず disable がある (励磁したまま原点を動かすと軸が飛ぶ)
+            assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
+            # SET_ZERO の後に必ず enable がある (無励磁のまま残さない)
+            assert Edulite05Driver.COMM_TYPE_ENABLE in order[zero:]
+
+    async def test_原点付け替え中は同期監視を止める(self) -> None:
+        """左右の SET_ZERO のあいだ 2 台の座標系が違うので、偏差という量が
+        定義を失う。40ms の debounce に収まる保証は無い。
+        """
+        mgr, _sent = self._manager()
+        monitor = self._monitor()
+        suspended_during: list[bool] = []
+
+        original = mgr.capture_origin_via_set_zero
+
+        async def _spy(names):
+            suspended_during.append(monitor.is_suspended("rotate"))
+            await original(names)
+
+        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], sync_monitors=[monitor]
+        )("rotate")
+
+        assert capture is not None
+        await capture()
+
+        assert suspended_during == [True]
+        # **必ず戻す。** 戻し忘れると以後の試合中ずっと偏差監視が死んだまま残る
+        assert monitor.is_suspended("rotate") is False
+
+    async def test_付け替えが失敗しても同期監視を戻す(self) -> None:
+        """例外で抜ける経路が `finally` を通らないと、監視が死んだままになる。"""
+        mgr, _sent = self._manager()
+        monitor = self._monitor()
+
+        async def _boom(_names):
+            raise RuntimeError("再励磁できません")
+
+        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], sync_monitors=[monitor]
+        )("rotate")
+
+        assert capture is not None
+        with pytest.raises(RuntimeError):
+            await capture()
+
+        assert monitor.is_suspended("rotate") is False
+
+    async def test_dm3520_は対象外(self) -> None:
+        """`SET_ZERO` の安全な順序は disable を要求するが、`sub_lift` は
+        disable すると自重で落ちる (保持ブレーキが無い)。
+        """
+        table = load_position_table(
+            {
+                "axes": {
+                    "sub_lift": {
+                        "unit": "mm",
+                        "command_unit": "rad",
+                        "motors": {"sub_lift_m": {"scale": 1.0}},
+                    }
+                },
+                "positions": {"sub_lift": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_dm3520", mock_bus())
+        mgr.add_motor("can_dm3520", Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11))
+
+        resolve = main._make_origin_resolver([], table, can_managers=[mgr])
+
+        assert resolve("sub_lift") is None

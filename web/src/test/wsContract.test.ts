@@ -21,6 +21,7 @@ import type {
   RobotState,
   SafetyState,
   SequenceFailure,
+  SensorState,
   SequenceStepInfo,
   ServerInfo,
   ServerMessage,
@@ -72,6 +73,9 @@ const STATE_FIELDS_UI_READS = [
   "running",
   "steps",
   "motors",
+  // 原点スイッチの接触状態。落ちれば `origin_sensor_react` の指差喚呼を
+  // 画面から確かめる手段がなくなる (candump を打つしかない状態へ戻る)
+  "sensors",
   "e_stop_active",
   "health",
   "safety",
@@ -111,6 +115,8 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].safety).toEqual(sample.safety);
     // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
     expect(result.states[robot].manual).toEqual(sample.manual);
+    // センサも同じ理由で配信そのまま (センサ名を UI へ書き写さない)
+    expect(result.states[robot].sensors).toEqual(sample.sensors);
   },
 
   /**
@@ -390,6 +396,12 @@ const TARGET_REFRESHER = fieldsOf<TargetRefresherState>({
   paused: { unused: "動作確認中の意図的な停止なので異常に数えない" },
 });
 
+/** 自作基板のセンサ入力 1 個。接触は情報で、異常なのは途絶 (stale) の方 */
+const SENSOR_STATE = fieldsOf<SensorState>({
+  active: "ui",
+  stale: "ui",
+});
+
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
@@ -466,6 +478,7 @@ const STATE_FIELDS: FieldSpec = {
     running: "ui",
     steps: "ui",
     motors: "ui",
+    sensors: "ui",
     e_stop_active: "ui",
     health: "ui",
     safety: "ui",
@@ -477,6 +490,7 @@ const STATE_FIELDS: FieldSpec = {
   }),
   ...nest("motors.*", MOTOR_STATE),
   ...nest("motors.*.pid", MOTOR_PID),
+  ...nest("sensors.*", SENSOR_STATE),
   ...nest("health", HEALTH),
   ...nest("health.buses[]", BUS_HEALTH),
   ...nest("health.motors[]", MOTOR_HEALTH),
@@ -634,8 +648,9 @@ const DECLARED: Record<string, FieldSpec> = {
 /**
  * キー名が動的なマップ。ここを普通の入れ子として辿ると `motors.gripper.pos` の形で
  * モータ名が契約へ焼き付き、「UI はモータ名をハードコードしない」設計と食い違う。
+ * センサ名も同じ理由で焼き付けない (機構が変わって本数が増減しても UI は無変更)。
  */
-const DYNAMIC_MAPS = new Set(["motors", "checklists"]);
+const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists"]);
 
 /** サンプル 1 通のキーをドット区切りのパスへ平坦化する (配列要素はまとめて `[]`) */
 function flattenPaths(value: unknown, prefix = ""): string[] {

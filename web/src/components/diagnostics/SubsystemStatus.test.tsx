@@ -57,6 +57,31 @@ describe("SubsystemStatus", () => {
     expect(screen.queryByText(/同期ずれ/)).not.toBeInTheDocument();
   });
 
+  /**
+   * 原点スイッチの反応 (`config/checklist.yaml` の `origin_sensor_react`) を
+   * 画面から確かめる唯一の場所。**モータ一覧とは別に描く** —— サーバーも
+   * `sensors:` を `motors:` と別セクションに持っている (モータ一覧に
+   * 「常に 0 のモータ」を並べないため)。
+   */
+  it("開いたときにセンサをモータ一覧とは別に出す", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety()}
+        sensors={{ origin_sensor: { active: true, stale: false } }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByText("origin_sensor")).toBeInTheDocument();
+    expect(screen.getByText("接触")).toBeInTheDocument();
+    // モータ基数はセンサを数えない (混ぜると「常に 0 のモータ」が 1 基増えて見える)
+    expect(screen.getByText(/モータ 1$/)).toBeInTheDocument();
+  });
+
   it("同期ずれラッチは畳んだ状態を上書きして開き、復旧手順まで出す", () => {
     // 緊急停止を解除してもその軸は動かない。解除操作だけを繰り返させてはならない
     renderWithRobot(

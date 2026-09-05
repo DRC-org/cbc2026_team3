@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import time
 
-__all__ = ["motor_state", "patch_health"]
+__all__ = ["motor_state", "patch_health", "sensor_state"]
 
 
 def motor_state(robot_name: str, motor_name: str) -> dict:
@@ -32,6 +32,24 @@ def motor_state(robot_name: str, motor_name: str) -> dict:
         "torque": math.sin(t * 0.7 + h * 0.2) * 0.35,
         "temp": 30.0 + math.sin(t * 0.15 + h * 0.7) * 6.0,
     }
+
+
+#: 擬似センサが接触したままでいる秒数。1 周期の半分ずつ接触・開放を繰り返す。
+#: 机上で両方のチップを目視できる速さにしてあるだけで、実機の挙動とは無関係
+_SENSOR_CYCLE_S = 4.0
+
+
+def sensor_state(robot_name: str, sensor_name: str) -> dict:
+    """UI に接触・開放の両方を見せるための擬似センサ状態。
+
+    virtual バスは FEEDBACK を 1 通も返さないので、実機の経路をそのまま通すと
+    全センサが途絶 (stale) で固まり、机上では接触チップの描画を一度も確かめられない。
+
+    センサ名のハッシュを位相に使い、複数のセンサが同時に切り替わらないようにする。
+    """
+    h = sum(ord(c) for c in robot_name + ":" + sensor_name)
+    phase = (time.time() + h) % _SENSOR_CYCLE_S
+    return {"active": phase < _SENSOR_CYCLE_S / 2, "stale": False}
 
 
 def patch_health(snapshot_dict: dict) -> dict:

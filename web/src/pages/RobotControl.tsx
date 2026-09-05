@@ -156,6 +156,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         health={state.health}
         motors={state.motors}
         safety={state.safety}
+        sensors={state.sensors}
         connected={connected}
         tempThresholds={tempThresholdsOf(serverInfo)}
         defaultOpen={open}

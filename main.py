@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import importlib
@@ -10,7 +11,7 @@ import os
 import pathlib
 import signal
 import socket
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from types import ModuleType
 
 import can
@@ -209,37 +210,99 @@ def _load_position_table_file(path: pathlib.Path) -> PositionTable:
         return PositionTable.empty(source=str(path))
 
 
+@contextlib.contextmanager
+def _suspend_sync_monitoring(monitors: list[SyncMonitor], axis: str) -> Iterator[None]:
+    """原点を付け替えるあいだ、その軸の偏差監視だけを止める。
+
+    **全体 pause にしない。** 零点確定は動作確認の最初のステップで、そのあいだ
+    他の軸も動く。全体を止めると関係の無いペア軸の保護まで消える。
+    再開は `ExitStack` が例外経路でも必ず行う (取りこぼすと、その後の試合中ずっと
+    この軸の偏差監視が死んだまま残り、しかも画面には何も出ない)。
+    """
+    with contextlib.ExitStack() as stack:
+        for monitor in monitors:
+            if axis in monitor.group_names:
+                stack.enter_context(monitor.suspend_group(axis))
+        yield
+
+
 def _make_origin_resolver(
     loops: list[M3508PositionLoop],
     table: PositionTable,
-) -> Callable[[str], Callable[[], None] | None]:
+    *,
+    can_managers: list[CANManager] | None = None,
+    sync_monitors: list[SyncMonitor] | None = None,
+) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
     """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
 
     **左右ペアはグループ単位でしか確定しない。** 別々の時刻に確定すると、その間に
     片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に偏差超過で
-    止まる。判断は `M3508PositionLoop.set_group_origin_here` に委ねる。
+    止まる。判断は `M3508PositionLoop.set_group_origin_here` と
+    `CANManager.capture_origin_via_set_zero` (軸のモータ全員をまとめて受ける) が持つ。
 
     「確定できるか」と「確定する」を同じ解決器から出すのは、探索を始める前に
     可否を問えるようにするため。センサまで押し込んでから「確定できません」で
     降りると、機構を動かした意味が無いまま姿勢だけが変わる。
 
-    **PC 側位置制御ループに載っていないモータ (EDULITE 05 / DM3520) は確定できない。**
-    それらは原点をドライバ内部に持ち、切り直すには CAN フレーム (SET_ZERO) を
-    送る経路が要る。手段が無いことを None として素直に返し、呼び出し側が
-    起動ログと `HomingError` の両方で見せる。
-    """
+    手段は 2 つあり、この順で探す:
 
-    def resolve(axis: str) -> Callable[[], None] | None:
+    1. **PC 側位置制御ループ (M3508)** —— 累積角の原点を PC が持つので、CAN の
+       往復は要らない
+    2. **ドライバへの `SET_ZERO`** —— 原点をドライバ内部に持つモータ用。可否は
+       ドライバ自身の `supports_origin_capture()` が答える (`main.py` に
+       ドライバ種別を書き写して導出し直さない)
+
+    どちらも無ければ None を返す。呼び出し側が起動ログと `HomingError` の両方で見せる。
+    """
+    managers = can_managers or []
+    monitors = sync_monitors or []
+
+    def _resolve_via_set_zero(axis: str) -> Callable[[], Awaitable[None]] | None:
+        names = table.axis(axis).motor_names
+        for manager in managers:
+            drivers = [manager.motors.get(name) for name in names]
+            if any(driver is None for driver in drivers):
+                # この軸のモータ全員を持っているマネージャだけが確定できる。
+                # 一部だけ確定すると、確定できなかった側との差が原点のずれになる
+                continue
+            if not all(driver.supports_origin_capture() for driver in drivers if driver):
+                return None
+
+            async def capture(manager: CANManager = manager) -> None:
+                # 付け替え中は 2 台の座標系が違うので偏差という量が定義を失う
+                # (かつ無励磁なので押し合いは起きない)。40ms の debounce に
+                # 収まる保証は無いため、判定そのものを止めてから送る
+                with _suspend_sync_monitoring(monitors, axis):
+                    await manager.capture_origin_via_set_zero(names)
+
+            return capture
+        return None
+
+    def resolve(axis: str) -> Callable[[], Awaitable[None]] | None:
         spec = table.axis(axis)
         for loop in loops:
             if axis in loop.sync_group_names:
-                return functools.partial(loop.set_group_origin_here, axis)
+                return _as_async(functools.partial(loop.set_group_origin_here, axis))
             for motor in spec.motor_names:
                 if motor in loop.motor_names:
-                    return functools.partial(loop.set_origin_here, motor)
-        return None
+                    return _as_async(functools.partial(loop.set_origin_here, motor))
+        return _resolve_via_set_zero(axis)
 
     return resolve
+
+
+def _as_async(capture: Callable[[], None]) -> Callable[[], Awaitable[None]]:
+    """同期の原点確定を非同期の口に合わせる。
+
+    `M3508PositionLoop` 側は await を 1 つも挟まないことが性質そのもの
+    (左右の確定のあいだに制御周期が割り込む余地を無くしている) なので、
+    非同期化するのは呼び出し規約だけに留める。
+    """
+
+    async def run() -> None:
+        capture()
+
+    return run
 
 
 def _wire_motor_check_sequence(
@@ -249,6 +312,7 @@ def _wire_motor_check_sequence(
     *,
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
+    sync_monitors: list[SyncMonitor],
     feedback_timeout_ms: float,
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
@@ -307,26 +371,29 @@ def _wire_motor_check_sequence(
             # その移動は search_distance の歯止めに 1mm も掛からない
             return freshness.is_stale(name, freshness.now())
 
-        resolve_origin = _make_origin_resolver(loops, merged)
+        resolve_origin = _make_origin_resolver(
+            loops, merged, can_managers=can_managers, sync_monitors=sync_monitors
+        )
 
         def _origin_capturable(axis: str) -> bool:
             return resolve_origin(axis) is not None
 
-        def _capture_origin(axis: str) -> None:
+        async def _capture_origin(axis: str) -> None:
             capture = resolve_origin(axis)
             if capture is None:
                 raise HomingError(
                     f"軸 '{axis}' の原点を確定できません"
-                    " (PC 側位置制御ループに載っていないモータでは零点確定を実行できない)"
+                    " (PC 側位置制御ループに載らず、SET_ZERO を受け付けるドライバでもない)"
                 )
-            capture()
+            await capture()
 
         unsupported = [name for name in homing_axes if not _origin_capturable(name)]
         if unsupported:
             # 起動ログに出す。押した瞬間に失敗する構成のまま試合当日を迎えないため
             logger.error(
                 "零点確定: 軸 %s は原点を確定する手段がありません"
-                " (PC 側位置制御ループに載っていないモータ。動作確認はこの軸で失敗する)",
+                " (PC 側位置制御ループに載らず SET_ZERO も受け付けない。"
+                "動作確認はこの軸で失敗する)",
                 unsupported,
             )
 
@@ -1246,6 +1313,7 @@ async def main() -> None:
         [w.positions for w in wirings],
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
+        sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
         feedback_timeout_ms=system.health.feedback_timeout_ms,
     )
 

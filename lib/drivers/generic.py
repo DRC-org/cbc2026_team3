@@ -475,8 +475,12 @@ class GenericDriver(MotorDriver):
     #  励磁 (緊急停止ラッチの解除)
     # ------------------------------------------------------------------ #
 
-    def activation_steps(self) -> list[tuple[can.Message, float]]:
+    def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
         """緊急停止ラッチを解除する (仕様書 §3.5)。
+
+        ``after_set_zero`` は使わない。本機に原点の概念が無く (位置を持つのは
+        サーボスロットだけで、その原点はファームの可動域定義が持つ)、
+        ``supports_origin_capture()`` も False のままだからである。
 
         本機に励磁の概念はないが、緊急停止はファーム側でラッチされるため、
         解除フレームを送らない限り SET_TARGET を受け付けない。これを

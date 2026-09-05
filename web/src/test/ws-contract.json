@@ -319,6 +319,16 @@
         ],
         "unenergized_motors": []
       },
+      "sensors": {
+        "origin_sensor": {
+          "active": true,
+          "stale": false
+        },
+        "rotate_origin_sensor": {
+          "active": false,
+          "stale": true
+        }
+      },
       "sequence": "main_hand_seq",
       "step_index": 0,
       "steps": [
@@ -567,6 +577,16 @@
           }
         ],
         "unenergized_motors": []
+      },
+      "sensors": {
+        "origin_sensor": {
+          "active": true,
+          "stale": false
+        },
+        "rotate_origin_sensor": {
+          "active": false,
+          "stale": true
+        }
       },
       "sequence": "main_hand_seq",
       "step_index": 2,
