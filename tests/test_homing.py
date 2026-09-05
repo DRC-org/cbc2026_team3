@@ -49,29 +49,48 @@ def _table(**homing_overrides: object):
 
 
 class _Recorder:
-    """指令と原点確定を記録する。センサは指定回数目の観測で ON になる。"""
+    """指令と原点確定を記録する。
+
+    センサの模し方は 2 通りある:
+
+    - ``active_after`` — 指定回数目の観測で ON になる。歩数だけを見るテスト向け
+    - ``active_at_or_below`` — **実測位置が境界以下なら ON。** リミットスイッチの
+      ON 区間を表す。区間には幅があるので「触れた状態から始めたときにどこを原点に
+      するか」は回数では表せない (どこで始めても観測 1 回目から ON になり、
+      離れたかどうかが位置に依存する)
+    """
 
     def __init__(
         self,
         *,
         active_after: int | None = None,
+        active_at_or_below: float | None = None,
         stale: bool = False,
         motor_stale: bool = False,
         capturable: bool = True,
     ) -> None:
         self.commands: list[dict[str, float]] = []
         self.origins: list[str] = []
+        #: 原点を確定した瞬間の実測位置 [軸の unit]。確定位置そのものを見るために要る
+        self.captured_at: list[float] = []
         #: `_handle` が組んだモータ名 → ドライバ (実測位置の差し替え口)
         self.drivers: dict[str, StubFeedbackDriver] = {}
         self.sleeps = 0
         self._active_after = active_after
+        self._active_at_or_below = active_at_or_below
         self._observations = 0
         self._stale = stale
         self._motor_stale = motor_stale
         self._capturable = capturable
 
+    def axis_position(self) -> float:
+        """実測の軸位置。`_handle` が組んだ右モータの scale (+2.0) で戻す。"""
+        return self.drivers["y_axis_r"].state.position / 2.0
+
     def sensor_active(self, _name: str) -> bool:
         self._observations += 1
+        if self._active_at_or_below is not None:
+            return self.axis_position() <= self._active_at_or_below
         if self._active_after is None:
             return False
         return self._observations > self._active_after
@@ -87,6 +106,8 @@ class _Recorder:
 
     def capture_origin(self, axis: str) -> None:
         self.origins.append(axis)
+        if self.drivers:
+            self.captured_at.append(self.axis_position())
 
     async def sleep(self, _seconds: float) -> None:
         self.sleeps += 1
@@ -299,18 +320,6 @@ class TestReachesOrigin:
         # 15mm から 2 歩 (負方向) 動いたので実測は 13mm。移動量は 2mm
         assert travelled == pytest.approx(2.0)
 
-    async def test_既に触れていれば動かさずに確定する(self) -> None:
-        """押し込む方向へ動かさない。機構端で始まったときに壊さないため。"""
-        table = _table()
-        spec = table.axis("y_axis")
-        rec = _Recorder(active_after=0)  # 最初の観測から ON
-
-        travelled = await _runner(rec).home(spec, _handle(spec, rec))
-
-        assert rec.commands == []
-        assert rec.origins == ["y_axis"]
-        assert travelled == 0.0
-
     async def test_探索方向を符号で表す(self) -> None:
         table = _table(direction=-1, step=1.0)
         spec = table.axis("y_axis")
@@ -332,6 +341,69 @@ class TestReachesOrigin:
         # 1 回の指令に左右が揃っていること (2 回に分かれていない)
         assert len(rec.commands) == 1
         assert set(rec.commands[0]) == {"y_axis_r", "y_axis_l"}
+
+
+class TestReleasesBeforeSeeking:
+    """**触れた状態から始めたら、一度離れてから寄せ直す。**
+
+    リミットスイッチの ON 区間には幅がある。触れたその場を原点にすると
+    「区間のどこで始めたか」がそのまま原点のばらつきになり、区間幅ぶん
+    (step の何倍にもなる) の誤差が座標へ焼き付く。しかも症状は「原点合わせを
+    したのに位置がずれる」だけで、始めた位置が毎回違うので再現もしない。
+
+    離脱は**探索と逆向き**なので、機構端で始まったときに押し込まない、という
+    元の性質は保たれる。
+    """
+
+    async def test_触れた状態から始めたら離れてから寄せ直す(self) -> None:
+        table = _table(direction=-1, step=1.0, search_distance=10.0)
+        spec = table.axis("y_axis")
+        # 位置 <= -1.0 が ON 区間。-3.0 はその奥 (区間へ深く入り込んだ状態)
+        rec = _Recorder(active_at_or_below=-1.0)
+
+        await _runner(rec).home(spec, _handle(spec, rec, start_value=-3.0))
+
+        # 軸の単位に戻した指令列 (右モータの scale は +2.0)
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        # 離脱 (+ 方向) で区間を出てから、探索 (- 方向) で入口へ寄せ直す
+        assert axis_commands == pytest.approx([-2.0, -1.0, 0.0, -1.0])
+        assert rec.origins == ["y_axis"]
+        # その場 (-3.0) ではなく区間の入口で確定している
+        assert rec.captured_at == pytest.approx([-1.0])
+
+    @pytest.mark.parametrize("start", [-1.2, -2.0, -3.0, -4.5])
+    async def test_区間のどこで始めても確定位置は入口から一歩以内(self, start: float) -> None:
+        """**これがこの処理の目的そのもの。** 離脱しない実装ではここが区間幅ぶん開く。"""
+        table = _table(direction=-1, step=1.0, search_distance=10.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_at_or_below=-1.0)
+
+        await _runner(rec).home(spec, _handle(spec, rec, start_value=start))
+
+        assert rec.captured_at[0] == pytest.approx(-1.0, abs=1.0)  # 入口 -1.0 から step 以内
+
+    async def test_離れられなければ原点を確定せず降りる(self) -> None:
+        """接点が固着したセンサは「いつまでも OFF にならない」形でしか現れない。"""
+        table = _table(step=1.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_after=0)  # 最初の観測から常に ON
+
+        with pytest.raises(HomingError, match="離せませんでした"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == []
+
+    async def test_離脱の上限は探索距離を使わない(self) -> None:
+        """流用すると、実ストロークまで伸びた探索距離ぶん反対端へ走り抜ける。"""
+        table = _table(step=1.0, search_distance=500.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_after=0)
+
+        with pytest.raises(HomingError, match="離せませんでした"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        # 上限は step の定数倍。search_distance (500) ぶん動いてはいない
+        assert len(rec.commands) < 30
 
 
 class TestSpecValidation:
