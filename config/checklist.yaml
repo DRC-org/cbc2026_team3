@@ -117,8 +117,12 @@ checklists:
     - id: firmware_match
       label: 自作モタドラ 3 種のファーム版・サーボ可動角の異常表示が出ていないこと確認
       group: motor_check
+    # **2 本とも触ること。** 配線していないスロットも「接触していない」を report し
+    # 続けるので (基板は役割が Sensor なら配線の有無に関わらず FEEDBACK を送る)、
+    # 未配線と「配線済みだが押していない」は画面上まったく同じに見える。
+    # 押して反応するのを見る以外に、繋がっていることを確かめる手段が無い。
     - id: origin_sensor_react
-      label: 原点センサに触れて反応することを確認
+      label: 原点センサ 2 本 (y_axis / rotate) に 1 本ずつ触れて反応することを確認
       group: motor_check
     - id: sub_lift_holds
       label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)

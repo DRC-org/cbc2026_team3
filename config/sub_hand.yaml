@@ -20,13 +20,25 @@ robot_name: sub_hand
 #     スロット番号 3bit。仕様書 §2.2)。**ID は基板の種別・DIP・スロットで決まり、
 #     どちらのロボットが使うかとは無関係。** 現在の割り当ては
 #       0x40-0x44 サーボ基板 #0 SV0-SV4 … main: gripper(0x40) / wall_f(0x41) /
-#                                          wall_r(0x42) / origin_sensor(0x44)
-#                                          sub : sub_gripper(0x43)
+#                                          wall_r(0x42) /
+#                                          rotate_origin_sensor(0x43) /
+#                                          origin_sensor(0x44)
+#       0x48-0x4C サーボ基板 #1 SV0-SV4 … sub : sub_gripper(0x48)
+#                                          SV1-SV4 は Unused (下記)
 #       0x80-0x82 DC 基板 #0 ch0-ch2   … main: conveyor(0x80)
 #                                          sub : pump_vac(0x81) / pump_blow(0x82)
 #       0xC0-0xC5 電磁弁基板 #0 ch0-ch5 … sub : valve_1〜valve_6
 #     **1 枚の基板を両ロボットが分け合う**ので、ロボット単位で帯を切ることはできない。
-#     基板を足すときは DIP (基板番号) を上げる: サーボ #1 = 0x48-0x4C、DC #1 = 0x88-。
+#     基板を足すときは DIP (基板番号) を上げる: サーボ #2 = 0x50-0x54、DC #1 = 0x88-。
+#
+#     **スロットの役割 (サーボ / スイッチ / 未使用) は基板番号ごとにファームが持つ**
+#     (firmware/servo/include/config.h の kSlotRoleByBoard)。config 側で選べる値では
+#     ないので、新しいアクチュエータを空き ID へ載せる前に、その基板番号のその行が
+#     Servo になっていることを確かめること。役割が食い違うと、指令を送っても FEEDBACK も
+#     INFO も返らない (センサ・未使用スロットは SET_TARGET を受け付けない) ので、
+#     症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
+#     現在サーボ基板 #0 は SV0-SV2 が Servo・SV3/SV4 が TouchSensor、
+#     サーボ基板 #1 は SV0 だけが Servo で SV1-SV4 は Unused。
 #
 #   can_edulite … EDULITE 05 の ID は 1 バイトの任意値で、ビット分割の規則は無い
 #     (出荷時は 2 台とも 0x7F。バスへ載せる前に scripts/edulite_set_id.py で
@@ -123,17 +135,21 @@ motors:
   # (sequences/motor_check.py)、確認専用の駆動量は存在しない。かつては magnitude を
   # 別に持っており、微小量を指令すると「サーボは補間完了で reached を立てるので、
   # 0.1deg しか動いていなくても PASSED になる」という形で確認が意味を失っていた。
+  # **サーボ基板 #0 ではなく #1 に載る唯一のアクチュエータ。** サーボ基板 #0 の SV3 は
+  # ファーム側で TouchSensor (rotate の原点スイッチ) になっており、同じスロットへ
+  # サーボの指令を送っても受け付けられない。#0 の残る Servo スロットは
+  # gripper / wall_f / wall_r で埋まっているため、基板をもう 1 枚足してその SV0 を使う。
   sub_gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x43               # サーボ基板 #0 SV3 (仕様書 §2.2)
+    can_id: 0x48               # サーボ基板 #1 SV0 (仕様書 §2.2)
     control_type: position
     # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
     # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
     # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
     # 値は firmware/servo/include/config.h の kFirmwareVersion と
     # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
-    expected_firmware: 3
+    expected_firmware: 4
     expected_angle_range_deg: 270.0
 
   # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---

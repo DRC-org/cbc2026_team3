@@ -179,24 +179,26 @@ axes:
       steps: [1.0, 5.0, 15.0, 45.0]
     # !!! リミットスイッチ未装着。**下のコメントを外すだけでは動かない。** !!!
     #
-    # 有効化には 2 つの前提が要る。どちらも現時点では満たされていない。
+    # 有効化には 2 つの前提が要る。**前提 1 は解消済み、前提 2 が残っている。**
     #
-    # --- 前提 1: センサを載せるスロットが無い ---------------------------------
+    # --- 前提 1 (解消済み): センサを載せるスロット ------------------------------
     # かつてここには「サーボ基板 #0 の空きスロット SV5 (can_id 0x45) に配線する」と
     # 書いてあったが、**SV5 という信号線は存在しない**。この基板は SV0〜SV4 の 5 本
-    # しか持たず (firmware/servo/include/config.h の kServoSlotCount = 5)、5 本とも
-    # 既に埋まっている:
-    #   0x40 gripper / 0x41 wall_f / 0x42 wall_r / 0x43 sub_gripper / 0x44 origin_sensor
+    # しか持たない (firmware/servo/include/config.h の kServoSlotCount = 5)。
     # 0x45〜0x47 は ID 空間としては基板 #0 のブロックに含まれるが、対応するピンが
     # 無いので**その ID のデバイスは FEEDBACK を 1 通も送らない**。手順どおり配線した
     # つもりで登録すると sensor_is_stale が真になり、動作確認の最初のステップが毎回
     # 「センサが応答していません」で止まる —— 症状は配線不良と区別が付かない。
-    # 取れる道は 2 つ:
-    #   (a) サーボ基板 #1 を足す (DIP=1 → 0x48〜0x4C が SV0〜SV4)。1 枚増える
-    #   (b) 既存スロットを転用する。ただし 5 本とも運用中なので、転用するなら
-    #       どのアクチュエータを別基板へ移すかを先に決めること
     #
-    # --- 前提 2: EDULITE 軸は原点確定の経路そのものが無い ----------------------
+    # 解消の仕方は「基板 #0 の SV3 を転用し、そこに載っていた sub_gripper を
+    # サーボ基板 #1 の SV0 (0x48) へ移す」。現在の基板 #0 は
+    #   0x40 gripper / 0x41 wall_f / 0x42 wall_r /
+    #   0x43 rotate_origin_sensor / 0x44 origin_sensor
+    # で、SV3 / SV4 の 2 本がスイッチになっている。**スロットの役割はファームが
+    # 基板番号ごとに持つ**ので、配線を差し替えるだけでは足りず
+    # firmware/servo/include/config.h の kSlotRoleByBoard も対応していなければならない。
+    #
+    # --- 前提 2 (未解消): EDULITE 軸は原点確定の経路そのものが無い --------------
     # 零点確定 (lib/sequence/homing.py) の原点確定は main.py の _make_origin_resolver
     # 経由で、**M3508PositionLoop に載っているモータしか確定できない**。rotate は
     # EDULITE 05 なのでループに載らず、センサを正しく配線してスイッチが反応しても
@@ -221,16 +223,14 @@ axes:
     # したがって搬送中に手で回されたぶんは、その姿勢が原点になる形でそのまま残る。
     # **上の 2 つが揃ったら必ず有効化すること。**
     #
-    # 有効にする手順 (2 つの前提を満たした後):
-    #   1. 上の (a) か (b) でスロットを確保し、そこへスイッチを配線する
-    #   2. config/main_hand.yaml の sensors: に rotate_origin_sensor を足す
-    #      (origin_sensor と同じ形。can_id は 1. で確保したスロットのもの)
-    #   3. EDULITE 向けの原点確定経路 (SET_ZERO) を実装する
-    #   4. config/main_hand.yaml の set_zero_on_start を 2 台とも false へ戻す。
+    # 有効にする手順 (残りは前提 2 の側だけ):
+    #   1. EDULITE 向けの原点確定経路 (SET_ZERO) を実装する
+    #   2. config/main_hand.yaml の set_zero_on_start を 2 台とも false へ戻す。
     #      残したままだと起動時の一律 0 が零点確定の直前に割り込み、スイッチで決めた
     #      原点と電源投入位置のどちらが正なのか config から読めなくなる
-    #   5. 下のコメントを外し、search_distance と direction を実測へ合わせる。
+    #   3. 下のコメントを外し、search_distance と direction を実測へ合わせる。
     #      search_distance は上の manual の全幅 (15.0 - (-5.0) = 20.0deg) を超えないこと
+    # スロット確保 (0x43) と config/main_hand.yaml の sensors: への登録は済んでいる。
     # homing:
     #   sensor: rotate_origin_sensor
     #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)

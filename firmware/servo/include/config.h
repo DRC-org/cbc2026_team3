@@ -6,6 +6,10 @@
 //   - D11/D12/D13 をハードウェア SPI が占有する
 //   - **D13 は SCK。オンボード LED はステータス表示に使えない**（RGB LED がその役目）
 //
+// **同じファームを全基板へ焼く**（§3.4 の版番号照合は 1 種類のバイナリを前提にしている）。
+// そのため基板ごとに違う唯一のもの ——「そのスロットをサーボとして使うかスイッチとして
+// 使うか」—— は kSlotRoleByBoard が基板番号ごとに持ち、実行時に DIP で選ぶ。
+//
 // ここに集約してあるのは「基板を見ないと確定できない値」と「機構が決まるまで動かせない値」。
 // TODO(実機で確認) が付いた定数は仮置きであり、通電前に必ず基板・サーボのデータシート・
 // 実測と突き合わせること。可動範囲を誤ったまま通電するとサーボがメカストッパに当たったまま
@@ -51,29 +55,36 @@ constexpr uint8_t kDipBitCount = 4;
 // ===========================================================================
 
 // **この基板は 5 本の信号線（SV0〜SV4）を持ち、どれもサーボにもセンサにもなる。**
-// どのスロットを何に使うかは配線で決まるので、役割を表に持たせて 1 行で切り替えられる
-// ようにしてある。**サーボ・センサ・空きが何個ずつでも動く**（センサだけの基板も可）。
+// **サーボ・センサ・空きが何個ずつでも動く**（センサだけの基板も可）。
 //
 // これが成立するのは **1 スロット = 1 CAN デバイス**にしてあるからで、センサも自分の
 // デバイス ID で FEEDBACK を送る。サーボのフレームに相乗りさせると、相乗り先の無い
 // 「センサだけの基板」が成立せず、載せられる個数も予約ビットの数で頭打ちになる。
 constexpr uint8_t kServoSlotCount = 5;
 
+// **Unused を 0 にしてあるのは、書き忘れを安全側へ倒すため。** 下の kSlotRoleByBoard は
+// 行あたり kServoSlotCount 個を並べる表で、足りない要素はゼロ埋めされる。先頭が Servo だと
+// 書き忘れたスロットが黙って「サーボとして駆動するピン」になり、そこにスイッチが
+// 繋がっていれば通電したまま叩く。Unused なら ID を名乗らず駆動もしない側へ落ちる。
 enum class SlotRole : uint8_t {
+    Unused,       // 何も繋がない。pinMode すら触らない
     Servo,        // サーボ出力。deviceId 宛の SET_TARGET で動く
     TouchSensor,  // デジタル入力。自分のデバイス ID で FEEDBACK を送り bit4 で報告するだけ
-    Unused,       // 何も繋がない。pinMode すら触らない
 };
 
+// **役割は下の kSlotRoleByBoard が基板番号ごとに持ち、この構造体には入れない。**
+// ここに残すのは全基板で共通の物理的性質だけ ——「そのピンをサーボとして使うか
+// スイッチとして使うか」しか基板ごとに変わらないためで、初期角と可動範囲は
+// src/main.cpp の ServoChannel g_channel[] の静的初期化子が使う（役割をここへ混ぜると、
+// 静的初期化子まで実行時に確定する DIP の値に依存させることになる）。
 struct ServoSlotConfig {
-    SlotRole role;
     // デバイス ID は表に持たない。**スロットの添字がそのままデバイス ID の下位 3bit**
     // になるので（仕様書 §2.2）、配線で役割を変えても ID は動かない。
     uint8_t pin;
     float initialAngleDeg;         // 起動時に持っていく角度（仕様書 §5.4）
     motorcan::ServoLimits limits;  // 可動範囲とスルーレート（SET_PARAM 0x04-0x06 で変更可）
     motorcan::ServoPulseSpec pulse;
-    // TouchSensor のとき、LOW を「入力あり」とみなすか。
+    // TouchSensor として使う基板があるとき、LOW を「入力あり」とみなすか。
     // 報告ビットは常に FEEDBACK のセンサ入力（自分のデバイス ID で送るので 1 つで足りる）。
     bool sensorActiveLow;
     // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
@@ -109,41 +120,74 @@ constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 // 止まるだけだが、広すぎるとメカストッパに当たったまま停動して焼損する。**
 constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
 
-// 既定は config/main_hand.yaml / config/sub_hand.yaml の実構成に合わせてある。
-// **4ch あるので自作サーボはこの 1 枚で全部まかなえる。**
+// **ピンと電気的性質は全基板で共通。** 5 スロットとも同じ基板を同じパターンで焼くので、
+// 変わるのは下の役割表だけである。
 //
-// 以下のデバイス ID は **DIP の基板番号が 0（全 OFF）のとき**の値。基板番号を N に
-// すると 8 ずつずれる（N=1 なら 0x48〜0x4C）ので、PC 側 yaml の can_id もそちらへ合わせる。
-// 実際の値は candump が教えてくれる: FEEDBACK の CAN ID は 0x300 + デバイス ID。
+//   スロット | ピン | デバイス ID の下位 3bit
+//   ---------+------+------------------------
+//   SV0      | D4   | 0
+//   SV1      | D5   | 1
+//   SV2      | D6   | 2
+//   SV3      | D7   | 3
+//   SV4      | D8   | 4
 //
-//   スロット | ピン | 役割        | デバイス ID | PC 側のモータ / 用途
-//   ---------+------+-------------+------------+---------------------------
-//   SV0      | D4   | Servo       | 0x40       | gripper       (メインハンド)
-//   SV1      | D5   | Servo       | 0x41       | wall_f        (メインハンド)
-//   SV2      | D6   | Servo       | 0x42       | wall_r        (メインハンド)
-//   SV3      | D7   | Servo       | 0x43       | sub_gripper   (サブハンド)
-//   SV4      | D8   | TouchSensor | 0x44       | origin_sensor (原点合わせ用)
-//
-// **Unused 以外のスロットはすべて CAN デバイスとして FEEDBACK を送る。**
-// センサも PC 側 yaml に 1 モータとして登録すること（登録しないと受信ループが
-// そのフレームを誰にも配らない）。目標値を持たないので SET_TARGET は飛ばず、
-// motor_check.magnitude: 0 で動作確認からは外れるが、途絶は STALE として検出される。
-//
-// 役割を変えるときは、その行の SlotRole と最後の引数（sensorActiveLow）だけを
-// 書き換える。**デバイス ID は動かさないこと** — スロットに固定しておくと、
-// 配線を差し替えても PC 側 yaml の can_id が無変更で済む。
+// **デバイス ID は動かさないこと** — スロットに固定しておくと、配線を差し替えても
+// PC 側 yaml の can_id が無変更で済む。
 //
 // デバイス ID が PC 側 yaml と一致していることが唯一の接点で、照合する仕組みは無い。
 // ずれるとそのモータは指令を受け取らず FEEDBACK も来ない（PC からは STALE に見える）。
 constexpr ServoSlotConfig kServoSlots[kServoSlotCount] = {
-    {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 = gripper
-    {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 = wall_f
-    {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 = wall_r
-    {SlotRole::Servo, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 = sub_gripper
-    // SV4 = origin_sensor。
+    {4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0
+    {5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1
+    {6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2
+    // SV3 / SV4 はスイッチとして使う基板がある。
     // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
     // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
-    {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},
+    {7, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV3
+    {8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4
+};
+
+// ===========================================================================
+// スロットの役割（基板番号ごと）
+// ===========================================================================
+
+// **同じファームを全基板へ焼くので、役割は基板番号（DIP）ごとにここで分ける。**
+// スロット表に 1 つだけ持たせていた頃は、基板 #0 の SV3 をスイッチにすると
+// 基板 #1 の SV3 も道連れになった（1 枚だけ別のファームを焼くのは §3.4 の焼き忘れ検出を
+// 無力化するので採らない）。
+//
+// 以下のデバイス ID は基板番号から決まる（仕様書 §2.2。FEEDBACK の CAN ID は
+// 0x300 + デバイス ID なので candump からそのまま読める）。
+//
+//   基板 | スロット | デバイス ID | PC 側のモータ / 用途
+//   -----+----------+------------+--------------------------------
+//    #0  | SV0      | 0x40       | gripper        (メインハンド)
+//    #0  | SV1      | 0x41       | wall_f         (メインハンド)
+//    #0  | SV2      | 0x42       | wall_r         (メインハンド)
+//    #0  | SV3      | 0x43       | rotate の原点スイッチ
+//    #0  | SV4      | 0x44       | y_axis の原点スイッチ
+//    #1  | SV0      | 0x48       | sub_gripper    (サブハンド)
+//    #1  | SV1〜SV4 | ―          | 未使用
+//
+// **Unused 以外のスロットはすべて CAN デバイスとして FEEDBACK を送る。**
+// センサは PC 側 yaml の sensors: へ登録すること（登録しないと受信ループが
+// そのフレームを誰にも配らない）。途絶は STALE として検出される。
+constexpr uint8_t kServoBoardCount = 2;
+
+// **表に無い基板番号は全スロット Unused のままにする**（判断は src/main.cpp）。
+// 黙って基板 #0 の行を使うと、DIP を回しすぎた基板が別の基板の役割とデバイス ID を
+// 名乗り、同じ ID の 2 ノードが違うデータを送ってバスがエラーフレームで埋まる。
+// 全 Unused なら resolveDeviceIds が ID を付けないので、既存の「デバイス ID 未設定 →
+// LED 赤の速い点滅・駆動拒否」へそのまま乗る（DIP 8 以上の扱いと同じ思想）。
+//
+// **行数を明示しないのは、書き忘れを static_assert で捕まえるため**（src/main.cpp）。
+// [kServoBoardCount][...] と書くと足りない行がゼロ埋めで通ってしまう。
+constexpr SlotRole kSlotRoleByBoard[][kServoSlotCount] = {
+    // 基板 #0（DIP=0）: メインハンド
+    {SlotRole::Servo, SlotRole::Servo, SlotRole::Servo, SlotRole::TouchSensor,
+     SlotRole::TouchSensor},
+    // 基板 #1（DIP=1）: サブハンド
+    {SlotRole::Servo, SlotRole::Unused, SlotRole::Unused, SlotRole::Unused, SlotRole::Unused},
 };
 
 // ===========================================================================
@@ -175,12 +219,16 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 //    「デバイス ID 未設定」の報告経路は構造的に死んでいた。しかも複数の基板が同時に
 //    未設定だと、異なるノードが同じ ID で異なるデータを送ってバスがエラーフレームで
 //    埋まる。設定ミスの通知は LED（赤の速い点滅）が担う。
+// 4: スロットの役割を基板番号ごとに持つようにした（kSlotRoleByBoard）。
+//    基板 #0 の SV3 が Servo（sub_gripper）から TouchSensor（rotate の原点スイッチ）に
+//    なり、sub_gripper は基板 #1 の SV0（0x48）へ移った。**焼き忘れた基板は
+//    「サーボのつもりのピンが入力のまま」または逆になる**ので、版番号での検出が要る。
 //
 // **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
 // PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
 // これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
 // 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
-constexpr uint8_t kFirmwareVersion = 3;
+constexpr uint8_t kFirmwareVersion = 4;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;

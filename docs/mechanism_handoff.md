@@ -46,7 +46,7 @@
 | `axes.y_axis.timeout_s` | 4.0s | 実測ストローク 650mm（`positions.y_axis` の `home` 0.0 〜 `work_shared` 650.0）に対し、`motion.duration_for(650.0)`（`max_velocity` 200.0mm/s / `max_acceleration` 1200.0mm/s²）の理論所要時間は 3.4167 秒、余裕は 0.5833 秒（約 15%）。起動時検証 `_check_motion_timeout`（`lib/sequence/positions.py`）はこの余裕の範囲内なので通る。**ただしこれは理想台形プロファイルの所要時間だけで、`tolerance` 1.0mm の帯へ整定するまでの時間を含まない。** 実機で `SequenceTimeoutError` が出たらまずここを疑うこと（症状は「その軸だけが毎回失敗する」で、機構にもモータにも異常が無い —— 説明は `_check_motion_timeout` の docstring）。`timeout_s` をいくつにすべきかは実機で測る人が決める |
 | `positions.rotate` | **埋まった。** 実測値（home 0.0 / pick 180.0 / place 10.0deg）が入っている | かつての 0〜8deg は機構未装着時の仮値。実機の値へ更新済み |
 | `axes.rotate.manual` | **埋まった。** 0.0〜180.0deg（2026-09-04 のコミット `5aa89c3` で実ストロークへ更新済み） | 同上 |
-| `axes.rotate.homing` | **コメントアウト（有効化できない）** | スイッチ未装着に加え、**載せるスロットが無く**（サーボ基板 #0 は SV0〜SV4 の 5 本とも使用中）、**EDULITE には原点確定の経路そのものが無い**。詳細は `docs/checks_and_health.md` の「零点確定」節 |
+| `axes.rotate.homing` | **コメントアウト（有効化できない）** | **スロットは確保済み**（サーボ基板 #0 SV3 = `0x43`。`config/main_hand.yaml` の `sensors:` に `rotate_origin_sensor` として登録済み）だが、**EDULITE には原点確定の経路そのものが無い**（`SET_ZERO`）。残るのはスイッチの装着と `direction` / `search_distance` の実測。詳細は `docs/checks_and_health.md` の「零点確定」節 |
 | `motors.rotate_r` / `.rotate_l` の `set_zero_on_start`（`config/main_hand.yaml`） | **`true`（暫定）** | 上の `homing` が入るまでの代替。**EDULITE の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として出る**（実機で 175.879deg → 起動直後に全体緊急停止）。起動のたびに `set_zero` を送って電源投入時の姿勢を原点にしている。**機構が付いたら「起動前に rotate を収納姿勢へ戻す」ことが人の責任になる。** `homing` を有効化する日に 2 台とも `false` へ戻すこと（左右で値が食い違うと揃うどころか偏差が残る） |
 | `positions.gripper` / `wall_f` / `wall_r`（サーボ 3 軸） | **0〜6deg**（gripper 0/5、wall 0/3/6） | **実可動域が未確認。** 上の `kProvisionalLimits` と必ずセットで決める（ファームが黙ってクランプするので、超えた値は「送ったのに途中で止まる」としか現れない） |
 | `positions.wall_r.closed` / `.open` | 3.0 / 6.0 | **試合シーケンスから未参照**（後壁を使う手順が未確定）。動作確認は 3 状態とも駆動する |
@@ -63,7 +63,7 @@
 | `motors.sub_lift.limit_speed` | **1.0 rad/s** | 重量未確定。**緊急停止 = 消磁**で保持ブレーキが無いので、自重落下の懸念がある。減速比 19.2 のギヤで落ちない前提に乗っており、**指差喚呼 `sub_lift_holds` で必ず実機確認する**（上げた状態で非常停止し、落ちないこと） |
 | `axes.sub_arm_joint.offset` | **0.0（実測未）** | 機械原点のずれをここで寄せる。EDULITE は負の角度も扱えるが、機構原点を決めてから測る |
 | `positions.sub_arm_joint` | 0〜10deg | 干渉角未確認 |
-| `positions.sub_gripper` | 0〜5deg | 上の `kProvisionalLimits` と同じ制約（サーボ基板 SV3） |
+| `positions.sub_gripper` | 0〜5deg | 上の `kProvisionalLimits` と同じ制約（サーボ基板 #1 SV0） |
 | `axes.valve_1`〜`valve_6` の `settle_s` | **0.2s（6 軸とも）** | **吸着が効くまでの時間が未実測。** 短すぎると「離した直後に持ち上げて落とす」。**6 箇所すべてを直すこと**（1 つ残るとその弁だけ待ち時間が違う） |
 | `axes.pump_vac` / `pump_blow` の `settle_s` | **0.5s** | 規定の負圧 / 正圧に達するまでの時間。短すぎると「回し始めた直後に弁を開けて吸着し損ねる」 |
 | `positions.pump_*.run` | **0.3 duty** | ファーム側 `max_duty`（既定 0.30）でクランプ。吸引力が足りなければ**ファームを先に**上げる |

@@ -30,8 +30,12 @@
 # RAM 上のみで電源断で config.h の既定値に戻る。
 
 axes:
-  # 4 本とも同一仕様。scale は 1.0 = 指令値がそのまま角度 [deg] で、本番の
+  # 3 本とも同一仕様。scale は 1.0 = 指令値がそのまま角度 [deg] で、本番の
   # gripper / wall_f / wall_r と同一にしてある (ベンチで確かめた指令量が本番でもそのまま出る)。
+  #
+  # **SV3 / SV4 はここに現れない。** ファームがこの 2 スロットを TouchSensor として
+  # 宣言しており (firmware/servo/include/config.h の kSlotRoleByBoard)、駆動できないので
+  # 軸を持たない。config/bench/servo/main_hand.yaml では sensors: に登録してある。
   #
   # timeout_s はスルーレート 90deg/s で全ストローク 30deg を動く時間 (約 0.33s) に
   # 対する余裕を見た値。本番の 2.0s と同じにしてある。
@@ -71,17 +75,6 @@ axes:
       max: 30.0
       steps: [1.0, 5.0, 10.0]
 
-  servo_sv3:
-    unit: deg
-    command_unit: deg
-    scale: 1.0
-    offset: 0.0
-    timeout_s: 2.0
-    manual:
-      min: 0.0
-      max: 30.0
-      steps: [1.0, 5.0, 10.0]
-
 positions:
   # 手動操縦パネルにこの名前のプリセットボタンが並ぶ。ジョグと併用できる。
   #
@@ -105,12 +98,6 @@ positions:
     full: 30.0
 
   servo_sv2:
-    initial: 0.0
-    small: 5.0
-    mid: 15.0
-    full: 30.0
-
-  servo_sv3:
     initial: 0.0
     small: 5.0
     mid: 15.0

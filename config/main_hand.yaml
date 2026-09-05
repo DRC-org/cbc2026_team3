@@ -130,6 +130,16 @@ motors:
   # サーボ基板 (種別 1) の基板番号 0、スロット 0-4 が 0x40-0x44。
   # ID を見ればどの基板のどのスロットかが直接読めるので、candump を眺めるときに
   # 対応表を引かなくてよい。
+  #
+  # **スロットの役割はファームが基板番号ごとに持つ** (firmware/servo/include/config.h の
+  # kSlotRoleByBoard)。サーボ基板 #0 の現在の割り当ては
+  #   SV0 0x40 Servo       … gripper
+  #   SV1 0x41 Servo       … wall_f
+  #   SV2 0x42 Servo       … wall_r
+  #   SV3 0x43 TouchSensor … rotate_origin_sensor (下の sensors:)
+  #   SV4 0x44 TouchSensor … origin_sensor        (下の sensors:)
+  # で、**この基板に空いている Servo スロットはもう無い**。サーボを足すときは
+  # サーボ基板 #1 (0x48-) を使う (サブハンドの sub_gripper が 0x48 に載っている)。
   gripper:
     driver: generic
     bus: generic_bus
@@ -140,7 +150,7 @@ motors:
     # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
     # 値は firmware/servo/include/config.h の kFirmwareVersion と
     # kServoSlots[].pulse.angleRangeDeg に対応する。**ファームを直したらここも直す。**
-    expected_firmware: 3
+    expected_firmware: 4
     expected_angle_range_deg: 270.0
 
   # DC モータ。位置の概念がないので duty 指令。
@@ -164,7 +174,7 @@ motors:
     bus: generic_bus
     can_id: 0x41               # サーボ基板 #0 SV1
     control_type: position
-    expected_firmware: 3
+    expected_firmware: 4
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   wall_r:
@@ -172,10 +182,10 @@ motors:
     bus: generic_bus
     can_id: 0x42               # サーボ基板 #0 SV2
     control_type: position
-    expected_firmware: 3
+    expected_firmware: 4
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-# --- センサ入力 (自作サーボ基板のスロット SV4) ---
+# --- センサ入力 (自作サーボ基板のスロット SV3 / SV4) ---
 # **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
 # 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
 # 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。
@@ -183,7 +193,21 @@ motors:
 # motors ではなくこちらに書くことで、動作確認・目標値再送・UI のモータ一覧に
 # 「常に 0 のモータ」が並ばない。途絶は STALE として監視される
 # (センサが死んだまま原点合わせを始めると「いつまでも当たらない」形でしか分からない)。
+#
+# **零点確定 (ホーミング) は軸ごとに 1 本のスイッチを要求する**ので、原点を確定したい
+# 軸の数だけスロットが要る。どちらの軸のものかは config/main_hand_positions.yaml の
+# axes.<軸>.homing.sensor がこの名前を指すことで決まる:
+#   origin_sensor        … y_axis (M3508 ペア) の原点。SV4
+#   rotate_origin_sensor … rotate (EDULITE ペア) の原点。SV3
+#
+# **SensorConfig は name / bus / can_id しか持たない。** expected_firmware は書けない
+# (書くと起動が拒否される) —— INFO の照合はモータの側だけが行う。同じ基板に載る
+# gripper / wall_f / wall_r が版番号を見ているので、焼き忘れはそちらで FAULT になる。
 sensors:
   origin_sensor:
     bus: generic_bus
     can_id: 0x44               # サーボ基板 #0 SV4
+
+  rotate_origin_sensor:
+    bus: generic_bus
+    can_id: 0x43               # サーボ基板 #0 SV3
