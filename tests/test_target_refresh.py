@@ -138,6 +138,32 @@ class TestEStopInterlock:
         assert fx.manager.sent == []
 
 
+class TestClearSingleTarget:
+    """`clear_target(name)` は 1 台だけを対象にする (`RobotServer._reenergize_motors` が使う)。
+
+    `clear_targets()` (全台) と違い、同じバスで動作中の別モータを巻き込んで
+    `wait_reached` を中断させてはならない。
+    """
+
+    async def test_only_the_named_handle_loses_its_target(self) -> None:
+        fx = _Fixture()
+        await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
+        await fx.handles["wall_f"].set_target(ControlMode.POSITION, 45.0)
+
+        fx.refresher.clear_target("conveyor")
+
+        assert fx.handles["conveyor"].has_target is False
+        assert fx.handles["wall_f"].target == 45.0
+
+    async def test_unknown_name_is_a_no_op(self) -> None:
+        fx = _Fixture()
+        await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
+
+        fx.refresher.clear_target("no_such_motor")
+
+        assert fx.handles["conveyor"].target == 0.3
+
+
 class TestPauseForMotorCheck:
     async def test_paused_refresher_sends_nothing(self) -> None:
         """動作確認は同じモータへ自前の指令を出す。古い目標を被せると誤判定になる。"""
@@ -391,6 +417,71 @@ class TestDm3520EStop:
         fx.refresher.clear_targets()
 
         assert fx.handle.has_target is False
+
+
+class TestDm3520ClearSingleTarget:
+    """`clear_target(name)` は問い合わせ駆動のラッチ (`_idle_targets`) も剥がす。
+
+    `RobotServer._reenergize_motors` が使う経路。剥がさずに励磁すると、
+    直後の再送 (最大 20Hz = 50ms 後) がフォルト前の古いラッチで上書きし、
+    「現在角を書いてから励磁する」保証が 1 周期で無効になる。
+    """
+
+    def _two_motor_fixture(self) -> tuple[_StubCANManager, dict[str, MotorHandle], object]:
+        manager = _StubCANManager()
+        dropped = Dm3520Driver("dropped", 0x01, master_id=0x11)
+        healthy = Dm3520Driver("healthy", 0x02, master_id=0x12)
+        handles = {
+            driver.name: MotorHandle(driver.name, driver, manager)  # type: ignore[arg-type]
+            for driver in (dropped, healthy)
+        }
+        refresher = QueryDrivenTargetRefresher(
+            list(handles.values()),
+            manager,
+            is_estop_active=lambda: False,  # type: ignore[arg-type]
+        )
+        return manager, handles, refresher
+
+    async def test_named_motor_relatches_fresh_position(self) -> None:
+        manager, handles, refresher = self._two_motor_fixture()
+        dropped_driver = handles["dropped"].driver
+        healthy_driver = handles["healthy"].driver
+
+        # 目標を持たないまま「今の姿勢を保て」がラッチされる
+        feed_dm3520(dropped_driver, position=3.0)  # type: ignore[arg-type]
+        feed_dm3520(healthy_driver, position=0.0)  # type: ignore[arg-type]
+        await refresher.step()
+
+        # フォルトで機構が沈んだ (1.0)。ラッチ (3.0) はまだ古いまま
+        feed_dm3520(dropped_driver, position=1.0)  # type: ignore[arg-type]
+
+        refresher.clear_target("dropped")
+        manager.sent.clear()
+        await refresher.step()
+
+        sent = {name: msg for name, msg in manager.sent}
+        p_des, _ = struct.unpack("<ff", sent["dropped"].data)
+        assert p_des == pytest.approx(1.0, abs=1e-3)
+
+    async def test_other_motor_on_same_refresher_keeps_its_latch(self) -> None:
+        manager, handles, refresher = self._two_motor_fixture()
+        dropped_driver = handles["dropped"].driver
+        healthy_driver = handles["healthy"].driver
+
+        feed_dm3520(dropped_driver, position=3.0)  # type: ignore[arg-type]
+        feed_dm3520(healthy_driver, position=2.0)  # type: ignore[arg-type]
+        await refresher.step()
+
+        # healthy の負荷が変わっても、剥がしていない側のラッチは追従しない
+        feed_dm3520(healthy_driver, position=0.5)  # type: ignore[arg-type]
+
+        refresher.clear_target("dropped")
+        manager.sent.clear()
+        await refresher.step()
+
+        sent = {name: msg for name, msg in manager.sent}
+        p_des, _ = struct.unpack("<ff", sent["healthy"].data)
+        assert p_des == pytest.approx(2.0, abs=1e-3)
 
 
 class TestDm3520PauseForMotorCheck:

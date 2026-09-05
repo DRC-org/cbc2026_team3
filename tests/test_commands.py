@@ -56,6 +56,7 @@ _EXPECTED_COMMANDS = {
     "sequence_jump",
     "motor_check_start",
     "motor_check_abort",
+    "reenergize_motors",
     "set_court",
     "checklist_set",
     "checklist_reset",
@@ -240,6 +241,8 @@ class TestEStopGate:
             "manual_move",
             "manual_set",
             "manual_jog",
+            # 緊急停止中に励磁してはならない (緊急停止の意味が消える)
+            "reenergize_motors",
         }
 
     @pytest.mark.parametrize(
@@ -301,10 +304,29 @@ class TestManualModeGate:
             # 動作確認の手動モードとの排他は `_motor_check_environment_deny()` が
             # 両ロボット横断で持つ (ここで重複させない)
             "motor_check_start",
+            # 手動はシーケンスからの退避路そのものなので、手動中に落ちた励磁を
+            # 手動のまま戻せないと退避路自体が詰む
+            "reenergize_motors",
         ],
     )
     def test_not_gated_by_manual_mode(self, command: str) -> None:
         assert COMMANDS[command].blocked_during_manual is False
+
+
+class TestReenergizeMotorsGate:
+    """励磁が落ちたモータを機体を止めずに戻す操作。CommandSpec が答えるのは
+    「フェーズ / 緊急停止 / 手動モード」の 3 軸だけで、動作確認との排他と
+    ロボット単位の in-flight ガードはハンドラ側 (`RobotServer._cmd_reenergize_motors`)
+    が持つため、ここでは対象外にする。
+    """
+
+    @pytest.mark.parametrize("phase", list(Phase))
+    def test_every_phase_is_allowed(self, phase: Phase) -> None:
+        assert phase_deny_reason("reenergize_motors", phase) is None
+
+    def test_denied_during_e_stop(self) -> None:
+        """緊急停止中に励磁してはならない (緊急停止の意味が消える)。"""
+        assert e_stop_deny_reason("reenergize_motors") is not None
 
 
 class TestManualCommandsAreNotPhaseGated:

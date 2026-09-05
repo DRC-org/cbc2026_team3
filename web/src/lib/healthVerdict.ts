@@ -40,6 +40,13 @@ export interface SafetyIssue {
   hint: string;
 }
 
+/**
+ * 「無励磁のまま」issue の固定ラベル。`SubsystemStatus` が再励磁ボタンを
+ * どの issue に添えるか判定するのに使う。文言をここ 1 箇所にしておかないと、
+ * 打鍵ミスでボタンが出なくなっても型検査を通ってしまう。
+ */
+export const UNENERGIZED_ISSUE_LABEL = "無励磁のまま";
+
 /** モータ温度の色分けに使うしきい値 [℃]。正はサーバーの config にしかない */
 export interface TempThresholds {
   warning: number;
@@ -179,12 +186,15 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
   }
 
   // 緊急停止は解除されているのに励磁が戻っていない。指令は 20Hz で飛び続け、
-  // フィードバックもヘルスも正常なので、ここで言わないと誰も気付けない
+  // フィードバックもヘルスも正常なので、ここで言わないと誰も気付けない。
+  // 復帰させる操作 (reenergize_motors) はこの機体の操縦者画面にしか無い
+  // (Monitor はどのロボットの画面かを跨いで表示するため、ここではボタンでなく
+  // 導線だけを言葉で示す)
   if (safety.unenergized_motors.length > 0) {
     issues.push({
-      label: "無励磁のまま",
+      label: UNENERGIZED_ISSUE_LABEL,
       detail: safety.unenergized_motors.join(", "),
-      hint: "指令は届いていますが励磁されていません。緊急停止をもう一度押して解除し直してください (直らなければドライバの電源と CAN 配線を確認)",
+      hint: "指令は届いていますが励磁されていません。操縦者画面の「再励磁」ボタンを押してください (直らなければ緊急停止をもう一度押して解除し直すか、ドライバの電源と CAN 配線を確認)",
     });
   }
 
