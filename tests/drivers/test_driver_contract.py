@@ -15,7 +15,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 
 #: モータ単位の能動テスト (旧 MotorCheckRunner) 用に置かれていた語彙。
-#: 動作確認は両ハンド 1 本のシーケンス (robots/motor_check.py) へ移り、合否は
+#: 動作確認は両ハンド 1 本のシーケンス (sequences/motor_check.py) へ移り、合否は
 #: シーケンスエンジンの到達判定が担うので、この API 群は 1 つも復活させない
 _REMOVED_CHECK_API = (
     "check_command",

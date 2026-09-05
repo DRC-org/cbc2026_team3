@@ -1341,7 +1341,7 @@ class TestLoadAllConfigs:
 
 
 class TestSequenceClassSelection:
-    """robots/<name>.py から登録するシーケンスの決め方。
+    """sequences/<name>.py から登録するシーケンスの決め方。
 
     かつては ``dir()`` の並び (アルファベット順) の先頭を採っていたため、
     モジュールが他機体のシーケンスを import しただけで乗っ取られえた
@@ -1381,7 +1381,7 @@ class TestSequenceClassSelection:
         """名前順で先頭に来る import 済みクラスに乗っ取られないこと。"""
         module = self._module(
             self._PREAMBLE
-            + "from robots.motor_check import MotorCheckSequence\n"
+            + "from sequences.motor_check import MotorCheckSequence\n"
             + "class ZzzOwn(Sequence):\n    pass\n"
         )
 

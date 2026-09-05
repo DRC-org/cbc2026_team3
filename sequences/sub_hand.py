@@ -7,8 +7,8 @@ from lib.sequence.engine import Sequence, step
 logger = logging.getLogger(__name__)
 
 #: 吸着パッドの電磁弁。config/sub_hand_positions.yaml の axes と 1:1 で対応する。
-#: 数値ではなく軸名の一覧なので robots/ に置いてよい (値・待ち時間は yaml が持つ)。
-#: 動作確認 (`robots/motor_check.py`) も同じ 1 つを参照する。
+#: 数値ではなく軸名の一覧なので sequences/ に置いてよい (値・待ち時間は yaml が持つ)。
+#: 動作確認 (`sequences/motor_check.py`) も同じ 1 つを参照する。
 VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
 
 
@@ -43,7 +43,7 @@ class SubHandSequence(Sequence):
     症状が配線・換算の誤りと区別できなくなる。機構寸法が確定したら
     `config/sub_hand_positions.yaml` に受け渡し / 配置の位置名を足したうえで、
     ここへステップとして組み込むこと。
-    2 軸とも動作確認 (`robots/motor_check.py`) と手動操縦の対象には入っているので、
+    2 軸とも動作確認 (`sequences/motor_check.py`) と手動操縦の対象には入っているので、
     シーケンスに現れないこと自体は「未接続」を意味しない。
     """
 

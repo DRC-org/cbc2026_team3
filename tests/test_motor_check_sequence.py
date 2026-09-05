@@ -1,4 +1,4 @@
-"""統合動作確認シーケンス (robots/motor_check.py)。
+"""統合動作確認シーケンス (sequences/motor_check.py)。
 
 **実際に出荷する config で成立することを見る。** シーケンスが参照する軸名・位置名は
 `config/*_positions.yaml` にしか存在しないので、片方だけ直すと「動作確認を押した
@@ -17,11 +17,11 @@ from collections.abc import Mapping
 import pytest
 import yaml
 
-import robots.main_hand as main_hand
-import robots.sub_hand as sub_hand
+import sequences.main_hand as main_hand
+import sequences.sub_hand as sub_hand
 from lib.match_state import Court
 from lib.sequence.positions import PositionTable, load_position_table
-from robots.motor_check import MAIN_HOME, REQUIRED_AXES, SUB_HOME, VALVE_AXES, MotorCheckSequence
+from sequences.motor_check import MAIN_HOME, REQUIRED_AXES, SUB_HOME, VALVE_AXES, MotorCheckSequence
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 

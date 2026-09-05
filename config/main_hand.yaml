@@ -3,13 +3,13 @@ robot_name: main_hand
 # バス別名 (m3508_bus 等) の定義・health の共通設定は config/system.yaml。
 # 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
 #
-# 動作確認の駆動量はここに書かない。robots/motor_check.py が
+# 動作確認の駆動量はここに書かない。sequences/motor_check.py が
 # config/*_positions.yaml の位置名へ動かすので、確認用の値そのものが存在しない。
 
 motors:
   # --- 逆回転ペア軸 y_axis (ラックアンドピニオンの前後移動) ---
   # 左右 2 台が機構的に直結しており、位置がずれるとその場で機構が壊れる。
-  # 動作確認は **軸単位** で指令するので (robots/motor_check.py の move_to)、
+  # 動作確認は **軸単位** で指令するので (sequences/motor_check.py の move_to)、
   # 左右が同じフレームで同時に動く。かつてモータ単位で 1 台ずつ駆動していた頃は
   # 単独駆動が構造的に避けられず、確認そのものから除外するしかなかった。
   # 左右のずれは checklist.yaml の y_axis_sync で目視確認する。
@@ -79,8 +79,8 @@ motors:
   # 2 台の機械ゼロは揃っておらず、逆回転ペアは scale の符号で向きを表すので、
   # 物理的に同じ姿勢でも人間の単位へ逆換算すると差として現れる
   #   deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
-  # 実機では起動直後に 175.879deg (sync_tolerance 3.0deg) となり、SyncMonitor が
-  # 全体緊急停止を掛けて機体が 1 ステップも動かせなかった。
+  # 実機では起動直後に 175.879deg (当時の sync_tolerance 3.0deg。現在は 5.0deg) と
+  # なり、SyncMonitor が全体緊急停止を掛けて機体が 1 ステップも動かせなかった。
   #
   # true にすると initialization_steps() の末尾で set_zero (通信タイプ 0x06) を送り、
   # 電源投入時の姿勢がそのまま原点になる。直結した 2 台は同じ姿勢を取るため差は消える。
@@ -122,7 +122,7 @@ motors:
 
   # --- 離散状態アクチュエータ (自作モータドライバ — CAN Standard Frame) ---
   # 開 / 閉 のような数状態しか取らない。動作確認も運用と同じ位置名へ動かすので
-  # (robots/motor_check.py)、確認専用の駆動量は存在しない。かつては magnitude を
+  # (sequences/motor_check.py)、確認専用の駆動量は存在しない。かつては magnitude を
   # 別に持っており、位置定数と食い違うと「動作確認で動いた位置」と「運用で使う位置」が
   # 別物になる、という形で確認が意味を失っていた。
 

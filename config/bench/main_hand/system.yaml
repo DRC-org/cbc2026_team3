@@ -1,14 +1,21 @@
-# メインハンド一式ベンチ (機構未装着) 用の共通設定。
+# サブハンド不在 (Damiao DM3520 用 CANable 未接続) でメインハンド実機を動かす構成の
+# 共通設定。
 #
-# **単体ベンチでは確かめられないことのために置いている。**
-# config/bench/m3508/ と config/bench/edulite/ は 1 本の CANable しか開かないので、
-# 「複数本挿した状態で全部が読めるか」を一度も通らない。実機のメインハンドは M3508 /
-# EDULITE 05 / 自作モタドラが同じ PC・同じプロセスにぶら下がる構成なので、機構へ
-# 組み込む前の最後の机上確認としてここを通す。**単体で 1 種ずつ確かめた後に使うこと**
-# —— いきなりここから始めると、落ちたときに CAN ID なのかバスなのか配線なのかを
-# 切り分ける手掛かりが無い。
+# メインハンドの機構が完成する前は「メインハンド一式ベンチ (機構未装着)」として
+# 使っていたが、機構の付いた実機が完成した今は机上確認ではなく、**サブハンドを
+# 繋がずにメインハンド実機を動かす構成**になっている。サブハンド不在の理由は
+# Damiao DM3520 用の CANable を挿していないことで、本番の config/system.yaml は
+# can_buses に並んだ 4 本を main.py の _setup_robot() が**すべて** open するため、
+# そのままでは [Errno 19] No such device で起動しない。このセットが can_buses を
+# 3 本 (M3508 / EDULITE 05 / 自作モタドラ) に絞っていることだけが、DM3520 未接続の
+# まま起動できる根拠になっている。
 #
-# 同時に載せることで初めて確かめられること:
+# モータ構成・位置定数は本番の config/main_hand.yaml / config/main_hand_positions.yaml
+# をそのまま使う (**このセット専用のベンチ値ではなく、実機の実測値入りの本番設定**)。
+#
+# それでも、単体ベンチでは確かめられないことを確かめる場としての価値は生きている:
+#   - config/bench/m3508/ と config/bench/edulite/ は 1 本の CANable しか開かないので、
+#     「複数本挿した状態で全部が読めるか」を一度も通らない
 #   - CANable 3 本の固定名が入れ替わっていないこと。バス名は udev が serial で固定するが、
 #     config/can_buses.yaml の serial が実機とずれれば入れ替わる。**C620 へ EDULITE 用の
 #     指令が飛ぶ事故 (CLAUDE.md「CAN バス名は udev で個体固定する」) は、複数本挿した
@@ -24,7 +31,7 @@
 # 使い方:
 #   scripts/setup_can.sh
 #   uv run python main.py --system config/bench/main_hand/system.yaml \
-#       --config config/bench/main_hand/main_hand.yaml \
+#       --config config/main_hand.yaml \
 #       --checklist config/bench/main_hand/checklist.yaml
 
 can_buses:

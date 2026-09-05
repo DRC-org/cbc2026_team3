@@ -7,9 +7,9 @@ from lib.sequence.engine import Sequence, step
 logger = logging.getLogger(__name__)
 
 #: メインハンドの初期姿勢。**軸名と位置名の一覧であって数値ではない**ので
-#: robots/ に置いてよい (単位換算・許容差・待ち時間はすべて位置定数 yaml が持つ)。
+#: sequences/ に置いてよい (単位換算・許容差・待ち時間はすべて位置定数 yaml が持つ)。
 #: シーケンスの往路 (`move_to_home`) と復路 (`return_home`)、および
-#: 動作確認 (`robots/motor_check.py`) が同じ 1 つを参照する。書き写すと、機構が
+#: 動作確認 (`sequences/motor_check.py`) が同じ 1 つを参照する。書き写すと、機構が
 #: 変わったときに片方だけ直った状態が作れる。
 HOME: dict[str, str] = {
     "y_axis": "home",

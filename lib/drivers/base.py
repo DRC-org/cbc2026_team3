@@ -252,7 +252,7 @@ class MotorDriver(abc.ABC):
     # / `feedback_probe_message` は起動経路 (`CANManager.initialize_motors`) が使う。
     #
     # 動作確認 (セッティングタイム) はここに専用 API を持たない。両ハンドを 1 本の
-    # シーケンス (robots/motor_check.py) で駆動する形にしたので、合否はシーケンス
+    # シーケンス (sequences/motor_check.py) で駆動する形にしたので、合否はシーケンス
     # エンジンの到達判定 (`is_target_reached`) がそのまま担う。
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:

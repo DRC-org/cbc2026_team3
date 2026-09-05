@@ -88,6 +88,12 @@ uv run python main.py \
 #    main_hand だけは CANable 3 本 (can_m3508 + can_edulite + can_generic) を
 #    同時に要求する。
 #    会場で 1 本欠けているときに選んではならない (起動しない)
+#    main_hand だけは --config も本番の config/main_hand.yaml を渡す
+#    (config/bench/main_hand/ は robot yaml / positions を持たない。
+#     --system と --checklist だけを bench/main_hand/ から渡す):
+#      uv run python main.py --system config/bench/main_hand/system.yaml \
+#          --config config/main_hand.yaml \
+#          --checklist config/bench/main_hand/checklist.yaml
 
 # (c) 機体を動かさずに UI と手順だけ確認する
 uv run python main.py --dry-run

@@ -25,7 +25,7 @@
 | | 答える問い | 頻度 | 判定するのは | 実装 |
 |---|---|---|---|---|
 | ① 受動ヘルス監視 | 今 CAN とモータは生きているか | 20Hz 配信 | サーバー | `lib/health.py` + `CANManager.health()` |
-| ② 統合動作確認 | 指令したら本当に動くか | 準備中に 1 回 | シーケンスエンジン + 人 | `robots/motor_check.py` |
+| ② 統合動作確認 | 指令したら本当に動くか | 準備中に 1 回 | シーケンスエンジン + 人 | `sequences/motor_check.py` |
 | ③ 常駐保護 | 壊れる前に力を抜けるか | 200 / 50 / 20Hz | 各周期タスク | `lib/control/` |
 | ④ 指差喚呼 | ①②が見られないものを人が見たか | 試合前 | 人 | `config/checklist.yaml` |
 
@@ -308,10 +308,9 @@ ifindex を変えないので、待って呼び直せば戻る。バスを作り
 成り立たない。中断した窓でモータ軸が半周以上回ると方向を取り違え、累積角に
 1 回転（360deg）が乗る。
 
-`y_axis` の scale 55.0131deg/mm では **6.54mm**。同じ軸の `sync_tolerance` は
-**2.0mm** なので 3 倍を超える —— **左右の片方だけに乗れば、実在しないずれで
-その場で全体緊急停止が掛かる。** ウォッチドッグの `down`/`up` は約 1 秒なので、
-1 回の復旧動作がそのまま試合を止めうる。
+`y_axis` の scale 55.0131deg/mm では **6.54mm**。`sync_tolerance` は現在 **10.0mm**
+なので 1 回転の注入はこの内側に収まり、**注入 1 発では止まらない**
+（検出経路は再アンカーの WARNING（`health_detail()`）だけになる）。
 
 **窓は受信の中断だけでなく、受信の取りこぼしでも開く。しかもそちらは黙って開く。**
 カーネルのソケットバッファが溢れると、その分のフレームは PC まで届かない
@@ -383,7 +382,7 @@ MotorCheckController.deny_reason()       ← 起動できるかの唯一の判�
 MotorCheckController.start()
         │  全ロボットの position_loop / target_refresher を pause
         ▼
-MotorCheckSequence.run()          ← robots/motor_check.py
+MotorCheckSequence.run()          ← sequences/motor_check.py
         │
         ├── 零点確定 (lib/sequence/homing.py)
         ├── メインハンド: y 軸 → 回転 → グリッパ → 壁 → コンベア
@@ -518,8 +517,8 @@ homing:
 deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 ```
 
-実機では起動直後に **175.879deg**（`sync_tolerance` 3.0deg）となり、`SyncMonitor` が
-全体緊急停止を掛けて機体が 1 ステップも動かせなかった。零点確定が入るまでの暫定措置
+実機では起動直後に **175.879deg**（当時の `sync_tolerance` 3.0deg。現在は 5.0deg）
+となり、`SyncMonitor` が全体緊急停止を掛けて機体が 1 ステップも動かせなかった。零点確定が入るまでの暫定措置
 として `config/main_hand.yaml` の `rotate_r` / `rotate_l` を **`set_zero_on_start: true`**
 にしてあり、起動のたびに `set_zero`（通信タイプ `0x06`）を送って電源投入時の姿勢を
 原点にしている。直結した 2 台は同じ姿勢を取るので差は消える。
