@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import pytest
 
-from lib.sequence.homing import HomingError, HomingRunner
+from lib.sequence.homing import _FOLLOW_ATTEMPTS, _STALL_LIMIT, HomingError, HomingRunner
 from lib.sequence.motors import AxisHandle, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
 
 
-def _table(**homing_overrides: object):
+def _table(*, tolerance: float = 0.1, **homing_overrides: object):
     homing: dict = {
         "sensor": "origin_sensor",
         "direction": -1,
@@ -36,7 +36,7 @@ def _table(**homing_overrides: object):
                 "y_axis": {
                     "unit": "mm",
                     "command_unit": "deg",
-                    "tolerance": 0.1,
+                    "tolerance": tolerance,
                     "sync_tolerance": 100.0,
                     "homing": homing,
                     "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
@@ -404,6 +404,49 @@ class TestReleasesBeforeSeeking:
 
         # 上限は step の定数倍。search_distance (500) ぶん動いてはいない
         assert len(rec.commands) < 30
+
+
+class TestFollowWaitThreshold:
+    """`_wait_step` の早期リターン閾値は `spec.tolerance` ではなく `homing.step` に基づく。
+
+    `commanded = observed + direction * step` なので、1mm も動いていない機構でも
+    `|observed - commanded|` は常にちょうど `step` になる。`tolerance` を閾値に
+    使っていた頃は、`tolerance >= step` の軸 (本番の `y_axis`: `tolerance: 1.0` /
+    `homing.step: 0.5`) で「動いた」と「動いていない」を一切区別できず、初回の
+    `settle_s` 1 回で必ず抜けていた —— 追従待ちが `_FOLLOW_ATTEMPTS` 回の設計から
+    実質 1 回へ縮退する。**既存テストは逆の比率 (`tolerance 0.1 < step 1.0`) しか
+    持っておらず、この経路を一度も踏んでいなかった。** ここでは両方の比率を見る。
+    """
+
+    async def test_本番と同じ比率_toleranceがstepより大きい_でも追従待ちは設計上限まで実行される(
+        self,
+    ) -> None:
+        """`tolerance(1.0) > step(0.5)`。修正前はここで sleep が 1 回に縮退していた。"""
+        table = _table(tolerance=1.0, search_distance=100.0, step=0.5)
+        spec = table.axis("y_axis")
+        # 1mm も動かない機構。センサにも当たらないので、停滞判定 (_STALL_LIMIT 歩)
+        # まで確実に到達する
+        rec = _Recorder()
+
+        with pytest.raises(HomingError, match="動きません"):
+            await _runner(rec).home(spec, _handle(spec, rec, follows=False))
+
+        # 1 歩ごとに _FOLLOW_ATTEMPTS 回 sleep してから停滞と判定するのが設計。
+        # tolerance を閾値に使う実装 (修正前) では 1 歩ごとに 1 回で抜けてしまう
+        assert rec.sleeps == _STALL_LIMIT * _FOLLOW_ATTEMPTS
+
+    async def test_逆の比率_tolerance小于step_でも追従待ちは設計上限まで実行される(
+        self,
+    ) -> None:
+        """既存テストと同じ比率 (`tolerance 0.1 < step 1.0`)。両方の比率を見ておく。"""
+        table = _table(tolerance=0.1, search_distance=100.0, step=1.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder()
+
+        with pytest.raises(HomingError, match="動きません"):
+            await _runner(rec).home(spec, _handle(spec, rec, follows=False))
+
+        assert rec.sleeps == _STALL_LIMIT * _FOLLOW_ATTEMPTS
 
 
 class TestSpecValidation:

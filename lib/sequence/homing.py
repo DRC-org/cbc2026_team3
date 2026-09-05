@@ -300,13 +300,25 @@ class HomingRunner:
         **待っている間も見る**のは探索と離脱で同じ理由による —— 1 歩の移動中に
         センサの状態が変わるので、歩き終えてからしか見ないと、変化した位置ではなく
         その歩の終点が原点になる (step ぶん余計に行き過ぎる)。
+
+        **早期リターンの閾値に `spec.tolerance` (到達許容差) を使ってはならない。**
+        `commanded = observed + direction * step` なので、機構が 1mm も動かなくても
+        `|observed - commanded|` は常にちょうど `step` になる。`tolerance >= step` の軸
+        (本番の `y_axis`: `tolerance: 1.0` / `homing.step: 0.5`) では、この判定が
+        「動いた」と「動いていない」を一切区別できなくなり、初回の `settle_s` 1 回で
+        必ず抜けてしまう —— 追従待ちが `_FOLLOW_ATTEMPTS` 回の設計から実質 1 回へ
+        縮退し、`_seek` の停滞判定 (`stalled`) が実移動を観測できる時間まで削られる。
+        閾値は必ず `step` より小さい値にすること。`step / 2.0` にしたのは、`_seek` が
+        「進んだ」を判定する基準 (`abs(observed - previous) >= step / 2.0`) と同じに
+        揃えるため —— 別の基準にすると、ここでは「進んだ」と判定されたのに `_seek`
+        側では「停滞」と判定される、といった食い違いが起こり得る。
         """
-        tolerance = spec.tolerance if spec.tolerance is not None else homing.step
+        follow_tolerance = homing.step / 2.0
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
             if self._sensor_active(homing.sensor) is want_active:
                 return True
-            if abs(self._observe(spec, handle) - commanded) <= tolerance:
+            if abs(self._observe(spec, handle) - commanded) <= follow_tolerance:
                 return False
         return False
 
