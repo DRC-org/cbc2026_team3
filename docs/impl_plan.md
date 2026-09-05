@@ -224,7 +224,7 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 | インターフェースの状態 | `_create_bus()` | 受信ループ |
 |---|---|---|
 | 存在しない | `OSError: [Errno 19] No such device` で起動失敗 | — |
-| 存在するが down | **オープン成功。例外は出ない** | `bus.recv` が `CanOperationError` を投げ続ける |
+| 存在するが down | **オープン成功。例外は出ない**（起動ログに `operstate` 検出の ERROR が出る） | `bus.recv` が `CanOperationError` を投げ続ける |
 | up | 正常 | 正常 |
 
 問題は 2 行目。`CANManager.run()` は `_receive_loop` を `asyncio.create_task` で起こす
@@ -237,8 +237,14 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 「受信ループは断絶で降りない」を参照）。失敗は `LogThrottle` を通して残す。
 
 `cbc-can.service` により通常は起動時に up されるため実害は出にくいが、service が失敗した
-場合などに起きうる。**残る対策候補は `_create_bus()` にインターフェースの `operstate` 検証を
-追加し、down なら起動を止めること**で、これは未着手。
+場合などに起きうる。**`_create_bus()` は `operstate` (`/sys/class/net/<channel>/operstate`)
+を見て down なら起動ログへ 1 行 ERROR を残す**（インタフェース名を必ず入れる）。
+**起動は止めない** — 「揃っているかに答えるのは人である」という方針そのままで、
+`--strict` の点検を通していない構成（片ハンドだけの練習・机上ベンチ・会場での逃げ道）を
+一律に潰さないため。判定できない場合（`--dry-run` の virtual バスや `/sys` に実体が
+無い環境）は `None` として「分からない」へ倒し、そのこと自体もログに出さない
+（平常時のログを埋めないため）。`main._read_operstate()` / `main._create_bus()` の
+`read_operstate` 引数として注入できる。
 
 ---
 
@@ -5808,7 +5814,7 @@ CAN のフィードバックは無励磁でも正常に届くので、鮮度か�
 | フィードバックが得られないと EDULITE が無励磁のまま残る | Phase 9 の `activate_motor()` は待機（既定 0.5s）の間にフィードバックを受け取れないと enable を送らず、WARNING をログに出すだけ | 電源断・配線ミス・CAN 断のときは「シーケンスは進むのに軸だけ動かない」状態になる。ログを見ないと気づけないので、有効化を見送ったモータを UI（health / 起動時バナー）に出す仕組みが欲しい。なお `--dry-run` は virtual バスで応答が無いため、この WARNING が必ず 2 件出るのが正常 |
 | ホーミングは `rotate` で実機検証済み。`y_axis` は未検証 | Phase 11 で `lib/sequence/homing.py` を入れ、動作確認シーケンスの最初のステップが `set_group_origin_here()` まで到達する。**`rotate` は 2026-09-05 に実機で通った**（離脱 → 寄せ直しで 0.70deg 動いて到達、`SET_ZERO` まで到達。上の「`rotate` の零点確定を実機で通した」節）ので、`direction` −1 / `settle_s` 0.05s は実機の機構で妥当だと分かっている。**`search_distance` だけは触れた状態から始めたため一度も試されていない。** `step` は**現在 1.0deg**（原点の分解能を優先。上の「`step` を 1.0deg へ詰めた」節）で、**この刻みでの通し確認はまだ取っていない。** `y_axis` はスイッチ未装着で `homing:` ごとコメントアウト中なので 3 値とも仮値のまま | 探索の整定時間は `rotate` では確認できた。`step` の下限は実機で分かっている（0.5deg では静止摩擦を超えられず 1 歩も動かない）が、現在値 1.0deg はその 2 倍しかないので**停滞判定で落ちるようなら 1.5deg 前後へ戻す**。`y_axis` はスイッチが付く日に同じ確認が要る（探索の起点と歯止めそのものは下記「【済】」で解消した） |
 | 零点確定が有効なのは `rotate` だけ | `main.py` の `_make_origin_resolver` は「PC 側位置制御ループ（M3508）」と「ドライバへの `SET_ZERO`」の 2 つを順に探し、可否はドライバ自身の `supports_origin_capture()` が答える（`deactivation_steps()` と `origin_capture_steps()` の両方を持つドライバだけが宣言できる）。EDULITE 05 は宣言するので `rotate` の `homing:` は**有効**（センサはサーボ基板 #0 の SV3 = `0x43`、実機で接触が読めることを確認済み） | **`sub_y_axis` / `sub_lift`（DM3520）は宣言しない** —— `SET_ZERO` の安全な順序（`disable → set_zero`）が **`sub_lift` の自重落下**と両立しないため。スイッチを付けて `homing:` を有効化しても必ず `HomingError` で落ちる（**ただし 1 歩も動かずに落ち、起動ログにも `ERROR` で出る**）。**`y_axis`（M3508）は確定手段があるのにスイッチが未装着**で、ファームの `kSlotsByBoard` 基板 #0 SV4 は `Unused`、`sensors:` にも `homing:` にも書いていない（3 箇所は必ず同時に戻す。上の「零点確定を rotate へ移し、y_axis を一時無効化した」節）。原点が確定できない軸は**電源投入位置がそのまま原点**で、ずれは指差喚呼（`main_home_position` / `sub_dm3520_origin`）が人の目で埋める。**ただし `rotate` は放っておくと電源投入位置すら原点にならない** —— EDULITE 05 の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として現れ（実機で 175.879deg）、起動直後に `SyncMonitor` が全体緊急停止を掛ける。`rotate_r` / `rotate_l` の `set_zero_on_start: true` がこれを消しており、**零点確定が有効になっても `false` へ戻してはならない**（戻すと機体が動かせず、動作確認そのものを開始できない）。**`direction` −1 は 2026-09-05 に実機で確定した。`step` は同日に下限が分かっている**（0.5deg では静止摩擦を超えられず `HomingError`）が、**現在値 1.0deg はその 2 倍で、この刻みでの通し確認はまだ**。**未実測は `search_distance` 180.0deg だけ** —— その日の零点確定はスイッチに触れた状態から始めたので、この歯止めが効く経路を通っていない。探索は現在 180 ステップ・最短 9 秒（最悪 45 秒） |
-| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。`operstate` の検証は未実装 | 受信ループは `bus.recv` の失敗で降りずに待って呼び直し、そのあいだ `rx_down` を立てるので、UI にはそのバスが `BusHealth.DOWN` として出る（up すればそのまま復帰する）。起動そのものを止める仕組みは無いままなので、`--strict` の点検を通していない構成では「立ち上がったが 1 通も読めていない」状態で始まりうる。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
+| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。**`operstate` を見て down なら起動ログへ 1 行 ERROR を残すようになった**（インタフェース名入り。判定できない場合 — `--dry-run` の virtual バスや `/sys` に実体が無い環境 — は「分からない」へ倒し、ログも出さない）。**起動は拒否しない** — `--strict` を通していない構成（片ハンドだけの練習・机上ベンチ・会場での逃げ道）を一律に潰さない判断のまま | 受信ループは `bus.recv` の失敗で降りずに待って呼び直し、そのあいだ `rx_down` を立てるので、UI にはそのバスが `BusHealth.DOWN` として出る（up すればそのまま復帰する）。**down そのものは起動ログから読めるようになったが**、起動そのものを止める仕組みは無いままなので、`--strict` の点検を通していない構成では「立ち上がったが 1 通も読めていない」状態で始まりうる（ログを見なければ気づけない）。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
 | サブハンド不在構成（`config/bench/main_hand/`）では `y_axis` の原点が未確定のまま、checklist の記述も実態とずれている | かつては `sequences/motor_check.py` の `REQUIRED_AXES` が両ハンドの全軸を要求し、この構成では `MotorCheckSequence` そのものが登録されなかった。**その `REQUIRED_AXES` は削除済み**で、構成に無い軸のステップは `Sequence.restrict_to_axes()` が除外して残りを登録する（上の「構成に無い軸の動作確認ステップを除外する」節）。**この構成でも動作確認は登録され、最初のステップである `rotate` の零点確定は走る**（2026-09-05 に実機で完走）。**走らないのは `y_axis` の零点確定だけで、理由は登録の可否ではなくリミットスイッチが未装着で `homing:` ごとコメントアウトされていること**（本番構成でも同じく走らない）。加えて `config/bench/main_hand/checklist.yaml` の項目は M3508 と EDULITE 05 のものだけで、この構成が開く `can_generic`（`system.yaml` の `generic_bus: can_generic` により本番 `config/main_hand.yaml` の `gripper` / `conveyor` / `wall_f` / `wall_r` と `sensors.rotate_origin_sensor` がそのまま構成に入る）の確認項目が無い（本番 `config/checklist.yaml` にある `conveyor_run` / `origin_sensor_react` / `main_gripper_open` / `wall_initial` に相当するものが無い）。同 checklist の `bench_return_home` は「両軸に home を送り、どちらも電源投入位置へ戻ること確認」という文言で、`rotate` は `set_zero_on_start: true` なので今も成立するが、`y_axis` は本来ホーミング（リミットスイッチ探索）で原点を確定する軸であり `home` は電源投入位置ではない。ただし前述のとおりスイッチ未装着でそのホーミングが走らないため、結果的に電源投入位置が原点になっているという二重にねじれた状態にある | 位置定数は原点からの相対値なので、電源投入位置がそのまま `y_axis` の原点として扱われる。実測ストロークが 650mm へ広がった今、原点がずれたまま走らせると全ステップが同じだけずれた場所へ動く。**動かす前に機体を原点位置へ置いておくことが人の責任になり、UI にもログにも「原点が未確定である」ことは出ない。** 手動操縦（`y_axis` / `rotate`）は使えるので、そちらで確認しながら動かすことになる。DC 基板はフィードバックを一切持たず動作を自動判定できないので目視確認が唯一の手段だが（CLAUDE.md「この基板の動作は自動判定できない」）、その確認項目が checklist に無いため確認されないまま通る（どういう項目を置くべきかは実機を見ている人が決めることなので、ここでは「無い」という事実だけを記録する）。`bench_return_home` の文言をそのまま読むと `y_axis` もホーミングで原点確定されるかのように読めるが、実際には走らないホーミングを前提にした文言が、走らないこと自体によって結果的に辻褄が合ってしまっている |
 | `config/bench/y_axis_tuning/system.yaml` のコメントが本番の `sync_tolerance` と食い違う | 同ファイル冒頭のコメントは「保護値は本番と同じに保ち、代わりに出力上限だけを下げる」とあるが、実際のこのセットの `main_hand_positions.yaml` の `axes.y_axis.sync_tolerance` は 2.0mm で、本番 `config/main_hand_positions.yaml` の `axes.y_axis.sync_tolerance` は 10.0mm（2026-09-04 のコミット `5aa89c3` で 2.0 → 10.0 へ緩められている）で一致していない | どちらが正か（ベンチ側を本番に合わせて 10.0mm へ更新するのか、コメントの方が古いだけで意図的に 2.0mm のまま据え置いているのか）は現時点の記述からは判断できない |
 

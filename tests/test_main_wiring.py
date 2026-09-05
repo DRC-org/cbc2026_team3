@@ -1465,6 +1465,94 @@ class TestRobotBusSelection:
         assert "setup_can.sh" in message
 
 
+class TestCreateBusOperstate:
+    """**down しているインタフェースでも起動は止めない。ログにだけ出す。**
+
+    `--strict` を通していない構成 (片ハンドだけの練習・机上ベンチ・会場での逃げ道) を
+    一律に潰さないため、拒否は足さない。価値は「人が最初に見る場所 (起動ログ) に、
+    原因をインタフェース名付きで残す」ことだけ。`docs/impl_plan.md` の
+    「既知の制約: バス down 時の失敗が分かりにくい」参照。
+    """
+
+    def test_down_なら起動ログにERRORでインタフェース名を残す(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.ERROR),
+        ):
+            main._create_bus("can_m3508", dry_run=False, read_operstate=lambda _channel: "down")
+
+        assert any(
+            "can_m3508" in record.getMessage() and record.levelno == logging.ERROR
+            for record in caplog.records
+        )
+
+    def test_down_でも起動は止めない(self) -> None:
+        with patch("main.can.Bus", return_value=MagicMock()) as bus_ctor:
+            bus = main._create_bus(
+                "can_m3508", dry_run=False, read_operstate=lambda _channel: "down"
+            )
+
+        assert bus is bus_ctor.return_value
+
+    def test_up_ならログを出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.ERROR),
+        ):
+            main._create_bus("can_m3508", dry_run=False, read_operstate=lambda _channel: "up")
+
+        assert caplog.records == []
+
+    def test_unknown_は_up_なのでログを出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """**SocketCAN は up でも `unknown` を返す** (carrier を管理しない)。
+
+        判定を `!= "up"` へ書き換えると健全なバスが毎回起動ログを汚す。
+        """
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.ERROR),
+        ):
+            main._create_bus("can_m3508", dry_run=False, read_operstate=lambda _channel: "unknown")
+
+        assert caplog.records == []
+
+    def test_判定できなければログを出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`None` (存在しないインタフェース。virtual バスやテスト環境) は「分からない」
+
+        であって異常ではない。判定できなかったこと自体もログに出さない —
+        平常時 (virtual バス) に毎回警告が出るとログが埋もれる。
+        """
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.DEBUG),
+        ):
+            main._create_bus("can_m3508", dry_run=False, read_operstate=lambda _channel: None)
+
+        assert caplog.records == []
+
+    def test_dry_run_では判定しない(self) -> None:
+        """`--dry-run` の virtual バスは `/sys/class/net/` に実体が無い。呼び出しごと省く。
+
+        呼ばれたら `AssertionError` で分かるようにする (呼ばなければ落ちない)。
+        """
+
+        def _fail(_channel: str) -> str | None:
+            raise AssertionError("dry_run では read_operstate を呼んではならない")
+
+        bus = main._create_bus("can_m3508", dry_run=True, read_operstate=_fail)
+        bus.shutdown()
+
+    def test_既定は実際のoperstate読み取り関数(self) -> None:
+        assert main._create_bus.__kwdefaults__["read_operstate"] is main._read_operstate
+
+    def test_実体が無ければ判定できないとしてNoneを返す(self) -> None:
+        # 実在しないチャンネル名を渡す。/sys/class/net/<channel>/operstate が無いので
+        # 「判定できない」= None を返す (異常へ倒さない)
+        assert main._read_operstate("does-not-exist-channel-xyz") is None
+
+
 class TestEnsurePortAvailable:
     """**bind の可否は CAN を開くより前に見る。**
 
