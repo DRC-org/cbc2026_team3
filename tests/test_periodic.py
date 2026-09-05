@@ -12,6 +12,7 @@ import logging
 import pytest
 
 from lib.control.periodic import (
+    JITTER_OVERRUN_FACTOR,
     LOG_THROTTLE_S,
     LogThrottle,
     PausablePeriodicTask,
@@ -141,6 +142,32 @@ class TestLogThrottle:
         assert "m3508_bus" in caplog.text
         # 例外情報を落とすと、試合中に原因の分からない 1 行だけが残る
         assert caplog.records[0].exc_info is not None
+
+    def test_warning_same_key_is_throttled_within_interval(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """周期の乱れのような「例外を伴わない」警告も間引く (200Hz なら瞬時に溢れる)。"""
+        clock = FakeClock()
+        throttle = LogThrottle(logging.getLogger("test.throttle"), time_source=clock)
+
+        with caplog.at_level(logging.WARNING, logger="test.throttle"):
+            for _ in range(5):
+                throttle.warning("jitter", "実周期が乱れています")
+
+        assert len(caplog.records) == 1
+        # exception() と違い、正常に完了した tick が遅かっただけなのでトレースバックは無い
+        assert caplog.records[0].exc_info is None
+
+    def test_warning_logs_again_after_interval(self, caplog: pytest.LogCaptureFixture) -> None:
+        clock = FakeClock()
+        throttle = LogThrottle(logging.getLogger("test.throttle"), time_source=clock)
+
+        with caplog.at_level(logging.WARNING, logger="test.throttle"):
+            throttle.warning("jitter", "実周期が乱れています")
+            clock.advance(LOG_THROTTLE_S * 1.1)
+            throttle.warning("jitter", "実周期が乱れています")
+
+        assert len(caplog.records) == 2
 
 
 class TestPeriod:
@@ -341,3 +368,203 @@ class TestPausable:
         await stepping
         await pausing
         assert task.steps == 1
+
+
+class TestJitter:
+    """実周期の実測 (docs/impl_plan.md「乱れているかどうかを知る手段が無い」の解消)。
+
+    `y_axis` の台形速度プロファイルの停止距離も `SyncMonitor` の時間予算も、
+    公称周期どおりに回っていることが前提になっている。それが崩れたことを
+    サンプル列を溜めずに (件数・最大値だけで) 検知できることをここで固定する。
+    """
+
+    async def test_no_overrun_when_on_schedule(self) -> None:
+        """公称通りに回っていれば乱れを 1 件も数えない (平常時は静かにする)。"""
+        clock = FakeClock()
+        task = _Recorder(clock, interval_s=0.01, work_s=0.002, stop_after=5)
+
+        await task.run()
+
+        assert task.jitter_overrun_count == 0
+        assert task.worst_jitter_s == pytest.approx(0.0)
+
+    async def test_overrun_counts_when_period_exceeds_threshold(self) -> None:
+        """公称周期の (1 + JITTER_OVERRUN_FACTOR) 倍を超えたら乱れとして数える。"""
+        clock = FakeClock()
+        # 1 tick が 0.02s かかる = 実周期 0.02s。公称 0.01s に対し超過分 0.01s は
+        # しきい値 (0.01 * 0.5 = 0.005s) を上回るので、その次の tick 開始時に検知される
+        task = _Recorder(clock, interval_s=0.01, work_s=0.02, stop_after=3)
+
+        await task.run()
+
+        assert task.jitter_overrun_count == 2
+        assert task.worst_jitter_s == pytest.approx(0.01)
+
+    async def test_overrun_warning_is_throttled(self, caplog: pytest.LogCaptureFixture) -> None:
+        """乱れの WARNING も `LogThrottle` で間引く (200Hz の乱れが続けば瞬時に溢れる)。
+
+        2 回の乱れが FakeClock 上で 0.02s しか離れていない (`LOG_THROTTLE_S`=1.0s の
+        間引き窓の内側) ので、件数は 2 でも journal に出る行は 1 のはず。
+        """
+        clock = FakeClock()
+        task = _Recorder(clock, interval_s=0.01, work_s=0.02, stop_after=3)
+
+        with caplog.at_level(logging.WARNING, logger="tests.test_periodic"):
+            await task.run()
+
+        assert task.jitter_overrun_count == 2
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+
+    async def test_boundary_exactly_at_threshold_does_not_count(self) -> None:
+        """しきい値ちょうど (超過ではなく到達) は乱れに数えない (`>` であって `>=` でない)。"""
+        clock = FakeClock()
+        threshold_s = 0.01 * JITTER_OVERRUN_FACTOR
+        task = _Recorder(clock, interval_s=0.01, work_s=threshold_s, stop_after=3)
+
+        await task.run()
+
+        assert task.jitter_overrun_count == 0
+
+    async def test_worst_jitter_keeps_max_not_last(self) -> None:
+        """最悪値は最大値を保持し、後続が平常に戻っても最新値へ上書きしない。"""
+
+        class _Variable(_Recorder):
+            """tick ごとに異なる処理時間を与える (1 回だけ大きく遅れる)。"""
+
+            def __init__(self, clock: FakeClock) -> None:
+                super().__init__(clock, interval_s=0.01, stop_after=4)
+                self._work_schedule = [0.03, 0.0, 0.0]
+
+            async def _tick(self) -> None:
+                self.tick_at.append(self.clock.now)
+                if self._work_schedule:
+                    self.clock.advance(self._work_schedule.pop(0))
+                if self.stop_after is not None and len(self.tick_at) >= self.stop_after:
+                    self.request_stop()
+
+        task = _Variable(FakeClock())
+        await task.run()
+
+        assert task.jitter_overrun_count == 1
+        assert task.worst_jitter_s == pytest.approx(0.02)
+
+    async def test_restart_does_not_count_the_stopped_gap(self) -> None:
+        """stop() で空いた間隔を、再起動後の 1 発目の乱れとして数えない。"""
+        clock = FakeClock()
+        task = _Recorder(clock, interval_s=0.001, stop_after=2)
+        task.set_sleep(asyncio.sleep)
+
+        task.start()
+        await asyncio.sleep(0.01)
+        await task.stop()
+        assert task.jitter_overrun_count == 0
+
+        # 停止していた間に長時間が経過した状態を作る (会場で機体を放置した間など)
+        clock.advance(10.0)
+
+        task.stop_after = 4
+        task.start()
+        await asyncio.sleep(0.01)
+        await task.stop()
+
+        # start() が _last_tick_at をリセットしなければ、再開後 1 発目が
+        # この 10 秒の空白をそのまま「実周期」として読み、乱れの最大値へ
+        # 巨大な値が入ってしまう
+        assert task.jitter_overrun_count == 0
+
+    async def test_first_tick_has_no_prior_period_to_compare(self) -> None:
+        """起動直後の 1 発目は比較対象が無いので乱れとして数えない。"""
+        clock = FakeClock()
+        task = _Recorder(clock, interval_s=0.01, work_s=1.0, stop_after=1)
+
+        await task.run()
+
+        assert task.jitter_overrun_count == 0
+        assert task.worst_jitter_s == pytest.approx(0.0)
+
+
+class TestJitterReset:
+    """乱れの記録を試合単位で洗い流す (`reset_jitter_stats`)。
+
+    呼び出し口は `lib/server.py` の `_handle_match_start`。詳しい設計判断
+    (なぜ試合スコープか・なぜ match_reset ではないか・なぜ時間窓方式を
+    採らなかったか) はそちらのコメントに書いてあるので、ここでは
+    `PeriodicTask` 自身の実装 (回数と最悪値を両方落とす / `_last_tick_at`
+    は触らない) だけを固定する。
+    """
+
+    async def test_reset_clears_both_count_and_worst(self) -> None:
+        """回数と最悪値は必ず両方一緒に落ちる (片方だけ残す不整合を作らない)。"""
+        clock = FakeClock()
+        task = _Recorder(clock, interval_s=0.01, work_s=0.02, stop_after=3)
+        await task.run()
+        assert task.jitter_overrun_count == 2
+        assert task.worst_jitter_s == pytest.approx(0.01)
+
+        task.reset_jitter_stats()
+
+        assert task.jitter_overrun_count == 0
+        assert task.worst_jitter_s == pytest.approx(0.0)
+
+    async def test_reset_when_no_overrun_is_a_noop(self) -> None:
+        """乱れが一度も無ければ、リセットしても何も変わらない (0 のまま)。"""
+        task = _Recorder(FakeClock(), interval_s=0.01, work_s=0.001, stop_after=3)
+        await task.run()
+        assert task.jitter_overrun_count == 0
+
+        task.reset_jitter_stats()
+
+        assert task.jitter_overrun_count == 0
+        assert task.worst_jitter_s == pytest.approx(0.0)
+
+    async def test_reset_logs_info_only_when_there_was_an_overrun(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """画面のスコープを試合に縮めた分、journal には INFO で残す (超過 0 件は出さない)。"""
+        clean = _Recorder(FakeClock(), interval_s=0.01, work_s=0.001, stop_after=3)
+        with caplog.at_level(logging.INFO, logger="tests.test_periodic"):
+            await clean.run()
+            clean.reset_jitter_stats()
+        assert not any(r.levelno == logging.INFO for r in caplog.records)
+
+        caplog.clear()
+
+        dirty = _Recorder(FakeClock(), interval_s=0.01, work_s=0.02, stop_after=3)
+        with caplog.at_level(logging.INFO, logger="tests.test_periodic"):
+            await dirty.run()
+            dirty.reset_jitter_stats()
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(infos) == 1
+
+    async def test_reset_does_not_disturb_ongoing_measurement(self) -> None:
+        """リセットは統計だけを落とし、次の tick の実周期計測を巻き添えにしない。
+
+        `_last_tick_at` を触らないことの確認。もしここを ``None`` に戻すと、
+        リセット直後の 1 回だけ実周期の計測を取りこぼし、本当はリセットの
+        直後に起きた乱れを見逃す (「乱れが出るからこの機能を作っている」と
+        矛盾する)。この違いは、リセットを挟んだ後にも乱れを検知できるかで
+        判別できる: `_last_tick_at` を消していれば直後の 1 回ぶんだけ
+        検知漏れが起きるので、最終的な超過回数が 1 少なくなる。
+        """
+        clock = FakeClock()
+
+        class _ResetMidRun(_Recorder):
+            def __init__(self, clock: FakeClock) -> None:
+                super().__init__(clock, interval_s=0.01, work_s=0.02, stop_after=4)
+                self._reset_done = False
+
+            async def _tick(self) -> None:
+                await super()._tick()
+                # 2 tick 目の直後、既に 1 回乱れを記録した状態でリセットする
+                if len(self.tick_at) == 2 and not self._reset_done:
+                    self._reset_done = True
+                    self.reset_jitter_stats()
+
+        task = _ResetMidRun(clock)
+        await task.run()
+
+        # リセットが _last_tick_at も消していれば、3 tick 目の乱れ検知が
+        # 1 回分すり抜けて 1 になる。据え置いていれば 3・4 tick 目の 2 回とも拾う
+        assert task.jitter_overrun_count == 2
+        assert task.worst_jitter_s == pytest.approx(0.01)

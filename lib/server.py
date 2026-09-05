@@ -1106,16 +1106,14 @@ class RobotServer:
         # 開始直前にもう一度流し込む (取りこぼすとシーケンスが逆コートの分岐で動く)
         self._apply_court()
 
-        # CAN 途絶エピソード数を試合単位でリセットする。**match_reset ではなく
-        # match_start を選んだ理由**: 準備中 (配線確認・動作確認) に踏んだ途絶を
-        # ここで洗い流しておかないと、試合中に見えるエピソード数へ準備フェーズの
-        # ぶんが紛れ込み、「この試合で本当に何回起きたか」が読めなくなる。
-        # match_reset (次の準備フェーズへ戻る操作) でリセットすると、直前の
-        # 試合の記録が FINISHED のあいだに消えてしまい、結果確認中の操縦者が
-        # 見返せなくなる。CANManager が「試合」を知らないぶん、いつ呼ぶかは
-        # ここ (サーバー) が決める
+        # 試合単位でリセットする 2 つ。準備中 (配線確認・動作確認) に踏んだぶんを
+        # 洗い流し、試合中の数字を「この試合で起きたこと」だけにする。match_reset では
+        # なく match_start なのは、finished (結果確認中) に直前の試合の記録を消さない
+        # ため。ジッタは画面に出さず journal にだけ残る (しきい値が実機未検証)。
         for ctx in self._robots.values():
             ctx.can_manager.reset_rx_down_episodes()
+            for task in (*ctx.position_loops, *ctx.sync_monitors, *ctx.target_refreshers):
+                task.reset_jitter_stats()
 
         # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
         logger.info("試合開始: court=%s", self.match.court.value)
