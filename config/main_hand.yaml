@@ -74,7 +74,7 @@ motors:
   # 書き換えは scripts/edulite_set_id.py。**同じ ID の個体を 2 台ぶら下げたまま
   # 書き換えてはならない** — 1 通で両方が同じ新 ID になる (ツールが拒否する)。
   #
-  # --- set_zero_on_start: true は零点確定が入るまでの暫定措置 -----------------
+  # --- set_zero_on_start: true は「起動時に偏差を消す」ためのもの --------------
   # **本機の原点は電源投入位置ではなく、フラッシュに保存された機械ゼロである。**
   # 2 台の機械ゼロは揃っておらず、逆回転ペアは scale の符号で向きを表すので、
   # 物理的に同じ姿勢でも人間の単位へ逆換算すると差として現れる
@@ -89,9 +89,21 @@ motors:
   # 揃うどころか機械ゼロの差がまるごと偏差として残る (tests/test_robot_sequences.py の
   # test_paired_axis_motors_agree_on_set_zero_on_start が固定している)。
   #
-  # **暫定である。** rotate にリミットスイッチが付いて config/main_hand_positions.yaml の
-  # homing: を有効化したら false へ戻すこと —— 毎起動で原点が付け替わる以上、搬送中に
-  # 手で回された姿勢がそのまま座標のずれになり、それを正せるのは零点確定だけである。
+  # !!! 零点確定 (homing) を有効にしても false へ戻してはならない !!!
+  # 2 つは競合せず、順に効く:
+  #   起動時   … set_zero で 2 台を 0 に揃え、機械ゼロの差 (175.879deg) を消す。
+  #              これは**暫定原点**で、機体を動かせる状態にすることだけが目的
+  #   動作確認 … config/main_hand_positions.yaml の axes.rotate.homing がスイッチまで
+  #              寄せ、その位置で原点を上書きする (**正確な原点**。後から効くので勝つ)
+  # false にすると起動直後の偏差が消えないまま SyncMonitor が全体緊急停止を掛け、
+  # **機体が 1 ステップも動かせないので動作確認そのものを開始できない** —— つまり
+  # 零点確定にたどり着く手前で詰まる。「homing を有効にしたら false へ戻す」という
+  # 手順は、この軸では成立しない。
+  #
+  # **搬送中に手で回されたぶんは、動作確認を回すまで残る。** 起動時の set_zero は
+  # 「そのときの姿勢を 0 と呼ぶ」だけなので、姿勢がずれていれば座標もずれる。
+  # それを正せるのはスイッチによる零点確定だけで、セッティングタイムに動作確認を
+  # 回すことが唯一の手当てになる。
   #
   # 励磁時の飛び出しは起動経路が構造的に塞いでいる: initialization_steps() の先頭が
   # disable なので set_zero は無励磁で届き、_wait_fresh_feedback() が set_zero より後に
@@ -138,8 +150,10 @@ motors:
   #   SV1 0x41 Servo       … wall_f
   #   SV2 0x42 Servo       … wall_r
   #   SV3 0x43 TouchSensor … rotate_origin_sensor (下の sensors:)
-  #   SV4 0x44 TouchSensor … origin_sensor        (下の sensors:)
-  # で、**この基板に空いている Servo スロットはもう無い**。サーボを足すときは
+  #   SV4 ―    Unused      … y_axis の原点スイッチ用に予約 (スイッチ未装着)
+  # で、**この基板に空いている Servo スロットはもう無い**。SV4 は Unused だが、
+  # ここへサーボを載せてはならない —— y_axis の原点スイッチを付ける日に
+  # TouchSensor へ戻すスロットである。サーボを足すときは
   # サーボ基板 #1 (0x48-) を使う (サブハンドの sub_gripper が 0x48 に載っている)。
   gripper:
     driver: generic
@@ -153,7 +167,7 @@ motors:
     # kSlotsByBoard[基板][スロット].pulse.angleRangeDeg に対応する。**サーボの型は
     # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
     # **ファームを直したらここも直す。**
-    expected_firmware: 4
+    expected_firmware: 5
     expected_angle_range_deg: 270.0
 
   # DC モータ。位置の概念がないので duty 指令。
@@ -177,7 +191,7 @@ motors:
     bus: generic_bus
     can_id: 0x41               # サーボ基板 #0 SV1
     control_type: position
-    expected_firmware: 4
+    expected_firmware: 5
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   wall_r:
@@ -185,10 +199,10 @@ motors:
     bus: generic_bus
     can_id: 0x42               # サーボ基板 #0 SV2
     control_type: position
-    expected_firmware: 4
+    expected_firmware: 5
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-# --- センサ入力 (自作サーボ基板のスロット SV3 / SV4) ---
+# --- センサ入力 (自作サーボ基板のスロット SV3) ---
 # **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
 # 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
 # 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。
@@ -200,17 +214,21 @@ motors:
 # **零点確定 (ホーミング) は軸ごとに 1 本のスイッチを要求する**ので、原点を確定したい
 # 軸の数だけスロットが要る。どちらの軸のものかは config/main_hand_positions.yaml の
 # axes.<軸>.homing.sensor がこの名前を指すことで決まる:
-#   origin_sensor        … y_axis (M3508 ペア) の原点。SV4
-#   rotate_origin_sensor … rotate (EDULITE ペア) の原点。SV3
+#   rotate_origin_sensor … rotate (EDULITE ペア) の原点。サーボ基板 #0 SV3
+#
+# **y_axis の原点スイッチ (SV4 / 0x44) はまだ装着されていないので登録しない。**
+# ここへ書くと動作確認の最初のステップが毎回「センサが応答していません」で止まる ——
+# 現在のファームは SV4 を Unused として宣言しており (firmware/servo/include/config.h の
+# kSlotsByBoard)、Unused のスロットは FEEDBACK を 1 通も送らないため鮮度の事前確認に
+# 引っ掛かる。症状は配線不良と区別が付かない。
+# **スイッチを付ける日は 3 つを同時に戻すこと**: ファームの kSlotsByBoard の SV4 を
+# TouchSensor へ・ここへ origin_sensor を登録・config/main_hand_positions.yaml の
+# axes.y_axis.homing のコメントを外す。1 つでも欠けると上と同じ症状になる。
 #
 # **SensorConfig は name / bus / can_id しか持たない。** expected_firmware は書けない
 # (書くと起動が拒否される) —— INFO の照合はモータの側だけが行う。同じ基板に載る
 # gripper / wall_f / wall_r が版番号を見ているので、焼き忘れはそちらで FAULT になる。
 sensors:
-  origin_sensor:
-    bus: generic_bus
-    can_id: 0x44               # サーボ基板 #0 SV4
-
   rotate_origin_sensor:
     bus: generic_bus
     can_id: 0x43               # サーボ基板 #0 SV3

@@ -851,20 +851,21 @@ VMAX が 200 なので速度の分解能は 400/4095 ≒ 0.098rad/s になり、
 
 原点は**電源投入位置**である（本機は投入時に位置が 0.0rad へ固定される）。搬送中に手で
 動かしたぶんはそのまま座標のずれになる。`config/sub_hand_positions.yaml` に `homing:` の
-雛形をコメントで置いてあるが、**有効化するには実装が要る** ——
-`main.py` の `_make_origin_resolver()` は `M3508PositionLoop` 経由でしか原点を確定できず、
-本機では `SET_ZERO`（`0xFE`）を送る経路を足す必要がある。同じ制約は
-`config/main_hand_positions.yaml` の `rotate`（EDULITE 05 ペア）にもある。
+雛形をコメントで置いてあるが、**有効化しても必ず失敗する** ——
+`main.py` の `_make_origin_resolver()` は「PC 側位置制御ループ」と「ドライバへの
+`SET_ZERO`」の 2 つを探すが、本機のドライバは `supports_origin_capture()` を宣言しない
+（下記の自重落下のため）。`rotate`（EDULITE 05 ペア）は宣言するので有効化済み。
 
 **ただし「電源投入位置が原点」は本機の性質であって、EDULITE 05 には当てはまらない。**
 あちらの原点は放っておくと**フラッシュに保存された機械ゼロ**で、電源投入位置とは無関係
 である。`rotate` は逆回転ペアなので、2 台の機械ゼロが揃っていないと物理的に同じ姿勢でも
 逆換算した時点で `(pos_r + pos_l) / |scale|` の差になり、実機では起動直後に 175.879deg
-（`sync_tolerance` 3.0deg）で `SyncMonitor` が全体緊急停止を掛けた。零点確定が入るまでの
-暫定措置として `rotate_r` / `rotate_l` を `set_zero_on_start: true` にしてある
-（詳細は `docs/checks_and_health.md` の「零点確定（ホーミング）」節）。**本機で同じ手は
-使えない** —— `set_zero` の安全な順序が `disable` を要求し、`sub_lift` は disable すると
-自重で落ちる。
+（`sync_tolerance` 3.0deg）で `SyncMonitor` が全体緊急停止を掛けた。これを消すために
+`rotate_r` / `rotate_l` を `set_zero_on_start: true` にしてあり、**零点確定が有効に
+なっても戻さない**（戻すと起動直後に全体緊急停止が掛かり、動作確認そのものを開始
+できない。詳細は `docs/checks_and_health.md` の「零点確定（ホーミング）」節）。
+**本機で同じ手は使えない** —— `set_zero` の安全な順序が `disable` を要求し、
+`sub_lift` は disable すると自重で落ちる。
 
 ### main.py での配線
 
@@ -5376,7 +5377,7 @@ D0 は Nano の UART RX、D1 は TX で、`ENABLE_SERIAL_DEBUG` が 1 のとき�
 ID）で **DLC=3（サーボ: 状態フラグ + 位置）から DLC=1（センサ: 状態フラグのみ）へ
 変わる**こと、基板 #1 で `0x348` が流れて `0x349`〜`0x34C` が 1 通も流れないことを見る。
 
-#### `rotate` の `homing:` は依然コメントアウトのまま
+#### `rotate` の `homing:` は依然コメントアウトのまま【この後の節で解消】
 
 スロットとセンサ登録（`config/main_hand.yaml` の `rotate_origin_sensor`）は済んだが、
 **残る欠落は EDULITE 05 へ `SET_ZERO` を送る経路**である。`main.py` の
@@ -5393,6 +5394,69 @@ config.h の書き方とビルド時検査の話で、焼いたバイナリの�
 プロトコル）は 1 つも変わっていない。上げると PC 側 `expected_firmware` 26 箇所を
 道連れにするだけで、焼き忘れの検出には何も足さない。
 
+### 零点確定を rotate へ移し、y_axis を一時無効化した
+
+EDULITE の `SET_ZERO` 経路が入って `rotate` の原点確定が通るようになった一方、
+`y_axis` の原点スイッチ（サーボ基板 #0 の SV4 / `0x44`）は**装着されていない**。
+実機で配線が済んでいるのは SV3（`0x43` = `rotate_origin_sensor`）だけで、
+CAN 上で接触が読める（`00` ↔ `10`）ことも確認済み。
+
+#### y_axis を落としたのは「3 箇所が揃わないと必ず失敗する」ため
+
+役割が `TouchSensor` のスロットは、**配線の有無に関わらず** 100Hz で `FEEDBACK` を
+送り続ける。受け取り手（`config/<robot>.yaml` の `sensors:`）が居なければそのフレームは
+`_dispatch_frame` が誰にも配らず捨てるだけなので、残す理由が無い。逆に `sensors:` から
+外しただけでファーム側を `TouchSensor` のまま残すと、`homing:` が生きている限り
+`_sensor_is_stale` が「センサが config の `sensors:` に居ません」で `True` を返し、
+**動作確認の最初のステップが毎回 `HomingError` で止まる**（症状は配線不良と区別が
+付かない）。したがってファームの `kSlotsByBoard`・`sensors:`・`axes.y_axis.homing` の
+3 箇所は必ず同時に動かす。戻す手順は `config/main_hand_positions.yaml` の
+`axes.y_axis` のコメントが持つ。
+
+**`kFirmwareVersion` は 4 → 5 へ上げる。** 前節で据え置いた理由（焼いたバイナリの
+挙動が変わっていない）が今回は当てはまらない —— デバイス ID `0x44` が `FEEDBACK` を
+送るかどうかがバイナリで変わるので、上げないと「SV4 が `Unused` のファーム」と
+「SV4 が `TouchSensor` のファーム」がどちらも v4 を名乗り、どちらが焼かれているのかを
+`INFO` の照合で切り分けられなくなる。同梱 yaml の `expected_firmware` は
+`tests/test_firmware_version_sync.py` が機械的に突き合わせる。
+
+#### `set_zero_on_start: true` は零点確定が入っても残す
+
+`config/main_hand_positions.yaml` にはかつて「`homing:` を有効化したら
+`set_zero_on_start` を `false` へ戻す」と書いてあったが、**この軸ではその手順が
+成立しない。**
+
+`false` にすると 2 台の機械ゼロの差（実機で 175.879deg）が起動直後にそのまま偏差として
+現れ、`SyncMonitor` が全体緊急停止を掛ける。機体が 1 ステップも動かせないので
+**動作確認そのものを開始できず、零点確定にたどり着く手前で詰まる。**
+
+2 つは競合しない。順に効く:
+
+1. 起動時の `set_zero` が 2 台を 0 に揃えて偏差を消す（**暫定原点**。機体を動かせる
+   状態にすることだけが目的）
+2. 動作確認のホーミングがスイッチ位置で原点を上書きする（**正確な原点**。後から
+   効くのでこちらが勝つ）
+
+**それでも「搬送中に手で回されたぶん」は動作確認を回すまで残る。** 起動時の
+`set_zero` はそのときの姿勢を 0 と呼ぶだけなので、姿勢がずれていれば座標もずれる。
+
+#### 指差喚呼に `rotate_holds` を足した
+
+`SET_ZERO` の安全な順序は `disable → set_zero → …` なので、その数百 ms のあいだ
+`rotate` は保持トルクを持たない。偏心して自重で回るなら回ったぶんがそのまま原点の
+ずれになり、**スイッチで原点を決める方式そのものが成立しない。** ソフトでは
+解決できないので、`sub_lift_holds`（DM3520 の自重落下）と同じ形で人が確かめる。
+
+#### 探索時間はセッティングタイムから引かれる
+
+`search_distance` 180.0deg / `step` 0.5deg = 360 ステップで、1 ステップごとに
+`settle_s`（0.05s）を最低 1 回待つので**最短でも 18 秒**。`search_distance` は
+`manual` の全幅（0.0〜180.0deg）と一致させた暫定値で、「可動範囲の上端から始めても
+下端までは必ず届き、下端より先へは行かない」という `y_axis` と同じ考え方。
+縮めてよいのは `step` だけ（`search_distance` は唯一の無人の歯止め）で、`step` は
+そのまま原点の粒度になるため、実機で「何歩で当たるか」を測ってから上げる。
+`direction` も実測前の暫定値で、逆だと反対の機構端まで 180deg 押し込んでから失敗する。
+
 ## 未解決の課題
 
 実装済みだが実機・運用面で未対応の項目。競技当日までに潰すか、意識的に許容するかを決める必要がある。
@@ -5401,8 +5465,8 @@ config.h の書き方とビルド時検査の話で、焼いたバイナリの�
 
 > **安全機構の「今どうなっているか」は `docs/checks_and_health.md` が正。**
 > この表は経緯を積んだもので、実装が進むと古くなる。特に
-> **原点を確定できるのは M3508 の軸だけ**（`rotate` = EDULITE / `sub_y_axis` /
-> `sub_lift` = DM3520 はスイッチを付けても有効化できない。下表の行）は
+> **零点確定が有効なのは `rotate`（EDULITE）だけ**（`y_axis` はスイッチ未装着、
+> `sub_y_axis` / `sub_lift` = DM3520 はドライバが `SET_ZERO` を宣言しない。下表の行）は
 > あちらの「零点確定（ホーミング）」節と必ず突き合わせること。
 > かつて並記していた「ホーミングの 1 歩目が `search_distance` を消費しない」は
 > **解消済み**（下の「零点確定の探索を実測位置起点にした【済】」節）。
@@ -5413,9 +5477,9 @@ config.h の書き方とビルド時検査の話で、焼いたバイナリの�
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は Phase 9 で `activate_motors()`（現在角を書いてから enable）を呼ぶようになったが、`encode_disable(clear_fault=True)` は送らない | EDULITE 05 が過電流等の障害フラグを保持したままだと、再有効化しても指令が効かない。fault の自動クリアは原因を隠すため意図的に行っていない。実機で「解除しても動かない」場合は fault の内容を確認して電源再投入で対処する（`health` の `FAULT` 表示で判別できる） |
 | フィードバックが得られないと EDULITE が無励磁のまま残る | Phase 9 の `activate_motor()` は待機（既定 0.5s）の間にフィードバックを受け取れないと enable を送らず、WARNING をログに出すだけ | 電源断・配線ミス・CAN 断のときは「シーケンスは進むのに軸だけ動かない」状態になる。ログを見ないと気づけないので、有効化を見送ったモータを UI（health / 起動時バナー）に出す仕組みが欲しい。なお `--dry-run` は virtual バスで応答が無いため、この WARNING が必ず 2 件出るのが正常 |
 | ホーミングが実機未検証 | Phase 11 で `lib/sequence/homing.py` を入れ、動作確認シーケンスの最初のステップが `set_group_origin_here()` まで到達する。`search_distance` / `direction` / `step` / `settle_s` は `*_positions.yaml` の仮値 | 探索の刻みと整定時間が実機の機構で妥当かは未確認（探索の起点と歯止めそのものは下記「【済】」で解消した） |
-| 原点を確定できるのは M3508 の軸だけ | `main.py` の `_make_origin_resolver` は `M3508PositionLoop` に載っているモータしか確定できない。有効なのは `y_axis` のみ | `rotate`（EDULITE 05）と `sub_y_axis` / `sub_lift`（DM3520）は、**リミットスイッチを付けて config の `homing:` を有効化しても必ず `HomingError` で落ちる**。**ただし 1 歩も動かずに落ち、`homing:` を持つのに手段が無い軸は起動ログにも `ERROR` で出る**（かつてはセンサまで押し込んでから最後に失敗していた）。有効化には EDULITE / DM3520 へ `SET_ZERO` を送る経路が要るが、安全な順序（`disable → set_zero`）が **`sub_lift` の自重落下**と両立しないので機構確定まで入れない。**`rotate` のセンサ側は解消済みで、残る欠落は `SET_ZERO` の経路だけ** —— サーボ基板 #0 の SV3（`0x43`）がファームの役割表で `TouchSensor` になり、`config/main_hand.yaml` の `sensors:` に `rotate_origin_sensor` として登録してある（かつて有効化手順が指していた `SV5`(`0x45`) は**存在しない信号線**だった）。**それでも `config/main_hand_positions.yaml` の `homing:` はコメントアウトのまま**で、外してよいのは `SET_ZERO` の経路が入った後である（外しただけでは必ず `HomingError` で落ちる）。それまでは電源投入位置がそのまま原点で、ずれは指差喚呼（`sub_dm3520_origin`）が人の目で埋める。**ただし `rotate` は放っておくと電源投入位置すら原点にならない** —— EDULITE 05 の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として現れ（実機で 175.879deg）、起動直後に `SyncMonitor` が全体緊急停止を掛ける。暫定措置として `rotate_r` / `rotate_l` は `set_zero_on_start: true`（起動のたびに `set_zero` を送り、電源投入時の姿勢を原点にする）。**零点確定の代わりではない**ので、上の前提が揃ったら 2 台とも `false` へ戻して `homing:` へ移すこと |
+| 零点確定が有効なのは `rotate` だけ | `main.py` の `_make_origin_resolver` は「PC 側位置制御ループ（M3508）」と「ドライバへの `SET_ZERO`」の 2 つを順に探し、可否はドライバ自身の `supports_origin_capture()` が答える（`deactivation_steps()` と `origin_capture_steps()` の両方を持つドライバだけが宣言できる）。EDULITE 05 は宣言するので `rotate` の `homing:` は**有効**（センサはサーボ基板 #0 の SV3 = `0x43`、実機で接触が読めることを確認済み） | **`sub_y_axis` / `sub_lift`（DM3520）は宣言しない** —— `SET_ZERO` の安全な順序（`disable → set_zero`）が **`sub_lift` の自重落下**と両立しないため。スイッチを付けて `homing:` を有効化しても必ず `HomingError` で落ちる（**ただし 1 歩も動かずに落ち、起動ログにも `ERROR` で出る**）。**`y_axis`（M3508）は確定手段があるのにスイッチが未装着**で、ファームの `kSlotsByBoard` 基板 #0 SV4 は `Unused`、`sensors:` にも `homing:` にも書いていない（3 箇所は必ず同時に戻す。上の「零点確定を rotate へ移し、y_axis を一時無効化した」節）。原点が確定できない軸は**電源投入位置がそのまま原点**で、ずれは指差喚呼（`main_home_position` / `sub_dm3520_origin`）が人の目で埋める。**ただし `rotate` は放っておくと電源投入位置すら原点にならない** —— EDULITE 05 の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として現れ（実機で 175.879deg）、起動直後に `SyncMonitor` が全体緊急停止を掛ける。`rotate_r` / `rotate_l` の `set_zero_on_start: true` がこれを消しており、**零点確定が有効になっても `false` へ戻してはならない**（戻すと機体が動かせず、動作確認そのものを開始できない）。`direction` / `search_distance` / `step` は実機未検証で、探索は最短 18 秒かかる |
 | down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。`operstate` の検証は未実装 | 受信ループは `bus.recv` の失敗で降りずに待って呼び直し、そのあいだ `rx_down` を立てるので、UI にはそのバスが `BusHealth.DOWN` として出る（up すればそのまま復帰する）。起動そのものを止める仕組みは無いままなので、`--strict` の点検を通していない構成では「立ち上がったが 1 通も読めていない」状態で始まりうる。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
-| サブハンド不在構成（`config/bench/main_hand/`）ではホーミングが走らず、checklist の記述も実態とずれている | `sequences/motor_check.py` の `REQUIRED_AXES`（`sequences.main_hand.HOME` / `sequences.motor_check.SUB_HOME` / `sequences.sub_hand.VALVE_AXES` を束ねた frozenset）は両ハンドの全軸を要求するため、`--dry-run` で `config/bench/main_hand/` 一式（`--system config/bench/main_hand/system.yaml --config config/main_hand.yaml --checklist config/bench/main_hand/checklist.yaml`）を起動すると `統合動作確認: 必要な軸が足りないため登録しない (不足: ['pump_blow', 'pump_vac', 'sub_arm_joint', 'sub_gripper', 'sub_lift', 'sub_y_axis', 'valve_1', 'valve_2', 'valve_3', 'valve_4', 'valve_5', 'valve_6'])` と WARNING が出て（`main.py` の登録処理）`MotorCheckSequence` が登録されない。CLAUDE.md にあるとおり零点確定（ホーミング）は動作確認シーケンスの最初のステップなので、**登録されないこの構成では `y_axis` の原点確定が一度も走らない**。加えて `config/bench/main_hand/checklist.yaml` の項目は M3508 と EDULITE 05 のものだけで、この構成が開く `can_generic`（`system.yaml` の `generic_bus: can_generic` により本番 `config/main_hand.yaml` の `gripper` / `conveyor` / `wall_f` / `wall_r` と `sensors.origin_sensor` がそのまま構成に入る）の確認項目が無い（本番 `config/checklist.yaml` にある `conveyor_run` / `origin_sensor_react` / `main_gripper_open` / `wall_initial` に相当するものが無い）。同 checklist の `bench_return_home` は「両軸に home を送り、どちらも電源投入位置へ戻ること確認」という文言で、`rotate` は `set_zero_on_start: true` なので今も成立するが、`y_axis` は本来ホーミング（リミットスイッチ探索）で原点を確定する軸であり `home` は電源投入位置ではない。ただし前述のとおりこの構成ではそのホーミングが走らないため、結果的に電源投入位置が原点になっているという二重にねじれた状態にある | 位置定数は原点からの相対値なので、電源投入位置がそのまま `y_axis` の原点として扱われる。実測ストロークが 650mm へ広がった今、原点がずれたまま走らせると全ステップが同じだけずれた場所へ動く。**動かす前に機体を原点位置へ置いておくことが人の責任になり、UI にもログにも「原点が未確定である」ことは出ない。** 手動操縦（`y_axis` / `rotate`）は使えるので、そちらで確認しながら動かすことになる。DC 基板はフィードバックを一切持たず動作を自動判定できないので目視確認が唯一の手段だが（CLAUDE.md「この基板の動作は自動判定できない」）、その確認項目が checklist に無いため確認されないまま通る（どういう項目を置くべきかは実機を見ている人が決めることなので、ここでは「無い」という事実だけを記録する）。`bench_return_home` の文言をそのまま読むと `y_axis` もホーミングで原点確定されるかのように読めるが、実際には走らないホーミングを前提にした文言が、走らないこと自体によって結果的に辻褄が合ってしまっている |
+| サブハンド不在構成（`config/bench/main_hand/`）ではホーミングが走らず、checklist の記述も実態とずれている | `sequences/motor_check.py` の `REQUIRED_AXES`（`sequences.main_hand.HOME` / `sequences.motor_check.SUB_HOME` / `sequences.sub_hand.VALVE_AXES` を束ねた frozenset）は両ハンドの全軸を要求するため、`--dry-run` で `config/bench/main_hand/` 一式（`--system config/bench/main_hand/system.yaml --config config/main_hand.yaml --checklist config/bench/main_hand/checklist.yaml`）を起動すると `統合動作確認: 必要な軸が足りないため登録しない (不足: ['pump_blow', 'pump_vac', 'sub_arm_joint', 'sub_gripper', 'sub_lift', 'sub_y_axis', 'valve_1', 'valve_2', 'valve_3', 'valve_4', 'valve_5', 'valve_6'])` と WARNING が出て（`main.py` の登録処理）`MotorCheckSequence` が登録されない。CLAUDE.md にあるとおり零点確定（ホーミング）は動作確認シーケンスの最初のステップなので、**登録されないこの構成では `y_axis` の原点確定が一度も走らない**。加えて `config/bench/main_hand/checklist.yaml` の項目は M3508 と EDULITE 05 のものだけで、この構成が開く `can_generic`（`system.yaml` の `generic_bus: can_generic` により本番 `config/main_hand.yaml` の `gripper` / `conveyor` / `wall_f` / `wall_r` と `sensors.rotate_origin_sensor` がそのまま構成に入る）の確認項目が無い（本番 `config/checklist.yaml` にある `conveyor_run` / `origin_sensor_react` / `main_gripper_open` / `wall_initial` に相当するものが無い）。同 checklist の `bench_return_home` は「両軸に home を送り、どちらも電源投入位置へ戻ること確認」という文言で、`rotate` は `set_zero_on_start: true` なので今も成立するが、`y_axis` は本来ホーミング（リミットスイッチ探索）で原点を確定する軸であり `home` は電源投入位置ではない。ただし前述のとおりこの構成ではそのホーミングが走らないため、結果的に電源投入位置が原点になっているという二重にねじれた状態にある | 位置定数は原点からの相対値なので、電源投入位置がそのまま `y_axis` の原点として扱われる。実測ストロークが 650mm へ広がった今、原点がずれたまま走らせると全ステップが同じだけずれた場所へ動く。**動かす前に機体を原点位置へ置いておくことが人の責任になり、UI にもログにも「原点が未確定である」ことは出ない。** 手動操縦（`y_axis` / `rotate`）は使えるので、そちらで確認しながら動かすことになる。DC 基板はフィードバックを一切持たず動作を自動判定できないので目視確認が唯一の手段だが（CLAUDE.md「この基板の動作は自動判定できない」）、その確認項目が checklist に無いため確認されないまま通る（どういう項目を置くべきかは実機を見ている人が決めることなので、ここでは「無い」という事実だけを記録する）。`bench_return_home` の文言をそのまま読むと `y_axis` もホーミングで原点確定されるかのように読めるが、実際には走らないホーミングを前提にした文言が、走らないこと自体によって結果的に辻褄が合ってしまっている |
 | `config/bench/y_axis_tuning/system.yaml` のコメントが本番の `sync_tolerance` と食い違う | 同ファイル冒頭のコメントは「保護値は本番と同じに保ち、代わりに出力上限だけを下げる」とあるが、実際のこのセットの `main_hand_positions.yaml` の `axes.y_axis.sync_tolerance` は 2.0mm で、本番 `config/main_hand_positions.yaml` の `axes.y_axis.sync_tolerance` は 10.0mm（2026-09-04 のコミット `5aa89c3` で 2.0 → 10.0 へ緩められている）で一致していない | どちらが正か（ベンチ側を本番に合わせて 10.0mm へ更新するのか、コメントの方が古いだけで意図的に 2.0mm のまま据え置いているのか）は現時点の記述からは判断できない |
 
 ### リファクタリングで見つけた安全機構の穴（【済】と未着手）

@@ -174,7 +174,7 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
 //    #0  | SV1      | 0x41       | wall_f         (メインハンド)
 //    #0  | SV2      | 0x42       | wall_r         (メインハンド)
 //    #0  | SV3      | 0x43       | rotate の原点スイッチ
-//    #0  | SV4      | 0x44       | y_axis の原点スイッチ
+//    #0  | SV4      | ―          | 未使用 (y_axis の原点スイッチ用に予約)
 //    #1  | SV0      | 0x48       | sub_gripper    (サブハンド)
 //    #1  | SV1〜SV4 | ―          | 未使用
 //
@@ -205,7 +205,14 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
         // TODO(実機で確認): 接触時に導通して LOW になる想定（サンプル準拠）。
         // 極性が逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる。
         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV3 rotate
-        {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis
+        // SV4 は y_axis の原点スイッチ用に予約したスロットだが、**スイッチが未装着**の
+        // あいだは Unused にしておく。TouchSensor のままだと配線の有無に関わらず
+        // FEEDBACK を 100Hz で送り続ける一方、PC 側は受け取り手（config/main_hand.yaml の
+        // sensors:）を持たないので、そのフレームは誰にも配られず捨てられるだけになる。
+        // **スイッチを付けたら TouchSensor へ戻す**（同時に config/main_hand.yaml の
+        // sensors: と config/main_hand_positions.yaml の axes.y_axis.homing も戻す。
+        // 3 つのうち 1 つでも欠けると「センサが応答していません」で動作確認が止まる）。
+        {SlotRole::Unused, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis (未装着)
     },
     // 基板 #1（DIP=1）: サブハンド
     {
@@ -250,12 +257,18 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 //    基板 #0 の SV3 が Servo（sub_gripper）から TouchSensor（rotate の原点スイッチ）に
 //    なり、sub_gripper は基板 #1 の SV0（0x48）へ移った。**焼き忘れた基板は
 //    「サーボのつもりのピンが入力のまま」または逆になる**ので、版番号での検出が要る。
+// 5: 基板 #0 の SV4（y_axis の原点スイッチ用）が TouchSensor から Unused になった。
+//    **スイッチが未装着なので暫定であり、付けたら TouchSensor へ戻して版番号をまた上げる。**
+//    デバイス ID 0x44 が FEEDBACK を送るかどうかがバイナリで変わるため、上げないと
+//    「SV4 が Unused のファーム」と「SV4 が TouchSensor のファーム」が同じ v4 を名乗り、
+//    どちらが焼かれているのかを INFO の照合で切り分けられなくなる（版番号は「バイナリの
+//    区別が付く」ことだけが存在理由なので、CAN 上の振る舞いが変わったら必ず上げる）。
 //
 // **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
 // PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
 // これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
 // 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
-constexpr uint8_t kFirmwareVersion = 4;
+constexpr uint8_t kFirmwareVersion = 5;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;

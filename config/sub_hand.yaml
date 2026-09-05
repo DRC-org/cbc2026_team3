@@ -22,7 +22,8 @@ robot_name: sub_hand
 #       0x40-0x44 サーボ基板 #0 SV0-SV4 … main: gripper(0x40) / wall_f(0x41) /
 #                                          wall_r(0x42) /
 #                                          rotate_origin_sensor(0x43) /
-#                                          origin_sensor(0x44)
+#                                          SV4(0x44) は Unused (y_axis の原点
+#                                          スイッチ用に予約。装着待ち)
 #       0x48-0x4C サーボ基板 #1 SV0-SV4 … sub : sub_gripper(0x48)
 #                                          SV1-SV4 は Unused (下記)
 #       0x80-0x82 DC 基板 #0 ch0-ch2   … main: conveyor(0x80)
@@ -38,8 +39,10 @@ robot_name: sub_hand
 #     Servo になっていることを確かめること。役割が食い違うと、指令を送っても FEEDBACK も
 #     INFO も返らない (センサ・未使用スロットは SET_TARGET を受け付けない) ので、
 #     症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
-#     現在サーボ基板 #0 は SV0-SV2 が Servo・SV3/SV4 が TouchSensor、
+#     現在サーボ基板 #0 は SV0-SV2 が Servo・SV3 が TouchSensor・SV4 が Unused、
 #     サーボ基板 #1 は SV0 だけが Servo で SV1-SV4 は Unused。
+#     **SV4 の Unused は空きではない** —— y_axis の原点スイッチ用に予約してあり、
+#     スイッチが付いたら TouchSensor へ戻すスロットなので、ここへ別のものを載せない。
 #
 #   can_edulite … EDULITE 05 の ID は 1 バイトの任意値で、ビット分割の規則は無い
 #     (出荷時は 2 台とも 0x7F。バスへ載せる前に scripts/edulite_set_id.py で
@@ -152,7 +155,7 @@ motors:
     # kSlotsByBoard[基板][スロット].pulse.angleRangeDeg に対応する。**サーボの型は
     # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
     # **ファームを直したらここも直す。**
-    expected_firmware: 4
+    expected_firmware: 5
     expected_angle_range_deg: 270.0
 
   # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---

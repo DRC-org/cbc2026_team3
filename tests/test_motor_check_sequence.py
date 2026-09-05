@@ -143,8 +143,9 @@ class TestHomingComesFirst:
         table = _shipped_table()
         homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
 
-        # 出荷 config では y_axis だけ (rotate はハード追加待ちでコメントアウト)
-        assert homing_axes == ["y_axis"]
+        # 出荷 config では rotate だけ
+        # (y_axis はリミットスイッチ未装着のあいだコメントアウトしてある)
+        assert homing_axes == ["rotate"]
 
 
 class TestStepShape:

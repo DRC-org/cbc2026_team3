@@ -20,16 +20,25 @@
 
 | 対象 | 現在値 | 場所 | 何が起きるか |
 |---|---|---|---|
-| `y_axis` の `homing.search_distance` | **22.0mm** | `config/main_hand_positions.yaml` | **広すぎると機構端まで押し込む。** 「当たるまで動かす」動作に対する唯一の無人の歯止めで、配線が抜けたセンサは「いつまでも当たらない」形でしか現れない。実測ストローク全長 + わずかな余裕へ詰める |
+| `rotate` の `homing.search_distance` | **180.0deg** | `config/main_hand_positions.yaml` | **広すぎると機構端まで押し込む。** 「当たるまで動かす」動作に対する唯一の無人の歯止めで、配線が抜けたセンサは「いつまでも当たらない」形でしか現れない。現在値は `manual` の全幅そのままの暫定値なので、実測のスイッチ位置 + わずかな余裕へ詰める。**`direction` も暫定** —— 逆だと反対の機構端まで 180deg 押し込んでから失敗する |
+| `y_axis` の `homing.search_distance` | **22.0mm（コメントアウト中）** | `config/main_hand_positions.yaml` | 同上。**スイッチが未装着なので `homing:` ごと無効にしてある**（§1-1）。戻す日に実測ストローク全長 + わずかな余裕へ取り直すこと —— 22.0 は仮値時代の `manual` 全幅で、実ストローク 650mm にはまったく足りない |
 | サーボの `kProvisionalLimits` | **`{0.0, 30.0, 90.0}`**（0〜30deg / 90deg/s） | `firmware/servo/include/config.h` | **広すぎるとサーボが機構に当たったまま押し続けて焼損する。** 名前のとおり暫定値。実可動域が決まったら**すぐに**狭める。ファームを焼き直すので、当日の作業順で後回しにしないこと |
 
 **`search_distance` を詰めるときは `manual` の `min`/`max` も同時に実測へ寄せる。**
 片方だけ動かすと「原点に届かない」か「宣言した可動範囲の外まで押し込む」のどちらかになる。
-**この対応関係は今は崩れている。** `axes.y_axis.manual` は実ストローク
-（0.0〜650.0mm）へ更新済みだが、`search_distance`（22.0mm）は仮値時代の `manual` 全幅
-（`20.0 - (-2.0)` = 22.0）に合わせた値のまま取り残されている。ホーミングの起点次第では
-この距離でリミットスイッチへ届かない可能性がある。**次に実機で確認する人が
-`search_distance` を実測ストロークへ詰めること。**
+`rotate` は今その約束どおりで、`search_distance` 180.0deg は `manual` の全幅
+（0.0〜180.0deg）と一致している。**`y_axis` の 22.0mm は仮値時代の `manual` 全幅
+（`20.0 - (-2.0)` = 22.0）に合わせた値のまま取り残されており、実ストローク 650mm には
+届かない。** `homing:` ごとコメントアウトしてあるので今は害が無いが、**スイッチを付けて
+戻す日に必ず取り直すこと。**
+
+### 探索時間はセッティングタイムから引かれる
+
+`search_distance / step` が歩数で、1 歩ごとに `settle_s` を最低 1 回待つ。
+`rotate` の現在値では 180.0 / 0.5 = 360 歩 × 0.05s = **最短 18 秒**で、動作確認を回す
+たびにこれが入る。**縮めてよいのは `step` だけ** —— `search_distance` は歯止めなので
+速さのために縮めてはならない。`step` はそのまま原点の粒度になるので、実機で
+「何歩で当たるか」を測ってから上げること。
 
 ---
 
@@ -44,10 +53,12 @@
 | `axes.y_axis.tolerance` / `sync_tolerance` | 1.0mm / 10.0mm | `sync_tolerance` を緩めるのは最後の手段。左右直結なのでずれはその場で機構を壊す |
 | `axes.y_axis.sync_kp` / `sync_limit` | **16.0** / 1250counts | **2026-09-04 に実運用ストローク（150mm）で実測済み。** 左右のずれを**縮める**唯一の経路（`sync_tolerance` の 3 層は止めるだけ）。 **最適値は振幅で変わる** —— 振幅 1.5mm では 8.0 が最良だったが、150mm では 8.0 が最悪（1 回 1.899mm。測定時点の `sync_tolerance` 2.0mm では 95%、現在の 10.0mm では 19%）で、16.0 が 2 回とも最良（最大 0.637mm）。**短距離（15mm）では取り直していない** |
 | `axes.y_axis.timeout_s` | 4.0s | 実測ストローク 650mm（`positions.y_axis` の `home` 0.0 〜 `work_shared` 650.0）に対し、`motion.duration_for(650.0)`（`max_velocity` 200.0mm/s / `max_acceleration` 1200.0mm/s²）の理論所要時間は 3.4167 秒、余裕は 0.5833 秒（約 15%）。起動時検証 `_check_motion_timeout`（`lib/sequence/positions.py`）はこの余裕の範囲内なので通る。**ただしこれは理想台形プロファイルの所要時間だけで、`tolerance` 1.0mm の帯へ整定するまでの時間を含まない。** 実機で `SequenceTimeoutError` が出たらまずここを疑うこと（症状は「その軸だけが毎回失敗する」で、機構にもモータにも異常が無い —— 説明は `_check_motion_timeout` の docstring）。`timeout_s` をいくつにすべきかは実機で測る人が決める |
+| `axes.y_axis.homing` | **コメントアウト（スイッチ未装着）** | **確定手段は揃っている**（M3508 なので PC 側位置制御ループが原点を持つ）。欠けているのは物理のスイッチだけで、**現状この軸は電源投入位置がそのまま原点**になる（搬送中に手で動かされたぶんは正せない）。**戻すときは 3 つ同時**: ①`firmware/servo/include/config.h` の `kSlotsByBoard` 基板 #0 SV4 を `TouchSensor` へ（`kFirmwareVersion` を上げ、同梱 yaml の `expected_firmware` も揃える） ②`config/main_hand.yaml` の `sensors:` へ `origin_sensor`（`can_id` `0x44`）を登録 ③`homing:` のコメントを外し `search_distance` を実測ストロークへ。1 つでも欠けると動作確認の最初のステップが毎回「センサが応答していません」で止まり、配線不良と区別が付かない |
 | `positions.rotate` | **埋まった。** 実測値（home 0.0 / pick 180.0 / place 10.0deg）が入っている | かつての 0〜8deg は機構未装着時の仮値。実機の値へ更新済み |
 | `axes.rotate.manual` | **埋まった。** 0.0〜180.0deg（2026-09-04 のコミット `5aa89c3` で実ストロークへ更新済み） | 同上 |
-| `axes.rotate.homing` | **コメントアウト（有効化できない）** | **スロットは確保済み**（サーボ基板 #0 SV3 = `0x43`。`config/main_hand.yaml` の `sensors:` に `rotate_origin_sensor` として登録済み）だが、**EDULITE には原点確定の経路そのものが無い**（`SET_ZERO`）。残るのはスイッチの装着と `direction` / `search_distance` の実測。詳細は `docs/checks_and_health.md` の「零点確定」節 |
-| `motors.rotate_r` / `.rotate_l` の `set_zero_on_start`（`config/main_hand.yaml`） | **`true`（暫定）** | 上の `homing` が入るまでの代替。**EDULITE の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として出る**（実機で 175.879deg → 起動直後に全体緊急停止）。起動のたびに `set_zero` を送って電源投入時の姿勢を原点にしている。**機構が付いたら「起動前に rotate を収納姿勢へ戻す」ことが人の責任になる。** `homing` を有効化する日に 2 台とも `false` へ戻すこと（左右で値が食い違うと揃うどころか偏差が残る） |
+| `axes.rotate.homing` | **有効。ただし 3 値とも未実測** | スイッチはサーボ基板 #0 SV3（`0x43`）に配線済みで、`SET_ZERO` による原点確定も通る。埋める値は `direction`（**−1 は暫定**。逆だと反対の機構端まで押し込む） / `search_distance`（**180.0deg は `manual` 全幅の暫定値**。実測のスイッチ位置へ詰める） / `step`（**0.5deg は未検証**。所要時間 18 秒と原点の粒度のトレードオフ）。詳細は `docs/checks_and_health.md` の「零点確定」節 |
+| `motors.rotate_r` / `.rotate_l` の `set_zero_on_start`（`config/main_hand.yaml`） | **`true`。零点確定が有効になっても戻さない** | **EDULITE の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として出る**（実機で 175.879deg → 起動直後に全体緊急停止）。起動のたびに `set_zero` を送って電源投入時の姿勢を原点にし、この偏差を消している（**暫定原点**）。上の零点確定がスイッチ位置でそれを上書きする（**正確な原点**）ので 2 つは競合しない。**`false` にすると起動直後に全体緊急停止が掛かり、機体が動かせないので動作確認そのものを開始できない** —— 零点確定へたどり着けなくなる。左右で値が食い違うと揃うどころか偏差が残る。**動作確認を回すまでは「起動前に rotate を収納姿勢へ戻す」ことが人の責任**であることは変わらない |
+| **`rotate` が無励磁で自重で回らないこと**（`config/checklist.yaml` の `rotate_holds`） | **未確認** | **`SET_ZERO` は無励磁で送る**ので、その数百 ms のあいだ保持トルクが無い。偏心して自重で回るなら回ったぶんがそのまま原点のずれになり、**スイッチで原点を決める方式そのものが成立しない**。ソフトでは解決できないので、機構側でバランスを取るか固定が要る |
 | `positions.gripper` / `wall_f` / `wall_r`（サーボ 3 軸） | **0〜6deg**（gripper 0/5、wall 0/3/6） | **実可動域が未確認。** 上の `kProvisionalLimits` と必ずセットで決める（ファームが黙ってクランプするので、超えた値は「送ったのに途中で止まる」としか現れない） |
 | `positions.wall_r.closed` / `.open` | 3.0 / 6.0 | **試合シーケンスから未参照**（後壁を使う手順が未確定）。動作確認は 3 状態とも駆動する |
 | `positions.conveyor.run` | **0.3 duty** | ファーム側 `max_duty` でクランプされる。ここだけ上げても効かない |
@@ -209,9 +220,9 @@ uv run python scripts/tune_y_axis.py --amplitude 1.5 --kp 24,32 --ki 10 --kd 1.0
    ```
 
 2. **実測値を `config/main_hand_positions.yaml` の `manual` と `positions` へ反映する。**
-   `axes.y_axis.homing.search_distance`（現在 22.0mm）も**同時に**詰める
-   —— 片方だけ動かすと「原点に届かない」か「宣言した可動範囲の外まで押し込む」の
-   どちらかになる（§0）。
+   `axes.y_axis.homing.search_distance`（現在 22.0mm。`homing:` ごとコメントアウト中）も
+   **同時に**詰める —— 片方だけ動かすと「原点に届かない」か「宣言した可動範囲の外まで
+   押し込む」のどちらかになる（§0）。
 
 3. **チューニングは `config/bench/y_axis_tuning/` の robot config で回し、位置定数だけを
    本番へ差し替える。**
@@ -680,7 +691,8 @@ a=1200 まで落とすと指令ピークも下がるので、上限も取り直�
 | `kServoPulse180` のパルス幅 | **500–2400us（仮）** | 180 度品のパルス幅は 500–2400 とは限らず、1000–2000 や 500–2500 も普通にある。**型が決まり次第、データシートの値へ**。ずれると指令角と実角が比例倍でずれる |
 | `kSlotsByBoard[][].pulse` | 全基板・全スロット `kServoPulse270` | **型はスロットごと・基板ごとに選べる**（1 枚の中に 270 度品と 180 度品を混ぜられる）。載せ替えたスロットの行だけを `kServoPulse180` へ差し替え、`config/<robot>.yaml` の `expected_angle_range_deg` も**そのモータの行**を揃える（隣のスロットの値を写すと照合が通ったまま型だけずれる）。**PC 側 positions は 1 行も変わらない** —— 型を知っているのは `config.h` だけ |
 | `kSlotsByBoard[][].initialAngleDeg` | 全スロット 0.0deg | `setup()` で**ここへ駆動する**。機構が付いた後の安全な初期姿勢か確認すること（基板が瞬断するとこの角へ飛ぶ） |
-| `origin_sensor` の `sensorActiveLow` | `false`（TODO: 実機で確認） | 逆だと「触れているのに反応しない」＝ホーミングが `search_distance` いっぱいまで押し込む |
+| センサスロットの `sensorActiveLow` | `true`（接触で LOW。TODO: 実機で確認） | 逆だと「触れているのに反応しない」＝ホーミングが `search_distance` いっぱいまで押し込む。逆の逆（常に接触と報告）なら 1 歩も動かずに原点が確定してしまう |
+| `kSlotsByBoard[0][4]`（基板 #0 SV4）の役割 | **`Unused`（暫定）** | `y_axis` の原点スイッチ用に予約したスロットだが、**スイッチが未装着**なので `Unused` にしてある。**付けたら `TouchSensor` へ戻し、`kFirmwareVersion` を上げ、同梱 yaml の `expected_firmware` も揃える**（§1-1 の 3 点セット） |
 | DC 基板の `max_duty` | 既定 0.30 | ポンプ・コンベアの duty はここで頭打ち。上げるならファームが先 |
 | 各基板の `kFirmwareVersion` | — | **ピン配置かプロトコルを変えたら必ず上げる。** PC 側 `expected_firmware` と不一致は FAULT として見える（焼き忘れの唯一の検出手段） |
 
@@ -695,4 +707,5 @@ a=1200 まで落とすと指令ピークも下がるので、上限も取り直�
 3. **`--dry-run` ではなく実機で動作確認シーケンスを 1 回通す。**
    ホーミングを含む全アクチュエータが順に動く
 4. `config/checklist.yaml` の指差喚呼を上から 1 回読み上げる。
-   特に `sub_lift_holds`（自重落下）と `estop_functional`（非常停止が効くこと）
+   特に `rotate_holds` / `sub_lift_holds`（無励磁での自重）と
+   `estop_functional`（非常停止が効くこと）
