@@ -119,6 +119,13 @@ C620 は電流指令しか受け付けない（`M3508Driver.encode_target` は C
 
 **未検証**: 上記はいずれも単体テスト（`tests/test_position_loop.py`）でのみ確認しており、
 実機で 200Hz が維持できるかは測定していない（「未解決の課題」参照）。
+**乱れているかどうかを知る手段は 2026-09-05 に入った**（`lib/control/periodic.py` の
+`PeriodicTask` が実周期を測り、公称周期の 1.5 倍を超えた回数と最悪値を
+**journal へ記録する。画面にも WS 配信にも出していない** —— 理由は後述の限界表
+「200Hz が実機で維持できるか未測定」の行。
+`docs/checks_and_health.md` の「3 層はどれも『公称周期どおりに回っている』ことが
+前提 — その乱れを測る」節を参照）。これは**乱れを検知する手段**であって、
+実機で実際に 200Hz が維持できているかどうかの実測データそのものではない。
 
 ---
 
@@ -224,7 +231,7 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 | インターフェースの状態 | `_create_bus()` | 受信ループ |
 |---|---|---|
 | 存在しない | `OSError: [Errno 19] No such device` で起動失敗 | — |
-| 存在するが down | **オープン成功。例外は出ない** | `bus.recv` が `CanOperationError` を投げ続ける |
+| 存在するが down | **オープン成功。例外は出ない**（起動ログに `operstate` 検出の ERROR が出る） | `bus.recv` が `CanOperationError` を投げ続ける |
 | up | 正常 | 正常 |
 
 問題は 2 行目。`CANManager.run()` は `_receive_loop` を `asyncio.create_task` で起こす
@@ -237,8 +244,21 @@ udevadm info -a -p /sys/class/net/can0 | grep -m1 'ATTRS{serial}'
 「受信ループは断絶で降りない」を参照）。失敗は `LogThrottle` を通して残す。
 
 `cbc-can.service` により通常は起動時に up されるため実害は出にくいが、service が失敗した
-場合などに起きうる。**残る対策候補は `_create_bus()` にインターフェースの `operstate` 検証を
-追加し、down なら起動を止めること**で、これは未着手。
+場合などに起きうる。**`_create_bus()` は `operstate` (`/sys/class/net/<channel>/operstate`)
+を見て down なら起動ログへ 1 行 ERROR を残す**（インタフェース名を必ず入れる）。
+**起動は止めない** — 「揃っているかに答えるのは人である」という方針そのままで、
+`--strict` の点検を通していない構成（片ハンドだけの練習・机上ベンチ・会場での逃げ道）を
+一律に潰さないため。判定できない場合（`/sys` に実体が無い環境）は `None` として
+「分からない」へ倒し、そのこと自体もログに出さない（平常時のログを埋めないため）。
+**`--dry-run` では判定そのものを行わない** —— virtual バスは `/sys/class/net/` に
+実体を持たないので、読んでも必ず「分からない」にしかならない。判定は dry-run の
+early return より後ろに置いてあり、「dry-run では通らない」がコードの構造から読める。
+
+`main._read_operstate()` が読む根（`/sys/class/net`）は `_NET_SYSFS_ROOT` として
+引数（`root`）に出してある。**テスト用の注入口ではなく、パスの組み立てと `.strip()`
+を実ファイルで検証できるようにするため** —— sysfs は `"down\n"` を返すので、`.strip()`
+を落とすだけで判定が永久に偽になる（機能が丸ごと死ぬ）。読み取り関数ごとラムダへ
+差し替える形にしていた頃は、その変異も、パス要素の綴り間違いも、全件緑で通った。
 
 ---
 
@@ -1091,6 +1111,8 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 受信の中断を跨いで折り返しを推定しない | `_can_trust_wrap` の窓の上限判定を外す / rpm による見積もりを外す（**2 つは別々のテストが受け持つ**） | `tests/drivers/test_m3508.py::TestWrapInferenceAcrossFeedbackGap::test_長い窓を跨いだ差分は折り返しを推定せず累積しない` / `::test_高速回転なら短い窓でも折り返しを推定しない` |
 | 再アンカーは黙って行われない | `health()` で `detail is not None` を warning 条件から外す（状態が OK のままだと画面はどこにも出さない） | `test_can_manager_health.py::TestReanchorSurfacesInHealth::test_再アンカーしたモータは詳細付きのWARNINGになる` |
 | 無励磁のまま取り残されたモータは画面に出る | `_safety_state` の `unenergized_motors` を空固定にする / `_unenergized_motors` の緊急停止ガードを外す / `is_energized() is False` を `not is_energized()` へ（不明を無励磁へ倒す） | `test_server_e_stop.py::TestUnenergizedMotorsAreVisible` / `web: healthVerdict.test.ts` |
+| `INFO` 未受信で焼き忘れ検出が沈黙していることが画面に出る | `GenericDriver.firmware_confirmed()` を常に `True` へ / `_firmware_unconfirmed_motors` の猶予判定を外す / `is False` を `is not True` へ（`INFO` を送らない M3508 等まで巻き込む）/ dry-run ガードを外す（机上で全モータが恒久的に「未確認」になる）/ STALE 除外を外す（落ちた基板にも「配線ではなくファームを疑え」と言う）/ `_handle_match_start` で `_server_started_at` を置き直す（試合開始のたびに報告が消える）/ `_FIRMWARE_INFO_GRACE_S` を 600.0 へ（機能自身が静かに無効になる） | `tests/drivers/test_generic.py::TestFirmwareConfirmed` / `tests/drivers/test_driver_contract.py::TestFirmwareConfirmedCapability` / `test_server_firmware_confirmed.py`（順に `TestFirmwareUnconfirmedMotorsAreVisible` / `TestStaleMotorsAreExcluded` / `TestGraceIsAnchoredToStartupOnly` / `test_猶予は_INFO_数周期ぶんに留める`）|
+| 「版番号 未確認」の欄が読めなくても画面が落ちない | `healthVerdict.ts` の `firmwareUnconfirmedMotors` のガード 2 行を `?? []` へ（**欄はあるが配列でない**ときだけ挙動が変わり、`.map` の `TypeError` で `SubsystemStatus` 以下が丸ごとアンマウントする）/ `protocol.ts` の `safetyShapeErrors` の検査キーから `firmware_unconfirmed_motors` を外す（欠落が黙って `undefined` になる） | `web: healthVerdict.test.ts::firmwareUnconfirmedMotors::欄が配列でなくても投げず空を返す` / `web: protocol.test.ts` の `safety` 欠落 each / `web: wsContract.test.ts` |
 | bus-off から自動復帰できる設定で立ち上がる | `can_config.DEFAULT_RESTART_MS` を 0 にする | `test_can_config.py::test_restart_ms_defaults_to_a_nonzero_value` |
 | 送信が滞留したバスだけを復旧する | `can_watchdog.sh` の滞留判定から backlog 条件を落とす（平常時のバスを落とす）/ TX packets の比較を落とす（連続送信中のバスを落とす） | `test_can_watchdog.py::TestStallDetection::test_idle_bus_is_never_recovered` / `::test_busy_bus_making_progress_is_not_recovered` |
 | 復旧しないバスで down/up を回し続けない | `can_watchdog.sh` の `recover()` から最短間隔の `return` を外す | `test_can_watchdog.py::TestRecoveryRateLimit::test_repeated_stall_recovers_only_once_within_the_interval` |
@@ -5787,6 +5809,63 @@ enable を 1 通も送らない（CLAUDE.md「このフレームは機構を動�
 CAN のフィードバックは無励磁でも正常に届くので、鮮度からもヘルスからも区別が付かない。
 `step` のように「動かない」で説明の付く値が近くにあると、そちらを先に触ってしまう。
 
+### `INFO` を一度も受けていない基板があると焼き忘れ検出が黙って無効になる穴を閉じた（2026-09-06）
+
+CLAUDE.md「送信バッファの本数は 3 枚で違う」節が自ら予告していた穴: DC 基板は
+mailbox が 1 本しか無く、1 反復で全 ch ぶんまとめて送るコードでは `INFO` が
+**1 通も出ない**。PC 側は `INFO` の未受信を照合しない（それが正しい —— 未受信を
+不一致にすると起動のたびに全サーボが FAULT になる）ので、この壊れ方は FAULT に
+ならない。だが同時に、`GenericDriver.info_mismatch` による焼き忘れ検出
+（§3.4）も `INFO` を一度受けて初めて働くため、**未受信の間は焼き忘れがあっても
+気付ける経路そのものが存在しなかった**。ヘルスにも `is_fault()` にも一切出ない点は
+「励磁されていない」（1 つ上の節）と同型の異常である。
+
+**方針は「INFO 未受信を FAULT にする」ではない。** それは正しい既存の判断で、
+やり方を変えると起動直後の一時的な未受信で全サーボが赤くなる。代わりに
+FAULT でも STALE でもない**第 3 の状態**を足した:
+
+- `MotorDriver.firmware_confirmed()`（`lib/drivers/base.py`）—— `is_energized()` と
+  同じ形。既定は `None`（「そもそも `INFO` を送らない」の意味）で、`GenericDriver`
+  だけが `self._info is not None` を返す。M3508 / EDULITE 05 / DM3520 は `INFO` を
+  送らないので `None` のまま —— ここを `False` へ倒すと全モータが常時「未確認」になる
+- `RobotServer._firmware_unconfirmed_motors()`（`lib/server.py`）—— 起動から
+  `_FIRMWARE_INFO_GRACE_S`（3 秒。`INFO` は 1Hz なので数秒で埋まるのが正常。
+  `_ENERGIZE_GRACE_S` と同じ発想だが、緊急停止のたびには置き直さない ——
+  `INFO` は励磁状態と無関係に送られ続けるので、起点はサーバー起動 1 回で足りる）を
+  過ぎても `firmware_confirmed() is False` のモータを拾い、`state.safety` へ
+  `unenergized_motors` と並べて `firmware_unconfirmed_motors` として配信する
+- **フィードバックが途絶えている（STALE）モータは対象外。** 基板が丸ごと落ちて
+  いれば `INFO` も当然来ないが、それは `CANManager.health()` が全チャンネルを
+  STALE に倒し、UI の `evaluateHealth` が `要確認 N 件`（warning）として診断ツリーを
+  **強制展開**する経路が既にある。ここでも言えば同じ事実を 2 度描くことになり、
+  しかも**手当てが逆になる** —— この報告が残したいのは「`FEEDBACK` は 10ms で
+  届き続けているのに `INFO` だけが 1 通も出ない」ケースなので、電源・CAN 配線を
+  疑っても必ず何も見つからない（配線が正常だから `FEEDBACK` が来ている）。判定は
+  既存の `FeedbackFreshness` に `HealthThresholds.feedback_timeout_ms` を渡す
+  1 本だけで、ここに別名のしきい値を置かない
+- **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないため、猶予を
+  過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
+  なる（`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由）
+- **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
+  （仕様書 §5.2）が、現状 `main.py` はセンサを `expected_firmware` なしに生成する
+  ので照合対象そのものが無い。`sensors:` に `expected_firmware` を書けるように
+  する日には `ctx.can_manager.sensors` も見ること（`_firmware_unconfirmed_motors`
+  の docstring に同じ断りを置いてある）
+- UI 側 (`web/src/lib/healthVerdict.ts` の `firmwareUnconfirmedMotors`) は
+  `evaluateHealth` の判定 (tone) を経由しない —— `workpieceRiskBuses` と同じ位置付け。
+  **「壊れている」ではなく「確認できていない」なので赤くしない**（`StatusBadge
+  tone="info"`）。開閉の強制も入れていない —— `_info` は一度受ければ二度と `None`
+  へ戻らないラッチなので、猶予を過ぎても空でないのは大半が「起動直後のわずかな
+  遅れ」ではなく「その基板は焼き忘れ検出そのものが効かない」という試合中ずっと
+  変わらない状態になる。ワーク落下（`workpieceRiskBuses`）のような 1 事象ではなく、
+  しかも操縦者は試合中にこれを直せないので、畳めるままにして開いたときに見える
+  情報として残した
+- UI は**モータごとに 1 行**並べる（`WorkpieceRiskNotice` と同じ形）。この状態が
+  起きる最も現実的なきっかけは「1 枚の基板が丸ごと `INFO` を出していない」なので、
+  電磁弁 6ch やサブハンドの自作モタドラ 9 台が同時に並ぶ。1 行へ `join(", ")` すると
+  `truncate` で途中から読めず、操縦者は指差喚呼（`firmware_match`）に答えられない
+- 手当ての文面は**ファームの焼き直しと `candump`**。「電源・CAN 配線を確認」は
+  この機能の主対象シナリオでは必ず空振りになる（上の STALE 除外の項）
 ### 操縦者が明示的に叩ける再励磁コマンド（2026-09-06）
 
 上の穴を塞ぐ復帰経路は緊急停止の解除か `main.py` の再起動のどちらかしか無く、
@@ -6084,7 +6163,7 @@ disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）�
 | フィードバックが得られないと EDULITE が無励磁のまま残る | Phase 9 の `activate_motor()` は待機（既定 0.5s）の間にフィードバックを受け取れないと enable を送らず、WARNING をログに出すだけ | 電源断・配線ミス・CAN 断のときは「シーケンスは進むのに軸だけ動かない」状態になる。ログを見ないと気づけないので、有効化を見送ったモータを UI（health / 起動時バナー）に出す仕組みが欲しい。なお `--dry-run` は virtual バスで応答が無いため、この WARNING が必ず 2 件出るのが正常 |
 | ホーミングは `rotate` で実機検証済み。`y_axis` は未検証 | Phase 11 で `lib/sequence/homing.py` を入れ、動作確認シーケンスの最初のステップが `set_group_origin_here()` まで到達する。**`rotate` は 2026-09-05 に実機で通った**（離脱 → 寄せ直しで 0.70deg 動いて到達、`SET_ZERO` まで到達。上の「`rotate` の零点確定を実機で通した」節）ので、`direction` −1 / `settle_s` 0.05s は実機の機構で妥当だと分かっている。**`search_distance` だけは触れた状態から始めたため一度も試されていない。** `step` は**現在 1.0deg**（原点の分解能を優先。上の「`step` を 1.0deg へ詰めた」節）で、**この刻みでの通し確認はまだ取っていない。** `y_axis` はスイッチ未装着で `homing:` ごとコメントアウト中なので 3 値とも仮値のまま | 探索の整定時間は `rotate` では確認できた。`step` の下限は実機で分かっている（0.5deg では静止摩擦を超えられず 1 歩も動かない）が、現在値 1.0deg はその 2 倍しかないので**停滞判定で落ちるようなら 1.5deg 前後へ戻す**。`y_axis` はスイッチが付く日に同じ確認が要る（探索の起点と歯止めそのものは下記「【済】」で解消した） |
 | 零点確定が有効なのは `rotate` だけ | `main.py` の `_make_origin_resolver` は「PC 側位置制御ループ（M3508）」と「ドライバへの `SET_ZERO`」の 2 つを順に探し、可否はドライバ自身の `supports_origin_capture()` が答える（`deactivation_steps()` と `origin_capture_steps()` の両方を持つドライバだけが宣言できる）。EDULITE 05 は宣言するので `rotate` の `homing:` は**有効**（センサはサーボ基板 #0 の SV3 = `0x43`、実機で接触が読めることを確認済み） | **`sub_y_axis` / `sub_lift`（DM3520）は宣言しない** —— `SET_ZERO` の安全な順序（`disable → set_zero`）が **`sub_lift` の自重落下**と両立しないため。スイッチを付けて `homing:` を有効化しても必ず `HomingError` で落ちる（**ただし 1 歩も動かずに落ち、起動ログにも `ERROR` で出る**）。**`y_axis`（M3508）は確定手段があるのにスイッチが未装着**で、ファームの `kSlotsByBoard` 基板 #0 SV4 は `Unused`、`sensors:` にも `homing:` にも書いていない（3 箇所は必ず同時に戻す。上の「零点確定を rotate へ移し、y_axis を一時無効化した」節）。原点が確定できない軸は**電源投入位置がそのまま原点**で、ずれは指差喚呼（`main_home_position` / `sub_dm3520_origin`）が人の目で埋める。**ただし `rotate` は放っておくと電源投入位置すら原点にならない** —— EDULITE 05 の原点はフラッシュの機械ゼロで、2 台のゼロが揃っていないと物理的にずれ 0 でも逆換算後に差として現れ（実機で 175.879deg）、起動直後に `SyncMonitor` が全体緊急停止を掛ける。`rotate_r` / `rotate_l` の `set_zero_on_start: true` がこれを消しており、**零点確定が有効になっても `false` へ戻してはならない**（戻すと機体が動かせず、動作確認そのものを開始できない）。**`direction` −1 は 2026-09-05 に実機で確定した。`step` は同日に下限が分かっている**（0.5deg では静止摩擦を超えられず `HomingError`）が、**現在値 1.0deg はその 2 倍で、この刻みでの通し確認はまだ**。**未実測は `search_distance` 180.0deg だけ** —— その日の零点確定はスイッチに触れた状態から始めたので、この歯止めが効く経路を通っていない。探索は現在 180 ステップ・最短 9 秒（最悪 45 秒） |
-| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。`operstate` の検証は未実装 | 受信ループは `bus.recv` の失敗で降りずに待って呼び直し、そのあいだ `rx_down` を立てるので、UI にはそのバスが `BusHealth.DOWN` として出る（up すればそのまま復帰する）。起動そのものを止める仕組みは無いままなので、`--strict` の点検を通していない構成では「立ち上がったが 1 通も読めていない」状態で始まりうる。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
+| down したバスでも起動できてしまう | `_create_bus()` は down のインタフェースをオープンでき、例外も出ない。**`operstate` を見て down なら起動ログへ 1 行 ERROR を残すようになった**（インタフェース名入り。`--dry-run` では判定そのものを行わず、`/sys` に実体が無い環境では「分からない」へ倒してログも出さない）。**起動は拒否しない** — `--strict` を通していない構成（片ハンドだけの練習・机上ベンチ・会場での逃げ道）を一律に潰さない判断のまま | 受信ループは `bus.recv` の失敗で降りずに待って呼び直し、そのあいだ `rx_down` を立てるので、UI にはそのバスが `BusHealth.DOWN` として出る（up すればそのまま復帰する）。**down そのものは起動ログから読めるようになったが**、起動そのものを止める仕組みは無いままなので、`--strict` の点検を通していない構成では「立ち上がったが 1 通も読めていない」状態で始まりうる（ログを見なければ気づけない）。「既知の制約: バス down 時の失敗が分かりにくい」参照 |
 | サブハンド不在構成（`config/bench/main_hand/`）では `y_axis` の原点が未確定のまま、checklist の記述も実態とずれている | かつては `sequences/motor_check.py` の `REQUIRED_AXES` が両ハンドの全軸を要求し、この構成では `MotorCheckSequence` そのものが登録されなかった。**その `REQUIRED_AXES` は削除済み**で、構成に無い軸のステップは `Sequence.restrict_to_axes()` が除外して残りを登録する（上の「構成に無い軸の動作確認ステップを除外する」節）。**この構成でも動作確認は登録され、最初のステップである `rotate` の零点確定は走る**（2026-09-05 に実機で完走）。**走らないのは `y_axis` の零点確定だけで、理由は登録の可否ではなくリミットスイッチが未装着で `homing:` ごとコメントアウトされていること**（本番構成でも同じく走らない）。加えて `config/bench/main_hand/checklist.yaml` の項目は M3508 と EDULITE 05 のものだけで、この構成が開く `can_generic`（`system.yaml` の `generic_bus: can_generic` により本番 `config/main_hand.yaml` の `gripper` / `conveyor` / `wall_f` / `wall_r` と `sensors.rotate_origin_sensor` がそのまま構成に入る）の確認項目が無い（本番 `config/checklist.yaml` にある `conveyor_run` / `origin_sensor_react` / `main_gripper_open` / `wall_initial` に相当するものが無い）。同 checklist の `bench_return_home` は「両軸に home を送り、どちらも電源投入位置へ戻ること確認」という文言で、`rotate` は `set_zero_on_start: true` なので今も成立するが、`y_axis` は本来ホーミング（リミットスイッチ探索）で原点を確定する軸であり `home` は電源投入位置ではない。ただし前述のとおりスイッチ未装着でそのホーミングが走らないため、結果的に電源投入位置が原点になっているという二重にねじれた状態にある | 位置定数は原点からの相対値なので、電源投入位置がそのまま `y_axis` の原点として扱われる。実測ストロークが 650mm へ広がった今、原点がずれたまま走らせると全ステップが同じだけずれた場所へ動く。**動かす前に機体を原点位置へ置いておくことが人の責任になり、UI にもログにも「原点が未確定である」ことは出ない。** 手動操縦（`y_axis` / `rotate`）は使えるので、そちらで確認しながら動かすことになる。DC 基板はフィードバックを一切持たず動作を自動判定できないので目視確認が唯一の手段だが（CLAUDE.md「この基板の動作は自動判定できない」）、その確認項目が checklist に無いため確認されないまま通る（どういう項目を置くべきかは実機を見ている人が決めることなので、ここでは「無い」という事実だけを記録する）。`bench_return_home` の文言をそのまま読むと `y_axis` もホーミングで原点確定されるかのように読めるが、実際には走らないホーミングを前提にした文言が、走らないこと自体によって結果的に辻褄が合ってしまっている |
 | `config/bench/y_axis_tuning/system.yaml` のコメントが本番の `sync_tolerance` と食い違う | 同ファイル冒頭のコメントは「保護値は本番と同じに保ち、代わりに出力上限だけを下げる」とあるが、実際のこのセットの `main_hand_positions.yaml` の `axes.y_axis.sync_tolerance` は 2.0mm で、本番 `config/main_hand_positions.yaml` の `axes.y_axis.sync_tolerance` は 10.0mm（2026-09-04 のコミット `5aa89c3` で 2.0 → 10.0 へ緩められている）で一致していない | どちらが正か（ベンチ側を本番に合わせて 10.0mm へ更新するのか、コメントの方が古いだけで意図的に 2.0mm のまま据え置いているのか）は現時点の記述からは判断できない |
 
@@ -6178,7 +6257,7 @@ disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）�
 | プロファイル導入で PID の問題の性質が変わった | ゲイン（kp 32 / ki 10 / kd 1.0）は「飽和したバンバン制御をなだめる」条件で詰めた値のまま | 中間目標を入れた後の PID の仕事は**追従誤差の最小化**であり、同じ数字でも意味が違う。**実運用振幅での再調整が要る**（`docs/mechanism_handoff.md` §3-2 の手順 4） |
 | 低速域のスティックスリップが未観測 | この軸は静止摩擦が大きい（実測で重い側 500counts 相当）。中間目標がゆっくり動く低速域では追従誤差が小さく、電流が静止摩擦を超えられない可能性がある | **予測であって観測ではない。** 出るなら「動かない → 誤差が溜まって急に動く」形で、`sync_tolerance` の発報として現れうる。対抗手段は `ki`（既に 10 が入っていて、まさにこの役割）と `velocity_ff`。それでも足りなければ静摩擦補償（参照速度の符号に応じた定数電流）—— **今回スコープ外**（単位が counts で `motion` 節の人間単位と混ざる / 必要性がまだ推測 / `ki` が部分的に代替している） |
 | `velocity_ff` は実行中に変更できず UI にも配信されない | `pid_gains()` に相当する読み口が `M3508PositionLoop` に無く、`/pid-tuning` にも出ない。値を知る経路は起動ログ（`_attach_motion_profiles`）だけ | 調整は **config 変更 + 再起動**が要る。`kd` は UI から変えられるので、**画面から `kd` だけを動かすと `velocity_ff` との対応が黙って崩れる**（症状は「巡航中だけ飽和して速くならない」）。実機で詰めるあいだは `scripts/tune_y_axis.py --velocity-ff` を使う |
-| 200Hz が実機で維持できるか未測定 | 周期の実測・ジッタのロギング機構が無い | 「asyncio で 200Hz の位置ループを回す判断」の限界節を参照。乱れた場合の備えはあるが、乱れているかどうかを知る手段が無い |
+| ~~200Hz が実機で維持できるか未測定~~ → **周期の実測を追加済み（2026-09-05）。ただし画面と WS 配信からは外した（同日）** | `lib/control/periodic.py` の `PeriodicTask` が連続する tick 開始時刻の差 (= 実周期) を測り、公称周期の 1.5 倍 (`JITTER_OVERRUN_MARGIN` = 0.5。値は「超過分 / 公称周期」なので 0.5 が 1.5 倍にあたる) を超えた回数と最悪値だけを O(1) で積む（サンプル列は持たない）。3 つの周期タスク（位置制御ループ 200Hz / 同期監視 50Hz / 目標値再送 20Hz）は全て `PeriodicTask` を継承するので継承先へ書き写す必要は無い。超過したら `LogThrottle` 経由で WARNING。**集計 1 行は `match_finish`（`log_jitter_summary()` → `reset_jitter_stats()`）で journal へ INFO。`match_start` は前縁リセットだけ（黙って 0 に戻す）。** **画面 (`SubsystemStatus`) と WS 配信 (`safety.*.jitter_overrun_count` / `worst_jitter_ms`) からは外してある（2026-09-05）** —— しきい値は理屈で導いた値で実機で検証しておらず、本番構成（CANable 4 本・毎秒 4200 通）で 200Hz ループがどれだけ揺れるかは誰も測っていない（実装時に試したのは WSL の virtual バスを 20 秒動かしただけで、警告 0 件だったが本番とは条件が違いすぎる）。安全機構のパネルに未検証のしきい値で常時点灯する項目を混ぜると、同期ずれラッチや緊急停止といった本物の異常まで読まれなくなるおそれがあり、しかも試合中の操縦者にはこの情報に対してできる行動が無い（PC の負荷は下げられない）——PR #100 の CAN 警告が「ワークが落ちたかも → 掴み直す」という行動に繋がるのとは性質が違う、エンジニアが後から読む情報である。**順番が逆になっていた** —— 先に実機で測って線を決めてから画面に出すべきところを、理屈だけの線を先に画面へ出していたので、実機計測が先に来るよう画面と配信だけを外した。**リセットと journal ログは残した** —— 画面が無くても、試合ごとに 1 行の記録が journal に残ることで、実機計測のときにそのまま使える単位（この試合で何回・最悪何 ms）になる。**次にやるべきこと: 実機（本番の CAN 構成）で計測し、しきい値と対処可能な行動を決めてから画面へ戻すかどうかを判断する。** | しきい値は `interval_s` からの相対値で導出し（`HealthThresholds` には足さない — 200/50/20Hz の 3 種を跨ぐため）、`config/system.yaml` に新しい節は増えていない。**集計は超過 0 件でも 1 行出す** —— 「超過したときだけ出す」にすると、公称の 1.4 倍で常時走っている（＝停止距離も 40ms 予算も既に崩れている）機体で journal が無音になり、しきい値を決めるためにしきい値を超えている必要がある、という循環になる。**まだ「実機で 200Hz を維持できるか」の実測データそのものは無い** —— 今回入ったのは「乱れているかどうかを知る手段」で、実際に乱れているかは実機で動かして確認する必要がある。**画面に出す判断は実機計測の後**（現状は計測・WARNING・試合単位の集計と journal ログのみ） |
 | `dead_band=1.0`（モータ軸 deg）と `default_tolerance` の関係 | 到達判定の許容差は出力軸 1deg 相当（モータ軸で約 19.2deg）、PID のデッドバンドはモータ軸 1deg | 現状は許容差 > デッドバンドなので到達はするが、チューニングで両者を動かすときは大小関係を意識する必要がある（デッドバンドが許容差より広いと永久に到達しない） |
 
 ### 運用

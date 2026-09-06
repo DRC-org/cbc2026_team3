@@ -19,6 +19,14 @@ interface Blocker {
   detail: string;
 }
 
+/**
+ * 開始を止めない「開始前に見るべきこと」。1 機が 2 件以上出しうるので、
+ * 表示キーはラベル (機体名) ではなく発生源ごとに分けて持つ。
+ */
+interface Warning extends Blocker {
+  key: string;
+}
+
 const ROLE_LABEL: Record<string, string> = {
   pre_match: "指差喚呼",
 };
@@ -82,11 +90,31 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   // 機体側の異常は「開始できない」ではなく「開始前に見るべきこと」。サーバーは
   // ハードウェア状態で match_start を止めないので、ここでボタンを殺すと軽微な
   // 警告ひとつで試合そのものを始められなくなる。判断は操縦者に残し、見落としだけ防ぐ
-  const warnings = ROBOTS.flatMap(({ key, label }) => {
+  const warnings = ROBOTS.flatMap(({ key, label }): Warning[] => {
     const robot = states[key];
-    if (!robot) return [{ label, detail: "データ未受信" }];
+    if (!robot) return [{ key: `${key}:missing`, label, detail: "データ未受信" }];
+
+    const items: Warning[] = [];
     const verdict = evaluateHealth(robot.health, robot.safety, connected);
-    return verdict.tone === "success" ? [] : [{ label, detail: verdict.label }];
+    if (verdict.tone !== "success") {
+      items.push({ key: `${key}:health`, label, detail: verdict.label });
+    }
+    // 手動操縦は健全性ではないので evaluateHealth へは足さない (あちらは
+    // `lib/healthVerdict.ts` の 1 箇所だけが持つ機体の健全性判定)。ここへ別項目として
+    // 並べるのは、指差喚呼 operation_mode_sequence が読む先がこの行だから。
+    //
+    // **チェックの後で手動へ戻っても外れる**のが要点。指差喚呼は押した瞬間のラッチで、
+    // valves_actuate のように手動操縦を要求する項目が同じリストに居るので、
+    // final を全部チェックした後に弁をもう一度確かめて手動のまま戻ると
+    // can_start_match は true のままになる。ここは毎描画で評価するのでラッチしない
+    if (robot.manual?.mode === "manual") {
+      items.push({
+        key: `${key}:manual`,
+        label,
+        detail: "手動操縦中 — 半自動へ戻すまで START が拒否されます",
+      });
+    }
+    return items;
   });
 
   const ready = canStart && connected && phase !== "finished";
@@ -141,7 +169,7 @@ export function StartGate({ onStart }: { onStart: () => void }) {
           {warnings.length > 0 ? (
             <ul className="flex flex-col gap-[0.15rem]">
               {warnings.map((w) => (
-                <li key={w.label} className="flex min-w-0 items-baseline gap-2">
+                <li key={w.key} className="flex min-w-0 items-baseline gap-2">
                   <Icon as={TriangleAlert} className="translate-y-[0.15em] text-error" />
                   <span className="shrink-0 font-medium">{w.label}</span>
                   <span className="min-w-0 truncate text-base-content/70">{w.detail}</span>

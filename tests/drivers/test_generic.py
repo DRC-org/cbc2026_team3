@@ -523,6 +523,24 @@ class TestInfoFrame:
         assert driver.matches_feedback(generic_info(driver)) is False
 
 
+class TestFirmwareConfirmed:
+    """`firmware_confirmed()` — INFO を一度でも受けたかの単独判定。
+
+    `info_mismatch` (期待値との照合) とは別物。**「未受信」は False で表す**
+    (基底の `is_energized()` が使う None は「そもそも申告を持たないドライバ」の意味で、
+    GenericDriver は申告を持つのでここには入らない)。
+    """
+
+    def test_before_any_info_is_false(self):
+        driver = GenericDriver("gripper", 0x40)
+        assert driver.firmware_confirmed() is False
+
+    def test_after_info_is_true(self):
+        driver = GenericDriver("gripper", 0x40)
+        feed_generic_info(driver, firmware_version=1)
+        assert driver.firmware_confirmed() is True
+
+
 class TestInfoMismatch:
     """自己申告と config の期待値の照合 (仕様書 §3.4 / §7.7)。
 

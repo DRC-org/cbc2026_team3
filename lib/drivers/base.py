@@ -247,6 +247,21 @@ class MotorDriver(abc.ABC):
         """
         return None
 
+    def firmware_confirmed(self) -> bool | None:
+        """起動時自己申告 (`INFO`) を一度でも受けたか。**申告を持たないドライバは None。**
+
+        `INFO` は自作モタドラ (`GenericDriver`) だけが 1Hz で送る自己申告
+        (仕様書 §3.4)。M3508 / EDULITE 05 / DM3520 は送らないので、`is_energized()`
+        と同じ理由で既定は None のままにしておくこと —— None を False へ倒すと
+        「確認できていない」がそれらの全モータへ常時ついて回る。
+
+        呼び出し側 (`RobotServer._firmware_unconfirmed_motors`) は起動から猶予を
+        過ぎても False のままのモータを拾う。ファームの焼き忘れ検出
+        (`GenericDriver.info_mismatch`) は `INFO` を一度受けて初めて働くので、
+        ここが False のままだと焼き忘れがあっても FAULT にならず素通りする。
+        """
+        return None
+
     def health_detail(self) -> str | None:
         """ヘルスに添える 1 行。**言うことが無いドライバは None を返す。**
 

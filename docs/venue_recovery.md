@@ -157,6 +157,10 @@ journalctl -u cbc-can-watchdog -f      # [ WD ] ... down/up で復旧を試み�
 `DOWN` なら受信ループが `rx_down` を立てている。`scripts/setup_can.sh` を打ち直せば
 同じ socket のまま復帰する（受信ループは down/up を跨いで生き残る）。
 
+**起動ログに `CAN インタフェース '<名前>' は down です (起動は続けます)` が出ていたら
+そのバスは最初から down。** 立ち上がりはするが 1 通も読めない。同じく
+`scripts/setup_can.sh` を打ち直す。
+
 **(b) 自作モタドラ 1 枚のチャンネルだけが揃って赤い** — **基板の LED を見る。**
 赤の速い点滅なら **CAN 不通かデバイス ID 未設定**（DIP の回しすぎ）である。
 

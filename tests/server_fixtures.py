@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -34,7 +35,7 @@ from lib.health import HealthSnapshot
 from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
-from lib.server import RobotServer
+from lib.server import _FIRMWARE_INFO_GRACE_S, RobotServer
 from tests.fake_can import mock_can_manager
 
 #: 指差喚呼の既定定義。**項目が 1 つ以上あること自体に意味がある** ——
@@ -162,6 +163,15 @@ class ServerFixture:
         tasks = [task for task in self.server._reactivate_tasks if not task.done()]
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+
+    def expire_firmware_grace(self) -> None:
+        """起動猶予 (`_FIRMWARE_INFO_GRACE_S`) を実時間を待たずに過ぎさせる。
+
+        `INFO` は 1Hz なので、実時間でこの猶予を跨ぐとテストが数秒単位で重くなる。
+        `_server_started_at` を過去へ押し戻すだけで、判定対象そのもの
+        (`firmware_confirmed()`) には触れない。
+        """
+        self.server._server_started_at = time.time() - _FIRMWARE_INFO_GRACE_S - 0.1
 
     async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
         """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。
@@ -540,3 +550,13 @@ async def collect_types(ws: Any, wanted: Iterable[str], *, tries: int = 60) -> l
         if msg.get("type") in wanted_set:
             found.append(msg)
     return found
+
+
+def seed_jitter_overrun(task: Any, *, count: int = 1, worst_s: float = 0.05) -> None:
+    """周期タスクの乱れカウンタへ直接値を据える (リセット配線だけを見たいテスト専用)。
+
+    実際に実周期を乱して検知させる経路は ``tests/test_periodic.py`` が単体で
+    尽くしている。ここで本物のタイミングを乱すと非決定性がテストへ持ち込まれる。
+    """
+    task._jitter_overrun_count = count
+    task._worst_jitter_s = worst_s

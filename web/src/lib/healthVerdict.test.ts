@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeSafetyIssues,
   evaluateHealth,
+  firmwareUnconfirmedMotors,
   motorTempTone,
   summarizeMotors,
   tempThresholdsOf,
@@ -71,6 +72,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    firmware_unconfirmed_motors: [],
     reenergizing: false,
     loops_running: true,
     monitors_running: true,
@@ -333,6 +335,54 @@ describe("workpieceRiskBuses", () => {
   });
 });
 
+/**
+ * 起動の猶予を過ぎても `INFO` を一度も受けていない自作モタドラの一覧。
+ * `describeSafetyIssues` には含めない —— 「壊れている」ではなく「確認できていない」
+ * なので、`evaluateHealth` の判定 (tone) を動かしてはならない。
+ */
+describe("firmwareUnconfirmedMotors", () => {
+  it("平常時は返さない", () => {
+    expect(firmwareUnconfirmedMotors(safety({ firmware_unconfirmed_motors: [] }))).toEqual([]);
+  });
+
+  it("未受信のモータをそのまま返す", () => {
+    expect(firmwareUnconfirmedMotors(safety({ firmware_unconfirmed_motors: ["gripper"] }))).toEqual(
+      ["gripper"],
+    );
+  });
+
+  it("未配信・読めない配信は空 (evaluateHealth 側が判定不能を別に報告する)", () => {
+    expect(firmwareUnconfirmedMotors(undefined)).toEqual([]);
+    expect(firmwareUnconfirmedMotors(MALFORMED)).toEqual([]);
+  });
+
+  /**
+   * **ガードを `?? []` へ置き換えてはならない。** 欄の欠落 (`undefined`) だけなら
+   * `?? []` でも同じに見えるが、「**欄はあるが配列でない**」場合に挙動が変わり、
+   * 呼び出し側 (`FirmwareUnconfirmedNotice`) の `.map` が `TypeError` を投げて
+   * `SubsystemStatus` 以下の React ツリーが丸ごとアンマウントする —— CLAUDE.md が
+   * 「`describeSafetyIssues` が無検査で `.length` を呼び全画面が白くなった」として
+   * 記録している事故と同型。
+   */
+  it("欄が配列でなくても投げず空を返す (全画面を落とさない)", () => {
+    const broken = { ...safety(), firmware_unconfirmed_motors: "gripper" };
+
+    expect(firmwareUnconfirmedMotors(broken as unknown as SafetyState)).toEqual([]);
+  });
+
+  it("欄が欠けていても投げず空を返す", () => {
+    const broken: Record<string, unknown> = { ...safety() };
+    delete broken.firmware_unconfirmed_motors;
+
+    expect(firmwareUnconfirmedMotors(broken as unknown as SafetyState)).toEqual([]);
+  });
+
+  it("describeSafetyIssues には現れない (tone を動かさない)", () => {
+    const payload = safety({ firmware_unconfirmed_motors: ["gripper"] });
+    expect(describeSafetyIssues(payload)).toEqual([]);
+  });
+});
+
 describe("describeSafetyIssues", () => {
   it("平常時は 1 件も返さない (静かにする)", () => {
     expect(describeSafetyIssues(safety())).toEqual([]);
@@ -453,6 +503,7 @@ describe("describeSafetyIssues", () => {
     it.each([
       "sync_violations",
       "unenergized_motors",
+      "firmware_unconfirmed_motors",
       "reenergizing",
       "loops_running",
       "monitors_running",

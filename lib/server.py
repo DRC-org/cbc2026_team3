@@ -25,6 +25,7 @@ from lib.config_schema import (
     TuningSettings,
 )
 from lib.control.feedback import FeedbackFreshness
+from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import (
     MAX_TUNABLE_GAIN,
     TUNABLE_PID_KEYS,
@@ -69,6 +70,10 @@ _TUNING_CAPTURE_BACKLOG = 8
 #: DM3520 の再送は 20Hz (50ms) なので、その 10 倍を取れば偽報告は出ない。
 _ENERGIZE_GRACE_S = 0.5
 
+#: サーバー起動から、自作モタドラの `INFO` 未受信を「未確認」として報告し始めるまでの
+#: 猶予。`INFO` は 1Hz (仕様書 §3.4) なので、起動直後の空白は正常。位相のずれで
+#: 最悪 1 周期分待たされてもなお埋まるよう、余裕を持って 3 秒 (3 周期分) を取る。
+_FIRMWARE_INFO_GRACE_S = 3.0
 #: 緊急停止解除が、進行中の単発再励磁タスクを畳むのに待つ上限。
 #: **キャンセルが効いていれば 1 周期で終わる値である** —— ここまで掛かるのは
 #: エグゼキュータへ入った `bus.send` のように、キャンセルしても止まらない
@@ -188,6 +193,11 @@ class RobotServer:
         # enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓があり、
         # そこを無条件に異常とすると解除のたびに偽の警告が 1 回出るため
         self._energize_expected_since: float | None = None
+        # サーバー起動時刻。`INFO` 未受信の猶予 (`_FIRMWARE_INFO_GRACE_S`) の起点で、
+        # `_energize_expected_since` と違って緊急停止のたびには置き直さない ——
+        # `INFO` は自作モタドラが励磁状態と無関係に 1Hz で送り続けるので、猶予は
+        # 起動 1 回だけで足りる (置き直すと緊急停止のたびに検出が遅れる)
+        self._server_started_at: float | None = None
         # 直近の有効化で励磁できなかったモータ (ロボット名 -> モータ名)。
         # 送信失敗もフィードバック待ちの失敗もここへ集約し、`safety` に載せて配信する。
         # **緊急停止で消さない。** 停止中に報告を止めるのは `_unenergized_motors` の
@@ -370,6 +380,7 @@ class RobotServer:
         # `server.start()` を呼ぶので、この時点以降は全モータが励磁されているのが
         # 正しい状態になる。起動時に励磁できなかったモータも同じ経路で画面に出す
         self._energize_expected_since = time.time()
+        self._server_started_at = time.time()
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
         # 各ロボットのシーケンス常駐ループを起動。停止/ジャンプで再起動可能な
         # 永続タスクとして保持し、shutdown でキャンセルする。
@@ -963,6 +974,18 @@ class RobotServer:
         if self.match.match_finish():
             logger.info("試合終了")
             self._stop_all_sequences()
+            # 実周期の集計をここで 1 行残してから 0 に落とす。リセット点を
+            # match_start だけにすると集計窓が [試合N開始, 試合N+1開始) になり、
+            # 試合後の finished・match_reset・次のセッティングタイム・両ハンドを
+            # 一巡する動作確認 (まさに乱れの発生源) が丸ごと混ざって、1 行が
+            # 「試合 N の集計」を名乗れなくなる。しかもその日の最後の試合は
+            # 次の match_start が来ないので永久に journal へ出ない —— 一番読みたい
+            # 1 試合が抜ける。試合の終わりを決めるのは操縦者の match_finish なので、
+            # 「試合 N ぶん」の境界もここにしかない。
+            for ctx in self._robots.values():
+                for task in self._periodic_tasks(ctx):
+                    task.log_jitter_summary()
+                    task.reset_jitter_stats()
             await self._broadcast_match_state()
 
     async def _cmd_match_reset(self, _data: dict, requester: WSOrNone) -> None:
@@ -1200,6 +1223,16 @@ class RobotServer:
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
+    @staticmethod
+    def _periodic_tasks(ctx: RobotContext) -> tuple[PeriodicTask, ...]:
+        """1 ロボットぶんの周期タスク全部 (実周期の集計とリセットはこの単位で回す)。
+
+        3 種を並べる箇所が match_start / match_finish の 2 つあるので、1 つに
+        まとめておく —— 別々に書くと、4 種目の周期タスクが増えたときに片方だけが
+        古いまま残り、症状は「その試合の集計にだけ 1 本足りない」になる。
+        """
+        return (*ctx.position_loops, *ctx.sync_monitors, *ctx.target_refreshers)
+
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
         # **動作確認の実行中は試合に入れない。** フェーズが MATCH になると
         # sequence_start が解禁され、両ハンドを一巡している統合動作確認と通常
@@ -1224,16 +1257,16 @@ class RobotServer:
         # 開始直前にもう一度流し込む (取りこぼすとシーケンスが逆コートの分岐で動く)
         self._apply_court()
 
-        # CAN 途絶エピソード数を試合単位でリセットする。**match_reset ではなく
-        # match_start を選んだ理由**: 準備中 (配線確認・動作確認) に踏んだ途絶を
-        # ここで洗い流しておかないと、試合中に見えるエピソード数へ準備フェーズの
-        # ぶんが紛れ込み、「この試合で本当に何回起きたか」が読めなくなる。
-        # match_reset (次の準備フェーズへ戻る操作) でリセットすると、直前の
-        # 試合の記録が FINISHED のあいだに消えてしまい、結果確認中の操縦者が
-        # 見返せなくなる。CANManager が「試合」を知らないぶん、いつ呼ぶかは
-        # ここ (サーバー) が決める
+        # 試合単位でリセットする 2 つ。ここは**前縁リセット** —— 準備中 (配線確認・
+        # 動作確認) に踏んだぶんを洗い流し、試合中の数字を「この試合で起きたこと」
+        # だけにする。match_reset ではなく match_start なのは、finished (結果確認中)
+        # に直前の試合の記録を消さないため。CANManager も PeriodicTask も「試合」を
+        # 知らないぶん、いつ呼ぶかはここ (サーバー) が決める。
+        # ジッタの集計 1 行は match_finish が出すので、ここでは黙って 0 に戻すだけ。
         for ctx in self._robots.values():
             ctx.can_manager.reset_rx_down_episodes()
+            for task in self._periodic_tasks(ctx):
+                task.reset_jitter_stats()
 
         # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
         logger.info("試合開始: court=%s", self.match.court.value)
@@ -1393,6 +1426,7 @@ class RobotServer:
         return {
             "sync_violations": sorted(violations),
             "unenergized_motors": self._unenergized_motors(robot_name),
+            "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
             # 単発の再励磁が処理中か。**押した後の 0.1〜1.5 秒は
             # `unenergized_motors` が消えない**ので、これが無いと操縦者には
             # 「押しても何も起きない」ようにしか見えず 2 回目を押す (そして
@@ -1461,6 +1495,57 @@ class RobotServer:
         # 「無励磁と分かっている」側に入らない)
         names.update(self._inactive_motors.get(robot_name, ()))
         return sorted(names)
+
+    def _firmware_unconfirmed_motors(self, robot_name: str) -> list[str]:
+        """起動の猶予を過ぎても自己申告 (`INFO`) を一度も受けていない自作モタドラ。
+
+        **これは「異常」ではなく「焼き忘れ検出が働いていない」ことの報告である。**
+        `INFO` の未受信は FAULT にしない (送信バッファの都合でも起きるため。
+        CLAUDE.md 「送信バッファの本数は 3 枚で違う」節) が、その間は
+        `GenericDriver.info_mismatch` による焼き忘れ検出も一緒に働かなくなる。
+        黙って無効になると誰も気付けないので、ここで別の状態として拾う。
+
+        `INFO` を送らないドライバ (`firmware_confirmed()` が None) は対象外 ——
+        M3508 / EDULITE 05 / DM3520 を混ぜると全モータが常時この状態になる。
+
+        **フィードバックが途絶えている (STALE) モータも対象外。** 基板が丸ごと
+        落ちていれば `INFO` も当然来ないが、それは `CANManager.health()` が全
+        チャンネルを STALE に倒して `evaluateHealth` が warning として大声で言い、
+        診断ツリーを強制展開する経路が既にある。ここでも言うと同じ事実を 2 度
+        描くことになり、しかも**この報告の手当ては STALE とは別物になる** ——
+        残したいのは「`FEEDBACK` は 10ms で届き続けているのに `INFO` だけが
+        1 通も出ない」という、CLAUDE.md 「送信バッファの本数は 3 枚で違う」節が
+        書く壊れ方だけである。そこで電源・CAN 配線を疑っても必ず何も見つからない
+        (配線が正常だから `FEEDBACK` が来ている)。鮮度のしきい値は
+        `HealthThresholds` から来た 1 つだけを使い、ここに別名の値を置かない。
+
+        **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないので、猶予を
+        過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
+        なる (`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由)。
+
+        **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
+        (仕様書 §5.2) が、現状 `main.py` はセンサを `expected_firmware` なしに
+        生成するので照合対象そのものが無い。`sensors:` に `expected_firmware` を
+        書けるようにする日には、ここも `ctx.can_manager.sensors` を見ること。
+        """
+        if self._dry_run:
+            return []
+
+        since = self._server_started_at
+        if since is None or time.time() - since < _FIRMWARE_INFO_GRACE_S:
+            return []
+
+        ctx = self._robots[robot_name]
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        # 1 周期に 1 回だけ取る (モータごとに取り直すと同じ配信の中で基準時刻がずれる)
+        now = freshness.now()
+        return sorted(
+            motor_name
+            for motor_name, motor in ctx.can_manager.motors.items()
+            if motor.firmware_confirmed() is False and not freshness.is_stale(motor_name, now)
+        )
 
     async def _reactivate_motors(self) -> None:
         """緊急停止解除後にモータの励磁を戻す。
