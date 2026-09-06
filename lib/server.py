@@ -1362,9 +1362,25 @@ class RobotServer:
         `INFO` を送らないドライバ (`firmware_confirmed()` が None) は対象外 ——
         M3508 / EDULITE 05 / DM3520 を混ぜると全モータが常時この状態になる。
 
+        **フィードバックが途絶えている (STALE) モータも対象外。** 基板が丸ごと
+        落ちていれば `INFO` も当然来ないが、それは `CANManager.health()` が全
+        チャンネルを STALE に倒して `evaluateHealth` が warning として大声で言い、
+        診断ツリーを強制展開する経路が既にある。ここでも言うと同じ事実を 2 度
+        描くことになり、しかも**この報告の手当ては STALE とは別物になる** ——
+        残したいのは「`FEEDBACK` は 10ms で届き続けているのに `INFO` だけが
+        1 通も出ない」という、CLAUDE.md 「送信バッファの本数は 3 枚で違う」節が
+        書く壊れ方だけである。そこで電源・CAN 配線を疑っても必ず何も見つからない
+        (配線が正常だから `FEEDBACK` が来ている)。鮮度のしきい値は
+        `HealthThresholds` から来た 1 つだけを使い、ここに別名の値を置かない。
+
         **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないので、猶予を
         過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
         なる (`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由)。
+
+        **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
+        (仕様書 §5.2) が、現状 `main.py` はセンサを `expected_firmware` なしに
+        生成するので照合対象そのものが無い。`sensors:` に `expected_firmware` を
+        書けるようにする日には、ここも `ctx.can_manager.sensors` を見ること。
         """
         if self._dry_run:
             return []
@@ -1374,10 +1390,15 @@ class RobotServer:
             return []
 
         ctx = self._robots[robot_name]
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        # 1 周期に 1 回だけ取る (モータごとに取り直すと同じ配信の中で基準時刻がずれる)
+        now = freshness.now()
         return sorted(
             motor_name
             for motor_name, motor in ctx.can_manager.motors.items()
-            if motor.firmware_confirmed() is False
+            if motor.firmware_confirmed() is False and not freshness.is_stale(motor_name, now)
         )
 
     async def _reactivate_motors(self) -> None:
