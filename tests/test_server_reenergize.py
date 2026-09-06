@@ -28,6 +28,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.axis_sync import MotorSpec, SyncGroup
+from lib.can_manager import CANManager
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import QueryDrivenTargetRefresher
 from lib.drivers.base import ControlMode
@@ -36,7 +37,7 @@ from lib.manual import ManualController
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
-from tests.fake_can import mock_can_manager, mock_motor, set_motors
+from tests.fake_can import direct_runner, mock_bus, mock_can_manager, mock_motor, set_motors
 from tests.feedback_frames import feed_edulite
 from tests.server_fixtures import RecordingClient, ServerFixture
 
@@ -60,11 +61,45 @@ class _EmptySequence(Sequence):
     """
 
 
+def _count_e_stop_broadcasts(sent: list[can.Message]) -> int:
+    """ワイヤ上に出たブロードキャスト停止 (仕様書 §3.5 / CAN ID 0x0FF・data 全 0) の数。
+
+    エンコーダの戻り値と突き合わせず形をそのまま書くのは `tests/test_server_e_stop.py`
+    と同じ理由 —— 突き合わせると「実装が実装と一致する」ことしか見られない。
+    解除フレーム (同じ ID で data 01 5A A5) と data で見分ける。
+    """
+    return sum(
+        1
+        for msg in sent
+        if msg.arbitration_id == 0x0FF and bytes(msg.data) == bytes(3) and not msg.is_extended_id
+    )
+
+
 def _build_fixture() -> ServerFixture:
     fx = ServerFixture.build()
     for name in _ROBOT_NAMES:
         fx.add_robot(name, _EmptySequence(name))
     return fx
+
+
+def _dropped_fixture() -> tuple[ServerFixture, Edulite05Driver]:
+    """main_hand に「無励磁だと分かっている」EDULITE を 1 台だけ載せた最小構成。
+
+    **`mock_motor` では「対象が 1 台もいない再励磁」しか作れない。** あちらの
+    `is_energized()` は MagicMock を返すので `is False` が成立せず、`dropped` は
+    必ず空集合になる —— ラッチ剥がしもペア展開も 1 つも通らない。実ドライバへ
+    無励磁のフィードバックを流し、本物の対象を 1 台作る。
+    """
+    can_manager = mock_can_manager(bus_name="can_edulite")
+    can_manager.send = AsyncMock()
+    dropped = Edulite05Driver("dropped", can_id=1)
+    set_motors(can_manager, {"dropped": dropped})
+    feed_edulite(dropped, position=0.5, mode_state=0)
+
+    fx = ServerFixture.build()
+    fx.add_robot("main_hand", _EmptySequence("main_hand"), can_manager)
+    fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
+    return fx, dropped
 
 
 def _manual_fixture() -> ServerFixture:
@@ -896,3 +931,85 @@ class TestManualTargetDeniedWhileReenergizeInFlight:
             requester=client,
         )
         assert client.of_type("command_rejected") == []
+
+
+class TestEStopDuringReenergize:
+    """**再励磁と緊急停止が重なったときの 2 枚を、1 枚ずつ単独で確かめる。**
+
+    「再励磁を押した直後に機体が異常な動きを始めたので止める」は最も自然な
+    操作の流れで、そこで `_send_steps` の途中 (`encode_target` → 0.05s →
+    `encode_enable` → 0.1s) に停止が入りうる。守っているのは 2 つ:
+
+    1. `activate_motors` へ渡す `should_abort` —— 残りのモータへ enable を
+       送らないための中断口
+    2. 励磁を終えた後の停止フレーム再送 —— 中断判定をすり抜けた enable が
+       停止フレームより後に届き、**約 0.1 秒励磁されたまま残る**のを潰す
+
+    **まとめて 1 ケースにしてはならない。** 多重防護は統合経路のテストだと
+    1 枚壊しても他方が拾って落ちない (CLAUDE.md「多重防護の各層は 1 枚ずつ
+    単独で確かめる」)。実際、既存の `tests/test_server_e_stop.py` は解除経路
+    (`_reactivate_motors`) しか見ておらず、**再励磁経路だけ `should_abort` を
+    落とす変異も、再励磁側の再送だけを消す変異も 1 件も落ちなかった。**
+    """
+
+    async def test_activation_gets_a_live_e_stop_abort_hook(self) -> None:
+        """1 枚目だけを見る。停止フレームの再送は観測しない。"""
+        fx, _dropped = _dropped_fixture()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+
+        activate = fx.can_manager("main_hand").activate_motors
+        activate.assert_awaited_once()
+        should_abort = activate.await_args.kwargs["should_abort"]
+        # 常に False を返す中断口 (= `None` を渡したのと同じ) では意味を成さない
+        assert should_abort() is False
+        # 操縦者の e_stop と同じ経路で作る (フラグを直接立てると本番に無い状態を作る)
+        await fx.activate_e_stop(reason="再励磁の直後に機体が異常な動きを始めた")
+        assert should_abort() is True
+
+    async def test_stop_broadcast_is_resent_after_activation(self) -> None:
+        """2 枚目だけを見る。**中断口が効いたかどうかには依存させない。**
+
+        在飛中に緊急停止が入ったら、励磁を終えた後に停止のブロードキャスト
+        (`0x0FF`) がもう一度バスへ出ること。実 `CANManager` を挿してワイヤ上の
+        フレームで見る (`_send_e_stop_frames` を差し替えて呼び出し回数で見ると、
+        送り先も中身も変わってしまった実装を検出できない)。
+        """
+        sent: list[can.Message] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = mock_bus()
+        bus.send.side_effect = lambda msg: sent.append(msg)
+        mgr.add_bus("can_edulite", bus)
+        dropped = Edulite05Driver("dropped", can_id=1)
+        mgr.add_motor("can_edulite", dropped)
+        feed_edulite(dropped, position=0.5, mode_state=0)
+
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        mgr.activate_motors = _slow_activate  # type: ignore[method-assign]
+
+        fx = ServerFixture.build()
+        fx.add_robot("main_hand", _EmptySequence("main_hand"), mgr)
+        fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
+
+        try:
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await asyncio.sleep(0)
+
+            await fx.activate_e_stop(reason="再励磁の在飛中に押した")
+            before = _count_e_stop_broadcasts(sent)
+            assert before >= 1, "緊急停止そのものが停止フレームを出していない"
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+        assert _count_e_stop_broadcasts(sent) > before, (
+            "再励磁の完了後に停止フレームが送り直されていない"
+            " (中断判定をすり抜けた enable が停止より後に届いたまま残る)"
+        )
