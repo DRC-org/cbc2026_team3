@@ -378,15 +378,24 @@ class TestJitter:
     サンプル列を溜めずに (件数・最大値だけで) 検知できることをここで固定する。
     """
 
-    async def test_no_overrun_when_on_schedule(self) -> None:
-        """公称通りに回っていれば乱れを 1 件も数えない (平常時は静かにする)。"""
+    async def test_no_overrun_when_on_schedule(self, caplog: pytest.LogCaptureFixture) -> None:
+        """公称通りに回っていれば乱れを数えず、journal にも 1 行も出さない。
+
+        件数だけを見ていると「超過判定の**外**で毎周期 WARNING を出す」変異が
+        生き残る。実機では周期タスクが 6 本走るので、`LogThrottle` の 1 秒窓ごとに
+        各本が 1 行出せば 3 分の試合で約 1000 行になり、`docs/venue_recovery.md`
+        §3-1 が会場で journal を読ませる導線 (`[ WD ]` 探し) がノイズに埋まる。
+        「平常時に静かで、異常時に自分から主張する」は画面だけの話ではない。
+        """
         clock = FakeClock()
         task = _Recorder(clock, interval_s=0.01, work_s=0.002, stop_after=5)
 
-        await task.run()
+        with caplog.at_level(logging.WARNING, logger="tests.test_periodic"):
+            await task.run()
 
         assert task.jitter_overrun_count == 0
         assert task.worst_jitter_s == pytest.approx(0.0)
+        assert not caplog.records
 
     async def test_overrun_counts_when_period_exceeds_threshold(self) -> None:
         """公称周期の (1 + JITTER_OVERRUN_MARGIN) 倍を超えたら乱れとして数える。"""
@@ -448,6 +457,30 @@ class TestJitter:
         await task.run()
 
         assert task.jitter_overrun_count == 1
+
+    async def test_sub_threshold_jitter_updates_worst_without_counting(self) -> None:
+        """しきい値未満の乱れは数えないが、最悪値には必ず残る。
+
+        `worst_jitter_s` は「観測した超過分の最大値」であって「しきい値を超えた分の
+        最大値」ではない。しきい値 (`JITTER_OVERRUN_MARGIN`) が実機未検証である以上、
+        それを決める唯一の入力がこの値なので、更新を超過ブランチの内側へ移しては
+        ならない —— 移すと、公称の 1.4 倍で常時走っている機体の集計 1 行が
+        「最悪の遅れ 0.0ms」を名乗る (`log_jitter_summary` はこの値しか持たない)。
+        `interval_s` に 2 の冪を使う理由は境界テストと同じ (丸めを混ぜない)。
+        """
+        interval_s = 0.125
+        threshold_s = interval_s * JITTER_OVERRUN_MARGIN
+        task = _Recorder(
+            FakeClock(),
+            interval_s=interval_s,
+            work_s=interval_s + threshold_s / 2,
+            stop_after=3,
+        )
+
+        await task.run()
+
+        assert task.jitter_overrun_count == 0
+        assert task.worst_jitter_s == pytest.approx(threshold_s / 2)
 
     async def test_worst_jitter_keeps_max_not_last(self) -> None:
         """最悪値は最大値を保持し、後続が平常に戻っても最新値へ上書きしない。"""
