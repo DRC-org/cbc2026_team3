@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StartGate } from "@/components/monitor/StartGate";
 import { RobotProvider } from "@/context/RobotContext";
 import { ARM_GUARD_MS, ARM_TIMEOUT_MS } from "@/hooks/useArmedPress";
-import type { HealthSnapshot, MatchState, RobotState } from "@/lib/protocol";
+import type { HealthSnapshot, ManualState, MatchState, RobotState } from "@/lib/protocol";
 import { createRobotContext, DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
 function checklist(items: { id: string; label: string; checked: boolean }[]) {
@@ -19,8 +19,9 @@ const OK_HEALTH: HealthSnapshot = {
   detail: null,
 };
 
-function robot(health: HealthSnapshot): RobotState {
+function robot(health: HealthSnapshot, manual?: ManualState): RobotState {
   return {
+    ...(manual ? { manual } : {}),
     robot: "main_hand",
     sequence: "main_hand",
     current_step: null,
@@ -278,5 +279,50 @@ describe("StartGate の二度押し", () => {
     expect(screen.getByText("試合を開始できます")).toBeInTheDocument();
     fireEvent.click(startButton());
     expect(onStart).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 指差喚呼は押した瞬間のラッチなので、`operation_mode_sequence` にチェックを付けた後に
+ * 手動へ戻しても外れない。しかも同じリストの `valves_actuate` は手動操縦を要求する。
+ * つまり 27/27 で `can_start_match` が true のまま片ハンドが手動、という状態が普通に作れる
+ * （試合開始 → START → 「手動操縦中のため…」で拒否。そのとき計時は既に走っている）。
+ *
+ * ここは毎描画で `state.manual.mode` を読むのでラッチせず、読み上げる人が Monitor の
+ * 準備の面で判定材料を得られる。
+ */
+describe("StartGate の手動操縦警告", () => {
+  const MANUAL: ManualState = { mode: "manual", axes: [] };
+  const SEQUENCE: ManualState = { mode: "sequence", axes: [] };
+
+  it("手動操縦のままなら、機体名付きの警告を出す", () => {
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, MANUAL), sub_hand: robot(OK_HEALTH, SEQUENCE) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(screen.getByText(/手動操縦中/)).toBeInTheDocument();
+    expect(screen.getByText("Main Hand")).toBeInTheDocument();
+    expect(screen.getByText(/機体に要確認があります/)).toBeInTheDocument();
+  });
+
+  it("両ハンドとも半自動なら何も出さない", () => {
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, SEQUENCE), sub_hand: robot(OK_HEALTH, SEQUENCE) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(screen.queryByText(/手動操縦中/)).not.toBeInTheDocument();
+    expect(screen.getByText(/全ての指差喚呼が完了しています/)).toBeInTheDocument();
+  });
+
+  it("手動でも開始そのものは止めない (可否を決めるのはサーバーの can_start_match だけ)", () => {
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, MANUAL), sub_hand: robot(OK_HEALTH, MANUAL) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(screen.getByText("試合を開始できます")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "試合を開始する" })).toBeEnabled();
   });
 });
