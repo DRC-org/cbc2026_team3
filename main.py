@@ -491,8 +491,9 @@ def _create_bus(
 ) -> can.Bus:
     """1 本の CAN インタフェースを開く。開けなければ 1 行のメッセージで落とす。
 
-    down しているインタフェース (CANable が 1 本抜けている・`setup_can.sh` を
-    流していない) を開こうとすると python-can は例外を投げない
+    **インタフェースが存在しないとき (CANable が 1 本抜けている) は python-can が
+    例外を投げる**ので下の `SystemExit` で止まる。一方**存在するが down のとき
+    (`setup_can.sh` を流していない) は例外を投げない**
     (`docs/impl_plan.md` の「既知の制約: バス down 時の失敗が分かりにくい」)。
     **起動は拒否しない** (`--strict` を通していない構成の逃げ道を潰さないため)。
     代わりに operstate を見て down なら起動ログへ 1 行 ERROR を残す —
@@ -509,7 +510,8 @@ def _create_bus(
     # carrier が落ちる可能性があり、その場合このメッセージの手順は的外れになる。
     if not dry_run and read_operstate(channel) == "down":
         logger.error(
-            "CAN インタフェース '%s' は down です。scripts/setup_can.sh を実行してください",
+            "CAN インタフェース '%s' は down です (起動は続けます)。"
+            " scripts/setup_can.sh を実行してください",
             channel,
         )
     if dry_run:
