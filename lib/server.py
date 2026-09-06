@@ -79,11 +79,15 @@ _ENERGIZE_GRACE_S = 0.5
 #: 最悪 1 周期分待たされてもなお埋まるよう、余裕を持って 3 秒 (3 周期分) を取る。
 _FIRMWARE_INFO_GRACE_S = 3.0
 
-#: 緊急停止解除が、進行中の単発再励磁タスクを畳むのに待つ上限。
+#: 進行中の再励磁系タスクを畳むのに待つ上限。単発再励磁コマンドを緊急停止解除が
+#: 畳む場合 (`_settle_pending_reenergize`) と、緊急停止解除の再励磁を後続の
+#: 緊急停止解除が畳む場合 (`_settle_pending_reactivate`) の双方で使う ——
+#: どちらも「古いタスクをキャンセルしてから有界に待ち、待ちきれなくても
+#: ログを残して先へ進む」という同じ形なので定数を共有する。
 #: **キャンセルが効いていれば 1 周期で終わる値である** —— ここまで掛かるのは
 #: エグゼキュータへ入った `bus.send` のように、キャンセルしても止まらない
 #: ブロッキング呼び出しに入っているときだけ。詳細は `_settle_pending_reenergize`。
-_REENERGIZE_CANCEL_TIMEOUT_S = 0.5
+_PENDING_TASK_CANCEL_TIMEOUT_S = 0.5
 
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
@@ -1663,6 +1667,17 @@ class RobotServer:
         たびに同じロボットが取り残される」実機事故と同型になる)。ここ
         (バックグラウンドの再励磁タスク) だけが古いタスクを畳んでから
         自分の励磁へ進む。
+
+        **③の直前ではもう 1 つ、自分より前から走っている他の `_reactivate_motors`
+        自身も畳む** (`_settle_pending_reactivate`)。`e_stop → e_stop_release` が
+        連続で届くと、このコルーチンが同じロボットに対して二重に起動しうる
+        (`_reactivate_tasks` は解除操作単位で積むので、ロボット単位の排他が
+        `_reenergize_motors` 側の `_reenergize_tasks` のようには効かない)。
+        畳まずに両方が③へ進むと、`_reenergize_motors` と並走したときと同じ
+        「もう片方が enable したモータへ disable プローブが届く」事故が
+        解除コマンド同士でも起きる。中断 (`should_abort=lambda: self._e_stop_active`)
+        はこれを防げない —— 2 回目の解除で `_e_stop_active` は再び False に
+        戻るため、どちらのタスクも中断条件を満たさない。
         """
         await self._send_e_stop_clear_broadcast()
 
@@ -1678,6 +1693,11 @@ class RobotServer:
                     name,
                     ", ".join(uncleared),
                 )
+
+        # **ラッチ解除より後・励磁より前。** 後ろへ動かすと畳む前に自分の励磁が走り、
+        # 防ぎたい並走そのものが起きる (それは下の同時実行数のテストが捕まえる)。
+        # 前へ動かしても壊れないが、その位置を守るテストは無い。
+        await self._settle_pending_reactivate()
 
         for name, ctx in self._robots.items():
             await self._settle_pending_reenergize(name)
@@ -1730,13 +1750,56 @@ class RobotServer:
         # `asyncio.wait` は中の例外 (CancelledError を含む) を送出しない。
         # `await pending` や `wait_for` だとキャンセル済みタスクの CancelledError が
         # そのまま伝播し、**この再励磁タスク自身がキャンセルされたことになる**
-        done, _still_running = await asyncio.wait({pending}, timeout=_REENERGIZE_CANCEL_TIMEOUT_S)
+        done, _still_running = await asyncio.wait({pending}, timeout=_PENDING_TASK_CANCEL_TIMEOUT_S)
         if not done:
             logger.error(
                 "再励磁タスクが %.1fs 以内に畳めませんでした: robot=%s"
                 " (CAN の送信が詰まっている可能性があります)。解除の励磁を先へ進めます",
-                _REENERGIZE_CANCEL_TIMEOUT_S,
+                _PENDING_TASK_CANCEL_TIMEOUT_S,
                 robot_name,
+            )
+
+    async def _settle_pending_reactivate(self) -> None:
+        """励磁 (③) へ進む前に、自分より前から走っている他の `_reactivate_motors` を畳む。
+
+        `e_stop → e_stop_release` を連続で押すと `_cmd_e_stop_release` が
+        `_reactivate_motors` を毎回新しく起動する。`_reactivate_tasks` はロボット
+        単位ではなく解除操作単位で積むタスク集合なので、`_reenergize_tasks`
+        (ロボット名 → タスクの dict) と違って「同じロボットへの二重起動」を
+        自然には防げない。畳まずに両方が③まで進むと、`_settle_pending_reenergize`
+        が単発の再励磁コマンドとの並走で防いでいるのと同じ事故
+        (もう片方が enable したモータへ disable プローブが届き、DM3520 が
+        自重落下する) が解除コマンド同士でも起きる。
+
+        **自分自身は `asyncio.current_task()` で明示的に除く。** `_cmd_e_stop_release`
+        が `_reactivate_tasks` へ自分のタスクを追加するのは `asyncio.create_task` の
+        呼び出し元であり、このコルーチン自身の実行開始との前後関係は
+        スケジューラ任せで保証できない。集合に自分がまだ入っていない/既に
+        入っている、どちらの状態で読んでも `current_task() is not None` である
+        自分自身だけは確実に除けるので、変数を持ち回って照合するより頑丈になる
+        (`task is not current` を忘れて自分を含めると、直後の `asyncio.wait` が
+        自分自身の完了を自分で待つ形になりデッドロックする)。
+        """
+        current = asyncio.current_task()
+        others = [
+            task for task in self._reactivate_tasks if task is not current and not task.done()
+        ]
+        if not others:
+            return
+        for task in others:
+            task.cancel()
+        # `asyncio.wait` は中の例外 (CancelledError を含む) を送出しない。
+        # 個々を `await` するとキャンセル済みタスクの CancelledError がそのまま
+        # 伝播し、**この再励磁タスク自身がキャンセルされたことになる**
+        # (`_settle_pending_reenergize` と同じ理由)
+        done, _still_running = await asyncio.wait(others, timeout=_PENDING_TASK_CANCEL_TIMEOUT_S)
+        not_done = [task for task in others if task not in done]
+        if not_done:
+            logger.error(
+                "緊急停止解除の再励磁タスクを %.1fs 以内に畳めませんでした (%d 件)。"
+                " (CAN の送信が詰まっている可能性があります)。解除の励磁を先へ進めます",
+                _PENDING_TASK_CANCEL_TIMEOUT_S,
+                len(not_done),
             )
 
     async def _activate_motors_for_robot(

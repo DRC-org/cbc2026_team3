@@ -543,6 +543,136 @@ class TestEStopReleaseReactivatesMotors:
             await ws.close()
 
 
+class TestDoubleReleaseDoesNotDoubleReactivate:
+    """`e_stop → e_stop_release → e_stop → e_stop_release` の連打で
+    `_reactivate_motors` が同じロボットに対して二重に走ってはならない。
+
+    2 本が並走すると、片方の `_wait_fresh_feedback` が送るプローブ (disable) が
+    もう片方が enable したばかりのモータへ届く —— DM3520 は disable で自重落下する。
+    中断 (`should_abort=lambda: self._e_stop_active`) はこれを防げない。2 回目の
+    解除で `_e_stop_active` が再び False に戻るため、どちらのタスクも中断条件を
+    満たさないまま両方が励磁まで進んでしまう (修正前の実際の挙動)。
+    """
+
+    async def test_連続した解除でも同時実行数は1を超えない(self) -> None:
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        main_can = fx.can_manager("main_hand")
+        concurrent = 0
+        peak = 0
+        first_call_started = asyncio.Event()
+        release_first_call = asyncio.Event()
+
+        async def _tracked_activate(**_kwargs: object) -> list[str]:
+            nonlocal concurrent, peak
+            concurrent += 1
+            peak = max(peak, concurrent)
+            first_call_started.set()
+            try:
+                await release_first_call.wait()
+            finally:
+                concurrent -= 1
+            return []
+
+        main_can.activate_motors = _tracked_activate
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _enter_e_stop(fx, ws)
+
+            # 1 回目の解除。`_reactivate_motors` の 1 本目が activate_motors の
+            # 中で止まったまま (release_first_call を立てるまで抜けない)
+            await ws.send_json({"type": "e_stop_release"})
+            started = await asyncio.wait_for(first_call_started.wait(), timeout=2.0)
+            assert started
+            assert concurrent == 1
+
+            # もう一度緊急停止 → 解除。1 本目は活性化の途中でまだ抜けていない
+            # (=should_abort は効かない場面) が、2 本目の `_reactivate_motors` は
+            # 自分の励磁より前に 1 本目を畳んでから進むはず
+            await ws.send_json({"type": "e_stop"})
+            await wait_until(lambda: fx.e_stop_active)
+            first_call_started.clear()
+            await ws.send_json({"type": "e_stop_release"})
+
+            # 2 本目が (畳んでから) activate_motors へ到達するまで待つ
+            await asyncio.wait_for(first_call_started.wait(), timeout=2.0)
+
+            # 1 本目が畳まれてから 2 本目が入るので、同時実行数は常に 1 以下のはず
+            assert peak == 1, f"activate_motors の同時実行数が 1 を超えた: peak={peak}"
+
+            release_first_call.set()
+            assert await wait_until(lambda: not fx.e_stop_active)
+            await fx.wait_reactivation()
+
+            assert peak == 1, f"activate_motors の同時実行数が 1 を超えた: peak={peak}"
+            await ws.close()
+
+
+class TestReleaseProceedsWhenOldReactivateRefusesToCancel:
+    """**畳めない (キャンセルに応じない) 旧 `_reactivate_motors` がいても、
+    新しい解除の励磁は永久に待たされてはならない。**
+
+    `_settle_pending_reactivate` の上限 (`_PENDING_TASK_CANCEL_TIMEOUT_S`) を
+    無くすと、キャンセルへ応じない旧タスクを無期限に待ち、解除そのものが
+    返らなくなる。旧タスクは `CancelledError` を握り潰して居座り続けるので
+    (実機の `bus.send` がキャンセルに応じずスレッドの中で走り続けるのと同じ
+    性質)、`task.cancel()` を呼んだだけでは終わらない —— 上限がここで
+    本当に効いているかを確かめる。
+    """
+
+    async def test_release_proceeds_when_the_old_task_refuses_to_cancel(self) -> None:
+        fx = _build_fixture()
+        app = fx.create_app()
+
+        main_can = fx.can_manager("main_hand")
+        fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
+        calls: list[str] = []
+        release_first_call = asyncio.Event()
+
+        async def _stubborn_activate(**_kwargs: object) -> list[str]:
+            calls.append("main_hand")
+            if len(calls) == 1:
+                # 1 本目だけ、キャンセルされても飲み込んで居座り続ける
+                while not release_first_call.is_set():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.sleep(0.01)
+            return []
+
+        main_can.activate_motors = _stubborn_activate
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            await _enter_e_stop(fx, ws)
+
+            # 1 回目の解除。1 本目が activate_motors の中で居座ったまま抜けない
+            await ws.send_json({"type": "e_stop_release"})
+            assert await wait_until(lambda: calls == ["main_hand"])
+
+            # もう一度緊急停止 → 解除。2 本目は 1 本目を畳もうとするが、
+            # 1 本目はキャンセルへ応じない
+            await ws.send_json({"type": "e_stop"})
+            await wait_until(lambda: fx.e_stop_active)
+            await ws.send_json({"type": "e_stop_release"})
+
+            try:
+                # 上限が効いていれば、畳めなくても 2 本目は先へ進み
+                # main_hand への 2 回目の activate_motors 呼び出しが現れる。
+                # 上限を無くすと 1 本目を待ち続けてここに到達しない
+                progressed = await wait_until(
+                    lambda: calls == ["main_hand", "main_hand"], timeout=2.0
+                )
+                assert progressed, "畳めない旧タスクを待って解除の励磁が進んでいない"
+                fx.can_manager("sub_hand").activate_motors.assert_awaited()
+            finally:
+                # 後始末: 居座っている 1 本目を必ず解放する
+                release_first_call.set()
+                with contextlib.suppress(TimeoutError):
+                    await fx.wait_reactivation(timeout=2.0)
+            await ws.close()
+
+
 class TestReleaseDoesNotBlockTheCommandLoop:
     """**再励磁のあいだ、その操縦者のコマンド受信を止めてはならない。**
 
