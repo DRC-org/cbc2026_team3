@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from lib.drivers.base import ControlMode
-from lib.match_state import ROLE_PRE_MATCH
+from lib.match_state import ROLE_PRE_MATCH, load_checklist_definitions
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -648,3 +648,66 @@ class TestShippedRobotConfig:
             "suction_hold",
             "suction_release",
         } <= ids
+
+
+#: 同梱の指差喚呼定義すべて (本番 + 机上ベンチ)。**手書きの一覧にしない** ——
+#: セットを 1 つ足して書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる
+#: (tests/test_config_schema.py の _BENCH_DIRS が抱えているのと同じ穴)。
+#: 走査そのものが壊れた場合は test_scan_finds_every_shipped_checklist が落ちる。
+_CHECKLIST_PATHS = sorted(_CONFIG_DIR.rglob("checklist.yaml"))
+_CHECKLIST_TEST_IDS = [str(path.relative_to(_CONFIG_DIR)) for path in _CHECKLIST_PATHS]
+
+
+class TestShippedChecklists:
+    """指差喚呼の項目が「黙って欠ける」「黙って重なる」形で壊れないこと。
+
+    `load_checklist_definitions` は id / label を欠くエントリを**意図的に黙って捨てる**
+    (会場で yaml のタイプミス 1 つにより起動できないほうが重い)。裏を返すと
+    `label:` を `labell:` と打っただけで項目が 1 つ消え、**症状は「試合開始のゲートが
+    27/27 で開くのに、その 1 つを誰も読み上げていない」だけ**になる。起動ログにも
+    画面にも「消えた」ことは現れない。落とすなら会場ではなくここで落とす。
+
+    重複 id も同じ形で壊れる。`MatchState.set_checklist_item` は最初の 1 件だけを
+    更新して返るので、**2 件目は永久に未チェックのまま `can_start_match` が開かない**
+    (画面ではチェック済みに見える項目が 1 つあるのに件数が合わない)。
+    `load_checklist_definitions` も `MatchState` も重複を検査しないので、ここが唯一の網。
+    """
+
+    def test_scan_finds_every_shipped_checklist(self) -> None:
+        """走査が本番と全ベンチセットの checklist.yaml を拾えていること。
+
+        rglob が 1 件も拾わなくなっても、下の 2 つは parametrize が空になるだけで
+        緑を返す。ベンチセットが checklist.yaml を持たないまま同梱された場合も含めて、
+        ここで落とす。
+        """
+        expected = {pathlib.Path("checklist.yaml")} | {
+            pathlib.Path("bench") / bench_dir.name / "checklist.yaml"
+            for bench_dir in (_CONFIG_DIR / "bench").iterdir()
+            if bench_dir.is_dir()
+        }
+
+        assert {path.relative_to(_CONFIG_DIR) for path in _CHECKLIST_PATHS} == expected
+
+    @pytest.mark.parametrize("path", _CHECKLIST_PATHS, ids=_CHECKLIST_TEST_IDS)
+    def test_no_entry_is_silently_dropped(self, path: pathlib.Path) -> None:
+        """yaml に書いたエントリ数と、読み込まれた項目数が一致すること。"""
+        raw = yaml.safe_load(path.read_text()) or {}
+        written = sum(len(entries) for entries in (raw.get("checklists") or {}).values())
+
+        loaded = load_checklist_definitions(raw)
+
+        assert sum(len(items) for items in loaded.values()) == written
+
+    @pytest.mark.parametrize("path", _CHECKLIST_PATHS, ids=_CHECKLIST_TEST_IDS)
+    def test_item_ids_are_unique_within_a_role(self, path: pathlib.Path) -> None:
+        """同じロールの中で id が重複しないこと (set_checklist_item はロール単位)。"""
+        loaded = load_checklist_definitions(yaml.safe_load(path.read_text()) or {})
+
+        duplicated: dict[str, list[str]] = {}
+        for role, items in loaded.items():
+            counts = collections.Counter(item.id for item in items)
+            dups = sorted(item_id for item_id, count in counts.items() if count > 1)
+            if dups:
+                duplicated[role] = dups
+
+        assert duplicated == {}
