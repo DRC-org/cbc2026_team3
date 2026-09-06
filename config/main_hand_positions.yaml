@@ -17,6 +17,8 @@
 #     firmware/servo/include/config.h の kProvisionalLimits —— 広すぎるとサーボが
 #     機構に当たったまま押し続けて焼損する
 #   - rotate の homing の search_distance (direction / step は実機で確定済み)
+#   - conveyor の run のコート別の符号 (赤を正転とした割り当てが仮置き) —— 逆だと
+#     両コートともワークを反対向きへ送るが、機構は壊れないので試合中にしか現れない
 #   - y_axis の homing (スイッチ未装着でコメントアウト中)
 #   - サブハンド側 (config/sub_hand_positions.yaml) はほぼ全部
 # **何を埋めるかの棚卸しは docs/mechanism_handoff.md が正**。ここはその一部でしかない。
@@ -346,9 +348,21 @@ positions:
     open: 5.0            # 開 [deg]
     closed: 0.0          # 閉 (把持) [deg]
 
+  # 搬送方向はコートで逆になるので run だけをコート別にする。
+  #
+  # TODO(実機で確認): 赤を正 (= 正転) とする符号の割り当ては仮置きである。
+  # どちらの向きが正転かを決めるのはモータの配線と機構であり、対になる
+  # firmware/dc_motor/include/config.h の kDirForwardIsLow (方向ピンの論理) も
+  # TODO(実機で確認) のまま。**逆だったら red / blue の値を入れ替えるだけでよい。**
+  # 動作確認シーケンスは選択中のコートの向きへ 1 往復するだけなので、両向きを
+  # 見るならコートを切り替えてもう一度回すこと。
+  #
+  # 大きさ 0.3 はファーム側 max_duty (kDefaultMaxDuty = 0.30) と同値で、これより
+  # 大きくしてもクランプされて出力は 30% で頭打ちになる (「指令したのに速く
+  # ならない」という切り分けの難しい症状になる)。上げるならファーム側も上げる。
   conveyor:
-    stop: 0.0            # 停止 [duty]
-    run: 0.3             # 搬送 [duty]。符号が回転方向なので、逆転が必要になったら負値にする
+    stop: 0.0                       # 停止 [duty]。0 に符号は無いのでコート非依存
+    run: { red: 0.3, blue: -0.3 }   # 搬送 [duty]。符号が回転方向
 
   wall_f:
     initial: 0.0         # 初期 (退避) [deg]

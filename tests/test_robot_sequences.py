@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from lib.drivers.base import ControlMode
-from lib.match_state import ROLE_PRE_MATCH, load_checklist_definitions
+from lib.match_state import ROLE_PRE_MATCH, Court, load_checklist_definitions
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -469,6 +469,26 @@ class TestShippedPositionYaml:
             assert len(commands) == 2
             assert commands[0] != 0.0
             assert commands[1] == pytest.approx(-commands[0])
+
+    def test_conveyor_run_is_reversed_between_courts(self) -> None:
+        """コンベアの搬送 duty はコート別に定義され、赤と青で符号が逆であること。
+
+        搬送方向はコートで逆になる。duty の符号がそのまま回転方向なので、
+        コート別定義を片方の値へ戻す変更 (`run: 0.3`) も、両コートを同符号に
+        する変更も、**他のどのテストも落とさずに通ってしまう** —— duty 軸は
+        到達判定を持たず (DC 基板はフィードバックを一切持たない)、シーケンスも
+        位置定数の読み込みも値の符号を見ないため。症状は「片方のコートでだけ
+        コンベアが逆に回る」で、コートを選んで走らせる試合当日にしか現れない。
+
+        値の大きさ (0.3) は仮値なので固定しない。固定するのは符号の関係だけ。
+        """
+        table = _load_shipped("main_hand_positions.yaml")
+
+        red = table.raw("conveyor", "run", court=Court.RED)
+        blue = table.raw("conveyor", "run", court=Court.BLUE)
+
+        assert red != 0.0 and blue != 0.0, "搬送 duty が 0 では回転方向を持たない"
+        assert red * blue < 0.0, f"赤 ({red}) と青 ({blue}) の搬送方向が逆になっていない"
 
 
 class TestShippedRobotConfig:
