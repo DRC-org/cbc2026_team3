@@ -146,7 +146,7 @@ constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 // 実測して入れること。現状は config/main_hand_positions.yaml が 0〜6deg の微小ストロークしか
 // 使わないのに合わせた安全側の仮値で、広げるのは機構確定後。**狭すぎる分にはクランプで
 // 止まるだけだが、広すぎるとメカストッパに当たったまま停動して焼損する。**
-constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 30.0f, 90.0f};
+constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 270.0f, 90.0f};
 
 // ===========================================================================
 // スロット設定（基板番号ごと）
@@ -206,8 +206,8 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
     // 基板 #0（DIP=0）: メインハンド
     {
         {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 gripper
-        {SlotRole::Servo, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 wall_f
-        {SlotRole::Servo, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 wall_r
+        {SlotRole::Servo, 5, 180.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 wall_f
+        {SlotRole::Servo, 6, 90.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 wall_r
         // **実機で確認済み**（CAN ID 0x343 の FEEDBACK を実測）: 非接触で LOW、
         // 接触で HIGH。したがって sensorActiveLow は false。
         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 rotate

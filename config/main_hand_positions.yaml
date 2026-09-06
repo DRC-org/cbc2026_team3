@@ -345,8 +345,8 @@ positions:
   # 「運用で使う位置」が別物になって確認が意味を失っていた。**そのキーは config ごと
   # 消えている**ので、ここに合わせる先も無い (書けば起動時に未知キーとして拒否される)。
   gripper:
-    open: 5.0            # 開 [deg]
-    closed: 0.0          # 閉 (把持) [deg]
+    open: 0.0            # 開 [deg]
+    closed: 24.0          # 閉 (把持) [deg]
 
   # 搬送方向はコートで逆になるので run だけをコート別にする。
   #
@@ -365,15 +365,15 @@ positions:
     run: { red: 0.3, blue: -0.3 }   # 搬送 [duty]。符号が回転方向
 
   wall_f:
-    initial: 0.0         # 初期 (退避) [deg]
-    closed: 3.0          # 閉 (ワーク保持) [deg]
-    open: 6.0            # 開 [deg]
+    initial: 180.0         # 初期 (退避) [deg]
+    closed: 180.0          # 閉 (ワーク保持) [deg]
+    open: 90.0            # 開 [deg]
 
   # wall_r の closed / open は**現在の試合シーケンスからは参照されていない**
   # (initial だけが使われる)。後壁を使う手順が未確定なだけなので消さない ——
   # 動作確認 (sequences/motor_check.py) は wall_f と同じく 3 状態すべてを駆動するので、
   # 消すと確認の網から後壁の可動が丸ごと外れる。
   wall_r:
-    initial: 0.0         # 初期 (退避) [deg]
-    closed: 3.0          # 閉 (ワーク保持) [deg] — 試合シーケンス未使用
-    open: 6.0            # 開 [deg]              — 試合シーケンス未使用
+    initial: 90.0         # 初期 (退避) [deg]
+    closed: 90.0          # 閉 (ワーク保持) [deg] — 試合シーケンス未使用
+    open: 180.0            # 開 [deg]              — 試合シーケンス未使用
