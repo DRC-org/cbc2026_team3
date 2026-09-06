@@ -355,6 +355,27 @@ describe("firmwareUnconfirmedMotors", () => {
     expect(firmwareUnconfirmedMotors(MALFORMED)).toEqual([]);
   });
 
+  /**
+   * **ガードを `?? []` へ置き換えてはならない。** 欄の欠落 (`undefined`) だけなら
+   * `?? []` でも同じに見えるが、「**欄はあるが配列でない**」場合に挙動が変わり、
+   * 呼び出し側 (`FirmwareUnconfirmedNotice`) の `.map` が `TypeError` を投げて
+   * `SubsystemStatus` 以下の React ツリーが丸ごとアンマウントする —— CLAUDE.md が
+   * 「`describeSafetyIssues` が無検査で `.length` を呼び全画面が白くなった」として
+   * 記録している事故と同型。
+   */
+  it("欄が配列でなくても投げず空を返す (全画面を落とさない)", () => {
+    const broken = { ...safety(), firmware_unconfirmed_motors: "gripper" };
+
+    expect(firmwareUnconfirmedMotors(broken as unknown as SafetyState)).toEqual([]);
+  });
+
+  it("欄が欠けていても投げず空を返す", () => {
+    const broken: Record<string, unknown> = { ...safety() };
+    delete broken.firmware_unconfirmed_motors;
+
+    expect(firmwareUnconfirmedMotors(broken as unknown as SafetyState)).toEqual([]);
+  });
+
   it("describeSafetyIssues には現れない (tone を動かさない)", () => {
     const payload = safety({ firmware_unconfirmed_motors: ["gripper"] });
     expect(describeSafetyIssues(payload)).toEqual([]);

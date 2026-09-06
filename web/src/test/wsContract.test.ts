@@ -84,8 +84,11 @@ const STATE_FIELDS_UI_READS = [
   // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
   "safety.sync_violations",
   "safety.unenergized_motors",
-  // 焼き忘れ検出 (info_mismatch) が沈黙している自作モタドラ。落ちれば診断ツリーの
-  // チップが出せなくなる (`describeSafetyIssues` には乗らないので判定不能には倒れない)
+  // 焼き忘れ検出 (info_mismatch) が沈黙している自作モタドラ。**チップの内容**は
+  // `describeSafetyIssues` に乗せない (tone を動かさない) が、**欄そのものの欠落**は
+  // 他の 8 欄とまったく同じで、`safetyShapeErrors` が拾って「安全機構 判定不能」へ
+  // 倒れる。ここを検査キーから外すと、欠落が黙って `undefined` になり
+  // `FirmwareUnconfirmedNotice` の `.map` で全画面が落ちる経路が戻る
   "safety.firmware_unconfirmed_motors",
   "safety.loops_running",
   "safety.monitors_running",

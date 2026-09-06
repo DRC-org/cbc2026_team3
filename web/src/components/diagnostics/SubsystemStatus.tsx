@@ -87,25 +87,34 @@ function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
  * **「異常」として赤くしない** —— `evaluateHealth` の判定 (`tone`) はここを経由しない。
  * ここが空でないのは「焼き忘れ検出 (info_mismatch) が今は働いていない」という事実で、
  * 機体そのものが壊れているとは限らない。
+ *
+ * **1 行にまとめず、モータごとに `<li>` を並べる** (`WorkpieceRiskNotice` と同じ形)。
+ * この状態が起きる最も現実的なきっかけは「1 枚の基板が丸ごと `INFO` を出していない」
+ * なので、電磁弁 6ch やサブハンドの自作モタドラが同時に並ぶ。`join(", ")` の
+ * 1 行では途中で切れ、操縦者は指差喚呼 (`firmware_match`) に答えられない。
  */
 function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
   if (motors.length === 0) return null;
 
   return (
     <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1">
-      <li className="flex min-w-0 flex-col">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <Icon as={ShieldQuestion} className="shrink-0 text-info" />
-          <StatusBadge tone="info">版番号 未確認</StatusBadge>
-          <span className="min-w-0 truncate font-mono text-base-content/80">
-            {motors.join(", ")}
+      {motors.map((motor) => (
+        <li key={motor} className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Icon as={ShieldQuestion} className="shrink-0 text-info" />
+            <StatusBadge tone="info">版番号 未確認</StatusBadge>
+            <span className="min-w-0 truncate font-mono text-base-content/80">{motor}</span>
           </span>
-        </span>
-        {/* 状態だけ出しても操縦者は何が起きたか分からない。何を確かめればよいかまで書く */}
-        <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
-          焼き忘れの照合が働いていません。基板の電源・CAN 配線を確認してください
-        </span>
-      </li>
+          {/* 状態だけ出しても操縦者は次の一手を選べない。手当てまで書く。
+              **電源・CAN 配線を疑わせてはならない** —— サーバーは FEEDBACK が
+              届いているモータだけをここへ載せる (`_firmware_unconfirmed_motors`) ので、
+              配線を見ても必ず何も見つからない。基板が落ちている場合は
+              `evaluateHealth` が STALE として別に主張する */}
+          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+            FEEDBACK は届くのに INFO が来ません。ファームを焼き直して candump で確認してください
+          </span>
+        </li>
+      ))}
     </ul>
   );
 }

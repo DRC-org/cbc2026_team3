@@ -413,6 +413,56 @@ describe("SubsystemStatus", () => {
     expect(screen.getByText("gripper")).toBeInTheDocument();
   });
 
+  /**
+   * この状態が起きる最も現実的なきっかけは「1 枚の基板が丸ごと `INFO` を出していない」
+   * なので、電磁弁 6ch のように複数が同時に並ぶ。1 行へ `join(", ")` すると
+   * `truncate` で途中から読めなくなり、操縦者は指差喚呼 (`firmware_match`) に
+   * 答えられない。**モータごとに 1 行**にする。
+   */
+  it("複数の未確認モータを 1 行にまとめず 1 件ずつ並べる", async () => {
+    const user = userEvent.setup();
+    const unconfirmed = ["valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6"];
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: unconfirmed })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getAllByText("版番号 未確認")).toHaveLength(unconfirmed.length);
+    for (const name of unconfirmed) {
+      // 1 行にまとめていると "valve_1, valve_2, ..." という 1 つのノードになり、
+      // 名前 1 個での完全一致は取れない
+      expect(screen.getByText(name)).toBeInTheDocument();
+    }
+  });
+
+  /**
+   * **手当ての文面は「電源・CAN 配線」であってはならない。** サーバーは `FEEDBACK` が
+   * 届いているモータだけをここへ載せる (`_firmware_unconfirmed_motors` の STALE 除外)
+   * ので、配線を見ても必ず何も見つからない。直すべきはファーム側の `INFO` 送信経路。
+   */
+  it("手当てとしてファームの焼き直しを案内する (配線を疑わせない)", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: ["gripper"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText(/ファームを焼き直して/)).toBeInTheDocument();
+    expect(screen.queryByText(/配線を確認/)).not.toBeInTheDocument();
+  });
+
   it("INFO 未確認が 0 件なら開いても何も出さない", () => {
     renderWithRobot(
       <SubsystemStatus
