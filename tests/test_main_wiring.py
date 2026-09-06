@@ -1505,10 +1505,10 @@ class TestCreateBusOperstate:
 
         assert caplog.records == []
 
-    def test_unknown_は_up_なのでログを出さない(self, caplog: pytest.LogCaptureFixture) -> None:
-        """**SocketCAN は up でも `unknown` を返す** (carrier を管理しない)。
+    def test_unknown_ではログを出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`unknown` は「判定できない」であって down ではない。
 
-        判定を `!= "up"` へ書き換えると健全なバスが毎回起動ログを汚す。
+        判定を `!= "up"` へ書き換えると、ここが異常側へ倒れる。
         """
         with (
             patch("main.can.Bus", return_value=MagicMock()),
