@@ -13,6 +13,7 @@ test_sequence_move_to.py が既に見ている。ここでは手動固有の判�
 
 from __future__ import annotations
 
+import inspect
 import math
 from unittest.mock import AsyncMock, MagicMock
 
@@ -286,10 +287,22 @@ class TestPairedAxis:
         ], f"逐次送信になっている: {events}"
 
     async def test_片方のモータだけを動かす_API_を持たない(self) -> None:
-        # モータ名で指令できる口を生やすと、そこを通った瞬間に機構がねじれる
+        """モータ名で **指令** できる口を生やすと、そこを通った瞬間に機構がねじれる。
+
+        指令は必ず ``AxisHandle.set_target_value`` を await するので、送る口は
+        例外なくコルーチンになる。名前にモータが出てくる公開メンバがあっても、
+        コルーチンでなければ 1 通も送れない。
+
+        名前だけの検査に戻してはならない —— 送らない口 (再励磁がジョグ起点を
+        軸単位で捨てる `reset_axes_for_motors`) まで一律に禁じることになり、
+        その用途はサーバー側へモータ → 軸の対応表を書き写す形でしか実装できなくなる。
+        代わりに現状の例外を下で明示して、増えるときに必ず判断させる。
+        """
         manual, _, _ = _build()
         public = {name for name in dir(manual) if not name.startswith("_")}
-        assert not {name for name in public if "motor" in name}
+        motor_named = {name for name in public if "motor" in name}
+        assert not {n for n in motor_named if inspect.iscoroutinefunction(getattr(manual, n))}
+        assert motor_named == {"reset_axes_for_motors"}
 
 
 class TestEStopInterlock:

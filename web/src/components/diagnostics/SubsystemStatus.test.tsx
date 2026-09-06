@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
@@ -38,6 +38,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     sync_violations: [],
     unenergized_motors: [],
     firmware_unconfirmed_motors: [],
+    reenergizing: false,
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -100,6 +101,101 @@ describe("SubsystemStatus", () => {
     expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
     expect(screen.getByText("y_axis")).toBeInTheDocument();
     expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
+  });
+
+  describe("再励磁ボタン", () => {
+    it("無励磁のモータがあり、かつ onReenergize を渡した画面にだけ出る", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"] })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "再励磁" })).toBeInTheDocument();
+    });
+
+    it("onReenergize を渡さない画面 (Monitor) では出さない", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"] })}
+        />,
+      );
+
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("無励磁のモータが無ければ、onReenergize を渡していても出さない", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety()}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("無励磁以外の異常しか無ければ、onReenergize を渡していても出さない", () => {
+      // 同期ずれラッチの行にまで再励磁ボタンが付くと、押しても直らないボタンになる
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ sync_violations: ["y_axis"] })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("処理中はサーバーの配信どおり押せなくなる", () => {
+      // 押した後の 0.1〜1.5 秒は unenergized_motors が消えないので、これが無いと
+      // 操縦者は「押しても何も起きない」と読んで 2 回目を押す (そして拒否される)
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"], reenergizing: true })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      const button = screen.getByRole("button", { name: "処理中…" });
+      expect(button).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("押すとコールバックが呼ばれる", async () => {
+      const onReenergize = vi.fn();
+      const user = userEvent.setup();
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"] })}
+          onReenergize={onReenergize}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "再励磁" }));
+
+      expect(onReenergize).toHaveBeenCalledOnce();
+    });
   });
 
   it("保護ループの停止を自分から主張する", () => {

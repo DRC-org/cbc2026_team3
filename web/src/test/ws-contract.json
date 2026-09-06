@@ -327,6 +327,7 @@
             "sync_violations": []
           }
         ],
+        "reenergizing": false,
         "refreshers_running": true,
         "sync_monitors": [
           {
@@ -589,6 +590,7 @@
             "sync_violations": []
           }
         ],
+        "reenergizing": false,
         "refreshers_running": true,
         "sync_monitors": [
           {

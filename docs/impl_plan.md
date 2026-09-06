@@ -5867,6 +5867,283 @@ FAULT でも STALE でもない**第 3 の状態**を足した:
 - 手当ての文面は**ファームの焼き直しと `candump`**。「電源・CAN 配線を確認」は
   この機能の主対象シナリオでは必ず空振りになる（上の STALE 除外の項）
 
+### 操縦者が明示的に叩ける再励磁コマンド（2026-09-06）
+
+「励磁されていない」の穴（2 つ上の節）を塞ぐ復帰経路は緊急停止の解除か
+`main.py` の再起動のどちらかしか無く、
+**どちらも試合を止める**。`CANManager.activate_motors` 自体は既にあり、無いのは
+操縦者からそこへ届く経路だけだったので、WS コマンド `reenergize_motors` を足した。
+
+**採らなかった設計**: サーバーが `unenergized_motors` を見て自動で励磁し直す形。
+「電源投入だけで機体が通電・待機状態にならない」（`cbc-control.service` を enable
+しない理由）という一貫した方針に反することと、fault が再発し続けるモータへ無限に
+励磁し直す経路になることの 2 つが理由。操縦者の明示操作でしか呼ばない。
+
+**ゲート**: `allowed_phases=PHASES_ANY`（試合中に使えないと直したい状況そのものが
+直せない）、`allowed_during_e_stop=False`（緊急停止中に励磁してはならない）、
+`blocked_during_manual` は掛けない（手動はシーケンスからの退避路そのもので、手動中に
+落ちた励磁を手動のまま戻せないと退避路自体が詰む）。動作確認の実行中との排他と
+同一ロボットへの二重投入・緊急停止解除の再励磁との in-flight 排他は `CommandSpec` に
+表現できない軸なので `RobotServer._cmd_reenergize_motors` が個別に見る。
+
+**実装で見つけた穴: 剥がさずに励磁すると「現在角を書いてから励磁する」が 1 周期で
+無効化される。** `activate_motors` 自体は EDULITE 05 / DM3520 とも現在角を書いてから
+enable するが、フォルト直前の古い目標（`move_to` の行き先）や
+`QueryDrivenTargetRefresher` のラッチ（「今の姿勢を保て」、フォルトで機構が動く前の
+古い姿勢のまま凍っている）が生きたままだと、enable した直後の再送（最大 20Hz =
+50ms 後）がその古い値で上書きし、機構が古い目標へ動き出しうる。緊急停止解除
+（`_reactivate_motors`）がこの問題を持たないのは、停止中ずっと
+`QueryDrivenTargetRefresher` が毎周期現在角を測り直しており（`is_estop_active()` が
+True の間はラッチを取らない）、古い値が一度も残らないため。単発の再励磁は
+緊急停止を経由しないのでこの性質を借りられず、無励磁のモータだけに絞って先に
+目標とラッチを剥がしてから `activate_motors` を呼ぶ処理を足した
+（`_TargetRefresherBase.clear_target` / `QueryDrivenTargetRefresher.clear_target`）。
+剥がす対象を「無励磁のモータだけ」に絞るのは、`clear_targets()`（全台）をそのまま
+使うと同じバスの他モータが移動中でもその `wait_reached` を巻き込んで中断させてしまう
+ため。
+
+**advisor レビューで見つかった 2 つ目の穴: 励磁そのものも全モータへ渡していた。**
+目標とラッチは無励磁のモータだけに絞って剥がしていたのに、続く
+`ctx.can_manager.activate_motors()` は絞りを持たず全モータへ渡していた。EDULITE 05 /
+DM3520 の `activate_motor` は健全なモータにも「現在角を書いてから enable」を打つため、
+**移動中の健全なモータを一瞬止めて enable し直す**形で割り込んでしまう
+（`QueryDrivenTargetRefresher` の次の再送で実目標へ戻るが、その 1 周期のジャークを
+避ける理由が無くなる）。試合中に `PHASES_ANY` で叩けるコマンドなので、
+「sub_lift が落ちて再励磁を押した瞬間、動作中の sub_y_axis が割り込まれる」ような
+場面が現実に起きうる。**`CANManager.activate_motors` に `only: Collection[str] | None`
+を足し、`_activate_each_motor` が対象モータを絞り込むようにした。** `_reenergize_motors`
+は無励磁のモータ（`is_energized() is False`）に加え、前回の再励磁でも有効化できな
+かったモータ（`_inactive_motors` に残っているもの。起動直後にフィードバックが来ずに
+有効化へ進めなかったケースを次の押下でリトライできるようにするため）を対象集合とし、
+`activate_motors(only=対象集合)` を呼ぶ。~~`_activate_motors_for_robot` は `only` を
+渡された場合、`_inactive_motors` を丸ごと置き換えず「対象外の前回の結果」とマージする
+（絞った呼び出しは対象外モータについて何も語っていないため）。~~
+**（この段落は後述の「2 つの手直し」①で撤回した。マージは一度も分岐しない
+デッドコードで、現在は単純な置き換え。前提は `_activate_motors_for_robot` の
+docstring にある。）**
+
+**advisor レビューで見つかった 3 つ目の穴: 手動操縦のジョグ起点を捨てていなかった。**
+CLAUDE.md の「消すのはジョグの起点だけで、緊急停止でも同じく捨てる」という不変条件を
+再励磁の経路にも通す必要があった。手動モード中に軸のモータがフォルトで無励磁になり
+自重で下がった状態で操縦者が再励磁を押すと、機構は現在角で保持されるが**ジョグの
+起点（`ManualController._targets`）は落ちる前の値のまま**残る。直後のジョグはその
+古い起点から相対移動するため、落下した分だけ目標が飛ぶ ——
+緊急停止解除（`activate_e_stop` → `ManualController.on_e_stop()`）が既に守っている
+不変条件と同じ穴が、緊急停止を経由しない再励磁の経路にだけ空いていた。
+~~**`_reenergize_motors` は対象モータが 1 台以上あれば `ctx.manual.reset()` を呼ぶ。**
+軸単位に絞る API が無いのでロボット全体の起点を捨てるが、次のジョグがフィードバックから
+取り直すだけなので無害（対象が無ければ何もしない）。~~
+**（「無害」は誤り。後述の「3 件目のレビュー」S2 で
+`ManualController.reset_axes_for_motors()` へ差し替え、対象モータを含む軸だけに
+絞った。）**
+
+**advisor レビューで見つかった 4 つ目の穴: 直結ペアの片側だけを対象にすると、
+相方と押し合う。** `only=` で対象を絞ったことで新たに空いた穴 —— `rotate`
+（EDULITE 05 ×2）の片側だけが無励磁になった状態で相方が移動中に再励磁を押すと、
+無励磁側だけが「現在角で保持」に切り替わり、動いている相方に逆らう形になる。
+これは CLAUDE.md「ペア軸に片側だけ効く操作を作らない」が塞いでいるはずの穴で、
+`SyncMonitor` が直後に偏差超過を検出して緊急停止する（この機能が避けたいはずの
+「試合を止める」結果を、絞り込みの副作用として自分で作ってしまう）。
+**`SyncMonitor` に `groups` プロパティ（`_groups` の読み取り専用公開）を追加し、
+`_reenergize_motors` が「無励磁のモータが属するグループがあれば、そのグループの
+全モータを対象へ合併する」処理を足した。** 対象は `ctx.sync_monitors` の
+全グループを見るだけなので、`y_axis`（M3508。`is_energized()` は常に `None`）は
+そもそもここに現れない。相方（健全な EDULITE 05）の目標も一緒に剥がすため、
+移動中なら `wait_reached` が割り込まれる —— これは意図的に許容する。そのペアは
+片側の無励磁で既に機構として破綻していたので、割り込みは「壊れていた」ことの
+正しい反映であって、この変更が新たに持ち込む害ではない。
+
+**advisor レビューで見つかった 2 つの手直し（テスト・実装双方の後始末）**:
+①`_activate_motors_for_robot` の `only` 分岐が「対象外モータの前回の結果を保つ」
+マージ（`kept = [...]`）を持っていたが、唯一の呼び出し元 (`_reenergize_motors`)
+は `only` を常に「前回の無効化リストを包含する集合」として作るため、実際には
+一度も分岐しないコード（テストも無い）だった。CLAUDE.md「テストは実装が存在する
+ことしか見ていない」の実例なので、単純な置き換えへ戻し、前提をコメントで明記した。
+②`_reenergize_motors` が `activate_motors` へ渡す `only` が「無励磁のモータだけ」に
+絞られていることを見るテストが `_inactive_motors` からの合併ぶんを持っておらず、
+`| set(self._inactive_motors.get(...))` を削っても全テストが緑のままだった。
+`ServerFixture` に手を入れず、既に公開 API として存在する
+`RobotServer.set_initial_inactive_motors()` を使ってテストを足した。
+
+**UI**: 押せる場所は操縦者自身の画面（`RobotControl` の機体状態パネル）に限り、
+`safety.unenergized_motors` が空でないときだけボタンが出る（`SubsystemStatus` の
+「無励磁のまま」issue に添える）。可否の判定は持たず、押せばコマンドを送るだけで、
+拒否はサーバーが理由付きで返す。詳細は `docs/checks_and_health.md` の
+「『励磁されていない』はヘルスに現れない」節、手順は `docs/venue_recovery.md` §3-5。
+
+### 敵対的レビューで見つかった穴: 排他が片方向にしかなかった（2026-09-06）
+
+`reenergize_motors` は自分を守るガード（動作確認・緊急停止解除の再励磁・二重投入）
+を持つが、**逆方向**——他の操作が「同じロボットの再励磁が in-flight」を見ていな
+かった。`feedback_probe_message()` は EDULITE 05 / DM3520 とも disable フレームを
+返すため、再励磁の `activate_motors` が in-flight のまま別の `activate_motors` が
+同じモータへ並走すると、片方の enable をもう片方のプローブが disable し直す
+（DM3520 は disable で自重落下する）。
+
+3 箇所で塞いだ:
+
+- **`_reactivate_motors`（緊急停止解除）**: 対象ロボットの `_reenergize_tasks` が
+  in-flight なら `await` してから自分の `activate_motors` へ進む。**待つ・拒否
+  する・中断させるの 3 択で「待つ」を選んだ**——解除コマンドの受理自体を拒否・
+  遅延させると「解除のたびに同じロボットが取り残される」実機事故（本ファイル
+  上部、緊急停止のラッチ解除の節）と同型になる
+- **`_motor_check_environment_deny`**: いずれかのロボットの再励磁が in-flight
+  なら動作確認の起動を拒否する。零点確定（`rotate`）が disable → SET_ZERO →
+  enable を伴うため
+- **`_apply_operation_mode`（手動へ入る側）**: 対象ロボットの再励磁が in-flight
+  なら拒否する。手動へ入った直後のジョグが、再励磁の書く「フォルト前の現在角」
+  目標と同じモータへ競合しうるため。手動から出る側（`SEQUENCE` へ戻る）は CAN
+  へ何も送らないので対象外
+
+**`_reenergize_motors` 本体を try/except で囲った（should-fix）。** fire-and-forget
+タスクで `add_done_callback` も辞書からの除去しか見ないため、無防備だと CLAUDE.md
+が名指しする「`_tasks` を誰も await しないので例外は消える」と同型になる。現状の
+処理（辞書操作と CAN 呼び出しのみ）で実際に踏む筋は無いが、将来の変更に備えた
+予防線。
+
+### 2 件目の敵対的レビューで見つかった 2 つの穴（2026-09-06）
+
+**① `_manual_target` に同じガードが無かった。** `reenergize_motors` は手動操縦中も
+意図的に塞がない設計 (`lib/commands.py`) なので、`_apply_operation_mode` に足した
+ガード (MANUAL へ「入る」ときだけ) では、**既に手動中のロボットへ再励磁をかけた
+最中**に届く `manual_jog` / `manual_move` / `manual_set` を塞げない。この 3 コマンド
+共通の関門である `_manual_target` (`lib/server.py`) へ同じガードを足した——散らすと
+足し忘れる経路ができるため、ハンドラ 3 つそれぞれではなく共通関門の 1 箇所に置く。
+
+**② `_reactivate_motors` の docstring の待ちの根拠が逆だった (危険な嘘)。** 旧版は
+「古いタスクは `should_abort` で中断へ向かっているはず」としていたが、実際は
+逆——`_cmd_e_stop_release` は `_e_stop_active` を **先に** False へ戻してから
+`_reactivate_motors` のタスクを生成するため、通常の `e_stop` → 即 `e_stop_release`
+という操作順では、古いタスクの `should_abort` が True を返す窓は無いに等しい。
+加えて `_wait_fresh_feedback` (`lib/can_manager.py`) は `should_abort` を一切
+受け取らないループで、中断判定はそのモータの待機が終わった後にしか効かない。
+**つまり古いタスクは中断されず最後まで走る。** 待ちが有界であることは変わらない
+（`_wait_fresh_feedback` 自身が `_ACTIVATION_FEEDBACK_TIMEOUT_S`=0.5 秒の deadline を
+持つため）ので、docstring を「待つ理由は中断が効くからではなく、古いタスク自身が
+有界だから」に書き換えた。**現行 config での実測上限**: 対象モータのうち
+`requires_fresh_feedback_for_activation()` が True なもの (EDULITE 05 / DM3520 の
+位置モード) を数えると、`sub_hand` は `sub_arm_joint` (EDULITE 05) + `sub_y_axis` /
+`sub_lift` (DM3520) の 3 台で最悪 1.5 秒、`main_hand` は `rotate_r` / `rotate_l`
+(EDULITE 05) の 2 台で最悪 1.0 秒 (直列合算)。**タイムアウトは付けない**——付けて
+先に進めると、このガードが防ぎたい並走そのものが起きてしまい、節の目的が消える。
+
+### 3 件目の敵対的レビューで見つかった穴（2026-09-06）
+
+**Blocker 1: 再励磁経路の緊急停止インターロックが完全に無テストだった。**
+この機能の安全性は 2 つの機構に載っている ——
+`activate_motors(should_abort=…)`（残りのモータへ enable を送らない）と、
+励磁を終えた後の停止フレーム再送（中断判定をすり抜けた enable が停止より後に届く
+のを潰す）。ところが変異で確認したところ、**再励磁経路だけ `should_abort` を渡さない
+変異も、再励磁側の再送だけを消す変異も 1 件も落ちなかった**（1913 passed）。
+両方まとめて壊したときだけ `tests/test_server_e_stop.py` が 2 件落ちるが、それは
+解除経路（`_reactivate_motors`）を見ているだけである。試合中に踏む形は
+「再励磁を押した直後に緊急停止を押す（機体が異常な動きを始めたので止める）」で、
+`_send_steps` の途中（`encode_target` → 0.05s → `encode_enable` → 0.1s）に停止が
+入ると enable が停止フレームより後に届き、約 0.1 秒励磁されたまま残る。
+CLAUDE.md「多重防護の各層は 1 枚ずつ単独で確かめる」に従い `TestEStopDuringReenergize`
+を 2 ケースに分けて足した（まとめると片方を壊しても他方が拾って落ちない）。2 枚目は
+実 `CANManager` を挿してワイヤ上の `0x0FF` を数える。
+
+**Blocker 2: ペア展開が「disable は機構を動かさない」という前提を初めて破っていた。**
+ペア展開は片側が無励磁なら**健全で励磁中の相方も** `dropped` に入れる。すると
+`CANManager.activate_motor` → `_wait_fresh_feedback` がその相方へ
+`feedback_probe_message()`（EDULITE 05 / DM3520 とも **disable**）を必ず 1 通送る
+（ループは `last_rx > baseline` を最初に評価するので、必ず 1 回は出る）。さらに
+`_activate_each_motor` は宣言順で回るので、`config/main_hand.yaml` の順序
+（`rotate_r` → `rotate_l`）では**落ちたのが `rotate_l` 側だと健全な `rotate_r` が
+先に disable され、`rotate` 軸が両側とも無励磁になる**（復帰まで約 100ms、最悪 550ms）。
+会場カードは「機体は動かない」と断言しているので、操縦者はワークを掴んだまま押す。
+この前提は各ドライバの docstring が明示しているもの（`lib/drivers/dm3520.py` /
+`lib/drivers/edulite05.py`「disable は無励磁を無励磁のままにするだけなので、励磁前の
+問い合わせに使っても機構は動かない」）で、CLAUDE.md が名指ししている DM3520 の
+`sub_lift` でペア軸を作った瞬間に落下事故になる。
+
+対処: **`CANManager._may_probe_for_feedback` を 1 箇所だけ置き、`is_energized()` の
+三値で判断する**（ドライバ種別は書き写さない）。`True` のモータへはプローブを送らず、
+届くのを待つだけにする —— 励磁中ということは `QueryDrivenTargetRefresher`（20Hz）が
+目標を送り続けており、その応答として 50ms 以内に届く。届かなければ従来どおり無励磁の
+まま残す（安全側）。`after_set_zero` の経路だけは必ず打つ —— `capture_origin_via_set_zero`
+は直前に `deactivation_steps()` を送っており**無励磁であることを指令として知っている**
+ので、フィードバックが追いつく前でも打ってよい（例外ではなく、「無励磁だと分かって
+いる」の 2 つ目の根拠）。**代替案として検討した「`only` の並び順を無励磁のモータ先に
+する」は採らなかった** —— 順序に寄りかかると、宣言順や絞り込みの実装を触った人が
+その依存に気付けない。ドライバ 2 つの docstring にも「この前提が成り立つのは無励磁の
+モータへ送る場合だけ」と追記し、`docs/venue_recovery.md` §3-5 の括弧書きも正した。
+
+**S1: シーケンス系コマンドとの排他が片方向も無かった。** 手動側は 2 方向とも塞いだのに、
+シーケンス側は 1 方向も塞いでいなかった。`reenergize_motors` は `PHASES_ANY` なので
+試合中のシーケンス実行中に押せ、在飛中に NEXT が押されると `move_to` の目標を
+「フォルト前の現在角」が上書きし、`wait_reached` は動かない位置を見続けて
+`SequenceTimeoutError` で止まる（症状は「NEXT を押したのに動かない」だけ）。
+`CommandSpec.blocked_during_reenergize` + `reenergize_deny_message` として宣言し、
+`sequence_start` / `sequence_jump` / `trigger` に付けた。**逆方向は実装しない** ——
+それはこの機能の主目的（試合中に機体を止めずに戻す）を殺す。塞ぐのは在飛中の
+100ms〜1.5 秒だけ。`set_operation_mode` をこのゲートに載せないのは、方向で可否が
+変わる（手動へ入るのは塞ぐが、手動から出るのは塞いではならない）ため。
+在飛判定の書き写しを避けるため `RobotServer._is_reenergizing` を 1 つ置き、既存の
+4 箇所をそこへ寄せた。
+
+**S2: `ctx.manual.reset()` がロボット全体に効いていた。** 旧 docstring は「次のジョグが
+フィードバックから取り直すだけなので無害」としていたが、CLAUDE.md は逆を言っている
+——「ジョグの起点は直前の手動目標値であってフィードバックではない（毎回フィードバック
+から取ると、追従が遅れているあいだの連打が吸われて『押した回数だけ動かない』）」。
+落ちたのが `sub_lift` 1 台でも無関係な `sub_arm_joint` の起点まで捨てていた。緊急停止
+（`on_e_stop`）が全体でよいのは機体が止まっているからで、**再励磁は「機体を止めずに」が
+売りなので前提が違う**。`ManualController.reset_axes_for_motors()` を足し、対象モータを
+含む軸だけを捨てる。モータ → 軸の写像を `ManualController` が持つのは、位置定数表を
+知っているのがそこだけで、サーバー側で引き直すと同じ対応表が 2 箇所に生えるため。
+`tests/test_manual.py` の「片方のモータだけを動かす API を持たない」ガードは、名前に
+`motor` を含む公開メンバを一律に禁じていたので、**コルーチン（＝実際に送る API）に
+限る**形へ精密化した（送らない口まで禁じると、この用途はサーバー側へ対応表を書き写す
+形でしか実装できなくなる）。
+
+**S3: `_reactivate_motors` の `await pending` に上限が無かった。** 旧 docstring は
+「古いタスク自身が有界だから」を根拠にしていたが、**有界なのは `_wait_fresh_feedback` の
+deadline だけ**で、`CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` を
+タイムアウト無しで待つ。SocketCAN の送信キューが詰まっていれば `bus.send` はブロック
+しうる —— それは `cbc-can-watchdog` が bus-off を疑っている状況、つまり**まさに緊急停止を
+押した状況**である。`_settle_pending_reenergize` を切り出し、「キャンセルしてから有界に
+待ち（`_REENERGIZE_CANCEL_TIMEOUT_S` = 0.5 秒）、待ちきれなければログを残して先へ進む」へ
+変えた。キャンセルだけでは足りない（エグゼキュータのスレッドへ入った `bus.send` は
+`Task.cancel()` では止まらず、完了するまで `CancelledError` が投げ込まれない）。先へ
+進んでよいのは、直後に `only=None` で全モータを励磁し直すため。`asyncio.wait` を使うのは、
+`await pending` / `wait_for` だとキャンセル済みタスクの `CancelledError` がそのまま伝播し、
+**再励磁タスク自身がキャンセルされたことになる**ため。
+
+**S4: ペア再励磁のあいだ `SyncMonitor` を止めるか →「止めない」を選んだ。** 同型の
+disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）は
+`_suspend_sync_monitoring` で止めるので揃えたくなるが、**あちらの根拠がここには無い**
+——「その間モータは無励磁なので押し合いは原理的に起きない」は再励磁では落ちた側にしか
+当てはまらず、相方は励磁されたまま押しうる。もう 1 つの根拠（原点の付け替え中は偏差と
+いう量が定義を失う）も、再励磁は原点を動かさないので当てはまらない。止めると、この保護が
+本当に要る瞬間に限って目を塞ぐことになる。「遊びのある機構で発報して全体緊急停止 = この
+機能が避けたかった結果を自分で作る」という懸念については、**再励磁はずれを増やさない**
+——剥がした目標も `activate_motors` が書く目標もどちらも「今いる位置」で、新しい動きを
+作らない。既に許容差を超えているなら押す前から超えており、押さなくても発報する。
+採らなかった側の理由込みで `_reenergize_motors` の docstring に残した。
+
+**S7: 在飛中のフィードバックが UI に無かった。** 押した後の 0.1〜1.5 秒はボタンが押せる
+ままで `unenergized_motors` も消えないため、操縦者は 2 回目を押して「再励磁の処理中です」
+というトーストを受け取っていた。`safety.reenergizing` を足して在飛そのものを配る
+（可否も理由もサーバーが決める原則どおり、UI は押した記憶や `unenergized_motors` の
+中身から導出し直さない）。受信境界は既存の作法どおり `safetyShapeErrors` の boolean 欄へ
+足し、欠落は `MALFORMED` へ倒す。
+
+**S8: 再励磁の成功後に `_energize_expected_since` を置き直していなかった。**
+`_reactivate_motors` は置き直すのに `_reenergize_motors` は置かず、enable が次の
+フィードバックへ反映されるまでの 1 周期（実測 ~50ms）は `is_energized()` が古い値の
+ままなので、成功直後の `safety.unenergized_motors` に対象が残って画面が一瞬
+「直っていない」と言っていた。対称に扱う。
+
+**Nit**: `add_done_callback` のコメントが成立しないシナリオ（「今ここに居るのが自分自身の
+ときだけ取り除く。でないと新しいタスクの in-flight ガードが消える」）を説明していたので
+根拠を実態へ直した（全ガードが `not task.done()` 判定なので、消えても新しいタスクの
+ガードは効く。掃除としては正しいので処理は残す）。`SafetyIssue` に機械可読の `kind` を
+持たせ、UI が**表示文字列**を分岐キーにしていた構造（文言を変えたらボタンが消える）を
+消した。`dropped` が空なら `activate_motors` を呼ばず早期 return する。
+`TestTargetsRobotOnly` は `mock_motor` の `is_energized()` が MagicMock を返して
+`dropped` が必ず空になる弱いテストだったので、実ドライバ構成へ直した。
+
 ## 未解決の課題
 
 実装済みだが実機・運用面で未対応の項目。競技当日までに潰すか、意識的に許容するかを決める必要がある。

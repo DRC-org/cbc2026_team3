@@ -584,6 +584,16 @@ export interface SafetyState {
    * 照合が一緒に沈黙する。`evaluateHealth()` の判定 (tone) はここでは動かさない。
    */
   firmware_unconfirmed_motors: string[];
+  /**
+   * 単発の再励磁 (`reenergize_motors`) がサーバー側で処理中か。
+   *
+   * 押してから 0.1〜1.5 秒のあいだ `unenergized_motors` は消えない (励磁が
+   * 次のフィードバックへ反映されるまで分からない) ので、これが無いと操縦者は
+   * 「押しても何も起きない」としか読めず 2 回目を押す。**可否の判定を UI 側で
+   * 組み立て直さない** —— 押した記憶や `unenergized_motors` の中身から
+   * 導出すると、サーバーが拒否した押下まで「処理中」に見える。
+   */
+  reenergizing: boolean;
   loops_running: boolean;
   monitors_running: boolean;
   refreshers_running: boolean;
@@ -621,7 +631,7 @@ export function safetyShapeErrors(value: unknown): string[] {
   for (const key of ["sync_violations", "unenergized_motors", "firmware_unconfirmed_motors"]) {
     if (!isStringArray(value[key])) broken.push(key);
   }
-  for (const key of ["loops_running", "monitors_running", "refreshers_running"]) {
+  for (const key of ["loops_running", "monitors_running", "refreshers_running", "reenergizing"]) {
     if (typeof value[key] !== "boolean") broken.push(key);
   }
   for (const [key, isValidTask] of Object.entries(SAFETY_TASK_SHAPES)) {

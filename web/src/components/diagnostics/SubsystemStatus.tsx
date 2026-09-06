@@ -5,12 +5,14 @@ import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { SensorSummary } from "@/components/diagnostics/SensorSummary";
 import type { SensorPayload } from "@/components/diagnostics/SensorSummary";
+import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   describeSafetyIssues,
   evaluateHealth,
   firmwareUnconfirmedMotors,
+  isReenergizePending,
   readableHealth,
   workpieceRiskBuses,
 } from "@/lib/healthVerdict";
@@ -48,6 +50,14 @@ interface SubsystemStatusProps {
    * 同じ文字列を 2 度並べると、操縦者はどちらが最新か確かめる往復を強いられる。
    */
   showVerdict?: boolean;
+  /**
+   * 励磁が落ちたモータを戻す (`reenergize_motors`)。渡した画面だけボタンが出る。
+   * **可否の判定はここに持たせない** — 押せば送るだけで、拒否は
+   * サーバーが理由付きで返す (`MotorCheckController.deny_reason()` と同じ原則)。
+   * 渡さない画面 (Monitor) ではボタンごと出さない — この機体の操縦者画面が
+   * 別に居るので、そちらへ促す文言だけを `describeSafetyIssues` の hint が持つ。
+   */
+  onReenergize?: () => void;
 }
 
 /**
@@ -126,8 +136,17 @@ function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
  * モータ状態が届き続ける。どちらも「画面が正常に見えるのに機体は正常でない」型の異常で、
  * 自分から主張しない限り誰も気付けない。
  */
-function SafetyIssues({ safety }: { safety: SafetyPayload | undefined }) {
+function SafetyIssues({
+  safety,
+  onReenergize,
+}: {
+  safety: SafetyPayload | undefined;
+  onReenergize?: () => void;
+}) {
   const issues = describeSafetyIssues(safety);
+  // 在飛中かはサーバーが配る。押した記憶から組み立てない (拒否された押下まで
+  // 「処理中」に見える) し、`unenergized_motors` が消えるのを待つ必要も無い
+  const pending = isReenergizePending(safety);
   if (issues.length === 0) return null;
 
   return (
@@ -141,6 +160,18 @@ function SafetyIssues({ safety }: { safety: SafetyPayload | undefined }) {
           </span>
           {/* 状態だけ出しても操縦者は次の一手を選べない。復旧手順まで書く */}
           <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">{issue.hint}</span>
+          {/* 押せる場所は限定する — この異常が実際に出ていて、かつこの画面に
+              コールバックが渡されているとき (操縦者自身の画面) だけ */}
+          {issue.kind === "unenergized" && onReenergize ? (
+            <Button
+              tone="warn"
+              className="ml-[1.4rem] self-start"
+              onClick={onReenergize}
+              disabled={pending}
+            >
+              {pending ? "処理中…" : "再励磁"}
+            </Button>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -164,6 +195,7 @@ export function SubsystemStatus({
   tempThresholds = null,
   defaultOpen = false,
   showVerdict = true,
+  onReenergize,
 }: SubsystemStatusProps) {
   const verdict = evaluateHealth(health, safety, connected);
   // 内訳を並べる部品は「読めなかった」を表現できない。判定 (上) だけがそれを担う
@@ -224,7 +256,7 @@ export function SubsystemStatus({
           ) : null}
           <WorkpieceRiskNotice buses={riskyBuses} />
           <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
-          <SafetyIssues safety={safety} />
+          <SafetyIssues safety={safety} onReenergize={onReenergize} />
           <HealthIndicator health={readable} />
           {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、
               後ろへ回すと本数によっては指差喚呼で見たい 1 行が畳まれた先に隠れる */}

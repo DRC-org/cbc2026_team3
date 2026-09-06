@@ -279,6 +279,12 @@ class Edulite05Driver(MotorDriver):
     def feedback_probe_message(self) -> can.Message | None:
         # disable は無励磁を保ったままフィードバック応答を返させられる唯一のフレーム。
         # clear_fault=False なので障害フラグを握り潰す心配もない。
+        #
+        # **この前提が成り立つのは、無励磁のモータへ送る場合だけである。**
+        # 励磁中の `rotate_r` / `rotate_l` へ送れば保持トルクをその場で失い、
+        # 直結ペアが両側とも無励磁になる窓が開く。送ってよいかの判断は
+        # `CANManager._may_probe_for_feedback` が `is_energized()` の三値で
+        # 1 箇所だけ持つ (ここへ書き写さないこと)。
         return self.encode_disable()
 
     def decode_feedback(self, msg: can.Message) -> MotorState:

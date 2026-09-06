@@ -25,6 +25,7 @@ M3508 の PC 側 PID への迂回 (``target_sink``)、自作モタドラの 20Hz
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -176,6 +177,33 @@ class ManualController:
         モータの目標値そのものは消さない。消すと保持トルクを失い、昇降軸が落下する。
         """
         self._targets.clear()
+
+    def reset_axes_for_motors(self, motor_names: Collection[str]) -> None:
+        """指定したモータを含む軸だけ、ジョグの起点を捨てる。
+
+        使うのは単発の再励磁 (`RobotServer._reenergize_motors`) だけ。**そこでは
+        ``reset()`` を使ってはならない。** 無励磁のあいだ自重で下がった軸の起点を
+        捨てる必要があるのは確かだが、`reset()` はロボット全体に効くので、落ちたのが
+        `sub_lift` 1 台でも無関係な `sub_arm_joint` の起点まで消える。ジョグの起点は
+        「直前に手動で送った目標値」であることに意味があり (毎回フィードバックから
+        取り直すと、追従が遅れているあいだの連打が吸われて「押した回数だけ動かない」)、
+        巻き添えで捨てた軸ではその性質が次の 1 回だけ失われる。
+
+        緊急停止 (`on_e_stop`) が全体でよいのは機体が止まっているからで、
+        **再励磁は「機体を止めずに」が売りなので前提が違う。**
+
+        軸への写像をここが持つのは、`ManualController` だけが位置定数表
+        (軸 → モータ) を知っているため。サーバー側でモータ名から軸を引き直すと、
+        同じ対応表が 2 箇所に生える。ペア軸は片側のモータ名だけ渡されても軸ごと
+        捨てることになるが、それが正しい —— 起点は軸単位にしか無い。
+        """
+        dropped = set(motor_names)
+        for axis in [
+            name
+            for name in self._targets
+            if dropped.intersection(self._positions.axis(name).motor_names)
+        ]:
+            del self._targets[axis]
 
     def on_e_stop(self) -> None:
         """緊急停止で起点を捨てる。

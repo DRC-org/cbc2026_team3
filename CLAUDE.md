@@ -775,6 +775,37 @@ Monitor から機体の動きを説明できない）。手動へ入るときは
 `motor_check_start` も対象外 — 動作確認は両ハンドを 1 本で駆動するので排他は
 `_motor_check_environment_deny()` が両ロボット横断で持ち、ここへ重複させない。
 
+**再励磁（`reenergize_motors`）だけは片方向しか塞がない。意図的な例外である。**
+励磁が落ちたモータを機体を止めずに戻すコマンドで、無励磁のモータ（と直結ペアの相方）
+だけ目標ラッチを剥がしてから `activate_motors(only=…)` で絞って励磁する。100ms〜1.5 秒
+かかる別タスクで走り、そのあいだ `safety.reenergizing` が立つ。**塞ぐのは「在飛中に
+届くシーケンス系」だけ** — `CommandSpec.blocked_during_reenergize` が
+`sequence_start` / `sequence_jump` / `trigger` に付く（在飛中に `move_to` が書いた目標を
+「フォルト前の現在角」が上書きし、`wait_reached` が動かない位置を見続けて
+`SequenceTimeoutError` になる）。**逆方向（シーケンス実行中の再励磁）は塞がない** —
+励磁が落ちるのはたいていシーケンスを走らせている最中で、そこで使えなければ直したい状況が
+直せない。手動側の同じ排他はハンドラが持つ（`_apply_operation_mode` /
+`_manual_target`）— `set_operation_mode` は方向で可否が変わる（手動へ入るのは塞ぐが、
+手動から出るのは塞いではならない。退避路から戻れなくなる）ので、コマンド単位で一律に
+塞ぐ `CommandSpec` のゲートでは表せない。
+
+**再励磁のペア展開は「励磁中のモータへ disable を送らない」に依存している。**
+直結ペアの片側が無励磁なら相方も対象へ含める（片側だけ効く操作を作らないため）ので、
+`only` には**励磁中のモータが混ざる**。`CANManager.activate_motor` は
+`requires_fresh_feedback_for_activation()` なモータの鮮度を
+`feedback_probe_message()`（EDULITE 05 / DM3520 とも **disable**）で引き出すため、
+これをそのまま打つと健全な相方が保持トルクを失い、宣言順（`rotate_r` → `rotate_l`）
+次第で**軸が両側とも無励磁になる窓**（最悪 550ms）が開く。判断は
+`CANManager._may_probe_for_feedback` が `is_energized()` の三値で 1 箇所だけ持ち、
+`True` のモータへは打たない（励磁中なら `QueryDrivenTargetRefresher` の 20Hz への応答で
+鮮度は満たされる。届かなければ従来どおり無励磁のまま残す）。`after_set_zero` の経路だけは
+例外で必ず打つ — 直前に `deactivation_steps()` を送っており、無励磁であることを指令として
+知っているため。**ドライバ種別をここへ書き写してはならない。**
+一方 **`SyncMonitor` は止めない** — 零点確定が止めてよい根拠（「その間モータは無励磁
+なので押し合いは原理的に起きない」）は再励磁では片側にしか当てはまらず、止めると保護が
+本当に要る瞬間に目を塞ぐことになる。再励磁自体は「今いる位置」しか書かないのでずれを
+増やさない（理由は `RobotServer._reenergize_motors` の docstring）。
+
 **手動はフェーズでゲートしないが、緊急停止ゲートは別軸で効く。** 調整は準備中に、
 シーケンスからの退避は試合中に要るので `set_operation_mode` / `manual_*` はすべて
 `PHASES_ANY`。一方、機体を動かさない**モード切替は緊急停止中も通し、目標値を送る
