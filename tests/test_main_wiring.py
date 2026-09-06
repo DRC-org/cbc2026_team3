@@ -20,7 +20,7 @@ import struct
 import time
 import types
 from typing import ClassVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import can
 import pytest
@@ -1448,6 +1448,26 @@ class TestRobotBusSelection:
 
         assert can_manager.bus_names == ("generic_bus",)
 
+    def test_setup_robot_は別名ではなくインタフェース名で開く(self) -> None:
+        """`_create_bus` が受けるのは `can_buses` の**値**であって別名ではない。
+
+        `can_manager` へ登録されるのは別名のままなので、`bus_names` を見る上の
+        テストでは `_create_bus(bus_name, ...)` への変異を区別できない。実運用では
+        `can.Bus` が ENODEV で落ちるが、**`operstate` の判定
+        (`/sys/class/net/<名前>/`) は静かに死ぬ** —— down を 1 行も報告しなくなる。
+        """
+        robot = _robot(
+            {
+                "robot_name": "r",
+                "motors": {"conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1}},
+            }
+        )
+
+        with patch("main._create_bus") as create_bus:
+            main._setup_robot(robot, self._BUSES, dry_run=True)
+
+        assert create_bus.call_args_list == [call("can_generic", dry_run=True)]
+
     def test_バスを開けなければ一行のメッセージで落とす(self) -> None:
         """down しているインタフェースで生の traceback を出さない。
 
@@ -1463,6 +1483,144 @@ class TestRobotBusSelection:
         message = str(exc.value)
         assert "can_dm3520" in message
         assert "setup_can.sh" in message
+
+
+class TestReadOperstate:
+    """**sysfs を実際に読む経路そのものを固定する。**
+
+    読み取りを丸ごとラムダへ差し替えて `_create_bus` 側だけを見ていた頃は、
+    **機能が丸ごと死ぬ変異が 2 つとも全件緑で通った** —— `.strip()` を落とす
+    (sysfs は `"down\n"` を返すので `== "down"` が永久に偽になる) と、パス要素を
+    `oper_state` へ綴り間違える (常に `FileNotFoundError` → `None`) の 2 つ。
+    どちらも「ログが 1 行も出なくなる」だけなので、通しでも気づけない。
+    """
+
+    def _write(self, root: pathlib.Path, channel: str, text: str) -> None:
+        (root / channel).mkdir()
+        # sysfs は改行付きで返す。`.strip()` を落とすとここで落ちる
+        (root / channel / "operstate").write_text(text)
+
+    def test_down_を読む(self, tmp_path: pathlib.Path) -> None:
+        self._write(tmp_path, "can_m3508", "down\n")
+
+        assert main._read_operstate("can_m3508", root=tmp_path) == "down"
+
+    def test_up_を読む(self, tmp_path: pathlib.Path) -> None:
+        self._write(tmp_path, "can_m3508", "up\n")
+
+        assert main._read_operstate("can_m3508", root=tmp_path) == "up"
+
+    @pytest.mark.skipif(
+        not pathlib.Path("/sys/class/net/lo").is_dir(),
+        reason="sysfs のネットワークインタフェースが無い環境",
+    )
+    def test_既定の根は実在するインタフェースを読める(self) -> None:
+        """`_NET_SYSFS_ROOT` の綴りを固定する。
+
+        上の 2 件は `root` を渡すので既定値を 1 度も通らない。`lo` は Linux なら
+        必ず存在し、carrier を管理しないので `unknown` を返す (値そのものは問わない)。
+        """
+        assert main._read_operstate("lo") is not None
+
+    def test_実体が無ければ判定できないとしてNoneを返す(self, tmp_path: pathlib.Path) -> None:
+        # ディレクトリを作らない。「判定できない」= None を返す (異常へ倒さない)
+        assert main._read_operstate("can_m3508", root=tmp_path) is None
+
+
+class TestCreateBusOperstate:
+    """**down しているインタフェースでも起動は止めない。ログにだけ出す。**
+
+    `--strict` を通していない構成 (片ハンドだけの練習・机上ベンチ・会場での逃げ道) を
+    一律に潰さないため、拒否は足さない。価値は「人が最初に見る場所 (起動ログ) に、
+    原因をインタフェース名付きで残す」ことだけ。`docs/impl_plan.md` の
+    「既知の制約: バス down 時の失敗が分かりにくい」参照。
+    """
+
+    def test_down_なら起動ログにERRORでインタフェース名を残す(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(main, "_read_operstate", lambda _channel: "down")
+
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.ERROR),
+        ):
+            main._create_bus("can_m3508", dry_run=False)
+
+        assert any(
+            "can_m3508" in record.getMessage() and record.levelno == logging.ERROR
+            for record in caplog.records
+        )
+
+    def test_down_でも起動は止めない(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(main, "_read_operstate", lambda _channel: "down")
+
+        with patch("main.can.Bus", return_value=MagicMock()) as bus_ctor:
+            bus = main._create_bus("can_m3508", dry_run=False)
+
+        assert bus is bus_ctor.return_value
+
+    def test_up_ならログを出さない(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """up のときは**どのレベルでも**何も言わない (平常時のログを埋めない)。"""
+        monkeypatch.setattr(main, "_read_operstate", lambda _channel: "up")
+
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.DEBUG),
+        ):
+            main._create_bus("can_m3508", dry_run=False)
+
+        assert caplog.records == []
+
+    def test_unknown_ではログを出さない(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`unknown` は「判定できない」であって down ではない。
+
+        判定を `!= "up"` へ書き換えると、ここが異常側へ倒れる。
+        """
+        monkeypatch.setattr(main, "_read_operstate", lambda _channel: "unknown")
+
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.DEBUG),
+        ):
+            main._create_bus("can_m3508", dry_run=False)
+
+        assert caplog.records == []
+
+    def test_判定できなければログを出さない(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`None` (`/sys` に実体が無い環境) は「分からない」であって異常ではない。
+
+        判定できなかったこと自体もログに出さない — 毎回警告が出るとログが埋もれる。
+        """
+        monkeypatch.setattr(main, "_read_operstate", lambda _channel: None)
+
+        with (
+            patch("main.can.Bus", return_value=MagicMock()),
+            caplog.at_level(logging.DEBUG),
+        ):
+            main._create_bus("can_m3508", dry_run=False)
+
+        assert caplog.records == []
+
+    def test_dry_run_では判定しない(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`--dry-run` の virtual バスは `/sys/class/net/` に実体が無い。呼び出しごと省く。
+
+        呼ばれたら `AssertionError` で分かるようにする (呼ばなければ落ちない)。
+        """
+
+        def _fail(_channel: str) -> str | None:
+            raise AssertionError("dry_run では _read_operstate を呼んではならない")
+
+        monkeypatch.setattr(main, "_read_operstate", _fail)
+
+        bus = main._create_bus("can_m3508", dry_run=True)
+        bus.shutdown()
 
 
 class TestEnsurePortAvailable:
