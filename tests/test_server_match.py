@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -38,6 +39,35 @@ async def _complete_checklist(ws) -> None:
 
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
+
+
+def _build_fixture_with_periodic_tasks() -> tuple[
+    ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher
+]:
+    """周期タスク 3 種を持つロボット 1 台のサーバーを組み、乱れの記録を据える。
+
+    実周期を実際に乱して検知させる経路は `tests/test_periodic.py` が単体で
+    尽くしているので、ここでは `seed_jitter_overrun` でカウンタへ直接値を据える
+    (本物のタイミングを乱すと非決定性がサーバーテストへ持ち込まれる)。
+    """
+    fx = ServerFixture.build(checklist_definitions=_DEFS)
+    mgr = mock_can_manager(("y_axis_r",))
+
+    position_loop = M3508PositionLoop(mgr, "bus0")
+    sync_monitor = SyncMonitor([], {}, last_feedback_at=lambda _name: None)
+    refresher = GenericTargetRefresher([])
+
+    fx.add_robot(
+        "main_hand",
+        DummySequence("main_hand"),
+        mgr,
+        position_loops=[position_loop],
+        sync_monitors=[sync_monitor],
+        target_refreshers=[refresher],
+    )
+    for task in (position_loop, sync_monitor, refresher):
+        seed_jitter_overrun(task, count=3, worst_s=0.04)
+    return fx, position_loop, sync_monitor, refresher
 
 
 class DummySequence(Sequence):
@@ -555,41 +585,19 @@ class TestMatchStartResetsRxDownEpisodes:
 
 
 class TestJitterResetOnMatchStart:
-    """周期タスクが測る実周期の乱れは、試合開始で洗い流す。
+    """周期タスクが測る実周期の乱れは、試合開始で洗い流す (前縁リセット)。
 
-    画面に求める性質 (持続する / 永久に残らない) の調停点が「試合」という
-    スコープであることの詳しい設計判断は `lib/server.py` の
-    `_handle_match_start` に書いてある。ここではその配線 —— `match_start` が
-    成立したときだけ全ロボットの位置制御ループ・同期監視・目標値再送を
-    リセットすること —— だけを固定する。実周期を実際に乱して検知させる経路は
-    `tests/test_periodic.py` が単体で尽くしているので、ここでは
-    `seed_jitter_overrun` でカウンタへ直接値を据える。
+    準備中 (配線確認・両ハンドを一巡する動作確認) に踏んだぶんを試合の数字へ
+    持ち込まないための無音のリセットで、`reset_rx_down_episodes()` と同じ場所・
+    同じ理由。詳しい設計判断は `lib/server.py` の `_handle_match_start` にある。
+    ここではその配線 —— `match_start` が成立したときだけ全ロボットの位置制御
+    ループ・同期監視・目標値再送をリセットすること —— だけを固定する。
+    集計 1 行を出すのは `match_finish` 側なので、そちらは
+    `TestJitterSummaryOnMatchFinish` が持つ。
     """
 
-    def _build_fixture_with_periodic_tasks(
-        self,
-    ) -> tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher]:
-        fx = ServerFixture.build(checklist_definitions=_DEFS)
-        mgr = mock_can_manager(("y_axis_r",))
-
-        position_loop = M3508PositionLoop(mgr, "bus0")
-        sync_monitor = SyncMonitor([], {}, last_feedback_at=lambda _name: None)
-        refresher = GenericTargetRefresher([])
-
-        fx.add_robot(
-            "main_hand",
-            DummySequence("main_hand"),
-            mgr,
-            position_loops=[position_loop],
-            sync_monitors=[sync_monitor],
-            target_refreshers=[refresher],
-        )
-        for task in (position_loop, sync_monitor, refresher):
-            seed_jitter_overrun(task, count=3, worst_s=0.04)
-        return fx, position_loop, sync_monitor, refresher
-
     async def test_match_start_が成立すると全タスクの乱れをリセットする(self) -> None:
-        fx, position_loop, sync_monitor, refresher = self._build_fixture_with_periodic_tasks()
+        fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
@@ -613,7 +621,7 @@ class TestJitterResetOnMatchStart:
         見ており、指差喚呼未完了ならここで拒否されて `_handle_match_start` の
         中身 (リセットの呼び出しを含む) は 1 行も実行されない。
         """
-        fx, position_loop, sync_monitor, refresher = self._build_fixture_with_periodic_tasks()
+        fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
@@ -642,7 +650,7 @@ class TestJitterResetOnMatchStart:
         フェーズゲートを通過させたうえで `_handle_match_start` 内部の排他判定に
         引っかけるので、リセットが排他判定より前へ動くとここが落ちる。
         """
-        fx, position_loop, sync_monitor, refresher = self._build_fixture_with_periodic_tasks()
+        fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         check = _GatedCheckSequence()
         fx.set_motor_check_sequence(check)
         app = fx.create_app()
@@ -666,4 +674,76 @@ class TestJitterResetOnMatchStart:
 
             check.gate.set()
             await fx.wait_motor_check_idle()
+            await ws.close()
+
+
+class TestJitterSummaryOnMatchFinish:
+    """「試合 N の集計」1 行は試合終了で出し、そこで 0 に戻す。
+
+    リセット点が `match_start` だけだと集計窓が `[試合N開始, 試合N+1開始)` になり、
+    試合後の finished・`match_reset`・次のセッティングタイム・両ハンドを一巡する
+    動作確認 (まさに乱れの発生源) が丸ごと混ざる。しかもその日の最後の試合は次の
+    `match_start` が来ないので永久に journal へ出ない —— 一番読みたい 1 試合が抜ける。
+    ここでは配線 (成立した `match_finish` でだけ集計 1 行 + リセットが走ること) を
+    固定する。1 行の中身 (超過 0 件でも出す / 文言で読み分けられる) は
+    `tests/test_periodic.py` の `TestJitterSummary` が持つ。
+    """
+
+    @staticmethod
+    def _summary_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+        """集計 1 行だけを拾う (周期タスク 3 種でロガー名が違うのでメッセージで引く)。"""
+        return [r.getMessage() for r in caplog.records if " の実周期: " in r.getMessage()]
+
+    async def test_match_finish_が集計を残してから0に戻す(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+            fx.complete_all_checklists()
+            await ws.send_json({"type": "match_start"})
+            await asyncio.sleep(0.05)
+            assert fx.match.phase is Phase.MATCH
+
+            # 試合中に乱れが出た状態を作る (match_start の前縁リセット後に据える)
+            for task in (position_loop, sync_monitor, refresher):
+                seed_jitter_overrun(task, count=5, worst_s=0.06)
+
+            with caplog.at_level(logging.INFO):
+                await ws.send_json({"type": "match_finish"})
+                await asyncio.sleep(0.05)
+
+            assert fx.match.phase is Phase.FINISHED
+            # 3 タスクぶん、漏れなく 1 行ずつ
+            assert len(self._summary_lines(caplog)) == 3
+            for task in (position_loop, sync_monitor, refresher):
+                assert task.jitter_overrun_count == 0
+                assert task.worst_jitter_s == pytest.approx(0.0)
+            await ws.close()
+
+    async def test_試合中でなければ集計を残さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """フェーズゲート (`PHASES_DURING_MATCH`) で拒否された `match_finish` では触らない。
+
+        拒否された試みで集計を吐くと、journal の 1 行が「試合 N の集計」を名乗れなく
+        なる (誰かが準備中に押しただけの行が同じ書式で並ぶ)。
+        """
+        fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws")
+
+            with caplog.at_level(logging.INFO):
+                await ws.send_json({"type": "match_finish"})
+                msg = await recv_type(ws, "command_rejected")
+
+            assert msg is not None
+            assert msg["command"] == "match_finish"
+            assert fx.match.phase is not Phase.FINISHED
+            assert self._summary_lines(caplog) == []
+            for task in (position_loop, sync_monitor, refresher):
+                assert task.jitter_overrun_count == 3
+                assert task.worst_jitter_s == pytest.approx(0.04)
             await ws.close()

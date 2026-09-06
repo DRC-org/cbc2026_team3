@@ -507,14 +507,87 @@ class TestJitter:
         assert task.worst_jitter_s == pytest.approx(0.0)
 
 
-class TestJitterReset:
-    """乱れの記録を試合単位で洗い流す (`reset_jitter_stats`)。
+class TestJitterSummary:
+    """試合ぶんの実周期を journal へ 1 行残す (`log_jitter_summary`)。
 
-    呼び出し口は `lib/server.py` の `_handle_match_start`。詳しい設計判断
-    (なぜ試合スコープか・なぜ match_reset ではないか・なぜ時間窓方式を
-    採らなかったか) はそちらのコメントに書いてあるので、ここでは
-    `PeriodicTask` 自身の実装 (回数と最悪値を両方落とす / `_last_tick_at`
-    は触らない) だけを固定する。
+    呼び出し口は `lib/server.py` の `_cmd_match_finish`。ここでは
+    `PeriodicTask` 自身の約束 —— **超過 0 件でも必ず 1 行出す** / 0 件と
+    1 件以上を文言で読み分けられる —— だけを固定する。
+    """
+
+    async def test_summary_is_logged_even_without_overrun(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """超過 0 件でも 1 行残し、最悪の遅れをその行に載せる。
+
+        ここを `if 超過 > 0` で塞ぐと、公称の 1.4 倍で常時走っている機体
+        (200Hz が 143Hz。停止距離も偏差監視の 40ms 予算も既に崩れている) で
+        journal が無音になり、しきい値を決めるためにしきい値を超えている必要が
+        ある、という循環になる。実機でしきい値を決める唯一の観測値がこの 1 行。
+        """
+        interval_s = 0.125
+        threshold_s = interval_s * JITTER_OVERRUN_MARGIN
+        task = _Recorder(
+            FakeClock(),
+            interval_s=interval_s,
+            work_s=interval_s + threshold_s / 2,
+            stop_after=3,
+        )
+        await task.run()
+        assert task.jitter_overrun_count == 0
+
+        with caplog.at_level(logging.INFO, logger="tests.test_periodic"):
+            task.log_jitter_summary()
+
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(infos) == 1
+        message = infos[0].getMessage()
+        assert "超過なし" in message
+        # 0 件でも最悪の遅れ (31.2ms) が読めること。ここが 0.0ms を名乗ると
+        # 「乱れていない」と誤読され、この 1 行の存在価値が消える
+        assert f"{threshold_s / 2 * 1000.0:.1f}ms" in message
+
+    async def test_summary_wording_distinguishes_overrun_from_clean(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """超過 1 件以上は 0 件と違う文言で出す (1 行だけ読んで区別が付くこと)。"""
+        task = _Recorder(FakeClock(), interval_s=0.01, work_s=0.02, stop_after=3)
+        await task.run()
+        assert task.jitter_overrun_count == 2
+
+        with caplog.at_level(logging.INFO, logger="tests.test_periodic"):
+            task.log_jitter_summary()
+
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(infos) == 1
+        message = infos[0].getMessage()
+        assert "超過 2 回" in message
+        assert "超過なし" not in message
+
+    async def test_summary_does_not_reset(self) -> None:
+        """集計は読むだけ。0 に戻すのは `reset_jitter_stats` の仕事。
+
+        2 つを 1 つのメソッドへ戻すと、集計を出さずにリセットしたい
+        `match_start` (前縁リセット) が「試合の集計」を名乗る 1 行を
+        毎回吐くようになる。
+        """
+        task = _Recorder(FakeClock(), interval_s=0.01, work_s=0.02, stop_after=3)
+        await task.run()
+
+        task.log_jitter_summary()
+
+        assert task.jitter_overrun_count == 2
+        assert task.worst_jitter_s == pytest.approx(0.01)
+
+
+class TestJitterReset:
+    """乱れの記録を落とす (`reset_jitter_stats`)。
+
+    呼び出し口は `lib/server.py` の `_cmd_match_finish` (集計を残した直後) と
+    `_handle_match_start` (前縁リセット)。詳しい設計判断 (なぜ試合スコープか・
+    なぜ集計が match_finish 側か) はそちらのコメントに書いてあるので、ここでは
+    `PeriodicTask` 自身の実装 (回数と最悪値を両方落とす / ログは出さない /
+    `_last_tick_at` は触らない) だけを固定する。
     """
 
     async def test_reset_clears_both_count_and_worst(self) -> None:
@@ -541,24 +614,23 @@ class TestJitterReset:
         assert task.jitter_overrun_count == 0
         assert task.worst_jitter_s == pytest.approx(0.0)
 
-    async def test_reset_logs_info_only_when_there_was_an_overrun(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """画面のスコープを試合に縮めた分、journal には INFO で残す (超過 0 件は出さない)。"""
-        clean = _Recorder(FakeClock(), interval_s=0.01, work_s=0.001, stop_after=3)
-        with caplog.at_level(logging.INFO, logger="tests.test_periodic"):
-            await clean.run()
-            clean.reset_jitter_stats()
-        assert not any(r.levelno == logging.INFO for r in caplog.records)
+    async def test_reset_alone_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        """リセット単体では 1 行も出さない (`match_start` の前縁リセットが無音であること)。
 
+        集計とリセットを 1 つのメソッドへ戻すと、準備中のぶんを洗い流すだけの
+        `match_start` が「試合の集計」を名乗る 1 行を毎回吐き、試合終了時の
+        本物の 1 行と見分けが付かなくなる。
+        """
+        task = _Recorder(FakeClock(), interval_s=0.01, work_s=0.02, stop_after=3)
+        await task.run()
+        assert task.jitter_overrun_count == 2
+        # run() 中の超過 WARNING はここでの検証対象ではない (見るのはリセット単体)
         caplog.clear()
 
-        dirty = _Recorder(FakeClock(), interval_s=0.01, work_s=0.02, stop_after=3)
         with caplog.at_level(logging.INFO, logger="tests.test_periodic"):
-            await dirty.run()
-            dirty.reset_jitter_stats()
-        infos = [r for r in caplog.records if r.levelno == logging.INFO]
-        assert len(infos) == 1
+            task.reset_jitter_stats()
+
+        assert not caplog.records
 
     async def test_reset_does_not_disturb_ongoing_measurement(self) -> None:
         """リセットは統計だけを落とし、次の tick の実周期計測を巻き添えにしない。

@@ -205,24 +205,52 @@ class PeriodicTask(abc.ABC):
         """
         return self._worst_jitter_s
 
-    def reset_jitter_stats(self) -> None:
-        """乱れの記録を落とす。呼ぶのは match_start だけ (試合ごとに 1 行 journal へ残す)。
-        画面・WS 配信には出していない (しきい値が実機未検証。経緯は
-        ``docs/checks_and_health.md`` の「3 層はどれも公称周期どおりに回っている
-        ことが前提」節)。
+    def log_jitter_summary(self) -> None:
+        """直前の試合ぶんの実周期を journal へ 1 行残す。呼ぶのは match_finish だけ。
 
-        回数と最悪値は必ず両方一緒に落とす —— 片方だけ残ると数字が読めなくなる。
+        **超過 0 件でも必ず出す。** しきい値 (``JITTER_OVERRUN_MARGIN``) は理屈で
+        導いた値で実機未検証であり、それを決めるための唯一の観測値が
+        ``worst_jitter_s`` である。「超過したときだけ出す」にすると、公称の 1.4 倍で
+        常時走っている機体 —— 200Hz が 143Hz に落ち、`lib/control/trajectory.py` の
+        停止距離も `SyncMonitor` の 40ms 予算も既に崩れている状態 —— で journal に
+        1 行も出ず、読み手は「警告 0 件 = 乱れていない」と読む。しきい値を決める
+        ためにしきい値を超えている必要がある、という循環になる。
+        1 試合あたり (位置制御 + 同期監視 + 目標値再送) x 2 ロボット = 6 行程度なので
+        氾濫しない。**超過 0 件かどうかは文言で読み分けられるようにしてある。**
+
+        画面・WS 配信には出していない (しきい値が実機未検証。現況は
+        ``docs/checks_and_health.md`` の「3 層はどれも『公称周期どおりに回っている』
+        ことが前提 — その乱れを測る」節、経緯は ``docs/impl_plan.md`` の限界表)。
+        """
+        if self._jitter_overrun_count == 0:
+            self._logger.info(
+                "%s の実周期: しきい値超過なし (最悪の遅れ %.1fms / 公称周期 %.1fms)",
+                self._label(),
+                self._worst_jitter_s * 1000.0,
+                self._interval_s * 1000.0,
+            )
+        else:
+            self._logger.info(
+                "%s の実周期: しきい値超過 %d 回 (最悪の遅れ %.1fms / 公称周期 %.1fms)",
+                self._label(),
+                self._jitter_overrun_count,
+                self._worst_jitter_s * 1000.0,
+                self._interval_s * 1000.0,
+            )
+
+    def reset_jitter_stats(self) -> None:
+        """乱れの記録を 0 に戻す。ログは出さない (集計 1 行は ``log_jitter_summary``)。
+
+        呼び口は `lib/server.py` の 2 箇所 —— match_finish (集計を残した直後) と
+        match_start (前縁リセット。準備中に踏んだぶんを洗い流す)。
+
+        **回数と最悪値は必ず両方一緒に落とす。** 片方だけ残すと「超過 0 回なのに
+        最悪の遅れだけ残る」不整合になり、次の集計 1 行が前の試合の数字を混ぜて
+        名乗る。これはリセットの不変条件であって、ログを出すかどうかの話ではない。
         ``_last_tick_at`` は触らない —— ``None`` に戻すと直後の 1 tick 分の乱れ
         検知を取りこぼす (`start()` が捨てる「停止していた空白」とは違い、
         ここはタスクが動き続けたままの呼び出しなので空白が無い)。
         """
-        if self._jitter_overrun_count > 0:
-            self._logger.info(
-                "%s の実周期の乱れを試合単位でリセット (超過 %d 回 / 最悪 %.1fms)",
-                self._label(),
-                self._jitter_overrun_count,
-                self._worst_jitter_s * 1000.0,
-            )
         self._jitter_overrun_count = 0
         self._worst_jitter_s = 0.0
 
