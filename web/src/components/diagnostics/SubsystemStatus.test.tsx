@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
@@ -37,6 +37,8 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    firmware_unconfirmed_motors: [],
+    reenergizing: false,
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -99,6 +101,101 @@ describe("SubsystemStatus", () => {
     expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
     expect(screen.getByText("y_axis")).toBeInTheDocument();
     expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
+  });
+
+  describe("再励磁ボタン", () => {
+    it("無励磁のモータがあり、かつ onReenergize を渡した画面にだけ出る", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"] })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "再励磁" })).toBeInTheDocument();
+    });
+
+    it("onReenergize を渡さない画面 (Monitor) では出さない", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"] })}
+        />,
+      );
+
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("無励磁のモータが無ければ、onReenergize を渡していても出さない", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety()}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("無励磁以外の異常しか無ければ、onReenergize を渡していても出さない", () => {
+      // 同期ずれラッチの行にまで再励磁ボタンが付くと、押しても直らないボタンになる
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ sync_violations: ["y_axis"] })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("処理中はサーバーの配信どおり押せなくなる", () => {
+      // 押した後の 0.1〜1.5 秒は unenergized_motors が消えないので、これが無いと
+      // 操縦者は「押しても何も起きない」と読んで 2 回目を押す (そして拒否される)
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"], reenergizing: true })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      const button = screen.getByRole("button", { name: "処理中…" });
+      expect(button).toBeDisabled();
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("押すとコールバックが呼ばれる", async () => {
+      const onReenergize = vi.fn();
+      const user = userEvent.setup();
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"] })}
+          onReenergize={onReenergize}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "再励磁" }));
+
+      expect(onReenergize).toHaveBeenCalledOnce();
+    });
   });
 
   it("保護ループの停止を自分から主張する", () => {
@@ -368,6 +465,113 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
     expect(screen.queryByText(/CAN 途絶/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * `INFO` 未受信の通知 (`FirmwareUnconfirmedNotice`)。
+   *
+   * 「確認できていない」であって「壊れている」ではないので、判定チップ (見出し) も
+   * 開閉 (`forcedOpen`) も動かさない —— `_info` は一度受ければ二度と外れないラッチ
+   * なので、猶予を過ぎても残るのは大半が試合中ずっと変わらない状態であり、
+   * ワーク落下のような 1 事象ではない。開いたときに見える情報として畳める。
+   */
+  it("開いたときだけ INFO 未確認のモータを出す (判定・開閉は動かさない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: ["gripper"] })}
+      />,
+    );
+
+    // 見出しの判定チップは変えない (「異常」ではないため)
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+    // 自分から開かせない (畳んだままにできる)
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
+  });
+
+  it("開けば INFO 未確認のモータが見える", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: ["gripper"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText("版番号 未確認")).toBeInTheDocument();
+    expect(screen.getByText("gripper")).toBeInTheDocument();
+  });
+
+  /**
+   * この状態が起きる最も現実的なきっかけは「1 枚の基板が丸ごと `INFO` を出していない」
+   * なので、電磁弁 6ch のように複数が同時に並ぶ。1 行へ `join(", ")` すると
+   * `truncate` で途中から読めなくなり、操縦者は指差喚呼 (`firmware_match`) に
+   * 答えられない。**モータごとに 1 行**にする。
+   */
+  it("複数の未確認モータを 1 行にまとめず 1 件ずつ並べる", async () => {
+    const user = userEvent.setup();
+    const unconfirmed = ["valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6"];
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: unconfirmed })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getAllByText("版番号 未確認")).toHaveLength(unconfirmed.length);
+    for (const name of unconfirmed) {
+      // 1 行にまとめていると "valve_1, valve_2, ..." という 1 つのノードになり、
+      // 名前 1 個での完全一致は取れない
+      expect(screen.getByText(name)).toBeInTheDocument();
+    }
+  });
+
+  /**
+   * **手当ての文面は「電源・CAN 配線」であってはならない。** サーバーは `FEEDBACK` が
+   * 届いているモータだけをここへ載せる (`_firmware_unconfirmed_motors` の STALE 除外)
+   * ので、配線を見ても必ず何も見つからない。直すべきはファーム側の `INFO` 送信経路。
+   */
+  it("手当てとしてファームの焼き直しを案内する (配線を疑わせない)", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: ["gripper"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText(/ファームを焼き直して/)).toBeInTheDocument();
+    expect(screen.queryByText(/配線を確認/)).not.toBeInTheDocument();
+  });
+
+  it("INFO 未確認が 0 件なら開いても何も出さない", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ firmware_unconfirmed_motors: [] })}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
   });
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {

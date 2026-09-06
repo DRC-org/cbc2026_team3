@@ -60,6 +60,8 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
     safety: {
       sync_violations: [],
       unenergized_motors: [],
+      firmware_unconfirmed_motors: [],
+      reenergizing: false,
       loops_running: true,
       monitors_running: true,
       refreshers_running: true,
@@ -142,6 +144,35 @@ describe("RobotControl の操作先", () => {
     await userEvent.click(screen.getByRole("button", { name: "シーケンスを通常停止" }));
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "sequence_stop", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+
+  it("再励磁も自分の担当機へ宛てて送る", async () => {
+    // `_cmd_reenergize_motors` はロボット名が無い・未知なら拒否も返さず
+    // 黙って return するので、宛先を間違えると「押せるが何も起きず、
+    // 拒否トーストも出ない」という気付けない壊れ方になる
+    const { context } = mount(
+      "match",
+      robotState({
+        safety: {
+          sync_violations: [],
+          unenergized_motors: ["rotate_l"],
+          firmware_unconfirmed_motors: [],
+          reenergizing: false,
+          loops_running: true,
+          monitors_running: true,
+          refreshers_running: true,
+          position_loops: [],
+          sync_monitors: [],
+          target_refreshers: [],
+        },
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "再励磁" }));
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "reenergize_motors", robot: "sub_hand" },
       expect.any(String),
     );
   });
@@ -272,6 +303,8 @@ describe("RobotControl の診断表示", () => {
         safety: {
           sync_violations: ["rotate"],
           unenergized_motors: [],
+          firmware_unconfirmed_motors: [],
+          reenergizing: false,
           loops_running: true,
           monitors_running: true,
           refreshers_running: true,

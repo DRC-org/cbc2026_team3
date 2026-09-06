@@ -468,17 +468,64 @@ def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], floa
     return last_feedback_at
 
 
+#: ネットワークインタフェースの状態を持つ sysfs の根。`_read_operstate` の引数に
+#: 出してあるのは、パスの組み立てと `.strip()` を実ファイル (tmp_path) で検証できる
+#: ようにするため — 読む場所を丸ごとラムダへ差し替えると、その 2 つが 1 行も
+#: 通らないまま「機能が丸ごと死ぬ変異」が緑で通る。
+_NET_SYSFS_ROOT = pathlib.Path("/sys/class/net")
+
+
+def _read_operstate(channel: str, *, root: pathlib.Path = _NET_SYSFS_ROOT) -> str | None:
+    """`<root>/<channel>/operstate` を読む。python-can には依存しない。
+
+    `/sys` に実体が無い環境では読めない。**判定できないことを異常へ倒さず、
+    `None` で「分からない」を表す** (このリポジトリの他の「分からない」判定と
+    同じ方針。「判定できない」自体はログに出さない — 平常時のログを埋めないため)。
+    """
+    try:
+        # errors="replace": `UnicodeDecodeError` は `OSError` ではないので下の except
+        # では捕まらない。壊れた値を読んでも `== "down"` が偽になるだけで済ませ、
+        # 起動を巻き添えにしない
+        return (root / channel / "operstate").read_text(errors="replace").strip()
+    except OSError:
+        return None
+
+
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
     """1 本の CAN インタフェースを開く。開けなければ 1 行のメッセージで落とす。
 
-    down しているインタフェース (CANable が 1 本抜けている・`setup_can.sh` を
-    流していない) を開こうとすると python-can は `OSError [Errno 19]` を投げる。
+    **インタフェースが存在しないとき (CANable が 1 本抜けている) は python-can が
+    例外を投げる**ので下の `SystemExit` で止まる。一方**存在するが down のとき
+    (`setup_can.sh` を流していない) は例外を投げない**
+    (`docs/impl_plan.md` の「既知の制約: バス down 時の失敗が分かりにくい」)。
+    **起動は拒否しない** (`--strict` を通していない構成の逃げ道を潰さないため)。
+    代わりに operstate を見て down なら起動ログへ 1 行 ERROR を残す —
+    「立ち上がったが 1 通も読めていない」の原因をインタフェース名付きで名指しする。
+
     この呼び出しは `main()` の try の外にあるので、素通しすると生の traceback で
     落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、
     config 系のエラー (`_load_all_configs`) と同じく直し方まで書いて止める。
     """
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
+    # **`!= "up"` にしてはならない。** carrier を管理しないデバイス (`lo` /
+    # `tailscale0` など) は up でも `unknown` を返すので、up を条件にすると
+    # 「分からない」まで異常へ倒れる。拾いたいのは管理上 down だけで、
+    # `ip link set <dev> down` したデバイスは必ず `down` を返す (カーネルの
+    # `operstate_show()` が `!netif_running()` を無条件に `IF_OPER_DOWN` へ
+    # 上書きするため)。
+    # **実機の CANable2 (gs_usb) 4 本は定常状態で `up` を返す (2026-09-06 実測)。**
+    # **未確認なのは bus-off のときだけ** — カーネルの `can_bus_off()` は
+    # `netif_carrier_off()` を呼ぶので報告するドライバなら `down` に見えるが、
+    # gs_usb は bus-off 自体を報告しない (`docs/checks_and_health.md`) ので
+    # 落ちない公算が高い。落ちるなら、このメッセージの手順 (`setup_can.sh`) は
+    # bus-off に対しては的外れになる。
+    if _read_operstate(channel) == "down":
+        logger.error(
+            "CAN インタフェース '%s' は down です (起動は続けます)。"
+            " scripts/setup_can.sh を実行してください",
+            channel,
+        )
     try:
         return can.Bus(interface="socketcan", channel=channel)
     except (OSError, can.CanError) as exc:

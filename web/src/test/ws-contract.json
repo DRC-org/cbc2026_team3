@@ -316,6 +316,7 @@
       "robot": "main_hand",
       "running": false,
       "safety": {
+        "firmware_unconfirmed_motors": [],
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [
@@ -326,6 +327,7 @@
             "sync_violations": []
           }
         ],
+        "reenergizing": false,
         "refreshers_running": true,
         "sync_monitors": [
           {
@@ -577,6 +579,7 @@
       "robot": "main_hand",
       "running": false,
       "safety": {
+        "firmware_unconfirmed_motors": [],
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [
@@ -587,6 +590,7 @@
             "sync_violations": []
           }
         ],
+        "reenergizing": false,
         "refreshers_running": true,
         "sync_monitors": [
           {

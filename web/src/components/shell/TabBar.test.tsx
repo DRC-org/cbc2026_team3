@@ -62,6 +62,8 @@ function robot(over: Partial<RobotState> = {}): RobotState {
 const SAFETY: SafetyState = {
   sync_violations: [],
   unenergized_motors: [],
+  firmware_unconfirmed_motors: [],
+  reenergizing: false,
   loops_running: true,
   monitors_running: true,
   refreshers_running: true,

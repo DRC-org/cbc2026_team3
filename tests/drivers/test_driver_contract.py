@@ -137,3 +137,29 @@ class TestOriginCaptureCapability:
                 return [(can.Message(arbitration_id=1, data=bytes(8)), 0.0)]
 
         assert _HalfDeclared("x", 1).supports_origin_capture() is False
+
+
+class TestFirmwareConfirmedCapability:
+    """`INFO` (仕様書 §3.4) を送らないドライバは `firmware_confirmed()` が None のまま
+    (`is_energized()` と同じ「申告そのものを持たない」の表現)。
+
+    None を False へ倒すと、INFO を送らない 3 種の全モータが常時「未確認」として
+    `RobotServer._firmware_unconfirmed_motors` に載ってしまう。
+    """
+
+    def test_既定は_None(self) -> None:
+        assert _ProtocolOnlyDriver("x", 1).firmware_confirmed() is None
+
+    def test_m3508_は対象外(self) -> None:
+        assert M3508Driver("y_axis_r", can_id=1).firmware_confirmed() is None
+
+    def test_edulite_は対象外(self) -> None:
+        assert Edulite05Driver("rotate_r", can_id=0x11).firmware_confirmed() is None
+
+    def test_dm3520_は対象外(self) -> None:
+        driver = Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11)
+        assert driver.firmware_confirmed() is None
+
+    def test_generic_は自己申告の有無を返す(self) -> None:
+        """`GenericDriver` だけが INFO を送るので、ここだけ bool を返す。"""
+        assert GenericDriver("gripper", 0x40).firmware_confirmed() is False

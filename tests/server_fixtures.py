@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -34,7 +35,7 @@ from lib.health import HealthSnapshot
 from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
-from lib.server import RobotServer
+from lib.server import _FIRMWARE_INFO_GRACE_S, RobotServer
 from tests.fake_can import mock_can_manager
 
 #: 指差喚呼の既定定義。**項目が 1 つ以上あること自体に意味がある** ——
@@ -162,6 +163,48 @@ class ServerFixture:
         tasks = [task for task in self.server._reactivate_tasks if not task.done()]
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+
+    def expire_firmware_grace(self) -> None:
+        """起動猶予 (`_FIRMWARE_INFO_GRACE_S`) を実時間を待たずに過ぎさせる。
+
+        `INFO` は 1Hz なので、実時間でこの猶予を跨ぐとテストが数秒単位で重くなる。
+        `_server_started_at` を過去へ押し戻すだけで、判定対象そのもの
+        (`firmware_confirmed()`) には触れない。
+        """
+        self.server._server_started_at = time.time() - _FIRMWARE_INFO_GRACE_S - 0.1
+
+    async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
+        """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。
+
+        `asyncio.wait_for` ではなく `asyncio.wait` を使うのは、**このタスクは
+        キャンセルされて終わることがある**ため (緊急停止解除の
+        `_settle_pending_reenergize` が畳む)。`wait_for` だとその `CancelledError`
+        がテスト側へ伝播し、後始末として待っただけのテストが落ちる。
+        """
+        task = self.server._reenergize_tasks.get(robot_name)
+        if task is None or task.done():
+            return
+        done, _still_running = await asyncio.wait({task}, timeout=timeout)
+        assert done, f"再励磁タスクが {timeout}s 以内に終わっていない: robot={robot_name}"
+
+    def has_pending_reenergize(self, robot_name: str) -> bool:
+        """このロボット名ぶんの再励磁タスクが (実行中か完了済みかに関わらず) 存在するか。
+
+        入力検証 (未知のロボット名を弾く) が抜けていないかを見るテスト用。
+        `wait_reenergize` の「実行中か」判定 (`not task.done()`) だと、無効な
+        ロボット名で立てたタスクが検証をすり抜けて中で即座に例外落ちした場合に
+        `done()` が True になり「実行中でない」へ紛れて検証漏れを見逃す。
+        """
+        return robot_name in self.server._reenergize_tasks
+
+    def set_motor_check_task(self, task: asyncio.Task[None] | None) -> None:
+        """動作確認の実行中フラグ (`MotorCheckController.running`) を直接操作する。
+
+        `running` は実行タスクの生死で判定する。`start()` は環境ゲートとシーケンス
+        登録を要求するため、それらに関心の無いテスト (排他だけを見たいテスト) の
+        ために「今実行中」を直接作る口をここへ置く。
+        """
+        self.server._motor_check._task = task
 
     def break_command_handler(self, command: str, exc: Exception) -> None:
         """指定コマンドのハンドラを、必ず例外を投げるものへ差し替える。
@@ -507,3 +550,13 @@ async def collect_types(ws: Any, wanted: Iterable[str], *, tries: int = 60) -> l
         if msg.get("type") in wanted_set:
             found.append(msg)
     return found
+
+
+def seed_jitter_overrun(task: Any, *, count: int = 1, worst_s: float = 0.05) -> None:
+    """周期タスクの乱れカウンタへ直接値を据える (リセット配線だけを見たいテスト専用)。
+
+    実際に実周期を乱して検知させる経路は ``tests/test_periodic.py`` が単体で
+    尽くしている。ここで本物のタイミングを乱すと非決定性がテストへ持ち込まれる。
+    """
+    task._jitter_overrun_count = count
+    task._worst_jitter_s = worst_s

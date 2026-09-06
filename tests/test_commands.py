@@ -56,6 +56,7 @@ _EXPECTED_COMMANDS = {
     "sequence_jump",
     "motor_check_start",
     "motor_check_abort",
+    "reenergize_motors",
     "set_court",
     "checklist_set",
     "checklist_reset",
@@ -102,6 +103,8 @@ class TestRegistryCoverage:
             requires_dev_tools=False,
             blocked_during_manual=False,
             manual_deny_message=None,
+            blocked_during_reenergize=False,
+            reenergize_deny_message=None,
         )
         monkeypatch.setitem(COMMANDS, broken.name, broken)
 
@@ -139,6 +142,26 @@ class TestRegistryCoverage:
             else:
                 assert spec.manual_deny_message is None
 
+    def test_reenergize_gate_policy_is_declared_for_every_command(self) -> None:
+        for spec in COMMANDS.values():
+            if spec.blocked_during_reenergize:
+                assert spec.reenergize_deny_message
+            else:
+                assert spec.reenergize_deny_message is None
+
+    def test_sequence_commands_are_blocked_while_reenergizing(self) -> None:
+        """シーケンスの制御権を使う 3 つだけを塞ぐ。**塞ぎすぎない。**
+
+        再励磁は「フォルト前の現在角」を目標として書くので、在飛中に走った
+        `move_to` はその値で上書きされ `wait_reached` が永久に到達を観測しない。
+        一方 `sequence_stop` は退避の逃げ道なので通す —— 止める側の操作を
+        減らすだけになる (`blocked_during_manual` と同じ切り分け)。
+        `reenergize_motors` 自身が対象外なのは、二重投入をハンドラ側の
+        専用ゲートが理由文付きで返すため。
+        """
+        blocked = {name for name, spec in COMMANDS.items() if spec.blocked_during_reenergize}
+        assert blocked == {"sequence_start", "sequence_jump", "trigger"}
+
 
 class TestSpecValidation:
     def _spec(self, **overrides: object) -> CommandSpec:
@@ -151,6 +174,8 @@ class TestSpecValidation:
             "requires_dev_tools": False,
             "blocked_during_manual": False,
             "manual_deny_message": None,
+            "blocked_during_reenergize": False,
+            "reenergize_deny_message": None,
             "handler": "_cmd_dummy",
             "reject_channel": RejectChannel.COMMAND_REJECTED,
         }
@@ -186,6 +211,14 @@ class TestSpecValidation:
     def test_manual_ungated_command_must_not_carry_a_reason(self) -> None:
         with pytest.raises(ValueError):
             self._spec(manual_deny_message="使われない理由")
+
+    def test_reenergize_gated_command_requires_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(blocked_during_reenergize=True, reenergize_deny_message=None)
+
+    def test_reenergize_ungated_command_must_not_carry_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(reenergize_deny_message="使われない理由")
 
 
 class TestPhaseGate:
@@ -240,6 +273,8 @@ class TestEStopGate:
             "manual_move",
             "manual_set",
             "manual_jog",
+            # 緊急停止中に励磁してはならない (緊急停止の意味が消える)
+            "reenergize_motors",
         }
 
     @pytest.mark.parametrize(
@@ -301,10 +336,29 @@ class TestManualModeGate:
             # 動作確認の手動モードとの排他は `_motor_check_environment_deny()` が
             # 両ロボット横断で持つ (ここで重複させない)
             "motor_check_start",
+            # 手動はシーケンスからの退避路そのものなので、手動中に落ちた励磁を
+            # 手動のまま戻せないと退避路自体が詰む
+            "reenergize_motors",
         ],
     )
     def test_not_gated_by_manual_mode(self, command: str) -> None:
         assert COMMANDS[command].blocked_during_manual is False
+
+
+class TestReenergizeMotorsGate:
+    """励磁が落ちたモータを機体を止めずに戻す操作。CommandSpec が答えるのは
+    「フェーズ / 緊急停止 / 手動モード」の 3 軸だけで、動作確認との排他と
+    ロボット単位の in-flight ガードはハンドラ側 (`RobotServer._cmd_reenergize_motors`)
+    が持つため、ここでは対象外にする。
+    """
+
+    @pytest.mark.parametrize("phase", list(Phase))
+    def test_every_phase_is_allowed(self, phase: Phase) -> None:
+        assert phase_deny_reason("reenergize_motors", phase) is None
+
+    def test_denied_during_e_stop(self) -> None:
+        """緊急停止中に励磁してはならない (緊急停止の意味が消える)。"""
+        assert e_stop_deny_reason("reenergize_motors") is not None
 
 
 class TestManualCommandsAreNotPhaseGated:

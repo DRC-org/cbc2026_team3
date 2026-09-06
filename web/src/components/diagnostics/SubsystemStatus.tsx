@@ -1,15 +1,18 @@
-import { ChevronDown, ChevronRight, PackageX, ShieldAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, PackageX, ShieldAlert, ShieldQuestion } from "lucide-react";
 import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import { SensorSummary } from "@/components/diagnostics/SensorSummary";
 import type { SensorPayload } from "@/components/diagnostics/SensorSummary";
+import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   describeSafetyIssues,
   evaluateHealth,
+  firmwareUnconfirmedMotors,
+  isReenergizePending,
   readableHealth,
   workpieceRiskBuses,
 } from "@/lib/healthVerdict";
@@ -47,6 +50,14 @@ interface SubsystemStatusProps {
    * 同じ文字列を 2 度並べると、操縦者はどちらが最新か確かめる往復を強いられる。
    */
   showVerdict?: boolean;
+  /**
+   * 励磁が落ちたモータを戻す (`reenergize_motors`)。渡した画面だけボタンが出る。
+   * **可否の判定はここに持たせない** — 押せば送るだけで、拒否は
+   * サーバーが理由付きで返す (`MotorCheckController.deny_reason()` と同じ原則)。
+   * 渡さない画面 (Monitor) ではボタンごと出さない — この機体の操縦者画面が
+   * 別に居るので、そちらへ促す文言だけを `describeSafetyIssues` の hint が持つ。
+   */
+  onReenergize?: () => void;
 }
 
 /**
@@ -80,14 +91,62 @@ function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
 }
 
 /**
+ * 起動の猶予を過ぎても `INFO` を一度も受けていない自作モタドラの一覧。平常時 (0 件) は
+ * 何も出さない。
+ *
+ * **「異常」として赤くしない** —— `evaluateHealth` の判定 (`tone`) はここを経由しない。
+ * ここが空でないのは「焼き忘れ検出 (info_mismatch) が今は働いていない」という事実で、
+ * 機体そのものが壊れているとは限らない。
+ *
+ * **1 行にまとめず、モータごとに `<li>` を並べる** (`WorkpieceRiskNotice` と同じ形)。
+ * この状態が起きる最も現実的なきっかけは「1 枚の基板が丸ごと `INFO` を出していない」
+ * なので、電磁弁 6ch やサブハンドの自作モタドラが同時に並ぶ。`join(", ")` の
+ * 1 行では途中で切れ、操縦者は指差喚呼 (`firmware_match`) に答えられない。
+ */
+function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
+  if (motors.length === 0) return null;
+
+  return (
+    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1">
+      {motors.map((motor) => (
+        <li key={motor} className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Icon as={ShieldQuestion} className="shrink-0 text-info" />
+            <StatusBadge tone="info">版番号 未確認</StatusBadge>
+            <span className="min-w-0 truncate font-mono text-base-content/80">{motor}</span>
+          </span>
+          {/* 状態だけ出しても操縦者は次の一手を選べない。手当てまで書く。
+              **電源・CAN 配線を疑わせてはならない** —— サーバーは FEEDBACK が
+              届いているモータだけをここへ載せる (`_firmware_unconfirmed_motors`) ので、
+              配線を見ても必ず何も見つからない。基板が落ちている場合は
+              `evaluateHealth` が STALE として別に主張する */}
+          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+            FEEDBACK は届くのに INFO が来ません。ファームを焼き直して candump で確認してください
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
  * 安全機構の異常。平常時は 1 件も出ない。
  *
  * ラッチ中の軸は緊急停止を解除しても動かず、保護ループが死んでも WS は繋がったまま
  * モータ状態が届き続ける。どちらも「画面が正常に見えるのに機体は正常でない」型の異常で、
  * 自分から主張しない限り誰も気付けない。
  */
-function SafetyIssues({ safety }: { safety: SafetyPayload | undefined }) {
+function SafetyIssues({
+  safety,
+  onReenergize,
+}: {
+  safety: SafetyPayload | undefined;
+  onReenergize?: () => void;
+}) {
   const issues = describeSafetyIssues(safety);
+  // 在飛中かはサーバーが配る。押した記憶から組み立てない (拒否された押下まで
+  // 「処理中」に見える) し、`unenergized_motors` が消えるのを待つ必要も無い
+  const pending = isReenergizePending(safety);
   if (issues.length === 0) return null;
 
   return (
@@ -101,6 +160,18 @@ function SafetyIssues({ safety }: { safety: SafetyPayload | undefined }) {
           </span>
           {/* 状態だけ出しても操縦者は次の一手を選べない。復旧手順まで書く */}
           <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">{issue.hint}</span>
+          {/* 押せる場所は限定する — この異常が実際に出ていて、かつこの画面に
+              コールバックが渡されているとき (操縦者自身の画面) だけ */}
+          {issue.kind === "unenergized" && onReenergize ? (
+            <Button
+              tone="warn"
+              className="ml-[1.4rem] self-start"
+              onClick={onReenergize}
+              disabled={pending}
+            >
+              {pending ? "処理中…" : "再励磁"}
+            </Button>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -124,11 +195,13 @@ export function SubsystemStatus({
   tempThresholds = null,
   defaultOpen = false,
   showVerdict = true,
+  onReenergize,
 }: SubsystemStatusProps) {
   const verdict = evaluateHealth(health, safety, connected);
   // 内訳を並べる部品は「読めなかった」を表現できない。判定 (上) だけがそれを担う
   const readable = readableHealth(health);
   const riskyBuses = workpieceRiskBuses(health);
+  const unconfirmedMotors = firmwareUnconfirmedMotors(safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
   // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
@@ -136,7 +209,14 @@ export function SubsystemStatus({
   // 異常時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない。
   // ワーク落下の恐れも同格 —— `verdict.tone` はバスが復旧すれば平常に戻るが、
   // こちらは試合中ずっと自分から主張し続けるべき情報なので、判定 (tone) を
-  // 変えずにここへ OR で足す
+  // 変えずにここへ OR で足す。
+  //
+  // **版番号未確認 (`unconfirmedMotors`) はここに含めない。** `_info` は一度受ければ
+  // 二度と None へ戻らないラッチなので、猶予を過ぎても空でないのは大半が
+  // 「起動直後のわずかな遅れ」ではなく「その基板は焼き忘れ検出そのものが
+  // 効かない」という試合中ずっと変わらない状態になる。ワーク落下のように
+  // 試合中の 1 事象ではなく、しかも操縦者は試合中にこれを直せない —— 畳める
+  // ままにして、開いたときに見える情報として残す (`defaultOpen` の準備中は開く)
   const forcedOpen =
     verdict.tone === "error" || verdict.tone === "warning" || riskyBuses.length > 0;
   const open = !showVerdict || forcedOpen || manualOpen;
@@ -175,7 +255,8 @@ export function SubsystemStatus({
             </p>
           ) : null}
           <WorkpieceRiskNotice buses={riskyBuses} />
-          <SafetyIssues safety={safety} />
+          <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
+          <SafetyIssues safety={safety} onReenergize={onReenergize} />
           <HealthIndicator health={readable} />
           {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、
               後ろへ回すと本数によっては指差喚呼で見たい 1 行が畳まれた先に隠れる */}
