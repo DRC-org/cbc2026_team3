@@ -1091,7 +1091,8 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 受信の中断を跨いで折り返しを推定しない | `_can_trust_wrap` の窓の上限判定を外す / rpm による見積もりを外す（**2 つは別々のテストが受け持つ**） | `tests/drivers/test_m3508.py::TestWrapInferenceAcrossFeedbackGap::test_長い窓を跨いだ差分は折り返しを推定せず累積しない` / `::test_高速回転なら短い窓でも折り返しを推定しない` |
 | 再アンカーは黙って行われない | `health()` で `detail is not None` を warning 条件から外す（状態が OK のままだと画面はどこにも出さない） | `test_can_manager_health.py::TestReanchorSurfacesInHealth::test_再アンカーしたモータは詳細付きのWARNINGになる` |
 | 無励磁のまま取り残されたモータは画面に出る | `_safety_state` の `unenergized_motors` を空固定にする / `_unenergized_motors` の緊急停止ガードを外す / `is_energized() is False` を `not is_energized()` へ（不明を無励磁へ倒す） | `test_server_e_stop.py::TestUnenergizedMotorsAreVisible` / `web: healthVerdict.test.ts` |
-| `INFO` 未受信で焼き忘れ検出が沈黙していることが画面に出る | `GenericDriver.firmware_confirmed()` を常に `True` へ / `_firmware_unconfirmed_motors` の猶予判定を外す / `is False` を `is not True` へ（`INFO` を送らない M3508 等まで巻き込む）/ dry-run ガードを外す（机上で全モータが恒久的に「未確認」になる） | `tests/drivers/test_generic.py::TestFirmwareConfirmed` / `tests/drivers/test_driver_contract.py::TestFirmwareConfirmedCapability` / `test_server_firmware_confirmed.py` / `web: healthVerdict.test.ts::firmwareUnconfirmedMotors` |
+| `INFO` 未受信で焼き忘れ検出が沈黙していることが画面に出る | `GenericDriver.firmware_confirmed()` を常に `True` へ / `_firmware_unconfirmed_motors` の猶予判定を外す / `is False` を `is not True` へ（`INFO` を送らない M3508 等まで巻き込む）/ dry-run ガードを外す（机上で全モータが恒久的に「未確認」になる）/ STALE 除外を外す（落ちた基板にも「配線ではなくファームを疑え」と言う）/ `_handle_match_start` で `_server_started_at` を置き直す（試合開始のたびに報告が消える）/ `_FIRMWARE_INFO_GRACE_S` を 600.0 へ（機能自身が静かに無効になる） | `tests/drivers/test_generic.py::TestFirmwareConfirmed` / `tests/drivers/test_driver_contract.py::TestFirmwareConfirmedCapability` / `test_server_firmware_confirmed.py`（順に `TestFirmwareUnconfirmedMotorsAreVisible` / `TestStaleMotorsAreExcluded` / `TestGraceIsAnchoredToStartupOnly` / `test_猶予は_INFO_数周期ぶんに留める`）|
+| 「版番号 未確認」の欄が読めなくても画面が落ちない | `healthVerdict.ts` の `firmwareUnconfirmedMotors` のガード 2 行を `?? []` へ（**欄はあるが配列でない**ときだけ挙動が変わり、`.map` の `TypeError` で `SubsystemStatus` 以下が丸ごとアンマウントする）/ `protocol.ts` の `safetyShapeErrors` の検査キーから `firmware_unconfirmed_motors` を外す（欠落が黙って `undefined` になる） | `web: healthVerdict.test.ts::firmwareUnconfirmedMotors::欄が配列でなくても投げず空を返す` / `web: protocol.test.ts` の `safety` 欠落 each / `web: wsContract.test.ts` |
 | bus-off から自動復帰できる設定で立ち上がる | `can_config.DEFAULT_RESTART_MS` を 0 にする | `test_can_config.py::test_restart_ms_defaults_to_a_nonzero_value` |
 | 送信が滞留したバスだけを復旧する | `can_watchdog.sh` の滞留判定から backlog 条件を落とす（平常時のバスを落とす）/ TX packets の比較を落とす（連続送信中のバスを落とす） | `test_can_watchdog.py::TestStallDetection::test_idle_bus_is_never_recovered` / `::test_busy_bus_making_progress_is_not_recovered` |
 | 復旧しないバスで down/up を回し続けない | `can_watchdog.sh` の `recover()` から最短間隔の `return` を外す | `test_can_watchdog.py::TestRecoveryRateLimit::test_repeated_stall_recovers_only_once_within_the_interval` |
@@ -5813,9 +5814,23 @@ FAULT でも STALE でもない**第 3 の状態**を足した:
   `INFO` は励磁状態と無関係に送られ続けるので、起点はサーバー起動 1 回で足りる）を
   過ぎても `firmware_confirmed() is False` のモータを拾い、`state.safety` へ
   `unenergized_motors` と並べて `firmware_unconfirmed_motors` として配信する
+- **フィードバックが途絶えている（STALE）モータは対象外。** 基板が丸ごと落ちて
+  いれば `INFO` も当然来ないが、それは `CANManager.health()` が全チャンネルを
+  STALE に倒し、UI の `evaluateHealth` が `要確認 N 件`（warning）として診断ツリーを
+  **強制展開**する経路が既にある。ここでも言えば同じ事実を 2 度描くことになり、
+  しかも**手当てが逆になる** —— この報告が残したいのは「`FEEDBACK` は 10ms で
+  届き続けているのに `INFO` だけが 1 通も出ない」ケースなので、電源・CAN 配線を
+  疑っても必ず何も見つからない（配線が正常だから `FEEDBACK` が来ている）。判定は
+  既存の `FeedbackFreshness` に `HealthThresholds.feedback_timeout_ms` を渡す
+  1 本だけで、ここに別名のしきい値を置かない
 - **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないため、猶予を
   過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
   なる（`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由）
+- **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
+  （仕様書 §5.2）が、現状 `main.py` はセンサを `expected_firmware` なしに生成する
+  ので照合対象そのものが無い。`sensors:` に `expected_firmware` を書けるように
+  する日には `ctx.can_manager.sensors` も見ること（`_firmware_unconfirmed_motors`
+  の docstring に同じ断りを置いてある）
 - UI 側 (`web/src/lib/healthVerdict.ts` の `firmwareUnconfirmedMotors`) は
   `evaluateHealth` の判定 (tone) を経由しない —— `workpieceRiskBuses` と同じ位置付け。
   **「壊れている」ではなく「確認できていない」なので赤くしない**（`StatusBadge
@@ -5825,6 +5840,12 @@ FAULT でも STALE でもない**第 3 の状態**を足した:
   変わらない状態になる。ワーク落下（`workpieceRiskBuses`）のような 1 事象ではなく、
   しかも操縦者は試合中にこれを直せないので、畳めるままにして開いたときに見える
   情報として残した
+- UI は**モータごとに 1 行**並べる（`WorkpieceRiskNotice` と同じ形）。この状態が
+  起きる最も現実的なきっかけは「1 枚の基板が丸ごと `INFO` を出していない」なので、
+  電磁弁 6ch やサブハンドの自作モタドラ 9 台が同時に並ぶ。1 行へ `join(", ")` すると
+  `truncate` で途中から読めず、操縦者は指差喚呼（`firmware_match`）に答えられない
+- 手当ての文面は**ファームの焼き直しと `candump`**。「電源・CAN 配線を確認」は
+  この機能の主対象シナリオでは必ず空振りになる（上の STALE 除外の項）
 
 ## 未解決の課題
 
