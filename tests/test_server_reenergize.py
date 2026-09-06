@@ -18,8 +18,8 @@ CommandSpec のゲート宣言 (フェーズ / 緊急停止 / 手動モード) �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import struct
-import threading
 import time
 from typing import ClassVar
 from unittest.mock import AsyncMock
@@ -828,33 +828,39 @@ class TestReactivationSettlesPendingReenergize:
 
 
 class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
-    """**畳めない再励磁タスクがいても、緊急停止解除は先へ進む。**
+    """**畳めない (キャンセルに応じない) 旧再励磁タスクがいても、
+    緊急停止解除は先へ進む。**
 
-    かつては素の `await pending` で、根拠を「古いタスク自身が有界だから」に
-    置いていた。有界なのは `_wait_fresh_feedback` の deadline だけで、
-    `CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
-    無しで待つ。SocketCAN の送信キューが詰まっていれば `bus.send` はブロック
-    しうる —— それは `cbc-can-watchdog` が bus-off を疑っている状況、つまり
-    **まさに緊急停止を押した状況**で、そこで解除が永久に進まないことになる。
+    `_settle_pending_reenergize` の上限 (`_PENDING_TASK_CANCEL_TIMEOUT_S`) を
+    無くすと、キャンセルへ応じない旧タスクを無期限に待ち、解除そのものが
+    返らなくなる。旧タスクは `CancelledError` を握り潰して居座り続ける
+    コルーチンで再現する —— 上限がここで本当に効いているかを確かめる。
 
-    キャンセルだけでは足りないので上限も要る。ここではエグゼキュータへ入った
-    ブロッキング呼び出しを本物のスレッドで作る —— `Task.cancel()` はそれを
-    止められず、完了するまで `CancelledError` が投げ込まれない (実機の
-    `bus.send` とまったく同じ性質)。
+    **`run_in_executor` でスレッドに入ったブロッキング呼び出し (実機の
+    `bus.send`) はこの手本にならない。** 待っている側の Task は `cancel()`
+    した瞬間に (裏のスレッドの完了を待たず) `CancelledError` を受け取るので、
+    `asyncio.wait` はタイムアウトへ一度も到達しない (実測: 経過 0.000s)。
+    上限が効くのは、コルーチンが自ら `CancelledError` を握り潰して `await`
+    へ戻り続ける場合だけである (`tests/test_server_e_stop.py::
+    TestReleaseProceedsWhenOldReactivateRefusesToCancel` と同じ形。あちらが
+    `_settle_pending_reactivate` 側の手本)。
     """
 
-    async def test_release_proceeds_when_the_old_task_cannot_be_cancelled(self) -> None:
+    async def test_release_proceeds_when_the_old_task_refuses_to_cancel(self) -> None:
         fx, _dropped = _dropped_fixture()
-        release = threading.Event()
+        release_first_call = asyncio.Event()
         calls: list[str] = []
 
-        async def _activate(**_kwargs: object) -> list[str]:
+        async def _stubborn_activate(**_kwargs: object) -> list[str]:
             calls.append("main_hand")
             if len(calls) == 1:
-                await asyncio.get_running_loop().run_in_executor(None, release.wait)
+                # 1 本目だけ、キャンセルされても飲み込んで居座り続ける
+                while not release_first_call.is_set():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.sleep(0.01)
             return []
 
-        fx.can_manager("main_hand").activate_motors = _activate
+        fx.can_manager("main_hand").activate_motors = _stubborn_activate
         fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
 
         try:
@@ -864,13 +870,16 @@ class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
 
             await fx.command({"type": "e_stop"})
             await fx.command({"type": "e_stop_release"})
-            # 上限を無くすとここで永久に返らない (タイムアウトして失敗する)
+            # 上限が効いていれば、畳めなくても解除の励磁が先へ進み
+            # main_hand への 2 回目の activate_motors 呼び出しが現れる。
+            # 上限を無くすと 1 本目を待ち続けてここで返らない
             await fx.wait_reactivation(timeout=3.0)
 
             assert calls == ["main_hand", "main_hand"], "解除の励磁が先へ進んでいない"
             fx.can_manager("sub_hand").activate_motors.assert_awaited_once()
         finally:
-            release.set()
+            # 後始末: 居座っている 1 本目を必ず解放する
+            release_first_call.set()
             await fx.wait_reenergize("main_hand")
 
 

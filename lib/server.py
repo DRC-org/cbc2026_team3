@@ -84,9 +84,15 @@ _FIRMWARE_INFO_GRACE_S = 3.0
 #: 緊急停止解除が畳む場合 (`_settle_pending_reactivate`) の双方で使う ——
 #: どちらも「古いタスクをキャンセルしてから有界に待ち、待ちきれなくても
 #: ログを残して先へ進む」という同じ形なので定数を共有する。
-#: **キャンセルが効いていれば 1 周期で終わる値である** —— ここまで掛かるのは
-#: エグゼキュータへ入った `bus.send` のように、キャンセルしても止まらない
-#: ブロッキング呼び出しに入っているときだけ。詳細は `_settle_pending_reenergize`。
+#: **`run_in_executor` に入った `bus.send` はこの上限を要らない** —— 待っている
+#: 側の Task は `cancel()` した瞬間に (裏のスレッドの完了を待たず)
+#: `CancelledError` を受け取る (実測: 経過 0.000s。スレッド自体は最後まで走り
+#: 続けるが、それは Task の完了とは無関係)。この上限が効くのは、畳もうとしている
+#: コルーチンが自ら `CancelledError` を握り潰して `await` へ戻り続ける場合だけ
+#: (`tests/test_server_e_stop.py::TestReleaseProceedsWhenOldReactivateRefusesToCancel`
+#: が実際にその形で上限を確かめている)。現行コードにそのような箇所は無いが、
+#: 「畳む」側が待ちきれなかったときに必ず先へ進めるための保険として残す。
+#: 詳細は `_settle_pending_reenergize`。
 _PENDING_TASK_CANCEL_TIMEOUT_S = 0.5
 
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
@@ -1733,9 +1739,15 @@ class RobotServer:
         状況、つまり **まさに緊急停止を押した状況**である。素の await のままだと
         「緊急停止解除の再励磁が無期限に進まない」経路が理屈上残る。
 
-        **キャンセルだけでは足りない。** エグゼキュータのスレッドへ入った
-        `bus.send` は `Task.cancel()` では止まらず、完了するまで
-        `CancelledError` が投げ込まれない。上限を必ず添える。
+        **上限も添える。** `bus.send` 自体は `Task.cancel()` では止まらないが
+        (エグゼキュータのスレッドはそのまま走り続ける)、**待っている側の
+        Task はキャンセルした瞬間に `CancelledError` を受け取り、`asyncio.wait`
+        はスレッドの完了を待たず即座に返る** (実測: 経過 0.000s。詳細は
+        `_PENDING_TASK_CANCEL_TIMEOUT_S` のコメント)。つまりこの経路自体は
+        上限が無くても畳める。上限は、畳もうとしているコルーチンが自ら
+        `CancelledError` を握り潰して `await` へ戻り続ける場合 (現行コードには
+        無いが `_settle_pending_reactivate` が同じ形で備えている) の保険として
+        添える。
 
         **待ちきれなくても先へ進む。** この直後に `only=None` で全モータを
         励磁し直すので、キャンセルで中途半端に残った状態はそこで上書きされる。
