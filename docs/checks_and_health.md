@@ -450,6 +450,33 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 **まず励磁状態（`state.safety.unenergized_motors`）を見る**。CAN のフィードバックは
 無励磁でも正常に届くので、鮮度（STALE）からもヘルスからも区別が付かない。
 
+### 「焼き忘れ検出が働いていない」もヘルスに現れない
+
+自作モタドラ（`GenericDriver`）の焼き忘れ検出（`info_mismatch`、§3.4）は `INFO` を
+1 通でも受けて初めて働く。ところが `INFO` は送信バッファの都合だけで 1 通も出ないことが
+ある（`CLAUDE.md` 「送信バッファの本数は 3 枚で違う」節。DC 基板は mailbox が 1 本しか
+無く、1 反復で全 ch ぶんまとめて送るコードでは `INFO` が丸ごと落ちる）。PC 側は `INFO`
+の未受信を FAULT にしない（それが正しい —— 未受信を不一致にすると起動のたびに全サーボが
+FAULT になる）ので、この壊れ方は上の「励磁されていない」と同じ形で **ヘルスにも
+`is_fault()` にも一切現れない**。
+
+そこで `MotorDriver.firmware_confirmed()`（`INFO` を送らないドライバ = M3508 /
+EDULITE 05 / DM3520 は `None`）を `RobotServer._firmware_unconfirmed_motors()` が読み、
+起動から `_FIRMWARE_INFO_GRACE_S`（3 秒。`INFO` は 1Hz なので数秒で埋まるのが正常）を
+過ぎても未受信のモータを `state.safety.firmware_unconfirmed_motors` として配信する。
+診断ツリーには青チップ（`FirmwareUnconfirmedNotice`）で出るだけで、`evaluateHealth` の
+判定（tone）は動かさない —— **これは「壊れている」ではなく「焼き忘れがあっても
+気付けない状態」の報告**であり、機体そのものは正常なことが多い。
+
+**拾うのはフィードバックが鮮度内（`feedback_timeout_ms`）で届いているモータだけ。**
+基板が丸ごと落ちていれば `INFO` も当然来ないが、それは全チャンネルの STALE として
+`evaluateHealth` が既に `要確認 N 件`（warning）で主張し、診断ツリーを強制展開する。
+ここでも言えば同じ事実を 2 度描くことになり、しかも**手当てが逆になる** —— この報告が
+残したいのは「`FEEDBACK` は 10ms で届き続けているのに `INFO` だけが 1 通も出ない」
+ケースなので、電源・CAN 配線を疑っても必ず何も見つからない（配線が正常だから
+`FEEDBACK` が来ている）。直すべきはファーム側の `INFO` 送信経路で、確かめる手段は
+`candump`。UI の文面もそう案内する。
+
 ---
 
 ## ② 統合動作確認 — 動くか
@@ -908,7 +935,7 @@ USB 負荷やサーマルスロットルで乱れても、かつては何も出�
 | `suction_hold` / `suction_release` | 吸着の成否を測るセンサが無い |
 | `origin_sensor_react` | 未配線・極性違いのセンサは STALE にならず「接触なし」を報告し続ける（触れてみる以外に検出手段が無い）。触れた結果は `state.sensors` として画面に出る |
 | `rotate_holds` / `sub_lift_holds` | 無励磁で自重に負けるかは機構の性質で、CAN 越しには何も現れない（`rotate` は `SET_ZERO` の数百 ms が無励磁なので、回るぶんがそのまま原点のずれになる） |
-| `firmware_match` | 版の不一致は CAN 越しには「応答しない」としか見えない |
+| `firmware_match` | 版の不一致は CAN 越しには「応答しない」としか見えない。**照合そのものが働いていない**（`INFO` 未受信）状態も同じチェックで見る —— 診断ツリーの「版番号 未確認」チップが残っていないことを合わせて確かめる（→ ①の「『焼き忘れ検出が働いていない』もヘルスに現れない」節） |
 
 **②から外れたものが④で埋まっていることは `tests/test_robot_sequences.py` が固定する。**
 （`test_checklist_covers_what_cannot_be_judged_automatically`）

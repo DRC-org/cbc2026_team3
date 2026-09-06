@@ -70,6 +70,11 @@ _TUNING_CAPTURE_BACKLOG = 8
 #: DM3520 の再送は 20Hz (50ms) なので、その 10 倍を取れば偽報告は出ない。
 _ENERGIZE_GRACE_S = 0.5
 
+#: サーバー起動から、自作モタドラの `INFO` 未受信を「未確認」として報告し始めるまでの
+#: 猶予。`INFO` は 1Hz (仕様書 §3.4) なので、起動直後の空白は正常。位相のずれで
+#: 最悪 1 周期分待たされてもなお埋まるよう、余裕を持って 3 秒 (3 周期分) を取る。
+_FIRMWARE_INFO_GRACE_S = 3.0
+
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
 
@@ -183,6 +188,11 @@ class RobotServer:
         # enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓があり、
         # そこを無条件に異常とすると解除のたびに偽の警告が 1 回出るため
         self._energize_expected_since: float | None = None
+        # サーバー起動時刻。`INFO` 未受信の猶予 (`_FIRMWARE_INFO_GRACE_S`) の起点で、
+        # `_energize_expected_since` と違って緊急停止のたびには置き直さない ——
+        # `INFO` は自作モタドラが励磁状態と無関係に 1Hz で送り続けるので、猶予は
+        # 起動 1 回だけで足りる (置き直すと緊急停止のたびに検出が遅れる)
+        self._server_started_at: float | None = None
         # 直近の有効化で励磁できなかったモータ (ロボット名 -> モータ名)。
         # 送信失敗もフィードバック待ちの失敗もここへ集約し、`safety` に載せて配信する。
         # **緊急停止で消さない。** 停止中に報告を止めるのは `_unenergized_motors` の
@@ -361,6 +371,7 @@ class RobotServer:
         # `server.start()` を呼ぶので、この時点以降は全モータが励磁されているのが
         # 正しい状態になる。起動時に励磁できなかったモータも同じ経路で画面に出す
         self._energize_expected_since = time.time()
+        self._server_started_at = time.time()
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
         # 各ロボットのシーケンス常駐ループを起動。停止/ジャンプで再起動可能な
         # 永続タスクとして保持し、shutdown でキャンセルする。
@@ -1298,6 +1309,7 @@ class RobotServer:
         return {
             "sync_violations": sorted(violations),
             "unenergized_motors": self._unenergized_motors(robot_name),
+            "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
             "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
             "refreshers_running": all(r.is_running for r in ctx.target_refreshers),
@@ -1360,6 +1372,57 @@ class RobotServer:
         # 「無励磁と分かっている」側に入らない)
         names.update(self._inactive_motors.get(robot_name, ()))
         return sorted(names)
+
+    def _firmware_unconfirmed_motors(self, robot_name: str) -> list[str]:
+        """起動の猶予を過ぎても自己申告 (`INFO`) を一度も受けていない自作モタドラ。
+
+        **これは「異常」ではなく「焼き忘れ検出が働いていない」ことの報告である。**
+        `INFO` の未受信は FAULT にしない (送信バッファの都合でも起きるため。
+        CLAUDE.md 「送信バッファの本数は 3 枚で違う」節) が、その間は
+        `GenericDriver.info_mismatch` による焼き忘れ検出も一緒に働かなくなる。
+        黙って無効になると誰も気付けないので、ここで別の状態として拾う。
+
+        `INFO` を送らないドライバ (`firmware_confirmed()` が None) は対象外 ——
+        M3508 / EDULITE 05 / DM3520 を混ぜると全モータが常時この状態になる。
+
+        **フィードバックが途絶えている (STALE) モータも対象外。** 基板が丸ごと
+        落ちていれば `INFO` も当然来ないが、それは `CANManager.health()` が全
+        チャンネルを STALE に倒して `evaluateHealth` が warning として大声で言い、
+        診断ツリーを強制展開する経路が既にある。ここでも言うと同じ事実を 2 度
+        描くことになり、しかも**この報告の手当ては STALE とは別物になる** ——
+        残したいのは「`FEEDBACK` は 10ms で届き続けているのに `INFO` だけが
+        1 通も出ない」という、CLAUDE.md 「送信バッファの本数は 3 枚で違う」節が
+        書く壊れ方だけである。そこで電源・CAN 配線を疑っても必ず何も見つからない
+        (配線が正常だから `FEEDBACK` が来ている)。鮮度のしきい値は
+        `HealthThresholds` から来た 1 つだけを使い、ここに別名の値を置かない。
+
+        **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないので、猶予を
+        過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
+        なる (`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由)。
+
+        **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
+        (仕様書 §5.2) が、現状 `main.py` はセンサを `expected_firmware` なしに
+        生成するので照合対象そのものが無い。`sensors:` に `expected_firmware` を
+        書けるようにする日には、ここも `ctx.can_manager.sensors` を見ること。
+        """
+        if self._dry_run:
+            return []
+
+        since = self._server_started_at
+        if since is None or time.time() - since < _FIRMWARE_INFO_GRACE_S:
+            return []
+
+        ctx = self._robots[robot_name]
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        # 1 周期に 1 回だけ取る (モータごとに取り直すと同じ配信の中で基準時刻がずれる)
+        now = freshness.now()
+        return sorted(
+            motor_name
+            for motor_name, motor in ctx.can_manager.motors.items()
+            if motor.firmware_confirmed() is False and not freshness.is_stale(motor_name, now)
+        )
 
     async def _reactivate_motors(self) -> None:
         """緊急停止解除後にモータの励磁を戻す。

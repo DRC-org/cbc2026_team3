@@ -131,6 +131,20 @@ export function workpieceRiskBuses(health: HealthPayload | undefined): BusHealth
 }
 
 /**
+ * 起動の猶予を過ぎても自己申告 (`INFO`) を一度も受けていない自作モタドラ。平常時は空配列。
+ *
+ * **これは「壊れている」ではない。** `INFO` の未受信は FAULT にしない (送信バッファの
+ * 都合でも起きるため)。ここが空でなくても焼き忘れ検出 (`info_mismatch`) が沈黙して
+ * いるだけで、機体そのものは正常な場合がある —— `describeSafetyIssues` には含めず、
+ * `evaluateHealth` の判定 (`tone`) も動かさない (`workpieceRiskBuses` と同じ位置付け)。
+ */
+export function firmwareUnconfirmedMotors(safety: SafetyPayload | undefined): string[] {
+  if (!safety || safety === MALFORMED) return [];
+  if (safetyShapeErrors(safety).length > 0) return [];
+  return safety.firmware_unconfirmed_motors;
+}
+
+/**
  * 安全機構を判定できなかったことを、異常 1 件として出す。
  *
  * 「読めなかったから何も出さない」は最悪の選択肢になる —— 同期ずれラッチも

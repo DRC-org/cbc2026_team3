@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable, Iterable
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -34,7 +35,7 @@ from lib.health import HealthSnapshot
 from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
-from lib.server import RobotServer
+from lib.server import _FIRMWARE_INFO_GRACE_S, RobotServer
 from tests.fake_can import mock_can_manager
 
 #: 指差喚呼の既定定義。**項目が 1 つ以上あること自体に意味がある** ——
@@ -162,6 +163,15 @@ class ServerFixture:
         tasks = [task for task in self.server._reactivate_tasks if not task.done()]
         if tasks:
             await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+
+    def expire_firmware_grace(self) -> None:
+        """起動猶予 (`_FIRMWARE_INFO_GRACE_S`) を実時間を待たずに過ぎさせる。
+
+        `INFO` は 1Hz なので、実時間でこの猶予を跨ぐとテストが数秒単位で重くなる。
+        `_server_started_at` を過去へ押し戻すだけで、判定対象そのもの
+        (`firmware_confirmed()`) には触れない。
+        """
+        self.server._server_started_at = time.time() - _FIRMWARE_INFO_GRACE_S - 0.1
 
     def break_command_handler(self, command: str, exc: Exception) -> None:
         """指定コマンドのハンドラを、必ず例外を投げるものへ差し替える。

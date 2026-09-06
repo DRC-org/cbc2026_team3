@@ -575,6 +575,15 @@ export interface SafetyState {
    * 励磁状態を報告しないドライバ (自作モタドラ・C620) は最初から対象外。
    */
   unenergized_motors: string[];
+  /**
+   * 起動の猶予を過ぎても自己申告 (`INFO`) を一度も受けていない自作モタドラ。
+   *
+   * **これは「壊れている」ではなく「焼き忘れ検出 (`info_mismatch`) が働いていない」の
+   * 報告。** `INFO` は送信バッファの都合でも 1 通も出ないことがあり (CLAUDE.md
+   * 「送信バッファの本数は 3 枚で違う」節)、その間はファーム版・サーボ可動レンジの
+   * 照合が一緒に沈黙する。`evaluateHealth()` の判定 (tone) はここでは動かさない。
+   */
+  firmware_unconfirmed_motors: string[];
   loops_running: boolean;
   monitors_running: boolean;
   refreshers_running: boolean;
@@ -609,7 +618,7 @@ export function safetyShapeErrors(value: unknown): string[] {
   if (!isObject(value)) return ["safety"];
 
   const broken: string[] = [];
-  for (const key of ["sync_violations", "unenergized_motors"]) {
+  for (const key of ["sync_violations", "unenergized_motors", "firmware_unconfirmed_motors"]) {
     if (!isStringArray(value[key])) broken.push(key);
   }
   for (const key of ["loops_running", "monitors_running", "refreshers_running"]) {
