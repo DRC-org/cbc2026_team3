@@ -1676,6 +1676,13 @@ class RobotServer:
                 ctx.manual.reset_axes_for_motors(dropped)
 
             await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
+            # 猶予の起点を置き直す (`_reactivate_motors` と同じ扱い)。enable が
+            # 次のフィードバックへ反映されるまでの 1 周期 (実測 ~50ms) は
+            # `is_energized()` が古い値のままなので、置き直さないと成功直後の
+            # `safety.unenergized_motors` に対象が残り、画面が一瞬「直っていない」
+            # と言う。失敗したモータは `_inactive_motors` に残るので、猶予が
+            # 明けたところで改めて出る
+            self._energize_expected_since = time.time()
         except Exception:
             logger.exception("再励磁処理で予期しない例外: robot=%s", robot_name)
             return

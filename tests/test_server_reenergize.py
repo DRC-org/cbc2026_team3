@@ -38,6 +38,7 @@ from lib.manual import ManualController
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
+from lib.server import _ENERGIZE_GRACE_S
 from tests.fake_can import direct_runner, mock_bus, mock_can_manager, mock_motor, set_motors
 from tests.feedback_frames import feed_edulite
 from tests.server_fixtures import RecordingClient, ServerFixture
@@ -278,11 +279,18 @@ class TestFailureIsReported:
         # 空を返すので、実際にアプリを起動させる
         app = fx.create_app()
         async with TestClient(TestServer(app)):
-            # 起動直後の猶予 (_ENERGIZE_GRACE_S = 0.5s) をやり過ごす
-            await asyncio.sleep(0.6)
+            # 起動直後の猶予 (_ENERGIZE_GRACE_S) をやり過ごす
+            await asyncio.sleep(_ENERGIZE_GRACE_S + 0.1)
             await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
             await fx.wait_reenergize("main_hand")
 
+            # **成功直後の 1 周期は何も出さない。** 再励磁も猶予の起点を置き直す
+            # ので (`_reactivate_motors` と対称)、enable が次のフィードバックへ
+            # 反映されるまでの窓に「直っていない」と言わない。置き直しを外すと
+            # ここが ["m1"] になる
+            assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == []
+
+            await asyncio.sleep(_ENERGIZE_GRACE_S + 0.1)
             assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["m1"]
             # 巻き込んでいない側は空のまま
             assert fx.state_message("sub_hand")["safety"]["unenergized_motors"] == []
@@ -336,9 +344,11 @@ class TestFailureIsReported:
 
         app = fx.create_app()
         async with TestClient(TestServer(app)):
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(_ENERGIZE_GRACE_S + 0.1)
             await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
             await fx.wait_reenergize("main_hand")
+            # 再励磁は猶予の起点を置き直すので、報告が出るのはその後
+            await asyncio.sleep(_ENERGIZE_GRACE_S + 0.1)
 
             assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == [
                 "rotate_l",
