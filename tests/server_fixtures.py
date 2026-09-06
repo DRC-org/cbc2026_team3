@@ -164,10 +164,18 @@ class ServerFixture:
             await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
 
     async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
-        """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。"""
+        """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。
+
+        `asyncio.wait_for` ではなく `asyncio.wait` を使うのは、**このタスクは
+        キャンセルされて終わることがある**ため (緊急停止解除の
+        `_settle_pending_reenergize` が畳む)。`wait_for` だとその `CancelledError`
+        がテスト側へ伝播し、後始末として待っただけのテストが落ちる。
+        """
         task = self.server._reenergize_tasks.get(robot_name)
-        if task is not None and not task.done():
-            await asyncio.wait_for(task, timeout=timeout)
+        if task is None or task.done():
+            return
+        done, _still_running = await asyncio.wait({task}, timeout=timeout)
+        assert done, f"再励磁タスクが {timeout}s 以内に終わっていない: robot={robot_name}"
 
     def has_pending_reenergize(self, robot_name: str) -> bool:
         """このロボット名ぶんの再励磁タスクが (実行中か完了済みかに関わらず) 存在するか。

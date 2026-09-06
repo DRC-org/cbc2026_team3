@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import threading
 import time
 from typing import ClassVar
 from unittest.mock import AsyncMock
@@ -737,10 +738,10 @@ class TestPairedAxisIsExpandedToPartner:
         assert can_manager.activate_motors.await_args.kwargs["only"] == set()
 
 
-class TestReactivationWaitsForPendingReenergize:
+class TestReactivationSettlesPendingReenergize:
     """逆方向の排他: 緊急停止解除の再励磁 (`_reactivate_motors`) は、同じロボットの
-    `reenergize_motors` が in-flight ならその完了を待ってから自分の
-    `activate_motors` を呼ぶ (敵対的レビュー指摘)。
+    `reenergize_motors` が in-flight なら**畳んでから**自分の `activate_motors`
+    を呼ぶ (敵対的レビュー指摘)。
 
     両者が同じロボットへ並走すると、片方の `_wait_fresh_feedback` が送る
     プローブ (`feedback_probe_message()` = disable) が、もう片方が enable した
@@ -752,16 +753,24 @@ class TestReactivationWaitsForPendingReenergize:
     (`_cmd_e_stop_release` に手を入れていないことは他のテストが守る)。
     """
 
-    async def test_reactivate_activate_motors_waits_for_pending_reenergize(self) -> None:
-        fx = _build_fixture()
+    async def test_reactivate_activate_motors_never_overlaps_the_pending_one(self) -> None:
+        """並走しないこと。**解放を待たずに畳めることまで含めて見る。**
+
+        `reenergize_gate` は最後まで set しない —— キャンセルが効いていれば
+        `finally` を通って降りるので、それでも順序は成立する。畳む処理を
+        丸ごと消すと `reactivate` が先に走り、この順序が崩れる。
+        """
+        fx, _dropped = _dropped_fixture()
         order: list[str] = []
         reenergize_gate = asyncio.Event()
 
         async def _activate(**_kwargs: object) -> list[str]:
             if not order:
                 order.append("reenergize_start")
-                await reenergize_gate.wait()
-                order.append("reenergize_done")
+                try:
+                    await reenergize_gate.wait()
+                finally:
+                    order.append("reenergize_done")
             else:
                 order.append("reactivate")
             return []
@@ -775,17 +784,60 @@ class TestReactivationWaitsForPendingReenergize:
 
         await fx.command({"type": "e_stop"})
         await fx.command({"type": "e_stop_release"})
-        await asyncio.sleep(0)
-        # 解除は受理されているが、main_hand の再励磁がまだ処理中なので
-        # reactivate 側の activate_motors はまだ呼ばれていない
+        # 解除の受理そのものは再励磁を待たない
         assert not fx.server._e_stop_active
-        assert order == ["reenergize_start"]
 
-        reenergize_gate.set()
-        await fx.wait_reenergize("main_hand")
         await fx.wait_reactivation()
+        await fx.wait_reenergize("main_hand")
 
         assert order == ["reenergize_start", "reenergize_done", "reactivate"]
+
+
+class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
+    """**畳めない再励磁タスクがいても、緊急停止解除は先へ進む。**
+
+    かつては素の `await pending` で、根拠を「古いタスク自身が有界だから」に
+    置いていた。有界なのは `_wait_fresh_feedback` の deadline だけで、
+    `CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
+    無しで待つ。SocketCAN の送信キューが詰まっていれば `bus.send` はブロック
+    しうる —— それは `cbc-can-watchdog` が bus-off を疑っている状況、つまり
+    **まさに緊急停止を押した状況**で、そこで解除が永久に進まないことになる。
+
+    キャンセルだけでは足りないので上限も要る。ここではエグゼキュータへ入った
+    ブロッキング呼び出しを本物のスレッドで作る —— `Task.cancel()` はそれを
+    止められず、完了するまで `CancelledError` が投げ込まれない (実機の
+    `bus.send` とまったく同じ性質)。
+    """
+
+    async def test_release_proceeds_when_the_old_task_cannot_be_cancelled(self) -> None:
+        fx, _dropped = _dropped_fixture()
+        release = threading.Event()
+        calls: list[str] = []
+
+        async def _activate(**_kwargs: object) -> list[str]:
+            calls.append("main_hand")
+            if len(calls) == 1:
+                await asyncio.get_running_loop().run_in_executor(None, release.wait)
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _activate
+        fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
+
+        try:
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await asyncio.sleep(0)
+            assert calls == ["main_hand"]
+
+            await fx.command({"type": "e_stop"})
+            await fx.command({"type": "e_stop_release"})
+            # 上限を無くすとここで永久に返らない (タイムアウトして失敗する)
+            await fx.wait_reactivation(timeout=3.0)
+
+            assert calls == ["main_hand", "main_hand"], "解除の励磁が先へ進んでいない"
+            fx.can_manager("sub_hand").activate_motors.assert_awaited_once()
+        finally:
+            release.set()
+            await fx.wait_reenergize("main_hand")
 
 
 class TestMotorCheckDeniedWhileReenergizeInFlight:

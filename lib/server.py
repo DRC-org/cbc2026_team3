@@ -69,6 +69,12 @@ _TUNING_CAPTURE_BACKLOG = 8
 #: DM3520 の再送は 20Hz (50ms) なので、その 10 倍を取れば偽報告は出ない。
 _ENERGIZE_GRACE_S = 0.5
 
+#: 緊急停止解除が、進行中の単発再励磁タスクを畳むのに待つ上限。
+#: **キャンセルが効いていれば 1 周期で終わる値である** —— ここまで掛かるのは
+#: エグゼキュータへ入った `bus.send` のように、キャンセルしても止まらない
+#: ブロッキング呼び出しに入っているときだけ。詳細は `_settle_pending_reenergize`。
+_REENERGIZE_CANCEL_TIMEOUT_S = 0.5
+
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
 
@@ -1474,29 +1480,17 @@ class RobotServer:
         「バス上の全基板へ届く」ことを、②は「PC が把握しているモータへ確実に
         届く」ことをそれぞれ担う。
 
-        **③の直前に、同じロボットの `_reenergize_motors` が in-flight なら完了を待つ。**
-        両者が同じロボットの `activate_motors` を並走させると、片方の
-        `_wait_fresh_feedback` が送るプローブ (EDULITE 05 / DM3520 とも
-        `feedback_probe_message()` = disable) が、もう片方が enable したばかりの
-        モータへ届く —— DM3520 は disable で自重落下するので、「戻した直後に
-        もう一度落とす」形で `_reenergize_motors` 自身の存在意義を壊す。
+        **③の直前に、同じロボットの `_reenergize_motors` が in-flight なら畳む**
+        (`_settle_pending_reenergize`)。両者が同じロボットの `activate_motors` を
+        並走させると、片方の `_wait_fresh_feedback` が送るプローブ
+        (EDULITE 05 / DM3520 とも `feedback_probe_message()` = disable) が、
+        もう片方が enable したばかりのモータへ届く —— DM3520 は disable で
+        自重落下するので、「戻した直後にもう一度落とす」形で
+        `_reenergize_motors` 自身の存在意義を壊す。
         **解除コマンドの受理そのものは拒否・待機させない** (拒否すると「解除の
         たびに同じロボットが取り残される」実機事故と同型になる)。ここ
-        (バックグラウンドの再励磁タスク) だけが古いタスクの完了を待ってから
+        (バックグラウンドの再励磁タスク) だけが古いタスクを畳んでから
         自分の励磁へ進む。
-
-        **古いタスクは中断されない。** `e_stop` → `e_stop_release` を素早く行う
-        通常の操作順では、`_cmd_e_stop_release` が `_e_stop_active` を False に
-        戻してからこのタスクを生成するため、古いタスクの `should_abort` が
-        True を返す窓は無いか極めて短い。しかも `_wait_fresh_feedback`
-        (`lib/can_manager.py`) は `should_abort` を一切見ないループなので、
-        中断判定はそのモータの待機が終わってからしか効かない。**待つ理由は
-        中断が効くからではなく、古いタスク自身が有界だから**——待ちの上限は
-        対象モータのうち `requires_fresh_feedback_for_activation()` が True の
-        もの (EDULITE 05 / DM3520 の位置モード) の数 x `_ACTIVATION_FEEDBACK_TIMEOUT_S`
-        (0.5秒) を直列合算した値 (現行 config の最悪値は `sub_hand` で 3 台
-        = 1.5 秒、`main_hand` で 2 台 = 1.0 秒)。タイムアウトを付けないのは、
-        付けて先に進めると防ぎたい並走そのものが起きるため (この節の目的が消える)。
         """
         await self._send_e_stop_clear_broadcast()
 
@@ -1514,10 +1508,7 @@ class RobotServer:
                 )
 
         for name, ctx in self._robots.items():
-            pending = self._reenergize_tasks.get(name)
-            if pending is not None and not pending.done():
-                with contextlib.suppress(Exception):
-                    await pending
+            await self._settle_pending_reenergize(name)
             await self._activate_motors_for_robot(name, ctx)
 
         # 解除して有効化を試みた以上、以降は励磁されているのが正しい状態になる。
@@ -1537,6 +1528,44 @@ class RobotServer:
                 await self._send_e_stop_frames()
             except Exception:
                 logger.exception("E-STOP 停止フレーム再送に失敗")
+
+    async def _settle_pending_reenergize(self, robot_name: str) -> None:
+        """緊急停止解除の励磁へ進む前に、同じロボットの再励磁タスクを畳む。
+
+        **「待つ」ではなく「キャンセルしてから有界に待つ」。** かつては素の
+        `await pending` で、根拠を「古いタスク自身が有界だから」に置いていた。
+        **有界なのは `_wait_fresh_feedback` の deadline だけである** ——
+        `CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
+        無しで待つので、SocketCAN の送信キューが詰まっていれば `bus.send` は
+        ブロックしうる。そしてそれは `cbc-can-watchdog` が bus-off を疑っている
+        状況、つまり **まさに緊急停止を押した状況**である。素の await のままだと
+        「緊急停止解除の再励磁が無期限に進まない」経路が理屈上残る。
+
+        **キャンセルだけでは足りない。** エグゼキュータのスレッドへ入った
+        `bus.send` は `Task.cancel()` では止まらず、完了するまで
+        `CancelledError` が投げ込まれない。上限を必ず添える。
+
+        **待ちきれなくても先へ進む。** この直後に `only=None` で全モータを
+        励磁し直すので、キャンセルで中途半端に残った状態はそこで上書きされる。
+        並走を完全には防げないが、防げないのは「PC が CAN を送れなくなっている」
+        場面に限られ、そこで解除が永久に進まないほうが重い。黙って進まないよう
+        ログには必ず残す。
+        """
+        pending = self._reenergize_tasks.get(robot_name)
+        if pending is None or pending.done():
+            return
+        pending.cancel()
+        # `asyncio.wait` は中の例外 (CancelledError を含む) を送出しない。
+        # `await pending` や `wait_for` だとキャンセル済みタスクの CancelledError が
+        # そのまま伝播し、**この再励磁タスク自身がキャンセルされたことになる**
+        done, _still_running = await asyncio.wait({pending}, timeout=_REENERGIZE_CANCEL_TIMEOUT_S)
+        if not done:
+            logger.error(
+                "再励磁タスクが %.1fs 以内に畳めませんでした: robot=%s"
+                " (CAN の送信が詰まっている可能性があります)。解除の励磁を先へ進めます",
+                _REENERGIZE_CANCEL_TIMEOUT_S,
+                robot_name,
+            )
 
     async def _activate_motors_for_robot(
         self, robot_name: str, ctx: RobotContext, *, only: Collection[str] | None = None
