@@ -18,12 +18,13 @@ from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth
 from tests.fake_can import (
     ReadableBus,
+    deliver_frame,
     direct_runner,
     mark_feedback_at,
     mock_bus,
     mock_driver,
 )
-from tests.feedback_frames import feed_edulite, generic_feedback, m3508_feedback
+from tests.feedback_frames import edulite_feedback, feed_edulite, generic_feedback, m3508_feedback
 
 
 class TestCANManager:
@@ -483,6 +484,101 @@ class TestMotorActivation:
 
         assert inactive == []
         assert [call.args[0] for call in send.await_args_list] == ["m2"]
+
+    async def test_feedback_probe_is_never_sent_to_an_energized_motor(self) -> None:
+        """**励磁中のモータへ鮮度確認の `disable` を打ってはならない。**
+
+        EDULITE 05 / DM3520 の `feedback_probe_message()` は `disable` そのもので、
+        「無励磁を無励磁のままにするだけなので機構は動かない」という前提の上に
+        立っている。励磁中のモータへ送れば保持トルクをその場で失う。
+
+        踏むのは `RobotServer._reenergize_motors` の相方拡張 —— 直結ペアの片側
+        だけが落ちたとき、健全で **励磁中の相方も** `only` に入る。宣言順が
+        `rotate_r` → `rotate_l` の実機構成で落ちたのが `rotate_l` 側だと、
+        健全な `rotate_r` が先に disable され **軸が両側とも無励磁になる**
+        (復帰まで最悪 550ms)。ワークを掴んだまま押す操作なので落下しうる。
+
+        **実フレームで見る。** モックの戻り値で見ると、`encode_disable()` の
+        中身が変わっても同じ「送っていない」を主張し続ける。
+        """
+        sent: list[can.Message] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = mock_bus()
+        bus.send.side_effect = lambda msg: sent.append(msg)
+        mgr.add_bus("can_edulite", bus)
+        dropped = Edulite05Driver("rotate_r", can_id=1)
+        partner = Edulite05Driver("rotate_l", can_id=2)
+        for driver in (dropped, partner):
+            mgr.add_motor("can_edulite", driver)
+
+        feed_edulite(dropped, position=0.5, mode_state=0)  # 落ちた側 (無励磁)
+        feed_edulite(partner, position=0.0, mode_state=2)  # 相方 (健全・励磁中)
+
+        # フィードバックはどちらへも届かせない。ここでの関心は「何を送ったか」
+        # だけで、届かなければ両方とも無励磁のまま残る (安全側) のが正しい
+        await mgr.activate_motors(only={"rotate_r", "rotate_l"}, feedback_timeout_s=0.05)
+
+        wire = [(msg.arbitration_id, bytes(msg.data)) for msg in sent]
+        partner_probe = partner.encode_disable()
+        assert (partner_probe.arbitration_id, bytes(partner_probe.data)) not in wire, (
+            "励磁中の相方へ disable プローブが飛んでいる (保持トルクを失う)"
+        )
+        dropped_probe = dropped.encode_disable()
+        assert (dropped_probe.arbitration_id, bytes(dropped_probe.data)) in wire, (
+            "無励磁側へのプローブまで消えている (鮮度を確かめる手段が無くなる)"
+        )
+
+    async def test_energized_motor_still_activates_without_a_probe(self) -> None:
+        """プローブを止めても励磁そのものは通る。
+
+        励磁中ということは `QueryDrivenTargetRefresher` (20Hz) が目標を送り
+        続けており、その応答としてフィードバックが届く。**待つのをやめたわけ
+        ではない** —— 届かなければ従来どおり無励磁のまま残す。
+        """
+        sent: list[can.Message] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = mock_bus()
+        bus.send.side_effect = lambda msg: sent.append(msg)
+        mgr.add_bus("can_edulite", bus)
+        partner = Edulite05Driver("rotate_l", can_id=2)
+        mgr.add_motor("can_edulite", partner)
+        feed_edulite(partner, position=0.0, mode_state=2)
+
+        async def _refresher_reply() -> None:
+            # 20Hz の再送への応答が待機の途中で 1 通届く状況
+            await asyncio.sleep(0.02)
+            deliver_frame(mgr, "can_edulite", edulite_feedback(partner, position=0.0, mode_state=2))
+
+        reply = asyncio.create_task(_refresher_reply())
+        inactive = await mgr.activate_motors(only={"rotate_l"}, feedback_timeout_s=0.5)
+        await reply
+
+        assert inactive == []
+        probe = partner.encode_disable()
+        wire = [(msg.arbitration_id, bytes(msg.data)) for msg in sent]
+        assert (probe.arbitration_id, bytes(probe.data)) not in wire
+
+    async def test_probe_is_allowed_right_after_set_zero(self) -> None:
+        """原点の付け替え直後だけは、`is_energized()` が True でも打ってよい。
+
+        `capture_origin_via_set_zero` は直前に `deactivation_steps()` を送って
+        いるので **無励磁であることを指令として知っている**。フィードバックが
+        追いついていないだけで問い合わせを止めると、零点確定が理由もなく失敗する。
+        """
+        sent: list[can.Message] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        bus = mock_bus()
+        bus.send.side_effect = lambda msg: sent.append(msg)
+        mgr.add_bus("can_edulite", bus)
+        motor = Edulite05Driver("rotate_l", can_id=2)
+        mgr.add_motor("can_edulite", motor)
+        feed_edulite(motor, position=0.0, mode_state=2)  # まだ励磁中に見える
+
+        await mgr.activate_motor("rotate_l", feedback_timeout_s=0.05, after_set_zero=True)
+
+        probe = motor.encode_disable()
+        wire = [(msg.arbitration_id, bytes(msg.data)) for msg in sent]
+        assert (probe.arbitration_id, bytes(probe.data)) in wire
 
     async def test_initialize_motors_continues_after_one_motor_fails(self) -> None:
         """起動時も同じ。1 台の失敗でそのバスのモータが全部無励磁になってはならない。"""

@@ -749,6 +749,10 @@ class CANManager:
         のための絞り込み。EDULITE 05 / DM3520 の `activate_motor` は現在角を目標に
         書いてから enable するので、指定しなかった健全なモータまで含めると、
         移動中の軸を「今の位置で止めてから再度動かす」形で割り込ませてしまう。
+        **``only`` には励磁中のモータが混ざりうる** (直結ペアの相方は健全でも
+        対象に入る)。そのモータへ鮮度確認の `disable` を打たないことは
+        `_may_probe_for_feedback` が担保しており、宣言順の前後で結果が変わらない
+        のはそのため。
 
         Returns:
             有効化できなかったモータ名 (中断で飛ばしたものを含む)。``only`` を渡した
@@ -902,11 +906,17 @@ class CANManager:
         `after_set_zero` は直前に原点を切り直した経路 (`capture_origin_via_set_zero`)
         からの呼び出しであることをドライバへ伝える。旧原点で測られた実測角を保持目標に
         使わせないための宣言で、既定は False。
+
+        **既に励磁されているモータへは鮮度確認の問い合わせを送らない**
+        (`_may_probe_for_feedback`)。判断はドライバ種別ではなく `is_energized()` の
+        三値だけで行う。
         """
         motor = self._motors[motor_name]
 
         if motor.requires_fresh_feedback_for_activation() and not await self._wait_fresh_feedback(
-            motor_name, feedback_timeout_s
+            motor_name,
+            feedback_timeout_s,
+            probe=self._may_probe_for_feedback(motor, after_set_zero=after_set_zero),
         ):
             logger.warning(
                 "モータ '%s' のフィードバックを %.2fs 以内に受信できないため"
@@ -932,15 +942,57 @@ class CANManager:
             if delay_after_s > 0:
                 await asyncio.sleep(delay_after_s)
 
-    async def _wait_fresh_feedback(self, motor_name: str, timeout_s: float) -> bool:
+    @staticmethod
+    def _may_probe_for_feedback(motor: MotorDriver, *, after_set_zero: bool) -> bool:
+        """鮮度確認の問い合わせ (`feedback_probe_message()`) を送ってよいか。
+
+        **送ってよいのは、そのモータが無励磁だと分かっているときだけ。**
+        EDULITE 05 / DM3520 の問い合わせフレームは `disable` そのもので、
+        「無励磁を無励磁のままにするだけなので機構は動かない」という前提の上に
+        立っている (`Dm3520Driver.feedback_probe_message` /
+        `Edulite05Driver.feedback_probe_message` の docstring)。**励磁中のモータへ
+        送れば、その前提は成り立たない** —— 保持トルクをその場で失い、
+        負荷が掛かっていれば back-drive する (`sub_lift` は自重で落ちる)。
+
+        励磁中のモータを励磁し直す呼び出しは実在する ——
+        `RobotServer._reenergize_motors` は直結ペアの片側だけが落ちたとき、
+        **健全で励磁中の相方も対象へ含める** (ペア軸に片側だけ効く操作を作らない)。
+        絞り込みの宣言順は全モータの順序を保つので、落ちたのが `rotate_l` 側だと
+        健全な `rotate_r` が先にプローブされ、**軸が両側とも無励磁になる窓**
+        (最悪 550ms) がワークを掴んだまま開く。
+
+        鮮度そのものは問い合わせ無しでも満たされる —— 励磁中ということは
+        `QueryDrivenTargetRefresher` (20Hz) が目標を送り続けており、本機の
+        フィードバックはそれへの応答として 50ms 以内に届く。届かなければ
+        `_wait_fresh_feedback` がタイムアウトして無励磁のまま残す (安全側)。
+
+        `after_set_zero` は例外で、必ず送ってよい。この経路
+        (`capture_origin_via_set_zero`) は直前に `deactivation_steps()` を
+        送っており **無励磁であることを指令として知っている**ため、
+        フィードバックが追いついていない (`is_energized()` がまだ True を返す)
+        だけで問い合わせを止めると、零点確定が理由もなく失敗しうる。
+        つまり例外ではなく、「無励磁だと分かっている」の 2 つ目の根拠である。
+        """
+        if after_set_zero:
+            return True
+        return motor.is_energized() is not True
+
+    async def _wait_fresh_feedback(
+        self, motor_name: str, timeout_s: float, *, probe: bool = True
+    ) -> bool:
         """待機開始より後に届いたフィードバックを待つ。
 
         待機開始前に受信済みの値は set_zero より前の原点で測ったものかもしれず、
         保持目標として使うと原点の付け替え分だけモータが動いてしまう。そのため
         「新しく届いたこと」を要求し、受信済みの値の再利用は認めない。
+
+        ``probe`` が False なら問い合わせを 1 通も送らず、届くのを待つだけにする。
+        可否の判断は `_may_probe_for_feedback` が持つ (ここでは持たない ——
+        待ち方と「打ってよいか」を同じ関数に混ぜると、呼び出しを 1 つ足した人が
+        判断を書き写すことになる)。
         """
         baseline = self._last_rx_at.get(motor_name)
-        probe = self._motors[motor_name].feedback_probe_message()
+        probe_msg = self._motors[motor_name].feedback_probe_message() if probe else None
         deadline = time.monotonic() + timeout_s
 
         while True:
@@ -949,9 +1001,9 @@ class CANManager:
                 return True
             if time.monotonic() >= deadline:
                 return False
-            if probe is not None:
+            if probe_msg is not None:
                 try:
-                    await self.send(motor_name, probe)
+                    await self.send(motor_name, probe_msg)
                 except Exception:
                     # 問い合わせが通らないバスでも、自発フィードバックが届く可能性は残る。
                     # 待機自体はタイムアウトまで続ける。
