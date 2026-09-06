@@ -25,6 +25,7 @@ from lib.config_schema import (
     TuningSettings,
 )
 from lib.control.feedback import FeedbackFreshness
+from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import (
     MAX_TUNABLE_GAIN,
     TUNABLE_PID_KEYS,
@@ -845,6 +846,18 @@ class RobotServer:
         if self.match.match_finish():
             logger.info("試合終了")
             self._stop_all_sequences()
+            # 実周期の集計をここで 1 行残してから 0 に落とす。リセット点を
+            # match_start だけにすると集計窓が [試合N開始, 試合N+1開始) になり、
+            # 試合後の finished・match_reset・次のセッティングタイム・両ハンドを
+            # 一巡する動作確認 (まさに乱れの発生源) が丸ごと混ざって、1 行が
+            # 「試合 N の集計」を名乗れなくなる。しかもその日の最後の試合は
+            # 次の match_start が来ないので永久に journal へ出ない —— 一番読みたい
+            # 1 試合が抜ける。試合の終わりを決めるのは操縦者の match_finish なので、
+            # 「試合 N ぶん」の境界もここにしかない。
+            for ctx in self._robots.values():
+                for task in self._periodic_tasks(ctx):
+                    task.log_jitter_summary()
+                    task.reset_jitter_stats()
             await self._broadcast_match_state()
 
     async def _cmd_match_reset(self, _data: dict, requester: WSOrNone) -> None:
@@ -1082,6 +1095,16 @@ class RobotServer:
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
+    @staticmethod
+    def _periodic_tasks(ctx: RobotContext) -> tuple[PeriodicTask, ...]:
+        """1 ロボットぶんの周期タスク全部 (実周期の集計とリセットはこの単位で回す)。
+
+        3 種を並べる箇所が match_start / match_finish の 2 つあるので、1 つに
+        まとめておく —— 別々に書くと、4 種目の周期タスクが増えたときに片方だけが
+        古いまま残り、症状は「その試合の集計にだけ 1 本足りない」になる。
+        """
+        return (*ctx.position_loops, *ctx.sync_monitors, *ctx.target_refreshers)
+
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
         # **動作確認の実行中は試合に入れない。** フェーズが MATCH になると
         # sequence_start が解禁され、両ハンドを一巡している統合動作確認と通常
@@ -1106,16 +1129,16 @@ class RobotServer:
         # 開始直前にもう一度流し込む (取りこぼすとシーケンスが逆コートの分岐で動く)
         self._apply_court()
 
-        # CAN 途絶エピソード数を試合単位でリセットする。**match_reset ではなく
-        # match_start を選んだ理由**: 準備中 (配線確認・動作確認) に踏んだ途絶を
-        # ここで洗い流しておかないと、試合中に見えるエピソード数へ準備フェーズの
-        # ぶんが紛れ込み、「この試合で本当に何回起きたか」が読めなくなる。
-        # match_reset (次の準備フェーズへ戻る操作) でリセットすると、直前の
-        # 試合の記録が FINISHED のあいだに消えてしまい、結果確認中の操縦者が
-        # 見返せなくなる。CANManager が「試合」を知らないぶん、いつ呼ぶかは
-        # ここ (サーバー) が決める
+        # 試合単位でリセットする 2 つ。ここは**前縁リセット** —— 準備中 (配線確認・
+        # 動作確認) に踏んだぶんを洗い流し、試合中の数字を「この試合で起きたこと」
+        # だけにする。match_reset ではなく match_start なのは、finished (結果確認中)
+        # に直前の試合の記録を消さないため。CANManager も PeriodicTask も「試合」を
+        # 知らないぶん、いつ呼ぶかはここ (サーバー) が決める。
+        # ジッタの集計 1 行は match_finish が出すので、ここでは黙って 0 に戻すだけ。
         for ctx in self._robots.values():
             ctx.can_manager.reset_rx_down_episodes()
+            for task in self._periodic_tasks(ctx):
+                task.reset_jitter_stats()
 
         # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
         logger.info("試合開始: court=%s", self.match.court.value)
