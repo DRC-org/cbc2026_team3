@@ -130,7 +130,11 @@ def _manual_fixture() -> ServerFixture:
         },
         source="<test>",
     )
-    can_manager = mock_can_manager()
+    # `is_energized()` を三値で返させる。MagicMock の既定戻り値のままだと
+    # `is False` が成立せず `dropped` が空になり、在飛中の窓を作れない
+    motor = mock_motor("m1")
+    motor.is_energized.return_value = False
+    can_manager = mock_can_manager({"m1": motor})
     group = MotorGroup()
     group.add(MotorHandle("m1", can_manager.motors["m1"], can_manager))
     manual = ManualController(group, table)
@@ -231,7 +235,7 @@ class TestExclusionGates:
         """同一ロボットへの二重投入。ボタン連打や、is_energized() の反映待ちで
         ボタンが消えずに残っている間の 2 回目を想定する。
         """
-        fx = _build_fixture()
+        fx, _dropped = _dropped_fixture()
         gate = asyncio.Event()
 
         async def _slow_activate(**_kwargs: object) -> list[str]:
@@ -255,24 +259,46 @@ class TestExclusionGates:
 
 
 class TestTargetsRobotOnly:
-    """対象ロボットの `CANManager` だけを触り、もう一方は巻き込まない。"""
+    """対象ロボットの `CANManager` だけを触り、もう一方は巻き込まない。
+
+    **`mock_motor` 構成では成立しないテストだった。** `is_energized()` が
+    MagicMock を返すので `dropped` は必ず空になり、`only=set()` のまま
+    `assert_awaited_once()` を通っていた —— `dropped` の中身が壊れても緑。
+    実ドライバの無励磁フィードバックで本物の対象を作り、渡した `only` まで見る。
+    """
 
     async def test_only_named_robot_is_activated(self) -> None:
-        fx = _build_fixture()
+        fx, _dropped = _dropped_fixture()
         fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
         fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
 
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
         await fx.wait_reenergize("main_hand")
 
-        fx.can_manager("main_hand").activate_motors.assert_awaited_once()
+        main = fx.can_manager("main_hand")
+        main.activate_motors.assert_awaited_once()
+        assert main.activate_motors.await_args.kwargs["only"] == {"dropped"}
         fx.can_manager("sub_hand").activate_motors.assert_not_called()
+
+    async def test_nothing_is_sent_when_no_motor_is_dropped(self) -> None:
+        """対象が 1 台も無ければ `activate_motors` を呼ばない。
+
+        `only=set()` で呼んでも実害は無いが、CAN へ 1 通も出さないほうが
+        「押したのに何も起きていない」ことがログからも読める。
+        """
+        fx = _build_fixture()  # `mock_motor` なので `dropped` は空
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+
+        fx.can_manager("main_hand").activate_motors.assert_not_called()
 
 
 class TestFailureIsReported:
     async def test_motors_that_fail_to_activate_appear_in_safety(self) -> None:
-        fx = _build_fixture()
-        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["m1"])
+        fx, _driver = _dropped_fixture()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["dropped"])
 
         # `safety.unenergized_motors` は起動時 (`_on_startup`) に置く猶予の起点に
         # 依存する。素の `fx.command()` だけだとその起点が無いまま (`None`) で常に
@@ -291,7 +317,7 @@ class TestFailureIsReported:
             assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == []
 
             await asyncio.sleep(_ENERGIZE_GRACE_S + 0.1)
-            assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["m1"]
+            assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["dropped"]
             # 巻き込んでいない側は空のまま
             assert fx.state_message("sub_hand")["safety"]["unenergized_motors"] == []
 
@@ -734,7 +760,7 @@ class TestPairedAxisIsExpandedToPartner:
         assert can_manager.activate_motors.await_args.kwargs["only"] == {"gripper"}
 
     async def test_nothing_dropped_yields_empty_target(self) -> None:
-        """無励磁のモータが 1 台も無ければ、対象もラッチ剥がしも一切走らない。"""
+        """無励磁のモータが 1 台も無ければ、対象もラッチ剥がしも励磁も一切走らない。"""
         fx, drivers, _handles = self._build()
         feed_edulite(drivers["rotate_l"], position=0.0, mode_state=2)
         feed_edulite(drivers["rotate_r"], position=0.5, mode_state=2)
@@ -743,9 +769,7 @@ class TestPairedAxisIsExpandedToPartner:
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
         await fx.wait_reenergize("main_hand")
 
-        can_manager = fx.can_manager("main_hand")
-        can_manager.activate_motors.assert_awaited_once()
-        assert can_manager.activate_motors.await_args.kwargs["only"] == set()
+        fx.can_manager("main_hand").activate_motors.assert_not_called()
 
 
 class TestReactivationSettlesPendingReenergize:
@@ -860,7 +884,7 @@ class TestMotorCheckDeniedWhileReenergizeInFlight:
     """
 
     async def test_denied_while_pending(self) -> None:
-        fx = _build_fixture()
+        fx, _dropped = _dropped_fixture()
         fx.set_motor_check_sequence(_EmptySequence("motor_check"))
         gate = asyncio.Event()
 

@@ -33,19 +33,30 @@ export interface HealthVerdict {
   detail?: string;
 }
 
+/**
+ * 安全機構の異常の種別。**表示文字列と分けて持つ。**
+ *
+ * `SubsystemStatus` は「無励磁のまま」の行にだけ再励磁ボタンを添える。判定を
+ * `label` の文字列一致で書くと、**文言を 1 文字直しただけでボタンが消える** ——
+ * しかも型検査は通り、テストを持たない行なら気付けない。種別は union なので、
+ * 綴りを間違えればコンパイルが落ちる。
+ */
+export type SafetyIssueKind =
+  | "unknown"
+  | "sync_violation"
+  | "unenergized"
+  | "loops_stopped"
+  | "monitors_stopped"
+  | "refreshers_stopped";
+
 /** 安全機構の異常 1 件。`hint` は操縦者が次に取るべき行動 */
 export interface SafetyIssue {
+  /** 機械可読の種別。UI の分岐はこれだけを見る (`label` は表示専用) */
+  kind: SafetyIssueKind;
   label: string;
   detail: string;
   hint: string;
 }
-
-/**
- * 「無励磁のまま」issue の固定ラベル。`SubsystemStatus` が再励磁ボタンを
- * どの issue に添えるか判定するのに使う。文言をここ 1 箇所にしておかないと、
- * 打鍵ミスでボタンが出なくなっても型検査を通ってしまう。
- */
-export const UNENERGIZED_ISSUE_LABEL = "無励磁のまま";
 
 /**
  * 再励磁がサーバー側で処理中か。**判定を UI が持たない**ための 1 行。
@@ -160,6 +171,7 @@ export function workpieceRiskBuses(health: HealthPayload | undefined): BusHealth
  */
 function safetyUnknown(detail: string): SafetyIssue {
   return {
+    kind: "unknown",
     label: "安全機構 判定不能",
     detail,
     hint: "安全機構の配信を読めていません。同期ずれラッチも保護ループの停止も検知できない状態です — 機体を動かす前にサーバーのログを確認してください",
@@ -194,6 +206,7 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
 
   if (safety.sync_violations.length > 0) {
     issues.push({
+      kind: "sync_violation",
       label: "同期ずれラッチ",
       detail: safety.sync_violations.join(", "),
       hint: "機構を直してから緊急停止を解除し直してください (解除しただけでは動きません)",
@@ -207,7 +220,8 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
   // 導線だけを言葉で示す)
   if (safety.unenergized_motors.length > 0) {
     issues.push({
-      label: UNENERGIZED_ISSUE_LABEL,
+      kind: "unenergized",
+      label: "無励磁のまま",
       detail: safety.unenergized_motors.join(", "),
       hint: "指令は届いていますが励磁されていません。操縦者画面の「再励磁」ボタンを押してください (直らなければ緊急停止をもう一度押して解除し直すか、ドライバの電源と CAN 配線を確認)",
     });
@@ -217,6 +231,7 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
   const deadLoops = safety.position_loops.filter((l) => !l.running).map((l) => l.bus);
   if (deadLoops.length > 0 || !safety.loops_running) {
     issues.push({
+      kind: "loops_stopped",
       label: "位置制御ループ停止",
       detail: deadLoops.length > 0 ? deadLoops.join(", ") : "全バス",
       hint: "200Hz の位置制御が動いていません。M3508 は指令を失っています",
@@ -226,6 +241,7 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
   const deadMonitors = safety.sync_monitors.filter((m) => !m.running).flatMap((m) => m.axes);
   if (deadMonitors.length > 0 || !safety.monitors_running) {
     issues.push({
+      kind: "monitors_stopped",
       label: "同期監視停止",
       detail: deadMonitors.length > 0 ? deadMonitors.join(", ") : "全軸",
       hint: "左右のずれを誰も見ていません。ペア軸の破損を検知できません",
@@ -240,6 +256,7 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
     .flatMap((r) => r.motors);
   if (deadRefreshers.length > 0 || !safety.refreshers_running) {
     issues.push({
+      kind: "refreshers_stopped",
       label: "目標値再送停止",
       detail: deadRefreshers.length > 0 ? deadRefreshers.join(", ") : "全モータ",
       hint: "20Hz の再送が止まっています。500ms 後にファーム側ウォッチドッグでグリッパ・コンベア・壁が停止します",

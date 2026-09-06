@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
-  UNENERGIZED_ISSUE_LABEL,
   describeSafetyIssues,
   evaluateHealth,
   isReenergizePending,
@@ -123,7 +122,7 @@ function SafetyIssues({
           <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">{issue.hint}</span>
           {/* 押せる場所は限定する — この異常が実際に出ていて、かつこの画面に
               コールバックが渡されているとき (操縦者自身の画面) だけ */}
-          {issue.label === UNENERGIZED_ISSUE_LABEL && onReenergize ? (
+          {issue.kind === "unenergized" && onReenergize ? (
             <Button
               tone="warn"
               className="ml-[1.4rem] self-start"

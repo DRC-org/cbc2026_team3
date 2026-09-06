@@ -679,9 +679,13 @@ class RobotServer:
         # 1 台 0.5 秒待つため、待つとその操縦者の WS が数秒間 1 通も処理しなくなる)
         task = asyncio.create_task(self._reenergize_motors(robot_name))
         self._reenergize_tasks[robot_name] = task
-        # `task.done()` が立ってからこのコールバックが呼ばれるまでの窓で次の
-        # タスクが同じキーへ入ることがあるため、今ここに居るのが自分自身の
-        # ときだけ取り除く (でないと新しいタスクの in-flight ガードが消える)
+        # 完了とこのコールバックの実行のあいだには `call_soon` 1 回ぶんの窓がある。
+        # そこへ次の押下が入ると (在飛ガードは `not task.done()` なので通る) 同じ
+        # キーへ新しいタスクが載るため、**無条件に pop すると新しいタスクの登録ごと
+        # 消える** —— `_is_reenergizing` が False を返し、二重投入・シーケンス系
+        # ゲート・動作確認の排他がまとめて外れる。識別子を見て自分自身のときだけ
+        # 取り除く。なお辞書はロボット名で上書きされるので、この掃除が無くても
+        # 溜まるのは 1 ロボット 1 エントリだけである (窓が狭くテストは持っていない)
         task.add_done_callback(
             lambda t, name=robot_name: (
                 self._reenergize_tasks.pop(name, None)
@@ -1688,6 +1692,14 @@ class RobotServer:
                     member_names = {member.name for member in group.members}
                     if dropped & member_names:
                         dropped |= member_names
+            if not dropped:
+                # 対象が 1 台も無ければ CAN へ 1 通も出さない (画面が既に閉じた
+                # ボタンを遅延で押した等)。`dropped` は `_inactive_motors` を
+                # 合併して作るので、空なら前回の失敗も残っていない ——
+                # `_inactive_motors` を空で上書きし直す必要も無い
+                logger.info("再励磁の対象モータがありません: robot=%s", robot_name)
+                return
+
             for refresher in ctx.target_refreshers:
                 for name in dropped.intersection(refresher.motor_names):
                     refresher.clear_target(name)
@@ -1698,8 +1710,7 @@ class RobotServer:
             # ロボット全体へ効かせると、落ちたのが sub_lift 1 台でも無関係な
             # sub_arm_joint の起点まで消える —— 緊急停止 (機体が止まっている) と
             # 違い、再励磁は「機体を止めずに」が売りなので前提が違う。
-            # 対象が無ければ (画面が既に閉じたボタンを遅延で押した等) 触らない
-            if dropped and ctx.manual is not None:
+            if ctx.manual is not None:
                 ctx.manual.reset_axes_for_motors(dropped)
 
             await self._activate_motors_for_robot(robot_name, ctx, only=dropped)

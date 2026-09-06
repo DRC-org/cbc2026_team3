@@ -356,6 +356,16 @@ describe("describeSafetyIssues", () => {
     expect(issues[0].hint).toMatch(/励磁/);
   });
 
+  it("issue は機械可読の kind を持つ (UI は表示文字列で分岐しない)", () => {
+    // `SubsystemStatus` は「無励磁のまま」の行にだけ再励磁ボタンを添える。
+    // 判定を label の文字列一致で書くと、文言を 1 文字直しただけでボタンが
+    // 消え、しかも型検査は通る
+    const issues = describeSafetyIssues(
+      safety({ sync_violations: ["rotate"], unenergized_motors: ["sub_lift"] }),
+    );
+    expect(issues.map((issue) => issue.kind)).toEqual(["sync_violation", "unenergized"]);
+  });
+
   it("無励磁のモータがあると異常判定へ倒す", () => {
     const verdict = verdictWhenConnected(health(), safety({ unenergized_motors: ["sub_lift"] }));
     expect(verdict.tone).toBe("error");
