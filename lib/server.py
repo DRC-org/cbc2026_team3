@@ -1638,11 +1638,13 @@ class RobotServer:
 
             # ジョグの起点を捨てる。無励磁のあいだ機構が自重で下がっていた場合、
             # 再励磁後 1 回目のジョグが古い起点から飛ぶ (activate_e_stop の
-            # on_e_stop() と同じ理由)。軸単位に絞る API が無いのでロボット全体を
-            # 対象にするが、次のジョグがフィードバックから取り直すだけなので無害。
+            # on_e_stop() と同じ理由)。**捨てるのは対象モータが属する軸だけ。**
+            # ロボット全体へ効かせると、落ちたのが sub_lift 1 台でも無関係な
+            # sub_arm_joint の起点まで消える —— 緊急停止 (機体が止まっている) と
+            # 違い、再励磁は「機体を止めずに」が売りなので前提が違う。
             # 対象が無ければ (画面が既に閉じたボタンを遅延で押した等) 触らない
             if dropped and ctx.manual is not None:
-                ctx.manual.reset()
+                ctx.manual.reset_axes_for_motors(dropped)
 
             await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
         except Exception:

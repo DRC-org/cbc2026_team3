@@ -499,12 +499,18 @@ class TestStaleTargetIsClearedBeforeActivation:
 
 
 class TestManualJogOriginIsReset:
-    """再励磁は無励磁だったモータのジョグ起点も捨てる (advisor 指摘)。
+    """再励磁は無励磁だったモータのジョグ起点も捨てる。**ただし対象の軸だけ。**
 
     無励磁のあいだ機構が自重で下がっていた場合、目標とラッチだけ剥がして
     ジョグの起点をそのままにすると、次のジョグが古い (フォルト前の) 起点から
-    飛ぶ。緊急停止解除 (`activate_e_stop` → `ManualController.on_e_stop()`) と
-    対称に扱う。軸単位に絞る API が無いのでロボット全体の起点を捨てる。
+    飛ぶ。ここまでは緊急停止 (`activate_e_stop` → `ManualController.on_e_stop()`)
+    と同じ。
+
+    **違うのは範囲。** 緊急停止は機体が止まっているのでロボット全体でよいが、
+    再励磁は「機体を止めずに」が売りなので、落ちた 1 台のために無関係な軸の
+    起点まで捨ててはならない (CLAUDE.md「ジョグの起点は直前の手動目標値であって
+    フィードバックではない」)。**軸を 2 本置くのはそのため** —— 1 本しか無い
+    構成では「全体を捨てる」と「対象だけ捨てる」の区別が付かない。
     """
 
     _POSITIONS: ClassVar[dict] = {
@@ -514,6 +520,13 @@ class TestManualJogOriginIsReset:
                 "command_unit": "rad",
                 "manual": {"min": -12.0, "max": 12.0, "steps": [1.0]},
                 "motors": {"dropped": {"scale": 1.0}},
+            },
+            # 無関係な軸。落ちたモータを 1 台も含まないので起点は残らねばならない
+            "other_axis": {
+                "unit": "rad",
+                "command_unit": "rad",
+                "manual": {"min": -12.0, "max": 12.0, "steps": [1.0]},
+                "motors": {"healthy": {"scale": 1.0}},
             },
         },
         "positions": {},
@@ -525,15 +538,20 @@ class TestManualJogOriginIsReset:
         can_manager.activate_motors = AsyncMock(return_value=[])
 
         dropped = Edulite05Driver("dropped", can_id=1)
-        set_motors(can_manager, {"dropped": dropped})
+        healthy = Edulite05Driver("healthy", can_id=2)
+        set_motors(can_manager, {"dropped": dropped, "healthy": healthy})
 
-        dropped_handle = MotorHandle("dropped", dropped, can_manager)
+        handles = {
+            name: MotorHandle(name, driver, can_manager)
+            for name, driver in (("dropped", dropped), ("healthy", healthy))
+        }
         refresher = QueryDrivenTargetRefresher(
-            [dropped_handle], can_manager, is_estop_active=lambda: False
+            list(handles.values()), can_manager, is_estop_active=lambda: False
         )
 
         group = MotorGroup()
-        group.add(dropped_handle)
+        for handle in handles.values():
+            group.add(handle)
         table = load_position_table(self._POSITIONS, source="<test>")
         manual = ManualController(group, table)
 
@@ -546,12 +564,13 @@ class TestManualJogOriginIsReset:
             manual=manual,
         )
         fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
-        return fx, {"dropped": dropped}, manual
+        return fx, {"dropped": dropped, "healthy": healthy}, manual
 
     async def test_origin_is_dropped_when_motor_was_unenergized(self) -> None:
         fx, drivers, manual = self._build()
         await manual.set_value("test_axis", 5.0)
         feed_edulite(drivers["dropped"], position=1.0, mode_state=0)  # 無励磁・自重で沈んだ
+        feed_edulite(drivers["healthy"], position=0.0, mode_state=2)
 
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
         await fx.wait_reenergize("main_hand")
@@ -560,6 +579,25 @@ class TestManualJogOriginIsReset:
         # 起点が捨てられていれば、次のジョグはフィードバック (1.0) から積む。
         # 捨てられていなければ古い起点 (5.0) から積んでしまう
         assert await manual.jog("test_axis", 0.5) == pytest.approx(1.5, abs=0.01)
+
+    async def test_unrelated_axis_keeps_its_origin(self) -> None:
+        """**落ちたモータを含まない軸の起点は捨てない。**
+
+        `ManualController.reset()` (ロボット全体) へ戻すとここが落ちる。
+        フィードバック位置 (2.0) を起点 (7.0) と別の値にしておくのは、揃えると
+        「たまたま同じ値を測り直す」ため区別が付かないから。
+        """
+        fx, drivers, manual = self._build()
+        await manual.set_value("test_axis", 5.0)
+        await manual.set_value("other_axis", 7.0)
+        feed_edulite(drivers["dropped"], position=1.0, mode_state=0)  # こちらだけ無励磁
+        feed_edulite(drivers["healthy"], position=2.0, mode_state=2)
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+
+        # 起点 (7.0) が保たれていれば 7.5。全体を捨てていれば 2.5 になる
+        assert await manual.jog("other_axis", 0.5) == pytest.approx(7.5, abs=0.01)
 
     async def test_origin_is_kept_when_nothing_was_dropped(self) -> None:
         """無励磁のモータが無ければジョグ起点も触らない (無関係な巻き添えを作らない)。
@@ -571,6 +609,7 @@ class TestManualJogOriginIsReset:
         fx, drivers, manual = self._build()
         await manual.set_value("test_axis", 5.0)
         feed_edulite(drivers["dropped"], position=2.0, mode_state=2)  # 励磁中のまま
+        feed_edulite(drivers["healthy"], position=0.0, mode_state=2)
 
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
         await fx.wait_reenergize("main_hand")
