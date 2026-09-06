@@ -10,9 +10,13 @@
 「表に無いから素通り」という暗黙の状態を作れない。全フェーズで通したいコマンドは
 `PHASES_ANY` を明示的に書く (= 素通りさせると宣言する)。
 
-判定そのものは 3 段。開発用ゲート (この起動でそのコマンドが存在するか)、
-フェーズゲート (試合進行としての可否)、緊急停止ゲート (今この瞬間モータを
-動かしてよいか) は独立で、フェーズが `match` のままでも緊急停止中は止める必要がある。
+判定そのものは 5 段で、どれも独立している。開発用ゲート (この起動でそのコマンドが
+存在するか)、フェーズゲート (試合進行としての可否)、緊急停止ゲート (今この瞬間モータを
+動かしてよいか)、手動操縦ゲート (対象ロボットの制御権を誰が握っているか)、再励磁ゲート
+(対象ロボットの励磁を今書き換えている最中か)。フェーズが `match` のままでも緊急停止中は
+止める必要があるように、1 つが通っても他は通らないことがある。後ろ 2 つはロボットごとの
+状態と掛け合わせて初めて決まるので、`CommandSpec` は「ゲート対象にしたか」と理由文だけを
+持ち、掛け合わせは `RobotServer` が行う。
 """
 
 from __future__ import annotations
@@ -64,6 +68,26 @@ class CommandSpec:
     #: 対象外 (False)。True にする側にだけ理由文を書かせる
     blocked_during_manual: bool
     manual_deny_message: str | None
+    #: 対象ロボット (data["robot"]) の再励磁 (`reenergize_motors`) が in-flight の
+    #: あいだ塞ぐか。**片方向だけのゲートである。**
+    #:
+    #: 再励磁は「フォルト前の現在角」を目標として書いてから enable する。その
+    #: 100ms〜1.5 秒のあいだにシーケンスが `move_to` で書いた目標が上書きされると、
+    #: `AxisHandle.wait_reached` は動かない位置を見続けて `SequenceTimeoutError` で
+    #: 止まる (症状は「NEXT を押したのに動かない」だけ)。
+    #:
+    #: **逆方向 (シーケンス実行中の再励磁) は塞がない。** 塞ぐと「試合中に機体を
+    #: 止めずに励磁を戻す」というこの機能の主目的そのものが消える —— 励磁が落ちる
+    #: のはたいていシーケンスを走らせている最中で、そこで使えなければ直したい状況が
+    #: 直せない。CLAUDE.md「制御権の奪い合いは両方向を塞ぐ」に対する意図的な例外で、
+    #: 塞ぐのは在飛中の 100ms〜1.5 秒だけなので待てば必ず通る。
+    #:
+    #: 手動側の同じ排他はハンドラが持つ (`RobotServer._apply_operation_mode` /
+    #: `_manual_target`)。`set_operation_mode` は方向で可否が変わる ——
+    #: 手動へ「入る」のは塞ぐが、手動から「出る」のは塞いではならない (退避路から
+    #: 戻れなくなる) —— ので、コマンド単位で一律に塞ぐこのゲートでは表せない。
+    blocked_during_reenergize: bool
+    reenergize_deny_message: str | None
     #: RobotServer 側のハンドラメソッド名。ゲートと実行が別々に増えないよう同じ行に置く
     handler: str
     reject_channel: RejectChannel
@@ -88,6 +112,11 @@ class CommandSpec:
         if not self.blocked_during_manual and self.manual_deny_message:
             raise ValueError(f"{self.name}: 手動操縦ゲートを掛けないのに拒否理由が書かれている")
 
+        if self.blocked_during_reenergize and not self.reenergize_deny_message:
+            raise ValueError(f"{self.name}: 再励磁ゲートに理由文が無い")
+        if not self.blocked_during_reenergize and self.reenergize_deny_message:
+            raise ValueError(f"{self.name}: 再励磁ゲートを掛けないのに拒否理由が書かれている")
+
     def phase_deny_reason(self, phase: Phase) -> str | None:
         """phase で実行できなければ理由を返す。実行できるなら None。"""
         if phase in self.allowed_phases:
@@ -107,6 +136,15 @@ class CommandSpec:
         """
         return self.manual_deny_message if self.blocked_during_manual else None
 
+    def reenergize_deny_reason(self) -> str | None:
+        """このコマンドが再励磁ゲートの対象でなければ None、対象なら理由文を返す。
+
+        `manual_deny_reason()` と同じく、実際に塞ぐか (対象ロボットの再励磁が今
+        in-flight か) の判定は呼び出し側が持つ —— `CommandSpec` はサーバーの
+        タスク表を知らない。
+        """
+        return self.reenergize_deny_message if self.blocked_during_reenergize else None
+
     def dev_tools_deny_reason(self, dev_tools_enabled: bool) -> str | None:
         """この起動で実行できなければ理由を返す。実行できるなら None。"""
         if not self.requires_dev_tools or dev_tools_enabled:
@@ -124,6 +162,8 @@ def _spec(
     requires_dev_tools: bool = False,
     blocked_during_manual: bool = False,
     manual_deny_message: str | None = None,
+    blocked_during_reenergize: bool = False,
+    reenergize_deny_message: str | None = None,
     handler: str,
     reject_channel: RejectChannel = RejectChannel.COMMAND_REJECTED,
 ) -> CommandSpec:
@@ -136,6 +176,8 @@ def _spec(
         requires_dev_tools=requires_dev_tools,
         blocked_during_manual=blocked_during_manual,
         manual_deny_message=manual_deny_message,
+        blocked_during_reenergize=blocked_during_reenergize,
+        reenergize_deny_message=reenergize_deny_message,
         handler=handler,
         reject_channel=reject_channel,
     )
@@ -152,6 +194,13 @@ _SPECS: tuple[CommandSpec, ...] = (
     #  シーケンスが別の目標値を書きに来ると衝突する。手動へ入る側の防御
     #  (`_apply_operation_mode` が `_stop_sequence` で制御権を奪う) は既にあったが、
     #  逆方向 (手動中に飛んできた `sequence_start` 等を弾く) が無かった。
+    #
+    #  **同じ 3 つが `blocked_during_reenergize=True` でもある。** 再励磁は
+    #  `reenergize_motors` が `PHASES_ANY` なので試合中のシーケンス実行中にも
+    #  押せる。在飛中に NEXT が押されると、シーケンスの `move_to` が書いた目標を
+    #  再励磁の「フォルト前の現在角」が上書きし、`wait_reached` は動かない位置を
+    #  見続けて `SequenceTimeoutError` で止まる。**逆方向は塞がない**理由は
+    #  `CommandSpec.blocked_during_reenergize` の宣言に書いてある。
     # ------------------------------------------------------------------ #
     _spec(
         "sequence_start",
@@ -161,6 +210,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のためシーケンスを開始できません",
         blocked_during_manual=True,
         manual_deny_message="手動操縦中のためシーケンスを開始できません",
+        blocked_during_reenergize=True,
+        reenergize_deny_message="再励磁の処理中のためシーケンスを開始できません",
         handler="_cmd_sequence_start",
     ),
     _spec(
@@ -171,6 +222,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のためステップ移動できません",
         blocked_during_manual=True,
         manual_deny_message="手動操縦中のためステップ移動できません",
+        blocked_during_reenergize=True,
+        reenergize_deny_message="再励磁の処理中のためステップ移動できません",
         handler="_cmd_sequence_jump",
     ),
     _spec(
@@ -181,6 +234,8 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のためトリガーを送れません",
         blocked_during_manual=True,
         manual_deny_message="手動操縦中のためトリガーを送れません",
+        blocked_during_reenergize=True,
+        reenergize_deny_message="再励磁の処理中のためトリガーを送れません",
         handler="_cmd_trigger",
     ),
     # ------------------------------------------------------------------ #
@@ -189,9 +244,10 @@ _SPECS: tuple[CommandSpec, ...] = (
     #  フェーズにも緊急停止にも依存させない。
     # ------------------------------------------------------------------ #
     _spec(
-        # 手動操縦モード中でも塞がない (`blocked_during_manual` を書かず既定 False
-        # のまま)。実行中のシーケンスは無いはずなので実害は無いうえ、塞ぐと
-        # 「手動中は sequence_stop も送れない」という止める側の操作を減らすだけになる
+        # 手動操縦モード中でも再励磁の在飛中でも塞がない (`blocked_during_manual` /
+        # `blocked_during_reenergize` を書かず既定 False のまま)。実行中のシーケンスは
+        # 無いはずなので実害は無いうえ、塞ぐと「手動中は sequence_stop も送れない」
+        # という止める側の操作を減らすだけになる
         "sequence_stop",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=True,
@@ -311,7 +367,10 @@ _SPECS: tuple[CommandSpec, ...] = (
         # 試合中に使えないと直したい状況そのものが直せないので PHASES_ANY。
         # 一方 **緊急停止中は励磁してはならない** — 緊急停止の意味が消える。
         # 手動操縦中は塞がない — 手動はシーケンスからの退避路そのものなので、
-        # 手動中に落ちた励磁を手動のまま戻せないと退避路自体が詰む。動作確認との
+        # 手動中に落ちた励磁を手動のまま戻せないと退避路自体が詰む。**シーケンス
+        # 実行中も塞がない** — 励磁が落ちるのはたいていシーケンスを走らせている
+        # 最中で、そこで使えなければ直したい状況が直せない (逆向きだけを
+        # `blocked_during_reenergize` で塞ぐ理由はそちらの宣言に書いてある)。動作確認との
         # 排他は `MotorCheckController.running` をハンドラ側で見る (両ハンド横断の
         # 排他で、単一ロボットの data["robot"] では表せないため motor_check_start と
         # 同じ理由で CommandSpec の外に置く)。

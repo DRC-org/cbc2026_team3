@@ -103,6 +103,8 @@ class TestRegistryCoverage:
             requires_dev_tools=False,
             blocked_during_manual=False,
             manual_deny_message=None,
+            blocked_during_reenergize=False,
+            reenergize_deny_message=None,
         )
         monkeypatch.setitem(COMMANDS, broken.name, broken)
 
@@ -140,6 +142,26 @@ class TestRegistryCoverage:
             else:
                 assert spec.manual_deny_message is None
 
+    def test_reenergize_gate_policy_is_declared_for_every_command(self) -> None:
+        for spec in COMMANDS.values():
+            if spec.blocked_during_reenergize:
+                assert spec.reenergize_deny_message
+            else:
+                assert spec.reenergize_deny_message is None
+
+    def test_sequence_commands_are_blocked_while_reenergizing(self) -> None:
+        """シーケンスの制御権を使う 3 つだけを塞ぐ。**塞ぎすぎない。**
+
+        再励磁は「フォルト前の現在角」を目標として書くので、在飛中に走った
+        `move_to` はその値で上書きされ `wait_reached` が永久に到達を観測しない。
+        一方 `sequence_stop` は退避の逃げ道なので通す —— 止める側の操作を
+        減らすだけになる (`blocked_during_manual` と同じ切り分け)。
+        `reenergize_motors` 自身が対象外なのは、二重投入をハンドラ側の
+        専用ゲートが理由文付きで返すため。
+        """
+        blocked = {name for name, spec in COMMANDS.items() if spec.blocked_during_reenergize}
+        assert blocked == {"sequence_start", "sequence_jump", "trigger"}
+
 
 class TestSpecValidation:
     def _spec(self, **overrides: object) -> CommandSpec:
@@ -152,6 +174,8 @@ class TestSpecValidation:
             "requires_dev_tools": False,
             "blocked_during_manual": False,
             "manual_deny_message": None,
+            "blocked_during_reenergize": False,
+            "reenergize_deny_message": None,
             "handler": "_cmd_dummy",
             "reject_channel": RejectChannel.COMMAND_REJECTED,
         }
@@ -187,6 +211,14 @@ class TestSpecValidation:
     def test_manual_ungated_command_must_not_carry_a_reason(self) -> None:
         with pytest.raises(ValueError):
             self._spec(manual_deny_message="使われない理由")
+
+    def test_reenergize_gated_command_requires_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(blocked_during_reenergize=True, reenergize_deny_message=None)
+
+    def test_reenergize_ungated_command_must_not_carry_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(reenergize_deny_message="使われない理由")
 
 
 class TestPhaseGate:

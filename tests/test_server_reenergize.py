@@ -34,7 +34,7 @@ from lib.control.target_refresh import QueryDrivenTargetRefresher
 from lib.drivers.base import ControlMode
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.manual import ManualController
-from lib.sequence.engine import Sequence
+from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import direct_runner, mock_bus, mock_can_manager, mock_motor, set_motors
@@ -82,8 +82,8 @@ def _build_fixture() -> ServerFixture:
     return fx
 
 
-def _dropped_fixture() -> tuple[ServerFixture, Edulite05Driver]:
-    """main_hand に「無励磁だと分かっている」EDULITE を 1 台だけ載せた最小構成。
+def _can_manager_with_dropped_motor() -> tuple[CANManager, Edulite05Driver]:
+    """「無励磁だと分かっている」EDULITE を 1 台だけ載せたモック CANManager。
 
     **`mock_motor` では「対象が 1 台もいない再励磁」しか作れない。** あちらの
     `is_energized()` は MagicMock を返すので `is False` が成立せず、`dropped` は
@@ -95,7 +95,12 @@ def _dropped_fixture() -> tuple[ServerFixture, Edulite05Driver]:
     dropped = Edulite05Driver("dropped", can_id=1)
     set_motors(can_manager, {"dropped": dropped})
     feed_edulite(dropped, position=0.5, mode_state=0)
+    return can_manager, dropped
 
+
+def _dropped_fixture() -> tuple[ServerFixture, Edulite05Driver]:
+    """main_hand が無励磁のモータを 1 台抱えている最小構成。"""
+    can_manager, dropped = _can_manager_with_dropped_motor()
     fx = ServerFixture.build()
     fx.add_robot("main_hand", _EmptySequence("main_hand"), can_manager)
     fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
@@ -1013,3 +1018,132 @@ class TestEStopDuringReenergize:
             "再励磁の完了後に停止フレームが送り直されていない"
             " (中断判定をすり抜けた enable が停止より後に届いたまま残る)"
         )
+
+
+class _HoldingSequence(Sequence):
+    """1 ステップ目でテストの解放を待つシーケンス (実行中の状態を作るため)。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @step("解放されるまで待つ")
+    async def hold(self) -> None:
+        self.entered.set()
+        await self.release.wait()
+
+
+class TestSequenceCommandsDeniedWhileReenergizeInFlight:
+    """**逆方向の排他: 在飛中のシーケンス系コマンドを拒否する。片方向だけ。**
+
+    `reenergize_motors` は `PHASES_ANY` なので、試合中のシーケンス実行中にも
+    押せる。在飛中に NEXT が押されると、シーケンスの `move_to` が書いた目標を
+    再励磁の `activate_motors` が書く「フォルト前の現在角」で上書きし、
+    `AxisHandle.wait_reached` は動かない位置を見続けて `SequenceTimeoutError`
+    で止まる (症状は「NEXT を押したのに動かない」だけ)。
+
+    **逆 (シーケンス実行中の再励磁) は塞がない。** 塞ぐと「試合中に機体を
+    止めずに励磁を戻す」という主目的そのものが消える。CLAUDE.md「制御権の
+    奪い合いは両方向を塞ぐ」に対する意図的な例外なので、通ることも
+    `test_sequence_start_does_not_block_reenergize` で固定しておく。
+
+    ゲートの宣言 (どのコマンドを対象にしたか) は `tests/test_commands.py` が
+    別に固定する。ここで見るのは掛け合わせ (対象ロボットが今在飛中か) の側。
+    """
+
+    async def _start_slow_reenergize(self, fx: ServerFixture) -> asyncio.Event:
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await asyncio.sleep(0)
+        return gate
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ({"type": "sequence_start"}, "シーケンスを開始"),
+            ({"type": "sequence_jump", "step_index": 0}, "ステップ移動"),
+            ({"type": "trigger"}, "トリガー"),
+        ],
+    )
+    async def test_denied_while_pending(self, payload: dict, expected: str) -> None:
+        fx, _dropped = _dropped_fixture()
+        fx.enter_match()
+        gate = await self._start_slow_reenergize(fx)
+        client = RecordingClient()
+        fx.attach_clients(client)
+        try:
+            await fx.command({**payload, "robot": "main_hand"}, requester=client)
+
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert "再励磁の処理中" in rejected[0]["reason"]
+            assert expected in rejected[0]["reason"]
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_other_robot_is_not_blocked(self) -> None:
+        """塞ぐのは対象ロボットだけ。もう 1 台のシーケンスは巻き込まない。"""
+        fx, _dropped = _dropped_fixture()
+        fx.enter_match()
+        gate = await self._start_slow_reenergize(fx)
+        client = RecordingClient()
+        fx.attach_clients(client)
+        try:
+            await fx.command({"type": "sequence_start", "robot": "sub_hand"}, requester=client)
+            assert client.of_type("command_rejected") == []
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_allowed_once_reenergize_finishes(self) -> None:
+        """在飛が終われば通る。塞ぐのは 100ms〜1.5 秒だけ。"""
+        fx, _dropped = _dropped_fixture()
+        fx.enter_match()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+        await fx.command({"type": "sequence_start", "robot": "main_hand"}, requester=client)
+
+        assert client.of_type("command_rejected") == []
+
+    async def test_sequence_start_does_not_block_reenergize(self) -> None:
+        """**逆方向は塞がない (意図的な例外)。**
+
+        励磁が落ちるのはたいていシーケンスを走らせている最中で、そこで
+        再励磁が使えなければ直したい状況そのものが直せない。
+        """
+        can_manager, _dropped = _can_manager_with_dropped_motor()
+        can_manager.activate_motors = AsyncMock(return_value=[])
+        sequence = _HoldingSequence("main_hand")
+        fx = ServerFixture.build()
+        fx.add_robot("main_hand", sequence, can_manager)
+        fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
+        fx.enter_match()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        runner = asyncio.create_task(sequence.run_forever())
+        try:
+            await fx.command({"type": "sequence_start", "robot": "main_hand"})
+            await asyncio.wait_for(sequence.entered.wait(), timeout=1.0)
+            assert sequence.is_running
+
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"}, requester=client)
+            await fx.wait_reenergize("main_hand")
+
+            assert client.of_type("command_rejected") == []
+            can_manager.activate_motors.assert_awaited_once()
+        finally:
+            sequence.release.set()
+            runner.cancel()

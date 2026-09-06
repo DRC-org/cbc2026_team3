@@ -482,7 +482,7 @@ class RobotServer:
             logger.debug("未知のコマンド: %s", data.get("type"))
             return
 
-        # ゲートは 4 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
+        # ゲートは 5 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
         # 次にフェーズゲート (試合進行として許されるか)、通ったものだけ緊急停止ゲート
         # (今モータを動かしてよいか) に掛ける。フェーズが MATCH のままでも緊急停止中は
         # START を通してはならず、match_start は READY で受理されうるのでフェーズ遷移より
@@ -496,6 +496,12 @@ class RobotServer:
         # 逆方向 = 手動指令がシーケンスモード中に来た場合しか見ていなかった)。
         # 手動とシーケンスは同じ `AxisHandle.set_target_value` を通るため、
         # 塞がないとジョグ中の軸へシーケンスが別の目標値を書きに来る。
+        # 最後が再励磁ゲート (対象ロボットの励磁を今書き換えている最中か)。手動と
+        # 同じ衝突がシーケンス側にもある —— 再励磁の `activate_motors` が書く
+        # 「フォルト前の現在角」が `move_to` の目標を上書きすると、`wait_reached` は
+        # 動かない位置を見続けて `SequenceTimeoutError` で止まる。**塞ぐのは
+        # この向きだけ**で、逆 (シーケンス実行中の再励磁) は通す (理由は
+        # `CommandSpec.blocked_during_reenergize`)。
         deny = spec.dev_tools_deny_reason(self._dev_tools)
         if deny is None:
             deny = spec.phase_deny_reason(self.match.phase)
@@ -503,6 +509,8 @@ class RobotServer:
             deny = spec.e_stop_deny_reason()
         if deny is None:
             deny = self._manual_mode_deny_reason(spec, data)
+        if deny is None:
+            deny = self._reenergize_deny_reason(spec, data)
         if deny is not None:
             logger.info("コマンド拒否: %s (%s)", spec.name, deny)
             await self._reject_by_channel(spec, data, requester, deny)
@@ -561,6 +569,35 @@ class RobotServer:
         if ctx is None or ctx.mode is not OperationMode.MANUAL:
             return None
         return reason
+
+    def _reenergize_deny_reason(self, spec: CommandSpec, data: dict) -> str | None:
+        """spec が再励磁ゲートの対象で、かつ対象ロボットの再励磁が今 in-flight なら理由を返す。
+
+        `_manual_mode_deny_reason` と同じ形 —— `CommandSpec` は「ゲート対象にしたか」
+        しか知らず、ロボットごとの在飛状態はサーバーが `_reenergize_tasks` から引く。
+        ロボット名が無い・未知なら素通しするのも同じ理由 (未知のロボットという別の
+        失敗を、別の理由文で覆い隠さない)。
+        """
+        reason = spec.reenergize_deny_reason()
+        if reason is None:
+            return None
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str):
+            return None
+        if not self._is_reenergizing(robot_name):
+            return None
+        return reason
+
+    def _is_reenergizing(self, robot_name: str) -> bool:
+        """このロボットの単発再励磁が in-flight か。**判定はここ 1 箇所だけが持つ。**
+
+        同じ判定が 4 箇所 (シーケンス系ゲート・手動への切替・手動指令・動作確認の
+        起動可否) と配信 (`_safety_state`) から要る。`not task.done()` を書き写すと、
+        タスクの持ち方を変えたときに一部だけが古い判定のまま残り、**塞いだつもりの
+        経路だけが素通りする**。
+        """
+        task = self._reenergize_tasks.get(robot_name)
+        return task is not None and not task.done()
 
     # ------------------------------------------------------------------ #
     #  コマンドハンドラ (lib/commands.py の CommandSpec.handler から引かれる)
@@ -627,8 +664,7 @@ class RobotServer:
                 requester, "reenergize_motors", "緊急停止解除の再励磁が進行中です"
             )
             return
-        running = self._reenergize_tasks.get(robot_name)
-        if running is not None and not running.done():
+        if self._is_reenergizing(robot_name):
             await self._reject_command(requester, "reenergize_motors", "再励磁の処理中です")
             return
 
@@ -780,8 +816,7 @@ class RobotServer:
             # このロボットの再励磁が in-flight なら拒否する。手動へ入った直後に
             # ジョグを送ると、再励磁の `activate_motors` が書く「フォルト前の
             # 現在角」で上書きされうる (同じモータへの目標書き込みが競合する)
-            pending = self._reenergize_tasks.get(robot_name)
-            if pending is not None and not pending.done():
+            if self._is_reenergizing(robot_name):
                 await self._reject_command(
                     requester, "set_operation_mode", f"'{robot_name}' の再励磁が処理中です"
                 )
@@ -832,8 +867,7 @@ class RobotServer:
                 requester, command, "手動操縦モードではありません (モードを切り替えてください)"
             )
             return None
-        pending = self._reenergize_tasks.get(robot_name)
-        if pending is not None and not pending.done():
+        if self._is_reenergizing(robot_name):
             await self._reject_command(requester, command, f"'{robot_name}' の再励磁が処理中です")
             return None
 
@@ -1731,8 +1765,8 @@ class RobotServer:
         if self._e_stop_active:
             return "緊急停止中のため動作確認を実行できません"
 
-        for name, task in self._reenergize_tasks.items():
-            if not task.done():
+        for name in self._robots:
+            if self._is_reenergizing(name):
                 # 零点確定 (rotate) は disable → SET_ZERO → enable を伴う。同じモータへ
                 # 再励磁の activate_motors が並走すると、`_wait_fresh_feedback` の
                 # プローブ (disable) が動作確認側の enable と衝突しうる
