@@ -67,6 +67,38 @@ def _build_fixture() -> ServerFixture:
     return fx
 
 
+def _manual_fixture() -> ServerFixture:
+    """main_hand に手動操縦 1 軸 (`axis` → モータ `m1`) を持たせた最小構成。
+
+    `TestSetOperationModeDeniedWhileReenergizeInFlight` と
+    `TestManualTargetDeniedWhileReenergizeInFlight` が共有する (どちらも「手動と
+    再励磁が同じロボットで競合する」ことを見るので組み立てが同じ)。
+    """
+    table = load_position_table(
+        {
+            "axes": {
+                "axis": {
+                    "unit": "rad",
+                    "command_unit": "rad",
+                    "manual": {"min": -1.0, "max": 1.0, "steps": [0.1]},
+                    "motors": {"m1": {"scale": 1.0}},
+                },
+            },
+            "positions": {},
+        },
+        source="<test>",
+    )
+    can_manager = mock_can_manager()
+    group = MotorGroup()
+    group.add(MotorHandle("m1", can_manager.motors["m1"], can_manager))
+    manual = ManualController(group, table)
+
+    fx = ServerFixture.build()
+    fx.add_robot("main_hand", _EmptySequence("main_hand"), can_manager, manual=manual)
+    fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
+    return fx
+
+
 class TestUnknownOrMissingRobot:
     """`data["robot"]` が無い・未知なら黙って何もしない (拒否理由も返さない)。"""
 
@@ -662,33 +694,8 @@ class TestSetOperationModeDeniedWhileReenergizeInFlight:
     「フォルト前の現在角」目標と同じモータへ競合しうる。
     """
 
-    def _fixture(self) -> ServerFixture:
-        table = load_position_table(
-            {
-                "axes": {
-                    "axis": {
-                        "unit": "rad",
-                        "command_unit": "rad",
-                        "manual": {"min": -1.0, "max": 1.0, "steps": [0.1]},
-                        "motors": {"m1": {"scale": 1.0}},
-                    },
-                },
-                "positions": {},
-            },
-            source="<test>",
-        )
-        can_manager = mock_can_manager()
-        group = MotorGroup()
-        group.add(MotorHandle("m1", can_manager.motors["m1"], can_manager))
-        manual = ManualController(group, table)
-
-        fx = ServerFixture.build()
-        fx.add_robot("main_hand", _EmptySequence("main_hand"), can_manager, manual=manual)
-        fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
-        return fx
-
     async def test_denied_while_pending(self) -> None:
-        fx = self._fixture()
+        fx = _manual_fixture()
         gate = asyncio.Event()
 
         async def _slow_activate(**_kwargs: object) -> list[str]:
@@ -710,7 +717,7 @@ class TestSetOperationModeDeniedWhileReenergizeInFlight:
             await fx.wait_reenergize("main_hand")
 
     async def test_allowed_once_reenergize_finishes(self) -> None:
-        fx = self._fixture()
+        fx = _manual_fixture()
         fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
 
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
@@ -718,3 +725,93 @@ class TestSetOperationModeDeniedWhileReenergizeInFlight:
 
         await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
         assert fx.operation_mode("main_hand") == "manual"
+
+
+class TestManualTargetDeniedWhileReenergizeInFlight:
+    """逆方向の排他その 2: 既に手動中のロボットへ再励磁をかけた最中に届く
+    `manual_jog` / `manual_move` / `manual_set` を拒否する (2 件目の敵対的
+    レビュー指摘)。
+
+    `reenergize_motors` は手動操縦中も意図的に塞がない設計 (`lib/commands.py`)
+    なので、手動へ「入る」ときのガード (`TestSetOperationModeDeniedWhileReenergizeInFlight`)
+    だけでは、既に手動中のロボットに再励磁がかかっている最中のジョグを塞げない。
+    3 コマンドとも `_manual_target` という共通の関門を通るので、変異は 1 箇所
+    (`_manual_target` のガード) を外すだけで 3 件とも落ちるはず。
+    """
+
+    async def _enter_manual(self, fx: ServerFixture) -> None:
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        assert fx.operation_mode("main_hand") == "manual"
+
+    async def _start_slow_reenergize(self, fx: ServerFixture) -> asyncio.Event:
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await asyncio.sleep(0)
+        return gate
+
+    async def test_manual_jog_denied_while_pending(self) -> None:
+        fx = _manual_fixture()
+        await self._enter_manual(fx)
+        gate = await self._start_slow_reenergize(fx)
+        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        try:
+            await fx.command(
+                {"type": "manual_jog", "robot": "main_hand", "axis": "axis", "delta": 0.1}
+            )
+            fx.server._reject_command.assert_awaited_once()
+            assert fx.server._reject_command.await_args.args[1] == "manual_jog"
+            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_manual_move_denied_while_pending(self) -> None:
+        fx = _manual_fixture()
+        await self._enter_manual(fx)
+        gate = await self._start_slow_reenergize(fx)
+        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        try:
+            await fx.command(
+                {"type": "manual_move", "robot": "main_hand", "axis": "axis", "position": "home"}
+            )
+            fx.server._reject_command.assert_awaited_once()
+            assert fx.server._reject_command.await_args.args[1] == "manual_move"
+            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_manual_set_denied_while_pending(self) -> None:
+        fx = _manual_fixture()
+        await self._enter_manual(fx)
+        gate = await self._start_slow_reenergize(fx)
+        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        try:
+            await fx.command(
+                {"type": "manual_set", "robot": "main_hand", "axis": "axis", "value": 0.2}
+            )
+            fx.server._reject_command.assert_awaited_once()
+            assert fx.server._reject_command.await_args.args[1] == "manual_set"
+            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+    async def test_manual_jog_allowed_once_reenergize_finishes(self) -> None:
+        fx = _manual_fixture()
+        await self._enter_manual(fx)
+        fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+        await fx.wait_reenergize("main_hand")
+
+        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        await fx.command({"type": "manual_jog", "robot": "main_hand", "axis": "axis", "delta": 0.1})
+        fx.server._reject_command.assert_not_called()

@@ -5899,10 +5899,7 @@ CLAUDE.md の「消すのはジョグの起点だけで、緊急停止でも同�
   in-flight なら `await` してから自分の `activate_motors` へ進む。**待つ・拒否
   する・中断させるの 3 択で「待つ」を選んだ**——解除コマンドの受理自体を拒否・
   遅延させると「解除のたびに同じロボットが取り残される」実機事故（本ファイル
-  上部、緊急停止のラッチ解除の節）と同型になる。待ちが長くならない根拠は、
-  古いタスクの `activate_motors` 自身が `should_abort=lambda: self._e_stop_active`
-  を持ち、解除の前提として既に `_e_stop_active` が真だった瞬間から中断へ向かって
-  いること
+  上部、緊急停止のラッチ解除の節）と同型になる
 - **`_motor_check_environment_deny`**: いずれかのロボットの再励磁が in-flight
   なら動作確認の起動を拒否する。零点確定（`rotate`）が disable → SET_ZERO →
   enable を伴うため
@@ -5916,6 +5913,32 @@ CLAUDE.md の「消すのはジョグの起点だけで、緊急停止でも同�
 が名指しする「`_tasks` を誰も await しないので例外は消える」と同型になる。現状の
 処理（辞書操作と CAN 呼び出しのみ）で実際に踏む筋は無いが、将来の変更に備えた
 予防線。
+
+### 2 件目の敵対的レビューで見つかった 2 つの穴（2026-09-06）
+
+**① `_manual_target` に同じガードが無かった。** `reenergize_motors` は手動操縦中も
+意図的に塞がない設計 (`lib/commands.py`) なので、`_apply_operation_mode` に足した
+ガード (MANUAL へ「入る」ときだけ) では、**既に手動中のロボットへ再励磁をかけた
+最中**に届く `manual_jog` / `manual_move` / `manual_set` を塞げない。この 3 コマンド
+共通の関門である `_manual_target` (`lib/server.py`) へ同じガードを足した——散らすと
+足し忘れる経路ができるため、ハンドラ 3 つそれぞれではなく共通関門の 1 箇所に置く。
+
+**② `_reactivate_motors` の docstring の待ちの根拠が逆だった (危険な嘘)。** 旧版は
+「古いタスクは `should_abort` で中断へ向かっているはず」としていたが、実際は
+逆——`_cmd_e_stop_release` は `_e_stop_active` を **先に** False へ戻してから
+`_reactivate_motors` のタスクを生成するため、通常の `e_stop` → 即 `e_stop_release`
+という操作順では、古いタスクの `should_abort` が True を返す窓は無いに等しい。
+加えて `_wait_fresh_feedback` (`lib/can_manager.py`) は `should_abort` を一切
+受け取らないループで、中断判定はそのモータの待機が終わった後にしか効かない。
+**つまり古いタスクは中断されず最後まで走る。** 待ちが有界であることは変わらない
+（`_wait_fresh_feedback` 自身が `_ACTIVATION_FEEDBACK_TIMEOUT_S`=0.5 秒の deadline を
+持つため）ので、docstring を「待つ理由は中断が効くからではなく、古いタスク自身が
+有界だから」に書き換えた。**現行 config での実測上限**: 対象モータのうち
+`requires_fresh_feedback_for_activation()` が True なもの (EDULITE 05 / DM3520 の
+位置モード) を数えると、`sub_hand` は `sub_arm_joint` (EDULITE 05) + `sub_y_axis` /
+`sub_lift` (DM3520) の 3 台で最悪 1.5 秒、`main_hand` は `rotate_r` / `rotate_l`
+(EDULITE 05) の 2 台で最悪 1.0 秒 (直列合算)。**タイムアウトは付けない**——付けて
+先に進めると、このガードが防ぎたい並走そのものが起きてしまい、節の目的が消える。
 
 実装済みだが実機・運用面で未対応の項目。競技当日までに潰すか、意識的に許容するかを決める必要がある。
 

@@ -808,6 +808,14 @@ class RobotServer:
 
         モード判定をここ 1 箇所に置く。ハンドラごとに書くと、足したコマンドだけが
         半自動運転中でも通る経路になる。
+
+        **このロボットの再励磁が in-flight なら拒否する。** `reenergize_motors` は
+        手動操縦中も意図的に塞がない (`lib/commands.py`) ので、手動へ「入る」ときの
+        ガード (`_apply_operation_mode`) だけでは、既に手動中のロボットへ再励磁を
+        かけた最中に届くジョグを塞げない。ジョグは再励磁の `activate_motors` が
+        書く「フォルト前の現在角」目標と同じモータへ競合しうる (敵対的レビュー指摘。
+        3 コマンド共通のこの関門に置くのは、ハンドラごとに書くと足し忘れる経路が
+        できるのを避けるため)。
         """
         robot_name = data.get("robot")
         if not isinstance(robot_name, str) or robot_name not in self._robots:
@@ -823,6 +831,10 @@ class RobotServer:
             await self._reject_command(
                 requester, command, "手動操縦モードではありません (モードを切り替えてください)"
             )
+            return None
+        pending = self._reenergize_tasks.get(robot_name)
+        if pending is not None and not pending.done():
+            await self._reject_command(requester, command, f"'{robot_name}' の再励磁が処理中です")
             return None
 
         axis = data.get("axis")
@@ -1437,8 +1449,20 @@ class RobotServer:
         **解除コマンドの受理そのものは拒否・待機させない** (拒否すると「解除の
         たびに同じロボットが取り残される」実機事故と同型になる)。ここ
         (バックグラウンドの再励磁タスク) だけが古いタスクの完了を待ってから
-        自分の励磁へ進む。古いタスクは既に `_e_stop_active` を見て中断へ
-        向かっているはずなので、待ちは長くならない。
+        自分の励磁へ進む。
+
+        **古いタスクは中断されない。** `e_stop` → `e_stop_release` を素早く行う
+        通常の操作順では、`_cmd_e_stop_release` が `_e_stop_active` を False に
+        戻してからこのタスクを生成するため、古いタスクの `should_abort` が
+        True を返す窓は無いか極めて短い。しかも `_wait_fresh_feedback`
+        (`lib/can_manager.py`) は `should_abort` を一切見ないループなので、
+        中断判定はそのモータの待機が終わってからしか効かない。**待つ理由は
+        中断が効くからではなく、古いタスク自身が有界だから**——待ちの上限は
+        対象モータのうち `requires_fresh_feedback_for_activation()` が True の
+        もの (EDULITE 05 / DM3520 の位置モード) の数 x `_ACTIVATION_FEEDBACK_TIMEOUT_S`
+        (0.5秒) を直列合算した値 (現行 config の最悪値は `sub_hand` で 3 台
+        = 1.5 秒、`main_hand` で 2 台 = 1.0 秒)。タイムアウトを付けないのは、
+        付けて先に進めると防ぎたい並走そのものが起きるため (この節の目的が消える)。
         """
         await self._send_e_stop_clear_broadcast()
 
