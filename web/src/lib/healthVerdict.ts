@@ -47,6 +47,21 @@ export interface SafetyIssue {
  */
 export const UNENERGIZED_ISSUE_LABEL = "無励磁のまま";
 
+/**
+ * 再励磁がサーバー側で処理中か。**判定を UI が持たない**ための 1 行。
+ *
+ * 押した記憶や `unenergized_motors` の中身から導出すると、サーバーが拒否した
+ * 押下まで「処理中」に見える。配信された欄をそのまま読む。
+ *
+ * 読めなかった配信 (`MALFORMED`) と未配信は false —— そのとき
+ * `describeSafetyIssues` は「安全機構 判定不能」だけを返して再励磁ボタンごと
+ * 出さないので、ここに倒す先は無い (異常側へ倒す責務はあちらが持っている)。
+ */
+export function isReenergizePending(safety: SafetyPayload | undefined): boolean {
+  if (safety === undefined || safety === MALFORMED) return false;
+  return safetyShapeErrors(safety).length === 0 && safety.reenergizing;
+}
+
 /** モータ温度の色分けに使うしきい値 [℃]。正はサーバーの config にしかない */
 export interface TempThresholds {
   warning: number;

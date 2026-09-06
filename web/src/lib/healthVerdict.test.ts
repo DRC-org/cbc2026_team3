@@ -71,6 +71,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    reenergizing: false,
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -442,6 +443,7 @@ describe("describeSafetyIssues", () => {
     it.each([
       "sync_violations",
       "unenergized_motors",
+      "reenergizing",
       "loops_running",
       "monitors_running",
       "refreshers_running",

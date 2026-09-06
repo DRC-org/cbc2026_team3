@@ -1248,3 +1248,38 @@ class TestSequenceCommandsDeniedWhileReenergizeInFlight:
         finally:
             sequence.release.set()
             runner.cancel()
+
+
+class TestInFlightIsBroadcast:
+    """**在飛中を `safety.reenergizing` として配る。**
+
+    押した後の 0.1〜1.5 秒は `unenergized_motors` が消えない (励磁が次の
+    フィードバックへ反映されるまで分からない) ので、これが無いとボタンは
+    押せるまま残り、操縦者は 2 回目を押して「再励磁の処理中です」という
+    トーストを受け取ることになる。可否も理由もサーバーが決める、という
+    原則どおり在飛そのものを配る。
+    """
+
+    async def test_flag_follows_the_task_lifetime(self) -> None:
+        fx, _dropped = _dropped_fixture()
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+
+        assert fx.state_message("main_hand")["safety"]["reenergizing"] is False
+
+        try:
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await asyncio.sleep(0)
+            assert fx.state_message("main_hand")["safety"]["reenergizing"] is True
+            # 巻き込んでいない側は False のまま (ロボットごとに独立している)
+            assert fx.state_message("sub_hand")["safety"]["reenergizing"] is False
+        finally:
+            gate.set()
+            await fx.wait_reenergize("main_hand")
+
+        assert fx.state_message("main_hand")["safety"]["reenergizing"] is False

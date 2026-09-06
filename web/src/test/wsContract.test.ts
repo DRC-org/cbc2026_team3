@@ -80,10 +80,12 @@ const STATE_FIELDS_UI_READS = [
   "e_stop_active",
   "health",
   "safety",
-  // 安全機構は 8 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
+  // 安全機構は 9 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
   // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
   "safety.sync_violations",
   "safety.unenergized_motors",
+  // 再励磁の在飛。落ちればボタンが押せるまま残り、操縦者は 2 回目を押す
+  "safety.reenergizing",
   "safety.loops_running",
   "safety.monitors_running",
   "safety.position_loops",
@@ -419,6 +421,7 @@ const SENSOR_STATE = fieldsOf<SensorState>({
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
+  reenergizing: "ui",
   loops_running: "ui",
   monitors_running: "ui",
   refreshers_running: "ui",

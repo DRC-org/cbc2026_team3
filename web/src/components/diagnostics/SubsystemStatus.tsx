@@ -12,6 +12,7 @@ import {
   UNENERGIZED_ISSUE_LABEL,
   describeSafetyIssues,
   evaluateHealth,
+  isReenergizePending,
   readableHealth,
   workpieceRiskBuses,
 } from "@/lib/healthVerdict";
@@ -104,6 +105,9 @@ function SafetyIssues({
   onReenergize?: () => void;
 }) {
   const issues = describeSafetyIssues(safety);
+  // 在飛中かはサーバーが配る。押した記憶から組み立てない (拒否された押下まで
+  // 「処理中」に見える) し、`unenergized_motors` が消えるのを待つ必要も無い
+  const pending = isReenergizePending(safety);
   if (issues.length === 0) return null;
 
   return (
@@ -120,8 +124,13 @@ function SafetyIssues({
           {/* 押せる場所は限定する — この異常が実際に出ていて、かつこの画面に
               コールバックが渡されているとき (操縦者自身の画面) だけ */}
           {issue.label === UNENERGIZED_ISSUE_LABEL && onReenergize ? (
-            <Button tone="warn" className="ml-[1.4rem] self-start" onClick={onReenergize}>
-              再励磁
+            <Button
+              tone="warn"
+              className="ml-[1.4rem] self-start"
+              onClick={onReenergize}
+              disabled={pending}
+            >
+              {pending ? "処理中…" : "再励磁"}
             </Button>
           ) : null}
         </li>

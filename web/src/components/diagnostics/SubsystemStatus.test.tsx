@@ -37,6 +37,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    reenergizing: false,
     loops_running: true,
     monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
@@ -156,6 +157,24 @@ describe("SubsystemStatus", () => {
       );
 
       expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("処理中はサーバーの配信どおり押せなくなる", () => {
+      // 押した後の 0.1〜1.5 秒は unenergized_motors が消えないので、これが無いと
+      // 操縦者は「押しても何も起きない」と読んで 2 回目を押す (そして拒否される)
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["sub_lift"], reenergizing: true })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      const button = screen.getByRole("button", { name: "処理中…" });
+      expect(button).toBeDisabled();
       expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
     });
 

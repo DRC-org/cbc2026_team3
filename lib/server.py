@@ -1389,6 +1389,12 @@ class RobotServer:
         return {
             "sync_violations": sorted(violations),
             "unenergized_motors": self._unenergized_motors(robot_name),
+            # 単発の再励磁が処理中か。**押した後の 0.1〜1.5 秒は
+            # `unenergized_motors` が消えない**ので、これが無いと操縦者には
+            # 「押しても何も起きない」ようにしか見えず 2 回目を押す (そして
+            # 「再励磁の処理中です」というトーストを受け取る)。可否も理由も
+            # サーバーが持つ、という原則どおり在飛そのものを配る
+            "reenergizing": self._is_reenergizing(robot_name),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
             "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
             "refreshers_running": all(r.is_running for r in ctx.target_refreshers),
