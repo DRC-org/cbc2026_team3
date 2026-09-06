@@ -850,6 +850,7 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 | `can_bus_strict` | `--strict` の点検は人が打つコマンドで、①②のどちらからも呼ばれない（下記） |
 | `health_ready` | ①は配信しているが、**誰も見ていなければ何も起きない**（下記） |
 | `estop_functional` | 押して止まることは①②のどちらも確かめない（下記） |
+| `operation_mode_sequence` | `can_start_match` は指差喚呼の完了しか見ず `OperationMode` を参照しない（下記） |
 | `y_axis_sync` / `rotate_sync` | 左右のずれは③が監視するが、機構の目視は人にしかできない |
 | `conveyor_run` / `conveyor_stop` | DC 基板はエンコーダも電流センスも持たない |
 | `pumps_run` | 同上（ポンプも DC 基板） |
