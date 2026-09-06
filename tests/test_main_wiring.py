@@ -174,6 +174,16 @@ class TestLoadPidConfig:
         assert "kf" not in result
         assert result["kp"] == 1.0
 
+    def test_non_numeric_value_is_not_silently_defaulted(self) -> None:
+        """数値でない値は lib.config_schema._parse_pid が起動時に既に拒否している。
+
+        本番経路ではここに数値でない値が届くことはないので、直接呼んだときに
+        警告 1 行で既定値へ倒す旧経路が残っていないことを確かめる
+        (型検査を config_schema へ一本化したので、ここでの二重チェックは持たない)。
+        """
+        with pytest.raises((TypeError, ValueError)):
+            _load_pid_config("lift_motor", {"kp": "abc"})
+
 
 class TestBuildPositionPid:
     def test_gains_are_applied(self) -> None:

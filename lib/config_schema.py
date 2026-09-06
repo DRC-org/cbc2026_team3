@@ -17,6 +17,7 @@ server / control) は自前のリテラルを持たず、ここを参照する�
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -414,8 +415,21 @@ def _parse_pid(source: str, motor_name: str, raw: object) -> Mapping[str, object
     path = f"motors.{motor_name}.pid"
     section = _require_mapping(source, path, raw)
     # 書いても効かないゲインを黙って捨てないため、キー名だけは起動時に突き合わせる。
-    # 値そのものは main._load_pid_config が既定値で補完する (書きかけの yaml を許す)
     _reject_unknown(source, path, section, _PID_KEYS)
+    for key, value in section.items():
+        if value is None:
+            # 未指定/null は書きかけの yaml とみなし、main._load_pid_config が
+            # 既定値で補完する (integral_limit の null だけは「制限なし」の正当な指定)。
+            continue
+        # _number() は bool を弾く (yaml の true は float() を通り 1.0 として静かに効く)。
+        # 実行中のゲイン差し替え (lib/server.py._invalid_gain_reason) と同じ扱いに揃える。
+        number = _number(source, f"{path}.{key}", value)
+        # .inf / .nan は yaml が float として素直に読んでしまい、かつ float() 変換も
+        # 例外を投げないので、既存の「数値でなければ既定値へ」という手当てをすり抜けて
+        # そのまま採用されていた (kp: .inf が警告 0 件で有効化される)。実行中のゲイン
+        # 検証 (_invalid_gain_reason) は弾いているので、起動時だけ通す非対称を残さない。
+        if not math.isfinite(number):
+            raise ValueError(f"{source}: {path}.{key} は有限の数値である必要があります: {value!r}")
     return MappingProxyType(dict(section))
 
 
