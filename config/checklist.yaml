@@ -138,8 +138,12 @@ checklists:
     - id: sub_lift_holds
       label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)
       group: motor_check
+    # **確認できるのは選択中のコートの向きだけ。** コンベアの搬送方向はコートで
+    # 逆になる (positions.conveyor.run がコート別) が、動作確認シーケンスは
+    # run -> stop の 1 往復しか回さないので、回るのは今選んでいるコートの向きに
+    # 限られる。両向きを見たいならコートを切り替えてもう一度動作確認を回す運用になる。
     - id: conveyor_run
-      label: コンベア 正転・逆転の目視確認
+      label: コンベアが選択中のコートの向きへ回ること確認 (逆コートは切替後に再確認)
       group: motor_check
     - id: conveyor_stop
       label: コンベア停止確認
