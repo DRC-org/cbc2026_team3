@@ -417,14 +417,37 @@ class TestJitter:
         assert len(warnings) == 1
 
     async def test_boundary_exactly_at_threshold_does_not_count(self) -> None:
-        """しきい値ちょうど (超過ではなく到達) は乱れに数えない (`>` であって `>=` でない)。"""
+        """しきい値ちょうど (超過ではなく到達) は乱れに数えない (`>` であって `>=` でない)。
+
+        `interval_s` は 2 の冪 (0.125) を使う —— `work_s = interval_s + threshold_s`
+        を素直な小数 (0.01 等) で作ると、浮動小数の丸めで `jitter` がしきい値と
+        1 ULP ずれ、`>` と `>=` のどちらでも同じ結果になって境界を検証できない
+        (0.01 では実際に `jitter == 0.004999999999999999` になり食い違った)。
+        2 の冪なら加減算が丸め無しで通り、`jitter` がしきい値とビット単位で一致する。
+        """
         clock = FakeClock()
-        threshold_s = 0.01 * JITTER_OVERRUN_FACTOR
-        task = _Recorder(clock, interval_s=0.01, work_s=threshold_s, stop_after=3)
+        interval_s = 0.125
+        threshold_s = interval_s * JITTER_OVERRUN_FACTOR
+        work_s = interval_s + threshold_s
+        assert work_s - interval_s == threshold_s  # 前提: 丸めが起きていないことの自己チェック
+        task = _Recorder(clock, interval_s=interval_s, work_s=work_s, stop_after=2)
 
         await task.run()
 
         assert task.jitter_overrun_count == 0
+
+    async def test_boundary_just_above_threshold_counts(self) -> None:
+        """しきい値をわずかに超えたら数える (`>` の反対側の境界)。"""
+        clock = FakeClock()
+        interval_s = 0.125
+        threshold_s = interval_s * JITTER_OVERRUN_FACTOR
+        task = _Recorder(
+            clock, interval_s=interval_s, work_s=interval_s + threshold_s + 1e-6, stop_after=2
+        )
+
+        await task.run()
+
+        assert task.jitter_overrun_count == 1
 
     async def test_worst_jitter_keeps_max_not_last(self) -> None:
         """最悪値は最大値を保持し、後続が平常に戻っても最新値へ上書きしない。"""
