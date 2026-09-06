@@ -12,7 +12,7 @@ import logging
 import pytest
 
 from lib.control.periodic import (
-    JITTER_OVERRUN_FACTOR,
+    JITTER_OVERRUN_MARGIN,
     LOG_THROTTLE_S,
     LogThrottle,
     PausablePeriodicTask,
@@ -389,7 +389,7 @@ class TestJitter:
         assert task.worst_jitter_s == pytest.approx(0.0)
 
     async def test_overrun_counts_when_period_exceeds_threshold(self) -> None:
-        """公称周期の (1 + JITTER_OVERRUN_FACTOR) 倍を超えたら乱れとして数える。"""
+        """公称周期の (1 + JITTER_OVERRUN_MARGIN) 倍を超えたら乱れとして数える。"""
         clock = FakeClock()
         # 1 tick が 0.02s かかる = 実周期 0.02s。公称 0.01s に対し超過分 0.01s は
         # しきい値 (0.01 * 0.5 = 0.005s) を上回るので、その次の tick 開始時に検知される
@@ -427,7 +427,7 @@ class TestJitter:
         """
         clock = FakeClock()
         interval_s = 0.125
-        threshold_s = interval_s * JITTER_OVERRUN_FACTOR
+        threshold_s = interval_s * JITTER_OVERRUN_MARGIN
         work_s = interval_s + threshold_s
         assert work_s - interval_s == threshold_s  # 前提: 丸めが起きていないことの自己チェック
         task = _Recorder(clock, interval_s=interval_s, work_s=work_s, stop_after=2)
@@ -440,7 +440,7 @@ class TestJitter:
         """しきい値をわずかに超えたら数える (`>` の反対側の境界)。"""
         clock = FakeClock()
         interval_s = 0.125
-        threshold_s = interval_s * JITTER_OVERRUN_FACTOR
+        threshold_s = interval_s * JITTER_OVERRUN_MARGIN
         task = _Recorder(
             clock, interval_s=interval_s, work_s=interval_s + threshold_s + 1e-6, stop_after=2
         )

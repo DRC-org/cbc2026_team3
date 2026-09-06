@@ -32,7 +32,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 __all__ = [
-    "JITTER_OVERRUN_FACTOR",
+    "JITTER_OVERRUN_MARGIN",
     "LOG_THROTTLE_S",
     "LogThrottle",
     "PausablePeriodicTask",
@@ -42,12 +42,15 @@ __all__ = [
 # 同一原因のログを毎周期出すと 200Hz でログが溢れ、本当に読みたい 1 行が流れる
 LOG_THROTTLE_S = 1.0
 
-# 実周期がこの割合を超えて公称値を上回ったら「乱れ」として数える。
+# 実周期の「公称値からの超過分 / 公称周期」がこの値を上回ったら乱れとして数える。
+# 名前が倍率 (1.5) ではなく超過分の割合 (0.5) なのは、値と名前を一致させるため ——
+# `grep` で辿り着いた読み手が、宣言の `0.5` とドキュメントの「1.5 倍」を突き合わせて
+# 止まらないようにする。0.5 = 公称の 1.5 倍で発火する。
 # `interval_s` からの相対値にするのは、200/50/20Hz の 3 種を跨ぐしきい値を
 # 絶対値で 1 組持つと読み手が都度換算する羽目になるため。
 # 値の根拠: 50Hz の偏差監視は「2 サンプル = 40ms で機構破損に間に合う」が
 # 前提 (`lib/axis_sync.py`)。1.5 倍 = 30ms は既にその予算の 75% を単独で食う。
-JITTER_OVERRUN_FACTOR = 0.5
+JITTER_OVERRUN_MARGIN = 0.5
 
 SleepFunc = Callable[[float], Awaitable[None]]
 TimeSource = Callable[[], float]
@@ -135,7 +138,7 @@ class PeriodicTask(abc.ABC):
         self._last_tick_at: float | None = None
         self._jitter_overrun_count = 0
         self._worst_jitter_s = 0.0
-        self._jitter_threshold_s = interval_s * JITTER_OVERRUN_FACTOR
+        self._jitter_threshold_s = interval_s * JITTER_OVERRUN_MARGIN
 
     # ------------------------------------------------------------------ #
     #  サブクラスが実装する
@@ -187,12 +190,19 @@ class PeriodicTask(abc.ABC):
 
     @property
     def jitter_overrun_count(self) -> int:
-        """実周期が公称値を大きく (``JITTER_OVERRUN_FACTOR`` 超) 上回った回数。"""
+        """実周期が公称値を大きく (``JITTER_OVERRUN_MARGIN`` 超) 上回った回数。"""
         return self._jitter_overrun_count
 
     @property
     def worst_jitter_s(self) -> float:
-        """観測した実周期の超過分 [s] の最大値。乱れが一度も無ければ 0.0。"""
+        """観測した実周期の超過分 [s] の最大値 (しきい値未満の乱れも含む)。
+
+        **超過が 1 件も無くても 0 とは限らない** —— ``jitter_overrun_count`` の 0 とは
+        別物である。実機の ``asyncio.sleep`` は必ず数百 us オーバーシュートするので、
+        公称どおりに回っている機体でもここには小さな正の値が入る。しきい値
+        (``JITTER_OVERRUN_MARGIN``) が実機未検証である以上、それを決めるための
+        唯一の観測値がこの値なので、更新を超過ブランチの内側へ移してはならない。
+        """
         return self._worst_jitter_s
 
     def reset_jitter_stats(self) -> None:
