@@ -146,6 +146,33 @@ describe("RobotControl の操作先", () => {
     );
   });
 
+  it("再励磁も自分の担当機へ宛てて送る", async () => {
+    // `_cmd_reenergize_motors` はロボット名が無い・未知なら拒否も返さず
+    // 黙って return するので、宛先を間違えると「押せるが何も起きず、
+    // 拒否トーストも出ない」という気付けない壊れ方になる
+    const { context } = mount(
+      "match",
+      robotState({
+        safety: {
+          sync_violations: [],
+          unenergized_motors: ["rotate_l"],
+          loops_running: true,
+          monitors_running: true,
+          refreshers_running: true,
+          position_loops: [],
+          sync_monitors: [],
+          target_refreshers: [],
+        },
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "再励磁" }));
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "reenergize_motors", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+
   it("ステップジャンプは確認を経てから宛先付きで送る", async () => {
     // 物理状態を確かめずに途中から再開すると機構をぶつける。確認なしで
     // 飛べる経路ができていないことも併せて守る

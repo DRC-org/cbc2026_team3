@@ -36,9 +36,9 @@ from lib.manual import ManualController
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
-from tests.fake_can import mock_can_manager, set_motors
+from tests.fake_can import mock_can_manager, mock_motor, set_motors
 from tests.feedback_frames import feed_edulite
-from tests.server_fixtures import ServerFixture
+from tests.server_fixtures import RecordingClient, ServerFixture
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
@@ -135,15 +135,16 @@ class TestExclusionGates:
             await gate.wait()
 
         fx.set_motor_check_task(asyncio.create_task(_never_finishes()))
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
-            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"}, requester=client)
             await asyncio.sleep(0)
             fx.can_manager("main_hand").activate_motors.assert_not_called()
-            fx.server._reject_command.assert_awaited_once()
-            args = fx.server._reject_command.await_args.args
-            assert args[1] == "reenergize_motors"
-            assert "動作確認" in args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert rejected[0]["command"] == "reenergize_motors"
+            assert "動作確認" in rejected[0]["reason"]
         finally:
             gate.set()
 
@@ -166,7 +167,8 @@ class TestExclusionGates:
 
         fx.can_manager("main_hand").activate_motors = _slow_activate
         fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
             await fx.command({"type": "e_stop"})
             await fx.command({"type": "e_stop_release"})
@@ -174,10 +176,11 @@ class TestExclusionGates:
             await asyncio.sleep(0)
             assert fx.server._reactivating
 
-            await fx.command({"type": "reenergize_motors", "robot": "sub_hand"})
+            await fx.command({"type": "reenergize_motors", "robot": "sub_hand"}, requester=client)
             fx.can_manager("sub_hand").activate_motors.assert_not_called()
-            fx.server._reject_command.assert_awaited_once()
-            assert "進行中" in fx.server._reject_command.await_args.args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert "進行中" in rejected[0]["reason"]
         finally:
             gate.set()
             await fx.wait_reactivation()
@@ -194,14 +197,16 @@ class TestExclusionGates:
             return []
 
         fx.can_manager("main_hand").activate_motors = _slow_activate
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
             await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
             await asyncio.sleep(0)
-            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"}, requester=client)
             await asyncio.sleep(0)
-            fx.server._reject_command.assert_awaited_once()
-            assert "処理中" in fx.server._reject_command.await_args.args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert "処理中" in rejected[0]["reason"]
         finally:
             gate.set()
             await fx.wait_reenergize("main_hand")
@@ -240,6 +245,64 @@ class TestFailureIsReported:
             assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["m1"]
             # 巻き込んでいない側は空のまま
             assert fx.state_message("sub_hand")["safety"]["unenergized_motors"] == []
+
+    async def test_activate_motors_exception_reports_only_set(self) -> None:
+        """`activate_motors` が例外を投げても、`only` に渡した集合がそのまま
+        `unenergized_motors` に反映される (`_activate_motors_for_robot` の
+        except 分岐。`only` は今回の PR の新規ロジックなので単独で確かめる)。
+
+        **`only` に「相方拡張でしか入らないモータ」(`rotate_l`) を混ぜる。**
+        `rotate_l` は `is_energized()` が True (健全) で、事前の
+        `_inactive_motors` にも載っていない —— `only` を無視する変異
+        (全モータ扱い) はもちろん、**except 分岐そのものを削って例外を
+        上位へ素通りさせる変異**(`_reenergize_motors` の外側 try/except が
+        握り潰し、`_inactive_motors` が更新されない) も、この動機で拾える
+        (`rotate_l` は生きた `is_energized()` からは絶対に出てこないので、
+        except 分岐が走らない限り最終結果に現れない)。無関係な `gripper`
+        (健全・非ペア) を同居させ、「`only` を無視して全モータ扱い」の変異は
+        `gripper` が紛れ込むことで拾う。
+        """
+        fx = ServerFixture.build()
+
+        rotate_r = mock_motor("rotate_r")
+        rotate_r.is_energized.return_value = False  # 無励磁 (相方拡張の起点)
+        rotate_l = mock_motor("rotate_l")
+        rotate_l.is_energized.return_value = True  # 健全 (相方拡張でのみ対象に入る)
+        gripper = mock_motor("gripper")
+        gripper.is_energized.return_value = True  # 無関係 (only に混ざってはならない)
+
+        can_manager = mock_can_manager(
+            {"rotate_r": rotate_r, "rotate_l": rotate_l, "gripper": gripper}
+        )
+        can_manager.activate_motors = AsyncMock(side_effect=RuntimeError("CAN 送信失敗"))
+
+        group = SyncGroup(
+            name="rotate",
+            members=(
+                MotorSpec(name="rotate_r", scale=1.0, offset=0.0),
+                MotorSpec(name="rotate_l", scale=-1.0, offset=0.0),
+            ),
+            tolerance=5.0,
+        )
+        monitor = SyncMonitor(
+            [group],
+            {"rotate_r": rotate_r, "rotate_l": rotate_l},  # type: ignore[arg-type]
+            last_feedback_at=lambda _name: time.time(),
+        )
+
+        fx.add_robot("main_hand", _EmptySequence("main_hand"), can_manager, sync_monitors=[monitor])
+        fx.add_robot("sub_hand", _EmptySequence("sub_hand"))
+
+        app = fx.create_app()
+        async with TestClient(TestServer(app)):
+            await asyncio.sleep(0.6)
+            await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
+            await fx.wait_reenergize("main_hand")
+
+            assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == [
+                "rotate_l",
+                "rotate_r",
+            ]
 
 
 class TestPreviouslyInactiveMotorsAreRetried:
@@ -703,15 +766,20 @@ class TestSetOperationModeDeniedWhileReenergizeInFlight:
             return []
 
         fx.can_manager("main_hand").activate_motors = _slow_activate
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
             await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
             await asyncio.sleep(0)
 
-            await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+            await fx.command(
+                {"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"},
+                requester=client,
+            )
             assert fx.operation_mode("main_hand") == "sequence"
-            fx.server._reject_command.assert_awaited_once()
-            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert "再励磁" in rejected[0]["reason"]
         finally:
             gate.set()
             await fx.wait_reenergize("main_hand")
@@ -760,14 +828,17 @@ class TestManualTargetDeniedWhileReenergizeInFlight:
         fx = _manual_fixture()
         await self._enter_manual(fx)
         gate = await self._start_slow_reenergize(fx)
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
             await fx.command(
-                {"type": "manual_jog", "robot": "main_hand", "axis": "axis", "delta": 0.1}
+                {"type": "manual_jog", "robot": "main_hand", "axis": "axis", "delta": 0.1},
+                requester=client,
             )
-            fx.server._reject_command.assert_awaited_once()
-            assert fx.server._reject_command.await_args.args[1] == "manual_jog"
-            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert rejected[0]["command"] == "manual_jog"
+            assert "再励磁" in rejected[0]["reason"]
         finally:
             gate.set()
             await fx.wait_reenergize("main_hand")
@@ -776,14 +847,17 @@ class TestManualTargetDeniedWhileReenergizeInFlight:
         fx = _manual_fixture()
         await self._enter_manual(fx)
         gate = await self._start_slow_reenergize(fx)
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
             await fx.command(
-                {"type": "manual_move", "robot": "main_hand", "axis": "axis", "position": "home"}
+                {"type": "manual_move", "robot": "main_hand", "axis": "axis", "position": "home"},
+                requester=client,
             )
-            fx.server._reject_command.assert_awaited_once()
-            assert fx.server._reject_command.await_args.args[1] == "manual_move"
-            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert rejected[0]["command"] == "manual_move"
+            assert "再励磁" in rejected[0]["reason"]
         finally:
             gate.set()
             await fx.wait_reenergize("main_hand")
@@ -792,14 +866,17 @@ class TestManualTargetDeniedWhileReenergizeInFlight:
         fx = _manual_fixture()
         await self._enter_manual(fx)
         gate = await self._start_slow_reenergize(fx)
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
+        client = RecordingClient()
+        fx.attach_clients(client)
         try:
             await fx.command(
-                {"type": "manual_set", "robot": "main_hand", "axis": "axis", "value": 0.2}
+                {"type": "manual_set", "robot": "main_hand", "axis": "axis", "value": 0.2},
+                requester=client,
             )
-            fx.server._reject_command.assert_awaited_once()
-            assert fx.server._reject_command.await_args.args[1] == "manual_set"
-            assert "再励磁" in fx.server._reject_command.await_args.args[2]
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert rejected[0]["command"] == "manual_set"
+            assert "再励磁" in rejected[0]["reason"]
         finally:
             gate.set()
             await fx.wait_reenergize("main_hand")
@@ -812,6 +889,10 @@ class TestManualTargetDeniedWhileReenergizeInFlight:
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
         await fx.wait_reenergize("main_hand")
 
-        fx.server._reject_command = AsyncMock()  # type: ignore[method-assign]
-        await fx.command({"type": "manual_jog", "robot": "main_hand", "axis": "axis", "delta": 0.1})
-        fx.server._reject_command.assert_not_called()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        await fx.command(
+            {"type": "manual_jog", "robot": "main_hand", "axis": "axis", "delta": 0.1},
+            requester=client,
+        )
+        assert client.of_type("command_rejected") == []
