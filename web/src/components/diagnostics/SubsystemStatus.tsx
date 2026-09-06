@@ -1,4 +1,11 @@
-import { ChevronDown, ChevronRight, PackageX, ShieldAlert, ShieldQuestion } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ListX,
+  PackageX,
+  ShieldAlert,
+  ShieldQuestion,
+} from "lucide-react";
 import { useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
@@ -11,6 +18,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   describeSafetyIssues,
   evaluateHealth,
+  failedTasks,
   firmwareUnconfirmedMotors,
   isReenergizePending,
   readableHealth,
@@ -130,6 +138,39 @@ function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
 }
 
 /**
+ * 投げっぱなしタスク (`asyncio.create_task` して待たないもの) が失敗したラベルの一覧。
+ * 平常時 (0 件) は何も出さない。
+ *
+ * **「異常」として赤くしない** —— `evaluateHealth` の判定 (`tone`) はここを経由しない
+ * (`FirmwareUnconfirmedNotice` と同じ位置付け)。緊急停止解除の再励磁・単発の再励磁・
+ * 同期ずれ検出からの全体緊急停止のいずれかが 1 度失敗した記録で、直っていても
+ * 試合開始まで消えない (`docs/checks_and_health.md` 参照)。
+ *
+ * **再起動を促さない。** これは CAN や機体の異常ではなく投げっぱなしタスクの内部例外
+ * (トレースバックは journal にしか無い) なので、直す手がかりは journal にしかない。
+ */
+function FailedTasksNotice({ labels }: { labels: string[] }) {
+  if (labels.length === 0) return null;
+
+  return (
+    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1">
+      {labels.map((label) => (
+        <li key={label} className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Icon as={ListX} className="shrink-0 text-info" />
+            <StatusBadge tone="info">タスク失敗</StatusBadge>
+            <span className="min-w-0 truncate text-base-content/80">{label}</span>
+          </span>
+          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+            再起動ではなく journal (journalctl -u cbc-control) で原因を確認してください
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
  * 安全機構の異常。平常時は 1 件も出ない。
  *
  * ラッチ中の軸は緊急停止を解除しても動かず、保護ループが死んでも WS は繋がったまま
@@ -202,6 +243,7 @@ export function SubsystemStatus({
   const readable = readableHealth(health);
   const riskyBuses = workpieceRiskBuses(health);
   const unconfirmedMotors = firmwareUnconfirmedMotors(safety);
+  const failedTaskLabels = failedTasks(safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
   // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
@@ -256,6 +298,7 @@ export function SubsystemStatus({
           ) : null}
           <WorkpieceRiskNotice buses={riskyBuses} />
           <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
+          <FailedTasksNotice labels={failedTaskLabels} />
           <SafetyIssues safety={safety} onReenergize={onReenergize} />
           <HealthIndicator health={readable} />
           {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、

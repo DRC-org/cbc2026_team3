@@ -65,6 +65,10 @@ _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 #: 1 回の配信周期 (50ms) に複数の記録が閉じることがある
 _TUNING_CAPTURE_BACKLOG = 8
 
+#: `watch_task` が拾った失敗ラベルの在庫上限 (ロボットごと)。あふれたら古いものから
+#: 捨てる。無制限に伸ばすと、直したはずの古い失敗がいつまでも画面に残り続ける。
+_FAILED_TASK_BACKLOG = 5
+
 #: 「励磁されているはず」の起点から、無励磁を異常として報告し始めるまでの猶予。
 #: enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓がある。
 #: DM3520 の再送は 20Hz (50ms) なので、その 10 倍を取れば偽報告は出ない。
@@ -214,6 +218,13 @@ class RobotServer:
         # タスクで、同じロボットへの二重投入を防ぐ (in-flight のまま次の押下が来ると
         # 同じバスへ `activate_motors` が 2 重に走り、フィードバック待ちが競合する)
         self._reenergize_tasks: dict[str, asyncio.Task[None]] = {}
+        # `watch_task` が拾った、投げっぱなしタスクの失敗ラベル (ロボット名 → 在庫)。
+        # 先行事例は `BusHealthInfo.rx_down_episodes` —— journal にしか出ていなかった
+        # 異常を画面へ出す形をそのまま踏襲する。**復帰しても消さない。リセットは
+        # `_handle_match_start` の前縁リセットだけ**(`can_manager.reset_rx_down_episodes()`
+        # の隣にある)。黙って消えると、直る前に流し見た操縦者は失敗が起きたこと
+        # 自体に気付けない
+        self._failed_tasks: dict[str, deque[str]] = {}
         # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
         # 実機運用時は False のまま影響しない。
         self._dry_run: bool = dry_run
@@ -283,6 +294,59 @@ class RobotServer:
         書き換えは e_stop / e_stop_release コマンド経由に限りたいため読み取り専用。
         """
         return self._e_stop_active
+
+    @property
+    def robot_names(self) -> tuple[str, ...]:
+        """登録済みロボット名 (登録順)。
+
+        `main.py` は `_robots` へ (private なので) 触れないが、全体緊急停止
+        (`activate_e_stop`) の失敗をどのロボットへも帰属させたい —— 同期ずれ検出は
+        1 台の軸から起きても、失敗すれば「そのとき実際にどのロボットも保護されて
+        いない」ので、`_reactivate_motors` の失敗を全ロボットへ帰属させるのと
+        同じ理由になる。`CANManager.bus_names` と同じ形 (書き換え可能な list を
+        渡さない) にする。
+        """
+        return tuple(self._robots)
+
+    def watch_task(
+        self, task: asyncio.Task[None], *, context: str, robots: Collection[str]
+    ) -> None:
+        """投げっぱなしタスク (``asyncio.create_task`` して待たないもの) の失敗を拾う。
+
+        `done_callback` が集合から取り除くだけで `t.exception()` を取らない箇所が
+        3 つある (緊急停止解除の再励磁・単発の再励磁・同期ずれ検出からの全体緊急停止)。
+        例外そのものは消えないが (CPython が "Task exception was never retrieved" を
+        journal へ出す)、どのロボットのどの経路か・いつ起きたかが画面から読めない。
+        先行事例は `BusHealthInfo.rx_down_episodes` (journal にしか出ていなかった
+        CAN 途絶を UI へ出した) で、同じ形に寄せる —— `safety.failed_tasks` として
+        配信し、対象ロボットへ人が読めるラベルで積む。
+
+        呼び出し側の `add_done_callback` (GC 対策で参照を保持する集合) は消さない。
+        ここは done_callback を**追加**するだけで、既存の集合管理とは独立に動く。
+
+        **`t.cancelled()` を必ず先に見る。** `Task.exception()` はキャンセル済み
+        タスクに対して `CancelledError` を送出するので、見ないと shutdown の
+        一斉キャンセル (`_shutdown_step` 等) でこのコールバック自身が例外を撒く。
+        キャンセルは「タスクが失敗した」ではなく「後始末に畳まれた」なので報告しない。
+        """
+
+        def _on_done(t: asyncio.Task[None]) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is None:
+                return
+            logger.error("投げっぱなしタスクが失敗しました: %s", context, exc_info=exc)
+            label = f"{context} ({type(exc).__name__})"
+            for robot_name in robots:
+                failures = self._failed_tasks.setdefault(
+                    robot_name, deque(maxlen=_FAILED_TASK_BACKLOG)
+                )
+                # 同じラベルを重複させない (連発する障害で埋め尽くさせない)
+                if label not in failures:
+                    failures.append(label)
+
+        task.add_done_callback(_on_done)
 
     def add_robot(
         self,
@@ -656,6 +720,10 @@ class RobotServer:
         # GC で消えないよう参照を保持する (WsHub の切り離しタスクと同じ形)
         self._reactivate_tasks.add(task)
         task.add_done_callback(self._reactivate_tasks.discard)
+        # このタスクは全ロボットぶんまとめて 1 本 (ロボットを順に処理する)。
+        # 失敗したときはそのとき実際にどのロボットも励磁されていないので、
+        # 全ロボットへ帰属させる
+        self.watch_task(task, context="緊急停止解除の再励磁", robots=self.robot_names)
 
     async def _cmd_reenergize_motors(self, data: dict, requester: WSOrNone) -> None:
         """励磁が落ちたモータを、機体を止めずに戻す明示操作 (docs/checks_and_health.md)。
@@ -691,6 +759,8 @@ class RobotServer:
         # 1 台 0.5 秒待つため、待つとその操縦者の WS が数秒間 1 通も処理しなくなる)
         task = asyncio.create_task(self._reenergize_motors(robot_name))
         self._reenergize_tasks[robot_name] = task
+        # 単発の再励磁は対象ロボット 1 台ぶんなので、失敗の帰属もその 1 台だけ
+        self.watch_task(task, context="再励磁", robots=[robot_name])
         # 完了とこのコールバックの実行のあいだには `call_soon` 1 回ぶんの窓がある。
         # そこへ次の押下が入ると (在飛ガードは `not task.done()` なので通る) 同じ
         # キーへ新しいタスクが載るため、**無条件に pop すると新しいタスクの登録ごと
@@ -1264,10 +1334,12 @@ class RobotServer:
         # に直前の試合の記録を消さないため。CANManager も PeriodicTask も「試合」を
         # 知らないぶん、いつ呼ぶかはここ (サーバー) が決める。
         # ジッタの集計 1 行は match_finish が出すので、ここでは黙って 0 に戻すだけ。
-        for ctx in self._robots.values():
+        for name, ctx in self._robots.items():
             ctx.can_manager.reset_rx_down_episodes()
             for task in self._periodic_tasks(ctx):
                 task.reset_jitter_stats()
+            # `watch_task` が積んだ失敗ラベルも同じく前縁リセット
+            self._failed_tasks.pop(name, None)
 
         # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
         logger.info("試合開始: court=%s", self.match.court.value)
@@ -1428,6 +1500,10 @@ class RobotServer:
             "sync_violations": sorted(violations),
             "unenergized_motors": self._unenergized_motors(robot_name),
             "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
+            # 投げっぱなしタスク (`watch_task`) が拾った失敗。平常時は空配列。
+            # 古い順に並ぶ (`_FAILED_TASK_BACKLOG` を超えた分は古いものから消える)。
+            # 復帰しても消えない —— リセットは `_handle_match_start` の前縁リセットだけ
+            "failed_tasks": list(self._failed_tasks.get(robot_name, ())),
             # 単発の再励磁が処理中か。**押した後の 0.1〜1.5 秒は
             # `unenergized_motors` が消えない**ので、これが無いと操縦者には
             # 「押しても何も起きない」ようにしか見えず 2 回目を押す (そして

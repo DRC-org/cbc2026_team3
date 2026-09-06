@@ -982,6 +982,15 @@ def _make_sync_violation_handler(
         # 参照を保持しないと GC でタスクが消え、緊急停止が発火しないことがある
         task = asyncio.create_task(server.activate_e_stop(reason=reason))
         tasks.add(task)
+        # 失敗したら「全体緊急停止が発火しなかった」ことになる。数える側は
+        # server.watch_task に一本化する (main.py に 2 つ目のカウンタを作らない)。
+        # `activate_e_stop` は全体緊急停止なので、失敗すればそのとき実際に
+        # どのロボットも保護されていない —— `_reactivate_motors` の失敗を
+        # 全ロボットへ帰属させるのと同じ理由で robots も全ロボットにする
+        # (起点となった軸は context の文言に残す)
+        server.watch_task(
+            task, context=f"{robot_name} の同期ずれ検出 → 緊急停止", robots=server.robot_names
+        )
         task.add_done_callback(tasks.discard)
 
     return on_violation

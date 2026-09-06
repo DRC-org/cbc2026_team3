@@ -178,6 +178,20 @@ export function firmwareUnconfirmedMotors(safety: SafetyPayload | undefined): st
 }
 
 /**
+ * 投げっぱなしタスク (`RobotServer.watch_task`) が拾った失敗ラベル。平常時は空配列。
+ *
+ * **これも「壊れている」ではない。** 一度失敗したことがある、というだけの記録で、
+ * 復帰しても消えない (試合開始まで残る)。`describeSafetyIssues` には含めず、
+ * `evaluateHealth` の判定 (`tone`) も動かさない (`firmwareUnconfirmedMotors` と同じ
+ * 位置付け) —— 過去の 1 回の失敗で機体が今も壊れていると言い切れないため。
+ */
+export function failedTasks(safety: SafetyPayload | undefined): string[] {
+  if (!safety || safety === MALFORMED) return [];
+  if (safetyShapeErrors(safety).length > 0) return [];
+  return safety.failed_tasks;
+}
+
+/**
  * 安全機構を判定できなかったことを、異常 1 件として出す。
  *
  * 「読めなかったから何も出さない」は最悪の選択肢になる —— 同期ずれラッチも
