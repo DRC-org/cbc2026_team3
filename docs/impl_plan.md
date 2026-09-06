@@ -3098,7 +3098,7 @@ M3508 ベンチとは開くバスが違うので同居できない。
 |---|---|
 | `config/bench/servo/system.yaml` | `can_buses` が `generic_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
 | `config/bench/servo/main_hand.yaml` | サーボ基板 1 枚の 4 スロット（`servo_sv0`〜`servo_sv3`）+ センサ 1（`servo_sv4`）。`can_id` は実機の DIP に合わせて 0x48〜0x4C |
-| `config/bench/servo/main_hand_positions.yaml` | 4 軸とも `command_mode: position`。**本番と違い `manual:` を書く**（後述）。範囲はファームのクランプ値と同じ 0〜30deg |
+| `config/bench/servo/main_hand_positions.yaml` | 4 軸とも `command_mode: position`。**本番と違い `manual:` を書く**（後述）。範囲は `manual: {min: 0.0, max: 30.0}`。**ファームのクランプ（`kGripperLimits` 等。2026-09-06 にスロットごとの独立した定数へ分離、いずれも現在 0〜270deg）とはもう一致していない** —— yaml 側は分離前の値のまま据え置かれている |
 | `config/bench/servo/checklist.yaml` | 可動範囲の端・センサ反応・非常停止時に脱力しないことの目視項目 |
 
 ```bash
@@ -3115,12 +3115,14 @@ uv run python main.py --system config/bench/servo/system.yaml \
 `command_mode: position` の軸なので `_parse_manual` に受理される（duty 軸の DC ベンチとの違い）。
 
 **可動範囲はファームのクランプ値と一致させる。** `firmware/servo/include/config.h` の
-`kProvisionalLimits`（現在 `{0.0, 30.0, 90.0}` = 0〜30deg / 90deg/s）が `setTarget` で
-クランプするため、位置定数に 40deg と書いても基板は 30deg までしか動かない。その状態は
-UI からは「送ったのに途中で止まる」だけで、`SET_TARGET` には 40deg が載っているので
-candump からも原因が読めない。広げるときは yaml ではなくファーム側を直すこと（ただし
-この値は仮値であり、機構が付いた状態で当たらない範囲を実測してから。広すぎると
-メカストッパに当たったまま停動して焼損する）。
+`kGripperLimits` / `kWallFLimits` / `kWallRLimits`（このベンチが使う基板 #0 の
+SV0-SV2 に対応。2026-09-06 にスロットごとの独立した定数へ分離済みで、現在はいずれも
+`{0.0, 270.0, 90.0}` = 0〜270deg / 90deg/s）が `setTarget` でクランプするため、
+位置定数にその範囲を超える値を書いても基板はクランプ端までしか動かない。その状態は
+UI からは「送ったのに途中で止まる」だけで、`SET_TARGET` には指令値がそのまま載って
+いるので candump からも原因が読めない。広げるときは yaml ではなくファーム側の
+そのスロットの定数を直すこと（ただしこの値は仮値であり、機構が付いた状態で当たらない
+範囲を実測してから。広すぎるとメカストッパに当たったまま停動して焼損する）。
 
 **この基板は DC 基板と違って動作確認（`motor_check`）にかけられる。** `FEEDBACK` が
 DLC=3 で Byte1-2 に現在角を載せ、到達を Byte0 bit0 で報告するため、「動いたか」を

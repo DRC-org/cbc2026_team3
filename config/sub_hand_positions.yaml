@@ -13,7 +13,9 @@
 #     片側絶対角で書き、機械原点をずらしたいときは axes.<軸>.offset で寄せる
 #   - **ファームの angle_min / angle_max を超えた値は黙ってクランプされる。** 症状は
 #     「送ったのに途中で止まる」だけで、SET_TARGET には書いた値が載っているので
-#     candump からも読めない。範囲を広げるときはファームの kProvisionalLimits を直す
+#     candump からも読めない。範囲を変えるときはファーム側の**そのスロットの**
+#     定数を直す (kGripperLimits / kWallFLimits / kWallRLimits /
+#     kSubGripperLimits。1 つを共有すると 1 スロットの都合で全部が緩む)
 
 axes:
   # RobStride EDULITE 05 の補助アーム関節。指令・フィードバックともに rad。
