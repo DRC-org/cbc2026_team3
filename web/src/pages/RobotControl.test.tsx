@@ -119,6 +119,91 @@ describe("試合時間タイマーの配置", () => {
   });
 });
 
+/**
+ * 右カラム (試合時間 + 機体状態) は flex-col なので、**クロス軸は横**になる。
+ * 子に `align-self` を付けると幅が `stretch` から `fit-content` へ変わり、
+ * 列の幅ではなく内容が幅を決める —— 実際に `self-start` が付いていて、
+ * 試合時間パネルは 157px まで縮んで `0:00` が枠からはみ出し、機体状態パネルは
+ * 424px へ膨らんでビューポートを 58px 越えた (診断ツリーが画面外)。
+ *
+ * **flex-col の子は主軸 (縦) には伸びないので align-self は要らない。**
+ * 内容ぶんの高さに留めるための `self-start` は grid の子の話 (grid なら
+ * クロス軸が縦) で、ここへ書き写すと高さではなく幅を壊す。
+ */
+describe("試合中の右カラム", () => {
+  const TIMERS: MatchState["timer"][] = [
+    null,
+    { running: true, elapsed_ms: 60_000, duration_ms: 180_000 },
+  ];
+
+  it("パネルの幅を列に追従させる — クロス軸の指定を持たない", () => {
+    for (const timer of TIMERS) {
+      const view = mount("match", robotState(), timer);
+
+      const column = screen.getByText("試合時間").closest("section")?.parentElement;
+      expect(column?.className).toContain("flex-col");
+
+      const panels = Array.from(column?.children ?? []);
+      // 機体状態が別の列へ移ったら、この検査は空振りになる
+      expect(panels.some((el) => el.textContent?.includes("機体状態"))).toBe(true);
+
+      const crossAxisPinned = panels.flatMap((el) =>
+        Array.from(el.classList)
+          .filter((name) => name.startsWith("self-"))
+          .map((name) => `${el.querySelector("h2")?.textContent}: ${name}`),
+      );
+      expect(crossAxisPinned).toEqual([]);
+
+      view.unmount();
+    }
+  });
+
+  /**
+   * 幅とは別の事実。**縦が足りないときにどちらが縮むか**を固定する。
+   *
+   * 機体状態は異常時に自分から展開するので、列の高さを超えるのは平常ではなく
+   * 「何かが起きている最中」になる。そこで flex の既定 (`flex-shrink: 1`) に
+   * 任せると両方が縮み、削れる余地の無い試合時間パネルは caption が数字の
+   * 下半分に重なって読めなくなる (実機で発生)。試合中に最も参照する値なので、
+   * 縮むのは内部スクロールを持つ機体状態の側でなければならない。
+   */
+  it("縦が足りないときは機体状態だけが縮む — 試合時間は潰さない", () => {
+    // 強制展開させる。dry-run の操縦者画面が常にこの状態になる
+    const view = mount(
+      "match",
+      robotState({
+        safety: {
+          sync_violations: [],
+          unenergized_motors: ["rotate_l", "rotate_r"],
+          firmware_unconfirmed_motors: [],
+          reenergizing: false,
+          loops_running: true,
+          monitors_running: true,
+          refreshers_running: true,
+          position_loops: [],
+          sync_monitors: [],
+          target_refreshers: [],
+        },
+      }),
+      { running: true, elapsed_ms: 60_000, duration_ms: 180_000 },
+    );
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+
+    const timerPanel = screen.getByText("試合時間").closest("section");
+    const statusPanel = screen.getByText("機体状態").closest("section");
+
+    expect(timerPanel?.classList.contains("shrink-0")).toBe(true);
+    // 機体状態は縮む側のまま。`min-h-0` が無いと中身の高さが下限になり、
+    // 列を越えて伸びる (内部のモータ一覧のスクロールへ落ちない)
+    expect(statusPanel?.classList.contains("shrink-0")).toBe(false);
+    expect(statusPanel?.classList.contains("min-h-0")).toBe(true);
+    // 縦を食い尽くす `flex-1` は付けない。平常時に全高の白い箱になる
+    expect(statusPanel?.classList.contains("flex-1")).toBe(false);
+
+    view.unmount();
+  });
+});
+
 describe("RobotControl の操作先", () => {
   it("主操作はすべて自分の担当機へ宛てて送る", async () => {
     // 2 名の操縦者が別タブで同じ画面を開く。宛先を間違えると、押した本人の

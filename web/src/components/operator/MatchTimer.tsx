@@ -16,6 +16,12 @@ import type { MatchTimer as MatchTimerValue } from "@/lib/protocol";
  * 配信することで `useRobotStatus()` を読む全画面の再描画を抑えており、毎秒
  * 変わる値を載せるとその前提が崩れる。加えて配信が詰まった 1 台ではタイマー
  * だけが凍り、WebSocket は開いたままなので操縦者は気付けない。
+ *
+ * **右カラムでは縮まない側に置く (`shrink-0`)。** 高さは中身で決まり切っていて
+ * 削れる余地が無いのに、flex の既定 (`flex-shrink: 1`) は隣の機体状態パネルが
+ * 伸びたぶんをここからも取る —— caption が数字の下半分に重なって読めなくなる。
+ * 縮むのは内部スクロールを持つ機体状態パネルの側でなければならない。
+ * **クロス軸 (幅) の `self-start` を戻してはならない**（別の不具合になる）。
  */
 
 /** 表示が変わる瞬間に起きるための余裕。境界ちょうどだと 1 周期取りこぼす */
@@ -99,7 +105,7 @@ export function MatchTimer({ timer }: MatchTimerProps) {
   // 残り 0:00 を確信して表示することになる
   if (!timer) {
     return (
-      <Panel legend="試合時間" className="self-start">
+      <Panel legend="試合時間" className="shrink-0">
         <div className="text-center text-[1.1em] text-base-content/60">タイマー未受信</div>
       </Panel>
     );
@@ -115,7 +121,7 @@ export function MatchTimer({ timer }: MatchTimerProps) {
   const caption = running ? "残り時間" : elapsedMs === 0 ? "開始前" : "試合終了時点の残り";
 
   return (
-    <Panel legend="試合時間" className="self-start">
+    <Panel legend="試合時間" className="shrink-0">
       <div className="flex flex-col items-center gap-[0.1em] py-1">
         <span className="font-mono text-[3.4em] leading-none font-bold tabular-nums">
           {formatRemaining(remaining)}

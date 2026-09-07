@@ -152,8 +152,18 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
    * 準備中は配線確認が目的のフェーズなので開いた状態から始め、試合中は
    * 平常時 1 行へ畳む (操縦者は機体を見ており、画面へ視線を戻すのは一瞬しかない)。
    * ただし手動中は畳まない —— 機体を直接動かしている最中は、その前提が成り立たない。
+   *
+   * `className` に渡してよいのは主軸 (縦) の伸長指定だけ。flex-col の子へ
+   * `self-start` のようなクロス軸の指定を足すと幅が `fit-content` へ落ち、
+   * 診断ツリーが列の幅を無視して縮む / 溢れる。
+   *
+   * **試合中の右カラムでは、このパネルが縮む側を引き受ける。** 隣の試合時間は
+   * `shrink-0` で潰れないので、強制展開で列の高さを超えたぶんはここが吸って
+   * 内部のスクロール (モータ一覧) へ落ちる —— 縮めるための `min-h-0` は
+   * `Panel` が最初から持つ。**`flex-1` は付けない**: 中身が数行しかない
+   * 平常時に全高の白い箱になる。
    */
-  const subsystemPanel = (open: boolean, className: string) => (
+  const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
       <SubsystemStatus
         health={state.health}
@@ -256,7 +266,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         <div className="flex min-h-0 flex-col gap-2">
           <MatchTimer timer={matchState.timer} />
 
-          {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : "self-start")}
+          {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : undefined)}
         </div>
       </div>
 
