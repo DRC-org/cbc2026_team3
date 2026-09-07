@@ -1030,7 +1030,7 @@ checklist.yaml すべて —— 本番と `config/bench/*` —— が対象）�
   `docs/impl_plan.md` でも「試合前点検」と位置付けられているのに、**操縦者に実行させる
   導線が config にも UI にも 1 つも無かった**。`cbc-can.service` は `--strict` を
   付けずに呼ぶので CAN が 0 本でも `RemainAfterExit=yes` で success になり、
-  `cbc-control.service` の `Requires=cbc-can.service` は**何も守っていない**
+  `cbc-control.service` の `Wants=cbc-can.service` は**何も守っていない**
   （`--strict` を付けない判断とその理由は `scripts/cbc-can.service` のコメント）。
   つまり「揃っているか」に答えるのは、この 1 行の指差喚呼だけである
 - **`health_ready`** — ①は `state.safety.unenergized_motors` まで配信しているが、

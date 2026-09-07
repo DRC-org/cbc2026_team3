@@ -294,6 +294,32 @@ journalctl -u cbc-control -f             # ログ追跡
 走っている制御プログラムを落とさないよう、`cbc-control` は `restart` もしない
 （試合中に unit を入れ直しただけで機体が止まるのを避ける）。
 
+### udev の CAN 再起動で制御プログラムを道連れにしない（`Wants=cbc-can.service`）
+
+`cbc-control.service` は `Requires=cbc-can.service` を持っていたが、`Wants=` へ落とした
+（`After=` の順序宣言はそのまま）。`Requires=` は依存先が明示的に stop / **restart**
+されたときにこちらへ伝播する一方、`can_config.py` が生成する udev ルールは CANable の
+net デバイスが add されるたびに**無条件で** `systemctl --no-block restart cbc-can.service`
+を打つ。つまり USB の再列挙 —— 抜けかけ・接触不良・ハブのリセット、`install.sh` の
+`udevadm trigger --action=add` —— のたびに**試合中の制御プログラムが道連れで再起動**し、
+シーケンス位置も励磁もタイマーも飛んでいた。しかも `StartLimitBurst=3` を消費するので、
+60 秒以内に 3 回バウンドすれば `failed` で固定され、復帰に `reset-failed` が要る。
+
+**依存を弱めても診断性は落ちない。** CAN が上がっていなければ `main.py` の `_create_bus`
+が 1 行のメッセージを残して落ちる。そもそもこの依存は「CAN が揃っていること」を保証して
+いない（`cbc-can.service` は `--strict` なしなので 1 本も up しなくても success で終わる）。
+
+**`cbc-can-watchdog.service` の `Requires=cbc-can.service` は残す。** バスが up して
+いない状態で監視しても復旧するものが無く、道連れの再起動で失うものも無い —— 判定に使う
+状態はすべてプロセス内にあって次の周期に作り直され、唯一の後始末（復旧の down/up の
+途中で殺されるとバスが down のまま残る）は `can_watchdog.sh` の EXIT トラップが持つ。
+
+再発防止は `tests/test_can_config.py::test_udev_restart_does_not_take_down_the_control_program`
+—— 生成される udev ルールと `scripts/cbc-control.service` の両方を読み、①udev ルールが
+実際に `cbc-can.service` を restart していること（前提）②制御プログラムの unit が
+`Requires=` ではなく `Wants=` を宣言していること、を突き合わせる（①を見ないと、restart を
+やめた後にも落ち続ける検査になる）。
+
 ### SIGTERM を後始末経路へ合流させる
 
 `systemctl stop` / `restart` が送るのは SIGTERM で、既定の扱いはプロセスの即死。
@@ -6344,7 +6370,7 @@ disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）�
 |---|---|---|
 | 位置定数の実機反映手順が手動 | 「Phase 5 > 機構完成後にやること」参照。機構担当と共有する棚卸し表は `docs/mechanism_handoff.md` へ切り出した | **メインハンドの `y_axis` / `rotate` は着手済み**（2026-09-05 に実測値を反映）。`gripper` / `wall_f` / `wall_r` / `conveyor` とサブハンド側は未着手 |
 | CANable が 1 本欠けると起動できず、systemd で起動不能に固定される | `main.py` が open するのは**そのロボットが実際に使うバスだけ**（`_robot_bus_names`）になった。メインハンドは `can_dm3520` を、サブハンドは `can_m3508` を開かない（受信ループも 8 本 → 4 本）。ただし既定は両ハンドを読むので、**どの 1 本が欠けても既定構成は起動しない**ことは変わらない。`cbc-control.service` の `StartLimitBurst=3` / `RestartSec=2` により**約 6 秒で `failed` に固定**され、以後 `systemctl start` すら通らない | 復旧には `systemctl reset-failed` が要る。会場での切り分け手順は `docs/venue_recovery.md` §1（`--strict` で欠けを特定 → 挿し直し → `reset-failed` → 起動）。**片ハンドだけで出る逃げ道が実効になった** —— `can_m3508` が欠けたら `--config config/sub_hand.yaml`、`can_dm3520` なら `--config config/main_hand.yaml` でそのハンドは起動する（`can_edulite` / `can_generic` は両ハンドが使うので逃げられない）。バスが開けなければ `SystemExit` で 1 行のメッセージ |
-| `cbc-can.service` は CAN が 0 本でも success で終わる | `--strict` を付けずに `setup_can.sh` を呼び、`RemainAfterExit=yes` なので `cbc-control.service` の `Requires=` は何も守っていない | **意図的**（`--strict` を付けると片ハンドだけの練習・ベンチ・`--dry-run` が一律にできなくなる。理由は `scripts/cbc-can.service` のコメント）。揃っているかは指差喚呼 `can_bus_strict` が人に確認させる。**バスの絞り込み（`_robot_bus_names`）を入れた後に再検討したが、判断は変えない** —— 既定は両ハンドを読むのでどの 1 本が欠けても `cbc-control` は起動せず、`--strict` を足しても得るものが無い。一方、欠けたバスを使わないほうのハンドを手で起動する逃げ道は、この unit が `failed` になると `Requires=` に引きずられて塞がる |
+| `cbc-can.service` は CAN が 0 本でも success で終わる | `--strict` を付けずに `setup_can.sh` を呼び、`RemainAfterExit=yes` なので `cbc-control.service` の `Wants=`（`Requires=` から落とした。理由は「サービス化（systemd）」の『udev の CAN 再起動で制御プログラムを道連れにしない』）は何も守っていない | **意図的**（`--strict` を付けると、バスが揃っていないのが常態の片ハンド練習・ベンチ・`--dry-run` で毎回この unit が `failed` で残る。理由は `scripts/cbc-can.service` のコメント）。揃っているかは指差喚呼 `can_bus_strict` が人に確認させる。**バスの絞り込み（`_robot_bus_names`）を入れた後に再検討したが、判断は変えない** —— 既定は両ハンドを読むのでどの 1 本が欠けても `cbc-control` は起動せず、`--strict` を足しても得るものが無い。一方、`failed` になると `Requires=cbc-can.service` のままの `cbc-can-watchdog.service` が上がらず、**欠けたバスを使わないほうのハンドで練習を続けるあいだ bus-off 復旧の常駐保護だけが外れる** |
 | `deploy.sh` が会場でネットワークを要求しうる | `uv sync --frozen` / `pnpm install --frozen-lockfile` は、ロックが満たされていなければ依存解決へ降りる | `--no-install` を足した（ビルドと再起動だけ）。**会場入りの前に一度ネットワークのある場所で素の `deploy.sh` を回してキャッシュを温めておくこと** |
 | CAN 復旧の `down`/`up` が基板のウォッチドッグを満了させる | `scripts/can_watchdog.sh` の `recover()` に試合中かどうかのゲートは無い。`command_timeout_ms` 既定 500ms に対し down/up は 1 秒弱 | **電磁弁が消磁し、吸着で保持しているワークが落ちる。** ゲートを付けないのは「バスが戻らない」ほうが重いため。運用で受ける —— 試合中に journal へ `[ WD ]` が出たらワーク落下を疑う。**2026-09-05 に UI 表示を追加**: `CANManager` がバス別に途絶の立ち上がりを `rx_down_episodes` として数え（復帰しても 0 に戻らず、試合開始でリセット）、`control_type: on_off` のモータが載っているバスかどうか (`may_affect_workpiece`) と合わせてサーバーが判定・配信する。`SubsystemStatus` は該当バスがあるときだけ「CAN 途絶 N回」のチップを自分から開いて主張する（`BusHealth` の DOWN/DEGRADED 判定そのものは変えない）。詳細は `docs/checks_and_health.md` の「途絶エピソード数と UI 表示」節、手順は `docs/venue_recovery.md` §3-1 |
 
