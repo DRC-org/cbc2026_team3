@@ -206,7 +206,7 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
     // 基板 #0（DIP=0）: メインハンド
     {
         {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 gripper
-        {SlotRole::Servo, 5, 180.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 wall_f
+        {SlotRole::Servo, 5, 270.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 wall_f
         {SlotRole::Servo, 6, 90.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 wall_r
         // **実機で確認済み**（CAN ID 0x343 の FEEDBACK を実測）: 非接触で LOW、
         // 接触で HIGH。したがって sensorActiveLow は false。
