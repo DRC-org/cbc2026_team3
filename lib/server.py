@@ -584,13 +584,23 @@ class RobotServer:
         return reason
 
     def _is_reenergizing(self, robot_name: str) -> bool:
-        """このロボットの単発再励磁が in-flight か。**判定はここ 1 箇所だけが持つ。**
+        """このロボットのモータを今励磁し直しているか。**判定はここ 1 箇所だけが持つ。**
 
         同じ判定が 4 箇所 (シーケンス系ゲート・手動への切替・手動指令・動作確認の
         起動可否) と配信 (`_safety_state`) から要る。`not task.done()` を書き写すと、
         タスクの持ち方を変えたときに一部だけが古い判定のまま残り、**塞いだつもりの
         経路だけが素通りする**。
+
+        **緊急停止解除の再励磁 (`_reactivate_motors`) もここに含める。** 単発再励磁と
+        同じ `activate_motors`「現在角を書いてから enable」を打つので、
+        `blocked_during_reenergize` が防ぎたい害 —— `move_to` が書いた目標をフォルト
+        前の現在角が上書きし、`wait_reached` が動かない位置を見続ける —— は両者で
+        同型である。在飛判定が 2 系統に分かれているのは実装の都合であって、
+        呼び出し側から見た「今励磁し直している」は 1 つ。あちらは全ロボットぶんを
+        まとめて処理するので、**ロボット名に依らず True で正しい**。
         """
+        if self._reactivating:
+            return True
         task = self._reenergize_tasks.get(robot_name)
         return task is not None and not task.done()
 
