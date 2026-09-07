@@ -17,6 +17,7 @@ server / control) は自前のリテラルを持たず、ここを参照する�
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -234,9 +235,21 @@ def _number(source: str, path: str, raw: object) -> float:
     if isinstance(raw, bool) or not isinstance(raw, int | float | str):
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}")
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}") from exc
+
+    # **NaN と無限大はここで落とす。値域検査では捕まえられない。** yaml の `.nan` も
+    # 文字列の `"nan"` も float() を通り、NaN は比較がすべて False になるので
+    # `value <= 0` も `warning > critical` も素通りする —— CAN プロトコルから float を
+    # 外した理由 (CLAUDE.md) とまったく同じ失敗様式で、しきい値として内部へ入ると
+    # 「全モータが恒久 STALE なのに設定は正常に見える」形でしか現れない。
+    # 無限大は比較を通ってしまうぶんさらに悪く、`feedback_timeout_ms: .inf` は
+    # 「途絶検出が黙って無効」、`temp_warning_c: .inf` は「温度警告が黙って無効」に
+    # なる (どちらも検査を通った正当な設定として起動ログにも出ない)
+    if not math.isfinite(value):
+        raise ValueError(f"{source}: {path} が有限な数値ではありません: {raw!r}")
+    return value
 
 
 def _integer(source: str, path: str, raw: object) -> int:
@@ -276,12 +289,34 @@ def _parse_can_buses(source: str, raw: object) -> dict[str, str]:
     if not buses:
         # バス定義が無いとモータを 1 台も登録できず、静かに「何も動かない機体」になる
         raise ValueError(f"{source}: can_buses に CAN バスが 1 つも定義されていません")
+    # **2 つの別名が同じインタフェースを指してはならない。** バス名を udev で個体固定
+    # している理由そのもの —— 別名は「どの機種がぶら下がっているか」の宣言なので、
+    # 重ねると機種の違うノードが同じ物理バスに乗る構成が config の 1 行で書ける:
+    #   - can_m3508 と can_edulite が重なる → C620 へ EDULITE 用のコマンドが飛ぶ
+    #   - can_dm3520 と can_m3508 が重なる → C620 のフィードバック 0x201〜0x204 が
+    #     DM3520 から見て**速度指令**になる (発生源がモータ自身なので PC を止めても
+    #     流れ続ける)
+    #   - can_dm3520 と can_generic が重なる → E_STOP / SET_TARGET / SET_PARAM の
+    #     3 帯がそのまま重なる
+    # 下流の `CANManager.add_bus` は別名で持つだけでチャンネルの重複を見ないので、
+    # ここで弾かないと止める層が 1 つも無い (`add_motor` が見るのは名前と can_id だけ)。
+    seen: dict[str, str] = {}
     for alias, channel in buses.items():
         if not isinstance(channel, str) or not channel:
             raise ValueError(
                 f"{source}: can_buses.{alias} は SocketCAN のインタフェース名 "
                 f"(文字列) である必要があります: {channel!r}"
             )
+        previous = seen.get(channel)
+        if previous is not None:
+            raise ValueError(
+                f"{source}: can_buses.{alias} と can_buses.{previous} が同じ"
+                f" インタフェース '{channel}' を指しています。"
+                "別名は機種ごとの物理バスに 1 対 1 で対応させること"
+                " (重ねると機種の違うノードが同じバスに乗り、"
+                "一方のフィードバックが他方への指令として解釈されます)"
+            )
+        seen[channel] = str(alias)
     return {str(alias): channel for alias, channel in buses.items()}
 
 
@@ -295,12 +330,37 @@ def _parse_health(source: str, raw: object) -> HealthThresholds:
             continue
         values[key] = _number(source, f"health.{key}", health[key])
 
-    return HealthThresholds(
+    thresholds = HealthThresholds(
         feedback_timeout_ms=values.get("feedback_timeout_ms", DEFAULT_HEALTH.feedback_timeout_ms),
         temp_warning_c=values.get("temp_warning_c", DEFAULT_HEALTH.temp_warning_c),
         temp_critical_c=values.get("temp_critical_c", DEFAULT_HEALTH.temp_critical_c),
         tx_error_threshold=int(values.get("tx_error_threshold", DEFAULT_HEALTH.tx_error_threshold)),
     )
+
+    # **0 以下を通すと、しきい値そのものが症状に化ける。** ここは health の
+    # 単一情報源なので、通してしまうと他に止める層が 1 つも無い:
+    #   - feedback_timeout_ms <= 0 → 全モータ・全センサが恒久的に STALE。/health は
+    #     常に 503、診断ツリーは常時展開。**症状が配線不良と区別が付かない**
+    #   - temp_warning_c / temp_critical_c <= 0 → 温度を測れるモータが起動直後から
+    #     WARNING / FAULT (「測っていない 0」がそのまま警告・FAULT に化ける)
+    #   - tx_error_threshold <= 0 → 送信エラー 0 件でバスが DEGRADED
+    for key, value in (
+        ("feedback_timeout_ms", thresholds.feedback_timeout_ms),
+        ("temp_warning_c", thresholds.temp_warning_c),
+        ("temp_critical_c", thresholds.temp_critical_c),
+        ("tx_error_threshold", thresholds.tx_error_threshold),
+    ):
+        if value <= 0:
+            raise ValueError(f"{source}: health.{key} は正の値である必要があります: {value!r}")
+
+    # 逆転していると警告を飛ばして FAULT だけが出る (段階的に手当てする余地が消える)
+    if thresholds.temp_warning_c > thresholds.temp_critical_c:
+        raise ValueError(
+            f"{source}: health.temp_warning_c ({thresholds.temp_warning_c}) は"
+            f" health.temp_critical_c ({thresholds.temp_critical_c}) 以下である必要があります"
+        )
+
+    return thresholds
 
 
 def _parse_match(source: str, raw: object) -> MatchSettings:

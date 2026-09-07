@@ -475,11 +475,34 @@ class M3508PositionLoop(PausablePeriodicTask):
         # 例外でループを抜けると電流指令が止まる。C620 は指令断で惰走するため、
         # 握り潰さずログに残しつつ周期は維持し、その周期は 0 電流で埋める
         self._log.exception("tick", "位置制御ループの周期処理で例外 (bus=%s)", self._bus_name)
+        self._discard_profile_anchors()
         await self._send_zero_safely()
 
     async def _on_run_exit(self) -> None:
         # 一時停止中でもここは送る。制御を降りる以上、0 電流で終えるのが最も安全
+        self._discard_profile_anchors()
         await self._send_zero_safely()
+
+    def _discard_profile_anchors(self) -> None:
+        """電流 0 で終えた周期のぶん、軌道の起点と積分だけを捨てる。
+
+        **この周期は機構へ 1 通も届いていない。** それでも ``_step_locked`` は送信の
+        前に全軸の ``profile.advance()`` を回し終えているので、中間目標だけが
+        max_velocity で先へ進む。据え置くと、送信が戻った最初の 1 周期で PID が
+        「実測と中間目標の全差分」をステップ入力として受け、**出力レンジいっぱいの
+        電流が 1 発で出る** —— ``trajectory`` を入れた目的そのものが無効になる。
+        送信だけが落ちている間は ``feedback_timeout_ms`` の途絶判定が立たないので、
+        ここで捨てないと回復する経路がどこにも無い (受信も同時に止まる down/up では
+        途絶側が捨ててくれるが、qdisc の ENOBUFS はそうならない)。
+
+        **目標そのものは残す。** ``_reset_axis`` (緊急停止・原点確定) と違って、
+        送信の一過性の失敗は「シーケンスの指令が無効になった」ことを意味しない ——
+        目標まで捨てると ``wait_reached`` が永久に到達せず、送信が 1 周期落ちる
+        たびにシーケンスが失敗する。
+        """
+        for axis in self._axes.values():
+            axis.pid.reset()
+            axis.profile_anchored = False
 
     # ------------------------------------------------------------------ #
     #  内部処理

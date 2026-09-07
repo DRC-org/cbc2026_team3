@@ -240,21 +240,29 @@ static PeriodicTimer g_motionTimer;
 static PeriodicTimer g_infoTimer;
 
 // INFO は 1Hz で全スロット分を送るが、**送信バッファの本数は 3 枚の基板で違う。**
-// 基板 #2（UNO R4 Minima）の Arduino_CAN は標準 ID の mailbox を 1 本しか使わない
+//
+// 基板 #0/#1（Nano / MCP2515）: TX バッファは 3 本しかなく、しかも sendMsgBuf は
+// 空きと TXREQ のクリアを TIMEOUTVALUE（2500us）まで待つ。同じ反復で 4〜5 通を
+// 連続送信すると最大 20〜25ms loop() が止まり、その間 poll() が回らないので
+// **RXB0 / RXB1 の 2 段しかない受信バッファが溢れる**。落ちたのがブロードキャスト
+// E_STOP なら「たまに緊急停止が効かないサーボ基板」になる。
+//
+// 基板 #2（UNO R4 Minima）: Arduino_CAN は標準 ID の mailbox を 1 本しか使わない
 // （R7FA4M1_CAN.cpp の write が CAN_MAILBOX_ID_0 固定）ので、5 スロットを同じ反復で
 // 連続送信すると 2 通目以降が必ず落ちる。しかも kInfoIntervalMs(1000) が
 // feedback_interval_ms(10) の整数倍なので位相が固定され、**毎回同じスロットだけが出て
 // 残り 4 本は永久に 1 通も出ない**（DC 基板では実機で「INFO が 4 秒間 1 通も出ない」を観測）。
 // 落ちた INFO は PC 側から FAULT としては見えず、そのスロットの**焼き忘れ検出（§3.4）が
 // 黙って無効になる**だけなので、症状から原因へ辿る手段が無い。
-// 1 反復 1 通に割り、落ちたスロットはそのまま次の反復で送り直す。
 //
-// **MCU で分岐させない。** 1 反復 1 通は 3 枚に共通の規則で、Nano（MCP2515 = TX 3 本 +
-// ライブラリが空きを待つ）でも成立する —— PC から見える振る舞い（1Hz・内容・CAN ID）は
-// 変わらず、5 通が数反復に散るだけで、むしろ sendMsgBuf の空き待ちで loop() が伸びる
-// 最悪値は縮む。**したがって kFirmwareVersion も上げない**（§3.4 の版番号は「PC から
-// 観測できる CAN 上の振る舞いが変わったか」だけを指す）。#if を入れると「片方の MCU だけ
-// 直した状態」が作れてしまい、それこそがこの規則の戒めているものである。
+// **同じ 1 反復 1 通が両方を同時に満たす。** DC 用・電磁弁用と同じ形で、落ちた slot は
+// 添字を進めず次の反復で送り直す（再送キューは持たない）。PC から見える振る舞い
+// （1Hz・内容・CAN ID）は変わらず、5 通が数反復に散るだけなので
+// **kFirmwareVersion も上げない**（§3.4 の版番号は「PC から観測できる CAN 上の
+// 振る舞いが変わったか」だけを指す）。
+//
+// **`#if` で MCU 分岐させない。** 入れると「片方の MCU だけ直した状態」が作れてしまい、
+// それこそがこの規則の戒めているものである。
 static uint8_t g_infoPendingSlot = kServoSlotCount;  // kServoSlotCount = 送信待ちなし
 
 static PeriodicTimer g_blinkTimer;
@@ -422,7 +430,8 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
 
 // 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
-// **送れたかを返す。** 落とすと 1 秒欠けるので、呼び出し側が次の反復で送り直す。
+// **送れたかを返す**（DC 用・電磁弁用と同じ）。落ちた slot は添字を進めず、
+// 次の反復で送り直すために呼び出し側が結果を見る。
 static bool sendInfo(uint8_t slot) {
     uint8_t data[kInfoWithServoRangeLength];
     // **可動レンジを足すのはサーボスロットだけ**（仕様書 §3.4）。センサスロットは
@@ -641,9 +650,9 @@ static void updateLed(uint32_t nowMs) {
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
-    if (indication.urgent) {
+    if (indication.urgent()) {
         r = g_ledOn ? 255 : 0;
-    } else if (indication.stopped) {
+    } else if (indication.stopped()) {
         r = 255;
         g = 96;
     } else {
@@ -849,7 +858,7 @@ void loop() {
         } else if (sendInfo(g_infoPendingSlot)) {
             ++g_infoPendingSlot;
         }
-        // 送信に失敗したスロットはインデックスを進めず、次の反復で送り直す。
+        // 送信に失敗した slot はインデックスを進めず、次の反復で送り直す。
     }
 
     updateLed(nowMs);

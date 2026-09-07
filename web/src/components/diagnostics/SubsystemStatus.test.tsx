@@ -3,9 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
+import { RobotProvider } from "@/context/RobotContext";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
-import { renderWithRobot } from "@/test/robotContext";
+import { createRobotContext, renderWithRobot } from "@/test/robotContext";
 
 const HEALTH: HealthSnapshot = {
   timestamp: 0,
@@ -38,6 +39,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     sync_violations: [],
     unenergized_motors: [],
     firmware_unconfirmed_motors: [],
+    failed_tasks: [],
     reenergizing: false,
     loops_running: true,
     monitors_running: true,
@@ -59,6 +61,35 @@ describe("SubsystemStatus", () => {
     expect(screen.getByText("異常なし")).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
     expect(screen.queryByText(/同期ずれ/)).not.toBeInTheDocument();
+  });
+
+  it("defaultOpen が後から真になったら開く (再マウントされないので追従が要る)", () => {
+    // `RobotControl` は手動操縦へ切り替わったときに `defaultOpen` を false → true で
+    // 渡し直すが、この部品は grid の同じ位置・同じ型のまま残るので**再マウント
+    // されない**。初期値としてしか使わないと、試合中に手動へ入っても畳まれたまま、
+    // しかもパネルだけが列の全高へ伸びた白い箱になる ——
+    // 機体を直接動かしている最中に診断が閉じたままになる
+    // **Provider ごと再描画する。** `renderWithRobot` の rerender へ素の要素を
+    // 渡すとルートの型が変わって**再マウント**され、useState の初期値が使われる
+    // ので、追従が無くても緑になってしまう (実際の画面では再マウントされない)
+    const context = createRobotContext();
+    const panel = (open: boolean) => (
+      <RobotProvider value={context}>
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety()}
+          defaultOpen={open}
+        />
+      </RobotProvider>
+    );
+    const view = render(panel(false));
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+
+    view.rerender(panel(true));
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 
   /**
@@ -572,6 +603,85 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
+  });
+
+  /**
+   * 投げっぱなしタスクの失敗ラベル (`FailedTasksNotice`)。`FirmwareUnconfirmedNotice`
+   * と同じ位置付け —— 「異常」ではないので判定チップ (見出し) も開閉 (`forcedOpen`)
+   * も動かさない。過去に 1 度失敗した記録が試合開始まで残るだけで、機体が今も
+   * 壊れているとは限らない。
+   */
+  it("開いたときだけタスク失敗ラベルを出す (判定・開閉は動かさない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: ["再励磁 (RuntimeError)"] })}
+      />,
+    );
+
+    // 見出しの判定チップは変えない (「異常」ではないため)
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+    // 自分から開かせない (畳んだままにできる)
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText("タスク失敗")).not.toBeInTheDocument();
+  });
+
+  it("開けばタスク失敗ラベルが見える", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: ["再励磁 (RuntimeError)"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText("タスク失敗")).toBeInTheDocument();
+    expect(screen.getByText("再励磁 (RuntimeError)")).toBeInTheDocument();
+  });
+
+  /**
+   * **手当ての文面は再起動を促してはならない。** これは投げっぱなしタスクの内部例外
+   * (トレースバックは journal にしか無い) であり、再起動で直る保証は無い。
+   */
+  it("手当てとして journal の確認を案内する (再起動を促さない)", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: ["再励磁 (RuntimeError)"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText(/journal/)).toBeInTheDocument();
+    // 「再起動ではなく journal を見よ」という否定形は許す。「再起動してください」の
+    // ような行動喚起だけを弾く (文言に「再起動」という字面が 1 文字も出ない、
+    // ではなく「再起動を促していない」ことを見る)
+    expect(screen.queryByText(/再起動して/)).not.toBeInTheDocument();
+  });
+
+  it("タスク失敗が 0 件なら開いても何も出さない", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: [] })}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.queryByText("タスク失敗")).not.toBeInTheDocument();
   });
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {

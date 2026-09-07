@@ -22,19 +22,23 @@ checklists:
     - id: bench_free
       label: 出力軸に何も繋がっておらず、回っても干渉しないこと確認
     - id: bench_device_id
-      label: candump can_dm3520 でフィードバックが MST_ID (既定 0x000) に届いていること確認
+      label: candump can_dm3520 でフィードバックが MST_ID (0x11 / 0x12) に届いていること確認
     - id: bench_feedback
       label: 操縦していない間もフィードバックが途切れないこと確認 (問い合わせ駆動なので PC が 20Hz で送り続けている)
     - id: bench_mapping
       label: p_max/v_max/t_max が実機のレジスタ 0x15/0x16/0x17 と一致していること確認 (ずれると位置が比例倍で読める)
-    - id: slide_small
-      label: 手動操縦で sub_slide に small を送り、出力軸が動くこと目視確認
-    - id: slide_direction
+    - id: axis_small
+      label: 手動操縦で sub_y_axis に small を送り、出力軸が動くこと目視確認
+    - id: axis_direction
       label: 正の指令で機構が「伸びる」向きに回ること確認。逆なら positions の scale の符号を反転する
-    - id: slide_full
-      label: 手動操縦で sub_slide に full を送り、指令量と実際の回転角が比例していること確認
-    - id: slide_return
-      label: 手動操縦で sub_slide に home を送り、電源投入位置へ戻ること確認
+    - id: axis_full
+      label: 手動操縦で sub_y_axis に full を送り、指令量と実際の回転角が比例していること確認
+    - id: axis_return
+      label: 手動操縦で sub_y_axis に home を送り、電源投入位置へ戻ること確認
+    - id: lift_small
+      label: 手動操縦で sub_lift に small を送り、出力軸が動くこと目視確認 (2 台目の ESC_ID 0x02 が別個体として動くことの確認でもある)
+    - id: lift_return
+      label: 手動操縦で sub_lift に home を送り、電源投入位置へ戻ること確認
     - id: bench_estop
       label: 動作中に非常停止を押し、その場で停止すること確認
     - id: bench_estop_detach

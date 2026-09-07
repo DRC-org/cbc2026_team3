@@ -189,7 +189,7 @@ DC 基板の 2 枚目は DIP=1 で `0x88`〜`0x8F`、電磁弁基板の 2 枚目
 ### 3.1 `SET_TARGET`（PC → モタドラ）
 
 ```
-Byte 0   : 制御タイプ (0=position, 1=velocity, 2=duty)
+Byte 0   : 制御タイプ (0=position, 1=velocity, 2=duty, 3=on_off)
 Byte 1-2 : 目標値 (int16, little-endian)
 DLC = 3
 ```
@@ -597,7 +597,7 @@ DC 用基板は物理非常停止スイッチの状態を `REF` ピン（D2、**
         電源投入
            |
            v
-   [ID 未設定?] --yes--> (駆動拒否・赤点滅・FEEDBACK のデバイス ID 未設定)
+   [ID 未設定?] --yes--> (駆動拒否・赤の速い点滅。FEEDBACK / INFO は 1 通も送らない)
            | no
            v
         [待機] --SET_TARGET--> [駆動]
