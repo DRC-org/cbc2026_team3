@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `docs/motor_driver_can_protocol.md` | 自作モータドライバ CAN プロトコルの**単一情報源**。PC 側 `lib/drivers/generic.py` と `firmware/` の双方がこれに従う |
 | `docs/checks_and_health.md` | 点検とヘルスの全体像。ヘルス監視 / 動作確認 / 常駐保護 / 指差喚呼の 4 系統がどこで境界を持つか。**「今どうなっているか」はこれを見る**（`impl_plan.md` は経緯を積んだ文書なので、章によっては統合前の記述が残る。古い章には章頭に `【…統合前の記述】` を付けてある） |
 | `docs/venue_recovery.md` | **会場カード。試合当日に手が止まったときはこれ 1 枚を見る。** 起動しない / UI を直したい / 動いているのに様子がおかしい、の切り分けと手順 |
-| `docs/mechanism_handoff.md` | 機構が付いた日に埋める値の棚卸し。**機構担当と共有する表。** 位置定数・可動範囲・PID・ファームのサーボ可動域が全部仮値なので、何を埋めるかを 1 箇所にまとめてある |
+| `docs/mechanism_handoff.md` | 機構が付いた日に埋める値の棚卸し。**機構担当と共有する表。** メインハンドの `y_axis`（位置定数・可動範囲・PID・`motion`・`sync_kp`）と `rotate`（位置定数・可動範囲・原点スイッチ）は 2026-09-04〜09-05 に実測で埋まった。**サーボ 3 軸の位置定数とファームのサーボ可動域・`homing.search_distance`・サブハンドのほぼ全部は依然仮値**なので、何が埋まって何が残っているかを 1 箇所にまとめてある |
 
 ## コマンド
 
