@@ -47,6 +47,31 @@ def _make_group(*names: str, reaches: bool = True) -> tuple[MotorGroup, dict[str
     return group, drivers
 
 
+def _clear_on_first_poll(group: MotorGroup) -> None:
+    """最初の到達判定が呼ばれた瞬間に全ハンドルの目標を捨てる。
+
+    **中断のテストを実時間の勝負にしないための仕掛け。** `asyncio.sleep(0.01)` で
+    緊急停止を狙うと、狙いが外れた回に別の経路 (指令前に消える → タイムアウト /
+    指令後・待機前に消える → 窓) へ落ちて、踏めた日だけ緑になる ——
+    実際 CI で不定期に落ちていた。到達判定は `wait_reached` のループの中でしか
+    呼ばれないので、そこへ引っ掛ければ「待機中に消えた」が毎回同じ順序で起きる。
+    """
+    for handle in group.handles:
+        driver = handle.driver
+        original = driver.is_target_reached
+        fired = False
+
+        def _hooked(*args: object, _orig=original, **kwargs: object) -> bool:
+            nonlocal fired
+            if not fired:
+                fired = True
+                for other in group.handles:
+                    other.clear_target()
+            return bool(_orig(*args, **kwargs))
+
+        driver.is_target_reached = _hooked  # type: ignore[method-assign]
+
+
 _POSITION_CONFIG = {
     "axes": {
         "lift_motor": {"unit": "mm", "command_unit": "deg", "scale": 100.0, "timeout_s": 0.05},
@@ -226,17 +251,43 @@ class TestMoveToInterruptedByEStop:
         seq.bind_motors(group)
         seq.bind_positions(load_position_table(_POSITION_CONFIG))
 
-        async def interrupt() -> None:
-            await asyncio.sleep(0.01)
+        _clear_on_first_poll(group)
+
+        with pytest.raises(WaitInterruptedError):
+            await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
+
+    async def test_target_cleared_between_command_and_wait_is_an_interruption(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**指令し終えてから待ち始めるまでの窓で消えた目標も「中断」である。**
+
+        `move_to` は全軸へ `set_target_value` を送り終えてから `wait_reached` を
+        まとめて作る。その間に緊急停止 (`TargetRefresher.clear_targets()`) が挟まると、
+        `wait_reached` は**最初から目標が無い状態で待ち始める** —— 待機開始時点の
+        スナップショットだけを見ていた頃は、これが「一度も指令していない軸」と
+        区別できず `is_reached()` の「目標が無ければ到達済み」に吸われて **True** を
+        返し、中断された動作がステップ成功として記録された。
+
+        ここは時刻に依存させずに窓そのものを再現する —— 実時間の sleep で狙うと、
+        踏めた日だけ緑になる (実際 CI で不定期に落ちていた)。
+        """
+        seq = _MoveSequence()
+        group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+
+        original = AxisHandle.set_target_value
+
+        async def _clear_right_after_commanding(self: AxisHandle, values: object) -> None:
+            await original(self, values)  # type: ignore[arg-type]
+            # 指令は届いたが、待ち始める前に緊急停止が目標を捨てた
             for handle in group.handles:
                 handle.clear_target()
 
-        task = asyncio.create_task(interrupt())
-        try:
-            with pytest.raises(WaitInterruptedError):
-                await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
-        finally:
-            await task
+        monkeypatch.setattr(AxisHandle, "set_target_value", _clear_right_after_commanding)
+
+        with pytest.raises(WaitInterruptedError):
+            await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
 
     async def test_run_records_interruption_not_timeout(self) -> None:
         """run() が捕まえた失敗の文言はタイムアウトと取り違えてはならない。"""
@@ -245,16 +296,9 @@ class TestMoveToInterruptedByEStop:
         seq.bind_motors(group)
         seq.bind_positions(load_position_table(_POSITION_CONFIG))
 
-        async def interrupt() -> None:
-            await asyncio.sleep(0.01)
-            for handle in group.handles:
-                handle.clear_target()
+        _clear_on_first_poll(group)
 
-        task = asyncio.create_task(interrupt())
-        try:
-            await seq.run()
-        finally:
-            await task
+        await seq.run()
 
         # 中断されたので次のステップ ("after") へは進んでいない
         assert seq.executed == ["move"]
