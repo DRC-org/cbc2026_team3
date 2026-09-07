@@ -136,6 +136,24 @@ describe("MatchTimer", () => {
     expect(screen.getByText("開始前")).toBeInTheDocument();
   });
 
+  /**
+   * 停止中の 2 つの caption は legend「試合時間」からは読めない別の事実なので消せない
+   * (同じ 0:30 でも「まだ始まっていない」のか「その残りを抱えて終わった」のかで意味が
+   * 正反対になる)。一方、進行中の数字が残り時間であることは legend がもう言っている。
+   */
+  it("進行中は caption を持たず、停止中だけが caption を持つ", () => {
+    const { container, rerender } = render(<MatchTimer timer={timerValue()} />);
+    const captions = () =>
+      Array.from(container.querySelectorAll("span")).filter(
+        (el) => !el.className.includes("font-mono"),
+      );
+
+    expect(captions()).toHaveLength(0);
+
+    rerender(<MatchTimer timer={timerValue({ running: false, elapsed_ms: 150_000 })} />);
+    expect(captions().map((el) => el.textContent)).toEqual(["試合終了時点の残り"]);
+  });
+
   it("タイマーが読めなければ数字を出さず、読めていないことを言う", () => {
     // 誤った数字を自信満々に出すより、読めていないと言うほうが操縦者の判断に資する
     render(<MatchTimer timer={null} />);

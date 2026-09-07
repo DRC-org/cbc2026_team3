@@ -43,9 +43,10 @@ const PRIMARY_CLASS = "h-full w-full rounded-none border-0 text-[1.3em]";
  * CURRENT STEP パネルの `4 ステップ名`、STEP 一覧のハイライト。
  * 操縦者は 3 回読んでようやく 1 つの事実にたどり着いていた。ここに一本化する。
  *
- * 次ステップと ✋ (許可待ちの有無) を併記するのは、NEXT を押した後に機体が
- * 止まるのか動き続けるのかを**押す前に**知る必要があるため。これが分からないと
- * 操縦者は毎回機体の動きが終わるまで身構えることになる。
+ * 走る範囲を 1 行で予告するのは、NEXT を押した後に機体が止まるのか動き続けるのかを
+ * **押す前に**知る必要があるため。これが分からないと操縦者は毎回機体の動きが
+ * 終わるまで身構えることになる。ステップの並びそのものは下の一覧が描くので、
+ * ここは「何ステップ走ってどこで止まるか」だけに絞る。
  */
 export function ActionPanel({
   state,
@@ -69,9 +70,7 @@ export function ActionPanel({
   // 止められるのは動いているときだけ。トリガー待ちもシーケンスは生きている
   const canStop = kind === "running" || kind === "waiting_trigger";
   const { displayIndex, percent, current } = sequenceProgress(state);
-  // NEXT 後に走る一連のステップ。次の許可待ち (require_trigger) を含めてそこで切る。
-  // 許可待ちが無いまま延々続く場合に画面を埋めないよう表示は数件で打ち切る
-  const UPCOMING_LIMIT = 4;
+  // NEXT 後に走る一連のステップ。次の許可待ち (require_trigger) を含めてそこで切る
   const burst: typeof steps = [];
   if (!isComplete) {
     for (let i = stepIndex + 1; i < steps.length; i += 1) {
@@ -79,8 +78,17 @@ export function ActionPanel({
       if (steps[i].require_trigger) break;
     }
   }
-  const upcoming = burst.slice(0, UPCOMING_LIMIT);
-  const moreCount = burst.length - upcoming.length;
+  const burstEnd = burst.at(-1);
+  // 許可待ちで切れたのか、切れずに終端まで来たのか。**この 2 つを同じ文言にしては
+  // ならない** — 後者は押したら最後まで止まらないという別の事実である
+  const stopsAtTrigger = burstEnd?.require_trigger ?? false;
+  const burstMessage = isComplete
+    ? "シーケンスは終了しています"
+    : burstEnd === undefined
+      ? "これが最終ステップです"
+      : stopsAtTrigger
+        ? `${burst.length} ステップ走って「${burstEnd.label}」で停止`
+        : `残り ${burst.length} ステップを最後まで走り切ります (途中で止まりません)`;
   // START を出すのは「開始できる」ときだけ。ステップが 1 件も無い (no_sequence) を
   // ここへ含めると、開始しようのないシーケンスの START を押させることになる
   const idle = inMatch && kind === "idle";
@@ -108,13 +116,10 @@ export function ActionPanel({
   return (
     // 周辺視野でも状態の変化に気付けるよう、左端を状態色で塗る (Panel が引く)
     <Panel accentTone={status.tone} className="shrink-0" bodyClassName="p-0">
-      {/* 状態と進捗を 1 行に畳む。別々のパネルに分けると同じことを 2 度読ませる */}
+      {/* 状態と進捗を 1 行に畳む。別々のパネルに分けると同じことを 2 度読ませる。
+          ステップ番号はこの行に置かない — すぐ下の巨大表示が同じ数字を持っている */}
       <div className="flex shrink-0 items-center gap-2 border-b border-base-300 px-2 py-1">
         <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-        <span className="ml-auto shrink-0 font-mono text-base-content/70 tabular-nums">
-          {displayIndex}
-          <span className="text-base-content/45">/{totalSteps}</span>
-        </span>
       </div>
       <progress
         className={cx(
@@ -148,6 +153,9 @@ export function ActionPanel({
         <div className="flex min-w-0 items-baseline gap-4">
           <span className="shrink-0 font-mono text-[3em] leading-none text-base-content/30 tabular-nums">
             {displayIndex}
+            {/* 総数は「あとどれだけ残っているか」の目安でしかないので、
+                一瞬で読む必要がある現在番号より一回り小さく添える */}
+            <span className="text-[0.45em] text-base-content/40">/{totalSteps}</span>
           </span>
           <span className="min-w-0 text-[3em] leading-[1.1] font-semibold">
             {isComplete ? "全ステップ完了" : (current?.label ?? "—")}
@@ -155,43 +163,15 @@ export function ActionPanel({
         </div>
       </div>
 
-      {/* 押すと何が起きるか。
-          NEXT を押すと機体は次の許可待ちまで複数ステップを一気に走る。
-          「次の 1 件」だけ出しても、どこまで動いて止まるのかが分からない。
-          停止点までのまとまりを予告して、操縦者が身構える範囲を確定させる */}
-      <div className="flex min-h-0 shrink-0 flex-col gap-1 border-t border-base-300 px-4 py-2">
-        <span className="text-[0.85em] tracking-wide text-base-content/60">
-          {isComplete ? "この先の動作" : "NEXT で走る範囲"}
-        </span>
-        {upcoming.length === 0 ? (
-          <span className="text-base-content/60">
-            {isComplete ? "シーケンスは終了しています" : "これが最終ステップです"}
-          </span>
-        ) : (
-          <ol className="flex flex-col">
-            {upcoming.map((step, i) => (
-              <li key={step.index} className="flex min-w-0 items-center gap-2 text-[1.05em]">
-                <Icon
-                  as={ArrowRight}
-                  className={cx(i === 0 ? "text-base-content/60" : "text-transparent")}
-                />
-                <span className="shrink-0 font-mono text-base-content/60 tabular-nums">
-                  {step.index + 1}
-                </span>
-                <span className="min-w-0 truncate">{step.label}</span>
-                {step.require_trigger ? (
-                  <span className="ml-auto flex shrink-0 items-center gap-1 font-medium whitespace-nowrap text-warning">
-                    <Icon as={Hand} />
-                    ここで停止
-                  </span>
-                ) : null}
-              </li>
-            ))}
-            {moreCount > 0 ? (
-              <li className="pl-8 text-base-content/50">…さらに {moreCount} ステップ</li>
-            ) : null}
-          </ol>
-        )}
+      {/* 押すと何が起きるか。NEXT を押すと機体は次の許可待ちまで複数ステップを
+          一気に走るので、「何ステップ走ってどこで止まるか」を押す前に確定させる。
+          ステップの並びは下の一覧が描くので、ここで列挙し直さない */}
+      <div className="flex shrink-0 items-center gap-2 border-t border-base-300 px-4 py-2">
+        <Icon
+          as={stopsAtTrigger ? Hand : ArrowRight}
+          className={stopsAtTrigger ? "text-warning" : "text-base-content/60"}
+        />
+        <span className="min-w-0 truncate text-base-content/80">{burstMessage}</span>
       </div>
 
       {/* 主操作。右の大きい面が常に「今押すべきボタン」で、左は常に停止。

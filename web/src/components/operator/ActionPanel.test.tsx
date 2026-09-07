@@ -45,8 +45,12 @@ function mount(state: RobotState, extra: Partial<Parameters<typeof ActionPanel>[
     onTrigger: vi.fn(),
     ...extra,
   };
-  renderWithRobot(<ActionPanel {...props} />);
-  return props;
+  const view = renderWithRobot(<ActionPanel {...props} />);
+  // パネルは Panel が描く <section> 1 つ。「同じ事実が 2 箇所に出ていないか」は
+  // 個々の要素ではなくこの器の全文でしか数えられない
+  const panel = view.container.querySelector("section");
+  if (!panel) throw new Error("ActionPanel のパネルが見つからない");
+  return { ...props, panel: panel as HTMLElement };
 }
 
 describe("ActionPanel", () => {
@@ -125,8 +129,9 @@ describe("ActionPanel", () => {
   describe("シーケンスの失敗理由", () => {
     it("平常時は 1 ピクセルも出さない", () => {
       mount(makeState());
-      // 「ここで停止」(NEXT の予告) と紛れないよう、失敗行だけに現れる形で引く
-      expect(screen.queryByText(/」で停止/)).not.toBeInTheDocument();
+      // NEXT の予告 (「N ステップ走って『…』で停止」) と紛れないよう、
+      // 失敗行だけが持つ「ステップ <番号>「」の形で引く
+      expect(screen.queryByText(/ステップ \d+「/)).not.toBeInTheDocument();
     });
 
     it("どのステップで何が起きたかを出す", () => {
@@ -173,16 +178,37 @@ describe("ActionPanel", () => {
     });
   });
 
+  /**
+   * ステップの並びそのものは下の一覧が描く。ここが答えるのは
+   * 「NEXT を押すと何ステップ走って、どこで止まるか」の 2 つだけ。
+   */
   describe("NEXT で走る範囲の予告", () => {
-    it("次の許可待ちステップまでを列挙し、そこで打ち切る", () => {
-      // step_index=1 (前進) の次は 3(把持姿勢) → 4(ハンド閉じる ✋) で停止
+    it("走るステップ数と、止まるステップ名を出す", () => {
+      // step_index=1 (前進) の次は 3(把持姿勢へ) → 4(ハンド閉じる ✋) で停止
       mount(makeState({ step_index: 1, running: true, waiting_trigger: true }));
 
-      expect(screen.getByText("把持姿勢へ")).toBeInTheDocument();
-      expect(screen.getByText("ハンド閉じる")).toBeInTheDocument();
-      expect(screen.getByText("ここで停止")).toBeInTheDocument();
-      // 停止点より先は予告しない（どこまで動くのか分からなくなる）
-      expect(screen.queryByText("搬送")).not.toBeInTheDocument();
+      // 停止するステップ名を落とすと、どこまで動くのかが分からなくなる
+      expect(screen.getByText("2 ステップ走って「ハンド閉じる」で停止")).toBeInTheDocument();
+    });
+
+    it("許可待ちが現れないまま終端まで走る場合は、止まらないことを言う", () => {
+      // 停止する場合と同じ文言にすると、押したら終端まで止まらないことが伝わらない
+      const straight: SequenceStepInfo[] = [
+        step(0, "初期位置へ移動"),
+        step(1, "搬送"),
+        step(2, "終了姿勢へ"),
+      ];
+      mount(
+        makeState({
+          steps: straight,
+          total_steps: straight.length,
+          step_index: 0,
+          running: true,
+        }),
+      );
+
+      expect(screen.getByText(/最後まで走り切/)).toBeInTheDocument();
+      expect(screen.queryByText(/で停止/)).not.toBeInTheDocument();
     });
 
     it("最終ステップではその旨を出す", () => {
@@ -194,6 +220,22 @@ describe("ActionPanel", () => {
       mount(makeState({ step_index: STEPS.length }));
       expect(screen.getByText("全ステップ完了")).toBeInTheDocument();
       expect(screen.getByText("シーケンスは終了しています")).toBeInTheDocument();
+    });
+  });
+
+  /**
+   * 同じパネルに番号が 2 回出ていた（ヘッダー行の右端と巨大表示）。
+   * 操縦者は同じ数字を 2 度読むことになる。
+   */
+  describe("ステップ番号", () => {
+    it("現在番号と総数を 1 箇所だけで出す", () => {
+      const { panel } = mount(makeState({ step_index: 2, running: true }));
+
+      // 巨大表示は総数を一回り小さく添えるため番号と総数を別の span へ分けている。
+      // 単一テキストノードでは引けないので、器の全文を正規化して出現回数を数える
+      // —— ここで見たいのは「見つかるか」ではなく「1 回しか出ていないか」である
+      const text = (panel.textContent ?? "").replaceAll(/\s+/g, "");
+      expect(text.match(/3\/6/g) ?? []).toHaveLength(1);
     });
   });
 

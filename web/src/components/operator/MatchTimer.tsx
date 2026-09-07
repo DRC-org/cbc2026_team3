@@ -118,7 +118,10 @@ export function MatchTimer({ timer }: MatchTimerProps) {
     : elapsedMs;
   const remaining = clampRemaining(durationMs - elapsedNow, durationMs);
 
-  const caption = running ? "残り時間" : elapsedMs === 0 ? "開始前" : "試合終了時点の残り";
+  // 進行中の数字が残り時間であることは legend「試合時間」から読めるので何も言わない。
+  // 停止中の 2 つは legend からは読めない別の事実なので必ず出す —— 同じ 0:30 でも
+  // 「まだ始まっていない」のか「その残りを抱えて終わった」のかで意味が正反対になる
+  const caption = running ? null : elapsedMs === 0 ? "開始前" : "試合終了時点の残り";
 
   return (
     <Panel legend="試合時間" className="shrink-0">
@@ -126,7 +129,7 @@ export function MatchTimer({ timer }: MatchTimerProps) {
         <span className="font-mono text-[3.4em] leading-none font-bold tabular-nums">
           {formatRemaining(remaining)}
         </span>
-        <span className="text-[0.8em] text-base-content/60">{caption}</span>
+        {caption ? <span className="text-[0.8em] text-base-content/60">{caption}</span> : null}
       </div>
     </Panel>
   );
