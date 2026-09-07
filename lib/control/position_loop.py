@@ -72,9 +72,9 @@ class _Axis:
     target: float | None = None
     # フィードバック途絶の遷移でのみログを出すためのフラグ
     stale: bool = field(default=False)
-    # 直近周期の出力と飽和。テレメトリ (20Hz) が読む値なので、制御周期ごとに
-    # 更新して持たせる。**PID の内部状態から後で計算し直してはならない** —
-    # 途絶や緊急停止で PID を reset した後は last_output が 0 に戻り、
+    # 直近周期の出力と飽和。実機チューニング CLI (scripts/tune_y_axis.py) が読む値
+    # なので、制御周期ごとに更新して持たせる。**PID の内部状態から後で計算し直して
+    # はならない** — 途絶や緊急停止で PID を reset した後は last_output が 0 に戻り、
     # 「飽和していたのに飽和していないと見える」周期ができる
     last_output: float = field(default=0.0)
     saturated: bool = field(default=False)
@@ -255,8 +255,10 @@ class M3508PositionLoop(PausablePeriodicTask):
     def _paired_with(self, name: str) -> tuple[str, ...]:
         """``name`` と機構的に連動するモータ名の組 (単独なら自分だけ)。
 
-        「1 台だけに効かせてよいか」を判断する場所を 1 つに保つ。ゲイン変更にも
-        原点確定にも同じ答えが要る (どちらも片側だけ適用すると機構が壊れる)。
+        「1 台だけに効かせてよいか」を判断する場所を 1 つに保つ。現在の呼び出し元は
+        原点確定だけ (左右を別々の時刻に確定すると、その間に片方が動いたぶんだけ
+        消えないオフセットが残る)。片側だけ適用すると機構が壊れる操作を足すときも、
+        この判断を書き写さずここを呼ぶこと。
         """
         group_name = self._sync.group_of(name)
         if group_name is None:
@@ -269,8 +271,9 @@ class M3508PositionLoop(PausablePeriodicTask):
     def is_saturated(self, name: str) -> bool:
         """直近周期の出力が出力レンジの端に張り付いたか。
 
-        テレメトリに載せる。飽和している間はゲインを変えても応答が変わらないので、
-        これが見えないと操縦者は「kp を上げても下げても同じ」という観察から
+        読み手は実機チューニング CLI (``scripts/tune_y_axis.py``) だけで、配信にも
+        画面にも出ない。飽和している間はゲインを変えても応答が変わらないので、
+        これが読めないと調整する人は「kp を上げても下げても同じ」という観察から
         制御以外の原因 (機構の負荷・``output_limit``) へ辿り着けない。
         """
         return self._axes[name].saturated
@@ -324,8 +327,8 @@ class M3508PositionLoop(PausablePeriodicTask):
 
         1 軸ぶんのリセットを 2 箇所 (``clear_target`` / ``_disable_all``) に書くと、
         後から項目を足したときに片方を落とせる。``saturated`` を落とすと
-        「緊急停止中だけ飽和表示が残る」形になり、操縦者は止まっている機体の
-        テレメトリを見て出力が張り付いていると読む。
+        「電流 0 に落ちた後も飽和が立ちっぱなし」になり、``scripts/tune_y_axis.py``
+        の飽和率が「上限が律速している」と言い続ける。
 
         **中間目標の起点もここで捨てる。** 残すと、緊急停止や原点確定で止まって
         いた間に機構が動いていても軌道は元の位置から続き、復帰 1 周期目に
