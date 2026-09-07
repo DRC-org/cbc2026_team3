@@ -58,12 +58,16 @@ def _servo_slew_rate_deg_per_s() -> float:
     """
     text = _SERVO_CONFIG_H.read_text(encoding="utf-8")
 
-    limits = {name: (float(lo), float(hi), float(rate)) for name, lo, hi, rate in _LIMITS_RE.findall(text)}
+    limits = {
+        name: (float(lo), float(hi), float(rate)) for name, lo, hi, rate in _LIMITS_RE.findall(text)
+    }
     assert limits, f"{_SERVO_CONFIG_H}: ServoLimits の定義を 1 つも読めなかった"
 
     used = set(_SERVO_SLOT_RE.findall(text))
     assert used, f"{_SERVO_CONFIG_H}: SlotRole::Servo の行を 1 つも読めなかった"
-    assert len(used) == 1, f"{_SERVO_CONFIG_H}: Servo スロットが複数の ServoLimits を使っている: {sorted(used)}"
+    assert len(used) == 1, (
+        f"{_SERVO_CONFIG_H}: Servo スロットが複数の ServoLimits を使っている: {sorted(used)}"
+    )
 
     name = used.pop()
     assert name in limits, f"{_SERVO_CONFIG_H}: Servo スロットが使う {name} の定義が読めない"
