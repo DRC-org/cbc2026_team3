@@ -412,9 +412,9 @@ static void updateLed(uint32_t nowMs) {
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
-    if (indication.urgent) {
+    if (indication.urgent()) {
         r = g_ledOn ? 255 : 0;
-    } else if (indication.stopped) {
+    } else if (indication.stopped()) {
         r = 255;
         g = 96;
     } else {
