@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "MotorCanProtocol.h"
+#include "MotorPinTable.h"
 #include "SolenoidChannel.h"
 
 using namespace motorcan;
@@ -391,6 +392,55 @@ static void test_apply_set_target_still_honors_the_output_gate() {
     TEST_ASSERT_FALSE(channel.outputOn(1000));
 }
 
+// --------------------------------------------------------------------------
+// config.h と CubeMX（main.h）のピン割当の照合
+//
+// 照合の実行そのもの（HAL のポインタ → ポート番号の逆引き）は app.cpp にしか
+// 置けないが、**比較の規則だけは native 圏内に引き上げてある**（MotorPinTable.h）。
+// app.cpp に素のループを書いていた頃は `!=` を `==` に書き換えても全ケース緑だった。
+// --------------------------------------------------------------------------
+
+// 一致している表は一致と読む（ここが落ちると全基板が起動時に駆動を拒否する）。
+static void test_pin_tables_match_when_identical() {
+    const PortPin actual[] = {{1, 1u << 7}, {1, 1u << 3}, {0, 1u << 15}};
+    const PortPin expected[] = {{1, 1u << 7}, {1, 1u << 3}, {0, 1u << 15}};
+    TEST_ASSERT_TRUE(pinTablesMatch(actual, expected, 3));
+}
+
+// **この PR が塞いだ穴そのもの。** ピン番号が同じでポートだけ違う
+// （config.h の ch4 を PB3 ではなく PA3 と書いた）ケースを不一致と読むこと。
+static void test_pin_tables_detect_a_port_only_difference() {
+    const PortPin actual[] = {{1, 1u << 7}, {0, 1u << 3}};
+    const PortPin expected[] = {{1, 1u << 7}, {1, 1u << 3}};
+    TEST_ASSERT_FALSE(pinTablesMatch(actual, expected, 2));
+}
+
+// ポートだけを見る実装にしないこと。ピン番号は static_assert も見ているが、
+// 実行時検査だけで自己完結していれば static_assert 群を触ったときの二重化になる。
+static void test_pin_tables_detect_a_pin_only_difference() {
+    const PortPin actual[] = {{1, 1u << 7}, {1, 1u << 4}};
+    const PortPin expected[] = {{1, 1u << 7}, {1, 1u << 3}};
+    TEST_ASSERT_FALSE(pinTablesMatch(actual, expected, 2));
+}
+
+// 逆引きできなかったポート（CubeMX が 3 つ目のポートへ動かした）は、
+// 両側が同じ 0xFF でも一致にしない —— 照合できていないものを一致と読むと、
+// 「A でなければ B」に丸めたのと同じ穴が別の形で開く。
+static void test_unknown_port_never_matches() {
+    const PortPin actual[] = {{kPortIndexUnknown, 1u << 7}};
+    const PortPin expected[] = {{kPortIndexUnknown, 1u << 7}};
+    TEST_ASSERT_FALSE(pinTablesMatch(actual, expected, 1));
+}
+
+// 空の表を「一致」と読むと、表の組み立てを間違えたときに検査が黙って素通りする。
+static void test_empty_table_is_not_a_match() {
+    const PortPin actual[] = {{1, 1u << 7}};
+    const PortPin expected[] = {{1, 1u << 7}};
+    TEST_ASSERT_FALSE(pinTablesMatch(actual, expected, 0));
+    TEST_ASSERT_FALSE(pinTablesMatch(nullptr, expected, 1));
+    TEST_ASSERT_FALSE(pinTablesMatch(actual, nullptr, 1));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_solenoid_device_id_is_a_fixed_bit_split);
@@ -414,5 +464,10 @@ int main() {
     RUN_TEST(test_disabled_watchdog_still_requires_first_command);
     RUN_TEST(test_solenoid_channel_accepts_only_on_off_targets);
     RUN_TEST(test_apply_set_target_still_honors_the_output_gate);
+    RUN_TEST(test_pin_tables_match_when_identical);
+    RUN_TEST(test_pin_tables_detect_a_port_only_difference);
+    RUN_TEST(test_pin_tables_detect_a_pin_only_difference);
+    RUN_TEST(test_unknown_port_never_matches);
+    RUN_TEST(test_empty_table_is_not_a_match);
     return UNITY_END();
 }
