@@ -668,7 +668,9 @@ def _load_pid_config(
     pid セクションが無い M3508 は既定ゲインで動かす (エラーにしない)。
     起動できないと動作確認そのものができず、機構調整中の実機で困るため。
     既定値は安全側に振ってあるので、無指定でも暴れない。
-    キー名の誤記は lib/config_schema が起動時に弾く (書いても効かないゲインを作らない)。
+    キー名の誤記も値の型不正 (数値でない / bool / inf・nan) も lib/config_schema
+    (`_parse_pid`) が起動時に拒否するので、ここへ来る値は None か有限の数値だけ ——
+    書いても効かないゲインと、暴走するゲインのどちらも作らない。
     """
     result: dict[str, float | None] = dict(_DEFAULT_PID)
     if not isinstance(pid_cfg, Mapping):
@@ -691,16 +693,11 @@ def _load_pid_config(
                 _DEFAULT_PID[key],
             )
             continue
-        try:
-            result[key] = float(value)
-        except (TypeError, ValueError):
-            logger.warning(
-                "motors.%s.pid.%s が数値ではありません: %r。既定値 %s を使います。",
-                motor_name,
-                key,
-                value,
-                _DEFAULT_PID[key],
-            )
+        # 型不正は lib.config_schema._parse_pid が起動時に拒否済みなので、この
+        # float() は有限の数値にしか呼ばれない。**警告して既定値へ落とす手当てを
+        # ここへ戻してはならない** —— 戻すと「拒否する層」と「黙って既定値へ倒す層」が
+        # 二重になり、後から片方だけ外しても症状が出ない
+        result[key] = float(value)
     return result
 
 
