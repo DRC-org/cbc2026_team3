@@ -431,6 +431,26 @@ static void test_blink_interval_prefers_urgent() {
     TEST_ASSERT_EQUAL_UINT32(200, blinkIntervalFor(unconfigured, 200, 500, 1000));
 }
 
+// **デバイスとして名乗れるチャンネルが 1 つも無い基板も urgent。**
+//
+// 呼び出し側は Unused スロットを数えない（数えると空きスロットのある基板が常に
+// 赤く点滅する）。その結果、全スロットが Unused の基板 —— サーボ基板の DIP を
+// kServoBoardCount 以上へ回して kSlotsByBoard に行が無い状態 —— では observe が
+// 1 回も呼ばれない。そこを平常扱いにすると、FEEDBACK も INFO も 1 通も送らず
+// どのコマンドも受け付けない基板が **LED は平常と同じ青のハートビート**を出し、
+// PC 側は全チャンネル STALE。配線不良と区別する唯一の手段が消える。
+static void test_blink_interval_flags_board_with_no_devices() {
+    BoardIndication nothingConfigured(false);
+    TEST_ASSERT_TRUE(nothingConfigured.urgent());
+    TEST_ASSERT_EQUAL_UINT32(200, blinkIntervalFor(nothingConfigured, 200, 500, 1000));
+
+    // 1 つでも名乗れていれば平常へ戻る（空きスロットのある基板を赤くしない）
+    BoardIndication oneConfigured(false);
+    oneConfigured.observe(/*configured=*/true, false);
+    TEST_ASSERT_FALSE(oneConfigured.urgent());
+    TEST_ASSERT_EQUAL_UINT32(1000, blinkIntervalFor(oneConfigured, 200, 500, 1000));
+}
+
 // LED が 1 本しかない電磁弁基板は、緊急停止に専用の速さを割り当てる。
 // DC 用・サーボ用は色で示すので stoppedMs に heartbeatMs と同じ値を渡す。
 static void test_blink_interval_separates_stop_from_heartbeat() {
@@ -623,6 +643,7 @@ int main(int, char **) {
     RUN_TEST(test_serial_command_splits_channel_and_value);
     RUN_TEST(test_serial_command_rejects_ambiguous_lines);
     RUN_TEST(test_blink_interval_prefers_urgent);
+    RUN_TEST(test_blink_interval_flags_board_with_no_devices);
     RUN_TEST(test_blink_interval_separates_stop_from_heartbeat);
     RUN_TEST(test_serial_override_feeds_only_the_touched_channel);
     RUN_TEST(test_serial_override_starts_inactive);

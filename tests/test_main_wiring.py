@@ -57,6 +57,7 @@ from main import (
     _build_target_refreshers,
     _create_motor,
     _load_all_configs,
+    _load_checklist_definitions,
     _load_pid_config,
     _wire_robot_motors,
 )
@@ -1274,6 +1275,27 @@ class TestLoadAllConfigs:
 
         assert loaded == []
         assert any("absent.yaml" in record.getMessage() for record in caplog.records)
+
+    def test_invalid_checklist_aborts_with_a_message(self, tmp_path: pathlib.Path) -> None:
+        """チェックリストの誤記も traceback ではなく 1 行のメッセージで止まること。
+
+        ここだけ生の `ValueError` で落ちると、journal に出るのは Python の traceback に
+        なる。しかも `cbc-control.service` は `StartLimitBurst=3` / `RestartSec=2` で
+        約 6 秒後に `failed` へ固定され、復帰に `reset-failed` が要る —— 会場でこれを
+        読むのは操縦者なので、読み違えたぶんだけ復帰が遠くなる。
+        """
+        path = self._write(
+            tmp_path,
+            "checklist.yaml",
+            "checklists:\n  main_hand:\n    - id: a\n      label: A\n",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            _load_checklist_definitions(path)
+
+        message = str(exc.value)
+        assert "設定を読み込めません" in message
+        assert "main_hand" in message
 
 
 class TestSequenceClassSelection:

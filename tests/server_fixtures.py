@@ -159,10 +159,18 @@ class ServerFixture:
         テストは、この完了を待ってから観測しなければならない** ——
         `_board_e_stop_ignore_before` が確定するのも再励磁が終わってからで、
         待たずに配信を 1 回回すと「解除したのに基板の停止が拾われない」ように見える。
+
+        `wait_reenergize` と同じく `asyncio.wait` を使う —— **このタスクも
+        キャンセルされて終わることがある** (新しい解除の `_reactivate_motors` が
+        `_settle_pending_reactivation` で前回のぶんを畳む)。`gather` + `wait_for`
+        だとその `CancelledError` がテスト側へ伝播し、後始末として待っただけの
+        テストが落ちる。
         """
-        tasks = [task for task in self.server._reactivate_tasks if not task.done()]
-        if tasks:
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+        tasks = {task for task in self.server._reactivate_tasks if not task.done()}
+        if not tasks:
+            return
+        done, _still_running = await asyncio.wait(tasks, timeout=timeout)
+        assert len(done) == len(tasks), f"解除の再励磁タスクが {timeout}s 以内に終わっていない"
 
     def expire_firmware_grace(self) -> None:
         """起動猶予 (`_FIRMWARE_INFO_GRACE_S`) を実時間を待たずに過ぎさせる。

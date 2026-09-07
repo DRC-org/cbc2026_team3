@@ -58,6 +58,14 @@ _FLAG_NEVER_COMMANDED = 0x20
 _DEVICE_ID_MIN = 0x01
 _DEVICE_ID_MAX = 0xFE
 
+# 解釈に最低限必要な DLC。**どちらも可変長なので `== N` では書けない。**
+# FEEDBACK は状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト (仕様書 §3.2)、
+# INFO は版・基板種別・スロット役割の 3 バイト + サーボスロットだけ可動レンジ 2 バイト
+# (§3.4)。これを下回るフレームを自分宛として claim すると、デコードが `d[0]` や
+# `d[2]` で IndexError を投げる
+_FEEDBACK_MIN_LENGTH = 1
+_INFO_MIN_LENGTH = 3
+
 # 固定小数点の単位 (仕様書 §4)。**CAN 上を流れる数値はすべて int16 で、float は
 # 1 バイトも流れない。** float32 をやめたのは NaN の防御をプロトコル全体から消すため。
 # NaN は比較がすべて false になるのでクランプも範囲チェックも素通りし、一度内部へ
@@ -310,7 +318,17 @@ class GenericDriver(MotorDriver):
             return False
 
         cmd, dev = parsed
-        return cmd == CommandType.FEEDBACK and dev == self.can_id
+        if cmd != CommandType.FEEDBACK or dev != self.can_id:
+            return False
+
+        # **長さも見る。** DLC は可変 (状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト。
+        # 仕様書 §3.2) なので `== N` では書けないが、状態フラグすら無いフレームは
+        # 解釈できない。claim してしまうと `update_state` が `d[0]` で IndexError を
+        # 投げ、`_dispatch_frame` が握って `rx_error_count` を積む —— 「解釈できない
+        # フレームは自分宛ではないとして無視する」というこのメソッドの宣言に反する。
+        # リモートフレーム・ノイズ・他プロトコルの相乗りで実際に流れうる。
+        # Edulite05Driver / Dm3520Driver は同じ理由で `len(msg.data) != 8` を見ている。
+        return len(msg.data) >= _FEEDBACK_MIN_LENGTH
 
     def decode_info(self, msg: can.Message) -> InfoFrame:
         """INFO フレーム (仕様書 §3.4)。Byte0=版 / Byte1=基板種別 / Byte2=スロット役割。
@@ -341,7 +359,12 @@ class GenericDriver(MotorDriver):
             return False
 
         cmd, dev = parsed
-        return cmd == CommandType.INFO and dev == self.can_id
+        if cmd != CommandType.INFO or dev != self.can_id:
+            return False
+
+        # 長さも見る理由は matches_feedback と同じ。3 バイト未満だと
+        # `decode_info` が `d[2]` で IndexError を投げる
+        return len(msg.data) >= _INFO_MIN_LENGTH
 
     @property
     def info(self) -> InfoFrame | None:

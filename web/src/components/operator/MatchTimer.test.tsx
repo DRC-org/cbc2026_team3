@@ -1,4 +1,5 @@
 import { act, render, screen } from "@testing-library/react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MatchTimer, formatRemaining } from "@/components/operator/MatchTimer";
@@ -58,6 +59,25 @@ describe("formatRemaining", () => {
 });
 
 describe("MatchTimer", () => {
+  it("ページを長く開いた後にマウントしても、最初の 1 フレームから正しい残りを描く", () => {
+    // **アンカーを effect だけで取ると、最初の描画は初期値のまま出る。**
+    // `atPerfMs: 0` を初期値にしていた頃は `performance.now() - 0` ——
+    // ページを開いてからの経過 —— が試合の経過に化け、`duration_ms` を超えていれば
+    // `0:00` を 1 フレーム描いた。試合中のタブ切替・リロードで踏み、操縦者が
+    // 視線を戻した一瞬にそれを見ると「時間切れ」に読める。
+    //
+    // ここで見るのは **effect を走らせる前の描画**。`render` (RTL) は act で包んで
+    // effect まで流し切ってしまうので観測できない —— アンカーを取り直す effect が
+    // 先に走り、初期値が何であっても正しい表示になる。effect の走らない SSR 描画
+    // (`renderToStaticMarkup`) がちょうど「1 フレーム目」に当たる。
+    perfNow = 600_000; // ページを開いてから 10 分 (duration 3 分を大きく超える)
+
+    const html = renderToStaticMarkup(<MatchTimer timer={timerValue({ elapsed_ms: 30_000 })} />);
+
+    expect(html).toContain("2:30");
+    expect(html).not.toContain("0:00");
+  });
+
   it("試合中は自分の時計で残り時間を減らす", () => {
     const { container } = render(<MatchTimer timer={timerValue()} />);
     expect(displayed(container)).toBe("3:00");

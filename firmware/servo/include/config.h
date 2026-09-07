@@ -143,9 +143,33 @@ constexpr motorcan::ServoPulseSpec kServoPulse270{500, 2400, 270.0f};
 constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 
 // TODO(実機で確認): angle_min / angle_max は機構が付いた状態で「当たらない範囲」を
-// 実測して入れること。現状は config/main_hand_positions.yaml が 0〜6deg の微小ストロークしか
-// 使わないのに合わせた安全側の仮値で、広げるのは機構確定後。**狭すぎる分にはクランプで
-// 止まるだけだが、広すぎるとメカストッパに当たったまま停動して焼損する。**
+// 実測して入れること。**「機構確定後に広げる」という当初の方針どおりにはならず**、
+// wall_f を 180deg 動かす必要（8e34d10）で機構確定前に 270 度まで広げてある。
+// 現状 config/main_hand_positions.yaml / config/sub_hand_positions.yaml が使うのは
+// gripper 0〜65deg・wall_f 90〜270deg・wall_r 90〜180deg・sub_gripper 0〜5deg。
+// **狭すぎる分にはクランプで止まるだけだが、広すぎるとメカストッパに当たったまま
+// 停動して焼損する。**
+//
+// !!! 現在この値は 0〜270deg = サーボの全可動域で、クランプは実質効いていない !!!
+// かつては「positions が微小ストロークしか使わない」ことに合わせた安全側の仮値
+// (0〜30deg) だったが、位置定数が実運用値へ更新されたときにここを全域へ開けた。
+// **機構に当たる角度を送っても止まらない状態である。** 実可動域が決まったら必ず
+// 狭めること (棚卸しは docs/mechanism_handoff.md §0)。
+//
+// スルーレート (第 3 要素 90deg/s) は移動時間をそのまま決める。位置定数の
+// `timeout_s` はこの値から逆算した値でなければならず、対応は
+// `tests/test_servo_travel_budget.py` が突き合わせている。
+//
+// **駆動する Servo スロット（gripper / wall_f / wall_r / sub_gripper）は 1 本ずつ
+// 独立した定数を持つ。** 1 つを共有すると、片方の可動範囲を機構に合わせて広げただけで
+// 無関係なスロットのクランプまで一緒に緩む（実際に上記の wall_f 用の変更で gripper の
+// クランプが外れていた）。値はまだ全スロット同じ仮値のまま、実測はスロットごとに行う。
+constexpr motorcan::ServoLimits kGripperLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kWallFLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kWallRLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubGripperLimits{0.0f, 270.0f, 90.0f};
+
+// TouchSensor / Unused は駆動しないので共有のままでよい。
 constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 270.0f, 90.0f};
 
 // ===========================================================================
@@ -205,9 +229,9 @@ constexpr uint8_t kServoBoardCount = 2;
 constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
     // 基板 #0（DIP=0）: メインハンド
     {
-        {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 gripper
-        {SlotRole::Servo, 5, 270.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 wall_f
-        {SlotRole::Servo, 6, 90.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 wall_r
+        {SlotRole::Servo, 4, 0.0f, kGripperLimits, kServoPulse270, false},  // SV0 gripper
+        {SlotRole::Servo, 5, 270.0f, kWallFLimits, kServoPulse270, false},  // SV1 wall_f
+        {SlotRole::Servo, 6, 90.0f, kWallRLimits, kServoPulse270, false},  // SV2 wall_r
         // **実機で確認済み**（CAN ID 0x343 の FEEDBACK を実測）: 非接触で LOW、
         // 接触で HIGH。したがって sensorActiveLow は false。
         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 rotate
@@ -229,7 +253,7 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
     // TODO(実機で確認): SV1〜SV4 の sensorActiveLow は仮値。TouchSensor にする日に
     // 実測して確定すること（基板 #0 の SV3 の実測値は**この基板の配線を何も保証しない**）。
     {
-        {SlotRole::Servo, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 sub_gripper
+        {SlotRole::Servo, 4, 0.0f, kSubGripperLimits, kServoPulse270, false},  // SV0 sub_gripper
         {SlotRole::Unused, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1
         {SlotRole::Unused, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2
         {SlotRole::Unused, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV3

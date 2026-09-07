@@ -307,6 +307,35 @@ class TestRealConfig:
         for name in self._load()["buses"]:
             assert f'NAME="{name}"' in rules
 
+    def test_udev_restart_does_not_take_down_the_control_program(self) -> None:
+        """**udev が restart する unit を `Requires=` してはならない。**
+
+        `Requires=` は依存先が明示的に stop / restart されたときにこちらへ伝播する
+        (man 5 systemd.unit)。生成される udev ルールは CANable の net デバイスが
+        add されるたびに無条件で `systemctl restart cbc-can.service` を打つので、
+        `Requires=` だと **USB の再列挙 (抜けかけ・接触不良・ハブのリセット・
+        `install.sh` の `udevadm trigger`) のたびに試合中の制御プログラムが道連れで
+        再起動**し、シーケンス位置も励磁もタイマーも飛ぶ。しかも
+        `StartLimitBurst=3` を消費するので、60 秒以内に 3 回バウンドすれば
+        `failed` で固定され `systemctl start` すら通らなくなる。
+
+        `Wants=` は起動順の宣言としては同じで、stop / restart を伝播しない。
+        """
+        rules = can_config.cmd_udev(self._load())
+        assert f"restart {can_config._SERVICE_NAME}" in rules, (
+            "前提が崩れている: udev ルールが cbc-can.service を restart していない"
+        )
+
+        unit = (_PROJECT_ROOT / "scripts" / "cbc-control.service").read_text(encoding="utf-8")
+        directives = [
+            line.strip()
+            for line in unit.splitlines()
+            if line.strip().startswith(("Requires=", "Wants="))
+        ]
+
+        assert f"Requires={can_config._SERVICE_NAME}" not in directives
+        assert f"Wants={can_config._SERVICE_NAME}" in directives
+
 
 class TestCommandLine:
     """install.sh / setup_can.sh はこのスクリプトを標準出力経由でしか使わない。"""

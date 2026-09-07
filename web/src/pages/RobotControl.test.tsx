@@ -61,6 +61,7 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
       sync_violations: [],
       unenergized_motors: [],
       firmware_unconfirmed_motors: [],
+      failed_tasks: [],
       reenergizing: false,
       loops_running: true,
       monitors_running: true,
@@ -179,6 +180,7 @@ describe("試合中の右カラム", () => {
           sync_violations: [],
           unenergized_motors: ["rotate_l", "rotate_r"],
           firmware_unconfirmed_motors: [],
+          failed_tasks: [],
           reenergizing: false,
           loops_running: true,
           monitors_running: true,
@@ -247,6 +249,7 @@ describe("RobotControl の操作先", () => {
           sync_violations: [],
           unenergized_motors: ["rotate_l"],
           firmware_unconfirmed_motors: [],
+          failed_tasks: [],
           reenergizing: false,
           loops_running: true,
           monitors_running: true,
@@ -274,6 +277,50 @@ describe("RobotControl の操作先", () => {
     expect(context.sendOrReport).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByRole("button", { name: "再開" }));
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_jump", robot: "sub_hand", step_index: 2 },
+      expect.any(String),
+    );
+  });
+
+  it("駆動中は「クリックで再開」と案内しない (押せないものを押せると言わない)", () => {
+    // 一覧の行は素の <button disabled> で見た目がほとんど変わらないので、案内文が
+    // 古いままだと操縦者には「押したのに反応しない」＝故障としか見えない
+    mount("match", robotState({ running: true, step_index: 1 }));
+
+    expect(screen.queryByText("クリックで再開")).toBeNull();
+    expect(screen.getByText("停止してから選択")).toBeInTheDocument();
+  });
+
+  it("駆動中はステップジャンプの確認モーダルを開かない", async () => {
+    // **機体が動いているあいだ画面を覆ってはならない。** ジャンプの確認は全画面
+    // オーバーレイなので、開いているあいだヘッダーの EMG STOP がクリックできない
+    // (クリックは背景として吸われてパネルが閉じるだけで、機体は止まらない)。
+    // `MotorCheckPanel` をモーダルから外した理由と同じ形の事故。
+    mount("match", robotState({ running: true, step_index: 1 }));
+
+    await userEvent.click(screen.getByRole("button", { name: "ステップ 3: 搬送" }));
+
+    expect(screen.queryByRole("button", { name: "再開" })).toBeNull();
+    expect(document.querySelector(".modal")).toBeNull();
+  });
+
+  it("トリガー待ちではステップジャンプできる (機体は止まっている)", async () => {
+    // `require_trigger` のステップで止まっている間は機体が動いていない。
+    // そこは再開ステップを選ぶ本来の場面なので塞がない。
+    //
+    // **`running: true` を落とさないこと。** 実運用のトリガー待ちは実行中のまま
+    // 止まっている状態 (`sequenceKind` が `waiting_trigger` を `running` より先に
+    // 判定する) で、`running` を既定の false にすると、可否を `state.running === true`
+    // で書いた実装 —— トリガー待ちまで塞いでしまう変異 —— でもこのテストが通る
+    const { context } = mount(
+      "match",
+      robotState({ running: true, waiting_trigger: true, step_index: 1 }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "ステップ 3: 搬送" }));
+    await userEvent.click(screen.getByRole("button", { name: "再開" }));
+
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "sequence_jump", robot: "sub_hand", step_index: 2 },
       expect.any(String),
@@ -392,6 +439,7 @@ describe("RobotControl の診断表示", () => {
           sync_violations: ["rotate"],
           unenergized_motors: [],
           firmware_unconfirmed_motors: [],
+          failed_tasks: [],
           reenergizing: false,
           loops_running: true,
           monitors_running: true,

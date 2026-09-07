@@ -29,7 +29,9 @@ interface RobotControlProps {
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
   const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
-  const { send, sendOrReport } = useRobotCommands();
+  // この画面が送るものは**すべて** `sendOrReport` を通る。素の `send` を持ち出すと、
+  // 戻り値を捨てる書き方が 1 経路だけ混ざっても気付けない
+  const { sendOrReport } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
 
@@ -63,12 +65,29 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // 可否の正はサーバーだが、切断中は届かないので画面側でしか分からない。
   // 塞がずに押させると「押したのに何も起きない」だけが操縦者に残る
   const sequenceBlockedReason = connected ? null : "切断中のため送信できません";
-  // ステップ一覧が押せない理由。**押せるときは何も言わない** —— 塞がれている理由を
-  // 落とすと「押したのに何も起きない」だけが操縦者に残る
-  const stepListBlockedNote = sequenceBlockedReason ?? (inMatch ? null : "試合中のみ操作可");
 
   // 実行状態はサーバー配信の running が唯一の根拠。step_index からの推測をしない
   const kind = state ? sequenceKind(state) : null;
+
+  /**
+   * ステップ一覧を押せない理由。null なら押せる。
+   *
+   * **可否と案内文をここ 1 つで決める。** 別々に書くと「押せないのに
+   * 『クリックで再開』と案内し続ける」状態が作れる。一覧の行は素の
+   * `<button disabled>` で `disabled:cursor-not-allowed` 以外に見た目が変わらないので、
+   * 操縦者からは「押したのに反応しない」＝故障と区別が付かない。
+   * **案内文はこの理由そのもので、null なら何も描かない** —— 押せるときの案内は
+   * 押せば分かることを毎試合読ませるだけの面積なので、出す文言は別に持たない。
+   *
+   * **駆動中を塞ぐ理由**はジャンプの確認が全画面オーバーレイのモーダルだから
+   * (開いているあいだヘッダーの EMG STOP がクリックできない)。
+   * **トリガー待ちは塞がない** —— `require_trigger` で止まっている間、機体は
+   * 動いていない。そこは再開ステップを選ぶ本来の場面である
+   * (`sequenceKind` は `waiting_trigger` を `running` より先に判定する)。
+   */
+  const stepJumpBlockedReason =
+    sequenceBlockedReason ??
+    (!inMatch ? "試合中のみ操作可" : kind === "running" ? "停止してから選択" : null);
 
   // 操作モードもサーバーが正。配信を受け取るまでは半自動として描く
   // (機体を直接動かせる状態を、確証のないまま画面へ出さない)
@@ -154,7 +173,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       robotKey={robotKey}
       manual={manual}
       blockedReason={manualBlockedReason}
-      send={send}
+      sendOrReport={sendOrReport}
     />
   );
 
@@ -249,8 +268,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               // 出すのは**塞がれている理由**だけ。操作できるときの案内 (「クリックで
               // 再開」) は、押せば分かることを毎試合読ませるだけの面積になる
               actions={
-                stepListBlockedNote ? (
-                  <span className="text-[0.85em] text-base-content/60">{stepListBlockedNote}</span>
+                stepJumpBlockedReason ? (
+                  <span className="text-[0.85em] text-base-content/60">
+                    {stepJumpBlockedReason}
+                  </span>
                 ) : null
               }
             >
@@ -259,7 +280,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 stepIndex={state.step_index}
                 waitingTrigger={state.waiting_trigger}
                 onJump={handleJump}
-                disabled={!inMatch || sequenceBlockedReason !== null}
+                // 可否と、その理由の案内文は同じ `stepJumpBlockedReason` から出す
+                // (駆動中に塞ぐ理由・トリガー待ちを塞がない理由はそちらの docstring)
+                disabled={stepJumpBlockedReason !== null}
               />
             </Panel>
           </div>

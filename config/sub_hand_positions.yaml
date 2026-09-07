@@ -13,7 +13,9 @@
 #     片側絶対角で書き、機械原点をずらしたいときは axes.<軸>.offset で寄せる
 #   - **ファームの angle_min / angle_max を超えた値は黙ってクランプされる。** 症状は
 #     「送ったのに途中で止まる」だけで、SET_TARGET には書いた値が載っているので
-#     candump からも読めない。範囲を広げるときはファームの kProvisionalLimits を直す
+#     candump からも読めない。範囲を変えるときはファーム側の**そのスロットの**
+#     定数を直す (kGripperLimits / kWallFLimits / kWallRLimits /
+#     kSubGripperLimits。1 つを共有すると 1 スロットの都合で全部が緩む)
 
 axes:
   # RobStride EDULITE 05 の補助アーム関節。指令・フィードバックともに rad。
@@ -174,9 +176,16 @@ positions:
     home: 0.0            # 下端 = 電源投入位置
     lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
 
+  # !!! この軸だけ「ファームの起動角 = 初期姿勢」が崩れている !!!
+  # firmware/servo/include/config.h の kSlotsByBoard[1][0] (基板 #1 SV0) の初期角は
+  # 0.0deg で、それは下の closed にあたる。**通電直後と基板の瞬断後は閉じる方向へ動く。**
+  # メインハンドの 3 軸は起動角が gripper.open / wall_f.initial / wall_r.initial と
+  # 一致しているので、ここだけが逆。config/checklist.yaml の `sub_gripper_open`
+  # (動作確認より前に唱える) は通電直後には成立しない。
+  # 揃え方は docs/mechanism_handoff.md の該当行を参照 (機構側の判断)。
   sub_gripper:
     open: 5.0            # 開 [deg]
-    closed: 0.0          # 閉 (把持) [deg]
+    closed: 0.0          # 閉 (把持) [deg] — ファームの起動角と同じ値
 
   # 電磁弁は開 / 閉の 2 状態しか取らない。**値は 0 か非 0 かだけが意味を持つ**
   # (仕様書 §9.2)。0.5 のような中間値を書いても基板は ON として扱うので、

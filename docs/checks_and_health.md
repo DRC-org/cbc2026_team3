@@ -349,6 +349,42 @@ down です (起動は続けます)` を ERROR で残す（**起動は拒否し�
 変化しない —— バスが復旧すれば見出しは「異常なし」に戻るが、ワーク落下の通知は
 リセットされるまで残り続ける（2 つの表示が別の役目を持つ）。
 
+### 投げっぱなしタスクの失敗（`failed_tasks`）
+
+**`asyncio.create_task` して待たないタスクが 3 つある。** 緊急停止解除の再励磁
+（`_cmd_e_stop_release` → `_reactivate_motors`）・単発の再励磁
+（`_cmd_reenergize_motors` → `_reenergize_motors`）・同期ずれ検出からの全体緊急停止
+（`main._make_sync_violation_handler` → `activate_e_stop`）で、どれも
+`add_done_callback` が集合から取り除くだけで `t.exception()` を取っていなかった。
+
+かつては CPython の `Task exception was never retrieved` が journal に出るだけで、
+**どのロボットのどの経路か・いつ起きたかは読めず、しかも出力は GC のタイミング任せ**
+だった。とくに 3 つ目が飛ぶと「全体緊急停止が発火しなかった」ことが汎用メッセージに
+しか残らない。`rx_down_episodes` を journal から UI へ出したのと同じ形に寄せてある
+（試合中に journal を見る人はいない）。
+
+- 口は `RobotServer.watch_task` ただ 1 つ。`safety.failed_tasks: string[]` として配る
+- **平常時は空配列で無音。** `parseSafety` の既存の文字列配列ループにそのまま乗るので、
+  パース経路も UI プリミティブも増えない
+- **復帰しても消さない。** リセットは `match_start` の前縁リセットだけで、
+  `reset_rx_down_episodes()` / `reset_jitter_stats()` と同じループ・同じ理由
+- **`t.cancelled()` を先に見る。** `Task.exception()` はキャンセル済みタスクへ
+  `CancelledError` を送出するので、見ないと `_on_shutdown` の一斉キャンセルで
+  コールバック自身が例外を撒く
+- 帰属は**失敗した経路の届く範囲**で決める。全体緊急停止の失敗は全ロボットへ
+  （失敗した時点でどの機体も保護されていない）、単発の再励磁は対象 1 台へ
+
+**この欄は tone を動かさず `forcedOpen` にもしない。** `firmware_unconfirmed_motors`
+と同じ扱いで、診断ツリーを畳んだままにする。強制展開が要る場面はこの欄が単独で
+立つことはなく、別の欄が同時に立って主張するため —— 同期ずれからの緊急停止が
+失敗したケースでは `SyncMonitor.violated` がラッチして `safety.sync_violations` が
+立ち、`describeSafetyIssues` が tone error へ倒して診断ツリーを開く。再励磁の失敗も、
+励磁状態を報告するドライバ（EDULITE 05 / DM3520）なら `_unenergized_motors` の
+`is_energized() is False` 側で拾われる。**この依存関係が崩れたら（同時に立つ欄が
+無くなったら）、こちらを主張側へ倒し直すこと。**
+
+journal で追うときに探す文字列は `投げっぱなしタスクが失敗しました` である。
+
 ### 受信の中断は M3508 の累積角を飛ばす
 
 **受信が戻っても、位置は戻らない。** M3508 の多回転累積は「半周を超える差分は
@@ -1030,7 +1066,7 @@ checklist.yaml すべて —— 本番と `config/bench/*` —— が対象）�
   `docs/impl_plan.md` でも「試合前点検」と位置付けられているのに、**操縦者に実行させる
   導線が config にも UI にも 1 つも無かった**。`cbc-can.service` は `--strict` を
   付けずに呼ぶので CAN が 0 本でも `RemainAfterExit=yes` で success になり、
-  `cbc-control.service` の `Requires=cbc-can.service` は**何も守っていない**
+  `cbc-control.service` の `Wants=cbc-can.service` は**何も守っていない**
   （`--strict` を付けない判断とその理由は `scripts/cbc-can.service` のコメント）。
   つまり「揃っているか」に答えるのは、この 1 行の指差喚呼だけである
 - **`health_ready`** — ①は `state.safety.unenergized_motors` まで配信しているが、
