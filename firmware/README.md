@@ -1,6 +1,6 @@
 # firmware/ — 自作モータドライバのファームウェア
 
-自作モタドラ（Arduino UNO R4 / Renesas RA4M1）の PlatformIO プロジェクト群。
+自作モタドラのファームウェア（PlatformIO 2 プロジェクト + CMake 1 プロジェクト）。
 PC 側 `lib/drivers/generic.py` と CAN で対向する。
 
 **プロトコルの単一情報源は `docs/motor_driver_can_protocol.md`。**
@@ -32,10 +32,13 @@ firmware/
     platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
     src/main.cpp       ペリフェラル初期化・出力反映・CAN 送受信
-  servo/               サーボ用モタドラのファーム（**Arduino Nano** / 1 枚で 5 スロット）
-    platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
-    include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）
-    src/main.cpp       ペリフェラル初期化・補間ループ・MCP2515 送受信
+  servo/               サーボ用モタドラのファーム（1 枚で 5 スロット。**基板 3 枚 / MCU 2 種**）
+    platformio.ini     固有行のみ。**実機 env が 2 つ**（nano = #0/#1 / uno_r4_minima = #2）
+    include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）。**1 プロジェクト 1 ファイル**
+    src/main.cpp       ペリフェラル初期化・補間ループ・CAN 送受信（**MCU に依らず 1 コピー**）
+    src/can_backend.h  CAN の薄いインタフェース（`begin` / `send` / `poll`）。MCU 差はここで吸う
+    src/can_mcp2515.cpp  Nano（#0/#1）用の実装。SPI 外付け + 受信フィルタ
+    src/can_r4.cpp     UNO R4（#2）用の実装。内蔵ペリフェラル（`Arduino_CAN`）
   solenoid/            電磁弁用モタドラのファーム（**STM32F303K8** / 1 枚で 6ch）
     CMakeLists.txt     **PlatformIO ではなく CMake**。MotorCan を target_sources で共有
     CMakePresets.json  Debug / Release（generator は Ninja）
@@ -51,15 +54,32 @@ firmware/
 ST の公式リポジトリから取り直せるため）。clone 直後は `scripts/fetch_hal.sh` を 1 回
 実行すればビルドできる。**`cmake/` はコミットしてある** —— 詳細は下の「コマンド」を参照。
 
-**3 枚とも別の MCU に載っている。**
+**MCU は 3 種類ある。しかも「サーボ基板 = Nano」ではない** —— サーボ基板は 3 枚あり、
+**#2 だけ UNO R4 Minima（内蔵 CAN）**である。
 
-| | DC 用 | サーボ用 | 電磁弁用 |
-|---|---|---|---|
-| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** | **STM32F303K8T6（Cortex-M4F / 32bit / 3.3V）** |
-| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） | **STM32 内蔵 bxCAN**（PA11/PA12 固定） |
-| 出力 | `PwmOut`（R4 専用）+ 方向ピン | **`Servo` ライブラリ**（`writeMicroseconds`） | **GPIO の ON/OFF だけ**（PWM も方向ピンも無い） |
-| Flash / RAM | 256KB / 32KB | **32KB / 2KB** | 64KB / 12KB |
-| ビルド | PlatformIO（env `uno_r4_minima`） | PlatformIO（env `nano`） | **STM32CubeMX + CMake** |
+| | DC 用 | サーボ用 #0/#1 | サーボ用 **#2** | 電磁弁用 |
+|---|---|---|---|---|
+| MCU | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **Arduino Nano（ATmega328P / 8bit / 5V）** | Arduino UNO R4 Minima（RA4M1 / 32bit / 3.3V） | **STM32F303K8T6（Cortex-M4F / 32bit / 3.3V）** |
+| CAN | R4 内蔵ペリフェラル（`Arduino_CAN`、D4/D5 固定） | **MCP2515 を SPI で外付け**（`mcp_can`） | **R4 内蔵ペリフェラル**（`Arduino_CAN`、D4/D5 固定。MCP2515 は載っていない） | **STM32 内蔵 bxCAN**（PA11/PA12 固定） |
+| 出力 | `PwmOut`（R4 専用）+ 方向ピン | **`Servo` ライブラリ**（`writeMicroseconds`） | `Servo` ライブラリ | **GPIO の ON/OFF だけ**（PWM も方向ピンも無い） |
+| サーボのピン | ― | SV0–SV4 = **D4–D8** | SV0–SV4 = **D9 / D11 / D10 / D6 / D3** | ― |
+| RGB LED | D6 | **D9** | **D8**（D9 はサーボ SV0） |（無し） |
+| Flash / RAM | 256KB / 32KB | **32KB / 2KB** | 256KB / 32KB | 64KB / 12KB |
+| ビルド | PlatformIO（env `uno_r4_minima`） | PlatformIO（env `nano`） | PlatformIO（env `uno_r4_minima`） | **STM32CubeMX + CMake** |
+
+**サーボ用の 2 つの env は同じ `firmware/servo/` の中にある**（1 プロジェクト 2 env）。
+別プロジェクト（`firmware/servo_r4/`）にしなかったのは、**`config.h` が 2 つに分かれると
+デバイス ID `0x40` 台が 2 つの `kFirmwareVersion` に対応してしまう**ため。
+`tests/test_firmware_version_sync.py` は「can_id の上位 2bit → プロジェクト 1 つ」で
+同梱の全 yaml と突き合わせるので、分けた瞬間に**焼き忘れ検出の検査そのものが
+片方しか見ない嘘になる**。経緯は `docs/impl_plan.md` の
+「サーボ基板 3 枚目（UNO R4 Minima）」。
+
+**「同じファームを全基板へ焼く」は「MCU ごとに 1 種類のバイナリ」へ緩めてある。**
+Nano 用バイナリを R4 へ物理的に焼けない（platform も board も違う）以上、
+焼き間違いの事故が起きる余地は無い。CAN 上の振る舞いは 2 つのバイナリで同一なので、
+**`kFirmwareVersion` も同じ値を名乗る**（R4 バイナリの新設では版番号を上げていない。
+理由は仕様書 §3.4）。
 
 `MotorCan` が `Arduino.h` も `stm32f3xx_hal.h` も include しないのは意図的で、PC 上の
 native 環境でそのままコンパイルしてテストできるようにするため。**MCU もビルド系も
@@ -69,7 +89,12 @@ native 環境でそのままコンパイルしてテストできるようにす�
 テストも `firmware/test/` を共有するので、**`pio test -e native` はどちらの
 PlatformIO プロジェクトから回しても同じ全ケース（`test_solenoid` を含む）が走る。**
 電磁弁基板のロジック層も、実機ビルドが CMake であることとは無関係にここでテストされる。
-一方**実機ビルド（`pio run` / `cmake --build`）は 3 つとも確認すること。**
+**native テストは MCU に依らないので、サーボの env が 2 つに増えてもどちらか一方で足りる**
+（テスト対象の `MotorCan` は Arduino 非依存）。
+一方**実機ビルド（`pio run` / `cmake --build`）は 4 つとも確認すること** ——
+dc_motor / servo(`nano`) / servo(`uno_r4_minima`) / solenoid。サーボの 2 env は
+`main.cpp` を共有しているので、**片方だけ通しても壊れているのは常にもう片方**である
+（ピンの `static_assert` も CAN バックエンドも env ごとに別物）。
 
 `common.ini` が持つのは本当に共通の部分（`lib_extra_dirs` / `test_framework` / native env と、
 実機ビルドの共通フラグ）だけ。**`platform` / `board` / `lib_deps` は MCU が違うので
@@ -84,13 +109,20 @@ PlatformIO プロジェクトから回しても同じ全ケース（`test_soleno
 pio test -e native -d firmware/dc_motor
 pio test -e native -d firmware/servo
 
-# ビルド（env が基板ごとに違う）
+# ビルド（env が基板ごとに違う。**サーボは 2 env とも必要**）
 pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e nano -d firmware/servo
+pio run -e nano          -d firmware/servo      # サーボ基板 #0 / #1（Arduino Nano）
+pio run -e uno_r4_minima -d firmware/servo      # サーボ基板 #2（UNO R4 Minima）
+pio run                  -d firmware/servo      # 上の 2 つを両方（default_envs が両方）
 
-# 書き込み（サーボ基板 = Arduino Nano）
+# 書き込み（サーボ基板 #0 / #1 = Arduino Nano）
 pio run -e nano -d firmware/servo -t upload
 pio device monitor -e nano -d firmware/servo
+
+# 書き込み（サーボ基板 #2 = UNO R4 Minima）
+pio run -e uno_r4_minima -d firmware/servo -t upload
+pio run -e uno_r4_minima -d firmware/servo -t upload --upload-port /dev/ttyACM0
+pio device monitor -e uno_r4_minima -d firmware/servo
 
 # 書き込み（基板を USB で接続してから）
 pio run -e uno_r4_minima -d firmware/dc_motor -t upload
@@ -102,6 +134,19 @@ pio device monitor -e uno_r4_minima -d firmware/dc_motor
 # クリーン
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
+
+**書き込みの作法も MCU で違う。** Nano（サーボ #0/#1）だけがブートローダの
+ボーレート問題を持つ —— `platformio.ini` の `board` は `nanoatmega328`（**古い
+ブートローダ / 57600 baud**）で、新しいブートローダの個体には `nanoatmega328new`
+（115200）が要る。違うと avrdude が同期できず、しかも**症状が紛らわしい**（同期待ちの
+あいだにスケッチが起動してシリアルへ喋り出し、それを応答として読むので
+`not in sync: resp=0x45` のように意味のある ASCII が並ぶ。配線やポートの誤りに見えるが
+ボーレート違いでしかない）。切り分けは `-n`（書き込みなし）で署名だけ読むのが速い:
+`avrdude -c arduino -p atmega328p -P /dev/ttyUSB0 -b 57600 -n`。
+**ビルド成果物は同一**で、違うのは書き込み時の baud だけ。
+一方 **UNO R4（DC 基板とサーボ #2）は USB/DFU で書き込むのでこの制約が無い** ——
+ポートは `/dev/ttyACM*`（Nano は `/dev/ttyUSB*`）で、`board` を選び直す判断も要らない。
+**同じ「サーボ基板」でも書き込み手順が違うので、繋いだ基板がどちらかを先に確認すること。**
 
 **電磁弁基板（STM32F303K8）は PlatformIO ではなく CMake でビルドする。**
 
@@ -175,11 +220,19 @@ STM32_Programmer_CLI -c port=SWD -w firmware/solenoid/build/Debug/solenoid.elf -
 不定になり、電源投入のたびに違うデバイス ID を名乗る）。`Core/` を手で直すのではなく
 `.ioc` を直して再生成すること。
 
-**DC 用基板（UNO R4 Minima）の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている。**
-このピンを他用途へ割り当ててはならない。割り当てると CAN が上がらず**PC から止められない
-基板**ができあがる。**サーボ用基板（Nano）は MCP2515 を SPI で外付けしているので D4/D5 は
-サーボ出力に使えるが、代わりに `D11`/`D12`/`D13` を SPI が占有する**（`D13` は SCK なので
-ステータス LED に使えず、RGB LED がその役目を担う）。
+**UNO R4 Minima の CAN ペリフェラルは `D4`(TX)/`D5`(RX) に固定されている**（DC 基板と
+**サーボ基板 #2** が該当）。このピンを他用途へ割り当ててはならない。割り当てると CAN が
+上がらず**PC から止められない基板**ができあがる。**サーボ基板 #0/#1（Nano）は MCP2515 を
+SPI で外付けしているので D4/D5 はサーボ出力に使えるが、代わりに `D11`/`D12`/`D13` を
+SPI が占有する**（`D13` は SCK なのでステータス LED に使えず、RGB LED がその役目を担う）。
+
+**この 2 つは互いに逆なので、同じ「サーボ基板」どうしでもピンを類推してはならない。**
+#0/#1 で空いている D4/D5 は #2 では CAN が取り、#0/#1 で SPI が取っている D11 は
+#2 ではサーボ（SV1）である。**だからスロット表は基板番号を明示した並び
+（`kServoBoards[]`）に持ち、各バイナリは自分が担当する基板の要素だけを持つ** ——
+1 つの表に 3 枚ぶんを並べると、R4 ビルドの `static_assert` が Nano 側の D4/D5 を
+CAN 衝突と誤検出し、Nano ビルドは R4 側の D9 を RGB LED との衝突と誤検出する
+（どちらも実在しない衝突なので、検査を緩めるしか通す方法が無くなる）。
 
 各 `main.cpp` の `static_assert` が、`config.h` の全ピンについて **①CAN/SPI との衝突
 ②役割どうしの重複 ③デバイス ID の重複と連続ブロック性 ④センサの報告ビット**を
@@ -223,11 +276,12 @@ USB CDC の `Serial`（115200 baud）から角度を直接入力できる。
 シリアル操作中の養い方は dc_motor と同じ（打ったスロットだけ / 最後の入力から
 2000ms で自動解除。`lib/MotorCan/src/SerialOverride.h`）。
 
-サーボ基板の DIP は A0〜A3 で UART とは重ならないため、`Serial` の使用に制約はない。
-ただし **Flash 32KB / SRAM 2KB しかない**ので、容量が足りなくなったら
+サーボ基板の DIP は 3 枚とも A0〜A3 で UART とは重ならないため、`Serial` の使用に
+制約はない。ただし **#0/#1（Nano）は Flash 32KB / SRAM 2KB しかない**ので、
+容量が足りなくなったら
 `config.h` の `ENABLE_SERIAL_DEBUG` を 0 にして落とす。
 
-### 試合用ビルドでは 3 枚とも `ENABLE_SERIAL_DEBUG` を 0 にする
+### 試合用ビルドでは全基板とも `ENABLE_SERIAL_DEBUG` を 0 にする
 
 シリアルの上書きは**コマンドウォッチドッグ（仕様書 §5.1 の「最後の砦」）を
 意図的に外す経路**である。範囲はそのチャンネルだけ・期限は 2000ms に絞ってあるが、
@@ -239,8 +293,11 @@ USB CDC の `Serial`（115200 baud）から角度を直接入力できる。
 | servo | `firmware/servo/include/config.h` | `#define ENABLE_SERIAL_DEBUG 0` | `1` |
 | solenoid | `firmware/solenoid/include/config.h` | `#define ENABLE_SERIAL_DEBUG 0` | `1` |
 
+**`config.h` は 3 つだが、焼く相手は 5 枚**（DC 1 + サーボ 3 + 電磁弁 1）。サーボの
+`config.h` は 1 つでも **`nano` / `uno_r4_minima` の 2 回焼く**必要がある。
+
 **焼き直したら `kFirmwareVersion` は変えない**（プロトコルもピン配置も変わっていない）。
-どのビルドが載っているかは `INFO` からは分からないので、**試合前に 3 枚とも
+どのビルドが載っているかは `INFO` からは分からないので、**試合前に全基板を
 0 で焼き直したことを口頭で確認する**のが唯一の担保になる。
 
 ## デバイス ID
@@ -264,7 +321,9 @@ Bit2..0 : スロット番号 (0-7)
 | **電磁弁** ch0 – ch5 | `0xC0` – `0xC5` | `valve_1` 〜 `valve_6` |
 
 2 枚目は DIP=1 で DC が `0x88`〜、サーボが `0x48`〜、電磁弁が `0xC8`〜。
-**サーボ基板だけは実際に 2 枚使う** —— 基板 #1 の SV0（`0x48`）が `sub_gripper`。
+**サーボ基板だけは実際に 3 枚使う** —— 基板 #1 の SV0（`0x48`）が `sub_gripper`、
+基板 #2（`0x50`〜`0x54`、UNO R4）は**用途未定で全スロット `Unused`**（ID を 1 つも名乗らず、
+`FEEDBACK` も `INFO` も送らない。PC 側 yaml にも登録が無い）。
 
 **範囲外は未設定（駆動拒否）へ倒す。** 黙って丸めると、DIP を回しすぎた基板が
 別の基板の ID を名乗る。未設定にしておけば LED が速く点滅し、設定ミスがその場で
@@ -301,10 +360,14 @@ PC からの症状は「その基板の全チャンネルが STALE」で配線�
 「センサだけ」も成立する。`Unused` 以外のスロットはすべて CAN デバイスとして
 `FEEDBACK` を送る。
 
-**スロット設定は基板番号（DIP）ごとの表 `kSlotsByBoard[基板][スロット]` が持つ。**
-全基板へ**同じファームを焼く**ので、表が 1 つしか無いと基板 #0 の SV3 をスイッチへ
-変えた瞬間に基板 #1 の SV3 も道連れになる（1 枚だけ別のファームを焼くのは §3.4 の
-焼き忘れ検出を無力化するので採らない）。行を選ぶのは `setup()` の DIP 読み取り。
+**スロット設定は基板番号を明示して持つ並び `kServoBoards[]`（`ServoBoardConfig`）が持つ。**
+1 つのバイナリを複数の基板へ焼くので、表が 1 つしか無いと基板 #0 の SV3 をスイッチへ
+変えた瞬間に基板 #1 の SV3 も道連れになる。要素を選ぶのは `setup()` の DIP 読み取り。
+
+**「行の添字 = 基板番号」ではなく基板番号を値として持つのは、バイナリが MCU ごとに
+分かれたため。** Nano 用バイナリは #0/#1 の要素だけ、R4 用バイナリは #2 の要素だけを
+持つ。担当外の基板番号は表に**載っていない**ので、後述の「表に無い基板番号は全スロット
+`Unused`」へそのまま乗る（安全側の倒れ方は変えていない）。
 
 **サーボの型（270° / 180°）もスロットごと・基板ごとに選べる。** 型は `pulse`
 （`kServoPulse270` / `kServoPulse180`）が表し、`SlotRole` は「駆動するか、読むか、
@@ -321,6 +384,16 @@ CAN 越しには指令どおり動いたようにしか見えない）。
 | #0 | SV4 | D8 | `Unused` | ― | ― | `y_axis` の原点スイッチ用に予約（**スイッチ未装着のため `Unused`**。付けたら `TouchSensor` へ戻し `kFirmwareVersion` を上げる） |
 | #1 | SV0 | D4 | `Servo` | 270° | `0x48` | `sub_gripper`（サブハンド） |
 | #1 | SV1 – SV4 | D5 – D8 | `Unused` | ― | ― | 未使用（`FEEDBACK` も `INFO` も送らない） |
+| **#2**（UNO R4） | SV0 | **D9** | `Unused` | ― | ― | **用途未定**（`FEEDBACK` も `INFO` も送らない） |
+| **#2** | SV1 | **D11** | `Unused` | ― | ― | 用途未定 |
+| **#2** | SV2 | **D10** | `Unused` | ― | ― | 用途未定 |
+| **#2** | SV3 | **D6** | `Unused` | ― | ― | 用途未定 |
+| **#2** | SV4 | **D3** | `Unused` | ― | ― | 用途未定 |
+
+**#2 のピンが連番ですらないのは MCU が違うから** —— 内蔵 CAN が D4/D5 を、RGB LED が
+D8 を取っている。**ピン番号からスロットを推測してはならない**（#0 の D6 は SV2、
+#2 の D6 は SV3）。用途が決まったら `kServoBoards[]` の #2 の要素と PC 側 yaml の
+`can_id`（`0x50`〜）を同じコミットで揃えること —— **配線するだけでは動かない。**
 
 行が実行時にしか決まらないので、`ServoChannel g_channel[]` は静的初期化子を持てない。
 **初期角と可動範囲は `setup()` が `begin()` で入れる**（`ServoChannel.h`）。`begin()` を
@@ -329,20 +402,33 @@ CAN 越しには指令どおり動いたようにしか見えない）。
 
 **デバイス ID は表に持たない。** スロットの添字がそのまま ID の下位 3bit、DIP の
 基板番号がその上の 3bit になるので、配線で役割を変えても ID は動かない。役割を変える
-ときは**その基板の行**の `SlotRole` を書き換えるだけでよい。
+ときは**その基板の要素**の `SlotRole` を書き換えるだけでよい。**基板 #2 はピン配置が
+#0/#1 と全く違うのに `0x50`〜`0x54` がスロット順に並ぶ**のは、この性質があるため
+（PC 側 yaml の `can_id` は配線に引きずられない）。
 
-**表に無い基板番号（現在は 2 以上）は全スロット `Unused` のまま据え置く。** 黙って
+**表に無い基板番号は全スロット `Unused` のまま据え置く**（Nano 用バイナリでは 2 以上、
+R4 用バイナリでは 2 以外）。黙って
 基板 #0 の行を使うと、DIP を回しすぎた基板が別の基板の役割とデバイス ID を名乗り、
 同じ ID の 2 ノードが違うデータを送ってバスがエラーフレームで埋まる。据え置けば ID が
 付かないので、「デバイス ID 未設定 → LED 赤の速い点滅・駆動拒否」へそのまま乗る
 （DIP を 8 以上へ回したときと同じ扱い）。
 
-**`SlotRole` は `Unused` が 0 である。** 表は 1 行あたり `kServoSlotCount` 個を並べるので
+**`SlotRole` は `Unused` が 0 である。** 表は 1 基板あたり `kServoSlotCount` 個を並べるので
 書き忘れた要素はゼロ埋めされる。先頭が `Servo` だと、書き忘れたスロットが黙って
 「サーボとして駆動するピン」になり、そこにスイッチが繋がっていれば通電したまま叩く。
-行そのものの書き忘れは `main.cpp` の `static_assert`（表の行数 == `kServoBoardCount`）が
-ビルド時に弾く（`[kServoBoardCount][...]` と寸法を明示すると、足りない行がゼロ埋めで
-通ってしまうので書かない）。
+ゼロ埋めは `pin = 0` としても現れるので、**UART（D0/D1）を `kFixedPins[]` に予約してある**
+—— 予約が無いと 1 スロットぶんの書き忘れだけが衝突検査を素通りする（2 つ以上なら
+スロット間のピン重複で落ちる）。**`kFixedPins[]` の中身は MCU ごとに違う**（Nano は
+MCP2515 の INT/CS と SPI 3 本 + RGB(D9)、R4 は RGB(D8)）ので、検査の網もそのバイナリが
+担当する基板ぶんしか張られない。**R4 の CAN（D4/D5）だけは `kFixedPins[]` に写さず、
+別の `static_assert`（`pinsAvoidCan()`）が variant のマクロ `PIN_CAN0_TX` / `PIN_CAN0_RX` を
+直接見る** —— 正はコアの variant なので、`config.h` に写しを置くと**写しだけが古くなる**
+経路ができる。
+
+**基板の要素ごと書き忘れると、その基板は全スロット `Unused` になる**（上の「表に無い
+基板番号」と同じ扱い）。安全側には倒れるがビルドは通るので、症状は「焼いたのに
+`FEEDBACK` が 1 通も来ない」だけになる。**PC からは配線不良と区別が付かないので、
+まず基板の LED を見ること**（赤の速い点滅 = デバイス ID 未設定）。
 
 **センサは PC 側 `config/<robot>.yaml` の `sensors:` セクションに登録する。**
 `motors:` に置くと動作確認・目標値再送・UI のモータ一覧に「常に 0 のモータ」として
@@ -439,7 +525,8 @@ PC 側 `move_to` はこのフラグで次のステップへ進むため、**機�
 位置・速度制御と PID は実装ごと存在せず、`duty` だけを受理する。
 
 `HAS_RGB_LED` は dc_motor / servo とも既定 `1`。どちらも基板にシリアル RGB LED が
-1 個載っており（DC は D6、servo は D9）、`platformio.ini` の `lib_deps` は
+1 個載っており（DC は D6、servo は **#0/#1 が D9・#2 が D8**。#2 では D9 をサーボ SV0 が
+使うため）、`platformio.ini` の `lib_deps` は
 **`adafruit/Adafruit NeoPixel`** を指す。**FastLED は使わない** —— WS2812 を 1 個
 光らせるだけに引くと `fl/json.cpp` まで丸ごと付いてきて Nano の Flash 32KB に収まらず、
 さらにヘッダ走査で framework 同梱の I2S を巻き込む（`lib_ignore` が要るのはそちらの話）。
@@ -453,7 +540,8 @@ PC 側 `move_to` はこのフラグで次のステップへ進むため、**機�
 色は 2 枚の `main.cpp` に別々に書かれているので、**片方だけ直すと表示規則が
 静かに食い違う**（色は native テストの届かない翻訳単位にある）。
 
-**servo 側の `show()` は色が変わったときだけ呼ぶ。** AVR 版
+**servo 側の `show()` は色が変わったときだけ呼ぶ**（**理由が効くのは AVR = #0/#1 だけ
+だが、`main.cpp` は 2 env で共有しているので規則はそのまま守ること**）。AVR 版
 `Adafruit_NeoPixel::show()` は 1 LED あたり約 30us 割り込みを禁止し、その窓に
 Servo ライブラリの Timer1 割り込み（パルス終端）が当たると**そのパルスだけが最大 30us
 伸びる**。`kServoPulse270` は 7.04us/deg なので約 4.3deg のヒゲになり、
@@ -469,20 +557,51 @@ grip 5deg / 壁 6deg の微小ストロークではほぼ全域に相当する�
 
 | 定数 | 仮の値 | 何を確認するか | 誤ったときのリスク |
 |---|---|---|---|
-| `kSlotsByBoard[][].limits.angleMinDeg` / `angleMaxDeg` | `0.0` / `30.0` | 機構を付けた状態で当たらない可動範囲を実測する | **広すぎるとサーボがメカストッパに当たったまま停動し、短時間で焼損する。最優先で確認**（狭すぎる分はクランプで止まるだけ） |
-| `kSlotsByBoard[][].role` | #0 = サーボ 3 + センサ 1 + 空き 1 / #1 = サーボ 1 + 空き 4 | 実際に**どの基板に**何を何本繋ぐか（個数に制約は無い）。**#0 の SV4 は `y_axis` の原点スイッチ用に予約した空きで、別のものを載せない** | 役割がずれると、指令した先と違うものが動く。**行を間違えると隣の基板の役割になる** |
-| `kSlotsByBoard[][].sensorActiveLow` | `true` | センサの極性。接触で導通して LOW になる想定 | 逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる |
-| `kSlotsByBoard[][].pulse` | 全スロット `kServoPulse270` = `{500, 2400, 270.0}` | 各スロットに挿す**サーボの型**とデータシートのパルス幅・可動角（`kServoPulse180` は仮置き） | 指令角と実角がずれる。上端で当たり続ける |
-| `kSlotsByBoard[][].pin` | `4` / `5` / `6` / `7` / `8` | 基板の信号線。**SPI(D11-13) / MCP2515(D3,D10) / RGB(D9) / DIP(A0-A3) と重ならないこと** | `main.cpp` の `static_assert` がビルド時に弾く |
-| `kPinDip[4]` | `{14,15,16,17}`（A0–A3） | 基板の DIP がどのピンに落ちているか | オフセットが化けて別のアクチュエータが動く |
-| `kSlotsByBoard[][].initialAngleDeg` | `0.0` | 電源投入時に持っていく角度 | 起動した瞬間に機構が動く |
+| `kServoBoards[][].limits.angleMinDeg` / `angleMaxDeg` | `0.0` / `30.0` | 機構を付けた状態で当たらない可動範囲を実測する | **広すぎるとサーボがメカストッパに当たったまま停動し、短時間で焼損する。最優先で確認**（狭すぎる分はクランプで止まるだけ） |
+| `kServoBoards[][].role` | #0 = サーボ 3 + センサ 1 + 空き 1 / #1 = サーボ 1 + 空き 4 / **#2 = 空き 5（用途未定）** | 実際に**どの基板に**何を何本繋ぐか（個数に制約は無い）。**#0 の SV4 は `y_axis` の原点スイッチ用に予約した空きで、別のものを載せない**。**#2 は 5 スロットとも役割から未定**で、決まったら PC 側 yaml の `can_id`（`0x50`〜）も同じコミットで足す | 役割がずれると、指令した先と違うものが動く。**基板番号を間違えると隣の基板の役割になる** |
+| `kServoBoards[][].sensorActiveLow` | `true` | センサの極性。接触で導通して LOW になる想定 | 逆だと「触れていないのに触れている」と報告し続け、原点合わせが即座に終わる |
+| `kServoBoards[][].pulse` | 全スロット `kServoPulse270` = `{500, 2400, 270.0}` | 各スロットに挿す**サーボの型**とデータシートのパルス幅・可動角（`kServoPulse180` は仮置き） | 指令角と実角がずれる。上端で当たり続ける |
+| `kServoBoards[][].pin` | #0/#1 = `4`/`5`/`6`/`7`/`8`、**#2 = `9`/`11`/`10`/`6`/`3`** | 基板の信号線。**避けるピンが MCU で違う** —— #0/#1 は SPI(D11-13) / MCP2515(D3,D10) / RGB(D9) / DIP(A0-A3)、**#2 は内蔵 CAN(D4,D5) / RGB(D8) / DIP(A0-A3)** | `main.cpp` の `static_assert` がビルド時に弾く（**検査するのはそのバイナリが担当する基板のぶんだけ**） |
+| `kPinDip[4]` | `{14,15,16,17}`（A0–A3） | 基板の DIP がどのピンに落ちているか。**3 枚とも A0–A3 で、番号（14–17）も一致する**（Nano と UNO R4 でたまたま同じ） | オフセットが化けて別のアクチュエータが動く |
+| `kServoBoards[][].initialAngleDeg` | `0.0` | 電源投入時に持っていく角度 | 起動した瞬間に機構が動く |
 | `kEStopDetach` | `false` | 緊急停止時に脱力させたい機構があるか | `true` にすると壁が自重で倒れ、把持中のワークを落とす |
+
+#### CAN の持ち方は `can_backend.h` で分ける（#0/#1 と #2）
+
+**MCU 差は `src/can_backend.h` の薄いインタフェース（`begin` / `send` / `poll`）だけに
+閉じ込め、`main.cpp` は MCU に依らず 1 コピーのまま**にしてある。実装は
+`can_mcp2515.cpp`（Nano / SPI 外付け）と `can_r4.cpp`（UNO R4 / 内蔵ペリフェラル）。
+`main.cpp` を分岐で埋めると、安全機構とスロット処理が 2 通りに分かれて片方だけ古くなる。
+
+**送信バッファの本数も #0/#1 と #2 で違う。** MCP2515 は TX 3 本 + ライブラリが空きを
+待つが、**R4 の `Arduino_CAN` は標準 ID の mailbox を 1 本しか使わない**（`R7FA4M1_CAN.cpp`
+の `write()` が `CAN_MAILBOX_ID_0` 固定）。5 スロットぶんの `INFO` を同じ反復でまとめて
+送ると **#2 では 2 通目以降が必ず落ち**、`kInfoIntervalMs`(1000) が
+`feedback_interval_ms`(10) の整数倍で位相が固定されるため**毎回同じスロットだけが出て
+残り 4 本は永久に出ない**（＝そのスロットの焼き忘れ検出が黙って無効になる）。
+**対処済み** —— DC 基板・電磁弁基板と同じ「**1 反復 1 通・落ちたスロットは添字を進めず
+次の反復で送り直す**」（`loop()` の `g_infoPendingSlot`）へ揃えてあり、**`#if` による
+MCU 分岐は入れていない**。1 反復 1 通は 3 枚に共通の規則で Nano でも成立する
+（PC から見える振る舞い —— 1Hz・内容・CAN ID —— は変わらず、5 通が数反復に散るだけ。
+むしろ `sendMsgBuf` の空き待ちで `loop()` が伸びる最悪値は縮む）ので、
+**`kFirmwareVersion` も上げていない。**
+
+**R4 の `Arduino_CAN` には受信フィルタの API が無い。** したがって #2 にはバス上の
+全フレームが上がってくるが、宛先判定は `routeFrame` が行うので**自分宛でないフレームは
+そこで捨てられる** —— DC 基板（同じ R4 内蔵 CAN）で実績のある形である。
+下の MCP2515 のフィルタ話（#0/#1 限定）は、この差を埋めるためのものではなく
+**MCP2515 の受信バッファが 2 段しかないことへの対処**なので、#2 には当たらない。
+
+#### 以下は **#0/#1（Arduino Nano）に限る話**
 
 **Arduino Nano は Flash 32KB / SRAM 2KB しかない。** ライブラリを足したらビルド時の
 使用率を必ず見ること（現状は **Flash 57.9% / 17,786B、RAM 48.9% / 1,001B**。
 avr-gcc 7.3 / `pio run -e nano -d firmware/servo` の実測）。RGB LED に FastLED を使うと
 収まらないので Adafruit NeoPixel にしてある。足りなくなったら `ENABLE_SERIAL_DEBUG` を
-0 にして落とす。
+0 にして落とす。**#2（UNO R4）は 256KB / 32KB なのでこの制約に当たらないが、
+`main.cpp` と `lib_deps` は共有しているので、足したライブラリは Nano 側にも乗る** ——
+**使用率は必ず `-e nano` で確認すること**（R4 側だけ見て「入った」と判断すると、
+気付くのは Nano ビルドが落ちたときになる）。
 
 **MCP2515 を 16MHz 水晶で 1Mbps** はサンプルポイントの余裕が乏しい設定として
 知られている。実機で通信エラーが出るなら、バス全体を 500kbps へ下げる判断が要る

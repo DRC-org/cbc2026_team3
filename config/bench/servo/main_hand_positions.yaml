@@ -34,7 +34,7 @@ axes:
   # gripper / wall_f / wall_r と同一にしてある (ベンチで確かめた指令量が本番でもそのまま出る)。
   #
   # **SV3 / SV4 はここに現れない。** ファームは SV3 を TouchSensor、SV4 を Unused と
-  # 宣言しており (firmware/servo/include/config.h の kSlotsByBoard[基板][スロット])、
+  # 宣言しており (firmware/servo/include/config.h の kServoBoards[])、
   # どちらも駆動できないので軸を持たない。SV3 は
   # config/bench/servo/main_hand.yaml の sensors: に登録してある (SV4 は FEEDBACK を
   # 送らないので登録しない)。

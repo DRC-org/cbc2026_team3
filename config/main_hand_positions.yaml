@@ -130,7 +130,7 @@ axes:
     #
     # **戻すときは 3 つを同時に戻すこと。** 1 つでも欠けると動作確認の最初のステップが
     # 毎回「センサが応答していません」で止まり、症状は配線不良と区別が付かない:
-    #   1. firmware/servo/include/config.h の kSlotsByBoard 基板 #0 SV4 を
+    #   1. firmware/servo/include/config.h の kServoBoards 基板 #0 SV4 を
     #      SlotRole::TouchSensor へ (現在は Unused。同時に kFirmwareVersion を上げ、
     #      同梱 yaml の expected_firmware も揃える)
     #   2. config/main_hand.yaml の sensors: へ origin_sensor (can_id 0x44) を登録

@@ -61,15 +61,20 @@ WS 接続先は UI のステータスバー（接続表示）から変更でき�
 pio test -e native -d firmware/dc_motor   # 実機不要。firmware/test/ の全ケース
 pio test -e native -d firmware/servo      # 実機不要。上とまったく同じ全ケース
 pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e nano -d firmware/servo -t upload
+pio run -e nano -d firmware/servo -t upload          # サーボ基板 #0 / #1（Nano）
+pio run -e uno_r4_minima -d firmware/servo -t upload # サーボ基板 #2（UNO R4）
 ```
 
 テストは `firmware/test/` にあり、両プロジェクトが `test_dir` で共有するので、
-**native テストはどちらか一方で足りる**（どちらから回しても同じ全ケースが走る）。
+**native テストはどちらか一方で足りる**（どちらから回しても同じ全ケースが走る。
+サーボの env が 2 つに増えても変わらない）。
 **電磁弁基板のロジック層（`test_solenoid`）もここに含まれる** —— 実機ビルドが CMake でも、
 `MotorCan` を共有しているのでテストは PlatformIO 側から回る。
-一方**実機ビルド（`pio run`）は両方必要**。共有しているのは `firmware/lib/MotorCan/`
-までで、`main.cpp` と `config.h` は別物のため。
+一方**実機ビルド（`pio run`）は 3 つとも必要**（dc_motor / servo の `nano` / servo の
+`uno_r4_minima`）。共有しているのは `firmware/lib/MotorCan/` までで、`main.cpp` と
+`config.h` は別物のため。**サーボの 2 env は `main.cpp` と `config.h` を共有するが、
+ピンの `static_assert` も CAN バックエンドも env ごとに別物なので、片方だけ通しても
+壊れているのは常にもう片方である。**
 
 ### ファームウェア（電磁弁 = CMake）
 
@@ -233,7 +238,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
   静的に import する（旧名がロボット名の名前空間だったときは、ロボットでないものが
   そこに同居している不自然さもあった）
 - `config/` — YAML 設定（後述）
-- `firmware/` — 自作モータドライバのファームウェア（DC = UNO R4 / サーボ = Nano / 電磁弁 = STM32F303K8）
+- `firmware/` — 自作モータドライバのファームウェア（DC = UNO R4 / サーボ = Nano ×2 + UNO R4 ×1 / 電磁弁 = STM32F303K8）
 - `web/` — Vite + React + TypeScript + Tailwind v4 / daisyUI 5 の操作 UI
   - 画面切替は React Router（library mode / `createBrowserRouter`）。ルートは `src/routes.tsx`、
     共通の外枠と WebSocket 接続は `src/layouts/RootLayout.tsx`（タブ帯は `AppHeader` の中）
@@ -888,11 +893,20 @@ UI は送る前に理由を説明するだけ。画面ごとに `phase === "matc
 片方だけを変更してはならない。`firmware/lib/MotorCan/` が `Arduino.h` を include しないのは、
 native 環境（`pio test -e native`）でプロトコル層と安全機構をテストできるようにするため。
 
-**3 枚の基板は MCU も CAN の持ち方もビルド系も違う。ピン配置を他の基板から類推してはならない。**
-DC 用は UNO R4 Minima + 内蔵 CAN（`D4`/`D5` 固定）、サーボ用は **Arduino Nano + MCP2515
-（SPI 外付け）** で、Nano 側は `D11`/`D12`/`D13` を SPI が占有する（`D13` は SCK なので
-ステータス LED に使えず、RGB LED が担う）。Nano は Flash 32KB / SRAM 2KB しかないので、
-ライブラリを足したら使用率を必ず確認すること（RGB に FastLED を使うと収まらない）。
+**基板は MCU も CAN の持ち方もビルド系も違う。ピン配置を他の基板から類推してはならない ——
+「サーボ基板」どうしでも類推してはならない。**
+DC 用は UNO R4 Minima + 内蔵 CAN（`D4`/`D5` 固定）。**サーボ用は 3 枚あり、MCU が 2 種類に
+またがる** —— **#0/#1 は Arduino Nano + MCP2515（SPI 外付け）**、**#2 は UNO R4 Minima +
+内蔵 CAN**（`D4`/`D5` 固定。MCP2515 は載っていない）。**Nano 固有の制約は #0/#1 にしか
+当たらない**: `D11`/`D12`/`D13` を SPI が占有する（`D13` は SCK なのでステータス LED に
+使えず RGB LED が担う。RGB は #0/#1 が `D9`、**#2 は `D8`** —— #2 では `D9` がサーボ）、
+Flash 32KB / SRAM 2KB しかないのでライブラリを足したら使用率を必ず `-e nano` で確認する
+（RGB に FastLED を使うと収まらない）。スロットのピンは **#0/#1 が `D4`〜`D8`、#2 は
+`D9`/`D11`/`D10`/`D6`/`D3`** で、避けるピンが MCU で逆になる。**ファームは
+`firmware/servo/` の 1 プロジェクトのまま env を 2 つ（`nano` / `uno_r4_minima`）持ち**、
+MCU 差は `src/can_backend.h` に閉じる。**別プロジェクトにすると `config.h` が 2 つになり、
+`tests/test_firmware_version_sync.py` の焼き忘れ検出が片方しか見なくなる**（経緯は
+`docs/impl_plan.md`「サーボ基板 3 枚目（UNO R4 Minima）」）。
 電磁弁用は **STM32F303K8 + 内蔵 bxCAN（`PA11`/`PA12` 固定）** で、出力は GPIO の ON/OFF が
 6 本だけ（PWM も方向ピンも無い）。**この 1 枚だけ PlatformIO ではなく CubeMX + CMake** で、
 ピン割当は `solenoid.ioc` が持つ。
@@ -903,12 +917,15 @@ STM32 側は HAL の `GPIOA` / `GPIOB` が `constexpr` 文脈で使えないた�
 見ておらず、`config.h` の想定と実基板の配線がまるごと食い違ってもビルドが通った
 （`DIS` として LOW/HIGH を振っていた `D7` が、実機では ch2 の方向ピンだった）。
 
-**送信バッファの本数も 3 枚で違う。同じ送信コードが基板ごとに違う壊れ方をする。**
+**送信バッファの本数は基板ごとに違う。同じ送信コードが基板ごとに違う壊れ方をする。**
 DC（R4 内蔵 CAN）は**標準 ID の mailbox が 1 本だけ**、電磁弁（bxCAN）は 3 本、
-サーボ（MCP2515）は TX 3 本 + ライブラリが空きを待つ。1 反復で全 ch ぶんをまとめて送る
-コードは、DC では `INFO` が **1 通も出ず**、電磁弁では **6ch 中 2ch しか出ない**（サーボは
-無症状）。しかも `kInfoIntervalMs`(1000) が `feedback_interval_ms`(10) の整数倍なので位相が
-固定され、**毎回同じ ch が永久に落ちる**。守る規則は 4 つ ——
+サーボ #0/#1（MCP2515）は TX 3 本 + ライブラリが空きを待つ。**サーボ基板は #0/#1 と #2 で
+本数が違う** —— #2 は R4 内蔵 CAN なので DC と同じ 1 本である。1 反復で全 ch ぶんをまとめて送る
+コードは、DC では `INFO` が **1 通も出ず**、電磁弁では **6ch 中 2ch しか出ない**（無症状なのは
+MCP2515 の #0/#1 だけ）。しかも `kInfoIntervalMs`(1000) が `feedback_interval_ms`(10) の整数倍なので位相が
+固定され、**毎回同じ ch が永久に落ちる**。**送信コードは全基板で 1 つのまま、下の規則を
+共通で満たす形にしてある**（`#if` で MCU 分岐させない —— 片方の MCU だけ直した状態が作れ、
+それこそがこの規則の戒めているものである）。守る規則は 4 つ ——
 ①**送信 API の戻り値を捨てない**（唯一の口は各基板の `sendFrame()`。数える規則は
 `motorcan::TxFailCounter` が持ち、`kCanTxFailStreakAlarm`(50) で LED を赤へ倒す。捨てていた
 頃は全滅が LED にもログにも PC 側にも出なかった）②**空きを待たない**（詰まったバスの上で
@@ -1067,24 +1084,31 @@ float32 をやめたのは NaN の防御をプロトコル全体から消すた�
 
 **サーボ基板の 5 スロットは、どれもサーボ出力にもデジタル入力にもなる。**
 スロット設定一式（役割 `Servo` / `TouchSensor` / `Unused`・ピン・初期角・可動範囲・
-パルス仕様・センサ極性）は `config.h` の `kSlotsByBoard[基板][スロット]` が
-**基板番号（DIP）ごとの行**として持ち、**それぞれ何個でもよい**（センサだけの基板も
-成立する）。**基板ごとに分けてあるのは全基板へ同じファームを焼くため** — 表が 1 つだと
+パルス仕様・センサ極性）は `config.h` の `kServoBoards[]`（`ServoBoardConfig`）が
+**基板番号を明示した並び**として持ち、**それぞれ何個でもよい**（センサだけの基板も
+成立する）。**基板ごとに分けてあるのは 1 つのバイナリを複数の基板へ焼くため** — 表が 1 つだと
 基板 #0 の SV3 をスイッチにした瞬間に基板 #1 の SV3 も道連れになり、サーボの型も
 全基板・全スロットで一律になる。**270 度サーボと 180 度サーボはスロットごと・基板ごとに
 混在できる** — 型は `pulse`（`kServoPulse270` / `kServoPulse180`）が持ち、`SlotRole` は
 「駆動するか、読むか、使わないか」だけを表す軸に保つ（型を `SlotRole` へ入れると
 `isServoSlot()` が「どちらかである」に変わり、呼び出し側すべてが型を意識する）。
-変えるときはその基板のその行を書き換えるだけで、**デバイス ID は動かさない**（スロットに
-固定しておくと PC 側 yaml の `can_id` が無変更で済む）。`Unused` にしたスロットも ID を
-1 つ予約したままにする（予約をやめるとブロックの幅が縮んで隣の基板と重なる）。
+変えるときはその基板の要素を書き換えるだけで、**デバイス ID は動かさない**（スロットに
+固定しておくと PC 側 yaml の `can_id` が無変更で済む。**基板 #2 はピン配置が #0/#1 と
+まるで違うのに `0x50`〜`0x54` がスロット順に並ぶ**のがその効き目）。`Unused` にした
+スロットも ID を 1 つ予約したままにする（予約をやめるとブロックの幅が縮んで隣の基板と重なる）。
+**「行の添字 = 基板番号」をやめて基板番号を値で持つのは、バイナリが MCU ごとに分かれたため**
+— 各バイナリは自分が担当する基板の要素だけを持つ（Nano 用は #0/#1、R4 用は #2）。
+1 つの表に 3 枚ぶんを並べると、R4 ビルドの静的検査が Nano 行の D4/D5 を内蔵 CAN との
+衝突と誤検出し、Nano ビルドは R4 行の D9 を RGB との衝突と誤検出する（どちらも実在しない
+衝突なので、検査を緩めるしか通す方法が無くなる）。
 **表に無い基板番号は全スロット `Unused` のまま据え置く** — 黙って基板 #0 の行を使うと、
 DIP を回しすぎた基板が別の基板の役割とデバイス ID を名乗り、同じ ID の 2 ノードが違う
 データを送ってバスがエラーフレームで埋まる。据え置けば ID が付かないので、既存の
 「デバイス ID 未設定 → LED 赤の速い点滅・駆動拒否」へそのまま乗る。同じ理由で
 `SlotRole` は **`Unused` を 0** にしてある（表の要素を書き忘れたときのゼロ埋めが
 駆動しない側へ倒れる）。**ただしゼロ埋めは `pin = 0` としても現れる** — 役割は安全側へ
-倒れてもピンは倒れないので、`main.cpp` の `kFixedPins[]` が Nano の UART（D0/D1）を
+倒れてもピンは倒れないので、`main.cpp` の `kFixedPins[]`（**MCU ごとに中身が違い、R4 の
+CAN ピンだけは写さず別の `static_assert` が variant のマクロを直接見る**）が UART（D0/D1）を
 **`ENABLE_SERIAL_DEBUG` に依らず常に予約**し、書き忘れた 1 行を `static_assert` で
 捕まえる（予約が無いと、1 スロットぶんの書き忘れだけが検査を素通りする。2 つ以上なら
 スロット間のピン重複で落ちる）。行を選ぶのは実行時の DIP なので、初期角と可動範囲を
