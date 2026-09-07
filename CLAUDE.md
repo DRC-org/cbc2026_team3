@@ -104,9 +104,13 @@ scripts/setup_can.sh --strict     # 試合前点検。定義済みの全バス�
 
 **`--strict` を打つ導線は指差喚呼（`config/checklist.yaml` の `can_bus_strict`）。**
 `cbc-can.service` は `--strict` を付けずに呼ぶので **CAN が 0 本でも success で終わり**、
-`cbc-control.service` の `Requires=cbc-can.service` は揃っていることを保証しない。
-付けない理由は `scripts/cbc-can.service` のコメント（付けると片ハンドだけの練習・
-机上ベンチ・`--dry-run` が一律にできなくなる）。**「揃っているか」に答えるのは人である。**
+`cbc-control.service` の `Wants=cbc-can.service` は揃っていることを保証しない
+（`Requires=` ではないのは、udev の CAN 再起動で制御プログラムを道連れにしないため。
+理由は `scripts/cbc-control.service` のコメント）。`--strict` を付けない理由は
+`scripts/cbc-can.service` のコメント（片ハンドだけの練習・机上ベンチ・`--dry-run` は
+どれもバスが揃っていない構成なので、付けると毎回この unit が `failed` で残り、
+`Requires=cbc-can.service` のままの `cbc-can-watchdog.service` が上がらなくなる）。
+**「揃っているか」に答えるのは人である。**
 
 vcan を使うテストは無い（`--dry-run` は python-can の `virtual` インタフェースで、
 vcan ではない）。詳細は `docs/impl_plan.md` の「vcan を使った統合テスト（未着手）」。
