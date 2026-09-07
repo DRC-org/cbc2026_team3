@@ -60,6 +60,13 @@ bool SolenoidChannel::setOn(bool on, uint32_t nowMs) {
 
 void SolenoidChannel::hold() { on_ = false; }
 
+void SolenoidChannel::tick(uint32_t nowMs) {
+    // 出力禁止のあいだは目標を残さない（理由はヘッダの宣言に書いてある）
+    if (!safety_.isOutputAllowed(nowMs)) {
+        on_ = false;
+    }
+}
+
 bool SolenoidChannel::outputOn(uint32_t nowMs) const {
     return safety_.isOutputAllowed(nowMs) && on_;
 }

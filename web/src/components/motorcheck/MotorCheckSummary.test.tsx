@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
 import type { MotorCheckSnapshot } from "@/lib/protocol";
+import { MALFORMED } from "@/lib/protocol";
 import { EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
 function mount(over: Partial<MotorCheckSnapshot>) {
@@ -52,5 +53,22 @@ describe("MotorCheckSummary", () => {
 
     expect(screen.getByText("完了")).toBeInTheDocument();
     expect(screen.getByText("1 ステップ除外")).toBeInTheDocument();
+  });
+
+  it("ステップ一覧が読めない配信は、完了と出す場面でも判定不能を添える", () => {
+    // **ここでしか言えない。** `MotorCheckPanel` の全文警告は畳まれた内側にあり、
+    // あちらが自分から開くのは実行中と失敗時だけ。完了判定は `total_steps` しか
+    // 見ないので、この配信は緑の「完了」＋畳んだパネルになり、操縦者は警告を
+    // 一度も見ずに指差喚呼「アクチュエータ動作確認 完了」にチェックを付けられる
+    mount({ running: false, step_index: 6, total_steps: 6, steps: MALFORMED });
+
+    expect(screen.getByText("完了")).toBeInTheDocument();
+    expect(screen.getByText("ステップ 判定不能")).toBeInTheDocument();
+  });
+
+  it("読めている配信では判定不能を出さない", () => {
+    mount({ running: false, step_index: 6, total_steps: 6 });
+
+    expect(screen.queryByText("ステップ 判定不能")).not.toBeInTheDocument();
   });
 });

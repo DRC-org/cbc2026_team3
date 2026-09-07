@@ -453,6 +453,9 @@ class TestEStopClearsJogOrigin:
         drivers["y_axis_r"].set_observed(position=2.0 * 55.0)
         drivers["y_axis_l"].set_observed(position=-2.0 * 55.0)
         await fx.command({"type": "e_stop_release"})
+        # 解除の再励磁が終わるまで手動指令は拒否される (単発再励磁と同じゲート)。
+        # ここで待たないと、見たいもの (起点の取り直し) の手前で弾かれる
+        await fx.wait_reactivation()
 
         drivers["y_axis_r"].commands.clear()
         await fx.command({"type": "manual_jog", "robot": _ROBOT, "axis": "y_axis", "delta": 1.0})

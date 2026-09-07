@@ -40,9 +40,16 @@ const TWO_STEERABLE: ManualState = {
 };
 
 function renderPanel(manual: ManualState = MANUAL, blockedReason: string | null = null) {
+  // 送信口は `sendOrReport` 固定。素の `send` を渡せる形にしておくと、切断中に
+  // 押した 1 回が痕跡なく消える書き方がテストの上では通ってしまう
   const send = vi.fn(() => true);
   render(
-    <ManualPanel robotKey="main_hand" manual={manual} blockedReason={blockedReason} send={send} />,
+    <ManualPanel
+      robotKey="main_hand"
+      manual={manual}
+      blockedReason={blockedReason}
+      sendOrReport={send}
+    />,
   );
   return { send };
 }
@@ -71,12 +78,15 @@ describe("ManualPanel", () => {
 
     await user.click(screen.getByLabelText("y_axis を 0.5mm 進める"));
 
-    expect(send).toHaveBeenCalledWith({
-      type: "manual_jog",
-      robot: "main_hand",
-      axis: "y_axis",
-      delta: 0.5,
-    });
+    expect(send).toHaveBeenCalledWith(
+      {
+        type: "manual_jog",
+        robot: "main_hand",
+        axis: "y_axis",
+        delta: 0.5,
+      },
+      "ジョグ",
+    );
   });
 
   it("絶対値は manual_set を送る", async () => {
@@ -88,12 +98,15 @@ describe("ManualPanel", () => {
     await user.type(input, "7");
     await user.click(screen.getByLabelText("y_axis を入力値へ移動"));
 
-    expect(send).toHaveBeenCalledWith({
-      type: "manual_set",
-      robot: "main_hand",
-      axis: "y_axis",
-      value: 7,
-    });
+    expect(send).toHaveBeenCalledWith(
+      {
+        type: "manual_set",
+        robot: "main_hand",
+        axis: "y_axis",
+        value: 7,
+      },
+      "目標値の送信",
+    );
   });
 
   it("プリセットは manual_move を送る", async () => {
@@ -102,12 +115,15 @@ describe("ManualPanel", () => {
 
     await user.click(screen.getByLabelText("gripper を open へ"));
 
-    expect(send).toHaveBeenCalledWith({
-      type: "manual_move",
-      robot: "main_hand",
-      axis: "gripper",
-      position: "open",
-    });
+    expect(send).toHaveBeenCalledWith(
+      {
+        type: "manual_move",
+        robot: "main_hand",
+        axis: "gripper",
+        position: "open",
+      },
+      "プリセット移動",
+    );
   });
 
   it("操作できないときは理由を出して 1 通も送らせない", async () => {
@@ -133,12 +149,15 @@ describe("ManualPanel", () => {
 
       await user.keyboard("{ArrowRight}");
 
-      expect(send).toHaveBeenCalledWith({
-        type: "manual_jog",
-        robot: "main_hand",
-        axis: "y_axis",
-        delta: 0.5,
-      });
+      expect(send).toHaveBeenCalledWith(
+        {
+          type: "manual_jog",
+          robot: "main_hand",
+          axis: "y_axis",
+          delta: 0.5,
+        },
+        "ジョグ",
+      );
     });
 
     it("↑ ↓ で操作対象が移る", async () => {
@@ -148,12 +167,15 @@ describe("ManualPanel", () => {
       await user.keyboard("{ArrowDown}");
       await user.keyboard("{ArrowRight}");
 
-      expect(send).toHaveBeenLastCalledWith({
-        type: "manual_jog",
-        robot: "main_hand",
-        axis: "rotate",
-        delta: 0.5,
-      });
+      expect(send).toHaveBeenLastCalledWith(
+        {
+          type: "manual_jog",
+          robot: "main_hand",
+          axis: "rotate",
+          delta: 0.5,
+        },
+        "ジョグ",
+      );
     });
 
     it("端では選択が止まる (巡回しない)", async () => {
@@ -165,12 +187,15 @@ describe("ManualPanel", () => {
       await user.keyboard("{ArrowUp}{ArrowUp}{ArrowUp}");
       await user.keyboard("{ArrowRight}");
 
-      expect(send).toHaveBeenLastCalledWith({
-        type: "manual_jog",
-        robot: "main_hand",
-        axis: "y_axis",
-        delta: 0.5,
-      });
+      expect(send).toHaveBeenLastCalledWith(
+        {
+          type: "manual_jog",
+          robot: "main_hand",
+          axis: "y_axis",
+          delta: 0.5,
+        },
+        "ジョグ",
+      );
     });
 
     it("連続操作できない軸は選択対象に入らない", async () => {
@@ -182,12 +207,15 @@ describe("ManualPanel", () => {
       await user.keyboard("{ArrowDown}{ArrowDown}");
       await user.keyboard("{ArrowRight}");
 
-      expect(send).toHaveBeenLastCalledWith({
-        type: "manual_jog",
-        robot: "main_hand",
-        axis: "y_axis",
-        delta: 0.5,
-      });
+      expect(send).toHaveBeenLastCalledWith(
+        {
+          type: "manual_jog",
+          robot: "main_hand",
+          axis: "y_axis",
+          delta: 0.5,
+        },
+        "ジョグ",
+      );
     });
 
     it("行を触るとその軸が操作対象になる", async () => {
@@ -197,12 +225,15 @@ describe("ManualPanel", () => {
       await user.click(screen.getByText("rotate"));
       await user.keyboard("{ArrowRight}");
 
-      expect(send).toHaveBeenLastCalledWith({
-        type: "manual_jog",
-        robot: "main_hand",
-        axis: "rotate",
-        delta: 0.5,
-      });
+      expect(send).toHaveBeenLastCalledWith(
+        {
+          type: "manual_jog",
+          robot: "main_hand",
+          axis: "rotate",
+          delta: 0.5,
+        },
+        "ジョグ",
+      );
     });
 
     it("キーの割り当てを画面に出す", () => {

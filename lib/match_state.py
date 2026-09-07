@@ -132,11 +132,26 @@ def load_checklist_definitions(config: dict) -> dict[str, list[ChecklistItem]]:
 
     id / label を持たないエントリは無視する。yaml の記述ミスで起動が落ちるより、
     項目が欠けた状態で起動して UI 上で気付ける方が競技当日の運用に適する。
+
+    **ロール名の誤りだけは拒否する。1 項目の欠落とは失敗の質が違う。** id/label を
+    落としても残りの項目はゲートを閉じたままにするが、``ALL_ROLES`` に無いロールへ
+    書かれた項目は ``MatchState._rebuild_checklists`` が組み立てる段で丸ごと落ちる ——
+    ``pre_match`` が空リストになり、``completed`` は ``all([])`` で **True**、つまり
+    **指差喚呼を 1 つも読み上げないまま試合開始のゲートが開く**。しかも画面には
+    項目が 1 つも出ないので、操縦者にはゲートが開いている理由が分からない。
+    旧 2 ロール構成 (`main_hand:` / `sub_hand:`) の yaml を持ち込むだけで踏む。
     """
     raw = (config or {}).get("checklists") or {}
     definitions: dict[str, list[ChecklistItem]] = {role: [] for role in ALL_ROLES}
 
     for role, entries in raw.items():
+        if role not in definitions:
+            raise ValueError(
+                f"未知の指差喚呼ロール '{role}' が checklists に書かれています"
+                f" (使えるロール: {', '.join(ALL_ROLES)})。"
+                "このまま起動すると、その項目は組み立ての段で丸ごと落ち、"
+                "指差喚呼を 1 つも読み上げないまま試合を開始できてしまいます"
+            )
         if not isinstance(entries, list):
             continue
         items: list[ChecklistItem] = []

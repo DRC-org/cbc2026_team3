@@ -257,7 +257,13 @@ export interface MotorCheckSnapshot {
   current_step: string | null;
   step_index: number;
   total_steps: number;
-  steps: SequenceStepInfo[];
+  /**
+   * ステップ一覧。読めなかった配信は `MALFORMED`。
+   *
+   * **空配列へ倒さない** —— 空は「まだ読み込まれていない」という別の意味を既に
+   * 持っている (`excluded_steps` と同じ理由)。
+   */
+  steps: SequenceStepInfo[] | Malformed;
   /** 直近の拒否・失敗理由。次の起動が成功するまで消えない */
   error: string | null;
   /**
@@ -490,6 +496,30 @@ export function parseExcludedSteps(raw: unknown): ExcludedStep[] | Malformed {
   return ok ? (raw as ExcludedStep[]) : MALFORMED;
 }
 
+/**
+ * 動作確認のステップ一覧を読む。読めなければ `MALFORMED`。
+ *
+ * `parseExcludedSteps` と同じ理由で `?? []` へ倒してはならない —— 空配列は
+ * 「まだ読み込まれていない」という**別の意味**を既に持っており
+ * (`MotorCheckPanel` がその文言を出す)、読めなかった配信をそこへ倒すと
+ * 「配信が壊れている」が「まだ読み込まれていない」に化ける。指差喚呼
+ * 「アクチュエータ動作確認 完了」の判断材料が静かに嘘になる。
+ *
+ * 要素の形まで見るのは、`step.index` をレンダー本体で読むため —— 1 要素でも
+ * `null` が混ざると TypeError で `RouteErrorBoundary` の内側が丸ごと落ちる。
+ */
+export function parseMotorCheckSteps(raw: unknown): SequenceStepInfo[] | Malformed {
+  if (!Array.isArray(raw)) return MALFORMED;
+  const ok = raw.every(
+    (item) =>
+      isObject(item) &&
+      typeof item.index === "number" &&
+      typeof item.label === "string" &&
+      typeof item.require_trigger === "boolean",
+  );
+  return ok ? (raw as SequenceStepInfo[]) : MALFORMED;
+}
+
 /** 位置制御ループ 1 本 (= 同一バス上の M3508 を束ねる 200Hz ループ) の状態 */
 export interface PositionLoopState {
   bus: string;
@@ -551,13 +581,18 @@ export interface SafetyState {
    * 人が読めるラベル一覧。平常時は空配列。
    *
    * 緊急停止解除の再励磁・単発の再励磁・同期ずれ検出からの全体緊急停止はどれも
-   * 例外が起きても CPython が journal へ出すだけで画面には一切現れない
+   * 例外が起きても journal へ出るだけで画面には一切現れなかった
    * (`RobotServer.watch_task` 参照)。**古い順に並び、上限を超えた分は古いものから
    * 消える。復帰しても消えない** —— リセットは試合開始の前縁リセットだけ。
    */
   failed_tasks: string[];
   /**
-   * 単発の再励磁 (`reenergize_motors`) がサーバー側で処理中か。
+   * モータの励磁し直しがサーバー側で処理中か。
+   *
+   * 単発の再励磁 (`reenergize_motors`) と、緊急停止解除の再励磁の**どちらでも**
+   * 立つ (後者は全ロボットぶんをまとめて走るので、その間は全機で立つ)。
+   * どちらも「フォルト前の現在角を書いてから enable」を打つので、操縦者から見た
+   * 「今は指令が通らない」は 1 つ。
    *
    * 押してから 0.1〜1.5 秒のあいだ `unenergized_motors` は消えない (励磁が
    * 次のフィードバックへ反映されるまで分からない) ので、これが無いと操縦者は
@@ -959,7 +994,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           current_step: typeof raw.current_step === "string" ? raw.current_step : null,
           step_index: num(raw.step_index),
           total_steps: num(raw.total_steps),
-          steps: Array.isArray(raw.steps) ? (raw.steps as SequenceStepInfo[]) : [],
+          steps: parseMotorCheckSteps(raw.steps),
           error: typeof raw.error === "string" ? raw.error : null,
           last_error: parseSequenceFailure(raw.last_error),
           excluded_steps: parseExcludedSteps(raw.excluded_steps),

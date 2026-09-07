@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -271,7 +271,14 @@ class Sequence:
         指令値は保持したままにする (落下すると危険な軸で保持トルクを失わないため)。
         """
         table = self.positions
-        pending: list[tuple[AxisHandle, str, Awaitable[bool]]] = []
+        # **コルーチンは溜めない。** 到達待ちを溜めている途中の `set_target_value` が
+        # 例外 (緊急停止・CAN 送信失敗) を投げると、既に作った `wait_reached`
+        # コルーチンが誰にも await されないまま捨てられ、
+        # `RuntimeWarning: coroutine ... was never awaited` が journal に出る ——
+        # 試合中に緊急停止を踏むたび、本当の死因 (`EStopActiveError`) の隣に
+        # 無関係な警告が並ぶ。待ち時間だけを持っておき、全軸へ指令し終えてから
+        # まとめてコルーチンを作る
+        pending: list[tuple[AxisHandle, str, float | None]] = []
 
         for axis, position_name in targets.items():
             spec = table.axis(axis)
@@ -280,15 +287,11 @@ class Sequence:
             await handle.set_target_value(
                 table.commands(axis, position_name, court=self.court),
             )
-            pending.append(
-                (
-                    handle,
-                    position_name,
-                    handle.wait_reached(timeout=spec.timeout_s if timeout is None else timeout),
-                )
-            )
+            pending.append((handle, position_name, spec.timeout_s if timeout is None else timeout))
 
-        results = await asyncio.gather(*(awaitable for _, _, awaitable in pending))
+        results = await asyncio.gather(
+            *(handle.wait_reached(timeout=wait_s) for handle, _, wait_s in pending)
+        )
         failed = [
             f"{handle.name}->{position_name}"
             for (handle, position_name, _), reached in zip(pending, results, strict=True)

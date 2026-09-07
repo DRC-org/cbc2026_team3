@@ -221,6 +221,42 @@ class TestMatchesFeedback:
         msg_target = can.Message(arbitration_id=0x101, data=bytes(3), is_extended_id=False)
         assert self.drv.matches_feedback(msg_target) is False
 
+    def test_状態フラグすら無いフレームは自分宛にしない(self):
+        """**解釈できないフレームは「自分宛ではない」として無視する。**
+
+        DLC は可変 (状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト) なので
+        `== N` では書けないが、0 バイトのフレームは解釈しようがない。claim すると
+        `update_state` が `d[0]` で IndexError を投げ、`_dispatch_frame` が握って
+        `rx_error_count` を積む —— `can_generic` は 2 台のロボットで物理共有して
+        おり、リモートフレームやノイズが流れるのは構成上の正常である。
+        """
+        empty = can.Message(arbitration_id=0x301, data=b"", is_extended_id=False)
+
+        assert self.drv.matches_feedback(empty) is False
+
+    def test_状態フラグだけの_FEEDBACK_は自分宛として受ける(self):
+        """下限ちょうど (DLC=1) が通ることを見る。
+
+        位置を持たない基板 —— DC 基板とセンサスロット —— が送るのはこの形だけで
+        (仕様書 §3.2: 状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト)、下限を
+        1 バイトより上へ引き上げるとその全チャンネルが 1 通も配られなくなる。
+        症状は「その基板の全チャンネルが STALE」で、配線不良と区別が付かない。
+        """
+        # position を省くと DLC=1 (実機の DC 基板・センサと同じ形)
+        minimal = generic_feedback(self.drv)
+        assert len(minimal.data) == 1
+
+        assert self.drv.matches_feedback(minimal) is True
+
+    def test_短すぎる_INFO_も自分宛にしない(self):
+        # decode_info は Byte2 (スロット役割) まで読む (仕様書 §3.4)
+        short = can.Message(arbitration_id=0x401, data=bytes(2), is_extended_id=False)
+
+        assert self.drv.matches_info(short) is False
+        # 3 バイトあれば従来どおり受ける (可動レンジ無しの DC / 電磁弁 / センサ)
+        exact = can.Message(arbitration_id=0x401, data=bytes(3), is_extended_id=False)
+        assert self.drv.matches_info(exact) is True
+
 
 class TestEncodeEStop:
     def test_encode_e_stop(self):
