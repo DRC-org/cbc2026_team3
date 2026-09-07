@@ -52,9 +52,14 @@ _MARGIN = 1.2
 def _servo_slew_rate_deg_per_s() -> float:
     """サーボ基板が全 Servo スロットへ適用しているスルーレート [deg/s]。
 
-    **全スロットが同じ `ServoLimits` を使っていることまで確かめる。** スロットごとに
-    別のレートを持てる構造なので、種類が増えたらこの検査は「どのレートで割るべきか」に
-    答えられない —— そのまま素通しすると、検査が生きているように見えて実は嘘をつく。
+    **Servo スロットが使う定数のスルーレートが全部同じであることまで確かめる。**
+    可動範囲はスロットごとに独立した定数を持つ (1 つを共有すると、片方を機構に
+    合わせて広げただけで無関係なスロットのクランプまで緩む)が、下の検査は軸ごとの
+    `timeout_s` を 1 つのレートで割る。レートが分かれた瞬間、この検査は「どのレートで
+    割るべきか」に答えられない —— そのまま素通しすると、検査が生きているように見えて
+    実は嘘をつく。**レートを分けたくなったら、軸 → スロット → 定数の対応を辿って
+    軸ごとのレートを引く形へ書き換えること** (今は分かれていないので、その対応表を
+    先回りで作ると、使われないまま実装とずれていく表が 1 つ増えるだけになる)。
     """
     text = _SERVO_CONFIG_H.read_text(encoding="utf-8")
 
@@ -65,14 +70,18 @@ def _servo_slew_rate_deg_per_s() -> float:
 
     used = set(_SERVO_SLOT_RE.findall(text))
     assert used, f"{_SERVO_CONFIG_H}: SlotRole::Servo の行を 1 つも読めなかった"
-    assert len(used) == 1, (
-        f"{_SERVO_CONFIG_H}: Servo スロットが複数の ServoLimits を使っている: {sorted(used)}"
+
+    missing = sorted(used - limits.keys())
+    assert not missing, f"{_SERVO_CONFIG_H}: Servo スロットが使う {missing} の定義が読めない"
+
+    rates = {limits[name][2] for name in used}
+    assert len(rates) == 1, (
+        f"{_SERVO_CONFIG_H}: Servo スロットのスルーレートが分かれている:"
+        f" {sorted((name, limits[name][2]) for name in used)}"
     )
 
-    name = used.pop()
-    assert name in limits, f"{_SERVO_CONFIG_H}: Servo スロットが使う {name} の定義が読めない"
-    rate = limits[name][2]
-    assert rate > 0.0, f"{_SERVO_CONFIG_H}: {name} のスルーレートが {rate}"
+    rate = rates.pop()
+    assert rate > 0.0, f"{_SERVO_CONFIG_H}: Servo スロットのスルーレートが {rate}"
     return rate
 
 

@@ -39,6 +39,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     sync_violations: [],
     unenergized_motors: [],
     firmware_unconfirmed_motors: [],
+    failed_tasks: [],
     reenergizing: false,
     loops_running: true,
     monitors_running: true,
@@ -602,6 +603,85 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
+  });
+
+  /**
+   * 投げっぱなしタスクの失敗ラベル (`FailedTasksNotice`)。`FirmwareUnconfirmedNotice`
+   * と同じ位置付け —— 「異常」ではないので判定チップ (見出し) も開閉 (`forcedOpen`)
+   * も動かさない。過去に 1 度失敗した記録が試合開始まで残るだけで、機体が今も
+   * 壊れているとは限らない。
+   */
+  it("開いたときだけタスク失敗ラベルを出す (判定・開閉は動かさない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: ["再励磁 (RuntimeError)"] })}
+      />,
+    );
+
+    // 見出しの判定チップは変えない (「異常」ではないため)
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+    // 自分から開かせない (畳んだままにできる)
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText("タスク失敗")).not.toBeInTheDocument();
+  });
+
+  it("開けばタスク失敗ラベルが見える", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: ["再励磁 (RuntimeError)"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText("タスク失敗")).toBeInTheDocument();
+    expect(screen.getByText("再励磁 (RuntimeError)")).toBeInTheDocument();
+  });
+
+  /**
+   * **手当ての文面は再起動を促してはならない。** これは投げっぱなしタスクの内部例外
+   * (トレースバックは journal にしか無い) であり、再起動で直る保証は無い。
+   */
+  it("手当てとして journal の確認を案内する (再起動を促さない)", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: ["再励磁 (RuntimeError)"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText(/journal/)).toBeInTheDocument();
+    // 「再起動ではなく journal を見よ」という否定形は許す。「再起動してください」の
+    // ような行動喚起だけを弾く (文言に「再起動」という字面が 1 文字も出ない、
+    // ではなく「再起動を促していない」ことを見る)
+    expect(screen.queryByText(/再起動して/)).not.toBeInTheDocument();
+  });
+
+  it("タスク失敗が 0 件なら開いても何も出さない", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ failed_tasks: [] })}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.queryByText("タスク失敗")).not.toBeInTheDocument();
   });
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {

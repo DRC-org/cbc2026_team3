@@ -577,6 +577,16 @@ export interface SafetyState {
    */
   firmware_unconfirmed_motors: string[];
   /**
+   * 投げっぱなしタスク (`asyncio.create_task` して待たないもの) が失敗したときの
+   * 人が読めるラベル一覧。平常時は空配列。
+   *
+   * 緊急停止解除の再励磁・単発の再励磁・同期ずれ検出からの全体緊急停止はどれも
+   * 例外が起きても journal へ出るだけで画面には一切現れなかった
+   * (`RobotServer.watch_task` 参照)。**古い順に並び、上限を超えた分は古いものから
+   * 消える。復帰しても消えない** —— リセットは試合開始の前縁リセットだけ。
+   */
+  failed_tasks: string[];
+  /**
    * モータの励磁し直しがサーバー側で処理中か。
    *
    * 単発の再励磁 (`reenergize_motors`) と、緊急停止解除の再励磁の**どちらでも**
@@ -625,7 +635,12 @@ export function safetyShapeErrors(value: unknown): string[] {
   if (!isObject(value)) return ["safety"];
 
   const broken: string[] = [];
-  for (const key of ["sync_violations", "unenergized_motors", "firmware_unconfirmed_motors"]) {
+  for (const key of [
+    "sync_violations",
+    "unenergized_motors",
+    "firmware_unconfirmed_motors",
+    "failed_tasks",
+  ]) {
     if (!isStringArray(value[key])) broken.push(key);
   }
   for (const key of ["loops_running", "monitors_running", "refreshers_running", "reenergizing"]) {

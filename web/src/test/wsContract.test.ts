@@ -75,16 +75,20 @@ const STATE_FIELDS_UI_READS = [
   "e_stop_active",
   "health",
   "safety",
-  // 安全機構は 10 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
+  // 安全機構は 11 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
   // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
   "safety.sync_violations",
   "safety.unenergized_motors",
   // 焼き忘れ検出 (info_mismatch) が沈黙している自作モタドラ。**チップの内容**は
   // `describeSafetyIssues` に乗せない (tone を動かさない) が、**欄そのものの欠落**は
-  // 他の 9 欄とまったく同じで、`safetyShapeErrors` が拾って「安全機構 判定不能」へ
+  // 他の 10 欄とまったく同じで、`safetyShapeErrors` が拾って「安全機構 判定不能」へ
   // 倒れる。ここを検査キーから外すと、欠落が黙って `undefined` になり
   // `FirmwareUnconfirmedNotice` の `.map` で全画面が落ちる経路が戻る
   "safety.firmware_unconfirmed_motors",
+  // 投げっぱなしタスクの失敗ラベル (`RobotServer.watch_task`)。**チップの内容**は
+  // `describeSafetyIssues` に乗せない (tone を動かさない) が、欄そのものの欠落は
+  // 他の欄とまったく同じで「安全機構 判定不能」へ倒れる
+  "safety.failed_tasks",
   // 再励磁の在飛。落ちればボタンが押せるまま残り、操縦者は 2 回目を押す
   "safety.reenergizing",
   "safety.loops_running",
@@ -383,6 +387,7 @@ const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
   firmware_unconfirmed_motors: "ui",
+  failed_tasks: "ui",
   reenergizing: "ui",
   loops_running: "ui",
   monitors_running: "ui",

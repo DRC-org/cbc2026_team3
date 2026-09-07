@@ -14,8 +14,9 @@
 #
 # 仮値のまま残っているもの (機構を壊しうる順):
 #   - サーボ 3 軸 (gripper / wall_f / wall_r) の positions と、対になる
-#     firmware/servo/include/config.h の kProvisionalLimits —— 広すぎるとサーボが
-#     機構に当たったまま押し続けて焼損する
+#     firmware/servo/include/config.h のスロット別クランプ (kGripperLimits /
+#     kWallFLimits / kWallRLimits) —— 広すぎるとサーボが機構に当たったまま
+#     押し続けて焼損する
 #   - rotate の homing の search_distance (direction / step は実機で確定済み)
 #   - conveyor の run のコート別の符号 (赤を正転とした割り当てが仮置き) —— 逆だと
 #     両コートともワークを反対向きへ送るが、機構は壊れないので試合中にしか現れない
@@ -54,7 +55,9 @@
 #     片側絶対角で書き、機械原点をずらしたいときは axes.<軸>.offset で寄せる
 #   - **ファームの angle_min / angle_max を超えた値は黙ってクランプされる。** 症状は
 #     「送ったのに途中で止まる」だけで、SET_TARGET には書いた値が載っているので
-#     candump からも読めない。範囲を広げるときはファームの kProvisionalLimits を直す
+#     candump からも読めない。範囲を変えるときはファーム側の**そのスロットの**
+#     定数を直す (kGripperLimits / kWallFLimits / kWallRLimits /
+#     kSubGripperLimits。1 つを共有すると 1 スロットの都合で全部が緩む)
 
 axes:
   # ラックアンドピニオンによる y 軸前後移動。左右 2 台の M3508 が機構的に直結しており、

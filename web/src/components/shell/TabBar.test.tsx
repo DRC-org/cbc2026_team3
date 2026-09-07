@@ -63,6 +63,7 @@ const SAFETY: SafetyState = {
   sync_violations: [],
   unenergized_motors: [],
   firmware_unconfirmed_motors: [],
+  failed_tasks: [],
   reenergizing: false,
   loops_running: true,
   monitors_running: true,
