@@ -207,6 +207,18 @@ uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
 // 諦めた結果は捨てずに数える。**戻り値を捨てないための唯一の口**にしてあるので、
 // HAL_CAN_AddTxMessage() を直に呼ぶ経路を作らないこと。捨てていた頃は、6ch 中 4ch の
 // INFO が 1 通も出ていないことが LED にもログにも現れなかった。
+//
+// **この数え方は自動再送 (main.c の AutoRetransmission = ENABLE) に依存している。**
+// NART (再送しない) だと、1 回の送信試行が成功・エラー・調停負けのどれで終わっても
+// メールボックスが解放されるので、`GetTxMailboxesFreeLevel() == 0` も
+// `AddTxMessage != HAL_OK` も**成立しない** —— トランシーバが死んでいてもバスから
+// 外れていても ACK が返らなくても、g_txFail は 0 のまま LED は平常のハートビートを
+// 出し続ける。PC 側からは 6 本の弁が全部 STALE になるだけで、現場の切り分け手段が
+// 両側とも消える。DC 基板 (R4 内蔵 CAN は既定で再送する) では同じ状況でメールボックス
+// が埋まり続けて規則どおり赤へ倒れるので、**その非対称は意図されたものではない**。
+//
+// 再送を有効にしても loop() は止まらない —— ここは空きが無ければ即座に諦める
+// (規則②「空きを待たない」) ので、詰まったバスの上でも周期は回り続ける。
 bool sendFrame(uint16_t canId, uint8_t *data, uint8_t length) {
     if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) == 0) {
         g_txFail.onFailure();
