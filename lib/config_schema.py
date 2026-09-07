@@ -17,6 +17,7 @@ server / control) は自前のリテラルを持たず、ここを参照する�
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -234,9 +235,21 @@ def _number(source: str, path: str, raw: object) -> float:
     if isinstance(raw, bool) or not isinstance(raw, int | float | str):
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}")
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}") from exc
+
+    # **NaN と無限大はここで落とす。値域検査では捕まえられない。** yaml の `.nan` も
+    # 文字列の `"nan"` も float() を通り、NaN は比較がすべて False になるので
+    # `value <= 0` も `warning > critical` も素通りする —— CAN プロトコルから float を
+    # 外した理由 (CLAUDE.md) とまったく同じ失敗様式で、しきい値として内部へ入ると
+    # 「全モータが恒久 STALE なのに設定は正常に見える」形でしか現れない。
+    # 無限大は比較を通ってしまうぶんさらに悪く、`feedback_timeout_ms: .inf` は
+    # 「途絶検出が黙って無効」、`temp_warning_c: .inf` は「温度警告が黙って無効」に
+    # なる (どちらも検査を通った正当な設定として起動ログにも出ない)
+    if not math.isfinite(value):
+        raise ValueError(f"{source}: {path} が有限な数値ではありません: {raw!r}")
+    return value
 
 
 def _integer(source: str, path: str, raw: object) -> int:
