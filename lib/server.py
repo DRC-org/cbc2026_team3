@@ -642,7 +642,13 @@ class RobotServer:
         # ここで待つとそのあいだ次の 1 通が処理されない。フィードバックの返らない
         # モータは 1 台 0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を
         # 押した状況 —— では数秒に達し、**E-STOP の押し直しすら効かなくなる**。
-        # 進捗は `safety.unenergized_motors` として配信され続ける
+        # 進捗は `safety.unenergized_motors` として配信され続ける。
+        #
+        # **前回の解除の再励磁を畳むのもここではない** (`_reactivate_motors` の冒頭
+        # が持つ)。畳み込みは最悪 `_REENERGIZE_CANCEL_TIMEOUT_S` 待つので、ここへ
+        # 置くとすぐ上の理由がそのまま当てはまり、自分でこの性質を破ることになる。
+        # 単発再励磁の畳み込み (`_settle_pending_reenergize`) がハンドラではなく
+        # `_reactivate_motors` の中から呼ばれているのと同じ形に揃えてある
         task = asyncio.create_task(self._reactivate_motors())
         # GC で消えないよう参照を保持する (WsHub の切り離しタスクと同じ形)
         self._reactivate_tasks.add(task)
@@ -1411,11 +1417,20 @@ class RobotServer:
         もう片方が enable したばかりのモータへ届く —— DM3520 は disable で
         自重落下するので、「戻した直後にもう一度落とす」形で
         `_reenergize_motors` 自身の存在意義を壊す。
+        **①より前に、前回の解除の再励磁が残っていれば畳む**
+        (`_settle_pending_reactivation`)。理由は上と同型 —— 2 本の
+        `_reactivate_motors` が並走しても、片方のプローブがもう片方の enable 直後の
+        モータへ届く。**畳み込みを 2 つともここに置くのは意図的で**、
+        `_cmd_e_stop_release` へ移すと畳み込みが最悪
+        `_REENERGIZE_CANCEL_TIMEOUT_S` 待つぶんだけ解除の受理が止まり、
+        「解除は再励磁を待たない」性質を自分で破ることになる。
+
         **解除コマンドの受理そのものは拒否・待機させない** (拒否すると「解除の
         たびに同じロボットが取り残される」実機事故と同型になる)。ここ
         (バックグラウンドの再励磁タスク) だけが古いタスクを畳んでから
         自分の励磁へ進む。
         """
+        await self._settle_pending_reactivation()
         await self._send_e_stop_clear_broadcast()
 
         for name, ctx in self._robots.items():
@@ -1489,6 +1504,54 @@ class RobotServer:
                 " (CAN の送信が詰まっている可能性があります)。解除の励磁を先へ進めます",
                 _REENERGIZE_CANCEL_TIMEOUT_S,
                 robot_name,
+            )
+
+    async def _settle_pending_reactivation(self) -> None:
+        """新しい解除の再励磁を始める前に、前回のぶんを畳む。
+
+        畳み方 (キャンセル → 有界待ち → 待ちきれなくても進む) も、呼び出し位置
+        (ハンドラではなく `_reactivate_motors` の冒頭) も、その理由も
+        `_settle_pending_reenergize` とまったく同じ。違うのは対象だけで、あちらは
+        単発の `reenergize_motors` (ロボット単位)、こちらは緊急停止解除の
+        `_reactivate_motors` (全ロボットまとめて) を見る。**自分自身
+        (`asyncio.current_task()`) は畳む対象から外す** —— `_reactivate_tasks` には
+        呼び出し元のタスクも既に載っているので、外さないと自分をキャンセルして
+        1 通も送らずに降りる。
+
+        **踏むのは「解除を 2 連打したとき」ではない。** `_cmd_e_stop_release` は
+        `not self._e_stop_active` を拒否するので、素の 2 連打では 2 本目が立たない。
+        実際に踏むのは **E-STOP → RESET →(同期ずれ検出や操縦者の再押下で)
+        E-STOP → RESET** で、1 本目がまだ `activate_motors` の中にいるあいだに
+        2 本目が立つ。窓が広がるのは応答の無いモータを 1 台 0.5 秒待っている間、
+        つまり CAN が不調なときほど広い。
+
+        **2 系統あることそのものは実装の都合だが、畳み忘れると症状が出る。**
+        並走した 2 本のうち片方のプローブ (disable) がもう片方の enable 直後の
+        モータへ届くと `sub_lift` が自重で落ち、`_inactive_motors` の書き戻し順に
+        よっては画面だけ「無励磁」が残る。
+
+        **`Task.cancel()` は「ラッチ解除は中断しない」原則 (CLAUDE.md) の例外では
+        ない。** あの原則が禁じているのは、①ブロードキャスト解除 / ②個別ラッチ解除の
+        途中で中断して**取り残されたロボットを残す**ことである。ここでの中断は必ず
+        新しい `_reactivate_motors` が①から先頭でやり直す前提とセットなので、
+        取り残しは生じない —— 逆に、畳まずに並走させるほうが②の後の③で
+        「enable した直後のモータへ disable が届く」形の実害を出す。
+        **この前提に依存しているので、畳んだあとに①②を飛ばす経路を作ってはならない。**
+        """
+        current = asyncio.current_task()
+        pending = {
+            task for task in self._reactivate_tasks if not task.done() and task is not current
+        }
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        done, _still_running = await asyncio.wait(pending, timeout=_REENERGIZE_CANCEL_TIMEOUT_S)
+        if len(done) != len(pending):
+            logger.error(
+                "解除の再励磁タスクが %.1fs 以内に畳めませんでした"
+                " (CAN の送信が詰まっている可能性があります)。新しい解除を先へ進めます",
+                _REENERGIZE_CANCEL_TIMEOUT_S,
             )
 
     async def _activate_motors_for_robot(
