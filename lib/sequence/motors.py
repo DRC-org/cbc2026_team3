@@ -263,6 +263,32 @@ class AxisHandle:
         """モータ名 → 指令値をまとめて送る。
 
         逐次 await しないのは、左右直結の軸で送信に時間差が出ると機構がねじれるため。
+
+        **1 台でも失敗したら、送信に成功した側の目標だけを捨てる。** 素の ``gather`` は
+        最初の例外で抜けるが残りのタスクはキャンセルされずに完走するので、片方の送信だけが
+        失敗すると**成功した側にだけ新しい目標が残る**。問い合わせ駆動のモータ
+        (EDULITE 05 / DM3520) では ``QueryDrivenTargetRefresher`` が 20Hz でその
+        1 台だけを新目標へ押し続け、もう片方には ``idle_target_value()`` を書き続ける
+        —— 左右直結の軸が片側だけ動き、最後は ``SyncMonitor`` の偏差超過で全体緊急
+        停止になる。CLAUDE.md が禁じている「ペア軸に片側だけ効く操作」がエラー経路で
+        成立してしまう。捨てた側は再送が ``idle_target_value()`` (今の姿勢を保て) へ
+        切り替わるので、既に飛んでしまった 1 通ぶんの動きもその場で止まる。
+
+        **失敗した側の目標は捨てない。捨てる範囲を「指令した全員」へ広げてはならない。**
+        ここは ``move_to`` / 手動操縦 / 零点確定の共通口で、通る軸の多くは単一モータの
+        generic 軸 (電磁弁 6 個・ポンプ 2 個・コンベア・サーボ 3 軸) である。全員を捨てると
+        **モータ 1 台の軸でも送信 1 通の失敗でそれまで有効だった目標が消え**、
+        ``GenericTargetRefresher`` は「目標が無い = 送らない」なので 20Hz の再送がその場で
+        止まる —— 500ms 後にファームの ``command_timeout_ms`` が満了し、電磁弁は消磁して
+        **吸着中のワークが落ちる** (電磁弁基板は「止める = 消磁」の一手しか持たない)。
+        失敗した側は 1 通も飛んでいない以上、旧目標こそが基板が現に実行している状態と
+        一致しているので、残すほうが整合的である。
+
+        Raises:
+            BaseException: 送信に失敗した例外のうち、``self._handles`` の並びで最初の
+                もの (``gather`` の結果順であって「最初に送出された例外」ではない)。
+                ``ExceptionGroup`` へ包まないのは、呼び出し側 (``move_to`` / 手動) が
+                ``EStopActiveError`` と ``CanError`` を区別して扱うため。
         """
         try:
             values = [(handle, commands[handle.name]) for handle in self._handles]
@@ -271,9 +297,16 @@ class AxisHandle:
                 f"軸 '{self.name}' のモータ {exc.args[0]!r} に対する指令値がありません"
             ) from exc
 
-        await asyncio.gather(
-            *(handle.set_target(self._spec.command_mode, value) for handle, value in values)
+        results = await asyncio.gather(
+            *(handle.set_target(self._spec.command_mode, value) for handle, value in values),
+            return_exceptions=True,
         )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            for (handle, _), result in zip(values, results, strict=True):
+                if not isinstance(result, BaseException):
+                    handle.clear_target()
+            raise failures[0]
 
     async def wait_reached(self, *, timeout: float | None = None) -> bool:
         """軸の到達を待つ。到達すれば True、タイムアウトなら False。
