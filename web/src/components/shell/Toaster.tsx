@@ -134,9 +134,18 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
-  // ステータスバーに被らないよう底を持ち上げる
+  // ステータスバーに被らないよう底を持ち上げる。
+  //
+  // **z は daisyUI の `.modal` (z-index: 999) より上に置く。** トーストと
+  // 緊急停止オーバーレイは `AppShell` の兄弟で同じスタッキングコンテキストに居るので、
+  // `z-50` のままだと**モーダル表示中のトーストが 62% の暗幕の下に沈む**。
+  // そこが問題になるのは、まさに操縦者が説明を必要とする瞬間 ——
+  // 切断中に緊急停止オーバーレイの Reset を押したときの
+  // 「切断中のため送信できませんでした。機体側のラッチは残っています」は
+  // `RootLayout` がトーストへ逃がしており、**それが唯一の説明経路**である。
+  // 沈むと「Reset を押しても何も起きない」としか見えない。
   return (
-    <div className="toast toast-end toast-bottom bottom-8 z-50">
+    <div className="toast toast-end toast-bottom bottom-8 z-[1000]">
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}
