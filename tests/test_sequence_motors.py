@@ -366,26 +366,51 @@ class TestSequenceMotorBinding:
         assert seq.reached is True
 
 
+_PAIR_MOTORS = (
+    MotorSpec(name="pair_r", scale=10.0, offset=0.0),
+    MotorSpec(name="pair_l", scale=-10.0, offset=0.0),
+)
+
+
+def _make_axis(
+    name: str,
+    motors: tuple[MotorSpec, ...],
+    *,
+    manager: MagicMock,
+    sync_tolerance: float | None = None,
+    command_mode: ControlMode = ControlMode.POSITION,
+) -> tuple[AxisHandle, dict[str, _FakeDriver], list[MotorHandle]]:
+    """AxisSpec・ドライバ・MotorHandle 群をまとめて組み立てる。
+
+    MotorHandle まで返すのは、送信が失敗した後にどのモータへ目標が残っているかを
+    ``has_target`` で見るテストがあるため (``AxisHandle`` はハンドルを公開しない)。
+    """
+    drivers = {spec.name: _FakeDriver(spec.name, i + 1) for i, spec in enumerate(motors)}
+    axis_spec = AxisSpec(
+        name=name,
+        unit="mm",
+        command_unit="deg",
+        timeout_s=1.0,
+        tolerance=None,
+        motors=motors,
+        sync_tolerance=sync_tolerance,
+        command_mode=command_mode,
+    )
+    handles = [
+        MotorHandle(motor, drivers[motor], manager, poll_interval=0.001) for motor in drivers
+    ]
+    return AxisHandle(axis_spec, handles), drivers, handles
+
+
 class TestAxisHandle:
-    def _pair(
-        self, *, sync_tolerance: float | None, manager: MagicMock | None = None
-    ) -> tuple[AxisHandle, dict[str, _FakeDriver]]:
-        mgr = manager if manager is not None else _make_can_manager()
-        drivers = {name: _FakeDriver(name, i + 1) for i, name in enumerate(("pair_r", "pair_l"))}
-        spec = AxisSpec(
-            name="pair",
-            unit="mm",
-            command_unit="deg",
-            timeout_s=1.0,
-            tolerance=None,
-            motors=(
-                MotorSpec(name="pair_r", scale=10.0, offset=0.0),
-                MotorSpec(name="pair_l", scale=-10.0, offset=0.0),
-            ),
+    def _pair(self, *, sync_tolerance: float | None) -> tuple[AxisHandle, dict[str, _FakeDriver]]:
+        axis, drivers, _ = _make_axis(
+            "pair",
+            _PAIR_MOTORS,
+            manager=_make_can_manager(),
             sync_tolerance=sync_tolerance,
         )
-        handles = [MotorHandle(name, drivers[name], mgr, poll_interval=0.001) for name in drivers]
-        return AxisHandle(spec, handles), drivers
+        return axis, drivers
 
     def test_name_is_axis_name(self) -> None:
         handle, _ = self._pair(sync_tolerance=1.0)
@@ -400,7 +425,7 @@ class TestAxisHandle:
         assert drivers["pair_r"].encoded == [(ControlMode.POSITION, 30.0)]
         assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
 
-    async def test_片側の送信が失敗したら成功した側の目標も捨てる(self) -> None:
+    async def test_ペアの片側が失敗したら成功した側の目標だけを捨てる(self) -> None:
         """ペア軸に片側だけ効く操作を、エラー経路でも作らない。
 
         素の `gather` は最初の例外で抜けるが**残りのタスクはキャンセルされずに
@@ -408,37 +433,56 @@ class TestAxisHandle:
         問い合わせ駆動のモータ (EDULITE 05 / DM3520) では 20Hz の再送がその 1 台だけを
         新目標へ押し続け、もう片方には `idle_target_value()` を書き続ける ——
         左右直結の軸が片側だけ動き、最後は偏差超過で全体緊急停止になる。
+
+        一方**失敗した側の旧目標は残す**。1 通も飛んでいない以上、旧目標こそが
+        基板が現に実行している状態と一致している。
         """
         mgr = _make_can_manager()
+        axis, _, handles = _make_axis("pair", _PAIR_MOTORS, manager=mgr, sync_tolerance=1.0)
+        targets = {handle.name: handle for handle in handles}
+
+        await axis.set_target_value({"pair_r": 10.0, "pair_l": -10.0})
 
         async def _send(name: str, _msg: can.Message) -> None:
             if name == "pair_r":
                 raise can.CanError("送信失敗 (テスト)")
 
         mgr.send = AsyncMock(side_effect=_send)
-        drivers = {name: _FakeDriver(name, i + 1) for i, name in enumerate(("pair_r", "pair_l"))}
-        spec = AxisSpec(
-            name="pair",
-            unit="mm",
-            command_unit="deg",
-            timeout_s=1.0,
-            tolerance=None,
-            motors=(
-                MotorSpec(name="pair_r", scale=10.0, offset=0.0),
-                MotorSpec(name="pair_l", scale=-10.0, offset=0.0),
-            ),
-            sync_tolerance=1.0,
-        )
-        handles = [MotorHandle(name, drivers[name], mgr, poll_interval=0.001) for name in drivers]
-
         with pytest.raises(can.CanError):
-            await AxisHandle(spec, handles).set_target_value({"pair_r": 30.0, "pair_l": -30.0})
+            await axis.set_target_value({"pair_r": 30.0, "pair_l": -30.0})
 
-        # 前提: 片方 (pair_l) の送信自体は成功している
-        assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
-        # その成功した側にも目標が残っていないこと。残ると 20Hz の再送がこの 1 台だけを
-        # 押し続ける (`has_target` が False なら idle_target_value へ切り替わる)
-        assert [handle.has_target for handle in handles] == [False, False]
+        # 送信が通った側は捨てる。残ると 20Hz の再送がこの 1 台だけを新目標へ押し続ける
+        assert targets["pair_l"].has_target is False
+        # 送信が失敗した側は旧目標のまま (捨てると再送が止まり、基板の出力ごと落ちる)
+        assert targets["pair_r"].target == 10.0
+
+    async def test_単一モータ軸は送信が失敗しても旧目標が残る(self) -> None:
+        """捨てる範囲を「指令した全員」へ広げると、モータ 1 台の軸まで巻き添えになる。
+
+        電磁弁・ポンプ・コンベア・サーボはいずれも単一モータの generic 軸で、
+        `GenericTargetRefresher` は「目標が無い = 送らない」なので、目標を捨てた
+        瞬間に 20Hz の再送が止まる —— 500ms 後にファームの `command_timeout_ms` が
+        満了し、電磁弁は消磁して**吸着中のワークが落ちる**。送信 1 通が失敗しただけで
+        起きてはならない。
+        """
+        mgr = _make_can_manager()
+        axis, _, handles = _make_axis(
+            "valve_3",
+            (MotorSpec(name="valve_3_sol", scale=1.0, offset=0.0),),
+            manager=mgr,
+            command_mode=ControlMode.ON_OFF,
+        )
+        # 弁を開いてワークを吸着している状態
+        await axis.set_target_value({"valve_3_sol": 1.0})
+
+        mgr.send = AsyncMock(side_effect=can.CanError("送信失敗 (テスト)"))
+        with pytest.raises(can.CanError):
+            await axis.set_target_value({"valve_3_sol": 1.0})
+
+        assert handles[0].target == 1.0
+        # 再送が止まっていないこと (止まれば 500ms 後に消磁する)
+        mgr.send = AsyncMock()
+        assert await handles[0].resend_target() is True
 
     def test_sync_violation_is_none_without_sync_tolerance(self) -> None:
         handle, drivers = self._pair(sync_tolerance=None)
