@@ -60,21 +60,43 @@ class PeriodicTimer {
 struct BoardIndication {
     // CAN が上がらなかった基板は PC から止められない。ID 未設定と同じ「今すぐ
     // 直さないと使えない」側に入れる（仕様書 §2.2）。
-    explicit BoardIndication(bool canFailed) : urgent(canFailed), stopped(false) {}
+    explicit BoardIndication(bool canFailed)
+        : canFailed_(canFailed), unconfigured_(false), stopped_(false), devices_(0) {}
 
     // チャンネル 1 つぶんを足す。**どのチャンネルを数えるかは呼び出し側が決める** ——
     // サーボ基板は Unused スロットを数えず、緊急停止はサーボスロットからしか見ない。
     void observe(bool configured, bool latched) {
+        ++devices_;
         if (!configured) {
-            urgent = true;
+            unconfigured_ = true;
         }
         if (latched) {
-            stopped = true;
+            stopped_ = true;
         }
     }
 
-    bool urgent;
-    bool stopped;
+    // **デバイスとして名乗れるチャンネルが 1 つも無い基板も urgent。**
+    //
+    // 呼び出し側は Unused スロットを数えない（数えると空きスロットのある基板が
+    // 常に赤く点滅する）。その結果、**全スロットが Unused の基板では observe が
+    // 1 回も呼ばれない** —— サーボ基板の DIP を `kServoBoardCount` 以上へ回すと
+    // `kSlotsByBoard` に行が無く、仕様書 §2.2 と CLAUDE.md の言う「表に無い基板番号は
+    // 全スロット Unused のまま据え置く」がそのまま成立する。
+    //
+    // そこを urgent に数えないと、その基板は FEEDBACK も INFO も 1 通も送らず
+    // どのコマンドも受け付けないのに **LED は平常と同じ青のハートビート**を出す。
+    // PC 側からは全チャンネル STALE にしか見えないので、**配線不良・CAN 不通と
+    // 区別する唯一の手段（赤の速い点滅）が消える**。
+    bool urgent() const { return canFailed_ || unconfigured_ || devices_ == 0; }
+
+    bool stopped() const { return stopped_; }
+
+   private:
+    bool canFailed_;
+    bool unconfigured_;
+    bool stopped_;
+    // 数えたデバイススロットの数。0 は「この基板は何も名乗れていない」
+    uint8_t devices_;
 };
 
 // 点滅間隔を選ぶ。**3 通りの規則を引数で受ける** —— 電磁弁基板は LED が 1 本しか
@@ -83,10 +105,10 @@ struct BoardIndication {
 // LED の本数という機体側の事情がライブラリに入り込む。
 inline uint32_t blinkIntervalFor(const BoardIndication &indication, uint32_t urgentMs,
                                  uint32_t stoppedMs, uint32_t heartbeatMs) {
-    if (indication.urgent) {
+    if (indication.urgent()) {
         return urgentMs;
     }
-    if (indication.stopped) {
+    if (indication.stopped()) {
         return stoppedMs;
     }
     return heartbeatMs;
