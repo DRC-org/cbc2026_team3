@@ -191,6 +191,33 @@ describe("RobotControl の操作先", () => {
       expect.any(String),
     );
   });
+
+  it("駆動中はステップジャンプの確認モーダルを開かない", async () => {
+    // **機体が動いているあいだ画面を覆ってはならない。** ジャンプの確認は全画面
+    // オーバーレイなので、開いているあいだヘッダーの EMG STOP がクリックできない
+    // (クリックは背景として吸われてパネルが閉じるだけで、機体は止まらない)。
+    // `MotorCheckPanel` をモーダルから外した理由と同じ形の事故。
+    mount("match", robotState({ running: true, step_index: 1 }));
+
+    await userEvent.click(screen.getByRole("button", { name: "ステップ 3: 搬送" }));
+
+    expect(screen.queryByRole("button", { name: "再開" })).toBeNull();
+    expect(document.querySelector(".modal")).toBeNull();
+  });
+
+  it("トリガー待ちではステップジャンプできる (機体は止まっている)", async () => {
+    // `require_trigger` のステップで止まっている間は機体が動いていない。
+    // そこは再開ステップを選ぶ本来の場面なので塞がない
+    const { context } = mount("match", robotState({ waiting_trigger: true, step_index: 1 }));
+
+    await userEvent.click(screen.getByRole("button", { name: "ステップ 3: 搬送" }));
+    await userEvent.click(screen.getByRole("button", { name: "再開" }));
+
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "sequence_jump", robot: "sub_hand", step_index: 2 },
+      expect.any(String),
+    );
+  });
 });
 
 describe("RobotControl のフェーズ別レイアウト", () => {

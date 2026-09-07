@@ -244,7 +244,17 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 stepIndex={state.step_index}
                 waitingTrigger={state.waiting_trigger}
                 onJump={handleJump}
-                disabled={!inMatch || sequenceBlockedReason !== null}
+                // **駆動中は塞ぐ。** ジャンプの確認は全画面オーバーレイのモーダルで、
+                // 開いているあいだヘッダーの EMG STOP がクリックできない
+                // (クリックは背景として吸われてパネルが閉じるだけ。`ModalProvider` の
+                // `openCount` はホットキーも封じる)。機体が動いている最中に止める手段
+                // だけが画面から消える —— `MotorCheckPanel` をモーダルから外した理由と
+                // 同じ形の事故で、CLAUDE.md の「機体が動いているあいだ画面を覆っては
+                // ならない」に当たる。
+                //
+                // **トリガー待ちは塞がない** —— `require_trigger` のステップで止まって
+                // いる間、機体は動いていない。そこは再開ステップを選ぶ本来の場面である。
+                disabled={!inMatch || sequenceBlockedReason !== null || kind === "running"}
               />
             </Panel>
           </div>
