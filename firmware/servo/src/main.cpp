@@ -172,6 +172,15 @@ static PeriodicTimer g_feedbackTimer[kServoSlotCount];
 
 static PeriodicTimer g_motionTimer;
 static PeriodicTimer g_infoTimer;
+
+// INFO は 1Hz で全スロット分を送るが、MCP2515 の TX バッファは 3 本しかなく、
+// しかも sendMsgBuf は空きと TXREQ のクリアを TIMEOUTVALUE（2500us）まで待つ。
+// 同じ反復で 4〜5 通を連続送信すると最大 20〜25ms loop() が止まり、その間
+// pollCan() が回らないので **RXB0 / RXB1 の 2 段しかない受信バッファが溢れる**。
+// 落ちたのがブロードキャスト E_STOP なら「たまに緊急停止が効かないサーボ基板」になる。
+// DC 用・電磁弁用と同じく 1 反復 1 通に割り、落ちた slot はそのまま次の反復で送り直す
+// （再送キューは持たない）。
+static uint8_t g_infoPendingSlot = kServoSlotCount;  // kServoSlotCount = 送信待ちなし
 static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
@@ -304,12 +313,13 @@ static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
 
 // CAN 送信 1 通ぶんの結果を記録する。**戻り値を捨てないための唯一の口**にしてあるので、
 // g_can.sendMsgBuf() を直に呼ぶ経路を作らないこと。
-static void sendFrame(uint16_t canId, uint8_t length, uint8_t *data) {
+static bool sendFrame(uint16_t canId, uint8_t length, uint8_t *data) {
     if (g_can.sendMsgBuf(canId, 0, length, data) == CAN_OK) {
         g_txFail.onSuccess();
-        return;
+        return true;
     }
     g_txFail.onFailure();
+    return false;
 }
 
 static void sendFeedback(uint8_t slot, uint32_t nowMs) {
@@ -335,7 +345,9 @@ static void sendFeedback(uint8_t slot, uint32_t nowMs) {
 
 // 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
 // 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
-static void sendInfo(uint8_t slot) {
+// **送れたかを返す**（DC 用・電磁弁用と同じ）。落ちた slot は添字を進めず、
+// 次の反復で送り直すために呼び出し側が結果を見る。
+static bool sendInfo(uint8_t slot) {
     uint8_t data[kInfoWithServoRangeLength];
     // **可動レンジを足すのはサーボスロットだけ**（仕様書 §3.4）。センサスロットは
     // 角度そのものを持たないので、載せると PC 側に「測ったように見える 0」が届く。
@@ -344,13 +356,12 @@ static void sendInfo(uint8_t slot) {
     if (isServoSlot(slot)) {
         const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator,
                                        g_slots[slot].pulse.angleRangeDeg);
-        sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
-        return;
+        return sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
     }
 
     const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, kind);
-    sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
+    return sendFrame(buildCanId(CommandType::Info, g_deviceId[slot]), len, data);
 }
 
 // **nowMs を受け取るのは、出力禁止中の SET_PARAM を ServoChannel が保留するため**
@@ -835,12 +846,18 @@ void loop() {
 
     // 仕様書 §3.4: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
     // PC が基板より後から起動しても拾えるようにするため。
+    // **1 反復 1 通**（理由は g_infoPendingSlot の宣言に付けてある）。
     if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
-        for (uint8_t slot = 0; slot < kServoSlotCount; ++slot) {
-            if (isSlotConfigured(slot)) {
-                sendInfo(slot);
-            }
+        g_infoPendingSlot = 0;
+    }
+    if (g_infoPendingSlot < kServoSlotCount) {
+        // **ID を名乗れないスロットは 1 通も送らない**（仕様書 §2.2）。飛ばして次へ進む。
+        if (!isSlotConfigured(g_infoPendingSlot)) {
+            ++g_infoPendingSlot;
+        } else if (sendInfo(g_infoPendingSlot)) {
+            ++g_infoPendingSlot;
         }
+        // 送信に失敗した slot はインデックスを進めず、次の反復で送り直す。
     }
 
     updateLed(nowMs);
