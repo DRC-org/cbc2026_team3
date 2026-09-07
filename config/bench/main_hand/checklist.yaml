@@ -23,7 +23,7 @@ checklists:
   pre_match:
     # --- 通電前 --------------------------------------------------------------
     - id: bench_buses_up
-      label: can_m3508 と can_edulite の**両方**が up していること確認 (ip -br link show)。片方でも欠けると [Errno 19] で起動しない
+      label: can_m3508 / can_edulite / can_generic の**3 本すべて**が up していること確認 (ip -br link show)。1 本でも欠けると [Errno 19] で起動しない
     - id: bench_bus_serial
       label: config/can_buses.yaml の serial が実機 2 本と一致していること確認。**入れ替わると C620 に EDULITE 用の指令が飛ぶ**
     - id: bench_free
@@ -41,19 +41,19 @@ checklists:
     - id: edulite_host_id
       label: EDULITE のフィードバックの宛先 (拡張 ID 下位 8bit) が host_id 0xFD であること確認 (ずれると動くのに STALE のまま)
     - id: bench_feedback_all
-      label: y_axis_r / y_axis_l / rotate_r / rotate_l の 4 台すべてのフィードバックが届き、STALE が 1 つも無いこと確認
+      label: モータ 8 台 (y_axis_r/l・rotate_r/l・gripper・conveyor・wall_f・wall_r) とセンサ rotate_origin_sensor のフィードバックが届き、STALE が 1 つも無いこと確認
 
     # --- 動作 (ここからがこのセットの本題) ------------------------------------
     - id: y_axis_move
-      label: 手動操縦で y_axis に half を送り、M3508 2 台が逆向きに回ること目視確認。同じ向きなら scale の符号が片方落ちている
+      label: 手動操縦で y_axis に work_1 を送り、M3508 2 台が逆向きに回ること目視確認。同じ向きなら scale の符号が片方落ちている
     - id: rotate_move
-      label: 手動操縦で rotate に half を送り、EDULITE 2 台が逆向きに回ること目視確認
+      label: 手動操縦で rotate に pick を送り、EDULITE 2 台が逆向きに回ること目視確認
     - id: bench_no_crosstalk
       label: y_axis を動かしている間 rotate が 1 度も動かないこと、逆も同様であること確認。**動いたらバスの割り当てが入れ替わっている**
     - id: bench_both_axes
       label: y_axis と rotate を続けて動かし、その間どちらの軸もフィードバックが途切れないこと確認 (受信ループ 2 本が同時に回っていること)
     - id: bench_sync_pairs
-      label: 両軸を full まで動かした状態で、y_axis / rotate とも左右の位置が揃っていること確認 (ずれるなら本番の許容差では止まる)
+      label: y_axis を work_shared・rotate を pick まで動かした状態で、どちらも左右の位置が揃っていること確認 (ずれるなら本番の許容差では止まる)
     - id: bench_return_home
       label: 両軸に home を送り、どちらも電源投入位置へ戻ること確認
 
