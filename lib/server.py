@@ -572,25 +572,39 @@ class RobotServer:
         しか知らず、ロボットごとの在飛状態はサーバーが `_reenergize_tasks` から引く。
         ロボット名が無い・未知なら素通しするのも同じ理由 (未知のロボットという別の
         失敗を、別の理由文で覆い隠さない)。
+
+        **未知の名前は `_is_reenergizing` へ渡す前に落とす。** あちらは緊急停止解除の
+        再励磁をロボット名に依らず True で答えるので、素通しの判断をあちらへ預けると
+        在飛中だけ未知の名前が「再励磁の処理中」で拒否され、素通しの性質が消える。
         """
         reason = spec.reenergize_deny_reason()
         if reason is None:
             return None
         robot_name = data.get("robot")
-        if not isinstance(robot_name, str):
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
             return None
         if not self._is_reenergizing(robot_name):
             return None
         return reason
 
     def _is_reenergizing(self, robot_name: str) -> bool:
-        """このロボットの単発再励磁が in-flight か。**判定はここ 1 箇所だけが持つ。**
+        """このロボットのモータを今励磁し直しているか。**判定はここ 1 箇所だけが持つ。**
 
         同じ判定が 4 箇所 (シーケンス系ゲート・手動への切替・手動指令・動作確認の
         起動可否) と配信 (`_safety_state`) から要る。`not task.done()` を書き写すと、
         タスクの持ち方を変えたときに一部だけが古い判定のまま残り、**塞いだつもりの
         経路だけが素通りする**。
+
+        **緊急停止解除の再励磁 (`_reactivate_motors`) もここに含める。** 単発再励磁と
+        同じ `activate_motors`「現在角を書いてから enable」を打つので、
+        `blocked_during_reenergize` が防ぎたい害 —— `move_to` が書いた目標をフォルト
+        前の現在角が上書きし、`wait_reached` が動かない位置を見続ける —— は両者で
+        同型である。在飛判定が 2 系統に分かれているのは実装の都合であって、
+        呼び出し側から見た「今励磁し直している」は 1 つ。あちらは全ロボットぶんを
+        まとめて処理するので、**ロボット名に依らず True で正しい**。
         """
+        if self._reactivating:
+            return True
         task = self._reenergize_tasks.get(robot_name)
         return task is not None and not task.done()
 

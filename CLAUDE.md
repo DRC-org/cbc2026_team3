@@ -789,7 +789,16 @@ Monitor から機体の動きを説明できない）。手動へ入るときは
 届くシーケンス系」だけ** — `CommandSpec.blocked_during_reenergize` が
 `sequence_start` / `sequence_jump` / `trigger` に付く（在飛中に `move_to` が書いた目標を
 「フォルト前の現在角」が上書きし、`wait_reached` が動かない位置を見続けて
-`SequenceTimeoutError` になる）。**逆方向（シーケンス実行中の再励磁）は塞がない** —
+`SequenceTimeoutError` になる）。
+**同じゲートに緊急停止解除の再励磁（`_reactivate_motors`）も掛かる。** あちらも
+`activate_motors` の「現在角を書いてから enable」を打つので防ぎたい害は同型で、
+在飛判定が 2 系統（`_reenergize_tasks` / `_reactivate_tasks`）に分かれているのは実装の
+都合にすぎない。呼び出し側から見た「今励磁し直している」は 1 つなので、
+`RobotServer._is_reenergizing` が両方を畳んで答える（**解除の再励磁は全ロボットぶんを
+まとめて走るので、そちらはロボット名に依らず True**）。片方しか見ないと、窓が開くのは
+応答の無いモータを 1 台 0.5 秒待っている間 —— つまり CAN が不調なときほど広く、まさに
+緊急停止を押した状況 —— なのに、塞いだつもりの経路だけが素通りする。
+**逆方向（シーケンス実行中の再励磁）は塞がない** —
 励磁が落ちるのはたいていシーケンスを走らせている最中で、そこで使えなければ直したい状況が
 直せない。手動側の同じ排他はハンドラが持つ（`_apply_operation_mode` /
 `_manual_target`）— `set_operation_mode` は方向で可否が変わる（手動へ入るのは塞ぐが、

@@ -1307,3 +1307,167 @@ class TestInFlightIsBroadcast:
             await fx.wait_reenergize("main_hand")
 
         assert fx.state_message("main_hand")["safety"]["reenergizing"] is False
+
+
+class TestEStopReactivationSharesTheReenergizeGate:
+    """**緊急停止解除の再励磁も、単発再励磁とまったく同じゲートに掛かる。**
+
+    `_reactivate_motors` (緊急停止解除) と `_reenergize_motors` (単発) は、どちらも
+    `activate_motors` の「現在角を書いてから enable」を打つ。
+    `blocked_during_reenergize` が防ぎたい害 —— `move_to` が書いた目標をフォルト前の
+    現在角が上書きし、`wait_reached` が動かない位置を見続ける —— は**両者で同型**
+    なので、片方だけを塞ぐ理由が無い。
+
+    在飛判定が 2 系統 (`_reactivate_tasks` / `_reenergize_tasks`) に分かれているのは
+    実装の都合であって、呼び出し側から見た「今モータを励磁し直している」は 1 つで
+    ある。`_is_reenergizing` がそのうち片方しか見ないと、**塞いだつもりの経路だけが
+    素通りする** —— しかも窓が開くのは応答の無いモータを 1 台 0.5 秒待っている間、
+    つまり CAN が不調なときほど広い (まさに緊急停止を押した状況)。
+    """
+
+    @staticmethod
+    async def _hold_reactivation(fx: ServerFixture) -> asyncio.Event:
+        """緊急停止 → 解除を踏み、main_hand の `activate_motors` で止めて返す。
+
+        呼び出し側は返された Event を必ず `set()` すること (`finally` で
+        `fx.wait_reactivation()` まで行う)。
+        """
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        await fx.command({"type": "e_stop"})
+        await fx.command({"type": "e_stop_release"})
+        # 再励磁タスクへ 1 度だけ実行機会を与え、main_hand のゲートで止まらせる
+        await asyncio.sleep(0)
+        assert fx.server._reactivating
+        return gate
+
+    async def test_sequence_start_is_rejected(self) -> None:
+        """試合中に E-STOP → RESET → 即 START。
+
+        素通りすると `move_to` の目標が再励磁の現在角で上書きされ、操縦者には
+        「RESET したのに START が効かず、しばらくして赤いエラーだけ出る」と見える。
+        """
+        fx = _build_fixture()
+        fx.enter_match()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        gate = await self._hold_reactivation(fx)
+        try:
+            await fx.command({"type": "sequence_start", "robot": "main_hand"}, requester=client)
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert rejected[0]["command"] == "sequence_start"
+            assert not fx.sequence("main_hand").is_running
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+    async def test_motor_check_start_is_rejected(self) -> None:
+        """準備中に E-STOP → RESET → 即「動作確認」。
+
+        零点確定の disable / SET_ZERO と再励磁のプローブ (EDULITE 05 / DM3520 とも
+        disable) が同じモータへ並走する。`sub_lift` は disable で自重落下する。
+        """
+        fx = _build_fixture()
+        fx.set_motor_check_sequence(_EmptySequence("motor_check"))
+        gate = await self._hold_reactivation(fx)
+        try:
+            # 拒否理由は `motor_check_state` 1 通で運ぶ (`command_rejected` ではない)
+            assert await fx.start_motor_check() is False
+            assert "再励磁" in (fx.motor_check_error() or "")
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+    async def test_switching_to_manual_is_rejected(self) -> None:
+        """手動へ入ってジョグすると、同じく現在角で上書きされる。
+
+        **手動から出る方向は塞がない** (退避路から戻れなくなる) ので、ここで見るのは
+        `mode: manual` への切替だけ。
+        """
+        fx = _manual_fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        gate = await self._hold_reactivation(fx)
+        try:
+            await fx.command(
+                {"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"},
+                requester=client,
+            )
+            rejected = client.of_type("command_rejected")
+            assert len(rejected) == 1
+            assert rejected[0]["command"] == "set_operation_mode"
+            assert fx.operation_mode("main_hand") == "sequence"
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+    async def test_switching_back_to_sequence_is_allowed(self) -> None:
+        """**手動から出る方向は在飛中も通す。** 退避路から戻れなくなるため。
+
+        `_apply_operation_mode` のガードは `mode is OperationMode.MANUAL` の `if`
+        ブロックの中にある。外へ出すと「手動へ入れないが出られもしない」機体になり、
+        しかも症状は緊急停止解除の直後の数秒にしか出ない (単発再励磁は手動中も
+        意図的に塞がないので、そちらでは踏みにくい)。
+        """
+        fx = _manual_fixture()
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        assert fx.operation_mode("main_hand") == "manual"
+        client = RecordingClient()
+        fx.attach_clients(client)
+        gate = await self._hold_reactivation(fx)
+        try:
+            await fx.command(
+                {"type": "set_operation_mode", "robot": "main_hand", "mode": "sequence"},
+                requester=client,
+            )
+            assert client.of_type("command_rejected") == []
+            assert fx.operation_mode("main_hand") == "sequence"
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+    async def test_unknown_robot_is_not_denied(self) -> None:
+        """在飛中でも、未知のロボット名は再励磁ゲートで拒否しない。
+
+        `_reenergize_deny_reason` は「未知のロボットという別の失敗を、別の理由文で
+        覆い隠さない」ために素通しする不変条件を持つ。解除の再励磁はロボット名に
+        依らず True を返すので、`_is_reenergizing` へ渡す前に未知の名前を落とさないと
+        **在飛中だけ**この性質が消え、`bogus` 宛の `sequence_start` が「再励磁の
+        処理中」で拒否される (`_manual_mode_deny_reason` は `self._robots.get()` で
+        同じ性質を守っている)。
+        """
+        fx = _build_fixture()
+        fx.enter_match()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        gate = await self._hold_reactivation(fx)
+        try:
+            await fx.command({"type": "sequence_start", "robot": "bogus"}, requester=client)
+            assert client.of_type("command_rejected") == []
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+    async def test_safety_reports_reenergizing(self) -> None:
+        """在飛中は `safety.reenergizing` として配る。
+
+        配らないと、この数秒だけ画面はまったく平常のまま —— 操縦者は拒否トーストの
+        理由を画面のどこからも確認できない。
+        """
+        fx = _build_fixture()
+        gate = await self._hold_reactivation(fx)
+        try:
+            assert fx.state_message("main_hand")["safety"]["reenergizing"] is True
+            # 解除の再励磁は全ロボットぶんまとめて走るので、両方が在飛である
+            assert fx.state_message("sub_hand")["safety"]["reenergizing"] is True
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+        assert fx.state_message("main_hand")["safety"]["reenergizing"] is False
