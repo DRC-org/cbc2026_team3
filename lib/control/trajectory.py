@@ -158,7 +158,22 @@ class TrapezoidalProfile:
         velocity = _clamp(desired, self._velocity - step_limit, self._velocity + step_limit)
 
         step = velocity * dt
-        if remaining != 0.0 and step * remaining > 0.0 and abs(step) >= abs(remaining):
+        if remaining == 0.0:
+            # **既に目標にいる周期は中間目標を動かさない。**
+            #
+            # 巡航中に 1 周期ぶんより近くへ再ターゲットされると、その周期は着地代入で
+            # 目標へ置かれるが**速度は巡航速度のまま残る** (加速度制限があるので
+            # 1 周期では 0 にできない)。次の周期はここへ来る —— `remaining == 0` なので
+            # 下の着地条件は成立せず、素通しだと `position += step` で
+            # **着地したはずの目標を通り過ぎて進み続ける**。実測 (dt=5ms /
+            # v=200mm/s / a=1200mm/s²) では 1 周期で 0.94mm、速度が 0 に落ちるまでの
+            # 合計で 16mm 以上先へ出た。
+            #
+            # 中間目標を止めておけば、速度は加速度制限どおり 0 まで落ち、
+            # 「行き過ぎない」という このクラスの約束がどの経路でも保たれる。
+            # 手動ジョグの連打と `sequence_jump` 後の `move_to` で踏む。
+            pass
+        elif step * remaining > 0.0 and abs(step) >= abs(remaining):
             # 着地の周期。加算の丸め誤差で目標を跨いだり手前で止まったりしないよう代入する
             self._position = self._target
         else:

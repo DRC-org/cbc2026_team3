@@ -246,6 +246,38 @@ class TestRetarget:
         assert profile.position == -30.0
         assert profile.velocity == 0.0
 
+    def test_巡航中にすぐ手前へ再ターゲットしても目標を通り過ぎない(self) -> None:
+        """**着地した後の周期で中間目標が進み続けないこと。**
+
+        巡航中に 1 周期ぶんの進みより近くへ再ターゲットされると、その周期は着地代入で
+        目標へ置かれるが**速度は巡航速度のまま残る** (加速度制限があるので 1 周期では
+        0 にできない)。次の周期は `remaining == 0` なので着地条件が成立せず、
+        素通しだと `position += step` で**着地したはずの目標を通り過ぎて進み続ける**。
+
+        `TestNoOvershoot` は単発移動しか見ていないので、この経路は網に無かった。
+        手動ジョグの連打と `sequence_jump` 後の `move_to` で踏む。
+        """
+        profile = _profile()
+        profile.retarget(1000.0)
+        position = 0.0
+        velocity = 0.0
+        for _ in range(2000):
+            position, velocity = profile.advance(DT)
+            if velocity >= V_MAX:
+                break
+        assert velocity == pytest.approx(V_MAX)
+
+        # すぐ手前 (1 周期ぶんの進みより近く) へ再ターゲット
+        target = position + 0.1
+        profile.retarget(target)
+
+        # 速度が 0 へ落ちきるまで回しても、中間目標は目標を超えない
+        for _ in range(200):
+            position, _velocity = profile.advance(DT)
+            assert position <= target + 1e-9, "着地した目標を通り過ぎた"
+
+        assert position == pytest.approx(target)
+
     def test_repeated_retarget_keeps_velocity_continuous(self) -> None:
         """手動ジョグの連打相当。毎周期目標が動いても加速度制限を割らない。"""
         profile = _profile()
