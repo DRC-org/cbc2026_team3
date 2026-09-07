@@ -5,7 +5,6 @@ import { AppHeader } from "@/components/shell/AppHeader";
 import { ConnectionBanner } from "@/components/shell/ConnectionBanner";
 import { EStopOverlay } from "@/components/shell/EStopOverlay";
 import { RouteErrorBoundary } from "@/components/shell/RouteErrorBoundary";
-import { StatusBar } from "@/components/shell/StatusBar";
 import { Toaster } from "@/components/shell/Toaster";
 import { WsSettings } from "@/components/shell/WsSettings";
 import { ModalProvider } from "@/context/ModalContext";
@@ -81,14 +80,12 @@ const AppShell = memo(function AppShell({
           ページ全体はスクロールさせず、常に 1 画面へ収める */}
       <div className="flex h-svh w-full flex-col overflow-hidden bg-base-200 text-base-content">
         <ConnectionBanner />
-        {/* タブは AppHeader の中。帯を 2 段消費しないよう 1 段に畳んである */}
+        {/* タブ・接続表示・時刻も AppHeader の中。常設の帯は 1 段だけに畳んである */}
         <AppHeader />
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <RoutedOutlet />
         </div>
-
-        <StatusBar />
 
         <Toaster />
         <WsSettings open={wsSettingsOpen} onClose={onCloseWsSettings} />

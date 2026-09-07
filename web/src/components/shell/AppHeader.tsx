@@ -1,26 +1,47 @@
 import { OctagonX } from "lucide-react";
 
+import { Clock } from "@/components/shell/Clock";
 import { TabBar } from "@/components/shell/TabBar";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import { COURT_LABEL, COURT_TONE, PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE } from "@/lib/phase";
+import { TONE_STATUS_CLASS } from "@/lib/tone";
+
+/** 帯の横幅は限られるので host:port だけ出す（全体は title 属性で見せる） */
+function wsHostLabel(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
 
 /**
- * 全画面共通のヘッダー帯。フェーズ表示・タブ・試合設定・緊急停止を 1 段に収める。
+ * 全画面共通のヘッダー帯。画面唯一の常設帯として、機体の設定・画面切替・接続・
+ * 緊急停止を 1 段に収める。
  *
  * タブを別の帯に分けると縦を 2 段消費する。1366x768 級のノート PC では
- * その 1 段が操作領域を目に見えて削るため、同じ帯へ畳んでいる。
+ * その 1 段が操作領域を目に見えて削るため、同じ帯へ畳んでいる。同じ理由で
+ * 折り返さない（`flex-wrap` を付けると狭い画面で 2 段に折れ、畳んだ意味が消える）。
+ * 詰まったときに削ってよいのはタブ帯だけなので、そこだけが縮み、他は `shrink-0`。
+ *
+ * 並びは「今どういう設定・状態か（フェーズ・コート）」「どこを見るか（タブ）」
+ * 「機体と繋がっているか（接続・時刻）」の 3 群。フェーズとコートは対の情報なので
+ * 隣に置く（帯の両端へ離すと、試合設定を 2 回に分けて読むことになる）。
  *
  * 左端のバー色とフェーズチップで「今 機体が動くフェーズか」を示す。
  * 帯全面をフェーズ色で塗ると画面で最も明るい面になってしまうため、地は白に固定する。
  * 誤ったコート設定のまま試合に入る事故を防ぐためコートも常時表示する。
  * 緊急停止は最優先操作なので、常に同じ位置・最大サイズでここに置く。
+ *
+ * キー凡例はここに置かない。数字キーはタブ自身が、Space は START / NEXT ボタン自身が
+ * 持っている。キーが効く場所から離れた所で同じことを繰り返す面積は無い。
  */
 export function AppHeader() {
-  const { matchState } = useRobotStatus();
-  const { onEStop } = useRobotCommands();
+  const { connected, matchState, wsUrl } = useRobotStatus();
+  const { onEStop, openWsSettings } = useRobotCommands();
   const { court, phase } = matchState;
 
   return (
@@ -30,11 +51,31 @@ export function AppHeader() {
         PHASE_BAND_CLASS[phase],
       )}
     >
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1">
-        <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
-        <TabBar />
-        <div className="ml-auto flex shrink-0 items-center">
+      <div className="flex min-w-0 flex-1 items-center gap-x-3 px-2 py-1">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
           <StatusBadge tone={COURT_TONE[court]}>{COURT_LABEL[court]}</StatusBadge>
+        </div>
+
+        {/* 帯が詰まったときに削るのはここだけ。他を縮めると設定と停止が読めなくなる */}
+        <div className="min-w-0 overflow-hidden">
+          <TabBar />
+        </div>
+
+        <div className="ml-auto flex shrink-0 items-center gap-3 text-[0.82em] text-base-content/70">
+          {/* 接続表示そのものを接続先設定の入口にする。繋がらない時に最初に見る場所なので */}
+          <button
+            type="button"
+            onClick={openWsSettings}
+            className="flex cursor-pointer items-center gap-1.5 hover:text-base-content"
+            title={`接続先: ${wsUrl}（クリックで変更）`}
+          >
+            <span className={cx(TONE_STATUS_CLASS[connected ? "success" : "error"], "status-sm")} />
+            {connected ? "Connected" : "Disconnected"}
+            <span className="font-mono">{wsHostLabel(wsUrl)}</span>
+          </button>
+
+          <Clock />
         </div>
       </div>
 

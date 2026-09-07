@@ -1,7 +1,8 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
-import { StatusBar } from "@/components/shell/StatusBar";
+import { TabBar } from "@/components/shell/TabBar";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TABS } from "@/lib/tabs";
@@ -94,14 +95,19 @@ describe("daisyUI のクラスは対で書かれている", () => {
     expect(badge?.querySelector(".status.status-warning")).not.toBeNull();
   });
 
-  it("タブは 4 つとも数字キーが重複せず割り当てられている", () => {
+  it("どのタブにも数字キーが重複せず割り当てられている", () => {
     const hotkeys = TABS.map((tab) => tab.hotkey);
     expect(new Set(hotkeys).size).toBe(TABS.length);
   });
 
-  it("ステータスバーのキー凡例はタブ定義から描く", () => {
-    // 直書きしていた頃は、タブが増減してもここだけ古い数字が残った
-    renderWithRobot(<StatusBar />);
+  it("キー凡例はタブ定義から描く", () => {
+    // 凡例はキーが効く場所 (タブ自身) にしか無い。直書きすると、タブが増減した
+    // ときにそこだけ古い数字が残る (割り当ての正は `lib/tabs.ts` の TABS[].hotkey)
+    renderWithRobot(
+      <MemoryRouter>
+        <TabBar />
+      </MemoryRouter>,
+    );
     for (const tab of TABS) {
       expect(screen.getByText(tab.hotkey)).toBeInTheDocument();
     }
