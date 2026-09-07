@@ -36,9 +36,15 @@ const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
 /**
  * Monitor 試合中の 1 機分。
  *
- * 以前はここに 8 モータ × 4 値の表が常時展開されていた。両機ぶんで 64 個の数字が
- * 画面を埋め、肝心の「どちらの機体が止まっていて誰の操作待ちか」が沈んでいた。
- * 進行状態を主役に据え、数値は SubsystemStatus の判定 1 行へ畳んでいる。
+ * かつては 8 モータ × 4 値の表がそのまま並び、両機ぶんで 64 個の数字が画面を埋めて、
+ * 肝心の「どちらの機体が止まっていて誰の操作待ちか」が沈んでいた。上から
+ * 進行状態 → 進捗 → 現在ステップ、と読む順に積み、数値はその下の `SubsystemStatus` へ
+ * 送っている —— 主役を入れ替えたのであって、数値を畳んだのではない。
+ *
+ * その `SubsystemStatus` は **`defaultOpen` で展開して置く。** Monitor は操縦しない役で
+ * 数値を追う時間があり、異常の切り分けはこの画面の仕事である。同じ部品を操縦者の
+ * 試合中は畳んだままにしてあり、**変えているのは既定の開閉だけ**（異常時に開閉操作を
+ * 上書きして開く挙動は `SubsystemStatus` 自身が持つので、どちらの役でも同じに効く）。
  */
 export function RobotStatusRow({
   label,
@@ -95,8 +101,6 @@ export function RobotStatusRow({
         </span>
       </div>
 
-      {/* Monitor は操縦しない役で、数値を追う時間がある。操縦者側の同じ部品は
-          畳んだままにしてあり、既定の開閉だけを役割で変えている */}
       <div className="flex min-h-0 flex-1 flex-col border-t border-base-300 px-1 py-1">
         <SubsystemStatus
           health={state.health}
