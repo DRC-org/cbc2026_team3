@@ -572,12 +572,16 @@ class RobotServer:
         しか知らず、ロボットごとの在飛状態はサーバーが `_reenergize_tasks` から引く。
         ロボット名が無い・未知なら素通しするのも同じ理由 (未知のロボットという別の
         失敗を、別の理由文で覆い隠さない)。
+
+        **未知の名前は `_is_reenergizing` へ渡す前に落とす。** あちらは緊急停止解除の
+        再励磁をロボット名に依らず True で答えるので、素通しの判断をあちらへ預けると
+        在飛中だけ未知の名前が「再励磁の処理中」で拒否され、素通しの性質が消える。
         """
         reason = spec.reenergize_deny_reason()
         if reason is None:
             return None
         robot_name = data.get("robot")
-        if not isinstance(robot_name, str):
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
             return None
         if not self._is_reenergizing(robot_name):
             return None

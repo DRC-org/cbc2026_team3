@@ -1407,6 +1407,53 @@ class TestEStopReactivationSharesTheReenergizeGate:
             gate.set()
             await fx.wait_reactivation()
 
+    async def test_switching_back_to_sequence_is_allowed(self) -> None:
+        """**手動から出る方向は在飛中も通す。** 退避路から戻れなくなるため。
+
+        `_apply_operation_mode` のガードは `mode is OperationMode.MANUAL` の `if`
+        ブロックの中にある。外へ出すと「手動へ入れないが出られもしない」機体になり、
+        しかも症状は緊急停止解除の直後の数秒にしか出ない (単発再励磁は手動中も
+        意図的に塞がないので、そちらでは踏みにくい)。
+        """
+        fx = _manual_fixture()
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        assert fx.operation_mode("main_hand") == "manual"
+        client = RecordingClient()
+        fx.attach_clients(client)
+        gate = await self._hold_reactivation(fx)
+        try:
+            await fx.command(
+                {"type": "set_operation_mode", "robot": "main_hand", "mode": "sequence"},
+                requester=client,
+            )
+            assert client.of_type("command_rejected") == []
+            assert fx.operation_mode("main_hand") == "sequence"
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+    async def test_unknown_robot_is_not_denied(self) -> None:
+        """在飛中でも、未知のロボット名は再励磁ゲートで拒否しない。
+
+        `_reenergize_deny_reason` は「未知のロボットという別の失敗を、別の理由文で
+        覆い隠さない」ために素通しする不変条件を持つ。解除の再励磁はロボット名に
+        依らず True を返すので、`_is_reenergizing` へ渡す前に未知の名前を落とさないと
+        **在飛中だけ**この性質が消え、`bogus` 宛の `sequence_start` が「再励磁の
+        処理中」で拒否される (`_manual_mode_deny_reason` は `self._robots.get()` で
+        同じ性質を守っている)。
+        """
+        fx = _build_fixture()
+        fx.enter_match()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        gate = await self._hold_reactivation(fx)
+        try:
+            await fx.command({"type": "sequence_start", "robot": "bogus"}, requester=client)
+            assert client.of_type("command_rejected") == []
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
     async def test_safety_reports_reenergizing(self) -> None:
         """在飛中は `safety.reenergizing` として配る。
 

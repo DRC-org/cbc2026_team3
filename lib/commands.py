@@ -68,8 +68,13 @@ class CommandSpec:
     #: 対象外 (False)。True にする側にだけ理由文を書かせる
     blocked_during_manual: bool
     manual_deny_message: str | None
-    #: 対象ロボット (data["robot"]) の再励磁 (`reenergize_motors`) が in-flight の
-    #: あいだ塞ぐか。**片方向だけのゲートである。**
+    #: モータを今励磁し直しているあいだ塞ぐか。**片方向だけのゲートである。**
+    #:
+    #: 在飛と見なすのは 2 つ —— 対象ロボット (data["robot"]) の単発再励磁
+    #: (`reenergize_motors`) と、**ロボット名に依らない緊急停止解除の再励磁**
+    #: (`RobotServer._reactivate_motors`)。後者は全ロボットぶんをまとめて処理する
+    #: ので、対象ロボットが誰であっても塞ぐ。判定は
+    #: `RobotServer._is_reenergizing` の 1 箇所だけが持つ。
     #:
     #: 再励磁は「フォルト前の現在角」を目標として書いてから enable する。その
     #: 100ms〜1.5 秒のあいだにシーケンスが `move_to` で書いた目標が上書きされると、
