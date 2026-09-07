@@ -142,6 +142,12 @@ PeriodicTimer g_blinkTimer;
 uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 
 bool g_canFailed = false;
+
+// config.h のポート指定が CubeMX 生成の main.h と食い違っている。
+// **弁を 1 つも開かせず、LED でそれと分かるようにする** ——
+// CAN が上がらない基板と同じ「今すぐ直さないと使えない」扱い（仕様書 §2.2）。
+bool g_configMismatch = false;
+
 bool g_ledOn = false;
 
 // 送信の連続失敗数。数える規則は TxFailCounter が持つ（native テスト圏内）。
@@ -160,6 +166,47 @@ SerialOverride g_serialOverride;
 
 // Port（config.h の HAL 非依存な enum）から HAL のポートへの変換はここだけが持つ。
 GPIO_TypeDef *portOf(Port port) { return port == Port::A ? GPIOA : GPIOB; }
+
+// config.h のポート指定が CubeMX 生成の main.h と一致しているか。
+//
+// **ピン番号は static_assert が見ているが、ポートはビルド時に見られない。**
+// `PUMP5_SW_GPIO_Port` は `GPIOA` へ、`GPIOA` は `((GPIO_TypeDef *) GPIOA_BASE)` へ
+// 展開されるポインタキャストなので、constexpr 文脈にも `##` の連結にも持ち込めない。
+// 電源投入時に必ず通る setup() で照合する。
+bool portsMatchCubeMx() {
+    struct Expected {
+        GPIO_TypeDef *port;
+        uint16_t pin;
+    };
+    // **CubeMX 側 (main.h) が正。** config.h の表と 1 対 1 に並べる。
+    // チャンネルを増やしたら上の static_assert(kSolenoidChannelCount == 6) が先に落ちる。
+    const Expected expected[kSolenoidChannelCount] = {
+        {PUMP1_SW_GPIO_Port, PUMP1_SW_Pin}, {PUMP2_SW_GPIO_Port, PUMP2_SW_Pin},
+        {PUMP3_SW_GPIO_Port, PUMP3_SW_Pin}, {PUMP4_SW_GPIO_Port, PUMP4_SW_Pin},
+        {PUMP5_SW_GPIO_Port, PUMP5_SW_Pin}, {PUMP6_SW_GPIO_Port, PUMP6_SW_Pin},
+    };
+    for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
+        if (portOf(kSolenoidChannels[ch].port) != expected[ch].port) {
+            return false;
+        }
+    }
+    if (portOf(kPortLed) != LED_BI_GPIO_Port) {
+        return false;
+    }
+    // DIP は読み違えると基板番号ごと変わる（別の基板のデバイス ID を名乗る）
+    const Expected dip[kDipBitCount] = {
+        {DIP1_GPIO_Port, DIP1_Pin},
+        {DIP2_GPIO_Port, DIP2_Pin},
+        {DIP3_GPIO_Port, DIP3_Pin},
+        {DIP4_GPIO_Port, DIP4_Pin},
+    };
+    for (uint8_t i = 0; i < kDipBitCount; ++i) {
+        if (portOf(kDipPorts[i]) != dip[i].port) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // 仕様書 §2.2: オフセット適用後のデバイス ID が 0x00 のチャンネルは駆動しない。
 bool isChannelConfigured(uint8_t ch) { return g_deviceId[ch] != kDeviceIdUnconfigured; }
@@ -429,7 +476,8 @@ void resolveDeviceIds() {
 
 void updateLed(uint32_t nowMs) {
 #if HAS_STATUS_LED
-    BoardIndication indication(g_canFailed || g_txFail.isAlarming(kCanTxFailStreakAlarm));
+    BoardIndication indication(g_canFailed || g_configMismatch ||
+                               g_txFail.isAlarming(kCanTxFailStreakAlarm));
     for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
         indication.observe(isChannelConfigured(ch),
                            (g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
@@ -523,6 +571,27 @@ extern "C" void setup() {
                           GPIO_PIN_RESET);
     }
     HAL_GPIO_WritePin(portOf(kPortLed), kPinLed, GPIO_PIN_RESET);
+
+    // **config.h と CubeMX のポートが一致しているかを起動時に確かめる。**
+    // 上の static_assert 群はピン番号 (`*_Pin`) しか突き合わせていないので、
+    // `kSolenoidChannels[4]` を `{Port::A, 1 << 3}` と書き間違えても
+    // `PUMP5_SW_Pin == GPIO_PIN_3` なら通り、`pinsAreUnique()` も PA3 が他と
+    // 衝突しなければ通る。症状は「その弁だけ動かない」か「MX_GPIO_Init が出力設定
+    // していないピンを叩く」だけで、CAN 越しには一切見えない。
+    //
+    // **ビルド時に見られない理由**: `PUMP5_SW_GPIO_Port` は `GPIOA` へ、`GPIOA` は
+    // `((GPIO_TypeDef *) GPIOA_BASE)` へ展開されるポインタキャストなので、
+    // constexpr 文脈にも `##` の連結にも持ち込めない。**電源投入時に必ず通る**
+    // ここが次善の場所になる。
+    if (!portsMatchCubeMx()) {
+        // 1 本でも食い違うなら弁を 1 つも開かせない。どのチャンネルが正しいかを
+        // ここで選り分けると、間違ったピンを叩く経路が残る
+        for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
+            g_channel[ch].stop();
+        }
+        // CAN が上がらない基板と同じ「今すぐ直さないと使えない」表示にする（§2.2）
+        g_configMismatch = true;
+    }
 
     // 実効デバイス ID を確定させてから CAN を開ける。
     // ID 未設定のチャンネルは applyChannelOutput が触らないので、
