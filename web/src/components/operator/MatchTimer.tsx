@@ -54,12 +54,20 @@ interface MatchTimerProps {
 }
 
 export function MatchTimer({ timer }: MatchTimerProps) {
-  const anchor = useRef<Anchor>({ elapsedMs: 0, atPerfMs: 0 });
   const [, tick] = useReducer((n: number) => n + 1, 0);
 
   const elapsedMs = timer?.elapsed_ms ?? 0;
   const durationMs = timer?.duration_ms ?? 0;
   const running = timer?.running ?? false;
+
+  // **初回レンダーの時点でアンカーを確定させる。** アンカーを取り直す effect は
+  // commit の後にしか走らないので、最初の 1 フレームはここの値がそのまま描かれる。
+  // `atPerfMs: 0` を初期値にすると `performance.now() - 0` —— **ページを開いてからの
+  // 経過ミリ秒** —— が「試合の経過」に化け、タブを開いて `duration_ms` (180 秒) 以上
+  // 経ってからこの部品がマウントされると、`clampRemaining` が 0 へ丸めて **`0:00` を
+  // 1 フレーム描く**。試合中のタブ切替やリロードで踏み、操縦者が視線を戻した一瞬に
+  // それを見ると「時間切れ」に読める。
+  const anchor = useRef<Anchor>({ elapsedMs, atPerfMs: performance.now() });
 
   // 配信が届くたびにアンカーを取り直す。取り直さないと、リロードした操縦者と
   // 途中から繋いだ Monitor だけが 0 から数え始め、画面ごとに違う残り時間が出る
