@@ -15,6 +15,7 @@
 #include "MotorCanProtocol.h"
 #include "MotorCanRouter.h"
 #include "MotorLoopTimer.h"
+#include "MotorPinTable.h"
 #include "MotorTxHealth.h"
 #include "SerialLineBuffer.h"
 #include "SerialOverride.h"
@@ -143,9 +144,12 @@ uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 
 bool g_canFailed = false;
 
-// config.h のポート指定が CubeMX 生成の main.h と食い違っている。
+// config.h のピン割当が CubeMX 生成の main.h と食い違っている。
 // **弁を 1 つも開かせず、LED でそれと分かるようにする** ——
 // CAN が上がらない基板と同じ「今すぐ直さないと使えない」扱い（仕様書 §2.2）。
+//
+// 駆動を封じているのは実際には「デバイス ID を確定させない」ことで（setup() の
+// コメント）、このフラグが担うのは LED の表示だけ。
 bool g_configMismatch = false;
 
 bool g_ledOn = false;
@@ -167,45 +171,88 @@ SerialOverride g_serialOverride;
 // Port（config.h の HAL 非依存な enum）から HAL のポートへの変換はここだけが持つ。
 GPIO_TypeDef *portOf(Port port) { return port == Port::A ? GPIOA : GPIOB; }
 
-// config.h のポート指定が CubeMX 生成の main.h と一致しているか。
+// HAL のポート → 比較用のポート番号（config.h の enum と同じ値）。
+//
+// **portOf() の逆だが「A でなければ B」に丸めてはならない。** CubeMX が
+// ピンを 3 つ目のポートへ動かしたとき、B と読み替えると config.h が B と
+// 書いてあるだけで一致してしまい、照合そのものが素通りする。
+uint8_t portIndexOf(GPIO_TypeDef *port) {
+    if (port == GPIOA) {
+        return static_cast<uint8_t>(Port::A);
+    }
+    if (port == GPIOB) {
+        return static_cast<uint8_t>(Port::B);
+    }
+    return kPortIndexUnknown;
+}
+
+// config.h のピン割当が CubeMX 生成の main.h と一致しているか。
 //
 // **ピン番号は static_assert が見ているが、ポートはビルド時に見られない。**
 // `PUMP5_SW_GPIO_Port` は `GPIOA` へ、`GPIOA` は `((GPIO_TypeDef *) GPIOA_BASE)` へ
 // 展開されるポインタキャストなので、constexpr 文脈にも `##` の連結にも持ち込めない。
 // 電源投入時に必ず通る setup() で照合する。
+//
+// **比較の規則そのものは MotorPinTable.h（HAL 非依存）が持つ。** ここへループを
+// 書き戻すと、この翻訳単位は native テストの対象外なので `!=` を `==` に
+// 書き換えても全ケース緑になる。ここに残すのは HAL ポインタ → ポート番号の
+// 逆引きと、2 つの表を同じ順序で並べることだけ。
+//
+// **CAN（PA11 / PA12）と UART（PA9 / PA10）はここでは照合できない。**
+// この 2 つは CubeMX が `HAL_CAN_MspInit` / `HAL_UART_MspInit` の中で
+// `GPIO_PIN_11|GPIO_PIN_12` のようにその場で書いており、main.h に
+// `*_GPIO_Port` / `*_Pin` のマクロが生成されない（＝突き合わせる相手が居ない）。
+// この 4 本を守るのは kAllPins の重複検査（static_assert）だけである。
 bool portsMatchCubeMx() {
-    struct Expected {
-        GPIO_TypeDef *port;
-        uint16_t pin;
-    };
-    // **CubeMX 側 (main.h) が正。** config.h の表と 1 対 1 に並べる。
+    // config.h 側。**下の expected[] と 1 対 1 の順序**で並べる。
     // チャンネルを増やしたら上の static_assert(kSolenoidChannelCount == 6) が先に落ちる。
-    const Expected expected[kSolenoidChannelCount] = {
-        {PUMP1_SW_GPIO_Port, PUMP1_SW_Pin}, {PUMP2_SW_GPIO_Port, PUMP2_SW_Pin},
-        {PUMP3_SW_GPIO_Port, PUMP3_SW_Pin}, {PUMP4_SW_GPIO_Port, PUMP4_SW_Pin},
-        {PUMP5_SW_GPIO_Port, PUMP5_SW_Pin}, {PUMP6_SW_GPIO_Port, PUMP6_SW_Pin},
+    constexpr PortPin actual[] = {
+        {static_cast<uint8_t>(kSolenoidChannels[0].port), kSolenoidChannels[0].pin},
+        {static_cast<uint8_t>(kSolenoidChannels[1].port), kSolenoidChannels[1].pin},
+        {static_cast<uint8_t>(kSolenoidChannels[2].port), kSolenoidChannels[2].pin},
+        {static_cast<uint8_t>(kSolenoidChannels[3].port), kSolenoidChannels[3].pin},
+        {static_cast<uint8_t>(kSolenoidChannels[4].port), kSolenoidChannels[4].pin},
+        {static_cast<uint8_t>(kSolenoidChannels[5].port), kSolenoidChannels[5].pin},
+        {static_cast<uint8_t>(kPortLed), kPinLed},
+        // DIP は読み違えると基板番号ごと変わる（別の基板のデバイス ID を名乗る）
+        {static_cast<uint8_t>(kDipPorts[0]), kDipPins[0]},
+        {static_cast<uint8_t>(kDipPorts[1]), kDipPins[1]},
+        {static_cast<uint8_t>(kDipPorts[2]), kDipPins[2]},
+        {static_cast<uint8_t>(kDipPorts[3]), kDipPins[3]},
     };
-    for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-        if (portOf(kSolenoidChannels[ch].port) != expected[ch].port) {
-            return false;
-        }
-    }
-    if (portOf(kPortLed) != LED_BI_GPIO_Port) {
-        return false;
-    }
-    // DIP は読み違えると基板番号ごと変わる（別の基板のデバイス ID を名乗る）
-    const Expected dip[kDipBitCount] = {
-        {DIP1_GPIO_Port, DIP1_Pin},
-        {DIP2_GPIO_Port, DIP2_Pin},
-        {DIP3_GPIO_Port, DIP3_Pin},
-        {DIP4_GPIO_Port, DIP4_Pin},
+    // **CubeMX 側 (main.h) が正。** MX_GPIO_Init が実際に初期化したのはこちら。
+    const PortPin expected[] = {
+        {portIndexOf(PUMP1_SW_GPIO_Port), PUMP1_SW_Pin},
+        {portIndexOf(PUMP2_SW_GPIO_Port), PUMP2_SW_Pin},
+        {portIndexOf(PUMP3_SW_GPIO_Port), PUMP3_SW_Pin},
+        {portIndexOf(PUMP4_SW_GPIO_Port), PUMP4_SW_Pin},
+        {portIndexOf(PUMP5_SW_GPIO_Port), PUMP5_SW_Pin},
+        {portIndexOf(PUMP6_SW_GPIO_Port), PUMP6_SW_Pin},
+        {portIndexOf(LED_BI_GPIO_Port), LED_BI_Pin},
+        {portIndexOf(DIP1_GPIO_Port), DIP1_Pin},
+        {portIndexOf(DIP2_GPIO_Port), DIP2_Pin},
+        {portIndexOf(DIP3_GPIO_Port), DIP3_Pin},
+        {portIndexOf(DIP4_GPIO_Port), DIP4_Pin},
     };
-    for (uint8_t i = 0; i < kDipBitCount; ++i) {
-        if (portOf(kDipPorts[i]) != dip[i].port) {
-            return false;
-        }
-    }
-    return true;
+    constexpr uint8_t kCheckedPinCount = sizeof(actual) / sizeof(actual[0]);
+    static_assert(sizeof(expected) / sizeof(expected[0]) == kCheckedPinCount,
+                  "config.h 側と main.h 側の行数が食い違っている（1 対 1 に並べること）");
+    static_assert(kCheckedPinCount == kSolenoidChannelCount + 1 + kDipBitCount,
+                  "照合していないピンがある（チャンネル + LED + DIP の全部を並べること）");
+
+    return pinTablesMatch(actual, expected, kCheckedPinCount);
+}
+
+// LED を叩く唯一の口。**config.h ではなく CubeMX 生成の main.h を正として書く。**
+//
+// ポートの食い違いを見つけたときに残る通知経路は LED だけなのに、その LED を
+// 疑いの対象そのもの（config.h の kPortLed）で叩くと、食い違いの中身次第で
+// **止めたはずの弁のピンを 200ms ごとに叩く**（kPinLed = 1 << 5 のポートを B と
+// 書き間違えれば PB5 = ch2 = valve_3 で、MX_GPIO_Init が出力に設定済みのピンである）。
+// 両者が一致していることは portsMatchCubeMx() が別途見るので、config.h の
+// kPortLed / kPinLed が死んだ定数になるわけではない。
+void writeLed(bool on) {
+    HAL_GPIO_WritePin(LED_BI_GPIO_Port, LED_BI_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 // 仕様書 §2.2: オフセット適用後のデバイス ID が 0x00 のチャンネルは駆動しない。
@@ -495,7 +542,7 @@ void updateLed(uint32_t nowMs) {
         return;
     }
     g_ledOn = !g_ledOn;
-    HAL_GPIO_WritePin(portOf(kPortLed), kPinLed, g_ledOn ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    writeLed(g_ledOn);
 #else
     (void)nowMs;
 #endif
@@ -563,16 +610,7 @@ void pollSerial(uint32_t nowMs) {
 // ===========================================================================
 
 extern "C" void setup() {
-    // 何よりも先に出力を消磁側へ倒す。GPIO は MX_GPIO_Init() が RESET で初期化
-    // しているが、ここを省くと初期化順を変えたときに「通電したまま起動する」
-    // 経路が黙って生まれる。
-    for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-        HAL_GPIO_WritePin(portOf(kSolenoidChannels[ch].port), kSolenoidChannels[ch].pin,
-                          GPIO_PIN_RESET);
-    }
-    HAL_GPIO_WritePin(portOf(kPortLed), kPinLed, GPIO_PIN_RESET);
-
-    // **config.h と CubeMX のポートが一致しているかを起動時に確かめる。**
+    // **config.h と CubeMX のピン割当が一致しているかを何よりも先に確かめる。**
     // 上の static_assert 群はピン番号 (`*_Pin`) しか突き合わせていないので、
     // `kSolenoidChannels[4]` を `{Port::A, 1 << 3}` と書き間違えても
     // `PUMP5_SW_Pin == GPIO_PIN_3` なら通り、`pinsAreUnique()` も PA3 が他と
@@ -583,20 +621,43 @@ extern "C" void setup() {
     // `((GPIO_TypeDef *) GPIOA_BASE)` へ展開されるポインタキャストなので、
     // constexpr 文脈にも `##` の連結にも持ち込めない。**電源投入時に必ず通る**
     // ここが次善の場所になる。
-    if (!portsMatchCubeMx()) {
-        // 1 本でも食い違うなら弁を 1 つも開かせない。どのチャンネルが正しいかを
-        // ここで選り分けると、間違ったピンを叩く経路が残る
-        for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
-            g_channel[ch].stop();
-        }
-        // CAN が上がらない基板と同じ「今すぐ直さないと使えない」表示にする（§2.2）
-        g_configMismatch = true;
-    }
+    //
+    // **消磁ループより先に置く。** 後ろに置くと、食い違ったポート指定のまま
+    // HAL_GPIO_WritePin を 6 回叩いてから検査することになり、「間違ったピンを
+    // 叩く経路を残さない」というこの検査自身の目的と噛み合わない。
+    g_configMismatch = !portsMatchCubeMx();
 
-    // 実効デバイス ID を確定させてから CAN を開ける。
-    // ID 未設定のチャンネルは applyChannelOutput が触らないので、
-    // 設定ミスの基板は 1 本も弁を開かない（仕様書 §2.2）。
-    resolveDeviceIds();
+    if (!g_configMismatch) {
+        // 出力を消磁側へ倒す。GPIO は MX_GPIO_Init() が RESET で初期化しているが、
+        // ここを省くと初期化順を変えたときに「通電したまま起動する」経路が黙って生まれる。
+        for (uint8_t ch = 0; ch < kSolenoidChannelCount; ++ch) {
+            HAL_GPIO_WritePin(portOf(kSolenoidChannels[ch].port), kSolenoidChannels[ch].pin,
+                              GPIO_PIN_RESET);
+        }
+    }
+    // LED だけは食い違っていても叩く（唯一の通知経路）。main.h を正として書くので
+    // config.h の表が間違っていても別のピンには当たらない（writeLed のコメント）。
+    writeLed(false);
+
+    // **食い違ったらデバイス ID を確定させない。** g_deviceId[] は 0x00
+    // （kDeviceIdUnconfigured）のまま残るので、仕様書 §2.2 の既存の経路にそのまま乗る:
+    // applyChannelOutput は入口で return して GPIO へ 1 度も届かず、FEEDBACK も INFO も
+    // 1 通も出ず、LED は BoardIndication が urgent（赤の速い点滅）へ倒す。
+    // CLAUDE.md の「表に無い基板番号は全スロット Unused のまま据え置く」と同じ形で、
+    // 新しいゲートを 1 つも増やさずに「弁を 1 つも開かせない」が成立する。
+    //
+    // **緊急停止ラッチ（MotorSafety::stop()）で止めてはならない。** ラッチは CAN の
+    // E_STOP 解除フレームで外れ、PC 側は励磁のたびにそれを送る（lib/drivers/generic.py の
+    // activation_steps() が encode_e_stop_clear() を返し、加えて lib/server.py の
+    // _send_e_stop_clear_broadcast が全バスへブロードキャスト解除を流す）。つまり
+    // ラッチに預けると、PC を起動して励磁した時点で剥がれ、その後の SET_TARGET で
+    // 間違ったポートの GPIO を叩く —— 止まっているのは電源投入から最初の励磁までだけになる。
+    // 下の CAN 失敗時に stop() が有効なのは、**CAN が上がっていないので解除フレームが
+    // 物理的に届かない**からであって、ポートの食い違いにその前提は無い（CAN は正常に上がる）。
+    if (!g_configMismatch) {
+        // 実効デバイス ID を確定させてから CAN を開ける。
+        resolveDeviceIds();
+    }
 
     const uint32_t startMs = HAL_GetTick();
 
