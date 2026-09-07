@@ -180,11 +180,20 @@ def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistI
 
     項目ゼロのロールは「常に完了」とみなされるため、yaml が無くても試合には
     入れる。逆に yaml があれば全項目のチェックが試合開始の前提条件になる。
+
+    検証に落ちたときに SystemExit へ変換するのは `_load_all_configs` と同じ理由
+    (会場で読むのが操縦者であり、traceback より 1 行のメッセージのほうが直せる)。
+    ここだけ生の例外で落ちると、ロール名を 1 行打ち間違えただけで journal に
+    Python の traceback が出る —— しかも `cbc-control.service` は約 6 秒で
+    `failed` に固定されるので、読み違えたぶんだけ復帰が遠くなる。
     """
     if not path.exists():
         logger.warning("チェックリスト設定が見つかりません: %s (項目なしで起動)", path)
         return load_checklist_definitions({})
-    return load_checklist_definitions(_load_config(path) or {})
+    try:
+        return load_checklist_definitions(_load_config(path) or {})
+    except (ValueError, yaml.YAMLError) as exc:
+        raise SystemExit(f"設定を読み込めません: {exc}") from exc
 
 
 def _positions_path(config_path: pathlib.Path, robot_name: str) -> pathlib.Path:
