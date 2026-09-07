@@ -289,12 +289,34 @@ def _parse_can_buses(source: str, raw: object) -> dict[str, str]:
     if not buses:
         # バス定義が無いとモータを 1 台も登録できず、静かに「何も動かない機体」になる
         raise ValueError(f"{source}: can_buses に CAN バスが 1 つも定義されていません")
+    # **2 つの別名が同じインタフェースを指してはならない。** バス名を udev で個体固定
+    # している理由そのもの —— 別名は「どの機種がぶら下がっているか」の宣言なので、
+    # 重ねると機種の違うノードが同じ物理バスに乗る構成が config の 1 行で書ける:
+    #   - can_m3508 と can_edulite が重なる → C620 へ EDULITE 用のコマンドが飛ぶ
+    #   - can_dm3520 と can_m3508 が重なる → C620 のフィードバック 0x201〜0x204 が
+    #     DM3520 から見て**速度指令**になる (発生源がモータ自身なので PC を止めても
+    #     流れ続ける)
+    #   - can_dm3520 と can_generic が重なる → E_STOP / SET_TARGET / SET_PARAM の
+    #     3 帯がそのまま重なる
+    # 下流の `CANManager.add_bus` は別名で持つだけでチャンネルの重複を見ないので、
+    # ここで弾かないと止める層が 1 つも無い (`add_motor` が見るのは名前と can_id だけ)。
+    seen: dict[str, str] = {}
     for alias, channel in buses.items():
         if not isinstance(channel, str) or not channel:
             raise ValueError(
                 f"{source}: can_buses.{alias} は SocketCAN のインタフェース名 "
                 f"(文字列) である必要があります: {channel!r}"
             )
+        previous = seen.get(channel)
+        if previous is not None:
+            raise ValueError(
+                f"{source}: can_buses.{alias} と can_buses.{previous} が同じ"
+                f" インタフェース '{channel}' を指しています。"
+                "別名は機種ごとの物理バスに 1 対 1 で対応させること"
+                " (重ねると機種の違うノードが同じバスに乗り、"
+                "一方のフィードバックが他方への指令として解釈されます)"
+            )
+        seen[channel] = str(alias)
     return {str(alias): channel for alias, channel in buses.items()}
 
 

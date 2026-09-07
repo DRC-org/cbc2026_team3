@@ -210,6 +210,21 @@ class TestSystemConfig:
         with pytest.raises(ValueError, match="a_bus"):
             load_system_config({"can_buses": {"a_bus": 3}}, source="system.yaml")
 
+    def test_duplicate_bus_channel_is_rejected(self) -> None:
+        """**2 つの別名が同じインタフェースを指す構成を通さない。**
+
+        別名は「どの機種がぶら下がっているか」の宣言なので、重ねると機種の違う
+        ノードが同じ物理バスに乗る。C620 のフィードバック `0x201`〜`0x204` は
+        DM3520 から見て速度指令になり、しかも発生源がモータ自身なので **PC を
+        止めても流れ続ける**。下流の `CANManager.add_bus` は別名で持つだけで
+        チャンネルの重複を見ないため、ここで弾かないと止める層が 1 つも無い。
+        """
+        with pytest.raises(ValueError, match="can0"):
+            load_system_config(
+                {"can_buses": {"can_m3508": "can0", "can_edulite": "can0"}},
+                source="system.yaml",
+            )
+
 
 class TestRobotConfigStructure:
     def test_minimal_config_is_accepted(self) -> None:
