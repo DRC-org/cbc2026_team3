@@ -6,7 +6,7 @@ robot_name: main_hand
 # config/bench/y_axis_tuning/main_hand_positions.yaml を参照。
 #
 # --- output_limit を本番より下げてある ------------------------------------
-# 本番は 2000 counts (≒2.4A)。チューニング中は kp を上げて振動を出したり、
+# 本番は 5000 counts (≒6.1A)。チューニング中は kp を上げて振動を出したり、
 # 可動範囲の端へ寄せたりするので、突き当たったときの押し付け力をそのぶん
 # 小さくしておく。800 counts ≒ 0.98A で、出力軸トルクは約 0.3N・m
 # (ピニオン基準円 20mm で 15N ほど)。
@@ -39,7 +39,7 @@ motors:
       # 拘束が外れた瞬間に暴走する。output_limit (800) の半分に置いてある。
       integral_limit: 400.0
       dead_band: 1.0       # モータ軸 [deg]。y_axis の scale で約 0.018mm 相当
-      output_limit: 800    # 上のコメント参照。本番 (2000) より低い
+      output_limit: 800    # 上のコメント参照。本番 (5000) より低い
 
   y_axis_l:
     driver: m3508
