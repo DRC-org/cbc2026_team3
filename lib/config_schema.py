@@ -295,12 +295,37 @@ def _parse_health(source: str, raw: object) -> HealthThresholds:
             continue
         values[key] = _number(source, f"health.{key}", health[key])
 
-    return HealthThresholds(
+    thresholds = HealthThresholds(
         feedback_timeout_ms=values.get("feedback_timeout_ms", DEFAULT_HEALTH.feedback_timeout_ms),
         temp_warning_c=values.get("temp_warning_c", DEFAULT_HEALTH.temp_warning_c),
         temp_critical_c=values.get("temp_critical_c", DEFAULT_HEALTH.temp_critical_c),
         tx_error_threshold=int(values.get("tx_error_threshold", DEFAULT_HEALTH.tx_error_threshold)),
     )
+
+    # **0 以下を通すと、しきい値そのものが症状に化ける。** ここは health の
+    # 単一情報源なので、通してしまうと他に止める層が 1 つも無い:
+    #   - feedback_timeout_ms <= 0 → 全モータ・全センサが恒久的に STALE。/health は
+    #     常に 503、診断ツリーは常時展開。**症状が配線不良と区別が付かない**
+    #   - temp_warning_c / temp_critical_c <= 0 → 温度を測れるモータが起動直後から
+    #     WARNING / FAULT (「測っていない 0」がそのまま警告・FAULT に化ける)
+    #   - tx_error_threshold <= 0 → 送信エラー 0 件でバスが DEGRADED
+    for key, value in (
+        ("feedback_timeout_ms", thresholds.feedback_timeout_ms),
+        ("temp_warning_c", thresholds.temp_warning_c),
+        ("temp_critical_c", thresholds.temp_critical_c),
+        ("tx_error_threshold", thresholds.tx_error_threshold),
+    ):
+        if value <= 0:
+            raise ValueError(f"{source}: health.{key} は正の値である必要があります: {value!r}")
+
+    # 逆転していると警告を飛ばして FAULT だけが出る (段階的に手当てする余地が消える)
+    if thresholds.temp_warning_c > thresholds.temp_critical_c:
+        raise ValueError(
+            f"{source}: health.temp_warning_c ({thresholds.temp_warning_c}) は"
+            f" health.temp_critical_c ({thresholds.temp_critical_c}) 以下である必要があります"
+        )
+
+    return thresholds
 
 
 def _parse_match(source: str, raw: object) -> MatchSettings:

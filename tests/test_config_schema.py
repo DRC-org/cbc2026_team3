@@ -135,6 +135,37 @@ class TestSystemConfig:
                 source="system.yaml",
             )
 
+    @pytest.mark.parametrize(
+        "key",
+        ["feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold"],
+    )
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_non_positive_health_value_is_rejected(self, key: str, value: float) -> None:
+        """**しきい値そのものが症状に化ける値を通さない。**
+
+        `health` はしきい値の単一情報源なので、ここを通ると他に止める層が無い:
+        `feedback_timeout_ms` が 0 以下なら全モータが恒久 STALE (症状は配線不良と
+        区別が付かない)、温度 2 値が 0 以下なら「測っていない 0」がそのまま
+        WARNING / FAULT に化ける、`tx_error_threshold` が 0 以下なら送信エラー
+        0 件でバスが DEGRADED になる。
+        """
+        with pytest.raises(ValueError, match=key):
+            load_system_config(
+                {"can_buses": {"a_bus": "can_a"}, "health": {key: value}},
+                source="system.yaml",
+            )
+
+    def test_inverted_temperature_thresholds_are_rejected(self) -> None:
+        """警告 > 危険 だと、警告を飛ばして FAULT だけが出る。"""
+        with pytest.raises(ValueError, match="temp_warning_c"):
+            load_system_config(
+                {
+                    "can_buses": {"a_bus": "can_a"},
+                    "health": {"temp_warning_c": 90, "temp_critical_c": 60},
+                },
+                source="system.yaml",
+            )
+
     def test_missing_can_buses_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="can_buses"):
             load_system_config({}, source="system.yaml")
