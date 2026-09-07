@@ -13,7 +13,7 @@ import pytest
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
-from lib.sequence.motors import MotorGroup, MotorHandle, WaitInterruptedError
+from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, WaitInterruptedError
 from lib.sequence.positions import load_position_table
 from tests.fake_drivers import StubFeedbackDriver
 
@@ -150,6 +150,50 @@ class TestMoveTo:
 
         with pytest.raises(AttributeError, match="lift_motor"):
             await seq.move_to({"ghost": "home"})
+
+    async def test_指令の途中で例外が出ても到達待ちを取り残さない(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**溜めている途中で落ちたコルーチンが誰にも await されない形を作らない。**
+
+        2 軸目の `set_target_value` が例外を投げたとき、1 軸目ぶんの `wait_reached`
+        コルーチンを既に作っていると、それが誰にも await されないまま捨てられ
+        `RuntimeWarning: coroutine ... was never awaited` が journal に出る ——
+        試合中に緊急停止を踏むたび、本当の死因 (`EStopActiveError`) の隣に
+        無関係な警告が並ぶ。
+
+        判定は「コルーチンが 1 つも作られていないこと」で見る。警告そのものを
+        `catch_warnings` で捕まえる形にすると、コルーチンの回収時期 (gc とイベント
+        ループの終了) に依存して**変異版でも緑になる**。
+        """
+        seq = _MoveSequence()
+        mgr = MagicMock()
+
+        async def _send(name: str, _msg: can.Message) -> None:
+            # arm_joint (2 軸目) の指令だけを失敗させる
+            if name == "arm_joint":
+                raise can.CanError("送信失敗 (テスト)")
+
+        mgr.send = AsyncMock(side_effect=_send)
+        group = MotorGroup()
+        for name in ("lift_motor", "arm_joint"):
+            group.add(MotorHandle(name, _EchoDriver(name), mgr, poll_interval=0.001))
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+
+        created: list[str] = []
+        original = AxisHandle.wait_reached
+
+        def _record(self: AxisHandle, **kwargs: object):
+            created.append(self.name)
+            return original(self, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(AxisHandle, "wait_reached", _record)
+
+        with pytest.raises(can.CanError):
+            await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
+
+        assert created == [], f"到達待ちのコルーチンが取り残された: {created}"
 
 
 class TestRunStopsOnTimeout:
