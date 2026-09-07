@@ -6,7 +6,7 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { useArmedPress } from "@/hooks/useArmedPress";
-import { COURT_LABEL, isDuringMatch } from "@/lib/phase";
+import { isDuringMatch } from "@/lib/phase";
 
 /**
  * リセットの確認ダイアログ。
@@ -62,7 +62,8 @@ export function useResetConfirm() {
  * 試合中・試合終了後の 1 行帯。
  *
  * 試合中は画面をロボット状態に明け渡すが、`match_finish` は MATCH フェーズ限定なので
- * この導線を隠すと試合を終われなくなる。設定値の確認と終了導線だけを 1 行で残す。
+ * この導線を隠すと試合を終われなくなる。**残すのは導線だけ** — フェーズとコートは
+ * ヘッダーが常時チップで出しているので、ここで並べると同じ事実が同じ画面に 2 度出る。
  *
  * 終了の確認は同じボタンの二度押しで取る。ダイアログ本文が持っていた
  * 「緊急停止ではない」ことは、武装中に隣へ出す。
@@ -70,12 +71,12 @@ export function useResetConfirm() {
  * **セッティングへ戻る操作に確認は挟まない。** 試合が終わった後の唯一の進み先であり、
  * 失うのは消化済みのチェックリストだけで、機体は動かない。次の試合の準備を
  * 1 クリック遅らせる理由がない（同じ `match_reset` でも、準備中に押す
- * MatchPrep 最下段のリセットはまだ使っていない指差喚呼を捨てるので確認を残してある）。
+ * `MatchPrep` ヘッダーの RESET はまだ使っていない指差喚呼を捨てるので確認を残してある）。
  */
 export function MatchStrip() {
   const { matchState, connected } = useRobotStatus();
   const { matchFinish, matchReset } = useRobotCommands();
-  const { court, phase } = matchState;
+  const { phase } = matchState;
   const duringMatch = isDuringMatch(phase);
   const { armed, press, disarm } = useArmedPress(matchFinish);
 
@@ -88,11 +89,7 @@ export function MatchStrip() {
   }, [duringMatch, connected, disarm]);
 
   return (
-    <div className="flex shrink-0 items-center justify-between gap-2 border border-base-300 bg-base-100 px-2 py-1">
-      <span className="min-w-0 truncate">
-        <span className="text-base-content/70">MATCH </span>
-        {COURT_LABEL[court]}
-      </span>
+    <div className="flex shrink-0 items-center justify-end gap-2 border border-base-300 bg-base-100 px-2 py-1">
       {duringMatch ? (
         <span className="flex items-center gap-2">
           {armed ? (

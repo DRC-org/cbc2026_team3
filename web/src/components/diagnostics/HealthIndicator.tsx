@@ -86,13 +86,19 @@ export function HealthIndicator({ health }: { health: HealthSnapshot | undefined
       {health.buses.length === 0 ? (
         <div className="text-base-content/70">バス情報なし</div>
       ) : (
-        <table className="table table-zebra table-xs">
-          <tbody>
-            {health.buses.map((bus) => (
-              <BusRow key={bus.name} bus={bus} />
-            ))}
-          </tbody>
-        </table>
+        /* 表のセルは truncate で縮まない (`table-fixed` でない表の列幅は内容の
+           min-content で決まる)。異常時の `bus_off rx_down tx_err …` は
+           `whitespace-nowrap` なので、幅 21rem の診断カラムでは表だけが列を
+           越える。**溢れる側をスクロールさせ、画面本体は横スクロールさせない** */
+        <div className="overflow-x-auto">
+          <table className="table table-zebra table-xs">
+            <tbody>
+              {health.buses.map((bus) => (
+                <BusRow key={bus.name} bus={bus} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

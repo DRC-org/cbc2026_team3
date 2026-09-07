@@ -1,7 +1,9 @@
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
-import { StatusBar } from "@/components/shell/StatusBar";
+import { TabBar } from "@/components/shell/TabBar";
+import { Toaster } from "@/components/shell/Toaster";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TABS } from "@/lib/tabs";
@@ -58,6 +60,22 @@ describe("daisyUI のクラスは対で書かれている", () => {
     }
   });
 
+  it("トーストの配置は親クラスと位置修飾子が揃っている", () => {
+    // `toast` を落とすと `position: fixed` ごと消え、通知が本文の途中へ流れ込む。
+    // 位置修飾子を落とすと右下へ寄らず、操縦者が見る場所から外れる。
+    // どちらも DOM には在るので、描画されていることを見るだけでは検出できない
+    const { container } = renderWithRobot(<Toaster />, {
+      rejection: {
+        command: "match_start",
+        reason: "チェックリスト未完了",
+        receivedAtMs: 1,
+        source: "server",
+      },
+    });
+
+    expect(container.firstElementChild).toHaveClass("toast", "toast-end", "toast-bottom");
+  });
+
   it("Panel のアクセントバーは太さと色をリテラルで揃えて出す", () => {
     // `border-l-[0.4rem]` だけ、あるいは色だけを出すと、DOM には在るのに
     // 見えないバーになる (Tailwind はソースに現れた文字列ぶんしか CSS を出さない)
@@ -94,14 +112,19 @@ describe("daisyUI のクラスは対で書かれている", () => {
     expect(badge?.querySelector(".status.status-warning")).not.toBeNull();
   });
 
-  it("タブは 4 つとも数字キーが重複せず割り当てられている", () => {
+  it("どのタブにも数字キーが重複せず割り当てられている", () => {
     const hotkeys = TABS.map((tab) => tab.hotkey);
     expect(new Set(hotkeys).size).toBe(TABS.length);
   });
 
-  it("ステータスバーのキー凡例はタブ定義から描く", () => {
-    // 直書きしていた頃は、タブが増減してもここだけ古い数字が残った
-    renderWithRobot(<StatusBar />);
+  it("キー凡例はタブ定義から描く", () => {
+    // 凡例はキーが効く場所 (タブ自身) にしか無い。直書きすると、タブが増減した
+    // ときにそこだけ古い数字が残る (割り当ての正は `lib/tabs.ts` の TABS[].hotkey)
+    renderWithRobot(
+      <MemoryRouter>
+        <TabBar />
+      </MemoryRouter>,
+    );
     for (const tab of TABS) {
       expect(screen.getByText(tab.hotkey)).toBeInTheDocument();
     }

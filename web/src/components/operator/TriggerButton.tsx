@@ -1,4 +1,4 @@
-import { Ban, Check, Play } from "lucide-react";
+import { ArrowRight, Ban, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -53,7 +53,11 @@ export function TriggerButton({
   }
 
   // 待機解除は試合中に最も多く押す操作。ここだけは地をベタ塗りして、
-  // 「今 押すべきボタンはこれ」が周辺視野でも分かるようにする
+  // 「今 押すべきボタンはこれ」が周辺視野でも分かるようにする。
+  //
+  // アイコンは START (`Play`) と分ける。両者は同じ位置に同じ大きさで出るので、
+  // 記号まで同じだと色と文字でしか見分けられない —— START は先頭から走り直す操作で、
+  // 押し間違えると中断姿勢のまま全工程が流れる
   if (kind === "waiting_trigger") {
     return (
       <Button
@@ -62,7 +66,7 @@ export function TriggerButton({
         aria-label="次のステップへ進む"
         className={FILL_CLASS}
       >
-        <Icon as={Play} />
+        <Icon as={ArrowRight} />
         NEXT
         <Kbd className="bg-next-fg/10 text-next-fg">Space</Kbd>
       </Button>

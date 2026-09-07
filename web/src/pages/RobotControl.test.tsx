@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -104,11 +104,14 @@ function pressSpace() {
 }
 
 describe("試合時間タイマーの配置", () => {
-  it("試合中は残り時間を出す", () => {
+  it("試合中は右カラムに残り時間の値を出す", () => {
     mount("match", robotState(), { running: true, elapsed_ms: 60_000, duration_ms: 180_000 });
 
-    expect(screen.getByText("2:00")).toBeInTheDocument();
-    expect(screen.getByText("残り時間")).toBeInTheDocument();
+    // 進行中は caption を出さない (数字が残り時間であることは legend から読める)。
+    // ここが見たいのは配置なので、時刻の値そのものがパネルの中にあることで確かめる
+    const panel = screen.getByText("試合時間").closest("section");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("2:00")).toBeInTheDocument();
   });
 
   it("セッティングタイムには出さない", () => {
@@ -117,6 +120,92 @@ describe("試合時間タイマーの配置", () => {
     mount("setup", robotState(), { running: false, elapsed_ms: 0, duration_ms: 180_000 });
 
     expect(screen.queryByText("試合時間")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * 右カラム (試合時間 + 機体状態) は flex-col なので、**クロス軸は横**になる。
+ * 子に `align-self` を付けると幅が `stretch` から `fit-content` へ変わり、
+ * 列の幅ではなく内容が幅を決める —— 実際に `self-start` が付いていて、
+ * 試合時間パネルは 157px まで縮んで `0:00` が枠からはみ出し、機体状態パネルは
+ * 424px へ膨らんでビューポートを 58px 越えた (診断ツリーが画面外)。
+ *
+ * **flex-col の子は主軸 (縦) には伸びないので align-self は要らない。**
+ * 内容ぶんの高さに留めるための `self-start` は grid の子の話 (grid なら
+ * クロス軸が縦) で、ここへ書き写すと高さではなく幅を壊す。
+ */
+describe("試合中の右カラム", () => {
+  const TIMERS: MatchState["timer"][] = [
+    null,
+    { running: true, elapsed_ms: 60_000, duration_ms: 180_000 },
+  ];
+
+  it("パネルの幅を列に追従させる — クロス軸の指定を持たない", () => {
+    for (const timer of TIMERS) {
+      const view = mount("match", robotState(), timer);
+
+      const column = screen.getByText("試合時間").closest("section")?.parentElement;
+      expect(column?.className).toContain("flex-col");
+
+      const panels = Array.from(column?.children ?? []);
+      // 機体状態が別の列へ移ったら、この検査は空振りになる
+      expect(panels.some((el) => el.textContent?.includes("機体状態"))).toBe(true);
+
+      const crossAxisPinned = panels.flatMap((el) =>
+        Array.from(el.classList)
+          .filter((name) => name.startsWith("self-"))
+          .map((name) => `${el.querySelector("h2")?.textContent}: ${name}`),
+      );
+      expect(crossAxisPinned).toEqual([]);
+
+      view.unmount();
+    }
+  });
+
+  /**
+   * 幅とは別の事実。**縦が足りないときにどちらが縮むか**を固定する。
+   *
+   * 機体状態は異常時に自分から展開するので、列の高さを超えるのは平常ではなく
+   * 「何かが起きている最中」になる。そこで flex の既定 (`flex-shrink: 1`) に
+   * 任せると両方が縮み、削れる余地の無い試合時間パネルは caption が数字の
+   * 下半分に重なって読めなくなる (実機で発生)。試合中に最も参照する値なので、
+   * 縮むのは内部スクロールを持つ機体状態の側でなければならない。
+   */
+  it("縦が足りないときは機体状態だけが縮む — 試合時間は潰さない", () => {
+    // 強制展開させる。dry-run の操縦者画面が常にこの状態になる
+    const view = mount(
+      "match",
+      robotState({
+        safety: {
+          sync_violations: [],
+          unenergized_motors: ["rotate_l", "rotate_r"],
+          firmware_unconfirmed_motors: [],
+          failed_tasks: [],
+          reenergizing: false,
+          loops_running: true,
+          monitors_running: true,
+          refreshers_running: true,
+          position_loops: [],
+          sync_monitors: [],
+          target_refreshers: [],
+        },
+      }),
+      { running: true, elapsed_ms: 60_000, duration_ms: 180_000 },
+    );
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+
+    const timerPanel = screen.getByText("試合時間").closest("section");
+    const statusPanel = screen.getByText("機体状態").closest("section");
+
+    expect(timerPanel?.classList.contains("shrink-0")).toBe(true);
+    // 機体状態は縮む側のまま。`min-h-0` が無いと中身の高さが下限になり、
+    // 列を越えて伸びる (内部のモータ一覧のスクロールへ落ちない)
+    expect(statusPanel?.classList.contains("shrink-0")).toBe(false);
+    expect(statusPanel?.classList.contains("min-h-0")).toBe(true);
+    // 縦を食い尽くす `flex-1` は付けない。平常時に全高の白い箱になる
+    expect(statusPanel?.classList.contains("flex-1")).toBe(false);
+
+    view.unmount();
   });
 });
 
@@ -403,17 +492,15 @@ describe("手動操縦モード", () => {
     // 機体を直接動かせる状態を、確証のないまま画面へ出さない
     mount("match", robotState({ manual: undefined }));
 
-    expect(screen.getByRole("tab", { name: "半自動へ切り替え" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(screen.getByText("半自動")).toBeInTheDocument();
+    expect(screen.queryByText(/手動操縦中/)).toBeNull();
   });
 
   it("モード帯はどのフェーズでも同じ位置に出る", () => {
     // 「今この画面から機体を直接動かせるか」は準備中も試合中も同じ場所で読める
     for (const phase of ["setup", "match", "finished"] as MatchPhase[]) {
       const view = mount(phase);
-      expect(screen.getByRole("tab", { name: "手動操縦へ切り替え" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /手動操縦へ/ })).toBeInTheDocument();
       view.unmount();
     }
   });
@@ -421,7 +508,7 @@ describe("手動操縦モード", () => {
   it("切り替えは自分の担当機へ宛てて送る", async () => {
     const { context } = mount("match");
 
-    await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
+    await userEvent.click(screen.getByRole("button", { name: /手動操縦へ/ }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
@@ -476,7 +563,7 @@ describe("手動操縦モード", () => {
       { mode: "sequence", axes: MANUAL.axes },
     );
 
-    await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
+    await userEvent.click(screen.getByRole("button", { name: /手動操縦へ/ }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
@@ -588,5 +675,63 @@ describe("RobotControl の切断中", () => {
     });
 
     expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeDisabled();
+  });
+});
+
+function stepPanel(): HTMLElement {
+  const panel = screen.getByText("ステップ").closest("section");
+  if (!panel) throw new Error("ステップ一覧のパネルが見つからない");
+  return panel as HTMLElement;
+}
+
+/**
+ * 見出し行に出すのは**塞がれている理由**だけ。操作できるときの案内は押せば分かる
+ * ことを毎試合読ませるだけだが、**塞がれている理由は消してはならない** ——
+ * 消すと「押したのに何も起きない」だけが操縦者に残る。
+ */
+describe("ステップ一覧の見出し", () => {
+  it("操作できるときは案内を出さない", () => {
+    mount("match");
+
+    expect(within(stepPanel()).queryByText("クリックで再開")).toBeNull();
+  });
+
+  it("試合中でなければ、塞がれている理由を出す", () => {
+    mount("finished");
+
+    expect(within(stepPanel()).getByText("試合中のみ操作可")).toBeInTheDocument();
+  });
+
+  it("切断中も、塞がれている理由を出す", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      connected: false,
+      states: { sub_hand: robotState() },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", checklists: CHECKLISTS },
+    });
+
+    expect(within(stepPanel()).getByText("切断中のため送信できません")).toBeInTheDocument();
+  });
+});
+
+/**
+ * シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠 1 つぶんの縦を
+ * 払わない。総ステップ数を試合中に出さないのは、`ActionPanel` が `1/22` の形で
+ * 同じ数を既に出しているため (同じ事実を 2 度描かない)。
+ */
+describe("シーケンス名の置き場所", () => {
+  it("準備中はモード帯にシーケンス名と総ステップ数を出す", () => {
+    mount("setup");
+
+    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
+    // 1 行のためのパネルは持たない
+    expect(screen.queryByText("シーケンス")).toBeNull();
+  });
+
+  it("試合中は総ステップ数を出さない (ActionPanel が同じ数を出している)", () => {
+    mount("match");
+
+    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+    expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
   });
 });

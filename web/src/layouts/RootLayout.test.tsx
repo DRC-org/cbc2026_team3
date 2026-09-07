@@ -9,12 +9,12 @@ import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
  * 外枠 (RootLayout) がテレメトリで再描画されないことを、実際の WS 受信経路で確かめる。
  *
  * サーバーは 50ms 間隔で state を配信する。外枠まで巻き込んで再描画していると、
- * ステータスバー・トースト・接続バナーが毎秒 40 回描き直されることになる。
- * ここでは外枠の部品 (StatusBar) とテレメトリ購読者 (TabBar) を数える差し替えに
+ * ヘッダー・トースト・接続バナーが毎秒 40 回描き直されることになる。
+ * ここでは外枠の部品 (AppHeader) とテレメトリ購読者 (TabBar) を数える差し替えに
  * して、「テレメトリを読む者だけが動く」ことを固定する。
  */
 
-const counts = vi.hoisted(() => ({ statusBar: 0, tabBar: 0, checklist: 0 }));
+const counts = vi.hoisted(() => ({ header: 0, tabBar: 0, checklist: 0 }));
 
 /** Monitor の中身をわざと投げさせるスイッチ。境界の外が生き残ることを見るため */
 const flags = vi.hoisted(() => ({ dashboardThrows: false }));
@@ -29,9 +29,18 @@ vi.mock("@/pages/Dashboard", async (importOriginal) => {
   };
 });
 
-vi.mock("@/components/shell/StatusBar", () => ({
-  StatusBar: () => {
-    counts.statusBar += 1;
+/**
+ * ヘッダー本体の再描画を数える検出役。
+ *
+ * 数えるのは AppHeader が必ず描く末端 (Clock) で、AppHeader 自身は本物のまま
+ * 動かす。**ヘッダーごと差し替えると検出役の意味が消える** —— ヘッダーが
+ * テレメトリを購読し始めても、描かれているのは差し替えた側なので何も起きない。
+ * ここが本物であれば、ヘッダーが 1 度でも描き直された回数がそのまま出る
+ * (EMG STOP が境界の外に残ることを見る後段のテストも本物の描画で確かめられる)。
+ */
+vi.mock("@/components/shell/Clock", () => ({
+  Clock: () => {
+    counts.header += 1;
     return null;
   },
 }));
@@ -79,7 +88,7 @@ function stateMessage(stepIndex: number) {
 }
 
 beforeEach(() => {
-  counts.statusBar = 0;
+  counts.header = 0;
   counts.tabBar = 0;
   counts.checklist = 0;
   flags.dashboardThrows = false;
@@ -91,14 +100,15 @@ describe("RootLayout のテレメトリ再描画", () => {
     await renderApp();
     act(() => latestSocket().open());
 
-    const shellBefore = counts.statusBar;
+    const shellBefore = counts.header;
     const tabsBefore = counts.tabBar;
+    expect(shellBefore).toBeGreaterThan(0);
 
     for (let i = 0; i < 20; i++) {
       act(() => latestSocket().receive(stateMessage(i)));
     }
 
-    expect(counts.statusBar).toBe(shellBefore);
+    expect(counts.header).toBe(shellBefore);
     // 購読側は届いた回数ぶん更新される (止まっていたら値が凍る)
     expect(counts.tabBar).toBeGreaterThan(tabsBefore);
   });

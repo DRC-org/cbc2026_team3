@@ -25,7 +25,7 @@ pnpm check         # lint + format + 型検査 + テスト
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/App.tsx`                  | 旧ハッシュ URL の読み替え → `createBrowserRouter` の生成（**この順序に依存**）                                                                  |
 | `src/routes.tsx`               | ルート定義                                                                                                                                      |
-| `src/layouts/RootLayout.tsx`   | WebSocket 接続・Provider・ヘッダー・タブ・ステータスバー                                                                                        |
+| `src/layouts/RootLayout.tsx`   | WebSocket 接続・Provider・ヘッダー（タブ・接続表示・時計）・通知・緊急停止オーバーレイ                                                          |
 | `src/index.css`                | Tailwind の取り込みと daisyUI カスタムテーマ `cbc`（配色の単一情報源）                                                                          |
 | `src/components/ui/`           | 自前プリミティブ（`Page` / `Panel` / `Section` / `Button` / `StatusBadge` / `Kbd` / `Icon` / `Modal`）。レイアウト骨格は CSS ではなくここが持つ |
 | `src/lib/protocol.ts`          | WS メッセージの型と**受信条件**（最下層。UI の hook を import しない）                                                                          |

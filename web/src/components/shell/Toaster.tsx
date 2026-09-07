@@ -137,8 +137,6 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
-  // ステータスバーに被らないよう底を持ち上げる。
-  //
   // **z は daisyUI の `.modal` (z-index: 999) より上に置く。** トーストと
   // 緊急停止オーバーレイは `AppShell` の兄弟で同じスタッキングコンテキストに居るので、
   // `z-50` のままだと**モーダル表示中のトーストが 62% の暗幕の下に沈む**。
@@ -155,7 +153,7 @@ export function Toaster() {
   // モーダルのフッターボタンに重なって押せなくなる (会場のノート PC で起きうる)。
   // 透かすのはコンテナだけで、閉じるボタンを活かすため `ToastCard` は受け直す。
   return (
-    <div className="pointer-events-none toast toast-end toast-bottom bottom-8 z-[1000]">
+    <div className="pointer-events-none toast toast-end toast-bottom z-[1000]">
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}

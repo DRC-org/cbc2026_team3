@@ -76,6 +76,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
    * 『クリックで再開』と案内し続ける」状態が作れる。一覧の行は素の
    * `<button disabled>` で `disabled:cursor-not-allowed` 以外に見た目が変わらないので、
    * 操縦者からは「押したのに反応しない」＝故障と区別が付かない。
+   * **案内文はこの理由そのもので、null なら何も描かない** —— 押せるときの案内は
+   * 押せば分かることを毎試合読ませるだけの面積なので、出す文言は別に持たない。
    *
    * **駆動中を塞ぐ理由**はジャンプの確認が全画面オーバーレイのモーダルだから
    * (開いているあいだヘッダーの EMG STOP がクリックできない)。
@@ -151,9 +153,18 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   }
 
   // モード帯はどのフェーズでも同じ位置に出す。「今この画面から機体を直接
-  // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない
+  // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない。
+  //
+  // 総ステップ数を準備中にしか渡さないのは、試合中は `ActionPanel` が `1/22` の
+  // 形で同じ数を出しているため (同じ事実を 2 度描かない)
   const modeSwitch = (
-    <ModeSwitch mode={manual.mode} onChange={handleMode} blockedReason={modeBlockedReason} />
+    <ModeSwitch
+      mode={manual.mode}
+      onChange={handleMode}
+      blockedReason={modeBlockedReason}
+      sequenceName={state.sequence}
+      totalSteps={setupPhase ? state.total_steps : null}
+    />
   );
 
   // 手動の操作面。半自動側の主役 (動作確認 / ActionPanel) と同じ列を占める
@@ -172,8 +183,18 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
    * 準備中は配線確認が目的のフェーズなので開いた状態から始め、試合中は
    * 平常時 1 行へ畳む (操縦者は機体を見ており、画面へ視線を戻すのは一瞬しかない)。
    * ただし手動中は畳まない —— 機体を直接動かしている最中は、その前提が成り立たない。
+   *
+   * `className` に渡してよいのは主軸 (縦) の伸長指定だけ。flex-col の子へ
+   * `self-start` のようなクロス軸の指定を足すと幅が `fit-content` へ落ち、
+   * 診断ツリーが列の幅を無視して縮む / 溢れる。
+   *
+   * **試合中の右カラムでは、このパネルが縮む側を引き受ける。** 隣の試合時間は
+   * `shrink-0` で潰れないので、強制展開で列の高さを超えたぶんはここが吸って
+   * 内部のスクロール (モータ一覧) へ落ちる —— 縮めるための `min-h-0` は
+   * `Panel` が最初から持つ。**`flex-1` は付けない**: 中身が数行しかない
+   * 平常時に全高の白い箱になる。
    */
-  const subsystemPanel = (open: boolean, className: string) => (
+  const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
       <SubsystemStatus
         health={state.health}
@@ -207,18 +228,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         >
           {inManual ? manualPanel : null}
 
-          <div className="flex min-h-0 flex-col gap-2">
-            {subsystemPanel(true, "min-h-0 flex-1")}
-
-            <Panel legend="シーケンス" className="shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate font-mono">{state.sequence}</span>
-                <span className="shrink-0 text-base-content/70">
-                  全 {state.total_steps} ステップ
-                </span>
-              </div>
-            </Panel>
-          </div>
+          {/* シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠
+              1 つぶんの縦を払わない */}
+          {subsystemPanel(true, "min-h-0")}
         </div>
       </Page>
     );
@@ -253,10 +265,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               legend="ステップ"
               className="min-h-0 flex-1"
               bodyClassName="p-0"
+              // 出すのは**塞がれている理由**だけ。操作できるときの案内 (「クリックで
+              // 再開」) は、押せば分かることを毎試合読ませるだけの面積になる
               actions={
-                <span className="text-[0.85em] text-base-content/60">
-                  {stepJumpBlockedReason ?? "クリックで再開"}
-                </span>
+                stepJumpBlockedReason ? (
+                  <span className="text-[0.85em] text-base-content/60">
+                    {stepJumpBlockedReason}
+                  </span>
+                ) : null
               }
             >
               <SequenceStepList
@@ -278,7 +294,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         <div className="flex min-h-0 flex-col gap-2">
           <MatchTimer timer={matchState.timer} />
 
-          {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : "self-start")}
+          {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : undefined)}
         </div>
       </div>
 
