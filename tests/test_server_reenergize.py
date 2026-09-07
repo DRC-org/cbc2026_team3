@@ -41,7 +41,7 @@ from lib.sequence.positions import load_position_table
 from lib.server import _ENERGIZE_GRACE_S
 from tests.fake_can import direct_runner, mock_bus, mock_can_manager, mock_motor, set_motors
 from tests.feedback_frames import feed_edulite
-from tests.server_fixtures import RecordingClient, ServerFixture
+from tests.server_fixtures import RecordingClient, ServerFixture, wait_until
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
 
@@ -783,8 +783,11 @@ class TestReactivationSettlesPendingReenergize:
     もう一度落とす」形で `reenergize_motors` 自身の存在意義を壊す。
 
     **解除コマンドの受理そのものは待たせない** —— 待たせる先はバックグラウンドの
-    再励磁タスクのほうで、解除の受理・ラッチ解除・状態配信は即座に進む
-    (`_cmd_e_stop_release` に手を入れていないことは他のテストが守る)。
+    再励磁タスクのほうで、解除の受理・ラッチ解除・状態配信は即座に進む。
+    畳み込みを 2 系統とも `_reactivate_motors` の中に置いてあるのがその根拠で、
+    ハンドラ側にあれば同じ待ちがそのまま WS の直列処理を止める
+    (`TestEStopReleaseIsNotReentrant.test_the_settle_is_not_on_the_release_handlers_path`
+    が置き場所そのものを固定する)。
     """
 
     async def test_reactivate_activate_motors_never_overlaps_the_pending_one(self) -> None:
@@ -1323,7 +1326,17 @@ class TestEStopReleaseIsNotReentrant:
     押した状況である。
     """
 
+    @staticmethod
+    def _alive_reactivations(fx: ServerFixture) -> int:
+        return sum(1 for task in fx.server._reactivate_tasks if not task.done())
+
     async def test_second_release_settles_the_first(self) -> None:
+        """**踏むのは 2 連打ではない。** `_cmd_e_stop_release` は
+        `not self._e_stop_active` を拒否するので、素の 2 連打では 2 本目が立たない。
+        実際に踏むのは E-STOP → RESET →(同期ずれ検出や操縦者の再押下で)
+        E-STOP → RESET で、1 本目がまだ `activate_motors` の中にいるあいだに
+        2 本目が立つ。
+        """
         fx = _build_fixture()
         gate = asyncio.Event()
         started = 0
@@ -1347,9 +1360,12 @@ class TestEStopReleaseIsNotReentrant:
         try:
             await fx.command({"type": "e_stop_release"})
 
-            # 走っているのは常に 1 本だけ (2 本目を立てる前に 1 本目を畳んでいる)
-            alive = [task for task in fx.server._reactivate_tasks if not task.done()]
-            assert len(alive) == 1
+            # 畳み込みは**新しいタスクの冒頭**が行うので、ハンドラが返った直後は
+            # まだ 2 本ある (それがハンドラを止めていないことの裏返しでもある)。
+            # 2 本目が走り出せば 1 本目は畳まれ、以後 1 本しか残らない
+            assert await wait_until(lambda: self._alive_reactivations(fx) == 1), (
+                "1 本目が畳まれていない (2 本の activate_motors が並走する)"
+            )
         finally:
             gate.set()
             await fx.wait_reactivation()
@@ -1358,11 +1374,24 @@ class TestEStopReleaseIsNotReentrant:
         # (解除のたびに取り残されるロボットが出る形を作らない)
         assert started >= 2
 
-    async def test_release_still_returns_without_waiting_for_reactivation(self) -> None:
-        """畳み込みを足しても「解除は再励磁を待たない」性質は変えない。
+    async def test_the_settle_is_not_on_the_release_handlers_path(self) -> None:
+        """**畳み込みは解除ハンドラの経路に無い。**
 
-        待つと、その操縦者の WS が数秒間 1 通も処理しなくなり **E-STOP の押し直し
-        すら効かなくなる**。畳むのは前回のぶんだけで、自分が立てた 1 本は待たない。
+        置き場所を `_cmd_e_stop_release` へ移すと、そのすぐ下のコメントが理由として
+        書いていること —— `async for msg in ws` は 1 接続あたり完全に直列なので、
+        待つあいだ次の 1 通が処理されず **E-STOP の押し直しすら効かなくなる** ——
+        がそのまま当てはまる。`_settle_pending_reactivation` は畳めない相手を
+        最悪 `_REENERGIZE_CANCEL_TIMEOUT_S` 待つので、ハンドラに置けば「押し直しを
+        塞ぐ」時間を自分で作ることになる。単発再励磁の畳み込みが
+        `_settle_pending_reenergize` としてハンドラではなくバックグラウンドの
+        再励磁タスクから呼ばれているのと同じ形に揃えてある。
+
+        **所要時間では見られない。** `run_in_executor` の待ちは
+        `Task.cancel()` で即座に (スレッドを残したまま) 畳めるので、畳み込みは
+        置き場所に関わらず一瞬で終わる —— 上限が要るのは理屈の上の最悪ケースだけ
+        (`TestReactivationDoesNotWaitForeverOnAStuckReenergize`)。代わりに
+        「ハンドラが返った時点で前回のぶんはまだ生きている」を見る。ハンドラが
+        畳んでいたなら成立し得ない性質で、しかも実時間に依存しない。
         """
         fx = _build_fixture()
         gate = asyncio.Event()
@@ -1372,12 +1401,24 @@ class TestEStopReleaseIsNotReentrant:
             return []
 
         fx.can_manager("main_hand").activate_motors = _slow_activate
+        fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
 
-        await fx.command({"type": "e_stop"})
         try:
-            # ここで待ちに入るなら、この await は gate を開けるまで返らない
-            await asyncio.wait_for(fx.command({"type": "e_stop_release"}), timeout=1.0)
-            assert fx.server._reactivating
+            await fx.command({"type": "e_stop"})
+            await fx.command({"type": "e_stop_release"})
+            await asyncio.sleep(0)
+            first = next(iter(fx.server._reactivate_tasks))
+            assert not first.done()
+
+            await fx.command({"type": "e_stop"})
+            await fx.command({"type": "e_stop_release"})
+            # ハンドラは畳み込みへ 1 度も入らずに返っている
+            assert not first.done(), "解除の受理が前回の畳み込みを待っている"
+            assert self._alive_reactivations(fx) == 2
+
+            # 畳むのは新しいタスクの側。イベントループへ制御を返せば必ず畳まれる
+            assert await wait_until(first.done), "1 本目が畳まれていない"
+            assert self._alive_reactivations(fx) == 1
         finally:
             gate.set()
             await fx.wait_reactivation()
