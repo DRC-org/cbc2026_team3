@@ -388,6 +388,60 @@ class TestRunLifecycle:
         assert ticks == 4
         assert len(fx.manager.sent) >= 2
 
+    async def test_送信失敗のあいだ進んだ中間目標を持ち越さない(self) -> None:
+        """tick 例外も「電流 0 に落とす経路」なので、軌道の起点を捨てる。
+
+        送信だけが落ちている間 (qdisc の ENOBUFS など) はフィードバックが届き続ける
+        ので途絶判定が立たず、**起点を捨てる経路が他に 1 つも無い**。据え置くと
+        中間目標だけが max_velocity で進み、送信が戻った 1 周期目に PID が全差分を
+        ステップ入力として受けて出力レンジいっぱいの電流を出す。
+
+        見るのは復帰 1 周期目の電流。起点を捨てていれば「実測から 1 周期ぶん進んだ
+        中間目標」との偏差しか無いので数 counts に収まり、持ち越すと止まっていた
+        時間ぶん (このテストでは 0.25 秒) の差分が一気に入る。**実測では 1 counts と
+        648 counts** で、閾値 50 はその間のどこに置いても結論が変わらない。
+        """
+        far_target = 1000.0
+
+        async def first_current(*, fail_ticks: int) -> int:
+            fx = _Fixture(kp=32.0)
+            fx.loop.set_motion_profile(
+                "lift",
+                TrapezoidalProfile(max_velocity=100.0, max_acceleration=1000.0),
+            )
+            await fx.loop.set_target("lift", ControlMode.POSITION, far_target)
+            fx.manager.fail_sends = fail_ticks
+
+            ticks = 0
+
+            async def fake_sleep(delay: float) -> None:
+                nonlocal ticks
+                ticks += 1
+                fx.mono.advance(delay)
+                fx.wall.advance(delay)
+                # 機構は 1deg も動いていない (電流が 1 通も出ていないので当然)。
+                # 実測を進めないことがこのテストの肝 —— 進めると、起点を捨てても
+                # 捨てなくても同じ中間目標になってしまう
+                fx.manager.feedback_at["lift"] = fx.wall.now
+                fx.manager.feedback_at["tilt"] = fx.wall.now
+                if ticks > fail_ticks:
+                    fx.loop.request_stop()
+
+            fx.loop.set_sleep(fake_sleep)
+            await fx.loop.run()
+            # 失敗した送信は積まれないので、先頭が「復帰して最初に出せた 1 通」。
+            # tick 例外の 0 電流も fail_sends を消費するため、fail_ticks の実効は
+            # その半分の周期数になる (どれだけ止まったかはこのテストの主題ではない)
+            assert fx.manager.sent, "復帰後の送信が 1 通も無い"
+            return struct.unpack(">hhhh", fx.manager.sent[0][1].data)[0]
+
+        recovered = await first_current(fail_ticks=100)
+        pristine = await first_current(fail_ticks=0)
+
+        # 一度も失敗しなかった 1 周期目と同じ桁 (どちらも「1 周期ぶんの進み」しかない)
+        assert abs(pristine) < 50
+        assert abs(recovered) < 50
+
     async def test_run_survives_driver_error(self) -> None:
         fx = _Fixture(kp=100.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
