@@ -422,17 +422,6 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため手動操縦できません",
         handler="_cmd_manual_jog",
     ),
-    _spec(
-        # 試合中の PID 差し替えは、走行中の位置制御の特性をその場で変える。
-        # 左右直結ペアはグループ全員に同じ値が入るため、動いている機構が同時に別特性になる。
-        # 緊急停止中も同じ理由 (解除した瞬間に停止前と違う特性で動き出す) で塞ぐ
-        "set_param",
-        allowed_phases=PHASES_OUTSIDE_MATCH,
-        phase_deny_message="試合中はパラメータを変更できません",
-        allowed_during_e_stop=False,
-        e_stop_deny_message="緊急停止中のためパラメータを変更できません",
-        handler="_cmd_set_param",
-    ),
 )
 
 #: コマンド名 → 仕様。_handle_command のディスパッチ表もここから作る

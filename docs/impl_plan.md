@@ -12,7 +12,7 @@
 > 判断できず、結局全部を疑うことになる。**該当する章には必ずこの 1 行が付いている**
 > ので、付いていない章は現行と読んでよい（見つけたら足すこと。全面書き直しはしない
 > —— 経緯を消すとなぜそう決めたかが読めなくなる）。付いているのは 2026-09 時点で
-> 次の 6 章:
+> 次の 8 章:
 >
 > - 「自作モータドライバ用 CAN プロトコル」の電磁弁の項（インライン修正）
 > - 「緊急停止によるコマンドゲート」の動作確認 abort の項（インライン修正）
@@ -21,6 +21,8 @@
 > - 「誤記は警告ではなく起動拒否」
 > - 「逆回転ペア軸（`y_axis` / `rotate`）」／「離散状態アクチュエータ」／
 >   「アクチュエータ動作確認シーケンス」（Phase 6 内）
+> - 「Phase 12: PID 調整支援」（**機能ごと削除済み**）
+> - 「パラメータ変更（`set_param`）」（**コマンドごと削除済み**）
 >
 > **関連文書**: 試合当日に詰まったときは `docs/venue_recovery.md`（会場カード）。
 > 機構が付いた日に埋める値の棚卸しは `docs/mechanism_handoff.md`。
@@ -637,8 +639,9 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 **原点の張り直しは同期グループ単位。** `set_origin_here()` は指定モータが同期グループに
 属していれば全員を `await` を挟まず 1 回で確定する。左右を別々の時刻に原点確定すると、
 その間に片方が動いた分だけ偏差が最初からオフセットを持ち、正常な動作でも即座に偏差超過で
-止まる。「1 台だけに効かせてよいか」の判断は `_paired_with()` に 1 つだけ置き、
-`set_pid_gain()` も同じ答えを使う。
+止まる。「1 台だけに効かせてよいか」の判断は `_paired_with()` に 1 つだけ置く。
+現在の呼び出し元は原点確定だけで、片側だけ適用すると機構が壊れる操作を足すときも、
+この判断を書き写さずここを呼ぶこと。
 
 #### 周期タスクの共通土台（`lib/control/periodic.py`）
 
@@ -766,8 +769,9 @@ M3508 は C620 ESC 経由で**電流指令しか受け付けない**（`encode_t
 PC 側 PID は持たない** —— DM3520-1EC は Position Velocity Mode（位置 → 速度 → 電流の
 三重ループ）を内蔵しており、PC は `p_des` [rad] と `v_des` [rad/s] を float32 で
 送るだけでよい。位置ループを PC 側にも置くと二重ループになって必ず干渉する。
-`/pid-tuning` に現れないのはこのためで、`_motor_pid_state()` が `None` を返す
-（「ドライバ・ファーム側で制御していて PC からは変更できない」の単一の表現）。
+config の `pid: null` が「ドライバ・ファーム側で制御していて PC 側 PID を持たない」の
+単一の表現で、位置制御ループへ載せるかどうかは `main._build_position_loops` が
+ドライバ種別（M3508 だけ）で決める。
 ゲイン調整は Damiao の調整アシスタント側（レジスタ `KP_APR` / `KI_APR` / `KP_ASR` / `KI_ASR`）。
 
 情報源は `DM-S3519-1EC User Manual`（`/home/drc/repos/dm3520_test` に PDF と
@@ -1128,7 +1132,7 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 測れない項目を 0 で配らない | `GenericDriver.telemetry` を `FULL_TELEMETRY` へ戻す / `_measured_only()` を素通しにする / `CANManager.health()` の `telemetry.temperature` 参照を落とす / dry-run を関門の外へ出す（**3 つは別々のテストが受け持つ**。統合経路では 1 枚壊しても他が拾う） | `tests/drivers/test_generic.py::TestTelemetrySupport` / `tests/test_can_manager_health.py::TestUnmeasuredTemperature` / `tests/test_ws_protocol.py::TestUnmeasuredTelemetryIsNull` |
 | 測定可否を受信した状態から推測しない | `GenericDriver.telemetry` を `control_type` ではなく直近の `MotorState` から決める（**たまたま DLC>=3 のフレームが 1 通流れただけで DC 基板に位置が生える**） | `tests/drivers/test_generic.py::TestTelemetrySupport::test_position_stays_unmeasured_even_after_a_feedback_arrives` |
 | 測れない温度を判定材料にしない | `has_thermal_warning` / `has_thermal_fault` の `telemetry.temperature` ガードを外す（**しきい値 0 以下の構成で「測っていない 0」が警告・FAULT に化ける**） | `tests/drivers/test_generic.py::TestTelemetrySupport::test_thermal_judgement_is_skipped_when_temperature_is_unmeasured` |
-| `null`（測れない）と `MALFORMED`（読めない）を混同しない | `readMeasured` の `null` 分岐を削って `MALFORMED` へ倒す（**DC 基板 1 枚で全画面が異常側へ倒れる**）/ 逆に欠落・型違いを `null` へ丸める（配信の不具合が「測れない」に化ける）/ `Cell` を `value.toFixed(1)` に戻す（欄の欠落でレンダー本体から TypeError が飛び React ツリーごとアンマウント）/ `deviationOf` で `pos === null` を 0 として引く | `web/src/lib/protocol.test.ts`（`readMeasured`）/ `MotorStatus.test.tsx` / `pidTuning.test.ts`（`deviationOf`） |
+| `null`（測れない）と `MALFORMED`（読めない）を混同しない | `readMeasured` の `null` 分岐を削って `MALFORMED` へ倒す（**DC 基板 1 枚で全画面が異常側へ倒れる**）/ 逆に欠落・型違いを `null` へ丸める（配信の不具合が「測れない」に化ける）/ `Cell` を `value.toFixed(1)` に戻す（欄の欠落でレンダー本体から TypeError が飛び React ツリーごとアンマウント） | `web/src/lib/protocol.test.ts`（`readMeasured`）/ `MotorStatus.test.tsx` |
 | 契約フィクスチャに測れない基板が載っている | `ws-contract.json` の生成から `conveyor`（DC 基板）を落とす / `gripper` をモックの `MotorState(temperature=30.0)` へ戻す（**「4 値とも数値」の形しか golden に現れず、UI が `null` を受け取れなくても緑**） | `tests/test_ws_contract.py` / `web/src/test/wsContract.test.ts` |
 | 実測値を持つモータの POS 欄へ指令値を出さない | `PositionCell` の `readMeasured(state.pos)` 先読みを外して `command` を優先させる（**M3508 は緊急停止しても `command` が残る**ので、停止中の POS が `→220.0` になる。サーバー側はこの非対称を捨てておらず、守っているのは UI のこの 1 枚だけ） | `web/src/components/diagnostics/MotorStatus.test.tsx`（「実測値があるモータには指令値を出さない (同じ欄を実測と指令で読み分けさせない)」） |
 | 緊急停止では指令値も消える | `RobotServer.activate_e_stop` の `refresher.clear_targets()` を落とす（停止中も `→0.30` が残り、操縦者は「まだコンベアへ出し続けている」と読む） | `tests/test_ws_protocol.py::TestCommandValue::test_e_stop_clears_the_command` |
@@ -1150,9 +1154,6 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 動作確認中も目標値再送は回る | `_motor_check_pausables` に `target_refreshers` を戻す（**問い合わせ駆動の EDULITE 05 / DM3520 は指令 1 通ぶんしか状態を返さず、実際に動ききっても到達判定を通らない**。自作モタドラは 500ms で出力が切れ、`settle_s` 0.5s のコンベア・ポンプが確認の最中に止まる） | `test_server_motor_check.py::TestExclusion`（「本番の一覧は空である」「実行中も目標値再送は止まらない」「問い合わせ駆動のモータは実行中もフィードバックを更新し続ける」「両ロボットの周期タスクを止めない」） |
 | 止めたものは必ず戻す | `MotorCheckController.start()` の `finally` から `resume()` を落とす（対象が空になっても口は残るので、`Pausable` の代役を挿して層だけを見る） | `test_server_motor_check.py::TestPauseContract` |
 | 手動とシーケンスの制御権は同時に立たない | `_apply_operation_mode` の `_stop_sequence` を落とす / `discard_pending_start` を外す / `_manual_target` のモード判定を落とす | `test_server_manual.py` |
-| PID 調整画面が現在値を持つ | `_build_state_message` の `pid` 付与を消す / `pid` を dry-run 分岐の中だけに置く / UI の `getValue` を `?? 0` に戻す | `test_server_set_param.py` / `test_ws_contract.py` / `MotorTuning.test.tsx` |
-| ゲインの適用先を推測させない | `pid_gains()` の `applies_to` を `[name]` 固定にする | `test_runtime_pid_gain.py` / `test_server_set_param.py` / `MotorTuning.test.tsx` |
-| 3 値は 1 回で入る | `set_pid_gains` で `kp` だけ適用し `ki` / `kd` を捨てる | `test_runtime_pid_gain.py` / `test_server_set_param.py` |
 | モータ名はロボット横断に一意 | `config/sub_hand.yaml` のモータ名を `main_hand` と重複させる | `test_robot_sequences.py` |
 | 手動と動作確認の排他 | `_motor_check_environment_deny` の手動拒否を落とす / 切替側の `_motor_check.running` 判定を落とす | `test_server_motor_check.py`（`TestMotorCheckAndManualAreExclusive`） |
 | 手動でもペア軸は同一フレームで指令される | `ManualController._send` を `AxisHandle` 経由からモータ単体の逐次送信へ戻す | `test_manual.py` |
@@ -1174,13 +1175,12 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 到達フラグを立てられるのはサーボスロットだけ | `composeFeedbackFlags` の `BoardKind` 判定を外す（**DC 基板と電磁弁基板が「到達」を報告し始める。断線したソレノイドも到達と読まれる**） | `firmware/test/test_protocol/`（`test_dc_board_never_reports_reached` / `test_solenoid_board_never_reports_reached` / `test_actuator_slot_relays_safety_flags`） |
 | センサスロットは緊急停止・ウォッチドッグを立てない | `composeFeedbackFlags` のセンサ用 early-return を消す | `firmware/test/test_protocol/`（`test_sensor_slot_drops_safety_flags`） |
 | ヘルスの集約は 1 箇所 | `lib/health.worst_bus_health` のランク表を呼び出し側へ写し戻す / `compute_overall` か `/health` の片方だけを別実装へ戻す | `test_health.py::TestComputeOverall` / `test_server_health.py` |
-| 1 軸のリセットで飽和表示を落とさない | `M3508PositionLoop._reset_axis` から `saturated` のクリアを外す（**緊急停止中だけ飽和表示が残り、ゲインを変えても応答が変わらないという誤った助言が出続ける**） | `test_position_loop.py::test_saturation_clears_on_e_stop` |
+| 1 軸のリセットで飽和状態を落とさない | `M3508PositionLoop._reset_axis` から `saturated` のクリアを外す（**電流 0 に落ちた後も飽和が立ちっぱなしになり、`scripts/tune_y_axis.py` の飽和率が「上限が律速している」と言い続ける**） | `test_position_loop.py::test_saturation_clears_on_e_stop` |
 | 契約は「宣言にあるのに実配信から消えた欄」も検出する | `_build_state_message` から `safety` を落として golden を焼き直す（**片方向の検査だけだと Python も TS も全テスト緑のまま UI が白画面になる**） | `web/src/test/wsContract.test.ts`（「UI が読むと宣言した欄が実配信から消えていない」） |
 | 未実行の動作確認を「完了」と表示しない | `motorCheckStatus` の `total_steps > 0` を落とす（`running:false, step_index:0, total_steps:0` が完了になる）/ パネルとサマリーで別々に判定する形へ戻す | `motorCheckStatus.test.ts` / `MotorCheckPanel.test.tsx` |
 | 緊急停止のラッチ解除は中断されない | `CANManager.clear_e_stop_latches` に `should_abort` を通す（1 台目の最中に停止が再発動すると 2 台目へ 1 通も飛ばない）/ `_reactivate_motors` のラッチ解除ループを 1 台目で `break` する / ラッチ解除フェーズごと削除する | `test_server_e_stop.py::TestLatchClearIsNeverAborted` |
 | 解除はブロードキャストで全バスへ出る | `_send_e_stop_clear_broadcast()` の呼び出しを削除する / バスのループを 1 本目で `break` する（**PC の管轄外のチャンネルが永久にラッチされたまま残る**） | `test_server_e_stop.py::TestEStopClearIsBroadcast` |
 | 解除フレームを送り終えてから基板報告の起点を置く | `_send_e_stop_clear_broadcast()` を `_board_e_stop_ignore_before` の設定より後ろへ動かす（**まだ解除の届いていない基板の報告を信じて自分で止め直す**） | `test_server_e_stop.py::TestEStopClearIsBroadcast::test_ブロードキャスト解除は基板報告の起点より前に送る` |
-| 調整画面の重い描画は記録が増えたときだけ走る | `ResponseChart` / `MetricsPanel` / `AdviceList` の `memo` を外す（型を見るテストが落ちる）/ 親が毎描画 新しいオブジェクトを渡す形へ戻す（再描画回数のテストが落ちる。**2 つは別々のテストが受け持つ** —— memo の有無は DOM から観測できない） | `MotorTuning.test.tsx` / `ResponsePanel.test.tsx` |
 
 **この表に載せられない層が 1 つある: CAN 送信バッファの空き待ち。** `INFO` を 1 反復 1 通に
 割る規則と、送信 API の戻り値を回収する規則（「自作モータドライバ用 CAN プロトコル」節の
@@ -1424,16 +1424,11 @@ tests/
 ├── test_server_motor_check.py   # 動作確認の WS イベント列と競合拒否
 ├── test_server_e_stop.py        # 緊急停止でのシーケンス停止とコマンドゲート
 ├── test_server_manual.py        # 操作モードの遷移・制御権の排他・手動指令のゲート
-├── test_server_set_param.py     # set_param の受理・拒否
 ├── test_server_command_rejected.py  # command_rejected を要求元だけに返すこと
 ├── test_server_broadcast_resilience.py  # 詰まったクライアントで配信を止めないこと（WsHub）
-├── test_server_tuning_capture.py    # 記録の破棄条件と配信のフェーズゲート
-├── test_tuning_metrics.py       # 指標の純関数（測れなかったものを 0 で埋めないこと）
-├── test_tuning_advice.py        # 指標 → 助言の言い換えと並び順
-├── test_tuning_recorder.py      # 制御ループ内の記録器（1 周期定数時間・破棄）
-├── test_tuning_report.py        # 配信 1 通への組み立て
+├── test_tuning_metrics.py       # 指標の純関数（測れなかったものを 0 で埋めないこと）。
+│                                # 利用者は scripts/tune_y_axis.py だけ
 ├── test_server_encapsulation.py # 利用側が private を触らないこと / lib/ が get_event_loop を使わないこと
-├── test_runtime_pid_gain.py     # 実行中の PID ゲイン差し替え（左右ペアを別特性にしない）
 ├── test_config_schema.py        # yaml スキーマ検証（未知キー・誤記・共通設定の移動）
 ├── test_main_wiring.py          # main.py の配線（PID 生成・バス単位ループ・インターロック・シーケンス解決）
 ├── test_main_shutdown.py        # SIGTERM で後始末が完走すること（実プロセス）
@@ -1464,7 +1459,7 @@ web/
     ├── hooks/{useRobotSocket,useHotkeys,useHoldRepeat,useArmedPress,useMotorCheck,useWsUrl}.test.ts(x)
     ├── context/RobotContext.test.tsx   # 購読の分割が再描画を止めていること
     ├── layouts/RootLayout.test.tsx     # テレメトリで外枠が描き直されないこと
-    ├── pages/{Dashboard,RobotControl,MotorTuning}.test.tsx
+    ├── pages/{Dashboard,RobotControl}.test.tsx
     └── components/          # テストは対象と同じグループディレクトリに置く
         ├── shell/{ConnectionBanner,Toaster,WsSettings,EStopOverlay,TabBar}.test.tsx
         ├── monitor/{StartGate,MatchControl,MatchPrep}.test.tsx
@@ -1493,10 +1488,10 @@ web/
   `MatchPrep` は加えて**どの項目も必ずどこかの区分に描かれること**を見る（`group` を
   書き足した瞬間に項目が画面から消えると、指差喚呼が 1 つ足りないまま試合開始の
   ゲートだけが開かず、原因は画面のどこにも出ない）
-- `pages/RobotControl.tsx` / `pages/MotorTuning.tsx` — 画面が組み上がったときにしか
+- `pages/RobotControl.tsx` — 画面が組み上がったときにしか
   現れない性質を見る。**主操作の宛先が担当機に揃っていること**（1 箇所でも相手機に
   向くと、操縦者は自分の画面から相手の機体を動かす）、フェーズ別に何を出し何を塞ぐか、
-  Space が状態ごとにどの操作へ解決するか、編集と送信が分離されていること
+  Space が状態ごとにどの操作へ解決するか、手動モードが何を置き換えるか
 - `SubsystemStatus` — **異常中は操縦者が畳もうとしても畳めないこと**。「自分から開く」
   だけでは足りない。試合中に一度畳めてしまえば、その後に出た異常も畳んだままになり、
   見逃しの経路がそのまま残る
@@ -1539,7 +1534,7 @@ cbc2026_team3/
 │   ├── checks_and_health.md        # 点検とヘルスの全体像（「今どうなっているか」）
 │   └── motor_driver_can_protocol.md  # 自作モタドラ CAN プロトコルの単一情報源
 ├── config/
-│   ├── system.yaml         # 両ロボット共通（バス別名 / health / match / tuning）
+│   ├── system.yaml         # 両ロボット共通（バス別名 / health / match）
 │   ├── main_hand.yaml
 │   ├── sub_hand.yaml
 │   ├── can_buses.yaml      # CAN バス定義の単一情報源（serial ↔ 固定名）
@@ -1597,7 +1592,7 @@ cbc2026_team3/
 │   │   ├── homing.py          # リミットスイッチによる零点確定（HomingRunner）
 │   │   ├── motors.py          # シーケンスからのモータ指令・到達待ち
 │   │   └── positions.py       # 機構位置定数の読み込みと単位換算
-│   ├── tuning/                # PID 調整支援（記録・指標算出・助言・レポート）
+│   ├── tuning/                # metrics.py（ステップ応答の指標。呼び元は scripts/tune_y_axis.py だけ）
 │   ├── server.py              # aiohttp。フェーズ / 制御権 / 配信内容の組み立て
 │   ├── ws_hub.py              # WS クライアント集合と唯一の配信経路（WsHub）
 │   ├── server_motor_check.py  # 動作確認の統括（MotorCheckController）。可否判定の単一情報源
@@ -1648,7 +1643,7 @@ cbc2026_team3/
 │   └── src/
 │       ├── main.tsx
 │       ├── App.tsx                 # createBrowserRouter の生成（旧ハッシュの読み替えを含む）
-│       ├── routes.tsx              # ルート定義（/monitor /main-hand /sub-hand /pid-tuning）
+│       ├── routes.tsx              # ルート定義（/monitor /main-hand /sub-hand）
 │       ├── layouts/
 │       │   └── RootLayout.tsx      # WS 接続・Provider・外枠（外枠は memo した AppShell）
 │       ├── index.css               # Tailwind + daisyUI カスタムテーマ cbc
@@ -1676,12 +1671,10 @@ cbc2026_team3/
 │       │   ├── sequenceStatus.ts   # シーケンスの状態判定（running を推測しない）
 │       │   ├── motorCheckStatus.ts # 動作確認の完了判定（ステップ数 0 は未読込であって完了ではない）
 │       │   ├── syncVerdict.ts      # 左右偏差の主張しきい値（0.0 は正常な測定値なので捨てない）
-│       │   ├── pidTuning.ts        # 調整画面がページと部品で共有する語彙
 │       │   └── wsUrl.ts            # WS 接続先の優先順位解決・入力の正規化・永続化
 │       ├── pages/
 │       │   ├── Dashboard.tsx
-│       │   ├── RobotControl.tsx
-│       │   └── MotorTuning.tsx
+│       │   └── RobotControl.tsx
 │       ├── test/                   # vitest 共通ヘルパ（setup / mockWebSocket / robotContext）
 │       │                           #   + WS 契約（ws-contract.json / wsContract.test.ts）
 │       └── components/            # 分割軸は「誰が描くか」。直下にファイルは置かない
@@ -1709,12 +1702,6 @@ cbc2026_team3/
 │           │   ├── MotorCheckButton.tsx # 緊急停止中 / シーケンス中 / バス DOWN で無効化
 │           │   ├── MotorCheckPanel.tsx  # 進捗とステップ一覧。**インライン展開**（モーダル禁止）
 │           │   └── MotorCheckSummary.tsx
-│           ├── tuning/          # MotorTuning（PID 調整画面）専用
-│           │   ├── MotorDetail.tsx       # 1 モータ分のゲイン入力と実測値
-│           │   ├── ResponsePanel.tsx     # 波形 + 指標 + 助言。重い描画は memo で止める
-│           │   ├── ResponseChart.tsx     # 素の SVG（会場のネットワークに依存させない）
-│           │   ├── MetricsPanel.tsx
-│           │   └── AdviceList.tsx        # 文言も並び順もサーバーのまま出す
 │           ├── diagnostics/      # SubsystemStatus を頂点とする診断ツリー
 │           │   ├── SubsystemStatus.tsx  # 平常時 1 行に畳み、異常時は開閉操作を上書きして開く
 │           │   ├── MotorSummary.tsx     # 判定は summarizeMotors。ここに条件を書き足さない
@@ -1748,19 +1735,21 @@ cbc2026_team3/
     { "index": 1, "label": "ワーク前まで前進", "require_trigger": true }
   ],
   "motors": {
-    // pid は PC 側 PID を持つモータだけが持つ。applies_to は「このモータへ送ると
-    // 実際に適用されるモータ名」で、左右直結ペアなら両方が入る
+    // PID ゲインは配信しない。実行中に差し替える経路が無く、config の pid: が
+    // そのまま動いている値なので、画面へ配っても操縦者にできることが無い
     "m3508_1": {
       "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0,
-      "pid": { "kp": 2.0, "ki": 0.0, "kd": 0.0, "applies_to": ["y_axis_r", "y_axis_l"] }
+      "command": 220.0, "command_mode": "position"
     },
-    // ドライバ / ファーム側でループを閉じているモータは null
-    "edulite_1": { "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0, "pid": null },
+    "edulite_1": {
+      "pos": 0.5, "vel": 0.0, "torque": 0.1, "temp": 28.0,
+      "command": 0.5, "command_mode": "position"
+    },
     // 測る手段が無い項目は null。DC 基板は 4 値とも、サーボ基板は位置以外が null
     // （「測れないフィードバックは null で配る」参照）。command は PC が最後に送った
     // 指令値で、**実出力ではない**。一度も指令していなければ null
     "conveyor": {
-      "pos": null, "vel": null, "torque": null, "temp": null, "pid": null,
+      "pos": null, "vel": null, "torque": null, "temp": null,
       "command": 0.3, "command_mode": "duty"
     }
   },
@@ -1968,22 +1957,18 @@ DLC>=3 なら位置を読む（共通の `MotorState` に収めるため）の�
 **両者を混同してはならない。** `null` を「読めなかった」へ寄せると、DC 基板を 1 枚
 積んだだけで画面全体が異常側へ倒れる。逆に欠落を `null` へ丸めると、配信の不具合が
 「測れない」に化けて誰にも見えなくなる（`parseSafety` / `parseChecklists` /
-`parseTuningMetrics` が `?? []` を置かないのと同じ原則）。分ける唯一の入口が
+`parseExcludedSteps` が `?? []` を置かないのと同じ原則）。分ける唯一の入口が
 `readMeasured()`。
 
 **`motors` は受信境界（`parseKnown`）では素通しのまま**にしてある —— モータ名を UI へ
 書かない性質は配信をそのまま状態へ入れることで成立しており、そこで組み立て直すと
 モータが 1 基増えるたびに UI の変更が要る形へ逆戻りする。代わりに、数値を実際に読む側
-（`MotorStatus` / `MotorDetail` / `MotorTuning` の一覧）が `readMeasured()` を通す。
+（`MotorStatus` の一覧）が `readMeasured()` を通す。
 
 副産物として、従来の `state.pos.toFixed(1)` が塞がった。型は実行時に消えるので、
 欄が 1 つ落ちただけで**レンダー本体から TypeError が飛び、React ツリーごと
 アンマウント**する。`safety` の 1 欄が落ちて全画面が白くなった事故（`describeSafetyIssues`
 が無検査で `.length` を呼んでいた）とまったく同型である。
-
-`deviationOf()` も `pos === null` で `null` を返すようにした。**測れない位置を 0 として
-引き算すると、偏差そのものが目標値の符号違いに化けたうえで、測っていないことが
-画面から消える。**
 
 #### 契約フィクスチャが嘘をついていた
 
@@ -2024,11 +2009,15 @@ UI が `null` を受け取れなくても誰も気付けない。
 `state.motors[]` に `command` / `command_mode` を足し、`lib/server.py` の
 `_motor_command_state()` が組み立てる。
 
-**`target` と同じ欄に畳んではならない。** `target`（`_motor_control_state`）は M3508
-位置制御ループが持つ*軌道の中間目標*で、速度・加速度で制限しながら毎周期動く値である。
-`command` は*PC が基板へ最後に送った値そのもの*で、動くのは操縦者が指令したときだけ。
-1 つに畳むと、行き過ぎの観察に使う偏差（実測 − 中間目標）と「何を指令したか」が、
-同じ欄の中でモータごとに入れ替わる。
+**軌道の中間目標を同じ欄へ相乗りさせてはならない。** M3508 位置制御ループが持つ
+*軌道の中間目標*は、速度・加速度で制限しながら毎周期動く値である（導入当時は
+`target` として `state.motors[]` に載せていたが、**PID 調整機能ごと削除した際に配信から
+外れた**。今あるのは `M3508PositionLoop.target()` という読み口だけで、テストからしか
+読まれていない）。`command` は*PC が基板へ最後に送った値そのもの*で、動くのは操縦者が
+指令したときだけ。1 つに畳むと、「今どこを狙っているか」と「何を指令したか」が同じ欄の
+中でモータごとに入れ替わる。**中間目標を再び画面へ出したくなったら別の欄として配信を
+足すのであって、`command` へ寄せてはならない** —— 配信していない値を画面へ出す近道として
+既存の欄を使うと、その欄が何を意味するかがモータごとに変わる。
 
 ##### 表示規則
 
@@ -2130,7 +2119,6 @@ UI が `null` を受け取れなくても誰も気付けない。
 { "type": "sequence_start", "robot": "main_hand" }
 { "type": "e_stop" }
 { "type": "e_stop_release" }
-{ "type": "set_param", "motor": "m3508_1", "gains": { "kp": 1.5, "ki": 0.0, "kd": 0.1 } }
 
 // 手動操縦 (調整時・緊急時の補助操縦)
 { "type": "set_operation_mode", "robot": "main_hand", "mode": "manual" }  // "sequence" | "manual"
@@ -2248,7 +2236,12 @@ UI にもモータ単位のジョグを出さない。
 
 ### パラメータ変更（`set_param`）
 
-`/pid-tuning` タブから実行中に PID ゲインを差し替える。
+> **【この章まるごと削除前の記述】`set_param` コマンドは存在しない。**
+> `/pid-tuning` タブごと削除し、**実行中に PID ゲインを差し替える経路を持たなくなった**。
+> ゲインは `config/<robot>.yaml` の `pid:` だけが持ち、起動時に読んで以後動かない
+> （＝「config に書いてある値 = 今動いている値」が構造的に保証される）。実機で詰め直すのは
+> `scripts/tune_y_axis.py` で、上書きはそのプロセス内に閉じるので config は書き換わらない。
+> 配信からも `pid` / `target` / `saturated` の 3 欄が消えている。以下は削除前の記述。
 
 **現在ゲインの単一の出どころは `state.motors[].pid`。** UI に初期値を持たせてはならない。
 かつてサーバーがゲインを配信しておらず、画面は `0` で初期化していた。開いた直後の表示
@@ -2387,7 +2380,6 @@ WS 直叩きやリロード直後を防げないため、サーバー側でも�
 |---|:-:|:-:|:-:|:-:|---|
 | `set_court` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
 | `motor_check_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
-| `set_param` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
 | `checklist_set` / `checklist_reset` | ✓ | ✓ | ✗ | ✗ | `PHASES_PREPARATION` |
 | `match_start` | ✗ | ✓ | ✗ | ✗ | `PHASES_START_GATE` |
 | `match_finish` | ✗ | ✗ | ✓ | ✗ | `PHASES_DURING_MATCH` |
@@ -2399,10 +2391,6 @@ WS 直叩きやリロード直後を防げないため、サーバー側でも�
 （`sequence_stop` / `e_stop` / `motor_check_abort`）を塞ぐと「動いている機体を止められない」
 状態が作れてしまう。`health_check` は状態を読むだけで機体に触らず、塞ぐと異常時ほど
 状況が分からなくなる。`e_stop_release` と `match_reset` は復帰経路そのものなので通す。
-
-`set_param` が試合中 ✗ なのは、走行中の位置制御ループの特性を試合中に変えることになるため。
-`set_pid_gain` は同期グループ全体へ適用されるので、直結した左右軸の**両方が負荷下で同時に
-特性変化する**。試合が終わってからチューニングするより危険な瞬間は無い。
 
 拒否時は `{"type":"command_rejected","command":...,"reason":...}` を**要求元 1 台にだけ**返す。
 どの経路で返すかは `CommandSpec.reject_channel` が持つ。`motor_check_start` だけは
@@ -2432,7 +2420,6 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 | `sequence_jump` | ✗ | 緊急停止中のためステップ移動できません |
 | `trigger` | ✗ | 緊急停止中のためトリガーを送れません |
 | `match_start` | ✗ | 緊急停止中のため試合を開始できません |
-| `set_param` | ✗ | 緊急停止中のためパラメータを変更できません |
 | `motor_check_start` | ✗ | 緊急停止中のため動作確認を実行できません（`motor_check_error` で通知） |
 | `sequence_stop` / `e_stop` / `e_stop_release` / `motor_check_abort` | ✓ | 止める方向の操作は緊急停止中こそ通す |
 | `match_reset` / `match_finish` / `health_check` | ✓ | 復帰経路と状態確認は塞がない |
@@ -2446,9 +2433,6 @@ WS を直接叩かれたときに、返答の違いから語彙の有無を推�
 が解禁され、同時に動作確認とコート設定が閉じてしまう。ゲートは `_cmd_match_start()` より
 手前（`handle_command`）に置き、フェーズ遷移そのものを起こさない
 （緊急停止中に試合フェーズへ入れること自体が異常なため安全側に倒す）。
-
-`set_param` を載せる理由: 緊急停止は「今の状態を凍結する」ことなので、制御パラメータも
-その間は動かさない。書き換えを許すと、解除した瞬間に停止前とは別の特性で位置制御が走り出す。
 
 #### 緊急停止で行うこと・解除で行うこと
 
@@ -2703,7 +2687,6 @@ Vite のビルド時定数で決めると、同じ `web/dist` を配る本番と
 | Monitor | `1` | `pages/Dashboard.tsx` | 試合制御、準備の面 (`MatchPrep`: コート設定・動作確認・指差喚呼)、両ロボット監視 |
 | Main Hand | `2` | `pages/RobotControl.tsx` | 準備中は指差喚呼＋動作確認、試合中はシーケンス操作 |
 | Sub Hand | `3` | `pages/RobotControl.tsx` | 同上 |
-| PID Tuning | `4` | `pages/MotorTuning.tsx` | モータ個別調整 |
 
 ### フェーズ連動レイアウト
 
@@ -2793,9 +2776,6 @@ WS を叩いた場合や UI の判定漏れに対してもここが最終防御�
   指差喚呼で「動作確認 完了」にチェックする直前の唯一の判断材料が嘘になる
   （`wsContract.test.ts` の `motor_check_done` が実配信の値で正規化を固定している）
 - 試合中以外は START / NEXT / ステップジャンプを UI 上でも無効化する（サーバー側ゲートとの二重防御）
-- **試合中の PID Tuning は送信だけを塞ぎ、値の編集は塞がない。** 送信ボタンを無効化して
-  理由を出す（`set_param` はサーバーが試合中を拒否する）。編集まで凍結すると、
-  試合を見ながら次に入れる値を用意しておくという実際の使い方ができなくなる
 - 通常停止（STOP）は確認ダイアログを挟まない。安全側の動作であり、止めるまでの時間を延ばさない
 - WS 接続先は `lib/wsUrl.ts` が **クエリ `?ws=` > localStorage > `VITE_WS_URL` > ページ origin**
   の優先順で解決する。既定（origin 由来）は別 PC・タブレットからのアクセスを成立させるため。
@@ -3803,11 +3783,9 @@ P 項が上限に届く偏差は **1.14mm**（= 2000 / 32 / 55.0131）。**飽�
 （EDULITE）と `sub_y_axis` / `sub_lift`（DM3520）はドライバ内蔵ループなので
 `M3508PositionLoop` を通らず対象外で、書いても無害に無視される（配線層がログに残す）。
 
-**D4. 記録器（`MotorStepRecorder`）のトリガは最終目標のステップのまま。**
-指標の意味（行き過ぎ・整定）を保つため。立ち上がり時間はプロファイル所要時間ぶん
-伸びるが、それは仕様どおり。**PID へ渡す中間目標をトリガにしてはならない** ——
-ランプは「ステップ」として検出されず、記録が 1 回も起きなくなる（症状は
-「`/pid-tuning` に波形が一度も出ない」だけ）。
+**D4.**【削除済み】記録器（`MotorStepRecorder`）を持っていた頃の項。
+PID 調整支援を削除したので記録器そのものが無い。同じ論点は
+`scripts/tune_y_axis.py` が「最終目標のステップを自分で入れる」形で引き継いでいる。
 
 **D5. 安全経路ではプロファイルも必ず捨てる。** 緊急停止・フィードバック途絶・
 相方の異常（`blocked`）・`clear_target`・`_disable_all`・`pause` からの復帰。捨てずに
@@ -4248,7 +4226,7 @@ MOTOR CHECK・緊急停止）、1366x768 と 1280x720 で溢れなし、配色�
   枠外へ出て「今どこか」を一覧から読めなくなっていた。
 - **`MatchControl` を 3 つに分解** — `useResetConfirm`（リセットの確認ダイアログ）/ `MatchSettings`（準備中）/
   `MatchStrip`（試合中の 1 行）。呼び出し元が画面ごとに散るため、文言と遷移を 1 箇所へ集約した。
-- **PID Tuning をマスタ・ディテール化**。以前は両機の全モータを縦に展開しており、1 基を触るだけで
+- **PID Tuning をマスタ・ディテール化**（この画面はその後 PID 調整機能ごと削除した）。以前は両機の全モータを縦に展開しており、1 基を触るだけで
   スクロールが要り「今どのモータを見ているか」が視界から外れていた。左で選び、右をその 1 基に
   明け渡す。数値は直接入力を主にし（スライダーだけでは 0.01 刻みで狙った値に置けない）、
   送信は 3 値まとめて 1 回にした（個別送信では PID が中途半端に混ざった状態が一瞬できる）。
@@ -4478,7 +4456,7 @@ import 33 行のみで、振る舞いの変更はない（`git diff -M` 上で 3
 出る」中途半端な色分けになり、しきい値が届いていないことも画面から読み取れない）。
 配るのは UI が使う 2 値だけで、`feedback_timeout_ms` / `tx_error_threshold` は載せない。
 
-しきい値は **props で末端まで流す**（`Dashboard` / `RobotControl` / `MotorTuning` が
+しきい値は **props で末端まで流す**（`Dashboard` / `RobotControl` が
 `tempThresholdsOf` を呼び、`RobotStatusRow` → `SubsystemStatus` → `MotorSummary` →
 `MotorStatus` へ渡す）。末端の表示部品が context を読み始めると、`health` / `motors` を
 props で受けている現在の一貫性が崩れ、表示のテストのたびに Provider が要る。
@@ -5140,6 +5118,17 @@ Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という�
 
 ### Phase 12: PID 調整支援（ステップ応答の記録・指標・助言）— TDD
 
+> **【この章まるごと削除前の記述】Web Controller の PID 調整機能は削除した。**
+> `/pid-tuning` タブ・`set_param` コマンド・`lib/tuning/{advice,recorder,report}.py`・
+> `web/src/components/tuning/` はいずれも存在しない。**実行中に PID ゲインを差し替える
+> 手段そのものを持たなくなった**ので、「config の `pid:` に書いてある値 = 今動いている値」
+> が構造的に保証される（途中の値のまま試合に入る経路が閉じた）。
+> 実機での詰め直しは机上の CLI（`scripts/tune_y_axis.py` + `config/bench/y_axis_tuning/`）が
+> 担う —— 調整は「同じ条件でゲインだけを変えて繰り返し、前と比べる」作業で、操縦者が
+> 画面から手で動かす形では振幅も待ち時間も毎回わずかに違い、その差が指標の差と区別できない。
+> **残っているのは `lib/tuning/metrics.py`（純関数の指標）だけ**で、唯一の呼び出し元は
+> その CLI である。以下は削除前の設計判断の記録。
+
 `/pid-tuning` は Kp/Ki/Kd を送る口しか持たず、応答を見る手段が画面に無かった。
 判断材料が届いていなかったのが原因で、操縦者の技量の問題ではない。届いていなかったのは 4 つ:
 
@@ -5251,7 +5240,7 @@ Phase 7 以来の設計判断を撤回し、**制御権の持ち主**という�
 | `firmware/lib/MotorCan` の `composeFeedbackFlags()` | 状態フラグの組み立て規則。「到達を立てられるのはサーボスロットだけ」を `BoardKind` で持たせたので、呼び出し側が `reached` に何を渡しても DC / 電磁弁では立たない。同じく `stagger()` / `resolveDeviceIds()` / `applyCommonParam()` / `parseSerialCommand()` / `blinkIntervalFor()` も 3 枚の写しから引き上げた |
 | `scripts/_common.sh` | 4 本のシェルが共有する土台（`SCRIPT_DIR` / `PYTHON` / `CAN_CONFIG` の存在確認 / sudo の有無 / `log_*` / 引数解析）。udev ルールのパスと service 名は `can_config.py paths` が答える |
 | `web/src/lib/motorCheckStatus.ts` | 動作確認の完了判定 |
-| `web/src/components/tuning/` / `operator/{ContinuousControls,AbsoluteEntry,RangeBar}.tsx` | 469 行の `MotorTuning.tsx` と 474 行の `ManualAxisRow.tsx` を「画面上の独立した読み単位」で分割。**行の単位が論理軸であってモータではない不変条件のコメントは行本体に残した** |
+| `web/src/components/tuning/` / `operator/{ContinuousControls,AbsoluteEntry,RangeBar}.tsx` | 469 行の `MotorTuning.tsx` と 474 行の `ManualAxisRow.tsx` を「画面上の独立した読み単位」で分割。**行の単位が論理軸であってモータではない不変条件のコメントは行本体に残した**（`components/tuning/` と `MotorTuning.tsx` はその後 PID 調整機能ごと削除した。`operator/` 側は現存） |
 | `tests/server_fixtures.py` / `tests/fake_can.py` | サーバーと CAN 層の組み立て・駆動。**private へ手を伸ばす特権はこの 2 ファイルだけ**（本番のモジュール private の書き換えも含む）。`tests/feedback_frames.py` は特権を持たない 3 つ目のヘルパで、実フレームを `update_state` へ流す唯一の場所 |
 
 #### 撤去したもの
@@ -5334,7 +5323,8 @@ config にもテストにも痕跡が残らない形だった。
 - 契約テストの欠落検知（`safety` を落として golden を焼き直す）
 - `motorCheckStatus` の `total_steps > 0`（未実行が「完了」になる）
 - 調整画面の memo と props 安定（**2 つは別々のテストが受け持つ** —— memo の有無は
-  DOM から観測できないので、再描画回数のテストだけでは片方しか見ていない）
+  DOM から観測できないので、再描画回数のテストだけでは片方しか見ていない）。
+  **この行は PID 調整画面ごと消えたので表には残っていない**
 
 加えて、`_body_references`（yaml 省略時のしきい値 fallback が参照で書かれていることの検査）は
 **理由付きで用意されていたのに呼び出し元が無く、守っていたはずの層が無防備だった**。
@@ -6325,12 +6315,12 @@ disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）�
 
 | 課題 | 現状 | 影響 |
 |---|---|---|
-| PID ゲイン・機構定数がすべて仮値 | `main.py` の `_DEFAULT_PID`（kp=2.0 / ki=kd=0 / dead_band=1.0 / output_limit=2000）、`config/*_positions.yaml` の `scale` / `offset` / `positions` はいずれも安全側に振った仮値 | **実機チューニング必須**。現状のゲインでは重力負荷を持ち上げられない可能性が高い（ki=0 のため定常偏差が残る）。調整の判断材料は Phase 12 で `/pid-tuning` に出るようになった（波形・指標・助言）が、**どの値にするかを決めるのは実機で動かした人**である |
+| PID ゲイン・機構定数がすべて仮値 | `main.py` の `_DEFAULT_PID`（kp=2.0 / ki=kd=0 / dead_band=1.0 / output_limit=2000）、`config/*_positions.yaml` の `scale` / `offset` / `positions` はいずれも安全側に振った仮値 | **実機チューニング必須**。現状のゲインでは重力負荷を持ち上げられない可能性が高い（ki=0 のため定常偏差が残る）。調整の判断材料は `scripts/tune_y_axis.py` が試行ごとに出す指標（立上り / 行き過ぎ / 整定 / 定常偏差 / 飽和率 / 指令ピーク）と末尾の比較表で読む（Web UI の PID 調整機能は削除した）が、**どの値にするかを決めるのは実機で動かした人**である |
 | M3508 の位置制御が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は **2026-09-03 に振幅 1.5mm / `output_limit` 800 でだけ実測**（`docs/mechanism_handoff.md` §3-1） | ラップアラウンド判定のしきい値（半周＝3600rpm 相当）や減速比込みの許容差が実機で妥当かは未確認。**PID は実運用ストロークでの取り直しが必須** —— 本番の `output_limit` 2000 では偏差 1.14mm で飽和し、検証した振幅はその境界（2.3mm）の内側だった |
 | ~~台形速度プロファイルの値が実機未検証~~ → **2026-09-04 に実測済み**（`docs/mechanism_handoff.md` §3-4）| `axes.y_axis.motion` は `max_velocity` 200.0 / `max_acceleration` 1200.0 / `velocity_ff` 1.0、`pid.output_limit` は 5000、`sync_kp` は 16.0。150mm を 3.023s → 0.838s（3.6 倍）| ~~残る未検証は可動範囲そのもの —— `manual`（−2.0〜20.0mm）と `positions`（0〜15mm）は仮値のままで、実運用の移動距離（150mm 以上が主）と食い違っている。~~ → **`manual`（0.0〜650.0mm）と `positions`（home 0.0 / work_1 120.0 / work_2 320.0 / work_3 520.0 / work_shared 650.0mm）は実測値へ更新済み**（下記「メインハンド実機の実測値を本番 config へ反映」節）。ワーク保持力と機構強度は依然未評価（加速度の効く制約はそちら）|
 | プロファイル導入で PID の問題の性質が変わった | ゲイン（kp 32 / ki 10 / kd 1.0）は「飽和したバンバン制御をなだめる」条件で詰めた値のまま | 中間目標を入れた後の PID の仕事は**追従誤差の最小化**であり、同じ数字でも意味が違う。**実運用振幅での再調整が要る**（`docs/mechanism_handoff.md` §3-2 の手順 4） |
 | 低速域のスティックスリップが未観測 | この軸は静止摩擦が大きい（実測で重い側 500counts 相当）。中間目標がゆっくり動く低速域では追従誤差が小さく、電流が静止摩擦を超えられない可能性がある | **予測であって観測ではない。** 出るなら「動かない → 誤差が溜まって急に動く」形で、`sync_tolerance` の発報として現れうる。対抗手段は `ki`（既に 10 が入っていて、まさにこの役割）と `velocity_ff`。それでも足りなければ静摩擦補償（参照速度の符号に応じた定数電流）—— **今回スコープ外**（単位が counts で `motion` 節の人間単位と混ざる / 必要性がまだ推測 / `ki` が部分的に代替している） |
-| `velocity_ff` は実行中に変更できず UI にも配信されない | `pid_gains()` に相当する読み口が `M3508PositionLoop` に無く、`/pid-tuning` にも出ない。値を知る経路は起動ログ（`_attach_motion_profiles`）だけ | 調整は **config 変更 + 再起動**が要る。`kd` は UI から変えられるので、**画面から `kd` だけを動かすと `velocity_ff` との対応が黙って崩れる**（症状は「巡航中だけ飽和して速くならない」）。実機で詰めるあいだは `scripts/tune_y_axis.py --velocity-ff` を使う |
+| PID ゲインと `velocity_ff` は実行中に変更できず UI にも配信されない | 実行中に差し替える経路は持たない（PID 調整機能を削除したため）。値を知る経路は config そのもので、起動ログに出るのは `velocity_ff` の側だけ（`_attach_motion_profiles`）| 調整は **config 変更 + 再起動**が要る。**`config/<robot>.yaml` の `pid.kd` と `config/<robot>_positions.yaml` の `motion.velocity_ff` は同値に保つ対**なので、片方だけ書き換えると対応が黙って崩れる（症状は「巡航中だけ飽和して速くならない」）。実機で詰めるあいだは `scripts/tune_y_axis.py --velocity-ff` を使う |
 | ~~200Hz が実機で維持できるか未測定~~ → **周期の実測を追加済み（2026-09-05）。ただし画面と WS 配信からは外した（同日）** | `lib/control/periodic.py` の `PeriodicTask` が連続する tick 開始時刻の差 (= 実周期) を測り、公称周期の 1.5 倍 (`JITTER_OVERRUN_MARGIN` = 0.5。値は「超過分 / 公称周期」なので 0.5 が 1.5 倍にあたる) を超えた回数と最悪値だけを O(1) で積む（サンプル列は持たない）。3 つの周期タスク（位置制御ループ 200Hz / 同期監視 50Hz / 目標値再送 20Hz）は全て `PeriodicTask` を継承するので継承先へ書き写す必要は無い。超過したら `LogThrottle` 経由で WARNING。**集計 1 行は `match_finish`（`log_jitter_summary()` → `reset_jitter_stats()`）で journal へ INFO。`match_start` は前縁リセットだけ（黙って 0 に戻す）。** **画面 (`SubsystemStatus`) と WS 配信 (`safety.*.jitter_overrun_count` / `worst_jitter_ms`) からは外してある（2026-09-05）** —— しきい値は理屈で導いた値で実機で検証しておらず、本番構成（CANable 4 本・毎秒 4200 通）で 200Hz ループがどれだけ揺れるかは誰も測っていない（実装時に試したのは WSL の virtual バスを 20 秒動かしただけで、警告 0 件だったが本番とは条件が違いすぎる）。安全機構のパネルに未検証のしきい値で常時点灯する項目を混ぜると、同期ずれラッチや緊急停止といった本物の異常まで読まれなくなるおそれがあり、しかも試合中の操縦者にはこの情報に対してできる行動が無い（PC の負荷は下げられない）——PR #100 の CAN 警告が「ワークが落ちたかも → 掴み直す」という行動に繋がるのとは性質が違う、エンジニアが後から読む情報である。**順番が逆になっていた** —— 先に実機で測って線を決めてから画面に出すべきところを、理屈だけの線を先に画面へ出していたので、実機計測が先に来るよう画面と配信だけを外した。**リセットと journal ログは残した** —— 画面が無くても、試合ごとに 1 行の記録が journal に残ることで、実機計測のときにそのまま使える単位（この試合で何回・最悪何 ms）になる。**次にやるべきこと: 実機（本番の CAN 構成）で計測し、しきい値と対処可能な行動を決めてから画面へ戻すかどうかを判断する。** | しきい値は `interval_s` からの相対値で導出し（`HealthThresholds` には足さない — 200/50/20Hz の 3 種を跨ぐため）、`config/system.yaml` に新しい節は増えていない。**集計は超過 0 件でも 1 行出す** —— 「超過したときだけ出す」にすると、公称の 1.4 倍で常時走っている（＝停止距離も 40ms 予算も既に崩れている）機体で journal が無音になり、しきい値を決めるためにしきい値を超えている必要がある、という循環になる。**まだ「実機で 200Hz を維持できるか」の実測データそのものは無い** —— 今回入ったのは「乱れているかどうかを知る手段」で、実際に乱れているかは実機で動かして確認する必要がある。**画面に出す判断は実機計測の後**（現状は計測・WARNING・試合単位の集計と journal ログのみ） |
 | `dead_band=1.0`（モータ軸 deg）と `default_tolerance` の関係 | 到達判定の許容差は出力軸 1deg 相当（モータ軸で約 19.2deg）、PID のデッドバンドはモータ軸 1deg | 現状は許容差 > デッドバンドなので到達はするが、チューニングで両者を動かすときは大小関係を意識する必要がある（デッドバンドが許容差より広いと永久に到達しない） |
 

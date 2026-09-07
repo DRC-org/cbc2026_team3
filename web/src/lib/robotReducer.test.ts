@@ -87,12 +87,12 @@ describe("robotReducer", () => {
   it("拒否は受信時刻付きで保持し、clear_rejection で消える", () => {
     const rejected = receive(INITIAL_ROBOT_UI_STATE, {
       type: "command_rejected",
-      command: "set_param",
-      reason: "試合中はパラメータを変更できません",
+      command: "sequence_start",
+      reason: "手動操縦中はシーケンスを開始できません",
     });
     expect(rejected.rejection).toEqual({
-      command: "set_param",
-      reason: "試合中はパラメータを変更できません",
+      command: "sequence_start",
+      reason: "手動操縦中はシーケンスを開始できません",
       receivedAtMs: NOW,
       source: "server",
     });
@@ -182,74 +182,6 @@ describe("robotReducer", () => {
       const second = receive(first, { type: "e_stop_state", active: false });
 
       expect(second.eStopActive).toBe(false);
-    });
-  });
-
-  describe("ステップ応答の保持", () => {
-    // この describe の外で使う場面が無いので、内側に置いたままにする
-    // oxlint-disable-next-line unicorn/consistent-function-scoping
-    const capture = (motor: string, kp: number, robot = "main_hand") => ({
-      type: "tuning_capture",
-      robot,
-      motor,
-      captured_at: 1,
-      gains: { kp, ki: 0, kd: 0 },
-      metrics: null,
-      advice: [],
-      samples: { t: [0, 1], target: [10, 10], pos: [0, 10], output: [1, 1], sat: [false, false] },
-    });
-
-    it("モータごとに保持する", () => {
-      const state = receive(INITIAL_ROBOT_UI_STATE, capture("y_axis_r", 2));
-      expect(state.tuningCaptures["main_hand/y_axis_r"]).toHaveLength(1);
-    });
-
-    it("ロボットが違えば別のキーになる", () => {
-      /** モータ名はロボット横断に一意だが、画面はロボットごとに分けて出す */
-      let state = receive(INITIAL_ROBOT_UI_STATE, capture("lift", 2, "main_hand"));
-      state = receive(state, capture("lift", 3, "sub_hand"));
-      expect(Object.keys(state.tuningCaptures).toSorted()).toEqual([
-        "main_hand/lift",
-        "sub_hand/lift",
-      ]);
-    });
-
-    it("新しい順に 2 件だけ残す", () => {
-      /** 「変える前より良くなったか」に答えるには前回の 1 件が要る。3 件目は出す場所が無い */
-      let state = INITIAL_ROBOT_UI_STATE;
-      for (const kp of [1, 2, 3]) state = receive(state, capture("y_axis_r", kp));
-
-      const kept = state.tuningCaptures["main_hand/y_axis_r"];
-      expect(kept.map((c) => c.gains.kp)).toEqual([3, 2]);
-    });
-
-    it("他モータの配列は参照ごと据え置く", () => {
-      /** 無関係な記録でグラフを描き直さない */
-      const first = receive(INITIAL_ROBOT_UI_STATE, capture("y_axis_r", 2));
-      const next = receive(first, capture("y_axis_l", 2));
-
-      expect(next.tuningCaptures["main_hand/y_axis_r"]).toBe(
-        first.tuningCaptures["main_hand/y_axis_r"],
-      );
-    });
-
-    it("テレメトリの参照を作り直さない", () => {
-      const first = receive(INITIAL_ROBOT_UI_STATE, {
-        type: "state",
-        robot: "main_hand",
-        step_index: 1,
-      });
-      const next = receive(first, capture("y_axis_r", 2));
-
-      expect(next.states).toBe(first.states);
-      expect(next.matchState).toBe(first.matchState);
-    });
-
-    it("state 受信で記録の参照を作り直さない", () => {
-      const first = receive(INITIAL_ROBOT_UI_STATE, capture("y_axis_r", 2));
-      const next = receive(first, { type: "state", robot: "main_hand", step_index: 1 });
-
-      expect(next.tuningCaptures).toBe(first.tuningCaptures);
     });
   });
 });

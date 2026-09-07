@@ -8,9 +8,7 @@ import type { MotorState } from "@/lib/protocol";
  * テストを実装へ追従させることになる。組み立てを 1 箇所に集めておけば、
  * 増えたフィールドの既定値もここだけで決まる。
  *
- * 既定は「PC 側 PID を持たないモータが静止している」状態にしてある。
- * `target: null` を既定にするのは、`0` だと偏差 0 =完璧に追従している、と
- * 読めてしまうため (サーバー側も同じ理由で 0 を配らない)。
+ * 既定は「静止していて一度も指令していないモータ」にしてある。
  */
 export function motorState(overrides: Partial<MotorState> = {}): MotorState {
   return {
@@ -18,13 +16,10 @@ export function motorState(overrides: Partial<MotorState> = {}): MotorState {
     vel: 0,
     torque: 0,
     temp: 30,
-    pid: null,
-    target: null,
     // 既定は「一度も指令していない」。値を入れると、指令値を出すかどうかを
     // 見ていないテストにまで `→` 付きの表示が紛れ込む
     command: null,
     command_mode: null,
-    saturated: false,
     ...overrides,
   };
 }

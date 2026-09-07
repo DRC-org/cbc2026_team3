@@ -28,20 +28,6 @@ export const MALFORMED = "malformed";
 export type Malformed = typeof MALFORMED;
 
 /**
- * PC 側 PID を持つモータの現在ゲイン。
- *
- * `applies_to` はこの 1 基へ送ったときに実際に適用されるモータ名で、左右直結ペアなら
- * 両方が入る。**名前から対を推測してはならない** — 「1 台だけに効かせてよいか」の
- * 判断はサーバーの `_paired_with()` 1 箇所が持つ。
- */
-export interface MotorPid {
-  kp: number;
-  ki: number;
-  kd: number;
-  applies_to: string[];
-}
-
-/**
  * テレメトリの測定値 1 つ。**`null` は「そのドライバに測る手段が無い」という
  * 正当な測定結果であって、配信が読めなかったことではない。**
  *
@@ -108,9 +94,6 @@ export interface MotorState {
    * 出力しない) / コマンドウォッチドッグ満了 (500ms 途絶。`cbc-can-watchdog` の
    * bus-off 復旧でも起きる) / 緊急停止ラッチと基板の再起動。
    * **基板が止まっていてもここには値が載り続ける。**
-   *
-   * **`target` と混同しないこと。** あちらは M3508 の位置制御ループが刻む
-   * 軌道の中間目標で、こちらは 20Hz で基板へ再送されている値そのもの。
    */
   command: Measured;
   /**
@@ -120,27 +103,6 @@ export interface MotorState {
    * ための欄で、`command_mode` を見ずにモータ名や基板の種類から推測してはならない。
    */
   command_mode: string | null;
-  /**
-   * 位置目標。null なら PC 側に目標が無い (PID を持たないモータ・停止中・開ループ)。
-   *
-   * **0 で埋めてはならない。** 偏差 0 = 完璧に追従している、と読めてしまう。
-   * これが配られる前は画面に偏差そのものが存在せず、調整で最も見たい量が
-   * 操縦者の頭の中の引き算にしかなかった。
-   */
-  target: number | null;
-  /**
-   * 直近周期の出力が出力レンジの端に張り付いたか。
-   *
-   * 飽和している間はゲインを変えても応答は変わらない。これが見えないと
-   * 「kp を上げても下げても同じ」という観察から、制御以外の原因
-   * (機構の負荷・config の output_limit) へ辿り着けない。
-   */
-  saturated: boolean;
-  /**
-   * null なら PC 側 PID を持たない (ドライバ・ファーム側でループを閉じている)。
-   * 調整対象かどうかの判定はこれだけで行い、ドライバ種別を UI へ書き写さない。
-   */
-  pid: MotorPid | null;
 }
 
 /**
@@ -813,123 +775,6 @@ export interface RobotState {
 }
 
 /** 受信条件を通ったメッセージ。UI 状態へ入れる形まで正規化してある */
-/** 助言 1 件の重み。色分けはこれだけで決める */
-export type AdviceSeverity = "ok" | "info" | "warning";
-
-export interface TuningAdvice {
-  code: string;
-  severity: AdviceSeverity;
-  message: string;
-}
-
-/**
- * ステップ応答から読み取れた指標。
- *
- * **測れなかった項目は null。0 で埋めてはならない** — 行き過ぎが無かった応答と
- * 窓の中で目標へ届かなかった応答が同じ表示になり、次に取るべき行動が正反対になる。
- */
-export interface TuningMetrics {
-  step_from: number;
-  step_to: number;
-  step_size: number;
-  rise_time_s: number | null;
-  overshoot_pct: number;
-  peak_time_s: number | null;
-  settling_time_s: number | null;
-  steady_state_error: number;
-  oscillation_hz: number | null;
-  damping_ratio: number | null;
-  saturation_ratio: number;
-  peak_output: number;
-  settle_band: number;
-  sample_count: number;
-  duration_s: number;
-}
-
-function isNum(value: unknown): boolean {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-/** 測れなかったときだけ null になる欄。それ以外の null は配信の欠落 */
-const NULLABLE_METRICS = [
-  "rise_time_s",
-  "peak_time_s",
-  "settling_time_s",
-  "oscillation_hz",
-  "damping_ratio",
-] as const;
-
-const REQUIRED_METRICS = [
-  "step_from",
-  "step_to",
-  "step_size",
-  "overshoot_pct",
-  "steady_state_error",
-  "saturation_ratio",
-  "peak_output",
-  "settle_band",
-  "sample_count",
-  "duration_s",
-] as const;
-
-/**
- * 指標を受信境界で確定させる。
- *
- * `isObject` だけを条件にしていた頃は、半端な形がそのまま `MetricsPanel` へ渡り
- * `m.overshoot_pct.toFixed(0)` がレンダー本体で投げていた。**測れなかった項目の
- * null (`rise_time_s` 等) と、配信が欠けたことを混ぜてはならない** — 前者は
- * 「—」と出すのが正しく、後者は指標そのものを信用してはいけない。
- */
-export function parseTuningMetrics(raw: unknown): TuningMetrics | Malformed | null {
-  // null は「ステップとして解釈できなかった」の表現であって欠落ではない
-  if (raw === null || raw === undefined) return null;
-  if (!isObject(raw)) return MALFORMED;
-  if (!REQUIRED_METRICS.every((key) => isNum(raw[key]))) return MALFORMED;
-  if (!NULLABLE_METRICS.every((key) => raw[key] === null || isNum(raw[key]))) return MALFORMED;
-  return raw as unknown as TuningMetrics;
-}
-
-/**
- * 描画に使える指標だけを取り出す。未解釈 (null) も判定不能 (MALFORMED) も null。
- *
- * **どちらも「数字を出してはいけない」点では同じ**なので、グラフの整定帯のように
- * 値そのものを使う箇所はこれを通す。両者を言い分ける必要があるのは、操縦者へ
- * 理由を説明する 1 箇所 (`ResponsePanel`) だけ。
- */
-export function readableMetrics(metrics: TuningMetrics | Malformed | null): TuningMetrics | null {
-  return metrics === null || metrics === MALFORMED ? null : metrics;
-}
-
-/** 波形。点ごとのオブジェクトではなく列で運ぶ (同じキー名の繰り返しを避ける) */
-export interface TuningSamples {
-  t: number[];
-  target: number[];
-  pos: number[];
-  output: number[];
-  sat: boolean[];
-}
-
-/**
- * 1 回のステップ応答。波形・指標・助言を 1 通で運ぶ。
- *
- * 分けて配ると、波形だけ届いて指標が来ていない画面や、指標が新しく波形が古い
- * 画面が作れてしまう。調整はこの 3 つを突き合わせる作業なので、途中の 1 通を
- * 落とした画面はそのまま誤読につながる。
- */
-export interface TuningCapture {
-  robot: string;
-  motor: string;
-  captured_at: number;
-  gains: { kp: number; ki: number; kd: number };
-  /**
-   * ステップとして解釈できなかった記録では null (助言も空になる)。
-   * 読めなかった配信は `MALFORMED` — null へ倒すと「解釈できなかった」と混ざる。
-   */
-  metrics: TuningMetrics | Malformed | null;
-  advice: TuningAdvice[];
-  samples: TuningSamples;
-}
-
 export type ServerMessage =
   | { type: "state"; robot: string; state: RobotState }
   | { type: "server_info"; serverInfo: ServerInfo }
@@ -937,8 +782,7 @@ export type ServerMessage =
   | { type: "e_stop_state"; active: boolean; reason: string | null }
   | { type: "command_rejected"; command: string; reason: string }
   | { type: "health_change"; event: HealthChange }
-  | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot }
-  | { type: "tuning_capture"; capture: TuningCapture };
+  | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot };
 
 type Raw = Record<string, unknown>;
 
@@ -1002,40 +846,6 @@ function parseHealthChangeLevel(raw: unknown): HealthChangeLevel {
 /** どのロボットの話か決められないメッセージは捨てるしかない */
 function robotOf(raw: Raw): string | null {
   return typeof raw.robot === "string" && raw.robot.length > 0 ? raw.robot : null;
-}
-
-/**
- * 波形の列を読む。**列の長さが揃っていなければ null。**
- *
- * 揃っていない列をそのまま描くと、`t` の長さでループした先で `pos` が
- * undefined になり、グラフだけが静かに途切れる (例外は出ない)。長さの
- * 食い違いは配信側の不具合であって、部分的に描いてよい状態ではない。
- */
-function parseTuningSamples(raw: unknown): TuningSamples | null {
-  if (!isObject(raw)) return null;
-  const t = raw.t;
-  const target = raw.target;
-  const pos = raw.pos;
-  const output = raw.output;
-  const sat = raw.sat;
-  if (
-    !Array.isArray(t) ||
-    !Array.isArray(target) ||
-    !Array.isArray(pos) ||
-    !Array.isArray(output) ||
-    !Array.isArray(sat)
-  ) {
-    return null;
-  }
-  const lengths = new Set([t.length, target.length, pos.length, output.length, sat.length]);
-  if (lengths.size !== 1) return null;
-  return {
-    t: t as number[],
-    target: target as number[],
-    pos: pos as number[],
-    output: output as number[],
-    sat: sat as boolean[],
-  };
 }
 
 function parseKnown(raw: Raw): ServerMessage | null {
@@ -1140,33 +950,6 @@ function parseKnown(raw: Raw): ServerMessage | null {
           excluded_steps: parseExcludedSteps(raw.excluded_steps),
         },
       };
-
-    case "tuning_capture": {
-      if (robot === null) return null;
-      const samples = parseTuningSamples(raw.samples);
-      // 波形が読めない記録は捨てる。指標だけ出しても、操縦者はその数字が
-      // どの動きから出たのかを確かめる手段を失う
-      if (samples === null) return null;
-      return {
-        type: "tuning_capture",
-        capture: {
-          robot,
-          motor: str(raw.motor),
-          captured_at: num(raw.captured_at),
-          gains: {
-            kp: num((raw.gains as Raw | undefined)?.kp),
-            ki: num((raw.gains as Raw | undefined)?.ki),
-            kd: num((raw.gains as Raw | undefined)?.kd),
-          },
-          // metrics が null なのは「ステップとして解釈できなかった」の表現。
-          // 読めない形は MALFORMED として区別する (null へ倒すと、指標を出せなかった
-          // 記録と欠けた配信が同じ表示になり、配信側の不具合が誰にも見えない)
-          metrics: parseTuningMetrics(raw.metrics),
-          advice: Array.isArray(raw.advice) ? (raw.advice as TuningAdvice[]) : [],
-          samples,
-        },
-      };
-    }
 
     default:
       // 未知の type は無視する。サーバーが送り始めたものを取りこぼしていないかは

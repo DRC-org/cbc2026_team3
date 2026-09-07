@@ -72,7 +72,7 @@ export function isSetupPhase(phase: PhaseKey): boolean {
  * 試合中フェーズ。**サーバーのフェーズゲートの写しはここだけに置く。**
  *
  * `lib/match_state.py` の `PHASES_DURING_MATCH` (= {match}) と 1:1 で、
- * 「試合中は不可」のコマンド (`set_param` / `motor_check_start` / `set_court`) が通る
+ * 「試合中は不可」のコマンド (`motor_check_start` / `set_court`) が通る
  * `PHASES_OUTSIDE_MATCH` はその補集合なので、この 1 つで両側に答えられる。
  *
  * 可否を決めるのはサーバー (`lib/commands.py`) であって UI ではない。ここは

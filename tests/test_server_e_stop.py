@@ -407,43 +407,6 @@ class TestEStopBlocksMatchStart:
             await ws.close()
 
 
-class TestEStopBlocksSetParam:
-    async def test_set_param_rejected_while_e_stop_active(self) -> None:
-        """緊急停止中のパラメータ書き換えは停止状態を崩しうるため拒否する。"""
-        fx = _build_fixture()
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await _enter_e_stop(fx, ws)
-
-            await ws.send_json({"type": "set_param", "motor": "m1", "key": "kp", "value": 1.0})
-
-            msg = await recv_type(ws, "command_rejected")
-            assert msg is not None
-            assert msg["command"] == "set_param"
-            assert msg["reason"]
-
-            await ws.close()
-
-    async def test_set_param_not_blocked_by_e_stop_gate_when_inactive(self) -> None:
-        """緊急停止していなければ緊急停止ゲートでは弾かれないこと。
-
-        このフィクスチャの m1 は PC 側 PID を持たない (M3508 位置制御ループが無い) ため
-        set_param 自体は別の理由で拒否される。ここで見たいのは緊急停止ゲートの挙動だけ
-        なので、拒否理由が緊急停止由来でないことを確認する。
-        """
-        fx = _build_fixture()
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "set_param", "motor": "m1", "key": "kp", "value": 1.0})
-            msg = await recv_type(ws, "command_rejected", tries=5)
-            assert msg is None or "緊急停止" not in msg["reason"]
-            await ws.close()
-
-
 class TestEStopKeepsRecoveryCommands:
     async def test_match_finish_and_release_pass_during_e_stop(self) -> None:
         """試合終了・緊急停止解除は復帰経路なので緊急停止中も通す。"""
