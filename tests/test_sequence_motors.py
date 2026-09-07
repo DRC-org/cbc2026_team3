@@ -367,8 +367,10 @@ class TestSequenceMotorBinding:
 
 
 class TestAxisHandle:
-    def _pair(self, *, sync_tolerance: float | None) -> tuple[AxisHandle, dict[str, _FakeDriver]]:
-        mgr = _make_can_manager()
+    def _pair(
+        self, *, sync_tolerance: float | None, manager: MagicMock | None = None
+    ) -> tuple[AxisHandle, dict[str, _FakeDriver]]:
+        mgr = manager if manager is not None else _make_can_manager()
         drivers = {name: _FakeDriver(name, i + 1) for i, name in enumerate(("pair_r", "pair_l"))}
         spec = AxisSpec(
             name="pair",
@@ -397,6 +399,46 @@ class TestAxisHandle:
 
         assert drivers["pair_r"].encoded == [(ControlMode.POSITION, 30.0)]
         assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
+
+    async def test_片側の送信が失敗したら成功した側の目標も捨てる(self) -> None:
+        """ペア軸に片側だけ効く操作を、エラー経路でも作らない。
+
+        素の `gather` は最初の例外で抜けるが**残りのタスクはキャンセルされずに
+        完走する**ので、片方の送信だけが失敗すると成功した側にだけ新しい目標が残る。
+        問い合わせ駆動のモータ (EDULITE 05 / DM3520) では 20Hz の再送がその 1 台だけを
+        新目標へ押し続け、もう片方には `idle_target_value()` を書き続ける ——
+        左右直結の軸が片側だけ動き、最後は偏差超過で全体緊急停止になる。
+        """
+        mgr = _make_can_manager()
+
+        async def _send(name: str, _msg: can.Message) -> None:
+            if name == "pair_r":
+                raise can.CanError("送信失敗 (テスト)")
+
+        mgr.send = AsyncMock(side_effect=_send)
+        drivers = {name: _FakeDriver(name, i + 1) for i, name in enumerate(("pair_r", "pair_l"))}
+        spec = AxisSpec(
+            name="pair",
+            unit="mm",
+            command_unit="deg",
+            timeout_s=1.0,
+            tolerance=None,
+            motors=(
+                MotorSpec(name="pair_r", scale=10.0, offset=0.0),
+                MotorSpec(name="pair_l", scale=-10.0, offset=0.0),
+            ),
+            sync_tolerance=1.0,
+        )
+        handles = [MotorHandle(name, drivers[name], mgr, poll_interval=0.001) for name in drivers]
+
+        with pytest.raises(can.CanError):
+            await AxisHandle(spec, handles).set_target_value({"pair_r": 30.0, "pair_l": -30.0})
+
+        # 前提: 片方 (pair_l) の送信自体は成功している
+        assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
+        # その成功した側にも目標が残っていないこと。残ると 20Hz の再送がこの 1 台だけを
+        # 押し続ける (`has_target` が False なら idle_target_value へ切り替わる)
+        assert [handle.has_target for handle in handles] == [False, False]
 
     def test_sync_violation_is_none_without_sync_tolerance(self) -> None:
         handle, drivers = self._pair(sync_tolerance=None)

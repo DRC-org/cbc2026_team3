@@ -263,6 +263,18 @@ class AxisHandle:
         """モータ名 → 指令値をまとめて送る。
 
         逐次 await しないのは、左右直結の軸で送信に時間差が出ると機構がねじれるため。
+
+        **1 台でも失敗したら、成功した側の目標も捨てる。** 素の ``gather`` は最初の
+        例外で抜けるが残りのタスクはキャンセルされずに完走するので、片方の送信だけが
+        失敗すると**成功した側にだけ新しい目標が残る**。問い合わせ駆動のモータ
+        (EDULITE 05 / DM3520) では ``QueryDrivenTargetRefresher`` が 20Hz でその
+        1 台だけを新目標へ押し続け、もう片方には ``idle_target_value()`` を書き続ける
+        —— 左右直結の軸が片側だけ動き、最後は ``SyncMonitor`` の偏差超過で全体緊急
+        停止になる。CLAUDE.md が禁じている「ペア軸に片側だけ効く操作」がエラー経路で
+        成立してしまう。
+
+        捨てた後は再送が ``idle_target_value()`` (今の姿勢を保て) へ切り替わるので、
+        既に飛んでしまった 1 通ぶんの動きもその場で止まる。
         """
         try:
             values = [(handle, commands[handle.name]) for handle in self._handles]
@@ -271,9 +283,17 @@ class AxisHandle:
                 f"軸 '{self.name}' のモータ {exc.args[0]!r} に対する指令値がありません"
             ) from exc
 
-        await asyncio.gather(
-            *(handle.set_target(self._spec.command_mode, value) for handle, value in values)
+        results = await asyncio.gather(
+            *(handle.set_target(self._spec.command_mode, value) for handle, value in values),
+            return_exceptions=True,
         )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            for handle, _ in values:
+                handle.clear_target()
+            # 最初の 1 つを送出する。呼び出し側 (`move_to` / 手動) は EStopActiveError と
+            # CanError を区別して扱うので、ExceptionGroup へ包むと両方の経路が壊れる
+            raise failures[0]
 
     async def wait_reached(self, *, timeout: float | None = None) -> bool:
         """軸の到達を待つ。到達すれば True、タイムアウトなら False。
