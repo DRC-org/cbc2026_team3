@@ -1307,3 +1307,77 @@ class TestInFlightIsBroadcast:
             await fx.wait_reenergize("main_hand")
 
         assert fx.state_message("main_hand")["safety"]["reenergizing"] is False
+
+
+class TestEStopReleaseIsNotReentrant:
+    """**解除を 2 回踏んでも再励磁は 1 本しか走らない。**
+
+    並走すると、片方の鮮度確認プローブ (EDULITE 05 / DM3520 とも
+    `feedback_probe_message()` = disable) がもう片方の enable 直後のモータへ届く ——
+    `sub_lift` は disable で自重落下するので「戻した直後にもう一度落ちる」。
+    加えて `_activate_motors_for_robot` は結果を無条件に `_inactive_motors[robot]`
+    へ置き換えるので、完了順によっては**実際は励磁できているのに画面だけ
+    「無励磁」が残り続ける**。
+
+    窓が広がるのは CAN が詰まっている・モータが応答しないときで、まさに緊急停止を
+    押した状況である。
+    """
+
+    async def test_second_release_settles_the_first(self) -> None:
+        fx = _build_fixture()
+        gate = asyncio.Event()
+        started = 0
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            nonlocal started
+            started += 1
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+        fx.can_manager("sub_hand").activate_motors = AsyncMock(return_value=[])
+
+        await fx.command({"type": "e_stop"})
+        await fx.command({"type": "e_stop_release"})
+        await asyncio.sleep(0)
+        assert fx.server._reactivating
+
+        # 1 本目が main_hand のゲートで止まっている間に、もう一度停止 → 解除
+        await fx.command({"type": "e_stop"})
+        try:
+            await fx.command({"type": "e_stop_release"})
+
+            # 走っているのは常に 1 本だけ (2 本目を立てる前に 1 本目を畳んでいる)
+            alive = [task for task in fx.server._reactivate_tasks if not task.done()]
+            assert len(alive) == 1
+        finally:
+            gate.set()
+            await fx.wait_reactivation()
+
+        # **拒否はしない。** 2 回目の解除でも再励磁は必ず立ち上がる
+        # (解除のたびに取り残されるロボットが出る形を作らない)
+        assert started >= 2
+
+    async def test_release_still_returns_without_waiting_for_reactivation(self) -> None:
+        """畳み込みを足しても「解除は再励磁を待たない」性質は変えない。
+
+        待つと、その操縦者の WS が数秒間 1 通も処理しなくなり **E-STOP の押し直し
+        すら効かなくなる**。畳むのは前回のぶんだけで、自分が立てた 1 本は待たない。
+        """
+        fx = _build_fixture()
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.can_manager("main_hand").activate_motors = _slow_activate
+
+        await fx.command({"type": "e_stop"})
+        try:
+            # ここで待ちに入るなら、この await は gate を開けるまで返らない
+            await asyncio.wait_for(fx.command({"type": "e_stop_release"}), timeout=1.0)
+            assert fx.server._reactivating
+        finally:
+            gate.set()
+            await fx.wait_reactivation()

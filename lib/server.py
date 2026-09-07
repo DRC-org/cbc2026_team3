@@ -624,9 +624,23 @@ class RobotServer:
         self._e_stop_active = False
         self._e_stop_reason = None
         await self._broadcast_e_stop_state()
-        # **再励磁を待たない。** `async for msg in ws` は 1 接続あたり完全に直列なので、
-        # ここで待つとそのあいだ次の 1 通が処理されない。フィードバックの返らない
-        # モータは 1 台 0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を
+        # **前回の解除の再励磁が残っていたら畳んでから始める。**
+        # 解除操作を短時間に 2 回踏むと、同じ CANManager に対して 2 本の再励磁が
+        # 並走する。片方の鮮度確認プローブ (EDULITE 05 / DM3520 とも
+        # `feedback_probe_message()` = **disable**) が、もう片方が enable した
+        # 直後のモータへ届く —— `sub_lift` は disable で自重落下するので、
+        # 「戻した直後にもう一度落ちる」。加えて `_activate_motors_for_robot` は
+        # 結果を無条件に `_inactive_motors[robot] = …` で置き換えるため、完了順に
+        # よっては**実際は励磁できているのに画面だけ「無励磁」が残り続ける**
+        # (次に再励磁コマンドを押すまで直らない)。
+        #
+        # **拒否はしない。** 解除のたびに取り残されるロボットが出る形
+        # (`_send_e_stop_clear_broadcast` の非対称と同種の事故) を作らないため、
+        # 畳んでから必ず新しい 1 本を立てる。
+        await self._settle_pending_reactivation()
+        # **再励磁そのものは待たない。** `async for msg in ws` は 1 接続あたり完全に
+        # 直列なので、ここで待つとそのあいだ次の 1 通が処理されない。フィードバックの
+        # 返らないモータは 1 台 0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を
         # 押した状況 —— では数秒に達し、**E-STOP の押し直しすら効かなくなる**。
         # 進捗は `safety.unenergized_motors` として配信され続ける
         task = asyncio.create_task(self._reactivate_motors())
@@ -1475,6 +1489,32 @@ class RobotServer:
                 " (CAN の送信が詰まっている可能性があります)。解除の励磁を先へ進めます",
                 _REENERGIZE_CANCEL_TIMEOUT_S,
                 robot_name,
+            )
+
+    async def _settle_pending_reactivation(self) -> None:
+        """新しい解除の再励磁を始める前に、前回のぶんを畳む。
+
+        畳み方 (キャンセル → 有界待ち → 待ちきれなくても進む) と、その理由は
+        `_settle_pending_reenergize` とまったく同じ。違うのは対象だけで、あちらは
+        単発の `reenergize_motors` (ロボット単位)、こちらは緊急停止解除の
+        `_reactivate_motors` (全ロボットまとめて) を見る。
+
+        **2 系統あることそのものは実装の都合だが、畳み忘れると症状が出る。**
+        並走した 2 本のうち片方のプローブ (disable) がもう片方の enable 直後の
+        モータへ届くと `sub_lift` が自重で落ち、`_inactive_motors` の書き戻し順に
+        よっては画面だけ「無励磁」が残る。
+        """
+        pending = {task for task in self._reactivate_tasks if not task.done()}
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        done, _still_running = await asyncio.wait(pending, timeout=_REENERGIZE_CANCEL_TIMEOUT_S)
+        if len(done) != len(pending):
+            logger.error(
+                "解除の再励磁タスクが %.1fs 以内に畳めませんでした"
+                " (CAN の送信が詰まっている可能性があります)。新しい解除を先へ進めます",
+                _REENERGIZE_CANCEL_TIMEOUT_S,
             )
 
     async def _activate_motors_for_robot(
