@@ -51,6 +51,14 @@ export function AbsoluteEntry({ axis, min, max, disabled, onSet }: AbsoluteEntry
   const submit = () => {
     if (!filled) return;
     dirtyRef.current = false;
+    // **その場で今の目標値へ戻す。** `dirty` を落として `axis.target` の変化に
+    // 任せるだけだと、既に端 (max) にいる軸へ範囲外を送ったときに target が動かず
+    // effect も走らないので、入力欄は範囲外の値のままオレンジ枠で居座る ——
+    // 操縦者には「送ったのに反映されていない」としか見えない。
+    // **クランプ後の値を自分で計算して入れない** —— 丸めるのはサーバーの仕事で、
+    // ここで予測すると判定が 2 箇所になる。今の目標値を出しておけば、範囲内なら
+    // 直後の配信が新しい値へ差し替え、範囲外なら丸められた結果 (= 端の値) が残る
+    setDraft(toDraft(seedRef.current));
     onSet(axis.name, parsed);
   };
 
