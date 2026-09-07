@@ -134,9 +134,8 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
-  // ステータスバーに被らないよう底を持ち上げる
   return (
-    <div className="toast toast-end toast-bottom bottom-8 z-50">
+    <div className="toast toast-end toast-bottom z-50">
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}

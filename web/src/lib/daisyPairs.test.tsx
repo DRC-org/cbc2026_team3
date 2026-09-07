@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import { TabBar } from "@/components/shell/TabBar";
+import { Toaster } from "@/components/shell/Toaster";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TABS } from "@/lib/tabs";
@@ -57,6 +58,22 @@ describe("daisyUI のクラスは対で書かれている", () => {
     for (const tone of ALL_TONES.filter((t) => t !== "neutral")) {
       expect(TONE_ALERT_CLASS[tone]).toMatch(new RegExp(`(^| )alert-${tone}( |$)`));
     }
+  });
+
+  it("トーストの配置は親クラスと位置修飾子が揃っている", () => {
+    // `toast` を落とすと `position: fixed` ごと消え、通知が本文の途中へ流れ込む。
+    // 位置修飾子を落とすと右下へ寄らず、操縦者が見る場所から外れる。
+    // どちらも DOM には在るので、描画されていることを見るだけでは検出できない
+    const { container } = renderWithRobot(<Toaster />, {
+      rejection: {
+        command: "match_start",
+        reason: "チェックリスト未完了",
+        receivedAtMs: 1,
+        source: "server",
+      },
+    });
+
+    expect(container.firstElementChild).toHaveClass("toast", "toast-end", "toast-bottom");
   });
 
   it("Panel のアクセントバーは太さと色をリテラルで揃えて出す", () => {

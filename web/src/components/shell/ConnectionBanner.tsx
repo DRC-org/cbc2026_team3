@@ -8,7 +8,8 @@ import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
  * WebSocket 切断の全画面幅バナー。
  *
  * 切断中は全操作がサーバーに届かず、画面上の値も更新が止まったまま残る。
- * ステータスバーの小さな文字では気付けないため、画面上端を占有して知らせる。
+ * ヘッダー右端の接続表示は小さな文字なのでそれだけでは気付けない。画面上端を
+ * 全幅で占有して知らせる。
  * useRobotSocket が 3 秒間隔で自動再接続するので、操縦者側の操作は不要。
  */
 export function ConnectionBanner() {
