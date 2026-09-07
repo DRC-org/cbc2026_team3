@@ -146,7 +146,7 @@ constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 // 実測して入れること。**「機構確定後に広げる」という当初の方針どおりにはならず**、
 // wall_f を 180deg 動かす必要（8e34d10）で機構確定前に 270 度まで広げてある。
 // 現状 config/main_hand_positions.yaml / config/sub_hand_positions.yaml が使うのは
-// gripper 0〜24deg・wall_f 90〜180deg・wall_r 90〜180deg・sub_gripper 0〜5deg で、
+// gripper 0〜65deg・wall_f 90〜270deg・wall_r 90〜180deg・sub_gripper 0〜5deg で、
 // 270 度そのものは未実測の安全側の仮値のまま。**狭すぎる分にはクランプで止まる
 // だけだが、広すぎるとメカストッパに当たったまま停動して焼損する。**
 //
@@ -220,7 +220,7 @@ constexpr ServoSlotConfig kSlotsByBoard[][kServoSlotCount] = {
     // 基板 #0（DIP=0）: メインハンド
     {
         {SlotRole::Servo, 4, 0.0f, kGripperLimits, kServoPulse270, false},  // SV0 gripper
-        {SlotRole::Servo, 5, 180.0f, kWallFLimits, kServoPulse270, false},  // SV1 wall_f
+        {SlotRole::Servo, 5, 270.0f, kWallFLimits, kServoPulse270, false},  // SV1 wall_f
         {SlotRole::Servo, 6, 90.0f, kWallRLimits, kServoPulse270, false},  // SV2 wall_r
         // **実機で確認済み**（CAN ID 0x343 の FEEDBACK を実測）: 非接触で LOW、
         // 接触で HIGH。したがって sensorActiveLow は false。

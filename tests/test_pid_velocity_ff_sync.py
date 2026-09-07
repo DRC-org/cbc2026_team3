@@ -90,8 +90,16 @@ def _velocity_ff_pairs() -> list[tuple[str, pathlib.Path, pathlib.Path, str, str
         for axis_name, axis in axes.items():
             if not isinstance(axis, dict) or not isinstance(axis.get("motion"), dict):
                 continue
-            motor_names = (axis.get("motors") or {}).keys()
-            for motor_name in motor_names:
+            # PC 側 PID を持つモータだけが対を成す。EDULITE 05 / DM3520 はドライバが
+            # 位置ループを内蔵するので config が `pid: null` で、`main._attach_motion_profiles`
+            # も「位置制御ループに載らないモータへ書いても無害に無視される」と明記している。
+            # 絞らないと、その軸へ `motion:` を書いた瞬間に本番コードが無害と保証している
+            # 構成でこのテストだけが赤くなる。
+            robot = _load_yaml(robot_yaml)
+            for motor_name in axis.get("motors") or {}:
+                motor = (robot.get("motors") or {}).get(motor_name)
+                if not isinstance(motor, dict) or not isinstance(motor.get("pid"), dict):
+                    continue
                 pairs.append((label, robot_yaml, positions_path, axis_name, motor_name))
     return pairs
 
@@ -115,7 +123,10 @@ class TestPidVelocityFfSync:
         label, robot_yaml, positions_path, axis_name, motor_name = entry
 
         positions = _load_yaml(positions_path)
-        velocity_ff = positions["axes"][axis_name]["motion"]["velocity_ff"]
+        # `lib/sequence/positions.py` は `velocity_ff` を既定 0.0 で許す (必須キーは
+        # max_velocity / max_acceleration だけ)。添字で読むと、書き忘れた構成が
+        # KeyError で落ちて下の説明文に到達しない
+        velocity_ff = positions["axes"][axis_name]["motion"].get("velocity_ff", 0.0)
 
         robot = _load_yaml(robot_yaml)
         motor = robot["motors"][motor_name]

@@ -19,19 +19,12 @@ from lib.commands import COMMANDS, CommandSpec, RejectChannel, spec_for
 from lib.config_schema import (
     DEFAULT_HEALTH,
     DEFAULT_MATCH,
-    DEFAULT_TUNING,
     HealthThresholds,
     MatchSettings,
-    TuningSettings,
 )
 from lib.control.feedback import FeedbackFreshness
 from lib.control.periodic import PeriodicTask
-from lib.control.position_loop import (
-    MAX_TUNABLE_GAIN,
-    TUNABLE_PID_KEYS,
-    M3508PositionLoop,
-    PidGains,
-)
+from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import TargetRefresher
 from lib.drivers.base import TelemetrySupport
@@ -45,11 +38,9 @@ from lib.health import (
     worst_bus_health,
 )
 from lib.manual import ManualControlError, ManualController, OperationMode
-from lib.match_state import PHASES_DURING_MATCH, ChecklistItem, Court, MatchState
+from lib.match_state import ChecklistItem, Court, MatchState
 from lib.sequence.engine import Sequence
 from lib.server_motor_check import MotorCheckController, Pausable
-from lib.tuning.recorder import Capture
-from lib.tuning.report import summarize
 from lib.ws_hub import WsHub
 
 logger = logging.getLogger(__name__)
@@ -58,12 +49,6 @@ _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 
 #: 1 クライアントへの送信を諦めるまでの秒数。
 #: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
-
-#: 配信を待つステップ応答の在庫上限。あふれたら古いものから捨てる。
-#: 調整では最後に試した 1 回が最も重要なので、新しい記録を捨てて古いものを
-#: 残す形にはしない。動作確認では両ハンドの複数軸が続けて動くため、
-#: 1 回の配信周期 (50ms) に複数の記録が閉じることがある
-_TUNING_CAPTURE_BACKLOG = 8
 
 #: `watch_task` が拾った失敗ラベルの在庫上限 (ロボットごと)。あふれたら古いものから
 #: 捨てる。無制限に伸ばすと、直したはずの古い失敗がいつまでも画面に残り続ける。
@@ -162,7 +147,6 @@ class RobotServer:
         health: HealthThresholds = DEFAULT_HEALTH,
         checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         match_settings: MatchSettings = DEFAULT_MATCH,
-        tuning: TuningSettings = DEFAULT_TUNING,
         dry_run: bool = False,
         dev_tools: bool = False,
     ) -> None:
@@ -176,12 +160,6 @@ class RobotServer:
         self._ws = WsHub()
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
-        self._tuning = tuning
-        # 位置制御ループ (200Hz) が置いていく記録の受け皿。**制御周期から呼ばれる
-        # ので、受け取りは O(1) の append だけに留める** (解析と配信は配信ループ側)。
-        # 上限を置くのは、誰も見ていない間に記録が溜まり続けるのを防ぐため。
-        # 古いものから捨てるのは、調整では最後に試した 1 回が最も重要だから
-        self._tuning_captures: deque[tuple[str, Capture]] = deque(maxlen=_TUNING_CAPTURE_BACKLOG)
         self._e_stop_active: bool = False
         # 停止理由は停止が続くかぎり保持する。`_broadcast_state` は停止中に毎ティック
         # e_stop_state を送り直すため、保持しないと自動検知の直後 1 通だけが本当の
@@ -315,8 +293,10 @@ class RobotServer:
 
         `done_callback` が集合から取り除くだけで `t.exception()` を取らない箇所が
         3 つある (緊急停止解除の再励磁・単発の再励磁・同期ずれ検出からの全体緊急停止)。
-        例外そのものは消えないが (CPython が "Task exception was never retrieved" を
-        journal へ出す)、どのロボットのどの経路か・いつ起きたかが画面から読めない。
+        **かつては CPython の "Task exception was never retrieved" だけが journal に
+        出ていた** —— どのロボットのどの経路か・いつ起きたかは読めず、しかも出力は
+        GC のタイミング任せだった。ここで `t.exception()` を取るのでその行はもう出ない。
+        journal で追うときに探すのは下の "投げっぱなしタスクが失敗しました" である。
         先行事例は `BusHealthInfo.rx_down_episodes` (journal にしか出ていなかった
         CAN 途絶を UI へ出した) で、同じ形に寄せる —— `safety.failed_tasks` として
         配信し、対象ロボットへ人が読めるラベルで積む。
@@ -607,7 +587,7 @@ class RobotServer:
             # **ここは `_ws_handler` の受信ループから await されている。** 抜けさせると
             # `async for msg in ws` ごと降り、その操縦者は画面から何も送れなくなる
             # (試合中なら E-STOP を押す手段まで失う)。かつては `_run_manual` だけが
-            # 自前で握っており、`set_param` → `set_pid_gains` のように投げうる経路は
+            # 自前で握っており、他のハンドラが投げうる経路は
             # 無防備なままだった。握りをディスパッチ 1 箇所に置けば、コマンドを
             # 足す人が同じ握りを書き写す必要が無くなる。
             # 拒否経路はそのコマンドが宣言したものを使う (動作確認だけは専用チャネル)
@@ -779,9 +759,6 @@ class RobotServer:
     async def _cmd_health_check(self, _data: dict, _requester: WSOrNone) -> None:
         # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
         await self._broadcast_state()
-
-    async def _cmd_set_param(self, data: dict, requester: WSOrNone) -> None:
-        await self._handle_set_param(data, requester)
 
     async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
@@ -1072,149 +1049,6 @@ class RobotServer:
         self._apply_court()
         await self._broadcast_match_state()
 
-    async def _handle_set_param(
-        self,
-        data: dict,
-        requester: WSOrNone,
-    ) -> None:
-        """PID ゲインを実行中に差し替える (/pid-tuning タブ)。
-
-        3 値を 1 通で受ける。項目ごとに分けると混ざった状態が 200Hz の制御周期を
-        またいで残り、通らないときの拒否も 3 通に増える。
-
-        対象は M3508 だけ。位置制御を PC 側の PIDController で閉じているのは M3508 の
-        位置制御ループのみで、EDULITE 05 と自作モータドライバはドライバ/ファーム側で
-        ループを閉じているため PC 側に書き換えられるゲインが存在しない
-        (自作モタドラの SET_PARAM は PC 側にエンコーダが無く同じ意味を持たない)。
-
-        通らない要求は必ず理由を返す。以前のように黙ってログを出すだけだと、操縦者は
-        送信できたと信じたまま効いていないゲインで調整を続けることになる。
-        """
-        motor_name = data.get("motor")
-        gains = data.get("gains")
-
-        if not isinstance(motor_name, str) or not motor_name:
-            await self._reject_command(requester, "set_param", "モータが指定されていません")
-            return
-
-        if not isinstance(gains, dict) or not gains:
-            await self._reject_command(
-                requester, "set_param", "差し替えるゲインが指定されていません"
-            )
-            return
-
-        reason = self._invalid_gain_reason(gains)
-        if reason is not None:
-            await self._reject_command(requester, "set_param", reason)
-            return
-
-        loop = self._find_position_loop(motor_name)
-        if loop is None:
-            if self._has_motor(motor_name):
-                reason = (
-                    f"モータ '{motor_name}' は PC 側 PID を持ちません "
-                    "(ドライバ側で制御しているためサーバーからは変更できません)"
-                )
-            else:
-                reason = f"モータ '{motor_name}' が見つかりません"
-            await self._reject_command(requester, "set_param", reason)
-            return
-
-        affected = loop.set_pid_gains(motor_name, gains)
-        applied = ", ".join(f"{key}={gains[key]}" for key in sorted(gains))
-        logger.info("set_param: %s を適用 (%s)", applied, ", ".join(affected))
-
-    def _invalid_gain_reason(self, gains: dict) -> str | None:
-        """受け取ったゲイン一式を検証する。問題が無ければ None。
-
-        1 つでも通らなければ 1 つも適用しない。半分だけ入ると、操縦者が意図しない
-        PID の組み合わせで機体が動く。
-        """
-        for key, value in gains.items():
-            if not isinstance(key, str) or key not in TUNABLE_PID_KEYS:
-                return f"変更できるのは {'/'.join(TUNABLE_PID_KEYS)} のみです (受け取った: {key!r})"
-
-            # bool は Python では int だが、ゲインとして送られてきた時点で誤送信
-            if isinstance(value, bool) or not isinstance(value, int | float):
-                return f"{key} の値が数値ではありません: {value!r}"
-            if not math.isfinite(value):
-                return f"{key} の値が有限ではありません: {value!r}"
-            if value < 0:
-                # 負のゲインは正帰還になり、偏差が増える向きに電流が出て即座に発散する
-                return f"{key} に負の値は指定できません: {value}"
-            if value > MAX_TUNABLE_GAIN:
-                # 上限が無いと kp=1e6 のような打ち間違いがそのまま通る。出力は
-                # ±CURRENT_MAX に飽和するので、その先は調整ではなくバンバン制御になる
-                return f"{key} の上限は {MAX_TUNABLE_GAIN:.0f} です (受け取った: {value})"
-        return None
-
-    def record_tuning_capture(self, robot_name: str, capture: Capture) -> None:
-        """位置制御ループから 1 回ぶんのステップ応答を受け取る。
-
-        **200Hz の制御周期から同期に呼ばれる。** ここで解析や送信を行うと、
-        調整支援の都合で制御周期が伸びる。在庫へ積むだけにして、解析と配信は
-        配信ループ (20Hz) が行う。
-        """
-        self._tuning_captures.append((robot_name, capture))
-
-    def _drain_tuning_captures(self) -> list[dict]:
-        """溜まった記録を配信 1 通ずつへ変換する。
-
-        **試合中は配らず捨てる。** 試合中に調整はしないうえ、1 通が数十 KB あるので
-        テレメトリの帯域を奪う (詰まった 1 台の切り離しまで誘発しうる)。記録そのものを
-        止めないのは、止めると試合直前の設定フェーズへ戻った瞬間に「記録が始まる
-        までの空白」ができ、最初の 1 回が必ず取れなくなるため。
-        """
-        if not self._tuning_captures:
-            return []
-        captures = list(self._tuning_captures)
-        self._tuning_captures.clear()
-
-        if self.match.phase in PHASES_DURING_MATCH:
-            return []
-
-        payloads: list[dict] = []
-        for robot_name, capture in captures:
-            try:
-                report = summarize(robot_name, capture)
-                payloads.append(report.to_payload(max_points=self._tuning.max_points))
-            except Exception:
-                # 解析の失敗でテレメトリ配信ごと止めない。調整支援は補助機能であり、
-                # ヘルスや緊急停止の配信を巻き添えにしてよい理由が無い
-                logger.warning(
-                    "ステップ応答の解析に失敗しました (robot=%s, motor=%s)",
-                    robot_name,
-                    capture.motor,
-                    exc_info=True,
-                )
-        return payloads
-
-    def _motor_pid_state(self, motor_name: str) -> PidGains | None:
-        """UI へ配る現在ゲイン。PC 側 PID を持たないモータは None。
-
-        配らなかった頃、/pid-tuning は現在値を知る手段が無いまま初期値 0 を表示し、
-        そのまま送ると全ゲインが 0 になった。None は「ドライバ・ファーム側で
-        制御していて PC からは変更できない」の単一の表現でもあり、UI はこれだけで
-        調整対象を選り分ける (判定を UI 側に書き写さない)。
-        """
-        loop = self._find_position_loop(motor_name)
-        return None if loop is None else loop.pid_gains(motor_name)
-
-    def _motor_control_state(self, motor_name: str) -> dict[str, object]:
-        """UI へ配る位置目標と飽和。PC 側 PID を持たないモータは target=None。
-
-        目標値を配るのは、これが無いと画面に**偏差そのものが出ない**ため。
-        調整で最も見たい量が、以前は操縦者の頭の中の引き算にしか存在しなかった。
-
-        飽和を配るのは、出力が上限に張り付いている間はゲインを変えても応答が
-        変わらないため。これが見えないと「kp を上げても下げても同じ」という観察から
-        制御以外の原因 (機構の負荷・config の output_limit) へ辿り着けない。
-        """
-        loop = self._find_position_loop(motor_name)
-        if loop is None:
-            return {"target": None, "saturated": False}
-        return {"target": loop.target(motor_name), "saturated": loop.is_saturated(motor_name)}
-
     def _motor_command_state(self, robot_name: str, motor_name: str) -> dict[str, object]:
         """PC が基板へ最後に送った指令値と、その種別。一度も送っていなければ None。
 
@@ -1222,11 +1056,10 @@ class RobotServer:
         「今どうなっているか」である。** どちらも測る手段を持たないので配信の 4 値は
         すべて `None` になり、指令まで出さないと画面はそのモータについて何も言えない。
 
-        **`target` (`_motor_control_state`) と混ぜてはならない。** あちらは M3508
-        位置制御ループが持つ *軌道の中間目標* で、速度・加速度で制限しながら毎周期
-        動く値。こちらは *PC が基板へ最後に送った値そのもの* で、
-        `GenericTargetRefresher` が 20Hz で再送し続けているのはこの値である。
-        1 つに畳むと、行き過ぎの観察に使う偏差 (実測 - 中間目標) と、
+        **M3508 位置制御ループが持つ *軌道の中間目標* と混ぜてはならない。**
+        あちらは速度・加速度で制限しながら毎周期動く値で、こちらは *PC が基板へ
+        最後に送った値そのもの* である (`GenericTargetRefresher` が 20Hz で
+        再送し続けているのはこの値)。1 つに畳むと、「今どこを狙っているか」と
         「何を指令したか」が同じ欄の中で入れ替わる。
 
         出どころは ``MotorHandle`` ただ 1 つで、手動・シーケンス・動作確認の
@@ -1250,22 +1083,6 @@ class RobotServer:
         handle = group[motor_name]
         mode = handle.mode
         return {"command": handle.target, "command_mode": None if mode is None else mode.value}
-
-    def _find_position_loop(self, motor_name: str) -> M3508PositionLoop | None:
-        """指定モータを制御している M3508 位置制御ループを探す。"""
-        for ctx in self._robots.values():
-            for loop in ctx.position_loops:
-                if motor_name in loop.motor_names:
-                    return loop
-        return None
-
-    def _has_motor(self, motor_name: str) -> bool:
-        """いずれかのロボットに登録されているモータかどうか。
-
-        「存在しない」と「存在するが PC 側 PID を持たない」を操縦者に区別させるために要る
-        (前者は打ち間違い、後者は仕様)。
-        """
-        return any(motor_name in ctx.can_manager.motors for ctx in self._robots.values())
 
     # ------------------------------------------------------------------ #
     #  試合状態 (コート / フェーズ / チェックリスト)
@@ -1334,12 +1151,17 @@ class RobotServer:
         # に直前の試合の記録を消さないため。CANManager も PeriodicTask も「試合」を
         # 知らないぶん、いつ呼ぶかはここ (サーバー) が決める。
         # ジッタの集計 1 行は match_finish が出すので、ここでは黙って 0 に戻すだけ。
-        for name, ctx in self._robots.items():
+        for ctx in self._robots.values():
             ctx.can_manager.reset_rx_down_episodes()
             for task in self._periodic_tasks(ctx):
                 task.reset_jitter_stats()
-            # `watch_task` が積んだ失敗ラベルも同じく前縁リセット
-            self._failed_tasks.pop(name, None)
+
+        # `watch_task` が積んだ失敗ラベルも同じく前縁リセット。**ロボットごとに pop
+        # せず辞書ごと落とす** —— `watch_task` の `robots` に未登録の名前が渡ると、
+        # そのエントリは `_safety_state` からも読まれず (画面に出ず) リセットもされない
+        # ままになる。現在の呼び出し口は 3 つとも登録済み名なので到達しないが、
+        # clear() にしておけば構造的に閉じる
+        self._failed_tasks.clear()
 
         # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
         logger.info("試合開始: court=%s", self.match.court.value)
@@ -2261,13 +2083,9 @@ class RobotServer:
             prev = self._last_health.get(robot_name)
             change_events.extend(self._diff_health(robot_name, prev, snap))
 
-        # 5) 溜まったステップ応答を同じ配信で流す。専用の配信経路を作らないのは、
-        #    `WsHub` が守っている約束事 (送信ごとのタイムアウト・切り離しの
-        #    別タスク化・集合のスナップショット) を経路のぶんだけ守り続けることに
-        #    なるため。1 通が数十 KB あるので、詰まった相手の切り離しは特に効く
-        await self._ws.fanout([*state_messages, *change_events, *self._drain_tuning_captures()])
+        await self._ws.fanout([*state_messages, *change_events])
 
-        # 6) 差分検出後にスナップショットを更新する。順序を逆にすると
+        # 5) 差分検出後にスナップショットを更新する。順序を逆にすると
         #    1 回目の broadcast で health_change が出てしまう。
         self._last_health = snapshots
 
@@ -2300,14 +2118,6 @@ class RobotServer:
             # 擬似値を作ってよいのは実機が測れる項目だけで、DC 基板に温度や速度を
             # 作ると机上で確かめている画面が実機と別物になる
             motors[motor_name] = _measured_only(raw, motor.telemetry)
-            # ゲインはテレメトリではなく構成情報なので dry-run 分岐の外で足す。
-            # 擬似値を作る意味が無く、中に入れると dry-run で全モータが
-            # 「調整不可」になって机上で UI を確かめられない
-            motors[motor_name]["pid"] = self._motor_pid_state(motor_name)
-            # 目標値と飽和は PC 側 PID を持つモータにしか無い。持たないモータで
-            # None を配るのは「測っていない」の表現で、0 を配ってはならない
-            # (偏差 0 = 完璧に追従している、と読めてしまう)
-            motors[motor_name].update(self._motor_control_state(motor_name))
             # 指令値も dry-run 分岐の外で足す。**擬似値を作ってはならない** ——
             # 測れないモータの画面が指令値だけを頼りにしている以上、机上で見えている
             # 数字が「PC が実際に送った値」でなければ確かめたい対象そのものが消える

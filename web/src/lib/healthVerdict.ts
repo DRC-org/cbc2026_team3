@@ -122,9 +122,8 @@ export function summarizeMotors(healthMotors: MotorHealth[] | undefined): Health
 /**
  * モータ温度の状態色。
  *
- * 以前 `MotorStatus` と `MotorTuning` に別実装があり、片方は独自の
- * `StatTone`、もう片方は `Tone` を返していた。しきい値の変更が片方にしか
- * 効かない構造だったので、判定はここ 1 箇所に置く。
+ * 判定を画面ごとに書き写すと、返す色の語彙もしきい値の解釈も画面ごとにずれ、
+ * config を直しても片方の画面にしか効かない。判定はここ 1 箇所に置く。
  *
  * **しきい値は `server_info` 由来のものしか使わず、UI 側のフォールバック値を持たない。**
  * 持つと、config を変えても画面だけが古い境界で判定する二重管理が戻る。届いていない間は

@@ -218,29 +218,6 @@ class TestStateIncludesEStopActive:
             await ws.close()
 
 
-class TestSetParamCommand:
-    async def test_set_param_command(self) -> None:
-        """set_param コマンドの受付を検証する。"""
-        fx = _build_fixture()
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await ws.send_json(
-                {
-                    "type": "set_param",
-                    "motor": "m3508_1",
-                    "key": "kp",
-                    "value": 1.5,
-                }
-            )
-            await asyncio.sleep(0.05)
-
-            # エラーなく接続が維持されていること
-            assert not ws.closed
-            await ws.close()
-
-
 def _fault_health_snapshot(mgr: CANManager):
     """全モータ FAULT のスナップショット (health_change 差分を作るため)。"""
     snap = ok_health_snapshot(mgr)
@@ -369,9 +346,6 @@ class TestUnmeasuredTelemetryIsNull:
             "vel": None,
             "torque": None,
             "temp": None,
-            "pid": None,
-            "target": None,
-            "saturated": False,
             # 指令もまだ出していない (出した後の形は TestCommandValue が見る)
             "command": None,
             "command_mode": None,

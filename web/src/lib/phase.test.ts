@@ -33,7 +33,7 @@ describe("isDuringMatch", () => {
     expect(isDuringMatch("ready")).toBe(false);
   });
 
-  it("finished は試合中ではない (PID 変更も動作確認もサーバーは通す)", () => {
+  it("finished は試合中ではない (動作確認もコート選択もサーバーは通す)", () => {
     // 画面レイアウトの都合で match と finished をまとめて扱いたくなるが、
     // コマンドの可否は別物。ここを混ぜると試合終了後に操作を塞いでしまう
     expect(isDuringMatch("finished")).toBe(false);

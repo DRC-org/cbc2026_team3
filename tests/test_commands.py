@@ -50,7 +50,6 @@ _EXPECTED_COMMANDS = {
     "e_stop",
     "e_stop_release",
     "health_check",
-    "set_param",
     "sequence_start",
     "sequence_stop",
     "sequence_jump",
@@ -233,11 +232,6 @@ class TestPhaseGate:
         assert phase_deny_reason("motor_check_start", Phase.SETUP) is None
         assert phase_deny_reason("motor_check_start", Phase.MATCH) is not None
 
-    def test_set_param_blocked_during_match(self) -> None:
-        """試合中に PID を差し替えると、走行中の位置制御の特性が突然変わる。"""
-        assert phase_deny_reason("set_param", Phase.READY) is None
-        assert phase_deny_reason("set_param", Phase.MATCH) is not None
-
     @pytest.mark.parametrize(
         "command",
         [
@@ -267,7 +261,6 @@ class TestEStopGate:
             "sequence_jump",
             "trigger",
             "match_start",
-            "set_param",
             "motor_check_start",
             # 手動指令は目標値を送る操作。通すと緊急停止が意味を失う
             "manual_move",
@@ -408,7 +401,7 @@ class TestDevToolsGate:
 
 
 class TestPreparationOnlyCommands:
-    @pytest.mark.parametrize("command", ["set_court", "motor_check_start", "set_param"])
+    @pytest.mark.parametrize("command", ["set_court", "motor_check_start"])
     def test_configuration_commands_share_the_same_phase_set(self, command: str) -> None:
-        """試合中に設定を触らせない、という 1 つの方針を 3 コマンドで共有する。"""
+        """試合中に設定を触らせない、という 1 つの方針を 2 コマンドで共有する。"""
         assert COMMANDS[command].allowed_phases == PHASES_OUTSIDE_MATCH

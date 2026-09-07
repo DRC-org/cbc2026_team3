@@ -33,7 +33,6 @@ from lib.config_schema import (
     MotorConfig,
     RobotConfig,
     SystemConfig,
-    TuningSettings,
     load_robot_config,
 )
 from lib.control.position_loop import M3508PositionLoop
@@ -333,72 +332,6 @@ class TestBuildPositionLoops:
         await lenient.set_target("lift_motor", ControlMode.POSITION, 100.0)
         await lenient.step()
         assert manager.last_currents[0] != 0
-
-    async def test_tuning_settings_reach_the_loop(self) -> None:
-        """config の tuning が届かないと、波形が 1 本も出ない。
-
-        既定を「記録しない」に倒してあるぶん、配線漏れは例外ではなく沈黙として
-        現れる。ここで通し 1 回ぶんを実際に閉じさせて、経路が生きていることを見る。
-        """
-        config = {
-            "robot_name": "main_hand",
-            "motors": {"lift_motor": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}},
-        }
-        driver = M3508Driver("lift_motor", can_id=1)
-        manager = _StubCANManager()
-        feed_m3508(driver, deg=0.0)
-        manager.feedback_at["lift_motor"] = time.time()
-        captures: list[object] = []
-
-        loop = _build_position_loops(
-            _robot(config),
-            manager,
-            {"lift_motor": driver},
-            feedback_timeout_ms=500.0,
-            is_estop_active=lambda: False,
-            tuning=TuningSettings(
-                enabled=True,
-                window_s=0.02,
-                pre_trigger_s=0.0,
-                min_step_deg=0.5,
-                max_points=300,
-            ),
-            capture_sink=captures.append,
-        )["m3508_bus"]
-
-        await loop.set_target("lift_motor", ControlMode.POSITION, 10.0)
-        for _ in range(20):
-            manager.feedback_at["lift_motor"] = time.time()
-            await loop.step()
-
-        assert captures
-
-    async def test_no_recording_without_tuning_settings(self) -> None:
-        config = {
-            "robot_name": "main_hand",
-            "motors": {"lift_motor": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1}},
-        }
-        driver = M3508Driver("lift_motor", can_id=1)
-        manager = _StubCANManager()
-        feed_m3508(driver, deg=0.0)
-        manager.feedback_at["lift_motor"] = time.time()
-        captures: list[object] = []
-
-        loop = _build_position_loops(
-            _robot(config),
-            manager,
-            {"lift_motor": driver},
-            feedback_timeout_ms=500.0,
-            is_estop_active=lambda: False,
-            capture_sink=captures.append,
-        )["m3508_bus"]
-
-        await loop.set_target("lift_motor", ControlMode.POSITION, 10.0)
-        for _ in range(20):
-            manager.feedback_at["lift_motor"] = time.time()
-            await loop.step()
-
-        assert captures == []
 
 
 class TestWireRobotMotors:
@@ -1044,10 +977,10 @@ class TestAttachMotionProfiles:
     def test_起動ログに3つのつまみが全部出る(self, caplog: pytest.LogCaptureFixture) -> None:
         """``velocity_ff`` は**実行中に変更できず UI にも配信されない**。
 
-        ``pid_gains()`` に相当する読み口が無いので、起動ログが「今どの値で動いて
-        いるか」を知る唯一の経路になる。しかも巡航中の出力を最も大きく左右する値
-        (``kd`` と釣り合っていないと D 項が出力を食い潰す) なので、落とすと
-        「速くならない」原因が画面からもログからも読めなくなる。
+        ``kp`` / ``ki`` / ``kd`` にも読み口が無いので、起動ログが「今どの値で
+        動いているか」を知る唯一の経路になる。しかも巡航中の出力を最も大きく
+        左右する値 (``kd`` と釣り合っていないと D 項が出力を食い潰す) なので、
+        落とすと「速くならない」原因が画面からもログからも読めなくなる。
         """
         _, _, loops = self._rig()
 

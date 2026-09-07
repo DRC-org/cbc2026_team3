@@ -3,7 +3,7 @@ export interface TabDef {
   label: string;
   /** 切替に割り当てる数字キー。タブバー上にも表示して発見できるようにする */
   hotkey: string;
-  /** バッジ表示のために監視するロボット。Monitor / PID Tuning は対象外 */
+  /** バッジ表示のために監視するロボット。Monitor は対象外 */
   robotKey?: string;
 }
 
@@ -11,7 +11,6 @@ export const TABS: TabDef[] = [
   { path: "/monitor", label: "Monitor", hotkey: "1" },
   { path: "/main-hand", label: "Main Hand", hotkey: "2", robotKey: "main_hand" },
   { path: "/sub-hand", label: "Sub Hand", hotkey: "3", robotKey: "sub_hand" },
-  { path: "/pid-tuning", label: "PID Tuning", hotkey: "4" },
 ];
 
 export const DEFAULT_TAB_PATH = TABS[0].path;

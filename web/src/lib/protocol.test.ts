@@ -222,8 +222,8 @@ describe("parseServerMessage", () => {
      */
     it("測れない項目が null のモータを異常扱いにしない", () => {
       const motors = {
-        conveyor: { pos: null, vel: null, torque: null, temp: null, target: null, pid: null },
-        y_axis_r: { pos: 1.5, vel: 0, torque: 0.2, temp: 41, target: 1.5, pid: null },
+        conveyor: { pos: null, vel: null, torque: null, temp: null, command: 0.3 },
+        y_axis_r: { pos: 1.5, vel: 0, torque: 0.2, temp: 41, command: 1.5 },
       };
       const msg = parse({ type: "state", robot: "main_hand", motors });
 
@@ -587,116 +587,6 @@ describe("parseServerMessage", () => {
       expect(message?.type).toBe("motor_check_state");
       if (message?.type !== "motor_check_state") return;
       expect(message.motorCheck.excluded_steps).toBe(MALFORMED);
-    });
-  });
-
-  describe("tuning_capture", () => {
-    /** 実配信と同じく全欄が揃った指標。半端な形は受信境界で MALFORMED になる */
-    const METRICS = {
-      step_from: 0,
-      step_to: 10,
-      step_size: 10,
-      rise_time_s: 0.05,
-      overshoot_pct: 12,
-      peak_time_s: 0.08,
-      settling_time_s: null,
-      steady_state_error: 0.1,
-      oscillation_hz: null,
-      damping_ratio: null,
-      saturation_ratio: 0.2,
-      peak_output: 900,
-      settle_band: 1,
-      sample_count: 8,
-      duration_s: 0.14,
-    };
-
-    // eslint の consistent-function-scoping はここを外へ出せと言うが、payload は
-    // tuning_capture 用の組み立てで、この describe の外で使う場面が無い
-    // oxlint-disable-next-line unicorn/consistent-function-scoping
-    const payload = (overrides: object = {}) => ({
-      type: "tuning_capture",
-      robot: "main_hand",
-      motor: "y_axis_r",
-      captured_at: 1700000000,
-      gains: { kp: 2, ki: 0, kd: 0 },
-      metrics: null,
-      advice: [],
-      samples: { t: [0, 1], target: [10, 10], pos: [0, 9], output: [500, 100], sat: [true, false] },
-      ...overrides,
-    });
-
-    it("波形・指標・助言を 1 通で受け取る", () => {
-      const message = parse(
-        payload({
-          metrics: METRICS,
-          advice: [{ code: "overshoot", severity: "info", message: "行き過ぎ" }],
-        }),
-      );
-
-      expect(message?.type).toBe("tuning_capture");
-      if (message?.type !== "tuning_capture") return;
-      expect(message.capture.samples.pos).toEqual([0, 9]);
-      expect(message.capture.metrics).toEqual(METRICS);
-      expect(message.capture.advice).toHaveLength(1);
-    });
-
-    it.each(["overshoot_pct", "settle_band", "step_to", "duration_s"])(
-      "%s が欠けた指標は MALFORMED (null へ倒さない)",
-      (key) => {
-        // null は「ステップとして解釈できなかった」の表現。混ぜると、配信側の
-        // 不具合が「そういう記録もある」として画面から見えなくなる。
-        // 半端な形をそのまま通していた頃は `m.overshoot_pct.toFixed(0)` が
-        // MetricsPanel のレンダー本体で投げていた
-        const broken: Record<string, unknown> = { ...METRICS };
-        delete broken[key];
-        const message = parse(payload({ metrics: broken }));
-
-        expect(message?.type).toBe("tuning_capture");
-        if (message?.type !== "tuning_capture") return;
-        expect(message.capture.metrics).toBe(MALFORMED);
-      },
-    );
-
-    it("測れなかった項目の null は通す (欠落と区別する)", () => {
-      // rise_time_s の null は「窓の中で目標の 90% へ届かなかった」の意味で、
-      // 正常な配信。ここを弾くと指標そのものが出なくなる
-      const message = parse(payload({ metrics: { ...METRICS, rise_time_s: null } }));
-
-      expect(message?.type).toBe("tuning_capture");
-      if (message?.type !== "tuning_capture") return;
-      expect(message.capture.metrics).toMatchObject({ rise_time_s: null });
-    });
-
-    it("指標が null の記録も受け取る", () => {
-      /** 弾いてしまうと、波形だけは見たい場面で画面に何も出ない */
-      const message = parse(payload());
-
-      expect(message?.type).toBe("tuning_capture");
-      if (message?.type !== "tuning_capture") return;
-      expect(message.capture.metrics).toBeNull();
-    });
-
-    it("列の長さが揃っていない波形は捨てる", () => {
-      /**
-       * 揃っていない列を描くと、`t` の長さでループした先で `pos` が undefined になり、
-       * 例外も出ないままグラフだけが静かに途切れる。
-       */
-      const message = parse(
-        payload({
-          samples: { t: [0, 1], target: [10], pos: [0, 9], output: [1, 1], sat: [false] },
-        }),
-      );
-
-      expect(message).toBeNull();
-    });
-
-    it("波形そのものが欠けていたら捨てる", () => {
-      expect(parse(payload({ samples: undefined }))).toBeNull();
-    });
-
-    it("robot が無ければ捨てる", () => {
-      /** 画面はロボットごとに分けて出すので、宛先の無い記録は置き場所が無い */
-      expect(parse(payload({ robot: undefined }))).toBeNull();
     });
   });
 });

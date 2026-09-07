@@ -349,7 +349,7 @@ positions:
   # 消えている**ので、ここに合わせる先も無い (書けば起動時に未知キーとして拒否される)。
   gripper:
     open: 0.0            # 開 [deg]
-    closed: 24.0          # 閉 (把持) [deg]
+    closed: 65.0          # 閉 (把持) [deg]
 
   # 搬送方向はコートで逆になるので run だけをコート別にする。
   #
@@ -368,7 +368,7 @@ positions:
     run: { red: 0.3, blue: -0.3 }   # 搬送 [duty]。符号が回転方向
 
   wall_f:
-    initial: 180.0         # 初期 (退避) [deg]
+    initial: 270.0         # 初期 (退避) [deg]
     closed: 180.0          # 閉 (ワーク保持) [deg]
     open: 90.0            # 開 [deg]
 

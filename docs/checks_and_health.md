@@ -349,6 +349,42 @@ down です (起動は続けます)` を ERROR で残す（**起動は拒否し�
 変化しない —— バスが復旧すれば見出しは「異常なし」に戻るが、ワーク落下の通知は
 リセットされるまで残り続ける（2 つの表示が別の役目を持つ）。
 
+### 投げっぱなしタスクの失敗（`failed_tasks`）
+
+**`asyncio.create_task` して待たないタスクが 3 つある。** 緊急停止解除の再励磁
+（`_cmd_e_stop_release` → `_reactivate_motors`）・単発の再励磁
+（`_cmd_reenergize_motors` → `_reenergize_motors`）・同期ずれ検出からの全体緊急停止
+（`main._make_sync_violation_handler` → `activate_e_stop`）で、どれも
+`add_done_callback` が集合から取り除くだけで `t.exception()` を取っていなかった。
+
+かつては CPython の `Task exception was never retrieved` が journal に出るだけで、
+**どのロボットのどの経路か・いつ起きたかは読めず、しかも出力は GC のタイミング任せ**
+だった。とくに 3 つ目が飛ぶと「全体緊急停止が発火しなかった」ことが汎用メッセージに
+しか残らない。`rx_down_episodes` を journal から UI へ出したのと同じ形に寄せてある
+（試合中に journal を見る人はいない）。
+
+- 口は `RobotServer.watch_task` ただ 1 つ。`safety.failed_tasks: string[]` として配る
+- **平常時は空配列で無音。** `parseSafety` の既存の文字列配列ループにそのまま乗るので、
+  パース経路も UI プリミティブも増えない
+- **復帰しても消さない。** リセットは `match_start` の前縁リセットだけで、
+  `reset_rx_down_episodes()` / `reset_jitter_stats()` と同じループ・同じ理由
+- **`t.cancelled()` を先に見る。** `Task.exception()` はキャンセル済みタスクへ
+  `CancelledError` を送出するので、見ないと `_on_shutdown` の一斉キャンセルで
+  コールバック自身が例外を撒く
+- 帰属は**失敗した経路の届く範囲**で決める。全体緊急停止の失敗は全ロボットへ
+  （失敗した時点でどの機体も保護されていない）、単発の再励磁は対象 1 台へ
+
+**この欄は tone を動かさず `forcedOpen` にもしない。** `firmware_unconfirmed_motors`
+と同じ扱いで、診断ツリーを畳んだままにする。強制展開が要る場面はこの欄が単独で
+立つことはなく、別の欄が同時に立って主張するため —— 同期ずれからの緊急停止が
+失敗したケースでは `SyncMonitor.violated` がラッチして `safety.sync_violations` が
+立ち、`describeSafetyIssues` が tone error へ倒して診断ツリーを開く。再励磁の失敗も、
+励磁状態を報告するドライバ（EDULITE 05 / DM3520）なら `_unenergized_motors` の
+`is_energized() is False` 側で拾われる。**この依存関係が崩れたら（同時に立つ欄が
+無くなったら）、こちらを主張側へ倒し直すこと。**
+
+journal で追うときに探す文字列は `投げっぱなしタスクが失敗しました` である。
+
 ### 受信の中断は M3508 の累積角を飛ばす
 
 **受信が戻っても、位置は戻らない。** M3508 の多回転累積は「半周を超える差分は
@@ -923,9 +959,11 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 **この 3 層はいずれも「ずれたら止める」側で、ずれを縮めるものは 1 つも無い。**
 位置制御はモータごとに独立した PID なので、左右で負荷や摩擦が違えば追従差は原理的に
 残る。縮める経路は 200Hz の位置制御ループに載る**同期補正**（`SyncGroup.corrections()`）
-だけで、`axes.<軸>.sync_kp` を書いた軸にしか出ない。**同梱の config はすべて 0.0
-（補正なし）** なので、現状はどの軸にも補正が出ていない —— 有効化は機構が左右直結して
-からで、手順は `docs/mechanism_handoff.md` §3-1。補正は電流 0 の周期には出ないので、
+だけで、`axes.<軸>.sync_kp` を書いた軸にしか出ない。**本番の `y_axis` は 2026-09-04 に
+実運用ストローク 150mm で詰めた `sync_kp: 16.0` が入っている**（`rotate` は 0.0 のまま）。
+**机上ベンチ（`config/bench/m3508/`）は直結していない 2 台なので 0.0** —— 揃うべき前提が
+無いまま別々の負荷で回るため。詰め方は `docs/mechanism_handoff.md` §3-1。
+補正は電流 0 の周期には出ないので、
 上の 3 層の判断を上書きすることはない。
 
 **現在の偏差は手動操縦パネルの軸行に出る**（`state.manual.axes[].deviation`。算出は

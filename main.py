@@ -23,13 +23,12 @@ from lib.config_schema import (
     MotorConfig,
     RobotConfig,
     SystemConfig,
-    TuningSettings,
     load_robot_config,
     load_system_config,
 )
 from lib.control.feedback import FeedbackFreshness
 from lib.control.pid import PIDController
-from lib.control.position_loop import CaptureSink, M3508PositionLoop, make_position_pid
+from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import (
     GenericTargetRefresher,
@@ -723,10 +722,6 @@ def _build_position_loops(
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
-    # 既定は「記録しない」に倒す。配線を忘れた経路の症状が「波形が出ない」に
-    # なり、config と違う設定が黙って効く形にはならない
-    tuning: TuningSettings | None = None,
-    capture_sink: CaptureSink | None = None,
 ) -> dict[str, M3508PositionLoop]:
     """config 中の M3508 をバス単位でまとめた位置制御ループ群を作る。
 
@@ -750,10 +745,6 @@ def _build_position_loops(
                 feedback_timeout_ms=feedback_timeout_ms,
                 # 緊急停止インターロック: 実行中ステップが出した目標を破棄し電流 0 に落とす
                 is_estop_active=is_estop_active,
-                # PID 調整支援。目標値のステップを検出して応答を記録する
-                # (記録のために機体を動かす経路は無い)
-                tuning=tuning,
-                capture_sink=capture_sink,
             )
             loops[bus_name] = loop
         loop.add_motor(motor_name, driver, _build_position_pid(motor_cfg))
@@ -769,10 +760,6 @@ def _wire_robot_motors(
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
-    # 既定は「記録しない」に倒す。配線を忘れた経路の症状が「波形が出ない」に
-    # なり、config と違う設定が黙って効く形にはならない
-    tuning: TuningSettings | None = None,
-    capture_sink: CaptureSink | None = None,
 ) -> list[M3508PositionLoop]:
     """シーケンスにモータアクセス層を注入し、必要な位置制御ループを返す。"""
     loops = _build_position_loops(
@@ -781,8 +768,6 @@ def _wire_robot_motors(
         motors,
         feedback_timeout_ms=feedback_timeout_ms,
         is_estop_active=is_estop_active,
-        tuning=tuning,
-        capture_sink=capture_sink,
     )
 
     # M3508 は電流指令しか受け付けないため、目標値は PC 側 PID ループへ迂回させる
@@ -1152,10 +1137,6 @@ def _wire_one_robot(
         seq,
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         is_estop_active=is_estop_active,
-        tuning=system.tuning,
-        # 記録はロボット名とセットで運ぶ。モータ名はロボット横断に一意だが、
-        # 画面はロボットごとに分けて出すので、配信の時点で決めておく
-        capture_sink=functools.partial(server.record_tuning_capture, robot_name),
     )
 
     # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと
@@ -1336,7 +1317,6 @@ def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer
         health=system.health,
         checklist_definitions=checklist_definitions,
         match_settings=system.match,
-        tuning=system.tuning,
         dry_run=args.dry_run,
         dev_tools=dev_tools,
     )
