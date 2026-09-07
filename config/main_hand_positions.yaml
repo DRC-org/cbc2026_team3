@@ -311,14 +311,21 @@ axes:
     timeout_s: 1.0
 
   # 前側の壁。初期 / 閉 / 開 の 3 状態しか取らない。gripper と同じく manual: は書かない。
+  # **timeout_s は「その軸で起きうる最大移動」から決める。** サーボの移動時間は
+  # firmware/servo/include/config.h の kProvisionalLimits のスルーレート (90deg/s) で
+  # 決まり、PC 側から変える経路は無い。この軸は initial(270) ↔ open(90) の 180deg が
+  # 最大なのでちょうど 2.000s かかる —— 到達判定に早出しは無く (reachedTolerance 0deg)、
+  # FEEDBACK 100Hz の遅延も乗るので、2.0 では毎回 SequenceTimeoutError になる。
+  # 突き合わせは tests/test_servo_travel_budget.py が機械的に行う。
   wall_f:
     unit: deg
     command_unit: deg
     scale: 1.0
     offset: 0.0
-    timeout_s: 2.0
+    timeout_s: 3.0
 
-  # 後側の壁。wall_f と同一仕様。
+  # 後側の壁。wall_f と同一仕様だが、可動が initial(90) ↔ open(180) の 90deg = 1.0s
+  # までなので timeout_s は wall_f より短くてよい (長くすると故障の検出が遅れる)。
   wall_r:
     unit: deg
     command_unit: deg
