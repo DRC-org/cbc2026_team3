@@ -170,6 +170,16 @@ describe("MotorCheckPanel", () => {
 
     expect(screen.getByText(/この構成では動作確認を実行できません/)).toBeInTheDocument();
   });
+
+  it("ステップ一覧が読めなかったことを平常の文言に紛れさせない", async () => {
+    // 空配列 (「まだ読み込まれていない」) へ倒すと、配信が壊れているのに画面は
+    // 平常の文言を出し、指差喚呼「動作確認 完了」の判断材料が静かに嘘になる
+    mount({ steps: MALFORMED });
+    await userEvent.click(screen.getByRole("button", TOGGLE));
+
+    expect(screen.getByText(/ステップ一覧を読み取れませんでした/)).toBeInTheDocument();
+    expect(screen.queryByText(/ステップが読み込まれていません/)).not.toBeInTheDocument();
+  });
 });
 
 /**

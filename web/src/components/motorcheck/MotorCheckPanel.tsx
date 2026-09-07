@@ -148,7 +148,20 @@ export function MotorCheckPanel() {
             </div>
           ) : null}
 
-          {state.steps.length === 0 ? (
+          {/* **「読めなかった」と「まだ読み込まれていない」を混同しない。**
+              後者へ倒すと、配信が壊れているのに画面は平常の文言を出す
+              (除外ステップを `?? []` で埋めるのと同じ壊れ方) */}
+          {state.steps === MALFORMED ? (
+            <div className="text-warning">
+              <p className="flex items-center gap-1.5 font-medium">
+                <Icon as={TriangleAlert} />
+                ステップ一覧を読み取れませんでした
+              </p>
+              <p className="mt-1">
+                配信の形が読めていません。動作確認の結果は判断材料になりません。
+              </p>
+            </div>
+          ) : state.steps.length === 0 ? (
             <p className="px-1 py-1 text-base-content/70">
               {state.available
                 ? "動作確認のステップが読み込まれていません。"

@@ -509,7 +509,9 @@ describe("parseServerMessage", () => {
           current_step: null,
           step_index: 0,
           total_steps: 0,
-          steps: [],
+          // steps も excluded_steps と同じ扱い。空配列は「まだ読み込まれていない」
+          // という別の意味を持つので、欠落をそこへ倒さない
+          steps: MALFORMED,
           error: null,
           last_error: null,
           // **空配列へ倒さない。** 空は「除外なし = 全ステップが登録されている」を
@@ -543,12 +545,29 @@ describe("parseServerMessage", () => {
       expect(message.motorCheck.current_step).toBe("メインハンド y 軸");
     });
 
-    it("steps が配列でなければ空配列にする", () => {
+    it("steps が読めなければ MALFORMED へ倒す (空配列にしない)", () => {
+      // 空配列は「まだ読み込まれていない」という別の意味を既に持っている
+      // (MotorCheckPanel がその文言を出す)。そこへ倒すと、配信が壊れていることが
+      // 「まだ読み込まれていない」に化け、指差喚呼「動作確認 完了」の判断材料が
+      // 静かに嘘になる
       const message = parse({ type: "motor_check_state", steps: "壊れた値" });
 
       expect(message?.type).toBe("motor_check_state");
       if (message?.type !== "motor_check_state") return;
-      expect(message.motorCheck.steps).toEqual([]);
+      expect(message.motorCheck.steps).toBe(MALFORMED);
+    });
+
+    it("steps の要素の形が違えば MALFORMED へ倒す", () => {
+      // `step.index` はレンダー本体で読むので、1 要素でも null が混ざると
+      // TypeError で RouteErrorBoundary の内側が丸ごと落ちる
+      const message = parse({
+        type: "motor_check_state",
+        steps: [{ index: 0, label: "ok", require_trigger: false }, null],
+      });
+
+      expect(message?.type).toBe("motor_check_state");
+      if (message?.type !== "motor_check_state") return;
+      expect(message.motorCheck.steps).toBe(MALFORMED);
     });
 
     it("除外したステップと欠けている軸をそのまま運ぶ", () => {
