@@ -29,7 +29,9 @@ interface RobotControlProps {
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
   const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
-  const { send, sendOrReport } = useRobotCommands();
+  // この画面が送るものは**すべて** `sendOrReport` を通る。素の `send` を持ち出すと、
+  // 戻り値を捨てる書き方が 1 経路だけ混ざっても気付けない
+  const { sendOrReport } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
 
@@ -142,7 +144,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       robotKey={robotKey}
       manual={manual}
       blockedReason={manualBlockedReason}
-      send={send}
+      sendOrReport={sendOrReport}
     />
   );
 

@@ -12,7 +12,15 @@ interface ManualPanelProps {
   manual: ManualState;
   /** 操作できない理由。null なら操作できる */
   blockedReason: string | null;
-  send: (data: object) => boolean;
+  /**
+   * 送信できなかったら通知枠へ理由を出す送信口 (`useRobotCommands().sendOrReport`)。
+   *
+   * **戻り値を捨てる素の `send` を渡してはならない。** 切断中に押した 1 回が
+   * 痕跡なく消え、操縦者には「押したのに無反応」としか見えない。今は
+   * `blockedReason` がボタンごと無効にするので窓は「切断が確定する前の 1 回」に
+   * 限られるが、ゲートを緩めた瞬間にその壊れ方が戻る。
+   */
+  sendOrReport: (data: Record<string, unknown> & { type: string }, what: string) => boolean;
 }
 
 /**
@@ -40,15 +48,15 @@ const KEY_LEGEND: { keys: string[]; label: string }[] = [
  * (電磁弁・グリッパ・duty 軸) を選択に混ぜると、`←` `→` が何も起こさない行へ
  * 降りられてしまい、キーが効かないのか軸が動かないのかを画面から区別できない。
  */
-export function ManualPanel({ robotKey, manual, blockedReason, send }: ManualPanelProps) {
+export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: ManualPanelProps) {
   const [picked, setPicked] = useState<string | null>(null);
 
   const onJog = (axis: string, delta: number) =>
-    send({ type: "manual_jog", robot: robotKey, axis, delta });
+    sendOrReport({ type: "manual_jog", robot: robotKey, axis, delta }, "ジョグ");
   const onSet = (axis: string, value: number) =>
-    send({ type: "manual_set", robot: robotKey, axis, value });
+    sendOrReport({ type: "manual_set", robot: robotKey, axis, value }, "目標値の送信");
   const onMove = (axis: string, position: string) =>
-    send({ type: "manual_move", robot: robotKey, axis, position });
+    sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
   const steerable = manual.axes.filter((axis) => axis.manual !== null);
   // 選択は state から導出する。軸が入れ替わっても「居なくなった軸を選んだまま」に
