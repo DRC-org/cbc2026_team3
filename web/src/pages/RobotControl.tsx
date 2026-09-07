@@ -69,6 +69,24 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // 実行状態はサーバー配信の running が唯一の根拠。step_index からの推測をしない
   const kind = state ? sequenceKind(state) : null;
 
+  /**
+   * ステップ一覧を押せない理由。null なら押せる。
+   *
+   * **可否と案内文をここ 1 つで決める。** 別々に書くと「押せないのに
+   * 『クリックで再開』と案内し続ける」状態が作れる。一覧の行は素の
+   * `<button disabled>` で `disabled:cursor-not-allowed` 以外に見た目が変わらないので、
+   * 操縦者からは「押したのに反応しない」＝故障と区別が付かない。
+   *
+   * **駆動中を塞ぐ理由**はジャンプの確認が全画面オーバーレイのモーダルだから
+   * (開いているあいだヘッダーの EMG STOP がクリックできない)。
+   * **トリガー待ちは塞がない** —— `require_trigger` で止まっている間、機体は
+   * 動いていない。そこは再開ステップを選ぶ本来の場面である
+   * (`sequenceKind` は `waiting_trigger` を `running` より先に判定する)。
+   */
+  const stepJumpBlockedReason =
+    sequenceBlockedReason ??
+    (!inMatch ? "試合中のみ操作可" : kind === "running" ? "停止してから選択" : null);
+
   // 操作モードもサーバーが正。配信を受け取るまでは半自動として描く
   // (機体を直接動かせる状態を、確証のないまま画面へ出さない)
   const manual: ManualState = state?.manual ?? { mode: "sequence", axes: [] };
@@ -237,7 +255,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               bodyClassName="p-0"
               actions={
                 <span className="text-[0.85em] text-base-content/60">
-                  {sequenceBlockedReason ?? (inMatch ? "クリックで再開" : "試合中のみ操作可")}
+                  {stepJumpBlockedReason ?? "クリックで再開"}
                 </span>
               }
             >
@@ -246,7 +264,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 stepIndex={state.step_index}
                 waitingTrigger={state.waiting_trigger}
                 onJump={handleJump}
-                disabled={!inMatch || sequenceBlockedReason !== null}
+                // 可否と、その理由の案内文は同じ `stepJumpBlockedReason` から出す
+                // (駆動中に塞ぐ理由・トリガー待ちを塞がない理由はそちらの docstring)
+                disabled={stepJumpBlockedReason !== null}
               />
             </Panel>
           </div>
