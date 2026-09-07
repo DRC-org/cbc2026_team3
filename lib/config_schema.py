@@ -400,9 +400,27 @@ def _parse_pid(source: str, motor_name: str, raw: object) -> Mapping[str, object
         return None
     path = f"motors.{motor_name}.pid"
     section = _require_mapping(source, path, raw)
-    # 書いても効かないゲインを黙って捨てないため、キー名だけは起動時に突き合わせる。
-    # 値そのものは main._load_pid_config が既定値で補完する (書きかけの yaml を許す)
+    # 書いても効かないゲインを黙って捨てないため、キー名は起動時に突き合わせる。
     _reject_unknown(source, path, section, _PID_KEYS)
+
+    # **値も起動時に見る。ここが唯一の関門である。** かつては `main._load_pid_config`
+    # が「数値でなければ警告して既定値」で受けていたが、それは 2 通りに破れていた ——
+    # yaml の `true` は `float()` を通って 1.0 として静かに効き、`.inf` / `.nan` も
+    # `float()` が例外を投げないので警告 0 件でそのまま採用される (`kp: .inf` が
+    # 有効なゲインとして起動する)。しかも PID ゲインを実行中に差し替える経路は
+    # 持たない方針なので (CLAUDE.md「config に書いた値がそのまま動いている値である」)、
+    # ここを通った値を後段で止める層はどこにも無い。
+    #
+    # 判定は `_number` に任せる —— bool と非数値型、NaN と無限大をまとめて弾く。
+    # 同じ規則を書き写すと、しきい値側 (`_parse_health`) だけを直したときに
+    # こちらが古いまま残る。
+    for key, value in section.items():
+        if value is None:
+            # 未指定 / null は書きかけの yaml とみなし `main._load_pid_config` が
+            # 既定値で補完する (`integral_limit` の null だけは「制限なし」の正当な指定)
+            continue
+        _number(source, f"{path}.{key}", value)
+
     return MappingProxyType(dict(section))
 
 

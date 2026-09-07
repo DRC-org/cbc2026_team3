@@ -652,6 +652,88 @@ class TestDriverSpecificKeys:
 
         assert config.motors["y_axis_r"].pid == {"kp": 3.0}
 
+    def test_pid_null_values_are_kept_for_the_pid_loader(self) -> None:
+        """null は「書きかけの yaml」として `main._load_pid_config` が既定値で補完する。
+
+        `integral_limit` の null だけは「制限なし」の正当な指定だが、他のキーの null も
+        (main 側が既定値へ倒すので) ここでは拒否しない。**値の検査を足しても、この
+        「書きかけを許す」性質だけは残す** —— 機構調整中に 1 行コメントアウトしただけで
+        実機が起動しなくなると、動作確認そのものができない。
+        """
+        config = load_robot_config(
+            _robot(
+                y_axis_r={
+                    "driver": "m3508",
+                    "bus": "m3508_bus",
+                    "can_id": 1,
+                    "pid": {"kp": None, "integral_limit": None},
+                }
+            ),
+            source="test.yaml",
+        )
+
+        assert config.motors["y_axis_r"].pid == {"kp": None, "integral_limit": None}
+
+    def test_non_numeric_pid_value_is_rejected(self) -> None:
+        """数値でない pid 値を既定値へ黙って倒さず、起動を拒否する。
+
+        かつては `main._load_pid_config` が警告 1 行で既定値へ倒して起動を続けていた。
+        `pid.kd` は `motion.velocity_ff` と対に保つ値なので (CLAUDE.md)、黙って既定値へ
+        化けると症状は「飽和率だけ上がって速くならない」だけになり、config を読んでも
+        原因が見えない。
+        """
+        with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kp"):
+            load_robot_config(
+                _robot(
+                    y_axis_r={
+                        "driver": "m3508",
+                        "bus": "m3508_bus",
+                        "can_id": 1,
+                        "pid": {"kp": "abc"},
+                    }
+                ),
+                source="test.yaml",
+            )
+
+    def test_bool_pid_value_is_rejected(self) -> None:
+        """bool は int の派生なので `float(True) == 1.0` になってしまう。
+
+        `pid.kp: true` は誤記であって 1.0 の指定ではない。既定値へ倒す手当てでは
+        捕まらない (float() が例外を投げないので警告すら出ず、1.0 として静かに効く)。
+        """
+        with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kp"):
+            load_robot_config(
+                _robot(
+                    y_axis_r={
+                        "driver": "m3508",
+                        "bus": "m3508_bus",
+                        "can_id": 1,
+                        "pid": {"kp": True},
+                    }
+                ),
+                source="test.yaml",
+            )
+
+    def test_non_finite_pid_value_is_rejected(self) -> None:
+        """`.inf` / `.nan` は yaml が float として読み、`float()` 変換も例外を投げない。
+
+        「数値でなければ既定値へ」という手当てをすり抜けて `kp: .inf` がそのまま
+        有効なゲインとして起動していた (警告 0 件)。**PID ゲインを実行中に差し替える
+        経路は無い**ので (CLAUDE.md)、ここを通った値を後段で止める層はどこにも無い。
+        """
+        with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kd"):
+            load_robot_config(
+                _robot(
+                    y_axis_r={
+                        "driver": "m3508",
+                        "bus": "m3508_bus",
+                        "can_id": 1,
+                        "pid": {"kd": float("inf")},
+                    }
+                ),
+                source="test.yaml",
+            )
+
 
 class TestMotorCheckIsNotAMotorSetting:
     """モータごとの動作確認設定は無くなった。

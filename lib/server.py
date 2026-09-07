@@ -64,11 +64,18 @@ _ENERGIZE_GRACE_S = 0.5
 #: 最悪 1 周期分待たされてもなお埋まるよう、余裕を持って 3 秒 (3 周期分) を取る。
 _FIRMWARE_INFO_GRACE_S = 3.0
 
-#: 緊急停止解除が、進行中の単発再励磁タスクを畳むのに待つ上限。
-#: **キャンセルが効いていれば 1 周期で終わる値である** —— ここまで掛かるのは
-#: エグゼキュータへ入った `bus.send` のように、キャンセルしても止まらない
-#: ブロッキング呼び出しに入っているときだけ。詳細は `_settle_pending_reenergize`。
-_REENERGIZE_CANCEL_TIMEOUT_S = 0.5
+#: 進行中の再励磁タスクを畳むのに待つ上限。単発 (`_settle_pending_reenergize`) と
+#: 緊急停止解除 (`_settle_pending_reactivation`) の**両方が共有する**ので、
+#: 名前を片方に寄せない。
+#: **キャンセルが効いていれば 1 周期で終わる値である。** ここまで掛かるのは、
+#: 畳もうとしているコルーチンが自ら `CancelledError` を握り潰して `await` へ
+#: 戻り続ける場合だけ —— **エグゼキュータへ入った `bus.send` はこれに当たらない。**
+#: 待っている側の Task は `cancel()` した瞬間に (裏のスレッドの完了を待たずに)
+#: `CancelledError` を受け取るためで、実測でも経過 0.000s だった。
+#: `lib/can_manager.py` の励磁・再励磁の鎖に握り潰す箇所は無いので、この上限は
+#: 現状どこからも発火しない保険である。**保険だと分かった上で残す** —— 外すと
+#: 「握り潰す箇所を 1 つ足した瞬間に解除が永久に返らなくなる」形に戻る。
+_PENDING_TASK_CANCEL_TIMEOUT_S = 0.5
 
 #: 拒否通知の宛先。HTTP POST や内部の安全機構からの呼び出しには返す相手が居ない。
 type WSOrNone = web.WebSocketResponse | None
@@ -712,7 +719,7 @@ class RobotServer:
         # 進捗は `safety.unenergized_motors` として配信され続ける。
         #
         # **前回の解除の再励磁を畳むのもここではない** (`_reactivate_motors` の冒頭
-        # が持つ)。畳み込みは最悪 `_REENERGIZE_CANCEL_TIMEOUT_S` 待つので、ここへ
+        # が持つ)。畳み込みは最悪 `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つので、ここへ
         # 置くとすぐ上の理由がそのまま当てはまり、自分でこの性質を破ることになる。
         # 単発再励磁の畳み込み (`_settle_pending_reenergize`) がハンドラではなく
         # `_reactivate_motors` の中から呼ばれているのと同じ形に揃えてある
@@ -1506,7 +1513,7 @@ class RobotServer:
         `_reactivate_motors` が並走しても、片方のプローブがもう片方の enable 直後の
         モータへ届く。**畳み込みを 2 つともここに置くのは意図的で**、
         `_cmd_e_stop_release` へ移すと畳み込みが最悪
-        `_REENERGIZE_CANCEL_TIMEOUT_S` 待つぶんだけ解除の受理が止まり、
+        `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つぶんだけ解除の受理が止まり、
         「解除は再励磁を待たない」性質を自分で破ることになる。
 
         **解除コマンドの受理そのものは拒否・待機させない** (拒否すると「解除の
@@ -1564,9 +1571,14 @@ class RobotServer:
         状況、つまり **まさに緊急停止を押した状況**である。素の await のままだと
         「緊急停止解除の再励磁が無期限に進まない」経路が理屈上残る。
 
-        **キャンセルだけでは足りない。** エグゼキュータのスレッドへ入った
-        `bus.send` は `Task.cancel()` では止まらず、完了するまで
-        `CancelledError` が投げ込まれない。上限を必ず添える。
+        **キャンセルだけでは足りない。** 畳もうとしているコルーチンが
+        `CancelledError` を握り潰して `await` へ戻り続けると、キャンセルは通っても
+        タスクは終わらない。上限を必ず添える。
+        **かつてここは「エグゼキュータのスレッドへ入った `bus.send` は
+        `Task.cancel()` では止まらない」を根拠にしていたが、それは誤りだった** ——
+        裏のスレッドは走り続けるものの、待っている側の Task は `cancel()` した瞬間に
+        `CancelledError` を受け取る (実測 0.000s)。根拠を取り違えたまま上限だけ残すと、
+        それを確かめるテストが分岐へ一度も到達しないまま緑を返す (実際にそうなっていた)。
 
         **待ちきれなくても先へ進む。** この直後に `only=None` で全モータを
         励磁し直すので、キャンセルで中途半端に残った状態はそこで上書きされる。
@@ -1581,12 +1593,12 @@ class RobotServer:
         # `asyncio.wait` は中の例外 (CancelledError を含む) を送出しない。
         # `await pending` や `wait_for` だとキャンセル済みタスクの CancelledError が
         # そのまま伝播し、**この再励磁タスク自身がキャンセルされたことになる**
-        done, _still_running = await asyncio.wait({pending}, timeout=_REENERGIZE_CANCEL_TIMEOUT_S)
+        done, _still_running = await asyncio.wait({pending}, timeout=_PENDING_TASK_CANCEL_TIMEOUT_S)
         if not done:
             logger.error(
                 "再励磁タスクが %.1fs 以内に畳めませんでした: robot=%s"
                 " (CAN の送信が詰まっている可能性があります)。解除の励磁を先へ進めます",
-                _REENERGIZE_CANCEL_TIMEOUT_S,
+                _PENDING_TASK_CANCEL_TIMEOUT_S,
                 robot_name,
             )
 
@@ -1630,12 +1642,12 @@ class RobotServer:
             return
         for task in pending:
             task.cancel()
-        done, _still_running = await asyncio.wait(pending, timeout=_REENERGIZE_CANCEL_TIMEOUT_S)
+        done, _still_running = await asyncio.wait(pending, timeout=_PENDING_TASK_CANCEL_TIMEOUT_S)
         if len(done) != len(pending):
             logger.error(
                 "解除の再励磁タスクが %.1fs 以内に畳めませんでした"
                 " (CAN の送信が詰まっている可能性があります)。新しい解除を先へ進めます",
-                _REENERGIZE_CANCEL_TIMEOUT_S,
+                _PENDING_TASK_CANCEL_TIMEOUT_S,
             )
 
     async def _activate_motors_for_robot(
