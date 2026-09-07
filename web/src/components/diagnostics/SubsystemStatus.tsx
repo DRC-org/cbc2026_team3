@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, PackageX, ShieldAlert, ShieldQuestion } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { HealthIndicator } from "@/components/diagnostics/HealthIndicator";
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
@@ -203,6 +203,17 @@ export function SubsystemStatus({
   const riskyBuses = workpieceRiskBuses(health);
   const unconfirmedMotors = firmwareUnconfirmedMotors(safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
+  // **`defaultOpen` は初期値ではなく「今このパネルを開いておくべきか」の宣言。**
+  // 呼び出し側 (`RobotControl`) は手動操縦へ切り替わったときに false → true で
+  // 渡し直すが、この部品は grid の同じ位置・同じ型のまま残るので**再マウント
+  // されない**。`useState` の初期値として受けるだけだと、試合中に手動へ入っても
+  // 畳まれたまま、しかもパネルだけが列の全高へ伸びた白い箱になる ——
+  // 機体を直接動かしている最中に診断が閉じたままで、手で開かない限り開かない。
+  //
+  // 宣言が変わった周期だけ追従するので、操縦者が手で畳んだ状態は保たれる
+  // (依存が同じ値なら effect は再実行されない)。強制開示 (`forcedOpen`) とは
+  // 独立していて、あちらは異常時に操縦者の操作を上書きする別の層。
+  useEffect(() => setManualOpen(defaultOpen), [defaultOpen]);
   // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
 

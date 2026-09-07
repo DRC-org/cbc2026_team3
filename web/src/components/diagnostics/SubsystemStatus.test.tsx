@@ -3,9 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
+import { RobotProvider } from "@/context/RobotContext";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
-import { renderWithRobot } from "@/test/robotContext";
+import { createRobotContext, renderWithRobot } from "@/test/robotContext";
 
 const HEALTH: HealthSnapshot = {
   timestamp: 0,
@@ -59,6 +60,35 @@ describe("SubsystemStatus", () => {
     expect(screen.getByText("異常なし")).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
     expect(screen.queryByText(/同期ずれ/)).not.toBeInTheDocument();
+  });
+
+  it("defaultOpen が後から真になったら開く (再マウントされないので追従が要る)", () => {
+    // `RobotControl` は手動操縦へ切り替わったときに `defaultOpen` を false → true で
+    // 渡し直すが、この部品は grid の同じ位置・同じ型のまま残るので**再マウント
+    // されない**。初期値としてしか使わないと、試合中に手動へ入っても畳まれたまま、
+    // しかもパネルだけが列の全高へ伸びた白い箱になる ——
+    // 機体を直接動かしている最中に診断が閉じたままになる
+    // **Provider ごと再描画する。** `renderWithRobot` の rerender へ素の要素を
+    // 渡すとルートの型が変わって**再マウント**され、useState の初期値が使われる
+    // ので、追従が無くても緑になってしまう (実際の画面では再マウントされない)
+    const context = createRobotContext();
+    const panel = (open: boolean) => (
+      <RobotProvider value={context}>
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety()}
+          defaultOpen={open}
+        />
+      </RobotProvider>
+    );
+    const view = render(panel(false));
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+
+    view.rerender(panel(true));
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 
   /**

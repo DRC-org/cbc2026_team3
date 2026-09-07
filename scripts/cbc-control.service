@@ -10,11 +10,26 @@ Documentation=file://@PROJECT_DIR@/docs/impl_plan.md
 # CAN が up していなければ実機モードは起動できない。python 側の
 # OSError より、依存関係として明示した方が journal から原因を追える。
 #
-# **ただしこの Requires= は「CAN が揃っていること」を保証しない。**
+# **Requires= ではなく Wants= であること。**
+# `Requires=` は依存先が明示的に stop / **restart** されたときにこちらへ伝播する
+# (man 5 systemd.unit: "this unit will be stopped (or restarted) if one of the
+# other units is explicitly stopped (or restarted)")。ところが udev ルール
+# (can_config.py が生成する) は CANable の net デバイスが add されるたびに
+# **無条件で `systemctl restart cbc-can.service` を打つ**。つまり Requires= だと、
+# USB の再列挙 —— 抜けかけ・接触不良・ハブのリセット、`install.sh` の
+# `udevadm trigger --action=add` —— のたびに**試合中の制御プログラムが道連れで
+# 再起動**し、シーケンス位置も励磁もタイマーも飛ぶ。
+# しかも下の StartLimitBurst=3 を消費するので、60 秒以内に 3 回バウンドすると
+# `failed` で固定され、`systemctl start` すら通らなくなる。
+#
+# **依存を弱めても診断性は落ちない。** CAN が上がっていなければ main.py の
+# `_create_bus` が 1 行のメッセージを残して落ちる。
+#
+# **そもそもこの依存は「CAN が揃っていること」を保証しない。**
 # cbc-can.service は --strict なしで setup_can.sh を呼ぶので、1 本も up しなくても
 # success で終わる (理由は cbc-can.service のコメント)。揃っているかを答えるのは
 # 指差喚呼の can_bus_strict (config/checklist.yaml) —— 人が --strict を回す。
-Requires=cbc-can.service
+Wants=cbc-can.service
 After=cbc-can.service network.target
 
 # 設定ミス等で即死し続ける場合に無限ループさせない。

@@ -51,11 +51,14 @@ describe("MotorCheckButton", () => {
     const { context } = mount();
 
     await userEvent.click(screen.getByRole("button", START_BUTTON));
-    expect(context.send).not.toHaveBeenCalled();
+    expect(context.sendOrReport).not.toHaveBeenCalled();
     // 動くのは片方ではなく両機。周囲の確認範囲が変わるので文言で明示する
     expect(screen.getByText(/両機の可動範囲に人・物がないこと/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "開始" }));
-    expect(context.send).toHaveBeenCalledWith({ type: "motor_check_start" });
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "motor_check_start" },
+      "動作確認の開始",
+    );
   });
 });

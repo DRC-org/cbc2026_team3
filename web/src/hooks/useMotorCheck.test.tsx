@@ -51,19 +51,30 @@ describe("useMotorCheck", () => {
   });
 
   it("start は robot を載せない (両ハンド統合の 1 本)", () => {
-    const send = vi.fn();
-    const { result } = mount({ send });
+    const sendOrReport = vi.fn(() => true);
+    const { result } = mount({ sendOrReport });
 
     result.current.start();
-    expect(send).toHaveBeenCalledWith({ type: "motor_check_start" });
+    expect(sendOrReport).toHaveBeenCalledWith({ type: "motor_check_start" }, "動作確認の開始");
   });
 
   it("abort も robot を載せない", () => {
-    const send = vi.fn();
-    const { result } = mount({ send });
+    const sendOrReport = vi.fn(() => true);
+    const { result } = mount({ sendOrReport });
 
     result.current.abort();
-    expect(send).toHaveBeenCalledWith({ type: "motor_check_abort" });
+    expect(sendOrReport).toHaveBeenCalledWith({ type: "motor_check_abort" }, "動作確認の中断");
+  });
+
+  it("素の send を使わない (送れなかった 1 回を捨てない)", () => {
+    // 特に中断は `MotorCheckPanel` が `disabled` を持たないので実行中は常に押せる。
+    // 戻り値を捨てると、全アクチュエータが駆動されている最中に止める操作だけが消える
+    const send = vi.fn(() => true);
+    const { result } = mount({ send });
+
+    result.current.start();
+    result.current.abort();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("再レンダーしても start/abort の参照が変わらない", () => {

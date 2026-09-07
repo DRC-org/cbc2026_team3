@@ -62,6 +62,13 @@ bool DcChannel::setDuty(float duty, uint32_t nowMs) {
 
 void DcChannel::hold() { duty_ = 0.0f; }
 
+void DcChannel::tick(uint32_t nowMs) {
+    // 出力禁止のあいだは目標を残さない（理由はヘッダの宣言に書いてある）
+    if (!safety_.isOutputAllowed(nowMs)) {
+        duty_ = 0.0f;
+    }
+}
+
 float DcChannel::outputDuty(uint32_t nowMs) const {
     return safety_.isOutputAllowed(nowMs) ? duty_ : 0.0f;
 }

@@ -14,7 +14,9 @@ DT = 0.005
 # v_max に到達するかの境界。これ未満の移動距離は三角プロファイルになる
 TRIANGLE_BOUNDARY = V_MAX**2 / A_MAX
 
-# 実運用で踏む移動距離。1.5mm までは実機検証済みで、5mm 以上が未検証の領域
+# プロファイルを検証する移動距離。1.5mm までは実機検証済みで、5mm 以上は導入当時
+# 「未検証の領域」としていた側。**実運用の移動距離 (130〜530mm) はこの一覧の外側にある**
+# ので、ここで見ているのは移動距離に依らず成立する性質 (目標を跨がない・単調に近づく) だけ
 TRAVEL_DISTANCES = [0.5, 1.5, 5.0, 15.0, 50.0]
 
 
@@ -148,8 +150,9 @@ class TestConvergence:
 class TestNoOvershoot:
     """T4: 目標を跨がず、単調に近づく。
 
-    既存の PID は偏差 1.14mm で P 項が飽和するため、飽和中はフル電流の定加速になり
-    減速に使える距離が移動距離に依らず一定になる。実運用ストローク (5〜15mm) では
+    導入当時の PID (output_limit 2000) は偏差 1.14mm で P 項が飽和するため、
+    飽和中はフル電流の定加速になり
+    減速に使える距離が移動距離に依らず一定になる。実運用ストローク (130〜530mm) では
     原理的に行き過ぎるので、プロファイル側でこの性質を持たせる。
     """
 
@@ -242,6 +245,38 @@ class TestRetarget:
             previous = velocity
         assert profile.position == -30.0
         assert profile.velocity == 0.0
+
+    def test_巡航中にすぐ手前へ再ターゲットしても目標を通り過ぎない(self) -> None:
+        """**着地した後の周期で中間目標が進み続けないこと。**
+
+        巡航中に 1 周期ぶんの進みより近くへ再ターゲットされると、その周期は着地代入で
+        目標へ置かれるが**速度は巡航速度のまま残る** (加速度制限があるので 1 周期では
+        0 にできない)。次の周期は `remaining == 0` なので着地条件が成立せず、
+        素通しだと `position += step` で**着地したはずの目標を通り過ぎて進み続ける**。
+
+        `TestNoOvershoot` は単発移動しか見ていないので、この経路は網に無かった。
+        手動ジョグの連打と `sequence_jump` 後の `move_to` で踏む。
+        """
+        profile = _profile()
+        profile.retarget(1000.0)
+        position = 0.0
+        velocity = 0.0
+        for _ in range(2000):
+            position, velocity = profile.advance(DT)
+            if velocity >= V_MAX:
+                break
+        assert velocity == pytest.approx(V_MAX)
+
+        # すぐ手前 (1 周期ぶんの進みより近く) へ再ターゲット
+        target = position + 0.1
+        profile.retarget(target)
+
+        # 速度が 0 へ落ちきるまで回しても、中間目標は目標を超えない
+        for _ in range(200):
+            position, _velocity = profile.advance(DT)
+            assert position <= target + 1e-9, "着地した目標を通り過ぎた"
+
+        assert position == pytest.approx(target)
 
     def test_repeated_retarget_keeps_velocity_continuous(self) -> None:
         """手動ジョグの連打相当。毎周期目標が動いても加速度制限を割らない。"""

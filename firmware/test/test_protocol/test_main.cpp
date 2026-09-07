@@ -719,6 +719,31 @@ static void test_dc_channel_output_stops_on_watchdog_and_recovers() {
     TEST_ASSERT_EQUAL_FLOAT(0.4f, ch.outputDuty(600));
 }
 
+// **止まっている間に目標を残さない。**
+//
+// `outputDuty()` は出力禁止中に 0 を返すだけで `duty_` を残すので、tick で畳まないと
+// ウォッチドッグ満了の後に「受理できない SET_TARGET」（制御タイプ違い・DLC 不足）が
+// 1 通届いただけでゲートだけが開き、**途絶前の duty でコンベアが回り出す**。
+// 仕様書 §3.1 / §6 のとおり `handleChannelFrame` は受理できないフレームでも
+// ウォッチドッグを養う（`feed()` が妥当性検査より先）ので、この経路は実在する。
+// 操縦者は何も操作していない。
+static void test_dc_channel_forgets_target_while_output_is_blocked() {
+    DcChannel ch(500);
+    ch.feed(0);
+    ch.setDuty(0.30f, 0);
+    TEST_ASSERT_EQUAL_FLOAT(0.30f, ch.outputDuty(0));
+
+    // ウォッチドッグ満了。出力は止まり、tick が目標を畳む
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(600));
+    ch.tick(600);
+
+    // §6: 受理できない型でもウォッチドッグは養われる → ゲートだけが開く
+    ch.feed(700);
+    TEST_ASSERT_FALSE(ch.applySetTarget(SetTargetCommand{ControlType::Position, 900, true}, 700));
+
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ch.outputDuty(700));
+}
+
 // REF を押している間は、PC が再送を続けても駆動しない。
 static void test_dc_channel_physical_stop_blocks_until_cleared() {
     DcChannel ch(500);
@@ -1087,6 +1112,7 @@ int main(int, char **) {
     RUN_TEST(test_dc_channel_accepts_duty_after_first_command);
     RUN_TEST(test_dc_channel_rejects_duty_while_latched);
     RUN_TEST(test_dc_channel_output_stops_on_watchdog_and_recovers);
+    RUN_TEST(test_dc_channel_forgets_target_while_output_is_blocked);
     RUN_TEST(test_dc_channel_physical_stop_blocks_until_cleared);
     RUN_TEST(test_dc_channel_hold_stops_without_latching);
     RUN_TEST(test_dc_channel_accepts_only_duty_targets);

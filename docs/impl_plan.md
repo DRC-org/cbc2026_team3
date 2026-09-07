@@ -294,6 +294,32 @@ journalctl -u cbc-control -f             # ログ追跡
 走っている制御プログラムを落とさないよう、`cbc-control` は `restart` もしない
 （試合中に unit を入れ直しただけで機体が止まるのを避ける）。
 
+### udev の CAN 再起動で制御プログラムを道連れにしない（`Wants=cbc-can.service`）
+
+`cbc-control.service` は `Requires=cbc-can.service` を持っていたが、`Wants=` へ落とした
+（`After=` の順序宣言はそのまま）。`Requires=` は依存先が明示的に stop / **restart**
+されたときにこちらへ伝播する一方、`can_config.py` が生成する udev ルールは CANable の
+net デバイスが add されるたびに**無条件で** `systemctl --no-block restart cbc-can.service`
+を打つ。つまり USB の再列挙 —— 抜けかけ・接触不良・ハブのリセット、`install.sh` の
+`udevadm trigger --action=add` —— のたびに**試合中の制御プログラムが道連れで再起動**し、
+シーケンス位置も励磁もタイマーも飛んでいた。しかも `StartLimitBurst=3` を消費するので、
+60 秒以内に 3 回バウンドすれば `failed` で固定され、復帰に `reset-failed` が要る。
+
+**依存を弱めても診断性は落ちない。** CAN が上がっていなければ `main.py` の `_create_bus`
+が 1 行のメッセージを残して落ちる。そもそもこの依存は「CAN が揃っていること」を保証して
+いない（`cbc-can.service` は `--strict` なしなので 1 本も up しなくても success で終わる）。
+
+**`cbc-can-watchdog.service` の `Requires=cbc-can.service` は残す。** バスが up して
+いない状態で監視しても復旧するものが無く、道連れの再起動で失うものも無い —— 判定に使う
+状態はすべてプロセス内にあって次の周期に作り直され、唯一の後始末（復旧の down/up の
+途中で殺されるとバスが down のまま残る）は `can_watchdog.sh` の EXIT トラップが持つ。
+
+再発防止は `tests/test_can_config.py::test_udev_restart_does_not_take_down_the_control_program`
+—— 生成される udev ルールと `scripts/cbc-control.service` の両方を読み、①udev ルールが
+実際に `cbc-can.service` を restart していること（前提）②制御プログラムの unit が
+`Requires=` ではなく `Wants=` を宣言していること、を突き合わせる（①を見ないと、restart を
+やめた後にも落ち続ける検査になる）。
+
 ### SIGTERM を後始末経路へ合流させる
 
 `systemctl stop` / `restart` が送るのは SIGTERM で、既定の扱いはプロセスの即死。
@@ -2884,7 +2910,7 @@ M3508 2 台だけを CAN 通信の確認として動かす。
 | ファイル | 本番との違い |
 |---|---|
 | `config/bench/m3508/system.yaml` | `can_buses` が `m3508_bus` のみ。`health` / `motor_check` / `match` は本番と同値 |
-| `config/bench/m3508/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を 2000 → 1000 counts。`can_id` は本番と同じ 1 / 2 |
+| `config/bench/m3508/main_hand.yaml` | `y_axis_r` / `y_axis_l` だけ。PID の `output_limit` を **1000 counts** へ下げてある（作成当時の本番は 2000、現在の本番は 5000）。`can_id` は本番と同じ 1 / 2 |
 | `config/bench/m3508/main_hand_positions.yaml` | `y_axis` だけ。`sync_tolerance` 10.0mm、`manual` −10〜60mm |
 | `config/bench/m3508/checklist.yaml` | ベンチで通電前に確認する項目のみ |
 
@@ -2927,7 +2953,7 @@ No such device` で**起動そのものが失敗する**。`--config` でロボ�
 機構未装着では左右がずれても壊れず、本番の 2.0mm のままだと無負荷での追従差だけで
 緊急停止が掛かって通信確認が進まないため。それでも「片方がまったく動かない」（配線・
 CAN ID の誤り）は確実に超過するので、同期監視の検出能力そのものは残る。`output_limit` を
-半分にしてあるのも同じ考えで、負荷の無い M3508 は同じ電流でも一気に回るため。
+本番より下げてあるのも同じ考えで、負荷の無い M3508 は同じ電流でも一気に回るため。
 一方 `scale` は本番と同じ値を使う — ここを変えると「ベンチで確かめた指令量」と「本番で出る
 指令量」が別物になり、通信確認としての意味が薄れる。
 
@@ -3655,8 +3681,8 @@ EDULITE は位置ループがドライバ内蔵で PC 側に常駐ループが�
 
 実機で最初に問題になったのは「駆動中に開き、止まると戻る」という形の過渡差である。
 `move_to` はステップ目標を投げるので移動開始直後の偏差が全ストロークぶん立ち、
-現行値（`kp` 2.0 / `output_limit` 2000）では 15mm の移動が 1650counts と上限の 82% に
-達する。左右の負荷差が乗ると片方だけが先に飽和し、飽和した側は開ループになって
+当時の既定値（`kp` 2.0 / `output_limit` 2000）では 15mm の移動が 1650counts と上限の 82% に
+達する（現在は `kp` 32 / `output_limit` 5000）。左右の負荷差が乗ると片方だけが先に飽和し、飽和した側は開ループになって
 加速が頭打ちになる。目標に近づけば両者とも線形領域へ戻るので差は縮む。
 
 #### 設計判断
@@ -3740,7 +3766,7 @@ conditional integration が補正を知らないまま積分を進める。「�
 |---|---|---|
 | `scale` | 55.0131 deg/mm | `config/main_hand_positions.yaml`（唯一の確定値） |
 | `kp` | 32 counts/deg | `config/main_hand.yaml`（2026-09-03 実測） |
-| `output_limit` | 2000 counts | 同上 |
+| `output_limit` | 2000 counts | 同上。**2026-09-04 に 5000 へ引き上げた**ので、以下は 2000 当時の計算である（`docs/mechanism_handoff.md` §3-4） |
 
 P 項が上限に届く偏差は **1.14mm**（= 2000 / 32 / 55.0131）。**飽和中の PID は制御ではなく
 フル電流の定加速**（バンバン制御）である。ここから 2 つの量が出る。
@@ -3751,11 +3777,19 @@ P 項が上限に届く偏差は **1.14mm**（= 2000 / 32 / 55.0131）。**飽�
 止まりきれる条件を解くと **移動距離 ≤ 2 × 1.14 = 約 2.3mm**。
 
 - 実機で検証済みの振幅 **1.5mm は境界の内側**（うまく行って当然だった）
-- 実運用ストローク **5〜15mm は外側**（原理的に行き過ぎる）
+- 実運用ストローク **130〜530mm は外側**（原理的に行き過ぎる。最小の移動でも境界の 56 倍）
+
+**当初ここには「5〜15mm」と書いてあった。** それは位置定数が 0〜15mm の仮値だった頃の
+読み違いで、実測後の `positions.y_axis`（home 0.0 / work_1 120.0 / work_2 320.0 /
+work_3 520.0 / work_shared 650.0mm）と `sequences/main_hand.py` の巡回順
+（home → work_3 → work_shared → work_1 → work_2 → home）から出る 1 回の移動は
+520 / 130 / 530 / 200 / 320mm、最大ストロークは 650mm である（`docs/mechanism_handoff.md`
+§3-4）。**結論は変わらず、実ストロークが 1 桁以上大きいぶん強くなる。**
 
 **`kd` を上げても直らない。** 飽和中は P+I+D の合計がクランプされるので、D 項も出力に
-現れない。ではゲインを下げればよいかというと、L=15mm で行き過ぎない `kp` は 4.85 まで
-落ちる一方、実測では **`kp`=16 で左側が 1mm も動かなかった**（§「同期補正」/
+現れない。ではゲインを下げればよいかというと、当時の想定ストローク L=15mm でも
+行き過ぎない `kp` は 4.85 まで落ちる一方（実ストロークではさらに低い値が要る）、
+実測では **`kp`=16 で左側が 1mm も動かなかった**（§「同期補正」/
 `docs/mechanism_handoff.md` §3-1）。**単一のゲイン組で短距離と長距離は両立しない。**
 
 解は入力側にある。最終目標ではなく**速度と加速度で制限した中間目標**を制御周期ごとに
@@ -3818,7 +3852,8 @@ PID 調整支援を削除したので記録器そのものが無い。同じ論�
 教科書どおりの `stop_distance = v² / (2a)` で「残距離がこれを下回ったら減速」と分岐する
 実装は、**1 周期ぶんを取りこぼす**。その式は「速度 v から止まるまでに進む距離」であって
 「**今の周期に進む分**」を含んでいないためで、実測では 200Hz / 60mm/s / 400mm/s² のとき
-最大 **0.29mm** 行き過ぎた（`y_axis` の `sync_tolerance` 2.0mm の 15%）。しかも
+最大 **0.29mm** 行き過ぎた（測定時点の `y_axis` の `sync_tolerance` 2.0mm の 15%。
+現在の 10.0mm では 2.9%）。しかも
 行き過ぎ量は `dt` と速度に依存するので、周期が乱れるほど悪化する。
 
 `lib/control/trajectory.py` は代わりに「**この周期に出してよい速度の上限**」を離散時間の
@@ -3836,9 +3871,11 @@ PID 調整支援を削除したので記録器そのものが無い。同じ論�
 #### `velocity_ff = kd` が D 項の速度依存分を相殺する構造
 
 `kd` の単位は counts/(deg/s) なので、**巡航速度がそのまま制動として出力に乗る**。
-`y_axis` の `kd`=1.0 で 50mm/s = 2750deg/s を出すと、D 項だけで −2750counts になり、
-`output_limit` 2000 を**超えて逆向きに飽和する**。プロファイルを入れて飽和を消したはずが、
-速度を上げた途端に別の理由で飽和し直すことになる。
+`y_axis` の `kd`=1.0 で 50mm/s = 2750deg/s を出すと D 項だけで −2750counts、本番の巡航
+200mm/s = 11003deg/s なら **−11003counts** になり、こちらは `output_limit` 5000 を
+**超えて逆向きに飽和する**。プロファイルを入れて飽和を消したはずが、
+速度を上げた途端に別の理由で飽和し直すことになる（**上限を上げても速度を上げれば
+追いつかれる**ので、この対は上限に依らず保たなければならない）。
 
 定常追従では実測速度 ≒ 参照速度なので、**参照速度へ `kd` と同じ係数を掛けて足せば
 その制動をちょうど打ち消せる**。これが `velocity_ff = kd` の根拠で、config のコメントにも
@@ -3881,10 +3918,13 @@ axes:
 - `command_mode` が POSITION でない軸には書けない（`homing` と同じ検証）。`duty` /
   `on_off` は指令が届いたかを観測できないので、「目標へ向けて毎周期少しずつ進める」
   という前提が成り立たない
-- **採用値はすべて机上の計算値で、実機未検証。** 15mm 移動の所要は 0.467s
+- ~~**採用値はすべて机上の計算値で、実機未検証。** 15mm 移動の所要は 0.467s
   （`timeout_s` 4.0 に対し 8.5 倍の余裕）、追従誤差は摩擦ぶんの 0.284mm 程度で
-  `output_limit` の 75% が余裕として残る、という見積もり。**実機で詰める手順は
-  `docs/mechanism_handoff.md` §3-2**
+  `output_limit` の 75% が余裕として残る、という見積もり。~~ → **2026-09-04 に実機で
+  取り直した**（`docs/mechanism_handoff.md` §3-4）。`max_velocity` 200.0 /
+  `max_acceleration` 1200.0 / `velocity_ff` 1.0 / `output_limit` **5000** で、150mm が
+  0.838s。摩擦ぶんの 0.284mm は `output_limit` に依らないので、5000 に対しては
+  **90% が余裕として残る**。**実機で詰める手順は `docs/mechanism_handoff.md` §3-2**
 
 #### 変異テストの対応
 
@@ -6315,10 +6355,10 @@ disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）�
 
 | 課題 | 現状 | 影響 |
 |---|---|---|
-| PID ゲイン・機構定数がすべて仮値 | `main.py` の `_DEFAULT_PID`（kp=2.0 / ki=kd=0 / dead_band=1.0 / output_limit=2000）、`config/*_positions.yaml` の `scale` / `offset` / `positions` はいずれも安全側に振った仮値 | **実機チューニング必須**。現状のゲインでは重力負荷を持ち上げられない可能性が高い（ki=0 のため定常偏差が残る）。調整の判断材料は `scripts/tune_y_axis.py` が試行ごとに出す指標（立上り / 行き過ぎ / 整定 / 定常偏差 / 飽和率 / 指令ピーク）と末尾の比較表で読む（Web UI の PID 調整機能は削除した）が、**どの値にするかを決めるのは実機で動かした人**である |
-| M3508 の位置制御が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は **2026-09-03 に振幅 1.5mm / `output_limit` 800 でだけ実測**（`docs/mechanism_handoff.md` §3-1） | ラップアラウンド判定のしきい値（半周＝3600rpm 相当）や減速比込みの許容差が実機で妥当かは未確認。**PID は実運用ストロークでの取り直しが必須** —— 本番の `output_limit` 2000 では偏差 1.14mm で飽和し、検証した振幅はその境界（2.3mm）の内側だった |
+| 機構定数は**軸によって実測済みと仮値が混在する**（かつて「すべて仮値」と書いていた行）| **実測済み**（2026-09-04〜09-05）: メインハンド `y_axis` の `pid`（kp 32 / ki 10 / kd 1.0 / `integral_limit` 1000 / `output_limit` 5000）・`motion`・`sync_kp` 16.0 / `sync_limit` 1250・`positions`（home 0.0 〜 `work_shared` 650.0mm）・`manual`、`rotate` の `positions`（home 0.0 / pick 180.0 / place 10.0deg）・`manual`・原点スイッチの極性・`homing.direction`。**仮値のまま**: メインハンドのサーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの `kProvisionalLimits`、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`（スイッチ未装着でコメントアウト中）、**サブハンドはほぼ全部**（`config/sub_hand_positions.yaml` 冒頭が宣言している）| **残りは実機チューニング必須**。棚卸しの正は `docs/mechanism_handoff.md` §0 で、この行はその要約でしかない。調整の判断材料は `scripts/tune_y_axis.py` が試行ごとに出す指標（立上り / 行き過ぎ / 整定 / 定常偏差 / 飽和率 / 指令ピーク）と末尾の比較表で読む（Web UI の PID 調整機能は削除した）が、**どの値にするかを決めるのは実機で動かした人**である。**`main.py` の `_DEFAULT_PID`（kp=2.0 / ki=kd=0 / dead_band=1.0 / output_limit=2000）は同梱のどの config からも到達しない** —— 本番・ベンチとも M3508 は全台が `pid:` を明示しているので、この既定値が効くのは `pid:` を書かない config を新しく足したときだけである（そのときは「暴れないが重力負荷を持ち上げられない」ゲインで動く）|
+| M3508 の位置制御が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は **2026-09-03 に振幅 1.5mm / `output_limit` 800 でだけ実測**（`docs/mechanism_handoff.md` §3-1） | ラップアラウンド判定のしきい値（半周＝3600rpm 相当）や減速比込みの許容差が実機で妥当かは未確認。~~**PID は実運用ストロークでの取り直しが必須** —— 本番の `output_limit` 2000 では偏差 1.14mm で飽和し、検証した振幅はその境界（2.3mm）の内側だった~~ → **取り直し済み。** 2026-09-04 に機構が付いた実機で実運用ストローク（150mm）まで通し、`output_limit` は **5000**（飽和する偏差は 2.84mm へ移った）、`sync_kp` は 16.0 になった（下の行 / `docs/mechanism_handoff.md` §3-4）。**残っているのは短距離（15mm）での `sync_kp` の取り直し** |
 | ~~台形速度プロファイルの値が実機未検証~~ → **2026-09-04 に実測済み**（`docs/mechanism_handoff.md` §3-4）| `axes.y_axis.motion` は `max_velocity` 200.0 / `max_acceleration` 1200.0 / `velocity_ff` 1.0、`pid.output_limit` は 5000、`sync_kp` は 16.0。150mm を 3.023s → 0.838s（3.6 倍）| ~~残る未検証は可動範囲そのもの —— `manual`（−2.0〜20.0mm）と `positions`（0〜15mm）は仮値のままで、実運用の移動距離（150mm 以上が主）と食い違っている。~~ → **`manual`（0.0〜650.0mm）と `positions`（home 0.0 / work_1 120.0 / work_2 320.0 / work_3 520.0 / work_shared 650.0mm）は実測値へ更新済み**（下記「メインハンド実機の実測値を本番 config へ反映」節）。ワーク保持力と機構強度は依然未評価（加速度の効く制約はそちら）|
-| プロファイル導入で PID の問題の性質が変わった | ゲイン（kp 32 / ki 10 / kd 1.0）は「飽和したバンバン制御をなだめる」条件で詰めた値のまま | 中間目標を入れた後の PID の仕事は**追従誤差の最小化**であり、同じ数字でも意味が違う。**実運用振幅での再調整が要る**（`docs/mechanism_handoff.md` §3-2 の手順 4） |
+| プロファイル導入で PID の問題の性質が変わった → **実運用振幅での確認は済み。残るのは短距離** | ゲイン（kp 32 / ki 10 / kd 1.0）は「飽和したバンバン制御をなだめる」条件で詰めた値のままだが、2026-09-04 に振幅 150mm で通し、上限だけを `output_limit` 5000 へ上げて据え置くと判断した（`ki` を 2 / 5 / 10 で振っても整定は動かなかった。`docs/mechanism_handoff.md` §3-4）| 中間目標を入れた後の PID の仕事は**追従誤差の最小化**であり、同じ数字でも意味が違う。**残っているのは短距離での確認**（`sync_kp` は 150mm で 16.0 が最良だが、振幅 1.5mm では 8.0 が最良で 150mm では最悪だった —— 最適値が振幅で変わる軸である）。シーケンスの移動は 130〜530mm なので短距離が出るのは手動ジョグの刻み（1〜100mm）の側で、手順は `docs/mechanism_handoff.md` §3-1 |
 | 低速域のスティックスリップが未観測 | この軸は静止摩擦が大きい（実測で重い側 500counts 相当）。中間目標がゆっくり動く低速域では追従誤差が小さく、電流が静止摩擦を超えられない可能性がある | **予測であって観測ではない。** 出るなら「動かない → 誤差が溜まって急に動く」形で、`sync_tolerance` の発報として現れうる。対抗手段は `ki`（既に 10 が入っていて、まさにこの役割）と `velocity_ff`。それでも足りなければ静摩擦補償（参照速度の符号に応じた定数電流）—— **今回スコープ外**（単位が counts で `motion` 節の人間単位と混ざる / 必要性がまだ推測 / `ki` が部分的に代替している） |
 | PID ゲインと `velocity_ff` は実行中に変更できず UI にも配信されない | 実行中に差し替える経路は持たない（PID 調整機能を削除したため）。値を知る経路は config そのもので、起動ログに出るのは `velocity_ff` の側だけ（`_attach_motion_profiles`）| 調整は **config 変更 + 再起動**が要る。**`config/<robot>.yaml` の `pid.kd` と `config/<robot>_positions.yaml` の `motion.velocity_ff` は同値に保つ対**なので、片方だけ書き換えると対応が黙って崩れる（症状は「巡航中だけ飽和して速くならない」）。実機で詰めるあいだは `scripts/tune_y_axis.py --velocity-ff` を使う |
 | ~~200Hz が実機で維持できるか未測定~~ → **周期の実測を追加済み（2026-09-05）。ただし画面と WS 配信からは外した（同日）** | `lib/control/periodic.py` の `PeriodicTask` が連続する tick 開始時刻の差 (= 実周期) を測り、公称周期の 1.5 倍 (`JITTER_OVERRUN_MARGIN` = 0.5。値は「超過分 / 公称周期」なので 0.5 が 1.5 倍にあたる) を超えた回数と最悪値だけを O(1) で積む（サンプル列は持たない）。3 つの周期タスク（位置制御ループ 200Hz / 同期監視 50Hz / 目標値再送 20Hz）は全て `PeriodicTask` を継承するので継承先へ書き写す必要は無い。超過したら `LogThrottle` 経由で WARNING。**集計 1 行は `match_finish`（`log_jitter_summary()` → `reset_jitter_stats()`）で journal へ INFO。`match_start` は前縁リセットだけ（黙って 0 に戻す）。** **画面 (`SubsystemStatus`) と WS 配信 (`safety.*.jitter_overrun_count` / `worst_jitter_ms`) からは外してある（2026-09-05）** —— しきい値は理屈で導いた値で実機で検証しておらず、本番構成（CANable 4 本・毎秒 4200 通）で 200Hz ループがどれだけ揺れるかは誰も測っていない（実装時に試したのは WSL の virtual バスを 20 秒動かしただけで、警告 0 件だったが本番とは条件が違いすぎる）。安全機構のパネルに未検証のしきい値で常時点灯する項目を混ぜると、同期ずれラッチや緊急停止といった本物の異常まで読まれなくなるおそれがあり、しかも試合中の操縦者にはこの情報に対してできる行動が無い（PC の負荷は下げられない）——PR #100 の CAN 警告が「ワークが落ちたかも → 掴み直す」という行動に繋がるのとは性質が違う、エンジニアが後から読む情報である。**順番が逆になっていた** —— 先に実機で測って線を決めてから画面に出すべきところを、理屈だけの線を先に画面へ出していたので、実機計測が先に来るよう画面と配信だけを外した。**リセットと journal ログは残した** —— 画面が無くても、試合ごとに 1 行の記録が journal に残ることで、実機計測のときにそのまま使える単位（この試合で何回・最悪何 ms）になる。**次にやるべきこと: 実機（本番の CAN 構成）で計測し、しきい値と対処可能な行動を決めてから画面へ戻すかどうかを判断する。** | しきい値は `interval_s` からの相対値で導出し（`HealthThresholds` には足さない — 200/50/20Hz の 3 種を跨ぐため）、`config/system.yaml` に新しい節は増えていない。**集計は超過 0 件でも 1 行出す** —— 「超過したときだけ出す」にすると、公称の 1.4 倍で常時走っている（＝停止距離も 40ms 予算も既に崩れている）機体で journal が無音になり、しきい値を決めるためにしきい値を超えている必要がある、という循環になる。**まだ「実機で 200Hz を維持できるか」の実測データそのものは無い** —— 今回入ったのは「乱れているかどうかを知る手段」で、実際に乱れているかは実機で動かして確認する必要がある。**画面に出す判断は実機計測の後**（現状は計測・WARNING・試合単位の集計と journal ログのみ） |
@@ -6330,7 +6370,7 @@ disable → 再 enable を伴う零点確定（`capture_origin_via_set_zero`）�
 |---|---|---|
 | 位置定数の実機反映手順が手動 | 「Phase 5 > 機構完成後にやること」参照。機構担当と共有する棚卸し表は `docs/mechanism_handoff.md` へ切り出した | **メインハンドの `y_axis` / `rotate` は着手済み**（2026-09-05 に実測値を反映）。`gripper` / `wall_f` / `wall_r` / `conveyor` とサブハンド側は未着手 |
 | CANable が 1 本欠けると起動できず、systemd で起動不能に固定される | `main.py` が open するのは**そのロボットが実際に使うバスだけ**（`_robot_bus_names`）になった。メインハンドは `can_dm3520` を、サブハンドは `can_m3508` を開かない（受信ループも 8 本 → 4 本）。ただし既定は両ハンドを読むので、**どの 1 本が欠けても既定構成は起動しない**ことは変わらない。`cbc-control.service` の `StartLimitBurst=3` / `RestartSec=2` により**約 6 秒で `failed` に固定**され、以後 `systemctl start` すら通らない | 復旧には `systemctl reset-failed` が要る。会場での切り分け手順は `docs/venue_recovery.md` §1（`--strict` で欠けを特定 → 挿し直し → `reset-failed` → 起動）。**片ハンドだけで出る逃げ道が実効になった** —— `can_m3508` が欠けたら `--config config/sub_hand.yaml`、`can_dm3520` なら `--config config/main_hand.yaml` でそのハンドは起動する（`can_edulite` / `can_generic` は両ハンドが使うので逃げられない）。バスが開けなければ `SystemExit` で 1 行のメッセージ |
-| `cbc-can.service` は CAN が 0 本でも success で終わる | `--strict` を付けずに `setup_can.sh` を呼び、`RemainAfterExit=yes` なので `cbc-control.service` の `Requires=` は何も守っていない | **意図的**（`--strict` を付けると片ハンドだけの練習・ベンチ・`--dry-run` が一律にできなくなる。理由は `scripts/cbc-can.service` のコメント）。揃っているかは指差喚呼 `can_bus_strict` が人に確認させる。**バスの絞り込み（`_robot_bus_names`）を入れた後に再検討したが、判断は変えない** —— 既定は両ハンドを読むのでどの 1 本が欠けても `cbc-control` は起動せず、`--strict` を足しても得るものが無い。一方、欠けたバスを使わないほうのハンドを手で起動する逃げ道は、この unit が `failed` になると `Requires=` に引きずられて塞がる |
+| `cbc-can.service` は CAN が 0 本でも success で終わる | `--strict` を付けずに `setup_can.sh` を呼び、`RemainAfterExit=yes` なので `cbc-control.service` の `Wants=`（`Requires=` から落とした。理由は「サービス化（systemd）」の『udev の CAN 再起動で制御プログラムを道連れにしない』）は何も守っていない | **意図的**（`--strict` を付けると、バスが揃っていないのが常態の片ハンド練習・ベンチ・`--dry-run` で毎回この unit が `failed` で残る。理由は `scripts/cbc-can.service` のコメント）。揃っているかは指差喚呼 `can_bus_strict` が人に確認させる。**バスの絞り込み（`_robot_bus_names`）を入れた後に再検討したが、判断は変えない** —— 既定は両ハンドを読むのでどの 1 本が欠けても `cbc-control` は起動せず、`--strict` を足しても得るものが無い。一方、`failed` になると `Requires=cbc-can.service` のままの `cbc-can-watchdog.service` が上がらず、**欠けたバスを使わないほうのハンドで練習を続けるあいだ bus-off 復旧の常駐保護だけが外れる** |
 | `deploy.sh` が会場でネットワークを要求しうる | `uv sync --frozen` / `pnpm install --frozen-lockfile` は、ロックが満たされていなければ依存解決へ降りる | `--no-install` を足した（ビルドと再起動だけ）。**会場入りの前に一度ネットワークのある場所で素の `deploy.sh` を回してキャッシュを温めておくこと** |
 | CAN 復旧の `down`/`up` が基板のウォッチドッグを満了させる | `scripts/can_watchdog.sh` の `recover()` に試合中かどうかのゲートは無い。`command_timeout_ms` 既定 500ms に対し down/up は 1 秒弱 | **電磁弁が消磁し、吸着で保持しているワークが落ちる。** ゲートを付けないのは「バスが戻らない」ほうが重いため。運用で受ける —— 試合中に journal へ `[ WD ]` が出たらワーク落下を疑う。**2026-09-05 に UI 表示を追加**: `CANManager` がバス別に途絶の立ち上がりを `rx_down_episodes` として数え（復帰しても 0 に戻らず、試合開始でリセット）、`control_type: on_off` のモータが載っているバスかどうか (`may_affect_workpiece`) と合わせてサーバーが判定・配信する。`SubsystemStatus` は該当バスがあるときだけ「CAN 途絶 N回」のチップを自分から開いて主張する（`BusHealth` の DOWN/DEGRADED 判定そのものは変えない）。詳細は `docs/checks_and_health.md` の「途絶エピソード数と UI 表示」節、手順は `docs/venue_recovery.md` §3-1 |
 
