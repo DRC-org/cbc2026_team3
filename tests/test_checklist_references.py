@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 from lib.sequence.positions import PositionTable, load_position_table
+from tests.test_config_schema import _BENCH_USES_PRODUCTION_CONFIG
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _REPO_ROOT / "config"
@@ -36,22 +37,23 @@ _COMMAND_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*に\s*([A-Za-z_][A-Za-z0-9
 def _robot_yamls(directory: pathlib.Path) -> list[pathlib.Path]:
     """そのディレクトリの構成が読む robot yaml。
 
-    **bench で本番 config をそのまま使うセットはディレクトリ名から解決する**
+    **どのベンチセットが本番 config をそのまま使うかの正は
+    `tests/test_config_schema.py` の `_BENCH_USES_PRODUCTION_CONFIG` だけが持つ**
     (`config/bench/main_hand/` は robot yaml も positions も持たず、本番の
-    `config/main_hand.yaml` を `--config` で指して動かす。`tests/test_config_schema.py`
-    の `_BENCH_USES_PRODUCTION_CONFIG` が宣言している形)。
+    `config/main_hand.yaml` を `--config` で指して動かす)。ここでディレクトリ名の
+    規約として解決し直すと同じ対応表が 2 箇所になり、宣言の側だけを直したときに
+    こちらが古い規約のまま残る。
     """
-    found = [
+    production_robot = _BENCH_USES_PRODUCTION_CONFIG.get(directory.name)
+    if production_robot is not None:
+        return [_CONFIG_DIR / f"{production_robot}.yaml"]
+
+    return [
         path
         for path in sorted(directory.glob("*.yaml"))
         if isinstance(doc := yaml.safe_load(path.read_text(encoding="utf-8")), dict)
         and "motors" in doc
     ]
-    if found:
-        return found
-
-    production = _CONFIG_DIR / f"{directory.name}.yaml"
-    return [production] if production.exists() else []
 
 
 def _position_table(directory: pathlib.Path) -> PositionTable:
