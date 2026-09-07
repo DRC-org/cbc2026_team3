@@ -177,7 +177,7 @@ positions:
     lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
 
   # !!! この軸だけ「ファームの起動角 = 初期姿勢」が崩れている !!!
-  # firmware/servo/include/config.h の kSlotsByBoard[1][0] (基板 #1 SV0) の初期角は
+  # firmware/servo/include/config.h の kServoBoards[] の基板 #1 SV0 の初期角は
   # 0.0deg で、それは下の closed にあたる。**通電直後と基板の瞬断後は閉じる方向へ動く。**
   # メインハンドの 3 軸は起動角が gripper.open / wall_f.initial / wall_r.initial と
   # 一致しているので、ここだけが逆。config/checklist.yaml の `sub_gripper_open`

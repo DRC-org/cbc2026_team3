@@ -80,7 +80,7 @@ struct BoardIndication {
     // 呼び出し側は Unused スロットを数えない（数えると空きスロットのある基板が
     // 常に赤く点滅する）。その結果、**全スロットが Unused の基板では observe が
     // 1 回も呼ばれない** —— サーボ基板の DIP を `kServoBoardCount` 以上へ回すと
-    // `kSlotsByBoard` に行が無く、仕様書 §2.2 と CLAUDE.md の言う「表に無い基板番号は
+    // `kServoBoards` に行が無く、仕様書 §2.2 と CLAUDE.md の言う「表に無い基板番号は
     // 全スロット Unused のまま据え置く」がそのまま成立する。
     //
     // そこを urgent に数えないと、その基板は FEEDBACK も INFO も 1 通も送らず

@@ -435,7 +435,7 @@ static void test_blink_interval_prefers_urgent() {
 //
 // 呼び出し側は Unused スロットを数えない（数えると空きスロットのある基板が常に
 // 赤く点滅する）。その結果、全スロットが Unused の基板 —— サーボ基板の DIP を
-// kServoBoardCount 以上へ回して kSlotsByBoard に行が無い状態 —— では observe が
+// kServoBoardCount 以上へ回して kServoBoards に行が無い状態 —— では observe が
 // 1 回も呼ばれない。そこを平常扱いにすると、FEEDBACK も INFO も 1 通も送らず
 // どのコマンドも受け付けない基板が **LED は平常と同じ青のハートビート**を出し、
 // PC 側は全チャンネル STALE。配線不良と区別する唯一の手段が消える。

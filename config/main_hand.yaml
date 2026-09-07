@@ -145,7 +145,7 @@ motors:
   #
   # **スロット設定一式 (役割・ピン・初期角・可動範囲・パルス仕様・センサ極性) は
   # ファームが基板番号ごと・スロットごとに持つ** (firmware/servo/include/config.h の
-  # kSlotsByBoard[基板][スロット])。サーボ基板 #0 の現在の割り当ては
+  # kServoBoards[])。サーボ基板 #0 の現在の割り当ては
   #   SV0 0x40 Servo       … gripper
   #   SV1 0x41 Servo       … wall_f
   #   SV2 0x42 Servo       … wall_r
@@ -154,7 +154,8 @@ motors:
   # で、**この基板に空いている Servo スロットはもう無い**。SV4 は Unused だが、
   # ここへサーボを載せてはならない —— y_axis の原点スイッチを付ける日に
   # TouchSensor へ戻すスロットである。サーボを足すときは
-  # サーボ基板 #1 (0x48-) を使う (サブハンドの sub_gripper が 0x48 に載っている)。
+  # サーボ基板 #1 (0x48-) か #2 (0x50-) を使う (サブハンドの sub_gripper が 0x48 に
+  # 載っており、#1 は SV1-SV4、#2 は 5 スロットとも空いている)。
   gripper:
     driver: generic
     bus: generic_bus
@@ -164,7 +165,7 @@ motors:
     # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
     # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
     # 値は firmware/servo/include/config.h の kFirmwareVersion と
-    # kSlotsByBoard[基板][スロット].pulse.angleRangeDeg に対応する。**サーボの型は
+    # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
     # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
     # **ファームを直したらここも直す。**
     expected_firmware: 5
@@ -219,9 +220,9 @@ motors:
 # **y_axis の原点スイッチ (SV4 / 0x44) はまだ装着されていないので登録しない。**
 # ここへ書くと動作確認の最初のステップが毎回「センサが応答していません」で止まる ——
 # 現在のファームは SV4 を Unused として宣言しており (firmware/servo/include/config.h の
-# kSlotsByBoard)、Unused のスロットは FEEDBACK を 1 通も送らないため鮮度の事前確認に
+# kServoBoards)、Unused のスロットは FEEDBACK を 1 通も送らないため鮮度の事前確認に
 # 引っ掛かる。症状は配線不良と区別が付かない。
-# **スイッチを付ける日は 3 つを同時に戻すこと**: ファームの kSlotsByBoard の SV4 を
+# **スイッチを付ける日は 3 つを同時に戻すこと**: ファームの kServoBoards の SV4 を
 # TouchSensor へ・ここへ origin_sensor を登録・config/main_hand_positions.yaml の
 # axes.y_axis.homing のコメントを外す。1 つでも欠けると上と同じ症状になる。
 #
