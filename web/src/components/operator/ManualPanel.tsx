@@ -4,6 +4,7 @@ import { ManualAxisRow } from "@/components/operator/ManualAxisRow";
 import { Kbd } from "@/components/ui/Kbd";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import type { RobotCommands } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import type { ManualState } from "@/lib/protocol";
 
@@ -19,8 +20,11 @@ interface ManualPanelProps {
    * 痕跡なく消え、操縦者には「押したのに無反応」としか見えない。今は
    * `blockedReason` がボタンごと無効にするので窓は「切断が確定する前の 1 回」に
    * 限られるが、ゲートを緩めた瞬間にその壊れ方が戻る。
+   *
+   * 型は context の定義を参照する。ここへ書き写すと、context 側の引数が増えても
+   * 手書きの型だけが古いまま通り、契約のずれが型検査を素通りする。
    */
-  sendOrReport: (data: Record<string, unknown> & { type: string }, what: string) => boolean;
+  sendOrReport: RobotCommands["sendOrReport"];
 }
 
 /**

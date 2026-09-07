@@ -1,11 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { RouterProvider, createMemoryRouter } from "react-router";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { RobotProvider } from "@/context/RobotContext";
 import type { MotorCheckSnapshot, SequenceStepInfo } from "@/lib/protocol";
 import { MALFORMED } from "@/lib/protocol";
+import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 import { createRobotContext, EMPTY_MOTOR_CHECK, renderWithRobot } from "@/test/robotContext";
 
 const STEPS: SequenceStepInfo[] = [
@@ -83,7 +85,12 @@ describe("MotorCheckPanel", () => {
     const { context } = mount({ running: true, step_index: 1 });
 
     await userEvent.click(screen.getByRole("button", { name: "中断" }));
-    expect(context.send).toHaveBeenCalledWith({ type: "motor_check_abort" });
+    // 送信口は `sendOrReport` 固定。素の `send` だと切断中に押した 1 回が消える
+    // (このボタンは `disabled` を持たないので、実行中はいつでも押せる)
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "motor_check_abort" },
+      "動作確認の中断",
+    );
   });
 
   it("実行中は操縦者の操作でも畳めない (畳んだまま機体だけが動く画面を作らない)", async () => {
@@ -207,5 +214,47 @@ describe("MotorCheckPanel の除外表示", () => {
     await userEvent.click(screen.getByRole("button", TOGGLE));
 
     expect(screen.getByText("除外ステップを読み取れませんでした")).toBeInTheDocument();
+  });
+});
+
+/**
+ * 中断は**実際に送れなかった経路**まで踏む。context のモックが常に true を返すテストだけでは、
+ * 送信口を素の `send` へ戻す変更 (戻り値を捨てる書き方) が 1 件も落ちない。
+ *
+ * ここが塞がっていないと、両ハンドの全アクチュエータが順に駆動されている最中に押した
+ * 「中断」が痕跡なく消える (このボタンは `disabled` を持たないので実行中は常に押せる)。
+ * 操縦者には「押したのに止まらない」としか見えない。
+ */
+describe("切断中の動作確認の中断", () => {
+  beforeEach(() => {
+    installMockWebSocket();
+  });
+
+  it("送れなかったことを操縦者へ伝える", async () => {
+    const { routes } = await import("@/routes");
+    const router = createMemoryRouter(routes, { initialEntries: ["/monitor"] });
+    render(<RouterProvider router={router} />);
+
+    act(() => latestSocket().open());
+    act(() =>
+      latestSocket().receive({
+        type: "motor_check_state",
+        available: true,
+        blocked_reason: null,
+        running: true,
+        step_index: 1,
+        current_step: STEPS[1].label,
+        steps: STEPS,
+        total_steps: STEPS.length,
+        excluded_steps: [],
+        error: null,
+        last_error: null,
+      }),
+    );
+    act(() => latestSocket().close());
+
+    await userEvent.click(screen.getByRole("button", { name: "中断" }));
+
+    expect(screen.getByText(/動作確認の中断を送信できませんでした/)).toBeInTheDocument();
   });
 });
