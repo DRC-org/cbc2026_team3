@@ -40,8 +40,6 @@ from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
 from lib.sequence.engine import AxisSyncError, Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
-from lib.tuning.metrics import Sample
-from lib.tuning.recorder import Capture, PidSnapshot
 from tests.fake_can import mock_can_manager, set_last_feedback, set_motors, set_sensors
 from tests.fake_health import ok_health_snapshot
 from tests.feedback_frames import feed_generic
@@ -89,8 +87,6 @@ REQUIRED_TYPES = frozenset(
         # 動作確認は進捗も結果も拒否理由も 1 通に載る。4 種類に分けていた頃は、
         # 途中の 1 通を落とした画面が復旧しなかった
         "motor_check_state",
-        # PID 調整支援。波形・指標・助言を 1 通で運ぶ
-        "tuning_capture",
     }
 )
 
@@ -118,32 +114,6 @@ class _ContractSequence(Sequence):
             "シーケンス 'main_hand_seq': 軸内のモータ位置がずれています "
             "(y_axis: 偏差 3.100 > 許容 2.000)"
         )
-
-
-def _contract_capture(positions: list[float], *, target: float) -> Capture:
-    """golden 用のステップ応答。
-
-    記録そのものは入力データ (mock のモータ状態と同じ扱い) で、**配信の形は
-    実物の `summarize` → `to_payload` → `_fanout` が作る**。ここを手書きの
-    ペイロードにすると、UI 側が想像の契約を検証することになる。
-    """
-    return Capture(
-        motor="y_axis_r",
-        captured_at=1700000000.0,
-        samples=tuple(
-            Sample(
-                t=round(index * 0.02, 3),
-                target=target,
-                position=pos,
-                output=900.0 - index * 40.0,
-                # 飽和を混ぜる。全周期 False だと「飽和した記録」の形が
-                # golden に一度も現れず、UI の警告表示を誰も検証しない
-                saturated=index < 3,
-            )
-            for index, pos in enumerate(positions)
-        ),
-        gains=PidSnapshot(kp=2.0, ki=0.0, kd=0.0, dead_band=1.0),
-    )
 
 
 def _generic_drivers() -> dict[str, GenericDriver]:
@@ -445,25 +415,6 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             samples["motor_check_state_with_exclusions"] = await require_type(
                 ws, "motor_check_state"
             )
-
-            # ステップ応答は state と同じ配信周期に相乗りする。
-            # **指標が出る形と出ない形を両方載せる。** 片方だけだと、UI が
-            # 知らないほうの形を受信条件で弾いても誰も気付けない
-            fx.server.record_tuning_capture(
-                _ROBOT,
-                # 行き過ぎと飽和の両方が出る応答にする。助言が 1 種類しか載らないと、
-                # UI の重み別表示 (warning / info) の片方が golden に現れない
-                _contract_capture([0.0, 3.0, 7.0, 9.6, 13.5, 11.5, 9.8, 10.0], target=10.0),
-            )
-            await fx.publish_state()
-            samples["tuning_capture"] = await require_type(ws, "tuning_capture")
-
-            # 目標が動いていない記録。ステップとして解釈できないので metrics は null
-            fx.server.record_tuning_capture(
-                _ROBOT, _contract_capture([10.0, 10.0, 10.0], target=10.0)
-            )
-            await fx.publish_state()
-            samples["tuning_capture_not_a_step"] = await require_type(ws, "tuning_capture")
 
             await ws.close()
     finally:

@@ -44,7 +44,6 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     matchState: DEFAULT_MATCH_STATE,
     serverInfo: DEFAULT_SERVER_INFO,
     rejection: null,
-    tuningCaptures: {},
     clearRejection: vi.fn(),
     wsUrl: "ws://localhost:8080/ws",
     wsUrlSource: "origin",

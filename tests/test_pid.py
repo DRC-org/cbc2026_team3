@@ -240,8 +240,30 @@ class TestReset:
         assert pid.update(setpoint=1.0, measurement=0.0, dt=0.0) == pytest.approx(0.0)
 
 
-class TestGainAccess:
-    def test_gains_are_mutable_for_runtime_tuning(self) -> None:
+class TestAttributeAccess:
+    """生成時引数は公開属性のまま残り、``update()`` が毎周期読み直す。
+
+    ``main._build_position_pid`` は ``make_position_pid`` が入れた C620 のフルスケール
+    (±16384 = ±20A) を、組み立て済みの ``PIDController`` へ ``output_min`` /
+    ``output_max`` を代入して config の ``output_limit`` まで絞り込む
+    (``scripts/tune_y_axis.py`` も試行ごとの上限を同じ形で入れる)。生成時に値を
+    私有フィールドへ畳み込む実装に変えると、この絞り込みが 1 counts も効かないまま
+    C620 のフルトルクが出る。
+
+    ゲイン ``kp`` / ``ki`` / ``kd`` を実行中に差し替える経路は無い (変えるときは
+    インスタンスごと作り直す) が、読み出しは出力レンジと同じ機構に乗っているので、
+    片方だけ凍結した実装を検出できるよう両方を固定する。
+    """
+
+    def test_output_limits_are_read_at_each_update(self) -> None:
+        """生成後に絞り込んだ出力レンジが、次の update から効く。"""
+        pid = PIDController(kp=1000.0, output_min=M3508_CURRENT_MIN, output_max=M3508_CURRENT_MAX)
+        pid.output_min = -2000.0
+        pid.output_max = 2000.0
+        assert pid.update(setpoint=100.0, measurement=0.0, dt=0.01) == pytest.approx(2000.0)
+        assert pid.update(setpoint=-100.0, measurement=0.0, dt=0.01) == pytest.approx(-2000.0)
+
+    def test_gains_are_read_at_each_update(self) -> None:
         pid = PIDController(kp=1.0)
         pid.kp = 3.0
         assert pid.update(setpoint=1.0, measurement=0.0, dt=0.01) == pytest.approx(3.0)

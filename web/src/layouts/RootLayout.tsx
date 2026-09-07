@@ -202,7 +202,6 @@ export function RootLayout() {
         matchState: socket.matchState,
         serverInfo: socket.serverInfo,
         rejection: socket.rejection,
-        tuningCaptures: socket.tuningCaptures,
         clearRejection,
         wsUrl,
         wsUrlSource,

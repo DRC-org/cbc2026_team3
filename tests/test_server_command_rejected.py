@@ -272,8 +272,8 @@ class TestHandlerExceptionsNeverKillTheConnection:
     `handle_command` は `_ws_handler` の受信ループから await されている。例外を
     抜けさせると `async for msg in ws` ごと降り、その操縦者は画面から何も送れなく
     なる —— 試合中なら E-STOP を押す手段まで失う。以前は `_run_manual` だけが
-    自前で握っており、`set_param` → `set_pid_gains` のように投げうる経路が
-    無防備なまま残っていた。握りはディスパッチ 1 箇所に置く。
+    自前で握っており、他のハンドラが投げうる経路は無防備なまま残っていた。
+    握りはディスパッチ 1 箇所に置く。
     """
 
     async def test_ハンドラの例外は理由付きで返る(self) -> None:
