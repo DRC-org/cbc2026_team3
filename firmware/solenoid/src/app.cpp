@@ -171,6 +171,12 @@ void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
         // 設定ミスで意図しない弁が開くより、開かない方が安全。
         return;
     }
+    // **出力を読む前に目標を畳む。** outputOn() は出力禁止中に false を返すだけで
+    // 目標を残すので、これが無いとウォッチドッグ満了や緊急停止で消磁した後に
+    // 「受理できない SET_TARGET」が 1 通届いただけで途絶前に開いていた弁が
+    // 再通電する（§3.1 / §6 のとおり受理できないフレームでもウォッチドッグは養われる）。
+    g_channel[ch].tick(nowMs);
+
     // outputOn() は出力禁止中に false を返す。この基板に出力禁止ピンは無く、
     // GPIO を LOW にすることだけが止める手段なので、ここを通さない経路を作らないこと。
     const bool on = g_channel[ch].outputOn(nowMs);

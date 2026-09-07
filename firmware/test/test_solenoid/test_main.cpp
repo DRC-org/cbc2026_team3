@@ -179,6 +179,32 @@ static void test_output_stops_on_watchdog_and_recovers() {
     TEST_ASSERT_TRUE(channel.outputOn(2000));
 }
 
+// **止まっている間に目標を残さない。**
+//
+// `outputOn()` は出力禁止中に false を返すだけで `on_` を残すので、tick で畳まないと
+// ウォッチドッグ満了の後に「受理できない SET_TARGET」（制御タイプ違い・DLC 不足）が
+// 1 通届いただけでゲートだけが開き、**途絶前に開いていた弁が再通電する**。
+// 仕様書 §3.1 / §6 のとおり `handleChannelFrame` は受理できないフレームでも
+// ウォッチドッグを養う（`feed()` が妥当性検査より先）ので、この経路は実在する。
+// この基板は「止める = 消磁」の一手しか持たないので、意図せず通電が戻ることは
+// 吸着中のワークの扱いをそのまま変える。
+static void test_target_is_forgotten_while_output_is_blocked() {
+    SolenoidChannel channel = makeFedChannel(1000);
+    TEST_ASSERT_TRUE(channel.setOn(true, 1000));
+
+    // 満了で消磁。tick が目標を畳む
+    const uint32_t expired = 1000 + kTimeoutMs + 1;
+    TEST_ASSERT_FALSE(channel.outputOn(expired));
+    channel.tick(expired);
+
+    // §6: 受理できない型でもウォッチドッグは養われる → ゲートだけが開く
+    channel.feed(expired + 10);
+    TEST_ASSERT_FALSE(
+        channel.applySetTarget(SetTargetCommand{ControlType::Duty, 1000, true}, expired + 10));
+
+    TEST_ASSERT_FALSE(channel.outputOn(expired + 10));
+}
+
 // **出力へ至る経路は outputOn() の 1 本だけ。** 目標が ON のまま残っていても、
 // ゲートが閉じていれば false を返す。ここが素通しになると、app.cpp が
 // 安全機構を迂回して GPIO を叩ける形になる。
@@ -376,6 +402,7 @@ int main() {
     RUN_TEST(test_solenoid_channel_starts_de_energized);
     RUN_TEST(test_solenoid_channel_energizes_after_first_command);
     RUN_TEST(test_output_stops_on_watchdog_and_recovers);
+    RUN_TEST(test_target_is_forgotten_while_output_is_blocked);
     RUN_TEST(test_output_gate_overrides_stale_target);
     RUN_TEST(test_rejects_command_while_latched);
     RUN_TEST(test_clear_does_not_re_energize);
