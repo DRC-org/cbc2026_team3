@@ -23,6 +23,22 @@ function ExcludedNote({ state }: { state: MotorCheckSnapshot }) {
 }
 
 /**
+ * ステップ一覧が読めなかったことを 1 語で添える。**畳んだ状態でも見えている必要がある。**
+ *
+ * 内訳 (「ステップ一覧を読み取れませんでした」の全文) は `MotorCheckPanel` が出すが、
+ * あちらが自分から開くのは実行中と失敗時だけで、**未実行・完了では畳まれたまま**になる。
+ * ところが完了判定 (`motorCheckStatus`) が見るのは `total_steps` だけなので、
+ * `steps` が読めないまま `step_index >= total_steps` の配信が届くと、ここは緑の「完了」を
+ * 出し、パネルは畳まれたままになる —— 操縦者は警告を一度も見ずに指差喚呼
+ * 「アクチュエータ動作確認 完了」にチェックを付けられる。`ExcludedNote` と同じ理由で、
+ * ここが言えなければ誰も言わない。
+ */
+function StepsNote({ state }: { state: MotorCheckSnapshot }) {
+  if (state.steps !== MALFORMED) return null;
+  return <span className="text-warning">ステップ 判定不能</span>;
+}
+
+/**
  * 統合動作確認の状態を区分見出しに 1 語で出す。
  *
  * 指差喚呼には「アクチュエータ動作確認 完了」の項目がある。チェックを付ける前に
@@ -56,6 +72,7 @@ export function MotorCheckSummary() {
       ) : (
         <span className="text-base-content/60">未実行</span>
       )}
+      <StepsNote state={state} />
       <ExcludedNote state={state} />
     </span>
   );

@@ -1319,15 +1319,24 @@ padding だけでなく本文の `font-size` も直接指定する。ルート�
 付く経路だった。**ステップ数 0 は「未読込」であって完了ではない。**
 
 **受信境界では「読めなかった配信」を `MALFORMED` として異常側へ倒す。**
-`protocol.ts` の `parseSafety` / `parseChecklists` / `parseExcludedSteps` と
+`protocol.ts` の `parseSafety` / `parseChecklists` / `parseExcludedSteps` /
+`parseMotorCheckSteps` と
 `healthVerdict.ts` がこの形で、**`?? []` のような黙った既定値を置いてはならない** ——
 埋めると「ラッチしているのに画面は平常」へ化け、埋めたこと自体が画面から読めなくなる
 （サーバーの `overall=down` を「健全性 判定不能」へ倒すのと同じ）。未配信（`undefined`）とは
 別物として区別する。一度これで `safety` の 1 欄が落ちただけで全画面が白くなった
 （`describeSafetyIssues` が無検査で `.length` を呼び、レンダー本体なので React ツリーごと
-アンマウントした）。**`motors` と `steps` は素通しのまま** — モータ名を UI へ書かない
-性質はそこで成立している。代わりに**数値を実際に読む側が `readMeasured()` を通す**
-（`state.pos.toFixed(1)` は欄が 1 つ落ちれば同じ形で全画面を落とす）。
+アンマウントした）。**`state` メッセージの `motors` と `steps` は素通しのまま** —
+モータ名を UI へ書かない性質はそこで成立している。代わりに**数値を実際に読む側が
+`readMeasured()` を通す**（`state.pos.toFixed(1)` は欄が 1 つ落ちれば同じ形で全画面を
+落とす）。**`motor_check_state` の `steps` だけは例外で検査する** —— 空配列が
+「まだ読み込まれていない」という別の意味を既に持っており、読めなかった配信をそこへ倒すと
+指差喚呼「アクチュエータ動作確認 完了」の判断材料が静かに嘘になるため。
+**検査するのは `index` / `label` / `require_trigger` という構造だけ**で、ステップ名は
+UI へ書き写していない（素通しの性質はそのまま）。`MALFORMED` は
+`MotorCheckPanel` が全文で、`MotorCheckSummary` が「ステップ 判定不能」の 1 語で出す
+——後者が要るのは、パネルが自分から開くのは実行中と失敗時だけで、**完了・未実行では
+畳まれたまま**になるため（`ExcludedNote` と同じ理由）。
 
 **`RouteErrorBoundary` は `<Outlet />` だけに掛ける。** ヘッダー・接続バナー・緊急停止
 オーバーレイは境界の外に置く。画面全体を包むと、描画が落ちたときに**止める手段
