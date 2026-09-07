@@ -402,6 +402,41 @@ class TestLoadDefinitions:
             ChecklistItem(id="power", label="電源投入", group=None),
         ]
 
+    def test_load_rejects_unknown_role(self) -> None:
+        """**ロール名の誤りは 1 項目の欠落と失敗の質が違うので拒否する。**
+
+        `ALL_ROLES` に無いロールへ書かれた項目は `_rebuild_checklists` の段で丸ごと
+        落ち、`pre_match` は空リストになる。`completed` は `all([])` で True なので、
+        **指差喚呼を 1 つも読み上げないまま試合開始のゲートが開く**。しかも画面には
+        項目が 1 つも出ないため、操縦者にはゲートが開いている理由が分からない。
+
+        `group` の未知の値を素通しするのとは逆方向だが矛盾しない —— あちらは
+        「置き場所が既定へ落ちる」だけで項目もゲートも残る。
+        """
+        from lib.match_state import load_checklist_definitions
+
+        with pytest.raises(ValueError, match="main_hand"):
+            load_checklist_definitions(
+                {
+                    "checklists": {
+                        # 旧 2 ロール構成の yaml を持ち込んだ場合
+                        "main_hand": [{"id": "power", "label": "電源投入確認"}],
+                    }
+                }
+            )
+
+    def test_unknown_role_would_have_opened_the_gate(self) -> None:
+        """拒否しないと何が起きるかを、拒否とは独立に固定する。
+
+        `load_checklist_definitions` を通さずに `MatchState` を直接組み立てて、
+        「項目が 1 つも無いロール」が試合開始を通してしまうことを見る。この性質
+        自体は正しい (項目 0 件の構成は `config/bench/*` に実在する) ので、
+        **入口で弾くしか防ぎようが無い**ことの根拠になる。
+        """
+        state = MatchState({ROLE_PRE_MATCH: []})
+
+        assert state.can_start_match is True
+
     def test_group_survives_rebuild_and_reaches_the_wire(self) -> None:
         """定義の複製 (_rebuild_checklists) で group を落とすと、画面では全項目が
         「その他」へ落ちる。症状は「配置だけが効かない」で、config からもログからも
