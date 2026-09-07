@@ -289,8 +289,15 @@ class Sequence:
             )
             pending.append((handle, position_name, spec.timeout_s if timeout is None else timeout))
 
+        # **`expect_target=True` は「直前に指令を送った」の宣言。** ここへ来る軸は
+        # 全部 `set_target_value` を通っているので、待ち始めた時点で目標が無ければ
+        # それは「待つ必要が無い」ではなく、送ってから待つまでの窓で緊急停止が
+        # 目標を捨てたということである。宣言しないと中断がステップ成功に化ける
         results = await asyncio.gather(
-            *(handle.wait_reached(timeout=wait_s) for handle, _, wait_s in pending)
+            *(
+                handle.wait_reached(timeout=wait_s, expect_target=True)
+                for handle, _, wait_s in pending
+            )
         )
         failed = [
             f"{handle.name}->{position_name}"

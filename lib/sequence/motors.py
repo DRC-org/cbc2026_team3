@@ -164,6 +164,7 @@ class MotorHandle:
         *,
         tolerance: float | None = None,
         timeout: float | None = None,
+        expect_target: bool = False,
     ) -> bool:
         """目標到達を待つ。到達すれば True、タイムアウトなら False。
 
@@ -176,13 +177,21 @@ class MotorHandle:
         目標を一度も持たずに待ち始めた場合 (``has_target`` が最初から False) は
         従来どおり即座に True を返す —— こちらは中断ではなく「待つ必要が無い」。
 
-        既知の限界: 中断の検出は「待ち始めた時点で目標を持っていたか」の
-        スナップショットに拠るため、``move_to`` が複数軸へ ``set_target_value``
-        を順に送っている最中 (この関数が呼ばれる前) に目標が消えた場合は拾えない
-        (次に送る側は最初から目標無しで待ち始め、True を返す)。窓は送信 1 回分
-        (数 ms) に縮むだけで、待機期間全体を保護するものではない。
+        **``expect_target`` は「呼ぶ直前に指令を送った」と呼び出し側が宣言する印。**
+        立っていれば、待ち始めた時点で目標が無いことも中断として扱う。
+        待機開始時点のスナップショットだけでは、``move_to`` が全軸へ
+        ``set_target_value`` を送り終えてから ``wait_reached`` を作るまでの窓で
+        消えた目標を拾えない —— その軸は「最初から目標無し」に見えるので
+        「待つ必要が無い」と同じ扱いになり、**中断がステップ成功に化ける**。
+        窓は数 ms だが、そこへ入るのは緊急停止そのものである。
+        ここを時刻の勝負にしない (実際、実時間で狙っていたテストは CI で
+        不定期に落ちていた)。
+
+        判断を呼び出し側に置くのは、**指令を送ったかどうかを知っているのが
+        呼び出し側だけ**だからである。``has_target`` を見て推測すると、
+        まさに消えた場合と一度も指令していない場合が区別できない。
         """
-        had_target = self.has_target
+        had_target = self.has_target or expect_target
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             if had_target and not self.has_target:
@@ -308,12 +317,17 @@ class AxisHandle:
                     handle.clear_target()
             raise failures[0]
 
-    async def wait_reached(self, *, timeout: float | None = None) -> bool:
+    async def wait_reached(
+        self, *, timeout: float | None = None, expect_target: bool = False
+    ) -> bool:
         """軸の到達を待つ。到達すれば True、タイムアウトなら False。
 
         POSITION 軸では ``MotorHandle.wait_reached`` を束ねて呼ぶため、
         待機中に目標が消えれば (緊急停止など) ``WaitInterruptedError`` が
         そのまま伝播する (duty / velocity 軸は到達判定を持たないため無関係)。
+
+        ``expect_target`` はそのまま各モータへ渡す —— 意味も理由も
+        ``MotorHandle.wait_reached`` 側に書いてある。
         """
         if self._spec.command_mode is not ControlMode.POSITION:
             # duty / velocity 指令の軸は目標値と同じ次元のフィードバックを持たず
@@ -324,7 +338,11 @@ class AxisHandle:
 
         results = await asyncio.gather(
             *(
-                handle.wait_reached(tolerance=self._tolerance_for(handle.name), timeout=timeout)
+                handle.wait_reached(
+                    tolerance=self._tolerance_for(handle.name),
+                    timeout=timeout,
+                    expect_target=expect_target,
+                )
                 for handle in self._handles
             )
         )
