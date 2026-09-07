@@ -234,6 +234,20 @@ class TestMatchesFeedback:
 
         assert self.drv.matches_feedback(empty) is False
 
+    def test_状態フラグだけの_FEEDBACK_は自分宛として受ける(self):
+        """下限ちょうど (DLC=1) が通ることを見る。
+
+        位置を持たない基板 —— DC 基板とセンサスロット —— が送るのはこの形だけで
+        (仕様書 §3.2: 状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト)、下限を
+        1 バイトより上へ引き上げるとその全チャンネルが 1 通も配られなくなる。
+        症状は「その基板の全チャンネルが STALE」で、配線不良と区別が付かない。
+        """
+        # position を省くと DLC=1 (実機の DC 基板・センサと同じ形)
+        minimal = generic_feedback(self.drv)
+        assert len(minimal.data) == 1
+
+        assert self.drv.matches_feedback(minimal) is True
+
     def test_短すぎる_INFO_も自分宛にしない(self):
         # decode_info は Byte2 (スロット役割) まで読む (仕様書 §3.4)
         short = can.Message(arbitration_id=0x401, data=bytes(2), is_extended_id=False)
