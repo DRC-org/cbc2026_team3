@@ -201,6 +201,12 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
         return;
     }
 
+    // **出力を読む前に目標を畳む。** outputDuty() は出力禁止中に 0 を返すだけで
+    // 目標を残すので、これが無いとウォッチドッグ満了や緊急停止で止まった後に
+    // 「受理できない SET_TARGET」が 1 通届いただけで途絶前の duty が復活する
+    // （§3.1 / §6 のとおり受理できないフレームでもウォッチドッグは養われる）。
+    g_channel[ch].tick(nowMs);
+
     // outputDuty() は出力禁止中に 0 を返す。この基板には出力禁止ピン（DIS）が無く、
     // PWM を 0% にすることだけが止める手段なので、ここを通さない経路を作らないこと。
     const DutyOutput out = splitDuty(g_channel[ch].outputDuty(nowMs), g_maxDuty[ch]);
