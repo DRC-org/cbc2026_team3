@@ -1,4 +1,4 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -103,11 +103,14 @@ function pressSpace() {
 }
 
 describe("試合時間タイマーの配置", () => {
-  it("試合中は残り時間を出す", () => {
+  it("試合中は右カラムに残り時間の値を出す", () => {
     mount("match", robotState(), { running: true, elapsed_ms: 60_000, duration_ms: 180_000 });
 
-    expect(screen.getByText("2:00")).toBeInTheDocument();
-    expect(screen.getByText("残り時間")).toBeInTheDocument();
+    // 進行中は caption を出さない (数字が残り時間であることは legend から読める)。
+    // ここが見たいのは配置なので、時刻の値そのものがパネルの中にあることで確かめる
+    const panel = screen.getByText("試合時間").closest("section");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("2:00")).toBeInTheDocument();
   });
 
   it("セッティングタイムには出さない", () => {
@@ -441,17 +444,15 @@ describe("手動操縦モード", () => {
     // 機体を直接動かせる状態を、確証のないまま画面へ出さない
     mount("match", robotState({ manual: undefined }));
 
-    expect(screen.getByRole("tab", { name: "半自動へ切り替え" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(screen.getByText("半自動")).toBeInTheDocument();
+    expect(screen.queryByText(/手動操縦中/)).toBeNull();
   });
 
   it("モード帯はどのフェーズでも同じ位置に出る", () => {
     // 「今この画面から機体を直接動かせるか」は準備中も試合中も同じ場所で読める
     for (const phase of ["setup", "match", "finished"] as MatchPhase[]) {
       const view = mount(phase);
-      expect(screen.getByRole("tab", { name: "手動操縦へ切り替え" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /手動操縦へ/ })).toBeInTheDocument();
       view.unmount();
     }
   });
@@ -459,7 +460,7 @@ describe("手動操縦モード", () => {
   it("切り替えは自分の担当機へ宛てて送る", async () => {
     const { context } = mount("match");
 
-    await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
+    await userEvent.click(screen.getByRole("button", { name: /手動操縦へ/ }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
@@ -514,7 +515,7 @@ describe("手動操縦モード", () => {
       { mode: "sequence", axes: MANUAL.axes },
     );
 
-    await userEvent.click(screen.getByRole("tab", { name: "手動操縦へ切り替え" }));
+    await userEvent.click(screen.getByRole("button", { name: /手動操縦へ/ }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
@@ -626,5 +627,63 @@ describe("RobotControl の切断中", () => {
     });
 
     expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeDisabled();
+  });
+});
+
+function stepPanel(): HTMLElement {
+  const panel = screen.getByText("ステップ").closest("section");
+  if (!panel) throw new Error("ステップ一覧のパネルが見つからない");
+  return panel as HTMLElement;
+}
+
+/**
+ * 見出し行に出すのは**塞がれている理由**だけ。操作できるときの案内は押せば分かる
+ * ことを毎試合読ませるだけだが、**塞がれている理由は消してはならない** ——
+ * 消すと「押したのに何も起きない」だけが操縦者に残る。
+ */
+describe("ステップ一覧の見出し", () => {
+  it("操作できるときは案内を出さない", () => {
+    mount("match");
+
+    expect(within(stepPanel()).queryByText("クリックで再開")).toBeNull();
+  });
+
+  it("試合中でなければ、塞がれている理由を出す", () => {
+    mount("finished");
+
+    expect(within(stepPanel()).getByText("試合中のみ操作可")).toBeInTheDocument();
+  });
+
+  it("切断中も、塞がれている理由を出す", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      connected: false,
+      states: { sub_hand: robotState() },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", checklists: CHECKLISTS },
+    });
+
+    expect(within(stepPanel()).getByText("切断中のため送信できません")).toBeInTheDocument();
+  });
+});
+
+/**
+ * シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠 1 つぶんの縦を
+ * 払わない。総ステップ数を試合中に出さないのは、`ActionPanel` が `1/22` の形で
+ * 同じ数を既に出しているため (同じ事実を 2 度描かない)。
+ */
+describe("シーケンス名の置き場所", () => {
+  it("準備中はモード帯にシーケンス名と総ステップ数を出す", () => {
+    mount("setup");
+
+    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
+    // 1 行のためのパネルは持たない
+    expect(screen.queryByText("シーケンス")).toBeNull();
+  });
+
+  it("試合中は総ステップ数を出さない (ActionPanel が同じ数を出している)", () => {
+    mount("match");
+
+    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+    expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
   });
 });

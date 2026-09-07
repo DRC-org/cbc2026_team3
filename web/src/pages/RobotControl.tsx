@@ -63,6 +63,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // 可否の正はサーバーだが、切断中は届かないので画面側でしか分からない。
   // 塞がずに押させると「押したのに何も起きない」だけが操縦者に残る
   const sequenceBlockedReason = connected ? null : "切断中のため送信できません";
+  // ステップ一覧が押せない理由。**押せるときは何も言わない** —— 塞がれている理由を
+  // 落とすと「押したのに何も起きない」だけが操縦者に残る
+  const stepListBlockedNote = sequenceBlockedReason ?? (inMatch ? null : "試合中のみ操作可");
 
   // 実行状態はサーバー配信の running が唯一の根拠。step_index からの推測をしない
   const kind = state ? sequenceKind(state) : null;
@@ -131,9 +134,18 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   }
 
   // モード帯はどのフェーズでも同じ位置に出す。「今この画面から機体を直接
-  // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない
+  // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない。
+  //
+  // 総ステップ数を準備中にしか渡さないのは、試合中は `ActionPanel` が `1/22` の
+  // 形で同じ数を出しているため (同じ事実を 2 度描かない)
   const modeSwitch = (
-    <ModeSwitch mode={manual.mode} onChange={handleMode} blockedReason={modeBlockedReason} />
+    <ModeSwitch
+      mode={manual.mode}
+      onChange={handleMode}
+      blockedReason={modeBlockedReason}
+      sequenceName={state.sequence}
+      totalSteps={setupPhase ? state.total_steps : null}
+    />
   );
 
   // 手動の操作面。半自動側の主役 (動作確認 / ActionPanel) と同じ列を占める
@@ -197,18 +209,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         >
           {inManual ? manualPanel : null}
 
-          <div className="flex min-h-0 flex-col gap-2">
-            {subsystemPanel(true, "min-h-0 flex-1")}
-
-            <Panel legend="シーケンス" className="shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate font-mono">{state.sequence}</span>
-                <span className="shrink-0 text-base-content/70">
-                  全 {state.total_steps} ステップ
-                </span>
-              </div>
-            </Panel>
-          </div>
+          {/* シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠
+              1 つぶんの縦を払わない */}
+          {subsystemPanel(true, "min-h-0")}
         </div>
       </Page>
     );
@@ -243,10 +246,12 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               legend="ステップ"
               className="min-h-0 flex-1"
               bodyClassName="p-0"
+              // 出すのは**塞がれている理由**だけ。操作できるときの案内 (「クリックで
+              // 再開」) は、押せば分かることを毎試合読ませるだけの面積になる
               actions={
-                <span className="text-[0.85em] text-base-content/60">
-                  {sequenceBlockedReason ?? (inMatch ? "クリックで再開" : "試合中のみ操作可")}
-                </span>
+                stepListBlockedNote ? (
+                  <span className="text-[0.85em] text-base-content/60">{stepListBlockedNote}</span>
+                ) : null
               }
             >
               <SequenceStepList
