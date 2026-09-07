@@ -41,7 +41,10 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
       role="alert"
       className={cx(
         TONE_ALERT_CLASS[toast.tone],
-        "w-[22rem] max-w-[calc(100vw-2rem)] items-start gap-2 p-2",
+        // コンテナが `pointer-events-none` でクリックを透かすので、閉じるボタンの
+        // ぶんだけここで受け直す (カード自体は下の操作を塞ぐが、面積は 22rem に
+        // 留まるので、モーダルのフッターごと覆うことはない)
+        "pointer-events-auto w-[22rem] max-w-[calc(100vw-2rem)] items-start gap-2 p-2",
       )}
     >
       <Icon as={TOAST_ICON[toast.tone]} className="mt-[0.15em] text-[1.1em]" />
@@ -144,8 +147,15 @@ export function Toaster() {
   // 「切断中のため送信できませんでした。機体側のラッチは残っています」は
   // `RootLayout` がトーストへ逃がしており、**それが唯一の説明経路**である。
   // 沈むと「Reset を押しても何も起きない」としか見えない。
+  //
+  // **上へ出した代わりに、コンテナはクリックを透かす。** daisyUI の `.toast` は
+  // `pointer-events: none` を持たず `max-width: calc(100vw - 2rem)` なので、
+  // モーダルより下に居たあいだは**構造的に**モーダルのボタンを塞げなかった。
+  // 1000 へ上げるとその保護が外れ、ウィンドウ幅が約 1100px を下回るとトーストが
+  // モーダルのフッターボタンに重なって押せなくなる (会場のノート PC で起きうる)。
+  // 透かすのはコンテナだけで、閉じるボタンを活かすため `ToastCard` は受け直す。
   return (
-    <div className="toast toast-end toast-bottom bottom-8 z-[1000]">
+    <div className="pointer-events-none toast toast-end toast-bottom bottom-8 z-[1000]">
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={() => dismiss(toast.id)} />
       ))}

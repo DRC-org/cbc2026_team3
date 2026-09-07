@@ -148,6 +148,18 @@ describe("寿命と件数の制御", () => {
     expect(screen.queryByText(/can2/)).not.toBeInTheDocument();
   });
 
+  it("コンテナはクリックを透かし、カードだけが受け直す", () => {
+    // daisyUI の `.toast` は `pointer-events: none` を持たず、幅は
+    // `calc(100vw - 2rem)` まで広がる。z を `.modal` (999) の上へ出した以上、
+    // 透かさないと狭い画面でモーダルのフッターボタンを塞ぎうる
+    // (以前は下に沈んでいたので構造的に塞げなかった)
+    mount({ rejection: rejection() });
+
+    const card = screen.getByRole("alert");
+    expect(card).toHaveClass("pointer-events-auto");
+    expect(card.parentElement).toHaveClass("pointer-events-none");
+  });
+
   it("閉じるボタンで個別に消せる", async () => {
     mount({ rejection: rejection() });
 
