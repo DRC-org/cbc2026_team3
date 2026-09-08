@@ -149,6 +149,91 @@ describe("parseServerMessage", () => {
     });
 
     /**
+     * `positions` は名前だけの配列 (`["home", "work"]`) だった。**`state` の既存欄の
+     * 形を変えた唯一の例**なので、サーバーと `web/dist` の版がずれる窓が現実にある ——
+     * `pnpm dev` を手元で立てて `?ws=drc:8080` で機体へ繋ぐ運用がそれ。
+     * 素通しのままだと `position.name` が undefined になり、**文字の無いボタンが
+     * 押せる状態で並ぶ**（`onMove` は行き先の無い指令を送る）。
+     */
+    describe("manual の positions", () => {
+      const manualOf = (positions: unknown) => {
+        const msg = parse({
+          type: "state",
+          robot: "main_hand",
+          manual: { mode: "manual", axes: [{ name: "y_axis", positions }] },
+        });
+        return (msg as { state: RobotState }).state.manual?.axes[0].positions;
+      };
+
+      it("現行の形はそのまま通す", () => {
+        expect(
+          manualOf([
+            { name: "home", value: 0 },
+            { name: "work", value: 10 },
+          ]),
+        ).toEqual([
+          { name: "home", value: 0 },
+          { name: "work", value: 10 },
+        ]);
+      });
+
+      it("値が引けなかった位置の null を保つ (0 へ寄せない)", () => {
+        expect(manualOf([{ name: "place", value: null }])).toEqual([
+          { name: "place", value: null },
+        ]);
+      });
+
+      it("旧サーバーの素の文字列を value: null として受ける", () => {
+        // 押せるボタンは残す。**値が分からないことは null がそのまま表す**ので、
+        // 刻みも title も出ない (0 を捏造しない)
+        expect(manualOf(["home", "work"])).toEqual([
+          { name: "home", value: null },
+          { name: "work", value: null },
+        ]);
+      });
+
+      it("どちらの形でもない要素だけ落とす", () => {
+        // 名前を読めないボタンを出すより、ボタンが無い方が嘘をつかない
+        expect(manualOf([{ name: "home", value: 0 }, { value: 3 }, 42, null])).toEqual([
+          { name: "home", value: 0 },
+        ]);
+      });
+
+      it("値が数値でも null でもない要素も落とす", () => {
+        // **`0` へ丸めない。** 丸めると、可動範囲の下端に居ないプリセットが下端に
+        // 刻みとして描かれ、`title` は「そこがどこか」を数値で断言する
+        expect(
+          manualOf([
+            { name: "home", value: 0 },
+            { name: "work", value: {} },
+            { name: "place", value: "10" },
+            { name: "pick" },
+          ]),
+        ).toEqual([{ name: "home", value: 0 }]);
+      });
+
+      it("軸の他の欄は素通しのまま (軸名も可動範囲も UI へ書かない)", () => {
+        const msg = parse({
+          type: "state",
+          robot: "main_hand",
+          manual: {
+            mode: "manual",
+            axes: [{ name: "y_axis", unit: "mm", manual: { min: 0, max: 1, steps: [1] } }],
+          },
+        });
+        expect((msg as { state: RobotState }).state.manual).toEqual({
+          mode: "manual",
+          axes: [{ name: "y_axis", unit: "mm", manual: { min: 0, max: 1, steps: [1] } }],
+        });
+      });
+
+      it("未配信は undefined のまま (手動を配らない版のサーバーを異常にしない)", () => {
+        const msg = parse({ type: "state", robot: "main_hand" });
+        expect((msg as { state: RobotState }).state.manual).toBeUndefined();
+      });
+    });
+
+    /**
      * センサ一覧も UI が `Object.entries` を直に呼ぶので受信境界で形を確定させる。
      * **接触 (`active`) は異常ではない** ので値そのものは素通しで、異常側へ倒すのは
      * 読めなかった配信だけ。

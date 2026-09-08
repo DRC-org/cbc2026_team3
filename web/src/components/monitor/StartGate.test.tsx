@@ -36,6 +36,9 @@ function robot(health: HealthSnapshot, manual?: ManualState): RobotState {
 
 const HEALTHY_STATES = { main_hand: robot(OK_HEALTH), sub_hand: robot(OK_HEALTH) };
 
+/** 帯の色は Panel が `TONE_BORDER_L_CLASS` から引く。ここは引かれた結果を見る */
+const accent = (container: HTMLElement) => container.querySelector(".card");
+
 describe("StartGate", () => {
   it("残り件数を出す (項目名は同じ画面の Checklist が出すので繰り返さない)", () => {
     renderWithRobot(<StartGate onStart={vi.fn()} />, {
@@ -158,7 +161,10 @@ describe("StartGate", () => {
     });
 
     expect(screen.getByText(/CAN 停止 can_edulite/)).toBeInTheDocument();
-    expect(screen.getByText(/機体に要確認があります/)).toBeInTheDocument();
+    // **語彙はタブの LED と揃える。** 同じ CAN 停止に対して、タブは `evaluateHealth` の
+    // tone がそのまま出て「異常あり」、この画面だけが「要確認」と呼んでいた ——
+    // 2 つの画面を見比べた操縦者は、どちらが本当か判断できない
+    expect(screen.getByText(/機体に異常があります/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "試合を開始する" })).toBeEnabled();
   });
 });
@@ -314,6 +320,29 @@ describe("StartGate の手動操縦警告", () => {
 
     expect(screen.queryByText(/手動操縦中/)).not.toBeInTheDocument();
     expect(screen.getByText(/全ての指差喚呼が完了しています/)).toBeInTheDocument();
+  });
+
+  it("手動操縦の警告だけでは帯を赤くしない", () => {
+    // **件数ではなく重さで決める。** 軽微な警告 1 件で本物の異常と同じ赤にすると、
+    // 赤そのものが信用されなくなる (この画面は開始も止めないので、色しか残らない)
+    const { container } = renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, MANUAL), sub_hand: robot(OK_HEALTH, SEQUENCE) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(accent(container)).toHaveClass("border-l-warning");
+    expect(accent(container)).not.toHaveClass("border-l-error");
+  });
+
+  it("配信が 1 通も無い機体があれば帯を赤くする", () => {
+    // 判定できない = 異常側。上の warning と対で見ないと、赤を出す経路ごと
+    // 消しても片方のテストは緑のまま通る
+    const { container } = renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, SEQUENCE) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(accent(container)).toHaveClass("border-l-error");
   });
 
   it("手動でも開始そのものは止めない (可否を決めるのはサーバーの can_start_match だけ)", () => {

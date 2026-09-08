@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { ContinuousControls } from "@/components/operator/ContinuousControls";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { commandValueText, hasUnit } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
 import type { ManualAxis } from "@/lib/protocol";
 import { evaluateSync } from "@/lib/syncVerdict";
@@ -20,9 +21,17 @@ interface ManualAxisRowProps {
   onMove: (axis: string, position: string) => void;
 }
 
-/** 読めない値の表示。0 で埋めない (測っていない値を測ったように見せない) */
-function format(value: number | null, unit: string): string {
-  return value === null ? "—" : `${value.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+/**
+ * 軸の値 1 つ。0 で埋めない (測っていない値を測ったように見せない)。
+ *
+ * 桁が 2 つ要るのはジョグの刻みが 0.5 まであるため (診断表の 1 桁とは別の都合)。
+ * `on_off` だけは数値ではなく開閉として読ませ、単位も付けない —— 位置定数 yaml の
+ * `unit` は `on_off` という文字列なので、添えると「1.00 on_off」になる。
+ */
+function format(value: number | null, axis: ManualAxis): string {
+  if (value === null) return "—";
+  const text = commandValueText(value, axis.command_mode, 2);
+  return hasUnit(axis.command_mode) && axis.unit ? `${text} ${axis.unit}` : text;
 }
 
 /**
@@ -58,6 +67,38 @@ export function ManualAxisRow({
     if (selected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
 
+  /**
+   * プリセットは位置定数に定義された状態名からしか作らない。自由入力を許さないことで
+   * 「定義した状態以外を送れない」保証が残る。**値が配信されていても指令は名前で送る**
+   * —— 数値で送る経路を作った時点でその保証が消える。
+   *
+   * **置き場所は軸の性格で変わる。** 連続軸ではジョグ・絶対値入力の下の段だが、
+   * プリセットしか持たない軸 (電磁弁・ポンプ・壁) では見出しと同じ行へ入れて
+   * 1 軸 1 行に収める —— 2 行のままだと電磁弁 6 + ポンプ 2 で 16 行になり、
+   * 連続軸の下に隠れて画面外へ出る。
+   */
+  const presetOnly = range === null;
+  const presetButtons =
+    axis.positions.length === 0 ? null : (
+      <div className="flex flex-wrap items-center gap-1">
+        {axis.positions.map((position) => (
+          <Button
+            key={position.name}
+            disabled={disabled}
+            onClick={() => onMove(axis.name, position.name)}
+            aria-label={`${axis.name} を ${position.name} へ`}
+            // 値は連続軸でだけ意味を持つ (バーの目盛りと同じ場所を指す)。
+            // 離散状態の軸では `1` / `0` が読み手に何も足さない
+            title={
+              presetOnly || position.value === null ? undefined : `${position.value} ${axis.unit}`
+            }
+          >
+            {position.name}
+          </Button>
+        ))}
+      </div>
+    );
+
   return (
     <div
       ref={rowRef}
@@ -70,7 +111,13 @@ export function ManualAxisRow({
       onPointerDown={onSelect}
       onFocusCapture={onSelect}
     >
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <div
+        className={cx(
+          "flex min-w-0 flex-wrap gap-x-3 gap-y-0.5",
+          // ボタンを同じ行へ入れるので、そのときだけ縦中央で揃える
+          presetOnly ? "items-center" : "items-baseline",
+        )}
+      >
         <span className="min-w-0 shrink-0 font-medium">{axis.name}</span>
         {/* 実体が軸名と同じ単一モータ軸では出さない。同じ語を 2 度描くだけで、
             「同じ事実を 2 度描かない」原則にも反する */}
@@ -82,16 +129,25 @@ export function ManualAxisRow({
 
         <SyncIndicator axis={axis} />
 
+        {presetOnly ? presetButtons : null}
+
         <span className="ml-auto flex shrink-0 items-baseline gap-3 font-mono tabular-nums">
-          <span className="text-[1.15em] font-medium">
-            <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
-              現在
+          {/* **位置を測る手段が無い軸 (duty / on_off) に「現在」は無い。** サーバーは
+              position 以外の軸の `value` を必ず null にするので、出しても「現在 —」が
+              並ぶだけの欄になる (測れないこと自体は 機体状態 のモータ一覧が描く)。
+              **可否は `command_mode` で決め、届いた値から推測しない** —— 位置軸の
+              算出が一時的に失敗した null と、構造的に測れない null は同じ値である */}
+          {axis.command_mode === "position" ? (
+            <span className="text-[1.15em] font-medium">
+              <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
+                現在
+              </span>
+              {format(axis.value, axis)}
             </span>
-            {format(axis.value, axis.unit)}
-          </span>
+          ) : null}
           <span className="text-base-content/70">
             <span className="mr-1 font-sans text-[0.8em] text-base-content/55">目標</span>
-            {format(axis.target, axis.unit)}
+            {format(axis.target, axis)}
             <Delta value={axis.value} target={axis.target} />
           </span>
         </span>
@@ -112,22 +168,7 @@ export function ManualAxisRow({
         />
       ) : null}
 
-      {axis.positions.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1">
-          {/* プリセットは位置定数に定義された状態名からしか作らない。
-              自由入力を許さないことで「定義した状態以外を送れない」保証が残る */}
-          {axis.positions.map((position) => (
-            <Button
-              key={position}
-              disabled={disabled}
-              onClick={() => onMove(axis.name, position)}
-              aria-label={`${axis.name} を ${position} へ`}
-            >
-              {position}
-            </Button>
-          ))}
-        </div>
-      ) : null}
+      {presetOnly ? null : presetButtons}
     </div>
   );
 }

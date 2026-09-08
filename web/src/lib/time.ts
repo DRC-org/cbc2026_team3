@@ -38,3 +38,14 @@ export function formatAge(ms: number | null | undefined): string {
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m 前`;
   return `${Math.floor(ms / 3_600_000)}h 前`;
 }
+
+/**
+ * 試合の残りミリ秒を M:SS へ。**切り上げ**なのは、0:00 を「本当に時間が尽きた瞬間」
+ * だけに出すため。切り捨てると残り 0.9 秒でも 0:00 と表示される。
+ */
+export function formatRemaining(remainingMs: number): string {
+  const totalSeconds = Math.ceil(remainingMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}

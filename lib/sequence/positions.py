@@ -402,7 +402,13 @@ class PositionTable:
         return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
 
     def raw(self, axis: str, name: str, *, court: Court | None = None) -> float:
-        """人間の単位のままの値を返す (ログ・検証用)。"""
+        """人間の単位のままの値を返す。
+
+        **20Hz の配信経路からも呼ばれる** (``ManualController._position_entries`` が
+        プリセットの値を載せる)。呼び出し側は ``PositionLookupError`` を封じ込めること
+        —— 1 つの位置が引けないだけで state 全体が飛ぶと、全クライアントの
+        テレメトリが止まる。
+        """
         spec = self.axis(axis)
         values = self._positions.get(axis, {})
         if name not in values:

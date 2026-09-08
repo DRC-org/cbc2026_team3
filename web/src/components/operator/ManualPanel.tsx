@@ -63,6 +63,10 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
     sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
   const steerable = manual.axes.filter((axis) => axis.manual !== null);
+  // プリセットしか持たない軸 (電磁弁・ポンプ・グリッパ・壁・duty 軸)。
+  // **群に分けるだけで、群の中では配信順のまま。** 実運用の config は連続軸を先に
+  // 並べているので見た目の順序は変わらない
+  const presetOnly = manual.axes.filter((axis) => axis.manual === null);
   // 選択は state から導出する。軸が入れ替わっても「居なくなった軸を選んだまま」に
   // ならず、初期選択のための effect も要らない
   const selected = steerable.some((axis) => axis.name === picked)
@@ -99,21 +103,42 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
         </p>
       ) : (
         <>
-          <div className="scroll flex min-h-0 flex-1 flex-col">
-            {manual.axes.map((axis) => (
+          <div className="scroll @container flex min-h-0 flex-1 flex-col">
+            {steerable.map((axis) => (
               <ManualAxisRow
                 key={axis.name}
                 axis={axis}
                 blockedReason={blockedReason}
                 selected={axis.name === selected}
-                onSelect={() => {
-                  if (axis.manual !== null) setPicked(axis.name);
-                }}
+                onSelect={() => setPicked(axis.name)}
                 onJog={onJog}
                 onSet={onSet}
                 onMove={onMove}
               />
             ))}
+
+            {/* **プリセットしか持たない軸は横に畳む。** 1 軸が 2 行 (名前 + ボタン) なので、
+                サブハンドの電磁弁 6 + ポンプ 2 だけで 16 行になり、連続軸 6 本の下に隠れて
+                画面外にあった —— 指差喚呼「valve_1〜6 を個別に開閉」を 1 個ずつ辿るたびに
+                スクロールで探すことになる。列数は幅で決める (呼び出し元は関与しない) */}
+            {presetOnly.length === 0 ? null : (
+              <div className="grid @min-[40rem]:grid-cols-2 @min-[56rem]:grid-cols-3">
+                {presetOnly.map((axis) => (
+                  <ManualAxisRow
+                    key={axis.name}
+                    axis={axis}
+                    blockedReason={blockedReason}
+                    // 選択はキーボードで動かす連続軸だけの概念。プリセット軸へ
+                    // 降りられると `←` `→` が何も起こさない行に止まる
+                    selected={false}
+                    onSelect={() => {}}
+                    onJog={onJog}
+                    onSet={onSet}
+                    onMove={onMove}
+                  />
+                ))}
+              </div>
+            )}
           </div>
 
           {/* 凡例はスクロール領域の外に置く。中に入れると、軸が増えたときに

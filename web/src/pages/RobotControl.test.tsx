@@ -1,6 +1,6 @@
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type {
   ManualState,
@@ -12,12 +12,6 @@ import type {
 import { RobotControl } from "@/pages/RobotControl";
 import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
-
-// ステップ一覧は現在地を画面内へ送るために scrollIntoView を呼ぶが、jsdom は
-// これを実装していない。表示位置の追従はここでの検証対象ではないので潰す
-beforeAll(() => {
-  Element.prototype.scrollIntoView = () => {};
-});
 
 const STEPS: SequenceStepInfo[] = [
   { index: 0, label: "初期位置へ移動", require_trigger: false },
@@ -109,7 +103,7 @@ describe("試合時間タイマーの配置", () => {
 
     // 進行中は caption を出さない (数字が残り時間であることは legend から読める)。
     // ここが見たいのは配置なので、時刻の値そのものがパネルの中にあることで確かめる
-    const panel = screen.getByText("試合時間").closest("section");
+    const panel = screen.getByText("残り時間").closest("section");
     expect(panel).not.toBeNull();
     expect(within(panel as HTMLElement).getByText("2:00")).toBeInTheDocument();
   });
@@ -119,7 +113,7 @@ describe("試合時間タイマーの配置", () => {
     // 置くと、答えるべき問いが 1 つ増える
     mount("setup", robotState(), { running: false, elapsed_ms: 0, duration_ms: 180_000 });
 
-    expect(screen.queryByText("試合時間")).not.toBeInTheDocument();
+    expect(screen.queryByText("残り時間")).not.toBeInTheDocument();
   });
 });
 
@@ -144,7 +138,7 @@ describe("試合中の右カラム", () => {
     for (const timer of TIMERS) {
       const view = mount("match", robotState(), timer);
 
-      const column = screen.getByText("試合時間").closest("section")?.parentElement;
+      const column = screen.getByText("残り時間").closest("section")?.parentElement;
       expect(column?.className).toContain("flex-col");
 
       const panels = Array.from(column?.children ?? []);
@@ -194,7 +188,7 @@ describe("試合中の右カラム", () => {
     );
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
 
-    const timerPanel = screen.getByText("試合時間").closest("section");
+    const timerPanel = screen.getByText("残り時間").closest("section");
     const statusPanel = screen.getByText("機体状態").closest("section");
 
     expect(timerPanel?.classList.contains("shrink-0")).toBe(true);
@@ -452,7 +446,10 @@ describe("RobotControl の診断表示", () => {
     );
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
-    expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+    // 種別と対象は見出しのチップが出す (真下の詳細行はその写しになるので出さない。
+    // 詳細行が担うのは復旧手順のほう)
+    expect(screen.getByText("同期ずれラッチ rotate")).toBeInTheDocument();
+    expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
   });
 });
 
@@ -468,7 +465,10 @@ const MANUAL: ManualState = {
       manual: { min: -5, max: 30, steps: [1, 5] },
       deviation: 0.1,
       sync_tolerance: 1.0,
-      positions: ["home", "pick"],
+      positions: [
+        { name: "home", value: 0 },
+        { name: "pick", value: 20 },
+      ],
       motors: ["rotate_r", "rotate_l"],
     },
   ],
@@ -715,23 +715,58 @@ describe("ステップ一覧の見出し", () => {
 
 /**
  * シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠 1 つぶんの縦を
- * 払わない。総ステップ数を試合中に出さないのは、`ActionPanel` が `1/22` の形で
- * 同じ数を既に出しているため (同じ事実を 2 度描かない)。
+ * 払わない。総ステップ数は**ステップ一覧が画面に無いときだけ**帯が引き受ける ——
+ * 半自動では準備中に一覧が、試合中に `ActionPanel` の `1/22` が同じ数を既に
+ * 出している (同じ事実を 2 度描かない)。
  */
 describe("シーケンス名の置き場所", () => {
-  it("準備中はモード帯にシーケンス名と総ステップ数を出す", () => {
+  it("準備中はモード帯にシーケンス名を出す", () => {
     mount("setup");
 
     expect(screen.getByText("sub_hand")).toBeInTheDocument();
-    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
     // 1 行のためのパネルは持たない
     expect(screen.queryByText("シーケンス")).toBeNull();
   });
 
-  it("試合中は総ステップ数を出さない (ActionPanel が同じ数を出している)", () => {
-    mount("match");
-
-    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+  it("半自動では総ステップ数を出さない (準備中は一覧が、試合中は ActionPanel が出す)", () => {
+    mount("setup");
     expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
+
+    mount("match");
+    expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
+  });
+
+  it("手動の準備中だけ帯が総ステップ数を引き受ける (一覧が画面から消えるため)", () => {
+    mountManual("setup");
+
+    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * 準備中の操縦者画面は、かつて機体状態 1 枚が全幅へ広がるだけだった ——
+ * このフェーズで「これから何が起きるか」を答える面が画面のどこにも無く、
+ * 操縦者は手順を確認する手段を持たないまま試合開始を待っていた。
+ */
+describe("準備中のステップ一覧", () => {
+  it("半自動の準備中にも一覧を出す", () => {
+    mount("setup");
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeInTheDocument();
+  });
+
+  it("押せなくし、その理由を出す", () => {
+    // `sequence_jump` はサーバー側でフェーズゲートされる。押せる見た目にすると
+    // 「押したのに何も起きない」だけが操縦者に残る
+    mount("setup");
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeDisabled();
+    expect(within(stepPanel()).getByText("試合中のみ操作可")).toBeInTheDocument();
+  });
+
+  it("手動中は出さない (同じ列を手元の操作面へ明け渡す)", () => {
+    mountManual("setup");
+
+    expect(screen.queryByRole("button", { name: "ステップ 3: 搬送" })).toBeNull();
   });
 });

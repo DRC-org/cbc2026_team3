@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, ListMinus, Square, TriangleAlert } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -52,8 +52,27 @@ export function MotorCheckPanel() {
   const forcedOpen = outcome === "running" || outcome === "failed";
   const open = forcedOpen || manualOpen;
 
+  // **開いた先が画面の外では「自分から開く」が意味を持たない。** この面は指差喚呼の
+  // 下に置かれるので、1366x768 では区分の見出しと起動ボタンだけを残して視界の外にある
+  // (実機 dry-run で確認。失敗しても「未完了バッジが付いただけ」に見えていた)。
+  // 実行中と失敗時はパネルごと引き寄せる —— 一覧が現在位置へ送るのと同じ作法
+  // (`ChecklistItems` の「次」/ `SequenceStepList` の現在ステップ)。
+  // **`start` 以外を選んではならない。** `center` / `nearest` はどちらも画面より高い
+  // パネルの上端を視界の外へ押し出し、**中断ボタンがその行に居る** (折りたたみの外側に
+  // 置いてある) —— 実描画で `nearest` が実際にそうなった。止める手段を隠さないこと
+  //
+  // **依存は `outcome` であって `forcedOpen` ではない。** 失敗したまま押し直す
+  // (配線を直して再実行) と `forcedOpen` は真のままなので、そちらを依存にすると
+  // 2 回目以降は一度も動かない
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (outcome === "running" || outcome === "failed") {
+      panelRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+  }, [outcome]);
+
   return (
-    <div className="flex flex-col">
+    <div ref={panelRef} className="flex flex-col">
       <div className="flex items-center gap-2">
         <button
           type="button"

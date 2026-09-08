@@ -34,6 +34,16 @@ const MOTORS: Record<string, MotorState> = {
   y_axis_r: motorState(),
 };
 
+/**
+ * 画面に出ている文字列としての出現回数。
+ *
+ * 「同じ事実を 2 度描かない」を見るには要素の有無では足りない —— 見出しのチップと
+ * その真下の詳細行は別の要素なので、どちらも `getByText` を通ってしまう。
+ */
+function textCount(needle: string): number {
+  return (document.body.textContent ?? "").split(needle).length - 1;
+}
+
 function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
@@ -129,9 +139,65 @@ describe("SubsystemStatus", () => {
     );
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
-    expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
-    expect(screen.getByText("y_axis")).toBeInTheDocument();
+    // 種別と対象は見出しのチップが出す (詳細行はその写しになるので出さない)
+    expect(screen.getByText("同期ずれラッチ y_axis")).toBeInTheDocument();
     expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
+  });
+
+  /**
+   * 見出しのチップは `evaluateHealth` が安全機構の**先頭 1 件**の `label` + `detail` を
+   * そのまま出す (`lib/healthVerdict.ts`)。その真下に同じ文をもう一度描くと、
+   * 同じ事実が 2 行離れて 2 度並ぶ (実機の Monitor 試合中で発生)。
+   */
+  describe("安全機構の異常をチップと二重に描かない", () => {
+    it("チップを出している画面では、先頭 1 件の文は 1 度だけ", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["rotate_l", "rotate_r"] })}
+        />,
+      );
+
+      expect(textCount("無励磁のまま")).toBe(1);
+      expect(textCount("rotate_l, rotate_r")).toBe(1);
+      // 復旧手順はチップが持っていないので必ず残る
+      expect(screen.getByText(/再励磁/)).toBeInTheDocument();
+    });
+
+    it("チップを出さない画面 (showVerdict=false) では詳細行が文を引き受ける", () => {
+      // Monitor の準備面はチップを出さない。ここまで消すと、この機体について
+      // 何が起きているのかをパネルが 1 語も言わなくなる
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["rotate_l", "rotate_r"] })}
+          showVerdict={false}
+        />,
+      );
+
+      expect(screen.getByText("無励磁のまま")).toBeInTheDocument();
+      expect(screen.getByText("rotate_l, rotate_r")).toBeInTheDocument();
+    });
+
+    it("2 件目以降はチップが言っていないので残す", () => {
+      // チップに載るのは先頭 1 件だけ。まとめて畳むと、同期ずれラッチが
+      // 無励磁の陰に隠れて画面のどこにも出なくなる
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ sync_violations: ["y_axis"], unenergized_motors: ["rotate_l"] })}
+        />,
+      );
+
+      expect(textCount("同期ずれラッチ")).toBe(1);
+      expect(textCount("無励磁のまま")).toBe(1);
+    });
   });
 
   describe("再励磁ボタン", () => {
@@ -188,7 +254,7 @@ describe("SubsystemStatus", () => {
         />,
       );
 
-      expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+      expect(screen.getByText("同期ずれラッチ y_axis")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
     });
 
@@ -245,7 +311,7 @@ describe("SubsystemStatus", () => {
       />,
     );
 
-    expect(screen.getByText("位置制御ループ停止")).toBeInTheDocument();
+    expect(screen.getByText("位置制御ループ停止 can_m3508")).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 
@@ -264,8 +330,7 @@ describe("SubsystemStatus", () => {
       />,
     );
 
-    expect(screen.getByText("目標値再送停止")).toBeInTheDocument();
-    expect(screen.getByText("gripper, conveyor")).toBeInTheDocument();
+    expect(screen.getByText("目標値再送停止 gripper, conveyor")).toBeInTheDocument();
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
   });
 
@@ -284,7 +349,7 @@ describe("SubsystemStatus", () => {
     await userEvent.click(screen.getByRole("button", { expanded: true }));
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
-    expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+    expect(screen.getByText("同期ずれラッチ y_axis")).toBeInTheDocument();
   });
 
   it("異常中に畳もうとした操作は、解消した時点で効く", async () => {

@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { MotorStatus } from "@/components/diagnostics/MotorStatus";
+import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import type { MotorState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
 
@@ -209,5 +209,44 @@ describe("MotorStatus", () => {
       expect(cells()[0]).toHaveTextContent("?");
       expect(cells()[0]).toHaveClass("text-error");
     });
+  });
+});
+
+/**
+ * 数値列の見出し。**桁が揃っていない表は読み違いを誘う。**
+ *
+ * 1 行表示 (32rem 以上) では値行の先頭に名前列が入るので、見出しは同じ幅の空きを
+ * 置いて桁を合わせる。ここが `hidden` のままだと見出しだけが名前列ぶん左へ寄り、
+ * **広いカラムでだけ** POS/VEL/TRQ/TMP が値とずれる (実機で発生)。
+ */
+/** 見出しの空き (aria-hidden の spacer) */
+function spacer(): HTMLElement {
+  const { container } = render(<MotorStatHeader />);
+  const el = container.querySelector("[aria-hidden]");
+  if (!el) throw new Error("見出しの空きが見つかりません");
+  return el as HTMLElement;
+}
+
+/** そのブレークポイントで幅を変えるクラス (`@min-[32rem]:w-[11rem]`) */
+function widthClasses(el: HTMLElement): string[] {
+  return [...el.classList].filter((c) => c.includes(":w-["));
+}
+
+describe("MotorStatHeader", () => {
+  it("`hidden` を打ち消す display を、幅と同じブレークポイントで持つ", () => {
+    const el = spacer();
+    const [width] = widthClasses(el);
+    expect(width).toBeDefined();
+
+    // 幅だけ足しても display:none のままなので、空きは 1px も生まれない
+    expect(el.className).toContain(`${width.split(":")[0]}:block`);
+  });
+
+  it("空きの幅はモータ行の名前列と同じクラスで、ずれないこと", () => {
+    const { container } = render(<MotorStatus name="y_axis_r" state={motorState({})} />);
+    const nameColumn = container.firstElementChild?.firstElementChild as HTMLElement;
+
+    expect(widthClasses(spacer())).toEqual(widthClasses(nameColumn));
+    expect(widthClasses(nameColumn)).toHaveLength(1);
   });
 });

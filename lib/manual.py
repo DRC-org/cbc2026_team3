@@ -161,7 +161,7 @@ class ManualController:
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
                     "deviation": self._safe_deviation(spec),
                     "sync_tolerance": spec.sync_tolerance,
-                    "positions": list(self._positions.names(name)),
+                    "positions": self._position_entries(name),
                     "motors": list(spec.motor_names),
                 }
             )
@@ -260,6 +260,32 @@ class ManualController:
             for name in spec.motor_names
             if name in self._motors
         }
+
+    def _position_entries(self, axis: str) -> list[dict]:
+        """プリセット名と、その人間の単位での値。
+
+        値を載せるのは「そこがどこか」を画面に描かせるためだけで、指令は従来どおり
+        名前で送る (``manual_move``)。数値を送る経路にすると「位置定数に定義した
+        状態以外を送れない」保証が消える。
+
+        **1 つも例外を漏らさない。** ここは 20Hz の配信経路上なので、
+        ``PositionLookupError`` を素通しにすると 1 軸の定義漏れで全クライアントの
+        テレメトリが止まる (``_safe_observed_value`` / ``_safe_deviation`` と同じ理由)。
+        読めなかった値は None で載せる —— 0 で埋めると、可動範囲の下端に居ない
+        プリセットが下端に描かれる。
+
+        コート別に定義された位置は現在のコートの値になる。コートを変えると
+        次の配信で追従する (``set_court`` が ``_court`` を差し替えるだけでよい)。
+        """
+        entries: list[dict] = []
+        for name in self._positions.names(axis):
+            try:
+                value: float | None = self._positions.raw(axis, name, court=self._court)
+            except Exception:
+                logger.debug("位置 '%s.%s' の値を引けません", axis, name, exc_info=True)
+                value = None
+            entries.append({"name": name, "value": value})
+        return entries
 
     def _safe_deviation(self, spec: AxisSpec) -> float | None:
         """配信用の左右偏差 (人間の単位)。測れない軸は None を返す。

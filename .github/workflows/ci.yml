@@ -44,7 +44,7 @@ jobs:
         run: uv run pytest
 
   web:
-    name: Web UI (lint + 型検査 + vitest)
+    name: Web UI (lint + 型検査 + vitest + ビルド)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -67,7 +67,9 @@ jobs:
       - name: 依存を導入
         run: pnpm install --frozen-lockfile
 
-      # lint + format:check + tsc + vitest を 1 本で回す (web/package.json の check)
+      # lint + format:check + tsc + vitest + vite build を 1 本で回す
+      # (web/package.json の check)。ビルドが入るのは、CSS の生成が落ちる壊れ方が
+      # 型検査にもテストにも掛からず、次に気付くのが会場のデプロイになるため
       - name: 検査
         run: pnpm check
 

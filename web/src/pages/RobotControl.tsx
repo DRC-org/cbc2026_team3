@@ -14,7 +14,6 @@ import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { cx } from "@/lib/cx";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
@@ -155,15 +154,17 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // モード帯はどのフェーズでも同じ位置に出す。「今この画面から機体を直接
   // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない。
   //
-  // 総ステップ数を準備中にしか渡さないのは、試合中は `ActionPanel` が `1/22` の
-  // 形で同じ数を出しているため (同じ事実を 2 度描かない)
+  // **総ステップ数は、ステップ一覧が画面に出ていないときだけ帯が持つ。**
+  // 半自動では準備中も試合中も一覧 (または `ActionPanel` の `1/22`) が同じ数を
+  // 出しているので、帯にも書くと同じ事実を 2 度描くことになる。手動中はどちらも
+  // 画面から消えるので、そのときだけ帯が引き受ける
   const modeSwitch = (
     <ModeSwitch
       mode={manual.mode}
       onChange={handleMode}
       blockedReason={modeBlockedReason}
       sequenceName={state.sequence}
-      totalSteps={setupPhase ? state.total_steps : null}
+      totalSteps={setupPhase && inManual ? state.total_steps : null}
     />
   );
 
@@ -209,28 +210,64 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     </Panel>
   );
 
+  /**
+   * ステップ一覧のパネル。**準備中と試合中で同じものを出す。**
+   *
+   * 押せるかどうかだけがフェーズで変わり、それは `stepJumpBlockedReason` が
+   * 1 箇所で決める (準備中は「試合中のみ操作可」)。準備中に押させてはならない ——
+   * `sequence_jump` はサーバー側でフェーズゲートされるので、押せる見た目にすると
+   * 「押したのに何も起きない」だけが操縦者に残る。
+   *
+   * 出すのは**塞がれている理由**だけ。操作できるときの案内 (「クリックで再開」) は、
+   * 押せば分かることを毎試合読ませるだけの面積になる。
+   */
+  const stepPanel = (
+    <Panel
+      legend="ステップ"
+      className="min-h-0 flex-1"
+      bodyClassName="p-0"
+      actions={
+        stepJumpBlockedReason ? (
+          <span className="text-[0.85em] text-base-content/60">{stepJumpBlockedReason}</span>
+        ) : null
+      }
+    >
+      <SequenceStepList
+        steps={state.steps ?? []}
+        stepIndex={state.step_index}
+        waitingTrigger={state.waiting_trigger}
+        onJump={handleJump}
+        // 可否と、その理由の案内文は同じ `stepJumpBlockedReason` から出す
+        // (駆動中に塞ぐ理由・トリガー待ちを塞がない理由はそちらの docstring)
+        disabled={stepJumpBlockedReason !== null}
+      />
+    </Panel>
+  );
+
   // --- セッティングタイム -------------------------------------------------
   // 指差喚呼と動作確認は Monitor の設定面へ移した。指差喚呼は操縦者 2 名が
   // 同じ場所に立つので二度読み上げになっていたため、動作確認は両ハンドを 1 本の
   // シーケンスで駆動するので機体ごとの入口が意味を失ったため。
-  // ここに残るのは手動操縦と、その手元で見る機体状態。
+  // ここに残るのは手動操縦と、その手元で見る機体状態、そしてこれから流す手順。
   if (setupPhase) {
+    /**
+     * **格子はモードで変えず、どちらの面が 1fr を取るかだけが入れ替わる。**
+     * 準備中の主目的は配線確認なので、半自動では機体状態が主 (モータ 1 基が
+     * 1 行に畳まる幅が要る)。手動へ入ると主は手元の操作面へ移り、機体状態は
+     * 右列の参照面へ降りる —— 試合中の割り付けと同じ形になる。
+     *
+     * 半自動の右列にステップ一覧を置くのは、**このフェーズで唯一「これから何が
+     * 起きるか」を答える面**だから。かつてはここが空で、機体状態 1 枚が全幅へ
+     * 広がっていた (操縦者は準備中に手順を確認する手段を画面から持たなかった)。
+     */
+    // 機体状態はどちらの列に来ても同じもの (常に展開)。位置だけが入れ替わる
+    const openSubsystemPanel = subsystemPanel(true, "min-h-0");
     return (
       <Page className="flex flex-col">
         {modeSwitch}
-        <div
-          className={cx(
-            "grid min-h-0 flex-1 gap-2",
-            // 手動中だけ操作面のために左列を開ける。半自動の準備中はこの画面に
-            // 操作が無いので、参照面を 1 列に広げる
-            inManual ? "grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]" : "grid-cols-1",
-          )}
-        >
-          {inManual ? manualPanel : null}
-
-          {/* シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠
-              1 つぶんの縦を払わない */}
-          {subsystemPanel(true, "min-h-0")}
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
+          {inManual ? manualPanel : openSubsystemPanel}
+          {inManual ? openSubsystemPanel : stepPanel}
         </div>
       </Page>
     );
@@ -261,30 +298,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               onTrigger={handleTrigger}
             />
 
-            <Panel
-              legend="ステップ"
-              className="min-h-0 flex-1"
-              bodyClassName="p-0"
-              // 出すのは**塞がれている理由**だけ。操作できるときの案内 (「クリックで
-              // 再開」) は、押せば分かることを毎試合読ませるだけの面積になる
-              actions={
-                stepJumpBlockedReason ? (
-                  <span className="text-[0.85em] text-base-content/60">
-                    {stepJumpBlockedReason}
-                  </span>
-                ) : null
-              }
-            >
-              <SequenceStepList
-                steps={state.steps ?? []}
-                stepIndex={state.step_index}
-                waitingTrigger={state.waiting_trigger}
-                onJump={handleJump}
-                // 可否と、その理由の案内文は同じ `stepJumpBlockedReason` から出す
-                // (駆動中に塞ぐ理由・トリガー待ちを塞がない理由はそちらの docstring)
-                disabled={stepJumpBlockedReason !== null}
-              />
-            </Panel>
+            {stepPanel}
           </div>
         )}
 

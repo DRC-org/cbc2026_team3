@@ -1542,7 +1542,7 @@ uv run pytest -k "m3508"         # M3508 関連のみ
 
 cd web && pnpm test              # フロントエンド（watch）
 cd web && pnpm test:run          # フロントエンド（1 回だけ実行）
-cd web && pnpm check             # lint + format + 型検査 + テスト
+cd web && pnpm check             # lint + format + 型検査 + テスト + ビルド
 
 pio test -e native -d firmware/dc_motor   # ファーム（実機不要）
 pio test -e native -d firmware/servo      # ファーム（実機不要）
@@ -2707,148 +2707,25 @@ Vite のビルド時定数で決めると、同じ `web/dist` を配る本番と
 
 ## Web UI ページ構成
 
-タブ構成（定義は `web/src/lib/tabs.ts`、ルートは `web/src/routes.tsx`）。操縦者 2 名はそれぞれ Main Hand / Sub Hand タブを開く。
+**現況の仕様は `docs/web/` へ移した。** この章にあった「今どうなっているか」——
+タブ構成・フェーズ連動レイアウトの表・`ModeSwitch` の規則・`ManualAxisRow` の 3 分岐・
+キーボード操作・ヘッダーと通知・WS 接続先の解決順 —— はすべてそちらが持つ。
 
-| タブ | キー | ページ | 内容 |
-|---|---|---|---|
-| Monitor | `1` | `pages/Dashboard.tsx` | 試合制御、準備の面 (`MatchPrep`: コート設定・動作確認・指差喚呼)、両ロボット監視 |
-| Main Hand | `2` | `pages/RobotControl.tsx` | 準備中は指差喚呼＋動作確認、試合中はシーケンス操作 |
-| Sub Hand | `3` | `pages/RobotControl.tsx` | 同上 |
-
-### フェーズ連動レイアウト
-
-Monitor / RobotControl は `phase` でレイアウトごと切り替える（`lib/phase.ts` の
-`isSetupPhase`）。準備中に試合用の操作系を並べても押せず、
-試合中に設定 UI を並べても使わないため、その時に使うものだけを画面に出す。
-
-レイアウトの区分（`isSetupPhase`）と**コマンドの可否の区分（`isDuringMatch`）は別物**で、
-一致させてはならない。前者は `finished` を試合中と同じ情報密度に寄せるための区分、
-後者は `lib/match_state.py` の `PHASES_DURING_MATCH` の写しである。
-
-| | setup / ready | match / finished |
-|---|---|---|
-| Monitor | `StartGate`（開始可否と阻害要因＝画面の主役・全幅）+ 2 カラム（左 `MatchPrep` / 右 機体状態） | `MatchStrip`（1 行）+ `RobotStatusRow` ×2 + `EventFeed` |
-| RobotControl（半自動） | `ModeSwitch` + `SubsystemStatus`（準備中の操作はこの画面に無い） | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
-| RobotControl（手動） | `ManualPanel`（主役）+ 動作確認（不可・理由付き）+ `SubsystemStatus` | `ManualPanel`（主役）+ `SubsystemStatus`（右レール・展開） |
-
-### 操作モードの切り替え（`ModeSwitch`）
-
-RobotControl は最上段に**独立した帯**として `ModeSwitch` を置き、下の主役面を
-`ManualPanel` へ丸ごと明け渡す。**同じ列に 2 つの操作面を並べない** — どちらの指令が
-機体へ届くのかが画面から読めなくなる。
-
-帯をパネルの見出し行へ埋めないのは、「今この画面から機体を直接動かせる」ことが
-視線を戻した一瞬で読めなければならないため。一方で**枠付きパネルにもしない** ——
-罫線 1 本と左端のアクセントバーで足りる事実に、枠と本文余白ぶんの縦を払う理由が無い
-（シーケンス名と総ステップ数もこの帯が持つ。1 行の事実に別パネルを立てない）。
-
-**帯にタブの形（`tabs tabs-box`）を使わない。** ヘッダーの画面切替タブと同じ見た目が
-上下 2 段に並ぶと、「見る場所を変える操作」と「機体の制御権を奪う操作」が同じ形になる。
-現在モードは状態チップで示し、切替は行き先を書いたボタン 1 つに絞る。
-**高さはモードで変えない**（変えると下の主操作 `ActionPanel` が上下にずれ、
-「主操作は位置を動かさない」が帯の側から破られる）。経緯は Phase 4 の「外周の整理」節。
-
-**切替ボタンは帯の先頭に置く。** この帯はヘッダーへ密着しているので、右端に置くと
-**EMG STOP の真下数 px** に来て、ボタンを狙って外した先が緊急停止になる。現在モードの
-チップの隣ではなく先頭に固定するのは、チップの文言長がモードで変わるとボタンの横位置が
-動くため。右端に残してよいのは押せないもの（塞がれている理由）だけである。経緯は Phase 4 の
-「EMG STOP の誤爆を防ぐ配置」節。
-
-手動中は帯の左端を警告色で塗り、
-Monitor の `RobotStatusRow` にも同じチップを出す（Monitor から「どちらのハンドが手動か」が
-分からないと、機体が動いている理由もシーケンスが進まない理由も説明できない）。
-
-**モード切替と手動指令は別の理由で塞がる。** サーバーは切替（機体を動かさない）を
-緊急停止中も通し、指令だけを塞ぐので、UI 側も `modeBlockedReason`（切断中のみ）と
-`manualBlockedReason`（切断中 / 緊急停止中）に分ける。1 つにまとめると、サーバーが
-受け付ける操作を画面が殺す（`can_start_match` を `StartGate` で導出し直したのと同じ誤り）。
-
-**手動中は `Space` を無効化する。** 誤爆した `Space` が `sequence_start` になると、
-手動で機構を動かしている最中にシーケンスが走り出す。**この防御は UI 側の即応性
-（ボタン押下前に弾く）のためであって、唯一の防御ではない。** サーバー側にも
-`CommandSpec.blocked_during_manual`（`lib/commands.py`）で `sequence_start` /
-`sequence_jump` / `trigger` を手動操縦中は拒否するゲートがあり（操縦者 2 名 +
-Monitor が別ブラウザで繋がる以上、正はサーバーが持つ）、UI をバイパスして直接
-WS を叩いた場合や UI の判定漏れに対してもここが最終防御線になる。
-
-**手動中は `SubsystemStatus` を畳まない。** 「操縦者は機体を見ており画面は一瞬しか
-見ない」という前提が、機体を直接動かしている最中には成り立たない。
-
-`ManualAxisRow` の見た目は軸の性格で 3 通りに分かれるが、分岐の根拠は配信された
-`manual` と `command_mode` だけで、**軸名は一切見ていない**。
-
-| 軸の性格 | 出すもの |
+| 移した先 | 内容 |
 |---|---|
-| `manual` を持つ連続軸（`y_axis` / `rotate` / `sub_arm_joint`） | ジョグ（±・ステップ量）+ 絶対値入力 + 可動範囲バー（表示専用）+ プリセット |
-| 離散状態アクチュエータ（`gripper` / `wall_*` / `sub_rotate` / `sub_pitch` / `sub_offset`） | プリセットのみ |
-| duty 軸（`conveyor`） | プリセットのみ。現在値は `—`（測る手段が無い） |
+| `docs/web/screens.md` | タブ・フェーズ連動レイアウト・各画面の構成・部品カタログ |
+| `docs/web/design.md` | 配色・ラベル・アイコン・キーボード・確認の取り方・EMG STOP の配置 |
+| `docs/web/data_flow.md` | WS 契約・受信境界・context 分割・判定の単一情報源・接続先の解決 |
+| `docs/web/pitfalls.md` | 踏みやすい罠と、それを守っているテスト |
 
-可動範囲バーは**ドラッグできる入力にしない**（触れた瞬間に機体が飛ぶ）。
-端に達したジョグボタンは無効化するが、判定に使うのは**現在値ではなく直前の手動目標**
-（追従が遅れているあいだ現在値で判定すると、目標が既に端でも押せてしまう）。
-ジョグの長押しリピートは `hooks/useHoldRepeat.ts` が持ち、`pointerup` /
-`pointerleave` / `pointercancel` / `blur` / アンマウントのすべてで止める
-（`setPointerCapture` を使うと `pointerleave` が飛ばなくなるので使ってはならない）。
-取りこぼした場合の最後の砦は可動範囲のクランプで、連続発火は必ず範囲の端で止まる。
+ここに残すと同じ事実が 2 箇所になり、**片方が黙って古くなる**（`docs/checks_and_health.md` を
+立てたときと同じ判断）。**WS の契約を OpenAPI で書き直さない判断**（REST が 3 つしかなく、
+OpenAPI は WS のメッセージを表現できず、`ws-contract.json` が実配信から生成される既存の契約の
+方が強い）も `docs/web/data_flow.md` の末尾にある。
 
-`MatchStrip` は必須。試合中に試合制御を全て隠すと `match_finish` の導線が消え、
-試合を終われなくなる（`match_finish` は MATCH フェーズ限定）。
-
-各画面は**答える問いを 1 つに絞る**。設計原則は下記「レイアウト再設計」を参照。
-
-### キーボード操作（`hooks/useHotkeys.ts`）
-
-- 数字キー: タブ切替。**割当も個数も `lib/tabs.ts` の `TABS` だけが持つ**（各タブの `hotkey`）。
-  `RootLayout` はその表から `useHotkeys` のマップを組み、`TabBar` は同じ値を `<Kbd>` として
-  タブ自身へ描く。ここに `1`–`3` のような**件数を書き写さない** — タブが増減した瞬間に
-  この行だけが古くなり、しかも画面と食い違っていることは実機を触るまで分からない。
-  表示中のタブは URL パス（`/main-hand` 等）そのものなので、リロードで復帰する。
-  遷移時は `location.search` を引き継ぐ（`?ws=` の接続先上書きを落とさないため）
-- `Space`: 表示中のロボットの NEXT / START。ルーターは表示中のルートしか描画しないため、
-  ハンドラは表示中のロボットにだけ効く。**手動操縦モード中は無効**（誤爆した `Space` が
-  `sequence_start` になると、手動で機構を動かしている最中にシーケンスが走り出す）
-- 修飾キー併用・キーリピート・入力欄フォーカス中・モーダル表示中は一切発火しない。
-  モーダル判定は `ModalContext` が持つ表示中モーダル数で行う（CSS クラスの DOM 検索には依存しない）
-- **凡例は「そのキーが効く場所」にしか置かない。** 数字キーはタブ自身が、`Space` は
-  START / NEXT ボタン自身が `<Kbd>` として持つ。画面のどこかに一覧を作らない
-  （2026-09-07 まで画面下端の帯が `1 2 3` と `Space` を並べていた。詳細は Phase 4 の
-  「外周の整理」節）
-
-### その他の UI 方針
-
-- ヘッダー帯 `AppHeader` にタブ / 接続 / 時刻 / フェーズ（地色）/ COURT と EMG STOP を
-  1 段で常時表示（画面唯一の常設帯。フッターは持たない）。**この並び順は
-  「EMG STOP の周囲に押下可能な要素を置かない」から決まっている** —— 押せるもの
-  （タブ帯・接続表示）を EMG STOP から遠い左側へ、押せないもの（時計・状態チップ）を
-  EMG STOP 側へ寄せ、EMG STOP の手前には緩衝の余白を置く。理由は Phase 4 の
-  「EMG STOP の誤爆を防ぐ配置」節
-- WS 切断時は `ConnectionBanner` を画面上端に全幅表示（値が更新されていないことを明示）
-- 通知は `Toaster` に一本化（操作拒否 + ヘルス異常、右下に最大 3 件スタック）
-- **時刻の単位は型名で分ける**（`lib/time.ts` の `EpochSeconds` / `EpochMs`）。サーバーの
-  `time.time()` はエポック秒、`Date` / `Date.now()` はエポックミリ秒で、どちらも `number` の
-  ため取り違えても型検査を通る。受信境界（`lib/robotReducer.ts`）で必ず ms へ正規化し、UI 状態の
-  フィールド名は `...Ms` で終わらせる。ワイヤ形式のフィールド（`started_at` 等）だけが
-  `EpochSeconds` を名乗る。取り違えると動作確認の実施時刻が 1970-01-01 になり、
-  指差喚呼で「動作確認 完了」にチェックする直前の唯一の判断材料が嘘になる
-  （`wsContract.test.ts` の `motor_check_done` が実配信の値で正規化を固定している）
-- 試合中以外は START / NEXT / ステップジャンプを UI 上でも無効化する（サーバー側ゲートとの二重防御）
-- 通常停止（STOP）は確認ダイアログを挟まない。安全側の動作であり、止めるまでの時間を延ばさない
-- WS 接続先は `lib/wsUrl.ts` が **クエリ `?ws=` > localStorage > `VITE_WS_URL` > ページ origin**
-  の優先順で解決する。既定（origin 由来）は別 PC・タブレットからのアクセスを成立させるため。
-  vite dev では `/ws` を 8080 へプロキシする（`vite.config.ts`。中継先は `DEV_WS_TARGET` で変更可）
-- 接続先は UI から差し替えられる（`components/shell/WsSettings.tsx`。ヘッダー右端の接続表示と
-  切断バナーから開く）。**接続表示そのものがボタン**である —— 繋がらないときに操縦者が
-  最初に見るのはその表示なので、そこを入口にしておけば設定を探す先が 1 つで済む。「配信元 ≠ 制御プログラム」になる構成 — vite dev を Tailscale 経由で開く、
-  配信済み UI から手元の制御 PC へ繋ぐ、予備機へ切り替える — を再ビルドせず現場で解決するため。
-  クエリ `?ws=` は非永続の一時上書きで、保存済み設定を壊さずに 1 画面だけ別機を見られる
-- 接続先を切り替えると `useRobotSocket` は世代番号で旧接続のイベントを無視する。
-  弾かないと旧 URL への再接続タイマーが走り、古いサーバーの状態で画面が上書きされる
-- vite dev / preview は `host: true` で全インターフェースに bind し、`allowedHosts` に
-  `drc` と `.ts.net` を登録する。既定の localhost bind と Host ヘッダ検査（DNS リバインディング対策）
-  の両方が Tailscale 経由のアクセスを塞ぐため。別名は `VITE_ALLOWED_HOSTS` で追加する
-- `@cloudflare/vite-plugin` は build / preview のみで有効にする（`vite.config.ts`）。dev サーバーは
-  制御 PC 上のローカル UI 開発専用で Worker ランタイムを必要とせず、miniflare 起動に伴う
-  `Request.cf` 取得（外部通信）と起動遅延を避けるため
+**この下の「Phase 4: Web UI」以下の各節は経緯としてそのまま残す** —— レイアウト再設計
+（2026-08-26）・ライトテーマ化・二度押しへの移行・外周の整理（2026-09-07）・EMG STOP の
+誤爆を防ぐ配置（2026-09-08）は、「何が悪くてどう直したか」の記録であって現況の仕様ではない。
 
 ---
 
@@ -4242,6 +4119,10 @@ class PickAndPlace(Sequence):
 
 ### Phase 4: Web UI
 
+**この節は経緯である。現況の仕様は `docs/web/` にある**（画面構成は `screens.md`、配色と
+操作は `design.md`、WS 契約と判定は `data_flow.md`、踏みやすい罠は `pitfalls.md`）。
+以下に積んであるのは「何が悪くてどう直したか」で、**今どうなっているかを読む場所ではない。**
+
 #### ツール構成（2026-04 確定）
 
 | 項目 | 採用 | 補足 |
@@ -4848,7 +4729,7 @@ EMG STOP は赤地・大面積で常に同じ位置にあり、狙って外す�
 #### 現在のファイル構成
 
 Phase 4 の初期実装（HeroUI 期）・TUI リデザイン期のファイル名はいずれも現存しない。
-**現在の構成は「ディレクトリ構成」の `web/` 以下と `web/README.md` が持つ。**
+**現在の構成は `docs/web/screens.md`（画面と部品）と `web/README.md`（ディレクトリ）が持つ。** リポジトリ全体の見取り図は「ディレクトリ構成」の `web/` 以下。
 ここに 3 つ目の一覧を置くと、UI を触った人が更新しない側が黙って古くなる。
 
 ### Phase 5: ロボット固有シーケンス

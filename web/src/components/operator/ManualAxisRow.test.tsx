@@ -15,7 +15,10 @@ const PAIRED: ManualAxis = {
   manual: { min: -2, max: 20, steps: [0.5, 2] },
   deviation: 0.2,
   sync_tolerance: 2.0,
-  positions: ["home", "work"],
+  positions: [
+    { name: "home", value: 0 },
+    { name: "work", value: 15 },
+  ],
   motors: ["y_axis_r", "y_axis_l"],
 };
 
@@ -29,7 +32,10 @@ const DISCRETE: ManualAxis = {
   manual: null,
   deviation: null,
   sync_tolerance: null,
-  positions: ["open", "closed"],
+  positions: [
+    { name: "open", value: 5 },
+    { name: "closed", value: 0 },
+  ],
   motors: ["gripper"],
 };
 
@@ -43,8 +49,28 @@ const DUTY: ManualAxis = {
   manual: null,
   deviation: null,
   sync_tolerance: null,
-  positions: ["stop", "run"],
+  positions: [
+    { name: "stop", value: 0 },
+    { name: "run", value: 0.3 },
+  ],
   motors: ["conveyor"],
+};
+
+/** 電磁弁。位置も到達も観測できず、`unit` に入っているのは単位ではなく指令の種類 */
+const VALVE: ManualAxis = {
+  name: "valve_1",
+  unit: "on_off",
+  command_mode: "on_off",
+  value: null,
+  target: null,
+  manual: null,
+  deviation: null,
+  sync_tolerance: null,
+  positions: [
+    { name: "open", value: 1 },
+    { name: "closed", value: 0 },
+  ],
+  motors: ["valve_1"],
 };
 
 function renderRow(axis: ManualAxis, blockedReason: string | null = null, selected = false) {
@@ -411,12 +437,84 @@ describe("ManualAxisRow", () => {
     });
   });
 
+  /**
+   * プリセットが可動範囲のどこを指すのかは、それまで画面のどこにも出ていなかった
+   * (バーには現在値の線 1 本しか無く、`home` / `work` はその下のボタン列にあるだけ)。
+   */
+  describe("プリセットの位置", () => {
+    it("可動範囲バーに刻みとして出る", () => {
+      renderRow(PAIRED);
+
+      // 名前はバーへ書き込まない (4 つ並ぶ軸では必ず重なる)。対応は title が持つ
+      expect(screen.getByTitle("home 0 mm")).toBeInTheDocument();
+      expect(screen.getByTitle("work 15 mm")).toBeInTheDocument();
+    });
+
+    it("刻みは可動範囲に対する比で置く", () => {
+      // min -2 / max 20 の軸で work=15 は (15+2)/22 = 77.27%
+      renderRow(PAIRED);
+
+      expect(screen.getByTitle("work 15 mm")).toHaveStyle({ left: "77.27272727272727%" });
+    });
+
+    it("値が読めなかったプリセットは描かない (0 へ寄せない)", () => {
+      // 0 で埋めると、可動範囲の下端に居ないプリセットが下端に描かれる
+      renderRow({
+        ...PAIRED,
+        positions: [
+          { name: "home", value: 0 },
+          { name: "work", value: null },
+        ],
+      });
+
+      expect(screen.getByTitle("home 0 mm")).toBeInTheDocument();
+      expect(screen.queryByTitle(/^work/)).toBeNull();
+      // ボタンは残る。値が読めないことと指令できないことは別
+      expect(screen.getByLabelText("y_axis を work へ")).toBeInTheDocument();
+    });
+
+    it("連続軸ではボタンにも値を出す (バーの刻みと同じ場所を指す)", () => {
+      renderRow(PAIRED);
+
+      expect(screen.getByLabelText("y_axis を work へ")).toHaveAttribute("title", "15 mm");
+    });
+
+    it("離散状態の軸では値を出さない", () => {
+      // `open` = 5deg / `closed` = 0deg は読み手に何も足さない。可動範囲を
+      // 持たない軸には「そこがどこか」という問い自体が無い
+      renderRow(DISCRETE);
+
+      expect(screen.getByLabelText("gripper を open へ")).not.toHaveAttribute("title");
+    });
+  });
+
   describe("位置を測れない軸", () => {
     it("現在値を 0 で埋めない", () => {
       // DC 基板はエンコーダを持たない。0 を出すと「測ったように見える 0」になる
       renderRow(DUTY);
-      expect(screen.getByText(/現在/).parentElement).toHaveTextContent("—");
-      expect(screen.queryByText(/0\.00 duty/)).toBeNull();
+      expect(screen.queryByText(/0\.00/)).toBeNull();
+    });
+
+    it("「現在」の欄そのものを出さない (常に「—」が並ぶだけの欄になる)", () => {
+      // サーバーは position 以外の軸の value を必ず null にする。1 軸 1 行へ畳んだ
+      // 行では、この 1 語ぶんが折り返しの分かれ目になる
+      renderRow(DUTY);
+      expect(screen.queryByText("現在")).toBeNull();
+      // 目標は残す —— 押した指令が届いたことを画面から読む唯一の手がかり
+      expect(screen.getByText("目標")).toBeInTheDocument();
+    });
+
+    it("測れる軸では「現在」を出す (畳んだ行でも落とさない)", () => {
+      // 可動範囲を持たなくても、サーボ軸は位置を返す
+      renderRow(DISCRETE);
+      expect(screen.getByText("現在").parentElement).toHaveTextContent("5.00 deg");
+    });
+
+    it("位置軸の値が一時的に読めなくても「現在 —」は残す", () => {
+      // 構造的に測れないのか算出が失敗しただけなのかは値からは区別できない。
+      // 位置軸で欄ごと消すと「読めていない」ことが画面から消える
+      renderRow({ ...DISCRETE, value: null });
+      expect(screen.getByText("現在").parentElement).toHaveTextContent("—");
     });
 
     it("duty 軸でもプリセットは送れる", async () => {
@@ -424,6 +522,40 @@ describe("ManualAxisRow", () => {
       const { onMove } = renderRow(DUTY);
       await user.click(screen.getByLabelText("conveyor を run へ"));
       expect(onMove).toHaveBeenCalledWith("conveyor", "run");
+    });
+
+    it("duty の目標は単位付きの数値のまま", () => {
+      renderRow({ ...DUTY, target: 0.95 });
+      expect(screen.getByText("目標").parentElement).toHaveTextContent("0.95 duty");
+    });
+  });
+
+  /**
+   * 電磁弁。**`unit` に入っているのは単位ではなく指令の種類 (`on_off`)** なので、
+   * 数値へそのまま添えると「目標 1.00 on_off」という、単位でも状態でもない表示になる。
+   * 基板は 0 か非 0 かしか見ないため、開閉として読ませる (診断表と同じ語)。
+   */
+  describe("離散状態 (on_off) の軸", () => {
+    it("開指令は「ON」。1.00 とも on_off とも書かない", () => {
+      renderRow({ ...VALVE, target: 1.0 });
+
+      const target = screen.getByText("目標").parentElement;
+      expect(target).toHaveTextContent("ON");
+      expect(target).not.toHaveTextContent("1.00");
+      expect(target).not.toHaveTextContent("on_off");
+    });
+
+    it("閉指令は「OFF」。0 を「未指令」と混ぜない", () => {
+      renderRow({ ...VALVE, target: 0.0 });
+
+      const target = screen.getByText("目標").parentElement;
+      expect(target).toHaveTextContent("OFF");
+      expect(target).not.toHaveTextContent("—");
+    });
+
+    it("一度も指令していなければ「—」", () => {
+      renderRow(VALVE);
+      expect(screen.getByText("目標").parentElement).toHaveTextContent("—");
     });
   });
 

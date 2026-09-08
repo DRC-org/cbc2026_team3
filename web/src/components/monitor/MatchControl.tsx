@@ -6,7 +6,9 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { useArmedPress } from "@/hooks/useArmedPress";
+import { useRemainingMs } from "@/hooks/useRemainingMs";
 import { isDuringMatch } from "@/lib/phase";
+import { formatRemaining } from "@/lib/time";
 
 /**
  * リセットの確認ダイアログ。
@@ -89,6 +91,10 @@ export function MatchStrip() {
   const { phase } = matchState;
   const duringMatch = isDuringMatch(phase);
   const { armed, press, disarm } = useArmedPress(matchFinish);
+  // **Monitor にも残り時間を出す。** かつてこの帯は「試合終了」ボタン 1 個だけで、
+  // 計時を見る役の画面に時計が無かった (残り時間は操縦者のタブにしか出ていない)。
+  // 算術は操縦者の `MatchTimer` と同じフックが持つので、画面ごとに違う値が出ない
+  const remainingMs = useRemainingMs(matchState.timer);
 
   // 試合が終わった後まで武装を持ち越さない（ボタン自体が別物へ入れ替わる）。
   // **切断でも解く。** 武装は押した瞬間の状況に紐づいており、届かなかった 1 回目を
@@ -138,6 +144,20 @@ export function MatchStrip() {
           <Icon as={RotateCcw} />
           {connected ? "セッティングへ戻る" : "切断中"}
         </Button>
+      )}
+
+      {/* 帯の右端は押せないものだけ (ヘッダー直下の全幅要素なので、EMG STOP の
+          誤爆を防ぐ配置規則がここにも掛かる)。試合終了後も出し続ける —— 何秒
+          残して終えたのかは、次の試合の組み立てに要る */}
+      {remainingMs === null ? null : (
+        <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
+          <span className="text-[0.8em] text-base-content/60">
+            {duringMatch ? "残り" : "終了時点"}
+          </span>
+          <span className="font-mono text-[1.9em] leading-none font-bold tabular-nums">
+            {formatRemaining(remainingMs)}
+          </span>
+        </span>
       )}
     </div>
   );

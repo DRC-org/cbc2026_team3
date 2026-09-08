@@ -104,7 +104,89 @@ describe("MatchPrep の項目配置", () => {
     });
 
     expect(screen.getByText("/3")).toBeInTheDocument();
-    expect(screen.getByText("残り 2")).toBeInTheDocument();
+    // 残り件数は同じ画面の StartGate が出す。ここに併記すると、引き算で導ける
+    // 同じ事実が 1 行の中に 2 度並ぶ
+    expect(screen.queryByText(/残り/)).not.toBeInTheDocument();
+  });
+
+  it("「完了」はサーバーの completed であって件数からの導出ではない", () => {
+    // 全部チェック済みでもサーバーが completed を立てていなければ完了と言わない。
+    // 件数から導き直すと、この食い違いに気付ける表示が画面から消える
+    mount({ items: [item("a", "preflight", true), item("b", "court", true)], completed: false });
+
+    expect(screen.queryByText("完了")).not.toBeInTheDocument();
+  });
+
+  it("サーバーが completed を立てていれば未チェックが残っていても完了を出す", () => {
+    mount({ items: [item("a", "preflight", true), item("b", "court")], completed: true });
+
+    expect(screen.getByText("完了")).toBeInTheDocument();
+  });
+});
+
+/**
+ * 29 項目 + 3 つの操作は 1366x768 の左カラムに収まらず、下端に来るのはたいてい
+ * 次の区分の見出しで、その下にある動作確認の起動ボタンごと画面の外にある。
+ * スクロールバーは静止中 1px も描かれないので、合図が無いと「切れている」ことも
+ * 「ここで終わり」であることも読めない。
+ */
+/** jsdom はレイアウトを持たないので、溢れているかどうかは寸法を置いて作る */
+function stubScroll(
+  el: Element,
+  size: { clientHeight: number; scrollHeight: number; scrollTop: number },
+) {
+  for (const [key, value] of Object.entries(size)) {
+    Object.defineProperty(el, key, { value, configurable: true });
+  }
+  fireEvent.scroll(el);
+}
+
+function scrollBody(container: HTMLElement): Element {
+  const body = container.querySelector(".scroll");
+  if (!body) throw new Error("スクロール面が見つからない");
+  return body;
+}
+
+/** 上端 / 下端の合図。クラスが唯一の手がかりなので直接引く */
+const aboveSignal = (c: HTMLElement) => c.querySelector(".bg-linear-to-b");
+const belowSignal = (c: HTMLElement) => c.querySelector(".bg-linear-to-t");
+
+describe("MatchPrep のスクロール", () => {
+  it("下に続きがあるあいだだけ下端に合図を出す", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+    expect(belowSignal(container)).not.toBeNull();
+    expect(aboveSignal(container)).toBeNull();
+
+    // 末尾まで送れば消える。出したままにすると「まだ続きがある」の意味が消え、
+    // 項目の少ない構成では終わりを一度も読めなくなる
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 900 });
+    expect(belowSignal(container)).toBeNull();
+  });
+
+  it("上に続きがあるあいだだけ上端に合図を出す", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    // 「次」への自動スクロールは操縦者が動かさなくても起きるので、
+    // 上端で切れた行が「描画の崩れ」に見えるのはこの状態
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 400 });
+    expect(aboveSignal(container)).not.toBeNull();
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+    expect(aboveSignal(container)).toBeNull();
+  });
+
+  it("溢れていなければ上下とも何も出さない", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 300, scrollTop: 0 });
+
+    expect(aboveSignal(container)).toBeNull();
+    expect(belowSignal(container)).toBeNull();
   });
 });
 

@@ -691,11 +691,21 @@ export interface ManualAxis {
   name: string;
   /** 人間が扱う単位 (mm / deg / duty)。表示にそのまま使う */
   unit: string;
-  command_mode: "position" | "velocity" | "duty";
+  /**
+   * 指令の種類。サーバーの `lib/drivers/base.ControlMode` がそのまま載る。
+   * **`on_off` (電磁弁) を落とさないこと** —— 実際に配信されており、これが型から
+   * 抜けていると「0 / 1 を数値で描いてよい軸」と読める。
+   */
+  command_mode: "position" | "velocity" | "current" | "duty" | "on_off";
   /**
    * フィードバックから逆換算した現在値。**位置を測れない軸では null。**
    * DC 基板はエンコーダを持たないので、0 を載せると「測ったように見える 0」になる。
    * 数値へフォールバックせず「読めていない」ことを画面に出すこと。
+   *
+   * サーバーは `command_mode` が `position` でない軸を必ず null にする
+   * (`ManualController._safe_observed_value`)。**構造的に測れないのか、位置軸の
+   * 算出が一時的に失敗したのかは値からは区別できない**ので、UI が「測る手段が
+   * あるか」を判断するときは `command_mode` を見る。
    */
   value: number | null;
   /** 直前に手動で送った目標値。一度も送っていなければ null */
@@ -717,9 +727,23 @@ export interface ManualAxis {
    * UI はフォールバック値を持たない。null なら色を付けず数値も判定しない。
    */
   sync_tolerance: number | null;
-  /** 位置定数に定義された状態名。プリセットボタンはここからしか作らない */
-  positions: string[];
+  /** 位置定数に定義されたプリセット。ボタンも可動範囲バーの目盛りもここからしか作らない */
+  positions: ManualPosition[];
   motors: string[];
+}
+
+/**
+ * プリセット 1 つ。位置定数 yaml に定義された状態名と、その人間の単位での値。
+ *
+ * **値は「そこがどこか」を描くためだけに載る。** 指令は名前で送る (`manual_move`)
+ * —— 数値を送る経路を作ると「定義した状態以外を送れない」保証が消える。
+ *
+ * `value` が null なのはサーバーが値を引けなかったとき。**0 で埋めてはならない**
+ * —— 可動範囲の下端に居ないプリセットが下端に描かれる。
+ */
+export interface ManualPosition {
+  name: string;
+  value: number | null;
 }
 
 export interface ManualState {
@@ -763,6 +787,51 @@ export function parseSensors(raw: unknown): Record<string, SensorState> | Malfor
   if (!isObject(raw)) return MALFORMED;
   if (!Object.values(raw).every(isSensorState)) return MALFORMED;
   return raw as Record<string, SensorState>;
+}
+
+/**
+ * プリセット 1 つを受信境界で確定させる。**旧サーバーの `"home"`（素の文字列）も受ける。**
+ *
+ * `positions` は名前だけの配列だった。**`state` の既存欄の形を変えた唯一の例** なので、
+ * サーバーと `web/dist` の版がずれる窓が現実にある —— `pnpm dev` を手元で立てて
+ * `?ws=drc:8080` で機体へ繋ぐ運用（`CLAUDE.md` が案内している）がそれ。
+ * 素通しのままだと `position.name` が `undefined` になり、**文字の無いボタンが
+ * 押せる状態で並び**、`onMove` は行き先の無い指令を送る。バーには `left: NaN%` の
+ * 刻みが下端へ寄って出る。
+ *
+ * 旧形式は `value: null`（＝値が読めない）へ落とす。**これは黙った既定値ではない** ——
+ * サーバーが値を引けなかったときと同じ意味で、画面は刻みも `title` も出さずに
+ * 「そこがどこかは分からない」ことをそのまま描く。
+ *
+ * どちらの形でもないものだけを落とす。名前を読めないボタンを出すより、
+ * ボタンが無い方がまだ操縦者に嘘をつかない。**名前も値も検査しない**（軸名と
+ * 位置名を UI へ書かない性質は、ここを素通しにしていることで成り立っている）。
+ */
+function parseManualPosition(raw: unknown): ManualPosition | null {
+  if (typeof raw === "string") return { name: raw, value: null };
+  if (!isObject(raw)) return null;
+  if (typeof raw.name !== "string") return null;
+  if (raw.value !== null && typeof raw.value !== "number") return null;
+  return { name: raw.name, value: raw.value as number | null };
+}
+
+/**
+ * 手動操縦の軸一覧のうち `positions` だけを確定させる。
+ *
+ * **他の欄は素通しのまま。** 軸名も可動範囲も UI 側へ書かない性質はそこで成立している
+ * （`motor_check_state` の `steps` だけを検査して他を素通しにしているのと同じ切り分け）。
+ */
+function parseManual(raw: unknown): ManualState | undefined {
+  if (!isObject(raw)) return undefined;
+  if (!Array.isArray(raw.axes)) return raw as unknown as ManualState;
+  const axes = raw.axes.map((axis: unknown) => {
+    if (!isObject(axis) || !Array.isArray(axis.positions)) return axis;
+    return {
+      ...axis,
+      positions: axis.positions.map(parseManualPosition).filter((p) => p !== null),
+    };
+  });
+  return { ...raw, axes } as unknown as ManualState;
 }
 
 export interface RobotState {
@@ -922,6 +991,10 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (sensors !== undefined) state.sensors = sensors;
       // 型だけ足して受信条件を書かないと「型は合っているのに画面に出ない」になる
       state.last_error = parseSequenceFailure(raw.last_error);
+      // 手動操縦は `positions` だけ形を確定させる (他の欄は素通し)。
+      // 旧サーバーの素の文字列を受けないと、文字の無いボタンが押せる状態で並ぶ
+      if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
+
       return { type: "state", robot, state };
     }
 
