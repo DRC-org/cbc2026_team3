@@ -3,7 +3,8 @@
 キャチロボバトルコンテスト 2026 出場ロボットの操縦 UI。
 Vite + React + TypeScript + Tailwind v4 / daisyUI 5。
 
-設計判断は `../docs/impl_plan.md`、リポジトリ全体の約束は `../CLAUDE.md` を参照。
+構造は [`../docs/architecture.md`](../docs/architecture.md)、崩してはならない設計と
+その理由は [`../docs/invariants.md`](../docs/invariants.md) を参照。
 
 ## コマンド
 
@@ -41,48 +42,15 @@ pnpm check         # lint + format + 型検査 + テスト
 
 ## 開発時に踏みやすい点
 
+UI 側の不変条件（受信境界の `MALFORMED`、context の分割、モーダル、EMG STOP の配置、
+daisyUI の書き方、grid/flex の伸び方など）は
+[`../docs/invariants.md`](../docs/invariants.md) の §8 にまとまっている。**画面を触る前に
+一度読むこと。** ここに残すのは web/ の作業でしか出会わない点だけ。
+
 - **配色は `index.css` のテーマだけを触る。** 個別コンポーネントに色の生値を書かない
-- **`applyLegacyHashRedirect()` は `createBrowserRouter()` より前。** 順序が崩れると
-  操縦者がブックマークした `#main-hand` 等の URL が全て Monitor に落ちる
 - **タブ遷移では `location.search` を落とさない。** `?ws=` の接続先上書きが失われる
-- **サーバーとの契約は `src/test/wsContract.test.ts` が守る。** サンプルを手で書き写さず、
-  `ws-contract.json`（Python 側が `UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py`
-  で生成）を import して受信経路へ流し込む。写した瞬間に「想像した契約」へ逆戻りし、
-  実際に `health_change` が実機で 100% 捨てられていたことを両側のテストが揃って見逃した。
-  生成物なので整形もしない（`.prettierignore` で oxfmt の対象外にしてある）
-- **契約は両方向を見る。** 「UI が読む値が実配信に在るか」だけでは、
-  **サーバーが送っているのに TS が知らない欄**を取りこぼす（`health.detail` が
-  型にすら無く、サーバーの「判定不能」を画面が「異常なし」と表示していた）。
-  `wsContract.test.ts` の逆方向は実配信のキーを再帰的に列挙して宣言と突き合わせる。
-  使わないフィールドは `unused` に理由を書く。書かれていない欄が増えたら落ちる
-- **サーバーの判定より UI が楽観的になってはならない。** `health.overall` は
-  ヘルス計算そのものが失敗したときに `down` へ倒れる（内訳は空、理由は `detail`）。
-  内訳だけを見て「異常なし」を出すと、サーバーのフェイルセーフが画面上で消える
-- **切断中に楽観的更新をしない。** `send()` は送れたかを返す。緊急停止のように
-  送信の成否で画面が変わる操作は必ず戻り値を見ること（切断中に赤いオーバーレイを
-  出すと、機体は動いたままで、矛盾を示す接続バナーもその背後に隠れる）。
-  ただし黙って捨てるのも危険なので、送れなかったことは通知枠へ流す
-- **時刻は受信境界で ms へ正規化する。** サーバーはエポック秒、`Date` はミリ秒。
-  UI 状態のフィールド名は `...Ms` で終わらせ、秒のままの値は `EpochSeconds` を名乗る
-- **モーダルに `<dialog>` を使わない。** Esc で必ず閉じてしまい、緊急停止オーバーレイの
-  「解除は Reset ボタンのみ」という安全設計と両立しない
-- **試合の開始・終了はモーダルではなく同じボタンの二度押しで確認する**（`hooks/useArmedPress.ts`）。
-  ダイアログはボタンから離れた位置に出るため、押す → カーソルを運ぶ → 押す、の往復が挟まる。
-  誤爆を防ぐのは不感時間 400ms（ダブルクリック 1 回を二度押しにしない）と自動解除 4 秒
-  （武装したまま忘れられたボタンを残さない）の 2 つで、どちらが欠けても確認にならない。
-  操作が成立しなくなったら呼び出し側が `disarm()` すること
-- **`match_reset` の確認の要否は「何を失うか」で決める。** 試合後の「セッティングへ戻る」は
-  確認なしで即送信（失うのは消化済みのチェックリストだけ）。準備中の「チェックリストを
-  リセット」はダイアログを残す（まだ使っていない指差喚呼が全て消える）。同じコマンドだからと揃えない
-- **context は頻度で分けて購読する。** `states` は毎秒 40 回変わる（50ms × 2 台）。
-  低頻度の値やコマンドを同じ購読へ混ぜると、モータ温度が 0.1℃ 動いただけで
-  チェックリストもタブもトーストも描き直される。`useRobotStates()` /
-  `useRobotStatus()` / `useRobotCommands()` から**必要なものだけ**を読む
-- **`RootLayout` の `AppShell` の `memo` は飾りではない。** 親が再描画すると React は
-  memo の無い子を素通しで描き直すので、これが無いと context をいくつに割っても
-  外枠ごと毎秒 40 回描き直される。`AppShell` へテレメトリ由来の props を渡さないこと
-  （`src/layouts/RootLayout.test.tsx` と `src/context/RobotContext.test.tsx` が
-  再描画回数で守っている）
-- **フェーズによる可否はサーバーの写しを 1 箇所に置く。** `lib/phase.ts` の
-  `isDuringMatch()` が `lib/match_state.py` の `PHASES_DURING_MATCH` と 1:1。
-  可否を決めるのはサーバー (`lib/commands.py`) で、UI は送る前に理由を説明するだけ
+- **時刻は受信境界で ms へ正規化する。** サーバーはエポック秒、`Date` はミリ秒。UI 状態の
+  フィールド名は `...Ms` で終わらせ、秒のままの値は `EpochSeconds` を名乗る
+- **`ws-contract.json` は生成物なので手で書かず、整形もしない**
+  （`.prettierignore` で oxfmt の対象外にしてある）。サーバー側を変えたら
+  `UPDATE_WS_CONTRACT=1 uv run pytest tests/test_ws_contract.py` で作り直す
