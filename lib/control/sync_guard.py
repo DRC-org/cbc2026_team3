@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SyncGuard"]
 
 PositionReader = Callable[[str], float]
+TargetReader = Callable[[str], float | None]
 
 
 class SyncGuard:
@@ -154,6 +155,41 @@ class SyncGuard:
             if self._check_deviation(group, position_of):
                 blocked.add(group.name)
         return frozenset(blocked)
+
+    def skewed_groups(self, *, target_of: TargetReader) -> frozenset[str]:
+        """左右が別々の軸位置を目標にしているグループ名 (= 補正を出してはならない組)。
+
+        零点確定の整列段は「押されていない側のモータだけを進める」ので、左右の目標が
+        意図的に食い違う。同期補正は平均へ引き戻す向きなので、そのままではこの
+        意図したずれをちょうど打ち消しに掛かり、整列が成立しない。
+
+        **contextmanager による明示的な suspend/resume にはしていない。** 再開を
+        取りこぼすとそのグループの補正が試合中ずっと死んだまま残り、しかも画面にも
+        ログにも出ない。前提そのものを毎周期評価する形なら忘れようがなく、将来
+        「意図的に左右をずらす操作」を足した人も同じ罠を踏まない。
+
+        **止めるのは補正だけで、保護 (``blocked`` / 偏差ラッチ) は一切止めない。**
+        整列段でも許容差を超えるずれは依然として異常であり、消してよいのは
+        「平均へ引き戻す力」だけである。
+
+        判定そのもの (逆換算を通した比較) は ``SyncGroup.targets_share_axis_value``
+        が持つ。この層に固有なのは「グループ名の集合として答える」ことだけで、
+        ``blocked()`` / ``corrections()`` と同じ形に揃えてある。
+
+        Args:
+            target_of: モータ名 → 目標値 (指令単位)。目標を持たなければ None。
+                None を返すメンバが居るグループも「揃っていない」として含める
+        """
+        skewed: set[str] = set()
+        for group in self._groups.values():
+            targets = {
+                member.name: value
+                for member in group.members
+                if (value := target_of(member.name)) is not None
+            }
+            if not group.targets_share_axis_value(targets):
+                skewed.add(group.name)
+        return frozenset(skewed)
 
     def corrections(
         self, *, position_of: PositionReader, skip_groups: Collection[str]

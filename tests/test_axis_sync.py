@@ -319,6 +319,76 @@ class TestSyncCorrections:
         assert group.corrections({}) == {}
 
 
+class TestTargetsShareAxisValue:
+    """補正を出してよい前提「全員が同じ軸位置を目標にしている」の判定。
+
+    零点確定の整列段は片側だけを step ぶん進めるので、左右の目標が意図的に食い違う。
+    そこで補正が出ると意図したずれをちょうど打ち消しに掛かり、整列が成立しない。
+    """
+
+    def _group(self) -> SyncGroup:
+        return SyncGroup(
+            name="y_axis",
+            members=(
+                MotorSpec(name="y_axis_r", scale=SCALE, offset=0.0),
+                MotorSpec(name="y_axis_l", scale=-SCALE, offset=0.0),
+            ),
+            tolerance=2.0,
+            sync_kp=2.0,
+            sync_limit=1e9,
+        )
+
+    def test_same_axis_value_is_shared(self) -> None:
+        """同じ軸位置から換算した目標は「揃っている」。
+
+        逆回転ペアなので指令値そのものは符号が反転する。``to_value`` を通さずに
+        指令値を比べる実装ではここが成立しない。
+        """
+        group = self._group()
+
+        assert group.targets_share_axis_value({"y_axis_r": 10.0 * SCALE, "y_axis_l": -10.0 * SCALE})
+
+    def test_one_sided_step_is_not_shared(self) -> None:
+        """整列段そのもの —— 片側だけ step (0.5mm) 進めた目標は揃っていない。"""
+        group = self._group()
+
+        assert not group.targets_share_axis_value(
+            {"y_axis_r": 10.5 * SCALE, "y_axis_l": -10.0 * SCALE}
+        )
+
+    def test_missing_member_is_not_shared(self) -> None:
+        """メンバが欠けたら False。欠けたまま「揃っている」と答えると、目標を
+        持たない相方が居る周期に補正が出る。"""
+        group = self._group()
+
+        assert not group.targets_share_axis_value({"y_axis_r": 10.0 * SCALE})
+        assert not group.targets_share_axis_value({})
+
+    def test_round_trip_error_is_absorbed(self) -> None:
+        """to_command → to_value の往復で乗る丸め誤差は「揃っている」側に読む。
+
+        許容幅が丸め誤差より狭いと、正常な位置指令でも補正が永久に止まる。
+        """
+        group = self._group()
+        members = {member.name: member for member in group.members}
+        targets = {name: member.to_command(10.0) for name, member in members.items()}
+
+        assert group.targets_share_axis_value(targets)
+
+    def test_tolerance_sized_skew_is_not_shared(self) -> None:
+        """許容幅に ``tolerance`` (2.0mm) を流用していないことを固定する。
+
+        流用すると、整列段が作る数 mm の意図的なずれが「揃っている」と読まれて
+        打ち消す向きの補正が出続ける。tolerance は機構が壊れる境界であって、
+        「同じ軸位置から換算された目標か」という問いとは別の量である。
+        """
+        group = self._group()
+
+        assert not group.targets_share_axis_value(
+            {"y_axis_r": 11.0 * SCALE, "y_axis_l": -10.0 * SCALE}
+        )
+
+
 class TestSyncGainValidation:
     """ゲインと歯止めの対を型の段階で守る (yaml を経由しない組み立ても塞ぐ)。"""
 

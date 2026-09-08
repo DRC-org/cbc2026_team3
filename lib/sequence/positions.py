@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 # 単位換算は制御層 (同期監視・位置制御ループ) と共有する。ここで再定義すると
 # 逆回転ペアの符号付き scale の逆換算がまた 2 実装に分かれる
@@ -75,10 +76,21 @@ class HomingSpec:
     配線が抜けていたりセンサが死んでいたりすると機構端まで押し込み続ける。
     探索距離を超えたら止めるのが唯一の歯止めになる (緊急停止は操縦者が押さないと
     効かないので、無人の歯止けが要る)。
+
+    センサの書き方は 2 つあり、**排他でどちらか一方が必須**である:
+
+    - ``sensor`` (単数) …… スイッチ 1 本で軸全体の原点が決まる軸 (``rotate``)
+    - ``sensors`` (複数) …… 左右直結ペアの各モータにスイッチが 1 本ずつ付く軸
+      (``y_axis``)。「どのスイッチがどのモータのものか」はここでしか宣言されず、
+      整列段 (片方だけ押されている間に押されていない側のモータだけを進める段) は
+      この対応表を頼りに指令先を選ぶ
+
+    両方を書けると「どちらのスイッチが原点を決めるのか」が config から読めなくなり、
+    どちらも書かないとセンサを見ずに探索を始める軸ができるので、いずれも拒否する。
     """
 
-    #: 監視するセンサ名 (config の `sensors:` に登録された名前)
-    sensor: str
+    #: 監視するセンサ名 (config の `sensors:` に登録された名前)。`motor_sensors` と排他
+    sensor: str | None
     #: 探索方向。+1 か -1 のみ。人間の単位での増減方向を表す
     direction: float
     #: 探索距離の上限 [軸の unit]。ここまで動かして当たらなければ失敗として止める
@@ -87,8 +99,27 @@ class HomingSpec:
     step: float
     #: 1 ステップごとの待ち [s]。指令が機構へ届き、センサの状態が返る余裕を取る
     settle_s: float
+    #: モータ名 → センサ名の対応表 (yaml の `sensors:`)。**辞書ではなく組の列**で
+    #: 持つのは frozen dataclass の不変性と `__hash__` を壊さないため (dict は
+    #: ハッシュできず、呼び出し側から書き換えられる)。読むのは `sensors` property
+    motor_sensors: tuple[tuple[str, str], ...] | None = None
+    #: 整列段で片側だけに許す移動量の上限 [軸の unit]。`sensors` を書いたときのみ
+    align_distance: float | None = None
 
     def __post_init__(self) -> None:
+        if self.sensor is not None and self.motor_sensors is not None:
+            raise ValueError(
+                "homing.sensor と homing.sensors は併記できません "
+                "(どちらのスイッチが原点を決めるか決まりません)。"
+                "スイッチ 1 本なら sensor、モータごとに 1 本ずつなら sensors だけを書いてください"
+            )
+        if self.sensor is None and self.motor_sensors is None:
+            raise ValueError(
+                "homing には sensor (スイッチ 1 本) か "
+                "sensors (モータ名 → センサ名) のどちらかが必要です"
+            )
+        if self.motor_sensors is not None and not self.motor_sensors:
+            raise ValueError("homing.sensors が空です (見るセンサが 1 本もありません)")
         if self.direction not in (1.0, -1.0):
             raise ValueError(f"homing.direction は +1 か -1: {self.direction!r}")
         if self.search_distance <= 0.0:
@@ -103,6 +134,65 @@ class HomingSpec:
                 f"homing.step ({self.step}) が "
                 f"search_distance ({self.search_distance}) を超えています"
             )
+        self._validate_align_distance()
+
+    def _validate_align_distance(self) -> None:
+        """整列段の歯止めを検証する。
+
+        **`sensors` を書いたら `align_distance` は省略できない。** 整列段は左右直結
+        ペアの片側だけを動かす操作なので、極性を取り違えたセンサや抜けた配線は
+        「押されていない側をいつまでも進める」形でしか現れない。上限が唯一の無人の
+        歯止めになる (`search_distance` と同格)。
+
+        逆に `sensors` を書いていない軸の `align_distance` は拒否する。整列段その
+        ものが存在しないので、書いても効かない設定になる。
+        """
+        if self.motor_sensors is not None:
+            if self.align_distance is None:
+                raise ValueError(
+                    "homing.sensors を書いた軸には align_distance が必要です "
+                    "(片側だけを動かす整列段の唯一の無人の歯止めなので省略できません)"
+                )
+        elif self.align_distance is not None:
+            raise ValueError(
+                "homing.align_distance は sensors を書いた軸にのみ指定できます "
+                "(整列段が無いので書いても効きません)"
+            )
+
+        if self.align_distance is None:
+            return
+        if self.align_distance <= 0.0:
+            raise ValueError(f"homing.align_distance は正の値: {self.align_distance!r}")
+        if self.align_distance < self.step:
+            # 1 歩も踏めないまま必ず失敗する設定を通さない (step > search_distance と同じ)
+            raise ValueError(
+                f"homing.align_distance ({self.align_distance}) が "
+                f"step ({self.step}) より小さいため 1 歩も進めません"
+            )
+
+    @property
+    def sensors(self) -> Mapping[str, str] | None:
+        """モータ名 → センサ名。単数形 (`sensor`) で書いた軸は None。
+
+        書き換えられない写しを返す。ここで生の辞書を返すと、対応表を持つ意味
+        (「どのスイッチがどのモータのものか」の唯一の宣言) が呼び出し側から
+        崩せてしまう。
+        """
+        if self.motor_sensors is None:
+            return None
+        return MappingProxyType(dict(self.motor_sensors))
+
+    @property
+    def sensor_names(self) -> tuple[str, ...]:
+        """見るセンサ名を宣言順で返す。単数形・複数形の違いを吸収する唯一の口。
+
+        センサ鮮度の事前確認や離脱判定は「何本あるか」を問わないので、書き方の
+        違いをここで畳む。呼び出し側が `sensor` と `sensors` を場合分けすると、
+        片方の書き方でだけ事前確認が抜けた経路が作れる。
+        """
+        if self.motor_sensors is not None:
+            return tuple(sensor for _motor, sensor in self.motor_sensors)
+        return (self.sensor,) if self.sensor is not None else ()
 
 
 @dataclass(frozen=True)
@@ -212,6 +302,56 @@ class AxisSpec:
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
+        self._check_homing_sensor_map()
+        self._check_align_distance()
+
+    def _check_homing_sensor_map(self) -> None:
+        """`homing.sensors` のキーが軸のモータと過不足なく対応しているか見る。
+
+        この対応表は「どのスイッチがどのモータのものか」の唯一の宣言なので、
+        1 つ書き忘れるとそのモータだけが整列段の対象から静かに外れ、**片側が
+        押されないまま原点が確定する**。以後の位置定数はすべてずれた原点からの
+        相対値になり、症状は「全ステップが同じだけずれた場所へ動く」だけで、
+        config にもログにも間違いが現れない。
+        """
+        if self.homing is None or self.homing.sensors is None:
+            return
+
+        declared = set(self.homing.sensors)
+        actual = set(self.motor_names)
+        missing = sorted(actual - declared)
+        extra = sorted(declared - actual)
+        if not missing and not extra:
+            return
+        raise ValueError(
+            f"axes.{self.name}.homing.sensors のキーが motors と一致しません "
+            f"(不足: {', '.join(missing) or 'なし'} / 余分: {', '.join(extra) or 'なし'})"
+        )
+
+    def _check_align_distance(self) -> None:
+        """整列段の移動量が偏差許容差の内側に収まっているか見る。
+
+        整列段は左右の位置を**意図的にずらす**操作なので、そのずれが
+        ``sync_tolerance`` に届くと、零点確定の最中に 3 層の保護
+        (位置制御ループ 200Hz / SyncMonitor 50Hz / move_to 完了時) が発報する。
+        機体はラッチしたまま止まり、操縦者からは「動作確認の最初のステップで
+        いつも緊急停止する」としか見えない。
+
+        ここで強制するのは「真に小さい」ことだけにする。**余裕をどれだけ取るかは
+        機構ごとの運用判断**なので、係数を掛けた基準を持ち込むと config に書いた
+        値がそのまま効かない軸ができる。
+        """
+        if self.homing is None or self.homing.align_distance is None:
+            return
+        if self.sync_tolerance is None:
+            return
+        if self.homing.align_distance < self.sync_tolerance:
+            return
+        raise ValueError(
+            f"axes.{self.name}.homing.align_distance ({self.homing.align_distance}) は "
+            f"sync_tolerance ({self.sync_tolerance}) より小さい必要があります "
+            "(整列段のずれが偏差許容差に届くと零点確定の最中に緊急停止します)"
+        )
 
     @property
     def motor_names(self) -> tuple[str, ...]:
@@ -219,6 +359,35 @@ class AxisSpec:
 
     def to_commands(self, value: float) -> dict[str, float]:
         return {motor.name: motor.to_command(value) for motor in self.motors}
+
+    def to_commands_each(self, values: Mapping[str, float]) -> dict[str, float]:
+        """モータ名 → 人間の単位の軸位置を、モータ名 → 指令値へ換算する。
+
+        ``to_commands`` (全モータへ同じ軸位置を配る) と対になる、**モータごとに
+        違う軸位置を指令するための唯一の口**。零点確定の整列段が、片方のスイッチが
+        押されていない側だけを進めるために使う。
+
+        **これは「ペア軸に片側だけ効く操作」を作る口ではない。** 呼び出し側は左右
+        両方を同じ ``AxisHandle.set_target_value`` の 1 回で指令し、進めない側へは
+        現在位置の保持を指令する。左右が別々の時刻に動く経路はここからも生まれない
+        (別々に動くとその場で機構が壊れる)。
+
+        換算は ``MotorSpec.to_command`` に委ねる。ここで書き直すと逆回転ペアの
+        符号付き ``scale`` の扱いが 2 実装に分かれる (``to_commands`` と同じ理由)。
+
+        Raises:
+            KeyError: キーが ``motor_names`` と過不足なく一致しない。黙って通すと
+                指令しなかったモータの目標が前の周期のまま残り、軸としては片側だけが
+                動く (このメソッドが避けたい状態そのもの)
+        """
+        missing = sorted(name for name in self.motor_names if name not in values)
+        extra = sorted(set(values) - set(self.motor_names))
+        if missing or extra:
+            raise KeyError(
+                f"軸 '{self.name}' のモータと一致しません "
+                f"(不足: {', '.join(missing) or 'なし'} / 余分: {', '.join(extra) or 'なし'})"
+            )
+        return {motor.name: motor.to_command(values[motor.name]) for motor in self.motors}
 
     def to_value(self, commands: Mapping[str, float]) -> float:
         """モータの指令値・フィードバックを人間の単位の軸位置へ戻す (``to_commands`` の逆)。
@@ -280,10 +449,14 @@ _MOTOR_KEYS = frozenset({"scale", "offset"})
 
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
 
-_HOMING_KEYS = frozenset({"sensor", "direction", "search_distance", "step", "settle_s"})
+_HOMING_KEYS = frozenset(
+    {"sensor", "sensors", "direction", "search_distance", "step", "settle_s", "align_distance"}
+)
 #: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
-#: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
-_HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
+#: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)。
+#: **センサはここに載せない** —— `sensor` / `sensors` の排他と必須は
+#: `HomingSpec.__post_init__` の 1 箇所だけが持つ (理由は `_parse_homing`)
+_HOMING_REQUIRED = frozenset({"direction", "search_distance", "step"})
 
 _MOTION_KEYS = frozenset({"max_velocity", "max_acceleration", "velocity_ff"})
 #: 対で書かせるキー。片方だけでは台形プロファイルを組み立てられず、欠けたほうを
@@ -622,8 +795,13 @@ def _parse_sync_gain(
 def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
     """リミットスイッチによる零点確定の設定を読む。書かない軸は None。
 
-    値の妥当性 (方向が ±1 か、探索距離が正か) は ``HomingSpec.__post_init__`` が見る。
-    ここで見るのはキーの綴りと型だけ。
+    値の妥当性 (方向が ±1 か、探索距離が正か、``sensor`` と ``sensors`` の排他か) は
+    ``HomingSpec.__post_init__`` が見る。ここで見るのはキーの綴りと型だけ。
+
+    **センサの排他・必須をここへ書き写さない。** yaml 側にも同じ判定を置くと、
+    yaml を経由せず組み立てた ``HomingSpec`` にだけ緩い規則が効く状態が作れ、
+    どちらが正なのかを毎回確かめることになる。キーの綴り検査で通り抜けた誤りは
+    ``HomingSpec`` が同じ日本語のメッセージで拒否し、``path`` を付けて再送出する。
     """
     if raw is None:
         return None
@@ -642,21 +820,49 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
         # 探索距離を省けるようにすると、既定値のまま機構端まで押し込む経路ができる
         raise ValueError(f"axes.{axis_name}.homing に必須キーがありません: {', '.join(missing)}")
 
-    sensor = raw["sensor"]
-    if not isinstance(sensor, str) or not sensor:
-        raise ValueError(f"axes.{axis_name}.homing.sensor はセンサ名の文字列: {sensor!r}")
-
     path = f"axes.{axis_name}.homing"
+    sensor = raw.get("sensor")
+    if sensor is not None and (not isinstance(sensor, str) or not sensor):
+        raise ValueError(f"{path}.sensor はセンサ名の文字列: {sensor!r}")
+
+    # 自分で path 付きのメッセージを作る 2 つは try の外で読む
+    # (中で呼ぶと下の再送出が path を二重に付ける)
+    motor_sensors = _parse_homing_sensor_map(path, raw.get("sensors"))
+    align_distance = _number(path, raw, "align_distance", None)
+
     try:
         return HomingSpec(
             sensor=sensor,
+            motor_sensors=motor_sensors,
             direction=float(raw["direction"]),
             search_distance=float(raw["search_distance"]),
             step=float(raw["step"]),
             settle_s=float(raw.get("settle_s", 0.05)),
+            align_distance=align_distance,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from exc
+
+
+def _parse_homing_sensor_map(path: str, raw: object) -> tuple[tuple[str, str], ...] | None:
+    """`homing.sensors` (モータ名 → センサ名) を宣言順の組の列として読む。
+
+    順序を保つのは、鮮度の事前確認や整列段のログが config に書いた順で並ぶように
+    するため (辞書のまま持つと frozen dataclass の不変性も壊れる)。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}.sensors はモータ名 → センサ名の辞書: {raw!r}")
+
+    pairs: list[tuple[str, str]] = []
+    for motor_name, sensor_name in raw.items():
+        if not isinstance(motor_name, str) or not motor_name:
+            raise ValueError(f"{path}.sensors のキーはモータ名の文字列: {motor_name!r}")
+        if not isinstance(sensor_name, str) or not sensor_name:
+            raise ValueError(f"{path}.sensors.{motor_name} はセンサ名の文字列: {sensor_name!r}")
+        pairs.append((motor_name, sensor_name))
+    return tuple(pairs)
 
 
 def _parse_motion(axis_name: str, raw: object) -> MotionSpec | None:

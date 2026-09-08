@@ -9,6 +9,7 @@ from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.positions import (
     DEFAULT_TIMEOUT_S,
+    AxisSpec,
     MotorSpec,
     PositionLookupError,
     PositionTable,
@@ -1007,3 +1008,235 @@ class TestMotionSpec:
         )
 
         assert table.axis("y_axis").motion is not None
+
+
+class TestHomingSensorMap:
+    """零点確定のセンサ宣言 (axes.<軸>.homing の sensor / sensors / align_distance)。
+
+    左右直結ペアの各モータにスイッチが 1 本ずつ付いた軸 (`y_axis`) では、
+    「どのスイッチがどのモータのものか」がこの対応表でしか宣言されない。
+    書き忘れ・書き間違いはどれも「片側が押されないまま原点が確定する」という、
+    config からもログからも読めない形でしか現れないので起動時に潰す。
+    """
+
+    @staticmethod
+    def _paired(**homing_overrides: object) -> dict:
+        homing: dict = {
+            "sensors": {
+                "y_axis_r": "y_axis_r_origin_sensor",
+                "y_axis_l": "y_axis_l_origin_sensor",
+            },
+            "direction": -1,
+            "search_distance": 650.0,
+            "align_distance": 5.0,
+            "step": 0.5,
+            "settle_s": 0.05,
+        }
+        homing.update(homing_overrides)
+        # None を渡したキーは「書かなかった」を表す (欠落そのものを検証したいため)
+        for key in [name for name, value in homing.items() if value is None]:
+            del homing[key]
+        return {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "tolerance": 1.0,
+                    "sync_tolerance": 10.0,
+                    "motors": {
+                        "y_axis_r": {"scale": 55.0},
+                        "y_axis_l": {"scale": -55.0},
+                    },
+                    "homing": homing,
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        }
+
+    def test_モータごとのセンサを宣言順で読める(self) -> None:
+        homing = load_position_table(self._paired(), source="<test>").axis("y_axis").homing
+
+        assert homing is not None
+        assert homing.sensor is None
+        assert dict(homing.sensors or {}) == {
+            "y_axis_r": "y_axis_r_origin_sensor",
+            "y_axis_l": "y_axis_l_origin_sensor",
+        }
+        # 事前確認も離脱判定も宣言順に並ぶ (ログと config を突き合わせられる)
+        assert homing.sensor_names == ("y_axis_r_origin_sensor", "y_axis_l_origin_sensor")
+        assert homing.align_distance == pytest.approx(5.0)
+
+    def test_単数形の設定は今までどおり読める(self) -> None:
+        """スイッチ 1 本で軸全体の原点が決まる軸 (rotate) の回帰。"""
+        table = load_position_table(
+            {
+                "axes": {
+                    "rotate": {
+                        "unit": "deg",
+                        "homing": {
+                            "sensor": "rotate_origin_sensor",
+                            "direction": -1,
+                            "search_distance": 180.0,
+                            "step": 1.0,
+                            "settle_s": 0.05,
+                        },
+                    }
+                },
+                "positions": {"rotate": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        homing = table.axis("rotate").homing
+
+        assert homing is not None
+        assert homing.sensor == "rotate_origin_sensor"
+        assert homing.sensors is None
+        assert homing.sensor_names == ("rotate_origin_sensor",)
+        assert homing.align_distance is None
+
+    def test_対応表は書き換えられない(self) -> None:
+        """「どのスイッチがどのモータのものか」の唯一の宣言を呼び出し側から崩させない。"""
+        homing = load_position_table(self._paired(), source="<test>").axis("y_axis").homing
+
+        assert homing is not None
+        assert homing.sensors is not None
+        with pytest.raises(TypeError):
+            homing.sensors["y_axis_r"] = "別のセンサ"  # type: ignore[index]
+
+    def test_sensor_と_sensors_の併記は拒否する(self) -> None:
+        """どちらのスイッチが原点を決めるのかが config から読めなくなる。"""
+        with pytest.raises(ValueError, match="併記"):
+            load_position_table(self._paired(sensor="y_axis_r_origin_sensor"), source="<test>")
+
+    def test_どちらも書かなければ拒否する(self) -> None:
+        """センサを見ずに探索を始める軸を作らせない。"""
+        with pytest.raises(ValueError, match="sensors"):
+            load_position_table(self._paired(sensors=None, align_distance=None), source="<test>")
+
+    def test_空の_sensors_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="空"):
+            load_position_table(self._paired(sensors={}), source="<test>")
+
+    def test_sensors_が辞書でなければ型を示して拒否する(self) -> None:
+        with pytest.raises(ValueError, match="辞書"):
+            load_position_table(self._paired(sensors=["y_axis_r_origin_sensor"]), source="<test>")
+
+    def test_センサ名が文字列でなければ拒否する(self) -> None:
+        with pytest.raises(ValueError, match="y_axis_r"):
+            load_position_table(self._paired(sensors={"y_axis_r": 3}), source="<test>")
+
+    def test_sensors_に_align_distance_が無ければ拒否する(self) -> None:
+        """片側だけを動かす整列段の唯一の無人の歯止めなので省略できない。"""
+        with pytest.raises(ValueError, match="align_distance"):
+            load_position_table(self._paired(align_distance=None), source="<test>")
+
+    def test_sensors_の無い軸の_align_distance_は拒否する(self) -> None:
+        """整列段が存在しない軸に書いても効かない (書いたのに効かない設定を通さない)。"""
+        config = {
+            "axes": {
+                "rotate": {
+                    "unit": "deg",
+                    "homing": {
+                        "sensor": "rotate_origin_sensor",
+                        "direction": -1,
+                        "search_distance": 180.0,
+                        "step": 1.0,
+                        "align_distance": 5.0,
+                    },
+                }
+            },
+        }
+        with pytest.raises(ValueError, match="align_distance"):
+            load_position_table(config, source="<test>")
+
+    def test_非正の_align_distance_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="align_distance"):
+            load_position_table(self._paired(align_distance=0.0), source="<test>")
+
+    def test_step_より小さい_align_distance_は拒否する(self) -> None:
+        """1 歩も踏めないまま必ず失敗する設定を通さない。"""
+        with pytest.raises(ValueError, match="align_distance"):
+            load_position_table(self._paired(step=2.0, align_distance=1.0), source="<test>")
+
+    def test_モータが不足していれば拒否する(self) -> None:
+        """書き忘れたモータだけが整列段の対象から静かに外れる。"""
+        with pytest.raises(ValueError, match="y_axis_l"):
+            load_position_table(
+                self._paired(sensors={"y_axis_r": "y_axis_r_origin_sensor"}), source="<test>"
+            )
+
+    def test_余分なモータ名があれば拒否する(self) -> None:
+        """打ち間違えたモータ名は「不足」としても現れるが、余分な側も名指しする。"""
+        sensors = {
+            "y_axis_r": "y_axis_r_origin_sensor",
+            "y_axis_l": "y_axis_l_origin_sensor",
+            "y_axis_x": "y_axis_x_origin_sensor",
+        }
+        with pytest.raises(ValueError, match="y_axis_x"):
+            load_position_table(self._paired(sensors=sensors), source="<test>")
+
+    def test_align_distance_が_sync_tolerance_以上なら拒否する(self) -> None:
+        """整列段のずれが偏差許容差に届くと、零点確定の最中に 3 層の保護が発報する。"""
+        with pytest.raises(ValueError, match="sync_tolerance"):
+            load_position_table(self._paired(align_distance=10.5), source="<test>")
+
+    def test_境界_align_distance_が_sync_tolerance_と等しくても拒否する(self) -> None:
+        """等号を許すと「ちょうど許容差ぶんずらしてから止める」設定が通る。"""
+        with pytest.raises(ValueError, match="sync_tolerance"):
+            load_position_table(self._paired(align_distance=10.0), source="<test>")
+
+    def test_sync_tolerance_の内側なら通る(self) -> None:
+        table = load_position_table(self._paired(align_distance=9.999), source="<test>")
+
+        assert table.axis("y_axis").homing is not None
+
+
+class TestToCommandsEach:
+    """モータごとに違う軸位置を指令する唯一の口 (AxisSpec.to_commands_each)。
+
+    零点確定の整列段が使う。左右で違う値を送る経路なので、逆回転ペアの符号付き
+    scale がモータごとに正しく当たること自体が安全上の条件になる。
+    """
+
+    @staticmethod
+    def _spec() -> AxisSpec:
+        table = load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "unit": "mm",
+                        "motors": {
+                            "y_axis_r": {"scale": 55.0, "offset": 3.0},
+                            "y_axis_l": {"scale": -55.0, "offset": -3.0},
+                        },
+                    }
+                },
+                "positions": {"y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        return table.axis("y_axis")
+
+    def test_モータごとに違う値を換算する(self) -> None:
+        commands = self._spec().to_commands_each({"y_axis_r": 2.0, "y_axis_l": 5.0})
+
+        # 逆回転ペアなので向きは scale が持つ。整列段では左右へ違う軸位置を送る
+        # (揃った値を配る to_commands との違いはここにしかない)
+        assert commands["y_axis_r"] == pytest.approx(2.0 * 55.0 + 3.0)
+        assert commands["y_axis_l"] == pytest.approx(5.0 * -55.0 - 3.0)
+
+    def test_同じ値を渡せば_to_commands_と一致する(self) -> None:
+        spec = self._spec()
+
+        assert spec.to_commands_each({"y_axis_r": 4.0, "y_axis_l": 4.0}) == pytest.approx(
+            spec.to_commands(4.0)
+        )
+
+    def test_モータが不足していれば_KeyError(self) -> None:
+        """指令しなかったモータの目標は前の周期のまま残り、軸としては片側だけが動く。"""
+        with pytest.raises(KeyError, match="y_axis_l"):
+            self._spec().to_commands_each({"y_axis_r": 1.0})
+
+    def test_知らないモータ名があれば_KeyError(self) -> None:
+        with pytest.raises(KeyError, match="y_axis_x"):
+            self._spec().to_commands_each({"y_axis_r": 1.0, "y_axis_l": 1.0, "y_axis_x": 1.0})

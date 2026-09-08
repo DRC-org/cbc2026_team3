@@ -40,6 +40,15 @@ from dataclasses import dataclass
 
 __all__ = ["MotorSpec", "SyncGroup"]
 
+#: 目標値が「同じ軸位置から換算されたか」を見るときの許容幅 [人間の単位]。
+#: ``to_command`` → ``to_value`` の往復で乗る倍精度の丸め誤差 (1e-13 程度) だけを
+#: 吸収できればよい。**ずれ許容差 (``SyncGroup.tolerance``) を流用してはならない** ——
+#: あちらは機構が壊れる境界 (mm オーダー) で、ここが問うのは「同じ軸位置から換算された
+#: 目標か」という別の量である。流用すると、零点確定の整列段が作る意図的なずれ
+#: (最小でも ``homing.step`` = y_axis で 0.5mm) が「揃っている」と読まれ、
+#: 打ち消す向きの補正が出続けて整列そのものが成立しない。
+_TARGET_ALIGN_EPSILON = 1e-6
+
 
 @dataclass(frozen=True)
 class MotorSpec:
@@ -138,6 +147,35 @@ class SyncGroup:
         if deviation is None or deviation <= self.tolerance:
             return None
         return deviation
+
+    def targets_share_axis_value(self, targets: Mapping[str, float]) -> bool:
+        """メンバ全員の目標値が同じ軸位置を指しているか (引数は**指令単位**)。
+
+        同期補正 (``corrections``) が意味を持つ前提は 2 つあり、これはその 2 つ目
+        —— 「全員が同じ軸位置を目標にしている」。1 つ目 (全員が位置制御中) は
+        呼び出し側 (``M3508PositionLoop._open_loop_groups``) が見る。
+
+        零点確定の整列段のように**左右の目標を意図的にずらす**操作では、この前提が
+        崩れる。補正は「グループ平均へ引き戻す向き」なので、意図したずれをちょうど
+        打ち消しに掛かり、進めたい側は押し戻され保持したい側は前へ引きずられる。
+        しかも症状は「片側だけ動かしているのに軸ごと動いて、ずれが縮まらない」と
+        いう読みにくい形になる。
+
+        **逆回転ペアでは ``scale`` の符号が逆なので、指令値そのものの比較では
+        判定できない。** 必ず ``to_value`` で人間の単位へ戻してから比べる
+        (揃っているペアの指令値は符号が反転しており、素の比較では常に不一致になる)。
+
+        メンバが 1 台でも欠けていれば False。欠けた状態で「揃っている」と答えると、
+        目標を持たない相方が居る周期に補正が出る。
+        """
+        values = [
+            member.to_value(targets[member.name])
+            for member in self.members
+            if member.name in targets
+        ]
+        if len(values) != len(self.members) or not values:
+            return False
+        return max(values) - min(values) <= _TARGET_ALIGN_EPSILON
 
     def corrections(self, positions: Mapping[str, float]) -> dict[str, float]:
         """各メンバへ加える同期補正量を、そのメンバの**指令単位**で返す。
