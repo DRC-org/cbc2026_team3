@@ -319,6 +319,7 @@ export interface ManualAxis {
   value: number | null;
   target: number | null;
   manual: ManualRange | null;
+  manual_always: boolean;
   deviation: number | null;
   sync_tolerance: number | null;
   positions: ManualPosition[];

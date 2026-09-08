@@ -776,6 +776,11 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `manual_set` | 人間の単位の絶対値。`axes.<軸>.manual` を持つ軸のみ |
 | `manual_jog` | 直前の**手動目標**からの相対移動。同上 |
 
+3 つの入口は `RobotServer._manual_target` で軸を解決してからモードを見る。`sequence` モードの
+まま通せるのは `axes.<軸>.manual_always` を宣言した軸だけで、判定は `_allow_manual_in_sequence`
+（一覧は `ManualController.always_manual_axes()` → `PositionTable.manual_always_axes()`）。この経路は
+動作確認の実行中を拒否する。
+
 指令経路はシーケンスと同一（同じ `MotorGroup` を共有し `AxisHandle` を通すので、緊急停止
 インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの 3 層保護がそのまま効く）。
 **モータ単位の指令口を作らない**（UI にもモータ単位のジョグを出さない）。ジョグの起点は直前の
@@ -880,6 +885,7 @@ axes:                      # 換算: command = value * scale + offset
     command_unit: duty
     command_mode: duty     # position（既定）/ velocity / duty / on_off
     settle_s: 0.3          # 到達判定を持たない軸の指令後固定待ち [s]
+    manual_always: true    # sequence モードのままでも manual_move を受け付ける（duty / on_off のみ）
 
 positions:                 # 値は axes.<軸>.unit の単位で書く
   y_axis: { home: 0.0, work_1: 120.0, work_shared: 650.0 }
@@ -897,6 +903,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | モータ 1 台の軸に `sync_tolerance` | 防護が効いていないことに気付けない |
 | `sync_kp` があって `sync_limit` が無い / `motion` の 2 値の片方だけ | 押し合いの歯止めが無い / 軌道が決まらない（[invariants.md](invariants.md)「保護は止めるだけ…」） |
 | `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` | 可動範囲・軌道・原点という概念が無い |
+| `duty` / `on_off` 以外の軸に `manual_always: true` | シーケンスの到達待ちを手動が上書きできてしまう |
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
 
@@ -1038,6 +1045,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
       "value": 12.3,                     // フィードバックの逆換算。位置を測れない軸は null
       "target": 12.0,                    // 直前の手動目標。一度も送っていなければ null
       "manual": { "min": 0.0, "max": 650.0, "steps": [1.0, 10.0, 100.0] },  // 不可なら null
+      "manual_always": false,            // sequence モードのままでも manual_move を受け付ける軸か
       "deviation": 0.32,                 // SyncGroup.deviation() をそのまま配る。0.0 は正常値
       "sync_tolerance": 10.0,            // UI にフォールバック値を持たせないため一緒に配る
       "positions": ["home", "work_1", "work_shared"],

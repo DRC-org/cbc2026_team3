@@ -79,6 +79,14 @@ class ManualController:
         self._targets[spec.name] = value
         return value
 
+    def is_always_manual(self, axis: str) -> bool:
+        # 未定義の軸は ManualControlError のまま返す。サーバーがモードの理由で覆い隠すと、
+        # 軸名の打ち間違いが「切り替えても直らない拒否」に見える
+        return self._axis(axis).manual_always
+
+    def always_manual_axes(self) -> tuple[str, ...]:
+        return self._positions.manual_always_axes()
+
     def observed_value(self, axis: str) -> float:
         spec = self._axis(axis)
         return spec.to_value(self._feedback_positions(spec))
@@ -95,6 +103,7 @@ class ManualController:
                     "value": self._safe_observed_value(spec),
                     "target": self._targets.get(name),
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
+                    "manual_always": spec.manual_always,
                     "deviation": self._safe_deviation(spec),
                     "sync_tolerance": spec.sync_tolerance,
                     "positions": self._position_entries(name),

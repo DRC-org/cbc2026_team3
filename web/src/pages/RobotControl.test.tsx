@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type {
+  ManualAxis,
   ManualState,
   MatchPhase,
   MatchState,
@@ -393,6 +394,7 @@ const MANUAL: ManualState = {
       value: 3,
       target: null,
       manual: { min: -5, max: 30, steps: [1, 5] },
+      manual_always: false,
       deviation: 0.1,
       sync_tolerance: 1.0,
       positions: [
@@ -498,6 +500,52 @@ describe("手動操縦モード", () => {
     mountManual("match");
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+  });
+});
+
+const ALWAYS_MANUAL_AXIS: ManualAxis = {
+  name: "conveyor",
+  unit: "duty",
+  command_mode: "duty",
+  value: null,
+  target: null,
+  manual: null,
+  manual_always: true,
+  deviation: null,
+  sync_tolerance: null,
+  positions: [
+    { name: "stop", value: 0 },
+    { name: "run", value: 0.3 },
+  ],
+  motors: ["conveyor"],
+};
+
+const SEQUENCE_WITH_ALWAYS: ManualState = {
+  mode: "sequence",
+  axes: [...MANUAL.axes, ALWAYS_MANUAL_AXIS],
+};
+
+describe("常時操作パネル", () => {
+  it("試合中の半自動に出す", () => {
+    mount("match", robotState({ manual: SEQUENCE_WITH_ALWAYS }));
+
+    expect(screen.getByText("常時操作")).toBeInTheDocument();
+    expect(screen.getByLabelText("conveyor を stop へ")).toBeEnabled();
+    expect(screen.queryByLabelText("rotate を home へ")).toBeNull();
+  });
+
+  it("準備中には出さない", () => {
+    mount("setup", robotState({ manual: SEQUENCE_WITH_ALWAYS }));
+
+    expect(screen.queryByText("常時操作")).toBeNull();
+    expect(screen.queryByLabelText("conveyor を stop へ")).toBeNull();
+  });
+
+  it("手動モード中には出さない (手動パネルが同じ軸を出す)", () => {
+    mountManual("match", {}, { ...SEQUENCE_WITH_ALWAYS, mode: "manual" });
+
+    expect(screen.queryByText("常時操作")).toBeNull();
+    expect(screen.getAllByLabelText("conveyor を stop へ")).toHaveLength(1);
   });
 });
 
