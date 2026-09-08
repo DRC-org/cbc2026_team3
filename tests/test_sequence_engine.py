@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
 from lib.sequence.engine import AxisSyncError, Sequence, StepInfo, step
@@ -402,3 +403,91 @@ class TestLifecycle:
         seq.request_stop()
         await task
         assert seq.is_running is False
+
+
+class TestStepLog:
+    """ステップ進行の journal 記録。
+
+    **記録はエンジンの 1 箇所だけが持つ。** 各ステップ本体に `logger.info` を
+    書き写していた頃は `@step` のラベルと同じ文字列が 2 箇所にあり、ラベルを
+    直すとログだけが古くなった。ここで固定するのは書式そのものではなく、
+    「シーケンス名・番号・総数・ラベルの 4 つが揃うこと」と
+    「出るタイミング (トリガー待ちの後)」の 2 つ。
+    """
+
+    @staticmethod
+    def _step_lines(caplog) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "lib.sequence.engine" and "完走" not in r.getMessage()
+        ]
+
+    async def test_ステップごとに1行出る(self, caplog):
+        seq = SampleSequence()
+
+        with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):
+            async with _auto_trigger(seq):
+                await seq.run()
+
+        lines = self._step_lines(caplog)
+        assert len(lines) == 3
+        # シーケンス名・番号・総数・ラベルの 4 つが揃っていること
+        assert lines[0] == "[sample] 1/3 ステップ1"
+        assert lines[1] == "[sample] 2/3 ステップ2"
+        assert lines[2] == "[sample] 3/3 ステップ3"
+
+    async def test_トリガー待ちの間はまだ出ない(self, caplog):
+        """待つ前に出すと、許可待ちで止まっている間ずっと実行中に見える。
+
+        journal の並びが実際の実行順と食い違うので、後から追うときに
+        「どこで止まったか」を読み違える。
+        """
+        seq = SampleSequence()
+
+        with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):
+            task = asyncio.create_task(seq.run())
+            await asyncio.sleep(0.05)
+
+            assert seq.waiting_trigger is True
+            # step1 の 1 行だけ。トリガー待ちの step2 はまだ出ていない
+            assert self._step_lines(caplog) == ["[sample] 1/3 ステップ1"]
+
+            seq.trigger()
+            await asyncio.sleep(0.05)
+
+            assert self._step_lines(caplog)[1] == "[sample] 2/3 ステップ2"
+            task.cancel()
+
+    async def test_完走で1行出る(self, caplog):
+        seq = SampleSequence()
+
+        with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):
+            async with _auto_trigger(seq):
+                await seq.run()
+
+        completed = [r.getMessage() for r in caplog.records if "完走" in r.getMessage()]
+        assert completed == ["[sample] 完走 (3 ステップ)"]
+
+    async def test_途中で停止したら完走の行は出ない(self, caplog):
+        """通常停止は lib/server.py が別に記録している。ここで書くと二重になり、
+        しかも「完走した」という嘘になる。"""
+        seq = SampleSequence()
+
+        with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):
+            task = asyncio.create_task(seq.run())
+            await asyncio.sleep(0.05)
+            seq.request_stop()
+            await task
+
+        assert seq.executed == ["step1"]
+        assert [r.getMessage() for r in caplog.records if "完走" in r.getMessage()] == []
+
+    async def test_失敗したら完走の行は出ない(self, caplog):
+        seq = FailingSequence()
+
+        with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):
+            await seq.run()
+
+        assert seq.last_error is not None
+        assert [r.getMessage() for r in caplog.records if "完走" in r.getMessage()] == []

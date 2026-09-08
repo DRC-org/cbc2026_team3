@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import struct
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import can
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.axis_sync import MotorSpec, SyncGroup
@@ -977,6 +979,35 @@ class TestEStopDropsRefreshTargets:
         await fx.activate_e_stop()
 
         assert handle.has_target is False
+
+
+class TestEStopCompletionLogIsOneLine:
+    """締めの 1 行はロボットの数に依らず 1 行で、しかも「試行」と名乗ること。
+
+    緊急停止は最も切迫した局面で押される。そこで台数ぶんの行が流れると、
+    **直前の `logger.exception` (どのバスへ送れなかったか) が押し流される** ——
+    この行が言えるのは「全機ぶん流し終えた」の 1 事実だけなので、繰り返す価値が
+    無いばかりか、繰り返すこと自体が読みたい行を隠す。
+
+    同時に「試行」も落とせない。ループは送信失敗を握ったまま先へ進むので、
+    **1 通も届いていなくてもこの行は出る。** 「完了」と書くと緊急停止が実際に
+    効いたと読めてしまい、緊急停止のログは読み手が最も強く事実として受け取る。
+    """
+
+    async def test_2台でも締めの行は1行で全機の名前を載せる(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        fx = _build_fixture()  # main_hand / sub_hand の 2 台
+
+        with caplog.at_level(logging.INFO, logger="lib.server"):
+            await fx.activate_e_stop()
+
+        lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("E-STOP 送信")]
+        assert len(lines) == 1
+        # 送れたことではなく送ろうとしたことしか言えない
+        assert lines[0].startswith("E-STOP 送信試行完了: ")
+        assert "main_hand" in lines[0]
+        assert "sub_hand" in lines[0]
 
 
 class TestSafetyStateBroadcast:

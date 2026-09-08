@@ -1277,7 +1277,14 @@ class RobotServer:
             # 目標を残すと、解除した瞬間に再送が走って操縦者の操作なしに動き出す
             for refresher in ctx.target_refreshers:
                 refresher.clear_targets()
-            logger.info("E-STOP 送信試行完了: %s", name)
+        # ループの後に 1 行だけ。ロボットの数だけ並べても読み手が得るのは
+        # 「全機ぶん流し終えた」の 1 事実で、どれが失敗したかは上の
+        # `logger.exception` がロボット・バス単位で既に言っている。
+        # **「試行」を落としてはならない** —— このループは送信失敗を握ったまま
+        # 先へ進むので、1 通も届いていなくてもこの行は出る。「完了」と書くと
+        # 緊急停止が実際に効いたと読めてしまう (緊急停止のログは、読み手が
+        # 最も強く事実として受け取る行である)
+        logger.info("E-STOP 送信試行完了: %s", ", ".join(self._robots) or "対象なし")
 
     async def _send_e_stop_clear_broadcast(self) -> None:
         """全バスへブロードキャストの緊急停止解除フレームを送る。
@@ -2306,11 +2313,21 @@ class RobotServer:
 
     async def start(self) -> None:
         app = self.create_app()
-        runner = web.AppRunner(app)
+        # アクセスログは出さない。**SPA を配るので 1 リロードで数十行出る**うえ、
+        # HTTP が通ったかどうかは UI の接続表示に出るのでログで追う価値がない。
+        # 残すと、本当に読みたい CAN・シーケンスのログがそれに押し流される
+        runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self._host, self._port)
         await site.start()
-        logger.info("サーバー起動: http://%s:%d", self._host, self._port)
+        # dry-run はここでしか名乗らない。会場で「繋がるのに機体が動かない」を
+        # 切り分ける最初の 1 行になる (擬似値が出るので画面からは判別できない)
+        logger.info(
+            "サーバー起動: http://%s:%d%s",
+            self._host,
+            self._port,
+            " (dry-run)" if self._dry_run else "",
+        )
 
         try:
             await asyncio.Event().wait()

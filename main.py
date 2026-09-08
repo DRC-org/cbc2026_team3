@@ -20,6 +20,7 @@ import yaml
 from lib.axis_sync import SyncGroup
 from lib.can_manager import CANManager
 from lib.config_schema import (
+    HealthThresholds,
     MotorConfig,
     RobotConfig,
     SystemConfig,
@@ -41,6 +42,7 @@ from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
+from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
@@ -129,6 +131,13 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=8080,
         help="サーバーポート (デフォルト: 8080)",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str.lower,
+        choices=("debug", "info", "warning", "error"),
+        default="info",
+        help="ログの出力レベル (デフォルト: info)",
     )
     return parser.parse_args()
 
@@ -456,7 +465,7 @@ def _wire_motor_check_sequence(
         len(sequence.excluded_steps),
         len(motors),
         len(merged.axes),
-        homing_axes or "なし",
+        ", ".join(homing_axes) or "なし",
     )
 
 
@@ -915,6 +924,7 @@ def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionL
         if motion is None:
             continue
 
+        attached: list[str] = []
         for motor in spec.motors:
             loop = next(
                 (candidate for candidate in loops if motor.name in candidate.motor_names), None
@@ -936,21 +946,27 @@ def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionL
                 ),
                 velocity_ff=motion.velocity_ff,
             )
-            # velocity_ff も必ず出す。実行中に変更できず UI にも配信されないので、
-            # **起動ログが「今どの値で動いているか」を知る唯一の経路**である。
-            # かつ巡航中の出力を最も大きく左右する (kd と釣り合っていないと
-            # D 項が出力を食い潰す) 値なので、落とすと画面からもログからも読めない
-            logger.info(
-                "台形プロファイル: %s (軸 %s) に v<=%.1f %s/s, a<=%.1f %s/s^2, "
-                "velocity_ff=%g を設定",
-                motor.name,
-                axis_name,
-                motion.max_velocity,
-                spec.unit,
-                motion.max_acceleration,
-                spec.unit,
-                motion.velocity_ff,
-            )
+            attached.append(motor.name)
+
+        if not attached:
+            continue
+        # **軸ごとに 1 行**へ畳む。制限値は軸が持つ 1 組なので、左右直結ペアでは
+        # 同じ 3 値がモータの数だけ並ぶだけになる (適用先を知る手掛かりは
+        # モータ名だけなので、名前の列挙はここに残す)。
+        # velocity_ff も必ず出す。実行中に変更できず UI にも配信されないので、
+        # **起動ログが「今どの値で動いているか」を知る唯一の経路**である。
+        # かつ巡航中の出力を最も大きく左右する (kd と釣り合っていないと
+        # D 項が出力を食い潰す) 値なので、落とすと画面からもログからも読めない
+        logger.info(
+            "台形プロファイル: %s (%s) v<=%.1f %s/s, a<=%.1f %s/s^2, velocity_ff=%g",
+            axis_name,
+            ", ".join(attached),
+            motion.max_velocity,
+            spec.unit,
+            motion.max_acceleration,
+            spec.unit,
+            motion.velocity_ff,
+        )
 
 
 def _make_sync_violation_handler(
@@ -1188,16 +1204,26 @@ def _wire_one_robot(
         target_refreshers=refreshers,
         manual=manual,
     )
+    # INFO は要約だけ。名前を全部並べると 1 行が 300 桁を超えて端末で折り返し、
+    # 起動ログ全体が読めなくなる。**同期監視の対象名だけは残す** —— 左右ペアの
+    # 保護が実際に何に掛かったかは、機構を壊す前に起動時点で確かめたい
     logger.info(
-        "ロボット登録: %s (モータ: %d 台, 位置制御ループ: %s, 位置定数軸: %s, "
-        "同期監視: %s, 目標値再送: %s, 手動連続操作: %s)",
+        "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s)",
         robot_name,
         len(motors),
-        [loop.bus_name for loop in loops] or "なし",
-        list(positions.axes) or "なし",
-        [group.name for group in sync_groups] or "なし",
-        [name for r in refreshers for name in r.motor_names] or "なし",
-        list(positions.manual_axes()) or "なし",
+        len(positions.axes),
+        ", ".join(loop.bus_name for loop in loops) or "なし",
+        ", ".join(group.name for group in sync_groups) or "なし",
+    )
+    # 名前の一覧は DEBUG。平常時は要約で足り、食い違いを疑ったときだけ
+    # `--log-level debug` で読めればよい (config を読むより速い、という以上の
+    # 役割は持たない情報である)
+    logger.debug(
+        "ロボット登録 %s の内訳: 位置定数軸 %s / 目標値再送 %s / 手動連続操作 %s",
+        robot_name,
+        ", ".join(positions.axes) or "なし",
+        ", ".join(name for r in refreshers for name in r.motor_names) or "なし",
+        ", ".join(positions.manual_axes()) or "なし",
     )
 
     return _RobotWiring(
@@ -1300,6 +1326,46 @@ async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> Non
     logger.info("後始末完了")
 
 
+def _format_number(value: float) -> str:
+    """整数で表せる値から小数点以下を落とす (`180.0 秒` → `180 秒`)。
+
+    config は小数で書けるが実際に入るのはほぼ整数なので、`%s` のまま出すと
+    起動ログの数値が軒並み `.0` 付きになり、読み手が桁を数え直すことになる。
+    """
+    return f"{value:g}"
+
+
+def _describe_thresholds(health: HealthThresholds) -> str:
+    """ヘルスしきい値を人が読める 1 行へ畳む。
+
+    dataclass の repr はフィールド名を全部並べて 100 桁を超えるため、確認したい
+    4 つの数値が名前に埋もれる。起動ログは試合前点検で目視する対象なので、
+    値そのものが読める形にする。
+    """
+    return (
+        f"途絶 {_format_number(health.feedback_timeout_ms)}ms"
+        f" / 温度 警告 {_format_number(health.temp_warning_c)}℃"
+        f" 異常 {_format_number(health.temp_critical_c)}℃"
+        f" / TX エラー {health.tx_error_threshold}"
+    )
+
+
+def _describe_checklist(definitions: Mapping[str, list[ChecklistItem]]) -> str:
+    """指差喚呼の件数を 1 行へ。ロールが 1 つなら件数だけを出す。
+
+    現行はロール 1 つ (`pre_match`) に統合済みで、辞書のまま出すと
+    `{'pre_match': 27}` という Python の内部表現が起動ログに残る。ロールは
+    増えうる (WS 契約の形を保つため辞書のまま運んでいる) ので、複数あるときは
+    ロール名と件数を並べる。
+    """
+    if not definitions:
+        # yaml が無い構成 (ベンチ) はここへ来る。空文字を出すと行が尻切れになる
+        return "なし"
+    if len(definitions) == 1:
+        return f"{len(next(iter(definitions.values())))} 項目"
+    return ", ".join(f"{role} {len(items)} 項目" for role, items in definitions.items())
+
+
 def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer:
     """CLI 引数と共通設定からサーバーを 1 台建てる (ロボットはまだ登録しない)。"""
     # CLI 引数が優先。どちらか一方でも立っていれば解禁する
@@ -1312,10 +1378,7 @@ def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer
         pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
     )
     checklist_definitions = _load_checklist_definitions(checklist_path)
-    logger.info(
-        "チェックリスト項目数: %s",
-        {role: len(items) for role, items in checklist_definitions.items()},
-    )
+    logger.info("指差喚呼: %s", _describe_checklist(checklist_definitions))
 
     return RobotServer(
         host=args.host,
@@ -1330,15 +1393,13 @@ def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer
 
 async def main() -> None:
     """読む → 配線する → 起動する → 畳む。"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    # --log-level を 1 行目から効かせるため、ログ設定より先に引数を読む
+    # (引数解析自体はログを出さないので、ここを前へ出しても失われる行は無い)
+    args = _parse_args()
+    configure_logging(args.log_level)
 
     # CAN を開くより前に登録する。config 読み込み中に停止されても経路を揃えるため
     _install_stop_signal_handler()
-
-    args = _parse_args()
 
     if args.config:
         config_paths = [pathlib.Path(p) for p in args.config]
@@ -1349,9 +1410,9 @@ async def main() -> None:
     # 1 パス目: yaml をすべて読み込んで検証する。RobotServer 生成時にしきい値を渡す
     # 必要があるため、ロボット登録より先に全 config を確定させる。
     system, loaded = _load_all_configs(system_path, config_paths)
-    logger.info("health しきい値: %s", system.health)
+    logger.info("しきい値: %s", _describe_thresholds(system.health))
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
-    logger.info("試合時間: %s 秒", system.match.duration_s)
+    logger.info("試合時間: %s 秒", _format_number(system.match.duration_s))
 
     # **CAN を開くより前に bind の可否を見る。** ポートが埋まっているときに
     # 機体を励磁してから落ちる経路を作らない (会場での二重起動)
@@ -1404,7 +1465,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
+    # Ctrl-C では 1 行も出さない。直前に `_shutdown_all` の「後始末完了」が必ず
+    # 出ており、ここで足すと同じ事実 (畳み終わった) が 2 行になる。あちらには
+    # 「後始末が完走した証跡」という固有の役割 (無ければ TimeoutStopSec 超過の
+    # SIGKILL と判別できる) があるので、重複を消すならこちらである
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("終了")

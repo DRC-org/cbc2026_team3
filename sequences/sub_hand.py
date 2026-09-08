@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import logging
-
 from lib.sequence.engine import Sequence, step
-
-logger = logging.getLogger(__name__)
 
 #: 吸着パッドの電磁弁。config/sub_hand_positions.yaml の axes と 1:1 で対応する。
 #: 数値ではなく軸名の一覧なので sequences/ に置いてよい (値・待ち時間は yaml が持つ)。
@@ -52,7 +48,6 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ移動")
     async def move_to_home(self) -> None:
-        logger.info("[sub_hand] 初期位置へ移動")
         # **弁を閉じてから吸気ポンプを回す。** 逆にすると、前のサイクルで開いたままの
         # 弁からいきなり吸引が始まり、置いたばかりのワークを吸い直す
         await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
@@ -61,19 +56,16 @@ class SubHandSequence(Sequence):
 
     @step("補助ハンド展開", require_trigger=True)
     async def extend_sub_arm(self) -> None:
-        logger.info("[sub_hand] 補助ハンド展開")
         await self.move_to({"sub_arm_joint": "extended"})
 
     @step("ワーク受け取り位置へ")
     async def move_to_handoff(self) -> None:
-        logger.info("[sub_hand] ワーク受け取り位置へ")
         await self.move_to({"sub_arm_joint": "handoff"})
 
     # メインハンドと機構同士が向かい合う唯一の動作。ずれたまま閉じると両機構が衝突するため、
     # 操縦者の目視確認で止める
     @step("ハンド閉じる (受け取り)", require_trigger=True)
     async def grip_handoff(self) -> None:
-        logger.info("[sub_hand] ハンド閉じる")
         await self.move_to({"sub_gripper": "closed"})
 
     # **吸着したかどうかは PC からは分からない** (基板に圧力センサもリミットスイッチも無く、
@@ -81,18 +73,15 @@ class SubHandSequence(Sequence):
     # 実際に吸い付いたかは操縦者が目視で確かめる必要がある。トリガーを置くのはそのため
     @step("ワーク吸着", require_trigger=True)
     async def grip_by_suction(self) -> None:
-        logger.info("[sub_hand] ワーク吸着")
         await self.move_to(_all_valves("open"))
 
     @step("配置位置へ移動", require_trigger=True)
     async def move_to_place(self) -> None:
-        logger.info("[sub_hand] 配置位置へ移動")
         await self.move_to({"sub_arm_joint": "place"})
 
     # リリースはやり直しが利かないので、配置位置到達を目視で確認させる
     @step("ワーク解放 (配置)", require_trigger=True)
     async def release_at_place(self) -> None:
-        logger.info("[sub_hand] ワーク解放")
         # **吸気ポンプは止めず、弁だけを閉じる。** ポンプを止めて解放しようとすると、
         # 配管に残った負圧が抜けるまでワークが張り付いたままになり、しかも次の
         # サイクルでポンプの立ち上がりを待つことになる
@@ -105,7 +94,6 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
-        logger.info("[sub_hand] 初期位置へ復帰")
         # 吸気ポンプはここでも止めない (次のサイクルで立ち上がりを待たないため)。
         # 試合が終わったら操縦者が手動操縦で pump_vac に stop を送る
         await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
