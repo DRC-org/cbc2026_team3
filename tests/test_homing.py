@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import pytest
 
@@ -21,6 +22,10 @@ from lib.sequence.motors import AxisHandle, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
+
+#: `_handle` が受け付ける指令の上限。実機のどの経路でもこの回数は踏まない
+#: (最長でも探索距離 / step = 30 歩程度) ので、超えたら歯止めが 1 つも効いていない。
+_COMMAND_FUSE = 200
 
 
 def _table(**homing_overrides: object):
@@ -91,10 +96,44 @@ def _rotate_table():
     )
 
 
-class _Recorder:
-    """指令と原点確定を記録する。
+def _paired_table(**homing_overrides: object):
+    """**左右にスイッチが 1 本ずつ付く軸** (実機の y_axis)。
 
-    センサの模し方は 4 通りある:
+    `homing.sensors` を書いた軸だけが整列段を持つ。単数形 (`_table`) との違いは
+    センサの書き方と `align_distance` だけで、機構 (逆回転ペア) は同じにしてある
+    —— 整列段の有無だけが変数になるようにするため。
+    """
+    homing: dict = {
+        "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
+        "direction": -1,
+        "search_distance": 30.0,
+        "step": 1.0,
+        "settle_s": 0.0,
+        "align_distance": 5.0,
+    }
+    homing.update(homing_overrides)
+    return load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "tolerance": 0.1,
+                    "sync_tolerance": 100.0,
+                    "homing": homing,
+                    "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        },
+        source="<test>",
+    )
+
+
+class _SensorModel:
+    """1 本のスイッチ。**現在値とラッチを別々に模す。**
+
+    模し方は 4 通りある:
 
     - ``active_after`` — 指定回数目の観測で ON になる。歩数だけを見るテスト向け
     - ``active_at_or_below`` — **実測位置が境界以下なら ON。** リミットスイッチの
@@ -112,29 +151,23 @@ class _Recorder:
     探索と離脱が別のものを見るという設計を固定するため。位置モデルではラッチを
     「**前回読んだ位置から今の位置までの経路**が ON 区間と交わったか」として作る ——
     センサの FEEDBACK は 100Hz で届くので、そのあいだに通り抜けた区間は落ちない。
+
+    ``motor`` を書いたスイッチは**そのモータ単独の実測位置**を見る (左右に 1 本ずつ
+    付く軸のモデル)。書かなければ従来どおり軸位置 (平均) を見る。左右で別々の位置に
+    反応することそのものが整列段の前提なので、平均で見るモデルでは整列段を模せない。
     """
 
     def __init__(
         self,
         *,
+        motor: str | None = None,
         active_after: int | None = None,
         active_at_or_below: float | None = None,
         active_band: tuple[float, float] | None = None,
         chatter: bool = False,
         prelatched: bool = False,
-        stale: bool = False,
-        motor_stale: bool = False,
-        capturable: bool = True,
     ) -> None:
-        self.commands: list[dict[str, float]] = []
-        self.origins: list[str] = []
-        #: 原点を確定した瞬間の実測位置 [軸の unit]。確定位置そのものを見るために要る
-        self.captured_at: list[float] = []
-        #: `_handle` が組んだモータ名 → ドライバ (実測位置の差し替え口)
-        self.drivers: dict[str, StubFeedbackDriver] = {}
-        #: `_handle` が組んだ軸。逆換算をテストへ書き写さないために持つ
-        self.spec: AxisSpec | None = None
-        self.sleeps = 0
+        self.motor = motor
         self._active_after = active_after
         self._active_at_or_below = active_at_or_below
         self._active_band = active_band
@@ -150,25 +183,17 @@ class _Recorder:
         #: 零点確定を始める前から溜まっているラッチ (手動操縦でスイッチを跨いだ、
         #: 前回の零点確定で触れた、など)。1 回読めば消える
         self._prelatched = prelatched
-        self._stale = stale
-        self._motor_stale = motor_stale
-        self._capturable = capturable
-
-    def axis_position(self) -> float:
-        """実測の軸位置。逆換算は `AxisSpec` に委ねる (scale をテストへ書き写さない)。"""
-        assert self.spec is not None
-        return self.spec.to_value(
-            {name: driver.feedback_position() for name, driver in self.drivers.items()}
-        )
+        #: 見ている位置を返す口 (`_Recorder` が軸位置かモータ単独の位置を差す)
+        self.position: Callable[[], float] = lambda: 0.0
 
     def _extend_path(self) -> tuple[float, float]:
         """今の実測位置をラッチの窓へ加える (100Hz の FEEDBACK に相当)。"""
-        current = self.axis_position() if self.drivers else 0.0
+        current = self.position()
         low, high = self._path if self._path is not None else (current, current)
         self._path = (min(low, current), max(high, current))
         return self._path
 
-    def sensor_active(self, _name: str) -> bool:
+    def active(self) -> bool:
         """**今**接触しているか。離脱の判定と「既に触れているか」がこれを見る。"""
         self._observations += 1
         self._extend_path()
@@ -176,14 +201,14 @@ class _Recorder:
             return True  # まだ ON 区間の中にいる
         if self._active_band is not None:
             low, high = self._active_band
-            return low <= self.axis_position() <= high
+            return low <= self.position() <= high
         if self._active_at_or_below is not None:
-            return self.axis_position() <= self._active_at_or_below
+            return self.position() <= self._active_at_or_below
         if self._active_after is None:
             return False
         return self._observations > self._active_after
 
-    def sensor_latched(self, _name: str) -> bool:
+    def latched(self) -> bool:
         """前回読んでから一度でも接触したか。**読むと消える。** 探索だけが見る。
 
         位置モデルでは前回読んでから通った**経路**が ON 区間と交わったかを答える
@@ -194,7 +219,7 @@ class _Recorder:
         low, high = self._extend_path()
         # 読んだら消える。次の窓は**この位置から**始まる (センサは動き続ける機構を
         # 100Hz で見ているので、読み取りと読み取りのあいだに経路は途切れない)
-        current = self.axis_position() if self.drivers else 0.0
+        current = self.position()
         self._path = (current, current)
         if self._prelatched:
             self._prelatched = False
@@ -211,8 +236,91 @@ class _Recorder:
             return False
         return self._observations > self._active_after
 
-    def sensor_is_stale(self, _name: str) -> bool:
-        return self._stale
+
+class _Recorder:
+    """指令と原点確定を記録する。
+
+    センサは既定では**名前を無視する 1 本**として振る舞う (単数形の軸のモデル)。
+    ``sensors`` を渡すと**センサ名ごとに独立したモデル**になり、左右に 1 本ずつ
+    付く軸を模せる。ラッチが「読むと消える」ことも名前ごとに独立するので、
+    「A のラッチを読んだ瞬間に B の接触が捨てられる」実装がここで露見する。
+    """
+
+    def __init__(
+        self,
+        *,
+        sensors: dict[str, _SensorModel] | None = None,
+        active_after: int | None = None,
+        active_at_or_below: float | None = None,
+        active_band: tuple[float, float] | None = None,
+        chatter: bool = False,
+        prelatched: bool = False,
+        stale: bool = False,
+        stale_sensors: tuple[str, ...] = (),
+        motor_stale: bool = False,
+        capturable: bool = True,
+    ) -> None:
+        self.commands: list[dict[str, float]] = []
+        self.origins: list[str] = []
+        #: 原点を確定した瞬間の実測位置 [軸の unit]。確定位置そのものを見るために要る
+        self.captured_at: list[float] = []
+        #: 原点を確定した瞬間のモータ単独の実測位置。左右のどちらで確定したかを見る
+        self.captured_each: list[dict[str, float]] = []
+        #: `_handle` が組んだモータ名 → ドライバ (実測位置の差し替え口)
+        self.drivers: dict[str, StubFeedbackDriver] = {}
+        #: `_handle` が組んだ軸。逆換算をテストへ書き写さないために持つ
+        self.spec: AxisSpec | None = None
+        self.sleeps = 0
+        self._default = _SensorModel(
+            active_after=active_after,
+            active_at_or_below=active_at_or_below,
+            active_band=active_band,
+            chatter=chatter,
+            prelatched=prelatched,
+        )
+        self._sensors = sensors
+        for model in (self._default, *(sensors or {}).values()):
+            model.position = self._position_of(model)
+        self._stale = stale
+        self._stale_sensors = stale_sensors
+        self._motor_stale = motor_stale
+        self._capturable = capturable
+
+    def _position_of(self, model: _SensorModel) -> Callable[[], float]:
+        return (
+            self.axis_position if model.motor is None else lambda: self.motor_position(model.motor)
+        )
+
+    def _sensor(self, name: str) -> _SensorModel:
+        if self._sensors is None:
+            return self._default
+        return self._sensors[name]
+
+    def axis_position(self) -> float:
+        """実測の軸位置。逆換算は `AxisSpec` に委ねる (scale をテストへ書き写さない)。"""
+        if not self.drivers:
+            return 0.0
+        assert self.spec is not None
+        return self.spec.to_value(
+            {name: driver.feedback_position() for name, driver in self.drivers.items()}
+        )
+
+    def motor_position(self, motor: str | None) -> float:
+        """そのモータ**単独**の実測位置 [軸の unit]。整列段のモデルが見る。"""
+        if not self.drivers or motor is None:
+            return 0.0
+        assert self.spec is not None
+        spec = next(m for m in self.spec.motors if m.name == motor)
+        return spec.to_value(self.drivers[motor].feedback_position())
+
+    def sensor_active(self, name: str) -> bool:
+        return self._sensor(name).active()
+
+    def sensor_latched(self, name: str) -> bool:
+        return self._sensor(name).latched()
+
+    def sensor_is_stale(self, name: str) -> bool:
+        return self._stale or name in self._stale_sensors
 
     def motor_is_stale(self, _name: str) -> bool:
         return self._motor_stale
@@ -225,6 +333,7 @@ class _Recorder:
         self.origins.append(axis)
         if self.drivers:
             self.captured_at.append(self.axis_position())
+            self.captured_each.append({motor: self.motor_position(motor) for motor in self.drivers})
 
     async def sleep(self, _seconds: float) -> None:
         self.sleeps += 1
@@ -235,7 +344,7 @@ def _handle(
     recorder: _Recorder,
     *,
     start_value: float = 0.0,
-    follows: bool = True,
+    follows: bool | Callable[[], bool] = True,
 ) -> AxisHandle:
     """実測位置を持つ軸ハンドル。
 
@@ -243,6 +352,16 @@ def _handle(
     False は引っかかって 1mm も動かない機構で、**指令の積算ではなく実測で
     数えているか**を見るために要る (積算で数える実装では、動いていないのに
     探索距離を使い切って「到達しませんでした」で降りてしまう)。
+
+    呼び出し可能なものを渡すと**指令のたびに追従の可否を問い直す** —— 探索は
+    正常に終わるのに整列段だけが動かない機構 (遊びが無く片側駆動が成立しない機構)
+    を模すために要る。
+
+    指令が `_COMMAND_FUSE` 通を超えたらその場で落とす。歯止め (探索距離・整列段の
+    移動量上限・停滞判定) を 1 つ外すと、追従する機構は**永久に動き続ける** ——
+    それは実機で機構端まで走ることそのものだが、テストとしては無限ループになって
+    落ちない。**歯止めを外したことが「テストが固まる」ではなく「落ちる」形で出る
+    ようにする。**
     """
     mgr = mock_can_manager()
     drivers = {}
@@ -258,7 +377,10 @@ def _handle(
 
     async def _record(commands):
         recorder.commands.append(dict(commands))
-        if follows:
+        assert len(recorder.commands) <= _COMMAND_FUSE, (
+            f"指令が {_COMMAND_FUSE} 通を超えました (どの歯止めも効いていません)"
+        )
+        if follows() if callable(follows) else follows:
             for name, value in commands.items():
                 drivers[name].set_observed(position=value)
         return await original(commands)
@@ -303,6 +425,13 @@ def _slow_handle(
 
     recorder.sleep = _advance  # type: ignore[method-assign]
     return handle
+
+
+def _axis_commands(recorder: _Recorder, motor: str) -> list[float]:
+    """そのモータへ送った指令を軸の単位へ戻した列 (逆換算は `MotorSpec` に委ねる)。"""
+    assert recorder.spec is not None
+    spec = next(m for m in recorder.spec.motors if m.name == motor)
+    return [spec.to_value(cmd[motor]) for cmd in recorder.commands]
 
 
 def _runner(recorder: _Recorder) -> HomingRunner:
@@ -742,6 +871,196 @@ class TestReleasesBeforeSeeking:
 
         # 上限は step の定数倍。search_distance (500) ぶん動いてはいない
         assert len(rec.commands) < 30
+
+
+class TestAlignsBothSwitches:
+    """**左右にスイッチが 1 本ずつ付く軸は「両方が押された姿勢」を原点にする。**
+
+    機構には遊びがあるので左右のわずかなずれは物理的に存在する。片方が当たった
+    瞬間の姿勢をそのまま原点にすると、そのずれが原点のずれとして焼き付く。
+    整列段は**押されていない側のモータだけ**を進めてその姿勢を作る。
+
+    指令は常に軸単位で 1 回だけ出す (左右が別々の時刻に動くとその場で機構が壊れる)
+    ので、進めない側にも必ず**保持値**が載る。保持値は「ラッチを検出した時点の
+    実測位置」で固定で、**毎歩実測へ張り直してはならない** —— 理由は
+    `test_保持側は引きずられても指令を書き換えない` にある。
+    """
+
+    @staticmethod
+    def _sensors(right: float, left: float) -> dict[str, _SensorModel]:
+        """左右のスイッチ。それぞれ**そのモータ単独**の位置で ON になる。"""
+        return {
+            "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=right),
+            "sensor_l": _SensorModel(motor="y_axis_l", active_at_or_below=left),
+        }
+
+    async def test_同時に押される機構では整列段が一歩も指令を出さない(self) -> None:
+        """遊びが無く左右が完全に揃っている機構では、探索で両方が同時にラッチする。"""
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-1.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        # 探索の 1 歩と、検出位置への止め直しの 2 通だけ (整列段は 1 通も足さない)
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0])
+        assert rec.origins == ["y_axis"]
+
+    async def test_右が先に押されたら左のモータだけを進める(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        # **どの指令にも左右が揃っている。** モータ 1 台だけを指令する経路を作ると、
+        # 左右直結の機構は別々の時刻に動いてその場で壊れる
+        assert all(set(cmd) == {"y_axis_r", "y_axis_l"} for cmd in rec.commands)
+        # 右は探索で当たった -1.0 のまま**全ステップで同一**。左だけが -3.0 まで進む
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0] * 5)
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0, -1.0, -2.0, -3.0, -3.0])
+
+    async def test_左が先に押されても同じように整列する(self) -> None:
+        """左右対称。片方向だけ直した実装 (モータ名の決め打ち) はここで落ちる。"""
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-3.0, left=-1.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert all(set(cmd) == {"y_axis_r", "y_axis_l"} for cmd in rec.commands)
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0] * 5)
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0, -2.0, -3.0, -3.0])
+
+    async def test_押されない側を上限以上進めない(self) -> None:
+        """**整列段の唯一の無人の歯止め。**
+
+        極性を取り違えたセンサ・断線したスイッチは「押されていない側をいつまでも
+        進める」形でしか現れない。左右のずれは機構の遊びの範囲しかありえないので、
+        探索距離を流用すると軸をねじり切る (偏差監視の全体緊急停止が先に出る)。
+        """
+        spec = _paired_table(align_distance=3.0).axis("y_axis")
+        # 左は永久に反応しない (断線・極性の取り違え)
+        rec = _Recorder(
+            sensors={
+                "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=-1.0),
+                "sensor_l": _SensorModel(motor="y_axis_l"),
+            }
+        )
+
+        with pytest.raises(HomingError, match="y_axis_l") as excinfo:
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        message = str(excinfo.value)
+        assert "sensor_l" in message  # どのスイッチを疑えばよいかを必ず出す
+        assert "sensorActiveLow" in message  # 極性の取り違えが最も多い原因
+        assert rec.origins == []
+        # 3.0mm を超えて進めていない (左の最終指令は -4.0 まで)
+        assert min(_axis_commands(rec, "y_axis_l")) >= -4.0
+
+    async def test_整列段で動かない機構は停滞判定で降りる(self) -> None:
+        """**遊びが無い機構では片側駆動が成立しない。** それが現れる唯一の形。
+
+        進めた側が保持側を引きずるので、相対的には 1mm も進まない。保持側を固定
+        している (実測へ再アンカーしない) からこそ、これが「進めた側が進まない」
+        として停滞判定に掛かる。
+        """
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+        # 探索 (1 歩 + 止め直し) までは追従し、整列段に入ったところで固まる機構
+        handle = _handle(spec, rec, follows=lambda: len(rec.commands) <= 2)
+
+        with pytest.raises(HomingError, match="動きません") as excinfo:
+            await _runner(rec).home(spec, handle)
+
+        assert "y_axis_l" in str(excinfo.value)
+        assert rec.origins == []
+        # 停滞判定 (3 歩) で降りる。align_distance (5 歩ぶん) まで押し続けない
+        assert len(rec.commands) <= 2 + _STALL_LIMIT
+
+    async def test_保持側は引きずられても指令を書き換えない(self) -> None:
+        """**保持値を毎歩実測へ張り直すと、軸ごと機構端まで走る。**
+
+        遊びが無い機構では進めた側が保持側を引きずる。保持側の目標が引きずられた
+        先へ追従すると左右のずれが増えないので、`align_distance` にも停滞判定にも
+        永久に掛からない。固定保持なら、引きずりは「進めた側が進まない」形でしか
+        現れず停滞判定が拾う。
+        """
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-4.0))
+        handle = _handle(spec, rec)
+        drivers = rec.drivers
+        recorded = handle.set_target_value
+
+        async def _drag(commands):
+            await recorded(commands)
+            # 指令していない右が、左に引きずられて 0.3mm ずつ動く機構
+            spec_r = next(m for m in spec.motors if m.name == "y_axis_r")
+            current = rec.motor_position("y_axis_r")
+            drivers["y_axis_r"].set_observed(position=spec_r.to_command(current - 0.3))
+
+        handle.set_target_value = _drag  # type: ignore[method-assign]
+
+        await _runner(rec).home(spec, handle)
+
+        align = _axis_commands(rec, "y_axis_r")[2:]  # 探索の 1 歩と止め直しの後
+        assert len(align) >= 3
+        # 実測は引きずられて動いているのに、右へ送る指令は 1 度も変わらない
+        assert align == pytest.approx([align[0]] * len(align))
+        assert rec.motor_position("y_axis_r") != pytest.approx(align[0])
+
+    async def test_センサが一本でも途絶していたら一歩も動かさない(self) -> None:
+        """**全センサを見る。** 先頭だけを見る実装では整列段だけが押し込み続ける。"""
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(
+            sensors=self._sensors(right=-1.0, left=-3.0),
+            stale_sensors=("sensor_l",),  # 2 本目だけが応答しない
+        )
+
+        with pytest.raises(HomingError, match="sensor_l") as excinfo:
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert "応答していません" in str(excinfo.value)
+        assert rec.commands == []
+        assert rec.origins == []
+
+    async def test_片方だけ触れた状態から始めても両方が離れるまで動かす(self) -> None:
+        """1 本でも触れたまま探索を始めると、その 1 本は 1 歩目で必ず到達と読まれる。
+
+        区間のどこで始めたかがそのまま原点のばらつきになるので、**全センサが OFF に
+        なるまで**離してから寄せ直す。
+        """
+        spec = _paired_table().axis("y_axis")
+        # 右は -1.0 以下で ON。開始位置 -3.0 では右だけが触れている
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-5.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec, start_value=-3.0))
+
+        # 離脱 (+ 方向) で区間の外 (0.0) まで戻ってから探索へ入る
+        assert _axis_commands(rec, "y_axis_r")[:4] == pytest.approx([-2.0, -1.0, 0.0, 0.0])
+        assert rec.origins == ["y_axis"]
+        # 右は入口 -1.0、左はスイッチ位置 -5.0 で「両方が押された姿勢」になっている
+        assert rec.captured_each == [pytest.approx({"y_axis_r": -1.0, "y_axis_l": -5.0})]
+
+    async def test_原点確定は全センサが接触した後に一度だけ(self) -> None:
+        """片側だけ押された姿勢で確定すると、そのずれが座標へ焼き付く。"""
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == ["y_axis"]
+        assert rec.captured_each == [pytest.approx({"y_axis_r": -1.0, "y_axis_l": -3.0})]
+
+    async def test_単数センサの軸に整列段は無い(self) -> None:
+        """`homing.sensors` を書いていない軸 (rotate) は 1 歩も余分に動かない。"""
+        spec = _table(direction=-1, step=1.0, search_distance=10.0).axis("y_axis")
+        assert spec.homing is not None and spec.homing.sensors is None
+        rec = _Recorder(active_at_or_below=-1.0)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        # 探索の 1 歩と止め直しだけ。整列段が走ると左右の指令が食い違い始める
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0])
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0, -1.0])
+        assert rec.origins == ["y_axis"]
 
 
 class TestSpecValidation:

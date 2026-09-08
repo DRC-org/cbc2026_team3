@@ -109,7 +109,9 @@ class M3508PositionLoop(PausablePeriodicTask):
       - 同じペアには ``sync_kp`` を設定すると同期補正が加わる。**ずれを検出して
         止める 3 層とは向きが逆で、こちらは駆動中にずれを縮める唯一の経路**
         (独立した 2 つの PID には左右を揃える力がどこにも無い)。出さない周期は
-        電流 0 の周期と全員が位置制御中でない周期
+        電流 0 の周期と、補正の前提が崩れている周期 —— 全員が位置制御中でない
+        (``_open_loop_groups``) / 全員が同じ軸位置を目標にしていない
+        (``SyncGuard.skewed_groups``) の 2 つ
       - ``set_motion_profile`` を設定した軸は、最終目標ではなく速度・加速度で制限した
         中間目標を PID へ入れる。**電流 0 に落とすどの経路でも軌道の起点を捨てる** —
         止まっていた間に機構が動いていても軌道は元の位置から続くので、据え置くと
@@ -418,9 +420,15 @@ class M3508PositionLoop(PausablePeriodicTask):
         wall_now = self._freshness.now()
         stale = {name: self._freshness.is_stale(name, wall_now) for name in self._axes}
         blocked = self._sync.blocked(stale=stale, position_of=self._feedback_position)
+        # 同期補正が意味を持つ前提は 2 つあり、両方を毎周期評価して skip へ畳む。
+        # ①全員が位置制御中 (_open_loop_groups) ②全員が同じ軸位置を目標にしている
+        # (SyncGuard.skewed_groups)。**止まるのは補正だけで、保護 (blocked) は
+        # そのまま生きている**
         corrections = self._sync.corrections(
             position_of=self._feedback_position,
-            skip_groups=blocked | self._open_loop_groups(),
+            skip_groups=(
+                blocked | self._open_loop_groups() | self._sync.skewed_groups(target_of=self.target)
+            ),
         )
 
         currents = [0, 0, 0, 0]
@@ -522,8 +530,11 @@ class M3508PositionLoop(PausablePeriodicTask):
     def _open_loop_groups(self) -> frozenset[str]:
         """全員が位置制御中とは言えない同期グループ名。
 
-        同期補正は「左右が同じ目標を追っている」ことを前提に、平均へ引き戻す向きの
-        操作量を作る。前提が崩れる周期では 1 台にも出さない。
+        同期補正が意味を持つ前提は 2 つあり、これはその 1 つ目。もう 1 つ
+        「全員が同じ軸位置を目標にしている」は ``SyncGuard.skewed_groups`` が見る
+        (零点確定の整列段は左右の目標を意図的にずらすので、そこでは 2 つ目が崩れる)。
+        前提が崩れる周期では 1 台にも補正を出さない。**止めるのは補正だけで、
+        保護 (途絶・偏差ラッチ) はどちらの前提とも無関係に生き続ける。**
 
         判定を**グループ単位**にするのが要点で、モータ単位で「自分が位置制御中なら
         補正する」と書いてはならない。ホーミングの押し当て (``ControlMode.CURRENT``)

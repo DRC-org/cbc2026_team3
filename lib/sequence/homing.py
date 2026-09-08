@@ -4,7 +4,7 @@
 ぶんがそのまま座標のずれになる。位置定数はすべて原点からの相対値なので、
 ずれた原点のまま走らせると全ステップが同じだけずれた場所へ動く。
 
-**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 6 つ用意してある:
+**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 7 つ用意してある:
 
 1. **探索距離の上限** (`HomingSpec.search_distance`) — 超えたら失敗として降りる。
    配線が抜けている・センサが死んでいる場合の唯一の無人の歯止め。
@@ -27,7 +27,14 @@
    取り違え** (ファーム側 `sensorActiveLow` の設定ミス) はどちらも
    「いつまでも OFF にならない」形でしか現れない。**探索距離を流用してはならない**
    (あちらは実ストローク相当まで伸びる値なので、反対側の機構端まで走り抜ける)
-6. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
+6. **整列段の移動量上限** (`HomingSpec.align_distance`) — 左右にスイッチが 1 本ずつ
+   付く軸 (下記) では、片方だけが押されている間に**押されていない側のモータだけ**を
+   進める。極性を取り違えたセンサ・断線したスイッチはここでも「いつまでも押されない」
+   形でしか現れないので、片側だけを動かす操作にも無人の歯止めが要る。
+   **`search_distance` を流用してはならない** —— 左右のずれは機構の遊びの範囲
+   (数 mm) しかありえず、探索距離まで片側を進めるのは軸をねじり切ることに等しい
+   (`sync_tolerance` を超えた時点で偏差監視が全体緊急停止を出す)
+7. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
 
 **探索の到達判定はラッチで見る。「今 ON か」では取りこぼす。** ON 区間が `step` より
 狭い機構では、指令 1 回で区間を跨いでしまい `settle_s` 後の観測ではもう OFF になって
@@ -43,6 +50,25 @@
 探索の `step` 粒度に収まる。**離脱は探索と逆向き**なので、機構端で始まったときに
 押し込まない性質はそのまま保たれる。
 
+**左右にスイッチが 1 本ずつ付く軸は「両方が押された姿勢」を原点にする。**
+`HomingSpec.sensors` (モータ名 → センサ名) を書いた軸では、探索でどちらか 1 本が
+当たった後に**整列段**が走り、まだ押されていない側のモータだけを探索方向へ進める。
+機構には遊びがあるので左右のわずかなずれは物理的に存在し、片方が当たった瞬間の
+姿勢をそのまま原点にすると、そのずれが原点のずれとして焼き付く。
+
+**整列段は探索と意図的に非対称で、既に当たった側は「検出時点の実測位置」で固定保持
+する (毎歩実測へ再アンカーしない)。** 遊びが無い機構 —— つまり片側駆動が物理的に
+成立しない機構 —— では、進めた側が保持側を引きずる。保持側の目標を毎歩実測へ
+張り直すと目標が引きずられた先へ追従するので、左右のずれは増えず
+`align_distance` にも停滞判定にも掛からないまま、**軸ごと機構端まで走る**。
+固定保持なら引きずりは「進めた側が進まない」形で現れ、停滞判定 (`_STALL_LIMIT`) が
+拾う —— **「この機構では片側駆動が成立しない」を検出できる唯一の形である。**
+
+**複数センサのラッチは 1 回の観測でまとめて読む** (`_SensorLatches`)。
+`consume_sensor_latch` は読むと消えるので、センサごとに別々のタイミングで読むと
+「A を読んだ瞬間に B の接触が捨てられる」。どちらが先に当たったかは整列段まで
+持ち越す必要があるので、走行中は OR で溜め込む。
+
 **原点確定はグループ単位でしか行わない。** 左右直結ペアを別々の時刻に確定すると、
 その間に片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に
 偏差超過で止まる (`M3508PositionLoop.set_group_origin_here` と同じ理由)。
@@ -56,7 +82,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from lib.drivers.base import ControlMode
 from lib.sequence.motors import AxisHandle
@@ -117,6 +143,54 @@ OriginCapturable = Callable[[str], bool]
 #: 事前確認が、待ちを挟む重い操作に見えてしまう。
 CaptureOrigin = Callable[[str], Awaitable[None]]
 SleepFunc = Callable[[float], Awaitable[None]]
+
+
+class _SensorLatches:
+    """走行中のセンサのラッチを **1 回の観測でまとめて読み、OR で溜め込む**。
+
+    ラッチ (`GenericDriver.consume_sensor_latch`) は**読むと消える**。センサごとに
+    別々のタイミングで読むと「A のラッチを読んだ瞬間に B の接触が捨てられる」ので、
+    見るのは常に全センサぶんを 1 回で読む `poll()` だけにしてある。
+
+    溜め込むのは、どちらのスイッチが先に押されたかを**整列段まで持ち越す**必要が
+    あるため。探索は「いずれか 1 本」で止まるが、その後の整列段は「まだ押されて
+    いないのはどれか」を知らなければ指令先を選べない。
+    """
+
+    def __init__(self, sensors: tuple[str, ...], read: SensorLatched) -> None:
+        self._sensors = sensors
+        self._read = read
+        self._latched: dict[str, bool] = dict.fromkeys(sensors, False)
+
+    def poll(self) -> None:
+        """全センサのラッチを 1 回ずつ読み、立っていた分を記録へ足す。"""
+        for name in self._sensors:
+            if self._read(name):
+                self._latched[name] = True
+
+    def discard(self) -> None:
+        """溜まったラッチを捨てる。**探索を始める直前に 1 度だけ呼ぶ。**
+
+        離脱段のあいだ触れていたぶんや、前回の零点確定・手動操縦でスイッチを
+        跨いだぶんが残っていると、1 歩目の観測でいきなり到達と読む。
+        """
+        for name in self._sensors:
+            self._read(name)
+            self._latched[name] = False
+
+    def any_latched(self) -> bool:
+        """いずれか 1 本でも接触したか (探索の到達判定)。"""
+        self.poll()
+        return any(self._latched.values())
+
+    def latched(self, sensor: str) -> bool:
+        """そのセンサが接触済みか。**読み直さない** (記録だけを見る)。"""
+        return self._latched[sensor]
+
+
+def _sensor_label(homing: HomingSpec) -> str:
+    """メッセージに出すセンサ名。単数形の軸では従来どおり 1 語になる。"""
+    return " / ".join(f"'{name}'" for name in homing.sensor_names)
 
 
 def _progress_threshold(homing: HomingSpec) -> float:
@@ -188,24 +262,29 @@ class HomingRunner:
 
         Returns:
             **探索で**実際に動いた距離 [軸の unit]。ログと検証用。
-            離脱 (下記) のぶんは含めない —— 原点の精度を決めているのは
+            離脱 (下記) と整列段のぶんは含めない —— 原点の精度を決めているのは
             「どこから寄せて当たったか」であって、その前に離れた距離ではない。
 
         Raises:
             HomingError: 原点を確定する手段が無い / センサまたは軸のフィードバックが
                 途絶している / 実測が進まない / 探索距離を超えても当たらなかった /
-                離脱してもセンサが OFF にならない
+                離脱してもセンサが OFF にならない / 整列段で片側が
+                ``align_distance`` 動いてもスイッチに届かない / 整列段で
+                進めているモータが動かない (遊びが無く片側駆動が成立しない機構)
         """
         homing = spec.homing
         if homing is None:
             raise HomingError(f"軸 '{spec.name}' に homing 設定がありません")
 
         self._check_preconditions(spec, homing)
+        latches = _SensorLatches(homing.sensor_names, self._sensor_latched)
 
         # ここが問うのは「**今**触れているか」なのでラッチではない。ラッチで問うと、
         # 前回の零点確定や手動操縦でスイッチを跨いだ痕跡だけで離脱段へ入り、
-        # 触れてもいない位置から _RELEASE_STEP_LIMIT 歩ぶん離れる向きへ動き出す
-        if self._sensor_active(homing.sensor):
+        # 触れてもいない位置から _RELEASE_STEP_LIMIT 歩ぶん離れる向きへ動き出す。
+        # **いずれか 1 本でも ON なら離脱する** —— 片方が触れたまま探索を始めると、
+        # その 1 本は 1 歩目のラッチで必ず到達と読まれ、探索開始位置が原点になる
+        if any(self._sensor_active(name) for name in homing.sensor_names):
             # **触れた状態のまま確定してはならない。** リミットスイッチの ON 区間には
             # 幅があるので、その場を原点にすると「区間のどこで探索を始めたか」が
             # そのまま原点のばらつきになる (区間幅ぶん = step の何倍にもなる)。
@@ -218,11 +297,13 @@ class HomingRunner:
                 spec,
                 handle,
                 homing,
+                latches,
                 direction=-homing.direction,
                 want_active=False,
                 limit=homing.step * _RELEASE_STEP_LIMIT,
                 limit_message=(
-                    f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
+                    f"軸 '{spec.name}' を原点センサ {_sensor_label(homing)} から"
+                    "離せませんでした"
                     f" ({homing.step * _RELEASE_STEP_LIMIT}{spec.unit} 動かしても OFF に"
                     " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
                     " なるので、ファーム側の極性設定 (sensorActiveLow) を"
@@ -235,26 +316,219 @@ class HomingRunner:
             spec,
             handle,
             homing,
+            latches,
             direction=homing.direction,
             want_active=True,
             limit=homing.search_distance,
             limit_message=(
                 f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
-                f" 原点センサ '{homing.sensor}' に到達しませんでした"
+                f" 原点センサ {_sensor_label(homing)} に到達しませんでした"
                 " (探索方向・機構の引っかかり・センサの配線を確認してください)"
             ),
         )
 
         travelled = abs(observed - origin)
         logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
+        if homing.sensors is not None:
+            # 左右にスイッチが 1 本ずつ付く軸だけの段。**単数形の軸は 1 歩も動かさない**
+            await self._align(spec, handle, homing, homing.sensors, latches)
         await self._capture_origin(spec.name)
         return travelled
+
+    async def _align(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        sensors: Mapping[str, str],
+        latches: _SensorLatches,
+    ) -> None:
+        """**両方のスイッチが押された姿勢**まで、押されていない側のモータだけを進める。
+
+        機構には遊びがあるので左右のわずかなずれは物理的に存在する。片方が当たった
+        瞬間の姿勢をそのまま原点にすると、そのずれが原点のずれとして焼き付く。
+
+        **既に当たった側は「ラッチを検出した時点の実測位置」で固定保持し、毎歩実測へ
+        再アンカーしない。探索段と意図的に非対称である。** 遊びが無い機構 (= 片側駆動が
+        物理的に成立しない機構) では、進めた側が保持側を引きずる。保持側の目標を毎歩
+        実測へ張り直すと、目標が引きずられた先へ追従するので**左右のずれが増えず**、
+        `align_distance` も停滞判定も永久に発火しないまま**軸ごと機構端まで走る**。
+        固定保持なら引きずりは「進めた側が進まない」形でしか現れないので停滞判定が
+        拾う —— 「この機構では片側駆動が成立しない」を検出できる唯一の形である。
+
+        Raises:
+            HomingError: 進めた側が ``align_distance`` 動いてもスイッチに届かない /
+                進めた側が動かない
+        """
+        pending = [motor for motor, sensor in sensors.items() if not latches.latched(sensor)]
+        if not pending:
+            logger.info("[homing] %s: 整列段は不要 (全センサが同時に接触)", spec.name)
+            self._log_sensor_states(spec, homing)
+            return
+
+        logger.info(
+            "[homing] %s: 整列段 (未接触: %s)",
+            spec.name,
+            ", ".join(f"{motor}→{sensors[motor]}" for motor in pending),
+        )
+
+        # **保持値も開始位置もモータ単独の実測から取る。** 軸平均 (`observed_value`) は
+        # 左右がずれていればどちらか一方が必ず誤りで、まさにそのずれを見る段では使えない
+        hold = self._observe_each(spec, handle)
+        start = dict(hold)
+        stalled: dict[str, int] = dict.fromkeys(pending, 0)
+        progress = _progress_threshold(homing)
+
+        while True:
+            latches.poll()
+            observed = self._observe_each(spec, handle)
+            for motor in [motor for motor in pending if latches.latched(sensors[motor])]:
+                # **検出した瞬間の実測位置を保持値として固定する。** 以後書き換えない
+                hold[motor] = observed[motor]
+                pending.remove(motor)
+                logger.info(
+                    "[homing] %s: %s を %.2f%s 進めて %s に到達",
+                    spec.name,
+                    motor,
+                    abs(observed[motor] - start[motor]),
+                    spec.unit,
+                    sensors[motor],
+                )
+
+            if not pending:
+                # 最後に送った「実測 + step」が生きたままだと、原点確定 (`SET_ZERO` の
+                # disable) が届くまでスイッチを越えた先へ向かい続ける (探索段と同じ理由)
+                await self._command_align(spec, handle, homing, hold, pending, observed)
+                self._log_sensor_states(spec, homing)
+                return
+
+            self._check_align_distance(spec, homing, sensors, pending, observed, start)
+
+            commanded = await self._command_align(spec, handle, homing, hold, pending, observed)
+            await self._wait_align_step(spec, handle, homing, latches, sensors, pending, commanded)
+
+            # 指令を実測へ再アンカーしている以上、動かない側は「指令しても進まない」
+            # 形でしか現れず、align_distance だけでは永久に降りられない (探索段と同じ)。
+            # **引きずられて相対的に進まない機構もここでしか捕まらない** —— 保持側を
+            # 固定しているからこそ、その引きずりが「進めた側が進まない」として出る
+            moved = self._observe_each(spec, handle)
+            for motor in pending:
+                stalled[motor] = (
+                    0 if abs(moved[motor] - observed[motor]) >= progress else stalled[motor] + 1
+                )
+                if stalled[motor] >= _STALL_LIMIT:
+                    raise HomingError(
+                        f"軸 '{spec.name}' の整列段でモータ '{motor}' が指令しても動きません"
+                        f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
+                        "**機構に遊びが無いと片側だけを動かせず、相方を引きずったまま"
+                        "止まって見えます** —— 機構の引っかかり・モータの励磁と"
+                        "併せて確認してください"
+                    )
+
+    async def _command_align(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        hold: Mapping[str, float],
+        pending: list[str],
+        observed: Mapping[str, float],
+    ) -> dict[str, float]:
+        """整列段の 1 指令。**軸単位で 1 回だけ送る唯一の口。** 送った軸位置を返す。
+
+        進めるモータには「そのモータ単独の実測 + 1 歩」、進めないモータには**必ず
+        保持値**を載せる。モータ 1 台だけを指令する経路を作ってはならない ——
+        左右直結ペアが別々の時刻に動くとその場で機構が壊れるので、指令は常に
+        `AxisHandle.set_target_value` の 1 回に束ねる (`to_commands_each` はキーの
+        過不足を `KeyError` で拒否するので、載せ忘れも構造的に塞がっている)。
+        """
+        values = {
+            motor: (
+                observed[motor] + homing.direction * homing.step
+                if motor in pending
+                else hold[motor]
+            )
+            for motor in spec.motor_names
+        }
+        await handle.set_target_value(spec.to_commands_each(values))
+        return values
+
+    def _check_align_distance(
+        self,
+        spec: AxisSpec,
+        homing: HomingSpec,
+        sensors: Mapping[str, str],
+        pending: list[str],
+        observed: Mapping[str, float],
+        start: Mapping[str, float],
+    ) -> None:
+        """整列開始位置からの移動量の上限。**進めるモータ単独の実測**で数える。
+
+        極性を取り違えたセンサ・断線したスイッチは「押されていない側をいつまでも
+        進める」形でしか現れないので、ここが整列段の唯一の無人の歯止めになる。
+        """
+        limit = homing.align_distance
+        if limit is None:
+            return
+        for motor in pending:
+            if abs(observed[motor] - start[motor]) < limit:
+                continue
+            raise HomingError(
+                f"軸 '{spec.name}' の整列段でモータ '{motor}' を {limit}{spec.unit}"
+                f" 動かしても原点センサ '{sensors[motor]}' が反応しませんでした。"
+                "**センサの極性が逆だと押しても ON になりません** —— ファーム側の"
+                "極性設定 (sensorActiveLow) と、スイッチの配線・断線を確認してください"
+            )
+
+    async def _wait_align_step(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        latches: _SensorLatches,
+        sensors: Mapping[str, str],
+        pending: list[str],
+        commanded: Mapping[str, float],
+    ) -> None:
+        """整列段の 1 歩ぶんの追従を待つ。待っている間もセンサを見る。
+
+        考え方は `_wait_step` と同じ (`spec.tolerance` を流用しない理由もそのまま
+        当てはまる) が、**判定は進めているモータ単独の実測で行う**ので共有できない
+        —— 軸平均で見ると保持側が動かないぶん常に半分しか進んでいないように見え、
+        どの歩も `_FOLLOW_ATTEMPTS` を使い切る。
+        """
+        reached = _progress_threshold(homing)
+        for _ in range(_FOLLOW_ATTEMPTS):
+            await self._sleep(homing.settle_s)
+            latches.poll()
+            if any(latches.latched(sensors[motor]) for motor in pending):
+                return
+            observed = self._observe_each(spec, handle)
+            if all(abs(observed[motor] - commanded[motor]) <= reached for motor in pending):
+                return
+
+    def _log_sensor_states(self, spec: AxisSpec, homing: HomingSpec) -> None:
+        """原点確定の直前に全センサの現在値を残す。**判定には使わない。**
+
+        ON 区間が `homing.step` より狭いスイッチでは検出の直後にはもう抜けている
+        (実機の `rotate` は step 2.0deg を約 18ms で通過する)。ここを判定に使うと
+        そういう機構では必ず失敗するので、記録だけに留める。
+        """
+        logger.info(
+            "[homing] %s: 原点確定 (センサ現在値: %s)",
+            spec.name,
+            ", ".join(
+                f"{name}={'ON' if self._sensor_active(name) else 'OFF'}"
+                for name in homing.sensor_names
+            ),
+        )
 
     async def _seek(
         self,
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
+        latches: _SensorLatches,
         *,
         direction: int,
         want_active: bool,
@@ -267,6 +541,10 @@ class HomingRunner:
         向きごとに書き分けると、片方だけ直せてしまう —— 症状は「探索は止まるのに
         離脱は永久に動き続ける」で、離脱は普段踏まない経路なので気付けない。
 
+        **軸全体を動かす段なので、センサが何本あっても指令は軸単位のまま。**
+        到達は「いずれか 1 本がラッチした」、離脱完了は「全センサが OFF」で、
+        どちらのモータが先に当たったかは `latches` が覚えて整列段へ渡す。
+
         Args:
             direction: 進む向き。探索は `homing.direction`、離脱はその反対
             want_active: この状態になったら到達。探索は True、離脱は False
@@ -276,7 +554,7 @@ class HomingRunner:
             # **探索を始める前に溜まったラッチを捨てる。** 離脱段のあいだ触れていた
             # ぶんや、前回の零点確定・手動操縦でスイッチを跨いだぶんが残っていると、
             # 1 歩目の観測でいきなり到達と読み、探索開始位置が原点になる
-            self._sensor_latched(homing.sensor)
+            latches.discard()
 
         start = self._observe(spec, handle)
         observed = start
@@ -291,7 +569,9 @@ class HomingRunner:
             commanded = observed + direction * homing.step
             await handle.set_target_value(spec.to_commands(commanded))
 
-            hit = await self._wait_step(spec, handle, homing, commanded, want_active=want_active)
+            hit = await self._wait_step(
+                spec, handle, homing, latches, commanded, want_active=want_active
+            )
 
             previous = observed
             observed = self._observe(spec, handle)
@@ -334,9 +614,15 @@ class HomingRunner:
                 " 零点確定を実行できないため探索を開始しません"
             )
 
-        if self._sensor_is_stale(homing.sensor):
+        # **全センサを見る。1 本でも途絶していたら 1 歩も動かさない。**
+        # 先頭だけを見る実装では、左右にスイッチが 1 本ずつ付く軸で「探索は当たるが
+        # 整列段だけが押しても反応しない側を align_distance いっぱいまで進める」
+        # という、最も機構に近い場所での失敗に変わる
+        stale_sensors = [name for name in homing.sensor_names if self._sensor_is_stale(name)]
+        if stale_sensors:
+            label = " / ".join(f"'{name}'" for name in stale_sensors)
             raise HomingError(
-                f"軸 '{spec.name}' の原点センサ '{homing.sensor}' が応答していません"
+                f"軸 '{spec.name}' の原点センサ {label} が応答していません"
                 " (配線・基板の電源を確認してください)"
             )
 
@@ -354,6 +640,7 @@ class HomingRunner:
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
+        latches: _SensorLatches,
         commanded: float,
         *,
         want_active: bool,
@@ -381,13 +668,15 @@ class HomingRunner:
         reached = _progress_threshold(homing)
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
-            if self._sensor_reached(homing.sensor, want_active=want_active):
+            if self._sensor_reached(homing, latches, want_active=want_active):
                 return True
             if abs(self._observe(spec, handle) - commanded) <= reached:
                 return False
         return False
 
-    def _sensor_reached(self, sensor: str, *, want_active: bool) -> bool:
+    def _sensor_reached(
+        self, homing: HomingSpec, latches: _SensorLatches, *, want_active: bool
+    ) -> bool:
         """センサが目的の状態になったか。**探索と離脱で見るものが違う。**
 
         探索 (`want_active=True`) は**ラッチ**を見る —— 「前回読んでから一度でも
@@ -403,15 +692,33 @@ class HomingRunner:
         中にいるのに探索を始めて、区間内のどこかを原点にする**。取りこぼしの向きも
         非対称で、探索の取りこぼしは機構の破損側へ進み続けるのに対し、離脱の
         取りこぼしは「余計に離れる」だけで、次の探索がそのぶんを寄せ直す。
+
+        **センサが複数あっても非対称はそのまま。** 探索は「いずれか 1 本が
+        ラッチした」で止まり (残りは整列段が寄せる)、離脱は「全センサが OFF」まで
+        続ける —— 1 本でも触れたまま探索を始めると、その 1 本は 1 歩目のラッチで
+        必ず到達と読まれ、探索開始位置がそのまま原点になる。
         """
         if want_active:
-            return self._sensor_latched(sensor)
-        return self._sensor_active(sensor) is False
+            return latches.any_latched()
+        return not any(self._sensor_active(name) for name in homing.sensor_names)
 
     def _observe(self, spec: AxisSpec, handle: AxisHandle) -> float:
-        """実測の軸位置。読めなければ探索そのものを止める。"""
+        """実測の軸位置 (全モータの平均)。読めなければ探索そのものを止める。"""
         try:
             return handle.observed_value()
+        except HomingError:
+            raise
+        except Exception as exc:
+            raise HomingError(f"軸 '{spec.name}' の現在位置を読めません ({exc})") from exc
+
+    def _observe_each(self, spec: AxisSpec, handle: AxisHandle) -> dict[str, float]:
+        """モータ名 → そのモータ単独の実測位置。**整列段だけが使う。**
+
+        軸平均 (`_observe`) は左右がずれていればどちらか一方が必ず誤りなので、
+        ずれそのものを見る整列段では使えない (`AxisHandle.observed_values`)。
+        """
+        try:
+            return handle.observed_values()
         except HomingError:
             raise
         except Exception as exc:

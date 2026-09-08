@@ -183,9 +183,10 @@ class TestHomingComesFirst:
         table = _shipped_table()
         homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
 
-        # 出荷 config では rotate だけ
-        # (y_axis はリミットスイッチ未装着のあいだコメントアウトしてある)
-        assert homing_axes == ["rotate"]
+        # 出荷 config では y_axis と rotate の 2 軸
+        # (y_axis は 2026-09-08 に左右 2 本のスイッチが揃って有効化した。
+        #  サブハンドの 2 軸は DM3520 で原点確定の手段そのものが無いため書けない)
+        assert homing_axes == ["y_axis", "rotate"]
 
 
 class TestStepShape:

@@ -371,6 +371,35 @@ class AxisHandle:
             {handle.name: handle.driver.feedback_position() for handle in self._handles}
         )
 
+    def observed_values(self) -> dict[str, float]:
+        """モータ名 → **そのモータ単独**のフィードバックから逆換算した軸位置 (人間の単位)。
+
+        ``observed_value`` (全モータの平均) と対になる。**使ってよいのは零点確定の
+        整列段だけ**である —— 平均は左右がずれていればどちらか一方の値が必ず誤りで、
+        「ずれそのものを見たい」場面でしか片側の値を代表にする根拠が無い。
+        整列段は「片方のスイッチだけが押されている」というずれた状態を前提に、
+        押されていない側だけを進める操作なので、ここでは平均を見てはならない
+        (平均で見ると、進めた側の移動が半分に薄まって歯止めの距離が 2 倍になり、
+        止まらない側の判定も相方の位置に引きずられる)。
+
+        逆換算は ``MotorSpec.to_value`` に委ねる (``observed_value`` と同じ理由 ——
+        逆回転ペアの符号付き ``scale`` の扱いを 2 実装に分けない)。
+
+        Raises:
+            PositionLookupError: 位置を持たない軸。DC 基板も電磁弁基板も
+                ``MotorState.position`` が常に 0 なので、逆換算すると
+                「測ったように見える 0」を返してしまう (``observed_value`` と同じ)
+        """
+        if self._spec.command_mode is not ControlMode.POSITION:
+            raise PositionLookupError(
+                f"軸 '{self.name}' は位置フィードバックを持ちません"
+                f" (command_mode={self._spec.command_mode.value})"
+            )
+        return {
+            handle.name: self._motors[handle.name].to_value(handle.driver.feedback_position())
+            for handle in self._handles
+        }
+
     def sync_violation(self) -> float | None:
         """許容差を超えたモータ間のずれ (人間の単位)。超過していなければ None。
 

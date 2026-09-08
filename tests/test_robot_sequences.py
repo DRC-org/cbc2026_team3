@@ -549,13 +549,15 @@ class TestShippedRobotConfig:
         assert duplicated == {}
 
     def test_homing_sensors_are_registered(self) -> None:
-        """`homing.sensor` に書いた名前が config の `sensors:` に居ること。
+        """`homing` が見るセンサ名が config の `sensors:` に居ること。
 
         居ないと零点確定は「センサが応答していません」で必ず失敗する。しかも
         症状は配線不良と区別が付かないので、実機の前で切り分けることになる。
 
-        rotate の homing はハード追加待ちでコメントアウトしてある。外すときに
-        `sensors:` への追加を忘れると、ここで落ちる。
+        読むのは `HomingSpec.sensor_names` —— 単数形 (`sensor`) と複数形
+        (`sensors`) の違いを吸収する唯一の口である。単数形を直接読むと、
+        左右にスイッチが 1 本ずつ付く軸 (`y_axis`) が `None` として素通りし、
+        **登録漏れを検出できるはずの軸だけが検査から外れる。**
         """
         sensors: set[str] = set()
         for path in sorted(_CONFIG_DIR.glob("*.yaml")):
@@ -570,7 +572,7 @@ class TestShippedRobotConfig:
             for axis in table.axes:
                 homing = table.axis(axis).homing
                 if homing is not None:
-                    required.add(homing.sensor)
+                    required |= set(homing.sensor_names)
 
         assert required <= sensors
 

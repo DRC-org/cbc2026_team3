@@ -1024,6 +1024,19 @@ async def _skew_pair_half_targeted(fx: _Fixture) -> None:
     fx.feed("tilt", 0.0)
 
 
+async def _skew_pair_mismatched_targets(fx: _Fixture) -> None:
+    """零点確定の整列段と同じ状態 —— 片側 (tilt) だけを step ぶん先の目標へ送る。
+
+    lift は 10.0 の保持、tilt は人間の単位で 10.5 (逆回転なので指令は -10.5)。
+    実測は lift が 2.0 進んでいるので、前提を見ない実装ではここで補正が出て
+    「進めたい側を押し戻し、保持したい側を前へ引きずる」形で整列を打ち消す。
+    """
+    await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+    await fx.loop.set_target("tilt", ControlMode.POSITION, -10.5)
+    fx.feed("lift", 2.0)
+    fx.feed("tilt", 0.0)
+
+
 async def _currents(
     setup: Callable[[_Fixture], Awaitable[None]],
     *,
@@ -1164,6 +1177,53 @@ class TestSyncCorrection:
         )
 
         assert corrected == (0, 0, 0, 0)
+
+
+class TestSyncCorrectionRequiresSharedTargetValue:
+    """補正の前提 2 つ目 —— 「全員が同じ軸位置を目標にしている」周期にしか出さない。
+
+    零点確定の整列段は片側だけを step ぶん進めるので、左右の目標が意図的に食い違う。
+    平均へ引き戻す補正はその意図したずれをちょうど打ち消しに掛かり、進めたい側は
+    押し戻され保持したい側は前へ引きずられる。**止めるのは補正だけで、偏差の保護は
+    同じ周期でも生きたまま**でなければならない (整列中でも押し合いは機構を壊す)。
+    """
+
+    async def test_correction_is_applied_when_targets_share_axis_value(self) -> None:
+        """対照 —— 目標が同じ軸位置を指す周期では従来どおり補正が出る。
+
+        これが無いと、補正を丸ごと殺す実装でも下の 2 件が緑になる。
+        """
+        baseline = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
+        corrected = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=50.0))
+
+        assert corrected[0] != baseline[0]
+        assert corrected[1] != baseline[1]
+
+    async def test_no_correction_when_targets_are_intentionally_skewed(self) -> None:
+        """片側だけずらした周期では**両方とも**補正 0。"""
+        baseline = await _currents(
+            _skew_pair_mismatched_targets, group=_pair_group_with_gain(sync_kp=0.0)
+        )
+        corrected = await _currents(
+            _skew_pair_mismatched_targets, group=_pair_group_with_gain(sync_kp=50.0)
+        )
+
+        assert corrected == baseline
+
+    async def test_deviation_protection_stays_alive_while_targets_are_skewed(self) -> None:
+        """同じ周期でも偏差の保護は生きている (消えるのは平均へ引き戻す力だけ)。
+
+        目標をずらしていても、実測のずれが許容差を超えれば従来どおりラッチして
+        グループ全員を電流 0 に落とす。
+        """
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0, tolerance=1.0))
+        await _skew_pair_mismatched_targets(fx)
+
+        await fx.tick()
+
+        assert "y_axis" in fx.loop.sync_violations
+        assert fx.manager.last_currents == (0, 0, 0, 0)
 
 
 # --------------------------------------------------------------------------- #
