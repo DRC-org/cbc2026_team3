@@ -6,7 +6,6 @@ import { INITIAL_ROBOT_UI_STATE, robotReducer } from "@/lib/robotReducer";
 
 const NOW = 1_700_000_000_000;
 
-/** 受信経路と同じ形 (JSON → parse → reducer) で 1 通流す */
 function receive(state: RobotUiState, payload: object, nowMs = NOW): RobotUiState {
   const message = parseServerMessage(JSON.stringify(payload));
   if (!message) throw new Error(`受信条件に弾かれました: ${JSON.stringify(payload)}`);
@@ -21,11 +20,6 @@ describe("robotReducer", () => {
     expect(before).toEqual(snapshot);
   });
 
-  /**
-   * 20Hz × 2 台で毎秒 40 回届く state が、試合状態や動作確認の参照まで作り直すと
-   * それらを読むだけの画面 (チェックリスト・タブ・トースト) が同じ頻度で再描画される。
-   * 触っていない領域は参照ごと据え置く。
-   */
   it("state 受信で他領域の参照を作り直さない", () => {
     const first = receive(INITIAL_ROBOT_UI_STATE, {
       type: "match_state",
@@ -67,7 +61,6 @@ describe("robotReducer", () => {
     });
     expect(stopped.eStopReason).toBe("同期ずれ y_axis");
 
-    // 発動中の state 配信では理由を消さない (理由は e_stop_state だけが運ぶ)
     const during = receive(stopped, { type: "state", robot: "main_hand", e_stop_active: true });
     expect(during.eStopReason).toBe("同期ずれ y_axis");
 
@@ -101,8 +94,6 @@ describe("robotReducer", () => {
   });
 
   it("送信できなかった操作を、サーバーの拒否と区別して保持する", () => {
-    // 「サーバーが断った」と「そもそも届いていない」では操縦者の次の一手が違う。
-    // 前者は条件を満たせば通るが、後者は機体が指令を受け取っていない
     const unsent = robotReducer(INITIAL_ROBOT_UI_STATE, {
       type: "command_unsent",
       command: "e_stop",
@@ -119,8 +110,6 @@ describe("robotReducer", () => {
   });
 
   it("動作確認は継ぎ足さず、届いた状態でまるごと置き換える", () => {
-    // UI 側で進捗を組み立てると、1 通落としたときに画面だけが古い状態で固まる。
-    // 再送も無いのでリロードするまで直らない
     const running = receive(INITIAL_ROBOT_UI_STATE, {
       type: "motor_check_state",
       available: true,
@@ -140,7 +129,6 @@ describe("robotReducer", () => {
     });
 
     expect(finished.motorCheck.running).toBe(false);
-    // 前の current_step が残らないこと (継ぎ足していたら残る)
     expect(finished.motorCheck.current_step).toBeNull();
   });
 
@@ -152,11 +140,6 @@ describe("robotReducer", () => {
     expect(state.healthEvents.map((e) => e.target)).toEqual(["m7", "m6", "m5", "m4", "m3"]);
   });
 
-  /**
-   * 緊急停止中、サーバーは `e_stop_state` を 20Hz で再配信し続ける。値が同じでも
-   * 新しい state を返すと、停止しているあいだずっと全消費者 (チェックリスト・タブ・
-   * トースト) が余分に描き直される。`e_stop_local` は最初からこのガードを持っていた。
-   */
   describe("同値の再配信", () => {
     it("同じ e_stop_state を受けても参照を作り直さない", () => {
       const first = receive(INITIAL_ROBOT_UI_STATE, { type: "e_stop_state", active: true });

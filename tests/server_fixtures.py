@@ -1,20 +1,3 @@
-"""RobotServer をテストから組み立て・駆動するための唯一の入口。
-
-``RobotServer`` のテストは 10 ファイルに分かれているが、どれも同じことをする:
-サーバーを建て、モックの CAN 層を挿し、配信を 1 回だけ走らせ、結果を見る。
-それが各ファイルに書き写されていたため、サーバーの構造を 1 つ変えるだけで
-10 ファイルが機械的に赤くなり、そのたびに「モックの追従」としてテストを実装へ
-合わせ直していた。テストは実装の変更を検出するための網なのに、変更のたびに
-網を編み直しては何も守れない。組み立てと駆動をここへ集約する。
-
-**サーバー内部 (`_broadcast_state` などの private) へ手を伸ばすのは本ファイルの
-特権とする。** 公開 API で書けるものは公開 API を使う (``e_stop_active`` /
-``handle_command`` / ``activate_e_stop`` / ``match``)。ここに残る private 参照は
-「テストが配信や動作確認のタイミングを決定的に握るために要るが、本番の
-呼び出し元を増やしたくない」ものだけで、サーバーの構造が変わったときの
-追従はこのファイルだけで済む。
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -38,34 +21,17 @@ from lib.sequence.engine import Sequence
 from lib.server import _FIRMWARE_INFO_GRACE_S, RobotServer
 from tests.fake_can import mock_can_manager
 
-#: 指差喚呼の既定定義。**項目が 1 つ以上あること自体に意味がある** ——
-#: 空だと `can_start_match` が最初から True になり、フェーズが SETUP を素通りして
-#: READY から始まる。中身 (id / label) を見るテストは自分の定義を明示すること。
-#: 逆に「項目が 1 つも無い」状態を作りたいときは `checklist_definitions=None` を渡す。
 DEFAULT_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")]}
 
-#: 周期配信に割り込まれるとヘルス差分の基準が動く。テストが明示的に呼んだ配信
-#: だけを観測したいときは、この間隔まで伸ばして実質止める
 FROZEN_BROADCAST_INTERVAL_S = 3600.0
 
 
 class ServerFixture:
-    """1 台の ``RobotServer`` と、そこへ登録したロボット一式。
-
-    登録したシーケンス・CAN マネージャはフィクスチャ側が覚えておく。
-    サーバーへ問い合わせ直す必要が無くなり、``RobotServer`` がロボットを
-    どう保持しているか (``_robots``) にテストが依存しなくなる。
-    """
-
     def __init__(self, server: RobotServer) -> None:
         self.server = server
         self._sequences: dict[str, Any] = {}
         self._can_managers: dict[str, Any] = {}
         self._manuals: dict[str, Any] = {}
-
-    # ------------------------------------------------------------------ #
-    #  構築
-    # ------------------------------------------------------------------ #
 
     @classmethod
     def build(cls, **server_kwargs: Any) -> ServerFixture:
@@ -101,10 +67,6 @@ class ServerFixture:
     def create_app(self) -> web.Application:
         return self.server.create_app()
 
-    # ------------------------------------------------------------------ #
-    #  登録済みロボットの参照 (サーバーへ問い合わせず控えから返す)
-    # ------------------------------------------------------------------ #
-
     @property
     def robot_names(self) -> tuple[str, ...]:
         return tuple(self._sequences)
@@ -125,16 +87,7 @@ class ServerFixture:
         return self._manuals[name]
 
     def operation_mode(self, name: str) -> str:
-        """配信されている操作モード。サーバー内部ではなく state から読む。
-
-        テストが ``_robots[name].mode`` を直接見ると、配信し忘れても緑になる。
-        操縦者が見るのは配信された値なので、そこを正にする。
-        """
         return self.state_message(name)["manual"]["mode"]
-
-    # ------------------------------------------------------------------ #
-    #  公開 API の素通し (テスト側の記述を短くするだけ)
-    # ------------------------------------------------------------------ #
 
     @property
     def match(self) -> MatchState:
@@ -145,27 +98,12 @@ class ServerFixture:
         return self.server.e_stop_active
 
     async def command(self, payload: dict, *, requester: Any = None) -> None:
-        """コマンドを受理経路へ流す (WS も内部呼び出しもここへ合流する)。"""
         await self.server.handle_command(payload, requester=requester)
 
     async def activate_e_stop(self, *, reason: str | None = None) -> None:
         await self.server.activate_e_stop(reason=reason)
 
     async def wait_reactivation(self, *, timeout: float = 2.0) -> None:
-        """緊急停止解除の再励磁 (別タスク) の完了を待つ。
-
-        解除ハンドラは再励磁を待たずに返る (待つと、その操縦者の WS が数秒間
-        1 通も処理しなくなる)。**「解除フレームを送り終えた後」の振る舞いを見る
-        テストは、この完了を待ってから観測しなければならない** ——
-        `_board_e_stop_ignore_before` が確定するのも再励磁が終わってからで、
-        待たずに配信を 1 回回すと「解除したのに基板の停止が拾われない」ように見える。
-
-        `wait_reenergize` と同じく `asyncio.wait` を使う —— **このタスクも
-        キャンセルされて終わることがある** (新しい解除の `_reactivate_motors` が
-        `_settle_pending_reactivation` で前回のぶんを畳む)。`gather` + `wait_for`
-        だとその `CancelledError` がテスト側へ伝播し、後始末として待っただけの
-        テストが落ちる。
-        """
         tasks = {task for task in self.server._reactivate_tasks if not task.done()}
         if not tasks:
             return
@@ -173,22 +111,9 @@ class ServerFixture:
         assert len(done) == len(tasks), f"解除の再励磁タスクが {timeout}s 以内に終わっていない"
 
     def expire_firmware_grace(self) -> None:
-        """起動猶予 (`_FIRMWARE_INFO_GRACE_S`) を実時間を待たずに過ぎさせる。
-
-        `INFO` は 1Hz なので、実時間でこの猶予を跨ぐとテストが数秒単位で重くなる。
-        `_server_started_at` を過去へ押し戻すだけで、判定対象そのもの
-        (`firmware_confirmed()`) には触れない。
-        """
         self.server._server_started_at = time.time() - _FIRMWARE_INFO_GRACE_S - 0.1
 
     async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
-        """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。
-
-        `asyncio.wait_for` ではなく `asyncio.wait` を使うのは、**このタスクは
-        キャンセルされて終わることがある**ため (緊急停止解除の
-        `_settle_pending_reenergize` が畳む)。`wait_for` だとその `CancelledError`
-        がテスト側へ伝播し、後始末として待っただけのテストが落ちる。
-        """
         task = self.server._reenergize_tasks.get(robot_name)
         if task is None or task.done():
             return
@@ -196,42 +121,17 @@ class ServerFixture:
         assert done, f"再励磁タスクが {timeout}s 以内に終わっていない: robot={robot_name}"
 
     def has_pending_reenergize(self, robot_name: str) -> bool:
-        """このロボット名ぶんの再励磁タスクが (実行中か完了済みかに関わらず) 存在するか。
-
-        入力検証 (未知のロボット名を弾く) が抜けていないかを見るテスト用。
-        `wait_reenergize` の「実行中か」判定 (`not task.done()`) だと、無効な
-        ロボット名で立てたタスクが検証をすり抜けて中で即座に例外落ちした場合に
-        `done()` が True になり「実行中でない」へ紛れて検証漏れを見逃す。
-        """
         return robot_name in self.server._reenergize_tasks
 
     def set_motor_check_task(self, task: asyncio.Task[None] | None) -> None:
-        """動作確認の実行中フラグ (`MotorCheckController.running`) を直接操作する。
-
-        `running` は実行タスクの生死で判定する。`start()` は環境ゲートとシーケンス
-        登録を要求するため、それらに関心の無いテスト (排他だけを見たいテスト) の
-        ために「今実行中」を直接作る口をここへ置く。
-        """
         self.server._motor_check._task = task
 
     def break_command_handler(self, command: str, exc: Exception) -> None:
-        """指定コマンドのハンドラを、必ず例外を投げるものへ差し替える。
-
-        トップレベルの例外ガードが見たいのは「**どの**ハンドラが投げても操縦者の
-        WS が切れないこと」なので、特定コマンドの内部事情 (どの引数で何が起きるか)
-        に寄りかからない形で壊す必要がある。**差し替えはここだけの特権にする** ——
-        各テストがハンドラ名を書き写すと、名前を変えた瞬間に「壊したつもりで
-        壊せていない」テストが緑を返す。
-        """
 
         async def _raise(_data: dict, _requester: Any) -> None:
             raise exc
 
         setattr(self.server, COMMANDS[command].handler, _raise)
-
-    # ------------------------------------------------------------------ #
-    #  試合フェーズ
-    # ------------------------------------------------------------------ #
 
     def complete_checklist(self, role: str) -> None:
         for item in self.match.checklists[role].items:
@@ -242,27 +142,19 @@ class ServerFixture:
             self.complete_checklist(role)
 
     def enter_match(self) -> None:
-        """指差喚呼を全て通して試合中まで進める (フェーズゲートの前提を作る)。"""
         self.complete_all_checklists()
         assert self.match.match_start(), "READY に到達していないため試合へ入れない"
 
-    # ------------------------------------------------------------------ #
-    #  配信 — テストが 1 フレームずつ決定的に進めるための seam
-    # ------------------------------------------------------------------ #
-
     def freeze_broadcast(self) -> None:
-        """周期配信を実質止める。テストが明示的に呼んだ配信だけを観測したいとき用。"""
         self.server._broadcast_interval = FROZEN_BROADCAST_INTERVAL_S
 
     def set_broadcast_interval(self, seconds: float) -> None:
         self.server._broadcast_interval = seconds
 
     async def publish_state(self) -> None:
-        """テレメトリを 1 フレームぶんだけ配信する (周期ループを待たない)。"""
         await self.server._broadcast_state()
 
     def state_message(self, robot: str) -> dict:
-        """配信される state メッセージを WS を介さず 1 通組み立てる。"""
         return self.server._build_state_message(robot)
 
     def health(self, robot: str) -> HealthSnapshot:
@@ -278,75 +170,34 @@ class ServerFixture:
         await self.server._broadcast_e_stop_state()
 
     async def publish_motor_check_state(self) -> None:
-        """動作確認の状態を 1 通配信する (変化が無ければ流れない)。"""
         await self.server._motor_check.publish()
 
     async def publish_motor_check_error(self, message: str) -> None:
         await self.server._motor_check.report_error(message)
 
     def broadcast_loop(self) -> Any:
-        """配信ループのコルーチン。1 回の例外で止まらないことを見るテスト用。"""
         return self.server._broadcast_loop()
 
     def patch_publish_state(self, replacement: Callable[[], Any]) -> None:
         self.server._broadcast_state = replacement  # type: ignore[method-assign]
 
     def patch_e_stop_broadcast(self) -> Any:
-        """緊急停止の配信だけを差し替えるコンテキストマネージャ。
-
-        停止フレームの送信経路を見るテストが、配信の中身まで巻き込まないようにする。
-        """
         return patch.object(self.server, "_broadcast_e_stop_state", new_callable=AsyncMock)
-
-    # ------------------------------------------------------------------ #
-    #  WS クライアント
-    #
-    #  「送信が永久に返らない」「送信が例外を投げる」相手は実ソケットでは
-    #  作れないため、偽クライアントを直接ぶら下げる。配信の不変条件
-    #  (1 台の不調で全員のテレメトリを止めない) はこれでしか検証できない。
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def shrink_ws_send_timeout(monkeypatch: Any, seconds: float = 0.05) -> None:
-        """WS 送信の上限を縮める (詰まった相手の切り離しを実時間で待たないため)。
-
-        本番の上限は 1 秒なので、そのまま検証するとテスト 1 件ごとに 1 秒待つ。
-        縮めても見ているもの (上限を超えたら切り離す) は変わらない。
-
-        **モジュール private の書き換えなので、経路はここ 1 本に閉じる。**
-        テスト側に散らすと、定数名が変わったときにどのファイルが黙って
-        「上限を縮めたつもりで縮めていない」状態になったか分からなくなる
-        (monkeypatch.setattr は存在しない属性なら例外を出すが、別の定数へ
-        名前が移ったときは書き換え先だけが古いまま残る)。
-        """
         monkeypatch.setattr("lib.ws_hub._WS_SEND_TIMEOUT_S", seconds)
 
     def attach_clients(self, *clients: Any) -> None:
         self.server._ws._clients = set(clients)
 
     def connect_client(self, client: Any) -> None:
-        """配信の最中に 1 台繋がってきた状況を作る (``_ws_handler`` の ``add`` 相当)。
-
-        実機では操縦者がリロードするだけで起きる。配信は ``await`` を挟むので、
-        その隙にハンドラが同じ集合を書き換える。
-        """
         self.server._ws._clients.add(client)
 
     def is_connected(self, client: Any) -> bool:
         return client in self.server._ws._clients
 
     async def run_ws_handler(self, client: Any) -> Any:
-        """接続ハンドラを偽ソケット 1 本で走らせる。
-
-        接続直後に送るスナップショット 3 通 (server_info / match_state /
-        motor_check_state) が送信上限を通っているかは、実ソケットでは検証できない
-        (「読まないまま繋がり続ける相手」を作れない)。``web.WebSocketResponse`` を
-        差し替えてハンドラだけを踏ませる。
-
-        **本ファイル以外でクラスを差し替えないこと。** 生成箇所が増えると、
-        ハンドラの構造が変わったときにどのテストが古い偽物を掴んだまま緑に
-        なっているのか分からなくなる。
-        """
         with patch("lib.server.web.WebSocketResponse", return_value=client):
             return await self.server._ws_handler(AsyncMock())
 
@@ -355,52 +206,30 @@ class ServerFixture:
         return len(self.server._ws._clients)
 
     def only_client(self) -> Any:
-        """接続中のクライアントが 1 台だけであることを確認して返す。"""
         clients = self.server._ws._clients
         assert len(clients) == 1, f"接続中のクライアントが 1 台ではない: {len(clients)}"
         return next(iter(clients))
 
     @property
     def has_closing_tasks(self) -> bool:
-        """切り離したクライアントを閉じるタスクの参照が残っているか (GC 対策)。"""
         return bool(self.server._ws._closing_tasks)
 
     async def shutdown(self, app: web.Application) -> None:
         await self.server._on_shutdown(app)
 
     async def handle_match_start(self, requester: Any) -> None:
-        """フェーズゲートを迂回して match_start の防御的判定だけを踏む。"""
         await self.server._handle_match_start(requester)
 
-    # ------------------------------------------------------------------ #
-    #  アクチュエータ動作確認
-    # ------------------------------------------------------------------ #
-
     def set_motor_check_sequence(self, sequence: Any) -> None:
-        """統合動作確認シーケンスを登録する。両ハンド共通の 1 本。"""
         self.server.set_motor_check_sequence(sequence)
 
     async def start_motor_check(self) -> bool:
-        """動作確認を起動する。拒否されたら False (HTTP POST の 409 と同じ判定)。"""
         return await self.server._motor_check.start()
 
     def set_motor_check_pausables(self, pausables: list[Any]) -> None:
-        """動作確認が黙らせる周期タスクの一覧を差し替える。
-
-        **本番の一覧は空である** (`RobotServer._motor_check_pausables`)。それでも
-        「タスク生成から `run()` が駆動を始めるまで」の窓と、`finally` の復帰保証は
-        実在するので、そこを決定的に観測するための代役をここから挿す。
-
-        ロボット配線 (`set_target_refreshers`) 経由で挿していた頃は、pause 対象が
-        空になった瞬間にテストの窓ごと消え、窓の中の緊急停止・中断を誰も見なくなった。
-        差し替えを本ファイルの特権にするのは、コントローラの private を各テストへ
-        書き写すと、注入口の名前が変わったときに「挿したつもりで挿していない」
-        テストが緑を返すため。
-        """
         self.server._motor_check._pausables = lambda: list(pausables)
 
     def motor_check_pausables(self) -> list[Any]:
-        """サーバーが「動作確認中に黙らせる」と答える周期タスク (本番の判定)。"""
         return self.server._motor_check_pausables()
 
     def abort_motor_check(self) -> None:
@@ -410,7 +239,6 @@ class ServerFixture:
         return self.server._motor_check.sequence
 
     def motor_check_state(self) -> dict:
-        """配信される動作確認状態。UI が読むのと同じ形。"""
         return self.server._motor_check.payload()
 
     def motor_check_error(self) -> str | None:
@@ -431,11 +259,6 @@ class ServerFixture:
         )
         return sequence
 
-    # ------------------------------------------------------------------ #
-    #  ロボット配線の後付け
-    #  (位置制御ループ・目標値再送は CAN マネージャを要るため後から挿す)
-    # ------------------------------------------------------------------ #
-
     def set_position_loops(self, robot: str, loops: list[M3508PositionLoop]) -> None:
         self.server._robots[robot].position_loops = loops
 
@@ -449,26 +272,7 @@ class ServerFixture:
         return self.server._robots[robot].target_refreshers
 
 
-# ---------------------------------------------------------------------- #
-#  記録用 WS クライアント
-# ---------------------------------------------------------------------- #
-
-
 class RecordingClient:
-    """配信された JSON を溜めるだけの WS クライアント代役。
-
-    実 WebSocket を張ると「何通目に何が流れたか」を待ち合わせ越しにしか見られず、
-    「変化が無ければ流れない」ような *送らないこと* の検証ができない。
-
-    **生の文字列で溜める。** 受け取った時点で dict へ直すと、配信が JSON として
-    壊れていても記録側が先に落ちるため、配信経路の不具合が
-    「テストヘルパの中の例外」として出る。
-
-    障害を作るクライアント (送信が返らない・例外を投げる) はこれとは別物なので
-    統合しない。あちらは ``tests/test_server_broadcast_resilience.py`` が
-    それぞれの障害ごとに持つ。
-    """
-
     def __init__(self) -> None:
         self.sent: list[str] = []
         self.closed = False
@@ -489,13 +293,7 @@ class RecordingClient:
         return [msg for msg in self.messages() if msg.get("type") == name]
 
 
-# ---------------------------------------------------------------------- #
-#  待ち合わせ / WS 受信ヘルパ (5 ファイルに同じものが書き写されていた)
-# ---------------------------------------------------------------------- #
-
-
 async def wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> bool:
-    """条件成立をポーリングで待つ (固定 sleep より取りこぼしに強い)。"""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -506,7 +304,6 @@ async def wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> 
 
 
 async def recv_type(ws: Any, wanted: str, *, tries: int = 40, timeout: float = 0.2) -> dict | None:
-    """周期配信の state に紛れた特定 type のメッセージを 1 通拾う。"""
     for _ in range(tries):
         try:
             msg = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
@@ -525,7 +322,6 @@ async def require_type(ws: Any, wanted: str, *, tries: int = 40, timeout: float 
 
 
 async def expect_no_type(ws: Any, unwanted: str, *, tries: int = 8, timeout: float = 0.1) -> None:
-    """一定時間その type が流れてこないことを確認する。"""
     for _ in range(tries):
         try:
             msg = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
@@ -535,7 +331,6 @@ async def expect_no_type(ws: Any, unwanted: str, *, tries: int = 8, timeout: flo
 
 
 async def drain(ws: Any, *, timeout: float = 0.05, limit: int = 50) -> list[dict]:
-    """WS の残メッセージを排出する。タイムアウトしたら戻る。"""
     drained: list[dict] = []
     for _ in range(limit):
         try:
@@ -547,7 +342,6 @@ async def drain(ws: Any, *, timeout: float = 0.05, limit: int = 50) -> list[dict
 
 
 async def collect_types(ws: Any, wanted: Iterable[str], *, tries: int = 60) -> list[dict]:
-    """指定 type のメッセージを取りこぼさず集める (順序は到着順)。"""
     wanted_set = set(wanted)
     found: list[dict] = []
     for _ in range(tries):
@@ -561,10 +355,5 @@ async def collect_types(ws: Any, wanted: Iterable[str], *, tries: int = 60) -> l
 
 
 def seed_jitter_overrun(task: Any, *, count: int = 1, worst_s: float = 0.05) -> None:
-    """周期タスクの乱れカウンタへ直接値を据える (リセット配線だけを見たいテスト専用)。
-
-    実際に実周期を乱して検知させる経路は ``tests/test_periodic.py`` が単体で
-    尽くしている。ここで本物のタイミングを乱すと非決定性がテストへ持ち込まれる。
-    """
     task._jitter_overrun_count = count
     task._worst_jitter_s = worst_s

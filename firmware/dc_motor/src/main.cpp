@@ -1,29 +1,3 @@
-// DC モータ用自作モタドラのファームウェア本体（Arduino UNO R4 / RA4M1）。
-//
-// プロトコルの単一情報源は docs/motor_driver_can_protocol.md。
-// 機体依存の定数はすべて include/config.h にある。
-//
-// 責務の分割:
-//   MotorCan（Arduino 非依存）… フレームの符号化・復号、宛先判定、緊急停止ラッチ、
-//                                ウォッチドッグ、**両者の結線**（DcChannel）、
-//                                duty の分解、周期タイマ、シリアル行組み立て
-//   このファイル              … ペリフェラル初期化、チャンネル管理、CAN 送受信の配線
-//
-// 「出力禁止中は duty 指令を受け付けない」（仕様書 §3.5 / §5.2）は DcChannel が持つ。
-// ここで MotorSafety を直に触ると、その規則を迂回する経路（＝緊急停止中に回るモータ）が
-// 書けてしまう。
-//
-// サーボ用（firmware/servo）と同じ判断をする箇所は MotorCan 側に置くこと。
-// 両 main.cpp が同じ分岐を各自で持つと、片方だけ直したことに誰も気付けない。
-//
-// この基板の性質（仕様書 §4 / §8）:
-//   - 1 枚が 3 チャンネルを持ち、チャンネルごとに独立したデバイス ID を持つ
-//   - **フィードバックを一切持たない。** エンコーダ・電流センス・温度センサとも非搭載で、
-//     FEEDBACK の位置・速度はすべて 0、到達フラグも立てない
-//   - duty モードのみ受理する（位置・速度制御は実装ごと存在しない）
-//   - ゲートドライバの出力禁止（DIS）が無く、止める手段は PWM 0% だけ。その代わり
-//     物理緊急停止スイッチの状態を REF ピンで読める
-
 #include <Arduino.h>
 #include <Arduino_CAN.h>
 #include <stdlib.h>
@@ -48,16 +22,12 @@ using namespace motorcan;
 // 配線の静的検証
 // ===========================================================================
 
-// 使うピンをすべて 1 つの表にまとめてから検証する。以前は CAN ピンとの衝突しか
-// 見ておらず、**config.h の想定と実基板の配線がまるごと食い違っていてもビルドが通った**
-// （DIS として LOW/HIGH を振っていた D7 が、実機では ch2 の方向ピンだった）。
 static constexpr uint8_t kAllPins[] = {
     kPinPwm[0], kPinPwm[1], kPinPwm[2], kPinDir[0], kPinDir[1], kPinDir[2],
     kPinRef,    kPinLed,    kPinRgb,    kPinDip[0], kPinDip[1],
 };
 static constexpr uint8_t kAllPinCount = sizeof(kAllPins) / sizeof(kAllPins[0]);
 
-// CAN 線を他用途に奪われた基板は PC から停止できなくなる。
 static constexpr bool pinsAvoidCan() {
     for (uint8_t i = 0; i < kAllPinCount; ++i) {
         if (kAllPins[i] == PIN_CAN0_TX || kAllPins[i] == PIN_CAN0_RX) {
@@ -68,8 +38,6 @@ static constexpr bool pinsAvoidCan() {
 }
 static_assert(pinsAvoidCan(), "config.h のピンが CAN(D4/D5) と衝突している");
 
-// 同じピンを 2 つの役割に割り当てると、入力として読みたいピンを出力が駆動する
-// （REF が方向ピンに潰されれば、押しても止まらない基板になる）。
 static constexpr bool pinsAreUnique() {
     for (uint8_t i = 0; i < kAllPinCount; ++i) {
         for (uint8_t j = static_cast<uint8_t>(i + 1); j < kAllPinCount; ++j) {
@@ -82,23 +50,14 @@ static constexpr bool pinsAreUnique() {
 }
 static_assert(pinsAreUnique(), "config.h のピンが重複している");
 
-// デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
-// チャンネル間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）。
-// かつては基準 ID の表を持ち、重複・連続ブロック性・帯の 3 つを static_assert で
-// 見張っていたが、ビット分割にしたことで規則ごと消えた。
-
-// 下の g_pwm / g_channel は各チャンネルを明示的に初期化している。
-// チャンネルを増やすときはそれらの初期化子も一緒に足すこと。
 static_assert(kDcChannelCount == 3,
               "チャンネル数を変えたら g_pwm / g_channel の初期化子も更新すること");
 static_assert(kDcChannelCount <= motorcan::kMaxSlotNumber + 1,
               "チャンネル数がデバイス ID のスロット番号（3bit）に収まらない");
 
-// 宛先判定の結果はチャンネルのビットマスク（uint8_t）で返ってくる。
 static_assert(kDcChannelCount <= motorcan::kMaxChannels,
               "チャンネル数が FrameRoute::channelMask のビット数を超えている");
 
-// DIP のビット数と kPinDip の要素数がずれると、読まないピンが出るか配列外を読む。
 static_assert(kDipBitCount == sizeof(kPinDip) / sizeof(kPinDip[0]),
               "kDipBitCount と kPinDip の要素数が一致していない");
 
@@ -112,47 +71,33 @@ static PwmOut g_pwm[kDcChannelCount] = {
     PwmOut(kDcChannels[2].pwmPin),
 };
 
-// 仕様書 §5.4: 起動時は目標 0・出力停止・緊急停止ラッチは解除済み。
-// 宛先がチャンネルなので、ウォッチドッグもチャンネルごとに独立して動く
-// （1 チャンネルへの指令が途絶えても他は動き続ける）。
 static DcChannel g_channel[kDcChannelCount] = {
     DcChannel(kDefaultCommandTimeoutMs),
     DcChannel(kDefaultCommandTimeoutMs),
     DcChannel(kDefaultCommandTimeoutMs),
 };
 
-// DIP ブロックオフセット適用後の実効デバイス ID。0x00 なら駆動しない（§2.2）。
 static uint8_t g_deviceId[kDcChannelCount] = {0, 0, 0};
 
-// PwmOut::begin() を通したかどうか。ID 未設定チャンネルは begin() すらしない。
 static bool g_pwmStarted[kDcChannelCount] = {false, false, false};
 
-// SET_PARAM 0x00（max_duty）はチャンネル（＝デバイス）ごとの値。
 static float g_maxDuty[kDcChannelCount] = {
     kDcChannels[0].maxDuty,
     kDcChannels[1].maxDuty,
     kDcChannels[2].maxDuty,
 };
 
-// 送信周期は基板全体で 1 つ（チャンネルごとに変えると送信位相の分散が崩れる）。
 static uint16_t g_feedbackIntervalMs = kDefaultFeedbackIntervalMs;
 static PeriodicTimer g_feedbackTimer[kDcChannelCount];
 
 static PeriodicTimer g_infoTimer;
 
-// INFO は 1Hz で全チャンネル分を送るが、R4 の Arduino_CAN は標準 ID の mailbox を
-// 1 本しか使わない（R7FA4M1_CAN.cpp の write が CAN_MAILBOX_ID_0 固定）。同じ反復で
-// 連続送信すると 2 通目以降が必ず落ち、しかも kInfoIntervalMs が feedback_interval_ms の
-// 整数倍なので毎回同じ位相で落ちて永久に 1 通も出ない（実機で 4 秒間 0 通を観測）。
-// 1 反復 1 通に割り、落ちた ch はそのまま次の反復で送り直す。
-static uint8_t g_infoPendingCh = kDcChannelCount;  // kDcChannelCount = 送信待ちなし
+static uint8_t g_infoPendingCh = kDcChannelCount;
 static PeriodicTimer g_blinkTimer;
 static bool g_ledOn = false;
 
-// CAN が上がらなかった基板は PC から止められない。LED でそれと分かるようにする。
 static bool g_canFailed = false;
 
-// 送信の連続失敗数。数える規則は TxFailCounter が持つ（native テスト圏内）。
 static TxFailCounter g_txFail;
 
 #if HAS_RGB_LED
@@ -160,8 +105,6 @@ static Adafruit_NeoPixel g_strip(1, kPinRgb, NEO_GRB + NEO_KHZ800);
 #endif
 
 #if ENABLE_SERIAL_DEBUG
-// シリアルから duty を入力しているチャンネルと、その期限（規則は SerialOverride.h）。
-// CAN の SET_TARGET を受けたら解除して、PC の指令とシリアルが競合しないようにする。
 static SerialOverride g_serialOverride;
 static char g_serialStorage[kSerialLineCapacity];
 static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
@@ -171,8 +114,6 @@ static SerialLineBuffer g_serialLine(g_serialStorage, sizeof(g_serialStorage));
 // 入力
 // ===========================================================================
 
-// 物理緊急停止スイッチが押されているか。INPUT_PULLUP で読むので、
-// kRefActiveLow が真なら断線時も「押されている」側へ倒れる。
 static bool isPhysicalStopPressed() {
     const int level = digitalRead(kPinRef);
     return kRefActiveLow ? (level == LOW) : (level == HIGH);
@@ -182,33 +123,17 @@ static bool isPhysicalStopPressed() {
 // 出力
 // ===========================================================================
 
-// 仕様書 §2.2: オフセット適用後のデバイス ID が 0x00 のチャンネルは駆動しない。
 static bool isChannelConfigured(uint8_t ch) {
     return g_deviceId[ch] != kDeviceIdUnconfigured;
 }
 
-// モータへの出力はすべてこの関数を通す。ID 未設定・duty 上限・安全機構の
-// いずれかを迂回する経路を作らないため。
-//
-// duty を「大きさ」と「向き」に分ける規則は splitDuty が持つ。ここで符号を見て
-// 分岐すると、duty 0 のときに方向ピンが反転する実装を書き直せてしまう
-// （停止指令は毎ループ流れるので、機構に絶えず衝撃が入る）。
 static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
     if (!isChannelConfigured(ch) || !g_pwmStarted[ch]) {
-        // 設定ミスで意図しないアクチュエータが動くより、動かない方が安全。
-        // ID 未設定チャンネルは PwmOut::begin() を通していないのでパルスは 1 発も出ない。
-        // begin() が失敗したチャンネル（PWM チャンネルの取り合い等）も同様に触らない。
         return;
     }
 
-    // **出力を読む前に目標を畳む。** outputDuty() は出力禁止中に 0 を返すだけで
-    // 目標を残すので、これが無いとウォッチドッグ満了や緊急停止で止まった後に
-    // 「受理できない SET_TARGET」が 1 通届いただけで途絶前の duty が復活する
-    // （§3.1 / §6 のとおり受理できないフレームでもウォッチドッグは養われる）。
     g_channel[ch].tick(nowMs);
 
-    // outputDuty() は出力禁止中に 0 を返す。この基板には出力禁止ピン（DIS）が無く、
-    // PWM を 0% にすることだけが止める手段なので、ここを通さない経路を作らないこと。
     const DutyOutput out = splitDuty(g_channel[ch].outputDuty(nowMs), g_maxDuty[ch]);
     digitalWrite(kDcChannels[ch].dirPin, (out.reverse != kDirForwardIsLow) ? LOW : HIGH);
     g_pwm[ch].pulse_perc(out.magnitude * 100.0f);
@@ -218,25 +143,12 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
-// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
-// **ここで OR を足してはならない。** かつて 3 枚がそれぞれフラグを組み立てており、
-// この基板に `flags |= kReached;` を 1 行足しても native テストは 1 件も落ちなかった。
-// 到達フラグを立てないこと（仕様書 §3.2 / §8: 観測手段が 1 つも無い）は
-// board == Dc から導かれるので、この呼び出しが規則の全てになる。
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
                                 g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
                                 /*reached=*/false, /*sensorActive=*/false);
 }
 
-// CAN 送信 1 通ぶんの結果を記録する。**戻り値を捨てないための唯一の口**にしてあるので、
-// CAN.write() を直に呼ぶ経路を作らないこと。かつて戻り値を捨てていたため、INFO が
-// 4 秒間 1 通も出ていないことが LED にもログにも現れなかった。
-//
-// **空かなければ諦める。待ってはならない** —— 詰まったバスの上で loop() が止まると、
-// ウォッチドッグ満了の反映も出力の更新も止まる（電磁弁基板 app.cpp の sendFrame と
-// 同じ判断）。FEEDBACK は次の周期でまた送られるので、1 通落ちても PC 側の STALE 判定
-// （既定 500ms）には遠く届かない。
 static bool sendFrame(const CanMsg &msg) {
     if (CAN.write(msg) > 0) {
         g_txFail.onSuccess();
@@ -247,22 +159,14 @@ static bool sendFrame(const CanMsg &msg) {
 }
 
 static void sendFeedback(uint8_t ch, uint32_t nowMs) {
-    // **この基板は位置を持たないので状態フラグ 1 バイトだけ**（仕様書 §3.2）。
-    // 位置・速度に常に 0 を詰めても、PC には「測ったように見える 0」が届くだけ。
     uint8_t data[kFeedbackFlagsOnlyLength];
     const uint8_t len = encodeFeedback(data, buildStatusFlags(ch, nowMs));
 
-    // 緊急停止中・ウォッチドッグ作動中も送り続ける。
-    // 止めると PC 側が STALE になり、なぜ動かないのかを操縦者が判別できなくなる。
-    // **ID 未設定チャンネルはここへ来ない**（呼び出し側が isChannelConfigured で弾く。§2.2）。
     const CanMsg msg(CanStandardId(buildCanId(CommandType::Feedback, g_deviceId[ch])), len,
                      data);
     sendFrame(msg);
 }
 
-// 仕様書 §3.4: 焼き忘れた基板をセッティングタイムに見つけるための自己申告。
-// 低頻度（1Hz）で送るので、PC が後から起動しても拾える。
-// **送れたかを返す。** 落とすと 1 秒欠けるので、呼び出し側が次の反復で送り直す。
 static bool sendInfo(uint8_t ch) {
     uint8_t data[kInfoBaseLength];
     const uint8_t len = encodeInfo(data, kFirmwareVersion, kBoardKind, SlotKind::Actuator);
@@ -271,7 +175,6 @@ static bool sendInfo(uint8_t ch) {
 }
 
 static void applyParam(uint8_t ch, const SetParamCommand &cmd) {
-    // command_timeout_ms / feedback_interval_ms は 3 枚に共通なので MotorCan が持つ。
     if (applyCommonParam(cmd, g_channel[ch], g_feedbackIntervalMs)) {
         return;
     }
@@ -281,14 +184,11 @@ static void applyParam(uint8_t ch, const SetParamCommand &cmd) {
             break;
         case ParamId::CommandTimeoutMs:
         case ParamId::FeedbackIntervalMs:
-            // applyCommonParam が処理済み。ここへは来ない。
             break;
         case ParamId::ReachedTolerance:
         case ParamId::SlewRate:
         case ParamId::AngleMin:
         case ParamId::AngleMax:
-            // 仕様書 §3.3: サーボ固有のパラメータ。この基板は持たないので無視する。
-            // 受け付けて内部に持つと、PC 側から「設定できたのに効かない値」に見える。
             break;
     }
 }
@@ -297,11 +197,6 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
                                uint32_t nowMs) {
     switch (command) {
         case CommandType::SetTarget: {
-            // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
-            // 養わないと解除した直後に満了済みで動かない。
-            // 制御タイプが duty でなくても養うのは、通信自体は生きているため。
-            // 受理判定（DcChannel::setDuty）より必ず先に呼ぶこと。起動直後は
-            // §5.4 により未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる。
             g_channel[ch].feed(nowMs);
 
             const SetTargetCommand cmd = decodeSetTarget(msg.data, msg.data_length);
@@ -309,20 +204,14 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
                 return;
             }
 #if ENABLE_SERIAL_DEBUG
-            // PC がこのチャンネルへ指令を出している以上、シリアルの上書きは終わり。
             g_serialOverride.clear();
 #endif
-            // **制御タイプの受理判定（§4: duty のみ）は DcChannel が持つ。**
-            // ここに `if (cmd.type != ...)` を戻すと、この翻訳単位は native テストの
-            // 対象外なので消しても全ケース緑になる。
-            // 続けて緊急停止ラッチ中・ウォッチドッグ満了中は受け付けない。
             g_channel[ch].applySetTarget(cmd, nowMs);
             break;
         }
         case CommandType::SetParam: {
             const SetParamCommand cmd = decodeSetParam(msg.data, msg.data_length);
             if (cmd.valid) {
-                // 未知のパラメータ ID は decodeSetParam が弾く（仕様書 §3.3）。
                 applyParam(ch, cmd);
             }
             break;
@@ -330,8 +219,6 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
         case CommandType::EStop: {
             const EStopAction action = g_channel[ch].handleEStopFrame(msg.data, msg.data_length);
             if (action != EStopAction::None) {
-                // 停止はその場で PWM へ反映する。次のループを待つと、その間だけ
-                // 回り続ける（loop() の周期は保証されていない）。
                 applyChannelOutput(ch, nowMs);
 #if ENABLE_SERIAL_DEBUG
                 g_serialOverride.clear();
@@ -341,15 +228,11 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
         }
         case CommandType::Feedback:
         case CommandType::Info:
-            // 他基板がモタドラ → PC 方向へ送るフレーム。ID は衝突しないが念のため無視する。
             break;
     }
 }
 
 static void handleFrame(const CanMsg &msg) {
-    // Standard Frame 判定・予約コマンド種別・宛先判定（チャンネル表との突き合わせ /
-    // ブロードキャスト E_STOP は全チャンネル / ID 未設定チャンネルに自分宛は無い）は
-    // サーボ用と同じ規則なので MotorCanRouter に集約してある。
     const FrameRoute route = routeFrame(static_cast<uint16_t>(msg.getStandardId()),
                                         msg.isStandardId(), g_deviceId, kDcChannelCount);
     if (!route.accepted) {
@@ -375,12 +258,6 @@ static void pollCan() {
 // デバイス ID（DIP スイッチ = チャンネル表全体へのブロックオフセット）
 // ===========================================================================
 
-// 1 枚がチャンネルごとに別のデバイス ID を持つため、DIP は
-// **チャンネル表全体に加えるブロックオフセット**として働く。同一ファームの基板を
-// 複数枚使うとき、2 枚目の DIP を 1 段上げるだけで全チャンネルの ID がまとめて
-// 次のブロックへ移る。刻み幅がチャンネル数でないとブロックが重なる理由、
-// 負論理とビット順の対応、はみ出しの扱いは MotorCanRouter が持つ
-// （native テストで守られている）。
 static void resolveDeviceIds() {
     const uint8_t boardNumber = readDipSwitch(
         kPinDip, kDipBitCount, [](uint8_t pin) { return static_cast<int>(digitalRead(pin)); },
@@ -399,9 +276,6 @@ static void updateLed(uint32_t nowMs) {
                            (g_channel[ch].safetyStatusFlags(nowMs) & status_flag::kEStop) != 0);
     }
 
-    // CAN が上がらない・ID 未設定は「この基板は今すぐ直さないと使えない」状態なので、
-    // 平常のハートビートと区別が付くよう速い点滅にする（仕様書 §2.2）。
-    // **この基板は緊急停止を色（橙）で示す**ので、点滅の速さは平常と同じにする。
     const uint32_t interval = blinkIntervalFor(indication, kUnconfiguredBlinkIntervalMs,
                                                kHeartbeatIntervalMs, kHeartbeatIntervalMs);
     if (!g_blinkTimer.due(nowMs, interval)) {
@@ -411,10 +285,6 @@ static void updateLed(uint32_t nowMs) {
     digitalWrite(kPinLed, g_ledOn ? HIGH : LOW);
 
 #if HAS_RGB_LED
-    // 赤（速い点滅）= CAN 不通 / ID 未設定、橙 = 緊急停止ラッチ中、青 = 平常。
-    // 緊急停止だけ消灯を挟まないのは、「止まっている」ことを見落とさせないため。
-    // **平常に緑を使ってはならない（緑のランプの使用が禁止されている）。**
-    // 橙は緑ダイを 96 で点けるが発色はオレンジなので、緑のランプには当たらない。
     uint8_t r = 0;
     uint8_t g = 0;
     uint8_t b = 0;
@@ -437,16 +307,11 @@ static void updateLed(uint32_t nowMs) {
 
 #if ENABLE_SERIAL_DEBUG
 
-// 「<ch> <duty>」で 1 チャンネルへ duty を指令する。's' で全チャンネル停止。
-// duty は splitDuty が max_duty でクランプし、緊急停止ラッチ中は DcChannel が
-// 指令を拒否するため、ここから安全機構を迂回することはできない（仕様書 §5.2 の要求）。
 static void pollSerial(uint32_t nowMs) {
     while (Serial.available() > 0) {
         if (!g_serialLine.push(static_cast<char>(Serial.read()))) {
             continue;
         }
-        // 行の骨格の解釈（'s' / '<番号> <値>'）は parseSerialCommand が持つ。
-        // 値の読み取りだけを基板ごとに行う（DC は duty の float）。
         const SerialCommand cmd = parseSerialCommand(g_serialLine.line(), kDcChannelCount);
         if (cmd.kind == SerialCommand::Kind::StopAll) {
             g_serialOverride.clear();
@@ -454,20 +319,12 @@ static void pollSerial(uint32_t nowMs) {
                 g_channel[ch].hold();
             }
         } else if (cmd.kind == SerialCommand::Kind::Channel) {
-            // **float が入る唯一の経路。** toRaw が NaN と範囲外を飽和させるので、
-            // ここから先には CAN 経路と同じ値しか流れない（仕様書 §4）。
             g_channel[cmd.channel].setDuty(
                 fromRaw(toRaw(strtof(cmd.value, nullptr), kDutyScale), kDutyScale), nowMs);
             g_serialOverride.note(cmd.channel, nowMs);
         }
     }
 
-    // シリアル操作中はウォッチドッグを養い続ける。1 回だけ養う実装だと
-    // command_timeout_ms 後に必ず止まってデバッグにならない。
-    // **養う範囲と期限の規則は SerialOverride が持つ**（打ったチャンネルだけ /
-    // 最後の入力から kSerialOverrideHoldMs）。ここで全チャンネルを養うと、
-    // 1 行打っただけで基板ぜんぶの最後の砦が無期限に外れ、PC が落ちても
-    // 触っていないコンベアまで回り続ける。
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         if (g_serialOverride.shouldFeed(ch, nowMs)) {
             g_channel[ch].feed(nowMs);
@@ -475,15 +332,13 @@ static void pollSerial(uint32_t nowMs) {
     }
 }
 
-#endif  // ENABLE_SERIAL_DEBUG
+#endif
 
 // ===========================================================================
 // setup / loop
 // ===========================================================================
 
 void setup() {
-    // 何よりも先に出力段を停止側へ倒す。この基板には出力禁止ピンが無いので、
-    // PWM ピンが不定のまま電源が入るとモータが回り出しうる。
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         pinMode(kDcChannels[ch].pwmPin, OUTPUT);
         digitalWrite(kDcChannels[ch].pwmPin, LOW);
@@ -500,7 +355,6 @@ void setup() {
     }
 
 #if ENABLE_SERIAL_DEBUG
-    // USB CDC。D0/D1 は DIP に使っているので Serial1 は開かない（config.h 参照）。
     Serial.begin(kSerialBaud);
 #endif
 
@@ -509,30 +363,19 @@ void setup() {
     g_strip.setBrightness(kRgbBrightness);
 #endif
 
-    // PWM を立ち上げる前に実効デバイス ID を確定させる。
-    // ID 未設定のチャンネルには PwmOut::begin() すら通さず、パルスを 1 発も出さない
-    // （仕様書 §2.2: 設定ミスで意図しないアクチュエータが動くより動かない方が安全）。
     resolveDeviceIds();
 
     const uint32_t startMs = millis();
 
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        // 送信位相の分散は PeriodicTimer::stagger が持つ（式と理由は MotorLoopTimer.h）。
-        // ID 未設定のチャンネルは 1 通も送らない（§2.2）が、位相の割り当てはチャンネルの
-        // 添字で決まるので、ここは全チャンネル分やる（飛ばすと隣とずれ方が変わる）。
         g_feedbackTimer[ch].stagger(startMs, g_feedbackIntervalMs, ch, kDcChannelCount);
 
         if (!isChannelConfigured(ch)) {
             continue;
         }
-        // PwmOut::begin() の引数無し版は 490Hz・duty 50% で始まる。
-        // それではモータが一瞬回るので、周波数とデューティを明示して 0% から立ち上げる。
         g_pwmStarted[ch] = g_pwm[ch].begin(kPwmFrequencyHz, 0.0f);
     }
 
-    // 仕様書 §1: 1 Mbps。
-    // CAN が上がらない基板を駆動させると PC から止められないので、
-    // begin 失敗時は緊急停止ラッチに落として出力を封じる。
     if (!CAN.begin(CanBitRate::BR_1000k)) {
         g_canFailed = true;
         for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
@@ -540,15 +383,10 @@ void setup() {
         }
     }
 
-    // config.h のビルド時フラグを実行時フラグへ写す（仕様書 §5.1 / §8）。
-    // 判定そのものは MotorSafety にしか無いので、写し忘れれば有効のまま動く。
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         g_channel[ch].setWatchdogEnabled(WATCHDOG_ENABLED != 0);
     }
 
-    // 電源投入時点で物理緊急停止が押されているなら、その状態から始める。
-    // ここを省くと、押されたまま起動した基板が FEEDBACK の緊急停止ビットを立てず、
-    // PC からは「解除済み」に見える。
     const bool pressed = isPhysicalStopPressed();
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         g_channel[ch].applyPhysicalStop(pressed);
@@ -566,41 +404,30 @@ void loop() {
     pollSerial(nowMs);
 #endif
 
-    // **pollCan() より後に読むこと。** 押している間に解除フレームが届いても、
-    // ここで再ラッチされて「押している間は絶対に動かない」が成立する。
     const bool pressed = isPhysicalStopPressed();
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         g_channel[ch].applyPhysicalStop(pressed);
     }
 
-    // 出力は毎ループ書き直す。ウォッチドッグ満了のようにフレームを伴わない出力禁止は、
-    // ここを通らなければ PWM に反映されない（この基板には出力禁止ピンが無く、
-    // PWM を 0% にすることだけが止める手段）。
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
         applyChannelOutput(ch, nowMs);
     }
 
     for (uint8_t ch = 0; ch < kDcChannelCount; ++ch) {
-        // **ID を名乗れるチャンネルだけが FEEDBACK を送る**（仕様書 §2.2）。
         if (isChannelConfigured(ch) && g_feedbackTimer[ch].due(nowMs, g_feedbackIntervalMs)) {
             sendFeedback(ch, nowMs);
         }
     }
 
-    // 仕様書 §3.4: 版番号の自己申告。起動時 1 回ではなく低頻度で送り続けるのは、
-    // PC が基板より後から起動しても拾えるようにするため。
-    // **1 反復 1 通**（理由は g_infoPendingCh の宣言に付けてある）。
     if (g_infoTimer.due(nowMs, kInfoIntervalMs)) {
         g_infoPendingCh = 0;
     }
     if (g_infoPendingCh < kDcChannelCount) {
-        // **ID を名乗れないチャンネルは 1 通も送らない**（仕様書 §2.2）。飛ばして次へ進む。
         if (!isChannelConfigured(g_infoPendingCh)) {
             ++g_infoPendingCh;
         } else if (sendInfo(g_infoPendingCh)) {
             ++g_infoPendingCh;
         }
-        // 送信に失敗した ch はインデックスを進めず、次の反復で送り直す。
     }
 
     updateLed(nowMs);

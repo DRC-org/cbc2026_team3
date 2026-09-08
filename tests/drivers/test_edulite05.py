@@ -61,11 +61,6 @@ def test_fault_clear_requires_explicit_request() -> None:
 
 
 def test_set_id_carries_the_new_id_above_the_host_id() -> None:
-    """新 ID は データエリア2 の上位バイト、host_id は下位バイトに載る。
-
-    宛先 (dest_id) は**現在の** ID のまま。ここを新 ID にすると、まだその ID を
-    名乗っていないモータへ宛てることになり 1 台も受け取らない。
-    """
     driver = Edulite05Driver("m1", can_id=0x7F, host_id=0xFD)
 
     msg = driver.encode_set_id(0x01)
@@ -76,7 +71,6 @@ def test_set_id_carries_the_new_id_above_the_host_id() -> None:
 
 
 def test_set_id_rejects_ids_that_do_not_fit_the_id_field() -> None:
-    """モータ ID フィールドは 8bit。範囲外を黙って丸めると別の個体の ID を名乗る。"""
     driver = Edulite05Driver("m1", can_id=0x7F)
 
     with pytest.raises(ValueError):
@@ -86,11 +80,6 @@ def test_set_id_rejects_ids_that_do_not_fit_the_id_field() -> None:
 
 
 def test_set_id_is_not_part_of_any_automatic_startup_path() -> None:
-    """起動・励磁のどの手順にも ID 書き換えを混ぜないこと。
-
-    混ざると電源を入れ直すたびに ID が書き換わり、しかも 2 台が同じ ID を
-    名乗った瞬間に片方のフィードバックが永久に届かなくなる。
-    """
     driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
 
     steps = driver.initialization_steps() + driver.activation_steps()
@@ -258,7 +247,6 @@ def test_emergency_stop_uses_extended_disable_without_fault_clear() -> None:
 
 
 def test_activation_writes_current_position_before_enable() -> None:
-    """enable 直前に現在角を目標へ書かないと、有効化した瞬間に原点へ飛ぶ。"""
     driver = Edulite05Driver("m1", can_id=5)
     driver.update_state(edulite_feedback(driver, position=0.8))
     current = driver.state.position
@@ -290,7 +278,6 @@ def test_activation_in_velocity_mode_holds_zero_speed() -> None:
 
 
 def test_initialization_steps_never_contain_enable() -> None:
-    """起動フレームだけで enable すると現在角を書く前に励磁されてしまう。"""
     driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
     comm_types = [
         driver.parse_can_id(msg.arbitration_id)[0]
@@ -300,7 +287,6 @@ def test_initialization_steps_never_contain_enable() -> None:
 
 
 def test_feedback_probe_is_disable_without_fault_clear() -> None:
-    """フィードバックを引き出す問い合わせは、無励磁を保つフレームでなければならない。"""
     driver = Edulite05Driver("m1", can_id=5)
     probe = driver.feedback_probe_message()
 
@@ -310,15 +296,7 @@ def test_feedback_probe_is_disable_without_fault_clear() -> None:
 
 
 class TestIsEnergized:
-    """**「画面は正常なのに機体が動かない」型の異常を見えるようにする判定。**
-
-    起動時の励磁に失敗した EDULITE でも、`QueryDrivenTargetRefresher` の 20Hz の
-    問い合わせでフィードバックは流れ出す。鮮度は満たされ fault にも掛からないので、
-    この判定が無いとモータのヘルスは OK のまま無励磁だけが残る。
-    """
-
     def test_未受信では判定しない(self) -> None:
-        # 「分からない」を「無励磁」へ倒すと、CAN を立てる前の状態が警告になる
         assert Edulite05Driver("m1", can_id=5).is_energized() is None
 
     def test_モータモードなら励磁されている(self) -> None:

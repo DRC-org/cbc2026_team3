@@ -1,78 +1,14 @@
-# サーボ基板単体ベンチ (機構未装着) のモータ構成。
-#
-# robot_name を main_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
-# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
-# 現れず手動操縦パネルを開けない。
-#
-# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
-# (main.py の _positions_path) なので、このファイルを config/bench/servo/ に置くことで
-# robot_name は main_hand のまま config/bench/servo/main_hand_positions.yaml が読まれる。
-# 本番の config/main_hand_positions.yaml も他のベンチのものも無傷のまま残る。
-#
-# **このベンチではサーボ基板 1 枚の 5 スロットだけを登録する。** M3508 / EDULITE /
-# DC 基板を外すことで、登録されないバスへの送信も動作確認の対象も消え、確認が
-# 自作モタドラ (サーボ) の 1 枚に絞られる。
-#
-# ---------------------------------------------------------------------------
-# !!! スロット設定は config ではなくファームが基板番号ごと・スロットごとに持つ !!!
-# ---------------------------------------------------------------------------
-# firmware/servo/include/config.h の kServoBoards[] が、役割
-# (Servo / TouchSensor / Unused) もピンも初期角も可動範囲もパルス仕様 (270 度品か
-# 180 度品か) もセンサ極性も宣言する。**PC 側から選べる値ではない**ので、
-# ベンチは「どの基板番号として振る舞うか」を先に決め、その行の宣言へ登録を合わせる。
-# 役割と食い違う登録をしても起動は通るが、その ID は FEEDBACK も INFO も 1 通も
-# 返さない (センサ・未使用スロットは SET_TARGET を受け付けない) ため、症状は
-# 「配線したのに STALE のまま」だけになり、配線不良と区別が付かない。
-#
-#   基板番号 | SV0        | SV1         | SV2         | SV3         | SV4
-#   ---------+------------+-------------+-------------+-------------+-------------
-#      0     | 0x40 Servo | 0x41 Servo  | 0x42 Servo  | 0x43 Sensor | 0x44 Sensor
-#      1     | 0x48 Sensor| 0x49 Sensor | 0x4A Sensor | 0x4B Sensor | 0x4C Sensor
-#
-# **基板 #2 (0x50-0x54) はこの表に無い。** あちらは MCU が UNO R4 Minima で、
-# ファームが別バイナリ (env uno_r4_minima) のため Nano 版の表には現れない。
-# このベンチは Nano の基板を使うので、#2 として振る舞わせることはできない。
-#
-# サーボの型もスロットごとに宣言されるので、下の expected_angle_range_deg は
-# **そのスロットの行**と突き合わせること (現在は全スロット 270 度品)。
-#
-# ---------------------------------------------------------------------------
-# !!! このベンチは基板番号 0 として使う。基板の DIP を全 OFF にすること !!!
-# ---------------------------------------------------------------------------
-# **基板番号 1 は 5 スロットともスイッチで、駆動できるサーボが 1 本も無い**ので、
-# 机上ベンチとして成立しない (サーボの動作をここで確かめられない)。
-# 基板番号 0 なら 3 本のサーボと 2 本のスイッチが同時に載り、**本番の
-# config/main_hand.yaml とスロットの役割が一致する** —— ベンチで確かめた手順が
-# そのまま本番の gripper / wall_f / wall_r と 2 本のスイッチの確認になる。
-#
-# 本番では 3 本のサーボに機構上の役割名 (gripper / wall_f / wall_r) が付くが、
-# ベンチでは機構が付いていないのでスロット名で登録する。どのスロットにサーボを
-# 挿しても同じ手順で試せるようにするため。
-#
-# DIP を変えたらこのファイルの can_id も直すこと。実際の値は candump が教えてくれる:
-# FEEDBACK の CAN ID は 0x300 + デバイス ID なので、0x340 が流れていれば 0x40。
-# ID を合わせる仕組みはファーム側にも PC 側にも無く、ここが唯一の接点になる。
-
 robot_name: main_hand
 
 motors:
-  # SV0 (D4)。本番では gripper が載っているスロット。
   servo_sv0:
     driver: generic
     bus: generic_bus
     can_id: 0x40               # サーボ基板 #0 SV0
     control_type: position
-    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
-    # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
-    # 値は firmware/servo/include/config.h の kFirmwareVersion と
-    # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
-    # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
-    # **ファームを直したらここも直す。**
     expected_firmware: 6
     expected_angle_range_deg: 270.0
 
-  # SV1 (D5)。本番では wall_f。
   servo_sv1:
     driver: generic
     bus: generic_bus
@@ -81,7 +17,6 @@ motors:
     expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-  # SV2 (D6)。本番では wall_r。
   servo_sv2:
     driver: generic
     bus: generic_bus
@@ -90,32 +25,12 @@ motors:
     expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-# --- センサ入力 (スロット SV3 / D7) ---
-# **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
-# 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
-# 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない (照合する仕組みは無い)。
-#
-# motors ではなくこちらに書くことで、動作確認・目標値再送・UI のモータ一覧に
-# 「常に 0 のモータ」が並ばない。途絶は STALE として監視される。
-#
-# センサの FEEDBACK は DLC=1 (状態フラグのみ) で、位置を持たない。
-# 接触は Byte0 bit4 で報告されるが、**接触そのものは異常ではない** — 原点合わせで
-# 触れさせるたびに FAULT になってはならないので、ヘルス判定には入っていない。
-#
-# **センサにも expected_firmware を書く。** 同じ基板の servo_sv0〜sv2 が照合して
-# いるから省いてよい、とすると「そのモータを消したら照合も消える」という見えない
-# 依存になる。本番のサーボ基板 #1 は駆動するモータが 1 台も無く、焼き忘れを拾えるのが
-# sensors: の照合だけなので、ベンチもその書き方に揃えておく。
-#
-# 本番では SV3 が rotate の原点スイッチ、SV4 が y_axis 右のリミットスイッチ。
-# ベンチには軸が無いので、確認できるのは「押すと接触が PC まで届くか」だけになる。
 sensors:
   servo_sv3:
     bus: generic_bus
     can_id: 0x43               # サーボ基板 #0 SV3
     expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
 
-  # SV4 (D8)。本番では y_axis 右のリミットスイッチ。
   servo_sv4:
     bus: generic_bus
     can_id: 0x44               # サーボ基板 #0 SV4

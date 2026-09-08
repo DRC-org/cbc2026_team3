@@ -58,11 +58,6 @@ class TestDefaults:
         assert state.can_start_match is False
 
     def test_definitions_are_copied_into_each_state(self) -> None:
-        """定義をそのまま持つと、ある MatchState のチェックが定義側を汚す。
-
-        定義は yaml から 1 度だけ読んで使い回すため、複製しないと試合を
-        リセットしても前回のチェックが残ったまま READY で立ち上がる。
-        """
         first = _make()
         _complete(first, ROLE_PRE_MATCH)
         assert first.can_start_match is True
@@ -71,19 +66,12 @@ class TestDefaults:
         assert second.can_start_match is False
 
     def test_role_is_a_single_pre_match_list(self) -> None:
-        """ロールが増減すると試合開始ゲートの対象がそのまま変わる。
-
-        操縦者 2 名で分けていたものを 1 つへ統合した。分かれていた頃は
-        「片方だけ完了」で開始できない状態に意味があったが、2 名が同じ場所で
-        同じ機体を見る以上、独立した確認にはなっていなかった。
-        """
         assert set(_make().checklists) == {ROLE_PRE_MATCH}
 
 
 class TestChecklistCompletion:
     def test_needs_every_item_complete(self) -> None:
         state = _make()
-        # 1 項目でも残っている間は試合に入れない
         state.set_checklist_item(ROLE_PRE_MATCH, "power", True)
         assert state.checklists[ROLE_PRE_MATCH].completed is False
         assert state.can_start_match is False
@@ -109,7 +97,6 @@ class TestChecklistCompletion:
         assert state.set_checklist_item(ROLE_PRE_MATCH, "no_such_item", True) is False
 
     def test_empty_checklist_counts_as_complete(self) -> None:
-        """項目未定義のロールで永久にゲートが開かなくなるのを防ぐ。"""
         state = MatchState(definitions={ROLE_PRE_MATCH: []})
         assert state.phase is Phase.READY
 
@@ -125,7 +112,6 @@ class TestCourtChange:
         assert state.phase is Phase.SETUP
 
     def test_same_value_is_noop(self) -> None:
-        """同値の再設定でチェックリストを消さない (誤操作での作業やり直しを防ぐ)。"""
         state = _make()
         _complete_all(state)
 
@@ -169,7 +155,6 @@ class TestPhaseTransitions:
         assert state.match_reset() is True
         assert state.phase is Phase.SETUP
         assert state.checklists[ROLE_PRE_MATCH].completed is False
-        # コートは試合後もそのまま維持する (次の試合も同条件が普通)
         assert state.court is Court.BLUE
 
     def test_checklist_locked_during_match(self) -> None:
@@ -181,8 +166,6 @@ class TestPhaseTransitions:
 
 
 class TestPhaseSets:
-    """遷移条件の名前付き集合。lib/commands.py のコマンドゲートも同じ定数を参照する。"""
-
     def test_allows_follows_current_phase(self) -> None:
         state = _make()
         assert state.allows(PHASES_PREPARATION) is True
@@ -195,14 +178,12 @@ class TestPhaseSets:
         assert state.allows(PHASES_OUTSIDE_MATCH) is False
 
     def test_any_covers_every_phase(self) -> None:
-        """全フェーズ許可の宣言が 1 つでもフェーズを取りこぼすと、そのコマンドが死ぬ。"""
         assert frozenset(Phase) == PHASES_ANY
 
     def test_outside_match_is_the_complement_of_during_match(self) -> None:
         assert PHASES_OUTSIDE_MATCH == PHASES_ANY - PHASES_DURING_MATCH
 
     def test_start_gate_is_ready_only(self) -> None:
-        """指差喚呼が揃った READY 以外から試合へ入れてはならない。"""
         assert frozenset({Phase.READY}) == PHASES_START_GATE
 
 
@@ -227,21 +208,7 @@ class TestSerialization:
 
 
 class TestMatchTimer:
-    """試合時間タイマー。全デバイスの表示はこの経過時間だけを起点にする。
-
-    サーバーは残り時間ではなく「配信瞬間の経過ミリ秒」を配り、各デバイスが
-    自分の単調時計で進める。したがってここが誤ると、ずれは 1 台ではなく
-    **全デバイスで同じだけ**ずれる (画面同士を見比べても気付けない)。
-    """
-
     def test_default_clock_is_monotonic(self) -> None:
-        """既定の時刻源は単調時計であること。
-
-        time.time() は NTP 補正で後ろへ飛ぶことがあり、試合中に残り時間が
-        増える。全デバイスがこの値を起点にするため、ずれは 1 台ではなく
-        **全画面で同じだけ**現れ、見比べても気付けない。
-        テストは必ず clock を注入するので、既定値はここでしか踏まれない。
-        """
         default = inspect.signature(MatchState.__init__).parameters["clock"].default
         assert default is time.monotonic
 
@@ -260,7 +227,6 @@ class TestMatchTimer:
         assert state.elapsed_s == pytest.approx(12.5)
 
     def test_time_before_start_is_not_counted(self) -> None:
-        """セッティングタイムに費やした時間が試合時間に混ざってはならない。"""
         clock = FakeClock()
         state = _make_with_clock(clock)
         clock.advance(300.0)
@@ -269,12 +235,6 @@ class TestMatchTimer:
         assert state.elapsed_s == pytest.approx(0.0)
 
     def test_denied_match_start_does_not_move_the_origin(self) -> None:
-        """試合中に届いた match_start はフェーズゲートで弾かれる。そこで起点を
-        引き直すと、機体は動いたままタイマーだけが満了時間へ巻き戻る。
-
-        操縦者の押し間違いや Monitor の二重送信 1 回で成立し、しかも
-        「弾かれた」ことは画面に出るので**タイマーの巻き戻りだけが残る**。
-        """
         clock = FakeClock()
         state = _make_with_clock(clock)
         _enter_match(state)
@@ -284,7 +244,6 @@ class TestMatchTimer:
         assert state.elapsed_s == pytest.approx(40.0)
 
     def test_finish_freezes_the_value(self) -> None:
-        """結果確認中に数字が進み続けると、何秒で終えたのかが読めなくなる。"""
         clock = FakeClock()
         state = _make_with_clock(clock)
         _enter_match(state)
@@ -310,7 +269,6 @@ class TestMatchTimer:
         assert state.elapsed_s == 0.0
 
     def test_second_match_starts_from_zero(self) -> None:
-        """1 試合目の凍結値が残ると、2 試合目が途中から始まる。"""
         clock = FakeClock()
         state = _make_with_clock(clock)
         _enter_match(state)
@@ -335,8 +293,6 @@ class TestMatchTimer:
         assert timer == {"running": True, "elapsed_ms": 7250, "duration_ms": 120000}
 
     def test_duration_comes_from_settings_not_a_literal(self) -> None:
-        """試合時間は config/system.yaml の値。ここに数値を焼き付けると
-        当日ルールが変わったときに yaml を直しても画面が追従しない。"""
         state = _make_with_clock(FakeClock(), duration_s=90.0)
         assert state.to_dict()["timer"]["duration_ms"] == 90000
 
@@ -355,7 +311,6 @@ class TestLoadDefinitions:
         assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="power", label="電源投入確認")]
 
     def test_load_always_defines_every_role(self) -> None:
-        """定義が空でもロールは必ず存在させる (KeyError を UI 側に出さない)。"""
         from lib.match_state import ALL_ROLES, load_checklist_definitions
 
         defs = load_checklist_definitions({})
@@ -379,12 +334,6 @@ class TestLoadDefinitions:
         assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="ok", label="有効")]
 
     def test_load_carries_group(self) -> None:
-        """group は「その項目をどのコントロールの隣に置くか」の唯一の宣言。
-
-        サーバーは語彙を検証せず素通しする。未知の名前を弾くと、UI が知らない
-        group を書いた瞬間に起動しなくなり、区分を持たないベンチ設定 8 セットも
-        通らない。項目が画面から消えないことは UI 側 (未知は「その他」へ描く) が守る。
-        """
         from lib.match_state import load_checklist_definitions
 
         defs = load_checklist_definitions(
@@ -403,44 +352,23 @@ class TestLoadDefinitions:
         ]
 
     def test_load_rejects_unknown_role(self) -> None:
-        """**ロール名の誤りは 1 項目の欠落と失敗の質が違うので拒否する。**
-
-        `ALL_ROLES` に無いロールへ書かれた項目は `_rebuild_checklists` の段で丸ごと
-        落ち、`pre_match` は空リストになる。`completed` は `all([])` で True なので、
-        **指差喚呼を 1 つも読み上げないまま試合開始のゲートが開く**。しかも画面には
-        項目が 1 つも出ないため、操縦者にはゲートが開いている理由が分からない。
-
-        `group` の未知の値を素通しするのとは逆方向だが矛盾しない —— あちらは
-        「置き場所が既定へ落ちる」だけで項目もゲートも残る。
-        """
         from lib.match_state import load_checklist_definitions
 
         with pytest.raises(ValueError, match="main_hand"):
             load_checklist_definitions(
                 {
                     "checklists": {
-                        # 旧 2 ロール構成の yaml を持ち込んだ場合
                         "main_hand": [{"id": "power", "label": "電源投入確認"}],
                     }
                 }
             )
 
     def test_unknown_role_would_have_opened_the_gate(self) -> None:
-        """拒否しないと何が起きるかを、拒否とは独立に固定する。
-
-        `load_checklist_definitions` を通さずに `MatchState` を直接組み立てて、
-        「項目が 1 つも無いロール」が試合開始を通してしまうことを見る。この性質
-        自体は正しい (項目 0 件の構成は `config/bench/*` に実在する) ので、
-        **入口で弾くしか防ぎようが無い**ことの根拠になる。
-        """
         state = MatchState({ROLE_PRE_MATCH: []})
 
         assert state.can_start_match is True
 
     def test_group_survives_rebuild_and_reaches_the_wire(self) -> None:
-        """定義の複製 (_rebuild_checklists) で group を落とすと、画面では全項目が
-        「その他」へ落ちる。症状は「配置だけが効かない」で、config からもログからも
-        理由が読めない。"""
         state = MatchState({ROLE_PRE_MATCH: [ChecklistItem(id="court", label="C", group="court")]})
 
         items = state.to_dict()["checklists"][ROLE_PRE_MATCH]["items"]

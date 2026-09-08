@@ -1,6 +1,6 @@
 # 見た目と操作 — どう見せ、どう操作するか
 
-**「今どうなっているか」だけ。** 理由は `CLAUDE.md`、経緯は `docs/impl_plan.md` の Phase 4。
+**「今どうなっているか」だけ。** 理由は `docs/invariants.md` §8、経緯は `docs/history/` にある。
 画面の構成は `docs/web/screens.md`、壊れやすい点は `docs/web/pitfalls.md`。
 
 ---

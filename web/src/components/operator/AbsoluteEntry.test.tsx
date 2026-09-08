@@ -35,20 +35,11 @@ describe("AbsoluteEntry", () => {
     await user.type(input, "12");
     await user.click(screen.getByRole("button", SEND));
 
-    // 丸めるのはサーバーの仕事。ここで先に丸めると判定が 2 箇所になる
     expect(onSet).toHaveBeenCalledWith("y_axis", 12);
   });
 
-  /**
-   * **既に端にいる軸へ範囲外を送るのが、この部品の壊れ方だった。**
-   *
-   * `dirty` を落として `axis.target` の変化に任せるだけだと、target が動かないので
-   * effect も走らず、入力欄は範囲外の値のまま (オレンジ枠のまま) 居座る。
-   * 操縦者には「送ったのに反映されていない」としか見えない。
-   */
   it("範囲外を送った後、入力欄に今の目標値が戻る", async () => {
     const user = userEvent.setup();
-    // target が既に max (20)。ここへ 999 を送っても target は動かない
     const onSet = mount(axisOf({ target: 20, value: 20 }));
 
     const input = screen.getByRole("spinbutton", LABEL);
@@ -60,12 +51,10 @@ describe("AbsoluteEntry", () => {
 
     expect(onSet).toHaveBeenCalledWith("y_axis", 999);
     expect(input).toHaveValue(20);
-    // 範囲外の警告枠も残さない
     expect(input.className).not.toContain("border-warning");
   });
 
   it("編集中はサーバーの配信で入力欄を書き換えない", async () => {
-    // 20Hz で動く現在値に追わせると、入力欄として使えなくなる
     const user = userEvent.setup();
     const onSet = vi.fn();
     const view = render(

@@ -1,8 +1,3 @@
-"""MotorDriver の契約に対するテスト。
-
-個々のプロトコル実装ではなく「全ドライバが守るべき約束」を検証する。
-"""
-
 from __future__ import annotations
 
 import can
@@ -14,9 +9,6 @@ from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 
-#: モータ単位の能動テスト (旧 MotorCheckRunner) 用に置かれていた語彙。
-#: 動作確認は両ハンド 1 本のシーケンス (sequences/motor_check.py) へ移り、合否は
-#: シーケンスエンジンの到達判定が担うので、この API 群は 1 つも復活させない
 _REMOVED_CHECK_API = (
     "check_command",
     "evaluate_check_result",
@@ -32,8 +24,6 @@ _ALL_DRIVERS = (MotorDriver, GenericDriver, M3508Driver, Edulite05Driver, Dm3520
 
 
 class _ProtocolOnlyDriver(MotorDriver):
-    """プロトコル層だけを実装したドライバ。"""
-
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
         return can.Message(arbitration_id=1, data=bytes(8))
 
@@ -45,8 +35,6 @@ class _ProtocolOnlyDriver(MotorDriver):
 
 
 class TestDeadApisAreRemoved:
-    """「テストや診断だけが唯一の利用者」の API は残さない。"""
-
     def test_prepare_check_is_gone(self) -> None:
         assert not hasattr(MotorDriver, "prepare_check")
         assert not hasattr(Edulite05Driver, "prepare_check")
@@ -66,12 +54,6 @@ class TestDeadApisAreRemoved:
 
 
 class TestAbstractSurfaceIsProtocolOnly:
-    """新しいドライバに書かせるのはプロトコル層の 3 つだけにする。
-
-    呼ばれない実装を abstractmethod で強いると、書く側は「何のために要るのか」を
-    確かめられないまま形だけ埋めることになる。
-    """
-
     def test_abstract_methods_are_protocol_only(self) -> None:
         assert MotorDriver.__abstractmethods__ == frozenset(
             {"encode_target", "decode_feedback", "matches_feedback"}
@@ -83,12 +65,6 @@ class TestAbstractSurfaceIsProtocolOnly:
 
 
 class TestOriginCaptureCapability:
-    """「`SET_ZERO` で原点を切り直せるか」はドライバ自身が宣言する。
-
-    `main.py` や UI にドライバ種別を書き写して導出し直すと、ドライバを足した人が
-    そちらの表を直し忘れる (`TelemetrySupport` と同じ方針)。
-    """
-
     def test_既定は手段なし(self) -> None:
         driver = _ProtocolOnlyDriver("x", 1)
         assert driver.supports_origin_capture() is False
@@ -100,7 +76,6 @@ class TestOriginCaptureCapability:
         assert driver.supports_origin_capture() is True
 
     def test_edulite_は無励磁にしてから切り直す(self) -> None:
-        """励磁したまま送るとドライバ内部の位置目標が旧座標のまま残り、軸が飛ぶ。"""
         driver = Edulite05Driver("rotate_r", can_id=0x11)
 
         ((disable, _delay),) = driver.deactivation_steps()
@@ -114,9 +89,6 @@ class TestOriginCaptureCapability:
         )
 
     def test_dm3520_は対象外(self) -> None:
-        """`SET_ZERO` の安全な順序は disable を要求するが、`sub_lift` は disable
-        すると自重で落ちる (減速比 19.2 のギヤに乗っているだけで保持ブレーキが無い)。
-        """
         driver = Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11)
         assert driver.supports_origin_capture() is False
 
@@ -124,13 +96,9 @@ class TestOriginCaptureCapability:
         assert GenericDriver("servo", can_id=0x41).supports_origin_capture() is False
 
     def test_m3508_は対象外(self) -> None:
-        """累積角の原点は PC 側 (`M3508PositionLoop`) が持つ。CAN で送る原点は無い。"""
         assert M3508Driver("y_axis_r", can_id=1).supports_origin_capture() is False
 
     def test_切り直すフレームだけでは名乗れない(self) -> None:
-        """無励磁にする手段が無いまま能力ありと名乗ると、**励磁したまま原点を
-        動かす経路が黙って通る。**
-        """
 
         class _HalfDeclared(_ProtocolOnlyDriver):
             def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
@@ -140,13 +108,6 @@ class TestOriginCaptureCapability:
 
 
 class TestFirmwareConfirmedCapability:
-    """`INFO` (仕様書 §3.4) を送らないドライバは `firmware_confirmed()` が None のまま
-    (`is_energized()` と同じ「申告そのものを持たない」の表現)。
-
-    None を False へ倒すと、INFO を送らない 3 種の全モータが常時「未確認」として
-    `RobotServer._firmware_unconfirmed_motors` に載ってしまう。
-    """
-
     def test_既定は_None(self) -> None:
         assert _ProtocolOnlyDriver("x", 1).firmware_confirmed() is None
 
@@ -161,5 +122,4 @@ class TestFirmwareConfirmedCapability:
         assert driver.firmware_confirmed() is None
 
     def test_generic_は自己申告の有無を返す(self) -> None:
-        """`GenericDriver` だけが INFO を送るので、ここだけ bool を返す。"""
         assert GenericDriver("gripper", 0x40).firmware_confirmed() is False

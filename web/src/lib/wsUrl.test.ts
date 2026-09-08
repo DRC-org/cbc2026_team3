@@ -88,8 +88,6 @@ describe("localStorage への保存", () => {
   });
 
   it("localStorage が使えない環境でも例外を投げない", () => {
-    // プライベートブラウジング等ではアクセス自体が throw する。
-    // 接続先設定の保存に失敗しても UI 全体を落としてはならない
     const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("QuotaExceededError");
     });

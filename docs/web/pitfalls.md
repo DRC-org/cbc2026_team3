@@ -223,7 +223,7 @@ flex の既定（`flex-shrink: 1`）は列の全パネルを一律に縮める�
 - **依存は `outcome` であって `forcedOpen` ではない。** 失敗したまま押し直す（配線を直して
   再実行）と `forcedOpen` は真のままなので、2 回目以降は一度も動かない
 
-**モーダルへ戻すのは禁止**（`CLAUDE.md`。駆動中に EMG STOP を覆う）。
+**モーダルへ戻すのは禁止**（`docs/invariants.md` §8。駆動中に EMG STOP を覆う）。
 
 ---
 

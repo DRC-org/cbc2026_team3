@@ -1,6 +1,6 @@
 # 画面と部品 — どの画面に何が出るか
 
-**「今どうなっているか」だけ。** 理由は `CLAUDE.md`、経緯は `docs/impl_plan.md` の Phase 4。
+**「今どうなっているか」だけ。** 理由は `docs/invariants.md` §8、経緯は `docs/history/` にある。
 配色と操作は `docs/web/design.md`、値の届き方は `docs/web/data_flow.md`。
 
 ---

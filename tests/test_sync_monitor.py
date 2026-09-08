@@ -9,13 +9,10 @@ from lib.axis_sync import MotorSpec, SyncGroup
 from lib.control.sync_monitor import SyncMonitor
 from tests.fake_clock import FakeClock
 
-# 実機の y_axis (ラックアンドピニオン) と同じ構成。左右は逆回転で同一動作
 SCALE = 864.15
 
 
 class _StubDriver:
-    """SyncMonitor が触る API (feedback_position) だけを実装したスタブ。"""
-
     def __init__(self, position: float = 0.0) -> None:
         self.position = position
 
@@ -35,8 +32,6 @@ def _pair_group(name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
 
 
 class _Fixture:
-    """監視器 + スタブ一式。既定は y_axis ペア 1 組。"""
-
     def __init__(
         self,
         groups: tuple[SyncGroup, ...] | None = None,
@@ -69,7 +64,6 @@ class _Fixture:
         self.violations.append((group_name, deviation))
 
     def place(self, name: str, value: float, *, fresh: bool = True) -> None:
-        """人間の単位で位置を与える (指令単位へ順換算してフィードバックに載せる)。"""
         member = self._member(name)
         self.drivers[name].position = value * member.scale + member.offset
         if fresh:
@@ -98,7 +92,6 @@ class TestViolationDetection:
         fx.place("y_axis_l", 20.0)
         fx.monitor.step()
 
-        # 1 サンプルの外れ値で試合中に緊急停止させないためのノイズ対策
         fx.place("y_axis_l", 10.0)
         fx.monitor.step()
         assert fx.violations == []
@@ -125,7 +118,6 @@ class TestViolationDetection:
 
         for _ in range(5):
             fx.monitor.step()
-        # 緊急停止が連打されないよう、同じ軸では 1 度しか発報しない
         assert len(fx.violations) == 1
 
         fx.monitor.reset()
@@ -135,33 +127,19 @@ class TestViolationDetection:
 
 
 class TestSuspendGroup:
-    """**この層だけを見る。** 零点確定の統合経路では、無励磁だったり
-    フィードバックが届いていなかったりで他の条件が先に発報を止めうる。
-    その条件を 1 つも与えずに「一時停止だけが効いている」ことを確かめる。
-    """
-
     def _violating(self, *, samples: int = 2) -> _Fixture:
-        """許容 2.0 に対して 10.0 ずれた、鮮度も揃った状態。
-
-        止めなければ ``samples`` 周期で必ず発報する。実機の `rotate` は原点が
-        揃っていないだけで 175.879deg を記録している。
-        """
         fx = _Fixture(violation_samples=samples)
         fx.place("y_axis_r", 10.0)
         fx.place("y_axis_l", 20.0)
         return fx
 
     async def test_止めなければ発報する(self) -> None:
-        """下の 2 つが「止まっているから緑」ではないことの土台。"""
         fx = self._violating()
         fx.monitor.step()
         fx.monitor.step()
         assert len(fx.violations) == 1
 
     async def test_一時停止中は発報しない(self) -> None:
-        """左右へ SET_ZERO を送るあいだ、2 台の座標系が違うので偏差という量が
-        定義を失う。CAN 送信 2 通が debounce の 40ms に収まる保証は無い。
-        """
         fx = self._violating()
 
         with fx.monitor.suspend_group("y_axis"):
@@ -172,7 +150,6 @@ class TestSuspendGroup:
         assert fx.monitor.violated == frozenset()
 
     async def test_抜けたら判定が戻る(self) -> None:
-        """**戻し忘れると、以後の試合中ずっと監視が死んだまま残る。**"""
         fx = self._violating()
 
         with fx.monitor.suspend_group("y_axis"):
@@ -194,9 +171,8 @@ class TestSuspendGroup:
         assert len(fx.violations) == 1
 
     async def test_停止前の連続カウントを持ち越さない(self) -> None:
-        """持ち越すと、再開後の 1 サンプルだけで debounce (2 サンプル) が成立する。"""
         fx = self._violating(samples=2)
-        fx.monitor.step()  # 1 サンプル目を数えた状態で入る
+        fx.monitor.step()
 
         with fx.monitor.suspend_group("y_axis"):
             fx.monitor.step()
@@ -207,9 +183,6 @@ class TestSuspendGroup:
         assert len(fx.violations) == 1
 
     async def test_他の軸の監視は止めない(self) -> None:
-        """**全体 pause にしてはならない。** 零点確定は動作確認の最初のステップで、
-        そのあいだ他の軸も動く。
-        """
         fx = _Fixture(groups=(_pair_group("y_axis"), _pair_group("rotate")), violation_samples=1)
         fx.place("rotate_r", 10.0)
         fx.place("rotate_l", 20.0)
@@ -230,7 +203,6 @@ class TestSuspendGroup:
         assert fx.monitor.is_suspended("y_axis") is False
 
     async def test_知らない軸は拒否する(self) -> None:
-        """呼び出し側の取り違えを黙って通すと、止めたつもりの監視が動き続ける。"""
         fx = _Fixture()
         with pytest.raises(KeyError), fx.monitor.suspend_group("sub_lift"):
             pass
@@ -243,10 +215,9 @@ class TestFeedbackFreshness:
         fx.place("y_axis_l", 20.0)
 
         fx.clock.advance(0.6)
-        fx.place("y_axis_r", 10.0)  # 片側だけ鮮度を更新
+        fx.place("y_axis_r", 10.0)
 
         fx.monitor.step()
-        # 比較対象が 1 台では偏差を判定できない
         assert fx.violations == []
 
     async def test_missing_feedback_does_not_fire(self) -> None:
@@ -256,7 +227,6 @@ class TestFeedbackFreshness:
         fx.place("y_axis_l", 20.0, fresh=False)
 
         fx.monitor.step()
-        # 起動直後のフィードバック未受信で緊急停止させない
         assert fx.violations == []
 
     async def test_stale_member_resets_consecutive_count(self) -> None:
@@ -271,7 +241,6 @@ class TestFeedbackFreshness:
 
         fx.place("y_axis_l", 20.0)
         fx.monitor.step()
-        # 判定スキップを挟んだら連続カウントはやり直し
         assert fx.violations == []
 
         fx.monitor.step()
@@ -294,18 +263,12 @@ class TestCallbackRobustness:
 
         fx.monitor.step()
 
-        # 監視が死ぬ方が危険なので、例外は握って残りの軸も判定し続ける
         assert calls == ["y_axis", "rotate"]
         assert fx.monitor.violated == frozenset({"y_axis", "rotate"})
 
 
 class TestSamplingPeriod:
     async def test_processing_time_does_not_inflate_period(self) -> None:
-        """「50Hz x 2 サンプル = 40ms なら機構破損に間に合う」という前提を実測で固定する。
-
-        後置 sleep だと実周期が ``interval + 判定時間`` になり、この前提が負荷に
-        比例して崩れる (lib/axis_sync.py のモジュール docstring が置いている前提)。
-        """
         clock = FakeClock(start=0.0)
         sampled: list[float] = []
 
@@ -315,7 +278,6 @@ class TestSamplingPeriod:
         class _SlowMonitor(SyncMonitor):
             def step(self) -> None:
                 sampled.append(clock.now)
-                # 1 回の判定に 8ms かかる状況 (CAN 受信と競合して重い周期)
                 clock.advance(0.008)
                 if len(sampled) >= 3:
                     self.request_stop()
@@ -352,10 +314,6 @@ class TestLifecycle:
         assert len(fx.violations) == 1
 
     async def test_double_start_raises_and_spawns_no_second_task(self) -> None:
-        """3 つの周期タスクで揃えた作法 (lib/control/periodic.py)。
-
-        黙って無視すると「起動したつもり」のまま止まっている監視に気付けない。
-        """
         fx = _Fixture()
         before = len(asyncio.all_tasks())
         fx.monitor.start()

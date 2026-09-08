@@ -6,7 +6,7 @@ namespace {
 
 FrameRoute rejected() { return FrameRoute{false, CommandType::Feedback, 0}; }
 
-}  // namespace
+}
 
 FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceIds,
                       uint8_t channelCount) {
@@ -14,11 +14,6 @@ FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceId
         return rejected();
     }
     if (channelCount > kMaxChannels) {
-        // 切り詰めると 9 番目以降のチャンネルへブロードキャスト E_STOP が届かないのに
-        // 「受理」と答えることになり、止まらないチャンネルを持ったまま動く基板になる。
-        // 「全員に届ける」ことが仕事の関数なので、全部を捨てる方に倒す（フレームを
-        // 1 通も処理しなければ SET_TARGET も通らず、その基板はそもそも駆動しない）。
-        // 通常は config.h の static_assert が先に弾くので、これは最後の防壁。
         return rejected();
     }
 
@@ -28,8 +23,6 @@ FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceId
     }
 
     if (info.deviceId == kDeviceIdBroadcast) {
-        // 0xFF は E_STOP のブロードキャスト専用（仕様書 §2.2）。
-        // SET_TARGET を 0xFF で送っても誰も動かしてはならない。
         if (info.command != CommandType::EStop) {
             return rejected();
         }
@@ -52,8 +45,6 @@ FrameRoute routeFrame(uint16_t canId, bool isStandardId, const uint8_t *deviceId
     }
     return FrameRoute{true, info.command, mask};
 }
-
-
 
 void resolveDeviceIds(uint8_t *out, uint8_t count, BoardKind board, uint8_t boardNumber,
                       bool (*isDevice)(uint8_t slot)) {
@@ -80,4 +71,4 @@ uint8_t readDipSwitch(const uint8_t *pins, uint8_t count, int (*readPin)(uint8_t
     return value;
 }
 
-}  // namespace motorcan
+}

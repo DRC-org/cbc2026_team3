@@ -37,8 +37,6 @@ describe("ルーティング", () => {
   });
 
   it("タブ遷移で ?ws= の上書きを落とさない", async () => {
-    // 接続先の上書きはロード時にしか読まれないため、search を捨てると
-    // 「タブを切り替えてリロードしたら既定へ戻る」事故になる
     const router = renderAt("/monitor?ws=drc:8080");
     await userEvent.click(screen.getByRole("link", { name: /Main Hand/ }));
 

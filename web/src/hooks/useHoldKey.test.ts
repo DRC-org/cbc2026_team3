@@ -4,13 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useHoldKey } from "@/hooks/useHoldKey";
 import { HOLD_DELAY_MS, HOLD_INTERVAL_MS } from "@/hooks/useRepeatController";
 
-/**
- * キーボードからのジョグ。
- *
- * `useHoldRepeat` と同じく、守るのは **止まること**。キーボードには
- * 「離したのに `keyup` が来ない」経路 (Alt+Tab・タブの背面化) があるぶん、
- * ポインタより停止の網を広く張る必要がある。
- */
 function down(key: string, init: KeyboardEventInit = {}, target: EventTarget = window): boolean {
   const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
   target.dispatchEvent(event);
@@ -52,8 +45,6 @@ describe("useHoldKey", () => {
   });
 
   it("OS のキーリピートでは発火源を増やさない", () => {
-    // 連続発火を駆動するのは自前のタイマー 1 本だけ。OS のリピートが重なると
-    // 押しっぱなしのジョグが 2 倍の速さで出る
     const { fire } = setup();
     act(() => void down("ArrowRight"));
     act(() => void down("ArrowRight", { repeat: true }));
@@ -63,7 +54,6 @@ describe("useHoldKey", () => {
   });
 
   it("入力欄で打っている間は発火しない", () => {
-    // 目標値を打ちながらの ← → はカーソル移動であって機体を動かす操作ではない
     const { fire } = setup();
     const input = document.createElement("input");
     document.body.appendChild(input);
@@ -88,7 +78,6 @@ describe("useHoldKey", () => {
     expect(prevented).toBe(true);
   });
 
-  // 停止経路。1 つでも欠けると「離したのに動き続ける」になる
   it("keyup で止まる", () => {
     const { fire } = setup();
     act(() => void down("ArrowRight"));
@@ -128,7 +117,6 @@ describe("useHoldKey", () => {
   });
 
   it("押している最中に無効化されたら止まる", () => {
-    // 緊急停止・切断・軸選択の移動・モード離脱
     const { fire, view } = setup(true);
     act(() => void down("ArrowRight"));
     act(() => vi.advanceTimersByTime(HOLD_DELAY_MS + HOLD_INTERVAL_MS * 2));

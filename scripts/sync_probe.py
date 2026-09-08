@@ -1,41 +1,3 @@
-"""左右直結ペア軸のずれを受動的に観測する (PID / 同期補正のチューニング用)。
-
-**このスクリプトは CAN へ 1 通も送信しない。** 制御プログラム (main.py) が動いて
-いる最中に別プロセスで起動し、同じフィードバックを横から読むために作ってある。
-送信しないので 0x200 の奪い合いも起きない。
-
-**shebang は持たない (実行属性も付けない)。** python-can と lib/ を import するので
-プロジェクトの venv でしか動かず、`uv run python scripts/sync_probe.py` としてしか
-呼ばれない。理由は scripts/edulite_set_id.py の冒頭と同じ。
-
---- なぜ専用ツールが要るか -------------------------------------------------
-同期偏差は WS 配信 (20Hz) の `manual.axes[].deviation` に**瞬時値**としてしか出ず、
-しかも手動操縦パネルの軸行にしか現れない。y_axis の移動は数百 ms で終わるので、
-20Hz では数サンプルしか映らず「**移動中に最大どれだけ開いたか**」を読めない。
-補正の効果は移動中のピークにしか現れないので、それが見えないまま sync_kp を
-上げ下げしても効いているのかどうか分からない。
-
-このツールは C620 が 1kHz で流すフィードバックをそのまま読むのでピークを取り逃さず、
-静止 → 移動 → 静止 の 1 区間を自動で切り出して要約する。
-
---- 読める値と読めない値 ---------------------------------------------------
-偏差の算出は ``SyncGroup.deviation()`` をそのまま呼ぶ。逆換算をここへ書き写すと、
-逆回転ペアの符号を落とした「別の値」を見ながらゲインを決めることになる。
-
-**絶対位置は制御プログラム側と一致しない。** M3508Driver は最初に受け取った
-フィードバックを累積角の原点にするので、このツールの原点は「ツールを起動した瞬間の
-姿勢」である。したがって表示される位置は起動時からの相対値で、偏差も同じだけ
-オフセットを持ちうる。**チューニングで見たいのは移動中の偏差の変化量**なので
-これで足りるが、絶対的なずれ量として読んではならない。
-
-使い方:
-    # 既定 (config/main_hand.yaml の y_axis) を観測。Ctrl-C で終了
-    uv run python scripts/sync_probe.py
-
-    # 波形も残す (後から解析する / 補正あり・なしを比べる)
-    uv run python scripts/sync_probe.py --csv /tmp/y_axis_before.csv
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -56,20 +18,14 @@ from lib.config_schema import load_robot_config, load_system_config
 from lib.drivers.m3508 import M3508Driver
 from lib.sequence.positions import AxisSpec, load_position_table
 
-#: 移動とみなす速さ [unit/s]。エンコーダ 1 カウントのジッタ (y_axis で約 0.8mm/s
-#: 相当) を移動と読まない値に置く。実際の移動は桁が 1 つ上になる
+# 移動とみなす速さ [unit/s]。y_axis のエンコーダ 1 カウントのジッタが約 0.8mm/s 相当。
 DEFAULT_STILL_SPEED = 2.0
-#: 静止がこの時間続いたら区間を閉じる [s]
 DEFAULT_STILL_S = 0.15
-#: これ未満しか動かなかった区間は報告しない [unit]。振動やノイズを移動として
-#: 数え上げると、要約が流れて肝心の移動が読めなくなる
 DEFAULT_MIN_TRAVEL = 0.5
 
 
 @dataclass(frozen=True)
 class MoveSummary:
-    """静止 → 移動 → 静止 の 1 区間の要約。"""
-
     index: int
     duration_s: float
     start_value: float
@@ -85,16 +41,6 @@ class MoveSummary:
 
 
 class MoveTracker:
-    """位置の系列から「1 回の移動」を切り出し、その間の偏差のピークを保持する。
-
-    チューニングで欲しいのは静止時の値ではなく**移動中の最大ずれ**である。
-    区間の切り出しを人間の目に任せると、20Hz の画面を見ながら数百 ms のピークを
-    読むことになる (読めない)。
-
-    区間の開始は「動き始める直前のサンプル」に取る。速さが閾値を超えた時点の値を
-    起点にすると、その 1 サンプル分だけ移動量が短く出る。
-    """
-
     def __init__(
         self,
         *,
@@ -119,17 +65,9 @@ class MoveTracker:
 
     @property
     def completed(self) -> int:
-        """報告済みの移動回数。"""
         return self._index
 
     def observe(self, now: float, value: float, deviation: float | None) -> MoveSummary | None:
-        """1 サンプルを取り込み、区間が閉じたらその要約を返す。
-
-        Args:
-            now: 単調時刻 [s]
-            value: 軸の位置 (人間の単位)
-            deviation: 同じ瞬間の左右ずれ。比較対象が揃わなければ None
-        """
         prev = self._prev
         self._prev = (now, value)
         if prev is None:
@@ -192,18 +130,6 @@ class MoveTracker:
 
 @dataclass
 class Observation:
-    """観測の蓄積。**呼び出し側が持つ。**
-
-    Ctrl-C は受信ループの中で上がるので、ループ側で所有するとそれまでの観測が
-    全部消える (チューニングは「動かして Ctrl-C で止める」の繰り返しなので、
-    毎回消えては使いものにならない)。
-
-    位置の範囲を持つのは、**機構のストロークを実測する用途**があるため。
-    M3508 は電流指令 0 の間まったく保持力を持たないので、制御プログラムを
-    起動せずにこのツールだけを回し、機構を手で端から端まで動かせば、
-    可動範囲がそのまま range として読める (1 通も送らないので安全)。
-    """
-
     moves: list[MoveSummary] = field(default_factory=list)
     min_value: float | None = None
     max_value: float | None = None
@@ -238,11 +164,6 @@ def _positions_path(config: pathlib.Path, robot_name: str) -> pathlib.Path:
 def _build_drivers(
     spec: AxisSpec, robot_motors: dict, axis: str
 ) -> tuple[dict[str, M3508Driver], str]:
-    """軸を構成するモータのドライバを作り、載っているバス別名を返す。
-
-    M3508 以外が混ざった軸は扱えない (このツールは C620 のフィードバックしか
-    デコードしない)。黙って無視すると、片側だけを見た偏差を出してしまう。
-    """
     drivers: dict[str, M3508Driver] = {}
     buses: set[str] = set()
     for name in spec.motor_names:
@@ -296,10 +217,6 @@ def _run(
     duration_s: float | None,
     observation: Observation,
 ) -> None:
-    """受信ループ。**送信は 1 通も行わない。**
-
-    ``observation`` は呼び出し側が持つ (理由は Observation の docstring)。
-    """
     started = time.monotonic()
     seen: set[str] = set()
 
@@ -319,7 +236,6 @@ def _run(
             continue
 
         if len(seen) < len(drivers):
-            # 片方しか受け取っていない間は偏差が意味を持たない
             continue
 
         now = time.monotonic()
@@ -423,7 +339,6 @@ def main(argv: list[str] | None = None) -> int:
                 ["t_s", f"axis_{spec.unit}", *spec.motor_names, f"deviation_{spec.unit}"]
             )
 
-        # receive_own_messages=False。**このツールは send を 1 度も呼ばない**
         bus = can.Bus(interface="socketcan", channel=channel, receive_own_messages=False)
         stack.callback(bus.shutdown)
         with contextlib.suppress(KeyboardInterrupt):

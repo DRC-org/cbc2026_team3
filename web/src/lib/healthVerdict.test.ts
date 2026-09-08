@@ -54,10 +54,6 @@ function health(over: Partial<HealthSnapshot> = {}): HealthSnapshot {
   };
 }
 
-/**
- * 接続中の判定。切断中は判定そのものを止める仕様なので、それを見るテストだけが
- * `evaluateHealth` を直接呼ぶ (下の「切断中」節)。
- */
 function verdictWhenConnected(
   snapshot: Parameters<typeof evaluateHealth>[0],
   safetyPayload?: Parameters<typeof evaluateHealth>[1],
@@ -65,7 +61,6 @@ function verdictWhenConnected(
   return evaluateHealth(snapshot, safetyPayload, true);
 }
 
-/** 配信されたしきい値。値そのものはサーバーの config が決めるので固定値で良い */
 const THRESHOLDS = { warning: 65, critical: 80 };
 
 function safety(over: Partial<SafetyState> = {}): SafetyState {
@@ -85,11 +80,6 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   };
 }
 
-/**
- * 判定を 2 箇所に書くと「Monitor は READY と言うのに操縦者の画面は異常と言う」
- * 状態が生まれる。実際にタブの LED は degraded を error 扱いにしており、
- * 同じ瞬間に Monitor は黄「要確認」、タブは赤 LED を出していた。
- */
 describe("evaluateHealth", () => {
   it("ヘルス未取得は neutral", () => {
     expect(verdictWhenConnected(undefined)).toEqual({ tone: "neutral", label: "ヘルス未取得" });
@@ -106,7 +96,6 @@ describe("evaluateHealth", () => {
   });
 
   it("バス劣化 (degraded) は warning であって error ではない", () => {
-    // タブの LED だけが degraded を error 扱いしていた
     expect(verdictWhenConnected(health({ buses: [bus({ state: "degraded" })] })).tone).toBe(
       "warning",
     );
@@ -118,23 +107,12 @@ describe("evaluateHealth", () => {
     );
   });
 
-  /**
-   * 高温はサーバーが config の `temp_warning_c` で `MotorHealth.state = warning` として
-   * 既に配信している。UI が温度テレメトリから重ねて数えていた頃は、同じ 1 基が
-   * 「異常 2 件」として出ていた (しかも UI の境界 60℃ はサーバーの 65℃ とずれていた)。
-   */
   it("高温モータをサーバー判定と二重に数えない", () => {
     const verdict = verdictWhenConnected(health({ motors: [motorHealth({ state: "warning" })] }));
     expect(verdict.tone).toBe("warning");
     expect(verdict.label).toMatch(/要確認 1 件/);
   });
 
-  /**
-   * サーバー (`lib/server.py` の `_compute_health` / `_health_unknown`) は健全性を
-   * 計算できなかったとき、意図的に overall=down・buses/motors 空・detail 付きを配信する。
-   * 内訳が空だからと UI が「異常なし」を出すと、そのフェイルセーフを画面側が無効化して
-   * しまう (誰も異常を検知できない状態が、最も安全に見える表示になる)。
-   */
   describe("サーバーの総合判定", () => {
     it("内訳が空でも overall=down なら error に倒す", () => {
       const verdict = verdictWhenConnected(
@@ -181,14 +159,12 @@ describe("evaluateHealth", () => {
 
   describe("安全機構", () => {
     it("同期ずれラッチは error にし、どの軸かを出す", () => {
-      // 緊急停止を解除してもこの軸は動かない。復旧手順の選択に直結する
       const verdict = verdictWhenConnected(health(), safety({ sync_violations: ["y_axis"] }));
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toMatch(/y_axis/);
     });
 
     it("保護ループの停止は error", () => {
-      // WS は繋がったままモータ状態も届き続けるので、配信を読まない限り誰も気付けない
       expect(verdictWhenConnected(health(), safety({ loops_running: false })).tone).toBe("error");
       expect(verdictWhenConnected(health(), safety({ monitors_running: false })).tone).toBe(
         "error",
@@ -196,8 +172,6 @@ describe("evaluateHealth", () => {
     });
 
     it("目標値再送の停止は error (ファーム側ウォッチドッグで generic が全停止する)", () => {
-      // 20Hz の再送が途切れると 500ms 後にグリッパ・コンベア・壁が無反応になる。
-      // 位置制御ループ・同期監視の停止と同格の異常として扱う
       expect(verdictWhenConnected(health(), safety({ refreshers_running: false })).tone).toBe(
         "error",
       );
@@ -216,16 +190,7 @@ describe("evaluateHealth", () => {
     });
   });
 
-  /**
-   * **読めなかったヘルスは異常側へ倒す。**
-   *
-   * ここが素通しだった頃、`health.buses` を欠いた配信 1 通で `buses.filter(...)` が
-   * レンダー本体から投げていた。呼び出し元の 1 つ (`TabBar`) は `RouteErrorBoundary`
-   * の外にあるため、例外は React ツリーごとアンマウントし、**ヘッダーの緊急停止
-   * ボタンまで画面から消える**。`safety` の 1 欄欠落で全画面が白くなった事故と同型。
-   */
   describe("欠けたヘルス配信", () => {
-    // 型は実行時に消えるので、欠落は「型に無い形」としてしか作れない
     const drop = (key: keyof HealthSnapshot) => {
       const broken: Record<string, unknown> = { ...health() };
       delete broken[key];
@@ -237,12 +202,10 @@ describe("evaluateHealth", () => {
 
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toBe("健全性 判定不能");
-      // どの欄が読めなかったかを出す。出さないと配信側を直す手掛かりが残らない
       expect(verdict.detail).toContain(key);
     });
 
     it("未知の state が載っていても判定不能へ倒す", () => {
-      // 語彙の追加をサーバーだけが行うと、UI は知らない値を ok と同じ扱いにする
       const broken = health();
       (broken.buses as unknown[])[0] = { name: "can_m3508", state: "exploded" };
       expect(verdictWhenConnected(broken).tone).toBe("error");
@@ -252,9 +215,6 @@ describe("evaluateHealth", () => {
       const verdict = verdictWhenConnected(MALFORMED);
       expect(verdict.tone).toBe("error");
       expect(verdict.label).toBe("健全性 判定不能");
-      // **欄の欠落とは言い分ける。** MALFORMED は配信そのものが読めなかった形で、
-      // 「どの欄が」を挙げられない。ここを欄欠落と同じ文言へ畳むと、この層だけを
-      // 消してももう一方の層 (`healthShapeErrors`) が拾って緑のまま通ってしまう
       expect(verdict.detail).toMatch(/CAN もモータも異常を検知できない/);
     });
 
@@ -265,16 +225,10 @@ describe("evaluateHealth", () => {
     });
 
     it("未配信 (undefined) は判定不能にしない (ヘルス未取得)", () => {
-      // 届いていないことと、届いたものが読めないことは操縦者の次の一手が違う
       expect(verdictWhenConnected(undefined).label).toBe("ヘルス未取得");
     });
   });
 
-  /**
-   * 切断中に手元にあるのは「切れた瞬間の値」でしかない。緑の「異常なし」を
-   * 出し続けると、操縦者はそれを今の機体の状態として読む。
-   * (`motorCheckStatus` が切断を判定へ織り込んでいるのと同じ扱い)
-   */
   describe("切断中", () => {
     it("正常な配信が手元にあっても判定不能へ倒す", () => {
       const verdict = evaluateHealth(health(), safety(), false);
@@ -283,7 +237,6 @@ describe("evaluateHealth", () => {
     });
 
     it("異常が残っていても凍った判定を出さない", () => {
-      // 「切れた瞬間の異常」を今の異常として出すのも同じ誤りなので、通信断で統一する
       const verdict = evaluateHealth(health({ buses: [bus({ state: "down" })] }), safety(), false);
       expect(verdict.label).toMatch(/通信断/);
     });
@@ -294,11 +247,6 @@ describe("evaluateHealth", () => {
   });
 });
 
-/**
- * CAN 途絶がワーク落下に繋がりうるバスの一覧。**判定を UI 側で導出し直さない** ——
- * `may_affect_workpiece` はサーバーが `control_type: on_off` のモータの有無を見て
- * 決めた値をそのまま読むだけで、バス名やドライバ種別から推測してはならない。
- */
 describe("workpieceRiskBuses", () => {
   it("平常時 (エピソード 0) は返さない", () => {
     const snap = health({ buses: [bus({ may_affect_workpiece: true, rx_down_episodes: 0 })] });
@@ -319,8 +267,6 @@ describe("workpieceRiskBuses", () => {
   });
 
   it("復旧して state が ok に戻ってもエピソード数が残っていれば返し続ける", () => {
-    // BusHealth.state の判定そのものは動かさない。復旧後も操縦者へ主張し続けるのは
-    // このエピソード数の役目
     const risky = bus({
       name: "can_generic",
       state: "ok",
@@ -336,11 +282,6 @@ describe("workpieceRiskBuses", () => {
   });
 });
 
-/**
- * 起動の猶予を過ぎても `INFO` を一度も受けていない自作モタドラの一覧。
- * `describeSafetyIssues` には含めない —— 「壊れている」ではなく「確認できていない」
- * なので、`evaluateHealth` の判定 (tone) を動かしてはならない。
- */
 describe("firmwareUnconfirmedMotors", () => {
   it("平常時は返さない", () => {
     expect(firmwareUnconfirmedMotors(safety({ firmware_unconfirmed_motors: [] }))).toEqual([]);
@@ -357,14 +298,6 @@ describe("firmwareUnconfirmedMotors", () => {
     expect(firmwareUnconfirmedMotors(MALFORMED)).toEqual([]);
   });
 
-  /**
-   * **ガードを `?? []` へ置き換えてはならない。** 欄の欠落 (`undefined`) だけなら
-   * `?? []` でも同じに見えるが、「**欄はあるが配列でない**」場合に挙動が変わり、
-   * 呼び出し側 (`FirmwareUnconfirmedNotice`) の `.map` が `TypeError` を投げて
-   * `SubsystemStatus` 以下の React ツリーが丸ごとアンマウントする —— CLAUDE.md が
-   * 「`describeSafetyIssues` が無検査で `.length` を呼び全画面が白くなった」として
-   * 記録している事故と同型。
-   */
   it("欄が配列でなくても投げず空を返す (全画面を落とさない)", () => {
     const broken = { ...safety(), firmware_unconfirmed_motors: "gripper" };
 
@@ -399,8 +332,6 @@ describe("describeSafetyIssues", () => {
   });
 
   it("無励磁のまま残ったモータを名前付きで返す", () => {
-    // **この異常は他のどこにも現れない。** フィードバックは正常に届き、ヘルスは OK、
-    // CAN のカウンタも平常で、操縦者に見えるのは「指令しても動かない」だけになる
     const issues = describeSafetyIssues(safety({ unenergized_motors: ["sub_lift"] }));
     expect(issues).toHaveLength(1);
     expect(issues[0].detail).toMatch(/sub_lift/);
@@ -408,9 +339,6 @@ describe("describeSafetyIssues", () => {
   });
 
   it("issue は機械可読の kind を持つ (UI は表示文字列で分岐しない)", () => {
-    // `SubsystemStatus` は「無励磁のまま」の行にだけ再励磁ボタンを添える。
-    // 判定を label の文字列一致で書くと、文言を 1 文字直しただけでボタンが
-    // 消え、しかも型検査は通る
     const issues = describeSafetyIssues(
       safety({ sync_violations: ["rotate"], unenergized_motors: ["sub_lift"] }),
     );
@@ -443,7 +371,6 @@ describe("describeSafetyIssues", () => {
   });
 
   it("止まっている目標値再送をモータ名付きで返す", () => {
-    // どのアクチュエータが指令を失ったかが分からないと、操縦者は何を疑えばいいか決められない
     const issues = describeSafetyIssues(
       safety({
         refreshers_running: false,
@@ -467,7 +394,6 @@ describe("describeSafetyIssues", () => {
   });
 
   it("内訳が挙がらなくても集約値が false なら黙らない", () => {
-    // 再送タスクの一覧そのものが取れていない場合でも、異常であることは伝える
     const issues = describeSafetyIssues(
       safety({ refreshers_running: false, target_refreshers: [] }),
     );
@@ -485,16 +411,7 @@ describe("describeSafetyIssues", () => {
     expect(issues).toEqual([]);
   });
 
-  /**
-   * サーバーが安全機構の 1 欄を落として契約を焼き直すと、Python も TS も
-   * 全テスト緑のまま UI が起動直後に白画面になっていた (呼び出し元は
-   * SubsystemStatus / TabBar / StartGate のレンダー本体で、投げれば
-   * React ツリーごとアンマウントしヘッダーの緊急停止ボタンまで消える)。
-   *
-   * **`?? []` で埋めてはならない。** 埋めるとラッチしているのに画面は平常になる。
-   */
   describe("欠けた配信", () => {
-    // 型は実行時に消えるので、欠落は「型に無い形」としてしか作れない
     const drop = (key: keyof SafetyState) => {
       const broken: Record<string, unknown> = { ...safety() };
       delete broken[key];
@@ -518,14 +435,12 @@ describe("describeSafetyIssues", () => {
 
       expect(issues).toHaveLength(1);
       expect(issues[0].label).toBe("安全機構 判定不能");
-      // どの欄が読めなかったかを出す。出さないと配信側を直す手掛かりが残らない
       expect(issues[0].detail).toContain(key);
       expect(issues[0].hint.length).toBeGreaterThan(0);
     });
 
     it("周期タスクの要素が読めなくても投げない", () => {
       const broken = safety();
-      // 型に無い形 = サーバーが要素の構造を変えた場合
       (broken.sync_monitors as unknown[])[0] = { running: true };
 
       const issues = describeSafetyIssues(broken);
@@ -540,13 +455,11 @@ describe("describeSafetyIssues", () => {
     });
 
     it("判定不能は evaluateHealth でも error になる (平常へ倒さない)", () => {
-      // ここが success へ倒れると、保護ループが死んでいても画面は「異常なし」になる
       expect(verdictWhenConnected(health(), MALFORMED).tone).toBe("error");
       expect(verdictWhenConnected(health(), drop("sync_violations")).tone).toBe("error");
     });
 
     it("未配信 (undefined) は判定不能にしない", () => {
-      // 届いていないことと、届いたものが読めないことは操縦者の次の一手が違う
       expect(describeSafetyIssues(undefined)).toEqual([]);
     });
   });
@@ -563,10 +476,6 @@ describe("motorTempTone", () => {
     expect(motorTempTone(null, THRESHOLDS)).toBe("neutral");
   });
 
-  /**
-   * UI 側のフォールバック値を持つと、それがサーバーの config とずれたまま
-   * 効き続ける (二重管理そのもの)。しきい値が届いていない間は色を付けない。
-   */
   it("しきい値が未取得なら温度に関わらず neutral (独自の既定値を持たない)", () => {
     expect(motorTempTone(0, null)).toBe("neutral");
     expect(motorTempTone(70, null)).toBe("neutral");
@@ -574,10 +483,6 @@ describe("motorTempTone", () => {
   });
 });
 
-/**
- * 片方だけで判定すると「warning は出ないのに danger だけ出る」中途半端な色分けになり、
- * しきい値が届いていないことも画面から読み取れない。
- */
 describe("tempThresholdsOf", () => {
   it("2 値が揃っていれば server_info の値をそのまま使う", () => {
     expect(
@@ -599,10 +504,6 @@ describe("tempThresholdsOf", () => {
   });
 });
 
-/**
- * サマリーが独自判定を持っていた頃、温度が正常なら FAULT のモータがあっても
- * 「All operational」を出していた。判定はここ 1 箇所だけが持つ。
- */
 describe("summarizeMotors", () => {
   it("全て ok なら All operational", () => {
     expect(summarizeMotors([motorHealth(), motorHealth({ name: "y_axis_l" })])).toEqual({

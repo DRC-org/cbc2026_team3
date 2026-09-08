@@ -1,6 +1,6 @@
 # データの流れ — 値がどう届き、どこで判定するか
 
-**「今どうなっているか」だけ。** 理由は `CLAUDE.md`、サーバー側の詳細は `docs/impl_plan.md` の
+**「今どうなっているか」だけ。** 理由は `docs/invariants.md` §8、サーバー側の詳細は `docs/architecture.md` の
 「WebSocket プロトコル」章。画面は `docs/web/screens.md`、罠は `docs/web/pitfalls.md`。
 
 ---
