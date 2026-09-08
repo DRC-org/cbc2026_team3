@@ -39,7 +39,7 @@ _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_
 _MATCH_KEYS = frozenset({"duration_s"})
 
 _ROBOT_KEYS = frozenset({"robot_name", "motors", "sensors"})
-_SENSOR_KEYS = frozenset({"bus", "can_id"})
+_SENSOR_KEYS = frozenset({"bus", "can_id", "expected_firmware"})
 _COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id"})
 _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
     "m3508": frozenset({"pid"}),
@@ -104,6 +104,7 @@ class SensorConfig:
     name: str
     bus: str
     can_id: int
+    expected_firmware: int | None = None
 
 
 @dataclass(frozen=True)
@@ -325,11 +326,16 @@ def _parse_sensor(
             f"{source}: {path}.can_id が範囲外です: {can_id} "
             f"(指定できるのは {low:#04x}〜{high:#04x})"
         )
-    return SensorConfig(name=sensor_name, bus=bus, can_id=can_id)
+    return SensorConfig(
+        name=sensor_name,
+        bus=bus,
+        can_id=can_id,
+        expected_firmware=_parse_expected_firmware(source, path, sensor),
+    )
 
 
-def _parse_expected_firmware(source: str, path: str, motor: Mapping) -> int | None:
-    value = _optional(_integer, source, path, motor, "expected_firmware", None)
+def _parse_expected_firmware(source: str, path: str, raw: Mapping) -> int | None:
+    value = _optional(_integer, source, path, raw, "expected_firmware", None)
     if value is not None and not 0 <= value <= 0xFF:
         raise ValueError(
             f"{source}: {path}.expected_firmware が uint8 の範囲外です: {value} "

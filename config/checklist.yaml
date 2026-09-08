@@ -18,9 +18,6 @@ checklists:
     - id: main_gripper_open
       label: グリッパ開状態確認
       group: preflight
-    - id: sub_gripper_open
-      label: 補助ハンド開状態確認
-      group: preflight
     - id: wall_initial
       label: 壁 前後とも初期位置確認
       group: preflight
@@ -44,11 +41,20 @@ checklists:
     - id: rotate_sync
       label: エンドエフェクタ回転 左右のずれがないこと確認
       group: motor_check
+    - id: sub_servo_move
+      label: サブハンド 回転・ピッチ・オフセットの 3 軸が動作確認中に実際に動くこと目視確認 (サーボは指令角を返すだけなので自動判定できない)
+      group: motor_check
+    - id: sub_servo_pair_sync
+      label: サブハンド 回転・ピッチの左右が同じ姿勢であること確認 (サーボは偏差監視が効かず、ずれの検出はここだけ)
+      group: motor_check
     - id: firmware_match
       label: 自作モタドラ 3 種のファーム版・サーボ可動角の異常表示と「版番号 未確認」が出ていないこと確認
       group: motor_check
     - id: origin_sensor_react
-      label: rotate の原点センサに触れ、Controller の診断ツリーで反応することを確認
+      label: メインハンドの原点センサ 3 本 (rotate / y_axis 左右) に順に触れ、Controller の診断ツリーで 3 本とも反応することを確認
+      group: motor_check
+    - id: limit_sensor_react
+      label: サブハンドの可動端センサ 4 本 (前後の前端・後端 / 昇降の上端・下端) に順に触れ、診断ツリーで 4 本とも反応することを確認
       group: motor_check
     - id: rotate_holds
       label: rotate を非常停止し、無励磁でも自重で回らないこと確認 (零点確定は無励磁で行う)

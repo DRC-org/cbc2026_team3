@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { MotorStatus } from "@/components/diagnostics/MotorStatus";
+import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import type { MotorState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
 
@@ -173,5 +173,34 @@ describe("MotorStatus", () => {
       expect(cells()[0]).toHaveTextContent("?");
       expect(cells()[0]).toHaveClass("text-error");
     });
+  });
+});
+
+function spacer(): HTMLElement {
+  const { container } = render(<MotorStatHeader />);
+  const el = container.querySelector("[aria-hidden]");
+  if (!el) throw new Error("見出しの空きが見つかりません");
+  return el as HTMLElement;
+}
+
+function widthClasses(el: HTMLElement): string[] {
+  return [...el.classList].filter((c) => c.includes(":w-["));
+}
+
+describe("MotorStatHeader", () => {
+  it("`hidden` を打ち消す display を、幅と同じブレークポイントで持つ", () => {
+    const el = spacer();
+    const [width] = widthClasses(el);
+    expect(width).toBeDefined();
+
+    expect(el.className).toContain(`${width.split(":")[0]}:block`);
+  });
+
+  it("空きの幅はモータ行の名前列と同じクラスで、ずれないこと", () => {
+    const { container } = render(<MotorStatus name="y_axis_r" state={motorState({})} />);
+    const nameColumn = container.firstElementChild?.firstElementChild as HTMLElement;
+
+    expect(widthClasses(spacer())).toEqual(widthClasses(nameColumn));
+    expect(widthClasses(nameColumn)).toHaveLength(1);
   });
 });

@@ -155,6 +155,67 @@ class TestFirmwareUnconfirmedMotorsAreVisible:
         bus.shutdown()
 
 
+class TestSensorSlotsAreCovered:
+    def _sensor_only(self, *, bus_channel: str) -> tuple[CANManager, can.Bus, GenericDriver]:
+        mgr, bus = _build_can_manager(bus_channel=bus_channel)
+        sensor = GenericDriver("origin_sensor", 0x44, control_type=ControlMode.POSITION)
+        mgr.add_sensor(_BUS, sensor)
+        return mgr, bus, sensor
+
+    async def test_info_未受信のセンサが_safety_に載る(self) -> None:
+        fx = ServerFixture.build()
+        mgr, bus, sensor = self._sensor_only(bus_channel="vfwc")
+        fx.add_robot("main_hand", _DummySequence("main_hand"), mgr)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, generic_feedback(sensor))
+            fx.expire_firmware_grace()
+            reported = await wait_until(
+                lambda: (
+                    fx.state_message("main_hand")["safety"]["firmware_unconfirmed_motors"]
+                    == ["origin_sensor"]
+                )
+            )
+            assert reported, "INFO 未受信のセンサが safety に載っていない"
+
+        bus.shutdown()
+
+    async def test_info_を受けたセンサは載らない(self) -> None:
+        fx = ServerFixture.build()
+        mgr, bus, sensor = self._sensor_only(bus_channel="vfwd")
+        fx.add_robot("main_hand", _DummySequence("main_hand"), mgr)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, generic_feedback(sensor))
+            deliver_frame(mgr, _BUS, generic_info(sensor, firmware_version=1))
+            fx.expire_firmware_grace()
+
+            assert fx.state_message("main_hand")["safety"]["firmware_unconfirmed_motors"] == []
+
+        bus.shutdown()
+
+    async def test_途絶えたセンサは対象外(self) -> None:
+        fx = ServerFixture.build()
+        mgr, bus, sensor = self._sensor_only(bus_channel="vfwe")
+        fx.add_robot("main_hand", _DummySequence("main_hand"), mgr)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, generic_feedback(sensor))
+            mark_feedback_at(
+                mgr,
+                "origin_sensor",
+                time.time() - (DEFAULT_HEALTH.feedback_timeout_ms / 1000.0) - 0.1,
+            )
+            fx.expire_firmware_grace()
+
+            assert fx.state_message("main_hand")["safety"]["firmware_unconfirmed_motors"] == []
+
+        bus.shutdown()
+
+
 class TestStaleMotorsAreExcluded:
     async def test_フィードバックが途絶えたモータは対象外(self) -> None:
         fx = ServerFixture.build()

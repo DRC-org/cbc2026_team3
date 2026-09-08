@@ -127,6 +127,79 @@ describe("parseServerMessage", () => {
       });
     });
 
+    describe("manual の positions", () => {
+      const manualOf = (positions: unknown) => {
+        const msg = parse({
+          type: "state",
+          robot: "main_hand",
+          manual: { mode: "manual", axes: [{ name: "y_axis", positions }] },
+        });
+        return (msg as { state: RobotState }).state.manual?.axes[0].positions;
+      };
+
+      it("現行の形はそのまま通す", () => {
+        expect(
+          manualOf([
+            { name: "home", value: 0 },
+            { name: "work", value: 10 },
+          ]),
+        ).toEqual([
+          { name: "home", value: 0 },
+          { name: "work", value: 10 },
+        ]);
+      });
+
+      it("値が引けなかった位置の null を保つ (0 へ寄せない)", () => {
+        expect(manualOf([{ name: "place", value: null }])).toEqual([
+          { name: "place", value: null },
+        ]);
+      });
+
+      it("旧サーバーの素の文字列を value: null として受ける", () => {
+        expect(manualOf(["home", "work"])).toEqual([
+          { name: "home", value: null },
+          { name: "work", value: null },
+        ]);
+      });
+
+      it("どちらの形でもない要素だけ落とす", () => {
+        expect(manualOf([{ name: "home", value: 0 }, { value: 3 }, 42, null])).toEqual([
+          { name: "home", value: 0 },
+        ]);
+      });
+
+      it("値が数値でも null でもない要素も落とす", () => {
+        expect(
+          manualOf([
+            { name: "home", value: 0 },
+            { name: "work", value: {} },
+            { name: "place", value: "10" },
+            { name: "pick" },
+          ]),
+        ).toEqual([{ name: "home", value: 0 }]);
+      });
+
+      it("軸の他の欄は素通しのまま (軸名も可動範囲も UI へ書かない)", () => {
+        const msg = parse({
+          type: "state",
+          robot: "main_hand",
+          manual: {
+            mode: "manual",
+            axes: [{ name: "y_axis", unit: "mm", manual: { min: 0, max: 1, steps: [1] } }],
+          },
+        });
+        expect((msg as { state: RobotState }).state.manual).toEqual({
+          mode: "manual",
+          axes: [{ name: "y_axis", unit: "mm", manual: { min: 0, max: 1, steps: [1] } }],
+        });
+      });
+
+      it("未配信は undefined のまま (手動を配らない版のサーバーを異常にしない)", () => {
+        const msg = parse({ type: "state", robot: "main_hand" });
+        expect((msg as { state: RobotState }).state.manual).toBeUndefined();
+      });
+    });
+
     describe("sensors", () => {
       const SENSORS = {
         origin_sensor: { active: true, stale: false },

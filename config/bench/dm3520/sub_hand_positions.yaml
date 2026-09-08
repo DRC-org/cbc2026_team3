@@ -25,9 +25,9 @@ axes:
 
 positions:
   sub_y_axis: &bench_states
-    home: 0.0
-    small: 5.0
-    half: 30.0
-    full: 60.0
+    home: 0.0            # 原点 = 電源投入位置
+    small: 5.0           # 出力軸で約 16deg。まず動いたことの確認
+    half: 30.0           # 出力軸で約 95deg
+    full: 60.0           # 出力軸で約 191deg。位置がリニアに追従することの確認
 
   sub_lift: *bench_states

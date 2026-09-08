@@ -33,6 +33,7 @@ from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
+from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError
@@ -53,9 +54,10 @@ from main import (
     _load_pid_config,
     _wire_robot_motors,
 )
-from tests.fake_can import direct_runner, mark_feedback_at, mock_bus
+from sequences.motor_check import MotorCheckSequence
+from tests.fake_can import deliver_frame, direct_runner, mark_feedback_at, mock_bus
 from tests.fake_clock import FakeClock
-from tests.feedback_frames import feed_m3508
+from tests.feedback_frames import feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -1256,6 +1258,52 @@ class TestRobotBusSelection:
         assert "setup_can.sh" in message
 
 
+class TestSensorExpectedFirmware:
+    _SENSOR_ID = 0x44
+
+    def _setup(self, expected_firmware: int | None) -> tuple[CANManager, GenericDriver]:
+        sensor_cfg: dict = {"bus": "generic_bus", "can_id": self._SENSOR_ID}
+        if expected_firmware is not None:
+            sensor_cfg["expected_firmware"] = expected_firmware
+        robot = _robot(
+            {
+                "robot_name": "r",
+                "motors": {"conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1}},
+                "sensors": {"origin_sensor": sensor_cfg},
+            }
+        )
+        can_manager, _motors = main._setup_robot(
+            robot, {"generic_bus": "can_generic"}, dry_run=True
+        )
+        sensor = can_manager.sensors["origin_sensor"]
+        assert isinstance(sensor, GenericDriver)
+        return can_manager, sensor
+
+    def _sensor_health(self, can_manager: CANManager):
+        snapshot = can_manager.health()
+        return next(info for info in snapshot.motors if info.name == "origin_sensor")
+
+    def test_申告値が食い違うセンサは_fault(self) -> None:
+        can_manager, sensor = self._setup(expected_firmware=6)
+        deliver_frame(can_manager, "generic_bus", generic_info(sensor, firmware_version=5))
+
+        assert self._sensor_health(can_manager).state is MotorHealth.FAULT
+        assert sensor.info_mismatch is not None
+        assert "焼き忘れ" in sensor.info_mismatch
+
+    def test_申告値が一致するセンサは_fault_にならない(self) -> None:
+        can_manager, sensor = self._setup(expected_firmware=6)
+        deliver_frame(can_manager, "generic_bus", generic_info(sensor, firmware_version=6))
+
+        assert self._sensor_health(can_manager).state is not MotorHealth.FAULT
+
+    def test_期待値を書かないセンサは照合しない(self) -> None:
+        can_manager, sensor = self._setup(expected_firmware=None)
+        deliver_frame(can_manager, "generic_bus", generic_info(sensor, firmware_version=5))
+
+        assert self._sensor_health(can_manager).state is not MotorHealth.FAULT
+
+
 class TestReadOperstate:
     def _write(self, root: pathlib.Path, channel: str, text: str) -> None:
         (root / channel).mkdir()
@@ -1649,8 +1697,12 @@ class TestMotorCheckWiring:
             server = self._wire([self._table("main_hand_positions.yaml")])
 
         sequence = server.set_motor_check_sequence.call_args.args[0]
+        sub_labels = {
+            info.label for info in MotorCheckSequence("x").steps if "サブハンド" in info.label
+        }
+
         assert not [info for info in sequence.steps if "サブハンド" in info.label]
-        assert len(sequence.excluded_steps) == 7
+        assert {info.label for info in sequence.excluded_steps} == sub_labels
 
     def test_除外したステップを起動ログに出す(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):

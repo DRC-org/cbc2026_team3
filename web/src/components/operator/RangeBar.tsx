@@ -9,11 +9,23 @@ export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; ma
   const targetPct = axis.target === null ? null : ratio(axis.target, min, max);
 
   return (
-    <div className="flex items-center gap-2 text-[0.8em] text-base-content/55">
+    <div className="flex items-center gap-2 text-[0.8em] text-base-content/70">
       <span className="w-16 shrink-0 text-right font-mono tabular-nums">
         {min} {axis.unit}
       </span>
-      <div className="relative h-2.5 min-w-0 flex-1 bg-base-200">
+      <div className="relative h-2.5 min-w-0 flex-1 border border-base-300 bg-base-200">
+        {axis.positions.map((position) =>
+          position.value === null ? null : (
+            <span
+              key={position.name}
+              className="absolute bottom-0 h-1 w-px -translate-x-1/2 bg-base-content/40"
+              style={{ left: `${ratio(position.value, min, max)}%` }}
+              title={`${position.name} ${position.value} ${axis.unit}`}
+              aria-hidden
+            />
+          ),
+        )}
+
         {valuePct === null || targetPct === null ? null : (
           <span
             className="absolute top-0 h-full bg-info/15"
@@ -33,7 +45,7 @@ export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; ma
         )}
         {valuePct === null ? null : (
           <span
-            className="absolute top-0 h-full w-0.5 -translate-x-1/2 bg-base-content/80"
+            className="absolute top-0 h-full w-[0.1875rem] -translate-x-1/2 bg-base-content"
             style={{ left: `${valuePct}%` }}
             aria-hidden
           />

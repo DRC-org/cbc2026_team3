@@ -19,6 +19,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | [`docs/architecture.md`](docs/architecture.md) | 何がどう組まれているか（構造・データフロー・契約） |
 | [`docs/motor_driver_can_protocol.md`](docs/motor_driver_can_protocol.md) | 自作モータドライバ CAN プロトコル。PC 側 `lib/drivers/generic.py` と `firmware/` の双方がこれに従う |
 | [`docs/checks_and_health.md`](docs/checks_and_health.md) | 点検とヘルスの「**今どうなっているか**」。ヘルス監視 / 動作確認 / 常駐保護 / 指差喚呼の 4 系統 |
+| [`docs/web/`](docs/web/) | **操縦 UI の「今どうなっているか」。4 枚。** `screens.md`（画面・部品カタログ）/ `design.md`（配色・ラベル・アイコン・確認の取り方）/ `data_flow.md`（WS 契約・受信境界・判定の置き場所）/ `pitfalls.md`（踏んだ罠とテスト）。**UI を触るときはここから読む** |
 | [`docs/venue_recovery.md`](docs/venue_recovery.md) | **会場カード。試合当日に手が止まったときはこれ 1 枚** |
 | [`docs/mechanism_handoff.md`](docs/mechanism_handoff.md) | 機構が付いた日に埋める値の棚卸し。機構担当と共有する表 |
 | [`docs/operations.md`](docs/operations.md) | コマンド・CAN セットアップ・systemd 運用 |
@@ -42,7 +43,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/`, `lib/config_schema.py`, `main.py`, ログ | §5 設定と起動 |
 | `lib/server.py`, `lib/commands.py`, `lib/ws_hub.py` | §6 サーバーと配信 |
 | `firmware/` | §7 ファームウェア + `docs/motor_driver_can_protocol.md` |
-| `web/src/` | §8 Web UI |
+| `web/src/` | §8 Web UI + [`docs/web/`](docs/web/)（画面・部品・データフローの現況） |
 | `tests/`, `web/src/**/*.test.*`, `firmware/test/` | §9 テスト |
 
 ## コマンド
@@ -52,7 +53,7 @@ uv run python main.py             # サーバー起動（localhost:8080）
 uv run python main.py --dry-run   # CAN バスなしで起動
 uv run pytest                     # Python 側の全テスト
 uv run ruff check . && uv run ruff format .
-cd web && pnpm check              # lint + format + 型検査 + テスト
+cd web && pnpm check              # lint + format + 型検査 + テスト + ビルド
 pio test -e native -d firmware/servo  # ファームの native テスト（実機不要）
 ```
 

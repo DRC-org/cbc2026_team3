@@ -16,7 +16,7 @@ class SubHandSequence(Sequence):
     @step("初期位置へ移動")
     async def move_to_home(self) -> None:
         await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
-        await self.move_to({"sub_arm_joint": "home", "sub_gripper": "open"})
+        await self.move_to({"sub_arm_joint": "home"})
         await self.move_to({"pump_vac": "run"})
 
     @step("補助ハンド展開", require_trigger=True)
@@ -26,10 +26,6 @@ class SubHandSequence(Sequence):
     @step("ワーク受け取り位置へ")
     async def move_to_handoff(self) -> None:
         await self.move_to({"sub_arm_joint": "handoff"})
-
-    @step("ハンド閉じる (受け取り)", require_trigger=True)
-    async def grip_handoff(self) -> None:
-        await self.move_to({"sub_gripper": "closed"})
 
     @step("ワーク吸着", require_trigger=True)
     async def grip_by_suction(self) -> None:
@@ -44,9 +40,8 @@ class SubHandSequence(Sequence):
         await self.move_to(_all_valves("closed"))
         await self.move_to({"pump_blow": "run"})
         await self.move_to({"pump_blow": "stop"})
-        await self.move_to({"sub_gripper": "open"})
 
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
         await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
-        await self.move_to({"sub_arm_joint": "home", "sub_gripper": "open"})
+        await self.move_to({"sub_arm_joint": "home"})

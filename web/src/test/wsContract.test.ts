@@ -10,6 +10,7 @@ import type {
   HealthChange,
   HealthSnapshot,
   ManualAxis,
+  ManualPosition,
   ManualRange,
   ManualState,
   MatchState,
@@ -305,6 +306,11 @@ const MANUAL_RANGE = fieldsOf<ManualRange>({
   steps: "ui",
 });
 
+const MANUAL_POSITION = fieldsOf<ManualPosition>({
+  name: "ui",
+  value: "ui",
+});
+
 const MANUAL_AXIS = fieldsOf<ManualAxis>({
   name: "ui",
   unit: "ui",
@@ -407,6 +413,7 @@ const STATE_FIELDS: FieldSpec = {
   ...nest("manual", MANUAL),
   ...nest("manual.axes[]", MANUAL_AXIS),
   ...nest("manual.axes[].manual", MANUAL_RANGE),
+  ...nest("manual.axes[].positions[]", MANUAL_POSITION),
   ...nest("last_error", SEQUENCE_FAILURE),
 };
 

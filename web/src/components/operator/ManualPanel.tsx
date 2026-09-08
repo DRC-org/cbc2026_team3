@@ -33,6 +33,7 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
     sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
   const steerable = manual.axes.filter((axis) => axis.manual !== null);
+  const presetOnly = manual.axes.filter((axis) => axis.manual === null);
   const selected = steerable.some((axis) => axis.name === picked)
     ? picked
     : (steerable[0]?.name ?? null);
@@ -65,21 +66,36 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
         </p>
       ) : (
         <>
-          <div className="scroll flex min-h-0 flex-1 flex-col">
-            {manual.axes.map((axis) => (
+          <div className="scroll @container flex min-h-0 flex-1 flex-col">
+            {steerable.map((axis) => (
               <ManualAxisRow
                 key={axis.name}
                 axis={axis}
                 blockedReason={blockedReason}
                 selected={axis.name === selected}
-                onSelect={() => {
-                  if (axis.manual !== null) setPicked(axis.name);
-                }}
+                onSelect={() => setPicked(axis.name)}
                 onJog={onJog}
                 onSet={onSet}
                 onMove={onMove}
               />
             ))}
+
+            {presetOnly.length === 0 ? null : (
+              <div className="grid @min-[40rem]:grid-cols-2 @min-[56rem]:grid-cols-3">
+                {presetOnly.map((axis) => (
+                  <ManualAxisRow
+                    key={axis.name}
+                    axis={axis}
+                    blockedReason={blockedReason}
+                    selected={false}
+                    onSelect={() => {}}
+                    onJog={onJog}
+                    onSet={onSet}
+                    onMove={onMove}
+                  />
+                ))}
+              </div>
+            )}
           </div>
 
           {selected === null ? null : (

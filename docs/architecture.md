@@ -147,13 +147,9 @@ sync_monitors=…, target_refreshers=…)` でサーバーへも渡す（サー�
 
 ### 起動オプション
 
-```bash
-uv run python main.py                    # 通常起動（localhost:8080）
-uv run python main.py --dry-run          # CAN バス無し（python-can の virtual バス）
-uv run python main.py --dev-tools        # 開発用コマンドを解禁（CBC_DEV_TOOLS=1 でも可）
-uv run python main.py --log-level debug  # debug|info|warning|error（既定 info）
-uv run python main.py --system <path> --config <path>… --checklist <path>
-```
+`--dry-run`（CAN 無し）/ `--dev-tools`（開発用コマンドの解禁）/ `--log-level` /
+`--system` `--config` `--checklist`（構成の差し替え）。コマンドの書式は
+[`operations.md`](operations.md)。
 
 `--dry-run` では `RobotServer` が擬似値を作る（`lib/server_dryrun.py`）—— 各モータの状態を
 `time.time()` ベースのサイン波で生成（**擬似値も `_measured_only()` を通る**）、ヘルス
@@ -197,11 +193,7 @@ uv run python main.py --system <path> --config <path>… --checklist <path>
 
 #### セットアップ
 
-```bash
-sudo scripts/install.sh        # udev ルール配置 + systemd 有効化（初回のみ。--uninstall あり）
-scripts/setup_can.sh           # 手動 up。見つかったバスだけ立ち上げる（開発用）
-scripts/setup_can.sh --strict  # 試合前点検。定義済みの全バスが揃わなければ異常終了
-```
+セットアップと点検のコマンドは [`operations.md`](operations.md)。
 
 PC 起動時は `cbc-can.service`（`Type=oneshot` + `RemainAfterExit=yes`）が
 `setup_can.sh --wait 15` を実行する（`--wait` は USB 列挙の待ち時間で、**デッドラインは
@@ -367,19 +359,9 @@ firmware/
 └── solenoid/              # solenoid.ioc（CubeMX）+ include/config.h + src/app.cpp
 ```
 
-ビルド・テストのコマンド:
-
-```bash
-pio test -e native -d firmware/dc_motor   # 実機不要。firmware/test/ の全ケース
-pio test -e native -d firmware/servo      # 上とまったく同じ全ケース（test_dir 共有）
-pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e nano -d firmware/servo -t upload            # サーボ基板 #0 / #1
-pio run -e uno_r4_minima -d firmware/servo -t upload   # サーボ基板 #2
-
-firmware/solenoid/scripts/fetch_hal.sh    # 初回のみ（Drivers/ は .gitignore）
-cmake --preset Debug -S firmware/solenoid
-cmake --build firmware/solenoid/build/Debug
-```
+**native テストは 2 プロジェクトが `test_dir` を共有するのでどちらか一方で足りるが、実機
+ビルドは 3 env とも必要**（dc_motor / servo の `nano` / servo の `uno_r4_minima`）。電磁弁だけ
+CMake。コマンドは [`operations.md`](operations.md)。
 
 **native テストはどちらか一方で足りる。実機ビルドは 3 つとも必要**（`main.cpp` と
 `config.h` が別物のため）。`arm-none-eabi-gcc` は 11 以降が要る（詳細は `firmware/README.md`）。
@@ -1276,128 +1258,27 @@ setup ⇄ ready → match → finished → setup
 
 ## 9. Web UI の構成
 
-### タブとルート
+**画面・部品カタログ・配色・データフロー・踏みやすい罠は [`web/`](web/) の 4 枚が持つ。**
+ここに置くのは、リポジトリ全体から見た位置づけだけである。
 
-定義は `web/src/lib/tabs.ts`、ルートは `web/src/routes.tsx`。操縦者 2 名はそれぞれ Main Hand / Sub Hand タブを開く。
-
-| タブ | キー | パス | ページ | 内容 |
-|---|---|---|---|---|
-| Monitor | `1` | `/monitor` | `pages/Dashboard.tsx` | 試合制御、準備の面（`MatchPrep`）、両ロボット監視 |
-| Main Hand | `2` | `/main-hand` | `pages/RobotControl.tsx` | 準備中は指差喚呼＋動作確認、試合中はシーケンス操作 |
-| Sub Hand | `3` | `/sub-hand` | `pages/RobotControl.tsx` | 同上 |
-
-表示中のタブは URL パスそのものなのでリロードで復帰する。旧ハッシュ形式
-（`#main-hand` 等）は `applyLegacyHashRedirect()` が起動時にパスへ読み替える
-（**`createBrowserRouter()` より前**に評価される）。遷移時は `location.search` を引き継ぐ。
-
-### フェーズ連動レイアウト
-
-`lib/phase.ts` の `isSetupPhase` でレイアウトごと切り替える。
-
-| | setup / ready | match / finished |
-|---|---|---|
-| Monitor | `StartGate`（全幅・画面の主役）+ 2 カラム（左 `MatchPrep` / 右 機体状態） | `MatchStrip`（1 行）+ `RobotStatusRow` ×2 + `EventFeed` |
-| RobotControl（半自動） | `ModeSwitch` + `SubsystemStatus` | `ActionPanel`（主役）+ ステップ一覧 + `SubsystemStatus`（右レール） |
-| RobotControl（手動） | `ManualPanel`（主役）+ 動作確認（不可・理由付き）+ `SubsystemStatus` | `ManualPanel`（主役）+ `SubsystemStatus`（右レール・展開） |
-
-`MatchStrip` は必須（試合中に試合制御を全て隠すと `match_finish` の導線が消える）。
-
-### 主要コンポーネントの役割
-
-| コンポーネント | 答える問い |
+| | |
 |---|---|
-| `AppHeader` | 画面唯一の常設帯。`[タブ帯] … [接続][時計][フェーズ][コート][EMG STOP]` の順（フッターは持たない） |
-| `StartGate` | 試合を開始できるか、できないなら何が足りないか（残り件数だけを言う） |
-| `MatchPrep` | 準備の面。コート選択・動作確認の起動・指差喚呼を `group` に従って**操作の隣**へ並べる |
-| `ActionPanel` | 今押すべきボタンは何か（右の大きい面 = START / NEXT / RUNNING / DONE、左は常に STOP） |
-| `ModeSwitch` | 今この画面から機体を直接動かせるか（独立した帯。タブの形は使わない） |
-| `ManualPanel` / `ManualAxisRow` | 手動操縦。見た目は軸の性格で 3 通りに分かれるが、分岐の根拠は配信された `manual` と `command_mode` だけ（**軸名は見ていない**） |
-| `SubsystemStatus` | 異常があるか（平常時 1 行に畳み、異常時は開閉操作を上書きして開く） |
-| `MotorCheckPanel` | 動作確認の進捗と結果。**モーダルではなくインライン展開**（中断は折りたたみの外側） |
-| `MatchTimer` | 残り時間（`timer` を受け取るだけの部品。操縦者画面の参照面に置く） |
-| `EStopOverlay` / `ConnectionBanner` | 緊急停止中（解除は Reset ボタンのみ。`<dialog>` は使わない）/ WS 切断（画面上端に全幅） |
-| `Toaster` / `WsSettings` | 操作拒否・ヘルス異常（右下に最大 3 件）/ WS 接続先の確認・変更（**接続表示そのものがボタン**） |
+| スタック | Vite + React + TypeScript + Tailwind v4 / daisyUI 5（テーマ `cbc`）。パッケージマネージャは pnpm@10 |
+| 配信 | 制御プログラムと同一プロセス。`lib/server.py` が `web/dist/` を SPA 配信する |
+| タブ | URL パス（`/monitor` `/main-hand` `/sub-hand`）。操縦者 2 名 + Monitor の 3 画面 |
+| 状態 | WS 受信 → `lib/protocol.ts`（型と受信条件）→ `lib/robotReducer.ts`（純関数）→ context 3 分割 |
+| 判定の置き場所 | ヘルスは `lib/healthVerdict.ts`、動作確認の完了は `lib/motorCheckStatus.ts`、フェーズは `lib/phase.ts`。いずれも 1 箇所だけ |
 
-`ManualAxisRow` の 3 通りは、`manual` を持つ連続軸（ジョグ + 絶対値入力 + 可動範囲バー
-（表示専用）+ プリセット + 端へ飛ぶボタン）/ 離散状態アクチュエータ（プリセットのみ）/
-duty・on_off 軸（プリセットのみ。現在値は `—`）。
-
-### 状態の流れ
-
-```
-WebSocket
-  → hooks/useWebSocket.ts     接続・再接続・接続先切替のみ（メッセージを解釈しない）
-  → lib/protocol.ts           parseServerMessage（ワイヤ型と受信条件の単一情報源）
-  → lib/robotReducer.ts       受信 → UI 状態の遷移（純関数）
-  → hooks/useRobotSocket.ts   上 3 つを束ねる
-  → context/RobotContext.tsx  購読頻度で 3 分割
-       ├ useRobotStates()   毎秒 40 回変わるテレメトリ
-       ├ useRobotStatus()   フェーズ・接続・ヘルス
-       └ useRobotCommands() 送信関数
-```
-
-外枠は `memo` した `AppShell`（`layouts/RootLayout.tsx`）に括り出し、そこへテレメトリ由来の
-props を渡さない。
-
-**判定を 1 箇所に置くモジュール**:
-
-| ファイル | 何を決めるか |
+| 読みたいこと | 文書 |
 |---|---|
-| `lib/healthVerdict.ts` | 機体の健全性（見出しチップ / モータ一覧 / 温度色）。しきい値は `server_info` 由来で、届いていない間は `neutral` |
-| `lib/sequenceStatus.ts` | シーケンスの状態（`running` を推測しない） |
-| `lib/motorCheckStatus.ts` | 動作確認の完了判定（**ステップ数 0 は「未読込」であって完了ではない**） |
-| `lib/syncVerdict.ts` | 左右偏差の主張しきい値（`0.0` は正常な測定値なので捨てない） |
-| `lib/phase.ts` | `isSetupPhase`（レイアウト）/ `isDuringMatch`（可否の理由） |
-| `lib/checklistGroups.ts` | `group` → 画面上の置き場所（項目 id を UI に書き写さない） |
-| `lib/tone.ts` | 状態色 → daisyUI セマンティッククラス（クラス名を実行時に組み立てない） |
-| `lib/time.ts` | `EpochSeconds` / `EpochMs` の型分け。受信境界で必ず ms へ正規化する |
+| どの画面に何が出るか・部品カタログ | [`web/screens.md`](web/screens.md) |
+| 配色・ラベル・アイコン・確認の取り方・EMG STOP の配置 | [`web/design.md`](web/design.md) |
+| WS 契約・受信境界・context 分割・接続先の解決 | [`web/data_flow.md`](web/data_flow.md) |
+| 踏んだ罠と、それを守っているテスト | [`web/pitfalls.md`](web/pitfalls.md) |
+| コマンドとディレクトリ | [`../web/README.md`](../web/README.md) |
 
-### 受信境界の扱い
+崩してはならない UI の不変条件は [`invariants.md`](invariants.md) §8。
 
-`protocol.ts` の `parseSafety` / `parseChecklists` / `parseExcludedSteps` /
-`parseMotorCheckSteps` と `healthVerdict.ts` は、読めなかった配信を `MALFORMED` として
-**異常側へ倒す**（未配信 = `undefined` とは別物）。`state` の `motors` と `steps` は
-素通しのままで、数値を読む側が `readMeasured()` を通す。
-
-| 値 | UI の描き方 |
-|---|---|
-| `null`（測る手段が無い） | `—` |
-| `MALFORMED`（欄の欠落・型違い） | `?` / 「判定不能」 |
-| 位置を測れないモータの POS 欄 | 代わりに PC の指令値を `→0.30` の形で出す（`→` と `title` で実出力でないと断る） |
-
-### キーボード操作（`hooks/useHotkeys.ts`）
-
-| キー | 効果 |
-|---|---|
-| 数字キー | タブ切替。**割当も個数も `lib/tabs.ts` の `TABS` だけが持つ** |
-| `Space` | 表示中のロボットの NEXT / START。**手動操縦モード中は無効** |
-| `↑` `↓` / `←` `→` / `[` `]` / `Home` `End` | 手動操縦パネル（軸選択 / ジョグ / ジョグ量 / 端へ）。**選択中の 1 行だけが張る** |
-
-修飾キー併用・キーリピート・入力欄フォーカス中・モーダル表示中は一切発火しない
-（モーダル判定は `ModalContext` の表示中モーダル数）。ジョグだけは「押している間くり返す」が
-要るので `useHoldKey` / `useHoldRepeat` が別に持ち、遮断判定（`isHotkeyBlocked`）だけを
-共有する。停止経路は `keyup` / `blur` / `visibilitychange` / 無効化・アンマウントの 4 つ。
-**凡例は「そのキーが効く場所」にしか置かない**（数字キーはタブ自身、`Space` は
-START / NEXT ボタン自身が `<Kbd>` として持つ）。
-
-### 接続先の解決と見た目の枠組み
-
-`lib/wsUrl.ts` が **クエリ `?ws=` > localStorage > `VITE_WS_URL` > ページ origin** の
-優先順で解決する（クエリは非永続の一時上書き）。接続先を切り替えると `useRobotSocket` は
-世代番号で旧接続のイベントを無視する。vite dev / preview は `host: true` で全インター
-フェースに bind し、`allowedHosts` に `drc` と `.ts.net` を登録する（別名は
-`VITE_ALLOWED_HOSTS`）。dev では `/ws` を 8080 へプロキシする（中継先は `DEV_WS_TARGET`）。
-`@cloudflare/vite-plugin` は build / preview のみで有効。
-
-配色は `src/index.css` の daisyUI カスタムテーマ `cbc`（ライト基調）に集約し、組み込み
-テーマは使わない。自前プリミティブは `components/ui/`（**レイアウト骨格は CSS ではなく
-ここが持つ**）、アイコンは `lucide-react`（既定値は `ui/Icon.tsx`）、フォントは
-`@fontsource-variable/*` で自己ホスト、状態は着色テキストではなく `StatusBadge`。
-配置・記号・ラベルの規則（EMG STOP の周囲、`Hand` の用法、英大文字と日本語の役割分担、
-daisyUI のクラスを対で書くこと、`self-start` / `shrink-0` の扱い）は
-[invariants.md](invariants.md) の §8 Web UI。
-
----
 
 ## 10. サービス運用（systemd）
 
@@ -1412,15 +1293,7 @@ daisyUI のクラスを対で書くこと、`self-start` / `shrink-0` の扱い�
 配置・enable・撤去の 3 つは `install.sh` の 1 つの配列（`UNITS` / `AUTOSTART_UNITS`）が
 まとめて回す。
 
-```bash
-sudo scripts/install.sh           # 3 unit を配置（cbc-control だけ enable しない）
-scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
-scripts/deploy.sh --no-install    # 会場用。依存導入を飛ばしてビルドと再起動だけ
-sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
-journalctl -u cbc-control -f      # ログ追跡
-journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
-sudo systemctl reset-failed cbc-control   # StartLimitBurst で failed 固定したとき
-```
+配置・起動・ログ追跡のコマンドは [`operations.md`](operations.md)。
 
 `cbc-control.service` の性質:
 
@@ -1464,12 +1337,7 @@ sudo systemctl reset-failed cbc-control   # StartLimitBurst で failed 固定し
 プロトコル層とシーケンスエンジンは TDD で開発する（RED → GREEN）。実機デバッグで時間が
 溶けやすいバイト列の組み立てミスと状態遷移のバグを、テストで先に潰す。
 
-```bash
-uv run pytest                 # 全テスト（tests/drivers/ で絞る / -x で最初の失敗で停止 /
-                              #   -k "m3508" で特定テストのみ）
-uv run ruff check . && uv run ruff format .
-cd web && pnpm check          # lint + format + 型検査 + テスト
-```
+実行コマンドは [`operations.md`](operations.md)。
 
 ### テスト対象とアプローチ
 

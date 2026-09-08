@@ -86,7 +86,7 @@ class ManualController:
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
                     "deviation": self._safe_deviation(spec),
                     "sync_tolerance": spec.sync_tolerance,
-                    "positions": list(self._positions.names(name)),
+                    "positions": self._position_entries(name),
                     "motors": list(spec.motor_names),
                 }
             )
@@ -132,6 +132,17 @@ class ManualController:
             for name in spec.motor_names
             if name in self._motors
         }
+
+    def _position_entries(self, axis: str) -> list[dict]:
+        entries: list[dict] = []
+        for name in self._positions.names(axis):
+            try:
+                value: float | None = self._positions.raw(axis, name, court=self._court)
+            except Exception:
+                logger.debug("位置 '%s.%s' の値を引けません", axis, name, exc_info=True)
+                value = None
+            entries.append({"name": name, "value": value})
+        return entries
 
     def _safe_deviation(self, spec: AxisSpec) -> float | None:
         group = spec.sync_group

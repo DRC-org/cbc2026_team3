@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MatchStrip } from "@/components/monitor/MatchControl";
 import { RobotProvider } from "@/context/RobotContext";
 import { ARM_GUARD_MS, ARM_TIMEOUT_MS } from "@/hooks/useArmedPress";
-import type { MatchPhase } from "@/lib/protocol";
+import type { MatchPhase, MatchTimer } from "@/lib/protocol";
 import { createRobotContext, DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
 
 describe("MatchStrip の試合終了", () => {
@@ -197,5 +197,56 @@ describe("MatchStrip の操作ボタンの位置", () => {
     expect(after.band.firstElementChild).toBe(
       screen.getByRole("button", { name: "セッティングタイムへ戻す" }),
     );
+  });
+});
+
+describe("MatchStrip の残り時間", () => {
+  let perfNow = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    perfNow = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => perfNow);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function mountWithTimer(timer: MatchTimer | null, phase: MatchPhase = "match") {
+    return renderWithRobot(<MatchStrip />, {
+      connected: true,
+      matchState: { ...DEFAULT_MATCH_STATE, phase, court: "red", timer },
+    });
+  }
+
+  it("試合中は残り時間を出す", () => {
+    mountWithTimer({ running: true, elapsed_ms: 60_000, duration_ms: 180_000 });
+
+    expect(screen.getByText("残り")).toBeInTheDocument();
+    expect(screen.getByText("2:00")).toBeInTheDocument();
+  });
+
+  it("試合終了後は凍結した値を「終了時点」として出し続ける", () => {
+    mountWithTimer({ running: false, elapsed_ms: 150_000, duration_ms: 180_000 }, "finished");
+
+    expect(screen.getByText("終了時点")).toBeInTheDocument();
+    expect(screen.getByText("0:30")).toBeInTheDocument();
+
+    act(() => {
+      perfNow += 5_000;
+      vi.advanceTimersByTime(5_000);
+    });
+
+    expect(screen.getByText("0:30")).toBeInTheDocument();
+  });
+
+  it("未受信では時計を出さない (0:00 を確信して出さない)", () => {
+    mountWithTimer(null);
+
+    expect(screen.queryByText("残り")).not.toBeInTheDocument();
+    expect(screen.queryByText("0:00")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "試合を終了する" })).toBeInTheDocument();
   });
 });

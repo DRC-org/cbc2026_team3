@@ -15,3 +15,10 @@ export function formatAge(ms: number | null | undefined): string {
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m 前`;
   return `${Math.floor(ms / 3_600_000)}h 前`;
 }
+
+export function formatRemaining(remainingMs: number): string {
+  const totalSeconds = Math.ceil(remainingMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}

@@ -8,6 +8,7 @@ import { MotorCheckSummary } from "@/components/motorcheck/MotorCheckSummary";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Panel } from "@/components/ui/Panel";
+import { ScrollArea } from "@/components/ui/ScrollArea";
 import { Section } from "@/components/ui/Section";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import type { ChecklistGroup } from "@/lib/checklistGroups";
@@ -124,12 +125,10 @@ export const MatchPrep = memo(function MatchPrep({
             <Icon as={Check} />
             完了
           </span>
-        ) : (
-          <span className="shrink-0 text-base-content/70">残り {items.length - checkedCount}</span>
-        )}
+        ) : null}
       </div>
 
-      <div className="scroll flex min-h-0 flex-1 flex-col gap-1.5 px-2 py-1.5">
+      <ScrollArea className="gap-1.5 px-2 py-1.5">
         {unreadable ? (
           <p className="text-error">
             指差喚呼の配信を読めていません。進捗を画面から確認できません
@@ -207,7 +206,7 @@ export const MatchPrep = memo(function MatchPrep({
             {itemsOf("final")}
           </Section>
         ) : null}
-      </div>
+      </ScrollArea>
     </Panel>
   );
 });

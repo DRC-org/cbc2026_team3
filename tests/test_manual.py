@@ -11,7 +11,7 @@ from lib.drivers.base import ControlMode
 from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import Court
 from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
-from lib.sequence.positions import load_position_table
+from lib.sequence.positions import PositionLookupError, load_position_table
 from tests.fake_drivers import StubFeedbackDriver
 
 
@@ -263,11 +263,42 @@ class TestAxesInfo:
     def _by_name(self, manual: ManualController) -> dict[str, dict]:
         return {axis["name"]: axis for axis in manual.axes_info()}
 
-    def test_全軸が並びプリセット名を持つ(self) -> None:
+    def test_全軸が並びプリセット名と値を持つ(self) -> None:
         manual, _, _ = _build()
         axes = self._by_name(manual)
         assert set(axes) == {"y_axis", "rotate", "gripper", "conveyor"}
-        assert axes["gripper"]["positions"] == ["open", "closed"]
+        assert axes["gripper"]["positions"] == [
+            {"name": "open", "value": 5.0},
+            {"name": "closed", "value": 0.0},
+        ]
+
+    def test_コート別の位置は現在のコートの値で載る(self) -> None:
+        manual, _, _ = _build()
+        assert self._by_name(manual)["y_axis"]["positions"][2] == {
+            "name": "place",
+            "value": 3.0,
+        }
+
+        manual.set_court(Court.BLUE)
+        assert self._by_name(manual)["y_axis"]["positions"][2] == {
+            "name": "place",
+            "value": 6.0,
+        }
+
+    def test_値を引けない位置は空値で載せ配信を落とさない(self, monkeypatch) -> None:
+        manual, _, _ = _build()
+
+        def _boom(axis: str, name: str, **kwargs: object) -> float:
+            if name == "work":
+                raise PositionLookupError("引けない")
+            return _raw(axis, name, **kwargs)
+
+        _raw = manual._positions.raw
+        monkeypatch.setattr(manual._positions, "raw", _boom)
+
+        positions = self._by_name(manual)["y_axis"]["positions"]
+        assert {"name": "work", "value": None} in positions
+        assert {"name": "home", "value": 0.0} in positions
 
     def test_連続操作できる軸だけが可動範囲を持つ(self) -> None:
         manual, _, _ = _build()

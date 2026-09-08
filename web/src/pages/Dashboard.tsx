@@ -6,6 +6,7 @@ import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
+import { ScrollArea } from "@/components/ui/ScrollArea";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isSetupPhase } from "@/lib/phase";
@@ -29,7 +30,7 @@ export function Dashboard() {
           <MatchPrep onRequestReset={requestReset} />
 
           <Panel legend="機体状態" className="min-h-0" bodyClassName="p-1">
-            <div className="scroll flex min-h-0 flex-1 flex-col gap-2">
+            <ScrollArea className="gap-2">
               {ROBOTS.map(({ key, label }) => {
                 const robot = states[key];
                 return (
@@ -51,7 +52,7 @@ export function Dashboard() {
                   </section>
                 );
               })}
-            </div>
+            </ScrollArea>
           </Panel>
         </Page>
         {confirmModal}
@@ -60,7 +61,7 @@ export function Dashboard() {
   }
 
   return (
-    <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
+    <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="col-span-full">
         <MatchStrip />
       </div>
@@ -75,8 +76,8 @@ export function Dashboard() {
         />
       ))}
 
-      <div className="col-span-full min-h-0">
-        <Panel legend="イベント" className="h-full" bodyClassName="p-0">
+      <div className="col-span-full max-h-[40%] min-h-0">
+        <Panel legend="イベント" className="max-h-full" bodyClassName="p-0">
           <EventFeed />
         </Panel>
       </div>

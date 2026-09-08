@@ -6,3 +6,5 @@ import { afterEach } from "vitest";
 afterEach(() => {
   cleanup();
 });
+
+Element.prototype.scrollIntoView ??= () => {};

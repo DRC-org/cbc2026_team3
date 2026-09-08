@@ -34,7 +34,7 @@ checklists:
       label: 両軸に home を送り、どちらも電源投入位置へ戻ること確認
 
     - id: bench_estop
-      label: 両軸を動かしている最中に非常停止を押し、**モータ 8 台すべて**が出力を止めること確認 (動いている y_axis_r/l・rotate_r/l はその場で止まる。gripper / conveyor / wall_f / wall_r はブロードキャスト停止でラッチし、サーボ基板
+      label: 両軸を動かしている最中に非常停止を押し、**モータ 8 台すべて**が出力を止めること確認 (動いている y_axis_r/l・rotate_r/l はその場で止まる。gripper / conveyor / wall_f / wall_r はブロードキャスト停止でラッチし、サーボ基板 #0 と DC 基板 #0 の LED が橙になる)
     - id: m3508_estop_current
       label: 非常停止中は M3508 の電流指令が 0 に落ちていること確認 (保持トルクは残らない)
     - id: edulite_estop_detach

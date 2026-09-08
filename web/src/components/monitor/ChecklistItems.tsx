@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 
 import { cx } from "@/lib/cx";
 import type { ChecklistItem } from "@/lib/protocol";
@@ -18,6 +18,12 @@ export const ChecklistItems = memo(function ChecklistItems({
   onToggle,
   className,
 }: ChecklistItemsProps) {
+  const nextRef = useRef<HTMLLabelElement | null>(null);
+
+  useEffect(() => {
+    nextRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [nextId]);
+
   return (
     <div className={cx("flex flex-col", className)}>
       {items.map((item) => {
@@ -25,6 +31,7 @@ export const ChecklistItems = memo(function ChecklistItems({
         return (
           <label
             key={item.id}
+            ref={isNext ? nextRef : undefined}
             className={cx(
               "flex cursor-pointer items-center gap-3 border-l-2 border-transparent px-2 py-[0.4rem] text-[1.05em]",
               "hover:bg-base-200",

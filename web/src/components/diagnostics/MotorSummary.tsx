@@ -1,4 +1,5 @@
 import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
+import { ScrollArea } from "@/components/ui/ScrollArea";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { summarizeMotors } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
@@ -21,13 +22,13 @@ export function MotorSummary({ motors, healthMotors, tempThresholds = null }: Mo
   const verdict = summarizeMotors(healthMotors);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1">
+    <div className="@container flex min-h-0 flex-1 flex-col gap-1">
       <div className="flex shrink-0 items-center justify-between gap-2">
         <span className="text-base-content/70">{total} 基</span>
         <StatusBadge tone={verdict.tone}>{verdict.label}</StatusBadge>
       </div>
       <MotorStatHeader className="shrink-0 border-b border-base-300 pb-[0.1rem]" />
-      <div className="scroll min-h-0 flex-1 [&>*:nth-child(odd)]:bg-base-200">
+      <ScrollArea className="[&>*:nth-child(odd)]:bg-base-200">
         {Object.entries(motors).map(([name, state]) => (
           <MotorStatus
             key={name}
@@ -37,7 +38,7 @@ export function MotorSummary({ motors, healthMotors, tempThresholds = null }: Mo
             tempThresholds={tempThresholds}
           />
         ))}
-      </div>
+      </ScrollArea>
     </div>
   );
 }

@@ -2,8 +2,9 @@ import { act, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MatchTimer, formatRemaining } from "@/components/operator/MatchTimer";
+import { MatchTimer } from "@/components/operator/MatchTimer";
 import type { MatchTimer as MatchTimerValue } from "@/lib/protocol";
+import { formatRemaining } from "@/lib/time";
 
 const DURATION_MS = 180_000;
 
@@ -115,7 +116,7 @@ describe("MatchTimer", () => {
     rerender(<MatchTimer timer={{ ...frozen }} />);
 
     expect(displayed(container)).toBe("0:30");
-    expect(screen.getByText("試合終了時点の残り")).toBeInTheDocument();
+    expect(screen.getByText("試合終了時点")).toBeInTheDocument();
   });
 
   it("開始前は満了時間を出し、終了後と文言で区別する", () => {
@@ -134,7 +135,7 @@ describe("MatchTimer", () => {
     expect(captions()).toHaveLength(0);
 
     rerender(<MatchTimer timer={timerValue({ running: false, elapsed_ms: 150_000 })} />);
-    expect(captions().map((el) => el.textContent)).toEqual(["試合終了時点の残り"]);
+    expect(captions().map((el) => el.textContent)).toEqual(["試合終了時点"]);
   });
 
   it("タイマーが読めなければ数字を出さず、読めていないことを言う", () => {

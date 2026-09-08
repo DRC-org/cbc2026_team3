@@ -16,7 +16,9 @@ SUB_HOME: dict[str, str] = {
     "sub_arm_joint": "home",
     "sub_y_axis": "home",
     "sub_lift": "home",
-    "sub_gripper": "open",
+    "sub_rotate": "home",
+    "sub_pitch": "home",
+    "sub_offset": "home",
     "pump_vac": "stop",
     "pump_blow": "stop",
 }
@@ -107,10 +109,20 @@ class MotorCheckSequence(Sequence):
         await self.move_to({"sub_lift": "lifted"})
         await self.move_to({"sub_lift": "home"})
 
-    @step("サブハンド 補助ハンド", axes={"sub_gripper"})
-    async def sub_gripper(self) -> None:
-        await self.move_to({"sub_gripper": "closed"})
-        await self.move_to({"sub_gripper": "open"})
+    @step("サブハンド 回転 (左右直結ペア)", axes={"sub_rotate"})
+    async def sub_rotate(self) -> None:
+        await self.move_to({"sub_rotate": "working"})
+        await self.move_to({"sub_rotate": "home"})
+
+    @step("サブハンド ピッチ (左右直結ペア)", axes={"sub_pitch"})
+    async def sub_pitch(self) -> None:
+        await self.move_to({"sub_pitch": "working"})
+        await self.move_to({"sub_pitch": "home"})
+
+    @step("サブハンド オフセット", axes={"sub_offset"})
+    async def sub_offset(self) -> None:
+        await self.move_to({"sub_offset": "working"})
+        await self.move_to({"sub_offset": "home"})
 
     @step("サブハンド 電磁弁 6 個 (打音・目視確認)", axes=VALVE_AXES)
     async def sub_valves(self) -> None:

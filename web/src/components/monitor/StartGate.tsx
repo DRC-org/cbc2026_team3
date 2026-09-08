@@ -21,6 +21,7 @@ interface Blocker {
 
 interface Warning extends Blocker {
   key: string;
+  tone: Tone;
 }
 
 const ROLE_LABEL: Record<string, string> = {
@@ -62,25 +63,33 @@ export function StartGate({ onStart }: { onStart: () => void }) {
 
   const warnings = ROBOTS.flatMap(({ key, label }): Warning[] => {
     const robot = states[key];
-    if (!robot) return [{ key: `${key}:missing`, label, detail: "データ未受信" }];
+    if (!robot) return [{ key: `${key}:missing`, label, detail: "データ未受信", tone: "error" }];
 
     const items: Warning[] = [];
     const verdict = evaluateHealth(robot.health, robot.safety, connected);
     if (verdict.tone !== "success") {
-      items.push({ key: `${key}:health`, label, detail: verdict.label });
+      items.push({ key: `${key}:health`, label, detail: verdict.label, tone: verdict.tone });
     }
     if (robot.manual?.mode === "manual") {
       items.push({
         key: `${key}:manual`,
         label,
         detail: "手動操縦中 — 半自動へ戻すまで START が拒否されます",
+        tone: "warning",
       });
     }
     return items;
   });
 
   const ready = canStart && connected && phase !== "finished";
-  const accentTone: Tone = !ready ? "warning" : warnings.length > 0 ? "error" : "success";
+  const hasError = warnings.some((w) => w.tone === "error");
+  const accentTone: Tone = !ready
+    ? "warning"
+    : hasError
+      ? "error"
+      : warnings.length > 0
+        ? "warning"
+        : "success";
 
   useEffect(() => {
     if (!ready) disarm();
@@ -109,7 +118,9 @@ export function StartGate({ onStart }: { onStart: () => void }) {
             <span className="text-base-content/70">
               {warnings.length === 0
                 ? "全ての指差喚呼が完了しています。周囲の安全を確認して開始してください。"
-                : "指差喚呼は完了していますが、機体に要確認があります。"}
+                : hasError
+                  ? "指差喚呼は完了していますが、機体に異常があります。"
+                  : "指差喚呼は完了していますが、機体に要確認があります。"}
             </span>
           ) : (
             <ul className="flex flex-col gap-[0.15rem]">
@@ -127,7 +138,10 @@ export function StartGate({ onStart }: { onStart: () => void }) {
             <ul className="flex flex-col gap-[0.15rem]">
               {warnings.map((w) => (
                 <li key={w.key} className="flex min-w-0 items-baseline gap-2">
-                  <Icon as={TriangleAlert} className="translate-y-[0.15em] text-error" />
+                  <Icon
+                    as={TriangleAlert}
+                    className={cx("translate-y-[0.15em]", TONE_TEXT_CLASS[w.tone])}
+                  />
                   <span className="shrink-0 font-medium">{w.label}</span>
                   <span className="min-w-0 truncate text-base-content/70">{w.detail}</span>
                 </li>

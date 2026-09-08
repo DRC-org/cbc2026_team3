@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { MotorSummary } from "@/components/diagnostics/MotorSummary";
@@ -27,6 +27,16 @@ function verdictBadge(): HTMLElement {
   const badge = screen.getByText("2 基").parentElement?.querySelector(".badge");
   if (!badge) throw new Error("判定チップが見つかりません");
   return badge as HTMLElement;
+}
+
+function stubScroll(
+  el: Element,
+  size: { clientHeight: number; scrollHeight: number; scrollTop: number },
+) {
+  for (const [key, value] of Object.entries(size)) {
+    Object.defineProperty(el, key, { value, configurable: true });
+  }
+  fireEvent.scroll(el);
 }
 
 describe("MotorSummary", () => {
@@ -85,5 +95,19 @@ describe("MotorSummary", () => {
     render(<MotorSummary motors={{}} healthMotors={[]} />);
 
     expect(screen.getByText("モータ情報なし")).toBeInTheDocument();
+  });
+});
+
+describe("MotorSummary の溢れ", () => {
+  it("下に続きがあるあいだだけ合図を出す", () => {
+    const { container } = render(<MotorSummary motors={MOTORS} />);
+    const body = container.querySelector(".scroll");
+    if (!body) throw new Error("スクロール面が見つからない");
+
+    stubScroll(body, { clientHeight: 100, scrollHeight: 900, scrollTop: 0 });
+    expect(container.querySelector(".bg-linear-to-t")).not.toBeNull();
+
+    stubScroll(body, { clientHeight: 100, scrollHeight: 100, scrollTop: 0 });
+    expect(container.querySelector(".bg-linear-to-t")).toBeNull();
   });
 });

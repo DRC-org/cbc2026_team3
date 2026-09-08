@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { RobotProvider } from "@/context/RobotContext";
@@ -228,5 +228,59 @@ describe("切断中の動作確認の中断", () => {
     await userEvent.click(screen.getByRole("button", { name: "中断" }));
 
     expect(screen.getByText(/動作確認の中断を送信できませんでした/)).toBeInTheDocument();
+  });
+});
+
+describe("MotorCheckPanel の引き寄せ", () => {
+  function watchScroll() {
+    return vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("実行中は開いた先を視界へ引き寄せる", () => {
+    const scrollIntoView = watchScroll();
+
+    mount({ running: true, step_index: 1, current_step: STEPS[1].label });
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start", behavior: "smooth" });
+  });
+
+  it("失敗したときも引き寄せる", () => {
+    const scrollIntoView = watchScroll();
+
+    mount({ error: "ステップ '零点確定' で失敗しました" });
+
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("失敗のあと再実行しても引き寄せる", () => {
+    const scrollIntoView = watchScroll();
+    const panel = (check: Partial<MotorCheckSnapshot>) => (
+      <RobotProvider
+        value={createRobotContext({
+          motorCheck: { ...EMPTY_MOTOR_CHECK, available: true, steps: STEPS, ...check },
+        })}
+      >
+        <MotorCheckPanel />
+      </RobotProvider>
+    );
+
+    const { rerender } = render(panel({ error: "ステップ '零点確定' で失敗しました" }));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    rerender(panel({ running: true, step_index: 0, current_step: STEPS[0].label }));
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+  });
+
+  it("平常時は動かさない", () => {
+    const scrollIntoView = watchScroll();
+
+    mount();
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 });

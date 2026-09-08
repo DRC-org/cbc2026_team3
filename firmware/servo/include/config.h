@@ -102,7 +102,11 @@ constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 constexpr motorcan::ServoLimits kGripperLimits{0.0f, 270.0f, 90.0f};
 constexpr motorcan::ServoLimits kWallFLimits{0.0f, 270.0f, 90.0f};
 constexpr motorcan::ServoLimits kWallRLimits{0.0f, 270.0f, 90.0f};
-constexpr motorcan::ServoLimits kSubGripperLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubRotateRLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubRotateLLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubPitchRLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubPitchLLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubOffsetLimits{0.0f, 270.0f, 90.0f};
 
 // TouchSensor / Unused は駆動しないので共有のままでよい。
 constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 270.0f, 90.0f};
@@ -122,14 +126,24 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 270.0f, 90.0f};
 //
 //   基板 | スロット | デバイス ID | PC 側のモータ / 用途
 //   -----+----------+------------+--------------------------------
-//    #0  | SV0      | 0x40       | gripper        (メインハンド)
-//    #0  | SV1      | 0x41       | wall_f         (メインハンド)
-//    #0  | SV2      | 0x42       | wall_r         (メインハンド)
-//    #0  | SV3      | 0x43       | rotate の原点スイッチ
-//    #0  | SV4      | ―          | 未使用 (y_axis の原点スイッチ用に予約)
-//    #1  | SV0      | 0x48       | sub_gripper    (サブハンド)
-//    #1  | SV1〜SV4 | ―          | 未使用
-//    #2  | SV0〜SV4 | ―          | 用途未定 (0x50〜0x54 を予約)
+//    #0  | SV0      | 0x40       | gripper                 (メインハンド)
+//    #0  | SV1      | 0x41       | wall_f                  (メインハンド)
+//    #0  | SV2      | 0x42       | wall_r                  (メインハンド)
+//    #0  | SV3      | 0x43       | rotate の原点スイッチ    (メインハンド)
+//    #0  | SV4      | 0x44       | y_axis 右の原点スイッチ  (メインハンド)
+//    #1  | SV0      | 0x48       | y_axis 左の原点スイッチ  (メインハンド)
+//    #1  | SV1      | 0x49       | sub_y_axis 前端スイッチ  (サブハンド)
+//    #1  | SV2      | 0x4A       | sub_y_axis 後端スイッチ  (サブハンド)
+//    #1  | SV3      | 0x4B       | sub_lift 上端スイッチ    (サブハンド)
+//    #1  | SV4      | 0x4C       | sub_lift 下端スイッチ    (サブハンド)
+//    #2  | SV0      | 0x50       | sub_rotate_r            (サブハンド)
+//    #2  | SV1      | 0x51       | sub_rotate_l            (サブハンド)
+//    #2  | SV2      | 0x52       | sub_pitch_r             (サブハンド)
+//    #2  | SV3      | 0x53       | sub_pitch_l             (サブハンド)
+//    #2  | SV4      | 0x54       | sub_offset              (サブハンド)
+//
+// 基板 #1 は SV0 がメインハンド・SV1〜SV4 がサブハンドで、1 枚が 2 つのロボットに
+// またがる（配線はメインハンドからこの基板まで引く必要がある）。
 
 // boardNumber は DIP で選ばれる番号そのもの（仕様書 §2.2 の bit5-3）。
 struct ServoBoardConfig {
@@ -142,20 +156,20 @@ struct ServoBoardConfig {
 constexpr uint8_t kServoBoardCount = 1;
 
 constexpr ServoBoardConfig kServoBoards[] = {
-    // 基板 #2（DIP=2）: UNO R4 Minima
+    // 基板 #2（DIP=2）: サブハンドの回転 2 軸 / ピッチ 2 軸 / オフセット 1 軸
     //
-    // 5 スロットとも用途未定なので Unused。この状態の基板は正しいファームを焼いて
-    // DIP を 2 に合わせても RGB LED が赤の速い点滅になる（故障ではない）。
+    // sub_rotate_r/l と sub_pitch_r/l は機構的に直結した左右ペアで、折り返し
+    // （scale: -1.0 / offset: 270.0）は PC 側の位置定数 yaml が持つ。
     //
-    // TODO(実機で確認): 用途が決まったら role・initialAngleDeg・limits・pulse を
-    // 実物へ合わせ、sensorActiveLow はそのスロットの配線で実測すること。
+    // TODO(実機で確認): initialAngleDeg は 5 スロットとも仮値。通電と再起動のたび
+    // ここへ駆動するので、機構を付ける前に「当たらない角度」を実測して入れること。
     {2,
      {
-         {SlotRole::Unused, 9, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV0
-         {SlotRole::Unused, 11, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV1
-         {SlotRole::Unused, 10, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV2
-         {SlotRole::Unused, 6, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV3
-         {SlotRole::Unused, 3, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV4
+         {SlotRole::Servo, 9, 0.0f, kSubRotateRLimits, kServoPulse270, true},   // SV0 sub_rotate_r
+         {SlotRole::Servo, 11, 0.0f, kSubRotateLLimits, kServoPulse270, true},  // SV1 sub_rotate_l
+         {SlotRole::Servo, 10, 0.0f, kSubPitchRLimits, kServoPulse270, true},   // SV2 sub_pitch_r
+         {SlotRole::Servo, 6, 0.0f, kSubPitchLLimits, kServoPulse270, true},    // SV3 sub_pitch_l
+         {SlotRole::Servo, 3, 0.0f, kSubOffsetLimits, kServoPulse270, true},    // SV4 sub_offset
      }},
 };
 
@@ -172,23 +186,21 @@ constexpr ServoBoardConfig kServoBoards[] = {
          {SlotRole::Servo, 6, 90.0f, kWallRLimits, kServoPulse270, false},  // SV2 wall_r
          // 実測（CAN ID 0x343 の FEEDBACK）: 非接触で LOW、接触で HIGH。
          {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 rotate
-         // スイッチ未装着のため Unused。付けたら TouchSensor へ戻し、同時に
-         // config/main_hand.yaml の sensors: と
-         // config/main_hand_positions.yaml の axes.y_axis.homing も戻すこと。
-         //
-         // TODO(実機で確認): sensorActiveLow は仮値。
-         {SlotRole::Unused, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis (未装着)
+         // TODO(実機で確認): sensorActiveLow は仮値。極性はスロットごとの配線で決まるので
+         // 同じ基板の SV3 へ合わせてはならない。
+         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis 右
      }},
-    // 基板 #1（DIP=1）: サブハンド
+    // 基板 #1（DIP=1）: 5 スロットとも TouchSensor で、駆動するモータは 1 台も無い。
+    // 焼き忘れ検出は PC 側 sensors: の expected_firmware が担う。
     //
-    // TODO(実機で確認): SV1〜SV4 の sensorActiveLow は仮値。
+    // TODO(実機で確認): SV0〜SV4 の sensorActiveLow は仮値。
     {1,
      {
-         {SlotRole::Servo, 4, 0.0f, kSubGripperLimits, kServoPulse270, false},  // SV0 sub_gripper
-         {SlotRole::Unused, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1
-         {SlotRole::Unused, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2
-         {SlotRole::Unused, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV3
-         {SlotRole::Unused, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV4
+         {SlotRole::TouchSensor, 4, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV0 y_axis 左 (メイン)
+         {SlotRole::TouchSensor, 5, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV1 sub_y_axis 前端
+         {SlotRole::TouchSensor, 6, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV2 sub_y_axis 後端
+         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV3 sub_lift 上端
+         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 sub_lift 下端
      }},
 };
 
@@ -214,11 +226,13 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 //    （sub_gripper）から TouchSensor（rotate の原点スイッチ）になり、sub_gripper は
 //    基板 #1 の SV0（0x48）へ移った。
 // 5: 基板 #0 の SV4（y_axis の原点スイッチ用）が TouchSensor から Unused になった。
-//    スイッチを付けたら TouchSensor へ戻して版番号をまた上げること。
+// 6: 零点確定用のスイッチ 6 本とサブハンドのサーボ 5 本を割り当て、3 枚とも役割が
+//    変わった。#0 SV4 は TouchSensor へ戻り、#1 は 5 スロットとも TouchSensor、
+//    #2 は 5 スロットとも Servo になった。
 //
-// 基板 #2（UNO R4 Minima）の追加では上げていない。既存 2 枚の CAN 上の振る舞いが
-// 変わっていないため。R4 バイナリも v5 を名乗る。
-constexpr uint8_t kFirmwareVersion = 5;
+// 基板 #2（UNO R4 Minima）の追加自体では上げていない。既存 2 枚の CAN 上の振る舞いが
+// 変わっていないため。R4 バイナリも Nano と同じ番号を名乗る。
+constexpr uint8_t kFirmwareVersion = 6;
 
 constexpr uint32_t kInfoIntervalMs = 1000;
 

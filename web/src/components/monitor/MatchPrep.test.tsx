@@ -94,7 +94,73 @@ describe("MatchPrep の項目配置", () => {
     });
 
     expect(screen.getByText("/3")).toBeInTheDocument();
-    expect(screen.getByText("残り 2")).toBeInTheDocument();
+    expect(screen.queryByText(/残り/)).not.toBeInTheDocument();
+  });
+
+  it("「完了」はサーバーの completed であって件数からの導出ではない", () => {
+    mount({ items: [item("a", "preflight", true), item("b", "court", true)], completed: false });
+
+    expect(screen.queryByText("完了")).not.toBeInTheDocument();
+  });
+
+  it("サーバーが completed を立てていれば未チェックが残っていても完了を出す", () => {
+    mount({ items: [item("a", "preflight", true), item("b", "court")], completed: true });
+
+    expect(screen.getByText("完了")).toBeInTheDocument();
+  });
+});
+
+function stubScroll(
+  el: Element,
+  size: { clientHeight: number; scrollHeight: number; scrollTop: number },
+) {
+  for (const [key, value] of Object.entries(size)) {
+    Object.defineProperty(el, key, { value, configurable: true });
+  }
+  fireEvent.scroll(el);
+}
+
+function scrollBody(container: HTMLElement): Element {
+  const body = container.querySelector(".scroll");
+  if (!body) throw new Error("スクロール面が見つからない");
+  return body;
+}
+
+const aboveSignal = (c: HTMLElement) => c.querySelector(".bg-linear-to-b");
+const belowSignal = (c: HTMLElement) => c.querySelector(".bg-linear-to-t");
+
+describe("MatchPrep のスクロール", () => {
+  it("下に続きがあるあいだだけ下端に合図を出す", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+    expect(belowSignal(container)).not.toBeNull();
+    expect(aboveSignal(container)).toBeNull();
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 900 });
+    expect(belowSignal(container)).toBeNull();
+  });
+
+  it("上に続きがあるあいだだけ上端に合図を出す", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 400 });
+    expect(aboveSignal(container)).not.toBeNull();
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+    expect(aboveSignal(container)).toBeNull();
+  });
+
+  it("溢れていなければ上下とも何も出さない", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 300, scrollTop: 0 });
+
+    expect(aboveSignal(container)).toBeNull();
+    expect(belowSignal(container)).toBeNull();
   });
 });
 

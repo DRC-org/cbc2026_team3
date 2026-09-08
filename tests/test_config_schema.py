@@ -581,7 +581,6 @@ class TestDriverSpecificKeys:
                 source="test.yaml",
             )
 
-    # bool は int の派生なので float(True) == 1.0 が例外なく通る。
     def test_bool_pid_value_is_rejected(self) -> None:
         with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kp"):
             load_robot_config(
@@ -803,3 +802,25 @@ class TestExpectedInfoValues:
         )
         with pytest.raises(ValueError):
             load_robot_config(raw, source="test.yaml", buses=_BUSES)
+
+
+class TestSensorExpectedFirmware:
+    def _load(self, **extra: object):
+        raw = _robot(gripper=_generic(can_id=0x40))
+        raw["sensors"] = {"origin_sensor": {"bus": "generic_bus", "can_id": 0x44, **extra}}
+        return load_robot_config(raw, source="test.yaml", buses=_BUSES)
+
+    def test_expected_firmware_is_read(self) -> None:
+        sensor = self._load(expected_firmware=6).sensors["origin_sensor"]
+        assert sensor.expected_firmware == 6
+
+    def test_omitted_value_stays_none(self) -> None:
+        assert self._load().sensors["origin_sensor"].expected_firmware is None
+
+    def test_firmware_out_of_uint8_rejected(self) -> None:
+        with pytest.raises(ValueError, match="expected_firmware"):
+            self._load(expected_firmware=256)
+
+    def test_angle_range_rejected_on_sensor(self) -> None:
+        with pytest.raises(ValueError, match="expected_angle_range_deg"):
+            self._load(expected_angle_range_deg=270.0)

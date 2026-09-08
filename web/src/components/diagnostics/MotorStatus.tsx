@@ -1,4 +1,5 @@
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { commandValueText } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
 import { motorTempTone } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
@@ -43,21 +44,23 @@ const COMMAND_MARK = "→";
 const COMMAND_TITLE =
   "PC が最後に送った指令値です（実際の出力ではありません）。この基板は出力を測る手段を持たないため、緊急停止・ウォッチドッグ満了・ファーム側の上限クランプで基板が出していなくても、ここには値が残ります。";
 
-function commandText(value: number, mode: string | null): string {
-  if (mode === "on_off") return value === 0 ? "OFF" : "ON";
-  return mode === "duty" ? value.toFixed(2) : value.toFixed(1);
-}
+const commandDigits = (mode: string | null) => (mode === "duty" ? 2 : 1);
 
 const STAT_GRID_CLASS = "grid grid-cols-4 gap-1 px-1 text-right";
+
+const NAME_COL_CLASS = "@min-[32rem]:w-[11rem]";
 
 const STAT_LABELS = ["POS", "VEL", "TRQ", "TMP"];
 
 export function MotorStatHeader({ className }: { className?: string }) {
   return (
-    <div className={cx(STAT_GRID_CLASS, "text-[0.8em] text-base-content/60", className)}>
-      {STAT_LABELS.map((label) => (
-        <span key={label}>{label}</span>
-      ))}
+    <div className={cx("flex text-[0.8em] text-base-content/60", className)}>
+      <span className={cx("hidden shrink-0 @min-[32rem]:block", NAME_COL_CLASS)} aria-hidden />
+      <div className={cx(STAT_GRID_CLASS, "min-w-0 flex-1")}>
+        {STAT_LABELS.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -102,7 +105,7 @@ function PositionCell({ state }: { state: MotorState }) {
   return (
     <span className="truncate font-mono tabular-nums" title={COMMAND_TITLE}>
       <span className="text-base-content/50">{COMMAND_MARK}</span>
-      {commandText(commanded, mode)}
+      {commandValueText(commanded, mode, commandDigits(mode))}
     </span>
   );
 }
@@ -117,19 +120,31 @@ export function MotorStatus({
   const temp = readMeasured(state.temp);
 
   return (
-    <div className={cx("flex flex-col py-[0.15rem]", className)}>
-      <div className="flex min-w-0 items-center justify-between gap-2 px-1">
+    <div
+      className={cx(
+        "flex flex-col py-[0.15rem] @min-[32rem]:flex-row @min-[32rem]:items-center",
+        className,
+      )}
+    >
+      <div
+        className={cx(
+          "flex min-w-0 items-center justify-between gap-2 px-1 @min-[32rem]:shrink-0 @min-[32rem]:justify-start",
+          NAME_COL_CLASS,
+        )}
+      >
         <span className="min-w-0 truncate font-medium">{name}</span>
         {health ? (
           <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
             <StatusBadge tone={HEALTH_TONE[health.state]}>{health.state.toUpperCase()}</StatusBadge>
-            <span className="text-[0.8em] text-base-content/60">
-              {formatAge(health.feedback_age_ms)}
-            </span>
+            {health.state === "ok" ? null : (
+              <span className="text-[0.8em] text-base-content/60">
+                {formatAge(health.feedback_age_ms)}
+              </span>
+            )}
           </span>
         ) : null}
       </div>
-      <div className={STAT_GRID_CLASS}>
+      <div className={cx(STAT_GRID_CLASS, "min-w-0 @min-[32rem]:flex-1")}>
         <PositionCell state={state} />
         <Cell value={readMeasured(state.vel)} />
         <Cell value={readMeasured(state.torque)} />

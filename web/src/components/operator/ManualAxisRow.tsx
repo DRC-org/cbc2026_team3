@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { ContinuousControls } from "@/components/operator/ContinuousControls";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { commandValueText, hasUnit } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
 import type { ManualAxis } from "@/lib/protocol";
 import { evaluateSync } from "@/lib/syncVerdict";
@@ -17,8 +18,10 @@ interface ManualAxisRowProps {
   onMove: (axis: string, position: string) => void;
 }
 
-function format(value: number | null, unit: string): string {
-  return value === null ? "—" : `${value.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+function format(value: number | null, axis: ManualAxis): string {
+  if (value === null) return "—";
+  const text = commandValueText(value, axis.command_mode, 2);
+  return hasUnit(axis.command_mode) && axis.unit ? `${text} ${axis.unit}` : text;
 }
 
 export function ManualAxisRow({
@@ -38,6 +41,26 @@ export function ManualAxisRow({
     if (selected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
 
+  const presetOnly = range === null;
+  const presetButtons =
+    axis.positions.length === 0 ? null : (
+      <div className="flex flex-wrap items-center gap-1">
+        {axis.positions.map((position) => (
+          <Button
+            key={position.name}
+            disabled={disabled}
+            onClick={() => onMove(axis.name, position.name)}
+            aria-label={`${axis.name} を ${position.name} へ`}
+            title={
+              presetOnly || position.value === null ? undefined : `${position.value} ${axis.unit}`
+            }
+          >
+            {position.name}
+          </Button>
+        ))}
+      </div>
+    );
+
   return (
     <div
       ref={rowRef}
@@ -48,7 +71,12 @@ export function ManualAxisRow({
       onPointerDown={onSelect}
       onFocusCapture={onSelect}
     >
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <div
+        className={cx(
+          "flex min-w-0 flex-wrap gap-x-3 gap-y-0.5",
+          presetOnly ? "items-center" : "items-baseline",
+        )}
+      >
         <span className="min-w-0 shrink-0 font-medium">{axis.name}</span>
         {axis.motors.length === 1 && axis.motors[0] === axis.name ? null : (
           <span className="shrink-0 text-[0.8em] text-base-content/45">
@@ -58,16 +86,20 @@ export function ManualAxisRow({
 
         <SyncIndicator axis={axis} />
 
+        {presetOnly ? presetButtons : null}
+
         <span className="ml-auto flex shrink-0 items-baseline gap-3 font-mono tabular-nums">
-          <span className="text-[1.15em] font-medium">
-            <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
-              現在
+          {axis.command_mode === "position" ? (
+            <span className="text-[1.15em] font-medium">
+              <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
+                現在
+              </span>
+              {format(axis.value, axis)}
             </span>
-            {format(axis.value, axis.unit)}
-          </span>
+          ) : null}
           <span className="text-base-content/70">
             <span className="mr-1 font-sans text-[0.8em] text-base-content/55">目標</span>
-            {format(axis.target, axis.unit)}
+            {format(axis.target, axis)}
             <Delta value={axis.value} target={axis.target} />
           </span>
         </span>
@@ -86,20 +118,7 @@ export function ManualAxisRow({
         />
       ) : null}
 
-      {axis.positions.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1">
-          {axis.positions.map((position) => (
-            <Button
-              key={position}
-              disabled={disabled}
-              onClick={() => onMove(axis.name, position)}
-              aria-label={`${axis.name} を ${position} へ`}
-            >
-              {position}
-            </Button>
-          ))}
-        </div>
-      ) : null}
+      {presetOnly ? null : presetButtons}
     </div>
   );
 }

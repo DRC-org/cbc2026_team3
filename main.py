@@ -236,6 +236,7 @@ def _make_origin_resolver(
 
 
 def _as_async(capture: Callable[[], None]) -> Callable[[], Awaitable[None]]:
+
     async def run() -> None:
         capture()
 
@@ -357,6 +358,7 @@ def _wire_motor_check_sequence(
 
 
 def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
+
     def last_feedback_at(name: str) -> float | None:
         for mgr in managers:
             at = mgr.last_feedback_at(name)
@@ -470,7 +472,14 @@ def _setup_robot(
         motors[motor_name] = motor
 
     for sensor_cfg in robot.sensors.values():
-        can_manager.add_sensor(sensor_cfg.bus, GenericDriver(sensor_cfg.name, sensor_cfg.can_id))
+        can_manager.add_sensor(
+            sensor_cfg.bus,
+            GenericDriver(
+                sensor_cfg.name,
+                sensor_cfg.can_id,
+                expected_firmware=sensor_cfg.expected_firmware,
+            ),
+        )
 
     return can_manager, motors
 
@@ -692,6 +701,7 @@ def _make_sync_violation_handler(
     positions: PositionTable,
     tasks: set[asyncio.Task[None]],
 ) -> Callable[[str, float], None]:
+
     def on_violation(axis_name: str, deviation: float) -> None:
         spec = positions.axis(axis_name)
         unit = spec.unit

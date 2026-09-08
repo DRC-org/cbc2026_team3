@@ -14,7 +14,6 @@ import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { cx } from "@/lib/cx";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
@@ -110,7 +109,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       onChange={handleMode}
       blockedReason={modeBlockedReason}
       sequenceName={state.sequence}
-      totalSteps={setupPhase ? state.total_steps : null}
+      totalSteps={setupPhase && inManual ? state.total_steps : null}
     />
   );
 
@@ -138,19 +137,35 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     </Panel>
   );
 
+  const stepPanel = (
+    <Panel
+      legend="ステップ"
+      className="min-h-0 flex-1"
+      bodyClassName="p-0"
+      actions={
+        stepJumpBlockedReason ? (
+          <span className="text-[0.85em] text-base-content/60">{stepJumpBlockedReason}</span>
+        ) : null
+      }
+    >
+      <SequenceStepList
+        steps={state.steps ?? []}
+        stepIndex={state.step_index}
+        waitingTrigger={state.waiting_trigger}
+        onJump={handleJump}
+        disabled={stepJumpBlockedReason !== null}
+      />
+    </Panel>
+  );
+
   if (setupPhase) {
+    const openSubsystemPanel = subsystemPanel(true, "min-h-0");
     return (
       <Page className="flex flex-col">
         {modeSwitch}
-        <div
-          className={cx(
-            "grid min-h-0 flex-1 gap-2",
-            inManual ? "grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]" : "grid-cols-1",
-          )}
-        >
-          {inManual ? manualPanel : null}
-
-          {subsystemPanel(true, "min-h-0")}
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
+          {inManual ? manualPanel : openSubsystemPanel}
+          {inManual ? openSubsystemPanel : stepPanel}
         </div>
       </Page>
     );
@@ -174,26 +189,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               onTrigger={handleTrigger}
             />
 
-            <Panel
-              legend="ステップ"
-              className="min-h-0 flex-1"
-              bodyClassName="p-0"
-              actions={
-                stepJumpBlockedReason ? (
-                  <span className="text-[0.85em] text-base-content/60">
-                    {stepJumpBlockedReason}
-                  </span>
-                ) : null
-              }
-            >
-              <SequenceStepList
-                steps={state.steps ?? []}
-                stepIndex={state.step_index}
-                waitingTrigger={state.waiting_trigger}
-                onJump={handleJump}
-                disabled={stepJumpBlockedReason !== null}
-              />
-            </Panel>
+            {stepPanel}
           </div>
         )}
 

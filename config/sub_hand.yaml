@@ -4,7 +4,7 @@ motors:
   sub_arm_joint:
     driver: edulite05
     bus: edulite_bus
-    can_id: 3
+    can_id: 3                  # main_hand の rotate_r/rotate_l (1,2) との衝突回避
     host_id: 0xFD
     mode: position
     limit_speed: 2.0
@@ -19,84 +19,137 @@ motors:
     master_id: 0x11
     mode: position
     limit_speed: 2.0
-    p_max: 12.5
-    v_max: 200.0
-    t_max: 10.0
+    p_max: 12.5                # レジスタ 0x15 [rad]  (scale 換算で ±225mm)
+    v_max: 200.0               # レジスタ 0x16 [rad/s]
+    t_max: 10.0                # レジスタ 0x17 [Nm]
     set_zero_on_start: false
 
-  # TODO: limit_speed は機構の重量が分かったら実機で詰めること。
   sub_lift:
     driver: dm3520
     bus: dm3520_bus
     can_id: 0x02
     master_id: 0x12
     mode: position
+    # TODO: 機構の重量が分かったら実機で詰めること
     limit_speed: 1.0
     p_max: 12.5
     v_max: 200.0
     t_max: 10.0
     set_zero_on_start: false
 
-  sub_gripper:
+  sub_rotate_r:
     driver: generic
     bus: generic_bus
-    can_id: 0x48
+    can_id: 0x50               # サーボ基板 #2 SV0 (仕様書 §2.2)
     control_type: position
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0
+
+  sub_rotate_l:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x51               # サーボ基板 #2 SV1
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  sub_pitch_r:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x52               # サーボ基板 #2 SV2
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  sub_pitch_l:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x53               # サーボ基板 #2 SV3
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  sub_offset:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x54               # サーボ基板 #2 SV4
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   valve_1:
     driver: generic
     bus: generic_bus
-    can_id: 0xC0
+    can_id: 0xC0               # 電磁弁基板 #0 ch0 (PB7)
     control_type: on_off
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_2:
     driver: generic
     bus: generic_bus
-    can_id: 0xC1
+    can_id: 0xC1               # 電磁弁基板 #0 ch1 (PB6)
     control_type: on_off
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_3:
     driver: generic
     bus: generic_bus
-    can_id: 0xC2
+    can_id: 0xC2               # 電磁弁基板 #0 ch2 (PB5)
     control_type: on_off
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_4:
     driver: generic
     bus: generic_bus
-    can_id: 0xC3
+    can_id: 0xC3               # 電磁弁基板 #0 ch3 (PB4)
     control_type: on_off
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_5:
     driver: generic
     bus: generic_bus
-    can_id: 0xC4
+    can_id: 0xC4               # 電磁弁基板 #0 ch4 (PB3)
     control_type: on_off
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_6:
     driver: generic
     bus: generic_bus
-    can_id: 0xC5
+    can_id: 0xC5               # 電磁弁基板 #0 ch5 (PA15)
     control_type: on_off
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   pump_vac:
     driver: generic
     bus: generic_bus
-    can_id: 0x81
+    can_id: 0x81               # DC 基板 #0 ch1
     control_type: duty
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
   pump_blow:
     driver: generic
     bus: generic_bus
-    can_id: 0x82
+    can_id: 0x82               # DC 基板 #0 ch2
     control_type: duty
-    expected_firmware: 2
+    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
+
+sensors:
+  sub_y_axis_f_limit_sensor:
+    bus: generic_bus
+    can_id: 0x49               # サーボ基板 #1 SV1
+    expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
+
+  sub_y_axis_r_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4A               # サーボ基板 #1 SV2
+    expected_firmware: 6
+
+  sub_lift_t_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4B               # サーボ基板 #1 SV3
+    expected_firmware: 6
+
+  sub_lift_b_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4C               # サーボ基板 #1 SV4
+    expected_firmware: 6

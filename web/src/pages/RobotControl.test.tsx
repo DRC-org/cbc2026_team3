@@ -1,6 +1,6 @@
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type {
   ManualState,
@@ -12,11 +12,6 @@ import type {
 import { RobotControl } from "@/pages/RobotControl";
 import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
-
-beforeAll(() => {
-  // jsdom は scrollIntoView を実装していない
-  Element.prototype.scrollIntoView = () => {};
-});
 
 const STEPS: SequenceStepInfo[] = [
   { index: 0, label: "初期位置へ移動", require_trigger: false },
@@ -99,7 +94,7 @@ describe("試合時間タイマーの配置", () => {
   it("試合中は右カラムに残り時間の値を出す", () => {
     mount("match", robotState(), { running: true, elapsed_ms: 60_000, duration_ms: 180_000 });
 
-    const panel = screen.getByText("試合時間").closest("section");
+    const panel = screen.getByText("残り時間").closest("section");
     expect(panel).not.toBeNull();
     expect(within(panel as HTMLElement).getByText("2:00")).toBeInTheDocument();
   });
@@ -107,7 +102,7 @@ describe("試合時間タイマーの配置", () => {
   it("セッティングタイムには出さない", () => {
     mount("setup", robotState(), { running: false, elapsed_ms: 0, duration_ms: 180_000 });
 
-    expect(screen.queryByText("試合時間")).not.toBeInTheDocument();
+    expect(screen.queryByText("残り時間")).not.toBeInTheDocument();
   });
 });
 
@@ -121,7 +116,7 @@ describe("試合中の右カラム", () => {
     for (const timer of TIMERS) {
       const view = mount("match", robotState(), timer);
 
-      const column = screen.getByText("試合時間").closest("section")?.parentElement;
+      const column = screen.getByText("残り時間").closest("section")?.parentElement;
       expect(column?.className).toContain("flex-col");
 
       const panels = Array.from(column?.children ?? []);
@@ -160,7 +155,7 @@ describe("試合中の右カラム", () => {
     );
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
 
-    const timerPanel = screen.getByText("試合時間").closest("section");
+    const timerPanel = screen.getByText("残り時間").closest("section");
     const statusPanel = screen.getByText("機体状態").closest("section");
 
     expect(timerPanel?.classList.contains("shrink-0")).toBe(true);
@@ -383,7 +378,8 @@ describe("RobotControl の診断表示", () => {
     );
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
-    expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+    expect(screen.getByText("同期ずれラッチ rotate")).toBeInTheDocument();
+    expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
   });
 });
 
@@ -399,7 +395,10 @@ const MANUAL: ManualState = {
       manual: { min: -5, max: 30, steps: [1, 5] },
       deviation: 0.1,
       sync_tolerance: 1.0,
-      positions: ["home", "pick"],
+      positions: [
+        { name: "home", value: 0 },
+        { name: "pick", value: 20 },
+      ],
       motors: ["rotate_r", "rotate_l"],
     },
   ],
@@ -613,18 +612,45 @@ describe("ステップ一覧の見出し", () => {
 });
 
 describe("シーケンス名の置き場所", () => {
-  it("準備中はモード帯にシーケンス名と総ステップ数を出す", () => {
+  it("準備中はモード帯にシーケンス名を出す", () => {
     mount("setup");
 
     expect(screen.getByText("sub_hand")).toBeInTheDocument();
-    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
     expect(screen.queryByText("シーケンス")).toBeNull();
   });
 
-  it("試合中は総ステップ数を出さない (ActionPanel が同じ数を出している)", () => {
-    mount("match");
-
-    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+  it("半自動では総ステップ数を出さない (準備中は一覧が、試合中は ActionPanel が出す)", () => {
+    mount("setup");
     expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
+
+    mount("match");
+    expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
+  });
+
+  it("手動の準備中だけ帯が総ステップ数を引き受ける (一覧が画面から消えるため)", () => {
+    mountManual("setup");
+
+    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
+  });
+});
+
+describe("準備中のステップ一覧", () => {
+  it("半自動の準備中にも一覧を出す", () => {
+    mount("setup");
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeInTheDocument();
+  });
+
+  it("押せなくし、その理由を出す", () => {
+    mount("setup");
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeDisabled();
+    expect(within(stepPanel()).getByText("試合中のみ操作可")).toBeInTheDocument();
+  });
+
+  it("手動中は出さない (同じ列を手元の操作面へ明け渡す)", () => {
+    mountManual("setup");
+
+    expect(screen.queryByRole("button", { name: "ステップ 3: 搬送" })).toBeNull();
   });
 });

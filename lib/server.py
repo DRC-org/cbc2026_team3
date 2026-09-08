@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 
+
 _FAILED_TASK_BACKLOG = 5
 
 _ENERGIZE_GRACE_S = 0.5
@@ -172,6 +173,7 @@ class RobotServer:
     def watch_task(
         self, task: asyncio.Task[None], *, context: str, robots: Collection[str]
     ) -> None:
+
         def _on_done(t: asyncio.Task[None]) -> None:
             if t.cancelled():
                 return
@@ -900,10 +902,11 @@ class RobotServer:
             ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
         )
         now = freshness.now()
+        devices = {**ctx.can_manager.motors, **ctx.can_manager.sensors}
         return sorted(
-            motor_name
-            for motor_name, motor in ctx.can_manager.motors.items()
-            if motor.firmware_confirmed() is False and not freshness.is_stale(motor_name, now)
+            device_name
+            for device_name, device in devices.items()
+            if device.firmware_confirmed() is False and not freshness.is_stale(device_name, now)
         )
 
     async def _reactivate_motors(self) -> None:
@@ -943,7 +946,7 @@ class RobotServer:
         if pending is None or pending.done():
             return
         pending.cancel()
-        # asyncio.wait は中の例外 (CancelledError を含む) を送出しない。
+        # `asyncio.wait` は中の例外 (CancelledError を含む) を送出しない。
         done, _still_running = await asyncio.wait({pending}, timeout=_PENDING_TASK_CANCEL_TIMEOUT_S)
         if not done:
             logger.error(

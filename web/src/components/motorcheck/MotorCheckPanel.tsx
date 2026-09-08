@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, ListMinus, Square, TriangleAlert } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -24,8 +24,15 @@ export function MotorCheckPanel() {
   const forcedOpen = outcome === "running" || outcome === "failed";
   const open = forcedOpen || manualOpen;
 
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (outcome === "running" || outcome === "failed") {
+      panelRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+  }, [outcome]);
+
   return (
-    <div className="flex flex-col">
+    <div ref={panelRef} className="flex flex-col">
       <div className="flex items-center gap-2">
         <button
           type="button"

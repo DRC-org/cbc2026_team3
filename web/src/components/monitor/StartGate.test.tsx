@@ -36,6 +36,8 @@ function robot(health: HealthSnapshot, manual?: ManualState): RobotState {
 
 const HEALTHY_STATES = { main_hand: robot(OK_HEALTH), sub_hand: robot(OK_HEALTH) };
 
+const accent = (container: HTMLElement) => container.querySelector(".card");
+
 describe("StartGate", () => {
   it("残り件数を出す (項目名は同じ画面の Checklist が出すので繰り返さない)", () => {
     renderWithRobot(<StartGate onStart={vi.fn()} />, {
@@ -153,7 +155,7 @@ describe("StartGate", () => {
     });
 
     expect(screen.getByText(/CAN 停止 can_edulite/)).toBeInTheDocument();
-    expect(screen.getByText(/機体に要確認があります/)).toBeInTheDocument();
+    expect(screen.getByText(/機体に異常があります/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "試合を開始する" })).toBeEnabled();
   });
 });
@@ -286,6 +288,25 @@ describe("StartGate の手動操縦警告", () => {
 
     expect(screen.queryByText(/手動操縦中/)).not.toBeInTheDocument();
     expect(screen.getByText(/全ての指差喚呼が完了しています/)).toBeInTheDocument();
+  });
+
+  it("手動操縦の警告だけでは帯を赤くしない", () => {
+    const { container } = renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, MANUAL), sub_hand: robot(OK_HEALTH, SEQUENCE) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(accent(container)).toHaveClass("border-l-warning");
+    expect(accent(container)).not.toHaveClass("border-l-error");
+  });
+
+  it("配信が 1 通も無い機体があれば帯を赤くする", () => {
+    const { container } = renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: { main_hand: robot(OK_HEALTH, SEQUENCE) },
+      matchState: READY_MATCH_STATE,
+    });
+
+    expect(accent(container)).toHaveClass("border-l-error");
   });
 
   it("手動でも開始そのものは止めない (可否を決めるのはサーバーの can_start_match だけ)", () => {

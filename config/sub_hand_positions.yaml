@@ -2,37 +2,37 @@ axes:
   sub_arm_joint:
     unit: deg
     command_unit: rad
-    scale: 0.017453292519943295
-    offset: 0.0          # TODO: 機械原点と電気原点のずれ [rad]。実機で実測
-    timeout_s: 3.0
+    scale: 0.017453292519943295   # deg -> rad (pi/180)
+    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
+    timeout_s: 3.0       # この時間で到達しなければシーケンスを停止する
     # TODO: 機構完成後、メインハンドと干渉しない角度範囲へ詰めること
     manual:
       min: -5.0
       max: 15.0
       steps: [1.0, 5.0]
 
-  # TODO: 実機で確認 (収納側へ寄せる向き / ストローク全長)。リミットスイッチを
-  # 付けても DM3520 は supports_origin_capture() が False なので現状は有効化できない。
+  # TODO: 実機で確認 (収納側へ寄せる向き / ストローク全長)。リミットスイッチを付けても
+  # DM3520 は supports_origin_capture() が False なので現状は有効化できない。
   # homing:
   #   sensor: sub_y_axis_origin_sensor
-  #   direction: -1
-  #   search_distance: 40.0   # [mm]
+  #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
+  #   search_distance: 40.0   # [mm] TODO: ストローク全長より少し長い値へ
   #   step: 0.5               # [mm]
   #   settle_s: 0.05
   sub_y_axis:
     unit: mm
     command_unit: rad
-    scale: 0.0555556
+    scale: 0.0555556     # mm -> rad (出力軸) = 2 / (モジュール 1 * 歯数 36)
     offset: 0.0
-    timeout_s: 4.0
-    tolerance: 1.0
+    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
+    tolerance: 1.0       # 到達許容差 [mm]
     # TODO: 機構完成後、実測のストローク端より内側へ詰めること
     manual:
       min: -5.0
       max: 30.0
       steps: [1.0, 5.0, 10.0]
 
-  # TODO(実機で確認): 正が上、負が下。逆なら scale の符号を反転する。
+  # 昇降。正が上、負が下 (TODO: 実機で確認し、逆なら scale の符号を反転する)。
   sub_lift:
     unit: mm
     command_unit: rad
@@ -46,12 +46,35 @@ axes:
       max: 30.0
       steps: [1.0, 5.0, 10.0]
 
-  sub_gripper:
+  # サーボ 3 軸の timeout_s は firmware/servo/include/config.h のスルーレート
+  # (90deg/s) と対。突き合わせは tests/test_servo_travel_budget.py。
+  sub_rotate:
+    unit: deg
+    command_unit: deg
+    timeout_s: 2.0
+    tolerance: 2.0       # 到達許容差 [deg]
+    motors:
+      sub_rotate_r: { scale: 1.0, offset: 0.0 }
+      # TODO(実機で確認): offset 270.0 は仮値。折り返し点は左右のサーボの取り付け向きで決まる。
+      sub_rotate_l: { scale: -1.0, offset: 270.0 }
+
+  sub_pitch:
+    unit: deg
+    command_unit: deg
+    timeout_s: 2.0
+    tolerance: 2.0
+    motors:
+      sub_pitch_r: { scale: 1.0, offset: 0.0 }
+      # TODO(実機で確認): sub_rotate と同じく offset 270.0 は仮値。
+      sub_pitch_l: { scale: -1.0, offset: 270.0 }
+
+  sub_offset:
     unit: deg
     command_unit: deg
     scale: 1.0
     offset: 0.0
     timeout_s: 2.0
+    tolerance: 2.0
 
   # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
   valve_1: &valve_axis
@@ -90,27 +113,37 @@ axes:
 positions:
   # TODO: 機構完成後に実測値へ。現状は微小可動量のみ。
   sub_arm_joint:
-    home: 0.0
-    extended: 8.0
-    handoff: 5.0
-    place: 10.0
+    home: 0.0            # 収納姿勢 [deg]
+    extended: 8.0        # 展開姿勢 [deg]
+    handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
+    place: 10.0          # 配置姿勢 [deg]
 
-  # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」だけの仮値。
+  # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
   sub_y_axis:
-    home: 0.0
-    extended: 20.0
+    home: 0.0            # 収納位置 = 電源投入位置
+    extended: 20.0       # 前方への展開位置 [mm] (出力軸で約 64deg)
 
   sub_lift:
-    home: 0.0
-    lifted: 20.0
+    home: 0.0            # 下端 = 電源投入位置
+    lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
 
-  sub_gripper:
-    open: 5.0
-    closed: 0.0
+  # TODO(機構が付いてから実測): 3 軸とも仮値。home は firmware/servo/include/config.h の
+  # 基板 #2 の initialAngleDeg と対 (通電・瞬断からの再起動でその角へ駆動する)。
+  sub_rotate:
+    home: 0.0            # 収納姿勢 [deg]
+    working: 90.0        # 作業姿勢 [deg]
+
+  sub_pitch:
+    home: 0.0            # 収納姿勢 [deg]
+    working: 90.0        # 作業姿勢 [deg]
+
+  sub_offset:
+    home: 0.0            # 収納姿勢 [deg]
+    working: 90.0        # 作業姿勢 [deg]
 
   valve_1: &valve_states
-    open: 1.0
-    closed: 0.0
+    open: 1.0            # 開 (吸着パッドへ吸気経路をつなぐ)
+    closed: 0.0          # 閉 (吸気経路を遮断)
   valve_2: *valve_states
   valve_3: *valve_states
   valve_4: *valve_states
@@ -118,11 +151,11 @@ positions:
   valve_6: *valve_states
 
   # TODO(実機で確認): 吸引力が足りなければファームの max_duty を上げてから
-  # ここを上げること (ここだけ上げても効かない)。
+  # ここを上げること。ここだけ上げても効かない。
   pump_vac:
-    stop: 0.0
-    run: 0.95
+    stop: 0.0            # 停止 [duty]
+    run: 0.95             # 吸気 [duty]
 
   pump_blow:
-    stop: 0.0
-    run: 0.95
+    stop: 0.0            # 停止 [duty]
+    run: 0.95             # 排気 (ワークを離すときの正圧) [duty]

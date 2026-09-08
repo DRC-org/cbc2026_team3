@@ -315,14 +315,19 @@ export interface ManualRange {
 export interface ManualAxis {
   name: string;
   unit: string;
-  command_mode: "position" | "velocity" | "duty";
+  command_mode: "position" | "velocity" | "current" | "duty" | "on_off";
   value: number | null;
   target: number | null;
   manual: ManualRange | null;
   deviation: number | null;
   sync_tolerance: number | null;
-  positions: string[];
+  positions: ManualPosition[];
   motors: string[];
+}
+
+export interface ManualPosition {
+  name: string;
+  value: number | null;
 }
 
 export interface ManualState {
@@ -346,6 +351,27 @@ export function parseSensors(raw: unknown): Record<string, SensorState> | Malfor
   if (!isObject(raw)) return MALFORMED;
   if (!Object.values(raw).every(isSensorState)) return MALFORMED;
   return raw as Record<string, SensorState>;
+}
+
+function parseManualPosition(raw: unknown): ManualPosition | null {
+  if (typeof raw === "string") return { name: raw, value: null };
+  if (!isObject(raw)) return null;
+  if (typeof raw.name !== "string") return null;
+  if (raw.value !== null && typeof raw.value !== "number") return null;
+  return { name: raw.name, value: raw.value as number | null };
+}
+
+function parseManual(raw: unknown): ManualState | undefined {
+  if (!isObject(raw)) return undefined;
+  if (!Array.isArray(raw.axes)) return raw as unknown as ManualState;
+  const axes = raw.axes.map((axis: unknown) => {
+    if (!isObject(axis) || !Array.isArray(axis.positions)) return axis;
+    return {
+      ...axis,
+      positions: axis.positions.map(parseManualPosition).filter((p) => p !== null),
+    };
+  });
+  return { ...raw, axes } as unknown as ManualState;
 }
 
 export interface RobotState {
@@ -431,6 +457,8 @@ function parseKnown(raw: Raw): ServerMessage | null {
       const sensors = parseSensors(raw.sensors);
       if (sensors !== undefined) state.sensors = sensors;
       state.last_error = parseSequenceFailure(raw.last_error);
+      if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
+
       return { type: "state", robot, state };
     }
 

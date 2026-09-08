@@ -6,7 +6,9 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { useArmedPress } from "@/hooks/useArmedPress";
+import { useRemainingMs } from "@/hooks/useRemainingMs";
 import { isDuringMatch } from "@/lib/phase";
+import { formatRemaining } from "@/lib/time";
 
 export function useResetConfirm() {
   const { matchReset } = useRobotCommands();
@@ -51,6 +53,7 @@ export function MatchStrip() {
   const { phase } = matchState;
   const duringMatch = isDuringMatch(phase);
   const { armed, press, disarm } = useArmedPress(matchFinish);
+  const remainingMs = useRemainingMs(matchState.timer);
 
   useEffect(() => {
     if (!duringMatch || !connected) disarm();
@@ -94,6 +97,17 @@ export function MatchStrip() {
           <Icon as={RotateCcw} />
           {connected ? "セッティングへ戻る" : "切断中"}
         </Button>
+      )}
+
+      {remainingMs === null ? null : (
+        <span className="ml-auto flex shrink-0 items-baseline gap-1.5">
+          <span className="text-[0.8em] text-base-content/60">
+            {duringMatch ? "残り" : "終了時点"}
+          </span>
+          <span className="font-mono text-[1.9em] leading-none font-bold tabular-nums">
+            {formatRemaining(remainingMs)}
+          </span>
+        </span>
       )}
     </div>
   );
