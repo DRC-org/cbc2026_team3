@@ -4,7 +4,7 @@
 ぶんがそのまま座標のずれになる。位置定数はすべて原点からの相対値なので、
 ずれた原点のまま走らせると全ステップが同じだけずれた場所へ動く。
 
-**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 7 つ用意してある:
+**この操作は「当たるまで動かす」ので、止める仕組みが要る。** 9 つ用意してある:
 
 1. **探索距離の上限** (`HomingSpec.search_distance`) — 超えたら失敗として降りる。
    配線が抜けている・センサが死んでいる場合の唯一の無人の歯止め。
@@ -15,14 +15,24 @@
    機構を押し込んでから初めて分かる
 3. **対象軸のフィードバック鮮度の事前確認** — 実測位置が読めないまま始めると、
    未受信の 0.0 を現在位置と信じて全ストロークぶんの指令を 1 回で出す
-4. **1 歩ごとの再アンカー** — 指令は毎回**そのときの実測位置** + `step` で組む。
+4. **1 歩ごとの鮮度の再確認** — 事前確認だけでは**探索を始めた後の途絶**に
+   気付けない。センサの読み口は途絶しても「最後に届いたフラグ」を返し続けるので、
+   探索中にサーボ基板が再起動したり `can_generic` が瞬断すると、探索は
+   「いつまでも当たらない」まま `search_distance` いっぱいまで進む。
+   途絶を見つけたら**その場の実測位置を目標へ送り直してから**降りる
+   (最後に送った「実測 + step」が生きたままだと、ドライバ内蔵の位置ループが
+   そこへ向かって押し続ける。接触を検出したときの止め方と同じ作法)
+5. **1 歩ごとの再アンカー** — 指令は毎回**そのときの実測位置** + `step` で組む。
    指令が実位置を追い越して先行し続けることが構造的に起こらず、機構が引っかかった
    ときも 1 step ぶんの偏差しか掛からない。代わりに引っかかった機構は探索距離の
    上限へ永久に届かなくなるので、**停滞判定 (`_STALL_LIMIT`) が対になる**。
    その閾値は 1 歩ぶんの追従を待つ側 (`_wait_step`) と共有する
    (`_progress_threshold`) —— 基準が分かれると、待たずに抜けたことを
    「進まなかった」と数え、動いている機構を止めてしまう
-5. **離脱の距離上限** (`homing.release_distance`、既定は `step` の倍数) — 触れた
+6. **励磁の事前確認** — 無励磁のまま探索へ入っても停滞判定が 3 歩で拾うが、
+   その文言は「引っかかり・探索方向・励磁」の 3 択なので原因を絞れない。
+   1 歩も動かす前に問えば、答えが 1 つに定まる
+7. **離脱の距離上限** (`homing.release_distance`、既定は `step` の倍数) — 触れた
    状態から始めたときに一度センサの外まで離れるが、その離脱にも上限が要る。
    接点の固着と**極性の取り違え** (ファーム側 `sensorActiveLow` の設定ミス) はどちらも
    「いつまでも OFF にならない」形でしか現れない。**探索距離を流用してはならない**
@@ -30,11 +40,16 @@
    **既定の `step` 倍数に頼らないこと** —— 本来はスイッチの ON 区間の広さで決まる値で、
    刻み幅とは無関係である。精度のために `step` を詰めると離脱の許容も一緒に縮み、
    **精度を上げるほどスイッチから離れられなくなる**
-6. **粗探索が ON 区間を跨ぎ切ったことの検出** (`homing.coarse_step` を書いた軸のみ)
+8. **粗探索が ON 区間を跨ぎ切ったことの検出** (`homing.coarse_step` を書いた軸のみ)
    —— 粗い 1 歩が ON 区間より広いと、当てた直後にもう区間の外 (= 機構端の側) に
    居る。そこから離脱・寄せ直しをすると探索方向へ走り抜けるので、**寄せ直しへ
    入る前に「今 ON か」を問い直して降りる**
-7. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
+9. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
+
+**センサの読み口は三値で受ける** (`True` / `False` / **`None` = 読めていない**)。
+`None` を `False` へ丸めてはならない —— 丸めた瞬間に、配線が抜けたセンサが
+「押されていない」として離脱の完了に化ける (`MotionGuard` が可動端インターロックで
+同じ丸めを禁じているのと同じ理由。読み口も `main._make_sensor_reader` で共有する)。
 
 **精度と時間は 1 つの `step` では両立しない。二段探索がその答えである。**
 原点のばらつきは刻み幅そのものなので、0.1mm の精度を要求する軸では `step` を
@@ -138,6 +153,25 @@ def _release_limit(homing: HomingSpec) -> float:
     return homing.step * _RELEASE_STEP_LIMIT
 
 
+def _remaining_distance(homing: HomingSpec, *, travelled: float, released: float) -> float:
+    """この段の探索に許す移動量 [軸の unit]。
+
+    **`search_distance` が縛りたいのは「開始位置からどれだけ押し込むか」である。**
+    したがって探索で進んだぶん (`travelled`) は消費するが、**離脱で戻ったぶん
+    (`released`) は消費しない** —— 離脱は探索と逆向きなので、そのぶんを寄せ直しが
+    もう一度走っても、到達しうる最も深い点は離脱前の位置より深くならない。
+    数えないと、粗探索が上限をほぼ使い切った軸で寄せ直しの上限が 0 以下になり、
+    1 歩目から「-3mm 動かしても到達しません」という読めない文言で落ちる
+    (`search_distance` は実ストロークに合わせるので、二段探索の軸では普通に起きる)。
+
+    **`max(0.0, ...)` が要るのは、上限の判定が指令の「前」にしかないため。**
+    最後の 1 歩は上限を最大 `step` ぶん超えうる (指令してから測るのでは、超える
+    ことが分かった時点で既に動いている)。超過は 1 歩ぶんに限られるので許容し、
+    そのぶん次の段の残りが負にならないようにここで床を張る。
+    """
+    return max(0.0, homing.search_distance - travelled + released)
+
+
 def _not_reached_message(spec: AxisSpec, homing: HomingSpec, limit: float) -> str:
     """探索距離を使い切った理由。**二段探索では段ごとに残りが違う**ので引数で受ける。"""
     return (
@@ -155,13 +189,22 @@ class HomingError(RuntimeError):
     """
 
 
-SensorActive = Callable[[str], bool]
+#: センサ名 → 今接触しているか。**三値** (`None` = 読めていない)。
+#: `None` を `False` へ丸めてはならない —— 丸めると、配線が抜けたセンサが
+#: 「押されていない = 離脱できた」に化ける。読み口は可動端インターロックと
+#: 共有する (`main._make_sensor_reader`)。
+SensorActive = Callable[[str], bool | None]
 #: センサ名 → 前回読んでから一度でも接触したか。**読むと消える**
 #: (`GenericDriver.consume_sensor_latch`)。読み手が複数いると片方が相手のぶんまで
 #: 消すので、呼び手は `HomingRunner` 1 つに限る。
-SensorLatched = Callable[[str], bool]
+#: **`None` = ラッチを提供しないドライバ**で、現在値へ黙って落としてはならない
+#: (取りこぼす探索に戻る)。探索を始める `_seek` がその場で降りる。
+SensorLatched = Callable[[str], bool | None]
 SensorStale = Callable[[str], bool]
 MotorStale = Callable[[str], bool]
+#: モータ名 → 励磁されているか。**三値** (`None` = 報告しないドライバなので分からない)。
+#: `is_energized()` と同じ意味を持たせる (`main.py` にドライバ種別を書き写さない)。
+MotorEnergized = Callable[[str], bool | None]
 OriginCapturable = Callable[[str], bool]
 #: 原点の確定は CAN の往復を伴いうる (EDULITE 05 は無励磁 → SET_ZERO → 再励磁の
 #: 3 段で、途中に応答待ちが入る) ため非同期。**可否を問う `OriginCapturable` は
@@ -199,23 +242,34 @@ class HomingRunner:
         sensor_latched: SensorLatched,
         sensor_is_stale: SensorStale,
         motor_is_stale: MotorStale,
+        motor_is_energized: MotorEnergized,
         origin_capturable: OriginCapturable,
         capture_origin: CaptureOrigin,
         sleep: SleepFunc = asyncio.sleep,
     ) -> None:
         """
         Args:
-            sensor_active: センサ名 → **今**接触しているか
-                (`GenericDriver.sensor_active`)。離脱の判定と、探索前の
-                「既に触れているか」がこちらを見る
+            sensor_active: センサ名 → **今**接触しているか (三値)。
+                (`main._make_sensor_reader`)。離脱の判定と、探索前の
+                「既に触れているか」がこちらを見る。**`None` (読めていない) を
+                `False` へ丸めないこと** —— 丸めると、途絶したセンサが
+                「押されていない = 離脱できた」に化ける
             sensor_latched: センサ名 → **前回読んでから一度でも**接触したか。
                 読むと消える (`GenericDriver.consume_sensor_latch`)。
                 **探索の到達判定だけがこちらを見る** (`_sensor_reached`)。
-                **既定値を持たせない** —— 未配線が「取りこぼす探索」に黙って戻る
-            sensor_is_stale: センサ名 → フィードバックが途絶しているか
+                **既定値を持たせない** —— 未配線が「取りこぼす探索」に黙って戻る。
+                ラッチを提供しないドライバでは `None` を返すこと (現在値へ落とすと
+                その取りこぼしが戻る)。事前確認が 1 歩も動かさずに降りる
+            sensor_is_stale: センサ名 → フィードバックが途絶しているか。
+                **探索前だけでなく 1 歩ごとに問う** (`_feedback_lost`)
             motor_is_stale: モータ名 → フィードバックが途絶しているか。
                 **既定値を持たせない** —— 配線を忘れると「未受信の 0.0 を現在位置と
                 信じて全ストローク動く」という、この修正が消したはずの経路が戻る
+            motor_is_energized: モータ名 → 励磁されているか (三値。
+                `MotorDriver.is_energized`)。探索の前に問い、**`False`
+                (無励磁だと分かっている) のときだけ降りる**。`None` は
+                「励磁状態を報告しないドライバ」であって無励磁ではないので
+                通す —— 倒すと M3508 (常に `None`) の軸が零点確定できなくなる
             origin_capturable: 軸名 → 原点を確定できるか。探索の前に問う
             capture_origin: 軸名 → その軸の現在位置を原点として確定する
                 (左右ペアはグループ全員へ展開されること)。CAN の往復を挟む
@@ -226,6 +280,7 @@ class HomingRunner:
         self._sensor_latched = sensor_latched
         self._sensor_is_stale = sensor_is_stale
         self._motor_is_stale = motor_is_stale
+        self._motor_is_energized = motor_is_energized
         self._origin_capturable = origin_capturable
         self._capture_origin = capture_origin
         self._sleep = sleep
@@ -251,8 +306,9 @@ class HomingRunner:
 
         Raises:
             HomingError: 原点を確定する手段が無い / センサまたは軸のフィードバックが
-                途絶している / 実測が進まない / 探索距離を超えても当たらなかった /
-                離脱してもセンサが OFF にならない / 粗探索が ON 区間を跨ぎ切った
+                途絶している (探索前・探索中とも) / 無励磁 / 実測が進まない /
+                探索距離を超えても当たらなかった / 離脱してもセンサが OFF に
+                ならない / 粗探索が ON 区間を跨ぎ切った
         """
         homing = spec.homing
         if homing is None:
@@ -260,12 +316,21 @@ class HomingRunner:
 
         self._check_preconditions(spec, homing)
 
+        # **離脱で戻った距離は探索距離を消費しない。** 離脱は探索と逆向きなので、
+        # そのぶんは「機構を押し込んだ量」ではなく、寄せ直しがもう一度走るだけの
+        # 既に通った地面である (探索が到達しうる最も深い点は離脱前の位置のまま)。
+        # 数えないと、粗探索が上限近くまで使った軸で寄せ直しの上限が 0 以下になり、
+        # 1 歩目から「-3mm 動かしても到達しません」という読めない文言で落ちる
+        released = 0.0
+
         # ここが問うのは「**今**触れているか」なのでラッチではない。ラッチで問うと、
         # 前回の零点確定や手動操縦でスイッチを跨いだ痕跡だけで離脱段へ入り、
-        # 触れてもいない位置から _RELEASE_STEP_LIMIT 歩ぶん離れる向きへ動き出す
-        if self._sensor_active(homing.sensor):
+        # 触れてもいない位置から _RELEASE_STEP_LIMIT 歩ぶん離れる向きへ動き出す。
+        # **`is True` で問う** —— 三値の `None` (読めていない) は事前確認が既に
+        # 弾いているが、ここで真偽値へ丸めると弾いた意味が消える
+        if self._sensor_active(homing.sensor) is True:
             logger.info("[homing] %s: 既にセンサに触れているため一度離れて寄せ直す", spec.name)
-            await self._release(spec, handle, homing)
+            released += await self._release(spec, handle, homing)
 
         # **探索距離の上限は 2 段の合計に掛ける。** 段ごとに `search_distance` を
         # 与え直すと、唯一の無人の歯止めが黙って 2 倍になる
@@ -273,6 +338,7 @@ class HomingRunner:
 
         if homing.coarse_step is not None:
             start = self._observe(spec, handle)
+            limit = _remaining_distance(homing, travelled=travelled, released=released)
             observed = await self._seek(
                 spec,
                 handle,
@@ -280,8 +346,8 @@ class HomingRunner:
                 step=homing.coarse_step,
                 direction=homing.direction,
                 want_active=True,
-                limit=homing.search_distance,
-                limit_message=_not_reached_message(spec, homing, homing.search_distance),
+                limit=limit,
+                limit_message=_not_reached_message(spec, homing, limit),
             )
             travelled += abs(observed - start)
             logger.info(
@@ -305,10 +371,10 @@ class HomingRunner:
                     " (当てた直後にもう OFF)。このまま寄せ直すと探索方向へ走り抜けるので"
                     " 止めます。homing.coarse_step を ON 区間の実測より狭くしてください"
                 )
-            await self._release(spec, handle, homing)
+            released += await self._release(spec, handle, homing)
 
         start = self._observe(spec, handle)
-        remaining = homing.search_distance - travelled
+        remaining = _remaining_distance(homing, travelled=travelled, released=released)
         observed = await self._seek(
             spec,
             handle,
@@ -341,9 +407,16 @@ class HomingRunner:
         ON 区間を跨ぎ切ってしまったときにも区間の手前まで戻れる (細かい刻みだと
         跨いだ先から 1 歩しか戻らず、寄せ直しが区間から離れる向きへ走り出す)。
         上限は段に依らず `homing.release_distance` (区間の広さで決まる 1 つの量)。
+
+        Returns:
+            実測で戻った距離 [軸の unit]。**次の探索の上限へ足し戻す**ための量で、
+            理由は `_remaining_distance`。位置ではなく距離を返すのは、呼び出し側が
+            位置を使う経路を持たないため (使えると「離脱後の位置から数え直す」
+            という別の会計が書けてしまう)。
         """
         limit = _release_limit(homing)
-        return await self._seek(
+        start = self._observe(spec, handle)
+        observed = await self._seek(
             spec,
             handle,
             homing,
@@ -361,6 +434,7 @@ class HomingRunner:
                 " homing.release_distance を実測へ広げてください"
             ),
         )
+        return abs(observed - start)
 
     async def _seek(
         self,
@@ -388,16 +462,38 @@ class HomingRunner:
             want_active: この状態になったら到達。探索は True、離脱は False
             limit: 実測の移動量の上限。超えたら `limit_message` で降りる
         """
-        if want_active:
-            # **探索を始める前に溜まったラッチを捨てる。** 離脱段のあいだ触れていた
-            # ぶんや、前回の零点確定・手動操縦でスイッチを跨いだぶんが残っていると、
-            # 1 歩目の観測でいきなり到達と読み、探索開始位置が原点になる
-            self._sensor_latched(homing.sensor)
+        # **探索を始める前に溜まったラッチを捨てる** (この読み取りそのものが捨てる)。
+        # 離脱段のあいだ触れていたぶんや、前回の零点確定・手動操縦でスイッチを
+        # 跨いだぶんが残っていると、1 歩目の観測でいきなり到達と読み、探索開始位置が
+        # 原点になる。
+        # **ついでにラッチを提供しないセンサをここで弾く** —— 現在値へ落とす実装は
+        # 「ON 区間が step より狭いと指令 1 回ぶんの通過を取りこぼす」経路そのもので、
+        # 取りこぼした探索は機構の破損側へ進み続ける。判定をここへ置くのは、ラッチが
+        # 読むと消えるため (事前確認からも読むと読み手が 2 つになり、捨てるべき
+        # 1 通を先に食う)
+        if want_active and self._sensor_latched(homing.sensor) is None:
+            raise HomingError(
+                f"軸 '{spec.name}' の原点センサ '{homing.sensor}' は接触のラッチを"
+                "提供しません (現在値だけでは指令 1 回ぶんの通過を取りこぼすので"
+                "探索を開始しません)"
+            )
 
         start = self._observe(spec, handle)
         observed = start
         stalled = 0
         while True:
+            # **鮮度は 1 歩ごとに問い直す。** 事前確認は「探索を始めてよいか」しか
+            # 見ておらず、センサの読み口は途絶しても最後に届いたフラグを返し続ける
+            # ので、探索中の途絶は「いつまでも当たらない」形にしかならない。
+            # 距離超過より先に問うのは、そちらが原因でこちらが症状だから
+            lost = self._feedback_lost(spec, homing)
+            if lost is not None:
+                # **その場へ止め直してから降りる。** 最後に送った「実測 + step」は
+                # まだ生きており、ドライバ内蔵の位置ループはそこへ押し続ける
+                # (接触を検出したときと同じ作法。向きごとに書き分けない)
+                await handle.set_target_value(spec.to_commands(observed))
+                raise HomingError(lost)
+
             if abs(observed - start) >= limit:
                 raise HomingError(limit_message)
 
@@ -452,20 +548,53 @@ class HomingRunner:
                 " 零点確定を実行できないため探索を開始しません"
             )
 
-        if self._sensor_is_stale(homing.sensor):
+        lost = self._feedback_lost(spec, homing)
+        if lost is not None:
+            # 未受信の 0.0 を現在位置と信じると、1 歩目が原点近傍への
+            # ジャンプになり、その移動は探索距離の上限に掛からない。
+            # **探索中の再確認と同じ 1 本を使う** —— 文言を書き分けると、
+            # 事前と途中で「同じ事象なのに別の原因に見える」報告になる
+            raise HomingError(lost)
+
+        # **`False` (無励磁だと分かっている) のときだけ降りる。** `None` は
+        # 「励磁状態を報告しないドライバ」であって無励磁ではない —— 倒すと
+        # M3508 (`is_energized()` は常に None) の軸が一切零点確定できなくなる。
+        # 無励磁のまま入っても停滞判定が 3 歩で拾うが、その文言は
+        # 「引っかかり・探索方向・励磁」の 3 択で原因を絞れない
+        unenergized = [name for name in spec.motor_names if self._motor_is_energized(name) is False]
+        if unenergized:
             raise HomingError(
+                f"軸 '{spec.name}' のモータ {', '.join(unenergized)} が無励磁です"
+                " (緊急停止の解除・再励磁を済ませてから零点確定してください)"
+            )
+
+        # ラッチを提供しないセンサ (`sensor_latched` が `None`) もここで弾きたいが、
+        # **ラッチは読むと消えるので、事前確認から読んではならない** —— 読み手が
+        # 2 つになり、`_seek` が探索の直前に捨てる 1 通を先に食う。判定は唯一の
+        # 読み手である `_seek` の捨てる場所に置いてある
+
+    def _feedback_lost(self, spec: AxisSpec, homing: HomingSpec) -> str | None:
+        """センサまたは対象軸のフィードバックが途絶していれば、その理由。
+
+        **探索の前と 1 歩ごとの両方がここを通る。** 事前確認だけに置くと、
+        探索を始めた後の途絶 (サーボ基板の再起動・`can_generic` の瞬断) に
+        気付けない —— センサの読み口は途絶しても最後に届いたフラグを返し続けるので、
+        症状は「いつまでも当たらない」だけになり、止めるのは探索距離の上限
+        (そこまで機構を押し込んでから) か停滞判定だけになる。
+        """
+        if self._sensor_is_stale(homing.sensor):
+            return (
                 f"軸 '{spec.name}' の原点センサ '{homing.sensor}' が応答していません"
                 " (配線・基板の電源を確認してください)"
             )
 
         stale = [name for name in spec.motor_names if self._motor_is_stale(name)]
         if stale:
-            # 未受信の 0.0 を現在位置と信じると、1 歩目が原点近傍への
-            # ジャンプになり、その移動は探索距離の上限に掛からない
-            raise HomingError(
+            return (
                 f"軸 '{spec.name}' の現在位置を読めません"
                 f" (モータ {', '.join(stale)} のフィードバックが途絶しています)"
             )
+        return None
 
     async def _wait_step(
         self,
@@ -523,8 +652,11 @@ class HomingRunner:
         非対称で、探索の取りこぼしは機構の破損側へ進み続けるのに対し、離脱の
         取りこぼしは「余計に離れる」だけで、次の探索がそのぶんを寄せ直す。
         """
+        # **どちらも三値を真偽値へ丸めずに問う。** ラッチの `None` (ラッチを持たない)
+        # を「到達」と読めば探索が 1 歩目で終わり、現在値の `None` (読めていない) を
+        # 「離脱できた」と読めば、途絶したセンサがそのまま原点確定へ通る
         if want_active:
-            return self._sensor_latched(sensor)
+            return self._sensor_latched(sensor) is True
         return self._sensor_active(sensor) is False
 
     def _observe(self, spec: AxisSpec, handle: AxisHandle) -> float:

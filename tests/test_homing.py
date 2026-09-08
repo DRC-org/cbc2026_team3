@@ -107,6 +107,10 @@ class _Recorder:
       止まらない
     - ``chatter`` — 接点がばたついている状態。現在値は ON のまま (まだ ON 区間の
       中にいる) だが、ラッチには ON を記録しなかった窓が混ざる
+    - ``fails_open_above`` — **この位置より戻ったところで接点が開いたまま固着する。**
+      当てた後に二度と ON を報告しなくなるスイッチで、**寄せ直しの段が新しい探索
+      距離を貰っていないか**を見るために要る (位置だけで決まるセンサ模型では、
+      粗探索が当てた区間へ細探索も必ず当たるので、上限の食い違いが結果に出ない)
 
     **現在値 (``sensor_active``) とラッチ (``sensor_latched``) を作り分けている**のは、
     探索と離脱が別のものを見るという設計を固定するため。位置モデルではラッチを
@@ -124,6 +128,12 @@ class _Recorder:
         prelatched: bool = False,
         stale: bool = False,
         motor_stale: bool = False,
+        stale_after_commands: int | None = None,
+        motor_stale_after_commands: int | None = None,
+        unreadable_after_commands: int | None = None,
+        fails_open_above: float | None = None,
+        latched_supported: bool = True,
+        energized: bool | None = True,
         capturable: bool = True,
     ) -> None:
         self.commands: list[dict[str, float]] = []
@@ -152,6 +162,21 @@ class _Recorder:
         self._prelatched = prelatched
         self._stale = stale
         self._motor_stale = motor_stale
+        #: 指令をこの本数出した後に途絶する (探索の**途中**での途絶を作る)。
+        #: 途絶したセンサ・モータの読み口は最後に届いた値を返し続けるので、
+        #: 途中の途絶は「いつまでも当たらない」形にしかならない
+        self._stale_after_commands = stale_after_commands
+        self._motor_stale_after_commands = motor_stale_after_commands
+        #: 指令をこの本数出した後、**現在値だけ**が読めなくなる (鮮度の判定は
+        #: False のまま)。三値の `None` を `False` へ丸めていないかを、他の層
+        #: (`_feedback_lost`) を持たない条件で見るために要る
+        self._unreadable_after_commands = unreadable_after_commands
+        self._fails_open_above = fails_open_above
+        #: 接点が開いたまま固着したか (`fails_open_above` を戻ったら二度と戻らない)
+        self._failed_open = False
+        self._reached_below = False
+        self._latched_supported = latched_supported
+        self._energized = energized
         self._capturable = capturable
 
     def axis_position(self) -> float:
@@ -164,14 +189,36 @@ class _Recorder:
     def _extend_path(self) -> tuple[float, float]:
         """今の実測位置をラッチの窓へ加える (100Hz の FEEDBACK に相当)。"""
         current = self.axis_position() if self.drivers else 0.0
+        if self._fails_open_above is not None:
+            # **一度当ててから戻ったところで開き、二度と戻らない** (接点の固着)。
+            # 「当たる前から死んでいる」模型にすると粗探索そのものが失敗するので、
+            # 一度 ON 区間へ入ったことを条件にする
+            if current <= self._fails_open_above:
+                self._reached_below = True
+            elif self._reached_below:
+                self._failed_open = True
         low, high = self._path if self._path is not None else (current, current)
         self._path = (min(low, current), max(high, current))
         return self._path
 
-    def sensor_active(self, _name: str) -> bool:
-        """**今**接触しているか。離脱の判定と「既に触れているか」がこれを見る。"""
+    def sensor_active(self, _name: str) -> bool | None:
+        """**今**接触しているか。離脱の判定と「既に触れているか」がこれを見る。
+
+        **三値。** 途絶している間は `None` (読めていない) を返す —— 実機の読み口
+        (`main._make_sensor_reader`) がそうなので、`False` を返す模型にすると
+        「途絶したセンサが離脱完了に化ける」経路をテストが作れない。
+        """
         self._observations += 1
         self._extend_path()
+        if self.sensor_is_stale(_name):
+            return None
+        if (
+            self._unreadable_after_commands is not None
+            and len(self.commands) >= self._unreadable_after_commands
+        ):
+            return None
+        if self._failed_open:
+            return False
         if self._chatter:
             return True  # まだ ON 区間の中にいる
         if self._active_band is not None:
@@ -183,7 +230,7 @@ class _Recorder:
             return False
         return self._observations > self._active_after
 
-    def sensor_latched(self, _name: str) -> bool:
+    def sensor_latched(self, _name: str) -> bool | None:
         """前回読んでから一度でも接触したか。**読むと消える。** 探索だけが見る。
 
         位置モデルでは前回読んでから通った**経路**が ON 区間と交わったかを答える
@@ -196,6 +243,12 @@ class _Recorder:
         # 100Hz で見ているので、読み取りと読み取りのあいだに経路は途切れない)
         current = self.axis_position() if self.drivers else 0.0
         self._path = (current, current)
+        if not self._latched_supported:
+            # ラッチを提供しないドライバ。**現在値へ落とさない** (落とすと
+            # 「ON 区間が step より狭い機構で取りこぼす探索」へ黙って戻る)
+            return None
+        if self._failed_open:
+            return False
         if self._prelatched:
             self._prelatched = False
             return True
@@ -212,10 +265,18 @@ class _Recorder:
         return self._observations > self._active_after
 
     def sensor_is_stale(self, _name: str) -> bool:
+        if self._stale_after_commands is not None:
+            return len(self.commands) >= self._stale_after_commands
         return self._stale
 
     def motor_is_stale(self, _name: str) -> bool:
+        if self._motor_stale_after_commands is not None:
+            return len(self.commands) >= self._motor_stale_after_commands
         return self._motor_stale
+
+    def motor_is_energized(self, _name: str) -> bool | None:
+        """励磁されているか。**三値** (`None` = 報告しないドライバ = M3508)。"""
+        return self._energized
 
     def origin_capturable(self, _axis: str) -> bool:
         return self._capturable
@@ -311,6 +372,7 @@ def _runner(recorder: _Recorder) -> HomingRunner:
         sensor_latched=recorder.sensor_latched,
         sensor_is_stale=recorder.sensor_is_stale,
         motor_is_stale=recorder.motor_is_stale,
+        motor_is_energized=recorder.motor_is_energized,
         origin_capturable=recorder.origin_capturable,
         capture_origin=recorder.capture_origin,
         sleep=recorder.sleep,
@@ -509,6 +571,151 @@ class TestStops:
         with pytest.raises(HomingError):
             await _runner(rec).home(spec, _handle(spec, rec))
 
+        assert rec.origins == []
+
+
+class TestStopsWhenFeedbackIsLostMidSearch:
+    """**事前確認だけでは「探索を始めた後の途絶」に気付けない。**
+
+    センサの読み口 (`main._make_sensor_reader` / `GenericDriver.sensor_active`) は
+    途絶しても最後に届いたフラグを返し続けるので、探索中にサーボ基板が再起動したり
+    `can_generic` が瞬断したりしても、症状は「いつまでも当たらない」だけになる。
+    そのまま `search_distance` いっぱいまで進むか、止めるのは停滞判定 (`step/2`
+    未満が 3 歩連続) しかない —— ドライバ内蔵の位置ループが端を押し続けている
+    状態で、さらに 3 歩ぶん押し込むことになる。
+    """
+
+    async def test_探索の途中でセンサが途絶したら止める(self) -> None:
+        table = _table(direction=-1, step=1.0, search_distance=50.0)
+        spec = table.axis("y_axis")
+        # 2 歩目まで進んだところで途絶する。センサは一度も ON にならない
+        rec = _Recorder(stale_after_commands=2)
+
+        with pytest.raises(HomingError, match="応答していません"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == []
+        # 探索距離 (50mm) を使い切るまで進まない
+        assert len(rec.commands) <= 3
+
+    async def test_探索の途中で軸のフィードバックが途絶したら止める(self) -> None:
+        """実測が更新されなくなると、再アンカーが同じ位置を指し続ける。
+
+        指令は「最後に読めた実測 + step」で固定され、機構は動いているのに
+        位置が進まないので、停滞判定が拾うまで 3 歩ぶん押し込む。
+        """
+        table = _table(direction=-1, step=1.0, search_distance=50.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(motor_stale_after_commands=2)
+
+        with pytest.raises(HomingError, match="現在位置を読めません"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == []
+        assert len(rec.commands) <= 3
+
+    async def test_途絶で降りる前にその場の実測位置を目標へ送り直す(self) -> None:
+        """**最後に送った「実測 + step」が生きたままだと押し続ける。**
+
+        ドライバ内蔵の位置ループ (DM3520 / EDULITE 05) は PC が黙っても目標を
+        保持するので、降りるだけでは機構が端へ向かい続ける。接触を検出したときと
+        同じく、検出位置を目標に送り直してから降りること。
+        """
+        table = _table(direction=-1, step=1.0, search_distance=50.0, settle_s=0.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(stale_after_commands=2)
+        # **追従しきらない機構でしか差が出ない** —— 指令どおり動く機構では
+        # 「実測 + step」と実測が一致してしまい、送り直しの有無が現れない
+        handle = _slow_handle(spec, rec, per_tick=0.6)
+
+        with pytest.raises(HomingError, match="応答していません"):
+            await _runner(rec).home(spec, handle)
+
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        # 最後の 1 通は「今いる場所で止まれ」。送り直さない実装では、1 歩先
+        # (実測 + step) を指した指令が生き残る
+        assert axis_commands[-1] == pytest.approx(rec.axis_position())
+        assert axis_commands[-1] != pytest.approx(axis_commands[-2])
+        assert rec.origins == []
+
+    async def test_離脱の途中で途絶しても止める(self) -> None:
+        """歯止めは向きごとに書き分けない (`_seek` を 1 本にしてある理由)。"""
+        table = _table(direction=-1, step=1.0, search_distance=50.0)
+        spec = table.axis("y_axis")
+        # 最初から触れている (= 離脱段へ入る) 状態で、2 歩目に途絶する
+        rec = _Recorder(active_after=0, stale_after_commands=2)
+
+        with pytest.raises(HomingError, match="応答していません"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == []
+        assert len(rec.commands) <= 3
+
+    async def test_読めないセンサを離脱完了と読まない(self) -> None:
+        """**三値の `None` を `False` へ丸めない層を、単独で見る。**
+
+        `_feedback_lost` (鮮度の再確認) を持たない条件 —— 鮮度の判定は「正常」と
+        答えるのに現在値だけが読めない —— を作ると、この層だけが効いている。
+        丸める実装では、配線が抜けたセンサが「押されていない = 離脱できた」に
+        化け、**触れたままの位置で原点を確定する**。
+        """
+        table = _table(direction=-1, step=1.0, search_distance=50.0, release_distance=5.0)
+        spec = table.axis("y_axis")
+        # 常に ON (離脱段から抜けられない) センサが、1 歩目の後に読めなくなる
+        rec = _Recorder(active_after=0, unreadable_after_commands=1)
+
+        with pytest.raises(HomingError, match="離せませんでした"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == []
+
+
+class TestChecksTheDriveIsReady:
+    """**1 歩も動かす前に、原因が 1 つに定まる形で降りる。**
+
+    無励磁のまま探索へ入っても停滞判定が 3 歩で拾うが、その文言は
+    「機構の引っかかり・探索方向・励磁」の 3 択なので、操縦者は原因を絞れない。
+    """
+
+    async def test_無励磁の軸では一歩も動かさない(self) -> None:
+        table = _table()
+        spec = table.axis("y_axis")
+        rec = _Recorder(energized=False)
+
+        with pytest.raises(HomingError, match="無励磁"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.commands == []
+        assert rec.origins == []
+
+    async def test_励磁を報告しないドライバは無励磁として扱わない(self) -> None:
+        """`is_energized()` の `None` は「分からない」であって無励磁ではない。
+
+        倒すと M3508 (常に None) の軸が一切零点確定できなくなる。
+        """
+        table = _table(search_distance=10.0, step=1.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_after=3, energized=None)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == ["y_axis"]
+
+    async def test_ラッチを持たないセンサでは探索を開始しない(self) -> None:
+        """**現在値へ落とす実装は「取りこぼす探索」そのもの。**
+
+        ON 区間が `step` より狭い機構では指令 1 回ぶんの通過を丸ごと落とし、
+        取りこぼした探索が向かう先は機構の破損側である。黙って落ちるくらいなら
+        1 歩も動かさずに降りるほうが安全。
+        """
+        table = _table()
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_at_or_below=-2.0, latched_supported=False)
+
+        with pytest.raises(HomingError, match="ラッチ"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.commands == []
         assert rec.origins == []
 
 
@@ -836,18 +1043,52 @@ class TestTwoStageSearch:
         段ごとに `search_distance` を与え直すと、上限が黙って 2 倍になる。
         配線が抜けたセンサでは両段とも「いつまでも当たらない」ので、そのぶん
         機構を押し込む距離がそのまま倍になる。
+
+        **位置だけで決まるセンサ模型ではこの食い違いが結果に出ない** —— 粗探索が
+        当てた区間には寄せ直しも必ず当たるので、上限が 4 倍あっても同じ場所で
+        止まる。当てた後に開いたまま固着するスイッチ (`fails_open_above`) にすると、
+        寄せ直しに渡した上限がそのまま「押し込む距離」として現れる。
         """
         table = _table(
             direction=-1, step=0.1, coarse_step=1.0, search_distance=4.0, release_distance=2.0
         )
         spec = table.axis("y_axis")
-        # 粗探索が上限 4.0 をちょうど使い切る位置で当たる。寄せ直しに残りは無い
-        rec = _Recorder(active_at_or_below=-3.45)
+        # 粗探索は上限 4.0 をちょうど使い切って -4.0 で当たる。離脱で -3.0 まで
+        # 戻ったところで接点が開いたまま固着し、寄せ直しは二度と当たらない
+        rec = _Recorder(active_at_or_below=-3.45, fails_open_above=-3.5)
 
         with pytest.raises(HomingError, match="到達しませんでした"):
             await _runner(rec).home(spec, _handle(spec, rec))
 
         assert rec.origins == []
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        # 寄せ直しに渡るのは離脱で戻った 1.0mm だけ。段ごとに search_distance を
+        # 与え直す実装は、そこから更に 4.0mm (40 歩) 機構を押し込む
+        assert min(axis_commands) == pytest.approx(-4.0)
+
+    async def test_離脱で戻った分は探索距離を消費しない(self) -> None:
+        """**離脱は探索と逆向きなので「押し込んだ量」に数えない。**
+
+        数えると、粗探索が上限をほぼ使い切った軸では寄せ直しの上限が 0 以下になり、
+        1 歩目から「-0.5mm 動かしても到達しません」という読めない文言で落ちる。
+        `search_distance` は実ストロークに合わせる値なので、二段探索の軸ではこれが
+        普通に起きる。寄せ直しが走るのは離脱で戻った地面の上だけで、**到達しうる
+        最も深い点は離脱前の位置より深くならない** —— 歯止めの意味は変わらない。
+        """
+        table = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=4.0, release_distance=2.0
+        )
+        spec = table.axis("y_axis")
+        # 粗探索が上限 4.0 をちょうど使い切る位置で当たる
+        rec = _Recorder(active_at_or_below=-3.45)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == ["y_axis"]
+        assert rec.captured_at[0] == pytest.approx(-3.45, abs=0.1)
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        # 押し込んだ最も深い点は粗探索の到達点のまま (寄せ直しはその手前で止まる)
+        assert min(axis_commands) == pytest.approx(-4.0)
 
     async def test_粗探索の停滞判定は粗い刻みを基準にする(self) -> None:
         """基準を細かい側にすると、粗い 1 歩の 4 割しか動かない機構が正常に見える。

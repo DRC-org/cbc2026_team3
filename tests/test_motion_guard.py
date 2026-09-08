@@ -467,6 +467,7 @@ class TestHomingStillWorks:
             sensor_latched=latched,
             sensor_is_stale=lambda _name: False,
             motor_is_stale=lambda _name: False,
+            motor_is_energized=lambda _name: True,
             origin_capturable=lambda _axis: True,
             capture_origin=capture_origin,
             sleep=sleep,

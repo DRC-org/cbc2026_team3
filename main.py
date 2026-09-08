@@ -418,10 +418,11 @@ def _wire_motor_check_sequence(
         return
 
     # 統合動作確認も同じ歯止めを通す。センサ名はロボット横断に一意なので、
-    # 全 CANManager を横断した 1 つの読み口で両ハンドぶんに答えられる
-    motors = MotorGroup(
-        sensor_active=_make_sensor_reader(can_managers, feedback_timeout_ms=feedback_timeout_ms)
-    )
+    # 全 CANManager を横断した 1 つの読み口で両ハンドぶんに答えられる。
+    # **零点確定もこの同じ読み口を使う** —— 可動端インターロックと零点確定で
+    # 別々に組むと、片方だけが `None` (読めていない) を `False` へ丸めた状態が作れる
+    sensor_read = _make_sensor_reader(can_managers, feedback_timeout_ms=feedback_timeout_ms)
+    motors = MotorGroup(sensor_active=sensor_read)
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
@@ -437,30 +438,37 @@ def _wire_motor_check_sequence(
             _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
         )
 
-        def _sensor_active(name: str) -> bool:
-            sensor = sensors.get(name)
-            # 未登録のセンサは「触れていない」ではなく途絶として扱わせる
-            # (下の _sensor_is_stale が True を返すので 1 歩も動かさない)
-            return sensor is not None and bool(getattr(sensor, "sensor_active", False))
-
-        def _sensor_latched(name: str) -> bool:
+        def _sensor_latched(name: str) -> bool | None:
             # 探索の到達判定だけがこれを読む。ON 区間が homing.step より狭いと
-            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす (実機で発生)
+            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす (実機で発生)。
+            # **ラッチを持たないドライバでは現在値へ落とさず None を返す** ——
+            # 落とすとその取りこぼしが黙って戻る (歯止めは search_distance しか
+            # 残らず、取りこぼした探索が向かう先は機構の破損側である)。
+            # 判断は HomingRunner が持ち、探索を始める前に降りる
             sensor = sensors.get(name)
             if sensor is None:
-                return False
+                return None
             consume = getattr(sensor, "consume_sensor_latch", None)
-            if callable(consume):
-                return bool(consume())
-            # ラッチを持たないドライバでは現在値へ落ちる (取りこぼしうるが、
-            # 「一度も到達しない探索」にはしない)。歯止めは search_distance が持つ
-            return bool(getattr(sensor, "sensor_active", False))
+            if not callable(consume):
+                return None
+            return bool(consume())
 
         def _sensor_is_stale(name: str) -> bool:
             if name not in sensors:
                 logger.error("零点確定: センサ '%s' が config の sensors: に居ません", name)
                 return True
-            return freshness.is_stale(name, freshness.now())
+            # **鮮度の正は可動端インターロックと同じ読み口 (None = 読めていない)。**
+            # 別々に組むと、片方だけが途絶を見落とす状態が作れる
+            return sensor_read(name) is None
+
+        def _motor_is_energized(name: str) -> bool | None:
+            # 三値をそのまま運ぶ。M3508 のように励磁を報告しないドライバは None で、
+            # HomingRunner はそれを無励磁として扱わない
+            for manager in can_managers:
+                motor = manager.motors.get(name)
+                if motor is not None:
+                    return motor.is_energized()
+            return None
 
         def _motor_is_stale(name: str) -> bool:
             # 対象軸の実測位置が読めるかを、探索を始める前に問う。未受信の 0.0 を
@@ -500,10 +508,11 @@ def _wire_motor_check_sequence(
 
         sequence.bind_homing(
             HomingRunner(
-                sensor_active=_sensor_active,
+                sensor_active=sensor_read,
                 sensor_latched=_sensor_latched,
                 sensor_is_stale=_sensor_is_stale,
                 motor_is_stale=_motor_is_stale,
+                motor_is_energized=_motor_is_energized,
                 origin_capturable=_origin_capturable,
                 capture_origin=_capture_origin,
             )
@@ -531,8 +540,11 @@ def _make_sensor_reader(
     「押されていない = 進んでよい」に化ける** (2026-09-09 の事故はスイッチが
     1 スロットずれていて PC へ届いていなかった)。安全側は「止まる」である。
 
-    零点確定が使う `_sensor_active` (bool) と別物なのは意図的で、あちらは
-    「今 ON か」だけを問い、途絶は `_sensor_is_stale` が別に見る。
+    **零点確定 (`HomingRunner`) も同じ読み口を使う。** かつては bool を返す別の
+    クロージャを持っていたが、同じ問い (「そのセンサは今どうなっているか」) に
+    答える口が 2 つあると、片方だけが `None` を `False` へ丸めた状態が作れる ——
+    零点確定側では「途絶したセンサが離脱完了に化ける」形で現れる。
+    鮮度の判定 (`_sensor_is_stale`) もこの口の `None` から作る。
     """
     sensors = {name: sensor for mgr in managers for name, sensor in mgr.sensors.items()}
     freshness = FeedbackFreshness(
