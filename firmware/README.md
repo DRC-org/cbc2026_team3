@@ -494,8 +494,8 @@ HAL の `GPIOA` / `GPIOB` はポインタへのキャストを含むマクロで
 UI にもヘルス判定にも**測ったように見える到達**が流れ込む。
 
 PC 側も到達を待たない。`on_off` 軸は `command_mode` が `position` ではないので
-固定待ち（`settle_s`）へ落ちる。**動作確認（`motor_check`）からも除外**し
-（`config/sub_hand.yaml` の `magnitude: 0`）、`config/checklist.yaml` の
+固定待ち（`settle_s`）へ落ちる。**動作確認（`motor_check`）は 6 個を 1 個ずつ開閉する**
+が、鳴ったかどうかは基板から観測できないので、`config/checklist.yaml` の
 `valves_actuate` で打音・目視確認する。
 
 ## サーボの到達フラグは推定値（重要）
