@@ -691,7 +691,12 @@ export interface ManualAxis {
   name: string;
   /** 人間が扱う単位 (mm / deg / duty)。表示にそのまま使う */
   unit: string;
-  command_mode: "position" | "velocity" | "duty";
+  /**
+   * 指令の種類。サーバーの `lib/drivers/base.ControlMode` がそのまま載る。
+   * **`on_off` (電磁弁) を落とさないこと** —— 実際に配信されており、これが型から
+   * 抜けていると「0 / 1 を数値で描いてよい軸」と読める。
+   */
+  command_mode: "position" | "velocity" | "current" | "duty" | "on_off";
   /**
    * フィードバックから逆換算した現在値。**位置を測れない軸では null。**
    * DC 基板はエンコーダを持たないので、0 を載せると「測ったように見える 0」になる。
