@@ -205,8 +205,8 @@ positions:
   # ここを上げること。ここだけ上げても効かない。
   pump_vac:
     stop: 0.0            # 停止 [duty]
-    run: 0.3             # 吸気 [duty]
+    run: 0.95             # 吸気 [duty]
 
   pump_blow:
     stop: 0.0            # 停止 [duty]
-    run: 0.3             # 排気 (ワークを離すときの正圧) [duty]
+    run: 0.95             # 排気 (ワークを離すときの正圧) [duty]
