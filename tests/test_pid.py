@@ -243,16 +243,13 @@ class TestReset:
 class TestAttributeAccess:
     """生成時引数は公開属性のまま残り、``update()`` が毎周期読み直す。
 
-    ``main._build_position_pid`` は ``make_position_pid`` が入れた C620 のフルスケール
-    (±16384 = ±20A) を、組み立て済みの ``PIDController`` へ ``output_min`` /
-    ``output_max`` を代入して config の ``output_limit`` まで絞り込む
-    (``scripts/tune_y_axis.py`` も試行ごとの上限を同じ形で入れる)。生成時に値を
-    私有フィールドへ畳み込む実装に変えると、この絞り込みが 1 counts も効かないまま
-    C620 のフルトルクが出る。
+    ``main._build_position_pid`` は C620 のフルスケール (±16384 = ±20A) で組み立て済みの
+    ``PIDController`` へ ``output_min`` / ``output_max`` を代入して config の
+    ``output_limit`` まで絞り込む。生成時に私有フィールドへ畳み込む実装に変えると、
+    この絞り込みが 1 counts も効かないまま C620 のフルトルクが出る。
 
-    ゲイン ``kp`` / ``ki`` / ``kd`` を実行中に差し替える経路は無い (変えるときは
-    インスタンスごと作り直す) が、読み出しは出力レンジと同じ機構に乗っているので、
-    片方だけ凍結した実装を検出できるよう両方を固定する。
+    ゲインを実行中に差し替える経路は無いが、読み出しは出力レンジと同じ機構に乗って
+    いるので、片方だけ凍結した実装を検出できるよう両方を固定する。
     """
 
     def test_output_limits_are_read_at_each_update(self) -> None:
@@ -287,10 +284,9 @@ class TestDefaults:
 class TestFeedforward:
     """偏差以外の根拠で加える操作量 (左右直結ペアの同期補正がこれを使う)。
 
-    **呼び出し側で足して後からクランプする実装との違いを固定する。** 外で足すと
-    クランプが二重になるだけでなく、下の conditional integration が補正を知らない
-    まま積分を進める。「補正込みでは飽和していて機構が動けないのに、積分だけが
-    育ち続ける」状態は、拘束が外れた瞬間の暴走として現れる。
+    **呼び出し側で足して後からクランプする実装との違いを固定する** —— 外で足すと
+    conditional integration が補正を知らないまま積分を進め、「飽和していて機構が
+    動けないのに積分だけが育つ」状態が拘束の外れた瞬間の暴走として現れる。
     """
 
     def test_default_is_zero_and_changes_nothing(self) -> None:
@@ -321,8 +317,7 @@ class TestFeedforward:
         """不感帯の中でも補正は残る。
 
         不感帯は「自分が目標に十分近い」ことを言うだけで、左右が揃っているかとは
-        無関係である。ここで補正まで消すと、目標付近で静止した状態のずれを
-        縮める手段が無くなる。
+        無関係。消すと目標付近で静止した状態のずれを縮める手段が無くなる。
         """
         pid = PIDController(kp=2.0, dead_band=5.0)
 
@@ -333,9 +328,8 @@ class TestFeedforward:
     def test_integral_does_not_grow_while_saturated_by_feedforward(self) -> None:
         """補正だけで飽和している間は積分を進めない (アンチワインドアップが補正込み)。
 
-        補正を PID の外側で足す実装では、PID 自身は飽和していないと判断して積分を
-        育て続ける。ここが落ちる実装は、機構が動けない間に溜めた積分を拘束が
-        外れた瞬間に吐き出す。
+        補正を外側で足す実装では PID 自身は飽和していないと判断して積分を育て続け、
+        機構が動けない間に溜めた積分を拘束が外れた瞬間に吐き出す。
         """
         pid = PIDController(kp=1.0, ki=1.0, output_min=-1000.0, output_max=1000.0)
 

@@ -20,8 +20,6 @@ from tests.server_fixtures import ServerFixture, recv_type
 
 
 class DummySequence(Sequence):
-    """テスト用の最小シーケンス。"""
-
     def __init__(self) -> None:
         super().__init__("test_seq")
         self.triggered = False
@@ -46,14 +44,12 @@ def _build_fixture() -> ServerFixture:
 
 class TestStateMessageFormat:
     async def test_state_message_format(self) -> None:
-        """state メッセージの JSON 形式を検証する。"""
         fx = _build_fixture()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
-            # ブロードキャストを手動でトリガー
             await fx.publish_state()
 
             msg = await recv_type(ws, "state")
@@ -79,13 +75,11 @@ class TestStateMessageFormat:
 
 class TestTriggerCommand:
     async def test_trigger_command(self) -> None:
-        """trigger コマンドでシーケンスの trigger() が呼ばれることを検証する。"""
         fx = _build_fixture()
         fx.enter_match()
         seq = fx.sequence("main_hand")
         app = fx.create_app()
 
-        # シーケンスを実行して trigger 待ち状態にする
         task = asyncio.create_task(seq.run())
         await asyncio.sleep(0.05)
         assert seq.waiting_trigger is True
@@ -106,7 +100,6 @@ class TestTriggerCommand:
 
 class TestEStopCommand:
     async def test_e_stop_command(self) -> None:
-        """e_stop コマンドが処理されることを検証する。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -116,13 +109,11 @@ class TestEStopCommand:
             await asyncio.sleep(0.05)
             await ws.close()
 
-        # send_to_bus が呼ばれたことを確認
         fx.can_manager("main_hand").send_to_bus.assert_called()
 
 
 class TestUnknownCommandIgnored:
     async def test_unknown_command_ignored(self) -> None:
-        """不明なコマンドでエラーにならないことを検証する。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -131,10 +122,8 @@ class TestUnknownCommandIgnored:
             await ws.send_json({"type": "totally_unknown_command"})
             await asyncio.sleep(0.05)
 
-            # 接続が維持されていることを確認
             assert not ws.closed
 
-            # 正常にブロードキャストを受信できることを確認
             await fx.publish_state()
             msg = await recv_type(ws, "state")
             assert msg is not None
@@ -144,7 +133,6 @@ class TestUnknownCommandIgnored:
 
 class TestEStopSetsActiveState:
     async def test_e_stop_sets_active_state(self) -> None:
-        """e_stop コマンドで e_stop_state メッセージが配信されることを検証する。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -164,21 +152,18 @@ class TestEStopSetsActiveState:
 
 class TestEStopRelease:
     async def test_e_stop_release(self) -> None:
-        """e_stop_release コマンドで e_stop_state active=false が配信されることを検証する。"""
         fx = _build_fixture()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
-            # まず緊急停止を有効化
             await ws.send_json({"type": "e_stop"})
             await asyncio.sleep(0.05)
             msg = await recv_type(ws, "e_stop_state")
             assert msg is not None
             assert msg["active"] is True
 
-            # 緊急停止を解除
             await ws.send_json({"type": "e_stop_release"})
             await asyncio.sleep(0.05)
 
@@ -202,7 +187,6 @@ class TestEStopRelease:
 
 class TestStateIncludesEStopActive:
     async def test_state_includes_e_stop_active(self) -> None:
-        """state メッセージに e_stop_active フィールドが含まれることを検証する。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -247,7 +231,6 @@ class TestStateIncludesRunning:
             await ws.close()
 
     async def test_state_running_true_while_sequence_runs(self) -> None:
-        """シーケンス実行中は running=true になること。"""
         fx = _build_fixture()
         fx.enter_match()
         seq = fx.sequence("main_hand")
@@ -346,7 +329,6 @@ class TestUnmeasuredTelemetryIsNull:
             "vel": None,
             "torque": None,
             "temp": None,
-            # 指令もまだ出していない (出した後の形は TestCommandValue が見る)
             "command": None,
             "command_mode": None,
         }

@@ -46,9 +46,9 @@ def _build_fixture_with_periodic_tasks() -> tuple[
 ]:
     """周期タスク 3 種を持つロボット 1 台のサーバーを組み、乱れの記録を据える。
 
-    実周期を実際に乱して検知させる経路は `tests/test_periodic.py` が単体で
-    尽くしているので、ここでは `seed_jitter_overrun` でカウンタへ直接値を据える
-    (本物のタイミングを乱すと非決定性がサーバーテストへ持ち込まれる)。
+    実周期を乱して検知させる経路は `tests/test_periodic.py` が単体で尽くすので、
+    ここは `seed_jitter_overrun` でカウンタへ直接値を据える (本物のタイミングを
+    乱すと非決定性がサーバーテストへ持ち込まれる)。
     """
     fx = ServerFixture.build(checklist_definitions=_DEFS)
     mgr = mock_can_manager(("y_axis_r",))
@@ -138,17 +138,15 @@ async def _match_state_with_phase(ws: object, phase: str) -> dict:
 class TestMatchTimerBroadcast:
     """タイマーは match_state に相乗りして全クライアントへ届く。
 
-    専用の配信経路を作らないのは、`_fanout` の約束事 (送信ごとの上限・切り離しの
-    後始末) を守る経路をこれ以上増やさないため。接続直後のスナップショットが
-    そのままアンカーになるので、途中接続の同期にも追加の仕組みが要らない。
+    専用の配信経路を作らないのは、`_fanout` の約束事を守る経路を増やさないため。
+    接続直後のスナップショットがそのままアンカーになる。
     """
 
     async def test_snapshot_carries_configured_duration(self) -> None:
         """config/system.yaml の試合時間が実際に配信へ載ること。
 
-        既定値と同じ値で試すと、設定を配線し忘れた実装でもテストが通ってしまう。
-        当日ルールが変われば yaml を書き換えるのに画面が 3 分のまま、という
-        壊れ方はログにも UI にも現れない。
+        既定値と同じ値で試すと配線し忘れた実装でも通る。「yaml を書き換えたのに画面が
+        3 分のまま」はログにも UI にも現れない。
         """
         fx = _build_fixture(match_settings=MatchSettings(duration_s=90.0))
         app = fx.create_app()
@@ -429,10 +427,9 @@ class TestPhaseGate:
 class TestMatchStartDuringMotorCheck:
     """**動作確認の実行中に試合を開始できてはならない。**
 
-    フェーズが `match` になると `sequence_start` が解禁され、両ハンドを一巡している
-    統合動作確認と通常シーケンスが同じアクチュエータへ同時に指令を出す。
-    `abort()` へ倒さないのは、操縦者が意図していない中断より拒否のほうが安全なため
-    (止めたければ `motor_check_abort` が別にある)。
+    フェーズが `match` になると `sequence_start` が解禁され、統合動作確認と通常
+    シーケンスが同じアクチュエータへ同時に指令を出す。`abort()` へ倒さないのは、
+    意図しない中断より拒否のほうが安全なため (`motor_check_abort` が別にある)。
     """
 
     async def test_動作確認中の試合開始は理由付きで拒否される(self) -> None:
@@ -540,12 +537,9 @@ class TestMatchFinishAndReset:
 class TestMatchStartResetsRxDownEpisodes:
     """試合開始のたびに CAN 途絶エピソード数 (``rx_down_episodes``) を洗い流す。
 
-    準備中 (配線確認・動作確認) に踏んだ途絶をここでリセットしておかないと、
-    試合中に見えるエピソード数へ準備フェーズのぶんが紛れ込み、「この試合で
-    本当に何回起きたか」が読めなくなる。``match_reset`` ではなく ``match_start``
-    でリセットする理由は `lib/server.py` の `_handle_match_start` に書いてある
-    (``match_reset`` でリセットすると、結果確認中 (FINISHED) の操縦者が
-    直前の試合の記録を見返せなくなる)。
+    準備中 (配線確認・動作確認) のぶんが紛れ込むと「この試合で本当に何回起きたか」が
+    読めなくなる。``match_reset`` ではなく ``match_start`` でリセットする理由は
+    `lib/server.py` の `_handle_match_start` にある。
     """
 
     async def test_試合開始で全ロボットのエピソード数をリセットする(self) -> None:
@@ -587,12 +581,10 @@ class TestMatchStartResetsRxDownEpisodes:
 class TestJitterResetOnMatchStart:
     """周期タスクが測る実周期の乱れは、試合開始で洗い流す (前縁リセット)。
 
-    準備中 (配線確認・両ハンドを一巡する動作確認) に踏んだぶんを試合の数字へ
-    持ち込まないための無音のリセットで、`reset_rx_down_episodes()` と同じ場所・
-    同じ理由。詳しい設計判断は `lib/server.py` の `_handle_match_start` にある。
-    ここではその配線 —— `match_start` が成立したときだけ全ロボットの位置制御
-    ループ・同期監視・目標値再送をリセットすること —— だけを固定する。
-    集計 1 行を出すのは `match_finish` 側なので、そちらは
+    準備中のぶんを試合の数字へ持ち込まないための無音のリセットで、
+    `reset_rx_down_episodes()` と同じ場所・同じ理由 (設計判断は `lib/server.py` の
+    `_handle_match_start`)。ここで固定するのは配線 —— `match_start` が成立したときだけ
+    全ロボットの 3 種の周期タスクをリセットすること —— だけ。集計 1 行は
     `TestJitterSummaryOnMatchFinish` が持つ。
     """
 
@@ -643,12 +635,10 @@ class TestJitterResetOnMatchStart:
         """フェーズゲートは通っても (指差喚呼は完了)、`_handle_match_start` 自身の
         排他判定 (動作確認の実行中) で拒否されたときも触らない。
 
-        **この 1 本がリセット呼び出しの位置を固定する。** フェーズゲート側の
-        テスト (`test_フェーズゲートで拒否されたときはリセットしない`) は
-        `_handle_match_start` の中身を一切実行しないので、リセットの呼び出しを
-        関数の先頭 (排他判定より前) へ動かしてもそちらは落ちない。ここでは
-        フェーズゲートを通過させたうえで `_handle_match_start` 内部の排他判定に
-        引っかけるので、リセットが排他判定より前へ動くとここが落ちる。
+        **この 1 本がリセット呼び出しの位置を固定する。** フェーズゲート側のテストは
+        `_handle_match_start` の中身を一切実行しないので、リセットを関数の先頭へ動かして
+        も落ちない。ここはゲートを通過させたうえで内部の排他判定に引っかけるので、
+        リセットが排他判定より前へ動くと落ちる。
         """
         fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         check = _GatedCheckSequence()
@@ -680,13 +670,10 @@ class TestJitterResetOnMatchStart:
 class TestJitterSummaryOnMatchFinish:
     """「試合 N の集計」1 行は試合終了で出し、そこで 0 に戻す。
 
-    リセット点が `match_start` だけだと集計窓が `[試合N開始, 試合N+1開始)` になり、
-    試合後の finished・`match_reset`・次のセッティングタイム・両ハンドを一巡する
-    動作確認 (まさに乱れの発生源) が丸ごと混ざる。しかもその日の最後の試合は次の
-    `match_start` が来ないので永久に journal へ出ない —— 一番読みたい 1 試合が抜ける。
-    ここでは配線 (成立した `match_finish` でだけ集計 1 行 + リセットが走ること) を
-    固定する。1 行の中身 (超過 0 件でも出す / 文言で読み分けられる) は
-    `tests/test_periodic.py` の `TestJitterSummary` が持つ。
+    リセット点が `match_start` だけだと集計窓に試合後の finished・次のセッティング
+    タイム・動作確認 (まさに乱れの発生源) が混ざり、しかもその日の最後の試合は永久に
+    journal へ出ない。ここで固定するのは配線 (成立した `match_finish` でだけ集計 1 行 +
+    リセット) だけで、1 行の中身は `tests/test_periodic.py` の `TestJitterSummary`。
     """
 
     @staticmethod

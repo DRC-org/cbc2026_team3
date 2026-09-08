@@ -1,32 +1,25 @@
 # サブハンド不在 (Damiao DM3520 用 CANable 未接続) でメインハンド実機を動かす構成の
 # 共通設定。
 #
-# メインハンドの機構が完成する前は「メインハンド一式ベンチ (機構未装着)」として
-# 使っていたが、機構の付いた実機が完成した今は机上確認ではなく、**サブハンドを
-# 繋がずにメインハンド実機を動かす構成**になっている。サブハンド不在の理由は
-# Damiao DM3520 用の CANable を挿していないことで、本番の config/system.yaml は
-# can_buses に並んだ 4 本を main.py の _setup_robot() が**すべて** open するため、
+# サブハンド不在の理由は Damiao DM3520 用の CANable を挿していないことで、本番の
+# config/system.yaml は can_buses に並んだ 4 本を main.py が**すべて** open するため
 # そのままでは [Errno 19] No such device で起動しない。このセットが can_buses を
 # 3 本 (M3508 / EDULITE 05 / 自作モタドラ) に絞っていることだけが、DM3520 未接続の
-# まま起動できる根拠になっている。
+# まま起動できる根拠になっている。**逆にこのセットは CANable 3 本を同時に挿して
+# いないと起動しない** —— 足りないときは単体ベンチのどれかを使う。
 #
 # モータ構成・位置定数は本番の config/main_hand.yaml / config/main_hand_positions.yaml
 # をそのまま使う (**このセット専用のベンチ値ではなく、実機の実測値入りの本番設定**)。
 #
-# それでも、単体ベンチでは確かめられないことを確かめる場としての価値は生きている:
-#   - config/bench/m3508/ と config/bench/edulite/ は 1 本の CANable しか開かないので、
-#     「複数本挿した状態で全部が読めるか」を一度も通らない
-#   - CANable 3 本の固定名が入れ替わっていないこと。バス名は udev が serial で固定するが、
-#     config/can_buses.yaml の serial が実機とずれれば入れ替わる。**C620 へ EDULITE 用の
-#     指令が飛ぶ事故 (docs/invariants.md「CAN バス名は udev で個体固定する」) は、複数本挿した
-#     この構成でしか机上に現れない**
+# 単体ベンチでは確かめられないことを確かめる場としての価値がある:
+#   - 単体ベンチは 1 本の CANable しか開かないので、「複数本挿した状態で全部が
+#     読めるか」を一度も通らない
+#   - CANable 3 本の固定名が入れ替わっていないこと。**C620 へ EDULITE 用の指令が
+#     飛ぶ事故 (docs/invariants.md「CAN バス名は udev で個体固定する」) は、
+#     複数本挿したこの構成でしか机上に現れない**
 #   - 受信ループ 3 本 + 位置制御ループ (200Hz) + 目標値再送 (20Hz) + 同期監視 (50Hz) が
 #     同時に回った状態で、どの軸もフィードバックが途切れないこと
 #   - 左右直結ペアが 2 組 (y_axis / rotate) 同時に監視される状態
-#
-# main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で open する。
-# **したがってこのセットは CANable 3 本を同時に挿していないと起動しない**
-# ([Errno 19] No such device)。挿せる本数が足りないときは単体ベンチのどれかを使う。
 #
 # 使い方:
 #   scripts/setup_can.sh
@@ -39,8 +32,6 @@ can_buses:
   edulite_bus: can_edulite
   generic_bus: can_generic
 
-# health / match は書かない。**しきい値の既定値は lib/config_schema.py にしかなく**
-# (HealthThresholds / MatchSettings)、省略した分はそこから埋まる。本番と同じ数値を
-# 書き写すと bench 8 セット + 本番の 9 重管理になり、境界を 1 つ動かすたびに 9 箇所を
-# 揃え直すことになる —— 揃え損ねたセットは「机上では OK なのに実運用で警告が出る」
-# 形でしか現れない。省略しておけば、ベンチと実運用で判定基準がずれる余地が無い。
+# health / match は書かない。**しきい値の既定値は lib/config_schema.py にしかなく**、
+# 省略した分はそこから埋まる。本番と同じ数値を書き写すと 9 重管理になり、揃え損ねた
+# セットが「机上では OK なのに実運用で警告が出る」形で残る。

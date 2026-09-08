@@ -35,9 +35,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
 
-  // **主操作は戻り値を捨てない。** 切断中の `send` は false を返して黙るので、
-  // 捨てると「押したのにボタンは有効なまま・機体は動かない・トーストも出ない」になる。
-  // 試合中に最も多く押す NEXT を含む全操作がその形だった
+  // **主操作は戻り値を捨てない。** 切断中の `send` は false を返して黙るので、捨てると
+  // 「押したのにボタンは有効なまま・機体は動かない・トーストも出ない」になる
   const handleTrigger = () => sendOrReport({ type: "trigger", robot: robotKey }, "トリガー");
   const handleJump = (stepIndex: number) =>
     sendOrReport(
@@ -72,18 +71,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   /**
    * ステップ一覧を押せない理由。null なら押せる。
    *
-   * **可否と案内文をここ 1 つで決める。** 別々に書くと「押せないのに
-   * 『クリックで再開』と案内し続ける」状態が作れる。一覧の行は素の
-   * `<button disabled>` で `disabled:cursor-not-allowed` 以外に見た目が変わらないので、
-   * 操縦者からは「押したのに反応しない」＝故障と区別が付かない。
-   * **案内文はこの理由そのもので、null なら何も描かない** —— 押せるときの案内は
-   * 押せば分かることを毎試合読ませるだけの面積なので、出す文言は別に持たない。
+   * **可否と案内文をここ 1 つで決める** —— 別々に書くと「押せないのに『クリックで再開』と
+   * 案内し続ける」状態が作れ、一覧の行は見た目がほぼ変わらないので操縦者からは故障と
+   * 区別が付かない。**null なら何も描かない。**
    *
-   * **駆動中を塞ぐ理由**はジャンプの確認が全画面オーバーレイのモーダルだから
-   * (開いているあいだヘッダーの EMG STOP がクリックできない)。
-   * **トリガー待ちは塞がない** —— `require_trigger` で止まっている間、機体は
-   * 動いていない。そこは再開ステップを選ぶ本来の場面である
-   * (`sequenceKind` は `waiting_trigger` を `running` より先に判定する)。
+   * **駆動中を塞ぐ理由**はジャンプの確認が全画面モーダルだから (開いているあいだ
+   * ヘッダーの EMG STOP がクリックできない)。**トリガー待ちは塞がない** ——
+   * `require_trigger` で止まっている間、機体は動いておらず、そこは再開ステップを選ぶ
+   * 本来の場面である。
    */
   const stepJumpBlockedReason =
     sequenceBlockedReason ??
@@ -96,11 +91,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   // 可否の正はサーバー (lib/commands.py) で、ここは押す前に理由を出すだけ。
   // **フェーズでは塞がない** — 調整は準備中に、シーケンスからの退避は試合中に要る。
-  //
-  // **モード切替と手動指令は別の理由で塞がる。** サーバーは切替 (機体を動かさない) を
-  // 緊急停止中も通し、指令 (目標値を送る) だけを塞ぐ。ここを 1 つにまとめると、
-  // サーバーが受け付ける操作を画面が殺す — 停止中に手動へ寄せて解除と同時に
-  // 動かす、という手順が取れなくなる
+  // **モード切替と手動指令は別の理由で塞がる** (docs/invariants.md 「手動はフェーズで
+  // ゲートしないが、緊急停止ゲートは別軸で効く」)。1 つにまとめると、停止中に手動へ
+  // 寄せて解除と同時に動かす手順が取れなくなる
   const modeBlockedReason = connected ? null : "切断中のため切り替えできません";
   const manualBlockedReason = !connected
     ? "切断中のため操作できません"
@@ -111,11 +104,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   /**
    * START が「先頭へ戻して全工程を走り直す」意味になっているか。
    *
-   * `sequence_stop` は `step_index` を保持したまま降りるので、画面は中断位置を
-   * 出したまま START を差し出す。そこで押すと中断姿勢のまま先頭の動作が走る ——
-   * `sequence_jump` (同じ「任意ステップから再開」) が確認を挟むのに、より危険な
-   * こちらだけが素通しだった。**Space も同じ経路を通す** (キー 1 打で全工程が
-   * 走り出す方が、ボタンより危ない)。
+   * `sequence_stop` は `step_index` を保持したまま降りるので、画面は中断位置を出したまま
+   * START を差し出し、押すと中断姿勢のまま先頭の動作が走る。**Space も同じ経路を通す**
+   * (キー 1 打で全工程が走り出す方が、ボタンより危ない)。
    */
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
   const requestStart = () => {
@@ -127,10 +118,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     handleStart();
   };
 
-  // Space に主操作を集約する。ルーターは表示中のタブしか描画しないので、
-  // 表示中のロボットにだけ届く。トリガー待ちなら NEXT、待機中なら START に解決する
-  // 手動モード中は無効化する。誤爆した Space が sequence_start になると、
-  // 手動で機構を動かしている最中にシーケンスが走り出す
+  // Space に主操作を集約する (トリガー待ちなら NEXT、待機中なら START)。ルーターは
+  // 表示中のタブしか描画しないので、表示中のロボットにだけ届く。**手動モード中は
+  // 無効化する** —— 誤爆した Space が sequence_start になると、手動で機構を動かして
+  // いる最中にシーケンスが走り出す
   useHotkeys(
     {
       " ": () => {
@@ -178,21 +169,15 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   /**
-   * 機体状態のパネル。**既定の開閉だけが役割で違う。**
+   * 機体状態のパネル。**既定の開閉だけが役割で違う** —— 準備中は配線確認が目的なので
+   * 開いた状態から始め、試合中は平常時 1 行へ畳む。ただし手動中は畳まない (機体を
+   * 直接動かしている最中は、その前提が成り立たない)。
    *
-   * 準備中は配線確認が目的のフェーズなので開いた状態から始め、試合中は
-   * 平常時 1 行へ畳む (操縦者は機体を見ており、画面へ視線を戻すのは一瞬しかない)。
-   * ただし手動中は畳まない —— 機体を直接動かしている最中は、その前提が成り立たない。
-   *
-   * `className` に渡してよいのは主軸 (縦) の伸長指定だけ。flex-col の子へ
-   * `self-start` のようなクロス軸の指定を足すと幅が `fit-content` へ落ち、
-   * 診断ツリーが列の幅を無視して縮む / 溢れる。
-   *
-   * **試合中の右カラムでは、このパネルが縮む側を引き受ける。** 隣の試合時間は
-   * `shrink-0` で潰れないので、強制展開で列の高さを超えたぶんはここが吸って
-   * 内部のスクロール (モータ一覧) へ落ちる —— 縮めるための `min-h-0` は
-   * `Panel` が最初から持つ。**`flex-1` は付けない**: 中身が数行しかない
-   * 平常時に全高の白い箱になる。
+   * `className` に渡してよいのは主軸 (縦) の伸長指定だけ (docs/invariants.md 「grid の
+   * 子は既定で縦に伸びる」)。**試合中の右カラムでは、このパネルが縮む側を引き受ける** ——
+   * 隣の試合時間は `shrink-0` で潰れないので、強制展開で列の高さを超えたぶんはここが
+   * 吸って内部のスクロール (モータ一覧) へ落ちる。**`flex-1` は付けない**: 中身が数行
+   * しかない平常時に全高の白い箱になる。
    */
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
@@ -210,10 +195,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   // --- セッティングタイム -------------------------------------------------
-  // 指差喚呼と動作確認は Monitor の設定面が持つ。指差喚呼は操縦者 2 名が同じ場所に
-  // 立つので機体ごとに置くと二度読み上げになり、動作確認は両ハンドを 1 本の
-  // シーケンスで駆動するので機体ごとの入口が意味を持たない。
-  // ここに残るのは手動操縦と、その手元で見る機体状態。
+  // 指差喚呼と動作確認は Monitor の設定面が持つ (前者は二度読み上げになり、後者は
+  // 両ハンドを 1 本で駆動するので機体ごとの入口が意味を持たない)。ここに残るのは
+  // 手動操縦と、その手元で見る機体状態。
   if (setupPhase) {
     return (
       <Page className="flex flex-col">
@@ -237,8 +221,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   }
 
   // --- 試合中 / 試合終了 --------------------------------------------------
-  // 操縦者は機体を見ている。画面へ視線を戻すのは一瞬で、答えるべき問いは
-  // 「今 NEXT を押すのか」「押すと何が起きるか」の 2 つだけ。
+  // 答えるべき問いは「今 NEXT を押すのか」「押すと何が起きるか」の 2 つだけ。
   // 左を操作面、右を参照面に割り切り、参照面の診断は平常時 1 行へ畳む。
   return (
     <Page className="flex flex-col">

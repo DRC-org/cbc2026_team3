@@ -160,11 +160,10 @@ class TestCANManagerHealth:
     async def test_degraded_clears_once_sending_recovers(self) -> None:
         """**送信が復旧したら DEGRADED は消えなければならない。**
 
-        判定を累計カウンタで行うと、一度しきい値を超えたバスが永久に DEGRADED の
-        まま残る。実機では物理緊急停止で DM3520 の電源が数秒落ちただけで 6000 件
-        積み上がるので、CAN が完全に復旧した後 (ip -s link が ERROR-ACTIVE・
-        bus-off 0 回・送受信ともエラー 0) も UI が異常を出し続けることになる。
-        操縦者には「直したのに直らない」としか見えず、本物の異常と区別が付かない。
+        判定を累計カウンタで行うと、一度しきい値を超えたバスが永久に DEGRADED のまま
+        残る。実機では物理緊急停止で DM3520 の電源が数秒落ちただけで 6000 件積み上がる
+        ので、CAN が完全に復旧した後も UI が異常を出し続け、操縦者には「直したのに
+        直らない」としか見えない。
         """
         mgr = CANManager(run_blocking=direct_runner())
         bus = MagicMock()
@@ -295,13 +294,12 @@ class TestCANManagerHealth:
 class TestInfoDoesNotRefreshFeedbackAge:
     """INFO (1Hz の自己申告) でフィードバック鮮度を更新してはならない (仕様書 §3.4)。
 
-    **鮮度を動かすのは FEEDBACK だけ。** 100Hz の FEEDBACK が完全に途絶えても、
-    1Hz の自己申告が ``_last_rx_at`` を書き換え続けると feedback_timeout_ms
-    (既定 500ms) を満たし続け、そのモータは**永久に STALE にならない**。
-    途絶検出そのものが効かなくなり、症状は「UI は正常なのに機体が動かない」になる。
+    **鮮度を動かすのは FEEDBACK だけ。** 1Hz の自己申告が ``_last_rx_at`` を書き換え
+    続けると feedback_timeout_ms (既定 500ms) を満たし続け、そのモータは**永久に
+    STALE にならない** (症状は「UI は正常なのに機体が動かない」)。
 
-    この層は単独で確かめる。健全性の統合経路には他の判定も混ざっているので、
-    ここだけ壊しても他が拾ってしまい落ちない。
+    **この層は単独で確かめる** —— 健全性の統合経路には他の判定も混ざるので、ここだけ
+    壊しても他が拾って落ちない。
     """
 
     @pytest.fixture
@@ -394,11 +392,9 @@ class TestReanchorSurfacesInHealth:
 class TestUnmeasuredTemperature:
     """温度を測れない基板は 0.0 ではなく None を配ること。
 
-    自作モタドラはどの基板も温度センサを持たない (仕様書 §3.2) ので、
-    `MotorState.temperature` の 0.0 は制御経路が float を要求するための詰め物に
-    すぎない。素通しにすると UI に 0.0℃ が並び、操縦者は「冷えている」と読む。
-    **この層だけを単独で見る** —— state 配信側にも同じ規則があるので、
-    統合経路のテストでは片方を壊しても落ちない。
+    `MotorState.temperature` の 0.0 は制御経路が float を要求するための詰め物にすぎず、
+    素通しにすると UI に 0.0℃ が並んで「冷えている」と読まれる。**この層だけを単独で
+    見る** —— state 配信側にも同じ規則があるので、統合経路では片方を壊しても落ちない。
     """
 
     def _mgr(self, motor, channel: str) -> tuple[CANManager, can.Bus]:
@@ -438,12 +434,10 @@ class TestUnmeasuredTemperature:
 class TestMayAffectWorkpiece:
     """バスの途絶がワーク落下に繋がりうるかの判定 (``BusHealthInfo.may_affect_workpiece``)。
 
-    電磁弁基板 (``control_type: on_off``) はコマンドウォッチドッグ (既定 500ms)
-    が満了すると通電を落とす一手しか持たない。CAN 途絶が 1 秒弱続けば満了する
-    ので、そのバスの途絶は吸着中のワークを落としうる。一方 DM3520 や M3508 の
-    バスが途絶しても、それだけではワークは落ちない。判定はバス名や
-    ドライバ種別の文字列比較ではなく、ドライバ自身 (``has_on_off_control()``) に
-    聞く形で行う —— config で弁のバスを変えても判定が古いまま残らないようにするため。
+    電磁弁基板は 500ms のウォッチドッグ満了で通電を落とす一手しか持たないので、その
+    バスの途絶は吸着中のワークを落としうる (DM3520 / M3508 のバスでは落ちない)。判定は
+    バス名やドライバ種別の文字列比較ではなくドライバ自身 (``has_on_off_control()``) に
+    聞く —— config で弁のバスを変えても判定が古いまま残らないようにするため。
     """
 
     def _mgr_with_bus(self, channel: str) -> tuple[CANManager, can.Bus]:

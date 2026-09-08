@@ -1,9 +1,7 @@
 """テレメトリ配信が 1 クライアントの不調に巻き込まれないことを検証する。
 
-配信は全クライアントへ直列に送るため、詰まった 1 台をそのまま待つと他の全員 —
-Monitor を含む — のテレメトリが止まる。しかも WebSocket 自体は開いたままなので
-UI は「接続中」を出し続け、操縦者は凍った値を最新だと思って見続けることになる。
-操縦者のノート PC がスリープに入る・Wi-Fi が切れるだけで起きうる。
+守る 4 つの約束は docs/invariants.md「テレメトリ配信は 1 クライアントの不調で
+止めてはならない」。操縦者のノート PC がスリープに入る・Wi-Fi が切れるだけで起きる。
 """
 
 from __future__ import annotations
@@ -223,10 +221,9 @@ class TestFanout:
 class TestConnectHandshakeIsNotUnbounded:
     """接続直後の 3 通も送信上限を通ること。
 
-    生の ``send_str`` は相手が読まなくなると無期限に待つ。スリープに入りかけた
-    ノート PC が 1 台繋いだだけで接続ハンドラが返らなくなり、``finally`` の
-    ``_ws_clients.discard`` も走らない。配信ループは ``ws.closed`` にならない
-    その相手へ送り続けることになる。
+    生の ``send_str`` は相手が読まなくなると無期限に待つ。ノート PC が 1 台繋いだ
+    だけで接続ハンドラが返らず ``finally`` の切り離しも走らないので、配信ループは
+    ``ws.closed`` にならないその相手へ送り続ける。
     """
 
     @pytest.mark.parametrize("stall_after", [0, 1, 2])
@@ -295,11 +292,9 @@ class TestShutdownDoesNotHang:
 class _JoiningClient:
     """送信の待ちの隙に別のクライアントを接続させるクライアント。
 
-    操縦者がタブをリロードするだけで起きる。配信は 1 通ごとに await を挟むため、
-    その隙に `_ws_handler` が同じ集合へ追加・削除を行う。配信側が集合をそのまま
-    反復していると `RuntimeError: Set changed size during iteration` になり、
-    `activate_e_stop` の配信からは例外ガード無しで呼び出し元まで抜けて
-    E-STOP を押した操縦者の WebSocket がその場で切れる。
+    操縦者がタブをリロードするだけで起きる。集合をそのまま反復していると
+    `RuntimeError: Set changed size during iteration` になり、`activate_e_stop` の
+    配信からは例外ガード無しで抜けて E-STOP を押した本人の WS が切れる。
     """
 
     def __init__(self, fx: ServerFixture, newcomer: object) -> None:

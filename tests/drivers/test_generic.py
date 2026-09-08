@@ -21,14 +21,12 @@ _RESERVED_BITS = 0xE0
 class TestCanIdRange:
     """仕様書 §2.2 のデバイス ID 範囲 (0x01〜0xFE)。
 
-    M3508 (1〜4) と EDULITE 05 (0〜0xFF) には範囲検査があるのに、generic だけ
-    無検査だった。範囲外は静かに壊れる:
+    範囲外は静かに壊れる:
 
     - ``0xFF`` は E_STOP ブロードキャストの予約 ID。``activation_steps()`` が
       緊急停止**解除**フレームを 0x0FF へ送り、共有 can_generic バス上の
       全基板のラッチをまとめて外す
-    - ``0x1FF`` はコマンド種別のビットを侵食し、E_STOP が SET_TARGET として
-      読まれるフレームになる
+    - ``0x1FF`` はコマンド種別のビットを侵食し、E_STOP が SET_TARGET として読まれる
     - ``0x00`` は「DIP 設定忘れ」の予約。ファームは駆動を拒否する
     """
 
@@ -237,9 +235,8 @@ class TestMatchesFeedback:
     def test_状態フラグだけの_FEEDBACK_は自分宛として受ける(self):
         """下限ちょうど (DLC=1) が通ることを見る。
 
-        位置を持たない基板 —— DC 基板とセンサスロット —— が送るのはこの形だけで
-        (仕様書 §3.2: 状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト)、下限を
-        1 バイトより上へ引き上げるとその全チャンネルが 1 通も配られなくなる。
+        位置を持たない基板 (DC 基板とセンサスロット) が送るのはこの形だけなので、
+        下限を 1 バイトより上へ引き上げると全チャンネルが 1 通も配られなくなる。
         症状は「その基板の全チャンネルが STALE」で、配線不良と区別が付かない。
         """
         # position を省くと DLC=1 (実機の DC 基板・センサと同じ形)
@@ -284,9 +281,9 @@ class TestHealth:
     def test_reserved_sensor_bytes_never_raise_warnings(self):
         """予約バイトに何が載っていてもヘルス判定を動かさないこと。
 
-        自作モタドラは電流センスも温度センサも持たない (仕様書 §3.2)。
-        素通しにすると、他プロトコルの相乗りフレームや古いファームのゴミが
-        そのまま過熱・過電流として読まれ、試合中に理由のない FAULT が出る。
+        自作モタドラは電流センスも温度センサも持たない (仕様書 §3.2)。素通しにすると、
+        相乗りフレームや古いファームのゴミが過熱・過電流として読まれ、試合中に理由の
+        ない FAULT が出る。
         """
         feed_generic(self.drv, position=0.0, flags=_RESERVED_BITS, reserved=b"\xff\xff\xff")
         assert self.drv.has_overcurrent_warning() is False
@@ -345,10 +342,9 @@ class TestSensorInput:
     def test_latch_keeps_a_contact_that_is_already_over(self):
         """**零点確定はこれが無いと止まらない。**
 
-        探索は `settle_s` (50ms) ごとにしか観測できないのに、FEEDBACK は 100Hz で
-        届く。ON 区間が `homing.step` より狭い機構では指令 1 回で区間を通り抜け、
-        観測時にはもう OFF —— 実機ではスイッチに当たっているのに探索が止まらず、
-        機構の破損側へ回り続けた。
+        探索は `settle_s` (50ms) ごとにしか観測できないのに FEEDBACK は 100Hz で届く。
+        ON 区間が `homing.step` より狭い機構では指令 1 回で区間を通り抜け、観測時には
+        もう OFF になる (実機では機構の破損側へ回り続けた)。
         """
         self._feed(sensor=True)
         self._feed()  # 観測する前に抜けた
@@ -491,12 +487,11 @@ class TestSafetyStatusFlags:
     def test_unconfigured_device_id_is_fault(self):
         """デバイス ID 未設定だけが FAULT。
 
-        **ここで流し込むフレームを実機は生成しない。** 未設定のチャンネルは
-        FEEDBACK も INFO も 1 通も送らない (仕様書 §2.2) ので、実機でこのビットが
-        PC まで届くことはなく、PC から見える症状は「その基板の全チャンネルが
-        STALE」だけになる。**切り分けは基板の LED (赤の速い点滅) が担う。**
-        このケースが守っているのは「ビットが立ったフレームを受けたら FAULT へ倒す」
-        というデコードの対応関係だけで、設定ミスの検出そのものではない。
+        **ここで流し込むフレームを実機は生成しない** —— 未設定のチャンネルは
+        FEEDBACK も INFO も 1 通も送らない (仕様書 §2.2) ので、実機の症状は
+        「その基板の全チャンネルが STALE」だけで、切り分けは基板の LED が担う。
+        守っているのは「ビットが立ったフレームを受けたら FAULT へ倒す」という
+        デコードの対応関係だけで、設定ミスの検出そのものではない。
         """
         self._feed(unconfigured_id=True)
         assert self.drv.device_id_unconfigured is True
@@ -531,9 +526,8 @@ class TestInfoFrame:
     def test_absent_range_is_none_not_zero(self):
         """レンジを申告しない基板は None。**0 と混ぜてはならない。**
 
-        DC 基板と電磁弁基板はそもそも角度を持たないので送らないのが正しく、
-        サーボ基板が送ってこないのは古いファームが焼かれている証拠になる。
-        0 で埋めると、この 2 つが「測ったように見える 0」として同じ顔で届く。
+        DC / 電磁弁基板は角度を持たないので送らないのが正しく、サーボ基板が送って
+        こないのは古いファームが焼かれている証拠。0 で埋めると 2 つが同じ顔で届く。
         """
         driver = GenericDriver("conveyor", 0x80, control_type=ControlMode.DUTY)
         feed_generic_info(driver, firmware_version=1, board_kind=2)
@@ -580,9 +574,9 @@ class TestFirmwareConfirmed:
 class TestInfoMismatch:
     """自己申告と config の期待値の照合 (仕様書 §3.4 / §7.7)。
 
-    **180 度サーボと 270 度サーボの取り違えは、この照合以外に気付く手段が無い。**
+    **180 度サーボと 270 度サーボの取り違えは、この照合以外に気付く手段が無い** ——
     型を間違えると実機は指令の 1.5 倍 (または 2/3) 動くが、FEEDBACK が返すのは
-    クランプ後の指令角なので、PC からは正常に動いたようにしか見えない。
+    クランプ後の指令角なので PC からは正常に見える。
     """
 
     def _servo(self) -> GenericDriver:
@@ -649,12 +643,10 @@ class TestInfoMismatch:
 class TestTelemetrySupport:
     """何を測れるかの自己申告 (仕様書 §3.2)。
 
-    自作モタドラは電流センサも温度センサも持たず、位置を返すのは
-    サーボスロットだけ。``MotorState`` は制御経路の都合で float 固定なので、
-    測れない項目は 0.0 のまま流れてくる。**その 0.0 を配信へ素通しすると
-    UI に「測ったように見える 0」が出る。** 配信側 (`RobotServer` /
-    `CANManager.health`) はこの宣言だけを見て None へ倒すので、
-    ここが「全部測れる」に戻ると 0 がそのまま画面へ復活する。
+    自作モタドラは電流・温度センサを持たず、位置を返すのはサーボスロットだけ。
+    ``MotorState`` は制御経路の都合で float 固定なので測れない項目は 0.0 で流れる。
+    配信側 (`RobotServer` / `CANManager.health`) はこの宣言だけを見て None へ倒すので、
+    ここが「全部測れる」に戻ると「測ったように見える 0」が画面へ復活する。
     """
 
     def test_servo_board_measures_position_only(self):

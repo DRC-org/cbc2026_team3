@@ -144,10 +144,9 @@ class TestSystemConfig:
         """**しきい値そのものが症状に化ける値を通さない。**
 
         `health` はしきい値の単一情報源なので、ここを通ると他に止める層が無い:
-        `feedback_timeout_ms` が 0 以下なら全モータが恒久 STALE (症状は配線不良と
-        区別が付かない)、温度 2 値が 0 以下なら「測っていない 0」がそのまま
-        WARNING / FAULT に化ける、`tx_error_threshold` が 0 以下なら送信エラー
-        0 件でバスが DEGRADED になる。
+        `feedback_timeout_ms` <= 0 なら全モータが恒久 STALE (配線不良と区別が付かない)、
+        温度 2 値 <= 0 なら「測っていない 0」が WARNING / FAULT に化ける、
+        `tx_error_threshold` <= 0 なら送信エラー 0 件でバスが DEGRADED になる。
         """
         with pytest.raises(ValueError, match=key):
             load_system_config(
@@ -163,14 +162,11 @@ class TestSystemConfig:
     def test_non_finite_health_value_is_rejected(self, key: str, value: object) -> None:
         """**NaN と無限大は値域検査を素通りする。**
 
-        `_number` は文字列も `float()` に通すので、yaml の `.nan` も `"nan"` も
-        NaN として通る。NaN は比較がすべて False になるため正値検査
-        (`value <= 0`) も逆転検査 (`warning > critical`) も抜け、しきい値として
-        内部へ入ると「全モータが恒久 STALE なのに設定は正常に見える」形でしか
-        現れない —— CAN プロトコルから float を外した理由 (docs/invariants.md) と同じ
-        失敗様式。無限大は比較を通ってしまうぶんさらに悪く、
-        `feedback_timeout_ms: .inf` は途絶検出を、`temp_warning_c: .inf` は温度警告を
-        **黙って無効化**する。
+        NaN は比較がすべて False になるため正値検査 (`value <= 0`) も逆転検査
+        (`warning > critical`) も抜け、「全モータが恒久 STALE なのに設定は正常に
+        見える」形でしか現れない (CAN から float を外した理由と同じ失敗様式。
+        docs/invariants.md §1)。無限大はさらに悪く、`feedback_timeout_ms: .inf` は
+        途絶検出を、`temp_warning_c: .inf` は温度警告を**黙って無効化**する。
         """
         with pytest.raises(ValueError, match=key):
             load_system_config(
@@ -214,10 +210,10 @@ class TestSystemConfig:
         """**2 つの別名が同じインタフェースを指す構成を通さない。**
 
         別名は「どの機種がぶら下がっているか」の宣言なので、重ねると機種の違う
-        ノードが同じ物理バスに乗る。C620 のフィードバック `0x201`〜`0x204` は
-        DM3520 から見て速度指令になり、しかも発生源がモータ自身なので **PC を
-        止めても流れ続ける**。下流の `CANManager.add_bus` は別名で持つだけで
-        チャンネルの重複を見ないため、ここで弾かないと止める層が 1 つも無い。
+        ノードが同じ物理バスに乗る (C620 のフィードバック `0x201`〜`0x204` は DM3520
+        から見て速度指令になり、発生源がモータ自身なので PC を止めても流れ続ける)。
+        下流の `CANManager.add_bus` はチャンネルの重複を見ないので、ここで弾かないと
+        止める層が 1 つも無い。
         """
         with pytest.raises(ValueError, match="can0"):
             load_system_config(
@@ -330,9 +326,8 @@ class TestControlType:
     def test_on_off_is_applied(self) -> None:
         """電磁弁の control_type: on_off (仕様書 §9.2)。
 
-        許可表に無いと yaml に書いた瞬間に起動が拒否される。逆に許可表だけ通って
-        GenericDriver 側の _MODE_MAP に無いと、起動はできるのに最初の指令で
-        KeyError になる (試合中に落ちる)。
+        許可表に無いと yaml に書いた瞬間に起動が拒否され、許可表だけ通って
+        `_MODE_MAP` に無いと最初の指令で KeyError になる (試合中に落ちる)。
         """
         config = load_robot_config(
             _robot(valve_1=_generic(control_type="on_off")), source="test.yaml"
@@ -404,9 +399,8 @@ class TestCanIdRange:
     def test_ranges_match_what_the_drivers_accept(self) -> None:
         """config 側の表とドライバ側の検査がずれていないこと。
 
-        2 箇所に範囲を書く以上、片方だけが古くなる経路を塞いでおく
-        (config_schema は lib.drivers.base しか import しない約束なので、
-        表そのものを共有できない)。
+        2 箇所に範囲を書く以上、片方だけが古くなる経路を塞ぐ (config_schema は
+        lib.drivers.base しか import しない約束なので表を共有できない)。
         """
         builders = {
             "m3508": lambda i: M3508Driver("m", i),
@@ -484,9 +478,8 @@ class TestDriverSpecificKeys:
     def test_dm3520_mit_mode_is_rejected(self) -> None:
         """MIT モードを書けるようにしない。
 
-        書けてしまうと Kp/Kd を PC 側で持つ構成が config だけで成立し、
-        「ドライバ内蔵の三重ループを使う」という本機を選んだ理由が消える。
-        しかも指令フレームの形が変わるので、症状は「まったく動かない」になる。
+        書けると Kp/Kd を PC 側で持つ構成が config だけで成立し、「ドライバ内蔵の
+        三重ループを使う」という本機を選んだ理由が消える (症状は「まったく動かない」)。
         """
         with pytest.raises(ValueError, match="mit"):
             load_robot_config(
@@ -656,9 +649,8 @@ class TestDriverSpecificKeys:
         """null は「書きかけの yaml」として `main._load_pid_config` が既定値で補完する。
 
         `integral_limit` の null だけは「制限なし」の正当な指定だが、他のキーの null も
-        (main 側が既定値へ倒すので) ここでは拒否しない。**値の検査を足しても、この
-        「書きかけを許す」性質だけは残す** —— 機構調整中に 1 行コメントアウトしただけで
-        実機が起動しなくなると、動作確認そのものができない。
+        拒否しない。**この「書きかけを許す」性質は残す** —— 機構調整中に 1 行コメント
+        アウトしただけで実機が起動しなくなると、動作確認そのものができない。
         """
         config = load_robot_config(
             _robot(
@@ -716,9 +708,9 @@ class TestDriverSpecificKeys:
     def test_non_finite_pid_value_is_rejected(self) -> None:
         """`.inf` / `.nan` は yaml が float として読み、`float()` 変換も例外を投げない。
 
-        「数値でなければ既定値へ」という手当てをすり抜けて `kp: .inf` がそのまま
-        有効なゲインとして起動していた (警告 0 件)。**PID ゲインを実行中に差し替える
-        経路は無い**ので (docs/invariants.md)、ここを通った値を後段で止める層はどこにも無い。
+        「数値でなければ既定値へ」をすり抜けて `kp: .inf` が有効なゲインとして起動して
+        いた (警告 0 件)。**PID ゲインを実行中に差し替える経路は無い**ので、ここを通った
+        値を後段で止める層は無い。
         """
         with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kd"):
             load_robot_config(
@@ -737,9 +729,8 @@ class TestDriverSpecificKeys:
 class TestMotorCheckIsNotAMotorSetting:
     """モータごとの動作確認設定は無くなった。
 
-    両ハンドを 1 本のシーケンスで駆動する形 (sequences/motor_check.py) へ変えたので、
-    確認は運用と同じ位置名へ動かす。**確認専用の駆動量が存在しない**ため、
-    位置定数と食い違いようがない。書いてあったら起動時に落とす。
+    確認は運用と同じ位置名へ動かすので**確認専用の駆動量が存在せず**、位置定数と
+    食い違いようがない。書いてあったら起動時に落とす。
     """
 
     def test_motor_check_key_is_rejected(self) -> None:
@@ -816,12 +807,8 @@ _BENCH_DIRS = (
 )
 
 #: 自分の robot yaml / positions を持たず、本番 config (config/<値>.yaml,
-#: config/<値>_positions.yaml) をそのまま使うベンチセット。
-#: main_hand は実機が完成して実測値が本番 config へ移ったことで、bench 側に
-#: あった robot yaml (本番と完全一致) と positions (仮値のコピー) が
-#: 二重管理の複製でしかなくなったため削除した。ここへ載せないセットは従来どおり
-#: bench_dir 内の robot yaml / positions を要求する
-#: (test_bench_config_set_loads / test_bench_opens_only_the_buses_on_the_desk が見る)。
+#: config/<値>_positions.yaml) をそのまま使うベンチセット。載せないセットは
+#: bench_dir 内の robot yaml / positions を要求する。
 _BENCH_USES_PRODUCTION_CONFIG: dict[str, str] = {
     "main_hand": "main_hand",
 }
@@ -857,27 +844,18 @@ def _bench_positions_path(bench: str, bench_dir: pathlib.Path, robot_name: str) 
 class TestShippedBenchConfigs:
     """机上ベンチ用の config セット (config/bench/<対象>/) も同じスキーマで読めること。
 
-    **ベンチ config は誰も検証していなかった。** 本番の config は
-    TestShippedConfigs が守っているが、bench/ はスキーマを変えても壊れたことに
-    気付けない —— 気付くのは机上に基板を並べた当日で、しかも症状は
-    「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
-    始める余裕は無い。
-
-    8 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
-    見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
-    **robot yaml / positions が bench_dir に無いセットは `_BENCH_USES_PRODUCTION_CONFIG`
-    に載っていて本番 config を指す** —— 黙って検証を素通りさせると、他のセットで
-    誤って config を消したときに検出できなくなるため、どちらの構成であるかを
-    宣言させている (`test_every_shipped_bench_dir_is_covered` の穴と同じ理由)。
+    bench/ はここが無いとスキーマを変えても壊れたことに気付けない (気付くのは机上に
+    基板を並べた当日で、症状は「起動しない」だけ)。見るのは「system / robot /
+    positions / checklist が揃っていて読める」ことだけ。**robot yaml / positions が
+    bench_dir に無いセットは `_BENCH_USES_PRODUCTION_CONFIG` に宣言させる** ——
+    黙って素通りさせると、他のセットで config を消したときに検出できなくなる。
     """
 
     def test_every_shipped_bench_dir_is_covered(self) -> None:
         """同梱の bench ディレクトリが漏れなく _BENCH_DIRS に載っていること。
 
-        _BENCH_DIRS は手書きの一覧なので、セットを 1 つ足して**ここへ書き足し忘れると
-        その 1 セットだけ誰も検証しない**。しかも症状は「テストは全部緑」なので、
-        気付くのは机上に基板を並べた当日になる (このクラスを置いた理由と同じ穴が、
-        一覧の側に開く)。
+        _BENCH_DIRS は手書きの一覧なので、書き足し忘れると**そのセットだけ誰も検証
+        しない**。症状は「テストは全部緑」で、気付くのは机上に基板を並べた当日。
         """
         shipped = {path.name for path in (_CONFIG_DIR / "bench").iterdir() if path.is_dir()}
 
@@ -901,8 +879,8 @@ class TestShippedBenchConfigs:
 
         assert config.motors
 
-        # 位置定数は「robot config と同じディレクトリの <robot_name>_positions.yaml」を読む
-        # (main.py の _positions_path)。名前がずれると本番の位置定数が読まれてしまい、
+        # 位置定数は robot config と同じディレクトリの <robot_name>_positions.yaml
+        # (main.py の _positions_path)。名前がずれると本番の位置定数が読まれ、
         # **机上に無い軸へ指令が飛ぶ**
         positions_path = _bench_positions_path(bench, bench_dir, config.robot_name)
         assert positions_path.exists(), f"{positions_path} がありません"

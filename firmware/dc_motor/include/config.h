@@ -101,9 +101,8 @@ struct DcChannelConfig {
     uint8_t pwmPin;
     uint8_t dirPin;
     float maxDuty;  // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
-    // **表示名は持たない。** 読まれない文字列は Nano では SRAM と Flash を 50 バイト
-    // ずつ食い（2KB のうち 2.4%）、しかも PC 側 yaml のモータ名と静かにずれても
-    // 誰も気付けない。対応は下の表の行コメントが持つ。
+    // **表示名は持たない。** PC 側 yaml のモータ名と静かにずれても誰も気付けないため。
+    // 対応は下の表の行コメントが持つ。
 };
 
 // TODO(実機で確認): max_duty はモータとギヤ比が決まってから詰めること。
@@ -139,14 +138,12 @@ constexpr float kPwmFrequencyHz = 30000.0f;
 // kDefaultCommandTimeoutMs 以内に再送し続ける契約なので、途絶は PC の停止か
 // ケーブル断を意味する。止まらない基板は PC から止められない基板でもある。
 //
-// 0 にすると途絶しても駆動を続け、FEEDBACK の bit2 も報告しなくなる。これは
-// 手で cansend を打つようなベンチ確認（20Hz の再送を用意できない場合）のための
-// 逃げ道であって、試合では既定の 1 のまま使う。再送が間に合わない状態は運用上の
-// 異常なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
+// 0 にすると途絶しても駆動を続け、FEEDBACK の bit2 も報告しなくなる。ベンチ確認のための
+// 逃げ道であって、試合では既定の 1 のまま使う —— 再送が間に合わない状態は運用上の異常
+// なので、ここや command_timeout_ms を触って覆い隠してはならない（仕様書 §8）。
 //
-// この値は setup() が DcChannel::setWatchdogEnabled() へ写す。判定を #if で
-// main.cpp 側に置くと、同じ分岐を両ファームが各自で持つことになり、片方に入れ忘れても
-// 誰も気付けない。有効/無効の判定は MotorSafety にだけある。
+// この値は setup() が DcChannel::setWatchdogEnabled() へ写す。判定を #if で main.cpp
+// 側に置くと同じ分岐を各ファームが持つことになり、片方に入れ忘れても気付けない。
 #define WATCHDOG_ENABLED 1
 
 // command_timeout_ms / feedback_interval_ms（仕様書 §3.3 の既定値）は PC 側との契約なので

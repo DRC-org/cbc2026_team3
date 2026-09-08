@@ -237,9 +237,9 @@ class TestMotorHandleWaitReached:
     async def test_target_cleared_mid_wait_raises_interrupted(self) -> None:
         """緊急停止などが待機中に目標を刈り取ったら「到達」にすり替えず中断と分かる形にする。
 
-        回帰対象: MotorHandle.is_reached() は「目標が無ければ到達済み」を返すため、
-        wait_reached() の実行中に clear_target() が入ると、黙って True を返して
-        move_to() が中断された動作をステップ成功として記録しうる。
+        `MotorHandle.is_reached()` は「目標が無ければ到達済み」を返すので、
+        `wait_reached()` の実行中に `clear_target()` が入ると中断された動作が
+        ステップ成功として記録されうる。
         """
         handle, driver, _mgr = _make_handle()
         await handle.set_target(ControlMode.POSITION, 10.0)
@@ -428,14 +428,13 @@ class TestAxisHandle:
     async def test_ペアの片側が失敗したら成功した側の目標だけを捨てる(self) -> None:
         """ペア軸に片側だけ効く操作を、エラー経路でも作らない。
 
-        素の `gather` は最初の例外で抜けるが**残りのタスクはキャンセルされずに
-        完走する**ので、片方の送信だけが失敗すると成功した側にだけ新しい目標が残る。
-        問い合わせ駆動のモータ (EDULITE 05 / DM3520) では 20Hz の再送がその 1 台だけを
-        新目標へ押し続け、もう片方には `idle_target_value()` を書き続ける ——
-        左右直結の軸が片側だけ動き、最後は偏差超過で全体緊急停止になる。
+        素の `gather` は最初の例外で抜けるが**残りのタスクは完走する**ので、片方の送信
+        だけが失敗すると成功した側にだけ新しい目標が残る。問い合わせ駆動のモータでは
+        20Hz の再送がその 1 台だけを新目標へ押し続け、左右直結の軸が片側だけ動いて
+        偏差超過で全体緊急停止になる。
 
-        一方**失敗した側の旧目標は残す**。1 通も飛んでいない以上、旧目標こそが
-        基板が現に実行している状態と一致している。
+        一方**失敗した側の旧目標は残す** —— 1 通も飛んでいない以上、旧目標こそが基板が
+        現に実行している状態と一致している。
         """
         mgr = _make_can_manager()
         axis, _, handles = _make_axis("pair", _PAIR_MOTORS, manager=mgr, sync_tolerance=1.0)
@@ -460,10 +459,9 @@ class TestAxisHandle:
         """捨てる範囲を「指令した全員」へ広げると、モータ 1 台の軸まで巻き添えになる。
 
         電磁弁・ポンプ・コンベア・サーボはいずれも単一モータの generic 軸で、
-        `GenericTargetRefresher` は「目標が無い = 送らない」なので、目標を捨てた
-        瞬間に 20Hz の再送が止まる —— 500ms 後にファームの `command_timeout_ms` が
-        満了し、電磁弁は消磁して**吸着中のワークが落ちる**。送信 1 通が失敗しただけで
-        起きてはならない。
+        `GenericTargetRefresher` は「目標が無い = 送らない」なので、目標を捨てた瞬間に
+        20Hz の再送が止まる —— 500ms 後に `command_timeout_ms` が満了し、電磁弁は消磁して
+        **吸着中のワークが落ちる**。
         """
         mgr = _make_can_manager()
         axis, _, handles = _make_axis(

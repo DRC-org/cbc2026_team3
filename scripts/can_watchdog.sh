@@ -14,21 +14,17 @@
 
 set -euo pipefail
 
-# **なぜ要るか。** CANable2 (gs_usb) は bus-off から自動復帰しない。カーネルの
-# restart-ms はドライバが do_set_mode を持たないため設定できず、ファームが持つ
-# GS_CAN_FEATURE_BUS_OFF_RECOVERY もカーネル 7.0 の gs_usb は知らない。実測では
-# 30 秒待っても 1 通も通らず、down/up でのみ復旧した。バス上に相手が 1 台でも
-# 生きていれば ACK は返るので、実際に落ちうるのは相手が 2 台しか居ない
+# **なぜ要るか。** CANable2 (gs_usb) は bus-off から自動復帰しない (restart-ms は
+# ドライバが do_set_mode を持たないため設定できず、実測でも 30 秒待って 1 通も
+# 通らず down/up でのみ復旧した)。実際に落ちうるのは相手が 2 台しか居ない
 # can_dm3520 だけだが、そこは物理緊急停止で電源が落ちる経路そのものである。
 #
-# **なぜ `ip link` の state を見ないか。** 同じ実測で、落ちている間も can state は
-# ERROR-ACTIVE のまま、bus-off / error-warn / error-pass のカウンタも 0 のまま、
-# エラーフレームも 1 通も来なかった (berr-reporting も GET_STATE も未対応)。
-# カーネルから見える範囲に異常が現れないので、送信の滞留でしか判定できない。
-# 経緯と実測値は docs/checks_and_health.md にある。
+# **なぜ `ip link` の state を見ないか。** 落ちている間も can state は ERROR-ACTIVE の
+# まま、カウンタも 0 のまま、エラーフレームも 1 通も来ないため。送信の滞留でしか
+# 判定できない。実測値は docs/checks_and_health.md。
 #
-# (この説明を set -euo の下へ置いているのは、--help がヘッダコメントを
-#  そのまま出すため。使い方より長い経緯まで出すと読む場所でなくなる)
+# (この説明を set -euo の下へ置いているのは、--help がヘッダコメントをそのまま
+#  出すため)
 
 # shellcheck source=scripts/_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"

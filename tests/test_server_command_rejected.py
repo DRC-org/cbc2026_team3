@@ -1,9 +1,8 @@
 """command_rejected の宛先を検証する。
 
-拒否通知は「今その操作をした人」への返答であって、全員への通知ではない。
-全配信していると、Monitor が試合中に set_court を弾かれただけで両操縦者の画面にも
-赤トーストが出る。自分が押していない操作の拒否は操縦者にとってノイズでしかなく、
-本当に自分の操作が弾かれたときの通知と区別が付かなくなる。
+拒否通知は「今その操作をした人」への返答であって全員への通知ではない。全配信すると、
+Monitor が set_court を弾かれただけで両操縦者の画面にも赤トーストが出て、本当に自分の
+操作が弾かれたときの通知と区別が付かなくなる。
 """
 
 from __future__ import annotations
@@ -127,17 +126,15 @@ class TestRejectionGoesToRequesterOnly:
 class TestUnknownCommandsNeverReachHandlers:
     """語彙に無いコマンドはゲートを素通りしてハンドラへ届いてはならない。
 
-    ゲート表とディスパッチが別々の表だと、どの表にも載っていないコマンドが
-    「拒否もされず実行される」状態になり得る。COMMANDS を唯一の入口にすることで、
-    宣言されていない名前はハンドラへ到達しない。
+    ゲート表とディスパッチが別々の表だと、どの表にも載っていないコマンドが「拒否も
+    されず実行される」状態になり得る。COMMANDS を唯一の入口にする。
     """
 
     def _record_handler_calls(self, fx: ServerFixture) -> list[str]:
         """全ハンドラを記録役へ差し替える。
 
-        差し替え先の名前は ``CommandSpec.handler`` が持っている宣言そのもの
-        (lib/commands.py)。ここでハンドラ名を書き写すと、語彙表とテストが
-        別々の一覧を持つことになり、本文が防いでいる事故がテスト側で再発する。
+        差し替え先の名前は ``CommandSpec.handler`` の宣言そのもの。ここへ書き写すと
+        語彙表とテストが別々の一覧を持ち、本文が防いでいる事故がテスト側で再発する。
         """
         called: list[str] = []
 
@@ -185,9 +182,8 @@ class TestUnknownCommandsNeverReachHandlers:
 class TestDeclaredCommandsAlwaysAnswer:
     """語彙にあるコマンドは、引数が不正でも黙って捨てない。
 
-    未知のコマンド (語彙に無い = 存在を知らせない) とは別で、こちらは操縦者が
-    実在するボタンを押した結果である。黙って捨てると「送信できた」と信じたまま
-    効いていない状態が続く。
+    未知のコマンド (語彙に無い) とは別で、こちらは操縦者が実在するボタンを押した結果
+    である。黙って捨てると「送信できた」と信じたまま効いていない状態が続く。
     """
 
     async def test_未知のコートは理由付きで拒否される(self) -> None:
@@ -227,9 +223,9 @@ class _TwoStepSequence(Sequence):
 class TestSequenceJumpArgumentValidation:
     """`step_index` は整数のときだけステップ移動として扱う。
 
-    `isinstance(True, int)` は真なので、素通しすると `True` が index 1 として
-    通る。ジャンプ要求は停止中のシーケンスを叩き起こすため、操縦者が誰も
-    開始していないのに 2 番目のステップから機体が動き出す。
+    `isinstance(True, int)` は真なので素通しすると `True` が index 1 として通る。
+    ジャンプ要求は停止中のシーケンスを叩き起こすので、誰も開始していないのに
+    2 番目のステップから機体が動き出す。
     """
 
     async def test_真偽値のstep_indexではシーケンスが動き出さない(self) -> None:
@@ -269,10 +265,9 @@ class TestSequenceJumpArgumentValidation:
 class TestHandlerExceptionsNeverKillTheConnection:
     """**ハンドラが投げても操縦者の WS を切ってはならない。**
 
-    `handle_command` は `_ws_handler` の受信ループから await されている。例外を
-    抜けさせると `async for msg in ws` ごと降り、その操縦者は画面から何も送れなく
-    なる —— 試合中なら E-STOP を押す手段まで失う。ハンドラごとに握りを書くと
-    書き忘れた経路が無防備なまま残るので、握りはディスパッチ 1 箇所に置く。
+    例外を抜けさせると `async for msg in ws` ごと降り、その操縦者は画面から何も送れなく
+    なる (試合中なら E-STOP を押す手段まで失う)。ハンドラごとに握りを書くと書き忘れた
+    経路が無防備なまま残るので、握りはディスパッチ 1 箇所に置く。
     """
 
     async def test_ハンドラの例外は理由付きで返る(self) -> None:

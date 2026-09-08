@@ -1,6 +1,5 @@
 """再励磁コマンド (`reenergize_motors`) の回帰テスト。
 
-励磁が落ちたモータ (EDULITE 05 / DM3520 の fault) を機体を止めずに戻す操作。
 CommandSpec のゲート宣言 (フェーズ / 緊急停止 / 手動モード) は `tests/test_commands.py`
 が固定するので、ここではハンドラの実処理を見る:
 
@@ -8,11 +7,9 @@ CommandSpec のゲート宣言 (フェーズ / 緊急停止 / 手動モード) �
   二重投入は、CommandSpec に無い独自ゲートなのでここでしか守れない
 - 対象ロボットだけを触ること (もう一方の `activate_motors` を巻き込まない)
 - 有効化に失敗したモータが `safety.unenergized_motors` に載ること
-- **フォルト直前の古い目標 (`QueryDrivenTargetRefresher` のラッチ・
-  `MotorHandle` の明示目標) を、無励磁のモータだけに絞って剥がしてから
-  励磁すること** — 剥がさないと、励磁した直後の再送 (最大 50ms 後) が古い値で
-  上書きし、「現在角を書いてから励磁する」保証が意味を失う
-  (advisor 指摘。詳細は `lib/control/target_refresh.py` の `clear_target`)
+- **フォルト直前の古い目標を、無励磁のモータだけに絞って剥がしてから励磁すること**
+  — 剥がさないと励磁直後の再送 (最大 50ms 後) が古い値で上書きし、「現在角を
+  書いてから励磁する」保証が意味を失う
 """
 
 from __future__ import annotations
@@ -49,8 +46,7 @@ _ROBOT_NAMES = ("main_hand", "sub_hand")
 def _target_value(msg: can.Message) -> float:
     """EDULITE 05 の SET_TARGET (WRITE_PARAM) フレームから指令値を読む。
 
-    `feed_edulite` は 16bit 固定小数点を経由するので、実測角の丸め誤差ぶん
-    厳密な浮動小数点一致にならない。値そのもの (近似) を見る。
+    `feed_edulite` は 16bit 固定小数点を経由するので厳密な浮動小数点一致にならない。
     """
     _param_id, value = struct.unpack("<Hxxf", msg.data)
     return value
@@ -68,7 +64,6 @@ def _count_e_stop_broadcasts(sent: list[can.Message]) -> int:
 
     エンコーダの戻り値と突き合わせず形をそのまま書くのは `tests/test_server_e_stop.py`
     と同じ理由 —— 突き合わせると「実装が実装と一致する」ことしか見られない。
-    解除フレーム (同じ ID で data 01 5A A5) と data で見分ける。
     """
     return sum(
         1
@@ -87,10 +82,9 @@ def _build_fixture() -> ServerFixture:
 def _can_manager_with_dropped_motor() -> tuple[CANManager, Edulite05Driver]:
     """「無励磁だと分かっている」EDULITE を 1 台だけ載せたモック CANManager。
 
-    **`mock_motor` では「対象が 1 台もいない再励磁」しか作れない。** あちらの
-    `is_energized()` は MagicMock を返すので `is False` が成立せず、`dropped` は
-    必ず空集合になる —— ラッチ剥がしもペア展開も 1 つも通らない。実ドライバへ
-    無励磁のフィードバックを流し、本物の対象を 1 台作る。
+    **`mock_motor` では「対象が 1 台もいない再励磁」しか作れない** —— `is_energized()`
+    が MagicMock を返すので `dropped` は必ず空集合になり、ラッチ剥がしもペア展開も
+    1 つも通らない。実ドライバへ無励磁のフィードバックを流して本物の対象を作る。
     """
     can_manager = mock_can_manager(bus_name="can_edulite")
     can_manager.send = AsyncMock()
@@ -112,9 +106,7 @@ def _dropped_fixture() -> tuple[ServerFixture, Edulite05Driver]:
 def _manual_fixture() -> ServerFixture:
     """main_hand に手動操縦 1 軸 (`axis` → モータ `m1`) を持たせた最小構成。
 
-    `TestSetOperationModeDeniedWhileReenergizeInFlight` と
-    `TestManualTargetDeniedWhileReenergizeInFlight` が共有する (どちらも「手動と
-    再励磁が同じロボットで競合する」ことを見るので組み立てが同じ)。
+    「手動と再励磁が同じロボットで競合する」ことを見る 2 クラスが共有する。
     """
     table = load_position_table(
         {
@@ -152,10 +144,8 @@ class TestUnknownOrMissingRobot:
         fx = _build_fixture()
         fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=[])
         await fx.command({"type": "reenergize_motors", "robot": "no_such_robot"})
-        # タスクが 1 つも立っていないことまで見る。`assert_not_called()` だけだと、
-        # 検証を外して未知の名前のままタスクを立てても (中で KeyError に落ちて
-        # 即座に完了するだけなので) main_hand 側の呼び出しには一切現れず、
-        # 検証漏れを見逃す
+        # タスクが立っていないことまで見る。`assert_not_called()` だけだと、未知の
+        # 名前でタスクを立てても中で KeyError に落ちて即完了するので検出できない
         assert not fx.has_pending_reenergize("no_such_robot")
         await asyncio.sleep(0)
         fx.can_manager("main_hand").activate_motors.assert_not_called()
@@ -197,12 +187,9 @@ class TestExclusionGates:
     async def test_rejected_while_e_stop_reactivation_in_flight(self) -> None:
         """緊急停止解除の再励磁 (`_reactivate_motors`) と同じバスを取り合わない。
 
-        再励磁はロボットを順に (main_hand → sub_hand) 処理するので、main_hand の
-        `activate_motors` をゲートしておけば sub_hand の分はまだ 1 回も呼ばれない。
-        そこで **sub_hand** への `reenergize_motors` が「進行中」で拒否され、
-        `activate_motors` が (自分からは) 1 回も呼ばれないことを確かめる ——
-        main_hand 側の呼び出し回数で判定すると、再励磁フロー自身の呼び出しと
-        混ざって「拒否できているか」を判定できない。
+        再励磁はロボットを順に処理するので、main_hand の `activate_motors` をゲート
+        しておけば sub_hand の分はまだ呼ばれない。**sub_hand** 側で判定するのは、
+        main_hand の呼び出し回数だと再励磁フロー自身の呼び出しと混ざるため。
         """
         fx = _build_fixture()
         gate = asyncio.Event()
@@ -218,8 +205,7 @@ class TestExclusionGates:
         try:
             await fx.command({"type": "e_stop"})
             await fx.command({"type": "e_stop_release"})
-            # 再励磁タスクへ 1 度だけ実行機会を与え、main_hand のゲートで止まらせる
-            await asyncio.sleep(0)
+            await asyncio.sleep(0)  # main_hand のゲートで止まらせる
             assert fx.server._reactivating
 
             await fx.command({"type": "reenergize_motors", "robot": "sub_hand"}, requester=client)
@@ -261,10 +247,9 @@ class TestExclusionGates:
 class TestTargetsRobotOnly:
     """対象ロボットの `CANManager` だけを触り、もう一方は巻き込まない。
 
-    **`mock_motor` 構成では成立しないテストだった。** `is_energized()` が
-    MagicMock を返すので `dropped` は必ず空になり、`only=set()` のまま
-    `assert_awaited_once()` を通っていた —— `dropped` の中身が壊れても緑。
-    実ドライバの無励磁フィードバックで本物の対象を作り、渡した `only` まで見る。
+    **`mock_motor` 構成では `dropped` が必ず空になり、`only=set()` のまま
+    `assert_awaited_once()` を通ってしまう** (中身が壊れても緑)。実ドライバの無励磁
+    フィードバックで本物の対象を作り、渡した `only` まで見る。
     """
 
     async def test_only_named_robot_is_activated(self) -> None:
@@ -323,19 +308,13 @@ class TestFailureIsReported:
 
     async def test_activate_motors_exception_reports_only_set(self) -> None:
         """`activate_motors` が例外を投げても、`only` に渡した集合がそのまま
-        `unenergized_motors` に反映される (`_activate_motors_for_robot` の
-        except 分岐。`only` は今回の PR の新規ロジックなので単独で確かめる)。
+        `unenergized_motors` に反映される (`_activate_motors_for_robot` の except 分岐)。
 
         **`only` に「相方拡張でしか入らないモータ」(`rotate_l`) を混ぜる。**
-        `rotate_l` は `is_energized()` が True (健全) で、事前の
-        `_inactive_motors` にも載っていない —— `only` を無視する変異
-        (全モータ扱い) はもちろん、**except 分岐そのものを削って例外を
-        上位へ素通りさせる変異**(`_reenergize_motors` の外側 try/except が
-        握り潰し、`_inactive_motors` が更新されない) も、この動機で拾える
-        (`rotate_l` は生きた `is_energized()` からは絶対に出てこないので、
-        except 分岐が走らない限り最終結果に現れない)。無関係な `gripper`
-        (健全・非ペア) を同居させ、「`only` を無視して全モータ扱い」の変異は
-        `gripper` が紛れ込むことで拾う。
+        `rotate_l` は健全 (`is_energized()` が True) で `_inactive_motors` にも
+        載っていないので、except 分岐が走らない限り最終結果に現れない —— `only` を
+        無視する変異も、except 分岐を削って例外を上位へ素通りさせる変異も拾える。
+        無関係な `gripper` (健全・非ペア) の同居は「全モータ扱い」の変異を拾う。
         """
         fx = ServerFixture.build()
 
@@ -385,11 +364,9 @@ class TestFailureIsReported:
 class TestPreviouslyInactiveMotorsAreRetried:
     """前回 (起動時、または前回の再励磁) に有効化できなかったモータも対象に含める。
 
-    `is_energized()` はフィードバックが届くまで None を返すので、起動直後に
-    フィードバックが来ずに有効化を見送ったモータは「今無励磁」の判定に
-    引っかからない。`safety.unenergized_motors` が操縦者に見せている集合
-    (`set_initial_inactive_motors` / 前回の失敗) を対象へ合併しないと、
-    その状態のまま再励磁を押してもリトライされない。
+    `is_energized()` はフィードバックが届くまで None を返すので、起動直後に有効化を
+    見送ったモータは「今無励磁」の判定に引っかからない。`safety.unenergized_motors` が
+    見せている集合を対象へ合併しないと、その状態のまま押してもリトライされない。
     """
 
     async def test_only_includes_previously_inactive_motor(self) -> None:
@@ -411,10 +388,8 @@ class TestStaleTargetIsClearedBeforeActivation:
     def _build(self) -> tuple[ServerFixture, dict[str, Edulite05Driver], dict[str, MotorHandle]]:
         can_manager = mock_can_manager(bus_name="can_edulite")
         can_manager.send = AsyncMock()
-        # activate_motors 自体の中身 (現在角を書いて enable するところ) は
-        # 別のテスト (drivers/test_edulite05.py・test_can_manager.py) が見ている。
-        # ここでの関心はその前段 (何を剥がすか) だけなので、活性化そのものは
-        # 成功させたことにする
+        # activate_motors 自体の中身は drivers/test_edulite05.py・test_can_manager.py
+        # が見る。ここでの関心はその前段 (何を剥がすか) だけ
         can_manager.activate_motors = AsyncMock(return_value=[])
 
         dropped = Edulite05Driver("dropped", can_id=1)
@@ -444,17 +419,15 @@ class TestStaleTargetIsClearedBeforeActivation:
 
     async def test_dropped_motor_loses_stale_explicit_target(self) -> None:
         fx, drivers, handles = self._build()
-        # フォルト前: 遠くの目標 (POS_MAX 付近の 4.0rad) へ move_to していた
+        # フォルト前は 4.0rad へ move_to しており、無励磁の間に機構が 0.5rad へ沈んだ
         await handles["dropped"].set_target(ControlMode.POSITION, 4.0)
-        # フォルトで励磁が落ち、その間に機構が沈んだ (現在角は 0.5rad まで下がった)
         feed_edulite(drivers["dropped"], position=0.5, mode_state=0)  # RESET = 無励磁
         assert drivers["dropped"].is_energized() is False
 
         await fx.command({"type": "reenergize_motors", "robot": "main_hand"})
         await fx.wait_reenergize("main_hand")
 
-        # 古い目標 (4.0) が生きたままだと、activate_motors 後の再送がそこへ
-        # 引き戻してしまう。剥がされていることを確認する
+        # 古い目標 (4.0) が生きたままだと activate_motors 後の再送がそこへ引き戻す
         assert handles["dropped"].has_target is False
 
     async def test_dropped_motor_loses_stale_idle_latch(self) -> None:
@@ -462,8 +435,7 @@ class TestStaleTargetIsClearedBeforeActivation:
         can_manager = fx.can_manager("main_hand")
         (refresher,) = fx.server._robots["main_hand"].target_refreshers
 
-        # 目標を一度も持たないまま「今の姿勢を保て」がラッチされた状態を作る
-        # (問い合わせ駆動リフレッシャを公開 API で 1 周期進める)。
+        # 目標を一度も持たないまま「今の姿勢を保て」がラッチされた状態を作る。
         # 値は POS_MIN/POS_MAX (±12.57rad) に収める
         feed_edulite(drivers["dropped"], position=3.0, mode_state=2)  # まだ励磁中
         await refresher.step()
@@ -516,11 +488,11 @@ class TestStaleTargetIsClearedBeforeActivation:
         assert handles["dropped"].target == 1.2
 
     async def test_activation_is_scoped_to_dropped_motors_only(self) -> None:
-        """`activate_motors(only=...)` に渡すのは無励磁のモータだけ (advisor 指摘)。
+        """`activate_motors(only=...)` に渡すのは無励磁のモータだけ。
 
         絞らずに全モータへ渡すと、健全で移動中の `healthy` まで
         「現在角を書いてから enable」に巻き込まれ、動いている軸へ割り込む。
-        絞り込みの実効果 (`only` が本当にフィルタになっているか) は
+        絞り込みの実効果は
         `test_can_manager.py::test_activate_motors_only_filters_target_motors` が見る。
         """
         fx, drivers, _handles = self._build()
@@ -538,16 +510,13 @@ class TestStaleTargetIsClearedBeforeActivation:
 class TestManualJogOriginIsReset:
     """再励磁は無励磁だったモータのジョグ起点も捨てる。**ただし対象の軸だけ。**
 
-    無励磁のあいだ機構が自重で下がっていた場合、目標とラッチだけ剥がして
-    ジョグの起点をそのままにすると、次のジョグが古い (フォルト前の) 起点から
-    飛ぶ。ここまでは緊急停止 (`activate_e_stop` → `ManualController.on_e_stop()`)
-    と同じ。
+    無励磁のあいだ機構が自重で下がっていた場合、目標とラッチだけ剥がしてジョグの
+    起点を残すと、次のジョグが古い (フォルト前の) 起点から飛ぶ。ここまでは緊急停止
+    (`activate_e_stop` → `ManualController.on_e_stop()`) と同じ。
 
-    **違うのは範囲。** 緊急停止は機体が止まっているのでロボット全体でよいが、
-    再励磁は「機体を止めずに」が売りなので、落ちた 1 台のために無関係な軸の
-    起点まで捨ててはならない (docs/invariants.md「ジョグの起点は直前の手動目標値であって
-    フィードバックではない」)。**軸を 2 本置くのはそのため** —— 1 本しか無い
-    構成では「全体を捨てる」と「対象だけ捨てる」の区別が付かない。
+    **違うのは範囲。** 再励磁は「機体を止めずに」が売りなので、落ちた 1 台のために
+    無関係な軸の起点まで捨ててはならない (docs/invariants.md §4)。**軸を 2 本置くのは
+    そのため** —— 1 本では「全体を捨てる」と「対象だけ捨てる」の区別が付かない。
     """
 
     _POSITIONS: ClassVar[dict] = {
@@ -613,8 +582,7 @@ class TestManualJogOriginIsReset:
         await fx.wait_reenergize("main_hand")
 
         feed_edulite(drivers["dropped"], position=1.0, mode_state=2)
-        # 起点が捨てられていれば、次のジョグはフィードバック (1.0) から積む。
-        # 捨てられていなければ古い起点 (5.0) から積んでしまう
+        # 捨てられていればフィードバック (1.0) から積む。残っていれば古い起点 (5.0)
         assert await manual.jog("test_axis", 0.5) == pytest.approx(1.5, abs=0.01)
 
     async def test_unrelated_axis_keeps_its_origin(self) -> None:
@@ -658,12 +626,12 @@ class TestManualJogOriginIsReset:
 
 class TestPairedAxisIsExpandedToPartner:
     """直結ペア (`rotate` = EDULITE x2) の片側だけが無励磁になっても、対象は
-    相方を含めて拡張する (advisor 指摘)。
+    相方を含めて拡張する。
 
     片側だけを対象にすると、相方が移動中の場合「無励磁で連れ回されていた片側」を
     「相方に逆らって現在角を保持する片側」へ変えるだけになり、直後に
-    `SyncMonitor` の偏差超過で試合が止まる。docs/invariants.md「ペア軸に片側だけ効く
-    操作を作らない」をここにも適用する。
+    `SyncMonitor` の偏差超過で試合が止まる (docs/invariants.md §2「ペア軸に片側だけ
+    効く操作を作らない」)。
     """
 
     def _build(
@@ -774,20 +742,16 @@ class TestPairedAxisIsExpandedToPartner:
 
 class TestReactivationSettlesPendingReenergize:
     """逆方向の排他: 緊急停止解除の再励磁 (`_reactivate_motors`) は、同じロボットの
-    `reenergize_motors` が in-flight なら**畳んでから**自分の `activate_motors`
-    を呼ぶ (敵対的レビュー指摘)。
+    `reenergize_motors` が in-flight なら**畳んでから**自分の `activate_motors` を呼ぶ。
 
-    両者が同じロボットへ並走すると、片方の `_wait_fresh_feedback` が送る
-    プローブ (`feedback_probe_message()` = disable) が、もう片方が enable した
-    ばかりのモータへ届く。DM3520 は disable で自重落下するので、「戻した直後に
-    もう一度落とす」形で `reenergize_motors` 自身の存在意義を壊す。
+    並走すると片方のプローブ (`feedback_probe_message()` = disable) がもう片方が
+    enable したばかりのモータへ届く。DM3520 は disable で自重落下するので「戻した
+    直後にもう一度落とす」形になる。
 
-    **解除コマンドの受理そのものは待たせない** —— 待たせる先はバックグラウンドの
-    再励磁タスクのほうで、解除の受理・ラッチ解除・状態配信は即座に進む。
-    畳み込みを 2 系統とも `_reactivate_motors` の中に置いてあるのがその根拠で、
-    ハンドラ側にあれば同じ待ちがそのまま WS の直列処理を止める
-    (`TestEStopReleaseIsNotReentrant.test_the_settle_is_not_on_the_release_handlers_path`
-    が置き場所そのものを固定する)。
+    **解除コマンドの受理そのものは待たせない** —— 待たせるのはバックグラウンドの
+    再励磁タスクだけで、ハンドラ側に置くと同じ待ちが WS の直列処理を止める
+    (置き場所は `TestEStopReleaseIsNotReentrant` の
+    `test_the_settle_is_not_on_the_release_handlers_path` が固定する)。
     """
 
     async def test_reactivate_activate_motors_never_overlaps_the_pending_one(self) -> None:
@@ -833,22 +797,16 @@ class TestReactivationSettlesPendingReenergize:
 class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
     """**畳めない再励磁タスクがいても、緊急停止解除は先へ進む。**
 
-    素の `await pending` では済まない。有界なのは `_wait_fresh_feedback` の
-    deadline だけで、
-    `CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
-    無しで待つ。SocketCAN の送信キューが詰まっていれば `bus.send` はブロック
-    しうる —— それは `cbc-can-watchdog` が bus-off を疑っている状況、つまり
-    **まさに緊急停止を押した状況**で、そこで解除が永久に進まないことになる。
+    素の `await pending` では済まない。有界なのは `_wait_fresh_feedback` の deadline
+    だけで、`CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
+    無しで待つ。詰まった送信キューでブロックするのは `cbc-can-watchdog` が bus-off を
+    疑っている状況、つまり**まさに緊急停止を押した状況**である。
 
-    キャンセルだけでは足りないので上限も要る。**居座る旧タスクは
-    `CancelledError` を握り潰して `await` へ戻り続けるコルーチンで作る。**
-
-    **`run_in_executor` でスレッドへ入ったブロッキング呼び出し (実機の `bus.send`)
-    はこの手本にならない。** 待っている側の Task は `cancel()` した瞬間に
-    (裏のスレッドの完了を待たずに) `CancelledError` を受け取るので、
-    `asyncio.wait` はタイムアウトへ一度も到達しない —— 実測で経過 0.000s、
-    かつ `timeout` を `None` にしてもこのテストは通っていた (分岐に一度も
-    届いていなかった)。上限が本当に効くのは握り潰す側だけである。
+    キャンセルだけでは足りないので上限も要る。**居座る旧タスクは `CancelledError` を
+    握り潰して `await` へ戻り続けるコルーチンで作る。`run_in_executor` でスレッドへ
+    入ったブロッキング呼び出しはこの手本にならない** —— 待っている側の Task は
+    `cancel()` した瞬間に `CancelledError` を受け取るので `asyncio.wait` はタイムアウト
+    へ一度も到達せず (実測 0.000s)、`timeout=None` にしても通ってしまう。
     """
 
     async def test_release_proceeds_when_the_old_task_refuses_to_cancel(self) -> None:
@@ -859,7 +817,6 @@ class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
         async def _stubborn_activate(**_kwargs: object) -> list[str]:
             calls.append("main_hand")
             if len(calls) == 1:
-                # 1 本目だけ、キャンセルされても飲み込んで居座り続ける
                 while not release_first_call.is_set():
                     with contextlib.suppress(asyncio.CancelledError):
                         await asyncio.sleep(0.01)
@@ -882,14 +839,13 @@ class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
             assert calls == ["main_hand", "main_hand"], "解除の励磁が先へ進んでいない"
             fx.can_manager("sub_hand").activate_motors.assert_awaited_once()
         finally:
-            # 後始末: 居座っている 1 本目を必ず解放する
             release_first_call.set()
             await fx.wait_reenergize("main_hand")
 
 
 class TestMotorCheckDeniedWhileReenergizeInFlight:
     """逆方向の排他: 動作確認は、どちらかのロボットの `reenergize_motors` が
-    in-flight なら起動できない (敵対的レビュー指摘)。
+    in-flight なら起動できない。
 
     零点確定 (`rotate`) は disable → SET_ZERO → enable を伴う。同じモータへ
     再励磁の `activate_motors` が並走すると、そちらのプローブ (disable) が
@@ -929,7 +885,7 @@ class TestMotorCheckDeniedWhileReenergizeInFlight:
 
 class TestSetOperationModeDeniedWhileReenergizeInFlight:
     """逆方向の排他: 手動操縦への切替は、そのロボットの `reenergize_motors` が
-    in-flight なら拒否する (敵対的レビュー指摘)。
+    in-flight なら拒否する。
 
     手動へ入った直後に送るジョグは、再励磁の `activate_motors` が書く
     「フォルト前の現在角」目標と同じモータへ競合しうる。
@@ -975,14 +931,12 @@ class TestSetOperationModeDeniedWhileReenergizeInFlight:
 
 class TestManualTargetDeniedWhileReenergizeInFlight:
     """逆方向の排他その 2: 既に手動中のロボットへ再励磁をかけた最中に届く
-    `manual_jog` / `manual_move` / `manual_set` を拒否する (2 件目の敵対的
-    レビュー指摘)。
+    `manual_jog` / `manual_move` / `manual_set` を拒否する。
 
     `reenergize_motors` は手動操縦中も意図的に塞がない設計 (`lib/commands.py`)
     なので、手動へ「入る」ときのガード (`TestSetOperationModeDeniedWhileReenergizeInFlight`)
-    だけでは、既に手動中のロボットに再励磁がかかっている最中のジョグを塞げない。
-    3 コマンドとも `_manual_target` という共通の関門を通るので、変異は 1 箇所
-    (`_manual_target` のガード) を外すだけで 3 件とも落ちるはず。
+    だけでは、既に手動中のロボットへのジョグを塞げない。3 コマンドとも
+    `_manual_target` という共通の関門を通る。
     """
 
     async def _enter_manual(self, fx: ServerFixture) -> None:
@@ -1079,20 +1033,16 @@ class TestManualTargetDeniedWhileReenergizeInFlight:
 class TestEStopDuringReenergize:
     """**再励磁と緊急停止が重なったときの 2 枚を、1 枚ずつ単独で確かめる。**
 
-    「再励磁を押した直後に機体が異常な動きを始めたので止める」は最も自然な
-    操作の流れで、そこで `_send_steps` の途中 (`encode_target` → 0.05s →
-    `encode_enable` → 0.1s) に停止が入りうる。守っているのは 2 つ:
+    `_send_steps` の途中 (`encode_target` → 0.05s → `encode_enable` → 0.1s) に停止が
+    入りうる。守っているのは 2 つ:
 
-    1. `activate_motors` へ渡す `should_abort` —— 残りのモータへ enable を
-       送らないための中断口
-    2. 励磁を終えた後の停止フレーム再送 —— 中断判定をすり抜けた enable が
-       停止フレームより後に届き、**約 0.1 秒励磁されたまま残る**のを潰す
+    1. `activate_motors` へ渡す `should_abort` —— 残りのモータへ enable を送らない中断口
+    2. 励磁を終えた後の停止フレーム再送 —— 中断判定をすり抜けた enable が停止フレーム
+       より後に届き、**約 0.1 秒励磁されたまま残る**のを潰す
 
-    **まとめて 1 ケースにしてはならない。** 多重防護は統合経路のテストだと
-    1 枚壊しても他方が拾って落ちない (docs/invariants.md「多重防護の各層は 1 枚ずつ
-    単独で確かめる」)。実際、既存の `tests/test_server_e_stop.py` は解除経路
-    (`_reactivate_motors`) しか見ておらず、**再励磁経路だけ `should_abort` を
-    落とす変異も、再励磁側の再送だけを消す変異も 1 件も落ちなかった。**
+    **まとめて 1 ケースにしてはならない** (docs/invariants.md §9)。既存の
+    `tests/test_server_e_stop.py` は解除経路しか見ておらず、**再励磁経路だけ
+    `should_abort` を落とす変異も、再送だけを消す変異も 1 件も落ちなかった。**
     """
 
     async def test_activation_gets_a_live_e_stop_abort_hook(self) -> None:
@@ -1175,19 +1125,16 @@ class _HoldingSequence(Sequence):
 class TestSequenceCommandsDeniedWhileReenergizeInFlight:
     """**逆方向の排他: 在飛中のシーケンス系コマンドを拒否する。片方向だけ。**
 
-    `reenergize_motors` は `PHASES_ANY` なので、試合中のシーケンス実行中にも
-    押せる。在飛中に NEXT が押されると、シーケンスの `move_to` が書いた目標を
-    再励磁の `activate_motors` が書く「フォルト前の現在角」で上書きし、
-    `AxisHandle.wait_reached` は動かない位置を見続けて `SequenceTimeoutError`
-    で止まる (症状は「NEXT を押したのに動かない」だけ)。
+    在飛中に NEXT が押されると、`move_to` が書いた目標を「フォルト前の現在角」が
+    上書きし、`wait_reached` が動かない位置を見続けて `SequenceTimeoutError` になる
+    (症状は「NEXT を押したのに動かない」だけ)。
 
-    **逆 (シーケンス実行中の再励磁) は塞がない。** 塞ぐと「試合中に機体を
-    止めずに励磁を戻す」という主目的そのものが消える。docs/invariants.md「制御権の
+    **逆 (シーケンス実行中の再励磁) は塞がない** —— docs/invariants.md「制御権の
     奪い合いは両方向を塞ぐ」に対する意図的な例外なので、通ることも
     `test_sequence_start_does_not_block_reenergize` で固定しておく。
 
-    ゲートの宣言 (どのコマンドを対象にしたか) は `tests/test_commands.py` が
-    別に固定する。ここで見るのは掛け合わせ (対象ロボットが今在飛中か) の側。
+    ゲートの宣言は `tests/test_commands.py` が別に固定する。ここで見るのは
+    掛け合わせ (対象ロボットが今在飛中か) の側。
     """
 
     async def _start_slow_reenergize(self, fx: ServerFixture) -> asyncio.Event:
@@ -1290,11 +1237,9 @@ class TestSequenceCommandsDeniedWhileReenergizeInFlight:
 class TestInFlightIsBroadcast:
     """**在飛中を `safety.reenergizing` として配る。**
 
-    押した後の 0.1〜1.5 秒は `unenergized_motors` が消えない (励磁が次の
-    フィードバックへ反映されるまで分からない) ので、これが無いとボタンは
-    押せるまま残り、操縦者は 2 回目を押して「再励磁の処理中です」という
-    トーストを受け取ることになる。可否も理由もサーバーが決める、という
-    原則どおり在飛そのものを配る。
+    押した後の 0.1〜1.5 秒は `unenergized_motors` が消えない (励磁が次のフィードバック
+    へ反映されるまで分からない) ので、これが無いとボタンは押せるまま残り、操縦者は
+    2 回目を押して拒否トーストを受け取ることになる。
     """
 
     async def test_flag_follows_the_task_lifetime(self) -> None:
@@ -1325,17 +1270,12 @@ class TestInFlightIsBroadcast:
 class TestEStopReactivationSharesTheReenergizeGate:
     """**緊急停止解除の再励磁も、単発再励磁とまったく同じゲートに掛かる。**
 
-    `_reactivate_motors` (緊急停止解除) と `_reenergize_motors` (単発) は、どちらも
-    `activate_motors` の「現在角を書いてから enable」を打つ。
-    `blocked_during_reenergize` が防ぎたい害 —— `move_to` が書いた目標をフォルト前の
-    現在角が上書きし、`wait_reached` が動かない位置を見続ける —— は**両者で同型**
-    なので、片方だけを塞ぐ理由が無い。
-
-    在飛判定が 2 系統 (`_reactivate_tasks` / `_reenergize_tasks`) に分かれているのは
-    実装の都合であって、呼び出し側から見た「今モータを励磁し直している」は 1 つで
-    ある。`_is_reenergizing` がそのうち片方しか見ないと、**塞いだつもりの経路だけが
-    素通りする** —— しかも窓が開くのは応答の無いモータを 1 台 0.5 秒待っている間、
-    つまり CAN が不調なときほど広い (まさに緊急停止を押した状況)。
+    どちらも `activate_motors` の「現在角を書いてから enable」を打つので、
+    `blocked_during_reenergize` が防ぎたい害は両者で同型である。在飛判定が 2 系統
+    (`_reactivate_tasks` / `_reenergize_tasks`) に分かれているのは実装の都合で、
+    `_is_reenergizing` が片方しか見ないと**塞いだつもりの経路だけが素通りする** ——
+    窓が開くのは応答の無いモータを 1 台 0.5 秒待っている間、つまり CAN が不調な
+    ときほど広い (まさに緊急停止を押した状況)。
     """
 
     @staticmethod
@@ -1354,8 +1294,7 @@ class TestEStopReactivationSharesTheReenergizeGate:
         fx.can_manager("main_hand").activate_motors = _slow_activate
         await fx.command({"type": "e_stop"})
         await fx.command({"type": "e_stop_release"})
-        # 再励磁タスクへ 1 度だけ実行機会を与え、main_hand のゲートで止まらせる
-        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # main_hand のゲートで止まらせる
         assert fx.server._reactivating
         return gate
 
@@ -1423,10 +1362,9 @@ class TestEStopReactivationSharesTheReenergizeGate:
     async def test_switching_back_to_sequence_is_allowed(self) -> None:
         """**手動から出る方向は在飛中も通す。** 退避路から戻れなくなるため。
 
-        `_apply_operation_mode` のガードは `mode is OperationMode.MANUAL` の `if`
-        ブロックの中にある。外へ出すと「手動へ入れないが出られもしない」機体になり、
-        しかも症状は緊急停止解除の直後の数秒にしか出ない (単発再励磁は手動中も
-        意図的に塞がないので、そちらでは踏みにくい)。
+        `_apply_operation_mode` のガードは `mode is OperationMode.MANUAL` の `if` の
+        中にある。外へ出すと「手動へ入れないが出られもしない」機体になり、症状は
+        緊急停止解除の直後の数秒にしか出ない。
         """
         fx = _manual_fixture()
         await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
@@ -1448,12 +1386,10 @@ class TestEStopReactivationSharesTheReenergizeGate:
     async def test_unknown_robot_is_not_denied(self) -> None:
         """在飛中でも、未知のロボット名は再励磁ゲートで拒否しない。
 
-        `_reenergize_deny_reason` は「未知のロボットという別の失敗を、別の理由文で
-        覆い隠さない」ために素通しする不変条件を持つ。解除の再励磁はロボット名に
-        依らず True を返すので、`_is_reenergizing` へ渡す前に未知の名前を落とさないと
-        **在飛中だけ**この性質が消え、`bogus` 宛の `sequence_start` が「再励磁の
-        処理中」で拒否される (`_manual_mode_deny_reason` は `self._robots.get()` で
-        同じ性質を守っている)。
+        `_reenergize_deny_reason` は「未知のロボットという別の失敗を別の理由文で覆い
+        隠さない」ために素通しする。解除の再励磁はロボット名に依らず True を返すので、
+        未知の名前を先に落とさないと**在飛中だけ**この性質が消える
+        (`_manual_mode_deny_reason` は `self._robots.get()` で同じ性質を守っている)。
         """
         fx = _build_fixture()
         fx.enter_match()
@@ -1489,15 +1425,11 @@ class TestEStopReactivationSharesTheReenergizeGate:
 class TestEStopReleaseIsNotReentrant:
     """**解除を 2 回踏んでも再励磁は 1 本しか走らない。**
 
-    並走すると、片方の鮮度確認プローブ (EDULITE 05 / DM3520 とも
-    `feedback_probe_message()` = disable) がもう片方の enable 直後のモータへ届く ——
-    `sub_lift` は disable で自重落下するので「戻した直後にもう一度落ちる」。
-    加えて `_activate_motors_for_robot` は結果を無条件に `_inactive_motors[robot]`
-    へ置き換えるので、完了順によっては**実際は励磁できているのに画面だけ
-    「無励磁」が残り続ける**。
-
-    窓が広がるのは CAN が詰まっている・モータが応答しないときで、まさに緊急停止を
-    押した状況である。
+    並走すると、片方の鮮度確認プローブ (= disable) がもう片方の enable 直後のモータへ
+    届く (`sub_lift` は disable で自重落下する)。加えて `_activate_motors_for_robot` は
+    結果を無条件に `_inactive_motors[robot]` へ置き換えるので、完了順によっては
+    **実際は励磁できているのに画面だけ「無励磁」が残り続ける**。窓が広がるのは CAN が
+    詰まっているとき、つまりまさに緊急停止を押した状況である。
     """
 
     @staticmethod
@@ -1551,21 +1483,16 @@ class TestEStopReleaseIsNotReentrant:
     async def test_the_settle_is_not_on_the_release_handlers_path(self) -> None:
         """**畳み込みは解除ハンドラの経路に無い。**
 
-        置き場所を `_cmd_e_stop_release` へ移すと、そのすぐ下のコメントが理由として
-        書いていること —— `async for msg in ws` は 1 接続あたり完全に直列なので、
-        待つあいだ次の 1 通が処理されず **E-STOP の押し直しすら効かなくなる** ——
-        がそのまま当てはまる。`_settle_pending_reactivation` は畳めない相手を
-        最悪 `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つので、ハンドラに置けば「押し直しを
-        塞ぐ」時間を自分で作ることになる。単発再励磁の畳み込みが
-        `_settle_pending_reenergize` としてハンドラではなくバックグラウンドの
-        再励磁タスクから呼ばれているのと同じ形に揃えてある。
+        `async for msg in ws` は 1 接続あたり完全に直列なので、ハンドラで待つと次の
+        1 通が処理されず **E-STOP の押し直しすら効かなくなる**。
+        `_settle_pending_reactivation` は畳めない相手を最悪
+        `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つので、ハンドラに置けばその時間を自分で
+        作ることになる。
 
-        **所要時間では見られない。** `run_in_executor` の待ちは
-        `Task.cancel()` で即座に (スレッドを残したまま) 畳めるので、畳み込みは
-        置き場所に関わらず一瞬で終わる —— 上限が要るのは理屈の上の最悪ケースだけ
-        (`TestReactivationDoesNotWaitForeverOnAStuckReenergize`)。代わりに
-        「ハンドラが返った時点で前回のぶんはまだ生きている」を見る。ハンドラが
-        畳んでいたなら成立し得ない性質で、しかも実時間に依存しない。
+        **所要時間では見られない** —— `run_in_executor` の待ちは `Task.cancel()` で
+        即座に畳めるので、置き場所に関わらず一瞬で終わる。代わりに「ハンドラが返った
+        時点で前回のぶんはまだ生きている」を見る (ハンドラが畳んでいたなら成立し得ず、
+        実時間にも依存しない)。
         """
         fx = _build_fixture()
         gate = asyncio.Event()
@@ -1605,10 +1532,8 @@ class TestEStopReleaseIsNotReentrant:
         (`_settle_pending_reenergize`) と同じ定数を共有しているが、層としては別なので
         1 枚ずつ確かめる** —— 片方だけ上限を外しても、もう一方のテストは緑のままである。
 
-        居座る旧タスクは `CancelledError` を握り潰して `await` へ戻り続けるコルーチンで
-        作る。**`run_in_executor` でスレッドへ入ったブロッキング呼び出しでは代用できない**
-        —— 待っている側の Task は `cancel()` した瞬間に `CancelledError` を受け取るので、
-        上限の分岐へ一度も到達しない。
+        居座る旧タスクを `CancelledError` を握り潰すコルーチンで作る理由は
+        `TestReactivationDoesNotWaitForeverOnAStuckReenergize` と同じ。
         """
         fx = _build_fixture()
         release_first_call = asyncio.Event()
@@ -1617,7 +1542,6 @@ class TestEStopReleaseIsNotReentrant:
         async def _stubborn_activate(**_kwargs: object) -> list[str]:
             calls.append("main_hand")
             if len(calls) == 1:
-                # 1 本目だけ、キャンセルされても飲み込んで居座り続ける
                 while not release_first_call.is_set():
                     with contextlib.suppress(asyncio.CancelledError):
                         await asyncio.sleep(0.01)
@@ -1641,7 +1565,6 @@ class TestEStopReleaseIsNotReentrant:
                 "畳めない旧タスクを待って解除の励磁が進んでいない"
             )
         finally:
-            # 後始末: 居座っている 1 本目を必ず解放する
             release_first_call.set()
             with contextlib.suppress(TimeoutError):
                 await fx.wait_reactivation(timeout=2.0)

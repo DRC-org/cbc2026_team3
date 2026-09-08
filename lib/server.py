@@ -47,11 +47,8 @@ logger = logging.getLogger(__name__)
 
 _WEB_DIST_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "dist"
 
-#: 1 クライアントへの送信を諦めるまでの秒数。
-#: テレメトリは 20Hz なので、1 秒返ってこない相手は既に落ちているとみなしてよい。
-
-#: `watch_task` が拾った失敗ラベルの在庫上限 (ロボットごと)。あふれたら古いものから
-#: 捨てる。無制限に伸ばすと、直したはずの古い失敗がいつまでも画面に残り続ける。
+#: `watch_task` が拾った失敗ラベルの在庫上限 (ロボットごと)。無制限に伸ばすと、
+#: 直したはずの古い失敗がいつまでも画面に残り続ける。
 _FAILED_TASK_BACKLOG = 5
 
 #: 「励磁されているはず」の起点から、無励磁を異常として報告し始めるまでの猶予。
@@ -61,19 +58,14 @@ _ENERGIZE_GRACE_S = 0.5
 
 #: サーバー起動から、自作モタドラの `INFO` 未受信を「未確認」として報告し始めるまでの
 #: 猶予。`INFO` は 1Hz (仕様書 §3.4) なので、起動直後の空白は正常。位相のずれで
-#: 最悪 1 周期分待たされてもなお埋まるよう、余裕を持って 3 秒 (3 周期分) を取る。
+#: 最悪 1 周期分待たされてもなお埋まるよう 3 秒 (3 周期分) を取る。
 _FIRMWARE_INFO_GRACE_S = 3.0
 
 #: 進行中の再励磁タスクを畳むのに待つ上限。単発 (`_settle_pending_reenergize`) と
-#: 緊急停止解除 (`_settle_pending_reactivation`) の**両方が共有する**ので、
-#: 名前を片方に寄せない。
-#: **キャンセルが効いていれば 1 周期で終わる値である。** ここまで掛かるのは、
-#: 畳もうとしているコルーチンが自ら `CancelledError` を握り潰して `await` へ
-#: 戻り続ける場合だけ —— **エグゼキュータへ入った `bus.send` はこれに当たらない。**
-#: 待っている側の Task は `cancel()` した瞬間に (裏のスレッドの完了を待たずに)
-#: `CancelledError` を受け取るためで、実測でも経過 0.000s だった。
-#: `lib/can_manager.py` の励磁・再励磁の鎖に握り潰す箇所は無いので、この上限は
-#: 現状どこからも発火しない保険である。**保険だと分かった上で残す** —— 外すと
+#: 緊急停止解除 (`_settle_pending_reactivation`) の**両方が共有する**ので、名前を
+#: 片方に寄せない。キャンセルが効いていれば 1 周期で終わる値 (実測 0.000s) で、
+#: 発火するのはコルーチンが `CancelledError` を握り潰して `await` へ戻り続ける
+#: 場合だけ。現状そういう箇所は無く、**保険だと分かった上で残す** —— 外すと
 #: 「握り潰す箇所を 1 つ足した瞬間に解除が永久に返らなくなる」形に戻る。
 _PENDING_TASK_CANCEL_TIMEOUT_S = 0.5
 
@@ -86,15 +78,10 @@ def _measured_only(
 ) -> dict[str, float | None]:
     """測る手段の無い項目を ``None`` へ倒す。**実機と dry-run が通る唯一の関門。**
 
-    DC 基板・電磁弁基板は電流も温度も速度も測れず、位置すら持たない
-    (仕様書 §3.2)。``MotorState`` は制御経路の都合で float 固定なので、そこには
-    0.0 が入ったまま流れてくる。それを配信へ素通しすると UI には
-    「測ったように見える 0」が出て、操縦者は「本当に 0」なのか
-    「そもそも測っていない」のかを区別できない。
-
     可否を決めるのはドライバの `TelemetrySupport` だけで、ここは倒す場所に徹する。
     ドライバ種別による分岐をここへ (まして UI へ) 書き写すと、ドライバを足した人が
     配信側の表を直し忘れる形で 0 が復活する。
+    詳細は `docs/invariants.md`「測れない項目は配信の境界で `null` へ倒す」。
     """
     return {
         "pos": values["pos"] if telemetry.position else None,
@@ -105,7 +92,6 @@ def _measured_only(
 
 
 def _level_for_state(state: BusHealth) -> str:
-    """BusHealth を health_change イベントの level 文字列にマップする。"""
     if state is BusHealth.DOWN:
         return "critical"
     if state is BusHealth.DEGRADED:
@@ -114,7 +100,6 @@ def _level_for_state(state: BusHealth) -> str:
 
 
 def _level_for_motor_state(state: MotorHealth) -> str:
-    """MotorHealth を health_change イベントの level 文字列にマップする。"""
     if state is MotorHealth.FAULT:
         return "critical"
     if state in (MotorHealth.STALE, MotorHealth.WARNING):
@@ -136,12 +121,10 @@ class RobotContext:
     # **動作確認中も回し続ける** (理由は _motor_check_pausables)。
     # 緊急停止時だけは保持した目標を捨てる (解除だけで動き出させない)
     target_refreshers: list[TargetRefresher] = field(default_factory=list)
-    # 手動操縦の指令口。位置定数を読めていないロボットでは None (手動不可)
+    # 位置定数を読めていないロボットでは None (手動不可)
     manual: ManualController | None = None
-    # 制御権を誰が握っているか。ロボットごとに独立させる (片方だけ手動が成立する)。
-    # **正はサーバー側に置く。** 操縦者 2 名 + Monitor が別ブラウザで繋がるため、
-    # クライアント側に持つと「片方の画面だけが手動」という、Monitor から機体の
-    # 動きが説明できない状態が作れてしまう
+    # 制御権。ロボットごとに独立させる (片方だけ手動が成立する)。**正はサーバー側**
+    # (docs/invariants.md「手動操縦は制御権をシーケンスから奪う操作」)
     mode: OperationMode = OperationMode.SEQUENCE
 
 
@@ -161,78 +144,62 @@ class RobotServer:
         self._port = port
         self._app: web.Application | None = None
         self._robots: dict[str, RobotContext] = {}
-        #: WS クライアント集合と唯一の配信経路 (lib/ws_hub.py)。
-        #: 送信上限・切り離しの別タスク化・集合のスナップショットという 4 つの約束は
-        #: あちらに閉じており、配信経路を増やすには WsHub へメソッドを足すしかない
+        #: WS クライアント集合と唯一の配信経路。守る 4 つの約束は `lib/ws_hub.py` に
+        #: 閉じており、配信経路を増やすには WsHub へメソッドを足すしかない
         self._ws = WsHub()
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
         self._e_stop_active: bool = False
-        # 停止理由は停止が続くかぎり保持する。`_broadcast_state` は停止中に毎ティック
+        # 停止が続くかぎり保持する。`_broadcast_state` は停止中に毎ティック
         # e_stop_state を送り直すため、保持しないと自動検知の直後 1 通だけが本当の
         # 原因を載せ、以降の再配信が UI の表示を「操縦者の停止操作」へ塗り替える
         self._e_stop_reason: str | None = None
-        # 基板が報告する緊急停止 (FEEDBACK の緊急停止ビット) を、この時刻より後に届いた
-        # フィードバックについてのみ信用する。解除操作は「解除フレーム送信 →
-        # 基板がラッチを外す → 次の FEEDBACK」の順に伝わるので、送信より前の
-        # フィードバックに残った緊急停止ビットをそのまま信じると、解除した瞬間に
-        # サーバーが自分で緊急停止をかけ直して二度と解除できなくなる
+        # 基板が報告する緊急停止ビットを、この時刻より後に届いたフィードバックに
+        # ついてのみ信用する (docs/invariants.md「基板が報告する緊急停止は…」)
         self._board_e_stop_ignore_before: float = 0.0
         # 「この時刻以降は全モータが励磁されているはず」。起動直後と緊急停止解除の
-        # 直後に置き、緊急停止中は None にする。無励磁の報告をこの猶予つきで行うのは、
-        # enable を送ってから次のフィードバックが届くまでに 1 周期ぶんの窓があり、
-        # そこを無条件に異常とすると解除のたびに偽の警告が 1 回出るため
+        # 直後に置き、緊急停止中は None にする。猶予を付けるのは、enable を送ってから
+        # 次のフィードバックが届くまでの 1 周期ぶんの窓を無条件に異常とすると、
+        # 解除のたびに偽の警告が 1 回出るため
         self._energize_expected_since: float | None = None
-        # サーバー起動時刻。`INFO` 未受信の猶予 (`_FIRMWARE_INFO_GRACE_S`) の起点で、
+        # `INFO` 未受信の猶予 (`_FIRMWARE_INFO_GRACE_S`) の起点。
         # `_energize_expected_since` と違って緊急停止のたびには置き直さない ——
-        # `INFO` は自作モタドラが励磁状態と無関係に 1Hz で送り続けるので、猶予は
-        # 起動 1 回だけで足りる (置き直すと緊急停止のたびに検出が遅れる)
+        # `INFO` は励磁状態と無関係に 1Hz で届くので、猶予は起動 1 回で足りる
+        # (置き直すと緊急停止のたびに検出が遅れる)
         self._server_started_at: float | None = None
         # 直近の有効化で励磁できなかったモータ (ロボット名 -> モータ名)。
-        # 送信失敗もフィードバック待ちの失敗もここへ集約し、`safety` に載せて配信する。
         # **緊急停止で消さない。** 停止中に報告を止めるのは `_unenergized_motors` の
         # 緊急停止ガード 1 箇所の役目で、こちらでも消すと「壊しても落ちない層」が
-        # 増えるだけになる (どちらか片方を消しても症状が出ないので、後で誰かが
-        # 本物のガードの方を消しても気付けない)
+        # 増えるだけになる
         self._inactive_motors: dict[str, list[str]] = {}
         # 緊急停止解除の再励磁タスク。解除ハンドラはこれを待たずに返る (待つと
         # その操縦者の WS が数秒間 1 通も処理しなくなる)。GC で消えないよう
         # 参照を保持する — 取りこぼすと、再励磁が途中で消えたことに誰も気付けない
         self._reactivate_tasks: set[asyncio.Task[None]] = set()
-        # 単発の再励磁コマンド (`reenergize_motors`) の実行中タスク。ロボット名 →
-        # タスクで、同じロボットへの二重投入を防ぐ (in-flight のまま次の押下が来ると
-        # 同じバスへ `activate_motors` が 2 重に走り、フィードバック待ちが競合する)
+        # 単発の再励磁コマンド (`reenergize_motors`) の実行中タスク。同じロボットへの
+        # 二重投入を防ぐ (in-flight のまま次の押下が来ると同じバスへ `activate_motors`
+        # が 2 重に走り、フィードバック待ちが競合する)
         self._reenergize_tasks: dict[str, asyncio.Task[None]] = {}
         # `watch_task` が拾った、投げっぱなしタスクの失敗ラベル (ロボット名 → 在庫)。
-        # 先行事例は `BusHealthInfo.rx_down_episodes` —— journal にしか出ていなかった
-        # 異常を画面へ出す形をそのまま踏襲する。**復帰しても消さない。リセットは
-        # `_handle_match_start` の前縁リセットだけ**(`can_manager.reset_rx_down_episodes()`
-        # の隣にある)。黙って消えると、直る前に流し見た操縦者は失敗が起きたこと
-        # 自体に気付けない
+        # **復帰しても消さない。リセットは `_handle_match_start` の前縁リセットだけ。**
+        # 黙って消えると、直る前に流し見た操縦者は失敗が起きたこと自体に気付けない
         self._failed_tasks: dict[str, deque[str]] = {}
-        # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる。
-        # 実機運用時は False のまま影響しない。
+        # dry-run 時はモータ状態とヘルスを擬似的に揺らがせて Web UI の描画を成立させる
         self._dry_run: bool = dry_run
-        # 開発用コマンド (指差喚呼の一括チェック等) の解禁。試合運用の手順を飛ばすので
-        # 既定は False で、起動時に明示したときだけ立つ。UI へは server_info で配る
+        # 開発用コマンドの解禁。試合運用の手順を飛ばすので既定は False で、起動時に
+        # 明示したときだけ立つ。UI へは server_info で配る
         self._dev_tools: bool = dev_tools
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
-        # 試合全体の状態 (コート / フェーズ / チェックリスト)。
-        # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く。
+        # 操縦者 2 名 + Monitor が別ブラウザで接続するため正はサーバー側に置く
         self.match = MatchState(definitions=checklist_definitions, settings=match_settings)
 
-        # ヘルスチェックしきい値は config/system.yaml の health セクション由来。
         # 4 値を分解せず 1 つの値のまま持つ (config_schema.HealthThresholds 参照)
         self._health = health
-        # 直近の HealthSnapshot をロボット名で保持し、_diff_health で前回と比較する
         self._last_health: dict[str, HealthSnapshot] = {}
 
-        # アクチュエータ動作確認 (lib/server_motor_check.py)。**両ハンドを 1 本の
-        # シーケンスで順に駆動する** (sequences/motor_check.py)。機体ごとに独立した確認だと
-        # 2 つを同時に起動でき、可動域の重なる位置で干渉しうる。
         # 環境側の条件 (フェーズ・緊急停止・各ロボットの制御権) だけをここから渡し、
-        # 起動・中断・配信はあちらが持つ
+        # 起動・中断・配信は MotorCheckController が持つ
         self._motor_check = MotorCheckController(
             environment_deny=self._motor_check_environment_deny,
             pausables=self._motor_check_pausables,
@@ -249,8 +216,6 @@ class RobotServer:
         メソッド名を変えても静的には何も検出されない。起動もするが、操縦者が
         そのボタンを押した瞬間に ``AttributeError`` になる —— 試合中に初めて
         分かる壊れ方で、しかも拒否通知も出ないので画面から原因が読めない。
-        ``CommandSpec`` がゲート方針を必ず宣言させているのと同じで、ハンドラ名の
-        実在確認はその宣言の完結にあたる。
         """
         missing = [
             f"{spec.name} -> {spec.handler}"
@@ -264,12 +229,10 @@ class RobotServer:
 
     @property
     def dev_tools(self) -> bool:
-        """開発用コマンドが解禁されているか。コマンドゲートと server_info が参照する。"""
         return self._dev_tools
 
     @property
     def _reactivating(self) -> bool:
-        """緊急停止解除の再励磁が進行中か。"""
         return any(not task.done() for task in self._reactivate_tasks)
 
     @property
@@ -284,12 +247,10 @@ class RobotServer:
     def robot_names(self) -> tuple[str, ...]:
         """登録済みロボット名 (登録順)。
 
-        `main.py` は `_robots` へ (private なので) 触れないが、全体緊急停止
-        (`activate_e_stop`) の失敗をどのロボットへも帰属させたい —— 同期ずれ検出は
-        1 台の軸から起きても、失敗すれば「そのとき実際にどのロボットも保護されて
-        いない」ので、`_reactivate_motors` の失敗を全ロボットへ帰属させるのと
-        同じ理由になる。`CANManager.bus_names` と同じ形 (書き換え可能な list を
-        渡さない) にする。
+        全体緊急停止 (`activate_e_stop`) の失敗はどのロボットへも帰属させる ——
+        同期ずれ検出は 1 台の軸から起きても、失敗すれば「そのとき実際にどのロボットも
+        保護されていない」ため。`CANManager.bus_names` と同じく書き換え可能な list を
+        渡さない。
         """
         return tuple(self._robots)
 
@@ -298,22 +259,18 @@ class RobotServer:
     ) -> None:
         """投げっぱなしタスク (``asyncio.create_task`` して待たないもの) の失敗を拾う。
 
-        `done_callback` が集合から取り除くだけで `t.exception()` を取らない箇所が
-        3 つある (緊急停止解除の再励磁・単発の再励磁・同期ずれ検出からの全体緊急停止)。
         ここで拾わないと CPython の "Task exception was never retrieved" しか残らず、
         どのロボットのどの経路か・いつ起きたかが読めない (しかも出力は GC のタイミング
-        任せ)。`t.exception()` を取るのでその行は出ず、journal で追うときに探すのは
-        下の "投げっぱなしタスクが失敗しました" である。加えて `safety.failed_tasks`
-        として配信し、対象ロボットへ人が読めるラベルで積む (journal にしか出ない報告は
+        任せ)。journal で追うときに探すのは "投げっぱなしタスクが失敗しました"。
+        加えて `safety.failed_tasks` として配信する (journal にしか出ない報告は
         試合中に誰も見ない)。
 
         呼び出し側の `add_done_callback` (GC 対策で参照を保持する集合) は消さない。
-        ここは done_callback を**追加**するだけで、既存の集合管理とは独立に動く。
 
         **`t.cancelled()` を必ず先に見る。** `Task.exception()` はキャンセル済み
         タスクに対して `CancelledError` を送出するので、見ないと shutdown の
-        一斉キャンセル (`_shutdown_step` 等) でこのコールバック自身が例外を撒く。
-        キャンセルは「タスクが失敗した」ではなく「後始末に畳まれた」なので報告しない。
+        一斉キャンセルでこのコールバック自身が例外を撒く。キャンセルは「失敗」では
+        なく「後始末に畳まれた」なので報告しない。
         """
 
         def _on_done(t: asyncio.Task[None]) -> None:
@@ -375,12 +332,10 @@ class RobotServer:
 
     def create_app(self) -> web.Application:
         app = web.Application()
-        # ヘルスエンドポイントは静的ファイル SPA フォールバック (`/{path:.*}`) より先に
-        # 登録する必要がある。先に SPA ルートを登録すると `/health` が index.html に
-        # 吸い込まれて 200 HTML になり、監視ツールが誤判定する。
+        # SPA フォールバック (`/{path:.*}`) より先に登録する。逆順だと `/health` が
+        # index.html に吸い込まれて 200 HTML になり、監視ツールが誤判定する
         app.router.add_get("/health", self._health_handler)
         app.router.add_get("/ws", self._ws_handler)
-        # 動作確認エンドポイントも SPA フォールバックより前に登録する。
         # 両ハンド統合の 1 本なので robot を取らない
         app.router.add_post("/motor_check", self._motor_check_post)
         app.router.add_get("/motor_check", self._motor_check_get)
@@ -404,10 +359,7 @@ class RobotServer:
         return web.FileResponse(_WEB_DIST_DIR / "index.html")
 
     async def _health_handler(self, request: web.Request) -> web.Response:
-        """GET /health: 全ロボットの HealthSnapshot を集約し、最悪値で 200/503 を決める。
-
-        CI・監視ツール・curl 動作確認用。WS が使えない環境向けの代替経路。
-        """
+        """GET /health: WS が使えない環境 (CI・監視ツール・curl) 向けの代替経路。"""
         robots_payload: dict[str, dict] = {}
         overalls: list[BusHealth] = []
         for robot_name in self._robots:
@@ -433,9 +385,7 @@ class RobotServer:
         self._energize_expected_since = time.time()
         self._server_started_at = time.time()
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
-        # 各ロボットのシーケンス常駐ループを起動。停止/ジャンプで再起動可能な
-        # 永続タスクとして保持し、shutdown でキャンセルする。
-        # ループ本体 (開始要求待ち・停止後の巻き戻し) はシーケンス側の責務。
+        # 停止/ジャンプで再起動可能な永続タスクとして保持し、shutdown でキャンセルする
         for robot_name, ctx in self._robots.items():
             self._sequence_tasks[robot_name] = asyncio.create_task(ctx.sequence.run_forever())
 
@@ -470,16 +420,12 @@ class RobotServer:
         self._ws.add(ws)
         logger.info("WebSocket 接続: %s", request.remote)
 
-        # server_info と match_state と motor_check_state は接続直後にしか送らない。
-        # server_info は起動オプション由来で試合中に変わらないため定期配信に載せず、
-        # 残り 2 つは変化時のみ配信するのでスナップショットが要る
-        # (これがないとリロード直後のクライアントが現在のモード/フェーズを知れず、
-        # 動作確認の実行中に繋いだ画面は「未実行」を出したまま止まる)。
-        #
-        # **この 3 通も `WsHub.send_or_drop` を通す。** 生の `send_str` は相手が読まなく
-        # なると無期限に待つので、スリープに入りかけたノート PC が 1 台繋いだだけで
-        # この接続ハンドラが返らなくなり、`finally` の切り離しも
-        # 走らない (配信ループは `ws.closed` にならない相手へ送り続ける)。
+        # この 3 通は接続直後にしか送らない (server_info は起動オプション由来で不変、
+        # 残り 2 つは変化時のみ配信するのでスナップショットが要る。無いとリロード
+        # 直後のクライアントが現在のモード/フェーズを知れず、動作確認の実行中に
+        # 繋いだ画面は「未実行」を出したまま止まる)。
+        # **この 3 通も `WsHub.send_or_drop` を通す** (生の `send_str` は相手が読まなく
+        # なると無期限に待ち、接続ハンドラが返らず `finally` の切り離しも走らない)
         for snapshot in (
             self._server_info_dict(),
             self.match.to_dict(),
@@ -511,13 +457,9 @@ class RobotServer:
 
         開発用ボタンの表示可否をクライアント側のビルド時定数で決めると、同じ
         `web/dist` を配る本番と開発で再ビルドが要る (= 切り替えとして機能しない)。
-        正はサーバーが持ち、UI は配られた値を表示に反映するだけにする。
-
-        温度しきい値も同じ性質 (config 由来で試合中には変わらない) なのでここに載せる。
-        UI が独自のしきい値を持つと、config を変えても画面の判定だけが古い値のまま残り、
-        同じモータについてサーバーと UI が違う答えを出す。載せるのは UI が温度の色分けに
-        使う 2 値だけで、使わない値は配らない (配ると「配られているのだから使ってよい」
-        という別の写しの根拠になる)。
+        温度しきい値も同じ性質なのでここに載せる —— UI が独自のしきい値を持つと、
+        config を変えても画面の判定だけが古い値のまま残る。載せるのは UI が色分けに
+        使う 2 値だけで、使わない値は配らない (配ると別の写しの根拠になる)。
         """
         return {
             "type": "server_info",
@@ -550,26 +492,12 @@ class RobotServer:
             logger.debug("未知のコマンド: %s", data.get("type"))
             return
 
-        # ゲートは 5 段。開発用ゲート (この起動にそのコマンドが存在するか) が最初で、
-        # 次にフェーズゲート (試合進行として許されるか)、通ったものだけ緊急停止ゲート
-        # (今モータを動かしてよいか) に掛ける。フェーズが MATCH のままでも緊急停止中は
-        # START を通してはならず、match_start は READY で受理されうるのでフェーズ遷移より
-        # 手前で止める。開発用ゲートを先頭に置くのは、無効な起動での拒否理由が
-        # 「フェーズが違う」ではなく「この起動には無い機能」であるべきだから。
-        # 最後に手動操縦ゲート (対象ロボットが手動モードなら塞ぐ)。手動 → シーケンス
-        # 復帰の入口は 2 つあり、`_apply_operation_mode` は手動へ入る側で
-        # `_stop_sequence` により制御権を奪うが、**手動に入った後に届く
-        # sequence_start / sequence_jump / trigger を弾く経路がここまで無かった**
-        # (CommandSpec にモードゲートの概念自体が無く、`_manual_target` の判定は
-        # 逆方向 = 手動指令がシーケンスモード中に来た場合しか見ていなかった)。
-        # 手動とシーケンスは同じ `AxisHandle.set_target_value` を通るため、
-        # 塞がないとジョグ中の軸へシーケンスが別の目標値を書きに来る。
-        # 最後が再励磁ゲート (対象ロボットの励磁を今書き換えている最中か)。手動と
-        # 同じ衝突がシーケンス側にもある —— 再励磁の `activate_motors` が書く
-        # 「フォルト前の現在角」が `move_to` の目標を上書きすると、`wait_reached` は
-        # 動かない位置を見続けて `SequenceTimeoutError` で止まる。**塞ぐのは
-        # この向きだけ**で、逆 (シーケンス実行中の再励磁) は通す (理由は
-        # `CommandSpec.blocked_during_reenergize`)。
+        # ゲートは 5 段で、順序に理由がある。開発用ゲートが先頭なのは、無効な起動での
+        # 拒否理由が「フェーズが違う」ではなく「この起動には無い機能」であるべきだから。
+        # 緊急停止ゲートはフェーズ遷移より手前 —— フェーズが MATCH のままでも停止中は
+        # START を通してはならず、match_start は READY で受理されうる。
+        # 手動操縦ゲートと再励磁ゲートの理由は docs/invariants.md の
+        # 「制御権の奪い合いは両方向を塞ぐ」「再励磁は片方向しか塞がない」。
         deny = spec.dev_tools_deny_reason(self._dev_tools)
         if deny is None:
             deny = spec.phase_deny_reason(self.match.phase)
@@ -592,9 +520,7 @@ class RobotServer:
         except Exception as exc:
             # **ここは `_ws_handler` の受信ループから await されている。** 抜けさせると
             # `async for msg in ws` ごと降り、その操縦者は画面から何も送れなくなる
-            # (試合中なら E-STOP を押す手段まで失う)。握りをディスパッチ 1 箇所に
-            # 置けば、コマンドを足す人が同じ握りを書き写す必要が無くなる。
-            # 拒否経路はそのコマンドが宣言したものを使う (動作確認だけは専用チャネル)
+            # (試合中なら E-STOP を押す手段まで失う)
             logger.exception("コマンド処理に失敗: %s", spec.name)
             await self._reject_by_channel(
                 spec, data, requester, f"コマンドの処理に失敗しました ({exc})"
@@ -616,14 +542,9 @@ class RobotServer:
     def _manual_mode_deny_reason(self, spec: CommandSpec, data: dict) -> str | None:
         """spec が手動操縦ゲートの対象で、かつ対象ロボットが今手動モードなら理由を返す。
 
-        `CommandSpec.manual_deny_reason()` は「このコマンドをゲート対象にしたか」
-        しか知らない (ロボットごとの `OperationMode` は `RobotContext` が持つため)。
-        ここで data["robot"] から実際のモードを引いて掛け合わせる。
-
         ロボット名が無い・未知・見つからない場合は素通しする (deny しない) —
-        既存のハンドラ側 (`if robot_name and robot_name in self._robots:`) が
-        同じ条件で silent ignore しており、ここで先取りして拒否理由を返すと
-        「未知のロボット」という別の失敗が「手動操縦中」の理由で覆い隠される。
+        ハンドラ側が同じ条件で silent ignore しており、ここで先取りして拒否理由を
+        返すと「未知のロボット」という別の失敗が「手動操縦中」の理由で覆い隠される。
         """
         reason = spec.manual_deny_reason()
         if reason is None:
@@ -639,12 +560,8 @@ class RobotServer:
     def _reenergize_deny_reason(self, spec: CommandSpec, data: dict) -> str | None:
         """spec が再励磁ゲートの対象で、かつ対象ロボットの再励磁が今 in-flight なら理由を返す。
 
-        `_manual_mode_deny_reason` と同じ形 —— `CommandSpec` は「ゲート対象にしたか」
-        しか知らず、ロボットごとの在飛状態はサーバーが `_reenergize_tasks` から引く。
-        ロボット名が無い・未知なら素通しするのも同じ理由 (未知のロボットという別の
-        失敗を、別の理由文で覆い隠さない)。
-
-        **未知の名前は `_is_reenergizing` へ渡す前に落とす。** あちらは緊急停止解除の
+        ロボット名が無い・未知なら素通しするのは `_manual_mode_deny_reason` と同じ理由。
+        **未知の名前は `_is_reenergizing` へ渡す前に落とす** —— あちらは緊急停止解除の
         再励磁をロボット名に依らず True で答えるので、素通しの判断をあちらへ預けると
         在飛中だけ未知の名前が「再励磁の処理中」で拒否され、素通しの性質が消える。
         """
@@ -666,13 +583,9 @@ class RobotServer:
         タスクの持ち方を変えたときに一部だけが古い判定のまま残り、**塞いだつもりの
         経路だけが素通りする**。
 
-        **緊急停止解除の再励磁 (`_reactivate_motors`) もここに含める。** 単発再励磁と
-        同じ `activate_motors`「現在角を書いてから enable」を打つので、
-        `blocked_during_reenergize` が防ぎたい害 —— `move_to` が書いた目標をフォルト
-        前の現在角が上書きし、`wait_reached` が動かない位置を見続ける —— は両者で
-        同型である。在飛判定が 2 系統に分かれているのは実装の都合であって、
-        呼び出し側から見た「今励磁し直している」は 1 つ。あちらは全ロボットぶんを
-        まとめて処理するので、**ロボット名に依らず True で正しい**。
+        **緊急停止解除の再励磁 (`_reactivate_motors`) もここに含める** ——
+        防ぎたい害が同型だから (docs/invariants.md「再励磁は片方向しか塞がない」)。
+        あちらは全ロボットぶんをまとめて処理するので、ロボット名に依らず True。
         """
         if self._reactivating:
             return True
@@ -713,18 +626,13 @@ class RobotServer:
         # ここで待つとそのあいだ次の 1 通が処理されない。フィードバックの返らない
         # モータは 1 台 0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を
         # 押した状況 —— では数秒に達し、**E-STOP の押し直しすら効かなくなる**。
-        # 進捗は `safety.unenergized_motors` として配信され続ける。
-        #
-        # **前回の解除の再励磁を畳むのもここではない** (`_reactivate_motors` の冒頭
-        # が持つ)。畳み込みは最悪 `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つので、ここへ
-        # 置くとすぐ上の理由がそのまま当てはまり、自分でこの性質を破ることになる。
-        # 単発再励磁の畳み込み (`_settle_pending_reenergize`) がハンドラではなく
-        # `_reactivate_motors` の中から呼ばれているのと同じ形に揃えてある
+        # **前回の解除の再励磁を畳むのもここではない** (`_reactivate_motors` の冒頭)
+        # —— 畳み込みは最悪 `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つので、ここへ置くと
+        # 同じ理由がそのまま当てはまる
         task = asyncio.create_task(self._reactivate_motors())
-        # GC で消えないよう参照を保持する (WsHub の切り離しタスクと同じ形)
+        # GC で消えないよう参照を保持する
         self._reactivate_tasks.add(task)
         task.add_done_callback(self._reactivate_tasks.discard)
-        # このタスクは全ロボットぶんまとめて 1 本 (ロボットを順に処理する)。
         # 失敗したときはそのとき実際にどのロボットも励磁されていないので、
         # 全ロボットへ帰属させる
         self.watch_task(task, context="緊急停止解除の再励磁", robots=self.robot_names)
@@ -765,13 +673,10 @@ class RobotServer:
         self._reenergize_tasks[robot_name] = task
         # 単発の再励磁は対象ロボット 1 台ぶんなので、失敗の帰属もその 1 台だけ
         self.watch_task(task, context="再励磁", robots=[robot_name])
-        # 完了とこのコールバックの実行のあいだには `call_soon` 1 回ぶんの窓がある。
-        # そこへ次の押下が入ると (在飛ガードは `not task.done()` なので通る) 同じ
-        # キーへ新しいタスクが載るため、**無条件に pop すると新しいタスクの登録ごと
-        # 消える** —— `_is_reenergizing` が False を返し、二重投入・シーケンス系
-        # ゲート・動作確認の排他がまとめて外れる。識別子を見て自分自身のときだけ
-        # 取り除く。なお辞書はロボット名で上書きされるので、この掃除が無くても
-        # 溜まるのは 1 ロボット 1 エントリだけである (窓が狭くテストは持っていない)
+        # 完了とこのコールバックの実行のあいだには `call_soon` 1 回ぶんの窓があり、
+        # そこへ次の押下が入ると同じキーへ新しいタスクが載る。**無条件に pop すると
+        # 新しいタスクの登録ごと消える** —— `_is_reenergizing` が False を返し、
+        # 二重投入・シーケンス系ゲート・動作確認の排他がまとめて外れる
         task.add_done_callback(
             lambda t, name=robot_name: (
                 self._reenergize_tasks.pop(name, None)
@@ -781,7 +686,6 @@ class RobotServer:
         )
 
     async def _cmd_health_check(self, _data: dict, _requester: WSOrNone) -> None:
-        # クライアントからの即時ヘルス要求。次回ループを待たずに即配信する。
         await self._broadcast_state()
 
     async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone) -> None:
@@ -894,9 +798,6 @@ class RobotServer:
                     f"'{robot_name}' は手動操縦に対応していません (位置定数が未読込)",
                 )
                 return False
-            # 二重起動の判定と同じく実行タスクの生死で見る。シーケンスの is_running は
-            # タスク生成から run() 開始までのあいだ False で、そこを素通しすると
-            # 駆動中の動作確認と手動指令が同じモータを奪い合う。
             # **動作確認は両ハンドを 1 本で駆動する**ので、どちらのロボットを手動へ
             # 移そうとしても拒否する (片方だけ許すと確認の途中で干渉する)
             if self._motor_check.running:
@@ -938,12 +839,10 @@ class RobotServer:
         半自動運転中でも通る経路になる。
 
         **このロボットの再励磁が in-flight なら拒否する。** `reenergize_motors` は
-        手動操縦中も意図的に塞がない (`lib/commands.py`) ので、手動へ「入る」ときの
-        ガード (`_apply_operation_mode`) だけでは、既に手動中のロボットへ再励磁を
-        かけた最中に届くジョグを塞げない。ジョグは再励磁の `activate_motors` が
-        書く「フォルト前の現在角」目標と同じモータへ競合しうる (敵対的レビュー指摘。
-        3 コマンド共通のこの関門に置くのは、ハンドラごとに書くと足し忘れる経路が
-        できるのを避けるため)。
+        手動操縦中も意図的に塞がないので、手動へ「入る」ときのガード
+        (`_apply_operation_mode`) だけでは、既に手動中のロボットへ再励磁をかけた
+        最中に届くジョグを塞げない (ジョグは `activate_motors` が書く「フォルト前の
+        現在角」目標と同じモータへ競合する)。
         """
         robot_name = data.get("robot")
         if not isinstance(robot_name, str) or robot_name not in self._robots:
@@ -1047,13 +946,8 @@ class RobotServer:
             logger.info("試合終了")
             self._stop_all_sequences()
             # 実周期の集計をここで 1 行残してから 0 に落とす。リセット点を
-            # match_start だけにすると集計窓が [試合N開始, 試合N+1開始) になり、
-            # 試合後の finished・match_reset・次のセッティングタイム・両ハンドを
-            # 一巡する動作確認 (まさに乱れの発生源) が丸ごと混ざって、1 行が
-            # 「試合 N の集計」を名乗れなくなる。しかもその日の最後の試合は
-            # 次の match_start が来ないので永久に journal へ出ない —— 一番読みたい
-            # 1 試合が抜ける。試合の終わりを決めるのは操縦者の match_finish なので、
-            # 「試合 N ぶん」の境界もここにしかない。
+            # match_start だけにすると窓が「試合 + その後の準備時間」になり、
+            # しかもその日の最後の試合が永久に journal へ出ない
             for ctx in self._robots.values():
                 for task in self._periodic_tasks(ctx):
                     task.log_jitter_summary()
@@ -1076,25 +970,17 @@ class RobotServer:
     def _motor_command_state(self, robot_name: str, motor_name: str) -> dict[str, object]:
         """PC が基板へ最後に送った指令値と、その種別。一度も送っていなければ None。
 
-        **フィードバックを持たないモータ (DC 基板・電磁弁基板) に対する唯一の
-        「今どうなっているか」である。** どちらも測る手段を持たないので配信の 4 値は
-        すべて `None` になり、指令まで出さないと画面はそのモータについて何も言えない。
-
-        **M3508 位置制御ループが持つ *軌道の中間目標* と混ぜてはならない。**
-        あちらは速度・加速度で制限しながら毎周期動く値で、こちらは *PC が基板へ
-        最後に送った値そのもの* である (`GenericTargetRefresher` が 20Hz で
-        再送し続けているのはこの値)。1 つに畳むと、「今どこを狙っているか」と
-        「何を指令したか」が同じ欄の中で入れ替わる。
+        フィードバックを持たないモータ (DC 基板・電磁弁基板) に対する唯一の
+        「今どうなっているか」。**M3508 位置制御ループの *軌道の中間目標* と
+        混ぜてはならない** (docs/invariants.md「測れない項目は配信の境界で…」)。
 
         出どころは ``MotorHandle`` ただ 1 つで、手動・シーケンス・動作確認の
-        どの経路から出した指令も同じハンドルを通る (`main._wire_one_robot` が
-        `MotorGroup` を 1 つだけ作って共有している)。緊急停止では
-        `GenericTargetRefresher.clear_targets()` がハンドルの目標ごと捨てるので、
-        **停止中の DC 基板・電磁弁基板は `None` に戻る** —— 停止しているのに
-        `→0.30` と出ていたら、操縦者は「まだ出し続けている」と読む。
+        どの経路から出した指令も同じハンドルを通る。緊急停止では
+        `GenericTargetRefresher.clear_targets()` が目標ごと捨てるので **停止中は
+        `None` に戻る** —— 停止しているのに `→0.30` と出ていたら、操縦者は
+        「まだ出し続けている」と読む。
 
-        位置定数を読めていないロボット (`has_motors` が False) と、
-        `MotorGroup` に居ないモータは `None` へ倒す (ヘルスや配信を落とさない)。
+        位置定数を読めていないロボットと `MotorGroup` に居ないモータは `None`。
         """
         sequence = self._robots[robot_name].sequence
         if not sequence.has_motors:
@@ -1139,18 +1025,16 @@ class RobotServer:
     def _periodic_tasks(ctx: RobotContext) -> tuple[PeriodicTask, ...]:
         """1 ロボットぶんの周期タスク全部 (実周期の集計とリセットはこの単位で回す)。
 
-        3 種を並べる箇所が match_start / match_finish の 2 つあるので、1 つに
-        まとめておく —— 別々に書くと、4 種目の周期タスクが増えたときに片方だけが
-        古いまま残り、症状は「その試合の集計にだけ 1 本足りない」になる。
+        並べる箇所が match_start / match_finish の 2 つあるので 1 つにまとめておく
+        —— 別々に書くと、4 種目が増えたときに片方だけ古いまま残る。
         """
         return (*ctx.position_loops, *ctx.sync_monitors, *ctx.target_refreshers)
 
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
         # **動作確認の実行中は試合に入れない。** フェーズが MATCH になると
-        # sequence_start が解禁され、両ハンドを一巡している統合動作確認と通常
-        # シーケンスが同じアクチュエータへ同時に指令を出す。ここで `abort()` へ
-        # 倒さないのは、操縦者が意図していない中断より拒否のほうが安全だから
-        # (止めたければ motor_check_abort が別にある)
+        # sequence_start が解禁され、統合動作確認と通常シーケンスが同じアクチュエータへ
+        # 同時に指令を出す。`abort()` へ倒さないのは、意図していない中断より拒否の
+        # ほうが安全だから (止めたければ motor_check_abort が別にある)
         if self._motor_check.running:
             await self._reject_command(
                 requester, "match_start", "動作確認の実行中は試合を開始できません"
@@ -1169,22 +1053,18 @@ class RobotServer:
         # 開始直前にもう一度流し込む (取りこぼすとシーケンスが逆コートの分岐で動く)
         self._apply_court()
 
-        # 試合単位でリセットする 2 つ。ここは**前縁リセット** —— 準備中 (配線確認・
-        # 動作確認) に踏んだぶんを洗い流し、試合中の数字を「この試合で起きたこと」
-        # だけにする。match_reset ではなく match_start なのは、finished (結果確認中)
-        # に直前の試合の記録を消さないため。CANManager も PeriodicTask も「試合」を
-        # 知らないぶん、いつ呼ぶかはここ (サーバー) が決める。
-        # ジッタの集計 1 行は match_finish が出すので、ここでは黙って 0 に戻すだけ。
+        # **前縁リセット** —— 準備中 (配線確認・動作確認) に踏んだぶんを洗い流し、
+        # 試合中の数字を「この試合で起きたこと」だけにする。match_reset ではなく
+        # match_start なのは、finished (結果確認中) に直前の試合の記録を消さないため。
+        # ジッタの集計 1 行は match_finish が出すので、ここでは 0 に戻すだけ
         for ctx in self._robots.values():
             ctx.can_manager.reset_rx_down_episodes()
             for task in self._periodic_tasks(ctx):
                 task.reset_jitter_stats()
 
-        # `watch_task` が積んだ失敗ラベルも同じく前縁リセット。**ロボットごとに pop
-        # せず辞書ごと落とす** —— `watch_task` の `robots` に未登録の名前が渡ると、
-        # そのエントリは `_safety_state` からも読まれず (画面に出ず) リセットもされない
-        # ままになる。現在の呼び出し口は 3 つとも登録済み名なので到達しないが、
-        # clear() にしておけば構造的に閉じる
+        # 失敗ラベルも同じく前縁リセット。**ロボットごとに pop せず辞書ごと落とす**
+        # —— `watch_task` の `robots` に未登録の名前が渡ると、そのエントリは
+        # `_safety_state` からも読まれずリセットもされないままになる
         self._failed_tasks.clear()
 
         # フェーズを進めるだけで機体は動かさない。動き出すのは各操縦者の sequence_start から
@@ -1198,10 +1078,8 @@ class RobotServer:
         同期監視のような内部の異常検知も、操縦者が押した場合と完全に同じ順序で
         停止させる必要がある (停止経路が 2 つあると片方だけ穴が空く)。
         既に停止中に再度呼ばれても、状態を壊さず停止指令を送り直すだけで済む。
-
-        Args:
-            reason: 停止理由。試合中に「なぜ止まったか」が操縦者に伝わらないと
-                復旧できないため、ログと WS 配信の両方に載せる。
+        `reason` はログと WS 配信の両方に載せる (試合中に「なぜ止まったか」が
+        操縦者に伝わらないと復旧できない)。
         """
         logger.warning("緊急停止発動: %s", reason or "操縦者コマンド")
         self._e_stop_active = True
@@ -1212,10 +1090,10 @@ class RobotServer:
             self._e_stop_reason = reason
         # 動作確認はタスク生成から run() 開始までのあいだ is_running=False の窓を
         # 持つ。そこを条件にすると起動しかけの動作確認だけが停止をすり抜けるため、
-        # 状態を見ずに中断を要求する (要求は `_stop_event` に残り、run() が捨てない)
+        # 状態を見ずに中断を要求する
         self._motor_check.abort()
-        # ジョグの起点を捨てる。停止中に機構が自重で下がっていた場合、解除後の
-        # 1 回目のジョグが古い起点から飛ぶ。停止フレームの送信より前に行うのは、
+        # ジョグの起点を捨てる (停止中に機構が自重で下がっていると、解除後の
+        # 1 回目のジョグが古い起点から飛ぶ)。停止フレームの送信より前に行うのは、
         # 送信が丸ごと失敗しても必ず捨てさせるため
         for ctx in self._robots.values():
             if ctx.manual is not None:
@@ -1274,32 +1152,22 @@ class RobotServer:
             # 目標を残すと、解除した瞬間に再送が走って操縦者の操作なしに動き出す
             for refresher in ctx.target_refreshers:
                 refresher.clear_targets()
-        # ループの後に 1 行だけ。ロボットの数だけ並べても読み手が得るのは
-        # 「全機ぶん流し終えた」の 1 事実で、どれが失敗したかは上の
-        # `logger.exception` がロボット・バス単位で既に言っている。
         # **「試行」を落としてはならない** —— このループは送信失敗を握ったまま
         # 先へ進むので、1 通も届いていなくてもこの行は出る。「完了」と書くと
-        # 緊急停止が実際に効いたと読めてしまう (緊急停止のログは、読み手が
-        # 最も強く事実として受け取る行である)
+        # 緊急停止が実際に効いたと読めてしまう
         logger.info("E-STOP 送信試行完了: %s", ", ".join(self._robots) or "対象なし")
 
     async def _send_e_stop_clear_broadcast(self) -> None:
         """全バスへブロードキャストの緊急停止解除フレームを送る。
 
-        **停止と解除は対称でなければならない。** 停止は `_send_e_stop_frames` が
-        `0x0FF` をバスへ流すのでバス上の全基板・全チャンネルがラッチするのに対し、
-        解除は `activation_steps()` が device_id 宛に個別送信するため
-        **yaml に登録されたモータにしか届かない**。PC の管轄外のチャンネル
-        (ベンチ設定で一部だけ動かす / 増設した基板が yaml に無い / 片方のロボット
-        だけ起動する) は永久にラッチされたまま残り、基板の LED は 1 チャンネルでも
-        ラッチがあれば橙になるので **全基板が橙のまま戻らない**。操縦者からは
-        機体が復帰不能に見える。
+        **停止と解除は対称でなければならない** —— 停止の `0x0FF` はバス上の全基板を
+        ラッチするのに、解除が個別送信だけだと yaml 外のチャンネルが永久に残る
+        (docs/invariants.md「停止と解除は対称でなければならない」)。
 
         **ブロードキャストしても機体は動かない。** 停止時に目標値が捨てられており
         (DC は duty 0 / サーボは現在角保持 / 電磁弁は OFF)、ファーム側の
         `MotorSafety::isOutputAllowed()` は `SET_TARGET` を 1 通も受けるまで出力を
-        許可しない (仕様書 §5.4)。物理停止スイッチが押されている間はファームが
-        毎ループ再ラッチするので「押している間は絶対に動かない」も保たれる。
+        許可しない (仕様書 §5.4)。
 
         1 バスの送信失敗で他のバスを諦めないのは停止側と同じ。
         """
@@ -1318,12 +1186,10 @@ class RobotServer:
     def _reset_sync_latches(self) -> None:
         """同期ずれのラッチを解除し、監視を再び有効な状態へ戻す。
 
-        解除は「ずれを無かったことにする」操作ではない。位置制御ループ側の
-        ラッチは電流 0 を維持し続け、``SyncMonitor`` 側のラッチは同じ軸で二度と
-        発報しないという意味を持つため、解除経路が無いままだと「操縦者は復帰した
+        位置制御ループ側のラッチは電流 0 を維持し続け、``SyncMonitor`` 側のラッチは
+        同じ軸で二度と発報しないので、解除経路が無いままだと「操縦者は復帰した
         つもりで、実際には y_axis が動かず rotate が無監視で回る」状態になる。
-        解除後もずれが残っていれば双方が再び検知して緊急停止へ戻すので、
-        ここで外して機構の異常が隠れることはない。
+        解除後もずれが残っていれば双方が再び検知して緊急停止へ戻す。
         """
         for name, ctx in self._robots.items():
             for loop in ctx.position_loops:
@@ -1337,10 +1203,9 @@ class RobotServer:
 
         ラッチ中の軸が分からないと操縦者は復旧手順を選べず、200Hz の位置制御と
         50Hz の同期監視、20Hz の目標値再送が死んだことは配信しない限り誰にも
-        気付けない (WS は繋がったままで、モータ状態も届き続けるため画面は正常に
-        見える)。目標値再送が死ぬと 500ms 後にファームのウォッチドッグが全 generic
-        アクチュエータの出力を落とすため、同じ理由でここに載せる。
-        判定は UI 側で組み立て直させずここに一本化する。
+        気付けない (WS は繋がったままで画面は正常に見える)。目標値再送が死ぬと
+        500ms 後にファームのウォッチドッグが全 generic アクチュエータの出力を
+        落とすため、同じ理由でここに載せる。
         """
         ctx = self._robots[robot_name]
         violations: set[str] = set()
@@ -1357,11 +1222,9 @@ class RobotServer:
             # 古い順に並ぶ (`_FAILED_TASK_BACKLOG` を超えた分は古いものから消える)。
             # 復帰しても消えない —— リセットは `_handle_match_start` の前縁リセットだけ
             "failed_tasks": list(self._failed_tasks.get(robot_name, ())),
-            # 単発の再励磁が処理中か。**押した後の 0.1〜1.5 秒は
-            # `unenergized_motors` が消えない**ので、これが無いと操縦者には
-            # 「押しても何も起きない」ようにしか見えず 2 回目を押す (そして
-            # 「再励磁の処理中です」というトーストを受け取る)。可否も理由も
-            # サーバーが持つ、という原則どおり在飛そのものを配る
+            # **押した後の 0.1〜1.5 秒は `unenergized_motors` が消えない**ので、
+            # これが無いと操縦者には「押しても何も起きない」ようにしか見えず
+            # 2 回目を押す (そして「再励磁の処理中です」を受け取る)
             "reenergizing": self._is_reenergizing(robot_name),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
             "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
@@ -1397,10 +1260,9 @@ class RobotServer:
         """励磁されているべきなのに無励磁のモータ。
 
         **これは「画面が正常に見えるのに機体が動かない」型の異常である。**
-        DM3520 はドライバの通信途絶保護や電源の瞬断で励磁が外れるが、その後も
-        フィードバックは正常に届き、`is_fault()` にも掛からないのでモータのヘルスは
-        OK のまま。PC は 20Hz で位置指令を送り続け、CAN のカウンタにも異常は出ない。
-        操縦者から見えるのは「指令しても動かない」だけで、原因を示す表示がどこにも無い。
+        DM3520 は通信途絶保護や電源の瞬断で励磁が外れるが、その後もフィードバックは
+        正常に届き `is_fault()` にも掛からないので、操縦者から見えるのは
+        「指令しても動かない」だけで原因を示す表示がどこにも無い。
 
         励磁状態を報告しないドライバ (`is_energized()` が None) は対象外。
         「分からない」を「無励磁」へ倒すと、自作モタドラと C620 が常時警告を出す。
@@ -1430,28 +1292,20 @@ class RobotServer:
         """起動の猶予を過ぎても自己申告 (`INFO`) を一度も受けていない自作モタドラ。
 
         **これは「異常」ではなく「焼き忘れ検出が働いていない」ことの報告である。**
-        `INFO` の未受信は FAULT にしない (送信バッファの都合でも起きるため。
-        docs/invariants.md 「送信バッファの本数は基板ごとに違う」節) が、その間は
-        `GenericDriver.info_mismatch` による焼き忘れ検出も一緒に働かなくなる。
-        黙って無効になると誰も気付けないので、ここで別の状態として拾う。
+        理由は docs/invariants.md「送信バッファの本数は基板ごとに違う」。
 
         `INFO` を送らないドライバ (`firmware_confirmed()` が None) は対象外 ——
         M3508 / EDULITE 05 / DM3520 を混ぜると全モータが常時この状態になる。
 
         **フィードバックが途絶えている (STALE) モータも対象外。** 基板が丸ごと
-        落ちていれば `INFO` も当然来ないが、それは `CANManager.health()` が全
-        チャンネルを STALE に倒して `evaluateHealth` が warning として大声で言い、
-        診断ツリーを強制展開する経路が既にある。ここでも言うと同じ事実を 2 度
-        描くことになり、しかも**この報告の手当ては STALE とは別物になる** ——
-        残したいのは「`FEEDBACK` は 10ms で届き続けているのに `INFO` だけが
-        1 通も出ない」という、docs/invariants.md 「送信バッファの本数は基板ごとに違う」節が
-        書く壊れ方だけである。そこで電源・CAN 配線を疑っても必ず何も見つからない
-        (配線が正常だから `FEEDBACK` が来ている)。鮮度のしきい値は
+        落ちていれば `evaluateHealth` が既に warning で主張するので、ここでも言うと
+        同じ事実を 2 度描くうえ、**手当ても逆になる** —— 残したいのは「`FEEDBACK` は
+        10ms で届き続けているのに `INFO` だけが 1 通も出ない」ケースだけで、そこで
+        電源・CAN 配線を疑っても何も見つからない。鮮度のしきい値は
         `HealthThresholds` から来た 1 つだけを使い、ここに別名の値を置かない。
 
         **dry-run は対象外。** virtual バスは `INFO` を 1 通も返さないので、猶予を
-        過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
-        なる (`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由)。
+        過ぎれば全自作モタドラが恒久的に「未確認」になる。
 
         **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
         (仕様書 §5.2) が、現状 `main.py` はセンサを `expected_firmware` なしに
@@ -1490,40 +1344,18 @@ class RobotServer:
         まだ解除フレームが届いていない基板のフィードバックを「解除後の報告」として
         信じてしまい、解除した瞬間にサーバーが自分で止め直す。
 
-        **自作モタドラのラッチ解除は励磁より先に、全ロボットぶんまとめて行う。**
-        励磁の中断 (`should_abort`) はロボットを順に処理するので、1 台目の最中に
-        緊急停止が再び入ると 2 台目へは解除フレームが 1 通も飛ばない。ラッチの
-        外れない基板は緊急停止ビットを報告し続け、それを `_detect_board_e_stop` が
-        拾って停止を再発動するため、**解除操作のたびに同じロボットだけが
-        取り残されて永久に復帰できなくなる**。ラッチ解除は
-        それ自体では機体を動かさないので中断する理由が無い (根拠は
-        `CANManager.clear_e_stop_latches`)。
-
-        解除は 3 段になる: ①全バスへブロードキャスト解除 (バス上の全基板。PC の
-        管轄外のチャンネルを救う唯一の経路) → ②管轄内モータへ個別のラッチ解除
-        (中断しない) → ③励磁 (中断あり)。①と②が重なるのは意図的で、①は
-        「バス上の全基板へ届く」ことを、②は「PC が把握しているモータへ確実に
-        届く」ことをそれぞれ担う。
+        解除は 3 段: ①全バスへブロードキャスト解除 → ②管轄内モータへ個別の
+        ラッチ解除 (**中断しない**) → ③励磁 (中断あり)。①②の重複と中断しない
+        理由は docs/invariants.md「停止と解除は対称でなければならない」。
 
         **③の直前に、同じロボットの `_reenergize_motors` が in-flight なら畳む**
-        (`_settle_pending_reenergize`)。両者が同じロボットの `activate_motors` を
-        並走させると、片方の `_wait_fresh_feedback` が送るプローブ
-        (EDULITE 05 / DM3520 とも `feedback_probe_message()` = disable) が、
-        もう片方が enable したばかりのモータへ届く —— DM3520 は disable で
-        自重落下するので、「戻した直後にもう一度落とす」形で
-        `_reenergize_motors` 自身の存在意義を壊す。
-        **①より前に、前回の解除の再励磁が残っていれば畳む**
-        (`_settle_pending_reactivation`)。理由は上と同型 —— 2 本の
-        `_reactivate_motors` が並走しても、片方のプローブがもう片方の enable 直後の
-        モータへ届く。**畳み込みを 2 つともここに置くのは意図的で**、
-        `_cmd_e_stop_release` へ移すと畳み込みが最悪
-        `_PENDING_TASK_CANCEL_TIMEOUT_S` 待つぶんだけ解除の受理が止まり、
-        「解除は再励磁を待たない」性質を自分で破ることになる。
-
-        **解除コマンドの受理そのものは拒否・待機させない** (拒否すると「解除の
-        たびに同じロボットが取り残される」実機事故と同型になる)。ここ
-        (バックグラウンドの再励磁タスク) だけが古いタスクを畳んでから
-        自分の励磁へ進む。
+        (`_settle_pending_reenergize`)。並走させると、片方の `_wait_fresh_feedback`
+        が送るプローブ (EDULITE 05 / DM3520 とも disable) がもう片方の enable した
+        ばかりのモータへ届き、DM3520 は自重落下する。**①より前に、前回の解除の
+        再励磁が残っていれば畳む** (`_settle_pending_reactivation`) のも同型の理由。
+        **畳み込みを 2 つともここに置くのは意図的**で、`_cmd_e_stop_release` へ移すと
+        最悪 `_PENDING_TASK_CANCEL_TIMEOUT_S` ぶん解除の受理が止まり、「解除は
+        再励磁を待たない」性質を自分で破ることになる。
         """
         await self._settle_pending_reactivation()
         await self._send_e_stop_clear_broadcast()
@@ -1567,24 +1399,17 @@ class RobotServer:
         """緊急停止解除の励磁へ進む前に、同じロボットの再励磁タスクを畳む。
 
         **「待つ」ではなく「キャンセルしてから有界に待つ」。** 素の `await pending`
-        では済まない —— **有界なのは `_wait_fresh_feedback` の deadline だけである**。
-        `CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
-        無しで待つので、SocketCAN の送信キューが詰まっていれば `bus.send` は
-        ブロックしうる。そしてそれは `cbc-can-watchdog` が bus-off を疑っている
-        状況、つまり **まさに緊急停止を押した状況**である。素の await のままだと
-        「緊急停止解除の再励磁が無期限に進まない」経路が残る。
-
-        **キャンセルだけでは足りない。** 畳もうとしているコルーチンが
-        `CancelledError` を握り潰して `await` へ戻り続けると、キャンセルは通っても
-        タスクは終わらない。上限を必ず添える。
-        (エグゼキュータのスレッドへ入った `bus.send` 自体は走り続けるが、待っている
-        側の Task は `cancel()` した瞬間に `CancelledError` を受け取る。実測 0.000s)
+        では済まない —— `CANManager.send_to_bus` は `bus.send` をタイムアウト無しで
+        待つので、送信キューが詰まっていればブロックしうる。そしてそれは
+        `cbc-can-watchdog` が bus-off を疑っている状況、つまり**まさに緊急停止を
+        押した状況**であり、素の await だと解除の再励磁が無期限に進まない。
+        キャンセルだけでも足りない (握り潰されるとタスクは終わらない) ので
+        上限を必ず添える。
 
         **待ちきれなくても先へ進む。** この直後に `only=None` で全モータを
-        励磁し直すので、キャンセルで中途半端に残った状態はそこで上書きされる。
-        並走を完全には防げないが、防げないのは「PC が CAN を送れなくなっている」
-        場面に限られ、そこで解除が永久に進まないほうが重い。黙って進まないよう
-        ログには必ず残す。
+        励磁し直すので、中途半端に残った状態はそこで上書きされる。防げないのは
+        「PC が CAN を送れなくなっている」場面に限られ、そこで解除が永久に
+        進まないほうが重い。黙って進まないようログには必ず残す。
         """
         pending = self._reenergize_tasks.get(robot_name)
         if pending is None or pending.done():
@@ -1605,34 +1430,23 @@ class RobotServer:
     async def _settle_pending_reactivation(self) -> None:
         """新しい解除の再励磁を始める前に、前回のぶんを畳む。
 
-        畳み方 (キャンセル → 有界待ち → 待ちきれなくても進む) も、呼び出し位置
-        (ハンドラではなく `_reactivate_motors` の冒頭) も、その理由も
-        `_settle_pending_reenergize` とまったく同じ。違うのは対象だけで、あちらは
-        単発の `reenergize_motors` (ロボット単位)、こちらは緊急停止解除の
-        `_reactivate_motors` (全ロボットまとめて) を見る。**自分自身
-        (`asyncio.current_task()`) は畳む対象から外す** —— `_reactivate_tasks` には
-        呼び出し元のタスクも既に載っているので、外さないと自分をキャンセルして
-        1 通も送らずに降りる。
+        畳み方も呼び出し位置もその理由も `_settle_pending_reenergize` と同じ。
+        違うのは対象だけ (あちらは単発の `reenergize_motors`、こちらは緊急停止解除の
+        `_reactivate_motors`)。**自分自身 (`asyncio.current_task()`) は畳む対象から
+        外す** —— `_reactivate_tasks` には呼び出し元のタスクも既に載っているので、
+        外さないと自分をキャンセルして 1 通も送らずに降りる。
 
-        **踏むのは「解除を 2 連打したとき」ではない。** `_cmd_e_stop_release` は
-        `not self._e_stop_active` を拒否するので、素の 2 連打では 2 本目が立たない。
-        実際に踏むのは **E-STOP → RESET →(同期ずれ検出や操縦者の再押下で)
-        E-STOP → RESET** で、1 本目がまだ `activate_motors` の中にいるあいだに
-        2 本目が立つ。窓が広がるのは応答の無いモータを 1 台 0.5 秒待っている間、
-        つまり CAN が不調なときほど広い。
+        **踏むのは「解除を 2 連打したとき」ではない** (`_cmd_e_stop_release` が
+        停止中でない解除を拒否するので 2 本目が立たない)。実際に踏むのは
+        **E-STOP → RESET → E-STOP → RESET** で、1 本目がまだ `activate_motors` の
+        中にいるあいだに 2 本目が立つ。窓が広がるのは応答の無いモータを 1 台
+        0.5 秒待っている間、つまり CAN が不調なときほど広い。畳み忘れると片方の
+        プローブ (disable) がもう片方の enable 直後のモータへ届き `sub_lift` が落ちる。
 
-        **2 系統あることそのものは実装の都合だが、畳み忘れると症状が出る。**
-        並走した 2 本のうち片方のプローブ (disable) がもう片方の enable 直後の
-        モータへ届くと `sub_lift` が自重で落ち、`_inactive_motors` の書き戻し順に
-        よっては画面だけ「無励磁」が残る。
-
-        **`Task.cancel()` は「ラッチ解除は中断しない」原則 (docs/invariants.md) の例外では
-        ない。** あの原則が禁じているのは、①ブロードキャスト解除 / ②個別ラッチ解除の
-        途中で中断して**取り残されたロボットを残す**ことである。ここでの中断は必ず
-        新しい `_reactivate_motors` が①から先頭でやり直す前提とセットなので、
-        取り残しは生じない —— 逆に、畳まずに並走させるほうが②の後の③で
-        「enable した直後のモータへ disable が届く」形の実害を出す。
-        **この前提に依存しているので、畳んだあとに①②を飛ばす経路を作ってはならない。**
+        **`Task.cancel()` は「ラッチ解除は中断しない」原則の例外ではない。** あれが
+        禁じているのは①②の途中で中断して取り残されたロボットを残すことで、ここでの
+        中断は新しい `_reactivate_motors` が①から先頭でやり直す前提とセットである。
+        **畳んだあとに①②を飛ばす経路を作ってはならない。**
         """
         current = asyncio.current_task()
         pending = {
@@ -1660,11 +1474,8 @@ class RobotServer:
         `CANManager.activate_motors` 自身が持つので、ここでは例外の握り潰しと
         `_inactive_motors` への記録だけを担う。
 
-        ``only`` は `_reenergize_motors` が無励磁のモータだけに絞るための引数。
         **呼び出し側は ``only`` が前回の `_inactive_motors[robot_name]` を包含すること
-        を保証しなければならない** (`_reenergize_motors` の `dropped` は
-        `is_energized() is False` に加えて前回の無効化リストそのものを合併して作る)。
-        この前提のもとでは「今回の対象全員ぶんの結果」として単純に置き換えればよく、
+        を保証しなければならない。** その前提のもとでは結果を単純に置き換えればよく、
         対象外のモータの前回の結果を保つマージは要らない。保証しない呼び出しを
         新たに足す場合はここへマージのロジックを戻すこと。
         """
@@ -1686,72 +1497,41 @@ class RobotServer:
         return inactive
 
     async def _reenergize_motors(self, robot_name: str) -> None:
-        """1 ロボットぶんの再励磁コマンドの実体。**別タスクで走る** (WS ハンドラは
-        `_cmd_reenergize_motors` から投げっぱなしにする — 応答の無いモータで
-        1 台 0.5 秒待つため、直列の `async for msg in ws` 上で await すると
-        その操縦者の WS が数秒間 1 通も処理しなくなる。理由は `_reactivate_motors`
-        と同じ)。
+        """1 ロボットぶんの再励磁コマンドの実体。**別タスクで走る**
+        (応答の無いモータで 1 台 0.5 秒待つため、直列の `async for msg in ws` 上で
+        await するとその操縦者の WS が数秒間 1 通も処理しなくなる)。
 
         **無励磁のモータだけ、先に目標をラッチごと剥がしてから励磁する。**
-        フォルト直前の目標 (`move_to` の行き先) や `QueryDrivenTargetRefresher` の
-        ラッチ済みアイドル目標 (「今の姿勢を保て」) はフォルトで機構が動いたあとも
-        古い値のまま残る。剥がさずに `activate_motors()` で現在角を書いて enable
-        しても、直後の再送 (最大 50ms 後) がその古い値で上書きして enable の瞬間に
-        機構がそこへ動き出す —— 「現在角を目標に書いてから励磁する」保証が
-        1 周期で意味を失う。緊急停止解除がこの問題を持たないのは、停止中ずっと
-        `is_estop_active()` が True で毎周期現在角を測り直しており、古い値が
-        一度も残らないため (`lib/control/target_refresh.py`)。
-        剥がす対象を「無励磁のモータだけ」に絞るのは、同じバスの他モータが
-        移動中なら `wait_reached` を巻き込んで中断させてしまうため
-        (`_TargetRefresherBase.clear_target` 参照)。
+        フォルト直前の目標や `QueryDrivenTargetRefresher` のラッチ済みアイドル目標は
+        フォルトで機構が動いたあとも古い値のまま残るので、剥がさずに現在角を書いて
+        enable しても直後の再送 (最大 50ms 後) がその古い値で上書きし、enable の
+        瞬間に機構がそこへ動き出す。緊急停止解除がこの問題を持たないのは、停止中は
+        毎周期現在角を測り直していて古い値が一度も残らないため。剥がす対象を
+        「無励磁のモータだけ」に絞るのは、同じバスの他モータが移動中なら
+        `wait_reached` を巻き込んで中断させてしまうため。
 
         **励磁も無励磁のモータだけに絞る (`activate_motors(only=...)`)。** 絞らずに
-        全モータを渡すと、EDULITE 05 / DM3520 の `activate_motor` は健全で移動中の
-        モータにも「現在角を書いてから enable」を打ってしまい、動いている軸を
-        一瞬止めて enable し直す形で割り込む (`QueryDrivenTargetRefresher` の
-        次の再送で実目標へ戻るが、その 1 周期のジャークは避けられる理由が無い)。
-        対象は「今無励磁」に加えて「前回の再励磁でも有効化できなかった」モータも含める
-        —— `safety.unenergized_motors` が操縦者に見せている集合と同じにして、
-        起動直後にフィードバックが来ずに有効化へ進めなかったモータも次の押下で
-        リトライできるようにするため。
+        全モータを渡すと、健全で移動中のモータにも「現在角を書いてから enable」を
+        打ってしまい、動いている軸を一瞬止めて enable し直す形で割り込む。対象は
+        「今無励磁」に加えて「前回の再励磁でも有効化できなかった」モータも含める
+        (`safety.unenergized_motors` が操縦者に見せている集合と同じにして、次の
+        押下でリトライできるようにするため)。
 
-        **直結ペア (`rotate` = EDULITE x2) の片側だけが無励磁になった場合、
-        相方も対象へ含める。** ペアの片側だけを剥がして励磁すると、相方が移動中
-        なら「無励磁で連れ回されていた片側」を「相方に逆らって現在角を保持する
-        片側」へ変えるだけになり、直後に `SyncMonitor` の偏差超過で試合が止まる
-        —— 対称に保つ (docs/invariants.md「ペア軸に片側だけ効く操作を作らない」)。
-        `y_axis` (M3508) は `is_energized()` が常に None なのでここには現れず、
-        実質 `rotate` だけが対象になる。相方の `wait_reached` が割り込まれるのは
-        許容する —— そのペアは片側の無励磁で既に破綻していたので、割り込みは
-        「壊れていた」ことの正しい反映であって新たな害ではない。
+        **直結ペアの片側だけが無励磁になった場合、相方も対象へ含める** ——
+        片側だけを剥がして励磁すると、相方が移動中なら直後に `SyncMonitor` の
+        偏差超過で試合が止まる (docs/invariants.md「ペア軸に片側だけ効く操作を
+        作らない」「再励磁のペア展開は…」)。`y_axis` (M3508) は `is_energized()` が
+        常に None なので実質 `rotate` だけが対象になる。
 
-        **ペアを含む再励磁のあいだも `SyncMonitor` は止めない
-        (`suspend_group` を呼ばない)。** 同型の disable → 再 enable を伴う
-        零点確定 (`capture_origin_via_set_zero` / `main._suspend_sync_monitoring`)
-        は止めるので、揃えたくなるが揃えてはならない。止めない理由は 2 つある:
-
-        - **あちらが止めてよい根拠がここには無い。** 零点確定の根拠は「その間
-          モータは無励磁なので、この保護が防ぐ押し合いは原理的に起きない」
-          (`SyncMonitor.suspend_group`) だが、再励磁でそれが当てはまるのは
-          落ちた側だけで、**相方は励磁されたまま押しうる**。つまりここで
-          止めると、この保護が本当に要る瞬間に限って目を塞ぐことになる
-        - **もう 1 つの根拠 (座標系が 2 台で違うので偏差という量が定義を失う)
-          も当てはまらない。** 原点は動かさないので、この間に出る偏差は
-          そのまま機構の実際のずれである
-
-        「遊びのある機構で発報して全体緊急停止 = この機能が避けたかった結果を
-        自分で作る」という懸念は理解できるが、**再励磁はずれを増やさない** ——
-        剥がした目標も `activate_motors` が書く目標もどちらも「今いる位置」で、
-        新しい動きを作らない。既に許容差を超えているなら押す前から超えており、
-        押さなくても発報する。そこで止めれば、直したはずのずれが見えないまま
-        試合へ戻ることになる。
+        **ペアを含む再励磁のあいだも `SyncMonitor` は止めない** (`suspend_group` を
+        呼ばない)。零点確定が止めてよい根拠 (「その間モータは無励磁なので押し合いは
+        原理的に起きない」) は再励磁では落ちた側にしか当てはまらず、**相方は励磁
+        されたまま押しうる** —— 止めると保護が本当に要る瞬間に目を塞ぐ。再励磁自体は
+        「今いる位置」しか書かないのでずれを増やさない。
 
         **`only` の計算から `activate_motors` 呼び出しまでを try/except で囲う。**
-        このタスクは fire-and-forget (`_cmd_reenergize_motors` が await しない) で、
-        `add_done_callback` も辞書からの取り除きだけしか見ない。無防備なままだと
-        ここでの例外は「`_tasks` を誰も await しないので例外は消える」
-        (docs/invariants.md) と同型で握り潰される —— 現状は辞書操作しか無く踏む筋は
-        無いが、将来ここへ処理を足したときに同じ穴を空けないための予防線。
+        このタスクは fire-and-forget なので、無防備なままだとここでの例外は
+        握り潰される。
         """
         try:
             ctx = self._robots[robot_name]
@@ -1766,10 +1546,9 @@ class RobotServer:
                     if dropped & member_names:
                         dropped |= member_names
             if not dropped:
-                # 対象が 1 台も無ければ CAN へ 1 通も出さない (画面が既に閉じた
-                # ボタンを遅延で押した等)。`dropped` は `_inactive_motors` を
-                # 合併して作るので、空なら前回の失敗も残っていない ——
-                # `_inactive_motors` を空で上書きし直す必要も無い
+                # 対象が 1 台も無ければ CAN へ 1 通も出さない。`dropped` は
+                # `_inactive_motors` を合併して作るので、空なら前回の失敗も
+                # 残っておらず、空で上書きし直す必要も無い
                 logger.info("再励磁の対象モータがありません: robot=%s", robot_name)
                 return
 
@@ -1787,12 +1566,9 @@ class RobotServer:
                 ctx.manual.reset_axes_for_motors(dropped)
 
             await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
-            # 猶予の起点を置き直す (`_reactivate_motors` と同じ扱い)。enable が
-            # 次のフィードバックへ反映されるまでの 1 周期 (実測 ~50ms) は
-            # `is_energized()` が古い値のままなので、置き直さないと成功直後の
-            # `safety.unenergized_motors` に対象が残り、画面が一瞬「直っていない」
-            # と言う。失敗したモータは `_inactive_motors` に残るので、猶予が
-            # 明けたところで改めて出る
+            # 猶予の起点を置き直す。enable が次のフィードバックへ反映されるまでの
+            # 1 周期 (実測 ~50ms) は `is_energized()` が古い値のままなので、
+            # 置き直さないと画面が一瞬「直っていない」と言う
             self._energize_expected_since = time.time()
         except Exception:
             logger.exception("再励磁処理で予期しない例外: robot=%s", robot_name)
@@ -1817,14 +1593,11 @@ class RobotServer:
         """1 台のシーケンスを通常停止する。**破棄が先、停止が後。**
 
         逆順にすると、停止処理のあいだに届いた開始要求が破棄をすり抜けて残る。
-        順序を 1 箇所に持たないと、呼び出し側 (緊急停止 / 試合終了 / 手動への切替) の
-        どれか 1 つだけが書き写しを誤り、そこだけが「止めた直後に動き出す」。
 
         **破棄しない停止は用意しない。** 拾われていない開始要求を残したまま降りると、
         その 1 通は次に `run()` が降りた瞬間に `run_forever` が拾うので、症状は
         「STOP を押したのに先頭から全工程を走り切る」になる (試合終了なら、
-        フェーズは `finished` なのに機体だけが動き続ける)。選べるようにしておくと、
-        経路を 1 つ足すたびに同じ穴が開き直る。
+        フェーズは `finished` なのに機体だけが動き続ける)。
         """
         ctx.sequence.discard_pending_start()
         if ctx.sequence.is_running:
@@ -1833,10 +1606,9 @@ class RobotServer:
     def set_initial_inactive_motors(self, robot_name: str, motor_names: list[str]) -> None:
         """起動時に有効化できなかったモータを記録する (サーバー起動前に呼ばれる)。
 
-        `_inactive_motors` は緊急停止解除の経路でしか埋まらなかったため、**起動時の
-        励磁失敗はログの外にも画面にも出なかった**。操縦者に見えるのは「指令しても
-        動かない」だけで、原因を示す表示がどこにも無い。ここへ預けた名前は
-        `safety.unenergized_motors` として、解除後の失敗とまったく同じ経路で配信される。
+        ここへ預けた名前は `safety.unenergized_motors` として、解除後の失敗と
+        まったく同じ経路で配信される。無いと起動時の励磁失敗は画面に出ず、
+        操縦者に見えるのは「指令しても動かない」だけになる。
         """
         if motor_names:
             logger.error(
@@ -1857,7 +1629,6 @@ class RobotServer:
     ) -> None:
         """拒否理由を要求元 1 台にだけ返す。
 
-        拒否は「今その操作をした人」への返答であって全員への通知ではない。
         全配信すると、Monitor の set_court が試合中に弾かれただけで両操縦者の画面にも
         赤トーストが出る。自分が押していない操作の拒否が混ざると、本当に自分の操作が
         通らなかったときの通知と区別できなくなる。
@@ -1877,8 +1648,7 @@ class RobotServer:
 
         呼び出し側から理由を受け取る形にすると、停止中の定期再配信
         (`_broadcast_state`) が理由なしで呼ぶため、UI に届く最後の 1 通から理由が
-        抜ける。配信フォーマット自体を lossy にしないため、載せる値はここが
-        `_e_stop_reason` から引く。
+        抜ける。載せる値はここが `_e_stop_reason` から引く。
         """
         payload: dict[str, object] = {"type": "e_stop_state", "active": self._e_stop_active}
         if self._e_stop_reason is not None:
@@ -1887,7 +1657,7 @@ class RobotServer:
         await self._ws.broadcast_json(payload)
 
     # ------------------------------------------------------------------ #
-    #  アクチュエータ動作確認 (Phase 6 段階⑨ — タスク 6-22)
+    #  アクチュエータ動作確認
     # ------------------------------------------------------------------ #
 
     def _motor_check_environment_deny(self) -> str | None:
@@ -1902,9 +1672,7 @@ class RobotServer:
 
         両ハンドを 1 本で駆動するので、ゲートも全ロボットに対して掛ける。
         片方だけ見ていると、確認中にもう一方が手動で動かされて干渉する。
-
-        WS 経由は handle_command でも同じフェーズ判定を行うが、HTTP POST は
-        そこを通らないため本メソッド側にもゲートを置く。
+        HTTP POST は handle_command を通らないため、ゲートはここにも要る。
         """
         phase_deny = COMMANDS["motor_check_start"].phase_deny_reason(self.match.phase)
         if phase_deny is not None:
@@ -1933,41 +1701,14 @@ class RobotServer:
     def _motor_check_pausables(self) -> list[Pausable]:
         """動作確認中に黙らせる周期タスク。**1 つも無い。空を返すのが正しい。**
 
-        動作確認は `move_to` でしか軸を動かさず、`move_to` が出す指令は
-        シーケンスと同じ `MotorHandle` を通る。周期タスクはどれもその同じ
-        ハンドルの目標を実現する側であって、競合相手ではない。**止めると、
-        止めた側が担っていた仕事ごと消える。**
+        動作確認は `move_to` でしか軸を動かさず、周期タスクはどれもその目標を
+        実現する側なので、止めると仕事ごと消える (何がどう壊れるかは
+        docs/invariants.md「アクチュエータ動作確認は両ハンド 1 本のシーケンス」⑧)。
 
-        **M3508 の位置制御ループ**: 動作確認が M3508 を動かす唯一の経路である。
-        M3508 は電流指令しか受け付けないので、このループが C620 へ電流を出す
-        ことでしか動かない。止めると目標だけが設定されて電流は 1 通も出ず、
-        偏差が残ったまま `SequenceTimeoutError` になる (飽和すらしない ——
-        PID が 1 周期も回っていないため)。しかも復帰した瞬間に**残った目標へ
-        向かって機体が動き出す**ので、操縦者が失敗表示を読んだ直後に動く。
-
-        **目標値再送**: 止めると 2 つが壊れる。
-          - **EDULITE 05 / DM3520 の到達を観測できなくなる。** この 2 種は
-            フィードバックが問い合わせ駆動で、自分の CAN ID 宛のフレームを受けた
-            ときにしか状態を返さない。`AxisHandle.wait_reached` はドライバの
-            キャッシュを polling するだけで再送しないので、止めるとそのモータ宛へ
-            飛ぶのは `move_to` の指令 1 通だけになり、返るフィードバックも
-            **動き出す前の位置 1 通**で以後は更新されない。0deg から 180deg へ
-            回す `rotate` は、実際に回りきっても到達判定を通らない
-          - **自作モタドラのウォッチドッグが、確認したい当のものを消す。**
-            3 枚とも `command_timeout_ms` 500ms で出力を落とす。`conveyor` と
-            ポンプの `settle_s` は 0.5s なので、目視・聴音で確認している最中に
-            出力が切れる。サーボスロットは現在角で凍結するので、500ms を超える
-            移動がある軸は `reached` が永久に立たない
-
-        再送が確認用の指令を上書きすることも無い。`main._build_target_refreshers`
+        再送が確認用の指令を上書きすることも無い —— `main._build_target_refreshers`
         はロボットのシーケンスと**同じ `MotorHandle` インスタンス**を受け取り、
-        `main._wire_motor_check_sequence` はそのハンドルをそのまま統合動作確認の
-        `MotorGroup` へ入れる。再送が書き直すのは動作確認自身が設定した目標である。
-        `idle_target_value()` のラッチ値が出るのは、そのハンドルが目標を 1 つも
-        持たないときだけで、中身は「今の姿勢を保て」でしかない。
-
-        0x200 の奪い合いも起きない。動作確認中は他の指令経路 (通常シーケンス実行・
-        手動モード) が `MotorCheckController.deny_reason()` の排他で塞がれている。
+        `main._wire_motor_check_sequence` がそのハンドルをそのまま統合動作確認の
+        `MotorGroup` へ入れるため。
 
         `Pausable` の仕組み自体は残す。`safety.position_loops[].paused` /
         `safety.target_refreshers[].paused` は WS 契約に載っており、緊急停止解除の
@@ -2056,9 +1797,6 @@ class RobotServer:
     ) -> list[dict]:
         """前回スナップショットとの差分から health_change イベントの一覧を生成する。
 
-        前回 None (初回) の場合は空リストを返す。バス・モータそれぞれの state が
-        変化したペアだけイベント化する。
-
         ``robot`` フィールドは必須。Monitor は 2 機分のイベントを 1 本のリストへ
         並べるため、どちらの機体の異常かがイベント自身に載っていないと区別できない
         (バス名は両機で共有しており、target だけでは機体を特定できない)。
@@ -2105,13 +1843,10 @@ class RobotServer:
     def _detect_board_e_stop(self, snapshots: dict[str, HealthSnapshot]) -> str | None:
         """基板側が報告している緊急停止 (FEEDBACK の緊急停止ビット) を探す。
 
-        自作モタドラは物理停止スイッチの押下・CAN の初期化失敗を緊急停止ラッチに
-        落とし、緊急停止ビットで報告してくる。サーバーがこれを拾わないと、**機体は止まって
-        いるのに UI は平常のまま**になり、操縦者はシーケンスが進まない理由を
-        画面から知る術がない (実際に押されたスイッチを探し回ることになる)。
-
-        判定はフィードバックが `_board_e_stop_ignore_before` より後に届いたものに
-        限る。解除直後にサーバーが自分で停止をかけ直す経路を作らないため。
+        拾わないと **機体は止まっているのに UI は平常のまま**になり、操縦者は
+        シーケンスが進まない理由を画面から知る術がない。判定はフィードバックが
+        `_board_e_stop_ignore_before` より後に届いたものに限る (解除直後に
+        サーバーが自分で停止をかけ直す経路を作らないため)。
         """
         if self._e_stop_active:
             # 既に停止中なら報告するまでもない。ここで再発動すると停止理由が
@@ -2251,17 +1986,15 @@ class RobotServer:
         情報として配る。異常なのは `stale` の方で、ヘルス判定 (`CANManager.health`)
         は同じ鮮度でセンサを STALE に倒している。
 
-        配る理由は 3 つ:
+        配る理由は 2 つ:
 
-        1. `config/checklist.yaml` の `origin_sensor_react` (原点センサに 1 本ずつ
-           触れて反応を確認する) は、確認する手段が画面に無いまま項目だけがあった。
-           操縦者は `candump` を打たない限り反応を確かめられない
+        1. `config/checklist.yaml` の `origin_sensor_react` を、操縦者が `candump` を
+           打たずに確かめられるようにするため
         2. **未配線・極性違いのセンサは STALE にならない。** 基板は役割が
            TouchSensor なら配線の有無に関わらず FEEDBACK を送り、`INPUT_PULLUP` の
-           負論理で「接触なし」を報告し続けるので、ヘルスも平常のままになる。
-           押してみる以外に検出手段が無い
-        3. 零点確定は「当たるまで動かす」動作 (`lib/sequence/homing.py`) なので、
-           センサが死んでいると探索距離いっぱいまで機構を押し込む
+           負論理で「接触なし」を報告し続けるので、押してみる以外に検出手段が無い
+           (零点確定は「当たるまで動かす」動作なので、死んでいると探索距離いっぱい
+           まで機構を押し込む)
 
         鮮度のしきい値は `HealthThresholds` から来た 1 つだけを使う。ここに別の
         既定値を置くと、config を直しても画面の判定だけが古い境界のまま残る。
@@ -2293,9 +2026,8 @@ class RobotServer:
     def _manual_state(self, robot_name: str) -> dict:
         """操作モードと手動操縦の軸一覧。
 
-        軸定義 (可動範囲・プリセット名) は静的だが ``steps`` と同じく state に載せる。
-        UI に軸名も可動範囲もハードコードさせないためで、機構が変わって軸が増減しても
-        UI 側の変更は要らない。現在値だけがテレメトリなので配信周期はそちらに合わせる。
+        軸定義 (可動範囲・プリセット名) は静的だが ``steps`` と同じく state に載せる
+        —— UI に軸名も可動範囲もハードコードさせないため。
         """
         ctx = self._robots[robot_name]
         return {

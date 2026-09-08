@@ -1,18 +1,15 @@
 """RobotServer をテストから組み立て・駆動するための唯一の入口。
 
-``RobotServer`` のテストは 10 ファイルに分かれているが、どれも同じことをする:
-サーバーを建て、モックの CAN 層を挿し、配信を 1 回だけ走らせ、結果を見る。
-それを各ファイルへ書き写すと、サーバーの構造を 1 つ変えるだけで 10 ファイルが
-機械的に赤くなり、そのたびに「モックの追従」としてテストを実装へ合わせ直すことに
-なる。テストは実装の変更を検出するための網なのに、変更のたびに網を編み直しては
-何も守れない。組み立てと駆動をここへ集約する。
+``RobotServer`` のテストはどれも同じことをする: サーバーを建て、モックの CAN 層を
+挿し、配信を 1 回だけ走らせ、結果を見る。各ファイルへ書き写すとサーバーの構造を
+1 つ変えるだけで全部が機械的に赤くなり、そのたびに「モックの追従」としてテストを
+実装へ合わせ直すことになる。組み立てと駆動をここへ集約する。
 
 **サーバー内部 (`_broadcast_state` などの private) へ手を伸ばすのは本ファイルの
 特権とする。** 公開 API で書けるものは公開 API を使う (``e_stop_active`` /
 ``handle_command`` / ``activate_e_stop`` / ``match``)。ここに残る private 参照は
 「テストが配信や動作確認のタイミングを決定的に握るために要るが、本番の
-呼び出し元を増やしたくない」ものだけで、サーバーの構造が変わったときの
-追従はこのファイルだけで済む。
+呼び出し元を増やしたくない」ものだけ (docs/invariants.md §9)。
 """
 
 from __future__ import annotations
@@ -52,9 +49,8 @@ FROZEN_BROADCAST_INTERVAL_S = 3600.0
 class ServerFixture:
     """1 台の ``RobotServer`` と、そこへ登録したロボット一式。
 
-    登録したシーケンス・CAN マネージャはフィクスチャ側が覚えておく。
-    サーバーへ問い合わせ直す必要が無くなり、``RobotServer`` がロボットを
-    どう保持しているか (``_robots``) にテストが依存しなくなる。
+    登録したシーケンス・CAN マネージャはフィクスチャ側が覚えておく (``RobotServer``
+    がロボットをどう保持しているかにテストが依存しないように)。
     """
 
     def __init__(self, server: RobotServer) -> None:
@@ -154,17 +150,15 @@ class ServerFixture:
     async def wait_reactivation(self, *, timeout: float = 2.0) -> None:
         """緊急停止解除の再励磁 (別タスク) の完了を待つ。
 
-        解除ハンドラは再励磁を待たずに返る (待つと、その操縦者の WS が数秒間
-        1 通も処理しなくなる)。**「解除フレームを送り終えた後」の振る舞いを見る
-        テストは、この完了を待ってから観測しなければならない** ——
-        `_board_e_stop_ignore_before` が確定するのも再励磁が終わってからで、
-        待たずに配信を 1 回回すと「解除したのに基板の停止が拾われない」ように見える。
+        解除ハンドラは再励磁を待たずに返るので、**「解除フレームを送り終えた後」の
+        振る舞いを見るテストはこの完了を待ってから観測しなければならない** ——
+        `_board_e_stop_ignore_before` が確定するのも再励磁が終わってからで、待たずに
+        配信を 1 回回すと「解除したのに基板の停止が拾われない」ように見える。
 
-        `wait_reenergize` と同じく `asyncio.wait` を使う —— **このタスクも
-        キャンセルされて終わることがある** (新しい解除の `_reactivate_motors` が
-        `_settle_pending_reactivation` で前回のぶんを畳む)。`gather` + `wait_for`
-        だとその `CancelledError` がテスト側へ伝播し、後始末として待っただけの
-        テストが落ちる。
+        `wait_for` ではなく `asyncio.wait` を使うのは、**このタスクもキャンセルされて
+        終わることがある**ため (`_settle_pending_reactivation` が前回のぶんを畳む)。
+        `wait_for` だとその `CancelledError` がテスト側へ伝播し、後始末として待った
+        だけのテストが落ちる。
         """
         tasks = {task for task in self.server._reactivate_tasks if not task.done()}
         if not tasks:
@@ -175,19 +169,16 @@ class ServerFixture:
     def expire_firmware_grace(self) -> None:
         """起動猶予 (`_FIRMWARE_INFO_GRACE_S`) を実時間を待たずに過ぎさせる。
 
-        `INFO` は 1Hz なので、実時間でこの猶予を跨ぐとテストが数秒単位で重くなる。
-        `_server_started_at` を過去へ押し戻すだけで、判定対象そのもの
-        (`firmware_confirmed()`) には触れない。
+        `INFO` は 1Hz なので実時間で跨ぐとテストが数秒重くなる。`_server_started_at` を
+        押し戻すだけで、判定対象そのもの (`firmware_confirmed()`) には触れない。
         """
         self.server._server_started_at = time.time() - _FIRMWARE_INFO_GRACE_S - 0.1
 
     async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
         """単発の再励磁コマンド (別タスク) の完了を待つ。`wait_reactivation` と同じ理由。
 
-        `asyncio.wait_for` ではなく `asyncio.wait` を使うのは、**このタスクは
-        キャンセルされて終わることがある**ため (緊急停止解除の
-        `_settle_pending_reenergize` が畳む)。`wait_for` だとその `CancelledError`
-        がテスト側へ伝播し、後始末として待っただけのテストが落ちる。
+        `wait_for` ではなく `asyncio.wait` を使うのは、**このタスクはキャンセルされて
+        終わることがある**ため (`_settle_pending_reenergize` が畳む)。
         """
         task = self.server._reenergize_tasks.get(robot_name)
         if task is None or task.done():
@@ -199,29 +190,26 @@ class ServerFixture:
         """このロボット名ぶんの再励磁タスクが (実行中か完了済みかに関わらず) 存在するか。
 
         入力検証 (未知のロボット名を弾く) が抜けていないかを見るテスト用。
-        `wait_reenergize` の「実行中か」判定 (`not task.done()`) だと、無効な
-        ロボット名で立てたタスクが検証をすり抜けて中で即座に例外落ちした場合に
-        `done()` が True になり「実行中でない」へ紛れて検証漏れを見逃す。
+        `not task.done()` だと、検証をすり抜けて中で即座に例外落ちしたタスクが
+        「実行中でない」へ紛れて検証漏れを見逃す。
         """
         return robot_name in self.server._reenergize_tasks
 
     def set_motor_check_task(self, task: asyncio.Task[None] | None) -> None:
         """動作確認の実行中フラグ (`MotorCheckController.running`) を直接操作する。
 
-        `running` は実行タスクの生死で判定する。`start()` は環境ゲートとシーケンス
-        登録を要求するため、それらに関心の無いテスト (排他だけを見たいテスト) の
-        ために「今実行中」を直接作る口をここへ置く。
+        `running` は実行タスクの生死で判定する。`start()` は環境ゲートとシーケンス登録を
+        要求するので、排他だけを見たいテストのために「今実行中」を直接作る口を置く。
         """
         self.server._motor_check._task = task
 
     def break_command_handler(self, command: str, exc: Exception) -> None:
         """指定コマンドのハンドラを、必ず例外を投げるものへ差し替える。
 
-        トップレベルの例外ガードが見たいのは「**どの**ハンドラが投げても操縦者の
-        WS が切れないこと」なので、特定コマンドの内部事情 (どの引数で何が起きるか)
-        に寄りかからない形で壊す必要がある。**差し替えはここだけの特権にする** ——
-        各テストがハンドラ名を書き写すと、名前を変えた瞬間に「壊したつもりで
-        壊せていない」テストが緑を返す。
+        見たいのは「**どの**ハンドラが投げても操縦者の WS が切れないこと」なので、特定
+        コマンドの内部事情に寄りかからない形で壊す。**差し替えはここだけの特権にする**
+        —— ハンドラ名を各テストへ書き写すと、名前を変えた瞬間に「壊したつもりで壊せて
+        いない」テストが緑を返す。
         """
 
         async def _raise(_data: dict, _requester: Any) -> None:
@@ -310,14 +298,10 @@ class ServerFixture:
     def shrink_ws_send_timeout(monkeypatch: Any, seconds: float = 0.05) -> None:
         """WS 送信の上限を縮める (詰まった相手の切り離しを実時間で待たないため)。
 
-        本番の上限は 1 秒なので、そのまま検証するとテスト 1 件ごとに 1 秒待つ。
-        縮めても見ているもの (上限を超えたら切り離す) は変わらない。
-
-        **モジュール private の書き換えなので、経路はここ 1 本に閉じる。**
-        テスト側に散らすと、定数名が変わったときにどのファイルが黙って
-        「上限を縮めたつもりで縮めていない」状態になったか分からなくなる
-        (monkeypatch.setattr は存在しない属性なら例外を出すが、別の定数へ
-        名前が移ったときは書き換え先だけが古いまま残る)。
+        本番の上限は 1 秒なので、そのまま検証すると 1 件ごとに 1 秒待つ (見ているもの
+        は変わらない)。**モジュール private の書き換えなので経路はここ 1 本に閉じる**
+        —— 散らすと定数が別名へ移ったときに書き換え先だけが古いまま残り、「縮めた
+        つもりで縮めていない」テストが緑を返す。
         """
         monkeypatch.setattr("lib.ws_hub._WS_SEND_TIMEOUT_S", seconds)
 
@@ -338,14 +322,11 @@ class ServerFixture:
     async def run_ws_handler(self, client: Any) -> Any:
         """接続ハンドラを偽ソケット 1 本で走らせる。
 
-        接続直後に送るスナップショット 3 通 (server_info / match_state /
-        motor_check_state) が送信上限を通っているかは、実ソケットでは検証できない
-        (「読まないまま繋がり続ける相手」を作れない)。``web.WebSocketResponse`` を
-        差し替えてハンドラだけを踏ませる。
+        接続直後に送るスナップショット 3 通が送信上限を通っているかは、実ソケット
+        では検証できない (「読まないまま繋がり続ける相手」を作れない)。
 
-        **本ファイル以外でクラスを差し替えないこと。** 生成箇所が増えると、
-        ハンドラの構造が変わったときにどのテストが古い偽物を掴んだまま緑に
-        なっているのか分からなくなる。
+        **本ファイル以外でクラスを差し替えないこと** —— 生成箇所が増えると、古い
+        偽物を掴んだまま緑になっているテストを見分けられなくなる。
         """
         with patch("lib.server.web.WebSocketResponse", return_value=client):
             return await self.server._ws_handler(AsyncMock())
@@ -388,14 +369,9 @@ class ServerFixture:
         """動作確認が黙らせる周期タスクの一覧を差し替える。
 
         **本番の一覧は空である** (`RobotServer._motor_check_pausables`)。それでも
-        「タスク生成から `run()` が駆動を始めるまで」の窓と、`finally` の復帰保証は
-        実在するので、そこを決定的に観測するための代役をここから挿す。
-
-        ロボット配線 (`set_target_refreshers`) 経由で挿すと、pause 対象が空になった
-        瞬間にテストの窓ごと消え、窓の中の緊急停止・中断を誰も見なくなる。
-        差し替えを本ファイルの特権にするのは、コントローラの private を各テストへ
-        書き写すと、注入口の名前が変わったときに「挿したつもりで挿していない」
-        テストが緑を返すため。
+        「タスク生成から `run()` が駆動を始めるまで」の窓と `finally` の復帰保証は実在
+        するので、そこを決定的に観測する代役を挿す。差し替えを本ファイルの特権にするのは、
+        注入口の名前が変わったときに「挿したつもりで挿していない」テストが緑を返すため。
         """
         self.server._motor_check._pausables = lambda: list(pausables)
 
@@ -457,16 +433,15 @@ class ServerFixture:
 class RecordingClient:
     """配信された JSON を溜めるだけの WS クライアント代役。
 
-    実 WebSocket を張ると「何通目に何が流れたか」を待ち合わせ越しにしか見られず、
-    「変化が無ければ流れない」ような *送らないこと* の検証ができない。
+    実 WebSocket を張ると「変化が無ければ流れない」ような *送らないこと* の検証が
+    できない。
 
-    **生の文字列で溜める。** 受け取った時点で dict へ直すと、配信が JSON として
-    壊れていても記録側が先に落ちるため、配信経路の不具合が
-    「テストヘルパの中の例外」として出る。
+    **生の文字列で溜める** —— 受け取った時点で dict へ直すと、配信が JSON として
+    壊れていても記録側が先に落ち、配信経路の不具合が「テストヘルパの中の例外」
+    として出る。
 
-    障害を作るクライアント (送信が返らない・例外を投げる) はこれとは別物なので
-    統合しない。あちらは ``tests/test_server_broadcast_resilience.py`` が
-    それぞれの障害ごとに持つ。
+    障害を作るクライアント (送信が返らない・例外を投げる) は
+    ``tests/test_server_broadcast_resilience.py`` が障害ごとに持つ。
     """
 
     def __init__(self) -> None:

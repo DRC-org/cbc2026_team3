@@ -339,14 +339,9 @@ class TestFeedbackPosition:
 class TestWrapInferenceAcrossFeedbackGap:
     """フィードバックが途切れた窓を跨いだときの折り返し推定。
 
-    単回転角のアンラップは「半周を超える差分は 0 を跨いだ折り返し」という推定に
-    立っており、**これはフィードバックが 1kHz で途切れず届いている間しか成り立たない**。
-    途切れた窓でモータ軸が半周以上回ると方向を取り違え、累積角に 360deg が乗る。
-    `config/main_hand_positions.yaml` の scale 55.0131deg/mm では 6.54mm 相当で、
-    同じ y_axis の `sync_tolerance` 2.0mm の 3 倍を超える —— 実在しないずれで
-    全体緊急停止が掛かる。
-
-    窓は CAN 受信の中断で実際に開く (`scripts/can_watchdog.sh` の down/up は約 1 秒)。
+    前提と失敗様式は docs/invariants.md「M3508 の累積角は『フィードバックが途切れて
+    いない』ことに立っている」。scale 55.0131deg/mm では 1 回転 = 6.54mm 相当で、窓は
+    CAN 受信の中断 (`scripts/can_watchdog.sh` の down/up は約 1 秒) で実際に開く。
     """
 
     def setup_method(self) -> None:
@@ -373,10 +368,8 @@ class TestWrapInferenceAcrossFeedbackGap:
     def test_長い窓を跨いだ差分は折り返しを推定せず累積しない(self) -> None:
         """1 回転ぶんの偽の飛びを作らない。
 
-        実際に +4300 カウント (0.52 回転) 回ったとき、単回転角は
-        (8000 + 4300) % 8192 = 4108 になる。差分は -3892 で半周に届かないため、
-        推定を続けると「-3892 カウント動いた」と読む —— 真値との差は
-        ちょうど 1 回転 (-8192 カウント = -360deg) になる。
+        +4300 カウント (0.52 回転) 回ると単回転角は (8000 + 4300) % 8192 = 4108。差分
+        -3892 は半周に届かないので、推定を続けると真値と 1 回転 (-360deg) ずれる。
         """
         self._feed(8000)
         self._feed(4108, after_s=1.0)
@@ -446,18 +439,10 @@ class TestWrapInferenceAcrossFeedbackGap:
 class TestWrapInferenceWhenFramesAreDropped:
     """**カーネルに捨てられた窓を「途切れていない」と読んではならない。**
 
-    受信が 1kHz に追いつかないとソケットバッファが溢れ、カーネルはフレームを捨てる
-    (実機の `can_m3508` は受信 369 万通に対し 77 万通 = 17% が `rx_dropped`)。
-    このとき残った分は**滞留を詰めて処理される**ので、処理時刻 (単調クロック) で
-    測った間隔は 1ms 程度にしか見えない —— 実際には数十 ms 途切れているのに。
-
-    巡航 200mm/s では減速比込みでモータ軸 1834rpm なので、**16ms 欠けるだけで
-    半周を越える**。そこへ「半周を超える差分は折り返し」という推定を当てると、
-    累積角に 360deg (`y_axis` の scale 55.0131deg/mm で 6.54mm) が入る。しかも
-    再アンカーの記録は残らないので、原点がずれたまま平常どおりに見える。
-
-    症状は「動作中に軸が荒れて (左右が押し合って) 同期ずれで緊急停止」だけ。
-    窓の長さは**フレーム自身のタイムスタンプ**で測るしかない。
+    理由は docs/invariants.md「窓の長さはフレーム自身のタイムスタンプで測る」。捨てられた
+    分の残りは滞留を詰めて処理されるので処理時刻で測った間隔は 1ms 程度にしか見えず、
+    巡航 200mm/s (モータ軸 1834rpm) では **16ms 欠けるだけで半周を越える**。症状は
+    「動作中に軸が荒れて同期ずれで緊急停止」だけ (実機で `rx_dropped` 17%)。
     """
 
     # 巡航 200mm/s 相当。1834rpm = 8192counts * 1834 / 60 / 1000 ≒ 250counts/ms
@@ -489,9 +474,8 @@ class TestWrapInferenceWhenFramesAreDropped:
     def test_捨てられた窓は処理間隔が詰まっていても折り返しを推定しない(self) -> None:
         """壊れていると、この 1 通で累積角が 1 回転ぶん (6.54mm) 巻き戻る。
 
-        30ms 欠けた間の実移動は 7500counts (0.92 回転)。単回転角の差分は
-        7500 % 8192 = 7500 で半周を超えるため、推定を続けると -692counts と読む
-        —— 真値との差はちょうど -8192counts = -360deg になる。
+        30ms 欠けた間の実移動は 7500counts (0.92 回転)。差分は半周を超えるので、推定を
+        続けると -692counts と読み、真値と -8192counts = -360deg ずれる。
         """
         for _ in range(5):
             self._feed(elapsed_ms=1, processed_after_ms=1)
@@ -519,9 +503,8 @@ class TestWrapInferenceWhenFramesAreDropped:
     def test_滞留しているだけで取りこぼしが無ければ推定を続ける(self) -> None:
         """**処理が遅れただけで再アンカーしてはならない。**
 
-        イベントループが 30ms 止まっても、フレームがバッファに残っていれば
-        1 通も失われていない。そこで再アンカーすると、原点の信頼を失う理由が
-        「処理が遅れた」だけになり、`health_detail` が実害の無い警告で埋まる。
+        フレームがバッファに残っていれば 1 通も失われていない。再アンカーすると
+        `health_detail` が実害の無い警告で埋まる。
         """
         self._feed(elapsed_ms=1, processed_after_ms=1)
         self._feed(elapsed_ms=1, processed_after_ms=30)

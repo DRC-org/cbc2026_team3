@@ -1,10 +1,8 @@
 """scripts/can_config.py の不変条件。
 
-このモジュールは CAN バス命名の要である。`can0`/`can1`/`can2` は USB の列挙順で
-入れ替わるため、番号のままでは C620 に EDULITE 用のコマンドが飛んでモータを壊す。
-それを防ぐ唯一の仕掛けが「STM32 UID 由来の serial に固定名を紐付ける udev ルール」で、
-そのルールを生成しているのがここ。つまり**このファイルの出力が壊れると、
-壊れたことに気付けないまま誤ったバスへ電流指令が飛ぶ**。
+バス名の個体固定 (docs/invariants.md「CAN バス名は udev で個体固定する」) を担う
+udev ルールを生成しているのがここなので、**出力が壊れると気付けないまま誤ったバスへ
+電流指令が飛ぶ**。
 
 さらに `scripts/setup_can.sh` は
   - `list` の TSV を `IFS=$'\t' read -r name serial bitrate txqueuelen` で読み
@@ -310,14 +308,11 @@ class TestRealConfig:
     def test_udev_restart_does_not_take_down_the_control_program(self) -> None:
         """**udev が restart する unit を `Requires=` してはならない。**
 
-        `Requires=` は依存先が明示的に stop / restart されたときにこちらへ伝播する
-        (man 5 systemd.unit)。生成される udev ルールは CANable の net デバイスが
-        add されるたびに無条件で `systemctl restart cbc-can.service` を打つので、
-        `Requires=` だと **USB の再列挙 (抜けかけ・接触不良・ハブのリセット・
-        `install.sh` の `udevadm trigger`) のたびに試合中の制御プログラムが道連れで
-        再起動**し、シーケンス位置も励磁もタイマーも飛ぶ。しかも
-        `StartLimitBurst=3` を消費するので、60 秒以内に 3 回バウンドすれば
-        `failed` で固定され `systemctl start` すら通らなくなる。
+        `Requires=` は依存先の stop / restart をこちらへ伝播する (man 5 systemd.unit)。
+        udev ルールは net デバイスが add されるたびに `systemctl restart
+        cbc-can.service` を打つので、**USB の再列挙 (抜けかけ・接触不良・ハブのリセット・
+        `udevadm trigger`) のたびに試合中の制御プログラムが道連れで再起動**し、しかも
+        `StartLimitBurst=3` を消費して 60 秒に 3 回で `failed` に固定される。
 
         `Wants=` は起動順の宣言としては同じで、stop / restart を伝播しない。
         """

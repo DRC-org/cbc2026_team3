@@ -187,21 +187,17 @@ uint8_t portIndexOf(GPIO_TypeDef *port) {
 
 // config.h のピン割当が CubeMX 生成の main.h と一致しているか。
 //
-// **ピン番号は static_assert が見ているが、ポートはビルド時に見られない。**
-// `PUMP5_SW_GPIO_Port` は `GPIOA` へ、`GPIOA` は `((GPIO_TypeDef *) GPIOA_BASE)` へ
-// 展開されるポインタキャストなので、constexpr 文脈にも `##` の連結にも持ち込めない。
-// 電源投入時に必ず通る setup() で照合する。
+// **ピン番号は static_assert が見ているが、ポートはビルド時に見られない** ——
+// `GPIOA` は `((GPIO_TypeDef *) GPIOA_BASE)` へ展開されるポインタキャストなので
+// constexpr 文脈へ持ち込めない。電源投入時に必ず通る setup() で照合する。
 //
 // **比較の規則そのものは MotorPinTable.h（HAL 非依存）が持つ。** ここへループを
-// 書き戻すと、この翻訳単位は native テストの対象外なので `!=` を `==` に
-// 書き換えても全ケース緑になる。ここに残すのは HAL ポインタ → ポート番号の
-// 逆引きと、2 つの表を同じ順序で並べることだけ。
+// 書き戻すと、この翻訳単位は native テストの対象外なので `!=` を `==` に書き換えても
+// 全ケース緑になる。
 //
-// **CAN（PA11 / PA12）と UART（PA9 / PA10）はここでは照合できない。**
-// この 2 つは CubeMX が `HAL_CAN_MspInit` / `HAL_UART_MspInit` の中で
-// `GPIO_PIN_11|GPIO_PIN_12` のようにその場で書いており、main.h に
-// `*_GPIO_Port` / `*_Pin` のマクロが生成されない（＝突き合わせる相手が居ない）。
-// この 4 本を守るのは kAllPins の重複検査（static_assert）だけである。
+// **CAN（PA11 / PA12）と UART（PA9 / PA10）はここでは照合できない** —— CubeMX が
+// `HAL_CAN_MspInit` / `HAL_UART_MspInit` の中でその場で書いており、main.h に
+// `*_GPIO_Port` / `*_Pin` が生成されない。この 4 本を守るのは kAllPins の重複検査だけ。
 bool portsMatchCubeMx() {
     // config.h 側。**下の expected[] と 1 対 1 の順序**で並べる。
     // チャンネルを増やしたら上の static_assert(kSolenoidChannelCount == 6) が先に落ちる。
@@ -242,14 +238,10 @@ bool portsMatchCubeMx() {
     return pinTablesMatch(actual, expected, kCheckedPinCount);
 }
 
-// LED を叩く唯一の口。**config.h ではなく CubeMX 生成の main.h を正として書く。**
-//
-// ポートの食い違いを見つけたときに残る通知経路は LED だけなのに、その LED を
-// 疑いの対象そのもの（config.h の kPortLed）で叩くと、食い違いの中身次第で
-// **止めたはずの弁のピンを 200ms ごとに叩く**（kPinLed = 1 << 5 のポートを B と
-// 書き間違えれば PB5 = ch2 = valve_3 で、MX_GPIO_Init が出力に設定済みのピンである）。
-// 両者が一致していることは portsMatchCubeMx() が別途見るので、config.h の
-// kPortLed / kPinLed が死んだ定数になるわけではない。
+// LED を叩く唯一の口。**config.h ではなく CubeMX 生成の main.h を正として書く** ——
+// ポートの食い違いを見つけたときに残る通知経路は LED だけなのに、その LED を疑いの
+// 対象そのもの（config.h の kPortLed）で叩くと **止めたはずの弁のピンを 200ms ごとに
+// 叩く**（kPinLed = 1 << 5 のポートを B と書き間違えれば PB5 = ch2 = valve_3）。
 void writeLed(bool on) {
     HAL_GPIO_WritePin(LED_BI_GPIO_Port, LED_BI_Pin, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
@@ -287,37 +279,30 @@ void applyAllOutputs(uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
-// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
-// **ここで OR を足してはならない。** 到達フラグを立てないこと（仕様書 §9.3: 弁が
-// 開いたかを観測する手段が 1 つも無い）は board == Solenoid から導かれるので、
-// この呼び出しが規則の全てになる。ここで組み立てると規則が HAL の翻訳単位へ移り、
-// `flags |= kReached;` を足しても native テストが 1 件も落ちなくなる。
+// 状態フラグの組み立て規則は composeFeedbackFlags が持つ（規則と理由はその宣言。
+// native テスト圏内）。**ここで OR を足してはならない** —— 足すと規則が HAL の翻訳単位へ
+// 移り、`flags |= kReached;` を足しても native テストが 1 件も落ちなくなる。
 uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
                                 g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
                                 /*reached=*/false, /*sensorActive=*/false);
 }
 
-// 送信は空きメールボックスが無ければ諦める。**待ってはならない** — 詰まった
-// バスの上で loop() が止まると、ウォッチドッグ満了の反映も出力の更新も止まる。
-// FEEDBACK は次の周期でまた送られるので、1 通落ちても PC 側の STALE 判定
-// （既定 500ms）には遠く届かない。
-//
-// 諦めた結果は捨てずに数える。**戻り値を捨てないための唯一の口**にしてあるので、
-// HAL_CAN_AddTxMessage() を直に呼ぶ経路を作らないこと。捨てると、6ch 中 4ch の
-// INFO が 1 通も出ていないことが LED にもログにも現れない。
+// 送信は空きメールボックスが無ければ諦める（共通の規則は MotorTxHealth.h）。
+// **戻り値を捨てないための唯一の口**にしてあるので、HAL_CAN_AddTxMessage() を直に
+// 呼ぶ経路を作らないこと —— 捨てると、6ch 中 4ch の INFO が 1 通も出ていないことが
+// LED にもログにも現れない。
 //
 // **この数え方は自動再送 (main.c の AutoRetransmission = ENABLE) に依存している。**
 // NART (再送しない) だと、1 回の送信試行が成功・エラー・調停負けのどれで終わっても
 // メールボックスが解放されるので、`GetTxMailboxesFreeLevel() == 0` も
-// `AddTxMessage != HAL_OK` も**成立しない** —— トランシーバが死んでいてもバスから
-// 外れていても ACK が返らなくても、g_txFail は 0 のまま LED は平常のハートビートを
-// 出し続ける。PC 側からは 6 本の弁が全部 STALE になるだけで、現場の切り分け手段が
-// 両側とも消える。DC 基板 (R4 内蔵 CAN は既定で再送する) では同じ状況でメールボックス
-// が埋まり続けて規則どおり赤へ倒れるので、**その非対称は意図されたものではない**。
+// `AddTxMessage != HAL_OK` も**成立しない** —— トランシーバが死んでいても ACK が
+// 返らなくても g_txFail は 0 のまま LED は平常のハートビートを出し続け、PC 側からは
+// 6 本の弁が全部 STALE になるだけで切り分け手段が両側とも消える。DC 基板
+// (R4 内蔵 CAN は既定で再送する) では同じ状況で規則どおり赤へ倒れる。
 //
-// 再送を有効にしても loop() は止まらない —— ここは空きが無ければ即座に諦める
-// (規則②「空きを待たない」) ので、詰まったバスの上でも周期は回り続ける。
+// 再送を有効にしても loop() は止まらない —— 空きが無ければ即座に諦めるので、
+// 詰まったバスの上でも周期は回り続ける。
 bool sendFrame(uint16_t canId, uint8_t *data, uint8_t length) {
     if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) == 0) {
         g_txFail.onFailure();
@@ -386,11 +371,10 @@ void handleChannelFrame(uint8_t ch, CommandType command, const uint8_t *data, ui
                         uint32_t nowMs) {
     switch (command) {
         case CommandType::SetTarget: {
-            // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
-            // 養わないと解除した直後に満了済みで動かない。制御タイプが on_off で
-            // なくても養うのは、通信自体は生きているため。
-            // 受理判定（SolenoidChannel::setOn）より必ず先に呼ぶこと。起動直後は
-            // §5.4 により未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる。
+            // 仕様書 §6: 緊急停止ラッチ中でも、制御タイプが on_off でなくてもウォッチドッグ
+            // は養う（通信自体は生きているので、養わないと解除直後に満了済みで動かない）。
+            // **受理判定より必ず先に呼ぶこと** —— 起動直後は §5.4 により未受信＝出力禁止
+            // なので、順序を逆にすると最初の 1 通を捨てる。
             g_channel[ch].feed(nowMs);
 
             const SetTargetCommand cmd = decodeSetTarget(data, length);

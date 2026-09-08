@@ -4,10 +4,8 @@
 # main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
 # 現れず手動操縦パネルを開けない。
 #
-# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
-# (main.py の _positions_path) なので、このファイルを config/bench/dc/ に置くことで
-# robot_name は main_hand のまま config/bench/dc/main_hand_positions.yaml が読まれる。
-# 本番の config/main_hand_positions.yaml も M3508 ベンチのものも無傷のまま残る。
+# 位置定数は同じディレクトリの <robot_name>_positions.yaml が読まれる
+# (main.py の _positions_path)。本番の config/*_positions.yaml は無傷のまま残る。
 #
 # **このベンチでは DC 基板 1 枚の 3 チャンネルだけを登録する。** M3508 / EDULITE /
 # サーボ基板を外すことで、登録されないバスへの送信も動作確認の対象も消え、確認が

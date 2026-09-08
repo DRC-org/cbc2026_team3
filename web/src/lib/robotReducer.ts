@@ -39,11 +39,9 @@ export interface RobotUiState {
   eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
   /**
-   * 統合動作確認の状態。**両ハンドで 1 つ**なので Record ではない。
-   *
-   * サーバーが組み立てた 1 通をそのまま持つ。UI 側で進捗を継ぎ足して状態を
-   * 作らないのは、途中の 1 通を落としたときに画面と機体が食い違ったまま
-   * 復旧しなくなるため (再送も無いのでリロードするまで直らない)。
+   * 統合動作確認の状態。**両ハンドで 1 つ**なので Record ではない。サーバーが組み立てた
+   * 1 通をそのまま持つ —— UI 側で継ぎ足すと、途中の 1 通を落としたときに画面と機体が
+   * 食い違ったまま、再送も無いのでリロードするまで直らない。
    */
   motorCheck: MotorCheckSnapshot;
   matchState: MatchState;
@@ -61,10 +59,8 @@ export type RobotAction =
 
 /**
  * 受信前の初期値。UI 側 (`useMotorCheck` / テストヘルパ) も必ずこれを使う。
- *
- * **`available: false` から始める。** 「起動できる」へ倒すと、配信が届く前の
- * 一瞬だけ押せるボタンが出る。押しても拒否されるだけだが、操縦者には
- * 「押したのに何も起きない」としか見えない。
+ * **`available: false` から始める** —— 「起動できる」へ倒すと配信が届く前の一瞬だけ
+ * 押せるボタンが出て、操縦者には「押したのに何も起きない」としか見えない。
  */
 export function emptyMotorCheckState(): MotorCheckSnapshot {
   return {
@@ -168,9 +164,7 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
     }
 
     case "motor_check_state":
-      // サーバーが組み立てた状態をそのまま置く。**ここで継ぎ足さない** —
-      // 進捗を UI 側で組み立てると、1 通落としたときに画面だけが古い状態で
-      // 固まり、再送も無いのでリロードするまで直らない
+      // サーバーが組み立てた状態をそのまま置く。**ここで継ぎ足さない**
       return { ...state, motorCheck: message.motorCheck };
   }
 }

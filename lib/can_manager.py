@@ -49,20 +49,12 @@ _CAN_ERR_RESTARTED = 0x00000100
 _TX_ERROR_SCORE_FAIL = 8
 _TX_ERROR_SCORE_MAX = 255
 
-# バスからの通信が観測できたら bus-off ラッチを外すまでの猶予は置かない。
-# bus-off はコントローラがバスから切り離された状態そのものなので、1 通でも
-# 送受信できた時点で「切り離されていない」が確定する。
-
 # 受信が読めなくなったときの再試行間隔 [秒]。平常時は 1 度も使われない
 # (`_RECV_TIMEOUT` のタイムアウトは成功であって失敗ではない)。
-#
-# **同一 socket は `ip link` の down/up を跨いで生き残る。** 実測では down 中の
-# `recv` が `Network is down [Errno 100]` で失敗し、up 後は同じ socket のまま
-# 何事もなく再開した。bus を作り直す必要はないので、ここは待って呼び直すだけでよい。
-#
-# 短いほど M3508 の累積角が欠ける窓が縮む (欠落中の回転は折り返し推定を狂わせる。
-# `lib/drivers/m3508.py` の `_MAX_TRUSTED_GAP_S` を参照) が、down が続く間は
-# 呼ぶたびに例外を作るので上限を置く。復旧ウォッチドッグの down/up 窓は実測で約 1 秒。
+# **同一 socket は `ip link` の down/up を跨いで生き残る** ので、bus を作り直さず
+# 待って呼び直すだけでよい。短いほど M3508 の累積角が欠ける窓が縮むが、down が
+# 続く間は呼ぶたびに例外を作るので上限を置く (復旧ウォッチドッグの down/up 窓は
+# 実測で約 1 秒)。
 _RECV_RETRY_MIN_S = 0.02
 _RECV_RETRY_MAX_S = 0.2
 
@@ -70,31 +62,19 @@ _RECV_RETRY_MAX_S = 0.2
 class _ReadableFd:
     """バスの受信 fd をイベントループの監視に載せ、「読める」を待てるようにする。
 
-    **1 通ごとにエグゼキュータへ往復する形は、受信そのものの上限を作る。**
-    `run_in_executor(bus.recv)` はスレッドの起床とイベントループへの復帰を伴い、
-    実測で 1 通あたり 168us かかる。C620 は 1 台 1kHz でフィードバックを流すので
-    M3508 2 台だけで 2000 通/秒、`can_generic` と合わせて 4000 通/秒を超え、
-    **受信だけで 1 コアが埋まる**。追いつかなくなった分はカーネルのソケット
-    バッファ溢れとして捨てられ、実機では `can_m3508` の受信 369 万通に対して
-    **77 万通 (17%) が `rx_dropped`** に積まれていた。
-
-    捨てられた窓は M3508 の累積角に化ける。滞留を詰めて処理している間は
-    ``time.monotonic()`` で測った処理間隔が詰まって見えるので、
-    `lib/drivers/m3508.py` の折り返し推定はその窓を「途切れていない」と読む。
-    巡航 200mm/s ではモータ軸 1834rpm なので、**16ms 分が欠けるだけで半周を超え、
-    累積角に 360deg (= 6.54mm) が注入される**。左右のどちらかにだけ乗れば
-    そのまま同期ずれになり、症状は「動作中に軸が荒れて緊急停止」になる。
-
-    そこで受信は fd の可読通知で起こし、起きたら滞留を出し切る。実測で
-    1 通 168us → 47.5us、バス 1 本ぶんの CPU で 37.5% → 10.6% になる。
+    **1 通ごとにエグゼキュータへ往復する形は、受信そのものの上限を作る**
+    (実測 168us/通で受信だけで 1 コアが埋まり、追いつかない分をカーネルが捨てる。
+    捨てられた窓は M3508 の累積角へ 360deg = 6.54mm として化ける。詳細と実測値は
+    docs/invariants.md「受信は 1 通ごとにエグゼキュータへ往復してはならない」)。
+    そこで受信は fd の可読通知で起こし、起きたら滞留を出し切る (1 通 47.5us、
+    バス 1 本ぶんの CPU で 37.5% → 10.6%)。
 
     ``fileno()`` を持たないバス (``--dry-run`` の virtual バス) では作れないので
     ``for_bus`` が None を返し、呼び出し側はエグゼキュータ経由へ落ちる。
     """
 
     def __init__(self, fd: int) -> None:
-        # コルーチンから呼ばれる前提。get_event_loop() は実行中のループが無い文脈で
-        # 新しいループを黙って作るので使わない (このファイルの他の箇所と同じ)
+        # コルーチンから呼ばれる前提 (get_event_loop() は使わない)
         self._loop = asyncio.get_running_loop()
         self._fd = fd
         self._ready = asyncio.Event()
@@ -163,8 +143,7 @@ class BlockingRunner(Protocol):
 
 
 async def _run_in_default_executor[T](func: Callable[..., T], /, *args: Any) -> T:
-    # コルーチンの中では get_running_loop() が正しい。get_event_loop() は実行中の
-    # ループが無い文脈で新しいループを黙って作る (Python 3.12 では非推奨) ため、
+    # get_event_loop() は実行中のループが無い文脈で新しいループを黙って作るため、
     # 「送ったつもりのフレームがどのループでも走らない」経路を作りうる
     return await asyncio.get_running_loop().run_in_executor(None, func, *args)
 
@@ -192,24 +171,17 @@ class CANManager:
         self._bus_motors: dict[str, list[MotorDriver]] = {}
         self._tasks: list[asyncio.Task[None]] = []
 
-        # ヘルスチェック (Phase 6) 用の受動監視タイムスタンプとカウンタ。
-        # 受信ループは _last_rx_at のみ更新し、送信失敗は send_to_bus 内で
-        # _tx_error_count を増やす。
+        # 受動監視のタイムスタンプとカウンタ
         self._last_rx_at: dict[str, float] = {}
         self._last_tx_at: dict[str, float] = {}
         self._tx_error_count: dict[str, int] = {}
-        # **健全性の判定はこちらで行う。** `_tx_error_count` は起動からの累計で、
-        # 一度でもしきい値を超えると二度と下がらない。実機では物理緊急停止で
-        # DM3520 の電源が落ちた数秒間に 6000 件積み上がり、CAN が完全に復旧した後も
-        # バスが永久に DEGRADED のまま残った (`ip -s link` は ERROR-ACTIVE・
-        # bus-off 0 回、送受信ともエラー 0 なのに UI だけが異常を出し続ける)。
-        # 「今も壊れているか」に答えられない指標で判定してはならない。
-        #
-        # 増減は CAN コントローラの送信エラーカウンタ (TEC) に合わせる ——
-        # 失敗で +8、成功で -1、上限 255。config の `tx_error_threshold` は
-        # 「CAN error_passive 境界」として書かれているので、同じ土俵の値でなければ
-        # 意味が合わない。20Hz の再送なら 12 回続けて失敗して警告に入り、
-        # 復旧後は約 2.4 秒で警告が消える。
+        # **健全性の判定はこちらで行う。** `_tx_error_count` は起動からの累計なので
+        # 一度しきい値を超えると二度と下がらない (実機で 6000 件積み上がり、CAN が
+        # 復旧した後もバスが永久に DEGRADED のまま残った)。「今も壊れているか」に
+        # 答えられない指標で判定してはならない。
+        # 増減は CAN コントローラの TEC に合わせる —— 失敗 +8 / 成功 -1 / 上限 255。
+        # config の `tx_error_threshold` が「CAN error_passive 境界」として
+        # 書かれているので、同じ土俵の値でなければ意味が合わない。
         self._tx_error_score: dict[str, int] = {}
         self._rx_error_count: dict[str, int] = {}
         self._bus_off: dict[str, bool] = {}
@@ -218,12 +190,9 @@ class CANManager:
         # 外せるのは `bus.recv` が実際に返ったときだけ。
         self._rx_down: dict[str, bool] = {}
         self._rx_down_since: dict[str, float] = {}
-        # 途絶の「立ち上がり」を数えたエピソード数。**`_record_rx_down` 側で
-        # 数える** (立ち上がりの瞬間) —— `_clear_rx_down` 側で数えると、復帰
-        # しないまま試合が終わったケース (=エピソードが 1 度も「復帰」しない)
-        # を取りこぼす。試合単位のリセットは `reset_rx_down_episodes()` が持ち、
-        # いつ呼ぶかは呼び出し元 (サーバー) が決める —— CANManager は「試合」を
-        # 知らない (lib/match_state.py の責務との境界)。
+        # 途絶の「立ち上がり」を数えたエピソード数。**`_record_rx_down` 側で数える**
+        # —— `_clear_rx_down` 側だと、復帰しないまま試合が終わったケースを取りこぼす。
+        # 試合単位のリセットをいつ呼ぶかは呼び出し元 (サーバー) が決める
         self._rx_down_episodes: dict[str, int] = {}
         self._bus_channels: dict[str, str] = {}
 
@@ -235,8 +204,7 @@ class CANManager:
         self._buses[name] = bus
         self._bus_motors.setdefault(name, [])
 
-        # channel 文字列はヘルススナップショットの BusHealthInfo.channel に載せる。
-        # 呼び出し側が省略した場合は python-can の channel_info から推測 (失敗時は空文字)。
+        # 省略時は python-can の channel_info から推測 (失敗時は空文字)
         if not channel:
             channel = getattr(bus, "channel_info", "") or ""
         self._bus_channels[name] = channel
@@ -258,10 +226,8 @@ class CANManager:
         もう一方が永久にフィードバックを得られない。
 
         ただしロボットごとに別インスタンスを持つ構成のため、
-        **ロボット横断の衝突は 1 つの CANManager からは原理的に検出できない**
-        (メインハンドとサブハンドは can_edulite / can_generic を物理的に共有する)。
-        全ロボットを合わせた一意性は tests/test_robot_sequences.py の
-        yaml 静的テストが引き続き担保する。
+        **ロボット横断の衝突は 1 つの CANManager からは原理的に検出できない**。
+        全ロボットを合わせた一意性は tests/test_robot_sequences.py が担保する。
         """
         self._add_device(bus_name, motor)
         self._motors[motor.name] = motor
@@ -292,11 +258,8 @@ class CANManager:
     def add_sensor(self, bus_name: str, sensor: MotorDriver) -> None:
         """バスにセンサを登録する (仕様書 §5.2)。
 
-        自作基板は 1 スロット = 1 CAN デバイスで、センサも自分のデバイス ID で
-        FEEDBACK を送る。**登録しないと受信ループがそのフレームを誰にも配らず、
-        接触が PC まで届かない。** 名前・can_id の重複検査はモータと同じ空間で行う
-        (同じバス上の別デバイスなので、衝突すれば同じ壊れ方をする)。
-
+        **登録しないと受信ループがそのフレームを誰にも配らず、接触が PC まで
+        届かない。** 名前・can_id の重複検査はモータと同じ空間で行う。
         motors とは別に持つのは、動作確認・目標値再送・UI のモータ一覧へ
         「常に 0 のモータ」を並べないため。ヘルス (STALE) は同じ扱いで監視する。
         """
@@ -312,10 +275,8 @@ class CANManager:
     def motors(self) -> Mapping[str, MotorDriver]:
         """登録済みモータの読み取り専用ビュー (宣言順を保つ)。
 
-        サーバーは全モータの状態配信・停止フレーム送信のために一覧を必要とする。
         書き換え可能な dict を渡すと登録経路が add_motor 以外にも生まれ、
         名前・can_id の重複検査を素通りしたモータが混ざりうる。
-        ビューなので登録の追加はそのまま見えるが、外からは変更できない。
         """
         return MappingProxyType(self._motors)
 
@@ -323,18 +284,14 @@ class CANManager:
     def bus_names(self) -> tuple[str, ...]:
         """登録済みバス名 (登録順)。
 
-        バス単位のブロードキャスト (E-STOP の 0x7FF など) の宛先を列挙するために要る。
-        ``can.Bus`` そのものは渡さない。生のバスを掴むと send_to_bus を経由しない
-        送信ができてしまい、送信失敗が tx_error_count に載らない = ヘルスが
-        「正常」と言い続ける経路ができる。
+        ``can.Bus`` そのものは渡さない —— 生のバスを掴むと send_to_bus を経由
+        しない送信ができ、送信失敗が tx_error_count に載らない (= ヘルスが
+        「正常」と言い続ける) 経路ができる。
         """
         return tuple(self._buses)
 
     def last_feedback_at(self, motor_name: str) -> float | None:
-        """最後にフィードバックを受信した時刻 (time.time 基準)。未受信なら None。
-
-        位置制御ループがフィードバック途絶を検出して電流を落とすために参照する。
-        """
+        """最後にフィードバックを受信した時刻 (time.time 基準)。未受信なら None。"""
         return self._last_rx_at.get(motor_name)
 
     async def send(self, motor_name: str, msg: can.Message) -> None:
@@ -346,12 +303,10 @@ class CANManager:
         try:
             await self._run_blocking(bus.send, msg)
         except can.CanError:
-            # CAN プロトコル層の送信失敗。カウンタを進めつつ、既存呼び出し元
-            # (server.py の e_stop など) との互換性のため例外を再 raise する。
             self._record_tx_failure(bus_name)
             raise
         except Exception:
-            # OS / executor / その他の異常も健全性カウンタに反映してから上位へ伝搬。
+            # OS / executor の異常も健全性カウンタに反映してから上位へ伝搬する
             self._record_tx_failure(bus_name)
             raise
         else:
@@ -369,13 +324,11 @@ class CANManager:
         """送信 1 回の成功でスコアを 1 だけ戻す。**累計は減らさない。**
 
         累計を減らすと「今日このバスで何回送信に失敗したか」が誰にも分からなくなる。
-        判定と記録は別の役目なので、別の数で持つ。
 
         送信できたということはコントローラがバスから切り離されていないので、
         bus-off ラッチもここで外す。**外す経路が必要**なのは、`restart-ms` が 0 の
-        インタフェースでは復帰通知 (CAN_ERR_RESTARTED) が届かないためで、
-        それが無いと一度立った DOWN が二度と消えない ——
-        いま直している `tx_error_count` と同じ壊れ方を bus-off 側に作ることになる。
+        インタフェースでは復帰通知 (CAN_ERR_RESTARTED) が届かず、一度立った DOWN が
+        二度と消えないため。
         """
         self._tx_error_score[bus_name] = max(0, self._tx_error_score.get(bus_name, 0) - 1)
         self._bus_off[bus_name] = False
@@ -384,34 +337,17 @@ class CANManager:
         """バス 1 本ぶんの受信ループ。**フレームの解釈失敗でも受信の断絶でも降りない。**
 
         **インタフェース断でこのタスクごと降りてはならない。** SocketCAN の socket は
-        `ip link` の down/up を跨いで生き残り、up 後は同じ socket のまま受信を再開する
-        ので、待って呼び直せば戻る。
+        `ip link` の down/up を跨いで生き残るので、待って呼び直せば戻る。降りる実装
+        だと bus-off 復旧ウォッチドッグの down/up 1 回で受信タスクが永久に失われ、
+        症状は「UI は接続中のまま全モータが STALE」になる (詳細は docs/invariants.md
+        「`bus.recv` の失敗で受信ループを降ろしてはならない」)。
 
-        戻る経路を持たないと害が大きい。bus-off 復旧ウォッチドッグ
-        (`scripts/can_watchdog.sh`) は復旧のたびに down/up を出すので、その 1 秒で
-        受信タスクが永久に失われる。``_tasks`` は誰も await しないため死は
-        ログ 1 行にしか現れず、症状は「UI は接続中のまま全モータが STALE」——
-        最も復旧しにくい壊れ方になる。
-
-        送信側 (`PeriodicTask._run`) は tick ごとに例外を捕まえて回り続け、復旧すれば
-        自力で戻る。**受信側だけを片道にしない。**
-
-        `bus.recv` を失敗させる事象は down/up だけではない —— `ip link set down`、
-        CANable の抜き差し、`setup_can.sh` の再実行、udev 経由の `cbc-can.service`
-        再起動はどれも同じ形で現れ、どれも 1 秒以内に戻る一過性のものである。
-
-        再試行は待ってから行う。素の ``continue`` にすると、戻らないインタフェースを
-        相手に全速で失敗を繰り返して 1 コアを食い潰し、**同じプロセスに同居している
+        再試行は待ってから行う —— 素の ``continue`` は 1 コアを食い潰し、**同居する
         位置制御ループ (200Hz) と偏差監視 (50Hz) の周期まで巻き添えにする**。
-        ログを ``LogThrottle`` へ通すのも同じ理由で、間引かないと同じ失敗が延々続いて
-        本当の死因が流れる。
-
-        黙って回り続けてはならないので、読めていないあいだは `_rx_down` を立てて
-        `health()` から `BusHealth.DOWN` として見えるようにする。
+        ログを ``LogThrottle`` へ通すのも同じ理由。読めていないあいだは `_rx_down` を
+        立てて `health()` から `BusHealth.DOWN` として見えるようにする。
 
         **1 通ごとにエグゼキュータへ往復してはならない (`_ReadableFd` を参照)。**
-        往復のコストが受信可能な速度の上限を決めてしまい、C620 の 1kHz に追いつけずに
-        カーネルがフレームを捨てる。捨てられた窓は M3508 の折り返し推定を狂わせる。
         """
         bus = self._buses[bus_name]
         motors = self._bus_motors[bus_name]
@@ -463,11 +399,9 @@ class CANManager:
                         continue
                     self._dispatch_frame(bus_name, motors, msg)
 
-                # **滞留が残っていても、次の 1 回は必ずイベントループへ戻る。**
-                # 可読通知のコールバックはループが回らないと呼ばれず、上の取り込みと
-                # 配布のあいだは 1 度も await しないので、`_ReadableFd.wait()` は
-                # 必ず一度サスペンドする。`_RX_BATCH_MAX` はその 1 区切りで同期的に
-                # 走る量の上限で、位置制御ループ (200Hz) を締め出さない幅に置いてある
+                # **滞留が残っていても、次の 1 回は必ずイベントループへ戻る**
+                # (`_RX_BATCH_MAX` は 1 区切りで同期的に走る量の上限で、位置制御
+                # ループ 200Hz を締め出さない幅に置いてある)
         finally:
             if readable is not None:
                 readable.close()
@@ -478,9 +412,7 @@ class CANManager:
         """この起床で取り込めるだけのフレームを 1 回で引き取る。
 
         ``readable`` を持つバス (SocketCAN) では、イベントループの fd 監視で
-        「読める」まで待ってから**滞留を出し切る**。1 通ごとにエグゼキュータへ
-        往復する形と比べて実測で 1 通あたり 168us → 47.5us、バス 1 本ぶんの CPU で
-        37.5% → 10.6% になる (can_m3508, 2225 フレーム/秒)。
+        「読める」まで待ってから**滞留を出し切る** (実測 168us → 47.5us/通)。
 
         ``fileno()`` を持たないバス (``--dry-run`` の virtual バス) では従来どおり
         エグゼキュータ経由で 1 通ずつ読む。**1 回の呼び出しで recv を 1 回しか
@@ -516,10 +448,9 @@ class CANManager:
     def _record_rx_down(self, bus_name: str) -> None:
         """受信が読めなくなったことを記録する。状態の遷移だけを 1 行残す。
 
-        エピソード数もここ (立ち上がりの瞬間) で数える。`_clear_rx_down` 側の
-        「復帰した瞬間」で数えると、復帰しないまま (`rx_down` が立ったまま)
-        試合が終わったケースが 1 件も数えられない —— ワーク落下が起きた
-        まさにその場合を取りこぼすことになり、本末転倒になる。
+        エピソード数もここ (立ち上がりの瞬間) で数える。「復帰した瞬間」で数えると、
+        復帰しないまま試合が終わったケース —— ワーク落下が起きたまさにその場合 ——
+        を 1 件も数えられない。
         """
         if not self._rx_down.get(bus_name, False):
             self._rx_down_since[bus_name] = time.time()
@@ -532,10 +463,9 @@ class CANManager:
 
         呼ぶのは実際に 1 通読めたときに限る (タイムアウトの None では呼ばない ——
         down 中も None は返り続けるので、復帰の証拠にならない)。送信の成否でも
-        外さない。インタフェースが戻って送信だけが通り、受信は死んだままという形を
-        見逃さないため。中断していた時間をログに残すのは、
-        M3508 の累積角がその窓で飛びうる (`lib/drivers/m3508.py`) ので、後から
-        「あのときの緊急停止はこれか」を突き合わせられるようにするため。
+        外さない (送信だけが通り受信は死んだまま、という形を見逃さないため)。
+        中断していた時間をログに残すのは、M3508 の累積角がその窓で飛びうるので
+        後から「あのときの緊急停止はこれか」を突き合わせられるようにするため。
         """
         if self._rx_down.get(bus_name, False):
             since = self._rx_down_since.pop(bus_name, None)
@@ -546,19 +476,11 @@ class CANManager:
     def reset_rx_down_episodes(self) -> None:
         """途絶エピソード数を全バス 0 に戻す。
 
-        CANManager は「試合」という概念を知らない (層の境界は
-        `lib/match_state.py` が試合の状態、`lib/can_manager.py` が CAN の状態を
-        持つこと)。いつリセットするかは呼び出し元 (`lib/server.py`) が決める —
-        現在は試合開始 (`match_start`) の成立時に呼んでいる。準備中 (機体の
-        配線確認・動作確認) に踏んだ途絶を試合開始時点で洗い流すことで、
-        試合中に見えるエピソード数が「この試合で実際に起きたこと」だけを
-        表すようにするため (次の試合の準備が始まる `match_reset` まで待つと、
-        準備フェーズで踏んだ途絶が次の試合の表示に紛れ込む)。
+        CANManager は「試合」という概念を知らないので、いつリセットするかは
+        呼び出し元 (`lib/server.py` の `match_start` 成立時) が決める。
 
         現在進行中の途絶 (`_rx_down` が True のまま) はここでは触らない ——
-        復帰していないバスを「無かったこと」にしてはならない。次に復帰した
-        ときの `_clear_rx_down` はそのまま働き、次の立ち上がりからまた
-        1 件目として数え直される。
+        復帰していないバスを「無かったこと」にしてはならない。
         """
         for bus_name in self._rx_down_episodes:
             self._rx_down_episodes[bus_name] = 0
@@ -571,12 +493,10 @@ class CANManager:
         ここで例外を素通しすると受信ループのタスクごと終わり、しかも ``_tasks`` は
         誰も await しないので例外は握り潰される。結果は「そのバスの全モータが以後
         永久に STALE、UI は接続中のまま」という、試合中に最も復旧しにくい壊れ方になる。
-        バス上には他プロトコルの機器も、相方のロボット宛のフレームも流れてくるので、
-        解釈できないフレームは必ず来るものとして扱う。
 
-        捕捉するのは ``Exception`` だけ。``asyncio.CancelledError`` (shutdown の停止
-        経路) と ``KeyboardInterrupt`` / ``SystemExit`` は ``BaseException`` 側にあり、
-        握り潰すと「止められない受信ループ」ができるため素通しする。
+        捕捉するのは ``Exception`` だけ。``asyncio.CancelledError`` と
+        ``KeyboardInterrupt`` / ``SystemExit`` を握り潰すと「止められない受信ループ」
+        ができるため素通しする。
         """
         for motor in motors:
             try:
@@ -584,7 +504,6 @@ class CANManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # 宛先判定で落ちるドライバは、他モータ宛のフレームまで巻き添えにしない。
                 # 巻き添えの範囲をそのドライバ 1 台に閉じるため次のモータへ進む
                 self._record_rx_error(bus_name, motor.name, "宛先判定")
                 continue
@@ -606,8 +525,8 @@ class CANManager:
                     self._record_rx_error(bus_name, motor.name, "状態更新")
                 return
 
-            # 自作モタドラの INFO (1Hz の自己申告, 仕様書 §3.4)。焼き忘れとサーボの
-            # 型違いを見つける唯一の経路なので、FEEDBACK と同じ粒度で囲って配る
+            # 自作モタドラの INFO (1Hz の自己申告, 仕様書 §3.4)。焼き忘れと
+            # サーボの型違いを見つける唯一の経路
             try:
                 info_claimed = motor.matches_info(msg)
             except asyncio.CancelledError:
@@ -634,25 +553,18 @@ class CANManager:
     def _handle_error_frame(self, bus_name: str, msg: can.Message) -> None:
         """SocketCAN のエラーフレームでバス状態を更新する。**モータへは配らない。**
 
-        python-can の socketcan バスは既定でエラーフレームを受信する。これを
         通常のフレームとして `_dispatch_frame` へ流すと、エラー種別のビット列
         (0x40 = bus-off など) がそのまま arbitration_id として宛先判定に掛かる。
-        DM3520 の MST_ID は 0x11 / 0x12 で、`CAN_ERR_TRX|CAN_ERR_TX_TIMEOUT` の
-        0x11 や `CAN_ERR_TRX|CAN_ERR_LOSTARB` の 0x12 と衝突しうる —— つまり
+        DM3520 の MST_ID 0x11 / 0x12 は `CAN_ERR_TRX|CAN_ERR_TX_TIMEOUT` (0x11) /
+        `CAN_ERR_TRX|CAN_ERR_LOSTARB` (0x12) と衝突しうる —— つまり
         **バスのエラーがモータの実測角として取り込まれる**余地がある。
 
-        **bus-off はここでしか観測できない。** `health()` は `bus.state` も見ているが、
-        python-can 4.6 の `SocketcanBus` は `state` を実装しておらず、基底クラスの
-        既定 (`BusState.ACTIVE`) が返る。つまり SocketCAN では ERROR / PASSIVE の
-        分岐は永久に成立せず、bus-off を立てる経路は今まで 1 つも無かった
-        (`_bus_off` はテストからしか True にならなかった)。
-
-        **ただし現行の CANable2 はエラーフレームを 1 通も送ってこない** ——
-        実測で確認済み (`docs/checks_and_health.md`)。落ちている間も `can state` は
-        ERROR-ACTIVE のままで、`berr-reporting` も `GET_STATE` も未対応。
-        つまりこの経路は実機では発火しない。**残しているのは、エラーフレームを送る
-        アダプタ (別のブリッジや vcan) へ載せ替えたときに検出が消えないため**で、
-        実機で bus-off が現れるのは送信失敗 (`tx_error_count` と送信スコア) だけである。
+        **bus-off をエラーフレームで観測できるのはここだけ**だが、python-can 4.6 の
+        `SocketcanBus` は `state` 未実装で、**現行の CANable2 はエラーフレームを
+        1 通も送ってこない** (実測。`docs/checks_and_health.md`)。この経路は実機では
+        発火しない —— **残しているのは、エラーフレームを送るアダプタへ載せ替えた
+        ときに検出が消えないため**で、実機で bus-off が現れるのは送信失敗
+        (`tx_error_count` と送信スコア) だけである。
 
         鮮度 (`_last_rx_at`) は動かさない。エラーフレームは「モータからの応答」では
         ないので、これで途絶検出を止めると本物の途絶が見えなくなる。
@@ -671,11 +583,10 @@ class CANManager:
         """握り潰した受信失敗を、数として残しつつ間引いて記録する。
 
         件数を ``rx_error_count`` に積むのは、握り潰しが「異常が無い」ことにすり替わる
-        のを防ぐため。一方でバスの健全性判定 (``BusHealth``) は動かさない。判定できない
-        フレームを流す機器の相乗りは構成上あり得る (メインハンドとサブハンドは
-        can_edulite / can_generic を物理的に共有する) ので、それだけで DEGRADED を
-        出すと本物の送信障害の警告まで信用されなくなる。実害 —— そのモータの
-        フィードバックが来ないこと —— は当該モータの STALE として別に現れる。
+        のを防ぐため。一方でバスの健全性判定 (``BusHealth``) は動かさない —— 解釈
+        できないフレームの相乗りは構成上正常なので、それだけで DEGRADED を出すと
+        本物の送信障害の警告まで信用されなくなる。実害はそのモータの STALE として
+        別に現れる。
         """
         self._rx_error_count[bus_name] = self._rx_error_count.get(bus_name, 0) + 1
         self._rx_log.exception(
@@ -689,12 +600,9 @@ class CANManager:
     async def run(self) -> list[str]:
         """受信ループを立ててから起動時設定と励磁を行う。
 
-        Returns:
-            有効化できなかったモータ名。**呼び出し側は捨ててはならない** ——
-            起動時の励磁失敗はここ以外に現れる場所が無く、捨てると症状は
-            「指令しても動かない」だけになる。フィードバックは
-            `QueryDrivenTargetRefresher` の問い合わせで流れ出すので、
-            ヘルスは OK のまま無励磁だけが残る。
+        戻り値は有効化できなかったモータ名。**呼び出し側は捨ててはならない** ——
+        起動時の励磁失敗はここ以外に現れる場所が無く、捨てると症状は「指令しても
+        動かない」だけになる (ヘルスは OK のまま無励磁だけが残る)。
         """
         for bus_name in self._buses:
             task = asyncio.create_task(self._receive_loop(bus_name))
@@ -704,14 +612,8 @@ class CANManager:
     async def initialize_motors(self) -> list[str]:
         """各モータの起動時設定を宣言順に送り、続けて励磁を有効化する。
 
-        **1 台の送信失敗で残りの起動を諦めない。** 素の for に並べると、最初の
-        モータで CAN の送信が失敗しただけで以降のモータは設定も励磁も受けられず、
-        しかも症状は「そのバスのモータが全部無励磁」でしかない。
-        `shutdown()` や `main()` の後始末と同じ理由 (止める処理・立ち上げる処理を
-        途中の 1 例外で丸ごと飛ばさない)。
-
-        Returns:
-            有効化できなかったモータ名。呼び出し側が操縦者へ見せる。
+        **1 台の送信失敗で残りの起動を諦めない** (症状は「そのバスのモータが
+        全部無励磁」でしかない)。戻り値は有効化できなかったモータ名。
         """
 
         async def initialize_and_activate(motor_name: str) -> bool:
@@ -730,32 +632,22 @@ class CANManager:
         feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
         only: Collection[str] | None = None,
     ) -> list[str]:
-        """全モータ (または ``only`` で絞った一部) の励磁を有効化する。
+        """全モータ (または ``only`` で絞った一部) の励磁を有効化する。緊急停止解除後の
+        復帰にも使う。``should_abort`` は緊急停止が再び入ったときの中断口。
 
-        緊急停止解除後の復帰にも使う。
+        **1 台の送信失敗で残りの有効化を諦めない。** 緊急停止の原因がそのまま CAN の
+        送信失敗を招いている場面 (専用バスに 1 台しか居ない DM3520 が電源を失うと
+        ACK が返らず送信が全滅する) では、素の for だと**残りのモータへ enable が
+        1 通も飛ばない**まま画面上は「解除できた」ように見える。
 
-        should_abort は「途中で有効化をやめるべきか」を返す。緊急停止が再び入った
-        場合に、残りのモータへ enable を送らないための中断口。
+        ``only`` は無励磁のモータだけを再励磁するための絞り込み (絞らないと、健全で
+        移動中の軸へ「今の位置で止めてから再度動かす」形で割り込む)。
+        **``only`` には励磁中のモータが混ざりうる** (直結ペアの相方は健全でも対象に
+        入る)。そのモータへ鮮度確認の `disable` を打たないことは
+        `_may_probe_for_feedback` が担保する。
 
-        **1 台の送信失敗で残りの有効化を諦めない。** 緊急停止の原因がそのまま
-        CAN の送信失敗を招いている場面 (専用バスに 1 台しか居ない DM3520 が電源を
-        失うと ACK が返らず送信が全滅する) では、解除操作のたびに最初のモータで
-        例外が上がり、**残りのモータへ enable が 1 通も飛ばない**。しかも
-        `RobotServer._reactivate_motors` はこれをログに落とすだけなので、画面上は
-        「解除できた」ように見えたまま機体が無励磁で取り残される。
-
-        ``only`` は無励磁のモータだけを再励磁したい呼び出し (`RobotServer._reenergize_motors`)
-        のための絞り込み。EDULITE 05 / DM3520 の `activate_motor` は現在角を目標に
-        書いてから enable するので、指定しなかった健全なモータまで含めると、
-        移動中の軸を「今の位置で止めてから再度動かす」形で割り込ませてしまう。
-        **``only`` には励磁中のモータが混ざりうる** (直結ペアの相方は健全でも
-        対象に入る)。そのモータへ鮮度確認の `disable` を打たないことは
-        `_may_probe_for_feedback` が担保しており、宣言順の前後で結果が変わらない
-        のはそのため。
-
-        Returns:
-            有効化できなかったモータ名 (中断で飛ばしたものを含む)。``only`` を渡した
-            場合は対象外のモータ名を含まない。
+        戻り値は有効化できなかったモータ名 (中断で飛ばしたものを含む)。``only`` を
+        渡した場合は対象外のモータ名を含まない。
         """
 
         async def activate(motor_name: str) -> bool:
@@ -772,13 +664,9 @@ class CANManager:
     async def clear_e_stop_latches(self) -> list[str]:
         """自作モタドラの緊急停止ラッチだけを外す。**中断口を持たない。**
 
-        `activate_motors` の `should_abort` は「励磁」を途中でやめるための口で、
-        ロボットを 1 台ずつ順に処理する `RobotServer._reactivate_motors` では
-        **後ろのロボットが構造的に不利**になる —— 1 台目の処理中に緊急停止が
-        再び入ると 2 台目へは解除フレームが 1 通も飛ばない。ラッチの外れない基板は
-        緊急停止ビットを報告し続け、それを `_detect_board_e_stop` が拾って停止を
-        再発動するので、解除操作のたびに同じ順序で同じロボットだけが取り残される
-        (取り残された側の全基板が `kNeverCommanded` のまま戻らなくなる)。
+        中断口を持たせると、ロボットを 1 台ずつ順に処理する
+        `RobotServer._reactivate_motors` で**後ろのロボットが構造的に不利**になる
+        (docs/invariants.md「停止と解除は対称でなければならない」)。
 
         **ラッチ解除そのものでは機体は動かない**ので、中断する理由が無い:
 
@@ -789,9 +677,7 @@ class CANManager:
 
         本当の励磁を伴う EDULITE 05 / DM3520 / M3508 は対象外で、従来どおり
         `activate_motors` の中断ありの経路を通る。
-
-        Returns:
-            解除フレームを送れなかったモータ名。
+        戻り値は解除フレームを送れなかったモータ名。
         """
 
         async def clear(motor_name: str) -> bool:
@@ -815,16 +701,13 @@ class CANManager:
     ) -> list[str]:
         """``only`` (省略時は全モータ) へ ``action`` を宣言順に適用し、失敗したモータ名を返す。
 
-        **1 台の送信失敗で残りを諦めない。** 素の for に並べると、最初のモータで
-        CAN の送信が失敗しただけで以降のモータは何も受け取れず、しかも症状は
-        「そのバスのモータが全部無励磁」でしかない。起動経路と緊急停止解除の経路が
-        同じ骨格をそれぞれ持っていると、片方だけ握りを外した状態を作れてしまう。
+        **1 台の送信失敗で残りを諦めない。** 起動経路と緊急停止解除の経路が同じ骨格を
+        それぞれ持っていると、片方だけ握りを外した状態を作れてしまう。
 
         中断は「次のモータへ進む直前」にだけ見る。送信の途中で降りると、
         設定だけ入って励磁されていないモータが残る。
 
         ``only`` で絞っても宣言順そのものは全モータの順序を保つ (対象外は素通りする)。
-        絞り込みを理由に順序が変わると、他の呼び出しと挙動が食い違って読みにくい。
         """
         inactive: list[str] = []
         motor_names = [name for name in self._motors if only is None or name in only]
@@ -850,10 +733,8 @@ class CANManager:
         その間に片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に
         偏差超過で止まる (`M3508PositionLoop.set_group_origin_here` と同じ理由)。
 
-        順序は `initialization_steps()` が既に確立しているもの ——
-        **無励磁 → 原点付け替え → 再励磁** —— をそのまま使う。励磁したまま原点を
-        動かすとドライバ内部の位置目標が旧座標のまま残り、差分だけ軸が飛ぶ。
-        独自に組み替えると、励磁時の飛び出しを塞ぐ仕掛けが 2 箇所に分かれる。
+        順序は **無励磁 → 原点付け替え → 再励磁**。励磁したまま原点を動かすと
+        ドライバ内部の位置目標が旧座標のまま残り、差分だけ軸が飛ぶ。
 
         再励磁で `after_set_zero=True` を通すのが要点。`_wait_fresh_feedback` は
         「待機開始より後に届いた 1 通」しか待たないので、SET_ZERO を送った直後に
@@ -862,7 +743,6 @@ class CANManager:
 
         Raises:
             ValueError: 原点を切り直す手段を持たないモータが混ざっている
-                (呼び出し側が `supports_origin_capture()` で先に弾く前提)
             RuntimeError: 再励磁できなかった。**黙って戻ってはならない** ——
                 原点だけ切り直して無励磁のまま残ると、症状は「指令しても動かない」
                 だけになる
@@ -946,31 +826,19 @@ class CANManager:
         """鮮度確認の問い合わせ (`feedback_probe_message()`) を送ってよいか。
 
         **送ってよいのは、そのモータが無励磁だと分かっているときだけ。**
-        EDULITE 05 / DM3520 の問い合わせフレームは `disable` そのもので、
-        「無励磁を無励磁のままにするだけなので機構は動かない」という前提の上に
-        立っている (`Dm3520Driver.feedback_probe_message` /
-        `Edulite05Driver.feedback_probe_message` の docstring)。**励磁中のモータへ
-        送れば、その前提は成り立たない** —— 保持トルクをその場で失い、
-        負荷が掛かっていれば back-drive する (`sub_lift` は自重で落ちる)。
+        EDULITE 05 / DM3520 の問い合わせフレームは `disable` そのものなので、
+        励磁中のモータへ送れば保持トルクをその場で失う (`sub_lift` は自重で落ちる)。
+        励磁中のモータが `only` に混ざる経路は実在し、**軸が両側とも無励磁になる窓**
+        (最悪 550ms) がワークを掴んだまま開く (docs/invariants.md「再励磁のペア展開は
+        『励磁中のモータへ disable を送らない』に依存している」)。
 
-        励磁中のモータを励磁し直す呼び出しは実在する ——
-        `RobotServer._reenergize_motors` は直結ペアの片側だけが落ちたとき、
-        **健全で励磁中の相方も対象へ含める** (ペア軸に片側だけ効く操作を作らない)。
-        絞り込みの宣言順は全モータの順序を保つので、落ちたのが `rotate_l` 側だと
-        健全な `rotate_r` が先にプローブされ、**軸が両側とも無励磁になる窓**
-        (最悪 550ms) がワークを掴んだまま開く。
-
-        鮮度そのものは問い合わせ無しでも満たされる —— 励磁中ということは
-        `QueryDrivenTargetRefresher` (20Hz) が目標を送り続けており、本機の
-        フィードバックはそれへの応答として 50ms 以内に届く。届かなければ
+        鮮度そのものは問い合わせ無しでも満たされる —— 励磁中なら
+        `QueryDrivenTargetRefresher` (20Hz) への応答が 50ms 以内に届く。届かなければ
         `_wait_fresh_feedback` がタイムアウトして無励磁のまま残す (安全側)。
 
-        `after_set_zero` は例外で、必ず送ってよい。この経路
-        (`capture_origin_via_set_zero`) は直前に `deactivation_steps()` を
-        送っており **無励磁であることを指令として知っている**ため、
-        フィードバックが追いついていない (`is_energized()` がまだ True を返す)
-        だけで問い合わせを止めると、零点確定が理由もなく失敗しうる。
-        つまり例外ではなく、「無励磁だと分かっている」の 2 つ目の根拠である。
+        `after_set_zero` は必ず送ってよい。この経路は直前に `deactivation_steps()` を
+        送っており **無励磁であることを指令として知っている**ため、フィードバックが
+        追いついていないだけで問い合わせを止めると零点確定が理由もなく失敗する。
         """
         if after_set_zero:
             return True
@@ -986,9 +854,7 @@ class CANManager:
         「新しく届いたこと」を要求し、受信済みの値の再利用は認めない。
 
         ``probe`` が False なら問い合わせを 1 通も送らず、届くのを待つだけにする。
-        可否の判断は `_may_probe_for_feedback` が持つ (ここでは持たない ——
-        待ち方と「打ってよいか」を同じ関数に混ぜると、呼び出しを 1 つ足した人が
-        判断を書き写すことになる)。
+        可否の判断は `_may_probe_for_feedback` が持つ (ここでは持たない)。
         """
         baseline = self._last_rx_at.get(motor_name)
         probe_msg = self._motors[motor_name].feedback_probe_message() if probe else None
@@ -1004,19 +870,16 @@ class CANManager:
                 try:
                     await self.send(motor_name, probe_msg)
                 except Exception:
-                    # 問い合わせが通らないバスでも、自発フィードバックが届く可能性は残る。
-                    # 待機自体はタイムアウトまで続ける。
+                    # 問い合わせが通らないバスでも自発フィードバックが届く可能性は
+                    # 残るので、待機自体はタイムアウトまで続ける
                     logger.debug("モータ '%s' への問い合わせ送信に失敗", motor_name)
             await asyncio.sleep(_ACTIVATION_PROBE_INTERVAL_S)
 
     async def shutdown(self) -> None:
         """受信タスクを畳み、全バスを閉じる。
 
-        既に例外で死んでいる受信タスク (バスが down しているときの
-        ``CanOperationError`` など) の例外をここで再送出しない。``main()`` の
-        ``finally`` は 2 台ぶんの ``shutdown()`` を素の for で並べており、
-        1 台目が送出すると 2 台目のバスが開いたまま残る。1 本のバスの
-        ``bus.shutdown()`` が失敗した場合も同じ理由で残りを閉じ続ける。
+        既に例外で死んでいる受信タスクの例外をここで再送出しない —— 送出すると
+        2 台目のバスが開いたまま残る (`bus.shutdown()` の失敗も同じ理由で握る)。
         死因は受信ループ側が降りる前に必ずログへ残している。
         """
         for task in self._tasks:
@@ -1036,16 +899,11 @@ class CANManager:
             except Exception:
                 logger.exception("バスの停止に失敗: bus=%s", bus_name)
 
-    # ------------------------------------------------------------------ #
-    #  ヘルスチェック (Phase 6, タスク 6-8)
-    # ------------------------------------------------------------------ #
-
     def health(self, *, thresholds: HealthThresholds = DEFAULT_HEALTH) -> HealthSnapshot:
-        """現在の受動監視状態から HealthSnapshot を組み立てる (同期処理)。
+        """現在の受動監視状態から HealthSnapshot を組み立てる (副作用を持たない)。
 
-        サーバの WS 配信ループや GET /health から呼ばれる前提で副作用を持たない。
-        能動的にモータを動かして確かめるのは統合動作確認シーケンス
-        (sequences/motor_check.py) の仕事で、本メソッドは受信状態を読むだけ。
+        能動的にモータを動かして確かめるのは統合動作確認シーケンスの仕事で、
+        本メソッドは受信状態を読むだけ。
         """
         now = time.time()
 
@@ -1067,10 +925,8 @@ class CANManager:
                 age_ms is not None and age_ms > thresholds.feedback_timeout_ms
             )
             # **ドライバが言うことを持っているなら状態も OK ではない。**
-            # detail だけを載せて状態を OK に置くと、`summarizeMotors` が
-            # 「All operational」を出して `SubsystemStatus` は畳んだままになり、
-            # 報告はどの画面にも現れない ——「報告した」つもりの黙殺が成立する。
-            # 出したい詳細があることと、状態が平常でないことを 1 つに束ねておく
+            # detail だけを載せて状態を OK に置くと `SubsystemStatus` が畳んだまま
+            # になり、報告はどの画面にも現れない
             detail = motor.health_detail()
             warning = (
                 motor.has_thermal_warning(thresholds.temp_warning_c)
@@ -1094,15 +950,11 @@ class CANManager:
                     state=state,
                     last_feedback_at=last_fb,
                     feedback_age_ms=age_ms,
-                    # **温度を測れない基板は 0.0 ではなく None を配る。**
-                    # 自作モタドラはどの基板も温度センサを持たない (仕様書 §3.2) ので、
-                    # `MotorState.temperature` の 0.0 は「測った値」ではなく制御経路が
-                    # float を要求するための詰め物にすぎない。素通しにすると
-                    # UI に 0.0℃ が並び、操縦者は「冷えている」と読む
+                    # **温度を測れない基板は 0.0 ではなく None を配る** (素通しすると
+                    # UI に 0.0℃ が並び、操縦者は「冷えている」と読む)
                     temperature=(motor.state.temperature if motor.telemetry.temperature else None),
-                    # ドライバ固有の事情 (M3508 の累積角再アンカーなど) をそのまま載せる。
-                    # 状態 (OK/STALE) では表せない「値は届いているが意味が変わった」を
-                    # 運ぶ唯一の口で、ここを None 固定に戻すと報告が画面から消える
+                    # 状態 (OK/STALE) では表せない「値は届いているが意味が変わった」
+                    # (M3508 の累積角再アンカー等) を運ぶ唯一の口
                     detail=detail,
                 )
             )
@@ -1121,31 +973,27 @@ class CANManager:
             bus_off = self._bus_off.get(bus_name, False)
             rx_down = self._rx_down.get(bus_name, False)
             rx_down_episodes = self._rx_down_episodes.get(bus_name, 0)
-            # **バス名や `control_type` の文字列比較ではなく、ドライバ自身に聞く。**
-            # `has_on_off_control()` の既定は False で、電磁弁用の GenericDriver
-            # だけが True を返す。ここで名前判定 (例: "can_generic" かどうか) に
-            # 倒すと、config で弁のバスを変えた瞬間に UI の判定が古いまま残る
+            # **バス名や `control_type` の文字列比較ではなく、ドライバ自身に聞く**
+            # —— 名前判定に倒すと、config で弁のバスを変えた瞬間に UI の判定が
+            # 古いまま残る
             may_affect_workpiece = any(
                 motor.has_on_off_control() for motor in self._bus_motors.get(bus_name, [])
             )
 
-            # python-can の bus.state は実装しないインタフェースが多い (SocketCAN も
-            # その 1 つで、基底クラスの既定 ACTIVE が返る) ため getattr で防御的に読む。
-            # **SocketCAN では下の 2 つは永久に False になる。** 実バスの bus-off は
-            # エラーフレーム (`_handle_error_frame`) が拾う。
+            # bus.state は実装しないインタフェースが多いので getattr で防御的に読む。
+            # **SocketCAN では下の 2 つは永久に False になる**
             can_state = getattr(bus, "state", None)
             error_state = getattr(can.BusState, "ERROR", None)
             passive_state = getattr(can.BusState, "PASSIVE", None)
             is_error = can_state is not None and can_state == error_state
             is_passive = can_state is not None and can_state == passive_state
 
-            # **判定に使うのは累計 (`tx_err`) ではなく現況スコア (`tx_score`)。**
-            # 累計は単調増加なので、一度超えたバスは復旧しても DEGRADED から戻れない。
-            # 表示には累計をそのまま載せる (この試合で何回失敗したかは残す)
-            # **受信が読めていないバスは DOWN。** 受信ループが断絶を握って再試行を
-            # 続けるようになったので、ここで出さないと「黙って回り続ける」だけになり、
-            # 症状は全モータの STALE にしか現れない (原因がバスなのかモータなのか
-            # 区別が付かない、いちばん切り分けにくい形)。
+            # **判定に使うのは累計 (`tx_err`) ではなく現況スコア (`tx_score`)** ——
+            # 累計は単調増加なので、一度超えたバスは復旧しても DEGRADED から戻れない
+            # (表示には累計をそのまま載せる)。
+            # **受信が読めていないバスは DOWN。** 出さないと受信ループが黙って再試行を
+            # 続けるだけになり、症状は全モータの STALE にしか現れない (原因がバスか
+            # モータか区別が付かない、いちばん切り分けにくい形)
             if bus_off or is_error or rx_down:
                 state = BusHealth.DOWN
             elif tx_score >= thresholds.tx_error_threshold or is_passive:

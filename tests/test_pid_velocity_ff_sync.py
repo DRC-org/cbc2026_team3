@@ -1,29 +1,16 @@
 """`motion.velocity_ff` と `pid.kd` の一致を機械的に守る。
 
-docs/invariants.md の不変条件:
+不変条件と理由は docs/invariants.md「`motion.velocity_ff` は `pid.kd` と同値に保つ」。
+片方だけ動かした症状は「飽和率だけ上がって速くならない」だけで、今どの値で動いて
+いるかを読めるのは起動ログしかないので、対をここで機械的に守る (同型の先行事例は
+`tests/test_firmware_version_sync.py`)。
 
-> **`motion.velocity_ff` は `pid.kd` と同値に保つ。2 つの config ファイルにまたがる対である。**
+**現状この対を持つのは `config/main_hand_positions.yaml` の `y_axis` 1 組だけ。**
 
-`kd` の単位は counts/(deg/s) なので巡航速度がそのまま制動として出力に乗る
-(200mm/s = 11003deg/s では D 項だけで -11003counts になり output_limit を
-超えて逆向きに飽和する)。参照速度へ `velocity_ff` と同じ係数を掛けて足すことで
-その制動をちょうど打ち消す設計であり、片方だけ動かすと「飽和率だけ上がって
-速くならない」という症状になる。今どの値で動いているかを読めるのは起動ログ
-だけなので (`motion.velocity_ff` は実行中に変更できず UI にも配信されない)、
-ここで機械的に守る。先行事例は `tests/test_firmware_version_sync.py`。
-
-**現状この対を実際に持つのは `config/main_hand_positions.yaml` の `y_axis` 1 組だけ**
-(`velocity_ff` を書いている軸がそこにしか無い)。守る対が 1 組しか無いことは
-承知のうえで、将来の編集がここを黙って崩さないように置く。
-
-**`motion:` を持たない軸は対象外にする。** `config/bench/y_axis_tuning/main_hand.yaml` は
-`pid.kd: 1.0` を持つが、対になる `config/bench/y_axis_tuning/main_hand_positions.yaml` の
-`y_axis` には `motion:` が無い (台形プロファイルを意図的に持たせていないベンチ構成)。
-「`kd` があれば `velocity_ff` と一致しろ」と素直に書くとこのベンチセットが即座に
-誤検出で赤くなる —— 参照速度が存在しないので `velocity_ff` はそもそも定義され得ない。
-このスコープの絞り込みは実在するこの反例に立っている (test_config_schema.py の
-_BENCH_USES_PRODUCTION_CONFIG まわりで確認済み)。`motion:` を持つ軸だけを対象にすれば、
-「対を書くなら両方書け」という以上のことは要求しない。
+**`motion:` を持たない軸は対象外にする。** `config/bench/y_axis_tuning/` は `pid.kd`
+を持つが positions 側に `motion:` が無い (台形プロファイルを意図的に持たせていない)
+—— 参照速度が存在しない軸では `velocity_ff` がそもそも定義され得ないので、
+「`kd` があれば一致しろ」と書くとこのベンチセットが誤検出で赤くなる。
 """
 
 from __future__ import annotations
@@ -90,11 +77,9 @@ def _velocity_ff_pairs() -> list[tuple[str, pathlib.Path, pathlib.Path, str, str
         for axis_name, axis in axes.items():
             if not isinstance(axis, dict) or not isinstance(axis.get("motion"), dict):
                 continue
-            # PC 側 PID を持つモータだけが対を成す。EDULITE 05 / DM3520 はドライバが
-            # 位置ループを内蔵するので config が `pid: null` で、`main._attach_motion_profiles`
-            # も「位置制御ループに載らないモータへ書いても無害に無視される」と明記している。
-            # 絞らないと、その軸へ `motion:` を書いた瞬間に本番コードが無害と保証している
-            # 構成でこのテストだけが赤くなる。
+            # PC 側 PID を持つモータだけが対を成す。EDULITE 05 / DM3520 は `pid: null`
+            # で、`motion:` を書いても位置制御ループに載らず無害に無視される。絞らないと
+            # 本番コードが無害と保証している構成でこのテストだけが赤くなる。
             robot = _load_yaml(robot_yaml)
             for motor_name in axis.get("motors") or {}:
                 motor = (robot.get("motors") or {}).get(motor_name)

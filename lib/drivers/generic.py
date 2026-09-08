@@ -47,9 +47,8 @@ _FLAG_UNCONFIGURED_ID = 0x08
 # センサは自分のデバイス ID で FEEDBACK を送るので、1 枚に何個載っていてもビットは 1 つ
 _FLAG_SENSOR = 0x10
 # **電源投入後まだ SET_TARGET を 1 通も受けていない** (仕様書 §3.2 / §5.4)。
-# これが無いと基板の再起動が PC から見えない。サーボ基板は起動時に config.h の
-# 初期角へ駆動するので、試合中の瞬断は「機構が勝手に飛ぶ」形で現れるのに、
-# ウォッチドッグのビットは「一度でも受けた後の満了」でしか立たない
+# これが無いと基板の再起動が PC から見えない (ウォッチドッグのビットは
+# 「一度でも受けた後の満了」でしか立たない)
 _FLAG_NEVER_COMMANDED = 0x20
 # bit6-7 は予約
 
@@ -67,9 +66,7 @@ _FEEDBACK_MIN_LENGTH = 1
 _INFO_MIN_LENGTH = 3
 
 # 固定小数点の単位 (仕様書 §4)。**CAN 上を流れる数値はすべて int16 で、float は
-# 1 バイトも流れない。** float32 をやめたのは NaN の防御をプロトコル全体から消すため。
-# NaN は比較がすべて false になるのでクランプも範囲チェックも素通りし、一度内部へ
-# 入ると「無言で止まったモータ」になる。整数ならその失敗クラスごと存在しない
+# 1 バイトも流れない** (理由は docs/invariants.md「CAN 上を流れる数値はすべて…」)
 _ANGLE_SCALE = 10  # 0.1deg
 _DUTY_SCALE = 10000  # duty -1.0 .. +1.0
 _RATE_SCALE = 10  # 0.1deg/s
@@ -91,11 +88,9 @@ _TARGET_SCALE = {
 class InfoFrame:
     """INFO フレームの中身 (仕様書 §3.4)。基板が 1Hz で自己申告する。
 
-    ``angle_range_deg`` が None なのは **可動レンジを申告しなかった** ことを意味し、
-    「レンジ 0deg」とは別物である。混ぜてはならない —— DC 基板と電磁弁基板は
-    そもそも角度を持たないので送らないのが正しく、サーボ基板が送ってこないのは
-    可動レンジ以前のバージョンが焼かれている証拠になる。0 で埋めると、この 2 つが
-    「測ったように見える 0」として同じ顔で届く。
+    ``angle_range_deg`` の None は **可動レンジを申告しなかった** ことで、
+    「レンジ 0deg」とは別物。0 で埋めると「角度を持たない基板」と「可動レンジ以前の
+    ファームが焼かれたサーボ基板」が同じ顔で届く。
     """
 
     firmware_version: int
@@ -148,12 +143,10 @@ class GenericDriver(MotorDriver):
         expected_firmware: int | None = None,
         expected_angle_range_deg: float | None = None,
     ) -> None:
-        # 範囲外の can_id は静かに壊れる。特に 0xFF は activation_steps() が
-        # 緊急停止**解除**フレームを 0x7FF (ブロードキャスト) へ送ることになり、
-        # 共有 can_generic バス上の全基板のラッチをまとめて外す。
-        # 0x100 以上はコマンド種別のビットを侵食し、SET_TARGET が FEEDBACK として
-        # 読まれるフレームになる (何も駆動せず永久に STALE)。
-        # 0x00 はファームが駆動を拒否する ID で、実行時に FEEDBACK で分かるが遅い。
+        # 範囲外の can_id は静かに壊れる。特に 0xFF は activation_steps() の
+        # 緊急停止**解除**フレームがブロードキャストになり、共有バス上の全基板の
+        # ラッチをまとめて外す。0x100 以上はコマンド種別のビットを侵食し、
+        # SET_TARGET が FEEDBACK として読まれるフレームになる。
         if not _DEVICE_ID_MIN <= can_id <= _DEVICE_ID_MAX:
             raise ValueError(
                 f"can_id は {_DEVICE_ID_MIN:#04x}〜{_DEVICE_ID_MAX:#04x} の範囲"
@@ -186,17 +179,10 @@ class GenericDriver(MotorDriver):
     def telemetry(self) -> TelemetrySupport:
         """自作モタドラが測れるのは位置だけで、それも位置指令の基板に限る。
 
-        - サーボ基板 (``control_type: position``) は FEEDBACK Byte1-2 に位置を載せる
-        - DC 基板 (``duty``) と電磁弁基板 (``on_off``) は状態フラグ 1 バイトだけを送る
-          (DLC=1)。``decode_feedback`` が返す ``position=0.0`` は「位置が無いフレームを
-          共通の ``MotorState`` に収めるための詰め物」であって、測った値ではない
-        - ``velocity`` に設定した軸も位置は返らない。速度指令を実装した基板は無く、
-          速度フィードバックはプロトコルから外れている
-
-        電流・温度はどの基板も測る手段を持たない (仕様書 §3.2)。センサスロットも
-        既定の ``control_type: position`` で生成されるが、位置は state 配信に載らず
-        (``sensors:`` は UI のモータ一覧に並ばない)、ヘルスが読む温度はここで
-        ``None`` へ倒れる。
+        サーボ基板 (``position``) だけが FEEDBACK Byte1-2 に位置を載せ、DC 基板
+        (``duty``) と電磁弁基板 (``on_off``) は状態フラグ 1 バイトだけを送る (DLC=1)。
+        ``decode_feedback`` が返す ``position=0.0`` は詰め物であって測った値ではない。
+        電流・温度はどの基板も測る手段を持たない (仕様書 §3.2)。
         """
         if self.control_type is ControlMode.POSITION:
             return _POSITION_ONLY_TELEMETRY
@@ -218,9 +204,8 @@ class GenericDriver(MotorDriver):
     def try_parse_can_id(arbitration_id: int) -> tuple[CommandType, int] | None:
         """解析できない ID では例外の代わりに None を返す parse_can_id。
 
-        parse_can_id は「自分が組み立てた ID を解析し直す」用途で例外を投げたままにし
-        (誤った ID を黙って通すと原因調査が困難になる)、バス上の他人のフレームを
-        ふるいにかける受信経路だけをこちらに分ける。
+        parse_can_id は「自分が組み立てた ID を解析し直す」用途で例外を投げたままにし、
+        バス上の他人のフレームをふるいにかける受信経路だけをこちらに分ける。
         """
         try:
             return GenericDriver.parse_can_id(arbitration_id)
@@ -263,7 +248,7 @@ class GenericDriver(MotorDriver):
         """緊急停止ラッチの解除フレーム (仕様書 §3.5)。
 
         ファーム側は緊急停止をラッチし、解除フレームを受け取るまで SET_TARGET で
-        駆動しない。解除しない限り復旧できないので、起動時と緊急停止解除時に送る。
+        駆動しないので、起動時と緊急停止解除時に送る。
         """
         data = bytearray(3)
         data[0] = 0x01
@@ -280,8 +265,7 @@ class GenericDriver(MotorDriver):
         """FEEDBACK フレーム (仕様書 §3.2)。Byte0=状態フラグ / Byte1-2=位置。
 
         **DLC は可変。** 位置を持たない基板 (DC・センサ) は状態フラグ 1 バイトだけを
-        送る。常に 0 の位置・速度を詰めても、PC には「測ったように見える 0」が届くだけ。
-        速度は誰も使っていなかったのでプロトコルから外した。
+        送る (常に 0 を詰めると「測ったように見える 0」が届く)。
         """
         d = msg.data
         flags = d[0]
@@ -302,13 +286,10 @@ class GenericDriver(MotorDriver):
         return super().update_state(msg)
 
     def matches_feedback(self, msg: can.Message) -> bool:
-        # 自分宛でないフレームの解釈失敗はここで握りつぶす。受信ループ
-        # (CANManager._dispatch_frame) は宛先判定とデコードをモータ 1 台単位で
-        # 囲うのでバス全体は死なないが、ここから例外を投げるとそのモータ宛の
-        # フレームが 1 通落ち、鮮度も進まない (握った件数は rx_error_count に積まれる)。
-        # 判定できないフレームは「自分宛ではない」として無視する方が明らかに安全 ——
-        # can_generic は 2 台のロボットで物理共有しており、解釈できないフレームが
-        # 流れるのは構成上の正常である。
+        # 判定できないフレームは「自分宛ではない」として無視する —— can_generic は
+        # 2 台のロボットで物理共有しており、解釈できないフレームが流れるのは構成上の
+        # 正常である。ここから例外を投げると、そのモータ宛のフレームが 1 通落ちて
+        # 鮮度も進まない。
         if msg.is_extended_id:
             # 本プロトコルは Standard Frame のみ (仕様書 §1)。
             # 他プロトコルが同一バスに相乗りしても壊れないよう、ID 解析前に弾く
@@ -322,13 +303,10 @@ class GenericDriver(MotorDriver):
         if cmd != CommandType.FEEDBACK or dev != self.can_id:
             return False
 
-        # **長さも見る。** DLC は可変 (状態フラグ 1 バイト + 位置を持つ基板だけ 2 バイト。
-        # 仕様書 §3.2) なので `== N` では書けないが、状態フラグすら無いフレームは
-        # 解釈できない。claim してしまうと `update_state` が `d[0]` で IndexError を
-        # 投げ、`_dispatch_frame` が握って `rx_error_count` を積む —— 「解釈できない
-        # フレームは自分宛ではないとして無視する」というこのメソッドの宣言に反する。
-        # リモートフレーム・ノイズ・他プロトコルの相乗りで実際に流れうる。
-        # Edulite05Driver / Dm3520Driver は同じ理由で `len(msg.data) != 8` を見ている。
+        # **長さも見る。** DLC は可変なので `== N` では書けないが、状態フラグすら
+        # 無いフレームを claim すると `update_state` が `d[0]` で IndexError を投げ、
+        # 「解釈できないフレームは自分宛ではないとして無視する」という宣言に反する
+        # (リモートフレーム・ノイズ・他プロトコルの相乗りで実際に流れうる)。
         return len(msg.data) >= _FEEDBACK_MIN_LENGTH
 
     def decode_info(self, msg: can.Message) -> InfoFrame:
@@ -450,17 +428,10 @@ class GenericDriver(MotorDriver):
     def device_id_unconfigured(self) -> bool:
         """DIP スイッチのデバイス ID が未設定 (0x00) か (FEEDBACK のデバイス ID 未設定ビット)。
 
-        **実機からこのビットが立つことはない。この経路は防護として機能しない。**
-        未設定のチャンネルは FEEDBACK も INFO も 1 通も送らないため (仕様書 §2.2)、
-        報告を運ぶフレーム自体が存在しない (デバイス ID 0x00 で送ったとしても、
-        PC 側の can_id は 0x01〜0xFE に限られるので claim できるドライバが無い)。
-
-        **PC 側から見える症状は「その基板の全チャンネルが STALE」で、配線不良と
-        区別が付かない。切り分けは基板の LED (赤の速い点滅) で行う。**
-
-        デコードを残してあるのは、ファームが状態フラグ bit3 の定義を保持しているため
-        (詰め直すと bit4/bit5 が動き、PC とファームを同時に差し替えることになる)。
-        観測手段を持つ基板が将来現れたときは、ここが自動的に生きる。
+        **実機からこのビットが立つことはない。この経路は防護として機能しない**
+        (docs/invariants.md「未設定のチャンネルは `FEEDBACK` も `INFO` も
+        1 通も送らない」)。切り分けは基板の LED (赤の速い点滅) で行う。
+        デコードを残してあるのは、ファームが状態フラグ bit3 の定義を保持しているため。
         """
         return self._unconfigured_id_flag
 
@@ -479,14 +450,9 @@ class GenericDriver(MotorDriver):
     def sensor_active(self) -> bool:
         """このデバイスのセンサ入力が入っているか (FEEDBACK のセンサビット, 仕様書 §5.2)。
 
-        基板のセンサは 1 個ずつ独立した CAN デバイスとして FEEDBACK を送るので、
-        「何番のセンサか」はこのドライバのモータ名と can_id が表す。
-
-        原点合わせ用の入力で、**異常ではない**。is_fault() に入れてはならない。
-        ここに入れると、センサに触れているだけでヘルスが FAULT になり動作確認も
-        シーケンスも止まる (原点合わせは「触れさせる」操作なので必ず起きる)。
-
-        基板は状態を報告するだけで、判断は PC 側が持つ (仕様書 §5.2)。
+        原点合わせ用の入力で、**異常ではない。is_fault() に入れてはならない** ——
+        入れるとセンサに触れているだけでヘルスが FAULT になり、原点合わせのたびに
+        動作確認もシーケンスも止まる。
 
         **「今どうなっているか」を描く側 (診断ツリー) はこちらを見る。**
         観測と観測のあいだの接触まで拾いたい零点確定は `consume_sensor_latch()`。
@@ -496,36 +462,28 @@ class GenericDriver(MotorDriver):
     def consume_sensor_latch(self) -> bool:
         """前回この関数を呼んでから一度でもセンサ入力が入ったか。**読むと消える。**
 
-        零点確定の探索はリミットスイッチの ON 区間を**跨いで**しまうことがある。
-        `homing.step` (rotate は 2.0deg) より ON 区間が狭いと、指令 1 回で区間を
-        通り抜け、`settle_s` (50ms) 後の観測時にはもう OFF —— 実機ではこれで探索が
-        止まらず、スイッチを越えて回り続けた。FEEDBACK は 100Hz で届いているので、
+        零点確定の探索は ON 区間が `homing.step` より狭いと指令 1 回で通り抜け、
+        `settle_s` (50ms) 後の観測時にはもう OFF になる —— 実機ではこれで探索が
+        止まらずスイッチを越えて回り続けた。FEEDBACK は 100Hz で届いているので、
         受信のたびにラッチしておけば区間の通過を 1 通も取りこぼさない。
 
-        **読み手が複数いると壊れる。** 先に読んだ側が相手のぶんまで消すので、
-        **呼んでよいのは `HomingRunner` だけ**とする。今の状態が要るだけの用途
-        (診断ツリー・ヘルス) は `sensor_active` を見ること。
+        **読み手が複数いると壊れる** (先に読んだ側が相手のぶんまで消す) ので、
+        **呼んでよいのは `HomingRunner` だけ**。今の状態が要るだけの用途は
+        `sensor_active` を見ること。
 
-        現在値も OR で見るのは、ラッチを消した直後に FEEDBACK が途絶えても
-        「触れているのに触れていないと答える」側へ倒れないようにするため
-        (この関数は現在値より弱い答えを返さない)。
+        現在値も OR で見るのは、この関数が現在値より弱い答えを返さないため。
         """
         latched = self._sensor_latched or self._sensor_flag
         self._sensor_latched = False
         return latched
 
     def is_fault(self) -> bool:
-        # デバイス ID 未設定は基板の設定ミスで駆動自体が拒否される状態なので FAULT に
-        # するが、**実機ではこの項が立つことはない** (device_id_unconfigured の
-        # docstring)。設定ミスの通知を担うのは基板の LED で、PC 側には「全チャンネルが
-        # STALE」としてしか現れない。残してあるのはビット定義がファーム側に残っている
-        # ためで、ここを唯一の防護と読んではならない。
+        # デバイス ID 未設定は FAULT にするが、**実機ではこの項が立つことはない**
+        # (device_id_unconfigured の docstring)。ここを唯一の防護と読んではならない。
         # 緊急停止中とウォッチドッグ作動中は正常な安全動作なので含めない。
-        # 過電流・過熱はどちらの基板も検出手段を持たない (仕様書 §3.2)
-        #
-        # 自己申告の不一致 (焼き忘れ・サーボの型違い) も同じ扱いにする。どちらも
-        # **機体は指令どおり動いたようにしか見えない**設定ミスで、ここで FAULT に
-        # しないと試合まで誰も気付けない (仕様書 §3.4 / §7.7)
+        # 自己申告の不一致 (焼き忘れ・サーボの型違い) は FAULT —— どちらも
+        # **機体は指令どおり動いたようにしか見えない**設定ミスで、ここで倒さないと
+        # 試合まで誰も気付けない (仕様書 §3.4 / §7.7)
         return self._unconfigured_id_flag or self.info_mismatch is not None
 
     def has_on_off_control(self) -> bool:
@@ -554,13 +512,9 @@ class GenericDriver(MotorDriver):
 
         ブロードキャストではなく自分の device_id 宛に送るのは、共有バス上の
         他ロボットのモータまで巻き添えで解除しないため。**ただしこれだけでは
-        yaml に登録されたモータにしか届かない。** 停止はサーバーがブロードキャスト
-        `0x0FF` をバスへ流すのでバス上の全基板・全チャンネルがラッチするので、
-        個別送信だけだと PC の管轄外 (ベンチ設定で一部だけ動かす / 増設基板が
-        yaml に無い / 片方のロボットだけ起動する) が永久にラッチされたまま残る。
-        そのため**サーバーは解除時に別途ブロードキャスト解除も送る**
-        (`RobotServer._send_e_stop_clear_broadcast`)。ここが個別送信のままなのは、
-        管轄内のモータへ確実に届けるという別の役割を持つため。
+        yaml に登録されたモータにしか届かない**ので、**サーバーは解除時に別途
+        ブロードキャスト解除も送る** (`RobotServer._send_e_stop_clear_broadcast`)。
+        ここが個別送信のままなのは、管轄内のモータへ確実に届ける役割を持つため。
 
         解除後の目標値はファーム側が 0 から始める (§3.5) ので、実測角を知らなくても
         飛び出さない。よって requires_fresh_feedback_for_activation は既定の False。

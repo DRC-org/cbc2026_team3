@@ -5,10 +5,8 @@
 # 現れず手動操縦パネルを開けない。**本番では吸着系はサブハンドの機構だが、ベンチでは
 # 他の 3 セットと手順を揃える方を優先している** (どのベンチでも同じタブを開けばよい)。
 #
-# 位置定数の読み先は「robot config と同じディレクトリの <robot_name>_positions.yaml」
-# (main.py の _positions_path) なので、このファイルを config/bench/solenoid/ に置くことで
-# robot_name は main_hand のまま config/bench/solenoid/main_hand_positions.yaml が読まれる。
-# 本番の config/main_hand_positions.yaml も他のベンチのものも無傷のまま残る。
+# 位置定数は同じディレクトリの <robot_name>_positions.yaml が読まれる
+# (main.py の _positions_path)。本番の config/*_positions.yaml は無傷のまま残る。
 #
 # **このベンチでは電磁弁基板 1 枚の 6 チャンネルだけを登録する。** M3508 / EDULITE /
 # DC 基板 / サーボ基板を外すことで、登録されないバスへの送信も動作確認の対象も消え、

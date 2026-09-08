@@ -1,14 +1,12 @@
 """サーバーが実際に配信する WS メッセージを golden ファイルへ焼き付ける。
 
-サーバーと Web UI が「それぞれ想像した契約」を別々にテストしていると、両者の
-食い違いは誰にも検出できない。実際に `health_change` から `robot` が抜けたまま
-UI 側が `typeof msg.robot === "string"` を受信条件にしており、Python 側は
-`target` しか見ず、TS 側はサンプルを自分で捏造していたため、ヘルス異常が実機で
-100% 捨てられていることに両方のテストが揃って気付けなかった。
+サーバーと Web UI が「それぞれ想像した契約」を別々にテストしていると、両者の食い違いは
+誰にも検出できない (実際に `health_change` の `robot` 欠落でヘルス異常が 100% 捨てられ
+ていることに、両方のテストが揃って気付けなかった)。
 
-そこで「実物の配信内容」を 1 つの JSON に固定し、Python 側はここで
-現在の配信と一致することを、Web 側はこのファイルを読んで型が受理できることを
-検証する。サンプルは決して手書きしない (手書きした瞬間に想像の契約へ逆戻りする)。
+「実物の配信内容」を 1 つの JSON に固定し、Python 側は現在の配信と一致することを、
+Web 側はこのファイルを型が受理できることを検証する。**サンプルは決して手書きしない**
+(手書きした瞬間に想像の契約へ逆戻りする)。
 """
 
 from __future__ import annotations
@@ -119,10 +117,9 @@ class _ContractSequence(Sequence):
 def _generic_drivers() -> dict[str, GenericDriver]:
     """自作モタドラの 2 枚。**測れる項目が違う 2 種類を必ず両方載せる。**
 
-    サーボ基板 (position) は位置だけを、DC 基板 (duty) は 1 つも測れない
-    (仕様書 §3.2)。実ドライバを CANManager へ挿すのは、測定可否の宣言が
-    ドライバ側にしか無いため —— モックのままだと「4 値とも数値」の形しか
-    golden に現れず、UI が null を受け取れなくても誰も気付けない。
+    サーボ基板 (position) は位置だけを、DC 基板 (duty) は 1 つも測れない (仕様書 §3.2)。
+    測定可否の宣言はドライバ側にしか無いので実ドライバを挿す —— モックのままだと
+    「4 値とも数値」の形しか golden に現れず、UI が null を受け取れなくても気付けない。
 
     状態は実機と同じ FEEDBACK フレームで作る (``driver._state`` への直接代入は
     デコード層を丸ごと迂回する)。DC 基板は位置を持たないので DLC=1 で送る。
@@ -137,8 +134,8 @@ def _generic_drivers() -> dict[str, GenericDriver]:
 def _sensor_drivers() -> dict[str, GenericDriver]:
     """原点スイッチ 2 本。**接触した形と接触していない形を両方載せる。**
 
-    片方だけだと `active` が常に同じ値になり、UI がもう一方を受信条件で弾いても
-    誰も気付けない。鮮度 (`stale`) の 2 通りは `_make_can_manager` が作る。
+    片方だけだと `active` が常に同じ値になり、UI がもう一方を弾いても気付けない。
+    鮮度 (`stale`) の 2 通りは `_make_can_manager` が作る。
     """
     touching = GenericDriver("origin_sensor", can_id=0x44, control_type=ControlMode.POSITION)
     released = GenericDriver("rotate_origin_sensor", can_id=0x43, control_type=ControlMode.POSITION)
@@ -199,9 +196,8 @@ def _fault_motor_snapshot(mgr: CANManager):
 class _ContractCheckSequence(Sequence):
     """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。
 
-    軸を宣言しておくのは、**除外されたステップが載った形**も golden へ焼き付ける
-    ため。除外が無い形しか無いと、UI が除外を受信条件で弾いても誰も気付けない
-    (サブハンド不在の構成でだけ全ステップ成功に見える、という壊れ方になる)。
+    軸を宣言するのは**除外されたステップが載った形**も golden へ焼き付けるため
+    (除外が無い形しか無いと、サブハンド不在の構成でだけ全ステップ成功に見える)。
     """
 
     def __init__(self) -> None:
@@ -223,14 +219,12 @@ def _motor_group(
 ) -> MotorGroup:
     """指令の出どころ。**本番と同じく 1 つだけ作って全員で共有する。**
 
-    `main._wire_one_robot` はシーケンス・手動・目標値再送へ同じ ``MotorGroup`` を
-    渡す。ここで別々のハンドルを作ると、緊急停止で目標を捨てられる側と `state` の
-    `command` が読む側が別物になり、**golden だけが「停止しても指令が残る」形**を
-    UI へ見せることになる。
+    `main._wire_one_robot` はシーケンス・手動・目標値再送へ同じ ``MotorGroup`` を渡す。
+    別々のハンドルを作ると、緊急停止で目標を捨てられる側と `state` の `command` が読む
+    側が別物になり、**golden だけが「停止しても指令が残る」形**を UI へ見せる。
 
-    mock_can_manager の motors は MagicMock なので、逆換算に実ドライバを使う
-    (MagicMock の feedback_position() は JSON にできず、配信そのものが落ちる)。
-    M3508 は電流指令しか受け付けないので、目標値は PC 側 PID ループへ迂回させる。
+    逆換算に実ドライバを使うのは MagicMock の feedback_position() が JSON にできない
+    ため。M3508 は電流指令しか受け付けないので目標値は PC 側 PID ループへ迂回させる。
     """
     group = MotorGroup()
     for name, driver in drivers.items():
@@ -241,8 +235,8 @@ def _motor_group(
 def _manual_controller(group: MotorGroup) -> ManualController:
     """手動操縦の軸一覧。**連続操作できる軸とできない軸を両方入れる。**
 
-    片方だけだと ``manual`` が null になる形か、値が入る形のどちらかしか
-    golden に現れず、UI が知らないほうの形を受信条件で弾いても誰も気付けない。
+    片方だけだと ``manual`` が null の形か値が入る形のどちらかしか golden に現れず、
+    UI が知らないほうを弾いても気付けない。
     """
     table = load_position_table(
         {
@@ -505,9 +499,8 @@ class TestWsContract:
     async def test_match_state_carries_timer(self) -> None:
         """タイマーの 3 値が実配信に載っていること。
 
-        golden は再生成で黙らせられるので、UI が読むフィールドは不変条件として
-        別に持つ。3 値のどれか 1 つでも落ちると、全デバイスのタイマーが
-        「動かない」「上限が分からない」のどちらかになる。
+        golden は再生成で黙らせられるので、UI が読むフィールドは不変条件として別に持つ。
+        1 つ落ちると全デバイスのタイマーが「動かない」か「上限が分からない」になる。
         """
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         timer = document["samples"]["match_state"]["timer"]

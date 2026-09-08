@@ -22,9 +22,8 @@ from tests.feedback_frames import feed_dm3520
 class _StubCANManager:
     """MotorHandle が触る API だけを実装したスタブ。
 
-    tests/test_position_loop.py の同名スタブとは意図的に別物 (あちらは
-    ``send_to_bus`` だけを持つ)。触れる API を協力者ごとに絞ることで、
-    本来使ってはならない経路をテストが使い始めても気付けるようにしている。
+    tests/test_position_loop.py の同名スタブとは意図的に別物 (あちらは ``send_to_bus``
+    だけを持つ)。触れる API を絞ることが、使ってはならない経路の使用を検出する。
     """
 
     def __init__(self) -> None:
@@ -284,9 +283,8 @@ class _Dm3520Fixture:
 class TestDm3520PollsEvenWithoutTarget:
     """**ここが自作モタドラと正反対**。送らないとフィードバックが 1 通も来ない。
 
-    本機のフィードバックは問い合わせ駆動で、自分宛のフレームを受けたときにしか
-    返らない。目標が無い間も送り続けないと、操縦していない時間はまるごと
-    ``MotorHealth.STALE`` になり、症状は「常に赤い」だけで配線不良と区別が付かない。
+    フィードバックは問い合わせ駆動なので、目標が無い間も送り続けないと操縦していない
+    時間がまるごと ``MotorHealth.STALE`` になる (症状は「常に赤い」だけ)。
     """
 
     async def test_sends_hold_target_before_any_command(self) -> None:
@@ -422,9 +420,9 @@ class TestDm3520EStop:
 class TestDm3520ClearSingleTarget:
     """`clear_target(name)` は問い合わせ駆動のラッチ (`_idle_targets`) も剥がす。
 
-    `RobotServer._reenergize_motors` が使う経路。剥がさずに励磁すると、
-    直後の再送 (最大 20Hz = 50ms 後) がフォルト前の古いラッチで上書きし、
-    「現在角を書いてから励磁する」保証が 1 周期で無効になる。
+    `RobotServer._reenergize_motors` が使う経路。剥がさずに励磁すると直後の再送
+    (最大 50ms 後) が古いラッチで上書きし、「現在角を書いてから励磁する」保証が
+    1 周期で無効になる。
     """
 
     def _two_motor_fixture(self) -> tuple[_StubCANManager, dict[str, MotorHandle], object]:

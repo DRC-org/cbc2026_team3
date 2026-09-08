@@ -1,9 +1,7 @@
 """ログの体裁と、アクセスログを黙らせる仕掛けを固定する。
 
-**壊れると困ること**は 2 つある。1 つは体裁そのもの —— ロガー名の短縮や固定幅が
-崩れると列が揃わなくなり、左端を視線で飛ばして本文を追う読み方ができなくなる。
-もう 1 つはアクセスログで、SPA を配る以上リロード 1 回で数十行出るため、
-`access_log=None` が 1 箇所外れただけで CAN とシーケンスのログが押し流される。
+壊れると困るのは 2 つ —— 体裁 (固定幅が崩れると列で読めなくなる) と、アクセスログ
+(`access_log=None` が 1 箇所外れるだけで CAN とシーケンスのログが押し流される)。
 どちらも「動かなくなる」形では現れず、実機のログを目で見るまで気付けない。
 """
 
@@ -90,9 +88,8 @@ class TestLoggerNameShortening:
     def test_周期タスクの長い名前でも桁が揃う(self) -> None:
         """欄幅が足りないと、**その行だけ**本文が右へずれて列が崩れる。
 
-        `position_loop` (13) と `target_refresh` (14) は 200Hz / 20Hz の周期
-        タスクなので、実機のログでは最も頻度高く現れる。ここが溢れると、
-        いちばん量の多い行が揃わないまま残る。
+        `position_loop` (13) と `target_refresh` (14) は 200Hz / 20Hz の周期タスク
+        なので、溢れるといちばん量の多い行が揃わないまま残る。
         """
         stream = io.StringIO()
         configure_logging(stream=stream)
@@ -306,9 +303,8 @@ class _FakeSite:
 class TestServerAccessLogDisabled:
     """`RobotServer.start()` が `access_log=None` で `AppRunner` を作ること。
 
-    ここが外れても機能は 1 つも壊れないので、振る舞いのテストでは検出できない。
-    症状は「実機のログがアクセス記録で埋まる」だけで、それは実機を見るまで
-    分からない。
+    外れても機能は 1 つも壊れないので振る舞いのテストでは検出できず、症状は
+    「実機のログがアクセス記録で埋まる」だけ。
     """
 
     async def test_AppRunnerにaccess_log_Noneを渡す(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,9 +328,8 @@ class TestServerAccessLogDisabled:
 class TestStartupLineNamesDryRun:
     """`--dry-run` で起動したことは、起動 1 行目から読めなければならない。
 
-    dry-run は `python-can` の virtual バスで擬似値を作るので、UI は平常どおり
-    値を描き接続表示も緑になる —— **画面からは本物と区別が付かない。** 会場で
-    「繋がるのに機体が動かない」を切り分ける最初の手掛かりがこの 1 行になる。
+    dry-run でも UI は平常どおり値を描き接続表示も緑になる —— **画面からは本物と
+    区別が付かない。** 会場で「繋がるのに機体が動かない」を切り分ける最初の手掛かり。
     """
 
     async def _startup_line(self, monkeypatch: pytest.MonkeyPatch, *, dry_run: bool) -> str:

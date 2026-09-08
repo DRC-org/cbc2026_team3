@@ -63,15 +63,13 @@ _POSITIONS_SUFFIX = "_positions.yaml"
 
 # M3508 の PC 側位置制御 PID の既定値 (motors[name].pid が無い場合の補完値)。
 # 入力は累積角 [deg]、出力は C620 の電流指令 [counts] (16384 counts ≒ 20A)。
-#
-# 機構が未完成でイナーシャも重力負荷も不明なため、ここでは「動かないより暴れない」を
-# 優先した保守的な仮値を置いている。実機で要チューニング。
-#   kp=2.0  : 100deg の偏差でも 200counts (≒0.24A) しか出ない。まず振動しない領域から始める
-#   ki=0.0  : 積分は重力補償が必要と分かってから足す。機構端に当たった状態で育つと危険
-#   kd=0.0  : ノイズを増幅するため、kp を上げて振動が出てから初めて入れる
-#   dead_band=1.0 : M3508 の減速比 (19:1) を考えると出力軸で 0.05deg 相当。唸り防止
-#   output_limit=2000 : 電流上限 ≒2.4A。C620 フルスケール (20A) の約 12%。
-#                       機構が確定するまで、暴走しても人力で押さえられる領域に留める
+# 「動かないより暴れない」を優先した保守的な仮値。TODO(実機で確認)
+#   kp=2.0  : 100deg の偏差でも 200counts (≒0.24A) しか出ない
+#   ki=0.0  : 積分は重力補償が必要と分かってから足す (機構端で育つと危険)
+#   kd=0.0  : ノイズを増幅するため、振動が出てから初めて入れる
+#   dead_band=1.0 : 減速比 19:1 なので出力軸で 0.05deg 相当。唸り防止
+#   output_limit=2000 : ≒2.4A (C620 フルスケール 20A の約 12%)。暴走しても
+#                       人力で押さえられる領域に留める
 _DEFAULT_PID: dict[str, float | None] = {
     "kp": 2.0,
     "ki": 0.0,
@@ -189,12 +187,7 @@ def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistI
 
     項目ゼロのロールは「常に完了」とみなされるため、yaml が無くても試合には
     入れる。逆に yaml があれば全項目のチェックが試合開始の前提条件になる。
-
-    検証に落ちたときに SystemExit へ変換するのは `_load_all_configs` と同じ理由
-    (会場で読むのが操縦者であり、traceback より 1 行のメッセージのほうが直せる)。
-    ここだけ生の例外で落ちると、ロール名を 1 行打ち間違えただけで journal に
-    Python の traceback が出る —— しかも `cbc-control.service` は約 6 秒で
-    `failed` に固定されるので、読み違えたぶんだけ復帰が遠くなる。
+    検証落ちを SystemExit へ変換するのは `_load_all_configs` と同じ理由。
     """
     if not path.exists():
         logger.warning("チェックリスト設定が見つかりません: %s (項目なしで起動)", path)
@@ -261,15 +254,10 @@ def _make_origin_resolver(
     可否を問えるようにするため。センサまで押し込んでから「確定できません」で
     降りると、機構を動かした意味が無いまま姿勢だけが変わる。
 
-    手段は 2 つあり、この順で探す:
-
-    1. **PC 側位置制御ループ (M3508)** —— 累積角の原点を PC が持つので、CAN の
-       往復は要らない
-    2. **ドライバへの `SET_ZERO`** —— 原点をドライバ内部に持つモータ用。可否は
-       ドライバ自身の `supports_origin_capture()` が答える (`main.py` に
-       ドライバ種別を書き写して導出し直さない)
-
-    どちらも無ければ None を返す。呼び出し側が起動ログと `HomingError` の両方で見せる。
+    手段はこの順で探す: ①PC 側位置制御ループ (M3508) ②ドライバへの `SET_ZERO`
+    (可否はドライバ自身の `supports_origin_capture()` が答える。**`main.py` に
+    ドライバ種別を書き写して導出し直さない**)。どちらも無ければ None を返し、
+    呼び出し側が起動ログと `HomingError` の両方で見せる。
     """
     managers = can_managers or []
     monitors = sync_monitors or []
@@ -334,22 +322,15 @@ def _wire_motor_check_sequence(
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
 
-    **構成に無い軸のステップは除外して登録する。** 機構が未装着のハンドを外して
-    実機を動かす構成 (config/bench/main_hand) や、机上ベンチ (config/bench/*) では
-    軸が揃わない。全ステップを登録すると押した瞬間に `PositionLookupError` で
-    止まり、逆に軸が 1 本でも欠けたら登録しない形にすると、残っているハンドの
-    動作確認まで一切できなくなる。
-
+    **構成に無い軸のステップは除外して登録する** (机上ベンチでは軸が揃わない)。
+    全ステップを登録すると押した瞬間に `PositionLookupError` で止まり、逆に軸が
+    1 本でも欠けたら登録しない形にすると残っているハンドの確認までできなくなる。
     **除外の判定は `Sequence.restrict_to_axes()` が 1 箇所で持ち、ここはその結果を
-    ログと配信へ流すだけ。** 除外を黙って行うと、本番構成で 1 軸が config から
-    漏れていてもそのステップごと消えて全ステップが成功する。
+    ログと配信へ流すだけ** (黙って除外すると全ステップ PASSED になる)。
 
-    指令できる軸が 1 本も残らない構成では登録しない。動作確認は
-    「シーケンスが読み込まれていません」として拒否されるだけで、UI もその理由を
-    表示できる。
-
-    軸名の衝突 (`PositionTable.merged`) はここで起動ごと落とす。動作確認が意図した
-    側とは別の機体の軸へ指令を飛ばす構成を、黙って起動させてはならない。
+    指令できる軸が 1 本も残らない構成では登録しない。軸名の衝突
+    (`PositionTable.merged`) はここで起動ごと落とす —— 動作確認が意図した側とは
+    別の機体の軸へ指令を飛ばす構成を、黙って起動させてはならない。
     """
     if not tables:
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
@@ -495,9 +476,8 @@ _NET_SYSFS_ROOT = pathlib.Path("/sys/class/net")
 def _read_operstate(channel: str, *, root: pathlib.Path = _NET_SYSFS_ROOT) -> str | None:
     """`<root>/<channel>/operstate` を読む。python-can には依存しない。
 
-    `/sys` に実体が無い環境では読めない。**判定できないことを異常へ倒さず、
-    `None` で「分からない」を表す** (このリポジトリの他の「分からない」判定と
-    同じ方針。「判定できない」自体はログに出さない — 平常時のログを埋めないため)。
+    **判定できないことを異常へ倒さず、`None` で「分からない」を表す**
+    (「判定できない」自体はログに出さない — 平常時のログを埋めないため)。
     """
     try:
         # errors="replace": `UnicodeDecodeError` は `OSError` ではないので下の except
@@ -520,8 +500,8 @@ def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
     「立ち上がったが 1 通も読めていない」の原因をインタフェース名付きで名指しする。
 
     この呼び出しは `main()` の try の外にあるので、素通しすると生の traceback で
-    落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、
-    config 系のエラー (`_load_all_configs`) と同じく直し方まで書いて止める。
+    落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、直し方まで
+    書いて止める。
     """
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
@@ -561,8 +541,7 @@ def _robot_bus_names(robot: RobotConfig, can_buses: Mapping[str, str]) -> list[s
     欠けているだけで**どちらのハンドも起動できなくなる**。片方だけの運用も
     動作確認も UI の起動もできない。
 
-    副次的に、受信ループが物理バス 1 本につき 2 本立つ (executor スレッドを
-    常時 8 本占有し、E-STOP のブロードキャストも 2 通ずつ出る) のも解消する。
+    副次的に、受信ループが物理バス 1 本につき 2 本立つのも解消する。
     """
     used = {cfg.bus for cfg in robot.motors.values()}
     used |= {cfg.bus for cfg in robot.sensors.values()}
@@ -620,8 +599,7 @@ def _make_generic(motor: MotorConfig) -> MotorDriver:
 
 #: ドライバ種別名 -> 生成関数。**全種別がこの表を通る。**
 #: if 連鎖に戻すと、足し忘れが「引数の足りない別物が黙って生成される」形に落ちる。
-#: 種別を足す人は DRIVER_TYPES とこの表の両方を触ることになり、
-#: 対応は tests/test_config_schema.py が検証する。
+#: DRIVER_TYPES との対応は tests/test_config_schema.py が検証する。
 _DRIVER_MAP: dict[str, Callable[[MotorConfig], MotorDriver]] = {
     "m3508": _make_m3508,
     "edulite05": _make_edulite05,
@@ -671,12 +649,10 @@ def _load_pid_config(
 ) -> dict[str, float | None]:
     """motors[name].pid を読み、未指定キーを _DEFAULT_PID で補完する。
 
-    pid セクションが無い M3508 は既定ゲインで動かす (エラーにしない)。
-    起動できないと動作確認そのものができず、機構調整中の実機で困るため。
-    既定値は安全側に振ってあるので、無指定でも暴れない。
-    キー名の誤記も値の型不正 (数値でない / bool / inf・nan) も lib/config_schema
-    (`_parse_pid`) が起動時に拒否するので、ここへ来る値は None か有限の数値だけ ——
-    書いても効かないゲインと、暴走するゲインのどちらも作らない。
+    pid セクションが無い M3508 は既定ゲインで動かす (エラーにしない) —— 起動でき
+    ないと動作確認そのものができず、機構調整中の実機で困るため。値の型不正は
+    lib/config_schema (`_parse_pid`) が起動時に拒否するので、ここへ来るのは
+    None か有限の数値だけ。
     """
     result: dict[str, float | None] = dict(_DEFAULT_PID)
     if not isinstance(pid_cfg, Mapping):
@@ -699,10 +675,9 @@ def _load_pid_config(
                 _DEFAULT_PID[key],
             )
             continue
-        # 型不正は lib.config_schema._parse_pid が起動時に拒否済みなので、この
-        # float() は有限の数値にしか呼ばれない。**警告して既定値へ落とす手当てを
-        # ここへ戻してはならない** —— 戻すと「拒否する層」と「黙って既定値へ倒す層」が
-        # 二重になり、後から片方だけ外しても症状が出ない
+        # **警告して既定値へ落とす手当てをここへ戻してはならない** —— 戻すと
+        # 「拒否する層」と「黙って既定値へ倒す層」が二重になり、後から片方だけ
+        # 外しても症状が出ない
         result[key] = float(value)
     return result
 
@@ -737,9 +712,8 @@ def _build_position_loops(
 ) -> dict[str, M3508PositionLoop]:
     """config 中の M3508 をバス単位でまとめた位置制御ループ群を作る。
 
-    バス単位で 1 ループにする理由: C620 の電流指令フレーム (0x200) は 1 通に
-    4 モータ分のスロットを持つ。モータごとに送ると他モータのスロットを 0 で
-    上書きしてしまうため、同一バス上の M3508 は必ず 1 ループが束ねる。
+    C620 の電流指令フレーム (0x200) は 1 通に 4 モータ分のスロットを持つので、
+    モータごとに送ると他モータのスロットを 0 で上書きしてしまう。
     """
     loops: dict[str, M3508PositionLoop] = {}
 
@@ -813,15 +787,11 @@ def _build_target_refreshers(
     送らないため、再送が無いとコンベアは回し始めて 500ms で止まる。
 
     DM3520 と EDULITE 05 は理由が違う。**フィードバックが問い合わせ駆動**で、
-    自分宛のフレームを受けたときにしか状態を返さない。送らなければ操縦していない
-    間じゅう ``MotorHealth.STALE`` になり、症状は「手動操縦すると動くのに常に赤い」
-    だけで配線不良と区別が付かない。自作モタドラと 1 つのタスクにまとめないのは、
-    目標を持たないモータの扱いが正反対のため (自作モタドラは送ってはならず、
-    問い合わせ駆動の 2 種は送らなければならない)。
-
-    **EDULITE 05 を対象外にしてはならない。** ドライバ内蔵の位置ループが目標を
-    保持するので位置制御ループは要らないが、フィードバックは自発的に返さない
-    (実機で励磁したまま 13 秒放置してフィードバックは 0 通)。要るのは生存問い合わせ。
+    自分宛のフレームを受けたときにしか状態を返さない。自作モタドラと 1 つのタスクに
+    まとめないのは、目標を持たないモータの扱いが正反対のため (自作モタドラは
+    送ってはならず、問い合わせ駆動の 2 種は送らなければならない)。
+    **EDULITE 05 を対象外にしてはならない** (実機で励磁したまま 13 秒放置して
+    フィードバック 0 通。症状は「手動操縦すると動くのに常に赤い」だけ)。
 
     M3508 だけが対象外。位置制御ループが 200Hz で電流指令を送り続けるうえ、
     C620 はフィードバックを自発的に送るため問い合わせも要らない。
@@ -910,9 +880,8 @@ def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionL
     逆回転ペアは ``scale`` の符号が逆なので、符号付きで掛けると片側の制限が負値になり
     制限として一切機能しない (プロファイルは正の上限しか受け取らない)。
 
-    ``_attach_sync_groups`` と同じく「登録できるものだけ登録し、できないものはログに
-    残して続行する」。位置制御ループに載らないモータ (EDULITE / DM3520 はドライバが
-    位置ループを内蔵する) は対象外で、書いても無害に無視される。
+    位置制御ループに載らないモータ (EDULITE / DM3520 はドライバが位置ループを
+    内蔵する) は対象外で、書いても無害に無視される。
     """
     for axis_name in positions.axes:
         spec = positions.axis(axis_name)
@@ -946,13 +915,10 @@ def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionL
 
         if not attached:
             continue
-        # **軸ごとに 1 行**へ畳む。制限値は軸が持つ 1 組なので、左右直結ペアでは
-        # 同じ 3 値がモータの数だけ並ぶだけになる (適用先を知る手掛かりは
-        # モータ名だけなので、名前の列挙はここに残す)。
-        # velocity_ff も必ず出す。実行中に変更できず UI にも配信されないので、
-        # **起動ログが「今どの値で動いているか」を知る唯一の経路**である。
-        # かつ巡航中の出力を最も大きく左右する (kd と釣り合っていないと
-        # D 項が出力を食い潰す) 値なので、落とすと画面からもログからも読めない
+        # **軸ごとに 1 行**へ畳む (制限値は軸が持つ 1 組なので、左右直結ペアでは
+        # 同じ 3 値がモータの数だけ並ぶだけになる)。
+        # **velocity_ff も必ず出す** —— 実行中に変更できず UI にも配信されないので、
+        # 起動ログが「今どの値で動いているか」を知る唯一の経路である
         logger.info(
             "台形プロファイル: %s (%s) v<=%.1f %s/s, a<=%.1f %s/s^2, velocity_ff=%g",
             axis_name,
@@ -985,11 +951,8 @@ def _make_sync_violation_handler(
         # 参照を保持しないと GC でタスクが消え、緊急停止が発火しないことがある
         task = asyncio.create_task(server.activate_e_stop(reason=reason))
         tasks.add(task)
-        # 失敗したら「全体緊急停止が発火しなかった」ことになる。数える側は
-        # server.watch_task に一本化する (main.py に 2 つ目のカウンタを作らない)。
         # `activate_e_stop` は全体緊急停止なので、失敗すればそのとき実際に
-        # どのロボットも保護されていない —— `_reactivate_motors` の失敗を
-        # 全ロボットへ帰属させるのと同じ理由で robots も全ロボットにする
+        # どのロボットも保護されていない —— robots も全ロボットにする
         # (起点となった軸は context の文言に残す)
         server.watch_task(
             task, context=f"{robot_name} の同期ずれ検出 → 緊急停止", robots=server.robot_names
@@ -1002,13 +965,8 @@ def _make_sync_violation_handler(
 def _load_sequence(robot_name: str) -> Sequence | None:
     """sequences/<robot_name>.py からシーケンスクラスを動的にロードする。
 
-    **候補は「そのモジュールが定義した」クラスに限り、2 つ以上あったら起動を拒否する。**
-    ``dir()`` の並び (アルファベット順) の先頭を採る形にすると、
-    ``sequences/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を import
-    しただけで ``"MotorCheckSequence" < "SubHandSequence"`` が成立し、サブハンドと
-    して動作確認シーケンスが登録される。症状は「sub_hand の sequence_start で
-    なぜか両ハンドが動く」だけで、config からもログからも理由が読めない。
-    曖昧な構成は黙って起動させず、その場で落とす。
+    **候補は「そのモジュールが定義した」クラスに限り、2 つ以上あったら起動を拒否する**
+    (docs/invariants.md「起動時に構成の曖昧さを黙って解決しない」)。
     """
     module_name = f"sequences.{robot_name}"
     try:
@@ -1059,9 +1017,7 @@ def _install_stop_signal_handler() -> None:
     """systemd の停止 (SIGTERM) を SIGINT と同じ後始末経路へ合流させる。
 
     既定の SIGTERM はプロセスを即死させるため、`main()` の `finally` に並べた
-    後始末 (位置制御ループ停止 → 目標値再送停止 → 同期監視停止 → CAN shutdown)
-    が 1 段も走らない。`systemctl stop` / `restart` のたびに規定の停止経路を
-    外れることになるので、main タスクの cancel へ変換して既存の経路に載せる。
+    後始末が 1 段も走らない。main タスクの cancel へ変換して既存の経路に載せる。
     """
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
@@ -1090,9 +1046,8 @@ def _install_stop_signal_handler() -> None:
 async def _shutdown_step(label: str, awaitable: Awaitable[None]) -> None:
     """終了処理の 1 手順を実行する。失敗しても残りの手順へ進む。
 
-    後始末は「全ループを止める → 全 CAN を落とす」の順に並んでおり、途中の 1 つが
-    例外を投げた時点で以降が丸ごと飛ぶと、2 台目のロボットのバスが開いたまま
-    残る。止める処理が止まる形は安全側ではないので、失敗は記録して先へ進める。
+    途中の 1 つが例外を投げた時点で以降が丸ごと飛ぶと、2 台目のロボットのバスが
+    開いたまま残る。止める処理が止まる形は安全側ではない。
     """
     try:
         await awaitable
@@ -1200,9 +1155,9 @@ def _wire_one_robot(
         target_refreshers=refreshers,
         manual=manual,
     )
-    # INFO は要約だけ。名前を全部並べると 1 行が 300 桁を超えて端末で折り返し、
-    # 起動ログ全体が読めなくなる。**同期監視の対象名だけは残す** —— 左右ペアの
-    # 保護が実際に何に掛かったかは、機構を壊す前に起動時点で確かめたい
+    # INFO は要約だけ (名前を全部並べると 1 行が 300 桁を超えて折り返す)。
+    # **同期監視の対象名だけは残す** —— 左右ペアの保護が実際に何に掛かったかは、
+    # 機構を壊す前に起動時点で確かめたい
     logger.info(
         "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s)",
         robot_name,
@@ -1211,9 +1166,7 @@ def _wire_one_robot(
         ", ".join(loop.bus_name for loop in loops) or "なし",
         ", ".join(group.name for group in sync_groups) or "なし",
     )
-    # 名前の一覧は DEBUG。平常時は要約で足り、食い違いを疑ったときだけ
-    # `--log-level debug` で読めればよい (config を読むより速い、という以上の
-    # 役割は持たない情報である)
+    # 名前の一覧は DEBUG (食い違いを疑ったときだけ `--log-level debug` で読む)
     logger.debug(
         "ロボット登録 %s の内訳: 位置定数軸 %s / 目標値再送 %s / 手動連続操作 %s",
         robot_name,
@@ -1237,12 +1190,10 @@ def _wire_one_robot(
 def _ensure_port_available(host: str, port: int) -> None:
     """サーバーの bind 可否を **CAN を開くより前に**確かめる。
 
-    立ち上げ順 (`_start_all`) は「CAN → 制御ループ → 目標値再送 → サーバー bind」で、
-    これは変えられない —— フィードバック未受信のまま PID を回すと、起動のたびに
-    途絶の警告ログが出る。だがその順序のままだと、ポートが埋まっているときに
-    **機体を励磁して 200Hz の制御ループを回し始めた後**で bind が失敗する。
-    「起動したか分からず二度叩く」は会場で普通に起きる操作で、そのたびに機体が
-    数百 ms 励磁される。順序は変えず、bind の可能性だけを先に見る。
+    立ち上げ順 (`_start_all`) は変えられないので、そのままだとポートが埋まって
+    いるときに**機体を励磁して 200Hz の制御ループを回し始めた後**で bind が失敗する
+    (「起動したか分からず二度叩く」は会場で普通に起きる操作)。順序は変えず、
+    bind の可能性だけを先に見る。
 
     ここで確保した socket は閉じて手放す (aiohttp が自分で bind し直す)。その間に
     別プロセスが割り込む余地は残るが、防ぎたいのは「自分の二重起動」であって
@@ -1275,10 +1226,8 @@ async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
     **CAN の受信ループを先に立てる。** フィードバック未受信のまま PID を回しても
     途絶判定で電流 0 に落ちるだけだが、起動のたびに無駄な警告ログが出る。
 
-    **起動時に励磁できなかったモータは必ずサーバーへ渡す。** 捨てると
-    `safety.unenergized_motors` は緊急停止解除の経路でしか埋まらず、起動時の
-    励磁失敗は画面のどこにも出ない。フィードバックは問い合わせ駆動の再送で
-    流れ出すのでヘルスは OK のまま、症状は「指令しても動かない」だけになる。
+    **起動時に励磁できなかったモータは必ずサーバーへ渡す。** 捨てると励磁失敗が
+    画面のどこにも出ず、ヘルスは OK のまま症状は「指令しても動かない」だけになる。
     """
     for wiring in wirings:
         server.set_initial_inactive_motors(wiring.name, await wiring.can_manager.run())
@@ -1323,21 +1272,12 @@ async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> Non
 
 
 def _format_number(value: float) -> str:
-    """整数で表せる値から小数点以下を落とす (`180.0 秒` → `180 秒`)。
-
-    config は小数で書けるが実際に入るのはほぼ整数なので、`%s` のまま出すと
-    起動ログの数値が軒並み `.0` 付きになり、読み手が桁を数え直すことになる。
-    """
+    """整数で表せる値から小数点以下を落とす (`180.0 秒` → `180 秒`)。"""
     return f"{value:g}"
 
 
 def _describe_thresholds(health: HealthThresholds) -> str:
-    """ヘルスしきい値を人が読める 1 行へ畳む。
-
-    dataclass の repr はフィールド名を全部並べて 100 桁を超えるため、確認したい
-    4 つの数値が名前に埋もれる。起動ログは試合前点検で目視する対象なので、
-    値そのものが読める形にする。
-    """
+    """ヘルスしきい値を人が読める 1 行へ畳む (起動ログは試合前点検で目視する)。"""
     return (
         f"途絶 {_format_number(health.feedback_timeout_ms)}ms"
         f" / 温度 警告 {_format_number(health.temp_warning_c)}℃"
@@ -1349,10 +1289,8 @@ def _describe_thresholds(health: HealthThresholds) -> str:
 def _describe_checklist(definitions: Mapping[str, list[ChecklistItem]]) -> str:
     """指差喚呼の件数を 1 行へ。ロールが 1 つなら件数だけを出す。
 
-    現行はロール 1 つ (`pre_match`) に統合済みで、辞書のまま出すと
-    `{'pre_match': 27}` という Python の内部表現が起動ログに残る。ロールは
-    増えうる (WS 契約の形を保つため辞書のまま運んでいる) ので、複数あるときは
-    ロール名と件数を並べる。
+    現行はロール 1 つ (`pre_match`) だが、WS 契約の形を保つため辞書のまま
+    運んでいるので、複数あるときはロール名と件数を並べる。
     """
     if not definitions:
         # yaml が無い構成 (ベンチ) はここへ来る。空文字を出すと行が尻切れになる
@@ -1390,7 +1328,6 @@ def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer
 async def main() -> None:
     """読む → 配線する → 起動する → 畳む。"""
     # --log-level を 1 行目から効かせるため、ログ設定より先に引数を読む
-    # (引数解析自体はログを出さないので、ここを前へ出しても失われる行は無い)
     args = _parse_args()
     configure_logging(args.log_level)
 
@@ -1403,8 +1340,8 @@ async def main() -> None:
         config_paths = [_CONFIG_DIR / name for name in _DEFAULT_CONFIGS]
     system_path = pathlib.Path(args.system) if args.system else _CONFIG_DIR / _SYSTEM_CONFIG
 
-    # 1 パス目: yaml をすべて読み込んで検証する。RobotServer 生成時にしきい値を渡す
-    # 必要があるため、ロボット登録より先に全 config を確定させる。
+    # 1 パス目: RobotServer 生成時にしきい値を渡すため、ロボット登録より先に
+    # 全 config を読んで確定させる
     system, loaded = _load_all_configs(system_path, config_paths)
     logger.info("しきい値: %s", _describe_thresholds(system.health))
     # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
@@ -1438,9 +1375,7 @@ async def main() -> None:
         for config_path, robot in loaded
     ]
 
-    # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
-    # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、
-    # 可動域の重なる位置で干渉しうる
+    # **両ハンドを 1 本の順序で駆動する**ので、どのロボットにも属さない
     _wire_motor_check_sequence(
         server,
         [w.motor_group for w in wirings if w.motor_group is not None],
@@ -1462,8 +1397,6 @@ async def main() -> None:
 
 if __name__ == "__main__":
     # Ctrl-C では 1 行も出さない。直前に `_shutdown_all` の「後始末完了」が必ず
-    # 出ており、ここで足すと同じ事実 (畳み終わった) が 2 行になる。あちらには
-    # 「後始末が完走した証跡」という固有の役割 (無ければ TimeoutStopSec 超過の
-    # SIGKILL と判別できる) があるので、重複を消すならこちらである
+    # 出ており、ここで足すと同じ事実が 2 行になる
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())

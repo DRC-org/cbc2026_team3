@@ -152,8 +152,8 @@ class TestCANManager:
         """止める処理が止まってはならない。
 
         受信ループは down しても降りずに再試行を続けるので、片方が再試行中でも
-        `shutdown()` が両方のバスを閉じ切ることを見る。畳めないタスクが 1 つでも
-        あると、`main()` の finally がそこで折れて 2 台目のバスが開いたまま残る。
+        `shutdown()` が両方のバスを閉じ切ることを見る (畳めないタスクが 1 つあると
+        `main()` の finally が折れ、2 台目のバスが開いたまま残る)。
         """
         # 既定のエグゼキュータ経由の runner を使う。同期実行の runner だと
         # 正常な方のバスの受信ループがイベントループへ譲らず回り続けてしまう
@@ -177,9 +177,9 @@ class TestCANManager:
     ) -> None:
         """受信ループが降りない今も、この防護は単独で効いている必要がある。
 
-        受信ループ側で握るようになったぶん、ここが壊れても普段は誰も気付けない。
-        層を 1 枚ずつ確かめる原則に従い、**既に例外で終わったタスク**を直接
-        持たせて、`shutdown()` がそれを握って残りのバスを閉じ切ることを見る。
+        受信ループ側でも握るのでここが壊れても普段は気付けない。層を 1 枚ずつ確かめる
+        ため、**既に例外で終わったタスク**を直接持たせて `shutdown()` がそれを握って
+        残りのバスを閉じ切ることを見る。
         """
 
         async def _die() -> None:
@@ -339,9 +339,9 @@ class TestMotorActivation:
     async def test_設定と励磁はモータ単位で交互に送る(self) -> None:
         """「全モータの設定 → 全モータの励磁」に組み替えてはならない。
 
-        EDULITE 05 / DM3520 は activation_steps を組み立てるときに実測角を読み、
-        それを目標として書いてから励磁する。並べ替えると、読む実測角が
-        「自分の設定を送った直後」ではなく「他機の設定を挟んだ後」のものになる。
+        EDULITE 05 / DM3520 は activation_steps を組み立てるとき実測角を読み、それを
+        目標として書いてから励磁する。並べ替えると読む実測角が「他機の設定を挟んだ後」
+        のものになる。
         """
         mgr = CANManager()
         mgr.add_bus("can0", mock_bus())
@@ -439,11 +439,10 @@ class TestMotorActivation:
     async def test_activate_motors_continues_after_one_motor_fails(self) -> None:
         """**1 台の送信失敗で残りのモータの有効化を諦めてはならない。**
 
-        緊急停止の原因がそのまま送信失敗を招く場面がある —— 専用バスに 1 台しか
-        居ない DM3520 が電源を失うと ACK が返らず、そのバスの送信は全滅する。
-        素の for に並べると最初のモータの例外で以降へ enable が 1 通も飛ばず、
-        しかも `RobotServer._reactivate_motors` はそれをログに落とすだけなので、
-        画面は「解除できた」ように見えたまま機体が無励磁で取り残される。
+        緊急停止の原因がそのまま送信失敗を招く場面がある —— 専用バスに 1 台しか居ない
+        DM3520 が電源を失うと ACK が返らず、そのバスの送信は全滅する。素の for だと
+        最初のモータの例外で以降へ enable が 1 通も飛ばず、しかも呼び出し側はログへ
+        落とすだけなので、画面は「解除できた」ように見えたまま機体が取り残される。
         """
         mgr = CANManager()
         mgr.add_bus("can0", mock_bus())
@@ -466,9 +465,8 @@ class TestMotorActivation:
     async def test_activate_motors_only_filters_target_motors(self) -> None:
         """``only`` を渡すと、そこに無いモータへは 1 通も送らない。
 
-        再励磁 (`RobotServer._reenergize_motors`) が無励磁のモータだけを対象に
-        絞る根拠。絞らずに全モータへ送ると、健全で移動中のモータまで
-        「現在角を書いてから enable」に巻き込まれる (advisor 指摘)。
+        再励磁 (`RobotServer._reenergize_motors`) が無励磁のモータだけを対象に絞る
+        根拠。絞らずに送ると健全で移動中のモータまで巻き込まれる。
         """
         mgr = CANManager()
         mgr.add_bus("can0", mock_bus())
@@ -487,18 +485,16 @@ class TestMotorActivation:
     async def test_feedback_probe_is_never_sent_to_an_energized_motor(self) -> None:
         """**励磁中のモータへ鮮度確認の `disable` を打ってはならない。**
 
-        EDULITE 05 / DM3520 の `feedback_probe_message()` は `disable` そのもので、
-        「無励磁を無励磁のままにするだけなので機構は動かない」という前提の上に
-        立っている。励磁中のモータへ送れば保持トルクをその場で失う。
+        `feedback_probe_message()` は `disable` そのもので、「無励磁を無励磁のままに
+        するだけ」という前提に立つ。励磁中のモータへ送れば保持トルクをその場で失う。
 
-        踏むのは `RobotServer._reenergize_motors` の相方拡張 —— 直結ペアの片側
-        だけが落ちたとき、健全で **励磁中の相方も** `only` に入る。宣言順が
-        `rotate_r` → `rotate_l` の実機構成で落ちたのが `rotate_l` 側だと、
-        健全な `rotate_r` が先に disable され **軸が両側とも無励磁になる**
-        (復帰まで最悪 550ms)。ワークを掴んだまま押す操作なので落下しうる。
+        踏むのは `RobotServer._reenergize_motors` の相方拡張 —— 直結ペアの片側だけが
+        落ちたとき、健全で**励磁中の相方も** `only` に入る。宣言順が `rotate_r` →
+        `rotate_l` の実機構成で落ちたのが `rotate_l` 側だと、健全な `rotate_r` が先に
+        disable され**軸が両側とも無励磁になる** (復帰まで最悪 550ms)。
 
-        **実フレームで見る。** モックの戻り値で見ると、`encode_disable()` の
-        中身が変わっても同じ「送っていない」を主張し続ける。
+        **実フレームで見る** —— モックの戻り値だと `encode_disable()` の中身が
+        変わっても同じ「送っていない」を主張し続ける。
         """
         sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
@@ -530,9 +526,8 @@ class TestMotorActivation:
     async def test_energized_motor_still_activates_without_a_probe(self) -> None:
         """プローブを止めても励磁そのものは通る。
 
-        励磁中ということは `QueryDrivenTargetRefresher` (20Hz) が目標を送り
-        続けており、その応答としてフィードバックが届く。**待つのをやめたわけ
-        ではない** —— 届かなければ従来どおり無励磁のまま残す。
+        励磁中なら `QueryDrivenTargetRefresher` (20Hz) への応答でフィードバックが届く。
+        **待つのをやめたわけではない** —— 届かなければ従来どおり無励磁のまま残す。
         """
         sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
@@ -560,9 +555,9 @@ class TestMotorActivation:
     async def test_probe_is_allowed_right_after_set_zero(self) -> None:
         """原点の付け替え直後だけは、`is_energized()` が True でも打ってよい。
 
-        `capture_origin_via_set_zero` は直前に `deactivation_steps()` を送って
-        いるので **無励磁であることを指令として知っている**。フィードバックが
-        追いついていないだけで問い合わせを止めると、零点確定が理由もなく失敗する。
+        `capture_origin_via_set_zero` は直前に `deactivation_steps()` を送っているので
+        **無励磁であることを指令として知っている**。ここで止めると零点確定が理由もなく
+        失敗する。
         """
         sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
@@ -764,14 +759,11 @@ class TestReceiveLoopRobustness:
     async def test_receive_loop_survives_interface_down_and_resumes(self) -> None:
         """**インタフェース断で受信ループを終わらせてはならない。**
 
-        `ip link set down` / CANable の抜き差し / `setup_can.sh` の再実行はいずれも
-        `bus.recv` を `Network is down` で失敗させるが、どれも 1 秒以内に戻る一過性の
-        事象である。ここで降りると、**送信側だけが自動復帰して受信は二度と戻らない**
-        —— 症状は「指令は効くのにフィードバックだけ永久に無い」で、機体は動くのに
-        全モータが STALE のまま試合を終える。実際にこれで 1 回沈黙した。
-
-        socketcan のソケットは down/up をまたいでも生き続けるので (実測済み)、
-        同じ Bus のまま recv を再試行するだけで復帰する。
+        `bus.recv` を失敗させる事象 (`ip link set down` / CANable の抜き差し /
+        `setup_can.sh` の再実行) はどれも 1 秒以内に戻る一過性のもので、socketcan の
+        socket は down/up を跨いで生き残る (実測)。降りると**送信側だけが自動復帰して
+        受信は二度と戻らない** —— 症状は「指令は効くのにフィードバックだけ永久に無い」
+        で、機体は動くのに全モータが STALE のまま試合を終える (実機で発生)。
         """
         mgr = CANManager(run_blocking=direct_runner())
         bus = mock_bus()
@@ -803,20 +795,16 @@ class TestReceiveLoopRobustness:
     async def test_receive_loop_backs_off_after_a_receive_failure(self) -> None:
         """復帰を待つ間、全速で再試行してはならない。
 
-        インタフェースが戻らない場合、失敗は同じ速さで繰り返される。素の
-        ``continue`` だと 1 コアを食い潰したままログを溢れさせ、**同じプロセスに
-        同居している位置制御ループ (200Hz) と偏差監視 (50Hz) の周期まで
-        巻き添えにする**。
+        素の ``continue`` だと 1 コアを食い潰し、**同居している位置制御ループ (200Hz)
+        と偏差監視 (50Hz) の周期まで巻き添えにする**。
 
         ``asyncio.sleep`` を patch して回数を数える書き方は採らない ——
-        ``lib.can_manager.asyncio`` は共有のモジュールオブジェクトなので、
-        patch するとプロセス全体の ``asyncio.sleep`` が差し替わり、
-        pytest-asyncio ごと巻き添えにしてテストセッションが停止する
-        (実際にこれでハングさせた)。実時間で「呼ばれた回数」を測れば、
-        待っていることは外から確かめられる。
+        ``lib.can_manager.asyncio`` は共有のモジュールオブジェクトなので、プロセス
+        全体の ``asyncio.sleep`` が差し替わって pytest-asyncio ごと停止する (実際に
+        ハングさせた)。実時間で「呼ばれた回数」を測れば待ちは外から確かめられる。
 
-        待ち時間は失敗のたびに伸びる (`_RECV_RETRY_MIN_S` から `_RECV_RETRY_MAX_S`
-        まで) ので、最短の間隔で回り続けた場合を上限として見る。
+        待ち時間は失敗のたびに伸びる (`_RECV_RETRY_MIN_S` → `_RECV_RETRY_MAX_S`) ので、
+        最短間隔で回り続けた場合を上限として見る。
         """
         mgr = CANManager(run_blocking=direct_runner())
         bus = mock_bus()
@@ -869,12 +857,9 @@ class TestReceiveLoopRobustness:
     async def test_受信断は降りずに必ず記録される(self, caplog: pytest.LogCaptureFixture) -> None:
         """受信 API 自体の失敗は、痕跡を残したうえで**再試行する**。
 
-        黙って再試行し続けるのが最も危ない失敗になる —— ログにも UI にも出ないまま、
-        そのバスの全モータが STALE になる。
-
-        降りないことも同時に見る。降りると送信側だけが次の周期で自動復帰し、
-        受信は二度と戻らない。症状は「指令は効くのにフィードバックだけ永久に無い」で、
-        機体は動くのに全モータが STALE のまま試合を終える。
+        黙って再試行し続けるのが最も危ない —— ログにも UI にも出ないまま、そのバスの
+        全モータが STALE になる。降りないことも同時に見る (降りると送信側だけが復帰し、
+        「指令は効くのにフィードバックだけ永久に無い」で試合を終える)。
         """
         mgr = CANManager()
         bus = mock_bus()
@@ -1015,12 +1000,10 @@ class TestReceiveLoopSurvivesInterfaceDown:
     """受信の断絶で降りないこと、降りないことが黙殺にならないこと。
 
     `scripts/can_watchdog.sh` は bus-off 復旧のたびに `ip link` の down/up を出す。
-    その約 1 秒のあいだ `bus.recv` は `Network is down` で失敗し続けるが、
-    **同一 socket は down/up を跨いで生き残る** (実測) ので、待って呼び直せば戻る。
-
-    ここで受信タスクごと降りると、``_tasks`` は誰も await しないため死はログ 1 行に
-    しか現れず、症状は「UI は接続中のまま全モータが STALE」という最も切り分けにくい
-    形になる。
+    その約 1 秒は `bus.recv` が失敗し続けるが、**同一 socket は down/up を跨いで
+    生き残る** (実測) ので待って呼び直せば戻る。降りると ``_tasks`` を誰も await
+    しないため死はログ 1 行にしか現れず、症状は「UI は接続中のまま全モータが STALE」
+    という最も切り分けにくい形になる。
     """
 
     async def test_インタフェース断で降りず復帰後に受信を再開する(self) -> None:
@@ -1082,13 +1065,11 @@ class TestReceiveLoopSurvivesInterfaceDown:
     async def test_タイムアウトは復帰の証拠にならない(self) -> None:
         """`recv` が None を返しても、インタフェースが戻ったとは言えない。
 
-        python-can の socketcan は select がタイムアウトした時点で socket に
-        触れずに None を返すので、**down している間も None は返り続ける**。
-        これを復帰扱いにすると `rx_down` が数十 ms で勝手に外れ、画面は
-        「読めていない」ことを一度も出さないまま平常を映す。
-
-        実際に vcan で down させたまま「30ms で受信が再開しました」と
-        誤判定した回帰。
+        python-can の socketcan は select がタイムアウトすると socket に触れずに
+        None を返すので、**down している間も None は返り続ける**。これを復帰扱いに
+        すると `rx_down` が数十 ms で勝手に外れ、画面は「読めていない」ことを一度も
+        出さないまま平常を映す (vcan で down させたまま「30ms で受信が再開しました」と
+        誤判定した回帰)。
         """
         mgr = CANManager()
         bus = mock_bus()
@@ -1136,11 +1117,10 @@ class TestReceiveLoopSurvivesInterfaceDown:
     async def test_recvが投げたキャンセルも握り潰さない(self) -> None:
         """`bus.recv` の中から来た `CancelledError` も素通しする。
 
-        `CancelledError` は `BaseException` 側にあるので `except Exception` では
-        捕まらない —— **つまりここは既定で正しい。** それでも独立した試験を置くのは、
-        捕捉を `BaseException` へ広げる変更が入った瞬間に「止められない受信ループ」が
-        できるため。しかもその壊れ方は、期限を付けずに待つ試験では「落ちる」ではなく
-        「終わらない」形で現れ、原因が読めない。
+        `CancelledError` は `BaseException` 側なので `except Exception` では捕まらない
+        —— **つまりここは既定で正しい。** それでも独立した試験を置くのは、捕捉を
+        `BaseException` へ広げた瞬間に「止められない受信ループ」ができ、しかもその
+        壊れ方は「落ちる」ではなく「終わらない」形で現れるため。
         """
         mgr = CANManager(run_blocking=direct_runner())
         bus = mock_bus()
@@ -1159,9 +1139,8 @@ class TestRxDownEpisodes:
     """途絶の「立ち上がり」を数えるエピソード数 (``rx_down_episodes``)。
 
     ``rx_down`` は生の bool なので、1 秒に満たない一過性の途絶 (bus-off 復旧の
-    down/up 等) は画面に一瞬しか出ず、機体を見ている操縦者はまず見落とす。
-    エピソード数は復帰しても 0 に戻らない累積値で、リセットできるのは
-    ``reset_rx_down_episodes()`` だけ (試合単位でのリセットは呼び出し元の責務)。
+    down/up 等) は画面に一瞬しか出ず操縦者は見落とす。エピソード数は復帰しても 0 に
+    戻らない累積値で、落とせるのは ``reset_rx_down_episodes()`` だけ。
     """
 
     async def test_1回の途絶で1件だけ数える(self) -> None:
@@ -1275,14 +1254,12 @@ class TestRxDownEpisodes:
 class TestReceiveLoopOnAPollableBus:
     """**実機 (SocketCAN) が通る経路。** fd の可読通知で起きて滞留を出し切る。
 
-    ここを 1 通ずつエグゼキュータへ往復する形にすると、往復のコスト (実測 168us)
-    が受信速度の上限を決めてしまう。C620 は 1 台 1kHz なので M3508 2 台だけで
-    2000 通/秒あり、追いつかない分はカーネルがソケットバッファ溢れとして捨てる
-    (実機で 17%)。**捨てられた窓は M3508 の折り返し推定を狂わせ、累積角に
-    360deg = 6.54mm が入る** —— 症状は「動作中に軸が荒れて同期ずれで緊急停止」。
+    1 通ずつエグゼキュータへ往復すると往復のコスト (実測 168us) が受信速度の上限を
+    決め、追いつかない分をカーネルが捨てる (実機で 17%)。**捨てられた窓は M3508 の
+    折り返し推定を狂わせ、累積角に 360deg = 6.54mm が入る。**
 
-    ``mock_bus`` (MagicMock) は ``fileno()`` が int を返さないのでこの経路に
-    入らない。本番の経路を踏むテストは ``ReadableBus`` を使うこと。
+    ``mock_bus`` (MagicMock) は ``fileno()`` が int を返さずこの経路へ入らないので、
+    本番の経路を踏むテストは ``ReadableBus`` を使うこと。
     """
 
     async def _run_until_idle(self, mgr: CANManager, bus_name: str = "can0") -> None:
@@ -1316,13 +1293,11 @@ class TestReceiveLoopOnAPollableBus:
     async def test_滞留を捌く途中で他のタスクが走る(self) -> None:
         """滞留が深くても制御周期を締め出してはならない。
 
-        1 回の起床で在庫を無制限に捌くと、その間ずっと同期的に走り続けるので
-        **位置制御ループ (200Hz) と偏差監視 (50Hz) が滞留を捌き終わるまで
-        一切走れない**。`_RX_BATCH_MAX` はその 1 区切りの上限で、区切りごとに
-        `_ReadableFd.wait()` が必ずイベントループへ戻ることで成立する。
+        1 回の起床で在庫を無制限に捌くと、**位置制御ループ (200Hz) と偏差監視 (50Hz) が
+        滞留を捌き終わるまで一切走れない**。`_RX_BATCH_MAX` がその 1 区切りの上限で、
+        区切りごとに `_ReadableFd.wait()` がイベントループへ戻ることで成立する。
 
-        「途中で走った」ことは、配り終える前の中間状態を他のタスクが観測できたか
-        で見る。最終値しか観測できないなら、そのタスクは締め出されている。
+        「途中で走った」ことは、配り終える前の中間状態を他のタスクが観測できたかで見る。
         """
         mgr = CANManager(run_blocking=direct_runner())
         motor = GenericDriver("gripper", 0x01)
@@ -1372,13 +1347,10 @@ class TestReceiveLoopOnAPollableBus:
     async def test_復帰待ちのあいだは可読の監視を外す(self) -> None:
         """down した socket は「読める」と報告され続ける。
 
-        監視に載せたまま復帰を待つと、**イベントループが毎周期そのコールバックで
-        起こされ**、待っているはずの時間が空回りになる。同居している位置制御ループ
-        (200Hz) と偏差監視 (50Hz) の周期まで巻き添えにするので、素の ``continue``
-        を禁じているのと同じ理由でここも外す。
-
-        ``remove_reader`` は「外すものがあったか」を返すので、実装が既に外して
-        いれば False になる。
+        監視に載せたまま復帰を待つと**イベントループが毎周期そのコールバックで起こされ**、
+        位置制御ループ (200Hz) と偏差監視 (50Hz) の周期まで巻き添えにする (素の
+        ``continue`` を禁じているのと同じ理由)。``remove_reader`` は「外すものがあったか」
+        を返すので、実装が既に外していれば False になる。
         """
         mgr = CANManager(run_blocking=direct_runner())
         bus = ReadableBus()

@@ -122,9 +122,9 @@ class TestAxisSpecSyncGroup:
 class TestConversionIsAlwaysPerMotor:
     """換算はモータごとにしか行えない (軸単位の scale を返す API を公開しない)。
 
-    軸単位の ``scale`` / ``to_command`` / ``command_tolerance`` をペア軸に使うと、
-    先頭モータの scale が左右の両方へ当たり、左のモータが右向きに全ストローク動く。
-    API ごと持たないので、残るのはモータごとに換算する道だけになる。
+    軸単位の ``scale`` / ``to_command`` / ``command_tolerance`` をペア軸に使うと、先頭
+    モータの scale が左右の両方へ当たり、左のモータが右向きに全ストローク動く。
+    **API ごと持たないことが唯一の歯止め。**
     """
 
     def test_paired_axis_converts_each_motor_with_its_own_scale(self) -> None:
@@ -191,9 +191,9 @@ class TestSyncGroupDeviation:
 class TestSyncCorrections:
     """左右のずれを縮める補正量 (SyncGroup.corrections)。
 
-    3 層の ``violation`` は「ずれたら止める」しかできず、駆動中にずれを縮める力は
-    どこにも無かった。ここが返すのがその力なので、**符号と単位が正しいことは
-    機構の安全に直結する**。符号を落とすと、軸ごと押し動かしながらずれは縮まない。
+    3 層の ``violation`` は「ずれたら止める」しかできない。ここが返すのが駆動中に
+    ずれを縮める唯一の力なので、**符号と単位が正しいことは機構の安全に直結する**
+    (符号を落とすと、軸ごと押し動かしながらずれは縮まない)。
     """
 
     def _group(self, *, sync_kp: float = 2.0, sync_limit: float | None = 1e9) -> SyncGroup:
@@ -217,10 +217,9 @@ class TestSyncCorrections:
     def test_reversed_pair_gets_identical_corrections(self) -> None:
         """逆回転ペアの補正は同符号・同じ大きさ。**この方式が成立する根拠そのもの。**
 
-        人間の単位では ``e_l = -e_r`` だが ``scale_l = -scale_r`` なので、指令単位へ
-        戻すと一致する。つまり補正は軸としての運動を動かさず、左右の内部のずれだけを
-        縮める。``scale`` の符号を落とすと補正が逆符号になり、ずれを縮めないまま
-        軸ごと押し動かす力になる。
+        人間の単位では ``e_l = -e_r`` だが ``scale_l = -scale_r`` なので指令単位へ戻すと
+        一致する。つまり補正は軸としての運動を動かさず内部のずれだけを縮める
+        (符号を落とすと、ずれを縮めないまま軸ごと押し動かす力になる)。
         """
         group = self._group(sync_kp=2.0)
 

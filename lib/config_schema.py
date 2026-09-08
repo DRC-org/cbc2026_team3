@@ -1,17 +1,12 @@
 """``config/system.yaml`` と ``config/<robot>.yaml`` のスキーマ検証付き読み込み。
 
-検証で例外を投げるのは ``lib/sequence/positions.py`` と同じ理由による。
-設定の誤記をそのまま通すと、意図と違う種類の指令が機構へ流れる。特に
-``control_type`` の誤記は致命的で、duty 0.3 のつもりの指令が position 0.3deg として
-ファームへ届き、ファーム側も正当なフレームとして受理する。誤記を警告ログに
-落として起動を続けると、操縦者はログを読まない限り気付けない。
-「壊れていても起動する」方針 (checklist.yaml) はここでは取らない。
+**誤記は警告ではなく起動拒否。** ``control_type`` の誤記は duty 0.3 のつもりの指令が
+position 0.3deg としてファームへ届き、ファーム側も正当なフレームとして受理する ——
+警告ログに落として起動を続けると、操縦者はログを読まない限り気付けない。
 
 このモジュールは yaml が黙っていたときに使う既定値 (``DEFAULT_HEALTH`` /
-``DEFAULT_MATCH``) の単一情報源でもある。しきい値を使う側 (can_manager /
-server / control) は自前のリテラルを持たず、ここを参照する。
-同じ数値を各所に書くと、config を配線し忘れた 1 経路だけが古い境界で判定を続け、
-どこにも異常として現れない。
+``DEFAULT_MATCH``) の**単一情報源**でもある。同じ数値を各所に書くと、config を
+配線し忘れた 1 経路だけが古い境界で判定を続け、どこにも異常として現れない。
 そのため上位モジュールを import してはならない (依存は lib.drivers.base のみ)。
 """
 
@@ -55,21 +50,16 @@ _DM3520_MODES = {mode.value: mode for mode in (ControlMode.POSITION, ControlMode
 
 # ドライバ種別ごとの can_id の範囲 (両端を含む)。
 #
-# 範囲そのものは各ドライバの __init__ も持っているが、そちらで捕まえると
-# 「yaml のどのモータが悪いのか」が出ないまま起動が落ちる。config を読んだ時点で
-# ファイル名とモータ名つきで拒否する。
-# このモジュールは lib.drivers.base 以外を import しない約束なので表を共有できず、
-# 数値が 2 箇所にある。ずれていないことは tests/test_config_schema.py が
-# 実際にドライバを生成して検証する。
+# 範囲は各ドライバの __init__ も持っているが、そちらで捕まえると「yaml のどのモータが
+# 悪いのか」が出ないまま起動が落ちる。数値が 2 箇所にあること (このモジュールは
+# lib.drivers.base 以外を import しない約束) は tests/test_config_schema.py が守る。
 #
 #   m3508     … C620 の電流指令フレームが 1 通に 4 台分のスロットしか持たない
 #   edulite05 … Extended Frame のモータ ID フィールドが 8bit
 #   generic   … 仕様書 §2.2 (0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約)
-#   dm3520    … **フィードバックには CAN ID の下位 4bit しか載らない**。MST_ID を
-#               共有する 2 台を見分ける手掛かりはそれだけなので、下位 4bit が重なる
-#               ID (0x01 と 0x11 など) を許すと「2 台目のフィードバックが 1 台目の
-#               状態を上書きする」構成が書けてしまう。範囲を 1 バイト目の下位ニブルに
-#               閉じれば「ID が違う = 下位 4bit も違う」が構造的に成立する
+#   dm3520    … **フィードバックには CAN ID の下位 4bit しか載らない** ので、
+#               範囲を下位ニブルへ閉じて「ID が違う = 下位 4bit も違う」を成立させる
+#               (docs/invariants.md「DM3520 の ESC_ID は `0x01`〜`0x0F` に限り…」)
 CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     {
         "m3508": (1, 4),
@@ -109,10 +99,9 @@ _MOVED_TO_SYSTEM = frozenset({"health", "can_buses", "match"})
 class HealthThresholds:
     """ヘルス判定のしきい値。この 4 値は必ず 1 組で運ぶ。
 
-    バラの数値として配ると、配線側が 4 本のうち 3 本だけ渡した経路を作れてしまい、
-    残る 1 本だけが既定値のまま黙って効く。「フィードバック途絶は config どおり
-    250ms で見ているのに、温度警告だけ既定の 65℃ を見ている」という状態は
-    ログにも UI にも現れない。1 つの値として渡せば部分配線が構文的に作れない。
+    バラの数値として配ると、4 本のうち 3 本だけ渡した経路を作れてしまい、残る 1 本
+    だけが既定値のまま黙って効く (ログにも UI にも現れない)。1 つの値として渡せば
+    部分配線が構文的に作れない。
     """
 
     feedback_timeout_ms: float = 500.0
@@ -146,9 +135,8 @@ class SystemConfig:
 class MotorConfig:
     """モータ 1 台分の検証済み設定。ドライバ固有値は既定値まで解決済み。
 
-    動作確認の駆動量はここに持たない。両ハンドを 1 本のシーケンスで駆動する形
-    (sequences/motor_check.py) へ変えたので、確認は運用と同じ位置名へ動かす。
-    確認専用の値が存在しない = 位置定数とずれようがない。
+    動作確認の駆動量はここに持たない —— 確認専用の値が存在しなければ位置定数と
+    ずれようがない。
     """
 
     name: str
@@ -188,10 +176,8 @@ class MotorConfig:
 class SensorConfig:
     """自作基板のセンサ入力 1 つ分の設定 (config/<robot>.yaml の sensors)。
 
-    **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
-    自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。motors に書くと動作確認・
-    目標値再送・UI のモータ一覧に「常に 0 のモータ」として並んでしまうので、
-    受信登録とヘルス監視だけを行う別のセクションに分ける。
+    **センサはモータではない** (仕様書 §5.2)。motors に書くと動作確認・目標値再送・
+    UI のモータ一覧に「常に 0 のモータ」として並ぶ。
     """
 
     name: str
@@ -239,14 +225,10 @@ def _number(source: str, path: str, raw: object) -> float:
     except ValueError as exc:
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}") from exc
 
-    # **NaN と無限大はここで落とす。値域検査では捕まえられない。** yaml の `.nan` も
-    # 文字列の `"nan"` も float() を通り、NaN は比較がすべて False になるので
-    # `value <= 0` も `warning > critical` も素通りする —— CAN プロトコルから float を
-    # 外した理由 (docs/invariants.md) とまったく同じ失敗様式で、しきい値として内部へ入ると
-    # 「全モータが恒久 STALE なのに設定は正常に見える」形でしか現れない。
-    # 無限大は比較を通ってしまうぶんさらに悪く、`feedback_timeout_ms: .inf` は
-    # 「途絶検出が黙って無効」、`temp_warning_c: .inf` は「温度警告が黙って無効」に
-    # なる (どちらも検査を通った正当な設定として起動ログにも出ない)
+    # **NaN と無限大はここで落とす。値域検査では捕まえられない。** NaN は比較が
+    # すべて False になるので `value <= 0` も `warning > critical` も素通りし、
+    # 無限大は比較を通るぶんさらに悪い —— `feedback_timeout_ms: .inf` は
+    # 「途絶検出が黙って無効」、`temp_warning_c: .inf` は「温度警告が黙って無効」
     if not math.isfinite(value):
         raise ValueError(f"{source}: {path} が有限な数値ではありません: {raw!r}")
     return value
@@ -289,17 +271,12 @@ def _parse_can_buses(source: str, raw: object) -> dict[str, str]:
     if not buses:
         # バス定義が無いとモータを 1 台も登録できず、静かに「何も動かない機体」になる
         raise ValueError(f"{source}: can_buses に CAN バスが 1 つも定義されていません")
-    # **2 つの別名が同じインタフェースを指してはならない。** バス名を udev で個体固定
-    # している理由そのもの —— 別名は「どの機種がぶら下がっているか」の宣言なので、
-    # 重ねると機種の違うノードが同じ物理バスに乗る構成が config の 1 行で書ける:
-    #   - can_m3508 と can_edulite が重なる → C620 へ EDULITE 用のコマンドが飛ぶ
-    #   - can_dm3520 と can_m3508 が重なる → C620 のフィードバック 0x201〜0x204 が
-    #     DM3520 から見て**速度指令**になる (発生源がモータ自身なので PC を止めても
-    #     流れ続ける)
-    #   - can_dm3520 と can_generic が重なる → E_STOP / SET_TARGET / SET_PARAM の
-    #     3 帯がそのまま重なる
-    # 下流の `CANManager.add_bus` は別名で持つだけでチャンネルの重複を見ないので、
-    # ここで弾かないと止める層が 1 つも無い (`add_motor` が見るのは名前と can_id だけ)。
+    # **2 つの別名が同じインタフェースを指してはならない。** 別名は「どの機種が
+    # ぶら下がっているか」の宣言なので、重ねると機種の違うノードが同じ物理バスに
+    # 乗る構成が config の 1 行で書ける (何が起きるかは docs/invariants.md の
+    # 「CAN バス名は udev で個体固定する」「Damiao DM3520 は専用バスに載せる」)。
+    # 下流の `CANManager.add_bus` はチャンネルの重複を見ないので、ここで弾かないと
+    # 止める層が 1 つも無い。
     seen: dict[str, str] = {}
     for alias, channel in buses.items():
         if not isinstance(channel, str) or not channel:
@@ -403,16 +380,10 @@ def _parse_pid(source: str, motor_name: str, raw: object) -> Mapping[str, object
     # 書いても効かないゲインを黙って捨てないため、キー名は起動時に突き合わせる。
     _reject_unknown(source, path, section, _PID_KEYS)
 
-    # **値も起動時に見る。ここが唯一の関門である。** 「数値でなければ警告して既定値」
-    # では 2 通りに破れる —— yaml の `true` は `float()` を通って 1.0 として静かに効き、
-    # `.inf` / `.nan` も `float()` が例外を投げないので警告 0 件でそのまま採用される
-    # (`kp: .inf` が有効なゲインとして起動する)。しかも PID ゲインを実行中に差し替える経路は
-    # 持たない方針なので (docs/invariants.md「config に書いた値がそのまま動いている値である」)、
-    # ここを通った値を後段で止める層はどこにも無い。
-    #
+    # **値も起動時に見る。ここが唯一の関門である。** PID ゲインを実行中に差し替える
+    # 経路は無い (docs/invariants.md) ので、ここを通った値を後段で止める層は無い。
     # 判定は `_number` に任せる —— bool と非数値型、NaN と無限大をまとめて弾く。
-    # 同じ規則を書き写すと、しきい値側 (`_parse_health`) だけを直したときに
-    # こちらが古いまま残る。
+    # 書き写すと、しきい値側 (`_parse_health`) だけを直したときにこちらが古くなる。
     for key, value in section.items():
         if value is None:
             # 未指定 / null は書きかけの yaml とみなし `main._load_pid_config` が
@@ -501,9 +472,8 @@ def _parse_expected_angle_range(
             "(0 以下だと角度 → パルス幅の変換そのものが定義できない)"
         )
 
-    # **角度を持たない基板に書けてしまうと「書いたのに効かない設定」になる。**
-    # DC 基板と電磁弁基板は可動レンジを申告しないので、照合は永久に「申告なし」と
-    # 判定し続け、モータが起動直後から FAULT のまま復帰しない
+    # 角度を持たない基板 (DC / 電磁弁) は可動レンジを申告しないので、照合は永久に
+    # 「申告なし」と判定し続け、モータが起動直後から FAULT のまま復帰しない
     if control_type is not ControlMode.POSITION:
         raise ValueError(
             f"{source}: {path}.expected_angle_range_deg は control_type: position の軸に"
@@ -607,20 +577,13 @@ def _check_dm3520_master_id_collisions(
     """DM3520 の master_id (MST_ID) が同じバス上のどのノードの can_id (ESC_ID) とも
     下位 8bit で衝突していないことを確認する。
 
-    本機は受信 ID の**下位 8bit だけ**を見て自分宛かを判定するため
-    (docs/invariants.md「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)、
-    一致すると自分または他ノードへのフィードバックが指令として解釈される。
-    DM3520 の出荷値は 2 台とも ESC_ID == MST_ID なので、この検査が無いと
-    「ESC_ID は書き換えたが MST_ID を書き換え忘れた」個体がそのまま config に
-    残っても起動を通してしまう (症状は実機でフィードバックが指令として誤解釈
-    されることで、config からもログからも読めない)。
+    理由は docs/invariants.md「DM3520 の ESC_ID は `0x01`〜`0x0F` に限り、MST_ID は
+    下位 8bit を衝突させない」。出荷値は 2 台とも ESC_ID == MST_ID なので、この検査が
+    無いと「ESC_ID は書き換えたが MST_ID を書き換え忘れた」個体を通してしまう。
 
-    **ここ (config_schema) で見るのは、1 台の CANManager では
-    ロボット横断の can_id 衝突を検出できない (add_motor の docstring参照) のと
-    対称的に、DM3520 専用バス (can_dm3520) は現状 1 ロボットの config 内でしか
-    使われておらず、1 ファイルの中で閉じた検査で足りるため。** バス単位で見るのは、
-    フレームが同じ物理バスに繋がったノードにしか届かないため (別バスの can_id と
-    偶然一致しても無害)。
+    **1 ファイルの中で閉じた検査で足りる**のは、DM3520 専用バスが現状 1 ロボットの
+    config 内でしか使われていないため。バス単位で見るのは、フレームが同じ物理バスに
+    繋がったノードにしか届かないため。
     """
     all_nodes: list[tuple[str, str, int]] = [
         (name, motor.bus, motor.can_id) for name, motor in motors.items()

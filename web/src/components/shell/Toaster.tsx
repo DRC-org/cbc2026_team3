@@ -112,10 +112,8 @@ export function Toaster() {
       id: latest.receivedAtMs,
       tone: latest.level === "critical" ? "error" : "warning",
       // **`latest.level` を無検査で `.toUpperCase()` しない。** ここは
-      // `RouteErrorBoundary`（`<Outlet />` だけを包む）の外にあるので、
-      // 想定外の型 (受信境界の検査漏れ・将来の型変更) が来ても投げてはならない
-      // ―― 投げれば緊急停止オーバーレイごと React ツリーがアンマウントする。
-      // `String()` は何を渡しても例外にならない
+      // `RouteErrorBoundary` の外なので、投げれば緊急停止オーバーレイごと React ツリーが
+      // アンマウントする。`String()` は何を渡しても例外にならない
       title: `${String(latest.level).toUpperCase()} — ${latest.robot}`,
       lines: [
         `${latest.target}: ${latest.from} → ${latest.to}`,
@@ -136,20 +134,14 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
-  // **z は daisyUI の `.modal` (z-index: 999) より上に置く。** トーストと
-  // 緊急停止オーバーレイは `AppShell` の兄弟で同じスタッキングコンテキストに居るので、
-  // `z-50` のままだと**モーダル表示中のトーストが 62% の暗幕の下に沈む**。
-  // そこが問題になるのは、まさに操縦者が説明を必要とする瞬間 ——
-  // 切断中に緊急停止オーバーレイの Reset を押したときの
-  // 「切断中のため送信できませんでした。機体側のラッチは残っています」は
-  // `RootLayout` がトーストへ逃がしており、**それが唯一の説明経路**である。
-  // 沈むと「Reset を押しても何も起きない」としか見えない。
+  // **z は daisyUI の `.modal` (z-index: 999) より上に置く。** `z-50` のままだと
+  // モーダル表示中のトーストが 62% の暗幕の下に沈む —— 切断中に緊急停止オーバーレイの
+  // Reset を押したときの「機体側のラッチは残っています」は `RootLayout` がトーストへ
+  // 逃がしており、**それが唯一の説明経路**である。
   //
   // **上へ出した代わりに、コンテナはクリックを透かす。** daisyUI の `.toast` は
-  // `pointer-events: none` を持たず `max-width: calc(100vw - 2rem)` なので、
-  // モーダルより下に居たあいだは**構造的に**モーダルのボタンを塞げなかった。
-  // 1000 へ上げるとその保護が外れ、ウィンドウ幅が約 1100px を下回るとトーストが
-  // モーダルのフッターボタンに重なって押せなくなる (会場のノート PC で起きうる)。
+  // `pointer-events: none` を持たず幅が `calc(100vw - 2rem)` なので、1000 へ上げると
+  // ウィンドウ幅 約1100px 以下でモーダルのフッターボタンに重なって押せなくなる。
   // 透かすのはコンテナだけで、閉じるボタンを活かすため `ToastCard` は受け直す。
   return (
     <div className="pointer-events-none toast toast-end toast-bottom z-[1000]">

@@ -57,31 +57,20 @@ export const COURT_TONE: Record<CourtKey, Tone> = {
 };
 
 /**
- * 準備フェーズ (セッティングタイム)。
- * setup と ready はチェックリストの完了状況で自動遷移する連続した準備期間なので、
- * 画面レイアウトの出し分けでは 1 つのフェーズとして扱う。
- *
- * 読めなかったフェーズはどちらでもない。準備の面へ倒すと、試合中かもしれない
- * 機体に対して指差喚呼とコート設定の画面を出すことになる。
+ * 準備フェーズ (セッティングタイム)。setup と ready は自動遷移する連続した準備期間なので
+ * レイアウトの出し分けでは 1 つとして扱う。**読めなかったフェーズはどちらでもない** ——
+ * 準備の面へ倒すと、試合中かもしれない機体に指差喚呼とコート設定の画面を出すことになる。
  */
 export function isSetupPhase(phase: PhaseKey): boolean {
   return phase === "setup" || phase === "ready";
 }
 
 /**
- * 試合中フェーズ。**サーバーのフェーズゲートの写しはここだけに置く。**
+ * 試合中フェーズ。**サーバーのフェーズゲートの写しはここだけに置く**
+ * (docs/invariants.md 「フェーズによる可否のサーバー写しは `lib/phase.ts` の
+ * `isDuringMatch()` だけ」)。`lib/match_state.py` の `PHASES_DURING_MATCH` と 1:1。
  *
- * `lib/match_state.py` の `PHASES_DURING_MATCH` (= {match}) と 1:1 で、
- * 「試合中は不可」のコマンド (`motor_check_start` / `set_court`) が通る
- * `PHASES_OUTSIDE_MATCH` はその補集合なので、この 1 つで両側に答えられる。
- *
- * 可否を決めるのはサーバー (`lib/commands.py`) であって UI ではない。ここは
- * 送る前に理由を説明するためだけに使い、サーバーの判定を組み立て直さないこと。
- * 画面ごとに `phase === "match"` と書き散らすと、フェーズが増えたときに
- * 片方の画面だけが古い条件のまま残る。
- *
- * レイアウトの出し分けに使う `isSetupPhase` とは別物。あちらは finished を
- * 「試合中と同じ情報密度」に寄せるための区分で、コマンドの可否とは一致しない。
+ * レイアウトの出し分けに使う `isSetupPhase` とは別物で、一致させてはならない。
  */
 export function isDuringMatch(phase: PhaseKey): boolean {
   return phase === "match";

@@ -7,8 +7,8 @@
 ここで見るのは **いつ走ってよくて、いつ止まるか** だけ。
 
 駆動の有無は代役シーケンス (`_CheckSequence`) の記録で確かめる。実モータを繋ぐと
-「止まっていること」の確認が送信フレームの不在という弱い形になり、たまたま
-送っていないだけの状態と区別が付かない。
+「止まっていること」が送信フレームの不在という弱い形になり、たまたま送っていない
+だけの状態と区別が付かない。
 """
 
 from __future__ import annotations
@@ -126,9 +126,8 @@ class _LoopProbe:
 class _MoveCheckSequence(Sequence):
     """M3508 の軸を `move_to` で動かす動作確認の代役。
 
-    軸を動かす経路を `move_to` だけにしてあるのは実物と同じ性質を保つため。
-    M3508 は電流指令しか受け付けないので、この指令は位置制御ループを通らなければ
-    1 通の CAN フレームにもならない。
+    軸を動かす経路を `move_to` だけにするのは実物と同じ性質を保つため。M3508 は
+    電流指令しか受け付けないので、位置制御ループを通らなければ 1 通も出ない。
     """
 
     def __init__(self, probe: _LoopProbe) -> None:
@@ -209,9 +208,8 @@ def _generic_refresher(mgr: CANManager) -> tuple[GenericTargetRefresher, MotorHa
 class _QueryDrivenMotor:
     """問い合わせ駆動のモータ (EDULITE 05) の模型。
 
-    **自分の CAN ID 宛のフレームを受けたときにしか状態を返さない。** 1 通につき
-    1 歩だけ目標へ近づいて応答するので、`move_to` の指令 1 通では到達しない ——
-    目標値再送が回り続けて初めて到達を観測できる、という実機と同じ関係になる。
+    **自分の CAN ID 宛のフレームを受けたときにしか状態を返さない。** 1 通につき 1 歩
+    だけ目標へ近づくので、目標値再送が回り続けて初めて到達を観測できる。
     """
 
     def __init__(self, *, step_rad: float = 0.5) -> None:
@@ -474,9 +472,8 @@ class TestStartupWindow:
     def _install(fx: ServerFixture, stall: _StallingPausable) -> None:
         """窓を確実に開くための代役を挿す。
 
-        **本番の pause 対象は空**なので、窓は「タスク生成から `run()` が
-        スケジュールされるまで」の一瞬になり、テストからは掴めない。窓そのものは
-        実在するので、`pause()` で待たせる代役を挿して固定する。
+        **本番の pause 対象は空**なので窓は一瞬でテストから掴めないが、窓そのものは
+        実在するので `pause()` で待たせる代役を挿して固定する。
         """
         fx.set_motor_check_pausables([stall])
 
@@ -536,9 +533,9 @@ class TestExclusion:
     async def test_実行中も位置制御ループは回り続ける(self) -> None:
         """**動作確認は M3508 をこのループ経由でしか動かせない。**
 
-        止めると `move_to` の目標だけが設定されて電流が 1 通も出ず、偏差が
-        残ったまま到達待ちがタイムアウトする。復帰した瞬間に残った目標へ
-        向かって機体が動き出すので、操縦者は失敗表示の直後に動く機体を見る。
+        止めると `move_to` の目標だけが設定されて電流が 1 通も出ず、到達待ちがタイム
+        アウトする。復帰した瞬間に残った目標へ機体が走るので、操縦者は失敗表示の
+        直後に動く機体を見る。
         """
         fx, sequence = _build()
         probe = _LoopProbe(fx.can_manager("main_hand"))
@@ -558,9 +555,8 @@ class TestExclusion:
     async def test_実行中の指令が電流指令になる(self) -> None:
         """目標が設定されただけでは M3508 は動かない。
 
-        実機では目標 520mm に対して実測 2mm・飽和なしのまま到達待ちが
-        タイムアウトした。ループが 1 周期も回っていなければ、偏差がいくら
-        あっても電流指令は 0 のままになる。
+        実機では目標 520mm に対して実測 2mm・飽和なしのまま到達待ちがタイムアウトした
+        (ループが 1 周期も回らなければ偏差があっても電流指令は 0 のまま)。
         """
         fx, sequence = _build_with_axis()
         probe = sequence.probe
@@ -579,9 +575,8 @@ class TestExclusion:
     async def test_実行中も目標値再送は止まらない(self) -> None:
         """**止めると自作モタドラのウォッチドッグが確認したい当のものを消す。**
 
-        3 枚とも `command_timeout_ms` 500ms で出力を落とす。`conveyor` と
-        ポンプの `settle_s` は 0.5s なので、目視・聴音で確認している最中に
-        出力が切れる (「回っていない」を目で見ることになる)。
+        3 枚とも `command_timeout_ms` 500ms で出力を落とす。`conveyor` とポンプの
+        `settle_s` は 0.5s なので、目視・聴音で確認している最中に出力が切れる。
         """
         fx, sequence = _build()
         mgr = fx.can_manager("main_hand")
@@ -605,13 +600,11 @@ class TestExclusion:
     async def test_問い合わせ駆動のモータは実行中もフィードバックを更新し続ける(self) -> None:
         """**EDULITE 05 / DM3520 は PC が黙ると 1 通も状態を返さない。**
 
-        `AxisHandle.wait_reached` はドライバのキャッシュを polling するだけで
-        再送しないので、目標値再送を止めるとそのモータ宛へ飛ぶのは `move_to` の
-        指令 1 通だけになる。返るフィードバックも**動き出す前の位置 1 通**で
-        以後は更新されず、実際に動ききっても到達判定を通らない。
-
-        実機で `rotate` の零点確定が通ったのは `HomingRunner` が 1 歩ごとに
-        指令を出して毎回応答を得ていたからで、`move_to` は同じ形にならない。
+        `AxisHandle.wait_reached` はキャッシュを polling するだけで再送しないので、
+        目標値再送を止めるとそのモータ宛へ飛ぶのは `move_to` の指令 1 通だけになる。
+        返るフィードバックも**動き出す前の位置 1 通**で以後は更新されず、実際に
+        動ききっても到達判定を通らない (`HomingRunner` は 1 歩ごとに指令を出して
+        毎回応答を得るので同じ形にならない)。
         """
         fx, motor = _build_with_query_driven()
         motor.refresher.start()
@@ -650,8 +643,7 @@ class TestExclusion:
         """**止める対象は 1 つも無い。**
 
         位置制御ループも目標値再送も、動作確認が軸を動かす経路そのものである
-        (`RobotServer._motor_check_pausables`)。以降のテストが挿す代役は、
-        本番に存在しない窓を再現するためのもの。
+        (`RobotServer._motor_check_pausables`)。以降の代役は本番に無い窓の再現用。
         """
         fx, _ = _build()
         probe = _LoopProbe(fx.can_manager("main_hand"))
@@ -778,10 +770,9 @@ class TestBroadcast:
     async def test_失敗したステップと理由を状態に載せる(self) -> None:
         """**動作確認が失敗したことが画面に出なければ、確認そのものが意味を失う。**
 
-        到達タイムアウトも左右ずれもシーケンスのステップ単位 try で握られるため、
-        載せない限り `error:None` / `step_index:0` のまま「一度も実行していない」と
-        同じ表示に戻る。`config/checklist.yaml` の「アクチュエータ動作確認 完了」は、
-        その誤表示のままチェックが付く経路になる。
+        到達タイムアウトも左右ずれもステップ単位 try で握られるため、載せない限り
+        `error:None` / `step_index:0` のまま「一度も実行していない」と同じ表示に戻り、
+        指差喚呼「アクチュエータ動作確認 完了」がその誤表示のままチェックされる。
         """
 
         class _FailingCheck(Sequence):
@@ -826,10 +817,9 @@ class TestBroadcast:
     async def test_除外したステップを状態に載せる(self) -> None:
         """**除外を黙って行うと、動作確認そのものが意味を失う。**
 
-        構成に無い軸のステップが配信から消えるだけだと、サブハンド不在で減って
-        いるのか、本番構成なのに config の書き忘れで減っているのかを操縦者が
-        区別できない。どちらも「全ステップ成功」として同じに見え、症状は
-        「動作確認は通ったのに試合でその軸だけ動かない」になる。
+        ステップが配信から消えるだけだと、サブハンド不在で減っているのか config の
+        書き忘れで減っているのかを操縦者が区別できない。どちらも「全ステップ成功」に
+        見え、症状は「動作確認は通ったのに試合でその軸だけ動かない」になる。
         """
 
         class _PartialCheck(Sequence):

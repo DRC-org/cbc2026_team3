@@ -4,11 +4,9 @@ robot_name: sub_hand
 # 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
 
 # !!! can_id はバス単位でロボット横断に一意にすること !!!
-# can_edulite / can_generic はメインハンドと物理的に同じバスを共有する。
-# CANManager はロボットごとに別インスタンスだが CAN ID 空間は共有されるため、
-# 同じ can_id を両者が使うと CANManager._receive_loop が最初にマッチした 1 台で break し、
-# もう一方は永久にフィードバックを得られない。EDULITE 05 は
-# requires_fresh_feedback_for_activation が True なので、無励磁のまま運用に入ってしまう。
+# can_edulite / can_generic はメインハンドと物理的に同じバスを共有する。重複すると
+# 受信ループが最初にマッチした 1 台で打ち切るため、もう一方は永久にフィードバックを
+# 得られない (EDULITE 05 は無励磁のまま運用に入ってしまう)。
 #
 # --- バスごとに ID の決め方が違う -------------------------------------------
 # **「メインハンドが前を使うからサブハンドは後ろへずらす」という割り当てではない。**
@@ -38,14 +36,13 @@ robot_name: sub_hand
 #     基板番号ごと・スロットごとにファームが持つ**
 #     (firmware/servo/include/config.h の kServoBoards[])。config 側で選べる値では
 #     ないので、新しいアクチュエータを空き ID へ載せる前に、その基板番号のその行が
-#     Servo になっていることを確かめること。役割が食い違うと、指令を送っても FEEDBACK も
-#     INFO も返らない (センサ・未使用スロットは SET_TARGET を受け付けない) ので、
-#     症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
+#     Servo になっていることを確かめること。役割が食い違うと FEEDBACK も INFO も
+#     返らず、症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
 #     現在サーボ基板 #0 は SV0-SV2 が Servo・SV3 が TouchSensor・SV4 が Unused、
 #     サーボ基板 #1 は SV0 だけが Servo で SV1-SV4 は Unused、
 #     サーボ基板 #2 は 5 スロットとも Unused (用途未定)。
-#     **SV4 の Unused は空きではない** —— y_axis の原点スイッチ用に予約してあり、
-#     スイッチが付いたら TouchSensor へ戻すスロットなので、ここへ別のものを載せない。
+#     **SV4 の Unused は空きではない** —— y_axis の原点スイッチ用の予約なので、
+#     ここへ別のものを載せない。
 #
 #   can_edulite … EDULITE 05 の ID は 1 バイトの任意値で、ビット分割の規則は無い
 #     (出荷時は 2 台とも 0x7F。バスへ載せる前に scripts/edulite_set_id.py で
@@ -72,23 +69,14 @@ motors:
   # pid: を書かない (書いても位置制御ループに載らない) のはそのためで、
   # ゲイン調整は Damiao の調整アシスタント側。
   #
-  # **can_dm3520 は専用バス。** 相乗りできる既存バスが無い (DM3520 の
-  # 0x100+ID / 0x200+ID が can_generic の SET_TARGET / SET_PARAM と、また C620 の
-  # フィードバック 0x201〜0x204 と重なる)。理由は config/can_buses.yaml に書いてある。
+  # **can_dm3520 は専用バス。** 相乗りできる既存バスが無い (理由は
+  # config/can_buses.yaml と docs/invariants.md)。
   #
   # --- ID の付け方 -----------------------------------------------------------
   # ESC_ID (レジスタ 0x08) / MST_ID (レジスタ 0x07) は 2026-08-30 に実機へ書き込み済み。
   # 出荷値は 2 台とも ESC_ID == MST_ID (0x010 / 0x013) だった。
-  #
-  # **ESC_ID は 0x01..0x0F に限る。** フィードバックには CAN ID の下位 4bit しか
-  # 載らない (仕様の Feedback Frame の D0) ので、下位 4bit が重なる 2 台は原理的に
-  # 区別できず、2 台目のフィードバックが 1 台目の状態を上書きする。
-  # lib/config_schema.py の CAN_ID_RANGES がこれを起動時に弾く。
-  #
-  # **MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする。** 本機は受信 ID の
-  # 下位 8bit だけを見て自分宛かを判定するため、一致するとフィードバックが別の個体
-  # (あるいは自分自身) への指令として解釈される。0x01/0x02 に対する 0x11/0x12 は
-  # この条件を満たす。
+  # **ESC_ID は 0x01..0x0F に限り、MST_ID はどの ESC_ID とも下位 8bit を衝突させない**
+  # (理由は docs/invariants.md。lib/config_schema.py が起動時に両方とも弾く)。
   #
   # !!! p_max / v_max / t_max はフィードバックの固定小数点レンジ !!!
   # 実機のレジスタ (0x15 / 0x16 / 0x17) と一致していないと**比例倍の値が読める**。
@@ -139,10 +127,6 @@ motors:
     set_zero_on_start: false
 
   # --- 離散状態アクチュエータ (自作モータドライバ) ---
-  # 開 / 閉 の 2 状態しか取らない。動作確認も運用と同じ位置名へ動かすので
-  # (sequences/motor_check.py)、確認専用の駆動量は存在しない。専用の magnitude を
-  # 持たせると、微小量の指令でも「サーボは補間完了で reached を立てるので 0.1deg しか
-  # 動いていなくても PASSED になる」という形で確認が意味を失う。
   # **サーボ基板 #0 ではなく #1 に載る唯一のアクチュエータ。** サーボ基板 #0 の SV3 は
   # ファーム側で TouchSensor (rotate の原点スイッチ) になっており、同じスロットへ
   # サーボの指令を送っても受け付けられない。#0 の残る Servo スロットは
@@ -154,10 +138,9 @@ motors:
     control_type: position
     # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
     # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
-    # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
-    # 値は firmware/servo/include/config.h の kFirmwareVersion と
-    # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
-    # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
+    # ので、この照合以外に気付く手段が無い。値は firmware/servo/include/config.h の
+    # kFirmwareVersion と kServoBoards[].slots[].pulse.angleRangeDeg に対応する。
+    # **サーボの型はスロットごとに選べる**ので、別スロットの値を写さないこと。
     # **ファームを直したらここも直す。**
     expected_firmware: 5
     expected_angle_range_deg: 270.0
@@ -175,18 +158,14 @@ motors:
   # 非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。動作確認は弁を
   # 開閉するところまでを担い、鳴ったかどうかは config/checklist.yaml の
   # valves_actuate で打音・目視確認する。
-  # on_off 軸は到達判定を持たないので、シーケンスは settle_s の固定待ちへ落ちる
-  # (config/sub_hand_positions.yaml)。
   valve_1:
     driver: generic
     bus: generic_bus
     can_id: 0xC0               # 電磁弁基板 #0 ch0 (PB7)
     control_type: on_off
     # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # ファームを一部の基板にだけ焼き忘れると、症状は「そのモータが応答しない」か、
-    # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
     # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
-    # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
+    # その基板のモータが一斉に FAULT になる）。
     expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
 
   valve_2:
@@ -227,15 +206,12 @@ motors:
   # --- 吸着系: ポンプ (自作モータドライバ / DC 基板) ---
   # **ポンプは電磁弁基板ではなく DC 基板が動かす** (仕様書 §9.6)。電磁弁基板の 6ch は
   # すべて弁で埋まっており、またポンプは起動電流が大きく max_duty で立ち上がりを
-  # 抑えられる DC 基板の側が適している。
+  # 抑えられる DC 基板の側が適している。**メインハンドの conveyor (0x80) と同じ基板を
+  # 共有する**ので、サブハンド側に基板をもう 1 枚置くなら can_id を 0x88 / 0x89
+  # (DC 基板 #1 = DIP 1) へ移すこと。
   #
-  # DC 基板 #0 の ch1 / ch2 は空いていたのでそこへ載せる。**メインハンドの conveyor
-  # (0x80) と同じ基板を共有する**ので、サブハンド側に基板をもう 1 枚置くなら
-  # can_id を 0x88 / 0x89 (DC 基板 #1 = DIP 1) へ移すこと。
-  #
-  # duty 指令で、回ったかどうかを観測する手段は無い (conveyor と同じ)。
-  # 動作確認は回して止めるところまでを担い、鳴ったかどうかは checklist の
-  # pumps_run で聴音確認する。
+  # 回ったかどうかを観測する手段は無い (conveyor と同じ)。動作確認は回して止める
+  # ところまでを担い、鳴ったかどうかは checklist の pumps_run で聴音確認する。
   pump_vac:
     driver: generic
     bus: generic_bus

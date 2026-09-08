@@ -50,11 +50,10 @@ def _make_group(*names: str, reaches: bool = True) -> tuple[MotorGroup, dict[str
 def _clear_on_first_poll(group: MotorGroup) -> None:
     """最初の到達判定が呼ばれた瞬間に全ハンドルの目標を捨てる。
 
-    **中断のテストを実時間の勝負にしないための仕掛け。** `asyncio.sleep(0.01)` で
-    緊急停止を狙うと、狙いが外れた回に別の経路 (指令前に消える → タイムアウト /
-    指令後・待機前に消える → 窓) へ落ちて、踏めた日だけ緑になる。
-    到達判定は `wait_reached` のループの中でしか
-    呼ばれないので、そこへ引っ掛ければ「待機中に消えた」が毎回同じ順序で起きる。
+    **中断のテストを実時間の勝負にしないための仕掛け。** `asyncio.sleep(0.01)` で狙うと
+    別の経路 (指令前に消える → タイムアウト / 指令後・待機前 → 窓) へ落ち、踏めた日だけ
+    緑になる。到達判定は `wait_reached` のループでしか呼ばれないので、そこへ引っ掛ければ
+    「待機中に消えた」が毎回同じ順序で起きる。
     """
     for handle in group.handles:
         driver = handle.driver
@@ -182,14 +181,11 @@ class TestMoveTo:
         """**溜めている途中で落ちたコルーチンが誰にも await されない形を作らない。**
 
         2 軸目の `set_target_value` が例外を投げたとき、1 軸目ぶんの `wait_reached`
-        コルーチンを既に作っていると、それが誰にも await されないまま捨てられ
-        `RuntimeWarning: coroutine ... was never awaited` が journal に出る ——
-        試合中に緊急停止を踏むたび、本当の死因 (`EStopActiveError`) の隣に
-        無関係な警告が並ぶ。
+        コルーチンを既に作っていると誰にも await されないまま捨てられ、緊急停止のたび
+        本当の死因 (`EStopActiveError`) の隣に `RuntimeWarning` が並ぶ。
 
-        判定は「コルーチンが 1 つも作られていないこと」で見る。警告そのものを
-        `catch_warnings` で捕まえる形にすると、コルーチンの回収時期 (gc とイベント
-        ループの終了) に依存して**変異版でも緑になる**。
+        判定は「コルーチンが 1 つも作られていないこと」で見る —— 警告を
+        `catch_warnings` で捕まえる形は回収時期に依存して**変異版でも緑になる**。
         """
         seq = _MoveSequence()
         mgr = MagicMock()
@@ -240,9 +236,8 @@ class TestRunStopsOnTimeout:
 class TestMoveToInterruptedByEStop:
     """緊急停止 (clear_target) が到達待ちを「到達」にすり替えない回帰テスト。
 
-    経路: MotorHandle.is_reached() は「目標が無ければ到達済み」を返す仕様のため、
-    move_to() の到達待ち中に緊急停止で目標がクリアされると、黙って「到達した」こと
-    になり、中断された動作がステップ成功として記録されうる。
+    `MotorHandle.is_reached()` は「目標が無ければ到達済み」を返すので、到達待ち中に
+    緊急停止で目標がクリアされると、中断された動作がステップ成功として記録されうる。
     """
 
     async def test_move_to_raises_when_target_cleared_mid_wait(self) -> None:
@@ -261,15 +256,12 @@ class TestMoveToInterruptedByEStop:
     ) -> None:
         """**指令し終えてから待ち始めるまでの窓で消えた目標も「中断」である。**
 
-        `move_to` は全軸へ `set_target_value` を送り終えてから `wait_reached` を
-        まとめて作る。その間に緊急停止 (`TargetRefresher.clear_targets()`) が挟まると、
-        `wait_reached` は**最初から目標が無い状態で待ち始める** —— 待機開始時点の
-        スナップショットだけを見ると、これが「一度も指令していない軸」と区別できず
-        `is_reached()` の「目標が無ければ到達済み」に吸われて **True** を返し、
-        中断された動作がステップ成功として記録される。
+        `move_to` は全軸へ送り終えてから `wait_reached` をまとめて作る。その間に緊急停止
+        が挟まると `wait_reached` は**最初から目標が無い状態で待ち始め**、「一度も指令して
+        いない軸」と区別できずに `is_reached()` の「目標が無ければ到達済み」へ吸われて
+        中断がステップ成功として記録される。
 
-        ここは時刻に依存させずに窓そのものを再現する —— 実時間の sleep で狙うと、
-        踏めた日だけ緑になる。
+        時刻に依存させずに窓そのものを再現する (実時間の sleep で狙うと踏めた日だけ緑)。
         """
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", "arm_joint", reaches=False)

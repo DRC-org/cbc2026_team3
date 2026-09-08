@@ -228,18 +228,16 @@ class TestSerialization:
 class TestMatchTimer:
     """試合時間タイマー。全デバイスの表示はこの経過時間だけを起点にする。
 
-    サーバーは残り時間ではなく「配信瞬間の経過ミリ秒」を配り、各デバイスが
-    自分の単調時計で進める。したがってここが誤ると、ずれは 1 台ではなく
-    **全デバイスで同じだけ**ずれる (画面同士を見比べても気付けない)。
+    サーバーは残り時間ではなく「配信瞬間の経過ミリ秒」を配り、各デバイスが自分の
+    単調時計で進める (docs/invariants.md §4)。ここが誤るとずれは 1 台ではなく
+    **全デバイスで同じだけ**現れ、画面同士を見比べても気付けない。
     """
 
     def test_default_clock_is_monotonic(self) -> None:
         """既定の時刻源は単調時計であること。
 
-        time.time() は NTP 補正で後ろへ飛ぶことがあり、試合中に残り時間が
-        増える。全デバイスがこの値を起点にするため、ずれは 1 台ではなく
-        **全画面で同じだけ**現れ、見比べても気付けない。
-        テストは必ず clock を注入するので、既定値はここでしか踏まれない。
+        time.time() は NTP 補正で後ろへ飛び、試合中に残り時間が増える。テストは必ず
+        clock を注入するので、既定値はここでしか踏まれない。
         """
         default = inspect.signature(MatchState.__init__).parameters["clock"].default
         assert default is time.monotonic
@@ -404,10 +402,9 @@ class TestLoadDefinitions:
     def test_load_rejects_unknown_role(self) -> None:
         """**ロール名の誤りは 1 項目の欠落と失敗の質が違うので拒否する。**
 
-        `ALL_ROLES` に無いロールへ書かれた項目は `_rebuild_checklists` の段で丸ごと
-        落ち、`pre_match` は空リストになる。`completed` は `all([])` で True なので、
-        **指差喚呼を 1 つも読み上げないまま試合開始のゲートが開く**。しかも画面には
-        項目が 1 つも出ないため、操縦者にはゲートが開いている理由が分からない。
+        `ALL_ROLES` に無いロールの項目は `_rebuild_checklists` で丸ごと落ち、
+        `pre_match` は空リストになる。`completed` は `all([])` で True なので、
+        **指差喚呼を 1 つも読み上げないまま試合開始のゲートが開く**。
 
         `group` の未知の値を素通しするのとは逆方向だが矛盾しない —— あちらは
         「置き場所が既定へ落ちる」だけで項目もゲートも残る。
@@ -427,10 +424,8 @@ class TestLoadDefinitions:
     def test_unknown_role_would_have_opened_the_gate(self) -> None:
         """拒否しないと何が起きるかを、拒否とは独立に固定する。
 
-        `load_checklist_definitions` を通さずに `MatchState` を直接組み立てて、
-        「項目が 1 つも無いロール」が試合開始を通してしまうことを見る。この性質
-        自体は正しい (項目 0 件の構成は `config/bench/*` に実在する) ので、
-        **入口で弾くしか防ぎようが無い**ことの根拠になる。
+        「項目が 1 つも無いロール」が試合開始を通す性質自体は正しい (項目 0 件の構成は
+        `config/bench/*` に実在する) ので、**入口で弾くしか防ぎようが無い**。
         """
         state = MatchState({ROLE_PRE_MATCH: []})
 

@@ -35,15 +35,10 @@ const ROLE_LABEL: Record<string, string> = {
  * セッティングタイムの主役。「今すぐ試合を開始できるか、できないなら何が足りないか」
  * だけを、画面で最も大きい要素として答える。
  *
- * 以前この情報は試合制御パネル最下段の小さなグレー文字
- * (`試合開始 不可: チェックリスト未完了`) だった。何が未完了なのかは書かれておらず、
- * Monitor は右側に並ぶ 16 行の項目を目でスキャンして差分を取る必要があった。
- * 開始が遅れている原因を探すのに操縦者へ聞きにいく、という運用がそこから生まれる。
- *
- * 開始の確認は**同じボタンの二度押し**で取る（`useArmedPress`）。確認ダイアログは
- * ボタンから離れた位置に出るため、押す → カーソルを運ぶ → 押す、の往復が要った。
- * ダイアログ本文が持っていた情報（コート・機体が動く条件・周囲の安全確認）は
- * 武装中の説明行へ移してある。落とすと二度押しは単なる連打になる。
+ * 開始の確認は**同じボタンの二度押し**で取る（docs/invariants.md 「試合の開始・終了の
+ * 確認は同じボタンの二度押しで取る」）。ダイアログ本文が持っていた情報（コート・機体が
+ * 動く条件・周囲の安全確認）は武装中の説明行へ移してある —— 落とすと二度押しは単なる
+ * 連打になる。
  */
 export function StartGate({ onStart }: { onStart: () => void }) {
   const { matchState, connected } = useRobotStatus();
@@ -59,14 +54,12 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     blockers.push({ label: "フェーズ", detail: "リセットしてセッティングへ戻してください" });
   }
 
-  // 開始可否を決めるのはサーバーの can_start_match だけ。ここは「なぜ開始できないか」を
-  // 説明するに留める。クライアントでも判定し直すと、サーバーは開始できると言っているのに
-  // 画面がボタンを殺す状態が生まれる (実際に、配信ロールが 1 つ増えただけでそうなった)。
+  // 開始可否を決めるのはサーバーの can_start_match だけ (docs/invariants.md 「試合を
+  // 開始できるかを決めるのはサーバーの `can_start_match` だけ」)。ここは「なぜ開始
+  // できないか」を説明するに留める。
   if (!canStart) {
-    // **残っている項目名はここに出さない。** 同じ画面の Checklist が全項目を並べ、
-    // 未完の先頭を「次」として強調している。ここで先頭項目を繰り返すと、
-    // 操縦者は同じ 1 行を 2 箇所で読むことになる (以前この画面には Checklist が
-    // 無く、右カラムの 16 行をスキャンさせないために項目名を出していた)。
+    // **残っている項目名はここに出さない。** 同じ画面の `MatchPrep` が全項目を並べて
+    // 未完の先頭を「次」として強調しているので、繰り返すと同じ 1 行を 2 箇所で読ませる。
     const checklists = matchState.checklists;
     const incomplete =
       checklists === MALFORMED ? [] : Object.entries(checklists).filter(([, c]) => !c.completed);
@@ -99,14 +92,10 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     if (verdict.tone !== "success") {
       items.push({ key: `${key}:health`, label, detail: verdict.label });
     }
-    // 手動操縦は健全性ではないので evaluateHealth へは足さない (あちらは
-    // `lib/healthVerdict.ts` の 1 箇所だけが持つ機体の健全性判定)。ここへ別項目として
-    // 並べるのは、指差喚呼 operation_mode_sequence が読む先がこの行だから。
-    //
-    // **チェックの後で手動へ戻っても外れる**のが要点。指差喚呼は押した瞬間のラッチで、
-    // valves_actuate のように手動操縦を要求する項目が同じリストに居るので、
-    // final を全部チェックした後に弁をもう一度確かめて手動のまま戻ると
-    // can_start_match は true のままになる。ここは毎描画で評価するのでラッチしない
+    // 手動操縦は健全性ではないので evaluateHealth へは足さず、別項目として並べる
+    // (指差喚呼 operation_mode_sequence が読む先がこの行)。**チェックの後で手動へ戻っても
+    // 外れる**のが要点 —— 指差喚呼は押した瞬間のラッチなので、弁を確かめて手動のまま
+    // 戻ると can_start_match は true のままになる。ここは毎描画で評価しラッチしない
     if (robot.manual?.mode === "manual") {
       items.push({
         key: `${key}:manual`,

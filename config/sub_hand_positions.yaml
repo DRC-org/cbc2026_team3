@@ -51,15 +51,13 @@ axes:
   # という形でしか現れない。
   #
   # !!! 原点は電源投入位置 !!! 本機は投入時に 0.0rad へ固定されるので、搬送中に手で
-  # 動かしたぶんがそのまま座標のずれになる。リミットスイッチを付けたら下の homing:
-  # を有効化すること —— ただし現状 lib/sequence/homing.py の零点確定は
-  # M3508PositionLoop 経由 (main.py の _make_origin_resolver) にしか対応しておらず、
-  # 本機で有効化するには SET_ZERO (0xFE) を送る経路を足す必要がある
-  # (config/main_hand_positions.yaml の rotate も同じ状態)。
+  # 動かしたぶんがそのまま座標のずれになる。**リミットスイッチを付けても現状は
+  # 有効化できない** —— `supports_origin_capture()` が False なので `HomingError` に
+  # なる (理由は docs/invariants.md「原点を確定する手段はドライバ自身が答える」)。
   #
   # 前後方向 (Y 方向)。**軸名に sub_ を付けるのは main_hand の y_axis と衝突させない
-  # ため** —— 統合動作確認は両ハンドの位置定数を PositionTable.merged で 1 つに
-  # まとめるので、軸名が重なると起動ごと落ちる (main.py の _wire_motor_check_sequence)。
+  # ため** —— 統合動作確認は両ハンドの位置定数を 1 つに merge するので、軸名が
+  # 重なると起動ごと落ちる。
   # homing:
   #   sensor: sub_y_axis_origin_sensor
   #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
@@ -73,9 +71,7 @@ axes:
     offset: 0.0
     timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
     tolerance: 1.0       # 到達許容差 [mm]
-    # 手動操縦の可動範囲 [mm]。**機構の物理端ではなくその内側に取る** ——
-    # 手動は操縦者が端へ寄せていく操作なので、境界を物理端に合わせると
-    # 「指令は範囲内なのに機構は突き当たっている」状態が作れてしまう。
+    # 手動操縦の可動範囲 [mm]。**機構の物理端ではなくその内側に取る。**
     # TODO: 機構完成後、実測のストローク端より内側へ詰めること
     manual:
       min: -5.0
@@ -84,10 +80,8 @@ axes:
 
   # 昇降。正が上、負が下 (TODO: 実機で確認し、逆なら scale の符号を反転する)。
   #
-  # **緊急停止では無励磁になる。** 本機の「止める」は消磁の一手しか無く、サーボの
-  # ような「現在角を保持」は持たない。減速比 19.2 のギヤで自重落下しない前提に
-  # 乗っているので、機構が付いたら config/checklist.yaml の sub_lift_holds で
-  # 必ず実機確認すること。
+  # **緊急停止では無励磁になる。** 減速比 19.2 のギヤで自重落下しない前提に乗って
+  # いるので、機構が付いたら config/checklist.yaml の sub_lift_holds で必ず実機確認。
   sub_lift:
     unit: mm
     command_unit: rad
@@ -114,10 +108,8 @@ axes:
   # 電磁弁 6 個。**6 軸とも同じ定義**なので、settle_s などを変えるときは
   # 6 箇所すべてを直すこと (1 つだけ残ると、その弁だけ待ち時間が違う)。
   #
-  # on_off 軸は到達判定を持たない (基板が弁の開閉を観測できない。仕様書 §9.3)。
-  # 指令の直後に次のステップへ進まないよう settle_s で待つ。
-  # duty 軸と同じく manual: は書けない (書くと起動を拒否する) ので、手動操縦でも
-  # open / closed のプリセットだけを送る。
+  # on_off 軸は到達判定を持たない (基板が弁の開閉を観測できない。仕様書 §9.3) ので
+  # settle_s で待つ。manual: は書けない (書くと起動を拒否する)。
   #
   # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
   # 機構が付いたら「離した直後に持ち上げても落ちない」ところまで実測して詰めること。
@@ -179,9 +171,8 @@ positions:
   # !!! この軸だけ「ファームの起動角 = 初期姿勢」が崩れている !!!
   # firmware/servo/include/config.h の kServoBoards[] の基板 #1 SV0 の初期角は
   # 0.0deg で、それは下の closed にあたる。**通電直後と基板の瞬断後は閉じる方向へ動く。**
-  # メインハンドの 3 軸は起動角が gripper.open / wall_f.initial / wall_r.initial と
-  # 一致しているので、ここだけが逆。config/checklist.yaml の `sub_gripper_open`
-  # (動作確認より前に唱える) は通電直後には成立しない。
+  # メインハンドの 3 軸はここが一致しているので、この軸だけが逆で、
+  # config/checklist.yaml の `sub_gripper_open` は通電直後には成立しない。
   # 揃え方は docs/mechanism_handoff.md の該当行を参照 (機構側の判断)。
   sub_gripper:
     open: 5.0            # 開 [deg]

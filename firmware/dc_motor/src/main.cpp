@@ -217,25 +217,19 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
-// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
-// **ここで OR を足してはならない。** 各 main.cpp がフラグを組み立てると規則が
-// ペリフェラルの翻訳単位へ移り、`flags |= kReached;` を 1 行足しても native テストは
-// 1 件も落ちなくなる。到達フラグを立てないこと（仕様書 §3.2 / §8: 観測手段が 1 つも
-// 無い）は board == Dc から導かれるので、この呼び出しが規則の全てになる。
+// 状態フラグの組み立て規則は composeFeedbackFlags が持つ（規則と理由はその宣言。
+// native テスト圏内）。**ここで OR を足してはならない** —— 足すと規則がペリフェラルの
+// 翻訳単位へ移り、`flags |= kReached;` を 1 行足しても native テストが 1 件も落ちない。
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
                                 g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
                                 /*reached=*/false, /*sensorActive=*/false);
 }
 
-// CAN 送信 1 通ぶんの結果を記録する。**戻り値を捨てないための唯一の口**にしてあるので、
-// CAN.write() を直に呼ぶ経路を作らないこと。戻り値を捨てると、INFO が数秒間 1 通も
-// 出ていないことが LED にもログにも PC 側にも現れない。
-//
-// **空かなければ諦める。待ってはならない** —— 詰まったバスの上で loop() が止まると、
-// ウォッチドッグ満了の反映も出力の更新も止まる（電磁弁基板 app.cpp の sendFrame と
-// 同じ判断）。FEEDBACK は次の周期でまた送られるので、1 通落ちても PC 側の STALE 判定
-// （既定 500ms）には遠く届かない。
+// CAN 送信 1 通ぶんの結果を記録する（共通の規則は MotorTxHealth.h）。
+// **戻り値を捨てないための唯一の口**にしてあるので、CAN.write() を直に呼ぶ経路を
+// 作らないこと —— 捨てると、INFO が数秒間 1 通も出ていないことが LED にもログにも
+// PC 側にも現れない。
 static bool sendFrame(const CanMsg &msg) {
     if (CAN.write(msg) > 0) {
         g_txFail.onSuccess();
@@ -296,11 +290,10 @@ static void handleChannelFrame(uint8_t ch, CommandType command, const CanMsg &ms
                                uint32_t nowMs) {
     switch (command) {
         case CommandType::SetTarget: {
-            // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
-            // 養わないと解除した直後に満了済みで動かない。
-            // 制御タイプが duty でなくても養うのは、通信自体は生きているため。
-            // 受理判定（DcChannel::setDuty）より必ず先に呼ぶこと。起動直後は
-            // §5.4 により未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる。
+            // 仕様書 §6: 緊急停止ラッチ中でも、制御タイプが duty でなくてもウォッチドッグ
+            // は養う（通信自体は生きているので、養わないと解除直後に満了済みで動かない）。
+            // **受理判定より必ず先に呼ぶこと** —— 起動直後は §5.4 により未受信＝出力禁止
+            // なので、順序を逆にすると最初の 1 通を捨てる。
             g_channel[ch].feed(nowMs);
 
             const SetTargetCommand cmd = decodeSetTarget(msg.data, msg.data_length);

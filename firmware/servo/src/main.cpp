@@ -12,17 +12,16 @@
 //
 // 「出力禁止中は角度指令を受け付けず、補間より先に現在角で凍結する」（§7.5）は
 // ServoChannel が持つ。ここで ServoMotion / MotorSafety を直に触ると、その規則を
-// 迂回する経路（＝緊急停止中に動くサーボ）が書けてしまう。
-//
-// DC 用（firmware/dc_motor）と同じ判断をする箇所は MotorCan 側に置くこと。
-// 両 main.cpp が同じ分岐を各自で持つと、片方だけ直したことに誰も気付けない。
+// 迂回する経路（＝緊急停止中に動くサーボ）が書けてしまう。DC 用（firmware/dc_motor）と
+// 同じ判断をする箇所も MotorCan 側に置くこと —— 両 main.cpp が同じ分岐を各自で持つと、
+// 片方だけ直したことに誰も気付けない。
 //
 // **サーボ基板は 3 枚あって MCU が 2 種類ある**（config.h 冒頭を参照）。CAN の扱いだけが
-// 違うので、そこは servo_can（can_backend.h）へ切り出してあり、このファイルに
-// MCU 依存の #if が残るのは**ピンの表と静的検査だけ**である。
-//   - 基板 #0 / #1: Arduino Nano（ATmega328P / 8bit）。CAN は MCP2515 を SPI で外付け。
-//     D11/D12/D13 が SPI で、D13 は SCK なのでステータス LED に使えず RGB LED が担う
-//   - 基板 #2: UNO R4 Minima（RA4M1 / 32bit）。CAN は内蔵で D4/D5 固定
+// 違うので servo_can（can_backend.h）へ切り出してあり、このファイルに MCU 依存の #if が
+// 残るのは**ピンの表と静的検査だけ**である。
+//   - 基板 #0 / #1: Arduino Nano。CAN は MCP2515 を SPI（D11/D12/D13）で外付け。
+//     D13 は SCK なのでステータス LED に使えず RGB LED が担う
+//   - 基板 #2: UNO R4 Minima。CAN は内蔵で D4/D5 固定
 //   - PWM はどちらも Servo ライブラリを使う（DC 用の R4 専用 PwmOut は使わない）
 //
 // サーボ固有の扱い（DC 用との違い）:
@@ -64,10 +63,8 @@ using namespace motorcan;
 // ここには写さず下の pinsAvoidCan() が PIN_CAN0_TX / PIN_CAN0_RX を直接見る。
 //
 // **UART の 2 本（D0/D1）はどちらの MCU でも ENABLE_SERIAL_DEBUG に依らず常に入れる。**
-// 理由は 2 つで、どちらも config.h の kPinUartRx / kPinUartTx のコメントにある ——
-// シリアルを切ってもその 2 本が使えるようにはならないこと（Nano は USB-シリアル変換に
-// 直結、R4 は Serial1）、そして kServoBoards の**ゼロ埋め（書き忘れた要素は pin=0 に
-// なる）をここで捕まえる**こと。
+// 理由は config.h の kPinUartRx / kPinUartTx のコメントにある（シリアルを切っても
+// その 2 本は使えるようにならないこと / kServoBoards のゼロ埋めの捕獲）。
 #if defined(ARDUINO_ARCH_RENESAS)
 static constexpr uint8_t kFixedPins[] = {
     kPinUartRx, kPinUartTx, kPinRgb, kPinDip[0], kPinDip[1], kPinDip[2], kPinDip[3],
@@ -80,14 +77,12 @@ static constexpr uint8_t kFixedPins[] = {
 #endif
 static constexpr uint8_t kFixedPinCount = sizeof(kFixedPins) / sizeof(kFixedPins[0]);
 
-// **このビルドが担う全基板・全スロットのピンを見る。** 役割も型も基板番号ごとに変わるので、
-// 「今この行で Unused になっているスロット」を検査から外すと、別の基板でそのスロットを
-// 使い始めた瞬間に検査を通っていない配線が動き出す。基板 #1 の行だけ衝突していても
-// 症状はその 1 枚にしか出ないので、実機を挿すまで気付けない。
+// **このビルドが担う全基板・全スロットのピンを見る。** Unused のスロットを検査から外すと、
+// 別の基板でそのスロットを使い始めた瞬間に検査を通っていない配線が動き出す（基板 #1 の
+// 行だけ衝突していても症状はその 1 枚にしか出ず、実機を挿すまで気付けない）。
 //
 // **constexpr のループで continue を使わないこと。** avr-gcc 7.3 は constexpr 評価中の
-// continue で増分式を飛ばし、無限ループになって
-// 「constexpr loop iteration count exceeds limit」でビルドが落ちる。条件は if の入れ子で書く。
+// continue で増分式を飛ばし、無限ループになってビルドが落ちる。条件は if の入れ子で書く。
 static constexpr bool slotPinsAreSane() {
     for (uint8_t b = 0; b < kServoBoardCount; ++b) {
         for (uint8_t i = 0; i < kServoSlotCount; ++i) {
@@ -144,10 +139,9 @@ static constexpr bool pinsAvoidCan() {
 static_assert(pinsAvoidCan(), "config.h のピンが CAN(D4/D5) と衝突している");
 #endif
 
-// デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
-// スロット間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）ので、
-// 基準 ID の表も重複・連続ブロック性・帯・センサのビット割り当ての static_assert も
-// 要らない。
+// makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので（§2.2）、
+// スロット間の重複も帯からのはみ出しも構造的に起こらない —— 基準 ID の表も、重複・
+// 連続ブロック性・帯の static_assert も要らない。
 
 static_assert(kServoSlotCount <= motorcan::kMaxSlotNumber + 1,
               "スロット数がデバイス ID のスロット番号（3bit）に収まらない");
@@ -203,10 +197,9 @@ static_assert(boardNumbersFitInDeviceId(),
 static bool g_canFailed = false;
 
 // 送信の連続失敗数。数える規則は TxFailCounter が持つ（native テスト圏内）。
-// **servo_can::send() の戻り値を捨ててはならない** —— 捨てると「loop() だけが伸び続けて
-// 誰にも何も届かない基板」が平常時と同じ青のハートビートを出し続ける。失敗の出方は
-// MCU で違う（MCP2515 は 1 通あたり最大 5ms 待たされてから失敗、R4 は mailbox が
-// 空いていなければ即失敗）が、数え方はどちらも同じでよい。
+// **servo_can::send() の戻り値を捨ててはならない** —— 捨てると「誰にも何も届かない基板」が
+// 平常時と同じ青のハートビートを出し続ける。失敗の出方は MCU で違う（MCP2515 は 1 通あたり
+// 最大 5ms 待たされてから失敗、R4 は mailbox が空いていなければ即失敗）が、数え方は同じ。
 static TxFailCounter g_txFail;
 
 static Servo g_servo[kServoSlotCount];
@@ -239,30 +232,20 @@ static PeriodicTimer g_feedbackTimer[kServoSlotCount];
 static PeriodicTimer g_motionTimer;
 static PeriodicTimer g_infoTimer;
 
-// INFO は 1Hz で全スロット分を送るが、**送信バッファの本数は 3 枚の基板で違う。**
+// INFO は 1Hz で全スロット分を送る。**共通の規則は MotorTxHealth.h**（1 反復 1 通・
+// 空きを待たない・戻り値を捨てない）。この基板が同時に満たすべき事情は MCU で 2 つある:
 //
-// 基板 #0/#1（Nano / MCP2515）: TX バッファは 3 本しかなく、しかも sendMsgBuf は
-// 空きと TXREQ のクリアを TIMEOUTVALUE（2500us）まで待つ。同じ反復で 4〜5 通を
-// 連続送信すると最大 20〜25ms loop() が止まり、その間 poll() が回らないので
-// **RXB0 / RXB1 の 2 段しかない受信バッファが溢れる**。落ちたのがブロードキャスト
-// E_STOP なら「たまに緊急停止が効かないサーボ基板」になる。
+//   基板 #0/#1（Nano / MCP2515）: TX 3 本だが sendMsgBuf は空きと TXREQ のクリアを
+//     TIMEOUTVALUE(2500us) まで待つ。4〜5 通を連続送信すると最大 20〜25ms loop() が
+//     止まり、その間 **RXB0/RXB1 の 2 段しかない受信バッファが溢れる** ——
+//     落ちたのがブロードキャスト E_STOP なら「たまに緊急停止が効かない基板」になる。
+//   基板 #2（UNO R4 Minima）: Arduino_CAN は標準 ID の mailbox を 1 本しか使わない
+//     （R7FA4M1_CAN.cpp の write が CAN_MAILBOX_ID_0 固定）ので 2 通目以降が必ず落ち、
+//     kInfoIntervalMs(1000) が feedback_interval_ms(10) の整数倍で位相が固定される
+//     ため**毎回同じスロットだけが出て残り 4 本は永久に 1 通も出ない**。
 //
-// 基板 #2（UNO R4 Minima）: Arduino_CAN は標準 ID の mailbox を 1 本しか使わない
-// （R7FA4M1_CAN.cpp の write が CAN_MAILBOX_ID_0 固定）ので、5 スロットを同じ反復で
-// 連続送信すると 2 通目以降が必ず落ちる。しかも kInfoIntervalMs(1000) が
-// feedback_interval_ms(10) の整数倍なので位相が固定され、**毎回同じスロットだけが出て
-// 残り 4 本は永久に 1 通も出ない**（DC 基板では実機で「INFO が 4 秒間 1 通も出ない」を観測）。
-// 落ちた INFO は PC 側から FAULT としては見えず、そのスロットの**焼き忘れ検出（§3.4）が
-// 黙って無効になる**だけなので、症状から原因へ辿る手段が無い。
-//
-// **同じ 1 反復 1 通が両方を同時に満たす。** DC 用・電磁弁用と同じ形で、落ちた slot は
-// 添字を進めず次の反復で送り直す（再送キューは持たない）。PC から見える振る舞い
-// （1Hz・内容・CAN ID）は変わらず、5 通が数反復に散るだけなので
-// **kFirmwareVersion も上げない**（§3.4 の版番号は「PC から観測できる CAN 上の
-// 振る舞いが変わったか」だけを指す）。
-//
-// **`#if` で MCU 分岐させない。** 入れると「片方の MCU だけ直した状態」が作れてしまい、
-// それこそがこの規則の戒めているものである。
+// PC から見える振る舞い（1Hz・内容・CAN ID）は変わらないので **kFirmwareVersion は
+// 上げない**（§3.4 の版番号は「CAN 上の振る舞いが変わったか」だけを指す）。
 static uint8_t g_infoPendingSlot = kServoSlotCount;  // kServoSlotCount = 送信待ちなし
 
 static PeriodicTimer g_blinkTimer;
@@ -384,10 +367,10 @@ static void updateMotion(uint32_t nowMs) {
 // CAN
 // ===========================================================================
 
-// 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
-// **ここで OR を足してはならない。** 「センサスロットは緊急停止・ウォッチドッグ・到達を
-// 立てない」（仕様書 §5.2）は SlotKind::Sensor から導かれる。ここを唯一の実装にすると
-// native テストが届かず、規則を消しても 1 件も落ちなくなる。
+// 状態フラグの組み立て規則は composeFeedbackFlags が持つ（規則と理由はその宣言。
+// native テスト圏内）。**ここで OR を足してはならない** —— 「センサスロットは緊急停止・
+// ウォッチドッグ・到達を立てない」（§5.2）は SlotKind::Sensor から導かれるので、
+// ここを唯一の実装にすると規則を消しても native テストが 1 件も落ちない。
 static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
     const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
     return composeFeedbackFlags(kBoardKind, kind, g_channel[slot].safetyStatusFlags(nowMs),
@@ -500,11 +483,10 @@ static void handleSlotFrame(uint8_t slot, CommandType command, const uint8_t *da
 
     switch (command) {
         case CommandType::SetTarget: {
-            // 仕様書 §6: 緊急停止ラッチ中でもウォッチドッグは養う。
-            // 養わないと解除した直後に満了済みで動かない。
-            // 制御タイプが position でなくても養うのは、通信自体は生きているため。
-            // 受理判定（ServoChannel::setTarget）より必ず先に呼ぶこと。起動直後は
-            // §5.4 により未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる。
+            // 仕様書 §6: 緊急停止ラッチ中でも、制御タイプが position でなくてもウォッチ
+            // ドッグは養う（通信自体は生きているので、養わないと解除直後に満了済みで
+            // 動かない）。**受理判定より必ず先に呼ぶこと** —— 起動直後は §5.4 により
+            // 未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる。
             g_channel[slot].feed(nowMs);
 
             const SetTargetCommand cmd = decodeSetTarget(data, len);
@@ -579,20 +561,16 @@ static void handleFrame(uint16_t canId, bool standard, const uint8_t *data, uint
 // スロット設定とデバイス ID（どちらも DIP の基板番号で決まる）
 // ===========================================================================
 
-// デバイス ID は「基板種別 2bit | 基板番号 3bit | スロット番号 3bit」の固定ビット分割
-// （§2.2）。DIP の基板番号は bit5-3 に入るので、**1 枚あたりの刻み幅はスロット数（5）
-// ではなく 8** —— 基板 #1 の SV0 は 0x45 ではなく 0x48 である。同一ファームの基板を
-// 複数枚使うとき、2 枚目の DIP を 1 段上げるだけで全スロットの ID がまとめてその
-// 基板のブロックへ移る。組み立てと、DIP を回しすぎて 3bit からはみ出した番号を
-// 未設定へ倒す扱いは MotorCanRouter / makeDeviceId が持つ（native テストで守られている）。
+// デバイス ID は「基板種別 2bit | 基板番号 3bit | スロット番号 3bit」（§2.2）。DIP の
+// 基板番号は bit5-3 に入るので **1 枚あたりの刻み幅はスロット数（5）ではなく 8** ——
+// 基板 #1 の SV0 は 0x45 ではなく 0x48 である。組み立てと、3bit からはみ出した番号を
+// 未設定へ倒す扱いは MotorCanRouter / makeDeviceId が持つ（native テスト圏内）。
 //
 // 同じ DIP が**スロット設定の行**も選ぶ（config.h の kServoBoards）。**行の添字ではなく
-// boardNumber の一致で探す** —— MCU ごとに担当する基板が違い、R4 ビルドが持つ唯一の行の
-// boardNumber は 2 なので、添字で引くと「DIP=0 で基板 #2 の役割が動く」ことになる。
-// 表に無い番号では g_slots を nullptr のまま据え置き、全スロットを Unused として扱う ——
-// 黙って先頭の行を使うと、DIP を回しすぎた基板が別の基板の役割で動き出す。据え置けば
-// ID も付かないので、既存の「デバイス ID 未設定 → LED 赤の速い点滅・駆動拒否」（§2.2）へ
-// そのまま乗る。
+// boardNumber の一致で探す** —— R4 ビルドが持つ唯一の行の boardNumber は 2 なので、
+// 添字で引くと「DIP=0 で基板 #2 の役割が動く」ことになる。表に無い番号では g_slots を
+// nullptr のまま据え置き、全スロットを Unused として扱う（既存の「デバイス ID 未設定 →
+// LED 赤の速い点滅・駆動拒否」へそのまま乗る）。
 //
 // **Unused のスロットだけ 0x00 のままにする。** センサは自分のデバイス ID で
 // FEEDBACK を送るので ID を持つ（持たせないと「センサだけの基板」が何も報告できない）。
@@ -660,13 +638,11 @@ static void updateLed(uint32_t nowMs) {
     }
 
     // **AVR 版 Adafruit_NeoPixel::show() は 1 LED あたり約 30us 割り込みを禁止する。**
-    // その窓に Servo ライブラリの Timer1 割り込み（パルス終端）が当たると、
-    // **そのパルスだけが最大 30us 伸びる** —— kServoPulse270 は 7.04us/deg なので
-    // 約 4.3deg のヒゲになる（grip 5deg / 壁 6deg の微小ストロークではほぼ全域に相当）。
-    // 次のフレーム（20ms 後）で正しい幅に戻るので機構への影響は一瞬だが、
-    // **呼ぶ回数を増やしてはならない**（updateMotion の直後や毎ループの位置へ
-    // 動かすと、当たる確率がそのまま比例して上がる）。色が変わらないときに
-    // 送らないのは、緊急停止ラッチ中（橙で固定）に毎秒 1 回叩き続けないため。
+    // その窓に Servo ライブラリの Timer1 割り込み（パルス終端）が当たると **そのパルス
+    // だけが最大 30us 伸びる** —— kServoPulse270 は 7.04us/deg なので約 4.3deg のヒゲに
+    // なる（grip 5deg / 壁 6deg の微小ストロークではほぼ全域）。次のフレーム（20ms 後）で
+    // 戻るので影響は一瞬だが、**呼ぶ回数を増やしてはならない**（毎ループの位置へ動かすと
+    // 当たる確率が比例して上がる）。
     // **キャッシュは 3 成分すべてを持つこと。** ここが show() を呼ぶ唯一の条件なので、
     // 平常色が載っている青を外すと「色を計算しているのに一度も反映されない LED」になる。
     static uint8_t lastR = 0xFF;

@@ -1,9 +1,8 @@
 """Damiao DM3520-1EC ドライバのプロトコル層。
 
-情報源は `DM-S3519-1EC User Manual`。**実機が手元に無い段階で書いているので、
-ここで固定できるのは「マニュアルの記述どおりに組み立て・解釈しているか」まで**である。
-p_max / v_max / t_max の実値のような、実機のレジスタを読まないと分からないものは
-config で与える形にしてあり、そのずれは動作確認シーケンスが検出する。
+情報源は `DM-S3519-1EC User Manual`。**固定できるのは「マニュアルの記述どおりに
+組み立て・解釈しているか」まで**で、p_max / v_max / t_max のような実機のレジスタを
+読まないと分からない値は config で与え、そのずれは動作確認シーケンスが検出する。
 """
 
 from __future__ import annotations
@@ -197,10 +196,9 @@ class TestFeedbackDecode:
     def test_energized_only_when_error_nibble_says_enabled(self) -> None:
         """**無励磁は `is_fault()` に掛からないので、別に読めなければ見えない。**
 
-        本機は指令フレームを無励磁のまま受理して黙って捨てる。ドライバの TIMEOUT や
-        電源の瞬断で励磁が外れると、PC は 20Hz で位置指令を送り続け、フィードバックも
-        正常に届き、ヘルスも OK のまま —— 操縦者に見えるのは「指令しても動かない」だけで、
-        原因を示す表示がどこにも無い。実機で実際にこの状態が起きた。
+        本機は指令フレームを無励磁のまま受理して黙って捨てる。励磁が外れても
+        フィードバックは正常に届きヘルスも OK のままなので、操縦者に見えるのは
+        「指令しても動かない」だけになる (実機で発生)。
         """
         drv = _driver()
 
@@ -218,11 +216,10 @@ class TestFeedbackDecode:
     def test_unreceived_feedback_is_energized_none(self) -> None:
         """**フィードバックを 1 通も受けていない状態は `None`(分からない)。**
 
-        `error_code` の初期値は `DISABLED` (0) だが、これは「無励磁だと分かって
-        いる」のではなく「まだ何も届いていない」だけである。ここを区別せず
-        `error_code == ENABLED` を素通しすると、起動直後や CAN 瞬断中の DM3520 が
-        `_unenergized_motors()` の警告 (`is_energized() is False`) に化ける
-        (EDULITE 05 の `mode_state is None` と対になる契約)。
+        `error_code` の初期値 `DISABLED` (0) は「無励磁だと分かっている」ではなく
+        「まだ何も届いていない」。区別しないと起動直後や CAN 瞬断中の DM3520 が
+        `_unenergized_motors()` の警告に化ける (EDULITE 05 の `mode_state is None` と
+        対になる契約)。
         """
         drv = _driver()
 

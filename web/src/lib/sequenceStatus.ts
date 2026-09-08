@@ -18,12 +18,9 @@ export function isSequenceComplete(state: Progress): boolean {
 }
 
 /**
- * 実行状態はサーバーの `running` をそのまま使う。
- *
- * `step_index === 0 && total_steps > 0` のような推測をしてはならない。準備フェーズでは
- * その条件が常に成立し、動作確認ボタンが「主役であるはずのフェーズ」で常時無効になった
- * (`MotorCheckButton` のコメントがその事故を記録している)。同じ推測は STOP 直後にも
- * 効かず、止まっているのに RUNNING を出し続けていた。
+ * 実行状態はサーバーの `running` をそのまま使う。`step_index === 0 && total_steps > 0`
+ * のような推測をしてはならない —— 準備フェーズではその条件が常に成立して動作確認ボタンが
+ * 常時無効になり、STOP 直後には止まっているのに RUNNING を出し続ける。
  */
 export function sequenceKind(state: Progress): SequenceKind {
   if (state.total_steps === 0) return "no_sequence";
@@ -37,15 +34,11 @@ export function sequenceKind(state: Progress): SequenceKind {
 /**
  * START が「先頭へ戻して全工程を走り直す」意味になる状態か。
  *
- * `sequence_stop` は `step_index` を保持したままシーケンスを降ろすので、画面は
- * 「8/13・現在ステップ○○・待機中」を出したままになる。そこで押す START (と
- * Space 1 打) はステップ 0 へ戻り、**中断姿勢のまま先頭の動作が走る**。
- * 同じ「任意ステップから再開」である `sequence_jump` は確認モーダルを挟むのに、
- * より危険なこちらだけが素通しだった。
- *
- * 判定をここに置くのは、**ボタンの文言 (`ActionPanel`) と確認の要否
- * (`RobotControl` の Space / onStart) が必ず同じ条件で動く**ようにするため。
- * 片方だけに書くと「文言は『先頭から再開』なのに Space は確認なしで走る」が作れる。
+ * `sequence_stop` は `step_index` を保持したまま降りるので、画面は「8/13・待機中」を
+ * 出したままになる。そこで押す START (と Space 1 打) はステップ 0 へ戻り、**中断姿勢の
+ * まま先頭の動作が走る**。判定をここに置くのは、**ボタンの文言 (`ActionPanel`) と確認の
+ * 要否 (`RobotControl`) が必ず同じ条件で動く**ようにするため —— 片方だけに書くと
+ * 「文言は『先頭から再開』なのに Space は確認なしで走る」が作れる。
  */
 export function isRestartFromTop(state: Progress): boolean {
   return sequenceKind(state) === "idle" && state.step_index > 0;
@@ -65,23 +58,15 @@ export interface SequenceProgress {
 }
 
 /**
- * 進捗の算術。**`sequenceKind` / `isSequenceComplete` と同じ理由でここに 1 本だけ置く。**
- *
- * 操縦者の `ActionPanel` と Monitor の `RobotStatusRow` に、完走時の丸め・0 除算の
- * 回避・現在ステップの取り方まで同一の式が写経されていた。判定は既に一本化して
- * あったのにその先の算術だけが分かれており、片方だけ直せば同じ瞬間に 2 つの画面が
- * 違う進捗を出す。
+ * 進捗の算術。**`sequenceKind` / `isSequenceComplete` と同じ理由でここに 1 本だけ置く**
+ * —— 操縦者の `ActionPanel` と Monitor の `RobotStatusRow` に同じ式を写経すると、
+ * 片方だけ直した瞬間に 2 つの画面が違う進捗を出す。
  *
  * **バーの分子は「完了したステップ数」= `step_index` であって、操縦者に見せる現在
  * ステップ番号 (`displayIndex` = `step_index + 1`) ではない。** サーバーはステップを
- * 完了した時点で `step_index` を進めるので、この値がそのまま完了件数を意味する。
- * 両方に同じ式を使うとバーが常に 1 ステップ先行し、シーケンスを開始していない試合
- * 開始直後の画面が「1 マス進んだバー」を出す (実際にそう見えていた)。走行中のステップを
- * 0.5 件のように按分しないのは、そのステップの進み具合を測る手段がどこにも無いため ——
- * 実行中であることは状態表示 (`sequenceKind`) が言う。
- *
- * 完走が 100% になるのも同じ式で足りる。バックエンドは完走で
- * `step_index === total_steps` を返す (= 全件完了)。
+ * 完了した時点で `step_index` を進めるので、この値がそのまま完了件数を意味する ——
+ * 両方に同じ式を使うとバーが常に 1 ステップ先行し、開始前の画面が「1 マス進んだバー」を
+ * 出す。走行中のステップを按分しないのは、進み具合を測る手段がどこにも無いため。
  */
 export function sequenceProgress(state: ProgressWithSteps): SequenceProgress {
   const total = state.total_steps;

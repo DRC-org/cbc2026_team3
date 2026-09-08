@@ -94,13 +94,11 @@ class TestDefaultsComeFromConfigSchema:
     def test_yaml_省略時の_fallback_も参照で書かれている(self) -> None:
         """yaml が health を書かなかったときに使う値も、リテラルで持たないこと。
 
-        ここは引数の既定値ではなく関数本体の ``values.get(key, ...)`` なので
-        ``_default_source`` では見えない。**値の一致では守れない層**でもある ——
-        既定と同じ数値をリテラルで書き戻すと、値を見るテスト
-        (`test_missing_sections_fall_back_to_defaults`) は緑のまま通り、
-        以後 ``HealthThresholds`` の既定を変えても yaml 省略時だけが古い境界に
-        残る。「フィードバック途絶は config どおりなのに温度警告だけ 65℃」は
-        ログにも UI にも現れない壊れ方なので、書かれ方そのものを固定する。
+        ここは関数本体の ``values.get(key, ...)`` なので ``_default_source`` では
+        見えず、**値の一致でも守れない** —— 既定と同じ数値をリテラルで書き戻すと
+        `test_missing_sections_fall_back_to_defaults` は緑のまま通り、以後
+        ``HealthThresholds`` の既定を変えても yaml 省略時だけが古い境界に残る。
+        書かれ方そのものを固定する。
         """
         for key in _HEALTH_KEYS:
             assert _body_references(_parse_health, f"DEFAULT_HEALTH.{key}"), (

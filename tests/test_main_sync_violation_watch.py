@@ -1,20 +1,15 @@
 """`main._make_sync_violation_handler` が `RobotServer.watch_task` を配線していることの回帰テスト。
 
-同期ずれ検出 → 全体緊急停止 (`main.py:983` 付近) は `asyncio.create_task` して
-待たない投げっぱなしタスクの 1 つ。ここが飛ぶと「緊急停止が発火しなかったこと」が
-journal の汎用メッセージにしか残らないので、`server.watch_task` へ渡す。
+同期ずれ検出 → 全体緊急停止は投げっぱなしタスクの 1 つで、飛ぶと「緊急停止が発火しな
+かったこと」が journal の汎用メッセージにしか残らないので `server.watch_task` へ渡す。
 
 **`robots` は検知元の 1 台ではなく `server.robot_names` (全ロボット)。**
-`activate_e_stop()` は全体緊急停止なので、失敗すればそのとき実際にどのロボットも
-保護されていない —— `_reactivate_motors` (全ロボットぶんまとめて 1 本) の失敗を
-全ロボットへ帰属させるのとまったく同じ理由で、片方だけ違う扱いにしない。
-起点となった軸・ロボットは `context` の文言 (`f"{robot_name} の..."`) に残す ——
-起点と影響範囲は別物。
+`activate_e_stop()` は全体緊急停止なので、失敗すればそのとき実際にどのロボットも保護
+されていない (`_reactivate_motors` と同じ理由)。起点となった軸・ロボットは `context`
+の文言に残す —— 起点と影響範囲は別物。
 
 `watch_task` 自体の振る舞い (失敗の記録・キャンセルの無視・上限) は
-`tests/test_server_task_watch.py` が持つ。ここでは main.py 側の配線
-(呼ばれること・context と robots の中身) だけを見る。**main.py に 2 つ目の
-カウンタを作らない** (docs/invariants.md) ので、数える側の正しさはあちらのテストに任せる。
+`tests/test_server_task_watch.py` が持つ。ここで見るのは main.py 側の配線だけ。
 """
 
 from __future__ import annotations

@@ -1,20 +1,16 @@
 """サーボ軸の `timeout_s` が、ファームのスルーレートで到達できる時間を持つか。
 
-**この 2 つがずれると、機構が完全に正常でもシーケンスが必ず止まる。** サーボ基板は
-`ServoMotion` が `travel = slewRate * elapsed` で角度を補間するので、移動にかかる時間は
-`移動量 / スルーレート` で決まる。PC 側の `AxisHandle.wait_reached` は位置定数 yaml の
-`axes.<軸>.timeout_s` で待つので、これが移動時間より短い位置の組を書いた瞬間、
-その `move_to` は **毎回・決定的に** `SequenceTimeoutError` になる。
+**この 2 つがずれると、機構が完全に正常でもシーケンスが必ず止まる。** 移動時間は
+`移動量 / スルーレート` (`ServoMotion` の `travel = slewRate * elapsed`) で決まり、PC 側は
+`axes.<軸>.timeout_s` で待つので、これが移動時間より短い位置の組を書いた瞬間その
+`move_to` は **毎回・決定的に** `SequenceTimeoutError` になる。
 
-到達判定に早出しは無い —— `kDefaultServoReachedToleranceDeg` は 0.0deg で、`reached` は
-補間が終わってから 100Hz の `FEEDBACK` に乗って届く。PC はスルーレートを実行時に変える
-経路を持たない (`SET_PARAM` はどこからも送っていない) ので、**config に書いた値と
-ファームに焼いた値がそのまま動いている値**である。
+到達判定に早出しは無い (`kDefaultServoReachedToleranceDeg` は 0.0deg) し、PC は
+スルーレートを実行時に変える経路を持たないので、**config に書いた値とファームに焼いた
+値がそのまま動いている値**である。
 
-実際に `wall_f` (`initial: 270` ↔ `open: 90` = 180deg) が `timeout_s: 2.0` に対して
-ちょうど 2.000 秒かかる状態で入っており、試合シーケンスの `move_work_3_to_conveyor` と
-動作確認の「メインハンド 壁 前後」が両方とも止まる状態だった。規則は yaml のコメントに
-書いてあっても守るのは人の注意力だけなので、ここで機械的に突き合わせる。
+実際に `wall_f` (270 ↔ 90 = 180deg) が `timeout_s: 2.0` に対してちょうど 2.000 秒かかる
+状態で入っていた。yaml のコメントでは守るのが人の注意力だけになるので機械的に見る。
 """
 
 from __future__ import annotations

@@ -6,8 +6,7 @@
 **shebang は持たない (実行属性も付けない)。** 理由は scripts/edulite_set_id.py と同じ。
 
 --- 実機で PID を詰め直す唯一の手段 ---------------------------------------
-Web Controller は手動ジョグで軸を動かせるだけで、ステップ応答を測る術を持たない。
-そして調整は「同じ条件で値だけを変えて繰り返し、前と比べる」作業である。手で操作すると
+調整は「同じ条件で値だけを変えて繰り返し、前と比べる」作業である。手で操作すると
 振幅も待ち時間も毎回わずかに違い、その差が指標の差と区別できない。ここは目標の
 入れ方・待ち時間・記録の窓を固定し、**ゲインだけを変えた同一条件の試行**を並べて出す。
 
@@ -82,14 +81,9 @@ kp を振ると「上げても下げても同じ」という観察から抜け�
   3. ``a_max`` を上げる (立ち上がりが速くなる。行き過ぎと飽和率を見る)
        --amplitude 15 --dwell 3.0 --max-acceleration 300,600,1000
 
-  4. 最後に ``v_max`` を上げる。**velocity_ff と kd をセットで見直すこと。**
-     ``kd`` の単位は counts/(deg/s) なので、巡航速度がそのまま制動として出力に
-     乗る —— kd=1.0 では 50mm/s = 2750deg/s が D 項だけで -2750counts になり、
-     ``output_limit`` を D 項だけで食う (ベンチの 800 なら 3 倍以上超えて
-     **逆向きに飽和し**、本番の 5000 でも過半が消える)。定常追従では実測速度が
-     参照速度にほぼ等しいので、参照速度へ kd と同じ係数 (velocity_ff = kd) を
-     掛けて足せばその制動をちょうど打ち消せる。**片方だけ動かすと巡航中に
-     D 項が出力を食い潰し、飽和率だけが上がって速くならない**
+  4. 最後に ``v_max`` を上げる。**velocity_ff と kd はセットで見直すこと**
+     (理由は docs/invariants.md「`motion.velocity_ff` は `pid.kd` と同値に保つ」。
+     片方だけ動かすと飽和率だけが上がって速くならない)
        --amplitude 15 --dwell 3.0 --max-velocity 50,80
        --amplitude 15 --dwell 3.0 --max-velocity 80 --velocity-ff 0,1.0,1.6
 """
@@ -198,12 +192,10 @@ class StepRunner:
     def _dead_band_value(self, name: str) -> float:
         """PID の不感帯を**人間の単位**へ戻す。
 
-        ``PIDController.dead_band`` はモータの指令単位 (M3508 ならモータ軸 deg) で
-        持っている。整定帯は人間の単位 (mm) のサンプルに対して使うので、換算せずに
-        渡すと帯が scale 倍だけ広くなる —— y_axis では 1.0deg がそのまま 1.0mm の
-        帯として効き、**0.5mm のステップが最初から帯の中に入って「整定 0.000s」**
-        になる (実際には 1mm も動いていないのに)。
-        幅なので符号は落とす。
+        ``PIDController.dead_band`` はモータの指令単位 (M3508 ならモータ軸 deg)。
+        整定帯は人間の単位 (mm) のサンプルに使うので、換算せずに渡すと帯が scale 倍
+        だけ広くなり、**0.5mm のステップが最初から帯の中に入って「整定 0.000s」**に
+        なる。幅なので符号は落とす。
         """
         return self._loop.pid(name).dead_band / abs(self._member(name).scale)
 
@@ -276,10 +268,9 @@ class StepRunner:
 def _analyze(samples: list[Sample], dead_band_value: float):
     """指標を出す。**帯の下限には不感帯を (人間の単位で) 渡す。**
 
-    不感帯の内側では偏差が 0 として扱われて制御が働かないので、それより狭い帯で
-    「整定していない」と判定すると、正常な機構が永久に整定しない応答として出る。
-    逆に指令単位のまま渡すと帯が scale 倍に広がり、動いていない応答が
-    「即座に整定した」と出る (StepRunner._dead_band_value を参照)。
+    不感帯の内側では制御が働かないので、それより狭い帯で「整定していない」と
+    判定すると正常な機構が永久に整定しない応答として出る。逆に指令単位のまま
+    渡すと帯が scale 倍に広がる (StepRunner._dead_band_value を参照)。
     """
     span = step_span(samples)
     if span is None:
@@ -290,11 +281,8 @@ def _analyze(samples: list[Sample], dead_band_value: float):
 
 
 def _format_metrics(trace: MotorTrace, unit: str) -> str:
-    """1 モータ分の 1 行。**飽和率は指標が出せなかった応答でも必ず出す。**
-
-    飽和している間はゲインを変えても応答が変わらないので、これが読めないと
-    「上げても下げても同じ」という観察から抜け出せない。動かなかった試行
-    (指標が None になる) こそその状態でありうるため、指標とは別経路で持つ。
+    """1 モータ分の 1 行。**飽和率は指標が出せなかった応答でも必ず出す**
+    (動かなかった試行こそ飽和している可能性が高いので、指標とは別経路で持つ)。
     """
     sat = f"飽和 {trace.saturation_ratio * 100:.0f}%"
     m = trace.metrics
@@ -350,9 +338,8 @@ def _build_profile(motion: MotionSpec, scale: float) -> TrapezoidalProfile:
     """人間の単位の制限を**モータの指令単位**へ換算したプロファイルを作る。
 
     ``main._attach_motion_profiles`` と同じ換算。``abs(scale)`` で掛けるのは、
-    速度・加速度の制限が向きを持たない量だから —— 逆回転ペアは ``scale`` の符号が
-    逆なので、符号付きで掛けると片側の上限が負値になる (``TrapezoidalProfile`` は
-    正の上限しか受け取らないため、そこで落ちる)。
+    速度・加速度の制限が向きを持たない量だから (符号付きで掛けると逆回転側の
+    上限が負値になる)。
     """
     factor = abs(scale)
     return TrapezoidalProfile(
@@ -642,11 +629,9 @@ def _build_motions(
 def _resolve_bus_alias(robot: RobotConfig, spec: AxisSpec) -> str:
     """対象軸のモータが載っているバス別名を返す。**開くのはこの 1 本だけ。**
 
-    このツールは 1 つの軸を詰めるものなので、その軸が使わないバスを開く理由が無い。
-    モータ構成に現れるバスの集合から選ぶ実装だと、複数バスを持つ config
-    (本番も config/bench/main_hand/ も 3 本) で開くバスが実行ごとに変わり、
-    対象軸の載っていないバスを開いた回はフィードバックが 1 通も届かない ——
-    症状は「同じコマンドなのに動いたり動かなかったりする」だけになる。
+    モータ構成に現れるバスの集合から選ぶ実装だと、複数バスを持つ config で開く
+    バスが実行ごとに変わり、対象軸の載っていないバスを開いた回はフィードバックが
+    1 通も届かない —— 症状は「同じコマンドなのに動いたり動かなかったりする」だけ。
     """
     missing = [name for name in spec.motor_names if name not in robot.motors]
     if missing:
@@ -659,10 +644,8 @@ def _resolve_bus_alias(robot: RobotConfig, spec: AxisSpec) -> str:
     buses = {name: robot.motors[name].bus for name in spec.motor_names}
     aliases = set(buses.values())
     if len(aliases) > 1:
-        # C620 の電流指令フレーム (0x200) は 1 通で同一バス上の 4 モータへ届く。
-        # 左右が別バスだと同時に指令できず、このツールの前提 (1 つのループが
-        # ペアを束ねる) が崩れる。黙って片方のバスを開くと、開かれなかった側は
-        # 力が入らないまま偏差だけが開く
+        # 左右が別バスだと同じフレームで同時に指令できず、黙って片方のバスを
+        # 開くと開かれなかった側は力が入らないまま偏差だけが開く
         detail = " / ".join(f"{name}={alias}" for name, alias in buses.items())
         raise SystemExit(
             f"軸 '{spec.name}' のモータが別のバスに分かれています ({detail})。"
@@ -674,10 +657,8 @@ def _resolve_bus_alias(robot: RobotConfig, spec: AxisSpec) -> str:
 def _check_dwell(trials: list[TrialConfig], *, amplitude: float, dwell_s: float) -> None:
     """記録窓がプロファイルの移動を含みきれるか確かめる。
 
-    プロファイルを入れると移動そのものに時間が掛かる (振幅 15mm / v=50 / a=300 なら
-    0.47 秒)。窓が移動の途中で閉じると、行き過ぎも整定も**まだ起きていない**ものを
-    測ることになり、指標が一律に良い方へ嘘をつく。しかも「速いプロファイルほど
-    数字が良い」という逆向きの結論が出るので、気付く手掛かりが無い。
+    窓が移動の途中で閉じると、行き過ぎも整定も**まだ起きていない**ものを測ることに
+    なり、「速いプロファイルほど数字が良い」という逆向きの結論が出る。
     """
     for trial in trials:
         if trial.motion is None:
@@ -712,9 +693,8 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     manual = spec.manual
     if manual is not None and manual.clamp(args.amplitude) != args.amplitude:
-        # 可動範囲は「この軸を動かしてよい範囲」の唯一の宣言なので、そこを
-        # 超える振幅を歯止め無しに通さない。判定は ManualSpec.clamp に委ねる
-        # (境界の解釈をここへ書き写すと、片方だけ直したときに気付けない)
+        # 可動範囲は「この軸を動かしてよい範囲」の唯一の宣言。判定は
+        # ManualSpec.clamp に委ねる (書き写すと片方だけ直したときに気付けない)
         raise SystemExit(
             f"振幅 {args.amplitude} が manual の可動範囲 "
             f"({manual.min_value}〜{manual.max_value}) の外です。"
@@ -732,8 +712,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     channel = system.can_buses[bus_alias]
     can_manager.add_bus(bus_alias, can.Bus(interface="socketcan", channel=channel))
 
-    # 単位換算 (人間の単位 → 指令単位) を知るのはこの層だけ。位置制御ループへは
-    # 指令単位で渡す
+    # 単位換算を知るのはこの層だけ。位置制御ループへは指令単位で渡す
     scales = {m.name: m.scale for m in spec.motors}
 
     drivers: dict[str, M3508Driver] = {}
@@ -789,7 +768,6 @@ async def _main_async(args: argparse.Namespace) -> int:
             "出力上限に対する割合が試行ごとに変わります **"
         )
     print(f"  sync_tolerance: {base_group.tolerance}{spec.unit}")
-    # プロファイルの有無は試行全体で共通 (スイープしても値が変わるだけ)。
     # 「効いているつもり」で結果を読ませないため、無い場合も明示する ——
     # 最終目標がそのまま PID へ入る軸では、大きな移動は飽和したまま加速する
     if trials[0].motion is None:
@@ -820,9 +798,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             pid.output_max = trial.output_limit
             loop.add_motor(name, driver, pid)
             if trial.motion is not None:
-                # 本番 (main._attach_motion_profiles) と同じく後付けで渡す。
-                # 起点の実測は位置制御ループが最初の指令で行うので、ここで
-                # フィードバック未受信の 0.0 が軌道の起点に焼き付くことはない
+                # 本番 (main._attach_motion_profiles) と同じく後付けで渡す
                 loop.set_motion_profile(
                     name,
                     _build_profile(trial.motion, scales[name]),

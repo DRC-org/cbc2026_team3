@@ -1,11 +1,10 @@
 """main.py の組み立て (composition root) が正しく配線されているかを検証する。
 
-``main`` の関数はすべて ``_`` 付きで、公開されているのは ``main()`` だけ。テストが
-private を掴んでいるのはカプセル化の破りではなく、モジュール全体が非公開だから。
-ここで確かめる事実 —— M3508 の載っていないバスに位置制御ループを作らない、
-同期グループをループへ結び付ける、未知の control_type を起動時に弾く —— は
-どれも取り違えると機構が壊れるものなので、``main()`` の起動 (実バスと実 config が
-要る) を通してしか触れない状態にはできない。
+``main`` の関数はすべて ``_`` 付きで公開されているのは ``main()`` だけなので、テストが
+private を掴んでいるのはカプセル化の破りではない。ここで確かめる事実 (M3508 の載って
+いないバスに位置制御ループを作らない / 同期グループをループへ結び付ける / 未知の
+control_type を起動時に弾く) はどれも取り違えると機構が壊れるので、``main()`` の起動
+(実バスと実 config が要る) を通してしか触れない状態にはできない。
 """
 
 from __future__ import annotations
@@ -413,9 +412,8 @@ class TestWireRobotMotors:
 class TestBuildManualController:
     """手動操縦の指令口が、シーケンスと同じ MotorGroup を共有していること。
 
-    別の MotorGroup を組むと、緊急停止インターロック・M3508 の PID 迂回・
-    自作モタドラの再送対象が 2 セットに分かれる。片方の配線を落としても起動でき、
-    「そちらから出した指令だけが停止中も通る」形で現れるので気付けない。
+    別の MotorGroup を組むと、緊急停止インターロック・M3508 の PID 迂回・再送対象が
+    2 セットに分かれ、「そちらから出した指令だけが停止中も通る」形でしか現れない。
     """
 
     def _build(self, estop_flag: list[bool]):
@@ -557,9 +555,8 @@ class TestBuildTargetRefresher:
     def test_dm3520_gets_its_own_refresher(self) -> None:
         """**自作モタドラと同じタスクに束ねてはならない。**
 
-        目標を持たないモータの扱いが正反対で、自作モタドラは送ってはならず
-        (起動直後にコンベアが回り出す)、DM3520 は送らなければならない
-        (問い合わせ駆動なのでフィードバックが 1 通も来ない)。
+        目標を持たないモータの扱いが正反対 —— 自作モタドラは送ってはならず (起動直後に
+        コンベアが回り出す)、DM3520 は送らなければならない (問い合わせ駆動)。
         """
         manager, motors, seq = self._wire(
             extra_motors={"sub_slide": Dm3520Driver("sub_slide", can_id=1)},
@@ -575,11 +572,9 @@ class TestBuildTargetRefresher:
     def test_edulite_gets_a_refresher_too(self) -> None:
         """**EDULITE 05 も問い合わせ駆動である。** 自発的にはフィードバックを返さない。
 
-        実機は励磁したまま 13 秒放置しても 1 通も届かず、届いたのは起動時に PC が
-        送ったフレームへの応答 20 通だけだった。
-
-        再送しないと、操縦していない間じゅう ``MotorHealth.STALE`` になる。症状は
-        「手動操縦すると動くのに常に赤い」だけで、配線不良と区別が付かない。
+        実機は励磁したまま 13 秒放置してフィードバック 0 通 (届いたのは起動時に PC が
+        送ったフレームへの応答 20 通だけ)。再送しないと操縦していない間じゅう
+        ``MotorHealth.STALE`` になり、症状は「動くのに常に赤い」だけ。
         """
         manager, motors, seq = self._wire(
             extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
@@ -646,9 +641,8 @@ class TestServerEStopProperty:
     async def test_e_stop_active_property_reflects_state(self) -> None:
         """main.py から private 属性を触らずに緊急停止状態を読めること。
 
-        状態を作るのも公開経路 (activate_e_stop) から行う。private へ直接
-        代入すると、「停止したのにプロパティが追随しない」配線ミスを
-        テストの側が肩代わりして隠してしまう。
+        状態を作るのも公開経路 (activate_e_stop) から行う —— private へ直接代入すると、
+        「停止したのにプロパティが追随しない」配線ミスをテスト側が肩代わりして隠す。
         """
         server = RobotServer()
 
@@ -886,10 +880,9 @@ def _motion_table() -> PositionTable:
 class TestAttachMotionProfiles:
     """位置定数の ``motion`` を位置制御ループへ結ぶ配線。
 
-    単位換算 (人間の単位 → 指令単位) を知るのはこの層だけで、位置制御ループは
-    指令単位しか扱わない。``add_motor`` の引数ではなく後付けにしてあるのは、
-    ``PositionTable`` を持たない呼び出し元 (``scripts/tune_y_axis.py`` 等) を
-    壊さないため —— 設定しなければ今までどおり動く。
+    単位換算を知るのはこの層だけ (位置制御ループは指令単位しか扱わない)。後付けに
+    してあるのは ``PositionTable`` を持たない呼び出し元 (`scripts/tune_y_axis.py` 等)
+    を壊さないため。
     """
 
     def _rig(self) -> tuple[_StubCANManager, dict[str, M3508Driver], dict]:
@@ -934,9 +927,9 @@ class TestAttachMotionProfiles:
     async def test_逆回転ペアの両側に制限が載る(self) -> None:
         """換算は ``abs(scale)`` で行うこと。
 
-        速度・加速度の制限は向きを持たない量なので、符号付きの ``scale`` を掛けると
-        逆回転側だけ負値になる。プロファイルは正の上限しか受け取らないため、
-        符号を落とすと**起動そのものが落ちる**か、制限として機能しない側が残る。
+        制限は向きを持たない量なので、符号付きの ``scale`` を掛けると逆回転側だけ負値に
+        なる。プロファイルは正の上限しか受け取らないので、**起動そのものが落ちる**か
+        制限として機能しない側が残る。
         """
         manager, _, loops = self._rig()
 
@@ -978,10 +971,9 @@ class TestAttachMotionProfiles:
     def test_起動ログに3つのつまみが全部出る(self, caplog: pytest.LogCaptureFixture) -> None:
         """``velocity_ff`` は**実行中に変更できず UI にも配信されない**。
 
-        ``kp`` / ``ki`` / ``kd`` にも読み口が無いので、起動ログが「今どの値で
-        動いているか」を知る唯一の経路になる。しかも巡航中の出力を最も大きく
-        左右する値 (``kd`` と釣り合っていないと D 項が出力を食い潰す) なので、
-        落とすと「速くならない」原因が画面からもログからも読めなくなる。
+        ``kp`` / ``ki`` / ``kd`` にも読み口が無いので、起動ログが「今どの値で動いて
+        いるか」を知る唯一の経路になる。しかも巡航中の出力を最も大きく左右する値
+        (``kd`` と釣り合っていないと D 項が出力を食い潰す)。
         """
         _, _, loops = self._rig()
 
@@ -1001,9 +993,8 @@ class TestAttachMotionProfiles:
     def test_左右ペアは軸ごと1行に畳む(self, caplog: pytest.LogCaptureFixture) -> None:
         """制限値は軸が 1 組しか持たないので、モータごとに出すと同じ 3 値が並ぶ。
 
-        畳んでも**適用先を知る手掛かりはモータ名だけ**なので、名前の列挙は
-        残す (どのモータに載ったかが読めないと、位置制御ループに載らなかった
-        側と区別が付かない)。
+        畳んでも**適用先を知る手掛かりはモータ名だけ**なので名前の列挙は残す (位置制御
+        ループに載らなかった側と区別が付かなくなる)。
         """
         _, _, loops = self._rig()
 
@@ -1022,9 +1013,8 @@ class TestAttachMotionProfiles:
     async def test_velocity_ff_が位置制御ループまで届く(self) -> None:
         """巡航中の出力は ``velocity_ff * 参照速度``。
 
-        速度 FF は config の ``motion.velocity_ff`` にしか無い値なので、配線で
-        落とすと「書いたのに効かない設定」になる (症状はどこにも出ない)。
-        kp=ki=kd=0 の軸で見れば、出力に残るのは FF だけになる。
+        速度 FF は ``motion.velocity_ff`` にしか無い値なので、配線で落とすと「書いたのに
+        効かない設定」になる。kp=ki=kd=0 の軸で見れば出力に残るのは FF だけ。
         """
         mono = FakeClock()
         wall = FakeClock(start=5000.0)
@@ -1060,9 +1050,8 @@ class TestAttachMotionProfiles:
 class TestAttachHelpersAreCalledFromTheCompositionRoot:
     """後付けの配線は、呼び忘れても位置制御ループがそのまま動いてしまう。
 
-    ``add_motor`` の引数ではないので、``_wire_one_robot`` から 1 行落としても
-    全テストが緑のまま通る。症状は「config に書いた同期監視 / 速度制限が丸ごと
-    効かない」だけで、起動ログにも UI にも現れない。
+    ``add_motor`` の引数ではないので、``_wire_one_robot`` から 1 行落としても全テストが
+    緑のまま通る。症状は「config に書いた同期監視 / 速度制限が丸ごと効かない」だけ。
     """
 
     def _called_names(self, function: str) -> set[str]:
@@ -1127,12 +1116,9 @@ class TestShippedMainHandConfig:
 class TestSystemConfigReachesTheServer:
     """config/system.yaml の各セクションが RobotServer まで届いていること。
 
-    ここが空いていると、`main()` の RobotServer(...) から引数を 1 本落としても
-    全テストが緑のままになる (実際に health / motor_check の配線は誰も見ていなかった)。
-    症状は「yaml に書いた値どおりに動かない」だけで、ログにも UI にも現れない。
-
-    値ではなく**式の書かれ方**を見る。値の一致だけを見るとリテラルで書き直しても
-    通ってしまい、単一情報源から外れたことを検出できない。
+    ここが空いていると `RobotServer(...)` から引数を 1 本落としても全テストが緑のままに
+    なり、症状は「yaml に書いた値どおりに動かない」だけ。値ではなく**式の書かれ方**を
+    見るのは、リテラルで書き直しても値の一致では検出できないため。
     """
 
     #: RobotServer へ渡さないフィールドと、その渡し先。
@@ -1177,13 +1163,9 @@ class TestSystemConfigReachesTheServer:
 class TestRobotContextReachesTheServer:
     """ロボット 1 台に紐づく部品が ``main()`` からサーバーまで届いていること。
 
-    ``RobotContext`` にフィールドを足し、``add_robot`` に引数を足したのに
-    ``main()`` から渡し忘れる、という抜け方をする。症状はその機能が丸ごと
-    無反応になるだけで、起動ログにも UI にも現れない (実際に手動操縦を足したとき、
-    ``manual=`` を落としても全テストが緑のままだった)。
-
-    連鎖を 2 本に分けて見る:
-      RobotContext のフィールド → add_robot の引数 → main() の呼び出し
+    ``RobotContext`` と ``add_robot`` に足したのに ``main()`` から渡し忘れる、という
+    抜け方をする (実際に ``manual=`` を落としても全テストが緑だった)。連鎖を 2 本に
+    分けて見る: RobotContext のフィールド → add_robot の引数 → main() の呼び出し。
     """
 
     #: add_robot の引数にしないフィールドと、その理由。
@@ -1300,10 +1282,9 @@ class TestLoadAllConfigs:
     def test_invalid_checklist_aborts_with_a_message(self, tmp_path: pathlib.Path) -> None:
         """チェックリストの誤記も traceback ではなく 1 行のメッセージで止まること。
 
-        ここだけ生の `ValueError` で落ちると、journal に出るのは Python の traceback に
-        なる。しかも `cbc-control.service` は `StartLimitBurst=3` / `RestartSec=2` で
-        約 6 秒後に `failed` へ固定され、復帰に `reset-failed` が要る —— 会場でこれを
-        読むのは操縦者なので、読み違えたぶんだけ復帰が遠くなる。
+        生の `ValueError` だと journal に出るのは traceback になる。`cbc-control.service`
+        は約 6 秒後に `failed` へ固定され復帰に `reset-failed` が要るので、会場でこれを
+        読む操縦者が読み違えたぶんだけ復帰が遠くなる。
         """
         path = self._write(
             tmp_path,
@@ -1322,11 +1303,9 @@ class TestLoadAllConfigs:
 class TestSequenceClassSelection:
     """sequences/<name>.py から登録するシーケンスの決め方。
 
-    ``dir()`` の並び (アルファベット順) の先頭を採ると、モジュールが他機体の
-    シーケンスを import しただけで乗っ取られる
-    (``"MotorCheckSequence" < "SubHandSequence"``)。症状は「sub_hand の
-    sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
-    理由が読めない。
+    ``dir()`` の並び (アルファベット順) の先頭を採ると、モジュールが他機体のシーケンスを
+    import しただけで乗っ取られる (docs/invariants.md「起動時に構成の曖昧さを黙って
+    解決しない」)。
     """
 
     def _module(self, source: str) -> types.ModuleType:
@@ -1373,9 +1352,8 @@ class TestSequenceClassSelection:
 class TestRobotBusSelection:
     """**そのロボットが使うバスだけを開く。**
 
-    全バスを開くと、メインハンドは DM3520 を 1 台も持たないのに `can_dm3520` を
-    開くことになり、CANable が 1 本欠けているだけで**両ハンドとも起動できなくなる**
-    (片方だけの運用も動作確認も UI の起動もできない)。受信ループが物理バス 1 本に
+    全バスを開くと、メインハンドが持たない `can_dm3520` まで開くことになり、CANable が
+    1 本欠けているだけで**両ハンドとも起動できなくなる**。受信ループが物理バス 1 本に
     つき 2 本立つのも同じ原因。
     """
 
@@ -1427,10 +1405,9 @@ class TestRobotBusSelection:
     def test_setup_robot_は別名ではなくインタフェース名で開く(self) -> None:
         """`_create_bus` が受けるのは `can_buses` の**値**であって別名ではない。
 
-        `can_manager` へ登録されるのは別名のままなので、`bus_names` を見る上の
-        テストでは `_create_bus(bus_name, ...)` への変異を区別できない。実運用では
-        `can.Bus` が ENODEV で落ちるが、**`operstate` の判定
-        (`/sys/class/net/<名前>/`) は静かに死ぬ** —— down を 1 行も報告しなくなる。
+        `can_manager` へ登録されるのは別名のままなので、`bus_names` を見る上のテストでは
+        `_create_bus(bus_name, ...)` への変異を区別できない。実運用では `can.Bus` が
+        ENODEV で落ちるが、**`operstate` の判定は静かに死ぬ** (down を報告しなくなる)。
         """
         robot = _robot(
             {
@@ -1464,11 +1441,9 @@ class TestRobotBusSelection:
 class TestReadOperstate:
     """**sysfs を実際に読む経路そのものを固定する。**
 
-    読み取りを丸ごとラムダへ差し替えて `_create_bus` 側だけを見ると、
-    **機能が丸ごと死ぬ変異が 2 つとも全件緑で通る** —— `.strip()` を落とす
-    (sysfs は `"down\n"` を返すので `== "down"` が永久に偽になる) と、パス要素を
-    `oper_state` へ綴り間違える (常に `FileNotFoundError` → `None`) の 2 つ。
-    どちらも「ログが 1 行も出なくなる」だけなので、通しでも気づけない。
+    読み取りをラムダへ差し替えて `_create_bus` 側だけを見ると、**機能が丸ごと死ぬ変異が
+    2 つとも緑で通る** —— `.strip()` を落とす (sysfs は `"down\n"` を返す) と、パス要素を
+    `oper_state` へ綴り間違える (常に `None`)。どちらも「ログが 1 行も出なくなる」だけ。
     """
 
     def _write(self, root: pathlib.Path, channel: str, text: str) -> None:
@@ -1507,9 +1482,8 @@ class TestCreateBusOperstate:
     """**down しているインタフェースでも起動は止めない。ログにだけ出す。**
 
     `--strict` を通していない構成 (片ハンドだけの練習・机上ベンチ・会場での逃げ道) を
-    一律に潰さないため、拒否は足さない。価値は「人が最初に見る場所 (起動ログ) に、
-    原因をインタフェース名付きで残す」ことだけ。`docs/impl_plan.md` の
-    「既知の制約: バス down 時の失敗が分かりにくい」参照。
+    一律に潰さないため拒否は足さない。価値は「人が最初に見る場所 (起動ログ) に、原因を
+    インタフェース名付きで残す」ことだけ。
     """
 
     def test_down_なら起動ログにERRORでインタフェース名を残す(
@@ -1602,9 +1576,9 @@ class TestCreateBusOperstate:
 class TestEnsurePortAvailable:
     """**bind の可否は CAN を開くより前に見る。**
 
-    立ち上げ順は「CAN → 制御ループ → 目標値再送 → サーバー bind」なので、
-    ポートが埋まっていると**機体を励磁して 200Hz の制御ループを回し始めた後**に
-    落ちる。「起動したか分からず二度叩く」は会場で普通に起きる操作。
+    立ち上げ順は「CAN → 制御ループ → 目標値再送 → サーバー bind」なので、ポートが
+    埋まっていると**機体を励磁して 200Hz の制御ループを回し始めた後**に落ちる
+    (「起動したか分からず二度叩く」は会場で普通に起きる)。
     """
 
     def test_空いていれば通る(self) -> None:
@@ -1913,10 +1887,9 @@ class TestMotorCheckWiring:
     """統合動作確認の登録 (`main._wire_motor_check_sequence`)。
 
     **構成に無い軸のステップを除外しつつ、除外したことを起動ログに出す。**
-    機構が未装着のハンドを外して実機を動かす構成 (`config/bench/main_hand`) で、
-    残っているハンドの動作確認まで一切できなくなってはならない。一方で除外を
-    黙って行うと、本番構成で 1 軸が config から漏れていてもそのステップごと
-    消えて全ステップが成功する。
+    機構が未装着のハンドを外した構成 (`config/bench/main_hand`) で残るハンドの確認が
+    できなくなってはならない一方、黙って除外すると本番構成で 1 軸が config から漏れて
+    いてもそのステップごと消えて全ステップ成功になる。
     """
 
     _CONFIG_DIR: ClassVar[pathlib.Path] = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -1987,8 +1960,8 @@ class TestStartupSummaryLines:
     """起動ログの数値は、Python の内部表現ではなく人が読む形で出す。
 
     起動ログは試合前点検で目視する対象なので、``dataclass`` や ``dict`` の repr を
-    そのまま出すと、確認したい値がフィールド名の中に埋もれる。**壊れても機能は
-    1 つも落ちない**ので、実機のログを見るまで気付けない類の劣化である。
+    そのまま出すと確認したい値がフィールド名に埋もれる。**壊れても機能は 1 つも落ちない**
+    ので、実機のログを見るまで気付けない。
     """
 
     def test_しきい値は4つとも読める形で並ぶ(self) -> None:

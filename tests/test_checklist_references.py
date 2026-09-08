@@ -2,16 +2,11 @@
 
 **チェックリストは「操縦者が読んで実行する手順」なので、実在しない軸名や位置名が
 書いてあると点検そのものが実行できない。** 画面に出ないプリセットを探すことになり、
-しかも項目は残っているので「チェックが付かない = 試合開始のゲートが開かない」に
-なる。既存の検査はロール名 (`test_bench_checklist_uses_a_known_role`) と項目の
-取りこぼし (`test_no_entry_is_silently_dropped`) しか見ていない。
+項目は残るので「チェックが付かない = 試合開始のゲートが開かない」になる。ベンチ構成の
+差し替えや軸の改名では文面だけが古いまま取り残されやすい。
 
-ベンチ構成の差し替えや軸の改名では、checklist の文面だけが古い軸名・位置名のまま
-取り残されやすい。
-
-**文面は自然文なので完全な検証はできない。** ここが見るのは「`<軸名> に <位置名> を
-送り』の形で書かれた組がその構成に実在するか」だけで、書き方を狭めない代わりに
-拾えないものは拾わない。拾える形で書いてある限り、config を変えたときに落ちる。
+**文面は自然文なので完全な検証はできない。** 見るのは「`<軸名> に <位置名> を送り』の
+形で書かれた組がその構成に実在するか」だけで、拾えないものは拾わない。
 """
 
 from __future__ import annotations
@@ -37,11 +32,9 @@ def _robot_yamls(directory: pathlib.Path) -> list[pathlib.Path]:
     """そのディレクトリの構成が読む robot yaml。
 
     **どのベンチセットが本番 config をそのまま使うかの正は
-    `tests/test_config_schema.py` の `_BENCH_USES_PRODUCTION_CONFIG` だけが持つ**
-    (`config/bench/main_hand/` は robot yaml も positions も持たず、本番の
-    `config/main_hand.yaml` を `--config` で指して動かす)。ここでディレクトリ名の
-    規約として解決し直すと同じ対応表が 2 箇所になり、宣言の側だけを直したときに
-    こちらが古い規約のまま残る。
+    `tests/test_config_schema.py` の `_BENCH_USES_PRODUCTION_CONFIG` だけが持つ。**
+    ここで規約として解決し直すと同じ対応表が 2 箇所になり、宣言の側だけを直したときに
+    こちらが古いまま残る。
     """
     production_robot = _BENCH_USES_PRODUCTION_CONFIG.get(directory.name)
     if production_robot is not None:
