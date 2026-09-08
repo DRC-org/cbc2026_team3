@@ -1,7 +1,8 @@
 # Damiao DM3520 単体ベンチ (機構未装着) の位置定数。
 #
 # 本番の config/sub_hand_positions.yaml から DM3520 の 2 軸だけを取り出したもの。
-# sub_arm_joint / sub_gripper / valve_* / pump_* はモータを登録していないので書かない
+# sub_arm_joint / sub_rotate / sub_pitch / sub_offset / valve_* / pump_* は
+# モータを登録していないので書かない
 # (書くと手動操縦の軸一覧に、指令の届かない軸が並ぶ)。
 #
 # **数値はベンチ専用に振り直してある。** 機構に組み込む前の CAN 通信確認が目的なので、

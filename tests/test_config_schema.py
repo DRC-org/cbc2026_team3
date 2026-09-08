@@ -1010,3 +1010,43 @@ class TestExpectedInfoValues:
         )
         with pytest.raises(ValueError):
             load_robot_config(raw, source="test.yaml", buses=_BUSES)
+
+
+class TestSensorExpectedFirmware:
+    """センサスロットにも期待ファーム版を書ける (仕様書 §3.4 / §5.2)。
+
+    自作基板は 1 スロット = 1 CAN デバイスで、センサスロットも自分のデバイス ID で
+    `INFO` を送る。**書けないと、センサだけを載せた基板は照合対象を 1 つも持たない。**
+    サーボ基板の 5 スロットを全てセンサへ回すと、その基板の焼き忘れ検出はまるごと
+    消え、旧ファームのままのスロットは「スイッチを押してもセンサ入力ビットが
+    立たない」という配線不良と区別の付かない形でしか現れない。
+    """
+
+    def _load(self, **extra: object):
+        # モータ 0 台の robot yaml は別の理由で拒否されるので 1 台だけ添える
+        raw = _robot(gripper=_generic(can_id=0x40))
+        raw["sensors"] = {"origin_sensor": {"bus": "generic_bus", "can_id": 0x44, **extra}}
+        return load_robot_config(raw, source="test.yaml", buses=_BUSES)
+
+    def test_expected_firmware_is_read(self) -> None:
+        sensor = self._load(expected_firmware=6).sensors["origin_sensor"]
+        assert sensor.expected_firmware == 6
+
+    def test_omitted_value_stays_none(self) -> None:
+        """書かない構成は照合しない (既存 config をそのまま起動できる)。"""
+        assert self._load().sensors["origin_sensor"].expected_firmware is None
+
+    def test_firmware_out_of_uint8_rejected(self) -> None:
+        """範囲検査はモータと同じ関数を通る (書き写すと片方だけ緩む)。"""
+        with pytest.raises(ValueError, match="expected_firmware"):
+            self._load(expected_firmware=256)
+
+    def test_angle_range_rejected_on_sensor(self) -> None:
+        """**センサスロットは角度を持たない。**
+
+        ファームは `INFO` に可動レンジを載せないので、書けてしまうと「測ったように
+        見える期待値」が config に置ける。しかも照合は永久に「申告なし = 焼き忘れ」
+        と判定し続け、正しく焼いた基板が起動直後から FAULT のまま復帰しない。
+        """
+        with pytest.raises(ValueError, match="expected_angle_range_deg"):
+            self._load(expected_angle_range_deg=270.0)

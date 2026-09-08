@@ -206,8 +206,11 @@ constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 // TODO(実機で確認): angle_min / angle_max は機構が付いた状態で「当たらない範囲」を
 // 実測して入れること。**「機構確定後に広げる」という当初の方針どおりにはならず**、
 // wall_f を 180deg 動かす必要（8e34d10）で機構確定前に 270 度まで広げてある。
-// 現状 config/main_hand_positions.yaml / config/sub_hand_positions.yaml が使うのは
-// gripper 0〜65deg・wall_f 90〜270deg・wall_r 90〜180deg・sub_gripper 0〜5deg。
+// 現状 config/main_hand_positions.yaml が使うのは
+// gripper 0〜65deg・wall_f 90〜270deg・wall_r 90〜180deg。
+// **サブハンドの 5 軸（sub_rotate_r/l・sub_pitch_r/l・sub_offset）が使う角度はまだ
+// 決まっていない**（機構が付いていないので位置定数そのものが仮値）。決まったら
+// その軸の定数を実可動域へ狭めること。
 // **狭すぎる分にはクランプで止まるだけだが、広すぎるとメカストッパに当たったまま
 // 停動して焼損する。**
 //
@@ -221,14 +224,23 @@ constexpr motorcan::ServoPulseSpec kServoPulse180{500, 2400, 180.0f};
 // `timeout_s` はこの値から逆算した値でなければならず、対応は
 // `tests/test_servo_travel_budget.py` が突き合わせている。
 //
-// **駆動する Servo スロット（gripper / wall_f / wall_r / sub_gripper）は 1 本ずつ
-// 独立した定数を持つ。** 1 つを共有すると、片方の可動範囲を機構に合わせて広げただけで
-// 無関係なスロットのクランプまで一緒に緩む（実際に上記の wall_f 用の変更で gripper の
-// クランプが外れていた）。値はまだ全スロット同じ仮値のまま、実測はスロットごとに行う。
+// **駆動する Servo スロット（gripper / wall_f / wall_r / sub_rotate_r / sub_rotate_l /
+// sub_pitch_r / sub_pitch_l / sub_offset）は 1 本ずつ独立した定数を持つ。** 1 つを共有すると、
+// 片方の可動範囲を機構に合わせて広げただけで無関係なスロットのクランプまで一緒に緩む
+// （実際に上記の wall_f 用の変更で gripper のクランプが外れていた）。値はまだ全スロット
+// 同じ仮値のまま、実測はスロットごとに行う。
+//
+// **左右ペア（sub_rotate_r/l・sub_pitch_r/l）も 1 本ずつ持つ。** ペアは PC 側で 1 論理軸へ
+// 束ねるが、逆回転側は scale: -1.0 / offset: 270.0 で絶対角を折り返すので、同じ論理位置でも
+// ファームへ届く角度は左右で違う。共有すると片側の実測で相方のクランプが動く。
 constexpr motorcan::ServoLimits kGripperLimits{0.0f, 270.0f, 90.0f};
 constexpr motorcan::ServoLimits kWallFLimits{0.0f, 270.0f, 90.0f};
 constexpr motorcan::ServoLimits kWallRLimits{0.0f, 270.0f, 90.0f};
-constexpr motorcan::ServoLimits kSubGripperLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubRotateRLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubRotateLLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubPitchRLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubPitchLLimits{0.0f, 270.0f, 90.0f};
+constexpr motorcan::ServoLimits kSubOffsetLimits{0.0f, 270.0f, 90.0f};
 
 // TouchSensor / Unused は駆動しないので共有のままでよい。
 constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 270.0f, 90.0f};
@@ -265,14 +277,27 @@ constexpr motorcan::ServoLimits kProvisionalLimits{0.0f, 270.0f, 90.0f};
 //
 //   基板 | スロット | デバイス ID | PC 側のモータ / 用途
 //   -----+----------+------------+--------------------------------
-//    #0  | SV0      | 0x40       | gripper        (メインハンド)
-//    #0  | SV1      | 0x41       | wall_f         (メインハンド)
-//    #0  | SV2      | 0x42       | wall_r         (メインハンド)
-//    #0  | SV3      | 0x43       | rotate の原点スイッチ
-//    #0  | SV4      | ―          | 未使用 (y_axis の原点スイッチ用に予約)
-//    #1  | SV0      | 0x48       | sub_gripper    (サブハンド)
-//    #1  | SV1〜SV4 | ―          | 未使用
-//    #2  | SV0〜SV4 | ―          | 用途未定 (0x50〜0x54 を予約。下の R4 の行を参照)
+//    #0  | SV0      | 0x40       | gripper                  (メインハンド)
+//    #0  | SV1      | 0x41       | wall_f                   (メインハンド)
+//    #0  | SV2      | 0x42       | wall_r                   (メインハンド)
+//    #0  | SV3      | 0x43       | rotate の原点スイッチ     (メインハンド)
+//    #0  | SV4      | 0x44       | y_axis 右の原点スイッチ   (メインハンド)
+//    #1  | SV0      | 0x48       | y_axis 左の原点スイッチ   (メインハンド)
+//    #1  | SV1      | 0x49       | sub_y_axis 前端スイッチ   (サブハンド)
+//    #1  | SV2      | 0x4A       | sub_y_axis 後端スイッチ   (サブハンド)
+//    #1  | SV3      | 0x4B       | sub_lift 上端スイッチ     (サブハンド)
+//    #1  | SV4      | 0x4C       | sub_lift 下端スイッチ     (サブハンド)
+//    #2  | SV0      | 0x50       | sub_rotate_r             (サブハンド)
+//    #2  | SV1      | 0x51       | sub_rotate_l             (サブハンド)
+//    #2  | SV2      | 0x52       | sub_pitch_r              (サブハンド)
+//    #2  | SV3      | 0x53       | sub_pitch_l              (サブハンド)
+//    #2  | SV4      | 0x54       | sub_offset               (サブハンド)
+//
+// **基板 #1 は 2 つのロボットにまたがる。** SV0 がメインハンドの y_axis 左スイッチで、
+// SV1〜SV4 がサブハンドのスイッチである。CAN 上はどちらも共有バス can_generic に載るので
+// 成立するが、**配線は物理的にメインハンドから基板 #1 まで引く必要がある** ——
+// 基板は「どのロボットのものか」ではなく「どのバスに繋がっているか」でしか区切られていない。
+// 引き回しを嫌って y_axis 左を基板 #0 の空きへ移すことはできない（#0 は 5 スロットとも埋まっている）。
 //
 // **Unused 以外のスロットはすべて CAN デバイスとして FEEDBACK を送る。**
 // センサは PC 側 yaml の sensors: へ登録すること（登録しないと受信ループが
@@ -307,41 +332,37 @@ struct ServoBoardConfig {
 constexpr uint8_t kServoBoardCount = 1;
 
 constexpr ServoBoardConfig kServoBoards[] = {
-    // 基板 #2（DIP=2）: UNO R4 Minima
+    // 基板 #2（DIP=2）: サブハンドの回転 2 軸 / ピッチ 2 軸 / オフセット 1 軸
     //
-    // **5 スロットとも用途が未定なので Unused。** 配線（ピン）だけが確定していて、
-    // どのスロットにサーボを挿すかもスイッチを挿すかも決まっていない。Unused の間は
-    // デバイス ID を名乗らず pinMode すら触らないので、繋がっていないピンを駆動する
-    // 事故が構造的に起きない（決まったら role を Servo / TouchSensor へ変えるだけでよく、
-    // デバイス ID は 0x50〜0x54 で固定されているので PC 側 yaml の can_id は動かない）。
+    // **5 スロットとも 270 度サーボ。** サブハンドで角度を持つ機構がちょうど 5 つあり、
+    // 1 枚で足りる（スイッチ側は基板 #1 が担う）。
     //
-    // **この状態の基板は、正しいファームを焼いて DIP を 2 に合わせても RGB LED が
-    // 赤の速い点滅になる。故障ではない。** updateLed は Unused スロットを observe しない
-    // ので、全スロットが Unused の基板では「デバイスとして名乗れるスロットが 1 つも無い」
-    // ことになり、BoardIndication がそれを urgent に数える（判定は MotorLoopTimer.h）。
-    // 赤はこの基板の今の状態そのままの報告である —— FEEDBACK も INFO も 1 通も送らず、
-    // どのコマンドも受け付けず、サーボを attach すらしない。
+    // **sub_rotate_r / sub_rotate_l と sub_pitch_r / sub_pitch_l は機構的に直結した
+    // 左右ペア**で、PC 側の位置定数 yaml で 1 論理軸へ束ね、逆回転側は scale: -1.0 /
+    // offset: 270.0 で絶対角を折り返す。**ファーム側は 1 スロット = 1 デバイスのままで
+    // ペアを知らない** —— ペアを知る層を増やすと、左右で違う角度を送るという正常な状態を
+    // 「食い違い」と読む判定がここにも生まれ、しかも PC 側の折り返しと二重になる。
+    // ここに残しておくのは、片方のスロットだけを別のピンや別の基板へ移すと機構が
+    // その場で壊れる、という配線上の制約のため。
     //
-    // **ただし LED からは「DIP を回しすぎて kServoBoards に行が無い」と区別が付かない。**
-    // どちらも同じ赤の速い点滅で、どちらも 0x50〜0x54 が 1 通も流れないので、
-    // **candump では切り分けられない。切り分けは DIP の値を目で確認すること。**
+    // **Servo スロットは通電した瞬間に initialAngleDeg へ駆動する**（setup() が attach して
+    // 初期角を出す。仕様書 §5.4）。Unused のスロットは attach すらしないので、この基板が
+    // 通電で動くようになるのはここが Servo になったときからである。
+    // **下の 0.0f は仮値なので、この値のまま機構を付けてはならない** —— 通電のたび、
+    // そして基板が瞬断で再起動するたびに 0deg へ飛ぶ（再起動は FEEDBACK の
+    // 「起動後未受信」ビットとして PC 側に出るが、飛んだ後にしか出ない）。
     //
-    // **スロットに役割（Servo / TouchSensor）を 1 つでも与えた時点で赤は消える**ので、
-    // 「用途が決まったかどうか」の目印として使える（通電して赤いうちは、下の
-    // TODO がまだ 1 つも埋まっていないということ）。
-    //
-    // TODO(実機で確認): 用途が決まったら role・initialAngleDeg・limits・pulse を実物へ
-    // 合わせること。**sensorActiveLow は必ずそのスロットの配線で実測して決める** ——
-    // 基板 #0 の SV3 が false であることは**この基板の配線を何も保証しない**。
-    // 逆に設定すると零点確定（lib/sequence/homing.py）の離脱段でどこまで動かしても
-    // OFF にならず、HomingError で止まる（原因は配線不良と区別が付かない）。
+    // TODO(実機で確認): initialAngleDeg は 5 スロットとも仮値。機構を付ける前に、
+    // 「そこへ飛んでも当たらない角度」を実測して入れること。limits も全域（0〜270deg）の
+    // ままなので、実可動域が決まったら kSubRotate*Limits / kSubPitch*Limits /
+    // kSubOffsetLimits を狭めること。
     {2,
      {
-         {SlotRole::Unused, 9, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV0
-         {SlotRole::Unused, 11, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV1
-         {SlotRole::Unused, 10, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV2
-         {SlotRole::Unused, 6, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV3
-         {SlotRole::Unused, 3, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV4
+         {SlotRole::Servo, 9, 0.0f, kSubRotateRLimits, kServoPulse270, true},   // SV0 sub_rotate_r
+         {SlotRole::Servo, 11, 0.0f, kSubRotateLLimits, kServoPulse270, true},  // SV1 sub_rotate_l
+         {SlotRole::Servo, 10, 0.0f, kSubPitchRLimits, kServoPulse270, true},   // SV2 sub_pitch_r
+         {SlotRole::Servo, 6, 0.0f, kSubPitchLLimits, kServoPulse270, true},    // SV3 sub_pitch_l
+         {SlotRole::Servo, 3, 0.0f, kSubOffsetLimits, kServoPulse270, true},    // SV4 sub_offset
      }},
 };
 
@@ -360,30 +381,34 @@ constexpr ServoBoardConfig kServoBoards[] = {
          // **実機で確認済み**（CAN ID 0x343 の FEEDBACK を実測）: 非接触で LOW、
          // 接触で HIGH。したがって sensorActiveLow は false。
          {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 rotate
-         // SV4 は y_axis の原点スイッチ用に予約したスロットだが、**スイッチが未装着**の
-         // あいだは Unused にしておく。TouchSensor のままだと配線の有無に関わらず
-         // FEEDBACK を 100Hz で送り続ける一方、PC 側は受け取り手（config/main_hand.yaml の
-         // sensors:）を持たないので、そのフレームは誰にも配られず捨てられるだけになる。
-         // **スイッチを付けたら TouchSensor へ戻す**（同時に config/main_hand.yaml の
-         // sensors: と config/main_hand_positions.yaml の axes.y_axis.homing も戻す。
-         // 3 つのうち 1 つでも欠けると「センサが応答していません」で動作確認が止まる）。
+         // SV4 は y_axis の**右**のリミットスイッチ。左は基板 #1 の SV0（0x48）で、
+         // 1 本の直結ペア軸のスイッチが 2 枚の基板にまたがる（基板 #0 に空きが無いため）。
          //
          // TODO(実機で確認): sensorActiveLow は仮値。**同じ基板の SV3 が false だからと
-         // いって合わせてはならない** —— 極性はスロットごとの配線で決まる。スイッチを
-         // 付けた日に FEEDBACK の bit4 を非接触・接触の両方で実測して確定すること。
-         {SlotRole::Unused, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis (未装着)
+         // いって合わせてはならない** —— 極性はスロットごとの配線で決まる。FEEDBACK の
+         // bit4 を非接触・接触の両方で実測して確定すること。
+         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis 右
      }},
-    // 基板 #1（DIP=1）: サブハンド
+    // 基板 #1（DIP=1）: **5 スロットとも TouchSensor で、駆動するモータは 1 台も無い。**
+    // SV0 だけがメインハンド（y_axis 左）で、SV1〜SV4 はサブハンドなので、
+    // **この 1 枚が 2 つのロボットにまたがる**（上のスロット表を参照。CAN は共有バス
+    // can_generic なので成立するが、配線はメインハンドからここまで引く必要がある）。
     //
-    // TODO(実機で確認): SV1〜SV4 の sensorActiveLow は仮値。TouchSensor にする日に
+    // **駆動するモータが無いので、この基板の焼き忘れ検出は motors: 側では働かない。**
+    // §3.4 の版番号照合は expected_firmware を書いた対象としか突き合わせないため、
+    // センサ側（PC 側 sensors: の expected_firmware）が担う。そこが無いと、この基板だけ
+    // 古いファームのまま**全スロットが「反応しないスイッチ」として現れ**、症状は配線不良と
+    // 区別が付かない。
+    //
+    // TODO(実機で確認): 5 スロットとも sensorActiveLow は仮値。**スロットごとに**
     // 実測して確定すること（基板 #0 の SV3 の実測値は**この基板の配線を何も保証しない**）。
     {1,
      {
-         {SlotRole::Servo, 4, 0.0f, kSubGripperLimits, kServoPulse270, false},  // SV0 sub_gripper
-         {SlotRole::Unused, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1
-         {SlotRole::Unused, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2
-         {SlotRole::Unused, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV3
-         {SlotRole::Unused, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},   // SV4
+         {SlotRole::TouchSensor, 4, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV0 y_axis 左 (メイン)
+         {SlotRole::TouchSensor, 5, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV1 sub_y_axis 前端
+         {SlotRole::TouchSensor, 6, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV2 sub_y_axis 後端
+         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV3 sub_lift 上端
+         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 sub_lift 下端
      }},
 };
 
@@ -433,20 +458,27 @@ constexpr motorcan::BoardKind kBoardKind = motorcan::BoardKind::Servo;
 //    「SV4 が Unused のファーム」と「SV4 が TouchSensor のファーム」が同じ v4 を名乗り、
 //    どちらが焼かれているのかを INFO の照合で切り分けられなくなる（版番号は「バイナリの
 //    区別が付く」ことだけが存在理由なので、CAN 上の振る舞いが変わったら必ず上げる）。
+// 6: 零点確定用のスイッチ 6 本とサブハンドのサーボ 5 本を割り当て、**3 枚とも役割が
+//    変わった**。基板 #0 の SV4 は Unused から TouchSensor（y_axis 右）へ戻り、基板 #1 は
+//    sub_gripper の 1 台から 5 スロットとも TouchSensor へ、基板 #2 は全 Unused から
+//    5 スロットとも Servo になった。焼き忘れた基板は**サーボのつもりのピンが入力のまま**
+//    （逆も同じ）で、しかも 0x44 / 0x49〜0x4C / 0x50〜0x54 が FEEDBACK を送るかどうかが
+//    バイナリで変わるので、上げないと新旧が同じ v5 を名乗って INFO の照合で切り分けられない。
 //
 // **基板 #2（UNO R4 Minima）を足したときは上げていない。これは上げ忘れではない。**
 // 版番号が区別したいのは「CAN 上の振る舞い」であって、基板 #0 / #1 のそれは 1 ビットも
 // 変わっていない（新しい行は基板番号 2 にしか当たらず、既存 2 枚のスロット表・
 // デバイス ID・フレームはすべて同じ）。上げると意味の無い Nano 2 枚の再書き込みと
 // config/**/*.yaml の expected_firmware 26 箇所の更新が発生し、揃え損ねた 1 箇所が
-// 「正しく焼いたのに FAULT」として返ってくる。新設の R4 バイナリも v5 を名乗る ——
-// 版番号は MCU ではなく振る舞いを指すので、同じ振る舞いなら同じ番号でよい。
+// 「正しく焼いたのに FAULT」として返ってくる。**R4 バイナリは Nano と同じ番号を名乗る** ——
+// 版番号は MCU ではなく振る舞いを指すので、MCU が増えただけでは分岐させない
+// （逆に、上の v6 のように振る舞いが変わるときは 3 枚とも同じ番号で上がる）。
 //
 // **上げたら config/<robot>.yaml の expected_firmware も揃えること**（仕様書 §3.4）。
 // PC 側は INFO の申告値と突き合わせ、食い違ったらそのモータを FAULT にする ——
 // これは焼き忘れを見つけるための仕掛けなので、揃え忘れると「正しく焼いたのに
 // 全部 FAULT」になる。表示される不一致メッセージに期待値と申告値の両方が出る。
-constexpr uint8_t kFirmwareVersion = 5;
+constexpr uint8_t kFirmwareVersion = 6;
 
 // INFO（版番号の自己申告）の送信周期。1Hz なら 8 デバイスでもバス負荷は無視できる。
 constexpr uint32_t kInfoIntervalMs = 1000;

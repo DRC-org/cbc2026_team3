@@ -181,6 +181,88 @@ class TestFirmwareUnconfirmedMotorsAreVisible:
         bus.shutdown()
 
 
+class TestSensorSlotsAreCovered:
+    """**センサスロットも同じ欄で拾う (仕様書 §5.2)。**
+
+    自作基板は 1 スロット = 1 CAN デバイスで、センサスロットも自分のデバイス ID で
+    `INFO` を送る。サーボ基板の 5 スロットを全てセンサへ回した構成では照合できる
+    モータが 1 台も無くなるので、ここでセンサを見ないとその基板の焼き忘れ検出が
+    働いているかどうかを画面から知る手段が消える。
+
+    配信のフィールド名が `firmware_unconfirmed_motors` のままなのは、1 スロット =
+    1 CAN デバイスとしてセンサも「デバイス 1 つ」に数えるため (名前を変えると
+    WS 契約と UI の受信条件が同時に追従を要り、漏れは「型は合っているのに画面に
+    出ない」形で現れる)。
+    """
+
+    def _sensor_only(self, *, bus_channel: str) -> tuple[CANManager, can.Bus, GenericDriver]:
+        """センサだけを載せた基板の構成 (照合できるモータが 1 台も無い)。"""
+        mgr, bus = _build_can_manager(bus_channel=bus_channel)
+        sensor = GenericDriver("origin_sensor", 0x44, control_type=ControlMode.POSITION)
+        mgr.add_sensor(_BUS, sensor)
+        return mgr, bus, sensor
+
+    async def test_info_未受信のセンサが_safety_に載る(self) -> None:
+        fx = ServerFixture.build()
+        mgr, bus, sensor = self._sensor_only(bus_channel="vfwc")
+        fx.add_robot("main_hand", _DummySequence("main_hand"), mgr)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            # センサの FEEDBACK は状態フラグ 1 バイトだけ (位置を持たない)
+            deliver_frame(mgr, _BUS, generic_feedback(sensor))
+            fx.expire_firmware_grace()
+            reported = await wait_until(
+                lambda: (
+                    fx.state_message("main_hand")["safety"]["firmware_unconfirmed_motors"]
+                    == ["origin_sensor"]
+                )
+            )
+            assert reported, "INFO 未受信のセンサが safety に載っていない"
+
+        bus.shutdown()
+
+    async def test_info_を受けたセンサは載らない(self) -> None:
+        """反対向きも見ないと、センサを常に載せる変異が上のテストだけでは通る。"""
+        fx = ServerFixture.build()
+        mgr, bus, sensor = self._sensor_only(bus_channel="vfwd")
+        fx.add_robot("main_hand", _DummySequence("main_hand"), mgr)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, generic_feedback(sensor))
+            deliver_frame(mgr, _BUS, generic_info(sensor, firmware_version=1))
+            fx.expire_firmware_grace()
+
+            assert fx.state_message("main_hand")["safety"]["firmware_unconfirmed_motors"] == []
+
+        bus.shutdown()
+
+    async def test_途絶えたセンサは対象外(self) -> None:
+        """除外の層はモータと共有する (センサ用に別の判定を置かない)。
+
+        基板が丸ごと落ちていれば `CANManager.health()` が STALE として既に言うので、
+        ここで重ねると同じ事実を 2 度描くことになる。
+        """
+        fx = ServerFixture.build()
+        mgr, bus, sensor = self._sensor_only(bus_channel="vfwe")
+        fx.add_robot("main_hand", _DummySequence("main_hand"), mgr)
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, generic_feedback(sensor))
+            mark_feedback_at(
+                mgr,
+                "origin_sensor",
+                time.time() - (DEFAULT_HEALTH.feedback_timeout_ms / 1000.0) - 0.1,
+            )
+            fx.expire_firmware_grace()
+
+            assert fx.state_message("main_hand")["safety"]["firmware_unconfirmed_motors"] == []
+
+        bus.shutdown()
+
+
 class TestStaleMotorsAreExcluded:
     """**基板が落ちている場合はここで言わない。**
 

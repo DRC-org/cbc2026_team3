@@ -14,8 +14,16 @@
 #   - **ファームの angle_min / angle_max を超えた値は黙ってクランプされる。** 症状は
 #     「送ったのに途中で止まる」だけで、SET_TARGET には書いた値が載っているので
 #     candump からも読めない。範囲を変えるときはファーム側の**そのスロットの**
-#     定数を直す (kGripperLimits / kWallFLimits / kWallRLimits /
-#     kSubGripperLimits。1 つを共有すると 1 スロットの都合で全部が緩む)
+#     定数を直す (このロボットのぶんは kSubRotateRLimits / kSubRotateLLimits /
+#     kSubPitchRLimits / kSubPitchLLimits / kSubOffsetLimits。1 つを共有すると
+#     1 スロットの都合で全部が緩む)
+#
+# --- サーボの左右ペアは offset で折り返す ------------------------------------
+# **メインハンドの rotate (EDULITE) と書き方が違う。** あちらは連続回転なので
+# scale の符号だけで逆回転を表せるが、**サーボは 0〜270deg の絶対角**なので、
+# 符号を反転しただけでは逆回転側が負の角度になり、ファームが 0deg でクランプして
+# 動かなくなる (症状は「片側だけ動かない」だけで、SET_TARGET には書いた値が載って
+# いるので candump からも読めない)。offset とセットで折り返すこと。
 
 axes:
   # RobStride EDULITE 05 の補助アーム関節。指令・フィードバックともに rad。
@@ -102,14 +110,72 @@ axes:
       max: 30.0
       steps: [1.0, 5.0, 10.0]
 
-  # 自作モータドライバの補助グリッパ。指令・フィードバックともに deg。
-  # 開 / 閉 の 2 状態しか取らないので manual: は書かない (手動でも位置名しか送れない)。
-  sub_gripper:
+  # --- 自作モータドライバのサーボ 3 軸 (サーボ基板 #2) ---
+  # 指令・フィードバックともに出力軸の絶対角 [deg]。
+  #
+  # **manual: は書かない。** 位置名によるプリセット指令だけに絞ることで、「定義した
+  # 状態以外を送れない」という通常運用の保証がそのまま残る (メインハンドの gripper と
+  # 同じ扱い)。機構が付くまで角度が仮値なので、連続値で端へ寄せていける口を開けると
+  # 仮値の可動範囲を信じて機構へ突き当てることになる。
+  #
+  # **homing: も書かない。** 同じ基板群の 6 センサはどれも報告のみで、零点確定には
+  # 使わない (サブハンドの直動 2 軸は DM3520 で、そもそも原点確定の手段を宣言して
+  # いない)。サーボは指令角がそのまま位置なので零点確定という概念を持たない。
+  #
+  # !!! sync_tolerance / sync_kp は書かない。書き忘れではない !!!
+  # 左右ペア軸の 3 重の保護のうち、**②偏差監視だけがサーボでは原理的に働かない** ——
+  # サーボの FEEDBACK は**クランプ後の指令角のエコー**であって実位置ではないので、
+  # 偏差監視に載せても見えるのは「PC が送った指令の差」だけで、片側が固着しても
+  # ホーンが外れても差は 0 のままである。効かない保護を書くと「守っているように見えて
+  # 守っていない」層が 1 枚できる (次に読む人はそこを保護と数える) ので書かない。
+  # 残る 2 つは motors: に束ねるだけで効く: ①左右が同じフレームで同時に指令される
+  # ②フィードバック途絶をペア単位で判定する。
+  # ずれの検出は目視 (config/checklist.yaml) が担う。
+  #
+  # **timeout_s はその軸で起きうる最大移動から決める。** サーボの移動時間は
+  # firmware/servo/include/config.h のスルーレート (90deg/s) で決まり、PC 側から
+  # 変える経路は無い。下の 3 軸は home(0) ↔ working(90) の 90deg が最大なので
+  # 1.000s かかる —— 到達判定に早出しは無く (reachedTolerance 0deg)、FEEDBACK 100Hz の
+  # 遅延も乗るので 1.0 では毎回 SequenceTimeoutError になる。
+  # 突き合わせは tests/test_servo_travel_budget.py が機械的に行う。
+  # **positions を広げたらここも一緒に見直すこと** (片方だけ動かすと、機構が完全に
+  # 正常でもその move_to が毎回・決定的に落ちる)。
+
+  # サブハンドの回転。左右 2 台が機構的に直結し、逆回転で同一動作。
+  sub_rotate:
+    unit: deg
+    command_unit: deg
+    timeout_s: 2.0
+    tolerance: 2.0       # 到達許容差 [deg]
+    motors:
+      sub_rotate_r: { scale: 1.0, offset: 0.0 }
+      # 逆回転で同一動作。**符号の反転だけでは足りず offset が要る** (上のコメント)。
+      # TODO(実機で確認): offset 270.0 は仮値。実際の折り返し点は、左右のサーボを
+      # どの向きに取り付けるかで決まるので機構が付いてから実測する。ずれていると
+      # 左右が同じ論理位置で違う姿勢を取り、直結した機構をその場で捻る
+      sub_rotate_l: { scale: -1.0, offset: 270.0 }
+
+  # サブハンドのピッチ。sub_rotate と同じ左右直結ペア。
+  sub_pitch:
+    unit: deg
+    command_unit: deg
+    timeout_s: 2.0
+    tolerance: 2.0
+    motors:
+      sub_pitch_r: { scale: 1.0, offset: 0.0 }
+      # TODO(実機で確認): sub_rotate と同じく offset 270.0 は仮値。
+      # **sub_rotate の実測値を写してはならない** —— 取り付けの向きは軸ごとに違う
+      sub_pitch_l: { scale: -1.0, offset: 270.0 }
+
+  # オフセット機構。**左右ペアではない単独軸**なので motors: を書かず、
+  # 「軸名 = モータ名」の既定の対応に乗せる。
+  sub_offset:
     unit: deg
     command_unit: deg
     scale: 1.0
     offset: 0.0
     timeout_s: 2.0
+    tolerance: 2.0
 
   # 電磁弁 6 個。**6 軸とも同じ定義**なので、settle_s などを変えるときは
   # 6 箇所すべてを直すこと (1 つだけ残ると、その弁だけ待ち時間が違う)。
@@ -176,16 +242,29 @@ positions:
     home: 0.0            # 下端 = 電源投入位置
     lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
 
-  # !!! この軸だけ「ファームの起動角 = 初期姿勢」が崩れている !!!
-  # firmware/servo/include/config.h の kServoBoards[] の基板 #1 SV0 の初期角は
-  # 0.0deg で、それは下の closed にあたる。**通電直後と基板の瞬断後は閉じる方向へ動く。**
-  # メインハンドの 3 軸は起動角が gripper.open / wall_f.initial / wall_r.initial と
-  # 一致しているので、ここだけが逆。config/checklist.yaml の `sub_gripper_open`
-  # (動作確認より前に唱える) は通電直後には成立しない。
-  # 揃え方は docs/mechanism_handoff.md の該当行を参照 (機構側の判断)。
-  sub_gripper:
-    open: 5.0            # 開 [deg]
-    closed: 0.0          # 閉 (把持) [deg] — ファームの起動角と同じ値
+  # --- サーボ 3 軸 [deg] ---
+  # TODO(機構が付いてから実測): 3 軸とも仮値。**home 0.0 / working 90.0 は「動いたことが
+  # 目で分かる」ことだけを狙った値**で、機構の姿勢とは何の関係も無い。
+  #
+  # !!! ファームの起動角 (initialAngleDeg) と home を揃えること !!!
+  # 基板 #2 の 5 スロットは通電した瞬間と瞬断からの再起動で initialAngleDeg へ駆動する
+  # (現在 0.0deg で、これも仮値)。ここが食い違うと、電源を入れるたび・基板が瞬断する
+  # たびに機構が別の姿勢へ飛ぶ。**再起動は FEEDBACK の「起動後未受信」ビットとして
+  # PC に出るが、飛んだ後にしか出ない。**
+  #
+  # **左右ペアの 2 軸は論理位置を 1 つ書くだけでよい** —— 左右へ届く実際の角度は
+  # axes.<軸>.motors の scale / offset が別々に作る。
+  sub_rotate:
+    home: 0.0            # 収納姿勢 [deg]
+    working: 90.0        # 作業姿勢 [deg]
+
+  sub_pitch:
+    home: 0.0            # 収納姿勢 [deg]
+    working: 90.0        # 作業姿勢 [deg]
+
+  sub_offset:
+    home: 0.0            # 収納姿勢 [deg]
+    working: 90.0        # 作業姿勢 [deg]
 
   # 電磁弁は開 / 閉の 2 状態しか取らない。**値は 0 か非 0 かだけが意味を持つ**
   # (仕様書 §9.2)。0.5 のような中間値を書いても基板は ON として扱うので、

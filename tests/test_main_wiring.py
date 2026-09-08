@@ -43,6 +43,7 @@ from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
+from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError
@@ -63,9 +64,10 @@ from main import (
     _load_pid_config,
     _wire_robot_motors,
 )
-from tests.fake_can import direct_runner, mark_feedback_at, mock_bus
+from sequences.motor_check import MotorCheckSequence
+from tests.fake_can import deliver_frame, direct_runner, mark_feedback_at, mock_bus
 from tests.fake_clock import FakeClock
-from tests.feedback_frames import feed_m3508
+from tests.feedback_frames import feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -1463,6 +1465,69 @@ class TestRobotBusSelection:
         assert "setup_can.sh" in message
 
 
+class TestSensorExpectedFirmware:
+    """`sensors:` の `expected_firmware` が実際に照合まで届くこと (仕様書 §3.4 / §5.2)。
+
+    自作基板は 1 スロット = 1 CAN デバイスで、センサスロットも自分のデバイス ID で
+    `INFO` を送る。**センサへ期待値を渡さないと、センサだけを載せた基板は照合対象を
+    1 つも持たない** —— サーボ基板の 5 スロットを全てセンサへ回した構成では焼き忘れ
+    検出がまるごと消え、旧ファームのままのスロットは「スイッチを押してもセンサ入力
+    ビットが立たない」という配線不良と区別の付かない形でしか現れない。
+
+    config の読み込みからドライバの生成、`INFO` のデコード、ヘルス判定までを
+    一続きに通す。途中のどこか 1 つで値を落としても、症状は「照合が黙って
+    働かない」だけで画面にもログにも出ないため、経路を分けて見ても意味がない。
+    """
+
+    _SENSOR_ID = 0x44
+
+    def _setup(self, expected_firmware: int | None) -> tuple[CANManager, GenericDriver]:
+        sensor_cfg: dict = {"bus": "generic_bus", "can_id": self._SENSOR_ID}
+        if expected_firmware is not None:
+            sensor_cfg["expected_firmware"] = expected_firmware
+        robot = _robot(
+            {
+                "robot_name": "r",
+                "motors": {"conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1}},
+                "sensors": {"origin_sensor": sensor_cfg},
+            }
+        )
+        can_manager, _motors = main._setup_robot(
+            robot, {"generic_bus": "can_generic"}, dry_run=True
+        )
+        sensor = can_manager.sensors["origin_sensor"]
+        assert isinstance(sensor, GenericDriver)
+        return can_manager, sensor
+
+    def _sensor_health(self, can_manager: CANManager):
+        snapshot = can_manager.health()
+        return next(info for info in snapshot.motors if info.name == "origin_sensor")
+
+    def test_申告値が食い違うセンサは_fault(self) -> None:
+        can_manager, sensor = self._setup(expected_firmware=6)
+        deliver_frame(can_manager, "generic_bus", generic_info(sensor, firmware_version=5))
+
+        assert self._sensor_health(can_manager).state is MotorHealth.FAULT
+        # FAULT の理由が焼き忘れであること (デバイス ID 未設定でも FAULT になるので、
+        # 状態だけを見ると別の理由で緑になる変異を取り逃がす)
+        assert sensor.info_mismatch is not None
+        assert "焼き忘れ" in sensor.info_mismatch
+
+    def test_申告値が一致するセンサは_fault_にならない(self) -> None:
+        """一致側も見ないと、常に FAULT にする変異が上のテストだけでは通る。"""
+        can_manager, sensor = self._setup(expected_firmware=6)
+        deliver_frame(can_manager, "generic_bus", generic_info(sensor, firmware_version=6))
+
+        assert self._sensor_health(can_manager).state is not MotorHealth.FAULT
+
+    def test_期待値を書かないセンサは照合しない(self) -> None:
+        """既存 config をそのまま起動できること (書かなければ照合そのものをしない)。"""
+        can_manager, sensor = self._setup(expected_firmware=None)
+        deliver_frame(can_manager, "generic_bus", generic_info(sensor, firmware_version=5))
+
+        assert self._sensor_health(can_manager).state is not MotorHealth.FAULT
+
+
 class TestReadOperstate:
     """**sysfs を実際に読む経路そのものを固定する。**
 
@@ -1947,13 +2012,23 @@ class TestMotorCheckWiring:
         return server
 
     def test_メインハンドだけの構成でも登録する(self, caplog: pytest.LogCaptureFixture) -> None:
-        """サブハンドが不在でも、メインハンド実機の動作確認は使えること。"""
+        """サブハンドが不在でも、メインハンド実機の動作確認は使えること。
+
+        除外数を数字で固定しない —— ステップを 1 つ足すたびに数字合わせが要るうえ、
+        合わせた側が正しいかを誰も見ない。**除外されるのはサブハンドのステップ
+        ちょうど全部**という対応を見れば、メインハンドのステップが巻き添えで
+        落ちた場合も (数が合わなくなるので) 落ちる。
+        """
         with caplog.at_level(logging.WARNING):
             server = self._wire([self._table("main_hand_positions.yaml")])
 
         sequence = server.set_motor_check_sequence.call_args.args[0]
+        sub_labels = {
+            info.label for info in MotorCheckSequence("x").steps if "サブハンド" in info.label
+        }
+
         assert not [info for info in sequence.steps if "サブハンド" in info.label]
-        assert len(sequence.excluded_steps) == 7
+        assert {info.label for info in sequence.excluded_steps} == sub_labels
 
     def test_除外したステップを起動ログに出す(self, caplog: pytest.LogCaptureFixture) -> None:
         """画面を開かずに構成の食い違いへ気付ける唯一の経路。"""

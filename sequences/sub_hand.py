@@ -41,6 +41,16 @@ class SubHandSequence(Sequence):
     ここへステップとして組み込むこと。
     2 軸とも動作確認 (`sequences/motor_check.py`) と手動操縦の対象には入っているので、
     シーケンスに現れないこと自体は「未接続」を意味しない。
+
+    **サーボ 3 軸 (`sub_rotate` / `sub_pitch` / `sub_offset`) も同じ理由でここには
+    現れない。書き忘れではない。** 位置定数がまだ `home` / `working` の 2 つしか無く、
+    しかもその角度 (0deg / 90deg) は「動いたことが目で分かる」ことだけを狙った仮値で、
+    機構の姿勢とは何の関係も無い (`config/sub_hand_positions.yaml`)。受け渡し・吸着・
+    配置のどの姿勢に対応するかが決まっていない以上、組み込んでも「シーケンスは通るが
+    機体は狙った場所へ行かない」形にしかならず、症状は換算・配線の誤りと区別が付かない。
+    機構が確定して姿勢に対応する位置名が入った日に、手順ごと組み直すこと。
+    3 軸とも動作確認の対象には入っており、手動操縦では位置名のプリセットだけ送れる
+    (`manual:` を持たないため連続値は送れない)。
     """
 
     def __init__(self, name: str = "sub_hand") -> None:
@@ -51,7 +61,7 @@ class SubHandSequence(Sequence):
         # **弁を閉じてから吸気ポンプを回す。** 逆にすると、前のサイクルで開いたままの
         # 弁からいきなり吸引が始まり、置いたばかりのワークを吸い直す
         await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
-        await self.move_to({"sub_arm_joint": "home", "sub_gripper": "open"})
+        await self.move_to({"sub_arm_joint": "home"})
         await self.move_to({"pump_vac": "run"})
 
     @step("補助ハンド展開", require_trigger=True)
@@ -62,15 +72,11 @@ class SubHandSequence(Sequence):
     async def move_to_handoff(self) -> None:
         await self.move_to({"sub_arm_joint": "handoff"})
 
-    # メインハンドと機構同士が向かい合う唯一の動作。ずれたまま閉じると両機構が衝突するため、
-    # 操縦者の目視確認で止める
-    @step("ハンド閉じる (受け取り)", require_trigger=True)
-    async def grip_handoff(self) -> None:
-        await self.move_to({"sub_gripper": "closed"})
-
     # **吸着したかどうかは PC からは分からない** (基板に圧力センサもリミットスイッチも無く、
     # FEEDBACK の到達フラグも立たない。仕様書 §9.3)。弁を開けて settle_s 待つだけなので、
-    # 実際に吸い付いたかは操縦者が目視で確かめる必要がある。トリガーを置くのはそのため
+    # 実際に吸い付いたかは操縦者が目視で確かめる必要がある。トリガーを置くのはそのため。
+    # **メインハンドと機構同士が向かい合う唯一の動作でもある** —— ずれたまま吸着へ入ると
+    # パッドがワークを掴めないだけでなく両機構が接触するので、ここで一度止める
     @step("ワーク吸着", require_trigger=True)
     async def grip_by_suction(self) -> None:
         await self.move_to(_all_valves("open"))
@@ -90,11 +96,10 @@ class SubHandSequence(Sequence):
         # 押し出す間だけ回して止める (回しっぱなしにすると次の吸着を邪魔する)
         await self.move_to({"pump_blow": "run"})
         await self.move_to({"pump_blow": "stop"})
-        await self.move_to({"sub_gripper": "open"})
 
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
         # 吸気ポンプはここでも止めない (次のサイクルで立ち上がりを待たないため)。
         # 試合が終わったら操縦者が手動操縦で pump_vac に stop を送る
         await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
-        await self.move_to({"sub_arm_joint": "home", "sub_gripper": "open"})
+        await self.move_to({"sub_arm_joint": "home"})

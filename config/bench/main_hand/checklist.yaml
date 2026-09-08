@@ -1,7 +1,7 @@
 # メインハンド実機 (機構付き・サブハンド不在) の M3508 + EDULITE 05 確認項目。
 #
-# 本番の config/checklist.yaml は sub_gripper / sub_dm3520_origin / sub_lift_holds /
-# valves_actuate / pumps_run / suction_hold など、サブハンドが無ければ存在しない
+# 本番の config/checklist.yaml は sub_dm3520_origin / sub_servo_move / sub_lift_holds /
+# limit_sensor_react / valves_actuate / pumps_run / suction_hold など、サブハンドが無ければ存在しない
 # 確認まで求めるため、そのままでは使えない。**メインハンド自体は機構の付いた実機
 # なので、gripper / wall / conveyor / rotate_origin_sensor はこのセットにも実在する** ——
 # ただしこの一覧はそれらの確認を持たない。自作モタドラ側の確認を M3508 + EDULITE 05

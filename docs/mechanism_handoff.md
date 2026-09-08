@@ -25,9 +25,12 @@
 `rotate` の `homing.search_distance`（**触れた状態から始めたので一度も試されていない**。
 同じ節の `direction` −1 は 2026-09-05 に実機で裏付けられ、`step` は**下限だけ**が
 分かっている）、
-`y_axis` の `homing`（スイッチ未装着でコメントアウト中）、サーボ 3 軸
-（`gripper` / `wall_f` / `wall_r`）の可動域とファームの `kGripperLimits` /
-`kWallFLimits` / `kWallRLimits`（旧 `kProvisionalLimits` 共有から分離済み。§0 / §4）、
+`y_axis` の `homing`（スイッチは付いたが極性と探索パラメータが未実測でコメントアウト中）、
+サーボ **8 軸**（メインハンドの `gripper` / `wall_f` / `wall_r` と、サブハンドの
+`sub_rotate_r` / `sub_rotate_l` / `sub_pitch_r` / `sub_pitch_l` / `sub_offset`）の
+可動域とファームのスロット別クランプ定数（§0 / §4）、
+**サブハンド基板 #2 の初期角**（5 本とも仮値で、**通電した瞬間にその角へ飛ぶ**。§0）、
+**7 本のタッチセンサのうち 6 本の極性**（実測済みは基板 #0 SV3 だけ。§4）、
 **サブハンドはほぼ全部**（§2）。`y_axis` のゲインも**短距離（15mm）では取り直していない**。
 極性のように**スロットごと・軸ごとにしか決まらない値は、確定した 1 つを他へ広げてはならない。**
 
@@ -46,18 +49,21 @@
 
 ---
 
-## 0. 最優先の 3 つ — **これだけは機構が付いた日のうちに**
+## 0. 最優先の 4 つ — **これだけは機構が付いた日のうちに**
 
-他は「動かない・届かない」で済むが、この 3 つは**壊す向き**に間違っている。
-3 つとも「広すぎる」ことが危険で、広すぎても平常時は何の症状も出さない。
-**行が減ったら見出しの数も直すこと** —— 数はこの節が「その日のうちに閉じきれる短い表」
+他は「動かない・届かない」で済むが、この 4 つは**壊す向き**に間違っている。
+上の 3 つは「広すぎる」ことが危険で、広すぎても平常時は何の症状も出さない。
+4 つ目（基板 #2 の初期角）だけは向きが違い、**電源を入れた瞬間に機構がその角へ飛ぶ**
+—— 測る前に通電する機会が最初に来るぶん、実質いちばん早く踏む。
+**行が増減したら見出しの数も直すこと** —— 数はこの節が「その日のうちに閉じきれる短い表」
 であることの宣言で、表と食い違うと閉じたかどうかを数えられなくなる。
 
 | 対象 | 現在値 | 場所 | 何が起きるか |
 |---|---|---|---|
 | `rotate` の `homing.search_distance` | **180.0deg** | `config/main_hand_positions.yaml` | **広すぎると機構端まで押し込む。** 「当たるまで動かす」動作に対する唯一の無人の歯止めで、配線が抜けたセンサは「いつまでも当たらない」形でしか現れない。現在値は `manual` の全幅そのままの暫定値なので、実測のスイッチ位置 + わずかな余裕へ詰める。**2026-09-05 の零点確定はスイッチに触れた状態から始めたので、この値は一度も試されていない** —— 実際に何 deg で当たるかは、触れていない位置から始めたときに初めて分かる。**`direction` −1 のほうは同日に実機で裏付けられた**（離脱後に寄せ直した向きが正しかった）ので、2 つを混同しないこと |
-| `y_axis` の `homing.search_distance` | **22.0mm（コメントアウト中）** | `config/main_hand_positions.yaml` | 同上。**スイッチが未装着なので `homing:` ごと無効にしてある**（§1-1）。戻す日に実測ストローク全長 + わずかな余裕へ取り直すこと —— 22.0 は仮値時代の `manual` 全幅で、実ストローク 650mm にはまったく足りない |
-| サーボの可動範囲クランプ（`kGripperLimits` / `kWallFLimits` / `kWallRLimits` / `kSubGripperLimits`） | 4 本とも **`{0.0, 270.0, 90.0}`**（0〜270deg / 90deg/s） | `firmware/servo/include/config.h` | **広すぎるとサーボが機構に当たったまま押し続けて焼損する。** 現在値は**サーボの全可動域**なので、クランプは実質効いていない（位置定数を実運用値へ更新したときに全域へ開けた）。**2026-09-06 にスロットごとの独立した定数へ分離済み**（旧 `kProvisionalLimits` 共有だと 1 スロットの都合で他スロットのクランプまで一緒に緩んだ）。実可動域が決まったら**そのスロットの定数だけ**すぐに狭める。ファームを焼き直すので、当日の作業順で後回しにしないこと。**スルーレート 90deg/s は位置定数の `timeout_s` と対**で、`tests/test_servo_travel_budget.py` が突き合わせている |
+| `y_axis` の `homing.search_distance` | **22.0mm（コメントアウト中）** | `config/main_hand_positions.yaml` | 同上。**スイッチは左右とも付いたが `homing:` はまだ無効**（§1-1）。有効にする日に実測ストローク全長 + わずかな余裕へ取り直すこと —— 22.0 は仮値時代の `manual` 全幅で、実ストローク 650mm にはまったく足りない |
+| サーボの可動範囲クランプ（`kGripperLimits` / `kWallFLimits` / `kWallRLimits` / `kSubRotateRLimits` / `kSubRotateLLimits` / `kSubPitchRLimits` / `kSubPitchLLimits` / `kSubOffsetLimits`） | **8 本とも `{0.0, 270.0, 90.0}`**（0〜270deg / 90deg/s） | `firmware/servo/include/config.h` | **広すぎるとサーボが機構に当たったまま押し続けて焼損する。** 現在値は**サーボの全可動域**なので、クランプは実質効いていない（位置定数を実運用値へ更新したときに全域へ開けた）。**駆動する 8 スロットが 1 本ずつ独立した定数を持つ**（共有だと 1 スロットの都合で他スロットのクランプまで一緒に緩む）。実可動域が決まったら**そのスロットの定数だけ**すぐに狭める。ファームを焼き直すので、当日の作業順で後回しにしないこと。**左右ペア（`sub_rotate_r`/`_l`・`sub_pitch_r`/`_l`）も 1 本ずつ測る** —— 逆回転側は絶対角を折り返して届くので、同じ論理位置でも左右で角度が違う。**スルーレート 90deg/s は位置定数の `timeout_s` と対**で、`tests/test_servo_travel_budget.py` が突き合わせている |
+| **サーボ基板 #2 の 5 スロットの `initialAngleDeg`** | **5 本とも 0.0f（仮値）** | `firmware/servo/include/config.h` | **この基板は通電した瞬間に 5 本ともこの角へ駆動する**（`Unused` だった間は attach すらしなかったので、動くようになったのは 5 スロットが `Servo` になってからである）。**仮値のまま機構を付けてはならない** —— 通電のたび、そして基板が瞬断で再起動するたびに 0deg へ飛ぶ。再起動は `FEEDBACK` の「起動後未受信」ビットとして PC に出るが、**飛んだ後にしか出ない**。§2 の `positions.sub_rotate` / `sub_pitch` / `sub_offset` の `home` と揃えること |
 
 **`search_distance` を詰めるときは `manual` の `min`/`max` も同時に実測へ寄せる。**
 片方だけ動かすと「原点に届かない」か「宣言した可動範囲の外まで押し込む」のどちらかになる。
@@ -101,7 +107,7 @@
 | `axes.y_axis.tolerance` / `sync_tolerance` | 1.0mm / 10.0mm | `sync_tolerance` を緩めるのは最後の手段。左右直結なのでずれはその場で機構を壊す |
 | `axes.y_axis.sync_kp` / `sync_limit` | **16.0** / 1250counts | **2026-09-04 に実運用ストローク（150mm）で実測済み。** 左右のずれを**縮める**唯一の経路（`sync_tolerance` の 3 層は止めるだけ）。 **最適値は振幅で変わる** —— 振幅 1.5mm では 8.0 が最良だったが、150mm では 8.0 が最悪（1 回 1.899mm。測定時点の `sync_tolerance` 2.0mm では 95%、現在の 10.0mm では 19%）で、16.0 が 2 回とも最良（最大 0.637mm）。**短距離（15mm）では取り直していない** |
 | `axes.y_axis.timeout_s` | 4.0s | 実測ストローク 650mm（`positions.y_axis` の `home` 0.0 〜 `work_shared` 650.0）に対し、`motion.duration_for(650.0)`（`max_velocity` 200.0mm/s / `max_acceleration` 1200.0mm/s²）の理論所要時間は 3.4167 秒、余裕は 0.5833 秒（約 15%）。起動時検証 `_check_motion_timeout`（`lib/sequence/positions.py`）はこの余裕の範囲内なので通る。**ただしこれは理想台形プロファイルの所要時間だけで、`tolerance` 1.0mm の帯へ整定するまでの時間を含まない。** 実機で `SequenceTimeoutError` が出たらまずここを疑うこと（症状は「その軸だけが毎回失敗する」で、機構にもモータにも異常が無い —— 説明は `_check_motion_timeout` の docstring）。`timeout_s` をいくつにすべきかは実機で測る人が決める |
-| `axes.y_axis.homing` | **コメントアウト（スイッチ未装着）** | **確定手段は揃っている**（M3508 なので PC 側位置制御ループが原点を持つ）。欠けているのは物理のスイッチだけで、**現状この軸は電源投入位置がそのまま原点**になる（搬送中に手で動かされたぶんは正せない）。**戻すときは 3 つ同時**: ①`firmware/servo/include/config.h` の `kServoBoards[]` 基板 #0 SV4 を `TouchSensor` へ（`kFirmwareVersion` を上げ、同梱 yaml の `expected_firmware` も揃える） ②`config/main_hand.yaml` の `sensors:` へ `origin_sensor`（`can_id` `0x44`）を登録 ③`homing:` のコメントを外し `search_distance` を実測ストロークへ。1 つでも欠けると動作確認の最初のステップが毎回「センサが応答していません」で止まり、配線不良と区別が付かない |
+| `axes.y_axis.homing` | **コメントアウト中。スイッチ・ファーム・`sensors:` は揃った** | **確定手段は揃っている**（M3508 なので PC 側位置制御ループが原点を持つ）。**左右 2 本のスイッチも付いた** —— 右が `y_axis_r_origin_sensor`（サーボ基板 #0 SV4 = `0x44`）、左が `y_axis_l_origin_sensor`（**基板 #1** SV0 = `0x48`。#0 に空きが無いので 2 枚にまたがる）。ファームも `TouchSensor` として宣言し、`config/main_hand.yaml` の `sensors:` にも登録済み。**残るのは実測だけ**: `sensorActiveLow` の極性（下の §4。**左右それぞれ**）と `direction` / `search_distance` / `step`。それまで**この軸は電源投入位置がそのまま原点**（搬送中に手で動かされたぶんは正せない）。**極性が逆のまま有効にすると、離脱の段でどこまで動かしても OFF にならず機構端まで押し込んでから失敗する** |
 | `positions.rotate` | **埋まった。** 実測値（home 0.0 / pick 180.0 / place 10.0deg）が入っている | かつての 0〜8deg は機構未装着時の仮値。実機の値へ更新済み |
 | `axes.rotate.manual` | **埋まった。** 0.0〜180.0deg（2026-09-04 のコミット `5aa89c3` で実ストロークへ更新済み） | 同上 |
 | `axes.rotate.homing` | **有効。配線・極性と `direction` が確定、`step` は下限が判明。残る未実測は `search_distance` だけ** | **スイッチ側**（2026-09-05）: サーボ基板 #0 SV3（`0x43`）に配線済みで、`candump` で押下時に `FEEDBACK` が `0x10`（`status_flag::kSensor`）、開放時に `0x00` になることを実測した。**非接触で LOW・接触で HIGH** なので `sensorActiveLow: false`（`firmware/servo/include/config.h` の `kServoBoards[]` 基板 #0 SV3 に反映済み。§4）。**零点確定そのもの**（2026-09-05）: スイッチに触れた状態から離脱 → 寄せ直しで **0.70deg 動いて到達**し、`SET_ZERO` まで通った。付け替えのあいだの `SyncMonitor` のグループ単位の一時停止と再開（約 0.9 秒間）も設計どおり動作した。**`direction` −1 は確定**（離脱後に寄せ直した向きが正しかった）。**`step` は下限だけが判明**（0.5deg では静止摩擦を超えられず停滞して `HomingError`。現在値 **1.0deg** は分解能を `tolerance` 2.0deg の半分まで詰めた設定で、下限の 2 倍しかない —— 停滞判定で落ちるようなら 1.5 前後へ戻す。§0）。**未実測は 1 つだけ**: `search_distance`（**180.0deg は `manual` 全幅から置いた値**。今回は**触れた状態から始めたので一度も試されていない** —— 実際に何 deg でスイッチに当たるかは、触れていない位置から始めたときに初めて分かる）。詳細は `docs/checks_and_health.md` の「零点確定」節 |
@@ -122,7 +128,10 @@
 | `motors.sub_lift.limit_speed` | **1.0 rad/s** | 重量未確定。**緊急停止 = 消磁**で保持ブレーキが無いので、自重落下の懸念がある。減速比 19.2 のギヤで落ちない前提に乗っており、**指差喚呼 `sub_lift_holds` で必ず実機確認する**（上げた状態で非常停止し、落ちないこと） |
 | `axes.sub_arm_joint.offset` | **0.0（実測未）** | 機械原点のずれをここで寄せる。EDULITE は負の角度も扱えるが、機構原点を決めてから測る |
 | `positions.sub_arm_joint` | 0〜10deg | 干渉角未確認 |
-| `positions.sub_gripper` | 0〜5deg（open 5.0 / closed 0.0） | 上の `kSubGripperLimits`（0〜270deg の仮値）と同じ制約（サーボ基板 #1 SV0）。**この軸だけ「ファームの起動角 = 初期姿勢」が崩れている** —— `kSlotsByBoard[1][0]` の初期角は 0.0deg = `closed` なので、**通電直後と基板の瞬断後は閉じる方向へ動く**。メインハンドの 3 軸は起動角が `gripper.open` / `wall_f.initial` / `wall_r.initial` と一致している。指差喚呼 `sub_gripper_open`（動作確認より前に唱える）は通電直後には成立しない。どちらを正とするかは機構側の判断で、揃えるなら初期角を 5.0f にするか open/closed を入れ替える（前者のほうが他 3 軸と同じ規則に乗る。ファームを焼き直すので `kFirmwareVersion` と `expected_firmware` も同時に上げること） |
+| `positions.sub_rotate` / `sub_pitch` / `sub_offset`（サーボ 3 軸 = 5 スロット） | **3 軸とも home 0.0 / working 90.0deg の仮値** | 「動いたことが目で分かる」ことだけを狙った値で、機構の姿勢とは何の関係も無い。**§0 の `initialAngleDeg`（基板 #2 の 5 スロット。現在 0.0f）と `home` を必ず揃えること** —— 食い違うと、電源を入れるたび・基板が瞬断するたびに機構が別の姿勢へ飛ぶ。可動域はファームの `kSubRotateRLimits` / `kSubRotateLLimits` / `kSubPitchRLimits` / `kSubPitchLLimits` / `kSubOffsetLimits`（**5 本とも 0〜270deg の全域**）とスロットごとにセットで決める。**`timeout_s` も対**で、`移動量 / 90deg/s` を下回ると機構が正常でも毎回タイムアウトする（`tests/test_servo_travel_budget.py`） |
+| `axes.sub_rotate` / `sub_pitch` の逆回転側 `offset` | **270.0（仮値）** | **左右直結ペアの折り返し点。** サーボは 0〜270deg の**絶対角**なので、`scale: -1.0` だけでは逆回転側が負角になりファームが 0deg でクランプする（症状は「片側だけ動かない」だけで、`SET_TARGET` には書いた値が載っているので `candump` からも読めない）。実際の折り返し点は**左右のサーボをどの向きに取り付けるかで決まる**ので、機構が付いてから実測する。**ずれていると左右が同じ論理位置で違う姿勢を取り、直結した機構をその場で捻る。** `sub_rotate` の実測値を `sub_pitch` へ写してはならない（取り付けの向きは軸ごとに違う） |
+| **ペア軸のずれは自動では検出できない**（`sync_tolerance` / `sync_kp` を書いていない） | **書いていない。書き忘れではない** | サーボの `FEEDBACK` は**クランプ後の指令角のエコー**であって実位置ではないので、偏差監視に載せても見えるのは「PC が送った指令の差」だけで、**片側が固着してもホーンが外れても差は 0 のまま**である（詳細は `docs/impl_plan.md`）。左右の食い違いに気付ける手段は**人の目視だけ**なので、機構が付いたら動作確認で左右が同じ姿勢を取ることを必ず目で見ること |
+| **サブハンドの 4 本のリミットスイッチ**（`sub_y_axis` の前後端 = `0x49` / `0x4A`、`sub_lift` の上下端 = `0x4B` / `0x4C`。すべてサーボ基板 #1） | **配線済み・`sensors:` 登録済み。極性 `sensorActiveLow` は 4 本とも仮値** | **どれも零点確定には使えない（報告のみ）。** `sub_y_axis` / `sub_lift` は DM3520 で、`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は disable すると自重で落ちるため原点確定の手段を宣言していない —— `homing:` を書いても必ず `HomingError` になる。**それでも登録してあるのは、途絶が `STALE` として出るからである**。**`sub_lift` の下端は自重落下の検出にも使えない** —— 基板は報告するだけで、落ちてから ON になるので保護にはならない（保持は指差喚呼 `sub_lift_holds` で人が確認する） |
 | `axes.valve_1`〜`valve_6` の `settle_s` | **0.2s（6 軸とも）** | **吸着が効くまでの時間が未実測。** 短すぎると「離した直後に持ち上げて落とす」。**6 箇所すべてを直すこと**（1 つ残るとその弁だけ待ち時間が違う） |
 | `axes.pump_vac` / `pump_blow` の `settle_s` | **0.5s** | 規定の負圧 / 正圧に達するまでの時間。短すぎると「回し始めた直後に弁を開けて吸着し損ねる」 |
 | `positions.pump_*.run` | **0.3 duty** | ファーム側 `max_duty`（既定 0.30）でクランプ。吸引力が足りなければ**ファームを先に**上げる |
@@ -751,15 +760,14 @@ a=1200 まで落とすと指令ピークも下がるので、上限も取り直�
 
 | 対象 | 現在値 | 危険の向き / 注意 |
 |---|---|---|
-| サーボ可動範囲クランプ（`kGripperLimits` / `kWallFLimits` / `kWallRLimits` / `kSubGripperLimits`。TouchSensor / Unused 行は引き続き `kProvisionalLimits` を共有） | 4 本とも **0〜270deg / 90deg/s** | §0 参照。**現在クランプは効いていない**（全可動域）。**焼損する向き。2026-09-06 にスロットごとの独立した定数へ分離済み** |
+| サーボ可動範囲クランプ（`kGripperLimits` / `kWallFLimits` / `kWallRLimits` / `kSubRotateRLimits` / `kSubRotateLLimits` / `kSubPitchRLimits` / `kSubPitchLLimits` / `kSubOffsetLimits`。`TouchSensor` の行は駆動しないので `kProvisionalLimits` を共有したままでよい） | **8 本とも 0〜270deg / 90deg/s** | §0 参照。**現在クランプは効いていない**（全可動域）。**焼損する向き。駆動するスロットは 1 本ずつ独立した定数を持つ**（共有すると 1 スロットの都合で他スロットのクランプまで一緒に緩む） |
 | `kServoPulse180` のパルス幅 | **500–2400us（仮）** | 180 度品のパルス幅は 500–2400 とは限らず、1000–2000 や 500–2500 も普通にある。**型が決まり次第、データシートの値へ**。ずれると指令角と実角が比例倍でずれる |
 | `kServoBoards[].slots[].pulse` | 全基板・全スロット `kServoPulse270` | **型はスロットごと・基板ごとに選べる**（1 枚の中に 270 度品と 180 度品を混ぜられる）。載せ替えたスロットの行だけを `kServoPulse180` へ差し替え、`config/<robot>.yaml` の `expected_angle_range_deg` も**そのモータの行**を揃える（隣のスロットの値を写すと照合が通ったまま型だけずれる）。**PC 側 positions は 1 行も変わらない** —— 型を知っているのは `config.h` だけ |
-| `kServoBoards[].slots[].initialAngleDeg` | **基板 #0: SV0 `gripper` 0.0deg / SV1 `wall_f` 270.0deg / SV2 `wall_r` 90.0deg。基板 #1: SV0 `sub_gripper` 0.0deg**（`TouchSensor` と `Unused` のスロットは駆動しないので、そこに並ぶ 0.0deg は効かない） | `setup()` で**ここへ駆動する**。**メインハンドの 3 軸は `gripper.open` / `wall_f.initial` / `wall_r.initial` と一致している**（この 3 つは埋め直すのではなく、位置定数を動かしたら**同時に**動かす値）。**`sub_gripper` だけ 0.0deg = `closed` なので、通電直後と基板の瞬断後は閉じる方向へ動く**（§2 の `positions.sub_gripper` 参照）。機構が付いた後の安全な初期姿勢か確認すること（基板が瞬断するとこの角へ飛ぶ） |
-| センサスロットの `sensorActiveLow` | **基板 #0 SV3（`0x43`）のみ `false` で確定**（2026-09-05 に実機で確認）。**基板 #0 SV4 と基板 #1 の 4 スロットは `true` の仮値のまま**（TODO: 実機で確認） | 逆だと「触れているのに反応しない」＝ホーミングが `search_distance` いっぱいまで押し込む。逆の逆（常に接触と報告）なら 1 歩も動かずに原点が確定してしまう。**極性はスロットごとの配線でしか決まらないので、SV3 の実測値を他のスロットへ広げてはならない** —— 1 スロットずつ、`candump` で非接触・接触の両方の `FEEDBACK` を見て確定する（SV3 は押下で `0x10` = `status_flag::kSensor`、開放で `0x00` だった） |
-| `kServoBoards[]` の基板 #0 SV4（基板 #0 SV4）の役割 | **`Unused`（暫定）** | `y_axis` の原点スイッチ用に予約したスロットだが、**スイッチが未装着**なので `Unused` にしてある。**付けたら `TouchSensor` へ戻し、`kFirmwareVersion` を上げ、同梱 yaml の `expected_firmware` も揃える**（§1-1 の 3 点セット） |
+| `kServoBoards[].slots[].initialAngleDeg` | **基板 #0: SV0 `gripper` 0.0deg / SV1 `wall_f` 270.0deg / SV2 `wall_r` 90.0deg。基板 #2: SV0〜SV4 の 5 本とも 0.0deg（全部仮値）**（`TouchSensor` のスロットは駆動しないので、そこに並ぶ 0.0deg は効かない） | `setup()` で**ここへ駆動する**。**メインハンドの 3 軸は `gripper.open` / `wall_f.initial` / `wall_r.initial` と一致している**（この 3 つは埋め直すのではなく、位置定数を動かしたら**同時に**動かす値）。**基板 #2 の 5 本は仮値のままなので、この値で機構を付けてはならない**（§0）—— 通電のたび・瞬断からの再起動のたびに 0deg へ飛ぶ。§2 の `positions.sub_rotate` / `sub_pitch` / `sub_offset` の `home` と揃えること |
+| センサスロットの `sensorActiveLow` | **基板 #0 SV3（`0x43`）のみ `false` で確定**（2026-09-05 に実機で確認）。**基板 #0 SV4 と基板 #1 の 5 スロット、合わせて 6 本は `true` の仮値のまま**（TODO: 実機で確認） | 逆だと「触れているのに反応しない」＝ホーミングが `search_distance` いっぱいまで押し込む。逆の逆（常に接触と報告）なら 1 歩も動かずに原点が確定してしまう。**極性はスロットごとの配線でしか決まらないので、SV3 の実測値を他のスロットへ広げてはならない** —— 1 スロットずつ、`candump` で非接触・接触の両方の `FEEDBACK` を見て確定する（SV3 は押下で `0x10` = `status_flag::kSensor`、開放で `0x00` だった）。**6 本のうち零点確定に使うのは `y_axis` の左右 2 本だけ**（残る 4 本は報告のみ。§2）だが、**極性は 6 本とも測る** —— 報告だけのスイッチでも、逆極性なら「押していないのに接触」と出続けて指差喚呼の目視確認が意味を失う |
 | DC 基板の `max_duty` | 既定 0.30 | ポンプ・コンベアの duty はここで頭打ち。上げるならファームが先 |
-| 各基板の `kFirmwareVersion` | **サーボ基板は #0 / #1 とも v5 を書き込み済み**（2026-09-05 に `INFO` で確認。版番号 5・サーボ基板・スロット種別（`0x443` のみ Sensor、他は Actuator）・可動レンジ 270.0deg を申告）。**#2（UNO R4）は用途未定でまだ何も接続しておらず、5 スロットとも `Unused` = `FEEDBACK` も `INFO` も送らないので `INFO` での確認自体ができない**（版番号は同じ v5。R4 バイナリの新設では上げていない） | **ピン配置かプロトコルを変えたら必ず上げる。** PC 側 `expected_firmware` と不一致は FAULT として見える（焼き忘れの唯一の検出手段）。**焼くのはサーボ 3 枚 + DC 1 枚 + 電磁弁 1 枚で、サーボの #2 だけ別バイナリ**（`pio run -e uno_r4_minima -d firmware/servo`。#0/#1 は `-e nano`）—— 片方だけ古いままだと、症状はその基板のスロットが FAULT になるだけで、CAN 越しには焼き忘れと配線不良の区別が付かない |
-| **サーボ基板 #2（UNO R4 Minima / DIP=2 / `0x50`〜`0x54`）** | **全部空**。5 スロットとも役割（`Servo` / `TouchSensor` / `Unused`）が未定で、現在は `Unused`。したがって `sensorActiveLow` / `initialAngleDeg` / `limits`（可動範囲）/ `pulse` も 1 つも決まっておらず、**PC 側 `config/*.yaml` にも `can_id` `0x50`〜 のモータ・センサを 1 つも登録していない** | **用途が決まった日に埋める。** ピンは #0/#1 と別物（SV0=D9 / SV1=D11 / SV2=D10 / SV3=D6 / SV4=D3。RGB は D8、CAN は内蔵で D4/D5 固定）なので、**#0/#1 の行を写してはならない**。埋めるのは ①`firmware/servo/include/config.h` の `kServoBoards[]` の #2 の要素（役割・初期角・可動範囲・パルス仕様・センサ極性） ②PC 側 yaml の `motors:` / `sensors:` ③`kFirmwareVersion` を上げて同梱 yaml の `expected_firmware` も揃える —— の 3 点セット（§1-1 と同じ形）。**現状この基板はバス上に存在しないのと同じ**なので、動作確認にも指差喚呼にも 1 項目も現れない。**通電すると RGB LED が赤の速い点滅になるが、これは故障ではなく「まだ 1 つも埋めていない」印である** —— 全スロットが `Unused` の基板は「デバイスとして名乗れるスロットが 1 つも無い」ものとして `BoardIndication` が urgent に数えるため（`firmware/lib/MotorCan/src/MotorLoopTimer.h`）。**役割を 1 つでも与えれば赤は消えるので、この表が埋まったかどうかの目印としてそのまま使える。** ただし LED は「DIP を回しすぎて表に行が無い」場合とまったく同じ出方をし、どちらも `0x50`〜`0x54` が 1 通も流れないので `candump` でも切り分けられない —— **赤いときは先に DIP の値を目で確認すること** |
+| 各基板の `kFirmwareVersion` | **サーボ基板は 3 枚とも v6 が必要。実機に v6 が入っているかは未確認**（実機で確認済みなのは 2026-09-05 の v5 が #0 / #1 に入っていたところまで） | **ピン配置かプロトコルを変えたら必ず上げる。** PC 側 `expected_firmware` と不一致は FAULT として見える（焼き忘れの唯一の検出手段）。**焼くのはサーボ 3 枚 + DC 1 枚 + 電磁弁 1 枚で、サーボの #2 だけ別バイナリ**（`pio run -e uno_r4_minima -d firmware/servo`。#0/#1 は `-e nano`）—— 片方だけ古いままだと、症状はその基板のスロットが FAULT になるだけで、CAN 越しには焼き忘れと配線不良の区別が付かない。**基板 #1 だけは `motors:` の照合対象を 1 台も持たない**（5 スロットともセンサ）ので、焼き忘れを拾うのは `sensors:` の `expected_firmware` である |
+| **サーボ基板 #2（UNO R4 Minima / DIP=2 / `0x50`〜`0x54`）** | **5 スロットとも `Servo`**（`sub_rotate_r` / `sub_rotate_l` / `sub_pitch_r` / `sub_pitch_l` / `sub_offset`）。`initialAngleDeg` も `limits`（可動範囲）も**全部仮値**で、`pulse` は 5 本とも `kServoPulse270` | **埋めるのは初期角と可動範囲の 2 つ**（§0 / 上の 2 行）。ピンは #0/#1 と別物（SV0=D9 / SV1=D11 / SV2=D10 / SV3=D6 / SV4=D3。RGB は D8、CAN は内蔵で D4/D5 固定）なので、**#0/#1 の行を写してはならない**。**この基板は通電した瞬間に 5 本とも駆動する** —— 役割が `Unused` だった間は attach すらしなかったので、「電源を入れても何も起きない基板」だった頃の感覚で扱わないこと |
 
 ---
 

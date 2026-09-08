@@ -84,7 +84,13 @@ _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_
 _MATCH_KEYS = frozenset({"duration_s"})
 
 _ROBOT_KEYS = frozenset({"robot_name", "motors", "sensors"})
-_SENSOR_KEYS = frozenset({"bus", "can_id"})
+# **`expected_angle_range_deg` は意図的に無い。** センサスロットは角度を持たず
+# (仕様書 §5.2)、ファームも INFO に可動レンジを載せない。書けてしまうと
+# 「測ったように見える期待値」が config に置ける —— しかも照合は永久に
+# 「申告なし = 焼き忘れ」と判定し続けるので、正しく焼いた基板が起動直後から
+# FAULT のまま復帰しない。`expected_firmware` だけはセンサスロットも 1Hz で
+# 自己申告する (仕様書 §3.4) ので書ける
+_SENSOR_KEYS = frozenset({"bus", "can_id", "expected_firmware"})
 _COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id"})
 # ドライバ固有キー。他のドライバに書いても効かないため、混在は起動時に拒否する
 _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
@@ -197,6 +203,11 @@ class SensorConfig:
     name: str
     bus: str
     can_id: int
+    # INFO (1Hz の自己申告, 仕様書 §3.4) と突き合わせる期待値。**書かなければ照合しない。**
+    # センサスロットしか載っていない基板でもここを書けば焼き忘れが FAULT として出る ——
+    # 書けないと、旧ファームのままのスロットが `Servo` として動き続け、症状は
+    # 「スイッチを押してもセンサ入力ビットが立たない」だけになって配線不良と区別が付かない
+    expected_firmware: int | None = None
 
 
 @dataclass(frozen=True)
@@ -474,12 +485,24 @@ def _parse_sensor(
             f"{source}: {path}.can_id が範囲外です: {can_id} "
             f"(指定できるのは {low:#04x}〜{high:#04x})"
         )
-    return SensorConfig(name=sensor_name, bus=bus, can_id=can_id)
+    # 期待値の解釈はモータと同じ関数に通す。センサ側へ範囲検査を書き写すと、
+    # uint8 の境界が 2 箇所に分かれて片方だけ緩む
+    return SensorConfig(
+        name=sensor_name,
+        bus=bus,
+        can_id=can_id,
+        expected_firmware=_parse_expected_firmware(source, path, sensor),
+    )
 
 
-def _parse_expected_firmware(source: str, path: str, motor: Mapping) -> int | None:
-    """INFO の Byte0 と突き合わせるファーム版 (仕様書 §3.4)。"""
-    value = _optional(_integer, source, path, motor, "expected_firmware", None)
+def _parse_expected_firmware(source: str, path: str, raw: Mapping) -> int | None:
+    """INFO の Byte0 と突き合わせるファーム版 (仕様書 §3.4)。
+
+    モータとセンサの両方から呼ぶ。自作基板は 1 スロット = 1 CAN デバイスで、
+    センサスロットも自分のデバイス ID で INFO を送る (仕様書 §5.2) ため、
+    照合の規則そのものは両者で同じである。
+    """
+    value = _optional(_integer, source, path, raw, "expected_firmware", None)
     if value is not None and not 0 <= value <= 0xFF:
         raise ValueError(
             f"{source}: {path}.expected_firmware が uint8 の範囲外です: {value} "

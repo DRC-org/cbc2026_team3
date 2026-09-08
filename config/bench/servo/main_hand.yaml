@@ -24,19 +24,14 @@
 # 返さない (センサ・未使用スロットは SET_TARGET を受け付けない) ため、症状は
 # 「配線したのに STALE のまま」だけになり、配線不良と区別が付かない。
 #
-#   基板番号 | SV0        | SV1        | SV2        | SV3         | SV4
-#   ---------+------------+------------+------------+-------------+-------------
-#      0     | 0x40 Servo | 0x41 Servo | 0x42 Servo | 0x43 Sensor | 0x44 Unused
-#      1     | 0x48 Servo | 0x49 —     | 0x4A —     | 0x4B —      | 0x4C —
+#   基板番号 | SV0        | SV1         | SV2         | SV3         | SV4
+#   ---------+------------+-------------+-------------+-------------+-------------
+#      0     | 0x40 Servo | 0x41 Servo  | 0x42 Servo  | 0x43 Sensor | 0x44 Sensor
+#      1     | 0x48 Sensor| 0x49 Sensor | 0x4A Sensor | 0x4B Sensor | 0x4C Sensor
 #
 # **基板 #2 (0x50-0x54) はこの表に無い。** あちらは MCU が UNO R4 Minima で、
 # ファームが別バイナリ (env uno_r4_minima) のため Nano 版の表には現れない。
 # このベンチは Nano の基板を使うので、#2 として振る舞わせることはできない。
-#
-# **SV4 は本番で y_axis の原点スイッチに充てるスロットだが、スイッチが未装着の
-# あいだファームは Unused として宣言している。** Unused のスロットは FEEDBACK も
-# INFO も 1 通も送らないので、ベンチでも登録しない (登録すると 0x44 だけが永久に
-# STALE として並び、配線不良と区別が付かなくなる)。
 #
 # サーボの型もスロットごとに宣言されるので、下の expected_angle_range_deg は
 # **そのスロットの行**と突き合わせること (現在は全スロット 270 度品)。
@@ -44,11 +39,11 @@
 # ---------------------------------------------------------------------------
 # !!! このベンチは基板番号 0 として使う。基板の DIP を全 OFF にすること !!!
 # ---------------------------------------------------------------------------
-# **基板番号 1 は SV0 しか駆動できない**ので、机上ベンチとして成立しない (5 スロット
-# 中 4 つが無応答で、それが正常なのか壊れているのかを画面から区別できない)。
+# **基板番号 1 は 5 スロットともスイッチで、駆動できるサーボが 1 本も無い**ので、
+# 机上ベンチとして成立しない (サーボの動作をここで確かめられない)。
 # 基板番号 0 なら 3 本のサーボと 2 本のスイッチが同時に載り、**本番の
 # config/main_hand.yaml とスロットの役割が一致する** —— ベンチで確かめた手順が
-# そのまま本番の gripper / wall_f / wall_r と 2 本の原点スイッチの確認になる。
+# そのまま本番の gripper / wall_f / wall_r と 2 本のスイッチの確認になる。
 #
 # 本番では 3 本のサーボに機構上の役割名 (gripper / wall_f / wall_r) が付くが、
 # ベンチでは機構が付いていないのでスロット名で登録する。どのスロットにサーボを
@@ -74,7 +69,7 @@ motors:
     # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
     # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
     # **ファームを直したらここも直す。**
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0
 
   # SV1 (D5)。本番では wall_f。
@@ -83,7 +78,7 @@ motors:
     bus: generic_bus
     can_id: 0x41               # サーボ基板 #0 SV1
     control_type: position
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   # SV2 (D6)。本番では wall_r。
@@ -92,7 +87,7 @@ motors:
     bus: generic_bus
     can_id: 0x42               # サーボ基板 #0 SV2
     control_type: position
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
 # --- センサ入力 (スロット SV3 / D7) ---
@@ -107,19 +102,21 @@ motors:
 # 接触は Byte0 bit4 で報告されるが、**接触そのものは異常ではない** — 原点合わせで
 # 触れさせるたびに FAULT になってはならないので、ヘルス判定には入っていない。
 #
-# **SensorConfig は name / bus / can_id しか持たない**ので expected_firmware は書けない
-# (書くと起動が拒否される)。同じ基板の servo_sv0〜sv2 が版番号を照合しているため、
-# 焼き忘れはそちらで FAULT として現れる。
+# **センサにも expected_firmware を書く。** 同じ基板の servo_sv0〜sv2 が照合して
+# いるから省いてよい、とすると「そのモータを消したら照合も消える」という見えない
+# 依存になる。本番のサーボ基板 #1 は駆動するモータが 1 台も無く、焼き忘れを拾えるのが
+# sensors: の照合だけなので、ベンチもその書き方に揃えておく。
 #
-# 本番では SV3 が rotate の原点スイッチ。ベンチには軸が無いので、確認できるのは
-# 「押すと接触が PC まで届くか」だけになる。
-#
-# **SV4 (0x44) は登録しない。** 本番では y_axis の原点スイッチに充てるスロットだが、
-# スイッチが未装着のあいだファームが Unused として宣言しており、FEEDBACK を 1 通も
-# 送らない。スイッチが付いてファームが TouchSensor へ戻る日に servo_sv4 も戻すこと
-# (このベンチが本番の基板 #0 とスロットの役割で一致していることが存在理由なので、
-# 片方だけ戻すとベンチで確かめた手順が本番の確認にならなくなる)。
+# 本番では SV3 が rotate の原点スイッチ、SV4 が y_axis 右のリミットスイッチ。
+# ベンチには軸が無いので、確認できるのは「押すと接触が PC まで届くか」だけになる。
 sensors:
   servo_sv3:
     bus: generic_bus
     can_id: 0x43               # サーボ基板 #0 SV3
+    expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
+
+  # SV4 (D8)。本番では y_axis 右のリミットスイッチ。
+  servo_sv4:
+    bus: generic_bus
+    can_id: 0x44               # サーボ基板 #0 SV4
+    expected_firmware: 6
