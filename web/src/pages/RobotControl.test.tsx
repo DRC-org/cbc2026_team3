@@ -709,23 +709,58 @@ describe("ステップ一覧の見出し", () => {
 
 /**
  * シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠 1 つぶんの縦を
- * 払わない。総ステップ数を試合中に出さないのは、`ActionPanel` が `1/22` の形で
- * 同じ数を既に出しているため (同じ事実を 2 度描かない)。
+ * 払わない。総ステップ数は**ステップ一覧が画面に無いときだけ**帯が引き受ける ——
+ * 半自動では準備中に一覧が、試合中に `ActionPanel` の `1/22` が同じ数を既に
+ * 出している (同じ事実を 2 度描かない)。
  */
 describe("シーケンス名の置き場所", () => {
-  it("準備中はモード帯にシーケンス名と総ステップ数を出す", () => {
+  it("準備中はモード帯にシーケンス名を出す", () => {
     mount("setup");
 
     expect(screen.getByText("sub_hand")).toBeInTheDocument();
-    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
     // 1 行のためのパネルは持たない
     expect(screen.queryByText("シーケンス")).toBeNull();
   });
 
-  it("試合中は総ステップ数を出さない (ActionPanel が同じ数を出している)", () => {
-    mount("match");
-
-    expect(screen.getByText("sub_hand")).toBeInTheDocument();
+  it("半自動では総ステップ数を出さない (準備中は一覧が、試合中は ActionPanel が出す)", () => {
+    mount("setup");
     expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
+
+    mount("match");
+    expect(screen.queryByText(/全 3 ステップ/)).toBeNull();
+  });
+
+  it("手動の準備中だけ帯が総ステップ数を引き受ける (一覧が画面から消えるため)", () => {
+    mountManual("setup");
+
+    expect(screen.getByText(/全 3 ステップ/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * 準備中の操縦者画面は、かつて機体状態 1 枚が全幅へ広がるだけだった ——
+ * このフェーズで「これから何が起きるか」を答える面が画面のどこにも無く、
+ * 操縦者は手順を確認する手段を持たないまま試合開始を待っていた。
+ */
+describe("準備中のステップ一覧", () => {
+  it("半自動の準備中にも一覧を出す", () => {
+    mount("setup");
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeInTheDocument();
+  });
+
+  it("押せなくし、その理由を出す", () => {
+    // `sequence_jump` はサーバー側でフェーズゲートされる。押せる見た目にすると
+    // 「押したのに何も起きない」だけが操縦者に残る
+    mount("setup");
+
+    expect(screen.getByRole("button", { name: "ステップ 3: 搬送" })).toBeDisabled();
+    expect(within(stepPanel()).getByText("試合中のみ操作可")).toBeInTheDocument();
+  });
+
+  it("手動中は出さない (同じ列を手元の操作面へ明け渡す)", () => {
+    mountManual("setup");
+
+    expect(screen.queryByRole("button", { name: "ステップ 3: 搬送" })).toBeNull();
   });
 });
