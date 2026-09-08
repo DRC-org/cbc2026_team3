@@ -58,6 +58,32 @@ export function ManualAxisRow({
     if (selected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
 
+  /**
+   * プリセットは位置定数に定義された状態名からしか作らない。自由入力を許さないことで
+   * 「定義した状態以外を送れない」保証が残る。
+   *
+   * **置き場所は軸の性格で変わる。** 連続軸ではジョグ・絶対値入力の下の段だが、
+   * プリセットしか持たない軸 (電磁弁・ポンプ・壁) では見出しと同じ行へ入れて
+   * 1 軸 1 行に収める —— 2 行のままだと電磁弁 6 + ポンプ 2 で 16 行になり、
+   * 連続軸の下に隠れて画面外へ出る。
+   */
+  const presetButtons =
+    axis.positions.length === 0 ? null : (
+      <div className="flex flex-wrap items-center gap-1">
+        {axis.positions.map((position) => (
+          <Button
+            key={position}
+            disabled={disabled}
+            onClick={() => onMove(axis.name, position)}
+            aria-label={`${axis.name} を ${position} へ`}
+          >
+            {position}
+          </Button>
+        ))}
+      </div>
+    );
+  const presetOnly = range === null;
+
   return (
     <div
       ref={rowRef}
@@ -70,7 +96,13 @@ export function ManualAxisRow({
       onPointerDown={onSelect}
       onFocusCapture={onSelect}
     >
-      <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <div
+        className={cx(
+          "flex min-w-0 flex-wrap gap-x-3 gap-y-0.5",
+          // ボタンを同じ行へ入れるので、そのときだけ縦中央で揃える
+          presetOnly ? "items-center" : "items-baseline",
+        )}
+      >
         <span className="min-w-0 shrink-0 font-medium">{axis.name}</span>
         {/* 実体が軸名と同じ単一モータ軸では出さない。同じ語を 2 度描くだけで、
             「同じ事実を 2 度描かない」原則にも反する */}
@@ -81,6 +113,8 @@ export function ManualAxisRow({
         )}
 
         <SyncIndicator axis={axis} />
+
+        {presetOnly ? presetButtons : null}
 
         <span className="ml-auto flex shrink-0 items-baseline gap-3 font-mono tabular-nums">
           <span className="text-[1.15em] font-medium">
@@ -112,22 +146,7 @@ export function ManualAxisRow({
         />
       ) : null}
 
-      {axis.positions.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1">
-          {/* プリセットは位置定数に定義された状態名からしか作らない。
-              自由入力を許さないことで「定義した状態以外を送れない」保証が残る */}
-          {axis.positions.map((position) => (
-            <Button
-              key={position}
-              disabled={disabled}
-              onClick={() => onMove(axis.name, position)}
-              aria-label={`${axis.name} を ${position} へ`}
-            >
-              {position}
-            </Button>
-          ))}
-        </div>
-      ) : null}
+      {presetOnly ? null : presetButtons}
     </div>
   );
 }
