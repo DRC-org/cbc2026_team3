@@ -260,12 +260,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
      * 起きるか」を答える面**だから。かつてはここが空で、機体状態 1 枚が全幅へ
      * 広がっていた (操縦者は準備中に手順を確認する手段を画面から持たなかった)。
      */
+    // 機体状態はどちらの列に来ても同じもの (常に展開)。位置だけが入れ替わる
+    const openSubsystemPanel = subsystemPanel(true, "min-h-0");
     return (
       <Page className="flex flex-col">
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
-          {inManual ? manualPanel : subsystemPanel(true, "min-h-0")}
-          {inManual ? subsystemPanel(true, "min-h-0") : stepPanel}
+          {inManual ? manualPanel : openSubsystemPanel}
+          {inManual ? openSubsystemPanel : stepPanel}
         </div>
       </Page>
     );
