@@ -12,6 +12,8 @@
 | 罠 | 症状 | 守っているテスト |
 |---|---|---|
 | daisyUI のクラスを片方だけ書く | DOM には居るのに**何も見えない** | `lib/daisyPairs.test.tsx` / `ui/Modal.test.tsx` |
+| コンテナクエリを `@[…]:` で書く | 一部のクラスだけ CSS が出て、残りが黙って落ちる | （無し。CSS を目で確かめる） |
+| `scrollIntoView` をテストごとに stub する | 次に自動スクロールを足した部品のテストだけが落ちる | `test/setup.ts` が 1 箇所で埋める |
 | クラス名を実行時に組み立てる | CSS ごと出力されず色が付かない | `lib/daisyPairs.test.tsx` |
 | grid の `self-start` を flex-col へ書き写す | パネルが 157px に潰れ、隣は 424px に膨らんで画面外へ | `pages/RobotControl.test.tsx` |
 | `shrink-0` を付け忘れる | 異常時に展開した瞬間、試合時間の数字に文字が重なる | `pages/RobotControl.test.tsx` |
@@ -62,6 +64,24 @@ daisyUI のコンポーネントは「親クラス + 修飾子」が揃って初
 特に `:disabled` は既定が「地 base-content 10% / 文字 20%」で、`⊘ 準備中` `RUNNING` `✓ DONE` の
 ように**状態表示を兼ねる無効ボタン**が読めなくなる（`ui/Button.tsx` の `DISABLED_CLASS` で
 上書き済み）。配色を変えたら実機描画で確認する。
+
+### コンテナクエリの任意値は `@min-[…]:`（v4）
+
+Tailwind v4 のコアでは `@min-[32rem]:` / `@max-[32rem]:`。v3 プラグインの書式 `@[32rem]:` は
+**一部のユーティリティだけ CSS が出て、残りが黙って落ちる**。
+
+```tsx
+<div className="@[32rem]:flex-row @[32rem]:block">      {/* ✗ block だけ出力され flex-row は消えた */}
+<div className="@min-[32rem]:flex-row">                  {/* ○ */}
+```
+
+コンテナクエリが効かないときは、まず**ビルド後の CSS に自分のクラスが出ているか**を見る
+（`grep '@container (width' dist/assets/*.css`）。要素の `container-type` と幅は
+DevTools で確かめられるが、**出力されていないクラスは DevTools にも現れない**ので、
+「条件は満たしているのに効かない」に見える。
+
+**幅を変える指定と `display` を混ぜない。** `@min-[…]:block` を名前列へ付けたとき、
+内側の flex（名前とバッジを両端へ振る）が潰れて 2 段に落ちた —— 1 行化した意味が消える。
 
 ### サイズ修飾子は font-size まで固定する
 
@@ -170,6 +190,12 @@ oxfmt の対象外）。両側が自分のサンプルを持つと、契約が�
 
 ヘルパは `test/robotContext.tsx`（Provider でくるむ）/ `test/mockWebSocket.ts` /
 `test/motorState.ts`。テスト本体は**対象ソースの隣**に `*.test.ts(x)`。
+
+**jsdom に無い API は `test/setup.ts` が 1 箇所で埋める。** `scrollIntoView` は jsdom に
+存在せず、現在地を画面内へ送る部品（`SequenceStepList` / `ChecklistItems` /
+`ManualAxisRow`）が呼ぶ。テストごとに stub していた頃は 3 通りの対処が混在し（個別 stub /
+オプショナル呼び出し / 未対処）、**自動スクロールを足した部品のテストだけが「関数ではない」で
+落ちて、原因が部品側にあるように見えた**。
 
 ---
 

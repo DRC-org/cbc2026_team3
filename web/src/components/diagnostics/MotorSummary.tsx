@@ -22,8 +22,11 @@ export function MotorSummary({ motors, healthMotors, tempThresholds = null }: Mo
   // 判定は healthVerdict に一本化してある。ここに条件を書き足さないこと
   const verdict = summarizeMotors(healthMotors);
 
+  // **行の形は「誰が呼んだか」ではなく実際の幅で決める。** 操縦者の右カラム (310px) と
+  // Monitor の 1 機ぶん (670px) で同じ部品が使われるので、props で切り替えると
+  // 呼び出し元がレイアウトの都合を知ることになる
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1">
+    <div className="@container flex min-h-0 flex-1 flex-col gap-1">
       <div className="flex shrink-0 items-center justify-between gap-2">
         <span className="text-base-content/70">{total} 基</span>
         <StatusBadge tone={verdict.tone}>{verdict.label}</StatusBadge>

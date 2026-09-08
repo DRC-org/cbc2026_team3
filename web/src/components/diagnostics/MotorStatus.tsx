@@ -79,6 +79,23 @@ function commandText(value: number, mode: string | null): string {
 /** 4 値の桁位置をモータ間で揃えるためのグリッド。ヘッダーと値行で共有する */
 const STAT_GRID_CLASS = "grid grid-cols-4 gap-1 px-1 text-right";
 
+/**
+ * 1 行表示に切り替わる幅と、そのときの名前列。**見出しと値行が対で使う。**
+ *
+ * 狭いカラム (操縦者の右レール 310px / Monitor 準備中の右カラム 400px) では
+ * 名前が "sub_arm_j..." まで削られ、1 行に畳むと数値まで truncate される。
+ * そこは従来どおり名前を独立した行に出す。広い側 (Monitor 試合中の 1 機ぶん
+ * 645px) で 2 行のままだと、24 基のうち 2 基しか画面に入らない —— 展開して
+ * いるのに中身が読めない状態になっていた。
+ *
+ * **Tailwind v4 の任意コンテナクエリは `@min-[…]:`。** v3 プラグインの
+ * `@[…]:` は一部のユーティリティだけ CSS が出て残りが黙って落ちる
+ * (`@[26rem]:block` は効いたのに `@[26rem]:flex-row` が出力されなかった)。
+ */
+// **幅だけを指定する。** `display` を足すと、名前とバッジを両端へ振っている
+// 内側の flex が潰れて 2 段に落ちる (1 行化した意味が消える)
+const NAME_COL_CLASS = "@min-[32rem]:w-[11rem]";
+
 const STAT_LABELS = ["POS", "VEL", "TRQ", "TMP"];
 
 /**
@@ -88,10 +105,15 @@ const STAT_LABELS = ["POS", "VEL", "TRQ", "TMP"];
  */
 export function MotorStatHeader({ className }: { className?: string }) {
   return (
-    <div className={cx(STAT_GRID_CLASS, "text-[0.8em] text-base-content/60", className)}>
-      {STAT_LABELS.map((label) => (
-        <span key={label}>{label}</span>
-      ))}
+    <div className={cx("flex text-[0.8em] text-base-content/60", className)}>
+      {/* 1 行表示のときだけ名前列ぶんを空ける。幅は MotorStatus の名前列と対で、
+          ずらすと見出しと数値の桁がすれる */}
+      <span className={cx("hidden shrink-0", NAME_COL_CLASS)} aria-hidden />
+      <div className={cx(STAT_GRID_CLASS, "min-w-0 flex-1")}>
+        {STAT_LABELS.map((label) => (
+          <span key={label}>{label}</span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -174,23 +196,38 @@ export function MotorStatus({
   // 温度だけは色分けにも使うので、読み取りを 1 度で済ませる
   const temp = readMeasured(state.temp);
 
-  // モータ名と数値を同じ行に並べると、サイドカラム幅ではモータ名が "li..." まで
-  // 削られて識別できなくなる。名前を独立した行に出して常に読めるようにする
+  // 狭いカラムでは名前を独立した行に出す (横に並べると "sub_arm_j..." まで削られる)。
+  // 広いカラムでは 1 行に畳む —— 2 行のままだと 1 画面に 2 基しか入らない
   return (
-    <div className={cx("flex flex-col py-[0.15rem]", className)}>
-      <div className="flex min-w-0 items-center justify-between gap-2 px-1">
+    <div
+      className={cx(
+        "flex flex-col py-[0.15rem] @min-[32rem]:flex-row @min-[32rem]:items-center",
+        className,
+      )}
+    >
+      <div
+        className={cx(
+          "flex min-w-0 items-center justify-between gap-2 px-1 @min-[32rem]:shrink-0 @min-[32rem]:justify-start",
+          NAME_COL_CLASS,
+        )}
+      >
         <span className="min-w-0 truncate font-medium">{name}</span>
         {health ? (
           <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
             <StatusBadge tone={HEALTH_TONE[health.state]}>{health.state.toUpperCase()}</StatusBadge>
-            <span className="text-[0.8em] text-base-content/60">
-              {formatAge(health.feedback_age_ms)}
-            </span>
+            {/* **鮮度は異常なときだけ出す。** 平常時に全基へ「0ms 前」を並べると、
+                24 基ぶんの同じ文字列が画面で最も目立つ要素になる。STALE の判定は
+                サーバーが持っていて状態バッジに出るので、平常時は言わなくてよい */}
+            {health.state === "ok" ? null : (
+              <span className="text-[0.8em] text-base-content/60">
+                {formatAge(health.feedback_age_ms)}
+              </span>
+            )}
           </span>
         ) : null}
       </div>
       {/* 見出しは MotorStatHeader が一覧に 1 行だけ出す。同じグリッドを使って桁位置を揃える */}
-      <div className={STAT_GRID_CLASS}>
+      <div className={cx(STAT_GRID_CLASS, "min-w-0 @min-[32rem]:flex-1")}>
         {/* 指令値を出すのは POS 欄だけ。速度も電流も温度も PC は指令していないので、
             測れない残り 3 欄は常に「—」のまま (埋めると「測ったように見える値」になる) */}
         <PositionCell state={state} />

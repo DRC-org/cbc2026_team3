@@ -109,7 +109,6 @@ export function RobotStatusRow({
           sensors={state.sensors}
           connected={connected}
           tempThresholds={tempThresholds}
-          defaultOpen
         />
       </div>
     </Panel>

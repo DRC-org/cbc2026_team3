@@ -2,8 +2,9 @@ import { act, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MatchTimer, formatRemaining } from "@/components/operator/MatchTimer";
+import { MatchTimer } from "@/components/operator/MatchTimer";
 import type { MatchTimer as MatchTimerValue } from "@/lib/protocol";
+import { formatRemaining } from "@/lib/time";
 
 /**
  * タイマーは「全デバイスで同じ値が出る」ことが存在理由なので、ここでは表示より先に
@@ -147,7 +148,7 @@ describe("MatchTimer", () => {
     rerender(<MatchTimer timer={{ ...frozen }} />);
 
     expect(displayed(container)).toBe("0:30");
-    expect(screen.getByText("試合終了時点の残り")).toBeInTheDocument();
+    expect(screen.getByText("試合終了時点")).toBeInTheDocument();
   });
 
   it("開始前は満了時間を出し、終了後と文言で区別する", () => {
@@ -157,7 +158,7 @@ describe("MatchTimer", () => {
   });
 
   /**
-   * 停止中の 2 つの caption は legend「試合時間」からは読めない別の事実なので消せない
+   * 停止中の 2 つの caption は legend「残り時間」からは読めない別の事実なので消せない
    * (同じ 0:30 でも「まだ始まっていない」のか「その残りを抱えて終わった」のかで意味が
    * 正反対になる)。一方、進行中の数字が残り時間であることは legend がもう言っている。
    */
@@ -171,7 +172,7 @@ describe("MatchTimer", () => {
     expect(captions()).toHaveLength(0);
 
     rerender(<MatchTimer timer={timerValue({ running: false, elapsed_ms: 150_000 })} />);
-    expect(captions().map((el) => el.textContent)).toEqual(["試合終了時点の残り"]);
+    expect(captions().map((el) => el.textContent)).toEqual(["試合終了時点"]);
   });
 
   it("タイマーが読めなければ数字を出さず、読めていないことを言う", () => {

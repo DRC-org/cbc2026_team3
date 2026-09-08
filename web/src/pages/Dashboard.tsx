@@ -74,7 +74,7 @@ export function Dashboard() {
   }
 
   return (
-    <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]">
+    <Page className="grid grid-cols-2 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="col-span-full">
         <MatchStrip />
       </div>
@@ -90,9 +90,12 @@ export function Dashboard() {
       ))}
 
       {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
-            Monitor は起きたことを拾う役なので、履歴を画面に残す */}
-      <div className="col-span-full min-h-0">
-        <Panel legend="イベント" className="h-full" bodyClassName="p-0">
+            Monitor は起きたことを拾う役なので、履歴を画面に残す。
+            **高さは中身で決める。** 固定比率 (0.42fr) で置いていた頃は、
+            「異常イベントはありません」の 1 行のために画面の 42% を空けたまま、
+            上の機体状態は展開してもモータが 1 基も見えない状態になっていた */}
+      <div className="col-span-full max-h-[40%] min-h-0">
+        <Panel legend="イベント" className="max-h-full" bodyClassName="p-0">
           <EventFeed />
         </Panel>
       </div>

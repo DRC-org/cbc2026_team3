@@ -149,6 +149,7 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 | `lib/phase.ts` | フェーズによる可否・レイアウト区分。`isDuringMatch()` は `lib/match_state.py` の `PHASES_DURING_MATCH` の写しで、**写しはここだけ** |
 | `lib/checklistGroups.ts` | 指差喚呼の項目をどの区分へ置くか |
 | `lib/syncVerdict.ts` | 左右ペア軸のずれ表示 |
+| `hooks/useRemainingMs.ts` | 試合の残り時間（アンカーと秒境界の起床）。操縦者の `MatchTimer` と Monitor の `MatchStrip` が同じ値を出す |
 
 ### `evaluateHealth` の判定順
 

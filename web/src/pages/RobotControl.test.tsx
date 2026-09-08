@@ -1,6 +1,6 @@
 import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type {
   ManualState,
@@ -12,12 +12,6 @@ import type {
 import { RobotControl } from "@/pages/RobotControl";
 import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
-
-// ステップ一覧は現在地を画面内へ送るために scrollIntoView を呼ぶが、jsdom は
-// これを実装していない。表示位置の追従はここでの検証対象ではないので潰す
-beforeAll(() => {
-  Element.prototype.scrollIntoView = () => {};
-});
 
 const STEPS: SequenceStepInfo[] = [
   { index: 0, label: "初期位置へ移動", require_trigger: false },
@@ -109,7 +103,7 @@ describe("試合時間タイマーの配置", () => {
 
     // 進行中は caption を出さない (数字が残り時間であることは legend から読める)。
     // ここが見たいのは配置なので、時刻の値そのものがパネルの中にあることで確かめる
-    const panel = screen.getByText("試合時間").closest("section");
+    const panel = screen.getByText("残り時間").closest("section");
     expect(panel).not.toBeNull();
     expect(within(panel as HTMLElement).getByText("2:00")).toBeInTheDocument();
   });
@@ -119,7 +113,7 @@ describe("試合時間タイマーの配置", () => {
     // 置くと、答えるべき問いが 1 つ増える
     mount("setup", robotState(), { running: false, elapsed_ms: 0, duration_ms: 180_000 });
 
-    expect(screen.queryByText("試合時間")).not.toBeInTheDocument();
+    expect(screen.queryByText("残り時間")).not.toBeInTheDocument();
   });
 });
 
@@ -144,7 +138,7 @@ describe("試合中の右カラム", () => {
     for (const timer of TIMERS) {
       const view = mount("match", robotState(), timer);
 
-      const column = screen.getByText("試合時間").closest("section")?.parentElement;
+      const column = screen.getByText("残り時間").closest("section")?.parentElement;
       expect(column?.className).toContain("flex-col");
 
       const panels = Array.from(column?.children ?? []);
@@ -194,7 +188,7 @@ describe("試合中の右カラム", () => {
     );
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
 
-    const timerPanel = screen.getByText("試合時間").closest("section");
+    const timerPanel = screen.getByText("残り時間").closest("section");
     const statusPanel = screen.getByText("機体状態").closest("section");
 
     expect(timerPanel?.classList.contains("shrink-0")).toBe(true);

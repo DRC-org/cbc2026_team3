@@ -22,9 +22,14 @@ interface Blocker {
 /**
  * 開始を止めない「開始前に見るべきこと」。1 機が 2 件以上出しうるので、
  * 表示キーはラベル (機体名) ではなく発生源ごとに分けて持つ。
+ *
+ * **`tone` は `evaluateHealth` の判定をそのまま運ぶ。** ここで「要確認」へ丸めると、
+ * 同じ無励磁に対してタブの LED は「異常あり」(error)、この画面は「要確認」と
+ * 呼ぶ状態になる —— 操縦者は 2 つの画面を見比べてどちらが本当か分からなくなる。
  */
 interface Warning extends Blocker {
   key: string;
+  tone: Tone;
 }
 
 const ROLE_LABEL: Record<string, string> = {
@@ -92,12 +97,13 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   // 警告ひとつで試合そのものを始められなくなる。判断は操縦者に残し、見落としだけ防ぐ
   const warnings = ROBOTS.flatMap(({ key, label }): Warning[] => {
     const robot = states[key];
-    if (!robot) return [{ key: `${key}:missing`, label, detail: "データ未受信" }];
+    // 配信が 1 通も無いのは「軽微な確認事項」ではない。判定できない = 異常側
+    if (!robot) return [{ key: `${key}:missing`, label, detail: "データ未受信", tone: "error" }];
 
     const items: Warning[] = [];
     const verdict = evaluateHealth(robot.health, robot.safety, connected);
     if (verdict.tone !== "success") {
-      items.push({ key: `${key}:health`, label, detail: verdict.label });
+      items.push({ key: `${key}:health`, label, detail: verdict.label, tone: verdict.tone });
     }
     // 手動操縦は健全性ではないので evaluateHealth へは足さない (あちらは
     // `lib/healthVerdict.ts` の 1 箇所だけが持つ機体の健全性判定)。ここへ別項目として
@@ -112,15 +118,25 @@ export function StartGate({ onStart }: { onStart: () => void }) {
         key: `${key}:manual`,
         label,
         detail: "手動操縦中 — 半自動へ戻すまで START が拒否されます",
+        tone: "warning",
       });
     }
     return items;
   });
 
   const ready = canStart && connected && phase !== "finished";
+  // 異常が 1 件でもあれば異常側。**件数ではなく重さで決める** —— 手動操縦中 (warning) が
+  // 1 件あるだけで帯を赤くすると、本物の異常と同じ色になる
+  const hasError = warnings.some((w) => w.tone === "error");
   // 帯の色は TONE_BORDER_L_CLASS が唯一の出どころ (Panel が引く)。ここで
   // `border-l-[0.4rem] border-l-*` を三項で組み立てると、色の規則が 2 つになる
-  const accentTone: Tone = !ready ? "warning" : warnings.length > 0 ? "error" : "success";
+  const accentTone: Tone = !ready
+    ? "warning"
+    : hasError
+      ? "error"
+      : warnings.length > 0
+        ? "warning"
+        : "success";
 
   // 開始できない状況へ変わったら武装を解く。武装は押した瞬間の状況に紐づいており、
   // 通信が切れた・チェックリストが外れた後の 1 回目を 2 回目として扱ってはならない
@@ -151,7 +167,9 @@ export function StartGate({ onStart }: { onStart: () => void }) {
             <span className="text-base-content/70">
               {warnings.length === 0
                 ? "全ての指差喚呼が完了しています。周囲の安全を確認して開始してください。"
-                : "指差喚呼は完了していますが、機体に要確認があります。"}
+                : hasError
+                  ? "指差喚呼は完了していますが、機体に異常があります。"
+                  : "指差喚呼は完了していますが、機体に要確認があります。"}
             </span>
           ) : (
             <ul className="flex flex-col gap-[0.15rem]">
@@ -170,7 +188,10 @@ export function StartGate({ onStart }: { onStart: () => void }) {
             <ul className="flex flex-col gap-[0.15rem]">
               {warnings.map((w) => (
                 <li key={w.key} className="flex min-w-0 items-baseline gap-2">
-                  <Icon as={TriangleAlert} className="translate-y-[0.15em] text-error" />
+                  <Icon
+                    as={TriangleAlert}
+                    className={cx("translate-y-[0.15em]", TONE_TEXT_CLASS[w.tone])}
+                  />
                   <span className="shrink-0 font-medium">{w.label}</span>
                   <span className="min-w-0 truncate text-base-content/70">{w.detail}</span>
                 </li>

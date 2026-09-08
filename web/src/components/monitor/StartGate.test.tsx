@@ -158,7 +158,10 @@ describe("StartGate", () => {
     });
 
     expect(screen.getByText(/CAN 停止 can_edulite/)).toBeInTheDocument();
-    expect(screen.getByText(/機体に要確認があります/)).toBeInTheDocument();
+    // **語彙はタブの LED と揃える。** 同じ CAN 停止に対して、タブは `evaluateHealth` の
+    // tone がそのまま出て「異常あり」、この画面だけが「要確認」と呼んでいた ——
+    // 2 つの画面を見比べた操縦者は、どちらが本当か判断できない
+    expect(screen.getByText(/機体に異常があります/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "試合を開始する" })).toBeEnabled();
   });
 });
