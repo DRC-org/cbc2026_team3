@@ -183,9 +183,9 @@ class TestHomingComesFirst:
         table = _shipped_table()
         homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
 
-        # 出荷 config では rotate (EDULITE) と sub_y_axis (DM3520) の 2 本。
-        # y_axis は極性が、sub_lift は探索パラメータが未実測なので homing: を書いていない
-        assert homing_axes == ["rotate", "sub_y_axis"]
+        # 出荷 config では rotate (EDULITE) と サブハンド直動 2 軸 (DM3520)。
+        # y_axis だけは極性が未実測なので homing: を書いていない
+        assert homing_axes == ["rotate", "sub_y_axis", "sub_lift"]
 
 
 class TestStepShape:
