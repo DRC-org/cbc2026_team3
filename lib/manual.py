@@ -255,7 +255,11 @@ class ManualController:
         持っている。ここでモータ 1 台ずつ ``MotorHandle.set_target`` を呼ぶと、
         送信の時間差ぶんだけ機構がねじれる。
         """
-        handle = AxisHandle(spec, [getattr(self._motors, name) for name in spec.motor_names])
+        handle = AxisHandle(
+            spec,
+            [getattr(self._motors, name) for name in spec.motor_names],
+            sensor_active=self._motors.sensor_active,
+        )
         await handle.set_target_value(commands)
 
     def _feedback_positions(self, spec: AxisSpec) -> dict[str, float]:

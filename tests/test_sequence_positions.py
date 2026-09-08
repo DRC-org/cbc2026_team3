@@ -1007,3 +1007,91 @@ class TestMotionSpec:
         )
 
         assert table.axis("y_axis").motion is not None
+
+
+class TestMotionGuardSpec:
+    """指令を出す直前の歯止めの宣言 (axes.<軸>.guard)。
+
+    判断そのものは ``lib/motion_guard.py`` が持つ (``tests/test_motion_guard.py``)。
+    ここが見るのは「yaml をそのまま宣言へ運べているか」と、
+    **書かなかった軸が今までどおり素通りすること**だけ。
+    """
+
+    def _axis(self, *, guard: object, **extra: object) -> dict:
+        return {
+            "axes": {
+                "sub_y_axis": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": 1.0668451,
+                    "guard": guard,
+                    **extra,
+                }
+            },
+            "positions": {"sub_y_axis": {"home": 0.0, "extended": 10.0}},
+        }
+
+    def test_guard_を書かない軸は素通り(self) -> None:
+        """既定値で埋めない。埋めると「効いている値か書き忘れか」が読めなくなる。"""
+        assert _table().axis("lift_motor").guard is None
+
+    def test_値がそのまま_MotionGuardSpec_へ届く(self) -> None:
+        table = load_position_table(
+            self._axis(
+                guard={
+                    "limits": {"plus": "front_switch", "minus": "rear_switch"},
+                    "max_step": 800.0,
+                    "stall_torque": 2.0,
+                }
+            ),
+            source="<test>",
+        )
+        guard = table.axis("sub_y_axis").guard
+
+        assert guard is not None
+        assert guard.limits is not None
+        assert guard.limits.plus == "front_switch"
+        assert guard.limits.minus == "rear_switch"
+        assert guard.max_step == pytest.approx(800.0)
+        assert guard.stall_torque == pytest.approx(2.0)
+
+    def test_片端だけの宣言も通る(self) -> None:
+        """片端にしかスイッチが無い機構は普通にある。書かなかった端は守られない。"""
+        table = load_position_table(
+            self._axis(guard={"limits": {"plus": "front_switch"}}), source="<test>"
+        )
+        guard = table.axis("sub_y_axis").guard
+
+        assert guard is not None
+        assert guard.limits is not None
+        assert guard.limits.plus == "front_switch"
+        assert guard.limits.minus is None
+        assert guard.max_step is None
+        assert guard.stall_torque is None
+
+    def test_未知のキーを拒否する(self) -> None:
+        with pytest.raises(ValueError, match="max_stepp"):
+            load_position_table(self._axis(guard={"max_stepp": 800.0}))
+
+    def test_limits_の未知のキーを拒否する(self) -> None:
+        """`plus` / `minus` 以外を黙って捨てると、綴り違いが「守っていない端」になる。"""
+        with pytest.raises(ValueError, match="up"):
+            load_position_table(self._axis(guard={"limits": {"up": "front_switch"}}))
+
+    def test_非正の_max_step_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="max_step"):
+            load_position_table(self._axis(guard={"max_step": 0.0}))
+
+    def test_非正の_stall_torque_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="stall_torque"):
+            load_position_table(self._axis(guard={"stall_torque": -1.0}))
+
+    def test_位置指令でない軸には書けない(self) -> None:
+        """duty 軸は位置を観測できないので、現在位置が常に 0 として読める。
+
+        書けてしまうと「守っているように見えて 1 度も判定していない」設定が通る。
+        """
+        with pytest.raises(ValueError, match="guard は位置指令の軸にのみ"):
+            load_position_table(
+                self._axis(guard={"max_step": 1.0}, command_mode="duty"),
+            )

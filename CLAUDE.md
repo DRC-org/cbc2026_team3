@@ -210,6 +210,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 
 - `lib/` — 共通ライブラリ（両ロボットで共有）
   - `axis_sync.py` — 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。最下位層で、上位を import しない
+  - `motion_guard.py` — 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層
   - `can_manager.py` — SocketCAN 複数バス管理。受信ループが 1 通を `_dispatch_frame` へ渡し、モータの `matches_feedback` で振り分ける（失敗の封じ込め粒度はモータ 1 台）
   - `commands.py` — WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ）の単一情報源
   - `config_schema.py` — yaml の検証付き読み込み。しきい値の既定値もここだけが持つ
@@ -274,7 +275,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`match` |
 | `config/can_buses.yaml` | CAN バス定義の単一情報源。udev ルールとセットアップスクリプトの双方がここから生成・参照する |
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
-| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
+| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`)・指令の歯止め (`guard`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
 | `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `main_hand/` = **サブハンド不在**（Damiao DM3520 用 CANable 未接続）**でメインハンド実機を動かす構成**（メインハンド実機が完成したため、機構未装着の机上ベンチから役割が変わった。このセットだけ robot yaml / positions を持たず本番の `config/main_hand.yaml` / `config/main_hand_positions.yaml` をそのまま使う。CANable 3 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台 / `sub_hand_homing/` = **サブハンド直動 2 軸 + リミットスイッチ**（零点確定の実機確認用。**DC 基板を登録しないので物理非常停止が効かない** —— `REF` が押されっぱなしで本番 config が起動直後に緊急停止へ落ちる間の退避路であり、直ったら使わない） / `y_axis_tuning/` = y_axis の PID 実機チューニング用）。`--system` / `--config` / `--checklist` で差し替える。9 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる）。**本番 config をそのまま使うセット（現在は `main_hand/` のみ）は `_BENCH_USES_PRODUCTION_CONFIG` に宣言させる**（黙って検証を素通りさせず、他のセットで誤って config を消したときに検出できるようにするため） |
 
@@ -533,6 +534,22 @@ C620 の電流指令フレーム（`0x200`）は 1 通に 4 モータ分のス�
 「ずれているのに止まらない」のどちらかになり、しかも片方の層だけが壊れるので気付けない。
 `lib/axis_sync.py` は最下位層なので上位モジュールを import してはならず、層ごとの差とその理由は
 同モジュールの docstring に集約してある。
+
+**可動端のインターロックは `AxisHandle.set_target_value` 1 箇所で効かせる。**
+手動操縦・シーケンス（`move_to`）・零点確定の 3 経路がすべてそこを通るので、判断を
+層ごとに書き写すと**片方だけ緩んだ状態が作れる**（左右ペアの偏差判定を
+`SyncGroup.violation()` へ一本化しているのと同じ理由）。宣言は位置定数 yaml の
+`axes.<軸>.guard`（`limits.plus` / `limits.minus` / `max_step` / `stall_torque`）で、
+**書かなかった軸は今までどおり素通り**（既定値で埋めない）。守るのは 2026-09-09 に実機で
+踏んだ 4 つ —— 押されている端へ進む指令の拒否 / **離れる向きは必ず通す**（塞ぐと端に
+張り付いた軸を手動でも戻せず、零点確定の離脱段も成立しない）/ 桁の違う目標の拒否
+（`p_max` の食い違いで位置が 80 倍に読めた）/ トルクの立ち上がり。
+**`None`（読めていない）を `False`（押されていない）へ丸めてはならない** —— 丸めると
+配線が抜けたセンサが「進んでよい」に化ける。センサ状態は `MotorGroup` の
+`sensor_active`（三値）として `main._make_sensor_reader` が注入し、未登録・途絶は
+どちらも `None` を返す。**トルクは「動く指令」にしか掛けない** —— 実測位置と同じ値を
+送り直す指令（接触を検出した瞬間の「その場で止まれ」）まで塞ぐと、押し込む向きの
+古い目標が生き残る。
 
 **保護は止めるだけで、駆動中にずれを縮めるのは `sync_kp`（同期補正）だけである。**
 位置制御はモータごとに独立した PID なので、左右で負荷や摩擦が違えば追従差は原理的に残る。

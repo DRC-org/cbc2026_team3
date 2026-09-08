@@ -718,3 +718,62 @@ class TestShippedChecklists:
                 duplicated[role] = dups
 
         assert duplicated == {}
+
+
+class TestShippedMotionGuard:
+    """`axes.<軸>.guard` が同梱 config の中で閉じていること。
+
+    可動端インターロックはセンサ名の文字列でしか繋がっていない。綴りを間違えても
+    yaml は読めてしまい、症状は「その端では止まらない」— つまり**機構を壊すまで
+    出ない**。本番と机上ベンチ (config/bench/<対象>/) の全セットを見る。
+    """
+
+    def _sensor_names(self, positions_path: pathlib.Path) -> set[str]:
+        robot_path = positions_path.with_name(
+            positions_path.name.removesuffix("_positions.yaml") + ".yaml"
+        )
+        if not robot_path.exists():
+            # 本番 config をそのまま使うベンチセット (config/bench/main_hand)
+            robot_path = _CONFIG_DIR / robot_path.name
+        return set((yaml.safe_load(robot_path.read_text()) or {}).get("sensors") or {})
+
+    def test_guard_のセンサ名が_sensors_に登録されている(self) -> None:
+        """未登録の名前は三値の `None` (読めていない) にしかならない。
+
+        安全側 (止まる) には倒れるが、**その軸は 1 歩も動かせなくなる**ので
+        綴り違いは起動前に潰す。
+        """
+        missing: dict[str, set[str]] = {}
+
+        for positions_path in sorted(_CONFIG_DIR.rglob("*_positions.yaml")):
+            table = load_position_table(
+                yaml.safe_load(positions_path.read_text()), source=positions_path.name
+            )
+            registered = self._sensor_names(positions_path)
+            required: set[str] = set()
+            for axis in table.axes:
+                guard = table.axis(axis).guard
+                if guard is None or guard.limits is None:
+                    continue
+                required |= {
+                    name for name in (guard.limits.plus, guard.limits.minus) if name is not None
+                }
+            if required - registered:
+                missing[str(positions_path)] = required - registered
+
+        assert missing == {}
+
+    def test_本番とベンチの_guard_が一致する(self) -> None:
+        """**歯止めは対である。片方だけ動かしてはならない。**
+
+        ベンチ側だけ緩めると、本番では止まる構成がベンチでだけ端を踏み越える
+        (`homing.search_distance` を対で持たせているのと同じ理由)。
+        """
+        for name in ("sub_hand_positions.yaml",):
+            production = _load_shipped(name)
+            bench = load_position_table(
+                yaml.safe_load((_CONFIG_DIR / "bench" / "sub_hand_homing" / name).read_text()),
+                source=name,
+            )
+            for axis in sorted(set(production.axes) & set(bench.axes)):
+                assert production.axis(axis).guard == bench.axis(axis).guard, axis

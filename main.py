@@ -417,7 +417,11 @@ def _wire_motor_check_sequence(
         )
         return
 
-    motors = MotorGroup()
+    # 統合動作確認も同じ歯止めを通す。センサ名はロボット横断に一意なので、
+    # 全 CANManager を横断した 1 つの読み口で両ハンドぶんに答えられる
+    motors = MotorGroup(
+        sensor_active=_make_sensor_reader(can_managers, feedback_timeout_ms=feedback_timeout_ms)
+    )
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
@@ -514,6 +518,34 @@ def _wire_motor_check_sequence(
         len(merged.axes),
         ", ".join(homing_axes) or "なし",
     )
+
+
+def _make_sensor_reader(
+    managers: list[CANManager], *, feedback_timeout_ms: float
+) -> Callable[[str], bool | None]:
+    """可動端インターロックが読むセンサ状態を組む。**三値を返す。**
+
+    `True` = 押されている / `False` = 押されていない / **`None` = 読めていない**。
+    最後の 1 つは「登録されていない」と「途絶している」の両方で返る。どちらも
+    `False` へ丸めてはならない —— 丸めた瞬間に、**配線が抜けたセンサが
+    「押されていない = 進んでよい」に化ける** (2026-09-09 の事故はスイッチが
+    1 スロットずれていて PC へ届いていなかった)。安全側は「止まる」である。
+
+    零点確定が使う `_sensor_active` (bool) と別物なのは意図的で、あちらは
+    「今 ON か」だけを問い、途絶は `_sensor_is_stale` が別に見る。
+    """
+    sensors = {name: sensor for mgr in managers for name, sensor in mgr.sensors.items()}
+    freshness = FeedbackFreshness(
+        _merged_last_feedback_at(managers), timeout_ms=feedback_timeout_ms
+    )
+
+    def sensor_active(name: str) -> bool | None:
+        sensor = sensors.get(name)
+        if sensor is None or freshness.is_stale(name, freshness.now()):
+            return None
+        return bool(getattr(sensor, "sensor_active", False))
+
+    return sensor_active
 
 
 def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
@@ -834,6 +866,7 @@ def _wire_robot_motors(
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
+    sensor_active: Callable[[str], bool | None],
 ) -> list[M3508PositionLoop]:
     """シーケンスにモータアクセス層を注入し、必要な位置制御ループを返す。"""
     loops = _build_position_loops(
@@ -856,6 +889,9 @@ def _wire_robot_motors(
             # 緊急停止インターロック: 停止中はシーケンスからの指令自体を拒否する
             is_estop_active=is_estop_active,
             target_sinks=target_sinks,
+            # 可動端インターロック: `guard:` を書いた軸が押されている端へ進むのを止める。
+            # 配線しないと三値の `None` (読めていない) しか返らず、その軸は 1 歩も動けない
+            sensor_active=sensor_active,
         )
     )
     return list(loops.values())
@@ -1218,6 +1254,9 @@ def _wire_one_robot(
         seq,
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         is_estop_active=is_estop_active,
+        sensor_active=_make_sensor_reader(
+            [can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms
+        ),
     )
 
     # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと

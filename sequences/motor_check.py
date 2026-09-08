@@ -136,7 +136,11 @@ class MotorCheckSequence(Sequence):
         for axis in targets:
             spec = table.axis(axis)
             logger.info("零点確定: %s", axis)
-            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
+            handle = AxisHandle(
+                spec,
+                [getattr(self.motors, name) for name in spec.motor_names],
+                sensor_active=self.motors.sensor_active,
+            )
             await self._homing.home(spec, handle)
 
     # ------------------------------------------------------------------ #

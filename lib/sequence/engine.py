@@ -283,7 +283,11 @@ class Sequence:
         for axis, position_name in targets.items():
             spec = table.axis(axis)
             # 未定義のモータ名は MotorGroup 側が利用可能な名前付きの例外にしてくれる
-            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
+            handle = AxisHandle(
+                spec,
+                [getattr(self.motors, name) for name in spec.motor_names],
+                sensor_active=self.motors.sensor_active,
+            )
             await handle.set_target_value(
                 table.commands(axis, position_name, court=self.court),
             )

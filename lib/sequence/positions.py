@@ -10,10 +10,15 @@ from lib.axis_sync import MotorSpec, SyncGroup
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
 
+# 可動端インターロック・跳躍量・トルクの判断は最下位層に閉じてある。ここは
+# 「宣言を yaml から読む」だけで、判断そのものは持たない
+from lib.motion_guard import LimitSpec, MotionGuardSpec
+
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
     "ManualSpec",
+    "MotionGuardSpec",
     "MotionSpec",
     "MotorSpec",
     "PositionLookupError",
@@ -266,6 +271,10 @@ class AxisSpec:
     homing: HomingSpec | None = None
     # 台形速度プロファイルの制限。None ならこの軸は従来どおり最終目標をステップで入れる
     motion: MotionSpec | None = None
+    # 指令を出す直前の歯止め (可動端インターロック・跳躍量・トルク)。
+    # None ならこの軸は今までどおり素通り。既定値で埋めないのは、埋めた値が
+    # 効いているのか書き忘れなのかがコードから読めなくなるため
+    guard: MotionGuardSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.motors:
@@ -282,6 +291,14 @@ class AxisSpec:
         if self.motion is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
+                f"(command_mode={self.command_mode.value})"
+            )
+        # 跳躍量も可動端も「実測位置と目標位置の差」で判断する。位置を観測できない
+        # 軸 (duty / on_off) では現在位置が常に 0 として読めてしまうので、書けると
+        # 「守っているように見えて 1 度も判定していない」設定が通る
+        if self.guard is not None and self.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"axes.{self.name}: guard は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
 
@@ -345,6 +362,7 @@ _AXIS_KEYS = frozenset(
         "manual",
         "homing",
         "motion",
+        "guard",
     }
 )
 
@@ -366,6 +384,10 @@ _HOMING_KEYS = frozenset(
 #: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
 #: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
 _HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
+
+_GUARD_KEYS = frozenset({"limits", "max_step", "stall_torque"})
+
+_GUARD_LIMIT_KEYS = frozenset({"plus", "minus"})
 
 _MOTION_KEYS = frozenset({"max_velocity", "max_acceleration", "velocity_ff"})
 #: 対で書かせるキー。片方だけでは台形プロファイルを組み立てられず、欠けたほうを
@@ -631,6 +653,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         manual=_parse_manual(name, raw.get("manual"), command_mode),
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
+        guard=_parse_guard(name, raw.get("guard")),
     )
 
 
@@ -773,6 +796,71 @@ def _parse_motion(axis_name: str, raw: object) -> MotionSpec | None:
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from exc
+
+
+def _parse_guard(axis_name: str, raw: object) -> MotionGuardSpec | None:
+    """指令を出す直前の歯止めを読む。**書かない軸は None (今までどおり素通り)。**
+
+    値の妥当性 (正の値か) は ``MotionGuardSpec.__post_init__`` が見る。ここで
+    見るのはキーの綴りと型だけ —— ``homing`` / ``motion`` と同じ作法。
+
+    **省略した項目は「その守りが無い」ことを意味する**ので既定値では埋めない。
+    埋めると、効いている値なのか書き忘れなのかが config から読めなくなる。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.guard は辞書である必要があります: {raw!r}")
+
+    unknown = sorted(set(raw) - _GUARD_KEYS)
+    if unknown:
+        raise ValueError(
+            f"axes.{axis_name}.guard に未知のキー: {', '.join(unknown)} "
+            f"(指定できるのは {', '.join(sorted(_GUARD_KEYS))})"
+        )
+
+    path = f"axes.{axis_name}.guard"
+    try:
+        return MotionGuardSpec(
+            limits=_parse_guard_limits(axis_name, raw.get("limits")),
+            max_step=(float(raw["max_step"]) if raw.get("max_step") is not None else None),
+            stall_torque=(
+                float(raw["stall_torque"]) if raw.get("stall_torque") is not None else None
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def _parse_guard_limits(axis_name: str, raw: object) -> LimitSpec | None:
+    """可動端のセンサ名を読む。**どちらの端も省略できる。**
+
+    片端にしかスイッチが無い機構は普通にあるので、書かなかった側はインターロックが
+    掛からない (= 守られていない端として残る)。**どちらが + でどちらが - かを
+    取り違えると守りが反転する**ので、名前は必ず実機で当てて確かめること。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.guard.limits は辞書である必要があります: {raw!r}")
+
+    unknown = sorted(set(raw) - _GUARD_LIMIT_KEYS)
+    if unknown:
+        raise ValueError(
+            f"axes.{axis_name}.guard.limits に未知のキー: {', '.join(unknown)} "
+            f"(指定できるのは {', '.join(sorted(_GUARD_LIMIT_KEYS))})"
+        )
+
+    names: dict[str, str | None] = {}
+    for key in ("plus", "minus"):
+        value = raw.get(key)
+        if value is None:
+            names[key] = None
+            continue
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"axes.{axis_name}.guard.limits.{key} はセンサ名の文字列: {value!r}")
+        names[key] = value
+    return LimitSpec(plus=names["plus"], minus=names["minus"])
 
 
 def _parse_command_mode(axis_name: str, raw: object) -> ControlMode:

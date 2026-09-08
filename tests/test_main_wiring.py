@@ -63,12 +63,13 @@ from main import (
     _load_all_configs,
     _load_checklist_definitions,
     _load_pid_config,
+    _make_sensor_reader,
     _wire_robot_motors,
 )
 from sequences.motor_check import MotorCheckSequence
 from tests.fake_can import deliver_frame, direct_runner, mark_feedback_at, mock_bus
 from tests.fake_clock import FakeClock
-from tests.feedback_frames import feed_m3508, generic_info
+from tests.feedback_frames import feed_generic, feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -98,6 +99,16 @@ class _StubCANManager:
 
 class _DummySequence(Sequence):
     pass
+
+
+def _no_sensors(_name: str) -> bool | None:
+    """センサを 1 本も持たない構成の読み口 (可動端インターロックの注入)。
+
+    `guard:` を書いた軸が 1 本も無い config でしか使わないので、返す値は
+    判定に現れない。**それでも `False` ではなく `None` を返す** —— 「読めていない」
+    が既定であることを、テスト側の書き方でも崩さないため。
+    """
+    return None
 
 
 def _robot(config: dict) -> RobotConfig:
@@ -360,6 +371,7 @@ class TestWireRobotMotors:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: estop_flag[0],
+            sensor_active=_no_sensors,
         )
         return config, manager, motors, seq, loops
 
@@ -441,6 +453,7 @@ class TestBuildManualController:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: estop_flag[0],
+            sensor_active=_no_sensors,
         )
         positions = load_position_table(
             {
@@ -522,6 +535,7 @@ class TestBuildTargetRefresher:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
+            sensor_active=_no_sensors,
         )
         return manager, motors, seq
 
@@ -550,6 +564,7 @@ class TestBuildTargetRefresher:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
+            sensor_active=_no_sensors,
         )
 
         assert (
@@ -2208,3 +2223,46 @@ class TestStartupSummaryLines:
 
         assert "main_hand 1 項目" in text
         assert "sub_hand 2 項目" in text
+
+
+class TestSensorReader:
+    """可動端インターロックが読むセンサ状態 (`_make_sensor_reader`)。**三値である。**
+
+    `True` / `False` / **`None` (読めていない)** を区別する。最後の 1 つは
+    「`sensors:` に居ない」と「フィードバックが途絶している」の両方で返り、
+    どちらも `False` へ丸めてはならない —— 丸めた瞬間に**配線が抜けたセンサが
+    「押されていない = 進んでよい」に化ける** (2026-09-09 の事故はスイッチが
+    1 スロットずれていて PC へ届いていなかった)。
+    """
+
+    def _manager(self, *, active: bool, age_ms: float = 0.0) -> _StubCANManager:
+        manager = _StubCANManager()
+        sensor = GenericDriver("front_switch", can_id=0x49)
+        feed_generic(sensor, sensor=active)
+        manager.sensors = {"front_switch": sensor}  # type: ignore[attr-defined]
+        manager.feedback_at["front_switch"] = time.time() - age_ms / 1000.0
+        return manager
+
+    def test_接触は_True_で返る(self) -> None:
+        read = _make_sensor_reader([self._manager(active=True)], feedback_timeout_ms=500.0)
+
+        assert read("front_switch") is True
+
+    def test_非接触は_False_で返る(self) -> None:
+        read = _make_sensor_reader([self._manager(active=False)], feedback_timeout_ms=500.0)
+
+        assert read("front_switch") is False
+
+    def test_未登録のセンサは_None(self) -> None:
+        """`sensors:` に居ない名前を「押されていない」と答えてはならない。"""
+        read = _make_sensor_reader([self._manager(active=False)], feedback_timeout_ms=500.0)
+
+        assert read("rear_switch") is None
+
+    def test_途絶したセンサは_None(self) -> None:
+        """届かなくなったセンサの最後の値を信じ続けると、抜けた配線が素通りする。"""
+        read = _make_sensor_reader(
+            [self._manager(active=False, age_ms=5000.0)], feedback_timeout_ms=500.0
+        )
+
+        assert read("front_switch") is None
