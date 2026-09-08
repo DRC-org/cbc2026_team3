@@ -311,5 +311,23 @@ def dm3520_feedback(
     )
 
 
+def dm3520_config_response(driver: Dm3520Driver, register: int, value: float) -> can.Message:
+    """レジスタ読み返し (0x7FF / CONFIG_READ) への応答。
+
+    **応答もフィードバックと同じ MST_ID で返る** (マニュアル「CAN Configuration
+    Commands」節)。実機の固定小数点レンジを知る唯一の口なので、`p_max` の
+    食い違いを扱うテストはこのフレームを実際に流して組み立てること。
+    """
+    data = bytes(
+        [
+            driver.can_id & 0xFF,
+            (driver.can_id >> 8) & 0xFF,
+            Dm3520Driver.CONFIG_READ,
+            register & 0xFF,
+        ]
+    ) + struct.pack("<f", value)
+    return can.Message(arbitration_id=driver.master_id, data=data, is_extended_id=False)
+
+
 def feed_dm3520(driver: Dm3520Driver, **kwargs: float | int | None) -> None:
     driver.update_state(dm3520_feedback(driver, **kwargs))  # type: ignore[arg-type]

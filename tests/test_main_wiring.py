@@ -1827,7 +1827,9 @@ class TestOriginResolver:
         assert motors["y_axis_r"].multi_turn_position != 0.0
         assert motors["y_axis_l"].multi_turn_position != 0.0
 
-        capture = main._make_origin_resolver([loop], self._table())("y_axis")
+        capture = main._make_origin_resolver([loop], self._table(), is_estop_active=lambda: False)(
+            "y_axis"
+        )
 
         assert capture is not None
         await capture()
@@ -1844,7 +1846,9 @@ class TestOriginResolver:
         for name, can_id in (("rotate_r", 0x41), ("rotate_l", 0x42)):
             mgr.add_motor("can_generic", GenericDriver(name, can_id=can_id))
 
-        resolve = main._make_origin_resolver([self._loop()], self._table(), can_managers=[mgr])
+        resolve = main._make_origin_resolver(
+            [self._loop()], self._table(), can_managers=[mgr], is_estop_active=lambda: False
+        )
 
         assert resolve("rotate") is None
 
@@ -1900,7 +1904,9 @@ class TestOriginResolverViaSetZero:
     async def test_edulite_のペア軸は_set_zero_で確定できる(self) -> None:
         mgr, sent = self._manager()
 
-        capture = main._make_origin_resolver([], self._table(), can_managers=[mgr])("rotate")
+        capture = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], is_estop_active=lambda: False
+        )("rotate")
 
         assert capture is not None
         await capture()
@@ -1919,6 +1925,28 @@ class TestOriginResolverViaSetZero:
             # SET_ZERO の後に必ず enable がある (無励磁のまま残さない)
             assert Edulite05Driver.COMM_TYPE_ENABLE in order[zero:]
 
+    async def test_緊急停止インターロックを零点確定へ渡す(self) -> None:
+        """**渡し忘れると「緊急停止を見ない零点確定」が黙って通る。**
+
+        付け替えの窓 (約 0.5 秒) で停止が入ると、停止の disable の後に再励磁の
+        enable が届き、停止中に励磁されたまま残る (ログにもヘルスにも出ない)。
+        """
+        mgr, sent = self._manager()
+
+        capture = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], is_estop_active=lambda: True
+        )("rotate")
+
+        assert capture is not None
+        with pytest.raises(RuntimeError, match="再励磁"):
+            await capture()
+
+        comm_types = [
+            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
+        ]
+        assert ("rotate_r", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
+        assert ("rotate_l", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
+
     async def test_原点付け替え中は同期監視を止める(self) -> None:
         """左右の SET_ZERO のあいだ 2 台の座標系が違うので、偏差という量が
         定義を失う。40ms の debounce に収まる保証は無い。
@@ -1929,14 +1957,18 @@ class TestOriginResolverViaSetZero:
 
         original = mgr.capture_origin_via_set_zero
 
-        async def _spy(names):
+        async def _spy(names, **kwargs):
             suspended_during.append(monitor.is_suspended("rotate"))
-            await original(names)
+            await original(names, **kwargs)
 
         mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
-            [], self._table(), can_managers=[mgr], sync_monitors=[monitor]
+            [],
+            self._table(),
+            can_managers=[mgr],
+            sync_monitors=[monitor],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -1964,7 +1996,11 @@ class TestOriginResolverViaSetZero:
         assert all(h.has_target for h in handles)
 
         capture = main._make_origin_resolver(
-            [], table, can_managers=[mgr], target_refreshers=[refresher]
+            [],
+            table,
+            can_managers=[mgr],
+            target_refreshers=[refresher],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -1986,14 +2022,18 @@ class TestOriginResolverViaSetZero:
 
         original = mgr.capture_origin_via_set_zero
 
-        async def _spy(names):
+        async def _spy(names, **kwargs):
             paused_during.append(refresher.is_paused)
-            await original(names)
+            await original(names, **kwargs)
 
         mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
-            [], table, can_managers=[mgr], target_refreshers=[refresher]
+            [],
+            table,
+            can_managers=[mgr],
+            target_refreshers=[refresher],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -2010,13 +2050,17 @@ class TestOriginResolverViaSetZero:
         handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
         refresher = QueryDrivenTargetRefresher(handles, mgr)
 
-        async def _boom(_names):
+        async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
         mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
-            [], table, can_managers=[mgr], target_refreshers=[refresher]
+            [],
+            table,
+            can_managers=[mgr],
+            target_refreshers=[refresher],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -2030,13 +2074,17 @@ class TestOriginResolverViaSetZero:
         mgr, _sent = self._manager()
         monitor = self._monitor()
 
-        async def _boom(_names):
+        async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
         mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
-            [], self._table(), can_managers=[mgr], sync_monitors=[monitor]
+            [],
+            self._table(),
+            can_managers=[mgr],
+            sync_monitors=[monitor],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -2069,16 +2117,41 @@ class TestOriginResolverViaSetZero:
         sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_dm3520", mock_bus())
-        mgr.add_motor("can_dm3520", Dm3520Driver("sub_y_axis_m", can_id=0x01, master_id=0x11))
+        driver = Dm3520Driver("sub_y_axis_m", can_id=0x01, master_id=0x11)
+        mgr.add_motor("can_dm3520", driver)
 
         async def _send(motor_name: str, msg: can.Message) -> None:
             sent.append(msg)
             # 問い合わせへの応答としてフィードバックが届く状況を模す
             mark_feedback_at(mgr, motor_name, time.time())
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID:
+                # 固定小数点レンジの読み返しにも応答する。応答が無いモータは
+                # 励磁を拒否される (`activation_block_reason`) ので、実機と同じく
+                # 「読めている」状態にしておかないと再励磁の順序を見られない
+                register = msg.data[3]
+                driver.matches_feedback(
+                    can.Message(
+                        arbitration_id=driver.master_id,
+                        data=struct.pack(
+                            "<HBBf",
+                            driver.can_id,
+                            Dm3520Driver.CONFIG_READ,
+                            register,
+                            {
+                                Dm3520Driver.REG_P_MAX: driver.p_max,
+                                Dm3520Driver.REG_V_MAX: driver.v_max,
+                                Dm3520Driver.REG_T_MAX: driver.t_max,
+                            }.get(register, 0.0),
+                        ),
+                        is_extended_id=False,
+                    )
+                )
 
         mgr.send = _send  # type: ignore[method-assign]
 
-        capture = main._make_origin_resolver([], table, can_managers=[mgr])("sub_y_axis")
+        capture = main._make_origin_resolver(
+            [], table, can_managers=[mgr], is_estop_active=lambda: False
+        )("sub_y_axis")
 
         assert capture is not None
         await capture()
@@ -2125,6 +2198,7 @@ class TestMotorCheckWiring:
             sync_monitors=[],
             target_refreshers=[],
             feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
         )
         return server
 

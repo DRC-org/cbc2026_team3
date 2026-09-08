@@ -289,6 +289,7 @@ def _make_origin_resolver(
     can_managers: list[CANManager] | None = None,
     sync_monitors: list[SyncMonitor] | None = None,
     target_refreshers: list[TargetRefresher] | None = None,
+    is_estop_active: EStopChecker,
 ) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
     """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
 
@@ -310,6 +311,12 @@ def _make_origin_resolver(
        ドライバ種別を書き写して導出し直さない)
 
     どちらも無ければ None を返す。呼び出し側が起動ログと `HomingError` の両方で見せる。
+
+    `is_estop_active` に既定値を置かないのは、**渡し忘れが「緊急停止を見ない零点確定」
+    として黙って通るため**。付け替えの窓 (約 0.5 秒) で停止が入ると、停止の disable の
+    後に再励磁の enable が届き、停止中に励磁されたまま残る (ログにもヘルスにも出ない)。
+    M3508 側の経路は CAN の往復を持たず、原点を置き換えるだけで励磁もしないので
+    この口を要らない —— 効くのは `SET_ZERO` の経路だけである。
     """
     managers = can_managers or []
     monitors = sync_monitors or []
@@ -332,7 +339,9 @@ def _make_origin_resolver(
                 # 収まる保証は無いため、判定そのものを止めてから送る
                 with _suspend_sync_monitoring(monitors, axis):
                     async with _hold_target_refresh(refreshers, names):
-                        await manager.capture_origin_via_set_zero(names)
+                        await manager.capture_origin_via_set_zero(
+                            names, should_abort=is_estop_active
+                        )
 
             return capture
         return None
@@ -374,6 +383,7 @@ def _wire_motor_check_sequence(
     sync_monitors: list[SyncMonitor],
     target_refreshers: list[TargetRefresher],
     feedback_timeout_ms: float,
+    is_estop_active: EStopChecker,
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
 
@@ -482,6 +492,7 @@ def _wire_motor_check_sequence(
             can_managers=can_managers,
             sync_monitors=sync_monitors,
             target_refreshers=target_refreshers,
+            is_estop_active=is_estop_active,
         )
 
         def _origin_capturable(axis: str) -> bool:
@@ -1564,6 +1575,8 @@ async def main() -> None:
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
         target_refreshers=[r for w in wirings for r in w.target_refreshers],
         feedback_timeout_ms=system.health.feedback_timeout_ms,
+        # 付け替えの窓で停止が入ると、停止の disable の後に enable が届いて励磁が残る。
+        is_estop_active=is_estop_active,
     )
 
     try:

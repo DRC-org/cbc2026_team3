@@ -185,9 +185,8 @@ class Dm3520Driver(MotorDriver):
         # 「未受信」と「分かっている」を混ぜない目的は同じ)。
         self.error_code = int(Dm3520Error.DISABLED)
         self._feedback_received = False
-        # 実機のレジスタ 0x15 から読み返した値。None は「まだ読めていない」。
-        # config の p_max と食い違うと位置が比例倍で読めるので、励磁を止める根拠になる
-        self._reported_p_max: float | None = None
+        # 載っていないレジスタは「まだ読めていない」であって「一致した」ではない。
+        self._reported_ranges: dict[int, float] = {}
 
     # ------------------------------------------------------------------ #
     #  固定小数点 <-> 実数
@@ -294,17 +293,27 @@ class Dm3520Driver(MotorDriver):
             and data[2] in (self.CONFIG_READ, self.CONFIG_WRITE)
         )
 
-    def _record_config_response(self, msg: can.Message) -> None:
-        """設定応答から実機の固定小数点レンジを控える。
+    def _expected_ranges(self) -> tuple[tuple[int, str, float], ...]:
+        """励磁前に実機と突き合わせるレンジ (レジスタ, 名前, config の値)。
 
-        **状態フィードバックと同じ MST_ID で返ってくるこの 1 通が、実機の p_max を
-        知る唯一の口である。** 読み返しを `initialization_steps()` に置いてあるので、
-        起動のたびに 1 通だけ届く。
+        重さで区別せず 3 つとも載せる —— 現実の壊れ方 (電源断で出荷値へ戻る) では
+        同時にずれるので、レジスタごとの効き方の対応表を誰も覚え続けられない。
         """
+        return (
+            (self.REG_P_MAX, "p_max", self.p_max),
+            (self.REG_V_MAX, "v_max", self.v_max),
+            (self.REG_T_MAX, "t_max", self.t_max),
+        )
+
+    def _record_config_response(self, msg: can.Message) -> None:
+        """設定応答から実機の固定小数点レンジを控える (実機を知る唯一の口)。"""
         data = msg.data
-        if data[2] != self.CONFIG_READ or data[3] != self.REG_P_MAX:
+        if data[2] != self.CONFIG_READ:
             return
-        self._reported_p_max = struct.unpack("<f", bytes(data[4:8]))[0]
+        register = data[3]
+        if register not in {reg for reg, _, _ in self._expected_ranges()}:
+            return
+        self._reported_ranges[register] = struct.unpack("<f", bytes(data[4:8]))[0]
 
     def matches_feedback(self, msg: can.Message) -> bool:
         if msg.is_extended_id or len(msg.data) != 8:
@@ -368,20 +377,50 @@ class Dm3520Driver(MotorDriver):
         レンジが食い違う窓ではそれ自体が飛ばす原因になる。
 
         **正しい向きは「書いて直す」ではなく「食い違いを検出して止める」である。**
-        起動時に 0x15 を読み返し、config と違えば励磁せずに拒否する形にすること
+        0x15/0x16/0x17 を読み返し、config と違えば励磁せずに拒否する
         (この repo の「起動時に構成の曖昧さを黙って解決しない」と同じ方針)。
-        それが入るまでは、レジスタを書くのは人間の手順に残す。
+        レジスタを直すのは人間の手順に残す。
+
+        **読み返しはここに置かない** —— 静的な list は「応答が届いたらやめる」を
+        表現できないので、再試行は `configuration_probe_messages()` が持つ。
+
+        **起動時にしか送らないのは原点確定だけである。** 残りは
+        `reinitialization_steps()` が持ち、再励磁のたびに送り直される。
         """
-        steps = [
-            (self.encode_disable(), 0.05),
-            (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
-            # **書くのではなく読んで突き合わせる。** 応答は `matches_feedback` の
-            # 途中で拾い、食い違っていれば `activation_block_reason()` が励磁を止める
-            (self.encode_read_register(self.REG_P_MAX), 0.05),
-        ]
+        steps = list(self.reinitialization_steps())
         if self.set_zero_on_start:
+            # 原点は励磁が落ちても生き残るので、再励磁で送ると合わせた原点を壊すだけ。
             steps.append((self.encode_set_zero(), 0.2))
         return steps
+
+    def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
+        """無励磁化 → 制御モード設定。**電源断で失われるぶんだけ。**
+
+        物理非常停止 (DC 基板の `REF`) は本機の電源を数秒落とす。CTRL_MODE は
+        フラッシュへ保存されないので、復帰した個体は出荷値の MIT モードで立って
+        いる。書き直さずに励磁すると `0x100` の位置速度指令が解釈されず、
+        **「励磁を名乗るのにトルクが出ない」** —— `is_energized()` は True、
+        `is_fault()` も掛からないので、症状は `SequenceTimeoutError` か零点確定の
+        停滞だけになり、機構の引っかかりと区別が付かない。
+
+        **控えてある固定小数点レンジをここで捨てる。** 同じ電源断で p_max も
+        出荷値 12.5 へ戻っているのに、起動時に読んだ 1000 が残っていると
+        `activation_block_reason()` は「一致している」と答えてしまい、
+        **2026-09-09 に機構を壊しかけた 80 倍の経路が再励磁のたびに復活する**。
+        捨てれば `configuration_probe_messages()` が読み返しを再開し、
+        `CANManager._confirm_configuration` が答えを待つ。**「捨てる」を
+        `CANManager` 側に書かないのは、何が揮発するかを知っているのがここだけ
+        だからである** (ドライバ種別を上位へ書き写さない)。
+
+        呼び出し側は無励磁だと分かっているモータへしか送らない
+        (`CANManager._is_known_energized`)。先頭が `disable` なので、直結ペアの
+        健全な相方へ届くとその場で保持トルクを失う。
+        """
+        self._reported_ranges.clear()
+        return [
+            (self.encode_disable(), 0.05),
+            (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
+        ]
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
         """現在角を目標に書いてから励磁する (EDULITE 05 と同じ理由)。
@@ -426,38 +465,61 @@ class Dm3520Driver(MotorDriver):
         """
         return [(self.encode_set_zero(), 0.2)]
 
-    def activation_block_reason(self) -> str | None:
-        """実機の p_max が config と食い違っていたら励磁を止める。
+    def configuration_probe_messages(self) -> list[can.Message]:
+        """まだ読めていないレンジの読み返し (0x15/0x16/0x17)。
 
-        !!! **これは「書いて直す」の代わりである。一度書いて実機を壊しかけた** !!!
-        p_max はフラッシュへ保存されず電源断で出荷値 12.5 へ戻るので、CTRL_MODE と
-        同じく起動のたびに書けばよいと考えたのが誤りだった —— **書き終わるまでの窓で
-        復号レンジが食い違う**。ドライバが 12.5 で送ったフィードバックを config の
-        1000 で復号すると位置が 80 倍に読め、直後の `activation_steps` がその値を
-        「現在角」として保持目標に書く。機構は 80 倍先へ走り、リミットスイッチを
-        踏み越えて機構端まで行った (2026-09-09 に実機で発生)。現在角を書いてから
-        励磁するのは飛び出しを塞ぐための仕掛けなのに、レンジが食い違う窓では
-        それ自体が飛ばす原因になる。
-
-        **読み返して食い違いを見つけたら、直さずに止める。** これは
-        「起動時に構成の曖昧さを黙って解決しない」と同じ方針で、直す側に回ると
-        「直している最中」という危険な窓が必ずできる。
-
-        **まだ読めていない (`None`) ときは止めない。** 読み返しの応答は
-        `initialization_steps()` の 1 通に依存しており、取りこぼしは通信の問題で
-        あって構成の食い違いではない。ここで止めると、応答が 1 通落ちただけで
-        機体が無励磁のまま動かせなくなる (鮮度待ちのタイムアウトが別途効く)。
+        取りこぼしは再試行で解く —— ゲートの既定を「通す」にして解くと、応答 1 通の
+        取りこぼしで事故の経路が丸ごと復活する。
         """
-        reported = self._reported_p_max
-        if reported is None or math.isclose(reported, self.p_max, rel_tol=1e-6):
-            return None
-        ratio = self.p_max / reported if reported else float("inf")
-        return (
-            f"実機の p_max が {reported}rad、config が {self.p_max}rad で食い違っています"
-            f" (位置が約 {ratio:.4g} 倍で読めます)。**電源断でフラッシュの出荷値へ"
-            "戻ったか、config を書き換えたのに実機へ反映していないかのどちらかです。**"
-            "レジスタ 0x15 を config の値へ書き直してから起動し直してください"
-        )
+        return [
+            self.encode_read_register(register)
+            for register, _, _ in self._expected_ranges()
+            if register not in self._reported_ranges
+        ]
+
+    def _range_problems(self) -> tuple[list[str], list[str]]:
+        """(未確認のレンジ, 食い違っているレンジ)。
+
+        励磁ゲートとヘルスが同じここを読む —— 2 箇所に書くと「止めているのに画面は
+        平常」が作れる。
+        """
+        unconfirmed: list[str] = []
+        mismatched: list[str] = []
+        for register, label, expected in self._expected_ranges():
+            reported = self._reported_ranges.get(register)
+            if reported is None:
+                unconfirmed.append(f"{label} (レジスタ {register:#04x})")
+            elif not math.isclose(reported, expected, rel_tol=1e-6):
+                mismatched.append(f"{label} 実機 {reported:g} / config {expected:g}")
+        return unconfirmed, mismatched
+
+    def activation_block_reason(self) -> str | None:
+        """レンジが確認できない・config と食い違うなら励磁を止める。
+
+        !!! **「書いて直す」の代わりである。一度書いて実機を壊しかけた** !!!
+        書き終わるまでの窓でレンジが食い違い、12.5 で送られた位置を 1000 で復号した
+        80 倍の値が `activation_steps` の保持目標に書かれて機構端まで走った
+        (2026-09-09)。**未確認でも止める** —— 素通しにすると応答 1 通の取りこぼしで
+        この経路が丸ごと復活する。文面を分けるのは手当てが逆だから (応答が無い =
+        電源・配線 / 食い違う = config か実機のレジスタ)。
+        """
+        unconfirmed, mismatched = self._range_problems()
+        if mismatched:
+            return (
+                f"実機と config の固定小数点レンジが食い違っています ({', '.join(mismatched)})。"
+                "**電源断でフラッシュの出荷値へ戻ったか、config を書き換えたのに実機へ"
+                "反映していないかのどちらかです。** フィードバックが比例倍で読めるので、"
+                "レジスタ 0x15/0x16/0x17 を config の値へ書き直してから起動し直してください"
+            )
+        if unconfirmed:
+            return (
+                f"実機の固定小数点レンジを読み返せません ({', '.join(unconfirmed)})。"
+                "レジスタ読み返しの応答が 1 通も届いていないので、フィードバックの"
+                "解釈が config どおりかを確かめられません。**電源・CAN 配線を"
+                "確認してください** (レンジが食い違ったまま励磁すると、比例倍で読めた"
+                "位置がそのまま保持目標に書かれて機構が飛びます)"
+            )
+        return None
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         # MotorState の初期値 0.0rad を実測角と取り違えると、機構は「原点へ戻る」
@@ -522,6 +584,26 @@ class Dm3520Driver(MotorDriver):
 
     def has_overcurrent_warning(self) -> bool:
         return self.error_code == Dm3520Error.OVERCURRENT
+
+    def health_detail(self) -> str | None:
+        """励磁を止めている理由を操縦者へ渡す。
+
+        ログと起動時の「有効化できなかったモータ名」にしか出ないと配線不良と区別が
+        付かない。**`is_fault()` へ入れてはならない** —— ドライバの異常報告ではなく
+        PC 側が安全側へ倒した判断なので、FAULT ではなく WARNING で出す。
+        """
+        unconfirmed, mismatched = self._range_problems()
+        if mismatched:
+            return (
+                f"固定小数点レンジ 食い違い ({', '.join(mismatched)}) のため励磁しません。"
+                "実機のレジスタ 0x15/0x16/0x17 か config のどちらかを直してください"
+            )
+        if unconfirmed:
+            return (
+                f"固定小数点レンジ 未確認 ({', '.join(unconfirmed)} の読み返し応答が"
+                "未受信) のため励磁しません。電源・CAN 配線を確認してください"
+            )
+        return None
 
     def error_label(self) -> str | None:
         return _ERROR_LABELS.get(self.error_code)

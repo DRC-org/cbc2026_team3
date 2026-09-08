@@ -12,6 +12,7 @@ import pytest
 
 from lib.can_manager import _RECV_RETRY_MIN_S, _RX_BATCH_MAX, CANManager
 from lib.drivers.base import ControlMode, MotorState
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
@@ -24,7 +25,14 @@ from tests.fake_can import (
     mock_bus,
     mock_driver,
 )
-from tests.feedback_frames import edulite_feedback, feed_edulite, generic_feedback, m3508_feedback
+from tests.feedback_frames import (
+    dm3520_config_response,
+    dm3520_feedback,
+    edulite_feedback,
+    feed_edulite,
+    generic_feedback,
+    m3508_feedback,
+)
 
 
 class TestCANManager:
@@ -292,6 +300,28 @@ class TestCaptureOriginViaSetZero:
             assert value == pytest.approx(0.0), "旧原点の実測角 1.5rad を書いてはならない"
             assert enable > zero
 
+    async def test_付け替え中に緊急停止が入ったら励磁しない(self) -> None:
+        """**緊急停止を「押した瞬間の状態」に依存させない。**
+
+        付け替えの窓 (disable 0.05s + `SET_ZERO` 0.2s + 鮮度待ち + 0.15s ≒ 0.5 秒)
+        で停止が入ると、`_send_e_stop_frames` の disable の**後**に enable が届き、
+        **停止中に励磁されたまま残る**。ログにもヘルスにも出ない。
+        """
+        mgr, sent = self._prepare()
+
+        with pytest.raises(RuntimeError, match="再励磁"):
+            await mgr.capture_origin_via_set_zero(
+                ["rotate_r", "rotate_l"], should_abort=lambda: True
+            )
+
+        for name in ("rotate_r", "rotate_l"):
+            order = self._comm_types(sent, name)
+            assert Edulite05Driver.COMM_TYPE_ENABLE not in order, "停止中に励磁してはならない"
+            # **中断してよいのは励磁だけ。** 無励磁化と付け替えは機体を動かさない
+            # 指令で、途中で降りると「片方だけ付け替えた」状態が残る
+            assert Edulite05Driver.COMM_TYPE_DISABLE in order
+            assert Edulite05Driver.COMM_TYPE_SET_ZERO in order
+
     async def test_再励磁できなければ降りる(self) -> None:
         """原点だけ切り直して無励磁のまま残ると、症状は「指令しても動かない」だけ。"""
         mgr = CANManager(run_blocking=direct_runner())
@@ -365,6 +395,61 @@ class TestMotorActivation:
             msgs["m2_enable"],
         ]
 
+    async def test_再励磁は電源断で失われた設定を送り直す(self) -> None:
+        """**物理非常停止は DM3520 の電源を数秒落とす。**
+
+        復帰した個体は CTRL_MODE も固定小数点レンジも出荷値へ戻っているのに、
+        再励磁経路は長いあいだ `activate_motors` しか呼んでいなかった。戻った
+        モードで励磁すると「励磁を名乗るのにトルクが出ない」か、12.5 で送られた
+        フィードバックを 1000 で復号した **80 倍の保持目標**が書かれる。
+        """
+        mgr, motor = self._prepare()
+        reinit = can.Message(arbitration_id=0x7FF, data=bytes(8))
+        enable = can.Message(arbitration_id=0x201, data=bytes(8))
+        motor.reinitialization_steps.return_value = [(reinit, 0.0)]
+        motor.activation_steps.return_value = [(enable, 0.0)]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            await mgr.activate_motors()
+
+        assert [call.args[1] for call in send.await_args_list] == [reinit, enable]
+
+    async def test_起動経路は再初期化を送らない(self) -> None:
+        """起動は `initialization_steps()` を丸ごと送った直後なので要らない。
+
+        二重に送ると、`set_zero_on_start` の軸で `SET_ZERO` が 2 回飛ぶ。
+        """
+        mgr, motor = self._prepare()
+
+        with patch.object(mgr, "send", new_callable=AsyncMock):
+            await mgr.initialize_motors()
+
+        motor.reinitialization_steps.assert_not_called()
+
+    async def test_励磁中のモータへは再初期化を送らない(self) -> None:
+        """**再初期化は `disable` で始まる。** 直結ペアの健全な相方へ届くと、
+        その場で保持トルクを失う (`sub_lift` は自重で落ちる)。
+
+        再励磁の `only` には励磁中のモータが混ざる —— 片側だけ落ちたペアでは
+        健全な相方も対象に含めるため。判断は `_may_probe_for_feedback` と同じ
+        `is_energized()` の三値で、電源が落ちた個体は復帰後 `False` を報告する
+        ので、本当に要るモータには届く。
+        """
+        mgr, motor = self._prepare()
+        motor.is_energized.return_value = True
+        reinit = can.Message(arbitration_id=0x7FF, data=bytes(8))
+        enable = can.Message(arbitration_id=0x201, data=bytes(8))
+        motor.reinitialization_steps.return_value = [(reinit, 0.0)]
+        motor.activation_steps.return_value = [(enable, 0.0)]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            await mgr.activate_motors()
+
+        motor.reinitialization_steps.assert_not_called()
+        # 励磁そのものは通す (無励磁の相方を戻すための呼び出しに巻き込まれただけで、
+        # このモータの目標を書き直すこと自体は害が無い)
+        assert [call.args[1] for call in send.await_args_list] == [enable]
+
     async def test_activation_reads_position_after_fresh_feedback_arrives(self) -> None:
         """set_zero 後の原点を反映した実測角でなければ、目標として書いてはいけない。"""
         mgr, motor = self._prepare()
@@ -393,6 +478,62 @@ class TestMotorActivation:
         assert activated is True
         assert seen_rx_at and seen_rx_at[0] is not None
         assert seen_rx_at[0] > (mgr.last_feedback_at("m1") or 0.0) - 1.0
+
+    async def test_設定は読めるまで問い合わせ直す(self) -> None:
+        """**取りこぼしは再試行で解く。** ゲートの既定を「通す」にして解くと、
+        応答 1 通で `activation_block_reason()` が守る経路が丸ごと復活する。"""
+        mgr, motor = self._prepare()
+        read = can.Message(arbitration_id=0x7FF, data=bytes(8))
+        enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
+        pending = [read]
+        motor.configuration_probe_messages.side_effect = lambda: list(pending)
+        motor.activation_steps.return_value = [(enable_msg, 0.0)]
+        attempts = 0
+
+        async def fake_send(name: str, msg: can.Message) -> None:
+            nonlocal attempts
+            if msg is read:
+                attempts += 1
+                if attempts >= 3:  # 2 通落ちてから応答が届いた状況
+                    pending.clear()
+
+        with patch.object(mgr, "send", new_callable=AsyncMock, side_effect=fake_send) as send:
+            # 締切は別のテストが見る。ここで実時間に頼ると負荷でフレークする
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=60.0)
+
+        assert activated is True
+        assert attempts == 3
+        assert send.await_args_list[-1].args[1] is enable_msg
+
+    async def test_設定を読めないまま締切を過ぎたらドライバの判断に従う(self) -> None:
+        """**再試行は無限ではない。** 締切を過ぎたら判断はドライバへ戻す ——
+        ここで「読めなかったから通す」を書くと、緩む場所がもう 1 つできる。"""
+        mgr, motor = self._prepare()
+        motor.configuration_probe_messages.return_value = [
+            can.Message(arbitration_id=0x7FF, data=bytes(8))
+        ]
+        motor.activation_block_reason.return_value = "p_max が未確認です"
+        motor.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
+        ]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock):
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=0.05)
+
+        assert activated is False
+        motor.activation_steps.assert_not_called()
+
+    async def test_確認すべき設定が無ければ読み返しを送らない(self) -> None:
+        """大半のドライバ (M3508 / 自作モタドラ) は確認すべき設定を持たない。"""
+        mgr, motor = self._prepare()
+        enable_msg = can.Message(arbitration_id=0x202, data=bytes(8))
+        motor.activation_steps.return_value = [(enable_msg, 0.0)]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            activated = await mgr.activate_motor("m1")
+
+        assert activated is True
+        assert [call.args[1] for call in send.await_args_list] == [enable_msg]
 
     async def test_構成が食い違うモータは励磁しない(self) -> None:
         """**「待てば解ける」と「待っても解けない」を分ける。**
@@ -666,6 +807,136 @@ class TestMotorActivation:
 
         assert inactive == ["m1"]
         assert "m2" in [call.args[0] for call in send.await_args_list]
+
+
+class TestReenergizeAfterPowerLoss:
+    """物理非常停止で **DM3520 の電源が数秒落ちた**後の再励磁。
+
+    CTRL_MODE も固定小数点レンジもフラッシュへ保存されないので、復帰した個体は
+    出荷値 (MIT モード / p_max 12.5) で立っている。**再励磁経路は長いあいだ
+    `activate_motors` しか呼んでおらず**、起動時に読んだ p_max が残っていたので
+    励磁ゲートも素通りしていた —— 2026-09-09 に機構を壊しかけた 80 倍の経路が、
+    緊急停止を踏むたびに復活していた。
+
+    実機に一番近い形で確かめる (mock ドライバでは `initialization_steps` と
+    `reinitialization_steps` が別々の MagicMock になり、**両者が同じレジスタを
+    持っていること自体が検証から落ちる**)。
+    """
+
+    def _prepare(self, device_p_max: float) -> tuple[CANManager, dict[str, float]]:
+        """実機の代わりに応答を返す DM3520 を 1 台載せた manager。
+
+        `device` の値を書き換えると「電源断でレジスタが出荷値へ戻った」を作れる。
+        """
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_dm3520", mock_bus())
+        driver = Dm3520Driver(
+            "sub_y_axis_m", can_id=0x01, master_id=0x11, p_max=1000.0, v_max=200.0, t_max=10.0
+        )
+        mgr.add_motor("can_dm3520", driver)
+        device = {"p_max": device_p_max, "v_max": driver.v_max, "t_max": driver.t_max}
+        registers = {
+            Dm3520Driver.REG_P_MAX: "p_max",
+            Dm3520Driver.REG_V_MAX: "v_max",
+            Dm3520Driver.REG_T_MAX: "t_max",
+        }
+
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            data = bytes(msg.data)
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID and data[2] == (
+                Dm3520Driver.CONFIG_READ
+            ):
+                deliver_frame(
+                    mgr,
+                    "can_dm3520",
+                    dm3520_config_response(driver, data[3], device[registers[data[3]]]),
+                )
+                return
+            # 本機のフィードバックは問い合わせ駆動。自分宛の 1 通に 1 通返す
+            deliver_frame(mgr, "can_dm3520", dm3520_feedback(driver, error=0))
+
+        mgr.send = _send  # type: ignore[method-assign]
+        return mgr, device
+
+    async def test_電源断でレンジが戻っていたら再励磁で検出して止める(self) -> None:
+        """起動時に読んだ 1000 を信じたまま励磁すると、12.5 で送られた位置を
+        1000 で復号した **80 倍の値**がそのまま保持目標に書かれる。
+        """
+        mgr, device = self._prepare(1000.0)
+        assert await mgr.initialize_motors() == []  # 起動時は一致している
+
+        device["p_max"] = 12.5  # 物理非常停止でドライバの電源が落ちた
+
+        inactive = await mgr.activate_motors(feedback_timeout_s=0.2)
+
+        assert inactive == ["sub_y_axis_m"]
+
+    async def test_レンジが変わっていなければ再励磁できる(self) -> None:
+        """**再初期化は「判断材料を集める」より前に置く。**
+
+        後ろへ置くと、読み返した直後にそれを捨てることになり、電源が落ちて
+        いない健全な機体まで「未確認」で永久に励磁できなくなる。
+        """
+        mgr, _device = self._prepare(1000.0)
+        assert await mgr.initialize_motors() == []
+
+        inactive = await mgr.activate_motors(feedback_timeout_s=0.2)
+
+        assert inactive == []
+
+    async def test_再励磁で制御モードを書き直す(self) -> None:
+        """MIT モードのまま励磁すると `0x100` の位置指令が解釈されず、
+        「励磁を名乗るのにトルクが出ない」。`is_energized()` も `is_fault()` も
+        掛からないので、症状はシーケンスのタイムアウトだけになる。
+        """
+        mgr, _device = self._prepare(1000.0)
+        await mgr.initialize_motors()
+        sent: list[can.Message] = []
+        original = mgr.send
+
+        async def _record(motor_name: str, msg: can.Message) -> None:
+            sent.append(msg)
+            await original(motor_name, msg)
+
+        mgr.send = _record  # type: ignore[method-assign]
+
+        await mgr.activate_motors(feedback_timeout_s=0.2)
+
+        writes = [
+            bytes(msg.data)[3]
+            for msg in sent
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID
+            and bytes(msg.data)[2] == Dm3520Driver.CONFIG_WRITE
+        ]
+        assert writes == [Dm3520Driver.REG_CTRL_MODE]
+
+    async def test_読み返しが落ちても再励磁は再試行で通る(self) -> None:
+        """**再励磁のたびにレンジを捨てる以上、取りこぼしは毎回の再励磁に効く。**
+
+        1 通で諦める実装だと、緊急停止を解除するたびに機体が無励磁のまま残る。
+        """
+        mgr, _device = self._prepare(1000.0)
+        assert await mgr.initialize_motors() == []
+        drops = 2
+        original = mgr.send
+
+        async def _lossy(motor_name: str, msg: can.Message) -> None:
+            nonlocal drops
+            data = bytes(msg.data)
+            is_read = msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID and (
+                data[2] == Dm3520Driver.CONFIG_READ
+            )
+            if is_read and drops > 0:
+                drops -= 1
+                return
+            await original(motor_name, msg)
+
+        mgr.send = _lossy  # type: ignore[method-assign]
+
+        inactive = await mgr.activate_motors(feedback_timeout_s=0.5)
+
+        assert inactive == []
+        assert drops == 0
 
 
 class TestClearEStopLatches:

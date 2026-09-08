@@ -931,6 +931,43 @@ ID 専用で、ID 空間そのものが分かれる）。それでも**専用バ
 **この誤りは動作確認シーケンス（`sequences/motor_check.py`）が検出する** —— 位置定数の
 `tolerance`（1mm）で到達を判定するので、比例倍で読めていれば必ず落ちる。
 
+##### 起動時に読み返して、揃わなければ励磁を拒否する（2026-09-09）
+
+動作確認まで待てないことが実機で分かった。`p_max` は**フラッシュへ保存されないので
+電源断で出荷値 12.5 へ戻る**。12.5 で送られたフィードバックを config の 1000 で復号すると
+位置が 80 倍に読め、その値を `activation_steps()` が「現在角」として保持目標に書くため、
+**励磁した瞬間に機構が 80 倍先へ走り、リミットスイッチを踏み越えて機構端まで行った。**
+現在角を書いてから励磁するのは飛び出しを塞ぐ仕掛けなのに、レンジが食い違う窓では
+それ自体が飛ばす原因になる。
+
+**直す側（起動のたびに `p_max` を書く）は一度入れて revert した（`a167d7e`）。**
+書き終わるまでの窓でレンジが食い違うので、事故の経路がそのまま残る。正しい向きは
+「書いて直す」ではなく「**読み返して食い違いを検出し、励磁を拒否する**」（「起動時に
+構成の曖昧さを黙って解決しない」と同じ方針）。レジスタを直すのは人間の手順
+（`config/bench/dm3520/checklist.yaml`）に残す。
+
+守る形は 3 つ:
+
+- **3 レジスタとも読み返す。** `t_max` がずれればトルクが比例倍で読め、
+  `guard.stall_torque`（2.0Nm）の実効値がそのままずれる —— `p_max` とまったく同型の
+  事故である。`v_max` は速度表示だけだが、**重さで区別しない**：現実の壊れ方は
+  「電源断で出荷値へ戻る」で 3 つ同時にずれるうえ、レジスタごとの重さの対応表を
+  誰かが覚え続ける形にすると、取り違えを症状から見分けられない
+- **読めなかったときも通さない。** 「まだ読めていない = 止めない」にすると、**応答が
+  1 通落ちるだけでゲートが丸ごと消える**。「1 通落ちただけで機体が動かせない」を
+  避けたいのは正しいが、それは再試行で解く問題であって、ゲートの既定を緩めて解く問題では
+  ない。`Dm3520Driver.configuration_probe_messages()` が「まだ読めていないぶん」だけを
+  返し、`CANManager._confirm_configuration` が空になるまで（または鮮度待ちと同じ
+  0.5 秒の締切まで）送り直す。判断は集め終わってから `activation_block_reason()` が下す。
+  読み返しを `initialization_steps()` の静的な list へ並べないのは、あれが
+  「応答が届いたらやめる」を表現できず、何通並べれば足りるかを誰も答えられないため
+- **拒否した理由を画面へ出す。** ログと起動時の「有効化できなかったモータ名」にしか
+  出ていないと、操縦者から見て配線不良と区別が付かない。`Dm3520Driver.health_detail()`
+  が `MotorHealthInfo.detail` に「固定小数点レンジ 未確認 / 食い違い」を載せる
+  （`MotorHealth.WARNING`。**`is_fault()` へは入れない** —— ドライバの異常報告ではなく
+  PC 側が安全側へ倒した判断なので）。文面は「応答が無い」（電源・CAN 配線）と
+  「食い違う」（config か実機のレジスタ）で分ける —— **手当てが逆になる**
+
 実測値（2026-08-30、2 台とも同一）。CAN の read（`0x7FF` / `D0-D1`=CAN ID / `D2=0x33` /
 `D3`=レジスタ番号）で読める。応答は MST_ID に `D2=0x33` で返り `D4-D7` が float32（LE）。
 
@@ -1198,6 +1235,10 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 緊急停止でジョグの起点を捨てる | `ManualController.on_e_stop` を空にする / `activate_e_stop` の呼び出しを落とす | `test_manual.py` / `test_server_manual.py` |
 | ジョグの起点は目標値で積む | 起点を毎回フィードバックから取る形へ戻す（**フィードバックが追従しないドライバでしか検出できない**） | `test_manual.py` |
 | 範囲の外から始めたジョグも刻み幅を超えない | `ManualSpec.clamp_from` の範囲拡張（`min(min_value, origin)` / `max(max_value, origin)`）を素の `min_value` / `max_value` へ戻す（**起点が範囲の外に居るときだけ 1 歩目が境界まで飛ぶ。零点確定がまだの軸では普通に踏む**） | `test_manual.py::TestClamp` |
+| 再励磁は電源断で失われた設定を送り直す | `activate_motors` の `reinitialize=True` を落とす（**物理非常停止で電源が落ちた DM3520 が MIT モード / p_max 12.5 のまま励磁され、80 倍の保持目標が書かれる**）/ `Dm3520Driver.reinitialization_steps()` の `_reported_ranges.clear()` を落とす（電源断前に読んだ値が残り、ゲートが「一致している」と答える）/ 再初期化を `_confirm_configuration` の後ろへ動かす（**読み返した直後に捨てるので、健全な機体まで永久に「未確認」になる**） | `test_can_manager.py::TestMotorActivation::test_再励磁は電源断で失われた設定を送り直す` / `::TestReenergizeAfterPowerLoss`（3 本）/ `tests/drivers/test_dm3520.py::TestStartupSequence::test_再初期化は控えてあるレンジを捨てる` |
+| 再初期化に原点確定を混ぜない | `reinitialization_steps()` へ `set_zero_on_start` の `SET_ZERO` を足す（**再励磁のたびに、零点確定で合わせた原点がその場の姿勢へ書き換わる**） | `tests/drivers/test_dm3520.py::TestStartupSequence::test_再初期化は電源断で失われるぶんだけを送る` |
+| 励磁中のモータへ `disable` で始まる手順を送らない | `activate_motor` の `not self._is_known_energized(motor)` を落とす（**直結ペアの健全な相方が保持トルクを失い、`sub_lift` は自重で落ちる**） | `test_can_manager.py::TestMotorActivation::test_励磁中のモータへは再初期化を送らない` |
+| 零点確定の再励磁は緊急停止を見る | `capture_origin_via_set_zero` の `should_abort` を `activate_motor` へ渡さない / `main._make_origin_resolver` から `is_estop_active` を落とす（**付け替えの約 0.5 秒で停止が入ると、停止の `disable` の後に enable が届いて停止中に励磁が残る**）/ 逆に無励磁化・付け替えまで中断する（片方だけ付け替えた状態が残る） | `test_can_manager.py::TestCaptureOriginViaSetZero::test_付け替え中に緊急停止が入ったら励磁しない` / `test_main_wiring.py::TestOriginResolverViaSetZero::test_緊急停止インターロックを零点確定へ渡す` |
 | 鮮度の判定は壁時計に依存しない | `_wait_fresh_feedback` の新規判定を `_rx_seq` から `_last_rx_at` の大小へ戻す / `_dispatch_frame` の `_rx_seq` 更新を落とす（**NTP の後ろ向き補正で、届き続けているのにタイムアウトする**） | `test_can_manager.py::TestMotorActivation` |
 | ロボット 1 台分の部品が main からサーバーへ届く | `main()` の `add_robot(...)` から `manual=` を落とす | `test_main_wiring.py` |
 | 押している間くり返すジョグが必ず止まる | `useHoldRepeat` の停止経路を 1 つ落とす / アンマウント時の解除を外す | `useHoldRepeat.test.ts` |
@@ -6964,6 +7005,85 @@ bit6-7 だけである）。機構が付く前にそこへ投資する判断材�
 弁の `settle_s` が**唯一の把持経路の信頼性**になったという意味でもあり、
 そこを曖昧にしたままにはできない。
 
+
+### 再励磁経路が電源断を跨いだ設定を戻さなかった（2026-09-09）
+
+**物理非常停止（DC 基板の `REF`）は DM3520 の電源を数秒落とす。** `CTRL_MODE` も
+`p_max` も `0xAA` で保存しない限りフラッシュに残らないので、復帰した個体は
+出荷値（MIT モード / `p_max` 12.5）で立っている。ところが再励磁の 2 経路
+（緊急停止解除の `_reactivate_motors` と単発の `_reenergize_motors`）は
+`activate_motors` しか呼んでおらず、**起動時に読んだ `p_max` が
+`Dm3520Driver` に残っているせいで励磁ゲートまで素通りしていた**。
+
+落ちる先は 2 つで、**どちらも画面に出ない**:
+
+- 戻ったモードで `0x100` の位置指令が効くなら、12.5 で送られたフィードバックを
+  config の 1000 で復号した **80 倍の位置**が保持目標に書かれる
+  —— 2026-09-09 に機構を壊しかけた事故そのものが、緊急停止を踏むたびに復活する
+- MIT モードのままなら「励磁を名乗るのにトルクが出ない」。`is_energized()` は
+  True、`is_fault()` も掛からないので、`safety.unenergized_motors` は無音のまま
+  症状は `SequenceTimeoutError` か零点確定の停滞 `HomingError` だけになる
+  （機構の引っかかりと区別が付かない）
+
+#### `initialization_steps()` を再送する形にはできない
+
+**`set_zero_on_start` の `SET_ZERO` が載っているため**、丸ごと再送すると
+零点確定で合わせた原点をその場の姿勢へ書き換えてしまう（本番の `rotate_r` /
+`rotate_l` が `true`）。原点は励磁が落ちても生き残るので、そもそも書き直す理由が無い。
+
+そこで **`MotorDriver.reinitialization_steps()`（既定 `[]`）を足し、
+「電源断で失われる設定だけ」をそちらに置いて `initialization_steps()` から呼ぶ**
+形にした。2 つのリストを別々に並べる案は採らない —— 片方だけへレジスタを足した
+状態が作れ、しかもその食い違いは電源断を跨いだときにしか現れない。
+
+**「再励磁のたびに初期化が要るか」を問う bool のフックにもしなかった。**
+何を送り直すかはドライバごとに違う（DM3520 は `CTRL_MODE`、EDULITE 05 は
+現時点で何も要らない）ので、bool にすると呼び出し側が「では何を送るのか」を
+別途決めることになり、結局ドライバ種別が上位へ漏れる。
+
+#### 誰が「再励磁である」と言うか
+
+`CANManager.activate_motors` が無条件に `reinitialize=True` を渡す。この関数へ
+来るのは再励磁の 2 経路だけで（起動は `initialize_motors` が別に持つ）、どちらの
+直前にも電源が落ちた可能性がある。**サーバーに選ばせない** —— 「電源断を跨いだか」
+の判断材料（何が揮発するか）はドライバ側にしか無い。
+
+**送るのは無励磁だと分かっているモータだけ**（`CANManager._is_known_energized`）。
+再初期化は `disable` で始まるので、直結ペアの健全な相方へ届けば保持トルクを
+その場で失う —— 鮮度確認の問い合わせ（`_may_probe_for_feedback`）と同じ制約で、
+`is_energized()` の三値の読み方は 1 箇所へ寄せた。電源が落ちた個体は復帰後
+`False` を報告するので、本当に要るモータには届く。
+
+**順序は「再初期化 → 設定の読み返し（`_confirm_configuration`）→ 励磁ゲート」。**
+逆にすると、読み返した直後にそれを捨てることになり、電源が落ちていない健全な機体まで
+「未確認」で永久に励磁できなくなる（`TestReenergizeAfterPowerLoss` の 2 本目が
+この順序だけを見ている）。
+
+所要時間は DM3520 1 台あたり +0.1 秒（`disable` 0.05 + `CTRL_MODE` 0.05）。
+読み返しは元から `_confirm_configuration` が行うので増えない。`safety.reenergizing`
+の窓は sub_hand（DM3520 2 台）で最大 +0.2 秒で、「100ms〜1.5 秒」という前提は保たれる。
+
+**レンジが戻った状態は再励磁では直らない**（PC は読んで拒否するだけ）。運用上は
+「物理緊急停止を踏んだら、レンジの警告が出ていないか見る」と「零点確定をやり直す」の
+2 つが要る。詳細は `docs/checks_and_health.md` の「零点確定（ホーミング）」節。
+
+### 零点確定の再励磁が緊急停止を見ていなかった（2026-09-09）
+
+`capture_origin_via_set_zero` は最後に `activate_motor(after_set_zero=True)` を
+呼ぶが `should_abort` を渡しておらず、`_send_steps` は `MotorHandle` の
+インターロックも通らない。**付け替えの窓（`disable` 0.05 秒 + `SET_ZERO` 0.2 秒 +
+鮮度待ち + 0.15 秒 ≒ 0.5 秒）で緊急停止が入ると、`_send_e_stop_frames` の
+`disable` の後に enable が届き、停止中に励磁されたまま残る。** ログにもヘルスにも
+出ない。「緊急停止は『押した瞬間の状態』に依存させない」に反していた。
+
+**中断するのは励磁だけ。** 無励磁化と付け替えはどちらも機体を動かさない指令で、
+途中で降りると「無励磁にしたが原点は旧いまま」「片方だけ付け替えた」という中途半端な
+状態が残る（`clear_e_stop_latches` が中断口を持たないのと同じ理由）。
+
+インターロックは `main._make_origin_resolver` が `is_estop_active` を受けて渡す。
+**この引数に既定値を置かない** —— 渡し忘れが「緊急停止を見ない零点確定」として
+黙って通るため（`HomingRunner` から `start_value` 引数を消したのと同じ判断）。
+M3508 側の経路は CAN の往復を持たず励磁もしないので、この口は要らない。
 
 ## 未解決の課題
 

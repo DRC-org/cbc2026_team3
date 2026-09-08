@@ -202,6 +202,15 @@ class Edulite05Driver(MotorDriver):
         )
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
+        """起動時だけ送る。**`reinitialization_steps()` は宣言しない。**
+
+        本機で「電源断で設定が出荷値へ戻る」現象は観測されていない (DM3520 では
+        実機で踏んだので、あちらは再励磁のたびに `CTRL_MODE` を書き直す)。
+        観測されたら `run_mode` / `limit_*` / `position_kp` をそちらへ移すこと ——
+        ただし **`set_zero` は移してはならない**。再励磁のたびに送ると、零点確定で
+        合わせた原点をその場の姿勢へ書き換える (`rotate_r` / `rotate_l` は
+        `set_zero_on_start: true`)。
+        """
         steps = [
             (self.encode_disable(), 0.05),
             (self.encode_run_mode(self._CONTROL_TO_RUN_MODE[self.mode]), 0.05),

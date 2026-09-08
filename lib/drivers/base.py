@@ -288,6 +288,29 @@ class MotorDriver(abc.ABC):
         """起動時に送る ``(message, delay_after_seconds)``。既定は初期化不要。
 
         励磁の有効化はここに含めない (activation_steps を使う)。
+        **電源断で失われる設定は ``reinitialization_steps()`` 側で宣言し、
+        ここはそれに起動時だけの手順を足す形で組み立てること。**
+        """
+        return []
+
+    def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
+        """**励磁し直すたびに送り直す**起動時設定。既定は不要 (空)。
+
+        ``initialization_steps()`` のうち **電源が落ちると失われる設定だけ**を返す。
+        再励磁 (`CANManager.activate_motors`) は起動時と同じ手順を丸ごと送り直せない
+        —— ``initialization_steps()`` には原点確定 (``set_zero_on_start``) が載って
+        いるドライバがあり、再送すると**零点確定で合わせた原点をその場の姿勢へ
+        書き換える**。だから起動と再励磁で送るものを分け、**電源断で消える側を
+        こちらに置いて ``initialization_steps()`` から呼ぶ** (2 つのリストを別々に
+        並べると、片方だけへレジスタを足した状態が作れる)。
+
+        物理非常停止 (DC 基板の `REF`) は一部のドライバの電源を数秒落とすので、
+        「再励磁 = 電源が落ちたかもしれないところからの復帰」である。
+
+        **呼び出し側は無励磁だと分かっているモータへしか送らない**
+        (`CANManager._is_known_energized`)。無励磁化を含む手順を励磁中のモータへ
+        送ると保持トルクをその場で失うため、`feedback_probe_message()` と同じ
+        制約が掛かる。
         """
         return []
 
@@ -364,6 +387,15 @@ class MotorDriver(abc.ABC):
         機体を動かす手段を失う。
         """
         return None
+
+    def configuration_probe_messages(self) -> list[can.Message]:
+        """励磁前に確認する設定のうち、**まだ読めていない**ぶんの問い合わせ。
+
+        `CANManager._confirm_configuration` が空リストになるまで送り直す ——
+        「読めなければ通す」でゲートを緩めず、取りこぼしは再試行で解くための口。
+        機構を動かすフレームを返してはならない (`feedback_probe_message` と同じ)。
+        """
+        return []
 
     def feedback_probe_message(self) -> can.Message | None:
         """フィードバックを引き出すための問い合わせフレーム。

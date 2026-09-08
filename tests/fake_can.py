@@ -193,11 +193,17 @@ def mock_driver(name: str, can_id: int) -> MagicMock:
     motor.telemetry = FULL_TELEMETRY
     motor.initialization_steps.return_value = []
     motor.activation_steps.return_value = []
+    motor.reinitialization_steps.return_value = []
     motor.requires_fresh_feedback_for_activation.return_value = False
     motor.feedback_probe_message.return_value = None
+    # 空リスト = 「確認すべき設定は無い」。MagicMock の既定 (真) とは逆の意味になる
+    motor.configuration_probe_messages.return_value = []
     # **None は「励磁を止める理由なし」で、MagicMock の既定 (真) とは逆の意味になる。**
     # 明示しないと、励磁を止める口を足した瞬間に全モータが無励磁のまま残る
     motor.activation_block_reason.return_value = None
+    # **False は「励磁中だと分かっていない」。** MagicMock の既定 (真) のままだと、
+    # 励磁中のモータへ送らない手当て (再初期化・鮮度確認の問い合わせ) が全部止まる
+    motor.is_energized.return_value = None
     return motor
 
 

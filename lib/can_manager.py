@@ -743,6 +743,20 @@ class CANManager:
 
         緊急停止解除後の復帰にも使う。
 
+        **励磁し直す前に、電源断で失われる設定を送り直す** (`reinitialization_steps()`)。
+        物理非常停止 (DC 基板の `REF`) は DM3520 の電源を数秒落とすので、この経路へ
+        来る個体は制御モードも固定小数点レンジも出荷値へ戻っていることがある ——
+        書き直さずに励磁すると、MIT モードのまま「励磁を名乗るのにトルクが出ない」か、
+        p_max 12.5 のフィードバックを config の 1000 で復号して**保持目標が 80 倍**に
+        なる。どちらも `is_energized()` も `is_fault()` も掛からないので、症状は
+        `SequenceTimeoutError` か零点確定の停滞だけになり、機構の引っかかりと
+        区別が付かない。
+
+        **所要時間は DM3520 1 台あたり +0.1 秒** (`disable` 0.05 秒 + `CTRL_MODE`
+        0.05 秒)。読み返しは元から `_confirm_configuration` が行うので増えない。
+        `safety.reenergizing` が立つ窓は sub_hand (DM3520 2 台) で最大 +0.2 秒
+        —— 100ms〜1.5 秒という前提は保たれる。
+
         should_abort は「途中で有効化をやめるべきか」を返す。緊急停止が再び入った
         場合に、残りのモータへ enable を送らないための中断口。
 
@@ -772,6 +786,8 @@ class CANManager:
                 motor_name,
                 should_abort=should_abort,
                 feedback_timeout_s=feedback_timeout_s,
+                # この経路はどれも電源断を跨ぎうる復帰で、跨いだかを判断できるのはドライバだけ。
+                reinitialize=True,
             )
 
         return await self._activate_each_motor(
@@ -852,7 +868,9 @@ class CANManager:
                 inactive.append(motor_name)
         return inactive
 
-    async def capture_origin_via_set_zero(self, motor_names: Sequence[str]) -> None:
+    async def capture_origin_via_set_zero(
+        self, motor_names: Sequence[str], *, should_abort: Callable[[], bool] | None = None
+    ) -> None:
         """指定したモータ群の原点を「今の位置」へまとめて切り直す (零点確定)。
 
         **軸のモータ全員をまとめて受け取る。** 左右直結ペアを別々の時刻に確定すると、
@@ -868,6 +886,19 @@ class CANManager:
         「待機開始より後に届いた 1 通」しか待たないので、SET_ZERO を送った直後に
         **旧原点で測られた在庫のフィードバックが届く**余地が残る。それを保持目標に
         使うと原点の差分だけ機構が動くので、保持目標には新原点そのものである 0 を書く。
+
+        ``should_abort`` は**最後の再励磁だけ**を中断する口。付け替えの窓
+        (disable 0.05s + `SET_ZERO` 0.2s + 鮮度待ち + 0.15s ≒ 0.5 秒) で緊急停止が
+        入ると、`_send_e_stop_frames` の disable の**後**に enable が届き、
+        **停止中に励磁されたまま残る** (ログにもヘルスにも出ない)。緊急停止を
+        「押した瞬間の状態」に依存させないための口で、**組み立て側
+        (`main._make_origin_resolver`) は既定値を持たず必ず渡す** —— 渡し忘れが
+        「緊急停止を見ない零点確定」として黙って通るため。
+
+        **無励磁化と付け替えは中断しない。** どちらも機体を動かさない指令で、
+        途中で降りると「無励磁にしたが原点は旧いまま」「片方だけ付け替えた」という
+        中途半端な状態が残る (`clear_e_stop_latches` が中断口を持たないのと同じ理由 ——
+        中断してよいのは励磁だけである)。
 
         Raises:
             ValueError: 原点を切り直す手段を持たないモータが混ざっている
@@ -889,12 +920,15 @@ class CANManager:
             await self._send_steps(name, self._motors[name].origin_capture_steps())
 
         inactive = [
-            name for name in names if not await self.activate_motor(name, after_set_zero=True)
+            name
+            for name in names
+            if not await self.activate_motor(name, after_set_zero=True, should_abort=should_abort)
         ]
         if inactive:
             raise RuntimeError(
                 f"原点を切り直しましたがモータ {', '.join(inactive)} を再励磁できません"
-                " (フィードバックが届いていません。配線・電源を確認してください)"
+                " (緊急停止が入ったか、フィードバックが届いていません。"
+                "緊急停止の解除、または配線・電源を確認してください)"
             )
 
     async def activate_motor(
@@ -904,6 +938,7 @@ class CANManager:
         should_abort: Callable[[], bool] | None = None,
         feedback_timeout_s: float = _ACTIVATION_FEEDBACK_TIMEOUT_S,
         after_set_zero: bool = False,
+        reinitialize: bool = False,
     ) -> bool:
         """1 モータの励磁を有効化する。有効化しなかった場合は False。
 
@@ -915,11 +950,23 @@ class CANManager:
         からの呼び出しであることをドライバへ伝える。旧原点で測られた実測角を保持目標に
         使わせないための宣言で、既定は False。
 
+        `reinitialize` は「電源が落ちたかもしれないところからの復帰」であることを
+        伝える。**再励磁の経路 (`activate_motors`) だけが True を渡す** ——
+        起動経路は `initialize_motors` が完全な `initialization_steps()` を
+        送った直後なので要らない。
+
         **既に励磁されているモータへは鮮度確認の問い合わせを送らない**
         (`_may_probe_for_feedback`)。判断はドライバ種別ではなく `is_energized()` の
         三値だけで行う。
         """
         motor = self._motors[motor_name]
+
+        # 後ろへ置くと、控えた値を捨てる前に読み直して電源断より前の値で確認済みにしてしまう。
+        if reinitialize and not self._is_known_energized(motor):
+            await self._send_steps(motor_name, motor.reinitialization_steps())
+
+        # 「まだ読めていない」を「問題なし」へ倒さないための再試行。
+        await self._confirm_configuration(motor_name, feedback_timeout_s)
 
         # **「待てば解ける」より先に「待っても解けない」を見る。** 構成が食い違って
         # いるモータを鮮度待ちへ入れると、原因が「通信が遅い」に見えてしまう
@@ -994,7 +1041,67 @@ class CANManager:
         """
         if after_set_zero:
             return True
-        return motor.is_energized() is not True
+        return not CANManager._is_known_energized(motor)
+
+    @staticmethod
+    def _is_known_energized(motor: MotorDriver) -> bool:
+        """励磁中だと**分かっている**か (`is_energized()` の三値を 1 箇所で読む)。
+
+        `None` (申告を持たない・未受信) は False へ倒す。「分からない」を
+        「励磁中」と読むと、無励磁のモータへ届くはずの手当てが黙って止まる。
+
+        **`disable` を含む手順を送ってよいかの判断は、すべてここを通る** ——
+        鮮度確認の問い合わせ (`_may_probe_for_feedback`) と再初期化
+        (`activate_motor` の `reinitialize`) の 2 つで、どちらも「励磁中の相方の
+        保持トルクをその場で失わせない」という同じ理由に立つ。三値の読み方を
+        呼び出し側へ書き写すと、片方だけ `is not False` のような別の丸め方に
+        なった状態が作れる。
+        """
+        return motor.is_energized() is True
+
+    async def _confirm_configuration(self, motor_name: str, timeout_s: float) -> None:
+        """励磁前に確認しなければならない設定を、読めるまで問い合わせ直す。
+
+        `activation_block_reason()` が「未確認だから止める」と答えるドライバ
+        (DM3520 の固定小数点レンジ) のための再試行。**取りこぼしを「問題なし」へ
+        倒して解いてはならない** —— 応答が 1 通落ちるだけで、ゲートが守っている
+        事故の経路 (レンジ違いで比例倍に読めた位置がそのまま保持目標へ書かれる)
+        が丸ごと復活する。かといって 1 通で諦めれば「CAN が 1 通落ちただけで
+        機体が動かせない」になるので、既定を緩めるのではなくここで送り直す。
+
+        **判断は下さない。** ここは材料を集めるだけで、集まらなかったときに
+        どうするかは `activation_block_reason()` が決める (`_wait_fresh_feedback`
+        と `_may_probe_for_feedback` を分けてあるのと同じ理由 —— 待ち方と判断を
+        同じ関数へ混ぜると、呼び出しを 1 つ足した人が判断を書き写すことになる)。
+
+        締切は鮮度待ちと同じ予算にしてある。どちらも「応答が返らないモータの
+        ぶんだけ起動が遅れる上限」で、性質も手当ても同じ (電源・配線) なので、
+        別の数字を持たせると片方だけ延ばした構成が作れる。
+
+        送るのは読み出しフレームだけで、機構は動かない
+        (`configuration_probe_messages()` の制約)。確認すべき設定を持たない
+        ドライバは 1 通も送らずに即戻る。
+        """
+        motor = self._motors[motor_name]
+        deadline = time.monotonic() + timeout_s
+        while True:
+            probes = motor.configuration_probe_messages()
+            if not probes:
+                return
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "モータ '%s' の設定を %.2fs 以内に読み返せませんでした",
+                    motor_name,
+                    timeout_s,
+                )
+                return
+            for probe in probes:
+                try:
+                    await self.send(motor_name, probe)
+                except Exception:
+                    # 送れないバスでも、既に飛んだぶんの応答は届きうる。
+                    logger.debug("モータ '%s' への設定読み返しの送信に失敗", motor_name)
+            await asyncio.sleep(_ACTIVATION_PROBE_INTERVAL_S)
 
     async def _wait_fresh_feedback(
         self, motor_name: str, timeout_s: float, *, probe: bool = True
