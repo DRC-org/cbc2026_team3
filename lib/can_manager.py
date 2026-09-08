@@ -921,6 +921,17 @@ class CANManager:
         """
         motor = self._motors[motor_name]
 
+        # **「待てば解ける」より先に「待っても解けない」を見る。** 構成が食い違って
+        # いるモータを鮮度待ちへ入れると、原因が「通信が遅い」に見えてしまう
+        blocked = motor.activation_block_reason()
+        if blocked is not None:
+            logger.error(
+                "モータ '%s' を励磁しません (無励磁のまま): %s",
+                motor_name,
+                blocked,
+            )
+            return False
+
         if motor.requires_fresh_feedback_for_activation() and not await self._wait_fresh_feedback(
             motor_name,
             feedback_timeout_s,

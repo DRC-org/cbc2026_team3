@@ -195,6 +195,9 @@ def mock_driver(name: str, can_id: int) -> MagicMock:
     motor.activation_steps.return_value = []
     motor.requires_fresh_feedback_for_activation.return_value = False
     motor.feedback_probe_message.return_value = None
+    # **None は「励磁を止める理由なし」で、MagicMock の既定 (真) とは逆の意味になる。**
+    # 明示しないと、励磁を止める口を足した瞬間に全モータが無励磁のまま残る
+    motor.activation_block_reason.return_value = None
     return motor
 
 

@@ -768,6 +768,165 @@ class TestReleasesBeforeSeeking:
         assert len(rec.commands) < 30
 
 
+class TestTwoStageSearch:
+    """**精度と時間は 1 つの刻みでは両立しない。** `homing.coarse_step` がその答え。
+
+    原点のばらつきは刻み幅そのものなので、0.1mm の精度を要求する軸では `step` を
+    0.1mm まで詰めることになる。ところが実ストローク 750mm の `sub_y_axis` を
+    0.1mm 刻みで探索すると 8000 歩 ≒ 8 分かかり、試合前の点検に入らない
+    (暫定として `search_distance` を 5.0 に絞り、「既に触れている状態から」しか
+    通らない設定で凌いでいた)。
+
+    粗い刻みで当てる → 離脱 → `step` で寄せ直す、の 2 段にすれば、**確定位置の
+    粒度は最後の段の `step` のまま**所要時間だけが縮む。
+    """
+
+    async def test_粗い刻みで当ててから細かい刻みで寄せ直す(self) -> None:
+        """段の境目 (当てる → 離れる → 寄せ直す) がそのまま指令列に出る。"""
+        table = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=20.0, release_distance=2.0
+        )
+        spec = table.axis("y_axis")
+        # ON 区間の入口は -5.45。粗い刻み (1.0) の格子とは意図してずらしてある ——
+        # 揃えると粗い段が入口ちょうどで止まり、寄せ直しの有無が結果に出ない
+        rec = _Recorder(active_at_or_below=-5.45)
+
+        travelled = await _runner(rec).home(spec, _handle(spec, rec))
+
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        assert axis_commands == pytest.approx(
+            [
+                # 粗探索 (1.0 刻み)。-6.0 で ON 区間へ入り、その場へ止め直す
+                -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -6.0,
+                # 離脱。**粗い側の刻みで区間の外まで戻る**
+                -5.0, -5.0,
+                # 寄せ直し (0.1 刻み)。入口 -5.45 を跨いだ -5.5 で確定
+                -5.1, -5.2, -5.3, -5.4, -5.5, -5.5,
+            ]
+        )  # fmt: skip
+        assert rec.origins == ["y_axis"]
+        # 粗い段のまま確定すると -6.0 (入口から 0.55mm)。寄せ直せば刻み幅に収まる
+        assert rec.captured_at[0] == pytest.approx(-5.45, abs=0.1)
+        # 戻り値は 2 段の合計 (粗 6.0 + 細 0.5)。離脱のぶんは含めない
+        assert travelled == pytest.approx(6.5)
+
+    @pytest.mark.parametrize("entry", [-5.45, -5.0, -4.62, -7.3])
+    async def test_粗い格子のどこで当てても確定位置は入口から細かい一歩以内(
+        self, entry: float
+    ) -> None:
+        """**これが二段にする目的そのもの。**
+
+        粗い段が止まるのは「入口を跨いだ最初の格子点」なので、入口が格子のどこに
+        あるかで最大 1 粗ステップぶんばらつく。離脱して細かい刻みで寄せ直せば、
+        ばらつきは最後の段の `step` に収まる。
+        """
+        table = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=20.0, release_distance=2.0
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_at_or_below=entry)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.captured_at[0] == pytest.approx(entry, abs=0.1)
+
+    async def test_粗探索と細探索の合計が探索距離を超えない(self) -> None:
+        """**唯一の無人の歯止めの意味を変えない。**
+
+        段ごとに `search_distance` を与え直すと、上限が黙って 2 倍になる。
+        配線が抜けたセンサでは両段とも「いつまでも当たらない」ので、そのぶん
+        機構を押し込む距離がそのまま倍になる。
+        """
+        table = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=4.0, release_distance=2.0
+        )
+        spec = table.axis("y_axis")
+        # 粗探索が上限 4.0 をちょうど使い切る位置で当たる。寄せ直しに残りは無い
+        rec = _Recorder(active_at_or_below=-3.45)
+
+        with pytest.raises(HomingError, match="到達しませんでした"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == []
+
+    async def test_粗探索の停滞判定は粗い刻みを基準にする(self) -> None:
+        """基準を細かい側にすると、粗い 1 歩の 4 割しか動かない機構が正常に見える。
+
+        引っかかった機構は「指令しても進まない」形でしか現れないので、
+        基準がずれると探索距離を使い切るまで押し当て続けることになる。
+        """
+        table = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=20.0, release_distance=2.0
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder()  # 一度も当たらない
+        # 1 回の待ちで 0.08mm。粗い 1 歩 (1.0mm) の待ち 5 回ぶんでも 0.4mm しか進まない
+        handle = _slow_handle(spec, rec, per_tick=0.08)
+
+        with pytest.raises(HomingError, match="動きません"):
+            await _runner(rec).home(spec, handle)
+
+        # 細かい側 (0.05mm) を基準にすると 0.4mm は「進んだ」に化け、
+        # 20mm を使い切るまで 50 歩押し当て続ける
+        assert len(rec.commands) <= _STALL_LIMIT + 1
+        assert rec.origins == []
+
+    async def test_細探索の停滞判定は細かい刻みを基準にする(self) -> None:
+        """**粗い側の基準を持ち込むと、動いている機構を数歩で止める。**
+
+        寄せ直しは 1 歩 0.1mm しか進まないので、粗い側の基準 (1.0mm) で数えると
+        どの歩も「進まなかった」になり、正常な機構が `_STALL_LIMIT` 歩で落ちる。
+        """
+        table = _table(
+            direction=-1, step=0.1, coarse_step=2.0, search_distance=20.0, release_distance=4.0
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_at_or_below=-5.05)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        # 離脱の終わり (-4.0 へ止め直した指令) から後が寄せ直しの段
+        release_end = len(axis_commands) - 1 - axis_commands[::-1].index(pytest.approx(-4.0))
+        fine_commands = axis_commands[release_end + 1 :]
+        # 停滞判定より多くの歩数を踏んでいる (踏まなければこの検証は空振りする)
+        assert len(fine_commands) > _STALL_LIMIT
+        assert rec.captured_at[0] == pytest.approx(-5.05, abs=0.1)
+
+    async def test_粗探索が区間を跨ぎ切ったら寄せ直さずに降りる(self) -> None:
+        """**粗い 1 歩が ON 区間より広い設定は config からは検証できない。**
+
+        跨ぎ切ると、当てた時点でもう区間の外 (機構端の側) に居る。そこから
+        寄せ直すと探索方向へ走り抜けるので、動かす前に「今 ON か」を問い直す。
+        """
+        table = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=20.0, release_distance=2.0
+        )
+        spec = table.axis("y_axis")
+        # ON 区間は -5.6〜-5.2 (幅 0.4mm)。粗い刻み 1.0mm は 1 歩で跨ぎ切る
+        rec = _Recorder(active_band=(-5.6, -5.2))
+
+        with pytest.raises(HomingError, match="coarse_step"):
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        # 粗探索 6 歩 + その場へ止め直す 1 通で終わり。1 歩も追加で動かさない
+        assert len(rec.commands) == 7
+        assert rec.origins == []
+
+    async def test_粗い刻みを書かない軸は従来どおり単段で寄せる(self) -> None:
+        """`rotate` (step 2.0deg で 90 歩) のように 1 つの刻みで足りる軸に二段は要らない。"""
+        table = _table(direction=-1, step=1.0, search_distance=20.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_at_or_below=-5.45)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
+        # 離脱も寄せ直しも挟まらない (挟むと確定位置が入口へ寄って -6.0 でなくなる)
+        assert axis_commands == pytest.approx([-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -6.0])
+        assert rec.captured_at == pytest.approx([-6.0])
+
+
 class TestSpecValidation:
     """設定の誤りは起動時に落とす。試合直前に「動かない」で気付くのでは遅い。"""
 
@@ -780,6 +939,14 @@ class TestSpecValidation:
             ({"search_distance": -1}, "search_distance"),
             ({"step": 0}, "step"),
             ({"step": 10.0}, "search_distance"),  # 1 歩も踏めない
+            ({"coarse_step": 0, "release_distance": 5.0}, "coarse_step"),
+            ({"coarse_step": -1.0, "release_distance": 5.0}, "coarse_step"),
+            # 粗くない粗探索 (既定の step は 1.0)。時間だけを倍にする
+            ({"coarse_step": 1.0, "release_distance": 5.0}, "coarse_step"),
+            # 探索距離より粗い刻み (既定の search_distance は 5.0)
+            ({"coarse_step": 10.0, "release_distance": 5.0}, "coarse_step"),
+            # 離脱は粗い刻みで動くので、step から作る既定では桁が合わない
+            ({"coarse_step": 2.0}, "release_distance"),
         ],
     )
     def test_不正な値を拒否する(self, override: dict, message: str) -> None:

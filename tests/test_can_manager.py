@@ -394,6 +394,45 @@ class TestMotorActivation:
         assert seen_rx_at and seen_rx_at[0] is not None
         assert seen_rx_at[0] > (mgr.last_feedback_at("m1") or 0.0) - 1.0
 
+    async def test_構成が食い違うモータは励磁しない(self) -> None:
+        """**「待てば解ける」と「待っても解けない」を分ける。**
+
+        固定小数点レンジの食い違いは待っても解けないので、鮮度待ちのタイムアウトへ
+        紛れ込ませてはならない (原因が「通信が遅い」に見えてしまう)。実機では
+        p_max の食い違いで位置が 80 倍に読め、その値が保持目標として書かれて機構が
+        リミットスイッチを踏み越えた。
+        """
+        mgr, motor = self._prepare()
+        motor.activation_block_reason.return_value = "p_max が食い違っています"
+        motor.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
+        ]
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            activated = await mgr.activate_motor("m1")
+
+        assert activated is False
+        motor.activation_steps.assert_not_called()
+        assert send.await_count == 0
+
+    async def test_構成の食い違いは鮮度待ちより先に見る(self) -> None:
+        """鮮度待ちを先に通すと、待っても解けない食い違いで 0.5 秒待たされる。
+
+        しかもその間 `feedback_probe_message` (= disable) を打ち続けるので、
+        「止めたい相手へ通信を続ける」形になる。
+        """
+        mgr, motor = self._prepare()
+        motor.activation_block_reason.return_value = "p_max が食い違っています"
+        motor.requires_fresh_feedback_for_activation.return_value = True
+        motor.feedback_probe_message.return_value = can.Message(arbitration_id=0x203, data=bytes(8))
+
+        with patch.object(mgr, "send", new_callable=AsyncMock) as send:
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=5.0)
+
+        assert activated is False
+        # 鮮度待ちへ入っていれば問い合わせが 1 通は飛ぶ
+        assert send.await_count == 0
+
     async def test_activation_skipped_when_feedback_never_arrives(self) -> None:
         """現在角が分からないまま enable すると原点へ飛ぶため、無励磁のままにする。"""
         mgr, motor = self._prepare()

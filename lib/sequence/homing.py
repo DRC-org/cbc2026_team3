@@ -46,9 +46,14 @@
 分からないので、そこを原点にすると粗い刻みぶんのばらつきが座標へ焼き付く
 (離脱段が存在する理由そのもの)。**書かなかった軸は従来どおりの単段探索**で、
 `rotate` (step 2.0deg で 90 歩) のように 1 つの刻みで足りる軸に二段は要らない。
-**離脱は粗い段の後でも `step` 刻みのまま**行う —— 離脱の役目は「ON 区間の外へ
-出る」ことだけなので、粗い刻みで出ると寄せ直しがその 1 歩ぶんを細かく数え直す
-ことになり、粗探索で稼いだ時間をそのまま返す。
+
+**離脱は常に粗い側の刻み (`coarse_step or step`) で行う。** 離脱の役目は
+「ON 区間の外へ出る」ことだけで、原点の粒度を決めるのは最後の寄せ直しである。
+細かい刻みで出ると、区間の奥から出るのに `区間幅 / step` 歩かかる —— 寄せ直しへ
+回すはずの歩数を離脱で使うだけなので、合計は縮まない。粗い刻みで出れば、
+**粗探索が ON 区間を跨ぎ切ってしまった場合にも区間の手前まで戻れる**
+(細かい刻みで出ると跨いだ先から 1 歩ぶんしか戻らず、寄せ直しは区間から
+離れる向きへ走り出す)。
 
 **探索の到達判定はラッチで見る。「今 ON か」では取りこぼす。** ON 区間が `step` より
 狭い機構では、指令 1 回で区間を跨いでしまい `settle_s` 後の観測ではもう OFF になって
@@ -123,10 +128,23 @@ def _release_limit(homing: HomingSpec) -> float:
     離脱の許容も一緒に縮み、**精度を上げるほどスイッチから離れられなくなる**。
     実際に sub_y_axis で step 0.5 -> 0.1 にした途端、許容が 10mm から 2mm へ落ちて
     ON 区間 (実測 2mm 以上) を 0.1mm ぶん抜けきれずに失敗した (2026-09-09)。
+
+    **二段探索の軸ではこの既定は使われない** —— 離脱が粗い刻みで動くのに既定は
+    `step` から作られて桁が合わないので、`coarse_step` を書いた軸には
+    `release_distance` を必須にしてある (`HomingSpec.__post_init__`)。
     """
     if homing.release_distance is not None:
         return homing.release_distance
     return homing.step * _RELEASE_STEP_LIMIT
+
+
+def _not_reached_message(spec: AxisSpec, homing: HomingSpec, limit: float) -> str:
+    """探索距離を使い切った理由。**二段探索では段ごとに残りが違う**ので引数で受ける。"""
+    return (
+        f"軸 '{spec.name}' が {limit}{spec.unit} 動かしても"
+        f" 原点センサ '{homing.sensor}' に到達しませんでした"
+        " (探索方向・機構の引っかかり・センサの配線を確認してください)"
+    )
 
 
 class HomingError(RuntimeError):
@@ -226,14 +244,15 @@ class HomingRunner:
                 (左右が別々の時刻に動くとその場で機構が壊れる)
 
         Returns:
-            **探索で**実際に動いた距離 [軸の unit]。ログと検証用。
+            **探索で**実際に動いた距離 [軸の unit]。ログと検証用。二段探索では
+            粗い段と細い段の合計 (どちらも `search_distance` を食う)。
             離脱 (下記) のぶんは含めない —— 原点の精度を決めているのは
             「どこから寄せて当たったか」であって、その前に離れた距離ではない。
 
         Raises:
             HomingError: 原点を確定する手段が無い / センサまたは軸のフィードバックが
                 途絶している / 実測が進まない / 探索距離を超えても当たらなかった /
-                離脱してもセンサが OFF にならない
+                離脱してもセンサが OFF にならない / 粗探索が ON 区間を跨ぎ切った
         """
         homing = spec.homing
         if homing is None:
@@ -245,51 +264,103 @@ class HomingRunner:
         # 前回の零点確定や手動操縦でスイッチを跨いだ痕跡だけで離脱段へ入り、
         # 触れてもいない位置から _RELEASE_STEP_LIMIT 歩ぶん離れる向きへ動き出す
         if self._sensor_active(homing.sensor):
-            # **触れた状態のまま確定してはならない。** リミットスイッチの ON 区間には
-            # 幅があるので、その場を原点にすると「区間のどこで探索を始めたか」が
-            # そのまま原点のばらつきになる (区間幅ぶん = step の何倍にもなる)。
-            # いったん区間の外まで離れてから寄せ直せば、確定位置は探索の step 粒度に
-            # 収まり、どこから始めても同じ場所が原点になる。
-            # **離脱は探索と逆向き**なので押し込む方向へは動かない (機構端で始まった
-            # ときに壊さない、という元の性質は保たれる)。
             logger.info("[homing] %s: 既にセンサに触れているため一度離れて寄せ直す", spec.name)
-            await self._seek(
+            await self._release(spec, handle, homing)
+
+        # **探索距離の上限は 2 段の合計に掛ける。** 段ごとに `search_distance` を
+        # 与え直すと、唯一の無人の歯止めが黙って 2 倍になる
+        travelled = 0.0
+
+        if homing.coarse_step is not None:
+            start = self._observe(spec, handle)
+            observed = await self._seek(
                 spec,
                 handle,
                 homing,
-                direction=-homing.direction,
-                want_active=False,
-                limit=_release_limit(homing),
-                limit_message=(
-                    f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
-                    f" ({_release_limit(homing)}{spec.unit} 動かしても OFF に"
-                    " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
-                    " なるので、ファーム側の極性設定 (sensorActiveLow) を"
-                    "接点の固着・配線の短絡と併せて確認してください。"
-                    " 極性が正しいなら ON 区間がこの距離より広いので"
-                    " homing.release_distance を実測へ広げてください"
-                ),
+                step=homing.coarse_step,
+                direction=homing.direction,
+                want_active=True,
+                limit=homing.search_distance,
+                limit_message=_not_reached_message(spec, homing, homing.search_distance),
             )
+            travelled += abs(observed - start)
+            logger.info(
+                "[homing] %s: 粗探索 (%g%s 刻み) で %.2f%s 動かして接触。"
+                "離脱して %g%s 刻みで寄せ直す",
+                spec.name,
+                homing.coarse_step,
+                spec.unit,
+                travelled,
+                spec.unit,
+                homing.step,
+                spec.unit,
+            )
+            # **跨ぎ切っていたらここで降りる。** 粗い 1 歩が ON 区間より広いと、
+            # 当てた時点でもう区間の外 (機構端の側) に居る。そのまま離脱・寄せ直しを
+            # すると探索方向へ走り抜けるので、動かす前に問い直す
+            if not self._sensor_active(homing.sensor):
+                raise HomingError(
+                    f"軸 '{spec.name}' は粗探索 ({homing.coarse_step}{spec.unit} 刻み) の"
+                    f" 1 歩で原点センサ '{homing.sensor}' の ON 区間を跨ぎ切りました"
+                    " (当てた直後にもう OFF)。このまま寄せ直すと探索方向へ走り抜けるので"
+                    " 止めます。homing.coarse_step を ON 区間の実測より狭くしてください"
+                )
+            await self._release(spec, handle, homing)
 
-        origin = self._observe(spec, handle)
+        start = self._observe(spec, handle)
+        remaining = homing.search_distance - travelled
         observed = await self._seek(
             spec,
             handle,
             homing,
+            step=homing.step,
             direction=homing.direction,
             want_active=True,
-            limit=homing.search_distance,
-            limit_message=(
-                f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
-                f" 原点センサ '{homing.sensor}' に到達しませんでした"
-                " (探索方向・機構の引っかかり・センサの配線を確認してください)"
-            ),
+            limit=remaining,
+            limit_message=_not_reached_message(spec, homing, remaining),
         )
+        travelled += abs(observed - start)
 
-        travelled = abs(observed - origin)
         logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
         await self._capture_origin(spec.name)
         return travelled
+
+    async def _release(self, spec: AxisSpec, handle: AxisHandle, homing: HomingSpec) -> float:
+        """センサの ON 区間の外まで**探索と逆向きに**離れる。
+
+        **触れた状態のまま確定してはならない。** リミットスイッチの ON 区間には
+        幅があるので、その場を原点にすると「区間のどこで探索を始めたか」がそのまま
+        原点のばらつきになる (区間幅ぶん = step の何倍にもなる)。いったん区間の外まで
+        離れてから寄せ直せば、確定位置は探索の step 粒度に収まり、どこから始めても
+        同じ場所が原点になる。**離脱は探索と逆向き**なので押し込む方向へは動かない
+        (機構端で始まったときに壊さない、という元の性質は保たれる)。
+
+        **刻みは常に粗い側 (`coarse_step or step`)。** 原点の粒度を決めるのは最後の
+        寄せ直しなので、離脱を細かくしても得るものは無く、区間の奥から出るのに
+        `区間幅 / step` 歩を使うだけで合計は縮まない。粗い刻みで出れば、粗探索が
+        ON 区間を跨ぎ切ってしまったときにも区間の手前まで戻れる (細かい刻みだと
+        跨いだ先から 1 歩しか戻らず、寄せ直しが区間から離れる向きへ走り出す)。
+        上限は段に依らず `homing.release_distance` (区間の広さで決まる 1 つの量)。
+        """
+        limit = _release_limit(homing)
+        return await self._seek(
+            spec,
+            handle,
+            homing,
+            step=homing.coarse_step or homing.step,
+            direction=-homing.direction,
+            want_active=False,
+            limit=limit,
+            limit_message=(
+                f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
+                f" ({limit}{spec.unit} 動かしても OFF に"
+                " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
+                " なるので、ファーム側の極性設定 (sensorActiveLow) を"
+                "接点の固着・配線の短絡と併せて確認してください。"
+                " 極性が正しいなら ON 区間がこの距離より広いので"
+                " homing.release_distance を実測へ広げてください"
+            ),
+        )
 
     async def _seek(
         self,
@@ -297,18 +368,22 @@ class HomingRunner:
         handle: AxisHandle,
         homing: HomingSpec,
         *,
-        direction: int,
+        step: float,
+        direction: float,
         want_active: bool,
         limit: float,
         limit_message: str,
     ) -> float:
-        """センサが `want_active` になるまで `direction` 方向へ step ずつ動かす。
+        """センサが `want_active` になるまで `direction` 方向へ `step` ずつ動かす。
 
         **探索と離脱の両方がこの 1 本を通る。** 歯止め (移動量の上限・停滞判定) を
         向きごとに書き分けると、片方だけ直せてしまう —— 症状は「探索は止まるのに
         離脱は永久に動き続ける」で、離脱は普段踏まない経路なので気付けない。
+        二段探索の粗い段・細い段も同じここを通る (`step` と `limit` だけが違う)。
 
         Args:
+            step: 1 歩の移動量。**停滞判定も追従待ちもこの値だけを基準にする**
+                —— 粗い段の基準を細い段へ持ち込むと、動いている機構を数歩で止める
             direction: 進む向き。探索は `homing.direction`、離脱はその反対
             want_active: この状態になったら到達。探索は True、離脱は False
             limit: 実測の移動量の上限。超えたら `limit_message` で降りる
@@ -329,10 +404,12 @@ class HomingRunner:
             # **毎回そのときの実測位置へアンカーし直す。** 指令の積算で組むと、
             # 追従が遅れているあいだ指令だけが先行し続け、機構には常に大きな偏差が
             # 掛かったままになる (位置制御ループは電流上限まで使って押す)
-            commanded = observed + direction * homing.step
+            commanded = observed + direction * step
             await handle.set_target_value(spec.to_commands(commanded))
 
-            hit = await self._wait_step(spec, handle, homing, commanded, want_active=want_active)
+            hit = await self._wait_step(
+                spec, handle, homing, commanded, step=step, want_active=want_active
+            )
 
             previous = observed
             observed = self._observe(spec, handle)
@@ -350,7 +427,7 @@ class HomingRunner:
             # 指令を実測へ再アンカーしている以上、引っかかった機構は「指令しても
             # 進まない」形でしか現れない。実測の移動量で数える上限だけでは
             # 永久に降りられないので、進まないことそのものを失敗として扱う
-            progress = _progress_threshold(homing)
+            progress = _progress_threshold(step)
             stalled = 0 if abs(observed - previous) >= progress else stalled + 1
             if stalled >= _STALL_LIMIT:
                 raise HomingError(
@@ -397,6 +474,7 @@ class HomingRunner:
         homing: HomingSpec,
         commanded: float,
         *,
+        step: float,
         want_active: bool,
     ) -> bool:
         """1 歩ぶんの追従を待つ。待っている間にセンサが `want_active` になったら True。
@@ -419,7 +497,7 @@ class HomingRunner:
         # 待ちが丸ごと消える。そのとき呼び出し側の停滞判定は「待ったのに進まなかった」
         # ではなく「待っていないので進んでいない」を数えるので、**正常に動いている
         # 機構が 0.3 秒で HomingError になる** (実機で発生)。
-        reached = _progress_threshold(homing)
+        reached = _progress_threshold(step)
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
             if self._sensor_reached(homing.sensor, want_active=want_active):

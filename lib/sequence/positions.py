@@ -128,6 +128,9 @@ class HomingSpec:
     #: からは検証できない —— 広いと粗い 1 歩で ON 区間を跨ぎ切り、離脱も寄せ直しも
     #: できない位置 (= 機構端の側) で止まる。跨いだことは `HomingRunner` が
     #: 粗探索の直後に検出して降りる。
+    #:
+    #: **書くなら `release_distance` も要る** —— 離脱はこの粗い刻みで動くのに、
+    #: 既定の許容は `step` から作られるので必ず桁が合わない。
     coarse_step: float | None = None
 
     def __post_init__(self) -> None:
@@ -161,6 +164,16 @@ class HomingSpec:
                 raise ValueError(
                     f"homing.coarse_step ({self.coarse_step}) が "
                     f"search_distance ({self.search_distance}) を超えています"
+                )
+            if self.release_distance is None:
+                # 離脱は粗い刻みで動くのに、既定の許容は step から作られる
+                # (step * 20)。二段の軸では step が精度のために詰めてあるので、
+                # 既定は必ず桁の違う値になる —— 書いたのに 1 歩で上限を超える
+                # (= 離脱できない) 設定が黙って通る
+                raise ValueError(
+                    "homing.coarse_step を指定するなら release_distance も必要です "
+                    "(既定は step から作られるので、粗い刻みで離脱する軸では"
+                    "桁が合いません)"
                 )
 
 
@@ -720,9 +733,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
             ),
-            coarse_step=(
-                float(raw["coarse_step"]) if raw.get("coarse_step") is not None else None
-            ),
+            coarse_step=(float(raw["coarse_step"]) if raw.get("coarse_step") is not None else None),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from exc

@@ -184,6 +184,9 @@ class Dm3520Driver(MotorDriver):
         # 「未受信」と「分かっている」を混ぜない目的は同じ)。
         self.error_code = int(Dm3520Error.DISABLED)
         self._feedback_received = False
+        # 実機のレジスタ 0x15 から読み返した値。None は「まだ読めていない」。
+        # config の p_max と食い違うと位置が比例倍で読めるので、励磁を止める根拠になる
+        self._reported_p_max: float | None = None
 
     # ------------------------------------------------------------------ #
     #  固定小数点 <-> 実数
@@ -290,6 +293,18 @@ class Dm3520Driver(MotorDriver):
             and data[2] in (self.CONFIG_READ, self.CONFIG_WRITE)
         )
 
+    def _record_config_response(self, msg: can.Message) -> None:
+        """設定応答から実機の固定小数点レンジを控える。
+
+        **状態フィードバックと同じ MST_ID で返ってくるこの 1 通が、実機の p_max を
+        知る唯一の口である。** 読み返しを `initialization_steps()` に置いてあるので、
+        起動のたびに 1 通だけ届く。
+        """
+        data = msg.data
+        if data[2] != self.CONFIG_READ or data[3] != self.REG_P_MAX:
+            return
+        self._reported_p_max = struct.unpack("<f", bytes(data[4:8]))[0]
+
     def matches_feedback(self, msg: can.Message) -> bool:
         if msg.is_extended_id or len(msg.data) != 8:
             # 本機は標準フレームしか送らない。拡張 ID をここで落としておくと、
@@ -298,6 +313,7 @@ class Dm3520Driver(MotorDriver):
         if msg.arbitration_id != self.master_id:
             return False
         if self._is_config_response(msg):
+            self._record_config_response(msg)
             return False
         # D0 の下位 4bit は送り主の CAN ID の下位 4bit (マニュアル「Feedback Frame」節)。
         # MST_ID を共有する複数台を見分ける唯一の手掛かりなので必ず突き合わせる
@@ -358,6 +374,9 @@ class Dm3520Driver(MotorDriver):
         steps = [
             (self.encode_disable(), 0.05),
             (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
+            # **書くのではなく読んで突き合わせる。** 応答は `matches_feedback` の
+            # 途中で拾い、食い違っていれば `activation_block_reason()` が励磁を止める
+            (self.encode_read_register(self.REG_P_MAX), 0.05),
         ]
         if self.set_zero_on_start:
             steps.append((self.encode_set_zero(), 0.2))
@@ -405,6 +424,39 @@ class Dm3520Driver(MotorDriver):
         `docs/checks_and_health.md` の「零点確定」節。
         """
         return [(self.encode_set_zero(), 0.2)]
+
+    def activation_block_reason(self) -> str | None:
+        """実機の p_max が config と食い違っていたら励磁を止める。
+
+        !!! **これは「書いて直す」の代わりである。一度書いて実機を壊しかけた** !!!
+        p_max はフラッシュへ保存されず電源断で出荷値 12.5 へ戻るので、CTRL_MODE と
+        同じく起動のたびに書けばよいと考えたのが誤りだった —— **書き終わるまでの窓で
+        復号レンジが食い違う**。ドライバが 12.5 で送ったフィードバックを config の
+        1000 で復号すると位置が 80 倍に読め、直後の `activation_steps` がその値を
+        「現在角」として保持目標に書く。機構は 80 倍先へ走り、リミットスイッチを
+        踏み越えて機構端まで行った (2026-09-09 に実機で発生)。現在角を書いてから
+        励磁するのは飛び出しを塞ぐための仕掛けなのに、レンジが食い違う窓では
+        それ自体が飛ばす原因になる。
+
+        **読み返して食い違いを見つけたら、直さずに止める。** これは
+        「起動時に構成の曖昧さを黙って解決しない」と同じ方針で、直す側に回ると
+        「直している最中」という危険な窓が必ずできる。
+
+        **まだ読めていない (`None`) ときは止めない。** 読み返しの応答は
+        `initialization_steps()` の 1 通に依存しており、取りこぼしは通信の問題で
+        あって構成の食い違いではない。ここで止めると、応答が 1 通落ちただけで
+        機体が無励磁のまま動かせなくなる (鮮度待ちのタイムアウトが別途効く)。
+        """
+        reported = self._reported_p_max
+        if reported is None or math.isclose(reported, self.p_max, rel_tol=1e-6):
+            return None
+        ratio = self.p_max / reported if reported else float("inf")
+        return (
+            f"実機の p_max が {reported}rad、config が {self.p_max}rad で食い違っています"
+            f" (位置が約 {ratio:.4g} 倍で読めます)。**電源断でフラッシュの出荷値へ"
+            "戻ったか、config を書き換えたのに実機へ反映していないかのどちらかです。**"
+            "レジスタ 0x15 を config の値へ書き直してから起動し直してください"
+        )
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         # MotorState の初期値 0.0rad を実測角と取り違えると、機構は「原点へ戻る」

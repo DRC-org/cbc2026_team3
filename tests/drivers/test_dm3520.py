@@ -19,6 +19,15 @@ from lib.drivers.dm3520 import Dm3520CtrlMode, Dm3520Driver, Dm3520Error
 from tests.feedback_frames import dm3520_feedback, feed_dm3520
 
 
+def _config_response(drv: Dm3520Driver, register: int, value: float) -> can.Message:
+    """0x7FF への読み出しに対する応答フレーム (マニュアル「Read Parameters」節)。
+
+    **状態フィードバックと同じ MST_ID で返る**ので、実物と同じ形で組み立てる。
+    """
+    data = struct.pack("<HBBf", drv.can_id, Dm3520Driver.CONFIG_READ, register, value)
+    return can.Message(arbitration_id=drv.master_id, data=data, is_extended_id=False)
+
+
 def _driver(**kwargs: object) -> Dm3520Driver:
     params: dict = {"master_id": 0x11}
     params.update(kwargs)
@@ -341,6 +350,47 @@ class TestStartupSequence:
 
         assert Dm3520Driver.REG_P_MAX not in writes
         assert writes == [Dm3520Driver.REG_CTRL_MODE]
+
+    def test_初期化で_p_max_を読み返す(self) -> None:
+        """**書くのではなく読んで突き合わせる。** 読まなければ食い違いに気付けない。"""
+        drv = _driver()
+
+        reads = [
+            bytes(msg.data)[3]
+            for msg, _ in drv.initialization_steps()
+            if msg.arbitration_id == 0x7FF and bytes(msg.data)[2] == 0x33
+        ]
+
+        assert reads == [Dm3520Driver.REG_P_MAX]
+
+    def test_p_max_が食い違うと励磁を止める(self) -> None:
+        """**位置が比例倍で読める状態のまま励磁すると、保持目標が桁ごとずれる。**
+
+        実機では 12.5 のドライバを config の 1000 で復号して 80 倍の位置を読み、
+        その値が保持目標として書かれて機構がリミットスイッチを踏み越えた。
+        """
+        drv = _driver(p_max=1000.0)
+        assert drv.activation_block_reason() is None  # まだ読めていないうちは止めない
+
+        drv.matches_feedback(_config_response(drv, Dm3520Driver.REG_P_MAX, 12.5))
+
+        reason = drv.activation_block_reason()
+        assert reason is not None
+        assert "12.5" in reason
+        assert "1000" in reason
+
+    def test_p_max_が一致していれば止めない(self) -> None:
+        drv = _driver(p_max=1000.0)
+
+        drv.matches_feedback(_config_response(drv, Dm3520Driver.REG_P_MAX, 1000.0))
+
+        assert drv.activation_block_reason() is None
+
+    def test_読み返しの応答をフィードバックとして取り込まない(self) -> None:
+        """**応答もフィードバックと同じ MST_ID で返る。** 取り込むと実測角が嘘になる。"""
+        drv = _driver(p_max=1000.0)
+
+        assert drv.matches_feedback(_config_response(drv, Dm3520Driver.REG_P_MAX, 1000.0)) is False
 
     def test_set_zero_on_start_appends_zero_command(self) -> None:
         drv = _driver(set_zero_on_start=True)
