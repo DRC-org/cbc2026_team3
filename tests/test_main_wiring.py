@@ -1950,30 +1950,51 @@ class TestOriginResolverViaSetZero:
 
         assert monitor.is_suspended("rotate") is False
 
-    async def test_dm3520_は対象外(self) -> None:
-        """`SET_ZERO` の安全な順序は disable を要求するが、`sub_lift` は
-        disable すると自重で落ちる (保持ブレーキが無い)。
+    async def test_dm3520_も_set_zero_で確定できる(self) -> None:
+        """サブハンドの前後軸は前端スイッチで零点を確定する。
+
+        かつては対象外だった —— 「無励磁にする操作が安全なのは自重で落ちない軸
+        だけ」という理由で `sub_lift` が落ちる前提に立っていたが、実機で否定された
+        (2026-09-08)。**特殊コマンドは 3 つとも同じ CAN ID なので、順序を見るには
+        末尾バイトを読むしかない。**
         """
         table = load_position_table(
             {
                 "axes": {
-                    "sub_lift": {
+                    "sub_y_axis": {
                         "unit": "mm",
                         "command_unit": "rad",
-                        "motors": {"sub_lift_m": {"scale": 1.0}},
+                        "motors": {"sub_y_axis_m": {"scale": 1.0}},
                     }
                 },
-                "positions": {"sub_lift": {"home": 0.0}},
+                "positions": {"sub_y_axis": {"home": 0.0}},
             },
             source="<test>",
         )
+        sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_dm3520", mock_bus())
-        mgr.add_motor("can_dm3520", Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11))
+        mgr.add_motor("can_dm3520", Dm3520Driver("sub_y_axis_m", can_id=0x01, master_id=0x11))
 
-        resolve = main._make_origin_resolver([], table, can_managers=[mgr])
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            sent.append(msg)
+            # 問い合わせへの応答としてフィードバックが届く状況を模す
+            mark_feedback_at(mgr, motor_name, time.time())
 
-        assert resolve("sub_lift") is None
+        mgr.send = _send  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver([], table, can_managers=[mgr])("sub_y_axis")
+
+        assert capture is not None
+        await capture()
+
+        # 特殊コマンドだけを抜き出す (目標書き込みは 0xFF が 7 つ並ばない)
+        specials = [msg.data[7] for msg in sent if msg.data[:7] == bytes([0xFF] * 7)]
+        zero = specials.index(Dm3520Driver.SPECIAL_SET_ZERO)
+        # SET_ZERO の前に必ず disable がある (励磁したまま原点を動かすと機構が飛ぶ)
+        assert Dm3520Driver.SPECIAL_DISABLE in specials[:zero]
+        # SET_ZERO の後に必ず enable がある (無励磁のまま残さない)
+        assert Dm3520Driver.SPECIAL_ENABLE in specials[zero:]
 
 
 class TestMotorCheckWiring:

@@ -58,23 +58,26 @@ axes:
   # ドライバ側で頭打ちになり、フィードバックも張り付くので「送ったのに途中で止まる」
   # という形でしか現れない。
   #
-  # !!! 原点は電源投入位置 !!! 本機は投入時に 0.0rad へ固定されるので、搬送中に手で
-  # 動かしたぶんがそのまま座標のずれになる。リミットスイッチを付けたら下の homing:
-  # を有効化すること —— ただし現状 lib/sequence/homing.py の零点確定は
-  # M3508PositionLoop 経由 (main.py の _make_origin_resolver) にしか対応しておらず、
-  # 本機で有効化するには SET_ZERO (0xFE) を送る経路を足す必要がある
-  # (config/main_hand_positions.yaml の rotate も同じ状態)。
+  # **前後軸の原点は前端のリミットスイッチ** (sub_y_axis_f_limit_sensor = 0x49)。
+  # 零点確定は Dm3520Driver の SET_ZERO 経路 (無励磁 -> 0xFE -> 再励磁) を通る。
+  #
+  # !!! sub_lift の原点は依然として電源投入位置 !!! 本機は投入時に 0.0rad へ固定
+  # されるので、搬送中に手で動かしたぶんがそのまま座標のずれになる。上下端の
+  # スイッチ (0x4B / 0x4C) は配線も極性も確定しているが、探索パラメータが未実測
+  # なので homing: を書いていない。書けば前後軸と同じ経路で動く。
   #
   # 前後方向 (Y 方向)。**軸名に sub_ を付けるのは main_hand の y_axis と衝突させない
   # ため** —— 統合動作確認は両ハンドの位置定数を PositionTable.merged で 1 つに
   # まとめるので、軸名が重なると起動ごと落ちる (main.py の _wire_motor_check_sequence)。
-  # homing:
-  #   sensor: sub_y_axis_origin_sensor
-  #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
-  #   search_distance: 40.0   # [mm] TODO: ストローク全長より少し長い値へ
-  #   step: 0.5               # [mm]
-  #   settle_s: 0.05
   sub_y_axis:
+    # 原点 = 前端。**唯一の無人の歯止めは search_distance だけ**なので、
+    # 実測ストロークが分かるまでこの値を広げないこと。
+    homing:
+      sensor: sub_y_axis_f_limit_sensor   # config/sub_hand.yaml の sensors: に登録した名前
+      direction: 1            # 前端へ寄せる向き。TODO(実機で確認): 逆だと後端まで押し込む
+      search_distance: 40.0   # [mm] TODO(実機で確認): 実測ストローク + わずかな余裕へ
+      step: 0.5               # [mm] 下限は静止摩擦、上限は tolerance 1.0 の半分
+      settle_s: 0.05          # 指令が機構へ届き、センサの状態が返る余裕
     unit: mm
     command_unit: rad
     scale: 0.0555556     # mm -> rad (出力軸)。導出は上のコメント
@@ -85,9 +88,11 @@ axes:
     # 手動は操縦者が端へ寄せていく操作なので、境界を物理端に合わせると
     # 「指令は範囲内なのに機構は突き当たっている」状態が作れてしまう。
     # TODO: 機構完成後、実測のストローク端より内側へ詰めること
+    # **原点が前端なので収納側が負になる。** max をわずかな正に留めてあるのは、
+    # 前端スイッチを越えた先が機構の突き当たりだから。
     manual:
-      min: -5.0
-      max: 30.0
+      min: -30.0
+      max: 2.0
       steps: [1.0, 5.0, 10.0]
 
   # 昇降。正が上、負が下 (TODO: 実機で確認し、逆なら scale の符号を反転する)。
@@ -234,9 +239,10 @@ positions:
 
   # 直動 2 軸 [mm]。原点 (0.0) は電源投入位置。
   # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
+  # **前後軸の原点は前端** (零点確定でそこへ寄せる) なので、収納側が負になる。
   sub_y_axis:
-    home: 0.0            # 収納位置 = 電源投入位置
-    extended: 20.0       # 前方への展開位置 [mm] (出力軸で約 64deg)
+    home: -20.0          # 収納位置 [mm]。前端から後ろへ
+    extended: 0.0        # 前方への展開位置 = 前端 = 原点
 
   sub_lift:
     home: 0.0            # 下端 = 電源投入位置

@@ -224,14 +224,19 @@ class Dm3520Driver(MotorDriver):
     def encode_set_zero(self) -> can.Message:
         """今の位置を原点として書き込む (特殊コマンド)。
 
-        **`deactivation_steps` / `origin_capture_steps` は宣言しない。** つまり
-        `supports_origin_capture()` は False のままで、リミットスイッチによる
-        零点確定 (`lib/sequence/homing.py`) の対象にならない —— このフレームを
-        安全に送れる状態が「無励磁」に限られる一方、`sub_lift` は disable すると
-        自重で落ちる (保持は減速比 19.2 のギヤ頼みで、保持ブレーキが無い)。
-        スイッチに当たった位置で無励磁にする操作は安全側と言えないため、
-        機構側に保持手段が入るまで経路を開けない。
-        呼び出し口は `set_zero_on_start` (起動時の一律 0) だけである。
+        **必ず無励磁にしてから送る。** 励磁したまま送るとドライバ内部の位置目標が
+        旧座標のまま残り、原点の差分だけ機構が飛ぶ。順序を保証するのは
+        `CANManager.capture_origin_via_set_zero` で、`deactivation_steps` →
+        `origin_capture_steps` → `activate_motor(after_set_zero=True)` の 3 段を
+        踏む。**この 2 つを両方宣言して初めて `supports_origin_capture()` が True に
+        なる**ので、片方だけ足して「励磁したまま原点を動かす経路」を作らないこと。
+
+        かつては 2 つとも宣言せず、零点確定の対象外にしていた —— 「無励磁にする
+        操作が安全と言えるのは自重で落ちない軸だけ」という理由で、`sub_lift` が
+        落ちる前提に立っていた。**その前提は実機で否定された** (2026-09-08。保持は
+        減速比 19.2 のギヤ頼みで保持ブレーキは無いが、それで落ちない)。**根拠は
+        指差喚呼 `sub_lift_holds` の実機確認なので、あれが通らなくなったらこの
+        宣言ごと見直すこと。**
         """
         return self._special_command(self.SPECIAL_SET_ZERO)
 
@@ -363,6 +368,21 @@ class Dm3520Driver(MotorDriver):
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
         ]
+
+    def deactivation_steps(self) -> list[tuple[can.Message, float]]:
+        """原点を切り直す前に無励磁へ落とす。
+
+        待ちは `initialization_steps()` の先頭の `disable` と同じ 0.05 秒。
+        """
+        return [(self.encode_disable(), 0.05)]
+
+    def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
+        """今の位置を原点として書き込む (特殊コマンド 0xFE)。
+
+        待ちが `disable` より長いのは、`initialization_steps()` の
+        `set_zero_on_start` と揃えているため。
+        """
+        return [(self.encode_set_zero(), 0.2)]
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         # MotorState の初期値 0.0rad を実測角と取り違えると、機構は「原点へ戻る」

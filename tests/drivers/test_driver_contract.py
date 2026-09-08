@@ -113,12 +113,29 @@ class TestOriginCaptureCapability:
             Edulite05Driver.COMM_TYPE_SET_ZERO
         )
 
-    def test_dm3520_は対象外(self) -> None:
-        """`SET_ZERO` の安全な順序は disable を要求するが、`sub_lift` は disable
-        すると自重で落ちる (減速比 19.2 のギヤに乗っているだけで保持ブレーキが無い)。
+    def test_dm3520_は切り直せる(self) -> None:
+        """かつては対象外だった —— 「無励磁にする操作が安全なのは自重で落ちない軸
+        だけ」という理由で、`sub_lift` が落ちる前提に立っていた。その前提は実機で
+        否定された (2026-09-08)。根拠は指差喚呼 `sub_lift_holds` である。
         """
-        driver = Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11)
-        assert driver.supports_origin_capture() is False
+        driver = Dm3520Driver("sub_y_axis", can_id=0x01, master_id=0x11)
+        assert driver.supports_origin_capture() is True
+
+    def test_dm3520_は無励磁にしてから切り直す(self) -> None:
+        """励磁したまま送るとドライバ内部の位置目標が旧座標のまま残り、原点の
+        差分だけ機構が飛ぶ。**特殊コマンドは 3 つとも同じ CAN ID なので、
+        見分けが付くのは末尾バイトだけである。**
+        """
+        driver = Dm3520Driver("sub_y_axis", can_id=0x01, master_id=0x11)
+
+        ((disable, _delay),) = driver.deactivation_steps()
+        ((set_zero, _zero_delay),) = driver.origin_capture_steps()
+
+        assert disable.data[7] == Dm3520Driver.SPECIAL_DISABLE
+        assert set_zero.data[7] == Dm3520Driver.SPECIAL_SET_ZERO
+        # 宛先は ESC_ID そのもの (制御モードに依らない)
+        assert disable.arbitration_id == Dm3520Driver.MIT_CMD_BASE + 0x01
+        assert set_zero.arbitration_id == Dm3520Driver.MIT_CMD_BASE + 0x01
 
     def test_generic_は対象外(self) -> None:
         assert GenericDriver("servo", can_id=0x41).supports_origin_capture() is False
