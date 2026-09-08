@@ -1542,7 +1542,7 @@ uv run pytest -k "m3508"         # M3508 関連のみ
 
 cd web && pnpm test              # フロントエンド（watch）
 cd web && pnpm test:run          # フロントエンド（1 回だけ実行）
-cd web && pnpm check             # lint + format + 型検査 + テスト
+cd web && pnpm check             # lint + format + 型検査 + テスト + ビルド
 
 pio test -e native -d firmware/dc_motor   # ファーム（実機不要）
 pio test -e native -d firmware/servo      # ファーム（実機不要）
