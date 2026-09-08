@@ -134,4 +134,48 @@ describe("ModeSwitch", () => {
     renderSwitch("sequence", null, null);
     expect(screen.queryByText(/ステップ/)).toBeNull();
   });
+
+  /**
+   * この帯はページ余白を打ち消してヘッダーへ密着しているので、右端に置いたボタンは
+   * ヘッダー右端の EMG STOP の真下数 px に来る。誤爆の向きは「切替ボタンを押そうとして
+   * EMG STOP を踏む」で、試合中に起きるとシーケンスが止まる。
+   * **右端 (ml-auto) に残してよいのは押せない要素 = 塞がれている理由だけ。**
+   */
+  it("切替ボタンを帯の右端に置かない (EMG STOP の真下に押せる要素を置かない)", () => {
+    const { band } = renderSwitch("sequence", "切断中のため操作できません");
+
+    const button = screen.getByRole("button", { name: /手動操縦へ/ });
+    expect(band.firstElementChild).toBe(button);
+    expect(button.className).not.toMatch(/ml-auto/);
+
+    const reason = screen.getByText("切断中のため操作できません");
+    expect(band.lastElementChild).toBe(reason);
+    expect(reason).toHaveClass("ml-auto");
+  });
+
+  /**
+   * 「主操作は状態によって位置を動かさない」を帯の側から破らないための固定。
+   * 現在モードのチップは文言長がモードで変わる (「手動操縦中 — シーケンスは停止して
+   * います」と「半自動」) ので、その隣へ置くとボタンの横位置がモードで動く。
+   * 帯自身のクラス集合を見る「帯の高さはモードで変えない」とは別物で、こちらは
+   * 帯の中でのボタンの位置を見る。
+   */
+  it("モードでも塞がれ状態でも切替ボタンは帯の先頭のまま", () => {
+    const cases: Array<[Parameters<typeof renderSwitch>[0], string | null]> = [
+      ["sequence", null],
+      ["manual", null],
+      ["sequence", "切断中のため操作できません"],
+      ["manual", "切断中のため操作できません"],
+    ];
+
+    for (const [mode, reason] of cases) {
+      const { band, view } = renderSwitch(mode, reason);
+      const first = band.firstElementChild as HTMLElement;
+
+      expect(first.tagName).toBe("BUTTON");
+      expect(first.textContent).toMatch(mode === "manual" ? /半自動へ戻る/ : /手動操縦へ/);
+
+      view.unmount();
+    }
+  });
 });

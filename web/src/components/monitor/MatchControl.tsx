@@ -66,12 +66,22 @@ export function useResetConfirm() {
  * ヘッダーが常時チップで出しているので、ここで並べると同じ事実が同じ画面に 2 度出る。
  *
  * 終了の確認は同じボタンの二度押しで取る。ダイアログ本文が持っていた
- * 「緊急停止ではない」ことは、武装中に隣へ出す。
+ * 「緊急停止ではない」ことは、武装中にボタンの右隣へ出す。
  *
  * **セッティングへ戻る操作に確認は挟まない。** 試合が終わった後の唯一の進み先であり、
  * 失うのは消化済みのチェックリストだけで、機体は動かない。次の試合の準備を
  * 1 クリック遅らせる理由がない（同じ `match_reset` でも、準備中に押す
  * `MatchPrep` ヘッダーの RESET はまだ使っていない指差喚呼を捨てるので確認を残してある）。
+ *
+ * **EMG STOP の真下に押下可能な要素を置かない。** この帯はヘッダー直下の最上段に出るので、
+ * 右端へ寄せると操作ボタンが EMG STOP のほぼ真下（右 16px・下 12px）に来る。誤爆の向きは
+ * 「この帯のボタンを狙って外し、緊急停止を踏む」で、試合中に起きればシーケンスが止まる。
+ * 操作は帯の先頭へ置き、右端には何も置かない。
+ *
+ * **ボタンは帯の先頭に固定する。** 試合終了とセッティングへ戻るは同じ場所へ交互に出る
+ * ものなので、フェーズで位置が変わると押す直前に探し直すことになる。同じ理由で武装中の
+ * 説明文はボタンの右へ出し、幅は `w-[11em]` で固定する —— 説明が左にあると押した瞬間に
+ * ボタンが横へずれ、二度押しの 2 回目が 1 回目と違う場所になる。
  */
 export function MatchStrip() {
   const { matchState, connected } = useRobotStatus();
@@ -89,15 +99,11 @@ export function MatchStrip() {
   }, [duringMatch, connected, disarm]);
 
   return (
-    <div className="flex shrink-0 items-center justify-end gap-2 border border-base-300 bg-base-100 px-2 py-1">
+    <div className="flex shrink-0 items-center gap-2 border border-base-300 bg-base-100 px-2 py-1">
       {duringMatch ? (
-        <span className="flex items-center gap-2">
-          {armed ? (
-            <span className="text-base-content/70">
-              実行中のシーケンスは通常停止します (緊急停止ではありません)
-            </span>
-          ) : null}
-          {/* 二度押しで文言が伸びてもボタンの左端を動かさない */}
+        <>
+          {/* 二度押しで文言が「試合終了」→「もう一度押して終了」と伸びても
+              ボタンの幅と位置を動かさない（2 回目を 1 回目と同じ場所で受ける） */}
           <Button
             tone="danger"
             disabled={!connected}
@@ -114,7 +120,12 @@ export function MatchStrip() {
             <Icon as={Square} />
             {!connected ? "切断中" : armed ? "もう一度押して終了" : "試合終了"}
           </Button>
-        </span>
+          {armed ? (
+            <span className="text-base-content/70">
+              実行中のシーケンスは通常停止します (緊急停止ではありません)
+            </span>
+          ) : null}
+        </>
       ) : (
         <Button
           tone="warn"

@@ -27,9 +27,17 @@ function wsHostLabel(url: string): string {
  * 折り返さない（`flex-wrap` を付けると狭い画面で 2 段に折れ、畳んだ意味が消える）。
  * 詰まったときに削ってよいのはタブ帯だけなので、そこだけが縮み、他は `shrink-0`。
  *
- * 並びは「今どういう設定・状態か（フェーズ・コート）」「どこを見るか（タブ）」
- * 「機体と繋がっているか（接続・時刻）」の 3 群。フェーズとコートは対の情報なので
- * 隣に置く（帯の両端へ離すと、試合設定を 2 回に分けて読むことになる）。
+ * **EMG STOP の周囲に押下可能な要素を置かない。** 誤爆の向きは「隣のボタンを
+ * 押そうとして EMG STOP を踏む」で、試合中にこれが起きると走っているシーケンスが
+ * その場で止まる。そこで並びは押せるかどうかで決める —— 押せるもの（タブ帯・接続表示）を
+ * EMG STOP から遠い側へ、押せないもの（フェーズ・コート・時計）を EMG STOP 側へ寄せる。
+ * **タブ帯が最左**なのは、画面の隅がポインタで最も当てやすい位置であると同時に、
+ * EMG STOP から最も遠いため。**EMG STOP 手前の `ml-6` は装飾ではなく緩衝で、
+ * 詰めてはならない**（詰めると右群の右端と停止ボタンが地続きになり、外した 1 回が
+ * そのまま停止になる）。
+ *
+ * 群そのものは従来どおり保つ —— フェーズとコートは対の情報なので隣に置き
+ * （帯の両端へ離すと試合設定を 2 回に分けて読むことになる）、接続と時刻も対で置く。
  *
  * 左端のバー色とフェーズチップで「今 機体が動くフェーズか」を示す。
  * 帯全面をフェーズ色で塗ると画面で最も明るい面になってしまうため、地は白に固定する。
@@ -52,40 +60,46 @@ export function AppHeader() {
       )}
     >
       <div className="flex min-w-0 flex-1 items-center gap-x-3 px-2 py-1">
-        <div className="flex shrink-0 items-center gap-1.5">
-          <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
-          <StatusBadge tone={COURT_TONE[court]}>{COURT_LABEL[court]}</StatusBadge>
-        </div>
-
         {/* 帯が詰まったときに削るのはここだけ。他を縮めると設定と停止が読めなくなる */}
         <div className="min-w-0 overflow-hidden">
           <TabBar />
         </div>
 
-        <div className="ml-auto flex shrink-0 items-center gap-3 text-[0.82em] text-base-content/70">
-          {/* 接続表示そのものを接続先設定の入口にする。繋がらない時に最初に見る場所なので */}
-          <button
-            type="button"
-            onClick={openWsSettings}
-            className="flex cursor-pointer items-center gap-1.5 hover:text-base-content"
-            title={`接続先: ${wsUrl}（クリックで変更）`}
-          >
-            <span className={cx(TONE_STATUS_CLASS[connected ? "success" : "error"], "status-sm")} />
-            {connected ? "Connected" : "Disconnected"}
-            <span className="font-mono">{wsHostLabel(wsUrl)}</span>
-          </button>
+        {/* 右群は EMG STOP へ近い順に「押せない」度合いを上げる。押せる接続表示を
+            先頭へ置き、停止ボタンの直左には読むだけの要素しか並ばないようにする */}
+        <div className="ml-auto flex shrink-0 items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3 text-[0.82em] text-base-content/70">
+            {/* 接続表示そのものを接続先設定の入口にする。繋がらない時に最初に見る場所なので */}
+            <button
+              type="button"
+              onClick={openWsSettings}
+              className="flex cursor-pointer items-center gap-1.5 hover:text-base-content"
+              title={`接続先: ${wsUrl}（クリックで変更）`}
+            >
+              <span
+                className={cx(TONE_STATUS_CLASS[connected ? "success" : "error"], "status-sm")}
+              />
+              {connected ? "Connected" : "Disconnected"}
+              <span className="font-mono">{wsHostLabel(wsUrl)}</span>
+            </button>
 
-          <Clock />
+            <Clock />
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1.5">
+            <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
+            <StatusBadge tone={COURT_TONE[court]}>{COURT_LABEL[court]}</StatusBadge>
+          </div>
         </div>
       </div>
 
       <button
         type="button"
-        className="flex shrink-0 cursor-pointer items-center gap-2 bg-estop px-6 text-[1.1em] font-bold text-estop-fg hover:bg-[#a82418] focus-visible:outline-2 focus-visible:outline-offset-[-4px] focus-visible:outline-estop-fg"
+        className="ml-6 flex shrink-0 cursor-pointer items-center gap-2 bg-estop px-6 text-[1.1em] font-bold text-estop-fg hover:bg-[#a82418] focus-visible:outline-2 focus-visible:outline-offset-[-4px] focus-visible:outline-estop-fg"
         onClick={onEStop}
         aria-label="緊急停止"
       >
-        <Icon as={OctagonX} className="alert-blink text-[1.25em]" />
+        <Icon as={OctagonX} className="text-[1.25em]" />
         EMG STOP
       </button>
     </header>

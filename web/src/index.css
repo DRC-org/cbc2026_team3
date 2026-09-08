@@ -133,7 +133,13 @@
     background-color: color-mix(in oklab, var(--color-base-content) 35%, transparent);
   }
 
-  /* 点滅は先頭の記号など最小限に留める。文章まで点滅すると読み取りに時間がかかる */
+  /* **異常時にだけ画面へ出る要素にしか付けない。** 平常時から点滅していたのは
+     ヘッダーの EMG STOP だけで、「平常時に静かで、異常時に自分から主張する」に
+     正面から反していた（常時動くものが 1 つあると、本当に異常が出たときの点滅が
+     平常の一部として読み飛ばされる）。EMG STOP は赤地・大面積・固定位置・常時表示
+     なので、外しても見つけにくくはならない。残る利用者は EStopOverlay（緊急停止の
+     発動中）と ConnectionBanner（切断中）で、どちらも異常時にしか描かれない。
+     付ける先も先頭の記号までに留める（文章まで点滅すると読み取りに時間がかかる） */
   .alert-blink {
     animation: estop-blink 1s steps(2, start) infinite;
   }

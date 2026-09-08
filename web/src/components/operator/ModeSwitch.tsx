@@ -38,6 +38,18 @@ interface ModeSwitchProps {
  * **高さはモードで変えない** —— 変えると下の主操作 (`ActionPanel`) が上下にずれ、
  * 押す直前に探し直すことになる。
  *
+ * **切替ボタンは帯の先頭に置く。EMG STOP の真下に押下可能な要素を置かないため。**
+ * この帯はページ余白を打ち消してヘッダーへ密着しており、右端に置いたボタンは
+ * ヘッダー右端の EMG STOP の真下数 px に来る。誤爆の向きは「切替ボタンを押そうとして
+ * EMG STOP を踏む」で、試合中に起きるとシーケンスが止まる。全画面のうち EMG STOP へ
+ * これほど近い押下可能要素はここだけだった。**右端に残してよいのは押せない要素
+ * (塞がれている理由) だけ。**
+ *
+ * **先頭に固定するのは、位置がモードでも塞がれ状態でも動かないため。** 現在モードの
+ * チップは文言長がモードで変わる (「手動操縦中 — シーケンスは停止しています」と
+ * 「半自動」) ので、その隣に置くとボタンの横位置がモードで動き、「主操作は状態に
+ * よって位置を動かさない」が帯の側から破られる。
+ *
  * 手動操縦のアイコンに `Hand` を使わない。あちらは「許可待ち / ここで停止」の意味で
  * `ActionPanel` / `SequenceStepList` / `RobotStatusRow` が使っており、試合中に同じ手が
  * 2 つの意味で出ると、トリガー待ちなのか手動操縦なのか区別できない。
@@ -62,6 +74,18 @@ export function ModeSwitch({
         manual ? "bg-warning/10" : "bg-base-100",
       )}
     >
+      {/* 帯の先頭が切替ボタンの定位置。EMG STOP の真下 (右端) には押せる要素を置かず、
+          モードでも塞がれ状態でも位置が動かないこの位置に固定する */}
+      <Button
+        tone={manual ? "default" : "warn"}
+        className="h-[1.5rem] min-h-0 shrink-0 px-2"
+        disabled={blockedReason !== null}
+        onClick={() => onChange(next)}
+      >
+        <Icon as={manual ? Workflow : SlidersHorizontal} />
+        {manual ? "半自動へ戻る" : "手動操縦へ"}
+      </Button>
+
       <StatusBadge tone={manual ? "warning" : "neutral"} className="shrink-0">
         <span className="flex items-center gap-1.5">
           <Icon as={manual ? SlidersHorizontal : Workflow} />
@@ -74,22 +98,10 @@ export function ModeSwitch({
         <span className="shrink-0 text-base-content/70">全 {totalSteps} ステップ</span>
       )}
 
-      {/* 塞がれている理由はボタンの手前に置く。右端はボタンの定位置で、
-          理由の有無で切替ボタンが横に動くと押す直前に探し直しになる */}
-      <div className="ml-auto flex min-w-0 items-center gap-2">
-        {blockedReason ? (
-          <span className="min-w-0 truncate text-base-content/70">{blockedReason}</span>
-        ) : null}
-        <Button
-          tone={manual ? "default" : "warn"}
-          className="h-[1.5rem] min-h-0 shrink-0 px-2"
-          disabled={blockedReason !== null}
-          onClick={() => onChange(next)}
-        >
-          <Icon as={manual ? Workflow : SlidersHorizontal} />
-          {manual ? "半自動へ戻る" : "手動操縦へ"}
-        </Button>
-      </div>
+      {/* 塞がれている理由だけが右端へ寄る。押せない要素なので EMG STOP の真下でよい */}
+      {blockedReason ? (
+        <span className="ml-auto min-w-0 truncate text-base-content/70">{blockedReason}</span>
+      ) : null}
     </div>
   );
 }
