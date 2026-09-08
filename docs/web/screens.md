@@ -86,7 +86,7 @@
 - **右の機体状態** — `showVerdict={false}`。判定チップは `StartGate` が出すので二重にしない
   （false のときパネルは常に開く）
 
-### 試合中・終了 — `grid-cols-2 grid-rows-[auto_minmax(0,1fr)_minmax(0,0.42fr)]`
+### 試合中・終了 — `grid-cols-2 grid-rows-[auto_minmax(0,1fr)_auto]`
 
 ```
 ┌─────────────────────────────────────────┐

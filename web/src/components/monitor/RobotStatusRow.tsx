@@ -41,10 +41,10 @@ const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
  * 進行状態 → 進捗 → 現在ステップ、と読む順に積み、数値はその下の `SubsystemStatus` へ
  * 送っている —— 主役を入れ替えたのであって、数値を畳んだのではない。
  *
- * その `SubsystemStatus` は **`defaultOpen` で展開して置く。** Monitor は操縦しない役で
- * 数値を追う時間があり、異常の切り分けはこの画面の仕事である。同じ部品を操縦者の
- * 試合中は畳んだままにしてあり、**変えているのは既定の開閉だけ**（異常時に開閉操作を
- * 上書きして開く挙動は `SubsystemStatus` 自身が持つので、どちらの役でも同じに効く）。
+ * その `SubsystemStatus` は **平常時は畳む**（`defaultOpen` を渡さない）。かつて展開して
+ * 置いていたが、警告 3 行 + CAN 3 行 + センサ 4 行で領域を使い切り、開いているのに
+ * モータが 1 基も見えない状態だった。異常時は `SubsystemStatus` 自身が操縦者の開閉操作を
+ * 上書きして開くので、畳んだまま見逃す経路は無い。
  */
 export function RobotStatusRow({
   label,
