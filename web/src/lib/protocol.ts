@@ -696,6 +696,11 @@ export interface ManualAxis {
    * フィードバックから逆換算した現在値。**位置を測れない軸では null。**
    * DC 基板はエンコーダを持たないので、0 を載せると「測ったように見える 0」になる。
    * 数値へフォールバックせず「読めていない」ことを画面に出すこと。
+   *
+   * サーバーは `command_mode` が `position` でない軸を必ず null にする
+   * (`ManualController._safe_observed_value`)。**構造的に測れないのか、位置軸の
+   * 算出が一時的に失敗したのかは値からは区別できない**ので、UI が「測る手段が
+   * あるか」を判断するときは `command_mode` を見る。
    */
   value: number | null;
   /** 直前に手動で送った目標値。一度も送っていなければ null */

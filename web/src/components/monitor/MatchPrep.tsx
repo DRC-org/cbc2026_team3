@@ -1,5 +1,6 @@
 import { Check, Info, RotateCcw, Zap } from "lucide-react";
-import { memo } from "react";
+import type { ReactNode } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 import { ChecklistItems } from "@/components/monitor/ChecklistItems";
 import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
@@ -29,6 +30,55 @@ const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }
   { value: "red", label: "赤コート", selectedClass: "border-error bg-error text-error-content" },
   { value: "blue", label: "青コート", selectedClass: "border-info bg-info text-info-content" },
 ];
+
+/**
+ * 下端に「まだ続きがある」ことを出すスクロール面。**溢れているあいだだけ**出す ——
+ * 常に出すと「ここで終わり」が読めなくなる (項目の少ないベンチ設定は一度も溢れない)。
+ *
+ * 指差喚呼 29 項目 + 3 つの操作は 1366x768 の左カラム (本文の高さ 479px) に対して
+ * 1252px あり、下端に来るのはたいてい次の区分の見出しで、**その下にある動作確認の
+ * 起動ボタン (準備の主操作) ごと画面の外**にある。しかもスクロールバーは静止中
+ * 1px も描かれない (`offsetWidth - clientWidth` が 0 のオーバーレイ) ので、
+ * 半分に切れた見出しだけが手がかりで、それは描画の崩れとも読めた。
+ *
+ * **地の色へのフェードにしてはならない。** 白へ溶かすと切れかけた要素ごと消えて
+ * 逆に「ここで終わり」に見える (実描画で確かめた)。縁が落とす影として描く。
+ */
+function ScrollArea({ className, children }: { className?: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [moreBelow, setMoreBelow] = useState(false);
+
+  // 中身の高さは項目のチェックでも動作確認パネルの開閉でも変わるので毎描画で測り直す。
+  // 判定が変わらなければ setState は再描画を起こさない
+  const measure = useCallback(() => {
+    const el = ref.current;
+    // 端で丸め誤差のぶん出っぱなしにならないよう 1px の余裕を持たせる
+    if (el) setMoreBelow(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+  }, []);
+  useEffect(measure);
+  useEffect(() => {
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [measure]);
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={ref}
+        onScroll={measure}
+        className={cx("scroll flex min-h-0 flex-1 flex-col", className)}
+      >
+        {children}
+      </div>
+      {moreBelow ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-linear-to-t from-base-content/18 to-transparent"
+        />
+      ) : null}
+    </div>
+  );
+}
 
 /** 区分ごとの進捗。残っている区分だけが目に入るよう、済んだ区分は主張しない */
 function GroupProgress({ items }: { items: readonly ChecklistItem[] }) {
@@ -172,7 +222,7 @@ export const MatchPrep = memo(function MatchPrep({
         ) : null}
       </div>
 
-      <div className="scroll flex min-h-0 flex-1 flex-col gap-1.5 px-2 py-1.5">
+      <ScrollArea className="gap-1.5 px-2 py-1.5">
         {unreadable ? (
           <p className="text-error">
             指差喚呼の配信を読めていません。進捗を画面から確認できません
@@ -261,7 +311,7 @@ export const MatchPrep = memo(function MatchPrep({
             {itemsOf("final")}
           </Section>
         ) : null}
-      </div>
+      </ScrollArea>
     </Panel>
   );
 });

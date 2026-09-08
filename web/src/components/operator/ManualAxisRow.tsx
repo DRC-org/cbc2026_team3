@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { ContinuousControls } from "@/components/operator/ContinuousControls";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { commandValueText, hasUnit } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
 import type { ManualAxis } from "@/lib/protocol";
 import { evaluateSync } from "@/lib/syncVerdict";
@@ -20,9 +21,17 @@ interface ManualAxisRowProps {
   onMove: (axis: string, position: string) => void;
 }
 
-/** 読めない値の表示。0 で埋めない (測っていない値を測ったように見せない) */
-function format(value: number | null, unit: string): string {
-  return value === null ? "—" : `${value.toFixed(2)}${unit ? ` ${unit}` : ""}`;
+/**
+ * 軸の値 1 つ。0 で埋めない (測っていない値を測ったように見せない)。
+ *
+ * 桁が 2 つ要るのはジョグの刻みが 0.5 まであるため (診断表の 1 桁とは別の都合)。
+ * `on_off` だけは数値ではなく開閉として読ませ、単位も付けない —— 位置定数 yaml の
+ * `unit` は `on_off` という文字列なので、添えると「1.00 on_off」になる。
+ */
+function format(value: number | null, axis: ManualAxis): string {
+  if (value === null) return "—";
+  const text = commandValueText(value, axis.command_mode, 2);
+  return hasUnit(axis.command_mode) && axis.unit ? `${text} ${axis.unit}` : text;
 }
 
 /**
@@ -123,15 +132,22 @@ export function ManualAxisRow({
         {presetOnly ? presetButtons : null}
 
         <span className="ml-auto flex shrink-0 items-baseline gap-3 font-mono tabular-nums">
-          <span className="text-[1.15em] font-medium">
-            <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
-              現在
+          {/* **位置を測る手段が無い軸 (duty / on_off) に「現在」は無い。** サーバーは
+              position 以外の軸の `value` を必ず null にするので、出しても「現在 —」が
+              並ぶだけの欄になる (測れないこと自体は 機体状態 のモータ一覧が描く)。
+              **可否は `command_mode` で決め、届いた値から推測しない** —— 位置軸の
+              算出が一時的に失敗した null と、構造的に測れない null は同じ値である */}
+          {axis.command_mode === "position" ? (
+            <span className="text-[1.15em] font-medium">
+              <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
+                現在
+              </span>
+              {format(axis.value, axis)}
             </span>
-            {format(axis.value, axis.unit)}
-          </span>
+          ) : null}
           <span className="text-base-content/70">
             <span className="mr-1 font-sans text-[0.8em] text-base-content/55">目標</span>
-            {format(axis.target, axis.unit)}
+            {format(axis.target, axis)}
             <Delta value={axis.value} target={axis.target} />
           </span>
         </span>

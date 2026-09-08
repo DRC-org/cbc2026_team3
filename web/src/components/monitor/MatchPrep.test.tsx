@@ -124,6 +124,57 @@ describe("MatchPrep の項目配置", () => {
   });
 });
 
+/**
+ * 29 項目 + 3 つの操作は 1366x768 の左カラムに収まらず、下端に来るのはたいてい
+ * 次の区分の見出しで、その下にある動作確認の起動ボタンごと画面の外にある。
+ * スクロールバーは静止中 1px も描かれないので、合図が無いと「切れている」ことも
+ * 「ここで終わり」であることも読めない。
+ */
+describe("MatchPrep のスクロール", () => {
+  /** jsdom はレイアウトを持たないので、溢れているかどうかは寸法を置いて作る */
+  function stubScroll(
+    el: Element,
+    size: { clientHeight: number; scrollHeight: number; scrollTop: number },
+  ) {
+    for (const [key, value] of Object.entries(size)) {
+      Object.defineProperty(el, key, { value, configurable: true });
+    }
+  }
+
+  function scrollBody(container: HTMLElement): Element {
+    const body = container.querySelector(".scroll");
+    if (!body) throw new Error("スクロール面が見つからない");
+    return body;
+  }
+
+  const signal = (container: HTMLElement) => container.querySelector(".bg-linear-to-t");
+
+  it("溢れているあいだだけ下端に続きの合図を出す", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+    fireEvent.scroll(body);
+    expect(signal(container)).not.toBeNull();
+
+    // 末尾まで送れば消える。出したままにすると「まだ続きがある」の意味が消え、
+    // 項目の少ない構成では終わりを一度も読めなくなる
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 900 });
+    fireEvent.scroll(body);
+    expect(signal(container)).toBeNull();
+  });
+
+  it("溢れていなければ何も出さない", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 300, scrollTop: 0 });
+    fireEvent.scroll(body);
+
+    expect(signal(container)).toBeNull();
+  });
+});
+
 describe("MatchPrep のチェック操作", () => {
   it("チェック操作をサーバーへ送る (状態はサーバー保持のため)", async () => {
     const { context } = mount();

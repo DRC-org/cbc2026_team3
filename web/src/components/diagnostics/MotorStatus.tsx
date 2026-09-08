@@ -1,4 +1,5 @@
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { commandValueText } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
 import { motorTempTone } from "@/lib/healthVerdict";
 import type { TempThresholds } from "@/lib/healthVerdict";
@@ -63,18 +64,8 @@ const COMMAND_MARK = "→";
 const COMMAND_TITLE =
   "PC が最後に送った指令値です（実際の出力ではありません）。この基板は出力を測る手段を持たないため、緊急停止・ウォッチドッグ満了・ファーム側の上限クランプで基板が出していなくても、ここには値が残ります。";
 
-/**
- * 指令値 1 つの表示文字列。**丸め方は `command_mode` だけで決める** ——
- * モータ名や基板の種類から推測すると、ドライバ種別を UI へ書き写すことになる。
- *
- * `on_off` は電磁弁の開閉指令で、基板は 0 か非 0 かしか見ない。0.0 / 1.0 と
- * 数字で出すと duty と見分けが付かないので `ON` / `OFF` と書く。
- */
-function commandText(value: number, mode: string | null): string {
-  if (mode === "on_off") return value === 0 ? "OFF" : "ON";
-  // duty は 0.30 のような値なので 1 桁では 0.3 と 0.34 が同じに見える
-  return mode === "duty" ? value.toFixed(2) : value.toFixed(1);
-}
+/** duty は 0.30 のような値なので、1 桁では 0.3 と 0.34 が同じに見える */
+const commandDigits = (mode: string | null) => (mode === "duty" ? 2 : 1);
 
 /** 4 値の桁位置をモータ間で揃えるためのグリッド。ヘッダーと値行で共有する */
 const STAT_GRID_CLASS = "grid grid-cols-4 gap-1 px-1 text-right";
@@ -184,7 +175,7 @@ function PositionCell({ state }: { state: MotorState }) {
   return (
     <span className="truncate font-mono tabular-nums" title={COMMAND_TITLE}>
       <span className="text-base-content/50">{COMMAND_MARK}</span>
-      {commandText(commanded, mode)}
+      {commandValueText(commanded, mode, commandDigits(mode))}
     </span>
   );
 }

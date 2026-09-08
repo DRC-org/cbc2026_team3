@@ -56,6 +56,23 @@ const DUTY: ManualAxis = {
   motors: ["conveyor"],
 };
 
+/** 電磁弁。位置も到達も観測できず、`unit` に入っているのは単位ではなく指令の種類 */
+const VALVE: ManualAxis = {
+  name: "valve_1",
+  unit: "on_off",
+  command_mode: "on_off",
+  value: null,
+  target: null,
+  manual: null,
+  deviation: null,
+  sync_tolerance: null,
+  positions: [
+    { name: "open", value: 1 },
+    { name: "closed", value: 0 },
+  ],
+  motors: ["valve_1"],
+};
+
 function renderRow(axis: ManualAxis, blockedReason: string | null = null, selected = false) {
   const onJog = vi.fn();
   const onSet = vi.fn();
@@ -475,8 +492,29 @@ describe("ManualAxisRow", () => {
     it("現在値を 0 で埋めない", () => {
       // DC 基板はエンコーダを持たない。0 を出すと「測ったように見える 0」になる
       renderRow(DUTY);
-      expect(screen.getByText(/現在/).parentElement).toHaveTextContent("—");
-      expect(screen.queryByText(/0\.00 duty/)).toBeNull();
+      expect(screen.queryByText(/0\.00/)).toBeNull();
+    });
+
+    it("「現在」の欄そのものを出さない (常に「—」が並ぶだけの欄になる)", () => {
+      // サーバーは position 以外の軸の value を必ず null にする。1 軸 1 行へ畳んだ
+      // 行では、この 1 語ぶんが折り返しの分かれ目になる
+      renderRow(DUTY);
+      expect(screen.queryByText("現在")).toBeNull();
+      // 目標は残す —— 押した指令が届いたことを画面から読む唯一の手がかり
+      expect(screen.getByText("目標")).toBeInTheDocument();
+    });
+
+    it("測れる軸では「現在」を出す (畳んだ行でも落とさない)", () => {
+      // 可動範囲を持たなくても、サーボ軸は位置を返す
+      renderRow(DISCRETE);
+      expect(screen.getByText("現在").parentElement).toHaveTextContent("5.00 deg");
+    });
+
+    it("位置軸の値が一時的に読めなくても「現在 —」は残す", () => {
+      // 構造的に測れないのか算出が失敗しただけなのかは値からは区別できない。
+      // 位置軸で欄ごと消すと「読めていない」ことが画面から消える
+      renderRow({ ...DISCRETE, value: null });
+      expect(screen.getByText("現在").parentElement).toHaveTextContent("—");
     });
 
     it("duty 軸でもプリセットは送れる", async () => {
@@ -484,6 +522,40 @@ describe("ManualAxisRow", () => {
       const { onMove } = renderRow(DUTY);
       await user.click(screen.getByLabelText("conveyor を run へ"));
       expect(onMove).toHaveBeenCalledWith("conveyor", "run");
+    });
+
+    it("duty の目標は単位付きの数値のまま", () => {
+      renderRow({ ...DUTY, target: 0.95 });
+      expect(screen.getByText("目標").parentElement).toHaveTextContent("0.95 duty");
+    });
+  });
+
+  /**
+   * 電磁弁。**`unit` に入っているのは単位ではなく指令の種類 (`on_off`)** なので、
+   * 数値へそのまま添えると「目標 1.00 on_off」という、単位でも状態でもない表示になる。
+   * 基板は 0 か非 0 かしか見ないため、開閉として読ませる (診断表と同じ語)。
+   */
+  describe("離散状態 (on_off) の軸", () => {
+    it("開指令は「ON」。1.00 とも on_off とも書かない", () => {
+      renderRow({ ...VALVE, target: 1.0 });
+
+      const target = screen.getByText("目標").parentElement;
+      expect(target).toHaveTextContent("ON");
+      expect(target).not.toHaveTextContent("1.00");
+      expect(target).not.toHaveTextContent("on_off");
+    });
+
+    it("閉指令は「OFF」。0 を「未指令」と混ぜない", () => {
+      renderRow({ ...VALVE, target: 0.0 });
+
+      const target = screen.getByText("目標").parentElement;
+      expect(target).toHaveTextContent("OFF");
+      expect(target).not.toHaveTextContent("—");
+    });
+
+    it("一度も指令していなければ「—」", () => {
+      renderRow(VALVE);
+      expect(screen.getByText("目標").parentElement).toHaveTextContent("—");
     });
   });
 
