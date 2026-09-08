@@ -4,7 +4,6 @@ namespace motorcan {
 
 ServoChannel::ServoChannel()
     : safety_(kDefaultCommandTimeoutMs),
-      // 幅 0 の可動範囲。begin() を呼ばずに使われても、どんな目標角も 0deg へクランプされる。
       motion_(0.0f, ServoLimits{0.0f, 0.0f, kDefaultSlewRateDegPerSec}),
       pendingLimits_(motion_.limits()),
       pendingToleranceDeg_(kDefaultServoReachedToleranceDeg),
@@ -20,8 +19,6 @@ ServoChannel::ServoChannel(float initialAngleDeg, const ServoLimits &limits,
 
 void ServoChannel::begin(float initialAngleDeg, const ServoLimits &limits,
                          uint32_t commandTimeoutMs) {
-    // 保留中の SET_PARAM ごと作り直す。begin() は電源投入の続きであって、
-    // それ以前に届いた指令を引き継ぐ場面が無い。
     safety_ = MotorSafety(commandTimeoutMs);
     motion_ = ServoMotion(initialAngleDeg, limits);
     pendingLimits_ = motion_.limits();
@@ -36,8 +33,6 @@ void ServoChannel::feed(uint32_t nowMs) { safety_.feed(nowMs); }
 EStopAction ServoChannel::handleEStopFrame(const uint8_t *data, uint8_t length, uint32_t nowMs) {
     const EStopAction action = safety_.handleEStopFrame(data, length);
     if (action != EStopAction::None) {
-        // 仕様書 §7.5 / §3.5: 停止でも解除でもその場で現在角へ凍結する。
-        // 解除側でも凍結するのは「解除した瞬間に動き出さない」を成立させるため。
         motion_.holdHere(nowMs);
     }
     return action;
@@ -55,9 +50,6 @@ void ServoChannel::setCommandTimeoutMs(uint32_t timeoutMs) { safety_.setTimeoutM
 uint32_t ServoChannel::commandTimeoutMs() const { return safety_.timeoutMs(); }
 
 bool ServoChannel::isOutputAllowed(uint32_t nowMs) const {
-    // **begin() 前は無条件に禁止。** 空きスロットは begin() されないまま残るので、
-    // MotorSafety の everFed_ だけに任せると、そのスロット宛の SET_TARGET が 1 通
-    // 届いただけで駆動が許可される（PC 側 yaml の can_id を書き間違えると実際に届く）。
     return begun_ && safety_.isOutputAllowed(nowMs);
 }
 
@@ -67,8 +59,6 @@ bool ServoChannel::applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs) {
     if (!cmd.valid) {
         return false;
     }
-    // 仕様書 §7.2: サーボは position のみ受理する。duty の 0.3 を角度として解釈すると
-    // 想定外の位置へ飛ぶので、velocity / duty / on_off は黙って捨てる。
     if (cmd.type != ControlType::Position) {
         return false;
     }
@@ -77,13 +67,8 @@ bool ServoChannel::applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs) {
 
 bool ServoChannel::setTarget(float angleDeg, uint32_t nowMs) {
     if (!isOutputAllowed(nowMs)) {
-        // 仕様書 §7.5: 出力禁止中は新しい角度指令を受け付けない。
-        // 受け付けると、PC が §5.1 の契約どおり 20Hz で再送している間ずっと
-        // 補間が再アンカーされ、緊急停止中でも 1 ティックぶんずつ進み続ける。
         return false;
     }
-    // 保留していた可動範囲は、この指令をクランプする**前に**取り込む。
-    // 次のティック任せにすると、解除直後の 1 通だけが古い範囲でクランプされる。
     applyPendingParams(nowMs);
     motion_.setTarget(angleDeg, nowMs);
     return true;
@@ -93,12 +78,8 @@ void ServoChannel::hold(uint32_t nowMs) { motion_.holdHere(nowMs); }
 
 void ServoChannel::tick(uint32_t nowMs) {
     if (!isOutputAllowed(nowMs)) {
-        // 補間を進める**前に**凍結する。後ろに置くと、ウォッチドッグ満了のように
-        // フレームを伴わない禁止では、満了の瞬間に slew_rate × 1 ティック分だけ
-        // 進んでから凍結する（既定なら 90deg/s × 5ms = 0.45deg）。
         motion_.holdHere(nowMs);
     } else {
-        // 出力が許可された最初のティックで、禁止中に届いた SET_PARAM を取り込む。
         applyPendingParams(nowMs);
     }
     motion_.update(nowMs);
@@ -106,9 +87,6 @@ void ServoChannel::tick(uint32_t nowMs) {
 
 void ServoChannel::setLimits(const ServoLimits &limits, uint32_t nowMs) {
     if (!isOutputAllowed(nowMs)) {
-        // 仕様書 §7.5: 出力禁止中に効かせない。ServoMotion::setLimits は目標角を
-        // 新しい範囲へクランプするので、ここを素通しにすると setTarget が入口で
-        // 拒否しているのと同じことを SET_PARAM 経由でできてしまう。
         pendingLimits_ = limits;
         hasPendingLimits_ = true;
         return;
@@ -139,10 +117,6 @@ void ServoChannel::applyPendingParams(uint32_t nowMs) {
     if (hasPendingLimits_) {
         motion_.setLimits(pendingLimits_);
         hasPendingLimits_ = false;
-        // 取り込んだ範囲で**現在角を動かさない**（仕様書 §3.5「解除した瞬間に
-        // 動き出さない」）。setLimits は目標角を新しい範囲へクランプするので、
-        // ここで凍結し直さないと解除の瞬間に補間が走り出す。狭めた範囲は
-        // 次の SET_TARGET から効く（そちらは setTarget がクランプする）。
         motion_.holdHere(nowMs);
     }
 }
@@ -151,4 +125,4 @@ float ServoChannel::currentAngleDeg() const { return motion_.currentAngleDeg(); 
 
 bool ServoChannel::isReached() const { return motion_.isReached(); }
 
-}  // namespace motorcan
+}

@@ -15,7 +15,6 @@ set -euo pipefail
 # shellcheck source=scripts/_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-# journal ではこの接頭辞で発生元を見分ける
 LOG_PREFIX="[ OK ]"
 
 STRICT=0
@@ -30,12 +29,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# デバイスが現れるまで待つ。USB の列挙は起動直後だと間に合わないことがあるため、
-# systemd から呼ぶ際は --wait を指定する。
-#
-# デッドラインは全バスで共有する。バスごとに待つと、欠けが N 本あるとき
-# N x WAIT_SEC 秒かかり PC 起動が実測で 31 秒まで伸びた。全 CANable は同じ
-# USB 列挙で現れるため、待ち時間を分ける意味はない。
+# デッドラインは全バスで共有する (バスごとに待つと実測で PC 起動が 31 秒まで伸びた)。
 wait_for_iface() {
     local iface="$1"
     while :; do
@@ -53,10 +47,9 @@ setup_one() {
     local iface="$1" bitrate="$2" txqueuelen="$3" restart_ms="$4"
 
     if ! wait_for_iface "$iface"; then
-        return 2   # デバイス欠け。strict かどうかは呼び出し元が判断する
+        return 2
     fi
 
-    # 設定変更は down 状態でしか通らない。up 済みでも失敗しないよう || true。
     "${IP[@]}" link set "$iface" down 2>/dev/null || true
 
     if ! "${IP[@]}" link set "$iface" type can bitrate "$bitrate"; then
@@ -64,15 +57,8 @@ setup_one() {
         return 1
     fi
 
-    # **restart-ms はドライバが対応していなければ設定できない。** カーネルは
-    # do_set_mode を持たないドライバに対して EOPNOTSUPP
-    # ("Device doesn't support restart from Bus Off") を返し、CANable2 が使う
-    # gs_usb がこれに当たる (手動の `type can restart` も同じ理由で通らない)。
-    # bitrate と同じ 1 コマンドに束ねると、対応していない環境では **1 本も
-    # up できない** —— しかも bitrate 側は先に適用されるので、症状は
-    # 「設定に失敗したのに bitrate だけ入っている」形になる。
-    # 非対応なら restart-ms 0 のまま続行し、後段でまとめて警告する
-    # (復旧手段が無いことは隠さないが、全バスを落とす理由にはしない)。
+    # do_set_mode を持たないドライバ (CANable2 の gs_usb) は restart-ms に
+    # EOPNOTSUPP ("Device doesn't support restart from Bus Off") を返す。
     local restart_err
     if restart_err=$("${IP[@]}" link set "$iface" type can restart-ms "$restart_ms" 2>&1); then
         :
@@ -93,7 +79,6 @@ setup_one() {
         return 1
     fi
 
-    # up の成功は通信可能を意味しない。コントローラの状態まで確認する。
     local state
     state=$(ip -details link show "$iface" | grep -oE '(ERROR-ACTIVE|ERROR-WARNING|ERROR-PASSIVE|BUS-OFF|STOPPED)' | head -1)
     if [[ "$state" != "ERROR-ACTIVE" ]]; then
@@ -101,8 +86,6 @@ setup_one() {
         return 1
     fi
 
-    # restart-ms は要求値ではなく実効値を読み戻して出す。要求値を出すと、
-    # ドライバが受け付けなかった環境で「設定したつもり」のログだけが残る。
     local effective_restart
     effective_restart=$(ip -details link show "$iface" | grep -oE 'restart-ms [0-9]+' | head -1 | awk '{print $2}')
     log_info "${iface}: bitrate=${bitrate} txqueuelen=${txqueuelen} restart-ms=${effective_restart:-不明} state=${state}"
@@ -111,9 +94,6 @@ setup_one() {
 
 require_can_config
 
-# can_buses.yaml を編集しても install.sh を再実行しなければ udev には反映されない。
-# 反映漏れは「serial を書いたのに固定名にならない」形で現れ、原因が分かりにくいため
-# ここで検出する。パスは can_config.py が単一情報源 (install.sh も同じ答えを引く)。
 if ! UDEV_RULE_PATH="$(can_config_path udev_rule_path)"; then
     log_err "udev ルールの配置先を取得できません: ${CAN_CONFIG}"
     exit 1
@@ -145,12 +125,6 @@ unassigned=()
 failed=()
 restart_unsupported=()
 
-# **プロセス置換 (`done < <(cmd)`) は cmd の終了コードをどこにも伝えない。**
-# set -e でも pipefail でも捕まらないので、can_config.py が落ちるとループは
-# 空回りし、configured=0 / unassigned=0 / missing=0 のまま先へ進む。その状態は
-# strict の条件を 1 つも満たさないので、**1 本も up していないのに試合前点検が
-# 成功終了する**。一度変数へ受けて終了コードを見るのが唯一の歯止めになる
-# (今まではたまたま check_udev_sync の diff が同じ不正を拾っていただけ)。
 if ! bus_list=$(can_config_list); then
     log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
     exit 1
@@ -160,7 +134,6 @@ if ! assigned_list=$(can_config_list --assigned-only); then
     exit 1
 fi
 
-# serial 未採取のバスを控えておく（strict では未完了として扱う）
 while IFS=$'\t' read -r name serial _bitrate _txq _restart; do
     [[ -z "${name:-}" ]] && continue
     if [[ "$serial" == "TBD" ]]; then
@@ -180,11 +153,6 @@ while IFS=$'\t' read -r name _serial bitrate txqueuelen restart_ms; do
     case $rc in
         0) up_count=$(( up_count + 1 )) ;;
         2) missing+=("$name") ;;
-        # デバイスはあるのに設定に失敗 → 常に異常。**ただしその場では降りない。**
-        # 即 exit していた頃は、それまでに up したバスは up・以降のバスは未設定
-        # という中途半端な状態で止まり、しかも下のサマリ (未採取 / 欠け /
-        # restart-ms 非対応) が 1 行も出ないので何本まで通ったのかログから
-        # 読めなかった。全バスを試してからサマリを出し、最後に異常終了する。
         *) failed+=("$name") ;;
     esac
 done <<< "$assigned_list"
@@ -201,9 +169,6 @@ for name in "${failed[@]}"; do
     log_err "${name}: デバイスはあるのに設定に失敗しました"
 done
 
-# 非対応は恒久的なドライバの性質であって、点検で直せる不備ではない。strict でも
-# 失敗にしないのは、毎回必ず落ちる点検は点検として機能しないため。ただし
-# 「bus-off に落ちたら自力では戻らない」ことは毎回目に入る場所に出す。
 for name in "${restart_unsupported[@]}"; do
     log_warn "${name}: ドライバが bus-off からの自動復帰に非対応 (restart-ms=0 のまま)"
 done
@@ -213,14 +178,11 @@ fi
 
 echo "--- ${up_count}/${configured} バス起動 (未採取 ${#unassigned[@]} / 欠け ${#missing[@]} / 失敗 ${#failed[@]}) ---"
 
-# 設定に失敗したバスがあれば strict でなくても異常終了する (判断は変えていない)
 if [[ ${#failed[@]} -gt 0 ]]; then
     exit 1
 fi
 
 if [[ $STRICT -eq 1 ]]; then
-    # 「立ち上げるものが 1 本も無かった」は成功ではない。試合前点検が答えるのは
-    # 「定義したバスが全部使えるか」なので、対象 0 本は必ず異常として扱う
     if [[ $configured -eq 0 ]]; then
         log_err "strict モード: 起動対象の CAN バスが 1 本もありません"
         exit 1
@@ -229,13 +191,10 @@ if [[ $STRICT -eq 1 ]]; then
         log_err "strict モード: 全 CAN バスが揃っていません"
         exit 1
     fi
-    # 欠けも未採取も無いのに up が足りないなら、途中で設定に失敗している
     if [[ $up_count -ne $configured ]]; then
         log_err "strict モード: ${up_count}/${configured} 本しか up していません"
         exit 1
     fi
-    # バスが揃っていても定義と実態がズレていれば、意図しない個体に
-    # 繋がっている可能性がある。試合前点検では失敗として扱う。
     if [[ $udev_stale -eq 1 ]]; then
         log_err "strict モード: udev ルールが config/can_buses.yaml と同期していません"
         exit 1

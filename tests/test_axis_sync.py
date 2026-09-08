@@ -1,10 +1,3 @@
-"""左右直結ペアの単位換算とずれ判定 (lib/axis_sync.py) のテスト。
-
-この機体は同じ ``sync_tolerance`` を 3 層 (シーケンス停止 / 電流 0 / 全体緊急停止) で
-参照する。換算と判定が層ごとに別実装になると、片方だけ直したときに気付けないまま
-機構が壊れるため、単一実装であること自体をここで固定する。
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -37,13 +30,11 @@ _PAIRED_CONFIG = {
 
 class TestMotorSpecIsShared:
     def test_positions_module_reexports_the_same_type(self) -> None:
-        """シーケンス層と制御層が同じ型を使う (換算のコピーを作らせない)。"""
         from lib.sequence import positions as positions_module
 
         assert positions_module.MotorSpec is MotorSpec
 
     def test_axis_motors_are_reused_as_sync_members(self) -> None:
-        """SyncGroup のメンバは AxisSpec のモータそのもの (詰め替えを挟まない)。"""
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
         spec = table.axis("y_axis")
 
@@ -60,7 +51,6 @@ class TestMotorSpecConversion:
         assert motor.to_value(motor.to_command(7.5)) == pytest.approx(7.5)
 
     def test_to_tolerance_is_positive_for_reverse_motor(self) -> None:
-        """許容差は幅であって向きを持たない。符号が残ると比較が常に成立してしまう。"""
         motor = MotorSpec(name="y_axis_l", scale=-10.0, offset=0.0)
 
         assert motor.to_tolerance(0.5) == pytest.approx(5.0)
@@ -90,14 +80,12 @@ class TestSyncGroupVerdict:
         assert deviation == pytest.approx(3.0)
 
     def test_violation_is_none_when_comparison_is_impossible(self) -> None:
-        """比較対象が 1 台以下では「ずれている」と言えない (途絶時に誤発報させない)。"""
         group = self._group()
 
         assert group.violation({"y_axis_r": 10.0 * SCALE}) is None
         assert group.violation({}) is None
 
     def test_violation_is_exclusive_of_the_tolerance_itself(self) -> None:
-        """許容差ちょうどは超過ではない (3 層で境界の扱いがずれないよう固定する)。"""
         group = self._group(tolerance=2.0)
 
         assert group.violation({"y_axis_r": 10.0 * SCALE, "y_axis_l": -8.0 * SCALE}) is None
@@ -120,21 +108,12 @@ class TestAxisSpecSyncGroup:
 
 
 class TestConversionIsAlwaysPerMotor:
-    """換算はモータごとにしか行えない (軸単位の scale を返す API を公開しない)。
-
-    かつては軸単位の ``scale`` / ``to_command`` / ``command_tolerance`` があり、
-    ペア軸に使うと先頭モータの scale が左右の両方へ当たって、左のモータが右向きに
-    全ストローク動いた。ValueError で塞いでいたが API ごと削除したため、
-    残っているのはモータごとに換算する道だけになった。
-    """
-
     def test_paired_axis_converts_each_motor_with_its_own_scale(self) -> None:
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
         commands = table.commands("y_axis", "work")
 
         assert set(commands) == {"y_axis_r", "y_axis_l"}
-        # 逆回転ペアは符号が反転する (向きは scale の符号で表す)
         assert commands["y_axis_r"] == pytest.approx(-commands["y_axis_l"])
 
     def test_tolerance_is_converted_per_motor_without_sign(self) -> None:
@@ -143,7 +122,6 @@ class TestConversionIsAlwaysPerMotor:
 
         widths = [motor.to_tolerance(spec.tolerance) for motor in spec.motors]
 
-        # 許容差は幅であって向きを持たない。符号が残ると逆回転側だけ到達判定が素通りする
         assert all(width > 0.0 for width in widths)
 
     def test_single_motor_axis_is_keyed_by_axis_name(self) -> None:
@@ -190,13 +168,6 @@ class TestSyncGroupDeviation:
 
 
 class TestSyncCorrections:
-    """左右のずれを縮める補正量 (SyncGroup.corrections)。
-
-    3 層の ``violation`` は「ずれたら止める」しかできず、駆動中にずれを縮める力は
-    どこにも無かった。ここが返すのがその力なので、**符号と単位が正しいことは
-    機構の安全に直結する**。符号を落とすと、軸ごと押し動かしながらずれは縮まない。
-    """
-
     def _group(self, *, sync_kp: float = 2.0, sync_limit: float | None = 1e9) -> SyncGroup:
         return SyncGroup(
             name="y_axis",
@@ -210,22 +181,13 @@ class TestSyncCorrections:
         )
 
     def test_no_corrections_without_gain(self) -> None:
-        """既定 (sync_kp=0.0) では 1 台にも補正を出さない = 従来どおり独立に動く。"""
         group = self._group(sync_kp=0.0, sync_limit=None)
 
         assert group.corrections({"y_axis_r": 10.0 * SCALE, "y_axis_l": -7.0 * SCALE}) == {}
 
     def test_reversed_pair_gets_identical_corrections(self) -> None:
-        """逆回転ペアの補正は同符号・同じ大きさ。**この方式が成立する根拠そのもの。**
-
-        人間の単位では ``e_l = -e_r`` だが ``scale_l = -scale_r`` なので、指令単位へ
-        戻すと一致する。つまり補正は軸としての運動を動かさず、左右の内部のずれだけを
-        縮める。``scale`` の符号を落とすと補正が逆符号になり、ずれを縮めないまま
-        軸ごと押し動かす力になる。
-        """
         group = self._group(sync_kp=2.0)
 
-        # 人間の単位で r=10.0mm / l=7.0mm (平均 8.5mm)
         corrections = group.corrections({"y_axis_r": 10.0 * SCALE, "y_axis_l": -7.0 * SCALE})
 
         expected = 2.0 * (8.5 - 10.0) * SCALE
@@ -233,18 +195,14 @@ class TestSyncCorrections:
         assert corrections["y_axis_l"] == pytest.approx(expected)
 
     def test_correction_pulls_advanced_motor_back(self) -> None:
-        """進んでいる側には戻す向き、遅れている側には進める向きの補正が出る。"""
         group = self._group(sync_kp=2.0)
 
         corrections = group.corrections({"y_axis_r": 10.0 * SCALE, "y_axis_l": -7.0 * SCALE})
 
-        # r は平均より進んでいるので指令を減らす向き (scale が正なので負の操作量)
         assert corrections["y_axis_r"] < 0.0
-        # l は平均より遅れている。人間の単位で進める向きは scale が負なので負の操作量
         assert corrections["y_axis_l"] < 0.0
 
     def test_no_correction_when_aligned(self) -> None:
-        """揃っていれば補正は 0 (揃っている機体へ余計な電流を出さない)。"""
         group = self._group(sync_kp=2.0)
 
         corrections = group.corrections({"y_axis_r": 9.0 * SCALE, "y_axis_l": -9.0 * SCALE})
@@ -253,10 +211,6 @@ class TestSyncCorrections:
         assert corrections["y_axis_l"] == pytest.approx(0.0)
 
     def test_corrections_sum_to_zero_with_three_members(self) -> None:
-        """平均を基準にするので、メンバが増えても補正の総和は 0 = 軸の運動に中立。
-
-        先頭モータとの差を基準にすると総和が 0 にならず、軸ごと押し動かす力が残る。
-        """
         group = SyncGroup(
             name="triple",
             members=(
@@ -276,7 +230,6 @@ class TestSyncCorrections:
         assert corrections["c"] == pytest.approx(-3.0)
 
     def test_correction_is_clamped_by_sync_limit(self) -> None:
-        """押し合いの唯一の歯止め。大きなずれでも上限を超える補正は出さない。"""
         group = self._group(sync_kp=100.0, sync_limit=250.0)
 
         corrections = group.corrections({"y_axis_r": 10.0 * SCALE, "y_axis_l": -7.0 * SCALE})
@@ -285,11 +238,6 @@ class TestSyncCorrections:
         assert corrections["y_axis_l"] == pytest.approx(-250.0)
 
     def test_offset_is_removed_before_averaging(self) -> None:
-        """offset を持つ軸でも人間の単位へ戻してから平均を取る。
-
-        指令単位のまま平均すると offset の差がそのままずれとして現れ、揃っている
-        機体に恒常的な補正が出続ける。
-        """
         group = SyncGroup(
             name="offset_pair",
             members=(
@@ -301,18 +249,12 @@ class TestSyncCorrections:
             sync_limit=1e9,
         )
 
-        # どちらも人間の単位で 5.0mm
         corrections = group.corrections({"r": 5.0 * SCALE + 100.0, "l": -5.0 * SCALE - 40.0})
 
         assert corrections["r"] == pytest.approx(0.0)
         assert corrections["l"] == pytest.approx(0.0)
 
     def test_no_corrections_when_a_member_is_missing(self) -> None:
-        """1 台でも位置が欠けたら 1 台にも出さない。
-
-        欠けたメンバを外して平均を取ると、残った側だけが「ずれている」と判定されて
-        実在しない補正が出る。
-        """
         group = self._group(sync_kp=2.0)
 
         assert group.corrections({"y_axis_r": 10.0 * SCALE}) == {}
@@ -320,12 +262,6 @@ class TestSyncCorrections:
 
 
 class TestTargetsShareAxisValue:
-    """補正を出してよい前提「全員が同じ軸位置を目標にしている」の判定。
-
-    零点確定の整列段は片側だけを step ぶん進めるので、左右の目標が意図的に食い違う。
-    そこで補正が出ると意図したずれをちょうど打ち消しに掛かり、整列が成立しない。
-    """
-
     def _group(self) -> SyncGroup:
         return SyncGroup(
             name="y_axis",
@@ -339,17 +275,11 @@ class TestTargetsShareAxisValue:
         )
 
     def test_same_axis_value_is_shared(self) -> None:
-        """同じ軸位置から換算した目標は「揃っている」。
-
-        逆回転ペアなので指令値そのものは符号が反転する。``to_value`` を通さずに
-        指令値を比べる実装ではここが成立しない。
-        """
         group = self._group()
 
         assert group.targets_share_axis_value({"y_axis_r": 10.0 * SCALE, "y_axis_l": -10.0 * SCALE})
 
     def test_one_sided_step_is_not_shared(self) -> None:
-        """整列段そのもの —— 片側だけ step (0.5mm) 進めた目標は揃っていない。"""
         group = self._group()
 
         assert not group.targets_share_axis_value(
@@ -357,18 +287,12 @@ class TestTargetsShareAxisValue:
         )
 
     def test_missing_member_is_not_shared(self) -> None:
-        """メンバが欠けたら False。欠けたまま「揃っている」と答えると、目標を
-        持たない相方が居る周期に補正が出る。"""
         group = self._group()
 
         assert not group.targets_share_axis_value({"y_axis_r": 10.0 * SCALE})
         assert not group.targets_share_axis_value({})
 
     def test_round_trip_error_is_absorbed(self) -> None:
-        """to_command → to_value の往復で乗る丸め誤差は「揃っている」側に読む。
-
-        許容幅が丸め誤差より狭いと、正常な位置指令でも補正が永久に止まる。
-        """
         group = self._group()
         members = {member.name: member for member in group.members}
         targets = {name: member.to_command(10.0) for name, member in members.items()}
@@ -376,12 +300,6 @@ class TestTargetsShareAxisValue:
         assert group.targets_share_axis_value(targets)
 
     def test_tolerance_sized_skew_is_not_shared(self) -> None:
-        """許容幅に ``tolerance`` (2.0mm) を流用していないことを固定する。
-
-        流用すると、整列段が作る数 mm の意図的なずれが「揃っている」と読まれて
-        打ち消す向きの補正が出続ける。tolerance は機構が壊れる境界であって、
-        「同じ軸位置から換算された目標か」という問いとは別の量である。
-        """
         group = self._group()
 
         assert not group.targets_share_axis_value(
@@ -390,8 +308,6 @@ class TestTargetsShareAxisValue:
 
 
 class TestSyncGainValidation:
-    """ゲインと歯止めの対を型の段階で守る (yaml を経由しない組み立ても塞ぐ)。"""
-
     def _members(self) -> tuple[MotorSpec, ...]:
         return (
             MotorSpec(name="y_axis_r", scale=SCALE, offset=0.0),
@@ -403,7 +319,6 @@ class TestSyncGainValidation:
             SyncGroup(name="y_axis", members=self._members(), tolerance=2.0, sync_kp=1.0)
 
     def test_negative_gain_is_rejected(self) -> None:
-        """負のゲインは正帰還。ずれを縮めるどころか発散させる。"""
         with pytest.raises(ValueError, match="sync_kp"):
             SyncGroup(
                 name="y_axis",
@@ -424,7 +339,6 @@ class TestSyncGainValidation:
             )
 
     def test_zero_gain_needs_no_limit(self) -> None:
-        """既定 (補正なし) では歯止めを書かなくてよい = 既存の構成がそのまま通る。"""
         group = SyncGroup(name="y_axis", members=self._members(), tolerance=2.0)
 
         assert group.sync_kp == 0.0

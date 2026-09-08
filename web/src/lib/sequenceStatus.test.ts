@@ -18,11 +18,6 @@ function state(over: Partial<RobotState> = {}): RobotState {
   };
 }
 
-/**
- * 実行状態は `running` (サーバー配信) だけで決める。
- * `step_index === 0 && total_steps > 0` を「未実行」の代用にしていた頃は、
- * 準備フェーズで条件が常に成立して動作確認ボタンが常時無効になった。
- */
 describe("sequenceKind", () => {
   it("シーケンス未取得", () => {
     expect(sequenceKind(state({ total_steps: 0 }))).toBe("no_sequence");
@@ -47,7 +42,6 @@ describe("sequenceKind", () => {
   });
 
   it("途中で停止した状態を実行中と偽らない", () => {
-    // 以前は step_index > 0 だけで「実行中」と表示し、STOP 後も RUNNING を出していた
     expect(sequenceKind(state({ running: false, step_index: 3 }))).toBe("idle");
   });
 
@@ -68,12 +62,6 @@ describe("isSequenceComplete", () => {
   });
 });
 
-/**
- * 進捗バーの分子は**完了したステップ数**であって、操縦者に見せる現在ステップ番号
- * (`displayIndex` = `step_index + 1`) ではない。両者で同じ式を使っていた頃は
- * 常に 1 マス先行し、シーケンスを開始していない試合開始直後の画面が
- * 「1/13 だけ進んだバー」を出していた。
- */
 describe("sequenceProgress", () => {
   const steps = Array.from({ length: 6 }, (_, i) => ({
     index: i,
@@ -84,7 +72,6 @@ describe("sequenceProgress", () => {
   it("開始していなければ 0%", () => {
     const { percent, displayIndex } = sequenceProgress(state({ steps }));
     expect(percent).toBe(0);
-    // バーは 0 でも、これから走るステップの番号は 1 始まりで出す
     expect(displayIndex).toBe(1);
   });
 
@@ -107,7 +94,6 @@ describe("sequenceProgress", () => {
     const { percent, displayIndex, current } = sequenceProgress(state({ steps, step_index: 6 }));
     expect(percent).toBe(100);
     expect(displayIndex).toBe(6);
-    // 完走後は「今いるステップ」が無い
     expect(current).toBeUndefined();
   });
 

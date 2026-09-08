@@ -6,11 +6,7 @@ MotorSafety::MotorSafety(uint32_t timeoutMs)
     : timeoutMs_(timeoutMs),
       lastFedMs_(0),
       everFed_(false),
-      // 仕様書 §5.4: 電源投入直後のラッチは解除済み。
-      // PC からの解除を待たないと動けない設計だと、PC 側の起動順序次第で
-      // 現場で「電源を入れ直しても動かない」状態になる。
       latched_(false),
-      // 写し忘れた基板が「気付かないうちに無効」にならないよう、既定は有効側に倒す。
       watchdogEnabled_(true) {}
 
 void MotorSafety::stop() { latched_ = true; }
@@ -33,14 +29,9 @@ void MotorSafety::feed(uint32_t nowMs) {
 }
 
 bool MotorSafety::isExpired(uint32_t nowMs) const {
-    // 一度も SET_TARGET を受けていない起動直後は「満了」として扱い、出力停止側に倒す。
-    // 仕様書 §5.4 の起動時状態（目標 0・出力停止）と矛盾せず、
-    // 通信が始まる前に何かの拍子で駆動されるのを防げる。
     if (!everFed_) {
         return true;
     }
-    // millis() は約 49.7 日で 0 に戻る。符号なしの引き算で経過時間を出すことで、
-    // 折り返し直後に永久満了して原因不明の停止になるのを避ける。
     const uint32_t elapsed = nowMs - lastFedMs_;
     return elapsed >= timeoutMs_;
 }
@@ -54,22 +45,13 @@ uint8_t MotorSafety::statusFlags(uint32_t nowMs) const {
     if (latched_) {
         flags |= status_flag::kEStop;
     }
-    // **基板の再起動を PC から見えるようにする（仕様書 §3.2）。** サーボ基板は
-    // setup() で config.h の初期角へ駆動するので、試合中の瞬断は「機構が勝手に飛ぶ」
-    // 形で現れるのに、これが無いと FEEDBACK 上は何事もなかったように見える
-    // （ウォッチドッグのビットは「一度でも受けた後の満了」でしか立たない）。
     if (!everFed_) {
         flags |= status_flag::kNeverCommanded;
     }
-    // ウォッチドッグのビットは「CAN 通信が途絶した」ことの報告なので、指令をまだ 1 通も受けていない
-    // 起動直後には立てない。立てると PC 側 check_safety_error() がセッティングタイムの
-    // 動作確認を指令送信前に打ち切り、健全な基板の配線を疑わせる誤誘導になる。
-    // 出力禁止（isOutputAllowed）は従来どおり未受信でも掛かったままにする。
-    // ウォッチドッグを無効にした基板は途絶しても止まらないのだから、作動中とも報告しない。
     if (watchdogEnabled_ && isCommandLost(nowMs)) {
         flags |= status_flag::kWatchdog;
     }
     return flags;
 }
 
-}  // namespace motorcan
+}

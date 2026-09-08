@@ -42,13 +42,11 @@ def _table(**overrides: object) -> PositionTable:
 
 
 def _command(table: PositionTable, axis: str, name: str, *, court: Court | None = None) -> float:
-    """単一モータ軸 (モータ名 = 軸名) の指令値。本番と同じ commands() 経由で引く。"""
     return table.commands(axis, name, court=court)[axis]
 
 
 class TestUnitConversion:
     def test_scale_is_applied(self) -> None:
-        """人間の単位 (mm) からモータ指令 (M3508 モータ軸 deg) へ換算される。"""
         table = _table()
 
         assert _command(table, "lift_motor", "work") == pytest.approx(10.0 * 864.0)
@@ -64,7 +62,6 @@ class TestUnitConversion:
         assert _command(table, "lift_motor", "home") == pytest.approx(5.0 * 2.0 + 100.0)
 
     def test_deg_to_rad_conversion(self) -> None:
-        """EDULITE 05 の指令は rad。deg で書いた値が rad に換算される。"""
         table = _table()
 
         assert _command(table, "arm_joint", "extended") == pytest.approx(math.radians(15.0))
@@ -102,7 +99,6 @@ class TestTimeoutAndTolerance:
         assert table.axis("lift_motor").timeout_s == pytest.approx(2.5)
 
     def test_tolerance_defaults_to_none(self) -> None:
-        """未指定ならドライバ既定の許容差を使う (None を返す)。"""
         table = _table()
 
         assert table.axis("lift_motor").tolerance is None
@@ -115,8 +111,6 @@ class TestTimeoutAndTolerance:
             }
         )
 
-        # 許容差は向きを持たないため scale の符号は無視する。到達待ちは
-        # AxisHandle がモータごとに換算するので、その経路と同じ API で確かめる
         spec = table.axis("lift_motor")
         assert spec.tolerance == pytest.approx(0.5)
         assert spec.motors[0].to_tolerance(spec.tolerance) == pytest.approx(0.5 * 864.0)
@@ -189,7 +183,6 @@ class TestLookupErrors:
 
 class TestLoadValidation:
     def test_positions_for_undefined_axis_raises(self) -> None:
-        """換算係数が無い軸に生値を送ると単位事故になるため、読み込み時に弾く。"""
         with pytest.raises(ValueError, match="unknown_axis"):
             load_position_table(
                 {
@@ -269,7 +262,6 @@ class TestMotorSpec:
 
 class TestPairedAxis:
     def test_commands_applies_per_motor_scale(self) -> None:
-        """逆回転ペアは scale の符号で表すため、左右で符号が反転した指令になる。"""
         table = load_position_table(_PAIRED_CONFIG, source="<test>")
 
         assert table.commands("y_axis", "work") == {
@@ -352,12 +344,6 @@ class TestCommandMode:
         assert table.axis("conveyor").command_mode is ControlMode.VELOCITY
 
     def test_on_off_mode_with_settle(self) -> None:
-        """電磁弁のような離散状態アクチュエータの軸 (仕様書 §9.2 / §9.3)。
-
-        基板が弁の開閉を観測できないので到達判定を持てない。position 以外の軸は
-        settle_s の固定待ちへ落ちるため、ここを書き忘れると指令の直後に次の
-        ステップへ進む (弁が開き切る前に機体が動く)。
-        """
         table = load_position_table(
             {
                 "axes": {
@@ -378,11 +364,6 @@ class TestCommandMode:
         assert table.commands("valve_1", "closed") == {"valve_1": 0.0}
 
     def test_on_off_axis_rejects_manual_range(self) -> None:
-        """on_off 軸に manual: は書けないこと。
-
-        弁は開か閉のどちらかしか取らないので「可動範囲」が存在しない。書けてしまうと
-        UI がジョグ行を描き、押しても何も起きない操作面ができる。
-        """
         with pytest.raises(ValueError, match="command_mode: position"):
             load_position_table(
                 {
@@ -399,7 +380,6 @@ class TestCommandMode:
             )
 
     def test_current_mode_is_rejected(self) -> None:
-        """電流指令は位置定数から出す用途が無く、誤記のまま機構へ流すと危険なため拒否する。"""
         with pytest.raises(ValueError, match="command_mode"):
             load_position_table({"axes": {"conveyor": {"command_mode": "current"}}})
 
@@ -447,7 +427,6 @@ class TestAxisSchemaValidation:
             )
 
     def test_sync_tolerance_on_single_motor_axis_is_rejected(self) -> None:
-        """1 台の軸に書くと防護が効かないまま「書いたつもり」になるため拒否する。"""
         with pytest.raises(ValueError, match="sync_tolerance"):
             load_position_table({"axes": {"gripper": {"scale": 1.0, "sync_tolerance": 2.0}}})
 
@@ -478,13 +457,6 @@ class TestAxisSchemaValidation:
 
 
 class TestManualSpec:
-    """手動操縦の可動範囲 (axes.<軸>.manual)。
-
-    通常運用の ``move_to`` は位置名でしか値を引けないため「定義した状態以外を
-    送れない」ことが構造的に保証されている。手動はその保証を外す経路なので、
-    代わりの境界が config に無ければ連続操作そのものを許さない。
-    """
-
     def test_manual_を書かない軸は連続操作の対象外(self) -> None:
         table = _table()
         assert table.axis("lift_motor").manual is None
@@ -557,7 +529,6 @@ class TestManualSpec:
             )
 
     def test_duty_軸への_manual_は起動を拒否する(self) -> None:
-        # duty に「可動範囲」は存在しない。書けると押しても位置決めされない操作面が出る
         with pytest.raises(ValueError, match="command_mode: position"):
             load_position_table(
                 {
@@ -588,7 +559,6 @@ class TestManualSpec:
             )
 
     def test_範囲外のプリセット位置があれば起動を拒否する(self) -> None:
-        # 「シーケンスは行ける場所へ手動では行けない」軸を config の時点で塞ぐ
         with pytest.raises(ValueError, match="manual の範囲"):
             _table(
                 axes={
@@ -619,12 +589,6 @@ class TestManualSpec:
 
 
 class TestManualAlwaysAxis:
-    """シーケンス制御中でも手動指令を受け付ける軸 (axes.<軸>.manual_always)。
-
-    ``manual`` (連続値の可動範囲) とは対の関係で、あちらは位置指令の軸にしか
-    書けず、こちらは到達判定を持たない軸 (duty / on_off) にしか書けない。
-    """
-
     def test_書かない軸は対象外(self) -> None:
         table = _table()
         assert table.axis("lift_motor").manual_always is False
@@ -652,8 +616,6 @@ class TestManualAlwaysAxis:
 
     @pytest.mark.parametrize("mode", ["position", "velocity"])
     def test_位置指令の軸へ書いたら起動を拒否する(self, mode: str) -> None:
-        # 位置指令の軸で許すと、シーケンスが move_to で書いた目標を手動が上書きし、
-        # wait_reached が動かない位置を見続けて必ずタイムアウトする
         with pytest.raises(ValueError, match="manual_always は duty / on_off"):
             load_position_table(
                 {
@@ -688,7 +650,6 @@ class TestManualAlwaysAxis:
             )
 
     def test_AxisSpec_を直接組み立てても拒否する(self) -> None:
-        # yaml を経由しない組み立て (テスト・将来のツール) にも同じ規則を効かせる
         with pytest.raises(ValueError, match="manual_always は duty / on_off"):
             AxisSpec(
                 name="lift_motor",
@@ -702,8 +663,6 @@ class TestManualAlwaysAxis:
 
 
 class TestAxisToValue:
-    """指令値・フィードバックを人間の単位へ戻す逆換算 (手動の現在値表示に使う)。"""
-
     def test_単一モータ軸は_to_commands_の逆になる(self) -> None:
         spec = _table().axis("lift_motor")
         commands = spec.to_commands(12.5)
@@ -727,7 +686,6 @@ class TestAxisToValue:
         )
         spec = table.axis("y_axis")
         commands = spec.to_commands(8.0)
-        # 逆回転ペアは指令値の符号が逆。人間の単位へ戻せば両方 8.0 になる
         assert commands["y_axis_r"] == pytest.approx(-commands["y_axis_l"])
         assert spec.to_value(commands) == pytest.approx(8.0)
 
@@ -738,12 +696,6 @@ class TestAxisToValue:
 
 
 class TestMerged:
-    """統合動作確認シーケンスは両ハンドの軸を 1 つの表から引く。
-
-    軸名がロボット横断に一意であることに依存しているので、崩れたら起動時に
-    弾けなければならない。
-    """
-
     @staticmethod
     def _one(axis: str, position: str) -> PositionTable:
         return load_position_table(
@@ -762,13 +714,10 @@ class TestMerged:
         assert merged.raw("valve_1", "open") == 1.0
 
     def test_軸名が衝突したら拒否する(self) -> None:
-        # 後勝ちで上書きすると、動作確認が意図した側とは別の機体の軸を動かす。
-        # 「指令したのに動かない機構」と「触っていないのに動く機構」が同時に出る
         with pytest.raises(ValueError, match="gripper"):
             PositionTable.merged([self._one("gripper", "open"), self._one("gripper", "closed")])
 
     def test_出どころを引き継ぐ(self) -> None:
-        # 位置が見つからないときの例外メッセージは source を頼りに config を探す
         merged = PositionTable.merged([self._one("y_axis", "home")])
         assert "y_axis" in merged.source
 
@@ -777,14 +726,6 @@ class TestMerged:
 
 
 class TestSyncGain:
-    """同期補正のゲインと歯止め (axes.<軸>.sync_kp / sync_limit)。
-
-    検証はすべて「書いたのに効かない設定」と「歯止めの無いゲイン」を起動時に潰す
-    ためにある。どちらも症状が出ないまま運用に入ってしまう種類の誤りで、前者は
-    「補正を入れたつもりで一切効かない」、後者は「打ち間違えた 1 桁がそのまま
-    押し合いのフルスケールになる」形で現れる。
-    """
-
     def _paired(self, **extra: object) -> dict:
         return {
             "axes": {
@@ -804,7 +745,6 @@ class TestSyncGain:
         }
 
     def test_defaults_to_no_correction(self) -> None:
-        """未指定なら補正なし = 既存の config がそのまま動く。"""
         table = load_position_table(self._paired(), source="<test>")
         spec = table.axis("y_axis")
 
@@ -812,10 +752,6 @@ class TestSyncGain:
         assert spec.sync_limit is None
 
     def test_gain_reaches_the_sync_group(self) -> None:
-        """config の値が監視・補正の単位 (SyncGroup) までそのまま届く。
-
-        途中で詰め替える経路があると、逆回転の符号や単位を落とす余地が生まれる。
-        """
         table = load_position_table(self._paired(sync_kp=1.5, sync_limit=400.0), source="<test>")
         group = table.axis("y_axis").sync_group
 
@@ -824,24 +760,20 @@ class TestSyncGain:
         assert group.sync_limit == pytest.approx(400.0)
 
     def test_gain_without_limit_is_rejected(self) -> None:
-        """押し合いの歯止めが無いゲインは起動を拒否する。"""
         with pytest.raises(ValueError, match="sync_limit"):
             load_position_table(self._paired(sync_kp=1.5))
 
     def test_limit_without_gain_is_rejected(self) -> None:
-        """歯止めだけ書いても補正は 1 通も出ない (書いたのに効かない設定)。"""
         with pytest.raises(ValueError, match="sync_limit"):
             load_position_table(self._paired(sync_limit=400.0))
 
     def test_zero_gain_may_declare_a_limit(self) -> None:
-        """0.0 + 上限は正当 (今は無効だが、上げるときの上限を先に決めておく)。"""
         table = load_position_table(self._paired(sync_kp=0.0, sync_limit=400.0), source="<test>")
 
         assert table.axis("y_axis").sync_kp == pytest.approx(0.0)
         assert table.axis("y_axis").sync_limit == pytest.approx(400.0)
 
     def test_negative_gain_is_rejected(self) -> None:
-        """負のゲインは正帰還。ずれを縮めるどころか発散させる。"""
         with pytest.raises(ValueError, match="sync_kp"):
             load_position_table(self._paired(sync_kp=-1.0, sync_limit=400.0))
 
@@ -850,14 +782,12 @@ class TestSyncGain:
             load_position_table(self._paired(sync_kp=1.0, sync_limit=-1.0))
 
     def test_gain_on_single_motor_axis_is_rejected(self) -> None:
-        """1 台の軸に書いても揃える相手が居ない。"""
         with pytest.raises(ValueError, match="sync_kp"):
             load_position_table(
                 {"axes": {"gripper": {"scale": 1.0, "sync_kp": 1.0, "sync_limit": 100.0}}}
             )
 
     def test_gain_without_sync_tolerance_is_rejected(self) -> None:
-        """sync_tolerance が無いと同期グループ自体が作られず、補正も監視も効かない。"""
         config = {
             "axes": {
                 "y_axis": {
@@ -874,21 +804,11 @@ class TestSyncGain:
             load_position_table(config)
 
     def test_unknown_key_is_still_rejected(self) -> None:
-        """キー名の打ち間違いが「黙って無視されるゲイン」にならないこと。"""
         with pytest.raises(ValueError, match="sync_gain"):
             load_position_table(self._paired(sync_gain=1.0))
 
 
 class TestMotionSpec:
-    """台形速度プロファイルの制限 (axes.<軸>.motion)。
-
-    位置制御ループへ渡す中間目標を作るための速度・加速度制限で、値は軸の人間の
-    単位のまま持つ (指令単位への換算は制御層が ``abs(scale)`` で行う)。
-    検証は「書いたのに制限として成立しない設定」と「必ずタイムアウトする軸」を
-    起動時に潰すためにある。後者は運用に入ってから「その軸だけ毎回失敗する」形で
-    しか現れず、原因が config からは読めない。
-    """
-
     def _axis(self, *, motion: object, **extra: object) -> dict:
         return {
             "axes": {
@@ -904,13 +824,11 @@ class TestMotionSpec:
         }
 
     def _suggested_timeout(self, message: str) -> float:
-        """エラーメッセージが提示した timeout_s を取り出す。"""
         found = re.search(r"timeout_s を ([0-9.]+) 以上", message)
         assert found is not None, message
         return float(found.group(1))
 
     def test_motion_を書かない軸は従来どおりステップ入力(self) -> None:
-        """既存 config がそのまま読める (motion は任意キー)。"""
         table = _table()
 
         assert table.axis("lift_motor").motion is None
@@ -940,7 +858,6 @@ class TestMotionSpec:
         assert motion.velocity_ff == pytest.approx(1.5)
 
     def test_max_velocity_だけの指定は拒否する(self) -> None:
-        """片方だけでは制限として成立しない (sync_kp / sync_limit と同じ方針)。"""
         with pytest.raises(ValueError, match="max_acceleration"):
             load_position_table(self._axis(motion={"max_velocity": 60.0}))
 
@@ -949,7 +866,6 @@ class TestMotionSpec:
             load_position_table(self._axis(motion={"max_acceleration": 400.0}))
 
     def test_非正の_max_velocity_は拒否する(self) -> None:
-        """0 では中間目標が一切進まず、負値では目標から遠ざかる。"""
         with pytest.raises(ValueError, match="max_velocity"):
             load_position_table(self._axis(motion={"max_velocity": 0.0, "max_acceleration": 400.0}))
 
@@ -958,7 +874,6 @@ class TestMotionSpec:
             load_position_table(self._axis(motion={"max_velocity": 60.0, "max_acceleration": -1.0}))
 
     def test_負の_velocity_ff_は拒否する(self) -> None:
-        """負の速度フィードフォワードは進行方向と逆へ押す。"""
         with pytest.raises(ValueError, match="velocity_ff"):
             load_position_table(
                 self._axis(
@@ -971,7 +886,6 @@ class TestMotionSpec:
             )
 
     def test_未知のキーは拒否する(self) -> None:
-        """綴り間違いが「黙って無視される制限」にならないこと。"""
         with pytest.raises(ValueError, match="max_vel"):
             load_position_table(self._axis(motion={"max_vel": 60.0, "max_acceleration": 400.0}))
 
@@ -980,7 +894,6 @@ class TestMotionSpec:
             load_position_table(self._axis(motion=60.0))
 
     def test_位置指令でない軸への_motion_は拒否する(self) -> None:
-        """duty / on_off 軸には中間目標という概念が無い (到達を観測できない)。"""
         config = {
             "axes": {
                 "conveyor": {
@@ -996,7 +909,6 @@ class TestMotionSpec:
             load_position_table(config)
 
     def test_timeout_s_に収まる設定は通る(self) -> None:
-        """15mm を 60mm/s・400mm/s^2 で走ると約 0.4s。既定の 5s に収まる。"""
         table = load_position_table(
             self._axis(motion={"max_velocity": 60.0, "max_acceleration": 400.0}),
             source="<test>",
@@ -1005,7 +917,6 @@ class TestMotionSpec:
         assert table.axis("y_axis").motion is not None
 
     def test_必ずタイムアウトする軸は起動を拒否する(self) -> None:
-        """15mm を 10mm/s で走ると 1.525s。timeout_s 1.0s では到達判定に届かない。"""
         with pytest.raises(ValueError) as exc:
             load_position_table(
                 self._axis(
@@ -1017,12 +928,9 @@ class TestMotionSpec:
 
         message = str(exc.value)
         assert "timeout_s" in message
-        # 必要な timeout_s を示さないと、いくつにすればよいかを config から
-        # 逆算することになる
         assert self._suggested_timeout(message) >= 1.525
 
     def test_提示された_timeout_s_をそのまま書けば通る(self) -> None:
-        """提示値を切り捨てて出すと、書き写した config がもう一度拒否される。"""
         with pytest.raises(ValueError) as exc:
             load_position_table(
                 self._axis(
@@ -1044,11 +952,6 @@ class TestMotionSpec:
         assert table.axis("y_axis").motion is not None
 
     def test_三角プロファイルの所要時間で判定する(self) -> None:
-        """v_max へ達しない短距離を台形の式で見積もると、間に合う設定を拒否する。
-
-        15mm / 1000mm/s / 400mm/s^2 は 2*sqrt(d/a) = 0.39s で終わるが、
-        台形の式 (d/v + v/a) をそのまま当てると 2.5s と読める。
-        """
         table = load_position_table(
             self._axis(
                 motion={"max_velocity": 1000.0, "max_acceleration": 400.0},
@@ -1060,7 +963,6 @@ class TestMotionSpec:
         assert table.axis("y_axis").motion is not None
 
     def test_コート別の位置も最大移動距離に数える(self) -> None:
-        """片コートでだけ必ずタイムアウトする軸を作れてはならない。"""
         config = {
             "axes": {
                 "y_axis": {
@@ -1076,7 +978,6 @@ class TestMotionSpec:
             load_position_table(config, source="<test>")
 
     def test_位置定数を持たない軸は距離が決まらないので通る(self) -> None:
-        """移動距離が config から読めない軸に、根拠の無い上限を課さない。"""
         table = load_position_table(
             {
                 "axes": {
@@ -1094,14 +995,6 @@ class TestMotionSpec:
 
 
 class TestHomingSensorMap:
-    """零点確定のセンサ宣言 (axes.<軸>.homing の sensor / sensors / align_distance)。
-
-    左右直結ペアの各モータにスイッチが 1 本ずつ付いた軸 (`y_axis`) では、
-    「どのスイッチがどのモータのものか」がこの対応表でしか宣言されない。
-    書き忘れ・書き間違いはどれも「片側が押されないまま原点が確定する」という、
-    config からもログからも読めない形でしか現れないので起動時に潰す。
-    """
-
     @staticmethod
     def _paired(**homing_overrides: object) -> dict:
         homing: dict = {
@@ -1116,7 +1009,6 @@ class TestHomingSensorMap:
             "settle_s": 0.05,
         }
         homing.update(homing_overrides)
-        # None を渡したキーは「書かなかった」を表す (欠落そのものを検証したいため)
         for key in [name for name, value in homing.items() if value is None]:
             del homing[key]
         return {
@@ -1145,12 +1037,10 @@ class TestHomingSensorMap:
             "y_axis_r": "y_axis_r_origin_sensor",
             "y_axis_l": "y_axis_l_origin_sensor",
         }
-        # 事前確認も離脱判定も宣言順に並ぶ (ログと config を突き合わせられる)
         assert homing.sensor_names == ("y_axis_r_origin_sensor", "y_axis_l_origin_sensor")
         assert homing.align_distance == pytest.approx(5.0)
 
     def test_単数形の設定は今までどおり読める(self) -> None:
-        """スイッチ 1 本で軸全体の原点が決まる軸 (rotate) の回帰。"""
         table = load_position_table(
             {
                 "axes": {
@@ -1178,7 +1068,6 @@ class TestHomingSensorMap:
         assert homing.align_distance is None
 
     def test_対応表は書き換えられない(self) -> None:
-        """「どのスイッチがどのモータのものか」の唯一の宣言を呼び出し側から崩させない。"""
         homing = load_position_table(self._paired(), source="<test>").axis("y_axis").homing
 
         assert homing is not None
@@ -1187,12 +1076,10 @@ class TestHomingSensorMap:
             homing.sensors["y_axis_r"] = "別のセンサ"  # type: ignore[index]
 
     def test_sensor_と_sensors_の併記は拒否する(self) -> None:
-        """どちらのスイッチが原点を決めるのかが config から読めなくなる。"""
         with pytest.raises(ValueError, match="併記"):
             load_position_table(self._paired(sensor="y_axis_r_origin_sensor"), source="<test>")
 
     def test_どちらも書かなければ拒否する(self) -> None:
-        """センサを見ずに探索を始める軸を作らせない。"""
         with pytest.raises(ValueError, match="sensors"):
             load_position_table(self._paired(sensors=None, align_distance=None), source="<test>")
 
@@ -1209,12 +1096,10 @@ class TestHomingSensorMap:
             load_position_table(self._paired(sensors={"y_axis_r": 3}), source="<test>")
 
     def test_sensors_に_align_distance_が無ければ拒否する(self) -> None:
-        """片側だけを動かす整列段の唯一の無人の歯止めなので省略できない。"""
         with pytest.raises(ValueError, match="align_distance"):
             load_position_table(self._paired(align_distance=None), source="<test>")
 
     def test_sensors_の無い軸の_align_distance_は拒否する(self) -> None:
-        """整列段が存在しない軸に書いても効かない (書いたのに効かない設定を通さない)。"""
         config = {
             "axes": {
                 "rotate": {
@@ -1237,19 +1122,16 @@ class TestHomingSensorMap:
             load_position_table(self._paired(align_distance=0.0), source="<test>")
 
     def test_step_より小さい_align_distance_は拒否する(self) -> None:
-        """1 歩も踏めないまま必ず失敗する設定を通さない。"""
         with pytest.raises(ValueError, match="align_distance"):
             load_position_table(self._paired(step=2.0, align_distance=1.0), source="<test>")
 
     def test_モータが不足していれば拒否する(self) -> None:
-        """書き忘れたモータだけが整列段の対象から静かに外れる。"""
         with pytest.raises(ValueError, match="y_axis_l"):
             load_position_table(
                 self._paired(sensors={"y_axis_r": "y_axis_r_origin_sensor"}), source="<test>"
             )
 
     def test_余分なモータ名があれば拒否する(self) -> None:
-        """打ち間違えたモータ名は「不足」としても現れるが、余分な側も名指しする。"""
         sensors = {
             "y_axis_r": "y_axis_r_origin_sensor",
             "y_axis_l": "y_axis_l_origin_sensor",
@@ -1259,12 +1141,10 @@ class TestHomingSensorMap:
             load_position_table(self._paired(sensors=sensors), source="<test>")
 
     def test_align_distance_が_sync_tolerance_以上なら拒否する(self) -> None:
-        """整列段のずれが偏差許容差に届くと、零点確定の最中に 3 層の保護が発報する。"""
         with pytest.raises(ValueError, match="sync_tolerance"):
             load_position_table(self._paired(align_distance=10.5), source="<test>")
 
     def test_境界_align_distance_が_sync_tolerance_と等しくても拒否する(self) -> None:
-        """等号を許すと「ちょうど許容差ぶんずらしてから止める」設定が通る。"""
         with pytest.raises(ValueError, match="sync_tolerance"):
             load_position_table(self._paired(align_distance=10.0), source="<test>")
 
@@ -1275,12 +1155,6 @@ class TestHomingSensorMap:
 
 
 class TestToCommandsEach:
-    """モータごとに違う軸位置を指令する唯一の口 (AxisSpec.to_commands_each)。
-
-    零点確定の整列段が使う。左右で違う値を送る経路なので、逆回転ペアの符号付き
-    scale がモータごとに正しく当たること自体が安全上の条件になる。
-    """
-
     @staticmethod
     def _spec() -> AxisSpec:
         table = load_position_table(
@@ -1303,8 +1177,6 @@ class TestToCommandsEach:
     def test_モータごとに違う値を換算する(self) -> None:
         commands = self._spec().to_commands_each({"y_axis_r": 2.0, "y_axis_l": 5.0})
 
-        # 逆回転ペアなので向きは scale が持つ。整列段では左右へ違う軸位置を送る
-        # (揃った値を配る to_commands との違いはここにしかない)
         assert commands["y_axis_r"] == pytest.approx(2.0 * 55.0 + 3.0)
         assert commands["y_axis_l"] == pytest.approx(5.0 * -55.0 - 3.0)
 
@@ -1316,7 +1188,6 @@ class TestToCommandsEach:
         )
 
     def test_モータが不足していれば_KeyError(self) -> None:
-        """指令しなかったモータの目標は前の周期のまま残り、軸としては片側だけが動く。"""
         with pytest.raises(KeyError, match="y_axis_l"):
             self._spec().to_commands_each({"y_axis_r": 1.0})
 

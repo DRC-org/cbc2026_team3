@@ -11,29 +11,10 @@ import type { ManualState } from "@/lib/protocol";
 interface ManualPanelProps {
   robotKey: string;
   manual: ManualState;
-  /** 操作できない理由。null なら操作できる */
   blockedReason: string | null;
-  /**
-   * 送信できなかったら通知枠へ理由を出す送信口 (`useRobotCommands().sendOrReport`)。
-   *
-   * **戻り値を捨てる素の `send` を渡してはならない。** 切断中に押した 1 回が
-   * 痕跡なく消え、操縦者には「押したのに無反応」としか見えない。今は
-   * `blockedReason` がボタンごと無効にするので窓は「切断が確定する前の 1 回」に
-   * 限られるが、ゲートを緩めた瞬間にその壊れ方が戻る。
-   *
-   * 型は context の定義を参照する。ここへ書き写すと、context 側の引数が増えても
-   * 手書きの型だけが古いまま通り、契約のずれが型検査を素通りする。
-   */
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
-/**
- * キーボードの割り当て。凡例と実装が別々の場所にあると必ず食い違う。
- *
- * 端への移動だけ `Shift` を併記するのは、そこだけ実装が修飾キー併用だから
- * (`ContinuousControls`)。凡例を単打のまま残すと、押しても動かないキーを
- * 画面が案内し続けることになる。
- */
 const KEY_LEGEND: { keys: string[]; label: string }[] = [
   { keys: ["↑", "↓"], label: "軸" },
   { keys: ["←", "→"], label: "ジョグ" },
@@ -41,17 +22,6 @@ const KEY_LEGEND: { keys: string[]; label: string }[] = [
   { keys: ["Shift", "Home", "End"], label: "端" },
 ];
 
-/**
- * 手動操縦の操作面。軸を 1 行ずつ並べるだけで、軸の並びも可動範囲も
- * サーバー配信 (`state.manual.axes`) をそのまま描く。
- *
- * **この画面に軸名は書かない。** 機構が変わって軸が増減しても UI 側の変更が
- * 要らない性質は、モータ一覧と同じくここを素通しにすることで成立している。
- *
- * **キーボードの操作対象は連続操作できる軸だけ。** プリセットしか持たない軸
- * (電磁弁・グリッパ・duty 軸) を選択に混ぜると、`←` `→` が何も起こさない行へ
- * 降りられてしまい、キーが効かないのか軸が動かないのかを画面から区別できない。
- */
 export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: ManualPanelProps) {
   const [picked, setPicked] = useState<string | null>(null);
 
@@ -63,12 +33,7 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
     sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
   const steerable = manual.axes.filter((axis) => axis.manual !== null);
-  // プリセットしか持たない軸 (電磁弁・ポンプ・グリッパ・壁・duty 軸)。
-  // **群に分けるだけで、群の中では配信順のまま。** 実運用の config は連続軸を先に
-  // 並べているので見た目の順序は変わらない
   const presetOnly = manual.axes.filter((axis) => axis.manual === null);
-  // 選択は state から導出する。軸が入れ替わっても「居なくなった軸を選んだまま」に
-  // ならず、初期選択のための effect も要らない
   const selected = steerable.some((axis) => axis.name === picked)
     ? picked
     : (steerable[0]?.name ?? null);
@@ -80,8 +45,6 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
     setPicked(steerable[next].name);
   };
 
-  // 選択を動かすだけなら機体は動かないので、操作が塞がれていても通す
-  // (緊急停止中に見る軸を変えられないほうが不便で、危険は増えない)
   useHotkeys(
     {
       ArrowUp: () => moveSelection(-1),
@@ -117,10 +80,6 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
               />
             ))}
 
-            {/* **プリセットしか持たない軸は横に畳む。** 1 軸が 2 行 (名前 + ボタン) なので、
-                サブハンドの電磁弁 6 + ポンプ 2 だけで 16 行になり、連続軸 6 本の下に隠れて
-                画面外にあった —— 指差喚呼「valve_1〜6 を個別に開閉」を 1 個ずつ辿るたびに
-                スクロールで探すことになる。列数は幅で決める (呼び出し元は関与しない) */}
             {presetOnly.length === 0 ? null : (
               <div className="grid @min-[40rem]:grid-cols-2 @min-[56rem]:grid-cols-3">
                 {presetOnly.map((axis) => (
@@ -128,8 +87,6 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
                     key={axis.name}
                     axis={axis}
                     blockedReason={blockedReason}
-                    // 選択はキーボードで動かす連続軸だけの概念。プリセット軸へ
-                    // 降りられると `←` `→` が何も起こさない行に止まる
                     selected={false}
                     onSelect={() => {}}
                     onJog={onJog}
@@ -141,8 +98,6 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
             )}
           </div>
 
-          {/* 凡例はスクロール領域の外に置く。中に入れると、軸が増えたときに
-              一番使う操作の説明だけが画面外へ流れていく */}
           {selected === null ? null : (
             <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
               {KEY_LEGEND.map(({ keys, label }) => (

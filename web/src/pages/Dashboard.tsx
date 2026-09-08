@@ -12,37 +12,23 @@ import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isSetupPhase } from "@/lib/phase";
 import { ROBOTS } from "@/lib/robots";
 
-/**
- * Monitor タブ。フェーズによって役割が変わるため、レイアウトごと切り替える。
- *
- * - セッティングタイム: 問いは 1 つ「試合を開始できるか、できないなら何が足りないか」
- * - 試合中 / 試合終了: 問いは 1 つ「どちらの機体が止まっていて、何か起きていないか」
- */
 export function Dashboard() {
   const states = useRobotStates();
   const { matchState, serverInfo, connected } = useRobotStatus();
   const { matchStart } = useRobotCommands();
   const { confirmModal, requestReset } = useResetConfirm();
-  // 温度しきい値の正はサーバーの config。表示部品は props で受け取る
   const tempThresholds = tempThresholdsOf(serverInfo);
 
   if (isSetupPhase(matchState.phase)) {
     return (
       <>
         <Page className="grid grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] grid-rows-[auto_minmax(0,1fr)]">
-          {/* 開始可否を画面で最も大きい要素にする。以前これはパネル最下段の
-              小さなグレー文字で、何が足りないかは書かれていなかった。
-              「何が足りないか」(指差喚呼の残りと機体の要確認) はここだけが答える */}
           <div className="col-span-full">
             <StartGate onStart={matchStart} />
           </div>
 
-          {/* 左は準備そのもの。コート設定・動作確認の操作と、それを確認する指差喚呼を
-              同じ場所に置く (以前は操作が右、確認が左に分かれ、項目ごとに往復していた) */}
           <MatchPrep onRequestReset={requestReset} />
 
-          {/* 右は準備の面が答えられないことだけを持つ参照面。機体状態の判定チップは
-              StartGate と重複するので出さない (同じ画面に「要確認 3 件」が 2 回並ばない) */}
           <Panel legend="機体状態" className="min-h-0" bodyClassName="p-1">
             <ScrollArea className="gap-2">
               {ROBOTS.map(({ key, label }) => {
@@ -90,11 +76,6 @@ export function Dashboard() {
         />
       ))}
 
-      {/* ヘルス異常はこれまで数秒で消えるトーストにしか出ていなかった。
-            Monitor は起きたことを拾う役なので、履歴を画面に残す。
-            **高さは中身で決める。** 固定比率 (0.42fr) で置いていた頃は、
-            「異常イベントはありません」の 1 行のために画面の 42% を空けたまま、
-            上の機体状態は展開してもモータが 1 基も見えない状態になっていた */}
       <div className="col-span-full max-h-[40%] min-h-0">
         <Panel legend="イベント" className="max-h-full" bodyClassName="p-0">
           <EventFeed />

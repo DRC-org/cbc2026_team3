@@ -1,10 +1,3 @@
-"""ヘルス判定しきい値の既定値が lib/config_schema.py の 1 箇所にしかないことを検証する。
-
-同じ既定値を各モジュールがリテラルで持つと、config を配線し忘れた経路だけが
-無言で古い値に戻る。しきい値は「壊れる前に止める」判定の境界なので、
-経路によって境界が違う状態は事故そのものになる。
-"""
-
 from __future__ import annotations
 
 import ast
@@ -27,11 +20,6 @@ def _default_of(func, name: str) -> object:
 
 
 def _default_source(func, name: str) -> str:
-    """引数の既定値が「どう書かれているか」を返す。
-
-    値の一致だけを見るとリテラルで書き直しても通ってしまい、既定値が再び
-    分散したことを検出できない。式そのものを見て参照であることを確かめる。
-    """
     tree = ast.parse(inspect.getsource(func).lstrip())
     definition = tree.body[0]
     assert isinstance(definition, ast.FunctionDef)
@@ -53,13 +41,6 @@ def _default_source(func, name: str) -> str:
 
 
 def _body_references(func, dotted: str) -> bool:
-    """関数本体がその参照をそのまま書いているか。
-
-    引数の既定値に置けない既定 (None のときだけ使う fallback など) は
-    ``_default_source`` では見えない。値の一致で確かめるには本番の private を
-    覗くしかなく、テストのためだけに公開 API を生やすことになるので、
-    ここでも「どう書かれているか」を見る。
-    """
     tree = ast.parse(inspect.getsource(func).lstrip())
     return any(
         isinstance(node, ast.Attribute) and ast.unparse(node) == dotted for node in ast.walk(tree)
@@ -67,8 +48,6 @@ def _body_references(func, dotted: str) -> bool:
 
 
 class TestDefaultsComeFromConfigSchema:
-    """各モジュールの既定値が config_schema の定義を参照しているか。"""
-
     def test_can_manager_health_takes_thresholds_object(self) -> None:
         assert _default_of(CANManager.health, "thresholds") is DEFAULT_HEALTH
 
@@ -87,21 +66,7 @@ class TestDefaultsComeFromConfigSchema:
             == "DEFAULT_HEALTH.feedback_timeout_ms"
         )
 
-    # 動作確認のしきい値はここに無い。両ハンドを 1 本のシーケンスで駆動する形へ
-    # 変えたので、タイムアウトも許容差も config/*_positions.yaml の位置定数が持つ
-    # (`AxisSpec.timeout_s` / `tolerance`)。確認専用のしきい値そのものが存在しない。
-
     def test_yaml_省略時の_fallback_も参照で書かれている(self) -> None:
-        """yaml が health を書かなかったときに使う値も、リテラルで持たないこと。
-
-        ここは引数の既定値ではなく関数本体の ``values.get(key, ...)`` なので
-        ``_default_source`` では見えない。**値の一致では守れない層**でもある ——
-        既定と同じ数値をリテラルで書き戻すと、値を見るテスト
-        (`test_missing_sections_fall_back_to_defaults`) は緑のまま通り、
-        以後 ``HealthThresholds`` の既定を変えても yaml 省略時だけが古い境界に
-        残る。「フィードバック途絶は config どおりなのに温度警告だけ 65℃」は
-        ログにも UI にも現れない壊れ方なので、書かれ方そのものを固定する。
-        """
         for key in _HEALTH_KEYS:
             assert _body_references(_parse_health, f"DEFAULT_HEALTH.{key}"), (
                 f"health.{key} 省略時の既定値が DEFAULT_HEALTH を参照していない"
@@ -109,12 +74,10 @@ class TestDefaultsComeFromConfigSchema:
 
 
 class _NoStepSequence(Sequence):
-    """ステップを 1 つも持たないシーケンス (ヘルス配線の検証に進行は要らない)。"""
+    """ステップを 1 つも持たないシーケンス。"""
 
 
 class _RecordingCANManager:
-    """RobotServer が health() へ渡したしきい値を記録するだけのスタブ。"""
-
     def __init__(self) -> None:
         self.received: HealthThresholds | None = None
 
@@ -124,8 +87,6 @@ class _RecordingCANManager:
 
 
 class TestServerForwardsThresholdsAsOneUnit:
-    """4 値が 1 つの値として運ばれ、部分配線が起こりえないこと。"""
-
     def test_compute_health_forwards_injected_thresholds(self) -> None:
         thresholds = HealthThresholds(
             feedback_timeout_ms=11.0,
@@ -143,21 +104,12 @@ class TestServerForwardsThresholdsAsOneUnit:
 
 
 class TestThermalWarningTakesOnlyWarningThreshold:
-    """未使用の critical しきい値を受け取らない (呼び出し側の誤配線を作らない)。"""
-
     def test_signature_has_no_critical_argument(self) -> None:
         params = inspect.signature(MotorDriver.has_thermal_warning).parameters
         assert list(params) == ["self", "temp_warning_c"]
 
 
 class TestServerInfoCarriesTempThresholds:
-    """温度しきい値が UI へ配られること。UI 側に写しを持たせないための配線。
-
-    UI が独自のしきい値を持っていた頃、同じモータについてサーバーは OK・画面は
-    異常という食い違いが出ていた。config の値がそのまま届くことまで見ないと、
-    「配ってはいるが既定値のまま」という形で二重管理が復活する。
-    """
-
     async def test_config_values_reach_the_client(self) -> None:
         thresholds = HealthThresholds(
             feedback_timeout_ms=11.0,
@@ -170,13 +122,11 @@ class TestServerInfoCarriesTempThresholds:
         async with TestClient(TestServer(fx.create_app())) as client:
             ws = await client.ws_connect("/ws")
             msg = await require_type(ws, "server_info")
-            # 既定値 (65 / 80) が漏れていないこと。config の値そのものが届く
             assert msg["temp_warning_c"] == 22.0
             assert msg["temp_critical_c"] == 33.0
             await ws.close()
 
     async def test_unused_thresholds_are_not_broadcast(self) -> None:
-        # UI が使わない値を配ると、そこから別の写しが生まれる
         fx = ServerFixture.build()
 
         async with TestClient(TestServer(fx.create_app())) as client:

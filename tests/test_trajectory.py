@@ -6,17 +6,12 @@ import pytest
 
 from lib.control.trajectory import TrapezoidalProfile
 
-# y_axis の実機相当の値。単位は mm / mm/s / mm/s^2 で、dt は位置制御ループの 200Hz
 V_MAX = 60.0
 A_MAX = 400.0
 DT = 0.005
 
-# v_max に到達するかの境界。これ未満の移動距離は三角プロファイルになる
 TRIANGLE_BOUNDARY = V_MAX**2 / A_MAX
 
-# プロファイルを検証する移動距離。1.5mm までは実機検証済みで、5mm 以上は導入当時
-# 「未検証の領域」としていた側。**実運用の移動距離 (130〜530mm) はこの一覧の外側にある**
-# ので、ここで見ているのは移動距離に依らず成立する性質 (目標を跨がない・単調に近づく) だけ
 TRAVEL_DISTANCES = [0.5, 1.5, 5.0, 15.0, 50.0]
 
 
@@ -64,7 +59,6 @@ class TestReset:
 
         assert profile.position == 3.25
         assert profile.velocity == 0.0
-        # 目標も現在位置へ落とさないと、リセット直後の 1 周期で古い目標へ動き出す
         assert profile.done
         assert profile.advance(DT) == (3.25, 0.0)
 
@@ -81,8 +75,6 @@ class TestReset:
 
 
 class TestVelocityLimit:
-    """T1: どの周期でも ``|v| <= max_velocity``。"""
-
     @pytest.mark.parametrize("distance", TRAVEL_DISTANCES)
     def test_velocity_never_exceeds_the_limit(self, distance: float) -> None:
         profile = _profile()
@@ -97,7 +89,6 @@ class TestVelocityLimit:
             assert abs(velocity) <= V_MAX + 1e-9
 
     def test_long_move_actually_reaches_the_velocity_limit(self) -> None:
-        """上限に触れない軌道では T1 が何も検証しないので、触れることを別に確かめる。"""
         profile = _profile()
         profile.retarget(50.0)
         peak = max(abs(v) for _, v in _run(profile, 2000))
@@ -105,8 +96,6 @@ class TestVelocityLimit:
 
 
 class TestAccelerationLimit:
-    """T2: 1 周期の速度変化が ``max_acceleration * dt`` を超えない。"""
-
     @pytest.mark.parametrize("distance", TRAVEL_DISTANCES)
     def test_velocity_step_is_bounded(self, distance: float) -> None:
         profile = _profile()
@@ -127,8 +116,6 @@ class TestAccelerationLimit:
 
 
 class TestConvergence:
-    """T3: 十分な時間で目標へ収束し、速度が 0 になる。"""
-
     @pytest.mark.parametrize("distance", TRAVEL_DISTANCES)
     def test_settles_exactly_on_the_target(self, distance: float) -> None:
         profile = _profile()
@@ -148,14 +135,6 @@ class TestConvergence:
 
 
 class TestNoOvershoot:
-    """T4: 目標を跨がず、単調に近づく。
-
-    導入当時の PID (output_limit 2000) は偏差 1.14mm で P 項が飽和するため、
-    飽和中はフル電流の定加速になり
-    減速に使える距離が移動距離に依らず一定になる。実運用ストローク (130〜530mm) では
-    原理的に行き過ぎるので、プロファイル側でこの性質を持たせる。
-    """
-
     @pytest.mark.parametrize("distance", TRAVEL_DISTANCES)
     def test_forward_move_never_crosses_the_target(self, distance: float) -> None:
         profile = _profile()
@@ -180,7 +159,6 @@ class TestNoOvershoot:
 
     @pytest.mark.parametrize("distance", TRAVEL_DISTANCES)
     def test_velocity_never_reverses_during_a_move(self, distance: float) -> None:
-        """行き過ぎて戻る軌道は位置の単調性だけでは拾えない周期がある。"""
         profile = _profile()
         profile.retarget(distance)
         for _, velocity in _run(profile, 4000):
@@ -188,7 +166,6 @@ class TestNoOvershoot:
 
     @pytest.mark.parametrize("dt", [0.001, 0.005, 0.02])
     def test_holds_for_coarser_control_periods(self, dt: float) -> None:
-        """周期が伸びるほど離散化の行き過ぎが出やすいので、粗い dt でも確かめる。"""
         profile = _profile()
         profile.retarget(15.0)
         for position, _ in _run(profile, 20_000, dt=dt):
@@ -197,8 +174,6 @@ class TestNoOvershoot:
 
 
 class TestTerminalBehaviour:
-    """T5: 目標付近で行ったり来たりしない。"""
-
     def test_stays_pinned_after_arrival(self) -> None:
         profile = _profile()
         profile.retarget(5.0)
@@ -210,7 +185,6 @@ class TestTerminalBehaviour:
             assert velocity == 0.0
 
     def test_last_approach_does_not_oscillate(self) -> None:
-        """到達直前の数周期で符号が反転していないこと。"""
         profile = _profile()
         profile.retarget(0.5)
         samples = _run(profile, 400)
@@ -219,8 +193,6 @@ class TestTerminalBehaviour:
 
 
 class TestRetarget:
-    """T6: 移動中に目標を差し替えても速度が飛ばない。"""
-
     def test_forward_retarget_keeps_velocity_continuous(self) -> None:
         profile = _profile()
         profile.retarget(50.0)
@@ -247,16 +219,6 @@ class TestRetarget:
         assert profile.velocity == 0.0
 
     def test_巡航中にすぐ手前へ再ターゲットしても目標を通り過ぎない(self) -> None:
-        """**着地した後の周期で中間目標が進み続けないこと。**
-
-        巡航中に 1 周期ぶんの進みより近くへ再ターゲットされると、その周期は着地代入で
-        目標へ置かれるが**速度は巡航速度のまま残る** (加速度制限があるので 1 周期では
-        0 にできない)。次の周期は `remaining == 0` なので着地条件が成立せず、
-        素通しだと `position += step` で**着地したはずの目標を通り過ぎて進み続ける**。
-
-        `TestNoOvershoot` は単発移動しか見ていないので、この経路は網に無かった。
-        手動ジョグの連打と `sequence_jump` 後の `move_to` で踏む。
-        """
         profile = _profile()
         profile.retarget(1000.0)
         position = 0.0
@@ -267,11 +229,9 @@ class TestRetarget:
                 break
         assert velocity == pytest.approx(V_MAX)
 
-        # すぐ手前 (1 周期ぶんの進みより近く) へ再ターゲット
         target = position + 0.1
         profile.retarget(target)
 
-        # 速度が 0 へ落ちきるまで回しても、中間目標は目標を超えない
         for _ in range(200):
             position, _velocity = profile.advance(DT)
             assert position <= target + 1e-9, "着地した目標を通り過ぎた"
@@ -279,7 +239,6 @@ class TestRetarget:
         assert position == pytest.approx(target)
 
     def test_repeated_retarget_keeps_velocity_continuous(self) -> None:
-        """手動ジョグの連打相当。毎周期目標が動いても加速度制限を割らない。"""
         profile = _profile()
         previous = 0.0
         target = 0.0
@@ -293,8 +252,6 @@ class TestRetarget:
 
 
 class TestNonPositiveDt:
-    """T7: ``dt <= 0`` で内部状態を一切変えない (``PIDController.update`` と同じ約束)。"""
-
     @pytest.mark.parametrize("bad_dt", [0.0, -0.005])
     def test_state_is_untouched(self, bad_dt: float) -> None:
         profile = _profile()
@@ -322,12 +279,9 @@ class TestNonPositiveDt:
 
 
 class TestProfileTiming:
-    """T8: 到達所要時間が台形 / 三角プロファイルの理論値と一致する。"""
-
     def test_trapezoidal_move_matches_theory(self) -> None:
         distance = 50.0
         assert distance > TRIANGLE_BOUNDARY
-        # 加速 + 巡航 + 減速 = v_max/a + L/v_max
         expected = V_MAX / A_MAX + distance / V_MAX
 
         profile = _profile()
@@ -339,7 +293,6 @@ class TestProfileTiming:
     def test_triangular_move_matches_theory(self) -> None:
         distance = 5.0
         assert distance < TRIANGLE_BOUNDARY
-        # v_max に届かないので加速 / 減速だけ。2*sqrt(L/a)
         expected = 2.0 * math.sqrt(distance / A_MAX)
 
         profile = _profile()

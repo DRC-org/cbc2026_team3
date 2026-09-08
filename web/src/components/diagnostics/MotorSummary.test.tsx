@@ -5,7 +5,6 @@ import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import type { MotorHealth, MotorState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
 
-/** 温度は常に正常域。サマリーが温度ではなくヘルスを見ていることを確かめるため */
 const MOTORS: Record<string, MotorState> = {
   y_axis_r: motorState(),
   y_axis_l: motorState(),
@@ -24,18 +23,12 @@ function motorHealth(over: Partial<MotorHealth> = {}): MotorHealth {
   };
 }
 
-/** 見出しチップ (モータ基数の隣に出る 1 つ目のバッジ) */
 function verdictBadge(): HTMLElement {
   const badge = screen.getByText("2 基").parentElement?.querySelector(".badge");
   if (!badge) throw new Error("判定チップが見つかりません");
   return badge as HTMLElement;
 }
 
-/**
- * 溢れが画面に出ない面は 1 つではない。**部品の契約は `ui/ScrollArea.test.tsx` が
- * 固定するので、ここが見るのは「この面が実際にそれを使っているか」だけ。**
- * jsdom はレイアウトを持たないので、溢れているかどうかは寸法を置いて作る。
- */
 function stubScroll(
   el: Element,
   size: { clientHeight: number; scrollHeight: number; scrollTop: number },
@@ -48,8 +41,6 @@ function stubScroll(
 
 describe("MotorSummary", () => {
   it("モータが 1 基でも fault なら、温度が正常でも All operational を出さない", () => {
-    // サマリーが温度しきい値しか見ていなかったため、行のバッジが FAULT (赤) を
-    // 出している同じ画面で、見出しだけが緑の「All operational」を出していた
     render(
       <MotorSummary
         motors={MOTORS}
@@ -107,10 +98,6 @@ describe("MotorSummary", () => {
   });
 });
 
-/**
- * 24 基は操縦者の右レール (285px) にも Monitor の 1 機ぶん (645px) にも収まらない。
- * 一覧が切れていることが画面に出ないと、下にあるモータが「居ない」のと区別が付かない。
- */
 describe("MotorSummary の溢れ", () => {
   it("下に続きがあるあいだだけ合図を出す", () => {
     const { container } = render(<MotorSummary motors={MOTORS} />);

@@ -27,8 +27,6 @@ class SampleSequence(Sequence):
 
 
 class FailingSequence(Sequence):
-    """2 番目のステップで実運用と同じ例外 (左右ずれ) を投げるシーケンス。"""
-
     def __init__(self):
         super().__init__("failing")
         self.fail = True
@@ -45,12 +43,6 @@ class FailingSequence(Sequence):
 
 @contextlib.asynccontextmanager
 async def _auto_trigger(seq: Sequence) -> AsyncIterator[None]:
-    """トリガー待ちを見つけ次第押し続ける操縦者役。
-
-    ``require_trigger`` のステップは操縦者が押すまで必ず止まる。完走まで見たい
-    テストはその代役が要るが、代役のループ条件を各テストに書き写すと
-    「待たずに素通りしている」のか「押されて進んだ」のかがテストごとに変わる。
-    """
 
     async def press() -> None:
         while True:
@@ -66,14 +58,6 @@ async def _auto_trigger(seq: Sequence) -> AsyncIterator[None]:
 
 
 class TestStepDecorator:
-    """``@step`` 単体の検証。
-
-    デコレータの唯一の出力はメソッドへ付けるマーカー属性で、それを拾うのは
-    ``__init_subclass__`` という別の協力者。両者をまとめて検証すると、壊れたときに
-    「印を付け忘れた」のか「集め忘れた」のかが切り分けられない。ここだけは
-    非公開のマーカーを直接見るのが正しい単体試験になる。
-    """
-
     def test_step_decorator_sets_attributes(self):
         assert SampleSequence.step1._step_label == "ステップ1"
         assert SampleSequence.step1._step_require_trigger is False
@@ -201,13 +185,6 @@ class TestReset:
 
 
 class TestLastError:
-    """失敗したステップと理由が外から読めること。
-
-    到達タイムアウト・左右ずれ・零点確定失敗はすべてステップ単位の try で握られる。
-    握ったまま捨てると journal 以外どこにも出ず、操縦者の画面は「待機中」と
-    区別が付かない (**3 層保護の第 1 層である `AxisSyncError` が画面から無音になる**)。
-    """
-
     async def test_平常時はNone(self):
         seq = SampleSequence()
 
@@ -234,7 +211,6 @@ class TestLastError:
         }
 
     async def test_再実行で消える(self):
-        """次の実行が始まったら古い失敗は残さない (平常時は null)。"""
         seq = FailingSequence()
         await seq.run()
         assert seq.last_error is not None
@@ -247,12 +223,6 @@ class TestLastError:
 
 
 class TestLifecycle:
-    """開始要求待ち → 実行 → 停止後の巻き戻し、という常駐ループの公開 API。
-
-    このループをサーバー側に写すと「停止後にどこへ戻るか」がシーケンスの外に置かれ、
-    シーケンス単体では正しい状態へ戻れなくなる。
-    """
-
     async def test_開始要求があるまで一歩も動かない(self):
         seq = SampleSequence()
         task = asyncio.create_task(seq.run_forever())
@@ -281,7 +251,6 @@ class TestLifecycle:
         assert seq.is_running is False
         assert seq.progress["step_index"] == 0
 
-        # 巻き戻った状態から再び先頭を実行できる
         seq.request_start()
         await asyncio.sleep(0.05)
         assert seq.executed == ["step1", "step1"]
@@ -320,27 +289,17 @@ class TestLifecycle:
         task.cancel()
 
     async def test_実行中に届いた2通目の開始要求は停止後に発火しない(self):
-        """**STOP を押した後、先頭から全工程を走り切ってはならない。**
-
-        2 通目の START は現実に届く —— 操縦者 2 名 + 予備タブが同じ画面を開き、
-        配信周期 (50ms) 以内の二度押しでも、詰まったクライアントが最大 1 秒古い
-        `running:false` を描いていても起きる。それを再開イベントとして残すと、
-        次の通常停止で `run()` が降りた瞬間に `run_forever` が拾い、操縦者が何も
-        押していないのに機体が先頭から動き出す。
-        """
         seq = SampleSequence()
         task = asyncio.create_task(seq.run_forever())
         seq.request_start()
         await asyncio.sleep(0.05)
         assert seq.is_running is True
 
-        # 実行中に届いた 2 通目
         seq.request_start()
         await asyncio.sleep(0.05)
         executed_at_stop = list(seq.executed)
 
         seq.request_stop()
-        # 以後、操縦者は何も押さない
         await asyncio.sleep(0.1)
 
         assert seq.is_running is False
@@ -359,14 +318,9 @@ class TestLifecycle:
         assert seq.executed == []
         task.cancel()
 
+    # asyncio.Event.set() は待機中の future をその場で解決するので、直後の clear() では
+    # 「起きることが決まった 1 回」を取り消せない。
     async def test_常駐ループが待っている最中の破棄も効く(self):
-        """**`clear()` だけでは、既に待機に入っている常駐ループを止められない。**
-
-        `asyncio.Event.set()` は待機中の future をその場で解決するので、直後の
-        `clear()` は「起きることが決まった 1 回」を取り消せない。本番の
-        `run_forever` は常に待機に入っているため、こちらが実運用での形になる
-        (待機前に破棄する形だけを見ていると、この穴が丸ごと素通りする)。
-        """
         seq = SampleSequence()
         task = asyncio.create_task(seq.run_forever())
         await asyncio.sleep(0.02)
@@ -388,7 +342,6 @@ class TestLifecycle:
         seq.request_start()
         await asyncio.sleep(0.05)
 
-        # 破棄されていなければ step3 から走り出す
         assert seq.executed == ["step1"]
         task.cancel()
 
@@ -406,15 +359,6 @@ class TestLifecycle:
 
 
 class TestStepLog:
-    """ステップ進行の journal 記録。
-
-    **記録はエンジンの 1 箇所だけが持つ。** 各ステップ本体に `logger.info` を
-    書き写していた頃は `@step` のラベルと同じ文字列が 2 箇所にあり、ラベルを
-    直すとログだけが古くなった。ここで固定するのは書式そのものではなく、
-    「シーケンス名・番号・総数・ラベルの 4 つが揃うこと」と
-    「出るタイミング (トリガー待ちの後)」の 2 つ。
-    """
-
     @staticmethod
     def _step_lines(caplog) -> list[str]:
         return [
@@ -432,17 +376,11 @@ class TestStepLog:
 
         lines = self._step_lines(caplog)
         assert len(lines) == 3
-        # シーケンス名・番号・総数・ラベルの 4 つが揃っていること
         assert lines[0] == "[sample] 1/3 ステップ1"
         assert lines[1] == "[sample] 2/3 ステップ2"
         assert lines[2] == "[sample] 3/3 ステップ3"
 
     async def test_トリガー待ちの間はまだ出ない(self, caplog):
-        """待つ前に出すと、許可待ちで止まっている間ずっと実行中に見える。
-
-        journal の並びが実際の実行順と食い違うので、後から追うときに
-        「どこで止まったか」を読み違える。
-        """
         seq = SampleSequence()
 
         with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):
@@ -450,7 +388,6 @@ class TestStepLog:
             await asyncio.sleep(0.05)
 
             assert seq.waiting_trigger is True
-            # step1 の 1 行だけ。トリガー待ちの step2 はまだ出ていない
             assert self._step_lines(caplog) == ["[sample] 1/3 ステップ1"]
 
             seq.trigger()
@@ -470,8 +407,6 @@ class TestStepLog:
         assert completed == ["[sample] 完走 (3 ステップ)"]
 
     async def test_途中で停止したら完走の行は出ない(self, caplog):
-        """通常停止は lib/server.py が別に記録している。ここで書くと二重になり、
-        しかも「完走した」という嘘になる。"""
         seq = SampleSequence()
 
         with caplog.at_level(logging.INFO, logger="lib.sequence.engine"):

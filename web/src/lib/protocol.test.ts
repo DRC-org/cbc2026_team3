@@ -4,14 +4,6 @@ import { readableHealth } from "@/lib/healthVerdict";
 import { MALFORMED, parseServerMessage, readCommand, readMeasured } from "@/lib/protocol";
 import type { RobotState } from "@/lib/protocol";
 
-/**
- * 受信条件そのもののテスト。
- *
- * 型は実行時に消えるので、「サーバーが送っているのに UI が捨てる」事故は
- * 受信条件を直接固定する以外に守れない (`health_change` の `robot` を
- * 必須にしていて実機で 100% 捨てていた前例がある)。
- * 実配信サンプルとの突き合わせは `test/wsContract.test.ts` が担う。
- */
 describe("parseServerMessage", () => {
   it("JSON として壊れた入力を null にする", () => {
     expect(parseServerMessage("{ not json")).toBeNull();
@@ -36,7 +28,6 @@ describe("parseServerMessage", () => {
       expect(msg).toEqual({
         type: "state",
         robot: "main_hand",
-        // last_error だけは受信境界が形を確定させるので、配信に無くても null が載る
         state: { type: "state", robot: "main_hand", step_index: 3, last_error: null },
       });
     });
@@ -46,8 +37,6 @@ describe("parseServerMessage", () => {
     });
 
     it("ヘルスの detail を受信経路で落とさない", () => {
-      // サーバーは健全性を計算できなかったとき overall=down と detail だけで
-      // 「判定不能」を伝える。detail を捨てると画面に理由が残らない
       const msg = parse({
         type: "state",
         robot: "main_hand",
@@ -58,11 +47,6 @@ describe("parseServerMessage", () => {
       expect(readableHealth(state.health)?.detail).toBe("計算失敗");
     });
 
-    /**
-     * `health` も UI が `.filter` を直に呼ぶ (`evaluateHealth`)。しかも呼び出し元の
-     * 1 つ (`TabBar`) は `RouteErrorBoundary` の**外**にあるため、投げれば React
-     * ツリーごとアンマウントして**ヘッダーの緊急停止ボタンまで消える**。
-     */
     describe("health", () => {
       const HEALTH = {
         timestamp: 0,
@@ -98,11 +82,6 @@ describe("parseServerMessage", () => {
       });
     });
 
-    /**
-     * `safety` だけは UI が `.length` / `.filter` を直に呼ぶので、受信境界で形を
-     * 確定させる。ここを素通しにすると 1 欄欠けた配信でレンダーが投げ、React
-     * ツリーごとアンマウントしてヘッダーの緊急停止ボタンまで消える。
-     */
     describe("safety", () => {
       const SAFETY = {
         sync_violations: [],
@@ -148,13 +127,6 @@ describe("parseServerMessage", () => {
       });
     });
 
-    /**
-     * `positions` は名前だけの配列 (`["home", "work"]`) だった。**`state` の既存欄の
-     * 形を変えた唯一の例**なので、サーバーと `web/dist` の版がずれる窓が現実にある ——
-     * `pnpm dev` を手元で立てて `?ws=drc:8080` で機体へ繋ぐ運用がそれ。
-     * 素通しのままだと `position.name` が undefined になり、**文字の無いボタンが
-     * 押せる状態で並ぶ**（`onMove` は行き先の無い指令を送る）。
-     */
     describe("manual の positions", () => {
       const manualOf = (positions: unknown) => {
         const msg = parse({
@@ -184,8 +156,6 @@ describe("parseServerMessage", () => {
       });
 
       it("旧サーバーの素の文字列を value: null として受ける", () => {
-        // 押せるボタンは残す。**値が分からないことは null がそのまま表す**ので、
-        // 刻みも title も出ない (0 を捏造しない)
         expect(manualOf(["home", "work"])).toEqual([
           { name: "home", value: null },
           { name: "work", value: null },
@@ -193,15 +163,12 @@ describe("parseServerMessage", () => {
       });
 
       it("どちらの形でもない要素だけ落とす", () => {
-        // 名前を読めないボタンを出すより、ボタンが無い方が嘘をつかない
         expect(manualOf([{ name: "home", value: 0 }, { value: 3 }, 42, null])).toEqual([
           { name: "home", value: 0 },
         ]);
       });
 
       it("値が数値でも null でもない要素も落とす", () => {
-        // **`0` へ丸めない。** 丸めると、可動範囲の下端に居ないプリセットが下端に
-        // 刻みとして描かれ、`title` は「そこがどこか」を数値で断言する
         expect(
           manualOf([
             { name: "home", value: 0 },
@@ -233,11 +200,6 @@ describe("parseServerMessage", () => {
       });
     });
 
-    /**
-     * センサ一覧も UI が `Object.entries` を直に呼ぶので受信境界で形を確定させる。
-     * **接触 (`active`) は異常ではない** ので値そのものは素通しで、異常側へ倒すのは
-     * 読めなかった配信だけ。
-     */
     describe("sensors", () => {
       const SENSORS = {
         origin_sensor: { active: true, stale: false },
@@ -282,11 +244,6 @@ describe("parseServerMessage", () => {
       });
     });
 
-    /**
-     * **`motors` と `steps` は素通しのまま保つ。** モータ名を UI 側へ書かない性質は
-     * 配信をそのまま状態へ入れることで成立しており、ここで組み立て直すと
-     * モータが 1 基増えるたびに UI の変更が要る形へ逆戻りする。
-     */
     it("motors と steps は知らないモータ・欄ごとそのまま通す", () => {
       const motors = {
         brand_new_motor: { pos: 1, vel: 2, torque: 3, temp: 4, future_field: "keep" },
@@ -299,12 +256,6 @@ describe("parseServerMessage", () => {
       expect(state.steps).toEqual(steps);
     });
 
-    /**
-     * **測れない項目の null は正当な測定結果であって、読めなかった配信ではない。**
-     * 自作モータドライバの DC 基板・電磁弁基板は 4 値とも測る手段が無く、
-     * サーボ基板は位置しか持たない。ここを異常扱いにすると、DC 基板を 1 枚
-     * 積んだだけでそのロボットの state 配信が丸ごと捨てられる。
-     */
     it("測れない項目が null のモータを異常扱いにしない", () => {
       const motors = {
         conveyor: { pos: null, vel: null, torque: null, temp: null, command: 0.3 },
@@ -331,7 +282,6 @@ describe("parseServerMessage", () => {
     });
 
     it("フラグが欠けていたら無効に倒す", () => {
-      // 開発用ボタンが本番で出るより、開発用起動で出ない方が安全側
       expect(parse({ type: "server_info" })).toEqual({
         type: "server_info",
         serverInfo: {
@@ -356,7 +306,6 @@ describe("parseServerMessage", () => {
     });
 
     it("温度しきい値をそのまま持つ", () => {
-      // UI 側に既定値を置かないので、config の値はこの 1 通でしか入らない
       expect(parse({ type: "server_info", temp_warning_c: 65, temp_critical_c: 80 })).toMatchObject(
         {
           serverInfo: { temp_warning_c: 65, temp_critical_c: 80 },
@@ -365,8 +314,6 @@ describe("parseServerMessage", () => {
     });
 
     it("しきい値が number でなければ null (代わりの既定値を持たない)", () => {
-      // 数値でない値を通すと比較が常に false になり、警告が一切出ないまま
-      // 「しきい値は届いている」ように見える
       expect(
         parse({ type: "server_info", temp_warning_c: "65", temp_critical_c: null }),
       ).toMatchObject({
@@ -416,21 +363,16 @@ describe("parseServerMessage", () => {
       ],
       ["そもそもオブジェクトでない", "pre_match"],
     ])("checklists が読めない形なら MALFORMED (%s)", (_name, checklists) => {
-      // **空へ倒してはならない。** 空は「config に項目が無い」の表現として既に
-      // 使っており、混ぜると操縦者は config/checklist.yaml を疑って探しに行く
       const msg = parse({ type: "match_state", court: "red", phase: "ready", checklists });
       expect(msg).toMatchObject({ matchState: { checklists: MALFORMED } });
     });
 
     it("読めない checklists でもフェーズは捨てない", () => {
-      // タイマーと同じ理由。試合の進行そのものを握っている値を巻き添えにしない
       const msg = parse({ type: "match_state", court: "red", phase: "match", checklists: 7 });
       expect(msg).toMatchObject({ matchState: { phase: "match", court: "red" } });
     });
 
     it("タイマーが欠けても match_state ごと捨てない", () => {
-      // フェーズと指差喚呼の進捗は試合の進行そのものを握っている。タイマーが
-      // 読めないという理由でそちらまで落とすほうがはるかに悪い
       const msg = parse({ type: "match_state", court: "red", phase: "match" });
 
       expect(msg).toMatchObject({ matchState: { phase: "match", timer: null } });
@@ -443,8 +385,6 @@ describe("parseServerMessage", () => {
       ["duration_ms が 0", { running: true, elapsed_ms: 0, duration_ms: 0 }],
       ["duration_ms が負", { running: true, elapsed_ms: 0, duration_ms: -1 }],
     ])("壊れたタイマー (%s) は null にする", (_label, timer) => {
-      // duration_ms <= 0 を通すと残り時間が常に 0 以下になり、
-      // 画面には「試合開始と同時に時間切れ」が出る
       const msg = parse({ type: "match_state", court: "red", phase: "match", timer });
 
       expect(msg).toMatchObject({ matchState: { timer: null } });
@@ -491,13 +431,6 @@ describe("parseServerMessage", () => {
       }
     });
 
-    /**
-     * `level` は `HealthChangeLevel`（3 値の union）で `MALFORMED` という
-     * 第 4 の値を持てない。読めなかったときに軽い側 (`"info"`) へ倒すと、
-     * 型不正のせいで本当に critical なイベントが画面から消える
-     * (`web/src/lib/protocol.ts:967` で実際に `?? "info"` になっていた事故)。
-     * ここでは異常側の `"critical"` へ倒すことを固定する。
-     */
     it("level 省略時は critical (異常側) へ倒す", () => {
       expect(parse({ type: "health_change", robot: "main_hand", target: "can0" })).toEqual({
         type: "health_change",
@@ -535,17 +468,9 @@ describe("parseServerMessage", () => {
     });
   });
 
-  /**
-   * `court` / `phase` はどちらも `Record` の索引として使われる
-   * (`PHASE_LABEL[phase]` / `COURT_TONE[court]`)。無検査キャストのままだと未知の値で
-   * 索引が undefined になり、**フェーズチップとコートチップが無地・無文字で消える**。
-   * さらに `isDuringMatch()` が false になって全画面が「準備中」へ倒れ、
-   * 読めなかったこと自体が画面のどこにも現れない。
-   */
   describe("match_state のコートとフェーズ", () => {
     const base = { type: "match_state", can_start_match: false };
 
-    /** 受信後の match_state。読めなかった欄も値として載るので広い型で受ける */
     const matchStateOf = (payload: object) =>
       (parse(payload) as unknown as { matchState: Record<string, unknown> }).matchState;
 
@@ -567,16 +492,12 @@ describe("parseServerMessage", () => {
     });
 
     it("片方が読めなくてももう片方は落とさない", () => {
-      // フェーズと指差喚呼は試合の進行そのものを握っている。コートが読めない
-      // ことを理由にそちらまで捨てるほうがはるかに悪い
       expect(matchStateOf({ ...base, court: "green", phase: "match" }).phase).toBe("match");
     });
   });
 
   describe("motor_check_state", () => {
     it("robot を要求しない (両ハンド統合の 1 本なので載っていない)", () => {
-      // ここで robot を必須にすると動作確認の状態が 100% 捨てられる。
-      // health_change で実際にやらかした形なので、受信条件として固定する
       const message = parse({ type: "motor_check_state", available: true, running: false });
 
       expect(message).not.toBeNull();
@@ -589,21 +510,15 @@ describe("parseServerMessage", () => {
       expect(message).toEqual({
         type: "motor_check_state",
         motorCheck: {
-          // available は「押せる」へ倒さない (押しても拒否されるボタンを出さない)
           available: false,
           blocked_reason: null,
           running: false,
           current_step: null,
           step_index: 0,
           total_steps: 0,
-          // steps も excluded_steps と同じ扱い。空配列は「まだ読み込まれていない」
-          // という別の意味を持つので、欠落をそこへ倒さない
           steps: MALFORMED,
           error: null,
           last_error: null,
-          // **空配列へ倒さない。** 空は「除外なし = 全ステップが登録されている」を
-          // 既に意味するので、読めなかった配信をそこへ埋めると、除外が起きているのに
-          // 画面が平常を描く (除外を黙って行うのと同じ壊れ方)
           excluded_steps: MALFORMED,
         },
       });
@@ -633,10 +548,6 @@ describe("parseServerMessage", () => {
     });
 
     it("steps が読めなければ MALFORMED へ倒す (空配列にしない)", () => {
-      // 空配列は「まだ読み込まれていない」という別の意味を既に持っている
-      // (MotorCheckPanel がその文言を出す)。そこへ倒すと、配信が壊れていることが
-      // 「まだ読み込まれていない」に化け、指差喚呼「動作確認 完了」の判断材料が
-      // 静かに嘘になる
       const message = parse({ type: "motor_check_state", steps: "壊れた値" });
 
       expect(message?.type).toBe("motor_check_state");
@@ -645,8 +556,6 @@ describe("parseServerMessage", () => {
     });
 
     it("steps の要素の形が違えば MALFORMED へ倒す", () => {
-      // `step.index` はレンダー本体で読むので、1 要素でも null が混ざると
-      // TypeError で RouteErrorBoundary の内側が丸ごと落ちる
       const message = parse({
         type: "motor_check_state",
         steps: [{ index: 0, label: "ok", require_trigger: false }, null],
@@ -658,9 +567,6 @@ describe("parseServerMessage", () => {
     });
 
     it("除外したステップと欠けている軸をそのまま運ぶ", () => {
-      // **除外が受信境界で消えると、動作確認そのものが意味を失う。**
-      // サブハンド不在で減っているのか config の書き忘れで減っているのかを、
-      // 操縦者はこれ以外に区別する材料を持たない
       const message = parse({
         type: "motor_check_state",
         excluded_steps: [{ step: "サブハンド 昇降", missing_axes: ["sub_lift"] }],
@@ -682,7 +588,6 @@ describe("parseServerMessage", () => {
     });
 
     it("除外が読めない形なら MALFORMED へ倒す", () => {
-      // 空配列 (= 除外なし) へ倒すと、読めなかった配信が「全ステップ登録済み」に化ける
       const message = parse({
         type: "motor_check_state",
         excluded_steps: [{ step: "サブハンド 昇降" }],
@@ -695,12 +600,6 @@ describe("parseServerMessage", () => {
   });
 });
 
-/**
- * 測定値の読み取り。**「測る手段が無い (null)」と「配信が読めない (欠落・型違い)」を
- * 混ぜてはならない** —— 前者は `—` を描くのが正しく、後者は異常側へ倒す。
- * `motors` は受信境界で素通しなので (モータ名を UI へ書かない性質がそこで
- * 成立している)、両者を分ける唯一の入口がここになる。
- */
 describe("readMeasured", () => {
   it("測れた値はそのまま返す", () => {
     expect(readMeasured(41.2)).toBe(41.2);
@@ -716,17 +615,11 @@ describe("readMeasured", () => {
     expect(readMeasured(undefined)).toBe(MALFORMED);
     expect(readMeasured("41.2")).toBe(MALFORMED);
     expect(readMeasured({})).toBe(MALFORMED);
-    // NaN / Infinity は toFixed が "NaN" や "Infinity" を描いてしまう
     expect(readMeasured(Number.NaN)).toBe(MALFORMED);
     expect(readMeasured(Number.POSITIVE_INFINITY)).toBe(MALFORMED);
   });
 });
 
-/**
- * 指令値の読み取り。`readMeasured` との違いは **未配信を異常にしない**ことだけ。
- * `command` は後から足された欄なので、配らない版のサーバーへ繋いだだけで
- * 全モータの POS 欄が `?` で埋まってはならない。
- */
 describe("readCommand", () => {
   it("未配信 (undefined) は「指令が無い」へ倒す。MALFORMED にしない", () => {
     expect(readCommand(undefined)).toBeNull();

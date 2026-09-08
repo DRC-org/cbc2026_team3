@@ -1,11 +1,3 @@
-"""手動操縦のサーバー側 (モード遷移・排他・ゲート・配信)。
-
-lib/manual.py の単体テストが「指令が正しく組み立つか」を見るのに対し、ここは
-**制御権が同時に 2 つ立たないこと**だけを見る。半自動シーケンス・動作確認・手動は
-どれも同じモータへ周期的に指令を出すので、2 つが同時に走った時点で
-「操縦者の操作と機体の動きが対応しない」状態になる。
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +26,6 @@ _POSITIONS = {
             "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
         },
         "gripper": {"unit": "deg", "command_unit": "deg"},
-        # シーケンス制御中でも手動で操作できる軸 (到達判定を持たない単独軸)
         "conveyor": {
             "unit": "duty",
             "command_unit": "duty",
@@ -61,14 +52,6 @@ class _RecordingDriver(StubFeedbackDriver):
 
 
 class _SlowSequence(Sequence):
-    """1 ステップ目でテストの解放を待ち、2 ステップ目に進んだことを記録する。
-
-    通常停止 (``request_stop``) は CAN 層に介入せず、走っているステップを
-    **その完了まで待ってから**ループを降りる。「止めた瞬間に is_running が
-    False になる」ことを検証すると、実際には見ていない性質を見たことになる。
-    ここで見るのは **止めた後に先へ進まないこと**。
-    """
-
     def __init__(self, name: str = _ROBOT) -> None:
         super().__init__(name)
         self.entered = asyncio.Event()
@@ -86,11 +69,6 @@ class _SlowSequence(Sequence):
 
 
 class _GatedCheckSequence(Sequence):
-    """統合動作確認シーケンスの代役。ゲートを開けるまで実行中のまま止まる。
-
-    「実行中である」窓を決定的に作るためだけのもので、軸は 1 つも動かさない。
-    """
-
     def __init__(self) -> None:
         super().__init__("motor_check")
         self.gate = asyncio.Event()
@@ -118,8 +96,6 @@ def _fixture(
     with_manual: bool = True,
     checklist: bool = False,
 ) -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
-    # 指差喚呼の項目が 1 つも無いと can_start_match が最初から True になり、
-    # フェーズが SETUP を素通りして READY から始まる
     fx = ServerFixture.build(checklist_definitions=DEFAULT_CHECKLIST if checklist else None)
     fx.freeze_broadcast()
     manual, drivers = _make_manual()
@@ -170,8 +146,6 @@ class TestModeSwitch:
         assert "手動操縦に対応していません" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_モードはロボットごとに独立する(self) -> None:
-        # メインハンドだけ手動、サブハンドは半自動、が成立しないと
-        # 「片方を調整するあいだ、もう片方の試合進行が止まる」
         fx, _ = _fixture()
         manual2, _ = _make_manual()
         fx.add_robot("sub_hand", _SlowSequence("sub_hand"), manual=manual2)
@@ -181,8 +155,6 @@ class TestModeSwitch:
 
 
 class TestPhaseIndependence:
-    """開始前・試合中・終了後のどこでも手動へ入れる (運用要件)。"""
-
     @pytest.mark.parametrize("phase", [p.value for p in Phase])
     async def test_どのフェーズでも手動へ入れる(self, phase: str) -> None:
         fx, _ = _fixture(checklist=True)
@@ -205,8 +177,6 @@ class TestPhaseIndependence:
 
 
 class TestControlOwnership:
-    """制御権が同時に 2 つ立たないこと。"""
-
     async def test_手動へ入るとシーケンスを止める(self) -> None:
         seq = _SlowSequence()
         fx, _ = _fixture(seq)
@@ -217,14 +187,12 @@ class TestControlOwnership:
         assert seq.is_running
 
         await _switch(fx, "manual")
-        # 走行中のステップは完了まで待つ。完了後にループが降り、次へは進まない
         seq.release.set()
         assert await _wait(lambda: not seq.is_running)
         assert not seq.advanced, "手動へ切り替えた後にシーケンスが次のステップへ進んだ"
         task.cancel()
 
     async def test_手動へ入る直前の開始要求を破棄する(self) -> None:
-        # 破棄しないと、手動で機構を動かしている最中に要求が発火する
         seq = _SlowSequence()
         fx, _ = _fixture(seq)
         fx.enter_match()
@@ -232,7 +200,6 @@ class TestControlOwnership:
 
         await fx.command({"type": "sequence_start", "robot": _ROBOT})
         await _switch(fx, "manual")
-        # 開始要求が残っていれば run_forever がここで拾って走り出す
         for _ in range(20):
             await asyncio.sleep(0)
         assert not seq.is_running
@@ -243,11 +210,7 @@ class TestControlOwnership:
         await _switch(fx, "manual")
         assert await fx.start_motor_check() is False
 
-    # 動作確認の側から見た排他 (実行中の手動切替拒否・両ロボットへのゲート) は
-    # tests/test_server_motor_check.py にある
-
     async def test_半自動へ戻してもシーケンスは自動再開しない(self) -> None:
-        # 手動で機構を動かした後に先頭から流すと、機構の姿勢と手順が食い違う
         seq = _SlowSequence()
         fx, _ = _fixture(seq)
         fx.enter_match()
@@ -258,18 +221,6 @@ class TestControlOwnership:
             await asyncio.sleep(0)
         assert not seq.is_running
         task.cancel()
-
-    # ------------------------------------------------------------------ #
-    #  逆方向: 手動モード中に届くシーケンス系コマンドを弾く。
-    #
-    #  `_apply_operation_mode` は手動へ「入る」側で `_stop_sequence` により制御権を
-    #  奪うが、手動に入った**後**に届く sequence_start / sequence_jump / trigger を
-    #  弾く経路が無かった (CommandSpec にモードゲートの概念自体が無く、
-    #  `_manual_target` の判定は逆方向 = 手動指令がシーケンスモード中に来た場合しか
-    #  見ていなかった)。手動 (lib/manual.py) とシーケンス (lib/sequence/engine.py) は
-    #  同じ AxisHandle.set_target_value を通るため、塞がないとジョグ中の軸へ
-    #  シーケンスが別の目標値を書きに来る。
-    # ------------------------------------------------------------------ #
 
     async def test_手動モード中はsequence_startを拒否する(self) -> None:
         seq = _SlowSequence()
@@ -312,8 +263,6 @@ class TestControlOwnership:
         assert "手動操縦中" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_半自動モード中はsequence_startが通る(self) -> None:
-        # ゲートが「フェーズが試合中でないこと」を誤検出していないかの対照実験。
-        # 半自動 (既定モード) では今までどおり通る
         seq = _SlowSequence()
         fx, _ = _fixture(seq)
         fx.enter_match()
@@ -359,7 +308,6 @@ class TestManualCommandGate:
         assert "緊急停止中" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_緊急停止中でもモード切替はできる(self) -> None:
-        # 停止中に画面を手動へ寄せ、解除と同時に動かす手順を塞ぐ理由は無い
         fx, _ = _fixture()
         await fx.activate_e_stop()
         await _switch(fx, "manual")
@@ -375,7 +323,6 @@ class TestManualCommandGate:
 
     @pytest.mark.parametrize("value", [None, "3.0", True, float("nan"), float("inf")])
     async def test_数値でない指令値は拒否する(self, value: object) -> None:
-        # NaN は比較がすべて false になるのでクランプを素通りする
         fx, drivers = _fixture()
         await _switch(fx, "manual")
         client = RecordingClient()
@@ -400,7 +347,6 @@ class TestManualCommandGate:
         assert "連続操作の対象外" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_位置名の誤りで_WS_が切れない(self) -> None:
-        # 打ち間違いで画面ごと落ちると、試合中に復旧手段が無くなる
         fx, _ = _fixture()
         await _switch(fx, "manual")
         client = RecordingClient()
@@ -414,14 +360,6 @@ class TestManualCommandGate:
 
 
 class TestManualAlwaysAxisGate:
-    """`manual_always` を宣言した軸だけ、シーケンス制御中でも手動で操作できる。
-
-    緩めたのは「モード判定」の 1 枚だけである。**緊急停止ゲート・再励磁ゲート・
-    連続操作の可否は 1 つも緩めていない**ので、それぞれが単独で効いていることを
-    ここで見る (他の層が拾ってしまう条件で確かめると、緩めた層を後で誰かが
-    消しても気付けない)。
-    """
-
     async def test_シーケンス制御中でも対象軸のプリセット指令は通る(self) -> None:
         fx, drivers = _fixture()
         assert fx.operation_mode(_ROBOT) == "sequence"
@@ -437,7 +375,6 @@ class TestManualAlwaysAxisGate:
         assert client.of_type("command_rejected") == []
 
     async def test_シーケンス制御中は非対象軸のプリセット指令を拒否する(self) -> None:
-        # 対照実験。宣言していない軸まで通ってしまうと、緩めた範囲が軸単位でなくなる
         fx, drivers = _fixture()
         client = RecordingClient()
         fx.attach_clients(client)
@@ -451,8 +388,6 @@ class TestManualAlwaysAxisGate:
         assert "手動操縦モードではありません" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_未定義の軸はモードではなく軸の理由で拒否する(self) -> None:
-        # 「手動操縦モードではありません」で覆い隠すと、軸名の打ち間違いが
-        # モードの問題に見えて、切り替えても直らない
         fx, _ = _fixture()
         client = RecordingClient()
         fx.attach_clients(client)
@@ -467,7 +402,6 @@ class TestManualAlwaysAxisGate:
         assert "手動操縦モードではありません" not in reason
 
     async def test_緊急停止中は対象軸でも拒否される(self) -> None:
-        # 半自動のまま・対象軸という、モード判定が拒否理由にならない条件で見る
         fx, drivers = _fixture()
         await fx.activate_e_stop()
         client = RecordingClient()
@@ -482,12 +416,6 @@ class TestManualAlwaysAxisGate:
         assert "緊急停止中" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_動作確認の実行中は対象軸でも拒否される(self) -> None:
-        """動作確認はまさにこの 7 軸を目視・打音で確かめる。
-
-        従来これを守っていたのは「動作確認は全ロボットが sequence モードでないと
-        起動できない → sequence モードでは手動が全部拒否される」という連鎖で、
-        軸単位で緩めた瞬間に切れる。
-        """
         fx, drivers = _fixture()
         check = _GatedCheckSequence()
         fx.set_motor_check_sequence(check)
@@ -508,7 +436,6 @@ class TestManualAlwaysAxisGate:
         await fx.wait_motor_check_idle()
 
     async def test_動作確認が終われば対象軸は通る(self) -> None:
-        # 上の対照実験。実行中だけを塞いでいることを見る
         fx, drivers = _fixture()
         check = _GatedCheckSequence()
         fx.set_motor_check_sequence(check)
@@ -531,8 +458,6 @@ class TestManualAlwaysAxisGate:
         ],
     )
     async def test_対象軸でも連続値の指令は通らない(self, payload: dict) -> None:
-        # duty / on_off 軸に manual: は書けないので、送れるのはプリセットだけ。
-        # 「定義した状態以外を送れない」という通常運用の保証がそのまま残る
         fx, drivers = _fixture()
         client = RecordingClient()
         fx.attach_clients(client)
@@ -543,7 +468,6 @@ class TestManualAlwaysAxisGate:
         assert "連続操作の対象外" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_手動モードでの非対象軸は今までどおり通る(self) -> None:
-        # 回帰。緩和が MANUAL モードの経路を変えていないこと
         fx, drivers = _fixture()
         await _switch(fx, "manual")
 
@@ -580,8 +504,6 @@ class TestManualCommandEffect:
 
 class TestMatchReset:
     async def test_セッティングタイムへの復帰で半自動へ戻す(self) -> None:
-        # 手動のまま次の試合の準備に入ると、切り替えたことを忘れたまま
-        # sequence_start が無反応になる
         fx, _ = _fixture()
         await _switch(fx, "manual")
         await fx.command({"type": "match_reset"})
@@ -613,27 +535,17 @@ class TestEStopClearsJogOrigin:
         await _switch(fx, "manual")
         await fx.command({"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 15.0})
         await fx.activate_e_stop()
-        # 停止中に機構が下がった状況を作る
         drivers["y_axis_r"].set_observed(position=2.0 * 55.0)
         drivers["y_axis_l"].set_observed(position=-2.0 * 55.0)
         await fx.command({"type": "e_stop_release"})
-        # 解除の再励磁が終わるまで手動指令は拒否される (単発再励磁と同じゲート)。
-        # ここで待たないと、見たいもの (起点の取り直し) の手前で弾かれる
         await fx.wait_reactivation()
 
         drivers["y_axis_r"].commands.clear()
         await fx.command({"type": "manual_jog", "robot": _ROBOT, "axis": "y_axis", "delta": 1.0})
-        # 起点を持ち越していれば 16.0mm、取り直していれば 3.0mm
         assert drivers["y_axis_r"].commands == [(ControlMode.POSITION, pytest.approx(3.0 * 55.0))]
 
 
-# ---------------------------------------------------------------------- #
-#  ヘルパ
-# ---------------------------------------------------------------------- #
-
-
 async def _advance_to(fx: ServerFixture, phase: str) -> None:
-    """SETUP から目的のフェーズまで正規の遷移で進める。"""
     if phase == "setup":
         return
     fx.complete_all_checklists()
