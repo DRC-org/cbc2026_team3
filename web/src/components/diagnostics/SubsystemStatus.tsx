@@ -15,6 +15,7 @@ import type { SensorPayload } from "@/components/diagnostics/SensorSummary";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { cx } from "@/lib/cx";
 import {
   describeSafetyIssues,
   evaluateHealth,
@@ -180,9 +181,19 @@ function FailedTasksNotice({ labels }: { labels: string[] }) {
 function SafetyIssues({
   safety,
   onReenergize,
+  verdictShown,
 }: {
   safety: SafetyPayload | undefined;
   onReenergize?: () => void;
+  /**
+   * 折りたたみ見出しのチップを同じパネルが出しているか。
+   *
+   * **出しているなら先頭 1 件の文はチップと完全に同じになる** ——
+   * `evaluateHealth` は安全機構を最初に見て `${label} ${detail}` をそのまま
+   * チップの文言にするため (`lib/healthVerdict.ts`)。真下でもう一度描くと、
+   * 同じ文が 2 行離れて 2 度並ぶ。**2 件目以降はチップが言っていない**ので残す。
+   */
+  verdictShown: boolean;
 }) {
   const issues = describeSafetyIssues(safety);
   // 在飛中かはサーバーが配る。押した記憶から組み立てない (拒否された押下まで
@@ -192,29 +203,41 @@ function SafetyIssues({
 
   return (
     <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-error bg-error/5 px-2 py-1">
-      {issues.map((issue) => (
-        <li key={issue.label} className="flex min-w-0 flex-col">
-          <span className="flex min-w-0 items-center gap-1.5">
-            <Icon as={ShieldAlert} className="shrink-0 text-error" />
-            <span className="shrink-0 font-medium">{issue.label}</span>
-            <span className="min-w-0 truncate font-mono text-base-content/80">{issue.detail}</span>
-          </span>
-          {/* 状態だけ出しても操縦者は次の一手を選べない。復旧手順まで書く */}
-          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">{issue.hint}</span>
-          {/* 押せる場所は限定する — この異常が実際に出ていて、かつこの画面に
-              コールバックが渡されているとき (操縦者自身の画面) だけ */}
-          {issue.kind === "unenergized" && onReenergize ? (
-            <Button
-              tone="warn"
-              className="ml-[1.4rem] self-start"
-              onClick={onReenergize}
-              disabled={pending}
+      {issues.map((issue, index) => {
+        const restated = verdictShown && index === 0;
+        return (
+          <li key={issue.label} className="flex min-w-0 flex-col">
+            {restated ? null : (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <Icon as={ShieldAlert} className="shrink-0 text-error" />
+                <span className="shrink-0 font-medium">{issue.label}</span>
+                <span className="min-w-0 truncate font-mono text-base-content/80">
+                  {issue.detail}
+                </span>
+              </span>
+            )}
+            {/* 状態だけ出しても操縦者は次の一手を選べない。復旧手順まで書く。
+                字下げは上のアイコンに揃えるためなので、その行が無い回は付けない */}
+            <span
+              className={cx("text-[0.85em] text-base-content/70", restated ? null : "pl-[1.4rem]")}
             >
-              {pending ? "処理中…" : "再励磁"}
-            </Button>
-          ) : null}
-        </li>
-      ))}
+              {issue.hint}
+            </span>
+            {/* 押せる場所は限定する — この異常が実際に出ていて、かつこの画面に
+                コールバックが渡されているとき (操縦者自身の画面) だけ */}
+            {issue.kind === "unenergized" && onReenergize ? (
+              <Button
+                tone="warn"
+                className={cx("self-start", restated ? null : "ml-[1.4rem]")}
+                onClick={onReenergize}
+                disabled={pending}
+              >
+                {pending ? "処理中…" : "再励磁"}
+              </Button>
+            ) : null}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -310,7 +333,7 @@ export function SubsystemStatus({
           <WorkpieceRiskNotice buses={riskyBuses} />
           <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
           <FailedTasksNotice labels={failedTaskLabels} />
-          <SafetyIssues safety={safety} onReenergize={onReenergize} />
+          <SafetyIssues safety={safety} onReenergize={onReenergize} verdictShown={showVerdict} />
           <HealthIndicator health={readable} />
           {/* モータより前に置く。モータ一覧は残り高さいっぱいまで伸びてスクロールするので、
               後ろへ回すと本数によっては指差喚呼で見たい 1 行が畳まれた先に隠れる */}

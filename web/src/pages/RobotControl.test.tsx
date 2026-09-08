@@ -446,7 +446,10 @@ describe("RobotControl の診断表示", () => {
     );
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
-    expect(screen.getByText("同期ずれラッチ")).toBeInTheDocument();
+    // 種別と対象は見出しのチップが出す (真下の詳細行はその写しになるので出さない。
+    // 詳細行が担うのは復旧手順のほう)
+    expect(screen.getByText("同期ずれラッチ rotate")).toBeInTheDocument();
+    expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
   });
 });
 
