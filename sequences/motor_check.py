@@ -119,18 +119,18 @@ class MotorCheckSequence(Sequence):
         動かないまま止まって操縦者に知らせるほうが安全なので、握り潰さない。
         """
         if self._homing is None:
-            logger.info("[motor_check] 零点確定: 実行口が未注入のため飛ばす")
+            logger.info("零点確定: 実行口が未注入のため飛ばす")
             return
 
         table = self.positions
         targets = [name for name in table.axes if table.axis(name).homing is not None]
         if not targets:
-            logger.info("[motor_check] 零点確定: homing を持つ軸が無いため飛ばす")
+            logger.info("零点確定: homing を持つ軸が無いため飛ばす")
             return
 
         for axis in targets:
             spec = table.axis(axis)
-            logger.info("[motor_check] 零点確定: %s", axis)
+            logger.info("零点確定: %s", axis)
             handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
             await self._homing.home(spec, handle)
 
@@ -140,32 +140,27 @@ class MotorCheckSequence(Sequence):
 
     @step("メインハンド 初期姿勢へ", axes=MAIN_HOME.keys())
     async def main_home(self) -> None:
-        logger.info("[motor_check] メインハンド 初期姿勢へ")
         await self.move_to(MAIN_HOME)
 
     @step("メインハンド y 軸 (左右直結ペア)", axes={"y_axis"})
     async def main_y_axis(self) -> None:
         # 左右 2 台が機構的に直結している。**軸単位で 1 回だけ指令する**
         # (モータ単位で 1 台ずつ動かすと、その場で機構が壊れる)
-        logger.info("[motor_check] メインハンド y 軸")
         await self.move_to({"y_axis": "work_3"})
         await self.move_to({"y_axis": "home"})
 
     @step("メインハンド エンドエフェクタ回転 (左右直結ペア)", axes={"rotate"})
     async def main_rotate(self) -> None:
-        logger.info("[motor_check] メインハンド エンドエフェクタ回転")
         await self.move_to({"rotate": "pick"})
         await self.move_to({"rotate": "home"})
 
     @step("メインハンド グリッパ", axes={"gripper"})
     async def main_gripper(self) -> None:
-        logger.info("[motor_check] メインハンド グリッパ")
         await self.move_to({"gripper": "closed"})
         await self.move_to({"gripper": "open"})
 
     @step("メインハンド 壁 前後", axes={"wall_f", "wall_r"})
     async def main_walls(self) -> None:
-        logger.info("[motor_check] メインハンド 壁 前後")
         await self.move_to({"wall_f": "closed", "wall_r": "closed"})
         await self.move_to({"wall_f": "open", "wall_r": "open"})
         await self.move_to({"wall_f": "initial", "wall_r": "initial"})
@@ -174,7 +169,6 @@ class MotorCheckSequence(Sequence):
     async def main_conveyor(self) -> None:
         # DC 基板はフィードバックを一切持たない。回ったかどうかは
         # `config/checklist.yaml` の conveyor_run / conveyor_stop で目視確認する
-        logger.info("[motor_check] メインハンド コンベア")
         await self.move_to({"conveyor": "run"})
         await self.move_to({"conveyor": "stop"})
 
@@ -184,12 +178,10 @@ class MotorCheckSequence(Sequence):
 
     @step("サブハンド 初期姿勢へ", axes=SUB_HOME.keys())
     async def sub_home(self) -> None:
-        logger.info("[motor_check] サブハンド 初期姿勢へ")
         await self.move_to(SUB_HOME)
 
     @step("サブハンド アーム関節", axes={"sub_arm_joint"})
     async def sub_arm(self) -> None:
-        logger.info("[motor_check] サブハンド アーム関節")
         await self.move_to({"sub_arm_joint": "extended"})
         await self.move_to({"sub_arm_joint": "home"})
 
@@ -199,7 +191,6 @@ class MotorCheckSequence(Sequence):
         # 位置定数の tolerance (1mm) にそのまま乗る。
         # **ここが落ちるときは config の p_max を最初に疑う** —— レジスタ 0x15 と
         # ずれていると位置が比例倍で読め、指令どおり動いても到達しない
-        logger.info("[motor_check] サブハンド 前後スライド")
         await self.move_to({"sub_y_axis": "extended"})
         await self.move_to({"sub_y_axis": "home"})
 
@@ -209,20 +200,17 @@ class MotorCheckSequence(Sequence):
         # 1 ステップで 2 つ変わり、どちらが引っかかったのか目で追えなくなるため。
         # **上げてから必ず下ろす** —— 上がったまま次のステップへ進むと、
         # 以降の確認をすべて持ち上がった姿勢で行うことになる
-        logger.info("[motor_check] サブハンド 昇降")
         await self.move_to({"sub_lift": "lifted"})
         await self.move_to({"sub_lift": "home"})
 
     @step("サブハンド 補助ハンド", axes={"sub_gripper"})
     async def sub_gripper(self) -> None:
-        logger.info("[motor_check] サブハンド 補助ハンド")
         await self.move_to({"sub_gripper": "closed"})
         await self.move_to({"sub_gripper": "open"})
 
     @step("サブハンド 電磁弁 6 個 (打音・目視確認)", axes=VALVE_AXES)
     async def sub_valves(self) -> None:
         # 1 個ずつ順に開閉する。まとめて開くと、どれが鳴っていないのか分からない
-        logger.info("[motor_check] サブハンド 電磁弁 6 個")
         for axis in VALVE_AXES:
             await self.move_to({axis: "open"})
             await self.move_to({axis: "closed"})
@@ -230,7 +218,6 @@ class MotorCheckSequence(Sequence):
     @step("サブハンド 吸気・排気ポンプ (聴音確認)", axes={"pump_vac", "pump_blow"})
     async def sub_pumps(self) -> None:
         # 2 台を同時に回さない。片方ずつでないと、どちらが鳴っているか聞き分けられない
-        logger.info("[motor_check] サブハンド 吸気・排気ポンプ")
         await self.move_to({"pump_vac": "run"})
         await self.move_to({"pump_vac": "stop"})
         await self.move_to({"pump_blow": "run"})
@@ -246,5 +233,4 @@ class MotorCheckSequence(Sequence):
         # ここは最後のステップなので、機体が確実に初期姿勢に居ることまでを保証する。
         # 片方のハンドが不在の構成でも残す必要があるので、指令先の絞り込みは
         # `Sequence.move_to` に任せる (ステップごと落とすと復帰の保証が消える)
-        logger.info("[motor_check] 両ハンドを初期姿勢へ戻す")
         await self.move_to({**MAIN_HOME, **SUB_HOME})

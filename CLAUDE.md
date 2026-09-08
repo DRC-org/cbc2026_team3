@@ -27,6 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv run python main.py             # サーバー起動（localhost:8080）
 uv run python main.py --dry-run   # CAN バスなしで起動（virtual バス。配線確認に使える）
 uv run python main.py --dev-tools # 開発用コマンドを解禁（指差喚呼の一括チェック。CBC_DEV_TOOLS=1 でも可）
+uv run python main.py --log-level debug # ログの出力レベル（debug|info|warning|error。既定 info）
 uv run pytest                     # 全テスト実行
 uv run pytest tests/drivers/      # ドライバテストのみ
 uv run pytest -x                  # 最初の失敗で停止
@@ -905,6 +906,23 @@ UI は送る前に理由を説明するだけ。画面ごとに `phase === "matc
 3 本だけ配線した経路が作れてしまい、残る 1 本だけが既定値のまま黙って効く（「途絶は config
 どおりに見ているのに温度警告だけ既定の 65℃」が成立し、ログにも UI にも現れない）。
 同じ理由で、同じ概念に別名を付けない（動作確認の鮮度判定も `feedback_timeout_ms`）。
+
+**ログの体裁は `lib/logging_setup.py` が単一情報源で、`main.py` が起動時に 1 回だけ呼ぶ**
+（レベルは `--log-level`。既定 info）。`logging.basicConfig` へ戻してはならない —— あれは
+既にハンドラが 1 本でもあると**黙って何もしない**ので、体裁の指定が例外も警告も無しに
+無視される。**HTTP のアクセスログは出さない**（`web.AppRunner(app, access_log=None)` と
+`aiohttp.access` を WARNING へ落とす二重の歯止め）—— SPA を配るのでリロード 1 回で数十行
+出て、読みたい CAN・シーケンスのログを押し流す一方、HTTP が通ったかどうかは UI の接続
+表示に出る。**シーケンスのステップログはエンジン（`lib/sequence/engine.py`）が
+`[main_hand] 2/22 …` の形で 1 箇所だけ出す。`sequences/*.py` の各ステップに
+`logger.info` を書き戻してはならない** —— `@step` のラベルと同じ文字列が 2 箇所に増え、
+ラベルを直すとログだけが古くなる（実際に `@step("ハンド閉じる (受け取り)")` の本体が
+`[sub_hand] ハンド閉じる` を出していた。ラベルは UI に、写しは journal にしか出ないので
+食い違いに気付けない）。**起動ログから落としてはならない値**は台形プロファイルの 3 値
+（`velocity_ff` を含む理由は前掲「`motion.velocity_ff` は `pid.kd` と同値に保つ」——
+実行中に変更できず UI にも配信されないので、起動ログが唯一の読み口である）、動作確認の
+除外ステップ WARNING、零点確定の手段が無い軸の ERROR、`後始末完了`。判断の理由は
+`docs/impl_plan.md` の「起動・実行時ログの整理」節。
 
 **ファームと PC 側はプロトコルの対。** `docs/motor_driver_can_protocol.md` を単一情報源とし、
 片方だけを変更してはならない。`firmware/lib/MotorCan/` が `Arduino.h` を include しないのは、

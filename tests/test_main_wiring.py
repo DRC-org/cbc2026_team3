@@ -30,6 +30,7 @@ import main
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.can_manager import CANManager
 from lib.config_schema import (
+    HealthThresholds,
     MotorConfig,
     RobotConfig,
     SystemConfig,
@@ -42,6 +43,7 @@ from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
+from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError
 from lib.sequence.positions import PositionTable, load_position_table
@@ -997,6 +999,27 @@ class TestAttachMotionProfiles:
         assert all("10.0" in message for message in messages)  # max_velocity
         assert all("50.0" in message for message in messages)  # max_acceleration
         assert all("velocity_ff=0.5" in message for message in messages)
+
+    def test_左右ペアは軸ごと1行に畳む(self, caplog: pytest.LogCaptureFixture) -> None:
+        """制限値は軸が 1 組しか持たないので、モータごとに出すと同じ 3 値が並ぶ。
+
+        畳んでも**適用先を知る手掛かりはモータ名だけ**なので、名前の列挙は
+        残す (どのモータに載ったかが読めないと、位置制御ループに載らなかった
+        側と区別が付かない)。
+        """
+        _, _, loops = self._rig()
+
+        with caplog.at_level(logging.INFO):
+            _attach_motion_profiles(_motion_table(), list(loops.values()))
+
+        applied = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("台形プロファイル: y_axis (")
+        ]
+        assert len(applied) == 1
+        assert "y_axis_r" in applied[0]
+        assert "y_axis_l" in applied[0]
 
     async def test_velocity_ff_が位置制御ループまで届く(self) -> None:
         """巡航中の出力は ``velocity_ff * 参照速度``。
@@ -1960,3 +1983,51 @@ class TestMotorCheckWiring:
             server = self._wire([empty])
 
         server.set_motor_check_sequence.assert_not_called()
+
+
+class TestStartupSummaryLines:
+    """起動ログの数値は、Python の内部表現ではなく人が読む形で出す。
+
+    起動ログは試合前点検で目視する対象なので、``dataclass`` や ``dict`` の repr を
+    そのまま出すと、確認したい値がフィールド名の中に埋もれる。**壊れても機能は
+    1 つも落ちない**ので、実機のログを見るまで気付けない類の劣化である。
+    """
+
+    def test_しきい値は4つとも読める形で並ぶ(self) -> None:
+        text = main._describe_thresholds(
+            HealthThresholds(
+                feedback_timeout_ms=250.0,
+                temp_warning_c=60.0,
+                temp_critical_c=75.0,
+                tx_error_threshold=32,
+            )
+        )
+
+        assert "250" in text
+        assert "60" in text
+        assert "75" in text
+        assert "32" in text
+        # repr が漏れていればフィールド名がそのまま残る
+        assert "feedback_timeout_ms" not in text
+
+    def test_整数で表せる値から小数点以下を落とす(self) -> None:
+        assert main._format_number(180.0) == "180"
+        # 端数のある設定を黙って丸めると、書いた値と出る値が食い違う
+        assert main._format_number(180.5) == "180.5"
+
+    def test_ロールが1つなら件数だけを出す(self) -> None:
+        items = [ChecklistItem(id=f"i{n}", label=f"項目{n}") for n in range(3)]
+
+        assert main._describe_checklist({"pre_match": items}) == "3 項目"
+
+    def test_ロールが複数ならロール名を添える(self) -> None:
+        """ロールは増えうる (WS 契約の形を保つため辞書のまま運んでいる)。"""
+        text = main._describe_checklist(
+            {
+                "main_hand": [ChecklistItem(id="a", label="A")],
+                "sub_hand": [ChecklistItem(id="b", label="B"), ChecklistItem(id="c", label="C")],
+            }
+        )
+
+        assert "main_hand 1 項目" in text
+        assert "sub_hand 2 項目" in text

@@ -517,6 +517,22 @@ class Sequence:
                     if self._jump_request is not None:
                         continue
 
+                # **ステップの記録はここ 1 箇所だけが持つ。** 各ステップ本体に
+                # 書き写すと `@step` のラベルと同じ文字列が 2 箇所に増え、ラベルを
+                # 直したときにログだけが古くなる。番号と総数を添えるのは、
+                # 「今どのステップか」だけでは進み具合が読めないため
+                #
+                # **トリガー待ちを抜けてから出す。** 待つ前に出すと、操縦者の許可を
+                # 待っている間ずっとそのステップが実行中に見え、journal の並びが
+                # 実際の実行順と食い違う
+                logger.info(
+                    "[%s] %d/%d %s",
+                    self.name,
+                    self._current_index + 1,
+                    len(self._steps),
+                    step_info.label,
+                )
+
                 method = getattr(self, step_info.method_name)
                 try:
                     await method()
@@ -537,6 +553,11 @@ class Sequence:
 
                 if self._jump_request is None:
                     self._current_index += 1
+                    if self._current_index >= len(self._steps):
+                        # 完走したときだけ 1 行残す。通常停止は lib/server.py が、
+                        # 例外は直上の logger.exception が既に記録しているので、
+                        # ここで書くと同じ事実が 2 度並ぶ
+                        logger.info("[%s] 完走 (%d ステップ)", self.name, len(self._steps))
         finally:
             self._running = False
             self._waiting_trigger = False
