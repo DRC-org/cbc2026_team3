@@ -130,48 +130,63 @@ describe("MatchPrep の項目配置", () => {
  * スクロールバーは静止中 1px も描かれないので、合図が無いと「切れている」ことも
  * 「ここで終わり」であることも読めない。
  */
+/** jsdom はレイアウトを持たないので、溢れているかどうかは寸法を置いて作る */
+function stubScroll(
+  el: Element,
+  size: { clientHeight: number; scrollHeight: number; scrollTop: number },
+) {
+  for (const [key, value] of Object.entries(size)) {
+    Object.defineProperty(el, key, { value, configurable: true });
+  }
+  fireEvent.scroll(el);
+}
+
+function scrollBody(container: HTMLElement): Element {
+  const body = container.querySelector(".scroll");
+  if (!body) throw new Error("スクロール面が見つからない");
+  return body;
+}
+
+/** 上端 / 下端の合図。クラスが唯一の手がかりなので直接引く */
+const aboveSignal = (c: HTMLElement) => c.querySelector(".bg-linear-to-b");
+const belowSignal = (c: HTMLElement) => c.querySelector(".bg-linear-to-t");
+
 describe("MatchPrep のスクロール", () => {
-  /** jsdom はレイアウトを持たないので、溢れているかどうかは寸法を置いて作る */
-  function stubScroll(
-    el: Element,
-    size: { clientHeight: number; scrollHeight: number; scrollTop: number },
-  ) {
-    for (const [key, value] of Object.entries(size)) {
-      Object.defineProperty(el, key, { value, configurable: true });
-    }
-  }
-
-  function scrollBody(container: HTMLElement): Element {
-    const body = container.querySelector(".scroll");
-    if (!body) throw new Error("スクロール面が見つからない");
-    return body;
-  }
-
-  const signal = (container: HTMLElement) => container.querySelector(".bg-linear-to-t");
-
-  it("溢れているあいだだけ下端に続きの合図を出す", () => {
+  it("下に続きがあるあいだだけ下端に合図を出す", () => {
     const { container } = mount();
     const body = scrollBody(container);
 
     stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
-    fireEvent.scroll(body);
-    expect(signal(container)).not.toBeNull();
+    expect(belowSignal(container)).not.toBeNull();
+    expect(aboveSignal(container)).toBeNull();
 
     // 末尾まで送れば消える。出したままにすると「まだ続きがある」の意味が消え、
     // 項目の少ない構成では終わりを一度も読めなくなる
     stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 900 });
-    fireEvent.scroll(body);
-    expect(signal(container)).toBeNull();
+    expect(belowSignal(container)).toBeNull();
   });
 
-  it("溢れていなければ何も出さない", () => {
+  it("上に続きがあるあいだだけ上端に合図を出す", () => {
+    const { container } = mount();
+    const body = scrollBody(container);
+
+    // 「次」への自動スクロールは操縦者が動かさなくても起きるので、
+    // 上端で切れた行が「描画の崩れ」に見えるのはこの状態
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 400 });
+    expect(aboveSignal(container)).not.toBeNull();
+
+    stubScroll(body, { clientHeight: 300, scrollHeight: 1200, scrollTop: 0 });
+    expect(aboveSignal(container)).toBeNull();
+  });
+
+  it("溢れていなければ上下とも何も出さない", () => {
     const { container } = mount();
     const body = scrollBody(container);
 
     stubScroll(body, { clientHeight: 300, scrollHeight: 300, scrollTop: 0 });
-    fireEvent.scroll(body);
 
-    expect(signal(container)).toBeNull();
+    expect(aboveSignal(container)).toBeNull();
+    expect(belowSignal(container)).toBeNull();
   });
 });
 

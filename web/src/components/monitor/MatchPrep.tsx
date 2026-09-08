@@ -32,8 +32,9 @@ const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }
 ];
 
 /**
- * 下端に「まだ続きがある」ことを出すスクロール面。**溢れているあいだだけ**出す ——
- * 常に出すと「ここで終わり」が読めなくなる (項目の少ないベンチ設定は一度も溢れない)。
+ * 端に「まだ続きがある」ことを出すスクロール面。**その向きに続きがあるあいだだけ**
+ * 出す —— 常に出すと「ここで終わり」が読めなくなる (項目の少ないベンチ設定は
+ * 一度も溢れない)。
  *
  * 指差喚呼 29 項目 + 3 つの操作は 1366x768 の左カラム (本文の高さ 479px) に対して
  * 1252px あり、下端に来るのはたいてい次の区分の見出しで、**その下にある動作確認の
@@ -41,19 +42,25 @@ const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }
  * 1px も描かれない (`offsetWidth - clientWidth` が 0 のオーバーレイ) ので、
  * 半分に切れた見出しだけが手がかりで、それは描画の崩れとも読めた。
  *
+ * **上端も要る。** 「次」への自動スクロール (`ChecklistItems`) は操縦者が何も
+ * 動かさなくても起きるので、切れた行が上端に現れたときこそ崩れに見える。
+ *
  * **地の色へのフェードにしてはならない。** 白へ溶かすと切れかけた要素ごと消えて
  * 逆に「ここで終わり」に見える (実描画で確かめた)。縁が落とす影として描く。
  */
 function ScrollArea({ className, children }: { className?: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement | null>(null);
-  const [moreBelow, setMoreBelow] = useState(false);
+  const [edges, setEdges] = useState({ above: false, below: false });
 
   // 中身の高さは項目のチェックでも動作確認パネルの開閉でも変わるので毎描画で測り直す。
   // 判定が変わらなければ setState は再描画を起こさない
   const measure = useCallback(() => {
     const el = ref.current;
+    if (!el) return;
     // 端で丸め誤差のぶん出っぱなしにならないよう 1px の余裕を持たせる
-    if (el) setMoreBelow(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+    const above = el.scrollTop > 1;
+    const below = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+    setEdges((prev) => (prev.above === above && prev.below === below ? prev : { above, below }));
   }, []);
   useEffect(measure);
   useEffect(() => {
@@ -70,7 +77,13 @@ function ScrollArea({ className, children }: { className?: string; children: Rea
       >
         {children}
       </div>
-      {moreBelow ? (
+      {edges.above ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-4 bg-linear-to-b from-base-content/18 to-transparent"
+        />
+      ) : null}
+      {edges.below ? (
         <div
           aria-hidden
           className="pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-linear-to-t from-base-content/18 to-transparent"
