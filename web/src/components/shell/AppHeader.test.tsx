@@ -15,7 +15,9 @@ const counts = vi.hoisted(() => ({ tabBar: 0 }));
 vi.mock("@/components/shell/TabBar", () => ({
   TabBar: () => {
     counts.tabBar += 1;
-    return null;
+    // 実体を返すのは帯の中での位置を DOM 順で見るテストがあるため。
+    // null を返していた頃は「タブ帯が最左か」を確かめる手段が無かった
+    return <div data-testid="tab-bar" />;
   },
 }));
 
@@ -30,6 +32,11 @@ function mount(over: Partial<MatchState> = {}, context: Partial<RobotContextValu
     </MemoryRouter>,
     { matchState: { ...DEFAULT_MATCH_STATE, ...over }, ...context },
   );
+}
+
+/** `earlier` が `later` より DOM 順で前にあるか */
+function precedes(earlier: Element, later: Element): boolean {
+  return Boolean(earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING);
 }
 
 /**
@@ -63,6 +70,58 @@ describe("AppHeader のフェーズ・コート表示", () => {
     mount({ phase: MALFORMED, court: MALFORMED });
 
     expect(screen.getByRole("button", { name: "緊急停止" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * **EMG STOP の周囲に押下可能な要素を置かない。** 誤爆の向きは「隣のボタンを
+ * 押そうとして EMG STOP を踏む」で、試合中にこれが起きると走っているシーケンスが
+ * その場で止まる。配置そのものは実機を描くまで目で確かめられないので、
+ * ここでは DOM 順として固定する（`ml-6` の緩衝と合わせて 1 組の防護になっている）。
+ */
+describe("AppHeader の緊急停止まわりの配置", () => {
+  const eStop = () => screen.getByRole("button", { name: "緊急停止" });
+  const connection = () => screen.getByRole("button", { name: /Connected/ });
+
+  it("押下可能な要素は EMG STOP より手前に置く", () => {
+    // 停止ボタンより後ろに押せるものが 1 つでもあれば、そこが新しい誤爆源になる。
+    // 「隣を狙って外した先が EMG STOP」という配置を禁じるのがこのテストの役目
+    const { container } = mount();
+    const buttons = Array.from(container.querySelectorAll("button"));
+
+    // 押せるものが停止ボタンしか無いなら「最後である」は自明で、何も見ていない
+    expect(buttons.length).toBeGreaterThan(1);
+    expect(buttons.at(-1)).toBe(eStop());
+  });
+
+  it("EMG STOP の直左には押せない要素を置く", () => {
+    // 接続表示 (押せる) を右群の先頭へ、フェーズ・コートのチップ (読むだけ) を
+    // 停止ボタン側へ寄せる。逆順にすると、接続表示を狙った 1 回が停止になる
+    mount();
+
+    expect(precedes(connection(), screen.getByText("セッティングタイム"))).toBe(true);
+    expect(precedes(connection(), screen.getByText("赤コート"))).toBe(true);
+  });
+
+  it("タブ帯はヘッダーの最左に置く", () => {
+    // 画面の隅はポインタで最も当てやすく、同時に EMG STOP から最も遠い。
+    // タブ帯を右へ戻すと、最も頻繁に押す要素が停止ボタンの隣に来る
+    mount();
+    const tabBar = screen.getByTestId("tab-bar");
+
+    expect(precedes(tabBar, connection())).toBe(true);
+    expect(precedes(tabBar, screen.getByText("セッティングタイム"))).toBe(true);
+    expect(precedes(tabBar, eStop())).toBe(true);
+  });
+
+  it("ヘッダーの EMG STOP は点滅させない", () => {
+    // 平常時から点滅している唯一の要素だった。常時動くものが 1 つあると、
+    // 本当に異常が出たときの点滅まで平常の一部として読み飛ばされる。
+    // 異常時にだけ描かれる EStopOverlay / ConnectionBanner の点滅は別物で、残す
+    const { container } = mount();
+
+    expect(eStop()).toBeInTheDocument();
+    expect(container.querySelector(".alert-blink")).toBeNull();
   });
 });
 

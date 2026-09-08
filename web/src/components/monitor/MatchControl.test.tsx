@@ -170,3 +170,57 @@ describe("MatchStrip の切断中", () => {
     expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();
   });
 });
+
+/**
+ * **EMG STOP の真下に押下可能な要素を置かない。** この帯はヘッダー直下の最上段に出るので、
+ * 右端へ寄せると操作ボタンが EMG STOP のほぼ真下（右 16px・下 12px）に来る。誤爆の向きは
+ * 「この帯のボタンを狙って外し、緊急停止を踏む」で、試合中に起きればシーケンスが止まる。
+ */
+describe("MatchStrip の操作ボタンの位置", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function mountStrip(phase: MatchPhase = "match") {
+    const view = renderWithRobot(<MatchStrip />, {
+      matchState: { ...DEFAULT_MATCH_STATE, phase, court: "red" },
+    });
+    return { view, band: view.container.firstElementChild as HTMLElement };
+  }
+
+  it("操作ボタンを帯の右端に置かない", () => {
+    const { band } = mountStrip();
+
+    expect(band.firstElementChild).toBe(screen.getByRole("button", { name: "試合を終了する" }));
+    // DOM 順だけでは flex 上の見た目の位置は決まらない。並びを先頭にしたまま
+    // 右端へ寄せ直せてしまうので、右寄せの指定が無いことも併せて見る
+    expect(band.className).not.toMatch(/justify-(end|between)/);
+  });
+
+  it("武装して説明文が出てもボタンの位置が動かない", () => {
+    // 説明文が左にあると、押した瞬間に文が現れたぶんボタンが横へずれ、
+    // 二度押しの 2 回目が 1 回目と違う場所になる
+    const { band } = mountStrip();
+
+    fireEvent.click(screen.getByRole("button", { name: "試合を終了する" }));
+
+    const button = screen.getByRole("button", { name: "もう一度押して試合を終了する" });
+    const note = screen.getByText(/緊急停止ではありません/);
+    const children = Array.from(band.children);
+    expect(band.firstElementChild).toBe(button);
+    expect(children.indexOf(button)).toBeLessThan(children.indexOf(note));
+  });
+
+  it("試合中と試合終了後でボタンの位置が変わらない", () => {
+    // 同じ場所へ交互に出るものなので、フェーズで位置が変わると押す直前に探し直しになる
+    const during = mountStrip("match");
+    expect(during.band.firstElementChild).toBe(
+      screen.getByRole("button", { name: "試合を終了する" }),
+    );
+    during.view.unmount();
+
+    const after = mountStrip("finished");
+    expect(after.band.firstElementChild).toBe(
+      screen.getByRole("button", { name: "セッティングタイムへ戻す" }),
+    );
+  });
+});
