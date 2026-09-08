@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 from lib.drivers.base import ControlMode
 from lib.sequence.positions import PositionLookupError
@@ -13,12 +15,58 @@ if TYPE_CHECKING:
     from lib.drivers.base import MotorDriver, MotorState
     from lib.sequence.positions import AxisSpec
 
+logger = logging.getLogger(__name__)
+
 # 到達待ちのポーリング間隔。CAN フィードバックは 1kHz 前後で届くため
 # 10ms 周期なら取りこぼしがなく、asyncio ループへの負荷も無視できる
 _DEFAULT_POLL_INTERVAL_S = 0.01
 
 TargetSink = Callable[[ControlMode, float], Awaitable[None]]
 EStopChecker = Callable[[], bool]
+
+
+@dataclass(frozen=True)
+class LimitIntervention:
+    """リミット保護がその軸で要求を曲げた回数と、直近でそれを起こしたセンサ名。
+
+    **``count`` は単調増加で、読んでも減らない。** 保護が働いたことを「今
+    ラッチしているか」で判定すると、移動の**途中で**触れて離れた接触
+    (接点のバウンド) を取りこぼす —— ラッチは外れるのに、層①が書き戻した目標は
+    残るので軸は触れた位置で止まったままになる。元の目標を再送する経路は無い。
+
+    **回数と理由を 1 組で運ぶ。** 別々の口に分けると、回数だけを見てセンサ名を
+    後から取り直す形が書け、そのあいだにラッチが外れれば「止まったのに理由だけが
+    空」になる (``HealthThresholds`` を 1 組で運ぶのと同じ理由)。
+
+    型をここに置くのは、実体側 (``lib/control/limit_guard.py``) が指令口である
+    このモジュールを既に import しているため。逆向きに import すると循環になる。
+    """
+
+    count: int = 0
+    sensors: tuple[str, ...] = ()
+
+
+class LimitClamp(Protocol):
+    """リミットスイッチ保護のうち、指令の入口が要る部分だけを表す構造的な型。
+
+    実体は ``lib.control.limit_guard.LimitGuard`` だが、**ここから
+    ``lib/control/`` を import してはならない** —— 保護 (上位) が指令口 (下位) を
+    掴む向きは既にあり、逆向きを足すと循環になる。判定そのものは向こうが単一
+    情報源で、こちらは「同じ ``clamp()`` を呼ぶ」ことだけを型で約束する。
+    """
+
+    @property
+    def axis_names(self) -> tuple[str, ...]:
+        """保護対象の軸名。ここに無い軸は逆換算すら行わずに素通しする。"""
+        ...
+
+    def clamp(self, axis: str, value: float, observed: float) -> float:
+        """禁止方向へ ``observed`` より進む指令を ``observed`` で頭打ちにする。"""
+        ...
+
+    def intervention(self, axis: str) -> LimitIntervention:
+        """その軸で保護が要求を曲げた回数と、直近の理由。"""
+        ...
 
 
 class EStopActiveError(RuntimeError):
@@ -211,13 +259,43 @@ class MotorHandle:
 
 
 class MotorGroup:
-    """モータ名でハンドルを引くコンテナ。シーケンスからは属性アクセスで使う。"""
+    """モータ名でハンドルを引くコンテナ。シーケンスからは属性アクセスで使う。
+
+    リミット保護をここへ持たせてあるのは、**軸ハンドルの生成口すべてがこの
+    グループを既に持っている**ため (シーケンス・手動操縦・統合動作確認・
+    50Hz 常駐層の 4 つ)。保護を各生成箇所へ引数で配る形にすると、渡し忘れが
+    「その経路だけ保護が黙って効かない」形でしか現れない。
+    """
 
     def __init__(self, handles: Mapping[str, MotorHandle] | None = None) -> None:
         self._handles: dict[str, MotorHandle] = dict(handles) if handles else {}
+        self._limit_guard: LimitClamp | None = None
 
     def add(self, handle: MotorHandle) -> None:
         self._handles[handle.name] = handle
+
+    @property
+    def limit_guard(self) -> LimitClamp | None:
+        """このグループのモータで組む軸へ掛かるリミット保護 (無ければ None)。"""
+        return self._limit_guard
+
+    def bind_limit_guard(self, guard: LimitClamp | None) -> None:
+        """起動時の配線でリミット保護を結ぶ。**1 グループにつき 1 回だけ。**
+
+        保護は自分を止めるために軸ハンドルを要り、軸ハンドルはこのグループを
+        要るので、生成順が循環する。保護側が軸ハンドルを遅延して引く (``main.
+        _make_axis_handle_lookup``) ことで解いてあり、こちらは後から結ぶ。
+
+        二重の bind を ``RuntimeError`` にするのは、**後から結んだほうだけが
+        効く**形を残さないため —— 症状は「保護を 2 つ書いたのに片方が黙って
+        効かない」で、ログにも画面にも出ない (周期タスクの二重 ``start()`` を
+        拒否するのと同じ理由)。
+        """
+        if guard is None:
+            return
+        if self._limit_guard is not None:
+            raise RuntimeError("リミット保護は既に結ばれています (二重の配線)")
+        self._limit_guard = guard
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -259,19 +337,68 @@ class AxisHandle:
     (手動操作・動作確認) から動かしたときに古い目標値が残るのを避けるため。
     """
 
-    def __init__(self, spec: AxisSpec, handles: Sequence[MotorHandle]) -> None:
+    def __init__(
+        self,
+        spec: AxisSpec,
+        handles: Sequence[MotorHandle],
+        *,
+        limit_guard: LimitClamp | None = None,
+    ) -> None:
         self._spec = spec
         self._handles = tuple(handles)
         self._motors = {motor.name: motor for motor in spec.motors}
+        self._limit_guard = limit_guard
 
     @property
     def name(self) -> str:
         return self._spec.name
 
-    async def set_target_value(self, commands: Mapping[str, float]) -> None:
-        """モータ名 → 指令値をまとめて送る。
+    @property
+    def has_target(self) -> bool:
+        """この軸のモータのいずれかが目標値を持っているか。
+
+        リミット保護が「止めるものがあるか」を問う口。誰も駆動していない軸へ
+        保持指令を書くと、**操作していないのに保持が始まる**。
+
+        ``any`` にしてあるのは、片側だけに目標が残る状態 (送信 1 通が失敗した
+        直後) でも「駆動中」と読ませるため —— そこは保護が最も要る瞬間である。
+        """
+        return any(handle.has_target for handle in self._handles)
+
+    @property
+    def limit_intervention(self) -> LimitIntervention:
+        """この軸でリミット保護が要求を曲げた回数と直近の理由 (保護が無ければ 0 回)。
+
+        **移動の前後で比べるためにある。** 保護が働くと目標がその場の実測位置へ
+        書き換わるので、到達判定 (送った目標との比較) は**必ず成立する** ——
+        ``move_to`` がここを見なければ、位置定数に書いたのとは別の場所で成功する
+        ステップができ、次のステップはその姿勢を前提に動く。
+
+        層① (50Hz の引き戻し) と層② (入口のクランプ) のどちらが働いても同じ
+        カウンタが進む。**判定を 2 つ持たない** —— 入口のクランプだけを見る
+        突き合わせでは、移動の途中で触れた場合 (指令はもう飛んでいる) を拾えない。
+        """
+        guard = self._limit_guard
+        if guard is None:
+            return LimitIntervention()
+        return guard.intervention(self.name)
+
+    async def set_target_value(self, commands: Mapping[str, float]) -> dict[str, float]:
+        """モータ名 → 指令値をまとめて送る。**実際に送った指令値を返す。**
 
         逐次 await しないのは、左右直結の軸で送信に時間差が出ると機構がねじれるため。
+
+        **リミット保護のクランプはここで掛かる (指令の入口 = 層②)。** 50Hz の
+        常駐層 (``LimitGuard``) だけだと、押し戻されるまでの 1 周期ぶん (20ms) は
+        禁止方向へ進み続けるうえ、操縦者には「押しても勝手に戻される」としか
+        見えない。判定は書き写さず ``LimitGuard.clamp()` をそのまま呼ぶ ——
+        同じ境界が 2 箇所に分かれると、片方だけ直せる形が残る
+        (``SyncGroup.violation()`` を 3 層が共有しているのと同じ理由)。
+
+        **返り値を持つのはクランプしたことを呼び出し側へ伝えるため。** 手動操縦の
+        ジョグ起点は「直前に手動で送った目標値」なので (毎回フィードバックから
+        取り直すと追従中の連打が吸われる)、クランプを知らない起点は押すたびに
+        禁止側へ伸び、退避しようとしても「押した回数だけ戻らない」形になる。
 
         **1 台でも失敗したら、送信に成功した側の目標だけを捨てる。** 素の ``gather`` は
         最初の例外で抜けるが残りのタスクはキャンセルされずに完走するので、片方の送信だけが
@@ -293,12 +420,16 @@ class AxisHandle:
         失敗した側は 1 通も飛んでいない以上、旧目標こそが基板が現に実行している状態と
         一致しているので、残すほうが整合的である。
 
+        Returns:
+            実際に送ったモータ名 → 指令値。クランプが掛かっていれば端の位置での値。
+
         Raises:
             BaseException: 送信に失敗した例外のうち、``self._handles`` の並びで最初の
                 もの (``gather`` の結果順であって「最初に送出された例外」ではない)。
                 ``ExceptionGroup`` へ包まないのは、呼び出し側 (``move_to`` / 手動) が
                 ``EStopActiveError`` と ``CanError`` を区別して扱うため。
         """
+        commands = self._clamped(commands)
         try:
             values = [(handle, commands[handle.name]) for handle in self._handles]
         except KeyError as exc:
@@ -316,6 +447,46 @@ class AxisHandle:
                 if not isinstance(result, BaseException):
                     handle.clear_target()
             raise failures[0]
+        return {handle.name: value for handle, value in values}
+
+    def _clamped(self, commands: Mapping[str, float]) -> Mapping[str, float]:
+        """リミット保護が禁じている向きへの指令を、端の位置で頭打ちにする。
+
+        **保護を持たない軸は逆換算も行わずに素通しする。** ``limits`` は位置指令の
+        軸にしか書けない (``AxisSpec._check_limits``) ので、ここを素通しにしないと
+        到達も現在位置も観測できない duty / on_off 軸で無意味な逆換算が走る。
+
+        **実測が読めなければクランプしない。** 未受信の 0.0 を現在位置と信じて端を
+        推定すると、指令のほうを歪めることになる。同じ状況では 50Hz の常駐層も
+        引き戻し先を持てないので、ここで拒否しても保護が厚くなるわけではない。
+
+        クランプが掛かったときは軸位置を全モータへ配り直す (``to_commands``)。
+        モータごとに違う軸位置を指令する経路 (零点確定の整列段) は、その間
+        ``suspend_sensors`` で保護を外しているのでここへは来ない。
+        """
+        guard = self._limit_guard
+        if guard is None or self.name not in guard.axis_names:
+            return commands
+
+        try:
+            observed = self.observed_value()
+        except Exception:
+            logger.debug("軸 '%s' の実測位置を読めずクランプを見送ります", self.name, exc_info=True)
+            return commands
+
+        value = self._spec.to_value(commands)
+        clamped = guard.clamp(self.name, value, observed)
+        if clamped == value:
+            return commands
+        logger.info(
+            "リミット保護: 軸 %s への指令 %.3f%s を端の %.3f%s で頭打ちにしました",
+            self.name,
+            value,
+            self._spec.unit,
+            clamped,
+            self._spec.unit,
+        )
+        return self._spec.to_commands(clamped)
 
     async def wait_reached(
         self, *, timeout: float | None = None, expect_target: bool = False
@@ -423,6 +594,25 @@ class AxisHandle:
         if self._spec.tolerance is None:
             return None
         return self._motors[motor_name].to_tolerance(self._spec.tolerance)
+
+
+def build_axis_handle(spec: AxisSpec, group: MotorGroup) -> AxisHandle:
+    """1 論理軸の指令口を組む。**本番コードで軸ハンドルが生まれる唯一の口。**
+
+    ``AxisHandle`` を直に組み立てる経路を各所に残すと、リミット保護を渡し忘れた
+    箇所だけが「触れても止まらない」まま残る —— 症状はその経路でしか出ず、config
+    にもログにも画面にも現れない。ここへ絞れば、保護はモータ群に結ばれた 1 つが
+    自動的に付いてくる (``tests/test_limit_clamp.py`` が直接生成の再発を AST で
+    見張る)。
+
+    ``AxisHandle`` は寿命のある状態を持たないので毎回組んでよい。使い回すと、
+    同じ軸を別経路 (シーケンス・手動・動作確認) から動かしたときに古い目標値が残る。
+    """
+    return AxisHandle(
+        spec,
+        [getattr(group, name) for name in spec.motor_names],
+        limit_guard=group.limit_guard,
+    )
 
 
 def build_motor_group(

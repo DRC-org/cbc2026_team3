@@ -93,12 +93,25 @@ class LogThrottle:
         ``exception()`` の ``exc_info=True`` は使えない。``key`` の名前空間は
         ``exception()`` と共有しているので、呼び出し側で衝突しない名前を選ぶこと。
         """
+        self._emit(self._logger.warning, key, message, *args)
+
+    def info(self, key: str, message: str, *args: object) -> None:
+        """平常の記録を間引く。
+
+        **警告と対で要る。** 「接触した」を間引いて「離れた」を素通しにすると、
+        接点がばたついている機構では解除側だけが周期ぶん出て、間引いた意味が消える
+        (どちらも同じ 1 つの事象の表と裏である)。``key`` の名前空間は
+        ``warning()`` / ``exception()`` と共有する。
+        """
+        self._emit(self._logger.info, key, message, *args)
+
+    def _emit(self, sink: Callable[..., None], key: str, message: str, *args: object) -> None:
         now = self._time_source()
         last = self._last_at.get(key)
         if last is not None and now - last < self._interval_s:
             return
         self._last_at[key] = now
-        self._logger.warning(message, *args)
+        sink(message, *args)
 
 
 class PeriodicTask(abc.ABC):

@@ -36,12 +36,21 @@
    (`sync_tolerance` を超えた時点で偏差監視が全体緊急停止を出す)
 7. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
 
-**探索の到達判定はラッチで見る。「今 ON か」では取りこぼす。** ON 区間が `step` より
-狭い機構では、指令 1 回で区間を跨いでしまい `settle_s` 後の観測ではもう OFF になって
-いる (`rotate` は step 2.0deg を約 18ms で通過する)。センサの FEEDBACK は 100Hz で
-届いているので、受信のたびにラッチしておけば 1 通も取りこぼさない
-(`GenericDriver.consume_sensor_latch`)。**離脱は現在値のまま**という非対称は意図した
-もので、理由は `HomingRunner._sensor_reached` に書いてある。
+**探索の到達判定は接触回数の増加で見る。「今 ON か」では取りこぼす。** ON 区間が
+`step` より狭い機構では、指令 1 回で区間を跨いでしまい `settle_s` 後の観測ではもう
+OFF になっている (`rotate` は step 2.0deg を約 18ms で通過する)。センサの FEEDBACK は
+100Hz で届いているので、受信のたびに数えておけば 1 通も取りこぼさない
+(`GenericDriver.sensor_contact_count`)。**カウンタは読んでも減らない**ので、
+零点確定以外の読み手 (リミットスイッチ保護) が同じセンサを見ていても、
+どちらかが相手のぶんまで消してしまうことがない。**離脱は現在値のまま**という
+非対称は意図したもので、理由は `HomingRunner._sensor_reached` に書いてある。
+
+**走っているあいだ、見るセンサのリミット保護 (`LimitGuard`) は外す。** あちらは
+「触れたらその向きへの指令を止める」常駐保護なので、効いたままだとスイッチに
+触れた瞬間に自分の指令が実測位置へ引き戻され、原点へ到達できない。外すのは
+`homing.sensor_names` の全センサで、**軸まるごとではなくセンサ単位**である
+(両端にスイッチのある軸で反対端の保護まで消さない)。それでも無人の歯止めが
+消えないのは、上の 7 つがどれも保護とは独立に効いているためである。
 
 **触れた状態から始めたら、一度離れてから寄せ直す。** リミットスイッチの ON 区間には
 幅があるので、触れたその場を原点にすると「区間のどこで探索を始めたか」がそのまま
@@ -64,10 +73,9 @@
 固定保持なら引きずりは「進めた側が進まない」形で現れ、停滞判定 (`_STALL_LIMIT`) が
 拾う —— **「この機構では片側駆動が成立しない」を検出できる唯一の形である。**
 
-**複数センサのラッチは 1 回の観測でまとめて読む** (`_SensorLatches`)。
-`consume_sensor_latch` は読むと消えるので、センサごとに別々のタイミングで読むと
-「A を読んだ瞬間に B の接触が捨てられる」。どちらが先に当たったかは整列段まで
-持ち越す必要があるので、走行中は OR で溜め込む。
+**接触は走行中に溜め込む** (`_SensorContacts`)。探索は「いずれか 1 本が当たった」で
+止まるが、その後の整列段は「まだ押されていないのはどれか」を知らなければ指令先を
+選べないので、どちらが先に当たったかを整列段まで持ち越す必要がある。
 
 **原点確定はグループ単位でしか行わない。** 左右直結ペアを別々の時刻に確定すると、
 その間に片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に
@@ -81,8 +89,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager
 
 from lib.drivers.base import ControlMode
 from lib.sequence.motors import AxisHandle
@@ -129,10 +139,11 @@ class HomingError(RuntimeError):
 
 
 SensorActive = Callable[[str], bool]
-#: センサ名 → 前回読んでから一度でも接触したか。**読むと消える**
-#: (`GenericDriver.consume_sensor_latch`)。読み手が複数いると片方が相手のぶんまで
-#: 消すので、呼び手は `HomingRunner` 1 つに限る。
-SensorLatched = Callable[[str], bool]
+#: センサ名 → 立ち上がり (OFF→ON) を数えた接触回数
+#: (`GenericDriver.sensor_contact_count`)。**読んでも減らない**ので、
+#: 零点確定以外の読み手が同じセンサを見ていても取りこぼしを起こさない。
+#: 読み手は自分で基準値を控え、その差だけを見る (`_SensorContacts`)。
+SensorContactCount = Callable[[str], int]
 SensorStale = Callable[[str], bool]
 MotorStale = Callable[[str], bool]
 OriginCapturable = Callable[[str], bool]
@@ -143,39 +154,60 @@ OriginCapturable = Callable[[str], bool]
 #: 事前確認が、待ちを挟む重い操作に見えてしまう。
 CaptureOrigin = Callable[[str], Awaitable[None]]
 SleepFunc = Callable[[float], Awaitable[None]]
+#: センサ名の並び → そのセンサのリミット保護だけを外す contextmanager
+#: (`LimitGuard.suspend_sensors`)。**軸ではなくセンサ単位**なのは、両端に
+#: スイッチのある軸で反対端の保護まで消さないため。
+SuspendSensors = Callable[[Iterable[str]], AbstractContextManager[None]]
 
 
-class _SensorLatches:
-    """走行中のセンサのラッチを **1 回の観測でまとめて読み、OR で溜め込む**。
+@contextlib.contextmanager
+def _no_suspend(_names: Iterable[str]) -> Iterator[None]:
+    """保護を持たない構成用の既定。**何もしない。**
 
-    ラッチ (`GenericDriver.consume_sensor_latch`) は**読むと消える**。センサごとに
-    別々のタイミングで読むと「A のラッチを読んだ瞬間に B の接触が捨てられる」ので、
-    見るのは常に全センサぶんを 1 回で読む `poll()` だけにしてある。
+    既定値を置くのは、CAN も `LimitGuard` も無い状態で零点確定を検証できる性質を
+    保つため。本番 (`main.py`) からは必ず本物を渡すこと —— 渡し忘れると、
+    リミット保護が探索の 1 歩目を引き戻して零点確定が必ず失敗する。
+    """
+    yield
+
+
+class _SensorContacts:
+    """**基準値からの接触回数の増加**を、走行中センサごとに溜め込む。
+
+    センサ側 (`GenericDriver.sensor_contact_count`) は読んでも減らない単調増加の
+    回数なので、**この読み方は他の読み手 (リミットスイッチ保護) と競合しない。**
+    かつての「読むと消えるラッチ」は先に読んだ側が相手のぶんまで消したため、
+    読み手が 2 人になった瞬間に探索が接触を取りこぼした。
 
     溜め込むのは、どちらのスイッチが先に押されたかを**整列段まで持ち越す**必要が
     あるため。探索は「いずれか 1 本」で止まるが、その後の整列段は「まだ押されて
     いないのはどれか」を知らなければ指令先を選べない。
     """
 
-    def __init__(self, sensors: tuple[str, ...], read: SensorLatched) -> None:
+    def __init__(self, sensors: tuple[str, ...], count: SensorContactCount) -> None:
         self._sensors = sensors
-        self._read = read
+        self._count = count
+        #: センサ名 → 基準値。**初めて見た時点で取る** (それ以前の接触は見ない)。
+        #: 探索の直前に `reset()` が取り直す
+        self._baseline: dict[str, int] = {}
         self._latched: dict[str, bool] = dict.fromkeys(sensors, False)
 
     def poll(self) -> None:
-        """全センサのラッチを 1 回ずつ読み、立っていた分を記録へ足す。"""
+        """全センサの回数を 1 回ずつ読み、基準値から増えていた分を記録へ足す。"""
         for name in self._sensors:
-            if self._read(name):
+            count = self._count(name)
+            if count != self._baseline.setdefault(name, count):
                 self._latched[name] = True
 
-    def discard(self) -> None:
-        """溜まったラッチを捨てる。**探索を始める直前に 1 度だけ呼ぶ。**
+    def reset(self) -> None:
+        """基準値を今の回数へ取り直す。**探索を始める直前に 1 度だけ呼ぶ。**
 
-        離脱段のあいだ触れていたぶんや、前回の零点確定・手動操縦でスイッチを
-        跨いだぶんが残っていると、1 歩目の観測でいきなり到達と読む。
+        離脱段のあいだに触れたぶんや、前回の零点確定・手動操縦でスイッチを
+        跨いだぶんまで数えていると、1 歩目の観測でいきなり到達と読み、
+        スイッチではなく探索開始位置が原点になる。
         """
         for name in self._sensors:
-            self._read(name)
+            self._baseline[name] = self._count(name)
             self._latched[name] = False
 
     def any_latched(self) -> bool:
@@ -213,11 +245,12 @@ class HomingRunner:
         self,
         *,
         sensor_active: SensorActive,
-        sensor_latched: SensorLatched,
+        sensor_contact_count: SensorContactCount,
         sensor_is_stale: SensorStale,
         motor_is_stale: MotorStale,
         origin_capturable: OriginCapturable,
         capture_origin: CaptureOrigin,
+        suspend_sensors: SuspendSensors = _no_suspend,
         sleep: SleepFunc = asyncio.sleep,
     ) -> None:
         """
@@ -225,8 +258,9 @@ class HomingRunner:
             sensor_active: センサ名 → **今**接触しているか
                 (`GenericDriver.sensor_active`)。離脱の判定と、探索前の
                 「既に触れているか」がこちらを見る
-            sensor_latched: センサ名 → **前回読んでから一度でも**接触したか。
-                読むと消える (`GenericDriver.consume_sensor_latch`)。
+            sensor_contact_count: センサ名 → 立ち上がりを数えた**接触回数**
+                (`GenericDriver.sensor_contact_count`)。読んでも減らないので、
+                他の読み手が同じセンサを見ていても取りこぼさない。
                 **探索の到達判定だけがこちらを見る** (`_sensor_reached`)。
                 **既定値を持たせない** —— 未配線が「取りこぼす探索」に黙って戻る
             sensor_is_stale: センサ名 → フィードバックが途絶しているか
@@ -237,14 +271,18 @@ class HomingRunner:
             capture_origin: 軸名 → その軸の現在位置を原点として確定する
                 (左右ペアはグループ全員へ展開されること)。CAN の往復を挟む
                 実装があるので非同期
+            suspend_sensors: そのセンサのリミット保護を外す contextmanager。
+                零点確定は「当たるまで動かす」動作なので、保護が効いたままだと
+                触れた瞬間に自分の指令が引き戻され原点へ到達できない
             sleep: 1 ステップごとの待ち (テストで差し替える)
         """
         self._sensor_active = sensor_active
-        self._sensor_latched = sensor_latched
+        self._sensor_contact_count = sensor_contact_count
         self._sensor_is_stale = sensor_is_stale
         self._motor_is_stale = motor_is_stale
         self._origin_capturable = origin_capturable
         self._capture_origin = capture_origin
+        self._suspend_sensors = suspend_sensors
         self._sleep = sleep
 
     async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
@@ -277,7 +315,18 @@ class HomingRunner:
             raise HomingError(f"軸 '{spec.name}' に homing 設定がありません")
 
         self._check_preconditions(spec, homing)
-        latches = _SensorLatches(homing.sensor_names, self._sensor_latched)
+        # **見るセンサ全部の保護を、事前確認の後から原点確定まで外す。**
+        # 1 本でも外し忘れると、整列段で「まだ押されていない側」を進めている最中に
+        # **既に押されている側**のセンサで保護が発動し、零点確定が必ず失敗する。
+        # 場合分けを書かず `sensor_names` を使うのはそのため (単数形・複数形の
+        # 違いを畳む唯一の口)。事前確認より前に外さないのは、外さなくても
+        # 1 歩も動かない段だからである (保護は指令にしか効かない)。
+        with self._suspend_sensors(homing.sensor_names):
+            return await self._run_homing(spec, handle, homing)
+
+    async def _run_homing(self, spec: AxisSpec, handle: AxisHandle, homing: HomingSpec) -> float:
+        """離脱 → 探索 → 整列 → 原点確定。**リミット保護を外した状態で走る。**"""
+        latches = _SensorContacts(homing.sensor_names, self._sensor_contact_count)
 
         # ここが問うのは「**今**触れているか」なのでラッチではない。ラッチで問うと、
         # 前回の零点確定や手動操縦でスイッチを跨いだ痕跡だけで離脱段へ入り、
@@ -341,7 +390,7 @@ class HomingRunner:
         handle: AxisHandle,
         homing: HomingSpec,
         sensors: Mapping[str, str],
-        latches: _SensorLatches,
+        latches: _SensorContacts,
     ) -> None:
         """**両方のスイッチが押された姿勢**まで、押されていない側のモータだけを進める。
 
@@ -485,7 +534,7 @@ class HomingRunner:
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
-        latches: _SensorLatches,
+        latches: _SensorContacts,
         sensors: Mapping[str, str],
         pending: list[str],
         commanded: Mapping[str, float],
@@ -528,7 +577,7 @@ class HomingRunner:
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
-        latches: _SensorLatches,
+        latches: _SensorContacts,
         *,
         direction: int,
         want_active: bool,
@@ -551,10 +600,10 @@ class HomingRunner:
             limit: 実測の移動量の上限。超えたら `limit_message` で降りる
         """
         if want_active:
-            # **探索を始める前に溜まったラッチを捨てる。** 離脱段のあいだ触れていた
-            # ぶんや、前回の零点確定・手動操縦でスイッチを跨いだぶんが残っていると、
+            # **探索を始める直前に基準値を取り直す。** 離脱段のあいだに触れたぶんや、
+            # 前回の零点確定・手動操縦でスイッチを跨いだぶんまで数えていると、
             # 1 歩目の観測でいきなり到達と読み、探索開始位置が原点になる
-            latches.discard()
+            latches.reset()
 
         start = self._observe(spec, handle)
         observed = start
@@ -640,7 +689,7 @@ class HomingRunner:
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
-        latches: _SensorLatches,
+        latches: _SensorContacts,
         commanded: float,
         *,
         want_active: bool,
@@ -675,19 +724,19 @@ class HomingRunner:
         return False
 
     def _sensor_reached(
-        self, homing: HomingSpec, latches: _SensorLatches, *, want_active: bool
+        self, homing: HomingSpec, latches: _SensorContacts, *, want_active: bool
     ) -> bool:
         """センサが目的の状態になったか。**探索と離脱で見るものが違う。**
 
-        探索 (`want_active=True`) は**ラッチ**を見る —— 「前回読んでから一度でも
-        ON になったか」。リミットスイッチの ON 区間が `step` より狭いと、指令 1 回で
-        区間を跨いでしまい、`settle_s` 後の観測時にはもう OFF になっている
+        探索 (`want_active=True`) は**接触回数の増加**を見る —— 「探索を始めてから
+        一度でも ON になったか」。リミットスイッチの ON 区間が `step` より狭いと、
+        指令 1 回で区間を跨いでしまい、`settle_s` 後の観測時にはもう OFF になっている
         (`rotate` は step 2.0deg を約 18ms で通過する)。「今 ON か」を 50ms ごとに
         見る方式では 100Hz で届いている接触を原理的に取りこぼし、**そのまま
         スイッチを越えて回り続ける**。越えた先は機構の破損側である。
 
         離脱 (`want_active=False`) は**現在値**を見る。対称に見えるが、揃えては
-        ならない —— 離脱に同じラッチ方式 (「一度でも OFF になったか」) を持ち込むと、
+        ならない —— 離脱に同じ数え方 (「一度でも OFF になったか」) を持ち込むと、
         接点のチャタリングで OFF が 1 回混じっただけで離脱完了と読み、**まだ ON 区間の
         中にいるのに探索を始めて、区間内のどこかを原点にする**。取りこぼしの向きも
         非対称で、探索の取りこぼしは機構の破損側へ進み続けるのに対し、離脱の

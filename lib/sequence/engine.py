@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from lib.match_state import Court
-from lib.sequence.motors import AxisHandle
+from lib.sequence.motors import AxisHandle, LimitIntervention, build_axis_handle
 from lib.sequence.positions import PositionTable
 
 if TYPE_CHECKING:
@@ -82,6 +82,21 @@ class StepFailure:
 
     def to_dict(self) -> dict:
         return {"step_index": self.step_index, "step": self.label, "message": self.message}
+
+
+def _limit_note(intervention: LimitIntervention, intervened: bool) -> str:
+    """失敗した軸に添えるリミット保護の理由。介入していなければ空文字。
+
+    **どのスイッチで止まったかを名指しする。** 「目標位置に到達しませんでした」
+    だけでは、操縦者は保護が働いたのか配線不良で機構が動かなかったのかを画面から
+    区別できず、手当てが正反対になる。
+    """
+    if not intervened:
+        return ""
+    names = ", ".join(intervention.sensors)
+    if not names:
+        return " (リミットスイッチに触れたため端で止まりました)"
+    return f" (リミットスイッチ {names} に触れたため端で止まりました)"
 
 
 def step(
@@ -269,6 +284,19 @@ class Sequence:
         (到達しなかったのではなく中断されたので、タイムアウトとは別の例外にして
         操縦者へ見せる文言が嘘にならないようにしてある)。
         指令値は保持したままにする (落下すると危険な軸で保持トルクを失わないため)。
+
+        **リミット保護が介入した軸は到達扱いにしない。** 保護が働くと目標はその
+        瞬間の実測位置へ書き換わるので、到達判定 (送った目標との比較) は必ず成立
+        してしまう —— 特別扱いせずに放置すると、**位置定数に書いたのとは別の場所で
+        成功するステップ**ができ、次のステップはその姿勢を前提に動く。
+        止まったことは操縦者に見えなければならない。
+
+        **判定は保護の介入カウンタ (``AxisHandle.limit_intervention``) だけに置き、
+        指令の前後で比べる。** 入口でクランプされたかを送信結果と突き合わせる形では、
+        **移動の途中で触れた場合を 1 件も拾えない** —— そのときの指令は既に飛んで
+        いて、目標を書き戻すのは 50Hz の常駐層のほうだからである。同じ理由で
+        「終了時にラッチしているか」も使えない (接点がバウンドして触れて離れると
+        ラッチは外れるが、書き戻された目標は残り軸は端で止まったままになる)。
         """
         table = self.positions
         # **コルーチンは溜めない。** 到達待ちを溜めている途中の `set_target_value` が
@@ -278,16 +306,22 @@ class Sequence:
         # 試合中に緊急停止を踏むたび、本当の死因 (`EStopActiveError`) の隣に
         # 無関係な警告が並ぶ。待ち時間だけを持っておき、全軸へ指令し終えてから
         # まとめてコルーチンを作る
-        pending: list[tuple[AxisHandle, str, float | None]] = []
+        #: (指令口, 位置名, 待ち時間, 指令を出す前のリミット保護の介入記録)
+        pending: list[tuple[AxisHandle, str, float | None, LimitIntervention]] = []
 
         for axis, position_name in targets.items():
             spec = table.axis(axis)
+            commands = table.commands(axis, position_name, court=self.court)
             # 未定義のモータ名は MotorGroup 側が利用可能な名前付きの例外にしてくれる
-            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
-            await handle.set_target_value(
-                table.commands(axis, position_name, court=self.court),
+            handle = build_axis_handle(spec, self.motors)
+            # **控えるのは指令の前。** 入口のクランプは set_target_value の中で
+            # 起きるので、送った後に控えるとその 1 件が「元から数えられていた」
+            # ことになり、頭打ちの移動が成功してしまう
+            before = handle.limit_intervention
+            await handle.set_target_value(commands)
+            pending.append(
+                (handle, position_name, spec.timeout_s if timeout is None else timeout, before)
             )
-            pending.append((handle, position_name, spec.timeout_s if timeout is None else timeout))
 
         # **`expect_target=True` は「直前に指令を送った」の宣言。** ここへ来る軸は
         # 全部 `set_target_value` を通っているので、待ち始めた時点で目標が無ければ
@@ -296,14 +330,16 @@ class Sequence:
         results = await asyncio.gather(
             *(
                 handle.wait_reached(timeout=wait_s, expect_target=True)
-                for handle, _, wait_s in pending
+                for handle, _, wait_s, _ in pending
             )
         )
-        failed = [
-            f"{handle.name}->{position_name}"
-            for (handle, position_name, _), reached in zip(pending, results, strict=True)
-            if not reached
-        ]
+        failed: list[str] = []
+        for (handle, position_name, _, before), reached in zip(pending, results, strict=True):
+            after = handle.limit_intervention
+            intervened = after.count != before.count
+            if reached and not intervened:
+                continue
+            failed.append(f"{handle.name}->{position_name}" + _limit_note(after, intervened))
         if failed:
             raise SequenceTimeoutError(
                 f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
@@ -312,7 +348,7 @@ class Sequence:
         # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない。
         # 判定そのものは SyncGroup.violation (3 層共通) が持ち、ここは結果を例外に変えるだけ
         desynced = []
-        for handle, _, _ in pending:
+        for handle, _, _, _ in pending:
             error = handle.sync_violation()
             if error is None:
                 continue

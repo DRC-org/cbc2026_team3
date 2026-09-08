@@ -576,6 +576,32 @@ class TestShippedRobotConfig:
 
         assert required <= sensors
 
+    def test_limit_sensors_are_registered(self) -> None:
+        """`limits` が見るセンサ名が config の `sensors:` に居ること。
+
+        居ないと受信ループがそのセンサのフレームを誰にも配らないので、保護層からは
+        永久に途絶として見える。**途絶では保護を発動させない**設計なので、症状は
+        「機構破壊防止が黙って無効のまま」になり、機体は平常どおり動いてしまう。
+        起動を待たずにここで落とす。
+
+        `homing` の同名の検査と分けてあるのは、両者が同じスイッチを見るとは限らない
+        ため —— `sub_y_axis` / `sub_lift` は零点確定を持たないまま保護だけを宣言する。
+        """
+        sensors: set[str] = set()
+        for path in sorted(_CONFIG_DIR.glob("*.yaml")):
+            if path.name.endswith("_positions.yaml"):
+                continue
+            config = yaml.safe_load(path.read_text()) or {}
+            sensors |= set(config.get("sensors") or {})
+
+        required: set[str] = set()
+        for path in sorted(_CONFIG_DIR.glob("*_positions.yaml")):
+            table = _load_shipped(path.name)
+            for axis in table.limit_axes():
+                required |= {limit.sensor for limit in table.limits(axis)}
+
+        assert required <= sensors
+
     def test_paired_axis_motors_agree_on_set_zero_on_start(self) -> None:
         """左右ペア軸を構成するモータは `set_zero_on_start` が揃っていること。
 

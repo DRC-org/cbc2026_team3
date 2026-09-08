@@ -342,7 +342,7 @@ class TestSensorInput:
         assert self.drv.is_fault() is False
         assert self.drv.has_overcurrent_warning() is False
 
-    def test_latch_keeps_a_contact_that_is_already_over(self):
+    def test_count_keeps_a_contact_that_is_already_over(self):
         """**零点確定はこれが無いと止まらない。**
 
         探索は `settle_s` (50ms) ごとにしか観測できないのに、FEEDBACK は 100Hz で
@@ -354,28 +354,41 @@ class TestSensorInput:
         self._feed()  # 観測する前に抜けた
 
         assert self.drv.sensor_active is False  # 今は触れていない
-        assert self.drv.consume_sensor_latch() is True
+        assert self.drv.sensor_contact_count == 1
 
-    def test_latch_clears_on_read(self):
-        """読んだら消す。次の窓に前の窓の接触を持ち越すと、原点が 1 歩ずれる。"""
+    def test_count_survives_any_number_of_readers(self):
+        """**読んでも減らない。** ここが消える読み方だと読み手は 1 人に限られる。
+
+        リミットスイッチ保護と零点確定が同じセンサを見るので、先に読んだ側が
+        相手のぶんまで消す形にしてはならない (症状は「スイッチに当たっているのに
+        探索が止まらず機構の端まで回り続ける」で、実機で起きた壊れ方そのもの)。
+        """
         self._feed(sensor=True)
         self._feed()
 
-        assert self.drv.consume_sensor_latch() is True
-        assert self.drv.consume_sensor_latch() is False
+        # 何人が何回読んでも同じ回数を答える
+        assert [self.drv.sensor_contact_count for _ in range(3)] == [1, 1, 1]
 
-    def test_latch_never_answers_weaker_than_the_current_state(self):
-        """触れたまま FEEDBACK が途絶えても「触れていない」へ倒れない。"""
+    def test_counts_only_the_rising_edge(self):
+        """**数えるのは OFF→ON だけ。** 触れている間ずっと数えると回数が意味を失う。
+
+        FEEDBACK は 100Hz で届くので、押しっぱなしの 1 回の接触が毎秒 100 増える。
+        読み手は基準値からの増加を「接触した」と読むので、離れていないのに
+        「もう一度触れた」と答える読み手ができる。
+        """
         self._feed(sensor=True)
+        self._feed(sensor=True)
+        self._feed(sensor=True)
+        assert self.drv.sensor_contact_count == 1
 
-        assert self.drv.consume_sensor_latch() is True
-        # 読んで消した後も接触は続いている (新しい FEEDBACK は届いていない)
-        assert self.drv.consume_sensor_latch() is True
+        self._feed()  # 離れて
+        self._feed(sensor=True)  # もう一度触れた
+        assert self.drv.sensor_contact_count == 2
 
-    def test_latch_does_not_disturb_the_current_state(self):
+    def test_count_does_not_disturb_the_current_state(self):
         """診断ツリーが描くのは `sensor_active` (今どうなっているか) のまま。"""
         self._feed(sensor=True)
-        self.drv.consume_sensor_latch()
+        assert self.drv.sensor_contact_count == 1
 
         assert self.drv.sensor_active is True
 

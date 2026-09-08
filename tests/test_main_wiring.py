@@ -46,7 +46,7 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
-from lib.sequence.motors import EStopActiveError
+from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotContext, RobotServer
 from main import (
@@ -65,8 +65,15 @@ from main import (
     _wire_robot_motors,
 )
 from sequences.motor_check import MotorCheckSequence
-from tests.fake_can import deliver_frame, direct_runner, mark_feedback_at, mock_bus
+from tests.fake_can import (
+    deliver_frame,
+    direct_runner,
+    mark_feedback_at,
+    mock_bus,
+    mock_can_manager,
+)
 from tests.fake_clock import FakeClock
+from tests.fake_drivers import StubFeedbackDriver
 from tests.feedback_frames import feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -1998,7 +2005,7 @@ class TestMotorCheckWiring:
             ]
         )
 
-    def _wire(self, tables: list[PositionTable]) -> MagicMock:
+    def _wire(self, tables: list[PositionTable], *, limit_guards: list | None = None) -> MagicMock:
         server = MagicMock()
         main._wire_motor_check_sequence(
             server,
@@ -2007,7 +2014,8 @@ class TestMotorCheckWiring:
             loops=[],
             can_managers=[],
             sync_monitors=[],
-            feedback_timeout_ms=500.0,
+            limit_guards=limit_guards or [],
+            sensors=main._build_sensor_view([], feedback_timeout_ms=500.0),
         )
         return server
 
@@ -2047,6 +2055,52 @@ class TestMotorCheckWiring:
         sequence = server.set_motor_check_sequence.call_args.args[0]
         assert sequence.excluded_steps == ()
 
+    def test_束ねたモータ群にも保護を結ぶ(self) -> None:
+        """両ハンドを混ぜた別のグループなので、ロボットごとの bind は届かない。
+
+        結び忘れると、**全アクチュエータを順に駆動する動作確認だけ**が保護の外で
+        走る (症状はその経路でしか出ない)。
+        """
+        table = self._table("main_hand_positions.yaml")
+        guard = main._build_limit_guard(
+            load_position_table(
+                {
+                    "axes": {
+                        "y_axis": {
+                            "unit": "mm",
+                            "command_unit": "deg",
+                            "limits": [{"sensor": "y_axis_r_origin_sensor", "direction": -1}],
+                            "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                        }
+                    },
+                    "positions": {"y_axis": {"home": 0.0}},
+                },
+                source="<test>",
+            ),
+            self._motor_group("y_axis_r", "y_axis_l"),
+            main._SensorView(
+                active=lambda _name: False,
+                contact_count=lambda _name: 0,
+                is_stale=lambda _name: True,
+                motor_is_stale=lambda _name: False,
+                known=lambda _name: True,
+            ),
+            axis_handle=lambda _name: None,
+        )
+
+        server = self._wire([table], limit_guards=[guard])
+
+        sequence = server.set_motor_check_sequence.call_args.args[0]
+        assert sequence.motors.limit_guard is not None
+        assert sequence.motors.limit_guard.axis_names == ("y_axis",)
+
+    def _motor_group(self, *names: str) -> MotorGroup:
+        group = MotorGroup()
+        mgr = mock_can_manager()
+        for name in names:
+            group.add(MotorHandle(name, StubFeedbackDriver(name, 1), mgr))
+        return group
+
     def test_指令できる軸が無ければ登録しない(self, caplog: pytest.LogCaptureFixture) -> None:
         """未登録なら「シーケンスが読み込まれていません」として拒否される。
 
@@ -2058,6 +2112,271 @@ class TestMotorCheckWiring:
             server = self._wire([empty])
 
         server.set_motor_check_sequence.assert_not_called()
+
+
+class TestLimitGuardWiring:
+    """``limits:`` を書いた軸のリミット保護を組み、起動・後始末へ載せる。
+
+    **黙って組まない構成を作らない。** 保護は平常時に一切姿を現さないので、
+    配線が落ちていることは機構が壊れるまで分からない。
+    """
+
+    _SENSOR = "y_axis_r_origin_sensor"
+
+    def _table(self, *, limits: bool = True, axis: str = "y_axis") -> PositionTable:
+        spec: dict = {
+            "unit": "mm",
+            "command_unit": "deg",
+            "motors": {f"{axis}_r": {"scale": 2.0}, f"{axis}_l": {"scale": -2.0}},
+        }
+        if limits:
+            spec["limits"] = [{"sensor": self._SENSOR, "direction": -1}]
+        return load_position_table(
+            {"axes": {axis: spec}, "positions": {axis: {"home": 0.0}}}, source="<test>"
+        )
+
+    def _motors(self, *names: str) -> MotorGroup:
+        group = MotorGroup()
+        mgr = mock_can_manager()
+        for name in names:
+            group.add(MotorHandle(name, StubFeedbackDriver(name, 1), mgr))
+        return group
+
+    def _sensors(self, *, known: bool = True) -> main._SensorView:
+        return main._SensorView(
+            active=lambda _name: False,
+            contact_count=lambda _name: 0,
+            # 起動時点ではまだ 1 通も受けていないので、実機でも全センサが途絶である
+            is_stale=lambda _name: True,
+            motor_is_stale=lambda _name: False,
+            known=lambda _name: known,
+        )
+
+    def test_limits_を書いた軸で組み立てる(self) -> None:
+        guard = main._build_limit_guard(
+            self._table(),
+            self._motors("y_axis_r", "y_axis_l"),
+            self._sensors(),
+            axis_handle=lambda _name: None,
+        )
+
+        assert guard is not None
+        assert guard.axis_names == ("y_axis",)
+        assert guard.sensor_names == (self._SENSOR,)
+
+    def test_対象が無ければ組み立てない(self) -> None:
+        """空のタスクを立てない (SyncMonitor を sync_groups が空なら作らないのと同じ)。"""
+        assert (
+            main._build_limit_guard(
+                self._table(limits=False),
+                self._motors("y_axis_r", "y_axis_l"),
+                self._sensors(),
+                axis_handle=lambda _name: None,
+            )
+            is None
+        )
+
+    def test_このロボットに無い軸は対象外(self, caplog: pytest.LogCaptureFixture) -> None:
+        """**黙って飛ばすと「保護しているつもり」で機構破損に至る。**"""
+        with caplog.at_level(logging.WARNING):
+            guard = main._build_limit_guard(
+                self._table(),
+                self._motors("other_motor"),
+                self._sensors(),
+                axis_handle=lambda _name: None,
+            )
+
+        assert guard is None
+        assert "y_axis_r" in caplog.text
+
+    def test_どの軸のどのセンサがどちら向きかを起動ログに出す(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.INFO):
+            main._build_limit_guard(
+                self._table(),
+                self._motors("y_axis_r", "y_axis_l"),
+                self._sensors(),
+                axis_handle=lambda _name: None,
+            )
+
+        assert "y_axis" in caplog.text
+        assert self._SENSOR in caplog.text
+        assert "-1" in caplog.text
+
+    def test_未登録のセンサは_ERROR_で名指しする(self, caplog: pytest.LogCaptureFixture) -> None:
+        """`sensors:` に居ないセンサを黙って通すと、保護を書いたつもりの軸が
+        「触れても止まらない」まま試合に入る (零点確定の unsupported と同じ扱い)。
+        """
+        with caplog.at_level(logging.ERROR):
+            guard = main._build_limit_guard(
+                self._table(),
+                self._motors("y_axis_r", "y_axis_l"),
+                self._sensors(known=False),
+                axis_handle=lambda _name: None,
+            )
+
+        # 起動そのものは拒否しない (片ハンドだけの構成・机上ベンチを塞がない)
+        assert guard is not None
+        assert self._SENSOR in caplog.text
+
+    def test_登録されていれば起動時に_ERROR_を出さない(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """**鮮度で判定すると毎起動 ERROR が出る** (起動時点ではまだ 1 通も
+        受けていないので全センサが途絶)。毎回出る ERROR は読まれなくなる。
+        """
+        with caplog.at_level(logging.ERROR):
+            main._build_limit_guard(
+                self._table(),
+                self._motors("y_axis_r", "y_axis_l"),
+                self._sensors(),
+                axis_handle=lambda _name: None,
+            )
+
+        assert caplog.text == ""
+
+    def test_軸ハンドルはモータ単位ではなく軸単位で引ける(self) -> None:
+        table = self._table()
+        lookup = main._make_axis_handle_lookup(table, self._motors("y_axis_r", "y_axis_l"))
+
+        handle = lookup("y_axis")
+
+        assert handle is not None
+        assert handle.name == "y_axis"
+        assert lookup("rotate") is None
+
+    def test_モータが揃わなければ軸ハンドルを返さない(self) -> None:
+        lookup = main._make_axis_handle_lookup(self._table(), self._motors("y_axis_r"))
+        assert lookup("y_axis") is None
+
+    def test_組んだ保護はモータ群へ結ぶ(self) -> None:
+        """結ばないと 50Hz の常駐層 (層①) だけが効き、シーケンス・手動操縦が出した
+        指令は押し戻されるまでの 1 周期ぶん禁止方向へ進む。**結ぶ先をモータ群に
+        してあるので、軸ハンドルを組むどの経路から来ても保護が付いてくる。**
+        """
+        group = self._motors("y_axis_r", "y_axis_l")
+        wiring = main._RobotWiring(
+            name="main_hand",
+            sequence=_DummySequence("main_hand"),
+            can_manager=MagicMock(),
+            positions=self._table(),
+            position_loops=[],
+            sync_monitors=[],
+            target_refreshers=[],
+            motor_group=group,
+        )
+
+        wired = main._wire_limit_guards([wiring], self._sensors())
+
+        assert wired[0].limit_guard is not None
+        assert group.limit_guard is wired[0].limit_guard
+
+    def test_零点確定へ渡す一時停止はセンサを持つ保護だけを止める(self) -> None:
+        """センサ名からしか「どのロボットの保護か」は決まらない。"""
+        guard = main._build_limit_guard(
+            self._table(),
+            self._motors("y_axis_r", "y_axis_l"),
+            self._sensors(),
+            axis_handle=lambda _name: None,
+        )
+        assert guard is not None
+        suspend = main._suspend_limit_guards([guard])
+
+        with suspend([self._SENSOR]):
+            assert guard.is_suspended(self._SENSOR) is True
+        assert guard.is_suspended(self._SENSOR) is False
+
+        # 誰も見ていないセンサでは何も止めない (KeyError にもしない)
+        with suspend(["rotate_origin_sensor"]):
+            pass
+
+
+class TestLimitGuardLifecycle:
+    """起動と後始末に載っていること。**後始末では最初に止める。**"""
+
+    def _wiring(self, guard: object) -> main._RobotWiring:
+        can_manager = MagicMock()
+        can_manager.run = AsyncMock(return_value=[])
+        can_manager.shutdown = AsyncMock()
+        return main._RobotWiring(
+            name="main_hand",
+            sequence=_DummySequence("main_hand"),
+            can_manager=can_manager,
+            positions=PositionTable.empty(),
+            position_loops=[],
+            sync_monitors=[],
+            target_refreshers=[],
+            motor_group=None,
+            limit_guard=guard,  # type: ignore[arg-type]
+        )
+
+    async def test_起動で回り始める(self) -> None:
+        server = MagicMock()
+        server.start = AsyncMock()
+        guard = MagicMock()
+
+        await main._start_all(server, [self._wiring(guard)])
+
+        guard.start.assert_called_once_with()
+
+    async def test_後始末では他のどれより先に止める(self) -> None:
+        """**新しい目標値を書きうる唯一の常駐タスク**なので最初に止める。
+        後回しにすると、他を止めた後の 1 周期が「止めたはずの軸」へ目標を書く。
+        """
+        order: list[str] = []
+        server = MagicMock()
+        server.cleanup = AsyncMock(side_effect=lambda: order.append("server"))
+
+        guard = MagicMock()
+        guard.stop = AsyncMock(side_effect=lambda: order.append("limit_guard"))
+        loop = MagicMock()
+        loop.bus_name = "can_m3508"
+        loop.stop = AsyncMock(side_effect=lambda: order.append("position_loop"))
+        refresher = MagicMock()
+        refresher.stop = AsyncMock(side_effect=lambda: order.append("refresher"))
+        monitor = MagicMock()
+        monitor.stop = AsyncMock(side_effect=lambda: order.append("sync_monitor"))
+
+        wiring = dataclasses.replace(
+            self._wiring(guard),
+            position_loops=[loop],
+            sync_monitors=[monitor],
+            target_refreshers=[refresher],
+        )
+        wiring.can_manager.shutdown = AsyncMock(side_effect=lambda: order.append("can"))
+
+        await main._shutdown_all(server, [wiring])
+
+        assert order == [
+            "limit_guard",
+            "position_loop",
+            "refresher",
+            "sync_monitor",
+            "can",
+            "server",
+        ]
+
+    async def test_保護の停止に失敗しても残りを続ける(self) -> None:
+        """止める処理が止まる形は安全側ではない。"""
+        server = MagicMock()
+        server.cleanup = AsyncMock()
+        guard = MagicMock()
+        guard.stop = AsyncMock(side_effect=RuntimeError("停止に失敗"))
+        wiring = self._wiring(guard)
+
+        await main._shutdown_all(server, [wiring])
+
+        wiring.can_manager.shutdown.assert_awaited_once()
+        server.cleanup.assert_awaited_once()
+
+    async def test_保護を持たない構成でも起動と後始末が通る(self) -> None:
+        server = MagicMock()
+        server.start = AsyncMock()
+        server.cleanup = AsyncMock()
+
+        await main._start_all(server, [self._wiring(None)])
+        await main._shutdown_all(server, [self._wiring(None)])
 
 
 class TestStartupSummaryLines:

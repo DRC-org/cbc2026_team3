@@ -10,6 +10,7 @@ from lib.match_state import Court
 from lib.sequence.positions import (
     DEFAULT_TIMEOUT_S,
     AxisSpec,
+    LimitSpec,
     MotorSpec,
     PositionLookupError,
     PositionTable,
@@ -1189,6 +1190,250 @@ class TestHomingSensorMap:
         table = load_position_table(self._paired(align_distance=9.999), source="<test>")
 
         assert table.axis("y_axis").homing is not None
+
+
+class TestLimitSpec:
+    """リミットスイッチ保護の宣言 (axes.<軸>.limits)。
+
+    「そのスイッチに触れたら、そのスイッチのある側へ進む指令を止める」ことだけを
+    宣言する。検証は「書いたのに効かない保護」を起動時に潰すためにある —— 保護は
+    平常時には一切姿を現さないので、効いていないことは機構が壊れるまで分からない。
+    """
+
+    def _axis(self, *, limits: object, **extra: object) -> dict:
+        return {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "scale": 55.0,
+                    "limits": limits,
+                    **extra,
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0, "work": 15.0}},
+        }
+
+    def test_limits_を書かない軸は保護なし(self) -> None:
+        table = _table()
+
+        assert table.axis("lift_motor").limits == ()
+        assert table.limit_axes() == ()
+
+    def test_1_本の宣言がそのまま届く(self) -> None:
+        table = load_position_table(
+            self._axis(limits=[{"sensor": "y_axis_r_origin_sensor", "direction": -1}]),
+            source="<test>",
+        )
+        limits = table.limits("y_axis")
+
+        assert len(limits) == 1
+        assert limits[0].sensor == "y_axis_r_origin_sensor"
+        assert limits[0].direction == pytest.approx(-1.0)
+        assert table.limit_axes() == ("y_axis",)
+
+    def test_同じ軸に_2_本書ける(self) -> None:
+        """左右直結ペアはモータごとにスイッチが 1 本ずつ付く (向きは同じ)。"""
+        table = load_position_table(
+            self._axis(
+                limits=[
+                    {"sensor": "y_axis_r_origin_sensor", "direction": -1},
+                    {"sensor": "y_axis_l_origin_sensor", "direction": -1},
+                ]
+            ),
+            source="<test>",
+        )
+        limits = table.limits("y_axis")
+
+        assert [limit.sensor for limit in limits] == [
+            "y_axis_r_origin_sensor",
+            "y_axis_l_origin_sensor",
+        ]
+
+    def test_両端のスイッチは向きを分けて書ける(self) -> None:
+        table = load_position_table(
+            self._axis(
+                limits=[
+                    {"sensor": "sub_y_axis_f_limit_sensor", "direction": 1},
+                    {"sensor": "sub_y_axis_r_limit_sensor", "direction": -1},
+                ]
+            ),
+            source="<test>",
+        )
+
+        assert [limit.direction for limit in table.limits("y_axis")] == [1.0, -1.0]
+
+    def test_direction_が_プラスマイナス1_以外なら拒否する(self) -> None:
+        """0 は「どちらも止めない」、それ以外は端の側を表せない。"""
+        with pytest.raises(ValueError, match="direction"):
+            load_position_table(self._axis(limits=[{"sensor": "sw", "direction": 0}]))
+        with pytest.raises(ValueError, match="direction"):
+            load_position_table(self._axis(limits=[{"sensor": "sw", "direction": 2}]))
+
+    def test_direction_の省略は拒否する(self) -> None:
+        """既定値で埋めると「どちら側の端か」を config が決めていない保護になる。"""
+        with pytest.raises(ValueError, match="direction"):
+            load_position_table(self._axis(limits=[{"sensor": "sw"}]))
+
+    def test_sensor_の省略は拒否する(self) -> None:
+        """センサを省くと、どのスイッチも見ない保護が config に書ける。"""
+        with pytest.raises(ValueError, match="sensor"):
+            load_position_table(self._axis(limits=[{"direction": -1}]))
+
+    def test_空のセンサ名は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="sensor"):
+            load_position_table(self._axis(limits=[{"sensor": "", "direction": -1}]))
+
+    def test_未知のキーは拒否する(self) -> None:
+        """綴り間違いが「黙って無視される保護」にならないこと。"""
+        with pytest.raises(ValueError, match="sensor_name"):
+            load_position_table(
+                self._axis(limits=[{"sensor_name": "sw", "sensor": "sw", "direction": -1}])
+            )
+
+    def test_空のリストは拒否する(self) -> None:
+        """`limits: []` は書き忘れと区別が付かない。"""
+        with pytest.raises(ValueError, match="limits"):
+            load_position_table(self._axis(limits=[]))
+
+    def test_リストでなければ拒否する(self) -> None:
+        with pytest.raises(ValueError, match="リスト"):
+            load_position_table(self._axis(limits={"sensor": "sw", "direction": -1}))
+
+    def test_要素が辞書でなければ拒否する(self) -> None:
+        with pytest.raises(ValueError, match="辞書"):
+            load_position_table(self._axis(limits=["sw"]))
+
+    def test_同じセンサの重複は拒否する(self) -> None:
+        """片方を直しても、もう片方が残る形にしかならない。"""
+        with pytest.raises(ValueError, match="sw"):
+            load_position_table(
+                self._axis(
+                    limits=[
+                        {"sensor": "sw", "direction": -1},
+                        {"sensor": "sw", "direction": 1},
+                    ]
+                )
+            )
+
+    def test_duty_軸への_limits_は拒否する(self) -> None:
+        """現在位置も到達も観測できない軸では「これ以上進めない」が成立しない。"""
+        config = {
+            "axes": {
+                "conveyor": {
+                    "scale": 1.0,
+                    "command_mode": "duty",
+                    "settle_s": 0.5,
+                    "limits": [{"sensor": "sw", "direction": -1}],
+                }
+            },
+            "positions": {"conveyor": {"stop": 0.0, "run": 0.6}},
+        }
+        with pytest.raises(ValueError, match="位置指令"):
+            load_position_table(config)
+
+    def test_on_off_軸への_limits_は拒否する(self) -> None:
+        config = {
+            "axes": {
+                "valve": {
+                    "scale": 1.0,
+                    "command_mode": "on_off",
+                    "settle_s": 0.2,
+                    "limits": [{"sensor": "sw", "direction": 1}],
+                }
+            },
+            "positions": {"valve": {"closed": 0.0, "open": 1.0}},
+        }
+        with pytest.raises(ValueError, match="位置指令"):
+            load_position_table(config)
+
+    def test_homing_を持たない軸にも書ける(self) -> None:
+        """零点確定と保護は別物 (sub_* は 4 本のスイッチを持つが homing を持たない)。"""
+        table = load_position_table(
+            self._axis(limits=[{"sensor": "sub_lift_b_limit_sensor", "direction": -1}]),
+            source="<test>",
+        )
+
+        assert table.axis("y_axis").homing is None
+        assert len(table.limits("y_axis")) == 1
+
+    def _homed(self, *, limit_direction: float, homing_direction: float = -1) -> dict:
+        """同じスイッチを homing と limits の両方が指す軸。"""
+        return self._axis(
+            limits=[{"sensor": "origin_sensor", "direction": limit_direction}],
+            homing={
+                "sensor": "origin_sensor",
+                "direction": homing_direction,
+                "search_distance": 30.0,
+                "step": 1.0,
+            },
+        )
+
+    def test_同じセンサを指す_homing_と_limits_は同じ向きなら通る(self) -> None:
+        table = load_position_table(self._homed(limit_direction=-1), source="<test>")
+
+        assert table.axis("y_axis").homing is not None
+        assert len(table.limits("y_axis")) == 1
+
+    def test_同じセンサで向きが食い違えば起動を拒否する(self) -> None:
+        """食い違うと「零点確定に向かう向きの指令が保護で止まる」形で必ず失敗する。
+        しかも零点確定の最中はその保護を外しているので、**症状が出るのは零点確定が
+        終わった後**であり、切り分けが難しい。
+        """
+        with pytest.raises(ValueError, match="direction"):
+            load_position_table(self._homed(limit_direction=1))
+
+    def test_homing_が見ないセンサの向きは自由(self) -> None:
+        """反対端のリミットは零点確定と無関係なので、逆向きで正しい。"""
+        table = load_position_table(
+            self._axis(
+                limits=[
+                    {"sensor": "origin_sensor", "direction": -1},
+                    {"sensor": "far_end_sensor", "direction": 1},
+                ],
+                homing={
+                    "sensor": "origin_sensor",
+                    "direction": -1,
+                    "search_distance": 30.0,
+                    "step": 1.0,
+                },
+            ),
+            source="<test>",
+        )
+
+        assert [limit.direction for limit in table.limits("y_axis")] == [-1.0, 1.0]
+
+    def test_複数センサの_homing_でも向きを突き合わせる(self) -> None:
+        """`homing.sensors` (左右に 1 本ずつ) でも見る対象は変わらない。"""
+        config = {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
+                    "limits": [
+                        {"sensor": "sensor_r", "direction": -1},
+                        {"sensor": "sensor_l", "direction": 1},
+                    ],
+                    "homing": {
+                        "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
+                        "direction": -1,
+                        "search_distance": 30.0,
+                        "step": 1.0,
+                        "align_distance": 5.0,
+                    },
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        }
+        with pytest.raises(ValueError, match="sensor_l"):
+            load_position_table(config)
+
+    def test_LimitSpec_を直接組んでも同じ規則が効く(self) -> None:
+        """yaml を経由しない組み立てにだけ緩い規則が効く状態を作らない。"""
+        with pytest.raises(ValueError, match="direction"):
+            LimitSpec(sensor="sw", direction=0.0)
+        with pytest.raises(ValueError, match="sensor"):
+            LimitSpec(sensor="", direction=1.0)
 
 
 class TestToCommandsEach:

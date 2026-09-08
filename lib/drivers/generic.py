@@ -166,10 +166,10 @@ class GenericDriver(MotorDriver):
         self._watchdog_flag: bool = False
         self._unconfigured_id_flag: bool = False
         self._sensor_flag: bool = False
-        # センサ入力のラッチ (consume_sensor_latch() が読んで消す)。
-        # FEEDBACK は 100Hz で届くが、読む側 (零点確定) は settle_s ごとにしか観測
-        # できないので、「今 ON か」だけでは観測と観測のあいだの接触が丸ごと消える
-        self._sensor_latched: bool = False
+        # センサ入力の接触回数 (sensor_contact_count が読む。読んでも減らない)。
+        # FEEDBACK は 100Hz で届くが、読む側は自分の周期でしか観測できないので、
+        # 「今 ON か」だけでは観測と観測のあいだの接触が丸ごと消える
+        self._sensor_contacts: int = 0
         self._never_commanded_flag: bool = False
         # 動作確認や reset の指令を出す制御モード。config から渡される値で上書き可能。
         self.control_type: ControlMode = control_type
@@ -289,16 +289,23 @@ class GenericDriver(MotorDriver):
 
     def update_state(self, msg: can.Message) -> MotorState:
         # decode_feedback は純粋関数のまま保ち、副作用 (フラグ保持) はここで処理する
-        # 到達は MotorState.reached に反映、それ以外はドライバ属性に保持
+        # 到達は MotorState.reached に反映、それ以外はドライバ属性に保持。
+        # **デコードを先に通す。** 解釈できないフレームで接触を数えると、読み手は
+        # その差分だけを見るので「触れていないのに触れた」と読む
+        state = super().update_state(msg)
         flags = msg.data[0]
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)
         sensor = bool(flags & _FLAG_SENSOR)
+        if sensor and not self._sensor_flag:
+            # **数えるのは立ち上がり (OFF→ON) だけ。** ON の間ずっと数えると、
+            # 触れ続けている 1 回の接触が 100Hz で増え続け、読み手は「離れずに
+            # 何度も触れた」と読む (回数そのものを見る読み手が意味を失う)
+            self._sensor_contacts += 1
         self._sensor_flag = sensor
-        self._sensor_latched = self._sensor_latched or sensor
         self._never_commanded_flag = bool(flags & _FLAG_NEVER_COMMANDED)
-        return super().update_state(msg)
+        return state
 
     def matches_feedback(self, msg: can.Message) -> bool:
         # 自分宛でないフレームの解釈失敗はここで握りつぶす。受信ループ
@@ -489,30 +496,31 @@ class GenericDriver(MotorDriver):
         基板は状態を報告するだけで、判断は PC 側が持つ (仕様書 §5.2)。
 
         **「今どうなっているか」を描く側 (診断ツリー) はこちらを見る。**
-        観測と観測のあいだの接触まで拾いたい零点確定は `consume_sensor_latch()`。
+        観測と観測のあいだの接触まで拾いたい側は `sensor_contact_count`。
         """
         return self._sensor_flag
 
-    def consume_sensor_latch(self) -> bool:
-        """前回この関数を呼んでから一度でもセンサ入力が入ったか。**読むと消える。**
+    @property
+    def sensor_contact_count(self) -> int:
+        """センサ入力の立ち上がり (OFF→ON) を数えた回数。**読んでも消えない。**
 
-        零点確定の探索はリミットスイッチの ON 区間を**跨いで**しまうことがある。
-        `homing.step` (rotate は 2.0deg) より ON 区間が狭いと、指令 1 回で区間を
-        通り抜け、`settle_s` (50ms) 後の観測時にはもう OFF —— 実機ではこれで探索が
-        止まらず、スイッチを越えて回り続けた。FEEDBACK は 100Hz で届いているので、
-        受信のたびにラッチしておけば区間の通過を 1 通も取りこぼさない。
+        **観測と観測のあいだの接触を落とさないためにある。** 零点確定の探索は
+        リミットスイッチの ON 区間を**跨いで**しまうことがある。`homing.step`
+        (rotate は 2.0deg) より ON 区間が狭いと、指令 1 回で区間を通り抜け、
+        `settle_s` (50ms) 後の観測時にはもう OFF —— 実機ではこれで探索が止まらず、
+        スイッチを越えて可動範囲の端まで回り続けた (その後、左右の同期ずれで自動
+        緊急停止)。FEEDBACK は 100Hz で届いているので、受信のたびに数えておけば
+        区間の通過を 1 通も取りこぼさない。
 
-        **読み手が複数いると壊れる。** 先に読んだ側が相手のぶんまで消すので、
-        **呼んでよいのは `HomingRunner` だけ**とする。今の状態が要るだけの用途
-        (診断ツリー・ヘルス) は `sensor_active` を見ること。
+        **カウンタなのは読み手が複数いても壊れないため。** かつては「読むと消える」
+        ラッチ (`consume_sensor_latch`) だったので、先に読んだ側が相手のぶんまで
+        消してしまい、呼んでよいのは `HomingRunner` 1 つに限られていた。読み手が
+        増えた瞬間に上の壊れ方がそのまま再発するので、**誰が何回読んでも減らない
+        単調増加の回数**にしてある。読み手は自分で基準値を控え、その差だけを見る。
 
-        現在値も OR で見るのは、ラッチを消した直後に FEEDBACK が途絶えても
-        「触れているのに触れていないと答える」側へ倒れないようにするため
-        (この関数は現在値より弱い答えを返さない)。
+        今の状態が要るだけの用途 (診断ツリー・ヘルス) は `sensor_active` を見ること。
         """
-        latched = self._sensor_latched or self._sensor_flag
-        self._sensor_latched = False
-        return latched
+        return self._sensor_contacts
 
     def is_fault(self) -> bool:
         # デバイス ID 未設定は基板の設定ミスで駆動自体が拒否される状態なので FAULT に

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
-from lib.sequence.motors import AxisHandle
+from lib.sequence.motors import build_axis_handle
 from lib.sequence.positions import PositionLookupError
 
 if TYPE_CHECKING:
@@ -98,32 +98,42 @@ class ManualController:
         既定義の点しか送らないので、``manual:`` を持たない軸 (離散状態アクチュエータ・
         duty 軸) でもこれだけは常に許してよい。到達は待たない — 手動は応答性が要る
         操作で、待つと連続した操作が詰まる。
+
+        位置名で指令してもリミット保護のクランプは掛かる。記録する起点と返す値は
+        **実際に送った値**であって、位置定数に書いてある値ではない。
         """
         spec = self._axis(axis)
-        value = self._positions.raw(axis, name, court=self._court)
-        await self._send(spec, spec.to_commands(value))
-        self._targets[axis] = value
-        logger.info("manual move: axis=%s position=%s value=%s", axis, name, value)
-        return value
+        sent = await self._send(spec, self._positions.raw(axis, name, court=self._court))
+        self._targets[axis] = sent
+        logger.info("manual move: axis=%s position=%s value=%s", axis, name, sent)
+        return sent
 
     async def set_value(self, axis: str, value: float) -> float:
         """人間の単位の絶対値で指令する。``manual:`` を持つ軸のみ。
 
         範囲外は拒否ではなくクランプする (拒否だと端で操作そのものが効かなくなる)。
         実際に送った値を返すので、呼び出し側は丸められたことを操縦者へ返せる。
+
+        丸める境界は 2 つあり、**どちらも拒否ではなくクランプで揃えてある** ——
+        config が宣言した可動範囲 (``ManualSpec.clamp``) と、リミットスイッチに
+        触れている向き (``AxisHandle`` の入口で掛かる)。後者は機構の今の状態で
+        決まるので、ここでは判定せず送った結果を受け取る。
         """
         spec = self._axis(axis)
         manual = self._require_manual(spec)
-        clamped = manual.clamp(float(value))
-        await self._send(spec, spec.to_commands(clamped))
-        self._targets[axis] = clamped
-        return clamped
+        sent = await self._send(spec, manual.clamp(float(value)))
+        self._targets[axis] = sent
+        return sent
 
     async def jog(self, axis: str, delta: float) -> float:
         """直前の手動目標から相対移動する。``manual:`` を持つ軸のみ。
 
         起点にフィードバックを使わないのは、追従中の連打が吸われるため。
         起点が無い (初回・緊急停止後) ときだけ現在値から取り直す。
+
+        積むのは ``set_value`` が返す**実際に送った値**なので、リミットスイッチで
+        頭打ちになった向きへ連打しても起点は端の外へ伸びない。伸びると、逆方向へ
+        退避しようとしても連打したぶんだけ戻らない軸ができる。
         """
         spec = self._axis(axis)
         self._require_manual(spec)
@@ -238,15 +248,24 @@ class ManualController:
             )
         return spec.manual
 
-    async def _send(self, spec: AxisSpec, commands: dict[str, float]) -> None:
-        """1 軸へ指令する。**必ず AxisHandle を通す。**
+    async def _send(self, spec: AxisSpec, value: float) -> float:
+        """1 軸へ指令し、**実際に送った軸位置**を返す。**必ず AxisHandle を通す。**
 
         左右直結ペアを同一フレームで送る責務は ``AxisHandle.set_target_value`` が
         持っている。ここでモータ 1 台ずつ ``MotorHandle.set_target`` を呼ぶと、
         送信の時間差ぶんだけ機構がねじれる。
+
+        **返ってきた指令をそのまま信じる。** リミット保護が端で頭打ちにした場合、
+        送った値は要求した値と違う。要求値をジョグ起点や画面へ返すと、起点は押す
+        たびに禁止側へ伸び、**退避しようとしても「押した回数だけ戻らない」**。
+        逆換算するのはクランプが掛かったときだけで、素通りした指令は要求値を
+        そのまま返す (往復で丸め誤差を足さない)。
         """
-        handle = AxisHandle(spec, [getattr(self._motors, name) for name in spec.motor_names])
-        await handle.set_target_value(commands)
+        commands = spec.to_commands(value)
+        sent = await build_axis_handle(spec, self._motors).set_target_value(commands)
+        if sent == commands:
+            return value
+        return spec.to_value(sent)
 
     def _feedback_positions(self, spec: AxisSpec) -> dict[str, float]:
         """軸のモータ名 → 指令単位のフィードバック位置。未登録のモータは載せない。

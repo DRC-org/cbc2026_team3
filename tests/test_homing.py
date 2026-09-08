@@ -17,11 +17,14 @@ from collections.abc import Callable
 
 import pytest
 
+from lib.control.limit_guard import LimitGuard
+from lib.drivers.generic import GenericDriver
 from lib.sequence.homing import _FOLLOW_ATTEMPTS, _STALL_LIMIT, HomingError, HomingRunner
-from lib.sequence.motors import AxisHandle, MotorHandle
+from lib.sequence.motors import AxisHandle, LimitClamp, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
+from tests.feedback_frames import feed_generic
 
 #: `_handle` が受け付ける指令の上限。実機のどの経路でもこの回数は踏まない
 #: (最長でも探索距離 / step = 30 歩程度) ので、超えたら歯止めが 1 つも効いていない。
@@ -131,7 +134,7 @@ def _paired_table(**homing_overrides: object):
 
 
 class _SensorModel:
-    """1 本のスイッチ。**現在値とラッチを別々に模す。**
+    """1 本のスイッチ。**現在値と接触回数を別々に模す。**
 
     模し方は 4 通りある:
 
@@ -145,12 +148,14 @@ class _SensorModel:
       ``rotate`` (step 2.0deg を約 18ms で通過) がこれで、現在値だけを見る探索は
       止まらない
     - ``chatter`` — 接点がばたついている状態。現在値は ON のまま (まだ ON 区間の
-      中にいる) だが、ラッチには ON を記録しなかった窓が混ざる
+      中にいる) だが、接触回数のほうは ON を記録しなかった窓が混ざって増える
 
-    **現在値 (``sensor_active``) とラッチ (``sensor_latched``) を作り分けている**のは、
-    探索と離脱が別のものを見るという設計を固定するため。位置モデルではラッチを
-    「**前回読んだ位置から今の位置までの経路**が ON 区間と交わったか」として作る ——
-    センサの FEEDBACK は 100Hz で届くので、そのあいだに通り抜けた区間は落ちない。
+    **現在値 (``sensor_active``) と接触回数 (``sensor_contact_count``) を作り分けて
+    いる**のは、探索と離脱が別のものを見るという設計を固定するため。位置モデルでは
+    回数を「**前回見た位置から今の位置までの経路**が ON 区間と交わったら 1 増える」
+    として作る —— センサの FEEDBACK は 100Hz で届くので、そのあいだに通り抜けた
+    区間は落ちない。**回数は読んでも減らない** (実機のドライバと同じ) ので、
+    読み手が何人いてもこのモデルは壊れない。
 
     ``motor`` を書いたスイッチは**そのモータ単独の実測位置**を見る (左右に 1 本ずつ
     付く軸のモデル)。書かなければ従来どおり軸位置 (平均) を見る。左右で別々の位置に
@@ -165,7 +170,7 @@ class _SensorModel:
         active_at_or_below: float | None = None,
         active_band: tuple[float, float] | None = None,
         chatter: bool = False,
-        prelatched: bool = False,
+        contacted_before: bool = False,
     ) -> None:
         self.motor = motor
         self._active_after = active_after
@@ -173,21 +178,24 @@ class _SensorModel:
         self._active_band = active_band
         self._chatter = chatter
         self._observations = 0
-        #: 前回ラッチを読んでから通った実測位置の範囲 (min, max)。
+        #: 前回接触回数を見てから通った実測位置の範囲 (min, max)。
         #: **センサを読むたびに広げる** —— FEEDBACK は 100Hz で届くので、
-        #: 離脱段のあいだに通った位置もラッチには載る (探索前に捨てないと残る)
+        #: 離脱段のあいだに通った位置もここに載る (探索前に基準を取り直さないと残る)
         self._path: tuple[float, float] | None = None
-        #: チャタリングのラッチ応答 (False から始める。ラッチで離脱を判定する実装は
+        #: 前回見た時点で ON 区間の中にいたか。**立ち上がり (OFF→ON) だけを
+        #: 数える**ために要る (触れ続けている間ずっと増える回数は意味を持たない)
+        self._on = False
+        #: チャタリングの応答 (False から始める。回数の増減で離脱を判定する実装は
         #: この 1 回目で「離脱完了」と読む)
-        self._chatter_latch = False
-        #: 零点確定を始める前から溜まっているラッチ (手動操縦でスイッチを跨いだ、
-        #: 前回の零点確定で触れた、など)。1 回読めば消える
-        self._prelatched = prelatched
+        self._chatter_on = False
+        #: 零点確定を始める前に既に数えた接触 (手動操縦でスイッチを跨いだ、
+        #: 前回の零点確定で触れた、など)。**読んでも消えない**
+        self._count = 1 if contacted_before else 0
         #: 見ている位置を返す口 (`_Recorder` が軸位置かモータ単独の位置を差す)
         self.position: Callable[[], float] = lambda: 0.0
 
     def _extend_path(self) -> tuple[float, float]:
-        """今の実測位置をラッチの窓へ加える (100Hz の FEEDBACK に相当)。"""
+        """今の実測位置を経路の窓へ加える (100Hz の FEEDBACK に相当)。"""
         current = self.position()
         low, high = self._path if self._path is not None else (current, current)
         self._path = (min(low, current), max(high, current))
@@ -199,39 +207,47 @@ class _SensorModel:
         self._extend_path()
         if self._chatter:
             return True  # まだ ON 区間の中にいる
-        if self._active_band is not None:
-            low, high = self._active_band
-            return low <= self.position() <= high
-        if self._active_at_or_below is not None:
-            return self.position() <= self._active_at_or_below
-        if self._active_after is None:
-            return False
-        return self._observations > self._active_after
+        return self._on_now()
 
-    def latched(self) -> bool:
-        """前回読んでから一度でも接触したか。**読むと消える。** 探索だけが見る。
+    def contact_count(self) -> int:
+        """これまでに数えた接触の回数。**読んでも減らない。** 探索だけが見る。
 
-        位置モデルでは前回読んでから通った**経路**が ON 区間と交わったかを答える
+        位置モデルでは前回見てから通った**経路**が ON 区間と交わったかで数える
         (100Hz の FEEDBACK は区間の通過を取りこぼさない)。経路は離脱段のあいだも
-        伸びるので、**探索の前に捨てないと離脱中の接触が残る。**
+        伸びるので、**探索の前に基準を取り直さないと離脱中の接触が混ざる。**
         """
         self._observations += 1
         low, high = self._extend_path()
-        # 読んだら消える。次の窓は**この位置から**始まる (センサは動き続ける機構を
-        # 100Hz で見ているので、読み取りと読み取りのあいだに経路は途切れない)
-        current = self.position()
-        self._path = (current, current)
-        if self._prelatched:
-            self._prelatched = False
-            return True
+        # 次の窓は**この位置から**始まる (センサは動き続ける機構を 100Hz で
+        # 見ているので、読み取りと読み取りのあいだに経路は途切れない)
+        self._path = (self.position(), self.position())
+        crossed = self._crossed(low, high)
+        if crossed and not self._on:
+            self._count += 1
+        # 触れたままなら次は数えない (立ち上がりだけを数える)
+        self._on = crossed and (True if self._chatter else self._on_now())
+        return self._count
+
+    def _crossed(self, low: float, high: float) -> bool:
+        """前回見てから今までの**経路**が ON 区間と交わったか。"""
         if self._chatter:
-            self._chatter_latch = not self._chatter_latch
-            return not self._chatter_latch
+            # 接点がばたついているので、ON を記録した窓としなかった窓が交互に並ぶ
+            self._chatter_on = not self._chatter_on
+            return self._chatter_on
         if self._active_band is not None:
             band_low, band_high = self._active_band
             return low <= band_high and high >= band_low
         if self._active_at_or_below is not None:
             return low <= self._active_at_or_below
+        return self._on_now()
+
+    def _on_now(self) -> bool:
+        """**今の位置**が ON 区間の中か。"""
+        if self._active_band is not None:
+            low, high = self._active_band
+            return low <= self.position() <= high
+        if self._active_at_or_below is not None:
+            return self.position() <= self._active_at_or_below
         if self._active_after is None:
             return False
         return self._observations > self._active_after
@@ -242,8 +258,8 @@ class _Recorder:
 
     センサは既定では**名前を無視する 1 本**として振る舞う (単数形の軸のモデル)。
     ``sensors`` を渡すと**センサ名ごとに独立したモデル**になり、左右に 1 本ずつ
-    付く軸を模せる。ラッチが「読むと消える」ことも名前ごとに独立するので、
-    「A のラッチを読んだ瞬間に B の接触が捨てられる」実装がここで露見する。
+    付く軸を模せる。接触回数も名前ごとに独立するので、どちらが先に押されたかを
+    整列段まで持ち越せていない実装はここで露見する。
     """
 
     def __init__(
@@ -254,7 +270,7 @@ class _Recorder:
         active_at_or_below: float | None = None,
         active_band: tuple[float, float] | None = None,
         chatter: bool = False,
-        prelatched: bool = False,
+        contacted_before: bool = False,
         stale: bool = False,
         stale_sensors: tuple[str, ...] = (),
         motor_stale: bool = False,
@@ -276,7 +292,7 @@ class _Recorder:
             active_at_or_below=active_at_or_below,
             active_band=active_band,
             chatter=chatter,
-            prelatched=prelatched,
+            contacted_before=contacted_before,
         )
         self._sensors = sensors
         for model in (self._default, *(sensors or {}).values()):
@@ -316,8 +332,8 @@ class _Recorder:
     def sensor_active(self, name: str) -> bool:
         return self._sensor(name).active()
 
-    def sensor_latched(self, name: str) -> bool:
-        return self._sensor(name).latched()
+    def sensor_contact_count(self, name: str) -> int:
+        return self._sensor(name).contact_count()
 
     def sensor_is_stale(self, name: str) -> bool:
         return self._stale or name in self._stale_sensors
@@ -345,8 +361,12 @@ def _handle(
     *,
     start_value: float = 0.0,
     follows: bool | Callable[[], bool] = True,
+    limit_guard: LimitClamp | None = None,
 ) -> AxisHandle:
     """実測位置を持つ軸ハンドル。
+
+    ``limit_guard`` を渡すと**指令の入口のクランプ (層②) まで通る**。零点確定が
+    保護を外し損ねていれば、探索の指令そのものが端で頭打ちになる。
 
     ``follows`` が True の機構は指令された位置へそのまま動く (追従する機構)。
     False は引っかかって 1mm も動かない機構で、**指令の積算ではなく実測で
@@ -372,7 +392,7 @@ def _handle(
         drivers[motor.name] = driver
         handles.append(MotorHandle(motor.name, driver, mgr))
 
-    handle = AxisHandle(spec, handles)
+    handle = AxisHandle(spec, handles, limit_guard=limit_guard)
     original = handle.set_target_value
 
     async def _record(commands):
@@ -437,7 +457,7 @@ def _axis_commands(recorder: _Recorder, motor: str) -> list[float]:
 def _runner(recorder: _Recorder) -> HomingRunner:
     return HomingRunner(
         sensor_active=recorder.sensor_active,
-        sensor_latched=recorder.sensor_latched,
+        sensor_contact_count=recorder.sensor_contact_count,
         sensor_is_stale=recorder.sensor_is_stale,
         motor_is_stale=recorder.motor_is_stale,
         origin_capturable=recorder.origin_capturable,
@@ -452,7 +472,9 @@ class TestStartsFromTheMeasuredPosition:
     async def test_一歩目は実測位置から一歩ぶんだけ動かす(self) -> None:
         table = _table(direction=-1, step=0.5, search_distance=30.0)
         spec = table.axis("y_axis")
-        rec = _Recorder(active_after=1)
+        # センサを読むのは「開始前の確認」「探索前の基準取り直し」「1 歩ごと」の順。
+        # 3 回目 = 1 歩目で ON になる (基準を取り直した後に立ち上がる必要がある)
+        rec = _Recorder(active_after=2)
 
         # 手動ジョグで +15mm へ動かした後に動作確認を起動した状態
         await _runner(rec).home(spec, _handle(spec, rec, start_value=15.0))
@@ -645,7 +667,7 @@ class TestReachesOrigin:
     async def test_当たった位置で原点を確定する(self) -> None:
         table = _table(search_distance=10.0, step=1.0)
         spec = table.axis("y_axis")
-        # センサを読むのは「開始前の確認」「探索前のラッチ捨て」「1 歩ごと」の順。
+        # センサを読むのは「開始前の確認」「探索前の基準取り直し」「1 歩ごと」の順。
         # 4 回目 = 2 歩目で ON になる
         rec = _Recorder(active_after=3)
 
@@ -668,7 +690,7 @@ class TestReachesOrigin:
     async def test_探索方向を符号で表す(self) -> None:
         table = _table(direction=-1, step=1.0)
         spec = table.axis("y_axis")
-        rec = _Recorder(active_after=1)
+        rec = _Recorder(active_after=2)  # 3 回目 = 1 歩目で ON
 
         await _runner(rec).home(spec, _handle(spec, rec))
 
@@ -680,7 +702,7 @@ class TestReachesOrigin:
         """別々の時刻に動かすとその場で機構が壊れる。"""
         table = _table()
         spec = table.axis("y_axis")
-        rec = _Recorder(active_after=1)
+        rec = _Recorder(active_after=2)  # 3 回目 = 1 歩目で ON
 
         await _runner(rec).home(spec, _handle(spec, rec))
 
@@ -715,6 +737,24 @@ class TestDoesNotMissTheContact:
         assert travelled == pytest.approx(2.0)
         assert rec.captured_at == pytest.approx([-2.0])
 
+    async def test_一歩目で跨いだ接触も取りこぼさない(self) -> None:
+        """**基準値は 1 歩目を出す前に取る。** 1 歩目の観測で取ると窓が 1 歩ぶん遅れる。
+
+        探索の 1 歩目でいきなり区間を跨ぐ機構 (スイッチのすぐ手前から始めた場合)
+        では、その接触は 1 歩目の観測でしか現れない。基準値をその観測時点で取ると
+        自分の接触を基準へ吸い込んでしまい、以後は二度と区間を通らないので
+        **探索距離いっぱいまで押し込んでから「到達しませんでした」で降りる。**
+        """
+        table = _table(direction=-1, step=1.0, search_distance=10.0)
+        spec = table.axis("y_axis")
+        # ON 区間 -0.55〜-0.45mm は 1 歩目 (0.0 → -1.0) の途中にある
+        rec = _Recorder(active_band=(-0.55, -0.45))
+
+        travelled = await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == ["y_axis"]
+        assert travelled == pytest.approx(1.0)
+
     async def test_検出したらその場へ止め直す(self) -> None:
         """最後に送った「実測 + step」を残すと、原点確定まで越えた先へ向かい続ける。
 
@@ -738,23 +778,87 @@ class TestDoesNotMissTheContact:
         assert axis_commands[-1] == pytest.approx(-1.8)
         assert axis_commands[-2] == pytest.approx(-2.2)
 
-    async def test_探索の前に古いラッチを捨てる(self) -> None:
-        """**ラッチは黙って溜まる。** 探索を始める前に 1 度捨てないと窓が広すぎる。
+    async def test_探索を始める前の接触を到達と読まない(self) -> None:
+        """**接触回数は消えずに残る。** 見るのは基準値からの増加でなければならない。
 
         手動操縦でスイッチを跨いだ後や、前回の零点確定で触れた後に動作確認を
-        起動すると、探索を始める時点で既に ON が溜まっている。捨てないと 1 歩目の
-        観測でいきなり到達と読み、**スイッチではなく探索開始位置が原点になる**。
-        症状は「原点合わせをしたのに位置がずれる」だけ。
+        起動すると、探索を始める時点で回数が既に 0 ではない。回数そのもの
+        (0 かどうか) で判定すると 1 歩目の観測でいきなり到達と読み、
+        **スイッチではなく探索開始位置が原点になる**。症状は「原点合わせを
+        したのに位置がずれる」だけ。
         """
         table = _table(direction=-1, step=1.0, search_distance=10.0)
         spec = table.axis("y_axis")
-        # 今は触れていない (区間は -5.0 以下) が、始める前の接触がラッチに残っている
-        rec = _Recorder(active_at_or_below=-5.0, prelatched=True)
+        # 今は触れていない (区間は -5.0 以下) が、始める前の接触が回数に残っている
+        rec = _Recorder(active_at_or_below=-5.0, contacted_before=True)
 
         await _runner(rec).home(spec, _handle(spec, rec))
 
         # 1 歩目 (-1.0) ではなく、実際にスイッチへ当たる -5.0 で確定する
         assert rec.captured_at == pytest.approx([-5.0])
+
+
+class TestSurvivesASecondReader:
+    """**同じセンサを読む相手がいても取りこぼさない。**
+
+    リミットスイッチ保護は零点確定と同じ接触情報を読む。「読むと消える」ラッチの
+    ままだと**先に読んだ側が相手のぶんまで消す**ので、探索は区間の通過を落とし、
+    実機で起きた壊れ方 (スイッチに当たっているのに止まらず可動範囲の端まで
+    回り続ける) がそのまま再発する。
+
+    **ここだけは模型ではなく実ドライバを通す。** 「読んでも減らない」という性質は
+    `GenericDriver` が持つものなので、模型のセンサで確かめても実装が消えたことに
+    ならない。フレームは実機と同じ組み立て (`tests/feedback_frames.py`) で流し込む。
+    """
+
+    #: ON 区間 (幅 0.1mm)。1 歩 1.0mm なので観測位置はどれも区間の外にある
+    _BAND = (-1.55, -1.45)
+
+    async def test_保護層が毎周期読んでも探索は接触を検出する(self) -> None:
+        table = _table(direction=-1, step=1.0, search_distance=10.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder()
+        sensor = GenericDriver("origin_sensor", 0x43)
+        handle = _handle(spec, rec)
+        commanded = handle.set_target_value
+        previous = 0.0
+
+        async def _travel(commands: dict[str, float]) -> None:
+            """1 歩ぶん動かし、通った経路ぶんの FEEDBACK を実機と同じ形で流す。"""
+            nonlocal previous
+            await commanded(commands)
+            current = rec.axis_position()
+            low, high = min(previous, current), max(previous, current)
+            if low <= self._BAND[1] and high >= self._BAND[0]:
+                feed_generic(sensor, sensor=True)  # 区間を通った 1 通 (100Hz のうち)
+            feed_generic(sensor, sensor=False)  # 観測の時点ではもう抜けている
+            previous = current
+
+        handle.set_target_value = _travel  # type: ignore[method-assign]
+
+        # 2 人目の読み手 (この後の段で入るリミットスイッチ保護)。同じセンサを毎周期読む
+        guard_reads: list[int] = []
+
+        async def _sleep(seconds: float) -> None:
+            guard_reads.append(sensor.sensor_contact_count)
+            await rec.sleep(seconds)
+
+        runner = HomingRunner(
+            sensor_active=lambda _name: sensor.sensor_active,
+            sensor_contact_count=lambda _name: sensor.sensor_contact_count,
+            sensor_is_stale=rec.sensor_is_stale,
+            motor_is_stale=rec.motor_is_stale,
+            origin_capturable=rec.origin_capturable,
+            capture_origin=rec.capture_origin,
+            sleep=_sleep,
+        )
+        travelled = await runner.home(spec, handle)
+
+        # 保護層は探索より先に接触を読んでいる (読んでいなければこのテストは無意味)
+        assert max(guard_reads) >= 1
+        # それでも探索は区間を跨いだ 2 歩目で止まる
+        assert rec.origins == ["y_axis"]
+        assert travelled == pytest.approx(2.0)
 
 
 class TestReleasesBeforeSeeking:
@@ -1061,6 +1165,183 @@ class TestAlignsBothSwitches:
         assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0])
         assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0, -1.0])
         assert rec.origins == ["y_axis"]
+
+
+class TestSuspendsTheLimitGuard:
+    """**`limits:` を書いた軸でも零点確定は成功する。**
+
+    リミットスイッチ保護は「触れたらその向きへの指令を止める」常駐保護なので、
+    効いたまま探索するとスイッチに触れた瞬間に自分の指令が実測位置へ引き戻され、
+    原点へ到達できない。零点確定は走っているあいだ**そのセンサの保護だけ**を外す。
+
+    **模型ではなく本物の `LimitGuard` を通す。** 「外している」ことは 2 つの
+    実装の噛み合わせでしか成立しないので、片方を模型にすると噛み合っていなくても
+    緑になる。保護は探索の待ち (`settle_s` ごと) と同じ頻度で判定させる。
+    """
+
+    #: この位置以下でスイッチが ON。1 歩 1.0mm なので 2 歩目で踏む
+    _THRESHOLD = -1.5
+
+    def _guard(self, spec: AxisSpec, rec: _Recorder, handle: AxisHandle) -> LimitGuard:
+        return LimitGuard(
+            [spec],
+            sensor_active=rec.sensor_active,
+            sensor_contact_count=rec.sensor_contact_count,
+            sensor_is_stale=rec.sensor_is_stale,
+            axis_handle=lambda name: handle if name == spec.name else None,
+            interval_s=0.001,
+        )
+
+    def _table(self):
+        return load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "tolerance": 0.1,
+                        "sync_tolerance": 100.0,
+                        "homing": {
+                            "sensor": "origin_sensor",
+                            "direction": -1,
+                            "search_distance": 10.0,
+                            "step": 1.0,
+                            "settle_s": 0.0,
+                        },
+                        # **零点確定と同じスイッチ**を指す保護。向きも同じ
+                        # (食い違いは load_position_table が起動時に拒否する)
+                        "limits": [{"sensor": "origin_sensor", "direction": -1}],
+                        "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                    }
+                },
+                "positions": {"y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    async def test_保護を外さなければ発動する(self) -> None:
+        """下のテストが「保護が眠っているから緑」ではないことの土台。"""
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(active_at_or_below=self._THRESHOLD)
+        handle = _handle(spec, rec)
+        guard = self._guard(spec, rec, handle)
+
+        await handle.set_target_value(spec.to_commands(-5.0))
+        rec.commands.clear()
+        await guard.step()
+
+        assert dict(guard.latched) == {"y_axis": ("origin_sensor",)}
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-5.0])
+        # 介入カウンタも動く。下の「零点確定では 0 件」が「カウンタが最初から
+        # 動かないから緑」ではないことの土台
+        assert guard.intervention("y_axis").count == 1
+
+    async def test_保護を外した零点確定は成功する(self) -> None:
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(active_at_or_below=self._THRESHOLD)
+        handle = _handle(spec, rec)
+        guard = self._guard(spec, rec, handle)
+
+        latched: list[dict] = []
+        guard_writes: list[int] = []
+        base_sleep = rec.sleep
+
+        async def _sleep(seconds: float) -> None:
+            # 探索の 1 歩ごとに保護も判定させる (実機では 50Hz で回っている)
+            before = len(rec.commands)
+            await guard.step()
+            guard_writes.append(len(rec.commands) - before)
+            latched.append(dict(guard.latched))
+            await base_sleep(seconds)
+
+        rec.sleep = _sleep  # type: ignore[method-assign]
+
+        runner = HomingRunner(
+            sensor_active=rec.sensor_active,
+            sensor_contact_count=rec.sensor_contact_count,
+            sensor_is_stale=rec.sensor_is_stale,
+            motor_is_stale=rec.motor_is_stale,
+            origin_capturable=rec.origin_capturable,
+            capture_origin=rec.capture_origin,
+            suspend_sensors=guard.suspend_sensors,
+            sleep=_sleep,
+        )
+        await runner.home(spec, handle)
+
+        assert rec.origins == ["y_axis"]
+        # **走っているあいだ 1 度もラッチしていない** (ラッチすれば目標が
+        # 引き戻され、探索は同じ場所を踏み続ける)
+        assert latched == [{} for _ in latched]
+        assert sum(guard_writes) == 0
+
+    async def test_零点確定では保護が1度も介入しない(self) -> None:
+        """**両方の層を生かしたまま**走らせても、介入カウンタは 1 も増えない。
+
+        カウンタは「保護が要求を曲げた」ことを数える口で、`move_to` はこれを
+        指令の前後で比べてステップの成否を決める。零点確定で増える実装は、
+        探索の指令が実際に曲げられている (原点がずれる) ということなので、
+        「0 件であること」はそのまま「外し忘れが無いこと」の証明になる。
+        """
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(active_at_or_below=self._THRESHOLD)
+        # 保護は自分を止めるために軸ハンドルを要り、軸ハンドルは保護を要るので
+        # 生成順が循環する。本番 (`main._make_axis_handle_lookup`) と同じく遅延で解く
+        holder: dict[str, AxisHandle] = {}
+        guard = LimitGuard(
+            [spec],
+            sensor_active=rec.sensor_active,
+            sensor_contact_count=rec.sensor_contact_count,
+            sensor_is_stale=rec.sensor_is_stale,
+            axis_handle=holder.get,
+            interval_s=0.001,
+        )
+        handle = _handle(spec, rec, limit_guard=guard)
+        holder[spec.name] = handle
+        base_sleep = rec.sleep
+
+        async def _sleep(seconds: float) -> None:
+            await guard.step()
+            await base_sleep(seconds)
+
+        rec.sleep = _sleep  # type: ignore[method-assign]
+        runner = HomingRunner(
+            sensor_active=rec.sensor_active,
+            sensor_contact_count=rec.sensor_contact_count,
+            sensor_is_stale=rec.sensor_is_stale,
+            motor_is_stale=rec.motor_is_stale,
+            origin_capturable=rec.origin_capturable,
+            capture_origin=rec.capture_origin,
+            suspend_sensors=guard.suspend_sensors,
+            sleep=_sleep,
+        )
+
+        await runner.home(spec, handle)
+
+        assert rec.origins == ["y_axis"]
+        assert guard.intervention("y_axis").count == 0
+
+    async def test_終わったら保護が戻る(self) -> None:
+        """戻し忘れると、その後の試合中ずっとこの軸の保護が死んだまま残る。"""
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(active_at_or_below=self._THRESHOLD)
+        handle = _handle(spec, rec)
+        guard = self._guard(spec, rec, handle)
+
+        runner = HomingRunner(
+            sensor_active=rec.sensor_active,
+            sensor_contact_count=rec.sensor_contact_count,
+            sensor_is_stale=rec.sensor_is_stale,
+            motor_is_stale=rec.motor_is_stale,
+            origin_capturable=rec.origin_capturable,
+            capture_origin=rec.capture_origin,
+            suspend_sensors=guard.suspend_sensors,
+            sleep=rec.sleep,
+        )
+        await runner.home(spec, handle)
+
+        assert guard.is_suspended("origin_sensor") is False
+        await guard.step()
+        assert guard.blocked_directions("y_axis") == frozenset({-1.0})
 
 
 class TestSpecValidation:

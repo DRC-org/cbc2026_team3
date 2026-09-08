@@ -14,6 +14,7 @@ from lib.match_state import Court
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
+    "LimitSpec",
     "ManualSpec",
     "MotionSpec",
     "MotorSpec",
@@ -196,6 +197,37 @@ class HomingSpec:
 
 
 @dataclass(frozen=True)
+class LimitSpec:
+    """リミットスイッチによる機構破壊防止。**軸の機構的性質**なのでここに置く。
+
+    「そのスイッチに触れたら、そのスイッチのある側へ進む指令を止める」ことだけを
+    宣言する。**方向を持つのが要点で、逆方向は必ず通す** —— 無条件に止めると、
+    端に触れた軸を戻す操作ごと塞がれ、二度と動かせない軸ができる。
+
+    零点確定 (`HomingSpec`) と同じスイッチを見るが役割は別物である。あちらは
+    「当たるまで動かして原点を決める」手順で、こちらは「当たったらそれ以上進めない」
+    常駐保護。だから ``homing`` を持たない軸 (`sub_y_axis` / `sub_lift`) にも書ける。
+
+    ``direction`` の意味は ``HomingSpec.direction`` と揃える (人間の単位での増減方向)。
+    両者で符号の意味が食い違うと、同じスイッチを指す 2 つの宣言が逆向きを表すことに
+    なり、config を読んでもどちらが正なのか決められない。
+    """
+
+    #: 監視するセンサ名 (config の `sensors:` に登録された名前)
+    sensor: str
+    #: **この向きへ進む指令を止める端**。+1 か -1 のみ
+    direction: float
+
+    def __post_init__(self) -> None:
+        if not self.sensor:
+            raise ValueError("limits.sensor はセンサ名の文字列が必要です")
+        if self.direction not in (1.0, -1.0):
+            # 0 は「どちらも止めない」= 書いたのに効かない保護、±1 以外の値は
+            # 「どちら側の端か」を表せない
+            raise ValueError(f"limits.direction は +1 か -1: {self.direction!r}")
+
+
+@dataclass(frozen=True)
 class MotionSpec:
     """台形速度プロファイルの制限。**軸の機構的性質**なのでここに置く。
 
@@ -284,6 +316,8 @@ class AxisSpec:
     homing: HomingSpec | None = None
     # 台形速度プロファイルの制限。None ならこの軸は従来どおり最終目標をステップで入れる
     motion: MotionSpec | None = None
+    # リミットスイッチによる機構破壊防止。空ならこの軸に保護は無い
+    limits: tuple[LimitSpec, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.motors:
@@ -302,8 +336,17 @@ class AxisSpec:
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
+        # duty / on_off は現在位置も到達も観測できないので、「これ以上進めない」という
+        # 判定そのものが成立しない (止める向きを決める材料が 1 つも無い)
+        if self.limits and self.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"axes.{self.name}: limits は位置指令の軸にのみ書けます "
+                f"(command_mode={self.command_mode.value})"
+            )
         self._check_homing_sensor_map()
         self._check_align_distance()
+        self._check_limit_sensors()
+        self._check_limit_homing_directions()
 
     def _check_homing_sensor_map(self) -> None:
         """`homing.sensors` のキーが軸のモータと過不足なく対応しているか見る。
@@ -352,6 +395,52 @@ class AxisSpec:
             f"sync_tolerance ({self.sync_tolerance}) より小さい必要があります "
             "(整列段のずれが偏差許容差に届くと零点確定の最中に緊急停止します)"
         )
+
+    def _check_limit_sensors(self) -> None:
+        """同じセンサを同じ軸へ 2 度書かせない。
+
+        2 本の宣言が同じスイッチを指すと、向きが同じなら片方は何もせず、向きが
+        違えばその軸は両方向とも塞がれる。どちらにしても「片方を直したのに
+        もう片方が残る」形にしかならず、config を読んでも効いているほうが決まらない。
+        """
+        seen: set[str] = set()
+        duplicated: set[str] = set()
+        for limit in self.limits:
+            if limit.sensor in seen:
+                duplicated.add(limit.sensor)
+            seen.add(limit.sensor)
+        if duplicated:
+            raise ValueError(
+                f"axes.{self.name}.limits に同じセンサが複数あります: "
+                f"{', '.join(sorted(duplicated))}"
+            )
+
+    def _check_limit_homing_directions(self) -> None:
+        """同じスイッチを指す ``homing`` と ``limits`` が同じ向きを表しているか見る。
+
+        食い違うと「零点確定に向かう向きの指令が保護で止まる」形で必ず失敗する。
+        しかも零点確定の最中はその保護を外している (``LimitGuard.suspend_sensors``)
+        ので、**症状が出るのは零点確定が終わった後の通常の指令**である ——
+        「原点合わせは通るのに、その向きへ動かすと途中で止まる」としか見えず、
+        config を読んでもどちらの符号が正なのか決められない。
+
+        ここで見るのは**両方が指しているセンサだけ**。``limits`` にしか無い
+        スイッチ (反対端のリミット) は零点確定と無関係なので、向きが逆で正しい。
+        """
+        if self.homing is None or not self.limits:
+            return
+
+        homing_sensors = set(self.homing.sensor_names)
+        mismatched = [
+            f"{limit.sensor} (limits {limit.direction:+g} / homing {self.homing.direction:+g})"
+            for limit in self.limits
+            if limit.sensor in homing_sensors and limit.direction != self.homing.direction
+        ]
+        if mismatched:
+            raise ValueError(
+                f"axes.{self.name}: 同じセンサを指す homing と limits で direction が"
+                f"食い違っています: {', '.join(mismatched)}"
+            )
 
     @property
     def motor_names(self) -> tuple[str, ...]:
@@ -442,6 +531,7 @@ _AXIS_KEYS = frozenset(
         "manual",
         "homing",
         "motion",
+        "limits",
     }
 )
 
@@ -457,6 +547,12 @@ _HOMING_KEYS = frozenset(
 #: **センサはここに載せない** —— `sensor` / `sensors` の排他と必須は
 #: `HomingSpec.__post_init__` の 1 箇所だけが持つ (理由は `_parse_homing`)
 _HOMING_REQUIRED = frozenset({"direction", "search_distance", "step"})
+
+_LIMIT_KEYS = frozenset({"sensor", "direction"})
+#: **どちらも省略できない。** センサを省けば「どのスイッチも見ない保護」、方向を
+#: 既定値で埋めれば「どちら側の端かを config が決めていない保護」になり、いずれも
+#: 書いたのに効かない (`sync_kp` / `sync_limit` や `homing.search_distance` と同じ方針)
+_LIMIT_REQUIRED = frozenset({"sensor", "direction"})
 
 _MOTION_KEYS = frozenset({"max_velocity", "max_acceleration", "velocity_ff"})
 #: 対で書かせるキー。片方だけでは台形プロファイルを組み立てられず、欠けたほうを
@@ -573,6 +669,14 @@ class PositionTable:
     def paired_axes(self) -> tuple[str, ...]:
         """同期監視の対象となる軸 (sync_tolerance を持つ軸)。"""
         return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
+
+    def limit_axes(self) -> tuple[str, ...]:
+        """リミットスイッチ保護の対象となる軸 (``limits:`` を持つ軸)。"""
+        return tuple(name for name, spec in self._axes.items() if spec.limits)
+
+    def limits(self, axis: str) -> tuple[LimitSpec, ...]:
+        """その軸の保護宣言。書いていない軸は空。"""
+        return self.axis(axis).limits
 
     def raw(self, axis: str, name: str, *, court: Court | None = None) -> float:
         """人間の単位のままの値を返す。
@@ -728,6 +832,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         manual=_parse_manual(name, raw.get("manual"), command_mode),
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
+        limits=_parse_limits(name, raw.get("limits")),
     )
 
 
@@ -863,6 +968,54 @@ def _parse_homing_sensor_map(path: str, raw: object) -> tuple[tuple[str, str], .
             raise ValueError(f"{path}.sensors.{motor_name} はセンサ名の文字列: {sensor_name!r}")
         pairs.append((motor_name, sensor_name))
     return tuple(pairs)
+
+
+def _parse_limits(axis_name: str, raw: object) -> tuple[LimitSpec, ...]:
+    """リミットスイッチ保護の宣言を読む。書かない軸は空 (保護なし)。
+
+    値の妥当性 (方向が ±1 か) は ``LimitSpec.__post_init__`` が見る。ここで見るのは
+    キーの綴りと型、そして必須キーが揃っていることだけ (``_parse_homing`` と同じ分担)。
+
+    **空リストは拒否する。** ``limits: []`` は「保護を書いた」ようにしか読めないのに
+    1 本も監視しないので、書き忘れと区別が付かない。保護なしを表す書き方は
+    「キーごと書かない」ただ 1 つに保つ。
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"axes.{axis_name}.limits はリストである必要があります: {raw!r}")
+    if not raw:
+        raise ValueError(
+            f"axes.{axis_name}.limits が空です (保護しないなら limits を書かないでください)"
+        )
+
+    specs: list[LimitSpec] = []
+    for index, entry in enumerate(raw):
+        path = f"axes.{axis_name}.limits[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path} は辞書である必要があります: {entry!r}")
+
+        unknown = sorted(set(entry) - _LIMIT_KEYS)
+        if unknown:
+            raise ValueError(
+                f"{path} に未知のキー: {', '.join(unknown)} "
+                f"(指定できるのは {', '.join(sorted(_LIMIT_KEYS))})"
+            )
+
+        missing = sorted(_LIMIT_REQUIRED - set(entry))
+        if missing:
+            raise ValueError(f"{path} に必須キーがありません: {', '.join(missing)}")
+
+        sensor = entry["sensor"]
+        if not isinstance(sensor, str) or not sensor:
+            raise ValueError(f"{path}.sensor はセンサ名の文字列: {sensor!r}")
+
+        try:
+            specs.append(LimitSpec(sensor=sensor, direction=float(entry["direction"])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path}: {exc}") from exc
+
+    return tuple(specs)
 
 
 def _parse_motion(axis_name: str, raw: object) -> MotionSpec | None:

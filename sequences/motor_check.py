@@ -34,7 +34,7 @@ from collections.abc import Collection, Mapping
 
 from lib.sequence.engine import Sequence, step
 from lib.sequence.homing import HomingRunner
-from lib.sequence.motors import AxisHandle
+from lib.sequence.motors import build_axis_handle
 from sequences.main_hand import HOME as MAIN_HOME
 from sequences.sub_hand import VALVE_AXES
 
@@ -136,7 +136,7 @@ class MotorCheckSequence(Sequence):
         for axis in targets:
             spec = table.axis(axis)
             logger.info("零点確定: %s", axis)
-            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
+            handle = build_axis_handle(spec, self.motors)
             await self._homing.home(spec, handle)
 
     # ------------------------------------------------------------------ #

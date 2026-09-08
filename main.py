@@ -11,7 +11,7 @@ import os
 import pathlib
 import signal
 import socket
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from types import ModuleType
 
 import can
@@ -28,6 +28,7 @@ from lib.config_schema import (
     load_system_config,
 )
 from lib.control.feedback import FeedbackFreshness
+from lib.control.limit_guard import LimitGuard, combine_limit_guards
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
@@ -46,9 +47,21 @@ from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
-from lib.sequence.homing import HomingError, HomingRunner
-from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
-from lib.sequence.positions import PositionTable, load_position_table
+from lib.sequence.homing import HomingError, HomingRunner, SuspendSensors
+from lib.sequence.motors import (
+    AxisHandle,
+    EStopChecker,
+    MotorGroup,
+    TargetSink,
+    build_axis_handle,
+    build_motor_group,
+)
+from lib.sequence.positions import (
+    AxisSpec,
+    PositionLookupError,
+    PositionTable,
+    load_position_table,
+)
 from lib.server import RobotServer
 from sequences.motor_check import MotorCheckSequence
 
@@ -322,6 +335,200 @@ def _as_async(capture: Callable[[], None]) -> Callable[[], Awaitable[None]]:
     return run
 
 
+@dataclasses.dataclass(frozen=True)
+class _SensorView:
+    """全 CANManager 横断のセンサ読み取り口。零点確定とリミット保護が共有する。
+
+    **同じ組み立てを 2 箇所へ書き写さない。** 未登録センサの扱い (途絶へ倒す) と
+    回数の読み方 (読んでも減らない) は、片方だけ直せる形にすると必ず食い違う ——
+    症状は「動作確認では止まるのに常駐保護は止まらない」で、どちらが正しいのか
+    コードから決められなくなる。
+    """
+
+    #: センサ名 → **今**接触しているか
+    active: Callable[[str], bool]
+    #: センサ名 → 立ち上がりを数えた接触回数 (読んでも減らない)
+    contact_count: Callable[[str], int]
+    #: センサ名 → フィードバックが途絶しているか
+    is_stale: Callable[[str], bool]
+    #: モータ名 → フィードバックが途絶しているか
+    motor_is_stale: Callable[[str], bool]
+    #: センサ名 → config の `sensors:` に登録されているか。**途絶とは別物**で、
+    #: 起動時点ではどのセンサもまだ 1 通も受けていない (= 全部が途絶) ので、
+    #: 配線の誤りを起動ログで名指しできるのはこちらだけである
+    known: Callable[[str], bool]
+
+
+def _build_sensor_view(
+    can_managers: list[CANManager], *, feedback_timeout_ms: float
+) -> _SensorView:
+    """センサ読み取りの注入口を組み立てる。
+
+    センサ名はロボット横断に一意なので、全 CANManager から引ける形にする
+    (どのマネージャが持っていても答えは 1 つ)。
+    """
+    sensors = {name: sensor for mgr in can_managers for name, sensor in mgr.sensors.items()}
+    freshness = FeedbackFreshness(
+        _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
+    )
+
+    def sensor_active(name: str) -> bool:
+        sensor = sensors.get(name)
+        # 未登録のセンサは「触れていない」ではなく途絶として扱わせる
+        # (下の sensor_is_stale が True を返すので零点確定は 1 歩も動かさず、
+        #  リミット保護は blind_sensors として「効いていない」を主張する)
+        return sensor is not None and bool(getattr(sensor, "sensor_active", False))
+
+    def sensor_contact_count(name: str) -> int:
+        # ON 区間が観測周期より狭いと「今 ON か」では通過を丸ごと取りこぼす
+        # (実機で発生)。**読んでも減らない**ので、零点確定とリミット保護が
+        # 同じセンサを見ていても互いの接触を消し合わない
+        sensor = sensors.get(name)
+        if sensor is None:
+            return 0
+        count = getattr(sensor, "sensor_contact_count", None)
+        if count is not None:
+            return int(count)
+        # 回数を持たないドライバでは現在値へ落ちる (触れている間だけ 1 になる
+        # ので、区間を跨いだ接触は取りこぼしうる。それでも「一度も到達しない
+        # 探索」にはしない)。歯止めは search_distance が持つ
+        return int(bool(getattr(sensor, "sensor_active", False)))
+
+    def sensor_is_stale(name: str) -> bool:
+        if name not in sensors:
+            logger.error("センサ '%s' が config の sensors: に居ません", name)
+            return True
+        return freshness.is_stale(name, freshness.now())
+
+    def motor_is_stale(name: str) -> bool:
+        # 対象軸の実測位置が読めるかを、探索を始める前に問う。未受信の 0.0 を
+        # 現在位置と信じると、1 歩目が原点近傍への 1 回のジャンプになり、
+        # その移動は search_distance の歯止めに 1mm も掛からない
+        return freshness.is_stale(name, freshness.now())
+
+    return _SensorView(
+        active=sensor_active,
+        contact_count=sensor_contact_count,
+        is_stale=sensor_is_stale,
+        motor_is_stale=motor_is_stale,
+        known=lambda name: name in sensors,
+    )
+
+
+def _build_limit_guard(
+    positions: PositionTable,
+    motors: MotorGroup | None,
+    sensors: _SensorView,
+    *,
+    axis_handle: Callable[[str], AxisHandle | None],
+) -> LimitGuard | None:
+    """``limits:`` を書いた軸のリミット保護を組み立てる。対象が無ければ None。
+
+    対象が 1 本も無いロボットで空のタスクを立てない (``SyncMonitor`` を
+    ``sync_groups`` が空なら作らないのと同じ)。
+
+    **センサが `sensors:` に登録されていないことは起動ログの ERROR で名指しする。**
+    黙って通すと、保護を書いたつもりの軸が「触れても止まらない」まま試合に入る。
+    起動そのものは拒否しない —— 実行時には `blind_sensors` として画面にも出る
+    (未登録センサは `sensor_is_stale` が常に True を返すため) ので、片ハンドだけの
+    構成や机上ベンチを起動できなくするほうが害が大きい。
+
+    **見るのは登録の有無であって鮮度ではない。** 起動時点ではどのセンサもまだ 1 通も
+    受けていないので、鮮度で見ると**毎回必ず ERROR が出る** —— 毎起動出る ERROR は
+    読まれなくなり、本物の配線ミスまで一緒に流れる。
+    """
+    if motors is None:
+        return None
+
+    specs: list[AxisSpec] = []
+    for axis_name in positions.limit_axes():
+        spec = positions.axis(axis_name)
+        missing = [motor.name for motor in spec.motors if motor.name not in motors]
+        if missing:
+            # 黙って飛ばすと「保護しているつもり」で機構破損に至るため必ず残す
+            logger.warning(
+                "リミット保護をスキップ: 軸 %s のモータ %s がこのロボットに存在しません",
+                axis_name,
+                ", ".join(missing),
+            )
+            continue
+        specs.append(spec)
+
+    if not specs:
+        return None
+
+    for spec in specs:
+        # **どの軸のどのセンサがどちら向きの保護に付いたか**を起動ログに残す。
+        # limits を書いていない軸があること自体は正常なので警告にはしない
+        logger.info(
+            "リミット保護: %s (%s)",
+            spec.name,
+            ", ".join(f"{limit.sensor} → {limit.direction:+g} 方向" for limit in spec.limits),
+        )
+
+    unregistered = sorted(
+        {limit.sensor for spec in specs for limit in spec.limits if not sensors.known(limit.sensor)}
+    )
+    if unregistered:
+        logger.error(
+            "リミット保護: センサ %s が config の sensors: に居ません"
+            " (この向きの保護は永久に効かない。触れても止まらない)",
+            ", ".join(unregistered),
+        )
+
+    return LimitGuard(
+        specs,
+        sensor_active=sensors.active,
+        sensor_contact_count=sensors.contact_count,
+        sensor_is_stale=sensors.is_stale,
+        axis_handle=axis_handle,
+    )
+
+
+def _make_axis_handle_lookup(
+    positions: PositionTable, group: MotorGroup | None
+) -> Callable[[str], AxisHandle | None]:
+    """軸名 → 指令口。**モータ単位の指令口はここからも生まれない。**
+
+    組み立ては `move_to` / 手動操縦と同じ `build_axis_handle` に委ねる。**遅延して
+    引くこと自体に意味がある** —— リミット保護は自分を止めるために軸ハンドルを要り、
+    軸ハンドルは保護の結ばれたモータ群を要るので、生成順が循環する。ここが呼ばれた
+    時点でモータ群を読めば、`bind_limit_guard` が後から結んだ保護がそのまま乗る。
+    """
+
+    def lookup(axis: str) -> AxisHandle | None:
+        if group is None:
+            return None
+        try:
+            return build_axis_handle(positions.axis(axis), group)
+        except (AttributeError, PositionLookupError):
+            # このロボットに無い軸・揃っていないモータ (片ハンドだけの構成)
+            return None
+
+    return lookup
+
+
+def _suspend_limit_guards(guards: list[LimitGuard]) -> SuspendSensors:
+    """零点確定へ渡す「そのセンサの保護だけを外す」口 (全ロボット横断)。
+
+    零点確定は両ハンド 1 本のシーケンスから走るので、どのロボットの保護を外すかは
+    センサ名からしか決まらない。**軸まるごとではなくセンサ単位**なのは、両端に
+    スイッチのある軸で反対端の保護まで消さないため。
+    """
+
+    @contextlib.contextmanager
+    def suspend(names: Iterable[str]) -> Iterator[None]:
+        names = tuple(names)
+        with contextlib.ExitStack() as stack:
+            for guard in guards:
+                owned = [name for name in names if guard.watches(name)]
+                if owned:
+                    stack.enter_context(guard.suspend_sensors(owned))
+            yield
+
+    return suspend
+
+
 def _wire_motor_check_sequence(
     server: RobotServer,
     groups: list[MotorGroup],
@@ -330,7 +537,8 @@ def _wire_motor_check_sequence(
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
     sync_monitors: list[SyncMonitor],
-    feedback_timeout_ms: float,
+    limit_guards: list[LimitGuard],
+    sensors: _SensorView,
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
 
@@ -378,49 +586,16 @@ def _wire_motor_check_sequence(
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
+    # **束ねたモータ群にも保護を結ぶ。** ここは両ハンドを混ぜた別のグループなので、
+    # ロボットごとの `bind_limit_guard` は届かない。結び忘れると、全アクチュエータを
+    # 順に駆動する動作確認だけが保護の外で走る
+    motors.bind_limit_guard(combine_limit_guards(limit_guards))
 
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
 
     homing_axes = [name for name in merged.axes if merged.axis(name).homing is not None]
     if homing_axes:
-        # センサはロボットをまたいで一意なので、全 CANManager から引ける形にする
-        sensors = {name: sensor for mgr in can_managers for name, sensor in mgr.sensors.items()}
-        freshness = FeedbackFreshness(
-            _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
-        )
-
-        def _sensor_active(name: str) -> bool:
-            sensor = sensors.get(name)
-            # 未登録のセンサは「触れていない」ではなく途絶として扱わせる
-            # (下の _sensor_is_stale が True を返すので 1 歩も動かさない)
-            return sensor is not None and bool(getattr(sensor, "sensor_active", False))
-
-        def _sensor_latched(name: str) -> bool:
-            # 探索の到達判定だけがこれを読む。ON 区間が homing.step より狭いと
-            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす (実機で発生)
-            sensor = sensors.get(name)
-            if sensor is None:
-                return False
-            consume = getattr(sensor, "consume_sensor_latch", None)
-            if callable(consume):
-                return bool(consume())
-            # ラッチを持たないドライバでは現在値へ落ちる (取りこぼしうるが、
-            # 「一度も到達しない探索」にはしない)。歯止めは search_distance が持つ
-            return bool(getattr(sensor, "sensor_active", False))
-
-        def _sensor_is_stale(name: str) -> bool:
-            if name not in sensors:
-                logger.error("零点確定: センサ '%s' が config の sensors: に居ません", name)
-                return True
-            return freshness.is_stale(name, freshness.now())
-
-        def _motor_is_stale(name: str) -> bool:
-            # 対象軸の実測位置が読めるかを、探索を始める前に問う。未受信の 0.0 を
-            # 現在位置と信じると、1 歩目が原点近傍への 1 回のジャンプになり、
-            # その移動は search_distance の歯止めに 1mm も掛からない
-            return freshness.is_stale(name, freshness.now())
-
         resolve_origin = _make_origin_resolver(
             loops, merged, can_managers=can_managers, sync_monitors=sync_monitors
         )
@@ -449,12 +624,15 @@ def _wire_motor_check_sequence(
 
         sequence.bind_homing(
             HomingRunner(
-                sensor_active=_sensor_active,
-                sensor_latched=_sensor_latched,
-                sensor_is_stale=_sensor_is_stale,
-                motor_is_stale=_motor_is_stale,
+                sensor_active=sensors.active,
+                sensor_contact_count=sensors.contact_count,
+                sensor_is_stale=sensors.is_stale,
+                motor_is_stale=sensors.motor_is_stale,
                 origin_capturable=_origin_capturable,
                 capture_origin=_capture_origin,
+                # 「当たるまで動かす」あいだ、そのセンサの保護だけを外す。
+                # 外さないと触れた瞬間に自分の指令が引き戻され原点へ到達できない
+                suspend_sensors=_suspend_limit_guards(limit_guards),
             )
         )
 
@@ -1136,6 +1314,10 @@ class _RobotWiring:
     target_refreshers: list[TargetRefresher]
     #: 統合動作確認へ渡すモータ束。モータを 1 台も bind できなかった構成では None
     motor_group: MotorGroup | None
+    #: リミットスイッチ保護。`limits:` を書いた軸が 1 本も無い構成では None。
+    #: **配線は `_wire_one_robot` の後**なので (センサをロボット横断で引くため
+    #: 全 CANManager が要る)、`_wire_limit_guards` が `dataclasses.replace` で入れる
+    limit_guard: LimitGuard | None = None
 
 
 def _wire_one_robot(
@@ -1250,6 +1432,32 @@ def _wire_one_robot(
     )
 
 
+def _wire_limit_guards(wirings: list[_RobotWiring], sensors: _SensorView) -> list[_RobotWiring]:
+    """各ロボットへリミット保護を後付けする。
+
+    **ロボットごとの配線 (`_wire_one_robot`) では組めない。** センサ名はロボット
+    横断に一意なので読み取り口は全 CANManager から引く必要があり、その全部が
+    揃うのは全機の配線が終わった後である。
+
+    **組んだ保護はモータ群へ結ぶ (`bind_limit_guard`)。** 結ばないと 50Hz の常駐層
+    (層①) だけが効き、シーケンス・手動操縦が出した指令は押し戻されるまでの 1 周期
+    ぶん禁止方向へ進む。結ぶ先をモータ群にしてあるので、軸ハンドルを組む 4 経路の
+    どれから来ても保護が付いてくる (渡し忘れうる引数が 1 つも無い)。
+    """
+    wired: list[_RobotWiring] = []
+    for wiring in wirings:
+        guard = _build_limit_guard(
+            wiring.positions,
+            wiring.motor_group,
+            sensors,
+            axis_handle=_make_axis_handle_lookup(wiring.positions, wiring.motor_group),
+        )
+        if wiring.motor_group is not None:
+            wiring.motor_group.bind_limit_guard(guard)
+        wired.append(dataclasses.replace(wiring, limit_guard=guard))
+    return wired
+
+
 def _ensure_port_available(host: str, port: int) -> None:
     """サーバーの bind 可否を **CAN を開くより前に**確かめる。
 
@@ -1305,6 +1513,9 @@ async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
         for monitor in wiring.sync_monitors:
             monitor.start()
     for wiring in wirings:
+        if wiring.limit_guard is not None:
+            wiring.limit_guard.start()
+    for wiring in wirings:
         for refresher in wiring.target_refreshers:
             refresher.start()
     await server.start()
@@ -1314,13 +1525,19 @@ async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> Non
     """後始末。**1 手順が失敗しても残りを必ず続ける** (`_shutdown_step`)。
 
     順序に意味がある:
-      1. 位置制御ループ —— 生き残ると電流指令が出続けるので CAN より先に止める
-      2. 目標値再送 —— 止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
+      1. リミット保護 —— **新しい目標値を書きうる唯一の常駐タスク**なので最初に止める。
+         後回しにすると、他を止めた後の 1 周期が「止めたはずの軸」へ目標を 1 通書き、
+         再送も位置制御ループも無いまま目標だけが残る
+      2. 位置制御ループ —— 生き残ると電流指令が出続けるので CAN より先に止める
+      3. 目標値再送 —— 止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
          停止指令をここから送らないのは、PC が落ちた場合と経路を 1 本に保つため
-      3. 同期監視 —— これだけ生き残ると、停止済みのモータのフィードバックを見て誤発報する
-      4. CAN シャットダウン
-      5. サーバー終了処理
+      4. 同期監視 —— これだけ生き残ると、停止済みのモータのフィードバックを見て誤発報する
+      5. CAN シャットダウン
+      6. サーバー終了処理
     """
+    for wiring in wirings:
+        if wiring.limit_guard is not None:
+            await _shutdown_step("リミット保護", wiring.limit_guard.stop())
     for wiring in wirings:
         for loop in wiring.position_loops:
             await _shutdown_step(f"位置制御ループ (bus={loop.bus_name})", loop.stop())
@@ -1454,6 +1671,13 @@ async def main() -> None:
         for config_path, robot in loaded
     ]
 
+    # センサ読み取りは零点確定とリミット保護が共有する。センサ名はロボット横断に
+    # 一意なので、全機の配線が済んでからでないと組めない
+    sensors = _build_sensor_view(
+        [w.can_manager for w in wirings], feedback_timeout_ms=system.health.feedback_timeout_ms
+    )
+    wirings = _wire_limit_guards(wirings, sensors)
+
     # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
     # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、
     # 可動域の重なる位置で干渉しうる
@@ -1464,7 +1688,8 @@ async def main() -> None:
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
-        feedback_timeout_ms=system.health.feedback_timeout_ms,
+        limit_guards=[w.limit_guard for w in wirings if w.limit_guard is not None],
+        sensors=sensors,
     )
 
     try:
