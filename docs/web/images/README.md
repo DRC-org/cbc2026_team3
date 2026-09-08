@@ -23,4 +23,5 @@
 **Before は `main` の UI と `main` のサーバーで撮る。** UI だけを `main` に戻すと、
 `state.manual.axes[].positions` の形が食い違って `RouteErrorBoundary` が発火し、
 撮れるのは「この画面の描画に失敗しました」になる（`git checkout main -- web/src lib/manual.py`
-まで戻してサーバーを起動し直すこと）。
+まで戻してサーバーを起動し直すこと）。この版ずれは撮影だけの話ではない ——
+両方向の症状と手当ては `docs/web/pitfalls.md`「`state` の既存欄の『形』を変えるとき」。

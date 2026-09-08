@@ -779,6 +779,51 @@ export function parseSensors(raw: unknown): Record<string, SensorState> | Malfor
   return raw as Record<string, SensorState>;
 }
 
+/**
+ * プリセット 1 つを受信境界で確定させる。**旧サーバーの `"home"`（素の文字列）も受ける。**
+ *
+ * `positions` は名前だけの配列だった。**`state` の既存欄の形を変えた唯一の例** なので、
+ * サーバーと `web/dist` の版がずれる窓が現実にある —— `pnpm dev` を手元で立てて
+ * `?ws=drc:8080` で機体へ繋ぐ運用（`CLAUDE.md` が案内している）がそれ。
+ * 素通しのままだと `position.name` が `undefined` になり、**文字の無いボタンが
+ * 押せる状態で並び**、`onMove` は行き先の無い指令を送る。バーには `left: NaN%` の
+ * 刻みが下端へ寄って出る。
+ *
+ * 旧形式は `value: null`（＝値が読めない）へ落とす。**これは黙った既定値ではない** ——
+ * サーバーが値を引けなかったときと同じ意味で、画面は刻みも `title` も出さずに
+ * 「そこがどこかは分からない」ことをそのまま描く。
+ *
+ * どちらの形でもないものだけを落とす。名前を読めないボタンを出すより、
+ * ボタンが無い方がまだ操縦者に嘘をつかない。**名前も値も検査しない**（軸名と
+ * 位置名を UI へ書かない性質は、ここを素通しにしていることで成り立っている）。
+ */
+function parseManualPosition(raw: unknown): ManualPosition | null {
+  if (typeof raw === "string") return { name: raw, value: null };
+  if (!isObject(raw)) return null;
+  if (typeof raw.name !== "string") return null;
+  if (raw.value !== null && typeof raw.value !== "number") return null;
+  return { name: raw.name, value: raw.value as number | null };
+}
+
+/**
+ * 手動操縦の軸一覧のうち `positions` だけを確定させる。
+ *
+ * **他の欄は素通しのまま。** 軸名も可動範囲も UI 側へ書かない性質はそこで成立している
+ * （`motor_check_state` の `steps` だけを検査して他を素通しにしているのと同じ切り分け）。
+ */
+function parseManual(raw: unknown): ManualState | undefined {
+  if (!isObject(raw)) return undefined;
+  if (!Array.isArray(raw.axes)) return raw as unknown as ManualState;
+  const axes = raw.axes.map((axis: unknown) => {
+    if (!isObject(axis) || !Array.isArray(axis.positions)) return axis;
+    return {
+      ...axis,
+      positions: axis.positions.map(parseManualPosition).filter((p) => p !== null),
+    };
+  });
+  return { ...raw, axes } as unknown as ManualState;
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -936,6 +981,12 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (sensors !== undefined) state.sensors = sensors;
       // 型だけ足して受信条件を書かないと「型は合っているのに画面に出ない」になる
       state.last_error = parseSequenceFailure(raw.last_error);
+      // 手動操縦は `positions` だけ形を確定させる (他の欄は素通し)。
+      // 旧サーバーの素の文字列を受けないと、文字の無いボタンが押せる状態で並ぶ
+      if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
+      // 手動操縦は `positions` だけ形を確定させる (他の欄は素通し)。
+      // 旧サーバーの素の文字列を受けないと、文字の無いボタンが押せる状態で並ぶ
+
       return { type: "state", robot, state };
     }
 

@@ -1437,7 +1437,7 @@ padding だけでなく本文の `font-size` も直接指定する。ルート�
 
 **受信境界では「読めなかった配信」を `MALFORMED` として異常側へ倒す。**
 `protocol.ts` の `parseSafety` / `parseChecklists` / `parseExcludedSteps` /
-`parseMotorCheckSteps` と
+`parseMotorCheckSteps` / `parseManual` と
 `healthVerdict.ts` がこの形で、**`?? []` のような黙った既定値を置いてはならない** ——
 埋めると「ラッチしているのに画面は平常」へ化け、埋めたこと自体が画面から読めなくなる
 （サーバーの `overall=down` を「健全性 判定不能」へ倒すのと同じ）。未配信（`undefined`）とは
@@ -1450,7 +1450,19 @@ padding だけでなく本文の `font-size` も直接指定する。ルート�
 「まだ読み込まれていない」という別の意味を既に持っており、読めなかった配信をそこへ倒すと
 指差喚呼「アクチュエータ動作確認 完了」の判断材料が静かに嘘になるため。
 **検査するのは `index` / `label` / `require_trigger` という構造だけ**で、ステップ名は
-UI へ書き写していない（素通しの性質はそのまま）。`MALFORMED` は
+UI へ書き写していない（素通しの性質はそのまま）。
+**`state` の `manual` も `positions` だけは同じ理由で検査する**（`parseManual`）——
+`positions` は名前だけの配列から `{ name, value }` へ形を変えた**唯一の既存欄**で、
+サーバーと `web/dist` の版がずれる窓が現実にある（`pnpm dev` を手元で立てて
+`?ws=drc:8080` で機体へ繋ぐ運用がそれ）。素通しのままだと新しい UI 側で
+`position.name` が `undefined` になり、**文字の無いボタンが押せる状態で並び**、
+行き先の無い `manual_move` が飛ぶ。旧形式（素の文字列）は `value: null`
+＝「値が読めない」へ落とすので、刻みも `title` も出ないだけで操作は保たれる。
+**ここでも名前と値は検査しない** —— 軸名も位置名も UI へ書き写さない性質は、
+`positions` 以外の欄を素通しにしていることで成り立っている。
+**逆向き（古い UI に新しい配信）は防げない** —— 古い `web/dist` を開いたままの
+タブは `RouteErrorBoundary` で route ごと落ちる（`EMG STOP` は境界の外なので生き残り、
+画面は再読み込みを案内する）。`scripts/deploy.sh` で更新したら**タブを再読み込みさせること。**`MALFORMED` は
 `MotorCheckPanel` が全文で、`MotorCheckSummary` が「ステップ 判定不能」の 1 語で出す
 ——後者が要るのは、パネルが自分から開くのは実行中と失敗時だけで、**完了・未実行では
 畳まれたまま**になるため（`ExcludedNote` と同じ理由）。

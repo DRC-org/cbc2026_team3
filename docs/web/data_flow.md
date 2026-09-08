@@ -118,8 +118,14 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 
 **`?? []` のような黙った既定値を置いてはならない**（何が起きるかは `docs/web/pitfalls.md`）。
 検査を通す関数: `parseSafety` / `parseHealth`（+ `*ShapeErrors`）/ `parseChecklists` /
-`parseExcludedSteps` / `parseMotorCheckSteps` / `parseSensors` / `readMeasured` /
-`readCommand` / `parseEnum`。
+`parseExcludedSteps` / `parseMotorCheckSteps` / `parseSensors` / `parseManual` /
+`readMeasured` / `readCommand` / `parseEnum`。
+
+**`parseManual` が見るのは `positions` だけ**（他の欄も `manual.axes` の他の軸も素通し）。
+`positions` は**形を変えた唯一の既存欄**なので、サーバーと `web/dist` の版がずれる窓が
+実際にある —— 旧形式（素の文字列）は `value: null` へ落とし、操作を保ったまま
+「そこがどこかは分からない」を描く。どちらの形でもない要素だけ落とす（名前を読めない
+ボタンを出すより、ボタンが無い方が嘘をつかない）。
 
 **位置を測れないモータの POS 欄にだけ、代わりに PC の指令値（`command`）を出す。**
 実出力ではないので `→` と `title` で断る。**実測値があるモータには出さない**（M3508 は
