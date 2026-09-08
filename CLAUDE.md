@@ -45,7 +45,7 @@ cd web && pnpm dev                # 開発サーバー起動
 cd web && pnpm build              # プロダクションビルド
 cd web && pnpm test               # vitest（watch）
 cd web && pnpm test:run           # vitest（1 回だけ実行）
-cd web && pnpm check              # lint + format + 型検査 + テスト
+cd web && pnpm check              # lint + format + 型検査 + テスト + ビルド
 ```
 
 dev サーバーは全インターフェースに bind し、Host ヘッダは `drc` と `*.ts.net` を許可する

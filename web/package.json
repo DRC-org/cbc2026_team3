@@ -13,7 +13,7 @@
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "check": "pnpm lint && pnpm format:check && tsc -b --noEmit && pnpm test:run"
+    "check": "pnpm lint && pnpm format:check && tsc -b --noEmit && pnpm test:run && vite build"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

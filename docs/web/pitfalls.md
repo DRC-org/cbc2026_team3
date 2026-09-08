@@ -13,7 +13,7 @@
 |---|---|---|
 | daisyUI のクラスを片方だけ書く | DOM には居るのに**何も見えない** | `lib/daisyPairs.test.tsx` / `ui/Modal.test.tsx` |
 | クラス文字列を `.tsx` のコメントに書く | 誰も使わない規則が本番 CSS に残る | （無し。ビルド後の CSS を見る） |
-| 同じくコメントに `…` 入りの任意値を書く | **`pnpm check` は緑のまま `pnpm build` だけが落ちる**（気付くのは会場） | （無し。`pnpm build` まで通す） |
+| 同じくコメントに `…` 入りの任意値を書く | ビルドだけが落ちる（`check` に `build` を足す前は会場まで分からなかった） | `pnpm check` が `vite build` まで回す |
 | `hidden` な spacer に幅だけ足す | 広いカラムでだけ表の見出しと値の桁がずれる | `diagnostics/MotorStatus.test.tsx` |
 | `scrollIntoView` をテストごとに stub する | 次に自動スクロールを足した部品のテストだけが落ちる | `test/setup.ts` が 1 箇所で埋める |
 | クラス名を実行時に組み立てる | CSS ごと出力されず色が付かない | `lib/daisyPairs.test.tsx` |
@@ -83,16 +83,19 @@ daisyUI のコンポーネントは「親クラス + 修飾子」が揃って初
 
 **プレースホルダを含む書式を書くと、静かに増えるどころかビルドが落ちる。**
 上の記述を直すつもりで `@min-[…]:` を（`…` のまま）コメントへ書いたら、
-`@container (width>=…)` という不正なメディアクエリが生成され、
-`pnpm build` が lightningcss の `Invalid media query` で止まった。
+Tailwind が `@container (width >= …)` を素直に生成し、**minify 段の
+lightningcss がそれを `@container (min-width:…)` へ書き換えるところで**
+`Invalid media query` で止まった。**エラーに出る形と生成された形は違う**ので、
+CSS を grep するときは Tailwind 側の書式（`width >=`）で探すこと。
 **失敗例をコード側に残したいときは、クラスとして読めない形に崩すか、
 実物の定数（`NAME_COL_CLASS` 等）を名前で指すこと。**
 
 **このとき `pnpm check` は緑のままだった。** `check` が回すのは
-`lint` / `format:check` / `tsc` / `vitest` で、**`build` は入っていない**。
+`lint` / `format:check` / `tsc` / `vitest` だけで、**`build` が入っていなかった**。
 `web/dist` を作るのは `scripts/deploy.sh` なので、気付くのはデプロイした瞬間 ——
 つまり**会場で `--no-install` を打った瞬間**になりうる。
-角括弧付きの任意値をコメントへ書いたら、`pnpm check` ではなく `pnpm build` まで通すこと。
+**そこで `check` の最後に `vite build` を足した**（+0.7 秒）。CSS の生成が落ちる種類の
+壊れ方は型検査にもテストにも掛からないので、合否の一本道に入れておく以外に守る手が無い。
 
 ### コンテナクエリの任意値は `@min-[…]:`（v4）
 
@@ -281,7 +284,7 @@ oxfmt の対象外）。両側が自分のサンプルを持つと、契約が�
 ## 検証
 
 ```bash
-cd web && pnpm check        # lint + format + 型検査 + テスト（これが合否）
+cd web && pnpm check        # lint + format + 型検査 + テスト + ビルド（これが合否）
 cd web && pnpm test:run     # vitest を 1 回だけ
 cd web && pnpm dev          # 実機描画（配色・レイアウトは目で見る）
 

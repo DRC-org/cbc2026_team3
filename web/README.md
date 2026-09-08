@@ -22,7 +22,7 @@ pnpm dev           # 開発サーバー（全インターフェースに bind）
 pnpm build         # プロダクションビルド（出力は dist/）
 pnpm test          # vitest（watch）
 pnpm test:run      # vitest（1 回だけ実行）
-pnpm check         # lint + format + 型検査 + テスト
+pnpm check         # lint + format + 型検査 + テスト + ビルド
 ```
 
 **ビルド出力先を `dist/` から変えないこと。** 制御プログラム（`uv run python main.py`）が
