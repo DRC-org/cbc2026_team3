@@ -22,9 +22,10 @@ export function MotorSummary({ motors, healthMotors, tempThresholds = null }: Mo
   // 判定は healthVerdict に一本化してある。ここに条件を書き足さないこと
   const verdict = summarizeMotors(healthMotors);
 
-  // **行の形は「誰が呼んだか」ではなく実際の幅で決める。** 操縦者の右カラム (310px) と
-  // Monitor の 1 機ぶん (670px) で同じ部品が使われるので、props で切り替えると
-  // 呼び出し元がレイアウトの都合を知ることになる
+  // **行の形は「誰が呼んだか」ではなく実際の幅で決める。** 同じ部品が幅の違う
+  // 4 つの場所で使われるので、props で切り替えると呼び出し元がレイアウトの都合を
+  // 知ることになる。**閾値と実測値は `MotorStatus` の `NAME_COL_CLASS` が持つ**
+  // (ここへ書き写すと、同じ画面を指す数字が 2 つできる)。この div がその比較対象
   return (
     <div className="@container flex min-h-0 flex-1 flex-col gap-1">
       <div className="flex shrink-0 items-center justify-between gap-2">
