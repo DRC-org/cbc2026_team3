@@ -199,6 +199,19 @@ describe("parseServerMessage", () => {
         ]);
       });
 
+      it("値が数値でも null でもない要素も落とす", () => {
+        // **`0` へ丸めない。** 丸めると、可動範囲の下端に居ないプリセットが下端に
+        // 刻みとして描かれ、`title` は「そこがどこか」を数値で断言する
+        expect(
+          manualOf([
+            { name: "home", value: 0 },
+            { name: "work", value: {} },
+            { name: "place", value: "10" },
+            { name: "pick" },
+          ]),
+        ).toEqual([{ name: "home", value: 0 }]);
+      });
+
       it("軸の他の欄は素通しのまま (軸名も可動範囲も UI へ書かない)", () => {
         const msg = parse({
           type: "state",
