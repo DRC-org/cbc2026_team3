@@ -78,7 +78,7 @@ class _Axis:
     # 「飽和していたのに飽和していないと見える」周期ができる
     last_output: float = field(default=0.0)
     saturated: bool = field(default=False)
-    # 台形速度プロファイル。None なら最終目標をそのままステップで PID へ入れる (従来動作)
+    # 台形速度プロファイル。None なら最終目標をそのままステップで PID へ入れる
     profile: TrapezoidalProfile | None = field(default=None)
     # 参照速度に掛けて feedforward へ足す係数 [counts/(指令単位/s)]
     velocity_ff: float = field(default=0.0)
@@ -196,7 +196,7 @@ class M3508PositionLoop(PausablePeriodicTask):
     def set_motion_profile(
         self, name: str, profile: TrapezoidalProfile, *, velocity_ff: float = 0.0
     ) -> None:
-        """1 モータの中間目標生成器を後付けする。書かなければ従来どおりステップ入力。
+        """1 モータの中間目標生成器を後付けする。書かない軸はステップ入力のまま。
 
         **``add_motor`` の引数にしない。** プロファイルの制限値は位置定数
         (``axes.<軸>.motion``) が持つのに対し、``add_motor`` を呼ぶ配線層はモータ構成

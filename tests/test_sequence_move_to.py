@@ -52,8 +52,8 @@ def _clear_on_first_poll(group: MotorGroup) -> None:
 
     **中断のテストを実時間の勝負にしないための仕掛け。** `asyncio.sleep(0.01)` で
     緊急停止を狙うと、狙いが外れた回に別の経路 (指令前に消える → タイムアウト /
-    指令後・待機前に消える → 窓) へ落ちて、踏めた日だけ緑になる ——
-    実際 CI で不定期に落ちていた。到達判定は `wait_reached` のループの中でしか
+    指令後・待機前に消える → 窓) へ落ちて、踏めた日だけ緑になる。
+    到達判定は `wait_reached` のループの中でしか
     呼ばれないので、そこへ引っ掛ければ「待機中に消えた」が毎回同じ順序で起きる。
     """
     for handle in group.handles:
@@ -241,8 +241,8 @@ class TestMoveToInterruptedByEStop:
     """緊急停止 (clear_target) が到達待ちを「到達」にすり替えない回帰テスト。
 
     経路: MotorHandle.is_reached() は「目標が無ければ到達済み」を返す仕様のため、
-    move_to() の到達待ち中に緊急停止で目標がクリアされると、かつては黙って
-    「到達した」ことになり、中断された動作がステップ成功として記録されていた。
+    move_to() の到達待ち中に緊急停止で目標がクリアされると、黙って「到達した」こと
+    になり、中断された動作がステップ成功として記録されうる。
     """
 
     async def test_move_to_raises_when_target_cleared_mid_wait(self) -> None:
@@ -264,12 +264,12 @@ class TestMoveToInterruptedByEStop:
         `move_to` は全軸へ `set_target_value` を送り終えてから `wait_reached` を
         まとめて作る。その間に緊急停止 (`TargetRefresher.clear_targets()`) が挟まると、
         `wait_reached` は**最初から目標が無い状態で待ち始める** —— 待機開始時点の
-        スナップショットだけを見ていた頃は、これが「一度も指令していない軸」と
-        区別できず `is_reached()` の「目標が無ければ到達済み」に吸われて **True** を
-        返し、中断された動作がステップ成功として記録された。
+        スナップショットだけを見ると、これが「一度も指令していない軸」と区別できず
+        `is_reached()` の「目標が無ければ到達済み」に吸われて **True** を返し、
+        中断された動作がステップ成功として記録される。
 
         ここは時刻に依存させずに窓そのものを再現する —— 実時間の sleep で狙うと、
-        踏めた日だけ緑になる (実際 CI で不定期に落ちていた)。
+        踏めた日だけ緑になる。
         """
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", "arm_joint", reaches=False)

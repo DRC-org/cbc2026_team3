@@ -98,7 +98,7 @@ positions:
   # 起きることそのものである (本番はその角が wall_f.initial / wall_r.initial に一致する)。
   #
   # 動作確認 (sequences/motor_check.py) も運用と同じ位置名へ動かすので、確認専用の
-  # 駆動量は無い (かつての motor_check.magnitude は config ごと消えている)。
+  # 駆動量は無い。
   # full はベンチの上端 (manual.max と同値) であって、ファームのクランプ端ではない ——
   # クランプは 0〜270deg なので掛からず、書いたぶんだけ実際に動く。
   servo_sv0:

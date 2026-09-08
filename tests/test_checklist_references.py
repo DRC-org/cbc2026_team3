@@ -6,9 +6,8 @@
 なる。既存の検査はロール名 (`test_bench_checklist_uses_a_known_role`) と項目の
 取りこぼし (`test_no_entry_is_silently_dropped`) しか見ていない。
 
-実際に `config/bench/main_hand/` が本番 config を使う形へ移った際、checklist だけが
-旧構成 (2 バス・4 モータ・bench 専用 positions の `half` / `full`) の記述のまま残り、
-`config/bench/dm3520/` には改名前の軸名 `sub_slide` が残っていた。
+ベンチ構成の差し替えや軸の改名では、checklist の文面だけが古い軸名・位置名のまま
+取り残されやすい。
 
 **文面は自然文なので完全な検証はできない。** ここが見るのは「`<軸名> に <位置名> を
 送り』の形で書かれた組がその構成に実在するか」だけで、書き方を狭めない代わりに

@@ -127,8 +127,8 @@ class TestRejectionGoesToRequesterOnly:
 class TestUnknownCommandsNeverReachHandlers:
     """語彙に無いコマンドはゲートを素通りしてハンドラへ届いてはならない。
 
-    ゲート表とディスパッチが別々の表だった頃は、どの表にも載っていないコマンドが
-    「拒否もされず実行される」状態になり得た。今は COMMANDS が唯一の入口なので、
+    ゲート表とディスパッチが別々の表だと、どの表にも載っていないコマンドが
+    「拒否もされず実行される」状態になり得る。COMMANDS を唯一の入口にすることで、
     宣言されていない名前はハンドラへ到達しない。
     """
 
@@ -271,9 +271,8 @@ class TestHandlerExceptionsNeverKillTheConnection:
 
     `handle_command` は `_ws_handler` の受信ループから await されている。例外を
     抜けさせると `async for msg in ws` ごと降り、その操縦者は画面から何も送れなく
-    なる —— 試合中なら E-STOP を押す手段まで失う。以前は `_run_manual` だけが
-    自前で握っており、他のハンドラが投げうる経路は無防備なまま残っていた。
-    握りはディスパッチ 1 箇所に置く。
+    なる —— 試合中なら E-STOP を押す手段まで失う。ハンドラごとに握りを書くと
+    書き忘れた経路が無防備なまま残るので、握りはディスパッチ 1 箇所に置く。
     """
 
     async def test_ハンドラの例外は理由付きで返る(self) -> None:

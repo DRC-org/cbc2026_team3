@@ -21,9 +21,9 @@ function snapshot(over: Partial<MotorCheckSnapshot> = {}): MotorCheckSnapshot {
 
 describe("motorCheckStatus", () => {
   /**
-   * **実配信のスナップショットがそのままこの形。** かつてパネルはこれを「完了」と
-   * 読み、全ステップに緑の ✓ を付けていた。`config/checklist.yaml` の
-   * 「アクチュエータ動作確認 完了」は、この誤表示のままチェックが付く。
+   * **実配信のスナップショットがそのままこの形。** これを「完了」と読むと全ステップに
+   * 緑の ✓ が付き、`config/checklist.yaml` の「アクチュエータ動作確認 完了」は
+   * その誤表示のままチェックが付く。
    */
   it("未実行を完了と読まない (ステップ表が届いているだけ)", () => {
     const status = motorCheckStatus(snapshot({ running: false, step_index: 0 }), true);

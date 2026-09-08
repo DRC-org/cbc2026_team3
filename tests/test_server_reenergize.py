@@ -545,7 +545,7 @@ class TestManualJogOriginIsReset:
 
     **違うのは範囲。** 緊急停止は機体が止まっているのでロボット全体でよいが、
     再励磁は「機体を止めずに」が売りなので、落ちた 1 台のために無関係な軸の
-    起点まで捨ててはならない (CLAUDE.md「ジョグの起点は直前の手動目標値であって
+    起点まで捨ててはならない (docs/invariants.md「ジョグの起点は直前の手動目標値であって
     フィードバックではない」)。**軸を 2 本置くのはそのため** —— 1 本しか無い
     構成では「全体を捨てる」と「対象だけ捨てる」の区別が付かない。
     """
@@ -662,7 +662,7 @@ class TestPairedAxisIsExpandedToPartner:
 
     片側だけを対象にすると、相方が移動中の場合「無励磁で連れ回されていた片側」を
     「相方に逆らって現在角を保持する片側」へ変えるだけになり、直後に
-    `SyncMonitor` の偏差超過で試合が止まる。CLAUDE.md「ペア軸に片側だけ効く
+    `SyncMonitor` の偏差超過で試合が止まる。docs/invariants.md「ペア軸に片側だけ効く
     操作を作らない」をここにも適用する。
     """
 
@@ -833,8 +833,8 @@ class TestReactivationSettlesPendingReenergize:
 class TestReactivationDoesNotWaitForeverOnAStuckReenergize:
     """**畳めない再励磁タスクがいても、緊急停止解除は先へ進む。**
 
-    かつては素の `await pending` で、根拠を「古いタスク自身が有界だから」に
-    置いていた。有界なのは `_wait_fresh_feedback` の deadline だけで、
+    素の `await pending` では済まない。有界なのは `_wait_fresh_feedback` の
+    deadline だけで、
     `CANManager.send_to_bus` は `_run_blocking(bus.send, msg)` をタイムアウト
     無しで待つ。SocketCAN の送信キューが詰まっていれば `bus.send` はブロック
     しうる —— それは `cbc-can-watchdog` が bus-off を疑っている状況、つまり
@@ -1089,7 +1089,7 @@ class TestEStopDuringReenergize:
        停止フレームより後に届き、**約 0.1 秒励磁されたまま残る**のを潰す
 
     **まとめて 1 ケースにしてはならない。** 多重防護は統合経路のテストだと
-    1 枚壊しても他方が拾って落ちない (CLAUDE.md「多重防護の各層は 1 枚ずつ
+    1 枚壊しても他方が拾って落ちない (docs/invariants.md「多重防護の各層は 1 枚ずつ
     単独で確かめる」)。実際、既存の `tests/test_server_e_stop.py` は解除経路
     (`_reactivate_motors`) しか見ておらず、**再励磁経路だけ `should_abort` を
     落とす変異も、再励磁側の再送だけを消す変異も 1 件も落ちなかった。**
@@ -1182,7 +1182,7 @@ class TestSequenceCommandsDeniedWhileReenergizeInFlight:
     で止まる (症状は「NEXT を押したのに動かない」だけ)。
 
     **逆 (シーケンス実行中の再励磁) は塞がない。** 塞ぐと「試合中に機体を
-    止めずに励磁を戻す」という主目的そのものが消える。CLAUDE.md「制御権の
+    止めずに励磁を戻す」という主目的そのものが消える。docs/invariants.md「制御権の
     奪い合いは両方向を塞ぐ」に対する意図的な例外なので、通ることも
     `test_sequence_start_does_not_block_reenergize` で固定しておく。
 

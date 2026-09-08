@@ -238,8 +238,8 @@ class TestMotorHandleWaitReached:
         """緊急停止などが待機中に目標を刈り取ったら「到達」にすり替えず中断と分かる形にする。
 
         回帰対象: MotorHandle.is_reached() は「目標が無ければ到達済み」を返すため、
-        wait_reached() の実行中に clear_target() が入ると、かつては黙って True を
-        返し、move_to() が中断された動作をステップ成功として記録していた。
+        wait_reached() の実行中に clear_target() が入ると、黙って True を返して
+        move_to() が中断された動作をステップ成功として記録しうる。
         """
         handle, driver, _mgr = _make_handle()
         await handle.set_target(ControlMode.POSITION, 10.0)

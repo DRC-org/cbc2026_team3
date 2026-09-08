@@ -4,14 +4,13 @@ import type { MotorCheckSnapshot } from "@/lib/protocol";
  * 統合動作確認が今どの状態にあるか。`lib/sequenceStatus.ts` と同じ形で、
  * **判定はここ 1 箇所**、ラベルと配色は画面ごとに決める。
  *
- * かつて判定は `MotorCheckPanel` と `MotorCheckSummary` に別々に書かれており、
- * 実際に食い違っていた。パネル側は「実行中でなく、エラーも無く、ステップ表が
- * 届いている」を完了と読むため、**一度も実行していない状態が「完了」**になり、
- * 全ステップに緑の ✓ が付いた。実配信のスナップショット
- * (`running:false, step_index:0, total_steps:2`) がまさにその形である。
+ * 画面ごとに判定を書くと食い違う。「実行中でなく、エラーも無く、ステップ表が
+ * 届いている」を完了と読むと、**一度も実行していない状態が「完了」**になり全ステップに
+ * 緑の ✓ が付く (`running:false, step_index:0, total_steps:2` が実配信でその形)。
+ * **ステップ数 0 は「未読込」であって完了ではない。**
  *
- * `config/checklist.yaml` には「アクチュエータ動作確認 完了」の指差喚呼項目が
- * あり、これは誤表示のままチェックが付く経路だった。
+ * `config/checklist.yaml` の「アクチュエータ動作確認 完了」は、その誤表示のまま
+ * チェックが付く経路になる。
  */
 export type MotorCheckOutcome = "idle" | "running" | "failed" | "done";
 

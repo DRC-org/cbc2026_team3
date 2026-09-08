@@ -3,9 +3,9 @@ import type { EpochSeconds } from "@/lib/time";
 /**
  * サーバー (`lib/server.py`) が WebSocket で配信するメッセージの型と受信条件。
  *
- * ここは最下層に置く (UI の hook を import しない)。以前は WS の型が
- * `hooks/useRobotSocket.ts` にあり、`lib/healthVerdict.ts` や `lib/phase.ts` が
- * hooks を import する依存の逆転が起きていた。
+ * ここは最下層に置く (UI の hook を import しない)。型を `hooks/` へ置くと
+ * `lib/healthVerdict.ts` や `lib/phase.ts` が hooks を import する依存の逆転になり、
+ * 「接続を張らずに受信条件と状態遷移を検証できる」性質が失われる。
  *
  * 契約の正はサーバー側で、`test/ws-contract.json` (Python が生成) を
  * `test/wsContract.test.ts` がこの受信経路へ流し込んで突き合わせている。
@@ -69,7 +69,7 @@ export function readMeasured(value: unknown): Measured | Malformed {
  * `command` はテレメトリに後から足された欄なので、これを配らない版のサーバーへ
  * 繋ぐことが起こりうる。そこを `MALFORMED` へ倒すと、**全モータの POS 欄が
  * `?` で埋まる** —— 届いていないことと届いたものが読めないことは、操縦者が次に
- * 取る行動が違う (CLAUDE.md の「未配信は異常にしない」)。型違いだけを異常にする。
+ * 取る行動が違う (docs/invariants.md の「未配信は異常にしない」)。型違いだけを異常にする。
  */
 export function readCommand(value: unknown): Measured | Malformed {
   return value === undefined ? null : readMeasured(value);
@@ -238,8 +238,8 @@ export interface HealthChange {
 /**
  * 統合動作確認の状態。**両ハンドで 1 つしかない**ので robot を持たない。
  *
- * 進捗も結果も拒否理由も 1 通に載る。かつては progress / record / done / error の
- * 4 種類に分かれており、受け取る側が継ぎ合わせて 1 つの状態を組み立てていた。
+ * 進捗も結果も拒否理由も 1 通に載る。progress / record / done / error のように
+ * 種類を分けると、受け取る側が継ぎ合わせて 1 つの状態を組み立てることになり、
  * 途中の 1 通を取りこぼすと画面と機体が食い違ったまま、リロードするまで直らない。
  */
 export interface MotorCheckSnapshot {
@@ -319,8 +319,8 @@ export type MatchPhase = (typeof MATCH_PHASES)[number];
 /**
  * 指差喚呼のロール。サーバーの `lib/match_state.py` の `ALL_ROLES` と 1:1 で対応する。
  *
- * かつては操縦者 2 名 (main_hand / sub_hand) に分かれていたが、2 名が必ず同じ場所で
- * 操縦するため独立した確認にならず、1 つへ統合した。
+ * 操縦者 2 名は必ず同じ場所で操縦するのでロールを分けても独立した確認にならず、
+ * ロールは 1 つに統合してある。
  */
 export type ChecklistRole = "pre_match";
 
@@ -571,7 +571,7 @@ export interface SafetyState {
    * 起動の猶予を過ぎても自己申告 (`INFO`) を一度も受けていない自作モタドラ。
    *
    * **これは「壊れている」ではなく「焼き忘れ検出 (`info_mismatch`) が働いていない」の
-   * 報告。** `INFO` は送信バッファの都合でも 1 通も出ないことがあり (CLAUDE.md
+   * 報告。** `INFO` は送信バッファの都合でも 1 通も出ないことがあり (docs/invariants.md
    * 「送信バッファの本数は 3 枚で違う」節)、その間はファーム版・サーボ可動レンジの
    * 照合が一緒に沈黙する。`evaluateHealth()` の判定 (tone) はここでは動かさない。
    */

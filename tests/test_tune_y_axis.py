@@ -282,7 +282,7 @@ class TestDwellWindow:
         tune._check_dwell([trial], amplitude=15.0, dwell_s=enough)
 
     def test_プロファイル無しの試行は対象外(self) -> None:
-        """従来のステップ入力に「移動時間」は無い。既存の使い方を塞がない。"""
+        """プロファイルを持たない (ステップ入力の) 試行に「移動時間」は無い。"""
         tune._check_dwell(
             [tune.TrialConfig(kp=32.0, ki=10.0, kd=1.0, sync_kp=8.0, output_limit=2000.0)],
             amplitude=15.0,
@@ -386,9 +386,7 @@ class TestBusSelection:
         """本番 config を渡せることは手順 (docs/mechanism_handoff.md §3-2) の前提。
 
         M3508 と EDULITE が同居する 3 バス構成でもある。edulite_bus を開いた回は
-        1 台も動かない (以前は同じ 3 バス構成を持つ config/bench/main_hand/ でも
-        別途検証していたが、実測値を本番へ移して bench 側の複製を削除したため
-        この 1 本に集約した)。
+        1 台も動かない。
         """
         alias = self._resolve(
             _ROOT / "config" / "main_hand.yaml",

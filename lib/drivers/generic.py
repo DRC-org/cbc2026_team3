@@ -248,8 +248,9 @@ class GenericDriver(MotorDriver):
     def encode_e_stop() -> can.Message:
         """ブロードキャスト緊急停止 (仕様書 §3.5)。
 
-        CAN ID 0x0FF は **他のどのフレームより優先度が高い**。かつては 0x7FF で、
-        Standard ID 全 2048 個のうち最も優先度が低かった。
+        CAN ID 0x0FF は **他のどのフレームより優先度が高い**。CommandType の
+        `E_STOP` を最小 (0b000) に置いてあるのがその根拠で、動かすと止めるフレームが
+        目標値やフィードバックに追い越される。
         """
         return can.Message(
             arbitration_id=GenericDriver.build_can_id(CommandType.E_STOP, 0xFF),
@@ -451,9 +452,8 @@ class GenericDriver(MotorDriver):
 
         **実機からこのビットが立つことはない。この経路は防護として機能しない。**
         未設定のチャンネルは FEEDBACK も INFO も 1 通も送らないため (仕様書 §2.2)、
-        報告を運ぶフレーム自体が存在しない。かつては CAN ID 0x300 (デバイス ID 0x00)
-        で送っていたが、PC 側の can_id は 0x01〜0xFE に限られるので 0x300 を claim
-        できるドライバは存在せず、その頃も届いていなかった。
+        報告を運ぶフレーム自体が存在しない (デバイス ID 0x00 で送ったとしても、
+        PC 側の can_id は 0x01〜0xFE に限られるので claim できるドライバが無い)。
 
         **PC 側から見える症状は「その基板の全チャンネルが STALE」で、配線不良と
         区別が付かない。切り分けは基板の LED (赤の速い点滅) で行う。**

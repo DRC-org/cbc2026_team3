@@ -9,8 +9,8 @@ function ratio(value: number, min: number, max: number): number {
  * 可動範囲の表示。**ドラッグできる入力にしてはならない** ——
  * スライダーにすると、掴んだ瞬間に機体がその位置へ飛ぶ。
  *
- * 現在値と目標値は太さと色で描き分ける。同じ 2px の線で描いていた頃は、
- * 両者が近いと重なって「追従が遅れているのか、目標がそこなのか」が読めなかった。
+ * 現在値と目標値は太さと色で描き分ける。同じ太さの線だと、両者が近いときに重なって
+ * 「追従が遅れているのか、目標がそこなのか」が読めない。
  */
 export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; max: number }) {
   const valuePct = axis.value === null ? null : ratio(axis.value, min, max);

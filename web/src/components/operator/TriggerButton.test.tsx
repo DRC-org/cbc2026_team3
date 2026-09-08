@@ -34,8 +34,8 @@ describe("TriggerButton", () => {
   });
 
   it("シーケンス未取得は RUNNING でも DONE でもなく、そのまま伝える", () => {
-    // 最後の return へ落として RUNNING を出していた頃は、同じ画面の状態表示が
-    // 「待機中 — START で開始」で、ボタンだけが実行中を主張していた
+    // 最後の return へ落として RUNNING を出すと、同じ画面の状態表示が
+    // 「待機中 — START で開始」なのにボタンだけが実行中を主張する
     render(<TriggerButton kind="no_sequence" onTrigger={vi.fn()} />);
 
     const button = screen.getByRole("button", { name: "操作不可: シーケンス未取得" });

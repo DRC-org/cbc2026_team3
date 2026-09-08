@@ -151,8 +151,7 @@ class TestCANManager:
     async def test_shutdown_は受信し続けているバスも畳んで全バスを閉じる(self) -> None:
         """止める処理が止まってはならない。
 
-        **かつてはここで「バスが down していると受信ループは即死する」ことを
-        前提にしていた。** いまは降りずに再試行を続けるので、片方が再試行中でも
+        受信ループは down しても降りずに再試行を続けるので、片方が再試行中でも
         `shutdown()` が両方のバスを閉じ切ることを見る。畳めないタスクが 1 つでも
         あると、`main()` の finally がそこで折れて 2 台目のバスが開いたまま残る。
         """
@@ -870,13 +869,12 @@ class TestReceiveLoopRobustness:
     async def test_受信断は降りずに必ず記録される(self, caplog: pytest.LogCaptureFixture) -> None:
         """受信 API 自体の失敗は、痕跡を残したうえで**再試行する**。
 
-        **かつてはここで「降りるときは必ず痕跡を残す」ことを見ていた。**
-        降りなくなったぶん、黙って再試行し続けるのが最も危ない失敗になった ——
-        ログにも UI にも出ないまま、そのバスの全モータが STALE になる。
+        黙って再試行し続けるのが最も危ない失敗になる —— ログにも UI にも出ないまま、
+        そのバスの全モータが STALE になる。
 
         降りないことも同時に見る。降りると送信側だけが次の周期で自動復帰し、
         受信は二度と戻らない。症状は「指令は効くのにフィードバックだけ永久に無い」で、
-        機体は動くのに全モータが STALE のまま試合を終える (実機で発生済み)。
+        機体は動くのに全モータが STALE のまま試合を終える。
         """
         mgr = CANManager()
         bus = mock_bus()
@@ -1020,9 +1018,9 @@ class TestReceiveLoopSurvivesInterfaceDown:
     その約 1 秒のあいだ `bus.recv` は `Network is down` で失敗し続けるが、
     **同一 socket は down/up を跨いで生き残る** (実測) ので、待って呼び直せば戻る。
 
-    かつてはここで受信タスクごと降りていた。``_tasks`` は誰も await しないため死は
-    ログ 1 行にしか現れず、症状は「UI は接続中のまま全モータが STALE」という
-    最も切り分けにくい形になっていた。
+    ここで受信タスクごと降りると、``_tasks`` は誰も await しないため死はログ 1 行に
+    しか現れず、症状は「UI は接続中のまま全モータが STALE」という最も切り分けにくい
+    形になる。
     """
 
     async def test_インタフェース断で降りず復帰後に受信を再開する(self) -> None:
@@ -1402,7 +1400,7 @@ class TestReceiveLoopOnAPollableBus:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    async def test_監視できないバスは従来の経路へ落ちる(self) -> None:
+    async def test_監視できないバスはエグゼキュータ経路へ落ちる(self) -> None:
         """``--dry-run`` の virtual バスは ``fileno()`` を持たない。
 
         ここで例外にすると、机上での配線確認ごと起動しなくなる。

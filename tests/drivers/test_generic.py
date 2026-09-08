@@ -53,8 +53,8 @@ class TestBuildCanId:
     def test_e_stop_outranks_every_other_frame(self):
         """CAN の調停は ID が小さいほど優先。止めるフレームが追い越されてはならない。
 
-        かつては E_STOP が 0b111 で、ブロードキャスト停止の 0x7FF は
-        Standard ID 全 2048 個のうち最も優先度が低かった。
+        E_STOP を 0b111 に置くと、ブロードキャスト停止の 0x7FF は Standard ID
+        全 2048 個のうち最も優先度が低くなる。
         """
         dev = 0x7F
         estop = GenericDriver.build_can_id(CommandType.E_STOP, dev)

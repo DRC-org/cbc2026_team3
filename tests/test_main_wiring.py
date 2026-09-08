@@ -575,10 +575,8 @@ class TestBuildTargetRefresher:
     def test_edulite_gets_a_refresher_too(self) -> None:
         """**EDULITE 05 も問い合わせ駆動である。** 自発的にはフィードバックを返さない。
 
-        かつて ``_build_target_refreshers`` は「EDULITE は自発的にフィードバックを
-        返すので対象外」として除外していたが、実機はそうではなかった —— 励磁したまま
-        13 秒放置しても 1 通も届かず、届いたのは起動時に PC が送ったフレームへの
-        応答 20 通だけだった。
+        実機は励磁したまま 13 秒放置しても 1 通も届かず、届いたのは起動時に PC が
+        送ったフレームへの応答 20 通だけだった。
 
         再送しないと、操縦していない間じゅう ``MotorHealth.STALE`` になる。症状は
         「手動操縦すると動くのに常に赤い」だけで、配線不良と区別が付かない。
@@ -1324,8 +1322,8 @@ class TestLoadAllConfigs:
 class TestSequenceClassSelection:
     """sequences/<name>.py から登録するシーケンスの決め方。
 
-    かつては ``dir()`` の並び (アルファベット順) の先頭を採っていたため、
-    モジュールが他機体のシーケンスを import しただけで乗っ取られえた
+    ``dir()`` の並び (アルファベット順) の先頭を採ると、モジュールが他機体の
+    シーケンスを import しただけで乗っ取られる
     (``"MotorCheckSequence" < "SubHandSequence"``)。症状は「sub_hand の
     sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
     理由が読めない。
@@ -1466,8 +1464,8 @@ class TestRobotBusSelection:
 class TestReadOperstate:
     """**sysfs を実際に読む経路そのものを固定する。**
 
-    読み取りを丸ごとラムダへ差し替えて `_create_bus` 側だけを見ていた頃は、
-    **機能が丸ごと死ぬ変異が 2 つとも全件緑で通った** —— `.strip()` を落とす
+    読み取りを丸ごとラムダへ差し替えて `_create_bus` 側だけを見ると、
+    **機能が丸ごと死ぬ変異が 2 つとも全件緑で通る** —— `.strip()` を落とす
     (sysfs は `"down\n"` を返すので `== "down"` が永久に偽になる) と、パス要素を
     `oper_state` へ綴り間違える (常に `FileNotFoundError` → `None`) の 2 つ。
     どちらも「ログが 1 行も出なくなる」だけなので、通しでも気づけない。

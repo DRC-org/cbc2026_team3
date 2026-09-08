@@ -110,10 +110,9 @@ struct SolenoidChannelConfig {
     // 下位 3bit** になるので（仕様書 §2.2）、配線を差し替えても ID は動かない。
     Port port;
     uint16_t pin;
-    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
-    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
-    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
-    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
+    // **表示名は持たない。** 読まれない文字列は Nano では SRAM と Flash を 50 バイト
+    // ずつ食い（2KB のうち 2.4%）、しかも PC 側 yaml のモータ名と静かにずれても
+    // 誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // チャンネル | ピン  | 回路図    | デバイス ID | PC 側のモータ
@@ -241,6 +240,6 @@ constexpr uint16_t kCanTxFailStreakAlarm = 50;
 // 緊急停止ラッチ中はシリアルからも駆動できない（SolenoidChannel が入口で指令を拒否する）。
 //
 // **ボーレートはここに書かない。** この基板の USART1 は CubeMX が初期化するので、
-// 正は solenoid.ioc（`MX_USART1_UART_Init`）だけが持つ。かつてここに定数があったが
-// 誰も読んでおらず、直しても何も変わらない —— 最も危険な種類の死んだ定数だった。
+// 正は solenoid.ioc（`MX_USART1_UART_Init`）だけが持つ。ここに定数を置いても誰も
+// 読まないので、直しても何も変わらない死んだ定数になる。
 #define ENABLE_SERIAL_DEBUG 1

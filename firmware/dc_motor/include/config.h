@@ -101,10 +101,9 @@ struct DcChannelConfig {
     uint8_t pwmPin;
     uint8_t dirPin;
     float maxDuty;  // 仕様書 §5.3 の duty 上限（SET_PARAM 0x00 で変更可）
-    // **表示名は持たない。** かつて `const char *name` があり「シリアルデバッグ表示用」
-    // と書いてあったが、どの pollSerial() も一度も表示しなかった。読まれない文字列は
-    // Nano では SRAM と Flash を 50 バイトずつ食い（2KB のうち 2.4%）、しかも
-    // PC 側 yaml のモータ名と静かにずれても誰も気付けない。対応は下の表の行コメントが持つ。
+    // **表示名は持たない。** 読まれない文字列は Nano では SRAM と Flash を 50 バイト
+    // ずつ食い（2KB のうち 2.4%）、しかも PC 側 yaml のモータ名と静かにずれても
+    // 誰も気付けない。対応は下の表の行コメントが持つ。
 };
 
 // TODO(実機で確認): max_duty はモータとギヤ比が決まってから詰めること。

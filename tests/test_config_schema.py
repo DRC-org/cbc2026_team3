@@ -167,7 +167,7 @@ class TestSystemConfig:
         NaN として通る。NaN は比較がすべて False になるため正値検査
         (`value <= 0`) も逆転検査 (`warning > critical`) も抜け、しきい値として
         内部へ入ると「全モータが恒久 STALE なのに設定は正常に見える」形でしか
-        現れない —— CAN プロトコルから float を外した理由 (CLAUDE.md) と同じ
+        現れない —— CAN プロトコルから float を外した理由 (docs/invariants.md) と同じ
         失敗様式。無限大は比較を通ってしまうぶんさらに悪く、
         `feedback_timeout_ms: .inf` は途絶検出を、`temp_warning_c: .inf` は温度警告を
         **黙って無効化**する。
@@ -526,7 +526,7 @@ class TestDriverSpecificKeys:
         """MST_ID の下位 8bit が別モータの ESC_ID と交差する構成は拒否する。
 
         本機は受信 ID の下位 8bit だけを見て自分宛かを判定するため、一致すると
-        フィードバックが指令として解釈される (CLAUDE.md
+        フィードバックが指令として解釈される (docs/invariants.md
         「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)。
         """
         with pytest.raises(ValueError, match="master_id"):
@@ -677,8 +677,7 @@ class TestDriverSpecificKeys:
     def test_non_numeric_pid_value_is_rejected(self) -> None:
         """数値でない pid 値を既定値へ黙って倒さず、起動を拒否する。
 
-        かつては `main._load_pid_config` が警告 1 行で既定値へ倒して起動を続けていた。
-        `pid.kd` は `motion.velocity_ff` と対に保つ値なので (CLAUDE.md)、黙って既定値へ
+        `pid.kd` は `motion.velocity_ff` と対に保つ値なので (docs/invariants.md)、黙って既定値へ
         化けると症状は「飽和率だけ上がって速くならない」だけになり、config を読んでも
         原因が見えない。
         """
@@ -719,7 +718,7 @@ class TestDriverSpecificKeys:
 
         「数値でなければ既定値へ」という手当てをすり抜けて `kp: .inf` がそのまま
         有効なゲインとして起動していた (警告 0 件)。**PID ゲインを実行中に差し替える
-        経路は無い**ので (CLAUDE.md)、ここを通った値を後段で止める層はどこにも無い。
+        経路は無い**ので (docs/invariants.md)、ここを通った値を後段で止める層はどこにも無い。
         """
         with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kd"):
             load_robot_config(

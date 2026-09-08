@@ -153,9 +153,9 @@ class TestThermalWarningTakesOnlyWarningThreshold:
 class TestServerInfoCarriesTempThresholds:
     """温度しきい値が UI へ配られること。UI 側に写しを持たせないための配線。
 
-    UI が独自のしきい値を持っていた頃、同じモータについてサーバーは OK・画面は
-    異常という食い違いが出ていた。config の値がそのまま届くことまで見ないと、
-    「配ってはいるが既定値のまま」という形で二重管理が復活する。
+    UI が独自のしきい値を持つと、同じモータについてサーバーは OK・画面は異常という
+    食い違いが出る。config の値がそのまま届くことまで見ないと、「配ってはいるが
+    既定値のまま」という形で二重管理が復活する。
     """
 
     async def test_config_values_reach_the_client(self) -> None:

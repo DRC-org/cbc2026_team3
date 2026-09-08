@@ -120,8 +120,8 @@ describe("evaluateHealth", () => {
 
   /**
    * 高温はサーバーが config の `temp_warning_c` で `MotorHealth.state = warning` として
-   * 既に配信している。UI が温度テレメトリから重ねて数えていた頃は、同じ 1 基が
-   * 「異常 2 件」として出ていた (しかも UI の境界 60℃ はサーバーの 65℃ とずれていた)。
+   * 既に配信している。UI が温度テレメトリから重ねて数えると、同じ 1 基が
+   * 「異常 2 件」として出る (しかも UI 側の境界はサーバーの config とずれうる)。
    */
   it("高温モータをサーバー判定と二重に数えない", () => {
     const verdict = verdictWhenConnected(health({ motors: [motorHealth({ state: "warning" })] }));
@@ -219,8 +219,8 @@ describe("evaluateHealth", () => {
   /**
    * **読めなかったヘルスは異常側へ倒す。**
    *
-   * ここが素通しだった頃、`health.buses` を欠いた配信 1 通で `buses.filter(...)` が
-   * レンダー本体から投げていた。呼び出し元の 1 つ (`TabBar`) は `RouteErrorBoundary`
+   * ここを素通しにすると、`health.buses` を欠いた配信 1 通で `buses.filter(...)` が
+   * レンダー本体から投げる。呼び出し元の 1 つ (`TabBar`) は `RouteErrorBoundary`
    * の外にあるため、例外は React ツリーごとアンマウントし、**ヘッダーの緊急停止
    * ボタンまで画面から消える**。`safety` の 1 欄欠落で全画面が白くなった事故と同型。
    */
@@ -361,7 +361,7 @@ describe("firmwareUnconfirmedMotors", () => {
    * **ガードを `?? []` へ置き換えてはならない。** 欄の欠落 (`undefined`) だけなら
    * `?? []` でも同じに見えるが、「**欄はあるが配列でない**」場合に挙動が変わり、
    * 呼び出し側 (`FirmwareUnconfirmedNotice`) の `.map` が `TypeError` を投げて
-   * `SubsystemStatus` 以下の React ツリーが丸ごとアンマウントする —— CLAUDE.md が
+   * `SubsystemStatus` 以下の React ツリーが丸ごとアンマウントする —— docs/invariants.md が
    * 「`describeSafetyIssues` が無検査で `.length` を呼び全画面が白くなった」として
    * 記録している事故と同型。
    */
@@ -487,7 +487,7 @@ describe("describeSafetyIssues", () => {
 
   /**
    * サーバーが安全機構の 1 欄を落として契約を焼き直すと、Python も TS も
-   * 全テスト緑のまま UI が起動直後に白画面になっていた (呼び出し元は
+   * 全テスト緑のまま UI が起動直後に白画面になる (呼び出し元は
    * SubsystemStatus / TabBar / StartGate のレンダー本体で、投げれば
    * React ツリーごとアンマウントしヘッダーの緊急停止ボタンまで消える)。
    *
@@ -600,8 +600,8 @@ describe("tempThresholdsOf", () => {
 });
 
 /**
- * サマリーが独自判定を持っていた頃、温度が正常なら FAULT のモータがあっても
- * 「All operational」を出していた。判定はここ 1 箇所だけが持つ。
+ * サマリーが独自判定を持つと、温度が正常なら FAULT のモータがあっても
+ * 「All operational」を出す。判定はここ 1 箇所だけが持つ。
  */
 describe("summarizeMotors", () => {
   it("全て ok なら All operational", () => {

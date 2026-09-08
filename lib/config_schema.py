@@ -242,7 +242,7 @@ def _number(source: str, path: str, raw: object) -> float:
     # **NaN と無限大はここで落とす。値域検査では捕まえられない。** yaml の `.nan` も
     # 文字列の `"nan"` も float() を通り、NaN は比較がすべて False になるので
     # `value <= 0` も `warning > critical` も素通りする —— CAN プロトコルから float を
-    # 外した理由 (CLAUDE.md) とまったく同じ失敗様式で、しきい値として内部へ入ると
+    # 外した理由 (docs/invariants.md) とまったく同じ失敗様式で、しきい値として内部へ入ると
     # 「全モータが恒久 STALE なのに設定は正常に見える」形でしか現れない。
     # 無限大は比較を通ってしまうぶんさらに悪く、`feedback_timeout_ms: .inf` は
     # 「途絶検出が黙って無効」、`temp_warning_c: .inf` は「温度警告が黙って無効」に
@@ -403,12 +403,11 @@ def _parse_pid(source: str, motor_name: str, raw: object) -> Mapping[str, object
     # 書いても効かないゲインを黙って捨てないため、キー名は起動時に突き合わせる。
     _reject_unknown(source, path, section, _PID_KEYS)
 
-    # **値も起動時に見る。ここが唯一の関門である。** かつては `main._load_pid_config`
-    # が「数値でなければ警告して既定値」で受けていたが、それは 2 通りに破れていた ——
-    # yaml の `true` は `float()` を通って 1.0 として静かに効き、`.inf` / `.nan` も
-    # `float()` が例外を投げないので警告 0 件でそのまま採用される (`kp: .inf` が
-    # 有効なゲインとして起動する)。しかも PID ゲインを実行中に差し替える経路は
-    # 持たない方針なので (CLAUDE.md「config に書いた値がそのまま動いている値である」)、
+    # **値も起動時に見る。ここが唯一の関門である。** 「数値でなければ警告して既定値」
+    # では 2 通りに破れる —— yaml の `true` は `float()` を通って 1.0 として静かに効き、
+    # `.inf` / `.nan` も `float()` が例外を投げないので警告 0 件でそのまま採用される
+    # (`kp: .inf` が有効なゲインとして起動する)。しかも PID ゲインを実行中に差し替える経路は
+    # 持たない方針なので (docs/invariants.md「config に書いた値がそのまま動いている値である」)、
     # ここを通った値を後段で止める層はどこにも無い。
     #
     # 判定は `_number` に任せる —— bool と非数値型、NaN と無限大をまとめて弾く。
@@ -609,7 +608,7 @@ def _check_dm3520_master_id_collisions(
     下位 8bit で衝突していないことを確認する。
 
     本機は受信 ID の**下位 8bit だけ**を見て自分宛かを判定するため
-    (CLAUDE.md「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)、
+    (docs/invariants.md「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)、
     一致すると自分または他ノードへのフィードバックが指令として解釈される。
     DM3520 の出荷値は 2 台とも ESC_ID == MST_ID なので、この検査が無いと
     「ESC_ID は書き換えたが MST_ID を書き換え忘れた」個体がそのまま config に

@@ -34,8 +34,8 @@ function mount(check: Partial<MotorCheckSnapshot> = {}, connected = true) {
 
 describe("MotorCheckPanel", () => {
   it("画面を覆わない (モーダルではない)", () => {
-    // **これがこの部品の存在理由。** モーダルだった頃は駆動しているあいだずっと
-    // 全画面オーバーレイがヘッダーを覆い、EMG STOP がクリックできなかった
+    // **これがこの部品の存在理由。** モーダルにすると駆動しているあいだずっと
+    // 全画面オーバーレイがヘッダーを覆い、EMG STOP がクリックできなくなる
     mount({ running: true, step_index: 1, current_step: STEPS[1].label });
 
     expect(document.querySelector(".modal")).toBeNull();
@@ -146,10 +146,9 @@ describe("MotorCheckPanel", () => {
 
   /**
    * **既定の mount() がまさにこの状態** (running:false, step_index:0, ステップ表あり)。
-   * 実配信のスナップショットもこの形で、以前は全ステップに緑の ✓ が付いていた。
-   *
-   * `config/checklist.yaml` の「アクチュエータ動作確認 完了」は、この誤表示のまま
-   * チェックが付く経路になっていた。
+   * 実配信のスナップショットもこの形。これを完了と読むと全ステップに緑の ✓ が付き、
+   * `config/checklist.yaml` の「アクチュエータ動作確認 完了」はその誤表示のまま
+   * チェックが付く経路になる。
    */
   it("未実行を完了と表示しない", async () => {
     mount();

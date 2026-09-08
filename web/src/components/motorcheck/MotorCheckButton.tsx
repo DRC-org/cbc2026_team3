@@ -13,7 +13,7 @@ import { motorCheckStatus } from "@/lib/motorCheckStatus";
  *
  * 可否の判定はサーバー (`_motor_check_deny_reason`) が唯一の持ち主で、ここは
  * 理由を表示するだけ。フェーズや緊急停止から導出し直すと、サーバーが受け付ける
- * 操作を画面が殺す状態が生まれる (かつて `StartGate` で作った失敗と同じ形)。
+ * 操作を画面が殺す状態が生まれる。
  *
  * **起動前の確認だけはダイアログのまま。** 押した瞬間に両ハンドの全アクチュエータが
  * 動き出すので、周囲の安全確認を促す文面を出す場所が要る。進捗パネルと違って機体が
@@ -25,8 +25,8 @@ export function MotorCheckButton() {
   const { state, start } = useMotorCheck();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // 可否の判定はパネル側と共有する。かつてパネルは `blocked_reason` しか見ておらず、
-  // 切断中でも押せて、押しても何も起きず理由も出なかった
+  // 可否の判定はパネル側と共有する。`blocked_reason` だけを見ると、切断中は
+  // サーバーへ届かないので理由も返らず、押せるのに何も起きないボタンになる
   const { reasonLabel } = motorCheckStatus(state, connected);
   const disabled = reasonLabel !== null;
 

@@ -73,9 +73,8 @@ class TestDefaults:
     def test_role_is_a_single_pre_match_list(self) -> None:
         """ロールが増減すると試合開始ゲートの対象がそのまま変わる。
 
-        操縦者 2 名で分けていたものを 1 つへ統合した。分かれていた頃は
-        「片方だけ完了」で開始できない状態に意味があったが、2 名が同じ場所で
-        同じ機体を見る以上、独立した確認にはなっていなかった。
+        操縦者 2 名は同じ場所で同じ機体を見るので、ロールを分けても独立した確認には
+        ならない。ロールは `pre_match` 1 つに保つ。
         """
         assert set(_make().checklists) == {ROLE_PRE_MATCH}
 

@@ -1,13 +1,13 @@
 """`INFO` (自己申告) を一度も受けていない自作モタドラを画面に出す。
 
-CLAUDE.md「送信バッファの本数は 3 枚で違う」節が書くとおり、`INFO` は送信バッファの
+docs/invariants.md「送信バッファの本数は基板ごとに違う」節が書くとおり、`INFO` は送信バッファの
 都合だけで 1 通も出ないことがある。PC 側は未受信を FAULT にしないのが正しいが、
 その間は焼き忘れ検出 (`GenericDriver.info_mismatch`) も一緒に沈黙する。ここが
 黙って無効になったままだと、実際に焼き忘れがあっても誰も気付けない。
 
 **対象は「`FEEDBACK` は届いているのに `INFO` だけ来ない」モータに限る。** 基板が
 丸ごと落ちている場合は `CANManager.health()` の STALE が既に大声で言うので、
-ここで重ねて言わない (CLAUDE.md「同じ事実を 2 度描かない」)。
+ここで重ねて言わない (docs/invariants.md「同じ事実を 2 度描かない」)。
 """
 
 from __future__ import annotations
@@ -185,7 +185,7 @@ class TestStaleMotorsAreExcluded:
     """**基板が落ちている場合はここで言わない。**
 
     残したいのは「`FEEDBACK` は 10ms で届き続けているのに `INFO` だけが 1 通も
-    出ない」(CLAUDE.md「送信バッファの本数は 3 枚で違う」節) という壊れ方だけ。
+    出ない」(docs/invariants.md「送信バッファの本数は基板ごとに違う」節) という壊れ方だけ。
     基板が丸ごと落ちていれば `CANManager.health()` が全チャンネルを STALE に倒し、
     UI 側の `evaluateHealth` が warning として診断ツリーを強制展開するので、
     ここでも言うと同じ事実を 2 度描くことになる。手当ても別物で、生きている基板に

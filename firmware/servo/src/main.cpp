@@ -145,9 +145,9 @@ static_assert(pinsAvoidCan(), "config.h のピンが CAN(D4/D5) と衝突して�
 #endif
 
 // デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
-// スロット間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）。
-// かつては基準 ID の表を持ち、重複・連続ブロック性・帯・センサのビット割り当ての
-// 4 つを static_assert で見張っていたが、ビット分割と 1 デバイス 1 ビットで規則ごと消えた。
+// スロット間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）ので、
+// 基準 ID の表も重複・連続ブロック性・帯・センサのビット割り当ての static_assert も
+// 要らない。
 
 static_assert(kServoSlotCount <= motorcan::kMaxSlotNumber + 1,
               "スロット数がデバイス ID のスロット番号（3bit）に収まらない");
@@ -166,8 +166,8 @@ static_assert(sizeof(kServoBoards) / sizeof(kServoBoards[0]) == kServoBoardCount
               "kServoBoards の行数と kServoBoardCount が一致していない");
 
 // **基板番号が重複していると、線形探索で先に見つかった行が黙って勝つ。**
-// 添字が基板番号だった頃は構造的に起こり得なかったが、値で持つようにした以上ここで見る。
-// 症状は「DIP を合わせたのに別の基板の役割で動く」で、しかも 2 枚のうち片方でしか出ない。
+// 基板番号は行の添字ではなく値で持つので、重複はここでしか止められない。症状は
+// 「DIP を合わせたのに別の基板の役割で動く」で、しかも 2 枚のうち片方でしか出ない。
 static constexpr bool boardNumbersAreUnique() {
     for (uint8_t i = 0; i < kServoBoardCount; ++i) {
         for (uint8_t j = static_cast<uint8_t>(i + 1); j < kServoBoardCount; ++j) {
@@ -386,8 +386,8 @@ static void updateMotion(uint32_t nowMs) {
 
 // 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
 // **ここで OR を足してはならない。** 「センサスロットは緊急停止・ウォッチドッグ・到達を
-// 立てない」（仕様書 §5.2）は SlotKind::Sensor から導かれ、以前はこの early-return が
-// 唯一の実装だったので `return flags;` を消してもテストが 1 件も落ちなかった。
+// 立てない」（仕様書 §5.2）は SlotKind::Sensor から導かれる。ここを唯一の実装にすると
+// native テストが届かず、規則を消しても 1 件も落ちなくなる。
 static uint8_t buildStatusFlags(uint8_t slot, uint32_t nowMs) {
     const SlotKind kind = isSensorSlot(slot) ? SlotKind::Sensor : SlotKind::Actuator;
     return composeFeedbackFlags(kBoardKind, kind, g_channel[slot].safetyStatusFlags(nowMs),

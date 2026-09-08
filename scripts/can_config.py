@@ -27,10 +27,9 @@ _IFNAME_MAX = 15
 _SERVICE_NAME = "cbc-can.service"
 
 # install.sh が配置し、setup_can.sh が同期を確認する udev ルールの置き場所。
-# **この 2 本が別々に文字列を持ってはならない。** かつては両方に書いてあり、
-# setup_can.sh 側は「install.sh の UDEV_RULE_PATH と一致させること」とコメントで
-# 運用を要求していた。ずれると setup_can.sh は存在しないファイルを見て「未配置」と
-# 警告し続け、strict では試合前点検が必ず落ちる (install.sh は正しく配置しているのに)。
+# **この 2 本が別々に文字列を持ってはならない。** ずれると setup_can.sh は存在しない
+# ファイルを見て「未配置」と警告し続け、strict では試合前点検が必ず落ちる
+# (install.sh は正しく配置しているのに)。
 # ルール本体と service 名の生成元がここなので、パスもここが持つ。
 _UDEV_RULE_PATH = "/etc/udev/rules.d/99-canable.rules"
 

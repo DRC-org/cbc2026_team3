@@ -409,8 +409,7 @@ describe("parseServerMessage", () => {
     /**
      * `level` は `HealthChangeLevel`（3 値の union）で `MALFORMED` という
      * 第 4 の値を持てない。読めなかったときに軽い側 (`"info"`) へ倒すと、
-     * 型不正のせいで本当に critical なイベントが画面から消える
-     * (`web/src/lib/protocol.ts:967` で実際に `?? "info"` になっていた事故)。
+     * 型不正のせいで本当に critical なイベントが画面から消える。
      * ここでは異常側の `"critical"` へ倒すことを固定する。
      */
     it("level 省略時は critical (異常側) へ倒す", () => {

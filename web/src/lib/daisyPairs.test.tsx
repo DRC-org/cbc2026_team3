@@ -24,7 +24,7 @@ const ALL_TONES: Tone[] = ["success", "warning", "error", "info", "neutral"];
  * daisyUI のコンポーネントは「親クラス + 修飾子」が揃って初めて成立する。
  * Tailwind はソース中に現れた文字列ぶんしか CSS を出力しないため、
  * 片方を書き忘れると **DOM には存在するのに何も見えない** 要素が出荷される
- * （過去に `modal-box` だけ書いて `modal modal-open` を落とし、実際にそうなった）。
+ * （`modal-box` だけ書いて `modal modal-open` を落とすとそうなる）。
  *
  * 文字列連結で組み立てると Tailwind の走査から漏れるので、対は必ず
  * 揃った 1 本の文字列としてソースに書く。ここではその不変条件を固定する。
@@ -49,8 +49,8 @@ describe("daisyUI のクラスは対で書かれている", () => {
   });
 
   it("alert は親クラスと色修飾子が揃っている", () => {
-    // トーストはここを使う。かつて配色表が `components/shell/Toaster.tsx` の
-    // ローカル定義だったため、この検査の対象から外れていた
+    // トーストはここを使う。配色表を各コンポーネントのローカル定義に置くと、
+    // この検査の対象から外れる
     for (const tone of ALL_TONES) {
       expect(TONE_ALERT_CLASS[tone]).toMatch(/(^| )alert( |$)/);
     }

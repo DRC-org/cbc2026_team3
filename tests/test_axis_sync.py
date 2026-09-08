@@ -122,10 +122,9 @@ class TestAxisSpecSyncGroup:
 class TestConversionIsAlwaysPerMotor:
     """換算はモータごとにしか行えない (軸単位の scale を返す API を公開しない)。
 
-    かつては軸単位の ``scale`` / ``to_command`` / ``command_tolerance`` があり、
-    ペア軸に使うと先頭モータの scale が左右の両方へ当たって、左のモータが右向きに
-    全ストローク動いた。ValueError で塞いでいたが API ごと削除したため、
-    残っているのはモータごとに換算する道だけになった。
+    軸単位の ``scale`` / ``to_command`` / ``command_tolerance`` をペア軸に使うと、
+    先頭モータの scale が左右の両方へ当たり、左のモータが右向きに全ストローク動く。
+    API ごと持たないので、残るのはモータごとに換算する道だけになる。
     """
 
     def test_paired_axis_converts_each_motor_with_its_own_scale(self) -> None:

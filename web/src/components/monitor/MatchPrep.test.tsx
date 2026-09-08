@@ -71,7 +71,7 @@ describe("MatchPrep の項目配置", () => {
   });
 
   it("動作確認の進捗と結果もその場で開く (モーダルへ追い出さない)", () => {
-    // かつてこれはモーダルで、駆動しているあいだヘッダーの EMG STOP を覆っていた
+    // モーダルにすると、駆動しているあいだヘッダーの EMG STOP を覆う
     mount();
 
     const check = section("アクチュエータ動作確認");
@@ -191,9 +191,9 @@ describe("MatchPrep のコート選択", () => {
   });
 
   it("やり直しの導線は 1 つだけ (結果が同じボタンを 2 つ並べない)", () => {
-    // かつてヘッダの CLEAR (checklist_reset) と最下段の match_reset が並んでいたが、
-    // 準備フェーズではフェーズもタイマーも初期状態なので結果が同じで、
-    // 操縦者はどちらを押すべきか画面から判断できなかった
+    // ヘッダの CLEAR (checklist_reset) と最下段の match_reset を並べると、準備
+    // フェーズではフェーズもタイマーも初期状態なので結果が同じになり、操縦者は
+    // どちらを押すべきか画面から判断できない
     mount({ items: [item("a", "preflight", true)], completed: false });
 
     expect(screen.getAllByRole("button", { name: /リセット|解除/ })).toHaveLength(1);

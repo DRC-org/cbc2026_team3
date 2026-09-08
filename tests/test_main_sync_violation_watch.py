@@ -14,7 +14,7 @@ journal の汎用メッセージにしか残らないので、`server.watch_task
 `watch_task` 自体の振る舞い (失敗の記録・キャンセルの無視・上限) は
 `tests/test_server_task_watch.py` が持つ。ここでは main.py 側の配線
 (呼ばれること・context と robots の中身) だけを見る。**main.py に 2 つ目の
-カウンタを作らない** (CLAUDE.md) ので、数える側の正しさはあちらのテストに任せる。
+カウンタを作らない** (docs/invariants.md) ので、数える側の正しさはあちらのテストに任せる。
 """
 
 from __future__ import annotations

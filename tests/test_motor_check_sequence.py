@@ -203,7 +203,7 @@ class TestConstantsHaveASingleOwner:
     async def test_メインハンドは同じ初期姿勢へ往復する(self) -> None:
         """往路 (move_to_home) と復路 (return_home) が別の姿勢になってはならない。
 
-        かつては同じ 6 軸の dict がリテラルで 2 回書かれており、片方だけ直せた。
+        同じ 6 軸の dict をリテラルで 2 回書くと、片方だけを直せてしまう。
         """
         seq = main_hand.MainHandSequence()
         calls: list[dict[str, str]] = []
@@ -220,10 +220,10 @@ class TestConstantsHaveASingleOwner:
     def test_ステップの宣言軸は初期姿勢と電磁弁から導かれる(self) -> None:
         """登録可否の判定材料を呼び出し側で組み直させない。
 
-        かつては `REQUIRED_AXES` という 1 つの定数がステップ表と別の場所に
-        あり、ステップが軸を増やしたときに判定だけが古いまま残せた。宣言を
-        ステップの隣へ置いた今でも、**宣言の出どころは運用シーケンスの定数**
-        でなければならない (書き写すと動作確認だけが古い軸名で通る)。
+        必要軸の定数をステップ表と別の場所に置くと、ステップが軸を増やしたときに
+        判定だけが古いまま残る。宣言はステップの隣に置き、かつ**宣言の出どころは
+        運用シーケンスの定数**でなければならない (書き写すと動作確認だけが古い
+        軸名で通る)。
         """
         declared = {axis for info in MotorCheckSequence("x").steps for axis in info.axes}
 

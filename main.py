@@ -398,7 +398,7 @@ def _wire_motor_check_sequence(
 
         def _sensor_latched(name: str) -> bool:
             # 探索の到達判定だけがこれを読む。ON 区間が homing.step より狭いと
-            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす (実機で発生)
+            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす
             sensor = sensors.get(name)
             if sensor is None:
                 return False
@@ -619,10 +619,7 @@ def _make_generic(motor: MotorConfig) -> MotorDriver:
 
 
 #: ドライバ種別名 -> 生成関数。**全種別がこの表を通る。**
-#: かつては 3 種を if 連鎖で個別に生成し、表に届くのは m3508 だけだった。
-#: 名前は「種別 → 実装クラスの対応表」なのに実態は 1 行のフォールバックで、
-#: lib/config_schema.DRIVER_TYPES が「この表と対で維持する」と言っている以上、
-#: 読んだ人は全種別がここで生成されると読む。
+#: if 連鎖に戻すと、足し忘れが「引数の足りない別物が黙って生成される」形に落ちる。
 #: 種別を足す人は DRIVER_TYPES とこの表の両方を触ることになり、
 #: 対応は tests/test_config_schema.py が検証する。
 _DRIVER_MAP: dict[str, Callable[[MotorConfig], MotorDriver]] = {
@@ -822,10 +819,9 @@ def _build_target_refreshers(
     目標を持たないモータの扱いが正反対のため (自作モタドラは送ってはならず、
     問い合わせ駆動の 2 種は送らなければならない)。
 
-    **EDULITE 05 を対象外にしてはならない。** かつて「ドライバ内蔵の位置ループが
-    目標を保持し、かつ自発的にフィードバックを返す」として除外していたが、後半が
-    誤りだった (実機で確認: 励磁したまま 13 秒放置してフィードバックは 0 通)。
-    前半は正しいので位置制御ループは要らず、要るのは生存問い合わせだけになる。
+    **EDULITE 05 を対象外にしてはならない。** ドライバ内蔵の位置ループが目標を
+    保持するので位置制御ループは要らないが、フィードバックは自発的に返さない
+    (実機で励磁したまま 13 秒放置してフィードバックは 0 通)。要るのは生存問い合わせ。
 
     M3508 だけが対象外。位置制御ループが 200Hz で電流指令を送り続けるうえ、
     C620 はフィードバックを自発的に送るため問い合わせも要らない。
@@ -1007,12 +1003,12 @@ def _load_sequence(robot_name: str) -> Sequence | None:
     """sequences/<robot_name>.py からシーケンスクラスを動的にロードする。
 
     **候補は「そのモジュールが定義した」クラスに限り、2 つ以上あったら起動を拒否する。**
-    かつては ``dir()`` の並び (アルファベット順) で最初に見つかったサブクラスを
-    返していたため、``sequences/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を
-    import しただけで ``"MotorCheckSequence" < "SubHandSequence"`` が成立し、
-    サブハンドとして動作確認シーケンスが登録される。症状は「sub_hand の
-    sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
-    理由が読めない。曖昧な構成は黙って起動させず、その場で落とす。
+    ``dir()`` の並び (アルファベット順) の先頭を採る形にすると、
+    ``sequences/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を import
+    しただけで ``"MotorCheckSequence" < "SubHandSequence"`` が成立し、サブハンドと
+    して動作確認シーケンスが登録される。症状は「sub_hand の sequence_start で
+    なぜか両ハンドが動く」だけで、config からもログからも理由が読めない。
+    曖昧な構成は黙って起動させず、その場で落とす。
     """
     module_name = f"sequences.{robot_name}"
     try:
@@ -1111,8 +1107,8 @@ class _RobotWiring:
     """ロボット 1 台ぶんの配線結果。
 
     起動・後始末・統合動作確認への受け渡しが、これ 1 つを回すだけで済むようにする。
-    かつては `main()` の中でロボットごとの部品を 5 本のリストへ ``extend`` していた
-    ため、「どの部品がどの機体のものか」がループを抜けた時点で失われていた。
+    部品を種類ごとのリストへ ``extend`` する形だと、「どの部品がどの機体のものか」が
+    ループを抜けた時点で失われる。
     """
 
     name: str

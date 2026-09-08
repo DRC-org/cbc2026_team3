@@ -160,10 +160,10 @@ class TestCANManagerHealth:
     async def test_degraded_clears_once_sending_recovers(self) -> None:
         """**送信が復旧したら DEGRADED は消えなければならない。**
 
-        判定を累計カウンタで行っていた頃は、一度しきい値を超えたバスが永久に
-        DEGRADED のまま残った。実機では物理緊急停止で DM3520 の電源が数秒落ちた
-        だけで 6000 件積み上がり、CAN が完全に復旧した後 (ip -s link が
-        ERROR-ACTIVE・bus-off 0 回・送受信ともエラー 0) も UI が異常を出し続けた。
+        判定を累計カウンタで行うと、一度しきい値を超えたバスが永久に DEGRADED の
+        まま残る。実機では物理緊急停止で DM3520 の電源が数秒落ちただけで 6000 件
+        積み上がるので、CAN が完全に復旧した後 (ip -s link が ERROR-ACTIVE・
+        bus-off 0 回・送受信ともエラー 0) も UI が異常を出し続けることになる。
         操縦者には「直したのに直らない」としか見えず、本物の異常と区別が付かない。
         """
         mgr = CANManager(run_blocking=direct_runner())

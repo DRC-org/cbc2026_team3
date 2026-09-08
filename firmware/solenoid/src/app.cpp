@@ -45,9 +45,8 @@ struct PinRef {
 
 // 基板が使うピンをすべて 1 つの表に集める。
 //
-// **CAN との衝突だけを見てはならない。** かつて DC 用の config.h は CAN ピンとの
-// 衝突しか検査しておらず、`DIS` として LOW/HIGH を振っていた D7 が実機では ch2 の
-// 方向ピンだった、という食い違いをビルドが素通しにした。
+// **CAN との衝突だけを見てはならない。** それだけでは config.h の想定と実基板の
+// 配線がまるごと食い違っていてもビルドが通る。
 // UART と CAN は「コードから触らないが奪われると死ぬ」ピンなので必ず入れる。
 constexpr PinRef kAllPins[] = {
     {kSolenoidChannels[0].port, kSolenoidChannels[0].pin},
@@ -291,8 +290,8 @@ void applyAllOutputs(uint32_t nowMs) {
 // 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
 // **ここで OR を足してはならない。** 到達フラグを立てないこと（仕様書 §9.3: 弁が
 // 開いたかを観測する手段が 1 つも無い）は board == Solenoid から導かれるので、
-// この呼び出しが規則の全てになる。以前はここで組み立てていて、HAL の翻訳単位に
-// あるせいで `flags |= kReached;` を足しても native テストが 1 件も落ちなかった。
+// この呼び出しが規則の全てになる。ここで組み立てると規則が HAL の翻訳単位へ移り、
+// `flags |= kReached;` を足しても native テストが 1 件も落ちなくなる。
 uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
                                 g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
@@ -305,8 +304,8 @@ uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
 // （既定 500ms）には遠く届かない。
 //
 // 諦めた結果は捨てずに数える。**戻り値を捨てないための唯一の口**にしてあるので、
-// HAL_CAN_AddTxMessage() を直に呼ぶ経路を作らないこと。捨てていた頃は、6ch 中 4ch の
-// INFO が 1 通も出ていないことが LED にもログにも現れなかった。
+// HAL_CAN_AddTxMessage() を直に呼ぶ経路を作らないこと。捨てると、6ch 中 4ch の
+// INFO が 1 通も出ていないことが LED にもログにも現れない。
 //
 // **この数え方は自動再送 (main.c の AutoRetransmission = ENABLE) に依存している。**
 // NART (再送しない) だと、1 回の送信試行が成功・エラー・調停負けのどれで終わっても
@@ -474,9 +473,8 @@ void pollCan() {
 // E_STOP や SET_TARGET だと、症状は「たまに指令が効かない」という最も追いにくい形になる。
 //
 // **どの ID を通すかは CommandType から導く**（`kEStopAndSetTargetFilter` /
-// `kSetParamFilter`）。以前はここに `0x000` / `0x600` / `0x200` / `0x700` という
-// リテラルが並び、CommandType への参照が 1 つも無かった —— この enum は実際に
-// 一度動いているので（かつて E_STOP は 0b111）、次に動かすと**電磁弁だけが
+// `kSetParamFilter`）。`0x000` / `0x600` / `0x200` / `0x700` のリテラルを並べると
+// CommandType への参照が 1 つも無くなり、種別のビット配置を動かしたときに**電磁弁だけが
 // 緊急停止を落とし始める**（DC 用とサーボ用は parseCanId 経由で自動追従する）。
 //
 // **1 本のマスクでは 3 値を表せない**ので 2 バンクに分ける。ここに残っているのは
@@ -661,7 +659,7 @@ extern "C" void setup() {
     // （kDeviceIdUnconfigured）のまま残るので、仕様書 §2.2 の既存の経路にそのまま乗る:
     // applyChannelOutput は入口で return して GPIO へ 1 度も届かず、FEEDBACK も INFO も
     // 1 通も出ず、LED は BoardIndication が urgent（赤の速い点滅）へ倒す。
-    // CLAUDE.md の「表に無い基板番号は全スロット Unused のまま据え置く」と同じ形で、
+    // docs/invariants.md の「表に無い基板番号は全スロット Unused のまま据え置く」と同じ形で、
     // 新しいゲートを 1 つも増やさずに「弁を 1 つも開かせない」が成立する。
     //
     // **緊急停止ラッチ（MotorSafety::stop()）で止めてはならない。** ラッチは CAN の

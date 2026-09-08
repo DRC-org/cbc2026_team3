@@ -75,7 +75,7 @@ describe("Dashboard (セッティングタイム)", () => {
     });
 
     // 項目名を出すのは Checklist だけ。StartGate は残り件数しか言わない
-    // (以前は StartGate と右カラムの OperatorProgress が同じ項目を 2 度並べていた)
+    // (両方が出すと操縦者は同じ 1 行を 2 箇所で読むことになる)
     expect(screen.getAllByText(/非常停止解除/)).toHaveLength(1);
   });
 

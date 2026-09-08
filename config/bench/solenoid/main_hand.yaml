@@ -29,8 +29,7 @@ motors:
   # この基板は弁が開いたかを観測する手段を持たず (圧力センサもリミットスイッチも
   # 非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。**それを表すのが
   # control_type: on_off で、この制御タイプは到達判定を持たない** ——
-  # 動作確認 (motor_check) は settle_s の固定待ちへ落ちるので、除外の指定は要らない
-  # (かつての motor_check.magnitude: 0 は config ごと消えている)。
+  # 動作確認 (motor_check) は settle_s の固定待ちへ落ちるので、除外の指定は要らない。
   # 開閉の確認は config/bench/solenoid/checklist.yaml の打音・目視項目が担う。
   valve_ch0:
     driver: generic

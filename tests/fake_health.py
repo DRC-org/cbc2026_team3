@@ -25,9 +25,9 @@ def ok_health_snapshot(can_manager: Any) -> HealthSnapshot:
 
     構成を実体から引くことで、テスト側でモータを差し替えてもヘルスの中身と
     state メッセージの中身が食い違わない。参照するのは ``motors`` /
-    ``bus_names`` という公開 API だけにする。ここが private (``_motors``) を
-    見ていた頃は、モックを組む側にも「``motors`` と ``_motors`` を同じ dict へ
-    揃える」という本番に存在しない儀式が必要だった。
+    ``bus_names`` という公開 API だけにする。private (``_motors``) を見ると、
+    モックを組む側にも「``motors`` と ``_motors`` を同じ dict へ揃える」という
+    本番に存在しない儀式が必要になる。
     """
     now = time.time()
     buses = list(getattr(can_manager, "bus_names", ()) or ())

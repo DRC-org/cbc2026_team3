@@ -38,9 +38,8 @@ fi
 
 # ヘッダコメントをそのまま --help として出す。
 #
-# **行番号をハードコードしてはならない。** かつては `sed -n '3,12p'` のように
-# 自分の何行目から何行目かを書いており、コメントを 1 行足すたびに末尾が欠けるか
-# 無関係な行が混ざった (can_watchdog.sh は実際に空行を 1 行余計に出していた)。
+# **行番号をハードコードしてはならない。** `sed -n '3,12p'` のように自分の何行目から
+# 何行目かを書くと、コメントを 1 行足すたびに末尾が欠けるか無関係な行が混ざる。
 # 連続するコメント行という構造で切れば、ヘッダを編集しても追従する。
 usage() {
     awk '
@@ -86,11 +85,10 @@ require_can_config() {
     fi
 }
 
-# udev ルールのパスと service 名は can_config.py が単一情報源。かつては
-# install.sh と setup_can.sh が同じ文字列を手で書き写し、「install.sh の
-# UDEV_RULE_PATH と一致させること」とコメントで運用を要求していた (= 仕組みでは
-# 担保されていなかった)。ずれると setup_can.sh は存在しないファイルを見て
-# 「udev ルールが未配置」と警告し続ける —— install.sh は正しく配置しているのに。
+# udev ルールのパスと service 名は can_config.py が単一情報源。install.sh と
+# setup_can.sh が同じ文字列を手で書き写すと、ずれても仕組みでは気付けない ——
+# setup_can.sh は存在しないファイルを見て「udev ルールが未配置」と警告し続ける
+# (install.sh は正しく配置しているのに)。
 can_config_path() {
     local key="$1" out
     out=$("$PYTHON" "$CAN_CONFIG" paths) || return 1

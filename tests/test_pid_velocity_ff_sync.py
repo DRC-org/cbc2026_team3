@@ -1,6 +1,6 @@
 """`motion.velocity_ff` と `pid.kd` の一致を機械的に守る。
 
-CLAUDE.md の不変条件:
+docs/invariants.md の不変条件:
 
 > **`motion.velocity_ff` は `pid.kd` と同値に保つ。2 つの config ファイルにまたがる対である。**
 

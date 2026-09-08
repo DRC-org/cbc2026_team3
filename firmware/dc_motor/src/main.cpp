@@ -48,9 +48,9 @@ using namespace motorcan;
 // 配線の静的検証
 // ===========================================================================
 
-// 使うピンをすべて 1 つの表にまとめてから検証する。以前は CAN ピンとの衝突しか
-// 見ておらず、**config.h の想定と実基板の配線がまるごと食い違っていてもビルドが通った**
-// （DIS として LOW/HIGH を振っていた D7 が、実機では ch2 の方向ピンだった）。
+// 使うピンをすべて 1 つの表にまとめてから検証する。**CAN ピンとの衝突だけを見ては
+// ならない** —— それだけでは config.h の想定と実基板の配線がまるごと食い違っていても
+// ビルドが通る（例: DIS のつもりの D7 が実機では ch2 の方向ピン）。
 static constexpr uint8_t kAllPins[] = {
     kPinPwm[0], kPinPwm[1], kPinPwm[2], kPinDir[0], kPinDir[1], kPinDir[2],
     kPinRef,    kPinLed,    kPinRgb,    kPinDip[0], kPinDip[1],
@@ -83,9 +83,8 @@ static constexpr bool pinsAreUnique() {
 static_assert(pinsAreUnique(), "config.h のピンが重複している");
 
 // デバイス ID は makeDeviceId が「基板種別 | 基板番号 | スロット番号」で組み立てるので、
-// チャンネル間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）。
-// かつては基準 ID の表を持ち、重複・連続ブロック性・帯の 3 つを static_assert で
-// 見張っていたが、ビット分割にしたことで規則ごと消えた。
+// チャンネル間の重複も帯からのはみ出しも構造的に起こらない（仕様書 §2.2）ので、
+// 基準 ID の表も重複・連続ブロック性・帯の static_assert も要らない。
 
 // 下の g_pwm / g_channel は各チャンネルを明示的に初期化している。
 // チャンネルを増やすときはそれらの初期化子も一緒に足すこと。
@@ -219,10 +218,10 @@ static void applyChannelOutput(uint8_t ch, uint32_t nowMs) {
 // ===========================================================================
 
 // 状態フラグの組み立て規則そのものは composeFeedbackFlags が持つ（native テスト圏内）。
-// **ここで OR を足してはならない。** かつて 3 枚がそれぞれフラグを組み立てており、
-// この基板に `flags |= kReached;` を 1 行足しても native テストは 1 件も落ちなかった。
-// 到達フラグを立てないこと（仕様書 §3.2 / §8: 観測手段が 1 つも無い）は
-// board == Dc から導かれるので、この呼び出しが規則の全てになる。
+// **ここで OR を足してはならない。** 各 main.cpp がフラグを組み立てると規則が
+// ペリフェラルの翻訳単位へ移り、`flags |= kReached;` を 1 行足しても native テストは
+// 1 件も落ちなくなる。到達フラグを立てないこと（仕様書 §3.2 / §8: 観測手段が 1 つも
+// 無い）は board == Dc から導かれるので、この呼び出しが規則の全てになる。
 static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
     return composeFeedbackFlags(kBoardKind, SlotKind::Actuator,
                                 g_channel[ch].safetyStatusFlags(nowMs), isChannelConfigured(ch),
@@ -230,8 +229,8 @@ static uint8_t buildStatusFlags(uint8_t ch, uint32_t nowMs) {
 }
 
 // CAN 送信 1 通ぶんの結果を記録する。**戻り値を捨てないための唯一の口**にしてあるので、
-// CAN.write() を直に呼ぶ経路を作らないこと。かつて戻り値を捨てていたため、INFO が
-// 4 秒間 1 通も出ていないことが LED にもログにも現れなかった。
+// CAN.write() を直に呼ぶ経路を作らないこと。戻り値を捨てると、INFO が数秒間 1 通も
+// 出ていないことが LED にもログにも PC 側にも現れない。
 //
 // **空かなければ諦める。待ってはならない** —— 詰まったバスの上で loop() が止まると、
 // ウォッチドッグ満了の反映も出力の更新も止まる（電磁弁基板 app.cpp の sendFrame と

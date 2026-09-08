@@ -377,7 +377,7 @@ class HomingRunner:
         # (rotate は step も tolerance も 2.0deg) では動く前に必ず追従完了になり、
         # 待ちが丸ごと消える。そのとき呼び出し側の停滞判定は「待ったのに進まなかった」
         # ではなく「待っていないので進んでいない」を数えるので、**正常に動いている
-        # 機構が 0.3 秒で HomingError になる** (実機で発生)。
+        # 機構が 0.3 秒で HomingError になる**。
         reached = _progress_threshold(homing)
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)

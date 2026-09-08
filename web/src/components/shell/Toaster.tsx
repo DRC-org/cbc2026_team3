@@ -16,9 +16,9 @@ const MAX_TOASTS = 3;
  * トーストに出るのは「要確認」と「異常」だけ。成功や情報を積むと、直近の異常が
  * 古い通知に押し出される (同時表示は MAX_TOASTS で絞ってある)。
  *
- * **`lib/tone.ts` の `Tone` をローカル定義で覆い隠さない。** 以前ここは
- * `"warning" | "danger"` を自前で名乗り、配色表も `lib/tone.ts` の外にあったため、
- * daisyUI の対を守る検査 (`lib/daisyPairs.test.tsx`) の対象から外れていた。
+ * **`lib/tone.ts` の `Tone` をローカル定義で覆い隠さない。** トーン名と配色表を
+ * ここで自前に持つと、daisyUI の対を守る検査 (`lib/daisyPairs.test.tsx`) の対象から
+ * 外れる。
  */
 type ToastTone = Extract<Tone, "warning" | "error">;
 
@@ -71,8 +71,7 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
 /**
  * 全画面共通の通知スタック。
  *
- * 以前は「操作拒否」と「ヘルス異常」をそれぞれ別実装で出しており、
- * 同時発生時に重なって読めなくなっていた。
+ * 「操作拒否」と「ヘルス異常」を別々に出すと同時発生時に重なって読めなくなるので、
  * 表示位置と寿命の管理をここへ一本化し、常に右下から積み上げる。
  */
 export function Toaster() {

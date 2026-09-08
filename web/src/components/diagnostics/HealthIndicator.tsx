@@ -62,10 +62,8 @@ function BusRow({ bus }: { bus: BusHealth }) {
 /**
  * CAN バスの健全性。`SubsystemStatus` の CAN 節だけが使う。
  *
- * 表示は 1 通りしか持たない。以前は pill / card / compact / bus-only の 4 variant を
- * 抱えていたが、本番から呼ばれるのは bus-only だけで 165 行中およそ 60 行が
- * 到達不能だった。分岐が残っていると、直すとき「どの見た目が本番か」を
- * 呼び出し元まで辿らないと決められない。
+ * 表示は 1 通りしか持たない。variant を増やすと到達不能な分岐が残り、直すときに
+ * 「どの見た目が本番か」を呼び出し元まで辿らないと決められなくなる。
  */
 export function HealthIndicator({ health }: { health: HealthSnapshot | undefined }) {
   if (!health) {

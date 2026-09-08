@@ -41,10 +41,9 @@ const TONE_CLASS: Record<ButtonTone, string> = {
 };
 
 /**
- * トグルの選択状態はここでは持たない。以前は汎用の `selected`（灰色の反転）があったが、
- * 唯一のトグルであるコート選択は赤/青そのもので塗らないと意味を成さず、
- * 実際の呼び出し側 (`MatchControl`) は独自の色クラスを渡していた。
- * 見た目の規則が 2 つあると、どちらが本番か呼び出し元を辿るまで分からない。
+ * トグルの選択状態はここでは持たない。唯一のトグルであるコート選択は赤/青そのもので
+ * 塗らないと意味を成さず、汎用の `selected`（灰色の反転）を併せ持つと見た目の規則が
+ * 2 つになり、どちらが本番か呼び出し元を辿るまで分からない。
  * 選択は呼び出し側が `aria-pressed` と `className` で表す。
  */
 export function Button({ tone = "default", className, ...props }: ButtonProps) {

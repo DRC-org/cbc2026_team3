@@ -20,8 +20,8 @@ function state(over: Partial<RobotState> = {}): RobotState {
 
 /**
  * 実行状態は `running` (サーバー配信) だけで決める。
- * `step_index === 0 && total_steps > 0` を「未実行」の代用にしていた頃は、
- * 準備フェーズで条件が常に成立して動作確認ボタンが常時無効になった。
+ * `step_index === 0 && total_steps > 0` を「未実行」の代用にすると、準備フェーズで
+ * 条件が常に成立して動作確認ボタンが常時無効になる。
  */
 describe("sequenceKind", () => {
   it("シーケンス未取得", () => {
@@ -47,7 +47,7 @@ describe("sequenceKind", () => {
   });
 
   it("途中で停止した状態を実行中と偽らない", () => {
-    // 以前は step_index > 0 だけで「実行中」と表示し、STOP 後も RUNNING を出していた
+    // step_index > 0 だけで「実行中」と表示すると、STOP 後も RUNNING を出し続ける
     expect(sequenceKind(state({ running: false, step_index: 3 }))).toBe("idle");
   });
 
@@ -70,9 +70,8 @@ describe("isSequenceComplete", () => {
 
 /**
  * 進捗バーの分子は**完了したステップ数**であって、操縦者に見せる現在ステップ番号
- * (`displayIndex` = `step_index + 1`) ではない。両者で同じ式を使っていた頃は
- * 常に 1 マス先行し、シーケンスを開始していない試合開始直後の画面が
- * 「1/13 だけ進んだバー」を出していた。
+ * (`displayIndex` = `step_index + 1`) ではない。両者で同じ式を使うと常に 1 マス
+ * 先行し、シーケンスを開始していない試合開始直後の画面が「1/13 だけ進んだバー」を出す。
  */
 describe("sequenceProgress", () => {
   const steps = Array.from({ length: 6 }, (_, i) => ({

@@ -49,12 +49,10 @@ function GroupProgress({ items }: { items: readonly ChecklistItem[] }) {
 /**
  * セッティングタイムの左カラム。**操作とその確認を同じ場所に置く**ための面。
  *
- * 以前は指差喚呼 22 項目が 1 本のリストで左に、コート設定と動作確認の操作が右に
- * 分かれていた。操縦者はコートを押してから右のリストの中ほどにある
- * 「コート設定と実配置の一致確認」を探し、動作確認を回してからまた別の位置にある
- * 12 項目を探す、という往復を項目ごとに繰り返していた。ここでは各操作の直下に
- * その操作を確認する項目を置く。どの項目がどこへ行くかは `config/checklist.yaml` の
- * `group` が決め、対応表は `lib/checklistGroups.ts` にある。
+ * 指差喚呼を 1 本の長いリストにすると、操作とそれを確認する項目が画面の別の場所へ
+ * 離れ、操縦者は項目ごとに「押す → リストを探す → チェックする」を往復する。
+ * ここでは各操作の直下にその操作を確認する項目を置く。どの項目がどこへ行くかは
+ * `config/checklist.yaml` の `group` が決め、対応表は `lib/checklistGroups.ts` にある。
  *
  * **全体の進捗は上端に 1 つだけ置く。** 試合開始のゲートは区分ごとではなく全項目の
  * 完了 (`can_start_match`) なので、区分ごとの進捗を足し算させてはならない。
@@ -128,10 +126,10 @@ export const MatchPrep = memo(function MatchPrep({
               DEV 全チェック
             </Button>
           ) : null}
-          {/* **やり直しの導線はこの 1 つだけ。** かつてここに CLEAR (checklist_reset)
-              があり、最下段に match_reset のボタンが別にあった。準備フェーズでは
-              フェーズもタイマーも既に初期状態なので**結果が同じ 2 つのボタン**になり、
-              操縦者はどちらを押すべきか画面から判断できなかった。
+          {/* **やり直しの導線はこの 1 つだけ。** 準備フェーズではフェーズもタイマーも
+              既に初期状態なので、CLEAR (checklist_reset) を並べても match_reset と
+              **結果が同じ 2 つのボタン**になり、操縦者はどちらを押すべきか画面から
+              判断できない。
               配信を読めていない間は「済んだ項目が 0 件」に見えるので、
               そのときだけは件数で殺さない (直す手段まで消さない) */}
           <Button
@@ -219,9 +217,7 @@ export const MatchPrep = memo(function MatchPrep({
         </Section>
 
         {/* 動作確認は両ハンドで 1 本。操作・進捗・結果・それを確認する指差喚呼が
-            この 1 区分に縦に並ぶので、回した操縦者はその場で唱えて潰せる
-            (以前は右カラムのボタンを押してから左のリストの中ほどにある 12 項目を
-            探しに行っており、進捗と結果はさらにモーダルの中だった) */}
+            この 1 区分に縦に並ぶので、回した操縦者はその場で唱えて潰せる */}
         <Section
           title={CHECKLIST_GROUP_TITLE.motor_check}
           aside={
@@ -234,8 +230,8 @@ export const MatchPrep = memo(function MatchPrep({
           <div className="flex flex-wrap items-center gap-2">
             <MotorCheckButton />
           </div>
-          {/* 進捗と結果は**この場で開く**。かつてはモーダルで、駆動しているあいだ
-              ずっとヘッダーの EMG STOP を覆っていた (`MotorCheckPanel` の docstring) */}
+          {/* 進捗と結果は**この場で開く**。モーダルにすると駆動しているあいだ
+              ずっとヘッダーの EMG STOP を覆う (`MotorCheckPanel` の docstring) */}
           <MotorCheckPanel />
           {itemsOf("motor_check")}
         </Section>

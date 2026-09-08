@@ -84,8 +84,8 @@ REQUIRED_TYPES = frozenset(
         "health_change",
         "e_stop_state",
         "command_rejected",
-        # 動作確認は進捗も結果も拒否理由も 1 通に載る。4 種類に分けていた頃は、
-        # 途中の 1 通を落とした画面が復旧しなかった
+        # 動作確認は進捗も結果も拒否理由も 1 通に載る。種類を分けると、途中の
+        # 1 通を落とした画面が復旧しない
         "motor_check_state",
     }
 )

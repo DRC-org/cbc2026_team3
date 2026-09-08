@@ -60,7 +60,7 @@ describe("ActionPanel", () => {
 
       expect(screen.getByText(/待機中/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "シーケンスを先頭から開始" })).toBeEnabled();
-      // 以前はここで TriggerButton が RUNNING を出し、同じ画面で表示が食い違っていた
+      // TriggerButton がここで RUNNING を出すと、同じ画面で表示が食い違う
       expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
     });
 
@@ -85,8 +85,8 @@ describe("ActionPanel", () => {
     });
 
     it("STOP で止めた後は RUNNING を出さず、STOP も押せない", () => {
-      // running を推測していた頃は step_index > 0 だけで「実行中」と表示していたため、
-      // 止まっている機体に対して RUNNING と STOP 可能を出し続けていた
+      // running を step_index > 0 から推測すると、止まっている機体に対して
+      // RUNNING と STOP 可能を出し続けることになる
       mount(makeState({ step_index: 3, running: false }));
 
       expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();

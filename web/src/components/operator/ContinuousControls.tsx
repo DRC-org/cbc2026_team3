@@ -46,10 +46,10 @@ export function ContinuousControls({
   onJog,
   onSet,
 }: ContinuousControlsProps) {
-  // **インデックスで扱う。** かつては `<option value={候補の数値}>` に戻して
-  // `steps.indexOf(Number(...))` で引き直していたが、config の `steps` に浮動小数
-  // (0.05 等) が入ると往復変換で一致せず `indexOf` が -1 を返し、刻みが**黙って 1**
-  // へ落ちた。症状は「選んだ量と違う量で動く」だけで、config にも画面にも痕跡が残らない。
+  // **インデックスで扱う。** `<option value={候補の数値}>` から
+  // `steps.indexOf(Number(...))` で引き直すと、config の `steps` に浮動小数 (0.05 等) が
+  // 入ったとき往復変換で一致せず `indexOf` が -1 を返し、刻みが**黙って 1** へ落ちる。
+  // 症状は「選んだ量と違う量で動く」だけで、config にも画面にも痕跡が残らない。
   // 可動範囲と刻みは config が宣言する境界であって、UI が値を捏造してよい所ではない
   const [stepIndex, setStepIndex] = useState(0);
   const step = steps[Math.min(stepIndex, steps.length - 1)];

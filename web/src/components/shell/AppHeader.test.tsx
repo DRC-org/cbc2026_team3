@@ -16,7 +16,7 @@ vi.mock("@/components/shell/TabBar", () => ({
   TabBar: () => {
     counts.tabBar += 1;
     // 実体を返すのは帯の中での位置を DOM 順で見るテストがあるため。
-    // null を返していた頃は「タブ帯が最左か」を確かめる手段が無かった
+    // null を返すと「タブ帯が最左か」を確かめる手段が無くなる
     return <div data-testid="tab-bar" />;
   },
 }));
