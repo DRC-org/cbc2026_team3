@@ -318,6 +318,46 @@ class TestStartupSequence:
         assert bytes(steps[0].data)[-1] == 0xFD
         assert steps[1].arbitration_id == 0x7FF
 
+    def test_初期化で_p_max_を_config_の値に書き直す(self) -> None:
+        """**書かないと PC の復号レンジとドライバの送信レンジが食い違う。**
+
+        p_max はフラッシュへ保存されない (電源断で出荷値 12.5 へ戻る) ので、
+        起動のたびに書かなければ config の値と実機の値が黙ってずれる。症状は
+        「その軸だけ位置が比例倍で読める」だけで、実機では 12.5 のドライバを
+        1000 で復号して 80 倍の値を読み、機構端まで押し込んでいるように見えた
+        (2026-09-09)。CTRL_MODE を書くのと同じ理由・同じ場所で書く。
+        """
+        drv = _driver(p_max=1000.0)
+
+        steps = [msg for msg, _ in drv.initialization_steps()]
+        writes = [
+            struct.unpack("<HBBf", bytes(msg.data))
+            for msg in steps
+            if msg.arbitration_id == 0x7FF and bytes(msg.data)[2] == 0x55
+        ]
+        p_max_writes = [w for w in writes if w[2] == Dm3520Driver.REG_P_MAX]
+
+        assert len(p_max_writes) == 1
+        can_id, marker, _register, value = p_max_writes[0]
+        assert can_id == drv.can_id
+        assert marker == 0x55
+        assert value == pytest.approx(1000.0)
+
+    def test_p_max_は制御モードより先に書く(self) -> None:
+        """モード切替はドライバ内部の指令値をクリアするので、レンジを先に確定させる。
+
+        逆順だと、モード切替直後の 1 通目のフィードバックだけが旧レンジで届く。
+        """
+        drv = _driver(p_max=1000.0)
+
+        registers = [
+            bytes(msg.data)[3]
+            for msg, _ in drv.initialization_steps()
+            if msg.arbitration_id == 0x7FF and bytes(msg.data)[2] == 0x55
+        ]
+
+        assert registers.index(Dm3520Driver.REG_P_MAX) < registers.index(Dm3520Driver.REG_CTRL_MODE)
+
     def test_set_zero_on_start_appends_zero_command(self) -> None:
         drv = _driver(set_zero_on_start=True)
 
