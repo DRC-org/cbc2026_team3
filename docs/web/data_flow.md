@@ -84,7 +84,8 @@ Python 側が**実物の `RobotServer` に配信させたメッセージ**を焼
 型アサーションでは足りない —— 型が合っていても受信条件が弾けば画面には何も出ない。
 
 **両方向を見る。** 「UI が読む値が実配信に在るか」だけでは、**サーバーが送っているのに TS が
-知らない欄**を取りこぼす。逆方向は実配信のキーを再帰的に列挙して宣言と突き合わせ、使わない
+知らない欄**を取りこぼす —— `health.detail` が型にすら無く、サーバーの「判定不能」を画面が
+「異常なし」と表示していた。逆方向は実配信のキーを再帰的に列挙して宣言と突き合わせ、使わない
 フィールドは `unused` に理由を書く。書かれていない欄が増えたら落ちる。
 
 **ワイヤ型と受信条件は `web/src/lib/protocol.ts` にしかない。** 型だけを別ファイルに持つと
@@ -145,7 +146,7 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 | `lib/healthVerdict.ts` | 機体の健全性、温度トーン、ワーク落下の恐れ、版番号未確認、失敗タスク |
 | `lib/sequenceStatus.ts` | シーケンスの実行状態・進捗の算術・「先頭から再開」か |
 | `lib/motorCheckStatus.ts` | 動作確認の完了判定 |
-| `lib/phase.ts` | フェーズによる可否・レイアウト区分 |
+| `lib/phase.ts` | フェーズによる可否・レイアウト区分。`isDuringMatch()` は `lib/match_state.py` の `PHASES_DURING_MATCH` の写しで、**写しはここだけ** |
 | `lib/checklistGroups.ts` | 指差喚呼の項目をどの区分へ置くか |
 | `lib/syncVerdict.ts` | 左右ペア軸のずれ表示 |
 
@@ -228,14 +229,17 @@ UI から差し替えられる（`WsSettings`）。**接続表示そのものが
 繋がらないときに最初に見る場所を入口にしておけば、設定を探す先が 1 つで済む。
 `?ws=` は**非永続の一時上書き**で、保存済み設定を壊さずに 1 画面だけ別機を見られる。
 
+差し替えが要るのは「配信元 ≠ 制御プログラム」になる構成 —— vite dev を Tailscale 経由で開く、
+配信済み UI から手元の制御 PC へ繋ぐ、**予備機へ切り替える**。どれも再ビルドせず現場で解決する。
+
 接続先を切り替えると `useWebSocket` は**世代番号**で旧接続の `close` / `message` を弾く。
 弾かないと旧 URL への再接続タイマーが走り、古いサーバーの状態で画面が上書きされる。
 
 ### 開発サーバー経由で繋ぐとき（`web/vite.config.ts`）
 
-- **全インターフェースに bind**（`host: true`）し、`allowedHosts` に `drc` と `.ts.net` を
-  登録する。既定の localhost bind と Host ヘッダ検査の**両方**が Tailscale 経由を塞ぐため。
-  別名は `VITE_ALLOWED_HOSTS`
+- **dev と preview の両方**を全インターフェースに bind（`host: true`）し、`allowedHosts` に
+  `drc` と `.ts.net` を登録する。既定の localhost bind と Host ヘッダ検査の**両方**が
+  Tailscale 経由を塞ぐため。別名は `VITE_ALLOWED_HOSTS`
 - dev では `/ws` を 8080 へプロキシする（中継先は `DEV_WS_TARGET`）
 
 | 開き方 | URL |
