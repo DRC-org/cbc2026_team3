@@ -244,10 +244,6 @@ class Dm3520Driver(MotorDriver):
         data = struct.pack("<HBBI", self.can_id, self.CONFIG_WRITE, register, value)
         return self._standard(self.CONFIG_FRAME_ID, data)
 
-    def encode_write_register_f32(self, register: int, value: float) -> can.Message:
-        data = struct.pack("<HBBf", self.can_id, self.CONFIG_WRITE, register, float(value))
-        return self._standard(self.CONFIG_FRAME_ID, data)
-
     def encode_read_register(self, register: int) -> can.Message:
         data = struct.pack("<HBBI", self.can_id, self.CONFIG_READ, register, 0)
         return self._standard(self.CONFIG_FRAME_ID, data)
@@ -337,28 +333,30 @@ class Dm3520Driver(MotorDriver):
     # ------------------------------------------------------------------ #
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
-        """無励磁化 → 固定小数点レンジ設定 → 制御モード設定 (→ 原点確定)。
+        """無励磁化 → 制御モード設定 (→ 原点確定)。
 
-        CTRL_MODE も p_max もフラッシュへ保存されず電源断で失われる (マニュアル
-        「Mode Switching」節と「Write Parameters」節) ため、**起動のたびに書く**。
-        モード切替の副作用としてドライバ内部の指令値 (位置・速度・トルク) は
-        クリアされるので、この後の ``activation_steps`` が実測角を書き直す順序で
-        なければならない。
+        CTRL_MODE はフラッシュへ保存されず電源断で失われる (マニュアル「Mode
+        Switching」節) ため、**起動のたびに書く**。モード切替の副作用として
+        ドライバ内部の指令値 (位置・速度・トルク) はクリアされるので、この後の
+        ``activation_steps`` が実測角を書き直す順序でなければならない。
 
-        **p_max を config から書くのは「config に書いた値がそのまま動いている値」を
-        保つため。** 出荷値の 12.5rad は scale 換算で ±11.7mm しか表現できず、
-        ストローク 750mm の軸ではまるで足りない。フラッシュへ焼いて済ませると、
-        書いたことが config から読めないうえ、基板を差し替えた 1 台だけが古い値の
-        まま残る (症状は「その軸だけ位置が比例倍で読める」)。**書き込みを飛ばすと
-        PC の復号レンジとドライバの送信レンジが食い違い、位置が比例倍で読める** ——
-        実機では 12.5 のドライバを 1000 で復号して 80 倍の値を読み、「機構端まで
-        押し込んでいる」ように見えた (2026-09-09)。
-        v_max / t_max を書かないのは、あちらが出荷値のままで足りているため
-        (ずれていれば動作確認シーケンスの到達判定が落ちる)。
+        !!! **ここで p_max を書いてはならない。一度入れて実機を壊しかけた** !!!
+        p_max もフラッシュへ保存されず電源断で出荷値 12.5 へ戻るので、CTRL_MODE と
+        同じように書き直せばよいと考えたが、**書き終わるまでの窓で復号レンジが
+        食い違う**。ドライバが 12.5 で送ったフィードバックを config の 1000 で
+        復号すると位置が 80 倍に読め、直後の ``activation_steps`` がその値を
+        「現在角」として保持目標に書く —— **機構が 80 倍先へ走り、リミット
+        スイッチを踏み越えて機構端まで行く** (2026-09-09 に実機で発生)。
+        現在角を書いてから励磁するのは飛び出しを塞ぐための仕掛けなのに、
+        レンジが食い違う窓ではそれ自体が飛ばす原因になる。
+
+        **正しい向きは「書いて直す」ではなく「食い違いを検出して止める」である。**
+        起動時に 0x15 を読み返し、config と違えば励磁せずに拒否する形にすること
+        (この repo の「起動時に構成の曖昧さを黙って解決しない」と同じ方針)。
+        それが入るまでは、レジスタを書くのは人間の手順に残す。
         """
         steps = [
             (self.encode_disable(), 0.05),
-            (self.encode_write_register_f32(self.REG_P_MAX, self.p_max), 0.05),
             (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
         ]
         if self.set_zero_on_start:

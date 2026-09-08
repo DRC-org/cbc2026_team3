@@ -103,7 +103,8 @@ class HomingSpec:
     direction: float
     #: 探索距離の上限 [軸の unit]。ここまで動かして当たらなければ失敗として止める
     search_distance: float
-    #: 1 回あたりの移動量 [軸の unit]。小さいほど原点の精度が上がり、時間が延びる
+    #: 1 回あたりの移動量 [軸の unit]。小さいほど原点の精度が上がり、時間が延びる。
+    #: **原点のばらつきはこの刻み幅そのもの**なので、要求精度がそのまま上限になる
     step: float
     #: 1 ステップごとの待ち [s]。指令が機構へ届き、センサの状態が返る余裕を取る
     settle_s: float
@@ -114,6 +115,20 @@ class HomingSpec:
     #: sub_y_axis で step 0.5 -> 0.1 にした途端、許容が 10mm から 2mm へ落ちて
     #: ON 区間 (実測 2mm 以上) を抜けられなくなった (2026-09-09)。
     release_distance: float | None = None
+    #: 粗探索の刻み [軸の unit]。書くと**粗い刻みで当てる → 離脱 → `step` で寄せ直す**
+    #: の二段探索になる。None なら従来どおりの単段探索。
+    #:
+    #: **これは時間の問題を解く値であって、精度の値ではない。** 原点のばらつきを
+    #: 決めるのは最後に寄せ直す `step` のほうで、粗探索は「スイッチの近くまで速く
+    #: 運ぶ」ことしかしない。sub_y_axis は実ストローク 750mm / `step` 0.1mm なので、
+    #: 単段では 8000 歩 ≒ 8 分かかって試合前の点検に入らない。
+    #:
+    #: **`step` より大きく、スイッチの ON 区間より狭く取ること。** 前者は
+    #: `__post_init__` が弾く (粗くない粗探索は時間だけを倍にする)。後者は config
+    #: からは検証できない —— 広いと粗い 1 歩で ON 区間を跨ぎ切り、離脱も寄せ直しも
+    #: できない位置 (= 機構端の側) で止まる。跨いだことは `HomingRunner` が
+    #: 粗探索の直後に検出して降りる。
+    coarse_step: float | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in (1.0, -1.0):
@@ -132,6 +147,21 @@ class HomingSpec:
                 f"homing.step ({self.step}) が "
                 f"search_distance ({self.search_distance}) を超えています"
             )
+        if self.coarse_step is not None:
+            if self.coarse_step <= 0.0:
+                raise ValueError(f"homing.coarse_step は正の値: {self.coarse_step!r}")
+            if self.coarse_step <= self.step:
+                # 粗くない粗探索は所要時間を倍にするだけで、精度も速さも 1 つも改善しない。
+                # 黙って通すと「二段にしたのに 8 分のまま」が config から読めなくなる
+                raise ValueError(
+                    f"homing.coarse_step ({self.coarse_step}) は "
+                    f"step ({self.step}) より大きい必要があります"
+                )
+            if self.coarse_step > self.search_distance:
+                raise ValueError(
+                    f"homing.coarse_step ({self.coarse_step}) が "
+                    f"search_distance ({self.search_distance}) を超えています"
+                )
 
 
 @dataclass(frozen=True)
@@ -310,7 +340,15 @@ _MOTOR_KEYS = frozenset({"scale", "offset"})
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
 
 _HOMING_KEYS = frozenset(
-    {"sensor", "direction", "search_distance", "step", "settle_s", "release_distance"}
+    {
+        "sensor",
+        "direction",
+        "search_distance",
+        "step",
+        "settle_s",
+        "release_distance",
+        "coarse_step",
+    }
 )
 #: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
 #: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
@@ -681,6 +719,9 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             settle_s=float(raw.get("settle_s", 0.05)),
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
+            ),
+            coarse_step=(
+                float(raw["coarse_step"]) if raw.get("coarse_step") is not None else None
             ),
         )
     except (TypeError, ValueError) as exc:
