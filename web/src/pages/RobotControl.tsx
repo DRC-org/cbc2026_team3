@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { ActionPanel } from "@/components/operator/ActionPanel";
+import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
@@ -187,6 +188,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               onStart={requestStart}
               onStop={handleStop}
               onTrigger={handleTrigger}
+            />
+
+            <AlwaysManualPanel
+              robotKey={robotKey}
+              manual={manual}
+              blockedReason={manualBlockedReason}
+              sendOrReport={sendOrReport}
             />
 
             {stepPanel}

@@ -77,6 +77,7 @@ axes:
     tolerance: 2.0
 
   # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
+  # manual_always: 吸着が外れないときに、弁 1 個のためシーケンスの制御権を奪わずに済む
   valve_1: &valve_axis
     unit: on_off
     command_unit: on_off
@@ -85,6 +86,7 @@ axes:
     offset: 0.0
     settle_s: 0.2
     timeout_s: 1.0
+    manual_always: true
   valve_2: *valve_axis
   valve_3: *valve_axis
   valve_4: *valve_axis

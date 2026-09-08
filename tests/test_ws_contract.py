@@ -188,7 +188,14 @@ def _manual_controller(group: MotorGroup) -> ManualController:
                     "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
                 },
                 "gripper": {"unit": "deg", "command_unit": "deg"},
-                "conveyor": {"unit": "duty", "command_mode": "duty", "settle_s": 0.0},
+                # manual_always が真になる唯一の軸。golden に真の形が無いと、UI が
+                # 真を受け取れなくても誰も気付けない
+                "conveyor": {
+                    "unit": "duty",
+                    "command_mode": "duty",
+                    "settle_s": 0.0,
+                    "manual_always": True,
+                },
             },
             "positions": {
                 "y_axis": {"home": 0.0, "work": 10.0},

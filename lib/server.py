@@ -595,11 +595,6 @@ class RobotServer:
                 requester, command, f"'{robot_name}' は手動操縦に対応していません"
             )
             return None
-        if ctx.mode is not OperationMode.MANUAL:
-            await self._reject_command(
-                requester, command, "手動操縦モードではありません (モードを切り替えてください)"
-            )
-            return None
         if self._is_reenergizing(robot_name):
             await self._reject_command(requester, command, f"'{robot_name}' の再励磁が処理中です")
             return None
@@ -608,7 +603,45 @@ class RobotServer:
         if not isinstance(axis, str) or not axis:
             await self._reject_command(requester, command, "軸が指定されていません")
             return None
+
+        # モード判定は軸の解決より後。manual_always の軸はシーケンス制御中でも通すので、
+        # どちらの軸かが分かるまで可否を決められない
+        if ctx.mode is not OperationMode.MANUAL and not await self._allow_manual_in_sequence(
+            ctx.manual, axis, command, requester
+        ):
+            return None
         return ctx.manual, axis
+
+    async def _allow_manual_in_sequence(
+        self,
+        manual: ManualController,
+        axis: str,
+        command: str,
+        requester: WSOrNone,
+    ) -> bool:
+        try:
+            always_manual = manual.is_always_manual(axis)
+        except ManualControlError as exc:
+            await self._reject_command(requester, command, str(exc))
+            return False
+
+        if not always_manual:
+            allowed = ", ".join(manual.always_manual_axes()) or "(なし)"
+            await self._reject_command(
+                requester,
+                command,
+                "手動操縦モードではありません (モードを切り替えてください)。"
+                f"シーケンス制御中でも操作できる軸: {allowed}",
+            )
+            return False
+
+        # 動作確認は conveyor / valve をまさにこの軸で駆動し、操縦者が目視・打音で確かめる。
+        # 排他は「sequence モードでは手動が全部拒否される」に乗っていたので、軸単位で
+        # 緩めたぶんをここで塞ぎ直す (`_motor_check_environment_deny` と対になる)
+        if self._motor_check.running:
+            await self._reject_command(requester, command, "動作確認の実行中は手動で操作できません")
+            return False
+        return True
 
     async def _manual_number(
         self,

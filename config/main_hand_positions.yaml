@@ -65,6 +65,7 @@ axes:
     offset: 0.0
     timeout_s: 2.0
 
+  # manual_always: コンベアを止めるだけのためにシーケンス全体の制御権を奪わずに済む
   conveyor:
     unit: duty
     command_unit: duty
@@ -73,6 +74,7 @@ axes:
     offset: 0.0
     settle_s: 0.5
     timeout_s: 1.0
+    manual_always: true
 
   # timeout_s はファームのスルーレート (90deg/s) から決まる。突き合わせは
   # tests/test_servo_travel_budget.py が行う

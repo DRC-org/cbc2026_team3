@@ -157,6 +157,7 @@ class AxisSpec:
     command_mode: ControlMode = ControlMode.POSITION
     settle_s: float = 0.0
     manual: ManualSpec | None = None
+    manual_always: bool = False
     homing: HomingSpec | None = None
     motion: MotionSpec | None = None
 
@@ -173,8 +174,23 @@ class AxisSpec:
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
+        self._check_manual_always()
         self._check_homing_sensor_map()
         self._check_align_distance()
+
+    def _check_manual_always(self) -> None:
+        # 到達判定を持つ軸で許すと、シーケンスが move_to で書いた目標を手動が上書きし、
+        # wait_reached が動かない位置を見続けてタイムアウトする。duty / on_off には
+        # 到達判定が無く settle_s の固定待ちへ落ちるので、割り込んでも手順は壊れない
+        if not self.manual_always:
+            return
+        if self.command_mode in (ControlMode.DUTY, ControlMode.ON_OFF):
+            return
+        raise ValueError(
+            f"axes.{self.name}: manual_always は duty / on_off の軸にのみ書けます "
+            f"(command_mode={self.command_mode.value})。到達判定を持つ軸で許すと、"
+            "シーケンスが書いた目標を手動が上書きして到達待ちが必ずタイムアウトします"
+        )
 
     def _check_homing_sensor_map(self) -> None:
         if self.homing is None or self.homing.sensors is None:
@@ -257,6 +273,7 @@ _AXIS_KEYS = frozenset(
         "command_mode",
         "settle_s",
         "manual",
+        "manual_always",
         "homing",
         "motion",
     }
@@ -352,6 +369,9 @@ class PositionTable:
 
     def manual_axes(self) -> tuple[str, ...]:
         return tuple(name for name, spec in self._axes.items() if spec.manual is not None)
+
+    def manual_always_axes(self) -> tuple[str, ...]:
+        return tuple(name for name, spec in self._axes.items() if spec.manual_always)
 
     def paired_axes(self) -> tuple[str, ...]:
         return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
@@ -492,6 +512,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         command_mode=command_mode,
         settle_s=float(settle_s),
         manual=_parse_manual(name, raw.get("manual"), command_mode),
+        manual_always=_parse_manual_always(name, raw.get("manual_always")),
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
     )
@@ -667,6 +688,16 @@ def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> Man
 
     steps = _parse_manual_steps(path, raw.get("steps"))
     return ManualSpec(min_value=float(min_value), max_value=float(max_value), steps=steps)
+
+
+def _parse_manual_always(axis_name: str, raw: object) -> bool:
+    # 型だけを見る (command_mode との整合は AxisSpec.__post_init__)。"false" のような
+    # 文字列を真と読むと、書いたつもりの無い軸がシーケンス中に手動で動かせてしまう
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError(f"axes.{axis_name}.manual_always は真偽値である必要があります: {raw!r}")
+    return raw
 
 
 def _parse_manual_steps(path: str, raw: object) -> tuple[float, ...]:

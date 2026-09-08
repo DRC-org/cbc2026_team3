@@ -12,6 +12,7 @@ const Y_AXIS: ManualAxis = {
   value: 5,
   target: 4,
   manual: { min: -2, max: 20, steps: [0.5, 2] },
+  manual_always: false,
   deviation: 0.2,
   sync_tolerance: 2.0,
   positions: [
@@ -28,6 +29,7 @@ const GRIPPER: ManualAxis = {
   value: 5,
   target: null,
   manual: null,
+  manual_always: false,
   deviation: null,
   sync_tolerance: null,
   positions: [
