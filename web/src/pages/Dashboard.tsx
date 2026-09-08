@@ -6,6 +6,7 @@ import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
 import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
+import { ScrollArea } from "@/components/ui/ScrollArea";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isSetupPhase } from "@/lib/phase";
@@ -43,7 +44,7 @@ export function Dashboard() {
           {/* 右は準備の面が答えられないことだけを持つ参照面。機体状態の判定チップは
               StartGate と重複するので出さない (同じ画面に「要確認 3 件」が 2 回並ばない) */}
           <Panel legend="機体状態" className="min-h-0" bodyClassName="p-1">
-            <div className="scroll flex min-h-0 flex-1 flex-col gap-2">
+            <ScrollArea className="gap-2">
               {ROBOTS.map(({ key, label }) => {
                 const robot = states[key];
                 return (
@@ -65,7 +66,7 @@ export function Dashboard() {
                   </section>
                 );
               })}
-            </div>
+            </ScrollArea>
           </Panel>
         </Page>
         {confirmModal}

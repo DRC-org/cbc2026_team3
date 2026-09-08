@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import type { HealthSnapshot, MatchState, RobotState } from "@/lib/protocol";
@@ -170,5 +170,38 @@ describe("Dashboard (試合中の手動操縦)", () => {
     });
 
     expect(screen.queryByText("手動操縦中")).toBeNull();
+  });
+});
+
+/**
+ * 準備中の右カラム (機体状態 2 機) は実測 526px に対して中身が 1913px ある。
+ * 溢れていることが画面に出ないと、下にある機体の診断が「無い」のと区別が付かない。
+ * **部品の契約は `ui/ScrollArea.test.tsx` が固定するので、ここが見るのは
+ * 「この面が実際にそれを使っているか」だけ。**
+ */
+describe("Dashboard 準備中の機体状態カラム", () => {
+  it("下に続きがあるあいだだけ合図を出す", () => {
+    renderWithRobot(<Dashboard />, {
+      matchState: SETUP,
+      states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
+    });
+
+    const panel = screen.getByText("機体状態").closest("section");
+    const body = panel?.querySelector(".scroll");
+    if (!body) throw new Error("スクロール面が見つからない");
+
+    const stub = (size: { clientHeight: number; scrollHeight: number; scrollTop: number }) => {
+      for (const [key, value] of Object.entries(size)) {
+        Object.defineProperty(body, key, { value, configurable: true });
+      }
+      fireEvent.scroll(body);
+    };
+
+    stub({ clientHeight: 526, scrollHeight: 1913, scrollTop: 0 });
+    expect(panel?.querySelector(".bg-linear-to-t")).not.toBeNull();
+
+    // 末尾まで送れば消える (出したままにすると「まだ続きがある」の意味が消える)
+    stub({ clientHeight: 526, scrollHeight: 1913, scrollTop: 1387 });
+    expect(panel?.querySelector(".bg-linear-to-t")).toBeNull();
   });
 });
