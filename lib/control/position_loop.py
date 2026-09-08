@@ -244,7 +244,9 @@ class M3508PositionLoop(PausablePeriodicTask):
         blocked = self._sync.blocked(stale=stale, position_of=self._feedback_position)
         corrections = self._sync.corrections(
             position_of=self._feedback_position,
-            skip_groups=blocked | self._open_loop_groups(),
+            skip_groups=(
+                blocked | self._open_loop_groups() | self._sync.skewed_groups(target_of=self.target)
+            ),
         )
 
         currents = [0, 0, 0, 0]

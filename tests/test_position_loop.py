@@ -391,7 +391,6 @@ class TestRunLifecycle:
         recovered = await first_current(fail_ticks=100)
         pristine = await first_current(fail_ticks=0)
 
-        # 実測は起点を捨てると 1 counts、持ち越すと 648 counts。閾値 50 はその間。
         assert abs(pristine) < 50
         assert abs(recovered) < 50
 
@@ -929,6 +928,13 @@ async def _skew_pair_half_targeted(fx: _Fixture) -> None:
     fx.feed("tilt", 0.0)
 
 
+async def _skew_pair_mismatched_targets(fx: _Fixture) -> None:
+    await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
+    await fx.loop.set_target("tilt", ControlMode.POSITION, -10.5)
+    fx.feed("lift", 2.0)
+    fx.feed("tilt", 0.0)
+
+
 async def _currents(
     setup: Callable[[_Fixture], Awaitable[None]],
     *,
@@ -1029,15 +1035,42 @@ class TestSyncCorrection:
         assert corrected == (0, 0, 0, 0)
 
 
+class TestSyncCorrectionRequiresSharedTargetValue:
+    async def test_correction_is_applied_when_targets_share_axis_value(self) -> None:
+        baseline = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
+        corrected = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=50.0))
+
+        assert corrected[0] != baseline[0]
+        assert corrected[1] != baseline[1]
+
+    async def test_no_correction_when_targets_are_intentionally_skewed(self) -> None:
+        baseline = await _currents(
+            _skew_pair_mismatched_targets, group=_pair_group_with_gain(sync_kp=0.0)
+        )
+        corrected = await _currents(
+            _skew_pair_mismatched_targets, group=_pair_group_with_gain(sync_kp=50.0)
+        )
+
+        assert corrected == baseline
+
+    async def test_deviation_protection_stays_alive_while_targets_are_skewed(self) -> None:
+        fx = _Fixture(kp=100.0)
+        fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0, tolerance=1.0))
+        await _skew_pair_mismatched_targets(fx)
+
+        await fx.tick()
+
+        assert "y_axis" in fx.loop.sync_violations
+        assert fx.manager.last_currents == (0, 0, 0, 0)
+
+
 Y_AXIS_SCALE = 55.0131
 LONG_MOVE_MM = 15.0
 Y_AXIS_OUTPUT_LIMIT = 2000.0
 
 
 class _Plant:
-    # 電流 1 counts あたりの角加速度 [deg/s^2]。上限 2000 counts で 200mm/s^2 相当。
     GAIN = 5.5
-    # 粘性 [1/s]。上限 2000 counts での終端速度が 3000deg/s (1 周期 15deg) になる値。
     DAMPING = GAIN * 2000.0 / 3000.0
 
     def __init__(self) -> None:

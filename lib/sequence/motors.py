@@ -227,6 +227,17 @@ class AxisHandle:
             {handle.name: handle.driver.feedback_position() for handle in self._handles}
         )
 
+    def observed_values(self) -> dict[str, float]:
+        if self._spec.command_mode is not ControlMode.POSITION:
+            raise PositionLookupError(
+                f"軸 '{self.name}' は位置フィードバックを持ちません"
+                f" (command_mode={self._spec.command_mode.value})"
+            )
+        return {
+            handle.name: self._motors[handle.name].to_value(handle.driver.feedback_position())
+            for handle in self._handles
+        }
+
     def sync_violation(self) -> float | None:
         group = self._spec.sync_group
         if group is None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import pytest
 
@@ -9,6 +10,8 @@ from lib.sequence.motors import AxisHandle, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
+
+_COMMAND_FUSE = 200
 
 
 def _table(**homing_overrides: object):
@@ -66,25 +69,46 @@ def _rotate_table():
     )
 
 
-class _Recorder:
+def _paired_table(**homing_overrides: object):
+    homing: dict = {
+        "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
+        "direction": -1,
+        "search_distance": 30.0,
+        "step": 1.0,
+        "settle_s": 0.0,
+        "align_distance": 5.0,
+    }
+    homing.update(homing_overrides)
+    return load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "tolerance": 0.1,
+                    "sync_tolerance": 100.0,
+                    "homing": homing,
+                    "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        },
+        source="<test>",
+    )
+
+
+class _SensorModel:
     def __init__(
         self,
         *,
+        motor: str | None = None,
         active_after: int | None = None,
         active_at_or_below: float | None = None,
         active_band: tuple[float, float] | None = None,
         chatter: bool = False,
         prelatched: bool = False,
-        stale: bool = False,
-        motor_stale: bool = False,
-        capturable: bool = True,
     ) -> None:
-        self.commands: list[dict[str, float]] = []
-        self.origins: list[str] = []
-        self.captured_at: list[float] = []
-        self.drivers: dict[str, StubFeedbackDriver] = {}
-        self.spec: AxisSpec | None = None
-        self.sleeps = 0
+        self.motor = motor
         self._active_after = active_after
         self._active_at_or_below = active_at_or_below
         self._active_band = active_band
@@ -93,40 +117,32 @@ class _Recorder:
         self._path: tuple[float, float] | None = None
         self._chatter_latch = False
         self._prelatched = prelatched
-        self._stale = stale
-        self._motor_stale = motor_stale
-        self._capturable = capturable
-
-    def axis_position(self) -> float:
-        assert self.spec is not None
-        return self.spec.to_value(
-            {name: driver.feedback_position() for name, driver in self.drivers.items()}
-        )
+        self.position: Callable[[], float] = lambda: 0.0
 
     def _extend_path(self) -> tuple[float, float]:
-        current = self.axis_position() if self.drivers else 0.0
+        current = self.position()
         low, high = self._path if self._path is not None else (current, current)
         self._path = (min(low, current), max(high, current))
         return self._path
 
-    def sensor_active(self, _name: str) -> bool:
+    def active(self) -> bool:
         self._observations += 1
         self._extend_path()
         if self._chatter:
             return True
         if self._active_band is not None:
             low, high = self._active_band
-            return low <= self.axis_position() <= high
+            return low <= self.position() <= high
         if self._active_at_or_below is not None:
-            return self.axis_position() <= self._active_at_or_below
+            return self.position() <= self._active_at_or_below
         if self._active_after is None:
             return False
         return self._observations > self._active_after
 
-    def sensor_latched(self, _name: str) -> bool:
+    def latched(self) -> bool:
         self._observations += 1
         low, high = self._extend_path()
-        current = self.axis_position() if self.drivers else 0.0
+        current = self.position()
         self._path = (current, current)
         if self._prelatched:
             self._prelatched = False
@@ -143,8 +159,77 @@ class _Recorder:
             return False
         return self._observations > self._active_after
 
-    def sensor_is_stale(self, _name: str) -> bool:
-        return self._stale
+
+class _Recorder:
+    def __init__(
+        self,
+        *,
+        sensors: dict[str, _SensorModel] | None = None,
+        active_after: int | None = None,
+        active_at_or_below: float | None = None,
+        active_band: tuple[float, float] | None = None,
+        chatter: bool = False,
+        prelatched: bool = False,
+        stale: bool = False,
+        stale_sensors: tuple[str, ...] = (),
+        motor_stale: bool = False,
+        capturable: bool = True,
+    ) -> None:
+        self.commands: list[dict[str, float]] = []
+        self.origins: list[str] = []
+        self.captured_at: list[float] = []
+        self.captured_each: list[dict[str, float]] = []
+        self.drivers: dict[str, StubFeedbackDriver] = {}
+        self.spec: AxisSpec | None = None
+        self.sleeps = 0
+        self._default = _SensorModel(
+            active_after=active_after,
+            active_at_or_below=active_at_or_below,
+            active_band=active_band,
+            chatter=chatter,
+            prelatched=prelatched,
+        )
+        self._sensors = sensors
+        for model in (self._default, *(sensors or {}).values()):
+            model.position = self._position_of(model)
+        self._stale = stale
+        self._stale_sensors = stale_sensors
+        self._motor_stale = motor_stale
+        self._capturable = capturable
+
+    def _position_of(self, model: _SensorModel) -> Callable[[], float]:
+        return (
+            self.axis_position if model.motor is None else lambda: self.motor_position(model.motor)
+        )
+
+    def _sensor(self, name: str) -> _SensorModel:
+        if self._sensors is None:
+            return self._default
+        return self._sensors[name]
+
+    def axis_position(self) -> float:
+        if not self.drivers:
+            return 0.0
+        assert self.spec is not None
+        return self.spec.to_value(
+            {name: driver.feedback_position() for name, driver in self.drivers.items()}
+        )
+
+    def motor_position(self, motor: str | None) -> float:
+        if not self.drivers or motor is None:
+            return 0.0
+        assert self.spec is not None
+        spec = next(m for m in self.spec.motors if m.name == motor)
+        return spec.to_value(self.drivers[motor].feedback_position())
+
+    def sensor_active(self, name: str) -> bool:
+        return self._sensor(name).active()
+
+    def sensor_latched(self, name: str) -> bool:
+        return self._sensor(name).latched()
+
+    def sensor_is_stale(self, name: str) -> bool:
+        return self._stale or name in self._stale_sensors
 
     def motor_is_stale(self, _name: str) -> bool:
         return self._motor_stale
@@ -156,6 +241,7 @@ class _Recorder:
         self.origins.append(axis)
         if self.drivers:
             self.captured_at.append(self.axis_position())
+            self.captured_each.append({motor: self.motor_position(motor) for motor in self.drivers})
 
     async def sleep(self, _seconds: float) -> None:
         self.sleeps += 1
@@ -166,7 +252,7 @@ def _handle(
     recorder: _Recorder,
     *,
     start_value: float = 0.0,
-    follows: bool = True,
+    follows: bool | Callable[[], bool] = True,
 ) -> AxisHandle:
     mgr = mock_can_manager()
     drivers = {}
@@ -182,7 +268,10 @@ def _handle(
 
     async def _record(commands):
         recorder.commands.append(dict(commands))
-        if follows:
+        assert len(recorder.commands) <= _COMMAND_FUSE, (
+            f"指令が {_COMMAND_FUSE} 通を超えました (どの歯止めも効いていません)"
+        )
+        if follows() if callable(follows) else follows:
             for name, value in commands.items():
                 drivers[name].set_observed(position=value)
         return await original(commands)
@@ -217,6 +306,12 @@ def _slow_handle(
 
     recorder.sleep = _advance  # type: ignore[method-assign]
     return handle
+
+
+def _axis_commands(recorder: _Recorder, motor: str) -> list[float]:
+    assert recorder.spec is not None
+    spec = next(m for m in recorder.spec.motors if m.name == motor)
+    return [spec.to_value(cmd[motor]) for cmd in recorder.commands]
 
 
 def _runner(recorder: _Recorder) -> HomingRunner:
@@ -522,6 +617,140 @@ class TestReleasesBeforeSeeking:
             await _runner(rec).home(spec, _handle(spec, rec))
 
         assert len(rec.commands) < 30
+
+
+class TestAlignsBothSwitches:
+    @staticmethod
+    def _sensors(right: float, left: float) -> dict[str, _SensorModel]:
+        return {
+            "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=right),
+            "sensor_l": _SensorModel(motor="y_axis_l", active_at_or_below=left),
+        }
+
+    async def test_同時に押される機構では整列段が一歩も指令を出さない(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-1.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0])
+        assert rec.origins == ["y_axis"]
+
+    async def test_右が先に押されたら左のモータだけを進める(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert all(set(cmd) == {"y_axis_r", "y_axis_l"} for cmd in rec.commands)
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0] * 5)
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0, -1.0, -2.0, -3.0, -3.0])
+
+    async def test_左が先に押されても同じように整列する(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-3.0, left=-1.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert all(set(cmd) == {"y_axis_r", "y_axis_l"} for cmd in rec.commands)
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0] * 5)
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0, -2.0, -3.0, -3.0])
+
+    async def test_押されない側を上限以上進めない(self) -> None:
+        spec = _paired_table(align_distance=3.0).axis("y_axis")
+        rec = _Recorder(
+            sensors={
+                "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=-1.0),
+                "sensor_l": _SensorModel(motor="y_axis_l"),
+            }
+        )
+
+        with pytest.raises(HomingError, match="y_axis_l") as excinfo:
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        message = str(excinfo.value)
+        assert "sensor_l" in message
+        assert "sensorActiveLow" in message
+        assert rec.origins == []
+        assert min(_axis_commands(rec, "y_axis_l")) >= -4.0
+
+    async def test_整列段で動かない機構は停滞判定で降りる(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+        handle = _handle(spec, rec, follows=lambda: len(rec.commands) <= 2)
+
+        with pytest.raises(HomingError, match="動きません") as excinfo:
+            await _runner(rec).home(spec, handle)
+
+        assert "y_axis_l" in str(excinfo.value)
+        assert rec.origins == []
+        assert len(rec.commands) <= 2 + _STALL_LIMIT
+
+    async def test_保持側は引きずられても指令を書き換えない(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-4.0))
+        handle = _handle(spec, rec)
+        drivers = rec.drivers
+        recorded = handle.set_target_value
+
+        async def _drag(commands):
+            await recorded(commands)
+            spec_r = next(m for m in spec.motors if m.name == "y_axis_r")
+            current = rec.motor_position("y_axis_r")
+            drivers["y_axis_r"].set_observed(position=spec_r.to_command(current - 0.3))
+
+        handle.set_target_value = _drag  # type: ignore[method-assign]
+
+        await _runner(rec).home(spec, handle)
+
+        align = _axis_commands(rec, "y_axis_r")[2:]
+        assert len(align) >= 3
+        assert align == pytest.approx([align[0]] * len(align))
+        assert rec.motor_position("y_axis_r") != pytest.approx(align[0])
+
+    async def test_センサが一本でも途絶していたら一歩も動かさない(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(
+            sensors=self._sensors(right=-1.0, left=-3.0),
+            stale_sensors=("sensor_l",),
+        )
+
+        with pytest.raises(HomingError, match="sensor_l") as excinfo:
+            await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert "応答していません" in str(excinfo.value)
+        assert rec.commands == []
+        assert rec.origins == []
+
+    async def test_片方だけ触れた状態から始めても両方が離れるまで動かす(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-5.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec, start_value=-3.0))
+
+        assert _axis_commands(rec, "y_axis_r")[:4] == pytest.approx([-2.0, -1.0, 0.0, 0.0])
+        assert rec.origins == ["y_axis"]
+        assert rec.captured_each == [pytest.approx({"y_axis_r": -1.0, "y_axis_l": -5.0})]
+
+    async def test_原点確定は全センサが接触した後に一度だけ(self) -> None:
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert rec.origins == ["y_axis"]
+        assert rec.captured_each == [pytest.approx({"y_axis_r": -1.0, "y_axis_l": -3.0})]
+
+    async def test_単数センサの軸に整列段は無い(self) -> None:
+        spec = _table(direction=-1, step=1.0, search_distance=10.0).axis("y_axis")
+        assert spec.homing is not None and spec.homing.sensors is None
+        rec = _Recorder(active_at_or_below=-1.0)
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-1.0, -1.0])
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx([-1.0, -1.0])
+        assert rec.origins == ["y_axis"]
 
 
 class TestSpecValidation:

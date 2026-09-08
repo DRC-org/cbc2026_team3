@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.drivers.base import ControlMode
@@ -48,13 +49,28 @@ class ManualSpec:
 
 @dataclass(frozen=True)
 class HomingSpec:
-    sensor: str
+    sensor: str | None
     direction: float
     search_distance: float
     step: float
     settle_s: float
+    motor_sensors: tuple[tuple[str, str], ...] | None = None
+    align_distance: float | None = None
 
     def __post_init__(self) -> None:
+        if self.sensor is not None and self.motor_sensors is not None:
+            raise ValueError(
+                "homing.sensor と homing.sensors は併記できません "
+                "(どちらのスイッチが原点を決めるか決まりません)。"
+                "スイッチ 1 本なら sensor、モータごとに 1 本ずつなら sensors だけを書いてください"
+            )
+        if self.sensor is None and self.motor_sensors is None:
+            raise ValueError(
+                "homing には sensor (スイッチ 1 本) か "
+                "sensors (モータ名 → センサ名) のどちらかが必要です"
+            )
+        if self.motor_sensors is not None and not self.motor_sensors:
+            raise ValueError("homing.sensors が空です (見るセンサが 1 本もありません)")
         if self.direction not in (1.0, -1.0):
             raise ValueError(f"homing.direction は +1 か -1: {self.direction!r}")
         if self.search_distance <= 0.0:
@@ -68,6 +84,42 @@ class HomingSpec:
                 f"homing.step ({self.step}) が "
                 f"search_distance ({self.search_distance}) を超えています"
             )
+        self._validate_align_distance()
+
+    def _validate_align_distance(self) -> None:
+        if self.motor_sensors is not None:
+            if self.align_distance is None:
+                raise ValueError(
+                    "homing.sensors を書いた軸には align_distance が必要です "
+                    "(片側だけを動かす整列段の唯一の無人の歯止めなので省略できません)"
+                )
+        elif self.align_distance is not None:
+            raise ValueError(
+                "homing.align_distance は sensors を書いた軸にのみ指定できます "
+                "(整列段が無いので書いても効きません)"
+            )
+
+        if self.align_distance is None:
+            return
+        if self.align_distance <= 0.0:
+            raise ValueError(f"homing.align_distance は正の値: {self.align_distance!r}")
+        if self.align_distance < self.step:
+            raise ValueError(
+                f"homing.align_distance ({self.align_distance}) が "
+                f"step ({self.step}) より小さいため 1 歩も進めません"
+            )
+
+    @property
+    def sensors(self) -> Mapping[str, str] | None:
+        if self.motor_sensors is None:
+            return None
+        return MappingProxyType(dict(self.motor_sensors))
+
+    @property
+    def sensor_names(self) -> tuple[str, ...]:
+        if self.motor_sensors is not None:
+            return tuple(sensor for _motor, sensor in self.motor_sensors)
+        return (self.sensor,) if self.sensor is not None else ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +173,36 @@ class AxisSpec:
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
+        self._check_homing_sensor_map()
+        self._check_align_distance()
+
+    def _check_homing_sensor_map(self) -> None:
+        if self.homing is None or self.homing.sensors is None:
+            return
+
+        declared = set(self.homing.sensors)
+        actual = set(self.motor_names)
+        missing = sorted(actual - declared)
+        extra = sorted(declared - actual)
+        if not missing and not extra:
+            return
+        raise ValueError(
+            f"axes.{self.name}.homing.sensors のキーが motors と一致しません "
+            f"(不足: {', '.join(missing) or 'なし'} / 余分: {', '.join(extra) or 'なし'})"
+        )
+
+    def _check_align_distance(self) -> None:
+        if self.homing is None or self.homing.align_distance is None:
+            return
+        if self.sync_tolerance is None:
+            return
+        if self.homing.align_distance < self.sync_tolerance:
+            return
+        raise ValueError(
+            f"axes.{self.name}.homing.align_distance ({self.homing.align_distance}) は "
+            f"sync_tolerance ({self.sync_tolerance}) より小さい必要があります "
+            "(整列段のずれが偏差許容差に届くと零点確定の最中に緊急停止します)"
+        )
 
     @property
     def motor_names(self) -> tuple[str, ...]:
@@ -128,6 +210,16 @@ class AxisSpec:
 
     def to_commands(self, value: float) -> dict[str, float]:
         return {motor.name: motor.to_command(value) for motor in self.motors}
+
+    def to_commands_each(self, values: Mapping[str, float]) -> dict[str, float]:
+        missing = sorted(name for name in self.motor_names if name not in values)
+        extra = sorted(set(values) - set(self.motor_names))
+        if missing or extra:
+            raise KeyError(
+                f"軸 '{self.name}' のモータと一致しません "
+                f"(不足: {', '.join(missing) or 'なし'} / 余分: {', '.join(extra) or 'なし'})"
+            )
+        return {motor.name: motor.to_command(values[motor.name]) for motor in self.motors}
 
     def to_value(self, commands: Mapping[str, float]) -> float:
         values = [
@@ -174,8 +266,10 @@ _MOTOR_KEYS = frozenset({"scale", "offset"})
 
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
 
-_HOMING_KEYS = frozenset({"sensor", "direction", "search_distance", "step", "settle_s"})
-_HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
+_HOMING_KEYS = frozenset(
+    {"sensor", "sensors", "direction", "search_distance", "step", "settle_s", "align_distance"}
+)
+_HOMING_REQUIRED = frozenset({"direction", "search_distance", "step"})
 
 _MOTION_KEYS = frozenset({"max_velocity", "max_acceleration", "velocity_ff"})
 _MOTION_REQUIRED = frozenset({"max_velocity", "max_acceleration"})
@@ -465,21 +559,42 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
     if missing:
         raise ValueError(f"axes.{axis_name}.homing に必須キーがありません: {', '.join(missing)}")
 
-    sensor = raw["sensor"]
-    if not isinstance(sensor, str) or not sensor:
-        raise ValueError(f"axes.{axis_name}.homing.sensor はセンサ名の文字列: {sensor!r}")
-
     path = f"axes.{axis_name}.homing"
+    sensor = raw.get("sensor")
+    if sensor is not None and (not isinstance(sensor, str) or not sensor):
+        raise ValueError(f"{path}.sensor はセンサ名の文字列: {sensor!r}")
+
+    motor_sensors = _parse_homing_sensor_map(path, raw.get("sensors"))
+    align_distance = _number(path, raw, "align_distance", None)
+
     try:
         return HomingSpec(
             sensor=sensor,
+            motor_sensors=motor_sensors,
             direction=float(raw["direction"]),
             search_distance=float(raw["search_distance"]),
             step=float(raw["step"]),
             settle_s=float(raw.get("settle_s", 0.05)),
+            align_distance=align_distance,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from exc
+
+
+def _parse_homing_sensor_map(path: str, raw: object) -> tuple[tuple[str, str], ...] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}.sensors はモータ名 → センサ名の辞書: {raw!r}")
+
+    pairs: list[tuple[str, str]] = []
+    for motor_name, sensor_name in raw.items():
+        if not isinstance(motor_name, str) or not motor_name:
+            raise ValueError(f"{path}.sensors のキーはモータ名の文字列: {motor_name!r}")
+        if not isinstance(sensor_name, str) or not sensor_name:
+            raise ValueError(f"{path}.sensors.{motor_name} はセンサ名の文字列: {sensor_name!r}")
+        pairs.append((motor_name, sensor_name))
+    return tuple(pairs)
 
 
 def _parse_motion(axis_name: str, raw: object) -> MotionSpec | None:

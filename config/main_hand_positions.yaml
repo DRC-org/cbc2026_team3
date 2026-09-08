@@ -11,20 +11,25 @@ axes:
       min: 0.0
       max: 650.0
       steps: [1.0, 5.0, 10.0, 50.0, 100.0]
+    # TODO(実機で確認): この軸のホーミングは実機で 1 度も走らせていない。
+    # direction / align_distance / step と左右 2 本の極性 (ファーム側 sensorActiveLow)
+    # はどれも未実測。初回は人が付いて EMG STOP を押せる状態で回すこと。
+    homing:
+      sensors:
+        y_axis_r: y_axis_r_origin_sensor
+        y_axis_l: y_axis_l_origin_sensor
+      direction: -1
+      # search_distance は上の manual の全幅 (max - min) と一致させる。対を機械的に
+      # 守るのは tests/test_main_positions_config.py の一致検査だけである
+      search_distance: 650.0
+      align_distance: 5.0
+      step: 0.5
+      settle_s: 0.05
     motion:
       max_velocity: 200.0
       max_acceleration: 1200.0
+      # config/main_hand.yaml の motors.y_axis_*.pid.kd と同値に保つこと
       velocity_ff: 1.0
-    # TODO(実機で確認): リミットスイッチ未装着のため無効。戻す日はファームの
-    # kServoBoards 基板 #0 SV4 を TouchSensor へ / config/main_hand.yaml の sensors: へ
-    # origin_sensor (can_id 0x44) を登録 / 下のコメントを外す、の 3 つを同時に行い、
-    # search_distance を実測のストローク全長へ取り直すこと (現在値は仮値時代の manual 全幅)。
-    # homing:
-    #   sensor: origin_sensor
-    #   direction: -1
-    #   search_distance: 22.0   # [mm]
-    #   step: 0.5               # [mm]
-    #   settle_s: 0.05
     motors:
       y_axis_r: { scale: 55.0131, offset: 0.0 }
       y_axis_l: { scale: -55.0131, offset: 0.0 }
@@ -35,7 +40,7 @@ axes:
     timeout_s: 3.0
     tolerance: 2.0
     sync_tolerance: 5.0
-    # TODO(実機で確認): 端まで振って他の機構と干渉しないことは未確認。
+    # TODO(実機で確認): 範囲は実測だが、端まで振って他の機構と干渉しないことは未確認。
     manual:
       min: 0.0
       max: 180.0
@@ -46,6 +51,7 @@ axes:
       sensor: rotate_origin_sensor
       direction: -1
       search_distance: 180.0
+      # 0.5deg では 1 歩も動かなかった (2026-09-05 実機。静止摩擦が下限を決める)
       step: 1.0
       settle_s: 0.05
     motors:
@@ -68,6 +74,8 @@ axes:
     settle_s: 0.5
     timeout_s: 1.0
 
+  # timeout_s はファームのスルーレート (90deg/s) から決まる。突き合わせは
+  # tests/test_servo_travel_budget.py が行う
   wall_f:
     unit: deg
     command_unit: deg
@@ -101,6 +109,7 @@ positions:
 
   # TODO(実機で確認): 赤を正 (= 正転) とする符号は仮置き。対になる
   # firmware/dc_motor/include/config.h の kDirForwardIsLow も TODO のまま。
+  # 0.3 はファーム側 kDefaultMaxDuty と同値で、超えるとクランプされる。
   conveyor:
     stop: 0.0
     run: { red: 0.3, blue: -0.3 }
@@ -110,6 +119,8 @@ positions:
     closed: 180.0
     open: 90.0
 
+  # TODO(実機で確認): closed が initial と同値なので動作確認の 1 段目が指令量 0 になり、
+  # closed へ届かない故障を拾えない。後壁の実可動域が決まったら別々の値にすること。
   wall_r:
     initial: 90.0
     closed: 90.0

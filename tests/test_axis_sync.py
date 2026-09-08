@@ -261,6 +261,52 @@ class TestSyncCorrections:
         assert group.corrections({}) == {}
 
 
+class TestTargetsShareAxisValue:
+    def _group(self) -> SyncGroup:
+        return SyncGroup(
+            name="y_axis",
+            members=(
+                MotorSpec(name="y_axis_r", scale=SCALE, offset=0.0),
+                MotorSpec(name="y_axis_l", scale=-SCALE, offset=0.0),
+            ),
+            tolerance=2.0,
+            sync_kp=2.0,
+            sync_limit=1e9,
+        )
+
+    def test_same_axis_value_is_shared(self) -> None:
+        group = self._group()
+
+        assert group.targets_share_axis_value({"y_axis_r": 10.0 * SCALE, "y_axis_l": -10.0 * SCALE})
+
+    def test_one_sided_step_is_not_shared(self) -> None:
+        group = self._group()
+
+        assert not group.targets_share_axis_value(
+            {"y_axis_r": 10.5 * SCALE, "y_axis_l": -10.0 * SCALE}
+        )
+
+    def test_missing_member_is_not_shared(self) -> None:
+        group = self._group()
+
+        assert not group.targets_share_axis_value({"y_axis_r": 10.0 * SCALE})
+        assert not group.targets_share_axis_value({})
+
+    def test_round_trip_error_is_absorbed(self) -> None:
+        group = self._group()
+        members = {member.name: member for member in group.members}
+        targets = {name: member.to_command(10.0) for name, member in members.items()}
+
+        assert group.targets_share_axis_value(targets)
+
+    def test_tolerance_sized_skew_is_not_shared(self) -> None:
+        group = self._group()
+
+        assert not group.targets_share_axis_value(
+            {"y_axis_r": 11.0 * SCALE, "y_axis_l": -10.0 * SCALE}
+        )
+
+
 class TestSyncGainValidation:
     def _members(self) -> tuple[MotorSpec, ...]:
         return (

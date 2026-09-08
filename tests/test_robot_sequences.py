@@ -436,7 +436,7 @@ class TestShippedRobotConfig:
             for axis in table.axes:
                 homing = table.axis(axis).homing
                 if homing is not None:
-                    required.add(homing.sensor)
+                    required |= set(homing.sensor_names)
 
         assert required <= sensors
 

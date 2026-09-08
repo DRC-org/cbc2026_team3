@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["SyncGuard"]
 
 PositionReader = Callable[[str], float]
+TargetReader = Callable[[str], float | None]
 
 
 class SyncGuard:
@@ -78,6 +79,18 @@ class SyncGuard:
             if self._check_deviation(group, position_of):
                 blocked.add(group.name)
         return frozenset(blocked)
+
+    def skewed_groups(self, *, target_of: TargetReader) -> frozenset[str]:
+        skewed: set[str] = set()
+        for group in self._groups.values():
+            targets = {
+                member.name: value
+                for member in group.members
+                if (value := target_of(member.name)) is not None
+            }
+            if not group.targets_share_axis_value(targets):
+                skewed.add(group.name)
+        return frozenset(skewed)
 
     def corrections(
         self, *, position_of: PositionReader, skip_groups: Collection[str]

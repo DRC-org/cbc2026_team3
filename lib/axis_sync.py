@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 __all__ = ["MotorSpec", "SyncGroup"]
 
+_TARGET_ALIGN_EPSILON = 1e-6
+
 
 @dataclass(frozen=True)
 class MotorSpec:
@@ -61,6 +63,16 @@ class SyncGroup:
         if deviation is None or deviation <= self.tolerance:
             return None
         return deviation
+
+    def targets_share_axis_value(self, targets: Mapping[str, float]) -> bool:
+        values = [
+            member.to_value(targets[member.name])
+            for member in self.members
+            if member.name in targets
+        ]
+        if len(values) != len(self.members) or not values:
+            return False
+        return max(values) - min(values) <= _TARGET_ALIGN_EPSILON
 
     def corrections(self, positions: Mapping[str, float]) -> dict[str, float]:
         if self.sync_kp == 0.0:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from lib.drivers.base import ControlMode
 from lib.sequence.motors import AxisHandle
@@ -32,6 +32,34 @@ MotorStale = Callable[[str], bool]
 OriginCapturable = Callable[[str], bool]
 CaptureOrigin = Callable[[str], Awaitable[None]]
 SleepFunc = Callable[[float], Awaitable[None]]
+
+
+class _SensorLatches:
+    def __init__(self, sensors: tuple[str, ...], read: SensorLatched) -> None:
+        self._sensors = sensors
+        self._read = read
+        self._latched: dict[str, bool] = dict.fromkeys(sensors, False)
+
+    def poll(self) -> None:
+        for name in self._sensors:
+            if self._read(name):
+                self._latched[name] = True
+
+    def discard(self) -> None:
+        for name in self._sensors:
+            self._read(name)
+            self._latched[name] = False
+
+    def any_latched(self) -> bool:
+        self.poll()
+        return any(self._latched.values())
+
+    def latched(self, sensor: str) -> bool:
+        return self._latched[sensor]
+
+
+def _sensor_label(homing: HomingSpec) -> str:
+    return " / ".join(f"'{name}'" for name in homing.sensor_names)
 
 
 def _progress_threshold(homing: HomingSpec) -> float:
@@ -64,18 +92,21 @@ class HomingRunner:
             raise HomingError(f"軸 '{spec.name}' に homing 設定がありません")
 
         self._check_preconditions(spec, homing)
+        latches = _SensorLatches(homing.sensor_names, self._sensor_latched)
 
-        if self._sensor_active(homing.sensor):
+        if any(self._sensor_active(name) for name in homing.sensor_names):
             logger.info("[homing] %s: 既にセンサに触れているため一度離れて寄せ直す", spec.name)
             await self._seek(
                 spec,
                 handle,
                 homing,
+                latches,
                 direction=-homing.direction,
                 want_active=False,
                 limit=homing.step * _RELEASE_STEP_LIMIT,
                 limit_message=(
-                    f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
+                    f"軸 '{spec.name}' を原点センサ {_sensor_label(homing)} から"
+                    "離せませんでした"
                     f" ({homing.step * _RELEASE_STEP_LIMIT}{spec.unit} 動かしても OFF に"
                     " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
                     " なるので、ファーム側の極性設定 (sensorActiveLow) を"
@@ -88,26 +119,166 @@ class HomingRunner:
             spec,
             handle,
             homing,
+            latches,
             direction=homing.direction,
             want_active=True,
             limit=homing.search_distance,
             limit_message=(
                 f"軸 '{spec.name}' が {homing.search_distance}{spec.unit} 動かしても"
-                f" 原点センサ '{homing.sensor}' に到達しませんでした"
+                f" 原点センサ {_sensor_label(homing)} に到達しませんでした"
                 " (探索方向・機構の引っかかり・センサの配線を確認してください)"
             ),
         )
 
         travelled = abs(observed - origin)
         logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
+        if homing.sensors is not None:
+            await self._align(spec, handle, homing, homing.sensors, latches)
         await self._capture_origin(spec.name)
         return travelled
+
+    async def _align(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        sensors: Mapping[str, str],
+        latches: _SensorLatches,
+    ) -> None:
+        pending = [motor for motor, sensor in sensors.items() if not latches.latched(sensor)]
+        if not pending:
+            logger.info("[homing] %s: 整列段は不要 (全センサが同時に接触)", spec.name)
+            self._log_sensor_states(spec, homing)
+            return
+
+        logger.info(
+            "[homing] %s: 整列段 (未接触: %s)",
+            spec.name,
+            ", ".join(f"{motor}→{sensors[motor]}" for motor in pending),
+        )
+
+        hold = self._observe_each(spec, handle)
+        start = dict(hold)
+        stalled: dict[str, int] = dict.fromkeys(pending, 0)
+        progress = _progress_threshold(homing)
+
+        while True:
+            latches.poll()
+            observed = self._observe_each(spec, handle)
+            for motor in [motor for motor in pending if latches.latched(sensors[motor])]:
+                hold[motor] = observed[motor]
+                pending.remove(motor)
+                logger.info(
+                    "[homing] %s: %s を %.2f%s 進めて %s に到達",
+                    spec.name,
+                    motor,
+                    abs(observed[motor] - start[motor]),
+                    spec.unit,
+                    sensors[motor],
+                )
+
+            if not pending:
+                await self._command_align(spec, handle, homing, hold, pending, observed)
+                self._log_sensor_states(spec, homing)
+                return
+
+            self._check_align_distance(spec, homing, sensors, pending, observed, start)
+
+            commanded = await self._command_align(spec, handle, homing, hold, pending, observed)
+            await self._wait_align_step(spec, handle, homing, latches, sensors, pending, commanded)
+
+            moved = self._observe_each(spec, handle)
+            for motor in pending:
+                stalled[motor] = (
+                    0 if abs(moved[motor] - observed[motor]) >= progress else stalled[motor] + 1
+                )
+                if stalled[motor] >= _STALL_LIMIT:
+                    raise HomingError(
+                        f"軸 '{spec.name}' の整列段でモータ '{motor}' が指令しても動きません"
+                        f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
+                        "**機構に遊びが無いと片側だけを動かせず、相方を引きずったまま"
+                        "止まって見えます** —— 機構の引っかかり・モータの励磁と"
+                        "併せて確認してください"
+                    )
+
+    async def _command_align(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        hold: Mapping[str, float],
+        pending: list[str],
+        observed: Mapping[str, float],
+    ) -> dict[str, float]:
+        values = {
+            motor: (
+                observed[motor] + homing.direction * homing.step
+                if motor in pending
+                else hold[motor]
+            )
+            for motor in spec.motor_names
+        }
+        await handle.set_target_value(spec.to_commands_each(values))
+        return values
+
+    def _check_align_distance(
+        self,
+        spec: AxisSpec,
+        homing: HomingSpec,
+        sensors: Mapping[str, str],
+        pending: list[str],
+        observed: Mapping[str, float],
+        start: Mapping[str, float],
+    ) -> None:
+        limit = homing.align_distance
+        if limit is None:
+            return
+        for motor in pending:
+            if abs(observed[motor] - start[motor]) < limit:
+                continue
+            raise HomingError(
+                f"軸 '{spec.name}' の整列段でモータ '{motor}' を {limit}{spec.unit}"
+                f" 動かしても原点センサ '{sensors[motor]}' が反応しませんでした。"
+                "**センサの極性が逆だと押しても ON になりません** —— ファーム側の"
+                "極性設定 (sensorActiveLow) と、スイッチの配線・断線を確認してください"
+            )
+
+    async def _wait_align_step(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        latches: _SensorLatches,
+        sensors: Mapping[str, str],
+        pending: list[str],
+        commanded: Mapping[str, float],
+    ) -> None:
+        reached = _progress_threshold(homing)
+        for _ in range(_FOLLOW_ATTEMPTS):
+            await self._sleep(homing.settle_s)
+            latches.poll()
+            if any(latches.latched(sensors[motor]) for motor in pending):
+                return
+            observed = self._observe_each(spec, handle)
+            if all(abs(observed[motor] - commanded[motor]) <= reached for motor in pending):
+                return
+
+    def _log_sensor_states(self, spec: AxisSpec, homing: HomingSpec) -> None:
+        logger.info(
+            "[homing] %s: 原点確定 (センサ現在値: %s)",
+            spec.name,
+            ", ".join(
+                f"{name}={'ON' if self._sensor_active(name) else 'OFF'}"
+                for name in homing.sensor_names
+            ),
+        )
 
     async def _seek(
         self,
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
+        latches: _SensorLatches,
         *,
         direction: int,
         want_active: bool,
@@ -115,7 +286,7 @@ class HomingRunner:
         limit_message: str,
     ) -> float:
         if want_active:
-            self._sensor_latched(homing.sensor)
+            latches.discard()
 
         start = self._observe(spec, handle)
         observed = start
@@ -127,7 +298,9 @@ class HomingRunner:
             commanded = observed + direction * homing.step
             await handle.set_target_value(spec.to_commands(commanded))
 
-            hit = await self._wait_step(spec, handle, homing, commanded, want_active=want_active)
+            hit = await self._wait_step(
+                spec, handle, homing, latches, commanded, want_active=want_active
+            )
 
             previous = observed
             observed = self._observe(spec, handle)
@@ -158,9 +331,11 @@ class HomingRunner:
                 " 零点確定を実行できないため探索を開始しません"
             )
 
-        if self._sensor_is_stale(homing.sensor):
+        stale_sensors = [name for name in homing.sensor_names if self._sensor_is_stale(name)]
+        if stale_sensors:
+            label = " / ".join(f"'{name}'" for name in stale_sensors)
             raise HomingError(
-                f"軸 '{spec.name}' の原点センサ '{homing.sensor}' が応答していません"
+                f"軸 '{spec.name}' の原点センサ {label} が応答していません"
                 " (配線・基板の電源を確認してください)"
             )
 
@@ -176,6 +351,7 @@ class HomingRunner:
         spec: AxisSpec,
         handle: AxisHandle,
         homing: HomingSpec,
+        latches: _SensorLatches,
         commanded: float,
         *,
         want_active: bool,
@@ -183,20 +359,30 @@ class HomingRunner:
         reached = _progress_threshold(homing)
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
-            if self._sensor_reached(homing.sensor, want_active=want_active):
+            if self._sensor_reached(homing, latches, want_active=want_active):
                 return True
             if abs(self._observe(spec, handle) - commanded) <= reached:
                 return False
         return False
 
-    def _sensor_reached(self, sensor: str, *, want_active: bool) -> bool:
+    def _sensor_reached(
+        self, homing: HomingSpec, latches: _SensorLatches, *, want_active: bool
+    ) -> bool:
         if want_active:
-            return self._sensor_latched(sensor)
-        return self._sensor_active(sensor) is False
+            return latches.any_latched()
+        return not any(self._sensor_active(name) for name in homing.sensor_names)
 
     def _observe(self, spec: AxisSpec, handle: AxisHandle) -> float:
         try:
             return handle.observed_value()
+        except HomingError:
+            raise
+        except Exception as exc:
+            raise HomingError(f"軸 '{spec.name}' の現在位置を読めません ({exc})") from exc
+
+    def _observe_each(self, spec: AxisSpec, handle: AxisHandle) -> dict[str, float]:
+        try:
+            return handle.observed_values()
         except HomingError:
             raise
         except Exception as exc:

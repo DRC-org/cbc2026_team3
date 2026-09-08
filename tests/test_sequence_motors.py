@@ -16,7 +16,7 @@ from lib.sequence.motors import (
     WaitInterruptedError,
     build_motor_group,
 )
-from lib.sequence.positions import AxisSpec, MotorSpec
+from lib.sequence.positions import AxisSpec, MotorSpec, PositionLookupError
 from tests.fake_drivers import StubFeedbackDriver
 
 
@@ -475,3 +475,22 @@ class TestAxisHandle:
         drivers["pair_l"].set_observed(position=-25.0)
 
         assert handle.sync_violation() is None
+
+    def test_observed_values_はモータ単独の軸位置を返す(self) -> None:
+        handle, drivers = self._pair(sync_tolerance=1.0)
+        drivers["pair_r"].set_observed(position=30.0)
+        drivers["pair_l"].set_observed(position=-10.0)
+
+        assert handle.observed_values() == pytest.approx({"pair_r": 3.0, "pair_l": 1.0})
+        assert handle.observed_value() == pytest.approx(2.0)
+
+    def test_observed_values_は位置を持たない軸を拒否する(self) -> None:
+        axis, _drivers, _handles = _make_axis(
+            "valve_3",
+            (MotorSpec(name="valve_3_sol", scale=1.0, offset=0.0),),
+            manager=_make_can_manager(),
+            command_mode=ControlMode.ON_OFF,
+        )
+
+        with pytest.raises(PositionLookupError):
+            axis.observed_values()
