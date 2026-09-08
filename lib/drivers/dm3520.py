@@ -381,6 +381,13 @@ class Dm3520Driver(MotorDriver):
 
         待ちが `disable` より長いのは、`initialization_steps()` の
         `set_zero_on_start` と揃えているため。
+
+        TODO(未修正): **ここで確定した原点は、物理緊急停止で本機の電源が数秒
+        落ちるたびに黙って無効になる** —— 本機は電源投入時に位置が 0.0rad へ
+        固定されるので、復帰時点で内部の原点がその瞬間の姿勢へ作り直される。
+        PC 側に検出手段が無く、UI にもログにもヘルスにも出ない。当面は
+        「物理緊急停止を踏んだら零点確定をやり直す」運用で受ける。詳細は
+        `docs/checks_and_health.md` の「零点確定」節。
         """
         return [(self.encode_set_zero(), 0.2)]
 

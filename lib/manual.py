@@ -130,6 +130,13 @@ class ManualController:
         origin = self._targets.get(axis)
         if origin is None:
             origin = self.observed_value(axis)
+        # TODO(未修正): **起点が可動範囲の外にあると、1 歩目が刻み幅を無視して
+        # 境界まで飛ぶ。** `set_value` は拒否ではなくクランプするので、実測 +9.96mm・
+        # max 2.0mm の軸へ delta -1.0 を送ると約 8mm 動く (2026-09-08 に実機で観測)。
+        # **零点確定がまだの軸は原点が電源投入位置なので、範囲外に居るのが普通**
+        # であり、この形は今後も踏む。クランプそのものは意図した仕様 (端で操作が
+        # 効かなくなるのを避ける) なので、直すなら移動量を |delta| で頭打ちにするか、
+        # 範囲外に居ることを画面へ出す側で手当てする。
         return await self.set_value(axis, origin + float(delta))
 
     # ------------------------------------------------------------------ #

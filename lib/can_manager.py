@@ -990,6 +990,15 @@ class CANManager:
         可否の判断は `_may_probe_for_feedback` が持つ (ここでは持たない ——
         待ち方と「打ってよいか」を同じ関数に混ぜると、呼び出しを 1 つ足した人が
         判断を書き写すことになる)。
+
+        TODO(未修正): **「新しく届いたか」の判定だけが壁時計に乗っている。**
+        `_last_rx_at` は `time.time()` で記録されるのに、締切だけ
+        `time.monotonic()` で測っている。baseline を取った直後に NTP が時刻を
+        後ろへ補正すると、その後に届いたフレームの記録が baseline より小さくなり、
+        **実際には届き続けているのに新規と認められないまま**タイムアウトする ——
+        症状は「フィードバックを受信できないため有効化を見送りました (無励磁の
+        まま)」だけで、配線不良と区別が付かない。判定は単調時計か単調増加の
+        シーケンス番号へ寄せること (表示用の `_last_rx_at` は壁時計のままでよい)。
         """
         baseline = self._last_rx_at.get(motor_name)
         probe_msg = self._motors[motor_name].feedback_probe_message() if probe else None
