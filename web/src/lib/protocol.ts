@@ -984,8 +984,6 @@ function parseKnown(raw: Raw): ServerMessage | null {
       // 手動操縦は `positions` だけ形を確定させる (他の欄は素通し)。
       // 旧サーバーの素の文字列を受けないと、文字の無いボタンが押せる状態で並ぶ
       if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
-      // 手動操縦は `positions` だけ形を確定させる (他の欄は素通し)。
-      // 旧サーバーの素の文字列を受けないと、文字の無いボタンが押せる状態で並ぶ
 
       return { type: "state", robot, state };
     }

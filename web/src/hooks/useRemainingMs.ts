@@ -31,6 +31,11 @@ interface Anchor {
   atPerfMs: number;
 }
 
+/** アンカーからの経過ミリ秒。**自分の単調時計で進めるのは進行中だけ** (呼び出し側が判定する) */
+function elapsedNowFrom(anchor: Anchor): number {
+  return anchor.elapsedMs + (performance.now() - anchor.atPerfMs);
+}
+
 /** 残りミリ秒。0 未満へは落とさない (マイナス表示は競技時計として意味を持たない) */
 function clampRemaining(remainingMs: number, durationMs: number): number {
   return Math.min(Math.max(remainingMs, 0), durationMs);
@@ -73,8 +78,7 @@ export function useRemainingMs(timer: MatchTimerValue | null | undefined): numbe
 
     let timeoutId = 0;
     const schedule = () => {
-      const elapsedNow = anchor.current.elapsedMs + (performance.now() - anchor.current.atPerfMs);
-      const remaining = clampRemaining(durationMs - elapsedNow, durationMs);
+      const remaining = clampRemaining(durationMs - elapsedNowFrom(anchor.current), durationMs);
       // 0:00 に達したら以降は表示が変わらない。空回りさせない
       if (remaining <= 0) return;
 
@@ -97,8 +101,6 @@ export function useRemainingMs(timer: MatchTimerValue | null | undefined): numbe
 
   // 進行中だけ自分の時計で進める。停止中はサーバーが凍結した値をそのまま描く
   // (試合終了後に数字が進み続けると、何秒残して終えたのかが読めなくなる)
-  const elapsedNow = running
-    ? anchor.current.elapsedMs + (performance.now() - anchor.current.atPerfMs)
-    : elapsedMs;
+  const elapsedNow = running ? elapsedNowFrom(anchor.current) : elapsedMs;
   return clampRemaining(durationMs - elapsedNow, durationMs);
 }
