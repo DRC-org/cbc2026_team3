@@ -196,6 +196,13 @@ class CANManager:
         # 受信ループは _last_rx_at のみ更新し、送信失敗は send_to_bus 内で
         # _tx_error_count を増やす。
         self._last_rx_at: dict[str, float] = {}
+        # **「新しく届いたか」の判定はこちら。** `_last_rx_at` は表示と経過時間の
+        # ための壁時計なので、NTP が時刻を後ろへ補正すると「後に届いたフレームの
+        # 記録のほうが小さい」が成立する。それで新規判定を行うと、届き続けている
+        # のに `_wait_fresh_feedback` がタイムアウトし、症状は「フィードバックを
+        # 受信できないため有効化を見送りました」だけで配線不良と区別が付かない。
+        # 単調増加のカウンタなら時計に依らない
+        self._rx_seq: dict[str, int] = {}
         self._last_tx_at: dict[str, float] = {}
         self._tx_error_count: dict[str, int] = {}
         # **健全性の判定はこちらで行う。** `_tx_error_count` は起動からの累計で、
@@ -597,6 +604,7 @@ class CANManager:
                     # デコードに失敗したフレームでは更新しない (解釈できていない値を
                     # 「受信できている」と報告すると、途絶の検出そのものが効かなくなる)
                     self._last_rx_at[motor.name] = time.time()
+                    self._rx_seq[motor.name] = self._rx_seq.get(motor.name, 0) + 1
                     # 受信できている = コントローラはバスから切り離されていない。
                     # `restart-ms` が 0 のインタフェースは復帰通知を送らないので、
                     # 実通信を根拠に外す経路が無いと DOWN が永久に残る
@@ -991,22 +999,19 @@ class CANManager:
         待ち方と「打ってよいか」を同じ関数に混ぜると、呼び出しを 1 つ足した人が
         判断を書き写すことになる)。
 
-        TODO(未修正): **「新しく届いたか」の判定だけが壁時計に乗っている。**
-        `_last_rx_at` は `time.time()` で記録されるのに、締切だけ
-        `time.monotonic()` で測っている。baseline を取った直後に NTP が時刻を
-        後ろへ補正すると、その後に届いたフレームの記録が baseline より小さくなり、
-        **実際には届き続けているのに新規と認められないまま**タイムアウトする ——
-        症状は「フィードバックを受信できないため有効化を見送りました (無励磁の
-        まま)」だけで、配線不良と区別が付かない。判定は単調時計か単調増加の
-        シーケンス番号へ寄せること (表示用の `_last_rx_at` は壁時計のままでよい)。
+        **判定も締切も壁時計に乗せない。** 新規判定は受信カウンタ (`_rx_seq`)、
+        締切は `time.monotonic()` で測る。`_last_rx_at` の壁時計で「baseline より
+        後か」を見ていた頃は、baseline を取った直後の NTP 補正で**届き続けている
+        のに新規と認められないまま**タイムアウトしえた —— 症状は「フィードバックを
+        受信できないため有効化を見送りました (無励磁のまま)」だけで、配線不良と
+        区別が付かない。`_last_rx_at` は表示と経過時間のための壁時計のまま。
         """
-        baseline = self._last_rx_at.get(motor_name)
+        baseline = self._rx_seq.get(motor_name, 0)
         probe_msg = self._motors[motor_name].feedback_probe_message() if probe else None
         deadline = time.monotonic() + timeout_s
 
         while True:
-            last_rx = self._last_rx_at.get(motor_name)
-            if last_rx is not None and (baseline is None or last_rx > baseline):
+            if self._rx_seq.get(motor_name, 0) > baseline:
                 return True
             if time.monotonic() >= deadline:
                 return False

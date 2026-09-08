@@ -190,6 +190,29 @@ class TestClamp:
         assert await manual.jog("y_axis", 5.0) == 20.0
         assert await manual.jog("y_axis", 5.0) == 20.0
 
+    async def test_範囲の外から始めた_1_歩は刻み幅を超えない(self) -> None:
+        """起点が範囲の外に居ても、1 歩は刻み幅ぶんしか動かないこと。
+
+        素の clamp を通していた頃は、境界まで一気に飛んだ (実機で実測 +9.96mm・
+        max 2.0mm の軸へ -1.0 を送り約 8mm 動いた)。**零点確定がまだの軸は原点が
+        電源投入位置なので、範囲の外に居るのは異常ではなく普通である。**
+        """
+        manual, drivers, _ = _build(follow=False)
+        # 上限 20.0 の外側 (30.0mm 相当) に居る
+        drivers["y_axis_r"].set_observed(position=30.0 * 55.0)
+        drivers["y_axis_l"].set_observed(position=-30.0 * 55.0)
+
+        assert await manual.jog("y_axis", -1.0) == pytest.approx(29.0)
+        assert [value for _, value in drivers["y_axis_r"].commands] == [pytest.approx(29.0 * 55.0)]
+
+    async def test_範囲の外からさらに外へは動かさない(self) -> None:
+        """寄る向きだけを許す。外側へ広げる向きは従来どおり境界で止める。"""
+        manual, drivers, _ = _build(follow=False)
+        drivers["y_axis_r"].set_observed(position=30.0 * 55.0)
+        drivers["y_axis_l"].set_observed(position=-30.0 * 55.0)
+
+        assert await manual.jog("y_axis", 1.0) == pytest.approx(30.0)
+
     async def test_丸めた値がジョグの起点になる(self) -> None:
         # 丸める前の値を起点にすると、上限で連打したぶんだけ「戻すのに空押しが要る」
         manual, _, _ = _build()

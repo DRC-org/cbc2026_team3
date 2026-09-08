@@ -409,6 +409,33 @@ class TestMotorActivation:
         motor.activation_steps.assert_not_called()
         assert send.await_count == 0
 
+    async def test_鮮度の判定は壁時計に依存しない(self) -> None:
+        """NTP が時刻を後ろへ補正しても、届いたフィードバックは新規と認めること。
+
+        `_last_rx_at` の大小で新規判定をしていた頃は、baseline を取った直後に
+        時計が戻ると **届き続けているのに** 新規と認められずタイムアウトした
+        (症状は「フィードバックを受信できないため有効化を見送りました」だけで、
+        配線不良と区別が付かない)。
+        """
+        mgr, motor = self._prepare()
+        motor.requires_fresh_feedback_for_activation.return_value = True
+        motor.feedback_probe_message.return_value = can.Message(arbitration_id=0x203, data=bytes(8))
+        motor.activation_steps.return_value = [
+            (can.Message(arbitration_id=0x202, data=bytes(8)), 0.0)
+        ]
+        started = time.time()
+        mark_feedback_at(mgr, "m1", started)
+
+        async def fake_send(name: str, msg: can.Message) -> None:
+            # 応答は届いているが、その間に時計が 10 秒巻き戻った状況
+            mark_feedback_at(mgr, name, started - 10.0)
+
+        with patch.object(mgr, "send", new_callable=AsyncMock, side_effect=fake_send):
+            activated = await mgr.activate_motor("m1", feedback_timeout_s=0.5)
+
+        assert activated is True
+        motor.activation_steps.assert_called_once()
+
     async def test_activation_requires_feedback_newer_than_wait_start(self) -> None:
         mgr, motor = self._prepare()
         motor.requires_fresh_feedback_for_activation.return_value = True

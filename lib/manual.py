@@ -101,8 +101,7 @@ class ManualController:
         """
         spec = self._axis(axis)
         value = self._positions.raw(axis, name, court=self._court)
-        await self._send(spec, spec.to_commands(value))
-        self._targets[axis] = value
+        await self._apply(spec, value)
         logger.info("manual move: axis=%s position=%s value=%s", axis, name, value)
         return value
 
@@ -114,30 +113,34 @@ class ManualController:
         """
         spec = self._axis(axis)
         manual = self._require_manual(spec)
-        clamped = manual.clamp(float(value))
-        await self._send(spec, spec.to_commands(clamped))
-        self._targets[axis] = clamped
-        return clamped
+        return await self._apply(spec, manual.clamp(float(value)))
 
     async def jog(self, axis: str, delta: float) -> float:
         """直前の手動目標から相対移動する。``manual:`` を持つ軸のみ。
 
         起点にフィードバックを使わないのは、追従中の連打が吸われるため。
         起点が無い (初回・緊急停止後) ときだけ現在値から取り直す。
+
+        **丸めは `set_value` の `clamp` ではなく `clamp_from` を通す。**
+        起点が範囲の外に居ると `clamp` は 1 歩目だけを境界まで飛ばす (実測
+        +9.96mm・``max`` 2.0mm の軸へ -1.0 を送り約 8mm 動いた)。零点確定が
+        まだの軸は原点が電源投入位置なので、範囲の外に居るのは普通である。
         """
         spec = self._axis(axis)
-        self._require_manual(spec)
-        origin = self._targets.get(axis)
-        if origin is None:
-            origin = self.observed_value(axis)
-        # TODO(未修正): **起点が可動範囲の外にあると、1 歩目が刻み幅を無視して
-        # 境界まで飛ぶ。** `set_value` は拒否ではなくクランプするので、実測 +9.96mm・
-        # max 2.0mm の軸へ delta -1.0 を送ると約 8mm 動く (2026-09-08 に実機で観測)。
-        # **零点確定がまだの軸は原点が電源投入位置なので、範囲外に居るのが普通**
-        # であり、この形は今後も踏む。クランプそのものは意図した仕様 (端で操作が
-        # 効かなくなるのを避ける) なので、直すなら移動量を |delta| で頭打ちにするか、
-        # 範囲外に居ることを画面へ出す側で手当てする。
-        return await self.set_value(axis, origin + float(delta))
+        manual = self._require_manual(spec)
+        stored = self._targets.get(axis)
+        origin = float(stored if stored is not None else self.observed_value(axis))
+        return await self._apply(spec, manual.clamp_from(origin, origin + float(delta)))
+
+    async def _apply(self, spec: AxisSpec, value: float) -> float:
+        """丸め終わった値を送り、ジョグの起点として控える。
+
+        送信と起点の記録を 1 箇所に閉じてあるのは、丸め方の違う 2 つの入口
+        (`set_value` / `jog`) が同じ後始末を書き写さないため。
+        """
+        await self._send(spec, spec.to_commands(value))
+        self._targets[spec.name] = value
+        return value
 
     # ------------------------------------------------------------------ #
     #  状態

@@ -1197,6 +1197,8 @@ target_refreshers=...)` で `RobotServer` にも渡す。サーバー側は
 | 緊急停止中は手動指令が 1 通も出ない（切替は通る） | `manual_*` の `allowed_during_e_stop` を反転する / `set_operation_mode` を `False` にする | `test_commands.py` / `test_server_manual.py` |
 | 緊急停止でジョグの起点を捨てる | `ManualController.on_e_stop` を空にする / `activate_e_stop` の呼び出しを落とす | `test_manual.py` / `test_server_manual.py` |
 | ジョグの起点は目標値で積む | 起点を毎回フィードバックから取る形へ戻す（**フィードバックが追従しないドライバでしか検出できない**） | `test_manual.py` |
+| 範囲の外から始めたジョグも刻み幅を超えない | `ManualSpec.clamp_from` の範囲拡張（`min(min_value, origin)` / `max(max_value, origin)`）を素の `min_value` / `max_value` へ戻す（**起点が範囲の外に居るときだけ 1 歩目が境界まで飛ぶ。零点確定がまだの軸では普通に踏む**） | `test_manual.py::TestClamp` |
+| 鮮度の判定は壁時計に依存しない | `_wait_fresh_feedback` の新規判定を `_rx_seq` から `_last_rx_at` の大小へ戻す / `_dispatch_frame` の `_rx_seq` 更新を落とす（**NTP の後ろ向き補正で、届き続けているのにタイムアウトする**） | `test_can_manager.py::TestMotorActivation` |
 | ロボット 1 台分の部品が main からサーバーへ届く | `main()` の `add_robot(...)` から `manual=` を落とす | `test_main_wiring.py` |
 | 押している間くり返すジョグが必ず止まる | `useHoldRepeat` の停止経路を 1 つ落とす / アンマウント時の解除を外す | `useHoldRepeat.test.ts` |
 | 試合の開始・終了は 1 回では成立しない | `useArmedPress` の不感時間ガードを外す（ダブルクリック 1 回が二度押しになる）/ 自動解除のタイマーを張らない / 発火後に未武装へ戻さない / 呼び出し側の `disarm()` を落とす | `useArmedPress.test.ts` / `StartGate.test.tsx` / `MatchControl.test.tsx` |

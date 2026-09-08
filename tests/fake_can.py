@@ -268,13 +268,19 @@ def deliver_frame(mgr: CANManager, bus_name: str, msg: can.Message) -> None:
 
 
 def mark_feedback_at(mgr: CANManager, motor_name: str, at: float) -> None:
-    """フィードバック受信時刻だけを任意の値に置く。
+    """フィードバックが 1 通届いたことにして、その受信時刻を任意の値に置く。
 
     「待機開始より前の受信」「送信の 1ms 後」のように *時刻そのもの* が検証
     対象の場合は、実フレームを流しても時計を狙った位置には置けない。
     ``deliver_frame`` で足りるならそちらを使うこと。
+
+    **受信カウンタも一緒に進める。** 本番の受信ループは 2 つを同じ 1 箇所で
+    更新するので、時刻だけを置くと「壁時計は進んだのに 1 通も届いていない」という
+    実機に存在しない状態になり、鮮度待ち (`_wait_fresh_feedback`) のテストが
+    受信の有無ではなく時計を見ることになる。
     """
     mgr._last_rx_at[motor_name] = at
+    mgr._rx_seq[motor_name] = mgr._rx_seq.get(motor_name, 0) + 1
 
 
 def mark_bus_off(mgr: CANManager, bus_name: str, *, value: bool = True) -> None:

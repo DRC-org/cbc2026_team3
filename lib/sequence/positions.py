@@ -57,6 +57,26 @@ class ManualSpec:
             return self.max_value
         return value
 
+    def clamp_from(self, origin: float, value: float) -> float:
+        """起点から動かす指令を丸める。**範囲を起点まで広げてから丸める。**
+
+        ``clamp`` をそのまま使うと、起点が範囲の外に居るときだけ 1 歩が刻み幅を
+        無視して境界まで飛ぶ (実機で実測 +9.96mm・``max`` 2.0mm の軸へ -1.0 の
+        ジョグを送り、約 8mm 動いた)。**零点確定がまだの軸は原点が電源投入位置
+        なので、範囲の外に居るのは異常ではなく普通である。**
+
+        外へ広げる向きは従来どおり境界で止まるので、範囲の内側から呼ぶ限り
+        ``clamp`` と一致する。範囲の外からは「寄る向きにだけ動ける」ことになり、
+        丸めた結果が起点から離れる量は必ず ``|value - origin|`` 以下になる。
+        """
+        low = min(self.min_value, origin)
+        high = max(self.max_value, origin)
+        if value < low:
+            return low
+        if value > high:
+            return high
+        return value
+
     def contains(self, value: float) -> bool:
         return self.min_value <= value <= self.max_value
 
