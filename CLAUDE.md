@@ -276,7 +276,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`) |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `main_hand/` = **サブハンド不在**（Damiao DM3520 用 CANable 未接続）**でメインハンド実機を動かす構成**（メインハンド実機が完成したため、機構未装着の机上ベンチから役割が変わった。このセットだけ robot yaml / positions を持たず本番の `config/main_hand.yaml` / `config/main_hand_positions.yaml` をそのまま使う。CANable 3 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台 / `y_axis_tuning/` = y_axis の PID 実機チューニング用）。`--system` / `--config` / `--checklist` で差し替える。8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる）。**本番 config をそのまま使うセット（現在は `main_hand/` のみ）は `_BENCH_USES_PRODUCTION_CONFIG` に宣言させる**（黙って検証を素通りさせず、他のセットで誤って config を消したときに検出できるようにするため） |
+| `config/bench/<対象>/` | 机上ベンチ（機構未装着）用の一式。対象ごとにサブディレクトリを分ける（`m3508/` = M3508 2 台 / `edulite/` = EDULITE 05 2 台 / `main_hand/` = **サブハンド不在**（Damiao DM3520 用 CANable 未接続）**でメインハンド実機を動かす構成**（メインハンド実機が完成したため、機構未装着の机上ベンチから役割が変わった。このセットだけ robot yaml / positions を持たず本番の `config/main_hand.yaml` / `config/main_hand_positions.yaml` をそのまま使う。CANable 3 本が要る） / `dc/` = 自作モタドラ DC 基板 1 枚 / `servo/` = 自作モタドラ サーボ基板 1 枚 / `solenoid/` = 自作モタドラ 電磁弁基板 1 枚 / `dm3520/` = Damiao DM3520 2 台 / `sub_hand_homing/` = **サブハンド直動 2 軸 + リミットスイッチ**（零点確定の実機確認用。**DC 基板を登録しないので物理非常停止が効かない** —— `REF` が押されっぱなしで本番 config が起動直後に緊急停止へ落ちる間の退避路であり、直ったら使わない） / `y_axis_tuning/` = y_axis の PID 実機チューニング用）。`--system` / `--config` / `--checklist` で差し替える。9 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が読めることを守り、**同梱のディレクトリが漏れなくその一覧に載っていること**も同クラスが見る（一覧は手書きなので、足したセットを書き忘れると「そのセットだけ誰も検証しないまま全部緑」になる）。**本番 config をそのまま使うセット（現在は `main_hand/` のみ）は `_BENCH_USES_PRODUCTION_CONFIG` に宣言させる**（黙って検証を素通りさせず、他のセットで誤って config を消したときに検出できるようにするため） |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。`health` /
 `can_buses` / `match` は PC 上に 1 組しか存在し得ないため `config/<robot>.yaml` には書けず、
@@ -1175,7 +1175,7 @@ CAN ピンだけは写さず別の `static_assert` が variant のマクロを�
 FAULT として出すので、症状は**「正しく焼いたのに全モータ FAULT」**になる。
 **この対はテストが機械的に守る** — `tests/test_firmware_version_sync.py` が 3 つの
 `config.h` を実際にパースし、can_id の上位 2bit（仕様書 §2.2 のビット分割）で基板種別を
-決めて同梱の全 yaml（bench 8 セットを含む）と突き合わせる。実際に一度、ファームだけを
+決めて同梱の全 yaml（bench 9 セットを含む）と突き合わせる。実際に一度、ファームだけを
 上げて config 側 26 箇所が丸ごと取り残された。
 **ただしこの照合は `INFO` を 1 通でも受けて初めて働く。** `INFO` は送信バッファの
 都合だけで 1 通も出ないことがあり（前出の「送信バッファの本数は 3 枚で違う」節）、その間は

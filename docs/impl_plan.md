@@ -2880,7 +2880,7 @@ WS を叩いた場合や UI の判定漏れに対してもここが最終防御�
 
 ### 机上ベンチ用の config セット（`config/bench/`）
 
-> **【各ベンチの `magnitude` の記述は統合前】** 8 セットの構成・分けた理由・
+> **【各ベンチの `magnitude` の記述は統合前】** 9 セットの構成・分けた理由・
 > `TestShippedBenchConfigs` が守るものは現行だが、以下の各ベンチ節にある
 > `motor_check.magnitude` の設定（`magnitude: 0` で除外する / `magnitude: 5.0` に
 > するといった話）は**キーごと config から消えている**ので、そのまま書き写しても
@@ -2908,7 +2908,7 @@ WS を叩いた場合や UI の判定漏れに対してもここが最終防御�
 **同一ディレクトリに同じ `robot_name` のベンチセットを 2 つ置けない**。セットを足すときは
 `config/bench/<対象>/` を 1 つ掘り、4 ファイルをまとめてそこへ置くこと。
 
-**8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
+**9 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る。**
 本番の config は `TestShippedConfigs` が見ているが、以前は bench/ を見るものが
 1 つも無かった —— スキーマを変えても壊れたことに気付けるのは机上に基板を並べた当日で、
 しかも症状は「起動しない」だけになる。実機が来る日は試合前で、そこで config の
@@ -6605,7 +6605,7 @@ PC からは繋がっていないのと区別が付かない** —— 運用（`
 そうなるとデバイス ID `0x40` 台（＝サーボ基板）が **2 つの `kFirmwareVersion` に対応する**。
 `tests/test_firmware_version_sync.py` は 3 つの `config.h` を実際にパースし、
 **can_id の上位 2bit（仕様書 §2.2 のビット分割）で基板種別を決めて**同梱の全 yaml
-（bench 8 セットを含む）の `expected_firmware` と突き合わせる。種別 → プロジェクトが
+（bench 9 セットを含む）の `expected_firmware` と突き合わせる。種別 → プロジェクトが
 1 対 1 でなくなった瞬間、この検査は**どちらか一方しか見ない嘘**になる ——
 しかも「片方だけ見て緑」なので、検査が壊れたこと自体がどこにも出ない。
 §3.4 の焼き忘れ検出はこの検査に立っているので、これを崩すのは割に合わない。

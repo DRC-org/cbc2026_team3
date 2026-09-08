@@ -1,0 +1,34 @@
+# サブハンド直動 2 軸 + リミットスイッチのベンチ用の共通設定。
+#
+# **このセットの存在理由は「DC 基板を登録しないこと」の一点である。**
+# 物理非常停止を受けるのは DC 基板だけで、その報告は `FEEDBACK` の緊急停止ビット
+# → サーバー全体の緊急停止という経路で伝わる。`REF` が押されっぱなし (配線・極性が
+# 未確定) の状態では本番 config が起動直後に緊急停止へ落ちるため、零点確定の実機
+# 確認そのものが始められない。ここでは DC 基板と電磁弁基板のモータを登録しないので、
+# その報告はサーバーへ届かない。
+#
+# !!! **この構成では物理非常停止が効かない。** !!!
+# 止める手段は UI の EMG STOP だけになる (CLAUDE.md「この基板に物理非常停止入力
+# (`REF`) は無い」の項が言う「DC 基板が繋がっていない構成」がこれである)。
+# 人を近付けないこと。**`REF` が直ったら本番 config へ戻し、このセットは使わない。**
+#
+# バスは 2 本要る —— 直動 2 軸は can_dm3520、リミットスイッチはサーボ基板 #1 なので
+# can_generic。can_generic には DC 基板と電磁弁基板も載っているが、登録していない
+# チャンネルのフレームは受信ループが誰にも配らないだけで害は無い。
+#
+# 使い方:
+#   scripts/setup_can.sh
+#   # 相手の居ないバスがあるとウォッチドッグが全バスを 5 秒周期で down/up するので
+#   # ベンチのあいだは止める。終わったら必ず戻すこと
+#   sudo systemctl stop cbc-can-watchdog
+#   uv run python main.py --system config/bench/sub_hand_homing/system.yaml \
+#       --config config/bench/sub_hand_homing/sub_hand.yaml \
+#       --checklist config/bench/sub_hand_homing/checklist.yaml
+#   sudo systemctl start cbc-can-watchdog
+
+can_buses:
+  dm3520_bus: can_dm3520
+  generic_bus: can_generic
+
+# health / match は書かない。既定値は lib/config_schema.py にしかないので、
+# 書き写すとベンチと実運用で判定基準がずれる余地ができる。

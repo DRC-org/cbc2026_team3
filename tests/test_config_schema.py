@@ -813,6 +813,7 @@ _BENCH_DIRS = (
     "servo",
     "solenoid",
     "dm3520",
+    "sub_hand_homing",
     "y_axis_tuning",
 )
 
@@ -864,7 +865,7 @@ class TestShippedBenchConfigs:
     「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
     始める余裕は無い。
 
-    8 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
+    9 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
     見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
     **robot yaml / positions が bench_dir に無いセットは `_BENCH_USES_PRODUCTION_CONFIG`
     に載っていて本番 config を指す** —— 黙って検証を素通りさせると、他のセットで
@@ -938,6 +939,12 @@ class TestShippedBenchConfigs:
         main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
         open するため、机上に挿していない CANable が 1 本でも書いてあると
         [Errno 19] No such device で起動そのものが落ちる。
+
+        **`sensors:` のバスも数える。** かつてはモータのバスしか見ておらず、
+        センサだけが載るバスを開くセット (`sub_hand_homing`) が書けなかった。
+        逆向きの穴も同時に塞がる —— センサを `can_buses` に無いバスへ書くと、
+        受信ループがそのフレームを 1 通も取り込まないまま「接触しないスイッチ」
+        になり、症状は配線不良と区別が付かない。
         """
         bench_dir = _CONFIG_DIR / "bench" / bench
 
@@ -946,7 +953,9 @@ class TestShippedBenchConfigs:
             source=f"bench/{bench}/system.yaml",
         )
         robot_yaml = _bench_robot_yaml_path(bench, bench_dir)
-        used = {motor["bus"] for motor in yaml.safe_load(robot_yaml.read_text())["motors"].values()}
+        raw = yaml.safe_load(robot_yaml.read_text())
+        used = {motor["bus"] for motor in raw["motors"].values()}
+        used |= {sensor["bus"] for sensor in (raw.get("sensors") or {}).values()}
 
         assert set(system.can_buses) == used
 

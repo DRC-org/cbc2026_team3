@@ -55,7 +55,7 @@ def _load_yaml(path: pathlib.Path) -> dict:
 
 
 def _config_sets() -> list[tuple[str, pathlib.Path, pathlib.Path]]:
-    """(表示名, robot yaml, positions yaml) の一覧。本番 2 つ + bench 8 セット。"""
+    """(表示名, robot yaml, positions yaml) の一覧。本番 2 つ + bench 9 セット。"""
     sets: list[tuple[str, pathlib.Path, pathlib.Path]] = []
 
     for robot_name in _PRODUCTION_ROBOTS:
