@@ -145,7 +145,7 @@ export const MatchPrep = memo(function MatchPrep({
         </>
       }
     >
-      {/* 件数と進捗バーで「あと何項目か」を数えずに読ませる。区分ごとに分けた後も、
+      {/* 済み件数と進捗バーで「あと何項目か」を数えずに読ませる。区分ごとに分けた後も、
           試合開始のゲートは全項目の完了なので合計はここ 1 箇所に出す */}
       <div className="flex shrink-0 items-center gap-3 border-b border-base-300 px-2 py-1">
         <span className="font-mono text-[1.3em] tabular-nums">
@@ -160,14 +160,16 @@ export const MatchPrep = memo(function MatchPrep({
           value={percent}
           max={100}
         />
+        {/* **残り件数は出さない。** 左の `checkedCount/items.length` から引き算で出るうえ、
+            同じ画面の `StartGate` が「指差喚呼 残り N 件」を同時に出している。
+            **`完了` は残す** —— これはサーバーの `checklist.completed` であって件数から
+            導いた値ではなく、両者が食い違ったことに気付ける唯一の表示になる */}
         {completed ? (
           <span className="flex shrink-0 items-center gap-1 font-medium text-success">
             <Icon as={Check} />
             完了
           </span>
-        ) : (
-          <span className="shrink-0 text-base-content/70">残り {items.length - checkedCount}</span>
-        )}
+        ) : null}
       </div>
 
       <div className="scroll flex min-h-0 flex-1 flex-col gap-1.5 px-2 py-1.5">

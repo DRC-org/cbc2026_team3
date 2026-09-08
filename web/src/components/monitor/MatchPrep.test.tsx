@@ -104,7 +104,23 @@ describe("MatchPrep の項目配置", () => {
     });
 
     expect(screen.getByText("/3")).toBeInTheDocument();
-    expect(screen.getByText("残り 2")).toBeInTheDocument();
+    // 残り件数は同じ画面の StartGate が出す。ここに併記すると、引き算で導ける
+    // 同じ事実が 1 行の中に 2 度並ぶ
+    expect(screen.queryByText(/残り/)).not.toBeInTheDocument();
+  });
+
+  it("「完了」はサーバーの completed であって件数からの導出ではない", () => {
+    // 全部チェック済みでもサーバーが completed を立てていなければ完了と言わない。
+    // 件数から導き直すと、この食い違いに気付ける表示が画面から消える
+    mount({ items: [item("a", "preflight", true), item("b", "court", true)], completed: false });
+
+    expect(screen.queryByText("完了")).not.toBeInTheDocument();
+  });
+
+  it("サーバーが completed を立てていれば未チェックが残っていても完了を出す", () => {
+    mount({ items: [item("a", "preflight", true), item("b", "court")], completed: true });
+
+    expect(screen.getByText("完了")).toBeInTheDocument();
   });
 });
 
