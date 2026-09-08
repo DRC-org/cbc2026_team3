@@ -62,7 +62,40 @@ def _generic_motors() -> list[tuple[pathlib.Path, str, dict]]:
     return found
 
 
+def _sensors() -> list[tuple[pathlib.Path, str, dict]]:
+    """同梱の全 yaml から `sensors:` の定義を拾う。
+
+    **センサも突き合わせる。** 自作基板は 1 スロット = 1 CAN デバイスで、センサ
+    スロットも自分のデバイス ID で INFO を送る (仕様書 §3.4) ので、期待値の書き方も
+    照合の意味もモータと変わらない。**motors だけを見ていると、駆動するモータが
+    1 台も載っていない基板 (サーボ基板 #1 は 5 スロットとも TouchSensor) の
+    expected_firmware がファームから乖離しても全件緑になる** —— その状態の症状は
+    「スイッチを押しても反応しない」だけで、配線不良と区別が付かない。
+
+    `driver` で絞れないのは、センサに種別の欄が無いため (自作基板のスロットしか
+    `sensors:` へ書けないので絞る必要も無い)。
+    """
+    found: list[tuple[pathlib.Path, str, dict]] = []
+    for path in sorted(_CONFIG_DIR.rglob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            continue
+        sensors = doc.get("sensors")
+        if not isinstance(sensors, dict):
+            continue
+        for name, sensor in sensors.items():
+            if isinstance(sensor, dict):
+                found.append((path, name, sensor))
+    return found
+
+
 _GENERIC_MOTORS = _generic_motors()
+_SENSORS = _sensors()
+
+# モータとセンサで検査の中身は同じ (期待値が書いてあり、can_id から決まる基板の
+# 版番号と一致すること) なので 1 つの表にまとめる。**分けて書くと片方にだけ
+# 検査を足した状態が作れる。**
+_GENERIC_DEVICES = _GENERIC_MOTORS + _SENSORS
 
 
 def _case_id(entry: tuple[pathlib.Path, str, dict]) -> str:
@@ -75,23 +108,29 @@ class TestFirmwareVersionSync:
         # 収集が空振りしたまま緑になるのを防ぐ (glob の書き間違い・config 移動)
         assert len(_GENERIC_MOTORS) >= 20
 
-    @pytest.mark.parametrize("entry", _GENERIC_MOTORS, ids=_case_id)
+    def test_shipped_configs_have_sensors(self):
+        # モータ側と別に数える。まとめて数えると、センサの収集だけが空振りしても
+        # モータの件数で下限を満たしてしまう
+        assert len(_SENSORS) >= 5
+
+    @pytest.mark.parametrize("entry", _GENERIC_DEVICES, ids=_case_id)
     def test_expected_firmware_is_declared(self, entry):
-        """generic のモータは必ず期待値を書く。
+        """generic のモータもセンサも必ず期待値を書く。
 
         書かない自由を残すと、下の突き合わせが「対象 0 件」で緑になる形で
-        すり抜けられる。
+        すり抜けられる。**`SensorConfig.expected_firmware` の既定は None (照合しない)**
+        なので、書き忘れは起動を拒否されず静かに照合が消える。
         """
-        path, name, motor = entry
-        assert "expected_firmware" in motor, f"{path}: {name} に expected_firmware が無い"
+        path, name, device = entry
+        assert "expected_firmware" in device, f"{path}: {name} に expected_firmware が無い"
 
-    @pytest.mark.parametrize("entry", _GENERIC_MOTORS, ids=_case_id)
+    @pytest.mark.parametrize("entry", _GENERIC_DEVICES, ids=_case_id)
     def test_expected_firmware_matches_header(self, entry):
-        path, name, motor = entry
-        can_id = motor["can_id"]
+        path, name, device = entry
+        can_id = device["can_id"]
         project = _BOARD_KIND_TO_PROJECT[(can_id >> 6) & 0b11]
         expected = _firmware_version(project)
-        assert motor["expected_firmware"] == expected, (
+        assert device["expected_firmware"] == expected, (
             f"{path}: {name} (can_id=0x{can_id:02X}) の expected_firmware が "
             f"firmware/{project}/include/config.h の kFirmwareVersion={expected} と "
             f"食い違っている。片方だけ上げると、正しく焼いた基板が一斉に FAULT になる"

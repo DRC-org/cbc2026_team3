@@ -1456,10 +1456,18 @@ class RobotServer:
         過ぎれば全自作モタドラが恒久的に「未確認」になり、机上で画面を確かめられなく
         なる (`server_dryrun.py` が見栄えの値だけを作る領域と同じ理由)。
 
-        **見ているのは `motors` だけ。** ファームはセンサスロットも `INFO` を送る
-        (仕様書 §5.2) が、現状 `main.py` はセンサを `expected_firmware` なしに
-        生成するので照合対象そのものが無い。`sensors:` に `expected_firmware` を
-        書けるようにする日には、ここも `ctx.can_manager.sensors` を見ること。
+        **`motors` と `sensors` の両方を見る。** 自作基板は 1 スロット = 1 CAN
+        デバイスで、センサスロットも自分のデバイス ID で `INFO` を送る
+        (仕様書 §5.2)。センサだけを載せた基板 (サーボ基板の 5 スロットを全て
+        センサへ回した構成) は照合するモータを 1 台も持たないので、ここで
+        センサを外すとその基板の焼き忘れ検出が丸ごと消える —— 旧ファームのまま
+        のスロットは「スイッチを押してもセンサ入力ビットが立たない」形でしか
+        現れず、配線不良と区別が付かない。
+
+        **配信のフィールド名は `firmware_unconfirmed_motors` のまま**にしてある。
+        1 スロット = 1 CAN デバイスなのでセンサも「デバイス 1 つ」として同じ欄で
+        扱えばよく、名前を変えると WS 契約と UI の受信条件が同時に追従を要る
+        (追従漏れは「型は合っているのに画面に出ない」形になる)。
         """
         if self._dry_run:
             return []
@@ -1472,12 +1480,15 @@ class RobotServer:
         freshness = FeedbackFreshness(
             ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
         )
-        # 1 周期に 1 回だけ取る (モータごとに取り直すと同じ配信の中で基準時刻がずれる)
+        # 1 周期に 1 回だけ取る (デバイスごとに取り直すと同じ配信の中で基準時刻がずれる)
         now = freshness.now()
+        # 名前空間はモータとセンサで共通 (`CANManager._add_device` が重複を拒否する)
+        # ので、束ねても取り違えは起きない
+        devices = {**ctx.can_manager.motors, **ctx.can_manager.sensors}
         return sorted(
-            motor_name
-            for motor_name, motor in ctx.can_manager.motors.items()
-            if motor.firmware_confirmed() is False and not freshness.is_stale(motor_name, now)
+            device_name
+            for device_name, device in devices.items()
+            if device.firmware_confirmed() is False and not freshness.is_stale(device_name, now)
         )
 
     async def _reactivate_motors(self) -> None:

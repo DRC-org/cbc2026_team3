@@ -22,17 +22,24 @@ robot_name: sub_hand
 #       0x40-0x44 サーボ基板 #0 SV0-SV4 … main: gripper(0x40) / wall_f(0x41) /
 #                                          wall_r(0x42) /
 #                                          rotate_origin_sensor(0x43) /
-#                                          SV4(0x44) は Unused (y_axis の原点
-#                                          スイッチ用に予約。装着待ち)
-#       0x48-0x4C サーボ基板 #1 SV0-SV4 … sub : sub_gripper(0x48)
-#                                          SV1-SV4 は Unused (下記)
-#       0x50-0x54 サーボ基板 #2 SV0-SV4 … 用途未定 (5 スロットとも Unused)。
+#                                          y_axis_r_origin_sensor(0x44)
+#       0x48-0x4C サーボ基板 #1 SV0-SV4 … main: y_axis_l_origin_sensor(0x48)
+#                                          sub : sub_y_axis_f_limit_sensor(0x49) /
+#                                                sub_y_axis_r_limit_sensor(0x4A) /
+#                                                sub_lift_t_limit_sensor(0x4B) /
+#                                                sub_lift_b_limit_sensor(0x4C)
+#                                          **5 スロットとも TouchSensor** で、
+#                                          駆動するモータは 1 台も無い
+#       0x50-0x54 サーボ基板 #2 SV0-SV4 … sub : sub_rotate_r(0x50) / sub_rotate_l(0x51) /
+#                                                sub_pitch_r(0x52) / sub_pitch_l(0x53) /
+#                                                sub_offset(0x54)
 #                                          この 1 枚だけ MCU が UNO R4 Minima で、
 #                                          ファームは別バイナリ (env uno_r4_minima)
 #       0x80-0x82 DC 基板 #0 ch0-ch2   … main: conveyor(0x80)
 #                                          sub : pump_vac(0x81) / pump_blow(0x82)
 #       0xC0-0xC5 電磁弁基板 #0 ch0-ch5 … sub : valve_1〜valve_6
-#     **1 枚の基板を両ロボットが分け合う**ので、ロボット単位で帯を切ることはできない。
+#     **1 枚の基板を両ロボットが分け合う**ので、ロボット単位で帯を切ることはできない
+#     (基板 #1 は SV0 だけがメインハンドで SV1-SV4 がサブハンド)。
 #     さらに基板を足すときは DIP (基板番号) を上げる: サーボ #3 = 0x58-、DC #1 = 0x88-。
 #
 #     **スロット設定一式 (役割・ピン・初期角・可動範囲・パルス仕様・センサ極性) は
@@ -42,11 +49,12 @@ robot_name: sub_hand
 #     Servo になっていることを確かめること。役割が食い違うと、指令を送っても FEEDBACK も
 #     INFO も返らない (センサ・未使用スロットは SET_TARGET を受け付けない) ので、
 #     症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
-#     現在サーボ基板 #0 は SV0-SV2 が Servo・SV3 が TouchSensor・SV4 が Unused、
-#     サーボ基板 #1 は SV0 だけが Servo で SV1-SV4 は Unused、
-#     サーボ基板 #2 は 5 スロットとも Unused (用途未定)。
-#     **SV4 の Unused は空きではない** —— y_axis の原点スイッチ用に予約してあり、
-#     スイッチが付いたら TouchSensor へ戻すスロットなので、ここへ別のものを載せない。
+#
+#     !!! サーボ基板 3 枚は 15 スロットとも埋まっている !!!
+#     #0 は SV0-SV2 が Servo・SV3/SV4 が TouchSensor、#1 は 5 スロットとも
+#     TouchSensor、#2 は 5 スロットとも Servo。**空きスロットはもう無いので、
+#     アクチュエータもスイッチも足すには基板を 1 枚増やす** (DIP 3 → 0x58-0x5C)。
+#     既存のスロットを流用すると、そこを使っていた機構が黙って動かなくなる。
 #
 #   can_edulite … EDULITE 05 の ID は 1 バイトの任意値で、ビット分割の規則は無い
 #     (出荷時は 2 台とも 0x7F。バスへ載せる前に scripts/edulite_set_id.py で
@@ -139,19 +147,26 @@ motors:
     t_max: 10.0
     set_zero_on_start: false
 
-  # --- 離散状態アクチュエータ (自作モータドライバ) ---
-  # 開 / 閉 の 2 状態しか取らない。動作確認も運用と同じ位置名へ動かすので
-  # (sequences/motor_check.py)、確認専用の駆動量は存在しない。かつては magnitude を
-  # 別に持っており、微小量を指令すると「サーボは補間完了で reached を立てるので、
-  # 0.1deg しか動いていなくても PASSED になる」という形で確認が意味を失っていた。
-  # **サーボ基板 #0 ではなく #1 に載る唯一のアクチュエータ。** サーボ基板 #0 の SV3 は
-  # ファーム側で TouchSensor (rotate の原点スイッチ) になっており、同じスロットへ
-  # サーボの指令を送っても受け付けられない。#0 の残る Servo スロットは
-  # gripper / wall_f / wall_r で埋まっているため、基板をもう 1 枚足してその SV0 を使う。
-  sub_gripper:
+  # --- サーボ 5 軸 (自作モータドライバ / サーボ基板 #2) ---
+  # **5 スロットとも 1 枚の基板 (#2) に載る。** この 1 枚だけ MCU が UNO R4 Minima で、
+  # ファームは別バイナリ (env uno_r4_minima) だが、CAN 上の振る舞いも版番号も
+  # Nano 版と同じなので PC 側から MCU の違いは見えない (見る必要も手段も無い)。
+  #
+  # **sub_rotate_r / sub_rotate_l と sub_pitch_r / sub_pitch_l は機構的に直結した
+  # 左右ペア**で、config/sub_hand_positions.yaml が 1 論理軸へ束ねる。逆回転側は
+  # そちらの motors: で scale: -1.0 / offset: 270.0 として絶対角を折り返すので、
+  # **同じ論理位置でも左右へ届く角度は違う** —— ファーム側の可動範囲定数
+  # (kSubRotate*Limits / kSubPitch*Limits) をスロットごとに分けてあるのはこのためで、
+  # 片側の実測で相方のクランプを動かしてはならない。
+  #
+  # 動作確認も運用と同じ位置名へ動かすので (sequences/motor_check.py)、確認専用の
+  # 駆動量は存在しない。かつては magnitude を別に持っており、微小量を指令すると
+  # 「サーボは補間完了で reached を立てるので、0.1deg しか動いていなくても PASSED に
+  # なる」という形で確認が意味を失っていた。
+  sub_rotate_r:
     driver: generic
     bus: generic_bus
-    can_id: 0x48               # サーボ基板 #1 SV0 (仕様書 §2.2)
+    can_id: 0x50               # サーボ基板 #2 SV0 (仕様書 §2.2)
     control_type: position
     # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
     # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
@@ -160,8 +175,41 @@ motors:
     # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
     # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
     # **ファームを直したらここも直す。**
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0
+
+  sub_rotate_l:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x51               # サーボ基板 #2 SV1
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  sub_pitch_r:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x52               # サーボ基板 #2 SV2
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  sub_pitch_l:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x53               # サーボ基板 #2 SV3
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  # 左右ペアではない単独軸。
+  sub_offset:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x54               # サーボ基板 #2 SV4
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---
   # 電磁弁基板 #0 の ch0-5 = 0xC0〜0xC5 (仕様書 §2.2 / §9)。
@@ -250,3 +298,58 @@ motors:
     can_id: 0x82               # DC 基板 #0 ch2
     control_type: duty
     expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
+
+# --- センサ入力 (自作サーボ基板 #1 の TouchSensor スロット) ---
+# **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
+# 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
+# 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない (照合する仕組みは無い)。
+#
+# motors ではなくこちらに書くことで、動作確認・目標値再送・UI のモータ一覧に
+# 「常に 0 のモータ」が並ばない。途絶は STALE として監視される。
+#
+# **接触そのものは異常ではない** —— 原点合わせで触れさせるたびに FAULT になっては
+# ならないので、ヘルス判定には入っていない。判断は PC 側が持ち、基板は報告するだけ。
+#
+# **この 4 本はどの homing からも参照していない (報告のみ)。**
+# config/sub_hand_positions.yaml の sub_y_axis / sub_lift は Damiao DM3520 で、
+# 零点確定の手段 (SET_ZERO の安全な順序) を宣言していない —— スイッチを付けても
+# HomingError になる。それでも登録するのは、途絶が STALE として出るからで、
+# 配線が抜けたまま零点確定を有効にして「いつまでも当たらない」形で機構端まで
+# 押し込む事故を先に潰せる。名前を `_limit_sensor` にしてあるのは、これらが原点では
+# なく**可動端の検出**だから (メインハンドの `_origin_sensor` と役割が違う)。
+#
+# **expected_firmware をここに書くのは必須である。** サーボ基板 #1 には駆動する
+# モータが 1 台も無いので、**この基板の焼き忘れを拾えるのは sensors: の照合だけ**
+# —— motors: 側の照合は expected_firmware を書いた対象としか突き合わせない。
+# 書かないと、この基板だけ古いファームのまま全スロットが「反応しないスイッチ」として
+# 現れ、症状は配線不良と区別が付かない。
+#
+# **同じ基板の SV0 (0x48) はメインハンドのもの**で、config/main_hand.yaml の
+# sensors: に登録してある。1 枚の基板が 2 つのロボットにまたがるが、can_generic は
+# 物理的に共有なので成立する (配線はメインハンドから基板 #1 まで引く)。
+sensors:
+  # sub_y_axis の前端。
+  sub_y_axis_f_limit_sensor:
+    bus: generic_bus
+    can_id: 0x49               # サーボ基板 #1 SV1
+    expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
+
+  # sub_y_axis の後端。
+  sub_y_axis_r_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4A               # サーボ基板 #1 SV2
+    expected_firmware: 6
+
+  # sub_lift の上端。
+  sub_lift_t_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4B               # サーボ基板 #1 SV3
+    expected_firmware: 6
+
+  # sub_lift の下端。**この 1 本は自重落下の検出にも使えない** —— 基板は報告するだけで、
+  # 落ちてから ON になるので保護にはならない。sub_lift が無励磁で保持できることは
+  # config/checklist.yaml の sub_lift_holds で実機確認する。
+  sub_lift_b_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4C               # サーボ基板 #1 SV4
+    expected_firmware: 6

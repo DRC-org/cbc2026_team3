@@ -48,11 +48,16 @@ logger = logging.getLogger(__name__)
 #: **`sequences/sub_hand.py` の `move_to_home` とは意図的に別物** —— あちらは
 #: 吸気ポンプを回したまま次のサイクルへ入る運用上の待機姿勢で、こちらは
 #: 前後スライドと昇降も含めた機構の原位置 (ポンプは停止)。
+#: サーボ 3 軸の `home` は**ファームの起動角と揃っている前提**で並べてある
+#: (config/sub_hand_positions.yaml)。ここから外すと、動作確認の後だけ機構が
+#: `working` のまま残り、次に基板が瞬断した瞬間に起動角へ飛ぶ。
 SUB_HOME: dict[str, str] = {
     "sub_arm_joint": "home",
     "sub_y_axis": "home",
     "sub_lift": "home",
-    "sub_gripper": "open",
+    "sub_rotate": "home",
+    "sub_pitch": "home",
+    "sub_offset": "home",
     "pump_vac": "stop",
     "pump_blow": "stop",
 }
@@ -203,10 +208,33 @@ class MotorCheckSequence(Sequence):
         await self.move_to({"sub_lift": "lifted"})
         await self.move_to({"sub_lift": "home"})
 
-    @step("サブハンド 補助ハンド", axes={"sub_gripper"})
-    async def sub_gripper(self) -> None:
-        await self.move_to({"sub_gripper": "closed"})
-        await self.move_to({"sub_gripper": "open"})
+    # --- サーボ 3 軸 (サーボ基板 #2) ------------------------------------------
+    # **この 3 軸の到達判定は「指令が届いた」ことしか言わない。** サーボの FEEDBACK は
+    # クランプ後の指令角のエコーであって実位置ではないので (仕様書 §7)、ホーンが外れて
+    # いても機構が固着していても reached は立ち、左右ペアのずれも 0 のままである。
+    # 実際に動いたか・左右が揃っているかは `config/checklist.yaml` の
+    # sub_servo_move / sub_servo_pair_sync で目視確認する (DC 基板の conveyor_run や
+    # 電磁弁の valves_actuate と同じ扱い)。
+    #
+    # **3 軸を 1 ステップにまとめない。** 同時に動かすと機構の姿勢が 1 ステップで
+    # 3 つ変わり、どれが動いていないのか目で追えなくなる —— 自動判定が効かない以上、
+    # 目で追えることがこの確認の中身そのものである (sub_lift と同じ理由)。
+    @step("サブハンド 回転 (左右直結ペア)", axes={"sub_rotate"})
+    async def sub_rotate(self) -> None:
+        # 左右 2 台が機構的に直結している。**軸単位で 1 回だけ指令する**
+        # (モータ単位で 1 台ずつ動かすと、その場で機構を捻る)
+        await self.move_to({"sub_rotate": "working"})
+        await self.move_to({"sub_rotate": "home"})
+
+    @step("サブハンド ピッチ (左右直結ペア)", axes={"sub_pitch"})
+    async def sub_pitch(self) -> None:
+        await self.move_to({"sub_pitch": "working"})
+        await self.move_to({"sub_pitch": "home"})
+
+    @step("サブハンド オフセット", axes={"sub_offset"})
+    async def sub_offset(self) -> None:
+        await self.move_to({"sub_offset": "working"})
+        await self.move_to({"sub_offset": "home"})
 
     @step("サブハンド 電磁弁 6 個 (打音・目視確認)", axes=VALVE_AXES)
     async def sub_valves(self) -> None:

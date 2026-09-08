@@ -663,8 +663,20 @@ def _setup_robot(
     # センサは motors には入れない (仕様書 §5.2)。受信の振り分けとヘルス監視だけを
     # 登録し、動作確認・目標値再送・UI のモータ一覧には並べない。
     # **登録を忘れると受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。**
+    # **期待ファーム版は渡す。** センサスロットも自分のデバイス ID で INFO を送る
+    # (仕様書 §5.2) ので、渡さないと照合対象そのものが無くなる —— センサだけを
+    # 載せた基板は焼き忘れ検出を 1 つも持たないことになり、旧ファームのままの
+    # スロットは「スイッチを押してもセンサ入力ビットが立たない」形でしか現れない
+    # (配線不良と区別が付かない)。可動レンジはセンサに無いので渡さない
     for sensor_cfg in robot.sensors.values():
-        can_manager.add_sensor(sensor_cfg.bus, GenericDriver(sensor_cfg.name, sensor_cfg.can_id))
+        can_manager.add_sensor(
+            sensor_cfg.bus,
+            GenericDriver(
+                sensor_cfg.name,
+                sensor_cfg.can_id,
+                expected_firmware=sensor_cfg.expected_firmware,
+            ),
+        )
 
     return can_manager, motors
 

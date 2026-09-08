@@ -149,13 +149,20 @@ motors:
   #   SV0 0x40 Servo       … gripper
   #   SV1 0x41 Servo       … wall_f
   #   SV2 0x42 Servo       … wall_r
-  #   SV3 0x43 TouchSensor … rotate_origin_sensor (下の sensors:)
-  #   SV4 ―    Unused      … y_axis の原点スイッチ用に予約 (スイッチ未装着)
-  # で、**この基板に空いている Servo スロットはもう無い**。SV4 は Unused だが、
-  # ここへサーボを載せてはならない —— y_axis の原点スイッチを付ける日に
-  # TouchSensor へ戻すスロットである。サーボを足すときは
-  # サーボ基板 #1 (0x48-) か #2 (0x50-) を使う (サブハンドの sub_gripper が 0x48 に
-  # 載っており、#1 は SV1-SV4、#2 は 5 スロットとも空いている)。
+  #   SV3 0x43 TouchSensor … rotate_origin_sensor      (下の sensors:)
+  #   SV4 0x44 TouchSensor … y_axis_r_origin_sensor    (下の sensors:)
+  #
+  # !!! サーボ基板 3 枚は 15 スロットとも埋まっている !!!
+  # #0 は上のとおり、#1 は 5 スロットとも TouchSensor (SV0 が y_axis 左の原点
+  # スイッチ = このロボットのもの、SV1-SV4 がサブハンド)、#2 は 5 スロットとも
+  # サブハンドのサーボ。**アクチュエータもスイッチも、足すには基板を 1 枚増やす**
+  # (DIP = 基板番号 3 → 0x58-0x5C)。空きを探して既存のスロットを流用すると、
+  # そのスロットを使っていた機構が黙って動かなくなる。
+  #
+  # **y_axis の左右の原点スイッチは 2 枚の基板にまたがる** —— 右が #0 の SV4
+  # (0x44)、左が #1 の SV0 (0x48) で、#0 に空きが無いための配線である。
+  # 基板は「どのロボットのものか」ではなく「どのバスに繋がっているか」でしか
+  # 区切られていないので、共有バス can_generic に載る限りこれで成立する。
   gripper:
     driver: generic
     bus: generic_bus
@@ -168,7 +175,7 @@ motors:
     # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
     # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
     # **ファームを直したらここも直す。**
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0
 
   # DC モータ。位置の概念がないので duty 指令。
@@ -192,7 +199,7 @@ motors:
     bus: generic_bus
     can_id: 0x41               # サーボ基板 #0 SV1
     control_type: position
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
   wall_r:
@@ -200,10 +207,10 @@ motors:
     bus: generic_bus
     can_id: 0x42               # サーボ基板 #0 SV2
     control_type: position
-    expected_firmware: 5
+    expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-# --- センサ入力 (自作サーボ基板のスロット SV3) ---
+# --- センサ入力 (自作サーボ基板の TouchSensor スロット) ---
 # **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
 # 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
 # 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。
@@ -217,19 +224,40 @@ motors:
 # axes.<軸>.homing.sensor がこの名前を指すことで決まる:
 #   rotate_origin_sensor … rotate (EDULITE ペア) の原点。サーボ基板 #0 SV3
 #
-# **y_axis の原点スイッチ (SV4 / 0x44) はまだ装着されていないので登録しない。**
-# ここへ書くと動作確認の最初のステップが毎回「センサが応答していません」で止まる ——
-# 現在のファームは SV4 を Unused として宣言しており (firmware/servo/include/config.h の
-# kServoBoards)、Unused のスロットは FEEDBACK を 1 通も送らないため鮮度の事前確認に
-# 引っ掛かる。症状は配線不良と区別が付かない。
-# **スイッチを付ける日は 3 つを同時に戻すこと**: ファームの kServoBoards の SV4 を
-# TouchSensor へ・ここへ origin_sensor を登録・config/main_hand_positions.yaml の
-# axes.y_axis.homing のコメントを外す。1 つでも欠けると上と同じ症状になる。
+# **y_axis の 2 本はまだ homing から参照していない (報告のみ)。** 登録して鮮度を
+# 監視するところまでが今の役目で、axes.y_axis.homing を有効にするのは
+# direction / search_distance / step を実機で測ってからになる。**登録だけでも意味が
+# ある** —— 途絶が STALE として出るので、配線が抜けたまま零点確定を有効にして
+# 「いつまでも当たらない」形で機構端まで押し込む事故を先に潰せる。
 #
-# **SensorConfig は name / bus / can_id しか持たない。** expected_firmware は書けない
-# (書くと起動が拒否される) —— INFO の照合はモータの側だけが行う。同じ基板に載る
-# gripper / wall_f / wall_r が版番号を見ているので、焼き忘れはそちらで FAULT になる。
+# **左右で 1 本ずつ要る**のは、y_axis が左右直結のペア軸で、原点確定がグループ単位に
+# しか効かないため (片側だけ確定すると、その間に片方が動いたぶんが消えないオフセットに
+# なる)。**2 本は別々の基板に載る** —— 右が #0 の SV4、左が #1 の SV0 で、#0 に
+# 空きが無いための配線である (上の motors: のコメントを参照)。
+#
+# **expected_firmware をセンサにも書く。** 基板 #1 には駆動するモータが 1 台も無いので、
+# **その基板の焼き忘れを拾えるのはここだけ**である —— motors: 側の照合は
+# expected_firmware を書いた対象としか突き合わせない。書かないと、基板 #1 だけが
+# 古いファームのまま全スロットが「反応しないスイッチ」として現れ、症状は配線不良と
+# 区別が付かない。基板 #0 の 2 本にも書くのは、同じ基板の gripper / wall_f / wall_r が
+# 見ているから省いてよい、という理由が「そのモータを消したら照合も消える」という
+# 見えない依存になるため。
 sensors:
   rotate_origin_sensor:
     bus: generic_bus
     can_id: 0x43               # サーボ基板 #0 SV3
+    expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
+
+  # y_axis の右側リミットスイッチ。
+  y_axis_r_origin_sensor:
+    bus: generic_bus
+    can_id: 0x44               # サーボ基板 #0 SV4
+    expected_firmware: 6
+
+  # y_axis の左側リミットスイッチ。**サーボ基板 #1 に載るのはこの 1 本だけで、
+  # 残る SV1-SV4 はサブハンドのもの** (config/sub_hand.yaml の sensors:)。
+  # 1 枚の基板が 2 つのロボットにまたがるが、can_generic は物理的に共有なので成立する。
+  y_axis_l_origin_sensor:
+    bus: generic_bus
+    can_id: 0x48               # サーボ基板 #1 SV0
+    expected_firmware: 6

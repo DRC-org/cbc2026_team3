@@ -103,6 +103,25 @@ class TestShippedConfig:
 
         assert set(table.axes) - touched == set()
 
+    async def test_全ての軸を初期姿勢以外の位置へも動かす(self) -> None:
+        """「触った」だけでは駆動の確認にならない。
+
+        初期姿勢のステップと最後の復帰ステップが全軸へ `home` を送るので、
+        **その軸を動かすステップが 1 つも無くても上の「一度は動かす」は成立する**。
+        駆動を確かめるには初期姿勢と違う位置へ一度出る必要がある。
+
+        自作サーボ基板の軸ではこの穴が特に見えない —— FEEDBACK は指令角のエコー
+        なので、`home` へ送り直しただけでも到達は立ち、全ステップ PASSED になる。
+        """
+        commanded: dict[str, set[str]] = {}
+        for targets in await _collect():
+            for axis, position in targets.items():
+                commanded.setdefault(axis, set()).add(position)
+
+        stuck = sorted(axis for axis, names in commanded.items() if len(names) < 2)
+
+        assert not stuck, f"1 つの位置へしか指令していない軸がある: {', '.join(stuck)}"
+
 
 class TestPairedAxes:
     async def test_左右直結ペアは軸名で指令する(self) -> None:
@@ -271,7 +290,9 @@ class TestPartialConfiguration:
             "サブハンド アーム関節": ("sub_arm_joint",),
             "サブハンド 前後スライド (Y 方向)": ("sub_y_axis",),
             "サブハンド 昇降": ("sub_lift",),
-            "サブハンド 補助ハンド": ("sub_gripper",),
+            "サブハンド 回転 (左右直結ペア)": ("sub_rotate",),
+            "サブハンド ピッチ (左右直結ペア)": ("sub_pitch",),
+            "サブハンド オフセット": ("sub_offset",),
             "サブハンド 電磁弁 6 個 (打音・目視確認)": tuple(sorted(VALVE_AXES)),
             "サブハンド 吸気・排気ポンプ (聴音確認)": ("pump_blow", "pump_vac"),
         }
