@@ -11,7 +11,7 @@ import os
 import pathlib
 import signal
 import socket
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from types import ModuleType
 
 import can
@@ -243,12 +243,52 @@ def _suspend_sync_monitoring(monitors: list[SyncMonitor], axis: str) -> Iterator
         yield
 
 
+@contextlib.asynccontextmanager
+async def _hold_target_refresh(
+    refreshers: list[TargetRefresher], names: list[str]
+) -> AsyncIterator[None]:
+    """原点を付け替えるあいだ再送を黙らせ、抜けるときに目標とラッチを捨てる。
+
+    **`SET_ZERO` は「生値 0 が指す物理位置」を付け替える操作なので、付け替えの前に
+    記録した目標もラッチも、付け替えた後には別の物理位置を指す。** 探索がヒットした
+    直後に `HomingRunner` が「その場で止める」ために書いた目標がまさにそれで、
+    その生値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
+    再励磁すると、20Hz の再送がそのぶんだけ離れた位置へ押し続ける ——
+    `activation_steps(after_set_zero=True)` が保持目標へ 0 を書く手当ては、
+    50ms 後の再送 1 通で上書きされて効かない
+    (`QueryDrivenTargetRefresher.clear_target` が再励磁について書いているのと
+    同じ上書きが、こちらでは恒久的に効き続ける)。
+
+    **捨てるだけでは足りず、付け替えのあいだ黙らせる必要がある。** 目標を先に
+    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、`SET_ZERO` の直前に
+    取ったラッチが直後には別の位置を指す。黙らせておけば、ラッチは抜けた後に
+    新しい原点で取り直される。
+
+    捨てるのは対象軸のモータだけ。全台へ広げると無関係な軸の `wait_reached` まで
+    巻き込んで中断させる (`_TargetRefresherBase.clear_target` と同じ理由)。
+    """
+    targeted = [r for r in refreshers if set(names) & set(r.motor_names)]
+    for refresher in targeted:
+        await refresher.pause(reason="原点の付け替え")
+    try:
+        yield
+    finally:
+        # **捨ててから再開する。** 順序を逆にすると、捨てるまでの 1 周期で
+        # 古い目標が新しい原点のもとへ送られる
+        for refresher in targeted:
+            for name in names:
+                if name in refresher.motor_names:
+                    refresher.clear_target(name)
+            refresher.resume()
+
+
 def _make_origin_resolver(
     loops: list[M3508PositionLoop],
     table: PositionTable,
     *,
     can_managers: list[CANManager] | None = None,
     sync_monitors: list[SyncMonitor] | None = None,
+    target_refreshers: list[TargetRefresher] | None = None,
 ) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
     """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
 
@@ -273,6 +313,7 @@ def _make_origin_resolver(
     """
     managers = can_managers or []
     monitors = sync_monitors or []
+    refreshers = target_refreshers or []
 
     def _resolve_via_set_zero(axis: str) -> Callable[[], Awaitable[None]] | None:
         names = table.axis(axis).motor_names
@@ -290,7 +331,8 @@ def _make_origin_resolver(
                 # (かつ無励磁なので押し合いは起きない)。40ms の debounce に
                 # 収まる保証は無いため、判定そのものを止めてから送る
                 with _suspend_sync_monitoring(monitors, axis):
-                    await manager.capture_origin_via_set_zero(names)
+                    async with _hold_target_refresh(refreshers, names):
+                        await manager.capture_origin_via_set_zero(names)
 
             return capture
         return None
@@ -330,6 +372,7 @@ def _wire_motor_check_sequence(
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
     sync_monitors: list[SyncMonitor],
+    target_refreshers: list[TargetRefresher],
     feedback_timeout_ms: float,
 ) -> None:
     """統合動作確認シーケンスを組み立ててサーバーへ登録する。
@@ -422,7 +465,11 @@ def _wire_motor_check_sequence(
             return freshness.is_stale(name, freshness.now())
 
         resolve_origin = _make_origin_resolver(
-            loops, merged, can_managers=can_managers, sync_monitors=sync_monitors
+            loops,
+            merged,
+            can_managers=can_managers,
+            sync_monitors=sync_monitors,
+            target_refreshers=target_refreshers,
         )
 
         def _origin_capturable(axis: str) -> bool:
@@ -1464,6 +1511,7 @@ async def main() -> None:
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
+        target_refreshers=[r for w in wirings for r in w.target_refreshers],
         feedback_timeout_ms=system.health.feedback_timeout_ms,
     )
 

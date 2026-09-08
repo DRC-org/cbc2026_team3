@@ -121,9 +121,11 @@ motors:
     p_max: 12.5                # レジスタ 0x15 [rad]  (scale 換算で ±225mm)
     v_max: 200.0               # レジスタ 0x16 [rad/s]
     t_max: 10.0                # レジスタ 0x17 [Nm]
-    # 原点は電源投入位置 (本機は投入時に 0.0rad へ固定される)。true にすると起動時に
-    # SET_ZERO を送ってその場を原点にするが、どちらでも「投入時の姿勢が原点」である
-    # ことは変わらない。リミットスイッチによる零点確定は未対応
+    # **false のままにする。** この軸の原点は前端リミットスイッチ
+    # (sub_y_axis_f_limit_sensor = 0x49) による零点確定で決める
+    # (config/sub_hand_positions.yaml の axes.sub_y_axis.homing)。
+    # true にすると起動時に SET_ZERO を送って「投入時の姿勢」を原点にしてしまい、
+    # 零点確定までのあいだ画面に出る座標が確定後と食い違う。
     set_zero_on_start: false
 
   # 昇降軸。

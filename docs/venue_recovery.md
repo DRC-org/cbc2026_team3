@@ -84,7 +84,7 @@ uv run python main.py \
   --config config/bench/servo/main_hand.yaml \
   --checklist config/bench/servo/checklist.yaml
 #    対象は m3508 / edulite / main_hand / dc / servo / solenoid / dm3520 /
-#    y_axis_tuning の 9 セット
+#    sub_hand_homing / y_axis_tuning の 9 セット
 #    main_hand だけは CANable 3 本 (can_m3508 + can_edulite + can_generic) を
 #    同時に要求する。
 #    会場で 1 本欠けているときに選んではならない (起動しない)

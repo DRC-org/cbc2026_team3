@@ -71,7 +71,9 @@ axes:
   # まとめるので、軸名が重なると起動ごと落ちる (main.py の _wire_motor_check_sequence)。
   sub_y_axis:
     # 原点 = 前端。**唯一の無人の歯止めは search_distance だけ**なので、
-    # 実測ストロークが分かるまでこの値を広げないこと。
+    # 実測ストロークが分かるまでこの値を広げないこと。**下の manual は歯止めに
+    # ならない** —— 探索は AxisHandle.set_target_value を直接呼ぶので、手動操縦の
+    # クランプ (lib/manual.py) を 1 度も通らない。
     homing:
       sensor: sub_y_axis_f_limit_sensor   # config/sub_hand.yaml の sensors: に登録した名前
       direction: 1            # 前端へ寄せる向き。TODO(実機で確認): 逆だと後端まで押し込む

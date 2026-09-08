@@ -99,7 +99,7 @@ checklists:
       label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
       group: preflight
     - id: sub_dm3520_origin
-      label: サブハンド 前後・昇降が原点位置にあること確認 (DM3520 は電源投入位置が原点)
+      label: サブハンド 昇降が原点位置にあること確認 (sub_lift は電源投入位置が原点。前後は零点確定で決まるので対象外)
       group: preflight
 
     # --- コート設定 ---
@@ -153,7 +153,7 @@ checklists:
     # 違う —— `_origin_sensor` は零点確定に使い、`_limit_sensor` は可動端の報告だけを
     # する (config/sub_hand.yaml の sensors:)。
     #
-    # **零点確定に実際に使われているのは rotate の 1 本だけ**だが、残る 6 本も
+    # **零点確定に実際に使われているのは rotate と sub_y_axis 前端の 2 本**だが、残る 5 本も
     # 反応を見る。死んだスイッチは「配線済みだが押していない」と画面上まったく
     # 同じに見えるので、押して確かめる以外に繋がっていることを知る手段が無い。
     - id: origin_sensor_react

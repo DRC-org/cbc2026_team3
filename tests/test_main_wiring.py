@@ -38,6 +38,7 @@ from lib.config_schema import (
 )
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
+from lib.control.target_refresh import QueryDrivenTargetRefresher
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -46,7 +47,7 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
-from lib.sequence.motors import EStopActiveError
+from lib.sequence.motors import EStopActiveError, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotContext, RobotServer
 from main import (
@@ -1930,6 +1931,85 @@ class TestOriginResolverViaSetZero:
         # **必ず戻す。** 戻し忘れると以後の試合中ずっと偏差監視が死んだまま残る
         assert monitor.is_suspended("rotate") is False
 
+    async def test_付け替えの前後で古い目標を捨てる(self) -> None:
+        """**`SET_ZERO` は「生値 0 が指す物理位置」を付け替える。**
+
+        探索がヒットした直後に `HomingRunner` が「その場で止める」ために書いた
+        目標は旧原点基準の生値で、その値は零点確定で補正しようとしていたズレ
+        そのものである。捨てずに再励磁すると、20Hz の再送がそのぶんだけ離れた
+        位置へ押し続ける (`activation_steps(after_set_zero=True)` が保持目標へ
+        0 を書く手当ては、再送 1 通で上書きされて効かない)。
+        """
+        mgr, _sent = self._manager()
+        table = self._table()
+        handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
+        refresher = QueryDrivenTargetRefresher(handles, mgr)
+        for handle in handles:
+            await handle.set_target(ControlMode.POSITION, 1.25)
+        assert all(h.has_target for h in handles)
+
+        capture = main._make_origin_resolver(
+            [], table, can_managers=[mgr], target_refreshers=[refresher]
+        )("rotate")
+
+        assert capture is not None
+        await capture()
+
+        # 捨てた後なので、次の再送は「今の姿勢を保て」を新しい原点で取り直す
+        assert [h.has_target for h in handles] == [False, False]
+        assert refresher.is_paused is False
+
+    async def test_付け替えのあいだ再送を黙らせる(self) -> None:
+        """捨てるだけでは足りない —— 再送は目標が無ければラッチを取り直すので、
+        `SET_ZERO` の直前に取ったラッチが直後には別の位置を指す。
+        """
+        mgr, _sent = self._manager()
+        table = self._table()
+        handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
+        refresher = QueryDrivenTargetRefresher(handles, mgr)
+        paused_during: list[bool] = []
+
+        original = mgr.capture_origin_via_set_zero
+
+        async def _spy(names):
+            paused_during.append(refresher.is_paused)
+            await original(names)
+
+        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [], table, can_managers=[mgr], target_refreshers=[refresher]
+        )("rotate")
+
+        assert capture is not None
+        await capture()
+
+        assert paused_during == [True]
+        # **必ず戻す。** 戻し忘れると以後この軸へ 1 通も再送されず、
+        # 問い合わせ駆動の DM3520 / EDULITE 05 は永久に STALE になる
+        assert refresher.is_paused is False
+
+    async def test_付け替えが失敗しても再送を戻す(self) -> None:
+        mgr, _sent = self._manager()
+        table = self._table()
+        handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
+        refresher = QueryDrivenTargetRefresher(handles, mgr)
+
+        async def _boom(_names):
+            raise RuntimeError("再励磁できません")
+
+        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [], table, can_managers=[mgr], target_refreshers=[refresher]
+        )("rotate")
+
+        assert capture is not None
+        with pytest.raises(RuntimeError):
+            await capture()
+
+        assert refresher.is_paused is False
+
     async def test_付け替えが失敗しても同期監視を戻す(self) -> None:
         """例外で抜ける経路が `finally` を通らないと、監視が死んだままになる。"""
         mgr, _sent = self._manager()
@@ -2028,6 +2108,7 @@ class TestMotorCheckWiring:
             loops=[],
             can_managers=[],
             sync_monitors=[],
+            target_refreshers=[],
             feedback_timeout_ms=500.0,
         )
         return server
