@@ -259,8 +259,15 @@ def _manual_controller(group: MotorGroup) -> ManualController:
                 },
                 "gripper": {"unit": "deg", "command_unit": "deg"},
                 # 位置を測れない軸。value が null になる形も golden に載せないと、
-                # UI が数値だけを受け付ける条件を書いても誰も気付けない
-                "conveyor": {"unit": "duty", "command_mode": "duty", "settle_s": 0.0},
+                # UI が数値だけを受け付ける条件を書いても誰も気付けない。
+                # manual_always も **true の形をここだけが載せる** —— 他の軸は
+                # すべて false なので、UI が真を受け取れなくても誰も気付けない
+                "conveyor": {
+                    "unit": "duty",
+                    "command_mode": "duty",
+                    "settle_s": 0.0,
+                    "manual_always": True,
+                },
             },
             "positions": {
                 "y_axis": {"home": 0.0, "work": 10.0},

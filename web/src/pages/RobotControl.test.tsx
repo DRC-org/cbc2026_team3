@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import type {
+  ManualAxis,
   ManualState,
   MatchPhase,
   MatchState,
@@ -463,6 +464,7 @@ const MANUAL: ManualState = {
       value: 3,
       target: null,
       manual: { min: -5, max: 30, steps: [1, 5] },
+      manual_always: false,
       deviation: 0.1,
       sync_tolerance: 1.0,
       positions: [
@@ -580,6 +582,63 @@ describe("手動操縦モード", () => {
     mountManual("match");
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+  });
+});
+
+/**
+ * 半自動シーケンス制御のまま操作できる軸 (`manual_always`)。**出す面を限る判断**を
+ * 固定する —— サーバーは準備中の動作確認中と手動モード中をどちらも拒否するので、
+ * そこへ出したボタンは「押せるが必ず拒否される」ものになる。
+ */
+const ALWAYS_MANUAL_AXIS: ManualAxis = {
+  name: "conveyor",
+  unit: "duty",
+  command_mode: "duty",
+  value: null,
+  target: null,
+  manual: null,
+  manual_always: true,
+  deviation: null,
+  sync_tolerance: null,
+  positions: [
+    { name: "stop", value: 0 },
+    { name: "run", value: 0.3 },
+  ],
+  motors: ["conveyor"],
+};
+
+/** 半自動のまま (mode は sequence) で、常時操作できる軸を 1 本持つ配信 */
+const SEQUENCE_WITH_ALWAYS: ManualState = {
+  mode: "sequence",
+  axes: [...MANUAL.axes, ALWAYS_MANUAL_AXIS],
+};
+
+describe("常時操作パネル", () => {
+  it("試合中の半自動に出す", () => {
+    mount("match", robotState({ manual: SEQUENCE_WITH_ALWAYS }));
+
+    expect(screen.getByText("常時操作")).toBeInTheDocument();
+    expect(screen.getByLabelText("conveyor を stop へ")).toBeEnabled();
+    // 宣言していない軸は並ばない (シーケンスの到達判定を手動が壊さない)
+    expect(screen.queryByLabelText("rotate を home へ")).toBeNull();
+  });
+
+  it("準備中には出さない", () => {
+    // このフェーズではシーケンスが走っていないのでモード切替で済み、
+    // 動作確認の起動導線もここ (Monitor の準備面) にしかない
+    // —— その目視・打音の最中に、押せるが必ず拒否されるボタンを同じ画面へ置かない
+    mount("setup", robotState({ manual: SEQUENCE_WITH_ALWAYS }));
+
+    expect(screen.queryByText("常時操作")).toBeNull();
+    expect(screen.queryByLabelText("conveyor を stop へ")).toBeNull();
+  });
+
+  it("手動モード中には出さない (手動パネルが同じ軸を出す)", () => {
+    // 同じ軸が 2 箇所に並ぶと、どちらのボタンが何をするのかを読み直すことになる
+    mountManual("match", {}, { ...SEQUENCE_WITH_ALWAYS, mode: "manual" });
+
+    expect(screen.queryByText("常時操作")).toBeNull();
+    expect(screen.getAllByLabelText("conveyor を stop へ")).toHaveLength(1);
   });
 });
 

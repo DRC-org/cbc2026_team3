@@ -618,6 +618,89 @@ class TestManualSpec:
             )
 
 
+class TestManualAlwaysAxis:
+    """シーケンス制御中でも手動指令を受け付ける軸 (axes.<軸>.manual_always)。
+
+    ``manual`` (連続値の可動範囲) とは対の関係で、あちらは位置指令の軸にしか
+    書けず、こちらは到達判定を持たない軸 (duty / on_off) にしか書けない。
+    """
+
+    def test_書かない軸は対象外(self) -> None:
+        table = _table()
+        assert table.axis("lift_motor").manual_always is False
+        assert table.manual_always_axes() == ()
+
+    @pytest.mark.parametrize("mode", ["duty", "on_off"])
+    def test_到達判定を持たない軸には書ける(self, mode: str) -> None:
+        table = load_position_table(
+            {
+                "axes": {
+                    "conveyor": {
+                        "unit": mode,
+                        "command_mode": mode,
+                        "scale": 1.0,
+                        "manual_always": True,
+                    },
+                    "lift_motor": {"unit": "mm", "scale": 1.0},
+                },
+                "positions": {"conveyor": {"stop": 0.0}, "lift_motor": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        assert table.axis("conveyor").manual_always is True
+        assert table.manual_always_axes() == ("conveyor",)
+
+    @pytest.mark.parametrize("mode", ["position", "velocity"])
+    def test_位置指令の軸へ書いたら起動を拒否する(self, mode: str) -> None:
+        # 位置指令の軸で許すと、シーケンスが move_to で書いた目標を手動が上書きし、
+        # wait_reached が動かない位置を見続けて必ずタイムアウトする
+        with pytest.raises(ValueError, match="manual_always は duty / on_off"):
+            load_position_table(
+                {
+                    "axes": {
+                        "lift_motor": {
+                            "unit": "mm",
+                            "command_mode": mode,
+                            "scale": 1.0,
+                            "manual_always": True,
+                        }
+                    },
+                    "positions": {"lift_motor": {"home": 0.0}},
+                },
+                source="<test>",
+            )
+
+    def test_真偽値でなければ起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="manual_always は真偽値"):
+            load_position_table(
+                {
+                    "axes": {
+                        "conveyor": {
+                            "unit": "duty",
+                            "command_mode": "duty",
+                            "scale": 1.0,
+                            "manual_always": "yes",
+                        }
+                    },
+                    "positions": {"conveyor": {"stop": 0.0}},
+                },
+                source="<test>",
+            )
+
+    def test_AxisSpec_を直接組み立てても拒否する(self) -> None:
+        # yaml を経由しない組み立て (テスト・将来のツール) にも同じ規則を効かせる
+        with pytest.raises(ValueError, match="manual_always は duty / on_off"):
+            AxisSpec(
+                name="lift_motor",
+                unit="mm",
+                command_unit="deg",
+                timeout_s=1.0,
+                tolerance=None,
+                motors=(MotorSpec(name="lift_motor", scale=1.0, offset=0.0),),
+                manual_always=True,
+            )
+
+
 class TestAxisToValue:
     """指令値・フィードバックを人間の単位へ戻す逆換算 (手動の現在値表示に使う)。"""
 

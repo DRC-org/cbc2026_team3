@@ -136,6 +136,23 @@ class ManualController:
     #  状態
     # ------------------------------------------------------------------ #
 
+    def is_always_manual(self, axis: str) -> bool:
+        """半自動シーケンス制御のままでも手動指令を受け付ける軸か。
+
+        **サーバーが軸名を書かずにこれを問う唯一の口。** 宣言の正は config
+        (``axes.<軸>.manual_always``) だけが持ち、対象を増減するときに触るのも
+        config だけである。
+
+        未定義の軸は ``ManualControlError`` にする。サーバーはこれをそのまま
+        操縦者へ返す —— 「手動操縦モードではありません」で覆い隠すと、軸名の
+        打ち間違いがモードの問題に見え、切り替えても直らない。
+        """
+        return self._axis(axis).manual_always
+
+    def always_manual_axes(self) -> tuple[str, ...]:
+        """``manual_always`` を宣言した軸の一覧 (拒否理由に添えるため)。"""
+        return self._positions.manual_always_axes()
+
     def observed_value(self, axis: str) -> float:
         """フィードバックから逆換算した現在の軸位置 (人間の単位)。"""
         spec = self._axis(axis)
@@ -159,6 +176,9 @@ class ManualController:
                     "value": self._safe_observed_value(spec),
                     "target": self._targets.get(name),
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
+                    # config と同じ語で配る。配信側だけ別名にすると、UI が読む語と
+                    # config に書く語が食い違い、どちらが正かを毎回確かめることになる
+                    "manual_always": spec.manual_always,
                     "deviation": self._safe_deviation(spec),
                     "sync_tolerance": spec.sync_tolerance,
                     "positions": self._position_entries(name),

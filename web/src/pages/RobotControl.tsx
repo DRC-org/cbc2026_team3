@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { ActionPanel } from "@/components/operator/ActionPanel";
+import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
@@ -296,6 +297,32 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               onStart={requestStart}
               onStop={handleStop}
               onTrigger={handleTrigger}
+            />
+
+            {/* **半自動のまま操作できる軸。試合中・試合終了にだけ出す。**
+                対象軸が無ければパネルごと描かれない (部品側が null を返す)。
+                主操作の位置は動かさないので `ActionPanel` の下・ステップ一覧の上。
+
+                **準備中には出さない。** そのフェーズではシーケンスが走っていない
+                (`sequence_start` は試合中のみ) ので、従来どおりモード切替で手動へ
+                入れば済み、失うものが無い。加えて**動作確認の起動導線は Monitor の
+                準備面 (`MatchPrep`) にしかなく**、サーバーは動作確認の実行中この
+                経路を拒否する (`lib/server.py` の `_allow_manual_in_sequence`)
+                —— 出さなければ「弁の作動音を聴いている最中に、押せるが必ず拒否
+                されるボタンが画面にある」状態を作らずに済む。
+                (`motor_check_start` のフェーズゲート自体は `finished` も許すので、
+                試合終了面でこのパネルと動作確認が同時に立つことは理屈の上ではある。
+                その場合もサーバーが拒否し、理由がトーストに出るだけである)
+
+                **手動モード中にも出さない。** `ManualPanel` が同じ軸を含む全軸を
+                出すので、同じ事実が 2 箇所に並ぶ (この分岐が半自動側なので構造的に
+                そうなっている)。塞ぐ理由も手動指令と同じものを使う —— ここで新しい
+                判定を作ると、同じ指令の可否が画面の場所で食い違う */}
+            <AlwaysManualPanel
+              robotKey={robotKey}
+              manual={manual}
+              blockedReason={manualBlockedReason}
+              sendOrReport={sendOrReport}
             />
 
             {stepPanel}

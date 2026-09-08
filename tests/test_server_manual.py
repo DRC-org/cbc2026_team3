@@ -34,10 +34,18 @@ _POSITIONS = {
             "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
         },
         "gripper": {"unit": "deg", "command_unit": "deg"},
+        # シーケンス制御中でも手動で操作できる軸 (到達判定を持たない単独軸)
+        "conveyor": {
+            "unit": "duty",
+            "command_unit": "duty",
+            "command_mode": "duty",
+            "manual_always": True,
+        },
     },
     "positions": {
         "y_axis": {"home": 0.0, "work": {"red": 5.0, "blue": 9.0}},
         "gripper": {"open": 5.0, "closed": 0.0},
+        "conveyor": {"run": 0.6, "stop": 0.0},
     },
 }
 
@@ -77,12 +85,27 @@ class _SlowSequence(Sequence):
         self.advanced = True
 
 
+class _GatedCheckSequence(Sequence):
+    """統合動作確認シーケンスの代役。ゲートを開けるまで実行中のまま止まる。
+
+    「実行中である」窓を決定的に作るためだけのもので、軸は 1 つも動かさない。
+    """
+
+    def __init__(self) -> None:
+        super().__init__("motor_check")
+        self.gate = asyncio.Event()
+
+    @step("ゲート待ち")
+    async def hold(self) -> None:
+        await self.gate.wait()
+
+
 def _make_manual() -> tuple[ManualController, dict[str, _RecordingDriver]]:
     table = load_position_table(_POSITIONS, source="<test>")
     mgr = mock_can_manager()
     group = MotorGroup()
     drivers: dict[str, _RecordingDriver] = {}
-    for name in ("y_axis_r", "y_axis_l", "gripper"):
+    for name in ("y_axis_r", "y_axis_l", "gripper", "conveyor"):
         driver = _RecordingDriver(name)
         drivers[name] = driver
         group.add(MotorHandle(name, driver, mgr))
@@ -390,6 +413,147 @@ class TestManualCommandGate:
         assert client.of_type("command_rejected")
 
 
+class TestManualAlwaysAxisGate:
+    """`manual_always` を宣言した軸だけ、シーケンス制御中でも手動で操作できる。
+
+    緩めたのは「モード判定」の 1 枚だけである。**緊急停止ゲート・再励磁ゲート・
+    連続操作の可否は 1 つも緩めていない**ので、それぞれが単独で効いていることを
+    ここで見る (他の層が拾ってしまう条件で確かめると、緩めた層を後で誰かが
+    消しても気付けない)。
+    """
+
+    async def test_シーケンス制御中でも対象軸のプリセット指令は通る(self) -> None:
+        fx, drivers = _fixture()
+        assert fx.operation_mode(_ROBOT) == "sequence"
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "conveyor", "position": "stop"},
+            requester=client,
+        )
+
+        assert drivers["conveyor"].commands == [(ControlMode.DUTY, pytest.approx(0.0))]
+        assert client.of_type("command_rejected") == []
+
+    async def test_シーケンス制御中は非対象軸のプリセット指令を拒否する(self) -> None:
+        # 対照実験。宣言していない軸まで通ってしまうと、緩めた範囲が軸単位でなくなる
+        fx, drivers = _fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "open"},
+            requester=client,
+        )
+
+        assert drivers["gripper"].commands == []
+        assert "手動操縦モードではありません" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_未定義の軸はモードではなく軸の理由で拒否する(self) -> None:
+        # 「手動操縦モードではありません」で覆い隠すと、軸名の打ち間違いが
+        # モードの問題に見えて、切り替えても直らない
+        fx, _ = _fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "no_such_axis", "position": "stop"},
+            requester=client,
+        )
+
+        reason = client.of_type("command_rejected")[-1]["reason"]
+        assert "no_such_axis" in reason
+        assert "手動操縦モードではありません" not in reason
+
+    async def test_緊急停止中は対象軸でも拒否される(self) -> None:
+        # 半自動のまま・対象軸という、モード判定が拒否理由にならない条件で見る
+        fx, drivers = _fixture()
+        await fx.activate_e_stop()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "conveyor", "position": "run"},
+            requester=client,
+        )
+
+        assert drivers["conveyor"].commands == []
+        assert "緊急停止中" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_動作確認の実行中は対象軸でも拒否される(self) -> None:
+        """動作確認はまさにこの 7 軸を目視・打音で確かめる。
+
+        従来これを守っていたのは「動作確認は全ロボットが sequence モードでないと
+        起動できない → sequence モードでは手動が全部拒否される」という連鎖で、
+        軸単位で緩めた瞬間に切れる。
+        """
+        fx, drivers = _fixture()
+        check = _GatedCheckSequence()
+        fx.set_motor_check_sequence(check)
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_running()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "conveyor", "position": "run"},
+            requester=client,
+        )
+
+        assert drivers["conveyor"].commands == []
+        assert "動作確認" in client.of_type("command_rejected")[-1]["reason"]
+
+        check.gate.set()
+        await fx.wait_motor_check_idle()
+
+    async def test_動作確認が終われば対象軸は通る(self) -> None:
+        # 上の対照実験。実行中だけを塞いでいることを見る
+        fx, drivers = _fixture()
+        check = _GatedCheckSequence()
+        fx.set_motor_check_sequence(check)
+        assert await fx.start_motor_check() is True
+        await fx.wait_motor_check_running()
+        check.gate.set()
+        await fx.wait_motor_check_idle()
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "conveyor", "position": "run"}
+        )
+
+        assert drivers["conveyor"].commands == [(ControlMode.DUTY, pytest.approx(0.6))]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"type": "manual_set", "axis": "conveyor", "value": 0.5},
+            {"type": "manual_jog", "axis": "conveyor", "delta": 0.1},
+        ],
+    )
+    async def test_対象軸でも連続値の指令は通らない(self, payload: dict) -> None:
+        # duty / on_off 軸に manual: は書けないので、送れるのはプリセットだけ。
+        # 「定義した状態以外を送れない」という通常運用の保証がそのまま残る
+        fx, drivers = _fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command({**payload, "robot": _ROBOT}, requester=client)
+
+        assert drivers["conveyor"].commands == []
+        assert "連続操作の対象外" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_手動モードでの非対象軸は今までどおり通る(self) -> None:
+        # 回帰。緩和が MANUAL モードの経路を変えていないこと
+        fx, drivers = _fixture()
+        await _switch(fx, "manual")
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "open"}
+        )
+
+        assert drivers["gripper"].commands == [(ControlMode.POSITION, pytest.approx(5.0))]
+
+
 class TestManualCommandEffect:
     async def test_絶対値指定が単位換算されて左右へ届く(self) -> None:
         fx, drivers = _fixture()
@@ -430,7 +594,7 @@ class TestStateBroadcast:
         state = fx.state_message(_ROBOT)
         assert state["manual"]["mode"] == "sequence"
         names = [axis["name"] for axis in state["manual"]["axes"]]
-        assert names == ["y_axis", "gripper"]
+        assert names == ["y_axis", "gripper", "conveyor"]
 
     async def test_可動範囲は連続操作できる軸だけに載る(self) -> None:
         fx, _ = _fixture()

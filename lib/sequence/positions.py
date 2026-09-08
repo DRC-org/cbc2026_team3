@@ -279,6 +279,9 @@ class AxisSpec:
     settle_s: float = 0.0
     # 手動操縦の可動範囲。None ならこの軸は連続操作の対象外 (プリセット指令のみ)
     manual: ManualSpec | None = None
+    # シーケンス制御中 (OperationMode.SEQUENCE) のままでも手動指令を受け付ける軸か。
+    # 書ける条件は「到達判定を持たない単独軸」に限る (理由は __post_init__)
+    manual_always: bool = False
     # リミットスイッチによる零点確定。None ならこの軸はホーミングしない
     # (電源投入位置をそのまま原点として使う)
     homing: HomingSpec | None = None
@@ -302,8 +305,32 @@ class AxisSpec:
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
+        self._check_manual_always()
         self._check_homing_sensor_map()
         self._check_align_distance()
+
+    def _check_manual_always(self) -> None:
+        """シーケンス中の手動を許してよい軸か見る。``manual`` と対の検証である。
+
+        ``manual`` (連続値の可動範囲) が位置指令の軸にしか書けないのに対し、
+        ``manual_always`` は**到達判定を持たない軸 (duty / on_off) にしか書けない**。
+
+        位置指令の軸で許すと、シーケンスが ``move_to`` で書いた目標を手動が上書きし、
+        ``AxisHandle.wait_reached`` は動かない位置を見続けて ``SequenceTimeoutError``
+        になる (再励磁が `blocked_during_reenergize` で塞いでいる害と同型)。
+        duty / on_off の軸にはそもそも到達判定が無く、シーケンスは ``settle_s`` の
+        固定待ちへ落ちるので、手動が割り込んでも手順は壊れない
+        (シーケンスが後からこの軸へ書きに来る = 上書きされるのは許容する)。
+        """
+        if not self.manual_always:
+            return
+        if self.command_mode in (ControlMode.DUTY, ControlMode.ON_OFF):
+            return
+        raise ValueError(
+            f"axes.{self.name}: manual_always は duty / on_off の軸にのみ書けます "
+            f"(command_mode={self.command_mode.value})。到達判定を持つ軸で許すと、"
+            "シーケンスが書いた目標を手動が上書きして到達待ちが必ずタイムアウトします"
+        )
 
     def _check_homing_sensor_map(self) -> None:
         """`homing.sensors` のキーが軸のモータと過不足なく対応しているか見る。
@@ -440,6 +467,7 @@ _AXIS_KEYS = frozenset(
         "command_mode",
         "settle_s",
         "manual",
+        "manual_always",
         "homing",
         "motion",
     }
@@ -569,6 +597,14 @@ class PositionTable:
     def manual_axes(self) -> tuple[str, ...]:
         """連続操作を許した軸 (``manual:`` を持つ軸)。"""
         return tuple(name for name, spec in self._axes.items() if spec.manual is not None)
+
+    def manual_always_axes(self) -> tuple[str, ...]:
+        """シーケンス制御中でも手動指令を受け付ける軸 (``manual_always: true``)。
+
+        軸名の宣言は config だけが持つ。サーバーも UI も軸名を書かずにこの一覧を
+        引くこと (書き写すと、config から外した軸がコード側に残る)。
+        """
+        return tuple(name for name, spec in self._axes.items() if spec.manual_always)
 
     def paired_axes(self) -> tuple[str, ...]:
         """同期監視の対象となる軸 (sync_tolerance を持つ軸)。"""
@@ -726,6 +762,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         command_mode=command_mode,
         settle_s=float(settle_s),
         manual=_parse_manual(name, raw.get("manual"), command_mode),
+        manual_always=_parse_manual_always(name, raw.get("manual_always")),
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
     )
@@ -943,6 +980,21 @@ def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> Man
 
     steps = _parse_manual_steps(path, raw.get("steps"))
     return ManualSpec(min_value=float(min_value), max_value=float(max_value), steps=steps)
+
+
+def _parse_manual_always(axis_name: str, raw: object) -> bool:
+    """``manual_always`` を読む。書かない軸は False。
+
+    command_mode との整合は ``AxisSpec.__post_init__`` が見る (yaml を経由せずに
+    組み立てた ``AxisSpec`` にだけ緩い規則が効く状態を作らないため)。ここで見るのは
+    型だけ —— ``"false"`` のような文字列を真と読むと、**書いたつもりの無い軸が
+    シーケンス中に手動で動かせるようになる**。
+    """
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError(f"axes.{axis_name}.manual_always は真偽値である必要があります: {raw!r}")
+    return raw
 
 
 def _parse_manual_steps(path: str, raw: object) -> tuple[float, ...]:

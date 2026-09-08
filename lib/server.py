@@ -940,6 +940,12 @@ class RobotServer:
         モード判定をここ 1 箇所に置く。ハンドラごとに書くと、足したコマンドだけが
         半自動運転中でも通る経路になる。
 
+        **軸を解決してからモードを判定する。** 一部の軸 (`manual_always`) は
+        シーケンス制御中でも手動で操作できるので、どちらの軸かが分かるまでモードの
+        可否を決められない。副次的に、軸名の打ち間違いが「手動操縦モードでは
+        ありません」で覆い隠されなくなる (覆い隠すと、切り替えても直らない拒否を
+        操縦者が延々と踏む)。
+
         **このロボットの再励磁が in-flight なら拒否する。** `reenergize_motors` は
         手動操縦中も意図的に塞がない (`lib/commands.py`) ので、手動へ「入る」ときの
         ガード (`_apply_operation_mode`) だけでは、既に手動中のロボットへ再励磁を
@@ -958,11 +964,6 @@ class RobotServer:
                 requester, command, f"'{robot_name}' は手動操縦に対応していません"
             )
             return None
-        if ctx.mode is not OperationMode.MANUAL:
-            await self._reject_command(
-                requester, command, "手動操縦モードではありません (モードを切り替えてください)"
-            )
-            return None
         if self._is_reenergizing(robot_name):
             await self._reject_command(requester, command, f"'{robot_name}' の再励磁が処理中です")
             return None
@@ -971,7 +972,60 @@ class RobotServer:
         if not isinstance(axis, str) or not axis:
             await self._reject_command(requester, command, "軸が指定されていません")
             return None
+
+        if ctx.mode is not OperationMode.MANUAL and not await self._allow_manual_in_sequence(
+            ctx.manual, axis, command, requester
+        ):
+            return None
         return ctx.manual, axis
+
+    async def _allow_manual_in_sequence(
+        self,
+        manual: ManualController,
+        axis: str,
+        command: str,
+        requester: WSOrNone,
+    ) -> bool:
+        """半自動シーケンス制御のまま、この軸への手動指令を通してよいか。
+
+        通してよいのは config が `manual_always` を宣言した軸だけである。
+        宣言できるのは到達判定を持たない単独軸 (duty / on_off) に限られ
+        (`AxisSpec._check_manual_always`)、左右直結ペアの「同一フレームで同時指令」
+        にも `wait_reached` にも触れない。シーケンスは後からその軸へ書きに来るので
+        手動の値は上書きされる —— それでよい (シーケンスが手順の正であり続ける)。
+
+        **この経路にだけ、動作確認の実行中を塞ぐ判定を足す。** 動作確認
+        (`sequences/motor_check.py`) は `main_conveyor` と `sub_valves` を
+        まさにこれらの軸で駆動し、どちらも**操縦者が目視・打音で確かめるステップ**
+        である。それが守られていたのは「動作確認は全ロボットが sequence モードで
+        ないと起動できない → sequence モードでは手動が全部拒否される」という連鎖に
+        乗っていたからで、**軸単位で緩めた瞬間にこの連鎖が切れる** (弁の作動音を
+        聴いている最中に別の弁を開けられる)。`motor_check_start` 側の排他
+        (`_motor_check_environment_deny`) と対になる、逆向きの塞ぎである。
+
+        緊急停止ゲート (`CommandSpec.allowed_during_e_stop`) と再励磁ゲートは
+        ここでは一切触らない。緩めたのはモード判定の 1 枚だけである。
+        """
+        try:
+            always_manual = manual.is_always_manual(axis)
+        except ManualControlError as exc:
+            await self._reject_command(requester, command, str(exc))
+            return False
+
+        if not always_manual:
+            allowed = ", ".join(manual.always_manual_axes()) or "(なし)"
+            await self._reject_command(
+                requester,
+                command,
+                "手動操縦モードではありません (モードを切り替えてください)。"
+                f"シーケンス制御中でも操作できる軸: {allowed}",
+            )
+            return False
+
+        if self._motor_check.running:
+            await self._reject_command(requester, command, "動作確認の実行中は手動で操作できません")
+            return False
+        return True
 
     async def _manual_number(
         self,
