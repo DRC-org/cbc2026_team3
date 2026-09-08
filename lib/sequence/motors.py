@@ -374,9 +374,9 @@ class AxisHandle:
     def sync_violation(self) -> float | None:
         """許容差を超えたモータ間のずれ (人間の単位)。超過していなければ None。
 
-        判定は 3 層で共有する ``SyncGroup.violation`` に委ねる。ここは
-        ``move_to`` の完了時に 1 回だけ見る層で、静止後の 1 サンプルしか使わない
-        (層ごとの違いは lib/axis_sync.py のモジュール docstring を参照)。
+        判定は偏差監視の 3 段で共有する ``SyncGroup.violation`` に委ねる。ここは
+        ``move_to`` の完了時に 1 回だけ見る段で、静止後の 1 サンプルしか使わない
+        (段ごとの違いと効く軸は lib/axis_sync.py のモジュール docstring を参照)。
         """
         group = self._spec.sync_group
         if group is None:

@@ -1,7 +1,7 @@
 """左右直結ペアの単位換算とずれ判定 (lib/axis_sync.py) のテスト。
 
-この機体は同じ ``sync_tolerance`` を 3 層 (シーケンス停止 / 電流 0 / 全体緊急停止) で
-参照する。換算と判定が層ごとに別実装になると、片方だけ直したときに気付けないまま
+偏差監視は同じ ``sync_tolerance`` を 3 段 (シーケンス停止 / 電流 0 / 全体緊急停止) で
+参照する。換算と判定が段ごとに別実装になると、片方だけ直したときに気付けないまま
 機構が壊れるため、単一実装であること自体をここで固定する。
 """
 
@@ -97,7 +97,7 @@ class TestSyncGroupVerdict:
         assert group.violation({}) is None
 
     def test_violation_is_exclusive_of_the_tolerance_itself(self) -> None:
-        """許容差ちょうどは超過ではない (3 層で境界の扱いがずれないよう固定する)。"""
+        """許容差ちょうどは超過ではない (3 段で境界の扱いがずれないよう固定する)。"""
         group = self._group(tolerance=2.0)
 
         assert group.violation({"y_axis_r": 10.0 * SCALE, "y_axis_l": -8.0 * SCALE}) is None
@@ -192,7 +192,7 @@ class TestSyncGroupDeviation:
 class TestSyncCorrections:
     """左右のずれを縮める補正量 (SyncGroup.corrections)。
 
-    3 層の ``violation`` は「ずれたら止める」しかできず、駆動中にずれを縮める力は
+    偏差監視の ``violation`` は「ずれたら止める」しかできず、駆動中にずれを縮める力は
     どこにも無かった。ここが返すのがその力なので、**符号と単位が正しいことは
     機構の安全に直結する**。符号を落とすと、軸ごと押し動かしながらずれは縮まない。
     """

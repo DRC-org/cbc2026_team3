@@ -70,7 +70,7 @@ class StepFailure:
 
     到達タイムアウト・左右ずれ・零点確定失敗はどれもステップ単位の try で握られる。
     握った結果を残さないと journal 以外どこにも出ず、画面は「待機中」と同じ表示に
-    戻る (3 層保護の第 1 層である `AxisSyncError` が画面から無音になる)。
+    戻る (偏差監視の第 1 段である `AxisSyncError` が画面から無音になる)。
 
     メソッド名は載せない。`StepInfo.method_name` を配信に含めないのと同じ理由で、
     操縦者に見せて意味があるのはラベルと理由だけ。
@@ -310,7 +310,8 @@ class Sequence:
             )
 
         # 到達判定を満たしていても左右がずれていれば押し合いで機構が壊れるため先へ進めない。
-        # 判定そのものは SyncGroup.violation (3 層共通) が持ち、ここは結果を例外に変えるだけ
+        # 判定そのものは SyncGroup.violation (偏差監視の 3 段で共通) が持ち、
+        # ここは結果を例外に変えるだけ
         desynced = []
         for handle, _, _ in pending:
             error = handle.sync_violation()

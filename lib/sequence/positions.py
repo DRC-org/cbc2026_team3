@@ -228,8 +228,9 @@ class AxisSpec:
         (lib/axis_sync.py のモジュール docstring を参照)。
 
         複数モータ軸では平均を返す。左右がずれていればどちらか一方の値は必ず
-        誤りなので「片側を代表にする」根拠が無く、ずれ自体は ``sync_group`` を
-        見る 3 層が別に検出する。値が 1 つも揃わなければ ``PositionLookupError``。
+        誤りなので「片側を代表にする」根拠が無く、ずれ自体は ``sync_group`` を持つ軸
+        なら偏差監視が別に検出する (持たないサーボのペアは目視だけ)。値が 1 つも
+        揃わなければ ``PositionLookupError``。
         """
         values = [
             motor.to_value(commands[motor.name]) for motor in self.motors if motor.name in commands
@@ -568,7 +569,7 @@ def _parse_sync_gain(
     """左右直結ペアの同期補正ゲインを読む。
 
     位置制御はモータごとに独立した PID なので、左右で負荷や摩擦が違えば駆動中の
-    追従差は原理的に残る。``sync_tolerance`` を見る 3 層は「ずれたら止める」しか
+    追従差は原理的に残る。``sync_tolerance`` を見る偏差監視は「ずれたら止める」しか
     できず、縮める力はどこにも無い。この 2 値がその縮める力を宣言する。
 
     検証は「書いたのに効かない設定を作らせない」ためにある:

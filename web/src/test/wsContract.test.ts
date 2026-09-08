@@ -131,7 +131,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
   /**
    * 失敗して止まった直後の配信。**この形が受信経路を通ることが本題** ——
    * 通らないと、左右ずれで止まっても画面は「待機中」へ戻るだけになり、
-   * 3 層保護の第 1 層が操縦者から無音になる。
+   * 偏差監視の第 1 段が操縦者から無音になる。
    */
   state_with_last_error: (result, sample) => {
     const robot = sample.robot as string;

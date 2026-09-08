@@ -139,8 +139,8 @@ class TestFailureReachesTheOperator:
     """止まった理由が state に載ること。
 
     到達タイムアウト・左右ずれ・零点確定失敗はステップ単位の try で握られる。
-    載せないと画面は「待機中 — START で開始」と描くだけで、**3 層保護の
-    第 1 層 (`AxisSyncError`) が画面から無音**になる。
+    載せないと画面は「待機中 — START で開始」と描くだけで、**偏差監視の
+    第 1 段 (`AxisSyncError`) が画面から無音**になる。
     """
 
     async def test_平常時はnull(self) -> None:

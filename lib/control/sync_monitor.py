@@ -46,7 +46,7 @@ class SyncMonitor(PeriodicTask):
     「試合を止めて人間に知らせる」全体的な保護で役割が違う。
 
     誤発報の代償が「試合が止まる」ことなので、この層だけ ``violation_samples``
-    による debounce を持つ (3 層の比較は lib/axis_sync.py のモジュール docstring)。
+    による debounce を持つ (3 段の比較は lib/axis_sync.py のモジュール docstring)。
 
     ライフサイクル (start / stop / 例外時の継続) は ``PeriodicTask`` と共通。
     """

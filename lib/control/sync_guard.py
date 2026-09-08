@@ -6,10 +6,13 @@
 コードを読むことになる。ここは判断とラッチ、および同期補正量の算出だけを持ち、
 電流を落とす行為も補正を指令へ足す行為も呼び出し側 (``M3508PositionLoop``) に残す。
 
-超過の境界そのものは ``SyncGroup.violation`` に一本化してある。この層に固有なのは
+超過の境界そのものは ``SyncGroup.violation`` に一本化してある。この段に固有なのは
 「debounce しない」「ラッチする」「グループ単位で扱う」の 3 点で、いずれも
 壊れるまでの猶予が短い局所保護であることに由来する
-(3 層の比較は lib/axis_sync.py のモジュール docstring を参照)。
+(3 段の比較は lib/axis_sync.py のモジュール docstring を参照)。
+
+**この段に載るのは全メンバが同じ位置制御ループに載る組だけ (現状 ``y_axis`` のみ。
+登録は ``main._attach_sync_groups``)。**
 """
 
 from __future__ import annotations

@@ -132,7 +132,7 @@ export function ActionPanel({
 
       {/* シーケンスが落ちた理由。**平常時は 1 ピクセルも出さない。**
           これが無い間、左右ずれ検出で止まっても画面は「待機中」へ戻るだけで、
-          3 層保護の第 1 層が操縦者から無音だった (押し直せば直ると読める) */}
+          偏差監視の第 1 段が操縦者から無音だった (押し直せば直ると読める) */}
       {state.last_error ? (
         <div className="flex shrink-0 items-start gap-1.5 border-l-[0.25rem] border-l-error bg-error/5 px-3 py-1">
           <Icon as={TriangleAlert} className="mt-[0.2em] shrink-0 text-error" />

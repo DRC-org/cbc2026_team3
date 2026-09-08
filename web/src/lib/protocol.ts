@@ -434,8 +434,8 @@ export interface SequenceStepInfo {
  * 直近の実行で失敗したステップと理由 (サーバー `lib/sequence/engine.py` の `StepFailure`)。
  *
  * 到達タイムアウト・左右ずれ・零点確定失敗はどれもステップ単位の try で握られるので、
- * これが無いと画面は「待機中」と同じ表示へ戻る —— **3 層保護の第 1 層
- * (`AxisSyncError`) が操縦者から無音になる。** 次の実行が始まるまで保持される。
+ * これが無いと画面は「待機中」と同じ表示へ戻る —— **左右ずれを見る偏差監視の
+ * 第 1 段 (`AxisSyncError`) が操縦者から無音になる。** 次の実行が始まるまで保持される。
  */
 export interface SequenceFailure {
   step_index: number;
@@ -715,7 +715,7 @@ export interface ManualAxis {
   /**
    * 左右直結ペアの現在のずれ (軸の単位)。**ずれようのない軸と測れない軸は null。**
    *
-   * サーバーが 3 層の保護と同じ `SyncGroup.deviation()` で算出した値をそのまま配る。
+   * サーバーが偏差監視と同じ `SyncGroup.deviation()` で算出した値をそのまま配る。
    * UI 側で `motors` の位置から計算し直してはならない —— 逆回転ペアは scale の符号で
    * 表されており、符号を 1 つ落とすと画面だけが別の「ずれ」を言い出す。
    *
@@ -872,7 +872,7 @@ export interface RobotState {
    * 平常時は null。
    *
    * これが無い間、左右ずれ検出でシーケンスが止まっても画面は「待機中」に戻るだけで、
-   * 3 層保護の第 1 層が操縦者から無音になっていた。**平常時は主張せず、
+   * 偏差監視の第 1 段が操縦者から無音になっていた。**平常時は主張せず、
    * 失敗したときだけ自分から出す** (`ActionPanel`)。
    */
   last_error?: SequenceFailure | null;
