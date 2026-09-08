@@ -400,8 +400,13 @@ constexpr ServoBoardConfig kServoBoards[] = {
     // 古いファームのまま**全スロットが「反応しないスイッチ」として現れ**、症状は配線不良と
     // 区別が付かない。
     //
-    // TODO(実機で確認): 5 スロットとも sensorActiveLow は仮値。**スロットごとに**
-    // 実測して確定すること（基板 #0 の SV3 の実測値は**この基板の配線を何も保証しない**）。
+    // **SV1〜SV4 は実機で確認済み**（CAN ID 0x349〜0x34C の FEEDBACK を実測）: 4 本とも
+    // NO なので開放で HIGH、押下で LOW。したがって sensorActiveLow は true —— 仮値が
+    // そのまま正解だったので値は 1 つも変わっておらず、kFirmwareVersion は据え置きである。
+    //
+    // TODO(実機で確認): SV0（y_axis 左）だけは仮値のまま。**同じ基板の SV1〜SV4 が
+    // true だからといって合わせてはならない** —— 極性はスロットごとの配線で決まる
+    // （基板 #0 の SV3 の実測値がこの基板の配線を何も保証しないのと同じ理由）。
     {1,
      {
          {SlotRole::TouchSensor, 4, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV0 y_axis 左 (メイン)
