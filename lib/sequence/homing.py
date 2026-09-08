@@ -22,11 +22,14 @@
    その閾値は 1 歩ぶんの追従を待つ側 (`_wait_step`) と共有する
    (`_progress_threshold`) —— 基準が分かれると、待たずに抜けたことを
    「進まなかった」と数え、動いている機構を止めてしまう
-5. **離脱の歩数上限** (`_RELEASE_STEP_LIMIT`) — 触れた状態から始めたときに
-   一度センサの外まで離れるが、その離脱にも上限が要る。接点の固着と**極性の
-   取り違え** (ファーム側 `sensorActiveLow` の設定ミス) はどちらも
+5. **離脱の距離上限** (`homing.release_distance`、既定は `step` の倍数) — 触れた
+   状態から始めたときに一度センサの外まで離れるが、その離脱にも上限が要る。
+   接点の固着と**極性の取り違え** (ファーム側 `sensorActiveLow` の設定ミス) はどちらも
    「いつまでも OFF にならない」形でしか現れない。**探索距離を流用してはならない**
-   (あちらは実ストローク相当まで伸びる値なので、反対側の機構端まで走り抜ける)
+   (あちらは実ストローク相当まで伸びる値なので、反対側の機構端まで走り抜ける)。
+   **既定の `step` 倍数に頼らないこと** —— 本来はスイッチの ON 区間の広さで決まる値で、
+   刻み幅とは無関係である。精度のために `step` を詰めると離脱の許容も一緒に縮み、
+   **精度を上げるほどスイッチから離れられなくなる**
 6. **緊急停止** — 目標値を送る経路 (`AxisHandle`) が既にインターロックを通る
 
 **探索の到達判定はラッチで見る。「今 ON か」では取りこぼす。** ON 区間が `step` より
@@ -87,11 +90,25 @@ _STALL_LIMIT = 3
 _PROGRESS_FRACTION = 0.5
 
 #: 離脱 (センサに触れた状態から抜けるまで) に許す最大歩数。
-#: リミットスイッチの ON 区間は数 mm しかないので、step の数十倍動いても OFF に
-#: ならなければセンサが張り付いている (接点の固着・配線の短絡)。
+#: `homing.release_distance` を書かなかった軸の既定値を step から作るために使う。
 #: **`search_distance` を流用してはならない** —— あちらは実ストローク相当まで
 #: 伸びる値で、離脱の上限に使うと反対側の機構端まで走り抜ける。
 _RELEASE_STEP_LIMIT = 20
+
+
+def _release_limit(homing: HomingSpec) -> float:
+    """離脱に許す距離 [軸の unit]。
+
+    **本来これはスイッチの ON 区間の広さで決まる値で、刻み幅とは無関係である。**
+    `step` の倍数を既定にしてあるのは既存の軸を変えないためだけで、精度のために
+    `step` を詰める軸では必ず `release_distance` を明示すること —— 詰めた瞬間に
+    離脱の許容も一緒に縮み、**精度を上げるほどスイッチから離れられなくなる**。
+    実際に sub_y_axis で step 0.5 -> 0.1 にした途端、許容が 10mm から 2mm へ落ちて
+    ON 区間 (実測 2mm 以上) を 0.1mm ぶん抜けきれずに失敗した (2026-09-09)。
+    """
+    if homing.release_distance is not None:
+        return homing.release_distance
+    return homing.step * _RELEASE_STEP_LIMIT
 
 
 class HomingError(RuntimeError):
@@ -220,13 +237,15 @@ class HomingRunner:
                 homing,
                 direction=-homing.direction,
                 want_active=False,
-                limit=homing.step * _RELEASE_STEP_LIMIT,
+                limit=_release_limit(homing),
                 limit_message=(
                     f"軸 '{spec.name}' を原点センサ '{homing.sensor}' から離せませんでした"
-                    f" ({homing.step * _RELEASE_STEP_LIMIT}{spec.unit} 動かしても OFF に"
+                    f" ({_release_limit(homing)}{spec.unit} 動かしても OFF に"
                     " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
                     " なるので、ファーム側の極性設定 (sensorActiveLow) を"
-                    "接点の固着・配線の短絡と併せて確認してください"
+                    "接点の固着・配線の短絡と併せて確認してください。"
+                    " 極性が正しいなら ON 区間がこの距離より広いので"
+                    " homing.release_distance を実測へ広げてください"
                 ),
             )
 

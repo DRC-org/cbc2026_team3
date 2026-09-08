@@ -691,6 +691,30 @@ class TestReleasesBeforeSeeking:
         # ラッチで離脱を判定する実装は 1 歩目で離脱完了と読み、そのまま原点を切る
         assert rec.origins == []
 
+    async def test_離脱の許容は刻み幅から切り離せる(self) -> None:
+        """**離脱の許容は ON 区間の広さで決まる値で、刻み幅とは無関係。**
+
+        既定 (`step` の 20 倍) のままだと、精度のために `step` を詰めた瞬間に
+        離脱の許容も一緒に縮み、**精度を上げるほどスイッチから離れられなくなる**。
+        実機の sub_y_axis で step 0.5 -> 0.1 にした途端、許容が 10mm から 2mm へ
+        落ちて ON 区間 (実測 2mm 以上) を抜けきれずに失敗した (2026-09-09)。
+        """
+        # step 0.1 の既定許容は 2.0mm。ON 区間 -3.0 以上はそれより広い
+        table = _table(direction=-1, step=0.1, search_distance=5.0)
+        spec = table.axis("y_axis")
+        # 区間の奥 -6.0 から出るには 3.1mm 要るので、既定の 2.0mm では届かない
+        rec = _Recorder(active_at_or_below=-3.0)
+        with pytest.raises(HomingError, match="離せませんでした"):
+            await _runner(rec).home(spec, _handle(spec, rec, start_value=-6.0))
+        assert rec.origins == []
+
+        # release_distance を実測へ広げれば同じ機構で通る
+        table = _table(direction=-1, step=0.1, search_distance=5.0, release_distance=10.0)
+        spec = table.axis("y_axis")
+        rec = _Recorder(active_at_or_below=-3.0)
+        await _runner(rec).home(spec, _handle(spec, rec, start_value=-6.0))
+        assert rec.captured_at == pytest.approx([-3.0], abs=0.1)
+
     async def test_離れられなければ原点を確定せず降りる(self) -> None:
         """接点が固着したセンサは「いつまでも OFF にならない」形でしか現れない。"""
         table = _table(step=1.0)

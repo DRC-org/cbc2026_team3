@@ -107,6 +107,13 @@ class HomingSpec:
     step: float
     #: 1 ステップごとの待ち [s]。指令が機構へ届き、センサの状態が返る余裕を取る
     settle_s: float
+    #: 触れた状態から離れるのに許す距離 [軸の unit]。None なら step の既定倍数。
+    #: **スイッチの ON 区間の広さで決まる値で、刻み幅とは無関係である。**
+    #: 既定 (step の倍数) のままだと、精度のために step を詰めた瞬間に離脱の許容も
+    #: 一緒に縮み、**精度を上げるほどスイッチから離れられなくなる**。実際に
+    #: sub_y_axis で step 0.5 -> 0.1 にした途端、許容が 10mm から 2mm へ落ちて
+    #: ON 区間 (実測 2mm 以上) を抜けられなくなった (2026-09-09)。
+    release_distance: float | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in (1.0, -1.0):
@@ -117,6 +124,8 @@ class HomingSpec:
             raise ValueError(f"homing.step は正の値: {self.step!r}")
         if self.settle_s < 0.0:
             raise ValueError(f"homing.settle_s は 0 以上: {self.settle_s!r}")
+        if self.release_distance is not None and self.release_distance <= 0.0:
+            raise ValueError(f"homing.release_distance は正の値: {self.release_distance!r}")
         if self.step > self.search_distance:
             # 1 歩も踏めないまま失敗するだけの設定を通さない
             raise ValueError(
@@ -300,7 +309,9 @@ _MOTOR_KEYS = frozenset({"scale", "offset"})
 
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
 
-_HOMING_KEYS = frozenset({"sensor", "direction", "search_distance", "step", "settle_s"})
+_HOMING_KEYS = frozenset(
+    {"sensor", "direction", "search_distance", "step", "settle_s", "release_distance"}
+)
 #: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
 #: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
 _HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
@@ -668,6 +679,9 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             search_distance=float(raw["search_distance"]),
             step=float(raw["step"]),
             settle_s=float(raw.get("settle_s", 0.05)),
+            release_distance=(
+                float(raw["release_distance"]) if raw.get("release_distance") is not None else None
+            ),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from exc
