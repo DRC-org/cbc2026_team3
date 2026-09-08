@@ -1,59 +1,18 @@
 robot_name: main_hand
 
-# バス別名 (m3508_bus 等) の定義・health の共通設定は config/system.yaml。
-# 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
-#
-# 動作確認の駆動量はここに書かない。sequences/motor_check.py が
-# config/*_positions.yaml の位置名へ動かすので、確認用の値そのものが存在しない。
-
 motors:
-  # --- 逆回転ペア軸 y_axis (ラックアンドピニオンの前後移動) ---
-  # 左右 2 台が機構的に直結しており、位置がずれるとその場で機構が壊れる。
-  # 動作確認は **軸単位** で指令するので (sequences/motor_check.py の move_to)、
-  # 左右が同じフレームで同時に動く。かつてモータ単位で 1 台ずつ駆動していた頃は
-  # 単独駆動が構造的に避けられず、確認そのものから除外するしかなかった。
-  # 左右のずれは checklist.yaml の y_axis_sync で目視確認する。
-
-  # DJI M3508 (C620 ESC) — CAN Standard Frame
   y_axis_r:
     driver: m3508
     bus: m3508_bus
     can_id: 1
-    # PC 側位置制御 PID。入力=累積角 [deg]、出力=C620 電流指令 [counts] (16384 ≒ 20A)。
-    #
-    # --- 2026-09-03 に実機で実測して決めた値 --------------------------------
-    # この軸は**左右で静止摩擦が大きく違い、遊びのせいで片方がもう片方を連れ回さない**
-    # (減速比 19:1 なので、片側を数 mm 回した程度では反対側が動かない)。連れ回すには
-    # 大きく動かすことになり負荷の面で望ましくないので、**両方を能動的に、揃えて
-    # 動かす**必要がある。3 項ともそのための役割を持つ:
-    #   kp=32 : 重い側 (左) が静止摩擦を超えるのに要る。kp=16 では左が 1mm も動かず、
-    #           右だけが進んで sync_tolerance を超えた
-    #   ki=10 : 偏差が残り続ける側でだけ積分が育つので、動き出しの重い側へ自動的に
-    #           多く電流を配る。左右の非対称性にちょうど効く
-    #   kd=1  : 行き過ぎを 50〜113% から 0〜5% へ抑える。これが無いと kp を上げられない
-    # 詰めた経緯と手順は docs/mechanism_handoff.md の §3-1。
-    #
-    # --- 2026-09-04 に実運用ストローク (150mm) で取り直した -------------------
-    # ゲイン 3 項は据え置きで、上限だけを上げた。**プロファイルを入れた後の PID の
-    # 仕事は「追従誤差の最小化」**なので、飽和させないだけの上限があれば足りる。
-    # ki を 2 / 5 / 10 で振っても整定は 0.839s から動かず (ずれの差もばらつきの
-    # 範囲) なので、左右の静止摩擦差へ効かせる 10 を残してある。
     pid:
       kp: 32.0
       ki: 10.0
       kd: 1.0
-      # ki を入れた以上、上限は省略できない。機構端に当たって動けない間に積分が
-      # 際限なく育つと、拘束が外れた瞬間に暴走する。output_limit の 20%
       integral_limit: 1000.0
       dead_band: 1.0       # 目標付近の唸り防止 [deg] (減速比 19:1 で出力軸 0.05deg 相当)
-      # 電流上限 [counts] ≒6.1A。C620 フルスケールの約 31%。
-      # **実測で決めた値であって、余裕を取った値ではない。** v=200 / a=1200 の
-      # 指令ピークが 3717counts なので、4000 では飽和が出て 5000 で 0% になる。
-      # 6000 以上へ上げても速くならず、機構端に当たったときの押し込む力だけが増える
       output_limit: 5000
 
-  # y_axis_r と対になる側。左右で追従特性が変わると押し合いになるため PID は同一値にする
-  # (静止摩擦が左右で違っても**ゲインは揃える** —— 差は ki と同期補正が吸収する)
   y_axis_l:
     driver: m3508
     bus: m3508_bus
@@ -66,49 +25,6 @@ motors:
       dead_band: 1.0
       output_limit: 5000
 
-  # --- 逆回転ペア軸 rotate (エンドエフェクタ回転) ---
-  # y_axis と同じく軸単位で駆動する。左右のずれは checklist.yaml の rotate_sync で確認。
-
-  # RobStride EDULITE 05 — CAN Extended Frame
-  # ID は 2026-08-30 に実機へ書き込み済み (出荷値は 2 台とも 0x7F)。
-  # 書き換えは scripts/edulite_set_id.py。**同じ ID の個体を 2 台ぶら下げたまま
-  # 書き換えてはならない** — 1 通で両方が同じ新 ID になる (ツールが拒否する)。
-  #
-  # --- set_zero_on_start: true は「起動時に偏差を消す」ためのもの --------------
-  # **本機の原点は電源投入位置ではなく、フラッシュに保存された機械ゼロである。**
-  # 2 台の機械ゼロは揃っておらず、逆回転ペアは scale の符号で向きを表すので、
-  # 物理的に同じ姿勢でも人間の単位へ逆換算すると差として現れる
-  #   deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
-  # 実機では起動直後に 175.879deg (当時の sync_tolerance 3.0deg。現在は 5.0deg) と
-  # なり、SyncMonitor が全体緊急停止を掛けて機体が 1 ステップも動かせなかった。
-  #
-  # true にすると initialization_steps() の末尾で set_zero (通信タイプ 0x06) を送り、
-  # 電源投入時の姿勢がそのまま原点になる。直結した 2 台は同じ姿勢を取るため差は消える。
-  #
-  # **左右は必ず揃えること。** 片側だけ true にすると、その 1 台だけ原点が付け替わり、
-  # 揃うどころか機械ゼロの差がまるごと偏差として残る (tests/test_robot_sequences.py の
-  # test_paired_axis_motors_agree_on_set_zero_on_start が固定している)。
-  #
-  # !!! 零点確定 (homing) を有効にしても false へ戻してはならない !!!
-  # 2 つは競合せず、順に効く:
-  #   起動時   … set_zero で 2 台を 0 に揃え、機械ゼロの差 (175.879deg) を消す。
-  #              これは**暫定原点**で、機体を動かせる状態にすることだけが目的
-  #   動作確認 … config/main_hand_positions.yaml の axes.rotate.homing がスイッチまで
-  #              寄せ、その位置で原点を上書きする (**正確な原点**。後から効くので勝つ)
-  # false にすると起動直後の偏差が消えないまま SyncMonitor が全体緊急停止を掛け、
-  # **機体が 1 ステップも動かせないので動作確認そのものを開始できない** —— つまり
-  # 零点確定にたどり着く手前で詰まる。「homing を有効にしたら false へ戻す」という
-  # 手順は、この軸では成立しない。
-  #
-  # **搬送中に手で回されたぶんは、動作確認を回すまで残る。** 起動時の set_zero は
-  # 「そのときの姿勢を 0 と呼ぶ」だけなので、姿勢がずれていれば座標もずれる。
-  # それを正せるのはスイッチによる零点確定だけで、セッティングタイムに動作確認を
-  # 回すことが唯一の手当てになる。
-  #
-  # 励磁時の飛び出しは起動経路が構造的に塞いでいる: initialization_steps() の先頭が
-  # disable なので set_zero は無励磁で届き、_wait_fresh_feedback() が set_zero より後に
-  # 届いたフィードバックだけを認め、activation_steps() がその実測角 (新原点基準) を
-  # LOC_REF へ書いてから enable する。
   rotate_r:
     driver: edulite05
     bus: edulite_bus
@@ -129,71 +45,23 @@ motors:
     limit_speed: 2.0
     limit_current: 5.0
     position_kp: 30.0
-    # rotate_r と必ず同じ値にすること (上の理由)
     set_zero_on_start: true
 
-  # --- 離散状態アクチュエータ (自作モータドライバ — CAN Standard Frame) ---
-  # 開 / 閉 のような数状態しか取らない。動作確認も運用と同じ位置名へ動かすので
-  # (sequences/motor_check.py)、確認専用の駆動量は存在しない。かつては magnitude を
-  # 別に持っており、位置定数と食い違うと「動作確認で動いた位置」と「運用で使う位置」が
-  # 別物になる、という形で確認が意味を失っていた。
-
-  # デバイス ID は「基板種別 | 基板番号 | スロット番号」の固定ビット分割 (仕様書 §2.2)。
-  # サーボ基板 (種別 1) の基板番号 0、スロット 0-4 が 0x40-0x44。
-  # ID を見ればどの基板のどのスロットかが直接読めるので、candump を眺めるときに
-  # 対応表を引かなくてよい。
-  #
-  # **スロット設定一式 (役割・ピン・初期角・可動範囲・パルス仕様・センサ極性) は
-  # ファームが基板番号ごと・スロットごとに持つ** (firmware/servo/include/config.h の
-  # kServoBoards[])。サーボ基板 #0 の現在の割り当ては
-  #   SV0 0x40 Servo       … gripper
-  #   SV1 0x41 Servo       … wall_f
-  #   SV2 0x42 Servo       … wall_r
-  #   SV3 0x43 TouchSensor … rotate_origin_sensor      (下の sensors:)
-  #   SV4 0x44 TouchSensor … y_axis_r_origin_sensor    (下の sensors:)
-  #
-  # !!! サーボ基板 3 枚は 15 スロットとも埋まっている !!!
-  # #0 は上のとおり、#1 は 5 スロットとも TouchSensor (SV0 が y_axis 左の原点
-  # スイッチ = このロボットのもの、SV1-SV4 がサブハンド)、#2 は 5 スロットとも
-  # サブハンドのサーボ。**アクチュエータもスイッチも、足すには基板を 1 枚増やす**
-  # (DIP = 基板番号 3 → 0x58-0x5C)。空きを探して既存のスロットを流用すると、
-  # そのスロットを使っていた機構が黙って動かなくなる。
-  #
-  # **y_axis の左右の原点スイッチは 2 枚の基板にまたがる** —— 右が #0 の SV4
-  # (0x44)、左が #1 の SV0 (0x48) で、#0 に空きが無いための配線である。
-  # 基板は「どのロボットのものか」ではなく「どのバスに繋がっているか」でしか
-  # 区切られていないので、共有バス can_generic に載る限りこれで成立する。
   gripper:
     driver: generic
     bus: generic_bus
     can_id: 0x40               # サーボ基板 #0 SV0
     control_type: position
-    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
-    # （FEEDBACK が返すのはクランプ後の指令角）ので、この照合以外に気付く手段が無い。
-    # 値は firmware/servo/include/config.h の kFirmwareVersion と
-    # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
-    # スロットごとに選べる**ので、同じ基板の別スロットの値を写してはならない。
-    # **ファームを直したらここも直す。**
     expected_firmware: 6
     expected_angle_range_deg: 270.0
 
-  # DC モータ。位置の概念がないので duty 指令。
-  # DC 基板 (種別 2) の基板番号 0、スロット 0-2 が 0x80-0x82。
-  # ch0=0x80(conveyor) / ch1=0x81 / ch2=0x82 で、ch1・ch2 は現在未使用。
   conveyor:
     driver: generic
     bus: generic_bus
     can_id: 0x80               # DC 基板 #0 ch0
     control_type: duty
-    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # ファームを一部の基板にだけ焼き忘れると、症状は「そのモータが応答しない」か、
-    # 悪くすると「違うものが動く」だけで、CAN 越しには何も見えない。
-    # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
-    # その基板のモータが一斉に FAULT になり、原因は表示された不一致から読める）。
     expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
-  # ワーク保持用の壁。初期 / 閉 / 開 の 3 状態のみ。
   wall_f:
     driver: generic
     bus: generic_bus
@@ -210,53 +78,17 @@ motors:
     expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-# --- センサ入力 (自作サーボ基板の TouchSensor スロット) ---
-# **センサはモータではない。** 自作基板は 1 スロット = 1 CAN デバイスで、センサも
-# 自分のデバイス ID で FEEDBACK を送る (仕様書 §5.2)。ここに登録しないと CANManager の
-# 受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。
-#
-# motors ではなくこちらに書くことで、動作確認・目標値再送・UI のモータ一覧に
-# 「常に 0 のモータ」が並ばない。途絶は STALE として監視される
-# (センサが死んだまま原点合わせを始めると「いつまでも当たらない」形でしか分からない)。
-#
-# **零点確定 (ホーミング) は軸ごとに 1 本のスイッチを要求する**ので、原点を確定したい
-# 軸の数だけスロットが要る。どちらの軸のものかは config/main_hand_positions.yaml の
-# axes.<軸>.homing.sensor がこの名前を指すことで決まる:
-#   rotate_origin_sensor … rotate (EDULITE ペア) の原点。サーボ基板 #0 SV3
-#
-# **y_axis の 2 本はまだ homing から参照していない (報告のみ)。** 登録して鮮度を
-# 監視するところまでが今の役目で、axes.y_axis.homing を有効にするのは
-# direction / search_distance / step を実機で測ってからになる。**登録だけでも意味が
-# ある** —— 途絶が STALE として出るので、配線が抜けたまま零点確定を有効にして
-# 「いつまでも当たらない」形で機構端まで押し込む事故を先に潰せる。
-#
-# **左右で 1 本ずつ要る**のは、y_axis が左右直結のペア軸で、原点確定がグループ単位に
-# しか効かないため (片側だけ確定すると、その間に片方が動いたぶんが消えないオフセットに
-# なる)。**2 本は別々の基板に載る** —— 右が #0 の SV4、左が #1 の SV0 で、#0 に
-# 空きが無いための配線である (上の motors: のコメントを参照)。
-#
-# **expected_firmware をセンサにも書く。** 基板 #1 には駆動するモータが 1 台も無いので、
-# **その基板の焼き忘れを拾えるのはここだけ**である —— motors: 側の照合は
-# expected_firmware を書いた対象としか突き合わせない。書かないと、基板 #1 だけが
-# 古いファームのまま全スロットが「反応しないスイッチ」として現れ、症状は配線不良と
-# 区別が付かない。基板 #0 の 2 本にも書くのは、同じ基板の gripper / wall_f / wall_r が
-# 見ているから省いてよい、という理由が「そのモータを消したら照合も消える」という
-# 見えない依存になるため。
 sensors:
   rotate_origin_sensor:
     bus: generic_bus
     can_id: 0x43               # サーボ基板 #0 SV3
     expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
 
-  # y_axis の右側リミットスイッチ。
   y_axis_r_origin_sensor:
     bus: generic_bus
     can_id: 0x44               # サーボ基板 #0 SV4
     expected_firmware: 6
 
-  # y_axis の左側リミットスイッチ。**サーボ基板 #1 に載るのはこの 1 本だけで、
-  # 残る SV1-SV4 はサブハンドのもの** (config/sub_hand.yaml の sensors:)。
-  # 1 枚の基板が 2 つのロボットにまたがるが、can_generic は物理的に共有なので成立する。
   y_axis_l_origin_sensor:
     bus: generic_bus
     can_id: 0x48               # サーボ基板 #1 SV0

@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import { SensorSummary } from "@/components/diagnostics/SensorSummary";
 import { MALFORMED } from "@/lib/protocol";
 
-/** センサ名の隣に出る状態チップ */
 function badgeFor(name: string): HTMLElement {
   const badge = screen.getByText(name).parentElement?.querySelector(".badge");
   if (!badge) throw new Error(`${name} の状態チップが見つかりません`);
@@ -17,10 +16,6 @@ describe("SensorSummary", () => {
     expect(screen.getByText("brand_new_sensor")).toBeInTheDocument();
   });
 
-  /**
-   * 原点合わせは「触れさせる」操作なので、接触は平常の情報であって異常ではない。
-   * サーバー側もドライバの `is_fault()` に入れていない。
-   */
   it("接触に警告色を使わない (接触は異常ではない)", () => {
     render(<SensorSummary sensors={{ origin_sensor: { active: true, stale: false } }} />);
     const badge = badgeFor("origin_sensor");
@@ -42,10 +37,6 @@ describe("SensorSummary", () => {
     expect(badgeFor("rotate_origin_sensor")).toHaveTextContent("開放");
   });
 
-  /**
-   * 途絶したセンサを「開放」と描くと、零点確定は探索距離いっぱいまで機構を
-   * 押し込んでから失敗する。異常なのは接触ではなくこちら。
-   */
   it("途絶を接触状態より優先して出す", () => {
     render(<SensorSummary sensors={{ origin_sensor: { active: true, stale: true } }} />);
     const badge = badgeFor("origin_sensor");

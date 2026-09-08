@@ -1,22 +1,12 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { MotorStatus } from "@/components/diagnostics/MotorStatus";
+import { MotorStatHeader, MotorStatus } from "@/components/diagnostics/MotorStatus";
 import type { MotorState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
 
-/**
- * 診断カラムの数値 4 列。
- *
- * **測る手段が無い項目に 0 を描いてはならない。** 自作モータドライバの DC 基板
- * (コンベア) と電磁弁基板はエンコーダも電流センスも温度センサも積んでおらず、
- * CAN プロトコルにフィールド自体が無い。`0.0 / 0.0 / 0.0 / 0.0℃` と出ていた頃は、
- * 操縦者に「本当に 0 なのか、フィードバックが来ていないのか」を区別する手段が
- * 画面のどこにも無かった。
- */
 const THRESHOLDS = { warning: 60, critical: 80 };
 
-/** 値行 (POS/VEL/TRQ/TMP) のセル。見出しは別部品なのでここには出ない */
 function cells(): HTMLElement[] {
   const row = document.querySelector(".grid-cols-4");
   if (!row) throw new Error("数値行が見つかりません");
@@ -34,13 +24,8 @@ describe("MotorStatus", () => {
     );
 
     expect(cells().map((c) => c.textContent)).toEqual(["—", "—", "—", "—"]);
-    // `—℃` は意味を持たない。単位は値があるときだけ
     expect(screen.queryByText("℃")).not.toBeInTheDocument();
-    // 「測ったように見える 0」が 1 つでも残っていないこと
     expect(screen.queryByText("0.0")).not.toBeInTheDocument();
-    // 温度が測れないモータには色も付けない。0 を温度とみなすとしきい値以下なので
-    // 「正常」の側へ黙って倒れる (判定そのものは motorTempTone が持ち、
-    // `healthVerdict.test.ts` が null → neutral を固定している)
     const [, , , tmp] = cells();
     expect(tmp).not.toHaveClass("text-warning");
     expect(tmp).not.toHaveClass("text-error");
@@ -81,8 +66,6 @@ describe("MotorStatus", () => {
   it("桁位置を揃えるグリッドと等幅指定を「—」でも崩さない", () => {
     render(<MotorStatus name="conveyor" state={motorState({ pos: null })} />);
 
-    // 4 列グリッドの中に 4 セルが並び、どれも tabular-nums のままであること
-    // (右寄せはグリッド側の text-right が持つ)
     const all = cells();
     expect(all).toHaveLength(4);
     for (const cell of all) {
@@ -92,10 +75,6 @@ describe("MotorStatus", () => {
   });
 
   it("欄そのものが欠けた配信は「—」ではなく異常側へ倒す", () => {
-    // **測れない (null) と読めない (欠落・型違い) を混ぜてはならない。**
-    // 同じ「—」にすると、配信の不具合が「このドライバは測れない」として
-    // 画面から消える。ついでに `state.pos.toFixed()` がレンダー本体で投げて
-    // React ツリーごとアンマウントする経路も塞ぐ
     const broken = { ...motorState(), pos: undefined, vel: "x" } as unknown as MotorState;
     render(<MotorStatus name="y_axis_r" state={broken} />);
 
@@ -105,15 +84,6 @@ describe("MotorStatus", () => {
     expect(vel).toHaveTextContent("?");
   });
 
-  /**
-   * フィードバックを持たない基板 (DC = duty / 電磁弁 = on_off) は 4 欄すべてが
-   * 「—」になり、何を指令したのかが画面のどこにも無かった。POS 欄にだけ
-   * **PC が最後に送った指令値**を出す。
-   *
-   * **これは実出力ではない。** ファームの `max_duty` クランプ・`everFed_` ゲート・
-   * ウォッチドッグ満了・緊急停止ラッチのどれでも基板の出力は 0 になりうるが、
-   * PC は送った値しか知らないのでここの値は変わらない。
-   */
   describe("指令値の表示 (フィードバックを持たない基板)", () => {
     it("DC 基板の duty 指令を POS 欄へ「→」付きで出す (小数 2 桁)", () => {
       render(
@@ -130,12 +100,10 @@ describe("MotorStatus", () => {
         />,
       );
 
-      // 0.3 と 0.34 が同じに見えないよう 2 桁。残り 3 欄は指令が無いので「—」のまま
       expect(cells().map((c) => c.textContent)).toEqual(["→0.30", "—", "—", "—"]);
     });
 
     it("電磁弁の on_off 指令は数値ではなく ON / OFF", () => {
-      // 基板は 0 か非 0 かしか見ない。0.0 / 1.0 と出すと duty と見分けが付かない
       const valve = (command: number) =>
         motorState({
           pos: null,
@@ -178,8 +146,6 @@ describe("MotorStatus", () => {
     });
 
     it("指令値であって実出力ではないことを言葉でも出す", () => {
-      // `→` の記号だけでは「送った値」と「基板が出している値」の差までは伝わらない。
-      // 幅 300px の診断カラムに凡例を置く余地が無いのでホバーに載せる
       render(
         <MotorStatus
           name="conveyor"
@@ -194,8 +160,6 @@ describe("MotorStatus", () => {
     });
 
     it("指令の欄そのものが未配信なら「—」。異常側へ倒さない", () => {
-      // この欄を配らない版のサーバーへ繋いだだけで全モータの POS が「?」で
-      // 埋まってはならない (届いていないことと読めないことは別)
       const old = { ...motorState({ pos: null }), command: undefined } as unknown as MotorState;
       render(<MotorStatus name="conveyor" state={old} />);
 
@@ -209,5 +173,34 @@ describe("MotorStatus", () => {
       expect(cells()[0]).toHaveTextContent("?");
       expect(cells()[0]).toHaveClass("text-error");
     });
+  });
+});
+
+function spacer(): HTMLElement {
+  const { container } = render(<MotorStatHeader />);
+  const el = container.querySelector("[aria-hidden]");
+  if (!el) throw new Error("見出しの空きが見つかりません");
+  return el as HTMLElement;
+}
+
+function widthClasses(el: HTMLElement): string[] {
+  return [...el.classList].filter((c) => c.includes(":w-["));
+}
+
+describe("MotorStatHeader", () => {
+  it("`hidden` を打ち消す display を、幅と同じブレークポイントで持つ", () => {
+    const el = spacer();
+    const [width] = widthClasses(el);
+    expect(width).toBeDefined();
+
+    expect(el.className).toContain(`${width.split(":")[0]}:block`);
+  });
+
+  it("空きの幅はモータ行の名前列と同じクラスで、ずれないこと", () => {
+    const { container } = render(<MotorStatus name="y_axis_r" state={motorState({})} />);
+    const nameColumn = container.firstElementChild?.firstElementChild as HTMLElement;
+
+    expect(widthClasses(spacer())).toEqual(widthClasses(nameColumn));
+    expect(widthClasses(nameColumn)).toHaveLength(1);
   });
 });

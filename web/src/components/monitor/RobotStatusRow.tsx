@@ -15,16 +15,10 @@ import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 interface RobotStatusRowProps {
   label: string;
   state: RobotState | undefined;
-  /** サーバーと繋がっているか。切断中の健全性判定は切れた瞬間の値でしかない */
   connected: boolean;
-  /** 温度の色分けに使うしきい値。サーバー由来で、Dashboard から流れてくる */
   tempThresholds?: TempThresholds | null;
 }
 
-/**
- * 試合中の Monitor が最初に読むべき「その機体は今どうなっているか」。
- * 判定 (どの状態か) は `sequenceKind` に一本化し、ここは表示だけを持つ。
- */
 const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
   no_sequence: { tone: "neutral", label: "シーケンス未取得" },
   idle: { tone: "neutral", label: "待機中" },
@@ -33,19 +27,6 @@ const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
   complete: { tone: "success", label: "完走" },
 };
 
-/**
- * Monitor 試合中の 1 機分。
- *
- * かつては 8 モータ × 4 値の表がそのまま並び、両機ぶんで 64 個の数字が画面を埋めて、
- * 肝心の「どちらの機体が止まっていて誰の操作待ちか」が沈んでいた。上から
- * 進行状態 → 進捗 → 現在ステップ、と読む順に積み、数値はその下の `SubsystemStatus` へ
- * 送っている —— 主役を入れ替えたのであって、数値を畳んだのではない。
- *
- * その `SubsystemStatus` は **`defaultOpen` で展開して置く。** Monitor は操縦しない役で
- * 数値を追う時間があり、異常の切り分けはこの画面の仕事である。同じ部品を操縦者の
- * 試合中は畳んだままにしてあり、**変えているのは既定の開閉だけ**（異常時に開閉操作を
- * 上書きして開く挙動は `SubsystemStatus` 自身が持つので、どちらの役でも同じに効く）。
- */
 export function RobotStatusRow({
   label,
   state,
@@ -61,15 +42,10 @@ export function RobotStatusRow({
     );
   }
 
-  // 手動中はシーケンスが止まっているので、進行状態だけを見ると「待機中」に見える。
-  // Monitor から「どちらのハンドが手動か」が分からないと、機体が動いている理由も
-  // シーケンスが進まない理由も画面から説明できない
   const inManual = state.manual?.mode === "manual";
   const activity = ACTIVITY[sequenceKind(state)];
   const { waiting_trigger: waiting } = state;
   const isComplete = isSequenceComplete(state);
-  // 進捗の算術は `lib/sequenceStatus.ts` の 1 箇所だけが持つ。ここへ写すと、
-  // 同じ瞬間に操縦者の画面と Monitor が違う進捗を出す経路が戻る
   const { displayIndex, total, percent, current } = sequenceProgress(state);
 
   return (
@@ -93,7 +69,6 @@ export function RobotStatusRow({
         max={100}
       />
 
-      {/* 現在ステップ。Monitor は操作しないので、読めれば十分な大きさに留める */}
       <div className="flex min-w-0 shrink-0 items-center gap-2 px-2 py-1.5 text-[1.15em]">
         {waiting ? <Icon as={Hand} className="shrink-0 text-warning" /> : null}
         <span className="min-w-0 truncate">
@@ -109,7 +84,6 @@ export function RobotStatusRow({
           sensors={state.sensors}
           connected={connected}
           tempThresholds={tempThresholds}
-          defaultOpen
         />
       </div>
     </Panel>

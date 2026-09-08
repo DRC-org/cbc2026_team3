@@ -18,14 +18,6 @@ class Edulite05RunMode(IntEnum):
 
 
 class Edulite05ModeState(IntEnum):
-    """フィードバックが報告する本機の動作状態 (拡張 ID の bit22-23)。
-
-    励磁されているのは `MOTOR` のときだけで、`RESET` は無励磁、`CALIBRATION` は
-    校正中を表す。**「値が来ていない」はこの enum で表さない** (`None` を使う) ——
-    未受信を `RESET` と同じ 0 に潰すと、1 通も届いていないモータが
-    「無励磁だと分かっている」側に混ざる。
-    """
-
     RESET = 0
     CALIBRATION = 1
     MOTOR = 2
@@ -42,8 +34,6 @@ class Edulite05Fault(IntFlag):
 
 
 class Edulite05Driver(MotorDriver):
-    """RobStride EDULITE 05 CAN 2.0B extended-frame driver."""
-
     POS_MIN, POS_MAX = -12.57, 12.57
     VEL_MIN, VEL_MAX = -50.0, 50.0
     TORQUE_MIN, TORQUE_MAX = -6.0, 6.0
@@ -105,8 +95,6 @@ class Edulite05Driver(MotorDriver):
         self.limit_current = float(limit_current)
         self.position_kp = self._clamp(position_kp, self.KP_MIN, self.KP_MAX)
         self.set_zero_on_start = bool(set_zero_on_start)
-        #: 最後に受信したフィードバックの動作状態。**未受信は None のまま**
-        #: (0 = RESET と潰すと、1 通も届いていないモータが無励磁の報告に混ざる)
         self.mode_state: int | None = None
         self.fault_bits = Edulite05Fault.NONE
 
@@ -179,20 +167,6 @@ class Edulite05Driver(MotorDriver):
         return self._message(self.COMM_TYPE_SET_ZERO, b"\x01" + bytes(7))
 
     def encode_set_id(self, new_can_id: int) -> can.Message:
-        """モータの CAN ID を書き換える (通信タイプ 7)。
-
-        **出荷値は 2 台とも 0x7F。** そのまま同一バスへ載せると 2 台が同じ ID で
-        応答し、`CANManager._dispatch_frame` は最初にマッチした 1 台で打ち切るので
-        もう 1 台は永久にフィードバックを得られない。症状は「片方だけ配線不良」に
-        しか見えないため、バスへ載せる前に 1 台ずつ書き換える。
-
-        新 ID はデータエリア2 の上位バイトへ、host_id は下位バイトへ載る。
-        **宛先は現在の ID のまま**にすること —— 新 ID を宛先にすると、まだその ID を
-        名乗っていないモータへ宛てることになり 1 台も受け取らない。
-
-        起動・励磁・動作確認のどの手順からも呼ばない。自動経路に混ざると電源を
-        入れ直すたびに ID が書き換わる。呼び出し口は scripts/edulite_set_id.py だけ。
-        """
         if not 0 <= new_can_id <= 0xFF:
             raise ValueError("new_can_id は 0..255 の範囲で指定してください")
         return self._message(
@@ -224,19 +198,6 @@ class Edulite05Driver(MotorDriver):
         return steps
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
-        """現在値を目標に書いてから励磁する。
-
-        本機は enable した瞬間に PARAM_LOC_REF (位置モード) へ追従を始めるため、
-        目標を書かずに励磁するとアームが原点へ全速で飛ぶ。位置モードでは直前に
-        受信したフィードバックの実測角を、それ以外のモードでは静止を意味する 0 を
-        目標として書いてから enable する。
-
-        after_set_zero は「直前に set_zero を送った」経路向け。原点が付け替わった
-        後のフィードバックはまだ届いておらず、手元の実測角は旧原点基準のままなので、
-        保持目標に使うと原点の差分だけアームが動く。新原点そのものである 0 を書く。
-        起動時 (initialize_motors) と緊急停止復帰 (activate_motors) は set_zero を
-        挟まないか新しいフィードバックを待ってから来るため、既定は実測角のままでよい。
-        """
         hold = (
             self._state.position
             if self.mode is ControlMode.POSITION and not after_set_zero
@@ -248,52 +209,18 @@ class Edulite05Driver(MotorDriver):
         ]
 
     def deactivation_steps(self) -> list[tuple[can.Message, float]]:
-        """原点を切り直す前に無励磁へ落とす。
-
-        励磁したまま `set_zero` を送ると、ドライバ内部の位置目標 (`LOC_REF`) が
-        旧座標のまま残り、原点の差分だけアームが飛ぶ。待ちは
-        `initialization_steps()` の先頭の `disable` と同じ 0.05 秒。
-        """
         return [(self.encode_disable(), 0.05)]
 
     def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
-        """今の位置を機械原点として書き込む (通信タイプ 0x06)。
-
-        待ちが `disable` より長いのは、フラッシュへの書き込みを伴うため
-        (`initialization_steps()` の `set_zero_on_start` と同じ 0.2 秒)。
-        """
         return [(self.encode_set_zero(), 0.2)]
 
     def idle_target_value(self) -> float:
-        """目標を持たない間に書き続ける指令値。
-
-        ``QueryDrivenTargetRefresher`` がこれをラッチして毎周期送り直すことで、
-        操縦者が何も操作していない間もフィードバックが届き続ける。**本機の
-        フィードバックは問い合わせ駆動で、送らなければ 1 通も来ない** (実機で確認:
-        励磁したまま 13 秒放置してもフィードバックは 0 通だった)。
-
-        値は ``activation_steps()`` の保持目標と同じもの。**指令として無害である**
-        ことが要点 —— 位置モードなら「今居る場所を保て」、それ以外なら「止まれ」で、
-        どちらも新しい動きを作らない。片方だけ直すと、励磁の瞬間と再送とで別の値を
-        書くことになり、enable した瞬間にアームがラッチ位置へ飛ぶ。
-        """
         return self._state.position if self.mode is ControlMode.POSITION else 0.0
 
     def requires_fresh_feedback_for_activation(self) -> bool:
-        # 位置モードの保持目標は実測角そのもの。MotorState の初期値 0.0 を実測角と
-        # 取り違えると原点へ飛ぶため、フィードバック未受信では励磁させない。
-        # set_zero_on_start で原点が変わった直後の値も同じ理由で使えない。
         return self.mode is ControlMode.POSITION
 
     def feedback_probe_message(self) -> can.Message | None:
-        # disable は無励磁を保ったままフィードバック応答を返させられる唯一のフレーム。
-        # clear_fault=False なので障害フラグを握り潰す心配もない。
-        #
-        # **この前提が成り立つのは、無励磁のモータへ送る場合だけである。**
-        # 励磁中の `rotate_r` / `rotate_l` へ送れば保持トルクをその場で失い、
-        # 直結ペアが両側とも無励磁になる窓が開く。送ってよいかの判断は
-        # `CANManager._may_probe_for_feedback` が `is_energized()` の三値で
-        # 1 箇所だけ持つ (ここへ書き写さないこと)。
         return self.encode_disable()
 
     def decode_feedback(self, msg: can.Message) -> MotorState:
@@ -303,7 +230,6 @@ class Edulite05Driver(MotorDriver):
             raise ValueError("EDULITE 05 フィードバックは 8 byte 必須です")
 
         _comm_type, data_area2, _dest_id = self.parse_can_id(msg.arbitration_id)
-        # 参照実装準拠。mode_state の正確な bit 範囲は実機応答で要確認。
         self.mode_state = (data_area2 >> 14) & 0x03
         self.fault_bits = Edulite05Fault((data_area2 >> 8) & 0x3F)
         pos_raw, vel_raw, torque_raw, temp_raw = struct.unpack(">HHHH", msg.data)
@@ -326,18 +252,6 @@ class Edulite05Driver(MotorDriver):
         )
 
     def is_energized(self) -> bool | None:
-        """フィードバックの動作状態が `MOTOR` のときだけ励磁されている。
-
-        **これが無いと「起動時に励磁できなかった EDULITE」がどこにも現れない。**
-        `activate_motor` は新しいフィードバックを 0.5 秒待って来なければ enable を
-        送らずに降りるが、その後 `QueryDrivenTargetRefresher` が 20Hz で問い合わせを
-        始めるとフィードバックは流れ出す。鮮度は満たされ `is_fault()` にも掛からない
-        ので、モータのヘルスは OK のまま無励磁だけが残る —— 操縦者から見えるのは
-        「指令しても動かない」だけになる (DM3520 と同じ型の異常)。
-
-        未受信 (`mode_state is None`) は None を返す。「分からない」を「無励磁」へ
-        倒すと、CAN を立てる前の状態がそのまま警告になる。
-        """
         if self.mode_state is None:
             return None
         return self.mode_state == Edulite05ModeState.MOTOR
@@ -348,12 +262,9 @@ class Edulite05Driver(MotorDriver):
     def is_fault(self) -> bool:
         return self.fault_bits != Edulite05Fault.NONE
 
-    # 本機の速度は rad/s だが、yaml の magnitude も操縦者への表示も共通単位の rpm で扱う
     _RPM_TO_RAD_PER_S = 2.0 * math.pi / 60.0
 
     def default_tolerance(self, mode: ControlMode) -> float:
-        # 共通既定値 (deg / rpm) を本機のフィードバック単位へ換算するだけに留める。
-        # ここに独自の数値を書くと共通既定値を直しても本機だけ古い値のまま残る
         if mode is ControlMode.POSITION:
             return math.radians(super().default_tolerance(mode))
         if mode is ControlMode.VELOCITY:

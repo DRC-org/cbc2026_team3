@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, ListMinus, Square, TriangleAlert } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -11,55 +11,31 @@ import { motorCheckStatus } from "@/lib/motorCheckStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
-/**
- * 統合動作確認の進捗パネル。**両ハンドで 1 つ**なので robot を取らない。
- *
- * **モーダルにしてはならない。** かつてはモーダルで、しかも起動と同時に自動で
- * 開いていた。`.modal` は全画面の fixed オーバーレイなので、**駆動しているあいだ
- * ずっとヘッダーの EMG STOP がクリックできず**（クリックは背景として吸われ、
- * パネルが閉じるだけ）、`ModalProvider` の `openCount` でホットキーまで封じられて
- * いた。全アクチュエータが順に動いている最中に止める手段だけが画面から消える、
- * という最も踏んではならない形で、起動確認ダイアログの「実行中も緊急停止は即時
- * 優先で動作します」という文面もそのあいだ嘘になっていた。ここは操作の隣で開く
- * だけの面にして、画面の他のどこも覆わないこと。
- *
- * 出すのはシーケンスのステップ一覧と、今どこを走っているか。
- * かつてはモータごとの合否表 (期待値 / 観測値) を並べていたが、判定は
- * シーケンスエンジンが担うようになり、失敗はシーケンスが止まる形で現れる
- * (`SequenceTimeoutError` / `AxisSyncError`)。**「合格」の列は無い** —
- * 到達判定を持たない軸 (duty / on_off) にそれを出すと、動いたかどうかを
- * 機械が見ていないのに見たように読めてしまう。
- *
- * **起動ボタンはここに置かない。** 動作確認の入口は `MotorCheckButton` 1 つで、
- * インライン化した今は同じ区分の中に並ぶので、ここにも置くと同じ操作が隣り合って
- * 2 つ並ぶ。状態と可否の理由もそちらが出す。
- */
 export function MotorCheckPanel() {
   const { connected } = useRobotStatus();
   const { state, abort } = useMotorCheck();
 
-  // 完了判定は `lib/motorCheckStatus.ts` の 1 箇所だけが持つ。ここで書き直すと
-  // 同じ瞬間にパネルは「完了」、サマリーは「未実行」を出す状態が戻る
   const { outcome, completedSteps: done, failureReason } = motorCheckStatus(state, connected);
   const total = state.total_steps;
   const percent = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
 
   const [manualOpen, setManualOpen] = useState(false);
-  // 開閉ボタンと開閉対象を結ぶ。aria-expanded だけでは「何が開くのか」が伝わらない
   const detailsId = useId();
-  // 実行中と失敗時は操縦者の開閉操作より優先して開く。畳んだまま見逃させない
-  // (`SubsystemStatus` と同じ方針)。畳んだ状態で機体だけが動く画面を作らない
   const forcedOpen = outcome === "running" || outcome === "failed";
   const open = forcedOpen || manualOpen;
 
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (outcome === "running" || outcome === "failed") {
+      panelRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+  }, [outcome]);
+
   return (
-    <div className="flex flex-col">
+    <div ref={panelRef} className="flex flex-col">
       <div className="flex items-center gap-2">
         <button
           type="button"
-          // 記録するのは「今の見え方の逆」。強制開示中に (v) => !v で反転させると、
-          // 見た目が開いたままなのに内部だけ「開く」へ倒れ、実行が終わった後も
-          // ステップ一覧が指差喚呼の上に居座り続ける
           onClick={() => setManualOpen(!open)}
           aria-expanded={open}
           aria-controls={detailsId}
@@ -68,7 +44,6 @@ export function MotorCheckPanel() {
           <Icon as={open ? ChevronDown : ChevronRight} className="text-base-content/60" />
           <span className="min-w-0 truncate">手順と結果</span>
         </button>
-        {/* 中断は開閉の外側に置く。止める操作を折りたたみの内側へ入れない */}
         {state.running ? (
           <Button tone="danger" onClick={abort}>
             <Icon as={Square} />
@@ -85,8 +60,6 @@ export function MotorCheckPanel() {
                 <span className="font-mono text-base-content/70 tabular-nums">
                   {done} / {total}
                 </span>
-                {/* ステップ一覧のハイライトと同じ事実だが、一覧は 15 行あって
-                    スクロールで視野から外れる。今動いているものはここに留める */}
                 <span className="min-w-0 truncate text-info">{state.current_step ?? "—"}</span>
               </div>
               <progress
@@ -100,10 +73,6 @@ export function MotorCheckPanel() {
             </div>
           ) : null}
 
-          {/* 失敗理由はサーバーが `error` / `last_error` の 2 欄で言ってくるので、
-              `motorCheckStatus` が畳んだ 1 つだけを出す (両方出すと同じ 1 行が 2 度並ぶ)。
-              **全文を出すのはここだけ。** 区分見出しの `MotorCheckSummary` は状態チップ
-              しか出さない (同じ理由が truncate 版と並んで 2 度読まれるのを避ける) */}
           {failureReason ? (
             <div className="text-error">
               <p className="flex items-center gap-1.5 font-medium">
@@ -114,11 +83,6 @@ export function MotorCheckPanel() {
             </div>
           ) : null}
 
-          {/* **除外は必ず出す。** 出さないと、サブハンド不在でステップが減っているのか、
-              本番構成なのに config の書き忘れで減っているのかを操縦者が区別できない
-              (どちらも「全ステップ成功」として同じに見える)。**内訳を出すのはここだけ** ——
-              区分見出しの `MotorCheckSummary` は件数 1 語しか出さない (畳んでいるあいだも
-              「除外がある」ことだけは見えている必要があるため、そちらは残してある) */}
           {state.excluded_steps === MALFORMED ? (
             <div className="text-warning">
               <p className="flex items-center gap-1.5 font-medium">
@@ -148,9 +112,6 @@ export function MotorCheckPanel() {
             </div>
           ) : null}
 
-          {/* **「読めなかった」と「まだ読み込まれていない」を混同しない。**
-              後者へ倒すと、配信が壊れているのに画面は平常の文言を出す
-              (除外ステップを `?? []` で埋めるのと同じ壊れ方) */}
           {state.steps === MALFORMED ? (
             <div className="text-warning">
               <p className="flex items-center gap-1.5 font-medium">

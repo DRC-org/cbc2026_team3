@@ -7,8 +7,6 @@ from lib.sequence.engine import Sequence, step
 
 
 class CourtAwareSequence(Sequence):
-    """コート依存の動作を持つテスト用シーケンス。"""
-
     def __init__(self) -> None:
         super().__init__("court_seq")
         self.executed: list[str] = []
@@ -53,7 +51,6 @@ class TestCourt:
 
 class TestTriggerGate:
     async def test_stops_at_every_trigger_step(self) -> None:
-        """require_trigger のステップは必ず操縦者の許可を待つ。"""
         seq = CourtAwareSequence()
         task = asyncio.create_task(seq.run())
         await asyncio.sleep(0.05)
@@ -64,7 +61,6 @@ class TestTriggerGate:
         seq.trigger()
         await asyncio.sleep(0.05)
         assert seq.executed == ["home", "advance"]
-        # 次の require_trigger でまた止まる
         assert seq.waiting_trigger is True
         assert seq.current_step is not None
         assert seq.current_step.label == "把持"

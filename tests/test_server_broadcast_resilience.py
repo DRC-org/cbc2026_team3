@@ -1,11 +1,3 @@
-"""テレメトリ配信が 1 クライアントの不調に巻き込まれないことを検証する。
-
-配信は全クライアントへ直列に送るため、詰まった 1 台をそのまま待つと他の全員 —
-Monitor を含む — のテレメトリが止まる。しかも WebSocket 自体は開いたままなので
-UI は「接続中」を出し続け、操縦者は凍った値を最新だと思って見続けることになる。
-操縦者のノート PC がスリープに入る・Wi-Fi が切れるだけで起きうる。
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -20,8 +12,6 @@ from tests.server_fixtures import ServerFixture
 
 
 class _NoopSequence(Sequence):
-    """state メッセージを 1 通生成させるための最小シーケンス。"""
-
     def __init__(self) -> None:
         super().__init__("noop_seq")
 
@@ -31,20 +21,12 @@ class _NoopSequence(Sequence):
 
 
 def _bare_can_manager() -> CANManager:
-    """モータ 0 台・バス 1 本の実 CANManager (配信経路だけを見るため)。"""
     mgr = CANManager()
     mgr.add_bus("bus0", MagicMock(), channel="vbroadcast0")
     return mgr
 
 
 class _StalledClient:
-    """送信もクローズも永久に返さないクライアント。スリープしたノート PC を模す。
-
-    `close()` まで詰まらせているのは意図的。WebSocket のクローズは相手の応答を
-    待つので、送信が詰まっている相手は当然クローズにも応じない。後始末を
-    配信ループ上で await すると送信タイムアウトを設けた意味がなくなる。
-    """
-
     def __init__(self) -> None:
         self.closed = False
         self.close_called = False
@@ -58,8 +40,6 @@ class _StalledClient:
 
 
 class _HealthyClient:
-    """正常に受け取るクライアント。"""
-
     def __init__(self) -> None:
         self.closed = False
         self.sent: list[str] = []
@@ -72,12 +52,6 @@ class _HealthyClient:
 
 
 class _HandshakeClient:
-    """``_ws_handler`` に渡せる偽ソケット。受信ループはすぐ終わる。
-
-    ``stall_after`` 通目の送信で永久に返らなくなる。接続直後のスナップショット
-    3 通のうち何通目で詰まっても同じ結果になることを見るためにパラメータ化する。
-    """
-
     def __init__(self, *, stall_after: int | None = None) -> None:
         self.closed = False
         self.close_called = False
@@ -107,8 +81,6 @@ class _HandshakeClient:
 
 
 class _ExplodingClient:
-    """送信で例外を投げるクライアント。"""
-
     def __init__(self) -> None:
         self.closed = False
         self.attempts = 0
@@ -123,7 +95,6 @@ class _ExplodingClient:
 
 class TestBroadcastResilience:
     async def test_詰まったクライアントは切り離され配信は完了する(self, monkeypatch) -> None:
-        # 実時間で 1 秒待たされるとテストが遅くなるだけなので上限を縮めて等価に検証する
         ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
         fx = ServerFixture.build()
@@ -133,12 +104,10 @@ class TestBroadcastResilience:
 
         await asyncio.wait_for(fx.publish({"type": "ping"}), timeout=2.0)
 
-        # 詰まった側だけが切り離され、正常な側には届いている
         assert not fx.is_connected(stalled)
         assert fx.is_connected(healthy)
         assert healthy.sent == ['{"type": "ping"}']
 
-        # 後始末は別タスクへ切り離されている (配信ループはこれを待たない)
         await asyncio.sleep(0.01)
         assert stalled.close_called
         assert fx.has_closing_tasks, "クローズタスクの参照を保持していないと GC で消える"
@@ -170,18 +139,10 @@ class TestBroadcastResilience:
         task = asyncio.create_task(fx.broadcast_loop())
         await asyncio.sleep(0.05)
         task.cancel()
-        # 1 回目の例外でループが終わっていたら 2 回目以降は呼ばれない
         assert calls["n"] > 1
 
 
 class TestFanout:
-    """全配信経路が同じファンアウトを通ること。
-
-    経路が分かれていると「送信タイムアウトを通す」「切り離しは別タスクへ逃がす」という
-    不変条件を経路の数だけ守り続ける必要があり、増えた経路が 1 つ抜けただけで
-    テレメトリ全体が 1 クライアントに引きずられて凍る。
-    """
-
     async def test_複数メッセージは順序どおり届く(self) -> None:
         fx = ServerFixture.build()
         healthy = _HealthyClient()
@@ -192,7 +153,6 @@ class TestFanout:
         assert healthy.sent == ['{"type": "a"}', '{"type": "b"}']
 
     async def test_1通目に失敗した相手へ2通目は送らない(self) -> None:
-        # 送れないと分かった相手に残りを投げ続けるぶんだけ、他クライアントの配信が遅れる
         fx = ServerFixture.build()
         exploding = _ExplodingClient()
         healthy = _HealthyClient()
@@ -221,14 +181,6 @@ class TestFanout:
 
 
 class TestConnectHandshakeIsNotUnbounded:
-    """接続直後の 3 通も送信上限を通ること。
-
-    生の ``send_str`` は相手が読まなくなると無期限に待つ。スリープに入りかけた
-    ノート PC が 1 台繋いだだけで接続ハンドラが返らなくなり、``finally`` の
-    ``_ws_clients.discard`` も走らない。配信ループは ``ws.closed`` にならない
-    その相手へ送り続けることになる。
-    """
-
     @pytest.mark.parametrize("stall_after", [0, 1, 2])
     async def test_詰まった相手でも接続ハンドラは返る(self, monkeypatch, stall_after: int) -> None:
         ServerFixture.shrink_ws_send_timeout(monkeypatch)
@@ -238,10 +190,8 @@ class TestConnectHandshakeIsNotUnbounded:
 
         await asyncio.wait_for(fx.run_ws_handler(client), timeout=2.0)
 
-        # 詰まった相手は接続集合に残らない (残ると配信ループが毎周期そこで待つ)
         assert not fx.is_connected(client)
         assert len(client.sent) == stall_after
-        # クローズは別タスクへ逃がす (close() も相手の応答を待つ)
         await asyncio.sleep(0.01)
         assert client.close_called
         assert fx.has_closing_tasks
@@ -260,12 +210,6 @@ class TestConnectHandshakeIsNotUnbounded:
 
 
 class TestShutdownDoesNotHang:
-    """終了処理も送信と同じ上限を通す。
-
-    `close()` は相手のクローズ応答を待つ。スリープしたノート PC が 1 台繋がって
-    いるだけでシャットダウンが返らなくなり、CAN を落とす後始末まで到達しない。
-    """
-
     async def test_on_shutdown_は詰まったクライアントを待たない(self, monkeypatch) -> None:
         ServerFixture.shrink_ws_send_timeout(monkeypatch)
 
@@ -293,15 +237,6 @@ class TestShutdownDoesNotHang:
 
 
 class _JoiningClient:
-    """送信の待ちの隙に別のクライアントを接続させるクライアント。
-
-    操縦者がタブをリロードするだけで起きる。配信は 1 通ごとに await を挟むため、
-    その隙に `_ws_handler` が同じ集合へ追加・削除を行う。配信側が集合をそのまま
-    反復していると `RuntimeError: Set changed size during iteration` になり、
-    `activate_e_stop` の配信からは例外ガード無しで呼び出し元まで抜けて
-    E-STOP を押した操縦者の WebSocket がその場で切れる。
-    """
-
     def __init__(self, fx: ServerFixture, newcomer: object) -> None:
         self.closed = False
         self.sent: list[str] = []
@@ -320,8 +255,6 @@ class _JoiningClient:
 
 
 class TestFanoutToleratesConcurrentConnect:
-    """配信の最中に接続が 1 本増減しても配信経路ごと落ちないこと。"""
-
     async def test_配信中に1台繋がっても配信は完了する(self) -> None:
         fx = ServerFixture.build()
         newcomer = _HealthyClient()
@@ -334,8 +267,6 @@ class TestFanoutToleratesConcurrentConnect:
         assert fx.is_connected(newcomer)
 
     async def test_緊急停止の配信は途中接続で操縦者のWSを切らない(self) -> None:
-        # activate_e_stop の finally には例外ガードが無い。ここで例外が抜けると
-        # handle_command → _ws_handler まで伝播し、E-STOP を押した本人の接続が切れる
         fx = ServerFixture.build()
         fx.add_robot("main_hand", _NoopSequence(), _bare_can_manager())
         newcomer = _HealthyClient()

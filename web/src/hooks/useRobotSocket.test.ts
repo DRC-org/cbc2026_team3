@@ -6,7 +6,6 @@ import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 
 const URL = "ws://test/ws";
 
-/** 接続確立済みの hook を返す */
 function renderConnected() {
   const view = renderHook(() => useRobotSocket(URL));
   act(() => latestSocket().open());
@@ -62,7 +61,6 @@ describe("接続", () => {
 
     rerender({ url: NEXT });
     expect(latestSocket().url).toBe(NEXT);
-    // 新しい接続が open するまでは指令が届かない。繋がっている表示を残してはならない
     expect(result.current.connected).toBe(false);
 
     act(() => latestSocket().open());
@@ -79,7 +77,6 @@ describe("接続", () => {
     act(() => old.open());
 
     rerender({ url: NEXT });
-    // 実 WebSocket の close イベントは切替より後に非同期で届く
     act(() => old.close());
     act(() => vi.advanceTimersByTime(3000));
 
@@ -114,8 +111,6 @@ describe("送信", () => {
   });
 
   it("送れたかどうかを呼び出し側へ返す", () => {
-    // 呼び出し側が「届いた前提」で楽観的に状態を変えると、切断中に緊急停止を
-    // 押しただけで全画面が「停止しました」と表示する (機体は動き続けている)
     const { result } = renderHook(() => useRobotSocket(URL));
     let sent: boolean | undefined;
     act(() => {
@@ -272,8 +267,6 @@ describe("health_change メッセージ", () => {
     ]);
   });
 
-  // 読めなかった level は異常側 (critical) へ倒す。詳細は protocol.test.ts の
-  // health_change スイート (この受信条件そのものは protocol.ts が持つ)
   it("level 省略時は critical (異常側) 扱いにする", () => {
     const { result } = renderConnected();
     act(() => latestSocket().receive({ type: "health_change", robot: "main_hand" }));
@@ -283,8 +276,6 @@ describe("health_change メッセージ", () => {
 
 describe("motor_check_state メッセージ", () => {
   it("サーバーが配った状態でまるごと置き換える", () => {
-    // **継ぎ足さない。** UI 側で進捗を組み立てると、1 通落としたときに画面だけが
-    // 古い状態で固まり、再送も無いのでリロードするまで直らない
     const { result } = renderConnected();
 
     act(() =>

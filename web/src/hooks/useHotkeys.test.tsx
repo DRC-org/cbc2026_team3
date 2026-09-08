@@ -6,7 +6,6 @@ import { ModalProvider, useModalRegistry } from "@/context/ModalContext";
 import type { HotkeyMap } from "@/hooks/useHotkeys";
 import { useHotkeys } from "@/hooks/useHotkeys";
 
-/** window へ keydown を流し、preventDefault されたかを返す */
 function press(key: string, init: KeyboardEventInit = {}, target: EventTarget = window): boolean {
   const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
   target.dispatchEvent(event);
@@ -19,7 +18,6 @@ function mount(map: HotkeyMap, enabled = true) {
   });
 }
 
-/** モーダル 1 枚が表示中であることだけを登録簿に伝えるスタブ */
 function ModalStub({ open }: { open: boolean }) {
   const { register } = useModalRegistry();
   useEffect(() => {
@@ -101,7 +99,7 @@ describe("誤爆の抑止", () => {
 
     const el = document.createElement("div");
     el.contentEditable = "true";
-    // jsdom は contentEditable から isContentEditable を導出しないため明示する
+    // jsdom は contentEditable から isContentEditable を導出しない
     Object.defineProperty(el, "isContentEditable", { value: true });
     document.body.appendChild(el);
     press(" ", {}, el);
@@ -125,7 +123,6 @@ describe("誤爆の抑止", () => {
     press(" ");
     expect(handler).not.toHaveBeenCalled();
 
-    // 閉じたモーダルは抑止しない
     rerender(
       <ModalProvider>
         <Probe open={false} />

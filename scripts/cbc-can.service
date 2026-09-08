@@ -1,5 +1,4 @@
-# テンプレート。@PROJECT_DIR@ は install.sh が実パスに置換して
-# /etc/systemd/system/ へ配置する。
+# テンプレート。@PROJECT_DIR@ / @RUN_USER@ は install.sh が置換する。
 
 [Unit]
 Description=CBC2026 Team3 CAN バス初期化
@@ -8,40 +7,7 @@ After=network-pre.target
 
 [Service]
 Type=oneshot
-# CAN の up は一度きりの処理で常駐しない。RemainAfterExit により
-# 後続の service が After= で依存できる状態を保つ。
 RemainAfterExit=yes
-# USB の列挙が起動直後だと間に合わないため、スクリプト側でデバイス出現を待つ。
-#
-# !!! ここに --strict は付けない。意図的である !!!
-# 付けると「定義した 4 本が全部揃わない限り、この unit が failed」になる。
-# **片方のハンドだけを持ち込んだ練習・机上ベンチ (config/bench/*)・--dry-run の
-# 動作確認は、どれも「定義したバスが揃っていない」構成である。** そこで毎回
-# failed が 1 つ残ると、失うものが 2 つある:
-#   - cbc-can-watchdog.service は Requires=cbc-can.service なので**起動しない**。
-#     bus-off からの復旧 (docs/checks_and_health.md) だけが黙って外れる
-#   - 欠けが常態の構成では systemctl status も journal も常に赤いままになり、
-#     本物の異常がそこへ埋もれる
-# 揃っていない構成で立ち上げること自体は正当な運用なので、この unit の成否を
-# そこへ結び付けてはならない。
-# (cbc-control.service は Wants=cbc-can.service なので**道連れにはならない** ——
-#  この unit が failed でも制御プログラムの起動そのものは塞がらない。
-#  なぜ Requires= ではないかは cbc-control.service のコメントにある)
-#
-# --strict が答えるのは「定義したバスが全部使えるか」という**試合前点検の問い**で、
-# 「今この PC を立ち上げてよいか」とは別の問いである。1 つの実行に両方を負わせると、
-# 点検を独立に回せなくなり、しかも失敗の代償が「起動できない」に跳ね上がる。
-#
-# **その代わり、この unit が success でも CAN が 0 本の可能性が残る。**
-# 埋めるのは人で、指差喚呼の can_bus_strict (config/checklist.yaml) が
-# `scripts/setup_can.sh --strict` を試合前に 1 回回させる。
-#
-# **main.py が「そのロボットが使うバスだけ」を開くようになった後も、この判断は
-# 変わらない。** 既定の構成は両ハンドを読むので、どの 1 本が欠けても
-# cbc-control は起動しない —— つまり --strict を足しても得るものが無い。
-# 一方で失うものはある: 欠けたバスを使わないほうのハンドで練習を続ける
-# (docs/venue_recovery.md §1-3) あいだ、bus-off 復旧の常駐保護が上がらない。
-# **得るものが無いまま保護だけを外す変更になる。**
 ExecStart=@PROJECT_DIR@/scripts/setup_can.sh --wait 15
 ExecStop=/bin/true
 

@@ -21,11 +21,6 @@ describe("isSetupPhase", () => {
   });
 });
 
-/**
- * サーバーのフェーズゲート (`lib/match_state.py`) の写し。
- * PHASES_DURING_MATCH = {match}、PHASES_OUTSIDE_MATCH はその補集合なので、
- * この 1 つの判定で両方に答えられる。
- */
 describe("isDuringMatch", () => {
   it("match だけを試合中とする", () => {
     expect(isDuringMatch("match")).toBe(true);
@@ -34,8 +29,6 @@ describe("isDuringMatch", () => {
   });
 
   it("finished は試合中ではない (動作確認もコート選択もサーバーは通す)", () => {
-    // 画面レイアウトの都合で match と finished をまとめて扱いたくなるが、
-    // コマンドの可否は別物。ここを混ぜると試合終了後に操作を塞いでしまう
     expect(isDuringMatch("finished")).toBe(false);
   });
 

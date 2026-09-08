@@ -58,20 +58,9 @@ _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
 _DEFAULT_CONFIGS = ["main_hand.yaml", "sub_hand.yaml"]
 _SYSTEM_CONFIG = "system.yaml"
 _CHECKLIST_CONFIG = "checklist.yaml"
-# 機構位置定数は robot config と同じディレクトリに <robot_name>_positions.yaml で置く
 _POSITIONS_SUFFIX = "_positions.yaml"
 
-# M3508 の PC 側位置制御 PID の既定値 (motors[name].pid が無い場合の補完値)。
-# 入力は累積角 [deg]、出力は C620 の電流指令 [counts] (16384 counts ≒ 20A)。
-#
-# 機構が未完成でイナーシャも重力負荷も不明なため、ここでは「動かないより暴れない」を
-# 優先した保守的な仮値を置いている。実機で要チューニング。
-#   kp=2.0  : 100deg の偏差でも 200counts (≒0.24A) しか出ない。まず振動しない領域から始める
-#   ki=0.0  : 積分は重力補償が必要と分かってから足す。機構端に当たった状態で育つと危険
-#   kd=0.0  : ノイズを増幅するため、kp を上げて振動が出てから初めて入れる
-#   dead_band=1.0 : M3508 の減速比 (19:1) を考えると出力軸で 0.05deg 相当。唸り防止
-#   output_limit=2000 : 電流上限 ≒2.4A。C620 フルスケール (20A) の約 12%。
-#                       機構が確定するまで、暴走しても人力で押さえられる領域に留める
+# TODO(実機で確認): 「動かないより暴れない」を優先した保守的な仮値。
 _DEFAULT_PID: dict[str, float | None] = {
     "kp": 2.0,
     "ki": 0.0,
@@ -82,10 +71,7 @@ _DEFAULT_PID: dict[str, float | None] = {
 }
 
 
-#: 開発用コマンドを解禁する環境変数。systemd unit や shell の export で渡せるように、
-#: CLI 引数と同じフラグをもう 1 経路用意してある (CLI 側が優先)。
 _DEV_TOOLS_ENV = "CBC_DEV_TOOLS"
-#: 真と見なす値。"0"/"false"/空文字を真にしないためにホワイトリストで判定する
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
@@ -150,14 +136,6 @@ def _load_config(path: pathlib.Path) -> dict:
 def _load_all_configs(
     system_path: pathlib.Path, config_paths: list[pathlib.Path]
 ) -> tuple[SystemConfig, list[tuple[pathlib.Path, RobotConfig]]]:
-    """共通設定と各ロボット設定を検証して読み込む。誤記があれば起動を拒否する。
-
-    検証に落ちた設定で起動を続けないのは、control_type の誤記のような
-    「指令の種類そのものが変わる」誤りを警告ログでは止められないため
-    (duty 0.3 のつもりの値が position 0.3deg としてファームに受理される)。
-    SystemExit で抜けるのは、会場で読むのが操縦者であり、traceback より
-    1 行のメッセージのほうが直せるため。
-    """
     if not system_path.exists():
         raise SystemExit(f"共通設定ファイルが見つかりません: {system_path}")
 
@@ -185,17 +163,6 @@ def _load_all_configs(
 
 
 def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistItem]]:
-    """チェックリスト yaml を読み込む。存在しなければ空定義で起動する。
-
-    項目ゼロのロールは「常に完了」とみなされるため、yaml が無くても試合には
-    入れる。逆に yaml があれば全項目のチェックが試合開始の前提条件になる。
-
-    検証に落ちたときに SystemExit へ変換するのは `_load_all_configs` と同じ理由
-    (会場で読むのが操縦者であり、traceback より 1 行のメッセージのほうが直せる)。
-    ここだけ生の例外で落ちると、ロール名を 1 行打ち間違えただけで journal に
-    Python の traceback が出る —— しかも `cbc-control.service` は約 6 秒で
-    `failed` に固定されるので、読み違えたぶんだけ復帰が遠くなる。
-    """
     if not path.exists():
         logger.warning("チェックリスト設定が見つかりません: %s (項目なしで起動)", path)
         return load_checklist_definitions({})
@@ -206,17 +173,10 @@ def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistI
 
 
 def _positions_path(config_path: pathlib.Path, robot_name: str) -> pathlib.Path:
-    """robot config と同じディレクトリの位置定数 yaml のパスを返す。"""
     return config_path.with_name(f"{robot_name}{_POSITIONS_SUFFIX}")
 
 
 def _load_position_table_file(path: pathlib.Path) -> PositionTable:
-    """位置定数 yaml を読み込む。読めなければ空表で起動する。
-
-    起動自体は通す (モータ動作確認やヘルス監視は定数なしでもやりたい) が、
-    定数が壊れているときに推測で動かすと機構を壊すため、空表のまま先へ進めて
-    シーケンスが値を引いた時点で明示的に失敗させる。
-    """
     if not path.exists():
         logger.warning("位置定数ファイルが見つかりません: %s (定数なしで起動)", path)
         return PositionTable.empty(source=str(path))
@@ -229,13 +189,6 @@ def _load_position_table_file(path: pathlib.Path) -> PositionTable:
 
 @contextlib.contextmanager
 def _suspend_sync_monitoring(monitors: list[SyncMonitor], axis: str) -> Iterator[None]:
-    """原点を付け替えるあいだ、その軸の偏差監視だけを止める。
-
-    **全体 pause にしない。** 零点確定は動作確認の最初のステップで、そのあいだ
-    他の軸も動く。全体を止めると関係の無いペア軸の保護まで消える。
-    再開は `ExitStack` が例外経路でも必ず行う (取りこぼすと、その後の試合中ずっと
-    この軸の偏差監視が死んだまま残り、しかも画面には何も出ない)。
-    """
     with contextlib.ExitStack() as stack:
         for monitor in monitors:
             if axis in monitor.group_names:
@@ -293,30 +246,12 @@ def _make_origin_resolver(
 ) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
     """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
 
-    **左右ペアはグループ単位でしか確定しない。** 別々の時刻に確定すると、その間に
-    片方が動いたぶんだけ消えないオフセットが残り、正常な動作でも即座に偏差超過で
-    止まる。判断は `M3508PositionLoop.set_group_origin_here` と
-    `CANManager.capture_origin_via_set_zero` (軸のモータ全員をまとめて受ける) が持つ。
-
     「確定できるか」と「確定する」を同じ解決器から出すのは、探索を始める前に
-    可否を問えるようにするため。センサまで押し込んでから「確定できません」で
-    降りると、機構を動かした意味が無いまま姿勢だけが変わる。
+    可否を問えるようにするため。可否はドライバ自身の `supports_origin_capture()`
+    が答える (`main.py` にドライバ種別を書き写さない)。
 
-    手段は 2 つあり、この順で探す:
-
-    1. **PC 側位置制御ループ (M3508)** —— 累積角の原点を PC が持つので、CAN の
-       往復は要らない
-    2. **ドライバへの `SET_ZERO`** —— 原点をドライバ内部に持つモータ用。可否は
-       ドライバ自身の `supports_origin_capture()` が答える (`main.py` に
-       ドライバ種別を書き写して導出し直さない)
-
-    どちらも無ければ None を返す。呼び出し側が起動ログと `HomingError` の両方で見せる。
-
-    `is_estop_active` に既定値を置かないのは、**渡し忘れが「緊急停止を見ない零点確定」
-    として黙って通るため**。付け替えの窓 (約 0.5 秒) で停止が入ると、停止の disable の
-    後に再励磁の enable が届き、停止中に励磁されたまま残る (ログにもヘルスにも出ない)。
-    M3508 側の経路は CAN の往復を持たず、原点を置き換えるだけで励磁もしないので
-    この口を要らない —— 効くのは `SET_ZERO` の経路だけである。
+    `is_estop_active` に既定値を置かないのは、渡し忘れが「緊急停止を見ない
+    零点確定」として黙って通るため。
     """
     managers = can_managers or []
     monitors = sync_monitors or []
@@ -327,16 +262,11 @@ def _make_origin_resolver(
         for manager in managers:
             drivers = [manager.motors.get(name) for name in names]
             if any(driver is None for driver in drivers):
-                # この軸のモータ全員を持っているマネージャだけが確定できる。
-                # 一部だけ確定すると、確定できなかった側との差が原点のずれになる
                 continue
             if not all(driver.supports_origin_capture() for driver in drivers if driver):
                 return None
 
             async def capture(manager: CANManager = manager) -> None:
-                # 付け替え中は 2 台の座標系が違うので偏差という量が定義を失う
-                # (かつ無励磁なので押し合いは起きない)。40ms の debounce に
-                # 収まる保証は無いため、判定そのものを止めてから送る
                 with _suspend_sync_monitoring(monitors, axis):
                     async with _hold_target_refresh(refreshers, names):
                         await manager.capture_origin_via_set_zero(
@@ -360,12 +290,6 @@ def _make_origin_resolver(
 
 
 def _as_async(capture: Callable[[], None]) -> Callable[[], Awaitable[None]]:
-    """同期の原点確定を非同期の口に合わせる。
-
-    `M3508PositionLoop` 側は await を 1 つも挟まないことが性質そのもの
-    (左右の確定のあいだに制御周期が割り込む余地を無くしている) なので、
-    非同期化するのは呼び出し規約だけに留める。
-    """
 
     async def run() -> None:
         capture()
@@ -385,25 +309,6 @@ def _wire_motor_check_sequence(
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
 ) -> None:
-    """統合動作確認シーケンスを組み立ててサーバーへ登録する。
-
-    **構成に無い軸のステップは除外して登録する。** 機構が未装着のハンドを外して
-    実機を動かす構成 (config/bench/main_hand) や、机上ベンチ (config/bench/*) では
-    軸が揃わない。全ステップを登録すると押した瞬間に `PositionLookupError` で
-    止まり、逆に軸が 1 本でも欠けたら登録しない形にすると、残っているハンドの
-    動作確認まで一切できなくなる。
-
-    **除外の判定は `Sequence.restrict_to_axes()` が 1 箇所で持ち、ここはその結果を
-    ログと配信へ流すだけ。** 除外を黙って行うと、本番構成で 1 軸が config から
-    漏れていてもそのステップごと消えて全ステップが成功する。
-
-    指令できる軸が 1 本も残らない構成では登録しない。動作確認は
-    「シーケンスが読み込まれていません」として拒否されるだけで、UI もその理由を
-    表示できる。
-
-    軸名の衝突 (`PositionTable.merged`) はここで起動ごと落とす。動作確認が意図した
-    側とは別の機体の軸へ指令を飛ばす構成を、黙って起動させてはならない。
-    """
     if not tables:
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
         return
@@ -412,14 +317,11 @@ def _wire_motor_check_sequence(
 
     sequence = MotorCheckSequence(available_axes=merged.axes)
     for excluded in sequence.excluded_steps:
-        # 起動ログにも必ず出す。画面を開かずに構成の食い違いへ気付ける唯一の経路
         logger.warning(
             "統合動作確認: ステップ '%s' を除外 (構成に無い軸: %s)",
             excluded.label,
             ", ".join(excluded.missing_axes),
         )
-    # 軸を宣言しないステップ (零点確定) は構成に依らず残るので、ステップ数では
-    # 「1 つも駆動しない」を判定できない。指令する軸が 1 本も無ければ登録しない
     if not any(info.axes for info in sequence.steps):
         logger.warning(
             "統合動作確認: 指令できる軸が 1 本も無いため登録しない (位置定数の軸: %s)",
@@ -442,19 +344,14 @@ def _wire_motor_check_sequence(
 
     homing_axes = [name for name in merged.axes if merged.axis(name).homing is not None]
     if homing_axes:
-        # センサはロボットをまたいで一意なので、全 CANManager から引ける形にする
         sensors = {name: sensor for mgr in can_managers for name, sensor in mgr.sensors.items()}
         freshness = FeedbackFreshness(
             _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
         )
 
         def _sensor_latched(name: str) -> bool | None:
-            # 探索の到達判定だけがこれを読む。ON 区間が homing.step より狭いと
-            # 「今 ON か」では指令 1 回ぶんの通過を丸ごと取りこぼす (実機で発生)。
-            # **ラッチを持たないドライバでは現在値へ落とさず None を返す** ——
-            # 落とすとその取りこぼしが黙って戻る (歯止めは search_distance しか
-            # 残らず、取りこぼした探索が向かう先は機構の破損側である)。
-            # 判断は HomingRunner が持ち、探索を始める前に降りる
+            # ラッチを持たないドライバで現在値へ落とすと、ON 区間が step より狭い
+            # ときの取りこぼしが黙って戻る。判断は HomingRunner が持つ
             sensor = sensors.get(name)
             if sensor is None:
                 return None
@@ -481,9 +378,6 @@ def _wire_motor_check_sequence(
             return None
 
         def _motor_is_stale(name: str) -> bool:
-            # 対象軸の実測位置が読めるかを、探索を始める前に問う。未受信の 0.0 を
-            # 現在位置と信じると、1 歩目が原点近傍への 1 回のジャンプになり、
-            # その移動は search_distance の歯止めに 1mm も掛からない
             return freshness.is_stale(name, freshness.now())
 
         resolve_origin = _make_origin_resolver(
@@ -509,7 +403,6 @@ def _wire_motor_check_sequence(
 
         unsupported = [name for name in homing_axes if not _origin_capturable(name)]
         if unsupported:
-            # 起動ログに出す。押した瞬間に失敗する構成のまま試合当日を迎えないため
             logger.error(
                 "零点確定: 軸 %s は原点を確定する手段がありません"
                 " (PC 側位置制御ループに載らず SET_ZERO も受け付けない。"
@@ -572,10 +465,6 @@ def _make_sensor_reader(
 
 
 def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
-    """全 CANManager を横断して最終受信時刻を引く。
-
-    センサ名はロボット横断に一意なので、どのマネージャが持っていても答えは 1 つ。
-    """
 
     def last_feedback_at(name: str) -> float | None:
         for mgr in managers:
@@ -587,58 +476,19 @@ def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], floa
     return last_feedback_at
 
 
-#: ネットワークインタフェースの状態を持つ sysfs の根。`_read_operstate` の引数に
-#: 出してあるのは、パスの組み立てと `.strip()` を実ファイル (tmp_path) で検証できる
-#: ようにするため — 読む場所を丸ごとラムダへ差し替えると、その 2 つが 1 行も
-#: 通らないまま「機能が丸ごと死ぬ変異」が緑で通る。
 _NET_SYSFS_ROOT = pathlib.Path("/sys/class/net")
 
 
 def _read_operstate(channel: str, *, root: pathlib.Path = _NET_SYSFS_ROOT) -> str | None:
-    """`<root>/<channel>/operstate` を読む。python-can には依存しない。
-
-    `/sys` に実体が無い環境では読めない。**判定できないことを異常へ倒さず、
-    `None` で「分からない」を表す** (このリポジトリの他の「分からない」判定と
-    同じ方針。「判定できない」自体はログに出さない — 平常時のログを埋めないため)。
-    """
     try:
-        # errors="replace": `UnicodeDecodeError` は `OSError` ではないので下の except
-        # では捕まらない。壊れた値を読んでも `== "down"` が偽になるだけで済ませ、
-        # 起動を巻き添えにしない
         return (root / channel / "operstate").read_text(errors="replace").strip()
     except OSError:
         return None
 
 
 def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
-    """1 本の CAN インタフェースを開く。開けなければ 1 行のメッセージで落とす。
-
-    **インタフェースが存在しないとき (CANable が 1 本抜けている) は python-can が
-    例外を投げる**ので下の `SystemExit` で止まる。一方**存在するが down のとき
-    (`setup_can.sh` を流していない) は例外を投げない**
-    (`docs/impl_plan.md` の「既知の制約: バス down 時の失敗が分かりにくい」)。
-    **起動は拒否しない** (`--strict` を通していない構成の逃げ道を潰さないため)。
-    代わりに operstate を見て down なら起動ログへ 1 行 ERROR を残す —
-    「立ち上がったが 1 通も読めていない」の原因をインタフェース名付きで名指しする。
-
-    この呼び出しは `main()` の try の外にあるので、素通しすると生の traceback で
-    落ちるうえ後始末も 1 段も走らない。会場で読むのは操縦者なので、
-    config 系のエラー (`_load_all_configs`) と同じく直し方まで書いて止める。
-    """
     if dry_run:
         return can.Bus(interface="virtual", channel=channel)
-    # **`!= "up"` にしてはならない。** carrier を管理しないデバイス (`lo` /
-    # `tailscale0` など) は up でも `unknown` を返すので、up を条件にすると
-    # 「分からない」まで異常へ倒れる。拾いたいのは管理上 down だけで、
-    # `ip link set <dev> down` したデバイスは必ず `down` を返す (カーネルの
-    # `operstate_show()` が `!netif_running()` を無条件に `IF_OPER_DOWN` へ
-    # 上書きするため)。
-    # **実機の CANable2 (gs_usb) 4 本は定常状態で `up` を返す (2026-09-06 実測)。**
-    # **未確認なのは bus-off のときだけ** — カーネルの `can_bus_off()` は
-    # `netif_carrier_off()` を呼ぶので報告するドライバなら `down` に見えるが、
-    # gs_usb は bus-off 自体を報告しない (`docs/checks_and_health.md`) ので
-    # 落ちない公算が高い。落ちるなら、このメッセージの手順 (`setup_can.sh`) は
-    # bus-off に対しては的外れになる。
     if _read_operstate(channel) == "down":
         logger.error(
             "CAN インタフェース '%s' は down です (起動は続けます)。"
@@ -656,24 +506,12 @@ def _create_bus(channel: str, *, dry_run: bool) -> can.Bus:
 
 
 def _robot_bus_names(robot: RobotConfig, can_buses: Mapping[str, str]) -> list[str]:
-    """そのロボットが実際に使うバス名 (`can_buses` の宣言順)。
-
-    **全バスを開いてはならない。** メインハンドは DM3520 を 1 台も持たないのに
-    `can_dm3520` を、サブハンドは `can_m3508` を開くことになり、CANable が 1 本
-    欠けているだけで**どちらのハンドも起動できなくなる**。片方だけの運用も
-    動作確認も UI の起動もできない。
-
-    副次的に、受信ループが物理バス 1 本につき 2 本立つ (executor スレッドを
-    常時 8 本占有し、E-STOP のブロードキャストも 2 通ずつ出る) のも解消する。
-    """
     used = {cfg.bus for cfg in robot.motors.values()}
     used |= {cfg.bus for cfg in robot.sensors.values()}
     return [name for name in can_buses if name in used]
 
 
 def _make_m3508(motor: MotorConfig) -> MotorDriver:
-    # 位置制御は PC 側の PID ループ (lib/control/position_loop.py) が持つので、
-    # ドライバへ渡す設定は無い (C620 は電流指令しか受け付けない)
     return M3508Driver(name=motor.name, can_id=motor.can_id)
 
 
@@ -697,8 +535,6 @@ def _make_dm3520(motor: MotorConfig) -> MotorDriver:
         master_id=motor.master_id,
         mode=motor.mode,
         limit_speed=motor.limit_speed,
-        # フィードバックの固定小数点レンジ。実機のレジスタ 0x15/0x16/0x17 と
-        # ずれると位置が比例倍で読め、指令どおり動いても到達判定を通らない
         p_max=motor.p_max,
         v_max=motor.v_max,
         t_max=motor.t_max,
@@ -707,26 +543,15 @@ def _make_dm3520(motor: MotorConfig) -> MotorDriver:
 
 
 def _make_generic(motor: MotorConfig) -> MotorDriver:
-    # control_type を渡さないと duty 指令の DC モータが位置制御で生成され、
-    # 指令が config と別物になる
     return GenericDriver(
         name=motor.name,
         can_id=motor.can_id,
         control_type=motor.control_type,
-        # 焼き忘れとサーボの型違いは、この照合以外に気付く手段が無い
-        # (機体は指令どおり動いたようにしか見えない。仕様書 §3.4 / §7.7)
         expected_firmware=motor.expected_firmware,
         expected_angle_range_deg=motor.expected_angle_range_deg,
     )
 
 
-#: ドライバ種別名 -> 生成関数。**全種別がこの表を通る。**
-#: かつては 3 種を if 連鎖で個別に生成し、表に届くのは m3508 だけだった。
-#: 名前は「種別 → 実装クラスの対応表」なのに実態は 1 行のフォールバックで、
-#: lib/config_schema.DRIVER_TYPES が「この表と対で維持する」と言っている以上、
-#: 読んだ人は全種別がここで生成されると読む。
-#: 種別を足す人は DRIVER_TYPES とこの表の両方を触ることになり、
-#: 対応は tests/test_config_schema.py が検証する。
 _DRIVER_MAP: dict[str, Callable[[MotorConfig], MotorDriver]] = {
     "m3508": _make_m3508,
     "edulite05": _make_edulite05,
@@ -736,21 +561,12 @@ _DRIVER_MAP: dict[str, Callable[[MotorConfig], MotorDriver]] = {
 
 
 def _create_motor(motor: MotorConfig) -> MotorDriver:
-    """検証済み設定からモータを生成する。
-
-    未対応のドライバ種別や control_type の誤記は lib/config_schema が起動時に弾くため、
-    ここには常に生成可能な設定しか来ない。
-    """
     return _DRIVER_MAP[motor.driver](motor)
 
 
 def _setup_robot(
     robot: RobotConfig, can_buses: Mapping[str, str], *, dry_run: bool
 ) -> tuple[CANManager, dict[str, MotorDriver]]:
-    """検証済み設定から CANManager とモータ群をセットアップする。
-
-    開くのは**このロボットが実際に使うバスだけ** (`_robot_bus_names`)。
-    """
     can_manager = CANManager()
 
     for bus_name in _robot_bus_names(robot, can_buses):
@@ -762,14 +578,6 @@ def _setup_robot(
         can_manager.add_motor(motor_cfg.bus, motor)
         motors[motor_name] = motor
 
-    # センサは motors には入れない (仕様書 §5.2)。受信の振り分けとヘルス監視だけを
-    # 登録し、動作確認・目標値再送・UI のモータ一覧には並べない。
-    # **登録を忘れると受信ループがそのフレームを誰にも配らず、接触が PC まで届かない。**
-    # **期待ファーム版は渡す。** センサスロットも自分のデバイス ID で INFO を送る
-    # (仕様書 §5.2) ので、渡さないと照合対象そのものが無くなる —— センサだけを
-    # 載せた基板は焼き忘れ検出を 1 つも持たないことになり、旧ファームのままの
-    # スロットは「スイッチを押してもセンサ入力ビットが立たない」形でしか現れない
-    # (配線不良と区別が付かない)。可動レンジはセンサに無いので渡さない
     for sensor_cfg in robot.sensors.values():
         can_manager.add_sensor(
             sensor_cfg.bus,
@@ -786,15 +594,6 @@ def _setup_robot(
 def _load_pid_config(
     motor_name: str, pid_cfg: Mapping[str, object] | None
 ) -> dict[str, float | None]:
-    """motors[name].pid を読み、未指定キーを _DEFAULT_PID で補完する。
-
-    pid セクションが無い M3508 は既定ゲインで動かす (エラーにしない)。
-    起動できないと動作確認そのものができず、機構調整中の実機で困るため。
-    既定値は安全側に振ってあるので、無指定でも暴れない。
-    キー名の誤記も値の型不正 (数値でない / bool / inf・nan) も lib/config_schema
-    (`_parse_pid`) が起動時に拒否するので、ここへ来る値は None か有限の数値だけ ——
-    書いても効かないゲインと、暴走するゲインのどちらも作らない。
-    """
     result: dict[str, float | None] = dict(_DEFAULT_PID)
     if not isinstance(pid_cfg, Mapping):
         return result
@@ -804,11 +603,9 @@ def _load_pid_config(
             logger.warning("未知の pid キー: motors.%s.pid.%s (無視)", motor_name, key)
             continue
         if value is None and key == "integral_limit":
-            # integral_limit の null は「制限なし」という正当な指定
             result[key] = None
             continue
         if value is None:
-            # 他のキーの null は書きかけの yaml とみなし、既定値のまま使う
             logger.warning(
                 "motors.%s.pid.%s が null です。既定値 %s を使います。",
                 motor_name,
@@ -816,16 +613,11 @@ def _load_pid_config(
                 _DEFAULT_PID[key],
             )
             continue
-        # 型不正は lib.config_schema._parse_pid が起動時に拒否済みなので、この
-        # float() は有限の数値にしか呼ばれない。**警告して既定値へ落とす手当てを
-        # ここへ戻してはならない** —— 戻すと「拒否する層」と「黙って既定値へ倒す層」が
-        # 二重になり、後から片方だけ外しても症状が出ない
         result[key] = float(value)
     return result
 
 
 def _build_position_pid(motor: MotorConfig) -> PIDController:
-    """M3508 1 台分の位置制御 PID を config から組み立てる。"""
     params = _load_pid_config(motor.name, motor.pid)
     pid = make_position_pid(
         params["kp"],
@@ -835,9 +627,6 @@ def _build_position_pid(motor: MotorConfig) -> PIDController:
         dead_band=params["dead_band"],
     )
 
-    # make_position_pid の出力レンジは C620 のフルスケール (±16384 = ±20A)。
-    # 機構が確定するまでフルトルクを許すと、暴走時に人力で止められず機構を壊すため、
-    # config の output_limit まで絞り込む。ハード上限は決して超えない。
     limit = min(abs(float(params["output_limit"])), float(CURRENT_MAX))
     pid.output_min = -limit
     pid.output_max = limit
@@ -852,12 +641,6 @@ def _build_position_loops(
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
 ) -> dict[str, M3508PositionLoop]:
-    """config 中の M3508 をバス単位でまとめた位置制御ループ群を作る。
-
-    バス単位で 1 ループにする理由: C620 の電流指令フレーム (0x200) は 1 通に
-    4 モータ分のスロットを持つ。モータごとに送ると他モータのスロットを 0 で
-    上書きしてしまうため、同一バス上の M3508 は必ず 1 ループが束ねる。
-    """
     loops: dict[str, M3508PositionLoop] = {}
 
     for motor_name, motor_cfg in robot.motors.items():
@@ -872,7 +655,6 @@ def _build_position_loops(
                 can_manager,
                 bus_name,
                 feedback_timeout_ms=feedback_timeout_ms,
-                # 緊急停止インターロック: 実行中ステップが出した目標を破棄し電流 0 に落とす
                 is_estop_active=is_estop_active,
             )
             loops[bus_name] = loop
@@ -891,7 +673,6 @@ def _wire_robot_motors(
     is_estop_active: EStopChecker,
     sensor_active: Callable[[str], bool | None],
 ) -> list[M3508PositionLoop]:
-    """シーケンスにモータアクセス層を注入し、必要な位置制御ループを返す。"""
     loops = _build_position_loops(
         robot,
         can_manager,
@@ -900,7 +681,6 @@ def _wire_robot_motors(
         is_estop_active=is_estop_active,
     )
 
-    # M3508 は電流指令しか受け付けないため、目標値は PC 側 PID ループへ迂回させる
     target_sinks: dict[str, TargetSink] = {}
     for loop in loops.values():
         target_sinks.update(loop.target_sinks())
@@ -909,7 +689,6 @@ def _wire_robot_motors(
         build_motor_group(
             can_manager,
             motors,
-            # 緊急停止インターロック: 停止中はシーケンスからの指令自体を拒否する
             is_estop_active=is_estop_active,
             target_sinks=target_sinks,
             # 可動端インターロック: `guard:` を書いた軸が押されている端へ進むのを止める。
@@ -927,27 +706,6 @@ def _build_target_refreshers(
     *,
     is_estop_active: EStopChecker,
 ) -> list[TargetRefresher]:
-    """周期的に指令を送り続ける必要があるモータを種別ごとに束ねる (居なければ空)。
-
-    自作モタドラのファームは 500ms 自分宛の SET_TARGET が来ないと出力を止める
-    (docs/motor_driver_can_protocol.md §5.1)。PC 側は目標値が変わったときにしか
-    送らないため、再送が無いとコンベアは回し始めて 500ms で止まる。
-
-    DM3520 と EDULITE 05 は理由が違う。**フィードバックが問い合わせ駆動**で、
-    自分宛のフレームを受けたときにしか状態を返さない。送らなければ操縦していない
-    間じゅう ``MotorHealth.STALE`` になり、症状は「手動操縦すると動くのに常に赤い」
-    だけで配線不良と区別が付かない。自作モタドラと 1 つのタスクにまとめないのは、
-    目標を持たないモータの扱いが正反対のため (自作モタドラは送ってはならず、
-    問い合わせ駆動の 2 種は送らなければならない)。
-
-    **EDULITE 05 を対象外にしてはならない。** かつて「ドライバ内蔵の位置ループが
-    目標を保持し、かつ自発的にフィードバックを返す」として除外していたが、後半が
-    誤りだった (実機で確認: 励磁したまま 13 秒放置してフィードバックは 0 通)。
-    前半は正しいので位置制御ループは要らず、要るのは生存問い合わせだけになる。
-
-    M3508 だけが対象外。位置制御ループが 200Hz で電流指令を送り続けるうえ、
-    C620 はフィードバックを自発的に送るため問い合わせも要らない。
-    """
     refreshers: list[TargetRefresher] = []
 
     generic = [group[name] for name, drv in motors.items() if isinstance(drv, GenericDriver)]
@@ -968,28 +726,15 @@ def _build_target_refreshers(
 
 
 def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
-    """手動操縦の指令口を組み立てる。
-
-    ``MotorGroup`` はシーケンスへ bind したものをそのまま共有する。手動用に別の
-    グループを組むと、緊急停止インターロック・M3508 の PID 迂回・自作モタドラの
-    再送対象がシーケンス側と 2 セットに分かれ、片方だけ配線を落としても起動できて
-    しまう (落ちた側から出した指令だけが停止中も通る、といった形で現れる)。
-    """
     return ManualController(sequence.motors, positions)
 
 
 def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver]) -> list[SyncGroup]:
-    """位置定数のペア軸のうち、このロボットに実在するものだけを監視対象にする。
-
-    グループ自体は ``AxisSpec.sync_group`` が返す (単位換算はモータ定義をそのまま
-    使うため、ここで詰め替えない)。この関数の責務は実在確認だけ。
-    """
     groups: list[SyncGroup] = []
     for axis_name in positions.paired_axes():
         spec = positions.axis(axis_name)
         missing = [motor.name for motor in spec.motors if motor.name not in motors]
         if missing:
-            # 黙って飛ばすと「監視しているつもり」で機構破損に至るため必ず残す
             logger.warning(
                 "同期監視をスキップ: 軸 %s のモータ %s がこのロボットに存在しません",
                 axis_name,
@@ -1003,12 +748,6 @@ def _build_sync_groups(positions: PositionTable, motors: dict[str, MotorDriver])
 
 
 def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop]) -> None:
-    """全メンバが同一の位置制御ループに載るグループだけをループへ登録する。
-
-    ループ側の保護 (偏差超過で即電流 0・途絶をペア単位で判定) は、そのループが
-    両方のモータの電流を握っている場合にしか成立しない。EDULITE のペアや
-    バスをまたぐペアは SyncMonitor による全体緊急停止だけで守る。
-    """
     for group in groups:
         member_names = {member.name for member in group.members}
         target = next(
@@ -1023,19 +762,6 @@ def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop])
 
 
 def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionLoop]) -> None:
-    """``axes.<軸>.motion`` を書いた軸のモータへ台形速度プロファイルを後付けする。
-
-    位置定数 (人間の単位) とモータ構成 (指令単位) が出会うのはこの層だけなので、
-    **単位換算をここで済ませて位置制御ループへは指令単位で渡す**。
-
-    ``abs(scale)`` で換算するのは、速度・加速度の制限が向きを持たない量だから。
-    逆回転ペアは ``scale`` の符号が逆なので、符号付きで掛けると片側の制限が負値になり
-    制限として一切機能しない (プロファイルは正の上限しか受け取らない)。
-
-    ``_attach_sync_groups`` と同じく「登録できるものだけ登録し、できないものはログに
-    残して続行する」。位置制御ループに載らないモータ (EDULITE / DM3520 はドライバが
-    位置ループを内蔵する) は対象外で、書いても無害に無視される。
-    """
     for axis_name in positions.axes:
         spec = positions.axis(axis_name)
         motion = spec.motion
@@ -1068,13 +794,6 @@ def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionL
 
         if not attached:
             continue
-        # **軸ごとに 1 行**へ畳む。制限値は軸が持つ 1 組なので、左右直結ペアでは
-        # 同じ 3 値がモータの数だけ並ぶだけになる (適用先を知る手掛かりは
-        # モータ名だけなので、名前の列挙はここに残す)。
-        # velocity_ff も必ず出す。実行中に変更できず UI にも配信されないので、
-        # **起動ログが「今どの値で動いているか」を知る唯一の経路**である。
-        # かつ巡航中の出力を最も大きく左右する (kd と釣り合っていないと
-        # D 項が出力を食い潰す) 値なので、落とすと画面からもログからも読めない
         logger.info(
             "台形プロファイル: %s (%s) v<=%.1f %s/s, a<=%.1f %s/s^2, velocity_ff=%g",
             axis_name,
@@ -1093,7 +812,6 @@ def _make_sync_violation_handler(
     positions: PositionTable,
     tasks: set[asyncio.Task[None]],
 ) -> Callable[[str, float], None]:
-    """同期ずれの検出を全体緊急停止に接続するハンドラを作る。"""
 
     def on_violation(axis_name: str, deviation: float) -> None:
         spec = positions.axis(axis_name)
@@ -1103,16 +821,8 @@ def _make_sync_violation_handler(
             f"{robot_name} の {axis_name} の左右ずれ {deviation:.3f}{unit} が"
             f" 許容 {tolerance:.3f}{unit} を超えました"
         )
-        # SyncMonitor のコールバックは同期関数なので停止処理をタスクへ逃がす。
-        # 参照を保持しないと GC でタスクが消え、緊急停止が発火しないことがある
         task = asyncio.create_task(server.activate_e_stop(reason=reason))
         tasks.add(task)
-        # 失敗したら「全体緊急停止が発火しなかった」ことになる。数える側は
-        # server.watch_task に一本化する (main.py に 2 つ目のカウンタを作らない)。
-        # `activate_e_stop` は全体緊急停止なので、失敗すればそのとき実際に
-        # どのロボットも保護されていない —— `_reactivate_motors` の失敗を
-        # 全ロボットへ帰属させるのと同じ理由で robots も全ロボットにする
-        # (起点となった軸は context の文言に残す)
         server.watch_task(
             task, context=f"{robot_name} の同期ずれ検出 → 緊急停止", robots=server.robot_names
         )
@@ -1122,16 +832,6 @@ def _make_sync_violation_handler(
 
 
 def _load_sequence(robot_name: str) -> Sequence | None:
-    """sequences/<robot_name>.py からシーケンスクラスを動的にロードする。
-
-    **候補は「そのモジュールが定義した」クラスに限り、2 つ以上あったら起動を拒否する。**
-    かつては ``dir()`` の並び (アルファベット順) で最初に見つかったサブクラスを
-    返していたため、``sequences/sub_hand.py`` が何かの都合で ``MotorCheckSequence`` を
-    import しただけで ``"MotorCheckSequence" < "SubHandSequence"`` が成立し、
-    サブハンドとして動作確認シーケンスが登録される。症状は「sub_hand の
-    sequence_start でなぜか両ハンドが動く」だけで、config からもログからも
-    理由が読めない。曖昧な構成は黙って起動させず、その場で落とす。
-    """
     module_name = f"sequences.{robot_name}"
     try:
         module = importlib.import_module(module_name)
@@ -1147,19 +847,12 @@ def _load_sequence(robot_name: str) -> Sequence | None:
 
 
 def _sequence_class_defined_in(module: ModuleType) -> type[Sequence] | None:
-    """そのモジュール自身が定義した Sequence サブクラス。無ければ None。
-
-    2 つ以上あったら ``SystemExit``。どちらを登録すべきかは構成からしか決まらず、
-    黙って片方を選ぶと「意図した側とは別の機体のシーケンス」がそのロボットとして
-    動き出す。
-    """
     found = [
         attr
         for attr_name in dir(module)
         if isinstance(attr := getattr(module, attr_name), type)
         and issubclass(attr, Sequence)
         and attr is not Sequence
-        # import しただけの他モジュール由来のクラスを候補にしない
         and attr.__module__ == module.__name__
     ]
     if len(found) > 1:
@@ -1172,32 +865,18 @@ def _sequence_class_defined_in(module: ModuleType) -> type[Sequence] | None:
 
 
 class _PlaceholderSequence(Sequence):
-    """シーケンスが未実装のロボット用プレースホルダー。"""
-
     pass
 
 
 def _install_stop_signal_handler() -> None:
-    """systemd の停止 (SIGTERM) を SIGINT と同じ後始末経路へ合流させる。
-
-    既定の SIGTERM はプロセスを即死させるため、`main()` の `finally` に並べた
-    後始末 (位置制御ループ停止 → 目標値再送停止 → 同期監視停止 → CAN shutdown)
-    が 1 段も走らない。`systemctl stop` / `restart` のたびに規定の停止経路を
-    外れることになるので、main タスクの cancel へ変換して既存の経路に載せる。
-    """
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
-    if task is None:  # asyncio.run 配下では起こらない
+    if task is None:
         return
 
     stopping = False
 
     def _request_stop() -> None:
-        # 2 通目以降はハンドラを残したまま無視する。後始末の最中に再 cancel が
-        # 入ると `_shutdown_step` が CancelledError を再送出して以降の手順が飛び、
-        # CAN を開いたままプロセスが落ちる (systemctl restart の連打で起きる)。
-        # remove_signal_handler では外してはならない —— SIGTERM の扱いが SIG_DFL に
-        # 戻り、2 通目が「無視」ではなく「即死」になって後始末ごと消える
         nonlocal stopping
         if stopping:
             logger.warning("後始末の実行中です。停止シグナルを無視します")
@@ -1210,12 +889,6 @@ def _install_stop_signal_handler() -> None:
 
 
 async def _shutdown_step(label: str, awaitable: Awaitable[None]) -> None:
-    """終了処理の 1 手順を実行する。失敗しても残りの手順へ進む。
-
-    後始末は「全ループを止める → 全 CAN を落とす」の順に並んでおり、途中の 1 つが
-    例外を投げた時点で以降が丸ごと飛ぶと、2 台目のロボットのバスが開いたまま
-    残る。止める処理が止まる形は安全側ではないので、失敗は記録して先へ進める。
-    """
     try:
         await awaitable
     except asyncio.CancelledError:
@@ -1226,13 +899,6 @@ async def _shutdown_step(label: str, awaitable: Awaitable[None]) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class _RobotWiring:
-    """ロボット 1 台ぶんの配線結果。
-
-    起動・後始末・統合動作確認への受け渡しが、これ 1 つを回すだけで済むようにする。
-    かつては `main()` の中でロボットごとの部品を 5 本のリストへ ``extend`` していた
-    ため、「どの部品がどの機体のものか」がループを抜けた時点で失われていた。
-    """
-
     name: str
     sequence: Sequence
     can_manager: CANManager
@@ -1240,7 +906,6 @@ class _RobotWiring:
     position_loops: list[M3508PositionLoop]
     sync_monitors: list[SyncMonitor]
     target_refreshers: list[TargetRefresher]
-    #: 統合動作確認へ渡すモータ束。モータを 1 台も bind できなかった構成では None
     motor_group: MotorGroup | None
 
 
@@ -1254,12 +919,6 @@ def _wire_one_robot(
     is_estop_active: EStopChecker,
     e_stop_tasks: set[asyncio.Task[None]],
 ) -> _RobotWiring:
-    """1 台ぶんの CAN・シーケンス・制御ループ・監視・手動を組み、サーバーへ登録する。
-
-    **どの部品も「作って渡す」だけで、ここでは 1 つも起動しない。** 起動は
-    `_start_all` が全機ぶんまとめて行う —— CAN の受信ループが立つ前に位置制御
-    ループを回すと、フィードバック未受信のまま途絶判定を踏んで警告が出る。
-    """
     robot_name = robot.robot_name
     can_manager, motors = _setup_robot(robot, system.can_buses, dry_run=dry_run)
 
@@ -1282,8 +941,6 @@ def _wire_one_robot(
         ),
     )
 
-    # 自作モタドラはコマンドウォッチドッグを持つため、目標値を定期再送しないと
-    # 500ms で出力が止まる (docs/motor_driver_can_protocol.md §5.1)
     refreshers = _build_target_refreshers(
         seq.motors,
         motors,
@@ -1291,11 +948,8 @@ def _wire_one_robot(
         is_estop_active=is_estop_active,
     )
 
-    # 同期監視はシーケンスから独立した常駐監視。動作確認中・待機中のずれも拾う
     sync_groups = _build_sync_groups(positions, motors)
     _attach_sync_groups(sync_groups, loops)
-    # 位置定数が持つ速度・加速度の制限を位置制御ループへ渡す。書かない軸は従来どおり
-    # 最終目標をステップで PID に入れる
     _attach_motion_profiles(positions, loops)
     monitors: list[SyncMonitor] = []
     if sync_groups:
@@ -1311,11 +965,8 @@ def _wire_one_robot(
             )
         )
 
-    # 手動操縦 (調整時・緊急時の補助操縦)。シーケンスと同じ MotorGroup を共有する
     manual = _build_manual_controller(seq, positions)
 
-    # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
-    # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
     server.add_robot(
         robot_name,
         seq,
@@ -1325,9 +976,6 @@ def _wire_one_robot(
         target_refreshers=refreshers,
         manual=manual,
     )
-    # INFO は要約だけ。名前を全部並べると 1 行が 300 桁を超えて端末で折り返し、
-    # 起動ログ全体が読めなくなる。**同期監視の対象名だけは残す** —— 左右ペアの
-    # 保護が実際に何に掛かったかは、機構を壊す前に起動時点で確かめたい
     logger.info(
         "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s)",
         robot_name,
@@ -1336,9 +984,6 @@ def _wire_one_robot(
         ", ".join(loop.bus_name for loop in loops) or "なし",
         ", ".join(group.name for group in sync_groups) or "なし",
     )
-    # 名前の一覧は DEBUG。平常時は要約で足り、食い違いを疑ったときだけ
-    # `--log-level debug` で読めればよい (config を読むより速い、という以上の
-    # 役割は持たない情報である)
     logger.debug(
         "ロボット登録 %s の内訳: 位置定数軸 %s / 目標値再送 %s / 手動連続操作 %s",
         robot_name,
@@ -1360,19 +1005,6 @@ def _wire_one_robot(
 
 
 def _ensure_port_available(host: str, port: int) -> None:
-    """サーバーの bind 可否を **CAN を開くより前に**確かめる。
-
-    立ち上げ順 (`_start_all`) は「CAN → 制御ループ → 目標値再送 → サーバー bind」で、
-    これは変えられない —— フィードバック未受信のまま PID を回すと、起動のたびに
-    途絶の警告ログが出る。だがその順序のままだと、ポートが埋まっているときに
-    **機体を励磁して 200Hz の制御ループを回し始めた後**で bind が失敗する。
-    「起動したか分からず二度叩く」は会場で普通に起きる操作で、そのたびに機体が
-    数百 ms 励磁される。順序は変えず、bind の可能性だけを先に見る。
-
-    ここで確保した socket は閉じて手放す (aiohttp が自分で bind し直す)。その間に
-    別プロセスが割り込む余地は残るが、防ぎたいのは「自分の二重起動」であって
-    競合そのものではない。
-    """
     try:
         family, socktype, proto, _canonname, sockaddr = socket.getaddrinfo(
             host, port, type=socket.SOCK_STREAM
@@ -1382,7 +1014,6 @@ def _ensure_port_available(host: str, port: int) -> None:
 
     with socket.socket(family, socktype, proto) as probe:
         # aiohttp の TCPSite と同じ条件で試す (POSIX では既定で reuse_address が立つ)。
-        # 揃えないと TIME_WAIT のポートを「使用中」と誤判定して起動を拒否する
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(sockaddr)
@@ -1395,16 +1026,6 @@ def _ensure_port_available(host: str, port: int) -> None:
 
 
 async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
-    """CAN → 制御ループ → 監視 → 再送 → サーバー、の順に立ち上げる。
-
-    **CAN の受信ループを先に立てる。** フィードバック未受信のまま PID を回しても
-    途絶判定で電流 0 に落ちるだけだが、起動のたびに無駄な警告ログが出る。
-
-    **起動時に励磁できなかったモータは必ずサーバーへ渡す。** 捨てると
-    `safety.unenergized_motors` は緊急停止解除の経路でしか埋まらず、起動時の
-    励磁失敗は画面のどこにも出ない。フィードバックは問い合わせ駆動の再送で
-    流れ出すのでヘルスは OK のまま、症状は「指令しても動かない」だけになる。
-    """
     for wiring in wirings:
         server.set_initial_inactive_motors(wiring.name, await wiring.can_manager.run())
     for wiring in wirings:
@@ -1420,16 +1041,6 @@ async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
 
 
 async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
-    """後始末。**1 手順が失敗しても残りを必ず続ける** (`_shutdown_step`)。
-
-    順序に意味がある:
-      1. 位置制御ループ —— 生き残ると電流指令が出続けるので CAN より先に止める
-      2. 目標値再送 —— 止めればファーム側のウォッチドッグが 500ms 以内に出力を落とす。
-         停止指令をここから送らないのは、PC が落ちた場合と経路を 1 本に保つため
-      3. 同期監視 —— これだけ生き残ると、停止済みのモータのフィードバックを見て誤発報する
-      4. CAN シャットダウン
-      5. サーバー終了処理
-    """
     for wiring in wirings:
         for loop in wiring.position_loops:
             await _shutdown_step(f"位置制御ループ (bus={loop.bus_name})", loop.stop())
@@ -1442,27 +1053,14 @@ async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> Non
     for wiring in wirings:
         await _shutdown_step("CAN シャットダウン", wiring.can_manager.shutdown())
     await _shutdown_step("サーバー終了処理", server.cleanup())
-    # 完走したことを journal に残す。この行が無いまま終了していれば、
-    # 後始末の途中で SIGKILL された (TimeoutStopSec 超過) と判別できる
     logger.info("後始末完了")
 
 
 def _format_number(value: float) -> str:
-    """整数で表せる値から小数点以下を落とす (`180.0 秒` → `180 秒`)。
-
-    config は小数で書けるが実際に入るのはほぼ整数なので、`%s` のまま出すと
-    起動ログの数値が軒並み `.0` 付きになり、読み手が桁を数え直すことになる。
-    """
     return f"{value:g}"
 
 
 def _describe_thresholds(health: HealthThresholds) -> str:
-    """ヘルスしきい値を人が読める 1 行へ畳む。
-
-    dataclass の repr はフィールド名を全部並べて 100 桁を超えるため、確認したい
-    4 つの数値が名前に埋もれる。起動ログは試合前点検で目視する対象なので、
-    値そのものが読める形にする。
-    """
     return (
         f"途絶 {_format_number(health.feedback_timeout_ms)}ms"
         f" / 温度 警告 {_format_number(health.temp_warning_c)}℃"
@@ -1472,15 +1070,7 @@ def _describe_thresholds(health: HealthThresholds) -> str:
 
 
 def _describe_checklist(definitions: Mapping[str, list[ChecklistItem]]) -> str:
-    """指差喚呼の件数を 1 行へ。ロールが 1 つなら件数だけを出す。
-
-    現行はロール 1 つ (`pre_match`) に統合済みで、辞書のまま出すと
-    `{'pre_match': 27}` という Python の内部表現が起動ログに残る。ロールは
-    増えうる (WS 契約の形を保つため辞書のまま運んでいる) ので、複数あるときは
-    ロール名と件数を並べる。
-    """
     if not definitions:
-        # yaml が無い構成 (ベンチ) はここへ来る。空文字を出すと行が尻切れになる
         return "なし"
     if len(definitions) == 1:
         return f"{len(next(iter(definitions.values())))} 項目"
@@ -1488,11 +1078,8 @@ def _describe_checklist(definitions: Mapping[str, list[ChecklistItem]]) -> str:
 
 
 def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer:
-    """CLI 引数と共通設定からサーバーを 1 台建てる (ロボットはまだ登録しない)。"""
-    # CLI 引数が優先。どちらか一方でも立っていれば解禁する
     dev_tools = args.dev_tools or _env_flag(_DEV_TOOLS_ENV)
     if dev_tools:
-        # 試合当日に開発用フラグのまま起動していないかを、起動ログだけで判断できるようにする
         logger.warning("開発用コマンドが有効です (指差喚呼の一括チェック等)。試合運用では外すこと")
 
     checklist_path = (
@@ -1513,13 +1100,9 @@ def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer
 
 
 async def main() -> None:
-    """読む → 配線する → 起動する → 畳む。"""
-    # --log-level を 1 行目から効かせるため、ログ設定より先に引数を読む
-    # (引数解析自体はログを出さないので、ここを前へ出しても失われる行は無い)
     args = _parse_args()
     configure_logging(args.log_level)
 
-    # CAN を開くより前に登録する。config 読み込み中に停止されても経路を揃えるため
     _install_stop_signal_handler()
 
     if args.config:
@@ -1528,28 +1111,19 @@ async def main() -> None:
         config_paths = [_CONFIG_DIR / name for name in _DEFAULT_CONFIGS]
     system_path = pathlib.Path(args.system) if args.system else _CONFIG_DIR / _SYSTEM_CONFIG
 
-    # 1 パス目: yaml をすべて読み込んで検証する。RobotServer 生成時にしきい値を渡す
-    # 必要があるため、ロボット登録より先に全 config を確定させる。
     system, loaded = _load_all_configs(system_path, config_paths)
     logger.info("しきい値: %s", _describe_thresholds(system.health))
-    # 試合時間は当日ルールで変わりうる。起動ログに出しておくと試合前点検で確認できる
     logger.info("試合時間: %s 秒", _format_number(system.match.duration_s))
 
-    # **CAN を開くより前に bind の可否を見る。** ポートが埋まっているときに
-    # 機体を励磁してから落ちる経路を作らない (会場での二重起動)
     _ensure_port_available(args.host, args.port)
 
     server = _build_server(args, system)
 
-    # 同期ずれから起動した緊急停止タスクの強参照置き場 (GC で消えると停止しない)
     e_stop_tasks: set[asyncio.Task[None]] = set()
 
-    # モータ指令経路に渡す緊急停止インターロック。server の状態を遅延参照するため
-    # クロージャにしている (server は add_robot より先に生成済み)
     def is_estop_active() -> bool:
         return server.e_stop_active
 
-    # 2 パス目: ロボットごとの配線
     wirings = [
         _wire_one_robot(
             server,
@@ -1563,9 +1137,6 @@ async def main() -> None:
         for config_path, robot in loaded
     ]
 
-    # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
-    # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、
-    # 可動域の重なる位置で干渉しうる
     _wire_motor_check_sequence(
         server,
         [w.motor_group for w in wirings if w.motor_group is not None],
@@ -1584,14 +1155,9 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        # 例外・キャンセルのどちらで抜けてもここを通す
         await _shutdown_all(server, wirings)
 
 
 if __name__ == "__main__":
-    # Ctrl-C では 1 行も出さない。直前に `_shutdown_all` の「後始末完了」が必ず
-    # 出ており、ここで足すと同じ事実 (畳み終わった) が 2 行になる。あちらには
-    # 「後始末が完走した証跡」という固有の役割 (無ければ TimeoutStopSec 超過の
-    # SIGKILL と判別できる) があるので、重複を消すならこちらである
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())

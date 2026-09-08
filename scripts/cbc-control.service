@@ -1,55 +1,15 @@
-# テンプレート。@PROJECT_DIR@ は install.sh が実パスに置換して
-# /etc/systemd/system/ へ配置する。
-#
-# enable はしない (install.sh も有効化しない)。電源投入だけで機体が通電・待機状態に
-# ならないようにするため、起動タイミングは操縦者が `systemctl start` で握る。
+# テンプレート。@PROJECT_DIR@ / @RUN_USER@ は install.sh が置換する。
 
 [Unit]
 Description=CBC2026 Team3 中央制御プログラム (Web Controller 同梱)
 Documentation=file://@PROJECT_DIR@/docs/impl_plan.md
-# CAN が up していなければ実機モードは起動できない。python 側の
-# OSError より、依存関係として明示した方が journal から原因を追える。
-#
-# **Requires= ではなく Wants= であること。**
-# `Requires=` は依存先が明示的に stop / **restart** されたときにこちらへ伝播する
-# (man 5 systemd.unit: "this unit will be stopped (or restarted) if one of the
-# other units is explicitly stopped (or restarted)")。ところが udev ルール
-# (can_config.py が生成する) は CANable の net デバイスが add されるたびに
-# **無条件で `systemctl restart cbc-can.service` を打つ**。つまり Requires= だと、
-# USB の再列挙 —— 抜けかけ・接触不良・ハブのリセット、`install.sh` の
-# `udevadm trigger --action=add` —— のたびに**試合中の制御プログラムが道連れで
-# 再起動**し、シーケンス位置も励磁もタイマーも飛ぶ。
-# しかも下の StartLimitBurst=3 を消費するので、60 秒以内に 3 回バウンドすると
-# `failed` で固定され、`systemctl start` すら通らなくなる。
-#
-# **依存を弱めても診断性は落ちない。** CAN が上がっていなければ main.py の
-# `_create_bus` が 1 行のメッセージを残して落ちる。
-#
-# **そもそもこの依存は「CAN が揃っていること」を保証しない。**
-# cbc-can.service は --strict なしで setup_can.sh を呼ぶので、1 本も up しなくても
-# success で終わる (理由は cbc-can.service のコメント)。揃っているかを答えるのは
-# 指差喚呼の can_bus_strict (config/checklist.yaml) —— 人が --strict を回す。
+# man 5 systemd.unit: Requires= は依存先が明示的に stop / restart されると
+# こちらへ伝播する。udev ルールは CANable が add されるたびに
+# `systemctl restart cbc-can.service` を打つので、ここは Wants= でなければならない。
 Wants=cbc-can.service
 After=cbc-can.service network.target
 
-# 設定ミス等で即死し続ける場合に無限ループさせない。
-# systemd v229 以降、この 2 つは [Service] に書くと黙って無視される
-#
-# !!! ここに掛かるとユニットが failed で固定され、`systemctl start` すら通らない !!!
-# RestartSec=2 なので **6 秒で 3 回**使い切る。CANable が 1 本欠けていると main.py は
-# バスを開けずに 1 秒未満で落ちるため、抜けかけた USB を 1 本挿し直すより早く固定される。
-# その状態から復帰させるには、原因を直したうえで
-#
-#     sudo systemctl reset-failed cbc-control && sudo systemctl start cbc-control
-#
-# が要る。**reset-failed を知らないと「直したのに起動しない」で詰まる。**
-# 会場での切り分け手順は docs/venue_recovery.md にある。
-#
-# 値そのものは 3/60 のままにしてある。欠けた CANable は**恒久的な条件**であって
-# 待てば直るものではないので、回数を増やしても固定されるまでの数秒が延びるだけで、
-# そのあいだ journal が同じトレースバックで埋まる。緩めても救えない一方、
-# RestartSec を延ばすと**試合中にクラッシュしたときの復帰が遅くなる**ため、
-# 「即死し続けたら止める」という元の判断を変える理由が無い。
+# systemd v229 以降、この 2 つは [Service] に書くと黙って無視される。
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
@@ -58,25 +18,15 @@ Type=simple
 User=@RUN_USER@
 WorkingDirectory=@PROJECT_DIR@
 
-# Web UI は同一プロセスが web/dist を配信する (lib/server.py)。その存在判定は
-# create_app() の 1 回きりなので、dist が無いまま起動すると UI のルートが登録
-# されないまま /health と /ws だけが応答し続ける (サービスは active のまま、
-# 画面だけ真っ白)。起動前に落として気付けるようにする
 ExecStartPre=/usr/bin/test -f @PROJECT_DIR@/web/dist/index.html
 
-# mise 配下の uv/python は shim が systemd の PATH に無く、`latest` が勝手に
-# 上がると試合当日に起動しなくなる。venv の実体を絶対パスで固定する
-# -u: journal へ即時に流す (バッファに溜めたまま停止すると死因が残らない)
+# mise の shim は systemd の PATH に無いので venv の実体を絶対パスで指す。
+# -u: journal へ即時に流す (バッファに溜めたまま停止すると死因が残らない)。
 ExecStart=@PROJECT_DIR@/.venv/bin/python -u main.py
 
-# 異常終了時は上げ直す。再起動してもシーケンスは sequence_start 待ちで停止した
-# まま起動するので勝手には動かず、UI だけが復帰する。ファーム側の物理非常停止
-# ラッチも PC 再起動では解除されない (CAN の解除フレームのみが解除できる)
 Restart=on-failure
 RestartSec=2
 
-# SIGTERM を受けた main.py が後始末 (ループ停止 → CAN shutdown) を終える猶予。
-# 通常は 1 秒未満で終わる。超過すると SIGKILL され「後始末完了」ログが残らない
 TimeoutStopSec=10
 
 [Install]

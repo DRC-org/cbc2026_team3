@@ -4,16 +4,7 @@ import { useModalRegistry } from "@/context/ModalContext";
 
 export type HotkeyMap = Record<string, (() => void) | undefined>;
 
-/**
- * 入力中・修飾キー併用など、グローバルショートカットを受け付けない状況。
- * 競技中の誤爆は機体の破損に直結するため、少しでも曖昧な状況では発火させない。
- *
- * **押しっぱなしのジョグ (`useHoldKey`) もこの判定を共有する。** 目標値の入力欄で
- * 数字を打ちながら `←` を押すのはカーソル移動であって、機体を動かす操作ではない。
- * 判定を写すと、片方だけが入力欄を素通しにしても画面からは区別が付かない。
- */
 export function isHotkeyBlocked(event: KeyboardEvent): boolean {
-  // 押しっぱなしによる連続発火はトリガーの多重送信になるため弾く
   if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return true;
 
   const target = event.target as HTMLElement | null;
@@ -22,36 +13,15 @@ export function isHotkeyBlocked(event: KeyboardEvent): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
-/**
- * 押されたキーに対応する登録名。修飾キー併用は `Shift+` を前置する。
- *
- * **Shift 併用と単打を別物として引く。** 誤爆すると機体が可動端まで走るような
- * 操作 (`Shift+Home` / `Shift+End`) を単打と同じ名前で引くと、修飾キーを付ける
- * 意味そのものが消える。逆に単打の登録が Shift 押下時に発火しないのも意図どおりで、
- * 「少しでも曖昧な状況では発火させない」という `isHotkeyBlocked` と同じ方針。
- */
 function hotkeyNameOf(event: KeyboardEvent): string {
   return event.shiftKey ? `Shift+${event.key}` : event.key;
 }
 
-/**
- * window 単位のキーバインドを登録する。キーは KeyboardEvent.key（スペースは " "）。
- * 修飾キー併用は `Shift+Home` の形で書く。
- *
- * ハンドラが見つかった場合は preventDefault する。直前にクリックしたボタンへ
- * フォーカスが残っていても Space が「そのボタンの再実行」にならず、常に
- * ここで定義した操作に一意に決まるようにするため。
- *
- * モーダル表示中は背後の画面を操作させない（緊急停止オーバーレイの裏で
- * シーケンスが進むのを防ぐ）。判定は ModalProvider が持つ表示中モーダル数による。
- */
 export function useHotkeys(map: HotkeyMap, enabled = true): void {
   const { openCount } = useModalRegistry();
 
   const mapRef = useRef(map);
   mapRef.current = map;
-  // リスナを張り直さずに最新値を読むためだけの参照。モーダル開閉で
-  // 登録・解除を繰り返すとキー入力を取りこぼす余地が生まれる
   const modalOpenRef = useRef(openCount > 0);
   modalOpenRef.current = openCount > 0;
 

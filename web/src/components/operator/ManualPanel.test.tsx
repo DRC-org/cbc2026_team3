@@ -14,7 +14,10 @@ const Y_AXIS: ManualAxis = {
   manual: { min: -2, max: 20, steps: [0.5, 2] },
   deviation: 0.2,
   sync_tolerance: 2.0,
-  positions: ["home", "work"],
+  positions: [
+    { name: "home", value: 0 },
+    { name: "work", value: 15 },
+  ],
   motors: ["y_axis_r", "y_axis_l"],
 };
 
@@ -27,21 +30,21 @@ const GRIPPER: ManualAxis = {
   manual: null,
   deviation: null,
   sync_tolerance: null,
-  positions: ["open", "closed"],
+  positions: [
+    { name: "open", value: 5 },
+    { name: "closed", value: 0 },
+  ],
   motors: ["gripper"],
 };
 
 const MANUAL: ManualState = { mode: "manual", axes: [Y_AXIS, GRIPPER] };
 
-/** 連続操作できる軸が 2 本ある構成。軸選択の移動を見るために要る */
 const TWO_STEERABLE: ManualState = {
   mode: "manual",
   axes: [Y_AXIS, { ...Y_AXIS, name: "rotate", unit: "deg", motors: ["rotate_r", "rotate_l"] }],
 };
 
 function renderPanel(manual: ManualState = MANUAL, blockedReason: string | null = null) {
-  // 送信口は `sendOrReport` 固定。素の `send` を渡せる形にしておくと、切断中に
-  // 押した 1 回が痕跡なく消える書き方がテストの上では通ってしまう
   const send = vi.fn(() => true);
   render(
     <ManualPanel
@@ -56,7 +59,6 @@ function renderPanel(manual: ManualState = MANUAL, blockedReason: string | null 
 
 describe("ManualPanel", () => {
   it("配信された軸をそのまま並べる", () => {
-    // 軸名を UI 側へ書かないことで、機構が変わっても UI を触らずに済む
     renderPanel();
     expect(screen.getByText("y_axis")).toBeInTheDocument();
     expect(screen.getByText("gripper")).toBeInTheDocument();
@@ -136,8 +138,6 @@ describe("ManualPanel", () => {
   });
 
   it("軸が 1 つも無ければ理由を説明する", () => {
-    // 位置定数を読めていないロボットで空の操作面だけが出ると、
-    // 「壊れている」のか「そういうものなのか」が画面から分からない
     renderPanel({ mode: "manual", axes: [] });
     expect(screen.getByText(/手動操縦できる軸がありません/)).toBeInTheDocument();
   });
@@ -179,8 +179,6 @@ describe("ManualPanel", () => {
     });
 
     it("端では選択が止まる (巡回しない)", async () => {
-      // 巡回すると、下端で 1 回押しすぎただけで先頭の軸へ飛ぶ。
-      // どの軸を操作しているかは画面を見ずに把握できる必要がある
       const user = userEvent.setup();
       const { send } = renderPanel(TWO_STEERABLE);
 
@@ -199,8 +197,6 @@ describe("ManualPanel", () => {
     });
 
     it("連続操作できない軸は選択対象に入らない", async () => {
-      // ← → が何も起こさない行へ降りられると、キーが効かないのか
-      // 軸が動かないのかを画面から区別できない
       const user = userEvent.setup();
       const { send } = renderPanel();
 
@@ -237,7 +233,6 @@ describe("ManualPanel", () => {
     });
 
     it("キーの割り当てを画面に出す", () => {
-      // 凡例と実装が別の場所にあると必ず食い違う
       renderPanel();
       for (const key of ["↑", "↓", "←", "→", "[", "]", "Home", "End"]) {
         expect(screen.getByText(key)).toBeInTheDocument();

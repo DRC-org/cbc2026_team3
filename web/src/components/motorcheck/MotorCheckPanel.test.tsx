@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
 import { RobotProvider } from "@/context/RobotContext";
@@ -34,16 +34,12 @@ function mount(check: Partial<MotorCheckSnapshot> = {}, connected = true) {
 
 describe("MotorCheckPanel", () => {
   it("画面を覆わない (モーダルではない)", () => {
-    // **これがこの部品の存在理由。** モーダルだった頃は駆動しているあいだずっと
-    // 全画面オーバーレイがヘッダーを覆い、EMG STOP がクリックできなかった
     mount({ running: true, step_index: 1, current_step: STEPS[1].label });
 
     expect(document.querySelector(".modal")).toBeNull();
   });
 
   it("何を動かすかをステップ一覧で読める", async () => {
-    // 押す前に「両機の何がどの順で動くか」が読めないと、周囲の安全確認ができない。
-    // 平常時は畳んでおく (指差喚呼 12 項目の上に 15 行が常時居座らないように)
     mount();
     expect(screen.queryByText("メインハンド 初期姿勢へ")).not.toBeInTheDocument();
 
@@ -54,7 +50,6 @@ describe("MotorCheckPanel", () => {
   });
 
   it("実行中は畳んでいても自分から開き、今どのステップかを出す", () => {
-    // 畳んだまま機体だけが動く画面を作らない (`SubsystemStatus` と同じ方針)
     mount({ running: true, step_index: 1, current_step: STEPS[1].label });
 
     expect(screen.getByRole("button", TOGGLE)).toHaveAttribute("aria-expanded", "true");
@@ -72,8 +67,6 @@ describe("MotorCheckPanel", () => {
   });
 
   it("合否の列を持たない", async () => {
-    // 到達判定を持たない軸 (duty / on_off) に「合格」を出すと、動いたかどうかを
-    // 機械が見ていないのに見たように読めてしまう
     mount({ running: false, step_index: 3 });
     await userEvent.click(screen.getByRole("button", TOGGLE));
 
@@ -85,8 +78,6 @@ describe("MotorCheckPanel", () => {
     const { context } = mount({ running: true, step_index: 1 });
 
     await userEvent.click(screen.getByRole("button", { name: "中断" }));
-    // 送信口は `sendOrReport` 固定。素の `send` だと切断中に押した 1 回が消える
-    // (このボタンは `disabled` を持たないので、実行中はいつでも押せる)
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "motor_check_abort" },
       "動作確認の中断",
@@ -99,13 +90,10 @@ describe("MotorCheckPanel", () => {
     await userEvent.click(screen.getByRole("button", TOGGLE));
 
     expect(screen.getByRole("button", TOGGLE)).toHaveAttribute("aria-expanded", "true");
-    // 止める操作は開閉の外側にあり、どちらの状態でも同じ位置に出る
     expect(screen.getByRole("button", { name: "中断" })).toBeInTheDocument();
   });
 
   it("実行が終わったら畳んだ状態へ戻る (開きっぱなしにしない)", async () => {
-    // 強制開示中の反転を (v) => !v で書くと、見た目は開いたままなのに内部だけ
-    // 「開く」へ倒れ、終わった後もステップ 15 行が指差喚呼の上に居座り続ける
     const running: MotorCheckSnapshot = {
       ...EMPTY_MOTOR_CHECK,
       available: true,
@@ -138,24 +126,15 @@ describe("MotorCheckPanel", () => {
   });
 
   it("起動ボタンを持たない (入口は MotorCheckButton の 1 つだけ)", () => {
-    // インラインになったので同じ区分の中に並ぶ。ここにも置くと同じ操作が 2 つ並ぶ
     mount({ running: false, step_index: 3 });
 
     expect(screen.queryByRole("button", { name: /実行/ })).not.toBeInTheDocument();
   });
 
-  /**
-   * **既定の mount() がまさにこの状態** (running:false, step_index:0, ステップ表あり)。
-   * 実配信のスナップショットもこの形で、以前は全ステップに緑の ✓ が付いていた。
-   *
-   * `config/checklist.yaml` の「アクチュエータ動作確認 完了」は、この誤表示のまま
-   * チェックが付く経路になっていた。
-   */
   it("未実行を完了と表示しない", async () => {
     mount();
     await userEvent.click(screen.getByRole("button", TOGGLE));
 
-    // ✓ が付いた行が 1 つも無いこと (走っていないのに通過済みには見せない)
     expect(document.querySelectorAll(".text-success")).toHaveLength(0);
   });
 
@@ -179,8 +158,6 @@ describe("MotorCheckPanel", () => {
   });
 
   it("ステップ一覧が読めなかったことを平常の文言に紛れさせない", async () => {
-    // 空配列 (「まだ読み込まれていない」) へ倒すと、配信が壊れているのに画面は
-    // 平常の文言を出し、指差喚呼「動作確認 完了」の判断材料が静かに嘘になる
     mount({ steps: MALFORMED });
     await userEvent.click(screen.getByRole("button", TOGGLE));
 
@@ -189,15 +166,8 @@ describe("MotorCheckPanel", () => {
   });
 });
 
-/**
- * 内訳を出すのはここだけ。件数 1 語は `MotorCheckSummary` が区分見出しに常時出すので、
- * 畳んでいるあいだも「除外がある」ことは画面から読める。
- */
 describe("MotorCheckPanel の除外表示", () => {
   it("除外したステップと欠けている軸を出す", async () => {
-    // **黙って減らしてはならない。** 出さないと、サブハンド不在で減っているのか、
-    // 本番構成なのに config の書き忘れで減っているのかを操縦者が区別できない
-    // (どちらも「全ステップ成功」として同じに見える)
     mount({
       excluded_steps: [
         { step: "サブハンド 昇降", missing_axes: ["sub_lift"] },
@@ -227,14 +197,6 @@ describe("MotorCheckPanel の除外表示", () => {
   });
 });
 
-/**
- * 中断は**実際に送れなかった経路**まで踏む。context のモックが常に true を返すテストだけでは、
- * 送信口を素の `send` へ戻す変更 (戻り値を捨てる書き方) が 1 件も落ちない。
- *
- * ここが塞がっていないと、両ハンドの全アクチュエータが順に駆動されている最中に押した
- * 「中断」が痕跡なく消える (このボタンは `disabled` を持たないので実行中は常に押せる)。
- * 操縦者には「押したのに止まらない」としか見えない。
- */
 describe("切断中の動作確認の中断", () => {
   beforeEach(() => {
     installMockWebSocket();
@@ -266,5 +228,59 @@ describe("切断中の動作確認の中断", () => {
     await userEvent.click(screen.getByRole("button", { name: "中断" }));
 
     expect(screen.getByText(/動作確認の中断を送信できませんでした/)).toBeInTheDocument();
+  });
+});
+
+describe("MotorCheckPanel の引き寄せ", () => {
+  function watchScroll() {
+    return vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("実行中は開いた先を視界へ引き寄せる", () => {
+    const scrollIntoView = watchScroll();
+
+    mount({ running: true, step_index: 1, current_step: STEPS[1].label });
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start", behavior: "smooth" });
+  });
+
+  it("失敗したときも引き寄せる", () => {
+    const scrollIntoView = watchScroll();
+
+    mount({ error: "ステップ '零点確定' で失敗しました" });
+
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("失敗のあと再実行しても引き寄せる", () => {
+    const scrollIntoView = watchScroll();
+    const panel = (check: Partial<MotorCheckSnapshot>) => (
+      <RobotProvider
+        value={createRobotContext({
+          motorCheck: { ...EMPTY_MOTOR_CHECK, available: true, steps: STEPS, ...check },
+        })}
+      >
+        <MotorCheckPanel />
+      </RobotProvider>
+    );
+
+    const { rerender } = render(panel({ error: "ステップ '零点確定' で失敗しました" }));
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    rerender(panel({ running: true, step_index: 0, current_step: STEPS[0].label }));
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+  });
+
+  it("平常時は動かさない", () => {
+    const scrollIntoView = watchScroll();
+
+    mount();
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
   });
 });

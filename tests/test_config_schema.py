@@ -86,8 +86,6 @@ class TestSystemConfig:
 
     @pytest.mark.parametrize("value", [0, -30])
     def test_non_positive_match_duration_is_rejected(self, value: int) -> None:
-        """0 以下だと開始と同時に残り 0 になり、タイマーが常に時間切れを出す。
-        誤記が画面の表示だけを壊すため、設定が原因だと気付けない。"""
         with pytest.raises(ValueError, match=r"match\.duration_s"):
             load_system_config(
                 {"can_buses": {"a_bus": "can_a"}, "match": {"duration_s": value}},
@@ -104,11 +102,6 @@ class TestSystemConfig:
         assert config.health.feedback_timeout_ms == DEFAULT_HEALTH.feedback_timeout_ms
 
     def test_motor_check_section_is_rejected(self) -> None:
-        """動作確認の設定は無くなった。残っていたら「書いたのに効かない」状態になる。
-
-        駆動量もタイムアウトも config/*_positions.yaml の位置定数が持つ
-        (sequences/motor_check.py は運用と同じ位置名へ動かす)。
-        """
         with pytest.raises(ValueError, match="motor_check"):
             load_system_config(
                 {"can_buses": {"a_bus": "can_a"}, "motor_check": {"per_motor_timeout_ms": 1500}},
@@ -141,14 +134,6 @@ class TestSystemConfig:
     )
     @pytest.mark.parametrize("value", [0, -1])
     def test_non_positive_health_value_is_rejected(self, key: str, value: float) -> None:
-        """**しきい値そのものが症状に化ける値を通さない。**
-
-        `health` はしきい値の単一情報源なので、ここを通ると他に止める層が無い:
-        `feedback_timeout_ms` が 0 以下なら全モータが恒久 STALE (症状は配線不良と
-        区別が付かない)、温度 2 値が 0 以下なら「測っていない 0」がそのまま
-        WARNING / FAULT に化ける、`tx_error_threshold` が 0 以下なら送信エラー
-        0 件でバスが DEGRADED になる。
-        """
         with pytest.raises(ValueError, match=key):
             load_system_config(
                 {"can_buses": {"a_bus": "can_a"}, "health": {key: value}},
@@ -161,17 +146,6 @@ class TestSystemConfig:
     )
     @pytest.mark.parametrize("value", [float("nan"), ".nan", "nan", float("inf"), ".inf"])
     def test_non_finite_health_value_is_rejected(self, key: str, value: object) -> None:
-        """**NaN と無限大は値域検査を素通りする。**
-
-        `_number` は文字列も `float()` に通すので、yaml の `.nan` も `"nan"` も
-        NaN として通る。NaN は比較がすべて False になるため正値検査
-        (`value <= 0`) も逆転検査 (`warning > critical`) も抜け、しきい値として
-        内部へ入ると「全モータが恒久 STALE なのに設定は正常に見える」形でしか
-        現れない —— CAN プロトコルから float を外した理由 (CLAUDE.md) と同じ
-        失敗様式。無限大は比較を通ってしまうぶんさらに悪く、
-        `feedback_timeout_ms: .inf` は途絶検出を、`temp_warning_c: .inf` は温度警告を
-        **黙って無効化**する。
-        """
         with pytest.raises(ValueError, match=key):
             load_system_config(
                 {"can_buses": {"a_bus": "can_a"}, "health": {key: value}},
@@ -180,11 +154,6 @@ class TestSystemConfig:
 
     @pytest.mark.parametrize("value", [float("nan"), ".nan", "nan", float("inf"), ".inf"])
     def test_non_finite_match_duration_is_rejected(self, value: object) -> None:
-        """`match.duration_s` にも同じ穴がある (`duration <= 0` を NaN が素通りする)。
-
-        NaN が入ると残り時間が常に NaN になり、タイマーは「時間切れ」でも
-        「残っている」でもない表示のまま試合を通る。
-        """
         with pytest.raises(ValueError, match="duration_s"):
             load_system_config(
                 {"can_buses": {"a_bus": "can_a"}, "match": {"duration_s": value}},
@@ -192,7 +161,6 @@ class TestSystemConfig:
             )
 
     def test_inverted_temperature_thresholds_are_rejected(self) -> None:
-        """警告 > 危険 だと、警告を飛ばして FAULT だけが出る。"""
         with pytest.raises(ValueError, match="temp_warning_c"):
             load_system_config(
                 {
@@ -211,14 +179,6 @@ class TestSystemConfig:
             load_system_config({"can_buses": {"a_bus": 3}}, source="system.yaml")
 
     def test_duplicate_bus_channel_is_rejected(self) -> None:
-        """**2 つの別名が同じインタフェースを指す構成を通さない。**
-
-        別名は「どの機種がぶら下がっているか」の宣言なので、重ねると機種の違う
-        ノードが同じ物理バスに乗る。C620 のフィードバック `0x201`〜`0x204` は
-        DM3520 から見て速度指令になり、しかも発生源がモータ自身なので **PC を
-        止めても流れ続ける**。下流の `CANManager.add_bus` は別名で持つだけで
-        チャンネルの重複を見ないため、ここで弾かないと止める層が 1 つも無い。
-        """
         with pytest.raises(ValueError, match="can0"):
             load_system_config(
                 {"can_buses": {"can_m3508": "can0", "can_edulite": "can0"}},
@@ -252,7 +212,6 @@ class TestRobotConfigStructure:
 
     @pytest.mark.parametrize("section", ["health", "can_buses", "match"])
     def test_shared_sections_point_at_system_yaml(self, section: str) -> None:
-        """共通設定を robot yaml に書いても効かない。黙って無視せず移動先を教える。"""
         with pytest.raises(ValueError, match=r"system\.yaml"):
             load_robot_config(
                 {"robot_name": "r", "motors": {"g": _generic()}, section: {}},
@@ -291,19 +250,12 @@ class TestRobotConfigStructure:
             )
 
     def test_bus_is_not_checked_without_bus_definitions(self) -> None:
-        """バス定義を渡さない呼び出し (単体試験・部分検証) では別名を突き合わせない。"""
         config = load_robot_config(_robot(gripper=_generic(bus="bus_a")), source="test.yaml")
 
         assert config.motors["gripper"].bus == "bus_a"
 
 
 class TestControlType:
-    """A9: control_type のタイポは position へ落とさず起動を拒否する。
-
-    duty のつもりの 0.3 が position 0.3deg としてファームへ届き、ファームも素直に
-    受理するため、警告ログだけでは事故を止められない。
-    """
-
     def test_control_type_is_applied(self) -> None:
         config = load_robot_config(
             _robot(conveyor=_generic(control_type="duty")), source="test.yaml"
@@ -328,12 +280,6 @@ class TestControlType:
         assert "duty" in message
 
     def test_on_off_is_applied(self) -> None:
-        """電磁弁の control_type: on_off (仕様書 §9.2)。
-
-        許可表に無いと yaml に書いた瞬間に起動が拒否される。逆に許可表だけ通って
-        GenericDriver 側の _MODE_MAP に無いと、起動はできるのに最初の指令で
-        KeyError になる (試合中に落ちる)。
-        """
         config = load_robot_config(
             _robot(valve_1=_generic(control_type="on_off")), source="test.yaml"
         )
@@ -341,12 +287,10 @@ class TestControlType:
         assert config.motors["valve_1"].control_type is ControlMode.ON_OFF
 
     def test_current_is_rejected(self) -> None:
-        """GenericDriver は電流指令フレームを持たない。"""
         with pytest.raises(ValueError, match="control_type"):
             load_robot_config(_robot(gripper=_generic(control_type="current")), source="test.yaml")
 
     def test_control_type_on_non_generic_driver_is_rejected(self) -> None:
-        """書いても効かないキーを黙って受け取らない。"""
         with pytest.raises(ValueError, match="control_type"):
             load_robot_config(
                 _robot(
@@ -362,12 +306,6 @@ class TestControlType:
 
 
 class TestCanIdRange:
-    """can_id の範囲は起動時に見る。ドライバ生成まで待つと yaml のどこが悪いか出ない。
-
-    範囲外の generic can_id は静かに壊れる (0xFF は緊急停止**解除**の
-    ブロードキャストになり、共有バス上の全基板のラッチを外す)。
-    """
-
     @pytest.mark.parametrize("can_id", [0x00, 0xFF, 0x100, -1])
     def test_generic_id_out_of_range_is_rejected(self, can_id: int) -> None:
         with pytest.raises(ValueError, match="can_id"):
@@ -375,11 +313,6 @@ class TestCanIdRange:
 
     @pytest.mark.parametrize("can_id", [0xC0, 0xC5, 0xFE])
     def test_solenoid_board_ids_are_accepted(self, can_id: int) -> None:
-        """電磁弁基板の帯 (0xC0-0xFE) が generic の範囲に収まっていること。
-
-        範囲は仕様書 §2.2 と揃えてある。ここが狭いと、実在する基板の ID を
-        yaml に書けないまま「範囲外」で起動を拒否される。
-        """
         config = load_robot_config(
             _robot(valve_1=_generic(can_id=can_id, control_type="on_off")), source="test.yaml"
         )
@@ -402,12 +335,6 @@ class TestCanIdRange:
             )
 
     def test_ranges_match_what_the_drivers_accept(self) -> None:
-        """config 側の表とドライバ側の検査がずれていないこと。
-
-        2 箇所に範囲を書く以上、片方だけが古くなる経路を塞いでおく
-        (config_schema は lib.drivers.base しか import しない約束なので、
-        表そのものを共有できない)。
-        """
         builders = {
             "m3508": lambda i: M3508Driver("m", i),
             "edulite05": lambda i: Edulite05Driver("m", i),
@@ -482,12 +409,6 @@ class TestDriverSpecificKeys:
         assert motor.set_zero_on_start is True
 
     def test_dm3520_mit_mode_is_rejected(self) -> None:
-        """MIT モードを書けるようにしない。
-
-        書けてしまうと Kp/Kd を PC 側で持つ構成が config だけで成立し、
-        「ドライバ内蔵の三重ループを使う」という本機を選んだ理由が消える。
-        しかも指令フレームの形が変わるので、症状は「まったく動かない」になる。
-        """
         with pytest.raises(ValueError, match="mit"):
             load_robot_config(
                 _robot(
@@ -503,11 +424,6 @@ class TestDriverSpecificKeys:
             )
 
     def test_dm3520_rejects_edulite_only_keys(self) -> None:
-        """host_id は EDULITE 05 のキー。DM3520 に書いても効かない。
-
-        効かないキーを黙って捨てると、「書いたのに反映されない」を config からは
-        読めない (本機の宛先は MST_ID であって host_id ではない)。
-        """
         with pytest.raises(ValueError, match="host_id"):
             load_robot_config(
                 _robot(
@@ -523,12 +439,6 @@ class TestDriverSpecificKeys:
             )
 
     def test_dm3520_master_id_colliding_with_another_can_id_is_rejected(self) -> None:
-        """MST_ID の下位 8bit が別モータの ESC_ID と交差する構成は拒否する。
-
-        本機は受信 ID の下位 8bit だけを見て自分宛かを判定するため、一致すると
-        フィードバックが指令として解釈される (CLAUDE.md
-        「MST_ID はどの ESC_ID とも下位 8bit が一致しない値にする」)。
-        """
         with pytest.raises(ValueError, match="master_id"):
             load_robot_config(
                 _robot(
@@ -550,11 +460,6 @@ class TestDriverSpecificKeys:
             )
 
     def test_dm3520_master_id_equal_to_own_can_id_is_rejected(self) -> None:
-        """出荷値のまま (ESC_ID == MST_ID) 残った個体も拒否する。
-
-        DM3520 の出荷値は 2 台とも ESC_ID == MST_ID。ESC_ID だけ書き換えて
-        MST_ID を書き換え忘れた個体がそのまま config に混ざる事故を検出する。
-        """
         with pytest.raises(ValueError, match="master_id"):
             load_robot_config(
                 _robot(
@@ -576,11 +481,6 @@ class TestDriverSpecificKeys:
             )
 
     def test_dm3520_master_id_colliding_on_a_different_bus_is_accepted(self) -> None:
-        """バスが違えば下位 8bit が一致しても衝突ではない。
-
-        フレームは同じ物理バスに繋がったノードにしか届かないため、他バスの
-        can_id とたまたま一致しても無害 (過剰検出で無関係な構成まで拒否しない)。
-        """
         config = load_robot_config(
             _robot(
                 sub_y_axis={
@@ -653,13 +553,6 @@ class TestDriverSpecificKeys:
         assert config.motors["y_axis_r"].pid == {"kp": 3.0}
 
     def test_pid_null_values_are_kept_for_the_pid_loader(self) -> None:
-        """null は「書きかけの yaml」として `main._load_pid_config` が既定値で補完する。
-
-        `integral_limit` の null だけは「制限なし」の正当な指定だが、他のキーの null も
-        (main 側が既定値へ倒すので) ここでは拒否しない。**値の検査を足しても、この
-        「書きかけを許す」性質だけは残す** —— 機構調整中に 1 行コメントアウトしただけで
-        実機が起動しなくなると、動作確認そのものができない。
-        """
         config = load_robot_config(
             _robot(
                 y_axis_r={
@@ -675,13 +568,6 @@ class TestDriverSpecificKeys:
         assert config.motors["y_axis_r"].pid == {"kp": None, "integral_limit": None}
 
     def test_non_numeric_pid_value_is_rejected(self) -> None:
-        """数値でない pid 値を既定値へ黙って倒さず、起動を拒否する。
-
-        かつては `main._load_pid_config` が警告 1 行で既定値へ倒して起動を続けていた。
-        `pid.kd` は `motion.velocity_ff` と対に保つ値なので (CLAUDE.md)、黙って既定値へ
-        化けると症状は「飽和率だけ上がって速くならない」だけになり、config を読んでも
-        原因が見えない。
-        """
         with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kp"):
             load_robot_config(
                 _robot(
@@ -696,11 +582,6 @@ class TestDriverSpecificKeys:
             )
 
     def test_bool_pid_value_is_rejected(self) -> None:
-        """bool は int の派生なので `float(True) == 1.0` になってしまう。
-
-        `pid.kp: true` は誤記であって 1.0 の指定ではない。既定値へ倒す手当てでは
-        捕まらない (float() が例外を投げないので警告すら出ず、1.0 として静かに効く)。
-        """
         with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kp"):
             load_robot_config(
                 _robot(
@@ -715,12 +596,6 @@ class TestDriverSpecificKeys:
             )
 
     def test_non_finite_pid_value_is_rejected(self) -> None:
-        """`.inf` / `.nan` は yaml が float として読み、`float()` 変換も例外を投げない。
-
-        「数値でなければ既定値へ」という手当てをすり抜けて `kp: .inf` がそのまま
-        有効なゲインとして起動していた (警告 0 件)。**PID ゲインを実行中に差し替える
-        経路は無い**ので (CLAUDE.md)、ここを通った値を後段で止める層はどこにも無い。
-        """
         with pytest.raises(ValueError, match=r"motors\.y_axis_r\.pid\.kd"):
             load_robot_config(
                 _robot(
@@ -736,13 +611,6 @@ class TestDriverSpecificKeys:
 
 
 class TestMotorCheckIsNotAMotorSetting:
-    """モータごとの動作確認設定は無くなった。
-
-    両ハンドを 1 本のシーケンスで駆動する形 (sequences/motor_check.py) へ変えたので、
-    確認は運用と同じ位置名へ動かす。**確認専用の駆動量が存在しない**ため、
-    位置定数と食い違いようがない。書いてあったら起動時に落とす。
-    """
-
     def test_motor_check_key_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="motor_check"):
             load_robot_config(
@@ -751,8 +619,6 @@ class TestMotorCheckIsNotAMotorSetting:
 
 
 class TestShippedConfigs:
-    """同梱 config が新しいスキーマを満たすこと (会場で読む設定なので必ず検証する)。"""
-
     def _system(self):
         return load_system_config(
             yaml.safe_load((_CONFIG_DIR / "system.yaml").read_text()), source="system.yaml"
@@ -786,25 +652,18 @@ class TestShippedConfigs:
         assert config.motors
 
     def test_shared_sections_are_not_duplicated_in_robot_yaml(self) -> None:
-        """A10: 書いても効かない共通設定が robot yaml に残っていないこと。"""
         for name in ("main_hand.yaml", "sub_hand.yaml"):
             raw = yaml.safe_load((_CONFIG_DIR / name).read_text())
 
             assert {"health", "motor_check", "can_buses", "match"} & set(raw) == set()
 
     def test_every_bus_alias_maps_to_a_defined_interface(self) -> None:
-        """バス別名の実インタフェース名は can_buses.yaml に定義済みのものであること。
-
-        ここが typo すると SocketCAN のインタフェースが存在せず、実機では起動時に
-        全モータが繋がらない (dry-run では virtual バスが何でも受けるため気付けない)。
-        """
         system = self._system()
         defined = set(yaml.safe_load((_CONFIG_DIR / "can_buses.yaml").read_text())["buses"] or {})
 
         assert set(system.can_buses.values()) <= defined
 
 
-#: 机上ベンチの config セット。追加したらここへ 1 行足せば 3 種類の検証が全部かかる
 _BENCH_DIRS = (
     "m3508",
     "edulite",
@@ -817,20 +676,12 @@ _BENCH_DIRS = (
     "y_axis_tuning",
 )
 
-#: 自分の robot yaml / positions を持たず、本番 config (config/<値>.yaml,
-#: config/<値>_positions.yaml) をそのまま使うベンチセット。
-#: main_hand は実機が完成して実測値が本番 config へ移ったことで、bench 側に
-#: あった robot yaml (本番と完全一致) と positions (仮値のコピー) が
-#: 二重管理の複製でしかなくなったため削除した。ここへ載せないセットは従来どおり
-#: bench_dir 内の robot yaml / positions を要求する
-#: (test_bench_config_set_loads / test_bench_opens_only_the_buses_on_the_desk が見る)。
 _BENCH_USES_PRODUCTION_CONFIG: dict[str, str] = {
     "main_hand": "main_hand",
 }
 
 
 def _bench_robot_yaml_path(bench: str, bench_dir: pathlib.Path) -> pathlib.Path:
-    """このベンチセットが読む robot yaml のパス。"""
     production_robot = _BENCH_USES_PRODUCTION_CONFIG.get(bench)
     if production_robot is not None:
         return _CONFIG_DIR / f"{production_robot}.yaml"
@@ -845,11 +696,6 @@ def _bench_robot_yaml_path(bench: str, bench_dir: pathlib.Path) -> pathlib.Path:
 
 
 def _bench_positions_path(bench: str, bench_dir: pathlib.Path, robot_name: str) -> pathlib.Path:
-    """このベンチセットが読む位置定数 yaml のパス。
-
-    本番 config を使うセットは main.py の _positions_path と同じ規則
-    (robot yaml と同じディレクトリの <robot_name>_positions.yaml) を本番側でたどる。
-    """
     if bench in _BENCH_USES_PRODUCTION_CONFIG:
         return _CONFIG_DIR / f"{robot_name}_positions.yaml"
 
@@ -857,30 +703,7 @@ def _bench_positions_path(bench: str, bench_dir: pathlib.Path, robot_name: str) 
 
 
 class TestShippedBenchConfigs:
-    """机上ベンチ用の config セット (config/bench/<対象>/) も同じスキーマで読めること。
-
-    **ベンチ config は誰も検証していなかった。** 本番の config は
-    TestShippedConfigs が守っているが、bench/ はスキーマを変えても壊れたことに
-    気付けない —— 気付くのは机上に基板を並べた当日で、しかも症状は
-    「起動しない」だけになる。実機が来る日は試合前で、そこで config の書き直しを
-    始める余裕は無い。
-
-    9 セットとも「system / robot / positions / checklist が揃っていて読める」ことだけを
-    見る。値そのものは対象ごとに違ってよい (それが分ける理由なので)。
-    **robot yaml / positions が bench_dir に無いセットは `_BENCH_USES_PRODUCTION_CONFIG`
-    に載っていて本番 config を指す** —— 黙って検証を素通りさせると、他のセットで
-    誤って config を消したときに検出できなくなるため、どちらの構成であるかを
-    宣言させている (`test_every_shipped_bench_dir_is_covered` の穴と同じ理由)。
-    """
-
     def test_every_shipped_bench_dir_is_covered(self) -> None:
-        """同梱の bench ディレクトリが漏れなく _BENCH_DIRS に載っていること。
-
-        _BENCH_DIRS は手書きの一覧なので、セットを 1 つ足して**ここへ書き足し忘れると
-        その 1 セットだけ誰も検証しない**。しかも症状は「テストは全部緑」なので、
-        気付くのは机上に基板を並べた当日になる (このクラスを置いた理由と同じ穴が、
-        一覧の側に開く)。
-        """
         shipped = {path.name for path in (_CONFIG_DIR / "bench").iterdir() if path.is_dir()}
 
         assert shipped == set(_BENCH_DIRS)
@@ -903,9 +726,6 @@ class TestShippedBenchConfigs:
 
         assert config.motors
 
-        # 位置定数は「robot config と同じディレクトリの <robot_name>_positions.yaml」を読む
-        # (main.py の _positions_path)。名前がずれると本番の位置定数が読まれてしまい、
-        # **机上に無い軸へ指令が飛ぶ**
         positions_path = _bench_positions_path(bench, bench_dir, config.robot_name)
         assert positions_path.exists(), f"{positions_path} がありません"
 
@@ -913,19 +733,11 @@ class TestShippedBenchConfigs:
             yaml.safe_load(positions_path.read_text()), source=str(positions_path)
         )
 
-        # 登録したモータはすべて位置定数から指令できること。
-        # 片方だけ足すと「UI には出るのに動かせないモータ」になる
         axis_motors = {name for axis in table.axes for name in table.axis(axis).motor_names}
         assert set(config.motors) == axis_motors
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
     def test_bench_checklist_uses_a_known_role(self, bench: str) -> None:
-        """チェックリストのロールが ALL_ROLES に含まれること。
-
-        知らないロール名で書いた項目はどこにも読み込まれない。しかも定義の無い
-        ロールは「完了」とみなされるので、**指差喚呼を 1 項目も踏まないまま
-        試合フェーズへ入れてしまう**。
-        """
         bench_dir = _CONFIG_DIR / "bench" / bench
         checklist = yaml.safe_load((bench_dir / "checklist.yaml").read_text())["checklists"]
 
@@ -934,18 +746,6 @@ class TestShippedBenchConfigs:
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
     def test_bench_opens_only_the_buses_on_the_desk(self, bench: str) -> None:
-        """ベンチが開くバスは、そのセットで使うものだけであること。
-
-        main.py の _setup_robot() は can_buses に並んだバスを**すべて** socketcan で
-        open するため、机上に挿していない CANable が 1 本でも書いてあると
-        [Errno 19] No such device で起動そのものが落ちる。
-
-        **`sensors:` のバスも数える。** かつてはモータのバスしか見ておらず、
-        センサだけが載るバスを開くセット (`sub_hand_homing`) が書けなかった。
-        逆向きの穴も同時に塞がる —— センサを `can_buses` に無いバスへ書くと、
-        受信ループがそのフレームを 1 通も取り込まないまま「接触しないスイッチ」
-        になり、症状は配線不良と区別が付かない。
-        """
         bench_dir = _CONFIG_DIR / "bench" / bench
 
         system = load_system_config(
@@ -961,17 +761,10 @@ class TestShippedBenchConfigs:
 
 
 def test_driver_types_match_the_driver_map() -> None:
-    """スキーマが許すドライバ種別と実装クラスの対応表がずれていないこと。
-
-    片方だけ増えると「検証は通るのに生成できない」または「生成できるのに書けない」
-    ドライバができる。
-    """
     assert set(DRIVER_TYPES) == set(main._DRIVER_MAP)
 
 
 class TestExpectedInfoValues:
-    """INFO と突き合わせる期待値の検証 (仕様書 §3.4 / §7.7)。"""
-
     def _load(self, **extra: object):
         raw = _robot(gripper=_generic(can_id=0x40, control_type="position", **extra))
         return load_robot_config(raw, source="test.yaml", buses=_BUSES)
@@ -982,17 +775,11 @@ class TestExpectedInfoValues:
         assert motor.expected_angle_range_deg == pytest.approx(270.0)
 
     def test_omitted_values_stay_none(self) -> None:
-        """書かない軸は照合しない (既存 config をそのまま起動できる)。"""
         motor = self._load().motors["gripper"]
         assert motor.expected_firmware is None
         assert motor.expected_angle_range_deg is None
 
     def test_angle_range_rejected_on_duty_axis(self) -> None:
-        """**角度を持たない基板に書けると「書いたのに効かない設定」になる。**
-
-        DC 基板と電磁弁基板は可動レンジを申告しないので、照合は永久に
-        「申告なし」と判定し続け、そのモータは起動直後から FAULT のまま復帰しない。
-        """
         raw = _robot(
             conveyor=_generic(can_id=0x80, control_type="duty", expected_angle_range_deg=270.0)
         )
@@ -1008,7 +795,6 @@ class TestExpectedInfoValues:
             self._load(expected_firmware=256)
 
     def test_expected_keys_rejected_on_other_drivers(self) -> None:
-        """M3508 に書いても効かないので、混在は起動時に弾く。"""
         raw = _robot(
             y_axis_r={
                 "driver": "m3508",
@@ -1022,17 +808,7 @@ class TestExpectedInfoValues:
 
 
 class TestSensorExpectedFirmware:
-    """センサスロットにも期待ファーム版を書ける (仕様書 §3.4 / §5.2)。
-
-    自作基板は 1 スロット = 1 CAN デバイスで、センサスロットも自分のデバイス ID で
-    `INFO` を送る。**書けないと、センサだけを載せた基板は照合対象を 1 つも持たない。**
-    サーボ基板の 5 スロットを全てセンサへ回すと、その基板の焼き忘れ検出はまるごと
-    消え、旧ファームのままのスロットは「スイッチを押してもセンサ入力ビットが
-    立たない」という配線不良と区別の付かない形でしか現れない。
-    """
-
     def _load(self, **extra: object):
-        # モータ 0 台の robot yaml は別の理由で拒否されるので 1 台だけ添える
         raw = _robot(gripper=_generic(can_id=0x40))
         raw["sensors"] = {"origin_sensor": {"bus": "generic_bus", "can_id": 0x44, **extra}}
         return load_robot_config(raw, source="test.yaml", buses=_BUSES)
@@ -1042,20 +818,12 @@ class TestSensorExpectedFirmware:
         assert sensor.expected_firmware == 6
 
     def test_omitted_value_stays_none(self) -> None:
-        """書かない構成は照合しない (既存 config をそのまま起動できる)。"""
         assert self._load().sensors["origin_sensor"].expected_firmware is None
 
     def test_firmware_out_of_uint8_rejected(self) -> None:
-        """範囲検査はモータと同じ関数を通る (書き写すと片方だけ緩む)。"""
         with pytest.raises(ValueError, match="expected_firmware"):
             self._load(expected_firmware=256)
 
     def test_angle_range_rejected_on_sensor(self) -> None:
-        """**センサスロットは角度を持たない。**
-
-        ファームは `INFO` に可動レンジを載せないので、書けてしまうと「測ったように
-        見える期待値」が config に置ける。しかも照合は永久に「申告なし = 焼き忘れ」
-        と判定し続け、正しく焼いた基板が起動直後から FAULT のまま復帰しない。
-        """
         with pytest.raises(ValueError, match="expected_angle_range_deg"):
             self._load(expected_angle_range_deg=270.0)

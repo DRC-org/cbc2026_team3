@@ -12,7 +12,6 @@ interface SequenceStepListProps {
   stepIndex: number;
   waitingTrigger: boolean;
   onJump: (index: number) => void;
-  /** 試合中以外はステップジャンプを禁止する (サーバー側でも拒否される) */
   disabled?: boolean;
 }
 
@@ -30,7 +29,6 @@ function classifyStep(
   return "future";
 }
 
-// 状態別の左端マーカー。done=済 / current=実行中 / waiting=許可待ち / future=未到達。
 const STEP_MARKER = {
   done: Check,
   current: ChevronRight,
@@ -45,7 +43,6 @@ const STEP_TONE_CLASS: Record<StepKind, string> = {
   future: "",
 };
 
-// 実行位置の行だけ左端にカラーバーと薄い地色を敷き、一覧の中で現在地を見失わせない。
 const STEP_ACTIVE_CLASS: Record<StepKind, string> = {
   done: "",
   current: "border-l-info bg-base-200 font-medium",
@@ -63,8 +60,6 @@ export function SequenceStepList({
   const [pendingIndex, setPendingIndex] = useState<number | null>(null);
   const currentRef = useRef<HTMLLIElement | null>(null);
 
-  // 実行位置を常に見える位置へ送る。一覧が縦に収まりきらない機体では、
-  // 進むほど現在地が枠外へ出ていき「今どこか」を一覧から読めなくなる
   useEffect(() => {
     currentRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [stepIndex]);
@@ -117,7 +112,6 @@ export function SequenceStepList({
                   {i + 1}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{step.label}</span>
-                {/* 許可待ちで止まるステップは事前に見えている必要がある */}
                 <span className="w-4 shrink-0">
                   {step.require_trigger ? (
                     <Icon as={Hand} className="text-[0.9em] text-base-content/50" />

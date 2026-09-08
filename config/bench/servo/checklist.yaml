@@ -1,29 +1,9 @@
-# サーボ基板単体ベンチ (機構未装着) の確認項目。
-#
-# 本番の config/checklist.yaml は y_axis / rotate / conveyor など、この基板に存在しない
-# 機構の確認を求めるためそのままでは使えない。
-#
-# 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもサーボは動かせる
-# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
-# ベンチで通電前に確認したいことを操縦者の画面に並べておくために置いている。
-#
-# **この基板は DC 基板と違って位置を報告できる**ので、回ったかどうかは動作確認
-# (motor_check) で自動判定できる。ここの目視項目が担うのは、自動判定では分からない
-# こと — 向き・可動範囲の端・緊急停止時に脱力しないこと — に絞ってある。
-#
-# **基板番号 0 として使う前提の一覧。** 基板番号 1 は SV0 しか駆動できず
-# (firmware/servo/include/config.h の kServoBoards[])、SV1 以降が無応答なのを
-# 故障と区別できないため、ベンチは DIP 全 OFF で回す。
-
 checklists:
   pre_match:
     - id: bench_bus_up
       label: can_generic が up していること確認 (ip -br link show)
     - id: bench_firmware
       label: 基板の RGB LED が緑の点滅 (平常) であること確認。赤の速い点滅は CAN 不通か DIP 未設定
-    # 0x344 (SV4) は届かない。**その 1 本だけファームが Unused として宣言している**
-    # ため (本番で y_axis の原点スイッチに充てるスロット。スイッチ未装着のあいだの
-    # 措置)、Unused のスロットは FEEDBACK も INFO も 1 通も送らない。
     - id: bench_device_id
       label: candump can_generic に 0x340-0x343 が届いていること確認 (DIP 全 OFF = 基板番号 0)
     - id: bench_free

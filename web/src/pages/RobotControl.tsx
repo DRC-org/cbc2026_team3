@@ -14,7 +14,6 @@ import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { cx } from "@/lib/cx";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
@@ -29,15 +28,10 @@ interface RobotControlProps {
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
   const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
-  // この画面が送るものは**すべて** `sendOrReport` を通る。素の `send` を持ち出すと、
-  // 戻り値を捨てる書き方が 1 経路だけ混ざっても気付けない
   const { sendOrReport } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
 
-  // **主操作は戻り値を捨てない。** 切断中の `send` は false を返して黙るので、
-  // 捨てると「押したのにボタンは有効なまま・機体は動かない・トーストも出ない」になる。
-  // 試合中に最も多く押す NEXT を含む全操作がその形だった
   const handleTrigger = () => sendOrReport({ type: "trigger", robot: robotKey }, "トリガー");
   const handleJump = (stepIndex: number) =>
     sendOrReport(
@@ -49,11 +43,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     sendOrReport({ type: "sequence_start", robot: robotKey }, "シーケンス開始");
   const handleMode = (mode: OperationMode) =>
     sendOrReport({ type: "set_operation_mode", robot: robotKey, mode }, "操作モードの切り替え");
-  // 可否の判定は持たない。押せば送るだけで、拒否はサーバーが理由付きで返す
   const handleReenergize = () =>
     sendOrReport({ type: "reenergize_motors", robot: robotKey }, "再励磁");
 
-  // シーケンス操作が許されるのは試合中のみ (サーバー側のフェーズゲートと対応)
   const inMatch = isDuringMatch(matchState.phase);
   const setupPhase = isSetupPhase(matchState.phase);
   const blockedLabel =
@@ -62,45 +54,17 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       : matchState.phase === MALFORMED
         ? "フェーズ不明"
         : "準備中";
-  // 可否の正はサーバーだが、切断中は届かないので画面側でしか分からない。
-  // 塞がずに押させると「押したのに何も起きない」だけが操縦者に残る
   const sequenceBlockedReason = connected ? null : "切断中のため送信できません";
 
-  // 実行状態はサーバー配信の running が唯一の根拠。step_index からの推測をしない
   const kind = state ? sequenceKind(state) : null;
 
-  /**
-   * ステップ一覧を押せない理由。null なら押せる。
-   *
-   * **可否と案内文をここ 1 つで決める。** 別々に書くと「押せないのに
-   * 『クリックで再開』と案内し続ける」状態が作れる。一覧の行は素の
-   * `<button disabled>` で `disabled:cursor-not-allowed` 以外に見た目が変わらないので、
-   * 操縦者からは「押したのに反応しない」＝故障と区別が付かない。
-   * **案内文はこの理由そのもので、null なら何も描かない** —— 押せるときの案内は
-   * 押せば分かることを毎試合読ませるだけの面積なので、出す文言は別に持たない。
-   *
-   * **駆動中を塞ぐ理由**はジャンプの確認が全画面オーバーレイのモーダルだから
-   * (開いているあいだヘッダーの EMG STOP がクリックできない)。
-   * **トリガー待ちは塞がない** —— `require_trigger` で止まっている間、機体は
-   * 動いていない。そこは再開ステップを選ぶ本来の場面である
-   * (`sequenceKind` は `waiting_trigger` を `running` より先に判定する)。
-   */
   const stepJumpBlockedReason =
     sequenceBlockedReason ??
     (!inMatch ? "試合中のみ操作可" : kind === "running" ? "停止してから選択" : null);
 
-  // 操作モードもサーバーが正。配信を受け取るまでは半自動として描く
-  // (機体を直接動かせる状態を、確証のないまま画面へ出さない)
   const manual: ManualState = state?.manual ?? { mode: "sequence", axes: [] };
   const inManual = manual.mode === "manual";
 
-  // 可否の正はサーバー (lib/commands.py) で、ここは押す前に理由を出すだけ。
-  // **フェーズでは塞がない** — 調整は準備中に、シーケンスからの退避は試合中に要る。
-  //
-  // **モード切替と手動指令は別の理由で塞がる。** サーバーは切替 (機体を動かさない) を
-  // 緊急停止中も通し、指令 (目標値を送る) だけを塞ぐ。ここを 1 つにまとめると、
-  // サーバーが受け付ける操作を画面が殺す — 停止中に手動へ寄せて解除と同時に
-  // 動かす、という手順が取れなくなる
   const modeBlockedReason = connected ? null : "切断中のため切り替えできません";
   const manualBlockedReason = !connected
     ? "切断中のため操作できません"
@@ -108,15 +72,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       ? "緊急停止中は手動操縦できません"
       : null;
 
-  /**
-   * START が「先頭へ戻して全工程を走り直す」意味になっているか。
-   *
-   * `sequence_stop` は `step_index` を保持したまま降りるので、画面は中断位置を
-   * 出したまま START を差し出す。そこで押すと中断姿勢のまま先頭の動作が走る ——
-   * `sequence_jump` (同じ「任意ステップから再開」) が確認を挟むのに、より危険な
-   * こちらだけが素通しだった。**Space も同じ経路を通す** (キー 1 打で全工程が
-   * 走り出す方が、ボタンより危ない)。
-   */
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
   const requestStart = () => {
     if (needsRestartConfirm) setRestartConfirmOpen(true);
@@ -127,10 +82,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     handleStart();
   };
 
-  // Space に主操作を集約する。ルーターは表示中のタブしか描画しないので、
-  // 表示中のロボットにだけ届く。トリガー待ちなら NEXT、待機中なら START に解決する
-  // 手動モード中は無効化する。誤爆した Space が sequence_start になると、
-  // 手動で機構を動かしている最中にシーケンスが走り出す
   useHotkeys(
     {
       " ": () => {
@@ -152,22 +103,16 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     );
   }
 
-  // モード帯はどのフェーズでも同じ位置に出す。「今この画面から機体を直接
-  // 動かせるか」は、準備中も試合中も同じ場所で読めなければならない。
-  //
-  // 総ステップ数を準備中にしか渡さないのは、試合中は `ActionPanel` が `1/22` の
-  // 形で同じ数を出しているため (同じ事実を 2 度描かない)
   const modeSwitch = (
     <ModeSwitch
       mode={manual.mode}
       onChange={handleMode}
       blockedReason={modeBlockedReason}
       sequenceName={state.sequence}
-      totalSteps={setupPhase ? state.total_steps : null}
+      totalSteps={setupPhase && inManual ? state.total_steps : null}
     />
   );
 
-  // 手動の操作面。半自動側の主役 (動作確認 / ActionPanel) と同じ列を占める
   const manualPanel = (
     <ManualPanel
       robotKey={robotKey}
@@ -177,23 +122,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     />
   );
 
-  /**
-   * 機体状態のパネル。**既定の開閉だけが役割で違う。**
-   *
-   * 準備中は配線確認が目的のフェーズなので開いた状態から始め、試合中は
-   * 平常時 1 行へ畳む (操縦者は機体を見ており、画面へ視線を戻すのは一瞬しかない)。
-   * ただし手動中は畳まない —— 機体を直接動かしている最中は、その前提が成り立たない。
-   *
-   * `className` に渡してよいのは主軸 (縦) の伸長指定だけ。flex-col の子へ
-   * `self-start` のようなクロス軸の指定を足すと幅が `fit-content` へ落ち、
-   * 診断ツリーが列の幅を無視して縮む / 溢れる。
-   *
-   * **試合中の右カラムでは、このパネルが縮む側を引き受ける。** 隣の試合時間は
-   * `shrink-0` で潰れないので、強制展開で列の高さを超えたぶんはここが吸って
-   * 内部のスクロール (モータ一覧) へ落ちる —— 縮めるための `min-h-0` は
-   * `Panel` が最初から持つ。**`flex-1` は付けない**: 中身が数行しかない
-   * 平常時に全高の白い箱になる。
-   */
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
       <SubsystemStatus
@@ -209,44 +137,44 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     </Panel>
   );
 
-  // --- セッティングタイム -------------------------------------------------
-  // 指差喚呼と動作確認は Monitor の設定面へ移した。指差喚呼は操縦者 2 名が
-  // 同じ場所に立つので二度読み上げになっていたため、動作確認は両ハンドを 1 本の
-  // シーケンスで駆動するので機体ごとの入口が意味を失ったため。
-  // ここに残るのは手動操縦と、その手元で見る機体状態。
+  const stepPanel = (
+    <Panel
+      legend="ステップ"
+      className="min-h-0 flex-1"
+      bodyClassName="p-0"
+      actions={
+        stepJumpBlockedReason ? (
+          <span className="text-[0.85em] text-base-content/60">{stepJumpBlockedReason}</span>
+        ) : null
+      }
+    >
+      <SequenceStepList
+        steps={state.steps ?? []}
+        stepIndex={state.step_index}
+        waitingTrigger={state.waiting_trigger}
+        onJump={handleJump}
+        disabled={stepJumpBlockedReason !== null}
+      />
+    </Panel>
+  );
+
   if (setupPhase) {
+    const openSubsystemPanel = subsystemPanel(true, "min-h-0");
     return (
       <Page className="flex flex-col">
         {modeSwitch}
-        <div
-          className={cx(
-            "grid min-h-0 flex-1 gap-2",
-            // 手動中だけ操作面のために左列を開ける。半自動の準備中はこの画面に
-            // 操作が無いので、参照面を 1 列に広げる
-            inManual ? "grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)]" : "grid-cols-1",
-          )}
-        >
-          {inManual ? manualPanel : null}
-
-          {/* シーケンス名と総ステップ数はモード帯が持つ。1 行の事実にパネル枠
-              1 つぶんの縦を払わない */}
-          {subsystemPanel(true, "min-h-0")}
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
+          {inManual ? manualPanel : openSubsystemPanel}
+          {inManual ? openSubsystemPanel : stepPanel}
         </div>
       </Page>
     );
   }
 
-  // --- 試合中 / 試合終了 --------------------------------------------------
-  // 操縦者は機体を見ている。画面へ視線を戻すのは一瞬で、答えるべき問いは
-  // 「今 NEXT を押すのか」「押すと何が起きるか」の 2 つだけ。
-  // 左を操作面、右を参照面に割り切り、参照面の診断は平常時 1 行へ畳む。
   return (
     <Page className="flex flex-col">
       {modeSwitch}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
-        {/* 左は操作面。主役を内容ぶんの高さに留め、余った縦はステップ一覧へ渡す。
-            手動中はここを手動パネルへ明け渡す — 同じ列に 2 つの操作面が並ぶと、
-            どちらの指令が機体へ届くのかが画面から読めなくなる */}
         {inManual ? (
           manualPanel
         ) : (
@@ -261,36 +189,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               onTrigger={handleTrigger}
             />
 
-            <Panel
-              legend="ステップ"
-              className="min-h-0 flex-1"
-              bodyClassName="p-0"
-              // 出すのは**塞がれている理由**だけ。操作できるときの案内 (「クリックで
-              // 再開」) は、押せば分かることを毎試合読ませるだけの面積になる
-              actions={
-                stepJumpBlockedReason ? (
-                  <span className="text-[0.85em] text-base-content/60">
-                    {stepJumpBlockedReason}
-                  </span>
-                ) : null
-              }
-            >
-              <SequenceStepList
-                steps={state.steps ?? []}
-                stepIndex={state.step_index}
-                waitingTrigger={state.waiting_trigger}
-                onJump={handleJump}
-                // 可否と、その理由の案内文は同じ `stepJumpBlockedReason` から出す
-                // (駆動中に塞ぐ理由・トリガー待ちを塞がない理由はそちらの docstring)
-                disabled={stepJumpBlockedReason !== null}
-              />
-            </Panel>
+            {stepPanel}
           </div>
         )}
 
-        {/* 右は参照面。試合時間は操作面へ置かない — 主操作 (ActionPanel) の位置は
-            状態によって動かさない約束なので、上に何かを積むと押す前に探し直しになる。
-            診断は平常時 1 行に畳み、異常が出たときだけ自分から開く */}
         <div className="flex min-h-0 flex-col gap-2">
           <MatchTimer timer={matchState.timer} />
 
@@ -298,10 +200,6 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         </div>
       </div>
 
-      {/* 中断位置から押した START の確認。**モーダルの中身は「押すと何が起きるか」**
-          を書く場所で、ここでは「先頭へ戻る」ことと「中断姿勢のまま先頭の動作が走る」
-          ことがそれに当たる。**途中から再開したいときの導線もここで示す** —
-          示さないと、操縦者は他に手が無いと思って全工程のやり直しを選ぶ */}
       <Modal
         open={restartConfirmOpen}
         onClose={() => setRestartConfirmOpen(false)}

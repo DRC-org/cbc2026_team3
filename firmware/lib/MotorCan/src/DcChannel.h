@@ -1,21 +1,3 @@
-// DC モータ 1 チャンネル分の「安全機構 + duty 目標」の結線。
-//
-// サーボ用の ServoChannel と同じ役割で、両者が同じ規則を持つことを保証するために
-// 存在する。安全機構（MotorSafety）と目標値を別々に main.cpp が持つと、両者をどう
-// 組み合わせるかがペリフェラルに埋まって native テストが 1 件も掛からない。実際
-// サーボ側では「緊急停止ラッチ中でも SET_TARGET が通り、ラッチ中にサーボが動く」
-// バグがその形で出た。
-//
-// この 3 つを組み合わせる規則はここだけが持つ。
-//   - 出力が許可されていない間は新しい duty 指令を受け付けない
-//   - 停止時は目標そのものを 0 に落とす（仕様書 §3.5: 解除した瞬間に動き出さない）
-//   - 受理する制御タイプは duty だけ（仕様書 §4）
-//
-// DC 基板はエンコーダを持たないので ServoChannel のような補間・到達推定は無い。
-// duty をそのまま出力段へ渡すだけで、位置・速度・電流の観測値も存在しない。
-//
-// Arduino.h を include しないのは意図的で、native 環境でそのままテストできるようにするため。
-
 #pragma once
 
 #include <stdint.h>
@@ -29,20 +11,12 @@ class DcChannel {
    public:
     explicit DcChannel(uint32_t commandTimeoutMs);
 
-    // ---- 安全機構（仕様書 §5.1 / §5.2）----
-
-    // 自分宛の SET_TARGET を受信したときに呼ぶ。制御タイプが duty でなくても、
-    // 緊急停止ラッチ中でも呼ぶこと（仕様書 §6: 通信自体は生きている）。
     void feed(uint32_t nowMs);
 
-    // E_STOP フレームを解釈する。停止でも解除でも目標 duty を 0 へ落とす（§3.5）。
     EStopAction handleEStopFrame(const uint8_t *data, uint8_t length);
 
-    // CAN が上がらなかったときなど、PC から止められない状態で駆動させないための停止。
     void stop();
 
-    // 基板上の物理緊急停止入力（REF）。押下でラッチし、離しても自動復帰しない。
-    // 判断は MotorSafety::applyPhysicalStop が持つ。
     void applyPhysicalStop(bool active);
 
     void setWatchdogEnabled(bool enabled);
@@ -51,43 +25,16 @@ class DcChannel {
 
     bool isOutputAllowed(uint32_t nowMs) const;
 
-    // FEEDBACK Byte0 の緊急停止 / ウォッチドッグのビット（他は呼び出し側で OR する）。
     uint8_t safetyStatusFlags(uint32_t nowMs) const;
 
-    // ---- 目標 duty（仕様書 §4 / §5.3）----
-
-    // 自分宛の SET_TARGET 1 通をそのまま渡す。**受理できる制御タイプの判定はここが
-    // 唯一の持ち主**（仕様書 §4: duty のみ。position の 90.0[deg] を duty として
-    // 解釈すると 9000% の全力指令になる）。main.cpp 側で判定すると、ペリフェラルの
-    // 翻訳単位は native テストの対象外（common.ini の `test_ignore = *`）なので、
-    // その 1 行を消しても全ケース緑のままになる。
-    // **feed() を先に呼ぶこと**（§6: 受理できないタイプでも通信自体は生きている）。
     bool applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs);
 
-    // 出力が許可されていない間は受け付けず false を返す。受け付けると、PC が
-    // §5.1 の契約どおり再送している間ずっとラッチ中の目標が更新され続け、
-    // 解除した瞬間にその duty で回り出す。**feed() を先に呼ぶこと**（起動直後は
-    // §5.4 により未受信＝出力禁止なので、順序を逆にすると最初の 1 通を捨てる）。
     bool setDuty(float duty, uint32_t nowMs);
 
-    // シリアルデバッグの 's' 等、その場で止めたいとき。
     void hold();
 
-    // 出力が許可されていない周期のあいだ、目標そのものを畳む。**毎ループ呼ぶ。**
-    //
-    // `outputDuty()` は出力禁止中に 0 を返すだけで `duty_` を残すので、これが無いと
-    // ウォッチドッグ満了や緊急停止で止まった後に「受理できない `SET_TARGET`」
-    // （制御タイプ違い・DLC 不足）が 1 通届いただけで**途絶前の duty が復活する**。
-    // 仕様書 §3.1 / §6 のとおり `handleChannelFrame` は受理できないフレームでも
-    // ウォッチドッグを養う（`feed()` が妥当性検査より先）ので、ゲートだけが開く。
-    // 操縦者は何も操作していないのにコンベアが回り出す。
-    //
-    // サーボ基板には元からこの穴が無い（`ServoChannel::tick()` が出力禁止中に
-    // 毎ティック現在角へ畳む）。3 枚で扱いを揃えるためのもの。
     void tick(uint32_t nowMs);
 
-    // 出力段へ渡す duty。出力禁止中は目標に関わらず 0 を返すので、
-    // 呼び出し側が安全機構を迂回する経路を書けない。
     float outputDuty(uint32_t nowMs) const;
 
    private:
@@ -95,4 +42,4 @@ class DcChannel {
     float duty_;
 };
 
-}  // namespace motorcan
+}
