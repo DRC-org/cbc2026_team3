@@ -79,9 +79,9 @@ const STAT_GRID_CLASS = "grid grid-cols-4 gap-1 px-1 text-right";
  * 645px) で 2 行のままだと、24 基のうち 2 基しか画面に入らない —— 展開して
  * いるのに中身が読めない状態になっていた。
  *
- * **Tailwind v4 の任意コンテナクエリは `@min-[…]:`。** v3 プラグインの
- * `@[…]:` は一部のユーティリティだけ CSS が出て残りが黙って落ちる
- * (`@[26rem]:block` は効いたのに `@[26rem]:flex-row` が出力されなかった)。
+ * **任意のコンテナクエリの書式は下の `NAME_COL_CLASS` に倣う** (Tailwind v4 のコア)。
+ * 書式を混ぜないこと。効かないときの調べ方と、**ここへ実例を書き写してはならない理由**
+ * (ビルドが落ちる) は `docs/web/pitfalls.md`。
  */
 // **幅だけを指定する。** `display` を足すと、名前とバッジを両端へ振っている
 // 内側の flex が潰れて 2 段に落ちる (1 行化した意味が消える)
@@ -98,9 +98,9 @@ export function MotorStatHeader({ className }: { className?: string }) {
   return (
     <div className={cx("flex text-[0.8em] text-base-content/60", className)}>
       {/* 1 行表示のときだけ名前列ぶんを空ける。幅は MotorStatus の名前列と対で、
-          ずらすと見出しと数値の桁がすれる。**`hidden` は `@min-[…]:block` で
-          必ず戻すこと** —— 幅だけ足しても display:none のままなので、見出しは
-          名前列ぶん左へ寄り、広いカラムでだけ桁がずれる (名前列に display を
+          ずらすと見出しと数値の桁がすれる。**`hidden` は同じ幅と同じブレークポイントの
+          display 指定で必ず打ち消すこと** —— 幅だけ足しても display:none のままなので、
+          見出しは名前列ぶん左へ寄り、広いカラムでだけ桁がずれる (名前列に display を
           混ぜてはならないのは中に flex を持つ側の話で、空の spacer は別物) */}
       <span className={cx("hidden shrink-0 @min-[32rem]:block", NAME_COL_CLASS)} aria-hidden />
       <div className={cx(STAT_GRID_CLASS, "min-w-0 flex-1")}>
