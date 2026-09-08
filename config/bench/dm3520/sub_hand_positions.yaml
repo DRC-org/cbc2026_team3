@@ -12,7 +12,9 @@
 axes:
   # scale は本番と同じ値をそのまま使う。ここを変えると「ベンチで確かめた指令量」と
   # 「本番で出る指令量」が別物になり、通信確認としての意味が薄れる。
-  #   scale = 2 / (m * z) = 2 / 36 = 0.0555556 [rad / mm]  (モジュール 1 / 歯数 36)
+  #   scale = Gr * 2 / (m * z) = 19.203211 * 2 / 36 = 1.0668451 [rad / mm]
+  #   ピニオンは KHK SS1-36 (モジュール 1 / 歯数 36)。**位置はロータ角 (減速前) なので
+  #   減速比 Gr が scale に現れる。** 2026-09-09 に実測で確定
   #   出力軸 1 回転 = 113.097mm 相当。**減速比はドライバ内部で吸収済み**なので
   #   M3508 の y_axis と違って scale には現れない。
   # 導出と実測での確かめ方は本番の config/sub_hand_positions.yaml に書いてある。
@@ -22,7 +24,7 @@ axes:
   sub_y_axis:
     unit: mm
     command_unit: rad
-    scale: 0.0555556
+    scale: 1.0668451
     offset: 0.0
     timeout_s: 4.0
     # 本番と同じ 1.0mm。ここを緩めるとフィードバックの解釈ミス (p_max のずれ) を
@@ -39,7 +41,7 @@ axes:
   sub_lift:
     unit: mm
     command_unit: rad
-    scale: 0.0555556
+    scale: 1.0668451
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0
