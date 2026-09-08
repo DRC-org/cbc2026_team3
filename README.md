@@ -29,8 +29,8 @@ CAN バスのセットアップ、Web UI のビルド、systemd への配置は
 | 機構が付いた日に埋める値 | [`docs/mechanism_handoff.md`](docs/mechanism_handoff.md) |
 | コマンド・CAN セットアップ・サービス運用 | [`docs/operations.md`](docs/operations.md) |
 | ファームウェアのビルドと書き込み | [`firmware/README.md`](firmware/README.md) |
-| **操縦 UI（`web/`）が今どうなっているか** | [`docs/web/`](docs/web/) — 画面 / 配色・操作 / データの流れ / 罠 の 4 枚 |
-| 操縦 UI の開発（コマンド・ビルド） | [`web/README.md`](web/README.md) |
+| 操縦 UI が今どうなっているか | [`docs/web/`](docs/web/) — 画面・配色・データフロー・罠の 4 枚 |
+| 操縦 UI の開発（コマンドと構成） | [`web/README.md`](web/README.md) |
 | いつ何が起きたか（実機で観測した事象の記録） | [`docs/history/`](docs/history/) — 正ではない |
 
 `docs/architecture.md` と `docs/invariants.md` は対になっている。**構造は architecture、

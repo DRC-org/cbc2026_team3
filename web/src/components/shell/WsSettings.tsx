@@ -14,7 +14,6 @@ const SOURCE_LABEL: Record<WsUrlSource, string> = {
   origin: "配信元と同じ (既定)",
 };
 
-/** 表示中の URL からポートだけ差し替えた候補。dev サーバー経由で開いた時の直結先になる */
 function directTarget(): string | null {
   return normalizeWsUrl(`${window.location.hostname}:8080`);
 }
@@ -27,20 +26,12 @@ function hasQueryOverride(): boolean {
   }
 }
 
-/**
- * WebSocket 接続先の変更ダイアログ。
- *
- * 配信元 ≠ 制御プログラムになる構成（vite dev を Tailscale 経由で開く、
- * 配信済み UI から手元の制御 PC へ繋ぐ、予備機へ切り替える）を、
- * 再ビルドせずに現場で解決できるようにするための逃げ道。
- */
 export function WsSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { wsUrl, wsUrlSource, connected } = useRobotStatus();
   const { setWsUrl, resetWsUrl } = useRobotCommands();
   const [draft, setDraft] = useState(wsUrl);
   const [error, setError] = useState<string | null>(null);
 
-  // 開き直したときと、保存後に正規化された値へ追従させる
   useEffect(() => {
     setDraft(wsUrl);
     setError(null);

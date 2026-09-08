@@ -1,6 +1,6 @@
 # データの流れ — 値がどう届き、どこで判定するか
 
-**「今どうなっているか」だけ。** 理由は `CLAUDE.md`、サーバー側の詳細は `docs/impl_plan.md` の
+**「今どうなっているか」だけ。** 理由は `docs/invariants.md` §8、サーバー側の詳細は `docs/architecture.md` の
 「WebSocket プロトコル」章。画面は `docs/web/screens.md`、罠は `docs/web/pitfalls.md`。
 
 ---
@@ -37,7 +37,7 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 | `state` | ロボット 1 台の全状態（モータ・シーケンス・安全機構・手動・センサ） | 20Hz × 2 台 |
 | `match_state` | フェーズ・コート・指差喚呼・タイマー | 変化時 |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由・除外ステップ | 変化時 |
-| `server_info` | 温度しきい値 2 値・`dev_tools` / `dry_run` フラグ | 接続直後 1 回だけ |
+| `server_info` | しきい値・`dev_tools` フラグ・ロボット一覧 | 接続直後 |
 | `e_stop_state` | 緊急停止の有無と**理由** | 変化時 + 定期再配信 |
 | `health_change` | ヘルス変化（`EventFeed` とトースト） | 発生時 |
 | `command_rejected` | コマンド拒否（トースト） | 発生時 |
@@ -108,7 +108,7 @@ Python 側が**実物の `RobotServer` に配信させたメッセージ**を焼
 | 値 | 意味 | 画面での出方 |
 |---|---|---|
 | `null` | **測る手段が無い**（正当な測定結果） | `—` |
-| `MALFORMED` | 配信が**読めなかった** | 異常側へ倒す。数値欄は `?`、判定は「判定不能」 |
+| `MALFORMED` | 配信が**読めなかった** | 異常側へ倒す。「判定不能」 |
 | `undefined` | まだ**届いていない** | 未取得。異常にしない |
 
 DC 基板・電磁弁基板はエンコーダも電流センスも温度センサも積んでおらず、CAN プロトコルに
@@ -162,7 +162,7 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 | `lib/motorCheckStatus.ts` | 動作確認の完了判定 |
 | `lib/phase.ts` | フェーズによる可否・レイアウト区分。`isDuringMatch()` は `lib/match_state.py` の `PHASES_DURING_MATCH` の写しで、**写しはここだけ** |
 | `lib/checklistGroups.ts` | 指差喚呼の項目をどの区分へ置くか |
-| `lib/syncVerdict.ts` | 左右ペア軸のずれ表示。**`deviation` の `0.0` は「完全に揃っている」という正常な測定値**で、falsy 判定で捨てると最も健全な状態だけが「測れていない」と出る |
+| `lib/syncVerdict.ts` | 左右ペア軸のずれ表示 |
 | `hooks/useRemainingMs.ts` | 試合の残り時間（アンカーと秒境界の起床）。操縦者の `MatchTimer` と Monitor の `MatchStrip` が同じ値を出す |
 
 ### `evaluateHealth` の判定順
@@ -256,10 +256,6 @@ UI から差し替えられる（`WsSettings`）。**接続表示そのものが
   `drc` と `.ts.net` を登録する。既定の localhost bind と Host ヘッダ検査の**両方**が
   Tailscale 経由を塞ぐため。別名は `VITE_ALLOWED_HOSTS`
 - dev では `/ws` を 8080 へプロキシする（中継先は `DEV_WS_TARGET`）
-- **`@cloudflare/vite-plugin` は build / preview でだけ有効**（`command === "build" || isPreview`）。
-  dev サーバーは制御 PC 上のローカル UI 開発専用で Worker ランタイムが要らないので、
-  miniflare (workerd) の起動を省いて起動時間と外部通信への依存をなくす。build / preview で
-  残すのは、デプロイ結果と一致させるため
 
 | 開き方 | URL |
 |---|---|

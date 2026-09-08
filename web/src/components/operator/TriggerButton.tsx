@@ -6,15 +6,12 @@ import { Kbd } from "@/components/ui/Kbd";
 import type { SequenceKind } from "@/lib/sequenceStatus";
 
 interface TriggerButtonProps {
-  /** 実行状態。`step_index` からの推測ではなくサーバー配信の `running` に由来する */
   kind: SequenceKind;
   onTrigger: () => void;
-  /** 試合中以外はサーバー側でも拒否されるため、UI でも押せなくする */
   disabled?: boolean;
   disabledLabel?: string;
 }
 
-// 試合中に最も多く押すボタンなので、視線を戻した瞬間に状態が読めるよう大きく出す
 const FILL_CLASS = "flex h-full w-full items-center justify-center gap-3 text-[1.4em]";
 
 export function TriggerButton({
@@ -32,8 +29,6 @@ export function TriggerButton({
     );
   }
 
-  // シーケンスが 1 件も届いていない状態。最後の return (RUNNING) へ落とすと、
-  // 状態表示と主操作が同じ画面で食い違う
   if (kind === "no_sequence") {
     return (
       <Button disabled className={FILL_CLASS} aria-label="操作不可: シーケンス未取得">
@@ -52,12 +47,6 @@ export function TriggerButton({
     );
   }
 
-  // 待機解除は試合中に最も多く押す操作。ここだけは地をベタ塗りして、
-  // 「今 押すべきボタンはこれ」が周辺視野でも分かるようにする。
-  //
-  // アイコンは START (`Play`) と分ける。両者は同じ位置に同じ大きさで出るので、
-  // 記号まで同じだと色と文字でしか見分けられない —— START は先頭から走り直す操作で、
-  // 押し間違えると中断姿勢のまま全工程が流れる
   if (kind === "waiting_trigger") {
     return (
       <Button

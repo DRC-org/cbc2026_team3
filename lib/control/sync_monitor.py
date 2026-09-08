@@ -19,13 +19,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["DEFAULT_INTERVAL_S", "SyncMonitor"]
 
-# 監視周期 50Hz。機構が壊れる前に止まればよく、位置制御ループの 200Hz は要らない
 DEFAULT_INTERVAL_S = 0.02
 
-# 発報に必要な連続超過サンプル数。1 サンプルの外れ値 (CAN の取りこぼしや
-# フィードバックの量子化ノイズ) で試合中に緊急停止させないためのノイズ対策。
-# 50Hz x 2 サンプル = 40ms なので、機構が破損する前には十分間に合う
-# (層ごとに debounce が違う理由は lib/axis_sync.py のモジュール docstring を参照)
 DEFAULT_VIOLATION_SAMPLES = 2
 
 ViolationHandler = Callable[[str, float], None]
@@ -34,23 +29,6 @@ SleepFunc = Callable[[float], Awaitable[None]]
 
 
 class SyncMonitor(PeriodicTask):
-    """左右直結軸の位置ずれを常駐監視し、超過したら発報する。
-
-    EDULITE 05 は位置ループがドライバ内蔵で PC 側に常駐ループが無く、
-    ``M3508PositionLoop`` のような偏差検知の置き場所が無い。またシーケンス実行中
-    以外 (動作確認中・待機中・手動操作中) にも機構がずれうるため、シーケンスから
-    独立した常駐監視としてここに置く。
-
-    ``y_axis`` は ``M3508PositionLoop`` 側の 200Hz 判定と二重になるが、これは意図的な
-    多重防護である。ループ側は「電流を即 0 にする」局所的な保護、こちらは
-    「試合を止めて人間に知らせる」全体的な保護で役割が違う。
-
-    誤発報の代償が「試合が止まる」ことなので、この層だけ ``violation_samples``
-    による debounce を持つ (3 段の比較は lib/axis_sync.py のモジュール docstring)。
-
-    ライフサイクル (start / stop / 例外時の継続) は ``PeriodicTask`` と共通。
-    """
-
     def __init__(
         self,
         groups: Sequence[SyncGroup],
@@ -65,19 +43,6 @@ class SyncMonitor(PeriodicTask):
         time_source: Callable[[], float] = time.monotonic,
         sleep: SleepFunc = asyncio.sleep,
     ) -> None:
-        """
-        Args:
-            groups: 監視対象の軸 (config の sync_tolerance を持つ軸)
-            drivers: モータ名 → ドライバ。位置は feedback_position() から読む
-            last_feedback_at: モータ名 → 最終受信時刻 (CANManager.last_feedback_at)
-            feedback_timeout_ms: これより古いフィードバックは判定から除外する
-            interval_s: 監視周期 [s]
-            violation_samples: 発報に必要な連続超過サンプル数
-            on_violation: 超過時に呼ぶハンドラ (main.py で緊急停止に接続する)
-            feedback_clock: last_feedback_at と比較する壁時計
-            time_source: 周期とログ間引きに使う単調クロック
-            sleep: 周期待ちに使う関数 (テストで差し替え可能)
-        """
         super().__init__(interval_s=interval_s, time_source=time_source, sleep=sleep, logger=logger)
         self._groups = tuple(groups)
         self._drivers = drivers
@@ -89,13 +54,7 @@ class SyncMonitor(PeriodicTask):
 
         self._counts: dict[str, int] = {}
         self._violated: set[str] = set()
-        # グループ名 -> 一時停止の入れ子段数。0 になった時点で監視へ戻る。
-        # bool で持つと、入れ子になった 2 つのうち内側が抜けた瞬間に監視が戻る
         self._suspended: dict[str, int] = {}
-
-    # ------------------------------------------------------------------ #
-    #  状態
-    # ------------------------------------------------------------------ #
 
     @property
     def group_names(self) -> tuple[str, ...]:
@@ -103,56 +62,18 @@ class SyncMonitor(PeriodicTask):
 
     @property
     def groups(self) -> tuple[SyncGroup, ...]:
-        """監視対象のグループそのもの (読み取り専用)。
-
-        `RobotServer._reenergize_motors` が「無励磁のモータが直結ペアの一員なら
-        相方も対象に含める」判定に使う (`SyncGroup.members` からモータ名を引く)。
-        ペアの片側だけへ効く操作を作らない、という CLAUDE.md の不変条件を
-        再励磁にも適用するための参照であって、書き換えは想定しない。
-        """
         return self._groups
 
     @property
     def violated(self) -> frozenset[str]:
-        """発報済み (ラッチ中) の軸名。"""
         return frozenset(self._violated)
 
     def reset(self) -> None:
-        """ラッチと連続カウントを解除する。
-
-        通す経路は操縦者の緊急停止解除 (``RobotServer._reset_sync_latches``) だけ。
-        これを通らないと軸は ``_violated`` に入ったまま二度と発報せず、以後どれだけ
-        ずれても誰も止められない。解除しても判定は無効化されないため、ずれが
-        残っていれば次のサンプルで再び発報する。
-        """
         self._counts.clear()
         self._violated.clear()
 
     @contextlib.contextmanager
     def suspend_group(self, name: str) -> Iterator[None]:
-        """1 グループの偏差判定だけを一時的に止める。
-
-        通す経路は零点確定 (`CANManager.capture_origin_via_set_zero`) だけ。
-        左右へ `SET_ZERO` を送るあいだ、片方は新原点・もう片方は旧原点で報告するので、
-        直結ペアでは機械ゼロの差がまるごと偏差として現れる (実機の `rotate` は
-        起動直後に 175.879deg を記録している)。CAN 送信 2 通が debounce の
-        40ms 以内に収まる確率へ安全機構を預けるわけにいかない。
-
-        **止めてよい根拠は 2 つある。**
-
-        - 原点の付け替え中は、偏差という量そのものが定義を失う (比較する座標系が
-          2 台で違うので、差を取っても機構のずれを表していない)
-        - その間モータは**無励磁**なので、この保護が防ぐ「押し合い」は原理的に起きない
-
-        **全体 pause にしてはならない。** 零点確定は動作確認の最初のステップで、
-        そのあいだ他の軸も動く。全体を止めると、関係の無いペア軸の保護まで消える。
-
-        再開は `finally` で必ず行う。取りこぼすと、その後の試合中ずっとこのグループの
-        偏差監視が死んだまま残り、しかも画面には何も出ない。
-
-        Raises:
-            KeyError: 監視対象に無いグループ名 (呼び出し側の取り違えを黙って通さない)
-        """
         if name not in self.group_names:
             raise KeyError(f"同期監視は軸 '{name}' を持っていません")
 
@@ -166,24 +87,16 @@ class SyncMonitor(PeriodicTask):
                 self._suspended[name] = depth
             else:
                 self._suspended.pop(name, None)
-                # 停止前に数えた連続超過を持ち越さない。持ち越すと、再開後の
-                # 1 サンプルだけで debounce (2 サンプル) が成立してしまう
                 self._counts[name] = 0
                 logger.info("同期監視を再開 (axis=%s)", name)
 
     def is_suspended(self, name: str) -> bool:
-        """そのグループの判定が一時停止中か。"""
         return self._suspended.get(name, 0) > 0
 
     def _label(self) -> str:
         return f"同期監視 ({', '.join(self.group_names) or '対象なし'})"
 
-    # ------------------------------------------------------------------ #
-    #  監視
-    # ------------------------------------------------------------------ #
-
     def step(self) -> None:
-        """1 周期分の判定を行う。run() から呼ばれるほか、テストから直接駆動できる。"""
         now = self._freshness.now()
         for group in self._groups:
             self._check_group(group, now)
@@ -193,15 +106,11 @@ class SyncMonitor(PeriodicTask):
 
     def _check_group(self, group: SyncGroup, now: float) -> None:
         if self.is_suspended(group.name):
-            # 原点の付け替え中。比較する座標系が 2 台で違うので、差を取っても
-            # 機構のずれを表していない (かつ無励磁なので押し合いも起こらない)
             return
 
         positions = self._fresh_positions(group, now)
         deviation = group.violation(positions)
         if deviation is None:
-            # 許容内、または比較対象が揃わず「ずれている」と言えない状態。
-            # 連続カウントを捨てることで、鮮度が戻ってから 2 サンプル数え直す
             self._counts[group.name] = 0
             return
 
@@ -211,8 +120,6 @@ class SyncMonitor(PeriodicTask):
             return
 
         if group.name in self._violated:
-            # 一度発報した軸で毎周期通知すると緊急停止が連打される。
-            # 復帰は人間が reset() 経路を通ることで明示する
             return
 
         self._violated.add(group.name)
@@ -225,11 +132,6 @@ class SyncMonitor(PeriodicTask):
         self._notify(group.name, deviation)
 
     def _fresh_positions(self, group: SyncGroup, now: float) -> dict[str, float]:
-        """フィードバックが新鮮なメンバの位置だけを集める。
-
-        未受信・途絶したモータを 0 とみなすと、起動直後にいきなり偏差超過と判定して
-        緊急停止してしまう。判定できないものは判定しない方が安全側になる。
-        """
         positions: dict[str, float] = {}
         for member in group.members:
             driver = self._drivers.get(member.name)
@@ -246,5 +148,4 @@ class SyncMonitor(PeriodicTask):
         try:
             self._on_violation(group_name, deviation)
         except Exception:
-            # ハンドラが落ちて監視まで死ぬ方が危険。残りの軸の判定は続ける
             logger.exception("同期ずれハンドラで例外 (axis=%s)", group_name)

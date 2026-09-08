@@ -8,12 +8,6 @@ import {
   useHoldRepeat,
 } from "@/hooks/useHoldRepeat";
 
-/**
- * ジョグの「押している間くり返す」制御。
- *
- * ここで守るのは **止まること**。1 つでも停止経路を取りこぼすと、指を離したのに
- * 機体が動き続ける。押し始めの発火より、停止経路の網羅のほうが重要。
- */
 describe("useHoldRepeat", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -29,7 +23,6 @@ describe("useHoldRepeat", () => {
   it("押した瞬間に 1 回発火する", () => {
     const { fire, handlers } = setup();
     act(() => handlers().onPointerDown());
-    // 単発の操作が待たされてはならない
     expect(fire).toHaveBeenCalledTimes(1);
   });
 
@@ -49,7 +42,6 @@ describe("useHoldRepeat", () => {
     expect(fire).toHaveBeenCalledTimes(1);
   });
 
-  // 停止経路は 1 つでも欠けると「離したのに動き続ける」になる
   it.each(["onPointerUp", "onPointerLeave", "onPointerCancel", "onBlur"] as const)(
     "%s で連続発火が止まる",
     (name) => {
@@ -66,7 +58,6 @@ describe("useHoldRepeat", () => {
   );
 
   it("アンマウントでも止まる", () => {
-    // タブを切り替えただけで送り続けないため
     const { fire, view, handlers } = setup();
     act(() => handlers().onPointerDown());
     act(() => vi.advanceTimersByTime(HOLD_DELAY_MS + HOLD_INTERVAL_MS));
@@ -86,7 +77,6 @@ describe("useHoldRepeat", () => {
   });
 
   it("押している最中に無効化されたら止まる", () => {
-    // 緊急停止・切断・モード離脱。押し始めたときの可否のまま回り続けてはならない
     const { fire, view, handlers } = setup(true);
     act(() => handlers().onPointerDown());
     act(() => vi.advanceTimersByTime(HOLD_DELAY_MS + HOLD_INTERVAL_MS * 2));
@@ -99,20 +89,16 @@ describe("useHoldRepeat", () => {
   });
 
   it("押し直しても発火源が二重にならない", () => {
-    // stop を挟まず start を 2 回呼ぶ経路 (連打) で interval が積み上がると、
-    // 1 回の押下で 2 倍の速さのジョグが出る
     const { fire, handlers } = setup();
     act(() => handlers().onPointerDown());
     act(() => handlers().onPointerDown());
     fire.mockClear();
     act(() => vi.advanceTimersByTime(HOLD_DELAY_MS + HOLD_INTERVAL_MS * 4));
-    // 4 間隔ぶん = 4 回。二重に走っていれば 8 回になる
     expect(fire).toHaveBeenCalledTimes(4);
   });
 
   describe("押し続けたときの加速", () => {
     it("最初の 1 回は必ず等倍で出る", () => {
-      // 軽く 1 回押したつもりが大きく動いてはならない
       const { fire, handlers } = setup(true, 8);
       act(() => handlers().onPointerDown());
       expect(fire).toHaveBeenLastCalledWith(1);
@@ -128,7 +114,6 @@ describe("useHoldRepeat", () => {
     });
 
     it("上限を超えて伸びない", () => {
-      // 1 回の押下で可動域を飛び越えさせない。上限は呼び出し側が可動範囲から決める
       const { fire, handlers } = setup(true, 2);
       act(() => handlers().onPointerDown());
       act(() => vi.advanceTimersByTime(HOLD_DELAY_MS + HOLD_INTERVAL_MS * HOLD_ACCEL_EVERY * 5));
@@ -143,7 +128,6 @@ describe("useHoldRepeat", () => {
     });
 
     it("離すと倍率が 1 へ戻る", () => {
-      // 前回の押下の勢いが残っていると、次の 1 押しの結果を予測できない
       const { fire, view, handlers } = setup(true, 8);
       act(() => handlers().onPointerDown());
       act(() => vi.advanceTimersByTime(HOLD_DELAY_MS + HOLD_INTERVAL_MS * HOLD_ACCEL_EVERY));

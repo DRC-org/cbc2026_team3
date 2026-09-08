@@ -72,14 +72,8 @@ Phase 12 が解こうとしていた問題は記録に値する ——「調整�
 ## 零点確定を `rotate` へ移し、`y_axis` を一時無効化した
 
 EDULITE の `SET_ZERO` 経路が入って `rotate` の原点確定が通るようになった一方、`y_axis` の
-原点スイッチ（サーボ基板 #0 の SV4 / `0x44`）は**当時は装着されていなかった**。実機で配線が
-済んでいたのは SV3（`0x43` = `rotate_origin_sensor`）だけで、CAN 上で接触が読める
-（`00` ↔ `10`）ことは確認済み。
-
-**現況（2026-09-08 以降）: `y_axis` のスイッチは左右 2 本とも付いている**（右が #0 の SV4 =
-`0x44`、左が #1 の SV0 = `0x48`）。ファームの `kServoBoards[]` も `config/main_hand.yaml` の
-`sensors:` も揃っていて、外してあるのは `axes.y_axis.homing` **だけ**（極性と探索パラメータが
-未実測のため）。下の 3 箇所同時の規則はそのまま効く。
+原点スイッチ（サーボ基板 #0 の SV4 / `0x44`）は**装着されていない**。実機で配線が済んでいるのは
+SV3（`0x43` = `rotate_origin_sensor`）だけで、CAN 上で接触が読める（`00` ↔ `10`）ことは確認済み。
 
 - **3 箇所（ファームの `kServoBoards[]`・`sensors:`・`axes.y_axis.homing`）は必ず同時に動かす。**
   `sensors:` から外してファームを `TouchSensor` のまま残すと、`homing:` が生きている限り
@@ -140,9 +134,7 @@ EDULITE の `SET_ZERO` 経路が入って `rotate` の原点確定が通るよ�
   電源再投入
 - **零点確定が有効なのは `rotate`（EDULITE）だけ。** `sub_y_axis` / `sub_lift`（DM3520）は
   スイッチを付けても `HomingError`（`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は
-  disable すると自重落下する）—— **手段そのものが無い。** `y_axis`（M3508）は**手段もスイッチも
-  あるが有効化していない** —— ファームも `sensors:` も揃っていて `axes.y_axis.homing` だけを
-  外してある（極性と探索パラメータが未実測）。**手当てが違うので混同しないこと**
+  disable すると自重落下する）。`y_axis`（M3508）は手段はあるがスイッチ未装着
 - **`rotate` の `search_distance` 180.0deg は未実測。** `direction` −1 と `step` の下限
   （0.5deg では動かない）だけが実機で確定している
 - **down したバスでも起動できてしまう。** `operstate` を見て起動ログへ ERROR は残すように

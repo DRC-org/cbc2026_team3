@@ -147,13 +147,9 @@ sync_monitors=…, target_refreshers=…)` でサーバーへも渡す（サー�
 
 ### 起動オプション
 
-```bash
-uv run python main.py                    # 通常起動（localhost:8080）
-uv run python main.py --dry-run          # CAN バス無し（python-can の virtual バス）
-uv run python main.py --dev-tools        # 開発用コマンドを解禁（CBC_DEV_TOOLS=1 でも可）
-uv run python main.py --log-level debug  # debug|info|warning|error（既定 info）
-uv run python main.py --system <path> --config <path>… --checklist <path>
-```
+`--dry-run`（CAN 無し）/ `--dev-tools`（開発用コマンドの解禁）/ `--log-level` /
+`--system` `--config` `--checklist`（構成の差し替え）。コマンドの書式は
+[`operations.md`](operations.md)。
 
 `--dry-run` では `RobotServer` が擬似値を作る（`lib/server_dryrun.py`）—— 各モータの状態を
 `time.time()` ベースのサイン波で生成（**擬似値も `_measured_only()` を通る**）、ヘルス
@@ -197,11 +193,7 @@ uv run python main.py --system <path> --config <path>… --checklist <path>
 
 #### セットアップ
 
-```bash
-sudo scripts/install.sh        # udev ルール配置 + systemd 有効化（初回のみ。--uninstall あり）
-scripts/setup_can.sh           # 手動 up。見つかったバスだけ立ち上げる（開発用）
-scripts/setup_can.sh --strict  # 試合前点検。定義済みの全バスが揃わなければ異常終了
-```
+セットアップと点検のコマンドは [`operations.md`](operations.md)。
 
 PC 起動時は `cbc-can.service`（`Type=oneshot` + `RemainAfterExit=yes`）が
 `setup_can.sh --wait 15` を実行する（`--wait` は USB 列挙の待ち時間で、**デッドラインは
@@ -257,8 +249,7 @@ down 中しか受け付けない）、up 後に `ERROR-ACTIVE` を確認して�
 | `gripper` | 同名 | generic（サーボ #0 SV0） | can_generic | 0x40 | 開 / 閉 の 2 状態 |
 | `wall_f` / `wall_r` | 同名 | generic（サーボ #0 SV1 / SV2） | can_generic | 0x41 / 0x42 | 初期 / 閉 / 開 の 3 状態 |
 | `conveyor` | 同名 | generic（DC ch0） | can_generic | 0x80 | duty 軸。搬送方向はコート別 |
-| （軸ではない） | `rotate_origin_sensor` | generic（サーボ #0 SV3） | can_generic | 0x43 | `rotate` の原点スイッチ。**`sensors:` セクション** |
-| （軸ではない） | `y_axis_r_origin_sensor` / `y_axis_l_origin_sensor` | generic（サーボ #0 SV4 / **#1 SV0**） | can_generic | 0x44 / 0x48 | `y_axis` の原点スイッチ。**まだどの `homing:` からも参照していない**（登録して鮮度を見るだけ） |
+| （軸ではない） | `rotate_origin_sensor` | generic（サーボ #0 SV3） | can_generic | 0x43 | 原点タッチセンサ。**`sensors:` セクション** |
 
 **サブハンド**（`config/sub_hand.yaml` / `config/sub_hand_positions.yaml`）:
 
@@ -266,28 +257,10 @@ down 中しか受け付けない）、up 後に `ERROR-ACTIVE` を確認して�
 |---|---|---|---|---|---|
 | `sub_arm_joint` | 同名 | edulite05 | can_edulite | 3 | アーム関節 |
 | `sub_y_axis` / `sub_lift` | 同名 | dm3520 | can_dm3520 | 0x01 / 0x02（MST 0x11 / 0x12） | 前後 / 昇降（ラックアンドピニオン直動） |
-| `sub_rotate` | `sub_rotate_r` / `sub_rotate_l` | generic（サーボ #2 SV0 / SV1） | can_generic | 0x50 / 0x51 | 回転。**左右直結ペア**（逆回転側は `scale` −1.0 + `offset` 270.0） |
-| `sub_pitch` | `sub_pitch_r` / `sub_pitch_l` | generic（サーボ #2 SV2 / SV3） | can_generic | 0x52 / 0x53 | ピッチ。**左右直結ペア** |
-| `sub_offset` | 同名 | generic（サーボ #2 SV4） | can_generic | 0x54 | オフセット機構。単独軸 |
+| `sub_gripper` | 同名 | generic（サーボ #1 SV0） | can_generic | 0x48 | 開 / 閉 |
 | `valve_1`〜`valve_6` / `pump_vac` / `pump_blow` | 同名 | generic（電磁弁 #0 ch0-5 / DC ch1・ch2） | can_generic | 0xC0〜0xC5 / 0x81 / 0x82 | `on_off` ×6 / duty ×2 |
-| （軸ではない） | `sub_y_axis_{f,r}_limit_sensor` / `sub_lift_{t,b}_limit_sensor` | generic（サーボ #1 SV1〜SV4） | can_generic | 0x49〜0x4C | **可動端の報告だけ**（`_origin_sensor` と役割が違う）。**`sensors:` セクション** |
 
-**スイッチは合計 7 本で、サーボ基板 3 枚 15 スロットは全部埋まっている** ——
-#0 は SV0〜SV2 が Servo・SV3/SV4 が TouchSensor、#1 は 5 スロットとも TouchSensor
-（SV0 だけメインハンド）、#2 は 5 スロットともサブハンドのサーボ。**アクチュエータも
-スイッチも、足すには基板を 1 枚増やす**（DIP 3 → `0x58`〜`0x5C`）。空きを探して既存の
-スロットを流用すると、そこを使っていた機構が黙って動かなくなる。
-
-**サブハンドの左右直結ペアは `sub_rotate` / `sub_pitch` の 2 組**で、`sub_y_axis` /
-`sub_lift`（DM3520）のほうが独立 2 軸である。ただしサーボの 2 組は `sync_tolerance` を
-**意図的に書いていない** —— サーボの `FEEDBACK` はクランプ後の**指令角のエコー**なので、
-偏差監視に載せても見えるのは「PC が送った指令の差」だけで、片側が固着してもホーンが外れても
-差は 0 のまま。効かない保護を 1 枚足すと、次に読む人はそこを保護と数える。
-`PositionTable.paired_axes()` は `sync_tolerance` を持つ軸だけを返すのでこの 2 組は載らず、
-ずれの検出は `config/checklist.yaml` の `sub_servo_pair_sync`（目視）だけが担う。
-**3 重の保護が揃うのは `y_axis` の 1 組だけ**で、`rotate` も偏差監視の 3 段のうち 2 段しか
-効かない（§4 / [invariants.md](invariants.md) §2）。
-
+`sub_y_axis` / `sub_lift` は**独立 2 軸**で左右直結ペアではない（`sync_tolerance` を持たない）。
 軸名に `sub_` を付けるのは、統合動作確認が両ハンドの位置定数を `PositionTable.merged` で
 1 つにまとめるため（軸名が重なると起動ごと落ちる）。
 
@@ -325,7 +298,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 
 | モジュール | 持つもの |
 |---|---|
-| `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
+| `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**3 層すべてがここの `violation()` を呼ぶ** |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -386,19 +359,9 @@ firmware/
 └── solenoid/              # solenoid.ioc（CubeMX）+ include/config.h + src/app.cpp
 ```
 
-ビルド・テストのコマンド:
-
-```bash
-pio test -e native -d firmware/dc_motor   # 実機不要。firmware/test/ の全ケース
-pio test -e native -d firmware/servo      # 上とまったく同じ全ケース（test_dir 共有）
-pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e nano -d firmware/servo -t upload            # サーボ基板 #0 / #1
-pio run -e uno_r4_minima -d firmware/servo -t upload   # サーボ基板 #2
-
-firmware/solenoid/scripts/fetch_hal.sh    # 初回のみ（Drivers/ は .gitignore）
-cmake --preset Debug -S firmware/solenoid
-cmake --build firmware/solenoid/build/Debug
-```
+**native テストは 2 プロジェクトが `test_dir` を共有するのでどちらか一方で足りるが、実機
+ビルドは 3 env とも必要**（dc_motor / servo の `nano` / servo の `uno_r4_minima`）。電磁弁だけ
+CMake。コマンドは [`operations.md`](operations.md)。
 
 **native テストはどちらか一方で足りる。実機ビルドは 3 つとも必要**（`main.cpp` と
 `config.h` が別物のため）。`arm-none-eabi-gcc` は 11 以降が要る（詳細は `firmware/README.md`）。
@@ -415,21 +378,20 @@ web/src/
 │            RobotContext.tsx（useRobotStates / useRobotStatus / useRobotCommands）
 ├── hooks/    useWebSocket.ts（接続・再接続・接続先切替のみ。メッセージを解釈しない）
 │            useRobotSocket.ts（protocol + robotReducer + useWebSocket を束ねる）
-│            useWsUrl / useHotkeys / useHoldKey / useHoldRepeat / useRepeatController /
-│            useMotorCheck / useRemainingMs（秒境界に合わせて起こす残り時間）
+│            useWsUrl / useHotkeys / useHoldKey / useHoldRepeat / useMotorCheck
 │            useArmedPress.ts（二度押しで実行する操作 = 試合開始・終了）
-├── lib/      # 最下層。hooks/ を import しない。判定の一覧は docs/web/data_flow.md
+├── lib/      # 最下層。hooks/ を import しない。判定を持つものは §9 の表
 │            protocol.ts / robotReducer.ts / phase.ts / healthVerdict.ts /
 │            sequenceStatus.ts / motorCheckStatus.ts / syncVerdict.ts /
-│            checklistGroups.ts / commandValue.ts / tabs.ts / robots.ts /
-│            time.ts / tone.ts / cx.ts / wsUrl.ts
+│            checklistGroups.ts / tabs.ts / robots.ts / time.ts / tone.ts /
+│            cx.ts / wsUrl.ts
 ├── pages/  Dashboard.tsx / RobotControl.tsx
 ├── test/   setup / mockWebSocket / robotContext + ws-contract.json / wsContract.test.ts
-└── components/  # 分割軸は「誰が描くか」。直下にファイルは置かない。役割は docs/web/screens.md
+└── components/  # 分割軸は「誰が描くか」。直下にファイルは置かない。役割は §9 の表
       shell/（RootLayout が全画面へ出す外枠）/ monitor/（Dashboard 専用）/
       operator/（RobotControl 専用）/ motorcheck/ / diagnostics/ /
       ui/（自前プリミティブ: Page / Panel / Section / Button / StatusBadge /
-           Kbd / Icon / Modal / ScrollArea）
+           Kbd / Icon / Modal）
 ```
 
 barrel（`index.ts`）は作らず、常に実ファイルまで指す。コマンドは `cd web &&`
@@ -527,37 +489,25 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 **起動ログに 3 値（`max_velocity` / `max_acceleration` / `velocity_ff`）を必ず出す** ——
 実行中に変更できず UI にも配信されないので、起動ログが唯一の読み口である。
 
-### 左右ペア軸の保護
+### 左右ペア軸の保護（3 層）
 
-機構的に直結した左右ペアは **4 組** —— `y_axis`（M3508 ×2）/ `rotate`（EDULITE ×2）/
-`sub_rotate`（サーボ ×2）/ `sub_pitch`（サーボ ×2）。位置定数 yaml の `motors:` で 1 論理軸に
-複数モータを束ね、逆回転は `scale` の符号で表す。保護は ①同一フレームでの同時指令
-（左右を束ねる唯一の経路が `AxisHandle.set_target_value`）②偏差監視 ③フィードバック途絶を
-ペア単位で判定。
+`y_axis`（M3508 ×2）と `rotate`（EDULITE ×2）は機構的に直結する。位置定数 yaml の
+`motors:` で 1 論理軸に複数モータを束ね、逆回転は `scale` の符号で表す。
 
-**①は 4 組すべてに効くが、②③は組を選ぶ。** ②③の入口はどちらも `sync_tolerance`
-（`PositionTable.paired_axes()` はそれを持つ軸しか返さない）で、③はさらに `M3508PositionLoop` の
-中の `SyncGuard` にしかないので、両メンバが同じ位置制御ループに載る組に限られる
-（`main._attach_sync_groups`）。**3 重が揃うのは `y_axis` の 1 組だけ**で、`rotate` は②の 2 段
-だけ、サーボの 2 組は①だけになる（サーボに `sync_tolerance` を書かない理由は §2）。
+**判定と単位換算は `lib/axis_sync.py` に一本化してあり、3 層とも `SyncGroup.violation()` を呼ぶ。**
 
-**②は 3 段あり、判定と単位換算は `lib/axis_sync.py` に一本化してある。3 段とも
-`SyncGroup.violation()` を呼ぶ。**
-
-| ②の段 | 頻度 | debounce | ラッチ | 効果 | 効く軸 |
-|---|---|---|---|---|---|
-| `sequence/engine.py` の `move_to`（`AxisHandle.sync_violation`） | move_to 完了時 1 回 | なし | なし | `AxisSyncError` でシーケンス停止 | `y_axis` / `rotate` |
-| `control/position_loop.py`（`_check_deviation` / `SyncGuard`） | 200Hz | なし | あり | グループ全員を電流 0 | **`y_axis` のみ** |
-| `control/sync_monitor.py`（`_check_group`） | 50Hz | 2 サンプル | あり | **全体緊急停止** | `y_axis` / `rotate` |
+| 層 | 頻度 | debounce | ラッチ | 効果 |
+|---|---|---|---|---|
+| `sequence/engine.py` の `move_to`（`AxisHandle.sync_violation`） | move_to 完了時 1 回 | なし | なし | `AxisSyncError` でシーケンス停止 |
+| `control/position_loop.py`（`_check_deviation` / `SyncGuard`） | 200Hz | なし | あり | グループ全員を電流 0 |
+| `control/sync_monitor.py`（`_check_group`） | 50Hz | 2 サンプル | あり | **全体緊急停止** |
 
 `lib/axis_sync.py` の公開 API は、`MotorSpec.to_command` / `to_value` / `to_tolerance`
 （人間の単位 ⇄ 指令単位の換算。`to_tolerance` は `abs()` を掛ける）、`SyncGroup.deviation()`
 （人間の単位へ逆換算した位置の `max - min`）、`SyncGroup.violation()`（唯一の境界。比較対象が
 2 個未満 = 途絶・未受信なら超過とみなさない）、`SyncGroup.corrections()`（同期補正の操作量）。
-
-②はどの段も**止めるだけ**（縮めるのは同期補正だけ）。**③は `SyncGuard` にしかないので
-`y_axis` 限定である** —— `SyncMonitor` の `_fresh_positions` は途絶メンバを判定から外すだけで、
-比較対象が 2 個未満になれば `violation()` は `None` を返し連続カウントも捨てるので**止まらない**。
+保護は 3 層とも**止めるだけ**で、加えて**フィードバック途絶をペア単位で判定**する
+（片方が stale なら両方を電流 0）。
 
 #### 同期監視（`lib/control/sync_monitor.py`）
 
@@ -790,11 +740,10 @@ class PickAndPlace(Sequence):
 ヘルパ関数（`main_hand._pick_at()` / `sub_hand._all_valves()`）にまとめ、単一軸の組
 （`{"gripper": "closed"}` 等）はリテラルのまま残す。合成は `dict` の `|` で行う。
 
-`require_trigger` の付与基準は「失敗したときに取り返しがつかないか」—— main_hand の
-「〜ワークを把持」（位置ずれのまま閉じるとワークと機構の双方を破損する）と「〜ワークを
-リリース」（落としたワークは拾えない）/ sub_hand の「ワーク吸着」（**メインハンドと機構同士が
-向かい合う唯一の動作**。しかも吸い付いたかを観測する手段が無いので目視で確かめさせる）と
-「ワーク解放 (配置)」。
+`require_trigger` の付与基準は「失敗したときに取り返しがつかないか」—— main_hand
+「ハンド閉じる (ワーク把持)」（位置ずれのまま閉じるとワークと機構の双方を破損する）/ sub_hand
+「ハンド閉じる (受け取り)」（メインハンドと機構同士が向かい合う唯一の動作）/ 両ハンドの
+「ハンド開く」（落とすとやり直せない）。
 
 ### アクチュエータ動作確認（`sequences/motor_check.py`）
 
@@ -827,7 +776,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `manual_jog` | 直前の**手動目標**からの相対移動。同上 |
 
 指令経路はシーケンスと同一（同じ `MotorGroup` を共有し `AxisHandle` を通すので、緊急停止
-インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの保護がそのまま効く）。
+インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの 3 層保護がそのまま効く）。
 **モータ単位の指令口を作らない**（UI にもモータ単位のジョグを出さない）。ジョグの起点は直前の
 手動目標値で、起点が無い（初回・緊急停止後）ときだけフィードバックから逆換算する。モータの
 目標値はモード切替で消さない（消すのはジョグの起点だけ）。範囲外の値は**拒否ではなくクランプ**
@@ -895,16 +844,6 @@ match:
 `system.yaml` の `can_buses` に定義済みの別名だけを受け付ける。センサは `motors:` ではなく
 `sensors:` セクションへ書く。
 
-`sensors:` に書けるのは `bus` / `can_id` / `expected_firmware` の 3 つだけ
-（`lib/config_schema.py` の `_SENSOR_KEYS`）。`expected_angle_range_deg` は**書けない** ——
-センサスロットはサーボの型を持たない。**`expected_firmware` はセンサにも書く。**
-サーボ基板 #1 は 5 スロットとも `TouchSensor` で駆動するモータが 1 台も無く、`motors:` 側の
-照合は `expected_firmware` を書いた対象としか突き合わせないので、**この基板の焼き忘れを
-拾えるのは `sensors:` の照合だけ**である。書かないと旧ファームのまま全スロットが「反応しない
-スイッチ」として現れ、症状は配線不良と区別が付かない。同じ基板にモータが載っている場合も
-省かない（「隣のモータが見ているから不要」は「そのモータを消したら照合も消える」という
-見えない依存になる）。
-
 ### `axes` スキーマ（`config/<robot>_positions.yaml`）
 
 ```yaml
@@ -922,18 +861,18 @@ axes:                      # 換算: command = value * scale + offset
     command_unit: deg
     timeout_s: 4.0
     tolerance: 1.0
-    sync_tolerance: 10.0   # 左右のずれ許容（人間の単位）。超過で停止（§4 の偏差監視）
+    sync_tolerance: 10.0   # 左右のずれ許容（人間の単位）。超過で停止（§4 の 3 層）
     sync_kp: 16.0          # 同期補正のゲイン
     sync_limit: 1250       # sync_kp とセットで必須
     motion: { max_velocity: 200.0, max_acceleration: 1200.0, velocity_ff: 1.0 }
                            # 台形プロファイル（§4）。velocity_ff は pid.kd と同値に保つ
-    manual: { min: 0.0, max: 650.0, steps: [1.0, 5.0, 10.0, 50.0, 100.0] }
+    manual: { min: 0.0, max: 650.0, steps: [1.0, 10.0, 100.0] }
                            # 手動で連続値を送ってよい軸だけが書く
     homing: { sensor: …, direction: -1, step: 1.0, settle_s: 0.05, search_distance: 180.0 }
                            # 零点確定（§4）。search_distance は省略できない
     motors:                # scale / offset はモータごとに書く
-      y_axis_r: { scale: 55.0131, offset: 0.0 }
-      y_axis_l: { scale: -55.0131, offset: 0.0 }  # 逆回転は scale の符号で表す
+      y_axis_r: { scale: 864.15, offset: 0.0 }
+      y_axis_l: { scale: -864.15, offset: 0.0 }   # 逆回転は scale の符号で表す
 
   conveyor:                # 位置以外を指令する軸
     unit: duty
@@ -967,7 +906,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 テストが使う `names()` / `raw()` だけで、`AxisSpec` 側では**先頭モータしか見ない API はペア軸で
 `ValueError` を投げる**（`scale` / `offset` / `to_command` / `command_tolerance`）。
 
-`on_off` を通す許可表は 5 箇所にあり、1 つでも漏れると別々の壊れ方をする:
+`on_off` を通す許可表は 4 箇所にあり、1 つでも漏れると別々の壊れ方をする:
 
 | 場所 | 漏れたときに起きること |
 |---|---|
@@ -975,7 +914,6 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `lib/drivers/generic.py` の `_MODE_MAP` / `_TARGET_SCALE` | 起動はできるが最初の指令で `KeyError` |
 | `lib/config_schema.py` の `_CONTROL_MODES` | robot yaml に書いた瞬間に起動拒否 |
 | `lib/sequence/positions.py` の `_COMMAND_MODES` | 位置定数 yaml に書いた瞬間に起動拒否 |
-| `web/src/lib/protocol.ts` の `ManualAxis.command_mode` | ここだけは無症状にならず `pnpm check` の型検査が落ちる（実際に落ちた）。落としたまま型を緩めると「0 / 1 を数値で描いてよい軸」と読める |
 
 ### `config/checklist.yaml`
 
@@ -1007,7 +945,7 @@ checklists:
 | `edulite/` | EDULITE 05 2 台 | `can_edulite` | `main_hand` | `limit_speed` / `limit_current` を半分、`sync_tolerance` 15.0deg、`timeout_s` 5.0s。`homing` は書かない |
 | `dm3520/` | Damiao DM3520 2 台 | `can_dm3520` | `sub_hand` | `limit_speed` を本番の半分（1.0rad/s） |
 | `dc/` | 自作モタドラ DC 基板 1 枚 | `can_generic` | `main_hand` | 3ch とも `command_mode: duty`。`manual:` は書けない |
-| `servo/` | 自作モタドラ サーボ基板 1 枚 | `can_generic` | `main_hand` | 3 スロット（サーボ）+ センサ 2 で、5 スロットとも使う。**本番と違い `manual:` を書く**（角度を連続で振るため） |
+| `servo/` | 自作モタドラ サーボ基板 1 枚 | `can_generic` | `main_hand` | 4 スロット + センサ 1。**本番と違い `manual:` を書く**（角度を連続で振るため） |
 | `solenoid/` | 自作モタドラ 電磁弁基板 1 枚 | `can_generic` | `main_hand` | 6ch とも `on_off` / `open`・`closed`。`manual:` は書けない |
 | `main_hand/` | **サブハンド不在でメインハンド実機を動かす構成** | `can_m3508` + `can_edulite` + `can_generic` | `main_hand` | **robot yaml / positions を持たず本番の `config/main_hand.yaml` / `config/main_hand_positions.yaml` をそのまま使う。CANable 3 本が要る** |
 | `y_axis_tuning/` | `y_axis` の PID 実機チューニング用 | `can_m3508` | `main_hand` | `scripts/tune_y_axis.py` が使う |
@@ -1068,9 +1006,6 @@ robot / positions / checklist が揃っていて読めること ②登録した�
   "waiting_trigger": true,
   "running": true,   // シーケンス側の実行フラグそのまま（UI に step_index から推測させない）
   "steps": [{ "index": 0, "label": "初期位置へ移動", "require_trigger": false }, …],
-  // 止まった理由。到達タイムアウト・左右ずれ・零点確定失敗はステップ単位の try で握られる
-  // ので、載せないと journal 以外どこにも出ない（画面は「待機中」を描くだけ）。平常時は null
-  "last_error": { "step_index": 3, "step": "受け取り位置へ移動", "message": "…" },
   "motors": {   // PID ゲインは配信しない（実行中に差し替える経路が無い）
     "y_axis_r": { "pos": 1500, "vel": 0.0, "torque": 0.2, "temp": 35.0,
                   "command": 220.0, "command_mode": "position" },
@@ -1089,13 +1024,6 @@ robot / positions / checklist が揃っていて読めること ②登録した�
     "sync_violations": ["y_axis"],       // ラッチ中の軸名（ループと SyncMonitor の和集合）
     "loops_running": true, "monitors_running": true, "refreshers_running": true,
     "reenergizing": false,
-    // 励磁されているべきなのに無励磁のモータ。**「画面が正常に見えるのに機体が動かない」型の
-    // 異常**で、再励磁（reenergize_motors）の唯一の入口の合図。指差喚呼の health_ready が
-    // 名指しで参照している
-    "unenergized_motors": [],
-    // 投げっぱなしタスク（watch_task）が拾った失敗を人が読めるラベルで。古い順・最大 5 件で、
-    // 復帰しても消えない（リセットは match_start の前縁だけ）
-    "failed_tasks": [],
     "firmware_unconfirmed_motors": [],   // INFO 未受信で焼き忘れ検出が働いていないモータ
     "position_loops":   [{ "bus": "m3508_bus", "running": true, "paused": false,
                            "sync_violations": ["y_axis"] }],
@@ -1108,10 +1036,10 @@ robot / positions / checklist が揃っていて読めること ②登録した�
       "name": "y_axis", "unit": "mm", "command_mode": "position",
       "value": 12.3,                     // フィードバックの逆換算。位置を測れない軸は null
       "target": 12.0,                    // 直前の手動目標。一度も送っていなければ null
-      "manual": { "min": 0.0, "max": 650.0, "steps": [1.0, 5.0, 10.0, 50.0, 100.0] },  // 不可なら null
+      "manual": { "min": 0.0, "max": 650.0, "steps": [1.0, 10.0, 100.0] },  // 不可なら null
       "deviation": 0.32,                 // SyncGroup.deviation() をそのまま配る。0.0 は正常値
       "sync_tolerance": 10.0,            // UI にフォールバック値を持たせないため一緒に配る
-      "positions": [{ "name": "home", "value": 0.0 }, …],  // 値も配る（引けなければ value: null）
+      "positions": ["home", "work_1", "work_shared"],
       "motors": ["y_axis_r", "y_axis_l"]
     }]
   }
@@ -1119,8 +1047,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 ```
 
 `steps` / `manual.axes` は静的だが `state` に載せる（**UI にモータ名も軸名も可動範囲も書かせ
-ない**ため。`positions` の `value` だけはコートで変わる）。`motors` と `steps` は素通しで、
-数値を実際に読む側が `readMeasured()` を通す。
+ない**ため）。`motors` と `steps` は素通しで、数値を実際に読む側が `readMeasured()` を通す。
 `motor_check_state` の `steps` だけは例外で構造（`index` / `label` / `require_trigger`）を検査する。
 
 #### `e_stop_state` / `match_state` / `server_info`
@@ -1331,24 +1258,27 @@ setup ⇄ ready → match → finished → setup
 
 ## 9. Web UI の構成
 
-**現況の仕様は [`docs/web/`](web/README.md) の 4 枚が持ち、この章には置かない。** 同じ画面の話が
-2 箇所にあると片方だけが必ず古くなる（実際に、この章のタブ表は指差喚呼と動作確認が操縦者タブに
-あった頃の記述のまま残っていた）。ここは入口だけを示す。
+**画面・部品カタログ・配色・データフロー・踏みやすい罠は [`web/`](web/) の 4 枚が持つ。**
+ここに置くのは、リポジトリ全体から見た位置づけだけである。
 
-| 知りたいこと | 読む文書 |
+| | |
 |---|---|
-| どの画面に何が出るか（設計原則・タブ・フェーズ連動レイアウト・部品カタログ 6 バケツ） | [`web/screens.md`](web/screens.md) |
-| どう見せ、どう操作するか（配色・文字・アイコン・キーボード・確認の取り方・EMG STOP の配置） | [`web/design.md`](web/design.md) |
-| 値がどう届き、どこで判定するか（受信境界の 3 値・context 分割・判定の単一情報源・接続先の解決） | [`web/data_flow.md`](web/data_flow.md) |
-| 何で壊れ、何が守っているか（Tailwind・レイアウト・再描画の罠と、それを固定しているテスト） | [`web/pitfalls.md`](web/pitfalls.md) |
+| スタック | Vite + React + TypeScript + Tailwind v4 / daisyUI 5（テーマ `cbc`）。パッケージマネージャは pnpm@10 |
+| 配信 | 制御プログラムと同一プロセス。`lib/server.py` が `web/dist/` を SPA 配信する |
+| タブ | URL パス（`/monitor` `/main-hand` `/sub-hand`）。操縦者 2 名 + Monitor の 3 画面 |
+| 状態 | WS 受信 → `lib/protocol.ts`（型と受信条件）→ `lib/robotReducer.ts`（純関数）→ context 3 分割 |
+| 判定の置き場所 | ヘルスは `lib/healthVerdict.ts`、動作確認の完了は `lib/motorCheckStatus.ts`、フェーズは `lib/phase.ts`。いずれも 1 箇所だけ |
 
-- ディレクトリ構成（`web/src/` の木）は §3
-- **サーバー側の配信契約は §7。`web/data_flow.md` は同じ WS の受信側**を書くので役割が違う
-  （型と中身の正は §7 と `web/src/test/ws-contract.json`、受信条件の正は `protocol.ts`）
-- 崩してはならない規則（なぜ・破ると何が起きるか）は [`invariants.md`](invariants.md) の §8
-- `pnpm` の入口・ビルド出力先・ディレクトリは [`web/README.md`（リポジトリ直下）](../web/README.md)
+| 読みたいこと | 文書 |
+|---|---|
+| どの画面に何が出るか・部品カタログ | [`web/screens.md`](web/screens.md) |
+| 配色・ラベル・アイコン・確認の取り方・EMG STOP の配置 | [`web/design.md`](web/design.md) |
+| WS 契約・受信境界・context 分割・接続先の解決 | [`web/data_flow.md`](web/data_flow.md) |
+| 踏んだ罠と、それを守っているテスト | [`web/pitfalls.md`](web/pitfalls.md) |
+| コマンドとディレクトリ | [`../web/README.md`](../web/README.md) |
 
----
+崩してはならない UI の不変条件は [`invariants.md`](invariants.md) §8。
+
 
 ## 10. サービス運用（systemd）
 
@@ -1363,15 +1293,7 @@ setup ⇄ ready → match → finished → setup
 配置・enable・撤去の 3 つは `install.sh` の 1 つの配列（`UNITS` / `AUTOSTART_UNITS`）が
 まとめて回す。
 
-```bash
-sudo scripts/install.sh           # 3 unit を配置（cbc-control だけ enable しない）
-scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
-scripts/deploy.sh --no-install    # 会場用。依存導入を飛ばしてビルドと再起動だけ
-sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
-journalctl -u cbc-control -f      # ログ追跡
-journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
-sudo systemctl reset-failed cbc-control   # StartLimitBurst で failed 固定したとき
-```
+配置・起動・ログ追跡のコマンドは [`operations.md`](operations.md)。
 
 `cbc-control.service` の性質:
 
@@ -1415,12 +1337,7 @@ sudo systemctl reset-failed cbc-control   # StartLimitBurst で failed 固定し
 プロトコル層とシーケンスエンジンは TDD で開発する（RED → GREEN）。実機デバッグで時間が
 溶けやすいバイト列の組み立てミスと状態遷移のバグを、テストで先に潰す。
 
-```bash
-uv run pytest                 # 全テスト（tests/drivers/ で絞る / -x で最初の失敗で停止 /
-                              #   -k "m3508" で特定テストのみ）
-uv run ruff check . && uv run ruff format .
-cd web && pnpm check          # lint + format + 型検査 + テスト + ビルド
-```
+実行コマンドは [`operations.md`](operations.md)。
 
 ### テスト対象とアプローチ
 
@@ -1491,8 +1408,8 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 | `_e_stop_active` がプロセスメモリ上のみ | サーバーを再起動すると緊急停止状態が消える。物理的な緊急停止ボタンの状態と同期する仕組みも無い |
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は `activate_motors()` を呼ぶが `encode_disable(clear_fault=True)` は送らない（fault の自動クリアは原因を隠すため意図的に行っていない）。実機で「解除しても動かない」場合は `health` の `FAULT` 表示で fault の内容を確認して電源再投入 |
 | フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らず WARNING をログに出すだけ。有効化を見送ったモータを UI に出す仕組みが欲しい |
-| ホーミングは `rotate` だけ実機検証済み | `search_distance` はまだ効く経路を通っていない。`step` 1.0deg での通し確認も未取得。`y_axis` は**手段もスイッチもある**が、極性と探索パラメータが未実測なので `homing:` だけを外してある |
-| 零点確定が有効なのは `rotate` だけ | 残る穴は 2 つで**性質が違う**。`sub_y_axis` / `sub_lift`（DM3520）は**手段そのものが無い** —— ドライバが `supports_origin_capture()` を宣言しない（`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は自重で落ちる）ので、スイッチを付けても `HomingError` になる。`y_axis`（M3508）は**手段もスイッチもあるが有効化していない** —— ファーム（`kServoBoards[]` の `TouchSensor` ×2）も `sensors:` も揃っていて、`axes.y_axis.homing` だけを外してある（極性と探索パラメータが未実測）。**「スイッチが付いた」と「零点確定が有効になった」を混同しないこと** —— 手当てが違う（`y_axis` は実測すれば開けられる / DM3520 はソフトでは開かない）。原点が確定できない軸は電源投入位置がそのまま原点で、ずれは指差喚呼が人の目で埋める |
+| ホーミングは `rotate` だけ実機検証済み | `search_distance` はまだ効く経路を通っていない。`step` 1.0deg での通し確認も未取得。`y_axis` はスイッチ未装着で `homing:` ごとコメントアウト中 |
+| 零点確定が有効なのは `rotate` だけ | `sub_y_axis` / `sub_lift`（DM3520）はドライバが `supports_origin_capture()` を宣言しない（`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は自重で落ちる）。`y_axis` は手段があるがスイッチ未装着。原点が確定できない軸は電源投入位置がそのまま原点で、ずれは指差喚呼が人の目で埋める |
 | down したバスでも起動できてしまう | 起動ログへ 1 行 ERROR を残すが起動は拒否しない（`--strict` を通していない構成を一律に潰さない判断）。受信ループは `rx_down` を立てて `BusHealth.DOWN` を出す |
 | `config/bench/main_hand/checklist.yaml` が `can_generic` 側の確認項目を持たない | この構成では本番の `gripper` / `conveyor` / `wall_*` / `rotate_origin_sensor` が構成に入るが、`conveyor_run` / `origin_sensor_react` に相当する項目が無い。`bench_return_home` の文言も `y_axis` の実態とねじれている |
 | `config/bench/y_axis_tuning/system.yaml` のコメントが本番の `sync_tolerance` と食い違う | ベンチ 2.0mm に対し本番 10.0mm。どちらが正かは現時点の記述からは判断できない |
@@ -1531,7 +1448,6 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 | [`checks_and_health.md`](checks_and_health.md) | 点検とヘルスの全体像（ヘルス監視 / 動作確認 / 常駐保護 / 指差喚呼の 4 系統）。**「今どうなっているか」はこれ** |
 | [`venue_recovery.md`](venue_recovery.md) / [`mechanism_handoff.md`](mechanism_handoff.md) | 会場カード（試合当日に手が止まったときはこれ 1 枚）/ 機構が付いた日に埋める値の棚卸し |
 | [`motor_driver_can_protocol.md`](motor_driver_can_protocol.md) | 自作モータドライバ CAN プロトコルの単一情報源 |
-| [`web/`（この docs 配下）](web/README.md) | 操縦 UI の現況の仕様 4 枚（画面 / 見た目と操作 / データの流れ / 罠）。**UI を触るときはここから読む** |
 | [`history/`](history/) / `firmware/README.md` | 実装の経緯・日誌 / 通電前の要確認項目・デバイス ID・安全既定値・native テストの方針 |
 
 ### RobStride EDULITE 05

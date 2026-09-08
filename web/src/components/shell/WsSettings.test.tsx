@@ -77,7 +77,7 @@ describe("WsSettings", () => {
 
   it("dev サーバー経由で開いている時は制御 PC 直結を候補に出す", async () => {
     const user = userEvent.setup();
-    // jsdom の hostname は localhost。5173 で開いている想定
+    // jsdom の hostname は localhost
     mount({ wsUrl: "ws://localhost:5173/ws" });
 
     const candidate = screen.getByRole("button", {

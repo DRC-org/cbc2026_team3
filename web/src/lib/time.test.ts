@@ -2,12 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import { formatAge, formatClock } from "@/lib/time";
 
-/**
- * 書式化は純関数なので表示部品から切り離しておく。以前 `formatAge` は
- * `components/diagnostics/HealthIndicator.tsx` の export で、兄弟の
- * `MotorStatus` がそこから import していた。表示部品が別の表示部品の
- * ユーティリティ置き場になると、片方を消したときに巻き添えで壊れる。
- */
 describe("formatAge", () => {
   it("未取得 (null / undefined / NaN) はダッシュで表す", () => {
     expect(formatAge(null)).toBe("—");
@@ -38,16 +32,8 @@ describe("formatAge", () => {
   });
 });
 
-/**
- * 表示は 1 通りだけ。以前は pill / card / compact / bus-only の 4 variant を持ち、
- * 本番から呼ばれるのは bus-only だけで、残る 3 つはテストからしか到達しなかった。
- * 「使われていないのに緑のまま残るコード」は、読む人に選択肢があると誤解させる。
- */
-
 describe("formatClock", () => {
   it("読めない値はダッシュで表す (1970-01-01 を出さない)", () => {
-    // サーバーの time.time() は**エポック秒**。ms のつもりで Date へ渡すと
-    // 常に 1970-01-01 が出る。読めない値は数字を出さない側へ倒す
     expect(formatClock(null)).toBe("—");
     expect(formatClock(undefined)).toBe("—");
     expect(formatClock(Number.NaN)).toBe("—");

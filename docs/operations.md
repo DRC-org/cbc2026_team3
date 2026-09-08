@@ -43,48 +43,13 @@ WS 接続先はヘッダーの接続表示（と切断バナー）から変更�
 
 ## ファームウェア
 
-### DC / サーボ（PlatformIO）
+**ビルド・書き込み・ツールチェーンの要件は [`../firmware/README.md`](../firmware/README.md) が
+持つ。** 3 枚とも MCU もビルド系も違うので、そちらを見ること。
 
-`-d` にプロジェクトディレクトリを渡せばリポジトリ直下から実行できる。
-
-```bash
-pio test -e native -d firmware/dc_motor   # 実機不要。firmware/test/ の全ケース
-pio test -e native -d firmware/servo      # 上とまったく同じ全ケース
-
-pio run -e uno_r4_minima -d firmware/dc_motor
-pio run -e nano -d firmware/servo -t upload          # サーボ基板 #0 / #1（Nano）
-pio run -e uno_r4_minima -d firmware/servo -t upload # サーボ基板 #2（UNO R4）
-```
-
-テストは `firmware/test/` にあり両プロジェクトが `test_dir` で共有するので、**native テストは
-どちらか一方で足りる**（電磁弁基板のロジック層 `test_solenoid` もここに含まれる。実機ビルドは
-CMake だが `MotorCan` を共有しているため）。
-
-一方**実機ビルド（`pio run`）は 3 つとも必要**（dc_motor / servo の `nano` / servo の
-`uno_r4_minima`）。共有しているのは `firmware/lib/MotorCan/` までで `main.cpp` と `config.h` は
-別物のため。**サーボの 2 env は `main.cpp` と `config.h` を共有するが、ピンの `static_assert` も
-CAN バックエンドも env ごとに別物なので、片方だけ通しても壊れているのは常にもう片方である。**
-
-### 電磁弁（CMake）
-
-**電磁弁基板だけビルド系が違う**（STM32F303K8 / CubeMX 生成の HAL）。`Drivers/` だけ
-`.gitignore` してあるので、clone 直後に 1 回取得すればビルドできる。
-
-```bash
-firmware/solenoid/scripts/fetch_hal.sh          # 初回のみ。CubeMX は要らない
-cmake --preset Debug -S firmware/solenoid
-cmake --build firmware/solenoid/build/Debug
-```
-
-**`arm-none-eabi-gcc` は 11 以降が要る。** CubeMX のリンカスクリプトが使う `READONLY`
-キーワードが GCC11 以降にしか無く、古い版では**コンパイルは全部通ってリンクだけが落ちる**。
-Ubuntu 24.04 以降なら `sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi
-libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib`（**libstdc++ を省くとリンクだけが
-落ちる**）。詳細と xPack 版の手順は [`../firmware/README.md`](../firmware/README.md)。
-
-`Core/Src/main.c` の USER CODE 領域には `setup()` / `loop()` の呼び出ししか置かないこと
-（それ以外は再生成で消える）。ロジックは `src/app.cpp`、ピン割当と CAN のビットタイミングは
-`solenoid.ioc` が持つ。**CubeMX が要るのは `.ioc` を変えたときだけ。**
+覚えておく点だけ: **native テスト（`pio test -e native`）は 2 プロジェクトが `test_dir` を
+共有するのでどちらか一方で足りる**が、**実機ビルドは 3 env とも必要**（dc_motor / servo の
+`nano` / servo の `uno_r4_minima`）。電磁弁だけ PlatformIO ではなく CMake で、
+`arm-none-eabi-gcc` は 11 以降が要る（古い版は**コンパイルは通ってリンクだけが落ちる**）。
 
 ## CAN セットアップ
 

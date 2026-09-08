@@ -8,25 +8,11 @@ import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { motorCheckStatus } from "@/lib/motorCheckStatus";
 
-/**
- * 統合動作確認の起動ボタン。**両ハンドで 1 つ**なので robot を取らない。
- *
- * 可否の判定はサーバー (`_motor_check_deny_reason`) が唯一の持ち主で、ここは
- * 理由を表示するだけ。フェーズや緊急停止から導出し直すと、サーバーが受け付ける
- * 操作を画面が殺す状態が生まれる (かつて `StartGate` で作った失敗と同じ形)。
- *
- * **起動前の確認だけはダイアログのまま。** 押した瞬間に両ハンドの全アクチュエータが
- * 動き出すので、周囲の安全確認を促す文面を出す場所が要る。進捗パネルと違って機体が
- * 動く前に閉じるため、EMG STOP を覆っている時間は駆動と重ならない
- * (`MotorCheckPanel` をモーダルにしてはならない理由はそちらの docstring にある)。
- */
 export function MotorCheckButton() {
   const { connected } = useRobotStatus();
   const { state, start } = useMotorCheck();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // 可否の判定はパネル側と共有する。かつてパネルは `blocked_reason` しか見ておらず、
-  // 切断中でも押せて、押しても何も起きず理由も出なかった
   const { reasonLabel } = motorCheckStatus(state, connected);
   const disabled = reasonLabel !== null;
 
@@ -50,9 +36,6 @@ export function MotorCheckButton() {
         )}
         {state.running ? "確認実行中..." : "動作確認"}
       </Button>
-      {/* Tooltip は使えないため無効化理由をテキストで併記する。
-          理由文は長く、ボタンと同じ行に流すと折り返して行が 2 段に化ける。
-          flex-wrap の親の中で必ず行頭から始まるよう basis-full を与える */}
       {disabled && reasonLabel ? (
         <span className="flex basis-full items-center gap-1.5 text-base-content/70">
           <Icon as={CircleHelp} />

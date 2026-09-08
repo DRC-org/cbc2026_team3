@@ -1,35 +1,3 @@
-"""RobStride EDULITE 05 の CAN ID を走査・書き換えする。
-
-**shebang は持たない (実行属性も付けない)。** このスクリプトは python-can と
-lib.drivers.edulite05 を import するのでプロジェクトの venv でしか動かず、
-`uv run python scripts/edulite_set_id.py ...` としてしか呼ばれない。
-`#!/usr/bin/env python3` を残して chmod +x すると、`./scripts/edulite_set_id.py`
-という**必ず ImportError で落ちる呼び方**が生まれる (システム python には
-python-can が入っていない)。同じ scripts/ にある can_config.py が 0755 なのは、
-あちらが systemd から `/usr/bin/python3` で起動される — venv に依存しないことが
-設計の要件 — ためで、性質が逆である。
-
-**出荷値は 0x7F で、複数台を買うと全台が同じ ID で届く。** そのまま同一バスへ
-載せると全台が同じ ID で応答し、`CANManager._dispatch_frame` は最初にマッチした
-1 台で打ち切るので残りは永久にフィードバックを得られない。症状は「片方だけ
-配線不良」にしか見えないため、バスへ載せる前に 1 台ずつ書き換える。
-
-走査は disable フレーム (通信タイプ 4) を投げて応答を見るだけ。**無励磁を保った
-まま応答を返させられる唯一のフレーム**で、障害フラグも握り潰さない
-(`Edulite05Driver.feedback_probe_message` と同じもの)。
-
-書き換えは通信タイプ 7。ドライバの `encode_set_id()` を使う ——
-ID の組み立てをここへ書き写すと、プロトコルを直したときに片方だけ古い形式で残る。
-
-使い方:
-    uv run python scripts/edulite_set_id.py scan
-    uv run python scripts/edulite_set_id.py set --from 0x7F --to 1
-
-**書き換えは 1 台ずつ行う。** 同じ ID の個体が 2 台ぶら下がっていると、1 通の
-書き換えフレームを両方が受け取って**両方とも同じ新 ID になる**。走査で 2 台以上の
-応答を見つけたら書き換えを拒否するので、片方の電源を落としてから実行すること。
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -43,31 +11,18 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 
 from lib.drivers.edulite05 import Edulite05Driver
 
-# 1 回の probe で応答を待つ時間 [s]。本機の応答は 1ms 未満で返るが、
-# USB-CAN のバッファリングぶんの余裕を見ている
 _PROBE_WINDOW_S = 0.015
 
-# probe の送信間隔 [s]。**詰めすぎてはならない** —— gs_usb (CANable の candleLight
-# ファーム) は送信完了スロットを数枚しか持たず、ACK が返らない状況で連射すると
-# 「Transmit buffer full」でソケットごと詰まる。詰まった後は正常なバスでも
-# 応答が取れなくなり、症状が「モータが居ない」と区別できなくなる
 _PROBE_INTERVAL_S = 0.01
 
 
 @dataclass(frozen=True)
 class ScanResult:
-    """ある ID へ probe した結果。
-
-    responses は**応答フレーム数**であって台数ではないが、1 回の probe に対して
-    1 台は 1 通しか返さないので、2 以上なら同じ ID の個体が複数ぶら下がっている。
-    """
-
     can_id: int
     responses: int
 
 
 def probe_id(bus: can.BusABC, host_id: int, target: int) -> ScanResult:
-    """1 つの ID へ disable を投げ、返ってきたフィードバックの数を数える。"""
     driver = Edulite05Driver(f"probe_{target}", can_id=target, host_id=host_id)
     bus.send(driver.feedback_probe_message())
 
@@ -84,14 +39,12 @@ def probe_id(bus: can.BusABC, host_id: int, target: int) -> ScanResult:
 
 
 def scan(bus: can.BusABC, host_id: int, targets: range) -> list[ScanResult]:
-    """ID 空間を走査して、応答のあった ID だけを返す。"""
     found: list[ScanResult] = []
     stalled = 0
     for target in targets:
         try:
             result = probe_id(bus, host_id, target)
         except can.CanOperationError:
-            # 送信が詰まった。1 通ごとに数えておき、最後にまとめて報告する
             stalled += 1
             time.sleep(0.05)
             continue
@@ -105,23 +58,6 @@ def scan(bus: can.BusABC, host_id: int, targets: range) -> list[ScanResult]:
 
 
 class BusStalledError(RuntimeError):
-    """送信が詰まり、応答も 0 件だった。**原因を断定してはならない状態。**
-
-    2 つの原因が同じ症状を出す:
-
-    1. ACK を返すノードがバス上に居ない (無通電・H/L 逆・断線)
-    2. **直前の走査で送信キューが詰まったまま残っている**
-
-    2 が厄介なのは、バスが完全に正常でも起きること。一度詰まると滞留した
-    フレームが送信スロットを占有し続け、以降の probe は誰にも届かないまま
-    キューの後ろに並ぶ。この状態で走査すると「応答 0 件」になり、**1 と
-    見分けが付かない**。
-
-    実際にこれで「モータが繋がっていない」と誤診した (2 台とも生きていた)。
-    断定せず、先にバスの張り直しを促すこと —— 張り直しはキューごと作り直すので、
-    1 通目から正しく測れる。
-    """
-
     def __init__(self, stalled: int, total: int) -> None:
         super().__init__(
             f"{total} 通中 {stalled} 通の送信が詰まり、応答は 0 件でした。\n"
@@ -140,12 +76,6 @@ class BusStalledError(RuntimeError):
 
 
 def plan_set_id(source: int, target: int, scanned: list[ScanResult]) -> str | None:
-    """ID 書き換えを実行してよいか判定する。拒否理由を返す (None なら実行可)。
-
-    判定をここに閉じてあるのは、**書き換えは取り消しの効かない操作**だから。
-    走査結果と突き合わせる規則が CLI の分岐に散ると、片方だけ直したときに
-    「2 台同時に書き換わる」経路が残る。
-    """
     if source == target:
         return f"書き換え前後の ID が同じです (0x{source:02X})"
 
@@ -187,8 +117,6 @@ def cmd_scan(args: argparse.Namespace, bus: can.BusABC) -> int:
 
 
 def cmd_set(args: argparse.Namespace, bus: can.BusABC) -> int:
-    # 書き換え前後の ID だけでなく全域を走査する。宛先の重複は「今は応答が無い」
-    # だけでは判定できず、電源の入っていない個体を見落とすと後で衝突する
     found = scan(bus, args.host_id, range(0x00, 0x100))
     _print_scan(found)
 
@@ -205,8 +133,6 @@ def cmd_set(args: argparse.Namespace, bus: can.BusABC) -> int:
             return 1
 
     driver = Edulite05Driver("target", can_id=args.source, host_id=args.host_id)
-    # 書き換え前に無励磁へ落とす。励磁したまま ID が変わると、以後の指令が
-    # 届かない相手が回り続ける
     bus.send(driver.encode_disable())
     time.sleep(0.1)
     bus.send(driver.encode_set_id(args.target))

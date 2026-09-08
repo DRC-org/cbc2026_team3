@@ -40,12 +40,6 @@ _ROBOT_NAMES = ("main_hand", "sub_hand")
 
 
 class GatedSequence(Sequence):
-    """実行中のステップを外部から任意のタイミングで完了させられるシーケンス。
-
-    緊急停止は「今動いているステップの後に次のステップが動き出さない」ことが
-    要点なので、ステップ境界をテスト側が制御できる形にする。
-    """
-
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.executed: list[str] = []
@@ -69,7 +63,6 @@ def _build_fixture() -> ServerFixture:
 
 
 async def _start_both_sequences(fx: ServerFixture, ws) -> list[GatedSequence]:
-    """試合を開始し、両ロボットのシーケンスをゲートステップまで進める。"""
     fx.complete_all_checklists()
     await ws.send_json({"type": "match_start"})
     for name in _ROBOT_NAMES:
@@ -88,13 +81,6 @@ async def _release_gates_and_settle(seqs: list[GatedSequence]) -> None:
 
 
 async def _spin_resident_loop(seq: GatedSequence, *, settle_s: float = 0.05) -> None:
-    """シーケンスの常駐ループを短時間だけ回して止める。
-
-    「未処理の開始要求が破棄されたか」は内部フラグを覗いても分かるが、それでは
-    *フラグの名前* を固定するだけで、守りたい事実 —— 誰も押していないのに機体が
-    動き出さないこと —— を確かめられない。常駐ループを実際に回し、要求が
-    残っていれば必ず現れる「最初のステップの実行」を観測する。
-    """
     task = asyncio.create_task(seq.run_forever())
     await asyncio.sleep(settle_s)
     task.cancel()
@@ -103,7 +89,6 @@ async def _spin_resident_loop(seq: GatedSequence, *, settle_s: float = 0.05) -> 
 
 
 async def _expect_no_rejection(ws, command: str, *, tries: int = 40) -> None:
-    """一定時間 command_rejected が流れてこないことを確認する。"""
     for _ in range(tries):
         try:
             msg = await asyncio.wait_for(ws.receive_json(), timeout=0.2)
@@ -114,7 +99,6 @@ async def _expect_no_rejection(ws, command: str, *, tries: int = 40) -> None:
 
 
 async def _enter_e_stop(fx: ServerFixture, ws) -> list[GatedSequence]:
-    """試合中にシーケンスを走らせたうえで緊急停止状態まで持っていく。"""
     seqs = await _start_both_sequences(fx, ws)
     await ws.send_json({"type": "e_stop"})
     await wait_until(lambda: fx.e_stop_active)
@@ -124,7 +108,6 @@ async def _enter_e_stop(fx: ServerFixture, ws) -> list[GatedSequence]:
 
 class TestEStopStopsSequences:
     async def test_e_stop_stops_all_running_sequences(self) -> None:
-        """緊急停止後に次ステップが走ると、新しいモータ目標値が停止指令を上書きする。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -144,7 +127,6 @@ class TestEStopStopsSequences:
             await ws.close()
 
     async def test_e_stop_stops_sequences_when_bus_send_fails(self) -> None:
-        """CAN 送信が失敗しても停止は成立させる (送信不能な時ほど停止が要る)。"""
         fx = _build_fixture()
         for mgr in fx.can_managers():
             mgr.send_to_bus = AsyncMock(side_effect=RuntimeError("バス送信失敗"))
@@ -167,7 +149,6 @@ class TestEStopStopsSequences:
             await ws.close()
 
     async def test_e_stop_stops_sequences_when_encode_raises(self) -> None:
-        """停止フレーム生成そのものが失敗しても、シーケンス停止まで到達すること。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -191,7 +172,6 @@ class TestEStopStopsSequences:
             await ws.close()
 
     async def test_e_stop_discards_pending_start_request(self) -> None:
-        """開始要求が処理される前に緊急停止が入っても、その要求で走り出さないこと。"""
         fx = _build_fixture()
         seq = fx.sequence(_ROBOT_NAMES[0])
         seq.request_start()
@@ -204,7 +184,6 @@ class TestEStopStopsSequences:
 
 class TestEStopReleaseKeepsSequencesStopped:
     async def test_release_does_not_restart_sequence(self) -> None:
-        """解除は再開合図ではない。操縦者の sequence_start を待つ設計を守る。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -229,7 +208,6 @@ class TestEStopReleaseKeepsSequencesStopped:
 
 class TestEStopBlocksSequenceCommands:
     async def test_sequence_start_rejected_while_e_stop_active(self) -> None:
-        """緊急停止中に START でロボットが動き出すと、操縦者が止める手段を失う。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -245,7 +223,6 @@ class TestEStopBlocksSequenceCommands:
             assert msg["reason"]
 
             await asyncio.sleep(0.1)
-            # 常駐ループは走ったままなので、要求が残っていれば先頭から走り直す
             assert seqs[0].executed == ["gate"]
             assert seqs[0].is_running is False
 
@@ -267,7 +244,6 @@ class TestEStopBlocksSequenceCommands:
             assert msg["reason"]
 
             await asyncio.sleep(0.1)
-            # ジャンプが通っていれば after_step が走って executed に現れる
             assert seqs[0].executed == ["gate"]
 
             await ws.close()
@@ -294,7 +270,6 @@ class TestEStopBlocksSequenceCommands:
             await ws.close()
 
     async def test_stop_direction_commands_pass_during_e_stop(self) -> None:
-        """止める方向の操作は緊急停止中こそ通す必要がある。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -302,9 +277,6 @@ class TestEStopBlocksSequenceCommands:
             ws = await client.ws_connect("/ws")
             seqs = await _enter_e_stop(fx, ws)
 
-            # 停止経路が実際に踏まれたことを見る。走行中でなければ `request_stop` は
-            # 呼ばれない (止めるものが無い) ので、停止のたびに必ず行う
-            # 「未処理の開始要求の破棄」で観測する
             stop_spy = MagicMock()
             seqs[0].discard_pending_start = stop_spy  # type: ignore[method-assign]
 
@@ -323,7 +295,6 @@ class TestEStopBlocksSequenceCommands:
             await ws.close()
 
     async def test_sequence_start_allowed_after_release(self) -> None:
-        """解除後は従来どおり操縦者の START で再開できること。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -348,8 +319,6 @@ class TestEStopBlocksSequenceCommands:
 
 
 class TestEStopBlocksMatchStart:
-    """match_start が通ると操縦者の sequence_start が解禁されるため、停止中は塞ぐ。"""
-
     async def test_match_start_rejected_while_e_stop_active(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
@@ -378,7 +347,6 @@ class TestEStopBlocksMatchStart:
             await ws.close()
 
     async def test_match_start_allowed_after_release(self) -> None:
-        """解除後は試合開始が通り、操縦者の sequence_start が受理されること。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -396,7 +364,6 @@ class TestEStopBlocksMatchStart:
             entered = await wait_until(lambda: fx.match.phase is Phase.MATCH)
             assert entered, "解除後の match_start が通っていない"
 
-            # 試合開始そのものは機体を動かさない
             seqs = fx.sequences()
             await asyncio.sleep(0.1)
             assert all(s.executed == [] for s in seqs)
@@ -411,7 +378,6 @@ class TestEStopBlocksMatchStart:
 
 class TestEStopKeepsRecoveryCommands:
     async def test_match_finish_and_release_pass_during_e_stop(self) -> None:
-        """試合終了・緊急停止解除は復帰経路なので緊急停止中も通す。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -421,8 +387,6 @@ class TestEStopKeepsRecoveryCommands:
 
             await ws.send_json({"type": "match_finish"})
             await _expect_no_rejection(ws, "match_finish", tries=5)
-            # 読み取った通数ではなく状態の変化を待つ。接続直後のスナップショットが
-            # 1 通増減しただけで結果が変わるテストは、何も守っていない
             assert await wait_until(lambda: fx.match.phase is Phase.FINISHED)
 
             await ws.send_json({"type": "e_stop_release"})
@@ -433,14 +397,6 @@ class TestEStopKeepsRecoveryCommands:
 
 
 class TestEStopReleaseRequiresActiveEStop:
-    """「解除」は解除すべき状態があるときだけ通す。
-
-    停止していない試合中に 1 通届くだけで同期ずれラッチが全解除され、全モータへ
-    再励磁が飛ぶ。ずれが残っていれば再ラッチされるとはいえ、監視を無効化する
-    操作が誰の意図でもなく走る経路を残す理由は無い (リロード直後の UI や
-    リトライで実際に届きうる)。
-    """
-
     async def test_停止中でない解除は理由付きで拒否される(self) -> None:
         fx = _build_fixture()
         for name in _ROBOT_NAMES:
@@ -462,8 +418,6 @@ class TestEStopReleaseRequiresActiveEStop:
 
 
 class TestEStopReleaseReactivatesMotors:
-    """EDULITE 05 は緊急停止で無励磁になるため、解除で再励磁しないと以後動かない。"""
-
     async def test_release_reactivates_motors_on_every_robot(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
@@ -485,7 +439,6 @@ class TestEStopReleaseReactivatesMotors:
             await ws.close()
 
     async def test_reactivation_is_abortable_by_a_new_e_stop(self) -> None:
-        """再有効化中にもう一度緊急停止が入ったら enable を送ってはならない。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -500,8 +453,6 @@ class TestEStopReleaseReactivatesMotors:
             should_abort = main_can.activate_motors.await_args.kwargs["should_abort"]
             assert should_abort() is False
 
-            # 再有効化の最中にもう一度緊急停止が入った状況を、操縦者の e_stop と
-            # 同じ経路で作る (フラグを直接立てると本番に無い状態を作りかねない)
             await fx.activate_e_stop()
             assert should_abort() is True
 
@@ -509,18 +460,8 @@ class TestEStopReleaseReactivatesMotors:
 
 
 class TestReleaseDoesNotBlockTheCommandLoop:
-    """**再励磁のあいだ、その操縦者のコマンド受信を止めてはならない。**
-
-    `async for msg in ws` は 1 接続あたり完全に直列なので、解除ハンドラが全モータの
-    再励磁を待つと次の 1 通が処理されない。フィードバックの返らないモータは 1 台
-    0.5 秒待つため、CAN が落ちている状況 —— まさに緊急停止を押した状況 —— では
-    数秒に達する。そのあいだ **E-STOP の押し直しすら効かない**。
-    """
-
     async def test_再励磁の完了を待たずに次のコマンドを処理する(self) -> None:
         fx = _build_fixture()
-        # 応答の返らないモータ (実機では 1 台 0.5 秒待つ) の代わりに、
-        # テスト側が明示的に解放するまで返らない有効化にする
         gate = asyncio.Event()
 
         async def _slow_activate(**_kwargs: object) -> list[str]:
@@ -538,30 +479,17 @@ class TestReleaseDoesNotBlockTheCommandLoop:
                 await ws.send_json({"type": "e_stop_release"})
                 assert await wait_until(lambda: not fx.e_stop_active)
 
-                # 再励磁は止まったまま。この状態で押し直しが効かなければならない
                 await ws.send_json({"type": "e_stop"})
                 assert await wait_until(lambda: fx.e_stop_active), (
                     "再励磁の完了を待つあいだ E-STOP の押し直しが処理されていない"
                 )
             finally:
-                # 失敗しても必ず解放する。待たせたままだと接続の後始末が返らず、
-                # テストが「落ちる」のではなく「固まる」
                 gate.set()
             await fx.wait_reactivation()
             await ws.close()
 
 
 class TestUnenergizedMotorsAreVisible:
-    """**「解除できたのに機体が動かない」を画面に出せなければならない。**
-
-    実機で起きた形: 物理緊急停止で DM3520 の電源が落ち、専用バスに 1 台しか
-    居ないので ACK が返らず送信が全滅する。解除しても再励磁は最初のモータの
-    例外で打ち切られ、以降へ enable が 1 通も飛ばない。それでもフィードバックは
-    復電後に正常に届き、`is_fault()` にも掛からないのでモータのヘルスは OK、
-    PC は 20Hz で位置指令を送り続ける。操縦者に見えるのは
-    「指令しても動かない」だけで、原因を示す表示がどこにも無い。
-    """
-
     async def test_release_reports_motors_that_failed_to_energize(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
@@ -578,12 +506,10 @@ class TestUnenergizedMotorsAreVisible:
             )
 
             assert reported, "励磁に失敗したモータが safety に載っていない"
-            # 成功した側へ巻き添えを出さない
             assert fx.state_message("sub_hand")["safety"]["unenergized_motors"] == []
             await ws.close()
 
     async def test_nothing_is_reported_while_e_stopped(self) -> None:
-        """停止中は無励磁が正しい状態。ここで報告すると本物の 1 行が押し流される。"""
         fx = _build_fixture()
         app = fx.create_app()
         fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["m1"])
@@ -602,11 +528,6 @@ class TestUnenergizedMotorsAreVisible:
             await ws.close()
 
     async def test_driver_reported_disable_is_surfaced(self) -> None:
-        """有効化に成功した後でドライバ側が励磁を落とした場合も拾う。
-
-        DM3520 は通信途絶保護や電源の瞬断で自ら励磁を切る。有効化の戻り値だけを
-        見ていると、この経路が丸ごと抜ける。
-        """
         fx = _build_fixture()
         app = fx.create_app()
         energized = MagicMock()
@@ -617,8 +538,6 @@ class TestUnenergizedMotorsAreVisible:
         dropped.is_energized.return_value = False
         unknown = MagicMock()
         unknown.name = "unknown"
-        # 励磁状態を報告しないドライバ (自作モタドラ・C620)。
-        # 「分からない」を「無励磁」へ倒すと常時警告が出る
         unknown.is_energized.return_value = None
         set_motors(
             fx.can_manager("main_hand"),
@@ -639,8 +558,6 @@ class TestUnenergizedMotorsAreVisible:
 
 
 class TestActivateEStopFromInside:
-    """同期監視など内部の異常検知から、操縦者の e_stop と同じ経路で止められること。"""
-
     async def test_same_side_effects_as_e_stop_command(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
@@ -653,7 +570,6 @@ class TestActivateEStopFromInside:
 
             assert fx.e_stop_active is True
             for mgr in fx.can_managers():
-                # 停止フレームはモータ個別・バス全体の両方へ出す
                 mgr.send_to_bus.assert_awaited()
 
             await _release_gates_and_settle(seqs)
@@ -674,7 +590,6 @@ class TestActivateEStopFromInside:
         assert seq.executed == [], "破棄されたはずの開始要求でシーケンスが走り出した"
 
     async def test_reason_is_broadcast(self) -> None:
-        """試合中に「なぜ止まったか」が操縦者に届かないと復旧できない。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -691,7 +606,6 @@ class TestActivateEStopFromInside:
             await ws.close()
 
     async def test_command_e_stop_keeps_broadcast_shape(self) -> None:
-        """操縦者操作による緊急停止の配信内容は従来どおり (理由なしでも壊れない)。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -708,7 +622,6 @@ class TestActivateEStopFromInside:
             await ws.close()
 
     async def test_repeated_activation_is_safe(self) -> None:
-        """同期監視は軸ごとに発報しうる。多重発報で状態が壊れないこと。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -730,18 +643,7 @@ class TestActivateEStopFromInside:
             await ws.close()
 
 
-# ---------------------------------------------------------------------- #
-#  同期ずれラッチの解除経路
-# ---------------------------------------------------------------------- #
-
-
 class _SyncFixture:
-    """位置制御ループと同期監視を実物のまま RobotServer へ配線した一式。
-
-    左右ペアのドライバをループと監視で共有する。実機と同じく「同じずれを
-    双方が見る」構成にしないと、解除経路の穴が見えない。
-    """
-
     def __init__(self, *, tolerance: float = 0.0) -> None:
         self.mgr = mock_can_manager()
         self.right = M3508Driver("y_r", can_id=1)
@@ -784,8 +686,6 @@ class _SyncFixture:
             position_loops=[self.loop],
             sync_monitors=[self.monitor],
         )
-        # 累積角の原点は初回フィードバックで確定する。先に 0deg を流しておかないと
-        # 「ずれた姿勢」がそのまま原点になり、偏差 0 と判定されてしまう
         feed_m3508(self.right, deg=0.0)
         feed_m3508(self.left, deg=0.0)
 
@@ -795,8 +695,6 @@ class _SyncFixture:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
-    # 「サーバーへの操作」はこのクラス自身の顔として出す。テスト側が
-    # 内側のフィクスチャを辿ると、配線の持ち方を変えるたびに全テストが壊れる
     async def command(self, payload: dict) -> None:
         await self._server_fx.command(payload)
 
@@ -811,12 +709,10 @@ class _SyncFixture:
         return self._server_fx.state_message(robot)
 
     def deviate(self) -> None:
-        """左右が逆向きに 10deg ずれた状態にする (人間の単位で 20 のずれ)。"""
         feed_m3508(self.right, deg=10.0)
         feed_m3508(self.left, deg=10.0)
 
     def aligned(self) -> None:
-        """逆回転ペアが正しく揃っている状態にする。"""
         feed_m3508(self.right, deg=10.0)
         feed_m3508(self.left, deg=-10.0)
 
@@ -827,7 +723,6 @@ class _SyncFixture:
 
 class TestSyncLatchRelease:
     async def test_release_clears_position_loop_latch(self) -> None:
-        """ラッチしたままだと y_axis はプロセス再起動まで電流 0 で復帰できない。"""
         fx = _SyncFixture()
         fx.deviate()
         await fx.loop.step()
@@ -839,7 +734,6 @@ class TestSyncLatchRelease:
         assert fx.loop.sync_violations == frozenset()
 
     async def test_release_clears_sync_monitor_latch(self) -> None:
-        """SyncMonitor がラッチしたままだと、以後どれだけずれても二度と発報しない。"""
         fx = _SyncFixture()
         fx.deviate()
         fx.monitor.step()
@@ -852,11 +746,6 @@ class TestSyncLatchRelease:
         assert fx.monitor.violated == frozenset()
 
     async def test_release_does_not_disable_monitoring(self) -> None:
-        """解除は「再び監視を有効にする」であって「ずれを無かったことにする」ではない。
-
-        解除後もずれが残っていれば、監視は同じ軸で再び発報して緊急停止へ戻す。
-        ここが効かないと、操縦者は復帰したつもりで無監視の機体を動かすことになる。
-        """
         fx = _SyncFixture()
         fx.deviate()
         fx.monitor.step()
@@ -866,7 +755,6 @@ class TestSyncLatchRelease:
         await fx.command({"type": "e_stop_release"})
         assert fx.e_stop_active is False
 
-        # 機構は直っていない (ずれたまま)
         fx.monitor.step()
         await fx.settle()
 
@@ -874,7 +762,6 @@ class TestSyncLatchRelease:
         assert fx.e_stop_active is True
 
     async def test_release_does_not_disable_position_loop_detection(self) -> None:
-        """位置制御ループ側も同じ。解除後にずれが残っていれば再びラッチする。"""
         fx = _SyncFixture()
         fx.deviate()
         await fx.loop.step()
@@ -887,7 +774,6 @@ class TestSyncLatchRelease:
         assert fx.loop.sync_violations == frozenset({"y_axis"})
 
     async def test_release_after_repair_keeps_axis_available(self) -> None:
-        """人間がずれを直してから解除すれば、再ラッチせずに軸が使える。"""
         fx = _SyncFixture()
         fx.deviate()
         await fx.loop.step()
@@ -902,18 +788,10 @@ class TestSyncLatchRelease:
 
 
 def _frames_to(mgr: CANManager, bus_name: str) -> list[can.Message]:
-    """指定バスへ送信されたフレームを送信順に取り出す。"""
     return [call.args[1] for call in mgr.send_to_bus.await_args_list if call.args[0] == bus_name]
 
 
 class TestEStopStopsM3508:
-    """左右直結で最も危険な Y 軸 (M3508) へ、緊急停止で能動的に停止指令を出すこと。
-
-    M3508 は ``emergency_stop_message()`` を持たず、自作モタドラ向けの 0x7FF も
-    解釈しない。位置制御ループが電流 0 を送り続けることに頼ると、そのタスクが
-    死んだ瞬間に「止める手段が 1 つも無い」状態になる。
-    """
-
     async def test_zero_current_frame_is_sent(self) -> None:
         fx = _SyncFixture()
         await fx.loop.set_target("y_r", ControlMode.CURRENT, 3000.0)
@@ -926,7 +804,6 @@ class TestEStopStopsM3508:
         assert struct.unpack(">hhhh", frames[-1].data) == (0, 0, 0, 0)
 
     async def test_sent_even_when_loop_is_not_running(self) -> None:
-        """停止がループの生存に依存してはならない。"""
         fx = _SyncFixture()
         assert fx.loop.is_running is False
 
@@ -935,7 +812,6 @@ class TestEStopStopsM3508:
         assert _frames_to(fx.mgr, "can_m3508")
 
     async def test_targets_are_cleared(self) -> None:
-        """目標が残っていると、ループが動き出した瞬間に再び電流が出る。"""
         fx = _SyncFixture()
         await fx.loop.set_target("y_r", ControlMode.POSITION, 30.0)
 
@@ -944,7 +820,6 @@ class TestEStopStopsM3508:
         assert fx.loop.target("y_r") is None
 
     async def test_bus_failure_does_not_block_other_frames(self) -> None:
-        """1 バスの送信失敗で他への停止指令を諦めない (既存方針の維持)。"""
         fx = _SyncFixture()
 
         async def _fail_m3508(bus_name: str, msg: can.Message) -> None:
@@ -955,18 +830,11 @@ class TestEStopStopsM3508:
 
         await fx.activate_e_stop()
 
-        # 自作モタドラ向けの 0x7FF ブロードキャストは届いている
         assert [call.args[0] for call in fx.mgr.send_to_bus.await_args_list].count("bus0") == 1
         assert fx.e_stop_active is True
 
 
 class TestEStopDropsRefreshTargets:
-    """緊急停止の解除だけでコンベアが回り出さないこと。
-
-    自作モタドラの目標値は 20Hz で再送し続けているため、停止時に目標を残すと
-    解除した瞬間に再送が走り、操縦者が何も操作していないのに機体が動き出す。
-    """
-
     async def test_targets_are_dropped_on_e_stop(self) -> None:
         fx = _build_fixture()
         mgr = fx.can_manager("main_hand")
@@ -982,29 +850,16 @@ class TestEStopDropsRefreshTargets:
 
 
 class TestEStopCompletionLogIsOneLine:
-    """締めの 1 行はロボットの数に依らず 1 行で、しかも「試行」と名乗ること。
-
-    緊急停止は最も切迫した局面で押される。そこで台数ぶんの行が流れると、
-    **直前の `logger.exception` (どのバスへ送れなかったか) が押し流される** ——
-    この行が言えるのは「全機ぶん流し終えた」の 1 事実だけなので、繰り返す価値が
-    無いばかりか、繰り返すこと自体が読みたい行を隠す。
-
-    同時に「試行」も落とせない。ループは送信失敗を握ったまま先へ進むので、
-    **1 通も届いていなくてもこの行は出る。** 「完了」と書くと緊急停止が実際に
-    効いたと読めてしまい、緊急停止のログは読み手が最も強く事実として受け取る。
-    """
-
     async def test_2台でも締めの行は1行で全機の名前を載せる(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        fx = _build_fixture()  # main_hand / sub_hand の 2 台
+        fx = _build_fixture()
 
         with caplog.at_level(logging.INFO, logger="lib.server"):
             await fx.activate_e_stop()
 
         lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("E-STOP 送信")]
         assert len(lines) == 1
-        # 送れたことではなく送ろうとしたことしか言えない
         assert lines[0].startswith("E-STOP 送信試行完了: ")
         assert "main_hand" in lines[0]
         assert "sub_hand" in lines[0]
@@ -1012,7 +867,6 @@ class TestEStopCompletionLogIsOneLine:
 
 class TestSafetyStateBroadcast:
     async def test_latched_axes_are_broadcast(self) -> None:
-        """どの軸がラッチされているかを UI が知れないと復旧操作を選べない。"""
         fx = _SyncFixture()
         fx.deviate()
         await fx.loop.step()
@@ -1024,7 +878,6 @@ class TestSafetyStateBroadcast:
         assert state["safety"]["sync_violations"] == ["y_axis"]
 
     async def test_dead_safety_loops_are_visible(self) -> None:
-        """200Hz の位置制御と 50Hz の監視が死んでも、現在は誰も気付けない。"""
         fx = _SyncFixture()
 
         state = fx.state_message()
@@ -1044,14 +897,6 @@ class TestSafetyStateBroadcast:
 
 
 class TestTargetRefresherLivenessBroadcast:
-    """20Hz の目標値再送が死んだことも配信しないと誰にも気付けない。
-
-    再送が止まるとファームのウォッチドッグが 500ms で全 generic アクチュエータの
-    出力を落とす (試合中にコンベアとグリッパが無反応になる)。WS は繋がったままで
-    モータ状態も届き続けるため、画面は正常に見えたままになる —— 位置制御ループと
-    同期監視について `_safety_state` の docstring が言っているのと同じ状況。
-    """
-
     def _fixture(self) -> tuple[ServerFixture, GenericTargetRefresher]:
         fx = ServerFixture.build()
         mgr = mock_can_manager(("conveyor",))
@@ -1087,17 +932,7 @@ class TestTargetRefresherLivenessBroadcast:
             await refresher.stop()
 
 
-# ---------------------------------------------------------------------- #
-#  停止理由の保持
-# ---------------------------------------------------------------------- #
-
-
 async def _latest_e_stop_state(ws) -> dict:
-    """流れてきた e_stop_state のうち最後の 1 通を返す。
-
-    再配信のたびに理由が載り直しているかは「最初の 1 通」では見えない。
-    停止中に UI が見続けるのは最後に届いた 1 通なので、そこを見る。
-    """
     latest: dict | None = None
     for msg in await drain(ws, timeout=0.1, limit=80):
         if msg.get("type") == "e_stop_state":
@@ -1107,14 +942,6 @@ async def _latest_e_stop_state(ws) -> dict:
 
 
 class TestEStopReasonIsRetained:
-    """停止理由はサーバーが保持し、再配信のたびに載せ直す。
-
-    `_broadcast_state` は停止中に毎ティック e_stop_state を送り直す。理由を
-    サーバー側が持っていないと、自動検知で止まった直後の 1 通だけが本当の原因を
-    載せ、以降の再配信が UI の表示を「操縦者の停止操作」へ塗り替えてしまう。
-    原因を説明できる唯一の情報が、それ自身の正反対で上書きされる形になる。
-    """
-
     async def test_理由は定期再配信でも保たれる(self) -> None:
         fx = _build_fixture()
         fx.freeze_broadcast()
@@ -1137,8 +964,6 @@ class TestEStopReasonIsRetained:
             await ws.close()
 
     async def test_操縦者の停止操作は判明済みの原因を塗り潰さない(self) -> None:
-        # 機体側の自動検知で止まった後に操縦者が E-STOP を押すのは普通の流れ。
-        # そこで理由が消えると、画面は「操縦者が押した」という正反対の説明に変わる
         fx = _build_fixture()
         fx.freeze_broadcast()
         app = fx.create_app()
@@ -1181,11 +1006,6 @@ class TestEStopReasonIsRetained:
 
 
 def _health_with_feedback_at(mgr, at: float) -> HealthSnapshot:
-    """フィードバック受信時刻だけを指定した OK スナップショット。
-
-    「解除フレームより前に届いたフィードバック」を作るには時刻そのものを
-    置く必要があり、実フレームを流しても時計を狙った位置には置けない。
-    """
     return HealthSnapshot(
         timestamp=time.time(),
         overall=BusHealth.OK,
@@ -1218,13 +1038,6 @@ def _health_with_feedback_at(mgr, at: float) -> HealthSnapshot:
 
 
 class TestBoardReportedEStop:
-    """基板が FEEDBACK の緊急停止ビットで報告した停止を、サーバー全体へ伝播すること。
-
-    自作 DC モタドラは物理停止スイッチの押下と CAN 初期化失敗をラッチへ落とす。
-    サーバーが拾わないと **機体は止まっているのに UI は平常のまま** になり、
-    操縦者はシーケンスが進まない理由を画面から知る手段が無い。
-    """
-
     def _fixture_with_generic(self, *, e_stop: bool) -> tuple[ServerFixture, GenericDriver]:
         fx = _build_fixture()
         drv = GenericDriver("conveyor", 0x11, control_type=ControlMode.DUTY)
@@ -1240,7 +1053,6 @@ class TestBoardReportedEStop:
         assert fx.e_stop_active is True
 
     async def test_reason_names_the_motor(self) -> None:
-        """止まった理由が「どのロボットのどのモータか」まで分かること。"""
         fx, _ = self._fixture_with_generic(e_stop=True)
 
         await fx.publish_state()
@@ -1258,7 +1070,6 @@ class TestBoardReportedEStop:
         assert fx.e_stop_active is False
 
     async def test_mock_motors_without_the_flag_are_ignored(self) -> None:
-        """自作モタドラ以外 (M3508 / EDULITE) を巻き込まないこと。"""
         fx = _build_fixture()
 
         await fx.publish_state()
@@ -1266,12 +1077,6 @@ class TestBoardReportedEStop:
         assert fx.e_stop_active is False
 
     async def test_release_is_not_undone_by_feedback_from_before_the_clear(self) -> None:
-        """解除フレーム送信より前に届いたフィードバックで停止をかけ直さないこと。
-
-        解除は「解除フレーム送信 → 基板がラッチを外す → 次の FEEDBACK」の順に
-        伝わる。送信前のフィードバックに残った緊急停止ビットを信じると、解除した瞬間に
-        サーバーが自分で止め直し、**二度と解除できない機体** になる。
-        """
         fx, _ = self._fixture_with_generic(e_stop=True)
         await fx.publish_state()
         assert fx.e_stop_active is True
@@ -1280,24 +1085,14 @@ class TestBoardReportedEStop:
         stale_at = time.time()
         await fx.command({"type": "e_stop_release"})
         assert fx.e_stop_active is False
-        # 解除フレームを送り終えるまで (= 再励磁の完了まで) 待つ。基板の報告を
-        # 信じてよいのはそれ以降に届いたフィードバックだけ
         await fx.wait_reactivation()
 
-        # 解除フレームより前に届いていたフィードバック (緊急停止ビットは立ったまま)
         mgr.health.side_effect = lambda **_kwargs: _health_with_feedback_at(mgr, stale_at)
         await fx.publish_state()
 
         assert fx.e_stop_active is False
 
     async def test_再励磁の最中は基板の報告で止め直さない(self) -> None:
-        """解除フレームがまだ届いていない基板の報告を信じないこと。
-
-        再励磁は別タスクで走るので、そのあいだは「解除済みだが基板はまだ停止中」と
-        いう窓ができる。ここで基板の緊急停止ビットを拾うと、解除した瞬間に
-        サーバーが自分で止め直し、**二度と解除できない機体**になる
-        (判定に使う `_board_e_stop_ignore_before` が確定するのも再励磁の後)。
-        """
         fx, _ = self._fixture_with_generic(e_stop=True)
         gate = asyncio.Event()
 
@@ -1313,7 +1108,6 @@ class TestBoardReportedEStop:
             await fx.command({"type": "e_stop_release"})
             assert fx.e_stop_active is False
 
-            # 再励磁の最中に、まだ緊急停止ビットの立ったフィードバックが届く
             await fx.publish_state()
             assert fx.e_stop_active is False, "再励磁の最中に基板の報告で止め直した"
         finally:
@@ -1321,12 +1115,6 @@ class TestBoardReportedEStop:
         await fx.wait_reactivation()
 
     async def test_still_pressed_after_release_stops_again(self) -> None:
-        """解除しても基板がまだ止まっているなら、改めて停止させること。
-
-        物理スイッチが押されたままなら、ファームは解除フレームを受けても
-        次のループで再ラッチする。そこで動けるようにしてしまうと、
-        「押しているのに機体が動く」状態を UI が作り出すことになる。
-        """
         fx, _ = self._fixture_with_generic(e_stop=True)
         await fx.publish_state()
 
@@ -1334,14 +1122,11 @@ class TestBoardReportedEStop:
         assert fx.e_stop_active is False
         await fx.wait_reactivation()
 
-        # 解除後に届いたフィードバックでも緊急停止ビットが立っている
         await fx.publish_state()
 
         assert fx.e_stop_active is True
 
 
-# 自作モタドラ 1 枚と、本当に励磁の要るモータ (EDULITE 05 / DM3520 の代役) 1 台を
-# 各ロボットへ載せるための定数。励磁フレームは ID だけで見分けられればよい
 _BOARD_CAN_ID = 0x11
 _ENERGIZE_FRAME_ID = 0x123
 
@@ -1358,11 +1143,6 @@ def _is_energize(msg: object) -> bool:
 
 
 def _is_broadcast_clear(msg: object) -> bool:
-    """仕様書 §3.5 のブロードキャスト解除 (CAN ID 0x0FF / data 01 5A A5)。
-
-    エンコーダの戻り値と突き合わせると「実装が実装と一致する」ことしか見られない
-    ので、ワイヤ上の形をそのまま書く。
-    """
     return (
         isinstance(msg, can.Message)
         and msg.arbitration_id == 0x0FF
@@ -1370,21 +1150,10 @@ def _is_broadcast_clear(msg: object) -> bool:
     )
 
 
-#: 送信 1 通の記録: (バス名, フレーム, 送信時刻)
 _Sent = list[tuple[str, object, float]]
 
 
 def _fixture_with_boards(*, with_energized_motor: bool = True) -> tuple[ServerFixture, _Sent, dict]:
-    """2 台のロボットへ実 CANManager を挿し、送信フレームを 1 本の列に記録する。
-
-    **バスごとに数えると見たい不変条件が消える。** 守りたいのは「全ロボットの
-    ラッチ解除が、どのロボットの励磁よりも先に出ること」で、これはロボットを
-    またいだ *順序* でしか表せない。
-
-    各ロボットの 2 本目のバスには自作モタドラを 1 台も登録しない (実機の
-    `can_m3508` に相当)。**ブロードキャスト解除はそこへも出なければならない** ——
-    PC が把握していないチャンネルを救えるのはその経路だけ。
-    """
     fx = ServerFixture.build()
     sent: _Sent = []
     boards: dict[str, GenericDriver] = {}
@@ -1398,8 +1167,6 @@ def _fixture_with_boards(*, with_energized_motor: bool = True) -> tuple[ServerFi
         mgr.add_motor(f"can{index}", board)
         boards[name] = board
         if with_energized_motor:
-            # 本当に励磁するモータ (EDULITE 05 / DM3520) の代役。こちらは従来どおり
-            # 中断ありの経路を通らなければならない
             energized = mock_driver(f"{name}_arm", 0x21)
             energized.emergency_stop_message.return_value = None
             energized.activation_steps.return_value = [
@@ -1416,14 +1183,6 @@ def _fixture_with_boards(*, with_energized_motor: bool = True) -> tuple[ServerFi
 
 
 class TestLatchClearIsNeverAborted:
-    """**ラッチ解除は中断しない。中断すべきは「励磁」であってラッチ解除ではない。**
-
-    実機で起きた形: 解除の途中で緊急停止が再発動すると、ロボットを順に処理する
-    再励磁は 2 台目へ解除フレームを 1 通も送らない。ラッチの外れない基板は
-    緊急停止ビットを報告し続け、それを拾ったサーバーが停止を再発動する ——
-    解除操作のたびに同じロボットだけが取り残され、**永久に復帰できない**。
-    """
-
     async def test_ラッチ解除は全ロボットの励磁より先に出る(self) -> None:
         fx, sent, _boards = _fixture_with_boards()
         await fx.activate_e_stop(reason="停止")
@@ -1452,7 +1211,6 @@ class TestLatchClearIsNeverAborted:
             )
 
     async def test_解除直後に停止が再発動しても2台目へ届く(self) -> None:
-        """1 台目の処理中に緊急停止が戻っても、2 台目のラッチは外しに行くこと。"""
         fx, sent, _boards = _fixture_with_boards()
         await fx.activate_e_stop(reason="停止")
 
@@ -1461,7 +1219,6 @@ class TestLatchClearIsNeverAborted:
 
         async def _clear_then_e_stop(**kwargs: object) -> list[str]:
             uncleared = await clear_main_hand(**kwargs)
-            # 解除フレームを送った直後に基板がまだ止まっていた場合と同じ状況
             await fx.activate_e_stop(reason="解除直後に再発動")
             return uncleared
 
@@ -1475,23 +1232,12 @@ class TestLatchClearIsNeverAborted:
             "2 台目のロボットへラッチ解除フレームが 1 通も飛んでいない"
         )
         assert fx.e_stop_active is True
-        # 励磁の中断は従来どおり効いていること (ラッチ解除だけを中断の外に出す)
         assert not any(_is_energize(msg) for _bus, msg, _at in sent), (
             "緊急停止が再発動しているのに励磁フレームが飛んでいる"
         )
 
 
 class TestEStopClearIsBroadcast:
-    """**停止と解除は対称でなければならない。**
-
-    停止はブロードキャスト `0x0FF` でバス上の全基板・全チャンネルをラッチさせる
-    のに、解除が device_id 宛の個別送信だけだと **yaml に登録されたモータにしか
-    届かない**。ベンチ設定で一部だけ動かす / 増設した基板が yaml に無い /
-    片方のロボットだけ起動する、のいずれでも PC の管轄外は永久にラッチされ、
-    基板の LED は 1 チャンネルでもラッチがあれば橙になるので全基板が橙のまま
-    戻らない (実機で発生)。
-    """
-
     async def test_全バスへブロードキャスト解除が飛ぶ(self) -> None:
         fx, sent, _boards = _fixture_with_boards()
         await fx.activate_e_stop(reason="停止")
@@ -1506,7 +1252,6 @@ class TestEStopClearIsBroadcast:
         )
 
     async def test_yamlに無いdevice_idもブロードキャストで救われる(self) -> None:
-        """個別送信では届かない基板が、バスへの 1 通で救われることを見る。"""
         fx, sent, _boards = _fixture_with_boards(with_energized_motor=False)
         await fx.activate_e_stop(reason="停止")
         sent.clear()
@@ -1514,7 +1259,6 @@ class TestEStopClearIsBroadcast:
         await fx.command({"type": "e_stop_release"})
         await fx.wait_reactivation()
 
-        # 実機で取り残された sub_hand のサーボ。yaml に無いので個別解除は飛ばない
         unregistered = 0x43
         assert not any(_is_latch_clear(msg, unregistered) for _bus, msg, _at in sent)
         for bus_name in ("can0", "can0_spare", "can1", "can1_spare"):
@@ -1523,12 +1267,6 @@ class TestEStopClearIsBroadcast:
             )
 
     async def test_ブロードキャスト解除は基板報告の起点より前に送る(self) -> None:
-        """順序が逆だと、まだ解除の届いていない基板の報告で自分で止め直す。
-
-        `_board_e_stop_ignore_before` は「これより後のフィードバックなら解除後の
-        報告として信じてよい」という起点なので、解除フレームを送り終えてから
-        置かなければならない。
-        """
         fx, sent, boards = _fixture_with_boards(with_energized_motor=False)
         board = boards["main_hand"]
         mgr = fx.can_manager("main_hand")
@@ -1546,8 +1284,6 @@ class TestEStopClearIsBroadcast:
             (at for bus, msg, at in sent if bus == "can0" and _is_broadcast_clear(msg)), None
         )
         assert broadcast_at is not None, "ブロードキャスト解除が送られていない"
-        # ブロードキャストを送ったのと同じ瞬間に届いたフィードバック。基板はまだ
-        # 解除を受け取っていないので、これを信じて止め直してはならない
         mark_feedback_at(mgr, board.name, broadcast_at)
         await fx.publish_state()
 

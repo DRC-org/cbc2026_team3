@@ -9,7 +9,6 @@ function step(index: number, label: string, requireTrigger = false): SequenceSte
   return { index, label, require_trigger: requireTrigger };
 }
 
-// 1 → (2) → 3 → 4(✋) → 5 → 6(✋)
 const STEPS: SequenceStepInfo[] = [
   step(0, "初期位置へ移動"),
   step(1, "前進", true),
@@ -46,8 +45,6 @@ function mount(state: RobotState, extra: Partial<Parameters<typeof ActionPanel>[
     ...extra,
   };
   const view = renderWithRobot(<ActionPanel {...props} />);
-  // パネルは Panel が描く <section> 1 つ。「同じ事実が 2 箇所に出ていないか」は
-  // 個々の要素ではなくこの器の全文でしか数えられない
   const panel = view.container.querySelector("section");
   if (!panel) throw new Error("ActionPanel のパネルが見つからない");
   return { ...props, panel: panel as HTMLElement };
@@ -60,7 +57,6 @@ describe("ActionPanel", () => {
 
       expect(screen.getByText(/待機中/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "シーケンスを先頭から開始" })).toBeEnabled();
-      // 以前はここで TriggerButton が RUNNING を出し、同じ画面で表示が食い違っていた
       expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
     });
 
@@ -85,8 +81,6 @@ describe("ActionPanel", () => {
     });
 
     it("STOP で止めた後は RUNNING を出さず、STOP も押せない", () => {
-      // running を推測していた頃は step_index > 0 だけで「実行中」と表示していたため、
-      // 止まっている機体に対して RUNNING と STOP 可能を出し続けていた
       mount(makeState({ step_index: 3, running: false }));
 
       expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
@@ -94,26 +88,17 @@ describe("ActionPanel", () => {
     });
   });
 
-  /**
-   * `sequence_stop` は `step_index` を保持したまま降りるので、画面は
-   * 「4/6・現在ステップ○○」を出したままになる。そこで押す START は**ステップ 0 へ
-   * 戻って全工程を走り直す** —— 中断姿勢のまま先頭の動作が走る。同じ「任意ステップ
-   * から再開」である `sequence_jump` は確認モーダルを挟むのに、より危険なこちらだけが
-   * 素通しで、しかもボタンは「START」、状態は「待機中」と表示していた。
-   */
   describe("中断位置から押す START", () => {
     it("先頭から走り直すことをボタンと状態表示の両方で言う", () => {
       mount(makeState({ step_index: 3, running: false }));
 
       expect(screen.getByRole("button", { name: "シーケンスを先頭から再開" })).toBeEnabled();
       expect(screen.getByText("先頭から再開")).toBeInTheDocument();
-      // 「待機中 — START で開始」のままだと、表示と実際の動作が食い違う
       expect(screen.getByText(/先頭から走り直します/)).toBeInTheDocument();
       expect(screen.queryByText(/待機中/)).not.toBeInTheDocument();
     });
 
     it("一度も走っていない状態は今までどおり START", () => {
-      // 試合開始直後の 1 回目に確認を挟むと、最も急ぐ場面で手数が増える
       mount(makeState());
 
       expect(screen.getByRole("button", { name: "シーケンスを先頭から開始" })).toBeEnabled();
@@ -121,16 +106,9 @@ describe("ActionPanel", () => {
     });
   });
 
-  /**
-   * 到達タイムアウト・左右ずれ・零点確定失敗はステップ単位の try で握られるので、
-   * これを出さないと画面は「待機中」へ戻るだけになる。**偏差監視の第 1 段
-   * (`AxisSyncError`) が操縦者から無音になる。**
-   */
   describe("シーケンスの失敗理由", () => {
     it("平常時は 1 ピクセルも出さない", () => {
       mount(makeState());
-      // NEXT の予告 (「N ステップ走って『…』で停止」) と紛れないよう、
-      // 失敗行だけが持つ「ステップ <番号>「」の形で引く
       expect(screen.queryByText(/ステップ \d+「/)).not.toBeInTheDocument();
     });
 
@@ -142,17 +120,11 @@ describe("ActionPanel", () => {
         }),
       );
 
-      // 理由だけでは「どこまで動いて止まったか」= 今の機体の姿勢が分からない
       expect(screen.getByText(/ステップ 3「把持姿勢へ」で停止/)).toBeInTheDocument();
       expect(screen.getByText(/偏差 3.1/)).toBeInTheDocument();
     });
   });
 
-  /**
-   * `send` は切断中に false を返すだけなので、塞がないと「押したのにボタンは
-   * 有効なまま・機体は動かない・トーストも出ない」になる。試合中に最も多く押す
-   * NEXT を含む主操作が全部その形だった。
-   */
   describe("切断中", () => {
     const DISCONNECTED = { blockedReason: "切断中のため送信できません" };
 
@@ -178,21 +150,14 @@ describe("ActionPanel", () => {
     });
   });
 
-  /**
-   * ステップの並びそのものは下の一覧が描く。ここが答えるのは
-   * 「NEXT を押すと何ステップ走って、どこで止まるか」の 2 つだけ。
-   */
   describe("NEXT で走る範囲の予告", () => {
     it("走るステップ数と、止まるステップ名を出す", () => {
-      // step_index=1 (前進) の次は 3(把持姿勢へ) → 4(ハンド閉じる ✋) で停止
       mount(makeState({ step_index: 1, running: true, waiting_trigger: true }));
 
-      // 停止するステップ名を落とすと、どこまで動くのかが分からなくなる
       expect(screen.getByText("2 ステップ走って「ハンド閉じる」で停止")).toBeInTheDocument();
     });
 
     it("許可待ちが現れないまま終端まで走る場合は、止まらないことを言う", () => {
-      // 停止する場合と同じ文言にすると、押したら終端まで止まらないことが伝わらない
       const straight: SequenceStepInfo[] = [
         step(0, "初期位置へ移動"),
         step(1, "搬送"),
@@ -223,28 +188,15 @@ describe("ActionPanel", () => {
     });
   });
 
-  /**
-   * 同じパネルに番号が 2 回出ていた（ヘッダー行の右端と巨大表示）。
-   * 操縦者は同じ数字を 2 度読むことになる。
-   */
   describe("ステップ番号", () => {
     it("現在番号と総数を 1 箇所だけで出す", () => {
       const { panel } = mount(makeState({ step_index: 2, running: true }));
 
-      // 巨大表示は総数を一回り小さく添えるため番号と総数を別の span へ分けている。
-      // 単一テキストノードでは引けないので、器の全文を正規化して出現回数を数える
-      // —— ここで見たいのは「見つかるか」ではなく「1 回しか出ていないか」である
       const text = (panel.textContent ?? "").replaceAll(/\s+/g, "");
       expect(text.match(/3\/6/g) ?? []).toHaveLength(1);
     });
   });
 
-  /**
-   * シーケンスが 1 件も届いていない状態 (`total_steps === 0`)。サーバー側の
-   * 定義ミスや起動途中で実際に起こりうる。ここを暗黙のフォールバックに任せると、
-   * 状態表示は「待機中 — START で開始」なのにボタンだけが「RUNNING」を主張し、
-   * 操縦者は同じ画面から相反する 2 つの事実を読むことになる。
-   */
   describe("シーケンス未取得", () => {
     it("チップとボタンが同じことを言う", () => {
       mount(makeState({ total_steps: 0, steps: [], current_step: null }));
@@ -257,7 +209,6 @@ describe("ActionPanel", () => {
     it("開始も停止もさせない (押せるボタンが無い)", () => {
       mount(makeState({ total_steps: 0, steps: [], current_step: null }));
 
-      // START を出すと、ステップの無いシーケンスを開始させることになる
       expect(screen.queryByRole("button", { name: "シーケンスを先頭から開始" })).toBeNull();
       expect(screen.getByRole("button", { name: "シーケンスを通常停止" })).toBeDisabled();
       expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();

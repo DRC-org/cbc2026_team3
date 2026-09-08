@@ -11,8 +11,6 @@ describe("EStopOverlay", () => {
   });
 
   it("サーバーが載せた停止理由を出す", () => {
-    // 最も危険なのは SyncMonitor による自動停止。理由が出ないと操縦者は
-    // 「誰かが押したのか、機体が壊れたのか」を画面から区別できず、復旧手順を選べない
     renderWithRobot(<EStopOverlay />, {
       eStopActive: true,
       eStopReason: "同期ずれを検知しました (y_axis)",
