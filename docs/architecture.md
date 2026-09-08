@@ -298,7 +298,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 
 | モジュール | 持つもの |
 |---|---|
-| `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**3 層すべてがここの `violation()` を呼ぶ** |
+| `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -489,25 +489,38 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 **起動ログに 3 値（`max_velocity` / `max_acceleration` / `velocity_ff`）を必ず出す** ——
 実行中に変更できず UI にも配信されないので、起動ログが唯一の読み口である。
 
-### 左右ペア軸の保護（3 層）
+### 左右ペア軸の保護（偏差監視の 3 段）
 
-`y_axis`（M3508 ×2）と `rotate`（EDULITE ×2）は機構的に直結する。位置定数 yaml の
-`motors:` で 1 論理軸に複数モータを束ね、逆回転は `scale` の符号で表す。
+機構的に直結した左右ペアは 4 組（`y_axis` = M3508 ×2 / `rotate` = EDULITE ×2 /
+`sub_rotate`・`sub_pitch` = サーボ ×2）。位置定数 yaml の `motors:` で 1 論理軸に複数モータを
+束ね、逆回転は `scale` の符号で表す。**偏差監視に載るのは `sync_tolerance` を書いた軸だけ**で、
+現状は `y_axis` と `rotate` の 2 組（サーボの 2 組が書いていない理由は
+`docs/mechanism_handoff.md` §2）。
 
-**判定と単位換算は `lib/axis_sync.py` に一本化してあり、3 層とも `SyncGroup.violation()` を呼ぶ。**
+**判定と単位換算は `lib/axis_sync.py` に一本化してあり、3 段とも `SyncGroup.violation()` を呼ぶ。**
 
-| 層 | 頻度 | debounce | ラッチ | 効果 |
-|---|---|---|---|---|
-| `sequence/engine.py` の `move_to`（`AxisHandle.sync_violation`） | move_to 完了時 1 回 | なし | なし | `AxisSyncError` でシーケンス停止 |
-| `control/position_loop.py`（`_check_deviation` / `SyncGuard`） | 200Hz | なし | あり | グループ全員を電流 0 |
-| `control/sync_monitor.py`（`_check_group`） | 50Hz | 2 サンプル | あり | **全体緊急停止** |
+| 段 | 効く軸 | 頻度 | debounce | ラッチ | 効果 |
+|---|---|---|---|---|---|
+| `sequence/engine.py` の `move_to`（`AxisHandle.sync_violation`） | `y_axis` / `rotate` | move_to 完了時 1 回 | なし | なし | `AxisSyncError` でシーケンス停止 |
+| `control/position_loop.py`（`_check_deviation` / `SyncGuard`） | **`y_axis` のみ** | 200Hz | なし | あり | グループ全員を電流 0 |
+| `control/sync_monitor.py`（`_check_group`） | `y_axis` / `rotate` | 50Hz | 2 サンプル | あり | **全体緊急停止** |
+
+**200Hz の段に載るのは全メンバが同じ位置制御ループに載る組だけ**（`main._attach_sync_groups`。
+外れた組は起動ログに「位置制御ループ外（`SyncMonitor` のみで監視）」と出る）。`rotate` は
+EDULITE なので M3508 の位置制御ループを持たず、この段には載らない。`move_to` の段は完了時に
+しか見ないので、**手動操縦中と零点確定中は 1 度も発火しない**（零点確定は
+`AxisHandle.set_target_value` を直に呼ぶ）。
 
 `lib/axis_sync.py` の公開 API は、`MotorSpec.to_command` / `to_value` / `to_tolerance`
 （人間の単位 ⇄ 指令単位の換算。`to_tolerance` は `abs()` を掛ける）、`SyncGroup.deviation()`
 （人間の単位へ逆換算した位置の `max - min`）、`SyncGroup.violation()`（唯一の境界。比較対象が
 2 個未満 = 途絶・未受信なら超過とみなさない）、`SyncGroup.corrections()`（同期補正の操作量）。
-保護は 3 層とも**止めるだけ**で、加えて**フィードバック途絶をペア単位で判定**する
-（片方が stale なら両方を電流 0）。
+偏差監視は 3 段とも**止めるだけ**で、加えて**フィードバック途絶をペア単位で判定**する
+（片方が stale なら両方を電流 0）—— ただしこれを持つのは `SyncGuard` だけなので、
+**効くのは `y_axis` のみ**である。`SyncMonitor` は途絶したメンバを判定から外すだけで、
+比較対象が 2 個未満になれば `violation()` は `None` を返し連続カウントも捨てる ——
+`rotate` は片側が途絶するとずれ判定そのものが成立しなくなる。**途絶を見て電流 0 へ落とす
+経路は `M3508PositionLoop` にしかない**ので、残った側は最後の目標を保持したまま駆動を続ける。
 
 #### 同期監視（`lib/control/sync_monitor.py`）
 
@@ -522,7 +535,8 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 駆動中にずれを縮める唯一の経路。`SyncGroup.corrections()` が「グループ平均へ引き戻す向き」の
 操作量を各モータの指令単位で返し、`M3508PositionLoop` が `PIDController.update(feedforward=…)`
 へ渡す。ゲインは `axes.<軸>.sync_kp` / `sync_limit`（§6。既定は `sync_kp: 0.0` = 補正なし）。
-補正を出さないのは①電流 0 に落とす周期 ②全員が位置制御中でない周期 の 2 つで、判断はグループ
+補正を出さないのは①電流 0 に落とす周期 ②全員が位置制御中でない周期 ③左右が同じ軸位置を
+目標にしていない周期（零点確定の整列段。`SyncGuard.skewed_groups()`）の 3 つで、判断はグループ
 単位。設計の根拠は [invariants.md](invariants.md) の「保護は止めるだけ。駆動中にずれを縮めるのは
 `sync_kp` だけである」。
 
@@ -753,7 +767,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 |---|---|
 | 判定 | シーケンスエンジンがそのまま担う（`tolerance` で到達判定、`duty` / `on_off` は `settle_s` の固定待ち） |
 | 駆動量 | **確認専用の値を持たない**。運用で使う位置名へ動かす |
-| ペア軸 | `move_to` は軸名しか受け付けないので、左右が同一フレームで同時に動く（除外しない） |
+| ペア軸 | `move_to` は軸名しか受け付けないので、左右へ同時に指令が飛ぶ（除外しない） |
 | ゲート | 環境側の条件（フェーズ・緊急停止・各ロボットの制御権）はサーバーが `environment_deny` として渡し、可否の判定は `MotorCheckController.deny_reason()` にしかない |
 | 排他 | 全ロボットに掛かる（どちらかが手動モード / シーケンス実行中なら拒否）。**周期タスクは 1 つも止めない**（`RobotServer._motor_check_pausables` は空を返す） |
 | 構成に無い軸 | `Sequence.restrict_to_axes()` が除外し、`excluded_steps`（欠けている軸まで）を同じ 1 通に載せる |
@@ -776,7 +790,9 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `manual_jog` | 直前の**手動目標**からの相対移動。同上 |
 
 指令経路はシーケンスと同一（同じ `MotorGroup` を共有し `AxisHandle` を通すので、緊急停止
-インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの 3 層保護がそのまま効く）。
+インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの偏差監視がそのまま効く。ただし
+`move_to` 完了時の段は手動では通らないので、効くのは常駐の段だけ —— `y_axis` は 200Hz と
+50Hz、`rotate` は 50Hz のみである）。
 **モータ単位の指令口を作らない**（UI にもモータ単位のジョグを出さない）。ジョグの起点は直前の
 手動目標値で、起点が無い（初回・緊急停止後）ときだけフィードバックから逆換算する。モータの
 目標値はモード切替で消さない（消すのはジョグの起点だけ）。範囲外の値は**拒否ではなくクランプ**
@@ -861,7 +877,7 @@ axes:                      # 換算: command = value * scale + offset
     command_unit: deg
     timeout_s: 4.0
     tolerance: 1.0
-    sync_tolerance: 10.0   # 左右のずれ許容（人間の単位）。超過で停止（§4 の 3 層）
+    sync_tolerance: 10.0   # 左右のずれ許容（人間の単位）。超過で停止（§4 の偏差監視）
     sync_kp: 16.0          # 同期補正のゲイン
     sync_limit: 1250       # sync_kp とセットで必須
     motion: { max_velocity: 200.0, max_acceleration: 1200.0, velocity_ff: 1.0 }
