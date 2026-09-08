@@ -717,9 +717,23 @@ export interface ManualAxis {
    * UI はフォールバック値を持たない。null なら色を付けず数値も判定しない。
    */
   sync_tolerance: number | null;
-  /** 位置定数に定義された状態名。プリセットボタンはここからしか作らない */
-  positions: string[];
+  /** 位置定数に定義されたプリセット。ボタンも可動範囲バーの目盛りもここからしか作らない */
+  positions: ManualPosition[];
   motors: string[];
+}
+
+/**
+ * プリセット 1 つ。位置定数 yaml に定義された状態名と、その人間の単位での値。
+ *
+ * **値は「そこがどこか」を描くためだけに載る。** 指令は名前で送る (`manual_move`)
+ * —— 数値を送る経路を作ると「定義した状態以外を送れない」保証が消える。
+ *
+ * `value` が null なのはサーバーが値を引けなかったとき。**0 で埋めてはならない**
+ * —— 可動範囲の下端に居ないプリセットが下端に描かれる。
+ */
+export interface ManualPosition {
+  name: string;
+  value: number | null;
 }
 
 export interface ManualState {

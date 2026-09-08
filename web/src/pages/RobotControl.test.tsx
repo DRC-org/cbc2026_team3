@@ -462,7 +462,10 @@ const MANUAL: ManualState = {
       manual: { min: -5, max: 30, steps: [1, 5] },
       deviation: 0.1,
       sync_tolerance: 1.0,
-      positions: ["home", "pick"],
+      positions: [
+        { name: "home", value: 0 },
+        { name: "pick", value: 20 },
+      ],
       motors: ["rotate_r", "rotate_l"],
     },
   ],

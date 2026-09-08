@@ -206,8 +206,14 @@
             ],
             "name": "y_axis",
             "positions": [
-              "home",
-              "work"
+              {
+                "name": "home",
+                "value": 0.0
+              },
+              {
+                "name": "work",
+                "value": 10.0
+              }
             ],
             "sync_tolerance": 2.0,
             "target": 4.0,
@@ -223,8 +229,14 @@
             ],
             "name": "gripper",
             "positions": [
-              "open",
-              "closed"
+              {
+                "name": "open",
+                "value": 5.0
+              },
+              {
+                "name": "closed",
+                "value": 0.0
+              }
             ],
             "sync_tolerance": null,
             "target": null,
@@ -240,8 +252,14 @@
             ],
             "name": "conveyor",
             "positions": [
-              "stop",
-              "run"
+              {
+                "name": "stop",
+                "value": 0.0
+              },
+              {
+                "name": "run",
+                "value": 0.3
+              }
             ],
             "sync_tolerance": null,
             "target": null,
@@ -442,8 +460,14 @@
             ],
             "name": "y_axis",
             "positions": [
-              "home",
-              "work"
+              {
+                "name": "home",
+                "value": 0.0
+              },
+              {
+                "name": "work",
+                "value": 10.0
+              }
             ],
             "sync_tolerance": 2.0,
             "target": 4.0,
@@ -459,8 +483,14 @@
             ],
             "name": "gripper",
             "positions": [
-              "open",
-              "closed"
+              {
+                "name": "open",
+                "value": 5.0
+              },
+              {
+                "name": "closed",
+                "value": 0.0
+              }
             ],
             "sync_tolerance": null,
             "target": null,
@@ -476,8 +506,14 @@
             ],
             "name": "conveyor",
             "positions": [
-              "stop",
-              "run"
+              {
+                "name": "stop",
+                "value": 0.0
+              },
+              {
+                "name": "run",
+                "value": 0.3
+              }
             ],
             "sync_tolerance": null,
             "target": null,

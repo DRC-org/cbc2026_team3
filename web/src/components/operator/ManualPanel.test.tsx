@@ -14,7 +14,10 @@ const Y_AXIS: ManualAxis = {
   manual: { min: -2, max: 20, steps: [0.5, 2] },
   deviation: 0.2,
   sync_tolerance: 2.0,
-  positions: ["home", "work"],
+  positions: [
+    { name: "home", value: 0 },
+    { name: "work", value: 15 },
+  ],
   motors: ["y_axis_r", "y_axis_l"],
 };
 
@@ -27,7 +30,10 @@ const GRIPPER: ManualAxis = {
   manual: null,
   deviation: null,
   sync_tolerance: null,
-  positions: ["open", "closed"],
+  positions: [
+    { name: "open", value: 5 },
+    { name: "closed", value: 0 },
+  ],
   motors: ["gripper"],
 };
 

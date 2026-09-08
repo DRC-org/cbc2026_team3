@@ -60,29 +60,35 @@ export function ManualAxisRow({
 
   /**
    * プリセットは位置定数に定義された状態名からしか作らない。自由入力を許さないことで
-   * 「定義した状態以外を送れない」保証が残る。
+   * 「定義した状態以外を送れない」保証が残る。**値が配信されていても指令は名前で送る**
+   * —— 数値で送る経路を作った時点でその保証が消える。
    *
    * **置き場所は軸の性格で変わる。** 連続軸ではジョグ・絶対値入力の下の段だが、
    * プリセットしか持たない軸 (電磁弁・ポンプ・壁) では見出しと同じ行へ入れて
    * 1 軸 1 行に収める —— 2 行のままだと電磁弁 6 + ポンプ 2 で 16 行になり、
    * 連続軸の下に隠れて画面外へ出る。
    */
+  const presetOnly = range === null;
   const presetButtons =
     axis.positions.length === 0 ? null : (
       <div className="flex flex-wrap items-center gap-1">
         {axis.positions.map((position) => (
           <Button
-            key={position}
+            key={position.name}
             disabled={disabled}
-            onClick={() => onMove(axis.name, position)}
-            aria-label={`${axis.name} を ${position} へ`}
+            onClick={() => onMove(axis.name, position.name)}
+            aria-label={`${axis.name} を ${position.name} へ`}
+            // 値は連続軸でだけ意味を持つ (バーの目盛りと同じ場所を指す)。
+            // 離散状態の軸では `1` / `0` が読み手に何も足さない
+            title={
+              presetOnly || position.value === null ? undefined : `${position.value} ${axis.unit}`
+            }
           >
-            {position}
+            {position.name}
           </Button>
         ))}
       </div>
     );
-  const presetOnly = range === null;
 
   return (
     <div

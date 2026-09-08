@@ -15,7 +15,10 @@ const PAIRED: ManualAxis = {
   manual: { min: -2, max: 20, steps: [0.5, 2] },
   deviation: 0.2,
   sync_tolerance: 2.0,
-  positions: ["home", "work"],
+  positions: [
+    { name: "home", value: 0 },
+    { name: "work", value: 15 },
+  ],
   motors: ["y_axis_r", "y_axis_l"],
 };
 
@@ -29,7 +32,10 @@ const DISCRETE: ManualAxis = {
   manual: null,
   deviation: null,
   sync_tolerance: null,
-  positions: ["open", "closed"],
+  positions: [
+    { name: "open", value: 5 },
+    { name: "closed", value: 0 },
+  ],
   motors: ["gripper"],
 };
 
@@ -43,7 +49,10 @@ const DUTY: ManualAxis = {
   manual: null,
   deviation: null,
   sync_tolerance: null,
-  positions: ["stop", "run"],
+  positions: [
+    { name: "stop", value: 0 },
+    { name: "run", value: 0.3 },
+  ],
   motors: ["conveyor"],
 };
 
@@ -408,6 +417,57 @@ describe("ManualAxisRow", () => {
       expect(screen.getByLabelText("gripper を closed へ")).toBeInTheDocument();
       // 定義に無い状態を送るボタンは存在しない
       expect(screen.queryByLabelText("gripper を half へ")).toBeNull();
+    });
+  });
+
+  /**
+   * プリセットが可動範囲のどこを指すのかは、それまで画面のどこにも出ていなかった
+   * (バーには現在値の線 1 本しか無く、`home` / `work` はその下のボタン列にあるだけ)。
+   */
+  describe("プリセットの位置", () => {
+    it("可動範囲バーに刻みとして出る", () => {
+      renderRow(PAIRED);
+
+      // 名前はバーへ書き込まない (4 つ並ぶ軸では必ず重なる)。対応は title が持つ
+      expect(screen.getByTitle("home 0 mm")).toBeInTheDocument();
+      expect(screen.getByTitle("work 15 mm")).toBeInTheDocument();
+    });
+
+    it("刻みは可動範囲に対する比で置く", () => {
+      // min -2 / max 20 の軸で work=15 は (15+2)/22 = 77.27%
+      renderRow(PAIRED);
+
+      expect(screen.getByTitle("work 15 mm")).toHaveStyle({ left: "77.27272727272727%" });
+    });
+
+    it("値が読めなかったプリセットは描かない (0 へ寄せない)", () => {
+      // 0 で埋めると、可動範囲の下端に居ないプリセットが下端に描かれる
+      renderRow({
+        ...PAIRED,
+        positions: [
+          { name: "home", value: 0 },
+          { name: "work", value: null },
+        ],
+      });
+
+      expect(screen.getByTitle("home 0 mm")).toBeInTheDocument();
+      expect(screen.queryByTitle(/^work/)).toBeNull();
+      // ボタンは残る。値が読めないことと指令できないことは別
+      expect(screen.getByLabelText("y_axis を work へ")).toBeInTheDocument();
+    });
+
+    it("連続軸ではボタンにも値を出す (バーの刻みと同じ場所を指す)", () => {
+      renderRow(PAIRED);
+
+      expect(screen.getByLabelText("y_axis を work へ")).toHaveAttribute("title", "15 mm");
+    });
+
+    it("離散状態の軸では値を出さない", () => {
+      // `open` = 5deg / `closed` = 0deg は読み手に何も足さない。可動範囲を
+      // 持たない軸には「そこがどこか」という問い自体が無い
+      renderRow(DISCRETE);
+
+      expect(screen.getByLabelText("gripper を open へ")).not.toHaveAttribute("title");
     });
   });
 
