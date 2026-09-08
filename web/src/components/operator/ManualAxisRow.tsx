@@ -9,35 +9,18 @@ import { evaluateSync } from "@/lib/syncVerdict";
 
 interface ManualAxisRowProps {
   axis: ManualAxis;
-  /** 操作できない理由。null なら操作できる */
   blockedReason: string | null;
-  /** キーボードの操作対象になっている軸か */
   selected: boolean;
-  /** この行を操作対象にする */
   onSelect: () => void;
   onJog: (axis: string, delta: number) => void;
   onSet: (axis: string, value: number) => void;
   onMove: (axis: string, position: string) => void;
 }
 
-/** 読めない値の表示。0 で埋めない (測っていない値を測ったように見せない) */
 function format(value: number | null, unit: string): string {
   return value === null ? "—" : `${value.toFixed(2)}${unit ? ` ${unit}` : ""}`;
 }
 
-/**
- * 手動操縦の 1 軸。**行の単位は論理軸であってモータではない。**
- *
- * モータ単位の操作面を作ってはならない —— 左右直結ペア (`y_axis` / `rotate`) が別々の
- * 時刻に動くとその場で機構が壊れる。ここにモータ名を出しているのは「どの実体が動くか」を
- * 示すためだけで、個別に押せる要素にはしない。
- *
- * 見た目は軸の性格で 3 通りに分かれるが、分岐の根拠はサーバー配信の `manual` と
- * `command_mode` だけで、軸名は一切見ていない。
- *
- * **キーボードの割り当ては選択中の行だけが張る。** 同じキーを全行が張ると、
- * どの軸へ飛ぶかが登録順という画面から読めない事情で決まる。
- */
 export function ManualAxisRow({
   axis,
   blockedReason,
@@ -51,7 +34,6 @@ export function ManualAxisRow({
   const disabled = blockedReason !== null;
   const rowRef = useRef<HTMLDivElement>(null);
 
-  // キーボードで選択を移したとき、畳まれた先が見えないと移動したことが分からない
   useEffect(() => {
     if (selected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
@@ -59,8 +41,6 @@ export function ManualAxisRow({
   return (
     <div
       ref={rowRef}
-      // 選択中は左のアクセントで示す。行全体を押せるボタンにはしない
-      // (行のどこを押しても何かが起きる面にすると、値を読むための視線移動が操作になる)
       className={cx(
         "flex flex-col gap-1 border-b border-base-300 border-l-[0.4rem] px-2 py-1.5 last:border-b-0",
         selected ? "border-l-info bg-base-200/40" : "border-l-transparent",
@@ -70,8 +50,6 @@ export function ManualAxisRow({
     >
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5">
         <span className="min-w-0 shrink-0 font-medium">{axis.name}</span>
-        {/* 実体が軸名と同じ単一モータ軸では出さない。同じ語を 2 度描くだけで、
-            「同じ事実を 2 度描かない」原則にも反する */}
         {axis.motors.length === 1 && axis.motors[0] === axis.name ? null : (
           <span className="shrink-0 text-[0.8em] text-base-content/45">
             {axis.motors.join(" / ")}
@@ -95,8 +73,6 @@ export function ManualAxisRow({
         </span>
       </div>
 
-      {/* `steps` は config が「空にはならない」と保証する境界だが、空で届いたら
-          刻みを 1 と捏造せず連続操作ごと出さない (捏造すると config に無い量が飛ぶ) */}
       {range && range.steps.length > 0 ? (
         <ContinuousControls
           axis={axis}
@@ -112,8 +88,6 @@ export function ManualAxisRow({
 
       {axis.positions.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1">
-          {/* プリセットは位置定数に定義された状態名からしか作らない。
-              自由入力を許さないことで「定義した状態以外を送れない」保証が残る */}
           {axis.positions.map((position) => (
             <Button
               key={position}
@@ -130,11 +104,6 @@ export function ManualAxisRow({
   );
 }
 
-/**
- * 目標までの残り。**現在値と目標値の引き算そのものは新しい事実ではない**が、
- * 「あと何 mm か」は操縦者が毎回頭でやっている計算で、桁を読み違えると
- * 行き過ぎに気付くのが 1 手遅れる。
- */
 function Delta({ value, target }: { value: number | null; target: number | null }) {
   if (value === null || target === null) return null;
   const delta = target - value;
@@ -147,16 +116,9 @@ function Delta({ value, target }: { value: number | null; target: number | null 
   );
 }
 
-/**
- * 左右直結ペアのずれ。**平常時は静かにし、許容差へ近づいたときだけ主張する。**
- *
- * 数値そのものは常に出す。ここが空欄だと「揃っている」のか「測れていない」のかを
- * 画面から区別できず、`sync_tolerance` を詰める作業が勘になる。
- */
 function SyncIndicator({ axis }: { axis: ManualAxis }) {
   const verdict = evaluateSync(axis);
   const { deviation, sync_tolerance: tolerance } = axis;
-  // ずれようのない軸 (単独モータ) と測れない軸には語ることが無い
   if (typeof deviation !== "number") return null;
 
   const text = `ずれ ${deviation.toFixed(2)}${axis.unit ? ` ${axis.unit}` : ""}`;

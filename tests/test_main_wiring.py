@@ -1,12 +1,3 @@
-"""main.py の組み立て (composition root) が正しく配線されているかを検証する。
-
-``main`` の関数はすべて ``_`` 付きで公開されているのは ``main()`` だけなので、テストが
-private を掴んでいるのはカプセル化の破りではない。ここで確かめる事実 (M3508 の載って
-いないバスに位置制御ループを作らない / 同期グループをループへ結び付ける / 未知の
-control_type を起動時に弾く) はどれも取り違えると機構が壊れるので、``main()`` の起動
-(実バスと実 config が要る) を通してしか触れない状態にはできない。
-"""
-
 from __future__ import annotations
 
 import ast
@@ -70,8 +61,6 @@ _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
 
 class _StubCANManager:
-    """MotorHandle / M3508PositionLoop が触る API だけを実装したスタブ。"""
-
     def __init__(self) -> None:
         self.sent: list[tuple[str, can.Message]] = []
         self.sent_by_motor: list[tuple[str, can.Message]] = []
@@ -97,7 +86,6 @@ class _DummySequence(Sequence):
 
 
 def _robot(config: dict) -> RobotConfig:
-    """検証済み設定へ通す。main.py 側は生 dict を受け取らない (誤記は起動時に弾く)。"""
     return load_robot_config(config, source="test.yaml")
 
 
@@ -117,7 +105,6 @@ def _m3508_config(**pid_overrides: object) -> dict:
 
 class TestLoadPidConfig:
     def test_defaults_when_pid_section_missing(self) -> None:
-        """pid セクションが無い M3508 は既定ゲインで動く (起動失敗にはしない)。"""
         result = _load_pid_config("lift_motor", None)
 
         assert result == _DEFAULT_PID
@@ -156,14 +143,12 @@ class TestLoadPidConfig:
         assert result["integral_limit"] is None
 
     def test_null_integral_limit_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
-        """integral_limit の null は「制限なし」という正当な指定なので警告しない。"""
         with caplog.at_level(logging.WARNING):
             _load_pid_config("lift_motor", {"integral_limit": None})
 
         assert caplog.records == []
 
     def test_null_numeric_key_falls_back_to_default(self) -> None:
-        """書きかけの yaml (null) で起動を壊さず、安全側の既定値を使う。"""
         result = _load_pid_config("lift_motor", {"kp": None, "output_limit": None})
 
         assert result["kp"] == _DEFAULT_PID["kp"]
@@ -187,7 +172,6 @@ class TestBuildPositionPid:
         assert pid.kd == 0.1
 
     def test_output_range_narrowed_by_output_limit(self) -> None:
-        """機構未確定のうちは電流上限を絞る。C620 のフルスケールは使わない。"""
         cfg = _motor("lift_motor", _m3508_config(output_limit=2000)["motors"]["lift_motor"])
 
         pid = _build_position_pid(cfg)
@@ -196,7 +180,6 @@ class TestBuildPositionPid:
         assert pid.output_min == -2000.0
 
     def test_output_limit_capped_at_current_max(self) -> None:
-        """config で C620 の範囲外を指定してもハード上限を超えない。"""
         cfg = _motor("lift_motor", _m3508_config(output_limit=999999)["motors"]["lift_motor"])
 
         pid = _build_position_pid(cfg)
@@ -257,7 +240,6 @@ class TestBuildPositionLoops:
         assert loops == {}
 
     def test_same_bus_m3508s_share_single_loop(self) -> None:
-        """C620 は 1 フレームに 4 モータ分を載せるため、バスあたり 1 ループでなければならない。"""
         config = {
             "robot_name": "r",
             "motors": {
@@ -305,12 +287,10 @@ class TestBuildPositionLoops:
         assert set(loops) == {"bus_a", "bus_b"}
 
     async def test_feedback_timeout_is_propagated(self) -> None:
-        """config の health.feedback_timeout_ms がループの途絶判定に効いている。"""
         config = _m3508_config()
         driver = M3508Driver("lift_motor", can_id=1)
         manager = _StubCANManager()
         feed_m3508(driver, deg=0.0)
-        # 0.3 秒前のフィードバックを最後の受信とする
         manager.feedback_at["lift_motor"] = time.time() - 0.3
 
         strict = _build_position_loops(
@@ -366,7 +346,6 @@ class TestWireRobotMotors:
         assert set(seq.motors.names) == {"lift_motor", "gripper"}
 
     async def test_m3508_target_goes_through_position_loop(self) -> None:
-        """target_sinks 経由になっていれば、set_position は直接 CAN 送信しない。"""
         _, manager, _, seq, loops = self._wire([False])
 
         await seq.motors.lift_motor.set_target(ControlMode.POSITION, 42.0)
@@ -382,7 +361,6 @@ class TestWireRobotMotors:
         assert [name for name, _ in manager.sent_by_motor] == ["gripper"]
 
     async def test_estop_checker_blocks_motor_group(self) -> None:
-        """緊急停止中はシーケンスからモータへ指令を出せない。"""
         flag = [False]
         _, _, _, seq, _ = self._wire(flag)
 
@@ -394,7 +372,6 @@ class TestWireRobotMotors:
             await seq.motors.gripper.set_target(ControlMode.POSITION, 10.0)
 
     async def test_estop_checker_reaches_position_loop(self) -> None:
-        """実行中ステップが出した目標も、緊急停止で位置制御ループ側が破棄する。"""
         flag = [False]
         _, manager, _, seq, loops = self._wire(flag)
         loop = loops[0]
@@ -410,12 +387,6 @@ class TestWireRobotMotors:
 
 
 class TestBuildManualController:
-    """手動操縦の指令口が、シーケンスと同じ MotorGroup を共有していること。
-
-    別の MotorGroup を組むと、緊急停止インターロック・M3508 の PID 迂回・再送対象が
-    2 セットに分かれ、「そちらから出した指令だけが停止中も通る」形でしか現れない。
-    """
-
     def _build(self, estop_flag: list[bool]):
         config = _m3508_config()
         config["motors"]["gripper"] = {
@@ -455,7 +426,6 @@ class TestBuildManualController:
         return manager, seq, loops, _build_manual_controller(seq, positions)
 
     async def test_m3508_への手動指令も位置制御ループを経由する(self) -> None:
-        # 別グループを組むと M3508 へ位置指令が直接飛び、C620 に受理されず黙って効かない
         manager, _, loops, manual = self._build([False])
 
         await manual.set_value("lift", 4.0)
@@ -474,7 +444,6 @@ class TestBuildManualController:
             await manual.move_to_position("gripper", "open")
 
     async def test_自作モタドラの手動目標が再送対象へ載る(self) -> None:
-        # 再送が効かないと、手動で開いたグリッパが 500ms で戻る
         manager, seq, _, manual = self._build([False])
         refreshers = _build_target_refreshers(
             seq.motors,
@@ -493,8 +462,6 @@ class TestBuildManualController:
 
 
 class TestBuildTargetRefresher:
-    """周期送信が要るモータだけを、種別ごとに別のタスクへ束ねる配線。"""
-
     def _wire(self, extra_motors: dict | None = None, extra_config: dict | None = None) -> tuple:
         config = _m3508_config()
         config["motors"]["gripper"] = {
@@ -525,7 +492,6 @@ class TestBuildTargetRefresher:
         return {"sub_slide": {"driver": "dm3520", "bus": "generic_bus", "can_id": 1}}
 
     def test_only_generic_motors_are_refreshed(self) -> None:
-        """M3508 は位置制御ループが 200Hz で送り続けるので再送対象ではない。"""
         manager, motors, seq = self._wire()
 
         refreshers = _build_target_refreshers(
@@ -553,11 +519,6 @@ class TestBuildTargetRefresher:
         )
 
     def test_dm3520_gets_its_own_refresher(self) -> None:
-        """**自作モタドラと同じタスクに束ねてはならない。**
-
-        目標を持たないモータの扱いが正反対 —— 自作モタドラは送ってはならず (起動直後に
-        コンベアが回り出す)、DM3520 は送らなければならない (問い合わせ駆動)。
-        """
         manager, motors, seq = self._wire(
             extra_motors={"sub_slide": Dm3520Driver("sub_slide", can_id=1)},
             extra_config=self._slide_config(),
@@ -570,12 +531,6 @@ class TestBuildTargetRefresher:
         assert [r.motor_names for r in refreshers] == [("gripper",), ("sub_slide",)]
 
     def test_edulite_gets_a_refresher_too(self) -> None:
-        """**EDULITE 05 も問い合わせ駆動である。** 自発的にはフィードバックを返さない。
-
-        実機は励磁したまま 13 秒放置してフィードバック 0 通 (届いたのは起動時に PC が
-        送ったフレームへの応答 20 通だけ)。再送しないと操縦していない間じゅう
-        ``MotorHealth.STALE`` になり、症状は「動くのに常に赤い」だけ。
-        """
         manager, motors, seq = self._wire(
             extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
             extra_config={"rotate_r": {"driver": "edulite05", "bus": "generic_bus", "can_id": 1}},
@@ -588,11 +543,6 @@ class TestBuildTargetRefresher:
         assert ("rotate_r",) in [r.motor_names for r in refreshers]
 
     async def test_edulite_is_polled_even_without_a_target(self) -> None:
-        """**目標を持たないモータへも送る。** ここが自作モタドラとの決定的な違い。
-
-        送らないと「励磁して待機しているだけの状態」が丸ごと観測できなくなる
-        (フィードバックが 1 通も来ないので STALE になる)。
-        """
         manager, motors, seq = self._wire(
             extra_motors={"rotate_r": Edulite05Driver("rotate_r", can_id=1)},
             extra_config={"rotate_r": {"driver": "edulite05", "bus": "generic_bus", "can_id": 1}},
@@ -608,7 +558,6 @@ class TestBuildTargetRefresher:
         assert "rotate_r" in [name for name, _ in manager.sent_by_motor]
 
     async def test_estop_checker_blocks_resend(self) -> None:
-        """再送は停止指令を上書きする。緊急停止中は 1 通も出してはならない。"""
         manager, motors, seq = self._wire()
         flag = [False]
         refreshers = _build_target_refreshers(
@@ -639,11 +588,6 @@ class TestBuildTargetRefresher:
 
 class TestServerEStopProperty:
     async def test_e_stop_active_property_reflects_state(self) -> None:
-        """main.py から private 属性を触らずに緊急停止状態を読めること。
-
-        状態を作るのも公開経路 (activate_e_stop) から行う —— private へ直接代入すると、
-        「停止したのにプロパティが追随しない」配線ミスをテスト側が肩代わりして隠す。
-        """
         server = RobotServer()
 
         assert server.e_stop_active is False
@@ -659,12 +603,6 @@ class TestServerEStopProperty:
 
 
 class TestCreateMotorControlType:
-    """generic ドライバの control_type が config から反映されること。
-
-    duty 指令の DC モータが POSITION で生成されると、動作確認は位置到達を待って
-    必ず失敗し、reset も位置指令になる。config と実挙動が食い違う状態を防ぐ。
-    """
-
     def _generic(self, **extra: object) -> GenericDriver:
         cfg: dict = {"driver": "generic", "bus": "generic_bus", "can_id": 1}
         cfg.update(extra)
@@ -688,21 +626,14 @@ class TestCreateMotorControlType:
         assert self._generic().control_type is ControlMode.POSITION
 
     def test_unknown_control_type_aborts_startup(self) -> None:
-        """誤記を position へ落として起動を続けない。
-
-        duty 0.3 のつもりの指令が position 0.3deg としてファームへ届き、ファームは
-        それを正当なフレームとして受理する。警告ログでは事故を止められない。
-        """
         with pytest.raises(ValueError, match="control_type"):
             self._generic(control_type="torque")
 
     def test_current_control_type_aborts_startup(self) -> None:
-        """GenericDriver は CURRENT を送れない。"""
         with pytest.raises(ValueError, match="control_type"):
             self._generic(control_type="current")
 
     def test_control_type_on_non_generic_driver_aborts_startup(self) -> None:
-        """書いても効かないキーを黙って受け取らない。"""
         with pytest.raises(ValueError, match="control_type"):
             _motor(
                 "y_axis_r",
@@ -746,7 +677,6 @@ class TestBuildSyncGroups:
         assert [g.name for g in groups] == ["y_axis"]
         group = groups[0]
         assert group.tolerance == 2.0
-        # 逆回転ペアは scale の符号で表す。符号が落ちると偏差が常に過大に見えて誤発報する
         assert [(m.name, m.scale, m.offset) for m in group.members] == [
             ("y_axis_r", 55.02, 1.0),
             ("y_axis_l", -55.02, -1.0),
@@ -760,7 +690,6 @@ class TestBuildSyncGroups:
     def test_axis_with_missing_motor_is_skipped_with_warning(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """config の書き間違いで監視が黙って無効になるのを防ぐ。"""
         motors = {"y_axis_r": M3508Driver("y_axis_r", can_id=1)}
 
         with caplog.at_level(logging.WARNING):
@@ -807,7 +736,6 @@ class TestAttachSyncGroups:
         assert loops["other_bus"].sync_group_names == ()
 
     def test_group_outside_position_loops_is_skipped(self) -> None:
-        """EDULITE のペアは PC 側常駐ループを持たないので SyncMonitor だけで見る。"""
         loops = self._loops()
         group = SyncGroup(
             "rotate",
@@ -820,7 +748,6 @@ class TestAttachSyncGroups:
         assert all(loop.sync_group_names == () for loop in loops.values())
 
     def test_group_split_across_loops_is_skipped(self) -> None:
-        """別バスに分かれたペアは 1 フレームで同時指令できないため登録しない。"""
         loops = self._loops()
         group = SyncGroup(
             "mixed",
@@ -833,12 +760,10 @@ class TestAttachSyncGroups:
         assert all(loop.sync_group_names == () for loop in loops.values())
 
 
-#: y_axis の実測換算 [deg/mm]
 _Y_SCALE = 55.0131
 
 
 def _motion_table() -> PositionTable:
-    """``motion`` を書いた逆回転ペアと、位置制御ループに載らないペアを持つ表。"""
     return load_position_table(
         {
             "axes": {
@@ -858,7 +783,6 @@ def _motion_table() -> PositionTable:
                         "y_axis_l": {"scale": -_Y_SCALE, "offset": 0.0},
                     },
                 },
-                # ドライバが位置ループを内蔵する軸 (EDULITE)。位置制御ループには載らない
                 "rotate": {
                     "unit": "deg",
                     "command_unit": "rad",
@@ -869,7 +793,6 @@ def _motion_table() -> PositionTable:
                         "rotate_l": {"scale": -0.017, "offset": 0.0},
                     },
                 },
-                # motion を書かない軸。従来どおり最終目標をステップで入れる
                 "gripper": {"unit": "deg", "command_unit": "deg", "scale": 1.0},
             }
         },
@@ -878,18 +801,10 @@ def _motion_table() -> PositionTable:
 
 
 class TestAttachMotionProfiles:
-    """位置定数の ``motion`` を位置制御ループへ結ぶ配線。
-
-    単位換算を知るのはこの層だけ (位置制御ループは指令単位しか扱わない)。後付けに
-    してあるのは ``PositionTable`` を持たない呼び出し元 (`scripts/tune_y_axis.py` 等)
-    を壊さないため。
-    """
-
     def _rig(self) -> tuple[_StubCANManager, dict[str, M3508Driver], dict]:
         config = {
             "robot_name": "main_hand",
             "motors": {
-                # 実機の y_axis と同じゲイン。偏差 1.14mm で P 項が上限に届く
                 "y_axis_r": {
                     "driver": "m3508",
                     "bus": "m3508_bus",
@@ -925,12 +840,6 @@ class TestAttachMotionProfiles:
         return manager, motors, loops
 
     async def test_逆回転ペアの両側に制限が載る(self) -> None:
-        """換算は ``abs(scale)`` で行うこと。
-
-        制限は向きを持たない量なので、符号付きの ``scale`` を掛けると逆回転側だけ負値に
-        なる。プロファイルは正の上限しか受け取らないので、**起動そのものが落ちる**か
-        制限として機能しない側が残る。
-        """
         manager, _, loops = self._rig()
 
         _attach_motion_profiles(_motion_table(), list(loops.values()))
@@ -940,8 +849,6 @@ class TestAttachMotionProfiles:
         await loop.set_target("y_axis_l", ControlMode.POSITION, -15.0 * _Y_SCALE)
         await loop.step()
 
-        # 15mm (825deg) をステップで入れれば kp=32 で必ず飽和する。中間目標が
-        # 実測から起きていれば、1 周期目の偏差はほとんど無い
         assert not loop.is_saturated("y_axis_r")
         assert not loop.is_saturated("y_axis_l")
         assert max(abs(current) for current in manager.last_currents) < 100
@@ -960,7 +867,6 @@ class TestAttachMotionProfiles:
     def test_位置制御ループ外の軸はログに残して続行する(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """黙って飛ばすと「制限が効いているつもり」で config を読むことになる。"""
         _, _, loops = self._rig()
 
         with caplog.at_level(logging.INFO):
@@ -969,12 +875,6 @@ class TestAttachMotionProfiles:
         assert any("rotate_r" in record.getMessage() for record in caplog.records)
 
     def test_起動ログに3つのつまみが全部出る(self, caplog: pytest.LogCaptureFixture) -> None:
-        """``velocity_ff`` は**実行中に変更できず UI にも配信されない**。
-
-        ``kp`` / ``ki`` / ``kd`` にも読み口が無いので、起動ログが「今どの値で動いて
-        いるか」を知る唯一の経路になる。しかも巡航中の出力を最も大きく左右する値
-        (``kd`` と釣り合っていないと D 項が出力を食い潰す)。
-        """
         _, _, loops = self._rig()
 
         with caplog.at_level(logging.INFO):
@@ -986,16 +886,11 @@ class TestAttachMotionProfiles:
             if "y_axis_r" in record.getMessage() and "台形プロファイル" in record.getMessage()
         ]
         assert messages
-        assert all("10.0" in message for message in messages)  # max_velocity
-        assert all("50.0" in message for message in messages)  # max_acceleration
+        assert all("10.0" in message for message in messages)
+        assert all("50.0" in message for message in messages)
         assert all("velocity_ff=0.5" in message for message in messages)
 
     def test_左右ペアは軸ごと1行に畳む(self, caplog: pytest.LogCaptureFixture) -> None:
-        """制限値は軸が 1 組しか持たないので、モータごとに出すと同じ 3 値が並ぶ。
-
-        畳んでも**適用先を知る手掛かりはモータ名だけ**なので名前の列挙は残す (位置制御
-        ループに載らなかった側と区別が付かなくなる)。
-        """
         _, _, loops = self._rig()
 
         with caplog.at_level(logging.INFO):
@@ -1011,11 +906,6 @@ class TestAttachMotionProfiles:
         assert "y_axis_l" in applied[0]
 
     async def test_velocity_ff_が位置制御ループまで届く(self) -> None:
-        """巡航中の出力は ``velocity_ff * 参照速度``。
-
-        速度 FF は ``motion.velocity_ff`` にしか無い値なので、配線で落とすと「書いたのに
-        効かない設定」になる。kp=ki=kd=0 の軸で見れば出力に残るのは FF だけ。
-        """
         mono = FakeClock()
         wall = FakeClock(start=5000.0)
         manager = _StubCANManager()
@@ -1043,17 +933,10 @@ class TestAttachMotionProfiles:
             manager.feedback_at["y_axis_r"] = wall.now
             await loop.step()
 
-        # 0.5s で巡航速度 10mm/s (= 550.131deg/s) に達している
         assert manager.last_currents[0] == pytest.approx(0.5 * 10.0 * _Y_SCALE, abs=2)
 
 
 class TestAttachHelpersAreCalledFromTheCompositionRoot:
-    """後付けの配線は、呼び忘れても位置制御ループがそのまま動いてしまう。
-
-    ``add_motor`` の引数ではないので、``_wire_one_robot`` から 1 行落としても全テストが
-    緑のまま通る。症状は「config に書いた同期監視 / 速度制限が丸ごと効かない」だけ。
-    """
-
     def _called_names(self, function: str) -> set[str]:
         tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -1071,8 +954,6 @@ class TestAttachHelpersAreCalledFromTheCompositionRoot:
 
 
 class TestShippedMainHandConfig:
-    """同梱 config と配線の結合を守る回帰テスト。"""
-
     def _load(self) -> tuple[RobotConfig, PositionTable, dict]:
         config = load_robot_config(
             yaml.safe_load((_CONFIG_DIR / "main_hand.yaml").read_text()),
@@ -1114,22 +995,12 @@ class TestShippedMainHandConfig:
 
 
 class TestSystemConfigReachesTheServer:
-    """config/system.yaml の各セクションが RobotServer まで届いていること。
-
-    ここが空いていると `RobotServer(...)` から引数を 1 本落としても全テストが緑のままに
-    なり、症状は「yaml に書いた値どおりに動かない」だけ。値ではなく**式の書かれ方**を
-    見るのは、リテラルで書き直しても値の一致では検出できないため。
-    """
-
-    #: RobotServer へ渡さないフィールドと、その渡し先。
-    #: 新しいセクションを足した人はここへ書くか、サーバーへ配線するかを選ぶことになる。
     NOT_FOR_SERVER: ClassVar[dict[str, str]] = {
         "can_buses": "CANManager の生成に使う (サーバーはバスを直接触らない)",
         "source": "エラーメッセージへ出すファイル名",
     }
 
     def _server_call_keywords(self) -> str:
-        """main() の中の RobotServer(...) 呼び出しの、キーワード引数の式をすべて連結する。"""
         tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (
@@ -1142,7 +1013,6 @@ class TestSystemConfigReachesTheServer:
 
     def test_every_section_is_wired(self) -> None:
         wired = self._server_call_keywords()
-        # 局所変数へ受けてから渡している経路も追えるよう、代入元まで含めて見る
         source = pathlib.Path(main.__file__).read_text(encoding="utf-8")
 
         for field in dataclasses.fields(SystemConfig):
@@ -1155,30 +1025,16 @@ class TestSystemConfigReachesTheServer:
             )
 
     def test_exemptions_are_real_fields(self) -> None:
-        """存在しないフィールド名で免除を書くと、本物の配線漏れを隠せてしまう。"""
         names = {f.name for f in dataclasses.fields(SystemConfig)}
         assert set(self.NOT_FOR_SERVER) <= names
 
 
 class TestRobotContextReachesTheServer:
-    """ロボット 1 台に紐づく部品が ``main()`` からサーバーまで届いていること。
-
-    ``RobotContext`` と ``add_robot`` に足したのに ``main()`` から渡し忘れる、という
-    抜け方をする (実際に ``manual=`` を落としても全テストが緑だった)。連鎖を 2 本に
-    分けて見る: RobotContext のフィールド → add_robot の引数 → main() の呼び出し。
-    """
-
-    #: add_robot の引数にしないフィールドと、その理由。
     NOT_A_PARAMETER: ClassVar[dict[str, str]] = {
         "mode": "サーバーが持つ実行時状態 (起動時は必ず SEQUENCE から始まる)",
     }
 
     def _add_robot_call_arguments(self) -> set[str]:
-        """main() 内の server.add_robot(...) が渡している引数名。
-
-        位置引数は add_robot のシグネチャ順で名前へ解決する。名前でしか見ないと、
-        位置で渡している sequence / can_manager を配線漏れと誤判定する。
-        """
         signature = inspect.signature(RobotServer.add_robot)
         positional = [name for name in signature.parameters if name != "self"]
 
@@ -1221,8 +1077,6 @@ class TestRobotContextReachesTheServer:
 
 
 class TestLoadAllConfigs:
-    """設定の誤記で起動を止める経路。会場で読むのは操縦者なので traceback は出さない。"""
-
     def _write(self, tmp_path: pathlib.Path, name: str, body: str) -> pathlib.Path:
         path = tmp_path / name
         path.write_text(body)
@@ -1270,7 +1124,6 @@ class TestLoadAllConfigs:
     def test_missing_robot_config_is_skipped(
         self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """1 台ぶんの yaml が無いだけなら、もう 1 台の点検はできるようにする。"""
         system_path = self._system(tmp_path)
 
         with caplog.at_level(logging.WARNING):
@@ -1280,12 +1133,6 @@ class TestLoadAllConfigs:
         assert any("absent.yaml" in record.getMessage() for record in caplog.records)
 
     def test_invalid_checklist_aborts_with_a_message(self, tmp_path: pathlib.Path) -> None:
-        """チェックリストの誤記も traceback ではなく 1 行のメッセージで止まること。
-
-        生の `ValueError` だと journal に出るのは traceback になる。`cbc-control.service`
-        は約 6 秒後に `failed` へ固定され復帰に `reset-failed` が要るので、会場でこれを
-        読む操縦者が読み違えたぶんだけ復帰が遠くなる。
-        """
         path = self._write(
             tmp_path,
             "checklist.yaml",
@@ -1301,13 +1148,6 @@ class TestLoadAllConfigs:
 
 
 class TestSequenceClassSelection:
-    """sequences/<name>.py から登録するシーケンスの決め方。
-
-    ``dir()`` の並び (アルファベット順) の先頭を採ると、モジュールが他機体のシーケンスを
-    import しただけで乗っ取られる (docs/invariants.md「起動時に構成の曖昧さを黙って
-    解決しない」)。
-    """
-
     def _module(self, source: str) -> types.ModuleType:
         module = types.ModuleType("fakerobots.r1")
         exec(compile(source, "<fakerobots.r1>", "exec"), module.__dict__)
@@ -1321,7 +1161,6 @@ class TestSequenceClassSelection:
         assert main._sequence_class_defined_in(module).__name__ == "OnlyOne"
 
     def test_複数定義されていたら起動を拒否する(self) -> None:
-        """どちらを登録すべきかは構成からしか決まらない。黙って片方を選ばない。"""
         module = self._module(
             self._PREAMBLE
             + "class AaaFirst(Sequence):\n    pass\n"
@@ -1336,7 +1175,6 @@ class TestSequenceClassSelection:
         assert "ZzzSecond" in message
 
     def test_import_しただけのシーケンスは候補にならない(self) -> None:
-        """名前順で先頭に来る import 済みクラスに乗っ取られないこと。"""
         module = self._module(
             self._PREAMBLE
             + "from sequences.motor_check import MotorCheckSequence\n"
@@ -1350,13 +1188,6 @@ class TestSequenceClassSelection:
 
 
 class TestRobotBusSelection:
-    """**そのロボットが使うバスだけを開く。**
-
-    全バスを開くと、メインハンドが持たない `can_dm3520` まで開くことになり、CANable が
-    1 本欠けているだけで**両ハンドとも起動できなくなる**。受信ループが物理バス 1 本に
-    つき 2 本立つのも同じ原因。
-    """
-
     _BUSES: ClassVar[dict[str, str]] = {
         "m3508_bus": "can_m3508",
         "edulite_bus": "can_edulite",
@@ -1374,7 +1205,6 @@ class TestRobotBusSelection:
         main_buses = main._robot_bus_names(robots["main_hand"], self._BUSES)
         sub_buses = main._robot_bus_names(robots["sub_hand"], self._BUSES)
 
-        # メインハンドは DM3520 を 1 台も持たない / サブハンドは M3508 を持たない
         assert "dm3520_bus" not in main_buses
         assert "m3508_bus" not in sub_buses
 
@@ -1387,7 +1217,6 @@ class TestRobotBusSelection:
             }
         )
 
-        # 宣言順を保つ (バス番号の入れ替わりを config の並びで固定するため)
         assert main._robot_bus_names(robot, self._BUSES) == ["edulite_bus", "generic_bus"]
 
     def test_setup_robot_は使うバスだけを開く(self) -> None:
@@ -1403,12 +1232,6 @@ class TestRobotBusSelection:
         assert can_manager.bus_names == ("generic_bus",)
 
     def test_setup_robot_は別名ではなくインタフェース名で開く(self) -> None:
-        """`_create_bus` が受けるのは `can_buses` の**値**であって別名ではない。
-
-        `can_manager` へ登録されるのは別名のままなので、`bus_names` を見る上のテストでは
-        `_create_bus(bus_name, ...)` への変異を区別できない。実運用では `can.Bus` が
-        ENODEV で落ちるが、**`operstate` の判定は静かに死ぬ** (down を報告しなくなる)。
-        """
         robot = _robot(
             {
                 "robot_name": "r",
@@ -1422,11 +1245,6 @@ class TestRobotBusSelection:
         assert create_bus.call_args_list == [call("can_generic", dry_run=True)]
 
     def test_バスを開けなければ一行のメッセージで落とす(self) -> None:
-        """down しているインタフェースで生の traceback を出さない。
-
-        この呼び出しは `main()` の try の外にあるので、素通しすると後始末も
-        1 段も走らない。会場で読むのは操縦者なので直し方まで書いて止める。
-        """
         with (
             patch("main.can.Bus", side_effect=OSError(19, "No such device")),
             pytest.raises(SystemExit) as exc,
@@ -1439,16 +1257,8 @@ class TestRobotBusSelection:
 
 
 class TestReadOperstate:
-    """**sysfs を実際に読む経路そのものを固定する。**
-
-    読み取りをラムダへ差し替えて `_create_bus` 側だけを見ると、**機能が丸ごと死ぬ変異が
-    2 つとも緑で通る** —— `.strip()` を落とす (sysfs は `"down\n"` を返す) と、パス要素を
-    `oper_state` へ綴り間違える (常に `None`)。どちらも「ログが 1 行も出なくなる」だけ。
-    """
-
     def _write(self, root: pathlib.Path, channel: str, text: str) -> None:
         (root / channel).mkdir()
-        # sysfs は改行付きで返す。`.strip()` を落とすとここで落ちる
         (root / channel / "operstate").write_text(text)
 
     def test_down_を読む(self, tmp_path: pathlib.Path) -> None:
@@ -1466,26 +1276,13 @@ class TestReadOperstate:
         reason="sysfs のネットワークインタフェースが無い環境",
     )
     def test_既定の根は実在するインタフェースを読める(self) -> None:
-        """`_NET_SYSFS_ROOT` の綴りを固定する。
-
-        上の 2 件は `root` を渡すので既定値を 1 度も通らない。`lo` は Linux なら
-        必ず存在し、carrier を管理しないので `unknown` を返す (値そのものは問わない)。
-        """
         assert main._read_operstate("lo") is not None
 
     def test_実体が無ければ判定できないとしてNoneを返す(self, tmp_path: pathlib.Path) -> None:
-        # ディレクトリを作らない。「判定できない」= None を返す (異常へ倒さない)
         assert main._read_operstate("can_m3508", root=tmp_path) is None
 
 
 class TestCreateBusOperstate:
-    """**down しているインタフェースでも起動は止めない。ログにだけ出す。**
-
-    `--strict` を通していない構成 (片ハンドだけの練習・机上ベンチ・会場での逃げ道) を
-    一律に潰さないため拒否は足さない。価値は「人が最初に見る場所 (起動ログ) に、原因を
-    インタフェース名付きで残す」ことだけ。
-    """
-
     def test_down_なら起動ログにERRORでインタフェース名を残す(
         self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1513,7 +1310,6 @@ class TestCreateBusOperstate:
     def test_up_ならログを出さない(
         self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """up のときは**どのレベルでも**何も言わない (平常時のログを埋めない)。"""
         monkeypatch.setattr(main, "_read_operstate", lambda _channel: "up")
 
         with (
@@ -1527,10 +1323,6 @@ class TestCreateBusOperstate:
     def test_unknown_ではログを出さない(
         self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`unknown` は「判定できない」であって down ではない。
-
-        判定を `!= "up"` へ書き換えると、ここが異常側へ倒れる。
-        """
         monkeypatch.setattr(main, "_read_operstate", lambda _channel: "unknown")
 
         with (
@@ -1544,10 +1336,6 @@ class TestCreateBusOperstate:
     def test_判定できなければログを出さない(
         self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """`None` (`/sys` に実体が無い環境) は「分からない」であって異常ではない。
-
-        判定できなかったこと自体もログに出さない — 毎回警告が出るとログが埋もれる。
-        """
         monkeypatch.setattr(main, "_read_operstate", lambda _channel: None)
 
         with (
@@ -1559,10 +1347,6 @@ class TestCreateBusOperstate:
         assert caplog.records == []
 
     def test_dry_run_では判定しない(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """`--dry-run` の virtual バスは `/sys/class/net/` に実体が無い。呼び出しごと省く。
-
-        呼ばれたら `AssertionError` で分かるようにする (呼ばなければ落ちない)。
-        """
 
         def _fail(_channel: str) -> str | None:
             raise AssertionError("dry_run では _read_operstate を呼んではならない")
@@ -1574,13 +1358,6 @@ class TestCreateBusOperstate:
 
 
 class TestEnsurePortAvailable:
-    """**bind の可否は CAN を開くより前に見る。**
-
-    立ち上げ順は「CAN → 制御ループ → 目標値再送 → サーバー bind」なので、ポートが
-    埋まっていると**機体を励磁して 200Hz の制御ループを回し始めた後**に落ちる
-    (「起動したか分からず二度叩く」は会場で普通に起きる)。
-    """
-
     def test_空いていれば通る(self) -> None:
         main._ensure_port_available("127.0.0.1", 0)
 
@@ -1597,14 +1374,11 @@ class TestEnsurePortAvailable:
         assert "使用中" in str(exc.value)
 
     def test_CAN_を開く前に呼ばれる(self) -> None:
-        """`main()` の並び順そのものを固定する。後ろへ移すと意味が無くなる。"""
         source = inspect.getsource(main.main)
         assert source.index("_ensure_port_available") < source.index("_wire_one_robot")
 
 
 class TestStartAll:
-    """起動の順序と、起動時に励磁できなかったモータの受け渡し。"""
-
     def _wiring(self, name: str, inactive: list[str]) -> main._RobotWiring:
         can_manager = MagicMock()
         can_manager.run = AsyncMock(return_value=inactive)
@@ -1620,9 +1394,6 @@ class TestStartAll:
         )
 
     async def test_起動時に励磁できなかったモータをサーバーへ渡す(self) -> None:
-        """**捨ててはならない。** 捨てると `safety.unenergized_motors` は緊急停止
-        解除の経路でしか埋まらず、起動時の励磁失敗は画面のどこにも出ない。
-        """
         server = MagicMock()
         server.start = AsyncMock()
 
@@ -1646,12 +1417,6 @@ class TestStartAll:
 
 
 class TestOriginResolver:
-    """零点確定の実行手段を、**探索を始める前に**問える形で解決する。
-
-    センサまで押し込んでから「確定できません」で降りると、機構を動かした意味が
-    無いまま姿勢だけが変わる。
-    """
-
     def _table(self) -> PositionTable:
         return load_position_table(
             {
@@ -1699,19 +1464,11 @@ class TestOriginResolver:
         return loop
 
     async def test_ペア軸はグループ単位で確定する(self) -> None:
-        """左右を別々の時刻に確定すると、その間に動いたぶんのオフセットが残る。
-
-        **解決器が何を返したかではなく、実際に両方の原点が動いたかを見る。**
-        片方だけへ効く実装 (`set_origin_here` を 1 台へ) でも「解決器が
-        callable を返した」ことは変わらないので、そこを見るだけでは噛まない。
-        """
         motors = {
             "y_axis_r": M3508Driver("y_axis_r", can_id=1),
             "y_axis_l": M3508Driver("y_axis_l", can_id=2),
         }
         loop = self._loop(motors)
-        # 実機と同じフレームで動かす (直接代入はデコード層を丸ごと迂回する)。
-        # 1 通目は累積角の起点になるだけなので、動かすには 2 通要る
         for driver, deg in ((motors["y_axis_r"], 30.0), (motors["y_axis_l"], -30.0)):
             feed_m3508(driver, deg=0.0)
             feed_m3508(driver, deg=deg)
@@ -1727,9 +1484,6 @@ class TestOriginResolver:
         assert motors["y_axis_l"].multi_turn_position == pytest.approx(0.0)
 
     def test_位置制御ループにも_set_zero_にも載らない軸は手段が無い(self) -> None:
-        """自作モタドラのサーボのように原点を切り直す手段が無いドライバでは、
-        **「確定したつもり」で先へ進ませない。**
-        """
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_generic", mock_bus())
         for name, can_id in (("rotate_r", 0x41), ("rotate_l", 0x42)):
@@ -1741,12 +1495,6 @@ class TestOriginResolver:
 
 
 class TestOriginResolverViaSetZero:
-    """原点をドライバ内部に持つモータ (EDULITE 05) は `SET_ZERO` で切り直す。
-
-    `M3508PositionLoop` に載らないので PC 側に累積角が無く、CAN フレームを
-    送る以外に「今の位置を 0 と定義し直す」手段が無い。
-    """
-
     def _table(self) -> PositionTable:
         return load_position_table(
             {
@@ -1764,7 +1512,6 @@ class TestOriginResolverViaSetZero:
         )
 
     def _manager(self) -> tuple[CANManager, list[tuple[str, can.Message]]]:
-        """実 CANManager に EDULITE 2 台を載せ、送信フレームを記録する。"""
         sent: list[tuple[str, can.Message]] = []
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_edulite", mock_bus())
@@ -1773,7 +1520,6 @@ class TestOriginResolverViaSetZero:
 
         async def _send(motor_name: str, msg: can.Message) -> None:
             sent.append((motor_name, msg))
-            # 問い合わせへの応答としてフィードバックが届く状況を模す
             mark_feedback_at(mgr, motor_name, time.time())
 
         mgr.send = _send  # type: ignore[method-assign]
@@ -1799,21 +1545,15 @@ class TestOriginResolverViaSetZero:
         comm_types = [
             (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
         ]
-        # 無励磁 → SET_ZERO → (問い合わせ) → 目標書き込み → enable の順
         assert ("rotate_r", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
         assert ("rotate_l", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
         for name in ("rotate_r", "rotate_l"):
             order = [t for n, t in comm_types if n == name]
             zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
-            # SET_ZERO の前に必ず disable がある (励磁したまま原点を動かすと軸が飛ぶ)
             assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
-            # SET_ZERO の後に必ず enable がある (無励磁のまま残さない)
             assert Edulite05Driver.COMM_TYPE_ENABLE in order[zero:]
 
     async def test_原点付け替え中は同期監視を止める(self) -> None:
-        """左右の SET_ZERO のあいだ 2 台の座標系が違うので、偏差という量が
-        定義を失う。40ms の debounce に収まる保証は無い。
-        """
         mgr, _sent = self._manager()
         monitor = self._monitor()
         suspended_during: list[bool] = []
@@ -1834,11 +1574,9 @@ class TestOriginResolverViaSetZero:
         await capture()
 
         assert suspended_during == [True]
-        # **必ず戻す。** 戻し忘れると以後の試合中ずっと偏差監視が死んだまま残る
         assert monitor.is_suspended("rotate") is False
 
     async def test_付け替えが失敗しても同期監視を戻す(self) -> None:
-        """例外で抜ける経路が `finally` を通らないと、監視が死んだままになる。"""
         mgr, _sent = self._manager()
         monitor = self._monitor()
 
@@ -1858,9 +1596,6 @@ class TestOriginResolverViaSetZero:
         assert monitor.is_suspended("rotate") is False
 
     async def test_dm3520_は対象外(self) -> None:
-        """`SET_ZERO` の安全な順序は disable を要求するが、`sub_lift` は
-        disable すると自重で落ちる (保持ブレーキが無い)。
-        """
         table = load_position_table(
             {
                 "axes": {
@@ -1884,14 +1619,6 @@ class TestOriginResolverViaSetZero:
 
 
 class TestMotorCheckWiring:
-    """統合動作確認の登録 (`main._wire_motor_check_sequence`)。
-
-    **構成に無い軸のステップを除外しつつ、除外したことを起動ログに出す。**
-    機構が未装着のハンドを外した構成 (`config/bench/main_hand`) で残るハンドの確認が
-    できなくなってはならない一方、黙って除外すると本番構成で 1 軸が config から漏れて
-    いてもそのステップごと消えて全ステップ成功になる。
-    """
-
     _CONFIG_DIR: ClassVar[pathlib.Path] = pathlib.Path(__file__).resolve().parent.parent / "config"
 
     def _table(self, *names: str) -> PositionTable:
@@ -1918,7 +1645,6 @@ class TestMotorCheckWiring:
         return server
 
     def test_メインハンドだけの構成でも登録する(self, caplog: pytest.LogCaptureFixture) -> None:
-        """サブハンドが不在でも、メインハンド実機の動作確認は使えること。"""
         with caplog.at_level(logging.WARNING):
             server = self._wire([self._table("main_hand_positions.yaml")])
 
@@ -1927,7 +1653,6 @@ class TestMotorCheckWiring:
         assert len(sequence.excluded_steps) == 7
 
     def test_除外したステップを起動ログに出す(self, caplog: pytest.LogCaptureFixture) -> None:
-        """画面を開かずに構成の食い違いへ気付ける唯一の経路。"""
         with caplog.at_level(logging.WARNING):
             self._wire([self._table("main_hand_positions.yaml")])
 
@@ -1944,11 +1669,6 @@ class TestMotorCheckWiring:
         assert sequence.excluded_steps == ()
 
     def test_指令できる軸が無ければ登録しない(self, caplog: pytest.LogCaptureFixture) -> None:
-        """未登録なら「シーケンスが読み込まれていません」として拒否される。
-
-        零点確定のステップは軸を宣言しないので構成に依らず残る —— ステップ数で
-        判定すると、1 本も駆動しない構成が「登録された」状態で通る。
-        """
         empty = load_position_table({"axes": {}, "positions": {}}, source="<test>")
         with caplog.at_level(logging.WARNING):
             server = self._wire([empty])
@@ -1957,13 +1677,6 @@ class TestMotorCheckWiring:
 
 
 class TestStartupSummaryLines:
-    """起動ログの数値は、Python の内部表現ではなく人が読む形で出す。
-
-    起動ログは試合前点検で目視する対象なので、``dataclass`` や ``dict`` の repr を
-    そのまま出すと確認したい値がフィールド名に埋もれる。**壊れても機能は 1 つも落ちない**
-    ので、実機のログを見るまで気付けない。
-    """
-
     def test_しきい値は4つとも読める形で並ぶ(self) -> None:
         text = main._describe_thresholds(
             HealthThresholds(
@@ -1978,12 +1691,10 @@ class TestStartupSummaryLines:
         assert "60" in text
         assert "75" in text
         assert "32" in text
-        # repr が漏れていればフィールド名がそのまま残る
         assert "feedback_timeout_ms" not in text
 
     def test_整数で表せる値から小数点以下を落とす(self) -> None:
         assert main._format_number(180.0) == "180"
-        # 端数のある設定を黙って丸めると、書いた値と出る値が食い違う
         assert main._format_number(180.5) == "180.5"
 
     def test_ロールが1つなら件数だけを出す(self) -> None:
@@ -1992,7 +1703,6 @@ class TestStartupSummaryLines:
         assert main._describe_checklist({"pre_match": items}) == "3 項目"
 
     def test_ロールが複数ならロール名を添える(self) -> None:
-        """ロールは増えうる (WS 契約の形を保つため辞書のまま運んでいる)。"""
         text = main._describe_checklist(
             {
                 "main_hand": [ChecklistItem(id="a", label="A")],

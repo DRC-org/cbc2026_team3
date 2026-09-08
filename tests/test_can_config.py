@@ -1,18 +1,3 @@
-"""scripts/can_config.py の不変条件。
-
-バス名の個体固定 (docs/invariants.md「CAN バス名は udev で個体固定する」) を担う
-udev ルールを生成しているのがここなので、**出力が壊れると気付けないまま誤ったバスへ
-電流指令が飛ぶ**。
-
-さらに `scripts/setup_can.sh` は
-  - `list` の TSV を `IFS=$'\t' read -r name serial bitrate txqueuelen` で読み
-  - serial 列が文字列 `TBD` かどうかで未採取を判定し
-  - `udev` の標準出力を配置済みルールと `diff -q` して同期を確認する
-という形でこのモジュールの出力書式に直接依存している。試合前点検
-(`setup_can.sh --strict`) の合否はここの出力そのものが根拠になるため、
-書式もこのテストで固定する。
-"""
-
 from __future__ import annotations
 
 import importlib.util
@@ -30,12 +15,6 @@ _SYSTEM_CONFIG = _PROJECT_ROOT / "config" / "system.yaml"
 
 
 def _load_module():
-    """scripts/ はパッケージではないのでファイルパスから直接読み込む。
-
-    systemd から `/usr/bin/python3 scripts/can_config.py` として起動される
-    スタンドアロンスクリプトなので、パッケージ化して import 経路を作ると
-    実運用の起動形態とテスト対象がずれる。
-    """
     spec = importlib.util.spec_from_file_location("can_config", _SCRIPT_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -65,16 +44,9 @@ def _bus(serial: str | None = "ABC123", **extra: object) -> dict:
 
 
 class TestLoadConfig:
-    """設定不正は「配置してから気付く」形にしてはならない。
-
-    install.sh は `list` が成功して初めて udev ルールを書き出す。ここで弾けなかった
-    不正は、そのまま /etc/udev/rules.d へ配置される。
-    """
-
+    # Linux の IFNAMSIZ は 16 (終端 NUL 込み)。15 文字を超える NAME= を書いた udev ルールは
+    # 黙って無視され、そのバスだけ can0 等の番号名で上がる。
     def test_bus_name_longer_than_ifnamsiz_is_rejected(self, tmp_path) -> None:
-        # Linux の IFNAMSIZ は 16 (終端 NUL 込み)。15 文字を超える NAME= を書いた
-        # udev ルールは黙って無視され、そのバスだけ can0 等の番号名で上がる。
-        # 「固定名にしたはずが番号名」という最も危険な状態になるため、生成前に落とす
         path = _write(tmp_path, _config({"a" * 16: _bus()}))
 
         with pytest.raises(can_config.ConfigError, match="長すぎます"):
@@ -87,8 +59,6 @@ class TestLoadConfig:
 
     @pytest.mark.parametrize("missing", ["vendor_id", "product_id"])
     def test_usb_id_is_required(self, tmp_path, missing: str) -> None:
-        # vendor/product が欠けると ATTRS 条件の緩いルールが生成され、
-        # CANable 以外の NIC にまで固定名を付けにいく余地が生まれる
         config = _config({"can_x": _bus()})
         del config["usb"][missing]
         path = _write(tmp_path, config)
@@ -97,8 +67,6 @@ class TestLoadConfig:
             can_config.load_config(path)
 
     def test_bitrate_is_required(self, tmp_path) -> None:
-        # bitrate 不一致は「バスは上がるのに 1 フレームも通らない」形で出る。
-        # 既定値で補うと誤った値のまま試合に入るので、必ず yaml に書かせる
         path = _write(tmp_path, _config({"can_x": {"serial": "ABC123"}}))
 
         with pytest.raises(can_config.ConfigError, match="bitrate"):
@@ -116,11 +84,7 @@ class TestLoadConfig:
 
 
 class TestUdevRules:
-    """バス名が個体に固定されることを担保しているのはこの出力だけ。"""
-
     def test_fixed_name_is_always_bound_to_a_serial(self) -> None:
-        # NAME= を伴う行に serial 条件が無ければ、最初に列挙された CANable が
-        # その名前を取る。番号名と同じ「挿し順で決まる」状態に戻ってしまう
         config = _config({"can_m3508": _bus("AAA"), "can_edulite": _bus("BBB")})
 
         for line in can_config.cmd_udev(config).splitlines():
@@ -140,19 +104,14 @@ class TestUdevRules:
 
     @pytest.mark.parametrize("serial", [can_config.UNASSIGNED, "", "   ", None])
     def test_unassigned_bus_never_gets_a_rule(self, serial) -> None:
-        # serial 未採取のバスに NAME= を出すと、条件が serial 以外だけになり
-        # 「たまたま最初に見えた個体」がその名前を取る。生成しないのが正しい
         config = _config({"can_generic": _bus(serial)})
 
         rules = can_config.cmd_udev(config)
 
         assert 'NAME="can_generic"' not in rules
-        # 消えたのではなく意図的に飛ばしたことが読み手に分かる必要がある
         assert "# can_generic: serial 未採取" in rules
 
     def test_hotplug_restart_does_not_block_udev(self) -> None:
-        # RUN+= は udev のイベント処理を止める。--no-block を落とすと
-        # setup_can.sh の完了まで udev が詰まり、抜き差しで復旧できなくなる
         config = _config({"can_m3508": _bus("AAA")})
 
         rules = can_config.cmd_udev(config)
@@ -160,15 +119,11 @@ class TestUdevRules:
         assert 'RUN+="/usr/bin/systemctl --no-block restart cbc-can.service"' in rules
 
     def test_output_is_stable_across_runs(self) -> None:
-        # setup_can.sh は生成結果と配置済みファイルを diff -q で突き合わせ、
-        # 差があれば strict で試合前点検を落とす。出力が揺れると常に落ちる
         config = _config({"can_m3508": _bus("AAA"), "can_generic": _bus(can_config.UNASSIGNED)})
 
         assert can_config.cmd_udev(config) == can_config.cmd_udev(config)
 
     def test_generated_file_warns_against_hand_editing(self) -> None:
-        # 手で書き換えられると yaml との同期チェックが恒常的に落ち、
-        # やがて警告そのものが無視されるようになる
         rules = can_config.cmd_udev(_config({"can_m3508": _bus("AAA")}))
 
         assert "自動生成" in rules
@@ -176,15 +131,12 @@ class TestUdevRules:
 
 
 class TestListTsv:
-    """setup_can.sh が `while IFS=$'\t' read` で読む書式。"""
-
     def test_every_line_has_five_tab_separated_fields(self) -> None:
         config = _config({"can_m3508": _bus("AAA"), "can_edulite": _bus("BBB")})
 
         for line in can_config.cmd_list(config, assigned_only=False).splitlines():
             fields = line.split("\t")
             assert len(fields) == 5, line
-            # シェル側は空フィールドを検出できない。空なら ip link に空文字が渡る
             assert all(fields), line
             assert " " not in line, line
 
@@ -199,9 +151,6 @@ class TestListTsv:
         assert names == ["can_m3508", "can_edulite", "can_generic"]
 
     def test_unassigned_serial_is_reported_as_the_literal_tbd(self) -> None:
-        # setup_can.sh は `[[ "$serial" == "TBD" ]]` で未採取を数え、strict では
-        # それを未完了として落とす。別の文字列や空欄になると 0 件と数えられ、
-        # serial が入っていないまま試合前点検を通過してしまう
         config = _config({"can_generic": _bus(None), "can_edulite": _bus("   ")})
 
         lines = can_config.cmd_list(config, assigned_only=False).splitlines()
@@ -209,7 +158,6 @@ class TestListTsv:
         assert [line.split("\t")[1] for line in lines] == ["TBD", "TBD"]
 
     def test_assigned_only_hides_unassigned_buses(self) -> None:
-        # 未採取のバスを up 対象に混ぜると、実体のない名前を待って起動が伸びる
         config = _config({"can_m3508": _bus("AAA"), "can_generic": _bus(can_config.UNASSIGNED)})
 
         output = can_config.cmd_list(config, assigned_only=True)
@@ -217,7 +165,6 @@ class TestListTsv:
         assert output.splitlines() == ["can_m3508\tAAA\t1000000\t1000\t100"]
 
     def test_txqueuelen_defaults_to_1000(self) -> None:
-        # カーネル既定の 10 では 200Hz の位置制御ループで送信キューが溢れる
         config = _config({"can_m3508": _bus("AAA")})
         assert "txqueuelen" not in config["buses"]["can_m3508"]
 
@@ -229,10 +176,6 @@ class TestListTsv:
         assert can_config.cmd_list(config, assigned_only=False).split("\t")[3] == "4000"
 
     def test_restart_ms_defaults_to_a_nonzero_value(self) -> None:
-        # **0 は「bus-off から自動復帰しない」の意味**で、カーネル既定でもある。
-        # 既定で 0 が渡ると、一度 bus-off に落ちたバスは手動で down/up するまで
-        # 送受信とも死んだままになる。バス上に 1 台しか居ない can_dm3520 では
-        # 相手の電源断だけで ACK が返らなくなり、試合中に復旧不能になる
         config = _config({"can_m3508": _bus("AAA")})
         assert "restart_ms" not in config["buses"]["can_m3508"]
 
@@ -245,11 +188,6 @@ class TestListTsv:
 
 
 class TestRealConfig:
-    """実際に試合で使う config/can_buses.yaml が要件を満たしているか。
-
-    ここが落ちるのは「コードのバグ」ではなく「設定が試合で使えない状態」を意味する。
-    """
-
     @staticmethod
     def _load() -> dict:
         return can_config.load_config(_REAL_CONFIG)
@@ -258,16 +196,12 @@ class TestRealConfig:
         assert self._load()["buses"]
 
     def test_all_buses_used_by_the_program_are_defined(self) -> None:
-        # config/system.yaml の can_buses は python-can に渡す実インターフェース名。
-        # 片方だけ改名すると、存在しないバスを開こうとして起動時に落ちる
         system = yaml.safe_load(_SYSTEM_CONFIG.read_text())
         defined = set(self._load()["buses"])
 
         assert set(system["can_buses"].values()) <= defined
 
     def test_every_bus_has_a_serial(self) -> None:
-        # TBD が残っていると setup_can.sh --strict は落ちる。試合当日ではなく
-        # 開発中に気付けるようにする
         config = self._load()
 
         unassigned = [
@@ -276,15 +210,11 @@ class TestRealConfig:
         assert unassigned == []
 
     def test_serials_are_unique(self) -> None:
-        # 同じ serial を 2 バスに書くと両方のルールが同一デバイスに一致し、
-        # 先に適用された名前だけが付いて残りのバスは永久に現れない。
-        # コード側に検査は無いので、設定の側でこれを守る
         serials = [str(entry["serial"]).strip() for entry in self._load()["buses"].values()]
 
         assert len(set(serials)) == len(serials)
 
     def test_setup_can_strict_can_bring_up_every_bus(self) -> None:
-        # --assigned-only の出力が全バスを含む = strict の「未採取 0 件」条件を満たす
         config = self._load()
         listed = can_config.cmd_list(config, assigned_only=True).splitlines()
 
@@ -292,10 +222,8 @@ class TestRealConfig:
         for line in listed:
             name, serial, bitrate, txqueuelen, restart_ms = line.split("\t")
             assert serial != can_config.UNASSIGNED
-            # 全ドライバ (C620 / EDULITE / 自作) を 1Mbps で統一している
             assert bitrate == "1000000"
             assert int(txqueuelen) >= 1000
-            # bus-off から自動復帰しないバスは、相手の電源断だけで試合中に死ぬ
             assert int(restart_ms) > 0
             assert len(name) <= can_config._IFNAME_MAX
 
@@ -306,16 +234,6 @@ class TestRealConfig:
             assert f'NAME="{name}"' in rules
 
     def test_udev_restart_does_not_take_down_the_control_program(self) -> None:
-        """**udev が restart する unit を `Requires=` してはならない。**
-
-        `Requires=` は依存先の stop / restart をこちらへ伝播する (man 5 systemd.unit)。
-        udev ルールは net デバイスが add されるたびに `systemctl restart
-        cbc-can.service` を打つので、**USB の再列挙 (抜けかけ・接触不良・ハブのリセット・
-        `udevadm trigger`) のたびに試合中の制御プログラムが道連れで再起動**し、しかも
-        `StartLimitBurst=3` を消費して 60 秒に 3 回で `failed` に固定される。
-
-        `Wants=` は起動順の宣言としては同じで、stop / restart を伝播しない。
-        """
         rules = can_config.cmd_udev(self._load())
         assert f"restart {can_config._SERVICE_NAME}" in rules, (
             "前提が崩れている: udev ルールが cbc-can.service を restart していない"
@@ -333,8 +251,6 @@ class TestRealConfig:
 
 
 class TestCommandLine:
-    """install.sh / setup_can.sh はこのスクリプトを標準出力経由でしか使わない。"""
-
     @staticmethod
     def _run(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -345,8 +261,6 @@ class TestCommandLine:
         )
 
     def test_udev_stdout_matches_the_generated_rules(self) -> None:
-        # install.sh は `can_config.py udev > /etc/udev/rules.d/...` で配置し、
-        # setup_can.sh は同じ標準出力を配置済みファイルと diff する
         result = self._run("udev")
 
         assert result.returncode == 0
@@ -360,8 +274,6 @@ class TestCommandLine:
         assert result.stdout == expected + "\n"
 
     def test_broken_config_exits_nonzero_without_output(self, tmp_path) -> None:
-        # install.sh は `list` の成功を前提に udev ルールを書き出す。ここで 0 を
-        # 返すと、空のルールファイルが配置されて全バスが番号名に戻る
         path = _write(tmp_path, _config({"can_x": {"serial": "AAA"}}))
 
         result = self._run("list", "--config", str(path))

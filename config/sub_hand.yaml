@@ -1,61 +1,10 @@
 robot_name: sub_hand
 
-# バス別名 (m3508_bus 等) の定義・health の共通設定は config/system.yaml。
-# 両ロボットで同じ値しか取り得ないため、ここには書けない (書くと起動が拒否される)。
-
-# !!! can_id はバス単位でロボット横断に一意にすること !!!
-# can_edulite / can_generic はメインハンドと物理的に同じバスを共有する。重複すると
-# 受信ループが最初にマッチした 1 台で打ち切るため、もう一方は永久にフィードバックを
-# 得られない (EDULITE 05 は無励磁のまま運用に入ってしまう)。
-#
-# --- バスごとに ID の決め方が違う -------------------------------------------
-# **「メインハンドが前を使うからサブハンドは後ろへずらす」という割り当てではない。**
-# generic は固定ビット分割なので、「前後にずらす」を根拠に新しい基板の ID を決めると
-# **既存の基板と衝突する**。規則は次のとおり:
-#
-#   can_generic … デバイス ID は固定ビット分割 (種別 2bit / 基板番号 3bit /
-#     スロット番号 3bit。仕様書 §2.2)。**ID は基板の種別・DIP・スロットで決まり、
-#     どちらのロボットが使うかとは無関係。** 現在の割り当ては
-#       0x40-0x44 サーボ基板 #0 SV0-SV4 … main: gripper(0x40) / wall_f(0x41) /
-#                                          wall_r(0x42) /
-#                                          rotate_origin_sensor(0x43) /
-#                                          SV4(0x44) は Unused (y_axis の原点
-#                                          スイッチ用に予約。装着待ち)
-#       0x48-0x4C サーボ基板 #1 SV0-SV4 … sub : sub_gripper(0x48)
-#                                          SV1-SV4 は Unused (下記)
-#       0x50-0x54 サーボ基板 #2 SV0-SV4 … 用途未定 (5 スロットとも Unused)。
-#                                          この 1 枚だけ MCU が UNO R4 Minima で、
-#                                          ファームは別バイナリ (env uno_r4_minima)
-#       0x80-0x82 DC 基板 #0 ch0-ch2   … main: conveyor(0x80)
-#                                          sub : pump_vac(0x81) / pump_blow(0x82)
-#       0xC0-0xC5 電磁弁基板 #0 ch0-ch5 … sub : valve_1〜valve_6
-#     **1 枚の基板を両ロボットが分け合う**ので、ロボット単位で帯を切ることはできない。
-#     さらに基板を足すときは DIP (基板番号) を上げる: サーボ #3 = 0x58-、DC #1 = 0x88-。
-#
-#     **スロット設定一式 (役割・ピン・初期角・可動範囲・パルス仕様・センサ極性) は
-#     基板番号ごと・スロットごとにファームが持つ**
-#     (firmware/servo/include/config.h の kServoBoards[])。config 側で選べる値では
-#     ないので、新しいアクチュエータを空き ID へ載せる前に、その基板番号のその行が
-#     Servo になっていることを確かめること。役割が食い違うと FEEDBACK も INFO も
-#     返らず、症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
-#     現在サーボ基板 #0 は SV0-SV2 が Servo・SV3 が TouchSensor・SV4 が Unused、
-#     サーボ基板 #1 は SV0 だけが Servo で SV1-SV4 は Unused、
-#     サーボ基板 #2 は 5 スロットとも Unused (用途未定)。
-#     **SV4 の Unused は空きではない** —— y_axis の原点スイッチ用の予約なので、
-#     ここへ別のものを載せない。
-#
-#   can_edulite … EDULITE 05 の ID は 1 バイトの任意値で、ビット分割の規則は無い
-#     (出荷時は 2 台とも 0x7F。バスへ載せる前に scripts/edulite_set_id.py で
-#     1 台ずつ書き換える)。main が 1,2 (rotate_r / rotate_l) を取っているので
-#     sub は 3 から続けている。**ここだけは「先着順に続ける」割り当て。**
-#
-#   can_dm3520 … 専用バスで sub しか居ない。ESC_ID は 0x01-0x0F に限る (後述)。
 motors:
-  # RobStride EDULITE 05 — 補助アーム関節
   sub_arm_joint:
     driver: edulite05
     bus: edulite_bus
-    can_id: 3                  # main_hand の rotate_r/rotate_l (1,2) との衝突回避
+    can_id: 3
     host_id: 0xFD
     mode: position
     limit_speed: 2.0
@@ -63,165 +12,91 @@ motors:
     position_kp: 30.0
     set_zero_on_start: false
 
-  # --- 直動 2 軸 (Damiao DM3520-1EC / DM-S3519-1EC ギヤードモータ) ---
-  # どちらもラックアンドピニオン。**位置ループはドライバ内蔵** (Position Velocity
-  # Mode = 位置→速度→電流の三重ループ) なので、M3508 のような PC 側 PID は持たない。
-  # pid: を書かない (書いても位置制御ループに載らない) のはそのためで、
-  # ゲイン調整は Damiao の調整アシスタント側。
-  #
-  # **can_dm3520 は専用バス。** 相乗りできる既存バスが無い (理由は
-  # config/can_buses.yaml と docs/invariants.md)。
-  #
-  # --- ID の付け方 -----------------------------------------------------------
-  # ESC_ID (レジスタ 0x08) / MST_ID (レジスタ 0x07) は 2026-08-30 に実機へ書き込み済み。
-  # 出荷値は 2 台とも ESC_ID == MST_ID (0x010 / 0x013) だった。
-  # **ESC_ID は 0x01..0x0F に限り、MST_ID はどの ESC_ID とも下位 8bit を衝突させない**
-  # (理由は docs/invariants.md。lib/config_schema.py が起動時に両方とも弾く)。
-  #
-  # !!! p_max / v_max / t_max はフィードバックの固定小数点レンジ !!!
-  # 実機のレジスタ (0x15 / 0x16 / 0x17) と一致していないと**比例倍の値が読める**。
-  # 指令は float なので効かず、症状は「指令どおり動いたのに到達判定を通らない」だけ。
-  # 以下は 2026-08-30 に実機から読んだ値 (2 台とも同一)。読み方は
-  # ID=0x7FF / D0-D1=can_id / D2=0x33 / D3=レジスタ番号 で、応答は MST_ID に
-  # D2=0x33 で返り D4-D7 が float32 (リトルエンディアン)。
-  # **v_max は定格speed ではなくマッピングレンジ** (本機の無負荷最高は 435rpm ≒
-  # 45.6rad/s だがレジスタは 200)。速度の分解能は 400/4095 ≒ 0.098rad/s になる。
-
-  # 前後方向 (Y 方向) の直動軸。
   sub_y_axis:
     driver: dm3520
     bus: dm3520_bus
     can_id: 0x01
     master_id: 0x11
     mode: position
-    # 移動中の速度上限 [rad/s]。**出力軸の値**なので、位置定数の scale
-    # (0.0555556 rad/mm) で割ると 36mm/s になる。目標速度ではなく上限であることに注意
     limit_speed: 2.0
-    p_max: 12.5                # レジスタ 0x15 [rad]  (scale 換算で ±225mm)
-    v_max: 200.0               # レジスタ 0x16 [rad/s]
-    t_max: 10.0                # レジスタ 0x17 [Nm]
-    # 原点は電源投入位置 (本機は投入時に 0.0rad へ固定される)。true にすると起動時に
-    # SET_ZERO を送ってその場を原点にするが、どちらでも「投入時の姿勢が原点」である
-    # ことは変わらない。リミットスイッチによる零点確定は未対応
+    p_max: 12.5
+    v_max: 200.0
+    t_max: 10.0
     set_zero_on_start: false
 
-  # 昇降軸。
-  #
-  # !!! 緊急停止・シャットダウンでは無励磁になる !!! 本機の「止める」は消磁の一手で、
-  # サーボのような「現在角を保持」は持たない。**減速比 19.2 のギヤで自重落下しない**
-  # という前提に乗っているので、機構が付いたら必ず実機で確かめること
-  # (config/checklist.yaml の sub_lift_holds)。落ちるなら機械ブレーキか
-  # カウンタバランスが要る —— ソフトでは解決できない。
+  # TODO: limit_speed は機構の重量が分かったら実機で詰めること。
   sub_lift:
     driver: dm3520
     bus: dm3520_bus
     can_id: 0x02
     master_id: 0x12
     mode: position
-    # 昇降は落下方向へ加速しうるので前後軸より遅くしてある。
-    # TODO: 機構の重量が分かったら実機で詰めること
     limit_speed: 1.0
     p_max: 12.5
     v_max: 200.0
     t_max: 10.0
     set_zero_on_start: false
 
-  # --- 離散状態アクチュエータ (自作モータドライバ) ---
-  # **サーボ基板 #0 ではなく #1 に載る唯一のアクチュエータ。** サーボ基板 #0 の SV3 は
-  # ファーム側で TouchSensor (rotate の原点スイッチ) になっており、同じスロットへ
-  # サーボの指令を送っても受け付けられない。#0 の残る Servo スロットは
-  # gripper / wall_f / wall_r で埋まっているため、基板をもう 1 枚足してその SV0 を使う。
   sub_gripper:
     driver: generic
     bus: generic_bus
-    can_id: 0x48               # サーボ基板 #1 SV0 (仕様書 §2.2)
+    can_id: 0x48
     control_type: position
-    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # 焼き忘れも 180/270 サーボの取り違えも、機体は指令どおり動いたようにしか見えない
-    # ので、この照合以外に気付く手段が無い。値は firmware/servo/include/config.h の
-    # kFirmwareVersion と kServoBoards[].slots[].pulse.angleRangeDeg に対応する。
-    # **サーボの型はスロットごとに選べる**ので、別スロットの値を写さないこと。
-    # **ファームを直したらここも直す。**
     expected_firmware: 5
     expected_angle_range_deg: 270.0
 
-  # --- 吸着系: 電磁弁 (自作モータドライバ / 電磁弁基板) ---
-  # 電磁弁基板 #0 の ch0-5 = 0xC0〜0xC5 (仕様書 §2.2 / §9)。
-  #
-  # 開 / 閉の 2 状態しか取らないので control_type: on_off。duty を流用しないのは、
-  # 「duty 0.3 の電磁弁」という意味を持たない指令を構造的に作れなくするため。
-  # DC 基板とサーボ基板は on_off を黙って捨てるので、can_id の書き間違いは
-  # 「その弁が動かない」として現れる (別の機構が動くことはない)。
-  #
-  # !!! この基板の動作は自動判定できない !!!
-  # 弁が実際に開いたかを観測する手段を持たず (圧力センサもリミットスイッチも
-  # 非搭載)、FEEDBACK の到達フラグも立てない (仕様書 §9.3)。動作確認は弁を
-  # 開閉するところまでを担い、鳴ったかどうかは config/checklist.yaml の
-  # valves_actuate で打音・目視確認する。
   valve_1:
     driver: generic
     bus: generic_bus
-    can_id: 0xC0               # 電磁弁基板 #0 ch0 (PB7)
+    can_id: 0xC0
     control_type: on_off
-    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # **ファームの kFirmwareVersion を上げたらここも上げること**（上げ忘れると
-    # その基板のモータが一斉に FAULT になる）。
-    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
   valve_2:
     driver: generic
     bus: generic_bus
-    can_id: 0xC1               # 電磁弁基板 #0 ch1 (PB6)
+    can_id: 0xC1
     control_type: on_off
-    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
   valve_3:
     driver: generic
     bus: generic_bus
-    can_id: 0xC2               # 電磁弁基板 #0 ch2 (PB5)
+    can_id: 0xC2
     control_type: on_off
-    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
   valve_4:
     driver: generic
     bus: generic_bus
-    can_id: 0xC3               # 電磁弁基板 #0 ch3 (PB4)
+    can_id: 0xC3
     control_type: on_off
-    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
   valve_5:
     driver: generic
     bus: generic_bus
-    can_id: 0xC4               # 電磁弁基板 #0 ch4 (PB3)
+    can_id: 0xC4
     control_type: on_off
-    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
   valve_6:
     driver: generic
     bus: generic_bus
-    can_id: 0xC5               # 電磁弁基板 #0 ch5 (PA15)
+    can_id: 0xC5
     control_type: on_off
-    expected_firmware: 2          # firmware/solenoid/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
-  # --- 吸着系: ポンプ (自作モータドライバ / DC 基板) ---
-  # **ポンプは電磁弁基板ではなく DC 基板が動かす** (仕様書 §9.6)。電磁弁基板の 6ch は
-  # すべて弁で埋まっており、またポンプは起動電流が大きく max_duty で立ち上がりを
-  # 抑えられる DC 基板の側が適している。**メインハンドの conveyor (0x80) と同じ基板を
-  # 共有する**ので、サブハンド側に基板をもう 1 枚置くなら can_id を 0x88 / 0x89
-  # (DC 基板 #1 = DIP 1) へ移すこと。
-  #
-  # 回ったかどうかを観測する手段は無い (conveyor と同じ)。動作確認は回して止める
-  # ところまでを担い、鳴ったかどうかは checklist の pumps_run で聴音確認する。
   pump_vac:
     driver: generic
     bus: generic_bus
-    can_id: 0x81               # DC 基板 #0 ch1
+    can_id: 0x81
     control_type: duty
-    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2
 
   pump_blow:
     driver: generic
     bus: generic_bus
-    can_id: 0x82               # DC 基板 #0 ch2
+    can_id: 0x82
     control_type: duty
-    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
+    expected_firmware: 2

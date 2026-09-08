@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Modal } from "@/components/ui/Modal";
 
-/** フォーカス復帰の検証用。呼び出し元のボタンとモーダルを同じツリーに置く */
 function Harness({ open }: { open: boolean }) {
   return (
     <>
@@ -30,11 +29,6 @@ describe("Modal", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  /**
-   * daisyUI の .modal-box は既定が opacity:0 / scale:.95 で、可視化するルールは
-   * .modal-open 側にしかない。付け忘れると Tailwind のツリーシェイクでそのルールごと
-   * CSS から消え、DOM には居るのに何も見えないモーダルが出荷される。
-   */
   it("表示中の外枠に modal-open が付く（modal-box を可視化する唯一のルール）", () => {
     const { container } = render(
       <Modal open title="T">
@@ -63,8 +57,6 @@ describe("Modal", () => {
       expect(onClose).toHaveBeenCalledTimes(2);
     });
 
-    // 緊急停止オーバーレイは解除経路を Reset ボタンのみに限定する。
-    // onClose を渡さなければ構造的に閉じられないことを保証する
     it("onClose が無ければ Esc でも背景クリックでも閉じない", async () => {
       const { container } = render(
         <Modal open title="T">
@@ -119,8 +111,6 @@ describe("Modal", () => {
         </Modal>,
       );
 
-      // 初期フォーカスは箱そのもの。中のボタンへ当てると「Enter で最初に押される
-      // もの」がモーダルごとに変わり、確認ダイアログの既定が「開始」になる並びを作れる
       expect(document.activeElement).toBe(screen.getByRole("dialog"));
     });
 
@@ -147,7 +137,6 @@ describe("Modal", () => {
         </>,
       );
 
-      // 箱 → A → B → (折り返して) A。背後のボタンには一度も止まらない
       for (let i = 0; i < 5; i++) {
         await userEvent.tab();
         expect(screen.getByRole("button", { name: "背後のボタン" })).not.toBe(
@@ -156,12 +145,6 @@ describe("Modal", () => {
       }
     });
 
-    /**
-     * 緊急停止オーバーレイ (`onClose` 無し) は一時的なダイアログではなく停止状態の
-     * 表示そのもので、閉じるまでの間ずっと続く。閉じ込めると停止中は画面の他の
-     * どこへもキーボードで到達できなくなる。**閉じる手段は増えない** —— Tab で
-     * 抜けてもオーバーレイは開いたまま。
-     */
     it("onClose の無いモーダルは Tab で抜けても閉じない", async () => {
       render(
         <>

@@ -38,7 +38,6 @@ def test_loads_valid_file(tmp_path: pathlib.Path) -> None:
 def test_missing_file_warns_and_returns_empty_table(
     tmp_path: pathlib.Path, caplog: logging.LogCaptureFixture
 ) -> None:
-    """yaml が無くても起動はできる。動かそうとした時点で初めて明示的に失敗する。"""
     path = tmp_path / "absent_positions.yaml"
 
     with caplog.at_level(logging.WARNING):
@@ -53,7 +52,6 @@ def test_missing_file_warns_and_returns_empty_table(
 def test_invalid_file_logs_error_and_returns_empty_table(
     tmp_path: pathlib.Path, caplog: logging.LogCaptureFixture
 ) -> None:
-    """換算係数の無い軸が混ざった yaml は、誤った生値を送るより空で起動する方が安全。"""
     path = tmp_path / "broken_positions.yaml"
     path.write_text("axes: {}\npositions:\n  lift_motor:\n    home: 1.0\n")
 

@@ -6,21 +6,15 @@ import { cx } from "@/lib/cx";
 
 export type ModalTone = "default" | "danger" | "estop";
 
-/** Tab で到達しうる要素。`disabled` の除外は取得後に行う */
 const FOCUSABLE_SELECTOR =
   'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 interface ModalProps {
   open: boolean;
-  /**
-   * 省略すると背景クリックでも Esc でも閉じられなくなる。
-   * 緊急停止オーバーレイのように解除経路を特定のボタンだけに限定したい場合に使う。
-   */
   onClose?: () => void;
   title: ReactNode;
   tone?: ModalTone;
   role?: "dialog" | "alertdialog";
-  /** タイトルと別の読み上げ名を与えたい場合のみ指定する */
   ariaLabel?: string;
   bodyClassName?: string;
   boxClassName?: string;
@@ -30,10 +24,7 @@ interface ModalProps {
 
 const TONE_BOX_CLASS: Record<ModalTone, string> = {
   default: "border-base-300 bg-base-100",
-  // 破壊的操作・危険操作の確認ダイアログは枠と見出しを危険色にする
   danger: "border-error bg-base-100",
-  // 停止中であることが画面のどこを見ても分かる必要がある唯一の状態。
-  // グレー基調の例外として、ここだけは面を赤で塗る
   estop: "border-estop-fg bg-estop text-estop-fg",
 };
 
@@ -43,15 +34,6 @@ const TONE_TITLE_CLASS: Record<ModalTone, string> = {
   estop: "text-estop-fg",
 };
 
-/**
- * daisyUI の modal を `<div>` 版で使うモーダル（`<dialog>` を使わない理由は
- * docs/invariants.md 「モーダルは `<dialog>` を使わない」）。閉じる手段は onClose の
- * 有無だけで決まるので、渡さなければ構造的に閉じられない。
- *
- * **外枠の `modal modal-open` は必須**（docs/invariants.md 「daisyUI のクラスは『対』で
- * 書く」）。背景の暗さだけはユーティリティで上書きする —— daisyUI 既定の #0006 は薄く、
- * ライト地の上では背後の画面と分離しない。
- */
 export function Modal({
   open,
   onClose,
@@ -74,13 +56,6 @@ export function Modal({
     return register();
   }, [open, register]);
 
-  /**
-   * 開いたら中へフォーカスを入れ、閉じたら元の要素へ戻す。
-   *
-   * 初期フォーカスは**箱そのもの**で、中のボタンには当てない。当てると
-   * 「最初に Enter で押されるもの」がモーダルごとに変わり、確認ダイアログの
-   * 既定が「開始」や「Reset」になる並びを作れてしまう。
-   */
   useEffect(() => {
     if (!open) return;
     restoreRef.current = document.activeElement as HTMLElement | null;
@@ -88,13 +63,6 @@ export function Modal({
     return () => restoreRef.current?.focus?.();
   }, [open]);
 
-  /**
-   * Tab を箱の中へ閉じ込める。**`onClose` を持つモーダルだけ** —— ホットキーは
-   * `ModalContext` で封じてあるが Tab + Enter は素通りする。一方、緊急停止オーバーレイ
-   * (`onClose` 無し) は停止状態の表示そのものなので、閉じ込めると停止中は画面の他の
-   * どこへもキーボードで到達できなくなる。**閉じる手段が増えるわけではない**
-   * (Tab で抜けてもオーバーレイは開いたまま)。
-   */
   useEffect(() => {
     if (!open || !onClose) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -143,13 +111,13 @@ export function Modal({
 
   return (
     <div
+      // daisyUI 既定の backdrop は #0006。ライト地では薄いので自前で上書きする。
       className="modal modal-open bg-[rgb(24_27_31_/_62%)]"
       onClick={onClose ? (event) => event.target === event.currentTarget && onClose() : undefined}
       role="presentation"
     >
       <div
         ref={boxRef}
-        // 初期フォーカスの受け皿。Tab 順には入れない (-1)
         tabIndex={-1}
         className={cx(
           "modal-box flex max-h-[90vh] flex-col gap-2 border p-3 outline-none",
@@ -158,7 +126,6 @@ export function Modal({
         )}
         role={role}
         aria-modal="true"
-        // 読み上げ名は見出しから取る。別名を与えたいときだけ ariaLabel が勝つ
         aria-label={ariaLabel}
         aria-labelledby={ariaLabel ? undefined : titleId}
       >

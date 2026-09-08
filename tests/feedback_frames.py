@@ -1,13 +1,3 @@
-"""実機と同じフィードバックフレームを組み立て、``update_state`` で流し込むヘルパ。
-
-``driver._state`` への直接代入は decode_feedback と ``update_state`` の副作用
-(M3508 の多回転アンラップ / 自作モタドラのフラグ保持 / EDULITE 05 の fault ビット
-取り込み) を丸ごと迂回するので、そのテストは「デコード側を壊しても緑」になる。
-
-**組み立て場所をここ 1 つに限る** —— 各テストへ写されていた頃は書式が実際にずれて
-いた (M3508 の単回転角を符号付きで pack しており実機の 8192 カウント域を表せなかった)。
-"""
-
 from __future__ import annotations
 
 import struct
@@ -28,17 +18,10 @@ from lib.drivers.generic import (
 )
 from lib.drivers.m3508 import M3508Driver
 
-# M3508 のエンコーダ 1 回転あたりのカウント数 (C620 フィードバックの角度レンジ)
 _M3508_COUNTS_PER_REV = 8192
 
 
 def m3508_counts_for_deg(deg: float) -> int:
-    """出力角 [deg] を M3508 フィードバックの生カウント (0〜8191) へ換算する。
-
-    **1 回転で折り返す。** C620 が載せるのは単回転角なので実機は必ずこの範囲を返す。
-    折り返さないと ``-10deg`` が生カウント ``-228`` として別の位置に化け、多回転
-    アンラップが実機では起こり得ない差分を見る。
-    """
     return round(deg / 360.0 * _M3508_COUNTS_PER_REV) % _M3508_COUNTS_PER_REV
 
 
@@ -51,12 +34,6 @@ def m3508_feedback(
     temp: int = 25,
     timestamp: float = 0.0,
 ) -> can.Message:
-    """C620 フィードバックフレーム (0x200 + can_id / 8 byte)。
-
-    ``timestamp`` はカーネル受信時刻。多回転アンラップは「バス上で途切れた時間」を
-    これで測るので、**取りこぼしを再現するテストは必ず指定する**。既定の 0.0 は
-    「時刻を持たないフレーム」で、ドライバは処理時刻 (単調クロック) へ落ちる。
-    """
     return can.Message(
         arbitration_id=0x200 + driver.can_id,
         data=struct.pack(">HhhBB", angle_raw & 0xFFFF, rpm, current, temp, 0),
@@ -75,14 +52,6 @@ def feed_m3508(
     temp: int = 25,
     timestamp: float = 0.0,
 ) -> None:
-    """M3508 へフィードバックを 1 フレーム流す。
-
-    ``deg`` を渡すと単回転角から生カウントへ換算する。多回転の累積は
-    ``update_state`` 側が前回値との差分で行うため、連続して呼ぶ順序に意味がある。
-
-    ``timestamp`` は SocketCAN のカーネル受信時刻 (``m3508_feedback`` 参照)。
-    取りこぼしを再現するテストだけが指定する。
-    """
     if (angle_raw is None) == (deg is None):
         raise ValueError("angle_raw と deg のどちらか一方を指定すること")
     raw = m3508_counts_for_deg(deg) if angle_raw is None else angle_raw
@@ -106,16 +75,6 @@ def generic_feedback(
     flags: int = 0x00,
     reserved: bytes = b"",
 ) -> can.Message:
-    """自作モータドライバの FEEDBACK フレーム (仕様書 §3.2)。
-
-    Byte0=状態フラグ / Byte1-2=位置。**DLC は可変**で、位置を持たない基板 (DC・センサ)
-    は状態フラグ 1 バイトだけを送る (``position`` を省くとその形)。
-
-    **状態フラグはビット位置ではなく名前で指定する** —— 生の 2 進リテラルを書くと、
-    割り当てを詰め直したときに 1 つ間違えても「別のフラグを見ている」だけで緑のまま
-    通る。``flags`` は *ビット位置そのもの* が検証対象のときだけ使う。``reserved`` は
-    Byte3 以降に載せる余分なバイト。
-    """
     named = 0
     for enabled, bit in (
         (reached, _FLAG_REACHED),
@@ -176,13 +135,6 @@ def generic_info(
     slot_kind: int = 0,
     angle_range_deg: float | None = None,
 ) -> can.Message:
-    """自作モータドライバの INFO フレーム (仕様書 §3.4)。
-
-    Byte0=版 / Byte1=基板種別 / Byte2=スロット役割。**DLC は可変**で、サーボスロット
-    だけが Byte3-4 に可動レンジ [0.1deg] を足す。``angle_range_deg`` を省くと「レンジを
-    申告しない基板」(DC・電磁弁・センサ / **旧サーボファーム**) の形になる。この 2 つは
-    PC 側で区別できないので、サーボ軸では「申告なし」自体が焼き忘れの証拠になる。
-    """
     data = bytearray([firmware_version, board_kind, slot_kind])
     if angle_range_deg is not None:
         data.extend(struct.pack("<h", round(angle_range_deg * 10)))
@@ -223,11 +175,6 @@ def edulite_feedback(
     fault_bits: int = 0,
     host_id: int | None = None,
 ) -> can.Message:
-    """EDULITE 05 のフィードバックフレーム (拡張 ID / 8 byte)。
-
-    ``host_id`` を明示できるのは「宛先が自分でないフレームを無視する」ことを
-    確かめるため。既定はドライバ自身の host_id なので通常は指定しない。
-    """
     data_area2 = (mode_state << 14) | (fault_bits << 8) | driver.can_id
     arbitration_id = driver.build_can_id(
         driver.COMM_TYPE_FEEDBACK,
@@ -249,11 +196,6 @@ def feed_edulite(driver: Edulite05Driver, **kwargs: float | int | None) -> None:
 
 
 def _dm3520_to_raw(value: float, max_abs: float, bits: int) -> int:
-    """実数 → 固定小数点。``Dm3520Driver.uint_to_float`` の逆変換。
-
-    逆変換をここに置くのは、ドライバ本体には要らない (PC は受信するだけ) ため。
-    **本体側へ生やすと、テストの都合で作った関数が本番コードに常駐する。**
-    """
     span = (1 << bits) - 1
     clamped = min(max(value, -max_abs), max_abs)
     return round((clamped + max_abs) * span / (2.0 * max_abs))
@@ -271,11 +213,6 @@ def dm3520_feedback(
     master_id: int | None = None,
     can_id_nibble: int | None = None,
 ) -> can.Message:
-    """DM3520 のフィードバックフレーム (標準 ID = MST_ID / 8 byte)。
-
-    ``error`` の既定は 1 (Enabled)。``master_id`` / ``can_id_nibble`` を明示できるのは
-    「自分宛でないフレームを無視する」ことを確かめるため。
-    """
     pos = _dm3520_to_raw(position, driver.p_max, driver._POS_BITS)
     vel = _dm3520_to_raw(velocity, driver.v_max, driver._VEL_BITS)
     trq = _dm3520_to_raw(torque, driver.t_max, driver._TORQUE_BITS)

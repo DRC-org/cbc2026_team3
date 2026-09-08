@@ -1,220 +1,57 @@
-# メインハンドの機構位置定数。sequences/main_hand.py には数値を書かないこと。
-#
-# !!! 実測で確定しているのは y_axis と rotate だけで、残りは依然すべて仮値 !!!
-# 仮値は「機構が付いていない状態で誰かが起動しても壊れない」ことだけを狙った、安全側の
-# 小さい可動量に留めてある。
-# **何を埋めるかの棚卸しは docs/mechanism_handoff.md が正**。ここはその一部でしかない。
-#
-# 実測で確定している範囲:
-#   - positions.y_axis (home 0.0 〜 work_shared 650.0mm) と axes.y_axis.manual (0.0〜650.0mm)
-#   - positions.rotate (home 0.0 / pick 180.0 / place 10.0deg) と axes.rotate.manual (0.0〜180.0deg)
-#   - axes.y_axis の pid / motion / sync_kp (実運用ストローク 150mm で詰めた。短距離 15mm は未検証)
-# y_axis の scale 55.0131 は設計値 (ピニオン モジュール 1 / 歯数 40) であって実測ではない。
-#
-# 仮値のまま残っているもの (機構を壊しうる順):
-#   - サーボ 3 軸 (gripper / wall_f / wall_r) の positions と、対になる
-#     firmware/servo/include/config.h のスロット別クランプ (kGripperLimits /
-#     kWallFLimits / kWallRLimits) —— 広すぎるとサーボが機構に当たったまま
-#     押し続けて焼損する
-#   - rotate の homing の search_distance (direction / step は実機で確定済み)
-#   - conveyor の run のコート別の符号 (赤を正転とした割り当てが仮置き) —— 逆だと
-#     両コートともワークを反対向きへ送るが、機構は壊れないので試合中にしか現れない
-#   - y_axis の homing (スイッチ未装着でコメントアウト中)
-#   - サブハンド側 (config/sub_hand_positions.yaml) はほぼ全部
-#
-# axes: 人間の単位 → モータ指令値の換算 (command = value * scale + offset)。
-#   左右 2 台で 1 つの動作をする軸は motors: に両方を並べ、逆回転は scale の符号で表す。
-# positions: 各軸の目標位置 (単位は axes.<軸>.unit)。コートで値が変わる位置だけ
-#   `{ red: <値>, blue: <値> }` と書く (両方必須)。
-# manual: 手動操縦で連続値を送ってよい範囲。**この節を書いた軸だけが連続操作の対象。**
-#   詳細は docs/invariants.md「手動で連続値を送ってよいのは…」。
-#
-# --- サーボ軸の角度の書き方 -------------------------------------------------
-# 値は**出力軸の絶対角 [deg]**。**180 度サーボか 270 度サーボかはここに現れない** ——
-# 角度 → パルス幅の変換は firmware/servo/include/config.h の ServoPulseSpec だけが
-# 持つので、**型を載せ替えてもこのファイルは 1 行も変わらない** (仕様書 §7.7)。
-# 代わりに 2 つ制約がある:
-#   - **負の角度は書けない。** ファームは 0deg でパルス幅の下端に張り付くようクランプ
-#     するので、270 度サーボの中央を 0 とした ±135 のような書き方は取れない。0 起点の
-#     片側絶対角で書き、機械原点をずらしたいときは axes.<軸>.offset で寄せる
-#   - **ファームの angle_min / angle_max を超えた値は黙ってクランプされる。** 症状は
-#     「送ったのに途中で止まる」だけで、SET_TARGET には書いた値が載っているので
-#     candump からも読めない。範囲を変えるときはファーム側の**そのスロットの**
-#     定数を直す (kGripperLimits / kWallFLimits / kWallRLimits /
-#     kSubGripperLimits。1 つを共有すると 1 スロットの都合で全部が緩む)
-
 axes:
-  # ラックアンドピニオンによる y 軸前後移動。左右 2 台の M3508 が機構的に直結しており、
-  # 逆回転で同一の動作になる。指令は「モータ軸の累積角 [deg]」。
-  #
-  # scale = 360 * (3591/187) / (pi * m * z)   [モータ軸 deg / mm]
-  #   減速比 3591/187 ≒ 19.203209、出力軸 1 回転 = モータ軸 6913.155deg
-  #   ピニオンは モジュール 1 / 歯数 40 (基準円 40.0mm) — ラックピニオンは基準円で
-  #   転がるので、1 回転で進む距離は基準円周 pi * 40 = 125.664mm
-  #   -> 6913.155 / 125.664 = 55.01314。6 桁で丸めても 1m あたり 0.7um しかずれない
-  # (旧 config にあったボールねじのリード基準の式は機構が変わったので使わない)
-  #
-  # 組み立て後に一度だけ実測で確かめること。ずれていたら
-  #   scale_new = scale_old * 指令値 / 実測値
-  # 測るときは必ず同じ方向から寄せる — バックラッシュは scale では吸収できず、
-  # 往復で測ると遊びのぶんが scale の誤差として紛れ込む。
   y_axis:
     unit: mm
     command_unit: deg
-    timeout_s: 4.0        # この時間で到達しなければシーケンスを停止する
-    tolerance: 1.0        # 到達許容差 [mm]
-    # 左右のずれ許容 [mm]。超過したら押し合いで機構が壊れるため停止する
+    timeout_s: 4.0
+    tolerance: 1.0
     sync_tolerance: 10.0
-    # --- 同期補正 (クロスカップリング) ---------------------------------------
-    # 駆動中にずれを縮める唯一の経路 (docs/invariants.md「保護は止めるだけ」)。
-    # 単位は motors.y_axis_*.pid.kp と同じなので「kp の何割」で考えられる (16 は 1/2)。
-    #
-    # 2026-09-04 に実運用ストローク (150mm) / v=200 / a=1200 で 3 往復ずつ実測:
-    #   sync_kp=8  → 移動中のずれ 最大 1.042mm / 平均 0.680mm
-    #   sync_kp=16 → 最大 0.637mm / 平均 0.578mm   ← 2 回の測定とも最良
-    #   sync_kp=24 → 最大 1.125mm / 平均 0.682mm   ← ここから上は悪化する
-    # **振幅で最適値が変わる** (振幅 1.5mm では 8 が最良だが 150mm では 8 が最悪)。
-    # 効果は移動中のピークにしか現れず WS 配信 (20Hz) では読めないので、測り直すときは
-    # scripts/sync_probe.py か scripts/tune_y_axis.py を使うこと。
-    # **短距離 (15mm) では未検証のまま。** 手順は docs/mechanism_handoff.md §3-1。
     sync_kp: 16.0
-    # !!! sync_kp を入れるなら sync_limit は省略できない (起動時に拒否する) !!!
-    # 補正項 1 つあたりの上限 [counts]。押し合いは左右直結の機構をその場で壊すので、
-    # homing.search_distance と同格の唯一の歯止めになる。上の pid.output_limit
-    # (5000) の 25% に置いてあり、補正だけで出力の 1/4 を超えて出ることはない。
     sync_limit: 1250.0
-    # 手動の可動範囲 [mm]。実測のストロークで、positions の全域
-    # (home 0.0 〜 work_shared 650.0mm) を包む。
-    # !!! ここを動かすなら下の homing.search_distance も同時に動かすこと !!!
-    # 片方だけ動かすと「原点に届かない」か「宣言範囲の外まで押し込む」のどちらかになる。
-    # その homing: はスイッチ未装着で無効にしてあり、search_distance は仮値時代の
-    # manual 全幅 (22.0mm) のまま実ストロークに届かない —— 戻す日に取り直す。
     manual:
       min: 0.0
       max: 650.0
       steps: [1.0, 5.0, 10.0, 50.0, 100.0]
-    # !!! リミットスイッチ未装着のため無効 !!!
-    #
-    # **この軸は原点確定の経路を持っている** (M3508 なので PC 側位置制御ループが
-    # 累積角の原点を持つ)。欠けているのはスイッチという物理だけ。現在は
-    # **電源投入位置がそのまま原点**なので、搬送中に手で動かされたぶんのずれを
-    # 正す手段が無い。
-    #
-    # **戻すときは 3 つを同時に戻すこと。** 1 つでも欠けると動作確認の最初のステップが
-    # 毎回「センサが応答していません」で止まり、症状は配線不良と区別が付かない:
-    #   1. firmware/servo/include/config.h の kServoBoards 基板 #0 SV4 を
-    #      SlotRole::TouchSensor へ (現在は Unused。同時に kFirmwareVersion を上げ、
-    #      同梱 yaml の expected_firmware も揃える)
-    #   2. config/main_hand.yaml の sensors: へ origin_sensor (can_id 0x44) を登録
-    #   3. 下の homing: のコメントを外す
-    #
-    # !!! search_distance は省略できず、上の manual の範囲と整合させること !!!
-    # 「当たるまで動かす」動作なので、これが唯一の無人の歯止めになる。
-    # **現在値 22.0 は仮値時代の manual 全幅で、実測更新後の 0.0〜650.0mm には
-    # 届かない。** 戻す日に実測のストローク全長 (+ わずかな余裕) へ取り直すこと ——
-    # 片方だけ動かすと「原点に届かない」か「宣言範囲の外まで押し込む」になる。
-    # homing:
-    #   sensor: origin_sensor   # config/main_hand.yaml の sensors: に登録した名前
-    #   direction: -1           # 原点は負方向 (home=0.0 より手前にスイッチを置く)
-    #   search_distance: 22.0   # [mm] ここまで動かして当たらなければ失敗として止める
-    #   step: 0.5               # 1 回の移動量 [mm]。小さいほど精度が上がり時間が延びる
-    #   settle_s: 0.05          # 指令が機構へ届き、センサの状態が返る余裕
-    # --- 台形速度プロファイル (中間目標の生成) --------------------------------
-    # !!! この節を外すと実運用ストロークで原理的にオーバーシュートする !!!
-    # 理由と実測値は docs/invariants.md「`y_axis` は最終目標をステップで PID へ
-    # 入れてはならない」。
     motion:
-      # --- 2026-09-04 に実運用ストローク (150mm) で実測して決めた ---------------
-      # [mm/s] 150mm を 0.837 秒で走る。**長い移動の所要時間を決めているのはこの値**
-      # (150mm では巡航が行程の 94%)。15mm 前後の短い移動では巡航に入らないので
-      # 効くのは max_acceleration の方で、**実運用はその両方を走る。**
       max_velocity: 200.0
-      # [mm/s^2] **速さではなく滑らかさで決めた値。** 上限は 4800 まで確認済みだが、
-      # 150mm の所要時間は 1 割しか変わらない (0.755s / 0.837s) 一方で加速に掛ける
-      # 時間は 4 倍違い (0.042s / 0.167s)、急な加減速は振動源になって左右ずれも増える
-      # (150mm で最大 0.690mm → 0.554mm)。**短い移動はこの値がそのまま所要時間になる**
-      # (15mm で 4800 なら 0.160s、1200 なら 0.243s) ので、上げ下げは長短の両方で測る。
-      # 効く制約は制御側ではなく機構強度とワーク保持力である
       max_acceleration: 1200.0
-      # !!! motors.y_axis_*.pid.kd と同値に保つこと !!!
-      # 理由は docs/invariants.md「`motion.velocity_ff` は `pid.kd` と同値に保つ」。
-      # **上げれば良いというものでもない**: kd=vff=2 の対も実測したが、行き過ぎは
-      # 減る一方で立ち上がりが遅くなり、整定は kd=vff=1 より悪化した
       velocity_ff: 1.0
+    # TODO(実機で確認): リミットスイッチ未装着のため無効。戻す日はファームの
+    # kServoBoards 基板 #0 SV4 を TouchSensor へ / config/main_hand.yaml の sensors: へ
+    # origin_sensor (can_id 0x44) を登録 / 下のコメントを外す、の 3 つを同時に行い、
+    # search_distance を実測のストローク全長へ取り直すこと (現在値は仮値時代の manual 全幅)。
+    # homing:
+    #   sensor: origin_sensor
+    #   direction: -1
+    #   search_distance: 22.0   # [mm]
+    #   step: 0.5               # [mm]
+    #   settle_s: 0.05
     motors:
       y_axis_r: { scale: 55.0131, offset: 0.0 }
-      y_axis_l: { scale: -55.0131, offset: 0.0 }   # 機構的に逆回転で同一動作
+      y_axis_l: { scale: -55.0131, offset: 0.0 }
 
-  # エンドエフェクタ回転。左右 2 台の EDULITE 05 が直結し、逆回転で同一動作。
-  # 指令・フィードバックともに rad。
   rotate:
     unit: deg
     command_unit: rad
     timeout_s: 3.0
-    tolerance: 2.0        # 到達許容差 [deg]
-    sync_tolerance: 5.0   # 左右のずれ許容 [deg]。超過で停止 (機構保護)
-    # 手動の可動範囲 [deg]。実ストロークで、positions の全域 (home 0.0 / pick 180.0) を包む。
-    # TODO(実機で確認): 範囲は実測だが、端まで振って**他の機構と干渉しないこと**は未確認。
-    # 干渉するなら干渉しない角度へ詰め、そのとき homing.search_distance も同時に寄せる
-    # (片方だけ動かすと「原点に届かない」か「宣言範囲の外まで押し込む」のどちらかになる)。
+    tolerance: 2.0
+    sync_tolerance: 5.0
+    # TODO(実機で確認): 端まで振って他の機構と干渉しないことは未確認。
     manual:
       min: 0.0
       max: 180.0
       steps: [1.0, 5.0, 15.0, 45.0]
-    # リミットスイッチで零点を確定する (動作確認シーケンスの先頭で実行)。
-    #
-    # **この軸の原点は放っておくとフラッシュに保存された機械ゼロで、電源投入位置とは
-    # 無関係である** (EDULITE 05 の性質)。2 台の機械ゼロは揃っておらず、逆回転ペアは
-    # scale の符号で向きを表すので、物理的に同じ姿勢でも逆換算した時点で差になる ——
-    # 実機では起動直後に 175.879deg。
-    #
-    # **起動時の set_zero と競合しない。順に効く。** config/main_hand.yaml の
-    # set_zero_on_start: true が起動時に 2 台を 0 へ揃えて上記の偏差を消し (暫定原点)、
-    # ここの零点確定がスイッチの位置でそれを上書きする (正確な原点)。
-    # **set_zero_on_start を false へ戻してはならない** —— 起動直後の偏差が残ったまま
-    # SyncMonitor が全体緊急停止を掛け、動作確認を開始できず零点確定にたどり着けない。
-    #
-    # !!! search_distance は省略できない !!!
-    # これが唯一の無人の歯止め。現在値は上の manual の全幅 (180.0deg) で、
-    # **可動範囲の上端から始めても下端までは必ず届き、下端より先へは行かない**。
-    #
-    # --- step の下限は静止摩擦が決める。小さいほど良い値ではない -----------------
-    # !!! 0.5deg では 1 歩も動かない (2026-09-05 実機確認) !!!
-    # position_kp 30.0 が生むトルクが減速機の保持力と静止摩擦を超えられず、離脱段で
-    # 停滞して HomingError になる。ホーミングは 1 歩ごとに静止するので**毎歩で静止
-    # 摩擦を超え直す**必要がある。**現在値 1.0 は動かなかった 0.5 の 2 倍しかない**
-    # ので、**HomingError が出るようなら 1.5 前後へ戻す判断が要る。**
-    #
-    # !!! step はそのまま原点の分解能である !!! (上の tolerance 2.0deg の半分)
-    # スイッチが ON になる瞬間を step 刻みでしか刻めないので、原点誤差の上限が step。
-    # 行き過ぎも 1 歩ぶんに収まる (スイッチは可動範囲の端にあるので安全側)。
-    #
-    # 探索は 180deg / step 1.0 = 180 ステップで、**最短 9 秒 / 最悪 45 秒**
-    # (1 歩の追従待ちに _FOLLOW_ATTEMPTS 5 回を使い切った場合)。
-    # **セッティングタイムで毎回これが入る**が、縮めたいときに効く search_distance は
-    # 唯一の無人の歯止めなので速さのために縮めてはならない。
-    #
-    # TODO(実機で確認): search_distance だけが暫定値。実測のスイッチ位置 + わずかな
-    #   余裕へ詰める。これまでの零点確定はスイッチに触れた状態から始めており、
-    #   触れていない位置から何 deg で当たるかは一度も試されていない。詰めるときは
-    #   上の manual の min/max も同時に実測へ寄せること (片方だけ動かすと
-    #   「原点に届かない」か「宣言範囲の外まで押し込む」のどちらかになる)。
+    # TODO(実機で確認): search_distance だけが暫定値 (触れていない位置から何 deg で
+    # 当たるかは未計測)。詰めるときは上の manual の min/max も同時に寄せること。
     homing:
-      sensor: rotate_origin_sensor   # config/main_hand.yaml の sensors: に登録した名前
-      # 収納側へ寄せる向き。2026-09-05 の実機で裏付け済み (触れた状態から離脱 →
-      # 寄せ直して 0.70deg で到達)。逆だと反対の機構端まで search_distance いっぱい
-      # 押し込んでから失敗する
+      sensor: rotate_origin_sensor
       direction: -1
-      search_distance: 180.0         # [deg] manual の全幅。ここまでで当たらなければ失敗
-      step: 1.0                      # 1 回の移動量 [deg]。下限は静止摩擦、上限は tolerance
-      settle_s: 0.05                 # 指令が機構へ届き、センサの状態が返る余裕
+      search_distance: 180.0
+      step: 1.0
+      settle_s: 0.05
     motors:
-      # deg -> rad (pi/180)。機構側に減速が入るなら実測値へ差し替えること
       rotate_r: { scale: 0.017453292519943295, offset: 0.0 }
-      rotate_l: { scale: -0.017453292519943295, offset: 0.0 }   # 逆回転で同一動作
+      rotate_l: { scale: -0.017453292519943295, offset: 0.0 }
 
-  # ワーク把持のグリッパ。開 / 閉 の 2 状態しか取らない。**manual: を書かない**ので
-  # 手動でも open / closed しか送れない (中途半端な開度でワークを潰せない)。
   gripper:
     unit: deg
     command_unit: deg
@@ -222,24 +59,15 @@ axes:
     offset: 0.0
     timeout_s: 2.0
 
-  # ワーク搬送コンベア。DC モータなので位置の概念がなく duty 指令で回す。
-  # duty 軸に manual: は書けない (書くと起動を拒否する)。到達フラグも持たないので、
-  # settle_s で待たないと起動・停止し切る前に次のステップへ進む。
   conveyor:
     unit: duty
     command_unit: duty
     command_mode: duty
     scale: 1.0
     offset: 0.0
-    settle_s: 0.5         # DC モータの起動・停止待ち [s]
+    settle_s: 0.5
     timeout_s: 1.0
 
-  # 前側の壁。初期 / 閉 / 開 の 3 状態しか取らない。gripper と同じく manual: は書かない。
-  # **timeout_s は「その軸で起きうる最大移動」から決める。** 移動時間は
-  # firmware/servo/include/config.h の kProvisionalLimits のスルーレート (90deg/s) で
-  # 決まり PC 側から変える経路は無い。この軸は最大 180deg = ちょうど 2.000s なので、
-  # 2.0 では FEEDBACK の遅延だけで毎回 SequenceTimeoutError になる。
-  # 突き合わせは tests/test_servo_travel_budget.py が機械的に行う。
   wall_f:
     unit: deg
     command_unit: deg
@@ -247,8 +75,6 @@ axes:
     offset: 0.0
     timeout_s: 3.0
 
-  # 後側の壁。wall_f と同一仕様だが、可動が initial(90) ↔ open(180) の 90deg = 1.0s
-  # までなので timeout_s は wall_f より短くてよい (長くすると故障の検出が遅れる)。
   wall_r:
     unit: deg
     command_unit: deg
@@ -258,56 +84,33 @@ axes:
 
 positions:
   y_axis:
-    home: 0.0            # 電源投入位置 = 原点 [mm]
-    work_1: 120.0        # 自陣ワーク 1 列目 [mm]
-    work_2: 320.0        # 自陣ワーク 2 列目 [mm]
-    work_3: 520.0        # 自陣ワーク 3 列目 [mm]
-    work_shared: 650.0   # 共通ワーク [mm]
-    # approach / place は試合シーケンスから未参照のまま実測の対象が無かったため削除。
-    # 戦略が決まった時点で実測して足す。
+    home: 0.0
+    work_1: 120.0
+    work_2: 320.0
+    work_3: 520.0
+    work_shared: 650.0
 
   rotate:
-    home: 0.0            # 収納姿勢 [deg]
-    pick: 180.0          # 把持姿勢 [deg]
-    place: 10.0          # 配置姿勢 [deg]。home と分けてあるのは、ワークを持った状態の
-                         # 姿勢だけを後から詰められるようにするため
+    home: 0.0
+    pick: 180.0
+    place: 10.0
 
-  # 以下 3 軸は離散状態アクチュエータ。動作確認も運用と同じ位置名へ動かすので、
-  # 確認専用の駆動量は存在しない (書けば起動時に未知キーとして拒否される)。
   gripper:
-    open: 0.0            # 開 [deg]
-    closed: 65.0          # 閉 (把持) [deg]
+    open: 0.0
+    closed: 65.0
 
-  # 搬送方向はコートで逆になるので run だけをコート別にする。
-  #
-  # TODO(実機で確認): 赤を正 (= 正転) とする符号の割り当ては仮置きである。
-  # どちらの向きが正転かを決めるのはモータの配線と機構であり、対になる
-  # firmware/dc_motor/include/config.h の kDirForwardIsLow (方向ピンの論理) も
-  # TODO(実機で確認) のまま。**逆だったら red / blue の値を入れ替えるだけでよい。**
-  # 動作確認シーケンスは選択中のコートの向きへ 1 往復するだけなので、両向きを
-  # 見るならコートを切り替えてもう一度回すこと。
-  #
-  # !!! 大きさ 0.3 はファーム側 max_duty (kDefaultMaxDuty = 0.30) と同値 !!!
-  # これより大きくしてもクランプされ、「指令したのに速くならない」という切り分けの
-  # 難しい症状になる。上げるならファーム側も上げること。
+  # TODO(実機で確認): 赤を正 (= 正転) とする符号は仮置き。対になる
+  # firmware/dc_motor/include/config.h の kDirForwardIsLow も TODO のまま。
   conveyor:
-    stop: 0.0                       # 停止 [duty]。0 に符号は無いのでコート非依存
-    run: { red: 0.3, blue: -0.3 }   # 搬送 [duty]。符号が回転方向
+    stop: 0.0
+    run: { red: 0.3, blue: -0.3 }
 
   wall_f:
-    initial: 270.0         # 初期 (退避) [deg]
-    closed: 180.0          # 閉 (ワーク保持) [deg]
-    open: 90.0            # 開 [deg]
+    initial: 270.0
+    closed: 180.0
+    open: 90.0
 
-  # wall_r の closed / open は**試合シーケンスからは未参照** (initial だけが使われる)
-  # だが消さない —— 動作確認は 3 状態すべてを駆動するので、消すと確認の網から後壁の
-  # 可動が丸ごと外れる。
-  #
-  # !!! ただし今は closed が initial と同値なので、その 1 段は指令量 0 になる !!!
-  # **「closed に届かない故障 (リンク外れ・スルーレート不足) を確認の網が拾えない」**
-  # 状態なので、後壁の実可動域が決まったら別々の値にすること
-  # (docs/mechanism_handoff.md)。
   wall_r:
-    initial: 90.0         # 初期 (退避) [deg]
-    closed: 90.0          # 閉 (ワーク保持) [deg] — 試合シーケンス未使用 / initial と同値
-    open: 180.0            # 開 [deg]              — 試合シーケンス未使用
+    initial: 90.0
+    closed: 90.0
+    open: 180.0

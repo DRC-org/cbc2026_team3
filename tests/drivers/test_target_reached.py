@@ -87,12 +87,6 @@ class TestGenericIsTargetReached:
         assert driver.is_target_reached(10.0, ControlMode.POSITION) is False
 
     def test_velocity_has_no_feedback_to_compare(self) -> None:
-        """自作モタドラは速度を返さない (仕様書 §3.2)。
-
-        プロトコルから外したので MotorState.velocity は常に 0。目標 0 以外は
-        永久に到達しない。両基板とも velocity モードを受理しないので実害は無いが、
-        「返らない量で判定しようとしている」ことが分かる形にしておく。
-        """
         driver = GenericDriver("g", 1)
         feed_generic(driver)
         assert driver.is_target_reached(100.0, ControlMode.VELOCITY) is False
@@ -100,19 +94,13 @@ class TestGenericIsTargetReached:
 
 
 class TestM3508IsTargetReached:
-    """M3508 は多回転累積角で判定する (詳細は tests/drivers/test_m3508.py)。"""
-
     def test_position_uses_multi_turn_position_not_wrapped_angle(self) -> None:
         driver = M3508Driver("m", 1)
-        # 起動後 1 フレーム目は差分を取れないので累積角は 0 のまま。
-        # 単回転角が 10deg でも 360deg 目標には到達しない
         feed_m3508(driver, deg=10.0)
         assert driver.is_target_reached(360.0, ControlMode.POSITION) is False
 
 
 class TestFeedbackPosition:
-    """位置偏差監視用の共通 API。ドライバ種別によらず同じ意味の値が得られること。"""
-
     def test_base_driver_returns_state_position(self) -> None:
         driver = StubFeedbackDriver("b", 1)
         driver.set_observed(position=12.5)

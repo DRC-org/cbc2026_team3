@@ -9,17 +9,8 @@ import { TONE_ALERT_CLASS } from "@/lib/tone";
 
 const REJECTION_TTL_MS = 5000;
 const HEALTH_TTL_MS = 6000;
-// 同時表示を絞らないと古い通知が画面下部を埋め、直近の異常が読めなくなる
 const MAX_TOASTS = 3;
 
-/**
- * トーストに出るのは「要確認」と「異常」だけ。成功や情報を積むと、直近の異常が
- * 古い通知に押し出される (同時表示は MAX_TOASTS で絞ってある)。
- *
- * **`lib/tone.ts` の `Tone` をローカル定義で覆い隠さない。** トーン名と配色表を
- * ここで自前に持つと、daisyUI の対を守る検査 (`lib/daisyPairs.test.tsx`) の対象から
- * 外れる。
- */
 type ToastTone = Extract<Tone, "warning" | "error">;
 
 interface ToastItem {
@@ -41,9 +32,6 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
       role="alert"
       className={cx(
         TONE_ALERT_CLASS[toast.tone],
-        // コンテナが `pointer-events-none` でクリックを透かすので、閉じるボタンの
-        // ぶんだけここで受け直す (カード自体は下の操作を塞ぐが、面積は 22rem に
-        // 留まるので、モーダルのフッターごと覆うことはない)
         "pointer-events-auto w-[22rem] max-w-[calc(100vw-2rem)] items-start gap-2 p-2",
       )}
     >
@@ -68,12 +56,6 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
   );
 }
 
-/**
- * 全画面共通の通知スタック。
- *
- * 「操作拒否」と「ヘルス異常」を別々に出すと同時発生時に重なって読めなくなるので、
- * 表示位置と寿命の管理をここへ一本化し、常に右下から積み上げる。
- */
 export function Toaster() {
   const { rejection, healthEvents } = useRobotStatus();
   const { clearRejection } = useRobotCommands();
@@ -90,14 +72,11 @@ export function Toaster() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // 拒否は受け取った時点でトーストへ移し替える。同じ操作を続けて拒否された場合にも
-  // 再表示されるよう、コンテキスト側の状態はすぐに空へ戻す
   useEffect(() => {
     if (!rejection) return;
     push({
       id: rejection.receivedAtMs,
       tone: "error",
-      // サーバーが断ったのか、そもそも届いていないのかで操縦者の次の一手が変わる
       title: rejection.source === "local" ? "操作が届きませんでした" : "操作が拒否されました",
       lines: [rejection.reason, `command: ${rejection.command}`],
       expiresAt: Date.now() + REJECTION_TTL_MS,
@@ -111,9 +90,6 @@ export function Toaster() {
     push({
       id: latest.receivedAtMs,
       tone: latest.level === "critical" ? "error" : "warning",
-      // **`latest.level` を無検査で `.toUpperCase()` しない。** ここは
-      // `RouteErrorBoundary` の外なので、投げれば緊急停止オーバーレイごと React ツリーが
-      // アンマウントする。`String()` は何を渡しても例外にならない
       title: `${String(latest.level).toUpperCase()} — ${latest.robot}`,
       lines: [
         `${latest.target}: ${latest.from} → ${latest.to}`,
@@ -123,7 +99,6 @@ export function Toaster() {
     });
   }, [healthEvents, push]);
 
-  // 絶対時刻で管理し、リスト更新のたびに張り直しても寿命がずれないようにする
   useEffect(() => {
     if (toasts.length === 0) return;
     const timers = toasts.map((t) =>
@@ -134,15 +109,8 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
-  // **z は daisyUI の `.modal` (z-index: 999) より上に置く。** `z-50` のままだと
-  // モーダル表示中のトーストが 62% の暗幕の下に沈む —— 切断中に緊急停止オーバーレイの
-  // Reset を押したときの「機体側のラッチは残っています」は `RootLayout` がトーストへ
-  // 逃がしており、**それが唯一の説明経路**である。
-  //
-  // **上へ出した代わりに、コンテナはクリックを透かす。** daisyUI の `.toast` は
-  // `pointer-events: none` を持たず幅が `calc(100vw - 2rem)` なので、1000 へ上げると
-  // ウィンドウ幅 約1100px 以下でモーダルのフッターボタンに重なって押せなくなる。
-  // 透かすのはコンテナだけで、閉じるボタンを活かすため `ToastCard` は受け直す。
+  // daisyUI の `.modal` は z-index: 999。`.toast` は `pointer-events: none` を持たず
+  // 幅が `calc(100vw - 2rem)` なので、1000 へ上げるなら透過も自分で当てる。
   return (
     <div className="pointer-events-none toast toast-end toast-bottom z-[1000]">
       {toasts.map((toast) => (

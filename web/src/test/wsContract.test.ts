@@ -31,18 +31,6 @@ import type {
 import { installMockWebSocket, latestSocket } from "@/test/mockWebSocket";
 import contract from "@/test/ws-contract.json";
 
-/**
- * サーバーの実配信 (`ws-contract.json`) が UI の受信経路を通ることを固定する。
- *
- * 型アサーションだけでは足りない —— 型が合っていても `useRobotSocket` の受信条件が
- * 弾けばメッセージは捨てられ、画面には何も出ない (docs/invariants.md 「WS メッセージの
- * 契約は 1 箇所で定義し、サーバーと UI が同じものを見る」)。
- *
- * したがってここでは **契約ファイルの実サンプルを reducer に流し込み**、状態が期待どおり
- * 更新されることだけを検証する。サンプルを手で書き写してはならない (写した瞬間に
- * 「想像した契約」へ逆戻りする)。
- */
-
 const URL = "ws://contract/ws";
 
 type Sample = Record<string, unknown>;
@@ -52,10 +40,6 @@ const SAMPLES = contract.samples as unknown as Record<string, Sample>;
 type SocketResult = ReturnType<typeof useRobotSocket>;
 type Expectation = (result: SocketResult, sample: Sample) => void;
 
-/**
- * state サンプルから UI が実際に読むフィールド。欠けたら画面のどこかが黙って壊れる。
- * 入れ子はドット区切り (`toHaveProperty` のパス指定) で書く。
- */
 const STATE_FIELDS_UI_READS = [
   "type",
   "robot",
@@ -67,82 +51,45 @@ const STATE_FIELDS_UI_READS = [
   "running",
   "steps",
   "motors",
-  // 原点スイッチの接触状態。落ちれば `origin_sensor_react` の指差喚呼を
-  // 画面から確かめる手段がなくなる (candump を打つしかない状態へ戻る)
   "sensors",
   "e_stop_active",
   "health",
   "safety",
-  // 安全機構は 11 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
-  // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
   "safety.sync_violations",
   "safety.unenergized_motors",
-  // 焼き忘れ検出 (info_mismatch) が沈黙している自作モタドラ。**チップの内容**は
-  // `describeSafetyIssues` に乗せない (tone を動かさない) が、**欄そのものの欠落**は
-  // 他の 10 欄とまったく同じで、`safetyShapeErrors` が拾って「安全機構 判定不能」へ
-  // 倒れる。ここを検査キーから外すと、欠落が黙って `undefined` になり
-  // `FirmwareUnconfirmedNotice` の `.map` で全画面が落ちる経路が戻る
   "safety.firmware_unconfirmed_motors",
-  // 投げっぱなしタスクの失敗ラベル (`RobotServer.watch_task`)。**チップの内容**は
-  // `describeSafetyIssues` に乗せない (tone を動かさない) が、欄そのものの欠落は
-  // 他の欄とまったく同じで「安全機構 判定不能」へ倒れる
   "safety.failed_tasks",
-  // 再励磁の在飛。落ちればボタンが押せるまま残り、操縦者は 2 回目を押す
   "safety.reenergizing",
   "safety.loops_running",
   "safety.monitors_running",
   "safety.position_loops",
   "safety.sync_monitors",
-  // 20Hz の目標値再送が止まると 500ms 後に generic アクチュエータが全停止する。
-  // 配信から落ちれば画面はグリッパ・コンベアの無反応を説明できなくなる
   "safety.refreshers_running",
   "safety.target_refreshers",
-  // 手動操縦。落ちれば操作モードの表示も軸一覧も出せなくなる
   "manual",
   "manual.mode",
   "manual.axes",
 ] as const;
 
-/**
- * サンプル名 → 受信後の期待。
- *
- * 契約ファイルにメッセージ型が増えると「未対応のサンプルがある」テストが落ちる。
- * サーバーが送り始めたものを UI が黙って捨て続ける状態を、ここで検出する。
- */
 const EXPECTATIONS: Record<string, Expectation> = {
   state: (result, sample) => {
     const robot = sample.robot as string;
-    // 受信した state はそのまま保持される (モータ名等をハードコードしないため)
     expect(result.states[robot]).toEqual(sample);
     expect(result.eStopActive).toBe(sample.e_stop_active);
-    // 実行状態は推測せずサーバーの running をそのまま持つ
     expect(result.states[robot].running).toBe(sample.running);
-    // 安全機構 (ラッチ中の軸・保護ループの生死) も配信そのまま
     expect(result.states[robot].safety).toEqual(sample.safety);
-    // 操作モードと軸一覧。**軸名を UI 側へ書かないため配信をそのまま持つ**
     expect(result.states[robot].manual).toEqual(sample.manual);
-    // センサも同じ理由で配信そのまま (センサ名を UI へ書き写さない)
     expect(result.states[robot].sensors).toEqual(sample.sensors);
   },
 
-  /**
-   * 失敗して止まった直後の配信。**この形が受信経路を通ることが本題** ——
-   * 通らないと、左右ずれで止まっても画面は「待機中」へ戻るだけになり、
-   * 3 層保護の第 1 層が操縦者から無音になる。
-   */
   state_with_last_error: (result, sample) => {
     const robot = sample.robot as string;
     expect(result.states[robot].last_error).toEqual(sample.last_error);
-    // 理由だけでなく「どこで止まったか」まで残す (今の機体の姿勢に直結する)
     expect(result.states[robot].last_error?.step.length).toBeGreaterThan(0);
     expect(result.states[robot].last_error?.message.length).toBeGreaterThan(0);
   },
 
   server_info: (result, sample) => {
-    // 開発用ボタンの表示可否はこの 1 通だけが決める。受信条件が弾くと
-    // 「--dev-tools で起動したのにボタンが出ない」が型検査を通ったまま成立する
-    // 温度しきい値も同じ 1 通で届く。受信条件が弾くと UI 側は「未取得」に倒れ、
-    // 温度の色分けが config を変えても一切出ないまま型検査だけ通る
     expect(result.serverInfo).toEqual({
       dev_tools: sample.dev_tools,
       dry_run: sample.dry_run,
@@ -191,7 +138,6 @@ const EXPECTATIONS: Record<string, Expectation> = {
 
   e_stop_state_with_reason: (result, sample) => {
     expect(result.eStopActive).toBe(true);
-    // 「誰かが押したのか、機体が壊れたのか」を操縦者が区別できないと復旧手順を選べない
     expect(result.eStopReason).toBe(sample.reason);
   },
 
@@ -203,7 +149,6 @@ const EXPECTATIONS: Record<string, Expectation> = {
   },
 
   motor_check_state: (result, sample) => {
-    // **robot を持たない 1 通**。受信条件が robot を要求していると 100% 捨てられる
     expect(sample.robot).toBeUndefined();
 
     const state = result.motorCheck;
@@ -215,13 +160,9 @@ const EXPECTATIONS: Record<string, Expectation> = {
   },
 
   motor_check_state_with_exclusions: (result, sample) => {
-    // **除外が受信経路を通ることを、除外が載った実配信で見る。** 空配列の形しか
-    // 通っていないと、UI が除外を受信条件で弾いても誰も気付けない (症状は
-    // 「サブハンド不在の構成でだけ全ステップ成功に見える」)
     const state = result.motorCheck;
     expect(state.excluded_steps).toEqual(sample.excluded_steps);
     expect(state.excluded_steps).not.toHaveLength(0);
-    // ステップ表からは減っていることを読めない (除外は別の欄でしか届かない)
     expect(state.steps).toEqual(sample.steps);
   },
 };
@@ -242,14 +183,10 @@ afterEach(() => {
 
 describe("WS 契約 (ws-contract.json)", () => {
   it("契約の全サンプルに TS 側の検証がある", () => {
-    // サーバーが新しいメッセージ型を送り始めたのに UI が対応していない状態を、
-    // 契約ファイルの再生成 (UPDATE_WS_CONTRACT=1) 時点で落とす
     expect(Object.keys(SAMPLES).toSorted()).toEqual(Object.keys(EXPECTATIONS).toSorted());
   });
 
   it("state サンプルに UI が読むフィールドが揃っている", () => {
-    // 型は実行時に消えるので、フィールドの存在はここでしか守れない。
-    // 例えば running が配信から落ちれば、UI は再び step_index からの推測へ逆戻りする
     for (const field of STATE_FIELDS_UI_READS) {
       expect(SAMPLES.state).toHaveProperty(field);
     }
@@ -268,39 +205,19 @@ describe("WS 契約 (ws-contract.json)", () => {
   });
 });
 
-/**
- * --- 逆方向の突き合わせ -------------------------------------------------
- *
- * 上のサンプル別検証は「UI が読む値が実配信に在るか」しか見ず、逆に**サーバーが送って
- * いるのに TS 側が知らないフィールド**は素通りする。ここでは実配信サンプルのキーを
- * 再帰的に列挙し、下の宣言と突き合わせる。
- *
- * **「サーバーの全フィールドを UI が消費する」ことまでは要求しない** —— 表示に使い道の
- * 無い値 (配信時刻、名前で突き合わせ済みのバス名) は実際に存在し、無理に画面へ出すと
- * 「平常時に静かで、異常時に主張する」原則の方が壊れる。要求するのは **知らない
- * フィールドが存在しないこと** — 使わないなら `unused` に理由を書いて明示する。
- */
 type FieldUse = "ui" | "parser" | { unused: string };
 
 type FieldSpec = Record<string, FieldUse>;
 
-/**
- * TS の型 1 つぶんの宣言。`Record<keyof T, ...>` なので、型にあるキーを
- * 書き忘れても、型に無いキーを書いても tsc が落ちる。
- * 「TS 側が型として持っているか」の確認を型検査へ肩代わりさせる。
- */
 function fieldsOf<T>(spec: Record<keyof T & string, FieldUse>): FieldSpec {
   return spec;
 }
 
-/** 入れ子のオブジェクト 1 つぶんを接頭辞付きで畳み込む */
 function nest(prefix: string, spec: FieldSpec): FieldSpec {
   return Object.fromEntries(Object.entries(spec).map(([key, use]) => [`${prefix}.${key}`, use]));
 }
 
-/** ワイヤ形式 = ペイロードの型 + エンベロープの `type` 欄 */
 type Wire<T> = T & { type: string };
-/** 正規化後の型がそのままワイヤ形式と 1:1 のメッセージ */
 type WireOf<K extends ServerMessage["type"]> = Extract<ServerMessage, { type: K }>;
 
 const MOTOR_STATE = fieldsOf<MotorState>({
@@ -308,12 +225,7 @@ const MOTOR_STATE = fieldsOf<MotorState>({
   vel: "ui",
   torque: "ui",
   temp: "ui",
-  // フィードバックを持たない基板 (DC・電磁弁) の唯一の手掛かり。落ちれば
-  // その行は 4 欄すべて「—」になり、何を指令したのかが画面から消える
   command: "ui",
-  // 指令値の丸め方 (duty は 2 桁 / on_off は ON・OFF) を決める唯一の根拠。
-  // 落ちるとモータ名や基板の種類から推測することになり、ドライバ種別を
-  // UI へ書き写す形へ逆戻りする
   command_mode: "ui",
 });
 
@@ -338,8 +250,6 @@ const MOTOR_HEALTH = fieldsOf<MotorHealth>({
   bus: { unused: "モータ行はテレメトリ側と名前で突き合わせる" },
   last_feedback_at: { unused: "経過時間 (feedback_age_ms) の方を出す" },
   temperature: { unused: "温度はテレメトリの motors[].temp を唯一の表示元にする" },
-  // 累積角の再アンカーなど、状態 (OK/STALE) では表せない事情の唯一の出口。
-  // 落とすと「原点がずれた」ことが操縦者にどこからも見えなくなる
   detail: "ui",
 });
 
@@ -364,14 +274,12 @@ const SYNC_MONITOR = fieldsOf<SyncMonitorState>({
   violated: { unused: "同上。ラッチ軸は safety.sync_violations を唯一の表示元にする" },
 });
 
-/** 目標値再送タスク 1 本 (= 自作モタドラ向け 20Hz の再送) の状態 */
 const TARGET_REFRESHER = fieldsOf<TargetRefresherState>({
   motors: "ui",
   running: "ui",
   paused: { unused: "動作確認中の意図的な停止なので異常に数えない" },
 });
 
-/** 自作基板のセンサ入力 1 個。接触は情報で、異常なのは途絶 (stale) の方 */
 const SENSOR_STATE = fieldsOf<SensorState>({
   active: "ui",
   stale: "ui",
@@ -417,14 +325,11 @@ const MANUAL = fieldsOf<ManualState>({
   axes: "ui",
 });
 
-/** 構成に無い軸を指令するため登録されなかったステップ (`motor_check_state` のみ) */
 const EXCLUDED_STEP = fieldsOf<ExcludedStep>({
   step: "ui",
-  // どの軸が無いか。これが落ちると「減っている理由」を画面から読めない
   missing_axes: "ui",
 });
 
-/** 失敗したステップと理由。`state` と `motor_check_state` の双方に載る */
 const SEQUENCE_FAILURE = fieldsOf<SequenceFailure>({
   step_index: "ui",
   step: "ui",
@@ -447,15 +352,10 @@ const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({
   id: "ui",
   label: "ui",
   checked: "ui",
-  // 項目をどのコントロールの隣に置くか (lib/checklistGroups.ts が対応表を持つ)
   group: "ui",
 });
 const CHECKLIST_STATE = fieldsOf<ChecklistState>({ items: "ui", completed: "ui" });
 
-/**
- * 動作確認の 1 通。ワイヤ形式と正規化後の形が違う唯一のメッセージで、受信時に
- * `motorCheck` で包み直しているので `WireOf` ではなく素のペイロード型で宣言する。
- */
 const MOTOR_CHECK_FIELDS: FieldSpec = {
   ...fieldsOf<Wire<MotorCheckSnapshot>>({
     type: "parser",
@@ -467,12 +367,7 @@ const MOTOR_CHECK_FIELDS: FieldSpec = {
     total_steps: "ui",
     steps: "ui",
     error: "ui",
-    // 失敗理由のもう 1 つの置き場所。`error` と合わせて 1 つへ畳んで出す
-    // (`lib/motorCheckStatus.ts`)。片方だけを読むと、サーバーが置き場所を
-    // 変えた瞬間に失敗が「未実行」と同じ表示へ落ちる
     last_error: "ui",
-    // 除外したステップ。**空でも必ず載る欄**なので、宣言から落とすと
-    // 「除外を配信しなくなった」変更が契約テストを素通りする
     excluded_steps: "ui",
   }),
   ...nest("steps[]", STEP),
@@ -496,8 +391,6 @@ const STATE_FIELDS: FieldSpec = {
     health: "ui",
     safety: "ui",
     manual: "ui",
-    // シーケンスが落ちた理由 (左右ずれ・到達しない等)。これが無い間、保護が
-    // 効いて止まっても画面は「待機中」へ戻るだけで、操縦者から無音だった
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
@@ -533,22 +426,14 @@ const HEALTH_CHANGE_FIELDS = fieldsOf<Wire<HealthChange>>({
   message: "ui",
 });
 
-/** サンプル名 → そのメッセージが持ちうる全フィールド (ドット区切り、配列要素は `[]`) */
 const DECLARED: Record<string, FieldSpec> = {
   state: STATE_FIELDS,
-  // 失敗して止まった形。**null 側だけを契約に載せると、`last_error` の中身を
-  // UI が読めているかを誰も確かめない** (除外が載った動作確認を別サンプルで
-  // 持っているのと同じ理由)
   state_with_last_error: STATE_FIELDS,
 
   server_info: fieldsOf<Wire<ServerInfo>>({
     type: "parser",
     dev_tools: "ui",
-    // 機体が繋がっていないことは health 側 (モータの STALE) に出るため、
-    // ここでは表示に使わない。将来 UI に「dry-run 中」を出すならここを "ui" にする
     dry_run: { unused: "現状 UI では表示しない (health の STALE で分かる)" },
-    // モータ温度の色分けの境界。UI 側に定数を持つと config を変えても画面だけが
-    // 古い境界で判定するため、サーバーの config を唯一の出どころにしてある
     temp_warning_c: "ui",
     temp_critical_c: "ui",
   }),
@@ -578,22 +463,12 @@ const DECLARED: Record<string, FieldSpec> = {
     reason: "ui",
   }),
 
-  // ワイヤ形式と正規化後の形が違う唯一のメッセージ。受信時に `motorCheck` で
-  // 包み直しているので、`WireOf` ではなく素のペイロード型で宣言する
   motor_check_state: MOTOR_CHECK_FIELDS,
-  // 構成に無い軸のステップを除外した形。**この形も契約に含める** — 除外が載った
-  // 側だけが漏れると、UI が除外を弾く条件を書いても誰も気付けない
   motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
 };
 
-/**
- * キー名が動的なマップ。ここを普通の入れ子として辿ると `motors.gripper.pos` の形で
- * モータ名が契約へ焼き付き、「UI はモータ名をハードコードしない」設計と食い違う。
- * センサ名も同じ理由で焼き付けない (機構が変わって本数が増減しても UI は無変更)。
- */
 const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists"]);
 
-/** サンプル 1 通のキーをドット区切りのパスへ平坦化する (配列要素はまとめて `[]`) */
 function flattenPaths(value: unknown, prefix = ""): string[] {
   if (Array.isArray(value)) return value.flatMap((item) => flattenPaths(item, `${prefix}[]`));
   if (typeof value !== "object" || value === null) return [];
@@ -601,41 +476,21 @@ function flattenPaths(value: unknown, prefix = ""): string[] {
   const dynamic = DYNAMIC_MAPS.has(prefix.split(".").pop() ?? "");
   return Object.entries(value).flatMap(([key, child]) => {
     const path = dynamic ? `${prefix}.*` : prefix === "" ? key : `${prefix}.${key}`;
-    // 動的マップの下はキー名ではなく形だけを契約にする
     return dynamic ? flattenPaths(child, path) : [path, ...flattenPaths(child, path)];
   });
 }
 
-/**
- * そのサンプルには正当に載らない欄。**理由を必須にする。**
- *
- * 同じメッセージ型が 2 つの形で配信されることがある (理由付き / 理由なしの
- * 緊急停止)。例外を無条件に許すと「サーバーが落とした欄」と「元からこの形には
- * 無い欄」の区別が付かなくなるので、`unused` と同じく理由を書かせる。
- */
 const SAMPLE_OMITS: Record<string, Record<string, string>> = {
   e_stop_state: {
     reason: "理由なしで停止した形。理由付きの配信は e_stop_state_with_reason が受け持つ",
   },
 };
 
-/** ドット区切りパスの親。トップレベルの親は根 (`""`) */
 function parentOf(path: string): string {
   const cut = path.lastIndexOf(".");
   return cut < 0 ? "" : path.slice(0, cut);
 }
 
-/**
- * 宣言に `"ui"` と書いたのにサンプルから消えている欄を挙げる。
- *
- * **逆方向の突き合わせだけでは足りない。** あちらは「宣言に無いパスがサンプルに在る」
- * ことしか見ないので、**宣言にあるのにサンプルから消えた欄**は素通りする。実際に
- * `safety` の 6 欄はどの存在検査にも載っておらず、サーバーが 1 欄落として契約を
- * 焼き直しても Python も TS も全テスト緑のまま、UI は起動直後に白画面になった。
- *
- * 親が null / 空配列のサンプルでは子が無いのが正しい (`timer` を持たない試合状態、
- * `manual` を持たない軸)。親が 1 度でも展開されている場合だけ子を要求する。
- */
 function missingDeclaredPaths(name: string, declared: FieldSpec, sample: Sample): string[] {
   const present = new Set(flattenPaths(sample));
   const expanded = new Set(["", ...[...present].map(parentOf)]);
@@ -659,15 +514,10 @@ describe("WS 契約 (逆方向 — サーバーが送るものを TS が知っ�
         .filter((path) => !(path in declared))
         .toSorted();
 
-      // 落ちたら、サーバーが送り始めた欄を UI が知らないということ。
-      // 型へ足して読むか、読まないなら unused に理由を書いて明示する
       expect(undeclared).toEqual([]);
     });
 
     it("UI が読むと宣言した欄が実配信から消えていない", () => {
-      // 落ちたら、UI が読んでいる欄をサーバーが送らなくなったということ。
-      // 表示が黙って空になるだけでは済まず、`.length` / `.filter` を呼ぶ側は
-      // レンダー本体で投げて React ツリーごと落ちる (ヘッダーの緊急停止ボタンごと)
       expect(missingDeclaredPaths(name, DECLARED[name], SAMPLES[name])).toEqual([]);
     });
   });
@@ -677,14 +527,12 @@ describe("WS 契約 (逆方向 — サーバーが送るものを TS が知っ�
       const present = new Set(flattenPaths(SAMPLES[name]));
       for (const [path, reason] of Object.entries(omits)) {
         expect(reason.length, `${name}.${path}`).toBeGreaterThan(0);
-        // 例外が古くなって残っていると、その欄だけ存在検査が永久に効かなくなる
         expect(present.has(path), `${name}.${path} は実配信に載っている`).toBe(false);
       }
     }
   });
 
   it("使わないと決めたフィールドには理由が書いてある", () => {
-    // 理由の無い unused は「消費し忘れ」と区別が付かない
     for (const [name, spec] of Object.entries(DECLARED)) {
       for (const [field, use] of Object.entries(spec)) {
         if (typeof use === "object") {

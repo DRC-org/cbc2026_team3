@@ -13,17 +13,6 @@ interface State {
   error: Error | null;
 }
 
-/**
- * タブ 1 枚の描画例外を、そのタブの中に閉じ込める。
- *
- * **境界が 1 枚も無いと、どこか 1 箇所の描画例外で React ツリー全体がアンマウントし、
- * ヘッダーの EMG STOP ボタンごと画面から消える。** 囲うのは `<Outlet />` だけで、
- * ヘッダー・接続バナー・緊急停止オーバーレイは境界の**外**に置く
- * （docs/invariants.md 「`RouteErrorBoundary` は `<Outlet />` だけに掛ける」）。
- *
- * 復帰はリロードだけ。壊れた原因は配信内容にあることが多く、状態を持ったまま再描画
- * しても同じ場所で投げ直すため、「もう一度描いてみる」ボタンは置かない。
- */
 export class RouteErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 
@@ -32,8 +21,6 @@ export class RouteErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // 画面には要約しか出せない。原因の特定に要る stack はコンソールへ残す
-    // (ここを消すと、境界に落ちた例外の痕跡がどこにも残らなくなる)
     // oxlint-disable-next-line no-console
     console.error("画面の描画に失敗しました", error, info.componentStack);
   }
@@ -51,7 +38,6 @@ export class RouteErrorBoundary extends Component<Props, State> {
           <Icon as={TriangleAlert} />
           この画面の描画に失敗しました
         </p>
-        {/* 最初に伝えるのは「機体を止められるか」。次の一手がそこで決まる */}
         <p className="text-center text-base-content/70">
           上部の EMG STOP は生きています。機体を止める必要があるならそのまま押してください。
         </p>

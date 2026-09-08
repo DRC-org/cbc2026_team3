@@ -1,14 +1,3 @@
-"""指差喚呼の文面が参照する軸名・位置名が、そのセットの構成に実在するか。
-
-**チェックリストは「操縦者が読んで実行する手順」なので、実在しない軸名や位置名が
-書いてあると点検そのものが実行できない。** 画面に出ないプリセットを探すことになり、
-項目は残るので「チェックが付かない = 試合開始のゲートが開かない」になる。ベンチ構成の
-差し替えや軸の改名では文面だけが古いまま取り残されやすい。
-
-**文面は自然文なので完全な検証はできない。** 見るのは「`<軸名> に <位置名> を送り』の
-形で書かれた組がその構成に実在するか」だけで、拾えないものは拾わない。
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -23,19 +12,10 @@ from tests.test_config_schema import _BENCH_USES_PRODUCTION_CONFIG
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _REPO_ROOT / "config"
 
-# 「手動操縦で <軸> に <位置> を送り」の形。全角・半角どちらの空白も許す。
-# **拾える形だけを見る。** 文面の書き方を縛ると、点検の意図を書けなくなる方が困る
 _COMMAND_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*に\s*([A-Za-z_][A-Za-z0-9_]*)\s*を送り")
 
 
 def _robot_yamls(directory: pathlib.Path) -> list[pathlib.Path]:
-    """そのディレクトリの構成が読む robot yaml。
-
-    **どのベンチセットが本番 config をそのまま使うかの正は
-    `tests/test_config_schema.py` の `_BENCH_USES_PRODUCTION_CONFIG` だけが持つ。**
-    ここで規約として解決し直すと同じ対応表が 2 箇所になり、宣言の側だけを直したときに
-    こちらが古いまま残る。
-    """
     production_robot = _BENCH_USES_PRODUCTION_CONFIG.get(directory.name)
     if production_robot is not None:
         return [_CONFIG_DIR / f"{production_robot}.yaml"]
@@ -49,7 +29,6 @@ def _robot_yamls(directory: pathlib.Path) -> list[pathlib.Path]:
 
 
 def _position_table(directory: pathlib.Path) -> PositionTable:
-    """そのディレクトリの構成が読む位置定数 (`main.py` の `_positions_path` と同じ解決)。"""
     tables = []
     for robot_yaml in _robot_yamls(directory):
         positions = robot_yaml.with_name(f"{robot_yaml.stem}_positions.yaml")
@@ -61,7 +40,6 @@ def _position_table(directory: pathlib.Path) -> PositionTable:
 
 
 def _checklist_cases() -> list[tuple[pathlib.Path, str, str, str]]:
-    """(checklist のパス, 項目 id, 軸名, 位置名)。"""
     cases: list[tuple[pathlib.Path, str, str, str]] = []
     for path in sorted(_CONFIG_DIR.rglob("checklist.yaml")):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -90,7 +68,6 @@ def _case_id(case: tuple[pathlib.Path, str, str, str]) -> str:
 
 
 def test_some_commands_are_detected() -> None:
-    """拾えた組が 0 件のまま緑を返さない (正規表現が壊れたら気付けるように)。"""
     assert _CASES, "『<軸> に <位置> を送り』の形の項目を 1 つも拾えなかった"
 
 

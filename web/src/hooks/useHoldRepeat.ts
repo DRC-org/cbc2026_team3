@@ -11,26 +11,10 @@ export interface HoldHandlers {
 }
 
 export interface HoldRepeat {
-  /** ボタンへそのまま展開するイベントハンドラ */
   handlers: HoldHandlers;
-  /** 現在の実効倍率。ボタンの表示を実際に送る量と一致させるために返す */
   multiplier: number;
 }
 
-/**
- * 「押している間くり返す」ボタンの発火制御。手動操縦のジョグに使う。
- *
- * **止める側を多重に張る。** 発火を止められるのは `pointerup` だけではない ——
- * ボタンの外へドラッグして離す / ポインタ操作の取り消し / フォーカス喪失 の経路があり、
- * 1 つでも拾い損ねると指を離したのに機体が動き続ける。
- * **`setPointerCapture` を使ってはならない** —— 捕捉すると `pointerleave` が飛ばなくなり、
- * ボタンの外へ逃がして止める経路が消える。取りこぼした場合の最後の砦は指令側の可動範囲
- * クランプ (`axes.<軸>.manual` の min/max)。
- *
- * `maxMultiplier` を 1 より大きくすると、押し続けたぶんだけ 1 回の量が伸びる。
- * **伸びた量は呼び出し側が画面に出すこと** —— 押した量が読めないまま動く距離だけ変わると、
- * 操縦者は次の 1 押しの結果を予測できない。
- */
 export function useHoldRepeat(
   fire: (multiplier: number) => void,
   enabled = true,

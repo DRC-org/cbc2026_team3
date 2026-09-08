@@ -1,10 +1,3 @@
-"""ログの体裁と、アクセスログを黙らせる仕掛けを固定する。
-
-壊れると困るのは 2 つ —— 体裁 (固定幅が崩れると列で読めなくなる) と、アクセスログ
-(`access_log=None` が 1 箇所外れるだけで CAN とシーケンスのログが押し流される)。
-どちらも「動かなくなる」形では現れず、実機のログを目で見るまで気付けない。
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -21,19 +14,14 @@ from tests.server_fixtures import ServerFixture, wait_until
 
 
 class _TtyStringIO(io.StringIO):
-    """TTY を名乗るストリーム。色付けの分岐だけを切り替えたいので中身は StringIO。"""
-
     def isatty(self) -> bool:
         return True
 
 
 @pytest.fixture(autouse=True)
 def _restore_root_logger():
-    """ルートロガーはプロセス共有なので、テストごとに元へ戻す。
-
-    戻さないと、色付きハンドラを張ったテストの後続が pytest の捕捉を失い、
-    失敗の理由が出力から読めなくなる。
-    """
+    # ルートロガーはプロセス共有。色付きハンドラを張ったまま返すと後続テストが
+    # pytest の出力捕捉を失う。
     root = logging.getLogger()
     saved_handlers = list(root.handlers)
     saved_level = root.level
@@ -48,14 +36,11 @@ def _restore_root_logger():
 
 
 def _emit(stream: io.StringIO, *, level: int = logging.INFO, name: str = "lib.can_manager") -> str:
-    """設定済みのルートロガー経由で 1 行出し、その行を返す。"""
     logging.getLogger(name).log(level, "テスト本文")
     return stream.getvalue()
 
 
 class TestLoggerNameShortening:
-    """ロガー名は末尾要素へ畳む。フルパスは毎行 20 桁を食う割に何も言わない。"""
-
     @pytest.mark.parametrize(
         ("full", "expected"),
         [
@@ -77,7 +62,6 @@ class TestLoggerNameShortening:
         assert "lib.control" not in line
 
     def test_短い名前は固定幅まで空白で埋まる(self) -> None:
-        """幅が揃っていないと本文の開始位置が行ごとにずれ、列で読めなくなる。"""
         stream = io.StringIO()
         configure_logging(stream=stream)
         logging.getLogger("main").info("A")
@@ -86,11 +70,6 @@ class TestLoggerNameShortening:
         assert first.index("A") == second.index("B")
 
     def test_周期タスクの長い名前でも桁が揃う(self) -> None:
-        """欄幅が足りないと、**その行だけ**本文が右へずれて列が崩れる。
-
-        `position_loop` (13) と `target_refresh` (14) は 200Hz / 20Hz の周期タスク
-        なので、溢れるといちばん量の多い行が揃わないまま残る。
-        """
         stream = io.StringIO()
         configure_logging(stream=stream)
         logging.getLogger("main").info("A")
@@ -101,15 +80,8 @@ class TestLoggerNameShortening:
 
 
 class TestFormatting:
-    """レベルは 5 桁固定、時刻は HH:MM:SS.mmm。日付は 1 回の起動を追うのに要らない。"""
-
     def test_レベルは5桁の略称になる(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """区切りの空白ではなく**位置**で切り出す。
-
-        `split(" ")` で読むと `"INFO "` の右詰め空白が落ちても次の欄との区切りに
-        紛れて通ってしまい、幅が揃っていないことを検出できない。
-        """
-        monkeypatch.setenv("JOURNAL_STREAM", "8:12345")  # 時刻を落として桁を固定する
+        monkeypatch.setenv("JOURNAL_STREAM", "8:12345")
         stream = io.StringIO()
         configure_logging(logging.DEBUG, stream=stream)
         for level in (
@@ -124,7 +96,6 @@ class TestFormatting:
         assert [line[:5] for line in lines] == ["DEBUG", "INFO ", "WARN ", "ERROR", "CRIT "]
 
     def test_レベルが違っても本文の開始位置は同じ(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """幅が 1 桁でも崩れると、レベルごとに本文がずれて列で読めなくなる。"""
         monkeypatch.setenv("JOURNAL_STREAM", "8:12345")
         stream = io.StringIO()
         configure_logging(logging.DEBUG, stream=stream)
@@ -146,11 +117,9 @@ class TestFormatting:
         stamp = _emit(stream).split(" ", 1)[0]
         assert len(stamp) == len("00:00:00.000")
         assert stamp.count(":") == 2 and stamp.count(".") == 1
-        # 日付が残っていると、この位置に "-" が現れる
         assert "-" not in stamp
 
     def test_例外のトレースバックは残る(self) -> None:
-        """ログを読む唯一の理由が例外の出どころなので、体裁を変えても落とさない。"""
         stream = io.StringIO()
         configure_logging(stream=stream)
         try:
@@ -176,8 +145,6 @@ class TestFormatting:
 
 
 class TestColor:
-    """色は「飛ばしてよい欄」の目印。本文に付けると読む対象がぶれる。"""
-
     def test_非TTYではANSIが1文字も混ざらない(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("JOURNAL_STREAM", raising=False)
         monkeypatch.delenv("NO_COLOR", raising=False)
@@ -201,7 +168,6 @@ class TestColor:
         configure_logging(stream=stream)
         logging.getLogger("main").info("本文だけは無色")
         line = stream.getvalue()
-        # 本文の直前でリセット済み = 本文に色コードが掛かっていない
         assert line.endswith("本文だけは無色\n")
         assert "\x1b" not in line[line.index("本文だけは無色") :]
 
@@ -215,8 +181,6 @@ class TestColor:
 
 
 class TestJournal:
-    """journald は自前で時刻を付ける。こちらも出すと 1 行に時刻が 2 つ並ぶ。"""
-
     def test_JOURNAL_STREAMがあれば時刻を出さない(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("JOURNAL_STREAM", "8:12345")
         stream = io.StringIO()
@@ -241,8 +205,6 @@ class TestJournal:
 
 
 class TestIdempotence:
-    """2 回呼んでもハンドラは 1 本。増えると同じ行が 2 度出る。"""
-
     def test_二度呼んでもルートハンドラは1本(self) -> None:
         configure_logging(stream=io.StringIO())
         configure_logging(stream=io.StringIO())
@@ -259,8 +221,6 @@ class TestIdempotence:
 
 
 class TestAccessLog:
-    """SPA を配るのでリロード 1 回で数十行出る。読みたいログが押し流される。"""
-
     def test_aiohttp_accessのINFOは出ない(self) -> None:
         stream = io.StringIO()
         configure_logging(stream=stream)
@@ -268,7 +228,6 @@ class TestAccessLog:
         assert stream.getvalue() == ""
 
     def test_aiohttp_accessのWARNINGは出る(self) -> None:
-        """黙らせるのはアクセス記録だけ。本当の異常まで消してはならない。"""
         stream = io.StringIO()
         configure_logging(stream=stream)
         logging.getLogger("aiohttp.access").warning("異常")
@@ -276,8 +235,6 @@ class TestAccessLog:
 
 
 class _FakeRunner:
-    """`AppRunner` の代役。ネットワークを bind せずに引数だけを捕まえる。"""
-
     instances: ClassVar[list[_FakeRunner]] = []
 
     def __init__(self, app: web.Application, **kwargs: object) -> None:
@@ -301,19 +258,12 @@ class _FakeSite:
 
 
 class TestServerAccessLogDisabled:
-    """`RobotServer.start()` が `access_log=None` で `AppRunner` を作ること。
-
-    外れても機能は 1 つも壊れないので振る舞いのテストでは検出できず、症状は
-    「実機のログがアクセス記録で埋まる」だけ。
-    """
-
     async def test_AppRunnerにaccess_log_Noneを渡す(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _FakeRunner.instances.clear()
         monkeypatch.setattr(web, "AppRunner", _FakeRunner)
         monkeypatch.setattr(web, "TCPSite", _FakeSite)
 
         fixture = ServerFixture.build()
-        # start() は asyncio.Event().wait() で永久に待つので、捕まえたら畳む
         task = asyncio.create_task(fixture.server.start())
         try:
             assert await wait_until(lambda: bool(_FakeRunner.instances))
@@ -326,12 +276,6 @@ class TestServerAccessLogDisabled:
 
 
 class TestStartupLineNamesDryRun:
-    """`--dry-run` で起動したことは、起動 1 行目から読めなければならない。
-
-    dry-run でも UI は平常どおり値を描き接続表示も緑になる —— **画面からは本物と
-    区別が付かない。** 会場で「繋がるのに機体が動かない」を切り分ける最初の手掛かり。
-    """
-
     async def _startup_line(self, monkeypatch: pytest.MonkeyPatch, *, dry_run: bool) -> str:
         _FakeRunner.instances.clear()
         monkeypatch.setattr(web, "AppRunner", _FakeRunner)
@@ -353,5 +297,4 @@ class TestStartupLineNamesDryRun:
         assert "(dry-run)" in await self._startup_line(monkeypatch, dry_run=True)
 
     async def test_実機起動では名乗らない(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """常に付けると目印にならない (付いていないことが実機の証拠である)。"""
         assert "dry-run" not in await self._startup_line(monkeypatch, dry_run=False)

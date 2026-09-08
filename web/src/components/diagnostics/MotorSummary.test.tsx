@@ -5,7 +5,6 @@ import { MotorSummary } from "@/components/diagnostics/MotorSummary";
 import type { MotorHealth, MotorState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
 
-/** 温度は常に正常域。サマリーが温度ではなくヘルスを見ていることを確かめるため */
 const MOTORS: Record<string, MotorState> = {
   y_axis_r: motorState(),
   y_axis_l: motorState(),
@@ -24,7 +23,6 @@ function motorHealth(over: Partial<MotorHealth> = {}): MotorHealth {
   };
 }
 
-/** 見出しチップ (モータ基数の隣に出る 1 つ目のバッジ) */
 function verdictBadge(): HTMLElement {
   const badge = screen.getByText("2 基").parentElement?.querySelector(".badge");
   if (!badge) throw new Error("判定チップが見つかりません");
@@ -33,8 +31,6 @@ function verdictBadge(): HTMLElement {
 
 describe("MotorSummary", () => {
   it("モータが 1 基でも fault なら、温度が正常でも All operational を出さない", () => {
-    // サマリーが温度しきい値しか見ていなかったため、行のバッジが FAULT (赤) を
-    // 出している同じ画面で、見出しだけが緑の「All operational」を出していた
     render(
       <MotorSummary
         motors={MOTORS}

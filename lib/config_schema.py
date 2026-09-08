@@ -1,15 +1,3 @@
-"""``config/system.yaml`` と ``config/<robot>.yaml`` のスキーマ検証付き読み込み。
-
-**誤記は警告ではなく起動拒否。** ``control_type`` の誤記は duty 0.3 のつもりの指令が
-position 0.3deg としてファームへ届き、ファーム側も正当なフレームとして受理する ——
-警告ログに落として起動を続けると、操縦者はログを読まない限り気付けない。
-
-このモジュールは yaml が黙っていたときに使う既定値 (``DEFAULT_HEALTH`` /
-``DEFAULT_MATCH``) の**単一情報源**でもある。同じ数値を各所に書くと、config を
-配線し忘れた 1 経路だけが古い境界で判定を続け、どこにも異常として現れない。
-そのため上位モジュールを import してはならない (依存は lib.drivers.base のみ)。
-"""
-
 from __future__ import annotations
 
 import math
@@ -19,15 +7,8 @@ from types import MappingProxyType
 
 from lib.drivers.base import ControlMode
 
-# 対応するドライバ種別。main._DRIVER_MAP (種別 → 生成関数) と対で維持する。
-# 全種別がその表を通って生成されるので、片方だけ足すと起動時に KeyError になる
-# (対応が崩れていないことは tests/test_config_schema.py が検証する)
 DRIVER_TYPES = ("m3508", "edulite05", "generic", "dm3520")
 
-# generic ドライバの control_type に書ける制御モード。CURRENT を除くのは
-# GenericDriver が電流指令フレームを持たないため。
-# ON_OFF は電磁弁基板専用 (仕様書 §9.2)。他の 2 枚は受け取っても黙って捨てるので、
-# control_type の書き間違いはファーム側で「動かない」として現れる
 _CONTROL_MODES = {
     mode.value: mode
     for mode in (
@@ -38,28 +19,12 @@ _CONTROL_MODES = {
     )
 }
 
-# EDULITE 05 の mode に書ける制御モード (Edulite05Driver._CONTROL_TO_RUN_MODE と対)
 _EDULITE_MODES = {
     mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY, ControlMode.CURRENT)
 }
 
-# DM3520 の mode に書ける制御モード (Dm3520Driver._CONTROL_TO_CTRL_MODE と対)。
-# MIT モードを載せないのは、Kp/Kd を PC 側で持つことになり「ドライバ内蔵の三重ループを
-# 使う」という本機を選んだ理由そのものが消えるため
 _DM3520_MODES = {mode.value: mode for mode in (ControlMode.POSITION, ControlMode.VELOCITY)}
 
-# ドライバ種別ごとの can_id の範囲 (両端を含む)。
-#
-# 範囲は各ドライバの __init__ も持っているが、そちらで捕まえると「yaml のどのモータが
-# 悪いのか」が出ないまま起動が落ちる。数値が 2 箇所にあること (このモジュールは
-# lib.drivers.base 以外を import しない約束) は tests/test_config_schema.py が守る。
-#
-#   m3508     … C620 の電流指令フレームが 1 通に 4 台分のスロットしか持たない
-#   edulite05 … Extended Frame のモータ ID フィールドが 8bit
-#   generic   … 仕様書 §2.2 (0x00=未設定 / 0xFF=E_STOP ブロードキャストの予約)
-#   dm3520    … **フィードバックには CAN ID の下位 4bit しか載らない** ので、
-#               範囲を下位ニブルへ閉じて「ID が違う = 下位 4bit も違う」を成立させる
-#               (docs/invariants.md「DM3520 の ESC_ID は `0x01`〜`0x0F` に限り…」)
 CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     {
         "m3508": (1, 4),
@@ -76,7 +41,6 @@ _MATCH_KEYS = frozenset({"duration_s"})
 _ROBOT_KEYS = frozenset({"robot_name", "motors", "sensors"})
 _SENSOR_KEYS = frozenset({"bus", "can_id"})
 _COMMON_MOTOR_KEYS = frozenset({"driver", "bus", "can_id"})
-# ドライバ固有キー。他のドライバに書いても効かないため、混在は起動時に拒否する
 _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
     "m3508": frozenset({"pid"}),
     "edulite05": frozenset(
@@ -87,23 +51,13 @@ _DRIVER_MOTOR_KEYS: dict[str, frozenset[str]] = {
         {"master_id", "mode", "limit_speed", "p_max", "v_max", "t_max", "set_zero_on_start"}
     ),
 }
-# 値の解釈 (null 許容・既定値補完) は main._load_pid_config が持つ。ここではキー名だけ見る
 _PID_KEYS = frozenset({"kp", "ki", "kd", "integral_limit", "dead_band", "output_limit"})
 
-# robot yaml から system.yaml へ移した共通設定。移動前の yaml をそのまま起動すると
-# 「書いたのに効かない」状態になるため、残っていたら移動先を示して拒否する
 _MOVED_TO_SYSTEM = frozenset({"health", "can_buses", "match"})
 
 
 @dataclass(frozen=True)
 class HealthThresholds:
-    """ヘルス判定のしきい値。この 4 値は必ず 1 組で運ぶ。
-
-    バラの数値として配ると、4 本のうち 3 本だけ渡した経路を作れてしまい、残る 1 本
-    だけが既定値のまま黙って効く (ログにも UI にも現れない)。1 つの値として渡せば
-    部分配線が構文的に作れない。
-    """
-
     feedback_timeout_ms: float = 500.0
     temp_warning_c: float = 65.0
     temp_critical_c: float = 80.0
@@ -112,19 +66,11 @@ class HealthThresholds:
 
 @dataclass(frozen=True)
 class MatchSettings:
-    """試合そのものの設定 (config/system.yaml の match セクション)。
-
-    競技ルールで決まる 1 つの値なので、ロボットごとの yaml には書けない
-    (両ハンドで違う試合時間という状態は存在しない)。
-    """
-
     duration_s: float = 180.0
 
 
 @dataclass(frozen=True)
 class SystemConfig:
-    """両ロボットで共有する設定 (config/system.yaml)。"""
-
     can_buses: Mapping[str, str]
     health: HealthThresholds
     match: MatchSettings
@@ -133,53 +79,28 @@ class SystemConfig:
 
 @dataclass(frozen=True)
 class MotorConfig:
-    """モータ 1 台分の検証済み設定。ドライバ固有値は既定値まで解決済み。
-
-    動作確認の駆動量はここに持たない —— 確認専用の値が存在しなければ位置定数と
-    ずれようがない。
-    """
-
     name: str
     driver: str
     bus: str
     can_id: int
-    # generic
     control_type: ControlMode = ControlMode.POSITION
-    # INFO (1Hz の自己申告, 仕様書 §3.4) と突き合わせる期待値。**書かなければ照合しない。**
-    # サーボの型 (180/270) は実物を測る手段が無く、照合できるのは「ファームに書いた値」と
-    # 「yaml に書いた値」の一致まで。それでも、型を取り違えたまま指令の 1.5 倍動く状態が
-    # PC からは正常にしか見えない (仕様書 §7.7) ので、この一致だけが検出の足がかりになる
     expected_firmware: int | None = None
     expected_angle_range_deg: float | None = None
-    # edulite05
     host_id: int = 0xFD
     mode: ControlMode = ControlMode.POSITION
     limit_speed: float = 2.0
     limit_current: float = 5.0
     position_kp: float = 30.0
     set_zero_on_start: bool = False
-    # dm3520。mode / limit_speed / set_zero_on_start は edulite05 と共有する
-    # (どちらも「ドライバ内蔵の位置ループへ rad で指令する」同じ形なので、別名を
-    # 与えると同じ概念が 2 つの名前で config に並ぶ)
     master_id: int = 0x00
-    # フィードバックの固定小数点レンジ。**実機のレジスタ 0x15/0x16/0x17 と一致させること。**
-    # 指令は float なのでずれても効かないが、位置・速度・トルクが比例倍で読める。
-    # 症状は「指令した量だけ動いたのに到達判定を通らない」で、動作確認が検出する
     p_max: float = 12.566
     v_max: float = 45.0
     t_max: float = 10.0
-    # m3508。ゲイン値の解釈は main._load_pid_config が持つためここでは生のまま運ぶ
     pid: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
 class SensorConfig:
-    """自作基板のセンサ入力 1 つ分の設定 (config/<robot>.yaml の sensors)。
-
-    **センサはモータではない** (仕様書 §5.2)。motors に書くと動作確認・目標値再送・
-    UI のモータ一覧に「常に 0 のモータ」として並ぶ。
-    """
-
     name: str
     bus: str
     can_id: int
@@ -187,8 +108,6 @@ class SensorConfig:
 
 @dataclass(frozen=True)
 class RobotConfig:
-    """ロボット 1 台分の検証済み設定 (config/<robot>.yaml)。"""
-
     robot_name: str
     motors: Mapping[str, MotorConfig]
     sensors: Mapping[str, SensorConfig] = field(default_factory=dict)
@@ -217,7 +136,6 @@ def _reject_unknown(source: str, path: str, raw: Mapping, allowed: frozenset[str
 
 
 def _number(source: str, path: str, raw: object) -> float:
-    # yaml の true は float() を通ってしまい 1.0 として静かに効く
     if isinstance(raw, bool) or not isinstance(raw, int | float | str):
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}")
     try:
@@ -225,17 +143,12 @@ def _number(source: str, path: str, raw: object) -> float:
     except ValueError as exc:
         raise ValueError(f"{source}: {path} が数値ではありません: {raw!r}") from exc
 
-    # **NaN と無限大はここで落とす。値域検査では捕まえられない。** NaN は比較が
-    # すべて False になるので `value <= 0` も `warning > critical` も素通りし、
-    # 無限大は比較を通るぶんさらに悪い —— `feedback_timeout_ms: .inf` は
-    # 「途絶検出が黙って無効」、`temp_warning_c: .inf` は「温度警告が黙って無効」
     if not math.isfinite(value):
         raise ValueError(f"{source}: {path} が有限な数値ではありません: {raw!r}")
     return value
 
 
 def _integer(source: str, path: str, raw: object) -> int:
-    """整数を読む。CAN ID は yaml に 0x05 形式でも書けるため 16 進文字列も許す。"""
     if isinstance(raw, bool):
         raise ValueError(f"{source}: {path} が整数ではありません: {raw!r}")
     if isinstance(raw, int):
@@ -263,20 +176,10 @@ def _mode(source: str, path: str, raw: object, allowed: dict[str, ControlMode]) 
     return mode
 
 
-# ---- system.yaml ----
-
-
 def _parse_can_buses(source: str, raw: object) -> dict[str, str]:
     buses = _require_mapping(source, "can_buses", raw)
     if not buses:
-        # バス定義が無いとモータを 1 台も登録できず、静かに「何も動かない機体」になる
         raise ValueError(f"{source}: can_buses に CAN バスが 1 つも定義されていません")
-    # **2 つの別名が同じインタフェースを指してはならない。** 別名は「どの機種が
-    # ぶら下がっているか」の宣言なので、重ねると機種の違うノードが同じ物理バスに
-    # 乗る構成が config の 1 行で書ける (何が起きるかは docs/invariants.md の
-    # 「CAN バス名は udev で個体固定する」「Damiao DM3520 は専用バスに載せる」)。
-    # 下流の `CANManager.add_bus` はチャンネルの重複を見ないので、ここで弾かないと
-    # 止める層が 1 つも無い。
     seen: dict[str, str] = {}
     for alias, channel in buses.items():
         if not isinstance(channel, str) or not channel:
@@ -314,13 +217,6 @@ def _parse_health(source: str, raw: object) -> HealthThresholds:
         tx_error_threshold=int(values.get("tx_error_threshold", DEFAULT_HEALTH.tx_error_threshold)),
     )
 
-    # **0 以下を通すと、しきい値そのものが症状に化ける。** ここは health の
-    # 単一情報源なので、通してしまうと他に止める層が 1 つも無い:
-    #   - feedback_timeout_ms <= 0 → 全モータ・全センサが恒久的に STALE。/health は
-    #     常に 503、診断ツリーは常時展開。**症状が配線不良と区別が付かない**
-    #   - temp_warning_c / temp_critical_c <= 0 → 温度を測れるモータが起動直後から
-    #     WARNING / FAULT (「測っていない 0」がそのまま警告・FAULT に化ける)
-    #   - tx_error_threshold <= 0 → 送信エラー 0 件でバスが DEGRADED
     for key, value in (
         ("feedback_timeout_ms", thresholds.feedback_timeout_ms),
         ("temp_warning_c", thresholds.temp_warning_c),
@@ -330,7 +226,6 @@ def _parse_health(source: str, raw: object) -> HealthThresholds:
         if value <= 0:
             raise ValueError(f"{source}: health.{key} は正の値である必要があります: {value!r}")
 
-    # 逆転していると警告を飛ばして FAULT だけが出る (段階的に手当てする余地が消える)
     if thresholds.temp_warning_c > thresholds.temp_critical_c:
         raise ValueError(
             f"{source}: health.temp_warning_c ({thresholds.temp_warning_c}) は"
@@ -349,15 +244,12 @@ def _parse_match(source: str, raw: object) -> MatchSettings:
         return MatchSettings()
 
     duration = _number(source, "match.duration_s", value)
-    # 0 以下だと試合開始と同時に残り 0 になり、タイマーが常に「時間切れ」を出す。
-    # 誤記を通すと画面の表示だけが壊れ、原因が設定だと気付けない
     if duration <= 0:
         raise ValueError(f"{source}: match.duration_s は正の秒数である必要があります: {value!r}")
     return MatchSettings(duration_s=duration)
 
 
 def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> SystemConfig:
-    """両ロボット共通の設定 yaml を検証して読み込む。"""
     raw = _require_mapping(source, "(最上位)", config)
     _reject_unknown(source, "(最上位)", raw, _SYSTEM_KEYS)
 
@@ -369,25 +261,15 @@ def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> S
     )
 
 
-# ---- <robot>.yaml ----
-
-
 def _parse_pid(source: str, motor_name: str, raw: object) -> Mapping[str, object] | None:
     if raw is None:
         return None
     path = f"motors.{motor_name}.pid"
     section = _require_mapping(source, path, raw)
-    # 書いても効かないゲインを黙って捨てないため、キー名は起動時に突き合わせる。
     _reject_unknown(source, path, section, _PID_KEYS)
 
-    # **値も起動時に見る。ここが唯一の関門である。** PID ゲインを実行中に差し替える
-    # 経路は無い (docs/invariants.md) ので、ここを通った値を後段で止める層は無い。
-    # 判定は `_number` に任せる —— bool と非数値型、NaN と無限大をまとめて弾く。
-    # 書き写すと、しきい値側 (`_parse_health`) だけを直したときにこちらが古くなる。
     for key, value in section.items():
         if value is None:
-            # 未指定 / null は書きかけの yaml とみなし `main._load_pid_config` が
-            # 既定値で補完する (`integral_limit` の null だけは「制限なし」の正当な指定)
             continue
         _number(source, f"{path}.{key}", value)
 
@@ -402,7 +284,6 @@ def _optional[T](
     key: str,
     default: T,
 ) -> T:
-    """未指定・null は既定値。書いてある値だけを検証する (書きかけの yaml を許す)。"""
     value = raw.get(key)
     return default if value is None else parse(source, f"{path}.{key}", value)
 
@@ -448,7 +329,6 @@ def _parse_sensor(
 
 
 def _parse_expected_firmware(source: str, path: str, motor: Mapping) -> int | None:
-    """INFO の Byte0 と突き合わせるファーム版 (仕様書 §3.4)。"""
     value = _optional(_integer, source, path, motor, "expected_firmware", None)
     if value is not None and not 0 <= value <= 0xFF:
         raise ValueError(
@@ -461,7 +341,6 @@ def _parse_expected_firmware(source: str, path: str, motor: Mapping) -> int | No
 def _parse_expected_angle_range(
     source: str, path: str, motor: Mapping, control_type: ControlMode
 ) -> float | None:
-    """INFO の Byte3-4 と突き合わせるサーボ可動レンジ [deg] (仕様書 §3.4 / §7.7)。"""
     value = _optional(_number, source, path, motor, "expected_angle_range_deg", None)
     if value is None:
         return None
@@ -472,8 +351,6 @@ def _parse_expected_angle_range(
             "(0 以下だと角度 → パルス幅の変換そのものが定義できない)"
         )
 
-    # 角度を持たない基板 (DC / 電磁弁) は可動レンジを申告しないので、照合は永久に
-    # 「申告なし」と判定し続け、モータが起動直後から FAULT のまま復帰しない
     if control_type is not ControlMode.POSITION:
         raise ValueError(
             f"{source}: {path}.expected_angle_range_deg は control_type: position の軸に"
@@ -574,17 +451,6 @@ def _check_dm3520_master_id_collisions(
     motors: Mapping[str, MotorConfig],
     sensors: Mapping[str, SensorConfig],
 ) -> None:
-    """DM3520 の master_id (MST_ID) が同じバス上のどのノードの can_id (ESC_ID) とも
-    下位 8bit で衝突していないことを確認する。
-
-    理由は docs/invariants.md「DM3520 の ESC_ID は `0x01`〜`0x0F` に限り、MST_ID は
-    下位 8bit を衝突させない」。出荷値は 2 台とも ESC_ID == MST_ID なので、この検査が
-    無いと「ESC_ID は書き換えたが MST_ID を書き換え忘れた」個体を通してしまう。
-
-    **1 ファイルの中で閉じた検査で足りる**のは、DM3520 専用バスが現状 1 ロボットの
-    config 内でしか使われていないため。バス単位で見るのは、フレームが同じ物理バスに
-    繋がったノードにしか届かないため。
-    """
     all_nodes: list[tuple[str, str, int]] = [
         (name, motor.bus, motor.can_id) for name, motor in motors.items()
     ] + [(name, sensor.bus, sensor.can_id) for name, sensor in sensors.items()]
@@ -615,11 +481,6 @@ def load_robot_config(
     source: str = "<inline>",
     buses: Mapping[str, str] | None = None,
 ) -> RobotConfig:
-    """ロボット 1 台分の設定 yaml を検証して読み込む。
-
-    ``buses`` を渡すと ``motors.*.bus`` の別名がその中に在ることまで確認する
-    (別名の誤記は CANManager 側で KeyError になるだけで、どこが悪いか分からない)。
-    """
     raw = _require_mapping(source, "(最上位)", config)
 
     moved = sorted(_MOVED_TO_SYSTEM & set(raw))
@@ -636,7 +497,6 @@ def load_robot_config(
 
     motors_raw = _require_mapping(source, "motors", raw.get("motors"))
     if not motors_raw:
-        # モータ 0 台のロボットは登録できてしまうが、操縦者からは「動かない機体」に見える
         raise ValueError(f"{source}: motors にモータが 1 台も定義されていません")
 
     motors = {
@@ -656,8 +516,6 @@ def load_robot_config(
 
     overlap = sorted(set(motors) & set(sensors))
     if overlap:
-        # 同じ名前でモータとセンサが並ぶと、ヘルスの表示も CAN の登録も
-        # どちらを指しているのか読めなくなる
         raise ValueError(
             f"{source}: motors と sensors で名前が重複しています: {', '.join(overlap)}"
         )

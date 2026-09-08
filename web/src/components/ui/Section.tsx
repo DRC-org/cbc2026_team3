@@ -4,18 +4,11 @@ import { cx } from "@/lib/cx";
 
 interface SectionProps {
   title?: ReactNode;
-  /** 見出し行の右端。区分ごとの進捗のように、見出しと対で読む短い値を置く */
   aside?: ReactNode;
   className?: string;
   children: ReactNode;
 }
 
-/**
- * パネル内の区切り。入れ子のパネルを作らず、罫線 1 本 + 小見出しでグループを表す。
- *
- * 先頭の Section だけ上罫線と余白を落とすことで、パネル見出しの直下に
- * 意味のない二重線が出るのを防ぐ。
- */
 export function Section({ title, aside, className, children }: SectionProps) {
   return (
     <section

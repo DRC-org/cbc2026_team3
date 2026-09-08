@@ -1,18 +1,3 @@
-"""ファームの `kFirmwareVersion` と config の `expected_firmware` の一致を機械的に守る。
-
-**この 2 つがずれると「正しく焼いたのに全モータ FAULT」になる。** PC 側は INFO
-(1Hz の自己申告, 仕様書 §3.4) を `expected_firmware` と突き合わせ、食い違ったら
-そのモータを FAULT にする —— 焼き忘れを見つけるための仕掛けなので、ファームだけを
-上げて config を据え置くと、正しく焼いた基板が一斉に FAULT になる。
-
-規則を `firmware/README.md` と `config/*.yaml` のコメントに書くだけでは、守るのは
-人の注意力になる (版番号を 1 つ上げるだけで config 側は 26 箇所に及ぶ)。ここで
-突き合わせておけば、片方だけを変えたコミットは `uv run pytest` で必ず落ちる。
-
-対応付けはデバイス ID の上位 2bit (仕様書 §2.2 の固定ビット分割) で行う。
-`config/*.yaml` に基板種別を書く欄は無く、can_id が唯一の手掛かりであるため。
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -25,7 +10,6 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _REPO_ROOT / "config"
 _FIRMWARE_DIR = _REPO_ROOT / "firmware"
 
-# 仕様書 §2.2: Bit7..6 が基板種別 (0=予約 / 1=サーボ / 2=DC / 3=電磁弁)。
 _BOARD_KIND_TO_PROJECT = {
     1: "servo",
     2: "dc_motor",
@@ -36,17 +20,13 @@ _VERSION_RE = re.compile(r"constexpr\s+uint8_t\s+kFirmwareVersion\s*=\s*(\d+)\s*
 
 
 def _firmware_version(project: str) -> int:
-    """`firmware/<project>/include/config.h` が申告する版番号。"""
     header = _FIRMWARE_DIR / project / "include" / "config.h"
     matches = _VERSION_RE.findall(header.read_text(encoding="utf-8"))
-    # 定義が消えた・複数になったら曖昧なので突き合わせを続けない
-    # (0 件を「版番号なし」として素通しすると、この検査ごと黙って死ぬ)
     assert len(matches) == 1, f"{header}: kFirmwareVersion の定義が {len(matches)} 個"
     return int(matches[0])
 
 
 def _generic_motors() -> list[tuple[pathlib.Path, str, dict]]:
-    """同梱の全 yaml (bench の 8 セットを含む) から generic のモータ定義を拾う。"""
     found: list[tuple[pathlib.Path, str, dict]] = []
     for path in sorted(_CONFIG_DIR.rglob("*.yaml")):
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -71,16 +51,10 @@ def _case_id(entry: tuple[pathlib.Path, str, dict]) -> str:
 
 class TestFirmwareVersionSync:
     def test_shipped_configs_have_generic_motors(self):
-        # 収集が空振りしたまま緑になるのを防ぐ (glob の書き間違い・config 移動)
         assert len(_GENERIC_MOTORS) >= 20
 
     @pytest.mark.parametrize("entry", _GENERIC_MOTORS, ids=_case_id)
     def test_expected_firmware_is_declared(self, entry):
-        """generic のモータは必ず期待値を書く。
-
-        書かない自由を残すと、下の突き合わせが「対象 0 件」で緑になる形で
-        すり抜けられる。
-        """
         path, name, motor = entry
         assert "expected_firmware" in motor, f"{path}: {name} に expected_firmware が無い"
 

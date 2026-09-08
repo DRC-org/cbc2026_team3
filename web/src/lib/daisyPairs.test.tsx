@@ -20,15 +20,6 @@ import { renderWithRobot } from "@/test/robotContext";
 
 const ALL_TONES: Tone[] = ["success", "warning", "error", "info", "neutral"];
 
-/**
- * daisyUI のコンポーネントは「親クラス + 修飾子」が揃って初めて成立する。
- * Tailwind はソース中に現れた文字列ぶんしか CSS を出力しないため、
- * 片方を書き忘れると **DOM には存在するのに何も見えない** 要素が出荷される
- * （`modal-box` だけ書いて `modal modal-open` を落とすとそうなる）。
- *
- * 文字列連結で組み立てると Tailwind の走査から漏れるので、対は必ず
- * 揃った 1 本の文字列としてソースに書く。ここではその不変条件を固定する。
- */
 describe("daisyUI のクラスは対で書かれている", () => {
   it("badge は親クラスと修飾子が揃っている", () => {
     for (const tone of ALL_TONES) {
@@ -42,28 +33,21 @@ describe("daisyUI のクラスは対で書かれている", () => {
     for (const tone of ALL_TONES) {
       expect(TONE_STATUS_CLASS[tone]).toMatch(/(^| )status( |$)/);
     }
-    // neutral は色修飾子を持たない（daisyUI 既定の灰色 LED をそのまま使う）
     for (const tone of ALL_TONES.filter((t) => t !== "neutral")) {
       expect(TONE_STATUS_CLASS[tone]).toMatch(new RegExp(`(^| )status-${tone}( |$)`));
     }
   });
 
   it("alert は親クラスと色修飾子が揃っている", () => {
-    // トーストはここを使う。配色表を各コンポーネントのローカル定義に置くと、
-    // この検査の対象から外れる
     for (const tone of ALL_TONES) {
       expect(TONE_ALERT_CLASS[tone]).toMatch(/(^| )alert( |$)/);
     }
-    // neutral だけは色修飾子を持たない (daisyUI に alert-neutral は無い)
     for (const tone of ALL_TONES.filter((t) => t !== "neutral")) {
       expect(TONE_ALERT_CLASS[tone]).toMatch(new RegExp(`(^| )alert-${tone}( |$)`));
     }
   });
 
   it("トーストの配置は親クラスと位置修飾子が揃っている", () => {
-    // `toast` を落とすと `position: fixed` ごと消え、通知が本文の途中へ流れ込む。
-    // 位置修飾子を落とすと右下へ寄らず、操縦者が見る場所から外れる。
-    // どちらも DOM には在るので、描画されていることを見るだけでは検出できない
     const { container } = renderWithRobot(<Toaster />, {
       rejection: {
         command: "match_start",
@@ -77,8 +61,6 @@ describe("daisyUI のクラスは対で書かれている", () => {
   });
 
   it("Panel のアクセントバーは太さと色をリテラルで揃えて出す", () => {
-    // `border-l-[0.4rem]` だけ、あるいは色だけを出すと、DOM には在るのに
-    // 見えないバーになる (Tailwind はソースに現れた文字列ぶんしか CSS を出さない)
     const { container } = render(
       <Panel accentTone="warning" legend="機体状態">
         本文
@@ -94,13 +76,9 @@ describe("daisyUI のクラスは対で書かれている", () => {
   });
 
   it("全トーンに文字色・進捗色・アクセントバー色が定義されている", () => {
-    // 検査対象は実際に使われているマップだけにする。使われていないマップを
-    // 「全トーン揃っている」と守り続けると、消せない死蔵コードになる
     for (const tone of ALL_TONES) {
       expect(TONE_TEXT_CLASS[tone]).toBeTruthy();
-      // 実行時に border- から組み立てるのは禁止。リテラルで揃っていることを見る
       expect(TONE_BORDER_L_CLASS[tone]).toMatch(/(^| )border-l-[a-z0-9-]+( |$)/);
-      // neutral だけは既定の進捗色（無指定）を使う
       if (tone !== "neutral") expect(TONE_PROGRESS_CLASS[tone]).toBeTruthy();
     }
   });
@@ -118,8 +96,6 @@ describe("daisyUI のクラスは対で書かれている", () => {
   });
 
   it("キー凡例はタブ定義から描く", () => {
-    // 凡例はキーが効く場所 (タブ自身) にしか無い。直書きすると、タブが増減した
-    // ときにそこだけ古い数字が残る (割り当ての正は `lib/tabs.ts` の TABS[].hotkey)
     renderWithRobot(
       <MemoryRouter>
         <TabBar />

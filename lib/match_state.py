@@ -1,9 +1,3 @@
-"""試合全体の状態 (コート・フェーズ・指差喚呼チェックリスト) を管理する。
-
-操縦者 2 名 + Monitor が別ブラウザで接続するため、チェックリストの進捗を
-クライアント側に持つと「どこまで確認したか」が画面ごとに食い違う。正はサーバー側。
-"""
-
 from __future__ import annotations
 
 import time
@@ -13,71 +7,36 @@ from enum import StrEnum
 
 from lib.config_schema import DEFAULT_MATCH, MatchSettings
 
-#: 試合前点検のロール。**現在これ 1 つしかない**
-#: (docs/invariants.md「指差喚呼はロール 1 つに統合し…」)。
 ROLE_PRE_MATCH = "pre_match"
 
-#: チェックリストを持ちうる全ロール。UI が KeyError にならないよう常にこの順で埋める。
-#: 全ロールの完了が試合開始のゲートを兼ねる (``can_start_match``)。
-#: ロールが 1 つでも辞書のまま運ぶのは、``can_start_match`` の判定 (全ロールが完了)
-#: と WS 契約の形を変えずに済ませるため。
 ALL_ROLES: tuple[str, ...] = (ROLE_PRE_MATCH,)
 
 
 class Court(StrEnum):
-    """自陣コート。赤青で配置が左右反転する。"""
-
     RED = "red"
     BLUE = "blue"
 
 
 class Phase(StrEnum):
-    """試合進行フェーズ。
-
-    SETUP    — セッティングタイム。チェックリスト実施中
-    READY    — チェックリスト完了。試合開始待ち
-    MATCH    — 試合中。シーケンス操作が解禁される唯一のフェーズ
-    FINISHED — 試合終了。結果確認後 match_reset で SETUP へ戻る
-    """
-
     SETUP = "setup"
     READY = "ready"
     MATCH = "match"
     FINISHED = "finished"
 
 
-# 以下はこの状態機械が「どのフェーズで何を受け付けるか」の唯一の定義。
-# lib/commands.py のコマンドゲートも同じ定数を参照する。名前付きの集合にしておかないと、
-# MatchState 自身の遷移条件とコマンドゲートに同じ列挙が二重に書かれ、片方だけ直されて
-# 「サーバーは受け付けるのに状態機械が拒む」ずれが生まれる。
-
-#: ゲートしない (全フェーズで受け付ける) ことを明示するための集合。
 PHASES_ANY: frozenset[Phase] = frozenset(Phase)
 
-#: 試合中のみ。シーケンスの進行操作と試合終了はここ。
 PHASES_DURING_MATCH: frozenset[Phase] = frozenset({Phase.MATCH})
 
-#: 試合中以外。モータを微小駆動する動作確認や設定変更は試合進行を乱すため試合中に通さない。
 PHASES_OUTSIDE_MATCH: frozenset[Phase] = frozenset({Phase.SETUP, Phase.READY, Phase.FINISHED})
 
-#: 準備中のみ。指差喚呼は試合が終わるまでやり直させない (結果確認の前に消させない)。
 PHASES_PREPARATION: frozenset[Phase] = frozenset({Phase.SETUP, Phase.READY})
 
-#: 試合開始ゲート。READY = 指差喚呼が全項目そろった状態でしか試合へ入れない。
 PHASES_START_GATE: frozenset[Phase] = frozenset({Phase.READY})
 
 
 @dataclass
 class ChecklistItem:
-    """指差喚呼 1 項目。
-
-    ``group`` は「画面上でどのコントロールの隣に置くか」の宣言 (``court`` なら
-    コート選択ボタンの直下、``motor_check`` なら動作確認ボタンの直下)。**サーバーは
-    語彙を検証せず素通しする** — 既知の名前だけを許すと、UI がまだ知らない group を
-    書いた瞬間に起動しなくなり、区分を持たないベンチ設定 (config/bench/*) も通らない。
-    未知・未指定の項目が画面から消えないことは UI 側が守る (「その他」として必ず描く)。
-    """
-
     id: str
     label: str
     checked: bool = False
@@ -94,14 +53,11 @@ class ChecklistItem:
 
 @dataclass
 class ChecklistState:
-    """1 ロール分のチェックリスト。"""
-
     role: str
     items: list[ChecklistItem] = field(default_factory=list)
 
     @property
     def completed(self) -> bool:
-        # 項目未定義のロールを未完了扱いにするとゲートが永久に開かないため完了とみなす
         return all(item.checked for item in self.items)
 
     def reset(self) -> None:
@@ -121,19 +77,6 @@ class ChecklistState:
 
 
 def load_checklist_definitions(config: dict) -> dict[str, list[ChecklistItem]]:
-    """config (checklist.yaml 相当) の dict からチェックリスト定義を組み立てる。
-
-    id / label を持たないエントリは無視する。yaml の記述ミスで起動が落ちるより、
-    項目が欠けた状態で起動して UI 上で気付ける方が競技当日の運用に適する。
-
-    **ロール名の誤りだけは拒否する。1 項目の欠落とは失敗の質が違う。** id/label を
-    落としても残りの項目はゲートを閉じたままにするが、``ALL_ROLES`` に無いロールへ
-    書かれた項目は ``MatchState._rebuild_checklists`` が組み立てる段で丸ごと落ちる ——
-    ``pre_match`` が空リストになり、``completed`` は ``all([])`` で **True**、つまり
-    **指差喚呼を 1 つも読み上げないまま試合開始のゲートが開く**。しかも画面には
-    項目が 1 つも出ないので、操縦者にはゲートが開いている理由が分からない。
-    旧 2 ロール構成 (`main_hand:` / `sub_hand:`) の yaml を持ち込むだけで踏む。
-    """
     raw = (config or {}).get("checklists") or {}
     definitions: dict[str, list[ChecklistItem]] = {role: [] for role in ALL_ROLES}
 
@@ -169,13 +112,6 @@ def load_checklist_definitions(config: dict) -> dict[str, list[ChecklistItem]]:
 
 
 class MatchState:
-    """試合全体の状態機械。
-
-    フェーズ遷移は SETUP ⇄ READY → MATCH → FINISHED → SETUP。
-    SETUP ⇄ READY はチェックリストの完了状況から自動で決まり、
-    MATCH への遷移だけが明示的な操作 (match_start) を要する。
-    """
-
     def __init__(
         self,
         definitions: dict[str, list[ChecklistItem]] | None = None,
@@ -189,20 +125,12 @@ class MatchState:
         }
         self._court = court
         self._settings = settings
-        # 経過時間は必ず単調時計で測る。time.time() は NTP 補正で後ろへ飛ぶことがあり、
-        # 試合中に残り時間が増える (= 操縦者が残り時間を信用できなくなる)。
         self._clock = clock
-        #: 試合開始時点の単調時刻。未開始は None
         self._started_at: float | None = None
-        #: 試合終了時点で凍結した経過秒。結果確認中に数字が進み続けないようにする
         self._frozen_elapsed_s: float | None = None
         self._phase = Phase.SETUP
         self.checklists: dict[str, ChecklistState] = {}
         self._rebuild_checklists()
-
-    # ------------------------------------------------------------------ #
-    #  読み取り
-    # ------------------------------------------------------------------ #
 
     @property
     def court(self) -> Court:
@@ -217,33 +145,25 @@ class MatchState:
         return all(state.completed for state in self.checklists.values())
 
     def allows(self, phases: frozenset[Phase]) -> bool:
-        """現フェーズが phases に含まれるか。コマンドゲートと遷移条件の共通判定。"""
         return self._phase in phases
 
     @property
     def timer_running(self) -> bool:
-        """試合時間が進行中か。開始前と終了後 (凍結済み) は False。"""
         return self._started_at is not None and self._frozen_elapsed_s is None
 
     @property
     def elapsed_s(self) -> float:
-        """試合開始からの経過秒。未開始は 0、終了後は終了時点で凍結した値。"""
         if self._frozen_elapsed_s is not None:
             return self._frozen_elapsed_s
         if self._started_at is None:
             return 0.0
         return self._clock() - self._started_at
 
-    # ------------------------------------------------------------------ #
-    #  更新
-    # ------------------------------------------------------------------ #
-
     def set_court(self, court: Court) -> bool:
         if not self.allows(PHASES_OUTSIDE_MATCH):
             return False
         if court is not self._court:
             self._court = court
-            # コートが変われば機体配置も変わるので指差喚呼はやり直し
             self._reset_all_checklists()
         self._sync_phase()
         return True
@@ -262,12 +182,6 @@ class MatchState:
         return False
 
     def check_all_checklist_items(self, role: str | None = None) -> bool:
-        """指差喚呼を一括で完了扱いにする (開発用)。role=None なら全ロール。
-
-        試合開始ゲートを飛ばす操作なので、呼べるのは開発用フラグを立てた起動だけに
-        限る (ゲートは lib/commands.py の requires_dev_tools が持つ)。ここでは
-        reset_checklist と同じフェーズ条件だけを見る。
-        """
         if not self.allows(PHASES_PREPARATION):
             return False
         if role is None:
@@ -298,12 +212,6 @@ class MatchState:
         if not self.allows(PHASES_START_GATE):
             return False
         self._phase = Phase.MATCH
-        # 起点はフェーズ遷移が成立した後にだけ引く。試合中に届いた match_start は
-        # ゲートで弾かれるが、その手前で起点を書き換えると機体は動いたまま
-        # タイマーだけが満了時間へ巻き戻る。
-        # 凍結の解除は match_reset だけが行う (READY へは match_reset を通ってしか
-        # 到達できないため)。FINISHED から直接 READY へ戻す遷移を足すなら、
-        # そこでも _frozen_elapsed_s を落とすこと。
         self._started_at = self._clock()
         return True
 
@@ -311,13 +219,10 @@ class MatchState:
         if not self.allows(PHASES_DURING_MATCH):
             return False
         self._phase = Phase.FINISHED
-        # 終了時点の経過を焼き付ける。凍結を解くのは match_start だけで、
-        # 解き忘れると 2 試合目が 1 試合目の残り時間から始まる
         self._frozen_elapsed_s = self.elapsed_s
         return True
 
     def match_reset(self) -> bool:
-        """どのフェーズからでもセッティングタイムに戻す。コートは維持する。"""
         self._reset_all_checklists()
         self._phase = Phase.SETUP
         self._started_at = None
@@ -325,12 +230,7 @@ class MatchState:
         self._sync_phase()
         return True
 
-    # ------------------------------------------------------------------ #
-    #  内部
-    # ------------------------------------------------------------------ #
-
     def _rebuild_checklists(self) -> None:
-        # 定義を共有すると 1 ロールのチェックが他ロールへ伝播するため必ず複製する
         self.checklists = {
             role: ChecklistState(
                 role=role,
@@ -348,18 +248,9 @@ class MatchState:
             state.reset()
 
     def _sync_phase(self) -> None:
-        """SETUP ⇄ READY をチェックリストの完了状況に追従させる。
-
-        MATCH / FINISHED 中は追従しない (試合中にチェックが外れて
-        フェーズが巻き戻ると進行中のシーケンスが止まってしまう)。
-        """
         if self._phase in (Phase.MATCH, Phase.FINISHED):
             return
         self._phase = Phase.READY if self.can_start_match else Phase.SETUP
-
-    # ------------------------------------------------------------------ #
-    #  配信
-    # ------------------------------------------------------------------ #
 
     def to_dict(self) -> dict:
         return {
@@ -367,12 +258,6 @@ class MatchState:
             "court": self._court.value,
             "phase": self._phase.value,
             "can_start_match": self.can_start_match,
-            # タイマーは「残り時間」ではなく**この配信瞬間の経過ミリ秒**を配る。
-            # 各デバイスはこれを起点に自分の単調時計で進めるため、デバイス間のずれは
-            # WS の片道遅延ぶん (数 ms) に収まり、**端末の壁時計が揃っている必要がない**。
-            # 残り時間そのものを毎秒配ると (1) match_state の参照が毎秒作り直され
-            # useRobotStatus を読む全画面が再描画される (2) 配信が詰まった 1 台では
-            # タイマーだけが凍り、WS は「接続中」のままなので操縦者が気付けない。
             "timer": {
                 "running": self.timer_running,
                 "elapsed_ms": round(self.elapsed_s * 1000),

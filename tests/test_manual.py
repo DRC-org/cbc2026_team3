@@ -1,16 +1,3 @@
-"""手動操縦の指令経路 (lib/manual.py)。
-
-見るのは 4 点だけで、いずれも「手動が新たに開けうる穴」に対応する:
-
-- 可動範囲を宣言していない軸へ連続値を送れないこと (プリセットは送れること)
-- 送る値が必ず可動範囲へ丸められること
-- 左右直結ペアが **1 回の AxisHandle 経由**で同時に指令されること
-- 緊急停止中は 1 通も出ないこと (インターロックは MotorHandle が持つ)
-
-``AxisHandle`` 以下の経路はシーケンスと共通なので、そこの振る舞いは
-test_sequence_move_to.py が既に見ている。ここでは手動固有の判断だけを見る。
-"""
-
 from __future__ import annotations
 
 import inspect
@@ -29,14 +16,6 @@ from tests.fake_drivers import StubFeedbackDriver
 
 
 class _EchoDriver(StubFeedbackDriver):
-    """指令値をフィードバックへ反映するテスト用ドライバ。
-
-    ``follow=False`` にすると指令を受けてもフィードバックが動かない。実機で
-    追従が遅れている状況 (ジョグの連打がまさにそれ) を作るために要る。
-    追従するドライバだけでテストを書くと「起点を目標値で積む」実装と
-    「毎回フィードバックから取る」実装が同じ結果になり、区別できない。
-    """
-
     def __init__(self, name: str, *, follow: bool = True) -> None:
         super().__init__(name, 1)
         self.commands: list[tuple[ControlMode, float]] = []
@@ -51,7 +30,6 @@ class _EchoDriver(StubFeedbackDriver):
 
 _CONFIG = {
     "axes": {
-        # 左右直結ペア。逆回転を scale の符号で表す
         "y_axis": {
             "unit": "mm",
             "command_unit": "deg",
@@ -68,9 +46,7 @@ _CONFIG = {
             "scale": math.pi / 180.0,
             "manual": {"min": -5.0, "max": 30.0},
         },
-        # 離散状態アクチュエータ。manual: を持たないので連続操作の対象外
         "gripper": {"unit": "deg", "command_unit": "deg"},
-        # duty 軸。位置の概念が無く、現在値も報告できない
         "conveyor": {"unit": "duty", "command_mode": "duty", "settle_s": 0.0},
     },
     "positions": {
@@ -99,15 +75,11 @@ def _build(
 
 class TestOperationMode:
     def test_モータの制御モードとは別の語彙である(self) -> None:
-        # lib.drivers.base.ControlMode (position/velocity/duty) と混ざらないこと。
-        # 同じ名前だと「duty モードのロボット」のような読み違えが起きる
         assert {mode.value for mode in OperationMode} == {"sequence", "manual"}
         assert OperationMode.MANUAL.value not in {mode.value for mode in ControlMode}
 
 
 class TestPresetCommand:
-    """位置名による指令は全軸で使える (既定義の点しか送らないため)。"""
-
     async def test_manual_を持たない離散軸でもプリセットは送れる(self) -> None:
         manual, drivers, _ = _build()
         value = await manual.move_to_position("gripper", "open")
@@ -123,7 +95,6 @@ class TestPresetCommand:
         manual, drivers, _ = _build()
         manual.set_court(Court.BLUE)
         await manual.move_to_position("y_axis", "place")
-        # blue=6.0mm。逆回転ペアなので左右で符号が反転する
         assert drivers["y_axis_r"].commands == [(ControlMode.POSITION, pytest.approx(6.0 * 55.0))]
         assert drivers["y_axis_l"].commands == [(ControlMode.POSITION, pytest.approx(-6.0 * 55.0))]
 
@@ -135,8 +106,6 @@ class TestPresetCommand:
 
 
 class TestContinuousCommand:
-    """連続値の指令は manual: を宣言した軸だけ。"""
-
     async def test_manual_を持たない軸への絶対値指定は拒否する(self) -> None:
         manual, drivers, _ = _build()
         with pytest.raises(ManualControlError, match="連続操作の対象外"):
@@ -169,8 +138,6 @@ class TestContinuousCommand:
 
 
 class TestClamp:
-    """可動範囲を出ないこと。手動が構造的保証を外した代わりの唯一の境界。"""
-
     async def test_上限を超える指定は上限へ丸める(self) -> None:
         manual, drivers, _ = _build()
         sent = await manual.set_value("y_axis", 999.0)
@@ -186,34 +153,26 @@ class TestClamp:
     async def test_ジョグも範囲を出ない(self) -> None:
         manual, _, _ = _build()
         await manual.set_value("y_axis", 19.0)
-        # 端に張り付いた状態で押し続けても越えない
         assert await manual.jog("y_axis", 5.0) == 20.0
         assert await manual.jog("y_axis", 5.0) == 20.0
 
     async def test_丸めた値がジョグの起点になる(self) -> None:
-        # 丸める前の値を起点にすると、上限で連打したぶんだけ「戻すのに空押しが要る」
         manual, _, _ = _build()
         await manual.set_value("y_axis", 999.0)
         assert await manual.jog("y_axis", -1.0) == pytest.approx(19.0)
 
 
 class TestJogOrigin:
-    """ジョグの起点は直前の手動目標。フィードバックではない。"""
-
     async def test_初回はフィードバックから起点を取る(self) -> None:
         manual, drivers, _ = _build(follow=False)
-        # 55 deg/mm なので 5.5mm 相当の位置に居る
         drivers["y_axis_r"].set_observed(position=5.5 * 55.0)
         drivers["y_axis_l"].set_observed(position=-5.5 * 55.0)
         assert await manual.jog("y_axis", 1.0) == pytest.approx(6.5)
 
     async def test_追従が遅れていても押した回数ぶん積み上がる(self) -> None:
-        # 起点を毎回フィードバックから取ると、追従が遅れているあいだの連打が吸われ、
-        # 3 回押しても 1 回ぶんしか進まない (実機では「押しても動かない」に見える)
         manual, drivers, _ = _build(follow=False)
         results = [await manual.jog("y_axis", 2.0) for _ in range(3)]
         assert results == [pytest.approx(2.0), pytest.approx(4.0), pytest.approx(6.0)]
-        # 送った指令値もフィードバックではなく目標値の積み上がりに従う
         assert [value for _, value in drivers["y_axis_r"].commands] == [
             pytest.approx(2.0 * 55.0),
             pytest.approx(4.0 * 55.0),
@@ -221,7 +180,6 @@ class TestJogOrigin:
         ]
 
     async def test_緊急停止で起点を捨てる(self) -> None:
-        # 停止中に自重で下がっていた場合、古い起点から再開すると 1 回目が飛ぶ
         manual, drivers, _ = _build(follow=False)
         await manual.set_value("y_axis", 15.0)
         manual.on_e_stop()
@@ -239,8 +197,6 @@ class TestJogOrigin:
 
 
 class TestPairedAxis:
-    """左右直結ペアは 1 軸として同時に指令される。"""
-
     async def test_ペア軸は_1_回の指令で両モータへ届く(self) -> None:
         manual, drivers, _ = _build()
         await manual.set_value("y_axis", 4.0)
@@ -254,12 +210,6 @@ class TestPairedAxis:
         assert right == pytest.approx(-left)
 
     async def test_左右へ逐次_await_せず同時に送る(self) -> None:
-        """送信を逐次 await すると、その時間差ぶんだけ直結機構がねじれる。
-
-        ``AxisHandle.set_target_value`` は ``asyncio.gather`` で束ねている。
-        ここを素の for + await へ書き換えると、下の送信ログが
-        start/end/start/end (逐次) になり、この検証が落ちる。
-        """
         import asyncio
 
         table = load_position_table(_CONFIG, source="<test>")
@@ -267,7 +217,6 @@ class TestPairedAxis:
 
         async def _send(name: str, _msg: object) -> None:
             events.append(f"start:{name}")
-            # 1 回でも制御を手放せば、同時に走っている送信が割り込める
             await asyncio.sleep(0)
             events.append(f"end:{name}")
 
@@ -287,17 +236,6 @@ class TestPairedAxis:
         ], f"逐次送信になっている: {events}"
 
     async def test_片方のモータだけを動かす_API_を持たない(self) -> None:
-        """モータ名で **指令** できる口を生やすと、そこを通った瞬間に機構がねじれる。
-
-        指令は必ず ``AxisHandle.set_target_value`` を await するので、送る口は
-        例外なくコルーチンになる。名前にモータが出てくる公開メンバがあっても、
-        コルーチンでなければ 1 通も送れない。
-
-        名前だけの検査に戻してはならない —— 送らない口 (再励磁がジョグ起点を
-        軸単位で捨てる `reset_axes_for_motors`) まで一律に禁じることになり、
-        その用途はサーバー側へモータ → 軸の対応表を書き写す形でしか実装できなくなる。
-        代わりに現状の例外を下で明示して、増えるときに必ず判断させる。
-        """
         manual, _, _ = _build()
         public = {name for name in dir(manual) if not name.startswith("_")}
         motor_named = {name for name in public if "motor" in name}
@@ -306,8 +244,6 @@ class TestPairedAxis:
 
 
 class TestEStopInterlock:
-    """緊急停止中は 1 通も出ない (インターロックは MotorHandle が持つ)。"""
-
     async def test_絶対値指定が拒否される(self) -> None:
         manual, drivers, mgr = _build(e_stop=True)
         with pytest.raises(EStopActiveError):
@@ -324,8 +260,6 @@ class TestEStopInterlock:
 
 
 class TestAxesInfo:
-    """UI へ配る軸一覧。軸名も可動範囲も UI 側にハードコードさせない。"""
-
     def _by_name(self, manual: ManualController) -> dict[str, dict]:
         return {axis["name"]: axis for axis in manual.axes_info()}
 
@@ -349,8 +283,6 @@ class TestAxesInfo:
         assert self._by_name(manual)["y_axis"]["value"] == pytest.approx(7.0)
 
     def test_位置を測れない軸の現在値は_None(self) -> None:
-        # DC 基板はエンコーダを持たない。逆換算した 0 を載せると
-        # 「測ったように見える 0」が UI へ流れ込む
         manual, _, _ = _build()
         assert self._by_name(manual)["conveyor"]["value"] is None
 
@@ -361,23 +293,18 @@ class TestAxesInfo:
         assert self._by_name(manual)["rotate"]["target"] == pytest.approx(9.0)
 
     def test_ペア軸の左右偏差を軸の単位で載せる(self) -> None:
-        # 逆回転ペアなので指令単位のまま引き算しても意味を持たない。
-        # 判定と同じ SyncGroup を通し、人間の単位 (mm) へ戻した差を配る
         manual, drivers, _ = _build()
         drivers["y_axis_r"].set_observed(position=7.0 * 55.0)
         drivers["y_axis_l"].set_observed(position=-5.0 * 55.0)
         assert self._by_name(manual)["y_axis"]["deviation"] == pytest.approx(2.0)
 
     def test_許容差も一緒に配る(self) -> None:
-        # UI はしきい値のフォールバック値を持たない。正は config だけが持つ
         manual, _, _ = _build()
         axes = self._by_name(manual)
         assert axes["y_axis"]["sync_tolerance"] == pytest.approx(2.0)
         assert axes["rotate"]["sync_tolerance"] is None
 
     def test_単独モータ軸の偏差は_None(self) -> None:
-        # 比較対象が 1 つしかない軸に 0.0 を載せると「揃っていることを測った」
-        # ように見える。ずれようのない軸と、ずれを測れない軸を区別できなくなる
         manual, _, _ = _build()
         assert self._by_name(manual)["rotate"]["deviation"] is None
 

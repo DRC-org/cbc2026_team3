@@ -1,17 +1,9 @@
 import type { ManualAxis } from "@/lib/protocol";
 
-/** 現在値の可動範囲内での位置 [%]。範囲外は端で止める */
 function ratio(value: number, min: number, max: number): number {
   return Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100));
 }
 
-/**
- * 可動範囲の表示。**ドラッグできる入力にしてはならない** ——
- * スライダーにすると、掴んだ瞬間に機体がその位置へ飛ぶ。
- *
- * 現在値と目標値は太さと色で描き分ける。同じ太さの線だと、両者が近いときに重なって
- * 「追従が遅れているのか、目標がそこなのか」が読めない。
- */
 export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; max: number }) {
   const valuePct = axis.value === null ? null : ratio(axis.value, min, max);
   const targetPct = axis.target === null ? null : ratio(axis.target, min, max);
@@ -22,7 +14,6 @@ export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; ma
         {min} {axis.unit}
       </span>
       <div className="relative h-2.5 min-w-0 flex-1 bg-base-200">
-        {/* 現在値から目標値までの移動ぶん。どちらへ向かっているかを面で示す */}
         {valuePct === null || targetPct === null ? null : (
           <span
             className="absolute top-0 h-full bg-info/15"

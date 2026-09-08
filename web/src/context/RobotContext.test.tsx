@@ -12,17 +12,6 @@ import type { RobotContextValue } from "@/context/RobotContext";
 import type { MatchState, RobotState } from "@/lib/protocol";
 import { createRobotContext } from "@/test/robotContext";
 
-/**
- * サーバーは 50ms 間隔で state を配信する (ロボット 2 台ぶんで毎秒 40 回)。
- * 全消費者が 1 つの context を読んでいると、モータ温度が 0.1℃ 動いただけで
- * チェックリストもタブもトーストも再描画される。会場の 1366x768 級ノート PC では
- * それが試合中の入力遅延として出る。
- *
- * ここで固定するのは 2 つ。
- *  - テレメトリ (`states`) と低頻度状態・コマンドが別の購読になっていること
- *  - 外枠 (memo された部分木) がテレメトリでは再描画されないこと
- */
-
 const renders = { states: 0, status: 0, commands: 0 };
 
 const StatesProbe = memo(function StatesProbe() {
@@ -43,7 +32,6 @@ const CommandsProbe = memo(function CommandsProbe() {
   return null;
 });
 
-/** RootLayout の外枠と同じ構造: Provider の子は memo された 1 つの部分木 */
 const Shell = memo(function Shell() {
   return (
     <>
@@ -62,7 +50,6 @@ function setup() {
   renders.states = 0;
   renders.status = 0;
   renders.commands = 0;
-  // 同じハンドラ群を使い回す。毎回 vi.fn() を作り直すとコマンド購読が必ず変わってしまう
   const base = createRobotContext();
   const view = render(
     <RobotProvider value={base}>

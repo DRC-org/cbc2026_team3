@@ -2,13 +2,7 @@ import { vi } from "vitest";
 
 type Listener = (event: unknown) => void;
 
-/**
- * useRobotSocket 用の WebSocket スタブ。
- *
- * jsdom は WebSocket を実装しているが実際に接続を張ってしまうため、
- * テストからサーバー側イベント (open/message/close) を任意の順で発火させられる
- * 差し替え実装を用意する。
- */
+// jsdom の WebSocket は実装されているが実際に接続を張るため、差し替える。
 export class MockWebSocket {
   static instances: MockWebSocket[] = [];
 
@@ -45,18 +39,15 @@ export class MockWebSocket {
     this.emit("close", {});
   }
 
-  /** サーバーが接続を受理した状態にする */
   open(): void {
     this.readyState = MockWebSocket.OPEN;
     this.emit("open", {});
   }
 
-  /** サーバーからの JSON メッセージ受信を模す */
   receive(payload: unknown): void {
     this.emit("message", { data: typeof payload === "string" ? payload : JSON.stringify(payload) });
   }
 
-  /** 送信済みペイロードを JSON として取り出す */
   sentJson(): unknown[] {
     return this.sent.map((s) => JSON.parse(s));
   }

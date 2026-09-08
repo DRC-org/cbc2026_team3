@@ -1,28 +1,3 @@
-// 電磁弁 1 チャンネル分の「安全機構 + ON/OFF 目標」の結線（仕様書 §9）。
-//
-// DC 用の DcChannel・サーボ用の ServoChannel と同じ役割で、3 枚が同じ規則を持つことを
-// 保証するために存在する。安全機構（MotorSafety）と目標値を別々に app.cpp が持つと、
-// 組み合わせ方がペリフェラルに埋まって native テストが 1 件も掛からない（実際サーボ側で
-// 「緊急停止ラッチ中でも SET_TARGET が通る」バグがその形で出た）。
-//
-// この 3 つを組み合わせる規則はここだけが持つ。
-//   - 出力が許可されていない間は新しい ON/OFF 指令を受け付けない
-//   - 停止時は目標そのものを OFF に落とす（仕様書 §3.5: 解除した瞬間に動き出さない）
-//   - 受理する制御タイプは on_off だけ（仕様書 §9.2）
-//
-// **止める = 消磁であり、それが唯一の安全側**（仕様書 §9.4）。サーボの「現在角を保持」に
-// 相当する扱いは持たない。吸着で保持しているワークは落ちるが、断線・PC 停止・操縦者の
-// 緊急停止のいずれでも確実に無通電へ倒れることを優先している。
-//
-// **物理非常停止入力（DC 用の REF）はこの基板に無い**ので applyPhysicalStop も持たない。
-// 配線の無いピンに対する API を残すと、実機で効かない安全機構を「ある」と読ませてしまう。
-//
-// Arduino.h も STM32 HAL も include しないのは意図的で、native 環境（pio test -e native）で
-// そのままテストできるようにするため。
-//
-// **CubeMX + CMake の firmware/solenoid/ からも、PlatformIO の native テストからも
-// 同じソースを参照する。** 片方だけを直せる形にしてはならない。
-
 #pragma once
 
 #include <stdint.h>
@@ -36,16 +11,10 @@ class SolenoidChannel {
    public:
     explicit SolenoidChannel(uint32_t commandTimeoutMs);
 
-    // ---- 安全機構（仕様書 §5.1 / §5.2）----
-
-    // 自分宛の SET_TARGET を受信したときに呼ぶ。制御タイプが on_off でなくても、
-    // 緊急停止ラッチ中でも呼ぶこと（仕様書 §6: 通信自体は生きている）。
     void feed(uint32_t nowMs);
 
-    // E_STOP フレームを解釈する。停止でも解除でも目標を OFF へ落とす（§3.5）。
     EStopAction handleEStopFrame(const uint8_t *data, uint8_t length);
 
-    // CAN が上がらなかったときなど、PC から止められない状態で通電させないための停止。
     void stop();
 
     void setWatchdogEnabled(bool enabled);
@@ -54,45 +23,16 @@ class SolenoidChannel {
 
     bool isOutputAllowed(uint32_t nowMs) const;
 
-    // FEEDBACK Byte0 の緊急停止 / ウォッチドッグのビット（他は呼び出し側で OR する）。
     uint8_t safetyStatusFlags(uint32_t nowMs) const;
 
-    // ---- 目標 ON/OFF（仕様書 §9.2）----
-
-    // 自分宛の SET_TARGET 1 通をそのまま渡す。**受理できる制御タイプの判定はここが
-    // 唯一の持ち主**（仕様書 §9.2: on_off のみ。position の 90.0[deg] や duty の 0.3 を
-    // 「非 0 = ON」として解釈すると、別の基板宛のつもりで書いた値で弁が開く）。
-    // main.cpp / app.cpp 側で判定すると、ペリフェラルの翻訳単位は native テストの
-    // 対象外（common.ini の `test_ignore = *`）なので、その 1 行を消しても全ケース緑になる。
-    // **feed() を先に呼ぶこと**（§6: 受理できないタイプでも通信自体は生きている）。
     bool applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs);
 
-    // 出力が許可されていない間は受け付けず false を返す。受け付けると、PC が §5.1 の
-    // 契約どおり再送している間ずっとラッチ中の目標が更新され続け、解除した瞬間に
-    // その状態で通電する。**feed() を先に呼ぶこと**（起動直後は §5.4 により未受信＝
-    // 出力禁止なので、順序を逆にすると最初の 1 通を捨てる）。
     bool setOn(bool on, uint32_t nowMs);
 
-    // シリアルデバッグの 's' 等、その場で消磁したいとき。
     void hold();
 
-    // 出力が許可されていない周期のあいだ、目標そのものを畳む。**毎ループ呼ぶ。**
-    //
-    // `outputOn()` は出力禁止中に false を返すだけで `on_` を残すので、これが無いと
-    // ウォッチドッグ満了や緊急停止で消磁した後に「受理できない `SET_TARGET`」
-    // （制御タイプ違い・DLC 不足）が 1 通届いただけで**途絶前に開いていた弁が
-    // 再通電する**。仕様書 §3.1 / §6 のとおり `handleChannelFrame` は受理できない
-    // フレームでもウォッチドッグを養う（`feed()` が妥当性検査より先）ので、
-    // ゲートだけが開く。この基板は「止める = 消磁」の一手しか持たないので、
-    // 意図せず通電が戻ることは吸着中のワークの扱いを変える。
-    //
-    // サーボ基板には元からこの穴が無い（`ServoChannel::tick()` が出力禁止中に
-    // 毎ティック現在角へ畳む）。3 枚で扱いを揃えるためのもの。
     void tick(uint32_t nowMs);
 
-    // 出力段（GPIO）へ渡す状態。出力禁止中は目標に関わらず false を返すので、
-    // 呼び出し側が安全機構を迂回する経路を書けない。
-    // **出力へ至る経路はこの 1 本だけにすること**（仕様書 §9.4）。
     bool outputOn(uint32_t nowMs) const;
 
    private:
@@ -100,4 +40,4 @@ class SolenoidChannel {
     bool on_;
 };
 
-}  // namespace motorcan
+}

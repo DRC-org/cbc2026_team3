@@ -62,11 +62,6 @@ const SETUP: MatchState = {
   },
 };
 
-/**
- * 準備フェーズの Monitor は問いを 1 つに絞る:
- * 「試合を開始できるか、できないなら何が足りないか」。
- * 同じ答えを右のパネルが繰り返すと、視線が画面を往復するだけで情報は増えない。
- */
 describe("Dashboard (セッティングタイム)", () => {
   it("残っている指差喚呼の項目名を画面に 1 度しか描かない", () => {
     renderWithRobot(<Dashboard />, {
@@ -74,14 +69,10 @@ describe("Dashboard (セッティングタイム)", () => {
       states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
     });
 
-    // 項目名を出すのは Checklist だけ。StartGate は残り件数しか言わない
-    // (両方が出すと操縦者は同じ 1 行を 2 箇所で読むことになる)
     expect(screen.getAllByText(/非常停止解除/)).toHaveLength(1);
   });
 
   it("動作確認の入口をこの画面に 1 つだけ置く", () => {
-    // 機体ごとの入口があると 2 つを同時に起動でき、両機が同時に動きうる。
-    // 統合後は両ハンドを 1 本のシーケンスで駆動するので入口も 1 つ
     renderWithRobot(<Dashboard />, {
       matchState: SETUP,
       states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
@@ -91,19 +82,16 @@ describe("Dashboard (セッティングタイム)", () => {
   });
 
   it("指差喚呼をこの画面で完結させる (操縦者タブへ往復させない)", () => {
-    // 操縦者 2 名は同じ場所に立つので、確認は Monitor 1 画面へ集約した
     renderWithRobot(<Dashboard />, {
       matchState: SETUP,
       states: { main_hand: robot(), sub_hand: robot({ robot: "sub_hand" }) },
     });
 
     expect(screen.getByText("試合準備")).toBeInTheDocument();
-    // チェックは操作できる形で出ていること (表示だけでは点検を進められない)
     expect(screen.getByLabelText("非常停止解除")).toBeEnabled();
   });
 
   it("機体の判定文言を画面に 1 度しか描かない", () => {
-    // 過熱の判定はサーバーが持つ (config の temp_warning_c)。UI へは warning で届く
     const hot = motorState({ temp: 90 });
     const hotHealth = health({
       motors: [
@@ -126,7 +114,6 @@ describe("Dashboard (セッティングタイム)", () => {
       },
     });
 
-    // 「要確認 1 件」が StartGate と SubsystemStatus の見出しに同時に出ていた
     expect(screen.getAllByText("要確認 1 件")).toHaveLength(1);
   });
 
@@ -141,10 +128,6 @@ describe("Dashboard (セッティングタイム)", () => {
   });
 });
 
-/**
- * 試合中の Monitor。手動操縦は「機体は動いているのにシーケンスは進まない」
- * 状態を作るので、その理由が Monitor から読めなければならない。
- */
 describe("Dashboard (試合中の手動操縦)", () => {
   const MATCH: MatchState = { ...SETUP, phase: "match", can_start_match: true };
 

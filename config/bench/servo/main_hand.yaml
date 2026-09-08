@@ -1,105 +1,31 @@
-# サーボ基板単体ベンチ (機構未装着) のモータ構成。
-#
-# robot_name を main_hand にしてあるのは、Web UI のロボットキーが web/src/routes.tsx で
-# main_hand / sub_hand に固定されているため。ベンチ専用の名前にすると、どのタブにも
-# 現れず手動操縦パネルを開けない。
-#
-# 位置定数は同じディレクトリの <robot_name>_positions.yaml が読まれる
-# (main.py の _positions_path)。本番の config/*_positions.yaml は無傷のまま残る。
-#
-# **このベンチではサーボ基板 1 枚の 5 スロットだけを登録する。**
-#
-# ---------------------------------------------------------------------------
-# !!! スロット設定は config ではなくファームが基板番号ごと・スロットごとに持つ !!!
-# ---------------------------------------------------------------------------
-# firmware/servo/include/config.h の kServoBoards[] が役割もピンも初期角も可動範囲も
-# パルス仕様もセンサ極性も宣言する。**PC 側から選べる値ではない**ので、ベンチは
-# 「どの基板番号として振る舞うか」を先に決め、その行の宣言へ登録を合わせる。
-# 役割と食い違う登録をしても起動は通るが、その ID は FEEDBACK も INFO も 1 通も
-# 返さないため、症状は「配線したのに STALE のまま」で配線不良と区別が付かない。
-#
-#   基板番号 | SV0        | SV1        | SV2        | SV3         | SV4
-#   ---------+------------+------------+------------+-------------+-------------
-#      0     | 0x40 Servo | 0x41 Servo | 0x42 Servo | 0x43 Sensor | 0x44 Unused
-#      1     | 0x48 Servo | 0x49 —     | 0x4A —     | 0x4B —      | 0x4C —
-#
-# **基板 #2 (0x50-0x54) はこの表に無い。** あちらは MCU が UNO R4 Minima で、
-# ファームが別バイナリ (env uno_r4_minima) のため Nano 版の表には現れない。
-# このベンチは Nano の基板を使うので、#2 として振る舞わせることはできない。
-#
-# **SV4 は本番で y_axis の原点スイッチに充てるスロットだが、スイッチが未装着の
-# あいだファームは Unused として宣言している。** Unused のスロットは FEEDBACK も
-# INFO も 1 通も送らないので、ベンチでも登録しない (登録すると 0x44 だけが永久に
-# STALE として並び、配線不良と区別が付かなくなる)。
-#
-# サーボの型もスロットごとに宣言されるので、下の expected_angle_range_deg は
-# **そのスロットの行**と突き合わせること (現在は全スロット 270 度品)。
-#
-# ---------------------------------------------------------------------------
-# !!! このベンチは基板番号 0 として使う。基板の DIP を全 OFF にすること !!!
-# ---------------------------------------------------------------------------
-# **基板番号 1 は SV0 しか駆動できない**ので、机上ベンチとして成立しない (5 スロット
-# 中 4 つが無応答で、それが正常なのか壊れているのかを画面から区別できない)。
-# 基板番号 0 なら 3 本のサーボと 2 本のスイッチが同時に載り、**本番の
-# config/main_hand.yaml とスロットの役割が一致する** —— ベンチで確かめた手順が
-# そのまま本番の gripper / wall_f / wall_r と 2 本の原点スイッチの確認になる。
-#
-# 本番では 3 本のサーボに機構上の役割名 (gripper / wall_f / wall_r) が付くが、
-# ベンチでは機構が付いていないのでスロット名で登録する。どのスロットにサーボを
-# 挿しても同じ手順で試せるようにするため。
-#
-# DIP を変えたらこのファイルの can_id も直すこと。実際の値は candump が教えてくれる:
-# FEEDBACK の CAN ID は 0x300 + デバイス ID なので、0x340 が流れていれば 0x40。
-# ID を合わせる仕組みはファーム側にも PC 側にも無く、ここが唯一の接点になる。
-
 robot_name: main_hand
 
 motors:
-  # SV0 (D4)。本番では gripper が載っているスロット。
   servo_sv0:
     driver: generic
     bus: generic_bus
-    can_id: 0x40               # サーボ基板 #0 SV0
+    can_id: 0x40
     control_type: position
-    # INFO（1Hz の自己申告）と突き合わせる期待値（仕様書 §3.4）。**不一致は FAULT。**
-    # 値は firmware/servo/include/config.h の kFirmwareVersion と
-    # kServoBoards[].slots[].pulse.angleRangeDeg に対応する。**サーボの型は
-    # スロットごとに選べる**ので、別スロットの値を写さないこと。
-    # **ファームを直したらここも直す。**
     expected_firmware: 5
     expected_angle_range_deg: 270.0
 
-  # SV1 (D5)。本番では wall_f。
   servo_sv1:
     driver: generic
     bus: generic_bus
-    can_id: 0x41               # サーボ基板 #0 SV1
+    can_id: 0x41
     control_type: position
     expected_firmware: 5
-    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+    expected_angle_range_deg: 270.0
 
-  # SV2 (D6)。本番では wall_r。
   servo_sv2:
     driver: generic
     bus: generic_bus
-    can_id: 0x42               # サーボ基板 #0 SV2
+    can_id: 0x42
     control_type: position
     expected_firmware: 5
-    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+    expected_angle_range_deg: 270.0
 
-# --- センサ入力 (スロット SV3 / D7) ---
-# **センサはモータではない** (仕様書 §5.2)。ここに登録しないと CANManager の受信ループが
-# そのフレームを誰にも配らず、接触が PC まで届かない。**接触そのものは異常ではない**
-# ので、ヘルス判定には入っていない。
-# **SensorConfig は name / bus / can_id しか持たない**ので expected_firmware は書けない
-# (同じ基板の servo_sv0〜sv2 が版番号を照合している)。
-#
-# **SV4 (0x44) は登録しない。** 本番では y_axis の原点スイッチに充てるスロットだが、
-# スイッチが未装着のあいだファームが Unused として宣言しており FEEDBACK を 1 通も
-# 送らない。スイッチが付いてファームが TouchSensor へ戻る日に servo_sv4 も戻すこと
-# —— **このベンチの存在理由は本番の基板 #0 とスロットの役割が一致していること**なので、
-# 片方だけ戻すとベンチで確かめた手順が本番の確認にならなくなる。
 sensors:
   servo_sv3:
     bus: generic_bus
-    can_id: 0x43               # サーボ基板 #0 SV3
+    can_id: 0x43

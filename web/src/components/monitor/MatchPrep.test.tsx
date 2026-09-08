@@ -21,7 +21,6 @@ const ITEMS: ChecklistState = {
   completed: false,
 };
 
-/** `null` = ロールごと未配信 (config に項目が無い状態) */
 function mount(
   checklist: ChecklistState | typeof MALFORMED | null = ITEMS,
   phase: MatchPhase = "setup",
@@ -39,7 +38,6 @@ function mount(
   });
 }
 
-/** 見出しから、その区分の枠 (Section) を取る */
 function section(title: string): HTMLElement {
   const heading = screen.getByText(title);
   const element = heading.closest("section");
@@ -47,10 +45,6 @@ function section(title: string): HTMLElement {
   return element;
 }
 
-/**
- * 準備の面は「操作とその確認を同じ場所に置く」ことが唯一の存在理由。
- * 項目が対応するコントロールから離れたら、この面は元の長いリストへ戻っている。
- */
 describe("MatchPrep の項目配置", () => {
   it("コート選択の項目をコート選択ボタンと同じ区分に置く", () => {
     mount();
@@ -66,12 +60,10 @@ describe("MatchPrep の項目配置", () => {
     const check = section("アクチュエータ動作確認");
     expect(within(check).getByRole("button", { name: "動作確認を開始" })).toBeInTheDocument();
     expect(within(check).getByLabelText("動作 OK")).toBeInTheDocument();
-    // 別区分の項目を巻き込んでいない (巻き込むと元の 1 本リストに戻る)
     expect(within(check).queryByLabelText("コート一致")).toBeNull();
   });
 
   it("動作確認の進捗と結果もその場で開く (モーダルへ追い出さない)", () => {
-    // モーダルにすると、駆動しているあいだヘッダーの EMG STOP を覆う
     mount();
 
     const check = section("アクチュエータ動作確認");
@@ -79,8 +71,6 @@ describe("MatchPrep の項目配置", () => {
   });
 
   it("group を持たない項目・未知の group の項目も必ず操作できる形で描く", () => {
-    // 落とすと、指差喚呼が 1 つ足りないまま試合開始のゲートだけが開かない。
-    // ベンチ設定 (config/bench/*) は group を 1 つも持たない
     mount({
       items: [item("ベンチ項目"), item("誤記 group", "moter_check")],
       completed: false,
@@ -138,11 +128,6 @@ describe("MatchPrep のチェック操作", () => {
   });
 });
 
-/**
- * コート選択は「今どちらか」を色で示す唯一の場所 (誤ったコートのまま試合に入る事故は
- * 試合をそのまま落とす)。選択中の面はコートの色そのものでなければ意味を成さないため、
- * 汎用の反転表示 (`Button` の generic な selected) ではなく呼び出し側が色を持つ。
- */
 describe("MatchPrep のコート選択", () => {
   it("選択中のコートを色付きの面と aria-pressed で示す", () => {
     mount();
@@ -172,8 +157,6 @@ describe("MatchPrep のコート選択", () => {
   });
 
   it("準備中のリセットは確認を挟む（まだ使っていない指差喚呼を捨てるため）", () => {
-    // MatchStrip の「セッティングへ戻る」は即実行だが、こちらは同じ match_reset でも
-    // 失うものが違う。押した時点で完了済みの指差喚呼が全て消える
     const onRequestReset = vi.fn();
     const { context } = renderWithRobot(<MatchPrep onRequestReset={onRequestReset} />, {
       matchState: {
@@ -191,9 +174,6 @@ describe("MatchPrep のコート選択", () => {
   });
 
   it("やり直しの導線は 1 つだけ (結果が同じボタンを 2 つ並べない)", () => {
-    // ヘッダの CLEAR (checklist_reset) と最下段の match_reset を並べると、準備
-    // フェーズではフェーズもタイマーも初期状態なので結果が同じになり、操縦者は
-    // どちらを押すべきか画面から判断できない
     mount({ items: [item("a", "preflight", true)], completed: false });
 
     expect(screen.getAllByRole("button", { name: /リセット|解除/ })).toHaveLength(1);
@@ -208,8 +188,6 @@ describe("MatchPrep のコート選択", () => {
 
 describe("MatchPrep の配信異常", () => {
   it("読めない配信を「項目が未定義」へ倒さない", () => {
-    // 空は config に項目が無いことの表現として既に使っている。混ぜると
-    // 操縦者は config/checklist.yaml を疑って探しに行く
     mount(MALFORMED);
 
     expect(screen.getByText(/配信を読めていません/)).toBeInTheDocument();
@@ -222,7 +200,6 @@ describe("MatchPrep の配信異常", () => {
   });
 
   it("チェックリストが読めなくてもコート設定と動作確認は操作できる", () => {
-    // 直す手段まで画面から消すと、配信が壊れた時点で準備そのものが進まなくなる
     mount(MALFORMED);
 
     expect(screen.getByRole("button", { name: "青コート" })).toBeEnabled();
@@ -230,12 +207,6 @@ describe("MatchPrep の配信異常", () => {
   });
 });
 
-/**
- * チェック状態はサーバー配信が唯一の出どころ。切断中に押せるままにすると
- * **チェックが付かないだけで理由も出ない** —— 試合前の最も忙しい時間帯に、
- * 最も紛らわしい挙動になる。同じ画面のコート選択は最初から `connected` を見ており、
- * `StartGate` も「通信 — サーバーに接続できていません」を出している。
- */
 describe("MatchPrep の切断中", () => {
   it("指差喚呼のチェックボックスを押せなくする", () => {
     mount(ITEMS, "setup", { connected: false });

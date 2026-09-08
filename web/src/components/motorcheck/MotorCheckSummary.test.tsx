@@ -22,7 +22,6 @@ describe("MotorCheckSummary", () => {
     mount({ running: true, step_index: 4, total_steps: 12 });
 
     expect(screen.getByText("実行中")).toBeInTheDocument();
-    // 進み具合は同じ区分の `MotorCheckPanel` が出す。数行のあいだに 2 度並べない
     expect(screen.queryByText("4 / 12")).not.toBeInTheDocument();
   });
 
@@ -32,18 +31,13 @@ describe("MotorCheckSummary", () => {
   });
 
   it("途中で降りたら未完了と出す", () => {
-    // 「完了」と紛らわしい表示にしないこと。チェックを付ける根拠が変わる
     mount({ running: false, step_index: 5, total_steps: 12, error: "動作確認を中断しました" });
 
     expect(screen.getByText("未完了")).toBeInTheDocument();
-    // 理由の全文は同じ区分の `MotorCheckPanel` が出す (そちらは失敗時に自分から開く)。
-    // ここにも置くと、同じ理由が truncate 版と並んで 2 度読まれる
     expect(screen.queryByText("動作確認を中断しました")).not.toBeInTheDocument();
   });
 
   it("除外があれば完了と一緒に件数を出す", () => {
-    // 「完了」だけだと、全ステップ成功と「サブハンドを丸ごと飛ばした成功」が
-    // 同じ表示になる。指差喚呼のチェックはこの 1 行を根拠に付く
     mount({
       running: false,
       step_index: 6,
@@ -56,10 +50,6 @@ describe("MotorCheckSummary", () => {
   });
 
   it("ステップ一覧が読めない配信は、完了と出す場面でも判定不能を添える", () => {
-    // **ここでしか言えない。** `MotorCheckPanel` の全文警告は畳まれた内側にあり、
-    // あちらが自分から開くのは実行中と失敗時だけ。完了判定は `total_steps` しか
-    // 見ないので、この配信は緑の「完了」＋畳んだパネルになり、操縦者は警告を
-    // 一度も見ずに指差喚呼「アクチュエータ動作確認 完了」にチェックを付けられる
     mount({ running: false, step_index: 6, total_steps: 6, steps: MALFORMED });
 
     expect(screen.getByText("完了")).toBeInTheDocument();

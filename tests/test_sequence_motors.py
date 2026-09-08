@@ -21,8 +21,6 @@ from tests.fake_drivers import StubFeedbackDriver
 
 
 class _FakeDriver(StubFeedbackDriver):
-    """送った指令を記録するテスト用ドライバ (観測値の投入は基底の set_observed)。"""
-
     def __init__(self, name: str = "m1", can_id: int = 1) -> None:
         super().__init__(name, can_id)
         self.encoded: list[tuple[ControlMode, float]] = []
@@ -235,15 +233,9 @@ class TestMotorHandleWaitReached:
         assert await handle.wait_reached(timeout=0.05) is True
 
     async def test_target_cleared_mid_wait_raises_interrupted(self) -> None:
-        """緊急停止などが待機中に目標を刈り取ったら「到達」にすり替えず中断と分かる形にする。
-
-        `MotorHandle.is_reached()` は「目標が無ければ到達済み」を返すので、
-        `wait_reached()` の実行中に `clear_target()` が入ると中断された動作が
-        ステップ成功として記録されうる。
-        """
         handle, driver, _mgr = _make_handle()
         await handle.set_target(ControlMode.POSITION, 10.0)
-        driver.set_observed(position=100.0)  # 到達しないまま待たせる
+        driver.set_observed(position=100.0)
 
         async def interrupt() -> None:
             await asyncio.sleep(0.03)
@@ -380,11 +372,6 @@ def _make_axis(
     sync_tolerance: float | None = None,
     command_mode: ControlMode = ControlMode.POSITION,
 ) -> tuple[AxisHandle, dict[str, _FakeDriver], list[MotorHandle]]:
-    """AxisSpec・ドライバ・MotorHandle 群をまとめて組み立てる。
-
-    MotorHandle まで返すのは、送信が失敗した後にどのモータへ目標が残っているかを
-    ``has_target`` で見るテストがあるため (``AxisHandle`` はハンドルを公開しない)。
-    """
     drivers = {spec.name: _FakeDriver(spec.name, i + 1) for i, spec in enumerate(motors)}
     axis_spec = AxisSpec(
         name=name,
@@ -426,16 +413,6 @@ class TestAxisHandle:
         assert drivers["pair_l"].encoded == [(ControlMode.POSITION, -30.0)]
 
     async def test_ペアの片側が失敗したら成功した側の目標だけを捨てる(self) -> None:
-        """ペア軸に片側だけ効く操作を、エラー経路でも作らない。
-
-        素の `gather` は最初の例外で抜けるが**残りのタスクは完走する**ので、片方の送信
-        だけが失敗すると成功した側にだけ新しい目標が残る。問い合わせ駆動のモータでは
-        20Hz の再送がその 1 台だけを新目標へ押し続け、左右直結の軸が片側だけ動いて
-        偏差超過で全体緊急停止になる。
-
-        一方**失敗した側の旧目標は残す** —— 1 通も飛んでいない以上、旧目標こそが基板が
-        現に実行している状態と一致している。
-        """
         mgr = _make_can_manager()
         axis, _, handles = _make_axis("pair", _PAIR_MOTORS, manager=mgr, sync_tolerance=1.0)
         targets = {handle.name: handle for handle in handles}
@@ -450,19 +427,10 @@ class TestAxisHandle:
         with pytest.raises(can.CanError):
             await axis.set_target_value({"pair_r": 30.0, "pair_l": -30.0})
 
-        # 送信が通った側は捨てる。残ると 20Hz の再送がこの 1 台だけを新目標へ押し続ける
         assert targets["pair_l"].has_target is False
-        # 送信が失敗した側は旧目標のまま (捨てると再送が止まり、基板の出力ごと落ちる)
         assert targets["pair_r"].target == 10.0
 
     async def test_単一モータ軸は送信が失敗しても旧目標が残る(self) -> None:
-        """捨てる範囲を「指令した全員」へ広げると、モータ 1 台の軸まで巻き添えになる。
-
-        電磁弁・ポンプ・コンベア・サーボはいずれも単一モータの generic 軸で、
-        `GenericTargetRefresher` は「目標が無い = 送らない」なので、目標を捨てた瞬間に
-        20Hz の再送が止まる —— 500ms 後に `command_timeout_ms` が満了し、電磁弁は消磁して
-        **吸着中のワークが落ちる**。
-        """
         mgr = _make_can_manager()
         axis, _, handles = _make_axis(
             "valve_3",
@@ -470,7 +438,6 @@ class TestAxisHandle:
             manager=mgr,
             command_mode=ControlMode.ON_OFF,
         )
-        # 弁を開いてワークを吸着している状態
         await axis.set_target_value({"valve_3_sol": 1.0})
 
         mgr.send = AsyncMock(side_effect=can.CanError("送信失敗 (テスト)"))
@@ -478,7 +445,6 @@ class TestAxisHandle:
             await axis.set_target_value({"valve_3_sol": 1.0})
 
         assert handles[0].target == 1.0
-        # 再送が止まっていないこと (止まれば 500ms 後に消磁する)
         mgr.send = AsyncMock()
         assert await handles[0].resend_target() is True
 
@@ -490,7 +456,6 @@ class TestAxisHandle:
         assert handle.sync_violation() is None
 
     def test_sync_violation_is_none_when_reverse_pair_is_aligned(self) -> None:
-        """逆回転は scale の符号で吸収されるので、揃っていれば偏差 0 で超過しない。"""
         handle, drivers = self._pair(sync_tolerance=1.0)
         drivers["pair_r"].set_observed(position=30.0)
         drivers["pair_l"].set_observed(position=-30.0)
@@ -502,11 +467,9 @@ class TestAxisHandle:
         drivers["pair_r"].set_observed(position=30.0)
         drivers["pair_l"].set_observed(position=-10.0)
 
-        # 3.0mm と 1.0mm の差
         assert handle.sync_violation() == pytest.approx(2.0)
 
     def test_sync_violation_is_none_within_tolerance(self) -> None:
-        """超過しているかの判定は SyncGroup と同じ境界で行う。"""
         handle, drivers = self._pair(sync_tolerance=1.0)
         drivers["pair_r"].set_observed(position=30.0)
         drivers["pair_l"].set_observed(position=-25.0)

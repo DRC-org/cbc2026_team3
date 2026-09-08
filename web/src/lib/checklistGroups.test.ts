@@ -23,9 +23,6 @@ describe("groupChecklistItems", () => {
   });
 
   it("group を持たない項目も未知の group の項目も落とさない", () => {
-    // 落とすと、config に group を書き足した瞬間に項目が画面から消え、
-    // 指差喚呼が 1 つ足りないまま試合開始のゲートだけが開かない状態になる。
-    // ベンチ設定 (config/bench/*) は group を 1 つも持たない
     const grouped = groupChecklistItems([
       item({ id: "bench" }),
       item({ id: "typo", group: "moter_check" }),

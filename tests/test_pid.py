@@ -6,7 +6,6 @@ import pytest
 
 from lib.control.pid import PIDController
 
-# M3508 (C620 ESC) の電流指令レンジ。PID 出力をそのまま電流指令に使う想定の検証に用いる
 M3508_CURRENT_MIN = -16384.0
 M3508_CURRENT_MAX = 16384.0
 
@@ -36,16 +35,13 @@ class TestIntegral:
     def test_integral_respects_variable_dt(self) -> None:
         pid = PIDController(kp=0.0, ki=10.0)
         pid.update(setpoint=1.0, measurement=0.0, dt=0.1)
-        # dt が倍になれば積分の伸びも倍
         assert pid.update(setpoint=1.0, measurement=0.0, dt=0.2) == pytest.approx(3.0)
 
     def test_integral_removes_steady_state_error(self) -> None:
-        """P のみでは残る定常偏差が I 項で解消されることを一次遅れ系で確認する。"""
 
         def simulate(pid: PIDController) -> float:
             position = 0.0
             for _ in range(2000):
-                # 出力に比例して動くが、常に一定の外乱 (重力相当) に引き戻される系
                 output = pid.update(setpoint=1.0, measurement=position, dt=0.01)
                 position += (output - 0.4) * 0.01
             return position
@@ -54,7 +50,6 @@ class TestIntegral:
         assert simulate(PIDController(kp=0.5, ki=2.0)) == pytest.approx(1.0, abs=0.01)
 
     def test_integral_not_accumulated_when_ki_is_zero(self) -> None:
-        """ki=0 で積分を回すと、後からゲインを上げた瞬間に出力が飛ぶため蓄積しない。"""
         pid = PIDController(kp=1.0, ki=0.0)
         for _ in range(100):
             pid.update(setpoint=1.0, measurement=0.0, dt=0.01)
@@ -65,7 +60,6 @@ class TestDerivative:
     def test_derivative_opposes_measurement_change(self) -> None:
         pid = PIDController(kp=0.0, kd=1.0)
         pid.update(setpoint=0.0, measurement=0.0, dt=0.1)
-        # 測定値が +1.0/0.1s で動く → D 項は -kd * 10.0
         assert pid.update(setpoint=0.0, measurement=1.0, dt=0.1) == pytest.approx(-10.0)
 
     def test_no_derivative_on_first_update(self) -> None:
@@ -90,11 +84,9 @@ class TestDerivative:
 
 class TestDerivativeKick:
     def test_setpoint_step_does_not_spike_output(self) -> None:
-        """偏差微分だと目標値ステップで D 項がスパイクする。測定値微分ならしない。"""
         pid = PIDController(kp=1.0, kd=100.0)
         pid.update(setpoint=0.0, measurement=0.0, dt=0.01)
         output = pid.update(setpoint=1.0, measurement=0.0, dt=0.01)
-        # D 項が偏差微分なら 100 * (1.0 / 0.01) = 10000 が乗る
         assert output == pytest.approx(1.0)
 
 
@@ -130,7 +122,6 @@ class TestAntiWindup:
         assert pid.integral == pytest.approx(0.0)
 
     def test_recovers_immediately_after_constraint_released(self) -> None:
-        """機構端に当たって飽和し続けた後、偏差が反転したら即座に逆方向へ出力する。"""
         pid = PIDController(kp=1.0, ki=100.0, output_min=-10.0, output_max=10.0)
         for _ in range(200):
             pid.update(setpoint=100.0, measurement=0.0, dt=0.01)
@@ -142,7 +133,6 @@ class TestAntiWindup:
         assert pid.integral == pytest.approx(0.1)
 
     def test_integral_can_unwind_out_of_saturation(self) -> None:
-        """飽和中でも、飽和を浅くする向きの積分は許可する。"""
         pid = PIDController(kp=0.0, ki=1.0, output_min=-10.0, output_max=10.0)
         for _ in range(200):
             pid.update(setpoint=100.0, measurement=0.0, dt=0.1)
@@ -180,7 +170,6 @@ class TestDeadBand:
         assert pid.integral == pytest.approx(held)
 
     def test_integral_term_still_holds_load_inside_dead_band(self) -> None:
-        """昇降軸の保持電流を失わないよう、不感帯でも積分項の出力は残す。"""
         pid = PIDController(kp=0.0, ki=10.0, dead_band=0.5)
         held = pid.update(setpoint=1.0, measurement=0.0, dt=0.1)
         assert held == pytest.approx(1.0)
@@ -203,7 +192,6 @@ class TestNonPositiveDt:
         integral = pid.integral
         pid.update(setpoint=5.0, measurement=3.0, dt=0.0)
         assert pid.integral == pytest.approx(integral)
-        # 直前測定値も汚さない (汚れていれば D 項が -1 * (0-3)/0.1 = +30 跳ねる)
         assert pid.update(setpoint=1.0, measurement=0.0, dt=0.1) == pytest.approx(3.0)
 
     def test_negative_dt_returns_previous_output(self) -> None:
@@ -229,7 +217,6 @@ class TestReset:
         pid = PIDController(kp=0.0, kd=1.0)
         pid.update(setpoint=0.0, measurement=0.0, dt=0.1)
         pid.reset()
-        # 前回測定値が消えているので D 項は 0 (再開時のキックを防ぐ)
         assert pid.update(setpoint=0.0, measurement=100.0, dt=0.1) == pytest.approx(0.0)
 
     def test_reset_clears_last_output(self) -> None:
@@ -241,19 +228,7 @@ class TestReset:
 
 
 class TestAttributeAccess:
-    """生成時引数は公開属性のまま残り、``update()`` が毎周期読み直す。
-
-    ``main._build_position_pid`` は C620 のフルスケール (±16384 = ±20A) で組み立て済みの
-    ``PIDController`` へ ``output_min`` / ``output_max`` を代入して config の
-    ``output_limit`` まで絞り込む。生成時に私有フィールドへ畳み込む実装に変えると、
-    この絞り込みが 1 counts も効かないまま C620 のフルトルクが出る。
-
-    ゲインを実行中に差し替える経路は無いが、読み出しは出力レンジと同じ機構に乗って
-    いるので、片方だけ凍結した実装を検出できるよう両方を固定する。
-    """
-
     def test_output_limits_are_read_at_each_update(self) -> None:
-        """生成後に絞り込んだ出力レンジが、次の update から効く。"""
         pid = PIDController(kp=1000.0, output_min=M3508_CURRENT_MIN, output_max=M3508_CURRENT_MAX)
         pid.output_min = -2000.0
         pid.output_max = 2000.0
@@ -282,15 +257,7 @@ class TestDefaults:
 
 
 class TestFeedforward:
-    """偏差以外の根拠で加える操作量 (左右直結ペアの同期補正がこれを使う)。
-
-    **呼び出し側で足して後からクランプする実装との違いを固定する** —— 外で足すと
-    conditional integration が補正を知らないまま積分を進め、「飽和していて機構が
-    動けないのに積分だけが育つ」状態が拘束の外れた瞬間の暴走として現れる。
-    """
-
     def test_default_is_zero_and_changes_nothing(self) -> None:
-        """既定では従来と 1 counts も変わらない (既存の全構成がそのまま動く)。"""
         plain = PIDController(kp=2.0)
         explicit = PIDController(kp=2.0)
 
@@ -306,7 +273,6 @@ class TestFeedforward:
         ) == pytest.approx(17.0)
 
     def test_output_is_clamped_including_feedforward(self) -> None:
-        """補正込みで出力レンジに収まる。外で足すと上限を超えた指令が出る。"""
         pid = PIDController(kp=2.0, output_min=-100.0, output_max=100.0)
 
         output = pid.update(setpoint=10.0, measurement=0.0, dt=0.01, feedforward=500.0)
@@ -314,11 +280,6 @@ class TestFeedforward:
         assert output == pytest.approx(100.0)
 
     def test_feedforward_survives_dead_band(self) -> None:
-        """不感帯の中でも補正は残る。
-
-        不感帯は「自分が目標に十分近い」ことを言うだけで、左右が揃っているかとは
-        無関係。消すと目標付近で静止した状態のずれを縮める手段が無くなる。
-        """
         pid = PIDController(kp=2.0, dead_band=5.0)
 
         output = pid.update(setpoint=1.0, measurement=0.0, dt=0.01, feedforward=30.0)
@@ -326,11 +287,6 @@ class TestFeedforward:
         assert output == pytest.approx(30.0)
 
     def test_integral_does_not_grow_while_saturated_by_feedforward(self) -> None:
-        """補正だけで飽和している間は積分を進めない (アンチワインドアップが補正込み)。
-
-        補正を外側で足す実装では PID 自身は飽和していないと判断して積分を育て続け、
-        機構が動けない間に溜めた積分を拘束が外れた瞬間に吐き出す。
-        """
         pid = PIDController(kp=1.0, ki=1.0, output_min=-1000.0, output_max=1000.0)
 
         for _ in range(5):
@@ -339,7 +295,6 @@ class TestFeedforward:
         assert pid.integral == pytest.approx(0.0)
 
     def test_integral_grows_without_saturation(self) -> None:
-        """対照: 飽和していなければ同じ条件で積分は育つ (上のテストの前提を固定)。"""
         pid = PIDController(kp=1.0, ki=1.0, output_min=-1000.0, output_max=1000.0)
 
         for _ in range(5):

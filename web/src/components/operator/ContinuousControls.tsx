@@ -21,15 +21,6 @@ interface ContinuousControlsProps {
   onSet: (axis: string, value: number) => void;
 }
 
-/**
- * 押し続けたときに 1 回の量を何倍まで伸ばしてよいか。
- *
- * **可動域の 1/8 を 1 回で飛び越えない**ことを上限に置く。ベンチの `y_axis` は
- * 可動範囲 370mm / 刻み 10mm で、等倍のままでは端から端まで 37 回の押下が要る
- * (押しっぱなしでも 3 秒以上)。一方で刻みが青天井に伸びると、離す直前の 1 回だけで
- * 機構を端まで運んでしまう。2 の冪へ落とすのは、伸びた量を `×2` `×4` として
- * 画面に出したときに操縦者が暗算できる形にするため。
- */
 function maxMultiplierFor(min: number, max: number, step: number): number {
   const limit = (max - min) / 8 / step;
   if (!Number.isFinite(limit) || limit < 2) return 1;
@@ -46,17 +37,10 @@ export function ContinuousControls({
   onJog,
   onSet,
 }: ContinuousControlsProps) {
-  // **インデックスで扱う。** `<option value={候補の数値}>` から
-  // `steps.indexOf(Number(...))` で引き直すと、config の `steps` に浮動小数 (0.05 等) が
-  // 入ったとき往復変換で一致せず `indexOf` が -1 を返し、刻みが**黙って 1** へ落ちる。
-  // 症状は「選んだ量と違う量で動く」だけで、config にも画面にも痕跡が残らない。
-  // 可動範囲と刻みは config が宣言する境界であって、UI が値を捏造してよい所ではない
   const [stepIndex, setStepIndex] = useState(0);
   const step = steps[Math.min(stepIndex, steps.length - 1)];
   const maxMultiplier = maxMultiplierFor(min, max, step);
 
-  // 端に達したら押しても動かない。理由を画面から読めるようにボタン側で塞ぐ
-  // (実際のクランプはサーバーが行う。ここは説明であって判定ではない)
   const anchor = axis.target ?? axis.value;
   const atMin = anchor !== null && anchor <= min;
   const atMax = anchor !== null && anchor >= max;
@@ -67,18 +51,12 @@ export function ContinuousControls({
 
   const minus = useHoldRepeat(jog(-1), canMinus, maxMultiplier);
   const plus = useHoldRepeat(jog(1), canPlus, maxMultiplier);
-  // キーボードは選択中の行だけが張る。押しっぱなしの加速はポインタと同じ engine
   const keyMinus = useHoldKey("ArrowLeft", jog(-1), selected && canMinus, maxMultiplier);
   const keyPlus = useHoldKey("ArrowRight", jog(1), selected && canPlus, maxMultiplier);
 
   const minusBoost = Math.max(minus.multiplier, keyMinus.multiplier);
   const plusBoost = Math.max(plus.multiplier, keyPlus.multiplier);
 
-  // **端への移動だけは修飾キーを併用する。** 1 打で軸が可動端まで走る唯一の操作で、
-  // しかも `Home` / `End` はジョグの `←` `→` と同じナビゲーションクラスタにある
-  // (ノート PC では `Fn+←/→` がそのまま `Home/End` になる機種が多い)。押し間違いが
-  // そのまま端までの全速移動になるのは、同じ動作をポインタで行うボタンと比べて
-  // 桁違いに危険なので、単打では発火させない。凡例 (`ManualPanel`) も対で持つこと
   useHotkeys(
     {
       "[": () => setStepIndex((i) => Math.max(0, i - 1)),
@@ -93,9 +71,6 @@ export function ContinuousControls({
     <>
       <RangeBar axis={axis} min={min} max={max} />
 
-      {/* クラスタ単位で折り返す。要素ごとに折り返させると、軸によって
-          「+ が右端にある行」と「+ が次の行の左端にある行」が混在し、
-          同じ操作を毎回探し直すことになる */}
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <div className="flex items-center gap-1">
           <Button
@@ -151,10 +126,6 @@ export function ContinuousControls({
   );
 }
 
-/**
- * 押し続けて伸びた実効量。**伸びていないときは何も出さない** ——
- * 常時 `×1` を出すと、平常時の行に意味の無い記号が 2 つ増える。
- */
 function Boost({ multiplier }: { multiplier: number }) {
   if (multiplier <= 1) return null;
   return <span className="font-mono text-[0.8em] tabular-nums">×{multiplier}</span>;

@@ -1,16 +1,3 @@
-"""本番モジュールが「外へ手を伸ばす」形を、振る舞いではなくソースの形で禁止する。
-
-ここに集めた誤りはどれも、混入しても平常時のテストが全て緑のまま通る。振る舞いの
-テストでは *新しく増えた 1 箇所* を止められないので、形そのものを禁じる。
-
-**他オブジェクトの private 参照**は機能を足すたびに増え、「シーケンスのライフサイクル
-の一部がサーバー側にある」といった責務の漏れが積み上がる。対象は lib/server.py だけで
-はなく、CANManager を外から使うモジュールを列挙して同じ禁止を掛ける。
-
-**暗黙のイベントループ取得**は lib/ 全体に掛ける (誤って書いても実行中のループが
-ある限り同じループが返るため、混入した瞬間には何も起きない)。
-"""
-
 from __future__ import annotations
 
 import ast
@@ -22,7 +9,6 @@ import pytest
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-#: 自分自身の状態だけは private のままでよい
 _ALLOWED_OWNERS = frozenset({"self", "cls"})
 
 _IGNORED_TOKENS = frozenset(
@@ -38,7 +24,6 @@ _IGNORED_TOKENS = frozenset(
 
 
 def _private_accesses(source: str) -> list[str]:
-    """``名前._private`` の形を字句解析で拾う (コメント・文字列リテラルは対象外)。"""
     tokens = [
         tok
         for tok in tokenize.generate_tokens(io.StringIO(source).readline)
@@ -55,7 +40,6 @@ def _private_accesses(source: str) -> list[str]:
     return found
 
 
-#: CANManager / Sequence を外から使うモジュール。ここに載せた分だけ再発を止められる
 _CONSUMER_MODULES = (
     "lib/server.py",
     "lib/server_motor_check.py",
@@ -80,12 +64,6 @@ def _lib_modules() -> list[pathlib.Path]:
 
 @pytest.mark.parametrize("module_path", _lib_modules(), ids=lambda p: p.name)
 def test_no_implicit_event_loop_acquisition(module_path: pathlib.Path) -> None:
-    """``asyncio.get_event_loop()`` を使わない (``get_running_loop()`` を使う)。
-
-    ``get_event_loop()`` は実行中のループが無い文脈で新しいループを黙って作る。誰も
-    回さないので、そこへ渡した WS 配信や CAN 送信は「呼んだのに一度も走らない」形で
-    消え、例外も警告も出ない。
-    """
     tree = ast.parse(module_path.read_text(encoding="utf-8"))
     offenders = [
         node.lineno

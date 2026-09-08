@@ -19,13 +19,10 @@ from tests.fake_drivers import StubFeedbackDriver
 
 
 class _EchoDriver(StubFeedbackDriver):
-    """指令値をそのままフィードバックに反映する (常に即到達する) テスト用ドライバ。"""
-
     def __init__(self, name: str, *, reaches: bool = True, bias: float = 0.0) -> None:
         super().__init__(name, 1)
         self.commands: list[tuple[ControlMode, float]] = []
         self._reaches = reaches
-        # 指令値とフィードバックのずれ。ペア軸の偏差検知を再現するために使う
         self._bias = bias
 
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
@@ -48,13 +45,6 @@ def _make_group(*names: str, reaches: bool = True) -> tuple[MotorGroup, dict[str
 
 
 def _clear_on_first_poll(group: MotorGroup) -> None:
-    """最初の到達判定が呼ばれた瞬間に全ハンドルの目標を捨てる。
-
-    **中断のテストを実時間の勝負にしないための仕掛け。** `asyncio.sleep(0.01)` で狙うと
-    別の経路 (指令前に消える → タイムアウト / 指令後・待機前 → 窓) へ落ち、踏めた日だけ
-    緑になる。到達判定は `wait_reached` のループでしか呼ばれないので、そこへ引っ掛ければ
-    「待機中に消えた」が毎回同じ順序で起きる。
-    """
     for handle in group.handles:
         driver = handle.driver
         original = driver.is_target_reached
@@ -141,7 +131,6 @@ class TestMoveTo:
         assert drivers["lift_motor"].commands == [(ControlMode.POSITION, 200.0)]
 
     async def test_timeout_raises(self) -> None:
-        """到達しないまま軸ごとのタイムアウトを過ぎたら例外で止める。"""
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", reaches=False)
         seq.bind_motors(group)
@@ -178,20 +167,10 @@ class TestMoveTo:
     async def test_指令の途中で例外が出ても到達待ちを取り残さない(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """**溜めている途中で落ちたコルーチンが誰にも await されない形を作らない。**
-
-        2 軸目の `set_target_value` が例外を投げたとき、1 軸目ぶんの `wait_reached`
-        コルーチンを既に作っていると誰にも await されないまま捨てられ、緊急停止のたび
-        本当の死因 (`EStopActiveError`) の隣に `RuntimeWarning` が並ぶ。
-
-        判定は「コルーチンが 1 つも作られていないこと」で見る —— 警告を
-        `catch_warnings` で捕まえる形は回収時期に依存して**変異版でも緑になる**。
-        """
         seq = _MoveSequence()
         mgr = MagicMock()
 
         async def _send(name: str, _msg: can.Message) -> None:
-            # arm_joint (2 軸目) の指令だけを失敗させる
             if name == "arm_joint":
                 raise can.CanError("送信失敗 (テスト)")
 
@@ -219,7 +198,6 @@ class TestMoveTo:
 
 class TestRunStopsOnTimeout:
     async def test_run_stops_and_logs(self, caplog: logging.LogCaptureFixture) -> None:
-        """タイムアウト例外は run() が握って停止する。後続ステップは実行しない。"""
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
         seq.bind_motors(group)
@@ -234,12 +212,6 @@ class TestRunStopsOnTimeout:
 
 
 class TestMoveToInterruptedByEStop:
-    """緊急停止 (clear_target) が到達待ちを「到達」にすり替えない回帰テスト。
-
-    `MotorHandle.is_reached()` は「目標が無ければ到達済み」を返すので、到達待ち中に
-    緊急停止で目標がクリアされると、中断された動作がステップ成功として記録されうる。
-    """
-
     async def test_move_to_raises_when_target_cleared_mid_wait(self) -> None:
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
@@ -254,15 +226,6 @@ class TestMoveToInterruptedByEStop:
     async def test_target_cleared_between_command_and_wait_is_an_interruption(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """**指令し終えてから待ち始めるまでの窓で消えた目標も「中断」である。**
-
-        `move_to` は全軸へ送り終えてから `wait_reached` をまとめて作る。その間に緊急停止
-        が挟まると `wait_reached` は**最初から目標が無い状態で待ち始め**、「一度も指令して
-        いない軸」と区別できずに `is_reached()` の「目標が無ければ到達済み」へ吸われて
-        中断がステップ成功として記録される。
-
-        時刻に依存させずに窓そのものを再現する (実時間の sleep で狙うと踏めた日だけ緑)。
-        """
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
         seq.bind_motors(group)
@@ -272,7 +235,6 @@ class TestMoveToInterruptedByEStop:
 
         async def _clear_right_after_commanding(self: AxisHandle, values: object) -> None:
             await original(self, values)  # type: ignore[arg-type]
-            # 指令は届いたが、待ち始める前に緊急停止が目標を捨てた
             for handle in group.handles:
                 handle.clear_target()
 
@@ -282,7 +244,6 @@ class TestMoveToInterruptedByEStop:
             await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
 
     async def test_run_records_interruption_not_timeout(self) -> None:
-        """run() が捕まえた失敗の文言はタイムアウトと取り違えてはならない。"""
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", "arm_joint", reaches=False)
         seq.bind_motors(group)
@@ -292,18 +253,15 @@ class TestMoveToInterruptedByEStop:
 
         await seq.run()
 
-        # 中断されたので次のステップ ("after") へは進んでいない
         assert seq.executed == ["move"]
         assert seq.progress["running"] is False
         assert seq.last_error is not None
-        # タイムアウトの文言 ("目標位置に到達しませんでした") と取り違えてはならない
         assert "到達しませんでした" not in seq.last_error.message
         assert "中断" in seq.last_error.message
 
 
 class TestBackwardCompatibility:
     async def test_sequence_without_positions_still_runs(self) -> None:
-        """位置定数を bind しないシーケンスは従来どおり動く。"""
 
         class _PlainSequence(Sequence):
             def __init__(self) -> None:
@@ -320,17 +278,11 @@ class TestBackwardCompatibility:
         assert seq.executed == ["noop"]
 
 
-# ---------------------------------------------------------------------- #
-#  複数モータ軸 (逆回転ペア) / 位置以外を指令する軸
-# ---------------------------------------------------------------------- #
-
-
 def _make_axis_group(
     options: Mapping[str, Mapping[str, float | bool]],
     *,
     send: AsyncMock | None = None,
 ) -> tuple[MotorGroup, dict[str, _EchoDriver]]:
-    """モータごとに到達可否とフィードバックのずれを指定してグループを組む。"""
     mgr = MagicMock()
     mgr.send = send if send is not None else AsyncMock()
     group = MotorGroup()
@@ -348,7 +300,6 @@ def _make_axis_group(
 
 _PAIRED_CONFIG = {
     "axes": {
-        # 左右直結の逆回転ペア。scale の符号だけが左右で異なる
         "y_axis": {
             "unit": "mm",
             "command_unit": "deg",
@@ -360,7 +311,6 @@ _PAIRED_CONFIG = {
                 "y_axis_l": {"scale": -10.0},
             },
         },
-        # 左右で scale の絶対値が異なる軸 (許容差がモータごとに換算されるかの検証用)
         "wide_pair": {
             "unit": "mm",
             "command_unit": "deg",
@@ -404,7 +354,6 @@ def _paired_sequence(group: MotorGroup) -> _MoveSequence:
 
 class TestPairedAxis:
     async def test_sends_per_motor_commands(self) -> None:
-        """逆回転ペアではモータごとの scale が効いて左右で符号が反転する。"""
         group, drivers = _make_axis_group({"y_axis_r": {}, "y_axis_l": {}})
         seq = _paired_sequence(group)
 
@@ -414,7 +363,6 @@ class TestPairedAxis:
         assert drivers["y_axis_l"].commands == [(ControlMode.POSITION, -30.0)]
 
     async def test_commands_are_sent_concurrently(self) -> None:
-        """左右の送信に時間差があると機構がねじれるため、逐次 await してはならない。"""
         events: list[tuple[str, str]] = []
 
         async def _send(name: str, msg: can.Message) -> None:
@@ -430,7 +378,6 @@ class TestPairedAxis:
 
         await seq.move_to({"y_axis": "work"})
 
-        # 逐次送信なら ("done", "y_axis_r") が ("start", "y_axis_l") より先に来る
         assert events.index(("start", "y_axis_l")) < events.index(("done", "y_axis_r"))
 
     async def test_timeout_when_one_motor_does_not_reach(self) -> None:
@@ -441,8 +388,6 @@ class TestPairedAxis:
             await seq.move_to({"y_axis": "work"})
 
     async def test_sync_error_raises_after_reach(self) -> None:
-        """到達許容差の内側でも左右がずれていれば次のステップへ進ませない。"""
-        # 30deg のずれ = 人間の単位で 3.0mm。到達許容差 (50deg) の内側だが sync_tolerance 超過
         group, _ = _make_axis_group({"y_axis_r": {}, "y_axis_l": {"bias": 30.0}})
         seq = _paired_sequence(group)
 
@@ -456,8 +401,6 @@ class TestPairedAxis:
         await seq.move_to({"y_axis": "work"})
 
     async def test_tolerance_is_converted_per_motor(self) -> None:
-        """scale の絶対値が左右で違っても、許容差はモータごとに換算される。"""
-        # 人間の単位 0.5mm → wide_a は 5deg、wide_b は 50deg が許容差になる
         group, _ = _make_axis_group({"wide_a": {"bias": 4.0}, "wide_b": {"bias": 40.0}})
         seq = _paired_sequence(group)
 
@@ -473,7 +416,6 @@ class TestPairedAxis:
 
 class TestNonPositionAxis:
     async def test_duty_axis_waits_settle_only(self) -> None:
-        """到達フラグを持たない軸は判定せず settle_s だけ待つ。"""
         group, drivers = _make_axis_group({"conveyor": {"reaches": False}})
         seq = _paired_sequence(group)
 
@@ -485,7 +427,6 @@ class TestNonPositionAxis:
         assert elapsed >= 0.05
 
     async def test_velocity_axis_does_not_time_out(self) -> None:
-        """速度指令の軸は到達判定を持たないため、フィードバックが追従しなくても止まらない。"""
         group, drivers = _make_axis_group({"spinner": {"reaches": False}})
         seq = _paired_sequence(group)
 

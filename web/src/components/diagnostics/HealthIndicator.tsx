@@ -2,7 +2,6 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { BusHealth, BusHealthState, HealthSnapshot } from "@/lib/protocol";
 import type { Tone } from "@/lib/tone";
 
-/** CAN ヘルスは正常/劣化/停止/未取得の 4 段階しか取らない（info は使わない） */
 type HealthTone = Exclude<Tone, "info">;
 
 const TONE_LABEL: Record<HealthTone, string> = {
@@ -18,30 +17,16 @@ function busTone(state: BusHealthState): HealthTone {
   return "error";
 }
 
-/**
- * daisyUI の table-xs は本文を .6875rem に固定する。ルートの clamp() 由来の
- * 相対サイズから外れて読みづらくなるため、セル側で明示的に上書きする
- * （font-size は tr に当たっているので、td/th の直接指定が勝つ）。
- */
 const CELL_CLASS = "text-[0.85em]";
 
 function StatusTag({ tone }: { tone: HealthTone }) {
   return <StatusBadge tone={tone}>{TONE_LABEL[tone]}</StatusBadge>;
 }
 
-/**
- * 受信フレームの解釈失敗数 (`rx_err`) は判定 (`tone`) を動かさず、内訳としてだけ添える。
- * 降格させないのはサーバー側の意図的な判断 (lib/can_manager.py `_record_rx_error`) で、
- * 表示側がそれを覆すと本物の送信障害の警告と区別が付かなくなる。一方で数を伏せると
- * 「握り潰した受信失敗を数として残す」ことの意味が消え、操縦者は STALE のモータを前に
- * 断線と解釈失敗を切り分けられない。
- */
 function BusRow({ bus }: { bus: BusHealth }) {
   const tone = busTone(bus.state);
-  // 0 のときは出さない。平常時に無音であることが、出たときに意味を持つ条件
   const notes = [
     bus.bus_off ? "bus_off" : null,
-    // bus_off とは原因が別 (インタフェース断)。同じ語で出すと復旧の手当てを誤る
     bus.rx_down ? "rx_down" : null,
     bus.tx_error_count > 0 ? `tx_err ${bus.tx_error_count}` : null,
     bus.rx_error_count > 0 ? `rx_err ${bus.rx_error_count}` : null,
@@ -59,12 +44,6 @@ function BusRow({ bus }: { bus: BusHealth }) {
   );
 }
 
-/**
- * CAN バスの健全性。`SubsystemStatus` の CAN 節だけが使う。
- *
- * 表示は 1 通りしか持たない。variant を増やすと到達不能な分岐が残り、直すときに
- * 「どの見た目が本番か」を呼び出し元まで辿らないと決められなくなる。
- */
 export function HealthIndicator({ health }: { health: HealthSnapshot | undefined }) {
   if (!health) {
     return (
@@ -84,10 +63,6 @@ export function HealthIndicator({ health }: { health: HealthSnapshot | undefined
       {health.buses.length === 0 ? (
         <div className="text-base-content/70">バス情報なし</div>
       ) : (
-        /* 表のセルは truncate で縮まない (`table-fixed` でない表の列幅は内容の
-           min-content で決まる)。異常時の `bus_off rx_down tx_err …` は
-           `whitespace-nowrap` なので、幅 21rem の診断カラムでは表だけが列を
-           越える。**溢れる側をスクロールさせ、画面本体は横スクロールさせない** */
         <div className="overflow-x-auto">
           <table className="table table-zebra table-xs">
             <tbody>

@@ -31,7 +31,6 @@ function healthEvent(over: Partial<HealthChangeEvent> = {}): HealthChangeEvent {
   };
 }
 
-/** コンテキストの差し替えを rerender で行えるようにした描画ヘルパ */
 function mount(overrides: Partial<RobotContextValue> = {}) {
   const view = render(
     <RobotProvider value={createRobotContext(overrides)}>
@@ -97,12 +96,6 @@ describe("表示するもの", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  /**
-   * `Toaster` は `RootLayout` で `RouteErrorBoundary` (`<Outlet />` だけを包む) の
-   * 外に置かれているので、ここで投げると緊急停止オーバーレイごとアンマウントする。
-   * 受信境界 (`protocol.ts`) が読めなかった `level` を弾いていても、この層は
-   * それ単独で守れていることを確かめる (層ごとに単独で効くことの確認)。
-   */
   it("level が非文字列でも投げずに描画する", () => {
     expect(() =>
       mount({
@@ -143,16 +136,11 @@ describe("寿命と件数の制御", () => {
     }
 
     expect(screen.getAllByText(/WARNING — main_hand/)).toHaveLength(3);
-    // 残るのは新しい 3 件
     expect(screen.getByText(/can5/)).toBeInTheDocument();
     expect(screen.queryByText(/can2/)).not.toBeInTheDocument();
   });
 
   it("コンテナはクリックを透かし、カードだけが受け直す", () => {
-    // daisyUI の `.toast` は `pointer-events: none` を持たず、幅は
-    // `calc(100vw - 2rem)` まで広がる。z を `.modal` (999) の上へ出した以上、
-    // 透かさないと狭い画面でモーダルのフッターボタンを塞ぎうる
-
     mount({ rejection: rejection() });
 
     const card = screen.getByRole("alert");

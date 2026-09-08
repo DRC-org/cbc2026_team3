@@ -1,87 +1,38 @@
-# サブハンドの機構位置定数。書き方は config/main_hand_positions.yaml と同じ。
-#
-# !!! 機構が未完成のため、ここに書かれた値はすべて仮値 (安全側の小さい可動量) !!!
-# sequences/sub_hand.py には数値を書かないこと。
-#
-# --- サーボ軸の角度の書き方 -------------------------------------------------
-# 値は**出力軸の絶対角 [deg]**。**180 度サーボか 270 度サーボかはここに現れない** ——
-# 角度 → パルス幅の変換は firmware/servo/include/config.h の ServoPulseSpec だけが
-# 持つので、**型を載せ替えてもこのファイルは 1 行も変わらない** (仕様書 §7.7)。
-# 代わりに 2 つ制約がある:
-#   - **負の角度は書けない。** ファームは 0deg でパルス幅の下端に張り付くようクランプ
-#     するので、270 度サーボの中央を 0 とした ±135 のような書き方は取れない。0 起点の
-#     片側絶対角で書き、機械原点をずらしたいときは axes.<軸>.offset で寄せる
-#   - **ファームの angle_min / angle_max を超えた値は黙ってクランプされる。** 症状は
-#     「送ったのに途中で止まる」だけで、SET_TARGET には書いた値が載っているので
-#     candump からも読めない。範囲を変えるときはファーム側の**そのスロットの**
-#     定数を直す (kGripperLimits / kWallFLimits / kWallRLimits /
-#     kSubGripperLimits。1 つを共有すると 1 スロットの都合で全部が緩む)
-
 axes:
-  # RobStride EDULITE 05 の補助アーム関節。指令・フィードバックともに rad。
   sub_arm_joint:
     unit: deg
     command_unit: rad
-    scale: 0.017453292519943295   # deg -> rad (pi/180)
-    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
-    timeout_s: 3.0       # この時間で到達しなければシーケンスを停止する
-    # 手動操縦の可動範囲 [deg]。書き方と考え方は main_hand_positions.yaml を参照。
+    scale: 0.017453292519943295
+    offset: 0.0          # TODO: 機械原点と電気原点のずれ [rad]。実機で実測
+    timeout_s: 3.0
     # TODO: 機構完成後、メインハンドと干渉しない角度範囲へ詰めること
     manual:
       min: -5.0
       max: 15.0
       steps: [1.0, 5.0]
 
-  # ラックアンドピニオンの直動 2 軸 (Damiao DM3520)。指令・フィードバックともに
-  # **出力軸の rad** —— 減速比 3591/187 は本機のドライバが内部で吸収済みなので、
-  # M3508 の y_axis と違って減速比は scale に現れない。
-  #
-  # scale = 2*pi / (pi * m * z) = 2 / (m * z)   [rad / mm]
-  #   ラックピニオンは基準円で転がるので、出力軸 1 回転 = 基準円周 pi*m*z [mm]
-  #   ピニオンは モジュール 1 / 歯数 36 (基準円 36.0mm)
-  #   -> 2 / 36 = 0.0555556 rad/mm (出力軸 1 回転 = 113.097mm)
-  # 組み立て後に一度だけ実測で確かめること。ずれていたら
-  #   scale_new = scale_old * 指令値 / 実測値
-  # **測るときは必ず同じ方向から寄せる** — バックラッシュは scale では吸収できず、
-  # 往復で測ると遊びのぶんが scale の誤差として紛れ込む (main_hand の y_axis と同じ)。
-  # TODO: 昇降側のピニオンが前後軸と違うなら、sub_lift の scale だけ差し替えること。
-  #
-  # 可動範囲は p_max (12.5rad) が上限で、scale 換算で ±225mm。ここを超えた位置は
-  # ドライバ側で頭打ちになり、フィードバックも張り付くので「送ったのに途中で止まる」
-  # という形でしか現れない。
-  #
-  # !!! 原点は電源投入位置 !!! 本機は投入時に 0.0rad へ固定されるので、搬送中に手で
-  # 動かしたぶんがそのまま座標のずれになる。**リミットスイッチを付けても現状は
-  # 有効化できない** —— `supports_origin_capture()` が False なので `HomingError` に
-  # なる (理由は docs/invariants.md「原点を確定する手段はドライバ自身が答える」)。
-  #
-  # 前後方向 (Y 方向)。**軸名に sub_ を付けるのは main_hand の y_axis と衝突させない
-  # ため** —— 統合動作確認は両ハンドの位置定数を 1 つに merge するので、軸名が
-  # 重なると起動ごと落ちる。
+  # TODO: 実機で確認 (収納側へ寄せる向き / ストローク全長)。リミットスイッチを
+  # 付けても DM3520 は supports_origin_capture() が False なので現状は有効化できない。
   # homing:
   #   sensor: sub_y_axis_origin_sensor
-  #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
-  #   search_distance: 40.0   # [mm] TODO: ストローク全長より少し長い値へ
+  #   direction: -1
+  #   search_distance: 40.0   # [mm]
   #   step: 0.5               # [mm]
   #   settle_s: 0.05
   sub_y_axis:
     unit: mm
     command_unit: rad
-    scale: 0.0555556     # mm -> rad (出力軸)。導出は上のコメント
+    scale: 0.0555556
     offset: 0.0
-    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
-    tolerance: 1.0       # 到達許容差 [mm]
-    # 手動操縦の可動範囲 [mm]。**機構の物理端ではなくその内側に取る。**
+    timeout_s: 4.0
+    tolerance: 1.0
     # TODO: 機構完成後、実測のストローク端より内側へ詰めること
     manual:
       min: -5.0
       max: 30.0
       steps: [1.0, 5.0, 10.0]
 
-  # 昇降。正が上、負が下 (TODO: 実機で確認し、逆なら scale の符号を反転する)。
-  #
-  # **緊急停止では無励磁になる。** 減速比 19.2 のギヤで自重落下しない前提に乗って
-  # いるので、機構が付いたら config/checklist.yaml の sub_lift_holds で必ず実機確認。
+  # TODO(実機で確認): 正が上、負が下。逆なら scale の符号を反転する。
   sub_lift:
     unit: mm
     command_unit: rad
@@ -89,15 +40,12 @@ axes:
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0
-    # 下端側を 0 未満まで許していないのは、原点 (電源投入位置) を最下点に取る想定のため。
     # TODO: 機構完成後、実測のストローク端より内側へ詰めること
     manual:
       min: -2.0
       max: 30.0
       steps: [1.0, 5.0, 10.0]
 
-  # 自作モータドライバの補助グリッパ。指令・フィードバックともに deg。
-  # 開 / 閉 の 2 状態しか取らないので manual: は書かない (手動でも位置名しか送れない)。
   sub_gripper:
     unit: deg
     command_unit: deg
@@ -105,14 +53,7 @@ axes:
     offset: 0.0
     timeout_s: 2.0
 
-  # 電磁弁 6 個。**6 軸とも同じ定義**なので、settle_s などを変えるときは
-  # 6 箇所すべてを直すこと (1 つだけ残ると、その弁だけ待ち時間が違う)。
-  #
-  # on_off 軸は到達判定を持たない (基板が弁の開閉を観測できない。仕様書 §9.3) ので
-  # settle_s で待つ。manual: は書けない (書くと起動を拒否する)。
-  #
   # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
-  # 機構が付いたら「離した直後に持ち上げても落ちない」ところまで実測して詰めること。
   valve_1: &valve_axis
     unit: on_off
     command_unit: on_off
@@ -127,11 +68,7 @@ axes:
   valve_5: *valve_axis
   valve_6: *valve_axis
 
-  # 吸気ポンプ / 排気ポンプ。DC 基板なので duty 指令 (conveyor と同じ扱い)。
-  # duty 軸に可動範囲は存在しないので manual: は書けない。
-  #
   # TODO(実機で確認): settle_s はポンプが規定の負圧 / 正圧に達するまでの時間。
-  # 短すぎると「回し始めた直後に弁を開けて吸着し損ねる」ことになる。
   pump_vac:
     unit: duty
     command_unit: duty
@@ -153,51 +90,39 @@ axes:
 positions:
   # TODO: 機構完成後に実測値へ。現状は微小可動量のみ。
   sub_arm_joint:
-    home: 0.0            # 収納姿勢 [deg]
-    extended: 8.0        # 展開姿勢 [deg]
-    handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
-    place: 10.0          # 配置姿勢 [deg]
+    home: 0.0
+    extended: 8.0
+    handoff: 5.0
+    place: 10.0
 
-  # 直動 2 軸 [mm]。原点 (0.0) は電源投入位置。
-  # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
+  # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」だけの仮値。
   sub_y_axis:
-    home: 0.0            # 収納位置 = 電源投入位置
-    extended: 20.0       # 前方への展開位置 [mm] (出力軸で約 64deg)
+    home: 0.0
+    extended: 20.0
 
   sub_lift:
-    home: 0.0            # 下端 = 電源投入位置
-    lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
+    home: 0.0
+    lifted: 20.0
 
-  # !!! この軸だけ「ファームの起動角 = 初期姿勢」が崩れている !!!
-  # firmware/servo/include/config.h の kServoBoards[] の基板 #1 SV0 の初期角は
-  # 0.0deg で、それは下の closed にあたる。**通電直後と基板の瞬断後は閉じる方向へ動く。**
-  # メインハンドの 3 軸はここが一致しているので、この軸だけが逆で、
-  # config/checklist.yaml の `sub_gripper_open` は通電直後には成立しない。
-  # 揃え方は docs/mechanism_handoff.md の該当行を参照 (機構側の判断)。
   sub_gripper:
-    open: 5.0            # 開 [deg]
-    closed: 0.0          # 閉 (把持) [deg] — ファームの起動角と同じ値
+    open: 5.0
+    closed: 0.0
 
-  # 電磁弁は開 / 閉の 2 状態しか取らない。**値は 0 か非 0 かだけが意味を持つ**
-  # (仕様書 §9.2)。0.5 のような中間値を書いても基板は ON として扱うので、
-  # 「半開」を意図した値を書かないこと。
   valve_1: &valve_states
-    open: 1.0            # 開 (吸着パッドへ吸気経路をつなぐ)
-    closed: 0.0          # 閉 (吸気経路を遮断)
+    open: 1.0
+    closed: 0.0
   valve_2: *valve_states
   valve_3: *valve_states
   valve_4: *valve_states
   valve_5: *valve_states
   valve_6: *valve_states
 
-  # ポンプの duty。**ファーム側の max_duty (既定 0.30) でクランプされる**ので、
-  # ここに 0.30 を超える値を書いても 0.30 で回る (仕様書 §5.3)。
   # TODO(実機で確認): 吸引力が足りなければファームの max_duty を上げてから
-  # ここを上げること。ここだけ上げても効かない。
+  # ここを上げること (ここだけ上げても効かない)。
   pump_vac:
-    stop: 0.0            # 停止 [duty]
-    run: 0.95             # 吸気 [duty]
+    stop: 0.0
+    run: 0.95
 
   pump_blow:
-    stop: 0.0            # 停止 [duty]
-    run: 0.95             # 排気 (ワークを離すときの正圧) [duty]
+    stop: 0.0
+    run: 0.95

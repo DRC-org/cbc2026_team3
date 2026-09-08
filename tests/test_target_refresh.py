@@ -20,12 +20,6 @@ from tests.feedback_frames import feed_dm3520
 
 
 class _StubCANManager:
-    """MotorHandle が触る API だけを実装したスタブ。
-
-    tests/test_position_loop.py の同名スタブとは意図的に別物 (あちらは ``send_to_bus``
-    だけを持つ)。触れる API を絞ることが、使ってはならない経路の使用を検出する。
-    """
-
     def __init__(self) -> None:
         self.sent: list[tuple[str, can.Message]] = []
         self.fail_motors: set[str] = set()
@@ -40,13 +34,10 @@ class _StubCANManager:
 
 
 def _target_value(msg: can.Message) -> float:
-    # SET_TARGET は Byte1-2 の int16 固定小数点 (仕様書 §3.1 / §4)
     return struct.unpack_from("<h", msg.data, 1)[0] / 10000.0
 
 
 class _Fixture:
-    """再送タスク + generic モータ 2 台。"""
-
     def __init__(self) -> None:
         self.manager = _StubCANManager()
         self.estop = False
@@ -72,7 +63,6 @@ class _Fixture:
 
 class TestResend:
     async def test_resends_last_target(self) -> None:
-        """ファームは 500ms 指令が来ないと出力を止める。再送が無いとコンベアが止まる。"""
         fx = _Fixture()
         await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
         fx.clear_sent()
@@ -94,7 +84,6 @@ class TestResend:
         assert fx.manager.names() == ["conveyor"] * 3
 
     async def test_no_send_without_target(self) -> None:
-        """起動直後に勝手な指令を出さない (意図しない駆動を作らない)。"""
         fx = _Fixture()
 
         await fx.refresher.step()
@@ -113,7 +102,6 @@ class TestResend:
 
 class TestEStopInterlock:
     async def test_no_send_while_estop_active(self) -> None:
-        """再送は停止指令を上書きする。緊急停止中に出してはならない。"""
         fx = _Fixture()
         await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
         fx.clear_sent()
@@ -124,7 +112,6 @@ class TestEStopInterlock:
         assert fx.manager.sent == []
 
     async def test_clear_targets_prevents_restart_after_release(self) -> None:
-        """緊急停止解除だけでコンベアが回り出してはならない。"""
         fx = _Fixture()
         await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
         fx.estop = True
@@ -138,12 +125,6 @@ class TestEStopInterlock:
 
 
 class TestClearSingleTarget:
-    """`clear_target(name)` は 1 台だけを対象にする (`RobotServer._reenergize_motors` が使う)。
-
-    `clear_targets()` (全台) と違い、同じバスで動作中の別モータを巻き込んで
-    `wait_reached` を中断させてはならない。
-    """
-
     async def test_only_the_named_handle_loses_its_target(self) -> None:
         fx = _Fixture()
         await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
@@ -165,7 +146,6 @@ class TestClearSingleTarget:
 
 class TestPauseForMotorCheck:
     async def test_paused_refresher_sends_nothing(self) -> None:
-        """動作確認は同じモータへ自前の指令を出す。古い目標を被せると誤判定になる。"""
         fx = _Fixture()
         await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
         fx.clear_sent()
@@ -200,7 +180,6 @@ class TestFailureIsolation:
         assert fx.manager.names() == ["wall_f"]
 
     async def test_run_survives_step_exception(self) -> None:
-        """再送が止まると 500ms でモータが止まる。1 回の失敗でループを終わらせない。"""
         fx = _Fixture()
         await fx.handles["conveyor"].set_target(ControlMode.DUTY, 0.3)
         fx.manager.fail_motors = {"conveyor"}
@@ -246,13 +225,10 @@ class TestLifecycle:
 
 class TestWatchdogMargin:
     def test_interval_has_margin_over_firmware_watchdog(self) -> None:
-        """ファームの猶予 500ms に対し、取りこぼしが数回続いても止まらない周期であること。"""
         assert DEFAULT_INTERVAL_S * 5 <= FIRMWARE_COMMAND_TIMEOUT_S
 
 
 class _Dm3520Fixture:
-    """DM3520 の再送タスク + モータ 1 台。"""
-
     def __init__(self, **driver_kwargs: object) -> None:
         self.manager = _StubCANManager()
         self.estop = False
@@ -281,12 +257,6 @@ class _Dm3520Fixture:
 
 
 class TestDm3520PollsEvenWithoutTarget:
-    """**ここが自作モタドラと正反対**。送らないとフィードバックが 1 通も来ない。
-
-    フィードバックは問い合わせ駆動なので、目標が無い間も送り続けないと操縦していない
-    時間がまるごと ``MotorHealth.STALE`` になる (症状は「常に赤い」だけ)。
-    """
-
     async def test_sends_hold_target_before_any_command(self) -> None:
         fx = _Dm3520Fixture()
         feed_dm3520(fx.slide, position=1.5)
@@ -298,17 +268,11 @@ class TestDm3520PollsEvenWithoutTarget:
         assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(1.5, abs=1e-3)
 
     async def test_hold_target_is_latched_not_re_measured(self) -> None:
-        """**毎周期の実測角を書き直すとクリープする。**
-
-        負荷で下がったぶんへ目標が追従していき、誰も操作していないのに軸が
-        じりじり動く。ラッチした値を送り続けなければならない。
-        """
         fx = _Dm3520Fixture()
         feed_dm3520(fx.slide, position=1.5)
         await fx.refresher.step()
         fx.clear_sent()
 
-        # 負荷で 0.5rad ぶん下がった、という状況
         feed_dm3520(fx.slide, position=1.0)
         await fx.refresher.step()
 
@@ -333,10 +297,6 @@ class TestDm3520PollsEvenWithoutTarget:
         assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(2.5)
 
     async def test_latch_is_retaken_after_the_target_is_cleared(self) -> None:
-        """目標を失った時点の姿勢でラッチを取り直すこと。
-
-        古いラッチが残っていると、次に励磁したときそこへ戻る動きが出る。
-        """
         fx = _Dm3520Fixture()
         await fx.handle.set_target(ControlMode.POSITION, 2.5)
         await fx.refresher.step()
@@ -350,14 +310,7 @@ class TestDm3520PollsEvenWithoutTarget:
 
 
 class TestDm3520EStop:
-    """停止中も送るが、送ってよいのは「今の姿勢を保て」だけ。"""
-
     async def test_keeps_polling_during_estop(self) -> None:
-        """停止中に黙ると、停止した瞬間から画面が機体の状態を映さなくなる。
-
-        送るのは実測角そのものなので、この経路で機構が動くことはない
-        (励磁は enable でしか起きず、このタスクは enable を 1 通も送らない)。
-        """
         fx = _Dm3520Fixture()
         feed_dm3520(fx.slide, position=1.0)
         fx.estop = True
@@ -369,7 +322,6 @@ class TestDm3520EStop:
         assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(1.0, abs=1e-3)
 
     async def test_never_sends_enable(self) -> None:
-        # 停止中に励磁フレームが 1 通でも出ると緊急停止が意味を失う
         fx = _Dm3520Fixture()
         await fx.handle.set_target(ControlMode.POSITION, 2.5)
         fx.estop = True
@@ -381,7 +333,6 @@ class TestDm3520EStop:
             assert bytes(msg.data)[-1] != 0xFC
 
     async def test_does_not_resend_the_pre_estop_target(self) -> None:
-        """停止前の目標を送り続けると、解除して励磁した瞬間にそこへ戻る。"""
         fx = _Dm3520Fixture()
         await fx.handle.set_target(ControlMode.POSITION, 2.5)
         feed_dm3520(fx.slide, position=0.5)
@@ -393,10 +344,6 @@ class TestDm3520EStop:
         assert fx.position_of(fx.manager.sent[0][1]) == pytest.approx(0.5, abs=1e-3)
 
     async def test_does_not_latch_during_estop(self) -> None:
-        """停止直後の惰走中にラッチすると、解除後 1 周期目にその位置へ戻す動きが出る。
-
-        無励磁なのでクリープは起こり得ず、停止中は測り直してよい。
-        """
         fx = _Dm3520Fixture()
         fx.estop = True
         feed_dm3520(fx.slide, position=1.0)
@@ -418,13 +365,6 @@ class TestDm3520EStop:
 
 
 class TestDm3520ClearSingleTarget:
-    """`clear_target(name)` は問い合わせ駆動のラッチ (`_idle_targets`) も剥がす。
-
-    `RobotServer._reenergize_motors` が使う経路。剥がさずに励磁すると直後の再送
-    (最大 50ms 後) が古いラッチで上書きし、「現在角を書いてから励磁する」保証が
-    1 周期で無効になる。
-    """
-
     def _two_motor_fixture(self) -> tuple[_StubCANManager, dict[str, MotorHandle], object]:
         manager = _StubCANManager()
         dropped = Dm3520Driver("dropped", 0x01, master_id=0x11)
@@ -445,12 +385,10 @@ class TestDm3520ClearSingleTarget:
         dropped_driver = handles["dropped"].driver
         healthy_driver = handles["healthy"].driver
 
-        # 目標を持たないまま「今の姿勢を保て」がラッチされる
         feed_dm3520(dropped_driver, position=3.0)  # type: ignore[arg-type]
         feed_dm3520(healthy_driver, position=0.0)  # type: ignore[arg-type]
         await refresher.step()
 
-        # フォルトで機構が沈んだ (1.0)。ラッチ (3.0) はまだ古いまま
         feed_dm3520(dropped_driver, position=1.0)  # type: ignore[arg-type]
 
         refresher.clear_target("dropped")
@@ -470,7 +408,6 @@ class TestDm3520ClearSingleTarget:
         feed_dm3520(healthy_driver, position=2.0)  # type: ignore[arg-type]
         await refresher.step()
 
-        # healthy の負荷が変わっても、剥がしていない側のラッチは追従しない
         feed_dm3520(healthy_driver, position=0.5)  # type: ignore[arg-type]
 
         refresher.clear_target("dropped")
@@ -484,7 +421,6 @@ class TestDm3520ClearSingleTarget:
 
 class TestDm3520PauseForMotorCheck:
     async def test_paused_refresher_sends_nothing(self) -> None:
-        """動作確認は同じモータへ自前の指令を出す。並行して送ると打ち消し合う。"""
         fx = _Dm3520Fixture()
         feed_dm3520(fx.slide, position=1.0)
         await fx.refresher.pause(reason="動作確認")
@@ -508,11 +444,10 @@ class TestDm3520PauseForMotorCheck:
 
 class TestDm3520FailureIsolation:
     async def test_send_failure_does_not_escape(self) -> None:
-        """1 台の送信失敗でループを降りると、そのモータは永久に STALE のまま。"""
         fx = _Dm3520Fixture()
         feed_dm3520(fx.slide, position=1.0)
         fx.manager.fail_motors.add("sub_slide")
 
-        await fx.refresher.step()  # 例外が漏れないこと
+        await fx.refresher.step()
 
         assert fx.manager.sent == []

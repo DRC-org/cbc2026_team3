@@ -24,13 +24,11 @@ import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 const TITLE = "試合準備";
 
-/** 選択中のコートは面で塗る。誤ったコート設定は試合をそのまま落とすため */
 const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }[] = [
   { value: "red", label: "赤コート", selectedClass: "border-error bg-error text-error-content" },
   { value: "blue", label: "青コート", selectedClass: "border-info bg-info text-info-content" },
 ];
 
-/** 区分ごとの進捗。残っている区分だけが目に入るよう、済んだ区分は主張しない */
 function GroupProgress({ items }: { items: readonly ChecklistItem[] }) {
   const done = items.filter((i) => i.checked).length;
   if (items.length === 0) return null;
@@ -46,20 +44,6 @@ function GroupProgress({ items }: { items: readonly ChecklistItem[] }) {
   );
 }
 
-/**
- * セッティングタイムの左カラム。**操作とその確認を同じ場所に置く**ための面。
- *
- * 各操作の直下にその操作を確認する項目を置く（docs/invariants.md 「指差喚呼の項目は
- * 『操作の隣』に置く」）。どの項目がどこへ行くかは `config/checklist.yaml` の `group` が
- * 決め、対応表は `lib/checklistGroups.ts` にある。
- *
- * **全体の進捗は上端に 1 つだけ置く**（ゲートは全項目の完了 `can_start_match` なので、
- * 区分ごとの進捗を足し算させてはならない）。**チェックリストが読めなくても操作は残す**
- * —— 配信が壊れているときにコート設定や動作確認まで消すと、直す手段ごと画面から無くなる。
- *
- * memo なのは親の都合（Dashboard はテレメトリで毎秒 40 回再描画されるが、ここが読むのは
- * 試合状態と動作確認の状態だけ）。props を足すときは呼び出し側で `useCallback` すること。
- */
 export const MatchPrep = memo(function MatchPrep({
   onRequestReset,
 }: {
@@ -69,20 +53,12 @@ export const MatchPrep = memo(function MatchPrep({
   const { setChecklistItem, checkAllChecklist, setCourt } = useRobotCommands();
   const { court, phase } = matchState;
 
-  // 読めない配信を空へ倒さない。空は「config に項目が無い」の表現として既に使っており、
-  // 混ぜると操縦者は config/checklist.yaml を疑って探しに行く
   const checklists = matchState.checklists;
   const unreadable = checklists === MALFORMED;
   const checklist = unreadable ? undefined : checklists[CHECKLIST_ROLE];
   const items = checklist?.items ?? [];
 
-  // 指差喚呼を触れるのは準備フェーズだけ (サーバー PHASES_PREPARATION と対応)。
-  // **切断中も塞ぐ。** チェック状態はサーバー配信が唯一の出どころなので、
-  // 押せるままにすると「チェックが付かないだけで理由も出ない」になる —— 同じ画面の
-  // コート選択は既に connected を見ており、StartGate も「通信 — サーバーに
-  // 接続できていません」を出している。ここだけが黙っていた
   const locked = !isSetupPhase(phase) || !connected;
-  // コート変更はサーバーも試合中だけ拒む (PHASES_OUTSIDE_MATCH)
   const courtLocked = isDuringMatch(phase) || !connected;
 
   const checkedCount = items.filter((i) => i.checked).length;
@@ -108,9 +84,6 @@ export const MatchPrep = memo(function MatchPrep({
       bodyClassName="p-0"
       actions={
         <>
-          {/* 開発用。サーバーが --dev-tools で起動したときだけ出る。
-              試合運用では指差喚呼そのものが試合開始のゲートなので、
-              押せる状態のまま会場へ持ち込まないよう見た目でも区別する */}
           {serverInfo.dev_tools ? (
             <Button
               tone="warn"
@@ -122,12 +95,6 @@ export const MatchPrep = memo(function MatchPrep({
               DEV 全チェック
             </Button>
           ) : null}
-          {/* **やり直しの導線はこの 1 つだけ。** 準備フェーズではフェーズもタイマーも
-              既に初期状態なので、CLEAR (checklist_reset) を並べても match_reset と
-              **結果が同じ 2 つのボタン**になり、操縦者はどちらを押すべきか画面から
-              判断できない。
-              配信を読めていない間は「済んだ項目が 0 件」に見えるので、
-              そのときだけは件数で殺さない (直す手段まで消さない) */}
           <Button
             disabled={locked || (!unreadable && checkedCount === 0)}
             onClick={onRequestReset}
@@ -139,8 +106,6 @@ export const MatchPrep = memo(function MatchPrep({
         </>
       }
     >
-      {/* 件数と進捗バーで「あと何項目か」を数えずに読ませる。区分ごとに分けた後も、
-          試合開始のゲートは全項目の完了なので合計はここ 1 箇所に出す */}
       <div className="flex shrink-0 items-center gap-3 border-b border-base-300 px-2 py-1">
         <span className="font-mono text-[1.3em] tabular-nums">
           {checkedCount}
@@ -183,13 +148,10 @@ export const MatchPrep = memo(function MatchPrep({
           </Section>
         ) : null}
 
-        {/* コート設定。誤ったコートのまま試合に入る事故は致命的なので畳まない */}
         <Section
           title={CHECKLIST_GROUP_TITLE.court}
           aside={<GroupProgress items={grouped.court} />}
         >
-          {/* 注意はボタンと同じ行に置く。間に挟むと、コートを押してから確認する
-              項目までの距離がそのぶん開く (この面はその距離を詰めるためにある) */}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <div className="join">
               {COURT_OPTIONS.map((opt) => (
@@ -212,8 +174,6 @@ export const MatchPrep = memo(function MatchPrep({
           {itemsOf("court")}
         </Section>
 
-        {/* 動作確認は両ハンドで 1 本。操作・進捗・結果・それを確認する指差喚呼が
-            この 1 区分に縦に並ぶので、回した操縦者はその場で唱えて潰せる */}
         <Section
           title={CHECKLIST_GROUP_TITLE.motor_check}
           aside={
@@ -226,14 +186,10 @@ export const MatchPrep = memo(function MatchPrep({
           <div className="flex flex-wrap items-center gap-2">
             <MotorCheckButton />
           </div>
-          {/* 進捗と結果は**この場で開く**。モーダルにすると駆動しているあいだ
-              ずっとヘッダーの EMG STOP を覆う (`MotorCheckPanel` の docstring) */}
           <MotorCheckPanel />
           {itemsOf("motor_check")}
         </Section>
 
-        {/* group を書いていない項目・UI が知らない group の項目。**必ず描く** —
-            落とすと、指差喚呼が 1 つ足りないまま試合開始のゲートだけが開かない */}
         {grouped.other.length > 0 ? (
           <Section
             title={CHECKLIST_GROUP_TITLE.other}

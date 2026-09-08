@@ -20,8 +20,6 @@ from lib.sequence.engine import Sequence, step
 from tests.fake_can import mock_can_manager
 from tests.server_fixtures import ServerFixture, recv_type, seed_jitter_overrun
 
-# 項目を 2 つ持たせるのは「1 つ埋めただけでは試合に入れない」を検証できる形にするため。
-# 1 項目だと最初のチェックで READY になり、ゲートが効いているのか区別が付かない。
 _DEFS = {
     ROLE_PRE_MATCH: [
         ChecklistItem(id="home", label="初期位置確認"),
@@ -31,7 +29,6 @@ _DEFS = {
 
 
 async def _complete_checklist(ws) -> None:
-    """試合開始ゲートを開ける。項目が 1 つでも残っていれば READY にならない。"""
     for item in _DEFS[ROLE_PRE_MATCH]:
         await ws.send_json(
             {"type": "checklist_set", "role": ROLE_PRE_MATCH, "item_id": item.id, "checked": True}
@@ -44,12 +41,6 @@ _ROBOT_NAMES = ("main_hand", "sub_hand")
 def _build_fixture_with_periodic_tasks() -> tuple[
     ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher
 ]:
-    """周期タスク 3 種を持つロボット 1 台のサーバーを組み、乱れの記録を据える。
-
-    実周期を乱して検知させる経路は `tests/test_periodic.py` が単体で尽くすので、
-    ここは `seed_jitter_overrun` でカウンタへ直接値を据える (本物のタイミングを
-    乱すと非決定性がサーバーテストへ持ち込まれる)。
-    """
     fx = ServerFixture.build(checklist_definitions=_DEFS)
     mgr = mock_can_manager(("y_axis_r",))
 
@@ -86,8 +77,6 @@ class DummySequence(Sequence):
 
 
 class _GatedCheckSequence(Sequence):
-    """統合動作確認の代役。ゲートを開けるまで実行中のまま留まる。"""
-
     def __init__(self) -> None:
         super().__init__("motor_check")
         self.gate = asyncio.Event()
@@ -106,7 +95,6 @@ def _build_fixture(**server_kwargs: object) -> ServerFixture:
 
 class TestMatchStateSnapshotOnConnect:
     async def test_snapshot_sent_immediately(self) -> None:
-        """接続直後に match_state が届かないと、リロードした操縦者が現在の状況を知れない。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -121,11 +109,6 @@ class TestMatchStateSnapshotOnConnect:
 
 
 async def _match_state_with_phase(ws: object, phase: str) -> dict:
-    """指定フェーズの match_state を拾う。
-
-    チェックリスト操作でも match_state が飛ぶため、接続直後のスナップショットを
-    そのまま見ると必ず setup を掴む。
-    """
     for _ in range(10):
         msg = await recv_type(ws, "match_state")
         if msg is None:
@@ -136,18 +119,7 @@ async def _match_state_with_phase(ws: object, phase: str) -> dict:
 
 
 class TestMatchTimerBroadcast:
-    """タイマーは match_state に相乗りして全クライアントへ届く。
-
-    専用の配信経路を作らないのは、`_fanout` の約束事を守る経路を増やさないため。
-    接続直後のスナップショットがそのままアンカーになる。
-    """
-
     async def test_snapshot_carries_configured_duration(self) -> None:
-        """config/system.yaml の試合時間が実際に配信へ載ること。
-
-        既定値と同じ値で試すと配線し忘れた実装でも通る。「yaml を書き換えたのに画面が
-        3 分のまま」はログにも UI にも現れない。
-        """
         fx = _build_fixture(match_settings=MatchSettings(duration_s=90.0))
         app = fx.create_app()
 
@@ -159,8 +131,6 @@ class TestMatchTimerBroadcast:
             await ws.close()
 
     async def test_timer_starts_running_when_the_match_starts(self) -> None:
-        """試合開始の配信でタイマーが走り出すこと。ここが false のままだと
-        全デバイスが 3:00 を表示したまま止まる。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -177,7 +147,6 @@ class TestMatchTimerBroadcast:
 
 class TestSequenceDoesNotAutoStart:
     async def test_sequence_idle_after_startup(self) -> None:
-        """明示的な開始合図があるまでシーケンスを走らせない。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -237,7 +206,6 @@ class TestChecklistCommands:
             msg = await recv_type(ws, "match_state")
             assert msg is not None
             assert msg["checklists"][ROLE_PRE_MATCH]["completed"] is False
-            # 1 項目でも残っている間は試合に入れない
             assert msg["can_start_match"] is False
             await ws.close()
 
@@ -256,8 +224,6 @@ class TestChecklistCommands:
 
 
 class TestServerInfoOnConnect:
-    """開発用ボタンの表示可否はサーバーが配る (クライアントのビルド時定数にしない)。"""
-
     async def test_flags_are_sent_on_connect(self) -> None:
         fx = _build_fixture(dev_tools=True, dry_run=True)
         app = fx.create_app()
@@ -283,8 +249,6 @@ class TestServerInfoOnConnect:
 
 
 class TestChecklistCheckAll:
-    """開発用の一括チェック。**本番起動では効かない**ことまでが仕様。"""
-
     async def test_rejected_without_dev_tools(self) -> None:
         fx = ServerFixture.build(checklist_definitions=_DEFS)
         for name in _ROBOT_NAMES:
@@ -297,7 +261,6 @@ class TestChecklistCheckAll:
             msg = await recv_type(ws, "command_rejected")
             assert msg is not None
             assert msg["command"] == "checklist_check_all"
-            # 拒否されただけでなく、チェックが 1 つも付いていないこと
             assert fx.match.can_start_match is False
             assert fx.match.phase is Phase.SETUP
             await ws.close()
@@ -320,11 +283,6 @@ class TestChecklistCheckAll:
             await ws.close()
 
     async def test_unknown_role_checks_nothing(self) -> None:
-        """role 指定は対象を絞るだけ。存在しないロールで全項目が埋まってはならない。
-
-        ロールは pre_match 1 つになったが、role を受け取る形は残っている。
-        綴り違いが「全部完了」に化けると、点検せずに試合を開始できてしまう。
-        """
         fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
         for name in _ROBOT_NAMES:
             fx.add_robot(name, DummySequence(name))
@@ -342,7 +300,6 @@ class TestChecklistCheckAll:
             await ws.close()
 
     async def test_rejected_during_match(self) -> None:
-        """開発用でもフェーズゲートは外れない (試合中に指差喚呼を触らせない)。"""
         fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
         for name in _ROBOT_NAMES:
             fx.add_robot(name, DummySequence(name))
@@ -391,7 +348,6 @@ class TestPhaseGate:
             await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
             await asyncio.sleep(0.15)
             assert fx.sequence("main_hand").executed == ["first"]
-            # 操縦者が押した側だけが動く (試合開始は両機を起動しない)
             assert fx.sequence("sub_hand").executed == []
             await ws.close()
 
@@ -402,19 +358,15 @@ class TestPhaseGate:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            # 接続直後のスナップショット (実行中に繋いだ画面が「未実行」を出さないよう
-            # サーバーが 1 通送る) を読み捨ててから、拒否で流れる 1 通を見る
             await recv_type(ws, "motor_check_state")
 
             await ws.send_json({"type": "motor_check_start"})
-            # 拒否理由は動作確認の状態に載って流れる (専用の 1 通を増やさない)
             msg = await recv_type(ws, "motor_check_state")
             assert msg is not None
             assert "試合中" in (msg["error"] or "")
             await ws.close()
 
     async def test_motor_check_http_rejected_during_match(self) -> None:
-        """HTTP 経路は handle_command を通らないため個別にゲートが要る。"""
         fx = _build_fixture()
         app = fx.create_app()
         fx.enter_match()
@@ -425,13 +377,6 @@ class TestPhaseGate:
 
 
 class TestMatchStartDuringMotorCheck:
-    """**動作確認の実行中に試合を開始できてはならない。**
-
-    フェーズが `match` になると `sequence_start` が解禁され、統合動作確認と通常
-    シーケンスが同じアクチュエータへ同時に指令を出す。`abort()` へ倒さないのは、
-    意図しない中断より拒否のほうが安全なため (`motor_check_abort` が別にある)。
-    """
-
     async def test_動作確認中の試合開始は理由付きで拒否される(self) -> None:
         fx = _build_fixture()
         check = _GatedCheckSequence()
@@ -478,7 +423,6 @@ class TestMatchStartDuringMotorCheck:
 
 class TestMatchStartDoesNotMoveRobots:
     async def test_match_start_leaves_sequences_idle(self) -> None:
-        """試合開始はフェーズを進めるだけ。動き出すのは操縦者が START を押してから。"""
         fx = _build_fixture()
         app = fx.create_app()
 
@@ -535,13 +479,6 @@ class TestMatchFinishAndReset:
 
 
 class TestMatchStartResetsRxDownEpisodes:
-    """試合開始のたびに CAN 途絶エピソード数 (``rx_down_episodes``) を洗い流す。
-
-    準備中 (配線確認・動作確認) のぶんが紛れ込むと「この試合で本当に何回起きたか」が
-    読めなくなる。``match_reset`` ではなく ``match_start`` でリセットする理由は
-    `lib/server.py` の `_handle_match_start` にある。
-    """
-
     async def test_試合開始で全ロボットのエピソード数をリセットする(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
@@ -557,18 +494,11 @@ class TestMatchStartResetsRxDownEpisodes:
             await ws.close()
 
     async def test_ゲートで拒否された試みではリセットしない(self) -> None:
-        """指差喚呼が残ったままの ``match_start`` は拒否される (フェーズが進まない)。
-
-        拒否された試みでもリセットしてしまうと、次の正当な試合開始を待つ間に
-        準備中の途絶が既に消え、「この試合で何回起きたか」が試合が始まる前から
-        ズレた状態になる。
-        """
         fx = _build_fixture()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            # 指差喚呼を完了させないまま送る (ゲートで拒否されるはず)
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
 
@@ -579,15 +509,6 @@ class TestMatchStartResetsRxDownEpisodes:
 
 
 class TestJitterResetOnMatchStart:
-    """周期タスクが測る実周期の乱れは、試合開始で洗い流す (前縁リセット)。
-
-    準備中のぶんを試合の数字へ持ち込まないための無音のリセットで、
-    `reset_rx_down_episodes()` と同じ場所・同じ理由 (設計判断は `lib/server.py` の
-    `_handle_match_start`)。ここで固定するのは配線 —— `match_start` が成立したときだけ
-    全ロボットの 3 種の周期タスクをリセットすること —— だけ。集計 1 行は
-    `TestJitterSummaryOnMatchFinish` が持つ。
-    """
-
     async def test_match_start_が成立すると全タスクの乱れをリセットする(self) -> None:
         fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         app = fx.create_app()
@@ -606,19 +527,11 @@ class TestJitterResetOnMatchStart:
             await ws.close()
 
     async def test_フェーズゲートで拒否されたときはリセットしない(self) -> None:
-        """指差喚呼未完了でフェーズが READY に達していなければ一切触らない。
-
-        `handle_command` は `CommandSpec.allowed_phases` (`match_start` は
-        `PHASES_START_GATE`) で `_handle_match_start` を呼ぶ前段からフェーズを
-        見ており、指差喚呼未完了ならここで拒否されて `_handle_match_start` の
-        中身 (リセットの呼び出しを含む) は 1 行も実行されない。
-        """
         fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            # 指差喚呼を完了させない = フェーズが READY に達せずゲートで拒否される
 
             await ws.send_json({"type": "match_start"})
             msg = await recv_type(ws, "command_rejected")
@@ -632,14 +545,6 @@ class TestJitterResetOnMatchStart:
             await ws.close()
 
     async def test_動作確認中の拒否ではリセットしない(self) -> None:
-        """フェーズゲートは通っても (指差喚呼は完了)、`_handle_match_start` 自身の
-        排他判定 (動作確認の実行中) で拒否されたときも触らない。
-
-        **この 1 本がリセット呼び出しの位置を固定する。** フェーズゲート側のテストは
-        `_handle_match_start` の中身を一切実行しないので、リセットを関数の先頭へ動かして
-        も落ちない。ここはゲートを通過させたうえで内部の排他判定に引っかけるので、
-        リセットが排他判定より前へ動くと落ちる。
-        """
         fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         check = _GatedCheckSequence()
         fx.set_motor_check_sequence(check)
@@ -668,17 +573,8 @@ class TestJitterResetOnMatchStart:
 
 
 class TestJitterSummaryOnMatchFinish:
-    """「試合 N の集計」1 行は試合終了で出し、そこで 0 に戻す。
-
-    リセット点が `match_start` だけだと集計窓に試合後の finished・次のセッティング
-    タイム・動作確認 (まさに乱れの発生源) が混ざり、しかもその日の最後の試合は永久に
-    journal へ出ない。ここで固定するのは配線 (成立した `match_finish` でだけ集計 1 行 +
-    リセット) だけで、1 行の中身は `tests/test_periodic.py` の `TestJitterSummary`。
-    """
-
     @staticmethod
     def _summary_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
-        """集計 1 行だけを拾う (周期タスク 3 種でロガー名が違うのでメッセージで引く)。"""
         return [r.getMessage() for r in caplog.records if " の実周期: " in r.getMessage()]
 
     async def test_match_finish_が集計を残してから0に戻す(
@@ -694,7 +590,6 @@ class TestJitterSummaryOnMatchFinish:
             await asyncio.sleep(0.05)
             assert fx.match.phase is Phase.MATCH
 
-            # 試合中に乱れが出た状態を作る (match_start の前縁リセット後に据える)
             for task in (position_loop, sync_monitor, refresher):
                 seed_jitter_overrun(task, count=5, worst_s=0.06)
 
@@ -703,7 +598,6 @@ class TestJitterSummaryOnMatchFinish:
                 await asyncio.sleep(0.05)
 
             assert fx.match.phase is Phase.FINISHED
-            # 3 タスクぶん、漏れなく 1 行ずつ
             assert len(self._summary_lines(caplog)) == 3
             for task in (position_loop, sync_monitor, refresher):
                 assert task.jitter_overrun_count == 0
@@ -711,11 +605,6 @@ class TestJitterSummaryOnMatchFinish:
             await ws.close()
 
     async def test_試合中でなければ集計を残さない(self, caplog: pytest.LogCaptureFixture) -> None:
-        """フェーズゲート (`PHASES_DURING_MATCH`) で拒否された `match_finish` では触らない。
-
-        拒否された試みで集計を吐くと、journal の 1 行が「試合 N の集計」を名乗れなく
-        なる (誰かが準備中に押しただけの行が同じ書式で並ぶ)。
-        """
         fx, position_loop, sync_monitor, refresher = _build_fixture_with_periodic_tasks()
         app = fx.create_app()
 

@@ -59,10 +59,6 @@ describe("HealthIndicator", () => {
     expect(screen.getByText("can0")).toBeInTheDocument();
   });
 
-  /**
-   * バスの判定 (OK / DEGRADED / DOWN) だけでは「何が起きたか」が分からず、
-   * 復旧手順を選べない。エラー計数は 0 のとき出さないので平常時は無音のまま。
-   */
   describe("エラー計数の内訳", () => {
     it("平常時 (全て 0) は内訳を出さない", () => {
       render(<HealthIndicator health={snapshot()} />);
@@ -92,11 +88,6 @@ describe("HealthIndicator", () => {
       expect(screen.getByText(/rx_err 12/)).toBeInTheDocument();
     });
 
-    /**
-     * 受信の解釈失敗でバスを降格させないのはサーバー側の意図的な判断
-     * (lib/can_manager.py `_record_rx_error`)。表示がそれを覆して警告色を出すと、
-     * 同じ画面が本物の送信障害の警告と区別できなくなる。
-     */
     it("受信エラーがあってもバスの判定は動かさない", () => {
       const health = snapshot();
       health.buses[0] = { ...health.buses[0], rx_error_count: 12 };

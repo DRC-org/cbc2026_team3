@@ -3,11 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ARM_GUARD_MS, ARM_TIMEOUT_MS, useArmedPress } from "@/hooks/useArmedPress";
 
-/**
- * 二度押しは確認ダイアログの代わりである。守るのは「1 回では実行されない」ことと、
- * 「1 回の物理的なダブルクリックが二度押しとして成立しない」ことの 2 つ。
- * どちらかが欠けると、ボタンは確認を取っているように見えて取っていない。
- */
 describe("useArmedPress", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -18,7 +13,6 @@ describe("useArmedPress", () => {
     return { fire, view };
   }
 
-  /** 不感時間を抜けて発火できる状態まで進める */
   function passGuard() {
     act(() => vi.advanceTimersByTime(ARM_GUARD_MS));
   }
@@ -40,7 +34,6 @@ describe("useArmedPress", () => {
     act(() => view.result.current.press());
 
     expect(fire).toHaveBeenCalledTimes(1);
-    // 実行したら未武装へ戻す。戻さないと次の 1 回でもう一度実行される
     expect(view.result.current.armed).toBe(false);
   });
 
@@ -52,7 +45,6 @@ describe("useArmedPress", () => {
     act(() => view.result.current.press());
 
     expect(fire).not.toHaveBeenCalled();
-    // 捨てるのは 2 回目だけで、武装は解かない（解くと連打で 1 回目に戻り続ける）
     expect(view.result.current.armed).toBe(true);
   });
 
@@ -62,7 +54,6 @@ describe("useArmedPress", () => {
     act(() => view.result.current.press());
     act(() => vi.advanceTimersByTime(ARM_GUARD_MS - 1));
     act(() => view.result.current.press());
-    // 1 回目からの猶予で解除される。押し直しで延長されるなら、ここではまだ武装中
     act(() => vi.advanceTimersByTime(ARM_TIMEOUT_MS - (ARM_GUARD_MS - 1)));
 
     expect(view.result.current.armed).toBe(false);

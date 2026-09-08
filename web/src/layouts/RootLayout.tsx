@@ -15,11 +15,6 @@ import { useWsUrl } from "@/hooks/useWsUrl";
 import type { ChecklistRole, MatchCourt } from "@/lib/protocol";
 import { TABS } from "@/lib/tabs";
 
-/**
- * 数字キーによるタブ移動。
- * ModalProvider の内側に置くことで、モーダル表示中は発火しない
- * （緊急停止オーバーレイの裏でタブが動くのを防ぐ）。
- */
 function TabHotkeys() {
   const navigate = useNavigate();
   const { search } = useLocation();
@@ -36,13 +31,6 @@ function TabHotkeys() {
   return null;
 }
 
-/**
- * タブの中身と、その描画例外を閉じ込める境界。囲うのは `<Outlet />` だけ
- * (docs/invariants.md 「`RouteErrorBoundary` は `<Outlet />` だけに掛ける」)。
- *
- * パスを `key` にするのは、落ちた境界がタブを切り替えても解けないため —— 1 枚の画面の
- * 不具合で全タブが「描画に失敗しました」のまま固まると、操縦者は退避先を失う。
- */
 function RoutedOutlet() {
   const { pathname } = useLocation();
   return (
@@ -52,14 +40,6 @@ function RoutedOutlet() {
   );
 }
 
-/**
- * 外枠の中身。**memo が本体で、飾りではない** —— RootLayout は毎秒 40 回再描画され、
- * memo が無いと context をいくつに割っても部分木全体が同じ頻度で描き直される
- * (docs/invariants.md 「context は購読頻度で 3 つに分ける」)。
- *
- * したがって props は「滅多に変わらない値」だけに保つこと。テレメトリ由来の値をここへ
- * 渡した瞬間に memo は無効になる。
- */
 const AppShell = memo(function AppShell({
   wsSettingsOpen,
   onCloseWsSettings,
@@ -70,11 +50,8 @@ const AppShell = memo(function AppShell({
   return (
     <ModalProvider>
       <TabHotkeys />
-      {/* 20px 固定だと 1366x768 級のノート PC でパネルが画面外に溢れる。
-          ページ全体はスクロールさせず、常に 1 画面へ収める */}
       <div className="flex h-svh w-full flex-col overflow-hidden bg-base-200 text-base-content">
         <ConnectionBanner />
-        {/* タブ・接続表示・時刻も AppHeader の中。常設の帯は 1 段だけに畳んである */}
         <AppHeader />
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -89,13 +66,6 @@ const AppShell = memo(function AppShell({
   );
 });
 
-/**
- * 全画面共通の外枠。
- *
- * WebSocket 接続と RobotProvider をここに置くことで、タブ (子ルート) を切り替えても
- * 再接続が起きない。子ルートは常に 1 つだけ描画されるため、RobotControl の
- * Space ホットキーが表示中のロボットにだけ届く前提もそのまま維持される。
- */
 export function RootLayout() {
   const { wsUrl, wsUrlSource, setWsUrl, resetWsUrl } = useWsUrl();
   const socket = useRobotSocket(wsUrl);
@@ -104,10 +74,6 @@ export function RootLayout() {
   const openWsSettings = useCallback(() => setWsSettingsOpen(true), []);
   const closeWsSettings = useCallback(() => setWsSettingsOpen(false), []);
 
-  // 依存に socket (毎描画 新しいオブジェクト) を置くと useCallback が実質無効になり、
-  // コマンド購読が毎秒 40 回変わる。個々の関数だけを依存にすること。
-  // 楽観的更新は「送れたとき」だけ行う (docs/invariants.md 「切断中に楽観的更新を
-  // しない」)。送れなかったことは通知枠へ流す
   const onEStop = useCallback(() => {
     if (send({ type: "e_stop" })) {
       setEStopActive(true);
@@ -124,18 +90,12 @@ export function RootLayout() {
       setEStopActive(false);
       return;
     }
-    // ここでオーバーレイだけ閉じると、機体側のラッチが残ったまま画面は平常へ戻る
     reportUnsent(
       "e_stop_release",
       "切断中のため緊急停止の解除を送信できませんでした。機体側のラッチは残っています",
     );
   }, [send, setEStopActive, reportUnsent]);
 
-  /**
-   * 送れなかったことを必ず通知枠へ流す送信口。`send` は切断中に false を返すだけなので、
-   * 戻り値を捨てた呼び出しは「押したのにボタンは有効なまま・機体は動かない・トーストも
-   * 出ない」になる。**送信経路をここ 1 つに寄せて、押した操作が消える経路を作らせない。**
-   */
   const sendOrReport = useCallback(
     (data: Record<string, unknown> & { type: string }, what: string) => {
       if (send(data)) return true;
@@ -157,7 +117,6 @@ export function RootLayout() {
     },
     [sendOrReport],
   );
-  // 開発用。サーバー側が --dev-tools 起動でなければ command_rejected で返ってくる
   const checkAllChecklist = useCallback(
     (role: ChecklistRole) => {
       sendOrReport({ type: "checklist_check_all", role }, "指差喚呼の一括チェック");

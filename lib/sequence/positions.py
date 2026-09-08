@@ -4,8 +4,6 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-# 単位換算は制御層 (同期監視・位置制御ループ) と共有する。ここで再定義すると
-# 逆回転ペアの符号付き scale の逆換算がまた 2 実装に分かれる
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
@@ -21,8 +19,6 @@ __all__ = [
     "load_position_table",
 ]
 
-# 軸ごとの到達待ち上限 [s] の既定値。機構が引っかかったまま試合が止まるのを避けるため、
-# yaml で timeout_s を書かなかった軸にも必ずタイムアウトを与える
 DEFAULT_TIMEOUT_S = 5.0
 
 
@@ -32,23 +28,11 @@ class PositionLookupError(RuntimeError):
 
 @dataclass(frozen=True)
 class ManualSpec:
-    """手動操縦で連続値を送ってよい範囲とジョグ量。
-
-    ``move_to`` の「定義した状態以外を送れない」保証を外す経路なので、代わりの
-    境界をここで宣言させる (docs/invariants.md「手動で連続値を送ってよいのは…」)。
-
-    ``min_value`` / ``max_value`` は機構の物理端そのものではなく、**その内側**に取る。
-    手動は操縦者が端へ寄せていく操作なので、境界を物理端に合わせると
-    「指令は範囲内なのに機構は突き当たっている」状態が作れてしまう。
-    """
-
     min_value: float
     max_value: float
-    #: UI が出すジョグ量の候補 [人間の単位]。先頭が既定値
     steps: tuple[float, ...]
 
     def clamp(self, value: float) -> float:
-        """範囲内へ丸める。範囲外を拒否しないのは、端で操作そのものが効かなくなるため。"""
         if value < self.min_value:
             return self.min_value
         if value > self.max_value:
@@ -64,24 +48,10 @@ class ManualSpec:
 
 @dataclass(frozen=True)
 class HomingSpec:
-    """リミットスイッチで零点を確定する手順。**軸の機構的性質**なのでここに置く。
-
-    動作確認固有の値ではない。「その軸はどちら向きに、どれだけ動かせば原点に
-    当たるか」は機構が変われば変わるので、位置定数と同じ場所で管理する。
-
-    **`search_distance` は省略できない。** 配線が抜けたセンサでは機構端まで
-    押し込み続けるので、探索距離の上限が唯一の無人の歯止めになる。
-    """
-
-    #: 監視するセンサ名 (config の `sensors:` に登録された名前)
     sensor: str
-    #: 探索方向。+1 か -1 のみ。人間の単位での増減方向を表す
     direction: float
-    #: 探索距離の上限 [軸の unit]。ここまで動かして当たらなければ失敗として止める
     search_distance: float
-    #: 1 回あたりの移動量 [軸の unit]。小さいほど原点の精度が上がり、時間が延びる
     step: float
-    #: 1 ステップごとの待ち [s]。指令が機構へ届き、センサの状態が返る余裕を取る
     settle_s: float
 
     def __post_init__(self) -> None:
@@ -94,7 +64,6 @@ class HomingSpec:
         if self.settle_s < 0.0:
             raise ValueError(f"homing.settle_s は 0 以上: {self.settle_s!r}")
         if self.step > self.search_distance:
-            # 1 歩も踏めないまま失敗するだけの設定を通さない
             raise ValueError(
                 f"homing.step ({self.step}) が "
                 f"search_distance ({self.search_distance}) を超えています"
@@ -103,23 +72,8 @@ class HomingSpec:
 
 @dataclass(frozen=True)
 class MotionSpec:
-    """台形速度プロファイルの制限。**軸の機構的性質**なのでここに置く。
-    理由は docs/invariants.md「`y_axis` は最終目標をステップで PID へ入れては
-    ならない」。
-
-    値は軸の人間の単位 (``axes.<軸>.unit``) のまま持つ。指令単位への換算は
-    制御層が ``abs(scale)`` で行う —— 速度・加速度の制限は向きを持たない量で、
-    符号付きの ``scale`` を掛けると逆回転側の制限が負値になり制限として働かない。
-
-    ``max_velocity`` と ``max_acceleration`` は必ず対で書く。片方だけを既定値で
-    埋めると「書いたのに効かない制限」になる (``sync_kp`` / ``sync_limit`` と同じ)。
-    """
-
-    #: 巡航速度の上限 [軸の unit/s]
     max_velocity: float
-    #: 加減速度の上限 [軸の unit/s^2]
     max_acceleration: float
-    #: 参照速度を PID の feedforward へ加算する係数。0.0 で追従誤差のみに任せる
     velocity_ff: float = 0.0
 
     def __post_init__(self) -> None:
@@ -128,20 +82,10 @@ class MotionSpec:
         if self.max_acceleration <= 0.0:
             raise ValueError(f"motion.max_acceleration は正の値: {self.max_acceleration!r}")
         if self.velocity_ff < 0.0:
-            # 負の係数は進行方向と逆へ押す。追従を助けるどころか誤差を広げる
             raise ValueError(f"motion.velocity_ff は 0 以上: {self.velocity_ff!r}")
 
     def duration_for(self, distance: float) -> float:
-        """静止から静止まで ``distance`` を走るのに要る時間 [s]。
-
-        起動時に「必ずタイムアウトする軸」を弾くための見積もり。時間だけを閉じた式で
-        出すので、位置定数の層は制御層を import しない。
-
-        巡航に入らない短距離 (三角プロファイル) を台形の式で見積もると所要時間を
-        過大に読み、実際には間に合う設定を起動時に拒否してしまう。
-        """
         travel = abs(distance)
-        # v_max へ達する前に減速へ移る距離かどうかで式が変わる (境界では一致する)
         if travel * self.max_acceleration <= self.max_velocity**2:
             return 2.0 * math.sqrt(travel / self.max_acceleration)
         return travel / self.max_velocity + self.max_velocity / self.max_acceleration
@@ -149,54 +93,29 @@ class MotionSpec:
 
 @dataclass(frozen=True)
 class AxisSpec:
-    """1 論理軸の単位換算とデフォルト待ち条件。
-
-    ``command = value * scale + offset`` で人間の単位からモータ指令値へ換算する。
-    3 種類のモータ (M3508=モータ軸 deg / EDULITE 05=rad / 自作=deg) で指令単位が
-    異なるため、換算はここに一元化してシーケンス本体には持ち込まない。
-
-    **換算はモータごとに行う API しか公開しない** (``to_commands`` /
-    ``MotorSpec.to_tolerance``)。「軸 = モータ 1 台」を前提に先頭モータの値だけを
-    返す API を置くと、逆回転ペアで左のモータに右の scale が当たり、左が右向きに
-    全ストローク動いて機構を壊す。
-    """
-
     name: str
     unit: str
     command_unit: str
     timeout_s: float
-    # 人間の単位での到達許容差。None ならドライバ既定値を使う
     tolerance: float | None
     motors: tuple[MotorSpec, ...]
-    # 人間の単位でのモータ間ずれ許容差。超過で停止する。単一モータ軸では None
     sync_tolerance: float | None = None
-    # 同期補正の比例ゲイン (位置制御 PID の kp と同じ単位)。0.0 で補正なし
     sync_kp: float = 0.0
-    # 補正項 1 つあたりの上限 [指令単位あたりの操作量]。sync_kp を入れるなら必須
     sync_limit: float | None = None
     command_mode: ControlMode = ControlMode.POSITION
-    # 到達判定を持たない軸 (duty / velocity) の指令後固定待ち [s]
     settle_s: float = 0.0
-    # 手動操縦の可動範囲。None ならこの軸は連続操作の対象外 (プリセット指令のみ)
     manual: ManualSpec | None = None
-    # リミットスイッチによる零点確定。None ならこの軸はホーミングしない
-    # (電源投入位置をそのまま原点として使う)
     homing: HomingSpec | None = None
-    # 台形速度プロファイルの制限。None ならこの軸は従来どおり最終目標をステップで入れる
     motion: MotionSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.motors:
             raise ValueError(f"axes.{self.name} にモータがありません")
-        # 到達判定を持たない軸へホーミングを書かせない。duty / on_off は指令が
-        # 届いたかを観測できないので、「当たるまで少しずつ動かす」が成立しない
         if self.homing is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: homing は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
-        # duty / on_off の軸に中間目標は存在しない。指令が届いたかを観測できないので
-        # 「目標へ向けて毎周期少しずつ進める」という前提が成り立たない
         if self.motion is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
@@ -211,15 +130,6 @@ class AxisSpec:
         return {motor.name: motor.to_command(value) for motor in self.motors}
 
     def to_value(self, commands: Mapping[str, float]) -> float:
-        """モータの指令値・フィードバックを人間の単位の軸位置へ戻す (``to_commands`` の逆)。
-
-        逆換算そのものは ``MotorSpec.to_value`` に委ねる (書き直すと逆回転ペアの
-        符号付き ``scale`` の扱いが 2 実装に分かれる)。
-
-        複数モータ軸では平均を返す。左右がずれていればどちらか一方の値は必ず
-        誤りなので「片側を代表にする」根拠が無く、ずれ自体は ``sync_group`` を
-        見る 3 層が別に検出する。
-        """
         values = [
             motor.to_value(commands[motor.name]) for motor in self.motors if motor.name in commands
         ]
@@ -229,11 +139,6 @@ class AxisSpec:
 
     @property
     def sync_group(self) -> SyncGroup | None:
-        """同期監視の単位。``sync_tolerance`` を持たない軸は None。
-
-        ``motors`` をそのままメンバにするため、監視側で単位換算を詰め替える経路が
-        存在しない (詰め替えを挟むと逆回転の符号を落とす余地が生まれる)。
-        """
         if self.sync_tolerance is None:
             return None
         return SyncGroup(
@@ -270,23 +175,13 @@ _MOTOR_KEYS = frozenset({"scale", "offset"})
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
 
 _HOMING_KEYS = frozenset({"sensor", "direction", "search_distance", "step", "settle_s"})
-#: 省略を許さないキー。探索距離を既定値で埋めると、配線が抜けた状態で機構端まで
-#: 押し込む経路ができる (ホーミングの唯一の無人の歯止めがこれ)
 _HOMING_REQUIRED = frozenset({"sensor", "direction", "search_distance", "step"})
 
 _MOTION_KEYS = frozenset({"max_velocity", "max_acceleration", "velocity_ff"})
-#: 対で書かせるキー。片方だけでは台形プロファイルを組み立てられず、欠けたほうを
-#: 既定値で埋めると「書いたのに制限として効かない」設定が通る
 _MOTION_REQUIRED = frozenset({"max_velocity", "max_acceleration"})
 
-#: 手動のジョグ量候補を書かなかった軸に与える既定 (人間の単位)。
-#: UI は必ず 1 つ以上の候補を要求するため、空にはしない
 _DEFAULT_MANUAL_STEPS: tuple[float, ...] = (1.0,)
 
-# 位置定数から出してよい指令モード。CURRENT を除くのは、位置名に紐付けて開ループの
-# トルク指令を出す用途が無く、誤記のまま機構へ流れると破損に直結するため。
-# ON_OFF は電磁弁のような離散状態アクチュエータ用で、DUTY と同じく到達判定を
-# 持たない (指令後は settle_s で待つ)
 _COMMAND_MODES = {
     mode.value: mode
     for mode in (
@@ -299,14 +194,6 @@ _COMMAND_MODES = {
 
 
 class PositionTable:
-    """機構位置の定数表。軸ごとの単位換算とコート差異を吸収する。
-
-    公開するのは「軸を引く」(``axis``) と「位置名を指令値へ換算する」(``commands``)
-    の 2 つに絞る。待ち条件や指令モードは ``axis(name)`` が返す ``AxisSpec`` から
-    直接読むこと。同じ値を読む道を 2 本置くと、どちらが正しいのかを毎回確かめる
-    ことになる。
-    """
-
     def __init__(
         self,
         axes: Mapping[str, AxisSpec],
@@ -326,16 +213,6 @@ class PositionTable:
 
     @classmethod
     def merged(cls, tables: Sequence[PositionTable]) -> PositionTable:
-        """複数の位置定数表を 1 つに束ねる。
-
-        統合動作確認シーケンスは両ハンドのアクチュエータを 1 つの順序で駆動するため、
-        両機の軸を同じ表から引く必要がある。
-
-        **軸名の衝突は起動時に拒否する。** 後勝ちで上書きすると、動作確認が意図した
-        側とは別の機体の軸へ指令が飛ぶ。症状は「指令したのに動かない機構」と
-        「触っていないのに動く機構」が同時に出る形で、しかもどちらの config を見ても
-        間違いが書かれていないので原因にたどり着けない。
-        """
         axes: dict[str, AxisSpec] = {}
         positions: dict[str, dict[str, float | dict[str, float]]] = {}
         owner: dict[str, str] = {}
@@ -380,15 +257,12 @@ class PositionTable:
         return self.axis(axis).sync_tolerance
 
     def manual_axes(self) -> tuple[str, ...]:
-        """連続操作を許した軸 (``manual:`` を持つ軸)。"""
         return tuple(name for name, spec in self._axes.items() if spec.manual is not None)
 
     def paired_axes(self) -> tuple[str, ...]:
-        """同期監視の対象となる軸 (sync_tolerance を持つ軸)。"""
         return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
 
     def raw(self, axis: str, name: str, *, court: Court | None = None) -> float:
-        """人間の単位のままの値を返す (ログ・検証用)。"""
         spec = self.axis(axis)
         values = self._positions.get(axis, {})
         if name not in values:
@@ -409,7 +283,6 @@ class PositionTable:
         return float(value)
 
     def commands(self, axis: str, name: str, *, court: Court | None = None) -> dict[str, float]:
-        """モータ名 → 指令値。逆回転ペアではモータごとに異なる scale が効く。"""
         return self.axis(axis).to_commands(self.raw(axis, name, court=court))
 
 
@@ -423,17 +296,11 @@ def _number(path: str, raw: dict, key: str, default: float | None) -> float | No
 
 
 def _parse_motors(axis_name: str, raw: dict) -> tuple[MotorSpec, ...]:
-    """軸を構成するモータ群を組み立てる。
-
-    ``motors:`` を書かない軸は「軸名 = モータ名」の単一モータ軸として扱う (既存 yaml と互換)。
-    """
     if raw.get("motors") is None:
         if "motors" in raw:
             raise ValueError(f"axes.{axis_name}.motors が空です")
-        # 軸直下のキー検証は _parse_axis が行うため、ここでは未知キーを見ない
         return (_parse_motor(f"axes.{axis_name}", axis_name, raw, strict_keys=False),)
 
-    # どちらの scale が効くか曖昧なまま機構を動かすと破損に直結するため併記を拒否する
     conflicting = sorted(set(raw) & _MOTOR_KEYS)
     if conflicting:
         raise ValueError(
@@ -500,8 +367,6 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
 
     sync_tolerance = _number(path, raw, "sync_tolerance", None)
     if sync_tolerance is not None:
-        # 単一モータ軸では偏差の比較対象が無い。黙って無視すると
-        # 「防護を書いたつもり」のまま運用に入ってしまうため読み込みを拒否する
         if len(motors) < 2:
             raise ValueError(
                 f"axes.{name}.sync_tolerance はモータ 2 台以上の軸にのみ指定できます "
@@ -545,19 +410,6 @@ def _parse_sync_gain(
     motors: tuple[MotorSpec, ...],
     sync_tolerance: float | None,
 ) -> tuple[float, float | None]:
-    """左右直結ペアの同期補正ゲインを読む。
-
-    ``sync_tolerance`` を見る 3 層は「ずれたら止める」しかできず、縮める力はどこにも
-    無い。この 2 値がその縮める力を宣言する (docs/invariants.md「保護は止めるだけ」)。
-
-    検証は「書いたのに効かない設定を作らせない」ためにある:
-
-    - ``sync_limit`` を欠いた ``sync_kp`` は拒否する。押し合いは左右直結の機構を
-      その場で壊すので、``homing.search_distance`` と同格の唯一の歯止めになる
-    - ``sync_tolerance`` の無い軸では補正そのものが組み立てられない
-      (``AxisSpec.sync_group`` が None を返す)
-    - 負のゲインは正帰還で、ずれを縮めるどころか発散させる
-    """
     sync_kp = _number(path, raw, "sync_kp", 0.0)
     sync_limit = _number(path, raw, "sync_limit", None)
 
@@ -597,11 +449,6 @@ def _parse_sync_gain(
 
 
 def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
-    """リミットスイッチによる零点確定の設定を読む。書かない軸は None。
-
-    値の妥当性 (方向が ±1 か、探索距離が正か) は ``HomingSpec.__post_init__`` が見る。
-    ここで見るのはキーの綴りと型だけ。
-    """
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -616,7 +463,6 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
 
     missing = sorted(_HOMING_REQUIRED - set(raw))
     if missing:
-        # 探索距離を省けるようにすると、既定値のまま機構端まで押し込む経路ができる
         raise ValueError(f"axes.{axis_name}.homing に必須キーがありません: {', '.join(missing)}")
 
     sensor = raw["sensor"]
@@ -637,11 +483,6 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
 
 
 def _parse_motion(axis_name: str, raw: object) -> MotionSpec | None:
-    """台形速度プロファイルの制限を読む。書かない軸は None (従来どおりステップ入力)。
-
-    値の妥当性 (正の値か) は ``MotionSpec.__post_init__`` が見る。ここで見るのは
-    キーの綴りと、**速度と加速度が対で書かれていること**だけ。
-    """
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -685,7 +526,6 @@ def _parse_command_mode(axis_name: str, raw: object) -> ControlMode:
 
 
 def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> ManualSpec | None:
-    """手動操縦の可動範囲を読む。``manual:`` を書かない軸は None (連続操作の対象外)。"""
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -696,8 +536,6 @@ def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> Man
         raise ValueError(f"axes.{axis_name}.manual に未知のキー: {', '.join(sorted(unknown))}")
 
     if command_mode is not ControlMode.POSITION:
-        # duty / velocity 指令の軸に「可動範囲」は存在しない。書けてしまうと
-        # UI がジョグ行を描き、押しても機構が位置決めされない操作面が出来上がる
         raise ValueError(
             f"axes.{axis_name}.manual は command_mode: position の軸にのみ指定できます "
             f"(現在 {command_mode.value})"
@@ -727,7 +565,6 @@ def _parse_manual_steps(path: str, raw: object) -> tuple[float, ...]:
         if isinstance(entry, bool) or not isinstance(entry, int | float):
             raise ValueError(f"{path}.steps に数値でない要素: {entry!r}")
         if entry <= 0.0:
-            # 0 や負のジョグ量は「押しても動かない」「押すと逆へ動く」ボタンになる
             raise ValueError(f"{path}.steps は正の値である必要があります: {entry!r}")
         steps.append(float(entry))
     return tuple(steps)
@@ -735,7 +572,6 @@ def _parse_manual_steps(path: str, raw: object) -> tuple[float, ...]:
 
 def _parse_value(axis: str, name: str, raw: object) -> float | dict[str, float]:
     if isinstance(raw, dict):
-        # コート別定義。片方だけ書くと反対コートで無言のまま別の値になるため両方を必須にする
         missing = [court.value for court in Court if court.value not in raw]
         if missing:
             raise ValueError(
@@ -760,11 +596,6 @@ def _to_float(axis: str, name: str, raw: object) -> float:
 
 
 def load_position_table(config: dict | None, *, source: str = "<inline>") -> PositionTable:
-    """位置定数 yaml 相当の dict から PositionTable を組み立てる。
-
-    誤記で起動を拒否するのは、換算係数の欠落をそのまま通すと人間の単位の値が
-    生の指令値として送られ、機構を破壊しかねないため。
-    """
     config = config or {}
 
     axes_raw = config.get("axes") or {}
@@ -800,15 +631,6 @@ def _check_motion_timeout(
     spec: AxisSpec,
     values: Mapping[str, float | dict[str, float]],
 ) -> None:
-    """プロファイルの所要時間が到達待ちの上限に収まっているか検証する。
-
-    速度と加速度を絞りすぎると、指令どおり動いているのに ``timeout_s`` の側が
-    先に切れる。症状は「その軸だけが毎回失敗する」で、機構にもモータにも異常が
-    無いため配線や PID を疑うことになる。
-
-    見るのはその軸に定義された位置定数の端から端まで (コート別の値も含む)。
-    位置定数が 1 つ以下の軸は移動距離が config から決まらないので通す。
-    """
     motion = spec.motion
     if motion is None:
         return
@@ -826,7 +648,6 @@ def _check_motion_timeout(
     if required <= spec.timeout_s:
         return
 
-    # 切り上げないと、提示した値をそのまま書き写した config がもう一度拒否される
     suggested = math.ceil(required * 100.0) / 100.0
     raise ValueError(
         f"{source}: axes.{spec.name} は motion の制限では最大移動 {span} {spec.unit} に "
@@ -841,12 +662,6 @@ def _check_manual_range(
     spec: AxisSpec,
     values: Mapping[str, float | dict[str, float]],
 ) -> None:
-    """プリセット位置が手動の可動範囲に収まっているか検証する。
-
-    範囲外の位置定数を通すと「シーケンスは行ける場所へ手動では行けない」軸ができる。
-    症状は「手動で戻そうとしても途中で止まる」だけで、クランプは黙って効くので
-    原因が config からは見えない。
-    """
     manual = spec.manual
     if manual is None:
         return

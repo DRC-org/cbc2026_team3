@@ -3,37 +3,17 @@ import { useEffect, useReducer, useRef } from "react";
 import { Panel } from "@/components/ui/Panel";
 import type { MatchTimer as MatchTimerValue } from "@/lib/protocol";
 
-/**
- * 試合時間の残りを表示する。**全デバイスで同じ値が出ること**がこの部品の存在理由で、
- * 方式の理由は docs/invariants.md 「試合時間タイマーは『時刻』ではなく『配信瞬間の
- * 経過ミリ秒』を配る」。サーバー配信をアンカーに `performance.now()` で進める
- * (`Date.now()` は NTP 補正で試合中に残り時間が飛ぶ)。
- *
- * **右カラムでは縮まない側に置く (`shrink-0`)。** 高さは中身で決まり切っていて削れる
- * 余地が無いのに、flex の既定 (`flex-shrink: 1`) は隣の機体状態パネルが伸びたぶんを
- * ここからも取り、caption が数字に重なって読めなくなる。**クロス軸 (幅) の
- * `self-start` を戻してはならない**（docs/invariants.md 「grid の子は既定で縦に伸びる」）。
- */
-
-/** 表示が変わる瞬間に起きるための余裕。境界ちょうどだと 1 周期取りこぼす */
 const BOUNDARY_EPSILON_MS = 15;
 
 interface Anchor {
-  /** アンカー時点の経過ミリ秒 (サーバー配信値そのもの) */
   elapsedMs: number;
-  /** アンカーを取った瞬間の単調時刻 */
   atPerfMs: number;
 }
 
-/** 残りミリ秒。0 未満へは落とさない (マイナス表示は競技時計として意味を持たない) */
 function clampRemaining(remainingMs: number, durationMs: number): number {
   return Math.min(Math.max(remainingMs, 0), durationMs);
 }
 
-/**
- * 残りミリ秒を M:SS へ。**切り上げ**なのは、0:00 を「本当に時間が尽きた瞬間」
- * だけに出すため。切り捨てると残り 0.9 秒でも 0:00 と表示される。
- */
 export function formatRemaining(remainingMs: number): string {
   const totalSeconds = Math.ceil(remainingMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -41,7 +21,6 @@ export function formatRemaining(remainingMs: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-/** 次に表示が変わるまでのミリ秒。固定間隔で起こさない理由は下の useEffect を参照 */
 function msUntilDisplayChange(remainingMs: number): number {
   return remainingMs - (Math.ceil(remainingMs / 1000) - 1) * 1000;
 }
@@ -57,23 +36,13 @@ export function MatchTimer({ timer }: MatchTimerProps) {
   const durationMs = timer?.duration_ms ?? 0;
   const running = timer?.running ?? false;
 
-  // **初回レンダーの時点でアンカーを確定させる。** 取り直す effect は commit の後に
-  // しか走らないので、最初の 1 フレームはここの値がそのまま描かれる。`atPerfMs: 0` を
-  // 初期値にすると `performance.now() - 0` (ページを開いてからの経過) が「試合の経過」に
-  // 化け、タブを開いて `duration_ms` 以上経ってからマウントすると **`0:00` を 1 フレーム
-  // 描く** —— 操縦者が視線を戻した一瞬にそれを見ると「時間切れ」に読める。
   const anchor = useRef<Anchor>({ elapsedMs, atPerfMs: performance.now() });
 
-  // 配信が届くたびにアンカーを取り直す。取り直さないと、リロードした操縦者と
-  // 途中から繋いだ Monitor だけが 0 から数え始め、画面ごとに違う残り時間が出る
   useEffect(() => {
     anchor.current = { elapsedMs, atPerfMs: performance.now() };
     tick();
   }, [elapsedMs, running]);
 
-  // 秒表示が切り替わる瞬間に合わせて起こす。固定間隔 (setInterval) だとデバイスごとに
-  // 起床位相がずれ、同じ値を持っているのに秒の繰り上がりが最大 1 周期ぶん食い違って
-  // 見える —— 画面を並べたときに「同期していない」と読める。
   useEffect(() => {
     if (!running || durationMs <= 0) return;
 
@@ -81,7 +50,6 @@ export function MatchTimer({ timer }: MatchTimerProps) {
     const schedule = () => {
       const elapsedNow = anchor.current.elapsedMs + (performance.now() - anchor.current.atPerfMs);
       const remaining = clampRemaining(durationMs - elapsedNow, durationMs);
-      // 0:00 に達したら以降は表示が変わらない。空回りさせない
       if (remaining <= 0) return;
 
       timeoutId = window.setTimeout(
@@ -97,8 +65,6 @@ export function MatchTimer({ timer }: MatchTimerProps) {
     return () => window.clearTimeout(timeoutId);
   }, [running, durationMs, elapsedMs]);
 
-  // undefined も同じ扱いにする。null 一致だけで見ると、値が届いていない画面が
-  // 残り 0:00 を確信して表示することになる
   if (!timer) {
     return (
       <Panel legend="試合時間" className="shrink-0">
@@ -107,16 +73,11 @@ export function MatchTimer({ timer }: MatchTimerProps) {
     );
   }
 
-  // 進行中だけ自分の時計で進める。停止中はサーバーが凍結した値をそのまま描く
-  // (試合終了後に数字が進み続けると、何秒残して終えたのかが読めなくなる)
   const elapsedNow = running
     ? anchor.current.elapsedMs + (performance.now() - anchor.current.atPerfMs)
     : elapsedMs;
   const remaining = clampRemaining(durationMs - elapsedNow, durationMs);
 
-  // 進行中の数字が残り時間であることは legend「試合時間」から読めるので何も言わない。
-  // 停止中の 2 つは legend からは読めない別の事実なので必ず出す —— 同じ 0:30 でも
-  // 「まだ始まっていない」のか「その残りを抱えて終わった」のかで意味が正反対になる
   const caption = running ? null : elapsedMs === 0 ? "開始前" : "試合終了時点の残り";
 
   return (

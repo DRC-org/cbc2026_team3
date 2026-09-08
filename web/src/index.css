@@ -1,33 +1,15 @@
 @import "tailwindcss";
 
-/* 組み込みテーマは持ち込まない。この画面の配色要件は下の cbc テーマが単独で満たす */
 @plugin "daisyui" {
   themes: false;
   logs: false;
 }
-
-/* ==================================================================
-   テーマ層
-
-   ライト基調。この画面はほぼ全面がパネルで埋まるため、彩度の高い配色だと
-   画面全体が原色で覆われ、試合中の長時間注視に耐えない。
-   グレー基調へ落とし、彩色は状態表示 (正常/警告/異常/実行中) の
-   アクセントだけに限定する方針は暗色時代から継承する。
-
-   状態色は「白抜き文字を載せて AA (4.5:1)」「badge-soft の淡色地に載せて AA」
-   の両方を満たす値を実測して選んである。ライト地では彩度の高い amber や
-   green はそのままでは文字として読めないため、明度を落として選定した。
-
-   角丸と影を全て 0 にしているのは、1px の実線 1 本でパネル境界を表す
-   情報密度優先のレイアウトに合わせるため。
-   ================================================================== */
 
 @plugin "daisyui/theme" {
   name: "cbc";
   default: true;
   color-scheme: light;
 
-  /* base-100 がパネル面。base-200 が地、base-300 が沈んだ面 (表の縞・入力欄) */
   --color-base-100: #ffffff;
   --color-base-200: #eef1f4;
   --color-base-300: #d5dbe2;
@@ -42,8 +24,6 @@
   --color-info: #25667f;
   --color-info-content: #ffffff;
 
-  /* primary/secondary/accent は独自の意味を持たせない。
-     取りこぼした daisyUI 既定クラスが原色で浮かないよう既存の状態色へ寄せる */
   --color-primary: #25667f;
   --color-primary-content: #ffffff;
   --color-secondary: #4a5361;
@@ -62,27 +42,18 @@
 }
 
 @theme {
-  /* フォントは自己ホストする。会場にネットワークがある保証はなく、Google Fonts の
-     <link> は解決に失敗しても無言で素の sans-serif に落ちるだけで当日まで気付けない。
-     実体は main.tsx が @fontsource-variable から読む */
   --font-sans: "Inter Variable", "Noto Sans JP Variable", system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
-  /* 緊急停止だけは例外的に強い赤。安全上、他の何よりも先に目に入る必要がある */
   --color-estop: #c62d1f;
   --color-estop-fg: #ffffff;
 
-  /* NEXT も例外。試合中に最も多く押すボタンで、周辺視野で見つかる必要がある。
-     状態色の warning は文字として読める明度まで落としてあり面塗りでは目立たない */
   --color-next: #d98c00;
   --color-next-fg: #241800;
 }
 
 @layer base {
   html {
-    /* 20px 固定だと 1366x768 級のノート PC でパネルが画面外に溢れる。
-       幅と高さの両方に追従させ、どの機材を持ち込んでも 1 画面に収める。
-       Tailwind の余白は rem 基準なので、ここを起点にすると余白も一緒に追従する */
     font-size: clamp(13px, min(1.05vw, 2.1vh), 20px);
     font-family: var(--font-sans);
   }
@@ -92,25 +63,13 @@
     color: var(--color-base-content);
   }
 
-  /* 操作対象はキーボードでも追えなければならない。daisyUI の既定は
-     コンポーネントごとにばらつくため、地の文からここで一律に与える */
   :focus-visible {
     outline: 2px solid var(--color-info);
     outline-offset: 1px;
   }
 }
 
-/* ==================================================================
-   アプリ共通クラス
-
-   レイアウトと配色はユーティリティか daisyUI コンポーネントで表す。
-   ここに残すのは擬似要素・擬似クラス・keyframe を伴い、
-   ユーティリティでは書けないものだけ。
-   ================================================================== */
-
 @layer components {
-  /* パネル内でスクロールさせる領域。ページ全体はスクロールさせない。
-     スクロールバー装飾は Tailwind に等価なユーティリティが無い */
   .scroll {
     overflow: auto;
     scrollbar-color: var(--color-base-300) transparent;
@@ -133,13 +92,6 @@
     background-color: color-mix(in oklab, var(--color-base-content) 35%, transparent);
   }
 
-  /* **異常時にだけ画面へ出る要素にしか付けない。** 平常時から点滅していたのは
-     ヘッダーの EMG STOP だけで、「平常時に静かで、異常時に自分から主張する」に
-     正面から反していた（常時動くものが 1 つあると、本当に異常が出たときの点滅が
-     平常の一部として読み飛ばされる）。EMG STOP は赤地・大面積・固定位置・常時表示
-     なので、外しても見つけにくくはならない。残る利用者は EStopOverlay（緊急停止の
-     発動中）と ConnectionBanner（切断中）で、どちらも異常時にしか描かれない。
-     付ける先も先頭の記号までに留める（文章まで点滅すると読み取りに時間がかかる） */
   .alert-blink {
     animation: estop-blink 1s steps(2, start) infinite;
   }
@@ -151,8 +103,6 @@
   }
 }
 
-/* 前庭障害・光過敏への配慮。緊急停止の点滅も例外にしない
-   （色と面積で十分に目立つよう設計してある） */
 @media (prefers-reduced-motion: reduce) {
   .alert-blink {
     animation: none;

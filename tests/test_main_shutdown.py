@@ -1,16 +1,3 @@
-"""SIGTERM (systemd の停止シグナル) で main.py の後始末が完走することを検証する。
-
-SIGTERM の既定の扱いはプロセスの即死で、そのままだと ``main()`` の ``finally`` に並べた
-後始末が 1 段も走らない (docs/invariants.md「`main()` の後始末はシグナルの扱いに依存する」)。
-
-シグナルの扱いはプロセス全体の状態なので、実プロセスを ``--dry-run`` で起動して外から
-シグナルを送り、終了コードとログで確かめる。
-
-2 通目を「後始末の開始ログを見てから」送るのは POSIX シグナルがキューされないため ——
-連続で送ると 2 通目は 1 通目と合体して消え、2 通目の扱いを一切検証しないテストになる
-(実際にそれでハンドラを外す変異を素通しにした)。
-"""
-
 from __future__ import annotations
 
 import pathlib
@@ -24,10 +11,7 @@ import pytest
 
 _PROJECT_DIR = pathlib.Path(__file__).resolve().parent.parent
 
-# dry-run の起動 (config 検証 + virtual バス + シーケンス登録) に許す時間
 _STARTUP_TIMEOUT_S = 30.0
-# SIGTERM を受けてから後始末を終えるまでに許す時間。実測は 1 秒未満で、
-# cbc-control.service の TimeoutStopSec=10 と同じ桁に合わせてある
 _SHUTDOWN_TIMEOUT_S = 15.0
 
 _STOP_LOG = "SIGTERM を受信しました"
@@ -60,7 +44,6 @@ def _spawn_dry_run(port: int) -> subprocess.Popen[str]:
 
 
 def _wait_until_listening(proc: subprocess.Popen[str], port: int) -> None:
-    """HTTP を受け付けるまで待つ。起動途中に停止させると経路が変わるため。"""
     deadline = time.monotonic() + _STARTUP_TIMEOUT_S
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -74,7 +57,6 @@ def _wait_until_listening(proc: subprocess.Popen[str], port: int) -> None:
 
 
 def _read_until(proc: subprocess.Popen[str], needle: str, collected: list[str]) -> bool:
-    """needle を含む行が出るまで読み進める。プロセスが終了 (EOF) すれば False。"""
     assert proc.stdout is not None
     while True:
         line = proc.stdout.readline()
@@ -98,7 +80,6 @@ def _collect_rest(proc: subprocess.Popen[str], collected: list[str]) -> tuple[in
 
 
 def test_sigterm_runs_full_shutdown() -> None:
-    """SIGTERM 1 通で後始末が最後まで走り、正常終了する。"""
     port = _free_port()
     proc = _spawn_dry_run(port)
     collected: list[str] = []
@@ -111,28 +92,20 @@ def test_sigterm_runs_full_shutdown() -> None:
             proc.kill()
             proc.communicate()
 
-    # 既定の SIGTERM で死ぬと -15 になる。0 は自前のハンドラを通った証拠
+    # 既定の SIGTERM 処理で死ぬと returncode は -15。0 は自前のハンドラを通った証拠。
     assert returncode == 0, f"SIGTERM で異常終了しました (exit={returncode}):\n{output}"
     assert _STOP_LOG in output, output
-    # 後始末の最終行。ここまで到達していれば全段が実行されている
     assert _DONE_LOG in output, output
 
 
 def test_second_sigterm_during_shutdown_does_not_kill_cleanup() -> None:
-    """後始末の最中に届いた 2 通目の SIGTERM が後始末を打ち切らない。
-
-    ``systemctl restart`` の連打で起きる。``remove_signal_handler`` でハンドラを
-    外すと SIGTERM の扱いが SIG_DFL へ戻るため、2 通目は「無視」ではなく「即死」に
-    なり、CAN を開いたままプロセスが消える。
-    """
     port = _free_port()
     proc = _spawn_dry_run(port)
     collected: list[str] = []
     try:
         _wait_until_listening(proc, port)
         proc.send_signal(signal.SIGTERM)
-        # 1 通目が処理された (= ハンドラが走った) ことを見届けてから 2 通目を送る。
-        # ここを待たずに送ると 2 通目は合体して消え、何も検証しないテストになる
+        # POSIX シグナルはキューされないので、待たずに 2 通目を送ると 1 通目と合体して消える。
         assert _read_until(proc, _STOP_LOG, collected), (
             f"後始末の開始ログが出ないまま終了しました:\n{''.join(collected)}"
         )

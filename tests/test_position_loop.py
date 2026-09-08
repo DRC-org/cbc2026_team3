@@ -25,14 +25,6 @@ BUS = "m3508_bus"
 
 
 class _StubCANManager:
-    """M3508PositionLoop が触る API だけを実装したスタブ。
-
-    同名のスタブが tests/test_target_refresh.py にもあるが 1 つにまとめてはならない。
-    位置制御ループはバス単位 (``send_to_bus``) でしか送ってはならず、モータ単位の
-    ``send`` を生やすと「同一バスの M3508 は 1 フレームに束ねる」制約を破る書き方が
-    通ってしまう。**持たせない API が制約の証明になっている。**
-    """
-
     def __init__(self) -> None:
         self.sent: list[tuple[str, can.Message]] = []
         self.feedback_at: dict[str, float] = {}
@@ -47,8 +39,6 @@ class _StubCANManager:
     def last_feedback_at(self, motor_name: str) -> float | None:
         return self.feedback_at.get(motor_name)
 
-    # ---- テスト補助 ----
-
     @property
     def last_currents(self) -> tuple[int, int, int, int]:
         assert self.sent, "CAN フレームが 1 つも送信されていない"
@@ -56,8 +46,6 @@ class _StubCANManager:
 
 
 class _Fixture:
-    """ループ + スタブ一式。各テストで使い回す。"""
-
     def __init__(
         self,
         *,
@@ -82,7 +70,6 @@ class _Fixture:
         self.tilt = M3508Driver("tilt", can_id=2)
         self.loop.add_motor("lift", self.lift, make_position_pid(kp=kp, ki=ki))
         self.loop.add_motor("tilt", self.tilt, make_position_pid(kp=kp, ki=ki))
-        # 原点確定 (初回フィードバック) と鮮度マークを済ませておく
         self.feed("lift", 0.0)
         self.feed("tilt", 0.0)
 
@@ -105,7 +92,6 @@ class TestFrameAggregation:
 
         await fx.tick()
 
-        # C620 は 1 フレームに 4 モータ分を載せるため、送信は必ずバスあたり 1 通
         assert len(fx.manager.sent) == 1
         bus_name, msg = fx.manager.sent[0]
         assert bus_name == BUS
@@ -143,7 +129,6 @@ class TestMultiTurnFeedback:
     async def test_uses_multi_turn_position_not_wrapped_angle(self) -> None:
         fx = _Fixture(kp=10.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 720.0)
-        # 2 回転して目標到達 → 偏差 0 (単回転角なら 0 deg 付近で偏差 720 のまま)
         for step in range(1, 9):
             fx.feed("lift", 90.0 * step)
         await fx.tick()
@@ -155,7 +140,6 @@ class TestMultiTurnFeedback:
         await fx.tick()
         assert fx.manager.last_currents[0] != 0
 
-        # ホーミング後の原点設定。目標を持ち越すと原点変更分だけ暴れるので解除する
         fx.loop.set_origin_here("lift")
         await fx.tick()
         assert fx.manager.last_currents[0] == 0
@@ -180,7 +164,6 @@ class TestEmergencyStop:
 
         fx.estop = True
         await fx.tick()
-        # 解除直後に溜まった積分が一気に出ないよう積分ごとクリアする
         assert fx.loop.pid("lift").integral == pytest.approx(0.0)
 
     async def test_no_output_after_release_until_retargeted(self) -> None:
@@ -191,7 +174,6 @@ class TestEmergencyStop:
 
         fx.estop = False
         await fx.tick()
-        # 停止中に姿勢が崩れている可能性があるため、解除だけでは動き出さない
         assert fx.manager.last_currents[0] == 0
 
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
@@ -200,8 +182,6 @@ class TestEmergencyStop:
 
 
 class TestSendStopFrame:
-    """緊急停止の停止指令がループの生存に依存しないこと。"""
-
     async def test_sends_all_zero_slots(self) -> None:
         fx = _Fixture(kp=100.0)
         await fx.loop.set_target("lift", ControlMode.CURRENT, 3000.0)
@@ -220,7 +200,6 @@ class TestSendStopFrame:
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_sends_even_while_paused(self) -> None:
-        """動作確認中でも緊急停止の 0 電流は通す (むしろ上書きさせたい)。"""
         fx = _Fixture(kp=100.0)
         await fx.loop.pause(reason="動作確認")
 
@@ -229,7 +208,6 @@ class TestSendStopFrame:
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_clears_targets(self) -> None:
-        """目標が残ると、ループが動き出した瞬間に再び電流が出る。"""
         fx = _Fixture(kp=100.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
 
@@ -238,7 +216,6 @@ class TestSendStopFrame:
         assert fx.loop.target("lift") is None
 
     async def test_send_failure_propagates(self) -> None:
-        """送信できなかったことは呼び出し側 (サーバー) が知る必要がある。"""
         fx = _Fixture(kp=100.0)
         fx.manager.fail_sends = 1
 
@@ -253,7 +230,6 @@ class TestFeedbackTimeout:
         await fx.tick()
         assert fx.manager.last_currents[0] == 1000
 
-        # 実測値が古いまま PID を回すと暴走するため 0 に落とす
         await fx.tick(dt=0.6)
         assert fx.manager.last_currents[0] == 0
 
@@ -298,7 +274,6 @@ class TestTargetSink:
     async def test_sink_accepts_current_as_open_loop(self) -> None:
         fx = _Fixture(kp=100.0)
         sink = fx.loop.target_sink("lift")
-        # ホーミングで機構端に押し当てる用途。PID を通さず素通しする
         await sink(ControlMode.CURRENT, 300.0)
         await fx.tick()
         assert fx.manager.last_currents[0] == 300
@@ -332,11 +307,9 @@ class TestTiming:
         assert fx.loop.pid("lift").integral == pytest.approx(3.0)
 
     async def test_long_stall_dt_is_clamped(self) -> None:
-        # asyncio が詰まって周期が飛んだとき、巨大な dt で積分が跳ねないこと
         fx = _Fixture(kp=0.0, ki=1.0, feedback_timeout_ms=100000.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 100.0)
         await fx.tick(dt=10.0)
-        # dt は DEFAULT_MAX_DT_S に制限される
         assert fx.loop.pid("lift").integral == pytest.approx(100.0 * DEFAULT_MAX_DT_S)
 
 
@@ -361,7 +334,6 @@ class TestRunLifecycle:
         await fx.loop.run()
 
         assert ticks == 3
-        # 制御を降りるときは必ず 0 電流で終える
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_run_survives_send_error(self) -> None:
@@ -384,22 +356,10 @@ class TestRunLifecycle:
         fx.loop.set_sleep(fake_sleep)
         await fx.loop.run()
 
-        # 送信失敗 2 回でループが死なず、その後の周期は送れている
         assert ticks == 4
         assert len(fx.manager.sent) >= 2
 
     async def test_送信失敗のあいだ進んだ中間目標を持ち越さない(self) -> None:
-        """tick 例外も「電流 0 に落とす経路」なので、軌道の起点を捨てる。
-
-        送信だけが落ちている間 (qdisc の ENOBUFS など) はフィードバックが届き続ける
-        ので途絶判定が立たず、**起点を捨てる経路が他に 1 つも無い**。据え置くと中間
-        目標だけが max_velocity で進み、送信が戻った 1 周期目に PID が全差分をステップ
-        入力として受ける。
-
-        見るのは復帰 1 周期目の電流。起点を捨てていれば数 counts、持ち越すと止まって
-        いた 0.25 秒ぶんが一気に入る (**実測 1 counts と 648 counts**。閾値 50 はその
-        間のどこに置いても結論が変わらない)。
-        """
         far_target = 1000.0
 
         async def first_current(*, fail_ticks: int) -> int:
@@ -418,9 +378,6 @@ class TestRunLifecycle:
                 ticks += 1
                 fx.mono.advance(delay)
                 fx.wall.advance(delay)
-                # 機構は 1deg も動いていない (電流が 1 通も出ていないので当然)。
-                # 実測を進めないことがこのテストの肝 —— 進めると、起点を捨てても
-                # 捨てなくても同じ中間目標になってしまう
                 fx.manager.feedback_at["lift"] = fx.wall.now
                 fx.manager.feedback_at["tilt"] = fx.wall.now
                 if ticks > fail_ticks:
@@ -428,16 +385,13 @@ class TestRunLifecycle:
 
             fx.loop.set_sleep(fake_sleep)
             await fx.loop.run()
-            # 失敗した送信は積まれないので、先頭が「復帰して最初に出せた 1 通」。
-            # tick 例外の 0 電流も fail_sends を消費するため、fail_ticks の実効は
-            # その半分の周期数になる (どれだけ止まったかはこのテストの主題ではない)
             assert fx.manager.sent, "復帰後の送信が 1 通も無い"
             return struct.unpack(">hhhh", fx.manager.sent[0][1].data)[0]
 
         recovered = await first_current(fail_ticks=100)
         pristine = await first_current(fail_ticks=0)
 
-        # 一度も失敗しなかった 1 周期目と同じ桁 (どちらも「1 周期ぶんの進み」しかない)
+        # 実測は起点を捨てると 1 counts、持ち越すと 648 counts。閾値 50 はその間。
         assert abs(pristine) < 50
         assert abs(recovered) < 50
 
@@ -493,8 +447,6 @@ class TestRunLifecycle:
 
 
 class TestPauseForMotorCheck:
-    """アクチュエータ動作確認との 0x200 排他 (lib/server.py の _start_motor_check)。"""
-
     async def test_paused_loop_sends_no_frame(self) -> None:
         fx = _Fixture(kp=100.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
@@ -506,7 +458,6 @@ class TestPauseForMotorCheck:
 
         await fx.tick()
         await fx.tick()
-        # 動作確認が 0x200 を占有している間は 0 電流フレームすら送ってはならない
         assert len(fx.manager.sent) == 1
 
     async def test_resume_restarts_sending(self) -> None:
@@ -529,7 +480,6 @@ class TestPauseForMotorCheck:
         await fx.loop.pause()
         fx.loop.resume()
 
-        # 保持目標を失うと復帰時に昇降軸が落ちるため、目標そのものは残す
         assert fx.loop.target("lift") == 10.0
 
     async def test_resume_clears_pid_integral(self) -> None:
@@ -542,7 +492,6 @@ class TestPauseForMotorCheck:
         await fx.loop.pause()
         fx.loop.resume()
 
-        # 動作確認でモータが動かされているため、古い積分を持ち越すと復帰時に暴れる
         assert fx.loop.pid("lift").integral == pytest.approx(0.0)
 
     async def test_resume_does_not_charge_paused_duration_to_dt(self) -> None:
@@ -557,7 +506,6 @@ class TestPauseForMotorCheck:
 
         await fx.tick(dt=0.005)
 
-        # 停止していた 30s 分が dt に化けると積分が一気に育つ
         assert fx.loop.pid("lift").integral == pytest.approx(10.0 * 0.005)
 
     async def test_estop_while_paused_drops_targets_without_sending(self) -> None:
@@ -569,7 +517,6 @@ class TestPauseForMotorCheck:
         await fx.tick()
 
         assert fx.manager.sent == []
-        # 停止中に目標が残ると、動作確認終了後の復帰で動き出してしまう
         assert fx.loop.target("lift") is None
 
     async def test_resume_without_pause_is_noop(self) -> None:
@@ -602,7 +549,6 @@ class TestPauseForMotorCheck:
         for _ in range(20):
             await asyncio.sleep(0)
 
-        # pause() の完了後は在庫の 1 周期分すら送られない (送信中の周期を待ち合わせる)
         assert len(fx.manager.sent) == sent_at_pause
 
         fx.loop.resume()
@@ -625,7 +571,6 @@ class TestMakePositionPid:
 
 
 def _pair_group(*, name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
-    """lift / tilt を逆回転ペアとして束ねたグループ (逆回転は scale の符号で表す)。"""
     return SyncGroup(
         name=name,
         members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("tilt", -1.0, 0.0)),
@@ -634,7 +579,6 @@ def _pair_group(*, name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
 
 
 async def _target_pair(fx: _Fixture, value: float) -> None:
-    """ペアに「同じ動作」を指示する (逆回転側は符号を反転)。"""
     await fx.loop.set_target("lift", ControlMode.POSITION, value)
     await fx.loop.set_target("tilt", ControlMode.POSITION, -value)
 
@@ -670,13 +614,11 @@ class TestPairedStaleFeedback:
         await fx.tick()
         assert fx.manager.last_currents == (1000, -1000, 0, 0)
 
-        # lift だけ途絶させる (tilt のフィードバックは新鮮なまま)
         fx.mono.advance(0.6)
         fx.wall.advance(0.6)
         fx.feed("tilt", 0.0)
         await fx.loop.step()
 
-        # 片方だけ止めると残った側が押し続けて機構が壊れる
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_ungrouped_stale_axis_does_not_affect_others(self) -> None:
@@ -689,7 +631,6 @@ class TestPairedStaleFeedback:
         fx.feed("tilt", 0.0)
         await fx.loop.step()
 
-        # グループ未登録なら従来どおり軸単位判定 (後方互換)
         assert fx.manager.last_currents == (0, -1000, 0, 0)
 
     async def test_healthy_member_pid_reset_on_group_stale(self) -> None:
@@ -726,7 +667,6 @@ class TestSyncDeviation:
         fx.loop.add_sync_group(_pair_group())
         await _target_pair(fx, 20.0)
 
-        # 左右が正しく同一動作している状態 (逆回転なので符号が逆)
         fx.feed("lift", 10.0)
         fx.feed("tilt", -10.0)
         await fx.tick()
@@ -750,7 +690,6 @@ class TestSyncDeviation:
         fx.feed("lift", -5.0)
         fx.feed("tilt", -5.0)
         await fx.tick()
-        # 偏差が許容内に戻ってもラッチは外れない
         assert fx.manager.last_currents == (0, 0, 0, 0)
         assert fx.loop.sync_violations == frozenset({"y_axis"})
 
@@ -779,7 +718,6 @@ class TestSyncDeviation:
         await fx.tick()
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
-        # 人間が機構のずれを直した状態 (逆回転ペアなので符号が逆で揃う)
         fx.feed("lift", 5.0)
         fx.loop.reset_sync_violation()
         await fx.tick()
@@ -789,11 +727,6 @@ class TestSyncDeviation:
         assert fx.manager.last_currents[1] == pytest.approx(-1500, abs=5)
 
     async def test_reset_does_not_disable_detection(self) -> None:
-        """解除は「監視を再び有効にする」であって「ずれを無かったことにする」ではない。
-
-        機構が直っていないまま解除された場合、次の周期で再びラッチして電流 0 に
-        戻らなければ、操縦者は復帰したつもりで左右直結の軸を押し込むことになる。
-        """
         fx = _Fixture(kp=100.0)
         fx.loop.add_sync_group(_pair_group(tolerance=2.0))
         await _target_pair(fx, 20.0)
@@ -804,7 +737,6 @@ class TestSyncDeviation:
         assert fx.loop.sync_violations == frozenset({"y_axis"})
 
         fx.loop.reset_sync_violation()
-        # ずれたまま次の周期へ (人間は機構を直していない)
         await fx.tick()
 
         assert fx.loop.sync_violations == frozenset({"y_axis"})
@@ -835,7 +767,6 @@ class TestSyncDeviation:
             fx.feed("tilt", -5.0)
             await fx.tick()
 
-        # 試合中に「なぜ止まったか」が分からないと復旧できない
         assert "y_axis" in caplog.text
         assert "2.0" in caplog.text
 
@@ -844,7 +775,6 @@ class TestSyncDeviation:
         fx.loop.add_sync_group(_pair_group(tolerance=2.0))
         await _target_pair(fx, 20.0)
 
-        # lift を途絶させたまま tilt だけ大きく動かす (比較対象が 1 個なので判定しない)
         fx.mono.advance(0.6)
         fx.wall.advance(0.6)
         fx.feed("tilt", -30.0)
@@ -867,7 +797,6 @@ class TestSyncDeviation:
         fx.estop = False
         await fx.tick()
 
-        # 機構のずれは緊急停止の解除では直らない
         assert fx.loop.sync_violations == frozenset({"y_axis"})
 
     async def test_no_violation_while_paused(self) -> None:
@@ -880,7 +809,6 @@ class TestSyncDeviation:
         fx.feed("tilt", -5.0)
         await fx.tick()
 
-        # 動作確認は 1 台ずつ動かすため、その間の偏差は機構のずれではない
         assert fx.loop.sync_violations == frozenset()
 
 
@@ -897,7 +825,6 @@ class TestGroupOrigin:
 
         assert fx.lift.multi_turn_position == pytest.approx(0.0)
         assert fx.tilt.multi_turn_position == pytest.approx(0.0)
-        # 原点が動くと既存の目標値の意味も変わるため、目標は解除される
         assert fx.loop.target("lift") is None
         assert fx.loop.target("tilt") is None
 
@@ -910,11 +837,6 @@ class TestGroupOrigin:
             fx.loop.set_group_origin_here("y_axis")
 
     async def test_set_origin_here_on_paired_motor_zeroes_whole_group(self) -> None:
-        """ペアの片側だけ原点確定すると、正常動作でも即座に偏差超過で止まる。
-
-        原点が左右で別々の瞬間に決まると、その差がそのまま消えないオフセットになる。
-        1 台ぶんの API から入っても機構の単位 (グループ) で確定させる。
-        """
         fx = _Fixture(kp=100.0)
         fx.loop.add_sync_group(_pair_group(tolerance=2.0))
         await _target_pair(fx, 20.0)
@@ -941,9 +863,6 @@ class TestGroupOrigin:
 
 
 class TestSaturationReadout:
-    """飽和の読み口。実機チューニング CLI (scripts/tune_y_axis.py) が唯一の読み手で、
-    飽和している間はゲインを変えても応答が変わらないという判断の根拠になる。"""
-
     async def test_saturated_when_output_hits_the_limit(self) -> None:
         fx = _Fixture(kp=100000.0)
         await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
@@ -957,7 +876,6 @@ class TestSaturationReadout:
         assert fx.loop.is_saturated("lift") is False
 
     async def test_not_saturated_without_a_target(self) -> None:
-        """目標を持たない周期の 0 出力を「下限に張り付いている」と読んではならない。"""
         fx = _Fixture(kp=100.0)
         await fx.tick()
         assert fx.loop.is_saturated("lift") is False
@@ -983,11 +901,6 @@ class TestSaturationReadout:
 def _pair_group_with_gain(
     *, sync_kp: float, sync_limit: float = 1e9, tolerance: float = 10.0
 ) -> SyncGroup:
-    """同期補正を有効にした lift / tilt のペア。
-
-    ``tolerance`` を既定より緩めてあるのは、補正そのものを見たいテストで偏差ラッチが
-    先に効いてしまわないようにするため (ラッチの側は専用のテストが見る)。
-    """
     return SyncGroup(
         name="y_axis",
         members=(MotorSpec("lift", 1.0, 0.0), MotorSpec("tilt", -1.0, 0.0)),
@@ -998,18 +911,12 @@ def _pair_group_with_gain(
 
 
 async def _skew_pair(fx: _Fixture) -> None:
-    """ペアに同じ目標を与えたうえで、lift だけ進んだ状態にする。
-
-    人間の単位で lift が tilt より進むので、補正は「lift を減速し tilt を加速する」
-    向きに出る (逆回転ペアなのでどちらも同じ符号の操作量になる)。
-    """
     await _target_pair(fx, 10.0)
     fx.feed("lift", 2.0)
     fx.feed("tilt", 0.0)
 
 
 async def _skew_pair_open_loop(fx: _Fixture) -> None:
-    """lift は位置制御、tilt は開ループ電流指令 (ホーミングの押し当てと同じ状態)。"""
     await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
     await fx.loop.set_target("tilt", ControlMode.CURRENT, -300.0)
     fx.feed("lift", 2.0)
@@ -1017,7 +924,6 @@ async def _skew_pair_open_loop(fx: _Fixture) -> None:
 
 
 async def _skew_pair_half_targeted(fx: _Fixture) -> None:
-    """lift にだけ目標がある状態。"""
     await fx.loop.set_target("lift", ControlMode.POSITION, 10.0)
     fx.feed("lift", 2.0)
     fx.feed("tilt", 0.0)
@@ -1029,12 +935,6 @@ async def _currents(
     group: SyncGroup | None = None,
     estop: bool = False,
 ) -> tuple[int, int, int, int]:
-    """同じ状況を「補正あり / なし」で作り分け、その周期の電流指令を返す。
-
-    補正量そのものの正しさは tests/test_axis_sync.py が見る。ここが見るのは経路の結線
-    (補正が電流指令まで届くか) だけなので、基準 (``group=None``) との差で判定する。
-    電流は整数 counts なので丸めで 1 counts のずれが乗りうる。
-    """
     fx = _Fixture(kp=100.0)
     if group is not None:
         fx.loop.add_sync_group(group)
@@ -1045,18 +945,7 @@ async def _currents(
 
 
 class TestSyncCorrection:
-    """左右直結ペアを揃える同期補正が、電流指令として実際に出ること。
-
-    ずれを検出して止める 3 層とは向きが逆で、**駆動中にずれを縮める唯一の経路**
-    (独立した 2 つの PID には左右を揃える力がどこにも無い)。
-    """
-
     async def test_correction_shifts_both_currents_equally(self) -> None:
-        """進んだ側は減速し、遅れた側は加速する。**逆回転ペアではその量が等しい。**
-
-        量が等しいことは「補正が軸としての運動を動かさず、左右の内部のずれだけを縮める」
-        ことと同じ意味で、片方にしか乗らない実装や符号を落とした実装では崩れる。
-        """
         baseline = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
         corrected = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=50.0))
 
@@ -1068,13 +957,11 @@ class TestSyncCorrection:
         assert shift_lift == pytest.approx(shift_tilt, abs=1)
 
     async def test_no_correction_without_gain(self) -> None:
-        """既定 (sync_kp=0.0) ではグループを登録していないときと同じ電流になる。"""
         with_group = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
 
         assert with_group == await _currents(_skew_pair)
 
     async def test_no_correction_when_aligned(self) -> None:
-        """揃っている機体には余計な電流を出さない。"""
         fx = _Fixture(kp=100.0)
         fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0))
         await _target_pair(fx, 10.0)
@@ -1084,17 +971,12 @@ class TestSyncCorrection:
         assert fx.manager.last_currents == (1000, -1000, 0, 0)
 
     async def test_no_correction_while_group_is_stale(self) -> None:
-        """途絶したグループには補正も出ない (電流 0 が優先)。
-
-        補正だけが生き残ると、力を抜いたはずの周期で押し合う。
-        """
         fx = _Fixture(kp=100.0)
         fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0))
         await _skew_pair(fx)
         await fx.tick()
         assert fx.manager.last_currents != (0, 0, 0, 0)
 
-        # tilt だけ新鮮に保ち、lift を途絶させる
         fx.mono.advance(0.6)
         fx.wall.advance(0.6)
         fx.feed("tilt", 0.0)
@@ -1103,11 +985,6 @@ class TestSyncCorrection:
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_no_correction_after_deviation_latch(self) -> None:
-        """偏差ラッチ中も補正を出さない。
-
-        ラッチは「人間がずれを直すまで力を抜く」宣言なので、補正で自動的に
-        揃えにいってはならない (人間が原因に気付かないまま駆動が続く)。
-        """
         fx = _Fixture(kp=100.0)
         fx.loop.add_sync_group(_pair_group_with_gain(sync_kp=50.0, tolerance=1.0))
         await _skew_pair(fx)
@@ -1118,18 +995,11 @@ class TestSyncCorrection:
         assert fx.manager.last_currents == (0, 0, 0, 0)
 
     async def test_no_correction_when_a_member_is_open_loop(self) -> None:
-        """片方が開ループ指令なら、グループの**どちらにも**補正を出さない。
-
-        モータ単位で「自分が位置制御中なら補正する」と書くと、ホーミングの押し当てで
-        片方だけモードが変わった瞬間にもう 1 台へだけ補正が乗り、打ち消し合うはずの力が
-        軸ごと押し動かす力になる。
-        """
         corrected = await _currents(_skew_pair_open_loop, group=_pair_group_with_gain(sync_kp=50.0))
 
         assert corrected == await _currents(_skew_pair_open_loop)
 
     async def test_no_correction_when_a_member_has_no_target(self) -> None:
-        """目標を持たないメンバが居るグループにも出さない。"""
         corrected = await _currents(
             _skew_pair_half_targeted, group=_pair_group_with_gain(sync_kp=50.0)
         )
@@ -1137,14 +1007,12 @@ class TestSyncCorrection:
         assert corrected == await _currents(_skew_pair_half_targeted)
 
     async def test_correction_is_clamped_to_output_range(self) -> None:
-        """補正込みで出力レンジに収まる (PID の外で足すと上限を超えた指令が出る)。"""
         corrected = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=1e6))
 
         assert corrected[0] == CURRENT_MIN
         assert corrected[1] == CURRENT_MIN
 
     async def test_sync_limit_caps_the_correction(self) -> None:
-        """押し合いの歯止め。大きなずれでも sync_limit を超える補正は出ない。"""
         baseline = await _currents(_skew_pair, group=_pair_group_with_gain(sync_kp=0.0))
         corrected = await _currents(
             _skew_pair, group=_pair_group_with_gain(sync_kp=1e6, sync_limit=200.0)
@@ -1154,7 +1022,6 @@ class TestSyncCorrection:
         assert corrected[1] - baseline[1] == -200
 
     async def test_no_correction_while_estop_active(self) -> None:
-        """緊急停止中は補正も出ない。"""
         corrected = await _currents(
             _skew_pair, group=_pair_group_with_gain(sync_kp=50.0), estop=True
         )
@@ -1162,32 +1029,15 @@ class TestSyncCorrection:
         assert corrected == (0, 0, 0, 0)
 
 
-# --------------------------------------------------------------------------- #
-#  台形速度プロファイルの結線
-# --------------------------------------------------------------------------- #
-
-#: y_axis の実測換算 [deg/mm] (ピニオン モジュール 1 / 歯数 40 で確定)
 Y_AXIS_SCALE = 55.0131
-#: 実運用ストローク [mm]。最終目標をステップで入れると原理的に行き過ぎる距離
 LONG_MOVE_MM = 15.0
-#: 実機で詰めた y_axis の出力上限 [counts] (C620 フルスケールの約 12%)
 Y_AXIS_OUTPUT_LIMIT = 2000.0
 
 
 class _Plant:
-    """電流指令で駆動される 1 軸の機構模型。
-
-    表すのは 2 点だけ —— 電流はトルク (角加速度) を作る、速度は粘性で頭打ちになる。
-    飽和の有無は「PID にどれだけ大きな偏差を見せるか」で決まるので係数が多少違っても
-    結論は動かない (**実機に寄せることが目的ではない**)。
-
-    速度が頭打ちになることは前提条件で、無いと 1 周期で半回転を超える移動が起こり、
-    C620 の単回転角アンラップが破綻して測定そのものが無意味になる。
-    """
-
-    #: 電流 1 counts あたりの角加速度 [deg/s^2]。上限 2000 counts で 200mm/s^2 相当
+    # 電流 1 counts あたりの角加速度 [deg/s^2]。上限 2000 counts で 200mm/s^2 相当。
     GAIN = 5.5
-    #: 粘性 [1/s]。上限 2000 counts での終端速度が 3000deg/s (1 周期 15deg) になる値
+    # 粘性 [1/s]。上限 2000 counts での終端速度が 3000deg/s (1 周期 15deg) になる値。
     DAMPING = GAIN * 2000.0 / 3000.0
 
     def __init__(self) -> None:
@@ -1200,12 +1050,6 @@ class _Plant:
 
 
 class _ProfileRig:
-    """y_axis の実測 PID を載せた 1 モータのループ + 機構模型。
-
-    ``motion`` を渡さなければ従来どおり最終目標をステップで入れる。同じ機構・同じゲイン
-    のまま入力の作り方だけを変えられるので、飽和の有無がプロファイル由来だと示せる。
-    """
-
     def __init__(self, *, motion: tuple[float, float] | None, velocity_ff: float = 0.0) -> None:
         self.mono = FakeClock()
         self.wall = FakeClock(start=5000.0)
@@ -1219,7 +1063,6 @@ class _ProfileRig:
             feedback_clock=self.wall,
         )
         self.driver = M3508Driver("y_axis_r", can_id=1)
-        # config/main_hand.yaml の実測値 (2026-09-03 に実機で詰めたもの)
         pid = make_position_pid(32.0, 10.0, 1.0, integral_limit=400.0, dead_band=1.0)
         pid.output_min = -Y_AXIS_OUTPUT_LIMIT
         pid.output_max = Y_AXIS_OUTPUT_LIMIT
@@ -1229,7 +1072,6 @@ class _ProfileRig:
             self.loop.set_motion_profile(
                 "y_axis_r",
                 TrapezoidalProfile(
-                    # 制限は指令単位 (deg) で渡す。mm からの換算は配線層 (main.py) の仕事
                     max_velocity=max_velocity * Y_AXIS_SCALE,
                     max_acceleration=max_acceleration * Y_AXIS_SCALE,
                 ),
@@ -1270,13 +1112,6 @@ class _ProfileRig:
 
 
 class TestLongMoveDoesNotSaturate:
-    """**この作業の本題。** 実運用ストロークで P 項が飽和したままにならないこと。
-
-    偏差 1.14mm で P 項が上限に届く (scale 55.0131 / kp 32 / output_limit 2000) ので、
-    ステップ入力では移動距離 2.3mm を超えた時点で止まりきれない。飽和中は合計が
-    クランプされるので D 項も出力に現れず、``kd`` を上げても直らない。
-    """
-
     async def test_15mm_の移動で出力が飽和しない(self) -> None:
         rig = _ProfileRig(motion=(10.0, 50.0))
 
@@ -1285,11 +1120,9 @@ class TestLongMoveDoesNotSaturate:
 
         assert not any(rig.saturations)
         assert rig.peak_output < Y_AXIS_OUTPUT_LIMIT
-        # 到達許容差 (config の tolerance 1.0mm) の中へ収まる
         assert rig.position_mm == pytest.approx(LONG_MOVE_MM, abs=1.0)
 
     async def test_同じ機構でも最終目標をステップで入れると飽和して行き過ぎる(self) -> None:
-        """プロファイルを外した対照。飽和が模型の作りではなく入力の作り方に由来する。"""
         rig = _ProfileRig(motion=None)
 
         await rig.move_to(LONG_MOVE_MM)
@@ -1299,22 +1132,15 @@ class TestLongMoveDoesNotSaturate:
         assert max(rig.positions_mm) > LONG_MOVE_MM + 1.0
 
     async def test_中間目標は速度制限を守って立ち上がる(self) -> None:
-        """飽和しない理由が「目標が届いていない」ではないこと。
-
-        実際に軸が動いていることまで見ておかないと、目標を捨てる実装でもこのクラスが
-        緑になる (飽和しないことは「動かない」でも成立してしまう)。
-        """
         rig = _ProfileRig(motion=(10.0, 50.0))
 
         await rig.move_to(LONG_MOVE_MM)
         await rig.run(0.5)
 
-        # 加速 0.2s (1mm) + 巡航 0.3s (3mm) で 4mm 前後
         assert 2.0 < rig.position_mm < 6.0
 
 
 def _flying(fx: _Fixture, name: str = "lift") -> None:
-    """``name`` に台形プロファイルを後付けする (制限は指令単位 deg のまま)。"""
     fx.loop.set_motion_profile(
         name,
         TrapezoidalProfile(max_velocity=50.0, max_acceleration=500.0),
@@ -1323,11 +1149,6 @@ def _flying(fx: _Fixture, name: str = "lift") -> None:
 
 
 async def _fly(fx: _Fixture, name: str = "lift", *, ticks: int = 100) -> float:
-    """中間目標を飛行中の状態にし、そこまでに進んだ中間目標 [deg] を返す。
-
-    実測を 0 に据え置くので、出力はそのまま ``kp * 中間目標`` になる。これで
-    「その周期に PID が見た中間目標」を公開 API だけで読める。
-    """
     await fx.loop.set_target(name, ControlMode.POSITION, 1000.0)
     for _ in range(ticks):
         await fx.tick()
@@ -1336,30 +1157,16 @@ async def _fly(fx: _Fixture, name: str = "lift", *, ticks: int = 100) -> float:
 
 
 class TestProfileIsDiscardedOnSafetyPaths:
-    """止まっていた間に進んだはずの中間目標へ、復帰 1 周期目に飛ばないこと。
-
-    復帰の瞬間に機構がどこに居るかは分からない (自重で落ちる・動作確認に動かされる)。
-    起点を据え置くと、その差がまるごと 1 周期の偏差として PID に入る。
-
-    **層ごとに 1 つずつ確かめる。** 5 つの経路 (緊急停止 = ``_reset_axis`` / 一時停止
-    からの復帰 / フィードバック途絶 / 相方の異常による blocked / 開ループ指令) は
-    どれも単独で機体を守るので、まとめて 1 本にすると 1 枚外しても落ちない。
-    """
-
-    #: 復帰までに機構が落ちる量 [deg]。据え置いた起点との差がここまで開く
     FALL_DEG = -30.0
 
     def _rig(self) -> _Fixture:
-        # kp を小さくして出力レンジの端から離す (飽和で差が潰れると層が見えない)
         fx = _Fixture(kp=5.0)
         _flying(fx)
         return fx
 
     def _assert_reanchored(self, fx: _Fixture, flown: float) -> None:
         current = fx.manager.last_currents[0]
-        # 実測から起こし直せば偏差は 1 周期の進みぶん (50deg/s * 5ms = 0.25deg) しかない
         assert abs(current) < 5.0, f"中間目標が実測から離れている (出力 {current})"
-        # 据え置いた場合との差が本当に出る状況だったかも見る (前提が崩れていないか)
         assert abs(flown - self.FALL_DEG) > 10.0
 
     async def test_緊急停止からの復帰で中間目標が飛ばない(self) -> None:
@@ -1369,7 +1176,6 @@ class TestProfileIsDiscardedOnSafetyPaths:
         fx.estop = True
         await fx.tick()
         fx.estop = False
-        # 停止中に自重で落ちた
         fx.feed("lift", self.FALL_DEG)
         await fx.loop.set_target("lift", ControlMode.POSITION, 1000.0)
         await fx.tick()
@@ -1377,13 +1183,11 @@ class TestProfileIsDiscardedOnSafetyPaths:
         self._assert_reanchored(fx, flown)
 
     async def test_一時停止からの復帰で中間目標が飛ばない(self) -> None:
-        """動作確認が同一バスを握っている間、機構はこのループの指令と無関係に動く。"""
         fx = self._rig()
         flown = await _fly(fx)
 
         await fx.loop.pause()
         await fx.tick()
-        # 動作確認が動かした先
         fx.feed("lift", self.FALL_DEG)
         fx.loop.resume()
         await fx.tick()
@@ -1394,7 +1198,6 @@ class TestProfileIsDiscardedOnSafetyPaths:
         fx = self._rig()
         flown = await _fly(fx)
 
-        # 目標もモードも残るので、ここだけが起点を捨てる層になる
         fx.wall.advance(1.0)
         await fx.tick()
         fx.feed("lift", self.FALL_DEG)
@@ -1403,7 +1206,6 @@ class TestProfileIsDiscardedOnSafetyPaths:
         self._assert_reanchored(fx, flown)
 
     async def test_相方の異常で力を抜いた後も中間目標が飛ばない(self) -> None:
-        """自分は健全でも、直結した相方が止まれば力は抜ける (その間に機構は動く)。"""
         fx = self._rig()
         fx.loop.add_sync_group(
             SyncGroup(
@@ -1415,7 +1217,6 @@ class TestProfileIsDiscardedOnSafetyPaths:
         await fx.loop.set_target("tilt", ControlMode.POSITION, 0.0)
         flown = await _fly(fx)
 
-        # tilt だけ途絶させる → lift は blocked (自分のフィードバックは新しいまま)
         fx.wall.advance(1.0)
         fx.feed("lift", 0.0)
         await fx.tick()
@@ -1426,7 +1227,6 @@ class TestProfileIsDiscardedOnSafetyPaths:
         self._assert_reanchored(fx, flown)
 
     async def test_開ループの押し当ての後も中間目標が飛ばない(self) -> None:
-        """ホーミングは機構端まで開ループで押す。その間の移動は軌道に入っていない。"""
         fx = self._rig()
         flown = await _fly(fx)
 
@@ -1441,11 +1241,6 @@ class TestProfileIsDiscardedOnSafetyPaths:
 
 class TestProfileRetarget:
     async def test_移動中の目標差し替えは起点を実測へ戻さない(self) -> None:
-        """左右直結ペアで実測から起こし直すと、追従誤差の差が軌道長の差になる。
-
-        差し替えのたびに実測起点へ戻す実装だと、追従が遅れているこの状況で中間目標
-        まで実測位置へ戻ってしまう。
-        """
         fx = _Fixture(kp=5.0)
         _flying(fx)
         flown = await _fly(fx)
@@ -1453,22 +1248,13 @@ class TestProfileRetarget:
         await fx.loop.set_target("lift", ControlMode.POSITION, 900.0)
         await fx.tick()
 
-        # 進んでいた中間目標がそのまま続く (実測 0 へは戻らない)
         assert fx.manager.last_currents[0] / 5.0 > flown
 
 
 class TestVelocityFeedforward:
-    """速度 FF は ``PIDController.update(feedforward=...)`` へ渡すこと。
-
-    外で足して後からクランプすると、アンチワインドアップが FF を知らないまま積分を
-    進め、「飽和していて機構が動けないのに積分だけが育つ」状態から拘束が外れた瞬間に
-    暴走する。
-    """
-
     async def test_FF_で飽和している間は積分が育たない(self) -> None:
         fx = _Fixture(kp=0.0, ki=1.0)
         pid = fx.loop.pid("lift")
-        # FF だけで上限に届く組み合わせにする (P 項では届かせない)
         pid.output_min, pid.output_max = -500.0, 500.0
         pid.dead_band = 0.0
         fx.loop.set_motion_profile(
@@ -1479,9 +1265,6 @@ class TestVelocityFeedforward:
 
         await _fly(fx, ticks=200)
 
-        # 実測は 0 のままなので偏差は開き続ける。FF を PID の内側へ渡していれば
-        # 飽和が見えて積分は止まり、外で足していれば PID からは余裕があるように
-        # 見えて積分だけが育つ
         assert pid.integral < 0.1
 
     async def test_FF_は参照速度に比例して出力へ乗る(self) -> None:
@@ -1494,7 +1277,6 @@ class TestVelocityFeedforward:
 
         await _fly(fx, ticks=100)
 
-        # 0.2s で v_max 100deg/s に達しているので FF = 2.0 * 100
         assert fx.manager.last_currents[0] == pytest.approx(200, abs=1)
 
     async def test_負の係数は受け付けない(self) -> None:
@@ -1516,11 +1298,6 @@ class TestVelocityFeedforward:
 
 class TestProfileDoesNotChangeTheContract:
     async def test_中間目標は_PID_と同じ_dt_で進む(self) -> None:
-        """周期が伸びた分だけ軌道も進むこと。
-
-        固定周期で進めると、周期が伸びた瞬間に「PID は 20ms 分の偏差を見ているのに軌道は
-        5ms しか進んでいない」状態になる。
-        """
         fx = _Fixture(kp=100.0)
         _flying(fx)
         await fx.loop.set_target("lift", ControlMode.POSITION, 1000.0)
@@ -1531,7 +1308,6 @@ class TestProfileDoesNotChangeTheContract:
 
         await fx.tick(dt=0.02)
 
-        # 巡航 (50deg/s) の 20ms なので中間目標は 1.0deg 進む (5ms なら 0.25deg)
         assert (fx.manager.last_currents[0] - before) / 100.0 == pytest.approx(1.0, abs=0.05)
 
     async def test_プロファイルを持たない軸は従来どおりステップ入力(self) -> None:
