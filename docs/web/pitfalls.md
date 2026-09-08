@@ -13,6 +13,7 @@
 |---|---|---|
 | daisyUI のクラスを片方だけ書く | DOM には居るのに**何も見えない** | `lib/daisyPairs.test.tsx` / `ui/Modal.test.tsx` |
 | コンテナクエリを `@[…]:` で書く | 一部のクラスだけ CSS が出て、残りが黙って落ちる | （無し。CSS を目で確かめる） |
+| `hidden` な spacer に幅だけ足す | 広いカラムでだけ表の見出しと値の桁がずれる | `diagnostics/MotorStatus.test.tsx` |
 | `scrollIntoView` をテストごとに stub する | 次に自動スクロールを足した部品のテストだけが落ちる | `test/setup.ts` が 1 箇所で埋める |
 | クラス名を実行時に組み立てる | CSS ごと出力されず色が付かない | `lib/daisyPairs.test.tsx` |
 | grid の `self-start` を flex-col へ書き写す | パネルが 157px に潰れ、隣は 424px に膨らんで画面外へ | `pages/RobotControl.test.tsx` |
@@ -83,6 +84,15 @@ DevTools で確かめられるが、**出力されていないクラスは DevTo
 
 **幅を変える指定と `display` を混ぜない。** `@min-[…]:block` を名前列へ付けたとき、
 内側の flex（名前とバッジを両端へ振る）が潰れて 2 段に落ちた —— 1 行化した意味が消える。
+
+**ただし `hidden` から始まる要素は逆で、`display` を書き足さないと幅が効かない。**
+`MotorStatHeader` の空き（`aria-hidden` の空 span）は `hidden` + 幅クラスだけを持っており、
+`display:none` のままなので**空きが 1px も生まれなかった**。見出しだけが名前列ぶん左へ寄り、
+**1 行に畳む広いカラムでだけ** POS/VEL/TRQ/TMP が値の桁とずれる（狭いカラムでは名前が
+独立した行に出るので正しく見える ——「広い画面でだけ壊れる」形になる）。
+共有する幅クラス（`NAME_COL_CLASS`）は幅だけを持ったまま、**打ち消す `@min-[…]:block` は
+使う側に書く**。`diagnostics/MotorStatus.test.tsx` が、空きが幅と同じブレークポイントで
+display を持つことと、幅クラスが名前列と一致することの 2 つを固定している。
 
 ### サイズ修飾子は font-size まで固定する
 

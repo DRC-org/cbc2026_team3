@@ -107,8 +107,11 @@ export function MotorStatHeader({ className }: { className?: string }) {
   return (
     <div className={cx("flex text-[0.8em] text-base-content/60", className)}>
       {/* 1 行表示のときだけ名前列ぶんを空ける。幅は MotorStatus の名前列と対で、
-          ずらすと見出しと数値の桁がすれる */}
-      <span className={cx("hidden shrink-0", NAME_COL_CLASS)} aria-hidden />
+          ずらすと見出しと数値の桁がすれる。**`hidden` は `@min-[…]:block` で
+          必ず戻すこと** —— 幅だけ足しても display:none のままなので、見出しは
+          名前列ぶん左へ寄り、広いカラムでだけ桁がずれる (名前列に display を
+          混ぜてはならないのは中に flex を持つ側の話で、空の spacer は別物) */}
+      <span className={cx("hidden shrink-0 @min-[32rem]:block", NAME_COL_CLASS)} aria-hidden />
       <div className={cx(STAT_GRID_CLASS, "min-w-0 flex-1")}>
         {STAT_LABELS.map((label) => (
           <span key={label}>{label}</span>
