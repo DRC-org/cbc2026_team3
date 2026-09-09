@@ -11,6 +11,7 @@ import yaml
 
 from lib.drivers.base import ControlMode
 from lib.match_state import ROLE_PRE_MATCH, Court, load_checklist_definitions
+from lib.motion_guard import MotionGuardSpec
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -544,6 +545,19 @@ class TestSubHandSteps:
         assert "pump_vac" not in [name for name, _ in sink]
 
 
+def _guard_declaration(guard: MotionGuardSpec | None) -> object:
+    """歯止めを、**位置の値に依らない宣言**へ落とす (本番とベンチの突き合わせ用)。"""
+    if guard is None:
+        return None
+    return (
+        guard.limits,
+        guard.max_step,
+        guard.stall_torque,
+        tuple((required.axis, required.label) for required in guard.requires),
+        guard.not_with,
+    )
+
+
 def _load_shipped(yaml_name: str) -> PositionTable:
     return load_position_table(
         yaml.safe_load((_CONFIG_DIR / yaml_name).read_text()), source=yaml_name
@@ -795,6 +809,10 @@ class TestShippedMotionGuard:
 
         ベンチ側だけ緩めると、本番では止まる構成がベンチでだけ端を踏み越える
         (`homing.search_distance` を対で持たせているのと同じ理由)。
+
+        干渉条件だけは解決後の数値ではなく**宣言 (参照先の軸と位置名) を**突き合わせる。
+        ベンチの位置定数は機構が無いぶん mm の値が本番と違ってよく、数値で比べると
+        必ず食い違う。対であるべきなのは「何を条件にしているか」である。
         """
         for name in ("sub_hand_positions.yaml",):
             production = _load_shipped(name)
@@ -803,4 +821,6 @@ class TestShippedMotionGuard:
                 source=name,
             )
             for axis in sorted(set(production.axes) & set(bench.axes)):
-                assert production.axis(axis).guard == bench.axis(axis).guard, axis
+                assert _guard_declaration(production.axis(axis).guard) == _guard_declaration(
+                    bench.axis(axis).guard
+                ), axis

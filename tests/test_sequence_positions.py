@@ -7,6 +7,7 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
+from lib.motion_guard import RequiredRange
 from lib.sequence.positions import (
     DEFAULT_TIMEOUT_S,
     AxisSpec,
@@ -1511,3 +1512,179 @@ class TestGuardLimitsMatchHoming:
         guard = table.axis("y_axis").guard
         assert guard is not None and guard.limits is not None
         assert guard.limits.plus == ("origin_r", "origin_l")
+
+
+class TestGuardInterference:
+    """軸どうしの干渉条件 (axes.<軸>.guard.requires / not_with)。
+
+    yaml は**位置名でだけ**宣言し、数値の区間へ解決するのは読み込み時である
+    (``MotionGuard`` は位置表もコートも見ない)。ここが見るのは解決の結果と、
+    **誤記が警告ではなく起動拒否になること**。判断そのものはまだ誰も呼ばない。
+    """
+
+    def _raw(self, **guards: object) -> dict:
+        axes: dict[str, dict] = {
+            "lift": {"unit": "mm", "command_unit": "rad", "scale": 1.0, "tolerance": 1.0},
+            "carriage": {"unit": "mm", "command_unit": "rad", "scale": 1.0, "tolerance": 0.5},
+            "arm": {"unit": "deg", "command_unit": "deg", "scale": 1.0, "tolerance": 2.0},
+            "pump": {
+                "unit": "duty",
+                "command_unit": "duty",
+                "command_mode": "duty",
+                "scale": 1.0,
+            },
+        }
+        for axis, guard in guards.items():
+            axes[axis]["guard"] = guard
+        return {
+            "axes": axes,
+            "positions": {
+                "lift": {"top": -140.0, "bottom": -20.0},
+                "carriage": {"retracted": -430.0, "clear": -200.0, "front": -10.0},
+                "arm": {"open": 0.0, "close": 90.0},
+                "pump": {"stop": 0.0, "run": 0.95},
+            },
+        }
+
+    def _load(self, **guards: object) -> PositionTable:
+        return load_position_table(self._raw(**guards), source="<test>")
+
+    def _required(self, table: PositionTable, axis: str) -> RequiredRange:
+        guard = table.axis(axis).guard
+        assert guard is not None
+        (required,) = guard.requires
+        return required
+
+    def test_at_は参照先の_tolerance_ぶん広げて解決される(self) -> None:
+        """広げないと、その位置へ許容差の内側で止まった実測が区間の外になる。"""
+        table = self._load(carriage={"requires": [{"axis": "lift", "at": "top"}]})
+
+        required = self._required(table, "carriage")
+        assert required.axis == "lift"
+        assert required.low == pytest.approx(-141.0)
+        assert required.high == pytest.approx(-139.0)
+        assert required.label == "top"
+        assert required.unit == "mm"
+
+    def test_between_は両端を_tolerance_ぶん広げて解決される(self) -> None:
+        table = self._load(
+            arm={"requires": [{"axis": "carriage", "between": ["retracted", "clear"]}]}
+        )
+
+        required = self._required(table, "arm")
+        assert required.low == pytest.approx(-430.5)
+        assert required.high == pytest.approx(-199.5)
+        assert required.label == "retracted〜clear"
+
+    def test_between_は書いた順に依らない(self) -> None:
+        table = self._load(
+            arm={"requires": [{"axis": "carriage", "between": ["clear", "retracted"]}]}
+        )
+
+        required = self._required(table, "arm")
+        assert (required.low, required.high) == (pytest.approx(-430.5), pytest.approx(-199.5))
+
+    def test_書かない軸は素通り(self) -> None:
+        """既定は空。書かなかった軸に干渉の歯止めは 1 つも掛からない。"""
+        table = self._load(carriage={"max_step": 100.0})
+
+        guard = table.axis("carriage").guard
+        assert guard is not None
+        assert guard.requires == ()
+        assert guard.not_with == ()
+        assert table.axis("arm").guard is None
+
+    def test_参照先の軸が無ければ起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="ghost"):
+            self._load(carriage={"requires": [{"axis": "ghost", "at": "top"}]})
+
+    def test_参照先の位置名が無ければ起動拒否(self) -> None:
+        with pytest.raises(ValueError, match=re.escape("lift.middle")):
+            self._load(carriage={"requires": [{"axis": "lift", "at": "middle"}]})
+
+    def test_位置指令でない軸は参照できない(self) -> None:
+        with pytest.raises(ValueError, match="command_mode=duty"):
+            self._load(carriage={"requires": [{"axis": "pump", "at": "run"}]})
+
+    def test_tolerance_の無い軸は参照できない(self) -> None:
+        """区間を広げられないと、到達した実測がそのまま区間の外になる。"""
+        raw = self._raw(carriage={"requires": [{"axis": "lift", "at": "top"}]})
+        del raw["axes"]["lift"]["tolerance"]
+
+        with pytest.raises(ValueError, match="tolerance"):
+            load_position_table(raw, source="<test>")
+
+    def test_コート別に分岐した位置は参照できない(self) -> None:
+        """mm の座標系は両コート共通という前提を崩さない。"""
+        raw = self._raw(carriage={"requires": [{"axis": "lift", "at": "top"}]})
+        raw["positions"]["lift"]["top"] = {"red": -140.0, "blue": -140.0}
+
+        with pytest.raises(ValueError, match="コート別"):
+            load_position_table(raw, source="<test>")
+
+    def test_生の数値は受け付けない(self) -> None:
+        """数値を許すと同じ座標が 2 箇所に書かれ、位置を動かすと片方だけ古くなる。"""
+        with pytest.raises(ValueError, match="生の数値"):
+            self._load(carriage={"requires": [{"axis": "lift", "at": -140.0}]})
+
+    def test_at_と_between_の併記は起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="どちらか一方"):
+            self._load(
+                carriage={"requires": [{"axis": "lift", "at": "top", "between": ["top", "bottom"]}]}
+            )
+
+    def test_at_も_between_も無ければ起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="どちらか一方"):
+            self._load(carriage={"requires": [{"axis": "lift"}]})
+
+    def test_未知のキーは起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="above"):
+            self._load(carriage={"requires": [{"axis": "lift", "above": "top"}]})
+
+    def test_between_に同じ位置を_2_回書いたら起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="2 回"):
+            self._load(carriage={"requires": [{"axis": "lift", "between": ["top", "top"]}]})
+
+    def test_between_が_2_点でなければ起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="2 つ"):
+            self._load(
+                carriage={"requires": [{"axis": "lift", "between": ["top", "bottom", "top"]}]}
+            )
+
+    def test_循環した参照は起動拒否(self) -> None:
+        """一方向なら詰んでも下流を動かせば必ず解ける。循環すると抜ける手が無い。"""
+        with pytest.raises(ValueError, match="循環"):
+            self._load(
+                carriage={"requires": [{"axis": "lift", "at": "top"}]},
+                lift={"requires": [{"axis": "carriage", "at": "clear"}]},
+            )
+
+    def test_自分自身を参照したら起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="循環"):
+            self._load(carriage={"requires": [{"axis": "carriage", "at": "clear"}]})
+
+    def test_not_with_は片側の宣言から対称化される(self) -> None:
+        """相手側に guard が無くても生える。制約は宣言されていて、書いた場所が反対なだけ。"""
+        table = self._load(arm={"not_with": ["carriage"]})
+
+        arm = table.axis("arm").guard
+        carriage = table.axis("carriage").guard
+        assert arm is not None and arm.not_with == ("carriage",)
+        assert carriage is not None and carriage.not_with == ("arm",)
+
+    def test_not_with_に自分自身を書いたら起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="自分自身"):
+            self._load(arm={"not_with": ["arm"]})
+
+    def test_not_with_の軸が無ければ起動拒否(self) -> None:
+        with pytest.raises(ValueError, match="ghost"):
+            self._load(arm={"not_with": ["ghost"]})
+
+    def test_not_with_に位置指令でない軸は書けない(self) -> None:
+        with pytest.raises(ValueError, match="command_mode=duty"):
+            self._load(arm={"not_with": ["pump"]})
+
+    def test_not_with_を両側に書いたら起動拒否(self) -> None:
+        """片側だけを正にする。両側に書けると、片方を消したとき守りが半分だけ残る。"""
+        with pytest.raises(ValueError, match="両側"):
+            self._load(arm={"not_with": ["carriage"]}, carriage={"not_with": ["arm"]})

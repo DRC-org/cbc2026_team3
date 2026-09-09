@@ -35,10 +35,13 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 __all__ = [
+    "AxisReading",
+    "AxisStateReader",
     "GuardViolation",
     "LimitSpec",
     "MotionGuard",
     "MotionGuardSpec",
+    "RequiredRange",
     "SensorSuspension",
 ]
 
@@ -95,6 +98,53 @@ class LimitSpec:
 
 
 @dataclass(frozen=True)
+class RequiredRange:
+    """他の軸がこの区間に居るあいだしか、この軸を動かしてはならない。
+
+    **持つのは解決済みの数値だけで、位置名も位置表も持たない。** 名前から数値への
+    解決は読み込み時 (`lib/sequence/positions.py`) に済ませてある —— ここが位置表を
+    引くと、判断の層が「今どのコートか」「その名前はあるか」を抱え込み、状態も表も
+    持たないという性質 (`MotionGuard` の docstring) が崩れる。
+
+    `label` / `unit` を運ぶのは拒否の文面のためだけである。数値だけを出しても
+    操縦者は「どこへ動かせば通るのか」が読めず、会場で手が止まる。
+    """
+
+    #: 参照する軸の名前
+    axis: str
+    #: 解決済みの下限 [参照先の unit]。参照先の tolerance ぶん広げた後の値
+    low: float
+    #: 解決済みの上限 [参照先の unit]
+    high: float
+    #: メッセージ用の位置名 ("top" / "retracted〜clear")
+    label: str
+    #: メッセージ用の単位 (参照先の unit)
+    unit: str
+
+    def __post_init__(self) -> None:
+        if self.low > self.high:
+            raise ValueError(f"区間の下限が上限を超えています: [{self.low}, {self.high}]")
+
+
+@dataclass(frozen=True)
+class AxisReading:
+    """参照先軸の実測と目標を **1 組で** 運ぶ。
+
+    別々に取れる形にすると 2 回読む経路が書け、そのあいだに軸が動くと実測と目標が
+    別の瞬間のものになる。
+    """
+
+    #: 実測 [軸の unit]。None = 読めていない
+    value: float | None
+    #: 書かれている目標 [軸の unit]。None = 目標が無い
+    target: float | None
+
+
+#: 軸名から `AxisReading` を返す読み口。歯止めは自分では読まず、必ず注入で受ける
+AxisStateReader = Callable[[str], AxisReading]
+
+
+@dataclass(frozen=True)
 class MotionGuardSpec:
     """1 軸ぶんの歯止めの宣言。**軸の機構的性質**なので位置定数と同居する。
 
@@ -109,6 +159,11 @@ class MotionGuardSpec:
     max_step: float | None = None
     #: これを超えたら止める絶対トルク [Nm]。None ならトルクを見ない
     stall_torque: float | None = None
+    #: 他の軸がこの区間に居ないと動かさない。**空なら干渉を一切見ない**
+    requires: tuple[RequiredRange, ...] = ()
+    #: 同じ指令で一緒に動かしてはならない軸。**読み込み時に対称化される**ので、
+    #: yaml には片側だけ書けばよい
+    not_with: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.max_step is not None and self.max_step <= 0.0:

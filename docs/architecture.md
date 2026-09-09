@@ -306,7 +306,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い） |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。軸間干渉の宣言（`RequiredRange` = 解決済みの区間 / `AxisReading` = 実測と目標を 1 組で運ぶ読み口）も持つが、**判定はまだ誰も呼んでいない** |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -956,6 +956,10 @@ axes:                      # 換算: command = value * scale + offset
       limits:              # 1 本なら文字列、同じ端に複数本あるなら並びで書く
         minus: [y_axis_r_origin_sensor, y_axis_l_origin_sensor]
       # max_step / stall_torque は実測が入るまで書かない
+      requires:            # 他の軸がこの区間に居るあいだしか動かさない（軸間干渉）
+        - { axis: lift, at: top }                  # 1 点
+        - { axis: carriage, between: [back, clear] }   # 2 点で挟む
+      not_with: [offset]   # 同じ指令で一緒に動かしてはならない軸。**片側だけ書く**
     motors:                # scale / offset はモータごとに書く
       y_axis_r: { scale: 864.15, offset: 0.0 }
       y_axis_l: { scale: -864.15, offset: 0.0 }   # 逆回転は scale の符号で表す
@@ -987,6 +991,17 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
 | `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
+| `guard.requires` に生の数値／未知の軸・位置名 | 同じ座標が 2 箇所に書かれて片方だけ古くなる／条件が解決できない |
+| `guard.requires` の参照先が `position` 以外／`tolerance` を持たない | 「今どこに居るか」を答えられない軸／区間を到達許容差ぶん広げられず、到達した実測が区間の外になる |
+| `guard.requires` の参照先の位置がコート別に分岐している | mm の座標系が片方のコートだけ別物になる（コートで変わってよいのは軸の `scale` の符号だけ） |
+| `guard.requires` の参照が循環している | どちらを先に動かしても相手に拒否される姿勢が作れ、抜ける手が無くなる |
+| `guard.not_with` が自分自身／`position` 以外の軸／両側に書かれている | 自分と一緒には動かせない軸／`guard` を書けない軸／片側を消したとき守りが半分だけ残る |
+
+`guard.requires` は**位置名でしか書けず、数値の区間への解決は読み込み時**に済ませる
+（`lib/sequence/positions.py`。`MotionGuard` は位置表もコートも見ない）。区間は**参照先の
+`tolerance` ぶん広げる** —— 広げないと、その位置へ到達許容差の内側で止まった実測が区間の
+外になり、次の段が会場でだけ拒否される。`not_with` は**片側に書けば読み込み時に対称化される**
+（両側に書かせると、片方を消したとき守りが半分だけ残る）。
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で

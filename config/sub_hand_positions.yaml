@@ -20,6 +20,10 @@ axes:
       max_step: 600.0
       # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
       stall_torque: 2.0
+      # 昇降が上がっていない高さで前後に走ると機構が当たる。区間は参照先の
+      # tolerance ぶん広げて解決される (lib/sequence/positions.py) ので、
+      # top へ許容差の内側で止まった実測もこの条件を満たす
+      requires: [{ axis: sub_lift, at: top }]
     unit: mm
     command_unit: rad
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
@@ -68,6 +72,10 @@ axes:
   # サーボ 3 軸の timeout_s は firmware/servo/include/config.h のスルーレート
   # (90deg/s) と対。突き合わせは tests/test_servo_travel_budget.py。
   sub_rotate:
+    guard:
+      # 前端から 150mm 以内で回すと、回転した機構が前端側の構造物に当たる。
+      # 回してよい範囲は retracted〜clear で、mm の値は positions が 1 箇所で持つ
+      requires: [{ axis: sub_y_axis, between: [retracted, clear] }]
     unit: deg
     command_unit: deg
     timeout_s: 2.0
@@ -78,6 +86,10 @@ axes:
       sub_rotate_l: { scale: -1.0, offset: 270.0 }
 
   sub_pitch:
+    guard:
+      # ピッチとオフセットを同じ指令で動かすと途中の姿勢で重なる。
+      # 片側だけ書く —— 読み込み時に sub_offset 側へも対称化される
+      not_with: [sub_offset]
     unit: deg
     command_unit: deg
     timeout_s: 2.0

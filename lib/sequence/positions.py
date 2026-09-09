@@ -11,7 +11,7 @@ from lib.match_state import Court
 
 # 可動端インターロック・跳躍量・トルクの判断は最下位層に閉じてある。ここは
 # 「宣言を yaml から読む」だけで、判断そのものは持たない
-from lib.motion_guard import LimitSpec, MotionGuardSpec
+from lib.motion_guard import LimitSpec, MotionGuardSpec, RequiredRange
 
 __all__ = [
     "DEFAULT_TIMEOUT_S",
@@ -475,7 +475,9 @@ _HOMING_KEYS = frozenset(
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
 _HOMING_REQUIRED = frozenset({"direction", "search_distance", "step"})
 
-_GUARD_KEYS = frozenset({"limits", "max_step", "stall_torque"})
+_GUARD_KEYS = frozenset({"limits", "max_step", "stall_torque", "requires", "not_with"})
+
+_GUARD_REQUIRES_KEYS = frozenset({"axis", "at", "between"})
 
 _GUARD_LIMIT_KEYS = frozenset({"plus", "minus"})
 
@@ -874,6 +876,10 @@ def _parse_guard(axis_name: str, raw: object) -> MotionGuardSpec | None:
 
     **省略した項目は「その守りが無い」ことを意味する**ので既定値では埋めない。
     埋めると、効いている値なのか書き忘れなのかが config から読めなくなる。
+
+    ``requires`` / ``not_with`` はここでは読まない。**他の軸と、その軸の位置名を
+    参照するので、表が全部揃うまで数値へ解決できない。** 読むのは
+    ``_resolve_guard_interference`` (``load_position_table`` の最後)。
     """
     if raw is None:
         return None
@@ -946,6 +952,288 @@ def _parse_guard_limit_sensors(axis_name: str, key: str, raw: object) -> tuple[s
             raise ValueError(f"{where} にセンサ '{value}' が 2 回書かれています")
         names.append(value)
     return tuple(names)
+
+
+@dataclass(frozen=True)
+class _RequiresDecl:
+    """yaml に書かれたままの干渉条件。**位置名のままで、数値をまだ持たない。**"""
+
+    axis: str
+    #: 参照する位置名。`at` なら 1 つ、`between` なら 2 つ
+    names: tuple[str, ...]
+    #: エラー文用の yaml パス (`axes.sub_rotate.guard.requires[0]`)
+    path: str
+
+
+def _guard_declarations(
+    axes_raw: Mapping[str, object],
+) -> tuple[dict[str, tuple[_RequiresDecl, ...]], dict[str, tuple[str, ...]]]:
+    """各軸の `guard.requires` / `guard.not_with` を、位置名のまま読む。
+
+    キーの綴りと型は `_parse_guard` が既に弾いている (`_GUARD_KEYS`)。
+    """
+    requires: dict[str, tuple[_RequiresDecl, ...]] = {}
+    not_with: dict[str, tuple[str, ...]] = {}
+
+    for name, raw in axes_raw.items():
+        guard_raw = raw.get("guard") if isinstance(raw, dict) else None
+        if not isinstance(guard_raw, dict):
+            continue
+        declared = _parse_guard_requires(name, guard_raw.get("requires"))
+        if declared:
+            requires[name] = declared
+        partners = _parse_guard_not_with(name, guard_raw.get("not_with"))
+        if partners:
+            not_with[name] = partners
+
+    return requires, not_with
+
+
+def _parse_guard_requires(axis_name: str, raw: object) -> tuple[_RequiresDecl, ...]:
+    """`requires` を位置名のまま読む。**生の数値は受け付けない。**
+
+    書式は `at:` (1 点) と `between: [a, b]` (2 点で挟む) の 2 つだけ。数値を許すと
+    同じ座標が位置定数と歯止めの 2 箇所に書かれ、位置を動かしたときに片方だけが
+    古くなる (CLAUDE.md「同じ判定を 2 箇所に書かない」)。
+    """
+    if raw is None:
+        return ()
+    where = f"axes.{axis_name}.guard.requires"
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{where} は空でない並びである必要があります: {raw!r}")
+
+    declarations: list[_RequiresDecl] = []
+    for index, entry in enumerate(raw):
+        path = f"{where}[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path} は辞書である必要があります: {entry!r}")
+
+        unknown = sorted(set(entry) - _GUARD_REQUIRES_KEYS)
+        if unknown:
+            raise ValueError(
+                f"{path} に未知のキー: {', '.join(unknown)} "
+                f"(指定できるのは {', '.join(sorted(_GUARD_REQUIRES_KEYS))})"
+            )
+
+        target = entry.get("axis")
+        if not isinstance(target, str) or not target:
+            raise ValueError(f"{path}.axis は軸名の文字列である必要があります: {target!r}")
+
+        has_at = entry.get("at") is not None
+        has_between = entry.get("between") is not None
+        if has_at == has_between:
+            raise ValueError(
+                f"{path} には at (1 点) か between (2 点) のどちらか一方が必要です: {entry!r}"
+            )
+
+        if has_at:
+            names: tuple[str, ...] = (_guard_position_name(f"{path}.at", entry["at"]),)
+        else:
+            names = _parse_guard_between(f"{path}.between", entry["between"])
+        declarations.append(_RequiresDecl(axis=target, names=names, path=path))
+
+    return tuple(declarations)
+
+
+def _parse_guard_between(where: str, raw: object) -> tuple[str, str]:
+    if not isinstance(raw, list) or len(raw) != 2:
+        raise ValueError(f"{where} は位置名 2 つの並びである必要があります: {raw!r}")
+    low, high = (_guard_position_name(where, value) for value in raw)
+    # 同じ名前で挟むのは 1 点を指すのと同じで、それは at で書く道がある
+    if low == high:
+        raise ValueError(f"{where} に位置 '{low}' が 2 回書かれています (1 点なら at で書きます)")
+    return low, high
+
+
+def _guard_position_name(where: str, raw: object) -> str:
+    if not isinstance(raw, str) or not raw:
+        raise ValueError(f"{where} は位置名で書きます (生の数値は受け付けません): {raw!r}")
+    return raw
+
+
+def _parse_guard_not_with(axis_name: str, raw: object) -> tuple[str, ...]:
+    where = f"axes.{axis_name}.guard.not_with"
+    if raw is None:
+        return ()
+    values = [raw] if isinstance(raw, str) else raw
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{where} は軸名の文字列か、その空でない並び: {raw!r}")
+
+    names: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{where} は軸名の文字列か、その空でない並び: {raw!r}")
+        if value not in names:
+            names.append(value)
+    return tuple(names)
+
+
+def _resolve_guard_interference(
+    source: str,
+    axes: dict[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, float | dict[str, float]]],
+    axes_raw: Mapping[str, object],
+) -> dict[str, AxisSpec]:
+    """位置名で書かれた干渉条件を、**読み込み時に**数値の区間へ解決する。
+
+    層の線引きは「yaml が名前を宣言 → ここが解決 → `MotionGuardSpec` は解決済みの
+    数値だけ運ぶ」。`MotionGuard` が位置表もコートも見ないという性質を崩さないため。
+
+    誤記は警告ではなく**起動拒否**にする。干渉の歯止めは間違っていても普段は
+    「たまたま通る」だけで、機構が当たるまで誰も気付けない。
+    """
+    declared_requires, declared_not_with = _guard_declarations(axes_raw)
+    resolved_requires = {
+        name: tuple(_resolve_required_range(source, axes, positions, decl) for decl in declarations)
+        for name, declarations in declared_requires.items()
+    }
+    _check_requires_acyclic(source, resolved_requires)
+    resolved_not_with = _symmetrize_not_with(source, axes, declared_not_with)
+
+    updated = dict(axes)
+    for name in set(resolved_requires) | set(resolved_not_with):
+        spec = updated[name]
+        # 対称化で初めて歯止めが付く軸がある (相手側にだけ not_with を書いた軸)。
+        # 「書かない = その守りが無い」を破ってはいない —— 制約は宣言されていて、
+        # 書いてある場所が反対側なだけ
+        guard = spec.guard if spec.guard is not None else MotionGuardSpec()
+        updated[name] = replace(
+            spec,
+            guard=replace(
+                guard,
+                requires=resolved_requires.get(name, ()),
+                not_with=resolved_not_with.get(name, ()),
+            ),
+        )
+    return updated
+
+
+def _resolve_required_range(
+    source: str,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, float | dict[str, float]]],
+    decl: _RequiresDecl,
+) -> RequiredRange:
+    target = axes.get(decl.axis)
+    if target is None:
+        available = ", ".join(axes) or "(なし)"
+        raise ValueError(
+            f"{source}: {decl.path} が参照する軸 '{decl.axis}' がこの位置定数にありません "
+            f"(定義済みの軸: {available})"
+        )
+    if target.command_mode is not ControlMode.POSITION:
+        raise ValueError(
+            f"{source}: {decl.path} が参照する軸 '{decl.axis}' は "
+            f"command_mode={target.command_mode.value} です "
+            "(位置を持たない軸は「今どこに居るか」を答えられないので条件になりません)"
+        )
+    if target.tolerance is None:
+        raise ValueError(
+            f"{source}: {decl.path} が参照する軸 '{decl.axis}' に tolerance がありません "
+            "(区間を到達許容差ぶん広げられないと、到達した実測がそのまま区間の外になります)"
+        )
+
+    values = positions.get(decl.axis, {})
+    resolved: list[float] = []
+    for name in decl.names:
+        if name not in values:
+            available = ", ".join(values) or "(なし)"
+            raise ValueError(
+                f"{source}: {decl.path} が参照する位置 '{decl.axis}.{name}' が"
+                f"定義されていません (定義済みの位置: {available})"
+            )
+        value = values[name]
+        if isinstance(value, dict):
+            raise ValueError(
+                f"{source}: {decl.path} が参照する位置 '{decl.axis}.{name}' は"
+                "コート別に分岐しています "
+                "(干渉の区間は両コート共通の座標系でしか書けません。"
+                "コートで変わってよいのは軸の scale の符号だけです)"
+            )
+        resolved.append(float(value))
+
+    # **参照先の tolerance ぶん広げる。** 広げないと試合シーケンスが自分で壊れる ——
+    # 端の位置へ到達許容差の内側で止まった実測は、広げていない区間からはみ出し、
+    # 次の段がその実測を見て拒否する。会場でしか出ない壊れ方になる。
+    # 参照先の scale がコート別 (sub_lift) でも tolerance は人間の単位なので、
+    # ここでは換算を 1 度も通さない —— 通すとコート未解決で読み込みごと落ちる
+    tolerance = target.tolerance
+    return RequiredRange(
+        axis=decl.axis,
+        low=min(resolved) - tolerance,
+        high=max(resolved) + tolerance,
+        label="〜".join(decl.names),
+        unit=target.unit,
+    )
+
+
+def _check_requires_acyclic(source: str, requires: Mapping[str, tuple[RequiredRange, ...]]) -> None:
+    """依存は一方向であること。
+
+    循環すると「どちらを先に動かしても相手に拒否される」姿勢が作れ、そこから抜ける
+    手が無くなる。一方向なら**詰んでも下流の軸を動かせば必ず解ける**。
+    """
+    visiting: list[str] = []
+    done: set[str] = set()
+
+    def walk(axis: str) -> None:
+        if axis in done:
+            return
+        if axis in visiting:
+            cycle = [*visiting[visiting.index(axis) :], axis]
+            raise ValueError(
+                f"{source}: guard.requires の参照が循環しています: {' → '.join(cycle)} "
+                "(依存は一方向でなければ、どちらを先に動かしても拒否される姿勢が作れます)"
+            )
+        visiting.append(axis)
+        for required in requires.get(axis, ()):
+            walk(required.axis)
+        visiting.pop()
+        done.add(axis)
+
+    for axis in requires:
+        walk(axis)
+
+
+def _symmetrize_not_with(
+    source: str, axes: Mapping[str, AxisSpec], declared: Mapping[str, tuple[str, ...]]
+) -> dict[str, tuple[str, ...]]:
+    """`not_with` を**片側の宣言から両側へ**広げる。
+
+    両側に書かせると、片方を消したときに守りが半分だけ残る。片側だけを正とし、
+    もう片側はここが作る。
+    """
+    for axis, partners in declared.items():
+        for partner in partners:
+            if partner == axis:
+                raise ValueError(f"{source}: axes.{axis}.guard.not_with に自分自身が書かれています")
+            other = axes.get(partner)
+            if other is None:
+                available = ", ".join(axes) or "(なし)"
+                raise ValueError(
+                    f"{source}: axes.{axis}.guard.not_with の軸 '{partner}' が"
+                    f"この位置定数にありません (定義済みの軸: {available})"
+                )
+            # 対称化は相手側へ guard を生やすので、guard を書けない軸は先に弾く。
+            # 生やしてから弾くと、書いた覚えの無い軸を名指しする文面になる
+            if other.command_mode is not ControlMode.POSITION:
+                raise ValueError(
+                    f"{source}: axes.{axis}.guard.not_with の軸 '{partner}' は "
+                    f"command_mode={other.command_mode.value} です "
+                    "(guard は位置指令の軸にしか書けません)"
+                )
+            if axis in declared.get(partner, ()):
+                raise ValueError(
+                    f"{source}: not_with が axes.{axis} と axes.{partner} の両側に"
+                    "書かれています (片側だけ書けば読み込み時に対称化されます)"
+                )
+
+    resolved: dict[str, list[str]] = {}
+    for axis, partners in declared.items():
+        for partner in partners:
+            resolved.setdefault(axis, []).append(partner)
+            resolved.setdefault(partner, []).append(axis)
+    return {axis: tuple(partners) for axis, partners in resolved.items()}
 
 
 def _parse_command_mode(axis_name: str, raw: object) -> ControlMode:
@@ -1069,6 +1357,9 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
         # どちらも軸の単位 (mm) だけを見るので、コート別 scale の符号には依らない
         _check_manual_range(source, axes[axis], positions[axis])
         _check_motion_timeout(source, axes[axis], positions[axis])
+
+    # 干渉条件は他の軸の位置名を参照するので、表が全部揃った後でしか解決できない
+    axes = _resolve_guard_interference(source, axes, positions, axes_raw)
 
     return PositionTable(axes, positions, source=source)
 

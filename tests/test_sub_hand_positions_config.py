@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from lib.match_state import Court
+from lib.motion_guard import RequiredRange
 from lib.sequence.positions import PositionTable, load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -37,6 +38,13 @@ def table() -> PositionTable:
 
 def _value(table: PositionTable, axis: str, name: str) -> float:
     return table.raw(axis, name)
+
+
+def _requirement(table: PositionTable, axis: str) -> RequiredRange:
+    guard = table.axis(axis).guard
+    assert guard is not None
+    (required,) = guard.requires
+    return required
 
 
 class TestSubYAxis:
@@ -136,6 +144,20 @@ class TestEveryPosition:
 
         assert at_origin == []
 
+    def test_ベンチの位置定数もすべて読める(self) -> None:
+        """干渉条件の起動拒否を足しても、机上ベンチの一式が読めなくなっていないこと。
+
+        `tests/test_config_schema.py` の `test_bench_config_set_loads` は
+        **そのベンチの robot yaml から辿れる 1 枚**しか開かない。ここは
+        `config/bench/**` に置いてある位置定数を名前で拾うので、robot yaml から
+        辿れない 1 枚が混じっても落ちる。
+        """
+        shipped = sorted(_CONFIG_DIR.glob("bench/*/*_positions.yaml"))
+
+        assert shipped, "config/bench にベンチ用の位置定数が 1 枚もありません"
+        for path in shipped:
+            load_position_table(yaml.safe_load(path.read_text()), source=str(path))
+
     def test_位置定数はコート別に分岐していない(self, table: PositionTable) -> None:
         """コートで変わるのは `sub_lift` の mm↔rad 換算 (scale の符号) だけである。
 
@@ -147,3 +169,62 @@ class TestEveryPosition:
                 value = table.raw(axis, name)
                 assert value == table.raw(axis, name, court=Court.RED)
                 assert value == table.raw(axis, name, court=Court.BLUE)
+
+
+class TestInterferenceDeclaration:
+    """`guard.requires` / `guard.not_with` の宣言が、守るべき制約と噛み合っているか。
+
+    宣言は位置名で書き、数値の区間は読み込み時に解決される。**150.0 はこのファイルの
+    `_ROTATE_CLEARANCE_MM` 1 箇所にしか無く**、それが `clear` を縛り、`clear` が
+    解決後の区間を縛る。ここで見るのは、その連鎖が切れていないこと。
+    """
+
+    def test_前後に動かしてよいのは昇降が移動高さのときだけ(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_y_axis")
+        tolerance = table.axis("sub_lift").tolerance
+        top = _value(table, "sub_lift", "top")
+
+        assert required.axis == "sub_lift"
+        assert tolerance is not None
+        # 区間を tolerance ぶん広げないと、top へ許容差の内側で止まった実測が
+        # 区間の外になり、次に前後へ動かす段が会場で拒否される
+        assert required.low == pytest.approx(top - tolerance)
+        assert required.high == pytest.approx(top + tolerance)
+
+    @pytest.mark.parametrize("name", ["pick", "place"])
+    def test_移動高さより下では前後に動かせない(self, table: PositionTable, name: str) -> None:
+        required = _requirement(table, "sub_y_axis")
+        value = _value(table, "sub_lift", name)
+
+        assert not required.low <= value <= required.high
+
+    def test_回転してよい区間は前端から_150mm_以上離れている(self, table: PositionTable) -> None:
+        # 区間の前端寄りの縁 (high) がこの余裕の内側に入ると、そこで回した機構が当たる
+        required = _requirement(table, "sub_rotate")
+
+        assert required.axis == "sub_y_axis"
+        assert abs(required.high) >= _ROTATE_CLEARANCE_MM
+
+    def test_回転してよい区間は_clear_を含む(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_rotate")
+        clear = _value(table, "sub_y_axis", "clear")
+
+        assert required.low <= clear <= required.high
+
+    @pytest.mark.parametrize("name", _NEAR_FRONT)
+    def test_回転してよい区間は前端寄りの位置を全部除外する(
+        self, table: PositionTable, name: str
+    ) -> None:
+        # between の端を書き間違える (retracted〜receive など) と、ここが通ってしまう
+        required = _requirement(table, "sub_rotate")
+        value = _value(table, "sub_y_axis", name)
+
+        assert not required.low <= value <= required.high
+
+    def test_ピッチとオフセットは同じ指令で動かせない(self, table: PositionTable) -> None:
+        """yaml には片側だけ書く。読み込み時に対称化されることを両側で見る。"""
+        pitch = table.axis("sub_pitch").guard
+        offset = table.axis("sub_offset").guard
+
+        assert pitch is not None and pitch.not_with == ("sub_offset",)
+        assert offset is not None and offset.not_with == ("sub_pitch",)
