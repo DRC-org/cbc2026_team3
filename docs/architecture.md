@@ -306,7 +306,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い） |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。覆う口は**現在値と接触の累計の 2 つ**で、`wrap()` が現在値を `False`（押されていない）へ、`wrap_count()` が累計を**覆う前に最後に読めた値**で凍らせる（`LimitMonitor` は両方を読むので、片方だけでは覆いに穴が残る） |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -638,9 +638,10 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 | 離脱 | 既にセンサに触れているなら、離れるまで動かす。判定は**現在値**（ラッチを使わない） |
 | 探索 | 毎ステップ `AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step`。到達判定は**接触の累計**（`GenericDriver.sensor_contact_count`。読んでも減らない単調カウンタで、探索開始直前に基準値を取り直す） |
 | 停滞判定 | `step/2` 未満が 3 歩連続で `HomingError` |
-| 整列段（`homing.sensors` を書いた軸のみ） | まだ当たっていない側のモータだけを進める。**この段のあいだだけその軸の原点センサを可動端の歯止めから外す**（`SensorSuspension`。外さないと、既に押された 1 本を見た歯止めが指令の入口でも 50Hz 監視でも拒否して必ず失敗する） |
+| 整列段（`homing.sensors` を書いた軸のみ） | まだ当たっていない側のモータだけを進める。1 歩の刻みは `homing.align_step`（書かない軸は `step`。片側 1 台でしか押さないので探索段とは別に決まる）で、停滞判定と追従待ちの基準もこの刻みから作る。**この段のあいだだけその軸の原点センサを可動端の歯止めから外す**（`SensorSuspension`。外さないと、既に押された 1 本を見た歯止めが指令の入口でも 50Hz 監視でも拒否して必ず失敗する） |
 | 検出後 | その場の実測位置を目標に送り直してから原点確定（`_stop_here`。**指令の単位のまま**書き戻す。値へ換算して戻すと往復の丸め誤差で入口の歯止めに拒否される） |
 | 原点確定 | `set_group_origin_here`（グループ単位でしか行わない） |
+| 退避（`homing.retreat_position` を書いた軸のみ） | 確定した原点から、位置名で書かれた場所へ動かして到達を待つ。**`HomingRunner` ではなく `run_homing()` 側**にある（位置定数の表を持つのがこちら）。届かなければその軸の失敗（`HomingError`）。原点姿勢が他の軸と干渉する軸で、次の軸の零点確定が 1 歩も動けなくなるのを防ぐ |
 
 **原点を確定する手段は 2 つ**で、可否はドライバ自身の `supports_origin_capture()` が答える
 （`main._make_origin_resolver` にドライバ種別を書き写さない）:
@@ -1520,8 +1521,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 | `_e_stop_active` がプロセスメモリ上のみ | サーバーを再起動すると緊急停止状態が消える。物理的な緊急停止ボタンの状態と同期する仕組みも無い |
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は `activate_motors()` を呼ぶが `encode_disable(clear_fault=True)` は送らない（fault の自動クリアは原因を隠すため意図的に行っていない）。実機で「解除しても動かない」場合は `health` の `FAULT` 表示で fault の内容を確認して電源再投入 |
 | フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らず WARNING をログに出すだけ。有効化を見送ったモータを UI に出す仕組みが欲しい |
-| ホーミングは `rotate` だけ実機検証済み | `search_distance` はまだ効く経路を通っていない。`step` 1.0deg での通し確認も未取得。`y_axis` はスイッチ未装着で `homing:` ごとコメントアウト中 |
-| 零点確定が有効なのは `rotate` だけ | `sub_y_axis` / `sub_lift`（DM3520）はドライバが `supports_origin_capture()` を宣言しない（`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は自重で落ちる）。`y_axis` は手段があるがスイッチ未装着。原点が確定できない軸は電源投入位置がそのまま原点で、ずれは指差喚呼が人の目で埋める |
+| ホーミングの実機検証は軸ごとに進捗が違う | `search_distance` はどの軸でもまだ効く経路を通っていない（当たる前に上限へ届いた実行が無い）。`y_axis` は 2026-09-09 に初めて走って 3 回中 1 回だけ通り、`align_step` を上げた後の実行がまだ無い。**軸ごとの現況は [`checks_and_health.md`](checks_and_health.md) の「零点確定（ホーミング）」節が正** |
 | down したバスでも起動できてしまう | 起動ログへ 1 行 ERROR を残すが起動は拒否しない（`--strict` を通していない構成を一律に潰さない判断）。受信ループは `rx_down` を立てて `BusHealth.DOWN` を出す |
 | `config/bench/main_hand/checklist.yaml` が `can_generic` 側の確認項目を持たない | この構成では本番の `gripper` / `conveyor` / `wall_*` / `rotate_origin_sensor` が構成に入るが、`conveyor_run` / `origin_sensor_react` に相当する項目が無い。`bench_return_home` の文言も `y_axis` の実態とねじれている |
 | `config/bench/y_axis_tuning/system.yaml` のコメントが本番の `sync_tolerance` と食い違う | ベンチ 2.0mm に対し本番 10.0mm。どちらが正かは現時点の記述からは判断できない |

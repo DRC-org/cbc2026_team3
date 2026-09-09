@@ -24,6 +24,14 @@ axes:
       search_distance: 650.0
       align_distance: 5.0
       step: 0.5
+      # 整列段は片側 1 台で押すので、探索段 (左右 2 台) と同じ 0.5mm では
+      # 1 台ぶんの P 項 880counts が静止摩擦の実測 900counts に届かない。
+      # 同じ力を 1 台で出すには 2 倍の刻みが要る (1.0mm = 1760counts)。
+      # 引き換えに左右の整列の粒度は 1.0mm になる
+      align_step: 1.0
+      # y_axis = 0 と rotate = 0 は機構が干渉する。rotate の零点確定より前に
+      # 干渉域を抜けておかないと rotate が 1 歩も動けない
+      retreat_position: clear
       settle_s: 0.05
     guard:
       # 左右 2 本とも原点側 (homing.direction: -1) に付く。**2 本とも書く** ——
@@ -122,6 +130,9 @@ positions:
   # TODO(実機で確認): 経由点の値はどれも等分割の仮値。実機で干渉を見ながら列ごとに詰めること。
   y_axis:
     home: 0.0
+    # 零点確定の直後に退避する先 (homing.retreat_position)。rotate を回してよい位置。
+    # TODO(実機で確認): 仮値。rotate の干渉域を抜ける実測値へ詰めること
+    clear: 40.0
     work_1_via_1: 30.0
     work_1_via_2: 60.0
     work_1_via_3: 90.0
@@ -140,7 +151,14 @@ positions:
     work_shared: 650.0
 
   rotate:
-    home: 0.0
+    # y_axis = 0 と rotate = 0 は機構が干渉する。HOME は y_axis: home と
+    # rotate: home の組なので、片方を原点から離さないと初期姿勢そのものが
+    # 干渉姿勢になる。離すのは rotate の側 (y_axis.home は 0.0 のまま)。
+    # 0.0 は零点確定のスイッチの動作点そのものでもある。ON 区間の実測 約 2deg に
+    # 対して tolerance が 2.0deg なので、0.0 を目標にすると到達帯が ON 区間へ
+    # 食い込み、その内側からの指令を可動端インターロック (guard.limits.minus)
+    # が拒む。5.0 なら到達帯 3.0〜7.0deg が ON 区間の外に出る。
+    home: 5.0
     work_1_via_1: 45.0
     work_1_via_2: 90.0
     work_1_via_3: 135.0
@@ -154,6 +172,10 @@ positions:
     work_shared_via_2: 90.0
     work_shared_via_3: 135.0
     pick: 180.0
+    # home と同値。**偶然の一致ではない** —— どちらも上の 2 つの理由から 0.0 を
+    # 取れず、結果として同じ 5.0 に並んでいる。
+    # TODO(実機で確認): 置く角が待機の角と同じでよいかは未確認。ワークを置ける角が
+    # 決まったら home と揃っている必要は無いので、別の値になってよい
     place: 5.0
 
   gripper:
