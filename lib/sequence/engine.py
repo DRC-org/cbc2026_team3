@@ -240,20 +240,22 @@ class Sequence:
             for axis, previous in before.items()
             if (now := self._limit_intervention(axis)).count != previous.count
         ]
-        if stopped:
-            raise LimitInterventionError(
-                f"シーケンス '{self.name}': 可動端保護が移動を止めました ({', '.join(stopped)})"
-            )
-
         failed = [
             f"{handle.name}->{position_name}"
             for (handle, position_name, _), reached in zip(pending, results, strict=True)
             if not reached
         ]
+        # 片方で `raise` すると、両方起きた移動では先に見たほうしか残らない。切り分けは
+        # 「止められた軸」と「届かなかった軸」の対応で進むので、片側だけでは辿れない
+        reasons: list[str] = []
+        if stopped:
+            reasons.append(f"可動端保護が移動を止めました ({', '.join(stopped)})")
         if failed:
-            raise SequenceTimeoutError(
-                f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
-            )
+            reasons.append(f"目標位置に到達しませんでした ({', '.join(failed)})")
+        if reasons:
+            # 保護が 1 件でも絡めば時間切れではない。単独の失敗は文言が今までと変わらない
+            error = LimitInterventionError if stopped else SequenceTimeoutError
+            raise error(f"シーケンス '{self.name}': {' / '.join(reasons)}")
 
         desynced = []
         for handle, _, _ in pending:
