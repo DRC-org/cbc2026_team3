@@ -1,9 +1,11 @@
 import {
   ChevronDown,
   ChevronRight,
+  Fence,
   ListX,
   PackageX,
   ShieldAlert,
+  ShieldOff,
   ShieldQuestion,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
@@ -22,10 +24,17 @@ import {
   failedTasks,
   firmwareUnconfirmedMotors,
   isReenergizePending,
+  limitBlindSensors,
+  limitLatchedAxes,
   readableHealth,
   workpieceRiskBuses,
 } from "@/lib/healthVerdict";
-import type { HealthPayload, SafetyPayload, TempThresholds } from "@/lib/healthVerdict";
+import type {
+  HealthPayload,
+  LimitLatchedAxis,
+  SafetyPayload,
+  TempThresholds,
+} from "@/lib/healthVerdict";
 import type { BusHealth, MotorState } from "@/lib/protocol";
 
 interface SubsystemStatusProps {
@@ -131,6 +140,87 @@ function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
               `evaluateHealth` が STALE として別に主張する */}
           <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
             FEEDBACK は届くのに INFO が来ません。ファームを焼き直して candump で確認してください
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * リミットスイッチ保護が今止めている軸の一覧。平常時 (0 件) は何も出さない。
+ *
+ * **接触そのものの再掲ではない。** センサが今 ON かは `SensorSummary` が既に描いて
+ * いる。ここが出すのは「保護が発動して**その軸のその向きが止まっている**」という
+ * 別の事実で、これが無いと操縦者から見えるのは「指令しても動かない」だけになる
+ * (保護は軸ローカルで全体緊急停止に倒さないので、他の軸は平常どおり動く)。
+ *
+ * **「異常」として赤くしない** —— `evaluateHealth` の判定 (`tone`) はここを経由しない。
+ * 保護が設計どおり働いた結果であって機体の故障ではないが、**逆向きへ退避するまでは
+ * 解けない**ので、`WorkpieceRiskNotice` と同じ warning で自分から主張する。
+ *
+ * 軸名とセンサ名はサーバーが配るものをそのまま描く (UI 側に表を持たない)。
+ */
+function LimitLatchedNotice({ axes }: { axes: LimitLatchedAxis[] }) {
+  if (axes.length === 0) return null;
+
+  return (
+    // 0 件で `<ul>` だけが残ると、中身の無い色付きの帯が平常時にずっと出る。
+    // 名前を付けて「この一覧が居るかどうか」をテストから見えるようにしてある
+    <ul
+      aria-label="リミット到達の軸"
+      className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-warning bg-warning/5 px-2 py-1"
+    >
+      {axes.map((latched) => (
+        <li key={latched.axis} className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            {/* 端に当たって進めない、を表す記号。緊急停止 (OctagonX) とも
+                トリガー待ち (Hand) とも重ねない */}
+            <Icon as={Fence} className="shrink-0 text-warning" />
+            <StatusBadge tone="warning">リミット到達</StatusBadge>
+            <span className="min-w-0 truncate font-mono text-base-content/80">{latched.axis}</span>
+          </span>
+          {/* 状態だけ出しても操縦者は次の一手を選べない。**どちらへ動かせるか**まで書く。
+              どちらの端かはセンサ名にしか無いので必ず並べる */}
+          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+            {latched.sensors.join(", ")} に接触。この向きへの指令は止まります (逆向きへは動きます)
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * フィードバック途絶でリミット保護が効いていないセンサの一覧。平常時 (0 件) は
+ * 何も出さない。
+ *
+ * **「壊れている」ではなく「保護が働いていない」** —— `FirmwareUnconfirmedNotice` と
+ * まったく同じ位置付けで、`evaluateHealth` の判定 (`tone`) は経由しない。途絶で軸を
+ * 止めるとスイッチ 1 本の不調で試合中に機体が動かなくなるので、サーバーは判定しない
+ * 方を選んでいる。そのぶん**効いていないことがここに出ていなければ、「守っている
+ * つもり」の機体になる。**
+ *
+ * センサが途絶していること自体は STALE として別に主張されるので、文面は「保護が
+ * 消えている」ことだけを言う (同じ事実を 2 度描かない)。
+ */
+function LimitBlindNotice({ sensors }: { sensors: string[] }) {
+  if (sensors.length === 0) return null;
+
+  return (
+    <ul
+      aria-label="リミット保護が無効なセンサ"
+      className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1"
+    >
+      {sensors.map((sensor) => (
+        <li key={sensor} className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Icon as={ShieldOff} className="shrink-0 text-info" />
+            <StatusBadge tone="info">リミット保護 無効</StatusBadge>
+            <span className="min-w-0 truncate font-mono text-base-content/80">{sensor}</span>
+          </span>
+          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+            このスイッチは応答が途絶えており、触れても軸は止まりません
           </span>
         </li>
       ))}
@@ -266,6 +356,8 @@ export function SubsystemStatus({
   const readable = readableHealth(health);
   const riskyBuses = workpieceRiskBuses(health);
   const unconfirmedMotors = firmwareUnconfirmedMotors(safety);
+  const latchedAxes = limitLatchedAxes(safety);
+  const blindSensors = limitBlindSensors(safety);
   const failedTaskLabels = failedTasks(safety);
   const [manualOpen, setManualOpen] = useState(defaultOpen);
   // **`defaultOpen` は初期値ではなく「今このパネルを開いておくべきか」の宣言。**
@@ -293,8 +385,17 @@ export function SubsystemStatus({
   // 効かない」という試合中ずっと変わらない状態になる。ワーク落下のように
   // 試合中の 1 事象ではなく、しかも操縦者は試合中にこれを直せない —— 畳める
   // ままにして、開いたときに見える情報として残す (`defaultOpen` の準備中は開く)
+  //
+  // **リミット保護のラッチ (`latchedAxes`) は含める。** 判定 (tone) は動かさないが、
+  // これは今まさに軸が止まっている状態で、逆向きへ退避するまで解けない。畳んだまま
+  // だと操縦者は「指令しても動かない」理由を画面から知る手段が無い。ラッチは自動解除
+  // されるので開きっぱなしにもならない (`blindSensors` の方は版番号未確認と同じく
+  // 試合中ずっと変わらない状態なので含めない)。
   const forcedOpen =
-    verdict.tone === "error" || verdict.tone === "warning" || riskyBuses.length > 0;
+    verdict.tone === "error" ||
+    verdict.tone === "warning" ||
+    riskyBuses.length > 0 ||
+    latchedAxes.length > 0;
   const open = !showVerdict || forcedOpen || manualOpen;
 
   const busCount = readable?.buses.length ?? 0;
@@ -331,7 +432,11 @@ export function SubsystemStatus({
             </p>
           ) : null}
           <WorkpieceRiskNotice buses={riskyBuses} />
+          {/* 今まさに軸が止まっている事実なので、恒常的な報告 (版番号・保護無効・
+              タスク失敗) より前に置く */}
+          <LimitLatchedNotice axes={latchedAxes} />
           <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
+          <LimitBlindNotice sensors={blindSensors} />
           <FailedTasksNotice labels={failedTaskLabels} />
           <SafetyIssues safety={safety} onReenergize={onReenergize} verdictShown={showVerdict} />
           <HealthIndicator health={readable} />

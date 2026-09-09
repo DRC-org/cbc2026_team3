@@ -76,7 +76,7 @@ const STATE_FIELDS_UI_READS = [
   "e_stop_active",
   "health",
   "safety",
-  // 安全機構は 11 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
+  // 安全機構は 13 欄すべてを読む。1 欄でも落ちれば `describeSafetyIssues` が
   // 「安全機構 判定不能」へ倒れ、ラッチ軸も保護ループの生死も画面から消える
   "safety.sync_violations",
   "safety.unenergized_motors",
@@ -86,6 +86,12 @@ const STATE_FIELDS_UI_READS = [
   // 倒れる。ここを検査キーから外すと、欠落が黙って `undefined` になり
   // `FirmwareUnconfirmedNotice` の `.map` で全画面が落ちる経路が戻る
   "safety.firmware_unconfirmed_motors",
+  // リミット保護が止めている軸。**欄そのものが落ちれば「安全機構 判定不能」へ倒れる**
+  // —— 保護は軸ローカルで全体緊急停止に倒さないので、ここが黙って消えると
+  // 「その向きへ指令しても動かない」だけが残り、原因が画面のどこにも出ない
+  "safety.limit_latched",
+  // 途絶で保護が効いていないセンサ。落ちれば「守っているつもり」の機体になる
+  "safety.limit_blind_sensors",
   // 投げっぱなしタスクの失敗ラベル (`RobotServer.watch_task`)。**チップの内容**は
   // `describeSafetyIssues` に乗せない (tone を動かさない) が、欄そのものの欠落は
   // 他の欄とまったく同じで「安全機構 判定不能」へ倒れる
@@ -388,6 +394,8 @@ const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
   firmware_unconfirmed_motors: "ui",
+  limit_latched: "ui",
+  limit_blind_sensors: "ui",
   failed_tasks: "ui",
   reenergizing: "ui",
   loops_running: "ui",

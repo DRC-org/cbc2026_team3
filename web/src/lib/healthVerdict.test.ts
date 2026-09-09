@@ -4,6 +4,8 @@ import {
   describeSafetyIssues,
   evaluateHealth,
   firmwareUnconfirmedMotors,
+  limitBlindSensors,
+  limitLatchedAxes,
   motorTempTone,
   summarizeMotors,
   tempThresholdsOf,
@@ -73,6 +75,8 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     sync_violations: [],
     unenergized_motors: [],
     firmware_unconfirmed_motors: [],
+    limit_latched: {},
+    limit_blind_sensors: [],
     failed_tasks: [],
     reenergizing: false,
     loops_running: true,
@@ -384,6 +388,75 @@ describe("firmwareUnconfirmedMotors", () => {
   });
 });
 
+/**
+ * リミットスイッチ保護が今止めている軸。`describeSafetyIssues` には含めない ——
+ * 保護が設計どおり働いた結果であって機体の故障ではないので、`evaluateHealth` の
+ * 判定 (tone) を動かしてはならない。呼び出し側 (`SubsystemStatus`) だけが
+ * 「畳んだままにしない」ために使う。
+ */
+describe("limitLatchedAxes", () => {
+  it("平常時は返さない", () => {
+    expect(limitLatchedAxes(safety({ limit_latched: {} }))).toEqual([]);
+  });
+
+  it("軸とセンサ名をそのまま返す (UI へ表を持たせない)", () => {
+    expect(
+      limitLatchedAxes(safety({ limit_latched: { y_axis: ["origin_l", "origin_r"] } })),
+    ).toEqual([{ axis: "y_axis", sensors: ["origin_l", "origin_r"] }]);
+  });
+
+  it("未配信・読めない配信は空 (evaluateHealth 側が判定不能を別に報告する)", () => {
+    expect(limitLatchedAxes(undefined)).toEqual([]);
+    expect(limitLatchedAxes(MALFORMED)).toEqual([]);
+  });
+
+  /**
+   * **ガードを `?? {}` へ置き換えてはならない。** 欄の欠落だけなら同じに見えるが、
+   * 「欄はあるが読めない」場合に呼び出し側の `.map` が投げ、`SubsystemStatus` 以下の
+   * React ツリーが丸ごとアンマウントする (`firmwareUnconfirmedMotors` と同型)。
+   */
+  it("欄が読めない形でも投げず空を返す (全画面を落とさない)", () => {
+    const broken = { ...safety(), limit_latched: ["y_axis"] };
+
+    expect(limitLatchedAxes(broken as unknown as SafetyState)).toEqual([]);
+  });
+
+  it("describeSafetyIssues には現れない (tone を動かさない)", () => {
+    expect(describeSafetyIssues(safety({ limit_latched: { y_axis: ["origin_l"] } }))).toEqual([]);
+  });
+});
+
+/**
+ * 途絶で保護が効いていないセンサ。「壊れている」ではなく「保護が働いていない」の
+ * 報告なので、`firmwareUnconfirmedMotors` と同じく tone を動かさない。
+ */
+describe("limitBlindSensors", () => {
+  it("平常時は返さない", () => {
+    expect(limitBlindSensors(safety({ limit_blind_sensors: [] }))).toEqual([]);
+  });
+
+  it("途絶したセンサをそのまま返す", () => {
+    expect(limitBlindSensors(safety({ limit_blind_sensors: ["sub_lift_t"] }))).toEqual([
+      "sub_lift_t",
+    ]);
+  });
+
+  it("未配信・読めない配信は空", () => {
+    expect(limitBlindSensors(undefined)).toEqual([]);
+    expect(limitBlindSensors(MALFORMED)).toEqual([]);
+  });
+
+  it("欄が配列でなくても投げず空を返す", () => {
+    const broken = { ...safety(), limit_blind_sensors: "sub_lift_t" };
+
+    expect(limitBlindSensors(broken as unknown as SafetyState)).toEqual([]);
+  });
+
+  it("describeSafetyIssues には現れない (tone を動かさない)", () => {
+    expect(describeSafetyIssues(safety({ limit_blind_sensors: ["sub_lift_t"] }))).toEqual([]);
+  });
+});
+
 describe("describeSafetyIssues", () => {
   it("平常時は 1 件も返さない (静かにする)", () => {
     expect(describeSafetyIssues(safety())).toEqual([]);
@@ -505,6 +578,8 @@ describe("describeSafetyIssues", () => {
       "sync_violations",
       "unenergized_motors",
       "firmware_unconfirmed_motors",
+      "limit_latched",
+      "limit_blind_sensors",
       "failed_tasks",
       "reenergizing",
       "loops_running",

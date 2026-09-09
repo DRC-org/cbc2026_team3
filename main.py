@@ -1314,6 +1314,10 @@ class _RobotWiring:
     target_refreshers: list[TargetRefresher]
     #: 統合動作確認へ渡すモータ束。モータを 1 台も bind できなかった構成では None
     motor_group: MotorGroup | None
+    #: 手動操縦の指令口 (調整時・緊急時の退避路)。**既定値を持たせない** ——
+    #: 渡し忘れが「手動へ切り替えられない機体」として静かに成立し、症状は
+    #: 試合中に退避しようとした瞬間にしか出ない
+    manual: ManualController | None
     #: リミットスイッチ保護。`limits:` を書いた軸が 1 本も無い構成では None。
     #: **配線は `_wire_one_robot` の後**なので (センサをロボット横断で引くため
     #: 全 CANManager が要る)、`_wire_limit_guards` が `dataclasses.replace` で入れる
@@ -1330,7 +1334,11 @@ def _wire_one_robot(
     is_estop_active: EStopChecker,
     e_stop_tasks: set[asyncio.Task[None]],
 ) -> _RobotWiring:
-    """1 台ぶんの CAN・シーケンス・制御ループ・監視・手動を組み、サーバーへ登録する。
+    """1 台ぶんの CAN・シーケンス・制御ループ・監視・手動を組む。
+
+    **サーバーへの登録はここではない** (`_register_robots`)。リミット保護だけは
+    全機の `CANManager` が揃うまで組めないので、1 台ぶんの配線が済んだ時点では
+    まだ渡すものが揃っていない。
 
     **どの部品も「作って渡す」だけで、ここでは 1 つも起動しない。** 起動は
     `_start_all` が全機ぶんまとめて行う —— CAN の受信ループが立つ前に位置制御
@@ -1387,39 +1395,6 @@ def _wire_one_robot(
     # 手動操縦 (調整時・緊急時の補助操縦)。シーケンスと同じ MotorGroup を共有する
     manual = _build_manual_controller(seq, positions)
 
-    # 監視をサーバーへ渡さないと、緊急停止解除でラッチを外す経路が存在せず、
-    # 一度ずれを検知した軸は再起動するまで無監視・不動のまま残る
-    server.add_robot(
-        robot_name,
-        seq,
-        can_manager,
-        position_loops=loops,
-        sync_monitors=monitors,
-        target_refreshers=refreshers,
-        manual=manual,
-    )
-    # INFO は要約だけ。名前を全部並べると 1 行が 300 桁を超えて端末で折り返し、
-    # 起動ログ全体が読めなくなる。**同期監視の対象名だけは残す** —— 左右ペアの
-    # 保護が実際に何に掛かったかは、機構を壊す前に起動時点で確かめたい
-    logger.info(
-        "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s)",
-        robot_name,
-        len(motors),
-        len(positions.axes),
-        ", ".join(loop.bus_name for loop in loops) or "なし",
-        ", ".join(group.name for group in sync_groups) or "なし",
-    )
-    # 名前の一覧は DEBUG。平常時は要約で足り、食い違いを疑ったときだけ
-    # `--log-level debug` で読めればよい (config を読むより速い、という以上の
-    # 役割は持たない情報である)
-    logger.debug(
-        "ロボット登録 %s の内訳: 位置定数軸 %s / 目標値再送 %s / 手動連続操作 %s",
-        robot_name,
-        ", ".join(positions.axes) or "なし",
-        ", ".join(name for r in refreshers for name in r.motor_names) or "なし",
-        ", ".join(positions.manual_axes()) or "なし",
-    )
-
     return _RobotWiring(
         name=robot_name,
         sequence=seq,
@@ -1429,7 +1404,57 @@ def _wire_one_robot(
         sync_monitors=monitors,
         target_refreshers=refreshers,
         motor_group=seq.motors if seq.has_motors else None,
+        manual=manual,
     )
+
+
+def _register_robots(server: RobotServer, wirings: list[_RobotWiring]) -> None:
+    """配線し終えた部品をサーバーへ登録する。
+
+    **リミット保護を組んだ後でなければ登録できない。** 保護の読み取り口はセンサ名
+    がロボット横断に一意であることに依っており、全機の `CANManager` が揃うまで
+    組めない (`_wire_limit_guards`)。登録を `_wire_one_robot` の中に残したまま
+    保護だけを後から差し込む口を足すと、部品ごとに渡し方が 2 通りになり、
+    次に足す人が「渡したのに配信されない」側を選べてしまう。
+
+    監視と保護をサーバーへ渡さないと、緊急停止解除で同期ずれのラッチを外す経路が
+    存在せず (一度ずれを検知した軸は再起動するまで無監視・不動のまま残る)、
+    リミット保護が止めている軸も画面のどこにも出ない。
+    """
+    for wiring in wirings:
+        server.add_robot(
+            wiring.name,
+            wiring.sequence,
+            wiring.can_manager,
+            position_loops=wiring.position_loops,
+            sync_monitors=wiring.sync_monitors,
+            target_refreshers=wiring.target_refreshers,
+            limit_guard=wiring.limit_guard,
+            manual=wiring.manual,
+        )
+        # INFO は要約だけ。名前を全部並べると 1 行が 300 桁を超えて端末で折り返し、
+        # 起動ログ全体が読めなくなる。**同期監視の対象名だけは残す** —— 左右ペアの
+        # 保護が実際に何に掛かったかは、機構を壊す前に起動時点で確かめたい
+        # (リミット保護の対象軸は `_build_limit_guard` が軸ごとに 1 行出す)
+        logger.info(
+            "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s)",
+            wiring.name,
+            len(wiring.can_manager.motors),
+            len(wiring.positions.axes),
+            ", ".join(loop.bus_name for loop in wiring.position_loops) or "なし",
+            ", ".join(name for monitor in wiring.sync_monitors for name in monitor.group_names)
+            or "なし",
+        )
+        # 名前の一覧は DEBUG。平常時は要約で足り、食い違いを疑ったときだけ
+        # `--log-level debug` で読めればよい (config を読むより速い、という以上の
+        # 役割は持たない情報である)
+        logger.debug(
+            "ロボット登録 %s の内訳: 位置定数軸 %s / 目標値再送 %s / 手動連続操作 %s",
+            wiring.name,
+            ", ".join(wiring.positions.axes) or "なし",
+            ", ".join(name for r in wiring.target_refreshers for name in r.motor_names) or "なし",
+            ", ".join(wiring.positions.manual_axes()) or "なし",
+        )
 
 
 def _wire_limit_guards(wirings: list[_RobotWiring], sensors: _SensorView) -> list[_RobotWiring]:
@@ -1677,6 +1702,9 @@ async def main() -> None:
         [w.can_manager for w in wirings], feedback_timeout_ms=system.health.feedback_timeout_ms
     )
     wirings = _wire_limit_guards(wirings, sensors)
+
+    # 登録はここ。リミット保護まで揃ってからでないと、保護だけが配信に載らない
+    _register_robots(server, wirings)
 
     # 統合動作確認シーケンス。**両ハンドを 1 本の順序で駆動する**ので、
     # どのロボットにも属さない。機体ごとに独立した確認だと 2 つを同時に起動でき、

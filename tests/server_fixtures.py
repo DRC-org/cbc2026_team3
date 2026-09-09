@@ -28,6 +28,7 @@ from aiohttp import web
 
 from lib.can_manager import CANManager
 from lib.commands import COMMANDS
+from lib.control.limit_guard import LimitGuard
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -81,6 +82,7 @@ class ServerFixture:
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
         target_refreshers: list[GenericTargetRefresher] | None = None,
+        limit_guard: LimitGuard | None = None,
         manual: ManualController | None = None,
     ) -> Any:
         mgr = can_manager if can_manager is not None else mock_can_manager()
@@ -91,6 +93,7 @@ class ServerFixture:
             position_loops=position_loops,
             sync_monitors=sync_monitors,
             target_refreshers=target_refreshers,
+            limit_guard=limit_guard,
             manual=manual,
         )
         self._sequences[name] = sequence

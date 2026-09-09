@@ -595,12 +595,25 @@ class TestShippedRobotConfig:
             sensors |= set(config.get("sensors") or {})
 
         required: set[str] = set()
+        inspected: set[str] = set()
         for path in sorted(_CONFIG_DIR.glob("*_positions.yaml")):
             table = _load_shipped(path.name)
             for axis in table.limit_axes():
+                inspected.add(f"{path.name}:{axis}")
                 required |= {limit.sensor for limit in table.limits(axis)}
 
         assert required <= sensors
+
+        # `limits` を 1 本も書いていない config では上の包含が空集合どうしになり、
+        # **検査そのものが空虚に緑を返す**。保護を持つ軸が実在することをここで固定する
+        # (test_paired_axis_motors_agree_on_set_zero_on_start が `inspected` で
+        # 同じ穴を塞いでいるのと同じ形)。**軸を足したらここへも足すこと。**
+        assert {
+            "main_hand_positions.yaml:y_axis",
+            "main_hand_positions.yaml:rotate",
+            "sub_hand_positions.yaml:sub_y_axis",
+            "sub_hand_positions.yaml:sub_lift",
+        } <= inspected
 
     def test_paired_axis_motors_agree_on_set_zero_on_start(self) -> None:
         """左右ペア軸を構成するモータは `set_zero_on_start` が揃っていること。
@@ -676,6 +689,12 @@ class TestShippedRobotConfig:
             "conveyor_stop",
             "conveyor_run",
             "origin_sensor_react",
+            # リミット保護の向き。**サブハンドの 4 本は機械が確かめる手段を持たない**
+            # (零点確定を持たないので homing.direction との突き合わせが働かない)。
+            # 触れた状態から退避できるかを人が見る以外に、逆向きの保護 —— 壊れる側へは
+            # 進めて退避だけができない状態 —— を検出する経路が無い
+            "limit_direction_main",
+            "limit_direction_sub",
             # サブハンド: 電磁弁 (到達を観測できない) と DC 基板のポンプ
             "valves_closed",
             "valves_actuate",

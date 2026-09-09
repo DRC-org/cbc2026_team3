@@ -176,6 +176,46 @@ export function firmwareUnconfirmedMotors(safety: SafetyPayload | undefined): st
   return safety.firmware_unconfirmed_motors;
 }
 
+/** リミット保護が止めている軸 1 本ぶん。**名前はサーバーが配るものだけを持つ。** */
+export interface LimitLatchedAxis {
+  axis: string;
+  /** ラッチ中のセンサ名。どちらの端に触れているかはここにしか無い */
+  sensors: string[];
+}
+
+/**
+ * リミットスイッチ保護が今止めている軸。平常時は空配列。
+ *
+ * **これは「異常」ではないが、操縦者が知らなければ復旧できない状態である。** 保護は
+ * 軸ローカルで全体緊急停止に倒さないので、機体は他の軸を含めて平常どおり動く ——
+ * 止まっているのはその軸のその向きだけで、逆向きへは動く。だから
+ * `describeSafetyIssues` には含めず `evaluateHealth` の判定 (tone) も動かさないが、
+ * 呼び出し側は 0 件でないあいだパネルを開いておく (`SubsystemStatus`)。
+ *
+ * **接触そのものの再掲ではない。** センサが今 ON かは `SensorSummary` が
+ * `state.sensors` から既に描いている。ここで足すのは「保護が発動して軸が
+ * 止まっている」という別の事実である。
+ */
+export function limitLatchedAxes(safety: SafetyPayload | undefined): LimitLatchedAxis[] {
+  if (!safety || safety === MALFORMED) return [];
+  if (safetyShapeErrors(safety).length > 0) return [];
+  return Object.entries(safety.limit_latched).map(([axis, sensors]) => ({ axis, sensors }));
+}
+
+/**
+ * フィードバック途絶でリミット保護が効いていないセンサ。平常時は空配列。
+ *
+ * **「壊れている」ではなく「保護が働いていない」の報告** で、
+ * `firmwareUnconfirmedMotors` とまったく同じ位置付け —— `describeSafetyIssues` にも
+ * `evaluateHealth` の判定 (tone) にも載せない。センサの途絶そのものは STALE として
+ * 別に主張されており、ここが足すのは「そのぶん保護が消えている」という別の事実。
+ */
+export function limitBlindSensors(safety: SafetyPayload | undefined): string[] {
+  if (!safety || safety === MALFORMED) return [];
+  if (safetyShapeErrors(safety).length > 0) return [];
+  return safety.limit_blind_sensors;
+}
+
 /**
  * 投げっぱなしタスク (`RobotServer.watch_task`) が拾った失敗ラベル。平常時は空配列。
  *

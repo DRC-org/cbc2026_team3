@@ -23,6 +23,7 @@ from lib.config_schema import (
     MatchSettings,
 )
 from lib.control.feedback import FeedbackFreshness
+from lib.control.limit_guard import LimitGuard
 from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
@@ -136,6 +137,11 @@ class RobotContext:
     # **動作確認中も回し続ける** (理由は _motor_check_pausables)。
     # 緊急停止時だけは保持した目標を捨てる (解除だけで動き出させない)
     target_refreshers: list[TargetRefresher] = field(default_factory=list)
+    # リミットスイッチ保護。`limits:` を書いた軸が 1 本も無い構成では None。
+    # **配信のためだけに持つ。** ラッチの操作口はここから生やさない —— 解除は
+    # 「センサが OFF になったこと」でしか起こしてはならず、押せるボタンを作れば
+    # 端に触れたまま指令が通って、そのぶんだけ機構へ押し込むことになる
+    limit_guard: LimitGuard | None = None
     # 手動操縦の指令口。位置定数を読めていないロボットでは None (手動不可)
     manual: ManualController | None = None
     # 制御権を誰が握っているか。ロボットごとに独立させる (片方だけ手動が成立する)。
@@ -343,6 +349,7 @@ class RobotServer:
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
         target_refreshers: list[TargetRefresher] | None = None,
+        limit_guard: LimitGuard | None = None,
         manual: ManualController | None = None,
     ) -> None:
         self._robots[name] = RobotContext(
@@ -351,6 +358,7 @@ class RobotServer:
             position_loops=list(position_loops or []),
             sync_monitors=list(sync_monitors or []),
             target_refreshers=list(target_refreshers or []),
+            limit_guard=limit_guard,
             manual=manual,
         )
         sequence.set_court(self.match.court)
@@ -1327,6 +1335,12 @@ class RobotServer:
         つもりで、実際には y_axis が動かず rotate が無監視で回る」状態になる。
         解除後もずれが残っていれば双方が再び検知して緊急停止へ戻すので、
         ここで外して機構の異常が隠れることはない。
+
+        **リミット保護のラッチ (`LimitGuard.reset()`) はここへ相乗りさせない。**
+        あちらは「押しても消えない状態」ではない —— まだ触れていれば 20ms 後の
+        次の周期でどのみち再ラッチし、既に離れていれば自動解除で外れている。
+        つまり呼んでも結果が変わらないので、呼べば「緊急停止の解除でリミットの
+        ラッチも外れる」という**効いていない因果**をコードが主張することになる。
         """
         for name, ctx in self._robots.items():
             for loop in ctx.position_loops:
@@ -1356,6 +1370,19 @@ class RobotServer:
             "sync_violations": sorted(violations),
             "unenergized_motors": self._unenergized_motors(robot_name),
             "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
+            # リミットスイッチ保護が今止めている軸 (軸名 → ラッチ中のセンサ名)。
+            # **黙って止まる軸を作らない** —— 操縦者から見えるのは「その向きへ
+            # 指令しても動かない」だけで、原因を示すものが画面のどこにも無くなる。
+            # 逆向きへは動くので、退避の一手はセンサ名から選べる。
+            #
+            # **介入回数 (`LimitGuard.intervention`) は配信しない。** 手動で端へ
+            # 寄せるたびに増えるので、シーケンス由来と手動由来が混ざった数になり、
+            # 操縦者には読めない (あちらは `move_to` が到達を疑うための内部の口)
+            "limit_latched": self._limit_latched(robot_name),
+            # フィードバック途絶で保護が効いていないセンサ。**これは「壊れている」
+            # ではなく「保護が働いていない」の報告**で、`firmware_unconfirmed_motors`
+            # と同じ扱いにする (FAULT にも `evaluateHealth` の判定にも倒さない)
+            "limit_blind_sensors": self._limit_blind_sensors(robot_name),
             # 投げっぱなしタスク (`watch_task`) が拾った失敗。平常時は空配列。
             # 古い順に並ぶ (`_FAILED_TASK_BACKLOG` を超えた分は古いものから消える)。
             # 復帰しても消えない —— リセットは `_handle_match_start` の前縁リセットだけ
@@ -1490,6 +1517,51 @@ class RobotServer:
             for device_name, device in devices.items()
             if device.firmware_confirmed() is False and not freshness.is_stale(device_name, now)
         )
+
+    def _limit_latched(self, robot_name: str) -> dict[str, list[str]]:
+        """リミットスイッチ保護が今止めている軸 → ラッチ中のセンサ名。平常時は空。
+
+        **黙って止まる軸を作らないための唯一の報告経路である。** 保護は軸ローカルで
+        全体緊急停止に倒さない (端に触れた軸を戻す操作そのものを塞がないため) ので、
+        操縦者から見えるのは「その向きへ指令しても機体が動かない」だけになる。
+        シーケンスは `SequenceTimeoutError` で止まるが、手動操縦には止まる理由が
+        1 つも現れない。
+
+        **センサ名まで配る。** どちらの端に触れているかはセンサ名にしか無く、
+        軸名だけでは退避の向きを選べない (両端にスイッチのある `sub_y_axis` /
+        `sub_lift` では 2 通りある)。UI 側に軸名・センサ名の表を持たせないため、
+        `LimitGuard` が持つ名前をそのまま流す。
+
+        **回数 (`LimitGuard.intervention`) は載せない。** あちらは手動で端へ寄せる
+        たびに増えるので、シーケンス由来と手動由来が混ざった数になり操縦者には
+        読めない (`move_to` が到達を疑うための内部の口である)。
+        """
+        guard = self._robots[robot_name].limit_guard
+        if guard is None:
+            return {}
+        return {axis: list(sensors) for axis, sensors in guard.latched.items()}
+
+    def _limit_blind_sensors(self, robot_name: str) -> list[str]:
+        """フィードバック途絶でリミット保護が効いていないセンサ。平常時は空。
+
+        **これは「壊れている」ではなく「保護が働いていない」の報告である**
+        (`_firmware_unconfirmed_motors` と同じ位置付け)。途絶で軸を止めると
+        スイッチ 1 本の不調で試合中に機体が動かなくなるので `LimitGuard` は
+        判定しない方を選んでおり、そのぶん**効いていないことは必ず見えなければ
+        ならない** —— 黙って無効になれば「守っているつもり」の機体ができる。
+
+        FAULT にも `evaluateHealth` の判定にも倒さない。センサの途絶そのものは
+        既に `MotorHealth.STALE` として別に主張しており、ここで足すのは
+        「そのぶん保護が消えている」という別の事実だけである。
+
+        **dry-run は対象外。** virtual バスはセンサの `FEEDBACK` を 1 通も返さない
+        ので、机上では全センサが恒久的にここへ並び、画面を確かめられなくなる
+        (`_firmware_unconfirmed_motors` と同じ理由)。
+        """
+        if self._dry_run:
+            return []
+        guard = self._robots[robot_name].limit_guard
+        return list(guard.blind_sensors) if guard is not None else []
 
     async def _reactivate_motors(self) -> None:
         """緊急停止解除後にモータの励磁を戻す。

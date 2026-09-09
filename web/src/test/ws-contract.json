@@ -308,6 +308,8 @@
       "safety": {
         "failed_tasks": [],
         "firmware_unconfirmed_motors": [],
+        "limit_blind_sensors": [],
+        "limit_latched": {},
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [
@@ -562,6 +564,8 @@
       "safety": {
         "failed_tasks": [],
         "firmware_unconfirmed_motors": [],
+        "limit_blind_sensors": [],
+        "limit_latched": {},
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [

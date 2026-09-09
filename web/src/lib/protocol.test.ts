@@ -108,6 +108,8 @@ describe("parseServerMessage", () => {
         sync_violations: [],
         unenergized_motors: [],
         firmware_unconfirmed_motors: [],
+        limit_latched: {},
+        limit_blind_sensors: [],
         failed_tasks: [],
         reenergizing: false,
         loops_running: true,
@@ -132,6 +134,11 @@ describe("parseServerMessage", () => {
         "sync_violations",
         "unenergized_motors",
         "firmware_unconfirmed_motors",
+        // リミット保護が止めている軸と、途絶で保護が効いていないセンサ。
+        // **`?? {}` / `?? []` で埋めてはならない** —— 埋めると「保護が軸を止めて
+        // いるのに画面は平常」へ化け、埋めたこと自体が画面から読めなくなる
+        "limit_latched",
+        "limit_blind_sensors",
         "failed_tasks",
         "reenergizing",
         "loops_running",
@@ -146,6 +153,22 @@ describe("parseServerMessage", () => {
         const msg = parse({ type: "state", robot: "main_hand", safety: broken });
         expect((msg as { state: RobotState }).state.safety).toBe(MALFORMED);
       });
+
+      it.each([
+        ["センサ名が配列でない", { y_axis: "origin_sensor" }],
+        ["センサ名が文字列でない", { y_axis: [1, 2] }],
+        ["そもそもオブジェクトでない", ["y_axis"]],
+      ])(
+        "limit_latched の値が %s なら MALFORMED (中身まで見る)",
+        (_label, limit_latched: unknown) => {
+          const msg = parse({
+            type: "state",
+            robot: "main_hand",
+            safety: { ...SAFETY, limit_latched },
+          });
+          expect((msg as { state: RobotState }).state.safety).toBe(MALFORMED);
+        },
+      );
     });
 
     /**

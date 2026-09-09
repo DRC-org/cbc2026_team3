@@ -1717,6 +1717,7 @@ class TestStartAll:
             sync_monitors=[],
             target_refreshers=[],
             motor_group=None,
+            manual=None,
         )
 
     async def test_起動時に励磁できなかったモータをサーバーへ渡す(self) -> None:
@@ -2265,6 +2266,7 @@ class TestLimitGuardWiring:
             sync_monitors=[],
             target_refreshers=[],
             motor_group=group,
+            manual=None,
         )
 
         wired = main._wire_limit_guards([wiring], self._sensors())
@@ -2308,6 +2310,7 @@ class TestLimitGuardLifecycle:
             sync_monitors=[],
             target_refreshers=[],
             motor_group=None,
+            manual=None,
             limit_guard=guard,  # type: ignore[arg-type]
         )
 

@@ -49,6 +49,8 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     sync_violations: [],
     unenergized_motors: [],
     firmware_unconfirmed_motors: [],
+    limit_latched: {},
+    limit_blind_sensors: [],
     failed_tasks: [],
     reenergizing: false,
     loops_running: true,
@@ -668,6 +670,121 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
+  });
+
+  /**
+   * リミットスイッチ保護 (`LimitLatchedNotice`)。**判定チップ (見出し) は動かさないが、
+   * 畳んだままにはしない** —— 今まさに軸が止まっていて、逆向きへ退避するまで解けない。
+   * 出さなければ操縦者から見えるのは「その向きへ指令しても動かない」だけになり、
+   * 保護は軸ローカルなので他の軸は平常どおり動く (＝他に手掛かりが 1 つも無い)。
+   */
+  it("リミット到達では自分から開いて軸とセンサを出す", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ limit_latched: { y_axis: ["y_axis_r_origin_sensor"] } })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.getByText("リミット到達")).toBeInTheDocument();
+    expect(screen.getByText("y_axis")).toBeInTheDocument();
+    // どちらの端かはセンサ名にしか無い。軸名だけでは退避の向きを選べない
+    expect(screen.getByText(/y_axis_r_origin_sensor/)).toBeInTheDocument();
+    // 「異常」ではない (保護が設計どおり働いた結果であって機体の故障ではない)
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+  });
+
+  it("逆向きへは動くことを書く (復帰できない軸だと読ませない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ limit_latched: { y_axis: ["y_axis_r_origin_sensor"] } })}
+      />,
+    );
+
+    expect(screen.getByText(/逆向きへは動きます/)).toBeInTheDocument();
+  });
+
+  it("ラッチ 0 件なら開いても何も出さない", () => {
+    // 平常時に静かであること。0 件で出すと、本当に止まった 1 回が埋もれる
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ limit_latched: {} })}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.queryByText("リミット到達")).not.toBeInTheDocument();
+    // **1px も占めないこと。** 空の `<ul>` が残ると、中身の無い色付きの帯が
+    // 平常時にずっと出たままになる (「平常時に静かで」が崩れる)
+    expect(screen.queryByRole("list", { name: "リミット到達の軸" })).not.toBeInTheDocument();
+  });
+
+  /**
+   * 途絶で保護が効いていないセンサ (`LimitBlindNotice`)。`FirmwareUnconfirmedNotice` と
+   * 同じ位置付け —— 「壊れている」ではなく「検出が働いていない」なので、判定チップも
+   * 開閉 (`forcedOpen`) も動かさない (試合中ずっと変わらない状態であり、開きっぱなしに
+   * すると安全機構のパネルごと読まれなくなる)。
+   */
+  it("開いたときだけ保護無効のセンサを出す (判定・開閉は動かさない)", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ limit_blind_sensors: ["sub_lift_t_limit_sensor"] })}
+      />,
+    );
+
+    expect(screen.getByText("異常なし")).toBeInTheDocument();
+    expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
+    expect(screen.queryByText("リミット保護 無効")).not.toBeInTheDocument();
+  });
+
+  it("開けば保護無効のセンサが見える", async () => {
+    const user = userEvent.setup();
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ limit_blind_sensors: ["sub_lift_t_limit_sensor"] })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+
+    expect(screen.getByText("リミット保護 無効")).toBeInTheDocument();
+    expect(screen.getByText("sub_lift_t_limit_sensor")).toBeInTheDocument();
+    // 「触れても止まらない」まで書く (状態だけでは次の一手を選べない)
+    expect(screen.getByText(/触れても軸は止まりません/)).toBeInTheDocument();
+  });
+
+  it("保護無効 0 件なら開いても何も出さない", () => {
+    renderWithRobot(
+      <SubsystemStatus
+        connected
+        health={HEALTH}
+        motors={MOTORS}
+        safety={safety({ limit_blind_sensors: [] })}
+        defaultOpen
+      />,
+    );
+
+    expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    expect(screen.queryByText("リミット保護 無効")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("list", { name: "リミット保護が無効なセンサ" }),
+    ).not.toBeInTheDocument();
   });
 
   /**

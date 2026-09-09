@@ -577,6 +577,30 @@ export interface SafetyState {
    */
   firmware_unconfirmed_motors: string[];
   /**
+   * リミットスイッチ保護が今止めている軸 (軸名 → ラッチ中のセンサ名)。平常時は空。
+   *
+   * 保護は軸ローカルで、全体緊急停止に倒さない (端に触れた軸を戻す操作そのものを
+   * 塞がないため)。だから**配信しなければ黙って止まる軸ができる** —— 操縦者から
+   * 見えるのは「その向きへ指令しても動かない」だけで、原因はどこにも出ない。
+   *
+   * **センサ名まで載る。** どちらの端に触れているかはセンサ名にしか無く、軸名
+   * だけでは退避の向きを選べない。UI 側に軸名・センサ名の表を持たせないため、
+   * サーバーが配る名前をそのまま描くこと。
+   *
+   * **介入回数は載らない** (手動で端へ寄せるたびに増えるので操縦者には読めない)。
+   */
+  limit_latched: Record<string, string[]>;
+  /**
+   * フィードバック途絶でリミット保護が効いていないセンサ。平常時は空。
+   *
+   * **これは「壊れている」ではなく「保護が働いていない」の報告**
+   * (`firmware_unconfirmed_motors` と同じ位置付け)。途絶で軸を止めるとスイッチ
+   * 1 本の不調で試合中に機体が動かなくなるのでサーバーは判定しない方を選んでおり、
+   * そのぶん効いていないことは必ず見えなければならない。
+   * `evaluateHealth()` の判定 (tone) はここでは動かさない。
+   */
+  limit_blind_sensors: string[];
+  /**
    * 投げっぱなしタスク (`asyncio.create_task` して待たないもの) が失敗したときの
    * 人が読めるラベル一覧。平常時は空配列。
    *
@@ -613,6 +637,11 @@ function isStringArray(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+/** `Record<string, string[]>` として読めるか (`safety.limit_latched` の形)。 */
+function isStringArrayRecord(value: unknown): boolean {
+  return isObject(value) && Object.values(value).every(isStringArray);
+}
+
 /**
  * 周期タスク 1 本ぶんの検査。**UI が実際に読む欄しか見ない** ——
  * `paused` や `violated` は契約上 `unused` と宣言してあり、欠けても表示は成立する。
@@ -639,10 +668,15 @@ export function safetyShapeErrors(value: unknown): string[] {
     "sync_violations",
     "unenergized_motors",
     "firmware_unconfirmed_motors",
+    "limit_blind_sensors",
     "failed_tasks",
   ]) {
     if (!isStringArray(value[key])) broken.push(key);
   }
+  // **`?? {}` で埋めてはならない。** 埋めると「保護が軸を止めているのに画面は
+  // 平常」へ化け、埋めたこと自体が画面から読めなくなる (未配信 = undefined とは
+  // 別物として、読めなかった配信は異常側へ倒す)
+  if (!isStringArrayRecord(value.limit_latched)) broken.push("limit_latched");
   for (const key of ["loops_running", "monitors_running", "refreshers_running", "reenergizing"]) {
     if (typeof value[key] !== "boolean") broken.push(key);
   }
