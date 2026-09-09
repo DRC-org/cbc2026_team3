@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass
 
 from lib.drivers.base import ControlMode
-from lib.sequence.motors import AxisHandle
-from lib.sequence.positions import AxisSpec, HomingSpec
+from lib.match_state import Court
+from lib.sequence.motors import AxisHandle, MotorGroup
+from lib.sequence.positions import AxisSpec, HomingSpec, PositionTable
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HomingError", "HomingRunner"]
+__all__ = ["AxisHomingResult", "HomingError", "HomingRunner", "homing_axis_names", "run_homing"]
 
 _FOLLOW_ATTEMPTS = 5
 
@@ -587,3 +589,56 @@ class HomingRunner:
             raise
         except Exception as exc:
             raise HomingError(f"軸 '{spec.name}' の現在位置を読めません ({exc})") from exc
+
+
+@dataclass(frozen=True)
+class AxisHomingResult:
+    axis: str
+    error: str | None
+
+
+def homing_axis_names(table: PositionTable) -> list[str]:
+    return [name for name in table.axes if table.axis(name).homing is not None]
+
+
+async def run_homing(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court,
+    axes: Collection[str] | None = None,
+    on_axis: Callable[[str], Awaitable[None]] | None = None,
+    stop_on_error: bool = True,
+) -> list[AxisHomingResult]:
+    """`homing:` を持つ軸を順に寄せて零点を確定する。**動作確認と単独実行が通る唯一の経路。**
+
+    `stop_on_error=False` は 1 本の失敗で残りを諦めない。軸ごとに独立した確定なので、
+    操縦者は 1 回の実行で全軸の可否を知りたい。
+    """
+    targets = homing_axis_names(table) if axes is None else list(axes)
+    if not targets:
+        logger.info("零点確定: homing を持つ軸が無いため飛ばす")
+        return []
+
+    results: list[AxisHomingResult] = []
+    for axis in targets:
+        spec = table.axis(axis).for_court(court)
+        logger.info("零点確定: %s", axis)
+        if on_axis is not None:
+            await on_axis(axis)
+        handle = AxisHandle(
+            spec,
+            [getattr(motors, name) for name in spec.motor_names],
+            sensor_active=motors.sensor_active,
+        )
+        try:
+            await runner.home(spec, handle)
+        except Exception as exc:
+            if stop_on_error:
+                raise
+            logger.error("零点確定に失敗: %s (%s)", axis, exc)
+            results.append(AxisHomingResult(axis=axis, error=str(exc)))
+            continue
+        results.append(AxisHomingResult(axis=axis, error=None))
+    return results

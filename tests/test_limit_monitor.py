@@ -135,7 +135,6 @@ class TestLimitMonitor:
         await rig.command(-450.0)
 
         await rig.monitor.step()
-        # 止めた直後、実測が目標に一致したまま回る周期
         await rig.monitor.step()
         # 止めた後も実測はゆらぐ。押されている端へ向いたゆらぎを指令と読むと撃ち続ける
         rig.set_observed(-447.4)

@@ -238,6 +238,14 @@ _SPECS: tuple[CommandSpec, ...] = (
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
     ),
     _spec(
+        "homing_start",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は零点合わせを実行できません",
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため零点合わせを実行できません",
+        handler="_cmd_homing_start",
+    ),
+    _spec(
         "reenergize_motors",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,

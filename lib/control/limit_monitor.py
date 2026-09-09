@@ -62,8 +62,7 @@ class LimitMonitor(PeriodicTask):
         self._sensor_active = sensor_active
         self._court = court
         self._guards = _build_guards(positions, motors)
-        # 発火したときに書いた目標。**同じ目標のあいだは撃ち直さない** ——
-        # 20〜50Hz で `set_target_value` を撃ち続けるとバスが埋まる
+        # 50Hz で撃ち続けるとバスが埋まるので、同じ目標のあいだは撃ち直さない
         self._stopped: dict[str, float] = {}
 
     @property
@@ -128,8 +127,7 @@ class LimitMonitor(PeriodicTask):
         await AxisHandle(spec, handles, sensor_active=self._sensor_active).set_target_value(
             spec.to_commands(observed)
         )
-        # 書いた結果から取り直す。`to_commands` の往復で桁の下の方がずれると、
-        # 次の周期に計算する目標と一致せず撃ち直しになる
+        # 単位換算の往復で桁の下がずれると、次の周期に一致せず撃ち直しになる
         written = self._commanded_value(spec, handles)
         if written is not None:
             self._stopped[axis] = written
@@ -146,7 +144,6 @@ def _build_guards(positions: PositionTable, motors: MotorGroup) -> dict[str, Mot
     guards: dict[str, MotionGuard] = {}
     for name in positions.axes:
         spec = positions.axis(name)
-        # `guard.limits` を書いていない軸は監視しない (既定値で埋めない)
         if spec.guard is None or spec.guard.limits is None:
             continue
         missing = [motor for motor in spec.motor_names if motor not in motors]
