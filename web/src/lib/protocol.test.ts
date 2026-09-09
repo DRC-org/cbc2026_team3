@@ -91,9 +91,11 @@ describe("parseServerMessage", () => {
         reenergizing: false,
         loops_running: true,
         monitors_running: true,
+        limit_monitors_running: true,
         refreshers_running: true,
         position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
         sync_monitors: [{ axes: ["y_axis"], running: true, violated: [] }],
+        limit_monitors: [{ axes: ["sub_y_axis"], running: true, stopped: [] }],
         target_refreshers: [{ motors: ["gripper"], running: true, paused: false }],
       };
 
@@ -115,9 +117,11 @@ describe("parseServerMessage", () => {
         "reenergizing",
         "loops_running",
         "monitors_running",
+        "limit_monitors_running",
         "refreshers_running",
         "position_loops",
         "sync_monitors",
+        "limit_monitors",
         "target_refreshers",
       ])("%s が欠けたら MALFORMED (空の SafetyState へ倒さない)", (key) => {
         const broken: Record<string, unknown> = { ...SAFETY };
