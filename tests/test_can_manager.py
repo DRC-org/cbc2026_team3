@@ -1520,3 +1520,45 @@ class TestReceiveLoopOnAPollableBus:
 
         assert motor.state.position == pytest.approx(12.0)
         assert calls, "virtual バスでエグゼキュータを経由していない"
+
+
+class TestSpuriousReadable:
+    """readable の通知が来ても recvmsg に何も無いことがある。そこで待つと
+    イベントループごと固まる (2026-09-09 実機: 非常停止中に Web が無応答)。"""
+
+    async def test_EAGAIN_は受信断ではなく空振りとして扱う(self) -> None:
+        import errno
+
+        from tests.fake_can import ReadableBus
+
+        mgr = CANManager()
+        bus = ReadableBus()
+        bus.queue(can.CanOperationError("Error receiving: EAGAIN", errno.EAGAIN))
+        mgr.add_bus("can0", bus)  # type: ignore[arg-type]
+
+        task = asyncio.create_task(mgr._receive_loop("can0"))
+        await asyncio.sleep(0.05)
+
+        assert mgr._rx_down.get("can0") is False
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        bus.shutdown()
+
+    async def test_readable_監視に載せるソケットは非ブロッキングにする(self) -> None:
+        import socket
+
+        from lib.can_manager import _ReadableFd
+
+        left, right = socket.socketpair()
+        try:
+            bus = MagicMock()
+            bus.fileno.return_value = right.fileno()
+            readable = _ReadableFd.for_bus(bus)
+            assert readable is not None
+            readable.close()
+        finally:
+            left.close()
+            right.close()
+
+        bus.socket.setblocking.assert_called_once_with(False)
