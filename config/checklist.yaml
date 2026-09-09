@@ -78,7 +78,7 @@ checklists:
       label: コンベア停止確認
       group: motor_check
     - id: pumps_run
-      label: 吸気ポンプ・排気ポンプが個別に回ること確認 (聴音。DC 基板は回転を報告しない)
+      label: 吸気ポンプが回ること確認 (聴音。DC 基板は回転を報告しない)
       group: motor_check
     - id: valves_actuate
       label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
@@ -87,7 +87,7 @@ checklists:
       label: 吸気ポンプ運転中に弁を開き、ワークを吸着して保持できること確認
       group: motor_check
     - id: suction_release
-      label: 弁を閉じ排気ポンプでワークが確実に離れること確認 (残圧で張り付かないこと)
+      label: 弁を閉じるだけでワークが確実に離れること確認 (三方弁の大気開放。残圧で張り付かないこと)
       group: motor_check
 
     - id: estop_functional

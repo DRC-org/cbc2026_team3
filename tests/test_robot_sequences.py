@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import pathlib
+from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import can
@@ -136,18 +137,12 @@ _SUB_POSITIONS = {
     "axes": {
         **{name: _axis(command_mode="on_off", settle_s=0.0) for name in _VALVE_AXES},
         "pump_vac": _axis(command_mode="duty", settle_s=0.0),
-        "pump_blow": _axis(command_mode="duty", settle_s=0.0),
     },
     "positions": {
         **{name: {"open": 1.0, "closed": 0.0} for name in _VALVE_AXES},
         "pump_vac": {"stop": 0.0, "run": 0.61},
-        "pump_blow": {"stop": 0.0, "run": 0.62},
     },
 }
-
-
-def _valves(value: float) -> list[tuple[str, float]]:
-    return [(name, value) for name in _VALVE_AXES]
 
 
 async def _run_each_step(
@@ -262,69 +257,181 @@ class TestMainHandSteps:
         assert run in commanded, "シーケンス中にコンベアを一度も回していない"
 
 
-class TestSubHandSteps:
-    @pytest.mark.parametrize(
-        ("method_name", "expected"),
-        [
-            (
-                "move_to_home",
-                [
-                    *_valves(0.0),
-                    ("pump_blow", 0.0),
-                    ("pump_vac", 0.61),
-                ],
-            ),
-            ("grip_by_suction", _valves(1.0)),
-            (
-                "release_at_place",
-                [
-                    *_valves(0.0),
-                    ("pump_blow", 0.62),
-                    ("pump_blow", 0.0),
-                ],
-            ),
-            (
-                "return_home",
-                [
-                    *_valves(0.0),
-                    ("pump_blow", 0.0),
-                ],
-            ),
-        ],
-    )
-    async def test_step_sends_expected_targets(
-        self, method_name: str, expected: list[tuple[str, float]]
+# ワーク 1 個ぶん 16 ステップ x 4 個 + 初期位置 + 復帰。
+_SUB_CYCLE_LABELS = (
+    "棚へ寄せる",
+    "吸着高さへ下降",
+    "ワーク吸着",
+    "持ち上げ",
+    "回転可能位置へ後退",
+    "搬送姿勢へ",
+    "箱 {n} の上へ",
+    "オフセットを閉じる",
+    "ピッチを閉じる",
+    "箱へ下降",
+    "ワーク解放 (配置)",
+    "上昇",
+    "ピッチを開く",
+    "オフセットを開く",
+    "回転可能位置へ後退",
+    "受け取り姿勢へ",
+)
+
+# 16 ステップのうち操縦者のトリガー待ちを持つ位置 (0 始まり)。
+_SUB_TRIGGER_OFFSETS = (0, 2, 9, 10)
+
+# 前端スイッチ (動作点 0.0mm) からこれより内側に居るあいだ sub_rotate を回すと機構が
+# 干渉する (docs/invariants.md §4)。守っているのはステップの並びだけである。
+_ROTATE_CLEARANCE_MM = 150.0
+
+_SUB_GRIP_METHODS = tuple(f"work_{n}_grip" for n in range(1, 5))
+_SUB_RELEASE_METHODS = tuple(f"work_{n}_release" for n in range(1, 5))
+
+
+def _expected_sub_labels() -> list[str]:
+    labels = ["初期位置へ移動"]
+    for n in range(1, 5):
+        labels += [f"{n} 個目: {label.format(n=n)}" for label in _SUB_CYCLE_LABELS]
+    labels.append("初期位置へ復帰")
+    return labels
+
+
+async def _collect_moves(seq: Sequence) -> list[tuple[int, dict[str, str]]]:
+    """各ステップが出した `move_to` を、ステップ番号付きで出た順に集める。
+
+    軸をまたぐ順序 (どの姿勢で何を動かすか) は `move_to` 1 回ごとの単位でしか
+    見えない。ステップ単位で束ねると「同じステップの中で順に動かした」のか
+    「同時に動かした」のかが区別できず、干渉の検査にならない。
+    """
+    calls: list[tuple[int, dict[str, str]]] = []
+    current = 0
+
+    async def _record(
+        _self: Sequence, targets: Mapping[str, str], *, timeout: float | None = None
     ) -> None:
-        seq = SubHandSequence()
-        sink, _ = _wire(seq, _SUB_POSITIONS)
+        calls.append((current, dict(targets)))
 
-        await getattr(seq, method_name)()
+    original = Sequence.move_to
+    Sequence.move_to = _record  # type: ignore[method-assign, assignment]
+    try:
+        for index, info in enumerate(seq.steps):
+            current = index
+            await getattr(seq, info.method_name)()
+    finally:
+        Sequence.move_to = original  # type: ignore[method-assign]
+    return calls
 
-        assert sink == expected
 
-    def test_step_labels_unchanged(self) -> None:
-        seq = SubHandSequence()
+class TestSubHandSteps:
+    def test_ワーク_4_個ぶんの_66_ステップである(self) -> None:
+        labels = [s["label"] for s in SubHandSequence().steps_info]
 
-        assert [s["label"] for s in seq.steps_info] == [
-            "初期位置へ移動",
-            "ワーク吸着",
-            "ワーク解放 (配置)",
-            "初期位置へ復帰",
+        assert labels == _expected_sub_labels()
+        assert len(labels) == 1 + 16 * 4 + 1
+
+    def test_トリガー待ちは仕様どおりの位置だけに付く(self) -> None:
+        steps = SubHandSequence().steps_info
+
+        waiting = {s["index"] for s in steps if s["require_trigger"]}
+
+        assert waiting == {1 + 16 * n + offset for n in range(4) for offset in _SUB_TRIGGER_OFFSETS}
+
+    async def test_回転の直前は前端スイッチから_150mm_以上離れている(self) -> None:
+        table = _load_shipped("sub_hand_positions.yaml")
+        at: str | None = None
+        turns = 0
+
+        for index, targets in await _collect_moves(SubHandSequence()):
+            if "sub_y_axis" in targets:
+                at = targets["sub_y_axis"]
+            if "sub_rotate" not in targets:
+                continue
+            turns += 1
+            assert at is not None, f"ステップ {index}: 前後軸の位置が定まらないまま回している"
+            # 前端スイッチの動作点が 0.0mm なので、位置の絶対値がそのまま隙間になる
+            assert abs(table.raw("sub_y_axis", at)) >= _ROTATE_CLEARANCE_MM, (
+                f"ステップ {index}: sub_y_axis が '{at}' に居るまま sub_rotate を回している"
+            )
+            if index > 0:
+                assert at == "clear", (
+                    f"ステップ {index}: 回転可能位置 (clear) を経由せずに回している"
+                )
+
+        assert turns == 1 + 4 * 2
+
+    async def test_前後に動かす直前の昇降は必ず_top(self) -> None:
+        lift: str | None = None
+        moves = 0
+
+        for index, targets in await _collect_moves(SubHandSequence()):
+            if "sub_lift" in targets:
+                lift = targets["sub_lift"]
+            if "sub_y_axis" not in targets:
+                continue
+            moves += 1
+            assert lift == "top", f"ステップ {index}: sub_lift が '{lift}' のまま前後に動かしている"
+
+        assert moves == 1 + 4 * 4 + 1
+
+    async def test_ピッチとオフセットを同じ指令で動かさない(self) -> None:
+        for index, targets in await _collect_moves(SubHandSequence()):
+            assert not {"sub_pitch", "sub_offset"} <= set(targets), (
+                f"ステップ {index}: ピッチとオフセットを同時に動かしている"
+            )
+
+    async def test_ピッチとオフセットは別々のステップである(self) -> None:
+        axes_by_step: dict[int, set[str]] = collections.defaultdict(set)
+        for index, targets in await _collect_moves(SubHandSequence()):
+            axes_by_step[index] |= set(targets)
+
+        together = sorted(
+            index for index, axes in axes_by_step.items() if {"sub_pitch", "sub_offset"} <= axes
+        )
+
+        # 例外は初期位置へ戻すステップだけ。そこも 1 指令ずつ順に送っている
+        assert together == [0]
+
+    async def test_閉じる順はオフセット先_開く順はピッチ先(self) -> None:
+        moves = [
+            (axis, targets[axis])
+            for _, targets in await _collect_moves(SubHandSequence())
+            for axis in ("sub_offset", "sub_pitch")
+            if axis in targets
         ]
 
-    def test_suction_requires_trigger(self) -> None:
+        assert (
+            moves
+            == [("sub_pitch", "open"), ("sub_offset", "open")]
+            + [
+                ("sub_offset", "close"),
+                ("sub_pitch", "close"),
+                ("sub_pitch", "open"),
+                ("sub_offset", "open"),
+            ]
+            * 4
+        )
+
+    async def test_初期位置は弁を閉じてポンプを回してから姿勢を戻す(self) -> None:
+        moves = await _collect_moves(SubHandSequence())
+
+        calls = [targets for index, targets in moves if index == 0]
+
+        assert calls == [
+            {**dict.fromkeys(_VALVE_AXES, "closed"), "pump_vac": "run"},
+            {"sub_lift": "top"},
+            {"sub_y_axis": "retracted"},
+            {"sub_pitch": "open"},
+            {"sub_offset": "open"},
+            {"sub_rotate": "receive"},
+        ]
+
+    async def test_復帰は収納位置へ戻すだけ(self) -> None:
         seq = SubHandSequence()
-        suction = next(s for s in seq.steps_info if s["label"] == "ワーク吸着")
+        last = len(seq.steps) - 1
 
-        assert suction["require_trigger"] is True
+        calls = [targets for index, targets in await _collect_moves(seq) if index == last]
 
-    async def test_release_does_not_stop_vacuum_pump(self) -> None:
-        seq = SubHandSequence()
-        sink, _ = _wire(seq, _SUB_POSITIONS)
-
-        await seq.release_at_place()
-
-        assert "pump_vac" not in [name for name, _ in sink]
+        assert calls == [{"sub_y_axis": "retracted"}]
 
     def test_default_suction_covers_every_valve(self) -> None:
         seq = SubHandSequence()
@@ -332,26 +439,38 @@ class TestSubHandSteps:
         assert seq.suction.axes == tuple(_VALVE_AXES)
         assert seq.suction.enabled() == tuple(_VALVE_AXES)
 
-    async def test_suction_opens_only_selected_pads_and_closes_the_rest(self) -> None:
+    @pytest.mark.parametrize("method_name", _SUB_GRIP_METHODS)
+    async def test_吸着は選ばれたパッドだけ開き残りを閉じ直す(self, method_name: str) -> None:
         seq = SubHandSequence()
         sink, _ = _wire(seq, _SUB_POSITIONS)
         assert seq.suction.select(["valve_2", "valve_5"]) is None
 
-        await seq.grip_by_suction()
+        await getattr(seq, method_name)()
 
         assert dict(sink) == {
             name: (1.0 if name in ("valve_2", "valve_5") else 0.0) for name in _VALVE_AXES
         }
 
-    async def test_suction_refuses_when_no_pad_is_selected(self) -> None:
+    @pytest.mark.parametrize("method_name", _SUB_GRIP_METHODS)
+    async def test_吸着はパッドが選ばれていなければ失敗する(self, method_name: str) -> None:
         seq = SubHandSequence()
         sink, _ = _wire(seq, _SUB_POSITIONS)
         assert seq.suction.select([]) is None
 
         with pytest.raises(SuctionSelectionError):
-            await seq.grip_by_suction()
+            await getattr(seq, method_name)()
 
         assert sink == []
+
+    @pytest.mark.parametrize("method_name", _SUB_RELEASE_METHODS)
+    async def test_解放は弁を閉じるだけでポンプを止めない(self, method_name: str) -> None:
+        seq = SubHandSequence()
+        sink, _ = _wire(seq, _SUB_POSITIONS)
+
+        await getattr(seq, method_name)()
+
+        assert dict(sink) == dict.fromkeys(_VALVE_AXES, 0.0)
+        assert "pump_vac" not in [name for name, _ in sink]
 
 
 def _load_shipped(yaml_name: str) -> PositionTable:
