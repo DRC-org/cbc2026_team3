@@ -990,26 +990,32 @@ class RobotServer:
             return set(), set()
 
         ctx = self._robots[robot_name]
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        now = freshness.now()
+
         candidates = {
             motor_name
             for motor_name, motor in ctx.can_manager.motors.items()
             if motor.is_energized() is False
         }
-        for motor_name in self._inactive_motors.get(robot_name, ()):
-            motor = ctx.can_manager.motors.get(motor_name)
-            # 起動時に失敗した後で自力で励磁されたモータをラッチに居座らせない。
-            if motor is not None and motor.is_energized() is True:
-                continue
-            candidates.add(motor_name)
+        candidates.update(self._inactive_motors.get(robot_name, ()))
 
-        # 鮮度切れは消すのではなく「応答なし」へ移す。`is_energized()` が読む値は
-        # フレームを復号した瞬間にしか書かれないので、途絶しても古い False が張り付く。
-        freshness = FeedbackFreshness(
-            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
-        )
-        now = freshness.now()
+        # 鮮度切れは消すのではなく「応答なし」へ移す。しかも `is_energized()` を一切見ない
+        # —— 読む値はフレームを復号した瞬間にしか書かれず、途絶えてもクリアされないので、
+        # 鮮度が切れた時点で True も False も信用できない。
         unresponsive = {name for name in candidates if freshness.is_stale(name, now)}
-        return candidates - unresponsive, unresponsive
+
+        fresh = candidates - unresponsive
+        # 鮮度が生きているものだけ `is_energized()` を信用する。起動時に失敗した後で
+        # 自力で励磁されたモータをラッチに居座らせない。
+        energized = set()
+        for motor_name in fresh:
+            motor = ctx.can_manager.motors.get(motor_name)
+            if motor is not None and motor.is_energized() is True:
+                energized.add(motor_name)
+        return fresh - energized, unresponsive
 
     def _firmware_unconfirmed_motors(self, robot_name: str) -> list[str]:
         if self._dry_run:

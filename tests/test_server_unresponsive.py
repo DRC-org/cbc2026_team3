@@ -166,6 +166,24 @@ class TestFreshMotorsAreStillReportedAsUnenergized:
 
 
 class TestSelfRecoveredMotorsLeaveTheLatch:
+    async def test_鮮度が切れたら自力励磁の報告も信用せず応答なしへ載せる(self) -> None:
+        fx, mgr, bus, motor = _build(bus_channel="vuna")
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, edulite_feedback(motor, mode_state=_MODE_MOTOR))
+            _go_stale(mgr, "rotate_l")
+            fx.expire_energize_grace()
+            fx.server.set_initial_inactive_motors(_ROBOT, ["rotate_l"])
+
+            safety = _safety(fx)
+            assert safety["unenergized_motors"] == []
+            assert safety["unresponsive_motors"] == ["rotate_l"], (
+                "鮮度切れの `is_energized() is True` を信用して、どちらの欄からも消えている"
+            )
+
+        bus.shutdown()
+
     async def test_自力で励磁されたモータはラッチに居ても報告されない(self) -> None:
         fx, mgr, bus, motor = _build(bus_channel="vun6")
         app = fx.create_app()

@@ -135,12 +135,6 @@
 - **`lib/drivers/edulite05.py` の `VEL_MIN/MAX = ±50.0` / `TORQUE_MIN/MAX = ±6.0` に
   リポジトリ内の典拠が無い。** トルク基準の歯止めを入れる前に実測で確認が要る
 - **`docs/architecture.md` の「EDULITE 05 × 3」が config（2 台）と食い違う**
-- **`is_energized()` の古い `True` は鮮度で洗われない。** `_split_inactive_motors` は
-  ラッチに居ても `True` を返すモータを、鮮度を見る前に候補から外す。励磁されたことを
-  1 度報告してから黙ったモータは `unenergized_motors` にも `unresponsive_motors` にも
-  現れない。**今回直した古い `False` の張り付きと同型**（`mode_state` は復号時にしか
-  書かれない）。窓は狭い（`_inactive_motors` は励磁のたびに置き直される）が、PC 側が
-  待ちきれず失敗と記録した後にモータが実際は励磁されていた場合に成立する
 - **「無励磁」と「応答なし」の境目にヒステリシスが無い。** `feedback_timeout_ms` の既定
   500ms に対して `state` は 50ms ごとに配る。バスが劣化して到達が 500ms 付近を行き来すると
   同じモータが 2 つの欄を往復し、**再励磁ボタンが出たり消えたりする**。デバウンスを
