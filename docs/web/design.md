@@ -252,3 +252,10 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 `22rem` 固定で縦に伸びる（`docs/web/pitfalls.md` の「daisyUI の `.alert` は grid」）。
 
 **トーストは履歴ではない** —— 数秒で消えるので、Monitor の試合中は `EventFeed` が残す。
+
+**理由文に Markdown を書かない。** トーストも零点合わせパネルの結果欄も素のテキストとして
+描くので、`**強調**` はアスタリスク込みでそのまま出る。強調は記号ではなく語順と文の分け方で
+出すこと。**サーバー側の文面がこの規則の対象**で（`lib/motion_guard.py` の `GuardViolation` と
+`lib/sequence/homing.py` の `HomingError`）、`tests/test_motion_guard.py::TestMessagesAreNotMarkdown`
+がソースの文字列リテラルを走査して固定する。ログにしか出ない文面（`activation_block_reason()`）は
+対象外 —— journalctl で読むので記号があっても害が無い。

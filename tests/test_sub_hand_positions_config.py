@@ -337,7 +337,3 @@ class TestVenueCardNumbers:
         # 手動で寄せる先と、零点確定が離脱する量。この 2 つで手が動く
         assert f"{table.raw('sub_lift', 'top'):g}mm" in text
         assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
-
-    def test_操縦者に出る文面に_Markdown_の記号を混ぜない(self, table: PositionTable) -> None:
-        """トーストもパネルも Markdown を解釈しないので、`**` は生のまま出る。"""
-        assert "**" not in _rejection(table)

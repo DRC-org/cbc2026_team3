@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import ast
+import pathlib
+
 import pytest
 
 from lib.drivers.base import NO_TELEMETRY, ControlMode, TelemetrySupport
@@ -774,78 +777,59 @@ class TestNotWith:
         )
 
 
+#: 操縦者の画面へ出る文面を組むモジュール。**ここに `**` を書かない。**
+#:
+#: - `lib/motion_guard.py` の `GuardViolation` → トースト (`command_rejected`) と
+#:   零点合わせパネルの結果欄
+#: - `lib/sequence/homing.py` の `HomingError` → 零点合わせパネルの結果欄
+#:
+#: `lib/drivers/dm3520.py` の `activation_block_reason()` は入れていない ——
+#: 呼ぶのは `CANManager._activate_one` の `logger.error` だけで、画面へ出る側
+#: (`health_detail()`) は別の文面を持つ。ログは journalctl で読むので記号は害にならない
+_OPERATOR_MESSAGE_MODULES = ("lib/motion_guard.py", "lib/sequence/homing.py")
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _message_literals(relative: str) -> list[tuple[int, str]]:
+    """docstring を除いた文字列リテラル。コメントは `ast` に載らない。"""
+    tree = ast.parse((_REPO_ROOT / relative).read_text())
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and (body := getattr(node, "body", []))
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    }
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
 class TestMessagesAreNotMarkdown:
     """操縦者の画面に出る文面に `**` を混ぜない。
 
-    トースト (`web/src/components/shell/Toaster.tsx`) も零点合わせパネルも
-    Markdown を解釈しないので、アスタリスクが生のまま出て読みにくくなる。
-    強調は記号ではなく語順と文の分け方で出すこと。**docstring とコメントは対象外**
+    トースト (`web/src/components/shell/Toaster.tsx`) も零点合わせパネルも Markdown を
+    解釈しないので、アスタリスクが生のまま出て読みにくくなる。強調は記号ではなく語順と
+    文の分け方で出すこと。**docstring とコメントは対象外**
     (あれはエディタと GitHub で読むもので、Markdown が効く)。
+
+    **見るのはソースの文字列リテラルである。** 文面 1 つずつを起こして確かめると、
+    足した文面をテストへ書き足し忘れたぶんが黙って漏れる。
     """
 
-    def _raised(self, call) -> str:
-        with pytest.raises(GuardViolation) as exc:
-            call()
-        return str(exc.value)
+    @pytest.mark.parametrize("relative", _OPERATOR_MESSAGE_MODULES)
+    def test_文面に強調記号を書かない(self, relative: str) -> None:
+        offenders = [
+            f"{relative}:{line}: {text[:40]}"
+            for line, text in _message_literals(relative)
+            if "**" in text
+        ]
 
-    def test_跳躍量(self) -> None:
-        message = self._raised(
-            lambda: _guard().check_command(
-                axis="sub_y_axis",
-                current=0.0,
-                target=999.0,
-                unit="mm",
-                sensor_active=_sensors(),
-            )
-        )
-
-        assert "**" not in message
-
-    def test_可動端が押されている(self) -> None:
-        message = self._raised(
-            lambda: _guard().check_limit(
-                axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=True)
-            )
-        )
-
-        assert "**" not in message
-
-    def test_可動端が読めていない(self) -> None:
-        message = self._raised(
-            lambda: _guard().check_limit(
-                axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=None)
-            )
-        )
-
-        assert "**" not in message
-
-    def test_トルク(self) -> None:
-        message = self._raised(lambda: _guard().check_torque(axis="sub_y_axis", torque=9.0))
-
-        assert "**" not in message
-
-    def test_干渉_区間の外(self) -> None:
-        message = self._raised(
-            lambda: _interference_guard().check_interference(
-                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(-10.0, -10.0)
-            )
-        )
-
-        assert "**" not in message
-
-    def test_干渉_読めていない(self) -> None:
-        message = self._raised(
-            lambda: _interference_guard().check_interference(
-                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(None, None)
-            )
-        )
-
-        assert "**" not in message
-
-    def test_同じ指令で動かせない(self) -> None:
-        guard = MotionGuard(MotionGuardSpec(not_with=("sub_offset",)))
-        message = self._raised(
-            lambda: guard.check_not_with(axis="sub_pitch", siblings={"sub_pitch", "sub_offset"})
-        )
-
-        assert "**" not in message
+        assert not offenders, "操縦者に出る文面に Markdown の記号がある: " + " / ".join(offenders)

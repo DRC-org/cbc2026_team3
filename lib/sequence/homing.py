@@ -423,8 +423,8 @@ class HomingRunner:
                 f"軸 '{spec.name}' を原点センサ {_label(homing.sensor_names)} から"
                 "離せませんでした"
                 f" ({limit}{spec.unit} 動かしても OFF に"
-                " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
-                " なるので、ファーム側の極性設定 (sensorActiveLow) を"
+                " ならない)。まずセンサの極性を疑ってください —— 逆だとどこへ動かしても"
+                " ON のままになります。ファーム側の極性設定 (sensorActiveLow) を"
                 "接点の固着・配線の短絡と併せて確認してください。"
                 " 極性が正しいなら ON 区間がこの距離より広いので"
                 " homing.release_distance を実測へ広げてください"
@@ -511,8 +511,8 @@ class HomingRunner:
                     raise HomingError(
                         f"軸 '{spec.name}' の整列段でモータ '{motor}' が指令しても動きません"
                         f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
-                        "**機構に遊びが無いと片側だけを動かせず、相方を引きずったまま"
-                        "止まって見えます** —— 機構の引っかかり・モータの励磁と"
+                        "機構に遊びが無いと片側だけを動かせず、相方を引きずったまま"
+                        "止まって見えます。機構の引っかかり・モータの励磁と"
                         "併せて確認してください"
                     )
 
@@ -555,8 +555,9 @@ class HomingRunner:
             raise HomingError(
                 f"軸 '{spec.name}' の整列段でモータ '{motor}' を {limit}{spec.unit}"
                 f" 動かしても原点センサ '{sensors[motor]}' が反応しませんでした。"
-                "**センサの極性が逆だと押しても ON になりません** —— ファーム側の"
-                "極性設定 (sensorActiveLow) と、スイッチの配線・断線を確認してください"
+                "まずセンサの極性を疑ってください —— 逆だと押しても ON になりません。"
+                "ファーム側の極性設定 (sensorActiveLow) と、"
+                "スイッチの配線・断線を確認してください"
             )
 
     async def _wait_align_step(
