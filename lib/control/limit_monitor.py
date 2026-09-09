@@ -14,6 +14,15 @@
 **見るのは可動端だけ。** `max_step` は「1 指令で実測位置から離れてよい量」の判定なので、
 移動中の実測位置に当てると長距離移動の途中で必ず誤発火する。トルクは誤発火が怖いので
 ここでは見ない。**判定そのものは `MotionGuard.check_limit` が持ち、ここには書き写さない。**
+
+**現在値 (`sensor_active`) だけでは観測周期 (20ms) より狭い ON 区間を丸ごと落とす**
+(`rotate` はスイッチの 2deg を約 18ms で通過する)。零点確定が探索の到達判定で踏んだのと
+同じ穴なので、同じ材料 —— 接触 (OFF→ON) の単調カウンタ —— で塞ぐ。判定へ渡す前の
+**入力の作り方**だけがここの仕事で、`MotionGuard` 側は三値をそのまま受け取る。
+
+**発火は回数で数える。** 目標を実測へ書き直すと `is_reached` は必ず成立するので、
+`move_to` は「その軸で移動を止めた回数」が増えたかどうかで介入を知る (終了時の状態を
+見る方式では、触れて離れた接点のバウンドを取りこぼす)。
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ from typing import TYPE_CHECKING
 from lib.control.periodic import PeriodicTask
 from lib.drivers.base import ControlMode
 from lib.motion_guard import GuardViolation, MotionGuard
+from lib.sequence.engine import NO_LIMIT_INTERVENTION, LimitIntervention
 from lib.sequence.motors import AxisHandle
 
 if TYPE_CHECKING:
@@ -42,6 +52,9 @@ DEFAULT_INTERVAL_S = 0.02
 
 CourtSource = Callable[[], "Court"]
 SleepFunc = Callable[[float], Awaitable[None]]
+#: 接触 (OFF→ON) の累計。**単調増加で読んでも減らない**ので読み手が何人いても壊れない。
+#: `None` = カウンタを提供しないドライバ (零点確定の `SensorContactCount` と同じ約束)
+SensorContactCount = Callable[[str], int | None]
 
 
 class LimitMonitor(PeriodicTask):
@@ -51,6 +64,7 @@ class LimitMonitor(PeriodicTask):
         motors: MotorGroup,
         *,
         sensor_active: SensorReader,
+        sensor_contact_count: SensorContactCount,
         court: CourtSource,
         interval_s: float = DEFAULT_INTERVAL_S,
         time_source: Callable[[], float] = time.monotonic,
@@ -60,10 +74,17 @@ class LimitMonitor(PeriodicTask):
         self._positions = positions
         self._motors = motors
         self._sensor_active = sensor_active
+        self._sensor_contact_count = sensor_contact_count
         self._court = court
         self._guards = _build_guards(positions, motors)
+        self._sensor_names = _limit_sensor_names(positions, self._guards)
         # 50Hz で撃ち続けるとバスが埋まるので、同じ目標のあいだは撃ち直さない
         self._stopped: dict[str, float] = {}
+        self._interventions: dict[str, LimitIntervention] = {}
+        # 読み手は自分で基準値を控える (カウンタは読んでも減らないので、同じセンサを
+        # 読む零点確定のぶんを消さない)。周期ごとに 1 度だけ進めるので二重に数えない
+        self._contact_baseline: dict[str, int] = {}
+        self._contacted: set[str] = set()
 
     @property
     def axis_names(self) -> tuple[str, ...]:
@@ -73,6 +94,10 @@ class LimitMonitor(PeriodicTask):
     def stopped_axes(self) -> frozenset[str]:
         return frozenset(self._stopped)
 
+    def intervention(self, axis: str) -> LimitIntervention:
+        """その軸で移動を止めた回数と直近の理由。**単調増加で、離れても減らない。**"""
+        return self._interventions.get(axis, NO_LIMIT_INTERVENTION)
+
     def _label(self) -> str:
         return f"可動端監視 ({', '.join(self.axis_names) or '対象なし'})"
 
@@ -80,11 +105,41 @@ class LimitMonitor(PeriodicTask):
         await self.step()
 
     async def step(self) -> None:
+        self._poll_contacts()
         for axis in self._guards:
             try:
                 await self._check_axis(axis)
             except Exception:
                 self._log.exception(f"axis:{axis}", "可動端監視で例外 (axis=%s)", axis)
+
+    def _poll_contacts(self) -> None:
+        """この周期に「前回から接触したセンサ」を確定する。
+
+        基準値を周期ごとに 1 度だけ進めるので、同じ接触を次の周期でもう一度
+        数えることはない。**初回は基準値を置くだけ** —— 監視を始める前 (前回の
+        零点確定や手動操縦) に数えたぶんまで見ると、最初の移動でいきなり止まる。
+        """
+        self._contacted.clear()
+        for name in self._sensor_names:
+            count = self._sensor_contact_count(name)
+            if count is None:
+                continue
+            previous = self._contact_baseline.get(name)
+            if previous is not None and count > previous:
+                self._contacted.add(name)
+            self._contact_baseline[name] = count
+
+    def _sensor_state(self, name: str) -> bool | None:
+        """判定へ渡すセンサ状態。**三値のまま運ぶ。**
+
+        観測周期より狭い ON 区間は現在値に現れないので、この周期に数えた接触も
+        「押されている」として渡す。`None` (読めていない) を `False` へ丸めないのは
+        `MotionGuard` 側の約束そのもの。
+        """
+        active = self._sensor_active(name)
+        if active is None:
+            return None
+        return bool(active) or name in self._contacted
 
     async def _check_axis(self, axis: str) -> None:
         spec = self._positions.axis(axis).for_court(self._court())
@@ -97,14 +152,14 @@ class LimitMonitor(PeriodicTask):
         if self._stopped.get(axis) == target:
             return
 
-        observed = spec.to_value({h.name: h.driver.feedback_position() for h in handles})
-        delta = target - observed
+        # 書き戻す値は指令の単位のまま持つ。値へ換算して戻すと往復の丸め誤差が
+        # そのまま delta に残り、**止めるための指令が入口の歯止めに拒否される**
+        observed_commands = {h.name: h.driver.feedback_position() for h in handles}
+        delta = target - spec.to_value(observed_commands)
         try:
-            self._guards[axis].check_limit(
-                axis=axis, delta=delta, sensor_active=self._sensor_active
-            )
+            self._guards[axis].check_limit(axis=axis, delta=delta, sensor_active=self._sensor_state)
         except GuardViolation as exc:
-            await self._stop_here(axis, spec, handles, observed, exc)
+            await self._stop_here(axis, spec, handles, observed_commands, exc)
             return
         self._stopped.pop(axis, None)
 
@@ -121,20 +176,23 @@ class LimitMonitor(PeriodicTask):
         axis: str,
         spec: AxisSpec,
         handles: list[MotorHandle],
-        observed: float,
+        observed_commands: dict[str, float],
         exc: GuardViolation,
     ) -> None:
-        await AxisHandle(spec, handles, sensor_active=self._sensor_active).set_target_value(
-            spec.to_commands(observed)
+        # 書き戻しに失敗しても要求を曲げたことは変わらないので、先に数える
+        self._interventions[axis] = LimitIntervention(
+            count=self.intervention(axis).count + 1, reason=str(exc)
         )
-        # 単位換算の往復で桁の下がずれると、次の周期に一致せず撃ち直しになる
+        await AxisHandle(spec, handles, sensor_active=self._sensor_state).set_target_value(
+            observed_commands
+        )
         written = self._commanded_value(spec, handles)
         if written is not None:
             self._stopped[axis] = written
         self._logger.warning(
             "移動中に可動端で停止: axis=%s, 実測=%.3f%s, 目標を実測へ書き直しました (%s)",
             axis,
-            observed,
+            spec.to_value(observed_commands),
             spec.unit,
             exc,
         )
@@ -156,3 +214,21 @@ def _build_guards(positions: PositionTable, motors: MotorGroup) -> dict[str, Mot
             continue
         guards[name] = MotionGuard(spec.guard)
     return guards
+
+
+def _limit_sensor_names(
+    positions: PositionTable, guards: dict[str, MotionGuard]
+) -> tuple[str, ...]:
+    """監視対象の軸が持つ端センサ名。**両端とも毎周期読む。**
+
+    進む向きの端だけを読むと、反対端は基準値を持たないまま残り、向きが変わった
+    最初の周期に「初回なので数えない」で狭い接触を落とす。
+    """
+    names: list[str] = []
+    for axis in guards:
+        guard = positions.axis(axis).guard
+        limits = None if guard is None else guard.limits
+        if limits is None:
+            continue
+        names.extend(name for name in (limits.plus, limits.minus) if name is not None)
+    return tuple(dict.fromkeys(names))

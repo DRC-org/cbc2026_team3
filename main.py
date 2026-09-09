@@ -46,7 +46,12 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
-from lib.sequence.engine import Sequence
+from lib.sequence.engine import (
+    NO_LIMIT_INTERVENTION,
+    LimitIntervention,
+    LimitInterventions,
+    Sequence,
+)
 from lib.sequence.homing import HomingError, HomingRunner, homing_axis_names
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
@@ -308,6 +313,7 @@ def _wire_motor_check_sequence(
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
     sync_monitors: list[SyncMonitor],
+    limit_monitors: list[LimitMonitor],
     target_refreshers: list[TargetRefresher],
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
@@ -344,6 +350,9 @@ def _wire_motor_check_sequence(
 
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
+    # 動作確認も `move_to` で駆動するので、保護に曲げられた移動はここでも失敗させる
+    # (黙って進むと、軸が途中に居るまま全ステップ PASSED になる)
+    sequence.bind_limit_interventions(_make_limit_interventions(limit_monitors))
 
     homing_axes = homing_axis_names(merged)
     if homing_axes:
@@ -351,17 +360,6 @@ def _wire_motor_check_sequence(
         freshness = FeedbackFreshness(
             _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
         )
-
-        def _sensor_contact_count(name: str) -> int | None:
-            # カウンタを持たないドライバで現在値へ落とすと、ON 区間が step より狭い
-            # ときの取りこぼしが黙って戻る。判断は HomingRunner が持つ
-            sensor = sensors.get(name)
-            if sensor is None:
-                return None
-            count = getattr(sensor, "sensor_contact_count", None)
-            if not isinstance(count, int):
-                return None
-            return count
 
         def _sensor_is_stale(name: str) -> bool:
             if name not in sensors:
@@ -415,7 +413,7 @@ def _wire_motor_check_sequence(
 
         runner = HomingRunner(
             sensor_active=sensor_read,
-            sensor_contact_count=_sensor_contact_count,
+            sensor_contact_count=_make_sensor_contact_reader(can_managers),
             sensor_is_stale=_sensor_is_stale,
             motor_is_stale=_motor_is_stale,
             motor_is_energized=_motor_is_energized,
@@ -478,6 +476,27 @@ def _make_sensor_reader(
         return bool(getattr(sensor, "sensor_active", False))
 
     return sensor_active
+
+
+def _make_sensor_contact_reader(managers: list[CANManager]) -> Callable[[str], int | None]:
+    """接触 (OFF→ON) の累計の読み口。**カウンタを持たないドライバは `None`。**
+
+    現在値へ落とすと、ON 区間が観測周期より狭い接触が黙って取りこぼされる。
+    **零点確定と移動中の可動端監視が同じ読み口を使う** —— カウンタは読んでも
+    減らないので、読み手が何人いても互いのぶんを消さない (基準値は読み手が控える)。
+    """
+    sensors = {name: sensor for mgr in managers for name, sensor in mgr.sensors.items()}
+
+    def contact_count(name: str) -> int | None:
+        sensor = sensors.get(name)
+        if sensor is None:
+            return None
+        count = getattr(sensor, "sensor_contact_count", None)
+        if not isinstance(count, int):
+            return None
+        return count
+
+    return contact_count
 
 
 def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
@@ -746,6 +765,7 @@ def _build_limit_monitors(
     sequence: Sequence,
     *,
     sensor_active: Callable[[str], bool | None],
+    sensor_contact_count: Callable[[str], int | None],
 ) -> list[LimitMonitor]:
     """移動中の可動端監視。`guard.limits` を書いた軸が 1 本も無ければ回さない。
 
@@ -759,11 +779,29 @@ def _build_limit_monitors(
         positions,
         sequence.motors,
         sensor_active=sensor_active,
+        sensor_contact_count=sensor_contact_count,
         court=lambda: sequence.court,
     )
     if not monitor.axis_names:
         return []
     return [monitor]
+
+
+def _make_limit_interventions(monitors: list[LimitMonitor]) -> LimitInterventions:
+    """`move_to` が「保護に曲げられた移動」を知る読み口。
+
+    保護が目標を実測へ書き直すと到達判定は必ず成立するので、配線しないと**軸は
+    途中に居るのにシーケンスだけが先へ進む**。軸名はロボット横断に一意なので、
+    その軸を見ている監視 1 つが答える。
+    """
+
+    def interventions(axis: str) -> LimitIntervention:
+        for monitor in monitors:
+            if axis in monitor.axis_names:
+                return monitor.intervention(axis)
+        return NO_LIMIT_INTERVENTION
+
+    return interventions
 
 
 def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
@@ -1010,7 +1048,13 @@ def _wire_one_robot(
 
     manual = _build_manual_controller(seq, positions)
 
-    limit_monitors = _build_limit_monitors(positions, seq, sensor_active=sensor_read)
+    limit_monitors = _build_limit_monitors(
+        positions,
+        seq,
+        sensor_active=sensor_read,
+        sensor_contact_count=_make_sensor_contact_reader([can_manager]),
+    )
+    seq.bind_limit_interventions(_make_limit_interventions(limit_monitors))
 
     server.add_robot(
         robot_name,
@@ -1200,6 +1244,7 @@ async def main() -> None:
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
+        limit_monitors=[monitor for w in wirings for monitor in w.limit_monitors],
         target_refreshers=[r for w in wirings for r in w.target_refreshers],
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         # 付け替えの窓で停止が入ると、停止の disable の後に enable が届いて励磁が残る。

@@ -12,7 +12,14 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
-from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
+from lib.sequence.engine import (
+    NO_LIMIT_INTERVENTION,
+    AxisSyncError,
+    LimitIntervention,
+    Sequence,
+    SequenceTimeoutError,
+    step,
+)
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, WaitInterruptedError
 from lib.sequence.positions import load_position_table
 from tests.fake_drivers import StubFeedbackDriver
@@ -452,3 +459,80 @@ class TestNonPositionAxis:
         await seq.move_to({"spinner": "run"})
 
         assert drivers["spinner"].commands == [(ControlMode.VELOCITY, 100.0)]
+
+
+class _Interventions:
+    """`LimitMonitor` の代わり。**回数と理由だけを注入で運ぶ** (層を 1 枚で見る)。"""
+
+    def __init__(self) -> None:
+        self.records: dict[str, LimitIntervention] = {}
+
+    def __call__(self, axis: str) -> LimitIntervention:
+        return self.records.get(axis, NO_LIMIT_INTERVENTION)
+
+    def stop(self, axis: str, reason: str) -> None:
+        self.records[axis] = LimitIntervention(count=self(axis).count + 1, reason=reason)
+
+
+class _BentDriver(_EchoDriver):
+    """指令を受けた瞬間に可動端保護が割り込んだ機体。
+
+    保護は目標を実測へ書き直すので、**到達判定は必ず成立する** (`reaches=True` の
+    まま止まる)。回数を見ないと、軸が途中に居るのにシーケンスだけが先へ進む。
+    """
+
+    def __init__(self, name: str, interventions: _Interventions, axis: str) -> None:
+        super().__init__(name)
+        self._interventions = interventions
+        self._axis = axis
+
+    def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        self._interventions.stop(self._axis, "可動端センサ 'rear_switch' が押されているため")
+        return super().encode_target(mode, value)
+
+
+class TestLimitIntervention:
+    """**曲げられた移動を成功と読まない。**"""
+
+    def _sequence(self, driver: _EchoDriver, interventions: _Interventions) -> Sequence:
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        group.add(MotorHandle(driver.name, driver, mgr, poll_interval=0.001))
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+        seq.bind_limit_interventions(interventions)
+        return seq
+
+    async def test_止められた移動は失敗する(self) -> None:
+        interventions = _Interventions()
+        seq = self._sequence(_BentDriver("lift_motor", interventions, "lift_motor"), interventions)
+
+        with pytest.raises(SequenceTimeoutError, match="rear_switch"):
+            await seq.move_to({"lift_motor": "work"})
+
+    async def test_止められなかった移動は成功する(self) -> None:
+        interventions = _Interventions()
+        seq = self._sequence(_EchoDriver("lift_motor"), interventions)
+
+        await seq.move_to({"lift_motor": "work"})
+
+    async def test_前の移動で数えたぶんでは失敗しない(self) -> None:
+        """回数は単調増加なので、移動ごとに前後で比べないと二度目以降が必ず落ちる。"""
+        interventions = _Interventions()
+        seq = self._sequence(_EchoDriver("lift_motor"), interventions)
+        interventions.stop("lift_motor", "前の移動で止まった")
+
+        await seq.move_to({"lift_motor": "work"})
+
+    async def test_配線しなければ従来どおり(self) -> None:
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        group.add(MotorHandle("lift_motor", _EchoDriver("lift_motor"), mgr, poll_interval=0.001))
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+
+        await seq.move_to({"lift_motor": "work"})

@@ -51,6 +51,26 @@ class StepFailure:
         return {"step_index": self.step_index, "step": self.label, "message": self.message}
 
 
+@dataclass(frozen=True)
+class LimitIntervention:
+    """可動端保護がその軸で移動を止めた回数と、直近の理由。
+
+    **回数と理由は 1 組で運ぶ。** 別々に取れる形にすると「回数を見てから理由を
+    取り直す」経路が書け、そのあいだに保護が別の軸で発火すると理由だけが
+    入れ替わる (どの軸で何が起きたか分からない失敗メッセージになる)。
+    """
+
+    count: int
+    reason: str | None = None
+
+
+#: 軸名 → その軸の `LimitIntervention`。**移動中の保護 (`LimitMonitor`) は
+#: `lib/control/` に居るので、注入で受けて import の向きを作らない**
+LimitInterventions = Callable[[str], LimitIntervention]
+
+NO_LIMIT_INTERVENTION = LimitIntervention(count=0)
+
+
 def step(
     label: str,
     *,
@@ -101,9 +121,18 @@ class Sequence:
         self._positions: PositionTable | None = None
         self._available_axes: frozenset[str] | None = None
         self._excluded_steps: tuple[ExcludedStep, ...] = ()
+        self._limit_interventions: LimitInterventions | None = None
 
     def bind_motors(self, group: MotorGroup) -> None:
         self._motors = group
+
+    def bind_limit_interventions(self, interventions: LimitInterventions) -> None:
+        self._limit_interventions = interventions
+
+    def _limit_intervention(self, axis: str) -> LimitIntervention:
+        if self._limit_interventions is None:
+            return NO_LIMIT_INTERVENTION
+        return self._limit_interventions(axis)
 
     @property
     def has_motors(self) -> bool:
@@ -169,6 +198,9 @@ class Sequence:
     ) -> None:
         table = self.positions
         pending: list[tuple[AxisHandle, str, float | None]] = []
+        # 保護は目標を実測位置へ書き直すので `is_reached` は必ず成立する。控えないと
+        # 軸が途中に居るままシーケンスだけが先へ進む
+        before = {axis: self._limit_intervention(axis) for axis in targets}
 
         for axis, position_name in targets.items():
             spec = table.axis(axis).for_court(self.court)
@@ -188,6 +220,18 @@ class Sequence:
                 for handle, _, wait_s in pending
             )
         )
+        # 終了時の状態ではなく回数で見る。接点がバウンドして触れて離れると、軸は
+        # 触れた位置で止まったままなのに状態だけが戻る
+        stopped = [
+            f"{axis}: {now.reason}"
+            for axis, previous in before.items()
+            if (now := self._limit_intervention(axis)).count != previous.count
+        ]
+        if stopped:
+            raise SequenceTimeoutError(
+                f"シーケンス '{self.name}': 可動端保護が移動を止めました ({', '.join(stopped)})"
+            )
+
         failed = [
             f"{handle.name}->{position_name}"
             for (handle, position_name, _), reached in zip(pending, results, strict=True)

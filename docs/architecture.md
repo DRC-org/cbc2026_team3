@@ -135,6 +135,8 @@ CAN フレーム
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
 | `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバの `SET_ZERO`）を解決 |
 | `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
+| `_make_sensor_reader` / `_make_sensor_contact_reader` | 可動端インターロックと零点確定が共有するセンサの読み口。前者は三値の現在値（`None` = 読めていない）、後者は接触（OFF→ON）の累計（`None` = カウンタを提供しないドライバ） |
+| `_make_limit_interventions` | `LimitMonitor` が止めた回数を `Sequence.bind_limit_interventions` へ渡す（保護に曲げられた `move_to` を失敗させる） |
 | `_build_manual_controller` | シーケンスと**同じ** `MotorGroup` を共有する `ManualController` |
 | `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す |
 | `_read_operstate` | `/sys/class/net/<ch>/operstate` を読み、down なら起動ログへ ERROR 1 行（起動は止めない） |
@@ -312,7 +314,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `control/pid.py` / `trajectory.py` | モータ非依存 PID（測定値微分 / conditional integration / デッドバンド）/ 台形速度プロファイル |
 | `control/position_loop.py` | M3508 の PC 側位置制御ループ（バス単位・200Hz） |
 | `control/sync_monitor.py` | 左右ペア軸のずれを常時監視（50Hz）。超過で全体緊急停止 |
-| `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit` |
+| `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit`。観測周期より狭い ON 区間は接触の累計で拾い、止めた回数（`intervention()`）を `move_to` へ渡す |
 | `control/target_refresh.py` | `GenericTargetRefresher` / `QueryDrivenTargetRefresher`（ともに 20Hz） |
 | `sequence/positions.py` | 位置定数 yaml の読み込み・単位換算・論理軸の解決（`PositionTable` / `AxisSpec`） |
 | `sequence/homing.py` / `motors.py` / `engine.py` | 零点確定（`HomingRunner`。センサ読みと原点確定は注入）/ `MotorHandle` と `AxisHandle` / `@step` ベースのシーケンスエンジン |
@@ -553,7 +555,7 @@ EDULITE なので M3508 の位置制御ループを持たず、この段には�
 |---|---|---|---|
 | `M3508PositionLoop` | 200Hz | バス上の全 M3508 | `0x200` 電流指令フレーム（1 周期 1 通） |
 | `SyncMonitor` | 50Hz | `sync_tolerance` を持つ全軸 | 送信しない（監視のみ） |
-| `LimitMonitor` | 50Hz | `guard.limits` を持つ全軸 | 発火した軸にだけ「その場の実測位置」を目標として 1 通 |
+| `LimitMonitor` | 50Hz | `guard.limits` を持つ全軸 | 発火した軸にだけ「その場の実測位置」を目標として 1 通（**指令の単位のまま**書き戻す。値へ換算して戻すと往復の丸め誤差で入口の歯止めに拒否される） |
 | `GenericTargetRefresher` | 20Hz | generic ドライバのモータ | `SET_TARGET` の再送 |
 | `QueryDrivenTargetRefresher` | 20Hz | EDULITE 05 + DM3520（`_QUERY_DRIVEN_DRIVERS`） | 目標値 or `idle_target_value()` のラッチ値 |
 
@@ -734,6 +736,7 @@ class PickAndPlace(Sequence):
 | 到達待ち | 軸ごとに `wait_reached(tolerance, timeout)` を**並列**実行 |
 | タイムアウト | 軸ごとの `timeout_s`。`move_to(..., timeout=)` で上書き可 |
 | タイムアウト時 | `SequenceTimeoutError` を送出 |
+| 可動端で曲げられたとき | 指令の前後で `LimitIntervention.count`（注入。既定は「保護なし」）を比べ、増えていれば理由を添えて `SequenceTimeoutError`。到達判定は保護の書き戻しで必ず成立するので、これが無いと軸が途中に居るまま次のステップへ進む |
 | 指令値の後始末 | **クリアしない**（昇降軸で保持トルクを失うとワークごと落下する） |
 | 呼び方 | 複数軸は 1 回の `move_to` へまとめて渡す（分けると待ちが軸の数だけ直列に積み上がる） |
 
