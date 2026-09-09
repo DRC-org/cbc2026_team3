@@ -39,6 +39,23 @@ const GRIPPER: ManualAxis = {
   motors: ["gripper"],
 };
 
+const VALVE: ManualAxis = {
+  name: "valve_1",
+  unit: "on_off",
+  command_mode: "on_off",
+  value: null,
+  target: 0,
+  manual: null,
+  manual_always: true,
+  deviation: null,
+  sync_tolerance: null,
+  positions: [
+    { name: "closed", value: 0 },
+    { name: "open", value: 1 },
+  ],
+  motors: ["valve_1"],
+};
+
 const MANUAL: ManualState = { mode: "manual", axes: [Y_AXIS, GRIPPER] };
 
 const TWO_STEERABLE: ManualState = {
@@ -137,6 +154,21 @@ describe("ManualPanel", () => {
     expect(screen.getByText("緊急停止中は手動操縦できません")).toBeInTheDocument();
     await user.click(screen.getByLabelText("gripper を open へ"));
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("on_off 軸は行ではなく丸トグルの群に出す", () => {
+    renderPanel({ mode: "manual", axes: [Y_AXIS, GRIPPER, VALVE] });
+
+    expect(screen.getByLabelText("valve_1 を ON にする")).toBeInTheDocument();
+    expect(screen.queryByLabelText("valve_1 を open へ")).toBeNull();
+  });
+
+  it("ON 側 / OFF 側のどちらかが欠けた on_off 軸は群に出さず、通常の行として出す", () => {
+    const broken = { ...VALVE, positions: [{ name: "open", value: 1 }] };
+    renderPanel({ mode: "manual", axes: [Y_AXIS, broken] });
+
+    expect(screen.queryByLabelText("valve_1 を ON にする")).toBeNull();
+    expect(screen.getByLabelText("valve_1 を open へ")).toBeInTheDocument();
   });
 
   it("軸が 1 つも無ければ理由を説明する", () => {
