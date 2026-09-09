@@ -37,8 +37,18 @@ _COURT_POSITIONS = {
             "tolerance": 1.0,
             "manual": {"min": -50.0, "max": 50.0, "steps": [1.0]},
         },
+        # コートと無関係な軸。ゲートが軸単位でないことを見るために同じ台へ置く
+        "valve_1": {
+            "unit": "state",
+            "command_unit": "state",
+            "command_mode": "on_off",
+            "manual_always": True,
+        },
     },
-    "positions": {"sub_lift": {"top": 0.0, "bottom": 40.0}},
+    "positions": {
+        "sub_lift": {"top": 0.0, "bottom": 40.0},
+        "valve_1": {"open": 1.0, "closed": 0.0},
+    },
 }
 
 #: コートに依存しない台 (退避路)
@@ -76,31 +86,37 @@ class _IdleSequence(Sequence):
         self.executed.append("idle")
 
 
-def _wire(name: str, positions: dict) -> tuple[Sequence, ManualController, _RecordingDriver]:
+def _wire(
+    name: str, positions: dict
+) -> tuple[Sequence, ManualController, dict[str, _RecordingDriver]]:
     table = load_position_table(positions, source=f"<{name}>")
     sequence = _IdleSequence(name)
     group = MotorGroup()
-    driver: _RecordingDriver | None = None
+    drivers: dict[str, _RecordingDriver] = {}
     mgr = mock_can_manager()
     for axis in table.axes:
         for motor in table.axis(axis).motor_names:
-            driver = _RecordingDriver(motor)
-            group.add(MotorHandle(motor, driver, mgr))
-    assert driver is not None
+            drivers[motor] = _RecordingDriver(motor)
+            group.add(MotorHandle(motor, drivers[motor], mgr))
     sequence.bind_motors(group)
     sequence.bind_positions(table)
-    return sequence, ManualController(group, table), driver
+    return sequence, ManualController(group, table), drivers
 
 
-def _fixture() -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
+def _fixture() -> tuple[ServerFixture, dict[str, dict[str, _RecordingDriver]]]:
     fx = ServerFixture.build()
     fx.freeze_broadcast()
-    drivers: dict[str, _RecordingDriver] = {}
+    drivers: dict[str, dict[str, _RecordingDriver]] = {}
     for name, positions in ((_COURT_ROBOT, _COURT_POSITIONS), (_PLAIN_ROBOT, _PLAIN_POSITIONS)):
-        sequence, manual, driver = _wire(name, positions)
+        sequence, manual, robot_drivers = _wire(name, positions)
         fx.add_robot(name, sequence, manual=manual)
-        drivers[name] = driver
+        drivers[name] = robot_drivers
     return fx, drivers
+
+
+def _sent(drivers: dict[str, dict[str, _RecordingDriver]], robot: str) -> list:
+    """その台のモータへ実際に出た指令。**拒否だけでなく送信そのものを数える。**"""
+    return [cmd for driver in drivers[robot].values() for cmd in driver.commands]
 
 
 async def _send(fx: ServerFixture, payload: dict) -> RecordingClient:
@@ -157,7 +173,7 @@ class TestManualIsBlockedWithoutCourt:
         client = await _send(fx, {**payload, "robot": _COURT_ROBOT})
 
         assert "コートが未設定" in (_rejection(client) or "")
-        assert drivers[_COURT_ROBOT].commands == []
+        assert _sent(drivers, _COURT_ROBOT) == []
 
     async def test_コートを選べば通る(self) -> None:
         fx, drivers = _fixture()
@@ -169,7 +185,37 @@ class TestManualIsBlockedWithoutCourt:
         )
 
         assert _rejection(client) is None
-        assert drivers[_COURT_ROBOT].commands != []
+        assert _sent(drivers, _COURT_ROBOT) != []
+
+
+class TestGateIsPerRobotNotPerAxis:
+    """**ゲートは台の単位。**同じ台のコート非依存軸も一緒に塞がる。
+
+    弁 (`valve_*`) 自体はコートと無関係だが、コマンドゲートは `data["robot"]` しか
+    見ないので一緒に止まる。軸単位に細かくすると、判定を位置定数とコマンドの
+    両方に置くことになる。会場での現れ方は `docs/venue_recovery.md` 3-3c。
+    """
+
+    async def test_同じ台のコート非依存軸も塞がる(self) -> None:
+        fx, _ = _fixture()
+        await _to_manual(fx, _COURT_ROBOT)
+        client = await _send(
+            fx,
+            {"type": "manual_move", "robot": _COURT_ROBOT, "axis": "valve_1", "position": "open"},
+        )
+
+        assert "コートが未設定" in (_rejection(client) or "")
+
+    async def test_コートを選べば弁も通る(self) -> None:
+        fx, _ = _fixture()
+        await fx.command({"type": "set_court", "court": "red"})
+        await _to_manual(fx, _COURT_ROBOT)
+        client = await _send(
+            fx,
+            {"type": "manual_move", "robot": _COURT_ROBOT, "axis": "valve_1", "position": "open"},
+        )
+
+        assert _rejection(client) is None
 
 
 class TestRetreatPathStaysOpen:
@@ -184,7 +230,7 @@ class TestRetreatPathStaysOpen:
         )
 
         assert _rejection(client) is None
-        assert drivers[_PLAIN_ROBOT].commands != []
+        assert _sent(drivers, _PLAIN_ROBOT) != []
 
     async def test_コート依存の台だけが止まる(self) -> None:
         fx, drivers = _fixture()
@@ -199,20 +245,29 @@ class TestRetreatPathStaysOpen:
             {"type": "manual_move", "robot": _PLAIN_ROBOT, "axis": "y_axis", "position": "work"},
         )
 
-        assert drivers[_COURT_ROBOT].commands == []
-        assert drivers[_PLAIN_ROBOT].commands != []
+        assert _sent(drivers, _COURT_ROBOT) == []
+        assert _sent(drivers, _PLAIN_ROBOT) != []
 
 
-class TestSequenceCommandsAreBlockedWithoutCourt:
-    async def test_sequence_start_が拒否される(self) -> None:
+class TestSequenceCommandsNeverSeeTheCourtGate:
+    """`sequence_start` / `sequence_jump` / `trigger` は `PHASES_DURING_MATCH`。
+
+    MATCH へ入るには `can_start_match` (= コート確定)が要るので、**コートゲートは
+    構造上到達しない** —— 実際に拒否しているのはフェーズゲートである。多重防護として
+    宣言はしてあるが、ここで見ているのは「未確定では試合へ入れない」ほうである。
+    """
+
+    async def test_コート未確定では試合へ入れないので開始もできない(self) -> None:
         fx, _ = _fixture()
+
+        assert fx.match.can_start_match is False
         client = await _send(fx, {"type": "sequence_start", "robot": _COURT_ROBOT})
 
-        # フェーズゲートより先にコートが立つことはない。試合へ入れないので理由は
-        # フェーズだが、どちらにせよ開始できないことを固定する
-        assert _rejection(client) is not None
+        assert "試合中のみ" in (_rejection(client) or "")
         assert fx.sequence(_COURT_ROBOT).is_running is False
 
+
+class TestSetupCommandsAreBlockedWithoutCourt:
     async def test_零点合わせが拒否される(self) -> None:
         fx, _ = _fixture()
         client = await _send(
@@ -264,7 +319,7 @@ class TestSecondLayerHoldsWithoutTheCommandGate:
         )
 
         assert "コートが解決されていません" in (_rejection(client) or "")
-        assert drivers[_COURT_ROBOT].commands == []
+        assert _sent(drivers, _COURT_ROBOT) == []
 
     async def test_コート別の位置も拒否として返る(self) -> None:
         """コマンドゲートが塞がない台でも、位置名を引く手動はここで止まる。"""
@@ -274,7 +329,7 @@ class TestSecondLayerHoldsWithoutTheCommandGate:
             "axes": {"conveyor": {"unit": "duty", "command_unit": "duty", "command_mode": "duty"}},
             "positions": {"conveyor": {"stop": 0.0, "run": {"red": 0.3, "blue": -0.3}}},
         }
-        sequence, manual, driver = _wire(_PLAIN_ROBOT, positions)
+        sequence, manual, robot_drivers = _wire(_PLAIN_ROBOT, positions)
         fx.add_robot(_PLAIN_ROBOT, sequence, manual=manual)
         await _to_manual(fx, _PLAIN_ROBOT)
 
@@ -284,4 +339,4 @@ class TestSecondLayerHoldsWithoutTheCommandGate:
         )
 
         assert "コートが指定されていません" in (_rejection(client) or "")
-        assert driver.commands == []
+        assert [c for d in robot_drivers.values() for c in d.commands] == []
