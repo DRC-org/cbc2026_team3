@@ -545,6 +545,7 @@ class RobotServer:
         logger.info(
             "吸着パッド選択: robot=%s 使用=%s", robot_name, ", ".join(suction.enabled()) or "なし"
         )
+
     async def _cmd_switch_measure_start(self, data: dict, requester: WSOrNone) -> None:
         reason = await self._switch_measure.start(data)
         if reason is not None:
