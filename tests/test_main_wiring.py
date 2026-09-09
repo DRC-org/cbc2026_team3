@@ -9,6 +9,7 @@ import socket
 import struct
 import time
 import types
+from collections.abc import Callable
 from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -25,6 +26,7 @@ from lib.config_schema import (
     RobotConfig,
     SystemConfig,
     load_robot_config,
+    load_system_config,
 )
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
@@ -1584,6 +1586,79 @@ class TestLimitMonitorWiring:
 
         await main._shutdown_all(server, [wiring])
         monitor.stop.assert_awaited_once_with()
+
+
+class TestLimitMonitorSensorSuspensionWiring:
+    """可動端監視へ渡す読み口は、**現在値も接触の累計も**整列段の覆いを通す。
+
+    片方を生のまま渡すと、覆ったはずのセンサでも接触を数えた周期だけ「押されている」と
+    判定され、整列段の最中に目標が実測位置へ書き直される (覆う目的そのものが果たせない)。
+    零点確定自身へ渡すぶんは生のまま —— 探索も離脱も「今 ON か」で進む。
+    """
+
+    def _wired_contact_reader(
+        self,
+        suspension: SensorSuspension,
+        contact_count: Callable[[str], int | None],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: pathlib.Path,
+    ) -> Callable[[str], int | None]:
+        captured: dict[str, Callable[[str], int | None]] = {}
+
+        def _capture(_positions, _sequence, *, sensor_active, sensor_contact_count):
+            captured["count"] = sensor_contact_count
+            return []
+
+        monkeypatch.setattr(main, "_setup_robot", lambda *_a, **_k: (CANManager(), {}))
+        monkeypatch.setattr(main, "_make_sensor_contact_reader", lambda _managers: contact_count)
+        monkeypatch.setattr(main, "_build_limit_monitors", _capture)
+
+        main._wire_one_robot(
+            MagicMock(),
+            tmp_path / "bench.yaml",
+            _robot(
+                {
+                    "robot_name": "bench",
+                    "motors": {
+                        "bench_axis": {"driver": "generic", "bus": "bench_bus", "can_id": 1}
+                    },
+                }
+            ),
+            load_system_config({"can_buses": {"bench_bus": "can0"}}, source="<test>"),
+            dry_run=True,
+            is_estop_active=lambda: False,
+            e_stop_tasks=set(),
+            sensor_suspension=suspension,
+        )
+        return captured["count"]
+
+    def test_接触の累計も覆いを通して渡す(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        contacts = {"y_axis_l_origin_sensor": 3}
+        suspension = SensorSuspension()
+
+        read = self._wired_contact_reader(suspension, contacts.get, monkeypatch, tmp_path)
+
+        assert read("y_axis_l_origin_sensor") == 3
+        with suspension.suspend(["y_axis_l_origin_sensor"]):
+            contacts["y_axis_l_origin_sensor"] = 9
+            assert read("y_axis_l_origin_sensor") == 3
+        assert read("y_axis_l_origin_sensor") == 9
+
+    def test_零点確定へは生の累計を渡す(self) -> None:
+        """覆った値を零点確定自身が読むと、到達判定が自分の目を塞ぐ。"""
+        tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+        runner = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "HomingRunner"
+        )
+        passed = {kw.arg: ast.unparse(kw.value) for kw in runner.keywords}
+
+        assert passed["sensor_contact_count"] == "_make_sensor_contact_reader(can_managers)"
 
 
 class TestOriginResolver:

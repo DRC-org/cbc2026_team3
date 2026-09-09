@@ -116,6 +116,17 @@ def _release_limit(homing: HomingSpec) -> float:
     return homing.step * _RELEASE_STEP_LIMIT
 
 
+def _align_step(homing: HomingSpec) -> float:
+    """整列段 1 歩の刻み [軸の unit]。**探索段の `step` とは別に決まる。**
+
+    探索段は左右 2 台で押すのに整列段は 1 台なので、同じ刻みでは同じ押しが出ず、
+    静止摩擦の手前で止まる。書かない軸は `step` と同じ。
+    """
+    if homing.align_step is not None:
+        return homing.align_step
+    return homing.step
+
+
 def _remaining_distance(homing: HomingSpec, *, travelled: float, released: float) -> float:
     """この段の探索に許す移動量 [軸の unit]。
 
@@ -470,7 +481,7 @@ class HomingRunner:
         hold = self._observe_each(spec, handle)
         start = dict(hold)
         stalled: dict[str, int] = dict.fromkeys(pending, 0)
-        progress = _progress_threshold(homing.step)
+        progress = _progress_threshold(_align_step(homing))
 
         while True:
             await self._stop_here_if_lost_each(spec, handle, homing)
@@ -505,13 +516,57 @@ class HomingRunner:
                     0 if abs(moved[motor] - observed[motor]) >= progress else stalled[motor] + 1
                 )
                 if stalled[motor] >= _STALL_LIMIT:
+                    states = self._sensor_states(homing)
+                    logger.error("[homing] %s: 整列段で停滞 (センサ現在値: %s)", spec.name, states)
                     raise HomingError(
-                        f"軸 '{spec.name}' の整列段でモータ '{motor}' が指令しても動きません"
-                        f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
-                        "**機構に遊びが無いと片側だけを動かせず、相方を引きずったまま"
-                        "止まって見えます** —— 機構の引っかかり・モータの励磁と"
-                        "併せて確認してください"
+                        self._align_stall_message(
+                            spec,
+                            motor,
+                            states=states,
+                            progress=progress,
+                            pending=pending,
+                            commanded=commanded,
+                            moved=moved,
+                            start=start,
+                        )
                     )
+
+    def _align_stall_message(
+        self,
+        spec: AxisSpec,
+        motor: str,
+        *,
+        states: str,
+        progress: float,
+        pending: list[str],
+        commanded: Mapping[str, float],
+        moved: Mapping[str, float],
+        start: Mapping[str, float],
+    ) -> str:
+        """停滞で降りるときに操縦者へ渡す判断材料。
+
+        原因は 4 通りあり文言だけでは切り分けられない。**保持側が引きずられた量**が
+        遊びの有無を分け、**指令値と実測値の差**が押しの届かなさを表す。
+        """
+        holding = [name for name in spec.motor_names if name not in pending]
+        dragged = (
+            ", ".join(f"{name} {moved[name] - start[name]:+.2f}{spec.unit}" for name in holding)
+            if holding
+            else "なし"
+        )
+        return (
+            f"軸 '{spec.name}' の整列段でモータ '{motor}' が指令しても動きません"
+            f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
+            f" センサ現在値: {states}。"
+            f" この段で {motor} は {moved[motor] - start[motor]:+.2f}{spec.unit} 進み、"
+            f"直前の 1 歩は指令 {commanded[motor]:.2f}{spec.unit} に対し"
+            f" 実測 {moved[motor]:.2f}{spec.unit}。"
+            f" 保持側の引きずられ量: {dragged}。"
+            "**機構に遊びが無いと片側だけを動かせず、相方を引きずったまま止まって"
+            "見えます** —— 1 台では静止摩擦を越えられていない"
+            " (homing.align_step を大きくする)・機構の引っかかり・モータの励磁を"
+            "確認してください"
+        )
 
     async def _command_align(
         self,
@@ -522,12 +577,9 @@ class HomingRunner:
         pending: list[str],
         observed: Mapping[str, float],
     ) -> dict[str, float]:
+        step = _align_step(homing)
         values = {
-            motor: (
-                observed[motor] + homing.direction * homing.step
-                if motor in pending
-                else hold[motor]
-            )
+            motor: (observed[motor] + homing.direction * step if motor in pending else hold[motor])
             for motor in spec.motor_names
         }
         await handle.set_target_value(spec.to_commands_each(values))
@@ -566,7 +618,7 @@ class HomingRunner:
         pending: list[str],
         commanded: Mapping[str, float],
     ) -> None:
-        reached = _progress_threshold(homing.step)
+        reached = _progress_threshold(_align_step(homing))
         for _ in range(_FOLLOW_ATTEMPTS):
             await self._sleep(homing.settle_s)
             contacts.poll()
@@ -576,14 +628,19 @@ class HomingRunner:
             if all(abs(observed[motor] - commanded[motor]) <= reached for motor in pending):
                 return
 
-    def _log_sensor_states(self, spec: AxisSpec, homing: HomingSpec) -> None:
+    def _sensor_states(self, homing: HomingSpec) -> str:
+        """原点センサの現在値。**三値のまま出す** —— `None` を `OFF` へ丸めると
+        途絶したセンサが「離れている」に見え、成功時のログと失敗時の文言で
+        同じ事象が別の状態に読める。
+        """
         states = {True: "ON", False: "OFF", None: "読めず"}
+        return ", ".join(
+            f"{name}={states[self._sensor_active(name)]}" for name in homing.sensor_names
+        )
+
+    def _log_sensor_states(self, spec: AxisSpec, homing: HomingSpec) -> None:
         logger.info(
-            "[homing] %s: 原点確定 (センサ現在値: %s)",
-            spec.name,
-            ", ".join(
-                f"{name}={states[self._sensor_active(name)]}" for name in homing.sensor_names
-            ),
+            "[homing] %s: 原点確定 (センサ現在値: %s)", spec.name, self._sensor_states(homing)
         )
 
     async def _seek(
@@ -813,6 +870,37 @@ def _axis_handle(
     )
 
 
+async def _retreat(
+    spec: AxisSpec,
+    handle: AxisHandle,
+    table: PositionTable,
+    *,
+    court: Court,
+) -> None:
+    """零点確定の直後に、原点から離れた位置名へ退避する。
+
+    原点姿勢が他の軸と干渉する軸 (`y_axis` の 0 と `rotate` の 0) では、退避せずに
+    次の軸を寄せるとその軸が 1 歩も動けない。**`HomingRunner` ではなくここに置く**
+    のは、位置定数の表を持っているのがこちら側だから。
+    """
+    homing = spec.homing
+    if homing is None or homing.retreat_position is None:
+        return
+
+    name = homing.retreat_position
+    value = table.raw(spec.name, name, court=court)
+    await handle.set_target_value(spec.to_commands(value))
+    # 指令と待ちのあいだで緊急停止が目標を消した窓を「到達」と読まないため
+    # (目標が無ければ到達済みに吸われ、退避していないのに退避できたことになる)
+    if not await handle.wait_reached(timeout=spec.timeout_s, expect_target=True):
+        raise HomingError(
+            f"軸 '{spec.name}' を零点確定後の退避位置 '{name}' ({value}{spec.unit}) へ"
+            f" {spec.timeout_s} 秒以内に動かせませんでした"
+            " (退避できていないまま次の軸を寄せると機構が干渉します)"
+        )
+    logger.info("[homing] %s: 零点確定後に '%s' (%.2f%s) へ退避", spec.name, name, value, spec.unit)
+
+
 async def measure_switch(
     runner: HomingRunner,
     table: PositionTable,
@@ -863,6 +951,7 @@ async def run_homing(
         _, handle = _axis_handle(table, motors, axis, court)
         try:
             await runner.home(spec, handle)
+            await _retreat(spec, handle, table, court=court)
         except Exception as exc:
             if stop_on_error:
                 raise
