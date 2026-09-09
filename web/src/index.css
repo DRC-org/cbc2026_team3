@@ -93,7 +93,7 @@
   }
 
   .alert-blink {
-    animation: estop-blink 1s steps(2, start) infinite;
+    animation: estop-blink 1s steps(1, start) infinite;
   }
 }
 

@@ -92,6 +92,40 @@ class TestShippedYAxisHoming:
         assert homing.align_distance is not None
         assert homing.align_distance < spec.sync_tolerance
 
+    def test_align_step_is_coarser_than_the_search_step(self, homing) -> None:
+        """整列段は片側 1 台で押すので、探索段 (左右 2 台) と同じ刻みでは押し切れない。"""
+        assert homing.align_step is not None, "整列段の刻みが探索段に縛られている"
+        assert homing.align_step > homing.step
+        assert homing.align_distance is not None
+        assert homing.align_step < homing.align_distance
+
+    def test_retreats_before_the_next_axis_is_homed(self, homing) -> None:
+        """`y_axis = 0` と `rotate = 0` は機構が干渉する。
+
+        `rotate` も零点確定を持つ以上、`y_axis` は原点を確定した直後に干渉域を
+        抜けていなければならない (抜けないと `rotate` が 1 歩も動けない)。
+        """
+        table = _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+
+        assert table.axis("rotate").homing is not None, "rotate の零点確定が無効"
+        assert homing.retreat_position is not None
+        # 原点は - 側 (homing.direction: -1) なので、退避先は + 側にある
+        assert table.raw("y_axis", homing.retreat_position) > 0.0
+
+    def test_retreat_position_does_not_share_a_value(self, homing) -> None:
+        """偶然の同値は「どちらの位置に居るのか」を読めなくする。"""
+        table = _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+        name = homing.retreat_position
+        assert name is not None
+        value = table.raw("y_axis", name)
+
+        duplicates = [
+            other
+            for other in table.names("y_axis")
+            if other != name and table.raw("y_axis", other) == pytest.approx(value)
+        ]
+        assert duplicates == []
+
     def test_search_distance_matches_the_manual_span(self, homing) -> None:
         manual = (
             _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
@@ -119,7 +153,7 @@ class TestShippedRotateTravel:
         travel = table.axis("rotate").travel
 
         assert travel is not None
-        assert (travel.min_value, travel.max_value) == (0.0, 180.0)
+        assert (travel.min_value, travel.max_value) == (0.0, 200.0)
 
     def test_可動域は1回転未満(self, table) -> None:
         """1 回転以上あると等価表現が 2 つ以上になり、一意化そのものが成り立たない。"""
@@ -157,6 +191,33 @@ class TestShippedRotateTravel:
         )
 
         assert bench.axis("rotate").travel is None
+
+
+class TestShippedRotateHome:
+    """`rotate` の `home` が零点確定の原点そのものではないこと。
+
+    **零点確定を持つ軸の一般則ではない。** `y_axis` の `home` は 0.0 のままでよく、
+    干渉するのは `rotate` の側である —— `y_axis = 0` と `rotate = 0` の組が
+    `sequences/main_hand.py` の `HOME` そのものなので、どちらか一方を原点から離す
+    必要があり、離すと決めたのが `rotate` だから、この検査も `rotate` にだけ効く。
+    """
+
+    @pytest.fixture
+    def table(self):
+        return _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+
+    def test_home_is_clear_of_the_origin_switch(self, table) -> None:
+        """到達帯 (`home` ± `tolerance`) が原点センサの ON 区間へ食い込まないこと。
+
+        原点は `-` 側 (`homing.direction: -1`) なので、到達帯の下限が正であれば
+        0.0 の側へ食い込まない。食い込むと、可動端インターロック
+        (`guard.limits.minus: rotate_origin_sensor`) が ON 区間の内側からの指令を拒む。
+        """
+        spec = table.axis("rotate")
+
+        assert spec.homing is not None, "rotate の零点確定が無効になっている"
+        assert spec.tolerance is not None, "tolerance が無く到達帯を決められない"
+        assert table.raw("rotate", "home") - spec.tolerance > 0.0
 
 
 class TestShippedMainHandGuard:

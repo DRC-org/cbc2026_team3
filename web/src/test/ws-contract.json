@@ -334,6 +334,16 @@
       "safety": {
         "failed_tasks": [],
         "firmware_unconfirmed_motors": [],
+        "limit_monitors": [
+          {
+            "axes": [
+              "gripper"
+            ],
+            "running": true,
+            "stopped": []
+          }
+        ],
+        "limit_monitors_running": true,
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [
@@ -605,6 +615,16 @@
       "safety": {
         "failed_tasks": [],
         "firmware_unconfirmed_motors": [],
+        "limit_monitors": [
+          {
+            "axes": [
+              "gripper"
+            ],
+            "running": true,
+            "stopped": []
+          }
+        ],
+        "limit_monitors_running": true,
         "loops_running": true,
         "monitors_running": true,
         "position_loops": [
@@ -685,6 +705,63 @@
       "total_steps": 3,
       "type": "state",
       "waiting_trigger": false
+    },
+    "switch_measure_state": {
+      "available": true,
+      "axis": null,
+      "blocked_reason": null,
+      "direction": null,
+      "error": null,
+      "result": null,
+      "robot": null,
+      "running": false,
+      "targets": {
+        "main_hand": [
+          "y_axis"
+        ]
+      },
+      "type": "switch_measure_state"
+    },
+    "switch_measure_state_with_error": {
+      "available": true,
+      "axis": "y_axis",
+      "blocked_reason": null,
+      "direction": 1.0,
+      "error": "軸 'y_axis' が 5.0mm 動かしてもリミットスイッチ 'origin_sensor' に 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)",
+      "result": null,
+      "robot": "main_hand",
+      "running": false,
+      "targets": {
+        "main_hand": [
+          "y_axis"
+        ]
+      },
+      "type": "switch_measure_state"
+    },
+    "switch_measure_state_with_result": {
+      "available": true,
+      "axis": "y_axis",
+      "blocked_reason": null,
+      "direction": -1.0,
+      "error": null,
+      "result": {
+        "axis": "y_axis",
+        "coarse_step": null,
+        "direction": -1.0,
+        "engage": -447.0,
+        "release": -441.2,
+        "step": 1.0,
+        "unit": "mm",
+        "width": 5.8
+      },
+      "robot": "main_hand",
+      "running": false,
+      "targets": {
+        "main_hand": [
+          "y_axis"
+        ]
+      },
+      "type": "switch_measure_state"
     }
   }
 }

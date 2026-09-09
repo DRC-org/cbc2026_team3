@@ -11,6 +11,7 @@ from aiohttp import web
 
 from lib.can_manager import CANManager
 from lib.commands import COMMANDS
+from lib.control.limit_monitor import LimitMonitor
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -47,6 +48,7 @@ class ServerFixture:
         *,
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
+        limit_monitors: list[LimitMonitor] | None = None,
         target_refreshers: list[GenericTargetRefresher] | None = None,
         manual: ManualController | None = None,
         suction: SuctionSelection | None = None,
@@ -58,6 +60,7 @@ class ServerFixture:
             mgr,
             position_loops=position_loops,
             sync_monitors=sync_monitors,
+            limit_monitors=limit_monitors,
             target_refreshers=target_refreshers,
             manual=manual,
             suction=suction,
@@ -207,6 +210,9 @@ class ServerFixture:
 
     async def publish_motor_check_state(self) -> None:
         await self.server._motor_check.publish()
+
+    async def publish_switch_measure_state(self) -> None:
+        await self.server._switch_measure.publish()
 
     async def publish_motor_check_error(self, message: str) -> None:
         await self.server._motor_check.report_error(message)

@@ -1120,7 +1120,11 @@ def _wire_one_robot(
         positions,
         seq,
         sensor_active=sensor_read,
-        sensor_contact_count=_make_sensor_contact_reader([can_manager]),
+        # 接触の累計も同じ覆いを通す。現在値だけを覆うと、整列段のあいだに数えた接触が
+        # その周期だけ「押されている」に化け、覆ったはずの軸の目標が実測へ書き直される
+        sensor_contact_count=sensor_suspension.wrap_count(
+            _make_sensor_contact_reader([can_manager])
+        ),
     )
     seq.bind_limit_interventions(_make_limit_interventions(limit_monitors))
 

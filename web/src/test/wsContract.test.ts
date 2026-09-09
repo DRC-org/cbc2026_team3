@@ -11,6 +11,7 @@ import type {
   HealthSnapshot,
   HomingAxisResult,
   HomingSnapshot,
+  LimitMonitorState,
   ManualAxis,
   ManualPosition,
   ManualRange,
@@ -30,6 +31,8 @@ import type {
   ServerMessage,
   SuctionPad,
   SuctionState,
+  SwitchMeasureSnapshot,
+  SwitchMeasurement,
   SyncMonitorState,
   TargetRefresherState,
 } from "@/lib/protocol";
@@ -69,6 +72,8 @@ const STATE_FIELDS_UI_READS = [
   "safety.monitors_running",
   "safety.position_loops",
   "safety.sync_monitors",
+  "safety.limit_monitors_running",
+  "safety.limit_monitors",
   "safety.refreshers_running",
   "safety.target_refreshers",
   "manual",
@@ -185,6 +190,40 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(state.excluded_steps).not.toHaveLength(0);
     expect(state.steps).toEqual(sample.steps);
   },
+
+  switch_measure_state: (result, sample) => {
+    const state = result.switchMeasure;
+    expect(state.available).toBe(sample.available);
+    expect(state.blocked_reason).toBe(sample.blocked_reason);
+    expect(state.running).toBe(sample.running);
+    expect(state.robot).toBe(sample.robot);
+    expect(state.axis).toBe(sample.axis);
+    expect(state.direction).toBe(sample.direction);
+    expect(state.result).toBeNull();
+    expect(state.error).toBeNull();
+    expect(state.targets).toEqual(sample.targets);
+    expect(Object.keys(state.targets)).not.toHaveLength(0);
+  },
+
+  switch_measure_state_with_result: (result, sample) => {
+    const state = result.switchMeasure;
+    expect(state.robot).toBe(sample.robot);
+    expect(state.axis).toBe(sample.axis);
+    expect(state.direction).toBe(sample.direction);
+    // 実測が数値のまま届く (MALFORMED や 0 埋めに化けると作動点が読めない)
+    expect(state.result).toEqual(sample.result);
+    expect(state.error).toBeNull();
+  },
+
+  switch_measure_state_with_error: (result, sample) => {
+    const state = result.switchMeasure;
+    expect(state.axis).toBe(sample.axis);
+    expect(state.direction).toBe(sample.direction);
+    expect(state.result).toBeNull();
+    // 失敗した理由が UI まで残る (これが読めないと「なぜ止まったか」が画面から消える)
+    expect(state.error).toBe(sample.error);
+    expect(state.error?.length).toBeGreaterThan(0);
+  },
 };
 
 function renderConnected() {
@@ -294,6 +333,14 @@ const SYNC_MONITOR = fieldsOf<SyncMonitorState>({
   violated: { unused: "同上。ラッチ軸は safety.sync_violations を唯一の表示元にする" },
 });
 
+const LIMIT_MONITOR = fieldsOf<LimitMonitorState>({
+  axes: "ui",
+  running: "ui",
+  stopped: {
+    unused: "端で止めた軸。保護が効いた証であって異常ではないので安全機構の欄には出さない",
+  },
+});
+
 const TARGET_REFRESHER = fieldsOf<TargetRefresherState>({
   motors: "ui",
   running: "ui",
@@ -313,9 +360,11 @@ const SAFETY = fieldsOf<SafetyState>({
   reenergizing: "ui",
   loops_running: "ui",
   monitors_running: "ui",
+  limit_monitors_running: "ui",
   refreshers_running: "ui",
   position_loops: "ui",
   sync_monitors: "ui",
+  limit_monitors: "ui",
   target_refreshers: "ui",
 });
 
@@ -423,6 +472,34 @@ const HOMING_FIELDS: FieldSpec = {
   "targets.*": "ui",
 };
 
+const SWITCH_MEASUREMENT = fieldsOf<SwitchMeasurement>({
+  axis: "ui",
+  unit: "ui",
+  direction: "ui",
+  engage: "ui",
+  release: "ui",
+  width: "ui",
+  step: "ui",
+  coarse_step: "ui",
+});
+
+const SWITCH_MEASURE_FIELDS: FieldSpec = {
+  ...fieldsOf<Wire<SwitchMeasureSnapshot>>({
+    type: "parser",
+    available: "ui",
+    blocked_reason: "ui",
+    running: "ui",
+    robot: "ui",
+    axis: "ui",
+    direction: "ui",
+    result: "ui",
+    error: "ui",
+    targets: "ui",
+  }),
+  ...nest("result", SWITCH_MEASUREMENT),
+  "targets.*": "ui",
+};
+
 const SUCTION = fieldsOf<SuctionState>({
   pads: "ui",
 });
@@ -463,6 +540,7 @@ const STATE_FIELDS: FieldSpec = {
   ...nest("safety", SAFETY),
   ...nest("safety.position_loops[]", POSITION_LOOP),
   ...nest("safety.sync_monitors[]", SYNC_MONITOR),
+  ...nest("safety.limit_monitors[]", LIMIT_MONITOR),
   ...nest("safety.target_refreshers[]", TARGET_REFRESHER),
   ...nest("steps[]", STEP),
   ...nest("manual", MANUAL),
@@ -528,6 +606,9 @@ const DECLARED: Record<string, FieldSpec> = {
   motor_check_state: MOTOR_CHECK_FIELDS,
   motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
   homing_state: HOMING_FIELDS,
+  switch_measure_state: SWITCH_MEASURE_FIELDS,
+  switch_measure_state_with_result: SWITCH_MEASURE_FIELDS,
+  switch_measure_state_with_error: SWITCH_MEASURE_FIELDS,
 };
 
 const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists", "targets"]);

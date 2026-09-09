@@ -13,6 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.can_manager import CANManager
+from lib.control.limit_monitor import LimitMonitor
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -20,11 +21,10 @@ from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, BusHealthInfo, HealthSnapshot, MotorHealth, MotorHealthInfo
-from lib.match_state import (
-    Phase,
-)
+from lib.match_state import Court, Phase
 from lib.sequence.engine import Sequence, step
-from lib.sequence.motors import MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.positions import load_position_table
 from tests.fake_can import (
     direct_runner,
     mark_feedback_at,
@@ -33,6 +33,7 @@ from tests.fake_can import (
     mock_driver,
     set_motors,
 )
+from tests.fake_drivers import StubFeedbackDriver
 from tests.feedback_frames import feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
@@ -894,6 +895,72 @@ class TestSafetyStateBroadcast:
         finally:
             await fx.loop.stop()
             await fx.monitor.stop()
+
+
+class _LimitFixture:
+    """可動端監視 1 本を載せたサーバー。後端スイッチが押された状態で組む。"""
+
+    def __init__(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {
+                    "sub_y_axis": {
+                        "unit": "mm",
+                        "command_unit": "rad",
+                        "scale": 2.0,
+                        "tolerance": 0.1,
+                        "guard": {"limits": {"plus": "front", "minus": "rear"}, "max_step": 500.0},
+                    }
+                },
+                "positions": {"sub_y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        self.driver = StubFeedbackDriver("sub_y_axis", 1)
+        self.handle = MotorHandle("sub_y_axis", self.driver, mock_can_manager())
+        group = MotorGroup()
+        group.add(self.handle)
+        self.monitor = LimitMonitor(
+            table,
+            group,
+            sensor_active=lambda name: name == "rear",
+            sensor_contact_count=lambda _name: 0,
+            court=lambda: Court.RED,
+        )
+        self.fx = ServerFixture.build()
+        self.fx.add_robot("sub_hand", GatedSequence("sub_hand"), limit_monitors=[self.monitor])
+
+    def safety(self) -> dict:
+        return self.fx.state_message("sub_hand")["safety"]
+
+
+class TestLimitMonitorLivenessBroadcast:
+    async def test_dead_limit_monitor_is_visible(self) -> None:
+        fx = _LimitFixture()
+
+        safety = fx.safety()
+        assert safety["limit_monitors_running"] is False
+        assert safety["limit_monitors"] == [
+            {"axes": ["sub_y_axis"], "running": False, "stopped": []}
+        ]
+        # 同期監視の欄は同期監視だけを見る (可動端監視は自分の欄で報告する)
+        assert safety["monitors_running"] is True
+
+        fx.monitor.start()
+        try:
+            assert await wait_until(lambda: fx.safety()["limit_monitors_running"] is True)
+            assert fx.safety()["limit_monitors"][0]["running"] is True
+        finally:
+            await fx.monitor.stop()
+
+    async def test_axis_held_at_limit_is_broadcast(self) -> None:
+        fx = _LimitFixture()
+        fx.driver.set_observed(position=-447.5 * 2.0)
+        await fx.handle.set_target(ControlMode.POSITION, -450.0 * 2.0)
+
+        await fx.monitor.step()
+
+        assert fx.safety()["limit_monitors"][0]["stopped"] == ["sub_y_axis"]
 
 
 class TestTargetRefresherLivenessBroadcast:

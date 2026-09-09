@@ -653,3 +653,83 @@ class TestSensorSuspension:
             raise RuntimeError("整列段が落ちた")
 
         assert read("origin_r") is True
+
+    def test_覆っている間は接触の累計が増えない(self) -> None:
+        """現在値だけ覆っても、周期監視は接触の累計で「押されている」と判定する。"""
+        suspension = SensorSuspension()
+        contacts = {"origin_r": 3}
+        count = suspension.wrap_count(contacts.get)
+        assert count("origin_r") == 3
+
+        with suspension.suspend(["origin_r"]):
+            contacts["origin_r"] = 5
+            assert count("origin_r") == 3
+            contacts["origin_r"] = 7
+            assert count("origin_r") == 3
+
+    def test_覆う前に最後に読めた値で凍らせる(self) -> None:
+        """覆ってから最初に読むまでに数えた接触が混ざると、その周期だけ基準値が跳ねる。"""
+        suspension = SensorSuspension()
+        contacts = {"origin_r": 3}
+        count = suspension.wrap_count(contacts.get)
+        assert count("origin_r") == 3
+
+        with suspension.suspend(["origin_r"]):
+            contacts["origin_r"] = 4
+
+            assert count("origin_r") == 3
+
+    def test_覆いを外すと生の累計に戻る(self) -> None:
+        suspension = SensorSuspension()
+        contacts = {"origin_r": 3}
+        count = suspension.wrap_count(contacts.get)
+        assert count("origin_r") == 3
+
+        with suspension.suspend(["origin_r"]):
+            contacts["origin_r"] = 5
+            assert count("origin_r") == 3
+        assert count("origin_r") == 5
+
+        # 凍らせた値を持ち越すと、次の整列段が前回の値で覆い始める
+        with suspension.suspend(["origin_r"]):
+            assert count("origin_r") == 5
+
+    def test_覆っている間も累計を答える(self) -> None:
+        """`None` (カウンタ非対応) へ倒すと、読み手が基準値を進めずに見送るので、
+        覆いを外した周期に**覆っている間の増加がまとめて接触として立つ**。"""
+        suspension = SensorSuspension()
+        contacts = {"origin_r": 3}
+        count = suspension.wrap_count(contacts.get)
+
+        with suspension.suspend(["origin_r"]):
+            contacts["origin_r"] = 9
+            assert count("origin_r") is not None
+
+    def test_名指ししていないセンサの累計は覆わない(self) -> None:
+        suspension = SensorSuspension()
+        contacts = {"origin_r": 3, "rear": 1}
+        count = suspension.wrap_count(contacts.get)
+
+        with suspension.suspend(["origin_r"]):
+            contacts["rear"] = 2
+            assert count("rear") == 2
+
+    def test_カウンタを持たないセンサは覆っても_None(self) -> None:
+        """カウンタの有無まで偽ると、読み手の判断材料そのものが変わる。"""
+        suspension = SensorSuspension()
+        count = suspension.wrap_count(lambda _name: None)
+
+        with suspension.suspend(["origin_r"]):
+            assert count("origin_r") is None
+
+    def test_累計の覆いも多重に掛けて早く外れない(self) -> None:
+        suspension = SensorSuspension()
+        contacts = {"origin_r": 3}
+        count = suspension.wrap_count(contacts.get)
+        assert count("origin_r") == 3
+
+        with suspension.suspend(["origin_r"]):
+            with suspension.suspend(["origin_r"]):
+                contacts["origin_r"] = 5
+            assert count("origin_r") == 3
+        assert count("origin_r") == 5
