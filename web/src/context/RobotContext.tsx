@@ -18,6 +18,7 @@ export interface RobotStatus {
   connected: boolean;
   eStopActive: boolean;
   eStopReason: string | null;
+  eStopOverlayHidden: boolean;
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
   matchState: MatchState;
@@ -36,6 +37,7 @@ export interface RobotCommands {
   sendOrReport: (data: Record<string, unknown> & { type: string }, what: string) => boolean;
   onEStop: () => void;
   onEStopRelease: () => void;
+  hideEStopOverlay: () => void;
   setCourt: (court: MatchCourt) => void;
   setChecklistItem: (role: ChecklistRole, itemId: string, checked: boolean) => void;
   checkAllChecklist: (role: ChecklistRole) => void;
@@ -64,6 +66,7 @@ export function RobotProvider({
     connected,
     eStopActive,
     eStopReason,
+    eStopOverlayHidden,
     healthEvents,
     motorCheck,
     matchState,
@@ -79,6 +82,7 @@ export function RobotProvider({
     sendOrReport,
     onEStop,
     onEStopRelease,
+    hideEStopOverlay,
     setCourt,
     setChecklistItem,
     checkAllChecklist,
@@ -92,6 +96,7 @@ export function RobotProvider({
       connected,
       eStopActive,
       eStopReason,
+      eStopOverlayHidden,
       healthEvents,
       motorCheck,
       matchState,
@@ -104,6 +109,7 @@ export function RobotProvider({
       connected,
       eStopActive,
       eStopReason,
+      eStopOverlayHidden,
       healthEvents,
       motorCheck,
       matchState,
@@ -124,6 +130,7 @@ export function RobotProvider({
       sendOrReport,
       onEStop,
       onEStopRelease,
+      hideEStopOverlay,
       setCourt,
       setChecklistItem,
       checkAllChecklist,
@@ -140,6 +147,7 @@ export function RobotProvider({
       sendOrReport,
       onEStop,
       onEStopRelease,
+      hideEStopOverlay,
       setCourt,
       setChecklistItem,
       checkAllChecklist,

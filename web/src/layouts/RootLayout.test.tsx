@@ -183,3 +183,62 @@ describe("切断中の緊急停止", () => {
     expect(screen.getByText(/解除を送信できませんでした/)).toBeInTheDocument();
   });
 });
+
+describe("開発用の緊急停止オーバーレイ非表示", () => {
+  const HIDE_BUTTON = "緊急停止ダイアログを開発用に非表示にする";
+  const BANNER_TEXT = /EMERGENCY STOP — 全ロボット停止中/;
+
+  async function hideOverlay() {
+    await renderApp("/monitor");
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive({ type: "server_info", dev_tools: true }));
+    act(() => latestSocket().receive({ type: "e_stop_state", active: true }));
+    expect(screen.getByText("ALL MOTION HALTED")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: HIDE_BUTTON }));
+
+    expect(screen.queryByText("ALL MOTION HALTED")).toBeNull();
+    expect(screen.getByText(BANNER_TEXT)).toBeInTheDocument();
+  }
+
+  it("非表示にしても帯の Reset から解除を送れる", async () => {
+    await hideOverlay();
+
+    await userEvent.click(screen.getByRole("button", { name: /Reset/ }));
+
+    expect(latestSocket().sentJson()).toContainEqual({ type: "e_stop_release" });
+  });
+
+  it("解除して再びラッチしてもオーバーレイは戻らず帯で知らせる", async () => {
+    await hideOverlay();
+
+    act(() => latestSocket().receive({ type: "e_stop_state", active: false }));
+    expect(screen.queryByText(BANNER_TEXT)).toBeNull();
+
+    act(() => latestSocket().receive({ type: "e_stop_state", active: true }));
+
+    expect(screen.queryByText("ALL MOTION HALTED")).toBeNull();
+    expect(screen.getByText(BANNER_TEXT)).toBeInTheDocument();
+  });
+
+  it("dev_tools が落ちた server_info を受け直すとオーバーレイが戻る", async () => {
+    await hideOverlay();
+
+    act(() => latestSocket().receive({ type: "server_info", dev_tools: false }));
+
+    expect(screen.getByText("ALL MOTION HALTED")).toBeInTheDocument();
+    expect(screen.queryByText(BANNER_TEXT)).toBeNull();
+  });
+
+  it("切断中に帯の Reset を押しても解除した体裁を作らない", async () => {
+    await hideOverlay();
+    const sentBefore = latestSocket().sent.length;
+
+    act(() => latestSocket().close());
+    await userEvent.click(screen.getByRole("button", { name: /Reset/ }));
+
+    expect(latestSocket().sent).toHaveLength(sentBefore);
+    expect(screen.getByText(BANNER_TEXT)).toBeInTheDocument();
+    expect(screen.getByText(/解除を送信できませんでした/)).toBeInTheDocument();
+  });
+});

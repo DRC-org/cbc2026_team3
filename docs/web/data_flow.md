@@ -82,6 +82,16 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 UI から送る経路を持たないものもある（`checklist_reset` は準備中の `match_reset` と結果が
 変わらない）。**押せないコマンドを context の API に残さない** —— 次に触る人が使える操作だと読む。
 
+### `dev_tools` が分けるもの
+
+`server_info` の `dev_tools` で描画を分けるのは 2 つ。**保持した真偽値ではなく、描画のたびに
+`serverInfo.dev_tools` を見る**（UI 側の既定は `false`。`lib/robotReducer.ts`）。
+
+| 分かれるもの | 出るボタン | 送るもの |
+|---|---|---|
+| 指差喚呼の一括チェック（`MatchPrep`） | 「DEV 全チェック」 | `checklist_check_all`。サーバーも `CommandSpec.requires_dev_tools` で見る 2 重ゲート |
+| 緊急停止オーバーレイの非表示（`EStopOverlay`） | 「DEV 非表示」 | **無し。** WS へは何も送らず `RootLayout` の state だけが変わり、代わりに `EStopBanner` が出る |
+
 ---
 
 ## 契約は 1 箇所
@@ -213,8 +223,8 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 | フック | 中身 | 変化 |
 |---|---|---|
 | `useRobotStates()` | `states`（テレメトリ） | 毎秒 40 回 |
-| `useRobotStatus()` | `connected` / `eStopActive` / `eStopReason` / `healthEvents` / `motorCheck` / `matchState` / `serverInfo` / `rejection` / `wsUrl` / `wsUrlSource` | 変化時 |
-| `useRobotCommands()` | 送信関数 14 個 | ほぼ不変 |
+| `useRobotStatus()` | `connected` / `eStopActive` / `eStopReason` / `eStopOverlayHidden` / `healthEvents` / `motorCheck` / `matchState` / `serverInfo` / `rejection` / `wsUrl` / `wsUrlSource` | 変化時 |
+| `useRobotCommands()` | 送信関数 14 個 + `hideEStopOverlay`（送らない。表示だけを切る） | ほぼ不変 |
 
 `RobotProvider` は 3 つの Provider を入れ子にし、`status` と `commands` を `useMemo` で
 **フィールド単位の依存**にしてある（`value` 自体を依存にすると、呼び出し側が毎描画で新しい
