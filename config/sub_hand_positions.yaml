@@ -1,21 +1,9 @@
 axes:
-  sub_arm_joint:
-    unit: deg
-    command_unit: rad
-    scale: 0.017453292519943295   # deg -> rad (pi/180)
-    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
-    timeout_s: 3.0       # この時間で到達しなければシーケンスを停止する
-    # TODO: 機構完成後、メインハンドと干渉しない角度範囲へ詰めること
-    manual:
-      min: -5.0
-      max: 15.0
-      steps: [1.0, 5.0]
-
   sub_y_axis:
     homing:
       sensor: sub_y_axis_f_limit_sensor
       direction: 1
-      # スイッチ間の実測は 500〜520mm (機構側の想定 750mm とは食い違う)
+      # スイッチ間の実測は 447mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
       search_distance: 560.0
       # ON 区間の実測 2.2mm より狭く取る (広いと粗い 1 歩で跨ぎ切る)
       coarse_step: 1.0
@@ -28,7 +16,7 @@ axes:
       limits:
         plus: sub_y_axis_f_limit_sensor
         minus: sub_y_axis_r_limit_sensor
-      # 桁の違う目標だけを止める。実ストローク 500〜520mm より広く取る
+      # 桁の違う目標だけを止める。実ストロークより広く取る
       max_step: 600.0
       # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
       stall_torque: 2.0
@@ -40,17 +28,18 @@ axes:
     timeout_s: 4.0
     tolerance: 1.0
     manual:
-      min: -495.0
+      # 後端スイッチの実測 -447.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
+      min: -440.0
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
-  # 昇降。**+ 方向が下** (2026-09-09 実機、青コート)。コートでモータの回転と上下の対応が
-  # 鏡になり、スイッチは重力側に固定なので、scale の符号だけをコート別に持つ (赤は未実測)。
+  # 昇降。**+ 方向が下**。コートでモータの回転と上下の対応が鏡になり、スイッチは
+  # 重力側に固定なので、scale の符号だけをコート別に持つ (2026-09-09 両コートで実機確認)。
   sub_lift:
     homing:
       sensor: sub_lift_b_limit_sensor
       direction: 1
-      # スイッチ間の実測は 189mm (機構側の想定 400mm とは食い違う)
+      # スイッチ間の実測は 159mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
       search_distance: 220.0
       step: 0.1
       # ON 区間 1.0mm より狭く取る (前後軸より狭いのはこの実測差による)
@@ -66,12 +55,13 @@ axes:
       stall_torque: 2.0
     unit: mm
     command_unit: rad
-    scale: { blue: 1.0668451, red: -1.0668451 }  # TODO: 昇降側のピニオンが違うなら差し替える
+    scale: { blue: 1.0668451, red: -1.0668451 }
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0
     manual:
-      min: -185.0
+      # 上端スイッチの実測 -159.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
+      min: -152.0
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
@@ -142,13 +132,6 @@ axes:
     timeout_s: 1.0
 
 positions:
-  # TODO: 機構完成後に実測値へ。現状は微小可動量のみ。
-  sub_arm_joint:
-    home: 0.0            # 収納姿勢 [deg]
-    extended: 8.0        # 展開姿勢 [deg]
-    handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
-    place: 10.0          # 配置姿勢 [deg]
-
   # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
   sub_y_axis:
     home: -20.0          # 収納位置 [mm]。前端から後ろへ
@@ -160,7 +143,7 @@ positions:
     # move_to を拒みうる
     home: -5.0           # 待機位置 [mm]
     # **上昇側が負。** + 方向が下なので、上げるほど値が小さくなる。
-    # TODO(機構が付いてから実測): スイッチ間 189mm の内側で実運用の高さへ詰めること
+    # TODO(機構が付いてから実測): スイッチ間 159mm の内側で実運用の高さへ詰めること
     lifted: -20.0        # 上昇位置 [mm]
 
   # TODO(機構が付いてから実測): 3 軸とも仮値。home は firmware/servo/include/config.h の

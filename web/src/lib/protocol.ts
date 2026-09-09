@@ -118,6 +118,100 @@ export interface MotorCheckSnapshot {
   excluded_steps: ExcludedStep[] | Malformed;
 }
 
+export interface HomingAxisResult {
+  axis: string;
+  error: string | null;
+}
+
+export interface HomingSnapshot {
+  available: boolean;
+  blocked_reason: string | null;
+  running: boolean;
+  robot: string | null;
+  axes: string[] | Malformed;
+  current_axis: string | null;
+  results: HomingAxisResult[] | Malformed;
+  error: string | null;
+  targets: Record<string, string[]> | Malformed;
+}
+
+export function parseHomingResults(raw: unknown): HomingAxisResult[] | Malformed {
+  if (!Array.isArray(raw)) return MALFORMED;
+  const ok = raw.every(
+    (item) =>
+      isObject(item) &&
+      typeof item.axis === "string" &&
+      (item.error === null || typeof item.error === "string"),
+  );
+  return ok ? (raw as HomingAxisResult[]) : MALFORMED;
+}
+
+export function parseAxisNames(raw: unknown): string[] | Malformed {
+  if (!Array.isArray(raw)) return MALFORMED;
+  return raw.every((axis) => typeof axis === "string") ? (raw as string[]) : MALFORMED;
+}
+
+export function parseHomingTargets(raw: unknown): Record<string, string[]> | Malformed {
+  if (!isObject(raw)) return MALFORMED;
+  const ok = Object.values(raw).every(
+    (axes) => Array.isArray(axes) && axes.every((axis) => typeof axis === "string"),
+  );
+  return ok ? (raw as Record<string, string[]>) : MALFORMED;
+}
+
+export type SwitchDirection = -1 | 1;
+
+export interface SwitchMeasurement {
+  axis: string;
+  unit: string;
+  direction: SwitchDirection;
+  engage: number;
+  release: number;
+  width: number;
+  step: number;
+  coarse_step: number | null;
+}
+
+export interface SwitchMeasureSnapshot {
+  available: boolean;
+  blocked_reason: string | null;
+  running: boolean;
+  robot: string | null;
+  axis: string | null;
+  direction: SwitchDirection | null;
+  result: SwitchMeasurement | Malformed | null;
+  error: string | null;
+  targets: Record<string, string[]> | Malformed;
+}
+
+export function parseSwitchDirection(raw: unknown): SwitchDirection | null {
+  return raw === 1 || raw === -1 ? raw : null;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function parseSwitchMeasurement(raw: unknown): SwitchMeasurement | Malformed | null {
+  if (raw === null) return null;
+  if (!isObject(raw)) return MALFORMED;
+  if (typeof raw.axis !== "string" || typeof raw.unit !== "string") return MALFORMED;
+  const direction = parseSwitchDirection(raw.direction);
+  if (direction === null) return MALFORMED;
+  if (![raw.engage, raw.release, raw.width, raw.step].every(isFiniteNumber)) return MALFORMED;
+  if (raw.coarse_step !== null && !isFiniteNumber(raw.coarse_step)) return MALFORMED;
+  return {
+    axis: raw.axis,
+    unit: raw.unit,
+    direction,
+    engage: raw.engage as number,
+    release: raw.release as number,
+    width: raw.width as number,
+    step: raw.step as number,
+    coarse_step: raw.coarse_step as number | null,
+  };
+}
+
 export interface ServerInfo {
   dev_tools: boolean;
   dry_run: boolean;
@@ -401,7 +495,9 @@ export type ServerMessage =
   | { type: "e_stop_state"; active: boolean; reason: string | null }
   | { type: "command_rejected"; command: string; reason: string }
   | { type: "health_change"; event: HealthChange }
-  | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot };
+  | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot }
+  | { type: "homing_state"; homing: HomingSnapshot }
+  | { type: "switch_measure_state"; switchMeasure: SwitchMeasureSnapshot };
 
 type Raw = Record<string, unknown>;
 
@@ -525,6 +621,38 @@ function parseKnown(raw: Raw): ServerMessage | null {
           error: typeof raw.error === "string" ? raw.error : null,
           last_error: parseSequenceFailure(raw.last_error),
           excluded_steps: parseExcludedSteps(raw.excluded_steps),
+        },
+      };
+
+    case "homing_state":
+      return {
+        type: "homing_state",
+        homing: {
+          available: raw.available === true,
+          blocked_reason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
+          running: raw.running === true,
+          robot: typeof raw.robot === "string" ? raw.robot : null,
+          axes: parseAxisNames(raw.axes),
+          current_axis: typeof raw.current_axis === "string" ? raw.current_axis : null,
+          results: parseHomingResults(raw.results),
+          error: typeof raw.error === "string" ? raw.error : null,
+          targets: parseHomingTargets(raw.targets),
+        },
+      };
+
+    case "switch_measure_state":
+      return {
+        type: "switch_measure_state",
+        switchMeasure: {
+          available: raw.available === true,
+          blocked_reason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
+          running: raw.running === true,
+          robot: typeof raw.robot === "string" ? raw.robot : null,
+          axis: typeof raw.axis === "string" ? raw.axis : null,
+          direction: parseSwitchDirection(raw.direction),
+          result: parseSwitchMeasurement(raw.result),
+          error: typeof raw.error === "string" ? raw.error : null,
+          targets: parseHomingTargets(raw.targets),
         },
       };
 

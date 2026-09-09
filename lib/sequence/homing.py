@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass, replace
 
 from lib.drivers.base import ControlMode
-from lib.sequence.motors import AxisHandle
-from lib.sequence.positions import AxisSpec, HomingSpec
+from lib.match_state import Court
+from lib.sequence.motors import AxisHandle, MotorGroup
+from lib.sequence.positions import AxisSpec, HomingSpec, PositionTable
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HomingError", "HomingRunner"]
+__all__ = [
+    "AxisHomingResult",
+    "HomingError",
+    "HomingRunner",
+    "SwitchMeasurement",
+    "homing_axis_names",
+    "measure_switch",
+    "run_homing",
+]
 
 _FOLLOW_ATTEMPTS = 5
 
@@ -101,6 +111,60 @@ def _not_reached_message(spec: AxisSpec, homing: HomingSpec, limit: float) -> st
     )
 
 
+@dataclass(frozen=True)
+class SwitchMeasurement:
+    """スイッチ 1 本ぶんの実測。距離は軸の `unit`。"""
+
+    axis: str
+    unit: str
+    direction: float
+    engage: float
+    release: float
+    width: float
+    #: 作動点のばらつきは刻みそのもの。値と一緒に配らないと精度が読めない
+    step: float
+    coarse_step: float | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "axis": self.axis,
+            "unit": self.unit,
+            "direction": self.direction,
+            "engage": self.engage,
+            "release": self.release,
+            "width": self.width,
+            "step": self.step,
+            "coarse_step": self.coarse_step,
+        }
+
+
+def _probe_spec(
+    spec: AxisSpec,
+    homing: HomingSpec,
+    direction: float,
+    step: float | None,
+    coarse_step: float | None,
+    limit: float | None,
+) -> HomingSpec:
+    """測定用に向きと刻みだけ差し替えた `HomingSpec`。
+
+    **上限は `search_distance` として載せる。** 別の変数で持つと探索の各段が見る
+    歯止めと測定の歯止めが二重になり、片方だけが直った状態が作れる。
+    `HomingSpec` の検証もそのまま効く。
+    """
+    changes: dict[str, object] = {"direction": float(direction)}
+    if step is not None:
+        changes["step"] = step
+    if coarse_step is not None:
+        changes["coarse_step"] = coarse_step
+    if limit is not None:
+        changes["search_distance"] = limit
+    try:
+        return replace(homing, **changes)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise HomingError(f"軸 '{spec.name}' の測定条件が成り立ちません ({exc})") from exc
+
+
 def _progress_threshold(step: float) -> float:
     """「1 歩ぶん進んだ」と見なす移動量。**追従待ちと停滞判定が同じ 1 つを見る。**
 
@@ -152,7 +216,79 @@ class HomingRunner:
 
         self._check_preconditions(spec, homing)
         latches = _SensorLatches(homing.sensor_names, self._sensor_latched)
+        travelled = await self._approach(spec, handle, homing, latches)
 
+        logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
+        if homing.sensors is not None:
+            await self._align(spec, handle, homing, homing.sensors, latches)
+        await self._capture_origin(spec.name)
+        return travelled
+
+    async def measure(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        *,
+        direction: float,
+        step: float | None = None,
+        coarse_step: float | None = None,
+        limit: float | None = None,
+    ) -> SwitchMeasurement:
+        """`direction` の側の端まで寄せ、スイッチの作動点と離脱点を測る。
+
+        零点確定と**同じ二段探索を通り、原点を書き込む段だけを行わない**。手順を
+        書き写すと、片方だけが直された状態が作れる。
+        """
+        homing = spec.homing
+        if homing is None:
+            raise HomingError(
+                f"軸 '{spec.name}' に homing 設定がありません"
+                " (どのセンサを見るか・どこまで動かしてよいかが決まりません)"
+            )
+
+        probe = _probe_spec(spec, homing, direction, step, coarse_step, limit)
+        self._check_preconditions(spec, probe, require_origin=False)
+        latches = _SensorLatches(probe.sensor_names, self._sensor_latched)
+
+        await self._approach(spec, handle, probe, latches)
+        engage = self._observe(spec, handle)
+        release = await self._release(spec, handle, probe, latches)
+
+        result = SwitchMeasurement(
+            axis=spec.name,
+            unit=spec.unit,
+            direction=probe.direction,
+            engage=engage,
+            release=release,
+            width=abs(release - engage),
+            step=probe.step,
+            coarse_step=probe.coarse_step,
+        )
+        logger.info(
+            "[switch] %s: 作動点 %.3f%s / 離脱点 %.3f%s / ON 区間 %.3f%s (刻み %g%s)",
+            spec.name,
+            result.engage,
+            spec.unit,
+            result.release,
+            spec.unit,
+            result.width,
+            spec.unit,
+            result.step,
+            spec.unit,
+        )
+        return result
+
+    async def _approach(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        latches: _SensorLatches,
+    ) -> float:
+        """`homing.direction` の側の端へ寄せ、**探索で**動いた距離を返す。
+
+        二段探索では 2 段の合計で、離脱のぶんは含めない。
+        """
         # 離脱で戻ったぶんは探索距離を消費しない (理由は `_remaining_distance`)
         released = 0.0
         travelled = 0.0
@@ -161,7 +297,7 @@ class HomingRunner:
         # 手動操縦でスイッチを跨いだ痕跡だけで離脱段へ入る
         if any(self._sensor_active(name) is True for name in homing.sensor_names):
             logger.info("[homing] %s: 既にセンサに触れているため一度離れて寄せ直す", spec.name)
-            released += await self._release(spec, handle, homing, latches)
+            released += await self._release_by(spec, handle, homing, latches)
 
         if homing.coarse_step is not None:
             start = self._observe(spec, handle)
@@ -199,7 +335,7 @@ class HomingRunner:
                     "走り抜けるので止めます。"
                     "homing.coarse_step を ON 区間の実測より狭くしてください"
                 )
-            released += await self._release(spec, handle, homing, latches)
+            released += await self._release_by(spec, handle, homing, latches)
 
         start = self._observe(spec, handle)
         remaining = _remaining_distance(homing, travelled=travelled, released=released)
@@ -215,12 +351,18 @@ class HomingRunner:
             limit_message=_not_reached_message(spec, homing, remaining),
         )
         travelled += abs(observed - start)
-
-        logger.info("[homing] %s: %.2f%s 動かして原点に到達", spec.name, travelled, spec.unit)
-        if homing.sensors is not None:
-            await self._align(spec, handle, homing, homing.sensors, latches)
-        await self._capture_origin(spec.name)
         return travelled
+
+    async def _release_by(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        latches: _SensorLatches,
+    ) -> float:
+        """離脱で戻った距離。"""
+        start = self._observe(spec, handle)
+        return abs(await self._release(spec, handle, homing, latches) - start)
 
     async def _release(
         self,
@@ -229,7 +371,7 @@ class HomingRunner:
         homing: HomingSpec,
         latches: _SensorLatches,
     ) -> float:
-        """ON 区間の外まで**探索と逆向きに**離れ、実測で戻った距離を返す。
+        """ON 区間の外まで**探索と逆向きに**離れ、OFF になった位置を返す。
 
         触れたその場を原点にすると「区間のどこで始めたか」がそのまま原点の
         ばらつきになる。刻みが常に粗い側 (`coarse_step or step`) なのは、粗探索が
@@ -238,8 +380,7 @@ class HomingRunner:
         走り出す)。
         """
         limit = _release_limit(homing)
-        start = self._observe(spec, handle)
-        observed = await self._seek(
+        return await self._seek(
             spec,
             handle,
             homing,
@@ -259,7 +400,6 @@ class HomingRunner:
                 " homing.release_distance を実測へ広げてください"
             ),
         )
-        return abs(observed - start)
 
     async def _align(
         self,
@@ -477,15 +617,19 @@ class HomingRunner:
                     " 機構の引っかかり・探索方向・モータの励磁を確認してください"
                 )
 
-    def _check_preconditions(self, spec: AxisSpec, homing: HomingSpec) -> None:
+    def _check_preconditions(
+        self, spec: AxisSpec, homing: HomingSpec, *, require_origin: bool = True
+    ) -> None:
         """**1 歩も動かす前に**、止められない探索になっていないかを確かめる。"""
         if spec.command_mode is not ControlMode.POSITION:
             raise HomingError(
-                f"軸 '{spec.name}' は位置指令ではないため零点確定できません"
+                f"軸 '{spec.name}' は位置指令ではないため探索できません"
                 f" (command_mode={spec.command_mode.value})"
             )
 
-        if not self._origin_capturable(spec.name):
+        # 原点を書き込まない測定はここを問わない。問うと「零点を確定できない軸ほど
+        # 作動点を測りたい」という当たり前の場面で測れなくなる
+        if require_origin and not self._origin_capturable(spec.name):
             raise HomingError(
                 f"軸 '{spec.name}' の原点を確定する手段がありません。"
                 " 零点確定を実行できないため探索を開始しません"
@@ -587,3 +731,87 @@ class HomingRunner:
             raise
         except Exception as exc:
             raise HomingError(f"軸 '{spec.name}' の現在位置を読めません ({exc})") from exc
+
+
+@dataclass(frozen=True)
+class AxisHomingResult:
+    axis: str
+    error: str | None
+
+
+def homing_axis_names(table: PositionTable) -> list[str]:
+    return [name for name in table.axes if table.axis(name).homing is not None]
+
+
+def _axis_handle(
+    table: PositionTable, motors: MotorGroup, axis: str, court: Court
+) -> tuple[AxisSpec, AxisHandle]:
+    spec = table.axis(axis).for_court(court)
+    return spec, AxisHandle(
+        spec,
+        [getattr(motors, name) for name in spec.motor_names],
+        sensor_active=motors.sensor_active,
+    )
+
+
+async def measure_switch(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court,
+    axis: str,
+    direction: float,
+    step: float | None = None,
+    coarse_step: float | None = None,
+    limit: float | None = None,
+) -> SwitchMeasurement:
+    """1 軸 1 向きぶんの作動点測定。**零点は書き込まない。**"""
+    spec, handle = _axis_handle(table, motors, axis, court)
+    logger.info("作動点測定: %s (向き %+g)", axis, direction)
+    return await runner.measure(
+        spec, handle, direction=direction, step=step, coarse_step=coarse_step, limit=limit
+    )
+
+
+async def run_homing(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court,
+    axes: Collection[str] | None = None,
+    on_axis: Callable[[str], Awaitable[None]] | None = None,
+    on_result: Callable[[AxisHomingResult], Awaitable[None]] | None = None,
+    stop_on_error: bool = True,
+) -> list[AxisHomingResult]:
+    """`homing:` を持つ軸を順に寄せて零点を確定する。**動作確認と単独実行が通る唯一の経路。**
+
+    `stop_on_error=False` は 1 本の失敗で残りを諦めない。軸ごとに独立した確定なので、
+    操縦者は 1 回の実行で全軸の可否を知りたい。
+    """
+    targets = homing_axis_names(table) if axes is None else list(axes)
+    if not targets:
+        logger.info("零点確定: homing を持つ軸が無いため飛ばす")
+        return []
+
+    results: list[AxisHomingResult] = []
+    for axis in targets:
+        spec = table.axis(axis).for_court(court)
+        logger.info("零点確定: %s", axis)
+        if on_axis is not None:
+            await on_axis(axis)
+        _, handle = _axis_handle(table, motors, axis, court)
+        try:
+            await runner.home(spec, handle)
+        except Exception as exc:
+            if stop_on_error:
+                raise
+            logger.error("零点確定に失敗: %s (%s)", axis, exc)
+            result = AxisHomingResult(axis=axis, error=str(exc))
+        else:
+            result = AxisHomingResult(axis=axis, error=None)
+        results.append(result)
+        if on_result is not None:
+            await on_result(result)
+    return results

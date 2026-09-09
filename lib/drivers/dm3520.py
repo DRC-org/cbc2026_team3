@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import struct
 from enum import IntEnum
@@ -8,6 +9,11 @@ from typing import ClassVar
 import can
 
 from lib.drivers.base import ControlMode, MotorDriver, MotorState
+
+logger = logging.getLogger(__name__)
+
+# 書いた 1 通が落ちただけで「書いても直らない」と結論しないための再送上限。
+_RANGE_WRITE_ATTEMPTS = 2
 
 
 class Dm3520CtrlMode(IntEnum):
@@ -120,6 +126,7 @@ class Dm3520Driver(MotorDriver):
         self._feedback_received = False
         # 載っていないレジスタは「まだ読めていない」であって「一致した」ではない。
         self._reported_ranges: dict[int, float] = {}
+        self._range_write_attempts: dict[int, int] = {}
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -152,6 +159,10 @@ class Dm3520Driver(MotorDriver):
 
     def encode_write_register_u32(self, register: int, value: int) -> can.Message:
         data = struct.pack("<HBBI", self.can_id, self.CONFIG_WRITE, register, value)
+        return self._standard(self.CONFIG_FRAME_ID, data)
+
+    def encode_write_register_f32(self, register: int, value: float) -> can.Message:
+        data = struct.pack("<HBBf", self.can_id, self.CONFIG_WRITE, register, float(value))
         return self._standard(self.CONFIG_FRAME_ID, data)
 
     def encode_read_register(self, register: int) -> can.Message:
@@ -238,11 +249,10 @@ class Dm3520Driver(MotorDriver):
         """無励磁化 → 制御モード設定 (→ 原点確定)。
 
         !!! **ここで p_max を書いてはならない。一度入れて実機を壊しかけた** !!!
-        書き終わるまでの窓で復号レンジが食い違い、12.5 のフィードバックを 1000 で
-        復号した 80 倍の位置が ``activation_steps`` の保持目標に入る (2026-09-09 に
-        機構がリミットスイッチを踏み越えた)。正しい向きは「書いて直す」ではなく
-        「読み返して食い違いを検出し、励磁を拒む」で、再試行は
-        `configuration_probe_messages()` が持つ。
+        静的な list は読み返しの完了を待てないので、書き終わるまでの窓で復号レンジが
+        食い違い、12.5 のフィードバックを 1000 で復号した 80 倍の位置が
+        ``activation_steps`` の保持目標に入る (2026-09-09 に機構がリミットスイッチを
+        踏み越えた)。書き直しと読み返しは `configuration_probe_messages()` が持つ。
         """
         steps = list(self.reinitialization_steps())
         if self.set_zero_on_start:
@@ -260,6 +270,7 @@ class Dm3520Driver(MotorDriver):
         「一致している」と答えてしまうため。何が揮発するかを知るのはここだけである。
         """
         self._reported_ranges.clear()
+        self._range_write_attempts.clear()
         return [
             (self.encode_disable(), 0.05),
             (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
@@ -299,16 +310,45 @@ class Dm3520Driver(MotorDriver):
         return [(self.encode_set_zero(), 0.2)]
 
     def configuration_probe_messages(self) -> list[can.Message]:
-        """まだ読めていないレンジの読み返し (0x15/0x16/0x17)。
+        """レンジの読み返しと、食い違っていたぶんの書き直し (0x15/0x16/0x17)。
 
         取りこぼしは再試行で解く —— ゲートの既定を「通す」にして解くと、応答 1 通の
         取りこぼしで事故の経路が丸ごと復活する。
+
+        **フラッシュへは焼かない (`CONFIG_SAVE` を送らない)。** 寿命は約 1 万回で、
+        電源が入るたびに焼けば確実に潰れる。揮発を承知のうえで毎回書き直す。
+
+        書くのは読み返しで食い違いを見てからで、書いた値は控えから外して読み返し直す
+        —— レンジ外の値を書くと実機は元の値をそのまま返すので、書いた事実は
+        「一致した」の代わりにならない。
         """
-        return [
-            self.encode_read_register(register)
-            for register, _, _ in self._expected_ranges()
-            if register not in self._reported_ranges
-        ]
+        messages: list[can.Message] = []
+        for register, label, expected in self._expected_ranges():
+            reported, matched = self._range_status(register, expected)
+            if reported is None:
+                messages.append(self.encode_read_register(register))
+                continue
+            if matched:
+                continue
+            attempts = self._range_write_attempts.get(register, 0)
+            if attempts >= _RANGE_WRITE_ATTEMPTS:
+                continue
+            self._range_write_attempts[register] = attempts + 1
+            logger.info(
+                "モータ '%s' の固定小数点レンジを書き直します: %s 実機 %g -> config %g",
+                self.name,
+                label,
+                reported,
+                expected,
+            )
+            del self._reported_ranges[register]
+            messages.append(self.encode_write_register_f32(register, expected))
+        return messages
+
+    def _range_status(self, register: int, expected: float) -> tuple[float | None, bool]:
+        """(実機が申告した値, config と一致しているか)。一致の判定はここだけが持つ。"""
+        reported = self._reported_ranges.get(register)
+        return reported, reported is not None and math.isclose(reported, expected, rel_tol=1e-6)
 
     def _range_problems(self) -> tuple[list[str], list[str]]:
         """(未確認のレンジ, 食い違っているレンジ)。
@@ -319,30 +359,31 @@ class Dm3520Driver(MotorDriver):
         unconfirmed: list[str] = []
         mismatched: list[str] = []
         for register, label, expected in self._expected_ranges():
-            reported = self._reported_ranges.get(register)
+            reported, matched = self._range_status(register, expected)
             if reported is None:
                 unconfirmed.append(f"{label} (レジスタ {register:#04x})")
-            elif not math.isclose(reported, expected, rel_tol=1e-6):
+            elif not matched:
                 mismatched.append(f"{label} 実機 {reported:g} / config {expected:g}")
         return unconfirmed, mismatched
 
     def activation_block_reason(self) -> str | None:
         """レンジが確認できない・config と食い違うなら励磁を止める。
 
-        !!! **「書いて直す」の代わりである。一度書いて実機を壊しかけた** !!!
+        !!! **書き直しても直らなかったときに残る最後の壁である** !!!
         書き終わるまでの窓でレンジが食い違い、12.5 で送られた位置を 1000 で復号した
         80 倍の値が `activation_steps` の保持目標に書かれて機構端まで走った
         (2026-09-09)。**未確認でも止める** —— 素通しにすると応答 1 通の取りこぼしで
         この経路が丸ごと復活する。文面を分けるのは手当てが逆だから (応答が無い =
-        電源・配線 / 食い違う = config か実機のレジスタ)。
+        電源・配線 / 食い違う = config の値が実機に受け付けられていない)。
         """
         unconfirmed, mismatched = self._range_problems()
         if mismatched:
             return (
-                f"実機と config の固定小数点レンジが食い違っています ({', '.join(mismatched)})。"
-                "**電源断でフラッシュの出荷値へ戻ったか、config を書き換えたのに実機へ"
-                "反映していないかのどちらかです。** フィードバックが比例倍で読めるので、"
-                "レジスタ 0x15/0x16/0x17 を config の値へ書き直してから起動し直してください"
+                f"実機と config の固定小数点レンジが食い違ったままです ({', '.join(mismatched)})。"
+                "**config の値をレジスタ 0x15/0x16/0x17 へ書き直しても読み返しが変わりません。**"
+                "レンジ外の値は実機が黙って捨てて元の値を返すので、config の値がこの機種で"
+                "受け付けられる範囲かを確かめてください "
+                "(フィードバックが比例倍で読めるため励磁しません)"
             )
         if unconfirmed:
             return (
@@ -388,7 +429,8 @@ class Dm3520Driver(MotorDriver):
         if mismatched:
             return (
                 f"固定小数点レンジ 食い違い ({', '.join(mismatched)}) のため励磁しません。"
-                "実機のレジスタ 0x15/0x16/0x17 か config のどちらかを直してください"
+                "書き直しても実機が受け付けないので、config の値がこの機種のレンジ内かを"
+                "確かめてください"
             )
         if unconfirmed:
             return (

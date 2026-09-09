@@ -150,6 +150,8 @@ export function RootLayout() {
         eStopOverlayHidden,
         healthEvents: socket.healthEvents,
         motorCheck: socket.motorCheck,
+        homing: socket.homing,
+        switchMeasure: socket.switchMeasure,
         matchState: socket.matchState,
         serverInfo: socket.serverInfo,
         rejection: socket.rejection,

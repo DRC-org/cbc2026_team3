@@ -1,8 +1,8 @@
-import { SlidersHorizontal, Workflow } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { SlidersHorizontal, TriangleAlert, Workflow } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
-import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
 import type { OperationMode } from "@/lib/protocol";
 import { TONE_BORDER_L_CLASS } from "@/lib/tone";
@@ -15,6 +15,26 @@ interface ModeSwitchProps {
   totalSteps: number | null;
 }
 
+const MODE_OPTIONS: {
+  value: OperationMode;
+  label: string;
+  icon: LucideIcon;
+  selectedClass: string;
+}[] = [
+  {
+    value: "sequence",
+    label: "半自動",
+    icon: Workflow,
+    selectedClass: "border-neutral bg-neutral text-neutral-content",
+  },
+  {
+    value: "manual",
+    label: "手動操縦",
+    icon: SlidersHorizontal,
+    selectedClass: "border-warning bg-warning text-warning-content",
+  },
+];
+
 export function ModeSwitch({
   mode,
   onChange,
@@ -23,7 +43,6 @@ export function ModeSwitch({
   totalSteps,
 }: ModeSwitchProps) {
   const manual = mode === "manual";
-  const next: OperationMode = manual ? "sequence" : "manual";
 
   return (
     <div
@@ -33,22 +52,32 @@ export function ModeSwitch({
         manual ? "bg-warning/10" : "bg-base-100",
       )}
     >
-      <Button
-        tone={manual ? "default" : "warn"}
-        className="h-[1.5rem] min-h-0 shrink-0 px-2"
-        disabled={blockedReason !== null}
-        onClick={() => onChange(next)}
-      >
-        <Icon as={manual ? Workflow : SlidersHorizontal} />
-        {manual ? "半自動へ戻る" : "手動操縦へ"}
-      </Button>
+      <div className="join shrink-0" role="group" aria-label="操作モード">
+        {MODE_OPTIONS.map((opt) => {
+          const selected = opt.value === mode;
+          return (
+            <Button
+              key={opt.value}
+              className={cx("join-item h-[1.5rem] min-h-0 px-2", selected && opt.selectedClass)}
+              disabled={blockedReason !== null}
+              aria-pressed={selected}
+              onClick={() => {
+                if (!selected) onChange(opt.value);
+              }}
+            >
+              <Icon as={opt.icon} />
+              {opt.label}
+            </Button>
+          );
+        })}
+      </div>
 
-      <StatusBadge tone={manual ? "warning" : "neutral"} className="shrink-0">
-        <span className="flex items-center gap-1.5">
-          <Icon as={manual ? SlidersHorizontal : Workflow} />
-          {manual ? "手動操縦中 — シーケンスは停止しています" : "半自動"}
+      {manual ? (
+        <span className="flex shrink-0 items-center gap-1.5 text-warning">
+          <Icon as={TriangleAlert} />
+          シーケンスは停止しています
         </span>
-      </StatusBadge>
+      ) : null}
 
       <span className="min-w-0 truncate font-mono text-base-content/70">{sequenceName}</span>
       {totalSteps === null ? null : (

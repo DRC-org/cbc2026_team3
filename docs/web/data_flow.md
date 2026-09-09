@@ -30,13 +30,15 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 
 ## サーバー → UI
 
-7 種（`ServerMessage` の union）。
+9 種（`ServerMessage` の union）。
 
 | メッセージ | 中身 | 頻度 |
 |---|---|---|
 | `state` | ロボット 1 台の全状態（モータ・シーケンス・安全機構・手動・センサ） | 20Hz × 2 台 |
 | `match_state` | フェーズ・コート・指差喚呼・タイマー | 変化時 |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由・除外ステップ | 変化時 |
+| `homing_state` | 零点合わせの宛先（`robot` / `axes`）・現在の軸・軸ごとの成否・拒否理由・ロボットごとの対象軸（`targets`） | 変化時 |
+| `switch_measure_state` | 作動点測定の宛先（`robot` / `axis` / `direction`）・実測（`result`: 作動点 / 離脱点 / ON 区間 / 刻み）・拒否理由・対象軸（`targets`） | 変化時 |
 | `server_info` | しきい値・`dev_tools` フラグ・ロボット一覧 | 接続直後 |
 | `e_stop_state` | 緊急停止の有無と**理由** | 変化時 + 定期再配信 |
 | `health_change` | ヘルス変化（`EventFeed` とトースト） | 発生時 |
@@ -45,6 +47,13 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 **`state` の `motors` と `steps` は素通し。** モータ名を UI へ書かない性質はそこで成立している。
 **`motor_check_state` の `steps` だけは検査する** —— 空配列が「まだ読み込まれていない」という
 別の意味を既に持っているため。
+
+**`homing_state` の `results` / `targets` / `axes` も検査する** —— 形が読めなければ
+`MALFORMED` を運び、画面は「読み取れませんでした」を出す。空配列で埋めると
+「成功も失敗もしていない」に化ける。
+
+**`switch_measure_state` の `result` も同じ。** 数値が 1 つでも読めなければ結果全体を
+`MALFORMED` にする。`0` で埋めると「作動点が原点だった」という測れた値に化ける。
 
 **`state.manual.axes[].positions` は `{ name, value }`。** 名前だけを配っていた頃は、
 プリセットが可動範囲のどこを指すのかが画面から読めなかった（バーには現在値の線 1 本だけ）。

@@ -181,7 +181,7 @@ describe("SubsystemStatus", () => {
       expect(screen.getByRole("button", { name: "再励磁" })).toBeInTheDocument();
     });
 
-    it("onReenergize を渡さない画面 (Monitor) では出さない", () => {
+    it("onReenergize を渡さなければ出さない", () => {
       renderWithRobot(
         <SubsystemStatus
           connected

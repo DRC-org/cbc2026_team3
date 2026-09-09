@@ -1,6 +1,9 @@
 import { Check, Info, RotateCcw, Zap } from "lucide-react";
 import { memo } from "react";
 
+import { HomingButtons } from "@/components/homing/HomingButtons";
+import { HomingPanel } from "@/components/homing/HomingPanel";
+import { SwitchMeasurePanel } from "@/components/homing/SwitchMeasurePanel";
 import { ChecklistItems } from "@/components/monitor/ChecklistItems";
 import { MotorCheckButton } from "@/components/motorcheck/MotorCheckButton";
 import { MotorCheckPanel } from "@/components/motorcheck/MotorCheckPanel";
@@ -186,6 +189,11 @@ export const MatchPrep = memo(function MatchPrep({
             <MotorCheckButton />
           </div>
           <MotorCheckPanel />
+          <div className="flex flex-wrap items-center gap-2">
+            <HomingButtons />
+          </div>
+          <HomingPanel />
+          <SwitchMeasurePanel />
           {itemsOf("motor_check")}
         </Section>
 

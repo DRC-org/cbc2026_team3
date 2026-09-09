@@ -15,9 +15,11 @@ import { ROBOTS } from "@/lib/robots";
 export function Dashboard() {
   const states = useRobotStates();
   const { matchState, serverInfo, connected } = useRobotStatus();
-  const { matchStart } = useRobotCommands();
+  const { matchStart, sendOrReport } = useRobotCommands();
   const { confirmModal, requestReset } = useResetConfirm();
   const tempThresholds = tempThresholdsOf(serverInfo);
+  const reenergize = (robot: string) => () =>
+    sendOrReport({ type: "reenergize_motors", robot }, "再励磁");
 
   if (isSetupPhase(matchState.phase)) {
     return (
@@ -45,6 +47,7 @@ export function Dashboard() {
                         connected={connected}
                         tempThresholds={tempThresholds}
                         showVerdict={false}
+                        onReenergize={reenergize(key)}
                       />
                     ) : (
                       <span className="px-1 text-base-content/70">データ未受信</span>
@@ -69,6 +72,7 @@ export function Dashboard() {
       {ROBOTS.map(({ key, label }) => (
         <RobotStatusRow
           key={key}
+          robotKey={key}
           label={label}
           state={states[key]}
           connected={connected}

@@ -422,14 +422,17 @@ describe("手動操縦モード", () => {
   it("配信を受け取るまでは半自動として描く", () => {
     mount("match", robotState({ manual: undefined }));
 
-    expect(screen.getByText("半自動")).toBeInTheDocument();
-    expect(screen.queryByText(/手動操縦中/)).toBeNull();
+    expect(screen.getByRole("button", { name: "半自動" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "手動操縦" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
   });
 
   it("モード帯はどのフェーズでも同じ位置に出る", () => {
     for (const phase of ["setup", "match", "finished"] as MatchPhase[]) {
       const view = mount(phase);
-      expect(screen.getByRole("button", { name: /手動操縦へ/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "手動操縦" })).toBeInTheDocument();
       view.unmount();
     }
   });
@@ -437,7 +440,7 @@ describe("手動操縦モード", () => {
   it("切り替えは自分の担当機へ宛てて送る", async () => {
     const { context } = mount("match");
 
-    await userEvent.click(screen.getByRole("button", { name: /手動操縦へ/ }));
+    await userEvent.click(screen.getByRole("button", { name: "手動操縦" }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },
@@ -488,7 +491,7 @@ describe("手動操縦モード", () => {
       { mode: "sequence", axes: MANUAL.axes },
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /手動操縦へ/ }));
+    await userEvent.click(screen.getByRole("button", { name: "手動操縦" }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "set_operation_mode", robot: "sub_hand", mode: "manual" },

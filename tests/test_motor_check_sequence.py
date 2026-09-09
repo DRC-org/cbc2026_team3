@@ -243,7 +243,6 @@ class TestPartialConfiguration:
 
         assert excluded == {
             "サブハンド 初期姿勢へ": tuple(sorted(SUB_HOME)),
-            "サブハンド アーム関節": ("sub_arm_joint",),
             "サブハンド 前後スライド (Y 方向)": ("sub_y_axis",),
             "サブハンド 昇降": ("sub_lift",),
             "サブハンド 回転 (左右直結ペア)": ("sub_rotate",),

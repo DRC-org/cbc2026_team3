@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -64,6 +65,11 @@ class _ReadableFd:
             return None
         if not isinstance(fd, int) or fd < 0:
             return None
+        # 読めると通知された直後でも recvmsg が待つことがある (送信失敗のエラー通知で
+        # readable になる)。ブロッキングのままだとイベントループごと固まる
+        sock = getattr(bus, "socket", None)
+        if hasattr(sock, "setblocking"):
+            sock.setblocking(False)
         try:
             return cls(fd)
         except (NotImplementedError, OSError, ValueError):
@@ -87,6 +93,15 @@ class _ReadableFd:
 
     def close(self) -> None:
         self.suspend()
+
+
+def _is_would_block(exc: BaseException) -> bool:
+    codes = (errno.EAGAIN, errno.EWOULDBLOCK)
+    if isinstance(exc, BlockingIOError):
+        return True
+    if isinstance(exc, can.CanOperationError):
+        return exc.error_code in codes or isinstance(exc.__cause__, BlockingIOError)
+    return False
 
 
 class BlockingRunner(Protocol):
@@ -273,7 +288,9 @@ class CANManager:
                 msg = bus.recv(_RECV_NO_WAIT)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if _is_would_block(exc):
+                    break
                 if msgs:
                     return msgs
                 raise
@@ -568,8 +585,10 @@ class CANManager:
         ぶんだけ起動が遅れる上限」で、性質も手当ても同じ (電源・配線) なので、
         別の数字を持たせると片方だけ延ばした構成が作れる。
 
-        送るのは読み出しフレームだけで、機構は動かない
-        (`configuration_probe_messages()` の制約)。確認すべき設定を持たない
+        送るのは設定フレームだけで、機構は動かない
+        (`configuration_probe_messages()` の制約)。食い違いを直す書き込みも
+        そこへ混ざって出るが、**書けたと数えるのは読み返せたときだけ**なので、
+        このループの終わり方は「読めた」のままである。確認すべき設定を持たない
         ドライバは 1 通も送らずに即戻る。
         """
         motor = self._motors[motor_name]

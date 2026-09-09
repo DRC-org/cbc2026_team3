@@ -37,6 +37,29 @@
       "to": "degraded",
       "type": "health_change"
     },
+    "homing_state": {
+      "available": true,
+      "axes": [
+        "y_axis"
+      ],
+      "blocked_reason": null,
+      "current_axis": null,
+      "error": null,
+      "results": [
+        {
+          "axis": "y_axis",
+          "error": "軸 'y_axis' が 5.0mm 動かしても原点センサ 'origin_sensor' に 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)"
+        }
+      ],
+      "robot": "main_hand",
+      "running": false,
+      "targets": {
+        "main_hand": [
+          "y_axis"
+        ]
+      },
+      "type": "homing_state"
+    },
     "match_state": {
       "can_start_match": false,
       "checklists": {

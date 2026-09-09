@@ -3,11 +3,13 @@ import type { ReactNode } from "react";
 
 import type {
   ChecklistRole,
+  HomingSnapshot,
   MatchCourt,
   MatchState,
   MotorCheckSnapshot,
   RobotState,
   ServerInfo,
+  SwitchMeasureSnapshot,
 } from "@/lib/protocol";
 import type { CommandRejectedEvent, HealthChangeEvent } from "@/lib/robotReducer";
 import type { WsUrlSource } from "@/lib/wsUrl";
@@ -21,6 +23,8 @@ export interface RobotStatus {
   eStopOverlayHidden: boolean;
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
+  homing: HomingSnapshot;
+  switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -69,6 +73,8 @@ export function RobotProvider({
     eStopOverlayHidden,
     healthEvents,
     motorCheck,
+    homing,
+    switchMeasure,
     matchState,
     serverInfo,
     rejection,
@@ -99,6 +105,8 @@ export function RobotProvider({
       eStopOverlayHidden,
       healthEvents,
       motorCheck,
+      homing,
+      switchMeasure,
       matchState,
       serverInfo,
       rejection,
@@ -112,6 +120,8 @@ export function RobotProvider({
       eStopOverlayHidden,
       healthEvents,
       motorCheck,
+      homing,
+      switchMeasure,
       matchState,
       serverInfo,
       rejection,
