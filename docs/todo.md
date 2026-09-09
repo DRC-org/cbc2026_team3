@@ -135,6 +135,10 @@
 - **`lib/drivers/edulite05.py` の `VEL_MIN/MAX = ±50.0` / `TORQUE_MIN/MAX = ±6.0` に
   リポジトリ内の典拠が無い。** トルク基準の歯止めを入れる前に実測で確認が要る
 - **`docs/architecture.md` の「EDULITE 05 × 3」が config（2 台）と食い違う**
+- **「無励磁」と「応答なし」の境目にヒステリシスが無い。** `feedback_timeout_ms` の既定
+  500ms に対して `state` は 50ms ごとに配る。バスが劣化して到達が 500ms 付近を行き来すると
+  同じモータが 2 つの欄を往復し、**再励磁ボタンが出たり消えたりする**。デバウンスを
+  入れるかは運用判断（点滅を嫌って遅らせると、本当に応答が無い状態の表示も遅れる）
 - **物理停止スイッチの検出が `pump_vac` 1 台頼み。** `RobotServer._detect_board_e_stop` は
   `GenericDriver` に絞っており、物理停止は DC 基板の `REF` にしか無いのでサブハンドで
   検出できるのは `pump_vac` だけ。しかも `received_at is None` で `continue` するため

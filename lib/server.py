@@ -937,10 +937,12 @@ class RobotServer:
         for monitor in ctx.sync_monitors:
             violations |= set(monitor.violated)
 
+        unenergized, unresponsive = self._split_inactive_motors(robot_name)
+
         return {
             "sync_violations": sorted(violations),
-            "unenergized_motors": self._unenergized_motors(robot_name),
-            "unresponsive_motors": self._unresponsive_motors(robot_name),
+            "unenergized_motors": sorted(unenergized),
+            "unresponsive_motors": sorted(unresponsive),
             "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
             "failed_tasks": list(self._failed_tasks.get(robot_name, ())),
             "reenergizing": self._is_reenergizing(robot_name),
@@ -975,7 +977,7 @@ class RobotServer:
         }
 
     def _split_inactive_motors(self, robot_name: str) -> tuple[set[str], set[str]]:
-        """励磁できなかったモータを「無励磁」と「応答なし」へ仕分ける。
+        """励磁されていないモータを「無励磁」と「応答なし」へ仕分ける。
 
         手当てが逆なので 1 つの文面へ潰さない —— 応答が無い = ドライバの電源・CAN 配線 /
         励磁されていない = 再励磁。`lib/drivers/dm3520.py` の `activation_block_reason`
@@ -988,35 +990,26 @@ class RobotServer:
             return set(), set()
 
         ctx = self._robots[robot_name]
-        freshness = FeedbackFreshness(
-            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
-        )
-        now = freshness.now()
-        unenergized = {
+        candidates = {
             motor_name
             for motor_name, motor in ctx.can_manager.motors.items()
             if motor.is_energized() is False
         }
-        unresponsive: set[str] = set()
         for motor_name in self._inactive_motors.get(robot_name, ()):
             motor = ctx.can_manager.motors.get(motor_name)
             # 起動時に失敗した後で自力で励磁されたモータをラッチに居座らせない。
             if motor is not None and motor.is_energized() is True:
                 continue
-            if freshness.is_stale(motor_name, now):
-                unresponsive.add(motor_name)
-            else:
-                unenergized.add(motor_name)
-        # 手当てが逆の 2 つを同じモータへ同時に出さない。落ちた側は必ずもう一方に居る。
-        return unenergized - unresponsive, unresponsive
+            candidates.add(motor_name)
 
-    def _unenergized_motors(self, robot_name: str) -> list[str]:
-        unenergized, _unresponsive = self._split_inactive_motors(robot_name)
-        return sorted(unenergized)
-
-    def _unresponsive_motors(self, robot_name: str) -> list[str]:
-        _unenergized, unresponsive = self._split_inactive_motors(robot_name)
-        return sorted(unresponsive)
+        # 鮮度切れは消すのではなく「応答なし」へ移す。`is_energized()` が読む値は
+        # フレームを復号した瞬間にしか書かれないので、途絶しても古い False が張り付く。
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        now = freshness.now()
+        unresponsive = {name for name in candidates if freshness.is_stale(name, now)}
+        return candidates - unresponsive, unresponsive
 
     def _firmware_unconfirmed_motors(self, robot_name: str) -> list[str]:
         if self._dry_run:

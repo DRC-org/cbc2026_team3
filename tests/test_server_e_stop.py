@@ -546,6 +546,7 @@ class TestUnenergizedMotorsAreVisible:
             fx.can_manager("main_hand"),
             {"energized": energized, "dropped": dropped, "unknown": unknown},
         )
+        keep_feedback_fresh(fx.can_manager("main_hand"))
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")

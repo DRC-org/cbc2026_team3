@@ -93,6 +93,38 @@ class TestUnresponsiveIsNotReportedAsUnenergized:
 
         bus.shutdown()
 
+    async def test_ラッチ外の無励磁も鮮度が切れたら応答なしへ移る(self) -> None:
+        # 稼働中に励磁が落ちた直後 CAN も落ちる経路。`mode_state` は復号時にしか
+        # 書かれないので、古い False が張り付いたまま `_inactive_motors` を通らない。
+        fx, mgr, bus, motor = _build(bus_channel="vun9")
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, edulite_feedback(motor, mode_state=_MODE_RESET))
+            _go_stale(mgr, "rotate_l")
+            fx.expire_energize_grace()
+
+            safety = _safety(fx)
+            assert safety["unenergized_motors"] == []
+            assert safety["unresponsive_motors"] == ["rotate_l"]
+
+        bus.shutdown()
+
+    async def test_ラッチ外の無励磁は鮮度が切れても消えない(self) -> None:
+        fx, mgr, bus, motor = _build(bus_channel="vun5")
+        app = fx.create_app()
+
+        async with TestClient(TestServer(app)):
+            deliver_frame(mgr, _BUS, edulite_feedback(motor, mode_state=_MODE_RESET))
+            _go_stale(mgr, "rotate_l")
+            fx.expire_energize_grace()
+
+            safety = _safety(fx)
+            reported = safety["unenergized_motors"] + safety["unresponsive_motors"]
+            assert reported == ["rotate_l"], "無励磁の報告が鮮度切れで黙って消えた"
+
+        bus.shutdown()
+
 
 class TestFreshMotorsAreStillReportedAsUnenergized:
     async def test_鮮度が生きているラッチは無励磁として報告される(self) -> None:
@@ -118,7 +150,7 @@ class TestFreshMotorsAreStillReportedAsUnenergized:
 
         bus.shutdown()
 
-    async def test_ドライバが無励磁と答えたモータは今までどおり載る(self) -> None:
+    async def test_ラッチ外の無励磁は鮮度が生きていれば無励磁のまま(self) -> None:
         fx, mgr, bus, motor = _build(bus_channel="vun4")
         app = fx.create_app()
 
@@ -129,21 +161,6 @@ class TestFreshMotorsAreStillReportedAsUnenergized:
             safety = _safety(fx)
             assert safety["unenergized_motors"] == ["rotate_l"]
             assert safety["unresponsive_motors"] == []
-
-        bus.shutdown()
-
-    async def test_ラッチ外の無励磁は鮮度が切れても消えない(self) -> None:
-        fx, mgr, bus, motor = _build(bus_channel="vun5")
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)):
-            deliver_frame(mgr, _BUS, edulite_feedback(motor, mode_state=_MODE_RESET))
-            _go_stale(mgr, "rotate_l")
-            fx.expire_energize_grace()
-
-            safety = _safety(fx)
-            reported = safety["unenergized_motors"] + safety["unresponsive_motors"]
-            assert reported == ["rotate_l"], "無励磁の報告が鮮度切れで黙って消えた"
 
         bus.shutdown()
 

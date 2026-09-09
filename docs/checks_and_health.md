@@ -492,7 +492,7 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 まま**になる。操縦者に見えるのは「指令しても動かない」だけで、原因はどこにも出ない。
 
 そこで `MotorDriver.is_energized()`（判定手段が無いドライバは `None`）を
-`RobotServer._unenergized_motors()` が読み、`state.safety.unenergized_motors` として
+`RobotServer._split_inactive_motors()` が読み、`state.safety.unenergized_motors` として
 配信する。緊急停止中は無励磁が正しい状態なので報告しない。**この緊急停止ガードが
 唯一の抑止で、`activate_e_stop` 側にも同じ判定を置いてはならない**（片方を消しても
 症状が出なくなり、後で本物のガードを消しても気付けなくなる）。
@@ -509,19 +509,28 @@ EDULITE 05 と DM3520 は POSITION モードでは新鮮なフィードバック
 **動力電源が落ちていればフィードバックが 1 通も来ないまま全数がラッチに入る**。手当ては
 「再励磁」ではなく電源と CAN 配線であり、再励磁を何度押しても消えない。
 
-そのため `_split_inactive_motors()` がラッチを**フィードバック鮮度**（`FeedbackFreshness`。
-`_firmware_unconfirmed_motors` と同じ組み方）で仕分け、鮮度切れを
-`state.safety.unresponsive_motors` へ、生きているものを `unenergized_motors` へ載せる。
+そのため `_split_inactive_motors()` が、`is_energized() is False` のモータとラッチを
+**同じ 1 つの候補集合へ入れてから**、**フィードバック鮮度**（`FeedbackFreshness`。
+`_firmware_unconfirmed_motors` と同じ組み方）で仕分ける。鮮度切れは
+`state.safety.unresponsive_motors` へ、生きているものは `unenergized_motors` へ。
 **片方から外したものは必ずもう片方に載る**（`None` を「無励磁」へ倒さない規則が、
-`is_energized()` の三値だけでなくこのラッチにも効くようにしたもの。黙って消すと、
+`is_energized()` の三値だけでなくこの経路にも効くようにしたもの。黙って消すと、
 機体が動かないのに画面が理由を言わない状態に戻る）。あわせて、**ラッチに居ても
 `is_energized()` が `True` を返すモータは報告しない** —— 起動時に失敗した後で自力で
 励磁されたものが居座らないようにするため。
 
+**鮮度の仕分けはラッチ経由かどうかに関わらず掛ける。** `is_energized()` が読む値
+（EDULITE の `mode_state` / DM3520 の `error_code`）は**フレームを復号した瞬間にしか
+書かれず、途絶えてもクリアされない**。稼働中に励磁が落ちて（`is_energized()` が
+`False`）その直後に CAN も落ちる経路では、モータはラッチを 1 度も通らないまま
+古い `False` を張り付かせる。ここに鮮度を掛けないと、**上の表の
+「フィードバックは届いているのに」をコードが保証しない**（2026-09-05 の UNDERVOLTAGE
+と地続きの経路）。
+
 | 欄 | 意味 | 手当て |
 |---|---|---|
 | `unenergized_motors` | フィードバックは届いているのに励磁されていない | 操縦者画面の「再励磁」 |
-| `unresponsive_motors` | 励磁に失敗したうえ、フィードバックの鮮度が切れている（1 通も来ていない / 途絶えた） | ドライバの電源と CAN 配線（**再励磁では直らない**ので UI もボタンを出さない） |
+| `unresponsive_motors` | 励磁されておらず、フィードバックの鮮度も切れている（1 通も来ていない / 途絶えた） | ドライバの電源と CAN 配線（**再励磁では直らない**ので UI もボタンを出さない） |
 
 **文面を分けるのは手当てが逆だから。** 同じ区別を `Dm3520Driver.activation_block_reason()`
 が既に持っており（応答が無い / 読み返しが食い違う）、上の層でそれを 1 つに潰していた。
