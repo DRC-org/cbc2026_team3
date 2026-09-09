@@ -171,11 +171,12 @@ sync_monitors=…, limit_monitors=…, target_refreshers=…)` でサーバー�
 | RobStride EDULITE 05 | 3 | 内蔵 | CAN 2.0B Extended Frame (29bit) |
 | Damiao DM-S3519-1EC | 2 | DM3520-1EC ドライバ | CAN 2.0A Standard Frame |
 | DC モータ / サーボ | 多数 | 自作モータドライバ | CAN 2.0A Standard Frame |
-| 真空ポンプ（吸気 / 排気） | 2 | 自作モータドライバ（DC 基板の空き ch） | CAN 2.0A Standard Frame |
-| 電磁弁（吸着パッド） | 6 | 自作モータドライバ（電磁弁基板 / STM32F303K8） | CAN 2.0A Standard Frame |
+| 真空ポンプ（吸気） | 1 | 自作モータドライバ（DC 基板の空き ch） | CAN 2.0A Standard Frame |
+| 三方電磁弁（吸着パッド） | 6 | 自作モータドライバ（電磁弁基板 / STM32F303K8） | CAN 2.0A Standard Frame |
 
-吸着系はサブハンドの機構。吸気ポンプは試合中回しっぱなしにし、吸着 / 解放は電磁弁だけで切り替える
-（**連続運転してよいかは未確認**。`docs/todo.md`）。
+吸着系はサブハンドの機構。**ポンプは吸気の 1 つだけ**で、試合中は回しっぱなしにし、
+吸着 / 解放は電磁弁だけで切り替える。**弁が三方弁なので、閉じた側が大気開放になり、
+解放は弁を閉じるだけで済む**（正圧をかける経路は無い）。
 **ポンプは電磁弁基板ではなく DC 基板が動かす**（電磁弁基板の 6ch はすべて弁で埋まっており、
 ポンプは起動電流が大きく `max_duty` で立ち上がりを抑えられる DC 基板が適する）。
 
@@ -261,7 +262,7 @@ down 中しか受け付けない）、up 後に `ERROR-ACTIVE` を確認して�
 |---|---|---|---|---|---|
 | `sub_y_axis` / `sub_lift` | 同名 | dm3520 | can_dm3520 | 0x01 / 0x02（MST 0x11 / 0x12） | 前後 / 昇降（ラックアンドピニオン直動） |
 | `sub_gripper` | 同名 | generic（サーボ #1 SV0） | can_generic | 0x48 | 開 / 閉 |
-| `valve_1`〜`valve_6` / `pump_vac` / `pump_blow` | 同名 | generic（電磁弁 #0 ch0-5 / DC ch1・ch2） | can_generic | 0xC0〜0xC5 / 0x81 / 0x82 | `on_off` ×6 / duty ×2 |
+| `valve_1`〜`valve_6` / `pump_vac` | 同名 | generic（電磁弁 #0 ch0-5 / DC ch1） | can_generic | 0xC0〜0xC5 / 0x81 | `on_off` ×6 / duty |
 
 `sub_y_axis` / `sub_lift` は**独立 2 軸**で左右直結ペアではない（`sync_tolerance` を持たない）。
 軸名に `sub_` を付けるのは、統合動作確認が両ハンドの位置定数を `PositionTable.merged` で
