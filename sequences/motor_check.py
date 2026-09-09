@@ -12,11 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 SUB_HOME: dict[str, str] = {
-    "sub_y_axis": "home",
-    "sub_lift": "home",
-    "sub_rotate": "home",
-    "sub_pitch": "home",
-    "sub_offset": "home",
+    "sub_y_axis": "retracted",
+    "sub_lift": "top",
+    "sub_rotate": "receive",
+    "sub_pitch": "open",
+    "sub_offset": "open",
     "pump_vac": "stop",
 }
 
@@ -83,28 +83,28 @@ class MotorCheckSequence(Sequence):
 
     @step("サブハンド 前後スライド (Y 方向)", axes={"sub_y_axis"})
     async def sub_y_axis(self) -> None:
-        await self.move_to({"sub_y_axis": "extended"})
-        await self.move_to({"sub_y_axis": "home"})
+        await self.move_to({"sub_y_axis": "clear"})
+        await self.move_to({"sub_y_axis": "retracted"})
 
     @step("サブハンド 昇降", axes={"sub_lift"})
     async def sub_lift(self) -> None:
-        await self.move_to({"sub_lift": "lifted"})
-        await self.move_to({"sub_lift": "home"})
+        await self.move_to({"sub_lift": "pick"})
+        await self.move_to({"sub_lift": "top"})
 
     @step("サブハンド 回転 (左右直結ペア)", axes={"sub_rotate"})
     async def sub_rotate(self) -> None:
-        await self.move_to({"sub_rotate": "working"})
-        await self.move_to({"sub_rotate": "home"})
+        await self.move_to({"sub_rotate": "carry"})
+        await self.move_to({"sub_rotate": "receive"})
 
     @step("サブハンド ピッチ (左右直結ペア)", axes={"sub_pitch"})
     async def sub_pitch(self) -> None:
-        await self.move_to({"sub_pitch": "working"})
-        await self.move_to({"sub_pitch": "home"})
+        await self.move_to({"sub_pitch": "close"})
+        await self.move_to({"sub_pitch": "open"})
 
     @step("サブハンド オフセット", axes={"sub_offset"})
     async def sub_offset(self) -> None:
-        await self.move_to({"sub_offset": "working"})
-        await self.move_to({"sub_offset": "home"})
+        await self.move_to({"sub_offset": "close"})
+        await self.move_to({"sub_offset": "open"})
 
     @step("サブハンド 電磁弁 6 個 (打音・目視確認)", axes=VALVE_AXES)
     async def sub_valves(self) -> None:
