@@ -80,7 +80,7 @@ axes:
   sub_pitch:
     unit: deg
     command_unit: deg
-    timeout_s: 2.0
+    timeout_s: 3.0
     tolerance: 2.0
     motors:
       sub_pitch_r: { scale: 1.0, offset: 0.0 }
@@ -92,7 +92,7 @@ axes:
     command_unit: deg
     scale: 1.0
     offset: 0.0
-    timeout_s: 2.0
+    timeout_s: 3.0
     tolerance: 2.0
 
   # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
