@@ -119,6 +119,13 @@ class HomingSpec:
     coarse_step: float | None = None
     motor_sensors: tuple[tuple[str, str], ...] | None = None
     align_distance: float | None = None
+    #: 整列段 1 歩の刻み [軸の unit]。None なら step と同じ。
+    #: 探索段は左右 2 台で押すのに整列段は 1 台なので、同じ刻みでは同じ押しが出ない
+    align_step: float | None = None
+    #: 零点確定の直後に退避する位置名 (`positions.<軸>` のキー)。原点姿勢が他の軸と
+    #: 干渉する軸で、次の軸を寄せる前に干渉域を抜けるために要る。距離ではなく位置名で
+    #: 持つのは、0.0 そのものがスイッチの動作点だから (`sub_y_axis` と同じ流儀)
+    retreat_position: str | None = None
 
     def __post_init__(self) -> None:
         if self.sensor is not None and self.motor_sensors is not None:
@@ -151,6 +158,7 @@ class HomingSpec:
             )
         self._validate_coarse_step()
         self._validate_align_distance()
+        self._validate_align_step()
 
     def _validate_coarse_step(self) -> None:
         if self.coarse_step is None:
@@ -193,6 +201,28 @@ class HomingSpec:
             raise ValueError(
                 f"homing.align_distance ({self.align_distance}) が "
                 f"step ({self.step}) より小さいため 1 歩も進めません"
+            )
+
+    def _validate_align_step(self) -> None:
+        if self.align_step is None:
+            return
+        if self.motor_sensors is None:
+            raise ValueError(
+                "homing.align_step は sensors を書いた軸にのみ指定できます "
+                "(整列段が無いので書いても効きません)"
+            )
+        if self.align_step <= 0.0:
+            raise ValueError(f"homing.align_step は正の値: {self.align_step!r}")
+        if self.align_step < self.step:
+            # 整列段は 1 台で押すので、探索段より細かい刻みでは静止摩擦を越えられない
+            raise ValueError(
+                f"homing.align_step ({self.align_step}) は "
+                f"step ({self.step}) 以上である必要があります"
+            )
+        if self.align_distance is not None and self.align_step >= self.align_distance:
+            raise ValueError(
+                f"homing.align_step ({self.align_step}) が "
+                f"align_distance ({self.align_distance}) 以上のため 1 歩で上限を越えます"
             )
 
     @property
@@ -468,8 +498,10 @@ _HOMING_KEYS = frozenset(
         "step",
         "settle_s",
         "align_distance",
+        "align_step",
         "release_distance",
         "coarse_step",
+        "retreat_position",
     }
 )
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
@@ -801,6 +833,12 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
     motor_sensors = _parse_homing_sensor_map(path, raw.get("sensors"))
     align_distance = _number(path, raw, "align_distance", None)
 
+    retreat_position = raw.get("retreat_position")
+    if retreat_position is not None and (
+        not isinstance(retreat_position, str) or not retreat_position
+    ):
+        raise ValueError(f"{path}.retreat_position は位置名の文字列: {retreat_position!r}")
+
     try:
         return HomingSpec(
             sensor=sensor,
@@ -810,6 +848,8 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             step=float(raw["step"]),
             settle_s=float(raw.get("settle_s", 0.05)),
             align_distance=align_distance,
+            align_step=_number(path, raw, "align_step", None),
+            retreat_position=retreat_position,
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
             ),
@@ -1070,7 +1110,48 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
         _check_manual_range(source, axes[axis], positions[axis])
         _check_motion_timeout(source, axes[axis], positions[axis])
 
+    # positions を 1 つも書かなかった軸も通す (退避先の書き忘れは「位置が無い」形で現れる)
+    for axis, spec in axes.items():
+        _check_retreat_position(source, spec, positions.get(axis, {}))
+
     return PositionTable(axes, positions, source=source)
+
+
+def _check_retreat_position(
+    source: str,
+    spec: AxisSpec,
+    values: Mapping[str, float | dict[str, float]],
+) -> None:
+    """零点確定の直後に退避する位置が、**原点から離れる側**にあること。
+
+    原点側に取ると退避したことにならず、干渉したまま次の軸を寄せることになる
+    (症状は「次の軸が 1 歩も動かずに零点確定で失敗する」)。
+    """
+    homing = spec.homing
+    if homing is None or homing.retreat_position is None:
+        return
+
+    name = homing.retreat_position
+    if name not in values:
+        available = ", ".join(values) or "(なし)"
+        raise ValueError(
+            f"{source}: axes.{spec.name}.homing.retreat_position の '{name}' が "
+            f"positions.{spec.name} にありません。定義済みの位置: {available}"
+        )
+
+    value = values[name]
+    candidates = list(value.values()) if isinstance(value, dict) else [float(value)]
+    wrong = [candidate for candidate in candidates if homing.direction * candidate >= 0.0]
+    if not wrong:
+        return
+
+    side = "正" if homing.direction < 0 else "負"
+    raise ValueError(
+        f"{source}: positions.{spec.name}.{name} "
+        f"({', '.join(str(candidate) for candidate in wrong)}) が原点から離れる側に"
+        f"ありません (homing.direction={homing.direction:+g} なので {side}の値が要ります)。"
+        "退避になっていないと、干渉したまま次の軸を寄せます"
+    )
 
 
 def _check_motion_timeout(

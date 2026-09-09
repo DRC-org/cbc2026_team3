@@ -23,6 +23,7 @@ import pytest
 from lib.control.limit_monitor import LimitMonitor
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
+from lib.motion_guard import SensorSuspension
 from lib.sequence.engine import Sequence, SequenceTimeoutError
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -72,19 +73,24 @@ class _Rig:
         self.contacts: dict[str, int] = {}
         self.counters = counters
         self.table = table
+        # 読み口は `main()` と同じ形 (現在値も累計も覆いを通す) で組む。片方だけ生で
+        # 渡した配線は、整列段の覆いに穴が開いていることに気付けない
+        self.suspension = SensorSuspension()
+        read = self.suspension.wrap(self.read)
+        count = self.suspension.wrap_count(self.count)
 
         async def sink(_mode: ControlMode, value: float) -> None:
             self.sent.append(value)
 
         self.driver = StubFeedbackDriver("sub_y_axis", 1)
         self.handle = MotorHandle("sub_y_axis", self.driver, mock_can_manager(), target_sink=sink)
-        group = MotorGroup(sensor_active=self.read)
+        group = MotorGroup(sensor_active=read)
         group.add(self.handle)
         self.monitor = LimitMonitor(
             table,
             group,
-            sensor_active=self.read,
-            sensor_contact_count=self.count,
+            sensor_active=read,
+            sensor_contact_count=count,
             court=lambda: Court.RED,
         )
 
@@ -314,6 +320,65 @@ class TestNarrowContact:
         await rig.monitor.step()
 
         assert rig.sent == []
+
+
+class TestSuspendedSensor:
+    """整列段のあいだ覆ったセンサでは止めない (`SensorSuspension`)。
+
+    左右に 1 本ずつスイッチが付く軸では、片方が当たった後にまだ当たっていない側だけを
+    端へ進める。軸としては端へ向かう向きなので、覆いが**現在値と接触の累計の両方**に
+    掛かっていないと、この監視が目標を実測へ書き直して整列段が必ず失敗する
+    (実機ログ: 整列段の最中に `y_axis_l_origin_sensor` で「移動中に可動端で停止」)。
+    """
+
+    async def test_覆っている間は接触を数えても止めない(self) -> None:
+        rig = _rig(rear_switch=False)
+        rig.set_observed(-447.5)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        with rig.suspension.suspend(["rear_switch"]):
+            rig.pulse("rear_switch")
+            await rig.monitor.step()
+
+            assert rig.sent == []
+
+    async def test_覆っている間は押されていても止めない(self) -> None:
+        rig = _rig(rear_switch=False)
+        rig.set_observed(-447.5)
+        await rig.command(-450.0)
+
+        with rig.suspension.suspend(["rear_switch"]):
+            rig.sensors["rear_switch"] = True
+            await rig.monitor.step()
+
+            assert rig.sent == []
+
+    async def test_名指ししていないセンサは覆っている間も止める(self) -> None:
+        """軸まるごと外すと、反対端の守りまで消える。"""
+        rig = _rig(rear_switch=False)
+        rig.set_observed(-447.5)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        with rig.suspension.suspend(["front_switch"]):
+            rig.pulse("rear_switch")
+            await rig.monitor.step()
+
+            assert rig.sent == [-447.5 * _SCALE]
+
+    async def test_覆いを外せば押されたスイッチで止める(self) -> None:
+        """覆いが外れ残ると、その端は試合が終わるまで守られない。"""
+        rig = _rig(rear_switch=False)
+        rig.set_observed(-447.5)
+        await rig.command(-450.0)
+
+        with rig.suspension.suspend(["rear_switch"]):
+            rig.sensors["rear_switch"] = True
+            await rig.monitor.step()
+        await rig.monitor.step()
+
+        assert rig.sent == [-447.5 * _SCALE]
 
 
 class TestIntervention:

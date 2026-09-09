@@ -153,11 +153,18 @@ class SensorSuspension:
     **この排他が消えたら覆いの適用範囲を絞る必要が出る**ので、両向きを
     `tests/test_server_homing.py::TestDenyGate` が固定している。
 
+    **覆う読み口は現在値だけでは足りない。** 周期監視は現在値に加えて**接触 (OFF→ON)
+    の累計** (`LimitMonitor._poll_contacts`) を見て、観測周期より狭い ON 区間を拾う。
+    累計を覆わずに渡すと、整列段のあいだに数えた接触がその周期だけ「押されている」に
+    化け、覆ったはずの軸の目標が実測位置へ書き直される (症状は整列段の最中の
+    「移動中に可動端で停止」)。`wrap_count()` が同じ名前の集合に同じ覆いを掛ける。
+
     多重に掛かっても数で持つ (掛けた順に外れなくても早く素通りに戻らない)。
     """
 
     def __init__(self) -> None:
         self._counts: dict[str, int] = {}
+        self._frozen_counts: dict[str, int] = {}
 
     @contextlib.contextmanager
     def suspend(self, names: Iterable[str]) -> Iterator[None]:
@@ -173,6 +180,7 @@ class SensorSuspension:
                     self._counts[name] = remaining
                 else:
                     self._counts.pop(name, None)
+                    self._frozen_counts.pop(name, None)
 
     def is_suspended(self, name: str) -> bool:
         return self._counts.get(name, 0) > 0
@@ -188,6 +196,33 @@ class SensorSuspension:
             if self.is_suspended(name):
                 return False
             return read(name)
+
+        return guarded
+
+    def wrap_count(self, read: Callable[[str], int | None]) -> Callable[[str], int | None]:
+        """接触 (OFF→ON) の累計の読み口を覆う。**覆っている間は覆い始めの値で凍らせる。**
+
+        `None` (カウンタを提供しないドライバ) へ倒さないのは、読み手が `None` の周期に
+        基準値を進めずに見送るため —— 覆いを外した瞬間に、覆っているあいだに増えたぶんが
+        まとめて接触として現れる。凍らせた値を返せば基準値は毎周期進む。
+
+        **元の読み口が `None` を返すセンサはそのまま `None`。** 覆いは「カウンタがあるのに
+        数えさせない」ものであって、カウンタの有無まで偽ると読み手の判断材料が変わる。
+
+        凍らせる値は**覆う前に最後に読めた値**で、覆ってから最初に読んだ値ではない ——
+        後者だと覆い始めから最初の読みまで (周期監視なら 20ms) に数えた接触が凍った値へ
+        混ざり、読み手の基準値がその周期だけ跳ねて接触として立つ。
+        """
+        last_seen: dict[str, int] = {}
+
+        def guarded(name: str) -> int | None:
+            count = read(name)
+            if count is None:
+                return None
+            if not self.is_suspended(name):
+                last_seen[name] = count
+                return count
+            return self._frozen_counts.setdefault(name, last_seen.get(name, count))
 
         return guarded
 
