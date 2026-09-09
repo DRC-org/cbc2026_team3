@@ -48,6 +48,11 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 **`motor_check_state` の `steps` だけは検査する** —— 空配列が「まだ読み込まれていない」という
 別の意味を既に持っているため。
 
+**同期ずれの詳しさは `e_stop_state.reason` だけが運ぶ。** `safety.sync_violations` は
+ラッチした軸名の配列のままで、`describeSafetyIssues` の `sync_violation` も分岐を持たない
+（hint は原因の候補を 2 つとも挙げるだけ）。何回目の再発かと次の一手はサーバーが文にして
+`reason` へ載せるので、**UI 側で回数を数えたり文面を組み立てたりしない**。
+
 **`homing_state` の `results` / `targets` / `axes` も検査する** —— 形が読めなければ
 `MALFORMED` を運び、画面は「読み取れませんでした」を出す。空配列で埋めると
 「成功も失敗もしていない」に化ける。

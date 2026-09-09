@@ -1156,6 +1156,15 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 `reason` は操縦者操作の `e_stop` では付かない。サーバーが保持し、解除まで再配信のたびに
 載せる。最初に判明した理由を優先し、後から来た理由で上書きしない。
 
+同期ずれの理由文は、解除を跨いで再発した 2 回目以降だけ後段が伸びる（`SyncMonitor` が
+軸ごとに数える再発回数を `main._make_sync_violation_handler` が受け取る）。**改行は
+`EStopOverlay` の 1 要素へそのまま流れて詰まるので 1 行で組む。**
+
+```jsonc
+{ "type": "e_stop_state", "active": true,
+  "reason": "main_hand の rotate の左右ずれ 175.879deg が 許容 5.000deg を超えました。解除しても 3 回続けて再発しています —— 左右の原点が食い違っている可能性があります。零点合わせを実行してください" }
+```
+
 ```jsonc
 { "type": "server_info", "dev_tools": false, "dry_run": false,
   "temp_warning_c": 65.0, "temp_critical_c": 80.0 }

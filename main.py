@@ -896,9 +896,9 @@ def _make_sync_violation_handler(
     robot_name: str,
     positions: PositionTable,
     tasks: set[asyncio.Task[None]],
-) -> Callable[[str, float], None]:
+) -> Callable[[str, float, int], None]:
 
-    def on_violation(axis_name: str, deviation: float) -> None:
+    def on_violation(axis_name: str, deviation: float, retrips: int = 1) -> None:
         spec = positions.axis(axis_name)
         unit = spec.unit
         tolerance = float(spec.sync_tolerance or 0.0)
@@ -906,6 +906,14 @@ def _make_sync_violation_handler(
             f"{robot_name} の {axis_name} の左右ずれ {deviation:.3f}{unit} が"
             f" 許容 {tolerance:.3f}{unit} を超えました"
         )
+        # 解除するたび即停止するループは、機構のずれと左右の原点の食い違いの区別が
+        # 画面から付かない。再発回数と次の一手だけが操縦者を原因へ導く手掛かりになる。
+        # 改行は EStopOverlay の 1 要素で詰まるので 1 行に収める。
+        if retrips >= 2:
+            reason += (
+                f"。解除しても {retrips} 回続けて再発しています"
+                " —— 左右の原点が食い違っている可能性があります。零点合わせを実行してください"
+            )
         task = asyncio.create_task(server.activate_e_stop(reason=reason))
         tasks.add(task)
         server.watch_task(

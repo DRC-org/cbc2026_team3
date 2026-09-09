@@ -119,7 +119,7 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
       kind: "sync_violation",
       label: "同期ずれラッチ",
       detail: safety.sync_violations.join(", "),
-      hint: "機構を直してから緊急停止を解除し直してください (解除しただけでは動きません)",
+      hint: "機構のずれか左右の原点の食い違いを直してから緊急停止を解除し直してください (解除しただけでは動きません。どちらなのかは緊急停止の理由が出します)",
     });
   }
 

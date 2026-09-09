@@ -49,6 +49,7 @@ class _Fixture:
                 self.drivers[member.name] = _StubDriver()
                 self.feedback_at[member.name] = self.clock.now
         self.violations: list[tuple[str, float]] = []
+        self.retrips: list[tuple[str, int]] = []
         self.monitor = SyncMonitor(
             self.groups,
             self.drivers,  # type: ignore[arg-type]
@@ -60,8 +61,9 @@ class _Fixture:
             feedback_clock=self.clock,
         )
 
-    def _record(self, group_name: str, deviation: float) -> None:
+    def _record(self, group_name: str, deviation: float, retrips: int = 1) -> None:
         self.violations.append((group_name, deviation))
+        self.retrips.append((group_name, retrips))
 
     def place(self, name: str, value: float, *, fresh: bool = True) -> None:
         member = self._member(name)
@@ -124,6 +126,46 @@ class TestViolationDetection:
         assert fx.monitor.violated == frozenset()
         fx.monitor.step()
         assert len(fx.violations) == 2
+
+
+class TestRetripCount:
+    def _violating(self, *, samples: int = 1) -> _Fixture:
+        fx = _Fixture(violation_samples=samples)
+        fx.place("y_axis_r", 10.0)
+        fx.place("y_axis_l", 20.0)
+        return fx
+
+    async def test_初回は1回目として渡る(self) -> None:
+        fx = self._violating()
+        fx.monitor.step()
+        assert fx.retrips == [("y_axis", 1)]
+
+    async def test_ラッチ中は数え上げない(self) -> None:
+        fx = self._violating()
+        for _ in range(5):
+            fx.monitor.step()
+        assert fx.retrips == [("y_axis", 1)]
+
+    async def test_resetをまたいでも数え続ける(self) -> None:
+        fx = self._violating()
+        for _ in range(3):
+            fx.monitor.step()
+            fx.monitor.reset()
+        assert fx.retrips == [("y_axis", 1), ("y_axis", 2), ("y_axis", 3)]
+
+    async def test_軸ごとに独立して数える(self) -> None:
+        fx = _Fixture(groups=(_pair_group("y_axis"), _pair_group("rotate")), violation_samples=1)
+        fx.place("y_axis_r", 10.0)
+        fx.place("y_axis_l", 20.0)
+        fx.monitor.step()
+        fx.monitor.reset()
+
+        fx.place("y_axis_l", 10.0)
+        fx.place("rotate_r", 10.0)
+        fx.place("rotate_l", 20.0)
+        fx.monitor.step()
+
+        assert fx.retrips == [("y_axis", 1), ("rotate", 1)]
 
 
 class TestSuspendGroup:
@@ -251,7 +293,7 @@ class TestCallbackRobustness:
     async def test_monitor_survives_callback_exception(self) -> None:
         calls: list[str] = []
 
-        def boom(group_name: str, deviation: float) -> None:
+        def boom(group_name: str, deviation: float, retrips: int = 1) -> None:
             calls.append(group_name)
             raise RuntimeError("コールバック内部エラー (テスト)")
 
