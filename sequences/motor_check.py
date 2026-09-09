@@ -119,4 +119,6 @@ class MotorCheckSequence(Sequence):
 
     @step("両ハンドを初期姿勢へ戻す", axes={*MAIN_HOME, *SUB_HOME})
     async def restore_home(self) -> None:
-        await self.move_to({**MAIN_HOME, **SUB_HOME})
+        # MAIN_HOME は試合中の待機姿勢でコンベアを回したままだが、
+        # 動作確認は駆動しっぱなしの軸を残さずに終える
+        await self.move_to({**MAIN_HOME, **SUB_HOME, "conveyor": "stop"})

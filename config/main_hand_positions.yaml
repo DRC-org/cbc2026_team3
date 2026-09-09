@@ -116,15 +116,43 @@ axes:
     timeout_s: 2.0
 
 positions:
+  # *_via_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
+  # 双方と干渉するため、干渉域を避けて段階的に寄せるための経由点。両軸で同じ位置名を
+  # 使い、対が崩れていないことを読めるようにしてある。
+  # TODO(実機で確認): 経由点の値はどれも等分割の仮値。実機で干渉を見ながら列ごとに詰めること。
   y_axis:
     home: 0.0
+    work_1_via_1: 30.0
+    work_1_via_2: 60.0
+    work_1_via_3: 90.0
     work_1: 120.0
+    work_2_via_1: 80.0
+    work_2_via_2: 160.0
+    work_2_via_3: 240.0
     work_2: 320.0
+    work_3_via_1: 130.0
+    work_3_via_2: 260.0
+    work_3_via_3: 390.0
     work_3: 520.0
+    work_shared_via_1: 162.5
+    work_shared_via_2: 325.0
+    work_shared_via_3: 487.5
     work_shared: 650.0
 
   rotate:
     home: 0.0
+    work_1_via_1: 45.0
+    work_1_via_2: 90.0
+    work_1_via_3: 135.0
+    work_2_via_1: 45.0
+    work_2_via_2: 90.0
+    work_2_via_3: 135.0
+    work_3_via_1: 45.0
+    work_3_via_2: 90.0
+    work_3_via_3: 135.0
+    work_shared_via_1: 45.0
+    work_shared_via_2: 90.0
+    work_shared_via_3: 135.0
     pick: 180.0
     place: 5.0
 
