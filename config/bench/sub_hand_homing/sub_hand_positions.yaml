@@ -1,0 +1,85 @@
+# サブハンド直動 2 軸 + リミットスイッチのベンチの位置定数。
+#
+# !!! homing: と guard: は本番 (config/sub_hand_positions.yaml) と対である。
+#     片方だけ動かすと、本番では止まる構成がベンチでだけ機構端まで押し込む !!!
+#
+# 軸は本番と同じ 2 本だけ書く。登録していないモータの軸を書くと、手動操縦の軸一覧に
+# 指令の届かない軸が並ぶ。
+
+axes:
+  sub_y_axis:
+    homing:
+      sensor: sub_y_axis_f_limit_sensor
+      direction: 1
+      # スイッチ間の実測は 500〜520mm (機構側の想定 750mm とは食い違う)
+      search_distance: 560.0
+      # ON 区間の実測 2.2mm より狭く取る (広いと粗い 1 歩で跨ぎ切る)
+      coarse_step: 1.0
+      # スイッチの移動許容 0.3mm より小さく。原点のばらつきは刻み幅そのもの
+      step: 0.1
+      release_distance: 10.0
+      settle_s: 0.05
+    guard:
+      # 逆に書くと守りが反転し、押されている端へ進む指令だけが通る
+      limits:
+        plus: sub_y_axis_f_limit_sensor
+        minus: sub_y_axis_r_limit_sensor
+      # 桁の違う目標だけを止める。実ストローク 500〜520mm より広く取る
+      max_step: 600.0
+      # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
+      stall_torque: 2.0
+    unit: mm
+    command_unit: rad
+    # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
+    scale: 1.0668451
+    offset: 0.0
+    timeout_s: 4.0
+    tolerance: 1.0
+    # 探索は AxisHandle.set_target_value を直接呼ぶので、この範囲を 1 度も通らない
+    manual:
+      min: -495.0
+      max: 2.0
+      steps: [1.0, 5.0, 10.0]
+
+  # 昇降。**+ 方向が下** (2026-09-09 実機、青コート)。コートでモータの回転と上下の対応が
+  # 鏡になり、スイッチは重力側に固定なので、scale の符号だけをコート別に持つ (赤は未実測)。
+  sub_lift:
+    homing:
+      sensor: sub_lift_b_limit_sensor
+      direction: 1
+      # スイッチ間の実測は 189mm (機構側の想定 400mm とは食い違う)
+      search_distance: 220.0
+      step: 0.1
+      # ON 区間 1.0mm より狭く取る (前後軸より狭いのはこの実測差による)
+      coarse_step: 0.5
+      release_distance: 10.0
+      settle_s: 0.05
+    guard:
+      # + が下なので plus が下端。逆に書くと守りが反転する
+      limits:
+        plus: sub_lift_b_limit_sensor
+        minus: sub_lift_t_limit_sensor
+      max_step: 250.0
+      stall_torque: 2.0
+    unit: mm
+    command_unit: rad
+    scale: { blue: 1.0668451, red: -1.0668451 }
+    offset: 0.0
+    timeout_s: 4.0
+    tolerance: 1.0
+    manual:
+      min: -185.0
+      max: 2.0
+      steps: [1.0, 5.0, 10.0]
+
+positions:
+  sub_y_axis:
+    home: -20.0          # 収納位置 [mm]
+    # 0.0 は動作点そのもの。tolerance 1.0mm と ON 区間 2mm の外へ離す
+    extended: -5.0       # 前方への展開位置 [mm]
+
+  sub_lift:
+    # 0.0 は動作点そのもの。ON 区間の縁に座ると読みが揺れ、guard も 0.0 への
+    # move_to を拒みうる
+    home: -5.0           # 待機位置 [mm]
+    lifted: -20.0        # 上昇位置 [mm]

@@ -37,7 +37,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | 触るもの | 読む節 |
 |---|---|
 | `lib/can_manager.py`, `lib/drivers/` | §1 CAN バスとフレーム |
-| `lib/control/`, `lib/axis_sync.py` | §2 制御ループと軸 |
+| `lib/control/`, `lib/axis_sync.py`, `lib/motion_guard.py` | §2 制御ループと軸 |
 | 緊急停止・ホーミング・再励磁・後始末 | §3 安全機構 |
 | `lib/manual.py`, `sequences/`, 動作確認, 指差喚呼 | §4 運用と操作モード |
 | `config/`, `lib/config_schema.py`, `main.py`, ログ | §5 設定と起動 |

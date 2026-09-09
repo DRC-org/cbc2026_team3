@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
+from lib.motion_guard import MotionGuard
 from lib.sequence.positions import PositionLookupError
 
 if TYPE_CHECKING:
@@ -17,6 +18,19 @@ _DEFAULT_POLL_INTERVAL_S = 0.01
 
 TargetSink = Callable[[ControlMode, float], Awaitable[None]]
 EStopChecker = Callable[[], bool]
+#: センサ名 → 接触の有無。**``None`` は「読めていない」**で、``False``
+#: (押されていない) とは別の事実として扱う (`lib/motion_guard.py` の docstring)
+SensorReader = Callable[[str], "bool | None"]
+
+
+def _unknown_sensor_state(_name: str) -> None:
+    """センサの状態を注入されなかった経路が使う既定の読み口。**常に「読めていない」。**
+
+    ``False`` (押されていない) を既定にすると、配線し忘れた経路だけが
+    インターロックを丸ごと素通りし、**しかもそれが画面にもログにも出ない**。
+    `guard:` を書いた軸へ指令が届かないという形で必ず表に出す。
+    """
+    return None
 
 
 class EStopActiveError(RuntimeError):
@@ -132,11 +146,25 @@ class MotorHandle:
 
 
 class MotorGroup:
-    def __init__(self, handles: Mapping[str, MotorHandle] | None = None) -> None:
+    def __init__(
+        self,
+        handles: Mapping[str, MotorHandle] | None = None,
+        *,
+        sensor_active: SensorReader | None = None,
+    ) -> None:
         self._handles: dict[str, MotorHandle] = dict(handles) if handles else {}
+        # 可動端インターロックが読むセンサ状態。`AxisHandle` を作る 3 箇所
+        # (手動・シーケンス・統合動作確認) がここから引き継ぐので、束ねる側が
+        # 1 度配線すれば 3 経路とも同じものを見る
+        self._sensor_active = sensor_active
 
     def add(self, handle: MotorHandle) -> None:
         self._handles[handle.name] = handle
+
+    @property
+    def sensor_active(self) -> SensorReader | None:
+        """可動端センサの読み口。配線されていなければ None。"""
+        return self._sensor_active
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -169,10 +197,21 @@ class MotorGroup:
 
 
 class AxisHandle:
-    def __init__(self, spec: AxisSpec, handles: Sequence[MotorHandle]) -> None:
+    def __init__(
+        self,
+        spec: AxisSpec,
+        handles: Sequence[MotorHandle],
+        *,
+        sensor_active: SensorReader | None = None,
+    ) -> None:
+        # 3 経路 (手動・move_to・零点確定) が必ずここを通るので、解決忘れはここで落とす
+        spec.require_resolved()
         self._spec = spec
         self._handles = tuple(handles)
         self._motors = {motor.name: motor for motor in spec.motors}
+        # `guard:` を書かなかった軸は今までどおり素通り (歯止めを既定値で作らない)
+        self._guard = None if spec.guard is None else MotionGuard(spec.guard)
+        self._sensor_active = sensor_active or _unknown_sensor_state
 
     @property
     def name(self) -> str:
@@ -186,6 +225,8 @@ class AxisHandle:
                 f"軸 '{self.name}' のモータ {exc.args[0]!r} に対する指令値がありません"
             ) from exc
 
+        self._check_guard(commands)
+
         results = await asyncio.gather(
             *(handle.set_target(self._spec.command_mode, value) for handle, value in values),
             return_exceptions=True,
@@ -196,6 +237,51 @@ class AxisHandle:
                 if not isinstance(result, BaseException):
                     handle.clear_target()
             raise failures[0]
+
+    def _check_guard(self, commands: Mapping[str, float]) -> None:
+        """指令を 1 通も出す前に歯止めを通す。**判断は `lib/motion_guard.py` が持つ。**
+
+        ここに置くのは、手動操縦・シーケンス (`move_to`)・零点確定の 3 経路が
+        **すべて `set_target_value` を通る**ため。経路ごとに書き写すと、
+        片方だけ緩んだ状態が作れる (実際に踏んだ事故は零点確定の経路で起きた)。
+
+        **トルクは「動く指令」にしか掛けない。** 実測位置と同じ値を送り直す指令
+        (`HomingRunner` が接触を検出した瞬間に出す「その場で止まれ」) まで塞ぐと、
+        **押し込む向きの古い目標が生き残る** —— 止めるための指令が、止まって
+        いないことを理由に拒否されるという逆立ちが起きる。可動端の判定が
+        `delta == 0` を見ないのと同じ理由である。
+        """
+        if self._guard is None:
+            return
+        current = self.observed_value()
+        target = self._spec.to_value(commands)
+        self._guard.check_command(
+            axis=self.name,
+            current=current,
+            target=target,
+            unit=self._spec.unit,
+            sensor_active=self._sensor_active,
+        )
+        if target != current:
+            self._guard.check_torque(axis=self.name, torque=self._observed_torque())
+
+    def _observed_torque(self) -> float | None:
+        """軸に掛かっているトルク [Nm]。測れるモータが 1 台も無ければ None。
+
+        DM3520 / EDULITE 05 はトルクを ``MotorState.current`` に載せる。
+        **測れるかどうかは `TelemetrySupport` だけが答える** —— 測る手段の無い
+        基板 (DC / 電磁弁) が常に運ぶ 0.0 を混ぜると、「測ったように見える 0」が
+        そのまま「異常なし」に化ける。
+
+        複数モータ軸では絶対値の最大を採る。左右直結ペアは片側だけが機構に
+        当たることがあり、平均を採るともう片方の余裕で薄まって検出が遅れる。
+        """
+        torques = [
+            abs(handle.driver.state.current)
+            for handle in self._handles
+            if handle.driver.telemetry.current
+        ]
+        return max(torques) if torques else None
 
     async def wait_reached(
         self, *, timeout: float | None = None, expect_target: bool = False
@@ -258,8 +344,9 @@ def build_motor_group(
     *,
     is_estop_active: EStopChecker | None = None,
     target_sinks: Mapping[str, TargetSink] | None = None,
+    sensor_active: SensorReader | None = None,
 ) -> MotorGroup:
-    group = MotorGroup()
+    group = MotorGroup(sensor_active=sensor_active)
     for name, driver in motors.items():
         group.add(
             MotorHandle(

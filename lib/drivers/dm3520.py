@@ -112,11 +112,14 @@ class Dm3520Driver(MotorDriver):
 
         if not math.isfinite(limit_speed) or limit_speed <= 0:
             raise ValueError("limit_speed は正の有限値で指定してください")
+        # v_max は復号レンジなので単位違い。実機では発火せず、正しい上限は実測待ちのため据え置く。
         self.limit_speed = min(float(limit_speed), self.v_max)
         self.set_zero_on_start = bool(set_zero_on_start)
 
         self.error_code = int(Dm3520Error.DISABLED)
         self._feedback_received = False
+        # 載っていないレジスタは「まだ読めていない」であって「一致した」ではない。
+        self._reported_ranges: dict[int, float] = {}
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -140,6 +143,11 @@ class Dm3520Driver(MotorDriver):
         return self._special_command(self.SPECIAL_DISABLE)
 
     def encode_set_zero(self) -> can.Message:
+        """今の位置を原点として書き込む (特殊コマンド)。
+
+        **必ず無励磁にしてから送る。** 順序は
+        `CANManager.capture_origin_via_set_zero` が保証する。
+        """
         return self._special_command(self.SPECIAL_SET_ZERO)
 
     def encode_write_register_u32(self, register: int, value: int) -> can.Message:
@@ -173,12 +181,35 @@ class Dm3520Driver(MotorDriver):
             and data[2] in (self.CONFIG_READ, self.CONFIG_WRITE)
         )
 
+    def _expected_ranges(self) -> tuple[tuple[int, str, float], ...]:
+        """励磁前に実機と突き合わせるレンジ (レジスタ, 名前, config の値)。
+
+        重さで区別せず 3 つとも載せる —— 現実の壊れ方 (電源断で出荷値へ戻る) では
+        同時にずれるので、レジスタごとの効き方の対応表を誰も覚え続けられない。
+        """
+        return (
+            (self.REG_P_MAX, "p_max", self.p_max),
+            (self.REG_V_MAX, "v_max", self.v_max),
+            (self.REG_T_MAX, "t_max", self.t_max),
+        )
+
+    def _record_config_response(self, msg: can.Message) -> None:
+        """設定応答から実機の固定小数点レンジを控える (実機を知る唯一の口)。"""
+        data = msg.data
+        if data[2] != self.CONFIG_READ:
+            return
+        register = data[3]
+        if register not in {reg for reg, _, _ in self._expected_ranges()}:
+            return
+        self._reported_ranges[register] = struct.unpack("<f", bytes(data[4:8]))[0]
+
     def matches_feedback(self, msg: can.Message) -> bool:
         if msg.is_extended_id or len(msg.data) != 8:
             return False
         if msg.arbitration_id != self.master_id:
             return False
         if self._is_config_response(msg):
+            self._record_config_response(msg)
             return False
         return (msg.data[0] & 0x0F) == (self.can_id & 0x0F)
 
@@ -204,13 +235,35 @@ class Dm3520Driver(MotorDriver):
         )
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
-        steps = [
+        """無励磁化 → 制御モード設定 (→ 原点確定)。
+
+        !!! **ここで p_max を書いてはならない。一度入れて実機を壊しかけた** !!!
+        書き終わるまでの窓で復号レンジが食い違い、12.5 のフィードバックを 1000 で
+        復号した 80 倍の位置が ``activation_steps`` の保持目標に入る (2026-09-09 に
+        機構がリミットスイッチを踏み越えた)。正しい向きは「書いて直す」ではなく
+        「読み返して食い違いを検出し、励磁を拒む」で、再試行は
+        `configuration_probe_messages()` が持つ。
+        """
+        steps = list(self.reinitialization_steps())
+        if self.set_zero_on_start:
+            # 原点は励磁が落ちても生き残るので、再励磁で送ると合わせた原点を壊すだけ
+            steps.append((self.encode_set_zero(), 0.2))
+        return steps
+
+    def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
+        """無励磁化 → 制御モード設定。**電源断で失われるぶんだけ。**
+
+        物理非常停止は本機の電源を数秒落とし、CTRL_MODE はフラッシュに残らないので
+        復帰した個体は MIT モードで立つ —— 書き直さないと `0x100` が解釈されず
+        「励磁を名乗るのにトルクが出ない」になる (`is_fault()` は掛からない)。
+        控えてあるレンジをここで捨てるのは、同じ電源断で戻った p_max を起動時の値で
+        「一致している」と答えてしまうため。何が揮発するかを知るのはここだけである。
+        """
+        self._reported_ranges.clear()
+        return [
             (self.encode_disable(), 0.05),
             (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
         ]
-        if self.set_zero_on_start:
-            steps.append((self.encode_set_zero(), 0.2))
-        return steps
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
         hold = (
@@ -222,6 +275,84 @@ class Dm3520Driver(MotorDriver):
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
         ]
+
+    def deactivation_steps(self) -> list[tuple[can.Message, float]]:
+        """原点を切り直す前に無励磁へ落とす。
+
+        待ちは `initialization_steps()` の先頭の `disable` と同じ 0.05 秒。
+        """
+        return [(self.encode_disable(), 0.05)]
+
+    def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
+        """今の位置を原点として書き込む (特殊コマンド 0xFE)。
+
+        待ちが `disable` より長いのは、`initialization_steps()` の
+        `set_zero_on_start` と揃えているため。
+
+        TODO(未修正): **ここで確定した原点は、物理緊急停止で本機の電源が数秒
+        落ちるたびに黙って無効になる** —— 本機は電源投入時に位置が 0.0rad へ
+        固定されるので、復帰時点で内部の原点がその瞬間の姿勢へ作り直される。
+        PC 側に検出手段が無く、UI にもログにもヘルスにも出ない。当面は
+        「物理緊急停止を踏んだら零点確定をやり直す」運用で受ける。詳細は
+        `docs/checks_and_health.md` の「零点確定」節。
+        """
+        return [(self.encode_set_zero(), 0.2)]
+
+    def configuration_probe_messages(self) -> list[can.Message]:
+        """まだ読めていないレンジの読み返し (0x15/0x16/0x17)。
+
+        取りこぼしは再試行で解く —— ゲートの既定を「通す」にして解くと、応答 1 通の
+        取りこぼしで事故の経路が丸ごと復活する。
+        """
+        return [
+            self.encode_read_register(register)
+            for register, _, _ in self._expected_ranges()
+            if register not in self._reported_ranges
+        ]
+
+    def _range_problems(self) -> tuple[list[str], list[str]]:
+        """(未確認のレンジ, 食い違っているレンジ)。
+
+        励磁ゲートとヘルスが同じここを読む —— 2 箇所に書くと「止めているのに画面は
+        平常」が作れる。
+        """
+        unconfirmed: list[str] = []
+        mismatched: list[str] = []
+        for register, label, expected in self._expected_ranges():
+            reported = self._reported_ranges.get(register)
+            if reported is None:
+                unconfirmed.append(f"{label} (レジスタ {register:#04x})")
+            elif not math.isclose(reported, expected, rel_tol=1e-6):
+                mismatched.append(f"{label} 実機 {reported:g} / config {expected:g}")
+        return unconfirmed, mismatched
+
+    def activation_block_reason(self) -> str | None:
+        """レンジが確認できない・config と食い違うなら励磁を止める。
+
+        !!! **「書いて直す」の代わりである。一度書いて実機を壊しかけた** !!!
+        書き終わるまでの窓でレンジが食い違い、12.5 で送られた位置を 1000 で復号した
+        80 倍の値が `activation_steps` の保持目標に書かれて機構端まで走った
+        (2026-09-09)。**未確認でも止める** —— 素通しにすると応答 1 通の取りこぼしで
+        この経路が丸ごと復活する。文面を分けるのは手当てが逆だから (応答が無い =
+        電源・配線 / 食い違う = config か実機のレジスタ)。
+        """
+        unconfirmed, mismatched = self._range_problems()
+        if mismatched:
+            return (
+                f"実機と config の固定小数点レンジが食い違っています ({', '.join(mismatched)})。"
+                "**電源断でフラッシュの出荷値へ戻ったか、config を書き換えたのに実機へ"
+                "反映していないかのどちらかです。** フィードバックが比例倍で読めるので、"
+                "レジスタ 0x15/0x16/0x17 を config の値へ書き直してから起動し直してください"
+            )
+        if unconfirmed:
+            return (
+                f"実機の固定小数点レンジを読み返せません ({', '.join(unconfirmed)})。"
+                "レジスタ読み返しの応答が 1 通も届いていないので、フィードバックの"
+                "解釈が config どおりかを確かめられません。**電源・CAN 配線を"
+                "確認してください** (レンジが食い違ったまま励磁すると、比例倍で読めた"
+                "位置がそのまま保持目標に書かれて機構が飛びます)"
+            )
+        return None
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         return self.mode is ControlMode.POSITION
@@ -245,6 +376,26 @@ class Dm3520Driver(MotorDriver):
 
     def has_overcurrent_warning(self) -> bool:
         return self.error_code == Dm3520Error.OVERCURRENT
+
+    def health_detail(self) -> str | None:
+        """励磁を止めている理由を操縦者へ渡す。
+
+        ログと起動時の「有効化できなかったモータ名」にしか出ないと配線不良と区別が
+        付かない。**`is_fault()` へ入れてはならない** —— ドライバの異常報告ではなく
+        PC 側が安全側へ倒した判断なので、FAULT ではなく WARNING で出す。
+        """
+        unconfirmed, mismatched = self._range_problems()
+        if mismatched:
+            return (
+                f"固定小数点レンジ 食い違い ({', '.join(mismatched)}) のため励磁しません。"
+                "実機のレジスタ 0x15/0x16/0x17 か config のどちらかを直してください"
+            )
+        if unconfirmed:
+            return (
+                f"固定小数点レンジ 未確認 ({', '.join(unconfirmed)} の読み返し応答が"
+                "未受信) のため励磁しません。電源・CAN 配線を確認してください"
+            )
+        return None
 
     def error_label(self) -> str | None:
         return _ERROR_LABELS.get(self.error_code)

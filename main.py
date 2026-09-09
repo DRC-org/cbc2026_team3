@@ -11,7 +11,7 @@ import os
 import pathlib
 import signal
 import socket
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from types import ModuleType
 
 import can
@@ -196,15 +196,66 @@ def _suspend_sync_monitoring(monitors: list[SyncMonitor], axis: str) -> Iterator
         yield
 
 
+@contextlib.asynccontextmanager
+async def _hold_target_refresh(
+    refreshers: list[TargetRefresher], names: list[str]
+) -> AsyncIterator[None]:
+    """原点を付け替えるあいだ再送を黙らせ、抜けるときに目標とラッチを捨てる。
+
+    **`SET_ZERO` は「生値 0 が指す物理位置」を付け替える操作なので、付け替えの前に
+    記録した目標もラッチも、付け替えた後には別の物理位置を指す。** 探索がヒットした
+    直後に `HomingRunner` が「その場で止める」ために書いた目標がまさにそれで、
+    その生値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
+    再励磁すると、20Hz の再送がそのぶんだけ離れた位置へ押し続ける ——
+    `activation_steps(after_set_zero=True)` が保持目標へ 0 を書く手当ては、
+    50ms 後の再送 1 通で上書きされて効かない
+    (`QueryDrivenTargetRefresher.clear_target` が再励磁について書いているのと
+    同じ上書きが、こちらでは恒久的に効き続ける)。
+
+    **捨てるだけでは足りず、付け替えのあいだ黙らせる必要がある。** 目標を先に
+    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、`SET_ZERO` の直前に
+    取ったラッチが直後には別の位置を指す。黙らせておけば、ラッチは抜けた後に
+    新しい原点で取り直される。
+
+    捨てるのは対象軸のモータだけ。全台へ広げると無関係な軸の `wait_reached` まで
+    巻き込んで中断させる (`_TargetRefresherBase.clear_target` と同じ理由)。
+    """
+    targeted = [r for r in refreshers if set(names) & set(r.motor_names)]
+    for refresher in targeted:
+        await refresher.pause(reason="原点の付け替え")
+    try:
+        yield
+    finally:
+        # **捨ててから再開する。** 順序を逆にすると、捨てるまでの 1 周期で
+        # 古い目標が新しい原点のもとへ送られる
+        for refresher in targeted:
+            for name in names:
+                if name in refresher.motor_names:
+                    refresher.clear_target(name)
+            refresher.resume()
+
+
 def _make_origin_resolver(
     loops: list[M3508PositionLoop],
     table: PositionTable,
     *,
     can_managers: list[CANManager] | None = None,
     sync_monitors: list[SyncMonitor] | None = None,
+    target_refreshers: list[TargetRefresher] | None = None,
+    is_estop_active: EStopChecker,
 ) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
+    """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
+
+    「確定できるか」と「確定する」を同じ解決器から出すのは、探索を始める前に
+    可否を問えるようにするため。可否はドライバ自身の `supports_origin_capture()`
+    が答える (`main.py` にドライバ種別を書き写さない)。
+
+    `is_estop_active` に既定値を置かないのは、渡し忘れが「緊急停止を見ない
+    零点確定」として黙って通るため。
+    """
     managers = can_managers or []
     monitors = sync_monitors or []
+    refreshers = target_refreshers or []
 
     def _resolve_via_set_zero(axis: str) -> Callable[[], Awaitable[None]] | None:
         names = table.axis(axis).motor_names
@@ -217,7 +268,10 @@ def _make_origin_resolver(
 
             async def capture(manager: CANManager = manager) -> None:
                 with _suspend_sync_monitoring(monitors, axis):
-                    await manager.capture_origin_via_set_zero(names)
+                    async with _hold_target_refresh(refreshers, names):
+                        await manager.capture_origin_via_set_zero(
+                            names, should_abort=is_estop_active
+                        )
 
             return capture
         return None
@@ -251,7 +305,9 @@ def _wire_motor_check_sequence(
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
     sync_monitors: list[SyncMonitor],
+    target_refreshers: list[TargetRefresher],
     feedback_timeout_ms: float,
+    is_estop_active: EStopChecker,
 ) -> None:
     if not tables:
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
@@ -273,7 +329,12 @@ def _wire_motor_check_sequence(
         )
         return
 
-    motors = MotorGroup()
+    # 統合動作確認も同じ歯止めを通す。センサ名はロボット横断に一意なので、
+    # 全 CANManager を横断した 1 つの読み口で両ハンドぶんに答えられる。
+    # **零点確定もこの同じ読み口を使う** —— 可動端インターロックと零点確定で
+    # 別々に組むと、片方だけが `None` (読めていない) を `False` へ丸めた状態が作れる
+    sensor_read = _make_sensor_reader(can_managers, feedback_timeout_ms=feedback_timeout_ms)
+    motors = MotorGroup(sensor_active=sensor_read)
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
@@ -288,30 +349,44 @@ def _wire_motor_check_sequence(
             _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
         )
 
-        def _sensor_active(name: str) -> bool:
-            sensor = sensors.get(name)
-            return sensor is not None and bool(getattr(sensor, "sensor_active", False))
-
-        def _sensor_latched(name: str) -> bool:
+        def _sensor_latched(name: str) -> bool | None:
+            # ラッチを持たないドライバで現在値へ落とすと、ON 区間が step より狭い
+            # ときの取りこぼしが黙って戻る。判断は HomingRunner が持つ
             sensor = sensors.get(name)
             if sensor is None:
-                return False
+                return None
             consume = getattr(sensor, "consume_sensor_latch", None)
-            if callable(consume):
-                return bool(consume())
-            return bool(getattr(sensor, "sensor_active", False))
+            if not callable(consume):
+                return None
+            return bool(consume())
 
         def _sensor_is_stale(name: str) -> bool:
             if name not in sensors:
                 logger.error("零点確定: センサ '%s' が config の sensors: に居ません", name)
                 return True
-            return freshness.is_stale(name, freshness.now())
+            # **鮮度の正は可動端インターロックと同じ読み口 (None = 読めていない)。**
+            # 別々に組むと、片方だけが途絶を見落とす状態が作れる
+            return sensor_read(name) is None
+
+        def _motor_is_energized(name: str) -> bool | None:
+            # 三値をそのまま運ぶ。M3508 のように励磁を報告しないドライバは None で、
+            # HomingRunner はそれを無励磁として扱わない
+            for manager in can_managers:
+                motor = manager.motors.get(name)
+                if motor is not None:
+                    return motor.is_energized()
+            return None
 
         def _motor_is_stale(name: str) -> bool:
             return freshness.is_stale(name, freshness.now())
 
         resolve_origin = _make_origin_resolver(
-            loops, merged, can_managers=can_managers, sync_monitors=sync_monitors
+            loops,
+            merged,
+            can_managers=can_managers,
+            sync_monitors=sync_monitors,
+            target_refreshers=target_refreshers,
+            is_estop_active=is_estop_active,
         )
 
         def _origin_capturable(axis: str) -> bool:
@@ -337,10 +412,11 @@ def _wire_motor_check_sequence(
 
         sequence.bind_homing(
             HomingRunner(
-                sensor_active=_sensor_active,
+                sensor_active=sensor_read,
                 sensor_latched=_sensor_latched,
                 sensor_is_stale=_sensor_is_stale,
                 motor_is_stale=_motor_is_stale,
+                motor_is_energized=_motor_is_energized,
                 origin_capturable=_origin_capturable,
                 capture_origin=_capture_origin,
             )
@@ -355,6 +431,37 @@ def _wire_motor_check_sequence(
         len(merged.axes),
         ", ".join(homing_axes) or "なし",
     )
+
+
+def _make_sensor_reader(
+    managers: list[CANManager], *, feedback_timeout_ms: float
+) -> Callable[[str], bool | None]:
+    """可動端インターロックが読むセンサ状態を組む。**三値を返す。**
+
+    `True` = 押されている / `False` = 押されていない / **`None` = 読めていない**。
+    最後の 1 つは「登録されていない」と「途絶している」の両方で返る。どちらも
+    `False` へ丸めてはならない —— 丸めた瞬間に、**配線が抜けたセンサが
+    「押されていない = 進んでよい」に化ける** (2026-09-09 の事故はスイッチが
+    1 スロットずれていて PC へ届いていなかった)。安全側は「止まる」である。
+
+    **零点確定 (`HomingRunner`) も同じ読み口を使う。** かつては bool を返す別の
+    クロージャを持っていたが、同じ問い (「そのセンサは今どうなっているか」) に
+    答える口が 2 つあると、片方だけが `None` を `False` へ丸めた状態が作れる ——
+    零点確定側では「途絶したセンサが離脱完了に化ける」形で現れる。
+    鮮度の判定 (`_sensor_is_stale`) もこの口の `None` から作る。
+    """
+    sensors = {name: sensor for mgr in managers for name, sensor in mgr.sensors.items()}
+    freshness = FeedbackFreshness(
+        _merged_last_feedback_at(managers), timeout_ms=feedback_timeout_ms
+    )
+
+    def sensor_active(name: str) -> bool | None:
+        sensor = sensors.get(name)
+        if sensor is None or freshness.is_stale(name, freshness.now()):
+            return None
+        return bool(getattr(sensor, "sensor_active", False))
+
+    return sensor_active
 
 
 def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
@@ -564,6 +671,7 @@ def _wire_robot_motors(
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
+    sensor_active: Callable[[str], bool | None],
 ) -> list[M3508PositionLoop]:
     loops = _build_position_loops(
         robot,
@@ -583,6 +691,9 @@ def _wire_robot_motors(
             motors,
             is_estop_active=is_estop_active,
             target_sinks=target_sinks,
+            # 可動端インターロック: `guard:` を書いた軸が押されている端へ進むのを止める。
+            # 配線しないと三値の `None` (読めていない) しか返らず、その軸は 1 歩も動けない
+            sensor_active=sensor_active,
         )
     )
     return list(loops.values())
@@ -825,6 +936,9 @@ def _wire_one_robot(
         seq,
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         is_estop_active=is_estop_active,
+        sensor_active=_make_sensor_reader(
+            [can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms
+        ),
     )
 
     refreshers = _build_target_refreshers(
@@ -1030,7 +1144,10 @@ async def main() -> None:
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
+        target_refreshers=[r for w in wirings for r in w.target_refreshers],
         feedback_timeout_ms=system.health.feedback_timeout_ms,
+        # 付け替えの窓で停止が入ると、停止の disable の後に enable が届いて励磁が残る。
+        is_estop_active=is_estop_active,
     )
 
     try:

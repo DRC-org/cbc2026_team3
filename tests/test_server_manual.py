@@ -567,3 +567,48 @@ async def _wait(predicate, *, timeout: float = 1.0) -> bool:
     from tests.server_fixtures import wait_until
 
     return await wait_until(predicate, timeout=timeout)
+
+
+class TestGuardRejection:
+    """歯止め (`GuardViolation`) は「失敗」ではなく「拒否」として返す。"""
+
+    @staticmethod
+    def _guarded_fixture() -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
+        positions = {
+            "axes": {
+                "y_axis": {
+                    **_POSITIONS["axes"]["y_axis"],
+                    "guard": {"limits": {"plus": "y_axis_end_sensor"}},
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        }
+        table = load_position_table(positions, source="<test>")
+        mgr = mock_can_manager()
+        group = MotorGroup()  # センサの読み口を注入しない = 読めていない (None)
+        drivers: dict[str, _RecordingDriver] = {}
+        for name in ("y_axis_r", "y_axis_l"):
+            drivers[name] = _RecordingDriver(name)
+            group.add(MotorHandle(name, drivers[name], mgr))
+        fx = ServerFixture.build()
+        fx.freeze_broadcast()
+        fx.add_robot(_ROBOT, _SlowSequence(), manual=ManualController(group, table))
+        return fx, drivers
+
+    async def test_歯止めの拒否は失敗ではなく理由付きの拒否として返す(self, caplog) -> None:
+        fx, drivers = self._guarded_fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        await _switch_as(fx, "manual", client)
+
+        with caplog.at_level("WARNING"):
+            await fx.command(
+                {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 5.0},
+                requester=client,
+            )
+
+        reason = client.of_type("command_rejected")[-1]["reason"]
+        assert "可動端センサ" in reason
+        assert not reason.startswith("コマンドの処理に失敗")
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+        assert drivers["y_axis_r"].commands == []

@@ -88,9 +88,21 @@ class TestOriginCaptureCapability:
             Edulite05Driver.COMM_TYPE_SET_ZERO
         )
 
-    def test_dm3520_は対象外(self) -> None:
-        driver = Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11)
-        assert driver.supports_origin_capture() is False
+    def test_dm3520_は切り直せる(self) -> None:
+        driver = Dm3520Driver("sub_y_axis", can_id=0x01, master_id=0x11)
+        assert driver.supports_origin_capture() is True
+
+    def test_dm3520_は無励磁にしてから切り直す(self) -> None:
+        # 特殊コマンドは 3 つとも同じ CAN ID なので、見分けが付くのは末尾バイトだけ
+        driver = Dm3520Driver("sub_y_axis", can_id=0x01, master_id=0x11)
+
+        ((disable, _delay),) = driver.deactivation_steps()
+        ((set_zero, _zero_delay),) = driver.origin_capture_steps()
+
+        assert disable.data[7] == Dm3520Driver.SPECIAL_DISABLE
+        assert set_zero.data[7] == Dm3520Driver.SPECIAL_SET_ZERO
+        assert disable.arbitration_id == Dm3520Driver.MIT_CMD_BASE + 0x01
+        assert set_zero.arbitration_id == Dm3520Driver.MIT_CMD_BASE + 0x01
 
     def test_generic_は対象外(self) -> None:
         assert GenericDriver("servo", can_id=0x41).supports_origin_capture() is False

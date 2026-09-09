@@ -16,7 +16,13 @@ from lib.sequence.motors import (
     WaitInterruptedError,
     build_motor_group,
 )
-from lib.sequence.positions import AxisSpec, MotorSpec, PositionLookupError
+from lib.sequence.positions import (
+    AxisSpec,
+    CourtMotorSpec,
+    CourtUnresolvedError,
+    MotorSpec,
+    PositionLookupError,
+)
 from tests.fake_drivers import StubFeedbackDriver
 
 
@@ -387,6 +393,18 @@ def _make_axis(
         MotorHandle(motor, drivers[motor], manager, poll_interval=0.001) for motor in drivers
     ]
     return AxisHandle(axis_spec, handles), drivers, handles
+
+
+class TestAxisHandleCourt:
+    def test_refuses_unresolved_court_scale(self) -> None:
+        motors = (
+            CourtMotorSpec(
+                name="lift", scale=2.0, offset=0.0, court_scales=(("blue", 2.0), ("red", -2.0))
+            ),
+        )
+
+        with pytest.raises(CourtUnresolvedError, match="lift"):
+            _make_axis("lift", motors, manager=_make_can_manager())
 
 
 class TestAxisHandle:

@@ -142,6 +142,19 @@ class MotorDriver(abc.ABC):
         return None
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
+        """起動時に送る ``(message, delay_after_seconds)``。既定は初期化不要。
+
+        励磁の有効化はここに含めない (activation_steps を使う)。
+        """
+        return []
+
+    def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
+        """``initialization_steps()`` のうち **電源断で失われる設定だけ**。既定は空。
+
+        再励磁は起動時の手順を丸ごと送り直せない —— ``set_zero_on_start`` が載って
+        いるドライバでは、零点確定で合わせた原点をその場の姿勢へ書き換えてしまう。
+        呼び出し側は無励磁だと分かっているモータへしか送らない。
+        """
         return []
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
@@ -158,6 +171,31 @@ class MotorDriver(abc.ABC):
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         return False
+
+    def activation_block_reason(self) -> str | None:
+        """励磁してはならない理由。無ければ None。
+
+        **「フィードバックが届かない」とは別の軸の判断である。** あちらは
+        「まだ分からない」なので待てば解ける可能性があるが、こちらは
+        「構成が食い違っている」ので待っても解けない。分けてあるのは、
+        後者を前者のタイムアウトへ紛れ込ませると、原因が「通信が遅い」に
+        見えてしまうため。
+
+        既定は None (理由なし)。**ここで報告する食い違いは、放置すると
+        「指令どおり動いたのに機構が別の場所へ行く」形でしか現れないもの**に
+        限ること —— 動作に影響しない差異まで励磁拒否へ倒すと、操縦者は
+        機体を動かす手段を失う。
+        """
+        return None
+
+    def configuration_probe_messages(self) -> list[can.Message]:
+        """励磁前に確認する設定のうち、**まだ読めていない**ぶんの問い合わせ。
+
+        `CANManager._confirm_configuration` が空リストになるまで送り直す ——
+        「読めなければ通す」でゲートを緩めず、取りこぼしは再試行で解くための口。
+        機構を動かすフレームを返してはならない (`feedback_probe_message` と同じ)。
+        """
+        return []
 
     def feedback_probe_message(self) -> can.Message | None:
         return None

@@ -47,26 +47,37 @@ class ManualController:
     async def move_to_position(self, axis: str, name: str) -> float:
         spec = self._axis(axis)
         value = self._positions.raw(axis, name, court=self._court)
-        await self._send(spec, spec.to_commands(value))
-        self._targets[axis] = value
+        await self._apply(spec, value)
         logger.info("manual move: axis=%s position=%s value=%s", axis, name, value)
         return value
 
     async def set_value(self, axis: str, value: float) -> float:
         spec = self._axis(axis)
         manual = self._require_manual(spec)
-        clamped = manual.clamp(float(value))
-        await self._send(spec, spec.to_commands(clamped))
-        self._targets[axis] = clamped
-        return clamped
+        return await self._apply(spec, manual.clamp(float(value)))
 
     async def jog(self, axis: str, delta: float) -> float:
+        """直前の手動目標から相対移動する。``manual:`` を持つ軸のみ。
+
+        起点にフィードバックを使わないのは、追従中の連打が吸われるため。
+        丸めが `clamp` ではなく `clamp_from` なのは、起点が範囲の外に居るとき
+        `clamp` が 1 歩目だけを境界まで飛ばすため (零点確定前は範囲の外が普通)。
+        """
         spec = self._axis(axis)
-        self._require_manual(spec)
-        origin = self._targets.get(axis)
-        if origin is None:
-            origin = self.observed_value(axis)
-        return await self.set_value(axis, origin + float(delta))
+        manual = self._require_manual(spec)
+        stored = self._targets.get(axis)
+        origin = float(stored if stored is not None else self.observed_value(axis))
+        return await self._apply(spec, manual.clamp_from(origin, origin + float(delta)))
+
+    async def _apply(self, spec: AxisSpec, value: float) -> float:
+        """丸め終わった値を送り、ジョグの起点として控える。
+
+        送信と起点の記録を 1 箇所に閉じてあるのは、丸め方の違う 2 つの入口
+        (`set_value` / `jog`) が同じ後始末を書き写さないため。
+        """
+        await self._send(spec, spec.to_commands(value))
+        self._targets[spec.name] = value
+        return value
 
     def is_always_manual(self, axis: str) -> bool:
         # 未定義の軸は ManualControlError のまま返す。サーバーがモードの理由で覆い隠すと、
@@ -83,7 +94,7 @@ class ManualController:
     def axes_info(self) -> list[dict]:
         info: list[dict] = []
         for name in self._positions.axes:
-            spec = self._positions.axis(name)
+            spec = self._axis(name)
             info.append(
                 {
                     "name": name,
@@ -118,7 +129,7 @@ class ManualController:
 
     def _axis(self, axis: str) -> AxisSpec:
         try:
-            return self._positions.axis(axis)
+            return self._positions.axis(axis).for_court(self._court)
         except PositionLookupError as exc:
             raise ManualControlError(str(exc)) from exc
 
@@ -132,7 +143,11 @@ class ManualController:
         return spec.manual
 
     async def _send(self, spec: AxisSpec, commands: dict[str, float]) -> None:
-        handle = AxisHandle(spec, [getattr(self._motors, name) for name in spec.motor_names])
+        handle = AxisHandle(
+            spec,
+            [getattr(self._motors, name) for name in spec.motor_names],
+            sensor_active=self._motors.sensor_active,
+        )
         await handle.set_target_value(commands)
 
     def _feedback_positions(self, spec: AxisSpec) -> dict[str, float]:

@@ -2,7 +2,7 @@ axes:
   sub_y_axis:
     unit: mm
     command_unit: rad
-    scale: 0.0555556
+    scale: 1.0668451
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0
@@ -14,7 +14,7 @@ axes:
   sub_lift:
     unit: mm
     command_unit: rad
-    scale: 0.0555556
+    scale: 1.0668451
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0

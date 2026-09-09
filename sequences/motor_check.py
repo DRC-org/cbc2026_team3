@@ -55,9 +55,13 @@ class MotorCheckSequence(Sequence):
             return
 
         for axis in targets:
-            spec = table.axis(axis)
+            spec = table.axis(axis).for_court(self.court)
             logger.info("零点確定: %s", axis)
-            handle = AxisHandle(spec, [getattr(self.motors, name) for name in spec.motor_names])
+            handle = AxisHandle(
+                spec,
+                [getattr(self.motors, name) for name in spec.motor_names],
+                sensor_active=self.motors.sensor_active,
+            )
             await self._homing.home(spec, handle)
 
     @step("メインハンド 初期姿勢へ", axes=MAIN_HOME.keys())

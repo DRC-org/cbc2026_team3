@@ -8,7 +8,7 @@ motors:
     master_id: 0x11
     mode: position
     limit_speed: 1.0
-    p_max: 12.5
+    p_max: 1000.0
     v_max: 200.0
     t_max: 10.0
     set_zero_on_start: false
@@ -20,7 +20,7 @@ motors:
     master_id: 0x12
     mode: position
     limit_speed: 1.0
-    p_max: 12.5
+    p_max: 1000.0
     v_max: 200.0
     t_max: 10.0
     set_zero_on_start: false

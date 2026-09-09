@@ -7,6 +7,7 @@ motors:
     can_id: 3                  # main_hand の rotate_r/rotate_l (1,2) との衝突回避
     host_id: 0xFD
     mode: position
+    # 単位は出力軸の rad/s (位置はロータ角なので単位系が違う)。mm/s = 値 * 18.0
     limit_speed: 2.0
     limit_current: 5.0
     position_kp: 30.0
@@ -19,7 +20,7 @@ motors:
     master_id: 0x11
     mode: position
     limit_speed: 2.0
-    p_max: 12.5                # レジスタ 0x15 [rad]  (scale 換算で ±225mm)
+    p_max: 1000.0              # レジスタ 0x15 [rad]  (scale 換算で ±937mm)
     v_max: 200.0               # レジスタ 0x16 [rad/s]
     t_max: 10.0                # レジスタ 0x17 [Nm]
     set_zero_on_start: false
@@ -32,7 +33,7 @@ motors:
     mode: position
     # TODO: 機構の重量が分かったら実機で詰めること
     limit_speed: 1.0
-    p_max: 12.5
+    p_max: 1000.0              # sub_y_axis と同じ理由
     v_max: 200.0
     t_max: 10.0
     set_zero_on_start: false

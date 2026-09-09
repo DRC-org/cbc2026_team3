@@ -11,6 +11,36 @@ from lib.drivers.dm3520 import Dm3520CtrlMode, Dm3520Driver, Dm3520Error
 from tests.feedback_frames import dm3520_feedback, feed_dm3520
 
 
+def _config_response(drv: Dm3520Driver, register: int, value: float) -> can.Message:
+    """0x7FF への読み出しに対する応答フレーム (マニュアル「Read Parameters」節)。
+
+    **状態フィードバックと同じ MST_ID で返る**ので、実物と同じ形で組み立てる。
+    """
+    data = struct.pack("<HBBf", drv.can_id, Dm3520Driver.CONFIG_READ, register, value)
+    return can.Message(arbitration_id=drv.master_id, data=data, is_extended_id=False)
+
+
+def _probe_registers(drv: Dm3520Driver) -> list[int]:
+    """まだ読めていないレンジの読み返しフレームが指すレジスタ番号。"""
+    return [bytes(msg.data)[3] for msg in drv.configuration_probe_messages()]
+
+
+def _confirm_ranges(
+    drv: Dm3520Driver,
+    *,
+    p_max: float | None = None,
+    v_max: float | None = None,
+    t_max: float | None = None,
+) -> None:
+    """3 つのレンジの読み返し応答を実機から届いたことにする (既定は食い違いなし)。"""
+    for register, reported in (
+        (Dm3520Driver.REG_P_MAX, drv.p_max if p_max is None else p_max),
+        (Dm3520Driver.REG_V_MAX, drv.v_max if v_max is None else v_max),
+        (Dm3520Driver.REG_T_MAX, drv.t_max if t_max is None else t_max),
+    ):
+        drv.matches_feedback(_config_response(drv, register, reported))
+
+
 def _driver(**kwargs: object) -> Dm3520Driver:
     params: dict = {"master_id": 0x11}
     params.update(kwargs)
@@ -240,12 +270,164 @@ class TestStartupSequence:
         assert bytes(steps[0].data)[-1] == 0xFD
         assert steps[1].arbitration_id == 0x7FF
 
+    def test_初期化で_p_max_を書かない(self) -> None:
+        """**ここで p_max を書くと機構が飛ぶ。一度入れて実機を壊しかけた。**
+
+        p_max はフラッシュへ保存されず電源断で出荷値へ戻るので、CTRL_MODE と同じく
+        書き直せばよいと考えたのが誤り。**書き終わるまでの窓で復号レンジが食い違う** ——
+        ドライバが 12.5 で送ったフィードバックを config の 1000 で復号すると位置が
+        80 倍に読め、直後の `activation_steps` がそれを「現在角」として保持目標に
+        書く。機構は 80 倍先へ走り、リミットスイッチを踏み越えて機構端まで行く
+        (2026-09-09 に実機で発生)。
+
+        正しい向きは「書いて直す」ではなく「食い違いを検出して止める」なので、
+        **このテストは書き込みが再び足されたときに落ちる。**
+        """
+        drv = _driver(p_max=1000.0)
+
+        writes = [
+            bytes(msg.data)[3]
+            for msg, _ in drv.initialization_steps()
+            if msg.arbitration_id == 0x7FF and bytes(msg.data)[2] == 0x55
+        ]
+
+        assert Dm3520Driver.REG_P_MAX not in writes
+        assert writes == [Dm3520Driver.REG_CTRL_MODE]
+
+    def test_初期化に読み返しを並べない(self) -> None:
+        """**静的な list は「応答が届いたらやめる」を表現できない。** 再試行は
+        `configuration_probe_messages()` が持つ。"""
+        drv = _driver()
+
+        reads = [
+            bytes(msg.data)[3]
+            for msg, _ in drv.initialization_steps()
+            if msg.arbitration_id == 0x7FF and bytes(msg.data)[2] == 0x33
+        ]
+
+        assert reads == []
+
+    def test_まだ読めていないレンジだけを読み返す(self) -> None:
+        """**読めた項目を落として返すから、空になった時点で最終判断できる。**"""
+        drv = _driver(p_max=1000.0)
+
+        assert _probe_registers(drv) == [
+            Dm3520Driver.REG_P_MAX,
+            Dm3520Driver.REG_V_MAX,
+            Dm3520Driver.REG_T_MAX,
+        ]
+
+        drv.matches_feedback(_config_response(drv, Dm3520Driver.REG_P_MAX, 1000.0))
+
+        assert _probe_registers(drv) == [Dm3520Driver.REG_V_MAX, Dm3520Driver.REG_T_MAX]
+
+        _confirm_ranges(drv)
+
+        assert _probe_registers(drv) == []
+
+    def test_読み返せていないうちは励磁しない(self) -> None:
+        """**「読めていない」を「問題なし」へ倒すと、応答 1 通の取りこぼしで事故の
+        経路が丸ごと復活する。** 取りこぼしは再試行で解く。"""
+        drv = _driver(p_max=1000.0)
+
+        reason = drv.activation_block_reason()
+
+        assert reason is not None
+        # 手当てが逆なので、食い違いと同じ文言にしてはならない (こちらは電源・配線)
+        assert "応答が 1 通も届いていない" in reason
+        assert "配線" in reason
+
+    @pytest.mark.parametrize(
+        ("register", "label"),
+        [
+            (Dm3520Driver.REG_P_MAX, "p_max"),
+            (Dm3520Driver.REG_V_MAX, "v_max"),
+            (Dm3520Driver.REG_T_MAX, "t_max"),
+        ],
+    )
+    def test_レンジが食い違うと励磁を止める(self, register: int, label: str) -> None:
+        """**比例倍で読める状態のまま励磁すると、保持目標が桁ごとずれる** (実機では
+        80 倍の位置を保持目標に書いて機構端まで走った)。t_max も同型で、
+        `guard.stall_torque` の実効値がずれる。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        _confirm_ranges(drv, **{label: 12.5})
+
+        reason = drv.activation_block_reason()
+
+        assert reason is not None
+        assert label in reason
+        assert "12.5" in reason
+        # 応答は返ってきているので、電源・配線を疑わせてはならない
+        assert "配線" not in reason
+
+    def test_全レンジが一致していれば止めない(self) -> None:
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+
+        _confirm_ranges(drv)
+
+        assert drv.activation_block_reason() is None
+
+    def test_読み返しの応答をフィードバックとして取り込まない(self) -> None:
+        """**応答もフィードバックと同じ MST_ID で返る。** 取り込むと実測角が嘘になる。"""
+        drv = _driver(p_max=1000.0)
+
+        assert drv.matches_feedback(_config_response(drv, Dm3520Driver.REG_P_MAX, 1000.0)) is False
+
     def test_set_zero_on_start_appends_zero_command(self) -> None:
         drv = _driver(set_zero_on_start=True)
 
         codes = [bytes(msg.data)[-1] for msg, _ in drv.initialization_steps()]
 
         assert codes[-1] == 0xFE
+
+    def test_再初期化は電源断で失われるぶんだけを送る(self) -> None:
+        """**再励磁のたびに `SET_ZERO` を送り直してはならない。**
+
+        原点は励磁が落ちても生き残るので書き直す理由が無く、送れば零点確定で
+        合わせた原点をその場の姿勢へ書き換えてしまう。一方 CTRL_MODE は
+        フラッシュに残らないので、電源が落ちた個体には書き直しが要る。
+        """
+        drv = _driver(set_zero_on_start=True)
+
+        codes = [bytes(msg.data)[-1] for msg, _ in drv.reinitialization_steps()]
+
+        assert 0xFE not in codes, "再励磁で原点を書き換えてはならない"
+        assert codes == [0xFD, 0x00]  # disable → CTRL_MODE 書き込み
+
+    def test_起動時の手順は再初期化に原点確定を足したもの(self) -> None:
+        """2 つのリストを別々に並べると、片方だけへレジスタを足した状態が作れる。"""
+        drv = _driver(set_zero_on_start=True)
+
+        initialization = [
+            (msg.arbitration_id, bytes(msg.data)) for msg, _ in drv.initialization_steps()
+        ]
+        reinitialization = [
+            (msg.arbitration_id, bytes(msg.data)) for msg, _ in drv.reinitialization_steps()
+        ]
+
+        assert initialization[: len(reinitialization)] == reinitialization
+        assert len(initialization) == len(reinitialization) + 1
+
+    def test_再初期化は控えてあるレンジを捨てる(self) -> None:
+        """**電源断は CTRL_MODE と同時に p_max も出荷値へ戻す。**
+
+        起動時に読んだ 1000 が残っていると `activation_block_reason()` は
+        「一致している」と答え、2026-09-09 に機構を壊しかけた 80 倍の経路が
+        再励磁のたびに復活する。捨てれば読み返しが再開する。
+        """
+        drv = _driver(p_max=1000.0)
+        _confirm_ranges(drv)
+        assert _probe_registers(drv) == []
+        assert drv.activation_block_reason() is None
+
+        drv.reinitialization_steps()
+
+        assert _probe_registers(drv) == [
+            Dm3520Driver.REG_P_MAX,
+            Dm3520Driver.REG_V_MAX,
+            Dm3520Driver.REG_T_MAX,
+        ]
+        assert drv.activation_block_reason() is not None
 
     def test_activation_writes_measured_position_before_enable(self) -> None:
         drv = _driver()
@@ -281,6 +463,51 @@ class TestStartupSequence:
         drv = _driver()
 
         assert bytes(drv.emergency_stop_message().data)[-1] == 0xFD
+
+
+class TestHealthDetail:
+    """励磁を止めた理由を操縦者の画面まで届ける (`MotorHealthInfo.detail`)。
+
+    ログにしか出ないと、操縦者から見て配線不良と区別が付かない。
+    """
+
+    def test_未確認は未確認として出す(self) -> None:
+        drv = _driver(p_max=1000.0)
+
+        detail = drv.health_detail()
+
+        assert detail is not None
+        assert "未確認" in detail
+        assert "0x15" in detail
+
+    def test_食い違いは実機と_config_の値を出す(self) -> None:
+        """**手当てが逆**なので未確認と同じ文言にしない —— 応答は返っているので、
+        電源・配線を疑っても何も見つからない。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        _confirm_ranges(drv, p_max=12.5)
+
+        detail = drv.health_detail()
+
+        assert detail is not None
+        assert "食い違" in detail
+        assert "12.5" in detail
+        assert "1000" in detail
+
+    def test_確認できたら黙る(self) -> None:
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+
+        _confirm_ranges(drv)
+
+        assert drv.health_detail() is None
+
+    def test_励磁拒否を_fault_にしない(self) -> None:
+        """**FAULT はドライバが異常を報告したことの印。** PC 側が安全側へ倒した判断を
+        そこへ入れると「モータが壊れた」と読める。"""
+        drv = _driver(p_max=1000.0)
+        _confirm_ranges(drv, p_max=12.5)
+
+        assert drv.health_detail() is not None
+        assert drv.is_fault() is False
 
 
 class TestIdleTarget:

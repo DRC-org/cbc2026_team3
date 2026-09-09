@@ -24,8 +24,9 @@ checklists:
     - id: valves_closed
       label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
       group: preflight
+    # 物理非常停止で DM3520 の電源が落ちると原点が作り直されるが、PC 側に検出手段が無い。
     - id: sub_dm3520_origin
-      label: サブハンド 前後・昇降が原点位置にあること確認 (DM3520 は電源投入位置が原点)
+      label: サブハンド 前後・昇降が可動範囲内にあること確認 (原点は 2 軸とも動作確認の零点確定で決まる。物理非常停止を踏んだ後はやり直すこと)
       group: preflight
 
     - id: court

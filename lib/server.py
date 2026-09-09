@@ -39,6 +39,7 @@ from lib.health import (
 )
 from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import ChecklistItem, Court, MatchState
+from lib.motion_guard import GuardViolation
 from lib.sequence.engine import Sequence
 from lib.server_motor_check import MotorCheckController, Pausable
 from lib.ws_hub import WsHub
@@ -670,6 +671,10 @@ class RobotServer:
         try:
             await coro
         except ManualControlError as exc:
+            await self._reject_command(requester, command, str(exc))
+        except GuardViolation as exc:
+            # 設計どおりの拒否。汎用の例外処理へ落とすと ERROR + Traceback で「失敗」に見える
+            logger.warning("手動操縦を歯止めが拒否: %s (%s)", command, exc)
             await self._reject_command(requester, command, str(exc))
 
     async def _cmd_set_court(self, data: dict, requester: WSOrNone) -> None:

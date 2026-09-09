@@ -672,6 +672,7 @@ _BENCH_DIRS = (
     "servo",
     "solenoid",
     "dm3520",
+    "sub_hand_homing",
     "y_axis_tuning",
 )
 
@@ -752,7 +753,9 @@ class TestShippedBenchConfigs:
             source=f"bench/{bench}/system.yaml",
         )
         robot_yaml = _bench_robot_yaml_path(bench, bench_dir)
-        used = {motor["bus"] for motor in yaml.safe_load(robot_yaml.read_text())["motors"].values()}
+        raw = yaml.safe_load(robot_yaml.read_text())
+        used = {motor["bus"] for motor in raw["motors"].values()}
+        used |= {sensor["bus"] for sensor in (raw.get("sensors") or {}).values()}
 
         assert set(system.can_buses) == used
 

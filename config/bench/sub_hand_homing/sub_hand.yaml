@@ -1,0 +1,82 @@
+# サブハンド直動 2 軸 + リミットスイッチのベンチ。零点確定の実機確認用。
+#
+# 本番の config/sub_hand.yaml から **DM3520 の 2 軸と、サブハンドのリミットスイッチ
+# 4 本だけ**を取り出したもの。sub_arm_joint / サーボ 3 軸 / valve_* / pump_* は
+# 登録しない。
+#
+# **登録しない理由はセットごとに違う。**
+#   - valve_* / pump_* (電磁弁基板・DC 基板) …… ここを登録すると DC 基板の
+#     `FEEDBACK` 緊急停止ビットがサーバーへ伝わり、`REF` が押されっぱなしの
+#     いまは起動直後に全体緊急停止へ落ちる。**このセットの存在理由そのもの**
+#   - sub_arm_joint (EDULITE 05) / サーボ 3 軸 …… 零点確定の確認に要らないうえ、
+#     応答しない相手を登録すると STALE が並んで本題の異常が埋もれる
+#
+# **センサは緊急停止ビットを立てない** (仕様書 §5.2)。だから can_generic を開いても
+# 停止は伝播しない —— 伝播するのは登録した「モータ」の報告だけである。
+#
+# 値は本番と同じにしてある。ここを緩めると「ベンチで確かめた挙動」と「本番で出る
+# 挙動」が別物になり、零点確定の確認としての意味が薄れる。
+
+robot_name: sub_hand
+
+motors:
+  # 前後方向 (Y 方向)。零点確定の対象。
+  sub_y_axis:
+    driver: dm3520
+    bus: dm3520_bus
+    can_id: 0x01               # ESC_ID (レジスタ 0x08)
+    master_id: 0x11            # MST_ID (レジスタ 0x07)
+    mode: position
+    # **本番の 2.0 ではなく 1.0 に絞ってある。** 零点確定は「当たるまで動かす」動作で、
+    # direction が逆なら反対の機構端へ search_distance いっぱい押し込む。初回の実測は
+    # 遅いほうが手で止められる。direction が実測で確定したら本番と同じ 2.0 へ戻す。
+    limit_speed: 1.0
+    # フィードバックの固定小数点レンジ。**本番と対なので片方だけ動かさない。**
+    # p_max は「動ける範囲」ではなく「読める範囲」で、出荷値 12.5 では scale 換算
+    # ±11.7mm しか読めない (前後は 750mm 動く)。2026-09-09 に実機の 2 台とも
+    # 1000.0 へ書き換えた。**電源断でフラッシュの値へ戻るので、疑わしいときは
+    # /tmp/dm_regs.py で読み直すこと。**
+    p_max: 1000.0
+    v_max: 200.0
+    t_max: 10.0
+    set_zero_on_start: false   # 原点はリミットスイッチで確定する
+
+  # 昇降。**零点確定はしない** (positions に homing: を書いていない) が、
+  # 同じバスに載る 2 台目として登録する —— 1 台だけだと「ID が一致している」ことの
+  # 確認にならず、下位 4bit の取り違えも見つからない。
+  sub_lift:
+    driver: dm3520
+    bus: dm3520_bus
+    can_id: 0x02
+    master_id: 0x12
+    mode: position
+    limit_speed: 1.0
+    p_max: 1000.0
+    v_max: 200.0
+    t_max: 10.0
+    set_zero_on_start: false
+
+# --- センサ入力 (自作サーボ基板 #1 の TouchSensor スロット) ---
+# 極性 sensorActiveLow: true は 2026-09-08 に実機で確定済み (開放 HIGH / 押下 LOW)。
+# 4 本とも登録するのは、零点確定に使う前端 1 本だけを載せると、残り 3 本の途絶が
+# STALE として出なくなるため —— 配線が抜けたまま探索を始める事故はそこで潰れる。
+sensors:
+  sub_y_axis_f_limit_sensor:
+    bus: generic_bus
+    can_id: 0x49               # サーボ基板 #1 SV1。homing.sensor が参照する
+    expected_firmware: 6       # firmware/servo/include/config.h の kFirmwareVersion
+
+  sub_y_axis_r_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4A               # サーボ基板 #1 SV2
+    expected_firmware: 6
+
+  sub_lift_t_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4B               # サーボ基板 #1 SV3
+    expected_firmware: 6
+
+  sub_lift_b_limit_sensor:
+    bus: generic_bus
+    can_id: 0x4C               # サーボ基板 #1 SV4
+    expected_firmware: 6

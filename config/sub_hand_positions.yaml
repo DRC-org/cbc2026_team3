@@ -11,39 +11,68 @@ axes:
       max: 15.0
       steps: [1.0, 5.0]
 
-  # TODO: 実機で確認 (収納側へ寄せる向き / ストローク全長)。リミットスイッチを付けても
-  # DM3520 は supports_origin_capture() が False なので現状は有効化できない。
-  # homing:
-  #   sensor: sub_y_axis_origin_sensor
-  #   direction: -1           # TODO: 実機で確認 (収納側へ寄せる向き)
-  #   search_distance: 40.0   # [mm] TODO: ストローク全長より少し長い値へ
-  #   step: 0.5               # [mm]
-  #   settle_s: 0.05
   sub_y_axis:
+    homing:
+      sensor: sub_y_axis_f_limit_sensor
+      direction: 1
+      # スイッチ間の実測は 500〜520mm (機構側の想定 750mm とは食い違う)
+      search_distance: 560.0
+      # ON 区間の実測 2.2mm より狭く取る (広いと粗い 1 歩で跨ぎ切る)
+      coarse_step: 1.0
+      # スイッチの移動許容 0.3mm より小さく。原点のばらつきは刻み幅そのもの
+      step: 0.1
+      release_distance: 10.0
+      settle_s: 0.05
+    guard:
+      # 逆に書くと守りが反転し、押されている端へ進む指令だけが通る
+      limits:
+        plus: sub_y_axis_f_limit_sensor
+        minus: sub_y_axis_r_limit_sensor
+      # 桁の違う目標だけを止める。実ストローク 500〜520mm より広く取る
+      max_step: 600.0
+      # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
+      stall_torque: 2.0
     unit: mm
     command_unit: rad
-    scale: 0.0555556     # mm -> rad (出力軸) = 2 / (モジュール 1 * 歯数 36)
-    offset: 0.0
-    timeout_s: 4.0       # この時間で到達しなければシーケンスを停止する
-    tolerance: 1.0       # 到達許容差 [mm]
-    # TODO: 機構完成後、実測のストローク端より内側へ詰めること
-    manual:
-      min: -5.0
-      max: 30.0
-      steps: [1.0, 5.0, 10.0]
-
-  # 昇降。正が上、負が下 (TODO: 実機で確認し、逆なら scale の符号を反転する)。
-  sub_lift:
-    unit: mm
-    command_unit: rad
-    scale: 0.0555556     # TODO: 昇降側のピニオンが違うなら差し替える
+    # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
+    scale: 1.0668451
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0
-    # TODO: 機構完成後、実測のストローク端より内側へ詰めること
     manual:
-      min: -2.0
-      max: 30.0
+      min: -495.0
+      max: 2.0
+      steps: [1.0, 5.0, 10.0]
+
+  # 昇降。**+ 方向が下** (2026-09-09 実機、青コート)。コートでモータの回転と上下の対応が
+  # 鏡になり、スイッチは重力側に固定なので、scale の符号だけをコート別に持つ (赤は未実測)。
+  sub_lift:
+    homing:
+      sensor: sub_lift_b_limit_sensor
+      direction: 1
+      # スイッチ間の実測は 189mm (機構側の想定 400mm とは食い違う)
+      search_distance: 220.0
+      step: 0.1
+      # ON 区間 1.0mm より狭く取る (前後軸より狭いのはこの実測差による)
+      coarse_step: 0.5
+      release_distance: 10.0
+      settle_s: 0.05
+    guard:
+      # + が下なので plus が下端。逆に書くと守りが反転する
+      limits:
+        plus: sub_lift_b_limit_sensor
+        minus: sub_lift_t_limit_sensor
+      max_step: 250.0
+      stall_torque: 2.0
+    unit: mm
+    command_unit: rad
+    scale: { blue: 1.0668451, red: -1.0668451 }  # TODO: 昇降側のピニオンが違うなら差し替える
+    offset: 0.0
+    timeout_s: 4.0
+    tolerance: 1.0
+    manual:
+      min: -185.0
+      max: 2.0
       steps: [1.0, 5.0, 10.0]
 
   # サーボ 3 軸の timeout_s は firmware/servo/include/config.h のスルーレート
@@ -122,12 +151,17 @@ positions:
 
   # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
   sub_y_axis:
-    home: 0.0            # 収納位置 = 電源投入位置
-    extended: 20.0       # 前方への展開位置 [mm] (出力軸で約 64deg)
+    home: -20.0          # 収納位置 [mm]。前端から後ろへ
+    # 0.0 は動作点そのもの。tolerance 1.0mm (移動許容 0.3mm) と ON 区間 2mm の外へ離す。
+    extended: -5.0       # 前方への展開位置 [mm]
 
   sub_lift:
-    home: 0.0            # 下端 = 電源投入位置
-    lifted: 20.0         # 上昇位置 [mm] (出力軸で約 64deg)
+    # 0.0 は動作点そのもの。ON 区間の縁に座ると読みが揺れ、guard も 0.0 への
+    # move_to を拒みうる
+    home: -5.0           # 待機位置 [mm]
+    # **上昇側が負。** + 方向が下なので、上げるほど値が小さくなる。
+    # TODO(機構が付いてから実測): スイッチ間 189mm の内側で実運用の高さへ詰めること
+    lifted: -20.0        # 上昇位置 [mm]
 
   # TODO(機構が付いてから実測): 3 軸とも仮値。home は firmware/servo/include/config.h の
   # 基板 #2 の initialAngleDeg と対 (通電・瞬断からの再起動でその角へ駆動する)。

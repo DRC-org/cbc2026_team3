@@ -293,12 +293,13 @@ cbc2026_team3/
 周期タスク    control/position_loop.py / sync_monitor.py / target_refresh.py /
               trajectory.py ─ periodic.py / feedback.py / sync_guard.py / pid.py
 CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic}.py
-最下位        axis_sync.py / config_schema.py / health.py / match_state.py / commands.py
+最下位        axis_sync.py / motion_guard.py / config_schema.py / health.py / match_state.py / commands.py
 ```
 
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層 |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |

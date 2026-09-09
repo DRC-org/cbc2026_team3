@@ -28,6 +28,7 @@ from lib.config_schema import (
 )
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
+from lib.control.target_refresh import QueryDrivenTargetRefresher
 from lib.drivers.base import ControlMode
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
@@ -36,7 +37,7 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
-from lib.sequence.motors import EStopActiveError
+from lib.sequence.motors import EStopActiveError, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotContext, RobotServer
 from main import (
@@ -52,12 +53,13 @@ from main import (
     _load_all_configs,
     _load_checklist_definitions,
     _load_pid_config,
+    _make_sensor_reader,
     _wire_robot_motors,
 )
 from sequences.motor_check import MotorCheckSequence
 from tests.fake_can import deliver_frame, direct_runner, mark_feedback_at, mock_bus
 from tests.fake_clock import FakeClock
-from tests.feedback_frames import feed_m3508, generic_info
+from tests.feedback_frames import feed_generic, feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -85,6 +87,16 @@ class _StubCANManager:
 
 class _DummySequence(Sequence):
     pass
+
+
+def _no_sensors(_name: str) -> bool | None:
+    """センサを 1 本も持たない構成の読み口 (可動端インターロックの注入)。
+
+    `guard:` を書いた軸が 1 本も無い config でしか使わないので、返す値は
+    判定に現れない。**それでも `False` ではなく `None` を返す** —— 「読めていない」
+    が既定であることを、テスト側の書き方でも崩さないため。
+    """
+    return None
 
 
 def _robot(config: dict) -> RobotConfig:
@@ -338,6 +350,7 @@ class TestWireRobotMotors:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: estop_flag[0],
+            sensor_active=_no_sensors,
         )
         return config, manager, motors, seq, loops
 
@@ -409,6 +422,7 @@ class TestBuildManualController:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: estop_flag[0],
+            sensor_active=_no_sensors,
         )
         positions = load_position_table(
             {
@@ -486,6 +500,7 @@ class TestBuildTargetRefresher:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
+            sensor_active=_no_sensors,
         )
         return manager, motors, seq
 
@@ -513,6 +528,7 @@ class TestBuildTargetRefresher:
             seq,
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
+            sensor_active=_no_sensors,
         )
 
         assert (
@@ -1523,7 +1539,9 @@ class TestOriginResolver:
         assert motors["y_axis_r"].multi_turn_position != 0.0
         assert motors["y_axis_l"].multi_turn_position != 0.0
 
-        capture = main._make_origin_resolver([loop], self._table())("y_axis")
+        capture = main._make_origin_resolver([loop], self._table(), is_estop_active=lambda: False)(
+            "y_axis"
+        )
 
         assert capture is not None
         await capture()
@@ -1537,7 +1555,9 @@ class TestOriginResolver:
         for name, can_id in (("rotate_r", 0x41), ("rotate_l", 0x42)):
             mgr.add_motor("can_generic", GenericDriver(name, can_id=can_id))
 
-        resolve = main._make_origin_resolver([self._loop()], self._table(), can_managers=[mgr])
+        resolve = main._make_origin_resolver(
+            [self._loop()], self._table(), can_managers=[mgr], is_estop_active=lambda: False
+        )
 
         assert resolve("rotate") is None
 
@@ -1585,7 +1605,9 @@ class TestOriginResolverViaSetZero:
     async def test_edulite_のペア軸は_set_zero_で確定できる(self) -> None:
         mgr, sent = self._manager()
 
-        capture = main._make_origin_resolver([], self._table(), can_managers=[mgr])("rotate")
+        capture = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], is_estop_active=lambda: False
+        )("rotate")
 
         assert capture is not None
         await capture()
@@ -1601,6 +1623,28 @@ class TestOriginResolverViaSetZero:
             assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
             assert Edulite05Driver.COMM_TYPE_ENABLE in order[zero:]
 
+    async def test_緊急停止インターロックを零点確定へ渡す(self) -> None:
+        """**渡し忘れると「緊急停止を見ない零点確定」が黙って通る。**
+
+        付け替えの窓 (約 0.5 秒) で停止が入ると、停止の disable の後に再励磁の
+        enable が届き、停止中に励磁されたまま残る (ログにもヘルスにも出ない)。
+        """
+        mgr, sent = self._manager()
+
+        capture = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], is_estop_active=lambda: True
+        )("rotate")
+
+        assert capture is not None
+        with pytest.raises(RuntimeError, match="再励磁"):
+            await capture()
+
+        comm_types = [
+            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
+        ]
+        assert ("rotate_r", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
+        assert ("rotate_l", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
+
     async def test_原点付け替え中は同期監視を止める(self) -> None:
         mgr, _sent = self._manager()
         monitor = self._monitor()
@@ -1608,14 +1652,18 @@ class TestOriginResolverViaSetZero:
 
         original = mgr.capture_origin_via_set_zero
 
-        async def _spy(names):
+        async def _spy(names, **kwargs):
             suspended_during.append(monitor.is_suspended("rotate"))
-            await original(names)
+            await original(names, **kwargs)
 
         mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
-            [], self._table(), can_managers=[mgr], sync_monitors=[monitor]
+            [],
+            self._table(),
+            can_managers=[mgr],
+            sync_monitors=[monitor],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -1624,17 +1672,113 @@ class TestOriginResolverViaSetZero:
         assert suspended_during == [True]
         assert monitor.is_suspended("rotate") is False
 
-    async def test_付け替えが失敗しても同期監視を戻す(self) -> None:
-        mgr, _sent = self._manager()
-        monitor = self._monitor()
+    async def test_付け替えの前後で古い目標を捨てる(self) -> None:
+        """**`SET_ZERO` は「生値 0 が指す物理位置」を付け替える。**
 
-        async def _boom(_names):
+        探索がヒットした直後に `HomingRunner` が「その場で止める」ために書いた
+        目標は旧原点基準の生値で、その値は零点確定で補正しようとしていたズレ
+        そのものである。捨てずに再励磁すると、20Hz の再送がそのぶんだけ離れた
+        位置へ押し続ける (`activation_steps(after_set_zero=True)` が保持目標へ
+        0 を書く手当ては、再送 1 通で上書きされて効かない)。
+        """
+        mgr, _sent = self._manager()
+        table = self._table()
+        handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
+        refresher = QueryDrivenTargetRefresher(handles, mgr)
+        for handle in handles:
+            await handle.set_target(ControlMode.POSITION, 1.25)
+        assert all(h.has_target for h in handles)
+
+        capture = main._make_origin_resolver(
+            [],
+            table,
+            can_managers=[mgr],
+            target_refreshers=[refresher],
+            is_estop_active=lambda: False,
+        )("rotate")
+
+        assert capture is not None
+        await capture()
+
+        # 捨てた後なので、次の再送は「今の姿勢を保て」を新しい原点で取り直す
+        assert [h.has_target for h in handles] == [False, False]
+        assert refresher.is_paused is False
+
+    async def test_付け替えのあいだ再送を黙らせる(self) -> None:
+        """捨てるだけでは足りない —— 再送は目標が無ければラッチを取り直すので、
+        `SET_ZERO` の直前に取ったラッチが直後には別の位置を指す。
+        """
+        mgr, _sent = self._manager()
+        table = self._table()
+        handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
+        refresher = QueryDrivenTargetRefresher(handles, mgr)
+        paused_during: list[bool] = []
+
+        original = mgr.capture_origin_via_set_zero
+
+        async def _spy(names, **kwargs):
+            paused_during.append(refresher.is_paused)
+            await original(names, **kwargs)
+
+        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [],
+            table,
+            can_managers=[mgr],
+            target_refreshers=[refresher],
+            is_estop_active=lambda: False,
+        )("rotate")
+
+        assert capture is not None
+        await capture()
+
+        assert paused_during == [True]
+        # **必ず戻す。** 戻し忘れると以後この軸へ 1 通も再送されず、
+        # 問い合わせ駆動の DM3520 / EDULITE 05 は永久に STALE になる
+        assert refresher.is_paused is False
+
+    async def test_付け替えが失敗しても再送を戻す(self) -> None:
+        mgr, _sent = self._manager()
+        table = self._table()
+        handles = [MotorHandle(name, mgr.motors[name], mgr) for name in ("rotate_r", "rotate_l")]
+        refresher = QueryDrivenTargetRefresher(handles, mgr)
+
+        async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
         mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
-            [], self._table(), can_managers=[mgr], sync_monitors=[monitor]
+            [],
+            table,
+            can_managers=[mgr],
+            target_refreshers=[refresher],
+            is_estop_active=lambda: False,
+        )("rotate")
+
+        assert capture is not None
+        with pytest.raises(RuntimeError):
+            await capture()
+
+        assert refresher.is_paused is False
+
+    async def test_付け替えが失敗しても同期監視を戻す(self) -> None:
+        """例外で抜ける経路が `finally` を通らないと、監視が死んだままになる。"""
+        mgr, _sent = self._manager()
+        monitor = self._monitor()
+
+        async def _boom(_names, **_kwargs):
+            raise RuntimeError("再励磁できません")
+
+        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [],
+            self._table(),
+            can_managers=[mgr],
+            sync_monitors=[monitor],
+            is_estop_active=lambda: False,
         )("rotate")
 
         assert capture is not None
@@ -1643,27 +1787,70 @@ class TestOriginResolverViaSetZero:
 
         assert monitor.is_suspended("rotate") is False
 
-    async def test_dm3520_は対象外(self) -> None:
+    async def test_dm3520_も_set_zero_で確定できる(self) -> None:
+        # 特殊コマンドは 3 つとも同じ CAN ID なので、順序は末尾バイトでしか読めない
         table = load_position_table(
             {
                 "axes": {
-                    "sub_lift": {
+                    "sub_y_axis": {
                         "unit": "mm",
                         "command_unit": "rad",
-                        "motors": {"sub_lift_m": {"scale": 1.0}},
+                        "motors": {"sub_y_axis_m": {"scale": 1.0}},
                     }
                 },
-                "positions": {"sub_lift": {"home": 0.0}},
+                "positions": {"sub_y_axis": {"home": 0.0}},
             },
             source="<test>",
         )
+        sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_dm3520", mock_bus())
-        mgr.add_motor("can_dm3520", Dm3520Driver("sub_lift_m", can_id=0x01, master_id=0x11))
+        driver = Dm3520Driver("sub_y_axis_m", can_id=0x01, master_id=0x11)
+        mgr.add_motor("can_dm3520", driver)
 
-        resolve = main._make_origin_resolver([], table, can_managers=[mgr])
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            sent.append(msg)
+            # 問い合わせへの応答としてフィードバックが届く状況を模す
+            mark_feedback_at(mgr, motor_name, time.time())
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID:
+                # 固定小数点レンジの読み返しにも応答する。応答が無いモータは
+                # 励磁を拒否される (`activation_block_reason`) ので、実機と同じく
+                # 「読めている」状態にしておかないと再励磁の順序を見られない
+                register = msg.data[3]
+                driver.matches_feedback(
+                    can.Message(
+                        arbitration_id=driver.master_id,
+                        data=struct.pack(
+                            "<HBBf",
+                            driver.can_id,
+                            Dm3520Driver.CONFIG_READ,
+                            register,
+                            {
+                                Dm3520Driver.REG_P_MAX: driver.p_max,
+                                Dm3520Driver.REG_V_MAX: driver.v_max,
+                                Dm3520Driver.REG_T_MAX: driver.t_max,
+                            }.get(register, 0.0),
+                        ),
+                        is_extended_id=False,
+                    )
+                )
 
-        assert resolve("sub_lift") is None
+        mgr.send = _send  # type: ignore[method-assign]
+
+        capture = main._make_origin_resolver(
+            [], table, can_managers=[mgr], is_estop_active=lambda: False
+        )("sub_y_axis")
+
+        assert capture is not None
+        await capture()
+
+        # 特殊コマンドだけを抜き出す (目標書き込みは 0xFF が 7 つ並ばない)
+        specials = [msg.data[7] for msg in sent if msg.data[:7] == bytes([0xFF] * 7)]
+        zero = specials.index(Dm3520Driver.SPECIAL_SET_ZERO)
+        # SET_ZERO の前に必ず disable がある (励磁したまま原点を動かすと機構が飛ぶ)
+        assert Dm3520Driver.SPECIAL_DISABLE in specials[:zero]
+        # SET_ZERO の後に必ず enable がある (無励磁のまま残さない)
+        assert Dm3520Driver.SPECIAL_ENABLE in specials[zero:]
 
 
 class TestMotorCheckWiring:
@@ -1688,7 +1875,9 @@ class TestMotorCheckWiring:
             loops=[],
             can_managers=[],
             sync_monitors=[],
+            target_refreshers=[],
             feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
         )
         return server
 
@@ -1764,3 +1953,46 @@ class TestStartupSummaryLines:
 
         assert "main_hand 1 項目" in text
         assert "sub_hand 2 項目" in text
+
+
+class TestSensorReader:
+    """可動端インターロックが読むセンサ状態 (`_make_sensor_reader`)。**三値である。**
+
+    `True` / `False` / **`None` (読めていない)** を区別する。最後の 1 つは
+    「`sensors:` に居ない」と「フィードバックが途絶している」の両方で返り、
+    どちらも `False` へ丸めてはならない —— 丸めた瞬間に**配線が抜けたセンサが
+    「押されていない = 進んでよい」に化ける** (2026-09-09 の事故はスイッチが
+    1 スロットずれていて PC へ届いていなかった)。
+    """
+
+    def _manager(self, *, active: bool, age_ms: float = 0.0) -> _StubCANManager:
+        manager = _StubCANManager()
+        sensor = GenericDriver("front_switch", can_id=0x49)
+        feed_generic(sensor, sensor=active)
+        manager.sensors = {"front_switch": sensor}  # type: ignore[attr-defined]
+        manager.feedback_at["front_switch"] = time.time() - age_ms / 1000.0
+        return manager
+
+    def test_接触は_True_で返る(self) -> None:
+        read = _make_sensor_reader([self._manager(active=True)], feedback_timeout_ms=500.0)
+
+        assert read("front_switch") is True
+
+    def test_非接触は_False_で返る(self) -> None:
+        read = _make_sensor_reader([self._manager(active=False)], feedback_timeout_ms=500.0)
+
+        assert read("front_switch") is False
+
+    def test_未登録のセンサは_None(self) -> None:
+        """`sensors:` に居ない名前を「押されていない」と答えてはならない。"""
+        read = _make_sensor_reader([self._manager(active=False)], feedback_timeout_ms=500.0)
+
+        assert read("rear_switch") is None
+
+    def test_途絶したセンサは_None(self) -> None:
+        """届かなくなったセンサの最後の値を信じ続けると、抜けた配線が素通りする。"""
+        read = _make_sensor_reader(
+            [self._manager(active=False, age_ms=5000.0)], feedback_timeout_ms=500.0
+        )
+
+        assert read("front_switch") is None
