@@ -263,14 +263,23 @@ class Edulite05Driver(MotorDriver):
         )
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
-        """起動時だけ送る。**`reinitialization_steps()` は宣言しない。**
+        """無励磁化 → 設定の書き込み (→ 原点確定)。
 
-        本機で「電源断で設定が出荷値へ戻る」現象は観測されていない (DM3520 では
-        実機で踏んだので、あちらは再励磁のたびに `CTRL_MODE` を書き直す)。
-        観測されたら `run_mode` / `limit_*` / `position_kp` をそちらへ移すこと ——
-        ただし **`set_zero` は移してはならない**。再励磁のたびに送ると、零点確定で
-        合わせた原点をその場の姿勢へ書き換える (`rotate_r` / `rotate_l` は
-        `set_zero_on_start: true`)。
+        **`set_zero` は `reinitialization_steps()` へ移してはならない。** 再励磁の
+        たびに送ると、零点確定で合わせた原点をその場の姿勢へ書き換える
+        (`rotate_r` / `rotate_l` は `set_zero_on_start: true`)。
+        """
+        steps = list(self.reinitialization_steps())
+        if self.set_zero_on_start:
+            steps.append((self.encode_set_zero(), 0.2))
+        return steps
+
+    def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
+        """無励磁化 → 設定の書き込み。**電源断で失われるぶんだけ。**
+
+        `run_mode` / `limit_spd` / `limit_cur` / `loc_kp` はどれも `WRITE_PARAM`
+        (0x12) で書く。マニュアルの type 18 は "lost after power failure" なので、
+        物理非常停止で電源が落ちた個体は**位置モードですらない**状態で立ち上がる。
         """
         steps = [
             (self.encode_disable(), 0.05),
@@ -280,8 +289,6 @@ class Edulite05Driver(MotorDriver):
         ]
         if self.mode is ControlMode.POSITION:
             steps.append((self.encode_write_param_float(self.PARAM_LOC_KP, self.position_kp), 0.05))
-        if self.set_zero_on_start:
-            steps.append((self.encode_set_zero(), 0.2))
         return steps
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:

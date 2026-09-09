@@ -114,8 +114,8 @@ uv run python scripts/edulite_origin_probe.py --label 4-after --json /tmp/probe-
 
 | 比較 | 読めること | 次にやること |
 |---|---|---|
-| 同じ | 電源断で設定は残る | 今の `initialization_steps()`（起動時 1 回だけ書く）のままでよい |
-| 出荷値・既定値へ戻る | 電源断で設定が失われる | DM3520 と同じく再励磁のたびに書き直す必要がある。**ただし `SET_ZERO` はそこへ移してはならない**（移すと再励磁のたびに原点がその場の姿勢へ書き換わる。`lib/drivers/edulite05.py` の `initialization_steps()` の docstring と `docs/invariants.md` §3） |
+| 同じ | 電源断で設定は残る | 再励磁のたびに書き直しても害は無いので `reinitialization_steps()` はそのままでよい。ただし在飛の時間（1 台 +0.25 秒）は減らせる |
+| 出荷値・既定値へ戻る | 電源断で設定が失われる | マニュアルの type 18（"lost after power failure"）どおり。**もう手当ては入っている** —— `reinitialization_steps()` が再励磁のたびに書き直す。**`SET_ZERO` はそこへ移してはならない**（移すと再励磁のたびに原点がその場の姿勢へ書き換わる。`lib/drivers/edulite05.py` の `initialization_steps()` の docstring と `docs/invariants.md` §3） |
 | `読めなかった (応答なし)` | この個体・このファームは `READ_PARAM` に答えない | パラメータの保持は別の方法（書き込み前後の挙動）でしか確かめられない。**0 とみなして先へ進まないこと** |
 
 ### 6. まとめて何が言えるか

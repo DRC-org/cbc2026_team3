@@ -303,6 +303,56 @@ class TestCaptureOriginViaSetZero:
             await mgr.capture_origin_via_set_zero(["servo"])
 
 
+class TestEduliteReenergize:
+    """モックではなく EDULITE 05 の実体で、再初期化のゲートを 1 枚で確かめる。
+
+    **`_is_known_energized` は `is_energized()` の三値をドライバへ聞く。** モック版
+    だけでは、実機のドライバがその三値を報告しなくなっても誰も気付けない。
+    """
+
+    def _prepare(self) -> tuple[CANManager, Edulite05Driver, list[can.Message]]:
+        sent: list[can.Message] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        driver = Edulite05Driver("rotate_r", can_id=0x11, position_kp=30.0)
+        mgr.add_motor("can_edulite", driver)
+
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            sent.append(msg)
+            mark_feedback_at(mgr, motor_name, time.time())
+
+        mgr.send = _send  # type: ignore[method-assign]
+        return mgr, driver, sent
+
+    async def test_無励磁なら電源断で失われた設定を書き直す(self) -> None:
+        mgr, driver, sent = self._prepare()
+        feed_edulite(driver, mode_state=0)
+
+        await mgr.activate_motors()
+
+        params = [
+            struct.unpack_from("<H", msg.data)[0]
+            for msg in sent
+            if Edulite05Driver.parse_can_id(msg.arbitration_id)[0]
+            == Edulite05Driver.COMM_TYPE_WRITE_PARAM
+        ]
+        assert params[:4] == [
+            Edulite05Driver.PARAM_RUN_MODE,
+            Edulite05Driver.PARAM_LIMIT_SPD,
+            Edulite05Driver.PARAM_LIMIT_CUR,
+            Edulite05Driver.PARAM_LOC_KP,
+        ]
+
+    async def test_励磁中なら再初期化を送らない(self) -> None:
+        """再初期化は `disable` で始まる。直結ペアの健全な相方は保持トルクを失う。"""
+        mgr, driver, sent = self._prepare()
+        feed_edulite(driver, mode_state=2)
+
+        await mgr.activate_motors(feedback_timeout_s=0.05)
+
+        assert sent == []
+
+
 class TestMotorActivation:
     def _prepare(self) -> tuple[CANManager, MagicMock]:
         mgr = CANManager()

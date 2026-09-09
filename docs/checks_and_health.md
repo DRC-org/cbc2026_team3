@@ -543,14 +543,25 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 
 **励磁の前に、電源断で失われる設定を送り直す。** 再励磁はどちらの経路も
 「物理非常停止でドライバの電源が落ちたかもしれないところからの復帰」なので、
-`CANManager.activate_motors` が `reinitialization_steps()` を先に送る（DM3520 の
-`CTRL_MODE` 書き直しと固定小数点レンジの読み返しやり直し。戻っていればそのまま
-書き直す。1 台あたり +0.1 秒、レンジを書き直すぶんが最大 +0.2 秒）。
+`CANManager.activate_motors` が `reinitialization_steps()` を先に送る。宣言している
+のは 2 機種:
+
+| ドライバ | 送り直すもの | 増える時間 |
+|---|---|---|
+| Damiao DM3520 | `CTRL_MODE` 書き直しと固定小数点レンジの読み返しやり直し | 1 台あたり +0.1 秒、レンジを書き直すぶんが最大 +0.2 秒 |
+| RobStride EDULITE 05 | `run_mode` / `limit_spd` / `limit_cur` /（位置モードなら）`loc_kp` | 1 台あたり +0.25 秒 |
+
+EDULITE 05 のこの 4 つはどれも `WRITE_PARAM`（`0x12`）で書き、マニュアルの type 18 は
+"lost after power failure" である。**書き直さないと、電源が落ちた個体は位置モードで
+すらない状態で立ち上がる** —— `PARAM_LOC_REF` を書いても解釈されず、症状は
+`SequenceTimeoutError` だけになる（`is_energized()` も `is_fault()` も掛からない）。
+**`set_zero` はここに含めない**（理由は下の DM3520 の段と同じ）。
+
 **励磁中だと分かっているモータへは送らない** —— 先頭が `disable` なので、
 直結ペアの健全な相方へ届けば保持トルクをその場で失う。詳細と落ちる先は
 「零点確定（ホーミング）」節の「既知の穴」に続く段。
 
-**在飛中（100ms〜1.5 秒）は `state.safety.reenergizing` が立つ。** UI はその間
+**在飛中（100ms〜2 秒）は `state.safety.reenergizing` が立つ。** UI はその間
 ボタンを「処理中…」で無効にする —— `unenergized_motors` はまだ消えない（励磁が
 次のフィードバックへ反映されるまで分からない）ので、これが無いと操縦者は
 「押しても何も起きない」と読んで 2 回目を押す。**この在飛中は同じロボットの
@@ -1243,10 +1254,20 @@ disable すると自重で落ちる（保持は減速比 19.2 のギヤ頼みで
 `activation_block_reason()` が励磁を拒否する。所要時間は DM3520 1 台あたり +0.1 秒
 （`safety.reenergizing` の窓は sub_hand で最大 +0.2 秒、レンジを書き直すときは +0.2 秒）。
 
+**同じ穴が EDULITE 05 にもある。** `run_mode` / `limit_spd` / `limit_cur` / `loc_kp` は
+どれも `WRITE_PARAM`（`0x12`）で書き、マニュアルの type 18 は "lost after power failure"
+である。**復帰した個体は位置モードですらない**ので `PARAM_LOC_REF` を書いても解釈されず、
+症状は `SequenceTimeoutError` だけになる（`is_energized()` は `MOTOR` を報告し、
+`is_fault()` も掛からない）。`reinitialization_steps()` がこの 4 つを書き直す
+（`rotate` は 2 台なので `safety.reenergizing` の窓は +0.5 秒）。
+
 - **`set_zero` はここに含めない。** 原点は励磁が落ちても生き残るので書き直す
   理由が無く、送れば零点確定で合わせた原点をその場の姿勢へ書き換えてしまう。
   起動時だけの手順（`initialization_steps()`）と再励磁のたびの手順
-  （`reinitialization_steps()`）を分けてあるのはこのためである
+  （`reinitialization_steps()`）を分けてあるのはこのためである。**EDULITE 05 では
+  マニュアルどおりなら `SET_ZERO` の零点自体が電源断で失われる**ので、書き直しても
+  原点は戻らない（実機での確かめ方は
+  [`edulite_origin_probe.md`](edulite_origin_probe.md)）
 - **励磁中だと分かっているモータへは送らない**（`CANManager._is_known_energized`）。
   先頭が `disable` なので、直結ペアの健全な相方へ届くとその場で保持トルクを失う
   —— 鮮度確認の問い合わせと同じ判断で、電源が落ちた個体は復帰後 `False` を

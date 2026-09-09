@@ -980,7 +980,7 @@ DM3520 の 2 軸は 2026-09-09 に実機で通した（再現性 0.1mm）。`y_a
 
 `reenergize_motors` は励磁が落ちたモータを機体を止めずに戻すコマンドで、無励磁のモータ（と直結
 ペアの相方）だけ目標ラッチを剥がしてから `activate_motors(only=…)` で絞って励磁する。
-100ms〜1.5 秒かかる別タスクで走り、そのあいだ `safety.reenergizing` が立つ。
+100ms〜2 秒かかる別タスクで走り、そのあいだ `safety.reenergizing` が立つ。
 
 **塞ぐのは「在飛中に届くシーケンス系」だけ** — `CommandSpec.blocked_during_reenergize` が
 `sequence_start` / `sequence_jump` / `trigger` に付く（在飛中に `move_to` が書いた目標を「フォルト
@@ -1001,12 +1001,13 @@ DM3520 の 2 軸は 2026-09-09 に実機で通した（再現性 0.1mm）。`y_a
 `CANManager.activate_motor` は `requires_fresh_feedback_for_activation()` なモータの鮮度を
 `feedback_probe_message()`（EDULITE 05 / DM3520 とも **disable**）で引き出すため、これをそのまま
 打つと健全な相方が保持トルクを失い、宣言順（`rotate_r` → `rotate_l`）次第で**軸が両側とも無励磁に
-なる窓**（最悪 550ms）が開く。
+なる窓**（最悪 550ms）が開く。**`reinitialization_steps()` も先頭が `disable` なので同じ窓を開く**
+（EDULITE 05 / DM3520 とも宣言している）。
 
-判断は `CANManager._may_probe_for_feedback` が `is_energized()` の三値で 1 箇所だけ持ち、`True` の
-モータへは打たない。`after_set_zero` の経路だけは例外で必ず打つ — 直前に `deactivation_steps()` を
-送っており、無励磁であることを指令として知っているため。**ドライバ種別をここへ書き写しては
-ならない。**
+判断は `CANManager._may_probe_for_feedback` と `_is_known_energized` が `is_energized()` の三値で
+1 箇所だけ持ち、`True` のモータへは打たない。`after_set_zero` の経路だけは例外で必ず打つ —
+直前に `deactivation_steps()` を送っており、無励磁であることを指令として知っているため。
+**ドライバ種別をここへ書き写してはならない。**
 
 一方 **`SyncMonitor` は止めない** — 零点確定が止めてよい根拠（「その間モータは無励磁なので押し合いは
 原理的に起きない」）は再励磁では片側にしか当てはまらず、止めると保護が本当に要る瞬間に目を塞ぐ

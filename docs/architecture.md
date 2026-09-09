@@ -414,7 +414,7 @@ barrel（`index.ts`）は作らず、常に実ファイルまで指す。コマ�
 
 | モータ | 位置ループの所在 | PC が送るもの |
 |---|---|---|
-| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時に `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、config の `position_kp`）を書き、実測角を保持目標に書いてから励磁する | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
+| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時と再励磁のたびに `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、config の `position_kp`）を書き、実測角を保持目標に書いてから励磁する（`WRITE_PARAM` の設定は電源断で失われるので `reinitialization_steps()` が持つ） | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
 | Damiao DM3520 | **ドライバ内蔵**（Position Velocity Mode = 位置 → 速度 → 電流の三重ループ） | `p_des` [rad] / `v_des` [rad/s] の float32 2 つ |
 | 自作モタドラ（DC / サーボ / 電磁弁） | **閉じていない。** DC は duty をそのまま出し、サーボは角度補間だけ、電磁弁は GPIO の ON/OFF | 目標値のみ（`SET_TARGET` の Byte0 が制御タイプを毎通運ぶ） |
 | DJI M3508 (C620) | **電流ループのみ ESC 内。位置ループは PC 側**（`lib/control/position_loop.py`、200Hz） | 電流指令（`0x200` フレーム。4 モータ分を 1 通に束ねる） |
@@ -679,7 +679,7 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 物理非常停止は DC 基板の `REF` が受けてファーム側でラッチされ、解除は CAN の `E_STOP` 解除
 フレームだけ（電磁弁基板に `REF` 入力は無い）。**再励磁**（`reenergize_motors`）は励磁が
 落ちたモータを機体を止めずに戻すコマンドで、無励磁のモータ（と直結ペアの相方）だけ目標ラッチを
-剥がしてから `activate_motors(only=…)` で絞って励磁する。100ms〜1.5 秒かかる別タスクで走り、
+剥がしてから `activate_motors(only=…)` で絞って励磁する。100ms〜2 秒かかる別タスクで走り、
 そのあいだ `safety.reenergizing` が立つ（在飛判定は `RobotServer._is_reenergizing` が
 `_reenergize_tasks` / `_reactivate_tasks` の両方を畳んで答える）。
 

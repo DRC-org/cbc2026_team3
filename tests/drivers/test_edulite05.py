@@ -178,6 +178,64 @@ def test_initialization_does_not_set_zero_by_default() -> None:
     assert driver.COMM_TYPE_ENABLE not in comm_types
 
 
+class TestReinitialization:
+    """電源断で失われる設定は再励磁のたびに書き直す。
+
+    `run_mode` / `limit_spd` / `limit_cur` / `loc_kp` はどれも `WRITE_PARAM`(0x12)
+    で、マニュアルの type 18 は "lost after power failure"。物理非常停止は本機の
+    電源を数秒落とすので、書き直さないと復帰した個体は位置モードですらない。
+    """
+
+    @staticmethod
+    def _comm_types(driver: Edulite05Driver) -> list[int]:
+        return [
+            driver.parse_can_id(msg.arbitration_id)[0]
+            for msg in messages_of(driver.reinitialization_steps())
+        ]
+
+    def test_無励磁化してから設定を書き直す(self) -> None:
+        driver = Edulite05Driver(
+            "m1",
+            can_id=5,
+            mode="position",
+            limit_speed=2.0,
+            limit_current=5.0,
+            position_kp=30.0,
+        )
+
+        messages = messages_of(driver.reinitialization_steps())
+
+        assert self._comm_types(driver) == [
+            driver.COMM_TYPE_DISABLE,
+            driver.COMM_TYPE_WRITE_PARAM,
+            driver.COMM_TYPE_WRITE_PARAM,
+            driver.COMM_TYPE_WRITE_PARAM,
+            driver.COMM_TYPE_WRITE_PARAM,
+        ]
+        assert messages[1].data == struct.pack("<HxxBxxx", driver.PARAM_RUN_MODE, 1)
+        assert messages[2].data == struct.pack("<Hxxf", driver.PARAM_LIMIT_SPD, 2.0)
+        assert messages[3].data == struct.pack("<Hxxf", driver.PARAM_LIMIT_CUR, 5.0)
+        assert messages[4].data == struct.pack("<Hxxf", driver.PARAM_LOC_KP, 30.0)
+
+    def test_位置モード以外は位置ゲインを書かない(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5, mode="velocity")
+
+        params = [
+            struct.unpack_from("<H", msg.data)[0]
+            for msg in messages_of(driver.reinitialization_steps())[1:]
+        ]
+
+        assert driver.PARAM_LOC_KP not in params
+        assert driver.PARAM_RUN_MODE in params
+
+    def test_SET_ZEROを含めない(self) -> None:
+        """再励磁のたびに送ると、零点確定で合わせた原点をその場の姿勢へ書き換える。"""
+        driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+
+        assert driver.COMM_TYPE_SET_ZERO not in self._comm_types(driver)
+        assert driver.COMM_TYPE_ENABLE not in self._comm_types(driver)
+
+
 @pytest.mark.parametrize("limit_current", [-1.0, math.inf, math.nan])
 def test_current_limit_rejects_negative_or_non_finite_values(limit_current: float) -> None:
     with pytest.raises(ValueError):
