@@ -1115,11 +1115,13 @@ robot / positions / checklist が揃っていて読めること ②登録した�
   "safety": {
     "sync_violations": ["y_axis"],       // ラッチ中の軸名（ループと SyncMonitor の和集合）
     "loops_running": true, "monitors_running": true, "refreshers_running": true,
+    "limit_monitors_running": true,      // 同期監視とは対処が違うので monitors_running に畳まない
     "reenergizing": false,
     "firmware_unconfirmed_motors": [],   // INFO 未受信で焼き忘れ検出が働いていないモータ
     "position_loops":   [{ "bus": "m3508_bus", "running": true, "paused": false,
                            "sync_violations": ["y_axis"] }],
     "sync_monitors":    [{ "axes": ["y_axis", "rotate"], "running": true, "violated": [] }],
+    "limit_monitors":   [{ "axes": ["sub_y_axis"], "running": true, "stopped": [] }],  // stopped = 今端で止めている軸
     "target_refreshers":[{ "motors": ["conveyor", "gripper"], "running": true, "paused": false }]
   },
   "manual": {

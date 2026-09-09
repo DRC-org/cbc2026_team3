@@ -63,9 +63,11 @@ const SAFETY: SafetyState = {
   reenergizing: false,
   loops_running: true,
   monitors_running: true,
+  limit_monitors_running: true,
   refreshers_running: true,
   position_loops: [],
   sync_monitors: [],
+  limit_monitors: [],
   target_refreshers: [],
 };
 
