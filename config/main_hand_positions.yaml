@@ -61,10 +61,9 @@ axes:
     timeout_s: 3.0
     tolerance: 2.0
     sync_tolerance: 5.0
-    # TODO(実機で確認): 範囲は実測だが、端まで振って他の機構と干渉しないことは未確認。
     manual:
       min: 0.0
-      max: 180.0
+      max: 185.0
       steps: [1.0, 5.0, 15.0, 45.0]
     # TODO(実機で確認): search_distance だけが暫定値 (触れていない位置から何 deg で
     # 当たるかは未計測)。詰めるときは上の manual の min/max も同時に寄せること。
@@ -130,53 +129,21 @@ positions:
   # TODO(実機で確認): 経由点の値はどれも等分割の仮値。実機で干渉を見ながら列ごとに詰めること。
   y_axis:
     home: 0.0
-    # 零点確定の直後に退避する先 (homing.retreat_position)。rotate を回してよい位置。
-    # TODO(実機で確認): 仮値。rotate の干渉域を抜ける実測値へ詰めること
-    clear: 40.0
-    work_1_via_1: 30.0
-    work_1_via_2: 60.0
-    work_1_via_3: 90.0
     work_1: 120.0
-    work_2_via_1: 80.0
-    work_2_via_2: 160.0
-    work_2_via_3: 240.0
     work_2: 320.0
-    work_3_via_1: 130.0
-    work_3_via_2: 260.0
-    work_3_via_3: 390.0
-    work_3: 520.0
-    work_shared_via_1: 162.5
-    work_shared_via_2: 325.0
-    work_shared_via_3: 487.5
-    work_shared: 650.0
+    work_3: 450.0
+    work_3_after_1: 380.0
+    work_3_after_2: 350.0
+    work_shared: 550.0
 
   rotate:
-    # y_axis = 0 と rotate = 0 は機構が干渉する。HOME は y_axis: home と
-    # rotate: home の組なので、片方を原点から離さないと初期姿勢そのものが
-    # 干渉姿勢になる。離すのは rotate の側 (y_axis.home は 0.0 のまま)。
-    # 0.0 は零点確定のスイッチの動作点そのものでもある。ON 区間の実測 約 2deg に
-    # 対して tolerance が 2.0deg なので、0.0 を目標にすると到達帯が ON 区間へ
-    # 食い込み、その内側からの指令を可動端インターロック (guard.limits.minus)
-    # が拒む。5.0 なら到達帯 3.0〜7.0deg が ON 区間の外に出る。
-    home: 5.0
-    work_1_via_1: 45.0
-    work_1_via_2: 90.0
-    work_1_via_3: 135.0
-    work_2_via_1: 45.0
-    work_2_via_2: 90.0
-    work_2_via_3: 135.0
-    work_3_via_1: 45.0
-    work_3_via_2: 90.0
-    work_3_via_3: 135.0
-    work_shared_via_1: 45.0
-    work_shared_via_2: 90.0
-    work_shared_via_3: 135.0
-    pick: 180.0
-    # home と同値。**偶然の一致ではない** —— どちらも上の 2 つの理由から 0.0 を
-    # 取れず、結果として同じ 5.0 に並んでいる。
-    # TODO(実機で確認): 置く角が待機の角と同じでよいかは未確認。ワークを置ける角が
-    # 決まったら home と揃っている必要は無いので、別の値になってよい
+    home: 0.0
+    work_3_after_1: 165.0
+    work_3_after_2: 155.0
+    pick: 185.0
+    pick_shared: 165.0
     place: 5.0
+    after_place: 30.0
 
   gripper:
     open: 0.0
