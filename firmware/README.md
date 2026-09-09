@@ -315,7 +315,7 @@ Bit2..0 : スロット番号 (0-7)
 
 | 基板 | 基板番号 0 の ID | モータ |
 |---|---|---|
-| **DC** ch0 / ch1 / ch2 | `0x80` / `0x81` / `0x82` | `conveyor` / `pump_vac` / `pump_blow` |
+| **DC** ch0 / ch1 / ch2 | `0x80` / `0x81` / `0x82` | `conveyor` / `pump_vac` / **未使用（ID は予約）** |
 | **サーボ** SV0 – SV4 | `0x40` – `0x44` | `gripper` / `wall_f` / `wall_r` / `rotate_origin_sensor` / `y_axis_r_origin_sensor` |
 | **電磁弁** ch0 – ch5 | `0xC0` – `0xC5` | `valve_1` 〜 `valve_6` |
 
@@ -459,9 +459,10 @@ MCP2515 の INT/CS と SPI 3 本 + RGB(D9)、R4 は RGB(D8)）ので、検査の
 `candump` とシリアルログと `config/sub_hand.yaml` を突き合わせるとき、同じものが
 2 つの名前で呼ばれていると対応表を頭の中で引くことになる。
 
-**吸気ポンプ・排気ポンプはこの基板ではなく DC 基板が動かす**（仕様書 §9.6）。
+**吸気ポンプはこの基板ではなく DC 基板が動かす**（仕様書 §9.6）。
 6ch はすべて弁で埋まっており、またポンプは起動電流が大きく `max_duty` で立ち上がりを
-抑えられる DC 基板の側が適している。
+抑えられる DC 基板の側が適している。**排気の駆動源は無い** —— 弁が三方弁で、閉じた側が
+吸着パッドを大気開放する。
 
 `config.h` は STM32 HAL を include せず、ポートを自前の `Port` enum で持つ。
 HAL の `GPIOA` / `GPIOB` はポインタへのキャストを含むマクロで `constexpr` 文脈に
