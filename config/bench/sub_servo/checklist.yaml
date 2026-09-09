@@ -1,0 +1,47 @@
+# サブハンドのサーボ 5 スロットのベンチの確認項目。
+#
+# 本番の config/checklist.yaml は直動 2 軸 / 電磁弁 / コンベアなど、この
+# セットに存在しない機構の確認を求めるためそのままでは使えない。
+#
+# 手動操縦は PHASES_ANY なので、この一覧を埋めなくてもモータは動かせる
+# (試合フェーズへ入るためのゲートであって、手動操縦のゲートではない)。
+#
+# **先頭の 3 つがこのセット固有の危険である。** 物理非常停止は効かず、ファーム側の
+# クランプも全域が開いているので、止められるのは人と `manual` の幅だけになる。
+
+checklists:
+  pre_match:
+    - id: bench_no_physical_estop
+      label: 「このセットでは物理非常停止が効かない」ことを全員が理解していること確認 (止める手段は UI の EMG STOP だけ)
+      group: preflight
+    - id: bench_no_firmware_clamp
+      label: ファームの angleMin/Max が 5 本とも 0〜270deg の全域であること理解 (当たったまま停動すると短時間で焼損する)
+      group: preflight
+    - id: bench_watchdog_off
+      label: cbc-can-watchdog を止めてあること確認 (相手の居ないバスがあると 5 秒周期で全バスを down/up する)
+      group: preflight
+    - id: bench_bus_up
+      label: can_generic が up していること確認 (ip -br link)
+      group: preflight
+    - id: bench_start_angle
+      label: 5 本とも生値 0.0deg に居ること確認 (candump で 0x350〜0x354。ここが起点で、manual は片側 30deg しか開いていない)
+      group: preflight
+
+    - id: one_slot_at_a_time
+      label: 動かすのは 1 本ずつであること確認 (左右ペアを同時に動かすのはこのベンチの目的に反する)
+      group: motor_check
+    - id: slot_mapping
+      label: 指令した軸名と実際に動いたアームが一致すること確認 (スロットの取り違えは FEEDBACK からは読めない)
+      group: motor_check
+    - id: travel_direction
+      label: 正の指令でアームがどちらへ動くかを控えたこと確認 (左右で逆なら本番の scale は -1.0 側)
+      group: motor_check
+    - id: travel_limit
+      label: 当たる手前で止め、そのときの角を控えたこと確認 (可動域は当ててから決めない)
+      group: motor_check
+    - id: fold_point
+      label: 左右が同じ姿勢を取る角の組を控えたこと確認 (本番の offset はこの 2 つの和である)
+      group: motor_check
+    - id: initial_angle_pair
+      label: 決めた初期姿勢をファームの initialAngleDeg へ書いて #2 を焼き直したこと確認 (通電と瞬断のたびにここへ飛ぶ)
+      group: motor_check

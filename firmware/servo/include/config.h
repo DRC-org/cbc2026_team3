@@ -161,14 +161,15 @@ constexpr ServoBoardConfig kServoBoards[] = {
     // sub_rotate_r/l と sub_pitch_r/l は機構的に直結した左右ペアで、折り返し
     // （scale: -1.0 / offset: 270.0）は PC 側の位置定数 yaml が持つ。
     //
-    // TODO(実機で確認): initialAngleDeg は 5 スロットとも仮値。通電と再起動のたび
-    // ここへ駆動するので、機構を付ける前に「当たらない角度」を実測して入れること。
+    // initialAngleDeg はシーケンスの初期姿勢 (回転 receive / ピッチ open /
+    // オフセット open) の生角。通電と再起動のたびここへ駆動するので、
+    // config/sub_hand_positions.yaml と食い違わせないこと。
     {2,
      {
-         {SlotRole::Servo, 9, 0.0f, kSubRotateRLimits, kServoPulse270, false},   // SV0 sub_rotate_r
-         {SlotRole::Servo, 11, 0.0f, kSubRotateLLimits, kServoPulse270, false},  // SV1 sub_rotate_l
-         {SlotRole::Servo, 10, 0.0f, kSubPitchRLimits, kServoPulse270, false},   // SV2 sub_pitch_r
-         {SlotRole::Servo, 6, 0.0f, kSubPitchLLimits, kServoPulse270, false},    // SV3 sub_pitch_l
+         {SlotRole::Servo, 9, 0.0f, kSubRotateRLimits, kServoPulse270, false},     // SV0 sub_rotate_r
+         {SlotRole::Servo, 11, 270.0f, kSubRotateLLimits, kServoPulse270, false},  // SV1 sub_rotate_l
+         {SlotRole::Servo, 10, 260.0f, kSubPitchRLimits, kServoPulse270, false},   // SV2 sub_pitch_r
+         {SlotRole::Servo, 6, 10.0f, kSubPitchLLimits, kServoPulse270, false},     // SV3 sub_pitch_l
          {SlotRole::Servo, 3, 0.0f, kSubOffsetLimits, kServoPulse270, false},    // SV4 sub_offset
      }},
 };

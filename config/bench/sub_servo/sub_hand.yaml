@@ -1,0 +1,60 @@
+# サブハンドのサーボ 5 スロット (基板 #2) のベンチ。可動域と姿勢の角を実測する。
+#
+# 本番の config/sub_hand.yaml から**基板 #2 の 5 台だけ**を取り出し、左右ペアを
+# ばらして 1 台 1 軸にしたもの。直動 2 軸 / valve_* / pump_* は登録しない。
+#
+# **登録しない理由はセットごとに違う。**
+#   - valve_* / pump_* (電磁弁基板・DC 基板) …… DC 基板の `FEEDBACK` 緊急停止
+#     ビットがサーバーへ伝わる唯一の経路なので、`REF` が押されっぱなしなら
+#     起動直後に全体緊急停止へ落ちる (config/bench/sub_hand_homing/ と同じ理由)
+#   - 直動 2 軸 …… サーボの可動域を測るのに要らない。**動かす軸を 1 つでも
+#     減らす**ほうが、誤操作で当てる先が減る
+#
+# !!! **この構成では物理非常停止が効かない。** !!!
+# 止める手段は UI の EMG STOP だけになる。人を近付けないこと。
+#
+# 値は expected_* も含めて本番と同じにしてある。緩めるとベンチで確かめた挙動が
+# 本番と別物になる。
+
+robot_name: sub_hand
+
+motors:
+  sub_rotate_r:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x50               # サーボ基板 #2 SV0
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
+
+  sub_rotate_l:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x51               # サーボ基板 #2 SV1
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0
+
+  sub_pitch_r:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x52               # サーボ基板 #2 SV2
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0
+
+  sub_pitch_l:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x53               # サーボ基板 #2 SV3
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0
+
+  sub_offset:
+    driver: generic
+    bus: generic_bus
+    can_id: 0x54               # サーボ基板 #2 SV4
+    control_type: position
+    expected_firmware: 6
+    expected_angle_range_deg: 270.0

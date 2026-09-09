@@ -1,0 +1,78 @@
+# 5 スロットを 1 台 1 軸として並べる。**左右の対応は書かない** —— 折り返し点
+# (本番の `offset`) を測るのがこのベンチの目的なので、それを前提にした写しを
+# 置くと測る前から答えを決めることになる。
+#
+# **`manual` の幅がこのセット唯一の歯止めである。** ファーム側のクランプは
+# 5 本とも 0〜270deg の全域が開いていて実質効いていない (機構を付けた状態で
+# 全域を回すとメカストッパに当たったまま停動し、短時間で焼損する)。
+#
+# **max はスロットごとに、目で確かめた量だけ開ける。** 実機は 5 本とも生値 0.0deg
+# から始めたので、まだ振っていないスロットは 30.0 の初期値のままである。
+# 30.0 に意味は無く、「まだ何も測っていない」ことの表明でしかない。
+
+axes:
+  # 回転は 2026-09-10 に 0 -> 5 -> 10 -> 30deg を左右同時に通した。機構の限界は 90deg。
+  sub_rotate_r: &rotate_axis
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    tolerance: 2.0
+    manual:
+      min: 0.0
+      max: 90.0
+      steps: [1.0, 5.0, 10.0]
+
+  # 左は右と対になる角を探すため単独で広く開ける (右は 0〜90 のまま)。
+  sub_rotate_l:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 4.0
+    tolerance: 2.0
+    manual:
+      min: 0.0
+      max: 270.0
+      steps: [1.0, 5.0, 10.0]
+
+  # ピッチは 2026-09-10 に左右別々で振り、r + l = 270 で対になることを確認した
+  # (close = r80/l190、open = r260/l10)。
+  sub_pitch_r: &pitch_axis
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    tolerance: 2.0
+    manual:
+      min: 0.0
+      max: 262.0
+      steps: [1.0, 5.0, 10.0]
+
+  sub_pitch_l: *pitch_axis
+
+  # オフセットは 2026-09-10 に 0 -> 5 -> 30deg を通した。限界は未確認。
+  sub_offset:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+    tolerance: 2.0
+    manual:
+      min: 0.0
+      max: 180.0
+      steps: [1.0, 5.0, 10.0]
+
+# 手動操縦だけで使うので、位置は起点と刻みの確認にしか要らない。
+positions:
+  sub_rotate_r: &servo_positions
+    initial: 0.0        # 通電時にファームが駆動する角 (initialAngleDeg 0.0f)
+    small: 5.0
+    mid: 15.0
+  sub_rotate_l: *servo_positions
+  sub_pitch_r: *servo_positions
+  sub_pitch_l: *servo_positions
+  sub_offset: *servo_positions
