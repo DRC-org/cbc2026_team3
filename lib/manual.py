@@ -34,14 +34,14 @@ class ManualController:
         motors: MotorGroup,
         positions: PositionTable,
         *,
-        court: Court = Court.RED,
+        court: Court | None = None,
     ) -> None:
         self._motors = motors
         self._positions = positions
-        self._court = court
+        self._court: Court | None = court
         self._targets: dict[str, float] = {}
 
-    def set_court(self, court: Court) -> None:
+    def set_court(self, court: Court | None) -> None:
         self._court = court
 
     async def move_to_position(self, axis: str, name: str) -> float:

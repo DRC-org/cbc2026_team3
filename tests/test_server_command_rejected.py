@@ -151,6 +151,7 @@ class TestDeclaredCommandsAlwaysAnswer:
         async with TestClient(TestServer(app)) as client:
             requester = await client.ws_connect("/ws")
 
+            await requester.send_json({"type": "set_court", "court": "red"})
             await requester.send_json({"type": "set_court", "court": "green"})
 
             msg = await recv_type(requester, "command_rejected")

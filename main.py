@@ -509,7 +509,7 @@ def _make_axis_state_reader(
     positions: PositionTable,
     motors: MotorGroup,
     *,
-    court: Callable[[], Court],
+    court: Callable[[], Court | None],
     managers: list[CANManager],
     feedback_timeout_ms: float,
 ) -> AxisStateReader:

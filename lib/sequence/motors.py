@@ -422,7 +422,7 @@ def build_axis_state_reader(
     positions: PositionTable,
     motors: MotorGroup,
     *,
-    court: Callable[[], Court],
+    court: Callable[[], Court | None],
     is_stale: Callable[[str], bool],
 ) -> AxisStateReader:
     """軸間干渉の判定が読む「他の軸は今どこか」を組む。**読めないものは `None`。**

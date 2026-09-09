@@ -646,3 +646,127 @@ class TestInterferenceIsNotWatchedHere:
 
         assert rig.sent == []
         assert rig.monitor.intervention("sub_y_axis").count == 0
+
+
+def _table_with_court_scale() -> PositionTable:
+    """コート依存の軸と非依存の軸を 1 枚に載せた表。**どちらも可動端を宣言している。**"""
+    return load_position_table(
+        {
+            "axes": {
+                "sub_y_axis": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": _SCALE,
+                    "tolerance": 0.1,
+                    "guard": _GUARD,
+                },
+                "sub_lift": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": {"red": -_SCALE, "blue": _SCALE},
+                    "tolerance": 1.0,
+                    "guard": {
+                        "limits": {"plus": "bottom_switch", "minus": "top_switch"},
+                        "max_step": 500.0,
+                        "stall_torque": 1.0,
+                    },
+                },
+            },
+            "positions": {"sub_y_axis": {"home": 0.0}, "sub_lift": {"top": -20.0}},
+        },
+        source="<test>",
+    )
+
+
+class _CourtRig:
+    """コート依存軸と非依存軸を 1 台ずつ持つ監視。コートは差し替えられる。"""
+
+    def __init__(self) -> None:
+        self.sent: dict[str, list[float]] = {"sub_y_axis": [], "sub_lift": []}
+        self.sensors: dict[str, bool | None] = {}
+        self.court: Court | None = None
+        table = _table_with_court_scale()
+        group = MotorGroup(sensor_active=self.sensors.get)
+        self.handles: dict[str, MotorHandle] = {}
+        for name in ("sub_y_axis", "sub_lift"):
+            handle = MotorHandle(
+                name,
+                StubFeedbackDriver(name, 1),
+                mock_can_manager(),
+                target_sink=self._sink(name),
+            )
+            group.add(handle)
+            self.handles[name] = handle
+        self.monitor = LimitMonitor(
+            table,
+            group,
+            sensor_active=self.sensors.get,
+            sensor_contact_count=lambda _name: None,
+            court=lambda: self.court,
+        )
+
+    def _sink(self, name: str):
+
+        async def sink(_mode: ControlMode, value: float) -> None:
+            self.sent[name].append(value)
+
+        return sink
+
+    async def command(self, name: str, value: float) -> None:
+        await self.handles[name].set_target(ControlMode.POSITION, value)
+        self.sent[name].clear()
+
+
+class TestCourtUnresolved:
+    """コート未確定のあいだ、コート依存軸は監視できない。**穴にはならない。**
+
+    決まるまでその軸へは指令が 1 通も通らない (入口が `CourtUnresolvedError` で
+    落ちる) ので、監視する動きがそもそも無い。
+    """
+
+    async def test_コート依存軸は飛ばす(self, caplog: pytest.LogCaptureFixture) -> None:
+        rig = _CourtRig()
+        rig.sensors["top_switch"] = True
+        await rig.command("sub_lift", -10.0)
+
+        with caplog.at_level(logging.WARNING, logger="lib.control.limit_monitor"):
+            await rig.monitor.step()
+
+        assert rig.sent["sub_lift"] == []
+        assert rig.monitor.intervention("sub_lift").count == 0
+        # 飛ばすのであって、例外で落ちるのではない (毎周期の Traceback は本物の異常を埋める)
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+    async def test_コート非依存軸の保護は生きている(self) -> None:
+        rig = _CourtRig()
+        rig.sensors["rear_switch"] = True
+        await rig.command("sub_y_axis", -10.0)
+
+        await rig.monitor.step()
+
+        assert rig.sent["sub_y_axis"] == [pytest.approx(0.0)]
+        assert rig.monitor.intervention("sub_y_axis").count == 1
+
+    async def test_警告は軸ごとに1度だけ(self, caplog: pytest.LogCaptureFixture) -> None:
+        rig = _CourtRig()
+        await rig.command("sub_lift", -10.0)
+
+        with caplog.at_level(logging.WARNING, logger="lib.control.limit_monitor"):
+            await rig.monitor.step()
+            await rig.monitor.step()
+            await rig.monitor.step()
+
+        held = [r for r in caplog.records if "コートが未確定" in r.getMessage()]
+        assert len(held) == 1
+
+    async def test_コートが決まれば監視に戻る(self) -> None:
+        rig = _CourtRig()
+        rig.sensors["top_switch"] = True
+        await rig.command("sub_lift", -10.0)
+        await rig.monitor.step()
+
+        rig.court = Court.RED
+        await rig.monitor.step()
+
+        assert rig.sent["sub_lift"] == [pytest.approx(0.0)]
+        assert rig.monitor.intervention("sub_lift").count == 1

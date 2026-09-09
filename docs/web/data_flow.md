@@ -153,6 +153,11 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 `parseExcludedSteps` / `parseMotorCheckSteps` / `parseSensors` / `parseManual` / `parseSuction` /
 `readMeasured` / `readCommand` / `parseEnum`。
 
+**`match_state.court` も 3 値を区別する。** `null` は**コート未確定**（操縦者がまだ選んでいない、
+正常な試合前の状態）で `MALFORMED` ではない。`parseEnum` に素通しすると `null` が `MALFORMED` へ
+潰れ、3 画面が正常な試合前状態を「壊れている」と表示する。ラベルと色は `courtLabel()` /
+`courtTone()`（`web/src/lib/phase.ts`）が持ち、未確定は中立色の「コート未設定」。
+
 **`state.suction` は 3 値を区別する。** `null` は「このロボットに吸着パッドが無い」
 （パネルを描かない）、欠落（`undefined`）は「古いサーバー」（同じく描かない）、`pads[]` の
 どれかが `axis` / `label` / `enabled` を欠けば `MALFORMED`（操作を出さず「読み取れませんでした」）。

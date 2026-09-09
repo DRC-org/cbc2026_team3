@@ -8,7 +8,7 @@ import { useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useArmedPress } from "@/hooks/useArmedPress";
 import { cx } from "@/lib/cx";
 import { evaluateHealth } from "@/lib/healthVerdict";
-import { COURT_LABEL, COURT_TONE } from "@/lib/phase";
+import { courtLabel, courtTone } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
 import { ROBOTS } from "@/lib/robots";
 import type { Tone } from "@/lib/tone";
@@ -108,8 +108,8 @@ export function StartGate({ onStart }: { onStart: () => void }) {
           </span>
           {armed ? (
             <span className="text-base-content/70">
-              <span className={cx("font-medium", TONE_TEXT_CLASS[COURT_TONE[court]])}>
-                {COURT_LABEL[court]}
+              <span className={cx("font-medium", TONE_TEXT_CLASS[courtTone(court)])}>
+                {courtLabel(court)}
               </span>{" "}
               で試合を開始します。各操縦者が自分のタブで START
               を押すまで機体は動きません。周囲の安全を確認してください。

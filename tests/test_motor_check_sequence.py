@@ -348,6 +348,7 @@ class TestShippedRunThrough:
     async def test_全ステップが拒否されずに通る(self) -> None:
         table = _shipped_table()
         seq = MotorCheckSequence(available_axes=table.axes)
+        seq.set_court(Court.RED)
         mgr = MagicMock()
         mgr.send = AsyncMock()
         group = MotorGroup(sensor_active=lambda _name: False)

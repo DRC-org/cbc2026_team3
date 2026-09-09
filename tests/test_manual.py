@@ -295,8 +295,17 @@ class TestAxesInfo:
             {"name": "closed", "value": 0.0},
         ]
 
+    def test_コート未確定ならコート別の位置は値を出さない(self) -> None:
+        # 「引けなかった」を片方のコートの値で埋めると、選び忘れが画面から読めない
+        manual, _, _ = _build()
+        assert self._by_name(manual)["y_axis"]["positions"][2] == {
+            "name": "place",
+            "value": None,
+        }
+
     def test_コート別の位置は現在のコートの値で載る(self) -> None:
         manual, _, _ = _build()
+        manual.set_court(Court.RED)
         assert self._by_name(manual)["y_axis"]["positions"][2] == {
             "name": "place",
             "value": 3.0,

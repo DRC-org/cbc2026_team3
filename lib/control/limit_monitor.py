@@ -58,7 +58,7 @@ __all__ = ["DEFAULT_INTERVAL_S", "LimitMonitor"]
 
 DEFAULT_INTERVAL_S = 0.02
 
-CourtSource = Callable[[], "Court"]
+CourtSource = Callable[[], "Court | None"]
 SleepFunc = Callable[[float], Awaitable[None]]
 #: 接触 (OFF→ON) の累計。**単調増加で読んでも減らない**ので読み手が何人いても壊れない。
 #: `None` = カウンタを提供しないドライバ (零点確定の `SensorContactCount` と同じ約束)
@@ -93,6 +93,7 @@ class LimitMonitor(PeriodicTask):
         # 読む零点確定のぶんを消さない)。周期ごとに 1 度だけ進めるので二重に数えない
         self._contact_baseline: dict[str, int] = {}
         self._contacted: set[str] = set()
+        self._unresolved_warned: set[str] = set()
 
     @property
     def axis_names(self) -> tuple[str, ...]:
@@ -150,7 +151,13 @@ class LimitMonitor(PeriodicTask):
         return bool(active) or name in self._contacted
 
     async def _check_axis(self, axis: str) -> None:
-        spec = self._positions.axis(axis).for_court(self._court())
+        court = self._court()
+        spec = self._positions.axis(axis)
+        if court is None and spec.court_dependent:
+            self._warn_unresolved(axis)
+            return
+        self._unresolved_warned.discard(axis)
+        spec = spec.for_court(court)
         handles = [self._motors[name] for name in spec.motor_names]
         handle = AxisHandle(spec, handles, sensor_active=self._sensor_state)
 
@@ -171,6 +178,18 @@ class LimitMonitor(PeriodicTask):
             await self._stop_here(axis, spec, handle, observed_commands, exc)
             return
         self._stopped.pop(axis, None)
+
+    def _warn_unresolved(self, axis: str) -> None:
+        """コート未確定の軸は監視できない。**保護の穴にはならない。**
+
+        コートが決まるまでこの軸へは指令が 1 通も通らない (指令の入口が
+        `CourtUnresolvedError` で落ちる) ので、監視する動きがそもそも無い。
+        毎周期の例外にすると本物の異常がログから読めなくなる。
+        """
+        if axis in self._unresolved_warned:
+            return
+        self._unresolved_warned.add(axis)
+        self._logger.warning("可動端監視を保留: 軸 %s はコートが未確定です", axis)
 
     def _commanded_value(self, spec: AxisSpec, handles: list[MotorHandle]) -> float | None:
         commands: dict[str, float] = {}

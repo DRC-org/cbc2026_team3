@@ -81,7 +81,7 @@
           ]
         }
       },
-      "court": "red",
+      "court": null,
       "phase": "setup",
       "timer": {
         "duration_ms": 180000,

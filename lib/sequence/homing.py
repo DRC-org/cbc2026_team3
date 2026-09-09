@@ -840,7 +840,7 @@ def homing_order(table: PositionTable, axes: Collection[str]) -> list[str]:
 
 
 def _axis_handle(
-    table: PositionTable, motors: MotorGroup, axis: str, court: Court
+    table: PositionTable, motors: MotorGroup, axis: str, court: Court | None
 ) -> tuple[AxisSpec, AxisHandle]:
     spec = table.axis(axis).for_court(court)
     return spec, AxisHandle(
@@ -858,7 +858,7 @@ async def measure_switch(
     table: PositionTable,
     motors: MotorGroup,
     *,
-    court: Court,
+    court: Court | None,
     axis: str,
     direction: float,
     step: float | None = None,
@@ -878,7 +878,7 @@ async def run_homing(
     table: PositionTable,
     motors: MotorGroup,
     *,
-    court: Court,
+    court: Court | None,
     axes: Collection[str] | None = None,
     move_to: MoveTo | None = None,
     on_axis: Callable[[str], Awaitable[None]] | None = None,
@@ -950,7 +950,7 @@ async def _home_each(
     runner: HomingRunner,
     table: PositionTable,
     motors: MotorGroup,
-    court: Court,
+    court: Court | None,
     axes: list[str],
     on_axis: Callable[[str], Awaitable[None]] | None,
     on_result: Callable[[AxisHomingResult], Awaitable[None]] | None,

@@ -16,7 +16,7 @@ from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.health import HealthSnapshot
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court, MatchState
 from lib.sequence.engine import Sequence
 from lib.server import _ENERGIZE_GRACE_S, _FIRMWARE_INFO_GRACE_S, RobotServer
 from lib.suction import SuctionSelection
@@ -177,6 +177,9 @@ class ServerFixture:
             self.match.set_checklist_item(role, item.id, True)
 
     def complete_all_checklists(self) -> None:
+        # コート未確定のあいだ can_start_match は偽なので、選ぶのが先。
+        # 指差喚呼より前に置くのは set_court が「変化」としてリセットを走らせるため
+        self.match.set_court(Court.RED)
         for role in self.match.checklists:
             self.complete_checklist(role)
 

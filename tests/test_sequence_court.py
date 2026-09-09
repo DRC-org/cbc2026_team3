@@ -31,9 +31,9 @@ class CourtAwareSequence(Sequence):
 
 
 class TestCourt:
-    def test_default_court_is_red(self) -> None:
+    def test_default_court_is_unresolved(self) -> None:
         seq = CourtAwareSequence()
-        assert seq.court is Court.RED
+        assert seq.court is None
 
     def test_set_court(self) -> None:
         seq = CourtAwareSequence()

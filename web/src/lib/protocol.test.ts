@@ -532,6 +532,10 @@ describe("parseServerMessage", () => {
       expect(matchStateOf(payload)[key]).toBe(MALFORMED);
     });
 
+    it("court の null は未確定として通す (MALFORMED へ潰さない)", () => {
+      expect(matchStateOf({ ...base, court: null, phase: "setup" }).court).toBeNull();
+    });
+
     it("欠落も MALFORMED にする", () => {
       expect(matchStateOf(base).court).toBe(MALFORMED);
       expect(matchStateOf(base).phase).toBe(MALFORMED);

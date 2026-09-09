@@ -145,7 +145,7 @@ class Sequence:
         self._resume_event: asyncio.Event = asyncio.Event()
         self._jump_request: int | None = None
         self._last_error: StepFailure | None = None
-        self._court: Court = Court.RED
+        self._court: Court | None = None
         self._motors: MotorGroup | None = None
         self._positions: PositionTable | None = None
         self._available_axes: frozenset[str] | None = None
@@ -311,10 +311,15 @@ class Sequence:
             )
 
     @property
-    def court(self) -> Court:
+    def court(self) -> Court | None:
+        """解決に使うコート。**選ばれるまでは `None`。**
+
+        既定を赤にすると、青コートで選び忘れたことがどこにも現れないまま
+        コート依存軸だけが鏡に走る。
+        """
         return self._court
 
-    def set_court(self, court: Court) -> None:
+    def set_court(self, court: Court | None) -> None:
         self._court = court
 
     @property

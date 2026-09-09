@@ -270,7 +270,8 @@ export interface MatchTimer {
 }
 
 export interface MatchState {
-  court: MatchCourt | Malformed;
+  /** `null` はコート未確定。**選ばれていないだけで、壊れた配信ではない。** */
+  court: MatchCourt | null | Malformed;
   phase: MatchPhase | Malformed;
   can_start_match: boolean;
   checklists: Record<string, ChecklistState> | Malformed;
@@ -607,7 +608,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
       return {
         type: "match_state",
         matchState: {
-          court: parseEnum(raw.court, MATCH_COURTS),
+          court: raw.court === null ? null : parseEnum(raw.court, MATCH_COURTS),
           phase: parseEnum(raw.phase, MATCH_PHASES),
           can_start_match: Boolean(raw.can_start_match),
           checklists: parseChecklists(raw.checklists),

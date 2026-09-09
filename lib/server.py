@@ -241,6 +241,8 @@ class RobotServer:
         self._switch_measure.set_source(source)
 
     def _apply_court(self) -> None:
+        # 未確定 (None) もそのまま押し下げる。飛ばすと試合をリセットした後も
+        # 前の試合のコートが各層に残り、解決済みのまま動いてしまう
         self._motor_check.set_court(self.match.court)
         for ctx in self._robots.values():
             ctx.sequence.set_court(self.match.court)
@@ -850,7 +852,7 @@ class RobotServer:
 
         self._failed_tasks.clear()
 
-        logger.info("試合開始: court=%s", self.match.court.value)
+        logger.info("試合開始: court=%s", court.value if (court := self.match.court) else "?")
 
         await self._broadcast_match_state()
 

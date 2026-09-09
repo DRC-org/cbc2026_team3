@@ -588,6 +588,7 @@ class TestShippedPositionYaml:
     ) -> None:
         table = _load_shipped(yaml_name)
         seq = sequence_cls()
+        seq.set_court(Court.RED)
         group, _ = _recording_group(_motor_names(table))
         _bind_axis_state(group, table, seq)
         seq.bind_motors(group)

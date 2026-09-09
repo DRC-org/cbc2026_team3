@@ -21,7 +21,7 @@ class HomingSource:
     table: PositionTable
     motors: MotorGroup
     #: 毎回問い直す。コートで探索の向きが鏡になるので、起動時に固めると切り替えに追従しない
-    court: Callable[[], Court]
+    court: Callable[[], Court | None]
     axes_by_robot: Mapping[str, tuple[str, ...]]
     #: 位置名で軸を寄せる口。**`guard.requires` の参照先が今回選ばれていれば**、
     #: 零点確定の前にそこへ寄せる (`run_homing`)。配線しないと寄せずに拒否させる

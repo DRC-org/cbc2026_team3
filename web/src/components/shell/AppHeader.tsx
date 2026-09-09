@@ -6,7 +6,7 @@ import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
-import { COURT_LABEL, COURT_TONE, PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE } from "@/lib/phase";
+import { PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE, courtLabel, courtTone } from "@/lib/phase";
 import { TONE_STATUS_CLASS } from "@/lib/tone";
 
 function wsHostLabel(url: string): string {
@@ -54,7 +54,7 @@ export function AppHeader() {
 
           <div className="flex shrink-0 items-center gap-1.5">
             <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
-            <StatusBadge tone={COURT_TONE[court]}>{COURT_LABEL[court]}</StatusBadge>
+            <StatusBadge tone={courtTone(court)}>{courtLabel(court)}</StatusBadge>
           </div>
         </div>
       </div>

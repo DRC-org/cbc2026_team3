@@ -377,8 +377,13 @@ class AxisSpec:
     def court_dependent(self) -> bool:
         return any(isinstance(motor, CourtMotorSpec) for motor in self.motors)
 
-    def for_court(self, court: Court) -> AxisSpec:
-        if not self.court_dependent:
+    def for_court(self, court: Court | None) -> AxisSpec:
+        """コートを解決した spec。**未確定 (`None`) なら解決せずに返す。**
+
+        未確定を黙って片方のコートへ倒さないことで、コート依存軸だけが
+        `require_resolved` で落ち、非依存軸は今までどおり通る。
+        """
+        if court is None or not self.court_dependent:
             return self
         return replace(
             self,
