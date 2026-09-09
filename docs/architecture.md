@@ -888,7 +888,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `config/<robot>.yaml` | そのロボットのモータ構成（`robot_name` / `motors` / `sensors`） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲・`motion` / `homing` / `sync_*` |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ用の一式（8 セット） |
+| `config/bench/<対象>/` | 机上ベンチ用の一式（10 セット） |
 
 パスは `--system` / `--config`（複数可）/ `--checklist` で差し替えられる。
 位置定数の読み先は「robot config と同じディレクトリの `<robot_name>_positions.yaml`」
@@ -1059,7 +1059,7 @@ uv run python main.py --system config/bench/<対象>/system.yaml \
 （`y_axis` / `rotate`）同時に監視される状態 / `can_id` が両バスで 1・2 と重なっていても
 衝突しないこと。
 
-**8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る** —— ①system /
+**10 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る** —— ①system /
 robot / positions / checklist が揃っていて読めること ②登録したモータが**すべて**位置定数から
 指令できること ③開くバスがそのセットで使うものだけであること ④**同梱のディレクトリが漏れなく
 `_BENCH_DIRS` に載っていること**（`test_every_shipped_bench_dir_is_covered`）⑤本番 config を
@@ -1539,7 +1539,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 
 | 課題 | 現状 |
 |---|---|
-| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドはほぼ全部** |
+| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドの直動 2 軸**（サーボ 3 軸は 2026-09-10 に実測済み。可動域だけ全域のまま） |
 | M3508 の位置制御の一部が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は 150mm で取り直し済みだが、**短距離（15mm）での `sync_kp` の取り直しが残る**（最適値が振幅で変わる軸である） |
 | 低速域のスティックスリップが未観測 | 予測であって観測ではない。対抗手段は `ki`（既に 10）と `velocity_ff`。静摩擦補償は今回スコープ外 |
 | PID ゲインと `velocity_ff` は実行中に変更できず UI にも配信されない | 調整は config 変更 + 再起動。`pid.kd` と `motion.velocity_ff` は 2 つの yaml にまたがる対 |
