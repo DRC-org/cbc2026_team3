@@ -104,12 +104,27 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 | `Play` | START（先頭から） | `ActionPanel` / `StartGate` |
 | `ArrowRight` | NEXT（続けて走る） | `TriggerButton` / `ActionPanel` |
 | `Square` | 停止（STOP・中断） | `ActionPanel` / `MatchStrip` / `MotorCheckPanel` |
-| `Check` | 完了 | `TriggerButton` / `ChecklistItems` |
+| `Check` | 完了 | `TriggerButton` / `SequenceStepList` / `MatchPrep` / `MotorCheckPanel` / `HomingPanel` |
 | `Ban` | 操作不可 | `TriggerButton` / `ActionPanel` |
 | `RotateCcw` | やり直し・解除 | `MatchControl` / `MatchPrep` / `EStopOverlay` / `EStopBanner` |
 | `EyeOff` | 開発用の非表示（`--dev-tools` 時だけ現れる） | `EStopOverlay` |
+| `Zap` | 開発用の一括チェック（同上） | `MatchPrep` |
+| `Activity` | 動作確認の起動 | `MotorCheckButton` |
+| `Crosshair` | 零点合わせの起動 | `HomingButtons` |
+| `Ruler` | 作動点測定の起動 | `SwitchMeasurePanel` |
+| `Send` | 絶対値入力の送信 | `AbsoluteEntry` |
+| `Minus` / `Plus` · `ChevronsLeft` / `ChevronsRight` | ジョグ · 可動端へ | `ContinuousControls` |
+| `Pause` / `Circle` | ステップ一覧の 許可待ち / 未到達 | `SequenceStepList` |
 | `TriangleAlert` | 警告 | 各所 |
+| `OctagonAlert` | `error` トースト | `Toaster` |
+| `CircleAlert` / `CircleHelp` / `Info` | 開始できない理由 / 押せない理由 / 補足 | `StartGate` / `MotorCheckButton` / `MatchPrep` |
+| `ShieldAlert` / `ShieldQuestion` / `PackageX` / `ListX` | 安全機構の異常 / 版番号未確認 / ワーク落下の恐れ / タスク失敗 | `SubsystemStatus` |
+| `ListMinus` | 除外ステップ | `MotorCheckPanel` |
+| `X` | 軸の失敗 / 通知を閉じる | `HomingPanel` / `Toaster` |
 | `ChevronDown` / `ChevronRight` | 開閉 | `SubsystemStatus` / `MotorCheckPanel` |
+
+**`X` と `ChevronRight` は 2 つの意味を持ってしまっている**（`ChevronRight` はステップ一覧の
+「現在」の印にも使っている）。新しく足すときにこの 2 つへ寄せない。
 
 `Hand` はかつて手動操縦にも使っており、**試合中に手のアイコンを見てもトリガー待ちか手動操縦か
 判別できなかった**。`Play` と `ArrowRight` も同じ理由で分ける（同じ位置に同じ大きさで交互に
@@ -192,7 +207,7 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 | 取り方 | 使う操作 | 理由 |
 |---|---|---|
 | **二度押し**（`useArmedPress`） | 試合開始（`StartGate`）/ 試合終了（`MatchStrip`） | 計時の開始点と、残り時間との勝負の最後。ダイアログは押したボタンから離れた位置に出るので往復が挟まる。この 2 つだけその数百 ms を払わない |
-| **モーダル** | 動作確認の起動 / 準備中の RESET / 先頭から再開 / ステップジャンプ | 押した瞬間に機体が動く、または取り返しの付かないものを捨てる。**準備中なので時間の余裕がある** |
+| **モーダル** | 動作確認の起動 / 零点合わせ / 作動点測定 / 準備中の RESET / 先頭から再開 / ステップジャンプ | 押した瞬間に機体が動く、または取り返しの付かないものを捨てる。**準備中なので時間の余裕がある** |
 | **確認なし** | 通常停止（STOP）/ 試合後の「セッティングへ戻る」 | 前者は安全側の動作で止めるまでの時間を延ばさない。後者は試合後の唯一の進み先で、失うのは消化済みのチェックリストだけ |
 
 ### 二度押しの内訳
@@ -213,7 +228,9 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 
 **モーダルの中身は「押すと何が起きるか」を書く場所**であって飾りではない。
 `MotorCheckButton` が「**両機**の可動範囲に人・物がないこと」と書くのは、動くのが両機だから。
-文面が古いままだと操縦者は片方の機体しか見ずに開始する。
+文面が古いままだと操縦者は片方の機体しか見ずに開始する。逆に `HomingButtons` /
+`SwitchMeasurePanel` は「**○○だけ**を動かします」と宛先のロボット（作動点測定は軸と向きも）を
+名指しする —— 動くのが片方だけなので、言わないと別の機体を見張ったまま開始する。
 
 ---
 
