@@ -96,7 +96,7 @@ class TestFinalPosture:
     async def test_最後は両ハンドを初期姿勢へ戻す(self) -> None:
         calls = await _collect()
 
-        assert calls[-1] == {**MAIN_HOME, **SUB_HOME}
+        assert calls[-1] == {**MAIN_HOME, **SUB_HOME, "conveyor": "stop"}
 
     async def test_駆動しっぱなしの軸を残さない(self) -> None:
         last: dict[str, str] = {}
@@ -198,6 +198,7 @@ class TestConstantsHaveASingleOwner:
         assert VALVE_AXES is sub_hand.VALVE_AXES
 
     async def test_メインハンドは同じ初期姿勢へ往復する(self) -> None:
+        """行きと帰りで同じ MAIN_HOME を使う。末尾の 1 回は試合の終わりにコンベアを止める分。"""
         seq = main_hand.MainHandSequence()
         calls: list[dict[str, str]] = []
 
@@ -208,7 +209,7 @@ class TestConstantsHaveASingleOwner:
         await seq.move_to_home()
         await seq.return_home()
 
-        assert calls == [MAIN_HOME, MAIN_HOME]
+        assert calls == [MAIN_HOME, MAIN_HOME, {"conveyor": "stop"}]
 
     def test_ステップの宣言軸は初期姿勢と電磁弁から導かれる(self) -> None:
         declared = {axis for info in MotorCheckSequence("x").steps for axis in info.axes}
@@ -266,9 +267,10 @@ class TestPartialConfiguration:
     async def test_最後は存在する軸だけを初期姿勢へ戻す(self) -> None:
         available = set(_main_hand_axes())
         calls = await _collect(available)
+        restored = {**MAIN_HOME, "conveyor": "stop"}
 
-        assert calls[-1] == {axis: pos for axis, pos in MAIN_HOME.items() if axis in available}
-        assert calls[-1] == MAIN_HOME, "メインハンドの初期姿勢が欠けている"
+        assert calls[-1] == {axis: pos for axis, pos in restored.items() if axis in available}
+        assert calls[-1] == restored, "メインハンドの初期姿勢が欠けている"
 
     def test_軸が一本も無ければ指令するステップが残らない(self) -> None:
         seq = MotorCheckSequence(available_axes=[])
