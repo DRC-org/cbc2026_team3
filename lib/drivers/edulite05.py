@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import struct
 from enum import IntEnum, IntFlag
@@ -8,6 +9,8 @@ from typing import ClassVar
 import can
 
 from lib.drivers.base import ControlMode, MotorDriver, MotorState
+
+logger = logging.getLogger(__name__)
 
 
 class Edulite05RunMode(IntEnum):
@@ -31,6 +34,9 @@ class Edulite05Fault(IntFlag):
     MAG_ENCODER = 8
     HALL = 16
     UNCALIBRATED = 32
+
+
+_TURN = 2.0 * math.pi
 
 
 class Edulite05Driver(MotorDriver):
@@ -61,6 +67,7 @@ class Edulite05Driver(MotorDriver):
         ControlMode.VELOCITY: Edulite05RunMode.VELOCITY,
         ControlMode.CURRENT: Edulite05RunMode.CURRENT,
     }
+    _U8_PARAMS: ClassVar[frozenset[int]] = frozenset({PARAM_RUN_MODE})
     _TARGET_PARAM: ClassVar[dict[ControlMode, int]] = {
         ControlMode.POSITION: PARAM_LOC_REF,
         ControlMode.VELOCITY: PARAM_SPD_REF,
@@ -97,6 +104,18 @@ class Edulite05Driver(MotorDriver):
         self.set_zero_on_start = bool(set_zero_on_start)
         self.mode_state: int | None = None
         self.fault_bits = Edulite05Fault.NONE
+
+        self._origin_offset = 0.0
+        self._origin_captured = False
+        # 暫定原点と零点確定は別の軸で見る。前者はその場の姿勢を論理 0 にするだけで
+        # 機構原点と無関係なので、可動域による一意化の前提が立たない
+        self._origin_homed = False
+        self._target_clamped = False
+        self._prev_raw_position: float | None = None
+        self._wrap_turns = 0
+        self._travel_range: tuple[float, float] | None = None
+        self._travel_fallback_logged = False
+        self._outside_travel = False
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -145,16 +164,219 @@ class Edulite05Driver(MotorDriver):
     def encode_run_mode(self, mode: Edulite05RunMode | int) -> can.Message:
         return self.encode_write_param_u8(self.PARAM_RUN_MODE, int(mode))
 
+    def encode_read_param(self, param_id: int) -> can.Message:
+        return self._message(self.COMM_TYPE_READ_PARAM, struct.pack("<Hxxxxxx", param_id))
+
+    def matches_read_param(self, msg: can.Message) -> bool:
+        if not msg.is_extended_id or len(msg.data) != 8:
+            return False
+        comm_type, data_area2, dest_id = self.parse_can_id(msg.arbitration_id)
+        return (
+            comm_type == self.COMM_TYPE_READ_PARAM
+            and (data_area2 & 0xFF) == self.can_id
+            and dest_id == self.host_id
+        )
+
+    def decode_read_param(self, msg: can.Message) -> tuple[int, float | int]:
+        """パラメータ応答を (param_id, 値) にほどく。
+
+        応答フレームは値の型を載せないので、float 4byte と uint8 1byte のどちらで
+        詰まっているかはパラメータ ID から決めるしかない。
+        """
+        if not self.matches_read_param(msg):
+            raise ValueError("対象モータの EDULITE 05 パラメータ応答ではありません")
+        param_id = struct.unpack_from("<H", msg.data)[0]
+        if param_id in self._U8_PARAMS:
+            return param_id, msg.data[4]
+        return param_id, struct.unpack_from("<f", msg.data, 4)[0]
+
+    @property
+    def origin_offset(self) -> float:
+        """論理 0 が指す連続化後の生角度 [rad]。ログと診断のための読み出し口。"""
+        return self._origin_offset
+
+    @property
+    def travel_range(self) -> tuple[float, float] | None:
+        """軸の機械的可動域 [rad]。設定されていなければ None。診断のための読み出し口。"""
+        return self._travel_range
+
+    def set_travel_range(self, min_command: float, max_command: float) -> None:
+        if not (math.isfinite(min_command) and math.isfinite(max_command)):
+            raise ValueError("可動域は有限の値で指定してください")
+        if min_command >= max_command:
+            raise ValueError(
+                "可動域は min < max で指定してください "
+                f"({min_command} >= {max_command})。scale が負のモータでは"
+                "軸の min/max が入れ替わるので、整列してから渡すこと"
+            )
+        self._travel_range = (min_command, max_command)
+        if max_command - min_command >= _TURN:
+            self._log_travel_fallback("可動域が 1 回転以上あり等価表現が 1 つに決まらない")
+
+    def _log_travel_fallback(self, reason: str) -> None:
+        """一意化できない構成を 1 回だけ残す。**毎フレーム出してはならない。**"""
+        if self._travel_fallback_logged:
+            return
+        self._travel_fallback_logged = True
+        logger.warning(
+            "EDULITE 05 の回転数を可動域から一意に決められません (motor=%s, 理由=%s)。"
+            "電文の差分による連続化を続けます —— 電源断のあいだに軸が半回転以上"
+            "動かされると 1 回転ぶん誤って読みます",
+            self.name,
+            reason,
+        )
+
+    def _uniquify_wrap(self, raw: float) -> bool:
+        """論理角が可動域の中心に最も近くなる回転数を選ぶ。選べたら True。
+
+        可動域が 1 回転未満なら等価表現は 1 つしかないので、直前の電文を見なくても
+        回転数が決まる。可動域を少し外れた姿勢でも最も近い表現が選ばれる。
+
+        **零点確定で原点が確定しているときだけ使える。** 暫定原点は機構原点と
+        無関係なので、可動域と論理角が対応しない。
+        """
+        if not self._origin_homed:
+            # 暫定原点のあいだは一意化そのものが成り立たないので、記録もしない
+            return False
+        if self._travel_range is None:
+            self._log_travel_fallback("軸の機械的可動域 (axes.<軸>.travel) が設定されていない")
+            return False
+        low, high = self._travel_range
+        if high - low >= _TURN:
+            return False
+
+        center = 0.5 * (low + high)
+        self._wrap_turns = round((center - (raw - self._origin_offset)) / _TURN)
+        logical = raw + self._wrap_turns * _TURN - self._origin_offset
+        self._note_travel_excursion(logical, low, high)
+        return True
+
+    def _note_travel_excursion(self, logical: float, low: float, high: float) -> None:
+        outside = not low <= logical <= high
+        # 端に留まると 20Hz で同じ行が流れ続けるので、外れた瞬間だけ残す
+        if outside and not self._outside_travel:
+            logger.warning(
+                "EDULITE 05 の論理位置が可動域の外にあります "
+                "(motor=%s, 位置=%.4frad, 可動域=%.4f..%.4frad)。"
+                "機構が想定外の場所にあるか config が実機と食い違っています",
+                self.name,
+                logical,
+                low,
+                high,
+            )
+        self._outside_travel = outside
+
+    def _track_wrap(self, raw: float) -> None:
+        """電文値が [0, 360) へ畳まれた跳びを回転数で吸収する。
+
+        電源投入のたびに位置の報告値は [0, 360) へ畳み直される。`rotate` は
+        `scale` が逆の 2 台の対で、片側は論理角が正であるかぎり生値が負になり
+        電源断のたびに +360deg される。左右に 1 回転の差が生まれ、`SyncMonitor`
+        が解除のたびに全体緊急停止を掛け直す。
+
+        可動域が渡されていれば回転数はそこから一意に決まる。渡されていない
+        (あるいは 1 回転以上ある) ときの差分アンラップは「2 つの電文のあいだに軸が
+        半回転以上動かない」ことに立っており、**可動端がちょうど半回転にある軸は
+        その境界で符号を取り違える**。電源断を跨ぐ窓は `rotate` が無励磁で自重で
+        回らないこと (指差喚呼 `rotate_holds`) が人の手で担保する。
+        """
+        if not self._uniquify_wrap(raw) and self._prev_raw_position is not None:
+            diff = raw - self._prev_raw_position
+            if diff > math.pi:
+                self._wrap_turns -= 1
+            elif diff < -math.pi:
+                self._wrap_turns += 1
+        self._prev_raw_position = raw
+
+    def _continuous_position(self) -> float:
+        """電文値を連続化した生角度 [rad]。原点も指令もこの座標で持つ。"""
+        return self._state.position + self._wrap_turns * _TURN
+
+    def has_local_origin(self) -> bool:
+        return True
+
+    def establish_provisional_origin(self) -> bool:
+        """起動時に暫定原点を控える。**`SET_ZERO` は 1 通も送らない。**
+
+        左右の機械ゼロは実機で 175.879deg 違い、逆回転ペアなので物理的に同じ姿勢でも
+        論理値へ直した時点で差になる。暫定原点が無いと起動直後から `SyncMonitor` が
+        全体緊急停止を掛け、零点確定にたどり着く手前で機体が 1 ステップも動かせない。
+
+        零点確定でも `_origin_captured` が立つので、正確な原点を後から上書きしない。
+        """
+        if not self.set_zero_on_start or self._origin_captured:
+            return False
+        if self.mode is not ControlMode.POSITION:
+            return False
+        self._capture_origin(homed=False)
+        return True
+
+    def capture_origin_here(self) -> None:
+        """今の連続化後の生角度を論理原点として控える。**CAN へは 1 通も出さない。**
+
+        原点をモータ側の `SET_ZERO` で切り直すと生座標そのものが付け替わり、切り直しの
+        前後で測った値が混ざる。`rotate` は逆回転ペアで左右の機械ゼロが 175.879deg 違い、
+        混ざれば `SyncMonitor` が全体緊急停止を掛ける。PC 側で持てば生座標は動かない。
+
+        控えるのは電文値ではなく連続化後の値である。電文値で控えると、電源投入で
+        [0, 360) へ畳まれた後に控え直した瞬間、回転数ぶんの論理位置が生える。
+        """
+        self._capture_origin(homed=True)
+
+    def _capture_origin(self, *, homed: bool) -> None:
+        raw = self._continuous_position()
+        # 電源断で機構が動いたかどうかを知る材料はここにしか出ない。
+        logger.info(
+            "EDULITE 05 の原点を控えました (motor=%s, 生角度=%.4frad, "
+            "直前の原点との差=%+.4frad, 控え直し=%s)",
+            self.name,
+            raw,
+            raw - self._origin_offset,
+            self._origin_captured,
+        )
+        self._origin_offset = raw
+        self._origin_captured = True
+        self._origin_homed = self._origin_homed or homed
+
+    def feedback_position(self) -> float:
+        """論理位置 [rad]。`state.position` は電文どおりの生値のまま残す。"""
+        return self._continuous_position() - self._origin_offset
+
+    def _clamp_target(self, mode: ControlMode, requested: float, lo: float, hi: float) -> float:
+        clamped = self._clamp(requested, lo, hi)
+        if clamped != requested:
+            # 20Hz の再送が端に張り付いた同じ指令を送り続けるので、変化の瞬間だけ残す。
+            if not self._target_clamped:
+                logger.warning(
+                    "EDULITE 05 の目標値がレンジ端で頭打ちになりました "
+                    "(motor=%s, mode=%s, 生値 %.4f → %.4f, 原点オフセット=%.4frad)",
+                    self.name,
+                    mode.name,
+                    requested,
+                    clamped,
+                    self._origin_offset,
+                )
+            self._target_clamped = True
+        else:
+            self._target_clamped = False
+        return clamped
+
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        """`value` は**論理**座標。生値へ直してから書く。"""
         param_id = self._TARGET_PARAM.get(mode)
         if param_id is None:
             raise ValueError(f"Edulite05Driver は {mode} モードをサポートしていません")
         if mode is ControlMode.POSITION:
-            value = self._clamp(value, self.POS_MIN, self.POS_MAX)
+            # `POS_MIN`/`POS_MAX` は uint16 の写像レンジであって機構の可動域ではない。
+            # 論理値でクランプすると、オフセットを足した生値がレンジ外へ出て折り返す。
+            # モータは畳まれた電文座標に居るので、連続化に足した回転数を引いて戻す。
+            # 引かずに送ると、モータは指令を 1 回転ぶんの移動として実行する。
+            raw = value + self._origin_offset - self._wrap_turns * _TURN
+            value = self._clamp_target(mode, raw, self.POS_MIN, self.POS_MAX)
         elif mode is ControlMode.VELOCITY:
-            value = self._clamp(value, -self.limit_speed, self.limit_speed)
+            value = self._clamp_target(mode, value, -self.limit_speed, self.limit_speed)
         else:
-            value = self._clamp(value, -self.limit_current, self.limit_current)
+            value = self._clamp_target(mode, value, -self.limit_current, self.limit_current)
         return self.encode_write_param_float(param_id, value)
 
     def encode_enable(self) -> can.Message:
@@ -164,6 +386,12 @@ class Edulite05Driver(MotorDriver):
         return self._message(self.COMM_TYPE_DISABLE, bytes([int(clear_fault)]) + bytes(7))
 
     def encode_set_zero(self) -> can.Message:
+        """モータ側の零点を切り直すフレーム。**自動の経路からは 1 通も出さない。**
+
+        生の座標系そのものを付け替える操作なので、PC 側の原点オフセットと併用すると
+        原点が二重定義になる。残してあるのは調査ツール
+        (`scripts/edulite_origin_probe.py`) のためだけである。
+        """
         return self._message(self.COMM_TYPE_SET_ZERO, b"\x01" + bytes(7))
 
     def encode_set_id(self, new_can_id: int) -> can.Message:
@@ -176,14 +404,19 @@ class Edulite05Driver(MotorDriver):
         )
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
-        """起動時だけ送る。**`reinitialization_steps()` は宣言しない。**
+        """起動時に送る手順。**再励磁と 1 通も違わない。**
 
-        本機で「電源断で設定が出荷値へ戻る」現象は観測されていない (DM3520 では
-        実機で踏んだので、あちらは再励磁のたびに `CTRL_MODE` を書き直す)。
-        観測されたら `run_mode` / `limit_*` / `position_kp` をそちらへ移すこと ——
-        ただし **`set_zero` は移してはならない**。再励磁のたびに送ると、零点確定で
-        合わせた原点をその場の姿勢へ書き換える (`rotate_r` / `rotate_l` は
-        `set_zero_on_start: true`)。
+        原点は PC 側のオフセットだけが持つので、CAN へ出す設定はどちらの経路でも
+        同じである。分けて書くと片方だけ直された状態が作れる。
+        """
+        return self.reinitialization_steps()
+
+    def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
+        """無励磁化 → 設定の書き込み。**電源断で失われるぶんだけ。**
+
+        `run_mode` / `limit_spd` / `limit_cur` / `loc_kp` はどれも `WRITE_PARAM`
+        (0x12) で書く。マニュアルの type 18 は "lost after power failure" なので、
+        物理非常停止で電源が落ちた個体は**位置モードですらない**状態で立ち上がる。
         """
         steps = [
             (self.encode_disable(), 0.05),
@@ -193,16 +426,14 @@ class Edulite05Driver(MotorDriver):
         ]
         if self.mode is ControlMode.POSITION:
             steps.append((self.encode_write_param_float(self.PARAM_LOC_KP, self.position_kp), 0.05))
-        if self.set_zero_on_start:
-            steps.append((self.encode_set_zero(), 0.2))
         return steps
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
-        hold = (
-            self._state.position
-            if self.mode is ControlMode.POSITION and not after_set_zero
-            else 0.0
-        )
+        """保持目標は論理座標の実測位置。**`after_set_zero` の有無で変わらない** ——
+        生座標は原点を控え直しても動かないので、控える前に測られた在庫のフィードバック
+        も控えた後と同じ物理位置を指す。
+        """
+        hold = self.feedback_position() if self.mode is ControlMode.POSITION else 0.0
         return [
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
@@ -211,11 +442,12 @@ class Edulite05Driver(MotorDriver):
     def deactivation_steps(self) -> list[tuple[can.Message, float]]:
         return [(self.encode_disable(), 0.05)]
 
-    def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
-        return [(self.encode_set_zero(), 0.2)]
-
     def idle_target_value(self) -> float:
-        return self._state.position if self.mode is ControlMode.POSITION else 0.0
+        """20Hz の再送が `encode_target()` へ通す値なので**論理**で返す。
+
+        生のまま返すと `生値 + オフセット` が書かれ続け、機構がオフセットぶん走る。
+        """
+        return self.feedback_position() if self.mode is ControlMode.POSITION else 0.0
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         return self.mode is ControlMode.POSITION
@@ -233,8 +465,10 @@ class Edulite05Driver(MotorDriver):
         self.mode_state = (data_area2 >> 14) & 0x03
         self.fault_bits = Edulite05Fault((data_area2 >> 8) & 0x3F)
         pos_raw, vel_raw, torque_raw, temp_raw = struct.unpack(">HHHH", msg.data)
+        position = self.uint16_to_float(pos_raw, self.POS_MIN, self.POS_MAX)
+        self._track_wrap(position)
         return MotorState(
-            position=self.uint16_to_float(pos_raw, self.POS_MIN, self.POS_MAX),
+            position=position,
             velocity=self.uint16_to_float(vel_raw, self.VEL_MIN, self.VEL_MAX),
             current=self.uint16_to_float(torque_raw, self.TORQUE_MIN, self.TORQUE_MAX),
             temperature=temp_raw / 10.0,

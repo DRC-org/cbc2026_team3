@@ -39,6 +39,23 @@ const Y_AXIS: ManualAxis = {
   motors: ["y_axis_r", "y_axis_l"],
 };
 
+const VALVE: ManualAxis = {
+  name: "valve_1",
+  unit: "on_off",
+  command_mode: "on_off",
+  value: null,
+  target: 1,
+  manual: null,
+  manual_always: true,
+  deviation: null,
+  sync_tolerance: null,
+  positions: [
+    { name: "closed", value: 0 },
+    { name: "open", value: 1 },
+  ],
+  motors: ["valve_1"],
+};
+
 function renderPanel(axes: ManualAxis[], blockedReason: string | null = null) {
   const manual: ManualState = { mode: "sequence", axes };
   const send = vi.fn(() => true);
@@ -92,6 +109,25 @@ describe("AlwaysManualPanel", () => {
     expect(screen.getByLabelText("conveyor を run へ")).toBeDisabled();
     await userEvent.click(screen.getByLabelText("conveyor を run へ"));
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("on_off 軸は行ではなく丸トグルの群に出す", () => {
+    renderPanel([CONVEYOR, VALVE]);
+
+    expect(screen.getByLabelText("valve_1 を OFF にする")).toBeInTheDocument();
+    expect(screen.queryByLabelText("valve_1 を closed へ")).toBeNull();
+    expect(screen.getByLabelText("conveyor を stop へ")).toBeInTheDocument();
+  });
+
+  it("丸トグルも manual_move として自分の担当機へ宛てて送る", async () => {
+    const { send } = renderPanel([VALVE]);
+
+    await userEvent.click(screen.getByLabelText("valve_1 を OFF にする"));
+
+    expect(send).toHaveBeenCalledWith(
+      { type: "manual_move", robot: "main_hand", axis: "valve_1", position: "closed" },
+      expect.any(String),
+    );
   });
 
   it("シーケンスに上書きされることを断る", () => {

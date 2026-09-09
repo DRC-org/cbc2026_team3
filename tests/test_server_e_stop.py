@@ -690,7 +690,7 @@ class _SyncFixture:
         feed_m3508(self.right, deg=0.0)
         feed_m3508(self.left, deg=0.0)
 
-    def _on_violation(self, axis: str, deviation: float) -> None:
+    def _on_violation(self, axis: str, deviation: float, retrips: int = 1) -> None:
         self.violations.append((axis, deviation))
         task = asyncio.create_task(self._server_fx.activate_e_stop(reason=f"{axis} の左右ずれ"))
         self.tasks.add(task)

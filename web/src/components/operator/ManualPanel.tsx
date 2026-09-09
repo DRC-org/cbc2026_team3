@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { ManualAxisRow } from "@/components/operator/ManualAxisRow";
+import { OnOffPadGroup, splitOnOffAxes } from "@/components/operator/OnOffPadGroup";
 import { Kbd } from "@/components/ui/Kbd";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -33,7 +34,9 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
     sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
   const steerable = manual.axes.filter((axis) => axis.manual !== null);
-  const presetOnly = manual.axes.filter((axis) => axis.manual === null);
+  const { pads, rest: presetOnly } = splitOnOffAxes(
+    manual.axes.filter((axis) => axis.manual === null),
+  );
   const selected = steerable.some((axis) => axis.name === picked)
     ? picked
     : (steerable[0]?.name ?? null);
@@ -79,6 +82,8 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
                 onMove={onMove}
               />
             ))}
+
+            <OnOffPadGroup axes={pads} blockedReason={blockedReason} onMove={onMove} />
 
             {presetOnly.length === 0 ? null : (
               <div className="grid @min-[40rem]:grid-cols-2 @min-[56rem]:grid-cols-3">

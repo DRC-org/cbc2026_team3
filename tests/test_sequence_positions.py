@@ -590,6 +590,106 @@ class TestAxisSchemaValidation:
             load_position_table({"axes": {"y_axis": {"motors": {"y_axis_r": 2.0}}}})
 
 
+class TestTravelSpec:
+    """機械的可動域。**`manual` の流用ではない。**
+
+    意味の違うものを 1 つの値に載せると、手動の範囲を狭めた瞬間に回転数の
+    一意化が黙って別の中心を選ぶ。
+    """
+
+    def test_travel_を書かない軸は一意化の対象外(self) -> None:
+        assert _table().axis("lift_motor").travel is None
+
+    def test_travel_を書いた軸だけが可動域を持つ(self) -> None:
+        table = _table(
+            axes={
+                "lift_motor": {
+                    "unit": "mm",
+                    "scale": 864.0,
+                    "manual": {"min": 0.0, "max": 10.0},
+                    "travel": {"min": -2.0, "max": 20.0},
+                },
+                "arm_joint": {"unit": "deg", "scale": 1.0},
+            }
+        )
+
+        travel = table.axis("lift_motor").travel
+        assert travel is not None
+        assert (travel.min_value, travel.max_value) == (-2.0, 20.0)
+        assert travel.span == pytest.approx(22.0)
+
+    def test_manual_とは独立に持てる(self) -> None:
+        """手動の範囲を狭めても機械的可動域は動かない。"""
+        table = _table(
+            axes={
+                "lift_motor": {
+                    "unit": "mm",
+                    "scale": 864.0,
+                    "manual": {"min": 0.0, "max": 12.0},
+                    "travel": {"min": -2.0, "max": 20.0},
+                },
+                "arm_joint": {"unit": "deg", "scale": 1.0},
+            }
+        )
+
+        spec = table.axis("lift_motor")
+        assert spec.manual is not None and spec.travel is not None
+        assert (spec.manual.min_value, spec.manual.max_value) == (0.0, 12.0)
+        assert (spec.travel.min_value, spec.travel.max_value) == (-2.0, 20.0)
+
+    def test_min_が_max_以上なら起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="min は max より小さい"):
+            _table(
+                axes={
+                    "lift_motor": {
+                        "unit": "mm",
+                        "scale": 864.0,
+                        "travel": {"min": 10.0, "max": 10.0},
+                    },
+                    "arm_joint": {"unit": "deg", "scale": 1.0},
+                }
+            )
+
+    def test_片側だけなら起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="機械的可動域が決まりません"):
+            _table(
+                axes={
+                    "lift_motor": {"unit": "mm", "scale": 864.0, "travel": {"min": 0.0}},
+                    "arm_joint": {"unit": "deg", "scale": 1.0},
+                }
+            )
+
+    def test_未知のキーは起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="travel に未知のキー"):
+            _table(
+                axes={
+                    "lift_motor": {
+                        "unit": "mm",
+                        "scale": 864.0,
+                        "travel": {"min": 0.0, "max": 1.0, "steps": [1.0]},
+                    },
+                    "arm_joint": {"unit": "deg", "scale": 1.0},
+                }
+            )
+
+    def test_duty_軸への_travel_は起動を拒否する(self) -> None:
+        with pytest.raises(ValueError, match="travel は位置指令の軸にのみ"):
+            load_position_table(
+                {
+                    "axes": {
+                        "conveyor": {
+                            "unit": "duty",
+                            "command_mode": "duty",
+                            "scale": 1.0,
+                            "travel": {"min": -1.0, "max": 1.0},
+                        }
+                    },
+                    "positions": {"conveyor": {"stop": 0.0}},
+                },
+                source="<test>",
+            )
+
+
 class TestManualSpec:
     def test_manual_を書かない軸は連続操作の対象外(self) -> None:
         table = _table()
