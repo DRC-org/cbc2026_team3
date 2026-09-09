@@ -23,7 +23,7 @@ DEFAULT_INTERVAL_S = 0.02
 
 DEFAULT_VIOLATION_SAMPLES = 2
 
-ViolationHandler = Callable[[str, float], None]
+ViolationHandler = Callable[[str, float, int], None]
 FeedbackClock = Callable[[], float]
 SleepFunc = Callable[[float], Awaitable[None]]
 
@@ -55,6 +55,9 @@ class SyncMonitor(PeriodicTask):
         self._counts: dict[str, int] = {}
         self._violated: set[str] = set()
         self._suspended: dict[str, int] = {}
+        # 緊急停止の解除で `reset()` が走ってもここだけは残す。解除するたび即再発する
+        # 状態を「何回目か」として理由文へ載せられるのは、ラッチをまたぐこの数だけ。
+        self._retrips: dict[str, int] = {}
 
     @property
     def group_names(self) -> tuple[str, ...]:
@@ -123,13 +126,16 @@ class SyncMonitor(PeriodicTask):
             return
 
         self._violated.add(group.name)
+        retrips = self._retrips.get(group.name, 0) + 1
+        self._retrips[group.name] = retrips
         logger.error(
-            "同期ずれを検出 (axis=%s, deviation=%.3f, tolerance=%.3f)",
+            "同期ずれを検出 (axis=%s, deviation=%.3f, tolerance=%.3f, 通算=%d 回目)",
             group.name,
             deviation,
             group.tolerance,
+            retrips,
         )
-        self._notify(group.name, deviation)
+        self._notify(group.name, deviation, retrips)
 
     def _fresh_positions(self, group: SyncGroup, now: float) -> dict[str, float]:
         positions: dict[str, float] = {}
@@ -142,10 +148,10 @@ class SyncMonitor(PeriodicTask):
             positions[member.name] = driver.feedback_position()
         return positions
 
-    def _notify(self, group_name: str, deviation: float) -> None:
+    def _notify(self, group_name: str, deviation: float, retrips: int) -> None:
         if self._on_violation is None:
             return
         try:
-            self._on_violation(group_name, deviation)
+            self._on_violation(group_name, deviation, retrips)
         except Exception:
             logger.exception("同期ずれハンドラで例外 (axis=%s)", group_name)

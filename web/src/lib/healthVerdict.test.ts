@@ -334,6 +334,7 @@ describe("describeSafetyIssues", () => {
     expect(issues[0].detail).toMatch(/y_axis/);
     expect(issues[0].detail).toMatch(/rotate/);
     expect(issues[0].hint).toMatch(/解除/);
+    expect(issues[0].hint).toMatch(/原点/);
   });
 
   it("無励磁のまま残ったモータを名前付きで返す", () => {

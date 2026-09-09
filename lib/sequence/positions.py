@@ -24,6 +24,7 @@ __all__ = [
     "MotorSpec",
     "PositionLookupError",
     "PositionTable",
+    "TravelSpec",
     "load_position_table",
 ]
 
@@ -63,6 +64,26 @@ class CourtMotorSpec(MotorSpec):
             f"モータ '{self.name}' の scale はコート別なのにコートが解決されていません "
             "(AxisSpec.for_court を通してください)"
         )
+
+
+@dataclass(frozen=True)
+class TravelSpec:
+    """軸が**機械的に到達しうる**範囲。`ManualSpec` とは別物である。
+
+    あちらは「手動操縦で動かしてよい範囲」で、意図的に狭められる。こちらは
+    機構が届いてしまう範囲なので、1 つの値に載せると片方を狭めた瞬間に
+    もう片方が黙って壊れる。
+    """
+
+    min_value: float
+    max_value: float
+
+    @property
+    def span(self) -> float:
+        return self.max_value - self.min_value
+
+    def to_dict(self) -> dict[str, object]:
+        return {"min": self.min_value, "max": self.max_value}
 
 
 @dataclass(frozen=True)
@@ -274,6 +295,11 @@ class AxisSpec:
     settle_s: float = 0.0
     manual: ManualSpec | None = None
     manual_always: bool = False
+    # 軸が機械的に到達しうる範囲。**`manual` の流用ではない** (あちらは手動操縦で
+    # 動かしてよい範囲で、意図的に狭められる)。1 回転未満なら電文値から論理角への
+    # 等価表現が 1 つに決まるので、ドライバが回転数を一意化できる。None なら
+    # 一意化しない —— 「可動域 0」ではないので既定値では埋めない
+    travel: TravelSpec | None = None
     homing: HomingSpec | None = None
     motion: MotionSpec | None = None
     # 指令を出す直前の歯止め (可動端インターロック・跳躍量・トルク)。
@@ -298,6 +324,11 @@ class AxisSpec:
         if self.guard is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: guard は位置指令の軸にのみ書けます "
+                f"(command_mode={self.command_mode.value})"
+            )
+        if self.travel is not None and self.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"axes.{self.name}: travel は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
         self._check_manual_always()
@@ -482,12 +513,15 @@ _AXIS_KEYS = frozenset(
         "homing",
         "motion",
         "guard",
+        "travel",
     }
 )
 
 _MOTOR_KEYS = frozenset({"scale", "offset"})
 
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
+
+_TRAVEL_KEYS = frozenset({"min", "max"})
 
 _HOMING_KEYS = frozenset(
     {
@@ -760,6 +794,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
         guard=_parse_guard(name, raw.get("guard")),
+        travel=_parse_travel(name, raw.get("travel")),
     )
 
 
@@ -1027,6 +1062,27 @@ def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> Man
 
     steps = _parse_manual_steps(path, raw.get("steps"))
     return ManualSpec(min_value=float(min_value), max_value=float(max_value), steps=steps)
+
+
+def _parse_travel(axis_name: str, raw: object) -> TravelSpec | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.travel は辞書である必要があります: {raw!r}")
+
+    unknown = set(raw) - _TRAVEL_KEYS
+    if unknown:
+        raise ValueError(f"axes.{axis_name}.travel に未知のキー: {', '.join(sorted(unknown))}")
+
+    path = f"axes.{axis_name}.travel"
+    min_value = _number(path, raw, "min", None)
+    max_value = _number(path, raw, "max", None)
+    if min_value is None or max_value is None:
+        missing = ", ".join(key for key in ("min", "max") if raw.get(key) is None)
+        raise ValueError(f"{path} に {missing} がありません (機械的可動域が決まりません)")
+    if min_value >= max_value:
+        raise ValueError(f"{path}.min は max より小さい必要があります: {min_value} >= {max_value}")
+    return TravelSpec(min_value=float(min_value), max_value=float(max_value))
 
 
 def _parse_manual_always(axis_name: str, raw: object) -> bool:

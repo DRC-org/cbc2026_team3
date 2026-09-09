@@ -118,6 +118,15 @@ class TestFeedbackPosition:
         assert driver.feedback_position() == pytest.approx(driver.state.position)
         assert driver.feedback_position() == pytest.approx(1.25)
 
+    def test_edulite_subtracts_the_captured_origin(self) -> None:
+        driver = Edulite05Driver("e", 1)
+        feed_edulite(driver, position=1.25)
+        driver.capture_origin_here()
+        feed_edulite(driver, position=1.75)
+
+        assert driver.feedback_position() == pytest.approx(0.5, abs=0.01)
+        assert driver.feedback_position() != pytest.approx(driver.state.position)
+
     def test_m3508_returns_multi_turn_position_not_wrapped_angle(self) -> None:
         driver = M3508Driver("m", 1)
         feed_m3508(driver, deg=10.0)

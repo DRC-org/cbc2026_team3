@@ -66,7 +66,7 @@ checklists:
       label: サブハンドの可動端センサ 4 本 (前後の前端・後端 / 昇降の上端・下端) を 1 本ずつ押したまま、手動操縦でそのスイッチから離れる向きへ動くことを確認 (逆向きにしか動かなければ guard.limits の plus/minus が逆)
       group: motor_check
     - id: rotate_holds
-      label: rotate を非常停止し、無励磁でも自重で回らないこと確認 (零点確定は無励磁で行う)
+      label: rotate を非常停止し、無励磁でも自重で回らないこと確認 (電源断のあいだに回ると生角度の連続化が 1 回転を捏造する)
       group: motor_check
     - id: sub_lift_holds
       label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)

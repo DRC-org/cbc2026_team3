@@ -11,6 +11,7 @@ from typing import Any, Protocol
 import can
 
 from lib.config_schema import DEFAULT_HEALTH, HealthThresholds
+from lib.control.feedback import FeedbackFreshness
 from lib.control.periodic import LogThrottle
 from lib.drivers.base import MotorDriver
 from lib.drivers.generic import GenericDriver
@@ -447,10 +448,56 @@ class CANManager:
                 inactive.append(motor_name)
         return inactive
 
+    async def capture_origin_in_place(
+        self, motor_names: Sequence[str], *, should_abort: Callable[[], bool] | None = None
+    ) -> None:
+        """指定したモータ群の原点を PC 側で「今の位置」へ控える (零点確定)。
+
+        **CAN フレームを 1 通も送らない。** 無励磁化も再励磁も要らないので、
+        機構が力を失う窓そのものが開かない。
+
+        全員をまとめて受け取るのは、別々の時刻に控えると消えないオフセットが残る
+        ため。**控える処理は `await` を挟まない** —— 挟むと、その隙に届いた
+        フィードバックで片方だけが別の姿勢を原点にしうる。
+
+        Raises:
+            ValueError: PC 側に原点を持たないモータが混ざっている
+            RuntimeError: フィードバックが途絶している / 緊急停止が入っている。
+                どちらも 1 台も控えずに降りる —— 片方だけ新しい座標系へ移ると、
+                ペア軸ではその差がそのまま全体緊急停止になる
+        """
+        names = list(motor_names)
+        unsupported = [name for name in names if not self._motors[name].has_local_origin()]
+        if unsupported:
+            raise ValueError(f"モータ {', '.join(unsupported)} は PC 側に原点を持ちません")
+
+        # 締切ではなく「最後に届いた時刻」で見る。ここは問い合わせを送れないので
+        # (送れば機構が動く窓が開く)、待っても新しい 1 通は届かない。
+        freshness = FeedbackFreshness(
+            self.last_feedback_at, timeout_ms=DEFAULT_HEALTH.feedback_timeout_ms
+        )
+        now = freshness.now()
+        stale = [name for name in names if freshness.is_stale(name, now)]
+        if stale:
+            raise RuntimeError(
+                f"モータ {', '.join(stale)} のフィードバックが届いていないため"
+                "原点を控えられません (配線・電源を確認してください)"
+            )
+
+        if should_abort is not None and should_abort():
+            raise RuntimeError("緊急停止中のため原点を控えませんでした")
+
+        for name in names:
+            self._motors[name].capture_origin_here()
+
     async def capture_origin_via_set_zero(
         self, motor_names: Sequence[str], *, should_abort: Callable[[], bool] | None = None
     ) -> None:
-        """指定したモータ群の原点を「今の位置」へまとめて切り直す (零点確定)。
+        """指定したモータ群の原点を「今の位置」へまとめて切り直す (零点確定)。**DM3520 専用。**
+
+        原点をドライバ内部に持つモータのための経路である。PC 側に原点を持つ
+        ドライバ (EDULITE 05) は `capture_origin_in_place` を通る —— 併用すると
+        生の座標系そのものを動かす操作が二重に効き、原点が二重定義になる。
 
         軸のモータ全員をまとめて受け取るのは、別々の時刻に確定すると消えない
         オフセットが残るため。順序 (無励磁 -> 付け替え -> 再励磁) は
@@ -527,6 +574,10 @@ class CANManager:
                 feedback_timeout_s,
             )
             return False
+
+        # **鮮度確認より前に置いてはならない。** 未受信の 0.0 を現在位置と信じて
+        # 原点にすると、以後の指令が全部そのぶんずれた場所を指す。
+        motor.establish_provisional_origin()
 
         steps = motor.activation_steps(after_set_zero=after_set_zero)
         if not steps:
