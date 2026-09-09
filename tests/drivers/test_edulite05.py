@@ -562,6 +562,100 @@ class TestPcSideOrigin:
         assert len(caplog.records) == 1
 
 
+_POS_LSB = (Edulite05Driver.POS_MAX - Edulite05Driver.POS_MIN) / 65535.0
+
+
+class TestRawAngleUnwrap:
+    """電源投入で [0, 360) へ畳まれる電文値を、PC 側で連続化して読む。
+
+    畳まれた側と畳まれない側が対になっている `rotate` では、畳みが左右へ
+    360deg の差を作り `SyncMonitor` が緊急停止を掛け直す
+    (`docs/invariants.md` §2 / `docs/history/incidents.md` 2026-09-09)。
+    """
+
+    def test_正回りの折り返しは進んだぶんだけ進む(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(179.0))
+        feed_edulite(driver, position=math.radians(-179.0))
+
+        assert driver.feedback_position() == pytest.approx(math.radians(181.0), abs=2 * _POS_LSB)
+
+    def test_逆回りの折り返しも戻ったぶんだけ戻る(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(-179.0))
+        feed_edulite(driver, position=math.radians(179.0))
+
+        assert driver.feedback_position() == pytest.approx(math.radians(-181.0), abs=2 * _POS_LSB)
+
+    def test_電源断で畳まれても動いていないと読む(self) -> None:
+        """2026-09-09 の実測値。`rotate_l` の電文値が +360deg 弱だけ飛んだ。
+
+        機構は 1LSB も動いていないので、論理位置も動いてはならない。
+        """
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(-181.7142))
+        before = driver.feedback_position()
+
+        feed_edulite(driver, position=math.radians(178.2634))
+
+        # 実測の差 1LSB に、電文へ載せるときの量子化 1LSB が重なる。
+        assert driver.feedback_position() - before == pytest.approx(0.0, abs=2 * _POS_LSB)
+
+    def test_畳まれた後の指令は今の電文座標に続く値を書く(self) -> None:
+        """読み側だけ直すと、指令が 360deg の移動になって軸が 1 回転する。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(-181.7142))
+        driver.capture_origin_here()
+        feed_edulite(driver, position=math.radians(178.2634))
+        raw = driver.state.position
+
+        msg = driver.encode_target(ControlMode.POSITION, 0.0)
+
+        assert target_value_of(msg) == pytest.approx(raw, abs=2 * _POS_LSB)
+
+    def test_保持目標を往復させても畳まれる前の座標へ戻らない(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(-181.7142))
+        driver.capture_origin_here()
+        feed_edulite(driver, position=math.radians(178.2634))
+        raw = driver.state.position
+
+        msg = driver.encode_target(driver.mode, driver.idle_target_value())
+
+        assert target_value_of(msg) == pytest.approx(raw, abs=2 * _POS_LSB)
+
+    def test_畳まれた後に控えた原点も連続化した座標で持つ(self) -> None:
+        """原点を電文座標で控えると、控えた瞬間に回転数ぶんの論理位置が生える。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(-181.7142))
+        feed_edulite(driver, position=math.radians(178.2634))
+        raw = driver.state.position
+
+        driver.capture_origin_here()
+
+        assert driver.feedback_position() == pytest.approx(0.0, abs=1e-9)
+        assert target_value_of(driver.encode_target(ControlMode.POSITION, 0.0)) == pytest.approx(
+            raw, abs=1e-6
+        )
+
+    def test_最初のフレームは補正しない(self) -> None:
+        """前回値が無いので、既定値 0 との差を折り返しと読んではならない。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(700.0))
+
+        assert driver.feedback_position() == pytest.approx(driver.state.position)
+
+    def test_電文の値は生のまま残す(self) -> None:
+        """診断の生値カラムが読む。連続化した値で上書きしてはならない。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=math.radians(179.0))
+
+        state = driver.update_state(edulite_feedback(driver, position=math.radians(-179.0)))
+
+        assert state.position == pytest.approx(math.radians(-179.0), abs=_POS_LSB)
+        assert driver.state.position == pytest.approx(math.radians(-179.0), abs=_POS_LSB)
+
+
 class TestIsEnergized:
     def test_未受信では判定しない(self) -> None:
         assert Edulite05Driver("m1", can_id=5).is_energized() is None

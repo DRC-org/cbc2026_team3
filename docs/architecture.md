@@ -479,6 +479,21 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 `scripts/tune_y_axis.py` + `config/bench/y_axis_tuning/`（上書きはプロセス内に閉じる）。
 `_DEFAULT_PID` は同梱のどの config からも到達しない（全 M3508 が `pid:` を明示している）。
 
+### EDULITE 05 の 3 つの座標（電文 / 連続化 / 論理）
+
+位置ループはモータ内蔵だが、**PC 側は座標を 3 段で持つ**。境界は
+`lib/drivers/edulite05.py` の 1 箇所だけで、外へ出るのは論理座標だけである。
+
+| 座標 | 何か | 読み口 |
+|---|---|---|
+| 電文 | `PARAM_LOC_REF` / フィードバックにそのまま載る値 [rad]。**電源投入で [0, 360) へ畳み直される** | `MotorState.position`（診断の生値カラム） |
+| 連続化 | 電文値 + `_wrap_turns` × 2π。前回の電文値との差が ±π を超えたら回転数を ±1 補正する | 外へは出ない |
+| 論理 | 連続化 − 原点オフセット。原点オフセットは `capture_origin_here()` が**連続化座標で**控える | `feedback_position()` / `idle_target_value()` |
+
+`encode_target(POSITION)` は逆順に戻す —— `(論理値 + 原点オフセット) − 回転数 × 2π` を作り、
+**その電文座標のまま** `POS_MIN`/`POS_MAX`（uint16 の写像レンジ）でクランプする。
+理由と踏んではならない形は `invariants.md` §2。
+
 ### 台形速度プロファイル（`lib/control/trajectory.py`）
 
 位置指令の軸に `axes.<軸>.motion`（§6）を書くと、最終目標をそのまま PID へ入れず、

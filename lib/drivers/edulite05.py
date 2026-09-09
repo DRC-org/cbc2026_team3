@@ -36,6 +36,9 @@ class Edulite05Fault(IntFlag):
     UNCALIBRATED = 32
 
 
+_TURN = 2.0 * math.pi
+
+
 class Edulite05Driver(MotorDriver):
     POS_MIN, POS_MAX = -12.57, 12.57
     VEL_MIN, VEL_MAX = -50.0, 50.0
@@ -105,6 +108,8 @@ class Edulite05Driver(MotorDriver):
         self._origin_offset = 0.0
         self._origin_captured = False
         self._target_clamped = False
+        self._prev_raw_position: float | None = None
+        self._wrap_turns = 0
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -181,19 +186,45 @@ class Edulite05Driver(MotorDriver):
 
     @property
     def origin_offset(self) -> float:
-        """論理 0 が指す生角度 [rad]。ログと診断のための読み出し口。"""
+        """論理 0 が指す連続化後の生角度 [rad]。ログと診断のための読み出し口。"""
         return self._origin_offset
 
-    def capture_origin_here(self) -> None:
-        """今の生角度を論理原点として控える。**CAN へは 1 通も出さない。**
+    def _track_wrap(self, raw: float) -> None:
+        """電文値が [0, 360) へ畳まれた跳びを回転数で吸収する。
 
-        原点をモータ側の `SET_ZERO` で持てない —— 零点は電源断で失われるので、
-        物理非常停止のたびにフラッシュの機械ゼロへ戻る。`rotate` は逆回転ペアで
-        左右の機械ゼロが 175.879deg 違い、`SyncMonitor` が解除のたびに全体緊急停止を
-        掛け直すことになる。PC 側で持てば、電源が落ちても控えは生き残る。
+        電源投入のたびに位置の報告値は [0, 360) へ畳み直される。`rotate` は
+        `scale` が逆の 2 台の対で、片側は論理角が正であるかぎり生値が負になり
+        電源断のたびに +360deg される。左右に 1 回転の差が生まれ、`SyncMonitor`
+        が解除のたびに全体緊急停止を掛け直す。
+
+        「2 つの電文のあいだに軸が半回転以上動かない」ことに立っている。
+        通常は 20Hz 以上で受けるので満たし、電源断を跨ぐ窓は `rotate` が無励磁で
+        自重で回らないこと (指差喚呼 `rotate_holds`) が人の手で担保する。
         """
-        raw = self._state.position
-        # 機械ゼロが電源断でどれだけ動いたかを知る材料はここにしか出ない。
+        if self._prev_raw_position is not None:
+            diff = raw - self._prev_raw_position
+            if diff > math.pi:
+                self._wrap_turns -= 1
+            elif diff < -math.pi:
+                self._wrap_turns += 1
+        self._prev_raw_position = raw
+
+    def _continuous_position(self) -> float:
+        """電文値を連続化した生角度 [rad]。原点も指令もこの座標で持つ。"""
+        return self._state.position + self._wrap_turns * _TURN
+
+    def capture_origin_here(self) -> None:
+        """今の連続化後の生角度を論理原点として控える。**CAN へは 1 通も出さない。**
+
+        原点をモータ側の `SET_ZERO` で切り直すと生座標そのものが付け替わり、切り直しの
+        前後で測った値が混ざる。`rotate` は逆回転ペアで左右の機械ゼロが 175.879deg 違い、
+        混ざれば `SyncMonitor` が全体緊急停止を掛ける。PC 側で持てば生座標は動かない。
+
+        控えるのは電文値ではなく連続化後の値である。電文値で控えると、電源投入で
+        [0, 360) へ畳まれた後に控え直した瞬間、回転数ぶんの論理位置が生える。
+        """
+        raw = self._continuous_position()
+        # 電源断で機構が動いたかどうかを知る材料はここにしか出ない。
         logger.info(
             "EDULITE 05 の原点を控えました (motor=%s, 生角度=%.4frad, "
             "直前の原点との差=%+.4frad, 控え直し=%s)",
@@ -207,7 +238,7 @@ class Edulite05Driver(MotorDriver):
 
     def feedback_position(self) -> float:
         """論理位置 [rad]。`state.position` は電文どおりの生値のまま残す。"""
-        return self._state.position - self._origin_offset
+        return self._continuous_position() - self._origin_offset
 
     def _clamp_target(self, mode: ControlMode, requested: float, lo: float, hi: float) -> float:
         clamped = self._clamp(requested, lo, hi)
@@ -236,7 +267,9 @@ class Edulite05Driver(MotorDriver):
         if mode is ControlMode.POSITION:
             # `POS_MIN`/`POS_MAX` は uint16 の写像レンジであって機構の可動域ではない。
             # 論理値でクランプすると、オフセットを足した生値がレンジ外へ出て折り返す。
-            raw = value + self._origin_offset
+            # モータは畳まれた電文座標に居るので、連続化に足した回転数を引いて戻す。
+            # 引かずに送ると、モータは指令を 1 回転ぶんの移動として実行する。
+            raw = value + self._origin_offset - self._wrap_turns * _TURN
             value = self._clamp_target(mode, raw, self.POS_MIN, self.POS_MAX)
         elif mode is ControlMode.VELOCITY:
             value = self._clamp_target(mode, value, -self.limit_speed, self.limit_speed)
@@ -339,8 +372,10 @@ class Edulite05Driver(MotorDriver):
         self.mode_state = (data_area2 >> 14) & 0x03
         self.fault_bits = Edulite05Fault((data_area2 >> 8) & 0x3F)
         pos_raw, vel_raw, torque_raw, temp_raw = struct.unpack(">HHHH", msg.data)
+        position = self.uint16_to_float(pos_raw, self.POS_MIN, self.POS_MAX)
+        self._track_wrap(position)
         return MotorState(
-            position=self.uint16_to_float(pos_raw, self.POS_MIN, self.POS_MAX),
+            position=position,
             velocity=self.uint16_to_float(vel_raw, self.VEL_MIN, self.VEL_MAX),
             current=self.uint16_to_float(torque_raw, self.TORQUE_MIN, self.TORQUE_MAX),
             temperature=temp_raw / 10.0,
