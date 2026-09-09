@@ -130,6 +130,25 @@ class TestMoveTo:
 
         assert drivers["lift_motor"].commands == [(ControlMode.POSITION, 200.0)]
 
+    @pytest.mark.parametrize(("court", "expected"), [(Court.BLUE, -20.0), (Court.RED, 20.0)])
+    async def test_court_scale_flips_command_sign(self, court: Court, expected: float) -> None:
+        seq = _MoveSequence()
+        group, drivers = _make_group("lift")
+        seq.bind_motors(group)
+        seq.bind_positions(
+            load_position_table(
+                {
+                    "axes": {"lift": {"scale": {"blue": 2.0, "red": -2.0}, "timeout_s": 0.05}},
+                    "positions": {"lift": {"up": -10.0}},
+                }
+            )
+        )
+        seq.set_court(court)
+
+        await seq.move_to({"lift": "up"})
+
+        assert drivers["lift"].commands == [(ControlMode.POSITION, expected)]
+
     async def test_timeout_raises(self) -> None:
         seq = _MoveSequence()
         group, _ = _make_group("lift_motor", reaches=False)

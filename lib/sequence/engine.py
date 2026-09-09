@@ -171,7 +171,7 @@ class Sequence:
         pending: list[tuple[AxisHandle, str, float | None]] = []
 
         for axis, position_name in targets.items():
-            spec = table.axis(axis)
+            spec = table.axis(axis).for_court(self.court)
             handle = AxisHandle(
                 spec,
                 [getattr(self.motors, name) for name in spec.motor_names],

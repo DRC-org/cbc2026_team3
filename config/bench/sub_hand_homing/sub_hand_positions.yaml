@@ -41,8 +41,9 @@ axes:
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
-  # 昇降。**+ 方向が下** (2026-09-09 実機、sub_rotate が home の姿勢で)。sub_rotate で
+  # 昇降。**+ 方向が下** (2026-09-09 実機、青コート・sub_rotate が home の姿勢で)。sub_rotate で
   # 回すと重力に対する上下は反転するが、座標・スイッチ・homing は機構に固定なので変えない。
+  # コートで回転と上下の対応が鏡になるので scale の符号だけをコート別に持つ (赤は未実測)。
   sub_lift:
     homing:
       sensor: sub_lift_b_limit_sensor
@@ -63,7 +64,7 @@ axes:
       stall_torque: 2.0
     unit: mm
     command_unit: rad
-    scale: 1.0668451
+    scale: { blue: 1.0668451, red: -1.0668451 }
     offset: 0.0
     timeout_s: 4.0
     tolerance: 1.0

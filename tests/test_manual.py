@@ -365,3 +365,55 @@ class TestAxesInfo:
     def test_位置を測れない軸の偏差は_None(self) -> None:
         manual, _, _ = _build()
         assert self._by_name(manual)["conveyor"]["deviation"] is None
+
+
+_COURT_CONFIG = {
+    "axes": {
+        "lift": {
+            "unit": "mm",
+            "command_unit": "rad",
+            "scale": {"blue": 2.0, "red": -2.0},
+            "manual": {"min": -30.0, "max": 0.0},
+        }
+    },
+    "positions": {"lift": {"home": -5.0}},
+}
+
+
+class TestCourtScale:
+    """コート別 scale の解決を手動操縦の経路が持つこと (`ManualController._axis`)。"""
+
+    def _build(self, court: Court) -> tuple[ManualController, _EchoDriver]:
+        table = load_position_table(_COURT_CONFIG, source="<test>")
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        driver = _EchoDriver("lift")
+        group.add(MotorHandle("lift", driver, mgr))
+        return ManualController(group, table, court=court), driver
+
+    async def test_set_value_uses_court_sign(self) -> None:
+        red, red_driver = self._build(Court.RED)
+        blue, blue_driver = self._build(Court.BLUE)
+
+        await red.set_value("lift", -10.0)
+        await blue.set_value("lift", -10.0)
+
+        assert red_driver.commands == [(ControlMode.POSITION, 20.0)]
+        assert blue_driver.commands == [(ControlMode.POSITION, -20.0)]
+
+    async def test_move_to_position_and_jog_follow_court_change(self) -> None:
+        ctrl, driver = self._build(Court.BLUE)
+        ctrl.set_court(Court.RED)
+
+        await ctrl.move_to_position("lift", "home")
+        await ctrl.jog("lift", -1.0)
+
+        assert driver.commands == [(ControlMode.POSITION, 10.0), (ControlMode.POSITION, 12.0)]
+
+    def test_observed_value_and_axes_info_use_court_sign(self) -> None:
+        ctrl, driver = self._build(Court.RED)
+        driver.set_observed(position=20.0)
+
+        assert ctrl.observed_value("lift") == pytest.approx(-10.0)
+        assert ctrl.axes_info()[0]["value"] == pytest.approx(-10.0)

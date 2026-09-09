@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Collection, Mapping
+from unittest.mock import AsyncMock, MagicMock
 
+import can
 import pytest
 import yaml
 
 import sequences.main_hand as main_hand
 import sequences.sub_hand as sub_hand
+from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.engine import Sequence
-from lib.sequence.positions import PositionTable, load_position_table
+from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle
+from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from sequences.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
+from tests.fake_drivers import StubFeedbackDriver
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -120,6 +125,58 @@ class TestHomingComesFirst:
         homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
 
         assert homing_axes == ["y_axis", "rotate", "sub_y_axis", "sub_lift"]
+
+
+class _EchoDriver(StubFeedbackDriver):
+    def __init__(self, name: str) -> None:
+        super().__init__(name, 1)
+        self.commands: list[float] = []
+
+    def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        self.commands.append(value)
+        return super().encode_target(mode, value)
+
+
+class _FirstStepHoming:
+    """探索 1 歩目だけを打つ零点確定の代役。渡された spec と handle をそのまま使う。"""
+
+    async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
+        homing = spec.homing
+        assert homing is not None
+        await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
+        return homing.step
+
+
+_COURT_CONFIG = {
+    "axes": {
+        "lift": {
+            "unit": "mm",
+            "command_unit": "rad",
+            "scale": {"blue": 2.0, "red": -2.0},
+            "homing": {"sensor": "s", "direction": 1, "search_distance": 5.0, "step": 1.0},
+        }
+    },
+    "positions": {"lift": {"home": -1.0}},
+}
+
+
+class TestHomingUsesCourt:
+    @pytest.mark.parametrize(("court", "expected"), [(Court.BLUE, 2.0), (Court.RED, -2.0)])
+    async def test_first_search_step_uses_court_sign(self, court: Court, expected: float) -> None:
+        seq = MotorCheckSequence()
+        driver = _EchoDriver("lift")
+        group = MotorGroup()
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group.add(MotorHandle("lift", driver, mgr))
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_COURT_CONFIG, source="<test>"))
+        seq.bind_homing(_FirstStepHoming())  # type: ignore[arg-type]
+        seq.set_court(court)
+
+        await seq.home_axes()
+
+        assert driver.commands == [pytest.approx(expected)]
 
 
 class TestStepShape:

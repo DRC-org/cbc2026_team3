@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from lib.axis_sync import MotorSpec, SyncGroup
@@ -16,6 +16,8 @@ from lib.motion_guard import LimitSpec, MotionGuardSpec
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
+    "CourtMotorSpec",
+    "CourtUnresolvedError",
     "ManualSpec",
     "MotionGuardSpec",
     "MotionSpec",
@@ -30,6 +32,37 @@ DEFAULT_TIMEOUT_S = 5.0
 
 class PositionLookupError(RuntimeError):
     """位置定数の参照に失敗したときに送出される。"""
+
+
+class CourtUnresolvedError(RuntimeError):
+    """コート別の scale を持つ軸を、コートを解決せずに換算しようとした。"""
+
+
+@dataclass(frozen=True)
+class CourtMotorSpec(MotorSpec):
+    """コートで回転の向きが鏡になるモータ。`scale` は大きさだけで、向きは `for_court` が決める。"""
+
+    court_scales: tuple[tuple[str, float], ...] = ()
+
+    def for_court(self, court: Court) -> MotorSpec:
+        return MotorSpec(
+            name=self.name, scale=dict(self.court_scales)[court.value], offset=self.offset
+        )
+
+    def to_command(self, value: float) -> float:
+        raise self._unresolved()
+
+    def to_value(self, command: float) -> float:
+        raise self._unresolved()
+
+    def to_tolerance(self, tolerance: float) -> float:
+        raise self._unresolved()
+
+    def _unresolved(self) -> CourtUnresolvedError:
+        return CourtUnresolvedError(
+            f"モータ '{self.name}' の scale はコート別なのにコートが解決されていません "
+            "(AxisSpec.for_court を通してください)"
+        )
 
 
 @dataclass(frozen=True)
@@ -240,6 +273,7 @@ class AxisSpec:
         self._check_manual_always()
         self._check_homing_sensor_map()
         self._check_align_distance()
+        self._check_court_scale_sync()
 
     def _check_manual_always(self) -> None:
         # 到達判定を持つ軸で許すと、シーケンスが move_to で書いた目標を手動が上書きし、
@@ -283,14 +317,47 @@ class AxisSpec:
             "(整列段のずれが偏差許容差に届くと零点確定の最中に緊急停止します)"
         )
 
+    def _check_court_scale_sync(self) -> None:
+        # 同期監視は起動時に 1 度だけ組まれてコートを知らないので、走行中に換算で落ちる
+        if self.sync_tolerance is not None and self.court_dependent:
+            raise ValueError(
+                f"axes.{self.name}: sync_tolerance とコート別の scale は併用できません "
+                "(同期監視はコートを知りません)"
+            )
+
     @property
     def motor_names(self) -> tuple[str, ...]:
         return tuple(motor.name for motor in self.motors)
 
+    @property
+    def court_dependent(self) -> bool:
+        return any(isinstance(motor, CourtMotorSpec) for motor in self.motors)
+
+    def for_court(self, court: Court) -> AxisSpec:
+        if not self.court_dependent:
+            return self
+        return replace(
+            self,
+            motors=tuple(
+                motor.for_court(court) if isinstance(motor, CourtMotorSpec) else motor
+                for motor in self.motors
+            ),
+        )
+
+    def require_resolved(self) -> None:
+        # 黙って片方のコートを採ると、忘れた経路だけが赤コートで鏡になり config からも読めない
+        if self.court_dependent:
+            raise CourtUnresolvedError(
+                f"軸 '{self.name}' の scale はコート別なのにコートが解決されていません "
+                "(AxisSpec.for_court を通してください)"
+            )
+
     def to_commands(self, value: float) -> dict[str, float]:
+        self.require_resolved()
         return {motor.name: motor.to_command(value) for motor in self.motors}
 
     def to_commands_each(self, values: Mapping[str, float]) -> dict[str, float]:
+        self.require_resolved()
         missing = sorted(name for name in self.motor_names if name not in values)
         extra = sorted(set(values) - set(self.motor_names))
         if missing or extra:
@@ -301,6 +368,7 @@ class AxisSpec:
         return {motor.name: motor.to_command(values[motor.name]) for motor in self.motors}
 
     def to_value(self, commands: Mapping[str, float]) -> float:
+        self.require_resolved()
         values = [
             motor.to_value(commands[motor.name]) for motor in self.motors if motor.name in commands
         ]
@@ -476,7 +544,10 @@ class PositionTable:
         return float(value)
 
     def commands(self, axis: str, name: str, *, court: Court | None = None) -> dict[str, float]:
-        return self.axis(axis).to_commands(self.raw(axis, name, court=court))
+        spec = self.axis(axis)
+        if court is not None:
+            spec = spec.for_court(court)
+        return spec.to_commands(self.raw(axis, name, court=court))
 
 
 def _number(path: str, raw: dict, key: str, default: float | None) -> float | None:
@@ -526,14 +597,32 @@ def _parse_motor(path: str, motor_name: str, raw: object, *, strict_keys: bool) 
         if unknown:
             raise ValueError(f"{path} に未知のキー: {', '.join(sorted(unknown))}")
 
+    offset = float(_number(path, raw, "offset", 0.0) or 0.0)
+    if isinstance(raw.get("scale"), dict):
+        return _parse_court_motor(path, motor_name, raw["scale"], offset)
+
     scale = _number(path, raw, "scale", 1.0)
     if scale is None or scale == 0.0:
         raise ValueError(f"{path}.scale が 0 です (どの値を書いても同じ位置になります)")
 
-    return MotorSpec(
+    return MotorSpec(name=motor_name, scale=float(scale), offset=offset)
+
+
+def _parse_court_motor(path: str, motor_name: str, raw: dict, offset: float) -> CourtMotorSpec:
+    scales = _parse_court_values(f"{path}.scale", raw)
+    magnitudes = {abs(value) for value in scales.values()}
+    if 0.0 in magnitudes:
+        raise ValueError(f"{path}.scale が 0 です (どの値を書いても同じ位置になります)")
+    # 大きさまで変わると motion / tolerance の換算もコート別になり、起動時の検証が知らずに通る
+    if len(magnitudes) != 1:
+        raise ValueError(
+            f"{path}.scale はコートで符号だけが変わる値です (大きさが違います: {raw!r})"
+        )
+    return CourtMotorSpec(
         name=motor_name,
-        scale=float(scale),
-        offset=float(_number(path, raw, "offset", 0.0) or 0.0),
+        scale=magnitudes.pop(),
+        offset=offset,
+        court_scales=tuple(sorted(scales.items())),
     )
 
 
@@ -866,28 +955,29 @@ def _parse_manual_steps(path: str, raw: object) -> tuple[float, ...]:
 
 
 def _parse_value(axis: str, name: str, raw: object) -> float | dict[str, float]:
+    path = f"positions.{axis}.{name}"
     if isinstance(raw, dict):
-        missing = [court.value for court in Court if court.value not in raw]
-        if missing:
-            raise ValueError(
-                f"positions.{axis}.{name} のコート別定義に {', '.join(missing)} がありません"
-            )
-        unknown = set(raw) - {court.value for court in Court}
-        if unknown:
-            raise ValueError(
-                f"positions.{axis}.{name} に未知のコート: {', '.join(sorted(unknown))}"
-            )
-        return {court.value: _to_float(axis, name, raw[court.value]) for court in Court}
-    return _to_float(axis, name, raw)
+        return _parse_court_values(path, raw)
+    return _to_float(path, raw)
 
 
-def _to_float(axis: str, name: str, raw: object) -> float:
+def _parse_court_values(path: str, raw: dict) -> dict[str, float]:
+    missing = [court.value for court in Court if court.value not in raw]
+    if missing:
+        raise ValueError(f"{path} のコート別定義に {', '.join(missing)} がありません")
+    unknown = set(raw) - {court.value for court in Court}
+    if unknown:
+        raise ValueError(f"{path} に未知のコート: {', '.join(sorted(unknown))}")
+    return {court.value: _to_float(path, raw[court.value]) for court in Court}
+
+
+def _to_float(path: str, raw: object) -> float:
     if isinstance(raw, bool) or not isinstance(raw, int | float | str):
-        raise ValueError(f"positions.{axis}.{name} が数値ではありません: {raw!r}")
+        raise ValueError(f"{path} が数値ではありません: {raw!r}")
     try:
         return float(raw)
     except ValueError as exc:
-        raise ValueError(f"positions.{axis}.{name} が数値ではありません: {raw!r}") from exc
+        raise ValueError(f"{path} が数値ではありません: {raw!r}") from exc
 
 
 def load_position_table(config: dict | None, *, source: str = "<inline>") -> PositionTable:
@@ -915,6 +1005,7 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
         positions[axis] = {
             name: _parse_value(axis, name, raw_value) for name, raw_value in values.items()
         }
+        # どちらも軸の単位 (mm) だけを見るので、コート別 scale の符号には依らない
         _check_manual_range(source, axes[axis], positions[axis])
         _check_motion_timeout(source, axes[axis], positions[axis])
 

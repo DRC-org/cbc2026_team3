@@ -55,7 +55,7 @@ class MotorCheckSequence(Sequence):
             return
 
         for axis in targets:
-            spec = table.axis(axis)
+            spec = table.axis(axis).for_court(self.court)
             logger.info("零点確定: %s", axis)
             handle = AxisHandle(
                 spec,

@@ -94,7 +94,7 @@ class ManualController:
     def axes_info(self) -> list[dict]:
         info: list[dict] = []
         for name in self._positions.axes:
-            spec = self._positions.axis(name)
+            spec = self._axis(name)
             info.append(
                 {
                     "name": name,
@@ -129,7 +129,7 @@ class ManualController:
 
     def _axis(self, axis: str) -> AxisSpec:
         try:
-            return self._positions.axis(axis)
+            return self._positions.axis(axis).for_court(self._court)
         except PositionLookupError as exc:
             raise ManualControlError(str(exc)) from exc
 

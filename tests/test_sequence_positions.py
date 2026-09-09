@@ -10,6 +10,8 @@ from lib.match_state import Court
 from lib.sequence.positions import (
     DEFAULT_TIMEOUT_S,
     AxisSpec,
+    CourtMotorSpec,
+    CourtUnresolvedError,
     MotorSpec,
     PositionLookupError,
     PositionTable,
@@ -151,6 +153,138 @@ class TestCourtVariants:
                 {
                     "axes": {"lift_motor": {}},
                     "positions": {"lift_motor": {"place": {"red": 10.0}}},
+                }
+            )
+
+
+_COURT_SCALE = {"blue": 2.0, "red": -2.0}
+
+
+def _court_table(**axis_overrides: object) -> PositionTable:
+    axis: dict = {"unit": "mm", "command_unit": "rad", "scale": dict(_COURT_SCALE)}
+    axis.update(axis_overrides)
+    return load_position_table(
+        {"axes": {"lift": axis}, "positions": {"lift": {"home": -5.0, "up": -20.0}}},
+        source="<test>",
+    )
+
+
+class TestCourtScale:
+    def test_float_scale_is_court_independent(self) -> None:
+        spec = _table().axis("lift_motor")
+
+        assert spec.court_dependent is False
+        assert spec.for_court(Court.RED) is spec
+        assert spec.for_court(Court.BLUE) is spec
+
+    def test_mapping_scale_resolves_sign_per_court(self) -> None:
+        spec = _court_table().axis("lift")
+
+        assert spec.court_dependent is True
+        assert spec.for_court(Court.BLUE).to_commands(10.0) == {"lift": pytest.approx(20.0)}
+        assert spec.for_court(Court.RED).to_commands(10.0) == {"lift": pytest.approx(-20.0)}
+        assert spec.for_court(Court.RED).to_value({"lift": -20.0}) == pytest.approx(10.0)
+
+    def test_table_commands_resolve_court_scale(self) -> None:
+        table = _court_table()
+
+        assert table.commands("lift", "up", court=Court.RED) == {"lift": pytest.approx(40.0)}
+        with pytest.raises(CourtUnresolvedError):
+            table.commands("lift", "up")
+
+    def test_resolved_spec_is_not_court_dependent(self) -> None:
+        resolved = _court_table().axis("lift").for_court(Court.RED)
+
+        assert resolved.court_dependent is False
+        assert isinstance(resolved.motors[0], MotorSpec)
+        assert not isinstance(resolved.motors[0], CourtMotorSpec)
+
+    def test_per_motor_scale_accepts_mapping(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {
+                    "lift": {
+                        "motors": {
+                            "lift_r": {"scale": dict(_COURT_SCALE)},
+                            "lift_l": {"scale": 1.0, "offset": 3.0},
+                        }
+                    }
+                }
+            }
+        )
+        spec = table.axis("lift")
+
+        assert spec.court_dependent is True
+        assert spec.for_court(Court.RED).to_commands(1.0) == {
+            "lift_r": pytest.approx(-2.0),
+            "lift_l": pytest.approx(4.0),
+        }
+
+    @pytest.mark.parametrize("method", ["to_commands", "to_commands_each", "to_value"])
+    def test_unresolved_conversion_raises(self, method: str) -> None:
+        spec = _court_table().axis("lift")
+        arg: object = 1.0 if method == "to_commands" else {"lift": 1.0}
+
+        with pytest.raises(CourtUnresolvedError, match="lift"):
+            getattr(spec, method)(arg)
+
+    def test_unresolved_motor_conversion_raises(self) -> None:
+        motor = _court_table().axis("lift").motors[0]
+
+        assert motor.scale == pytest.approx(2.0)
+        with pytest.raises(CourtUnresolvedError):
+            motor.to_command(1.0)
+        with pytest.raises(CourtUnresolvedError):
+            motor.to_value(1.0)
+        with pytest.raises(CourtUnresolvedError):
+            motor.to_tolerance(1.0)
+
+    def test_startup_checks_do_not_depend_on_court(self) -> None:
+        table = _court_table(
+            manual={"min": -30.0, "max": 0.0},
+            motion={"max_velocity": 100.0, "max_acceleration": 1000.0},
+            timeout_s=1.0,
+        )
+
+        assert table.axis("lift").manual is not None
+
+    def test_missing_court_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"axes\.lift\.scale.*red"):
+            _court_table(scale={"blue": 2.0})
+
+    def test_unknown_court_key_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"axes\.lift\.scale.*green"):
+            _court_table(scale={**_COURT_SCALE, "green": 2.0})
+
+    def test_non_numeric_court_scale_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"axes\.lift\.scale.*数値"):
+            _court_table(scale={"blue": 2.0, "red": "minus"})
+
+    def test_zero_court_scale_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"axes\.lift\.scale.*0"):
+            _court_table(scale={"blue": 2.0, "red": 0.0})
+
+    def test_unequal_magnitude_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="大きさ"):
+            _court_table(scale={"blue": 2.0, "red": -3.0})
+
+    def test_per_motor_mapping_errors_name_the_motor(self) -> None:
+        with pytest.raises(ValueError, match=r"axes\.lift\.motors\.lift_r\.scale"):
+            load_position_table({"axes": {"lift": {"motors": {"lift_r": {"scale": {"red": 1.0}}}}}})
+
+    def test_sync_tolerance_with_court_scale_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="sync_tolerance とコート別の scale"):
+            load_position_table(
+                {
+                    "axes": {
+                        "lift": {
+                            "sync_tolerance": 1.0,
+                            "motors": {
+                                "lift_r": {"scale": dict(_COURT_SCALE)},
+                                "lift_l": {"scale": {"blue": -2.0, "red": 2.0}},
+                            },
+                        }
+                    }
                 }
             )
 

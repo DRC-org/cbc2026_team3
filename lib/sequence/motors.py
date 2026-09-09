@@ -204,6 +204,8 @@ class AxisHandle:
         *,
         sensor_active: SensorReader | None = None,
     ) -> None:
+        # 3 経路 (手動・move_to・零点確定) が必ずここを通るので、解決忘れはここで落とす
+        spec.require_resolved()
         self._spec = spec
         self._handles = tuple(handles)
         self._motors = {motor.name: motor for motor in spec.motors}
