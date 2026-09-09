@@ -126,7 +126,7 @@ positions:
   rotate:
     home: 0.0
     pick: 180.0
-    place: 10.0
+    place: 5.0
 
   gripper:
     open: 0.0

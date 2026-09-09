@@ -8,7 +8,7 @@ HOME: dict[str, str] = {
     "gripper": "open",
     "wall_f": "initial",
     "wall_r": "initial",
-    "conveyor": "stop",
+    "conveyor": "run",
 }
 
 
@@ -16,7 +16,12 @@ def _pick_at(work: str) -> dict[str, str]:
     return {"y_axis": work, "rotate": "pick"}
 
 
-TO_CONVEYOR: dict[str, str] = {"rotate": "place", "wall_f": "open"}
+TO_CONVEYOR: dict[str, str] = {
+    "y_axis": "home",
+    "rotate": "place",
+    "wall_f": "open",
+    "conveyor": "stop",
+}
 
 SWEEP_TO_CONVEYOR: dict[str, str] = {"wall_f": "closed", "conveyor": "run"}
 
@@ -39,7 +44,7 @@ class MainHandSequence(Sequence):
     async def grab_work_3(self) -> None:
         await self.move_to({"gripper": "closed"})
 
-    @step("3 列目ワークをコンベアの位置へ")
+    @step("3 列目ワークをコンベアの位置へ", require_trigger=True)
     async def move_work_3_to_conveyor(self) -> None:
         await self.move_to(TO_CONVEYOR)
 
@@ -47,7 +52,7 @@ class MainHandSequence(Sequence):
     async def release_work_3(self) -> None:
         await self.move_to(RELEASE)
 
-    @step("共通ワークへ移動")
+    @step("共通ワークへ移動", require_trigger=True)
     async def move_to_work_shared(self) -> None:
         await self.move_to(_pick_at("work_shared"))
 
@@ -59,7 +64,7 @@ class MainHandSequence(Sequence):
     async def grab_work_shared(self) -> None:
         await self.move_to({"gripper": "closed"})
 
-    @step("共通ワークをコンベアの位置へ")
+    @step("共通ワークをコンベアの位置へ", require_trigger=True)
     async def move_work_shared_to_conveyor(self) -> None:
         await self.move_to(TO_CONVEYOR)
 
@@ -67,7 +72,7 @@ class MainHandSequence(Sequence):
     async def release_work_shared(self) -> None:
         await self.move_to(RELEASE)
 
-    @step("1 列目ワークへ移動")
+    @step("1 列目ワークへ移動", require_trigger=True)
     async def move_to_work_1(self) -> None:
         await self.move_to(_pick_at("work_1"))
 
@@ -79,7 +84,7 @@ class MainHandSequence(Sequence):
     async def grab_work_1(self) -> None:
         await self.move_to({"gripper": "closed"})
 
-    @step("1 列目ワークをコンベアの位置へ")
+    @step("1 列目ワークをコンベアの位置へ", require_trigger=True)
     async def move_work_1_to_conveyor(self) -> None:
         await self.move_to(TO_CONVEYOR)
 
@@ -114,3 +119,4 @@ class MainHandSequence(Sequence):
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
         await self.move_to(HOME)
+        await self.move_to({"conveyor": "stop"})
