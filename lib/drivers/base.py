@@ -189,11 +189,15 @@ class MotorDriver(abc.ABC):
         return None
 
     def configuration_probe_messages(self) -> list[can.Message]:
-        """励磁前に確認する設定のうち、**まだ読めていない**ぶんの問い合わせ。
+        """励磁前に確認する設定のうち、**まだ確認できていない**ぶんの問い合わせ。
 
         `CANManager._confirm_configuration` が空リストになるまで送り直す ——
         「読めなければ通す」でゲートを緩めず、取りこぼしは再試行で解くための口。
         機構を動かすフレームを返してはならない (`feedback_probe_message` と同じ)。
+
+        **食い違いを直す書き込みを混ぜてよい。** ただし書いた値は控えから外して
+        読み返し直すこと —— 書けたかどうかを実機に聞かずに「一致した」と数えると、
+        ゲートが守っている事故を素通しにする。
         """
         return []
 

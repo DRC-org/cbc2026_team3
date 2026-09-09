@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import struct
 
@@ -7,7 +8,12 @@ import can
 import pytest
 
 from lib.drivers.base import ControlMode
-from lib.drivers.dm3520 import Dm3520CtrlMode, Dm3520Driver, Dm3520Error
+from lib.drivers.dm3520 import (
+    _RANGE_WRITE_ATTEMPTS,
+    Dm3520CtrlMode,
+    Dm3520Driver,
+    Dm3520Error,
+)
 from tests.feedback_frames import dm3520_feedback, feed_dm3520
 
 
@@ -463,6 +469,147 @@ class TestStartupSequence:
         drv = _driver()
 
         assert bytes(drv.emergency_stop_message().data)[-1] == 0xFD
+
+
+class TestFixedPointRangeRewrite:
+    """**物理非常停止はドライバの電源を数秒落とし、レンジは出荷値へ戻る。**
+
+    戻ったままでは `activation_block_reason()` が励磁を拒み続け、再励磁ボタンでは
+    絶対に解けない (2026-09-09 に 1 日で 3 回踏んだ)。そこで励磁の手前で config の
+    値を書き、**読み返して確かめてから**励磁へ進む。
+    """
+
+    @staticmethod
+    def _frames(messages: list[can.Message], kind: int) -> list[tuple[int, float]]:
+        """(レジスタ番号, 載っている float) を種別 (0x55 / 0x33) で絞る。"""
+        return [
+            (bytes(msg.data)[3], struct.unpack("<f", bytes(msg.data)[4:8])[0])
+            for msg in messages
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID and bytes(msg.data)[2] == kind
+        ]
+
+    def _confirm_loop(
+        self,
+        drv: Dm3520Driver,
+        device: dict[int, float],
+        *,
+        accept_writes: bool = True,
+        rounds: int = 8,
+    ) -> list[can.Message]:
+        """`CANManager._confirm_configuration` と同じ回し方 (空になるまで送る)。
+
+        `accept_writes=False` は「レンジ外の値を書いたので実機が元の値を返す」。
+        """
+        sent: list[can.Message] = []
+        for _ in range(rounds):
+            probes = drv.configuration_probe_messages()
+            if not probes:
+                break
+            sent.extend(probes)
+            for msg in probes:
+                data = bytes(msg.data)
+                if data[2] == Dm3520Driver.CONFIG_WRITE and accept_writes:
+                    device[data[3]] = struct.unpack("<f", data[4:8])[0]
+                elif data[2] == Dm3520Driver.CONFIG_READ:
+                    drv.matches_feedback(_config_response(drv, data[3], device[data[3]]))
+        return sent
+
+    @staticmethod
+    def _device(p_max: float, drv: Dm3520Driver) -> dict[int, float]:
+        return {
+            Dm3520Driver.REG_P_MAX: p_max,
+            Dm3520Driver.REG_V_MAX: drv.v_max,
+            Dm3520Driver.REG_T_MAX: drv.t_max,
+        }
+
+    def test_出荷値へ戻っていたら書き直して励磁へ進む(self) -> None:
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        device = self._device(12.5, drv)
+
+        sent = self._confirm_loop(drv, device)
+
+        assert self._frames(sent, Dm3520Driver.CONFIG_WRITE) == [(Dm3520Driver.REG_P_MAX, 1000.0)]
+        assert device[Dm3520Driver.REG_P_MAX] == pytest.approx(1000.0)
+        assert drv.activation_block_reason() is None
+
+    def test_書いた事実を一致と数えない(self) -> None:
+        """**レンジ外を書くと実機は元の値をそのまま返す** (実機で確認済み)。
+        書けたかどうかは読み返しでしか分からないので、書いた register は控えから
+        外して問い合わせ直す。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        _confirm_ranges(drv, p_max=12.5)
+
+        first = drv.configuration_probe_messages()
+
+        assert self._frames(first, Dm3520Driver.CONFIG_WRITE) == [(Dm3520Driver.REG_P_MAX, 1000.0)]
+        assert drv.activation_block_reason() is not None, "書いただけで通してはならない"
+        assert self._frames(drv.configuration_probe_messages(), Dm3520Driver.CONFIG_READ) == [
+            (Dm3520Driver.REG_P_MAX, 0.0)
+        ]
+
+    def test_書き直しても戻らなければ励磁しない(self) -> None:
+        """ゲートは残す。守っているのは「比例倍に読めた位置がそのまま保持目標に
+        書かれて機構が可動端へ走る」で、実際に踏んでいる (2026-09-09)。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        device = self._device(12.5, drv)
+
+        sent = self._confirm_loop(drv, device, accept_writes=False)
+
+        writes = self._frames(sent, Dm3520Driver.CONFIG_WRITE)
+        assert writes == [(Dm3520Driver.REG_P_MAX, 1000.0)] * _RANGE_WRITE_ATTEMPTS, (
+            "1 通落ちただけで諦めず、かつ無限には書かない"
+        )
+        reason = drv.activation_block_reason()
+        assert reason is not None
+        assert "p_max" in reason
+
+    def test_フラッシュへ保存しない(self) -> None:
+        """**寿命は約 1 万回。電源が入るたびに焼けば確実に潰れる。**
+        揮発は承知のうえで毎回書き直すのが正解なので、`0xAA` を送ってはならない。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        device = self._device(12.5, drv)
+
+        sent = [msg for msg, _ in drv.initialization_steps()]
+        sent += self._confirm_loop(drv, device)
+
+        assert self._frames(sent, Dm3520Driver.CONFIG_SAVE) == []
+        assert all(bytes(msg.data)[2] != Dm3520Driver.CONFIG_SAVE for msg in sent)
+
+    def test_書き直しをログに残す(self, caplog: pytest.LogCaptureFixture) -> None:
+        """無言で直すと、電源が落ちたこと自体が誰にも見えなくなる。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        device = self._device(12.5, drv)
+
+        with caplog.at_level(logging.INFO, logger="lib.drivers.dm3520"):
+            self._confirm_loop(drv, device)
+
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "slide" in message
+        assert "p_max" in message
+        assert "12.5" in message and "1000" in message
+
+    def test_一致しているレンジは書かない(self) -> None:
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        device = self._device(1000.0, drv)
+
+        sent = self._confirm_loop(drv, device)
+
+        assert self._frames(sent, Dm3520Driver.CONFIG_WRITE) == []
+        assert drv.activation_block_reason() is None
+
+    def test_再初期化のあとはもう一度書き直す(self) -> None:
+        """**電源断は何度でも起きる。** 諦めた回数を持ち越すと、2 回目の物理非常停止で
+        書き直しが 1 通も出ない。"""
+        drv = _driver(p_max=1000.0, v_max=200.0, t_max=10.0)
+        device = self._device(12.5, drv)
+        self._confirm_loop(drv, device, accept_writes=False)
+
+        drv.reinitialization_steps()
+        sent = self._confirm_loop(drv, device)
+
+        assert self._frames(sent, Dm3520Driver.CONFIG_WRITE) == [(Dm3520Driver.REG_P_MAX, 1000.0)]
+        assert drv.activation_block_reason() is None
 
 
 class TestHealthDetail:

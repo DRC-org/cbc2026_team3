@@ -70,10 +70,6 @@ def _axis(**overrides: object) -> dict:
     return axis
 
 
-def _axes(names: list[str]) -> dict:
-    return {name: _axis() for name in names}
-
-
 def _paired_axis(*motors: tuple[str, float], **overrides: object) -> dict:
     return _axis(
         motors={name: {"scale": scale} for name, scale in motors},
@@ -124,13 +120,11 @@ _VALVE_AXES = [f"valve_{i}" for i in range(1, 7)]
 
 _SUB_POSITIONS = {
     "axes": {
-        **_axes(["sub_arm_joint"]),
         **{name: _axis(command_mode="on_off", settle_s=0.0) for name in _VALVE_AXES},
         "pump_vac": _axis(command_mode="duty", settle_s=0.0),
         "pump_blow": _axis(command_mode="duty", settle_s=0.0),
     },
     "positions": {
-        "sub_arm_joint": {"home": 0.0, "extended": 21.0, "handoff": 23.0, "place": 24.0},
         **{name: {"open": 1.0, "closed": 0.0} for name in _VALVE_AXES},
         "pump_vac": {"stop": 0.0, "run": 0.61},
         "pump_blow": {"stop": 0.0, "run": 0.62},
@@ -263,14 +257,10 @@ class TestSubHandSteps:
                 [
                     *_valves(0.0),
                     ("pump_blow", 0.0),
-                    ("sub_arm_joint", 0.0),
                     ("pump_vac", 0.61),
                 ],
             ),
-            ("extend_sub_arm", [("sub_arm_joint", 21.0)]),
-            ("move_to_handoff", [("sub_arm_joint", 23.0)]),
             ("grip_by_suction", _valves(1.0)),
-            ("move_to_place", [("sub_arm_joint", 24.0)]),
             (
                 "release_at_place",
                 [
@@ -284,7 +274,6 @@ class TestSubHandSteps:
                 [
                     *_valves(0.0),
                     ("pump_blow", 0.0),
-                    ("sub_arm_joint", 0.0),
                 ],
             ),
         ],
@@ -304,10 +293,7 @@ class TestSubHandSteps:
 
         assert [s["label"] for s in seq.steps_info] == [
             "初期位置へ移動",
-            "補助ハンド展開",
-            "ワーク受け取り位置へ",
             "ワーク吸着",
-            "配置位置へ移動",
             "ワーク解放 (配置)",
             "初期位置へ復帰",
         ]

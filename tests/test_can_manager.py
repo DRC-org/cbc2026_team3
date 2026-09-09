@@ -722,10 +722,13 @@ class TestReenergizeAfterPowerLoss:
     持っていること自体が検証から落ちる**)。
     """
 
-    def _prepare(self, device_p_max: float) -> tuple[CANManager, dict[str, float]]:
+    def _prepare(
+        self, device_p_max: float, *, accept_writes: bool = True
+    ) -> tuple[CANManager, dict[str, float]]:
         """実機の代わりに応答を返す DM3520 を 1 台載せた manager。
 
         `device` の値を書き換えると「電源断でレジスタが出荷値へ戻った」を作れる。
+        `accept_writes=False` は「レンジ外の値を書いたので実機が元の値を返す」。
         """
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_dm3520", mock_bus())
@@ -742,14 +745,15 @@ class TestReenergizeAfterPowerLoss:
 
         async def _send(motor_name: str, msg: can.Message) -> None:
             data = bytes(msg.data)
-            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID and data[2] == (
-                Dm3520Driver.CONFIG_READ
-            ):
-                deliver_frame(
-                    mgr,
-                    "can_dm3520",
-                    dm3520_config_response(driver, data[3], device[registers[data[3]]]),
-                )
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID and data[3] in registers:
+                if data[2] == Dm3520Driver.CONFIG_WRITE and accept_writes:
+                    device[registers[data[3]]] = struct.unpack("<f", data[4:8])[0]
+                if data[2] == Dm3520Driver.CONFIG_READ:
+                    deliver_frame(
+                        mgr,
+                        "can_dm3520",
+                        dm3520_config_response(driver, data[3], device[registers[data[3]]]),
+                    )
                 return
             # 本機のフィードバックは問い合わせ駆動。自分宛の 1 通に 1 通返す
             deliver_frame(mgr, "can_dm3520", dm3520_feedback(driver, error=0))
@@ -757,18 +761,58 @@ class TestReenergizeAfterPowerLoss:
         mgr.send = _send  # type: ignore[method-assign]
         return mgr, device
 
-    async def test_電源断でレンジが戻っていたら再励磁で検出して止める(self) -> None:
-        """起動時に読んだ 1000 を信じたまま励磁すると、12.5 で送られた位置を
-        1000 で復号した **80 倍の値**がそのまま保持目標に書かれる。
+    async def test_電源断でレンジが戻っていたら再励磁で書き直す(self) -> None:
+        """**操縦者が押せるボタンはこれだけ。** 再励磁で直らないと、人が別ツールで
+        レジスタを書き直して起動し直すまで機体が動かせない (2026-09-09 に 3 回)。
         """
         mgr, device = self._prepare(1000.0)
         assert await mgr.initialize_motors() == []  # 起動時は一致している
 
         device["p_max"] = 12.5  # 物理非常停止でドライバの電源が落ちた
 
-        inactive = await mgr.activate_motors(feedback_timeout_s=0.2)
+        inactive = await mgr.activate_motors(feedback_timeout_s=0.5)
+
+        assert inactive == []
+        assert device["p_max"] == pytest.approx(1000.0)
+
+    async def test_書き直しても戻らなければ再励磁でも止める(self) -> None:
+        """起動時に読んだ 1000 を信じたまま励磁すると、12.5 で送られた位置を
+        1000 で復号した **80 倍の値**がそのまま保持目標に書かれる。書き込みを
+        足してもゲートは残す。
+        """
+        mgr, device = self._prepare(1000.0, accept_writes=False)
+        assert await mgr.initialize_motors() == []
+
+        device["p_max"] = 12.5
+
+        inactive = await mgr.activate_motors(feedback_timeout_s=0.5)
 
         assert inactive == ["sub_y_axis_m"]
+
+    async def test_書き直しをフラッシュへ保存しない(self) -> None:
+        """**寿命は約 1 万回。** 電源が入るたびに焼けば確実に潰れるので、揮発を
+        承知のうえで毎回書き直す。"""
+        mgr, device = self._prepare(1000.0)
+        await mgr.initialize_motors()
+        device["p_max"] = 12.5
+        sent: list[can.Message] = []
+        original = mgr.send
+
+        async def _record(motor_name: str, msg: can.Message) -> None:
+            sent.append(msg)
+            await original(motor_name, msg)
+
+        mgr.send = _record  # type: ignore[method-assign]
+
+        await mgr.activate_motors(feedback_timeout_s=0.5)
+
+        config_frames = [
+            bytes(msg.data) for msg in sent if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID
+        ]
+        assert (Dm3520Driver.REG_P_MAX, Dm3520Driver.CONFIG_WRITE) in [
+            (data[3], data[2]) for data in config_frames
+        ]
+        assert all(data[2] != Dm3520Driver.CONFIG_SAVE for data in config_frames)
 
     async def test_レンジが変わっていなければ再励磁できる(self) -> None:
         """**再初期化は「判断材料を集める」より前に置く。**

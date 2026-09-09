@@ -37,13 +37,14 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
 from lib.sequence.engine import Sequence
-from lib.sequence.motors import EStopActiveError, MotorHandle
+from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotContext, RobotServer
 from main import (
     _DEFAULT_PID,
     _attach_motion_profiles,
     _attach_sync_groups,
+    _build_limit_monitors,
     _build_manual_controller,
     _build_position_loops,
     _build_position_pid,
@@ -57,8 +58,15 @@ from main import (
     _wire_robot_motors,
 )
 from sequences.motor_check import MotorCheckSequence
-from tests.fake_can import deliver_frame, direct_runner, mark_feedback_at, mock_bus
+from tests.fake_can import (
+    deliver_frame,
+    direct_runner,
+    mark_feedback_at,
+    mock_bus,
+    mock_can_manager,
+)
 from tests.fake_clock import FakeClock
+from tests.fake_drivers import StubFeedbackDriver
 from tests.feedback_frames import feed_generic, feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -1453,6 +1461,7 @@ class TestStartAll:
             positions=PositionTable.empty(),
             position_loops=[],
             sync_monitors=[],
+            limit_monitors=[],
             target_refreshers=[],
             motor_group=None,
         )
@@ -1478,6 +1487,76 @@ class TestStartAll:
             ("main_hand", []),
             ("sub_hand", ["sub_lift"]),
         ]
+
+
+class TestLimitMonitorWiring:
+    """移動中の可動端監視を回す配線。
+
+    配線し忘れると歯止めは**指令を書く瞬間しか効かない**ままになり、遠い目標を
+    1 回書いた移動が途中でスイッチを踏んでも誰も止めない。
+    """
+
+    def _table(self, *, guard: dict | None) -> PositionTable:
+        axis: dict = {"unit": "mm", "command_unit": "rad", "scale": 2.0}
+        if guard is not None:
+            axis["guard"] = guard
+        return load_position_table(
+            {"axes": {"sub_y_axis": axis}, "positions": {"sub_y_axis": {"home": 0.0}}},
+            source="<test>",
+        )
+
+    def _sequence(self) -> Sequence:
+        sequence = _DummySequence("sub_hand")
+        group = MotorGroup(sensor_active=_no_sensors)
+        group.add(
+            MotorHandle("sub_y_axis", StubFeedbackDriver("sub_y_axis", 1), mock_can_manager())
+        )
+        sequence.bind_motors(group)
+        return sequence
+
+    def test_limits_を書いた軸を監視する(self) -> None:
+        monitors = _build_limit_monitors(
+            self._table(guard={"limits": {"minus": "sub_y_rear"}}),
+            self._sequence(),
+            sensor_active=_no_sensors,
+        )
+
+        assert [monitor.axis_names for monitor in monitors] == [("sub_y_axis",)]
+
+    def test_対象の軸が無ければ回さない(self) -> None:
+        assert (
+            _build_limit_monitors(
+                self._table(guard=None), self._sequence(), sensor_active=_no_sensors
+            )
+            == []
+        )
+
+    async def test_起動で回し_終了で止める(self) -> None:
+        monitor = MagicMock()
+        monitor.stop = AsyncMock()
+        can_manager = MagicMock()
+        can_manager.run = AsyncMock(return_value=[])
+        can_manager.shutdown = AsyncMock()
+        wiring = main._RobotWiring(
+            name="sub_hand",
+            sequence=_DummySequence("sub_hand"),
+            can_manager=can_manager,
+            positions=PositionTable.empty(),
+            position_loops=[],
+            sync_monitors=[],
+            limit_monitors=[monitor],
+            target_refreshers=[],
+            motor_group=None,
+        )
+        server = MagicMock()
+        server.start = AsyncMock()
+        server.cleanup = AsyncMock()
+
+        await main._start_all(server, [wiring])
+        monitor.start.assert_called_once_with()
+
+        await main._shutdown_all(server, [wiring])
+        monitor.stop.assert_awaited_once_with()
 
 
 class TestOriginResolver:

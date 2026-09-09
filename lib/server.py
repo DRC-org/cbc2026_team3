@@ -23,6 +23,7 @@ from lib.config_schema import (
     MatchSettings,
 )
 from lib.control.feedback import FeedbackFreshness
+from lib.control.limit_monitor import LimitMonitor
 from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
@@ -93,6 +94,7 @@ class RobotContext:
     can_manager: CANManager
     position_loops: list[M3508PositionLoop] = field(default_factory=list)
     sync_monitors: list[SyncMonitor] = field(default_factory=list)
+    limit_monitors: list[LimitMonitor] = field(default_factory=list)
     target_refreshers: list[TargetRefresher] = field(default_factory=list)
     manual: ManualController | None = None
     mode: OperationMode = OperationMode.SEQUENCE
@@ -199,6 +201,7 @@ class RobotServer:
         can_manager: CANManager,
         position_loops: list[M3508PositionLoop] | None = None,
         sync_monitors: list[SyncMonitor] | None = None,
+        limit_monitors: list[LimitMonitor] | None = None,
         target_refreshers: list[TargetRefresher] | None = None,
         manual: ManualController | None = None,
     ) -> None:
@@ -207,6 +210,7 @@ class RobotServer:
             can_manager=can_manager,
             position_loops=list(position_loops or []),
             sync_monitors=list(sync_monitors or []),
+            limit_monitors=list(limit_monitors or []),
             target_refreshers=list(target_refreshers or []),
             manual=manual,
         )
@@ -761,7 +765,12 @@ class RobotServer:
 
     @staticmethod
     def _periodic_tasks(ctx: RobotContext) -> tuple[PeriodicTask, ...]:
-        return (*ctx.position_loops, *ctx.sync_monitors, *ctx.target_refreshers)
+        return (
+            *ctx.position_loops,
+            *ctx.sync_monitors,
+            *ctx.limit_monitors,
+            *ctx.target_refreshers,
+        )
 
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
         if self._motor_check.running:

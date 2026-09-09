@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 SUB_HOME: dict[str, str] = {
-    "sub_arm_joint": "home",
     "sub_y_axis": "home",
     "sub_lift": "home",
     "sub_rotate": "home",
@@ -97,11 +96,6 @@ class MotorCheckSequence(Sequence):
     @step("サブハンド 初期姿勢へ", axes=SUB_HOME.keys())
     async def sub_home(self) -> None:
         await self.move_to(SUB_HOME)
-
-    @step("サブハンド アーム関節", axes={"sub_arm_joint"})
-    async def sub_arm(self) -> None:
-        await self.move_to({"sub_arm_joint": "extended"})
-        await self.move_to({"sub_arm_joint": "home"})
 
     @step("サブハンド 前後スライド (Y 方向)", axes={"sub_y_axis"})
     async def sub_y_axis(self) -> None:

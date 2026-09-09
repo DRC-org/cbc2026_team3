@@ -1,16 +1,4 @@
 axes:
-  sub_arm_joint:
-    unit: deg
-    command_unit: rad
-    scale: 0.017453292519943295   # deg -> rad (pi/180)
-    offset: 0.0          # 機械原点と電気原点のずれ [rad]。TODO: 実機で実測
-    timeout_s: 3.0       # この時間で到達しなければシーケンスを停止する
-    # TODO: 機構完成後、メインハンドと干渉しない角度範囲へ詰めること
-    manual:
-      min: -5.0
-      max: 15.0
-      steps: [1.0, 5.0]
-
   sub_y_axis:
     homing:
       sensor: sub_y_axis_f_limit_sensor
@@ -144,13 +132,6 @@ axes:
     timeout_s: 1.0
 
 positions:
-  # TODO: 機構完成後に実測値へ。現状は微小可動量のみ。
-  sub_arm_joint:
-    home: 0.0            # 収納姿勢 [deg]
-    extended: 8.0        # 展開姿勢 [deg]
-    handoff: 5.0         # メインハンドからの受け取り姿勢 [deg]
-    place: 10.0          # 配置姿勢 [deg]
-
   # TODO: 機構完成後に実測値へ。現状は「動いたことが目で分かる」ことだけを狙った仮値。
   sub_y_axis:
     home: -20.0          # 収納位置 [mm]。前端から後ろへ

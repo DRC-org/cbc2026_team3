@@ -49,6 +49,7 @@ WebSocket (`/ws`) を受ける。
 │         │                 └── Sequence ×3 (sequence/engine)   │
 │   周期タスク（control/periodic.py 継承）  ┐                     │
 │     M3508PositionLoop 200Hz / SyncMonitor 50Hz /              │
+│     LimitMonitor 50Hz /                                       │
 │     GenericTargetRefresher・QueryDrivenTargetRefresher 20Hz   │
 │                    CANManager（can_manager.py）                │
 │         ドライバ: m3508 / edulite05 / dm3520 / generic         │
@@ -117,8 +118,8 @@ CAN フレーム
 | 読む | `_load_all_configs` | `lib/config_schema.py` の 4 ローダを呼ぶ。誤記は `SystemExit` の 1 行 |
 | bind | `_ensure_port_available(host, port)` | 配線の**手前**で行う（会場での二重起動を CAN を開く前に落とす） |
 | 配線 | `_wire_one_robot` ×ロボット数 | 下表 |
-| 起動 | `_start_all` | `CANManager.run()` → 位置制御ループ → 同期監視 → 目標値再送 → サーバー |
-| 畳む | `_shutdown_all` | 位置制御ループ → 目標値再送 → 同期監視 → CAN → サーバーの順（順序は不変条件） |
+| 起動 | `_start_all` | `CANManager.run()` → 位置制御ループ → 同期監視 → 可動端監視 → 目標値再送 → サーバー |
+| 畳む | `_shutdown_all` | 位置制御ループ → 目標値再送 → 可動端監視 → 同期監視 → CAN → サーバーの順（順序は不変条件） |
 
 `_wire_one_robot` が呼ぶヘルパ:
 
@@ -132,12 +133,13 @@ CAN フレーム
 | `_wire_robot_motors` | `build_motor_group()` → `Sequence.bind_motors()` |
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
 | `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバの `SET_ZERO`）を解決 |
+| `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
 | `_build_manual_controller` | シーケンスと**同じ** `MotorGroup` を共有する `ManualController` |
 | `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す |
 | `_read_operstate` | `/sys/class/net/<ch>/operstate` を読み、down なら起動ログへ ERROR 1 行（起動は止めない） |
 
 生成した部品は `server.add_robot(robot_name, seq, can_manager, position_loops=…,
-sync_monitors=…, target_refreshers=…)` でサーバーへも渡す（サーバーはこれを①動作確認との
+sync_monitors=…, limit_monitors=…, target_refreshers=…)` でサーバーへも渡す（サーバーはこれを①動作確認との
 排他 ②緊急停止解除でのラッチ解除 ③緊急停止時の保持目標の破棄 ④安全ループの生死配信 に使う）。
 **開くバスはそのロボットが実際に使うものだけ**（`_robot_bus_names`。メインハンドは
 `can_dm3520` を、サブハンドは `can_m3508` を開かない）。シグナルの扱いは
@@ -255,7 +257,6 @@ down 中しか受け付けない）、up 後に `ERROR-ACTIVE` を確認して�
 
 | 論理軸 | モータ | ドライバ | バス | can_id | 役割 |
 |---|---|---|---|---|---|
-| `sub_arm_joint` | 同名 | edulite05 | can_edulite | 3 | アーム関節 |
 | `sub_y_axis` / `sub_lift` | 同名 | dm3520 | can_dm3520 | 0x01 / 0x02（MST 0x11 / 0x12） | 前後 / 昇降（ラックアンドピニオン直動） |
 | `sub_gripper` | 同名 | generic（サーボ #1 SV0） | can_generic | 0x48 | 開 / 閉 |
 | `valve_1`〜`valve_6` / `pump_vac` / `pump_blow` | 同名 | generic（電磁弁 #0 ch0-5 / DC ch1・ch2） | can_generic | 0xC0〜0xC5 / 0x81 / 0x82 | `on_off` ×6 / duty ×2 |
@@ -290,8 +291,9 @@ cbc2026_team3/
 配信・受理    server.py / ws_hub.py / server_motor_check.py / server_dryrun.py
 制御権と手順  manual.py / sequence/engine.py / sequences/*.py
 軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py
-周期タスク    control/position_loop.py / sync_monitor.py / target_refresh.py /
-              trajectory.py ─ periodic.py / feedback.py / sync_guard.py / pid.py
+周期タスク    control/position_loop.py / sync_monitor.py / limit_monitor.py /
+              target_refresh.py / trajectory.py ─ periodic.py / feedback.py /
+              sync_guard.py / pid.py
 CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic}.py
 最下位        axis_sync.py / motion_guard.py / config_schema.py / health.py / match_state.py / commands.py
 ```
@@ -299,7 +301,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層 |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ** |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -309,6 +311,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `control/pid.py` / `trajectory.py` | モータ非依存 PID（測定値微分 / conditional integration / デッドバンド）/ 台形速度プロファイル |
 | `control/position_loop.py` | M3508 の PC 側位置制御ループ（バス単位・200Hz） |
 | `control/sync_monitor.py` | 左右ペア軸のずれを常時監視（50Hz）。超過で全体緊急停止 |
+| `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit` |
 | `control/target_refresh.py` | `GenericTargetRefresher` / `QueryDrivenTargetRefresher`（ともに 20Hz） |
 | `sequence/positions.py` | 位置定数 yaml の読み込み・単位換算・論理軸の解決（`PositionTable` / `AxisSpec`） |
 | `sequence/homing.py` / `motors.py` / `engine.py` | 零点確定（`HomingRunner`。センサ読みと原点確定は注入）/ `MotorHandle` と `AxisHandle` / `@step` ベースのシーケンスエンジン |
@@ -543,12 +546,13 @@ EDULITE なので M3508 の位置制御ループを持たず、この段には�
 
 ### 周期タスクの共通土台（`lib/control/periodic.py`）
 
-4 つの周期タスクは `PeriodicTask`（送信経路を奪い合いうるものは `PausablePeriodicTask`）を継承し、作法を揃える。
+5 つの周期タスクは `PeriodicTask`（送信経路を奪い合いうるものは `PausablePeriodicTask`）を継承し、作法を揃える。
 
 | タスク | 周期 | 対象 | 送るもの |
 |---|---|---|---|
 | `M3508PositionLoop` | 200Hz | バス上の全 M3508 | `0x200` 電流指令フレーム（1 周期 1 通） |
 | `SyncMonitor` | 50Hz | `sync_tolerance` を持つ全軸 | 送信しない（監視のみ） |
+| `LimitMonitor` | 50Hz | `guard.limits` を持つ全軸 | 発火した軸にだけ「その場の実測位置」を目標として 1 通 |
 | `GenericTargetRefresher` | 20Hz | generic ドライバのモータ | `SET_TARGET` の再送 |
 | `QueryDrivenTargetRefresher` | 20Hz | EDULITE 05 + DM3520（`_QUERY_DRIVEN_DRIVERS`） | 目標値 or `idle_target_value()` のラッチ値 |
 
@@ -870,13 +874,13 @@ match:
 
 ```yaml
 axes:                      # 換算: command = value * scale + offset
-  sub_arm_joint:           # 単一モータ軸（軸名 = モータ名。scale / offset を軸直下に書く）
-    unit: deg              # チームが positions に書く単位
+  sub_y_axis:              # 単一モータ軸（軸名 = モータ名。scale / offset を軸直下に書く）
+    unit: mm               # チームが positions に書く単位
     command_unit: rad      # モータへ実際に送る単位
-    scale: 0.017453292519943295
+    scale: 1.0668451
     offset: 0.0            # 機械原点と電気原点のずれ（指令単位）
-    timeout_s: 3.0         # 到達待ちの上限。未指定なら 5.0
-    tolerance: 0.5         # 到達許容差（人間の単位）。未指定ならドライバ既定値
+    timeout_s: 4.0         # 到達待ちの上限。未指定なら 5.0
+    tolerance: 1.0         # 到達許容差（人間の単位）。未指定ならドライバ既定値
 
   y_axis:                  # 複数モータで駆動する論理軸。軸名はモータ名でなくてよい
     unit: mm
