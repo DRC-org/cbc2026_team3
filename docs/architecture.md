@@ -295,7 +295,7 @@ cbc2026_team3/
 ```
 配信・受理    server.py / ws_hub.py / server_motor_check.py / server_dryrun.py
 制御権と手順  manual.py / sequence/engine.py / sequences/*.py
-軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py
+軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py / sequence/interlock.py
 周期タスク    control/position_loop.py / sync_monitor.py / limit_monitor.py /
               target_refresh.py / trajectory.py ─ periodic.py / feedback.py /
               sync_guard.py / pid.py
@@ -319,6 +319,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit`。観測周期より狭い ON 区間は接触の累計で拾い、止めた回数（`intervention()`）を `move_to` へ渡す |
 | `control/target_refresh.py` | `GenericTargetRefresher` / `QueryDrivenTargetRefresher`（ともに 20Hz） |
 | `sequence/positions.py` | 位置定数 yaml の読み込み・単位換算・論理軸の解決（`PositionTable` / `AxisSpec`） |
+| `sequence/interlock.py` | 軸どうしの干渉（`AxisInterlock` / `InterlockSpec`）。位置定数 yaml の `interlocks:` を「指令が通った後の姿勢」で判定し、`ManualController._apply` と `Sequence.move_to` の両方がここを呼ぶ。他方の軸は最後に指令した目標 → 無ければフィードバック |
 | `sequence/homing.py` / `motors.py` / `engine.py` | 零点確定（`HomingRunner`。センサ読みと原点確定は注入）/ `MotorHandle` と `AxisHandle` / `@step` ベースのシーケンスエンジン |
 | `manual.py` / `tuning/metrics.py` | 手動操縦（`OperationMode` / `ManualController`。軸単位でしか指令しない）/ ステップ応答の指標算出（呼び出し元は `scripts/tune_y_axis.py` だけ） |
 | `health.py` / `match_state.py` | ヘルスの語彙と集約（`worst_bus_health`）/ フェーズ・コート・指差喚呼・試合時間（`ALL_ROLES` はここだけ） |
@@ -846,6 +847,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの偏差監視がそのまま効く。ただし
 `move_to` 完了時の段は手動では通らないので、効くのは常駐の段だけ —— `y_axis` は 200Hz と
 50Hz、`rotate` は 50Hz のみである）。
+軸どうしの干渉（`interlocks:`）は `_apply` が `AxisInterlock` で判定し、`ManualControlError` で拒否する（§4）。
 **モータ単位の指令口を作らない**（UI にもモータ単位のジョグを出さない）。ジョグの起点は直前の
 手動目標値で、起点が無い（初回・緊急停止後）ときだけフィードバックから逆換算する。モータの
 目標値はモード切替で消さない（消すのはジョグの起点だけ）。範囲外の値は**拒否ではなくクランプ**
@@ -973,6 +975,10 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
   conveyor:
     run: { red: 0.3, blue: -0.3 }   # コートで変わる位置だけ辞書で書く（両方必須）
   gripper: { open: …, closed: … }   # 離散状態アクチュエータは「名前付き状態」として書く
+
+interlocks:                # 軸どうしの干渉（§4）。位置名で書き、「居る」かどうかは各軸の tolerance で決まる
+  - when: { sub_pitch: close }
+    require: { sub_offset: close }
 ```
 
 **読み込みを拒否する組み合わせ**:
@@ -988,6 +994,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
 | `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
+| `interlocks` に無い軸名・位置名、`tolerance` の無い軸、位置指令でない軸 | 綴り違いは「その姿勢では止まらない」としてしか現れず、機構を壊すまで出ない |
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で

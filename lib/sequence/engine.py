@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from lib.match_state import Court
+from lib.sequence.interlock import AxisInterlock
 from lib.sequence.motors import AxisHandle
 from lib.sequence.positions import PositionTable
 
@@ -211,6 +212,13 @@ class Sequence:
     ) -> None:
         table = self.positions
         pending: list[tuple[AxisHandle, str, float | None]] = []
+        # 出荷のシーケンスは並びで干渉を避けているので発火しないはず。
+        # 段を書き換えた人が気付くための歯止め
+        AxisInterlock(table).check(
+            {axis: table.raw(axis, name, court=self.court) for axis, name in targets.items()},
+            court=self.court,
+            motors=self.motors,
+        )
         # 保護は目標を実測位置へ書き直すので `is_reached` は必ず成立する。控えないと
         # 軸が途中に居るままシーケンスだけが先へ進む
         before = {axis: self._limit_intervention(axis) for axis in targets}

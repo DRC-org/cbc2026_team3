@@ -190,3 +190,9 @@ positions:
     stop: 0.0            # 停止 [duty]
     run: 0.95             # 吸気 [duty]
 
+# 軸どうしの干渉 (docs/invariants.md §4)。ピッチが close のあいだ、オフセットは close 以外の
+# 姿勢を取れない (機構が干渉する)。手動操縦とシーケンスの両方が指令の瞬間に判定する。
+# 「居る」かどうかは各軸の tolerance で決まり、中間の角は「居ない」と扱う。
+interlocks:
+  - when: { sub_pitch: close }
+    require: { sub_offset: close }

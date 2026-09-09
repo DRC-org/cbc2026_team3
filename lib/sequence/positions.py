@@ -12,12 +12,14 @@ from lib.match_state import Court
 # 可動端インターロック・跳躍量・トルクの判断は最下位層に閉じてある。ここは
 # 「宣言を yaml から読む」だけで、判断そのものは持たない
 from lib.motion_guard import LimitSpec, MotionGuardSpec
+from lib.sequence.interlock import InterlockSpec
 
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
     "CourtMotorSpec",
     "CourtUnresolvedError",
+    "InterlockSpec",
     "ManualSpec",
     "MotionGuardSpec",
     "MotionSpec",
@@ -533,12 +535,14 @@ class PositionTable:
         axes: Mapping[str, AxisSpec],
         positions: Mapping[str, Mapping[str, float | dict[str, float]]],
         *,
+        interlocks: Sequence[InterlockSpec] = (),
         source: str = "<inline>",
     ) -> None:
         self._axes: dict[str, AxisSpec] = dict(axes)
         self._positions: dict[str, dict[str, float | dict[str, float]]] = {
             axis: dict(values) for axis, values in positions.items()
         }
+        self._interlocks = tuple(interlocks)
         self._source = source
 
     @classmethod
@@ -549,9 +553,11 @@ class PositionTable:
     def merged(cls, tables: Sequence[PositionTable]) -> PositionTable:
         axes: dict[str, AxisSpec] = {}
         positions: dict[str, dict[str, float | dict[str, float]]] = {}
+        interlocks: list[InterlockSpec] = []
         owner: dict[str, str] = {}
 
         for table in tables:
+            interlocks.extend(table._interlocks)
             for name, spec in table._axes.items():
                 if name in axes:
                     raise ValueError(
@@ -565,7 +571,7 @@ class PositionTable:
                 positions[name] = dict(values)
 
         source = " + ".join(table.source for table in tables) or "<merged>"
-        return cls(axes, positions, source=source)
+        return cls(axes, positions, interlocks=interlocks, source=source)
 
     @property
     def source(self) -> str:
@@ -574,6 +580,10 @@ class PositionTable:
     @property
     def axes(self) -> tuple[str, ...]:
         return tuple(self._axes)
+
+    @property
+    def interlocks(self) -> tuple[InterlockSpec, ...]:
+        return self._interlocks
 
     def names(self, axis: str) -> tuple[str, ...]:
         return tuple(self._positions.get(axis, {}))
@@ -1114,7 +1124,94 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
     for axis, spec in axes.items():
         _check_retreat_position(source, spec, positions.get(axis, {}))
 
-    return PositionTable(axes, positions, source=source)
+    interlocks = _parse_interlocks(source, config.get("interlocks"), axes, positions)
+
+    return PositionTable(axes, positions, interlocks=interlocks, source=source)
+
+
+_INTERLOCK_KEYS = frozenset({"when", "require"})
+
+
+def _parse_interlocks(
+    source: str,
+    raw: object,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, float | dict[str, float]]],
+) -> tuple[InterlockSpec, ...]:
+    """軸どうしの干渉を読む。**書かなければ歯止めは無い** (`guard` と同じ作法)。
+
+    軸名・位置名の綴り違いは黙って通すと「その姿勢では止まらない」としてしか
+    現れず、機構を壊すまで出ないので起動前に落とす。
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{source}: interlocks は並びである必要があります: {raw!r}")
+
+    specs: list[InterlockSpec] = []
+    for index, entry in enumerate(raw):
+        path = f"interlocks[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{source}: {path} は辞書である必要があります: {entry!r}")
+        unknown = sorted(set(entry) - _INTERLOCK_KEYS)
+        if unknown:
+            raise ValueError(f"{source}: {path} に未知のキー: {', '.join(unknown)}")
+        missing = sorted(_INTERLOCK_KEYS - set(entry))
+        if missing:
+            raise ValueError(f"{source}: {path} に必須キーがありません: {', '.join(missing)}")
+        try:
+            specs.append(
+                InterlockSpec(
+                    when=_parse_interlock_side(
+                        source, f"{path}.when", entry["when"], axes, positions
+                    ),
+                    require=_parse_interlock_side(
+                        source, f"{path}.require", entry["require"], axes, positions
+                    ),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(f"{source}: {path}: {exc}") from exc
+    return tuple(specs)
+
+
+def _parse_interlock_side(
+    source: str,
+    path: str,
+    raw: object,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, float | dict[str, float]]],
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{source}: {path} は軸名 → 位置名の空でない辞書: {raw!r}")
+
+    pairs: list[tuple[str, str]] = []
+    for axis, name in raw.items():
+        spec = axes.get(axis)
+        if spec is None:
+            raise ValueError(
+                f"{source}: {path} の軸 '{axis}' が axes にありません "
+                f"(定義済みの軸: {', '.join(axes) or '(なし)'})"
+            )
+        if not isinstance(name, str) or name not in positions.get(axis, {}):
+            available = ", ".join(positions.get(axis, {})) or "(なし)"
+            raise ValueError(
+                f"{source}: {path}.{axis} の位置 '{name}' が positions.{axis} にありません "
+                f"(定義済みの位置: {available})"
+            )
+        if spec.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"{source}: {path}.{axis} は位置指令の軸ではありません "
+                f"(command_mode={spec.command_mode.value})"
+            )
+        if spec.tolerance is None:
+            # 「その位置に居る」を決める幅が無いと、干渉の判定そのものが立たない
+            raise ValueError(
+                f"{source}: {path}.{axis} には axes.{axis}.tolerance が必要です "
+                "(位置に居るかどうかを判定する許容差がありません)"
+            )
+        pairs.append((axis, name))
+    return tuple(pairs)
 
 
 def _check_retreat_position(
