@@ -953,8 +953,8 @@ ON 区間が `step` より狭いと、指令 1 回でその区間を跨いでし
 保護（偏差ラッチ・途絶判定）は生きたままである。**
 
 **`align_distance < sync_tolerance` を起動時に強制する。** 整列段は左右の位置を
-意図的にずらす操作なので、そのずれが `sync_tolerance` に届くと、**零点確定の最中に
-3 層の保護**（位置制御ループ 200Hz / `SyncMonitor` 50Hz / `move_to` 完了時）が発報する。
+意図的にずらす操作なので、そのずれが `sync_tolerance` に届くと、**零点確定の最中に常駐の
+偏差監視**（位置制御ループ 200Hz / `SyncMonitor` 50Hz）が発報する。
 機体はラッチしたまま止まり、操縦者からは**「動作確認の最初のステップでいつも緊急停止する」**
 としか見えない —— 原因が config から読めないので、config 側で先に拒否する。
 
@@ -1283,15 +1283,15 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 
 | 周期 | 実装 | 何をするか |
 |---|---|---|
-| 200Hz | `control/position_loop.py` + `control/sync_guard.py` | 偏差超過・途絶で電流 0 にラッチ |
-| 50Hz | `control/sync_monitor.py` | 偏差超過（2 サンプル）で**全体緊急停止** |
+| 200Hz | `control/position_loop.py` + `control/sync_guard.py` | 偏差超過・途絶で電流 0 にラッチ（**`y_axis` のみ** —— 全メンバが同じ位置制御ループに載る組しか登録されない） |
+| 50Hz | `control/sync_monitor.py` | 偏差超過（2 サンプル）で**全体緊急停止**（`y_axis` / `rotate`） |
 | 20Hz | `control/target_refresh.py` | 自作モタドラへ目標値を再送（生存通知） |
 
 **偏差の境界そのものは `lib/axis_sync.py` の `SyncGroup.violation()` 1 箇所。**
-3 層とも同じ関数を呼ぶ。層ごとに違うのは頻度と超過後の扱い（debounce・ラッチ・効果）
-だけで、境界がずれてはならない。
+偏差監視の 3 段（`move_to` 完了時 / 200Hz / 50Hz）とも同じ関数を呼ぶ。段ごとに違うのは
+頻度と超過後の扱い（debounce・ラッチ・効果）だけで、境界がずれてはならない。
 
-**この 3 層はいずれも「ずれたら止める」側で、ずれを縮めるものは 1 つも無い。**
+**この 3 段はいずれも「ずれたら止める」側で、ずれを縮めるものは 1 つも無い。**
 位置制御はモータごとに独立した PID なので、左右で負荷や摩擦が違えば追従差は原理的に
 残る。縮める経路は 200Hz の位置制御ループに載る**同期補正**（`SyncGroup.corrections()`）
 だけで、`axes.<軸>.sync_kp` を書いた軸にしか出ない。**本番の `y_axis` は 2026-09-04 に
@@ -1299,7 +1299,7 @@ deviation = pos_r / scale_r - pos_l / scale_l = (pos_r + pos_l) / |scale|
 **机上ベンチ（`config/bench/m3508/`）は直結していない 2 台なので 0.0** —— 揃うべき前提が
 無いまま別々の負荷で回るため。詰め方は `docs/mechanism_handoff.md` §3-1。
 補正は電流 0 の周期には出ないので、
-上の 3 層の判断を上書きすることはない。
+上の 3 段の判断を上書きすることはない。
 
 **現在の偏差は手動操縦パネルの軸行に出る**（`state.manual.axes[].deviation`。算出は
 同じ `SyncGroup.deviation()`）。ここが無かった頃は「どれだけずれて止まったか」を読む
