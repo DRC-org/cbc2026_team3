@@ -548,7 +548,8 @@ describe("SubsystemStatus", () => {
     expect(screen.queryByText(/CAN 途絶/)).not.toBeInTheDocument();
   });
 
-  it("エピソード 0 件なら、ワーク落下しうるバスでも何も出さない", () => {
+  it("エピソード 0 件なら、ワーク落下しうるバスでも何も出さない", async () => {
+    const user = userEvent.setup();
     renderWithRobot(
       <SubsystemStatus
         connected
@@ -563,6 +564,14 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: false })).toBeInTheDocument();
     expect(screen.queryByText(/CAN 途絶/)).not.toBeInTheDocument();
+
+    // **開いても 1px も占めないこと。** 空の `<ul>` が残ると、中身の無い色付きの帯が
+    // 平常時にずっと出たままになる。文字列の不在だけを見ていると、早期リターンを
+    // 消しても帯だけが残った状態で緑になる
+    await user.click(screen.getByRole("button", { expanded: false }));
+    expect(
+      screen.queryByRole("list", { name: "ワーク落下の恐れがあるバス" }),
+    ).not.toBeInTheDocument();
   });
 
   /**
@@ -670,6 +679,7 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.queryByText("版番号 未確認")).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "版番号 未確認のモータ" })).not.toBeInTheDocument();
   });
 
   /**
@@ -864,6 +874,7 @@ describe("SubsystemStatus", () => {
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
     expect(screen.queryByText("タスク失敗")).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "失敗したタスク" })).not.toBeInTheDocument();
   });
 
   it("開閉ボタンが開閉対象と結ばれている", async () => {

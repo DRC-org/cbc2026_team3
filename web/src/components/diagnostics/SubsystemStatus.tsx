@@ -90,7 +90,13 @@ function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
   if (buses.length === 0) return null;
 
   return (
-    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-warning bg-warning/5 px-2 py-1">
+    // 0 件で `<ul>` だけが残ると、中身の無い色付きの帯が平常時にずっと出る。
+    // 名前を付けて「この一覧が居るかどうか」をテストから見えるようにしてある
+    // (文字列の不在だけで見ると、早期リターンを消しても緑のまま通る)
+    <ul
+      aria-label="ワーク落下の恐れがあるバス"
+      className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-warning bg-warning/5 px-2 py-1"
+    >
       {buses.map((bus) => (
         <li key={bus.name} className="flex min-w-0 flex-col">
           <span className="flex min-w-0 items-center gap-1.5">
@@ -125,7 +131,10 @@ function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
   if (motors.length === 0) return null;
 
   return (
-    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1">
+    <ul
+      aria-label="版番号 未確認のモータ"
+      className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1"
+    >
       {motors.map((motor) => (
         <li key={motor} className="flex min-w-0 flex-col">
           <span className="flex min-w-0 items-center gap-1.5">
@@ -244,7 +253,10 @@ function FailedTasksNotice({ labels }: { labels: string[] }) {
   if (labels.length === 0) return null;
 
   return (
-    <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1">
+    <ul
+      aria-label="失敗したタスク"
+      className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-info bg-info/5 px-2 py-1"
+    >
       {labels.map((label) => (
         <li key={label} className="flex min-w-0 flex-col">
           <span className="flex min-w-0 items-center gap-1.5">

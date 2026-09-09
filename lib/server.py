@@ -1150,11 +1150,24 @@ class RobotServer:
     def _periodic_tasks(ctx: RobotContext) -> tuple[PeriodicTask, ...]:
         """1 ロボットぶんの周期タスク全部 (実周期の集計とリセットはこの単位で回す)。
 
-        3 種を並べる箇所が match_start / match_finish の 2 つあるので、1 つに
-        まとめておく —— 別々に書くと、4 種目の周期タスクが増えたときに片方だけが
-        古いまま残り、症状は「その試合の集計にだけ 1 本足りない」になる。
+        並べる箇所が match_start / match_finish の 2 つあるので、1 つにまとめて
+        ある —— 別々に書くと、周期タスクの種類が増えたときに片方だけが古いまま
+        残り、症状は「その試合の集計にだけ 1 本足りない」になる。実際に
+        `LimitGuard` (4 種目) を足したとき、この関数を直しただけで安心して
+        両方が追従したと思い込み、しばらく漏れたまま残っていた —— まとめて
+        あること自体は「書き写す危険」を消すだけで、「足し忘れる危険」までは
+        消さない。**足したときは必ずここのタプルと、このテストの隣にある
+        「持つとき / 持たないとき」を固定したテストの両方を見ること。**
+
+        `limit_guard` は `limits:` を書いた軸が 1 本も無いロボットでは `None`
+        (組み立てられない) なので、除いてから展開する。
         """
-        return (*ctx.position_loops, *ctx.sync_monitors, *ctx.target_refreshers)
+        return (
+            *ctx.position_loops,
+            *ctx.sync_monitors,
+            *ctx.target_refreshers,
+            *((ctx.limit_guard,) if ctx.limit_guard is not None else ()),
+        )
 
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
         # **動作確認の実行中は試合に入れない。** フェーズが MATCH になると

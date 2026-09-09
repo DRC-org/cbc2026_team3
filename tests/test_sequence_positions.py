@@ -1196,8 +1196,12 @@ class TestLimitSpec:
     """リミットスイッチ保護の宣言 (axes.<軸>.limits)。
 
     「そのスイッチに触れたら、そのスイッチのある側へ進む指令を止める」ことだけを
-    宣言する。検証は「書いたのに効かない保護」を起動時に潰すためにある —— 保護は
-    平常時には一切姿を現さないので、効いていないことは機構が壊れるまで分からない。
+    宣言する。検証は「書いたのに効かない保護」を読み込みの時点で潰すためにある ——
+    保護は平常時には一切姿を現さないので、効いていないことは機構が壊れるまで分からない。
+
+    **どの検証も起動そのものは止めない** (`main._load_position_table_file` が
+    読み込み失敗を「定数なしで起動」へ倒す) ので、config が拒まれた結果は
+    「そのロボットの軸が 0 本になる」形で現れる。
     """
 
     def _axis(self, *, limits: object, **extra: object) -> dict:
@@ -1375,10 +1379,14 @@ class TestLimitSpec:
         assert table.axis("y_axis").homing is not None
         assert len(table.limits("y_axis")) == 1
 
-    def test_同じセンサで向きが食い違えば起動を拒否する(self) -> None:
+    def test_同じセンサで向きが食い違えばこのファイルを読めなくする(self) -> None:
         """食い違うと「零点確定に向かう向きの指令が保護で止まる」形で必ず失敗する。
         しかも零点確定の最中はその保護を外しているので、**症状が出るのは零点確定が
         終わった後**であり、切り分けが難しい。
+
+        **起動そのものは止まらない** —— `main._load_position_table_file` が
+        読み込み失敗を「定数なしで起動」へ倒すので、実際に起きるのはこのロボットの
+        位置定数がまるごと消えることである。
         """
         with pytest.raises(ValueError, match="direction"):
             load_position_table(self._homed(limit_direction=1))
