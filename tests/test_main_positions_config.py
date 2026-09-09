@@ -6,7 +6,7 @@ import pathlib
 import pytest
 import yaml
 
-from lib.sequence.positions import PositionLookupError
+from lib.sequence.positions import PositionLookupError, load_position_table
 from main import _load_position_table_file, _positions_path
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -154,3 +154,49 @@ class TestShippedMainHandGuard:
             assert spec.guard is not None
             assert spec.guard.max_step is None, axis
             assert spec.guard.stall_torque is None, axis
+
+
+class TestShippedMainHandVias:
+    """n 列目ワークへ寄せる経由点 (`*_via_*`) が両軸で対になり、可動範囲に収まっていること。
+
+    値はどれも実機で干渉を見ながら詰める仮値である。**始点から終点へ単調に進むことは
+    検査しない** —— 干渉を避けるために途中で一旦戻す経路を取る余地を残すため。
+    """
+
+    @pytest.fixture
+    def table(self):
+        """同梱ファイルを **例外を握り潰さない** loader で読む。
+
+        `_load_position_table_file` は読み込み失敗を空表へ変えて起動を続けるため、
+        値の誤りが「軸が定義されていない」に化けて、何がどう外れたのかが読めない。
+        """
+        path = _CONFIG_DIR / "main_hand_positions.yaml"
+        return load_position_table(yaml.safe_load(path.read_text()), source=str(path))
+
+    @staticmethod
+    def _via_names(table, axis: str) -> set[str]:
+        return {name for name in table.names(axis) if "_via_" in name}
+
+    def test_経由点は両軸で同じ名前が揃っている(self, table) -> None:
+        """シーケンスは同じ位置名を `y_axis` と `rotate` の両方へ引く。
+
+        片方にしか無い名前は、実行時に `PositionLookupError` が出るまで分からない。
+        """
+        y_axis_vias = self._via_names(table, "y_axis")
+        rotate_vias = self._via_names(table, "rotate")
+
+        assert y_axis_vias, "y_axis に経由点が 1 つも無い"
+        assert y_axis_vias == rotate_vias, (
+            f"経由点の対が崩れている: y_axis のみ={sorted(y_axis_vias - rotate_vias)}, "
+            f"rotate のみ={sorted(rotate_vias - y_axis_vias)}"
+        )
+
+    @pytest.mark.parametrize("axis", ["y_axis", "rotate"])
+    def test_経由点は手動操縦の可動範囲に収まっている(self, table, axis: str) -> None:
+        """範囲の判定は loader が持つ (`positions` 全件を `axes.<軸>.manual` と突き合わせる)。
+
+        しきい値をここへ写すと対を機械的に守れなくなるので、同梱ファイルをその
+        検証へ通すこと自体が検査であり、ここでは空振りでないことだけを確かめる。
+        """
+        assert table.axis(axis).manual is not None, f"{axis} に manual が無く範囲検証が効かない"
+        assert self._via_names(table, axis), f"{axis} に経由点が 1 つも無い"

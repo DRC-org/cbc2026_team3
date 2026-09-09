@@ -103,6 +103,8 @@ _MAIN_POSITIONS = {
         "wall_r": _axis(),
     },
     "positions": {
+        # 経由点は経路の順序をそのまま指令値で読むための目印なので、軸をまたいで
+        # 1 つも重複しない値を与える (重複すると入れ替わっても検査が通ってしまう)
         "y_axis": {
             "home": 11.0,
             "work_1": 12.0,
@@ -111,8 +113,36 @@ _MAIN_POSITIONS = {
             "work_shared": 16.0,
             "approach": 14.0,
             "place": 15.0,
+            "work_1_via_1": 101.0,
+            "work_1_via_2": 102.0,
+            "work_1_via_3": 103.0,
+            "work_2_via_1": 201.0,
+            "work_2_via_2": 202.0,
+            "work_2_via_3": 203.0,
+            "work_3_via_1": 301.0,
+            "work_3_via_2": 302.0,
+            "work_3_via_3": 303.0,
+            "work_shared_via_1": 401.0,
+            "work_shared_via_2": 402.0,
+            "work_shared_via_3": 403.0,
         },
-        "rotate": {"home": 20.0, "pick": 21.0, "place": 22.0},
+        "rotate": {
+            "home": 20.0,
+            "pick": 21.0,
+            "place": 22.0,
+            "work_1_via_1": 501.0,
+            "work_1_via_2": 502.0,
+            "work_1_via_3": 503.0,
+            "work_2_via_1": 601.0,
+            "work_2_via_2": 602.0,
+            "work_2_via_3": 603.0,
+            "work_3_via_1": 701.0,
+            "work_3_via_2": 702.0,
+            "work_3_via_3": 703.0,
+            "work_shared_via_1": 801.0,
+            "work_shared_via_2": 802.0,
+            "work_shared_via_3": 803.0,
+        },
         "gripper": {"open": 31.0, "closed": 32.0},
         "conveyor": {"stop": 0.0, "run": 0.4},
         "wall_f": {"initial": 41.0, "closed": 42.0, "open": 43.0},
@@ -128,7 +158,8 @@ _MAIN_HOME_TARGETS = [
     ("gripper", 31.0),
     ("wall_f", 41.0),
     ("wall_r", 44.0),
-    ("conveyor", 0.0),
+    # HOME 姿勢はコンベアを回したまま待つ。止めるのは復帰の最後だけ
+    ("conveyor", 0.4),
 ]
 
 _VALVE_AXES = [f"valve_{i}" for i in range(1, 7)]
@@ -171,12 +202,52 @@ def _paired_motor_names(table: PositionTable) -> list[tuple[str, str]]:
     return pairs
 
 
+# n 列目へ寄せるステップと、そのステップが向かうワーク名。
+_MAIN_APPROACH_STEPS = [
+    ("move_to_work_3", "work_3"),
+    ("move_to_work_shared", "work_shared"),
+    ("move_to_work_1", "work_1"),
+    ("move_to_work_2", "work_2"),
+]
+
+
 class TestMainHandSteps:
+    @pytest.mark.parametrize(("method_name", "work"), _MAIN_APPROACH_STEPS)
+    async def test_列へは経由点_3_つを順に踏んでから寄せる(
+        self, method_name: str, work: str
+    ) -> None:
+        """`y_axis` と `rotate` を一息に動かすと機構が干渉する (docs/invariants.md §4)。
+
+        守っているのはこの並びだけなので、**両軸が同じ段数・同じ順序で対になって**
+        指令されることまで見る。片軸だけ見ると対が崩れても落ちない。
+        """
+        table = load_position_table(_MAIN_POSITIONS)
+        seq = MainHandSequence()
+        sink, _ = _wire(seq, _MAIN_POSITIONS)
+
+        await getattr(seq, method_name)()
+
+        issued: dict[str, list[float]] = collections.defaultdict(list)
+        for name, value in sink:
+            issued[name].append(value)
+
+        vias = [f"{work}_via_{n}" for n in (1, 2, 3)]
+        for axis, path in (("y_axis", [*vias, work]), ("rotate", [*vias, "pick"])):
+            for motor in table.axis(axis).motor_names:
+                expected = [table.commands(axis, position)[motor] for position in path]
+                assert len(set(expected)) == len(expected), (
+                    f"{axis}.{motor} の経路に同じ指令値があり順序を検査できない"
+                )
+                assert issued[motor] == expected, (
+                    f"{method_name}: {motor} が {path} の順に動いていない"
+                )
+
     async def test_starts_and_ends_at_home(self) -> None:
         per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
 
         assert dict(per_step[0][1]) == dict(_MAIN_HOME_TARGETS)
-        assert dict(per_step[-1][1]) == dict(_MAIN_HOME_TARGETS)
+        # 復帰だけは HOME 姿勢へ戻したあとコンベアを止めて終わる
+        assert dict(per_step[-1][1]) == {**dict(_MAIN_HOME_TARGETS), "conveyor": 0.0}
 
     async def test_release_is_a_step_of_its_own(self) -> None:
         table = load_position_table(_MAIN_POSITIONS)
