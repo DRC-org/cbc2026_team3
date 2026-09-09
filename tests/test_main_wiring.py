@@ -1945,7 +1945,7 @@ class TestMotorCheckWiring:
             ]
         )
 
-    def _wire(self, tables: list[PositionTable]) -> MagicMock:
+    def _wire(self, tables: dict[str, PositionTable]) -> MagicMock:
         server = MagicMock()
         main._wire_motor_check_sequence(
             server,
@@ -1962,7 +1962,7 @@ class TestMotorCheckWiring:
 
     def test_メインハンドだけの構成でも登録する(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
-            server = self._wire([self._table("main_hand_positions.yaml")])
+            server = self._wire({"main_hand": self._table("main_hand_positions.yaml")})
 
         sequence = server.set_motor_check_sequence.call_args.args[0]
         sub_labels = {
@@ -1974,7 +1974,7 @@ class TestMotorCheckWiring:
 
     def test_除外したステップを起動ログに出す(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
-            self._wire([self._table("main_hand_positions.yaml")])
+            self._wire({"main_hand": self._table("main_hand_positions.yaml")})
 
         excluded_logs = [rec.getMessage() for rec in caplog.records if "除外" in rec.getMessage()]
         assert any("サブハンド 昇降" in msg and "sub_lift" in msg for msg in excluded_logs)
@@ -1982,7 +1982,7 @@ class TestMotorCheckWiring:
     def test_出荷構成では一つも除外しない(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
             server = self._wire(
-                [self._table("main_hand_positions.yaml", "sub_hand_positions.yaml")]
+                {"both": self._table("main_hand_positions.yaml", "sub_hand_positions.yaml")}
             )
 
         sequence = server.set_motor_check_sequence.call_args.args[0]
@@ -1991,7 +1991,7 @@ class TestMotorCheckWiring:
     def test_指令できる軸が無ければ登録しない(self, caplog: pytest.LogCaptureFixture) -> None:
         empty = load_position_table({"axes": {}, "positions": {}}, source="<test>")
         with caplog.at_level(logging.WARNING):
-            server = self._wire([empty])
+            server = self._wire({"main_hand": empty})
 
         server.set_motor_check_sequence.assert_not_called()
 

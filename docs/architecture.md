@@ -106,7 +106,8 @@ CAN フレーム
 ```
 
 **配信の頻度**: `state` は定期配信（既定 50ms 周期）。`match_state` / `e_stop_state` /
-`motor_check_state` / `health_change` は変化時に push。`server_info` は接続直後の 1 回だけ。
+`motor_check_state` / `homing_state` / `health_change` は変化時に push。`server_info` は
+接続直後の 1 回だけ。
 
 ### 起動と後始末の段（`main.py`）
 
@@ -318,7 +319,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `manual.py` / `tuning/metrics.py` | 手動操縦（`OperationMode` / `ManualController`。軸単位でしか指令しない）/ ステップ応答の指標算出（呼び出し元は `scripts/tune_y_axis.py` だけ） |
 | `health.py` / `match_state.py` | ヘルスの語彙と集約（`worst_bus_health`）/ フェーズ・コート・指差喚呼・試合時間（`ALL_ROLES` はここだけ） |
 | `server.py` / `ws_hub.py` | aiohttp。フェーズ / 制御権 / 配信内容の組み立て / WS クライアント集合と**唯一の配信経路**（`WsHub`） |
-| `server_motor_check.py` / `server_dryrun.py` | 動作確認の統括（可否判定の単一情報源）/ dry-run の擬似値（見栄えの値しか作らない） |
+| `server_motor_check.py` / `server_homing.py` / `server_dryrun.py` | 動作確認の統括（可否判定の単一情報源）/ 零点合わせ単独実行の統括（宛先のロボットと軸を持つ）/ dry-run の擬似値（見栄えの値しか作らない） |
 | `logging_setup.py` | ログの体裁の単一情報源。`main.py` が起動時に 1 回だけ呼ぶ |
 
 `lib/control/` と `lib/tuning/` の `__init__.py` は**再エクスポートを持たない**。
@@ -621,6 +622,8 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 ### 零点確定（ホーミング）
 
 `lib/sequence/homing.py` の `HomingRunner` が持ち、**動作確認シーケンスの最初のステップ**として走る。
+軸を並べて順に回す段は同じファイルの `run_homing()` にあり、**通し実行と単独実行
+（`homing_start`。下の「零点合わせだけを走らせる」）が同じ 1 本を通る**。
 設定は `*_positions.yaml` の `axes.<軸>.homing`（§6。軸の機構的性質であって動作確認固有の
 値ではない）で、`sensor`（`sensors:` に登録されていること）/ `direction` / `step` /
 `settle_s` / `search_distance`（必須）を持つ。
@@ -752,7 +755,7 @@ class PickAndPlace(Sequence):
 | ファイル | 走らせ方 | 中身 |
 |---|---|---|
 | `sequences/main_hand.py` / `sub_hand.py` | 操縦者の `sequence_start`（それぞれのタブ） | ワークの取得 → 搬送 → 配置 / 受け取り → 吸着 → 配置 |
-| `sequences/motor_check.py` | Monitor の設定面から `motor_check_start` | **両ハンド 1 本**。零点確定 → 各軸を運用で使う位置名へ動かす → `restore_home` |
+| `sequences/motor_check.py` | Monitor の設定面から `motor_check_start`（零点確定だけなら `homing_start`） | **両ハンド 1 本**。零点確定 → 各軸を運用で使う位置名へ動かす → `restore_home` |
 
 **`sequences/*.py` に数値を書かない。** 共通化してよいのは「どの軸をどの位置名へ動かすか」の
 **組**だけで、複数軸の組が複数ステップに現れるときだけモジュール定数（`main_hand.HOME`）か
@@ -781,6 +784,20 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 
 現状の各ステップと判定可否は [`checks_and_health.md`](checks_and_health.md) の
 「② 統合動作確認 — 動くか」が正。
+
+### 零点合わせだけを走らせる（`lib/server_homing.py`）
+
+動作確認は零点確定の後に全軸を駆動する通し実行なので、零点確定だけを見たいときに
+その先の失敗を巻き込む。`homing_start` はその 1 歩目だけを走らせる入口である。
+
+| 要素 | 中身 |
+|---|---|
+| 宛先 | **`robot` が必須**。`axes` を省くとそのロボットの `homing:` を持つ全軸。**全ロボットを回す形は持たない**（「サブハンドのつもりでメインハンドが動く」を作らない） |
+| 実行 | `run_homing()`。動作確認と同じ 1 本を通す（手順を書き写さない） |
+| 失敗 | 1 軸落ちても残りを続け、軸ごとの理由を `results` に載せる（1 回で全軸の可否が分かる） |
+| ゲート | `HomingController.deny_reason()`。環境側は `RobotServer._homing_environment_deny()` が渡す（動作確認と同じ `_environment_deny` を見る） |
+| 排他 | 動作確認と相互排他。どちらかが走っている間、再励磁・手動切替・試合開始も `RobotServer._busy_label()` 経由で塞がる |
+| 配信 | 進捗も結果も拒否理由も `homing_state` 1 通。拒否は加えて `command_rejected` で要求元へ返す |
 
 ### 手動操縦（`lib/manual.py`）
 
@@ -1017,6 +1034,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 | `e_stop_state` | 切り替わった瞬間 + 接続直後（停止中なら） | `active` と（内部検知なら）`reason` |
 | `health_change` | ヘルスが変化した瞬間 | `robot` / `target` / 遷移。**`robot` は UI の受信条件が依存する** |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由 | 4 種に分けず**この 1 通で運ぶ** |
+| `homing_state` | 零点合わせ単独実行の進捗・結果・拒否理由 | 宛先（`robot` / `axes`）と軸ごとの成否（`results`）、ロボットごとの対象軸（`targets`） |
 | `command_rejected` | 拒否時、**要求元 1 台にだけ** | `command` / `reason` |
 
 `motor_check_start` の拒否だけは `motor_check_error` に載せる（UI の表示経路が別のため）。
@@ -1132,6 +1150,8 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 { "type": "match_start" | "match_finish" | "match_reset" }
 // 動作確認・状態
 { "type": "motor_check_start" | "motor_check_abort" | "health_check" }
+// 零点合わせだけを走らせる。robot は必須（axes 省略でそのロボットの homing: を持つ全軸）
+{ "type": "homing_start", "robot": "sub_hand", "axes": ["sub_y_axis"] }
 ```
 
 **シーケンス制御コマンドのセマンティクス**:
@@ -1224,7 +1244,7 @@ setup ⇄ ready → match → finished → setup
 | コマンド | setup | ready | match | finished | 許可フェーズ集合 |
 |---|:-:|:-:|:-:|:-:|---|
 | `set_court` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
-| `motor_check_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
+| `motor_check_start` / `homing_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
 | `checklist_set` / `checklist_reset` / `checklist_check_all` | ✓ | ✓ | ✗ | ✗ | `PHASES_PREPARATION` |
 | `match_start` | ✗ | ✓ | ✗ | ✗ | `PHASES_START_GATE` |
 | `match_finish` | ✗ | ✗ | ✓ | ✗ | `PHASES_DURING_MATCH` |
@@ -1241,6 +1261,7 @@ setup ⇄ ready → match → finished → setup
 |---|:-:|---|
 | `sequence_start` / `sequence_jump` / `trigger` / `match_start` | ✗ | シーケンスが進むと次のステップが停止指令を上書きする（拒否文はコマンドごとに別。`lib/commands.py`） |
 | `motor_check_start` | ✗ | 同上（拒否は `motor_check_error` で通知） |
+| `homing_start` | ✗ | 同上（拒否は `command_rejected` で通知） |
 | `manual_move` / `manual_set` / `manual_jog` | ✗ | 目標値を送るため |
 | `set_operation_mode` | ✓ | 機体を動かさない切替そのもの |
 | `sequence_stop` / `e_stop` / `e_stop_release` / `motor_check_abort` | ✓ | 止める方向の操作は緊急停止中こそ通す |

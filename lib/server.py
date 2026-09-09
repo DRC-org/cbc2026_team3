@@ -42,6 +42,7 @@ from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import ChecklistItem, Court, MatchState
 from lib.motion_guard import GuardViolation
 from lib.sequence.engine import Sequence
+from lib.server_homing import HomingController, HomingSource
 from lib.server_motor_check import MotorCheckController, Pausable
 from lib.ws_hub import WsHub
 
@@ -143,6 +144,10 @@ class RobotServer:
             is_e_stop_active=lambda: self._e_stop_active,
             broadcast=self._ws.broadcast_json,
         )
+        self._homing = HomingController(
+            environment_deny=self._homing_environment_deny,
+            broadcast=self._ws.broadcast_json,
+        )
 
         self._verify_command_handlers()
 
@@ -220,6 +225,9 @@ class RobotServer:
 
     def set_motor_check_sequence(self, sequence: Sequence) -> None:
         self._motor_check.set_sequence(sequence, court=self.match.court)
+
+    def set_homing_source(self, source: HomingSource) -> None:
+        self._homing.set_source(source)
 
     def _apply_court(self) -> None:
         self._motor_check.set_court(self.match.court)
@@ -308,6 +316,7 @@ class RobotServer:
             self._server_info_dict(),
             self.match.to_dict(),
             self._motor_check.payload(),
+            self._homing.payload(),
         ):
             if not await self._ws.send_or_drop(ws, json.dumps(snapshot, ensure_ascii=False)):
                 await self._ws.drop({ws})
@@ -445,9 +454,10 @@ class RobotServer:
         if not isinstance(robot_name, str) or robot_name not in self._robots:
             return
 
-        if self._motor_check.running:
+        busy = self._busy_label()
+        if busy is not None:
             await self._reject_command(
-                requester, "reenergize_motors", "動作確認の実行中は再励磁できません"
+                requester, "reenergize_motors", f"{busy}の実行中は再励磁できません"
             )
             return
         if self._reactivating:
@@ -500,6 +510,11 @@ class RobotServer:
 
     async def _cmd_motor_check_abort(self, _data: dict, _requester: WSOrNone) -> None:
         self._motor_check.abort()
+
+    async def _cmd_homing_start(self, data: dict, requester: WSOrNone) -> None:
+        reason = await self._homing.start(data.get("robot"), data.get("axes"))
+        if reason is not None:
+            await self._reject_command(requester, "homing_start", reason)
 
     async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
@@ -564,11 +579,12 @@ class RobotServer:
                     f"'{robot_name}' は手動操縦に対応していません (位置定数が未読込)",
                 )
                 return False
-            if self._motor_check.running:
+            busy = self._busy_label()
+            if busy is not None:
                 await self._reject_command(
                     requester,
                     "set_operation_mode",
-                    "動作確認の実行中は手動操縦へ切り替えられません",
+                    f"{busy}の実行中は手動操縦へ切り替えられません",
                 )
                 return False
             if self._is_reenergizing(robot_name):
@@ -643,8 +659,9 @@ class RobotServer:
         # 動作確認は conveyor / valve をまさにこの軸で駆動し、操縦者が目視・打音で確かめる。
         # 排他は「sequence モードでは手動が全部拒否される」に乗っていたので、軸単位で
         # 緩めたぶんをここで塞ぎ直す (`_motor_check_environment_deny` と対になる)
-        if self._motor_check.running:
-            await self._reject_command(requester, command, "動作確認の実行中は手動で操作できません")
+        busy = self._busy_label()
+        if busy is not None:
+            await self._reject_command(requester, command, f"{busy}の実行中は手動で操作できません")
             return False
         return True
 
@@ -773,9 +790,10 @@ class RobotServer:
         )
 
     async def _handle_match_start(self, requester: WSOrNone = None) -> None:
-        if self._motor_check.running:
+        busy = self._busy_label()
+        if busy is not None:
             await self._reject_command(
-                requester, "match_start", "動作確認の実行中は試合を開始できません"
+                requester, "match_start", f"{busy}の実行中は試合を開始できません"
             )
             return
 
@@ -1118,24 +1136,43 @@ class RobotServer:
             payload["reason"] = self._e_stop_reason
         await self._ws.broadcast_json(payload)
 
-    def _motor_check_environment_deny(self) -> str | None:
-        phase_deny = COMMANDS["motor_check_start"].phase_deny_reason(self.match.phase)
+    def _environment_deny(self, command: str, what: str) -> str | None:
+        """動かしてよい状況か。**動作確認と零点合わせで同じ判定を見る。**"""
+        phase_deny = COMMANDS[command].phase_deny_reason(self.match.phase)
         if phase_deny is not None:
             return phase_deny
 
         if self._e_stop_active:
-            return "緊急停止中のため動作確認を実行できません"
+            return f"緊急停止中のため{what}を実行できません"
 
         for name in self._robots:
             if self._is_reenergizing(name):
-                return f"'{name}' の再励磁が完了していないため動作確認を実行できません"
+                return f"'{name}' の再励磁が完了していないため{what}を実行できません"
 
         for name, ctx in self._robots.items():
             if ctx.mode is OperationMode.MANUAL:
-                return f"'{name}' が手動操縦モードのため動作確認を実行できません"
+                return f"'{name}' が手動操縦モードのため{what}を実行できません"
         for name, ctx in self._robots.items():
             if ctx.sequence.is_running:
-                return f"'{name}' の通常シーケンス実行中のため動作確認を実行できません"
+                return f"'{name}' の通常シーケンス実行中のため{what}を実行できません"
+        return None
+
+    def _motor_check_environment_deny(self) -> str | None:
+        if self._homing.running:
+            return "零点合わせの実行中は動作確認を実行できません"
+        return self._environment_deny("motor_check_start", "動作確認")
+
+    def _homing_environment_deny(self) -> str | None:
+        if self._motor_check.running:
+            return "動作確認の実行中は零点合わせを実行できません"
+        return self._environment_deny("homing_start", "零点合わせ")
+
+    def _busy_label(self) -> str | None:
+        """今この瞬間、軸を握っている点検があればその名前。"""
+        if self._motor_check.running:
+            return "動作確認"
+        if self._homing.running:
+            return "零点合わせ"
         return None
 
     def _motor_check_pausables(self) -> list[Pausable]:
@@ -1157,6 +1194,7 @@ class RobotServer:
             try:
                 await self._broadcast_state()
                 await self._motor_check.publish()
+                await self._homing.publish()
             except asyncio.CancelledError:
                 raise
             except Exception:

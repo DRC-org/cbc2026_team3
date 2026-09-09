@@ -2,7 +2,13 @@ import { useCallback, useReducer } from "react";
 
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { parseServerMessage } from "@/lib/protocol";
-import type { MatchState, MotorCheckSnapshot, RobotState, ServerInfo } from "@/lib/protocol";
+import type {
+  HomingSnapshot,
+  MatchState,
+  MotorCheckSnapshot,
+  RobotState,
+  ServerInfo,
+} from "@/lib/protocol";
 import type { CommandRejectedEvent, HealthChangeEvent } from "@/lib/robotReducer";
 import { INITIAL_ROBOT_UI_STATE, robotReducer } from "@/lib/robotReducer";
 import { originWsUrl } from "@/lib/wsUrl";
@@ -14,6 +20,7 @@ interface UseRobotSocketReturn {
   eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
+  homing: HomingSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -51,6 +58,7 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
     eStopReason: state.eStopReason,
     healthEvents: state.healthEvents,
     motorCheck: state.motorCheck,
+    homing: state.homing,
     matchState: state.matchState,
     serverInfo: state.serverInfo,
     rejection: state.rejection,

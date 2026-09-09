@@ -47,10 +47,11 @@ from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
-from lib.sequence.homing import HomingError, HomingRunner
+from lib.sequence.homing import HomingError, HomingRunner, homing_axis_names
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
+from lib.server_homing import HomingSource
 from sequences.motor_check import MotorCheckSequence
 
 logger = logging.getLogger(__name__)
@@ -301,7 +302,7 @@ def _as_async(capture: Callable[[], None]) -> Callable[[], Awaitable[None]]:
 def _wire_motor_check_sequence(
     server: RobotServer,
     groups: list[MotorGroup],
-    tables: list[PositionTable],
+    tables: Mapping[str, PositionTable],
     *,
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
@@ -314,7 +315,7 @@ def _wire_motor_check_sequence(
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
         return
 
-    merged = PositionTable.merged(tables)
+    merged = PositionTable.merged(list(tables.values()))
 
     sequence = MotorCheckSequence(available_axes=merged.axes)
     for excluded in sequence.excluded_steps:
@@ -343,7 +344,7 @@ def _wire_motor_check_sequence(
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
 
-    homing_axes = [name for name in merged.axes if merged.axis(name).homing is not None]
+    homing_axes = homing_axis_names(merged)
     if homing_axes:
         sensors = {name: sensor for mgr in can_managers for name, sensor in mgr.sensors.items()}
         freshness = FeedbackFreshness(
@@ -411,15 +412,28 @@ def _wire_motor_check_sequence(
                 unsupported,
             )
 
-        sequence.bind_homing(
-            HomingRunner(
-                sensor_active=sensor_read,
-                sensor_latched=_sensor_latched,
-                sensor_is_stale=_sensor_is_stale,
-                motor_is_stale=_motor_is_stale,
-                motor_is_energized=_motor_is_energized,
-                origin_capturable=_origin_capturable,
-                capture_origin=_capture_origin,
+        runner = HomingRunner(
+            sensor_active=sensor_read,
+            sensor_latched=_sensor_latched,
+            sensor_is_stale=_sensor_is_stale,
+            motor_is_stale=_motor_is_stale,
+            motor_is_energized=_motor_is_energized,
+            origin_capturable=_origin_capturable,
+            capture_origin=_capture_origin,
+        )
+        sequence.bind_homing(runner)
+        # 束ねると「サブハンドのつもりでメインハンドが動く」が作れる
+        server.set_homing_source(
+            HomingSource(
+                runner=runner,
+                table=merged,
+                motors=motors,
+                court=lambda: sequence.court,
+                axes_by_robot={
+                    robot: axes
+                    for robot, table in tables.items()
+                    if (axes := tuple(homing_axis_names(table)))
+                },
             )
         )
 
@@ -1180,7 +1194,7 @@ async def main() -> None:
     _wire_motor_check_sequence(
         server,
         [w.motor_group for w in wirings if w.motor_group is not None],
-        [w.positions for w in wirings],
+        {w.name: w.positions for w in wirings},
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],

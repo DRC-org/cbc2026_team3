@@ -609,6 +609,7 @@ async def run_homing(
     court: Court,
     axes: Collection[str] | None = None,
     on_axis: Callable[[str], Awaitable[None]] | None = None,
+    on_result: Callable[[AxisHomingResult], Awaitable[None]] | None = None,
     stop_on_error: bool = True,
 ) -> list[AxisHomingResult]:
     """`homing:` を持つ軸を順に寄せて零点を確定する。**動作確認と単独実行が通る唯一の経路。**
@@ -638,7 +639,10 @@ async def run_homing(
             if stop_on_error:
                 raise
             logger.error("零点確定に失敗: %s (%s)", axis, exc)
-            results.append(AxisHomingResult(axis=axis, error=str(exc)))
-            continue
-        results.append(AxisHomingResult(axis=axis, error=None))
+            result = AxisHomingResult(axis=axis, error=str(exc))
+        else:
+            result = AxisHomingResult(axis=axis, error=None)
+        results.append(result)
+        if on_result is not None:
+            await on_result(result)
     return results

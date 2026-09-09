@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import type {
   ChecklistRole,
+  HomingSnapshot,
   MatchCourt,
   MatchState,
   MotorCheckSnapshot,
@@ -21,6 +22,7 @@ export interface RobotStatus {
   eStopOverlayHidden: boolean;
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
+  homing: HomingSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -69,6 +71,7 @@ export function RobotProvider({
     eStopOverlayHidden,
     healthEvents,
     motorCheck,
+    homing,
     matchState,
     serverInfo,
     rejection,
@@ -99,6 +102,7 @@ export function RobotProvider({
       eStopOverlayHidden,
       healthEvents,
       motorCheck,
+      homing,
       matchState,
       serverInfo,
       rejection,
@@ -112,6 +116,7 @@ export function RobotProvider({
       eStopOverlayHidden,
       healthEvents,
       motorCheck,
+      homing,
       matchState,
       serverInfo,
       rejection,
