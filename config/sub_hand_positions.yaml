@@ -44,7 +44,8 @@ axes:
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
-  # 昇降。**+ 方向が下** (2026-09-09 実機)。したがって上昇側が負になる。
+  # 昇降。**+ 方向が下** (2026-09-09 実機、sub_rotate が home の姿勢で)。sub_rotate で
+  # 回すと重力に対する上下は反転するが、座標・スイッチ・homing は機構に固定なので変えない。
   sub_lift:
     homing:
       sensor: sub_lift_b_limit_sensor
