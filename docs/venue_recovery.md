@@ -1,7 +1,7 @@
 # 会場カード — 詰まったときの手順
 
-**試合当日、手が止まったときにこの 1 枚だけを見る。** 設計の理由は `CLAUDE.md`、
-今どうなっているかは `docs/checks_and_health.md`、経緯は `docs/impl_plan.md`。
+**試合当日、手が止まったときにこの 1 枚だけを見る。** 設計の理由は `docs/invariants.md`、
+今どうなっているかは `docs/checks_and_health.md`。
 ここに書くのは**手順と、その手順を打つ理由の 1 行**だけ。
 
 前提: リポジトリは `~/cbc2026_team3`（`cd` してから打つ）。systemd の unit 名は
@@ -102,7 +102,7 @@ uv run python main.py --dry-run
 - **(a) は機体が半分しか動かない。** どの軸が死ぬかを操縦者 2 名と Monitor で
   声に出して合わせてから走らせること
 - **(c) の `--dry-run` は virtual バスなので EDULITE の励磁 WARNING が必ず 2 件出る。**
-  これは正常（`docs/impl_plan.md` 「未解決の課題」）
+  これは正常（`docs/architecture.md` 「未解決の課題」）
 
 ---
 

@@ -15,7 +15,6 @@ export const routes: RouteObject[] = [
       { path: "monitor", element: <Dashboard /> },
       { path: "main-hand", element: <RobotControl robotKey="main_hand" label="メインハンド" /> },
       { path: "sub-hand", element: <RobotControl robotKey="sub_hand" label="サブハンド" /> },
-      // 打ち間違いや古いリンクで白画面を出さない。試合中に迷子になる余地を残さない
       { path: "*", element: <Navigate to={DEFAULT_TAB_PATH} replace /> },
     ],
   },

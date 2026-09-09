@@ -31,7 +31,6 @@ function healthEvent(over: Partial<HealthChangeEvent> = {}): HealthChangeEvent {
   };
 }
 
-/** コンテキストの差し替えを rerender で行えるようにした描画ヘルパ */
 function mount(overrides: Partial<RobotContextValue> = {}) {
   const view = render(
     <RobotProvider value={createRobotContext(overrides)}>
@@ -92,17 +91,25 @@ describe("表示するもの", () => {
     expect(screen.getByText("受信途絶")).toBeInTheDocument();
   });
 
+  it("長い理由文を省略せずカード内で折り返す (切ると次の一手が読めなくなる)", () => {
+    mount({
+      rejection: rejection({
+        reason: "切断中のため緊急停止の解除を送信できませんでした。機体側のラッチは残っています",
+      }),
+    });
+
+    const line = screen.getByText(/機体側のラッチは残っています/);
+    expect(line).not.toHaveClass("truncate");
+    // daisyUI の .alert は grid + justify-items:start。本文列は w-full が無いと
+    // min-content まで広がり、カードの外へ文字が出る
+    expect(line.parentElement).toHaveClass("w-full", "min-w-0", "wrap-anywhere");
+  });
+
   it("info レベルのヘルス変化は通知しない (平常運転で画面を埋めないため)", () => {
     const { container } = mount({ healthEvents: [healthEvent({ level: "info" })] });
     expect(container).toBeEmptyDOMElement();
   });
 
-  /**
-   * `Toaster` は `RootLayout` で `RouteErrorBoundary` (`<Outlet />` だけを包む) の
-   * 外に置かれているので、ここで投げると緊急停止オーバーレイごとアンマウントする。
-   * 受信境界 (`protocol.ts`) が読めなかった `level` を弾いていても、この層は
-   * それ単独で守れていることを確かめる (層ごとに単独で効くことの確認)。
-   */
   it("level が非文字列でも投げずに描画する", () => {
     expect(() =>
       mount({
@@ -143,16 +150,11 @@ describe("寿命と件数の制御", () => {
     }
 
     expect(screen.getAllByText(/WARNING — main_hand/)).toHaveLength(3);
-    // 残るのは新しい 3 件
     expect(screen.getByText(/can5/)).toBeInTheDocument();
     expect(screen.queryByText(/can2/)).not.toBeInTheDocument();
   });
 
   it("コンテナはクリックを透かし、カードだけが受け直す", () => {
-    // daisyUI の `.toast` は `pointer-events: none` を持たず、幅は
-    // `calc(100vw - 2rem)` まで広がる。z を `.modal` (999) の上へ出した以上、
-    // 透かさないと狭い画面でモーダルのフッターボタンを塞ぎうる
-    // (以前は下に沈んでいたので構造的に塞げなかった)
     mount({ rejection: rejection() });
 
     const card = screen.getByRole("alert");

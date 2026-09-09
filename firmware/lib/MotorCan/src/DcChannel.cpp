@@ -2,7 +2,6 @@
 
 namespace motorcan {
 
-// 仕様書 §5.4: 電源投入直後は目標 0・出力停止・ラッチ解除済み。
 DcChannel::DcChannel(uint32_t commandTimeoutMs) : safety_(commandTimeoutMs), duty_(0.0f) {}
 
 void DcChannel::feed(uint32_t nowMs) { safety_.feed(nowMs); }
@@ -10,8 +9,6 @@ void DcChannel::feed(uint32_t nowMs) { safety_.feed(nowMs); }
 EStopAction DcChannel::handleEStopFrame(const uint8_t *data, uint8_t length) {
     const EStopAction action = safety_.handleEStopFrame(data, length);
     if (action != EStopAction::None) {
-        // 仕様書 §3.5: 停止でも解除でも目標を 0 に落とす。
-        // 解除側でも落とすのは「解除した瞬間に動き出さない」を成立させるため。
         duty_ = 0.0f;
     }
     return action;
@@ -43,9 +40,6 @@ bool DcChannel::applySetTarget(const SetTargetCommand &cmd, uint32_t nowMs) {
     if (!cmd.valid) {
         return false;
     }
-    // 仕様書 §4: この基板はフィードバックを持たないので duty のみ受理する。
-    // position の 90.0[deg] を duty として解釈すると 9000% の全力指令になるため、
-    // position / velocity / on_off は黙って捨てる。
     if (cmd.type != ControlType::Duty) {
         return false;
     }
@@ -63,7 +57,6 @@ bool DcChannel::setDuty(float duty, uint32_t nowMs) {
 void DcChannel::hold() { duty_ = 0.0f; }
 
 void DcChannel::tick(uint32_t nowMs) {
-    // 出力禁止のあいだは目標を残さない（理由はヘッダの宣言に書いてある）
     if (!safety_.isOutputAllowed(nowMs)) {
         duty_ = 0.0f;
     }
@@ -73,4 +66,4 @@ float DcChannel::outputDuty(uint32_t nowMs) const {
     return safety_.isOutputAllowed(nowMs) ? duty_ : 0.0f;
 }
 
-}  // namespace motorcan
+}

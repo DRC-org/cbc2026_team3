@@ -1,6 +1,6 @@
 # データの流れ — 値がどう届き、どこで判定するか
 
-**「今どうなっているか」だけ。** 理由は `CLAUDE.md`、サーバー側の詳細は `docs/impl_plan.md` の
+**「今どうなっているか」だけ。** 理由は `docs/invariants.md` §8、サーバー側の詳細は `docs/architecture.md` の
 「WebSocket プロトコル」章。画面は `docs/web/screens.md`、罠は `docs/web/pitfalls.md`。
 
 ---
@@ -54,6 +54,11 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 読めなかった値は `null` で載せる —— 0 で埋めると、可動範囲の下端に居ないプリセットが
 下端に描かれる。**指令は名前のまま**（`manual_move`）。
 
+**`state.manual.axes[].manual_always` は真偽値。** `mode: "sequence"` のままでも手動指令
+（通るのは `manual_move` だけ）を受け付ける軸かを表す。正は位置定数 yaml
+（`axes.<軸>.manual_always`）だけが持つので、**UI 側で軸名や `command_mode` から導出し直しては
+ならない。**
+
 **タイマーは「経過ミリ秒」で届く。** 開始時刻ではない —— 操縦者 2 名 + Monitor が別 PC で
 繋がるので、時刻を配ると端末の壁時計のずれが 3 つのタイマーの食い違いになる。各デバイスは
 経過 ms を起点に自分の単調時計（`performance.now()`）で進める。
@@ -76,6 +81,16 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 
 UI から送る経路を持たないものもある（`checklist_reset` は準備中の `match_reset` と結果が
 変わらない）。**押せないコマンドを context の API に残さない** —— 次に触る人が使える操作だと読む。
+
+### `dev_tools` が分けるもの
+
+`server_info` の `dev_tools` で描画を分けるのは 2 つ。**保持した真偽値ではなく、描画のたびに
+`serverInfo.dev_tools` を見る**（UI 側の既定は `false`。`lib/robotReducer.ts`）。
+
+| 分かれるもの | 出るボタン | 送るもの |
+|---|---|---|
+| 指差喚呼の一括チェック（`MatchPrep`） | 「DEV 全チェック」 | `checklist_check_all`。サーバーも `CommandSpec.requires_dev_tools` で見る 2 重ゲート |
+| 緊急停止オーバーレイの非表示（`EStopOverlay`） | 「DEV 非表示」 | **無し。** WS へは何も送らず `RootLayout` の state だけが変わり、代わりに `EStopBanner` が出る |
 
 ---
 
@@ -121,11 +136,26 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 `parseExcludedSteps` / `parseMotorCheckSteps` / `parseSensors` / `parseManual` /
 `readMeasured` / `readCommand` / `parseEnum`。
 
+**`safetyShapeErrors` が見るのは文字列配列の欄だけではない。** リミット保護の 2 欄は形が
+違うので検査も 2 種類あり、**両方を通らないと `parseSafety` は `MALFORMED` を返す** ——
+`limit_blind_sensors` は他の配列欄と同じ `isStringArray`、`limit_latched` は
+**軸名 → センサ名配列の Record** なので `isStringArrayRecord`（値を 1 つずつ `isStringArray`
+に掛ける）。`limit_latched` を `isObject` だけで通すと、`{ y_axis: "origin" }` のような配信で
+`LimitLatchedNotice` の `sensors.join(", ")` がレンダー本体で落ち、`RouteErrorBoundary` まで
+飛んで route ごと消える。`protocol.test.ts` が「`limit_latched` の値が %s なら `MALFORMED`
+（中身まで見る）」として 3 通りの壊れ方で固定している。
+
 **`parseManual` が見るのは `positions` だけ**（他の欄も `manual.axes` の他の軸も素通し）。
 `positions` は**形を変えた唯一の既存欄**なので、サーバーと `web/dist` の版がずれる窓が
 実際にある —— 旧形式（素の文字列）は `value: null` へ落とし、操作を保ったまま
 「そこがどこかは分からない」を描く。どちらの形でもない要素だけ落とす（名前を読めない
 ボタンを出すより、ボタンが無い方が嘘をつかない）。
+
+**`manual_always` も素通しのまま。** 代わりに**読む側が `=== true` で厳密に見る**
+（`AlwaysManualPanel`）—— 欄が落ちた配信では対象軸が 1 本も出ず、押せるボタンが配信の欠落で
+増える側へは倒れない。**`?? true` のような向きの既定値を置いてはならない。** `MALFORMED` へ
+倒さないのは、欠落がそのまま操作の可否として画面に出る（パネルごと消える）ためで、この扱いを
+新しい欄の既定にしてはならない。
 
 **位置を測れないモータの POS 欄にだけ、代わりに PC の指令値（`command`）を出す。**
 実出力ではないので `→` と `title` で断る。**実測値があるモータには出さない**（M3508 は
@@ -157,7 +187,7 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 
 | モジュール | 判定するもの |
 |---|---|
-| `lib/healthVerdict.ts` | 機体の健全性、温度トーン、ワーク落下の恐れ、版番号未確認、失敗タスク |
+| `lib/healthVerdict.ts` | 機体の健全性、温度トーン、ワーク落下の恐れ、版番号未確認、失敗タスク、リミット保護が止めている軸（`limitLatchedAxes()`）と途絶で効いていないスイッチ（`limitBlindSensors()`） |
 | `lib/sequenceStatus.ts` | シーケンスの実行状態・進捗の算術・「先頭から再開」か |
 | `lib/motorCheckStatus.ts` | 動作確認の完了判定 |
 | `lib/phase.ts` | フェーズによる可否・レイアウト区分。`isDuringMatch()` は `lib/match_state.py` の `PHASES_DURING_MATCH` の写しで、**写しはここだけ** |
@@ -202,8 +232,8 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 | フック | 中身 | 変化 |
 |---|---|---|
 | `useRobotStates()` | `states`（テレメトリ） | 毎秒 40 回 |
-| `useRobotStatus()` | `connected` / `eStopActive` / `eStopReason` / `healthEvents` / `motorCheck` / `matchState` / `serverInfo` / `rejection` / `wsUrl` / `wsUrlSource` | 変化時 |
-| `useRobotCommands()` | 送信関数 14 個 | ほぼ不変 |
+| `useRobotStatus()` | `connected` / `eStopActive` / `eStopReason` / `eStopOverlayHidden` / `healthEvents` / `motorCheck` / `matchState` / `serverInfo` / `rejection` / `wsUrl` / `wsUrlSource` | 変化時 |
+| `useRobotCommands()` | 送信関数 14 個 + `hideEStopOverlay`（送らない。表示だけを切る） | ほぼ不変 |
 
 `RobotProvider` は 3 つの Provider を入れ子にし、`status` と `commands` を `useMemo` で
 **フィールド単位の依存**にしてある（`value` 自体を依存にすると、呼び出し側が毎描画で新しい

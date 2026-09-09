@@ -1,6 +1,6 @@
 # 画面と部品 — どの画面に何が出るか
 
-**「今どうなっているか」だけ。** 理由は `CLAUDE.md`、経緯は `docs/impl_plan.md` の Phase 4。
+**「今どうなっているか」だけ。** 理由は `docs/invariants.md` §8、経緯は `docs/history/` にある。
 配色と操作は `docs/web/design.md`、値の届き方は `docs/web/data_flow.md`。
 
 ---
@@ -54,7 +54,7 @@
 | | 準備中 | 試合中・終了 |
 |---|---|---|
 | **Monitor** | `StartGate`（全幅・主役）+ 左 `MatchPrep` / 右 機体状態 | `MatchStrip` + `RobotStatusRow` ×2 + `EventFeed` |
-| **操縦者・半自動** | `ModeSwitch` + 機体状態（1 列・展開） | `ModeSwitch` + 左 `ActionPanel`+ステップ / 右 `MatchTimer`+機体状態 |
+| **操縦者・半自動** | `ModeSwitch` + 機体状態（1 列・展開） | `ModeSwitch` + 左 `ActionPanel`+`AlwaysManualPanel`+ステップ / 右 `MatchTimer`+機体状態 |
 | **操縦者・手動** | `ModeSwitch` + 左 `ManualPanel` / 右 機体状態 | `ModeSwitch` + 左 `ManualPanel` / 右 `MatchTimer`+機体状態 |
 
 指差喚呼と動作確認は **Monitor の準備面にしか無い**。操縦者 2 名が同じ場所に立つので機体ごとに
@@ -183,12 +183,19 @@
 │  状態 → 現在ステップ(3em) →   │              │
 │  NEXT で走る範囲 → [STOP|主操作]├──────────────┤
 ├─────────────────────────────│ 機体状態      │ ← 縮む側
+│ 常時操作 (対象軸があるときだけ) │              │ ← shrink-0
+├─────────────────────────────│              │
 │ ステップ一覧 (flex-1・内部scroll)│  平常時 1 行  │
 └─────────────────────────────┴──────────────┘
 ```
 
 手動中は**左カラムごと `ManualPanel` へ明け渡す**。同じ列に 2 つの操作面が並ぶと、
 どちらの指令が機体へ届くのか画面から読めなくなる。
+
+**`AlwaysManualPanel`（常時操作）が出るのはこの面だけ** —— 準備中は出さず（そこでは
+シーケンスが走っておらずモード切替で足りる）、手動中も出さない（`ManualPanel` が同じ軸を
+出すので二度描きになる）。理由は [`pitfalls.md`](pitfalls.md)「押せるが必ず拒否される
+ボタンを出さない」。
 
 **`ActionPanel` の主操作** — 右の大きい面が常に「今押すべきボタン」、左は常に STOP:
 
@@ -222,6 +229,7 @@
 
 ```
 ConnectionBanner   切断中だけ・全幅
+EStopBanner        緊急停止中かつオーバーレイ非表示のときだけ・全幅
 AppHeader          [タブ帯] … [接続][時計][フェーズ][コート] │ EMG STOP
 RouteErrorBoundary > Outlet    画面本体
 Toaster / WsSettings / EStopOverlay   重なる層
@@ -230,9 +238,11 @@ Toaster / WsSettings / EStopOverlay   重なる層
 - **常設帯はヘッダー 1 本。フッターは持たない。** タブを別の帯にすると縦を 2 段消費し、
   1366×768 級ではその 1 段が操作領域を削る。折り返しもしない。縮んでよいのはタブ帯だけ
 - ヘッダーの並び順は EMG STOP 誤爆防止から決まる（`docs/web/design.md`）
-- **`RouteErrorBoundary` は `<Outlet />` だけを囲う。** ヘッダー・接続バナー・緊急停止
-  オーバーレイは境界の外（1 画面が落ちても止める手段を残す）。`key` はパス（落ちた境界は
-  タブを切り替えても解けない）
+- **`RouteErrorBoundary` は `<Outlet />` だけを囲う。** ヘッダー・接続バナー・緊急停止の
+  オーバーレイと警告帯は境界の外（1 画面が落ちても止める手段を残す）。`key` はパス（落ちた
+  境界はタブを切り替えても解けない）
+- **オーバーレイの非表示は `RootLayout` の state**（セッション中だけ。再読み込みで戻る）。
+  描画のたびに `serverInfo.dev_tools` と論理積を取るので、本番サーバーへ繋ぎ直すと自動で戻る
 - **`AppShell` の `memo` は飾りではない**（`docs/web/data_flow.md`）
 - ページ全体はスクロールさせない。スクロールするのは `Panel` の本文だけ
 
@@ -251,7 +261,8 @@ barrel（`index.ts`）は作らず常に実ファイルまで指す（oxlint の
 | `TabBar` | タブ帯と注意喚起 LED。並びもキーも `TABS` から組む |
 | `Clock` | 現在時刻。**独立した部品であること自体が本体**（毎秒 `setState` するので、展開するとタブ帯ごと毎秒描き直される） |
 | `ConnectionBanner` | 切断中の全幅バナー。ヘッダー右端の小さな表示では気付けない |
-| `EStopOverlay` | 緊急停止中の全画面モーダル。**`onClose` を渡さない**ので Esc・背景クリックで閉じない。解除は `Reset` のみ。停止理由を必ず出す |
+| `EStopBanner` | 緊急停止中に**オーバーレイを隠しているあいだだけ**出す全幅バナー。停止理由と `Reset` を載せる（解除の口が画面からここだけになるため）。作法は `ConnectionBanner` と同じ（`role="alert"` / `alert-error` / 記号に `alert-blink`） |
+| `EStopOverlay` | 緊急停止中の全画面モーダル。**`onClose` を渡さない**ので Esc・背景クリックで閉じない。解除は `Reset` のみ。停止理由を必ず出す。**`serverInfo.dev_tools` のときだけ** footer に「DEV 非表示」（`EyeOff` / `tone="warn"`）が並ぶ |
 | `WsSettings` | 接続先の変更ダイアログ |
 | `Toaster` | 通知の唯一のスタック（操作拒否 + ヘルス異常）。右下・最大 3 件 |
 | `RouteErrorBoundary` | 画面本体の描画例外の境界 |
@@ -276,6 +287,7 @@ barrel（`index.ts`）は作らず常に実ファイルまで指す（oxlint の
 | `TriggerButton` | 主操作の右の面（NEXT / RUNNING / DONE / 無効） |
 | `SequenceStepList` | ステップ一覧。現在位置へ自動スクロール |
 | `MatchTimer` | 残り時間。`shrink-0`。legend は「残り時間」——「試合時間」では残りか経過かが読めない |
+| `AlwaysManualPanel` | 半自動のまま操作できる軸（`manual_always`）だけを並べる面。**試合中・試合終了の半自動にだけ出し**、対象が 0 本なら描かない。行は `ManualAxisRow` をそのまま使い、送るのは `manual_move` だけ（対象軸は `manual:` を持たないので連続値の口が無い）。**シーケンスに上書きされることを 1 行で断る** —— 断らないと「押したのに戻った」が故障に見える |
 | `ManualPanel` | 手動の操作面。可動範囲は配信をそのまま描く。**軸は 2 群**（連続軸は縦 1 列 / プリセットのみの軸は幅に応じて 2〜3 列のグリッド）—— サブハンドは電磁弁 6 + ポンプ 2 だけで 16 行になり、連続軸 6 本の下に隠れて画面外にあった。群の中では配信順のまま |
 | `ManualAxisRow` | 手動の 1 軸。**行の単位は論理軸であってモータではない** |
 | `ContinuousControls` | ジョグと長押しリピート。**端の無効化判定は現在値ではなく直前の手動目標**（追従が遅れているあいだ現在値で見ると、目標が既に端でも押せる）。実際のクランプはサーバーが行い、ここは説明であって判定ではない |

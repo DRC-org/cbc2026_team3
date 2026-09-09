@@ -5,26 +5,12 @@ import type { ChecklistItem } from "@/lib/protocol";
 
 interface ChecklistItemsProps {
   items: readonly ChecklistItem[];
-  /**
-   * 強調する 1 項目の id。**画面全体で 1 つ**（`nextChecklistItemId` が決める）。
-   * 群ごとに「次」を出すと強調が 5 つ並び、強調でなくなる。
-   */
   nextId: string | null;
   locked: boolean;
   onToggle: (itemId: string, checked: boolean) => void;
-  /** 行のホバー面を区分の左右余白いっぱいへ広げるための打ち消し (`-mx-2`) */
   className?: string;
 }
 
-/**
- * 指差喚呼の項目行。**どの群でも同じ見た目で描く唯一の場所**。
- *
- * 群ごとに行を書き分けると、コート設定の下の 1 行と動作確認の下の 12 行で
- * チェックボックスの大きさや打ち消し線の有無が食い違い、同じ操作に見えなくなる。
- *
- * 「どの項目をどこへ置くか」はここでは決めない（`lib/checklistGroups.ts`）。
- * ここが持つのは 1 行の描き方と、上から順に唱えていく運用のための強調だけ。
- */
 export const ChecklistItems = memo(function ChecklistItems({
   items,
   nextId,
@@ -34,11 +20,6 @@ export const ChecklistItems = memo(function ChecklistItems({
 }: ChecklistItemsProps) {
   const nextRef = useRef<HTMLLabelElement | null>(null);
 
-  // **「次」を画面内へ引き寄せる。** 29 項目は 1366x768 に収まらず、上から順に
-  // 唱えていくと現在地が枠外へ出る。しかも動作確認の起動ボタンは項目より下の
-  // 区分にあるので、スクロールしない限り**準備の主操作が画面に現れない**。
-  // 「次」は画面全体で 1 つなので、それを持たないインスタンスでは ref が null。
-  // 一覧が現在位置へ自動スクロールするのは `SequenceStepList` と同じ扱い
   useEffect(() => {
     nextRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [nextId]);
@@ -54,7 +35,6 @@ export const ChecklistItems = memo(function ChecklistItems({
             className={cx(
               "flex cursor-pointer items-center gap-3 border-l-2 border-transparent px-2 py-[0.4rem] text-[1.05em]",
               "hover:bg-base-200",
-              // 次に唱える 1 項目だけを強調する。全部強調すると強調にならない
               isNext && "border-l-warning bg-base-200 font-medium",
               item.checked && "text-base-content/45",
             )}
@@ -62,7 +42,6 @@ export const ChecklistItems = memo(function ChecklistItems({
             <input
               type="checkbox"
               className="checkbox shrink-0 checkbox-sm checked:border-success checked:bg-success checked:text-success-content"
-              // 行内に「次」バッジなどの装飾を置くため、読み上げ名は項目名に固定する
               aria-label={item.label}
               checked={item.checked}
               disabled={locked}

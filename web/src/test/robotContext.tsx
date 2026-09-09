@@ -16,15 +16,9 @@ export const DEFAULT_MATCH_STATE: MatchState = {
   phase: "setup",
   can_start_match: false,
   checklists: {},
-  // 既定は「未受信」。走っているタイマーを既定にすると、関心の無いテストが
-  // 一律に setTimeout を仕掛けることになる (タイマー自体は MatchTimer.test.tsx が見る)
   timer: null,
 };
 
-/**
- * 既定は本番起動と同じ (開発用コマンドは閉じている)。
- * 温度しきい値は `server_info` を受け取るまで未取得なので null にしておく。
- */
 export const DEFAULT_SERVER_INFO: ServerInfo = {
   dev_tools: false,
   dry_run: false,
@@ -32,13 +26,13 @@ export const DEFAULT_SERVER_INFO: ServerInfo = {
   temp_critical_c: null,
 };
 
-/** 全ハンドラを vi.fn() にした既定値。テストは関心のあるフィールドだけ上書きする */
 export function createRobotContext(overrides: Partial<RobotContextValue> = {}): RobotContextValue {
   return {
     states: {},
     connected: true,
     eStopActive: false,
     eStopReason: null,
+    eStopOverlayHidden: false,
     healthEvents: [],
     motorCheck: emptyMotorCheckState(),
     matchState: DEFAULT_MATCH_STATE,
@@ -54,6 +48,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     sendOrReport: vi.fn(() => true),
     onEStop: vi.fn(),
     onEStopRelease: vi.fn(),
+    hideEStopOverlay: vi.fn(),
     setCourt: vi.fn(),
     setChecklistItem: vi.fn(),
     checkAllChecklist: vi.fn(),

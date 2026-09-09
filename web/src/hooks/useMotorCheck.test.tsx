@@ -34,7 +34,6 @@ const RUNNING: MotorCheckSnapshot = {
 
 describe("useMotorCheck", () => {
   it("受信前は起動できない状態を返す", () => {
-    // 「起動できる」へ倒すと、配信が届く前の一瞬だけ押せるボタンが出る
     const { result } = mount();
 
     expect(result.current.state.available).toBe(false);
@@ -67,8 +66,6 @@ describe("useMotorCheck", () => {
   });
 
   it("素の send を使わない (送れなかった 1 回を捨てない)", () => {
-    // 特に中断は `MotorCheckPanel` が `disabled` を持たないので実行中は常に押せる。
-    // 戻り値を捨てると、全アクチュエータが駆動されている最中に止める操作だけが消える
     const send = vi.fn(() => true);
     const { result } = mount({ send });
 

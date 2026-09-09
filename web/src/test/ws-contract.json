@@ -200,6 +200,7 @@
                 2.0
               ]
             },
+            "manual_always": false,
             "motors": [
               "y_axis_r",
               "y_axis_l"
@@ -224,6 +225,7 @@
             "command_mode": "position",
             "deviation": null,
             "manual": null,
+            "manual_always": false,
             "motors": [
               "gripper"
             ],
@@ -247,6 +249,7 @@
             "command_mode": "duty",
             "deviation": null,
             "manual": null,
+            "manual_always": true,
             "motors": [
               "conveyor"
             ],
@@ -456,6 +459,7 @@
                 2.0
               ]
             },
+            "manual_always": false,
             "motors": [
               "y_axis_r",
               "y_axis_l"
@@ -480,6 +484,7 @@
             "command_mode": "position",
             "deviation": null,
             "manual": null,
+            "manual_always": false,
             "motors": [
               "gripper"
             ],
@@ -503,6 +508,7 @@
             "command_mode": "duty",
             "deviation": null,
             "manual": null,
+            "manual_always": true,
             "motors": [
               "conveyor"
             ],

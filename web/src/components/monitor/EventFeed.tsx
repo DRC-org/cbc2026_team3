@@ -11,13 +11,6 @@ const LEVEL_TONE: Record<HealthChangeLevel, Tone> = {
   critical: "error",
 };
 
-/**
- * ヘルス変化の履歴。
- *
- * これまでヘルス異常は数秒で消えるトーストにしか出ていなかった。Monitor の
- * 担当は「試合中に起きたことを拾って後で共有する」役割なのに、目を離した
- * 数秒の間に起きた事象は痕跡ごと消えていた。試合中の画面に残す。
- */
 export function EventFeed() {
   const { healthEvents } = useRobotStatus();
 

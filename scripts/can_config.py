@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""config/can_buses.yaml を setup_can.sh と udev ルール向けの形式に変換する。
-
-systemd から root で起動されるため、プロジェクトの .venv ではなくシステムの
-python3 + pyyaml で動作することを前提にする。venv のパスに依存すると
-起動順やユーザ切り替えで壊れるため。
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -17,36 +10,15 @@ import yaml
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _CONFIG_PATH = _PROJECT_ROOT / "config" / "can_buses.yaml"
 
-# serial 未採取を示すプレースホルダ。この値のバスは udev ルールにも
-# setup_can.sh の対象にも含めない。
 UNASSIGNED = "TBD"
 
-# Linux の IFNAMSIZ は 16。終端 NUL を含むためインターフェース名は 15 文字まで。
 _IFNAME_MAX = 15
 
 _SERVICE_NAME = "cbc-can.service"
 
-# install.sh が配置し、setup_can.sh が同期を確認する udev ルールの置き場所。
-# **この 2 本が別々に文字列を持ってはならない。** かつては両方に書いてあり、
-# setup_can.sh 側は「install.sh の UDEV_RULE_PATH と一致させること」とコメントで
-# 運用を要求していた。ずれると setup_can.sh は存在しないファイルを見て「未配置」と
-# 警告し続け、strict では試合前点検が必ず落ちる (install.sh は正しく配置しているのに)。
-# ルール本体と service 名の生成元がここなので、パスもここが持つ。
 _UDEV_RULE_PATH = "/etc/udev/rules.d/99-canable.rules"
 
-# bus-off からの自動復帰までの待ち時間 [ms]。**0 (カーネル既定) にしてはならない。**
-# 0 は「自動復帰しない」の意味で、一度 bus-off に落ちたインタフェースは
-# 手動で down/up するまで送受信とも死んだままになる。専用バスに 1 台しか
-# 居ない構成 (can_dm3520) では相手が電源を失うだけで ACK が返らなくなり、
-# TEC が 256 に達して bus-off へ落ちる。試合中にそれが起きると、
-# 相手の電源が戻っても機体は二度と動かない。
-# 100ms はカーネルの推奨値で、復帰を試みる周期でもある。
-#
-# **この値はあくまで要求値。** restart-ms はドライバが do_set_mode を実装している
-# 場合しか設定できず、CANable2 の gs_usb は実装していない。setup_can.sh は
-# 非対応を検出したら restart-ms 0 のまま続行して警告する (致命扱いにすると
-# 1 本も up できない)。0 を既定にしないのは、対応ドライバへ載せ替えたときに
-# 自動復帰が無いまま気付かれない状態を作らないため。
+# 100ms は bus-off 自動復帰周期のカーネル推奨値。
 DEFAULT_RESTART_MS = 100
 
 
@@ -86,7 +58,6 @@ def _is_assigned(entry: dict) -> bool:
 
 
 def cmd_list(config: dict, *, assigned_only: bool) -> str:
-    """setup_can.sh が while read で回せる TSV を返す。"""
     lines = []
     for name, entry in config["buses"].items():
         entry = entry or {}
@@ -101,7 +72,6 @@ def cmd_list(config: dict, *, assigned_only: bool) -> str:
 
 
 def cmd_udev(config: dict) -> str:
-    """シリアル一致で固定名を割り当てる udev ルールを生成する。"""
     usb = config["usb"]
     vendor = usb["vendor_id"]
     product = usb["product_id"]
@@ -137,7 +107,6 @@ def cmd_udev(config: dict) -> str:
 
 
 def cmd_paths() -> str:
-    """シェル側が参照する固定名を TSV (key\\tvalue) で返す。"""
     return "\n".join(
         [
             f"udev_rule_path\t{_UDEV_RULE_PATH}",
@@ -161,9 +130,6 @@ def main() -> int:
     parser.add_argument("--config", type=pathlib.Path, default=_CONFIG_PATH)
     args = parser.parse_args()
 
-    # paths は yaml を 1 行も読まない。**設定が壊れていても答えられなければならない**
-    # —— install.sh --uninstall は撤去先を知るためにこれを呼ぶので、ここで
-    # load_config を通すと「設定を壊すと撤去もできない」状態が生まれる。
     if args.command == "paths":
         print(cmd_paths())
         return 0

@@ -4,8 +4,6 @@ import { evaluateSync } from "@/lib/syncVerdict";
 
 describe("evaluateSync", () => {
   it("揃っている軸は警告しない (0 を欠落として捨てない)", () => {
-    // 0 は JS では falsy。ここを `deviation ? ... : null` で書くと、
-    // 最も健全な状態だけが「測れていない」と表示される
     const v = evaluateSync({ deviation: 0, sync_tolerance: 2 });
     expect(v.tone).toBe("success");
     expect(v.ratio).toBe(0);

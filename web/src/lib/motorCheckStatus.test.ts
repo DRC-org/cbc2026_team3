@@ -20,11 +20,6 @@ function snapshot(over: Partial<MotorCheckSnapshot> = {}): MotorCheckSnapshot {
 }
 
 describe("motorCheckStatus", () => {
-  /**
-   * **実配信のスナップショットがそのままこの形。** かつてパネルはこれを「完了」と
-   * 読み、全ステップに緑の ✓ を付けていた。`config/checklist.yaml` の
-   * 「アクチュエータ動作確認 完了」は、この誤表示のままチェックが付く。
-   */
   it("未実行を完了と読まない (ステップ表が届いているだけ)", () => {
     const status = motorCheckStatus(snapshot({ running: false, step_index: 0 }), true);
 
@@ -50,7 +45,6 @@ describe("motorCheckStatus", () => {
     const status = motorCheckStatus(snapshot({ step_index: 3, error: "同期ずれ" }), true);
 
     expect(status.outcome).toBe("failed");
-    // 止まった位置までは実際に通っている。0 に戻すと進捗の情報が消える
     expect(status.completedSteps).toBe(3);
   });
 
@@ -58,12 +52,6 @@ describe("motorCheckStatus", () => {
     expect(motorCheckStatus(snapshot({ total_steps: 0 }), true).outcome).toBe("idle");
   });
 
-  /**
-   * サーバーは同じ失敗を `error` (表示 1 行) と `last_error` (どのステップで
-   * 失敗したか) の 2 欄で言う。片方だけを読むと、置き場所が変わった瞬間に失敗が
-   * 「未実行」と同じ表示へ落ちる —— 動作確認が失敗しても画面が黙る、という
-   * 元の壊れ方そのものになる。
-   */
   describe("失敗理由の畳み込み", () => {
     const failure = { step_index: 2, step: "メインハンド y 軸", message: "偏差 3.1 > 許容 2.0" };
 
@@ -99,7 +87,6 @@ describe("motorCheckStatus", () => {
     });
 
     it("切断中は画面側でしか分からないので画面が理由を付ける", () => {
-      // サーバーへ届かないので拒否も返らない。理由が無いと「押したのに何も起きない」
       expect(motorCheckStatus(snapshot(), false).reasonLabel).toBe("切断中のため不可");
     });
 

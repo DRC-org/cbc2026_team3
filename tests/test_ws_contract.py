@@ -1,16 +1,3 @@
-"""サーバーが実際に配信する WS メッセージを golden ファイルへ焼き付ける。
-
-サーバーと Web UI が「それぞれ想像した契約」を別々にテストしていると、両者の
-食い違いは誰にも検出できない。実際に `health_change` から `robot` が抜けたまま
-UI 側が `typeof msg.robot === "string"` を受信条件にしており、Python 側は
-`target` しか見ず、TS 側はサンプルを自分で捏造していたため、ヘルス異常が実機で
-100% 捨てられていることに両方のテストが揃って気付けなかった。
-
-そこで「実物の配信内容」を 1 つの JSON に固定し、Python 側はここで
-現在の配信と一致することを、Web 側はこのファイルを読んで型が受理できることを
-検証する。サンプルは決して手書きしない (手書きした瞬間に想像の契約へ逆戻りする)。
-"""
-
 from __future__ import annotations
 
 import difflib
@@ -48,7 +35,6 @@ from tests.server_fixtures import ServerFixture, require_type, wait_until
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONTRACT_PATH = _REPO_ROOT / "web" / "src" / "test" / "ws-contract.json"
 
-#: golden を作り直すときに立てる環境変数。失敗メッセージからそのまま辿れるようにする
 UPDATE_ENV = "UPDATE_WS_CONTRACT"
 
 _REGENERATE_HINT = f"{UPDATE_ENV}=1 uv run pytest tests/test_ws_contract.py"
@@ -56,9 +42,6 @@ _REGENERATE_HINT = f"{UPDATE_ENV}=1 uv run pytest tests/test_ws_contract.py"
 _ROBOT = "main_hand"
 _M3508_BUS = "can_m3508"
 
-#: 実行のたびに変わる値の差し替え先。時刻そのものは契約の一部ではないので固定する。
-#: 型 (数値か null か) は保つ: null は「まだ受信していない/未完了」という意味を持ち、
-#: UI の表示分岐がそこにぶら下がっているため、数値で塗り潰すと契約が変わってしまう。
 FIXED_EPOCH = 1700000000.0
 FIXED_DURATION_MS = 0.0
 
@@ -75,7 +58,6 @@ _EPOCH_KEYS = frozenset(
 )
 _DURATION_KEYS = frozenset({"feedback_age_ms"})
 
-#: 配信され得るメッセージ型。1 つでも欠けたら golden の意味が無いのでここで固定する
 REQUIRED_TYPES = frozenset(
     {
         "state",
@@ -84,16 +66,12 @@ REQUIRED_TYPES = frozenset(
         "health_change",
         "e_stop_state",
         "command_rejected",
-        # 動作確認は進捗も結果も拒否理由も 1 通に載る。4 種類に分けていた頃は、
-        # 途中の 1 通を落とした画面が復旧しなかった
         "motor_check_state",
     }
 )
 
 
 class _ContractSequence(Sequence):
-    """golden 用の最小シーケンス (トリガー待ちの有無を両方含める)。"""
-
     def __init__(self) -> None:
         super().__init__("main_hand_seq")
 
@@ -105,9 +83,6 @@ class _ContractSequence(Sequence):
     async def wait_work(self) -> None:
         return None
 
-    # **失敗した形も golden に載せる。** `last_error` が null の形しか無いと、
-    # UI が値の入った形を受信条件で弾いても誰も気付けない (到達タイムアウト・
-    # 左右ずれ・零点確定失敗はすべてこの形で届く)
     @step("Y 軸を投入位置へ")
     async def fail_on_sync(self) -> None:
         raise AxisSyncError(
@@ -117,16 +92,6 @@ class _ContractSequence(Sequence):
 
 
 def _generic_drivers() -> dict[str, GenericDriver]:
-    """自作モタドラの 2 枚。**測れる項目が違う 2 種類を必ず両方載せる。**
-
-    サーボ基板 (position) は位置だけを、DC 基板 (duty) は 1 つも測れない
-    (仕様書 §3.2)。実ドライバを CANManager へ挿すのは、測定可否の宣言が
-    ドライバ側にしか無いため —— モックのままだと「4 値とも数値」の形しか
-    golden に現れず、UI が null を受け取れなくても誰も気付けない。
-
-    状態は実機と同じ FEEDBACK フレームで作る (``driver._state`` への直接代入は
-    デコード層を丸ごと迂回する)。DC 基板は位置を持たないので DLC=1 で送る。
-    """
     gripper = GenericDriver("gripper", can_id=9, control_type=ControlMode.POSITION)
     conveyor = GenericDriver("conveyor", can_id=10, control_type=ControlMode.DUTY)
     feed_generic(gripper, position=5.0, reached=True)
@@ -135,14 +100,8 @@ def _generic_drivers() -> dict[str, GenericDriver]:
 
 
 def _sensor_drivers() -> dict[str, GenericDriver]:
-    """原点スイッチ 2 本。**接触した形と接触していない形を両方載せる。**
-
-    片方だけだと `active` が常に同じ値になり、UI がもう一方を受信条件で弾いても
-    誰も気付けない。鮮度 (`stale`) の 2 通りは `_make_can_manager` が作る。
-    """
     touching = GenericDriver("origin_sensor", can_id=0x44, control_type=ControlMode.POSITION)
     released = GenericDriver("rotate_origin_sensor", can_id=0x43, control_type=ControlMode.POSITION)
-    # センサスロットは状態フラグ 1 バイトだけを送る (位置を持たない)
     feed_generic(touching, sensor=True)
     feed_generic(released, sensor=False)
     return {"origin_sensor": touching, "rotate_origin_sensor": released}
@@ -160,9 +119,6 @@ def _make_can_manager(
     )
     set_motors(mgr, {**mgr.motors, **generics})
     set_sensors(mgr, sensors)
-    # 途絶している形も golden に載せる。**片方だけを新鮮にする** ——
-    # 全センサが stale だと「反応を確かめられる状態」の形が 1 つも現れず、
-    # 逆に全て新鮮だと途絶の表示を UI が弾いても誰も気付けない
     set_last_feedback(mgr, {"origin_sensor": time.time()})
     return mgr
 
@@ -197,13 +153,6 @@ def _fault_motor_snapshot(mgr: CANManager):
 
 
 class _ContractCheckSequence(Sequence):
-    """golden 用の最小動作確認シーケンス。ステップ表が配信に載ることを見る。
-
-    軸を宣言しておくのは、**除外されたステップが載った形**も golden へ焼き付ける
-    ため。除外が無い形しか無いと、UI が除外を受信条件で弾いても誰も気付けない
-    (サブハンド不在の構成でだけ全ステップ成功に見える、という壊れ方になる)。
-    """
-
     def __init__(self) -> None:
         super().__init__("motor_check")
 
@@ -221,17 +170,6 @@ def _motor_group(
     drivers: dict[str, object],
     target_sinks: dict[str, object],
 ) -> MotorGroup:
-    """指令の出どころ。**本番と同じく 1 つだけ作って全員で共有する。**
-
-    `main._wire_one_robot` はシーケンス・手動・目標値再送へ同じ ``MotorGroup`` を
-    渡す。ここで別々のハンドルを作ると、緊急停止で目標を捨てられる側と `state` の
-    `command` が読む側が別物になり、**golden だけが「停止しても指令が残る」形**を
-    UI へ見せることになる。
-
-    mock_can_manager の motors は MagicMock なので、逆換算に実ドライバを使う
-    (MagicMock の feedback_position() は JSON にできず、配信そのものが落ちる)。
-    M3508 は電流指令しか受け付けないので、目標値は PC 側 PID ループへ迂回させる。
-    """
     group = MotorGroup()
     for name, driver in drivers.items():
         group.add(MotorHandle(name, driver, mgr, target_sink=target_sinks.get(name)))
@@ -239,28 +177,25 @@ def _motor_group(
 
 
 def _manual_controller(group: MotorGroup) -> ManualController:
-    """手動操縦の軸一覧。**連続操作できる軸とできない軸を両方入れる。**
-
-    片方だけだと ``manual`` が null になる形か、値が入る形のどちらかしか
-    golden に現れず、UI が知らないほうの形を受信条件で弾いても誰も気付けない。
-    """
     table = load_position_table(
         {
             "axes": {
                 "y_axis": {
                     "unit": "mm",
                     "command_unit": "deg",
-                    # 左右偏差を配る軸。**揃っている状態 (deviation = 0.0) を載せる**のが
-                    # 狙いで、0.0 は JS では falsy なので `deviation ? ... : null` のような
-                    # 受信条件を書くと即座に落ちる。null で埋めた golden ではここが素通りする
                     "sync_tolerance": 2.0,
                     "manual": {"min": -2.0, "max": 20.0, "steps": [0.5, 2.0]},
                     "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
                 },
                 "gripper": {"unit": "deg", "command_unit": "deg"},
-                # 位置を測れない軸。value が null になる形も golden に載せないと、
-                # UI が数値だけを受け付ける条件を書いても誰も気付けない
-                "conveyor": {"unit": "duty", "command_mode": "duty", "settle_s": 0.0},
+                # manual_always が真になる唯一の軸。golden に真の形が無いと、UI が
+                # 真を受け取れなくても誰も気付けない
+                "conveyor": {
+                    "unit": "duty",
+                    "command_mode": "duty",
+                    "settle_s": 0.0,
+                    "manual_always": True,
+                },
             },
             "positions": {
                 "y_axis": {"home": 0.0, "work": 10.0},
@@ -274,7 +209,6 @@ def _manual_controller(group: MotorGroup) -> ManualController:
 
 
 def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
-    """指差喚呼の項目。空だと checklists の要素構造が golden に現れない。"""
     return {
         ROLE_PRE_MATCH: [
             ChecklistItem(id="y_axis_sync", label="Y 軸の左右が揃っている"),
@@ -303,22 +237,14 @@ def _build_fixture() -> _Fixture:
         last_feedback_at=lambda _name: None,
     )
 
-    # 目標値再送も 1 台ぶん載せる。空リストだと safety.target_refreshers の
-    # 要素構造が golden に現れず、UI 側が形を知る手立てが無くなる。
-    # **CANManager に挿したのと同じドライバを使う** —— 別インスタンスを作ると、
-    # 手動操縦や再送が触るモータと配信に載るモータが別物になる
     group = _motor_group(
         mgr,
         {**drivers, "gripper": generics["gripper"], "conveyor": generics["conveyor"]},
         loop.target_sinks(),
     )
-    # 自作モタドラ 2 枚を再送対象にする。**緊急停止で目標を捨てるのはこのタスク**なので、
-    # 指令値 (`command`) を持つモータを外すと、停止しても指令が残る構成になる
     refresher = GenericTargetRefresher([group["gripper"], group["conveyor"]])
 
     sequence = _ContractSequence()
-    # シーケンスにも同じ群を bind する。`state` の `command` はここから引かれるので、
-    # bind しない golden には「指令値を持つモータ」の形が 1 つも現れない
     sequence.bind_motors(group)
 
     fx.add_robot(
@@ -330,16 +256,12 @@ def _build_fixture() -> _Fixture:
         target_refreshers=[refresher],
         manual=_manual_controller(group),
     )
-    # 動作確認は両ハンド統合の 1 本で、どのロボットにも属さない
     fx.set_motor_check_sequence(_ContractCheckSequence())
-    # 周期配信に割り込まれるとヘルス差分の基準が動く。起動直後の 1 回だけ走らせ、
-    # 以降はテストが明示的に呼んだ配信だけを捕まえる
     fx.freeze_broadcast()
     return fx, loop, monitor, refresher, group
 
 
 async def collect_samples() -> dict[str, dict[str, Any]]:
-    """実際の RobotServer に配信させたメッセージを型ごとに 1 通ずつ集める。"""
     fx, loop, monitor, refresher, group = _build_fixture()
     app = fx.create_app()
     samples: dict[str, dict[str, Any]] = {}
@@ -351,27 +273,17 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
 
-            # 接続直後のスナップショット (server_info → match_state の順で届く)
             samples["server_info"] = await require_type(ws, "server_info")
             samples["match_state"] = await require_type(ws, "match_state")
 
-            # 手動で 1 軸だけ動かしてから state を採る。target が null のままだと
-            # 「手動目標を持っている軸」の形が golden に一度も現れない
             await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "manual"})
             await fx.command(
                 {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 4.0}
             )
-            # DC 基板へ duty を 1 回出しておく。**実測 4 値がすべて null になる
-            # モータで、指令値だけが入っている形**を golden に載せるため
-            # (これが無いと UI は「測れないモータの唯一の情報」を検証できない)
             await group["conveyor"].set_target(ControlMode.DUTY, 0.3)
-            # 手動モードのまま採る。半自動へ戻すと target が捨てられ、
-            # 「手動目標を持っている軸」の形が golden から消える
             await fx.publish_state()
             samples["state"] = await require_type(ws, "state")
 
-            # 失敗して止まったシーケンス。常駐ループへ直接ジャンプ要求を出すのは、
-            # 準備フェーズでは `sequence_jump` がフェーズゲートで弾かれるため
             sequence = fx.sequence(_ROBOT)
             sequence.request_jump(2)
             assert await wait_until(lambda: sequence.last_error is not None), (
@@ -389,7 +301,6 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             await fx.publish_state()
             samples["health_change"] = await require_type(ws, "health_change")
 
-            # 準備フェーズなので trigger はフェーズゲートで弾かれる
             await ws.send_json({"type": "trigger", "robot": _ROBOT})
             samples["command_rejected"] = await require_type(ws, "command_rejected")
 
@@ -399,13 +310,9 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             await fx.activate_e_stop(reason="同期ずれを検知しました (y_axis)")
             samples["e_stop_state_with_reason"] = await require_type(ws, "e_stop_state")
 
-            # 進捗も結果も拒否理由も 1 通に載る。理由が入った状態を golden にする
-            # (error が null の形は接続直後のスナップショットで既に配られている)
             await fx.publish_motor_check_error("緊急停止中のため動作確認を実行できません")
             samples["motor_check_state"] = await require_type(ws, "motor_check_state")
 
-            # 構成に無い軸のステップを除外した形。**除外は黙って消してはならない**
-            # ので、欠けている軸まで載った 1 通を golden に固定する
             restricted = _ContractCheckSequence()
             restricted.restrict_to_axes({"y_axis"})
             fx.set_motor_check_sequence(restricted)
@@ -426,11 +333,6 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
 
 
 def _normalize(value: Any, key: str | None = None) -> Any:
-    """実行のたびに変わる値を固定値へ差し替える。
-
-    null は潰さない。「まだ受信していない」「まだ終わっていない」を表す情報であり、
-    UI の分岐がそこにぶら下がっているため、数値で塗り潰すと契約自体が変わる。
-    """
     if isinstance(value, dict):
         return {k: _normalize(v, k) for k, v in value.items()}
     if isinstance(value, list):
@@ -461,7 +363,6 @@ def _build_document(samples: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 
 def _dump(document: dict[str, Any]) -> str:
-    # インデント 2・キー昇順・末尾改行。差分がレビューで読める形を保つ
     return json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
@@ -496,29 +397,20 @@ class TestWsContract:
             )
 
     async def test_contract_covers_every_broadcast_type(self) -> None:
-        """配信し得るメッセージ型が golden に 1 つも欠けていないこと。"""
         assert CONTRACT_PATH.is_file(), f"生成してください: {_REGENERATE_HINT}"
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         covered = {msg["type"] for msg in document["samples"].values()}
         assert covered >= REQUIRED_TYPES, f"golden に無い型: {sorted(REQUIRED_TYPES - covered)}"
 
     async def test_match_state_carries_timer(self) -> None:
-        """タイマーの 3 値が実配信に載っていること。
-
-        golden は再生成で黙らせられるので、UI が読むフィールドは不変条件として
-        別に持つ。3 値のどれか 1 つでも落ちると、全デバイスのタイマーが
-        「動かない」「上限が分からない」のどちらかになる。
-        """
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         timer = document["samples"]["match_state"]["timer"]
 
         assert isinstance(timer["running"], bool)
         assert isinstance(timer["elapsed_ms"], int)
-        # 上限が 0 だと UI 側は残り時間を計算できない (常に時間切れ表示になる)
         assert isinstance(timer["duration_ms"], int) and timer["duration_ms"] > 0
 
     async def test_health_change_carries_robot_and_target(self) -> None:
-        """UI の受信条件が依存するフィールドが実物に載っていること。"""
         document = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         for name in ("health_change", "health_change_bus"):
             sample = document["samples"][name]

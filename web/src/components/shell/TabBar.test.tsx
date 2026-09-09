@@ -7,10 +7,6 @@ import { RobotProvider } from "@/context/RobotContext";
 import type { BusHealthState, HealthSnapshot, RobotState, SafetyState } from "@/lib/protocol";
 import { createRobotContext, renderWithRobot } from "@/test/robotContext";
 
-/**
- * タブ帯が実際に描き直されたかを数える。`Kbd` は TabBarNav の内側にしか無いので、
- * memo が効いていれば increment されない。
- */
 const counts = vi.hoisted(() => ({ kbd: 0 }));
 
 vi.mock("@/components/ui/Kbd", () => ({
@@ -91,7 +87,6 @@ describe("TabBar のタブ LED", () => {
   });
 
   it("degraded は警告であって異常ではない", () => {
-    // 判定が 2 箇所にあった頃、タブは赤 LED、Monitor は黄「要確認」を同時に出していた
     mount({ main_hand: robot({ health: health("degraded") }) });
     expect(screen.getByRole("img", { name: "要確認" })).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "異常あり" })).not.toBeInTheDocument();
@@ -118,21 +113,14 @@ describe("TabBar のタブ LED", () => {
   });
 
   it("ヘルスが読めない配信でも投げず、異常として出す", () => {
-    // ここは RouteErrorBoundary の外。投げれば React ツリーごとアンマウントして
-    // ヘッダーの緊急停止ボタンまで消える
     const broken = { overall: "ok" } as unknown as RobotState["health"];
     mount({ main_hand: robot({ health: broken }) });
 
     expect(screen.getByRole("img", { name: "異常あり" })).toBeInTheDocument();
   });
 
-  /**
-   * 切断中に手元にあるのは「切れた瞬間の値」でしかない。LED を消したままにすると、
-   * 凍った判定を「今の機体は正常」として読ませることになる。
-   */
   describe("切断中", () => {
     it("平常だった機体でも灰の LED を出す", () => {
-      // 機体タブは 2 枚あり、どちらも「今の状態は分からない」が正しい
       mount({ main_hand: robot({ health: health("ok") }) }, false);
       expect(screen.getAllByRole("img", { name: "通信断" })).toHaveLength(2);
     });
@@ -144,14 +132,6 @@ describe("TabBar のタブ LED", () => {
   });
 });
 
-/**
- * タブ帯は外枠 (AppHeader) の一部で、20Hz × 2 台のテレメトリの中に居る。
- * ここが購読したままだと、`AppShell` を memo で切り離した意味が消えて
- * 毎秒 40 回タブ帯ごと描き直される (`evaluateHealth` の filter も毎回回る)。
- *
- * LED が要るのは異常時と許可待ちだけなので、畳んだ結果が変わらない間は
- * 描き直さない。
- */
 describe("TabBar の再描画", () => {
   beforeEach(() => {
     counts.kbd = 0;
@@ -176,7 +156,6 @@ describe("TabBar の再描画", () => {
   }
 
   it("テレメトリだけが動いてもタブ帯を描き直さない", () => {
-    // モータ温度が 0.1℃ 動いただけの配信。LED の中身は 1 つも変わらない
     const { update } = renderTabs({ main_hand: robot({ health: health("ok") }) });
     const before = counts.kbd;
     expect(before).toBeGreaterThan(0);
