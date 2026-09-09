@@ -287,6 +287,13 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため手動操縦できません",
         handler="_cmd_manual_jog",
     ),
+    # 選択を変えるだけで機体は動かない。次の吸着ステップから効くので、緊急停止中の準備にも通す
+    _spec(
+        "suction_pads_set",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=True,
+        handler="_cmd_suction_pads_set",
+    ),
 )
 
 COMMANDS: dict[str, CommandSpec] = {spec.name: spec for spec in _SPECS}

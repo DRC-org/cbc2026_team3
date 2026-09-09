@@ -469,6 +469,34 @@ function parseManual(raw: unknown): ManualState | undefined {
   return { ...raw, axes } as unknown as ManualState;
 }
 
+export interface SuctionPad {
+  axis: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface SuctionState {
+  pads: SuctionPad[];
+}
+
+function isSuctionPad(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  return (
+    typeof value.axis === "string" &&
+    typeof value.label === "string" &&
+    typeof value.enabled === "boolean"
+  );
+}
+
+// null は「このロボットに吸着パッドが無い」。欠落 (undefined) や形の崩れとは区別する
+export function parseSuction(raw: unknown): SuctionState | Malformed | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (!isObject(raw) || !Array.isArray(raw.pads)) return MALFORMED;
+  if (!raw.pads.every(isSuctionPad)) return MALFORMED;
+  return raw as unknown as SuctionState;
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -486,6 +514,7 @@ export interface RobotState {
   safety?: SafetyState | Malformed;
   steps?: SequenceStepInfo[];
   manual?: ManualState;
+  suction?: SuctionState | Malformed | null;
 }
 
 export type ServerMessage =
@@ -555,6 +584,8 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (sensors !== undefined) state.sensors = sensors;
       state.last_error = parseSequenceFailure(raw.last_error);
       if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
+      const suction = parseSuction(raw.suction);
+      if (suction !== undefined) state.suction = suction;
 
       return { type: "state", robot, state };
     }

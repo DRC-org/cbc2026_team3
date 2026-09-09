@@ -28,6 +28,8 @@ import type {
   SequenceStepInfo,
   ServerInfo,
   ServerMessage,
+  SuctionPad,
+  SuctionState,
   SyncMonitorState,
   TargetRefresherState,
 } from "@/lib/protocol";
@@ -72,6 +74,8 @@ const STATE_FIELDS_UI_READS = [
   "manual",
   "manual.mode",
   "manual.axes",
+  "suction",
+  "suction.pads",
 ] as const;
 
 const EXPECTATIONS: Record<string, Expectation> = {
@@ -83,6 +87,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].safety).toEqual(sample.safety);
     expect(result.states[robot].manual).toEqual(sample.manual);
     expect(result.states[robot].sensors).toEqual(sample.sensors);
+    expect(result.states[robot].suction).toEqual(sample.suction);
   },
 
   state_with_last_error: (result, sample) => {
@@ -418,6 +423,16 @@ const HOMING_FIELDS: FieldSpec = {
   "targets.*": "ui",
 };
 
+const SUCTION = fieldsOf<SuctionState>({
+  pads: "ui",
+});
+
+const SUCTION_PAD = fieldsOf<SuctionPad>({
+  axis: "ui",
+  label: "ui",
+  enabled: "ui",
+});
+
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
     type: "parser",
@@ -434,9 +449,12 @@ const STATE_FIELDS: FieldSpec = {
     health: "ui",
     safety: "ui",
     manual: "ui",
+    suction: "ui",
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
+  ...nest("suction", SUCTION),
+  ...nest("suction.pads[]", SUCTION_PAD),
   ...nest("motors.*", MOTOR_STATE),
   ...nest("sensors.*", SENSOR_STATE),
   ...nest("health", HEALTH),

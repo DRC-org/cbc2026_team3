@@ -705,3 +705,40 @@ describe("準備中のステップ一覧", () => {
     expect(screen.queryByRole("button", { name: "ステップ 3: 搬送" })).toBeNull();
   });
 });
+
+describe("吸着パッドの選択面", () => {
+  const SUCTION: RobotState["suction"] = {
+    pads: [
+      { axis: "valve_1", label: "1", enabled: true },
+      { axis: "valve_2", label: "2", enabled: true },
+    ],
+  };
+
+  it.each<[MatchPhase, ManualState["mode"]]>([
+    ["setup", "sequence"],
+    ["setup", "manual"],
+    ["match", "sequence"],
+    ["match", "manual"],
+  ])("%s の %s モードでも出す (選択は機体を動かさない)", (phase, mode) => {
+    mount(phase, robotState({ suction: SUCTION, manual: { mode, axes: [] } }));
+
+    expect(screen.getByRole("group", { name: "吸着に使うパッド" })).toBeInTheDocument();
+  });
+
+  it("吸着パッドを持たないロボットには出さない", () => {
+    mount("match", robotState({ suction: null }));
+
+    expect(screen.queryByRole("group", { name: "吸着に使うパッド" })).toBeNull();
+  });
+
+  it("選択は自分の担当機へ宛てて送る", async () => {
+    const { context } = mount("match", robotState({ suction: SUCTION }));
+
+    await userEvent.click(screen.getByRole("button", { name: "パッド 2 を使わない" }));
+
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "suction_pads_set", robot: "sub_hand", pads: ["valve_1"] },
+      expect.any(String),
+    );
+  });
+});

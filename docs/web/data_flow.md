@@ -34,7 +34,7 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 
 | メッセージ | 中身 | 頻度 |
 |---|---|---|
-| `state` | ロボット 1 台の全状態（モータ・シーケンス・安全機構・手動・センサ） | 20Hz × 2 台 |
+| `state` | ロボット 1 台の全状態（モータ・シーケンス・安全機構・手動・センサ・吸着パッドの選択） | 20Hz × 2 台 |
 | `match_state` | フェーズ・コート・指差喚呼・タイマー | 変化時 |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由・除外ステップ | 変化時 |
 | `homing_state` | 零点合わせの宛先（`robot` / `axes`）・現在の軸・軸ごとの成否・拒否理由・ロボットごとの対象軸（`targets`） | 変化時 |
@@ -86,6 +86,7 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 | 指差喚呼 | `checklist_set` / `checklist_reset` / `checklist_check_all`（`--dev-tools` 限定） |
 | 動作確認 | `motor_check_start` / `motor_check_abort` |
 | 手動操縦 | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` |
+| 吸着パッド | `suction_pads_set`（使う弁の**全集合**。差分ではない） |
 | その他 | `reenergize_motors` / `health_check` |
 
 UI から送る経路を持たないものもある（`checklist_reset` は準備中の `match_reset` と結果が
@@ -142,8 +143,14 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 
 **`?? []` のような黙った既定値を置いてはならない**（何が起きるかは `docs/web/pitfalls.md`）。
 検査を通す関数: `parseSafety` / `parseHealth`（+ `*ShapeErrors`）/ `parseChecklists` /
-`parseExcludedSteps` / `parseMotorCheckSteps` / `parseSensors` / `parseManual` /
+`parseExcludedSteps` / `parseMotorCheckSteps` / `parseSensors` / `parseManual` / `parseSuction` /
 `readMeasured` / `readCommand` / `parseEnum`。
+
+**`state.suction` は 3 値を区別する。** `null` は「このロボットに吸着パッドが無い」
+（パネルを描かない）、欠落（`undefined`）は「古いサーバー」（同じく描かない）、`pads[]` の
+どれかが `axis` / `label` / `enabled` を欠けば `MALFORMED`（操作を出さず「読み取れませんでした」）。
+`enabled` を `true` へ倒す既定値を置いてはならない —— 配信の崩れで「使う弁」が増える側へ倒れる。
+ラベルは配信の `label` をそのまま描く（`SuctionPadPanel`）。
 
 **`parseManual` が見るのは `positions` だけ**（他の欄も `manual.axes` の他の軸も素通し）。
 `positions` は**形を変えた唯一の既存欄**なので、サーバーと `web/dist` の版がずれる窓が

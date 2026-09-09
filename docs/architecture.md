@@ -846,6 +846,20 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 `_manual_target` の判定）は §8 と [invariants.md](invariants.md) の「制御権の奪い合いは
 両方向を塞ぐ」。
 
+### 吸着パッドの選択（`lib/suction.py`）
+
+サブハンドの吸着パッド 6 個（`valve_1`〜`valve_6`）のうち「次の吸着で開ける弁」を操縦者が
+減らせる。ワークの形で乗らないパッドの弁を開けると真空が抜けるため。
+
+| 要素 | 中身 |
+|---|---|
+| 正 | `SuctionSelection`（パッドの並びと有効集合）。**サーバーの `RobotContext.suction` が持つ**（操縦 UI 2 台で食い違わせない）。`sequences/sub_hand.py` が既定（全部 ON）を作り、`main.py` が `suction_of(seq)` で同じ 1 個をサーバーへ渡す |
+| 変更 | `suction_pads_set`（`robot` + 使う弁の**全集合** `pads`）。差分ではなく全集合を送るので、2 台が別々に押しても最後に届いた形が正になる。知らない軸名は拒否（`command_rejected`）。**空も通す**（選び直しの途中で 0 個を経由できる） |
+| 配信 | `state.suction`（`pads[]` に `axis` / `label` / `enabled`）。持たないロボットは `null`。ラベルはサーバーが付ける（UI に弁の名前を書き写さない） |
+| 効き方 | 「ワーク吸着」ステップが `enabled()` を読み、**選ばれた弁だけ `open`・残りは `closed`** を 1 回の `move_to` で送る。選択が空なら `SuctionSelectionError` でそのステップを失敗させる（吸わずに進むと落とす）。実行中の吸着には反映しない（次の吸着ステップから） |
+| ゲート | 無し（`PHASES_ANY`・緊急停止中も手動中も通す）。選択は機体を動かさない |
+| 既存との違い | `AlwaysManualPanel` の弁操作は「今すぐ開閉」、こちらは「次の吸着で使うか」。役割が違うので両方残す |
+
 ---
 
 ## 6. 設定ファイルの構成
@@ -1045,7 +1059,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 
 | type | 配信タイミング | 中身 |
 |---|---|---|
-| `state` | 定期（ロボットごと） | シーケンス進行・モータ状態・センサ・ヘルス・安全機構・手動軸 |
+| `state` | 定期（ロボットごと） | シーケンス進行・モータ状態・センサ・ヘルス・安全機構・手動軸・吸着パッドの選択 |
 | `match_state` | 接続直後 1 回 + 変化時 | コート・フェーズ・`can_start_match` / `checklists` / `timer` |
 | `server_info` | **接続直後 1 回だけ** | `dev_tools` / `dry_run` / 温度しきい値 2 値 |
 | `e_stop_state` | 切り替わった瞬間 + 接続直後（停止中なら） | `active` と（内部検知なら）`reason` |
@@ -1107,6 +1121,9 @@ robot / positions / checklist が揃っていて読めること ②登録した�
       "positions": ["home", "work_1", "work_shared"],
       "motors": ["y_axis_r", "y_axis_l"]
     }]
+  },
+  "suction": {                           // 吸着パッドを持たないロボットは null
+    "pads": [{ "axis": "valve_1", "label": "1", "enabled": true }]
   }
 }
 ```
@@ -1170,6 +1187,8 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 { "type": "motor_check_start" | "motor_check_abort" | "health_check" }
 // 零点合わせだけを走らせる。robot は必須（axes 省略でそのロボットの homing: を持つ全軸）
 { "type": "homing_start", "robot": "sub_hand", "axes": ["sub_y_axis"] }
+// 次の吸着で開ける弁の全集合。差分ではない
+{ "type": "suction_pads_set", "robot": "sub_hand", "pads": ["valve_1", "valve_2"] }
 // リミットスイッチの作動点を測る。robot / axis / direction は必須
 // step / coarse_step / limit は省略可（省くと homing の値が既定になる）
 { "type": "switch_measure_start", "robot": "sub_hand", "axis": "sub_y_axis",
@@ -1274,8 +1293,9 @@ setup ⇄ ready → match → finished → setup
 | `sequence_stop` / `e_stop` / `e_stop_release` / `match_reset` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `motor_check_abort` / `health_check` / `reenergize_motors` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
+| `suction_pads_set` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 
-最後の 3 行は「書き忘れ」ではなく**無ゲートであることの宣言**である。
+最後の 4 行は「書き忘れ」ではなく**無ゲートであることの宣言**である。
 
 #### 緊急停止によるコマンドゲート（二段目・独立）
 
@@ -1289,6 +1309,7 @@ setup ⇄ ready → match → finished → setup
 | `sequence_stop` / `e_stop` / `e_stop_release` / `motor_check_abort` | ✓ | 止める方向の操作は緊急停止中こそ通す |
 | `match_reset` / `match_finish` / `health_check` | ✓ | 復帰経路と状態確認は塞がない |
 | `set_court` / `checklist_*` | ✓ | 機体を動かさず、復旧には指差喚呼のやり直しが要る |
+| `suction_pads_set` | ✓ | 選択を変えるだけで、効くのは次の吸着ステップ |
 
 #### その他のゲート
 

@@ -13,6 +13,7 @@ from lib.match_state import ROLE_PRE_MATCH, Court, load_checklist_definitions
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
+from lib.suction import SuctionSelectionError
 from sequences.main_hand import MainHandSequence
 from sequences.sub_hand import SubHandSequence
 from tests.fake_drivers import StubFeedbackDriver
@@ -311,6 +312,33 @@ class TestSubHandSteps:
         await seq.release_at_place()
 
         assert "pump_vac" not in [name for name, _ in sink]
+
+    def test_default_suction_covers_every_valve(self) -> None:
+        seq = SubHandSequence()
+
+        assert seq.suction.axes == tuple(_VALVE_AXES)
+        assert seq.suction.enabled() == tuple(_VALVE_AXES)
+
+    async def test_suction_opens_only_selected_pads_and_closes_the_rest(self) -> None:
+        seq = SubHandSequence()
+        sink, _ = _wire(seq, _SUB_POSITIONS)
+        assert seq.suction.select(["valve_2", "valve_5"]) is None
+
+        await seq.grip_by_suction()
+
+        assert dict(sink) == {
+            name: (1.0 if name in ("valve_2", "valve_5") else 0.0) for name in _VALVE_AXES
+        }
+
+    async def test_suction_refuses_when_no_pad_is_selected(self) -> None:
+        seq = SubHandSequence()
+        sink, _ = _wire(seq, _SUB_POSITIONS)
+        assert seq.suction.select([]) is None
+
+        with pytest.raises(SuctionSelectionError):
+            await seq.grip_by_suction()
+
+        assert sink == []
 
 
 def _load_shipped(yaml_name: str) -> PositionTable:

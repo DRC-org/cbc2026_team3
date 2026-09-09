@@ -19,6 +19,7 @@ from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
 from lib.server import _FIRMWARE_INFO_GRACE_S, RobotServer
+from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager
 
 DEFAULT_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")]}
@@ -48,6 +49,7 @@ class ServerFixture:
         sync_monitors: list[SyncMonitor] | None = None,
         target_refreshers: list[GenericTargetRefresher] | None = None,
         manual: ManualController | None = None,
+        suction: SuctionSelection | None = None,
     ) -> Any:
         mgr = can_manager if can_manager is not None else mock_can_manager()
         self.server.add_robot(
@@ -58,6 +60,7 @@ class ServerFixture:
             sync_monitors=sync_monitors,
             target_refreshers=target_refreshers,
             manual=manual,
+            suction=suction,
         )
         self._sequences[name] = sequence
         self._can_managers[name] = mgr

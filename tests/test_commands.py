@@ -53,6 +53,7 @@ _EXPECTED_COMMANDS = {
     "manual_move",
     "manual_set",
     "manual_jog",
+    "suction_pads_set",
 }
 
 
