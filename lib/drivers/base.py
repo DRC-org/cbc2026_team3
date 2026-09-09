@@ -192,6 +192,17 @@ class MotorDriver(abc.ABC):
         """
         return False
 
+    def set_travel_range(self, min_command: float, max_command: float) -> None:  # noqa: B027
+        """軸の機械的可動域を**指令座標**で受け取る。既定は何もしない。
+
+        可動域が 1 回転未満の軸では、電文値から論理角への等価表現が 1 つしかない。
+        これを使えるドライバだけが実装する。**未設定は「一意化しない」であって
+        「可動域 0」ではない** ので、既定値で埋めてはならない。
+
+        呼び出し側は `min_command <= max_command` に整列してから渡すこと
+        (`scale` が負のモータでは軸の min/max が入れ替わる)。
+        """
+
     def supports_origin_capture(self) -> bool:
         if self.has_local_origin():
             return True

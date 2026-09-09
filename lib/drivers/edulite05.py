@@ -107,9 +107,15 @@ class Edulite05Driver(MotorDriver):
 
         self._origin_offset = 0.0
         self._origin_captured = False
+        # 暫定原点と零点確定は別の軸で見る。前者はその場の姿勢を論理 0 にするだけで
+        # 機構原点と無関係なので、可動域による一意化の前提が立たない
+        self._origin_homed = False
         self._target_clamped = False
         self._prev_raw_position: float | None = None
         self._wrap_turns = 0
+        self._travel_range: tuple[float, float] | None = None
+        self._travel_fallback_logged = False
+        self._outside_travel = False
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -189,6 +195,77 @@ class Edulite05Driver(MotorDriver):
         """論理 0 が指す連続化後の生角度 [rad]。ログと診断のための読み出し口。"""
         return self._origin_offset
 
+    @property
+    def travel_range(self) -> tuple[float, float] | None:
+        """軸の機械的可動域 [rad]。設定されていなければ None。診断のための読み出し口。"""
+        return self._travel_range
+
+    def set_travel_range(self, min_command: float, max_command: float) -> None:
+        if not (math.isfinite(min_command) and math.isfinite(max_command)):
+            raise ValueError("可動域は有限の値で指定してください")
+        if min_command >= max_command:
+            raise ValueError(
+                "可動域は min < max で指定してください "
+                f"({min_command} >= {max_command})。scale が負のモータでは"
+                "軸の min/max が入れ替わるので、整列してから渡すこと"
+            )
+        self._travel_range = (min_command, max_command)
+        if max_command - min_command >= _TURN:
+            self._log_travel_fallback("可動域が 1 回転以上あり等価表現が 1 つに決まらない")
+
+    def _log_travel_fallback(self, reason: str) -> None:
+        """一意化できない構成を 1 回だけ残す。**毎フレーム出してはならない。**"""
+        if self._travel_fallback_logged:
+            return
+        self._travel_fallback_logged = True
+        logger.warning(
+            "EDULITE 05 の回転数を可動域から一意に決められません (motor=%s, 理由=%s)。"
+            "電文の差分による連続化を続けます —— 電源断のあいだに軸が半回転以上"
+            "動かされると 1 回転ぶん誤って読みます",
+            self.name,
+            reason,
+        )
+
+    def _uniquify_wrap(self, raw: float) -> bool:
+        """論理角が可動域の中心に最も近くなる回転数を選ぶ。選べたら True。
+
+        可動域が 1 回転未満なら等価表現は 1 つしかないので、直前の電文を見なくても
+        回転数が決まる。可動域を少し外れた姿勢でも最も近い表現が選ばれる。
+
+        **零点確定で原点が確定しているときだけ使える。** 暫定原点は機構原点と
+        無関係なので、可動域と論理角が対応しない。
+        """
+        if not self._origin_homed:
+            # 暫定原点のあいだは一意化そのものが成り立たないので、記録もしない
+            return False
+        if self._travel_range is None:
+            self._log_travel_fallback("軸の機械的可動域 (axes.<軸>.travel) が設定されていない")
+            return False
+        low, high = self._travel_range
+        if high - low >= _TURN:
+            return False
+
+        center = 0.5 * (low + high)
+        self._wrap_turns = round((center - (raw - self._origin_offset)) / _TURN)
+        logical = raw + self._wrap_turns * _TURN - self._origin_offset
+        self._note_travel_excursion(logical, low, high)
+        return True
+
+    def _note_travel_excursion(self, logical: float, low: float, high: float) -> None:
+        outside = not low <= logical <= high
+        # 端に留まると 20Hz で同じ行が流れ続けるので、外れた瞬間だけ残す
+        if outside and not self._outside_travel:
+            logger.warning(
+                "EDULITE 05 の論理位置が可動域の外にあります "
+                "(motor=%s, 位置=%.4frad, 可動域=%.4f..%.4frad)。"
+                "機構が想定外の場所にあるか config が実機と食い違っています",
+                self.name,
+                logical,
+                low,
+                high,
+            )
+        self._outside_travel = outside
+
     def _track_wrap(self, raw: float) -> None:
         """電文値が [0, 360) へ畳まれた跳びを回転数で吸収する。
 
@@ -197,11 +274,13 @@ class Edulite05Driver(MotorDriver):
         電源断のたびに +360deg される。左右に 1 回転の差が生まれ、`SyncMonitor`
         が解除のたびに全体緊急停止を掛け直す。
 
-        「2 つの電文のあいだに軸が半回転以上動かない」ことに立っている。
-        通常は 20Hz 以上で受けるので満たし、電源断を跨ぐ窓は `rotate` が無励磁で
-        自重で回らないこと (指差喚呼 `rotate_holds`) が人の手で担保する。
+        可動域が渡されていれば回転数はそこから一意に決まる。渡されていない
+        (あるいは 1 回転以上ある) ときの差分アンラップは「2 つの電文のあいだに軸が
+        半回転以上動かない」ことに立っており、**可動端がちょうど半回転にある軸は
+        その境界で符号を取り違える**。電源断を跨ぐ窓は `rotate` が無励磁で自重で
+        回らないこと (指差喚呼 `rotate_holds`) が人の手で担保する。
         """
-        if self._prev_raw_position is not None:
+        if not self._uniquify_wrap(raw) and self._prev_raw_position is not None:
             diff = raw - self._prev_raw_position
             if diff > math.pi:
                 self._wrap_turns -= 1
@@ -229,7 +308,7 @@ class Edulite05Driver(MotorDriver):
             return False
         if self.mode is not ControlMode.POSITION:
             return False
-        self.capture_origin_here()
+        self._capture_origin(homed=False)
         return True
 
     def capture_origin_here(self) -> None:
@@ -242,6 +321,9 @@ class Edulite05Driver(MotorDriver):
         控えるのは電文値ではなく連続化後の値である。電文値で控えると、電源投入で
         [0, 360) へ畳まれた後に控え直した瞬間、回転数ぶんの論理位置が生える。
         """
+        self._capture_origin(homed=True)
+
+    def _capture_origin(self, *, homed: bool) -> None:
         raw = self._continuous_position()
         # 電源断で機構が動いたかどうかを知る材料はここにしか出ない。
         logger.info(
@@ -254,6 +336,7 @@ class Edulite05Driver(MotorDriver):
         )
         self._origin_offset = raw
         self._origin_captured = True
+        self._origin_homed = self._origin_homed or homed
 
     def feedback_position(self) -> float:
         """論理位置 [rad]。`state.position` は電文どおりの生値のまま残す。"""

@@ -487,12 +487,18 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 | 座標 | 何か | 読み口 |
 |---|---|---|
 | 電文 | `PARAM_LOC_REF` / フィードバックにそのまま載る値 [rad]。**電源投入で [0, 360) へ畳み直される** | `MotorState.position`（診断の生値カラム） |
-| 連続化 | 電文値 + `_wrap_turns` × 2π。前回の電文値との差が ±π を超えたら回転数を ±1 補正する | 外へは出ない |
+| 連続化 | 電文値 + `_wrap_turns` × 2π。回転数は 2 通りの決め方がある —— **軸の可動域（`axes.<軸>.travel`）が渡されていて 1 回転未満で、かつ零点確定済みなら「論理角が可動域の中心にいちばん近くなる」値**（差分を見ない）。それ以外は前回の電文値との差が ±π を超えたら ±1 補正する | `travel_range`（診断） |
 | 論理 | 連続化 − 原点オフセット。原点オフセットは `capture_origin_here()` が**連続化座標で**控える（起動時の暫定原点も零点確定もこの 1 本を通り、**モータ側の `SET_ZERO` は 1 通も出さない**） | `feedback_position()` / `idle_target_value()` / `origin_offset` |
 
 `encode_target(POSITION)` は逆順に戻す —— `(論理値 + 原点オフセット) − 回転数 × 2π` を作り、
 **その電文座標のまま** `POS_MIN`/`POS_MAX`（uint16 の写像レンジ）でクランプする。
 理由と踏んではならない形は `invariants.md` §2。
+
+可動域は `main._attach_travel_ranges` が `MotorSpec.to_command()` でモータ座標へ直し、
+**`scale` が負のモータでは min/max を整列してから**ドライバ契約の `set_travel_range()`
+（`lib/drivers/base.py` に既定 no-op）へ渡す。`main.py` はここでドライバ種別を見ない。
+零点確定は `capture_origin_here()`、起動時の暫定原点は `establish_provisional_origin()` で、
+**ドライバはこの 2 つを別のフラグで区別する**（一意化は前者の後だけ効く）。
 
 ### 台形速度プロファイル（`lib/control/trajectory.py`）
 
@@ -906,7 +912,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`match` |
 | `config/can_buses.yaml` | CAN バス定義（serial ↔ 固定名・bitrate・txqueuelen・restart_ms）の単一情報源 |
 | `config/<robot>.yaml` | そのロボットのモータ構成（`robot_name` / `motors` / `sensors`） |
-| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲・`motion` / `homing` / `sync_*` |
+| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲・機械的可動域（`travel`）・`motion` / `homing` / `sync_*` |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
 | `config/bench/<対象>/` | 机上ベンチ用の一式（8 セット） |
 
@@ -973,6 +979,11 @@ axes:                      # 換算: command = value * scale + offset
                            # 台形プロファイル（§4）。velocity_ff は pid.kd と同値に保つ
     manual: { min: 0.0, max: 650.0, steps: [1.0, 10.0, 100.0] }
                            # 手動で連続値を送ってよい軸だけが書く
+    travel: { min: 0.0, max: 180.0 }
+                           # 機械的に到達しうる範囲。**manual とは別物**（あちらは手動で
+                           # 動かしてよい範囲）。1 回転未満なら EDULITE 05 が電文値から
+                           # 回転数を一意に決める（§4 / invariants.md §2）。書かない
+                           # = 一意化しない
     homing: { sensor: …, direction: -1, step: 1.0, settle_s: 0.05, search_distance: 180.0 }
                            # 零点確定（§4）。search_distance は省略できない
     guard:                 # 可動端インターロック（§4）。書かない項目は「その守りが無い」
@@ -1005,7 +1016,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `motors:` と軸直下の `scale` / `offset` の併記 | どちらが効くか曖昧 |
 | モータ 1 台の軸に `sync_tolerance` | 防護が効いていないことに気付けない |
 | `sync_kp` があって `sync_limit` が無い / `motion` の 2 値の片方だけ | 押し合いの歯止めが無い / 軌道が決まらない（[invariants.md](invariants.md)「保護は止めるだけ…」） |
-| `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` | 可動範囲・軌道・原点という概念が無い |
+| `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` / `travel:` | 可動範囲・軌道・原点という概念が無い |
 | `duty` / `on_off` 以外の軸に `manual_always: true` | シーケンスの到達待ちを手動が上書きできてしまう |
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |

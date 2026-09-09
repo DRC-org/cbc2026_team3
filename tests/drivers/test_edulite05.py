@@ -543,6 +543,7 @@ class TestPcSideOrigin:
         feed_edulite(driver, position=1.5)
 
         with caplog.at_level(logging.INFO, logger="lib.drivers.edulite05"):
+            caplog.clear()
             driver.capture_origin_here()
 
         assert [record.levelno for record in caplog.records] == [logging.INFO]
@@ -744,3 +745,220 @@ class TestIsEnergized:
         driver.update_state(edulite_feedback(driver, mode_state=mode_state))
 
         assert driver.is_energized() is False
+
+
+class TestTravelRangeUniquification:
+    """軸の可動域が 1 回転未満なら、回転数は差分を見なくても一意に決まる。
+
+    差分アンラップは「2 つの電文のあいだに軸が半回転以上動かない」ことに立っている。
+    `rotate` の可動域はちょうど 0〜180deg で**半回転がその境界そのもの**なので、
+    電源が落ちているあいだに人が端から端へ動かすと、量子化した差分が π の
+    どちら側へ落ちるかで符号が反転する
+    (`docs/invariants.md` §2 / `docs/history/incidents.md` 2026-09-10)。
+    """
+
+    #: 電源復帰後の最初の電文の差分を、量子化で確実に π より小さい側へ落とす
+    MARGIN = math.degrees(2 * _POS_LSB)
+
+    #: `config/main_hand_positions.yaml` の rotate。scale が負の側は整列で符号が入れ替わる
+    R_TRAVEL = (0.0, math.pi)
+    L_TRAVEL = (-math.pi, 0.0)
+
+    #: 零点確定したときの電文値。論理 0 がここに乗る
+    R_ORIGIN_DEG = 350.0
+    L_ORIGIN_DEG = 10.0
+
+    #: 電源断のあいだに人が軸を 180deg 動かした後の電文値 ([0, 360) へ畳まれて届く)
+    R_AFTER_DEG = 170.0 + MARGIN
+    L_AFTER_DEG = 190.0 - MARGIN
+
+    def _homed(
+        self,
+        travel: tuple[float, float] | None,
+        *,
+        name: str = "rotate_r",
+        origin_deg: float = R_ORIGIN_DEG,
+    ) -> Edulite05Driver:
+        driver = Edulite05Driver(name, can_id=0x11)
+        if travel is not None:
+            driver.set_travel_range(*travel)
+        feed_edulite(driver, position=math.radians(origin_deg))
+        driver.capture_origin_here()
+        return driver
+
+    def test_電源断のあいだに180deg動かされても正の側で読む(self) -> None:
+        """**論理 -180deg と読むと、次の論理 0 の指令で逆向きに 180deg 回る。**
+
+        可動域は 0〜180deg なので -180deg は可動域の外であり、+180deg しか有り得ない。
+        """
+        driver = self._homed(self.R_TRAVEL)
+
+        feed_edulite(driver, position=math.radians(self.R_AFTER_DEG))
+
+        assert driver.feedback_position() == pytest.approx(math.pi, abs=3 * _POS_LSB)
+
+    def test_scaleが負の側も可動域のある側で読む(self) -> None:
+        driver = self._homed(self.L_TRAVEL, name="rotate_l", origin_deg=self.L_ORIGIN_DEG)
+
+        feed_edulite(driver, position=math.radians(self.L_AFTER_DEG))
+
+        assert driver.feedback_position() == pytest.approx(-math.pi, abs=3 * _POS_LSB)
+
+    def test_可動域が無ければ従来の差分アンラップのまま(self) -> None:
+        driver = self._homed(None)
+
+        feed_edulite(driver, position=math.radians(self.R_AFTER_DEG))
+
+        assert driver.feedback_position() == pytest.approx(-math.pi, abs=3 * _POS_LSB)
+
+    def test_暫定原点しかないあいだは一意化しない(self) -> None:
+        """暫定原点はその場の姿勢を論理 0 にするだけで、機構原点とは無関係である。"""
+        driver = Edulite05Driver("rotate_r", can_id=0x11, set_zero_on_start=True)
+        driver.set_travel_range(*self.R_TRAVEL)
+        feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG))
+        assert driver.establish_provisional_origin() is True
+
+        feed_edulite(driver, position=math.radians(self.R_AFTER_DEG))
+
+        assert driver.feedback_position() == pytest.approx(-math.pi, abs=3 * _POS_LSB)
+
+    def test_零点確定の後は一意化が効く(self) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11, set_zero_on_start=True)
+        driver.set_travel_range(*self.R_TRAVEL)
+        feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG))
+        driver.establish_provisional_origin()
+        driver.capture_origin_here()
+
+        feed_edulite(driver, position=math.radians(self.R_AFTER_DEG))
+
+        assert driver.feedback_position() == pytest.approx(math.pi, abs=3 * _POS_LSB)
+
+    def test_可動域が1回転以上なら一意化しない(self) -> None:
+        """等価表現が 2 つ以上あるので、回転数は可動域からは決まらない。"""
+        driver = self._homed((0.0, 3.0 * math.pi))
+
+        feed_edulite(driver, position=math.radians(self.R_AFTER_DEG))
+
+        assert driver.feedback_position() == pytest.approx(-math.pi, abs=3 * _POS_LSB)
+
+    def test_可動域を少し外れた姿勢はそのまま読む(self) -> None:
+        """オーバーシュートを -175deg と読むと、指令が可動域の逆端を向く。"""
+        driver = self._homed(self.R_TRAVEL)
+
+        feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 185.0 - 360.0))
+
+        assert driver.feedback_position() == pytest.approx(math.radians(185.0), abs=3 * _POS_LSB)
+
+    def test_可動域の外はWARNINGで残す(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = self._homed(self.R_TRAVEL)
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 185.0 - 360.0))
+
+        assert [record.levelname for record in caplog.records] == ["WARNING"]
+        assert "可動域" in caplog.records[0].message
+
+    def test_可動域の外に居るあいだ繰り返し出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = self._homed(self.R_TRAVEL)
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            for _ in range(5):
+                feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 185.0 - 360.0))
+
+        assert len(caplog.records) == 1
+
+    def test_可動域へ戻ってからまた外れれば再び出す(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = self._homed(self.R_TRAVEL)
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 185.0 - 360.0))
+            feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 90.0 - 360.0))
+            feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 185.0 - 360.0))
+
+        assert len(caplog.records) == 2
+
+    def test_可動域の内側では1通も出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = self._homed(self.R_TRAVEL)
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            feed_edulite(driver, position=math.radians(self.R_ORIGIN_DEG + 90.0 - 360.0))
+
+        assert caplog.records == []
+        assert driver.feedback_position() == pytest.approx(math.radians(90.0), abs=3 * _POS_LSB)
+
+    def test_一意化した回転数は指令にも効く(self) -> None:
+        """読み側だけ直すと、指令がモータの居場所から 360deg 離れた値になる。"""
+        driver = self._homed(self.R_TRAVEL)
+        feed_edulite(driver, position=math.radians(self.R_AFTER_DEG))
+        raw = driver.state.position
+
+        msg = driver.encode_target(ControlMode.POSITION, driver.feedback_position())
+
+        assert target_value_of(msg) == pytest.approx(raw, abs=3 * _POS_LSB)
+
+    def test_可動域は整列した順で受け取る(self) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+
+        with pytest.raises(ValueError, match="min < max"):
+            driver.set_travel_range(math.pi, 0.0)
+
+    def test_可動域の読み出し口を持つ(self) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+        assert driver.travel_range is None
+
+        driver.set_travel_range(*self.R_TRAVEL)
+
+        assert driver.travel_range == pytest.approx(self.R_TRAVEL)
+
+
+class TestTravelRangeFallbackIsLoggedOnce:
+    """一意化できない構成は、毎フレームではなく 1 回だけ残す。"""
+
+    def test_可動域が渡されていなければ1回だけ残す(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+        feed_edulite(driver, position=0.5)
+        driver.capture_origin_here()
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            for _ in range(5):
+                feed_edulite(driver, position=1.0)
+
+        messages = [record.message for record in caplog.records]
+        assert len(messages) == 1
+        assert "可動域" in messages[0]
+
+    def test_暫定原点しかないあいだは1通も出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """一意化そのものが成り立たない段なので、可動域の有無は問題ではない。"""
+        driver = Edulite05Driver("rotate_r", can_id=0x11, set_zero_on_start=True)
+        feed_edulite(driver, position=0.5)
+        driver.establish_provisional_origin()
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            feed_edulite(driver, position=1.0)
+
+        assert caplog.records == []
+
+    def test_可動域が1回転以上なら受け取った時点で1回残す(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            driver.set_travel_range(0.0, 3.0 * math.pi)
+            feed_edulite(driver, position=0.5)
+            driver.capture_origin_here()
+            feed_edulite(driver, position=1.0)
+
+        assert len(caplog.records) == 1
+        assert "1 回転" in caplog.records[0].message
+
+    def test_一意化できる構成では1通も出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = Edulite05Driver("rotate_r", can_id=0x11)
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            driver.set_travel_range(0.0, math.pi)
+            feed_edulite(driver, position=0.5)
+            driver.capture_origin_here()
+            feed_edulite(driver, position=0.5 + math.radians(90.0))
+
+        assert caplog.records == []

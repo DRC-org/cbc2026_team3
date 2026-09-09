@@ -4,6 +4,7 @@ import ast
 import dataclasses
 import inspect
 import logging
+import math
 import pathlib
 import socket
 import struct
@@ -45,6 +46,7 @@ from main import (
     _DEFAULT_PID,
     _attach_motion_profiles,
     _attach_sync_groups,
+    _attach_travel_ranges,
     _build_limit_monitors,
     _build_manual_controller,
     _build_position_loops,
@@ -980,9 +982,80 @@ class TestAttachHelpersAreCalledFromTheCompositionRoot:
                 }
         raise AssertionError(f"main.py に {function} の定義が無い")
 
-    @pytest.mark.parametrize("helper", ["_attach_sync_groups", "_attach_motion_profiles"])
+    @pytest.mark.parametrize(
+        "helper", ["_attach_sync_groups", "_attach_motion_profiles", "_attach_travel_ranges"]
+    )
     def test_wire_one_robot_calls_the_helper(self, helper: str) -> None:
         assert helper in self._called_names("_wire_one_robot")
+
+
+class TestTravelRangesReachTheDrivers:
+    """軸の可動域はモータ座標へ直して渡す。**`scale` が負の側は整列してから。**
+
+    整列を外すと `set_travel_range` が min >= max を受け取り、起動が落ちるか
+    (落ちなければ) 回転数の一意化が可動域の外側を中心に選ぶ。
+    """
+
+    def _table(self) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {
+                    "rotate": {
+                        "unit": "deg",
+                        "command_unit": "rad",
+                        "travel": {"min": 0.0, "max": 180.0},
+                        "motors": {
+                            "rotate_r": {"scale": math.radians(1.0), "offset": 0.0},
+                            "rotate_l": {"scale": -math.radians(1.0), "offset": 0.0},
+                        },
+                    }
+                },
+                "positions": {"rotate": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    def _drivers(self) -> dict[str, Edulite05Driver]:
+        return {
+            "rotate_r": Edulite05Driver("rotate_r", can_id=0x11),
+            "rotate_l": Edulite05Driver("rotate_l", can_id=0x12),
+        }
+
+    def test_scale_が正のモータへはそのまま渡る(self) -> None:
+        drivers = self._drivers()
+
+        _attach_travel_ranges(self._table(), drivers)
+
+        assert drivers["rotate_r"].travel_range == pytest.approx((0.0, math.pi))
+
+    def test_scale_が負のモータには整列してから渡る(self) -> None:
+        drivers = self._drivers()
+
+        _attach_travel_ranges(self._table(), drivers)
+
+        assert drivers["rotate_l"].travel_range == pytest.approx((-math.pi, 0.0))
+
+    def test_travel_を書かない軸へは渡さない(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {"lift": {"unit": "mm", "scale": 1.0}},
+                "positions": {"lift": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        drivers = {"lift": Edulite05Driver("lift", can_id=0x21)}
+
+        _attach_travel_ranges(table, drivers)
+
+        assert drivers["lift"].travel_range is None
+
+    def test_このロボットに居ないモータは警告して飛ばす(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="main"):
+            _attach_travel_ranges(self._table(), {})
+
+        assert len(caplog.records) == 2
 
 
 class TestShippedMainHandConfig:

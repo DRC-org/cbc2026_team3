@@ -865,6 +865,37 @@ def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop])
         logger.info("同期監視: %s を位置制御ループ (bus=%s) に登録", group.name, target.bus_name)
 
 
+def _attach_travel_ranges(positions: PositionTable, motors: dict[str, MotorDriver]) -> None:
+    """軸の機械的可動域をモータ座標へ直してドライバへ渡す。
+
+    使うかどうかはドライバ契約の既定実装 (`MotorDriver.set_travel_range`) が決める。
+    ここでドライバ種別を見ると、同じ判断が config とコードの 2 箇所に生える。
+    """
+    for axis_name in positions.axes:
+        travel = positions.axis(axis_name).travel
+        if travel is None:
+            continue
+        for motor in positions.axis(axis_name).motors:
+            driver = motors.get(motor.name)
+            if driver is None:
+                logger.warning(
+                    "可動域の受け渡しをスキップ: 軸 %s のモータ %s がこのロボットに存在しません",
+                    axis_name,
+                    motor.name,
+                )
+                continue
+            # scale が負のモータでは軸の min/max が入れ替わる
+            ends = (motor.to_command(travel.min_value), motor.to_command(travel.max_value))
+            driver.set_travel_range(min(ends), max(ends))
+            logger.debug(
+                "可動域を配線: 軸 %s のモータ %s へ %.4f..%.4f (指令単位)",
+                axis_name,
+                motor.name,
+                min(ends),
+                max(ends),
+            )
+
+
 def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionLoop]) -> None:
     for axis_name in positions.axes:
         spec = positions.axis(axis_name)
@@ -1068,6 +1099,7 @@ def _wire_one_robot(
     sync_groups = _build_sync_groups(positions, motors)
     _attach_sync_groups(sync_groups, loops)
     _attach_motion_profiles(positions, loops)
+    _attach_travel_ranges(positions, motors)
     monitors: list[SyncMonitor] = []
     if sync_groups:
         monitors.append(

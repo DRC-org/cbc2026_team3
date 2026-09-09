@@ -103,6 +103,62 @@ class TestShippedYAxisHoming:
         assert homing.search_distance == pytest.approx(manual.max_value - manual.min_value)
 
 
+class TestShippedRotateTravel:
+    """`rotate` の機械的可動域。**回転数の一意化が成り立つ唯一の根拠**である。
+
+    半回転がちょうど可動端なので、可動域が無いと電源断のあいだに端から端へ
+    動かされた軸を -180deg と読み、次の指令で逆向きに 180deg 回る
+    (`docs/history/incidents.md` 2026-09-10)。
+    """
+
+    @pytest.fixture
+    def table(self):
+        return _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+
+    def test_可動域を宣言している(self, table) -> None:
+        travel = table.axis("rotate").travel
+
+        assert travel is not None
+        assert (travel.min_value, travel.max_value) == (0.0, 180.0)
+
+    def test_可動域は1回転未満(self, table) -> None:
+        """1 回転以上あると等価表現が 2 つ以上になり、一意化そのものが成り立たない。"""
+        travel = table.axis("rotate").travel
+
+        assert travel is not None
+        assert 0.0 < travel.span < 360.0
+
+    def test_手動操縦の範囲を機械的可動域が含む(self, table) -> None:
+        """**同じ値である必要は無いが、含まれてはいる。**
+
+        手動で行ける先が機械的に到達しないなら、どちらかの値が実機と違う。
+        """
+        spec = table.axis("rotate")
+
+        assert spec.travel is not None and spec.manual is not None
+        assert spec.travel.min_value <= spec.manual.min_value
+        assert spec.manual.max_value <= spec.travel.max_value
+
+    def test_他の軸には書かない(self, table) -> None:
+        """一意化を使うのは EDULITE 05 だけである。"""
+        for axis in table.axes:
+            if axis == "rotate":
+                continue
+            assert table.axis(axis).travel is None, axis
+
+    def test_ベンチ構成には書かない(self) -> None:
+        """出力軸に何も繋がらないので「到達しうる範囲」が存在しない。
+
+        `manual` の -15〜90deg を流用すると、手で回した軸の論理角をその範囲へ
+        引き寄せて読む。
+        """
+        bench = _load_position_table_file(
+            _CONFIG_DIR / "bench" / "edulite" / "main_hand_positions.yaml"
+        )
+
+        assert bench.axis("rotate").travel is None
+
+
 class TestShippedMainHandGuard:
     """メインハンド 3 本のスイッチが可動端の歯止めの入力になっていること。
 
