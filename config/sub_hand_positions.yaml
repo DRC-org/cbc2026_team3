@@ -80,7 +80,7 @@ axes:
   sub_pitch:
     unit: deg
     command_unit: deg
-    timeout_s: 2.0
+    timeout_s: 3.0
     tolerance: 2.0
     motors:
       sub_pitch_r: { scale: 1.0, offset: 0.0 }
@@ -92,7 +92,7 @@ axes:
     command_unit: deg
     scale: 1.0
     offset: 0.0
-    timeout_s: 2.0
+    timeout_s: 3.0
     tolerance: 2.0
 
   # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
@@ -152,20 +152,26 @@ positions:
     pick: -130.0         # 吸着高さ [mm]。**top のちょうど 10mm 下** (+ が下なので値は 10 大きい)
     place: -20.0         # 箱へ下ろす高さ [mm]。箱 4 箇所とも同じ高さ
 
-  # TODO(機構が付いてから実測): 3 軸とも仮値。初期姿勢の角 (sub_rotate.receive /
+  # サーボ 3 軸は 2026-09-10 に実機で実測した。初期姿勢の角 (sub_rotate.receive /
   # sub_pitch.open / sub_offset.open) は firmware/servo/include/config.h の基板 #2 の
-  # initialAngleDeg と対 (通電・瞬断からの再起動でその角へ駆動する)。
+  # initialAngleDeg と対で、通電・瞬断からの再起動でその角へ駆動する
+  # (突き合わせは tests/test_sub_hand_positions_config.py がモータ 1 台ずつ行う)。
+  # 実機で確認済み (2026-09-10)。軸の値は右の生角で、左は offset 270.0 により
+  # receive で 270deg・carry で 180deg になる (どちらも r + l = 270 で対になる)。
   sub_rotate:
     receive: 0.0         # 受け取り姿勢 [deg]
     carry: 90.0          # 搬送姿勢 [deg]
 
+  # 実機で確認済み (2026-09-10)。軸の値は右の生角で、左は offset 270.0 により
+  # open で 10deg・close で 190deg になる (どちらも r + l = 270 で対になる)。
   sub_pitch:
-    open: 0.0            # 開いた持ち方 [deg]
-    close: 90.0          # 閉じた持ち方 [deg]
+    open: 260.0          # 開いた持ち方 [deg]
+    close: 80.0          # 閉じた持ち方 [deg]
 
+  # 実機で確認済み (2026-09-10)。0 -> 5 -> 30 -> 180deg を通した。
   sub_offset:
     open: 0.0            # 開いた持ち方 [deg]
-    close: 90.0          # 閉じた持ち方 [deg]
+    close: 180.0         # 閉じた持ち方 [deg]
 
   # 三方弁なので閉じた側が大気開放になる。ワークの解放は閉じるだけで済み、
   # 排気の駆動源を別に持たない。
@@ -183,3 +189,10 @@ positions:
   pump_vac:
     stop: 0.0            # 停止 [duty]
     run: 0.95             # 吸気 [duty]
+
+# 軸どうしの干渉 (docs/invariants.md §4)。ピッチが close のあいだ、オフセットは close 以外の
+# 姿勢を取れない (機構が干渉する)。手動操縦とシーケンスの両方が指令の瞬間に判定する。
+# 「居る」かどうかは各軸の tolerance で決まり、中間の角は「居ない」と扱う。
+interlocks:
+  - when: { sub_pitch: close }
+    require: { sub_offset: close }

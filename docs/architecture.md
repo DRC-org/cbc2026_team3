@@ -295,7 +295,7 @@ cbc2026_team3/
 ```
 配信・受理    server.py / ws_hub.py / server_motor_check.py / server_dryrun.py
 制御権と手順  manual.py / sequence/engine.py / sequences/*.py
-軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py
+軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py / sequence/interlock.py
 周期タスク    control/position_loop.py / sync_monitor.py / limit_monitor.py /
               target_refresh.py / trajectory.py ─ periodic.py / feedback.py /
               sync_guard.py / pid.py
@@ -319,6 +319,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit`。観測周期より狭い ON 区間は接触の累計で拾い、止めた回数（`intervention()`）を `move_to` へ渡す |
 | `control/target_refresh.py` | `GenericTargetRefresher` / `QueryDrivenTargetRefresher`（ともに 20Hz） |
 | `sequence/positions.py` | 位置定数 yaml の読み込み・単位換算・論理軸の解決（`PositionTable` / `AxisSpec`） |
+| `sequence/interlock.py` | 軸どうしの干渉（`AxisInterlock` / `InterlockSpec`）。位置定数 yaml の `interlocks:` を「指令が通った後の姿勢」で判定し、`ManualController._apply` と `Sequence.move_to` の両方がここを呼ぶ。他方の軸は最後に指令した目標 → 無ければフィードバック |
 | `sequence/homing.py` / `motors.py` / `engine.py` | 零点確定（`HomingRunner`。センサ読みと原点確定は注入）/ `MotorHandle` と `AxisHandle` / `@step` ベースのシーケンスエンジン |
 | `manual.py` / `tuning/metrics.py` | 手動操縦（`OperationMode` / `ManualController`。軸単位でしか指令しない）/ ステップ応答の指標算出（呼び出し元は `scripts/tune_y_axis.py` だけ） |
 | `health.py` / `match_state.py` | ヘルスの語彙と集約（`worst_bus_health`）/ フェーズ・コート・指差喚呼・試合時間（`ALL_ROLES` はここだけ） |
@@ -875,6 +876,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの偏差監視がそのまま効く。ただし
 `move_to` 完了時の段は手動では通らないので、効くのは常駐の段だけ —— `y_axis` は 200Hz と
 50Hz、`rotate` は 50Hz のみである）。
+軸どうしの干渉（`interlocks:`）は `_apply` が `AxisInterlock` で判定し、`ManualControlError` で拒否する（§4）。
 **モータ単位の指令口を作らない**（UI にもモータ単位のジョグを出さない）。ジョグの起点は直前の
 手動目標値で、起点が無い（初回・緊急停止後）ときだけフィードバックから逆換算する。モータの
 目標値はモード切替で消さない（消すのはジョグの起点だけ）。範囲外の値は**拒否ではなくクランプ**
@@ -915,7 +917,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `config/<robot>.yaml` | そのロボットのモータ構成（`robot_name` / `motors` / `sensors`） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲・機械的可動域（`travel`）・`motion` / `homing` / `sync_*` |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ用の一式（8 セット） |
+| `config/bench/<対象>/` | 机上ベンチ用の一式（10 セット） |
 
 パスは `--system` / `--config`（複数可）/ `--checklist` で差し替えられる。
 位置定数の読み先は「robot config と同じディレクトリの `<robot_name>_positions.yaml`」
@@ -1007,6 +1009,10 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
   conveyor:
     run: { red: 0.3, blue: -0.3 }   # コートで変わる位置だけ辞書で書く（両方必須）
   gripper: { open: …, closed: … }   # 離散状態アクチュエータは「名前付き状態」として書く
+
+interlocks:                # 軸どうしの干渉（§4）。位置名で書き、「居る」かどうかは各軸の tolerance で決まる
+  - when: { sub_pitch: close }
+    require: { sub_offset: close }
 ```
 
 **読み込みを拒否する組み合わせ**:
@@ -1022,6 +1028,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
 | `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
+| `interlocks` に無い軸名・位置名、`tolerance` の無い軸、位置指令でない軸 | 綴り違いは「その姿勢では止まらない」としてしか現れず、機構を壊すまで出ない |
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で
@@ -1086,7 +1093,7 @@ uv run python main.py --system config/bench/<対象>/system.yaml \
 （`y_axis` / `rotate`）同時に監視される状態 / `can_id` が両バスで 1・2 と重なっていても
 衝突しないこと。
 
-**8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る** —— ①system /
+**10 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る** —— ①system /
 robot / positions / checklist が揃っていて読めること ②登録したモータが**すべて**位置定数から
 指令できること ③開くバスがそのセットで使うものだけであること ④**同梱のディレクトリが漏れなく
 `_BENCH_DIRS` に載っていること**（`test_every_shipped_bench_dir_is_covered`）⑤本番 config を
@@ -1575,7 +1582,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 
 | 課題 | 現状 |
 |---|---|
-| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドはほぼ全部** |
+| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドの直動 2 軸**（サーボ 3 軸は 2026-09-10 に実測済み。可動域だけ全域のまま） |
 | M3508 の位置制御の一部が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は 150mm で取り直し済みだが、**短距離（15mm）での `sync_kp` の取り直しが残る**（最適値が振幅で変わる軸である） |
 | 低速域のスティックスリップが未観測 | 予測であって観測ではない。対抗手段は `ki`（既に 10）と `velocity_ff`。静摩擦補償は今回スコープ外 |
 | PID ゲインと `velocity_ff` は実行中に変更できず UI にも配信されない | 調整は config 変更 + 再起動。`pid.kd` と `motion.velocity_ff` は 2 つの yaml にまたがる対 |

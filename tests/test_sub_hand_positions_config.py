@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -17,6 +18,7 @@ from lib.sequence.positions import PositionTable, load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 _YAML_NAME = "sub_hand_positions.yaml"
+_FIRMWARE_DIR = _CONFIG_DIR.parent / "firmware" / "servo" / "include"
 
 # 前端スイッチ (動作点 0.0mm) からこれより内側では sub_rotate を回すと干渉する。
 _ROTATE_CLEARANCE_MM = 150.0
@@ -37,6 +39,29 @@ def table() -> PositionTable:
 
 def _value(table: PositionTable, axis: str, name: str) -> float:
     return table.raw(axis, name)
+
+
+# 基板 #2 のスロットは can_id 0x50〜0x54 の昇順で `config.h` の宣言順に対応する。
+_BOARD2_CAN_IDS = range(0x50, 0x55)
+
+
+def _firmware_initial_angles() -> dict[str, float]:
+    """`config.h` の基板 #2 の `initialAngleDeg` を モータ名 -> 角 で返す。
+
+    ファームは基板とスロット番号しか知らず、モータ名を知っているのは
+    `config/sub_hand.yaml` の `can_id` だけなので、両方を読まないと対応が付かない。
+    """
+    source = (_FIRMWARE_DIR / "config.h").read_text()
+    board = re.search(r"\{2,\s*\{(.*?)\}\}", source, re.S)
+    assert board is not None, "config.h に基板 #2 の宣言が無い"
+    angles = [float(m) for m in re.findall(r"SlotRole::Servo,\s*\d+,\s*([\d.]+)f", board.group(1))]
+    assert len(angles) == len(_BOARD2_CAN_IDS), f"基板 #2 のスロットが 5 つでない: {angles}"
+
+    motors = yaml.safe_load((_CONFIG_DIR / "sub_hand.yaml").read_text())["motors"]
+    by_can_id = {m["can_id"]: name for name, m in motors.items() if m["can_id"] in _BOARD2_CAN_IDS}
+    assert len(by_can_id) == len(_BOARD2_CAN_IDS), f"0x50〜0x54 のモータが 5 台でない: {by_can_id}"
+
+    return {by_can_id[can_id]: angle for can_id, angle in zip(_BOARD2_CAN_IDS, angles, strict=True)}
 
 
 class TestSubYAxis:
@@ -112,9 +137,16 @@ class TestServoAxes:
         """基板 #2 は通電と瞬断からの再起動のたび `initialAngleDeg` へ駆動する。
 
         シーケンスの初期姿勢と食い違うと、電源を入れ直すたびに機構が別の姿勢へ飛ぶ。
-        現在値は 5 スロットとも 0.0f (`firmware/servo/include/config.h`)。
+        **左右ペアはモータ 1 台ずつ突き合わせる** —— 軸の値だけを見ると、
+        折り返し点 (`offset`) がずれていても気付けない。
         """
-        assert _value(table, axis, name) == pytest.approx(0.0)
+        initial = _firmware_initial_angles()
+
+        for motor, command in table.commands(axis, name).items():
+            assert command == pytest.approx(initial[motor]), (
+                f"{axis}.{name} の {motor} が firmware/servo/include/config.h の"
+                f" initialAngleDeg と違う (config {command} / ファーム {initial[motor]})"
+            )
 
 
 class TestEveryPosition:
