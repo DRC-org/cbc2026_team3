@@ -723,6 +723,7 @@ class PickAndPlace(Sequence):
 | 例外 | 契機 |
 |---|---|
 | `SequenceTimeoutError` | 軸ごとの `timeout_s`（既定 5.0s）内に到達しなかった |
+| `LimitInterventionError`（`SequenceTimeoutError` の派生） | 可動端保護が移動を止めた。**待ち時間の不足ではない**ので型で分ける。派生にしてあるのは、移動の失敗を拾う既存の経路を素通りさせるため |
 | `AxisSyncError` | 到達後に `SyncGroup.violation()` が偏差を返した |
 | `EStopActiveError` | 緊急停止中に `MotorHandle.set_target` が呼ばれた |
 | `PositionLookupError` | 位置定数表に軸名・位置名が無い |
@@ -739,7 +740,8 @@ class PickAndPlace(Sequence):
 | 到達待ち | 軸ごとに `wait_reached(tolerance, timeout)` を**並列**実行 |
 | タイムアウト | 軸ごとの `timeout_s`。`move_to(..., timeout=)` で上書き可 |
 | タイムアウト時 | `SequenceTimeoutError` を送出 |
-| 可動端で曲げられたとき | 指令の前後で `LimitIntervention.count`（注入。既定は「保護なし」）を比べ、増えていれば理由を添えて `SequenceTimeoutError`。到達判定は保護の書き戻しで必ず成立するので、これが無いと軸が途中に居るまま次のステップへ進む |
+| 可動端で曲げられたとき | 指令の前後で `LimitIntervention.count`（注入。既定は「保護なし」）を比べ、増えていれば理由を添えて `LimitInterventionError`。到達判定は保護の書き戻しで必ず成立するので、これが無いと軸が途中に居るまま次のステップへ進む |
+| 保護の介入と未到達が同時に起きたとき | 両方を集めてから 1 つの例外にまとめる（`可動端保護が移動を止めました (…) / 目標位置に到達しませんでした (…)`）。**片方しか起きていなければその 1 文だけ**を出す。型は保護が 1 件でも絡めば`LimitInterventionError` |
 | 指令値の後始末 | **クリアしない**（昇降軸で保持トルクを失うとワークごと落下する） |
 | 呼び方 | 複数軸は 1 回の `move_to` へまとめて渡す（分けると待ちが軸の数だけ直列に積み上がる） |
 

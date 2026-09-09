@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from lib.drivers.generic import GenericDriver
+from lib.manual import ManualController
 from lib.match_state import Court
 from lib.sequence.engine import Sequence, step
 from lib.sequence.homing import HomingError
@@ -83,12 +84,16 @@ def _motors() -> MotorGroup:
 
 
 def _build(
-    *, runner: _RecordingRunner | None = None, robots: tuple[str, ...] = ("main_hand", "sub_hand")
+    *,
+    runner: _RecordingRunner | None = None,
+    robots: tuple[str, ...] = ("main_hand", "sub_hand"),
+    manual: bool = False,
 ) -> tuple[ServerFixture, _RecordingRunner]:
     fx = ServerFixture.build()
     fx.freeze_broadcast()
     for name in robots:
-        fx.add_robot(name, _IdleSequence(name))
+        controller = ManualController(_motors(), _table()) if manual else None
+        fx.add_robot(name, _IdleSequence(name), manual=controller)
 
     runner = runner or _RecordingRunner()
     fx.set_homing_source(
@@ -178,6 +183,35 @@ class TestDenyGate:
 
         assert started is False
         assert "零点合わせ" in (fx.motor_check_error() or "")
+
+    async def test_手動操縦モードのロボットが居たら拒む(self) -> None:
+        """整列段が原点センサを歯止めから外している間、その軸を手動で動かせないことの半分。
+
+        覆いは歯止めが読む口すべてに掛かるので、手動操縦の入口 (`AxisHandle`) が
+        見る歯止めも同時に緩む。**緩んだ歯止めが露出しないのは、この排他があるから**。
+        """
+        fx, runner = _build(manual=True)
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+
+        reason = await fx.start_homing("sub_hand")
+
+        assert reason is not None and "手動操縦モード" in reason
+        assert runner.homed == []
+
+    async def test_実行中は手動操縦へ切り替えられない(self) -> None:
+        """もう半分。走り出した後から制御権を奪う経路も塞がっていないと意味が無い。"""
+        fx, _runner = _build(manual=True)
+        fx.set_homing_running(True)
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"},
+            requester=client,
+        )
+
+        assert fx.operation_mode("main_hand") == "sequence"
+        assert "零点合わせ" in client.of_type("command_rejected")[-1]["reason"]
 
     async def test_実行中の重ね掛けを拒む(self) -> None:
         fx, runner = _build()

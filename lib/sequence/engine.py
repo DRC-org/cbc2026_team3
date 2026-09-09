@@ -20,6 +20,19 @@ class SequenceTimeoutError(RuntimeError):
     """目標位置に到達しないままタイムアウトした。"""
 
 
+class LimitInterventionError(SequenceTimeoutError):
+    """可動端保護が移動を止めたので、そのステップを失敗として扱った。
+
+    **中身はタイムアウトではない。** 待ち時間が足りなかったのではなく、機構が端に
+    着いたので保護が目標を実測へ書き直した。同じ型で運ぶと、操縦者は `timeout_s`
+    を伸ばす側を疑い、配線・向き・スケールの食い違いに辿り着けない。
+
+    **`SequenceTimeoutError` の派生にしてあるのは、既存の捕捉経路を素通りさせる
+    ため。** 移動の失敗を型で拾う経路 (`Sequence.run` の `except Exception`) は
+    どちらも同じ扱いでよく、狭めた型を投げても失敗が握り潰されない。
+    """
+
+
 class AxisSyncError(RuntimeError):
     """左右ペア軸の位置ずれ (sync_tolerance 超過) を検知した。"""
 
@@ -227,20 +240,22 @@ class Sequence:
             for axis, previous in before.items()
             if (now := self._limit_intervention(axis)).count != previous.count
         ]
-        if stopped:
-            raise SequenceTimeoutError(
-                f"シーケンス '{self.name}': 可動端保護が移動を止めました ({', '.join(stopped)})"
-            )
-
         failed = [
             f"{handle.name}->{position_name}"
             for (handle, position_name, _), reached in zip(pending, results, strict=True)
             if not reached
         ]
+        # 片方で `raise` すると、両方起きた移動では先に見たほうしか残らない。切り分けは
+        # 「止められた軸」と「届かなかった軸」の対応で進むので、片側だけでは辿れない
+        reasons: list[str] = []
+        if stopped:
+            reasons.append(f"可動端保護が移動を止めました ({', '.join(stopped)})")
         if failed:
-            raise SequenceTimeoutError(
-                f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
-            )
+            reasons.append(f"目標位置に到達しませんでした ({', '.join(failed)})")
+        if reasons:
+            # 保護が 1 件でも絡めば時間切れではない。単独の失敗は文言が今までと変わらない
+            error = LimitInterventionError if stopped else SequenceTimeoutError
+            raise error(f"シーケンス '{self.name}': {' / '.join(reasons)}")
 
         desynced = []
         for handle, _, _ in pending:

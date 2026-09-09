@@ -136,6 +136,23 @@ class SensorSuspension:
     読む口だけ**で、零点確定自身は生の読み口を使う —— 探索も離脱も「今 ON か」を
     見て進むので、覆った値を渡すと自分の目を塞ぐことになる。
 
+    **覆いは歯止めが読む口すべてに掛かる。** `main()` は 1 つの `SensorSuspension` を
+    両ハンドで共有し、覆った読み口を `MotorGroup` へ渡すので、整列段のあいだは
+    **手動操縦 (`lib/manual.py`) の指令が通る歯止めも同じだけ緩む**。それでも緩みが
+    露出しないのは、**整列段のあいだ当該軸に手動操縦の制御権が無い**ためで、根拠は
+    覆いの側ではなく制御権の側にある:
+
+    - 零点確定を走らせる 2 つの経路 (`homing_start` と動作確認) は、**どのロボットかが
+      手動操縦モードだと開始できない** (`RobotServer._environment_deny`)
+    - 走り出した後は `_busy_label()` が立つので、**手動操縦モードへの切り替えが拒まれ**
+      (`RobotServer._set_operation_mode`)、**`manual_always` の軸すら拒まれる**
+      (`RobotServer._allow_manual_in_sequence`)
+    - そもそも覆う対象になる軸は到達判定を持つ位置制御軸なので `manual_always` を
+      宣言できない (`AxisSpec._check_manual_always`)。半自動のまま動かす口が無い
+
+    **この排他が消えたら覆いの適用範囲を絞る必要が出る**ので、両向きを
+    `tests/test_server_homing.py::TestDenyGate` が固定している。
+
     多重に掛かっても数で持つ (掛けた順に外れなくても早く素通りに戻らない)。
     """
 
