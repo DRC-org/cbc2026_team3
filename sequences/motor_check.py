@@ -4,8 +4,7 @@ import logging
 from collections.abc import Collection, Mapping
 
 from lib.sequence.engine import Sequence, step
-from lib.sequence.homing import HomingRunner
-from lib.sequence.motors import AxisHandle
+from lib.sequence.homing import HomingRunner, run_homing
 from sequences.main_hand import HOME as MAIN_HOME
 from sequences.sub_hand import VALVE_AXES
 
@@ -13,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 SUB_HOME: dict[str, str] = {
-    "sub_arm_joint": "home",
     "sub_y_axis": "home",
     "sub_lift": "home",
     "sub_rotate": "home",
@@ -48,21 +46,7 @@ class MotorCheckSequence(Sequence):
             logger.info("零点確定: 実行口が未注入のため飛ばす")
             return
 
-        table = self.positions
-        targets = [name for name in table.axes if table.axis(name).homing is not None]
-        if not targets:
-            logger.info("零点確定: homing を持つ軸が無いため飛ばす")
-            return
-
-        for axis in targets:
-            spec = table.axis(axis).for_court(self.court)
-            logger.info("零点確定: %s", axis)
-            handle = AxisHandle(
-                spec,
-                [getattr(self.motors, name) for name in spec.motor_names],
-                sensor_active=self.motors.sensor_active,
-            )
-            await self._homing.home(spec, handle)
+        await run_homing(self._homing, self.positions, self.motors, court=self.court)
 
     @step("メインハンド 初期姿勢へ", axes=MAIN_HOME.keys())
     async def main_home(self) -> None:
@@ -97,11 +81,6 @@ class MotorCheckSequence(Sequence):
     @step("サブハンド 初期姿勢へ", axes=SUB_HOME.keys())
     async def sub_home(self) -> None:
         await self.move_to(SUB_HOME)
-
-    @step("サブハンド アーム関節", axes={"sub_arm_joint"})
-    async def sub_arm(self) -> None:
-        await self.move_to({"sub_arm_joint": "extended"})
-        await self.move_to({"sub_arm_joint": "home"})
 
     @step("サブハンド 前後スライド (Y 方向)", axes={"sub_y_axis"})
     async def sub_y_axis(self) -> None:

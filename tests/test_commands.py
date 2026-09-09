@@ -39,6 +39,8 @@ _EXPECTED_COMMANDS = {
     "sequence_jump",
     "motor_check_start",
     "motor_check_abort",
+    "homing_start",
+    "switch_measure_start",
     "reenergize_motors",
     "set_court",
     "checklist_set",
@@ -51,6 +53,7 @@ _EXPECTED_COMMANDS = {
     "manual_move",
     "manual_set",
     "manual_jog",
+    "suction_pads_set",
 }
 
 
@@ -226,6 +229,8 @@ class TestEStopGate:
             "trigger",
             "match_start",
             "motor_check_start",
+            "homing_start",
+            "switch_measure_start",
             "manual_move",
             "manual_set",
             "manual_jog",

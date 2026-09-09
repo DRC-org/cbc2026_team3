@@ -1,10 +1,12 @@
 import type {
   HealthChange,
+  HomingSnapshot,
   MatchState,
   MotorCheckSnapshot,
   RobotState,
   ServerInfo,
   ServerMessage,
+  SwitchMeasureSnapshot,
 } from "@/lib/protocol";
 import type { EpochMs } from "@/lib/time";
 
@@ -25,6 +27,8 @@ export interface RobotUiState {
   eStopReason: string | null;
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
+  homing: HomingSnapshot;
+  switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -51,6 +55,34 @@ export function emptyMotorCheckState(): MotorCheckSnapshot {
   };
 }
 
+export function emptyHomingState(): HomingSnapshot {
+  return {
+    available: false,
+    blocked_reason: "サーバーから零点合わせの状態を受信していません",
+    running: false,
+    robot: null,
+    axes: [],
+    current_axis: null,
+    results: [],
+    error: null,
+    targets: {},
+  };
+}
+
+export function emptySwitchMeasureState(): SwitchMeasureSnapshot {
+  return {
+    available: false,
+    blocked_reason: "サーバーから作動点測定の状態を受信していません",
+    running: false,
+    robot: null,
+    axis: null,
+    direction: null,
+    result: null,
+    error: null,
+    targets: {},
+  };
+}
+
 const INITIAL_MATCH_STATE: MatchState = {
   court: "red",
   phase: "setup",
@@ -72,6 +104,8 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   eStopReason: null,
   healthEvents: [],
   motorCheck: emptyMotorCheckState(),
+  homing: emptyHomingState(),
+  switchMeasure: emptySwitchMeasureState(),
   matchState: INITIAL_MATCH_STATE,
   serverInfo: INITIAL_SERVER_INFO,
   rejection: null,
@@ -124,6 +158,12 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
 
     case "motor_check_state":
       return { ...state, motorCheck: message.motorCheck };
+
+    case "homing_state":
+      return { ...state, homing: message.homing };
+
+    case "switch_measure_state":
+      return { ...state, switchMeasure: message.switchMeasure };
   }
 }
 

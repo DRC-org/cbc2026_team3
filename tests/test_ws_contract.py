@@ -23,14 +23,17 @@ from lib.health import (
     MotorHealth,
 )
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem
+from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court
 from lib.sequence.engine import AxisSyncError, Sequence, step
+from lib.sequence.homing import HomingError
 from lib.sequence.motors import MotorGroup, MotorHandle
-from lib.sequence.positions import load_position_table
+from lib.sequence.positions import AxisSpec, load_position_table
+from lib.server_homing import HomingSource
+from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager, set_last_feedback, set_motors, set_sensors
 from tests.fake_health import ok_health_snapshot
 from tests.feedback_frames import feed_generic
-from tests.server_fixtures import ServerFixture, require_type, wait_until
+from tests.server_fixtures import ServerFixture, drain, require_type, wait_until
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONTRACT_PATH = _REPO_ROOT / "web" / "src" / "test" / "ws-contract.json"
@@ -67,6 +70,7 @@ REQUIRED_TYPES = frozenset(
         "e_stop_state",
         "command_rejected",
         "motor_check_state",
+        "homing_state",
     }
 )
 
@@ -208,6 +212,52 @@ def _manual_controller(group: MotorGroup) -> ManualController:
     return ManualController(group, table)
 
 
+def _suction_selection() -> SuctionSelection:
+    """一部だけ ON の形を golden に固定する (全部 ON だと enabled の false が現れない)。"""
+    selection = SuctionSelection.numbered(("valve_1", "valve_2"))
+    assert selection.select(["valve_2"]) is None
+    return selection
+
+
+class _FailingHoming:
+    """原点へ届かない軸の代役。UI が「失敗した軸と理由」を受け取れるかを golden で固定する。"""
+
+    async def home(self, spec: AxisSpec, _handle: object) -> float:
+        raise HomingError(
+            f"軸 '{spec.name}' が 5.0mm 動かしても原点センサ 'origin_sensor' に"
+            " 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)"
+        )
+
+
+def _homing_source(group: MotorGroup) -> HomingSource:
+    table = load_position_table(
+        {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "homing": {
+                        "sensor": "origin_sensor",
+                        "direction": -1,
+                        "search_distance": 5.0,
+                        "step": 1.0,
+                    },
+                    "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        },
+        source="<ws-contract>",
+    )
+    return HomingSource(
+        runner=_FailingHoming(),  # type: ignore[arg-type]
+        table=table,
+        motors=group,
+        court=lambda: Court.RED,
+        axes_by_robot={_ROBOT: ("y_axis",)},
+    )
+
+
 def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     return {
         ROLE_PRE_MATCH: [
@@ -255,6 +305,7 @@ def _build_fixture() -> _Fixture:
         sync_monitors=[monitor],
         target_refreshers=[refresher],
         manual=_manual_controller(group),
+        suction=_suction_selection(),
     )
     fx.set_motor_check_sequence(_ContractCheckSequence())
     fx.freeze_broadcast()
@@ -303,6 +354,16 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
 
             await ws.send_json({"type": "trigger", "robot": _ROBOT})
             samples["command_rejected"] = await require_type(ws, "command_rejected")
+
+            fx.set_homing_source(_homing_source(group))
+            await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "sequence"})
+            await fx.start_homing(_ROBOT, ["y_axis"])
+            await fx.wait_homing_idle()
+            # 走り終えた形を採る (進捗の途中経過も同じ型で流れるので最後の 1 通を選ぶ)
+            samples["homing_state"] = [
+                msg for msg in await drain(ws) if msg.get("type") == "homing_state"
+            ][-1]
+            await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "manual"})
 
             await fx.publish_e_stop_state()
             samples["e_stop_state"] = await require_type(ws, "e_stop_state")

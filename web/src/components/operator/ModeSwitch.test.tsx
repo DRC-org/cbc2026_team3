@@ -29,36 +29,90 @@ function layoutClasses(el: HTMLElement): string[] {
     .toSorted();
 }
 
+function segments() {
+  return {
+    manual: screen.getByRole("button", { name: "手動操縦" }),
+    sequence: screen.getByRole("button", { name: "半自動" }),
+  };
+}
+
 describe("ModeSwitch", () => {
-  it("現在のモードを状態チップで示す", () => {
-    renderSwitch("manual");
-    expect(screen.getByText(/手動操縦中/)).toBeInTheDocument();
-    expect(screen.queryByText("半自動")).toBeNull();
+  it("どちらのモードでも両方の選択肢を並べる", () => {
+    for (const mode of ["sequence", "manual"] as const) {
+      const { view } = renderSwitch(mode);
+      const { manual, sequence } = segments();
+
+      expect(manual).toBeInTheDocument();
+      expect(sequence).toBeInTheDocument();
+
+      view.unmount();
+    }
   });
 
-  it("半自動中は行き先だけを差し出す (選択中のモードと同義の説明文を並べない)", () => {
+  it("選択中の側を aria-pressed と色付きの面で示す", () => {
+    const { view } = renderSwitch("manual");
+    expect(segments().manual).toHaveAttribute("aria-pressed", "true");
+    expect(segments().manual).toHaveClass("bg-warning");
+    expect(segments().sequence).toHaveAttribute("aria-pressed", "false");
+    expect(segments().sequence).not.toHaveClass("bg-neutral");
+    view.unmount();
+
     renderSwitch("sequence");
-    expect(screen.getByText("半自動")).toBeInTheDocument();
-    expect(screen.queryByText(/手動操縦中/)).toBeNull();
-    expect(screen.queryByText("シーケンス制御中")).toBeNull();
+    expect(segments().sequence).toHaveAttribute("aria-pressed", "true");
+    expect(segments().sequence).toHaveClass("bg-neutral");
+    expect(segments().manual).toHaveAttribute("aria-pressed", "false");
+    expect(segments().manual).not.toHaveClass("bg-warning");
   });
 
-  it("押すと切り替え先のモードを返す", async () => {
+  it("選択中の側を押しても切り替えを送らない", async () => {
     const user = userEvent.setup();
-    const { onChange } = renderSwitch("sequence");
 
-    await user.click(screen.getByRole("button", { name: /手動操縦へ/ }));
+    const a = renderSwitch("sequence");
+    await user.click(segments().sequence);
+    expect(a.onChange).not.toHaveBeenCalled();
+    a.view.unmount();
 
-    expect(onChange).toHaveBeenCalledWith("manual");
+    const b = renderSwitch("manual");
+    await user.click(segments().manual);
+    expect(b.onChange).not.toHaveBeenCalled();
   });
 
-  it("手動中のボタンは半自動へ戻す", async () => {
+  it("選ばれていない側を押すとそのモードを返す", async () => {
     const user = userEvent.setup();
-    const { onChange } = renderSwitch("manual");
 
-    await user.click(screen.getByRole("button", { name: /半自動へ戻る/ }));
+    const a = renderSwitch("sequence");
+    await user.click(segments().manual);
+    expect(a.onChange).toHaveBeenCalledWith("manual");
+    a.view.unmount();
 
-    expect(onChange).toHaveBeenCalledWith("sequence");
+    const b = renderSwitch("manual");
+    await user.click(segments().sequence);
+    expect(b.onChange).toHaveBeenCalledWith("sequence");
+  });
+
+  it("切り替えられないときは理由を出して両方を塞ぐ", () => {
+    renderSwitch("sequence", "切断中のため操作できません");
+
+    expect(segments().manual).toBeDisabled();
+    expect(segments().sequence).toBeDisabled();
+    expect(screen.getByText("切断中のため操作できません")).toBeInTheDocument();
+  });
+
+  it("手動中も同じ理由で両方を塞ぐ", () => {
+    renderSwitch("manual", "切断中のため操作できません");
+
+    expect(segments().manual).toBeDisabled();
+    expect(segments().sequence).toBeDisabled();
+    expect(screen.getByText("切断中のため操作できません")).toBeInTheDocument();
+  });
+
+  it("手動中はシーケンスが止まっていることを書く", () => {
+    const { view } = renderSwitch("manual");
+    expect(screen.getByText(/シーケンスは停止しています/)).toBeInTheDocument();
+    view.unmount();
+
+    renderSwitch("sequence");
+    expect(screen.queryByText(/シーケンスは停止しています/)).toBeNull();
   });
 
   it("手動中は帯そのものを警告色にする", () => {
@@ -96,17 +150,6 @@ describe("ModeSwitch", () => {
     expect(band.querySelector(".tabs")).toBeNull();
   });
 
-  it("切り替えられないときは理由を出してボタンを塞ぐ", () => {
-    renderSwitch("sequence", "切断中のため操作できません");
-    expect(screen.getByRole("button", { name: /手動操縦へ/ })).toBeDisabled();
-    expect(screen.getByText("切断中のため操作できません")).toBeInTheDocument();
-  });
-
-  it("手動から戻る側も同じ理由で塞ぐ", () => {
-    renderSwitch("manual", "切断中のため操作できません");
-    expect(screen.getByRole("button", { name: /半自動へ戻る/ })).toBeDisabled();
-  });
-
   it("シーケンス名を出す", () => {
     renderSwitch("sequence");
     expect(screen.getByText("sub_hand")).toBeInTheDocument();
@@ -121,19 +164,7 @@ describe("ModeSwitch", () => {
     expect(screen.queryByText(/ステップ/)).toBeNull();
   });
 
-  it("切替ボタンを帯の右端に置かない (EMG STOP の真下に押せる要素を置かない)", () => {
-    const { band } = renderSwitch("sequence", "切断中のため操作できません");
-
-    const button = screen.getByRole("button", { name: /手動操縦へ/ });
-    expect(band.firstElementChild).toBe(button);
-    expect(button.className).not.toMatch(/ml-auto/);
-
-    const reason = screen.getByText("切断中のため操作できません");
-    expect(band.lastElementChild).toBe(reason);
-    expect(reason).toHaveClass("ml-auto");
-  });
-
-  it("モードでも塞がれ状態でも切替ボタンは帯の先頭のまま", () => {
+  it("モードでも塞がれ状態でも選択は帯の先頭のまま (EMG STOP の真下に押せる要素を置かない)", () => {
     const cases: Array<[Parameters<typeof renderSwitch>[0], string | null]> = [
       ["sequence", null],
       ["manual", null],
@@ -143,10 +174,18 @@ describe("ModeSwitch", () => {
 
     for (const [mode, reason] of cases) {
       const { band, view } = renderSwitch(mode, reason);
-      const first = band.firstElementChild as HTMLElement;
+      const group = screen.getByRole("group", { name: "操作モード" });
 
-      expect(first.tagName).toBe("BUTTON");
-      expect(first.textContent).toMatch(mode === "manual" ? /半自動へ戻る/ : /手動操縦へ/);
+      expect(band.firstElementChild).toBe(group);
+      expect(group).toContainElement(segments().manual);
+      expect(group).toContainElement(segments().sequence);
+      expect(group.className).not.toMatch(/ml-auto/);
+
+      if (reason) {
+        const text = screen.getByText(reason);
+        expect(band.lastElementChild).toBe(text);
+        expect(text).toHaveClass("ml-auto");
+      }
 
       view.unmount();
     }

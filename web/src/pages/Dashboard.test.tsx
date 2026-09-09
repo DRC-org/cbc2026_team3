@@ -1,7 +1,8 @@
 import { fireEvent, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import type { HealthSnapshot, MatchState, RobotState } from "@/lib/protocol";
+import type { HealthSnapshot, MatchState, RobotState, SafetyState } from "@/lib/protocol";
 import { Dashboard } from "@/pages/Dashboard";
 import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
@@ -179,5 +180,76 @@ describe("Dashboard 準備中の機体状態カラム", () => {
 
     stub({ clientHeight: 526, scrollHeight: 1913, scrollTop: 1387 });
     expect(panel?.querySelector(".bg-linear-to-t")).toBeNull();
+  });
+});
+
+describe("Dashboard の再励磁", () => {
+  const MATCH: MatchState = { ...SETUP, phase: "match", can_start_match: true };
+  const unenergized: SafetyState = {
+    sync_violations: [],
+    unenergized_motors: ["sub_lift"],
+    firmware_unconfirmed_motors: [],
+    failed_tasks: [],
+    reenergizing: false,
+    loops_running: true,
+    monitors_running: true,
+    refreshers_running: true,
+    position_loops: [],
+    sync_monitors: [],
+    target_refreshers: [],
+  };
+
+  it("準備中の機体状態カラムから、無励磁のハンドへ宛てて送る", async () => {
+    const { context } = renderWithRobot(<Dashboard />, {
+      matchState: SETUP,
+      states: {
+        main_hand: robot(),
+        sub_hand: robot({ robot: "sub_hand", safety: unenergized }),
+      },
+    });
+
+    const buttons = screen.getAllByRole("button", { name: "再励磁" });
+    expect(buttons).toHaveLength(1);
+
+    await userEvent.click(buttons[0]);
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "reenergize_motors", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+
+  it("試合中の機体カードからも、そのカードのハンドへ宛てて送る", async () => {
+    const { context } = renderWithRobot(<Dashboard />, {
+      matchState: MATCH,
+      states: {
+        main_hand: robot(),
+        sub_hand: robot({ robot: "sub_hand", safety: unenergized }),
+      },
+    });
+
+    const buttons = screen.getAllByRole("button", { name: "再励磁" });
+    expect(buttons).toHaveLength(1);
+
+    await userEvent.click(buttons[0]);
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "reenergize_motors", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+
+  it("main_hand が無励磁なら main_hand へ宛てる", async () => {
+    const { context } = renderWithRobot(<Dashboard />, {
+      matchState: MATCH,
+      states: {
+        main_hand: robot({ safety: unenergized }),
+        sub_hand: robot({ robot: "sub_hand" }),
+      },
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "再励磁" }));
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "reenergize_motors", robot: "main_hand" },
+      expect.any(String),
+    );
   });
 });

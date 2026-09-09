@@ -28,6 +28,7 @@ from lib.config_schema import (
     load_system_config,
 )
 from lib.control.feedback import FeedbackFreshness
+from lib.control.limit_monitor import LimitMonitor
 from lib.control.pid import PIDController
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
@@ -46,10 +47,12 @@ from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
 from lib.sequence.engine import Sequence
-from lib.sequence.homing import HomingError, HomingRunner
+from lib.sequence.homing import HomingError, HomingRunner, homing_axis_names
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
+from lib.server_homing import HomingSource
+from lib.suction import suction_of
 from sequences.motor_check import MotorCheckSequence
 
 logger = logging.getLogger(__name__)
@@ -300,7 +303,7 @@ def _as_async(capture: Callable[[], None]) -> Callable[[], Awaitable[None]]:
 def _wire_motor_check_sequence(
     server: RobotServer,
     groups: list[MotorGroup],
-    tables: list[PositionTable],
+    tables: Mapping[str, PositionTable],
     *,
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
@@ -313,7 +316,7 @@ def _wire_motor_check_sequence(
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
         return
 
-    merged = PositionTable.merged(tables)
+    merged = PositionTable.merged(list(tables.values()))
 
     sequence = MotorCheckSequence(available_axes=merged.axes)
     for excluded in sequence.excluded_steps:
@@ -342,7 +345,7 @@ def _wire_motor_check_sequence(
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
 
-    homing_axes = [name for name in merged.axes if merged.axis(name).homing is not None]
+    homing_axes = homing_axis_names(merged)
     if homing_axes:
         sensors = {name: sensor for mgr in can_managers for name, sensor in mgr.sensors.items()}
         freshness = FeedbackFreshness(
@@ -410,15 +413,28 @@ def _wire_motor_check_sequence(
                 unsupported,
             )
 
-        sequence.bind_homing(
-            HomingRunner(
-                sensor_active=sensor_read,
-                sensor_contact_count=_sensor_contact_count,
-                sensor_is_stale=_sensor_is_stale,
-                motor_is_stale=_motor_is_stale,
-                motor_is_energized=_motor_is_energized,
-                origin_capturable=_origin_capturable,
-                capture_origin=_capture_origin,
+        runner = HomingRunner(
+            sensor_active=sensor_read,
+            sensor_contact_count=_sensor_contact_count,
+            sensor_is_stale=_sensor_is_stale,
+            motor_is_stale=_motor_is_stale,
+            motor_is_energized=_motor_is_energized,
+            origin_capturable=_origin_capturable,
+            capture_origin=_capture_origin,
+        )
+        sequence.bind_homing(runner)
+        # 束ねると「サブハンドのつもりでメインハンドが動く」が作れる
+        server.set_homing_source(
+            HomingSource(
+                runner=runner,
+                table=merged,
+                motors=motors,
+                court=lambda: sequence.court,
+                axes_by_robot={
+                    robot: axes
+                    for robot, table in tables.items()
+                    if (axes := tuple(homing_axis_names(table)))
+                },
             )
         )
 
@@ -725,6 +741,31 @@ def _build_target_refreshers(
     return refreshers
 
 
+def _build_limit_monitors(
+    positions: PositionTable,
+    sequence: Sequence,
+    *,
+    sensor_active: Callable[[str], bool | None],
+) -> list[LimitMonitor]:
+    """移動中の可動端監視。`guard.limits` を書いた軸が 1 本も無ければ回さない。
+
+    コートを毎周期問い直すのは、`scale` がコートで鏡になる軸では**進む向きの符号
+    そのものが変わる**ため。起動時に固めると、試合中のコート切り替えで反対端の
+    センサを見るようになる。
+    """
+    if not sequence.has_motors:
+        return []
+    monitor = LimitMonitor(
+        positions,
+        sequence.motors,
+        sensor_active=sensor_active,
+        court=lambda: sequence.court,
+    )
+    if not monitor.axis_names:
+        return []
+    return [monitor]
+
+
 def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
     return ManualController(sequence.motors, positions)
 
@@ -905,6 +946,7 @@ class _RobotWiring:
     positions: PositionTable
     position_loops: list[M3508PositionLoop]
     sync_monitors: list[SyncMonitor]
+    limit_monitors: list[LimitMonitor]
     target_refreshers: list[TargetRefresher]
     motor_group: MotorGroup | None
 
@@ -929,6 +971,9 @@ def _wire_one_robot(
     positions = _load_position_table_file(_positions_path(config_path, robot_name))
     seq.bind_positions(positions)
 
+    sensor_read = _make_sensor_reader(
+        [can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms
+    )
     loops = _wire_robot_motors(
         robot,
         can_manager,
@@ -936,9 +981,7 @@ def _wire_one_robot(
         seq,
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         is_estop_active=is_estop_active,
-        sensor_active=_make_sensor_reader(
-            [can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms
-        ),
+        sensor_active=sensor_read,
     )
 
     refreshers = _build_target_refreshers(
@@ -967,22 +1010,28 @@ def _wire_one_robot(
 
     manual = _build_manual_controller(seq, positions)
 
+    limit_monitors = _build_limit_monitors(positions, seq, sensor_active=sensor_read)
+
     server.add_robot(
         robot_name,
         seq,
         can_manager,
         position_loops=loops,
         sync_monitors=monitors,
+        limit_monitors=limit_monitors,
         target_refreshers=refreshers,
         manual=manual,
+        suction=suction_of(seq),
     )
     logger.info(
-        "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s)",
+        "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s"
+        " / 可動端監視 %s)",
         robot_name,
         len(motors),
         len(positions.axes),
         ", ".join(loop.bus_name for loop in loops) or "なし",
         ", ".join(group.name for group in sync_groups) or "なし",
+        ", ".join(a for m in limit_monitors for a in m.axis_names) or "なし",
     )
     logger.debug(
         "ロボット登録 %s の内訳: 位置定数軸 %s / 目標値再送 %s / 手動連続操作 %s",
@@ -999,6 +1048,7 @@ def _wire_one_robot(
         positions=positions,
         position_loops=loops,
         sync_monitors=monitors,
+        limit_monitors=limit_monitors,
         target_refreshers=refreshers,
         motor_group=seq.motors if seq.has_motors else None,
     )
@@ -1035,6 +1085,9 @@ async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
         for monitor in wiring.sync_monitors:
             monitor.start()
     for wiring in wirings:
+        for monitor in wiring.limit_monitors:
+            monitor.start()
+    for wiring in wirings:
         for refresher in wiring.target_refreshers:
             refresher.start()
     await server.start()
@@ -1047,6 +1100,9 @@ async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> Non
     for wiring in wirings:
         for refresher in wiring.target_refreshers:
             await _shutdown_step("目標値再送", refresher.stop())
+    for wiring in wirings:
+        for monitor in wiring.limit_monitors:
+            await _shutdown_step("可動端監視", monitor.stop())
     for wiring in wirings:
         for monitor in wiring.sync_monitors:
             await _shutdown_step("同期監視", monitor.stop())
@@ -1140,7 +1196,7 @@ async def main() -> None:
     _wire_motor_check_sequence(
         server,
         [w.motor_group for w in wirings if w.motor_group is not None],
-        [w.positions for w in wirings],
+        {w.name: w.positions for w in wirings},
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],

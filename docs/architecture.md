@@ -49,6 +49,7 @@ WebSocket (`/ws`) を受ける。
 │         │                 └── Sequence ×3 (sequence/engine)   │
 │   周期タスク（control/periodic.py 継承）  ┐                     │
 │     M3508PositionLoop 200Hz / SyncMonitor 50Hz /              │
+│     LimitMonitor 50Hz /                                       │
 │     GenericTargetRefresher・QueryDrivenTargetRefresher 20Hz   │
 │                    CANManager（can_manager.py）                │
 │         ドライバ: m3508 / edulite05 / dm3520 / generic         │
@@ -105,7 +106,8 @@ CAN フレーム
 ```
 
 **配信の頻度**: `state` は定期配信（既定 50ms 周期）。`match_state` / `e_stop_state` /
-`motor_check_state` / `health_change` は変化時に push。`server_info` は接続直後の 1 回だけ。
+`motor_check_state` / `homing_state` / `switch_measure_state` / `health_change` は変化時に push。`server_info` は
+接続直後の 1 回だけ。
 
 ### 起動と後始末の段（`main.py`）
 
@@ -117,8 +119,8 @@ CAN フレーム
 | 読む | `_load_all_configs` | `lib/config_schema.py` の 4 ローダを呼ぶ。誤記は `SystemExit` の 1 行 |
 | bind | `_ensure_port_available(host, port)` | 配線の**手前**で行う（会場での二重起動を CAN を開く前に落とす） |
 | 配線 | `_wire_one_robot` ×ロボット数 | 下表 |
-| 起動 | `_start_all` | `CANManager.run()` → 位置制御ループ → 同期監視 → 目標値再送 → サーバー |
-| 畳む | `_shutdown_all` | 位置制御ループ → 目標値再送 → 同期監視 → CAN → サーバーの順（順序は不変条件） |
+| 起動 | `_start_all` | `CANManager.run()` → 位置制御ループ → 同期監視 → 可動端監視 → 目標値再送 → サーバー |
+| 畳む | `_shutdown_all` | 位置制御ループ → 目標値再送 → 可動端監視 → 同期監視 → CAN → サーバーの順（順序は不変条件） |
 
 `_wire_one_robot` が呼ぶヘルパ:
 
@@ -132,12 +134,13 @@ CAN フレーム
 | `_wire_robot_motors` | `build_motor_group()` → `Sequence.bind_motors()` |
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
 | `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバの `SET_ZERO`）を解決 |
+| `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
 | `_build_manual_controller` | シーケンスと**同じ** `MotorGroup` を共有する `ManualController` |
 | `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す |
 | `_read_operstate` | `/sys/class/net/<ch>/operstate` を読み、down なら起動ログへ ERROR 1 行（起動は止めない） |
 
 生成した部品は `server.add_robot(robot_name, seq, can_manager, position_loops=…,
-sync_monitors=…, target_refreshers=…)` でサーバーへも渡す（サーバーはこれを①動作確認との
+sync_monitors=…, limit_monitors=…, target_refreshers=…)` でサーバーへも渡す（サーバーはこれを①動作確認との
 排他 ②緊急停止解除でのラッチ解除 ③緊急停止時の保持目標の破棄 ④安全ループの生死配信 に使う）。
 **開くバスはそのロボットが実際に使うものだけ**（`_robot_bus_names`。メインハンドは
 `can_dm3520` を、サブハンドは `can_m3508` を開かない）。シグナルの扱いは
@@ -255,7 +258,6 @@ down 中しか受け付けない）、up 後に `ERROR-ACTIVE` を確認して�
 
 | 論理軸 | モータ | ドライバ | バス | can_id | 役割 |
 |---|---|---|---|---|---|
-| `sub_arm_joint` | 同名 | edulite05 | can_edulite | 3 | アーム関節 |
 | `sub_y_axis` / `sub_lift` | 同名 | dm3520 | can_dm3520 | 0x01 / 0x02（MST 0x11 / 0x12） | 前後 / 昇降（ラックアンドピニオン直動） |
 | `sub_gripper` | 同名 | generic（サーボ #1 SV0） | can_generic | 0x48 | 開 / 閉 |
 | `valve_1`〜`valve_6` / `pump_vac` / `pump_blow` | 同名 | generic（電磁弁 #0 ch0-5 / DC ch1・ch2） | can_generic | 0xC0〜0xC5 / 0x81 / 0x82 | `on_off` ×6 / duty ×2 |
@@ -290,8 +292,9 @@ cbc2026_team3/
 配信・受理    server.py / ws_hub.py / server_motor_check.py / server_dryrun.py
 制御権と手順  manual.py / sequence/engine.py / sequences/*.py
 軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py
-周期タスク    control/position_loop.py / sync_monitor.py / target_refresh.py /
-              trajectory.py ─ periodic.py / feedback.py / sync_guard.py / pid.py
+周期タスク    control/position_loop.py / sync_monitor.py / limit_monitor.py /
+              target_refresh.py / trajectory.py ─ periodic.py / feedback.py /
+              sync_guard.py / pid.py
 CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic}.py
 最下位        axis_sync.py / motion_guard.py / config_schema.py / health.py / match_state.py / commands.py
 ```
@@ -299,7 +302,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層 |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ** |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -309,13 +312,14 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `control/pid.py` / `trajectory.py` | モータ非依存 PID（測定値微分 / conditional integration / デッドバンド）/ 台形速度プロファイル |
 | `control/position_loop.py` | M3508 の PC 側位置制御ループ（バス単位・200Hz） |
 | `control/sync_monitor.py` | 左右ペア軸のずれを常時監視（50Hz）。超過で全体緊急停止 |
+| `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit` |
 | `control/target_refresh.py` | `GenericTargetRefresher` / `QueryDrivenTargetRefresher`（ともに 20Hz） |
 | `sequence/positions.py` | 位置定数 yaml の読み込み・単位換算・論理軸の解決（`PositionTable` / `AxisSpec`） |
 | `sequence/homing.py` / `motors.py` / `engine.py` | 零点確定（`HomingRunner`。センサ読みと原点確定は注入）/ `MotorHandle` と `AxisHandle` / `@step` ベースのシーケンスエンジン |
 | `manual.py` / `tuning/metrics.py` | 手動操縦（`OperationMode` / `ManualController`。軸単位でしか指令しない）/ ステップ応答の指標算出（呼び出し元は `scripts/tune_y_axis.py` だけ） |
 | `health.py` / `match_state.py` | ヘルスの語彙と集約（`worst_bus_health`）/ フェーズ・コート・指差喚呼・試合時間（`ALL_ROLES` はここだけ） |
 | `server.py` / `ws_hub.py` | aiohttp。フェーズ / 制御権 / 配信内容の組み立て / WS クライアント集合と**唯一の配信経路**（`WsHub`） |
-| `server_motor_check.py` / `server_dryrun.py` | 動作確認の統括（可否判定の単一情報源）/ dry-run の擬似値（見栄えの値しか作らない） |
+| `server_motor_check.py` / `server_homing.py` / `server_dryrun.py` | 動作確認の統括（可否判定の単一情報源）/ 零点合わせ単独実行の統括（宛先のロボットと軸を持つ）/ dry-run の擬似値（見栄えの値しか作らない） |
 | `logging_setup.py` | ログの体裁の単一情報源。`main.py` が起動時に 1 回だけ呼ぶ |
 
 `lib/control/` と `lib/tuning/` の `__init__.py` は**再エクスポートを持たない**。
@@ -543,12 +547,13 @@ EDULITE なので M3508 の位置制御ループを持たず、この段には�
 
 ### 周期タスクの共通土台（`lib/control/periodic.py`）
 
-4 つの周期タスクは `PeriodicTask`（送信経路を奪い合いうるものは `PausablePeriodicTask`）を継承し、作法を揃える。
+5 つの周期タスクは `PeriodicTask`（送信経路を奪い合いうるものは `PausablePeriodicTask`）を継承し、作法を揃える。
 
 | タスク | 周期 | 対象 | 送るもの |
 |---|---|---|---|
 | `M3508PositionLoop` | 200Hz | バス上の全 M3508 | `0x200` 電流指令フレーム（1 周期 1 通） |
 | `SyncMonitor` | 50Hz | `sync_tolerance` を持つ全軸 | 送信しない（監視のみ） |
+| `LimitMonitor` | 50Hz | `guard.limits` を持つ全軸 | 発火した軸にだけ「その場の実測位置」を目標として 1 通 |
 | `GenericTargetRefresher` | 20Hz | generic ドライバのモータ | `SET_TARGET` の再送 |
 | `QueryDrivenTargetRefresher` | 20Hz | EDULITE 05 + DM3520（`_QUERY_DRIVEN_DRIVERS`） | 目標値 or `idle_target_value()` のラッチ値 |
 
@@ -617,13 +622,15 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 ### 零点確定（ホーミング）
 
 `lib/sequence/homing.py` の `HomingRunner` が持ち、**動作確認シーケンスの最初のステップ**として走る。
+軸を並べて順に回す段は同じファイルの `run_homing()` にあり、**通し実行と単独実行
+（`homing_start`。下の「零点合わせだけを走らせる」）が同じ 1 本を通る**。
 設定は `*_positions.yaml` の `axes.<軸>.homing`（§6。軸の機構的性質であって動作確認固有の
 値ではない）で、`sensor`（`sensors:` に登録されていること）/ `direction` / `step` /
 `settle_s` / `search_distance`（必須）を持つ。
 
 | 段 | 内容 |
 |---|---|
-| 事前確認（4 つ。どれも 1 歩も動かさずに落ちる） | 位置指令の軸か / 原点を確定する手段があるか / センサの鮮度 / **対象軸モータの鮮度** |
+| 事前確認（5 つ。どれも 1 歩も動かさずに落ちる） | 位置指令の軸か / 原点を確定する手段があるか / モータの励磁 / センサの鮮度 / **対象軸モータの鮮度** |
 | 離脱 | 既にセンサに触れているなら、離れるまで動かす。判定は**現在値**（ラッチを使わない） |
 | 探索 | 毎ステップ `AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step`。到達判定は**接触の累計**（`GenericDriver.sensor_contact_count`。読んでも減らない単調カウンタで、探索開始直前に基準値を取り直す） |
 | 停滞判定 | `step/2` 未満が 3 歩連続で `HomingError` |
@@ -748,7 +755,7 @@ class PickAndPlace(Sequence):
 | ファイル | 走らせ方 | 中身 |
 |---|---|---|
 | `sequences/main_hand.py` / `sub_hand.py` | 操縦者の `sequence_start`（それぞれのタブ） | ワークの取得 → 搬送 → 配置 / 受け取り → 吸着 → 配置 |
-| `sequences/motor_check.py` | Monitor の設定面から `motor_check_start` | **両ハンド 1 本**。零点確定 → 各軸を運用で使う位置名へ動かす → `restore_home` |
+| `sequences/motor_check.py` | Monitor の設定面から `motor_check_start`（零点確定だけなら `homing_start`） | **両ハンド 1 本**。零点確定 → 各軸を運用で使う位置名へ動かす → `restore_home` |
 
 **`sequences/*.py` に数値を書かない。** 共通化してよいのは「どの軸をどの位置名へ動かすか」の
 **組**だけで、複数軸の組が複数ステップに現れるときだけモジュール定数（`main_hand.HOME`）か
@@ -777,6 +784,37 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 
 現状の各ステップと判定可否は [`checks_and_health.md`](checks_and_health.md) の
 「② 統合動作確認 — 動くか」が正。
+
+### 零点合わせだけを走らせる（`lib/server_homing.py`）
+
+動作確認は零点確定の後に全軸を駆動する通し実行なので、零点確定だけを見たいときに
+その先の失敗を巻き込む。`homing_start` はその 1 歩目だけを走らせる入口である。
+
+| 要素 | 中身 |
+|---|---|
+| 宛先 | **`robot` が必須**。`axes` を省くとそのロボットの `homing:` を持つ全軸。**全ロボットを回す形は持たない**（「サブハンドのつもりでメインハンドが動く」を作らない） |
+| 実行 | `run_homing()`。動作確認と同じ 1 本を通す（手順を書き写さない） |
+| 失敗 | 1 軸落ちても残りを続け、軸ごとの理由を `results` に載せる（1 回で全軸の可否が分かる） |
+| ゲート | `HomingController.deny_reason()`。環境側は `RobotServer._homing_environment_deny()` が渡す（動作確認と同じ `_environment_deny` を見る） |
+| 排他 | 動作確認・作動点測定と相互排他。どれかが走っている間、再励磁・手動切替・試合開始も `RobotServer._busy_label()` 経由で塞がる |
+| 配信 | 進捗も結果も拒否理由も `homing_state` 1 通。拒否は加えて `command_rejected` で要求元へ返す |
+
+### リミットスイッチの作動点を測る（`lib/server_switch_measure.py`）
+
+機構が変わるたびにスイッチの作動点は動く。**位置定数 yaml に書く値を実機から取る**入口で、
+零点合わせと**同じ二段探索を通し、原点を書き込む段だけを行わない**。
+
+| 要素 | 中身 |
+|---|---|
+| 宛先 | **`robot` / `axis` / `direction` が必須**。零点合わせと同じく全機を回す形は持たない |
+| 向き | 指定させる。`homing.direction` を使い回さない（**測りたいのは `homing` が使わない側の端でもある**） |
+| 実行 | `HomingRunner.measure()`。`home()` と同じ `_approach()`（離脱 → 粗探索 → 寄せ直し）を通り、`_capture_origin()` を呼ばない |
+| 刻み・上限 | 既定は `homing` の `coarse_step` / `step` / `search_distance`。指定は `HomingSpec` を `replace()` して載せるので、**探索の各段が見る歯止めがそのまま測定の歯止めになる**（別変数で持たない）。`HomingSpec` の検証もそのまま効く |
+| 結果 | 作動点・離脱点・ON 区間の幅・**使った刻み**（作動点のばらつきは刻みそのものなので、値と一緒でないと精度が読めない） |
+| ゲート | `SwitchMeasureController.deny_reason()`。動作確認・零点合わせと相互排他（`RobotServer._axis_holders()` が単一情報源） |
+| 配信 | 進捗も結果も拒否理由も `switch_measure_state` 1 通。拒否は加えて `command_rejected` で要求元へ返す |
+
+対象の軸は零点合わせと共通（`HomingSource`）。`RobotServer.set_homing_source()` が両方へ配る。
 
 ### 手動操縦（`lib/manual.py`）
 
@@ -807,6 +845,20 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 制御権の奪い合いを両方向で塞ぐゲート（`CommandSpec.blocked_during_manual` /
 `_manual_target` の判定）は §8 と [invariants.md](invariants.md) の「制御権の奪い合いは
 両方向を塞ぐ」。
+
+### 吸着パッドの選択（`lib/suction.py`）
+
+サブハンドの吸着パッド 6 個（`valve_1`〜`valve_6`）のうち「次の吸着で開ける弁」を操縦者が
+減らせる。ワークの形で乗らないパッドの弁を開けると真空が抜けるため。
+
+| 要素 | 中身 |
+|---|---|
+| 正 | `SuctionSelection`（パッドの並びと有効集合）。**サーバーの `RobotContext.suction` が持つ**（操縦 UI 2 台で食い違わせない）。`sequences/sub_hand.py` が既定（全部 ON）を作り、`main.py` が `suction_of(seq)` で同じ 1 個をサーバーへ渡す |
+| 変更 | `suction_pads_set`（`robot` + 使う弁の**全集合** `pads`）。差分ではなく全集合を送るので、2 台が別々に押しても最後に届いた形が正になる。知らない軸名は拒否（`command_rejected`）。**空も通す**（選び直しの途中で 0 個を経由できる） |
+| 配信 | `state.suction`（`pads[]` に `axis` / `label` / `enabled`）。持たないロボットは `null`。ラベルはサーバーが付ける（UI に弁の名前を書き写さない） |
+| 効き方 | 「ワーク吸着」ステップが `enabled()` を読み、**選ばれた弁だけ `open`・残りは `closed`** を 1 回の `move_to` で送る。選択が空なら `SuctionSelectionError` でそのステップを失敗させる（吸わずに進むと落とす）。実行中の吸着には反映しない（次の吸着ステップから） |
+| ゲート | 無し（`PHASES_ANY`・緊急停止中も手動中も通す）。選択は機体を動かさない |
+| 既存との違い | `AlwaysManualPanel` の弁操作は「今すぐ開閉」、こちらは「次の吸着で使うか」。役割が違うので両方残す |
 
 ---
 
@@ -870,13 +922,13 @@ match:
 
 ```yaml
 axes:                      # 換算: command = value * scale + offset
-  sub_arm_joint:           # 単一モータ軸（軸名 = モータ名。scale / offset を軸直下に書く）
-    unit: deg              # チームが positions に書く単位
+  sub_y_axis:              # 単一モータ軸（軸名 = モータ名。scale / offset を軸直下に書く）
+    unit: mm               # チームが positions に書く単位
     command_unit: rad      # モータへ実際に送る単位
-    scale: 0.017453292519943295
+    scale: 1.0668451
     offset: 0.0            # 機械原点と電気原点のずれ（指令単位）
-    timeout_s: 3.0         # 到達待ちの上限。未指定なら 5.0
-    tolerance: 0.5         # 到達許容差（人間の単位）。未指定ならドライバ既定値
+    timeout_s: 4.0         # 到達待ちの上限。未指定なら 5.0
+    tolerance: 1.0         # 到達許容差（人間の単位）。未指定ならドライバ既定値
 
   y_axis:                  # 複数モータで駆動する論理軸。軸名はモータ名でなくてよい
     unit: mm
@@ -1007,12 +1059,14 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 
 | type | 配信タイミング | 中身 |
 |---|---|---|
-| `state` | 定期（ロボットごと） | シーケンス進行・モータ状態・センサ・ヘルス・安全機構・手動軸 |
+| `state` | 定期（ロボットごと） | シーケンス進行・モータ状態・センサ・ヘルス・安全機構・手動軸・吸着パッドの選択 |
 | `match_state` | 接続直後 1 回 + 変化時 | コート・フェーズ・`can_start_match` / `checklists` / `timer` |
 | `server_info` | **接続直後 1 回だけ** | `dev_tools` / `dry_run` / 温度しきい値 2 値 |
 | `e_stop_state` | 切り替わった瞬間 + 接続直後（停止中なら） | `active` と（内部検知なら）`reason` |
 | `health_change` | ヘルスが変化した瞬間 | `robot` / `target` / 遷移。**`robot` は UI の受信条件が依存する** |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由 | 4 種に分けず**この 1 通で運ぶ** |
+| `homing_state` | 零点合わせ単独実行の進捗・結果・拒否理由 | 宛先（`robot` / `axes`）と軸ごとの成否（`results`）、ロボットごとの対象軸（`targets`） |
+| `switch_measure_state` | 作動点測定の進捗・結果・拒否理由 | 宛先（`robot` / `axis` / `direction`）と実測（`result`: 作動点・離脱点・ON 区間・刻み）、ロボットごとの対象軸（`targets`） |
 | `command_rejected` | 拒否時、**要求元 1 台にだけ** | `command` / `reason` |
 
 `motor_check_start` の拒否だけは `motor_check_error` に載せる（UI の表示経路が別のため）。
@@ -1067,6 +1121,9 @@ robot / positions / checklist が揃っていて読めること ②登録した�
       "positions": ["home", "work_1", "work_shared"],
       "motors": ["y_axis_r", "y_axis_l"]
     }]
+  },
+  "suction": {                           // 吸着パッドを持たないロボットは null
+    "pads": [{ "axis": "valve_1", "label": "1", "enabled": true }]
   }
 }
 ```
@@ -1128,6 +1185,14 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 { "type": "match_start" | "match_finish" | "match_reset" }
 // 動作確認・状態
 { "type": "motor_check_start" | "motor_check_abort" | "health_check" }
+// 零点合わせだけを走らせる。robot は必須（axes 省略でそのロボットの homing: を持つ全軸）
+{ "type": "homing_start", "robot": "sub_hand", "axes": ["sub_y_axis"] }
+// 次の吸着で開ける弁の全集合。差分ではない
+{ "type": "suction_pads_set", "robot": "sub_hand", "pads": ["valve_1", "valve_2"] }
+// リミットスイッチの作動点を測る。robot / axis / direction は必須
+// step / coarse_step / limit は省略可（省くと homing の値が既定になる）
+{ "type": "switch_measure_start", "robot": "sub_hand", "axis": "sub_y_axis",
+  "direction": -1, "step": 0.5, "limit": 60.0 }
 ```
 
 **シーケンス制御コマンドのセマンティクス**:
@@ -1220,7 +1285,7 @@ setup ⇄ ready → match → finished → setup
 | コマンド | setup | ready | match | finished | 許可フェーズ集合 |
 |---|:-:|:-:|:-:|:-:|---|
 | `set_court` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
-| `motor_check_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
+| `motor_check_start` / `homing_start` / `switch_measure_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
 | `checklist_set` / `checklist_reset` / `checklist_check_all` | ✓ | ✓ | ✗ | ✗ | `PHASES_PREPARATION` |
 | `match_start` | ✗ | ✓ | ✗ | ✗ | `PHASES_START_GATE` |
 | `match_finish` | ✗ | ✗ | ✓ | ✗ | `PHASES_DURING_MATCH` |
@@ -1228,8 +1293,9 @@ setup ⇄ ready → match → finished → setup
 | `sequence_stop` / `e_stop` / `e_stop_release` / `match_reset` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `motor_check_abort` / `health_check` / `reenergize_motors` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
+| `suction_pads_set` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 
-最後の 3 行は「書き忘れ」ではなく**無ゲートであることの宣言**である。
+最後の 4 行は「書き忘れ」ではなく**無ゲートであることの宣言**である。
 
 #### 緊急停止によるコマンドゲート（二段目・独立）
 
@@ -1237,11 +1303,13 @@ setup ⇄ ready → match → finished → setup
 |---|:-:|---|
 | `sequence_start` / `sequence_jump` / `trigger` / `match_start` | ✗ | シーケンスが進むと次のステップが停止指令を上書きする（拒否文はコマンドごとに別。`lib/commands.py`） |
 | `motor_check_start` | ✗ | 同上（拒否は `motor_check_error` で通知） |
+| `homing_start` / `switch_measure_start` | ✗ | 同上（拒否は `command_rejected` で通知） |
 | `manual_move` / `manual_set` / `manual_jog` | ✗ | 目標値を送るため |
 | `set_operation_mode` | ✓ | 機体を動かさない切替そのもの |
 | `sequence_stop` / `e_stop` / `e_stop_release` / `motor_check_abort` | ✓ | 止める方向の操作は緊急停止中こそ通す |
 | `match_reset` / `match_finish` / `health_check` | ✓ | 復帰経路と状態確認は塞がない |
 | `set_court` / `checklist_*` | ✓ | 機体を動かさず、復旧には指差喚呼のやり直しが要る |
+| `suction_pads_set` | ✓ | 選択を変えるだけで、効くのは次の吸着ステップ |
 
 #### その他のゲート
 

@@ -9,6 +9,8 @@ import type {
   ExcludedStep,
   HealthChange,
   HealthSnapshot,
+  HomingAxisResult,
+  HomingSnapshot,
   ManualAxis,
   ManualPosition,
   ManualRange,
@@ -26,6 +28,8 @@ import type {
   SequenceStepInfo,
   ServerInfo,
   ServerMessage,
+  SuctionPad,
+  SuctionState,
   SyncMonitorState,
   TargetRefresherState,
 } from "@/lib/protocol";
@@ -70,6 +74,8 @@ const STATE_FIELDS_UI_READS = [
   "manual",
   "manual.mode",
   "manual.axes",
+  "suction",
+  "suction.pads",
 ] as const;
 
 const EXPECTATIONS: Record<string, Expectation> = {
@@ -81,6 +87,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].safety).toEqual(sample.safety);
     expect(result.states[robot].manual).toEqual(sample.manual);
     expect(result.states[robot].sensors).toEqual(sample.sensors);
+    expect(result.states[robot].suction).toEqual(sample.suction);
   },
 
   state_with_last_error: (result, sample) => {
@@ -158,6 +165,18 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(state.error).toBe(sample.error);
     expect(state.total_steps).toBe(sample.total_steps);
     expect(state.steps).toEqual(sample.steps);
+  },
+
+  homing_state: (result, sample) => {
+    const state = result.homing;
+    expect(state.available).toBe(sample.available);
+    expect(state.running).toBe(sample.running);
+    expect(state.robot).toBe(sample.robot);
+    expect(state.axes).toEqual(sample.axes);
+    expect(state.results).toEqual(sample.results);
+    expect(state.targets).toEqual(sample.targets);
+    // 失敗した軸の理由が UI まで残る (これが読めないと「なぜ止まったか」が画面から消える)
+    expect(state.results).not.toHaveLength(0);
   },
 
   motor_check_state_with_exclusions: (result, sample) => {
@@ -382,6 +401,38 @@ const MOTOR_CHECK_FIELDS: FieldSpec = {
   ...nest("excluded_steps[]", EXCLUDED_STEP),
 };
 
+const HOMING_RESULT = fieldsOf<HomingAxisResult>({
+  axis: "ui",
+  error: "ui",
+});
+
+const HOMING_FIELDS: FieldSpec = {
+  ...fieldsOf<Wire<HomingSnapshot>>({
+    type: "parser",
+    available: "ui",
+    blocked_reason: "ui",
+    running: "ui",
+    robot: "ui",
+    axes: "ui",
+    current_axis: "ui",
+    results: "ui",
+    error: "ui",
+    targets: "ui",
+  }),
+  ...nest("results[]", HOMING_RESULT),
+  "targets.*": "ui",
+};
+
+const SUCTION = fieldsOf<SuctionState>({
+  pads: "ui",
+});
+
+const SUCTION_PAD = fieldsOf<SuctionPad>({
+  axis: "ui",
+  label: "ui",
+  enabled: "ui",
+});
+
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
     type: "parser",
@@ -398,9 +449,12 @@ const STATE_FIELDS: FieldSpec = {
     health: "ui",
     safety: "ui",
     manual: "ui",
+    suction: "ui",
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
+  ...nest("suction", SUCTION),
+  ...nest("suction.pads[]", SUCTION_PAD),
   ...nest("motors.*", MOTOR_STATE),
   ...nest("sensors.*", SENSOR_STATE),
   ...nest("health", HEALTH),
@@ -473,9 +527,10 @@ const DECLARED: Record<string, FieldSpec> = {
 
   motor_check_state: MOTOR_CHECK_FIELDS,
   motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
+  homing_state: HOMING_FIELDS,
 };
 
-const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists"]);
+const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists", "targets"]);
 
 function flattenPaths(value: unknown, prefix = ""): string[] {
   if (Array.isArray(value)) return value.flatMap((item) => flattenPaths(item, `${prefix}[]`));

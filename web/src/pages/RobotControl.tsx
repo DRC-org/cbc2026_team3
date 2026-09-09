@@ -8,6 +8,7 @@ import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
+import { SuctionPadPanel } from "@/components/operator/SuctionPadPanel";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
@@ -123,6 +124,18 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     />
   );
 
+  // どちらのモードでも出す。選択は機体を動かさず、次の吸着ステップから効くだけなので
+  // 塞ぐ理由は切断だけ
+  const suctionPanel =
+    state.suction === undefined || state.suction === null ? null : (
+      <SuctionPadPanel
+        robotKey={robotKey}
+        suction={state.suction}
+        blockedReason={connected ? null : "切断中のため変更できません"}
+        sendOrReport={sendOrReport}
+      />
+    );
+
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
       <SubsystemStatus
@@ -160,12 +173,15 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   if (setupPhase) {
-    const openSubsystemPanel = subsystemPanel(true, "min-h-0");
+    const openSubsystemPanel = subsystemPanel(true, "min-h-0 flex-1");
     return (
       <Page className="flex flex-col">
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
-          {inManual ? manualPanel : openSubsystemPanel}
+          <div className="flex min-h-0 flex-col gap-2">
+            {suctionPanel}
+            {inManual ? manualPanel : openSubsystemPanel}
+          </div>
           {inManual ? openSubsystemPanel : stepPanel}
         </div>
       </Page>
@@ -177,7 +193,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       {modeSwitch}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
         {inManual ? (
-          manualPanel
+          <div className="flex min-h-0 flex-col gap-2">
+            {suctionPanel}
+            {manualPanel}
+          </div>
         ) : (
           <div className="flex min-h-0 flex-col gap-2">
             <ActionPanel
@@ -196,6 +215,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               blockedReason={manualBlockedReason}
               sendOrReport={sendOrReport}
             />
+
+            {suctionPanel}
 
             {stepPanel}
           </div>

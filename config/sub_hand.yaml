@@ -1,18 +1,6 @@
 robot_name: sub_hand
 
 motors:
-  sub_arm_joint:
-    driver: edulite05
-    bus: edulite_bus
-    can_id: 3                  # main_hand の rotate_r/rotate_l (1,2) との衝突回避
-    host_id: 0xFD
-    mode: position
-    # 単位は出力軸の rad/s (位置はロータ角なので単位系が違う)。mm/s = 値 * 18.0
-    limit_speed: 2.0
-    limit_current: 5.0
-    position_kp: 30.0
-    set_zero_on_start: false
-
   sub_y_axis:
     driver: dm3520
     bus: dm3520_bus

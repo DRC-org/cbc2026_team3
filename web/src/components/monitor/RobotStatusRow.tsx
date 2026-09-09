@@ -4,6 +4,7 @@ import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { Icon } from "@/components/ui/Icon";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { useRobotCommands } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
 import type { TempThresholds } from "@/lib/healthVerdict";
 import type { RobotState } from "@/lib/protocol";
@@ -13,6 +14,7 @@ import type { Tone } from "@/lib/tone";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 interface RobotStatusRowProps {
+  robotKey: string;
   label: string;
   state: RobotState | undefined;
   connected: boolean;
@@ -28,11 +30,14 @@ const ACTIVITY: Record<SequenceKind, { tone: Tone; label: string }> = {
 };
 
 export function RobotStatusRow({
+  robotKey,
   label,
   state,
   connected,
   tempThresholds = null,
 }: RobotStatusRowProps) {
+  const { sendOrReport } = useRobotCommands();
+
   if (!state) {
     return (
       <div className="card flex shrink-0 items-center gap-3 border-base-300 bg-base-100 p-2 card-border">
@@ -84,6 +89,9 @@ export function RobotStatusRow({
           sensors={state.sensors}
           connected={connected}
           tempThresholds={tempThresholds}
+          onReenergize={() =>
+            sendOrReport({ type: "reenergize_motors", robot: robotKey }, "再励磁")
+          }
         />
       </div>
     </Panel>

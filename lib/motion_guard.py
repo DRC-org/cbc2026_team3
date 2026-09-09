@@ -127,7 +127,7 @@ class MotionGuard:
         """
         delta = target - current
         self._check_jump(axis, delta, unit)
-        self._check_limit(axis, delta, sensor_active)
+        self.check_limit(axis=axis, delta=delta, sensor_active=sensor_active)
 
     def _check_jump(self, axis: str, delta: float, unit: str) -> None:
         limit = self._spec.max_step
@@ -140,7 +140,15 @@ class MotionGuard:
             "機構が可動端まで走ります"
         )
 
-    def _check_limit(self, axis: str, delta: float, sensor_active: object) -> None:
+    def check_limit(self, *, axis: str, delta: float, sensor_active: object) -> None:
+        """`delta` の向きへ進んでよいか。駄目なら送出する。
+
+        **指令を出す前 (`check_command`) と移動中 (`LimitMonitor`) の両方がここを呼ぶ。**
+        監視側へ書き写すと、片方だけが `None` (読めていない) を素通りさせる状態が作れる。
+
+        Raises:
+            GuardViolation: 進む向きの端が押されている (または読めていない)
+        """
         limits = self._spec.limits
         if limits is None or delta == 0.0:
             return

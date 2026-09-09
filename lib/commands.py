@@ -238,6 +238,22 @@ _SPECS: tuple[CommandSpec, ...] = (
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
     ),
     _spec(
+        "homing_start",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は零点合わせを実行できません",
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため零点合わせを実行できません",
+        handler="_cmd_homing_start",
+    ),
+    _spec(
+        "switch_measure_start",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は作動点測定を実行できません",
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため作動点測定を実行できません",
+        handler="_cmd_switch_measure_start",
+    ),
+    _spec(
         "reenergize_motors",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,
@@ -270,6 +286,13 @@ _SPECS: tuple[CommandSpec, ...] = (
         allowed_during_e_stop=False,
         e_stop_deny_message="緊急停止中のため手動操縦できません",
         handler="_cmd_manual_jog",
+    ),
+    # 選択を変えるだけで機体は動かない。次の吸着ステップから効くので、緊急停止中の準備にも通す
+    _spec(
+        "suction_pads_set",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=True,
+        handler="_cmd_suction_pads_set",
     ),
 )
 
