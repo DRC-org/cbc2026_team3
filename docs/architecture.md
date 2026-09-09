@@ -1193,7 +1193,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 
 {
   "type": "match_state",
-  "court": "red",
+  "court": null,                       // 未確定。選ぶと "red" / "blue"。MALFORMED ではない
   "phase": "setup",
   "can_start_match": false,
   "checklists": {
@@ -1286,7 +1286,7 @@ DC 基板 = 1 つも測れない）。変動値は `$placeholders`（`epoch_seco
 
 | 軸 | 値 | 範囲 | 意味 |
 |---|---|---|---|
-| `court` | `red` / `blue` | 全体で 1 つ | 自陣コート。赤青で配置が左右反転する |
+| `court` | `red` / `blue` / **未確定 (`null`)** | 全体で 1 つ | 自陣コート。赤青で配置が左右反転する。起動時とリセット後は未確定 |
 | `phase` | `setup` → `ready` → `match` → `finished` | 全体で 1 つ | セッティングタイムと試合中を分離 |
 | `mode` | `sequence` / `manual` | **ロボットごと** | 制御権を誰が握っているか |
 
@@ -1303,10 +1303,11 @@ setup ⇄ ready → match → finished → setup
 ```
 
 ゲート対象ロールは **`pre_match` 1 つだけ**（= `ALL_ROLES`）。`court` を変更すると
-チェックリストは**全リセット**され `setup` に戻る。`match_reset` はコートを維持したまま
-チェックリストのみリセットし、全ロボットを `sequence` へ戻す。未知のコート値は理由付きで
-拒否する（`command_rejected` に有効値を添える）。**試合を開始できるかを決めるのはサーバーの
-`can_start_match` だけ。**
+チェックリストは**全リセット**され `setup` に戻る（未確定→赤も「変更」なので同じく外れる）。
+`match_reset` は**コートを未確定へ戻し**、チェックリストもリセットして全ロボットを
+`sequence` へ戻す。未知のコート値は理由付きで拒否する（`command_rejected` に有効値を添える）。
+**試合を開始できるかを決めるのはサーバーの `can_start_match` だけ** —— 指差喚呼の完了に加えて
+**コートが確定していること**もそこに載っており、未確定のあいだフェーズは `setup` に留まる。
 
 フェーズ集合は `PHASES_ANY`（全フェーズ = 素通りさせるという宣言）/ `PHASES_OUTSIDE_MATCH`
 （`setup` / `ready` / `finished`）/ `PHASES_PREPARATION`（`setup` / `ready`）/
@@ -1321,7 +1322,8 @@ setup ⇄ ready → match → finished → setup
 「全フェーズ許可なのに拒否理由が書いてある」といった矛盾を import 時に弾く。
 
 `lib/server.py` は語彙を持たない。`handle_command` は `spec_for(type)` で仕様を引き、
-3 段のゲート（開発用 → フェーズ → 緊急停止）を掛け、`spec.handler` の名前で `_cmd_*` を呼ぶ。
+5 段のゲート（開発用 → フェーズ → 緊急停止 → 手動操縦 → 再励磁 → コート未確定）を掛け、
+`spec.handler` の名前で `_cmd_*` を呼ぶ。
 **語彙に無いコマンドは拒否理由も返さず黙って捨てる。**
 
 #### フェーズによるコマンドゲート
@@ -1338,6 +1340,18 @@ setup ⇄ ready → match → finished → setup
 | `motor_check_abort` / `health_check` / `reenergize_motors` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `suction_pads_set` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
+
+#### コート未確定によるコマンドゲート
+
+`blocked_without_court` を立てたコマンドは、コートが決まるまで**そのロボットが
+コート依存軸を持つときだけ**拒否される（`sequence_start` / `sequence_jump` / `trigger` /
+`manual_move` / `manual_set` / `manual_jog` / `homing_start` / `switch_measure_start` /
+`motor_check_start`）。要否の正は `PositionTable.court_dependent_axes()`（`scale` が
+コート別の軸）だけが持ち、サーバーにも UI にも軸名を書き写さない。
+
+`motor_check_start` は `robot` を取らず両ハンドを走らせるので、**コート別の位置の値**を
+持つ軸（`PositionTable.court_dependent_position_axes()`。メインハンドの `conveyor.run`）も
+見て、1 台でも要るなら拒否する。理由は `docs/invariants.md` §6。
 
 最後の 4 行は「書き忘れ」ではなく**無ゲートであることの宣言**である。
 

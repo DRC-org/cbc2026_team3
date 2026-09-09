@@ -1310,6 +1310,27 @@ SETUP に留まり、`match_start` は `PHASES_START_GATE` で自動的に閉じ
 `require_resolved` の `CourtUnresolvedError` で落ちる。`_apply_court` が `None` を配るのを飛ばすと、
 試合をリセットした後も前の試合のコートが各層に残り、解決済みのまま動いてしまう。
 
+### コート未確定のゲートはロボット単位。試合の開始だけは全体で止める
+
+**メインハンドは退避路** (§4 冒頭) なので、コートに依存しない台まで塞ぐと「コートを選び忘れたせいで
+機体を安全な姿勢へ戻せない」状態を作る。そのため `CommandSpec.blocked_without_court` の判定は
+`data["robot"]` の台だけを見る。一方**試合の開始は全体で止まる** —— `can_start_match` は台を区別しない。
+
+**要否の正は位置定数だけが持つ。** `PositionTable.court_dependent_axes()`（`scale` がコート別の軸）が
+単一情報源で、UI にもサーバーにも軸名を書き写さない。
+
+**コート別の「位置の値」は別物として扱う。** `config/main_hand_positions.yaml` の
+`conveyor.run: { red: 0.3, blue: -0.3 }` は換算ではなく値がコートで変わるだけなので、他の位置や連続値の
+指令は未確定でも通ってよい。これを `court_dependent_axes()` に混ぜるとメインハンドの退避路が丸ごと
+閉じる。代わりに `court_dependent_position_axes()` を持ち、**台を名指ししないコマンド**
+（`motor_check_start`）だけがそれも見る —— 動作確認は両ハンドを走らせ、途中の段で
+`conveyor.run` を引くため、走り出してから失敗するより先に断るほうがよい。
+
+**歯止めは 2 枚ある。** 1 枚目はコマンドゲート（理由文を操縦者へ返す）、2 枚目は指令の入口
+（`CourtUnresolvedError` / `PositionLookupError`）。2 枚目は `_run_manual` が**拒否として**返す ——
+設計どおりの拒否を汎用の例外処理へ落とすと ERROR と Traceback が出て「失敗」に見える
+（`GuardViolation` と同じ扱い）。1 枚ずつ単独で効くことを `tests/test_server_court.py` が確かめる。
+
 ### 試合時間タイマーは「時刻」ではなく「配信瞬間の経過ミリ秒」を配る
 
 操縦者 2 名 + Monitor は別ブラウザ・別 PC で繋がるため、開始時刻（エポック秒）を配って各自が引き算

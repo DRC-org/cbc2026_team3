@@ -1068,6 +1068,8 @@ class TestSystemConfigReachesTheServer:
 class TestRobotContextReachesTheServer:
     NOT_A_PARAMETER: ClassVar[dict[str, str]] = {
         "mode": "サーバーが持つ実行時状態 (起動時は必ず SEQUENCE から始まる)",
+        "court_dependent_axes": "位置定数から導く (書き写すと宣言と食い違う)",
+        "court_dependent_position_axes": "位置定数から導く (書き写すと宣言と食い違う)",
     }
 
     def _add_robot_call_arguments(self) -> set[str]:

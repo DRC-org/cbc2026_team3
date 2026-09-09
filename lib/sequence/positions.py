@@ -574,6 +574,26 @@ class PositionTable:
     def paired_axes(self) -> tuple[str, ...]:
         return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
 
+    def court_dependent_axes(self) -> tuple[str, ...]:
+        """**指令の換算がコートで鏡になる軸。**コートが決まるまで 1 通も出せない。
+
+        コート未確定のゲートはこれを単一情報源にする。UI にもサーバーにも軸名を
+        書き写さないため。コート別の**位置の値**を持つだけの軸はここに入らない
+        (それは `court_dependent_position_axes`)。
+        """
+        return tuple(name for name, spec in self._axes.items() if spec.court_dependent)
+
+    def court_dependent_position_axes(self) -> tuple[str, ...]:
+        """コート別の値を持つ位置を抱える軸。**その位置名を引くときだけコートが要る。**
+
+        換算そのものは両コートで同じなので、他の位置や連続値の指令は未確定でも通る。
+        """
+        return tuple(
+            axis
+            for axis, values in self._positions.items()
+            if any(isinstance(value, dict) for value in values.values())
+        )
+
     def homing_prerequisites(self, axes: Collection[str] | None = None) -> dict[str, str]:
         """`axes` を動かす前に寄せておく軸と、その位置名。**`guard.requires` から導く。**
 

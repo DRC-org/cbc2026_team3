@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from lib.match_state import Court
 from lib.sequence.engine import Sequence, step
+from lib.sequence.positions import CourtUnresolvedError, PositionTable, load_position_table
 
 
 class CourtAwareSequence(Sequence):
@@ -47,6 +50,45 @@ class TestCourt:
         await asyncio.sleep(0.05)
         assert seq.seen_courts == [Court.BLUE]
         task.cancel()
+
+
+class TestUnresolvedCourt:
+    """未確定のまま動かすと、**コート依存軸だけ**が落ちる。非依存軸は今までどおり。"""
+
+    def _table(self) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {
+                    "sub_lift": {
+                        "unit": "mm",
+                        "command_unit": "rad",
+                        "scale": {"red": -1.0, "blue": 1.0},
+                        "tolerance": 1.0,
+                    },
+                    "gripper": {"unit": "deg", "command_unit": "deg", "scale": 1.0},
+                },
+                "positions": {"sub_lift": {"top": 0.0}, "gripper": {"open": 5.0}},
+            },
+            source="<test>",
+        )
+
+    def test_コート依存軸は換算できない(self) -> None:
+        table = self._table()
+        with pytest.raises(CourtUnresolvedError):
+            table.commands("sub_lift", "top", court=None)
+
+    def test_コート非依存軸は換算できる(self) -> None:
+        table = self._table()
+        assert table.commands("gripper", "open", court=None) == {"gripper": 5.0}
+
+    def test_コートを解決すれば通る(self) -> None:
+        table = self._table()
+        assert table.commands("sub_lift", "top", court=Court.BLUE) == {"sub_lift": 0.0}
+
+    def test_for_court_は未確定を黙って赤へ倒さない(self) -> None:
+        spec = self._table().axis("sub_lift")
+        assert spec.for_court(None) is spec
+        assert spec.for_court(Court.RED) is not spec
 
 
 class TestTriggerGate:
