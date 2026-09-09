@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import struct
 from enum import IntEnum, IntFlag
@@ -8,6 +9,8 @@ from typing import ClassVar
 import can
 
 from lib.drivers.base import ControlMode, MotorDriver, MotorState
+
+logger = logging.getLogger(__name__)
 
 
 class Edulite05RunMode(IntEnum):
@@ -61,6 +64,7 @@ class Edulite05Driver(MotorDriver):
         ControlMode.VELOCITY: Edulite05RunMode.VELOCITY,
         ControlMode.CURRENT: Edulite05RunMode.CURRENT,
     }
+    _U8_PARAMS: ClassVar[frozenset[int]] = frozenset({PARAM_RUN_MODE})
     _TARGET_PARAM: ClassVar[dict[ControlMode, int]] = {
         ControlMode.POSITION: PARAM_LOC_REF,
         ControlMode.VELOCITY: PARAM_SPD_REF,
@@ -97,6 +101,10 @@ class Edulite05Driver(MotorDriver):
         self.set_zero_on_start = bool(set_zero_on_start)
         self.mode_state: int | None = None
         self.fault_bits = Edulite05Fault.NONE
+
+        self._origin_offset = 0.0
+        self._origin_captured = False
+        self._target_clamped = False
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -145,16 +153,95 @@ class Edulite05Driver(MotorDriver):
     def encode_run_mode(self, mode: Edulite05RunMode | int) -> can.Message:
         return self.encode_write_param_u8(self.PARAM_RUN_MODE, int(mode))
 
+    def encode_read_param(self, param_id: int) -> can.Message:
+        return self._message(self.COMM_TYPE_READ_PARAM, struct.pack("<Hxxxxxx", param_id))
+
+    def matches_read_param(self, msg: can.Message) -> bool:
+        if not msg.is_extended_id or len(msg.data) != 8:
+            return False
+        comm_type, data_area2, dest_id = self.parse_can_id(msg.arbitration_id)
+        return (
+            comm_type == self.COMM_TYPE_READ_PARAM
+            and (data_area2 & 0xFF) == self.can_id
+            and dest_id == self.host_id
+        )
+
+    def decode_read_param(self, msg: can.Message) -> tuple[int, float | int]:
+        """パラメータ応答を (param_id, 値) にほどく。
+
+        応答フレームは値の型を載せないので、float 4byte と uint8 1byte のどちらで
+        詰まっているかはパラメータ ID から決めるしかない。
+        """
+        if not self.matches_read_param(msg):
+            raise ValueError("対象モータの EDULITE 05 パラメータ応答ではありません")
+        param_id = struct.unpack_from("<H", msg.data)[0]
+        if param_id in self._U8_PARAMS:
+            return param_id, msg.data[4]
+        return param_id, struct.unpack_from("<f", msg.data, 4)[0]
+
+    @property
+    def origin_offset(self) -> float:
+        """論理 0 が指す生角度 [rad]。ログと診断のための読み出し口。"""
+        return self._origin_offset
+
+    def capture_origin_here(self) -> None:
+        """今の生角度を論理原点として控える。**CAN へは 1 通も出さない。**
+
+        原点をモータ側の `SET_ZERO` で持てない —— 零点は電源断で失われるので、
+        物理非常停止のたびにフラッシュの機械ゼロへ戻る。`rotate` は逆回転ペアで
+        左右の機械ゼロが 175.879deg 違い、`SyncMonitor` が解除のたびに全体緊急停止を
+        掛け直すことになる。PC 側で持てば、電源が落ちても控えは生き残る。
+        """
+        raw = self._state.position
+        # 機械ゼロが電源断でどれだけ動いたかを知る材料はここにしか出ない。
+        logger.info(
+            "EDULITE 05 の原点を控えました (motor=%s, 生角度=%.4frad, "
+            "直前の原点との差=%+.4frad, 控え直し=%s)",
+            self.name,
+            raw,
+            raw - self._origin_offset,
+            self._origin_captured,
+        )
+        self._origin_offset = raw
+        self._origin_captured = True
+
+    def feedback_position(self) -> float:
+        """論理位置 [rad]。`state.position` は電文どおりの生値のまま残す。"""
+        return self._state.position - self._origin_offset
+
+    def _clamp_target(self, mode: ControlMode, requested: float, lo: float, hi: float) -> float:
+        clamped = self._clamp(requested, lo, hi)
+        if clamped != requested:
+            # 20Hz の再送が端に張り付いた同じ指令を送り続けるので、変化の瞬間だけ残す。
+            if not self._target_clamped:
+                logger.warning(
+                    "EDULITE 05 の目標値がレンジ端で頭打ちになりました "
+                    "(motor=%s, mode=%s, 生値 %.4f → %.4f, 原点オフセット=%.4frad)",
+                    self.name,
+                    mode.name,
+                    requested,
+                    clamped,
+                    self._origin_offset,
+                )
+            self._target_clamped = True
+        else:
+            self._target_clamped = False
+        return clamped
+
     def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        """`value` は**論理**座標。生値へ直してから書く。"""
         param_id = self._TARGET_PARAM.get(mode)
         if param_id is None:
             raise ValueError(f"Edulite05Driver は {mode} モードをサポートしていません")
         if mode is ControlMode.POSITION:
-            value = self._clamp(value, self.POS_MIN, self.POS_MAX)
+            # `POS_MIN`/`POS_MAX` は uint16 の写像レンジであって機構の可動域ではない。
+            # 論理値でクランプすると、オフセットを足した生値がレンジ外へ出て折り返す。
+            raw = value + self._origin_offset
+            value = self._clamp_target(mode, raw, self.POS_MIN, self.POS_MAX)
         elif mode is ControlMode.VELOCITY:
-            value = self._clamp(value, -self.limit_speed, self.limit_speed)
+            value = self._clamp_target(mode, value, -self.limit_speed, self.limit_speed)
         else:
-            value = self._clamp(value, -self.limit_current, self.limit_current)
+            value = self._clamp_target(mode, value, -self.limit_current, self.limit_current)
         return self.encode_write_param_float(param_id, value)
 
     def encode_enable(self) -> can.Message:
@@ -198,11 +285,19 @@ class Edulite05Driver(MotorDriver):
         return steps
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
-        hold = (
-            self._state.position
-            if self.mode is ControlMode.POSITION and not after_set_zero
-            else 0.0
-        )
+        """保持目標は論理座標の実測位置。**原点を PC 側で持つ限り `after_set_zero`
+        の有無で変わらない** —— 生座標は原点を控え直しても動かないので、切り直しの
+        前に測られた在庫のフィードバックも切り直した後と同じ物理位置を指す。
+
+        モータ側の `SET_ZERO` で切り直したときだけ別で、そこは 0 を書く。旧原点で
+        測られた在庫を書くと enable した瞬間に新旧の原点差だけ機構が動き、`rotate`
+        はフラッシュの機械ゼロ次第でその差が 3 桁 deg に達する。
+        """
+        zeroed_in_motor = after_set_zero and not self._origin_captured
+        if self.mode is not ControlMode.POSITION or zeroed_in_motor:
+            hold = 0.0
+        else:
+            hold = self.feedback_position()
         return [
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
@@ -215,7 +310,11 @@ class Edulite05Driver(MotorDriver):
         return [(self.encode_set_zero(), 0.2)]
 
     def idle_target_value(self) -> float:
-        return self._state.position if self.mode is ControlMode.POSITION else 0.0
+        """20Hz の再送が `encode_target()` へ通す値なので**論理**で返す。
+
+        生のまま返すと `生値 + オフセット` が書かれ続け、機構がオフセットぶん走る。
+        """
+        return self.feedback_position() if self.mode is ControlMode.POSITION else 0.0
 
     def requires_fresh_feedback_for_activation(self) -> bool:
         return self.mode is ControlMode.POSITION

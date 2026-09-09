@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import struct
 
@@ -12,7 +13,7 @@ from lib.drivers.edulite05 import (
     Edulite05Fault,
     Edulite05RunMode,
 )
-from tests.feedback_frames import edulite_feedback
+from tests.feedback_frames import edulite_feedback, edulite_read_param_response, feed_edulite
 
 
 def messages_of(steps: list[tuple[can.Message, float]]) -> list[can.Message]:
@@ -232,6 +233,78 @@ def test_matches_feedback_validates_frame_type_motor_and_host() -> None:
     assert driver.matches_feedback(edulite_feedback(wrong_motor)) is False
 
 
+def test_read_param_request_asks_the_motor_and_names_the_host() -> None:
+    driver = Edulite05Driver("m1", can_id=5, host_id=0xFD)
+
+    msg = driver.encode_read_param(driver.PARAM_LOC_KP)
+
+    assert msg.arbitration_id == driver.build_can_id(driver.COMM_TYPE_READ_PARAM, 0xFD, 5)
+    assert msg.data == struct.pack("<Hxxxxxx", driver.PARAM_LOC_KP)
+    assert msg.is_extended_id
+
+
+def test_read_param_response_matches_only_own_motor_and_host() -> None:
+    driver = Edulite05Driver("m1", can_id=5, host_id=0xFD)
+    payload = struct.pack("<f", 30.0)
+    valid = edulite_read_param_response(driver, param_id=driver.PARAM_LOC_KP, payload=payload)
+    other_motor = edulite_read_param_response(
+        driver, param_id=driver.PARAM_LOC_KP, payload=payload, motor_id=6
+    )
+    other_host = edulite_read_param_response(
+        driver, param_id=driver.PARAM_LOC_KP, payload=payload, host_id=0x00
+    )
+    standard = can.Message(arbitration_id=0x205, data=valid.data, is_extended_id=False)
+    short = can.Message(arbitration_id=valid.arbitration_id, data=bytes(4), is_extended_id=True)
+
+    assert driver.matches_read_param(valid) is True
+    assert driver.matches_read_param(other_motor) is False
+    assert driver.matches_read_param(other_host) is False
+    assert driver.matches_read_param(standard) is False
+    assert driver.matches_read_param(short) is False
+
+
+def test_read_param_response_is_not_taken_for_feedback() -> None:
+    driver = Edulite05Driver("m1", can_id=5)
+    response = edulite_read_param_response(
+        driver, param_id=driver.PARAM_LIMIT_SPD, payload=struct.pack("<f", 2.0)
+    )
+
+    assert driver.matches_feedback(response) is False
+
+
+def test_decode_read_param_reads_float_parameters() -> None:
+    driver = Edulite05Driver("m1", can_id=5)
+    response = edulite_read_param_response(
+        driver, param_id=driver.PARAM_LIMIT_SPD, payload=struct.pack("<f", 2.5)
+    )
+
+    assert driver.decode_read_param(response) == (driver.PARAM_LIMIT_SPD, pytest.approx(2.5))
+
+
+def test_decode_read_param_reads_run_mode_as_uint8() -> None:
+    driver = Edulite05Driver("m1", can_id=5)
+    response = edulite_read_param_response(
+        driver,
+        param_id=driver.PARAM_RUN_MODE,
+        payload=bytes([int(Edulite05RunMode.POSITION), 0, 0, 0]),
+    )
+
+    assert driver.decode_read_param(response) == (
+        driver.PARAM_RUN_MODE,
+        int(Edulite05RunMode.POSITION),
+    )
+
+
+def test_decode_read_param_rejects_another_motors_response() -> None:
+    driver = Edulite05Driver("m1", can_id=5)
+    response = edulite_read_param_response(
+        driver, param_id=driver.PARAM_LOC_KP, payload=struct.pack("<f", 30.0), motor_id=6
+    )
+
+    with pytest.raises(ValueError):
+        driver.decode_read_param(response)
+
+
 def test_decode_rejects_unrelated_frame() -> None:
     driver = Edulite05Driver("m1", can_id=5)
     with pytest.raises(ValueError):
@@ -293,6 +366,142 @@ def test_feedback_probe_is_disable_without_fault_clear() -> None:
     assert probe is not None
     assert driver.parse_can_id(probe.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
     assert probe.data == bytes(8)
+
+
+def target_value_of(msg: can.Message) -> float:
+    return struct.unpack("<f", msg.data[4:])[0]
+
+
+class TestPcSideOrigin:
+    """原点をモータ側の `SET_ZERO` ではなく PC 側のオフセットで持つ。
+
+    `SET_ZERO` の零点は電源断で失われるので、物理非常停止のたびに原点が
+    フラッシュの機械ゼロへ戻る (`docs/invariants.md` §3)。
+    """
+
+    def test_控えるまでは論理位置が電文どおり(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=1.25)
+
+        assert driver.origin_offset == 0.0
+        assert driver.feedback_position() == pytest.approx(driver.state.position)
+
+    def test_控えた瞬間の論理位置は0で生値は動かない(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=3.0)
+        raw = driver.state.position
+
+        driver.capture_origin_here()
+
+        assert driver.feedback_position() == pytest.approx(0.0, abs=1e-9)
+        assert driver.state.position == pytest.approx(raw)
+        assert driver.origin_offset == pytest.approx(raw)
+
+    def test_論理0の指令は控えた生角度を書く(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=3.0)
+        raw = driver.state.position
+        driver.capture_origin_here()
+
+        msg = driver.encode_target(ControlMode.POSITION, 0.0)
+
+        assert struct.unpack_from("<H", msg.data)[0] == driver.PARAM_LOC_REF
+        assert target_value_of(msg) == pytest.approx(raw, abs=1e-6)
+
+    def test_頭打ちは生値のレンジで掛かる(self) -> None:
+        """`POS_MIN`/`POS_MAX` は uint16 の写像レンジで、機構の可動域ではない。
+
+        論理値でクランプすると、オフセットを足した生値がレンジ外へ出て折り返す。
+        """
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=3.0)
+        driver.capture_origin_here()
+
+        msg = driver.encode_target(ControlMode.POSITION, 10.0)
+
+        assert target_value_of(msg) == pytest.approx(driver.POS_MAX, abs=1e-5)
+
+    def test_保持目標を往復させても今の生角度のまま(self) -> None:
+        """20Hz の再送が `idle_target_value()` を `encode_target()` へ通す。
+
+        生のまま返すと `生値 + オフセット` を書き続け、機構がオフセットぶん走る。
+        """
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=2.0)
+        driver.capture_origin_here()
+        feed_edulite(driver, position=2.5)
+        raw = driver.state.position
+
+        msg = driver.encode_target(driver.mode, driver.idle_target_value())
+
+        assert target_value_of(msg) == pytest.approx(raw, abs=1e-6)
+
+    @pytest.mark.parametrize("after_set_zero", [False, True])
+    def test_励磁の保持目標は今の生角度(self, after_set_zero: bool) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=2.0)
+        driver.capture_origin_here()
+        feed_edulite(driver, position=2.5)
+        raw = driver.state.position
+
+        steps = driver.activation_steps(after_set_zero=after_set_zero)
+
+        assert struct.unpack_from("<H", steps[0][0].data)[0] == driver.PARAM_LOC_REF
+        assert target_value_of(steps[0][0]) == pytest.approx(raw, abs=1e-6)
+
+    def test_モータ側で切り直した直後だけ0を書く(self) -> None:
+        """PC 側の控えが無いなら、零点はまだモータ側にある。
+
+        `SET_ZERO` は生座標そのものを付け替えるので、旧原点で測られた在庫の
+        フィードバックを書くと enable した瞬間に新旧の原点差だけ機構が動く。
+        """
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=1.5)
+
+        steps = driver.activation_steps(after_set_zero=True)
+
+        assert target_value_of(steps[0][0]) == pytest.approx(0.0, abs=1e-9)
+
+    def test_控え直した原点の移動量をINFOで残す(self, caplog: pytest.LogCaptureFixture) -> None:
+        """機械ゼロが電源断でどれだけ動いたかを知る唯一の材料になる。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=1.0)
+        driver.capture_origin_here()
+        feed_edulite(driver, position=1.5)
+
+        with caplog.at_level(logging.INFO, logger="lib.drivers.edulite05"):
+            driver.capture_origin_here()
+
+        assert [record.levelno for record in caplog.records] == [logging.INFO]
+        record = caplog.records[0]
+        assert "m1" in record.getMessage()
+        assert any(
+            isinstance(arg, float) and arg == pytest.approx(0.5, abs=0.01)
+            for arg in record.args or ()
+        )
+
+    def test_頭打ちになった指令はWARNINGで残す(self, caplog: pytest.LogCaptureFixture) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=3.0)
+        driver.capture_origin_here()
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            driver.encode_target(ControlMode.POSITION, 10.0)
+
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
+        assert "m1" in caplog.records[0].getMessage()
+
+    def test_端に張り付いている間は繰り返し出さない(self, caplog: pytest.LogCaptureFixture) -> None:
+        """20Hz の再送で同じ指令が流れ続けるので、変化した瞬間だけ残す。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, position=3.0)
+        driver.capture_origin_here()
+
+        with caplog.at_level(logging.WARNING, logger="lib.drivers.edulite05"):
+            for _ in range(5):
+                driver.encode_target(ControlMode.POSITION, 10.0)
+
+        assert len(caplog.records) == 1
 
 
 class TestIsEnergized:
