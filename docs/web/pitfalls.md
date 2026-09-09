@@ -31,6 +31,7 @@
 | スクロール面の溢れを画面に出さない | 区分の見出しだけが下端で切れ、**その下の主操作ごと画面外**にあることが読めない | `monitor/MatchPrep.test.tsx` |
 | 自分から開くだけで、開いた先を見せない | 動作確認が失敗しても**「未完了バッジが付いただけ」に見える** | `motorcheck/MotorCheckPanel.test.tsx` |
 | サーバーが必ず拒否する面へボタンを出す | 打音・目視の最中に押せるボタンが並び、押すと拒否トーストだけが出る | `pages/RobotControl.test.tsx` |
+| daisyUI の `.alert` の子に `flex-1` を書く | 通知の文字がカードの外へ流れ、`…` すら出ない | `shell/Toaster.test.tsx` |
 
 ---
 
@@ -225,6 +226,25 @@ flex の既定（`flex-shrink: 1`）は列の全パネルを一律に縮める�
   再実行）と `forcedOpen` は真のままなので、2 回目以降は一度も動かない
 
 **モーダルへ戻すのは禁止**（`docs/invariants.md` §8。駆動中に EMG STOP を覆う）。
+
+### daisyUI の `.alert` は grid。子は列幅まで伸びない
+
+`.alert` は `display: grid` に加えて **`place-items: center start`** を持つ。`justify-items` が
+`start` の grid では子が stretch されず、幅は列（トラック）幅ではなく `fit-content` ——
+つまり **min-content を下回れない**。`Toaster` の本文行は `truncate`（`white-space: nowrap`）
+なので min-content が文字列の全長になり、**列 306.7px に対して本文が 444.8px**、
+138px ぶんカードの外へ流れた（1366×768・実測）。閉じるボタンの上を文字が通り、
+`truncate` の `…` すら出ない。
+
+**`min-w-0` では止まらない。** あれはトラックの下限（`minmax(auto,1fr)` の `auto`）を 0 に
+するだけで、子自身の幅は縮めない。**列幅へ張り付けるのは `w-full`。**
+
+`flex-1` は grid の子では効かない —— 伸縮を書いたつもりで 1 つも指定していない状態になる。
+`display` を `flex` で上書きしている `ConnectionBanner` は同じ書き方でも無事なので、
+**`alert` を見たら先に `display` を確かめる。**
+
+通知の理由文は次の一手そのもの（「配線・電源を確認してください」）なので、収まらないときは
+省略ではなく折り返す（`wrap-anywhere`。`command: …` のような長い ASCII 語も折れる）。
 
 ---
 
