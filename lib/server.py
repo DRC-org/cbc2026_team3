@@ -1508,6 +1508,8 @@ class RobotServer:
             "safety": self._safety_state(robot_name),
             "manual": self._manual_state(robot_name),
             "suction": ctx.suction.to_dict() if ctx.suction is not None else None,
+            # この台がコート確定を要るか。UI が軸名から導き直さないようサーバーが配る
+            "court_required": bool(ctx.court_dependent_axes),
         }
 
     def _sensor_states(self, robot_name: str) -> dict[str, dict]:

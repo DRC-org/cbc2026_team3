@@ -27,7 +27,7 @@ from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court
 from lib.sequence.engine import AxisSyncError, Sequence, step
 from lib.sequence.homing import HomingError
 from lib.sequence.motors import MotorGroup, MotorHandle
-from lib.sequence.positions import AxisSpec, load_position_table
+from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
 from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager, set_last_feedback, set_motors, set_sensors
@@ -180,6 +180,27 @@ def _motor_group(
     return group
 
 
+def _sequence_positions() -> PositionTable:
+    """`court_required` が真になる形を golden に残すための表。
+
+    真の形が無いと、UI が真を受け取れなくても誰も気付けない (`manual_always` と同じ理由)。
+    """
+    return load_position_table(
+        {
+            "axes": {
+                "lift": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": {"red": -1.0, "blue": 1.0},
+                    "tolerance": 1.0,
+                },
+            },
+            "positions": {"lift": {"top": 0.0}},
+        },
+        source="<ws-contract-sequence>",
+    )
+
+
 def _manual_controller(group: MotorGroup) -> ManualController:
     table = load_position_table(
         {
@@ -296,6 +317,7 @@ def _build_fixture() -> _Fixture:
 
     sequence = _ContractSequence()
     sequence.bind_motors(group)
+    sequence.bind_positions(_sequence_positions())
 
     fx.add_robot(
         _ROBOT,
@@ -325,8 +347,11 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             ws = await client.ws_connect("/ws")
 
             samples["server_info"] = await require_type(ws, "server_info")
+            # 未確定のコートを含む形を先に採る (試合前の正常な状態)
             samples["match_state"] = await require_type(ws, "match_state")
 
+            # ここから先の指令はコートが決まっていないと拒否される
+            await fx.command({"type": "set_court", "court": "red"})
             await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "manual"})
             await fx.command(
                 {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 4.0}

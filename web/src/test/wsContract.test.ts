@@ -452,6 +452,7 @@ const STATE_FIELDS: FieldSpec = {
     safety: "ui",
     manual: "ui",
     suction: "ui",
+    court_required: "ui",
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),

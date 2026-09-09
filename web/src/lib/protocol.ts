@@ -518,6 +518,8 @@ export interface RobotState {
   steps?: SequenceStepInfo[];
   manual?: ManualState;
   suction?: SuctionState | Malformed | null;
+  /** この台がコート確定を要るか。**判定はサーバー。UI が軸名から導き直さない。** */
+  court_required?: boolean;
 }
 
 export type ServerMessage =

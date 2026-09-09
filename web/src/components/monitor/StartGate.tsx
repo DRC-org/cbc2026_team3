@@ -42,6 +42,10 @@ export function StartGate({ onStart }: { onStart: () => void }) {
     blockers.push({ label: "フェーズ", detail: "リセットしてセッティングへ戻してください" });
   }
 
+  if (court === null) {
+    blockers.push({ label: "コート", detail: "未設定 — 試合準備で赤か青を選んでください" });
+  }
+
   if (!canStart) {
     const checklists = matchState.checklists;
     const incomplete =

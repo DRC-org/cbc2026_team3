@@ -170,7 +170,9 @@ export const MatchPrep = memo(function MatchPrep({
             </div>
             <p className="flex items-center gap-1.5 text-[0.9em] text-base-content/70">
               <Icon as={Info} />
-              変更するとチェックリストは全てリセットされます
+              {court === null
+                ? "未設定です。選ぶまで試合を開始できません"
+                : "変更するとチェックリストは全てリセットされます"}
             </p>
           </div>
           {itemsOf("court")}
