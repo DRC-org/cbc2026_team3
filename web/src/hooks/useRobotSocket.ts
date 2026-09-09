@@ -8,6 +8,7 @@ import type {
   MotorCheckSnapshot,
   RobotState,
   ServerInfo,
+  SwitchMeasureSnapshot,
 } from "@/lib/protocol";
 import type { CommandRejectedEvent, HealthChangeEvent } from "@/lib/robotReducer";
 import { INITIAL_ROBOT_UI_STATE, robotReducer } from "@/lib/robotReducer";
@@ -21,6 +22,7 @@ interface UseRobotSocketReturn {
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
   homing: HomingSnapshot;
+  switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -59,6 +61,7 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
     healthEvents: state.healthEvents,
     motorCheck: state.motorCheck,
     homing: state.homing,
+    switchMeasure: state.switchMeasure,
     matchState: state.matchState,
     serverInfo: state.serverInfo,
     rejection: state.rejection,

@@ -147,6 +147,21 @@ class ServerFixture:
             return
         await asyncio.wait_for(task, timeout=timeout)
 
+    async def start_switch_measure(self, payload: dict) -> str | None:
+        return await self.server._switch_measure.start(payload)
+
+    def switch_measure_state(self) -> dict:
+        return self.server._switch_measure.payload()
+
+    def set_switch_measure_running(self, running: bool) -> None:
+        self.server._switch_measure._running = running
+
+    async def wait_switch_measure_idle(self, *, timeout: float = 2.0) -> None:
+        task = self.server._switch_measure._task
+        if task is None:
+            return
+        await asyncio.wait_for(task, timeout=timeout)
+
     def break_command_handler(self, command: str, exc: Exception) -> None:
 
         async def _raise(_data: dict, _requester: Any) -> None:

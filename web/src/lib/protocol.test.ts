@@ -642,6 +642,77 @@ describe("parseServerMessage", () => {
       expect(message.motorCheck.excluded_steps).toBe(MALFORMED);
     });
   });
+
+  describe("switch_measure_state", () => {
+    const RESULT = {
+      axis: "sub_y_axis",
+      unit: "mm",
+      direction: -1,
+      engage: -447.0,
+      release: -441.2,
+      width: 5.8,
+      step: 0.5,
+      coarse_step: null,
+    };
+
+    it("結果と対象をそのまま運ぶ", () => {
+      const message = parse({
+        type: "switch_measure_state",
+        available: true,
+        blocked_reason: null,
+        running: false,
+        robot: "sub_hand",
+        axis: "sub_y_axis",
+        direction: -1,
+        result: RESULT,
+        error: null,
+        targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
+      });
+
+      expect(message).toEqual({
+        type: "switch_measure_state",
+        switchMeasure: {
+          available: true,
+          blocked_reason: null,
+          running: false,
+          robot: "sub_hand",
+          axis: "sub_y_axis",
+          direction: -1,
+          result: RESULT,
+          error: null,
+          targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
+        },
+      });
+    });
+
+    it("未実行の result は null、数値が欠けた result は MALFORMED (0 で埋めない)", () => {
+      const idle = parse({ type: "switch_measure_state", result: null, targets: {} });
+      expect(idle?.type).toBe("switch_measure_state");
+      if (idle?.type !== "switch_measure_state") return;
+      expect(idle.switchMeasure.result).toBeNull();
+      expect(idle.switchMeasure.direction).toBeNull();
+
+      const broken = parse({
+        type: "switch_measure_state",
+        result: { ...RESULT, engage: "-447.0" },
+        targets: {},
+      });
+      expect(broken?.type).toBe("switch_measure_state");
+      if (broken?.type !== "switch_measure_state") return;
+      expect(broken.switchMeasure.result).toBe(MALFORMED);
+    });
+
+    it("向きが ±1 以外なら結果ごと MALFORMED", () => {
+      const message = parse({
+        type: "switch_measure_state",
+        result: { ...RESULT, direction: 0 },
+        targets: {},
+      });
+      expect(message?.type).toBe("switch_measure_state");
+      if (message?.type !== "switch_measure_state") return;
+      expect(message.switchMeasure.result).toBe(MALFORMED);
+    });
+  });
 });
 
 describe("readMeasured", () => {

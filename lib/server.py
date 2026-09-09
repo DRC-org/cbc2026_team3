@@ -44,6 +44,7 @@ from lib.motion_guard import GuardViolation
 from lib.sequence.engine import Sequence
 from lib.server_homing import HomingController, HomingSource
 from lib.server_motor_check import MotorCheckController, Pausable
+from lib.server_switch_measure import SwitchMeasureController
 from lib.suction import SuctionSelection
 from lib.ws_hub import WsHub
 
@@ -151,6 +152,10 @@ class RobotServer:
             environment_deny=self._homing_environment_deny,
             broadcast=self._ws.broadcast_json,
         )
+        self._switch_measure = SwitchMeasureController(
+            environment_deny=self._switch_measure_environment_deny,
+            broadcast=self._ws.broadcast_json,
+        )
 
         self._verify_command_handlers()
 
@@ -233,6 +238,7 @@ class RobotServer:
 
     def set_homing_source(self, source: HomingSource) -> None:
         self._homing.set_source(source)
+        self._switch_measure.set_source(source)
 
     def _apply_court(self) -> None:
         self._motor_check.set_court(self.match.court)
@@ -322,6 +328,7 @@ class RobotServer:
             self.match.to_dict(),
             self._motor_check.payload(),
             self._homing.payload(),
+            self._switch_measure.payload(),
         ):
             if not await self._ws.send_or_drop(ws, json.dumps(snapshot, ensure_ascii=False)):
                 await self._ws.drop({ws})
@@ -538,6 +545,10 @@ class RobotServer:
         logger.info(
             "吸着パッド選択: robot=%s 使用=%s", robot_name, ", ".join(suction.enabled()) or "なし"
         )
+    async def _cmd_switch_measure_start(self, data: dict, requester: WSOrNone) -> None:
+        reason = await self._switch_measure.start(data)
+        if reason is not None:
+            await self._reject_command(requester, "switch_measure_start", reason)
 
     async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
@@ -1181,21 +1192,37 @@ class RobotServer:
         return None
 
     def _motor_check_environment_deny(self) -> str | None:
-        if self._homing.running:
-            return "零点合わせの実行中は動作確認を実行できません"
-        return self._environment_deny("motor_check_start", "動作確認")
+        return self._busy_deny("動作確認") or self._environment_deny(
+            "motor_check_start", "動作確認"
+        )
 
     def _homing_environment_deny(self) -> str | None:
-        if self._motor_check.running:
-            return "動作確認の実行中は零点合わせを実行できません"
-        return self._environment_deny("homing_start", "零点合わせ")
+        return self._busy_deny("零点合わせ") or self._environment_deny("homing_start", "零点合わせ")
+
+    def _switch_measure_environment_deny(self) -> str | None:
+        return self._busy_deny("作動点測定") or self._environment_deny(
+            "switch_measure_start", "作動点測定"
+        )
+
+    def _axis_holders(self) -> tuple[tuple[str, bool], ...]:
+        """軸を握りうる点検と、今それが走っているか。**相互排他はここ 1 箇所で決まる。**"""
+        return (
+            ("動作確認", self._motor_check.running),
+            ("零点合わせ", self._homing.running),
+            ("作動点測定", self._switch_measure.running),
+        )
+
+    def _busy_deny(self, what: str) -> str | None:
+        for label, running in self._axis_holders():
+            if running and label != what:
+                return f"{label}の実行中は{what}を実行できません"
+        return None
 
     def _busy_label(self) -> str | None:
         """今この瞬間、軸を握っている点検があればその名前。"""
-        if self._motor_check.running:
-            return "動作確認"
-        if self._homing.running:
-            return "零点合わせ"
+        for label, running in self._axis_holders():
+            if running:
+                return label
         return None
 
     def _motor_check_pausables(self) -> list[Pausable]:
@@ -1218,6 +1245,7 @@ class RobotServer:
                 await self._broadcast_state()
                 await self._motor_check.publish()
                 await self._homing.publish()
+                await self._switch_measure.publish()
             except asyncio.CancelledError:
                 raise
             except Exception:

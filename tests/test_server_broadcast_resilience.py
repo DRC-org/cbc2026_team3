@@ -196,7 +196,7 @@ class TestConnectHandshakeIsNotUnbounded:
         assert client.close_called
         assert fx.has_closing_tasks
 
-    async def test_正常な相手にはスナップショット4通が届く(self) -> None:
+    async def test_正常な相手にはスナップショット5通が届く(self) -> None:
         fx = ServerFixture.build()
         client = _HandshakeClient()
 
@@ -207,6 +207,7 @@ class TestConnectHandshakeIsNotUnbounded:
             "match_state",
             "motor_check_state",
             "homing_state",
+            "switch_measure_state",
         ]
 
 

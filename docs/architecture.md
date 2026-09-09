@@ -106,7 +106,7 @@ CAN フレーム
 ```
 
 **配信の頻度**: `state` は定期配信（既定 50ms 周期）。`match_state` / `e_stop_state` /
-`motor_check_state` / `homing_state` / `health_change` は変化時に push。`server_info` は
+`motor_check_state` / `homing_state` / `switch_measure_state` / `health_change` は変化時に push。`server_info` は
 接続直後の 1 回だけ。
 
 ### 起動と後始末の段（`main.py`）
@@ -796,8 +796,25 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | 実行 | `run_homing()`。動作確認と同じ 1 本を通す（手順を書き写さない） |
 | 失敗 | 1 軸落ちても残りを続け、軸ごとの理由を `results` に載せる（1 回で全軸の可否が分かる） |
 | ゲート | `HomingController.deny_reason()`。環境側は `RobotServer._homing_environment_deny()` が渡す（動作確認と同じ `_environment_deny` を見る） |
-| 排他 | 動作確認と相互排他。どちらかが走っている間、再励磁・手動切替・試合開始も `RobotServer._busy_label()` 経由で塞がる |
+| 排他 | 動作確認・作動点測定と相互排他。どれかが走っている間、再励磁・手動切替・試合開始も `RobotServer._busy_label()` 経由で塞がる |
 | 配信 | 進捗も結果も拒否理由も `homing_state` 1 通。拒否は加えて `command_rejected` で要求元へ返す |
+
+### リミットスイッチの作動点を測る（`lib/server_switch_measure.py`）
+
+機構が変わるたびにスイッチの作動点は動く。**位置定数 yaml に書く値を実機から取る**入口で、
+零点合わせと**同じ二段探索を通し、原点を書き込む段だけを行わない**。
+
+| 要素 | 中身 |
+|---|---|
+| 宛先 | **`robot` / `axis` / `direction` が必須**。零点合わせと同じく全機を回す形は持たない |
+| 向き | 指定させる。`homing.direction` を使い回さない（**測りたいのは `homing` が使わない側の端でもある**） |
+| 実行 | `HomingRunner.measure()`。`home()` と同じ `_approach()`（離脱 → 粗探索 → 寄せ直し）を通り、`_capture_origin()` を呼ばない |
+| 刻み・上限 | 既定は `homing` の `coarse_step` / `step` / `search_distance`。指定は `HomingSpec` を `replace()` して載せるので、**探索の各段が見る歯止めがそのまま測定の歯止めになる**（別変数で持たない）。`HomingSpec` の検証もそのまま効く |
+| 結果 | 作動点・離脱点・ON 区間の幅・**使った刻み**（作動点のばらつきは刻みそのものなので、値と一緒でないと精度が読めない） |
+| ゲート | `SwitchMeasureController.deny_reason()`。動作確認・零点合わせと相互排他（`RobotServer._axis_holders()` が単一情報源） |
+| 配信 | 進捗も結果も拒否理由も `switch_measure_state` 1 通。拒否は加えて `command_rejected` で要求元へ返す |
+
+対象の軸は零点合わせと共通（`HomingSource`）。`RobotServer.set_homing_source()` が両方へ配る。
 
 ### 手動操縦（`lib/manual.py`）
 
@@ -1049,6 +1066,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 | `health_change` | ヘルスが変化した瞬間 | `robot` / `target` / 遷移。**`robot` は UI の受信条件が依存する** |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由 | 4 種に分けず**この 1 通で運ぶ** |
 | `homing_state` | 零点合わせ単独実行の進捗・結果・拒否理由 | 宛先（`robot` / `axes`）と軸ごとの成否（`results`）、ロボットごとの対象軸（`targets`） |
+| `switch_measure_state` | 作動点測定の進捗・結果・拒否理由 | 宛先（`robot` / `axis` / `direction`）と実測（`result`: 作動点・離脱点・ON 区間・刻み）、ロボットごとの対象軸（`targets`） |
 | `command_rejected` | 拒否時、**要求元 1 台にだけ** | `command` / `reason` |
 
 `motor_check_start` の拒否だけは `motor_check_error` に載せる（UI の表示経路が別のため）。
@@ -1171,6 +1189,10 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 { "type": "homing_start", "robot": "sub_hand", "axes": ["sub_y_axis"] }
 // 次の吸着で開ける弁の全集合。差分ではない
 { "type": "suction_pads_set", "robot": "sub_hand", "pads": ["valve_1", "valve_2"] }
+// リミットスイッチの作動点を測る。robot / axis / direction は必須
+// step / coarse_step / limit は省略可（省くと homing の値が既定になる）
+{ "type": "switch_measure_start", "robot": "sub_hand", "axis": "sub_y_axis",
+  "direction": -1, "step": 0.5, "limit": 60.0 }
 ```
 
 **シーケンス制御コマンドのセマンティクス**:
@@ -1263,7 +1285,7 @@ setup ⇄ ready → match → finished → setup
 | コマンド | setup | ready | match | finished | 許可フェーズ集合 |
 |---|:-:|:-:|:-:|:-:|---|
 | `set_court` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
-| `motor_check_start` / `homing_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
+| `motor_check_start` / `homing_start` / `switch_measure_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
 | `checklist_set` / `checklist_reset` / `checklist_check_all` | ✓ | ✓ | ✗ | ✗ | `PHASES_PREPARATION` |
 | `match_start` | ✗ | ✓ | ✗ | ✗ | `PHASES_START_GATE` |
 | `match_finish` | ✗ | ✗ | ✓ | ✗ | `PHASES_DURING_MATCH` |
@@ -1281,7 +1303,7 @@ setup ⇄ ready → match → finished → setup
 |---|:-:|---|
 | `sequence_start` / `sequence_jump` / `trigger` / `match_start` | ✗ | シーケンスが進むと次のステップが停止指令を上書きする（拒否文はコマンドごとに別。`lib/commands.py`） |
 | `motor_check_start` | ✗ | 同上（拒否は `motor_check_error` で通知） |
-| `homing_start` | ✗ | 同上（拒否は `command_rejected` で通知） |
+| `homing_start` / `switch_measure_start` | ✗ | 同上（拒否は `command_rejected` で通知） |
 | `manual_move` / `manual_set` / `manual_jog` | ✗ | 目標値を送るため |
 | `set_operation_mode` | ✓ | 機体を動かさない切替そのもの |
 | `sequence_stop` / `e_stop` / `e_stop_release` / `motor_check_abort` | ✓ | 止める方向の操作は緊急停止中こそ通す |
