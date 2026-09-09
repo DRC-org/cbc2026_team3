@@ -211,18 +211,17 @@ async def _hold_target_refresh(
 ) -> AsyncIterator[None]:
     """原点を付け替えるあいだ再送を黙らせ、抜けるときに目標とラッチを捨てる。
 
-    **`SET_ZERO` は「生値 0 が指す物理位置」を付け替える操作なので、付け替えの前に
+    **原点の付け替えは「論理値 0 が指す物理位置」を動かす操作なので、付け替えの前に
     記録した目標もラッチも、付け替えた後には別の物理位置を指す。** 探索がヒットした
     直後に `HomingRunner` が「その場で止める」ために書いた目標がまさにそれで、
-    その生値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
-    再励磁すると、20Hz の再送がそのぶんだけ離れた位置へ押し続ける ——
-    `activation_steps(after_set_zero=True)` が保持目標へ 0 を書く手当ては、
-    50ms 後の再送 1 通で上書きされて効かない
+    その値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
+    再開すると、20Hz の再送が新しいオフセットで `encode_target()` を通り、
+    そのぶんだけ離れた位置へ押し続ける
     (`QueryDrivenTargetRefresher.clear_target` が再励磁について書いているのと
     同じ上書きが、こちらでは恒久的に効き続ける)。
 
     **捨てるだけでは足りず、付け替えのあいだ黙らせる必要がある。** 目標を先に
-    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、`SET_ZERO` の直前に
+    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、付け替えの直前に
     取ったラッチが直後には別の位置を指す。黙らせておけば、ラッチは抜けた後に
     新しい原点で取り直される。
 
@@ -266,21 +265,41 @@ def _make_origin_resolver(
     monitors = sync_monitors or []
     refreshers = target_refreshers or []
 
-    def _resolve_via_set_zero(axis: str) -> Callable[[], Awaitable[None]] | None:
+    def _resolve_via_driver(axis: str) -> Callable[[], Awaitable[None]] | None:
         names = table.axis(axis).motor_names
         for manager in managers:
             drivers = [manager.motors.get(name) for name in names]
             if any(driver is None for driver in drivers):
                 continue
-            if not all(driver.supports_origin_capture() for driver in drivers if driver):
+            present = [driver for driver in drivers if driver]
+            if not all(driver.supports_origin_capture() for driver in present):
                 return None
+            # 原点の持ち主はドライバが答える (`main.py` にドライバ種別を書き写さない)。
+            owners = [driver.has_local_origin() for driver in present]
+            if any(owners) and not all(owners):
+                # 混ざったまま片方の経路へ流すと、もう片方は原点が動かないまま
+                # 「成功した」と返る (黙って誤った原点ができる)。
+                logger.error(
+                    "軸 '%s' は原点の持ち方が違うモータが混ざっているので零点確定できません", axis
+                )
+                return None
+            local = all(owners)
 
-            async def capture(manager: CANManager = manager) -> None:
+            async def capture(manager: CANManager = manager, local: bool = local) -> None:
+                # **窓が短くなっても両方要る。** 再送は付け替えの瞬間に旧座標系の
+                # 論理値をキャッシュしていると、新しいオフセットで `encode_target` を
+                # 通った瞬間に差のぶん機構が走る。偏差監視は、`HomingRunner._align`
+                # が左右を意図的にずらした直後の姿勢を控えるので直前まで立っている。
                 with _suspend_sync_monitoring(monitors, axis):
                     async with _hold_target_refresh(refreshers, names):
-                        await manager.capture_origin_via_set_zero(
-                            names, should_abort=is_estop_active
-                        )
+                        if local:
+                            await manager.capture_origin_in_place(
+                                names, should_abort=is_estop_active
+                            )
+                        else:
+                            await manager.capture_origin_via_set_zero(
+                                names, should_abort=is_estop_active
+                            )
 
             return capture
         return None
@@ -293,7 +312,7 @@ def _make_origin_resolver(
             for motor in spec.motor_names:
                 if motor in loop.motor_names:
                     return _as_async(functools.partial(loop.set_origin_here, motor))
-        return _resolve_via_set_zero(axis)
+        return _resolve_via_driver(axis)
 
     return resolve
 

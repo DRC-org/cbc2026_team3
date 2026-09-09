@@ -166,7 +166,37 @@ class MotorDriver(abc.ABC):
     def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
         return []
 
+    def has_local_origin(self) -> bool:
+        """論理原点をドライバ自身が PC 側で持つか。既定は False。
+
+        **`M3508Driver` はここで True を名乗らない。** 累積角の原点は
+        `M3508PositionLoop` が持ち (`set_origin_here` は目標の破棄と PID のリセットまで
+        含む)、ドライバ単体では切り直せない —— ドライバだけを呼ぶ経路が生えると、
+        目標と積分が旧座標のまま残ったところへ新しい原点が入る。
+        """
+        return False
+
+    def capture_origin_here(self) -> None:
+        """今の実測位置を論理原点として控える。**CAN へは 1 通も出さない。**
+
+        `has_local_origin()` が True のドライバだけが実装する。
+        """
+        raise NotImplementedError(f"{type(self).__name__} は PC 側に原点を持ちません")
+
+    def establish_provisional_origin(self) -> bool:
+        """起動時の暫定原点を確立し、確立したら True。既定は何もしない。
+
+        **確立するのは 1 度だけ。** 再励磁のたびに控え直すと、物理緊急停止から復帰した
+        姿勢が新しい原点になり、ペア軸では左右で別々の時刻に控えたぶんが消えない
+        偏差として残る。
+        """
+        return False
+
     def supports_origin_capture(self) -> bool:
+        if self.has_local_origin():
+            return True
+        # 「切り直すフレームはあるが無励磁にする手段が無い」ドライバが名乗る形 ——
+        # 励磁したまま原点を動かす経路 —— を構造的に塞ぐ。
         return bool(self.deactivation_steps()) and bool(self.origin_capture_steps())
 
     def requires_fresh_feedback_for_activation(self) -> bool:

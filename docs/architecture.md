@@ -133,7 +133,7 @@ CAN フレーム
 | `_attach_motion_profiles` | `axes.<軸>.motion` を持つ軸へ台形プロファイルを後付けする |
 | `_wire_robot_motors` | `build_motor_group()` → `Sequence.bind_motors()` |
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
-| `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバの `SET_ZERO`）を解決 |
+| `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバのローカル原点 / ドライバの `SET_ZERO`）を解決。**どれを使うかはドライバに聞く**（`has_local_origin()`。`isinstance` で分けない） |
 | `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
 | `_make_sensor_reader` / `_make_sensor_contact_reader` | 可動端インターロックと零点確定が共有するセンサの読み口。前者は三値の現在値（`None` = 読めていない）、後者は接触（OFF→ON）の累計（`None` = カウンタを提供しないドライバ） |
 | `_make_limit_interventions` | `LimitMonitor` が止めた回数を `Sequence.bind_limit_interventions` へ渡す（保護に曲げられた `move_to` を失敗させる） |
@@ -310,7 +310,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
-| `drivers/base.py` | `MotorDriver` 基底 / `MotorState` / `ControlMode` / `TelemetrySupport`（測定可否の宣言） |
+| `drivers/base.py` | `MotorDriver` 基底 / `MotorState` / `ControlMode` / `TelemetrySupport`（測定可否の宣言）/ 原点の持ち方の宣言（`has_local_origin()` / `capture_origin_here()` / `establish_provisional_origin()` / `supports_origin_capture()`） |
 | `control/periodic.py` | 周期タスクの土台（`PeriodicTask` / `PausablePeriodicTask` / `LogThrottle`）+ 実周期の計測 |
 | `control/feedback.py` / `sync_guard.py` | フィードバック鮮度の判定（`FeedbackFreshness`。未受信は異常にしない）/ 左右直結ペアの局所保護（`SyncGuard`。判定とラッチだけ） |
 | `control/pid.py` / `trajectory.py` | モータ非依存 PID（測定値微分 / conditional integration / デッドバンド）/ 台形速度プロファイル |
@@ -414,7 +414,7 @@ barrel（`index.ts`）は作らず、常に実ファイルまで指す。コマ�
 
 | モータ | 位置ループの所在 | PC が送るもの |
 |---|---|---|
-| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時と再励磁のたびに `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、config の `position_kp`）を書き、実測角を保持目標に書いてから励磁する（`WRITE_PARAM` の設定は電源断で失われるので `reinitialization_steps()` が持つ） | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
+| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時と再励磁のたびに `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、config の `position_kp`）を書き、実測角を保持目標に書いてから励磁する（`WRITE_PARAM` の設定は電源断で失われるので `reinitialization_steps()` が持ち、`initialization_steps()` はそれへ委譲するだけ） | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
 | Damiao DM3520 | **ドライバ内蔵**（Position Velocity Mode = 位置 → 速度 → 電流の三重ループ） | `p_des` [rad] / `v_des` [rad/s] の float32 2 つ |
 | 自作モタドラ（DC / サーボ / 電磁弁） | **閉じていない。** DC は duty をそのまま出し、サーボは角度補間だけ、電磁弁は GPIO の ON/OFF | 目標値のみ（`SET_TARGET` の Byte0 が制御タイプを毎通運ぶ） |
 | DJI M3508 (C620) | **電流ループのみ ESC 内。位置ループは PC 側**（`lib/control/position_loop.py`、200Hz） | 電流指令（`0x200` フレーム。4 モータ分を 1 通に束ねる） |
@@ -488,7 +488,7 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 |---|---|---|
 | 電文 | `PARAM_LOC_REF` / フィードバックにそのまま載る値 [rad]。**電源投入で [0, 360) へ畳み直される** | `MotorState.position`（診断の生値カラム） |
 | 連続化 | 電文値 + `_wrap_turns` × 2π。前回の電文値との差が ±π を超えたら回転数を ±1 補正する | 外へは出ない |
-| 論理 | 連続化 − 原点オフセット。原点オフセットは `capture_origin_here()` が**連続化座標で**控える | `feedback_position()` / `idle_target_value()` |
+| 論理 | 連続化 − 原点オフセット。原点オフセットは `capture_origin_here()` が**連続化座標で**控える（起動時の暫定原点も零点確定もこの 1 本を通り、**モータ側の `SET_ZERO` は 1 通も出さない**） | `feedback_position()` / `idle_target_value()` / `origin_offset` |
 
 `encode_target(POSITION)` は逆順に戻す —— `(論理値 + 原点オフセット) − 回転数 × 2π` を作り、
 **その電文座標のまま** `POS_MIN`/`POS_MAX`（uint16 の写像レンジ）でクランプする。
@@ -657,13 +657,21 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 | 検出後 | その場の実測位置を目標に送り直してから原点確定（`_stop_here`。**指令の単位のまま**書き戻す。値へ換算して戻すと往復の丸め誤差で入口の歯止めに拒否される） |
 | 原点確定 | `set_group_origin_here`（グループ単位でしか行わない） |
 
-**原点を確定する手段は 2 つ**で、可否はドライバ自身の `supports_origin_capture()` が答える
+**原点を確定する手段は 3 つ**で、可否はドライバ自身の `supports_origin_capture()` が答える
 （`main._make_origin_resolver` にドライバ種別を書き写さない）:
 
-| 手段 | 対象 |
-|---|---|
-| PC 側位置制御ループの原点張り直し | M3508 |
-| ドライバへの `SET_ZERO` | EDULITE 05（`deactivation_steps()` と `origin_capture_steps()` の両方を持つ） |
+| 手段 | 対象 | 経路 |
+|---|---|---|
+| PC 側位置制御ループの原点張り直し | M3508 | `M3508PositionLoop.set_group_origin_here` |
+| ドライバのローカル原点 | EDULITE 05（`has_local_origin()` を宣言） | `CANManager.capture_origin_in_place`。**PC 側で完結し、CAN へは 1 通も出さない**（無励磁化も再励磁もしない） |
+| ドライバへの `SET_ZERO` | DM3520（`deactivation_steps()` と `origin_capture_steps()` の**両方**を持つ） | `CANManager.capture_origin_via_set_zero`。CAN 往復あり（無励磁化 → 付け替え → 再励磁） |
+
+`main._make_origin_resolver` は上から順に探し、どの経路でも**付け替えのあいだ偏差監視を止め、
+20Hz の再送を黙らせて目標とラッチを捨てる**（窓が短いローカル原点でも要る。理由は
+`invariants.md` §3）。
+
+`Edulite05Driver` は起動時の暫定原点も PC 側で控える（`establish_provisional_origin()`。
+`CANManager.activate_motor` が鮮度確認の後に 1 度だけ呼ぶ）。
 
 **手段が無い軸は探索を始める前に落ち、起動ログにも `ERROR` で出る。**
 どの軸で現在有効かは [`checks_and_health.md`](checks_and_health.md) の

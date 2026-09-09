@@ -68,7 +68,7 @@ from tests.fake_can import (
 )
 from tests.fake_clock import FakeClock
 from tests.fake_drivers import StubFeedbackDriver
-from tests.feedback_frames import feed_generic, feed_m3508, generic_info
+from tests.feedback_frames import edulite_feedback, feed_generic, feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -1668,7 +1668,7 @@ class TestOriginResolver:
         assert resolve("rotate") is None
 
 
-class TestOriginResolverViaSetZero:
+class TestOriginResolverViaDriver:
     def _table(self) -> PositionTable:
         return load_position_table(
             {
@@ -1691,6 +1691,8 @@ class TestOriginResolverViaSetZero:
         mgr.add_bus("can_edulite", mock_bus())
         for name, can_id in (("rotate_r", 0x11), ("rotate_l", 0x12)):
             mgr.add_motor("can_edulite", Edulite05Driver(name, can_id=can_id))
+            # 原点を控えるには鮮度が要る (未受信の 0.0 を現在位置と信じない)
+            deliver_frame(mgr, "can_edulite", edulite_feedback(mgr.motors[name], position=1.5))
 
         async def _send(motor_name: str, msg: can.Message) -> None:
             sent.append((motor_name, msg))
@@ -1708,7 +1710,12 @@ class TestOriginResolverViaSetZero:
             last_feedback_at=lambda _name: None,
         )
 
-    async def test_edulite_のペア軸は_set_zero_で確定できる(self) -> None:
+    async def test_edulite_のペア軸は_PC_側の原点で確定する(self) -> None:
+        """**`SET_ZERO` と PC 側オフセットを併用してはならない。**
+
+        どちらも生の座標系そのものを動かす操作なので、同時に効かせると原点が
+        二重定義になる (`docs/invariants.md` §3)。
+        """
         mgr, sent = self._manager()
 
         capture = main._make_origin_resolver(
@@ -1718,51 +1725,55 @@ class TestOriginResolverViaSetZero:
         assert capture is not None
         await capture()
 
-        comm_types = [
-            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
-        ]
-        assert ("rotate_r", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
-        assert ("rotate_l", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
+        assert sent == [], "原点は CAN の往復なしで確定する"
         for name in ("rotate_r", "rotate_l"):
-            order = [t for n, t in comm_types if n == name]
-            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
-            assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
-            assert Edulite05Driver.COMM_TYPE_ENABLE in order[zero:]
+            assert mgr.motors[name].feedback_position() == pytest.approx(0.0, abs=1e-9)
+
+    async def test_原点の持ち方が違うモータが混ざった軸は手段が無い(self) -> None:
+        """片方の経路へ流すと、もう片方は原点が動かないまま「成功した」と返る。"""
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        mgr.add_bus("can_dm3520", mock_bus())
+        mgr.add_motor("can_edulite", Edulite05Driver("rotate_r", can_id=0x11))
+        mgr.add_motor("can_dm3520", Dm3520Driver("rotate_l", can_id=0x01, master_id=0x11))
+
+        resolve = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], is_estop_active=lambda: False
+        )
+
+        assert resolve("rotate") is None
 
     async def test_緊急停止インターロックを零点確定へ渡す(self) -> None:
         """**渡し忘れると「緊急停止を見ない零点確定」が黙って通る。**
 
-        付け替えの窓 (約 0.5 秒) で停止が入ると、停止の disable の後に再励磁の
-        enable が届き、停止中に励磁されたまま残る (ログにもヘルスにも出ない)。
+        探索が完遂していない姿勢を原点にすると、黙って成功した誤った原点が残り、
+        以後の `move_to` が全部そのぶんずれた場所へ動く。
         """
-        mgr, sent = self._manager()
+        mgr, _sent = self._manager()
 
         capture = main._make_origin_resolver(
             [], self._table(), can_managers=[mgr], is_estop_active=lambda: True
         )("rotate")
 
         assert capture is not None
-        with pytest.raises(RuntimeError, match="再励磁"):
+        with pytest.raises(RuntimeError, match="緊急停止"):
             await capture()
 
-        comm_types = [
-            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
-        ]
-        assert ("rotate_r", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
-        assert ("rotate_l", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
+        for name in ("rotate_r", "rotate_l"):
+            assert mgr.motors[name].origin_offset == 0.0
 
     async def test_原点付け替え中は同期監視を止める(self) -> None:
         mgr, _sent = self._manager()
         monitor = self._monitor()
         suspended_during: list[bool] = []
 
-        original = mgr.capture_origin_via_set_zero
+        original = mgr.capture_origin_in_place
 
         async def _spy(names, **kwargs):
             suspended_during.append(monitor.is_suspended("rotate"))
             await original(names, **kwargs)
 
-        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],
@@ -1820,13 +1831,13 @@ class TestOriginResolverViaSetZero:
         refresher = QueryDrivenTargetRefresher(handles, mgr)
         paused_during: list[bool] = []
 
-        original = mgr.capture_origin_via_set_zero
+        original = mgr.capture_origin_in_place
 
         async def _spy(names, **kwargs):
             paused_during.append(refresher.is_paused)
             await original(names, **kwargs)
 
-        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],
@@ -1853,7 +1864,7 @@ class TestOriginResolverViaSetZero:
         async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
-        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],
@@ -1877,7 +1888,7 @@ class TestOriginResolverViaSetZero:
         async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
-        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],

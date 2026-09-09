@@ -152,7 +152,7 @@ def test_initialization_messages_apply_configuration_in_safe_order() -> None:
     messages = messages_of(driver.initialization_steps())
     comm_types = [driver.parse_can_id(msg.arbitration_id)[0] for msg in messages]
 
-    assert comm_types == [4, 18, 18, 18, 18, 6]
+    assert comm_types == [4, 18, 18, 18, 18]
     assert messages[1].data == struct.pack("<HxxBxxx", driver.PARAM_RUN_MODE, 1)
     assert messages[2].data == struct.pack("<Hxxf", driver.PARAM_LIMIT_SPD, 2.0)
     assert messages[3].data == struct.pack("<Hxxf", driver.PARAM_LIMIT_CUR, 5.0)
@@ -164,18 +164,33 @@ def test_initialization_messages_apply_configuration_in_safe_order() -> None:
         0.05,
         0.05,
         0.05,
-        0.2,
     ]
 
 
-def test_initialization_does_not_set_zero_by_default() -> None:
-    driver = Edulite05Driver("m1", can_id=5)
+@pytest.mark.parametrize("set_zero_on_start", [False, True])
+def test_initialization_never_sets_zero(set_zero_on_start: bool) -> None:
+    """**どの設定でも 1 通も送らない。** 原点は PC 側のオフセットだけが持つ。
+
+    `SET_ZERO` を混ぜると生座標そのものが付け替わり、PC 側のオフセットと二重定義に
+    なる (`docs/invariants.md` §3)。
+    """
+    driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=set_zero_on_start)
     comm_types = [
         driver.parse_can_id(msg.arbitration_id)[0]
         for msg in messages_of(driver.initialization_steps())
     ]
     assert driver.COMM_TYPE_SET_ZERO not in comm_types
     assert driver.COMM_TYPE_ENABLE not in comm_types
+
+
+@pytest.mark.parametrize("set_zero_on_start", [False, True])
+def test_initialization_steps_と_reinitialization_steps_は同一(set_zero_on_start: bool) -> None:
+    """分けて書くと、片方だけ直された状態が作れる。"""
+    driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=set_zero_on_start)
+
+    assert steps_as_frames(driver.initialization_steps()) == steps_as_frames(
+        driver.reinitialization_steps()
+    )
 
 
 class TestReinitialization:
@@ -507,18 +522,18 @@ class TestPcSideOrigin:
         assert struct.unpack_from("<H", steps[0][0].data)[0] == driver.PARAM_LOC_REF
         assert target_value_of(steps[0][0]) == pytest.approx(raw, abs=1e-6)
 
-    def test_モータ側で切り直した直後だけ0を書く(self) -> None:
-        """PC 側の控えが無いなら、零点はまだモータ側にある。
+    def test_原点を控えていなくても実測角を書く(self) -> None:
+        """生座標は原点を控え直しても動かないので、`after_set_zero` で分岐しない。
 
-        `SET_ZERO` は生座標そのものを付け替えるので、旧原点で測られた在庫の
-        フィードバックを書くと enable した瞬間に新旧の原点差だけ機構が動く。
+        分岐を残すと、控える前と後で保持目標の意味が変わる経路が 1 本増える。
         """
         driver = Edulite05Driver("m1", can_id=5)
         feed_edulite(driver, position=1.5)
+        raw = driver.state.position
 
         steps = driver.activation_steps(after_set_zero=True)
 
-        assert target_value_of(steps[0][0]) == pytest.approx(0.0, abs=1e-9)
+        assert target_value_of(steps[0][0]) == pytest.approx(raw, abs=1e-6)
 
     def test_控え直した原点の移動量をINFOで残す(self, caplog: pytest.LogCaptureFixture) -> None:
         """機械ゼロが電源断でどれだけ動いたかを知る唯一の材料になる。"""
@@ -654,6 +669,63 @@ class TestRawAngleUnwrap:
 
         assert state.position == pytest.approx(math.radians(-179.0), abs=_POS_LSB)
         assert driver.state.position == pytest.approx(math.radians(-179.0), abs=_POS_LSB)
+
+
+class TestProvisionalOrigin:
+    """起動時の暫定原点。左右の機械ゼロ差 (実機 175.879deg) を消して機体を動かせる形にする。
+
+    ここが効かないと起動直後から偏差が立ち、零点確定にたどり着く手前で詰まる。
+    """
+
+    def test_起動時に生角度を控える(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+        feed_edulite(driver, position=1.5)
+        raw = driver.state.position
+
+        assert driver.establish_provisional_origin() is True
+        assert driver.origin_offset == pytest.approx(raw)
+        assert driver.feedback_position() == pytest.approx(0.0, abs=1e-9)
+
+    def test_2度目は効かない(self) -> None:
+        """**再励磁のたびに控え直すと、そのときの姿勢が新しい原点になる。**
+
+        物理緊急停止からの復帰は再励磁を通るので、ここが効き続けると原点が
+        毎回書き換わり、左右で別々の時刻に控えたぶんが消えない偏差として残る。
+        """
+        driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+        feed_edulite(driver, position=1.5)
+        driver.establish_provisional_origin()
+        offset = driver.origin_offset
+        feed_edulite(driver, position=2.5)
+
+        assert driver.establish_provisional_origin() is False
+        assert driver.origin_offset == pytest.approx(offset)
+
+    def test_零点確定の後は効かない(self) -> None:
+        """スイッチで確定した正確な原点を、その後の再励磁が上書きしてはならない。"""
+        driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+        feed_edulite(driver, position=1.5)
+        driver.capture_origin_here()
+        offset = driver.origin_offset
+        feed_edulite(driver, position=2.5)
+
+        assert driver.establish_provisional_origin() is False
+        assert driver.origin_offset == pytest.approx(offset)
+
+    def test_宣言していなければ1度も効かない(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=False)
+        feed_edulite(driver, position=1.5)
+
+        assert driver.establish_provisional_origin() is False
+        assert driver.origin_offset == 0.0
+
+    def test_位置モード以外では効かない(self) -> None:
+        """論理座標を持つのは位置モードだけで、速度・電流に原点という量が無い。"""
+        driver = Edulite05Driver("m1", can_id=5, mode="velocity", set_zero_on_start=True)
+        feed_edulite(driver, position=1.5)
+
+        assert driver.establish_provisional_origin() is False
+        assert driver.origin_offset == 0.0
 
 
 class TestIsEnergized:

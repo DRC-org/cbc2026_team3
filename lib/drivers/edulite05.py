@@ -213,6 +213,25 @@ class Edulite05Driver(MotorDriver):
         """電文値を連続化した生角度 [rad]。原点も指令もこの座標で持つ。"""
         return self._state.position + self._wrap_turns * _TURN
 
+    def has_local_origin(self) -> bool:
+        return True
+
+    def establish_provisional_origin(self) -> bool:
+        """起動時に暫定原点を控える。**`SET_ZERO` は 1 通も送らない。**
+
+        左右の機械ゼロは実機で 175.879deg 違い、逆回転ペアなので物理的に同じ姿勢でも
+        論理値へ直した時点で差になる。暫定原点が無いと起動直後から `SyncMonitor` が
+        全体緊急停止を掛け、零点確定にたどり着く手前で機体が 1 ステップも動かせない。
+
+        零点確定でも `_origin_captured` が立つので、正確な原点を後から上書きしない。
+        """
+        if not self.set_zero_on_start or self._origin_captured:
+            return False
+        if self.mode is not ControlMode.POSITION:
+            return False
+        self.capture_origin_here()
+        return True
+
     def capture_origin_here(self) -> None:
         """今の連続化後の生角度を論理原点として控える。**CAN へは 1 通も出さない。**
 
@@ -284,6 +303,12 @@ class Edulite05Driver(MotorDriver):
         return self._message(self.COMM_TYPE_DISABLE, bytes([int(clear_fault)]) + bytes(7))
 
     def encode_set_zero(self) -> can.Message:
+        """モータ側の零点を切り直すフレーム。**自動の経路からは 1 通も出さない。**
+
+        生の座標系そのものを付け替える操作なので、PC 側の原点オフセットと併用すると
+        原点が二重定義になる。残してあるのは調査ツール
+        (`scripts/edulite_origin_probe.py`) のためだけである。
+        """
         return self._message(self.COMM_TYPE_SET_ZERO, b"\x01" + bytes(7))
 
     def encode_set_id(self, new_can_id: int) -> can.Message:
@@ -296,16 +321,12 @@ class Edulite05Driver(MotorDriver):
         )
 
     def initialization_steps(self) -> list[tuple[can.Message, float]]:
-        """無励磁化 → 設定の書き込み (→ 原点確定)。
+        """起動時に送る手順。**再励磁と 1 通も違わない。**
 
-        **`set_zero` は `reinitialization_steps()` へ移してはならない。** 再励磁の
-        たびに送ると、零点確定で合わせた原点をその場の姿勢へ書き換える
-        (`rotate_r` / `rotate_l` は `set_zero_on_start: true`)。
+        原点は PC 側のオフセットだけが持つので、CAN へ出す設定はどちらの経路でも
+        同じである。分けて書くと片方だけ直された状態が作れる。
         """
-        steps = list(self.reinitialization_steps())
-        if self.set_zero_on_start:
-            steps.append((self.encode_set_zero(), 0.2))
-        return steps
+        return self.reinitialization_steps()
 
     def reinitialization_steps(self) -> list[tuple[can.Message, float]]:
         """無励磁化 → 設定の書き込み。**電源断で失われるぶんだけ。**
@@ -325,19 +346,11 @@ class Edulite05Driver(MotorDriver):
         return steps
 
     def activation_steps(self, *, after_set_zero: bool = False) -> list[tuple[can.Message, float]]:
-        """保持目標は論理座標の実測位置。**原点を PC 側で持つ限り `after_set_zero`
-        の有無で変わらない** —— 生座標は原点を控え直しても動かないので、切り直しの
-        前に測られた在庫のフィードバックも切り直した後と同じ物理位置を指す。
-
-        モータ側の `SET_ZERO` で切り直したときだけ別で、そこは 0 を書く。旧原点で
-        測られた在庫を書くと enable した瞬間に新旧の原点差だけ機構が動き、`rotate`
-        はフラッシュの機械ゼロ次第でその差が 3 桁 deg に達する。
+        """保持目標は論理座標の実測位置。**`after_set_zero` の有無で変わらない** ——
+        生座標は原点を控え直しても動かないので、控える前に測られた在庫のフィードバック
+        も控えた後と同じ物理位置を指す。
         """
-        zeroed_in_motor = after_set_zero and not self._origin_captured
-        if self.mode is not ControlMode.POSITION or zeroed_in_motor:
-            hold = 0.0
-        else:
-            hold = self.feedback_position()
+        hold = self.feedback_position() if self.mode is ControlMode.POSITION else 0.0
         return [
             (self.encode_target(self.mode, hold), 0.05),
             (self.encode_enable(), 0.1),
@@ -345,9 +358,6 @@ class Edulite05Driver(MotorDriver):
 
     def deactivation_steps(self) -> list[tuple[can.Message, float]]:
         return [(self.encode_disable(), 0.05)]
-
-    def origin_capture_steps(self) -> list[tuple[can.Message, float]]:
-        return [(self.encode_set_zero(), 0.2)]
 
     def idle_target_value(self) -> float:
         """20Hz の再送が `encode_target()` へ通す値なので**論理**で返す。

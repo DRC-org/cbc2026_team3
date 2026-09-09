@@ -4,6 +4,7 @@ import asyncio
 import logging
 import struct
 import time
+from collections.abc import Sequence
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,7 @@ from tests.feedback_frames import (
     dm3520_config_response,
     dm3520_feedback,
     edulite_feedback,
+    feed_dm3520,
     feed_edulite,
     generic_feedback,
     m3508_feedback,
@@ -200,65 +202,93 @@ class TestCANManager:
 
 
 class TestCaptureOriginViaSetZero:
+    """`SET_ZERO` で原点を切り直す経路。**DM3520 専用である。**
+
+    EDULITE 05 は原点を PC 側で持つので、この経路を 1 度も通らない
+    (`TestCaptureOriginInPlace`)。
+    """
+
     def _prepare(self) -> tuple[CANManager, list[tuple[str, can.Message]]]:
         sent: list[tuple[str, can.Message]] = []
         mgr = CANManager(run_blocking=direct_runner())
-        mgr.add_bus("can_edulite", mock_bus())
-        for name, can_id in (("rotate_r", 0x11), ("rotate_l", 0x12)):
-            mgr.add_motor("can_edulite", Edulite05Driver(name, can_id=can_id))
+        mgr.add_bus("can_dm3520", mock_bus())
+        for name, can_id, master_id in (
+            ("sub_y_axis_m", 0x01, 0x11),
+            ("sub_lift_m", 0x02, 0x12),
+        ):
+            mgr.add_motor("can_dm3520", Dm3520Driver(name, can_id=can_id, master_id=master_id))
+
+        registers = {
+            Dm3520Driver.REG_P_MAX: "p_max",
+            Dm3520Driver.REG_V_MAX: "v_max",
+            Dm3520Driver.REG_T_MAX: "t_max",
+        }
 
         async def _send(motor_name: str, msg: can.Message) -> None:
             sent.append((motor_name, msg))
+            driver = mgr.motors[motor_name]
+            data = bytes(msg.data)
+            if msg.arbitration_id == Dm3520Driver.CONFIG_FRAME_ID and data[3] in registers:
+                # 読み返せないモータは励磁を拒否される (`activation_block_reason`)
+                deliver_frame(
+                    mgr,
+                    "can_dm3520",
+                    dm3520_config_response(driver, data[3], getattr(driver, registers[data[3]])),
+                )
+                return
             mark_feedback_at(mgr, motor_name, time.time())
 
         mgr.send = _send  # type: ignore[method-assign]
         return mgr, sent
 
     @staticmethod
-    def _comm_types(sent: list[tuple[str, can.Message]], name: str) -> list[int]:
-        return [Edulite05Driver.parse_can_id(msg.arbitration_id)[0] for n, msg in sent if n == name]
+    def _specials(sent: list[tuple[str, can.Message]], name: str) -> list[int]:
+        # 特殊コマンドは 3 つとも同じ CAN ID なので、見分けが付くのは末尾バイトだけ
+        return [
+            msg.data[7]
+            for n, msg in sent
+            if n == name and msg.arbitration_id < Dm3520Driver.POSITION_CMD_BASE
+        ]
 
     async def test_無励磁にしてから原点を切り直す(self) -> None:
         mgr, sent = self._prepare()
 
-        await mgr.capture_origin_via_set_zero(["rotate_r", "rotate_l"])
+        await mgr.capture_origin_via_set_zero(["sub_y_axis_m", "sub_lift_m"])
 
-        for name in ("rotate_r", "rotate_l"):
-            order = self._comm_types(sent, name)
-            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
-            assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
+        for name in ("sub_y_axis_m", "sub_lift_m"):
+            order = self._specials(sent, name)
+            zero = order.index(Dm3520Driver.SPECIAL_SET_ZERO)
+            assert Dm3520Driver.SPECIAL_DISABLE in order[:zero]
 
     async def test_全員を無励磁にしてから全員を切り直す(self) -> None:
         mgr, sent = self._prepare()
 
-        await mgr.capture_origin_via_set_zero(["rotate_r", "rotate_l"])
+        await mgr.capture_origin_via_set_zero(["sub_y_axis_m", "sub_lift_m"])
 
-        types = [Edulite05Driver.parse_can_id(msg.arbitration_id)[0] for _n, msg in sent]
-        first_zero = types.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
-        assert types[:first_zero].count(Edulite05Driver.COMM_TYPE_DISABLE) == 2
+        specials = [
+            msg.data[7] for _n, msg in sent if msg.arbitration_id < Dm3520Driver.POSITION_CMD_BASE
+        ]
+        first_zero = specials.index(Dm3520Driver.SPECIAL_SET_ZERO)
+        assert specials[:first_zero].count(Dm3520Driver.SPECIAL_DISABLE) == 2
 
     async def test_新原点を保持目標にして再励磁する(self) -> None:
         mgr, sent = self._prepare()
-        feed_edulite(mgr.motors["rotate_r"], position=1.5)
-        feed_edulite(mgr.motors["rotate_l"], position=1.5)
+        for name in ("sub_y_axis_m", "sub_lift_m"):
+            feed_dm3520(mgr.motors[name], position=1.5)
 
-        await mgr.capture_origin_via_set_zero(["rotate_r", "rotate_l"])
+        await mgr.capture_origin_via_set_zero(["sub_y_axis_m", "sub_lift_m"])
 
-        for name in ("rotate_r", "rotate_l"):
-            order = self._comm_types(sent, name)
-            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
-            enable = order.index(Edulite05Driver.COMM_TYPE_ENABLE, zero)
-            writes = [
+        for name in ("sub_y_axis_m", "sub_lift_m"):
+            order = self._specials(sent, name)
+            zero = order.index(Dm3520Driver.SPECIAL_SET_ZERO)
+            enable = order.index(Dm3520Driver.SPECIAL_ENABLE, zero)
+            targets = [
                 msg
                 for n, msg in sent
-                if n == name
-                and Edulite05Driver.parse_can_id(msg.arbitration_id)[0]
-                == Edulite05Driver.COMM_TYPE_WRITE_PARAM
+                if n == name and msg.arbitration_id >= Dm3520Driver.POSITION_CMD_BASE
             ]
-            hold = writes[-1]
-            param_id, value = struct.unpack("<Hxxf", hold.data)
-            assert param_id == Edulite05Driver.PARAM_LOC_REF
-            assert value == pytest.approx(0.0), "旧原点の実測角 1.5rad を書いてはならない"
+            p_des = struct.unpack("<f", targets[-1].data[:4])[0]
+            assert p_des == pytest.approx(0.0), "旧原点の実測角 1.5rad を書いてはならない"
             assert enable > zero
 
     async def test_付け替え中に緊急停止が入ったら励磁しない(self) -> None:
@@ -272,27 +302,27 @@ class TestCaptureOriginViaSetZero:
 
         with pytest.raises(RuntimeError, match="再励磁"):
             await mgr.capture_origin_via_set_zero(
-                ["rotate_r", "rotate_l"], should_abort=lambda: True
+                ["sub_y_axis_m", "sub_lift_m"], should_abort=lambda: True
             )
 
-        for name in ("rotate_r", "rotate_l"):
-            order = self._comm_types(sent, name)
-            assert Edulite05Driver.COMM_TYPE_ENABLE not in order, "停止中に励磁してはならない"
+        for name in ("sub_y_axis_m", "sub_lift_m"):
+            order = self._specials(sent, name)
+            assert Dm3520Driver.SPECIAL_ENABLE not in order, "停止中に励磁してはならない"
             # **中断してよいのは励磁だけ。** 無励磁化と付け替えは機体を動かさない
             # 指令で、途中で降りると「片方だけ付け替えた」状態が残る
-            assert Edulite05Driver.COMM_TYPE_DISABLE in order
-            assert Edulite05Driver.COMM_TYPE_SET_ZERO in order
+            assert Dm3520Driver.SPECIAL_DISABLE in order
+            assert Dm3520Driver.SPECIAL_SET_ZERO in order
 
     async def test_再励磁できなければ降りる(self) -> None:
         mgr = CANManager(run_blocking=direct_runner())
-        mgr.add_bus("can_edulite", mock_bus())
-        mgr.add_motor("can_edulite", Edulite05Driver("rotate_r", can_id=0x11))
+        mgr.add_bus("can_dm3520", mock_bus())
+        mgr.add_motor("can_dm3520", Dm3520Driver("sub_y_axis_m", can_id=0x01, master_id=0x11))
 
         with (
             patch.object(mgr, "send", new_callable=AsyncMock),
             pytest.raises(RuntimeError, match="再励磁"),
         ):
-            await mgr.capture_origin_via_set_zero(["rotate_r"])
+            await mgr.capture_origin_via_set_zero(["sub_y_axis_m"])
 
     async def test_手段を持たないモータは拒否する(self) -> None:
         mgr = CANManager(run_blocking=direct_runner())
@@ -303,6 +333,124 @@ class TestCaptureOriginViaSetZero:
             await mgr.capture_origin_via_set_zero(["servo"])
 
 
+class TestCaptureOriginInPlace:
+    """原点を PC 側のオフセットで控える経路 (EDULITE 05)。CAN へは 1 通も出ない。"""
+
+    _NAMES = ("rotate_r", "rotate_l")
+
+    def _prepare(
+        self, *, received: Sequence[str] = _NAMES
+    ) -> tuple[CANManager, list[tuple[str, can.Message]]]:
+        sent: list[tuple[str, can.Message]] = []
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        for name, can_id in (("rotate_r", 0x11), ("rotate_l", 0x12)):
+            mgr.add_motor("can_edulite", Edulite05Driver(name, can_id=can_id))
+        for name in received:
+            deliver_frame(mgr, "can_edulite", edulite_feedback(mgr.motors[name], position=1.5))
+
+        async def _send(motor_name: str, msg: can.Message) -> None:
+            sent.append((motor_name, msg))
+
+        mgr.send = _send  # type: ignore[method-assign]
+        return mgr, sent
+
+    async def test_全員の原点を控える(self) -> None:
+        mgr, _sent = self._prepare()
+
+        await mgr.capture_origin_in_place(list(self._NAMES))
+
+        for name in self._NAMES:
+            assert mgr.motors[name].feedback_position() == pytest.approx(0.0, abs=1e-9)
+
+    async def test_CANへは1通も出さない(self) -> None:
+        """無励磁化も再励磁も要らない。送れば機構が動く窓がそのぶん開く。"""
+        mgr, sent = self._prepare()
+
+        await mgr.capture_origin_in_place(list(self._NAMES))
+
+        assert sent == []
+
+    async def test_全員を同じ処理の中で控える(self) -> None:
+        """**別々の時刻に控えると、その間に動いたぶんが消えないオフセットになる。**
+
+        `rotate` は逆回転ペアなので、残ったオフセットはそのまま偏差として立ち、
+        正常な動作でも即座に `SyncMonitor` が全体緊急停止を掛ける。
+        """
+        mgr, _sent = self._prepare()
+        captured: list[str] = []
+
+        async def _move_after_first_capture() -> None:
+            # 1 台目を控えた後にイベントループが回るなら、そこで姿勢が変わりうる
+            while True:
+                if captured:
+                    for name in self._NAMES:
+                        deliver_frame(
+                            mgr, "can_edulite", edulite_feedback(mgr.motors[name], position=3.0)
+                        )
+                await asyncio.sleep(0)
+
+        for name in self._NAMES:
+            driver = mgr.motors[name]
+            original = driver.capture_origin_here
+
+            def _spy(name: str = name, original: Any = original) -> None:
+                captured.append(name)
+                original()
+
+            driver.capture_origin_here = _spy  # type: ignore[method-assign]
+
+        mover = asyncio.create_task(_move_after_first_capture())
+        try:
+            await mgr.capture_origin_in_place(list(self._NAMES))
+        finally:
+            mover.cancel()
+
+        assert captured == list(self._NAMES)
+        offsets = [mgr.motors[name].origin_offset for name in self._NAMES]
+        assert offsets[0] == pytest.approx(offsets[1])
+
+    async def test_1台でも未受信なら1台も控えない(self) -> None:
+        """**未受信の 0.0 を現在位置と信じてはならない。**
+
+        控えた側だけが新しい座標系に移り、ペアの偏差がそのまま全体緊急停止になる。
+        """
+        mgr, _sent = self._prepare(received=["rotate_r"])
+
+        with pytest.raises(RuntimeError, match="rotate_l"):
+            await mgr.capture_origin_in_place(list(self._NAMES))
+
+        for name in self._NAMES:
+            assert mgr.motors[name].origin_offset == 0.0
+
+    async def test_フィードバックが古ければ控えない(self) -> None:
+        mgr, _sent = self._prepare()
+        mark_feedback_at(mgr, "rotate_l", time.time() - 10.0)
+
+        with pytest.raises(RuntimeError, match="rotate_l"):
+            await mgr.capture_origin_in_place(list(self._NAMES))
+
+        assert mgr.motors["rotate_r"].origin_offset == 0.0
+
+    async def test_緊急停止が入っていたら1台も控えない(self) -> None:
+        """探索が完遂していない姿勢を原点にすると、黙って成功した誤った原点が残る。"""
+        mgr, _sent = self._prepare()
+
+        with pytest.raises(RuntimeError, match="緊急停止"):
+            await mgr.capture_origin_in_place(list(self._NAMES), should_abort=lambda: True)
+
+        for name in self._NAMES:
+            assert mgr.motors[name].origin_offset == 0.0
+
+    async def test_手段を持たないモータは拒否する(self) -> None:
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_generic", mock_bus())
+        mgr.add_motor("can_generic", GenericDriver("servo", can_id=0x41))
+
+        with pytest.raises(ValueError, match="原点"):
+            await mgr.capture_origin_in_place(["servo"])
+
+
 class TestEduliteReenergize:
     """モックではなく EDULITE 05 の実体で、再初期化のゲートを 1 枚で確かめる。
 
@@ -310,11 +458,15 @@ class TestEduliteReenergize:
     だけでは、実機のドライバがその三値を報告しなくなっても誰も気付けない。
     """
 
-    def _prepare(self) -> tuple[CANManager, Edulite05Driver, list[can.Message]]:
+    def _prepare(
+        self, *, set_zero_on_start: bool = False
+    ) -> tuple[CANManager, Edulite05Driver, list[can.Message]]:
         sent: list[can.Message] = []
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_edulite", mock_bus())
-        driver = Edulite05Driver("rotate_r", can_id=0x11, position_kp=30.0)
+        driver = Edulite05Driver(
+            "rotate_r", can_id=0x11, position_kp=30.0, set_zero_on_start=set_zero_on_start
+        )
         mgr.add_motor("can_edulite", driver)
 
         async def _send(motor_name: str, msg: can.Message) -> None:
@@ -351,6 +503,35 @@ class TestEduliteReenergize:
         await mgr.activate_motors(feedback_timeout_s=0.05)
 
         assert sent == []
+
+    async def test_起動時に暫定原点を控える(self) -> None:
+        """左右の機械ゼロ差 (実機 175.879deg) を消さないと 1 ステップも動かせない。"""
+        mgr, driver, _sent = self._prepare(set_zero_on_start=True)
+        feed_edulite(driver, position=1.0, mode_state=0)
+
+        await mgr.initialize_motors()
+
+        assert driver.origin_offset == pytest.approx(driver.state.position)
+        assert driver.feedback_position() == pytest.approx(0.0, abs=1e-9)
+
+    async def test_再励磁を繰り返しても原点が動かない(self) -> None:
+        """**物理緊急停止からの復帰は再励磁を通る。**
+
+        そのたびに暫定原点を控え直すと、復帰時点の姿勢が新しい原点になる。
+        `rotate` は逆回転ペアなので、左右で別々の姿勢を控えたぶんが偏差として残り、
+        解除するたびに `SyncMonitor` が全体緊急停止を掛け直して復帰できない。
+        """
+        mgr, driver, _sent = self._prepare(set_zero_on_start=True)
+        feed_edulite(driver, position=1.0, mode_state=0)
+
+        await mgr.activate_motors()
+        offset = driver.origin_offset
+
+        # 復帰までに機構が動いた (あるいは電源断で報告値が畳まれた) ことにする
+        feed_edulite(driver, position=2.0, mode_state=0)
+        await mgr.activate_motors()
+
+        assert driver.origin_offset == pytest.approx(offset)
 
 
 class TestMotorActivation:
@@ -449,6 +630,32 @@ class TestMotorActivation:
         # 励磁そのものは通す (無励磁の相方を戻すための呼び出しに巻き込まれただけで、
         # このモータの目標を書き直すこと自体は害が無い)
         assert [call.args[1] for call in send.await_args_list] == [enable]
+
+    async def test_暫定原点は鮮度を確かめてから控える(self) -> None:
+        """**未受信の 0.0 を現在位置と信じて原点にしてはならない。**
+
+        先に控えると、起動直後の原点が「まだ 1 通も届いていない」姿勢になり、
+        以後の指令が全部そのぶんずれた場所を指す。
+        """
+        mgr, motor = self._prepare()
+        motor.requires_fresh_feedback_for_activation.return_value = True
+        motor.feedback_probe_message.return_value = can.Message(arbitration_id=0x203, data=bytes(8))
+        order: list[str] = []
+
+        async def _send(motor_name: str, _msg: can.Message) -> None:
+            order.append("問い合わせ")
+            mark_feedback_at(mgr, motor_name, time.time())
+
+        def _establish() -> bool:
+            order.append("暫定原点")
+            return False
+
+        motor.establish_provisional_origin.side_effect = _establish
+        mgr.send = _send  # type: ignore[method-assign]
+
+        await mgr.activate_motor("m1")
+
+        assert order == ["問い合わせ", "暫定原点"]
 
     async def test_activation_reads_position_after_fresh_feedback_arrives(self) -> None:
         mgr, motor = self._prepare()
