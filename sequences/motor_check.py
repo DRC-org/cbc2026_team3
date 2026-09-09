@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Mapping
 
 from lib.sequence.engine import Sequence, step
-from lib.sequence.homing import HomingRunner, homing_axis_names, run_homing
+from lib.sequence.homing import HomingRunner, run_homing
 from sequences.main_hand import HOME as MAIN_HOME
 from sequences.sub_hand import VALVE_AXES
 
@@ -54,24 +54,19 @@ class MotorCheckSequence(Sequence):
             logger.info("零点確定: 実行口が未注入のため飛ばす")
             return
 
-        table = self.positions
-        axes = homing_axis_names(table)
-        # **条件になる軸を先に確定し、寄せてから残りを確定する。** 零点確定は
-        # `release_distance` ぶん離脱して終わるので、確定しただけの昇降は下端の
-        # すぐ上に居る。そのまま前後軸を探索すると「昇降が下がったまま前後に走る」
-        # ことになり、干渉の歯止めが拒否する —— 拒否は誤動作ではなく手順が危ない
-        # ことの露見なので、直したのは手順の側である。
-        # **寄せ先に軸名を書かない** —— 位置定数の `guard.requires` から導く
-        prerequisites = table.homing_prerequisites(axes)
-        await self._home(axis for axis in axes if axis in prerequisites)
-        await self.move_to(prerequisites)
-        await self._home(axis for axis in axes if axis not in prerequisites)
-
-    async def _home(self, axes: Iterable[str]) -> None:
-        targets = list(axes)
-        if not targets or self._homing is None:
-            return
-        await run_homing(self._homing, self.positions, self.motors, court=self.court, axes=targets)
+        # **寄せる口を渡すと「参照される軸を確定 → 寄せる → 残りを確定」で回る。**
+        # 零点確定は `release_distance` ぶん離脱して終わるので、確定しただけの昇降は
+        # 下端のすぐ上に居る。そのまま前後軸を探索すると「昇降が下がったまま前後に
+        # 走る」ことになり、干渉の歯止めが拒否する —— 拒否は誤動作ではなく手順が
+        # 危ないことの露見なので、直したのは手順の側である。
+        # 手順そのものは `run_homing` が 1 つだけ持つ (零点合わせパネルと共有)
+        await run_homing(
+            self._homing,
+            self.positions,
+            self.motors,
+            court=self.court,
+            move_to=self.move_to,
+        )
 
     @step("メインハンド 初期姿勢へ", axes=MAIN_HOME.keys())
     async def main_home(self) -> None:

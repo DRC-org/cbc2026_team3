@@ -997,6 +997,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `guard.requires` の参照先の位置がコート別に分岐している | mm の座標系が片方のコートだけ別物になる（コートで変わってよいのは軸の `scale` の符号だけ） |
 | `guard.requires` の参照が循環している | どちらを先に動かしても相手に拒否される姿勢が作れ、抜ける手が無くなる |
 | `guard.not_with` が自分自身／`position` 以外の軸／両側に書かれている | 自分と一緒には動かせない軸／`guard` を書けない軸／片側を消したとき守りが半分だけ残る |
+| 零点確定する軸の `guard.requires` の `at:` 参照先に `homing` が無い | 原点が確定していない軸へ位置名で寄せることになり、どこへ動くか分からない |
 
 `guard.requires` は**位置名でしか書けず、数値の区間への解決は読み込み時**に済ませる
 （`lib/sequence/positions.py`。`MotionGuard` は位置表もコートも見ない）。区間は**参照先の
@@ -1008,8 +1009,15 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 
 `PositionTable.homing_prerequisites()` は `requires` の `at:`（1 点）から「零点確定の前に寄せて
 おく軸 → 位置名」を導く（`between:` は寄せ先が一意に決まらないので順序にだけ効かせる）。
-`lib/sequence/homing.py` の `homing_order()` は同じ宣言から**参照先を先に回す並び**を作り、
-`run_homing()` が必ず通す。使い分けは `invariants.md` §4。
+**参照先が `homing:` を持たない宣言は起動を拒否する** —— 原点が確定していない軸へ位置名で寄せる
+ことになるため。`lib/sequence/homing.py` の `homing_order()` は同じ宣言から**参照先を先に回す並び**を
+作り、`run_homing()` が必ず通す。
+
+`run_homing()` に**寄せる口（`move_to`）を渡した経路だけ**が「①参照される軸を確定 → ②その軸を
+寄せる → ③残りを確定」の 3 段で回る。渡すのは統合動作確認（`sequences/motor_check.py`）と零点合わせ
+パネル（`HomingSource.move_to`。`main.py` が動作確認と同じ `Sequence.move_to` を配る）で、作動点測定は
+渡さない。**寄せるのは今回選ばれた軸だけ**で、①で確定できなかった軸は寄せない。使い分けと理由は
+`invariants.md` §4。
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で

@@ -7,7 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 
+import can
+import pytest
+
+from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
 from lib.manual import ManualController
 from lib.match_state import Court
@@ -17,7 +22,7 @@ from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
 from tests.fake_can import mock_can_manager
-from tests.feedback_frames import feed_generic
+from tests.fake_drivers import StubFeedbackDriver
 from tests.server_fixtures import RecordingClient, ServerFixture
 
 _CONFIG = {
@@ -327,107 +332,143 @@ _INTERFERING_CONFIG = {
 }
 
 
+class _FollowingDriver(StubFeedbackDriver):
+    """指令どおりに動く機体。寄せる段が本当に軸を動かしたかを実測で見る。"""
+
+    def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        if mode is ControlMode.POSITION:
+            self.set_observed(position=value)
+        return super().encode_target(mode, value)
+
+
 class _SteppingRunner:
     """探索の 1 歩を実際に打つ代役。**指令の入口 (= 歯止め) を必ず通る。**"""
 
-    def __init__(self) -> None:
-        self.homed: list[str] = []
+    def __init__(self, events: list[tuple[str, object]], *, fails: set[str] | None = None) -> None:
+        self._events = events
+        self._fails = fails or set()
 
     async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
+        if spec.name in self._fails:
+            raise HomingError(f"軸 '{spec.name}' はセンサに届きません (テスト)")
         homing = spec.homing
         assert homing is not None
         await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
-        self.homed.append(spec.name)
+        self._events.append(("home", spec.name))
         return homing.step
 
 
-class TestPanelDoesNotMoveOtherAxes:
-    """零点合わせパネルは**選んだ軸しか動かさない**。寄せるのは操縦者の仕事。
+class _Panel:
+    """零点合わせパネル 1 台ぶんの組み立て。**寄せる口は動作確認と同じ `move_to`。**"""
 
-    自動で寄せると「1 本だけ確定するつもりが別の軸が動いた」が起き、`§3` の
-    「零点確定は選んだ軸しか動かさない」を崩す。代わりに**拒否の 1 行に手当てを
-    書く** —— 会場ではそれが手順書になる。
-    """
-
-    @staticmethod
-    def _build(*, lift_mm: float) -> tuple[ServerFixture, _SteppingRunner]:
+    def __init__(
+        self, *, lift_mm: float, wire_move_to: bool, fails: set[str] | None = None
+    ) -> None:
+        self.events: list[tuple[str, object]] = []
         table = load_position_table(_INTERFERING_CONFIG, source="<test>")
         mgr = mock_can_manager()
         group = MotorGroup(sensor_active=lambda _name: False)
+        self.drivers: dict[str, _FollowingDriver] = {}
         for index, (name, value) in enumerate(
             (("sub_lift", lift_mm), ("sub_y_axis", 0.0)), start=1
         ):
-            driver = GenericDriver(name, can_id=index)
-            feed_generic(driver, position=value)
-            group.add(MotorHandle(name, driver, mgr))
+            driver = _FollowingDriver(name, index)
+            driver.set_observed(position=value)
+            self.drivers[name] = driver
+            group.add(MotorHandle(name, driver, mgr, poll_interval=0.001))
         group.bind_axis_state(
             build_axis_state_reader(
                 table, group, court=lambda: Court.RED, is_stale=lambda _name: False
             )
         )
 
-        fx = ServerFixture.build()
-        fx.freeze_broadcast()
-        fx.add_robot("sub_hand", _IdleSequence("sub_hand"))
-        runner = _SteppingRunner()
-        fx.set_homing_source(
+        mover = Sequence("panel")
+        mover.bind_motors(group)
+        mover.bind_positions(table)
+
+        async def _move_to(targets: Mapping[str, str]) -> None:
+            self.events.append(("move", dict(targets)))
+            await mover.move_to(targets)
+
+        self.fx = ServerFixture.build()
+        self.fx.freeze_broadcast()
+        self.fx.add_robot("sub_hand", _IdleSequence("sub_hand"))
+        self.fx.set_homing_source(
             HomingSource(
-                runner=runner,  # type: ignore[arg-type]
+                runner=_SteppingRunner(self.events, fails=fails),  # type: ignore[arg-type]
                 table=table,
                 motors=group,
                 court=lambda: Court.RED,
                 axes_by_robot={"sub_hand": ("sub_lift", "sub_y_axis")},
+                move_to=_move_to if wire_move_to else None,
             )
         )
-        return fx, runner
 
-    async def test_寄せていなければ手当ての入った理由が配信に載る(self) -> None:
-        fx, _runner = self._build(lift_mm=-10.0)
-        client = RecordingClient()
-        fx.attach_clients(client)
+    async def run(self, axes: list[str] | None = None) -> list[dict]:
+        await self.fx.start_homing("sub_hand", axes)
+        await self.fx.wait_homing_idle()
+        return self.fx.homing_state()["results"]
 
-        await fx.start_homing("sub_hand", ["sub_y_axis"])
-        await fx.wait_homing_idle()
 
-        (result,) = client.of_type("homing_state")[-1]["results"]
+class TestPanelOrdersWhatWasSelected:
+    """パネルは**選ばれた軸の範囲でだけ**順序を組む。
+
+    昇降と前後の両方を選べば「昇降を確定 → `top` へ寄せる → 前後を確定」で回る。
+    前後だけを選んだときに昇降を寄せると「零点確定は選んだ軸しか動かさない」が
+    壊れるので、そちらは寄せずに拒否して文面で案内する。**この非対称が仕様である。**
+    """
+
+    async def test_両方選べば寄せてから確定する(self) -> None:
+        panel = _Panel(lift_mm=-10.0, wire_move_to=True)
+
+        results = await panel.run()
+
+        assert panel.events == [
+            ("home", "sub_lift"),
+            ("move", {"sub_lift": "top"}),
+            ("home", "sub_y_axis"),
+        ]
+        assert [r["error"] for r in results] == [None, None]
+        assert panel.drivers["sub_lift"].state.position == pytest.approx(-20.0)
+
+    async def test_前後だけを選んだら寄せずに拒否する(self) -> None:
+        panel = _Panel(lift_mm=-10.0, wire_move_to=True)
+
+        (result,) = await panel.run(["sub_y_axis"])
+
+        assert panel.events == []
         assert result["axis"] == "sub_y_axis"
-        reason = result["error"]
-        assert "sub_lift" in reason
-        assert "top" in reason
-        assert "寄せてください" in reason
+        assert "sub_lift" in result["error"]
+        assert "top" in result["error"]
+        assert "寄せてください" in result["error"]
+        # 選んでいない軸は 1mm も動かさない
+        assert panel.drivers["sub_lift"].state.position == pytest.approx(-10.0)
 
-    async def test_選んだ軸以外を勝手に動かさない(self) -> None:
-        fx, runner = self._build(lift_mm=-10.0)
+    async def test_寄せる口を配線しなければ寄せない(self) -> None:
+        """既定は「寄せない」。配線し忘れは黙って通らず、拒否として表に出る。"""
+        panel = _Panel(lift_mm=-10.0, wire_move_to=False)
 
-        await fx.start_homing("sub_hand", ["sub_y_axis"])
-        await fx.wait_homing_idle()
+        results = await panel.run()
 
-        assert runner.homed == []
-
-    async def test_寄せてあれば通る(self) -> None:
-        fx, runner = self._build(lift_mm=-20.0)
-
-        await fx.start_homing("sub_hand", ["sub_y_axis"])
-        await fx.wait_homing_idle()
-
-        assert runner.homed == ["sub_y_axis"]
-
-    async def test_まとめて回しても寄せないので後続は拒否される(self) -> None:
-        """**参照先を先に回すが、寄せはしない。**
-
-        零点確定は離脱して終わるので、確定しただけの `sub_lift` は `top` に
-        居ない。パネルはそこから寄せないので、`sub_y_axis` は手当ての入った理由と
-        ともに残る (寄せてから確定する手順を組むのは動作確認の側)。
-        """
-        fx, runner = self._build(lift_mm=-20.0)
-        client = RecordingClient()
-        fx.attach_clients(client)
-
-        await fx.start_homing("sub_hand")
-        await fx.wait_homing_idle()
-
-        assert runner.homed == ["sub_lift"]
-        results = client.of_type("homing_state")[-1]["results"]
-        assert [r["axis"] for r in results] == ["sub_lift", "sub_y_axis"]
+        assert panel.events == [("home", "sub_lift")]
         assert results[0]["error"] is None
         assert "寄せてください" in results[1]["error"]
+
+    async def test_昇降の零点確定に失敗したら寄せない(self) -> None:
+        """原点が確定していない軸へ位置名で指令すると、どこへ動くか分からない。"""
+        panel = _Panel(lift_mm=-10.0, wire_move_to=True, fails={"sub_lift"})
+
+        results = await panel.run()
+
+        assert panel.events == []
+        assert "センサに届きません" in results[0]["error"]
+        assert "寄せてください" in results[1]["error"]
+        assert panel.drivers["sub_lift"].state.position == pytest.approx(-10.0)
+
+    async def test_前後だけでも条件を満たしていれば通る(self) -> None:
+        panel = _Panel(lift_mm=-20.0, wire_move_to=True)
+
+        (result,) = await panel.run(["sub_y_axis"])
+
+        assert result["error"] is None
+        assert panel.events == [("home", "sub_y_axis")]

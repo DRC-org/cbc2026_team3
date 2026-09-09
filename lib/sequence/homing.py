@@ -54,6 +54,8 @@ SleepFunc = Callable[[float], Awaitable[None]]
 #: 整列段のあいだ、指定したセンサを可動端の歯止めから外す
 #: (`lib.motion_guard.SensorSuspension.suspend`)
 SuspendSensors = Callable[[Iterable[str]], contextlib.AbstractContextManager[None]]
+#: 位置名で軸を寄せる口 (`Sequence.move_to`)。零点確定は自分では組まず、必ず注入で受ける
+MoveTo = Callable[[Mapping[str, str]], Awaitable[None]]
 
 
 def _no_suspension(_names: Iterable[str]) -> contextlib.AbstractContextManager[None]:
@@ -877,6 +879,7 @@ async def run_homing(
     *,
     court: Court,
     axes: Collection[str] | None = None,
+    move_to: MoveTo | None = None,
     on_axis: Callable[[str], Awaitable[None]] | None = None,
     on_result: Callable[[AxisHomingResult], Awaitable[None]] | None = None,
     stop_on_error: bool = True,
@@ -885,15 +888,75 @@ async def run_homing(
 
     `stop_on_error=False` は 1 本の失敗で残りを諦めない。軸ごとに独立した確定なので、
     操縦者は 1 回の実行で全軸の可否を知りたい。
+
+    `move_to` を渡すと **①参照される軸を確定 → ②その軸を寄せる → ③残りを確定**の
+    3 段で回す。零点確定は `release_distance` ぶん離脱して終わるので、確定しただけの
+    軸は `requires` の区間に居ない —— 寄せる段が無いと、参照する側は順序だけを理由に
+    必ず拒否される。渡さなければ並べ替えるだけで、1 本も余計に動かさない。
+
+    **寄せるのは「今回選ばれた軸」だけである。** 選ばれていない軸を寄せると
+    「零点確定は選んだ軸しか動かさない」が壊れるので、その場合は寄せずに拒否させ、
+    文面で手当てを案内する (`docs/invariants.md` §4)。零点合わせパネルで昇降と前後の
+    両方を選べば①〜③が回り、前後だけを選べば拒否される。**この非対称が仕様である。**
+
+    **①で確定できなかった軸は寄せない。** 原点が確定していない軸へ位置名で指令すると
+    どこへ動くか分からない。
     """
-    targets = homing_axis_names(table) if axes is None else list(axes)
+    targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
     if not targets:
         logger.info("零点確定: homing を持つ軸が無いため飛ばす")
         return []
     targets = homing_order(table, targets)
 
+    prerequisites = {
+        axis: position
+        for axis, position in table.homing_prerequisites(targets).items()
+        if axis in targets
+    }
+    if move_to is None or not prerequisites:
+        return await _home_each(
+            runner, table, motors, court, targets, on_axis, on_result, stop_on_error
+        )
+
+    # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
+    # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
+    referenced = homing_order(table, prerequisites)
+    results = await _home_each(
+        runner, table, motors, court, referenced, on_axis, on_result, stop_on_error
+    )
+    confirmed = {result.axis for result in results if result.error is None}
+    for axis in referenced:
+        if axis not in confirmed:
+            logger.error(
+                "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
+                axis,
+                prerequisites[axis],
+            )
+            continue
+        # 1 軸ずつ送る。まとめて 1 通にすると、前提軸どうしに not_with があるとき
+        # 自分の指令が自分の歯止めに拒否される
+        logger.info("零点確定: %s を %s へ寄せる", axis, prerequisites[axis])
+        await move_to({axis: prerequisites[axis]})
+
+    rest = [axis for axis in targets if axis not in prerequisites]
+    results.extend(
+        await _home_each(runner, table, motors, court, rest, on_axis, on_result, stop_on_error)
+    )
+    return results
+
+
+async def _home_each(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    court: Court,
+    axes: list[str],
+    on_axis: Callable[[str], Awaitable[None]] | None,
+    on_result: Callable[[AxisHomingResult], Awaitable[None]] | None,
+    stop_on_error: bool,
+) -> list[AxisHomingResult]:
     results: list[AxisHomingResult] = []
-    for axis in targets:
+    for axis in axes:
         spec = table.axis(axis).for_court(court)
         logger.info("零点確定: %s", axis)
         if on_axis is not None:

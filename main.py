@@ -452,6 +452,9 @@ def _wire_motor_check_sequence(
                 table=merged,
                 motors=motors,
                 court=lambda: sequence.court,
+                # 寄せる口は動作確認と同じもの。別に組むと、パネル経由だけが
+                # 可動端保護や到達判定の外側に出る
+                move_to=sequence.move_to,
                 axes_by_robot={
                     robot: axes
                     for robot, table in tables.items()

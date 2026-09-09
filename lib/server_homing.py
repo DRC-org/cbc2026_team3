@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 from lib.match_state import Court
-from lib.sequence.homing import AxisHomingResult, HomingRunner, run_homing
+from lib.sequence.homing import AxisHomingResult, HomingRunner, MoveTo, run_homing
 from lib.sequence.motors import MotorGroup
 from lib.sequence.positions import PositionTable
 
@@ -23,13 +23,17 @@ class HomingSource:
     #: 毎回問い直す。コートで探索の向きが鏡になるので、起動時に固めると切り替えに追従しない
     court: Callable[[], Court]
     axes_by_robot: Mapping[str, tuple[str, ...]]
+    #: 位置名で軸を寄せる口。**`guard.requires` の参照先が今回選ばれていれば**、
+    #: 零点確定の前にそこへ寄せる (`run_homing`)。配線しないと寄せずに拒否させる
+    move_to: MoveTo | None = None
 
 
 class HomingController:
     """ロボットと軸を指定して零点確定だけを走らせる。
 
     実行は動作確認と同じ `run_homing` を通す。手順を書き写すと、片方だけが
-    コートやセンサの扱いを直された状態が作れる。
+    コートやセンサの扱いを直された状態が作れる。**「参照される軸を確定 → 寄せる →
+    残りを確定」の 3 段も `run_homing` が持つ**ので、ここは寄せる口を渡すだけ。
     """
 
     def __init__(
@@ -108,6 +112,10 @@ class HomingController:
                     source.motors,
                     court=source.court(),
                     axes=targets,
+                    # 寄せるのは選ばれた軸だけ。昇降を選ばずに前後だけ選んだら
+                    # 寄せずに拒否させ、文面で手当てを案内する (`run_homing` の
+                    # docstring。この非対称が仕様)
+                    move_to=source.move_to,
                     on_axis=self._on_axis,
                     on_result=self._on_result,
                     stop_on_error=False,

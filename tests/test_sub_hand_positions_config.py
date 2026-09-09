@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from lib.match_state import Court
-from lib.motion_guard import RequiredRange
+from lib.motion_guard import AxisReading, GuardViolation, MotionGuard, RequiredRange
 from lib.sequence.homing import homing_axis_names, homing_order
 from lib.sequence.positions import PositionTable, load_position_table
 
@@ -278,3 +278,66 @@ class TestHomingOrder:
         table = _load(relative)
 
         assert _requirement(table, "sub_y_axis").contains(table.raw("sub_lift", "top"))
+
+
+_DOC_DIR = _CONFIG_DIR.parent / "docs"
+
+
+def _left_after_homing(table: PositionTable, axis: str) -> float:
+    """零点確定を終えた軸が居る位置 [mm]。原点で当ててから離脱したぶんだけ戻る。"""
+    homing = table.axis(axis).homing
+    assert homing is not None and homing.release_distance is not None
+    return -homing.direction * homing.release_distance
+
+
+def _rejection(table: PositionTable) -> str:
+    """同梱 config そのままで `sub_y_axis` を動かしたときの拒否文面。"""
+    guard = table.axis("sub_y_axis").guard
+    assert guard is not None
+    left_at = _left_after_homing(table, "sub_lift")
+
+    with pytest.raises(GuardViolation) as exc:
+        MotionGuard(guard).check_interference(
+            axis="sub_y_axis",
+            delta=-1.0,
+            axis_state=lambda _axis: AxisReading(value=left_at, target=None),
+        )
+    return str(exc.value)
+
+
+class TestVenueCardNumbers:
+    """会場カードに書き写した数値が、実際の拒否文面と一致しているか。
+
+    **会場で読むのは文書の側である。** 文面は `config/sub_hand_positions.yaml` から
+    導かれるので、`top` / `tolerance` / `release_distance` を変えると文面が変わる。
+    ここが無いと、**文書の数値だけが黙って古くなる** (症状は「カードのとおりに
+    寄せたのに拒否が消えない」で、会場でしか出ない)。
+    """
+
+    def test_拒否の文面は同梱_config_から導かれる(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_y_axis")
+        message = _rejection(table)
+
+        assert f"[{required.low:.4g}, {required.high:.4g}]{required.unit}" in message
+        assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in message
+        assert required.label in message
+
+    def test_点検の文書が文面と同じ数値を書いている(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_y_axis")
+        text = (_DOC_DIR / "checks_and_health.md").read_text()
+
+        assert f"[{required.low:.4g}, {required.high:.4g}]{required.unit}" in text
+        assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in text
+        assert f"{table.raw('sub_lift', 'top'):g}mm" in text
+        assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
+
+    def test_会場カードが文面と同じ数値を書いている(self, table: PositionTable) -> None:
+        text = (_DOC_DIR / "venue_recovery.md").read_text()
+
+        # 手動で寄せる先と、零点確定が離脱する量。この 2 つで手が動く
+        assert f"{table.raw('sub_lift', 'top'):g}mm" in text
+        assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
+
+    def test_操縦者に出る文面に_Markdown_の記号を混ぜない(self, table: PositionTable) -> None:
+        """トーストもパネルも Markdown を解釈しないので、`**` は生のまま出る。"""
+        assert "**" not in _rejection(table)

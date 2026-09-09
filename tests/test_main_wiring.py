@@ -2207,3 +2207,33 @@ class TestAxisStateWiring:
 
         sequence = server.set_motor_check_sequence.call_args.args[0]
         assert sequence.motors.axis_state is not None
+
+    def test_零点合わせパネルに寄せる口が配線されている(self) -> None:
+        """配線しないとパネルは寄せず、前後の零点確定が毎回 1 軸失敗で終わる。
+
+        寄せる口は**動作確認と同じ `move_to`** でなければならない。別に組むと
+        パネル経由だけが可動端保護や到達判定の外側に出る。
+        """
+        server = MagicMock()
+        table = load_position_table(
+            yaml.safe_load((self._CONFIG_DIR / "sub_hand_positions.yaml").read_text()) or {},
+            source="sub_hand_positions.yaml",
+        )
+
+        main._wire_motor_check_sequence(
+            server,
+            [],
+            {"sub_hand": table},
+            loops=[],
+            can_managers=[],
+            sync_monitors=[],
+            limit_monitors=[],
+            target_refreshers=[],
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            sensor_suspension=SensorSuspension(),
+        )
+
+        sequence = server.set_motor_check_sequence.call_args.args[0]
+        source = server.set_homing_source.call_args.args[0]
+        assert source.move_to == sequence.move_to
