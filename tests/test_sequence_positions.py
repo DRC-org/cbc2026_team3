@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from typing import ClassVar
 
 import pytest
 
@@ -1519,8 +1520,16 @@ class TestGuardInterference:
 
     yaml は**位置名でだけ**宣言し、数値の区間へ解決するのは読み込み時である
     (``MotionGuard`` は位置表もコートも見ない)。ここが見るのは解決の結果と、
-    **誤記が警告ではなく起動拒否になること**。判断そのものはまだ誰も呼ばない。
+    **誤記が警告ではなく起動拒否になること**。判断そのものは
+    ``tests/test_motion_guard.py`` が見る。
     """
+
+    _HOMING: ClassVar[dict] = {
+        "sensor": "origin_sensor",
+        "direction": 1,
+        "search_distance": 10.0,
+        "step": 1.0,
+    }
 
     def _raw(self, **guards: object) -> dict:
         axes: dict[str, dict] = {
@@ -1597,6 +1606,42 @@ class TestGuardInterference:
     def test_参照先の軸が無ければ起動拒否(self) -> None:
         with pytest.raises(ValueError, match="ghost"):
             self._load(carriage={"requires": [{"axis": "ghost", "at": "top"}]})
+
+    def test_零点確定する軸の参照先に_homing_が無ければ起動拒否(self) -> None:
+        """参照先は零点確定の前に**位置名で寄せる**先になる。
+
+        原点が確定していない軸へ位置名で指令すると、どこへ動くか分からない。
+        """
+        raw = self._raw(carriage={"requires": [{"axis": "lift", "at": "top"}]})
+        raw["axes"]["carriage"]["homing"] = self._HOMING
+
+        with pytest.raises(ValueError, match="homing がありません"):
+            load_position_table(raw, source="<test>")
+
+    def test_参照先にも_homing_があれば通る(self) -> None:
+        raw = self._raw(carriage={"requires": [{"axis": "lift", "at": "top"}]})
+        raw["axes"]["carriage"]["homing"] = self._HOMING
+        raw["axes"]["lift"]["homing"] = self._HOMING
+
+        table = load_position_table(raw, source="<test>")
+
+        assert table.homing_prerequisites(["carriage"]) == {"lift": "top"}
+
+    def test_零点確定しない軸の参照先は_homing_を要らない(self) -> None:
+        """その軸は零点確定の経路を 1 度も通らないので、寄せる先にならない。"""
+        raw = self._raw(arm={"requires": [{"axis": "carriage", "at": "clear"}]})
+
+        table = load_position_table(raw, source="<test>")
+
+        assert table.axis("arm").guard is not None
+
+    def test_between_は寄せ先にならないので_homing_を要らない(self) -> None:
+        raw = self._raw(arm={"requires": [{"axis": "carriage", "between": ["retracted", "clear"]}]})
+        raw["axes"]["arm"]["homing"] = self._HOMING
+
+        table = load_position_table(raw, source="<test>")
+
+        assert table.homing_prerequisites(["arm"]) == {}
 
     def test_参照先の位置名が無ければ起動拒否(self) -> None:
         with pytest.raises(ValueError, match=re.escape("lift.middle")):

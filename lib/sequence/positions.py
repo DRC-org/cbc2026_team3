@@ -1109,6 +1109,7 @@ def _resolve_guard_interference(
     }
     _check_requires_acyclic(source, resolved_requires)
     _check_prerequisites_agree(source, resolved_requires)
+    _check_prerequisites_homeable(source, axes, resolved_requires)
     resolved_not_with = _symmetrize_not_with(source, axes, declared_not_with)
 
     updated = dict(axes)
@@ -1240,6 +1241,35 @@ def _check_prerequisites_agree(
                     f"{source}: 軸 '{required.axis}' へ別々の位置が要求されています "
                     f"(axes.{previous[1]} は '{previous[0]}'、axes.{axis} は '{position}')。"
                     "零点確定の前に寄せる先が 1 つに決まりません"
+                )
+
+
+def _check_prerequisites_homeable(
+    source: str,
+    axes: Mapping[str, AxisSpec],
+    requires: Mapping[str, tuple[RequiredRange, ...]],
+) -> None:
+    """零点確定する軸が `at:` で参照する軸も、零点確定できなければならない。
+
+    参照先は零点確定の前に**位置名で寄せる**先になる (`homing_prerequisites`)。
+    位置名は原点からの相対値なので、原点が確定していない軸へ書くと**どこへ動くか
+    分からない指令**になる。`requires` が原点の確定した軸についてしか意味を持たない
+    という穴 (`docs/todo.md`) を、寄せる経路が自分で踏むことになる。
+
+    参照する側が `homing:` を持たない軸なら、この経路を通らないので対象外。
+    """
+    for axis, declarations in requires.items():
+        if axes[axis].homing is None:
+            continue
+        for required in declarations:
+            if required.single_position is None:
+                continue
+            if axes[required.axis].homing is None:
+                raise ValueError(
+                    f"{source}: axes.{axis} は零点確定の前に軸 '{required.axis}' を "
+                    f"'{required.single_position}' へ寄せますが、'{required.axis}' に "
+                    "homing がありません (原点が確定していない軸へ位置名で指令すると、"
+                    "どこへ動くか分かりません)"
                 )
 
 

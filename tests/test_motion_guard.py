@@ -772,3 +772,80 @@ class TestNotWith:
         MotionGuard(MotionGuardSpec()).check_not_with(
             axis="sub_pitch", siblings={"sub_pitch", "sub_offset"}
         )
+
+
+class TestMessagesAreNotMarkdown:
+    """操縦者の画面に出る文面に `**` を混ぜない。
+
+    トースト (`web/src/components/shell/Toaster.tsx`) も零点合わせパネルも
+    Markdown を解釈しないので、アスタリスクが生のまま出て読みにくくなる。
+    強調は記号ではなく語順と文の分け方で出すこと。**docstring とコメントは対象外**
+    (あれはエディタと GitHub で読むもので、Markdown が効く)。
+    """
+
+    def _raised(self, call) -> str:
+        with pytest.raises(GuardViolation) as exc:
+            call()
+        return str(exc.value)
+
+    def test_跳躍量(self) -> None:
+        message = self._raised(
+            lambda: _guard().check_command(
+                axis="sub_y_axis",
+                current=0.0,
+                target=999.0,
+                unit="mm",
+                sensor_active=_sensors(),
+            )
+        )
+
+        assert "**" not in message
+
+    def test_可動端が押されている(self) -> None:
+        message = self._raised(
+            lambda: _guard().check_limit(
+                axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=True)
+            )
+        )
+
+        assert "**" not in message
+
+    def test_可動端が読めていない(self) -> None:
+        message = self._raised(
+            lambda: _guard().check_limit(
+                axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=None)
+            )
+        )
+
+        assert "**" not in message
+
+    def test_トルク(self) -> None:
+        message = self._raised(lambda: _guard().check_torque(axis="sub_y_axis", torque=9.0))
+
+        assert "**" not in message
+
+    def test_干渉_区間の外(self) -> None:
+        message = self._raised(
+            lambda: _interference_guard().check_interference(
+                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(-10.0, -10.0)
+            )
+        )
+
+        assert "**" not in message
+
+    def test_干渉_読めていない(self) -> None:
+        message = self._raised(
+            lambda: _interference_guard().check_interference(
+                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(None, None)
+            )
+        )
+
+        assert "**" not in message
+
+    def test_同じ指令で動かせない(self) -> None:
+        guard = MotionGuard(MotionGuardSpec(not_with=("sub_offset",)))
+        message = self._raised(
+            lambda: guard.check_not_with(axis="sub_pitch", siblings={"sub_pitch", "sub_offset"})
+        )
+
+        assert "**" not in message

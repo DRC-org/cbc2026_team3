@@ -343,8 +343,8 @@ class MotionGuard:
             return
         raise GuardViolation(
             f"軸 '{axis}' へ 1 度に {abs(delta):.3g}{unit} 動かす指令が出ました"
-            f" (上限 {limit}{unit})。**スケールか固定小数点レンジの取り違えを疑うこと** ——"
-            " 位置が桁ごとずれて読めていると、保持目標がそのまま桁の違う位置を指し、"
+            f" (上限 {limit}{unit})。まずスケールか固定小数点レンジの取り違えを疑ってください。"
+            "位置が桁ごとずれて読めていると、保持目標がそのまま桁の違う位置を指し、"
             "機構が可動端まで走ります"
         )
 
@@ -377,8 +377,7 @@ class MotionGuard:
                     f"軸 '{axis}' は '{required.axis}' が {required.describe()} に居るあいだしか"
                     f"動かせませんが、'{required.axis}' の位置が読めていません"
                     " (ドライバの電源と CAN 配線を確認してください)。"
-                    "**読めていないことを「条件を満たしている」と読み替えてはならない**ので、"
-                    "安全側に倒しています"
+                    "読めていないことは条件を満たしていることではないので、安全側に倒しています"
                 )
             outside = [
                 f"{what} {value:.4g}{required.unit}"
@@ -389,8 +388,8 @@ class MotionGuard:
                 raise GuardViolation(
                     f"軸 '{axis}' は '{required.axis}' が {required.describe()} に居るあいだしか"
                     f"動かせません (今 {' / '.join(outside)})。"
-                    f"**先に '{required.axis}' を {required.label} へ寄せてください** "
-                    f"('{required.axis}' の零点がまだなら零点確定が先です)"
+                    f"先に '{required.axis}' を {required.label} へ寄せてください"
+                    f" ('{required.axis}' の零点がまだなら零点確定が先です)"
                 )
 
     def check_not_with(self, *, axis: str, siblings: Collection[str]) -> None:
@@ -437,15 +436,14 @@ class MotionGuard:
             raise GuardViolation(
                 f"軸 '{axis}' の可動端センサ {_label(unreadable)} が読めていないため、"
                 "その向きへは動かしません (配線・基板の電源・デバイス ID を確認してください)。"
-                "**読めていないことを「押されていない」と読み替えてはならない**ので、"
-                "安全側に倒しています"
+                "読めていないことは押されていないことではないので、安全側に倒しています"
             )
 
         pressed = [name for name, state in states.items() if state is not False]
         if pressed:
             raise GuardViolation(
                 f"軸 '{axis}' の可動端センサ {_label(pressed)} が押されているため、"
-                "その向きへは動かしません。**離れる向きの指令は通ります**"
+                "その向きへは動かしません。離れる向きの指令は通ります"
             )
 
     def check_torque(self, *, axis: str, torque: float | None) -> None:
