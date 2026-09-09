@@ -1519,7 +1519,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 |---|---|
 | `_e_stop_active` がプロセスメモリ上のみ | サーバーを再起動すると緊急停止状態が消える。物理的な緊急停止ボタンの状態と同期する仕組みも無い |
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は `activate_motors()` を呼ぶが `encode_disable(clear_fault=True)` は送らない（fault の自動クリアは原因を隠すため意図的に行っていない）。実機で「解除しても動かない」場合は `health` の `FAULT` 表示で fault の内容を確認して電源再投入 |
-| フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らず WARNING をログに出すだけ。有効化を見送ったモータを UI に出す仕組みが欲しい |
+| フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らない。名前は `state.safety.unresponsive_motors` として UI へ出るが（`unenergized_motors` とは別欄。手当てが電源・配線で、再励磁では直らないため）、**PC 側から復旧させる手段は無い** |
 | ホーミングは `rotate` だけ実機検証済み | `search_distance` はまだ効く経路を通っていない。`step` 1.0deg での通し確認も未取得。`y_axis` はスイッチ未装着で `homing:` ごとコメントアウト中 |
 | 零点確定が有効なのは `rotate` だけ | `sub_y_axis` / `sub_lift`（DM3520）はドライバが `supports_origin_capture()` を宣言しない（`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は自重で落ちる）。`y_axis` は手段があるがスイッチ未装着。原点が確定できない軸は電源投入位置がそのまま原点で、ずれは指差喚呼が人の目で埋める |
 | down したバスでも起動できてしまう | 起動ログへ 1 行 ERROR を残すが起動は拒否しない（`--strict` を通していない構成を一律に潰さない判断）。受信ループは `rx_down` を立てて `BusHealth.DOWN` を出す |

@@ -366,7 +366,8 @@
             "running": true
           }
         ],
-        "unenergized_motors": []
+        "unenergized_motors": [],
+        "unresponsive_motors": []
       },
       "sensors": {
         "origin_sensor": {
@@ -637,7 +638,8 @@
             "running": true
           }
         ],
-        "unenergized_motors": []
+        "unenergized_motors": [],
+        "unresponsive_motors": []
       },
       "sensors": {
         "origin_sensor": {

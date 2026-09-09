@@ -62,6 +62,7 @@ const STATE_FIELDS_UI_READS = [
   "safety",
   "safety.sync_violations",
   "safety.unenergized_motors",
+  "safety.unresponsive_motors",
   "safety.firmware_unconfirmed_motors",
   "safety.failed_tasks",
   "safety.reenergizing",
@@ -308,6 +309,7 @@ const SENSOR_STATE = fieldsOf<SensorState>({
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
+  unresponsive_motors: "ui",
   firmware_unconfirmed_motors: "ui",
   failed_tasks: "ui",
   reenergizing: "ui",

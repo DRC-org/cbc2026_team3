@@ -116,3 +116,27 @@
   `is_reached` が必ず成立し、軸は途中に居るのにシーケンスだけが次へ進む
 - **メインハンドの 3 本が未保護。** `guard:` があるのは `config/sub_hand_positions.yaml` の
   2 軸だけ
+
+## 7. 励磁の誤診（2026-09-10）を調べる途中で見つかったもの
+
+「無励磁」と「応答なし」を分ける修正（`docs/history/incidents.md` 2026-09-10）の
+調査で見つかったが、その修正には含めていないもの。
+
+- **`encode_disable(clear_fault=True)` がリポジトリ全体で 1 度も呼ばれていない**
+  （`lib/drivers/edulite05.py`）。fault ラッチを解除する手段が PC 側に無いので、
+  2026-09-05 の事象（UNDERVOLTAGE で励磁が落ち、fault が消えても戻らない）が
+  再発したとき再励磁で直らない。`docs/architecture.md` の「既知の穴」にも同じ趣旨がある
+- **`Edulite05Driver` が `health_detail()` を実装していない。** どの fault ビットが
+  立ったかが画面にもログにも出ない（DM3520 は実装済み）
+- **`lib/config_schema.py` の `edulite05` の CAN ID 許容域が `0x00..0xFF`。** 出荷値
+  `0x7F` も `host_id` と同値の `0xFD` も弾かない（`generic` は `0xFF` を弾くのに非対称）
+- **`tests/test_robot_sequences.py` の「モータ名・CAN ID はロボット横断に一意」テストが
+  `config/bench/**` と `sensors:` を見ない**
+- **`lib/drivers/edulite05.py` の `VEL_MIN/MAX = ±50.0` / `TORQUE_MIN/MAX = ±6.0` に
+  リポジトリ内の典拠が無い。** トルク基準の歯止めを入れる前に実測で確認が要る
+- **`docs/architecture.md` の「EDULITE 05 × 3」が config（2 台）と食い違う**
+- **物理停止スイッチの検出が `pump_vac` 1 台頼み。** `RobotServer._detect_board_e_stop` は
+  `GenericDriver` に絞っており、物理停止は DC 基板の `REF` にしか無いのでサブハンドで
+  検出できるのは `pump_vac` だけ。しかも `received_at is None` で `continue` するため
+  **DC 基板が黙っていると押されていても検出されない**。2026-09-10 の誤診と同型の
+  「機体が動かないのに画面が理由を言わない」穴

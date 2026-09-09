@@ -348,6 +348,7 @@ export interface TargetRefresherState {
 export interface SafetyState {
   sync_violations: string[];
   unenergized_motors: string[];
+  unresponsive_motors: string[];
   firmware_unconfirmed_motors: string[];
   failed_tasks: string[];
   reenergizing: boolean;
@@ -376,6 +377,7 @@ export function safetyShapeErrors(value: unknown): string[] {
   for (const key of [
     "sync_violations",
     "unenergized_motors",
+    "unresponsive_motors",
     "firmware_unconfirmed_motors",
     "failed_tasks",
   ]) {

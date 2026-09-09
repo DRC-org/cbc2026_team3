@@ -67,6 +67,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    unresponsive_motors: [],
     firmware_unconfirmed_motors: [],
     failed_tasks: [],
     reenergizing: false,
@@ -338,6 +339,32 @@ describe("describeSafetyIssues", () => {
     expect(issues[0].hint).toMatch(/励磁/);
   });
 
+  it("無励磁の手当てに「指令は届いている」と書かない (裏付ける判定が無い)", () => {
+    const issues = describeSafetyIssues(safety({ unenergized_motors: ["sub_lift"] }));
+    expect(issues[0].hint).not.toMatch(/指令は届いて/);
+  });
+
+  it("応答なしのモータを名前付きで返し、再励磁では直らないと言う", () => {
+    const issues = describeSafetyIssues(safety({ unresponsive_motors: ["rotate_l"] }));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].kind).toBe("unresponsive");
+    expect(issues[0].detail).toMatch(/rotate_l/);
+    expect(issues[0].hint).toMatch(/電源と CAN 配線/);
+    expect(issues[0].hint).toMatch(/再励磁を押しても直りません/);
+  });
+
+  it("応答なしは無励磁より先に返す (根本原因を先頭の判定へ出す)", () => {
+    const issues = describeSafetyIssues(
+      safety({ unresponsive_motors: ["rotate_l"], unenergized_motors: ["sub_lift"] }),
+    );
+    expect(issues.map((issue) => issue.kind)).toEqual(["unresponsive", "unenergized"]);
+  });
+
+  it("応答なしのモータがあると異常判定へ倒す", () => {
+    const verdict = verdictWhenConnected(health(), safety({ unresponsive_motors: ["rotate_l"] }));
+    expect(verdict.tone).toBe("error");
+  });
+
   it("issue は機械可読の kind を持つ (UI は表示文字列で分岐しない)", () => {
     const issues = describeSafetyIssues(
       safety({ sync_violations: ["rotate"], unenergized_motors: ["sub_lift"] }),
@@ -421,6 +448,7 @@ describe("describeSafetyIssues", () => {
     it.each([
       "sync_violations",
       "unenergized_motors",
+      "unresponsive_motors",
       "firmware_unconfirmed_motors",
       "failed_tasks",
       "reenergizing",

@@ -86,6 +86,7 @@ describe("parseServerMessage", () => {
       const SAFETY = {
         sync_violations: [],
         unenergized_motors: [],
+        unresponsive_motors: [],
         firmware_unconfirmed_motors: [],
         failed_tasks: [],
         reenergizing: false,
@@ -110,6 +111,7 @@ describe("parseServerMessage", () => {
       it.each([
         "sync_violations",
         "unenergized_motors",
+        "unresponsive_motors",
         "firmware_unconfirmed_motors",
         "failed_tasks",
         "reenergizing",

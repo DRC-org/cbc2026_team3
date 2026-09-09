@@ -18,7 +18,7 @@ from lib.health import HealthSnapshot
 from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, MatchState
 from lib.sequence.engine import Sequence
-from lib.server import _FIRMWARE_INFO_GRACE_S, RobotServer
+from lib.server import _ENERGIZE_GRACE_S, _FIRMWARE_INFO_GRACE_S, RobotServer
 from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager
 
@@ -115,6 +115,9 @@ class ServerFixture:
 
     def expire_firmware_grace(self) -> None:
         self.server._server_started_at = time.time() - _FIRMWARE_INFO_GRACE_S - 0.1
+
+    def expire_energize_grace(self) -> None:
+        self.server._energize_expected_since = time.time() - _ENERGIZE_GRACE_S - 0.1
 
     async def wait_reenergize(self, robot_name: str, *, timeout: float = 2.0) -> None:
         task = self.server._reenergize_tasks.get(robot_name)

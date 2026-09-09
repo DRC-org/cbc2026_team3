@@ -55,6 +55,7 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
     safety: {
       sync_violations: [],
       unenergized_motors: [],
+      unresponsive_motors: [],
       firmware_unconfirmed_motors: [],
       failed_tasks: [],
       reenergizing: false,
@@ -141,6 +142,7 @@ describe("試合中の右カラム", () => {
         safety: {
           sync_violations: [],
           unenergized_motors: ["rotate_l", "rotate_r"],
+          unresponsive_motors: [],
           firmware_unconfirmed_motors: [],
           failed_tasks: [],
           reenergizing: false,
@@ -202,6 +204,7 @@ describe("RobotControl の操作先", () => {
         safety: {
           sync_violations: [],
           unenergized_motors: ["rotate_l"],
+          unresponsive_motors: [],
           firmware_unconfirmed_motors: [],
           failed_tasks: [],
           reenergizing: false,
@@ -365,6 +368,7 @@ describe("RobotControl の診断表示", () => {
         safety: {
           sync_violations: ["rotate"],
           unenergized_motors: [],
+          unresponsive_motors: [],
           firmware_unconfirmed_motors: [],
           failed_tasks: [],
           reenergizing: false,

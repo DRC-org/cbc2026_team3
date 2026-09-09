@@ -380,9 +380,10 @@ down です (起動は続けます)` を ERROR で残す（**起動は拒否し�
 立つことはなく、別の欄が同時に立って主張するため —— 同期ずれからの緊急停止が
 失敗したケースでは `SyncMonitor.violated` がラッチして `safety.sync_violations` が
 立ち、`describeSafetyIssues` が tone error へ倒して診断ツリーを開く。再励磁の失敗も、
-励磁状態を報告するドライバ（EDULITE 05 / DM3520）なら `_unenergized_motors` の
-`is_energized() is False` 側で拾われる。**この依存関係が崩れたら（同時に立つ欄が
-無くなったら）、こちらを主張側へ倒し直すこと。**
+励磁状態を報告するドライバ（EDULITE 05 / DM3520）なら `_split_inactive_motors` が
+`unenergized_motors` か `unresponsive_motors` のどちらかで拾う（フィードバックが
+届いていれば前者、鮮度が切れていれば後者。どちらも tone error へ倒す）。
+**この依存関係が崩れたら（同時に立つ欄が無くなったら）、こちらを主張側へ倒し直すこと。**
 
 journal で追うときに探す文字列は `投げっぱなしタスクが失敗しました` である。
 
@@ -498,6 +499,36 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 
 `None` を「無励磁」へ倒さないこと。自作モタドラも C620 も励磁の有無を報告しないので、
 倒すと常時警告になる（「測ったように見える 0」と同じ罠）。
+
+#### 「無励磁」と「応答なし」は別の欄で配る
+
+`is_energized()` が読む値のほかに、**起動時と再励磁で励磁できなかったモータの名前**が
+ラッチとして残る（`RobotServer._inactive_motors`）。このラッチは 2 通りの理由で溜まる。
+EDULITE 05 と DM3520 は POSITION モードでは新鮮なフィードバックが無いと
+`activation_steps()` を 1 通も送らない（`requires_fresh_feedback_for_activation()`）ので、
+**動力電源が落ちていればフィードバックが 1 通も来ないまま全数がラッチに入る**。手当ては
+「再励磁」ではなく電源と CAN 配線であり、再励磁を何度押しても消えない。
+
+そのため `_split_inactive_motors()` がラッチを**フィードバック鮮度**（`FeedbackFreshness`。
+`_firmware_unconfirmed_motors` と同じ組み方）で仕分け、鮮度切れを
+`state.safety.unresponsive_motors` へ、生きているものを `unenergized_motors` へ載せる。
+**片方から外したものは必ずもう片方に載る**（`None` を「無励磁」へ倒さない規則が、
+`is_energized()` の三値だけでなくこのラッチにも効くようにしたもの。黙って消すと、
+機体が動かないのに画面が理由を言わない状態に戻る）。あわせて、**ラッチに居ても
+`is_energized()` が `True` を返すモータは報告しない** —— 起動時に失敗した後で自力で
+励磁されたものが居座らないようにするため。
+
+| 欄 | 意味 | 手当て |
+|---|---|---|
+| `unenergized_motors` | フィードバックは届いているのに励磁されていない | 操縦者画面の「再励磁」 |
+| `unresponsive_motors` | 励磁に失敗したうえ、フィードバックの鮮度が切れている（1 通も来ていない / 途絶えた） | ドライバの電源と CAN 配線（**再励磁では直らない**ので UI もボタンを出さない） |
+
+**文面を分けるのは手当てが逆だから。** 同じ区別を `Dm3520Driver.activation_block_reason()`
+が既に持っており（応答が無い / 読み返しが食い違う）、上の層でそれを 1 つに潰していた。
+UI 側の文言は `web/src/lib/healthVerdict.ts` の `describeSafetyIssues` が持ち、**根本原因が
+先に来るよう `unresponsive` を `unenergized` より前に返す**。緊急停止中と励磁の猶予中に
+両方とも空になるガードは共有する（緊急停止中は目標値再送が止まってフィードバックの
+問い合わせも止まるので、分けると停止のたびに全数が「応答なし」で湧く）。
 
 #### EDULITE 05 でも実際に起きた（2026-09-05）
 
@@ -1471,7 +1502,7 @@ checklist.yaml すべて —— 本番と `config/bench/*` —— が対象）�
   `cbc-control.service` の `Wants=cbc-can.service` は**何も守っていない**
   （`--strict` を付けない判断とその理由は `scripts/cbc-can.service` のコメント）。
   つまり「揃っているか」に答えるのは、この 1 行の指差喚呼だけである
-- **`health_ready`** — ①は `state.safety.unenergized_motors` まで配信しているが、
+- **`health_ready`** — ①は `state.safety.unenergized_motors` / `unresponsive_motors` まで配信しているが、
   無励磁は「指令しても動かない」としてしか現れず、①の色（`MotorHealth`）は **OK の
   まま**である（「励磁されていない」はヘルスに現れない、を参照）。試合が始まってから
   気付くことになるので、始まる前に 1 度だけ人が読む

@@ -188,6 +188,7 @@ describe("Dashboard の再励磁", () => {
   const unenergized: SafetyState = {
     sync_violations: [],
     unenergized_motors: ["sub_lift"],
+    unresponsive_motors: [],
     firmware_unconfirmed_motors: [],
     failed_tasks: [],
     reenergizing: false,
