@@ -91,6 +91,20 @@ describe("表示するもの", () => {
     expect(screen.getByText("受信途絶")).toBeInTheDocument();
   });
 
+  it("長い理由文を省略せずカード内で折り返す (切ると次の一手が読めなくなる)", () => {
+    mount({
+      rejection: rejection({
+        reason: "切断中のため緊急停止の解除を送信できませんでした。機体側のラッチは残っています",
+      }),
+    });
+
+    const line = screen.getByText(/機体側のラッチは残っています/);
+    expect(line).not.toHaveClass("truncate");
+    // daisyUI の .alert は grid + justify-items:start。本文列は w-full が無いと
+    // min-content まで広がり、カードの外へ文字が出る
+    expect(line.parentElement).toHaveClass("w-full", "min-w-0", "wrap-anywhere");
+  });
+
   it("info レベルのヘルス変化は通知しない (平常運転で画面を埋めないため)", () => {
     const { container } = mount({ healthEvents: [healthEvent({ level: "info" })] });
     expect(container).toBeEmptyDOMElement();

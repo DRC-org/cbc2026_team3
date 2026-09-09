@@ -245,4 +245,7 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 （`MAX_TOASTS`）、古いものから押し出される。トーンは `warning` と `error` の 2 つ。
 コンテナは `pointer-events-none` で下の操作を透かす。
 
+**理由文は省略せず折り返す。** 次の一手が書かれているので切ると読めなくなる。カードは幅
+`22rem` 固定で縦に伸びる（`docs/web/pitfalls.md` の「daisyUI の `.alert` は grid」）。
+
 **トーストは履歴ではない** —— 数秒で消えるので、Monitor の試合中は `EventFeed` が残す。

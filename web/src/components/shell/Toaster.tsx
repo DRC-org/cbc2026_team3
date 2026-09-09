@@ -36,10 +36,12 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: () => vo
       )}
     >
       <Icon as={TOAST_ICON[toast.tone]} className="mt-[0.15em] text-[1.1em]" />
-      <div className="min-w-0 flex-1">
+      {/* daisyUI の .alert は justify-items:start で子を列幅まで伸ばさない。w-full が無いと
+          本文は min-content まで広がり、カードの外へ文字が出る */}
+      <div className="w-full min-w-0 wrap-anywhere">
         <div className="font-bold">{toast.title}</div>
         {toast.lines.map((line) => (
-          <div key={line} className="truncate opacity-90">
+          <div key={line} className="opacity-90">
             {line}
           </div>
         ))}
