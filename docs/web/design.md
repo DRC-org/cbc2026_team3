@@ -82,8 +82,9 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 になる。装飾として増やすとその印が薄まる。
 
 **英字でも大文字でなければこの印にはならない**ので、タブ名（`Monitor` / `Main Hand` /
-`Sub Hand`）・接続表示（`Connected` / `Disconnected`）・緊急停止オーバーレイの `Reset` は
-今までどおりでよい（前 2 つは操作ではなく名前、最後は全画面を覆う唯一のボタン）。
+`Sub Hand`）・接続表示（`Connected` / `Disconnected`）・緊急停止の解除（`Reset`。オーバーレイと
+`EStopBanner` の両方）は今までどおりでよい（前 2 つは操作ではなく名前、最後は緊急停止を
+解除する唯一の口）。
 
 ---
 
@@ -97,7 +98,7 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 
 | 記号 | 意味 | 出る場所 |
 |---|---|---|
-| `OctagonX` | 緊急停止 | `AppHeader` / `EStopOverlay` |
+| `OctagonX` | 緊急停止 | `AppHeader` / `EStopOverlay` / `EStopBanner` |
 | `Hand` | **許可待ち / ここで停止** 専用 | `ActionPanel` / `SequenceStepList` / `RobotStatusRow` |
 | `SlidersHorizontal` / `Workflow` | 手動 / 半自動 | `ModeSwitch` |
 | `Play` | START（先頭から） | `ActionPanel` / `StartGate` |
@@ -105,7 +106,8 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 | `Square` | 停止（STOP・中断） | `ActionPanel` / `MatchStrip` / `MotorCheckPanel` |
 | `Check` | 完了 | `TriggerButton` / `ChecklistItems` |
 | `Ban` | 操作不可 | `TriggerButton` / `ActionPanel` |
-| `RotateCcw` | やり直し・解除 | `MatchControl` / `MatchPrep` / `EStopOverlay` |
+| `RotateCcw` | やり直し・解除 | `MatchControl` / `MatchPrep` / `EStopOverlay` / `EStopBanner` |
+| `EyeOff` | 開発用の非表示（`--dev-tools` 時だけ現れる） | `EStopOverlay` |
 | `TriangleAlert` | 警告 | 各所 |
 | `ChevronDown` / `ChevronRight` | 開閉 | `SubsystemStatus` / `MotorCheckPanel` |
 
@@ -122,8 +124,9 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 `docs/web/screens.md`）。
 
 **点滅（`.alert-blink`）は異常時にだけ画面へ出る要素に限る** —— `EStopOverlay` と
-`ConnectionBanner` だけ。平常時に点滅している要素が 1 つでもあると「異常時に自分から主張する」が
-成立しない。ヘッダーの EMG STOP は赤地・大面積・固定位置なので外しても見つけにくくならない。
+`ConnectionBanner`、そのオーバーレイを隠しているあいだだけ出る `EStopBanner` だけ。平常時に
+点滅している要素が 1 つでもあると「異常時に自分から主張する」が成立しない。
+ヘッダーの EMG STOP は赤地・大面積・固定位置なので外しても見つけにくくならない。
 付ける先も**先頭の記号まで**。`prefers-reduced-motion: reduce` では緊急停止も例外にしない。
 
 **機体が動いているあいだ画面を覆わない。** モーダルにしてよいのは、押す前に出して押した瞬間に

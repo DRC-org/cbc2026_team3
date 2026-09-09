@@ -1,4 +1,4 @@
-import { OctagonX, RotateCcw } from "lucide-react";
+import { EyeOff, OctagonX, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -6,21 +6,37 @@ import { Modal } from "@/components/ui/Modal";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 
 export function EStopOverlay() {
-  const { eStopActive, eStopReason } = useRobotStatus();
-  const { onEStopRelease } = useRobotCommands();
+  const { eStopActive, eStopReason, eStopOverlayHidden, serverInfo } = useRobotStatus();
+  const { onEStopRelease, hideEStopOverlay } = useRobotCommands();
 
   return (
     <Modal
-      open={eStopActive}
+      open={eStopActive && !eStopOverlayHidden}
       role="alertdialog"
       tone="estop"
       title="EMERGENCY STOP"
       boxClassName="text-center"
       footer={
-        <Button tone="estopReset" className="mx-auto" onClick={onEStopRelease}>
-          <Icon as={RotateCcw} />
-          Reset
-        </Button>
+        // Reset を中央に据えたまま、非表示は右端へ最大限離す (隣り合わせると解除の誤爆になる)。
+        <div className="flex w-full items-center gap-2">
+          <div className="flex-1" />
+          <Button tone="estopReset" onClick={onEStopRelease}>
+            <Icon as={RotateCcw} />
+            Reset
+          </Button>
+          <div className="flex flex-1 justify-end">
+            {serverInfo.dev_tools ? (
+              <Button
+                tone="warn"
+                onClick={hideEStopOverlay}
+                aria-label="緊急停止ダイアログを開発用に非表示にする"
+              >
+                <Icon as={EyeOff} />
+                DEV 非表示
+              </Button>
+            ) : null}
+          </div>
+        </div>
       }
     >
       <div className="flex flex-col items-center gap-2 py-2">

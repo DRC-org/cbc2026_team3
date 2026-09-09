@@ -3,6 +3,7 @@ import { Outlet, useLocation, useNavigate } from "react-router";
 
 import { AppHeader } from "@/components/shell/AppHeader";
 import { ConnectionBanner } from "@/components/shell/ConnectionBanner";
+import { EStopBanner } from "@/components/shell/EStopBanner";
 import { EStopOverlay } from "@/components/shell/EStopOverlay";
 import { RouteErrorBoundary } from "@/components/shell/RouteErrorBoundary";
 import { Toaster } from "@/components/shell/Toaster";
@@ -52,6 +53,7 @@ const AppShell = memo(function AppShell({
       <TabHotkeys />
       <div className="flex h-svh w-full flex-col overflow-hidden bg-base-200 text-base-content">
         <ConnectionBanner />
+        <EStopBanner />
         <AppHeader />
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -71,6 +73,11 @@ export function RootLayout() {
   const socket = useRobotSocket(wsUrl);
   const { send, clearRejection, setEStopActive, reportUnsent } = socket;
   const [wsSettingsOpen, setWsSettingsOpen] = useState(false);
+  const [overlayHidden, setOverlayHidden] = useState(false);
+  const hideEStopOverlay = useCallback(() => setOverlayHidden(true), []);
+  // 保持した値をそのまま使わず毎描画で dev_tools と AND を取る。フラグ配信が壊れた瞬間や
+  // 本番サーバーへ繋ぎ直した瞬間に、操縦者の操作を待たずオーバーレイが戻る。
+  const eStopOverlayHidden = socket.serverInfo.dev_tools && overlayHidden;
   const openWsSettings = useCallback(() => setWsSettingsOpen(true), []);
   const closeWsSettings = useCallback(() => setWsSettingsOpen(false), []);
 
@@ -140,6 +147,7 @@ export function RootLayout() {
         connected: socket.connected,
         eStopActive: socket.eStopActive,
         eStopReason: socket.eStopReason,
+        eStopOverlayHidden,
         healthEvents: socket.healthEvents,
         motorCheck: socket.motorCheck,
         matchState: socket.matchState,
@@ -155,6 +163,7 @@ export function RootLayout() {
         sendOrReport,
         onEStop,
         onEStopRelease,
+        hideEStopOverlay,
         setCourt,
         setChecklistItem,
         checkAllChecklist,

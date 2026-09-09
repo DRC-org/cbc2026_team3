@@ -1278,6 +1278,12 @@ setup ⇄ ready → match → finished → setup
 フラグの正はサーバーが持ち、接続直後の `server_info` で UI へ配る。一括チェックは
 `logger.warning` で必ずログに残す。
 
+配った `dev_tools` には**サーバーの語彙を増やさない UI 側の効果**もあり、緊急停止オーバーレイ
+（`EStopOverlay`）を操縦者が隠せるようになる。隠しているあいだは全幅の警告帯（`EStopBanner`）が
+代わりに出て解除ボタンを載せる。新しい WS コマンドは無く、UI は `serverInfo.dev_tools` を
+**描画のたびに**見る。理由は [`invariants.md`](invariants.md) §8、画面は
+[`web/screens.md`](web/screens.md)。
+
 ---
 
 ## 9. Web UI の構成

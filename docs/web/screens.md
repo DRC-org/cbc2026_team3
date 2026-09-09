@@ -229,6 +229,7 @@
 
 ```
 ConnectionBanner   切断中だけ・全幅
+EStopBanner        緊急停止中かつオーバーレイ非表示のときだけ・全幅
 AppHeader          [タブ帯] … [接続][時計][フェーズ][コート] │ EMG STOP
 RouteErrorBoundary > Outlet    画面本体
 Toaster / WsSettings / EStopOverlay   重なる層
@@ -237,9 +238,11 @@ Toaster / WsSettings / EStopOverlay   重なる層
 - **常設帯はヘッダー 1 本。フッターは持たない。** タブを別の帯にすると縦を 2 段消費し、
   1366×768 級ではその 1 段が操作領域を削る。折り返しもしない。縮んでよいのはタブ帯だけ
 - ヘッダーの並び順は EMG STOP 誤爆防止から決まる（`docs/web/design.md`）
-- **`RouteErrorBoundary` は `<Outlet />` だけを囲う。** ヘッダー・接続バナー・緊急停止
-  オーバーレイは境界の外（1 画面が落ちても止める手段を残す）。`key` はパス（落ちた境界は
-  タブを切り替えても解けない）
+- **`RouteErrorBoundary` は `<Outlet />` だけを囲う。** ヘッダー・接続バナー・緊急停止の
+  オーバーレイと警告帯は境界の外（1 画面が落ちても止める手段を残す）。`key` はパス（落ちた
+  境界はタブを切り替えても解けない）
+- **オーバーレイの非表示は `RootLayout` の state**（セッション中だけ。再読み込みで戻る）。
+  描画のたびに `serverInfo.dev_tools` と論理積を取るので、本番サーバーへ繋ぎ直すと自動で戻る
 - **`AppShell` の `memo` は飾りではない**（`docs/web/data_flow.md`）
 - ページ全体はスクロールさせない。スクロールするのは `Panel` の本文だけ
 
@@ -258,7 +261,8 @@ barrel（`index.ts`）は作らず常に実ファイルまで指す（oxlint の
 | `TabBar` | タブ帯と注意喚起 LED。並びもキーも `TABS` から組む |
 | `Clock` | 現在時刻。**独立した部品であること自体が本体**（毎秒 `setState` するので、展開するとタブ帯ごと毎秒描き直される） |
 | `ConnectionBanner` | 切断中の全幅バナー。ヘッダー右端の小さな表示では気付けない |
-| `EStopOverlay` | 緊急停止中の全画面モーダル。**`onClose` を渡さない**ので Esc・背景クリックで閉じない。解除は `Reset` のみ。停止理由を必ず出す |
+| `EStopBanner` | 緊急停止中に**オーバーレイを隠しているあいだだけ**出す全幅バナー。停止理由と `Reset` を載せる（解除の口が画面からここだけになるため）。作法は `ConnectionBanner` と同じ（`role="alert"` / `alert-error` / 記号に `alert-blink`） |
+| `EStopOverlay` | 緊急停止中の全画面モーダル。**`onClose` を渡さない**ので Esc・背景クリックで閉じない。解除は `Reset` のみ。停止理由を必ず出す。**`serverInfo.dev_tools` のときだけ** footer に「DEV 非表示」（`EyeOff` / `tone="warn"`）が並ぶ |
 | `WsSettings` | 接続先の変更ダイアログ |
 | `Toaster` | 通知の唯一のスタック（操作拒否 + ヘルス異常）。右下・最大 3 件 |
 | `RouteErrorBoundary` | 画面本体の描画例外の境界 |
