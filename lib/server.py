@@ -44,6 +44,7 @@ from lib.motion_guard import GuardViolation
 from lib.sequence.engine import Sequence
 from lib.server_homing import HomingController, HomingSource
 from lib.server_motor_check import MotorCheckController, Pausable
+from lib.suction import SuctionSelection
 from lib.ws_hub import WsHub
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,8 @@ class RobotContext:
     target_refreshers: list[TargetRefresher] = field(default_factory=list)
     manual: ManualController | None = None
     mode: OperationMode = OperationMode.SEQUENCE
+    #: 吸着に使うパッドの選択。持たないロボットは None (配信も null)
+    suction: SuctionSelection | None = None
 
 
 class RobotServer:
@@ -209,6 +212,7 @@ class RobotServer:
         limit_monitors: list[LimitMonitor] | None = None,
         target_refreshers: list[TargetRefresher] | None = None,
         manual: ManualController | None = None,
+        suction: SuctionSelection | None = None,
     ) -> None:
         self._robots[name] = RobotContext(
             sequence=sequence,
@@ -218,6 +222,7 @@ class RobotServer:
             limit_monitors=list(limit_monitors or []),
             target_refreshers=list(target_refreshers or []),
             manual=manual,
+            suction=suction,
         )
         sequence.set_court(self.match.court)
         if manual is not None:
@@ -515,6 +520,24 @@ class RobotServer:
         reason = await self._homing.start(data.get("robot"), data.get("axes"))
         if reason is not None:
             await self._reject_command(requester, "homing_start", reason)
+
+    async def _cmd_suction_pads_set(self, data: dict, requester: WSOrNone) -> None:
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            return
+        suction = self._robots[robot_name].suction
+        if suction is None:
+            await self._reject_command(
+                requester, "suction_pads_set", f"'{robot_name}' に吸着パッドがありません"
+            )
+            return
+        reason = suction.select(data.get("pads"))
+        if reason is not None:
+            await self._reject_command(requester, "suction_pads_set", reason)
+            return
+        logger.info(
+            "吸着パッド選択: robot=%s 使用=%s", robot_name, ", ".join(suction.enabled()) or "なし"
+        )
 
     async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
@@ -1368,6 +1391,7 @@ class RobotServer:
             "health": snapshot_dict,
             "safety": self._safety_state(robot_name),
             "manual": self._manual_state(robot_name),
+            "suction": ctx.suction.to_dict() if ctx.suction is not None else None,
         }
 
     def _sensor_states(self, robot_name: str) -> dict[str, dict]:

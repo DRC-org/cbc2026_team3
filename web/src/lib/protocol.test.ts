@@ -244,6 +244,50 @@ describe("parseServerMessage", () => {
       });
     });
 
+    describe("suction", () => {
+      const SUCTION = {
+        pads: [
+          { axis: "valve_1", label: "1", enabled: true },
+          { axis: "valve_2", label: "2", enabled: false },
+        ],
+      };
+
+      const suctionOf = (suction: unknown) => {
+        const msg = parse({ type: "state", robot: "sub_hand", suction });
+        return (msg as { state: RobotState }).state.suction;
+      };
+
+      it("読める配信はパッドごとそのまま通す (弁の名前を UI へ書き写さない)", () => {
+        expect(suctionOf(SUCTION)).toEqual(SUCTION);
+      });
+
+      it("吸着パッドを持たないロボットの null はそのまま (異常にしない)", () => {
+        expect(suctionOf(null)).toBeNull();
+      });
+
+      it("未配信は undefined のまま (古いサーバーを異常にしない)", () => {
+        const msg = parse({ type: "state", robot: "sub_hand" });
+        expect((msg as { state: RobotState }).state.suction).toBeUndefined();
+      });
+
+      it.each(["axis", "label", "enabled"])("%s が欠けたら MALFORMED (空へ倒さない)", (key) => {
+        const broken: Record<string, unknown> = { axis: "valve_1", label: "1", enabled: true };
+        delete broken[key];
+        expect(suctionOf({ pads: [broken] })).toBe(MALFORMED);
+      });
+
+      it("enabled が真偽値でなければ MALFORMED (押せるボタンを配信の崩れで増やさない)", () => {
+        expect(suctionOf({ pads: [{ axis: "valve_1", label: "1", enabled: "yes" }] })).toBe(
+          MALFORMED,
+        );
+      });
+
+      it("pads が配列でなければ MALFORMED", () => {
+        expect(suctionOf({ pads: "valve_1" })).toBe(MALFORMED);
+        expect(suctionOf("valve_1")).toBe(MALFORMED);
+      });
+    });
+
     it("motors と steps は知らないモータ・欄ごとそのまま通す", () => {
       const motors = {
         brand_new_motor: { pos: 1, vel: 2, torque: 3, temp: 4, future_field: "keep" },

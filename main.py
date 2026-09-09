@@ -52,6 +52,7 @@ from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_moto
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
 from lib.server_homing import HomingSource
+from lib.suction import suction_of
 from sequences.motor_check import MotorCheckSequence
 
 logger = logging.getLogger(__name__)
@@ -1020,6 +1021,7 @@ def _wire_one_robot(
         limit_monitors=limit_monitors,
         target_refreshers=refreshers,
         manual=manual,
+        suction=suction_of(seq),
     )
     logger.info(
         "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s"

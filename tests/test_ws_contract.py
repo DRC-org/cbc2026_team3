@@ -29,6 +29,7 @@ from lib.sequence.homing import HomingError
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
 from lib.server_homing import HomingSource
+from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager, set_last_feedback, set_motors, set_sensors
 from tests.fake_health import ok_health_snapshot
 from tests.feedback_frames import feed_generic
@@ -211,6 +212,13 @@ def _manual_controller(group: MotorGroup) -> ManualController:
     return ManualController(group, table)
 
 
+def _suction_selection() -> SuctionSelection:
+    """一部だけ ON の形を golden に固定する (全部 ON だと enabled の false が現れない)。"""
+    selection = SuctionSelection.numbered(("valve_1", "valve_2"))
+    assert selection.select(["valve_2"]) is None
+    return selection
+
+
 class _FailingHoming:
     """原点へ届かない軸の代役。UI が「失敗した軸と理由」を受け取れるかを golden で固定する。"""
 
@@ -297,6 +305,7 @@ def _build_fixture() -> _Fixture:
         sync_monitors=[monitor],
         target_refreshers=[refresher],
         manual=_manual_controller(group),
+        suction=_suction_selection(),
     )
     fx.set_motor_check_sequence(_ContractCheckSequence())
     fx.freeze_broadcast()
