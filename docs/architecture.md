@@ -304,7 +304,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ** |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い） |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -636,7 +636,8 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 | 離脱 | 既にセンサに触れているなら、離れるまで動かす。判定は**現在値**（ラッチを使わない） |
 | 探索 | 毎ステップ `AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step`。到達判定は**接触の累計**（`GenericDriver.sensor_contact_count`。読んでも減らない単調カウンタで、探索開始直前に基準値を取り直す） |
 | 停滞判定 | `step/2` 未満が 3 歩連続で `HomingError` |
-| 検出後 | その場の実測位置を目標に送り直してから原点確定 |
+| 整列段（`homing.sensors` を書いた軸のみ） | まだ当たっていない側のモータだけを進める。**この段のあいだだけその軸の原点センサを可動端の歯止めから外す**（`SensorSuspension`。外さないと、既に押された 1 本を見た歯止めが指令の入口でも 50Hz 監視でも拒否して必ず失敗する） |
+| 検出後 | その場の実測位置を目標に送り直してから原点確定（`_stop_here`。**指令の単位のまま**書き戻す。値へ換算して戻すと往復の丸め誤差で入口の歯止めに拒否される） |
 | 原点確定 | `set_group_origin_here`（グループ単位でしか行わない） |
 
 **原点を確定する手段は 2 つ**で、可否はドライバ自身の `supports_origin_capture()` が答える
@@ -947,6 +948,10 @@ axes:                      # 換算: command = value * scale + offset
                            # 手動で連続値を送ってよい軸だけが書く
     homing: { sensor: …, direction: -1, step: 1.0, settle_s: 0.05, search_distance: 180.0 }
                            # 零点確定（§4）。search_distance は省略できない
+    guard:                 # 可動端インターロック（§4）。書かない項目は「その守りが無い」
+      limits:              # 1 本なら文字列、同じ端に複数本あるなら並びで書く
+        minus: [y_axis_r_origin_sensor, y_axis_l_origin_sensor]
+      # max_step / stall_torque は実測が入るまで書かない
     motors:                # scale / offset はモータごとに書く
       y_axis_r: { scale: 864.15, offset: 0.0 }
       y_axis_l: { scale: -864.15, offset: 0.0 }   # 逆回転は scale の符号で表す
@@ -976,6 +981,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` | 可動範囲・軌道・原点という概念が無い |
 | `duty` / `on_off` 以外の軸に `manual_always: true` | シーケンスの到達待ちを手動が上書きできてしまう |
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
+| `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
 | `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて

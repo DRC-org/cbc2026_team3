@@ -144,6 +144,7 @@ class LimitMonitor(PeriodicTask):
     async def _check_axis(self, axis: str) -> None:
         spec = self._positions.axis(axis).for_court(self._court())
         handles = [self._motors[name] for name in spec.motor_names]
+        handle = AxisHandle(spec, handles, sensor_active=self._sensor_state)
 
         target = self._commanded_value(spec, handles)
         if target is None:
@@ -154,12 +155,12 @@ class LimitMonitor(PeriodicTask):
 
         # 書き戻す値は指令の単位のまま持つ。値へ換算して戻すと往復の丸め誤差が
         # そのまま delta に残り、**止めるための指令が入口の歯止めに拒否される**
-        observed_commands = {h.name: h.driver.feedback_position() for h in handles}
+        observed_commands = handle.observed_commands()
         delta = target - spec.to_value(observed_commands)
         try:
             self._guards[axis].check_limit(axis=axis, delta=delta, sensor_active=self._sensor_state)
         except GuardViolation as exc:
-            await self._stop_here(axis, spec, handles, observed_commands, exc)
+            await self._stop_here(axis, spec, handle, observed_commands, exc)
             return
         self._stopped.pop(axis, None)
 
@@ -175,7 +176,7 @@ class LimitMonitor(PeriodicTask):
         self,
         axis: str,
         spec: AxisSpec,
-        handles: list[MotorHandle],
+        handle: AxisHandle,
         observed_commands: dict[str, float],
         exc: GuardViolation,
     ) -> None:
@@ -183,10 +184,8 @@ class LimitMonitor(PeriodicTask):
         self._interventions[axis] = LimitIntervention(
             count=self.intervention(axis).count + 1, reason=str(exc)
         )
-        await AxisHandle(spec, handles, sensor_active=self._sensor_state).set_target_value(
-            observed_commands
-        )
-        written = self._commanded_value(spec, handles)
+        await handle.set_target_value(observed_commands)
+        written = self._commanded_value(spec, [self._motors[name] for name in spec.motor_names])
         if written is not None:
             self._stopped[axis] = written
         self._logger.warning(
@@ -230,5 +229,5 @@ def _limit_sensor_names(
         limits = None if guard is None else guard.limits
         if limits is None:
             continue
-        names.extend(name for name in (limits.plus, limits.minus) if name is not None)
+        names.extend((*limits.plus, *limits.minus))
     return tuple(dict.fromkeys(names))

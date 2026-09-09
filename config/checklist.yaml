@@ -57,6 +57,14 @@ checklists:
     - id: limit_sensor_react
       label: サブハンドの可動端センサ 4 本 (前後の前端・後端 / 昇降の上端・下端) に順に触れ、診断ツリーで 4 本とも反応することを確認
       group: motor_check
+    # 向きの取り違えは「押されている端へ進む指令だけが通る」形で現れるので、
+    # 反応の確認 (上の 2 項目) では見えない。退避できるかどうかで 1 操作で判別する。
+    - id: limit_escape_main
+      label: メインハンドの可動端センサ 3 本 (rotate / y_axis 左右) を 1 本ずつ押したまま、手動操縦でそのスイッチから離れる向きへ動くことを確認 (逆向きにしか動かなければ guard.limits の plus/minus が逆)
+      group: motor_check
+    - id: limit_escape_sub
+      label: サブハンドの可動端センサ 4 本 (前後の前端・後端 / 昇降の上端・下端) を 1 本ずつ押したまま、手動操縦でそのスイッチから離れる向きへ動くことを確認 (逆向きにしか動かなければ guard.limits の plus/minus が逆)
+      group: motor_check
     - id: rotate_holds
       label: rotate を非常停止し、無励磁でも自重で回らないこと確認 (零点確定は無励磁で行う)
       group: motor_check

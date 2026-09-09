@@ -6,6 +6,7 @@ from collections.abc import Callable
 import pytest
 
 from lib.drivers.generic import GenericDriver
+from lib.motion_guard import GuardViolation, SensorSuspension
 from lib.sequence.homing import _FOLLOW_ATTEMPTS, _STALL_LIMIT, HomingError, HomingRunner
 from lib.sequence.motors import AxisHandle, MotorHandle
 from lib.sequence.positions import AxisSpec, load_position_table
@@ -321,10 +322,15 @@ def _handle(
     *,
     start_value: float = 0.0,
     follows: bool | Callable[[], bool] = True,
+    sensor_active: Callable[[str], bool | None] | None = None,
 ) -> AxisHandle:
     """``follows`` が False の機構は引っかかって 1mm も動かない。
 
     指令の積算ではなく実測で数えているかは、この機構でしか現れない。
+
+    ``sensor_active`` を渡すと**可動端の歯止めが効いた状態**になる (`guard:` を
+    書いた軸だけ。渡さない軸は三値の `None` しか返らないので歯止めが全部に
+    掛かり、零点確定そのものが成立しない)。
     """
     mgr = mock_can_manager()
     drivers = {}
@@ -335,7 +341,7 @@ def _handle(
         drivers[motor.name] = driver
         handles.append(MotorHandle(motor.name, driver, mgr))
 
-    handle = AxisHandle(spec, handles)
+    handle = AxisHandle(spec, handles, sensor_active=sensor_active)
     original = handle.set_target_value
 
     async def _record(commands):
@@ -392,7 +398,13 @@ def _axis_commands(recorder: _Recorder, motor: str) -> list[float]:
     return [spec.to_value(cmd[motor]) for cmd in recorder.commands]
 
 
-def _runner(recorder: _Recorder) -> HomingRunner:
+def _runner(recorder: _Recorder, *, suspension: SensorSuspension | None = None) -> HomingRunner:
+    """``suspension`` を渡すと、整列段のあいだ原点センサを歯止めから外す配線が入る。
+
+    **`sensor_active` には覆いを掛けない口を渡す** —— 探索も離脱も「今 ON か」で
+    進むので、覆った値を渡すと零点確定が自分の目を塞ぐ。
+    """
+    extra = {} if suspension is None else {"suspend_sensors": suspension.suspend}
     return HomingRunner(
         sensor_active=recorder.sensor_active,
         sensor_contact_count=recorder.sensor_contact_count,
@@ -402,6 +414,7 @@ def _runner(recorder: _Recorder) -> HomingRunner:
         origin_capturable=recorder.origin_capturable,
         capture_origin=recorder.capture_origin,
         sleep=recorder.sleep,
+        **extra,  # type: ignore[arg-type]
     )
 
 
@@ -1278,3 +1291,172 @@ class TestSpecValidation:
                 },
                 source="<test>",
             )
+
+
+class TestStopsInTheCommandUnits:
+    """「その場で止まれ」は**実測を指令の単位のまま**書き戻す。
+
+    値へ換算して指令へ戻すと (`to_commands(to_value(…))`)、複数モータ軸では平均を
+    挟むぶん往復が丸め誤差を生み、それが非ゼロの `delta` として可動端の歯止めへ
+    届く —— **止めるための指令が、止まっていないことを理由に拒否される**
+    (実測 約 3%)。加えて平均へ寄せる指令は、止めるべき瞬間に左右を動かしに行く。
+    """
+
+    def _lagging_handle(
+        self, spec: AxisSpec, rec: _Recorder, seen: list[dict[str, float]]
+    ) -> AxisHandle:
+        """左だけ 0.5mm 遅れて追従する機構 (左右の実測が常に食い違う)。
+
+        `seen` には各指令の**直前の実測**を積む。書き戻した値がそれと一致するかは、
+        左右が揃った機構では平均と区別が付かない。
+        """
+        handle = _handle(spec, rec, follows=False)
+        drivers = rec.drivers
+        original = handle.set_target_value
+
+        async def _move(commands):
+            seen.append({name: driver.feedback_position() for name, driver in drivers.items()})
+            await original(commands)
+            for name, value in commands.items():
+                motor = next(m for m in spec.motors if m.name == name)
+                lag = 0.5 if name == "y_axis_l" else 0.0
+                drivers[name].set_observed(position=motor.to_command(motor.to_value(value) + lag))
+
+        handle.set_target_value = _move  # type: ignore[method-assign]
+        return handle
+
+    async def test_接触したら各モータの実測をそのまま書き戻す(self) -> None:
+        spec = _table(direction=-1, step=1.0, search_distance=10.0).axis("y_axis")
+        rec = _Recorder(active_at_or_below=-2.0)
+        seen: list[dict[str, float]] = []
+
+        await _runner(rec).home(spec, self._lagging_handle(spec, rec, seen))
+
+        assert rec.commands[-1] == pytest.approx(seen[-1])
+        # 左右が同じ値になっていたら平均へ寄せている (逆回転ペアなので符号は逆)
+        left, right = rec.commands[-1]["y_axis_l"], rec.commands[-1]["y_axis_r"]
+        assert left != pytest.approx(-right)
+
+    async def test_途絶で降りるときも実測をそのまま書き戻す(self) -> None:
+        spec = _table(direction=-1, step=1.0, search_distance=10.0).axis("y_axis")
+        rec = _Recorder(active_at_or_below=-20.0, motor_stale_after_commands=2)
+        seen: list[dict[str, float]] = []
+
+        with pytest.raises(HomingError, match="現在位置を読めません"):
+            await _runner(rec).home(spec, self._lagging_handle(spec, rec, seen))
+
+        assert rec.commands[-1] == pytest.approx(seen[-1])
+
+
+class TestAlignsWithTheGuardArmed:
+    """左右にスイッチを持つ軸の整列段と、可動端の歯止めの噛み合わせ。
+
+    整列段は**まだ当たっていない側だけ**を端へ進めるが、軸としては端へ向かう向き
+    なので、既に押された 1 本を見た歯止めがその指令を拒否する。外すのはその軸の
+    `homing.sensor_names` だけ (`SensorSuspension`)。
+    """
+
+    def _guarded_table(self):
+        return load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "tolerance": 0.1,
+                        "sync_tolerance": 100.0,
+                        "homing": {
+                            "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
+                            "direction": -1,
+                            "search_distance": 30.0,
+                            "step": 1.0,
+                            "settle_s": 0.0,
+                            "align_distance": 5.0,
+                        },
+                        "guard": {"limits": {"minus": ["sensor_r", "sensor_l"]}},
+                        "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                    }
+                },
+                "positions": {"y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    def _recorder(self) -> _Recorder:
+        return _Recorder(
+            sensors={
+                "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=-1.0),
+                "sensor_l": _SensorModel(motor="y_axis_l", active_at_or_below=-3.0),
+            }
+        )
+
+    def _handle(self, spec: AxisSpec, rec: _Recorder, reader) -> AxisHandle:
+        """**指令を通してから動かす機構。**
+
+        共有の `_handle` は歯止めより先に実測を動かすので、実測と目標が常に
+        一致して可動端の判定が `delta == 0` で素通りする (テストが何も見ていない
+        状態になる)。
+        """
+        handle = _handle(spec, rec, follows=False, sensor_active=reader)
+        original = handle.set_target_value
+
+        async def _move(commands):
+            await original(commands)
+            for name, value in commands.items():
+                rec.drivers[name].set_observed(position=value)
+
+        handle.set_target_value = _move  # type: ignore[method-assign]
+        return handle
+
+    async def test_覆いを配線すれば整列段が完走する(self) -> None:
+        spec = self._guarded_table().axis("y_axis")
+        rec = self._recorder()
+        suspension = SensorSuspension()
+        handle = self._handle(spec, rec, suspension.wrap(rec.sensor_active))
+
+        await _runner(rec, suspension=suspension).home(spec, handle)
+
+        assert rec.origins == ["y_axis"]
+        assert rec.captured_each == [pytest.approx({"y_axis_r": -1.0, "y_axis_l": -3.0})]
+
+    async def test_覆いを配線しないと整列段は歯止めに拒否される(self) -> None:
+        """**配線し忘れは「守りが消える」ではなく「その軸だけ零点確定できない」。**
+
+        安全側へ倒れるので黙って通ることは無いが、症状は config からもログからも
+        読めないので、この形で固定しておく。
+        """
+        spec = self._guarded_table().axis("y_axis")
+        rec = self._recorder()
+        handle = self._handle(spec, rec, rec.sensor_active)
+
+        with pytest.raises(GuardViolation, match="sensor_r"):
+            await _runner(rec).home(spec, handle)
+
+        assert rec.origins == []
+
+    async def test_探索中の歯止めは外さない(self) -> None:
+        """**外すのは整列段だけ。** 探索の途中でスイッチが立ったのに次の 1 歩が
+        出てしまう状態を作らない (接触の検出を取りこぼしたときの最後の砦)。
+        """
+        spec = self._guarded_table().axis("y_axis")
+        rec = self._recorder()
+        # 接触を 1 度も数えないセンサ (探索は当たったことに気付かないまま歩き続ける)
+        rec.sensor_contact_count = lambda _name: 0  # type: ignore[method-assign]
+        suspension = SensorSuspension()
+        handle = self._handle(spec, rec, suspension.wrap(rec.sensor_active))
+
+        with pytest.raises(GuardViolation, match="sensor_r"):
+            await _runner(rec, suspension=suspension).home(spec, handle)
+
+        assert rec.origins == []
+
+    async def test_覆いは整列段を抜けたら外れる(self) -> None:
+        spec = self._guarded_table().axis("y_axis")
+        rec = self._recorder()
+        suspension = SensorSuspension()
+        handle = self._handle(spec, rec, suspension.wrap(rec.sensor_active))
+
+        await _runner(rec, suspension=suspension).home(spec, handle)
+
+        assert not suspension.is_suspended("sensor_r")
+        assert not suspension.is_suspended("sensor_l")

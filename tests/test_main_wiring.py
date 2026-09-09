@@ -36,6 +36,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
+from lib.motion_guard import SensorSuspension
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -1984,6 +1985,7 @@ class TestMotorCheckWiring:
             target_refreshers=[],
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
+            sensor_suspension=SensorSuspension(),
         )
         return server
 

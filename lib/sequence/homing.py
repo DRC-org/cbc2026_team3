@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
@@ -49,6 +50,19 @@ MotorEnergized = Callable[[str], bool | None]
 OriginCapturable = Callable[[str], bool]
 CaptureOrigin = Callable[[str], Awaitable[None]]
 SleepFunc = Callable[[float], Awaitable[None]]
+#: 整列段のあいだ、指定したセンサを可動端の歯止めから外す
+#: (`lib.motion_guard.SensorSuspension.suspend`)
+SuspendSensors = Callable[[Iterable[str]], contextlib.AbstractContextManager[None]]
+
+
+def _no_suspension(_names: Iterable[str]) -> contextlib.AbstractContextManager[None]:
+    """配線しなかった場合。**歯止めは掛かったままなので安全側に倒れる。**
+
+    左右にスイッチを持つ軸の整列段は `GuardViolation` で必ず失敗するので、
+    配線し忘れは「黙って守りが消える」ではなく「その軸だけ零点確定できない」
+    という形で表に出る。
+    """
+    return contextlib.nullcontext()
 
 
 class _SensorContacts:
@@ -203,6 +217,7 @@ class HomingRunner:
         motor_is_energized: MotorEnergized,
         origin_capturable: OriginCapturable,
         capture_origin: CaptureOrigin,
+        suspend_sensors: SuspendSensors = _no_suspension,
         sleep: SleepFunc = asyncio.sleep,
     ) -> None:
         self._sensor_active = sensor_active
@@ -212,6 +227,7 @@ class HomingRunner:
         self._motor_is_energized = motor_is_energized
         self._origin_capturable = origin_capturable
         self._capture_origin = capture_origin
+        self._suspend_sensors = suspend_sensors
         self._sleep = sleep
 
     async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
@@ -420,7 +436,25 @@ class HomingRunner:
         sensors: Mapping[str, str],
         contacts: _SensorContacts,
     ) -> None:
-        """左右に 1 本ずつスイッチが付く軸で、まだ当たっていない側だけを進める。"""
+        """左右に 1 本ずつスイッチが付く軸で、まだ当たっていない側だけを進める。
+
+        **この段のあいだだけ、この軸の原点センサを可動端の歯止めから外す。**
+        軸としては端へ向かう向きなので、既に押された 1 本を見た歯止め (指令の入口と
+        50Hz の常駐監視) がこの段の指令を拒否し、整列段は必ず失敗する。進める側の
+        スイッチはまだ押されていないので機構から見れば進んでよい ——
+        判断と外す範囲の理由は `lib.motion_guard.SensorSuspension` が持つ。
+        """
+        with self._suspend_sensors(homing.sensor_names):
+            await self._align_pending(spec, handle, homing, sensors, contacts)
+
+    async def _align_pending(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        sensors: Mapping[str, str],
+        contacts: _SensorContacts,
+    ) -> None:
         pending = [motor for motor, sensor in sensors.items() if not contacts.contacted(sensor)]
         if not pending:
             logger.info("[homing] %s: 整列段は不要 (全センサが同時に接触)", spec.name)
@@ -592,7 +626,7 @@ class HomingRunner:
             if lost is not None:
                 # 最後に送った「実測 + step」が生きたままだとドライバ内蔵の位置ループが
                 # 押し続ける (接触を検出したときと同じ作法)
-                await handle.set_target_value(spec.to_commands(observed))
+                await self._stop_here(spec, handle)
                 raise HomingError(lost)
 
             if abs(observed - start) >= limit:
@@ -613,7 +647,7 @@ class HomingRunner:
             if hit:
                 # 原点確定 (disable) が届くまでスイッチを越えた先へ向かい続けないよう、
                 # 検出位置を目標に送り直す
-                await handle.set_target_value(spec.to_commands(observed))
+                await self._stop_here(spec, handle)
                 return observed
 
             # 指令を実測へ再アンカーしている以上、引っかかった機構は実測の移動量で
@@ -677,6 +711,21 @@ class HomingRunner:
             )
         return None
 
+    async def _stop_here(self, spec: AxisSpec, handle: AxisHandle) -> None:
+        """「その場で止まれ」。**実測を指令の単位のまま書き戻す唯一の口。**
+
+        値へ換算して戻すと (`to_commands(to_value(…))`) 複数モータ軸では平均を挟む
+        ぶん往復が丸め誤差を生み、それが非ゼロの `delta` として可動端の歯止めへ
+        届く —— **止めるための指令が、止まっていないことを理由に拒否される**
+        (`AxisHandle.observed_commands` と `LimitMonitor._stop_here` が同じ理由で
+        同じ形をしている)。平均へ寄せないので、各モータは自分の位置を保持する。
+        """
+        try:
+            commands = handle.observed_commands()
+        except Exception as exc:
+            raise HomingError(f"軸 '{spec.name}' の現在位置を読めません ({exc})") from exc
+        await handle.set_target_value(commands)
+
     async def _stop_here_if_lost_each(
         self, spec: AxisSpec, handle: AxisHandle, homing: HomingSpec
     ) -> None:
@@ -684,7 +733,7 @@ class HomingRunner:
         lost = self._feedback_lost(spec, homing)
         if lost is None:
             return
-        await handle.set_target_value(spec.to_commands_each(self._observe_each(spec, handle)))
+        await self._stop_here(spec, handle)
         raise HomingError(lost)
 
     async def _wait_step(

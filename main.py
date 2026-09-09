@@ -46,6 +46,7 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
+from lib.motion_guard import SensorSuspension
 from lib.sequence.engine import (
     NO_LIMIT_INTERVENTION,
     LimitIntervention,
@@ -317,6 +318,7 @@ def _wire_motor_check_sequence(
     target_refreshers: list[TargetRefresher],
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
+    sensor_suspension: SensorSuspension,
 ) -> None:
     if not tables:
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
@@ -342,8 +344,11 @@ def _wire_motor_check_sequence(
     # 全 CANManager を横断した 1 つの読み口で両ハンドぶんに答えられる。
     # **零点確定もこの同じ読み口を使う** —— 可動端インターロックと零点確定で
     # 別々に組むと、片方だけが `None` (読めていない) を `False` へ丸めた状態が作れる
+    # **零点確定には生の読み口を、歯止めには覆いを掛けた口を渡す。** 覆いは整列段の
+    # あいだ「押されていない」と答えるので、零点確定自身がそれを読むと自分の目を塞ぐ
+    # (探索も離脱も「今 ON か」で進む)
     sensor_read = _make_sensor_reader(can_managers, feedback_timeout_ms=feedback_timeout_ms)
-    motors = MotorGroup(sensor_active=sensor_read)
+    motors = MotorGroup(sensor_active=sensor_suspension.wrap(sensor_read))
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
@@ -419,6 +424,7 @@ def _wire_motor_check_sequence(
             motor_is_energized=_motor_is_energized,
             origin_capturable=_origin_capturable,
             capture_origin=_capture_origin,
+            suspend_sensors=sensor_suspension.suspend,
         )
         sequence.bind_homing(runner)
         # 束ねると「サブハンドのつもりでメインハンドが動く」が作れる
@@ -998,6 +1004,7 @@ def _wire_one_robot(
     dry_run: bool,
     is_estop_active: EStopChecker,
     e_stop_tasks: set[asyncio.Task[None]],
+    sensor_suspension: SensorSuspension,
 ) -> _RobotWiring:
     robot_name = robot.robot_name
     can_manager, motors = _setup_robot(robot, system.can_buses, dry_run=dry_run)
@@ -1009,8 +1016,10 @@ def _wire_one_robot(
     positions = _load_position_table_file(_positions_path(config_path, robot_name))
     seq.bind_positions(positions)
 
-    sensor_read = _make_sensor_reader(
-        [can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms
+    # 歯止め (指令の入口と 50Hz 監視) が読む口は覆いを通す。零点確定の整列段が
+    # 「まだ押されていない側だけを進める」あいだ、その軸の原点センサだけを外す
+    sensor_read = sensor_suspension.wrap(
+        _make_sensor_reader([can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms)
     )
     loops = _wire_robot_motors(
         robot,
@@ -1224,6 +1233,11 @@ async def main() -> None:
     def is_estop_active() -> bool:
         return server.e_stop_active
 
+    # **1 つを両ハンドで共有する。** 零点確定は両ハンドを 1 本のシーケンスで
+    # 走らせるので、覆いが機体ごとに別物だと整列段で外したつもりのセンサが
+    # もう一方の読み口では押されたまま残る (症状はその軸だけ整列段で必ず失敗)
+    sensor_suspension = SensorSuspension()
+
     wirings = [
         _wire_one_robot(
             server,
@@ -1233,6 +1247,7 @@ async def main() -> None:
             dry_run=args.dry_run,
             is_estop_active=is_estop_active,
             e_stop_tasks=e_stop_tasks,
+            sensor_suspension=sensor_suspension,
         )
         for config_path, robot in loaded
     ]
@@ -1249,6 +1264,7 @@ async def main() -> None:
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         # 付け替えの窓で停止が入ると、停止の disable の後に enable が届いて励磁が残る。
         is_estop_active=is_estop_active,
+        sensor_suspension=sensor_suspension,
     )
 
     try:

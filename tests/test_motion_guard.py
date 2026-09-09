@@ -18,7 +18,13 @@ import pytest
 
 from lib.drivers.base import NO_TELEMETRY, ControlMode, TelemetrySupport
 from lib.manual import ManualController
-from lib.motion_guard import GuardViolation, LimitSpec, MotionGuard, MotionGuardSpec
+from lib.motion_guard import (
+    GuardViolation,
+    LimitSpec,
+    MotionGuard,
+    MotionGuardSpec,
+    SensorSuspension,
+)
 from lib.sequence.engine import Sequence
 from lib.sequence.homing import HomingRunner
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle
@@ -114,6 +120,106 @@ class TestLimitInterlock:
             unit="mm",
             sensor_active=_sensors(front=True, rear=True),
         )
+
+
+class TestSeveralSwitchesOnOneEnd:
+    """**左右直結ペアは同じ端に 1 本ずつ持つ** (`y_axis` の左右の原点スイッチ)。
+
+    片方だけ宣言すると守りが半分になり、しかもどちらが落ちているかは機構が
+    壊れるまで分からない。軸は 1 つなので、**1 本でも押されていればその向きへ
+    進める余地はもう無い。**
+    """
+
+    def _pair_guard(self) -> MotionGuard:
+        return MotionGuard(
+            MotionGuardSpec(limits=LimitSpec(minus=("origin_r", "origin_l")), max_step=50.0)
+        )
+
+    def test_一本目が押されていれば止める(self) -> None:
+        with pytest.raises(GuardViolation, match="origin_r"):
+            self._pair_guard().check_command(
+                axis="y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(origin_r=True, origin_l=False),
+            )
+
+    def test_二本目だけが押されていても止める(self) -> None:
+        """**1 本目で打ち切ると、2 本目のスイッチは飾りになる。**
+
+        症状は「左は端で止まるのに右は踏み越える」で、機構が片側だけ壊れる。
+        """
+        with pytest.raises(GuardViolation, match="origin_l"):
+            self._pair_guard().check_command(
+                axis="y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(origin_r=False, origin_l=True),
+            )
+
+    def test_二本目だけが読めていなくても止める(self) -> None:
+        """**片方が読めているからといって、読めていない側を素通りさせない。**
+
+        丸めると、配線が抜けた 1 本が「押されていない = 進んでよい」に化ける。
+        """
+        with pytest.raises(GuardViolation, match="読めていない"):
+            self._pair_guard().check_command(
+                axis="y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(origin_r=False, origin_l=None),
+            )
+
+    def test_読めていない側を先に言う(self) -> None:
+        """端に着いていることは機構の姿勢から読めるが、死んだ 1 本は画面にしか出ない。"""
+        with pytest.raises(GuardViolation, match="'origin_l' が読めていない"):
+            self._pair_guard().check_command(
+                axis="y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(origin_r=True, origin_l=None),
+            )
+
+    def test_全部離れていれば通す(self) -> None:
+        self._pair_guard().check_command(
+            axis="y_axis",
+            current=0.0,
+            target=-1.0,
+            unit="mm",
+            sensor_active=_sensors(origin_r=False, origin_l=False),
+        )
+
+    def test_離れる向きは押されていても通す(self) -> None:
+        """零点確定の離脱段と、端に張り付いた軸の手動退避がこの向きを使う。"""
+        self._pair_guard().check_command(
+            axis="y_axis",
+            current=0.0,
+            target=1.0,
+            unit="mm",
+            sensor_active=_sensors(origin_r=True, origin_l=True),
+        )
+
+    def test_止めたセンサ名が文面に出る(self) -> None:
+        """どちらのスイッチで止まったかが出ないと、操縦者は 2 本を順に触って探す。"""
+        with pytest.raises(GuardViolation, match="'origin_r' / 'origin_l'"):
+            self._pair_guard().check_command(
+                axis="y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(origin_r=True, origin_l=True),
+            )
+
+    def test_一本を文字列で書いた宣言はそのまま通る(self) -> None:
+        """既存の `plus: <センサ名>` を書き換えさせない (差分に紛れて向きを取り違える)。"""
+        guard = MotionGuard(MotionGuardSpec(limits=LimitSpec(plus="front")))
+
+        with pytest.raises(GuardViolation, match="'front'"):
+            guard.check_limit(axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=True))
 
 
 class TestJumpGuard:
@@ -493,3 +599,57 @@ class TestHomingStillWorks:
         await self._runner(state).home(table.axis("sub_y_axis"), handle)
 
         assert state["position"] >= 5.0
+
+
+class TestSensorSuspension:
+    """整列段のあいだだけ、その軸の原点センサを歯止めから外す覆い。
+
+    **要るのは零点確定の整列段ただ 1 つ** (左右に 1 本ずつスイッチが付く軸で、
+    まだ当たっていない側だけを端へ進める段)。噛み合わせは
+    `tests/test_homing.py::TestAlignsWithTheGuardArmed` が実物どうしで見る。
+    """
+
+    def test_覆っている間だけ押されていないと答える(self) -> None:
+        suspension = SensorSuspension()
+        read = suspension.wrap(_sensors(origin_r=True))
+
+        assert read("origin_r") is True
+        with suspension.suspend(["origin_r"]):
+            assert read("origin_r") is False
+        assert read("origin_r") is True
+
+    def test_名指ししていないセンサは覆わない(self) -> None:
+        """**軸まるごと外すと、反対端の守りまで消える。**"""
+        suspension = SensorSuspension()
+        read = suspension.wrap(_sensors(origin_r=True, rear=True))
+
+        with suspension.suspend(["origin_r"]):
+            assert read("rear") is True
+
+    def test_読めていないセンサも押されていない扱いにする(self) -> None:
+        """`None` のままだと歯止めが安全側 (止まる) へ転び、覆う目的が果たせない。"""
+        suspension = SensorSuspension()
+        read = suspension.wrap(_sensors(origin_r=None))
+
+        with suspension.suspend(["origin_r"]):
+            assert read("origin_r") is False
+
+    def test_多重に掛けても早く外れない(self) -> None:
+        suspension = SensorSuspension()
+        read = suspension.wrap(_sensors(origin_r=True))
+
+        with suspension.suspend(["origin_r"]):
+            with suspension.suspend(["origin_r"]):
+                assert read("origin_r") is False
+            assert read("origin_r") is False
+        assert read("origin_r") is True
+
+    def test_例外で抜けても必ず外れる(self) -> None:
+        """外れ残ると、その端は試合が終わるまで守られない。"""
+        suspension = SensorSuspension()
+        read = suspension.wrap(_sensors(origin_r=True))
+
+        with pytest.raises(RuntimeError), suspension.suspend(["origin_r"]):
+            raise RuntimeError("整列段が落ちた")
+
+        assert read("origin_r") is True
