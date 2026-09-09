@@ -112,17 +112,8 @@ axes:
   valve_5: *valve_axis
   valve_6: *valve_axis
 
-  # TODO(実機で確認): settle_s はポンプが規定の負圧 / 正圧に達するまでの時間。
+  # TODO(実機で確認): settle_s はポンプが規定の負圧に達するまでの時間。
   pump_vac:
-    unit: duty
-    command_unit: duty
-    command_mode: duty
-    scale: 1.0
-    offset: 0.0
-    settle_s: 0.5
-    timeout_s: 1.0
-
-  pump_blow:
     unit: duty
     command_unit: duty
     command_mode: duty
@@ -160,9 +151,11 @@ positions:
     home: 0.0            # 収納姿勢 [deg]
     working: 90.0        # 作業姿勢 [deg]
 
+  # 三方弁なので閉じた側が大気開放になる。ワークの解放は閉じるだけで済み、
+  # 排気の駆動源を別に持たない。
   valve_1: &valve_states
     open: 1.0            # 開 (吸着パッドへ吸気経路をつなぐ)
-    closed: 0.0          # 閉 (吸気経路を遮断)
+    closed: 0.0          # 閉 (吸気経路を遮断し、パッド側を大気開放)
   valve_2: *valve_states
   valve_3: *valve_states
   valve_4: *valve_states
@@ -174,7 +167,3 @@ positions:
   pump_vac:
     stop: 0.0            # 停止 [duty]
     run: 0.95             # 吸気 [duty]
-
-  pump_blow:
-    stop: 0.0            # 停止 [duty]
-    run: 0.95             # 排気 (ワークを離すときの正圧) [duty]

@@ -115,13 +115,6 @@ motors:
     control_type: duty
     expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
-  pump_blow:
-    driver: generic
-    bus: generic_bus
-    can_id: 0x82               # DC 基板 #0 ch2
-    control_type: duty
-    expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
-
 sensors:
   sub_y_axis_f_limit_sensor:
     bus: generic_bus
