@@ -20,6 +20,19 @@ class SequenceTimeoutError(RuntimeError):
     """目標位置に到達しないままタイムアウトした。"""
 
 
+class LimitInterventionError(SequenceTimeoutError):
+    """可動端保護が移動を止めたので、そのステップを失敗として扱った。
+
+    **中身はタイムアウトではない。** 待ち時間が足りなかったのではなく、機構が端に
+    着いたので保護が目標を実測へ書き直した。同じ型で運ぶと、操縦者は `timeout_s`
+    を伸ばす側を疑い、配線・向き・スケールの食い違いに辿り着けない。
+
+    **`SequenceTimeoutError` の派生にしてあるのは、既存の捕捉経路を素通りさせる
+    ため。** 移動の失敗を型で拾う経路 (`Sequence.run` の `except Exception`) は
+    どちらも同じ扱いでよく、狭めた型を投げても失敗が握り潰されない。
+    """
+
+
 class AxisSyncError(RuntimeError):
     """左右ペア軸の位置ずれ (sync_tolerance 超過) を検知した。"""
 
@@ -228,7 +241,7 @@ class Sequence:
             if (now := self._limit_intervention(axis)).count != previous.count
         ]
         if stopped:
-            raise SequenceTimeoutError(
+            raise LimitInterventionError(
                 f"シーケンス '{self.name}': 可動端保護が移動を止めました ({', '.join(stopped)})"
             )
 

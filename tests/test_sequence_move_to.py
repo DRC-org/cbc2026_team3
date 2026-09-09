@@ -16,6 +16,7 @@ from lib.sequence.engine import (
     NO_LIMIT_INTERVENTION,
     AxisSyncError,
     LimitIntervention,
+    LimitInterventionError,
     Sequence,
     SequenceTimeoutError,
     step,
@@ -509,8 +510,28 @@ class TestLimitIntervention:
         interventions = _Interventions()
         seq = self._sequence(_BentDriver("lift_motor", interventions, "lift_motor"), interventions)
 
-        with pytest.raises(SequenceTimeoutError, match="rear_switch"):
+        with pytest.raises(LimitInterventionError, match="rear_switch"):
             await seq.move_to({"lift_motor": "work"})
+
+    async def test_保護の介入はタイムアウトと別の型で出る(self) -> None:
+        """型で区別できないと、操縦者が `timeout_s` を伸ばす側を疑い続ける。"""
+        interventions = _Interventions()
+        seq = self._sequence(_BentDriver("lift_motor", interventions, "lift_motor"), interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work"})
+
+        assert type(caught.value) is LimitInterventionError
+
+    async def test_到達しなかっただけならタイムアウトのまま(self) -> None:
+        """保護が絡まない失敗まで新しい型にすると、区別そのものが消える。"""
+        interventions = _Interventions()
+        seq = self._sequence(_EchoDriver("lift_motor", reaches=False), interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work"})
+
+        assert not isinstance(caught.value, LimitInterventionError)
 
     async def test_止められなかった移動は成功する(self) -> None:
         interventions = _Interventions()
