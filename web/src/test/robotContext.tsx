@@ -4,14 +4,26 @@ import { vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
 import type { RobotContextValue } from "@/context/RobotContext";
-import type { HomingSnapshot, MatchState, MotorCheckSnapshot, ServerInfo } from "@/lib/protocol";
-import { emptyHomingState, emptyMotorCheckState } from "@/lib/robotReducer";
+import type {
+  HomingSnapshot,
+  MatchState,
+  MotorCheckSnapshot,
+  ServerInfo,
+  SwitchMeasureSnapshot,
+} from "@/lib/protocol";
+import {
+  emptyHomingState,
+  emptyMotorCheckState,
+  emptySwitchMeasureState,
+} from "@/lib/robotReducer";
 
 export type { RobotContextValue };
 
 export const EMPTY_MOTOR_CHECK: MotorCheckSnapshot = emptyMotorCheckState();
 
 export const EMPTY_HOMING: HomingSnapshot = emptyHomingState();
+
+export const EMPTY_SWITCH_MEASURE: SwitchMeasureSnapshot = emptySwitchMeasureState();
 
 export const DEFAULT_MATCH_STATE: MatchState = {
   court: "red",
@@ -38,6 +50,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     healthEvents: [],
     motorCheck: emptyMotorCheckState(),
     homing: emptyHomingState(),
+    switchMeasure: emptySwitchMeasureState(),
     matchState: DEFAULT_MATCH_STATE,
     serverInfo: DEFAULT_SERVER_INFO,
     rejection: null,

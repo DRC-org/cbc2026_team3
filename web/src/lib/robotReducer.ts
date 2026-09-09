@@ -6,6 +6,7 @@ import type {
   RobotState,
   ServerInfo,
   ServerMessage,
+  SwitchMeasureSnapshot,
 } from "@/lib/protocol";
 import type { EpochMs } from "@/lib/time";
 
@@ -27,6 +28,7 @@ export interface RobotUiState {
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
   homing: HomingSnapshot;
+  switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
@@ -67,6 +69,20 @@ export function emptyHomingState(): HomingSnapshot {
   };
 }
 
+export function emptySwitchMeasureState(): SwitchMeasureSnapshot {
+  return {
+    available: false,
+    blocked_reason: "サーバーから作動点測定の状態を受信していません",
+    running: false,
+    robot: null,
+    axis: null,
+    direction: null,
+    result: null,
+    error: null,
+    targets: {},
+  };
+}
+
 const INITIAL_MATCH_STATE: MatchState = {
   court: "red",
   phase: "setup",
@@ -89,6 +105,7 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   healthEvents: [],
   motorCheck: emptyMotorCheckState(),
   homing: emptyHomingState(),
+  switchMeasure: emptySwitchMeasureState(),
   matchState: INITIAL_MATCH_STATE,
   serverInfo: INITIAL_SERVER_INFO,
   rejection: null,
@@ -144,6 +161,9 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
 
     case "homing_state":
       return { ...state, homing: message.homing };
+
+    case "switch_measure_state":
+      return { ...state, switchMeasure: message.switchMeasure };
   }
 }
 
