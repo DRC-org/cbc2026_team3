@@ -1169,8 +1169,8 @@ class TestMotionGuardSpec:
 
         assert guard is not None
         assert guard.limits is not None
-        assert guard.limits.plus == "front_switch"
-        assert guard.limits.minus == "rear_switch"
+        assert guard.limits.plus == ("front_switch",)
+        assert guard.limits.minus == ("rear_switch",)
         assert guard.max_step == pytest.approx(800.0)
         assert guard.stall_torque == pytest.approx(2.0)
 
@@ -1183,8 +1183,8 @@ class TestMotionGuardSpec:
 
         assert guard is not None
         assert guard.limits is not None
-        assert guard.limits.plus == "front_switch"
-        assert guard.limits.minus is None
+        assert guard.limits.plus == ("front_switch",)
+        assert guard.limits.minus == ()
         assert guard.max_step is None
         assert guard.stall_torque is None
 
@@ -1196,6 +1196,31 @@ class TestMotionGuardSpec:
         """`plus` / `minus` 以外を黙って捨てると、綴り違いが「守っていない端」になる。"""
         with pytest.raises(ValueError, match="up"):
             load_position_table(self._axis(guard={"limits": {"up": "front_switch"}}))
+
+    def test_一つの端に複数本を書ける(self) -> None:
+        """左右直結ペアは同じ端に 1 本ずつ持つ (`y_axis` の左右の原点スイッチ)。"""
+        table = load_position_table(
+            self._axis(guard={"limits": {"minus": ["origin_r", "origin_l"]}}), source="<test>"
+        )
+        guard = table.axis("sub_y_axis").guard
+
+        assert guard is not None
+        assert guard.limits is not None
+        assert guard.limits.minus == ("origin_r", "origin_l")
+
+    def test_空の並びを拒否する(self) -> None:
+        """書いたのに 1 本も無い端は、書き忘れと区別が付かない。"""
+        with pytest.raises(ValueError, match=r"limits\.minus"):
+            load_position_table(self._axis(guard={"limits": {"minus": []}}))
+
+    def test_同じセンサを二度書いたら拒否する(self) -> None:
+        """畳むと、2 本書いたつもりが同じ名前だったときに気付けない。"""
+        with pytest.raises(ValueError, match="2 回"):
+            load_position_table(self._axis(guard={"limits": {"minus": ["origin_r", "origin_r"]}}))
+
+    def test_センサ名でない要素を拒否する(self) -> None:
+        with pytest.raises(ValueError, match=r"limits\.plus"):
+            load_position_table(self._axis(guard={"limits": {"plus": ["front_switch", 3]}}))
 
     def test_非正の_max_step_は拒否する(self) -> None:
         with pytest.raises(ValueError, match="max_step"):
@@ -1416,3 +1441,73 @@ class TestToCommandsEach:
     def test_知らないモータ名があれば_KeyError(self) -> None:
         with pytest.raises(KeyError, match="y_axis_x"):
             self._spec().to_commands_each({"y_axis_r": 1.0, "y_axis_l": 1.0, "y_axis_x": 1.0})
+
+
+class TestGuardLimitsMatchHoming:
+    """零点確定で当てに行くスイッチは、**同じ向きの可動端**として宣言されていること。
+
+    両者はセンサ名の文字列でしか繋がっていないので、取り違えても yaml は読める。
+    現れ方はどちらも「機構を壊すまで出ない」か「その軸だけいつも零点確定に失敗する」。
+    """
+
+    @staticmethod
+    def _table(*, direction: float, limits: dict) -> dict:
+        return {
+            "axes": {
+                "y_axis": {
+                    "unit": "mm",
+                    "command_unit": "deg",
+                    "tolerance": 1.0,
+                    "sync_tolerance": 10.0,
+                    "motors": {"y_axis_r": {"scale": 55.0}, "y_axis_l": {"scale": -55.0}},
+                    "homing": {
+                        "sensors": {"y_axis_r": "origin_r", "y_axis_l": "origin_l"},
+                        "direction": direction,
+                        "search_distance": 650.0,
+                        "align_distance": 5.0,
+                        "step": 0.5,
+                        "settle_s": 0.05,
+                    },
+                    "guard": {"limits": limits},
+                }
+            },
+            "positions": {"y_axis": {"home": 0.0}},
+        }
+
+    def test_探索方向の端に全部書いてあれば通る(self) -> None:
+        table = load_position_table(
+            self._table(direction=-1, limits={"minus": ["origin_r", "origin_l"]}),
+            source="<test>",
+        )
+
+        guard = table.axis("y_axis").guard
+        assert guard is not None and guard.limits is not None
+        assert guard.limits.minus == ("origin_r", "origin_l")
+
+    def test_一本だけ書き忘れたら拒否する(self) -> None:
+        """**書き忘れた 1 本は「守られていない端」として残る。**"""
+        with pytest.raises(ValueError, match="origin_l"):
+            load_position_table(self._table(direction=-1, limits={"minus": ["origin_r"]}))
+
+    def test_歯止めそのものを書かない軸は対象外(self) -> None:
+        raw = self._table(direction=-1, limits={"minus": ["origin_r", "origin_l"]})
+        del raw["axes"]["y_axis"]["guard"]
+
+        assert load_position_table(raw, source="<test>").axis("y_axis").guard is None
+
+    def test_逆の端に書いたら拒否する(self) -> None:
+        """逆に書くと守りが反転し、押されている端へ進む指令だけが通る。"""
+        with pytest.raises(ValueError, match="plus"):
+            load_position_table(
+                self._table(direction=-1, limits={"plus": ["origin_r", "origin_l"]})
+            )
+
+    def test_探索方向が正なら_plus_側(self) -> None:
+        table = load_position_table(
+            self._table(direction=1, limits={"plus": ["origin_r", "origin_l"]}),
+            source="<test>",
+        )
+
+        guard = table.axis("y_axis").guard
+        assert guard is not None and guard.limits is not None
+        assert guard.limits.plus == ("origin_r", "origin_l")

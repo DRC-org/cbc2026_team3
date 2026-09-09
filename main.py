@@ -46,7 +46,13 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, load_checklist_definitions
-from lib.sequence.engine import Sequence
+from lib.motion_guard import SensorSuspension
+from lib.sequence.engine import (
+    NO_LIMIT_INTERVENTION,
+    LimitIntervention,
+    LimitInterventions,
+    Sequence,
+)
 from lib.sequence.homing import HomingError, HomingRunner, homing_axis_names
 from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
 from lib.sequence.positions import PositionTable, load_position_table
@@ -308,9 +314,11 @@ def _wire_motor_check_sequence(
     loops: list[M3508PositionLoop],
     can_managers: list[CANManager],
     sync_monitors: list[SyncMonitor],
+    limit_monitors: list[LimitMonitor],
     target_refreshers: list[TargetRefresher],
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
+    sensor_suspension: SensorSuspension,
 ) -> None:
     if not tables:
         logger.info("統合動作確認: 位置定数が 1 つも無いため登録しない")
@@ -336,14 +344,20 @@ def _wire_motor_check_sequence(
     # 全 CANManager を横断した 1 つの読み口で両ハンドぶんに答えられる。
     # **零点確定もこの同じ読み口を使う** —— 可動端インターロックと零点確定で
     # 別々に組むと、片方だけが `None` (読めていない) を `False` へ丸めた状態が作れる
+    # **零点確定には生の読み口を、歯止めには覆いを掛けた口を渡す。** 覆いは整列段の
+    # あいだ「押されていない」と答えるので、零点確定自身がそれを読むと自分の目を塞ぐ
+    # (探索も離脱も「今 ON か」で進む)
     sensor_read = _make_sensor_reader(can_managers, feedback_timeout_ms=feedback_timeout_ms)
-    motors = MotorGroup(sensor_active=sensor_read)
+    motors = MotorGroup(sensor_active=sensor_suspension.wrap(sensor_read))
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
 
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
+    # 動作確認も `move_to` で駆動するので、保護に曲げられた移動はここでも失敗させる
+    # (黙って進むと、軸が途中に居るまま全ステップ PASSED になる)
+    sequence.bind_limit_interventions(_make_limit_interventions(limit_monitors))
 
     homing_axes = homing_axis_names(merged)
     if homing_axes:
@@ -351,17 +365,6 @@ def _wire_motor_check_sequence(
         freshness = FeedbackFreshness(
             _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
         )
-
-        def _sensor_latched(name: str) -> bool | None:
-            # ラッチを持たないドライバで現在値へ落とすと、ON 区間が step より狭い
-            # ときの取りこぼしが黙って戻る。判断は HomingRunner が持つ
-            sensor = sensors.get(name)
-            if sensor is None:
-                return None
-            consume = getattr(sensor, "consume_sensor_latch", None)
-            if not callable(consume):
-                return None
-            return bool(consume())
 
         def _sensor_is_stale(name: str) -> bool:
             if name not in sensors:
@@ -415,12 +418,13 @@ def _wire_motor_check_sequence(
 
         runner = HomingRunner(
             sensor_active=sensor_read,
-            sensor_latched=_sensor_latched,
+            sensor_contact_count=_make_sensor_contact_reader(can_managers),
             sensor_is_stale=_sensor_is_stale,
             motor_is_stale=_motor_is_stale,
             motor_is_energized=_motor_is_energized,
             origin_capturable=_origin_capturable,
             capture_origin=_capture_origin,
+            suspend_sensors=sensor_suspension.suspend,
         )
         sequence.bind_homing(runner)
         # 束ねると「サブハンドのつもりでメインハンドが動く」が作れる
@@ -478,6 +482,27 @@ def _make_sensor_reader(
         return bool(getattr(sensor, "sensor_active", False))
 
     return sensor_active
+
+
+def _make_sensor_contact_reader(managers: list[CANManager]) -> Callable[[str], int | None]:
+    """接触 (OFF→ON) の累計の読み口。**カウンタを持たないドライバは `None`。**
+
+    現在値へ落とすと、ON 区間が観測周期より狭い接触が黙って取りこぼされる。
+    **零点確定と移動中の可動端監視が同じ読み口を使う** —— カウンタは読んでも
+    減らないので、読み手が何人いても互いのぶんを消さない (基準値は読み手が控える)。
+    """
+    sensors = {name: sensor for mgr in managers for name, sensor in mgr.sensors.items()}
+
+    def contact_count(name: str) -> int | None:
+        sensor = sensors.get(name)
+        if sensor is None:
+            return None
+        count = getattr(sensor, "sensor_contact_count", None)
+        if not isinstance(count, int):
+            return None
+        return count
+
+    return contact_count
 
 
 def _merged_last_feedback_at(managers: list[CANManager]) -> Callable[[str], float | None]:
@@ -746,6 +771,7 @@ def _build_limit_monitors(
     sequence: Sequence,
     *,
     sensor_active: Callable[[str], bool | None],
+    sensor_contact_count: Callable[[str], int | None],
 ) -> list[LimitMonitor]:
     """移動中の可動端監視。`guard.limits` を書いた軸が 1 本も無ければ回さない。
 
@@ -759,11 +785,29 @@ def _build_limit_monitors(
         positions,
         sequence.motors,
         sensor_active=sensor_active,
+        sensor_contact_count=sensor_contact_count,
         court=lambda: sequence.court,
     )
     if not monitor.axis_names:
         return []
     return [monitor]
+
+
+def _make_limit_interventions(monitors: list[LimitMonitor]) -> LimitInterventions:
+    """`move_to` が「保護に曲げられた移動」を知る読み口。
+
+    保護が目標を実測へ書き直すと到達判定は必ず成立するので、配線しないと**軸は
+    途中に居るのにシーケンスだけが先へ進む**。軸名はロボット横断に一意なので、
+    その軸を見ている監視 1 つが答える。
+    """
+
+    def interventions(axis: str) -> LimitIntervention:
+        for monitor in monitors:
+            if axis in monitor.axis_names:
+                return monitor.intervention(axis)
+        return NO_LIMIT_INTERVENTION
+
+    return interventions
 
 
 def _build_manual_controller(sequence: Sequence, positions: PositionTable) -> ManualController:
@@ -960,6 +1004,7 @@ def _wire_one_robot(
     dry_run: bool,
     is_estop_active: EStopChecker,
     e_stop_tasks: set[asyncio.Task[None]],
+    sensor_suspension: SensorSuspension,
 ) -> _RobotWiring:
     robot_name = robot.robot_name
     can_manager, motors = _setup_robot(robot, system.can_buses, dry_run=dry_run)
@@ -971,8 +1016,10 @@ def _wire_one_robot(
     positions = _load_position_table_file(_positions_path(config_path, robot_name))
     seq.bind_positions(positions)
 
-    sensor_read = _make_sensor_reader(
-        [can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms
+    # 歯止め (指令の入口と 50Hz 監視) が読む口は覆いを通す。零点確定の整列段が
+    # 「まだ押されていない側だけを進める」あいだ、その軸の原点センサだけを外す
+    sensor_read = sensor_suspension.wrap(
+        _make_sensor_reader([can_manager], feedback_timeout_ms=system.health.feedback_timeout_ms)
     )
     loops = _wire_robot_motors(
         robot,
@@ -1010,7 +1057,13 @@ def _wire_one_robot(
 
     manual = _build_manual_controller(seq, positions)
 
-    limit_monitors = _build_limit_monitors(positions, seq, sensor_active=sensor_read)
+    limit_monitors = _build_limit_monitors(
+        positions,
+        seq,
+        sensor_active=sensor_read,
+        sensor_contact_count=_make_sensor_contact_reader([can_manager]),
+    )
+    seq.bind_limit_interventions(_make_limit_interventions(limit_monitors))
 
     server.add_robot(
         robot_name,
@@ -1180,6 +1233,11 @@ async def main() -> None:
     def is_estop_active() -> bool:
         return server.e_stop_active
 
+    # **1 つを両ハンドで共有する。** 零点確定は両ハンドを 1 本のシーケンスで
+    # 走らせるので、覆いが機体ごとに別物だと整列段で外したつもりのセンサが
+    # もう一方の読み口では押されたまま残る (症状はその軸だけ整列段で必ず失敗)
+    sensor_suspension = SensorSuspension()
+
     wirings = [
         _wire_one_robot(
             server,
@@ -1189,6 +1247,7 @@ async def main() -> None:
             dry_run=args.dry_run,
             is_estop_active=is_estop_active,
             e_stop_tasks=e_stop_tasks,
+            sensor_suspension=sensor_suspension,
         )
         for config_path, robot in loaded
     ]
@@ -1200,10 +1259,12 @@ async def main() -> None:
         loops=[loop for w in wirings for loop in w.position_loops],
         can_managers=[w.can_manager for w in wirings],
         sync_monitors=[monitor for w in wirings for monitor in w.sync_monitors],
+        limit_monitors=[monitor for w in wirings for monitor in w.limit_monitors],
         target_refreshers=[r for w in wirings for r in w.target_refreshers],
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         # 付け替えの窓で停止が入ると、停止の disable の後に enable が届いて励磁が残る。
         is_estop_active=is_estop_active,
+        sensor_suspension=sensor_suspension,
     )
 
     try:

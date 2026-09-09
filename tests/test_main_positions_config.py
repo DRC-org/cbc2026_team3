@@ -101,3 +101,56 @@ class TestShippedYAxisHoming:
 
         assert manual is not None
         assert homing.search_distance == pytest.approx(manual.max_value - manual.min_value)
+
+
+class TestShippedMainHandGuard:
+    """メインハンド 3 本のスイッチが可動端の歯止めの入力になっていること。
+
+    スイッチと歯止めはセンサ名の文字列でしか繋がっていないので、書き忘れも
+    取り違えも yaml は読めてしまう。**`y_axis` は左右 2 本とも原点側に付く**ので、
+    1 本だけ書くと守りが半分になり、しかもどちらが落ちているかは機構が壊れるまで
+    分からない (向きの取り違えは `AxisSpec` が起動時に落とす)。
+    """
+
+    @pytest.fixture
+    def table(self):
+        return _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+
+    def test_y_axis_は左右_2_本とも原点側に宣言する(self, table) -> None:
+        spec = table.axis("y_axis")
+
+        assert spec.guard is not None
+        assert spec.guard.limits is not None
+        assert spec.guard.limits.minus == (
+            "y_axis_r_origin_sensor",
+            "y_axis_l_origin_sensor",
+        )
+        assert spec.guard.limits.plus == ()
+
+    def test_rotate_は原点側の_1_本を宣言する(self, table) -> None:
+        spec = table.axis("rotate")
+
+        assert spec.guard is not None
+        assert spec.guard.limits is not None
+        assert spec.guard.limits.minus == ("rotate_origin_sensor",)
+        assert spec.guard.limits.plus == ()
+
+    def test_零点確定のセンサが漏れなく歯止めに載っている(self, table) -> None:
+        for axis in ("y_axis", "rotate"):
+            spec = table.axis(axis)
+            assert spec.homing is not None
+            assert spec.guard is not None and spec.guard.limits is not None
+            assert set(spec.homing.sensor_names) <= set(spec.guard.limits.minus), axis
+
+    def test_跳躍量とトルクは未実測なので書かない(self, table) -> None:
+        """**省略は「その守りが無い」ことを意味する。** 実測が入るまで埋めない。
+
+        埋めると、効いている値なのか仮値なのかが config から読めなくなる
+        (`max_step` を狭く取ると正常な移動が拒否され、`stall_torque` は
+        M3508 が Nm を返さないので桁が合わない)。
+        """
+        for axis in ("y_axis", "rotate"):
+            spec = table.axis(axis)
+            assert spec.guard is not None
+            assert spec.guard.max_step is None, axis
+            assert spec.guard.stall_torque is None, axis

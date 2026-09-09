@@ -36,6 +36,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
+from lib.motion_guard import SensorSuspension
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -104,6 +105,11 @@ def _no_sensors(_name: str) -> bool | None:
     判定に現れない。**それでも `False` ではなく `None` を返す** —— 「読めていない」
     が既定であることを、テスト側の書き方でも崩さないため。
     """
+    return None
+
+
+def _no_contacts(_name: str) -> int | None:
+    """接触の累計を提供しないセンサ (カウンタを持たないドライバと同じ扱い)。"""
     return None
 
 
@@ -1519,6 +1525,7 @@ class TestLimitMonitorWiring:
             self._table(guard={"limits": {"minus": "sub_y_rear"}}),
             self._sequence(),
             sensor_active=_no_sensors,
+            sensor_contact_count=_no_contacts,
         )
 
         assert [monitor.axis_names for monitor in monitors] == [("sub_y_axis",)]
@@ -1526,10 +1533,30 @@ class TestLimitMonitorWiring:
     def test_対象の軸が無ければ回さない(self) -> None:
         assert (
             _build_limit_monitors(
-                self._table(guard=None), self._sequence(), sensor_active=_no_sensors
+                self._table(guard=None),
+                self._sequence(),
+                sensor_active=_no_sensors,
+                sensor_contact_count=_no_contacts,
             )
             == []
         )
+
+    async def test_止めた回数を_move_to_へ配線する(self) -> None:
+        """配線しないと、保護に曲げられた移動が「到達した」として次のステップへ進む。"""
+        sequence = self._sequence()
+        monitors = _build_limit_monitors(
+            self._table(guard={"limits": {"minus": "sub_y_rear"}}),
+            sequence,
+            sensor_active=_no_sensors,
+            sensor_contact_count=_no_contacts,
+        )
+        await sequence.motors["sub_y_axis"].set_target(ControlMode.POSITION, -10.0)
+        await monitors[0].step()
+
+        read = main._make_limit_interventions(monitors)
+
+        assert read("sub_y_axis").count == 1
+        assert read("居ない軸").count == 0
 
     async def test_起動で回し_終了で止める(self) -> None:
         monitor = MagicMock()
@@ -1954,9 +1981,11 @@ class TestMotorCheckWiring:
             loops=[],
             can_managers=[],
             sync_monitors=[],
+            limit_monitors=[],
             target_refreshers=[],
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
+            sensor_suspension=SensorSuspension(),
         )
         return server
 

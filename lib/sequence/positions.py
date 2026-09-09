@@ -273,6 +273,7 @@ class AxisSpec:
         self._check_manual_always()
         self._check_homing_sensor_map()
         self._check_align_distance()
+        self._check_guard_limits_match_homing()
         self._check_court_scale_sync()
 
     def _check_manual_always(self) -> None:
@@ -316,6 +317,49 @@ class AxisSpec:
             f"sync_tolerance ({self.sync_tolerance}) より小さい必要があります "
             "(整列段のずれが偏差許容差に届くと零点確定の最中に緊急停止します)"
         )
+
+    def _check_guard_limits_match_homing(self) -> None:
+        """零点確定で当てに行くスイッチは、**同じ向きの可動端**として宣言されていること。
+
+        両者はセンサ名の文字列でしか繋がっていないので、取り違えは黙って通る。
+        現れ方は 2 つとも「機構を壊すまで出ない」:
+
+        - **載せ忘れ** (左右 2 本のうち 1 本だけ書いた等) —— そのスイッチは探索で
+          当てた後、誰も守らない端として残る
+        - **逆側へ載せた** —— 守りが反転し、押されている端へ進む指令だけが通る。
+          しかも零点確定は 1 歩目から拒否されるので、症状は「その軸だけ
+          いつも零点確定で失敗する」になり、原因が config から読めない
+
+        `guard.limits` を書かない軸 (歯止めそのものが無い) は対象外。
+        """
+        if self.homing is None or self.guard is None or self.guard.limits is None:
+            return
+        limits = self.guard.limits
+        toward, away = (
+            (limits.minus, limits.plus)
+            if self.homing.direction < 0
+            else (limits.plus, limits.minus)
+        )
+        side = "minus" if self.homing.direction < 0 else "plus"
+        opposite = "plus" if self.homing.direction < 0 else "minus"
+
+        wrong = sorted(name for name in self.homing.sensor_names if name in away)
+        if wrong:
+            raise ValueError(
+                f"axes.{self.name}.guard.limits.{opposite} に原点センサ "
+                f"{', '.join(wrong)} が書かれています "
+                f"(homing.direction={self.homing.direction:+g} なので {side} 側です)。"
+                "逆に書くと守りが反転し、押されている端へ進む指令だけが通ります"
+            )
+
+        missing = sorted(name for name in self.homing.sensor_names if name not in toward)
+        if missing:
+            raise ValueError(
+                f"axes.{self.name}.guard.limits.{side} に原点センサ "
+                f"{', '.join(missing)} がありません "
+                "(探索で当てに行く端は必ず歯止めにも載せること。"
+                "載せ忘れた 1 本は「守られていない端」として残ります)"
+            )
 
     def _check_court_scale_sync(self) -> None:
         # 同期監視は起動時に 1 度だけ組まれてコートを知らないので、走行中に換算で落ちる
@@ -857,11 +901,15 @@ def _parse_guard(axis_name: str, raw: object) -> MotionGuardSpec | None:
 
 
 def _parse_guard_limits(axis_name: str, raw: object) -> LimitSpec | None:
-    """可動端のセンサ名を読む。**どちらの端も省略できる。**
+    """可動端のセンサ名を読む。**どちらの端も省略でき、1 つの端に何本でも書ける。**
 
     片端にしかスイッチが無い機構は普通にあるので、書かなかった側はインターロックが
     掛からない (= 守られていない端として残る)。**どちらが + でどちらが - かを
     取り違えると守りが反転する**ので、名前は必ず実機で当てて確かめること。
+
+    複数本は左右直結ペアのため (`y_axis` は同じ端に左右 1 本ずつ持つ)。1 本しか
+    無い端は文字列のまま書ける —— 書式を 1 つに強制すると、既にある宣言を
+    書き換える理由の無い変更が入り、その差分に紛れて向きを取り違えられる。
     """
     if raw is None:
         return None
@@ -875,16 +923,29 @@ def _parse_guard_limits(axis_name: str, raw: object) -> LimitSpec | None:
             f"(指定できるのは {', '.join(sorted(_GUARD_LIMIT_KEYS))})"
         )
 
-    names: dict[str, str | None] = {}
-    for key in ("plus", "minus"):
-        value = raw.get(key)
-        if value is None:
-            names[key] = None
-            continue
+    return LimitSpec(
+        plus=_parse_guard_limit_sensors(axis_name, "plus", raw.get("plus")),
+        minus=_parse_guard_limit_sensors(axis_name, "minus", raw.get("minus")),
+    )
+
+
+def _parse_guard_limit_sensors(axis_name: str, key: str, raw: object) -> tuple[str, ...]:
+    where = f"axes.{axis_name}.guard.limits.{key}"
+    if raw is None:
+        return ()
+    values = [raw] if isinstance(raw, str) else raw
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{where} はセンサ名の文字列か、その空でない並び: {raw!r}")
+
+    names: list[str] = []
+    for value in values:
         if not isinstance(value, str) or not value:
-            raise ValueError(f"axes.{axis_name}.guard.limits.{key} はセンサ名の文字列: {value!r}")
-        names[key] = value
-    return LimitSpec(plus=names["plus"], minus=names["minus"])
+            raise ValueError(f"{where} はセンサ名の文字列か、その空でない並び: {raw!r}")
+        # 重複を黙って畳むと、2 本書いたつもりの片方が誤って同じ名前でも気付けない
+        if value in names:
+            raise ValueError(f"{where} にセンサ '{value}' が 2 回書かれています")
+        names.append(value)
+    return tuple(names)
 
 
 def _parse_command_mode(axis_name: str, raw: object) -> ControlMode:

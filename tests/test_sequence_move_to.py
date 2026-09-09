@@ -12,7 +12,15 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
-from lib.sequence.engine import AxisSyncError, Sequence, SequenceTimeoutError, step
+from lib.sequence.engine import (
+    NO_LIMIT_INTERVENTION,
+    AxisSyncError,
+    LimitIntervention,
+    LimitInterventionError,
+    Sequence,
+    SequenceTimeoutError,
+    step,
+)
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, WaitInterruptedError
 from lib.sequence.positions import load_position_table
 from tests.fake_drivers import StubFeedbackDriver
@@ -452,3 +460,183 @@ class TestNonPositionAxis:
         await seq.move_to({"spinner": "run"})
 
         assert drivers["spinner"].commands == [(ControlMode.VELOCITY, 100.0)]
+
+
+class _Interventions:
+    """`LimitMonitor` の代わり。**回数と理由だけを注入で運ぶ** (層を 1 枚で見る)。"""
+
+    def __init__(self) -> None:
+        self.records: dict[str, LimitIntervention] = {}
+
+    def __call__(self, axis: str) -> LimitIntervention:
+        return self.records.get(axis, NO_LIMIT_INTERVENTION)
+
+    def stop(self, axis: str, reason: str) -> None:
+        self.records[axis] = LimitIntervention(count=self(axis).count + 1, reason=reason)
+
+
+class _BentDriver(_EchoDriver):
+    """指令を受けた瞬間に可動端保護が割り込んだ機体。
+
+    保護は目標を実測へ書き直すので、**到達判定は必ず成立する** (`reaches=True` の
+    まま止まる)。回数を見ないと、軸が途中に居るのにシーケンスだけが先へ進む。
+    """
+
+    def __init__(self, name: str, interventions: _Interventions, axis: str) -> None:
+        super().__init__(name)
+        self._interventions = interventions
+        self._axis = axis
+
+    def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        self._interventions.stop(self._axis, "可動端センサ 'rear_switch' が押されているため")
+        return super().encode_target(mode, value)
+
+
+class TestLimitIntervention:
+    """**曲げられた移動を成功と読まない。**"""
+
+    def _sequence(self, driver: _EchoDriver, interventions: _Interventions) -> Sequence:
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        group.add(MotorHandle(driver.name, driver, mgr, poll_interval=0.001))
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+        seq.bind_limit_interventions(interventions)
+        return seq
+
+    async def test_止められた移動は失敗する(self) -> None:
+        interventions = _Interventions()
+        seq = self._sequence(_BentDriver("lift_motor", interventions, "lift_motor"), interventions)
+
+        with pytest.raises(LimitInterventionError, match="rear_switch"):
+            await seq.move_to({"lift_motor": "work"})
+
+    async def test_保護の介入はタイムアウトと別の型で出る(self) -> None:
+        """型で区別できないと、操縦者が `timeout_s` を伸ばす側を疑い続ける。"""
+        interventions = _Interventions()
+        seq = self._sequence(_BentDriver("lift_motor", interventions, "lift_motor"), interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work"})
+
+        assert type(caught.value) is LimitInterventionError
+
+    async def test_到達しなかっただけならタイムアウトのまま(self) -> None:
+        """保護が絡まない失敗まで新しい型にすると、区別そのものが消える。"""
+        interventions = _Interventions()
+        seq = self._sequence(_EchoDriver("lift_motor", reaches=False), interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work"})
+
+        assert not isinstance(caught.value, LimitInterventionError)
+
+    async def test_止められなかった移動は成功する(self) -> None:
+        interventions = _Interventions()
+        seq = self._sequence(_EchoDriver("lift_motor"), interventions)
+
+        await seq.move_to({"lift_motor": "work"})
+
+    async def test_前の移動で数えたぶんでは失敗しない(self) -> None:
+        """回数は単調増加なので、移動ごとに前後で比べないと二度目以降が必ず落ちる。"""
+        interventions = _Interventions()
+        seq = self._sequence(_EchoDriver("lift_motor"), interventions)
+        interventions.stop("lift_motor", "前の移動で止まった")
+
+        await seq.move_to({"lift_motor": "work"})
+
+    async def test_配線しなければ従来どおり(self) -> None:
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        group.add(MotorHandle("lift_motor", _EchoDriver("lift_motor"), mgr, poll_interval=0.001))
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_POSITION_CONFIG))
+
+        await seq.move_to({"lift_motor": "work"})
+
+
+_TWO_AXIS_CONFIG = {
+    "axes": {
+        "lift_motor": {"unit": "mm", "command_unit": "deg", "scale": 100.0, "timeout_s": 0.05},
+        "arm_joint": {"unit": "deg", "command_unit": "deg", "timeout_s": 0.05},
+    },
+    "positions": {
+        "lift_motor": {"work": 3.0},
+        "arm_joint": {"extended": 30.0},
+    },
+}
+
+
+class TestFailureReasonsAreCombined:
+    """**保護の介入と未到達が同時に起きたら、両方を 1 つの例外で出す。**
+
+    片方で先に `raise` すると、もう片方の軸で何が起きたかが失敗表示から消える。
+    切り分けは「止められた軸」と「届かなかった軸」の対応で進むので辿れなくなる。
+    """
+
+    def _sequence(self, drivers: list[_EchoDriver], interventions: _Interventions) -> Sequence:
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        for driver in drivers:
+            group.add(MotorHandle(driver.name, driver, mgr, poll_interval=0.001))
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_TWO_AXIS_CONFIG))
+        seq.bind_limit_interventions(interventions)
+        return seq
+
+    def _both(self, interventions: _Interventions) -> Sequence:
+        return self._sequence(
+            [
+                _BentDriver("lift_motor", interventions, "lift_motor"),
+                _EchoDriver("arm_joint", reaches=False),
+            ],
+            interventions,
+        )
+
+    async def test_両方起きたら両方が出る(self) -> None:
+        interventions = _Interventions()
+        seq = self._both(interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
+
+        message = str(caught.value)
+        assert "rear_switch" in message
+        assert "arm_joint->extended" in message
+
+    async def test_保護が絡めば型は保護のほう(self) -> None:
+        """未到達も同時に起きたからといって、時間切れへ丸めない。"""
+        interventions = _Interventions()
+        seq = self._both(interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work", "arm_joint": "extended"})
+
+        assert type(caught.value) is LimitInterventionError
+
+    async def test_保護だけなら到達の話を混ぜない(self) -> None:
+        """単独の失敗が読みにくくなっては本末転倒。"""
+        interventions = _Interventions()
+        seq = self._sequence(
+            [_BentDriver("lift_motor", interventions, "lift_motor")], interventions
+        )
+
+        with pytest.raises(LimitInterventionError) as caught:
+            await seq.move_to({"lift_motor": "work"})
+
+        assert "到達しませんでした" not in str(caught.value)
+
+    async def test_未到達だけなら保護の話を混ぜない(self) -> None:
+        interventions = _Interventions()
+        seq = self._sequence([_EchoDriver("lift_motor", reaches=False)], interventions)
+
+        with pytest.raises(SequenceTimeoutError) as caught:
+            await seq.move_to({"lift_motor": "work"})
+
+        assert "可動端保護" not in str(caught.value)

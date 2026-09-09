@@ -10,7 +10,8 @@
 1. **可動端のインターロック** —— リミットスイッチが押されている向きへは、それ以上
    指令を出さない。**逆向き (離れる向き) は必ず通す** —— 塞ぐと機構端に張り付いた
    軸を手動でも戻せなくなり、退避路としての手動操縦が成立しなくなる。零点確定の
-   離脱段もこの向きを使う
+   離脱段もこの向きを使う。**1 つの向きに複数本のスイッチを宣言でき、1 本でも
+   押されていれば塞ぐ** (左右直結ペアは同じ端に 1 本ずつ持つ)
 2. **1 指令の跳躍量** —— 実測位置から `max_step` を超えて離れた目標を拒む。
    スケールや固定小数点レンジの取り違えは「桁が変わった目標値」として現れるので、
    **比が分からなくてもここで止まる**。実機では `p_max` の食い違いで位置が 80 倍に
@@ -29,34 +30,68 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
-__all__ = ["GuardViolation", "LimitSpec", "MotionGuard", "MotionGuardSpec"]
+__all__ = [
+    "GuardViolation",
+    "LimitSpec",
+    "MotionGuard",
+    "MotionGuardSpec",
+    "SensorSuspension",
+]
+
+
+def _sensor_names(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, Iterable):
+        return tuple(str(name) for name in raw)
+    raise TypeError(f"センサ名は文字列かその並び: {raw!r}")
+
+
+def _label(names: Iterable[str]) -> str:
+    return " / ".join(f"'{name}'" for name in names)
 
 
 @dataclass(frozen=True)
 class LimitSpec:
-    """軸の両端に居るリミットセンサの名前。
+    """軸の両端に居るリミットセンサの名前。**向きごとに何本でも書ける。**
 
-    **どちらも省略できる。** 片端にしかスイッチが無い機構は普通にある
+    **どちらの向きも省略できる。** 片端にしかスイッチが無い機構は普通にある
     (サブハンド前後は前端が原点で、後端は報告のみだった)。書かなかった側は
     インターロックが掛からないので、書き忘れは「守られていない端」として残る。
     そのため `axes.<軸>.homing.sensor` を書いた軸は、少なくともその 1 本が
     どちらの端かを宣言していることになる。
+
+    **1 つの向きに複数本を書けるのは、左右直結ペアが同じ端に 1 本ずつ持つため**
+    (`y_axis` の左右の原点スイッチ)。片方だけ宣言すると守りが半分になり、しかも
+    どちらが落ちているかは機構が壊れるまで分からない。**1 本でも押されていれば
+    その向きは塞ぐ** —— 軸は 1 つなので、片側が端に着いた時点でその向きへ進める
+    余地はもう無い。
     """
 
-    #: + 方向の端に居るセンサ名 (値が増える向きに進むと当たる)
-    plus: str | None = None
+    #: + 方向の端に居るセンサ名 (値が増える向きに進むと当たる)。1 本なら文字列でよい
+    plus: tuple[str, ...] | str | None = ()
     #: - 方向の端に居るセンサ名
-    minus: str | None = None
+    minus: tuple[str, ...] | str | None = ()
 
-    def sensor_for(self, delta: float) -> str | None:
-        """`delta` の向きに進むとき、当たりうる端のセンサ名。"""
+    def __post_init__(self) -> None:
+        # 1 本を文字列で書く既存の宣言をそのまま受ける。読み口を 2 つに分けると
+        # 「1 本目しか見ない呼び出し側」が書けてしまう
+        object.__setattr__(self, "plus", _sensor_names(self.plus))
+        object.__setattr__(self, "minus", _sensor_names(self.minus))
+
+    def sensors_for(self, delta: float) -> tuple[str, ...]:
+        """`delta` の向きに進むとき、当たりうる端のセンサ名。**全部返す。**"""
         if delta > 0.0:
-            return self.plus
+            return tuple(self.plus)
         if delta < 0.0:
-            return self.minus
-        return None
+            return tuple(self.minus)
+        return ()
 
 
 @dataclass(frozen=True)
@@ -80,6 +115,81 @@ class MotionGuardSpec:
             raise ValueError(f"max_step は正の値: {self.max_step!r}")
         if self.stall_torque is not None and self.stall_torque <= 0.0:
             raise ValueError(f"stall_torque は正の値: {self.stall_torque!r}")
+
+
+class SensorSuspension:
+    """指定したセンサを、その間だけ「押されていない」として読ませる読み口の覆い。
+
+    **要るのは零点確定の整列段ただ 1 つ。** 左右に 1 本ずつスイッチが付く軸
+    (`y_axis`) では、片方が当たった後に**まだ当たっていない側のモータだけ**を端へ
+    進める。軸としては端へ向かう向きなので、押された 1 本を見た歯止めが
+    「その向きへは動かさない」と拒否し、**整列段は必ず失敗する** (指令の入口と
+    50Hz の監視の両方で。実際に踏んだ)。進めているモータのスイッチはまだ
+    押されていないので、機構から見れば進んでよい。
+
+    **外すのはその軸の `homing.sensor_names` だけで、軸まるごとではない。**
+    両端にスイッチがある軸で反対端まで外すと、探索の向きを取り違えたときに
+    押し込む前で止まる経路が消える。逆に 1 本でも外し忘れると、上のとおり
+    整列段が必ず失敗する。
+
+    覆いを掛けるのは**指令の入口 (`AxisHandle`) と周期監視 (`LimitMonitor`) が
+    読む口だけ**で、零点確定自身は生の読み口を使う —— 探索も離脱も「今 ON か」を
+    見て進むので、覆った値を渡すと自分の目を塞ぐことになる。
+
+    **覆いは歯止めが読む口すべてに掛かる。** `main()` は 1 つの `SensorSuspension` を
+    両ハンドで共有し、覆った読み口を `MotorGroup` へ渡すので、整列段のあいだは
+    **手動操縦 (`lib/manual.py`) の指令が通る歯止めも同じだけ緩む**。それでも緩みが
+    露出しないのは、**整列段のあいだ当該軸に手動操縦の制御権が無い**ためで、根拠は
+    覆いの側ではなく制御権の側にある:
+
+    - 零点確定を走らせる 2 つの経路 (`homing_start` と動作確認) は、**どのロボットかが
+      手動操縦モードだと開始できない** (`RobotServer._environment_deny`)
+    - 走り出した後は `_busy_label()` が立つので、**手動操縦モードへの切り替えが拒まれ**
+      (`RobotServer._set_operation_mode`)、**`manual_always` の軸すら拒まれる**
+      (`RobotServer._allow_manual_in_sequence`)
+    - そもそも覆う対象になる軸は到達判定を持つ位置制御軸なので `manual_always` を
+      宣言できない (`AxisSpec._check_manual_always`)。半自動のまま動かす口が無い
+
+    **この排他が消えたら覆いの適用範囲を絞る必要が出る**ので、両向きを
+    `tests/test_server_homing.py::TestDenyGate` が固定している。
+
+    多重に掛かっても数で持つ (掛けた順に外れなくても早く素通りに戻らない)。
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+
+    @contextlib.contextmanager
+    def suspend(self, names: Iterable[str]) -> Iterator[None]:
+        held = tuple(names)
+        for name in held:
+            self._counts[name] = self._counts.get(name, 0) + 1
+        try:
+            yield
+        finally:
+            for name in held:
+                remaining = self._counts.get(name, 1) - 1
+                if remaining > 0:
+                    self._counts[name] = remaining
+                else:
+                    self._counts.pop(name, None)
+
+    def is_suspended(self, name: str) -> bool:
+        return self._counts.get(name, 0) > 0
+
+    def wrap(self, read: Callable[[str], bool | None]) -> Callable[[str], bool | None]:
+        """歯止めが読む口を覆う。**覆っている間だけ `False` を返す。**
+
+        `None` (読めていない) へ倒さないのは、倒すと歯止めが「安全側 = 止まる」へ
+        転んで整列段が失敗するため —— 覆う目的そのものが達成できない。
+        """
+
+        def guarded(name: str) -> bool | None:
+            if self.is_suspended(name):
+                return False
+            return read(name)
+
+        return guarded
 
 
 class GuardViolation(RuntimeError):
@@ -152,23 +262,29 @@ class MotionGuard:
         limits = self._spec.limits
         if limits is None or delta == 0.0:
             return
-        sensor = limits.sensor_for(delta)
-        if sensor is None:
+        sensors = limits.sensors_for(delta)
+        if not sensors:
             return
-        state = sensor_active(sensor)  # type: ignore[operator]
-        if state is False:
-            return
-        if state is None:
+        states = {name: sensor_active(name) for name in sensors}  # type: ignore[operator]
+
+        # **読めていない側を先に言う。** 押されていることは機構の姿勢から読めるが、
+        # 読めていないことは画面からしか読めない ——「端に着いているのだから当然」で
+        # 片付けられると、死んだ 1 本が押された 1 本の陰に隠れたまま試合に入る
+        unreadable = [name for name, state in states.items() if state is None]
+        if unreadable:
             raise GuardViolation(
-                f"軸 '{axis}' の可動端センサ '{sensor}' が読めていないため、"
+                f"軸 '{axis}' の可動端センサ {_label(unreadable)} が読めていないため、"
                 "その向きへは動かしません (配線・基板の電源・デバイス ID を確認してください)。"
                 "**読めていないことを「押されていない」と読み替えてはならない**ので、"
                 "安全側に倒しています"
             )
-        raise GuardViolation(
-            f"軸 '{axis}' の可動端センサ '{sensor}' が押されているため、"
-            "その向きへは動かしません。**離れる向きの指令は通ります**"
-        )
+
+        pressed = [name for name, state in states.items() if state is not False]
+        if pressed:
+            raise GuardViolation(
+                f"軸 '{axis}' の可動端センサ {_label(pressed)} が押されているため、"
+                "その向きへは動かしません。**離れる向きの指令は通ります**"
+            )
 
     def check_torque(self, *, axis: str, torque: float | None) -> None:
         """フィードバックのトルクが急に立ったら止める。

@@ -20,6 +20,19 @@ class SequenceTimeoutError(RuntimeError):
     """目標位置に到達しないままタイムアウトした。"""
 
 
+class LimitInterventionError(SequenceTimeoutError):
+    """可動端保護が移動を止めたので、そのステップを失敗として扱った。
+
+    **中身はタイムアウトではない。** 待ち時間が足りなかったのではなく、機構が端に
+    着いたので保護が目標を実測へ書き直した。同じ型で運ぶと、操縦者は `timeout_s`
+    を伸ばす側を疑い、配線・向き・スケールの食い違いに辿り着けない。
+
+    **`SequenceTimeoutError` の派生にしてあるのは、既存の捕捉経路を素通りさせる
+    ため。** 移動の失敗を型で拾う経路 (`Sequence.run` の `except Exception`) は
+    どちらも同じ扱いでよく、狭めた型を投げても失敗が握り潰されない。
+    """
+
+
 class AxisSyncError(RuntimeError):
     """左右ペア軸の位置ずれ (sync_tolerance 超過) を検知した。"""
 
@@ -49,6 +62,26 @@ class StepFailure:
 
     def to_dict(self) -> dict:
         return {"step_index": self.step_index, "step": self.label, "message": self.message}
+
+
+@dataclass(frozen=True)
+class LimitIntervention:
+    """可動端保護がその軸で移動を止めた回数と、直近の理由。
+
+    **回数と理由は 1 組で運ぶ。** 別々に取れる形にすると「回数を見てから理由を
+    取り直す」経路が書け、そのあいだに保護が別の軸で発火すると理由だけが
+    入れ替わる (どの軸で何が起きたか分からない失敗メッセージになる)。
+    """
+
+    count: int
+    reason: str | None = None
+
+
+#: 軸名 → その軸の `LimitIntervention`。**移動中の保護 (`LimitMonitor`) は
+#: `lib/control/` に居るので、注入で受けて import の向きを作らない**
+LimitInterventions = Callable[[str], LimitIntervention]
+
+NO_LIMIT_INTERVENTION = LimitIntervention(count=0)
 
 
 def step(
@@ -101,9 +134,18 @@ class Sequence:
         self._positions: PositionTable | None = None
         self._available_axes: frozenset[str] | None = None
         self._excluded_steps: tuple[ExcludedStep, ...] = ()
+        self._limit_interventions: LimitInterventions | None = None
 
     def bind_motors(self, group: MotorGroup) -> None:
         self._motors = group
+
+    def bind_limit_interventions(self, interventions: LimitInterventions) -> None:
+        self._limit_interventions = interventions
+
+    def _limit_intervention(self, axis: str) -> LimitIntervention:
+        if self._limit_interventions is None:
+            return NO_LIMIT_INTERVENTION
+        return self._limit_interventions(axis)
 
     @property
     def has_motors(self) -> bool:
@@ -169,6 +211,9 @@ class Sequence:
     ) -> None:
         table = self.positions
         pending: list[tuple[AxisHandle, str, float | None]] = []
+        # 保護は目標を実測位置へ書き直すので `is_reached` は必ず成立する。控えないと
+        # 軸が途中に居るままシーケンスだけが先へ進む
+        before = {axis: self._limit_intervention(axis) for axis in targets}
 
         for axis, position_name in targets.items():
             spec = table.axis(axis).for_court(self.court)
@@ -188,15 +233,29 @@ class Sequence:
                 for handle, _, wait_s in pending
             )
         )
+        # 終了時の状態ではなく回数で見る。接点がバウンドして触れて離れると、軸は
+        # 触れた位置で止まったままなのに状態だけが戻る
+        stopped = [
+            f"{axis}: {now.reason}"
+            for axis, previous in before.items()
+            if (now := self._limit_intervention(axis)).count != previous.count
+        ]
         failed = [
             f"{handle.name}->{position_name}"
             for (handle, position_name, _), reached in zip(pending, results, strict=True)
             if not reached
         ]
+        # 片方で `raise` すると、両方起きた移動では先に見たほうしか残らない。切り分けは
+        # 「止められた軸」と「届かなかった軸」の対応で進むので、片側だけでは辿れない
+        reasons: list[str] = []
+        if stopped:
+            reasons.append(f"可動端保護が移動を止めました ({', '.join(stopped)})")
         if failed:
-            raise SequenceTimeoutError(
-                f"シーケンス '{self.name}': 目標位置に到達しませんでした ({', '.join(failed)})"
-            )
+            reasons.append(f"目標位置に到達しませんでした ({', '.join(failed)})")
+        if reasons:
+            # 保護が 1 件でも絡めば時間切れではない。単独の失敗は文言が今までと変わらない
+            error = LimitInterventionError if stopped else SequenceTimeoutError
+            raise error(f"シーケンス '{self.name}': {' / '.join(reasons)}")
 
         desynced = []
         for handle, _, _ in pending:

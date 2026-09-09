@@ -39,13 +39,24 @@ class _RecordingDriver(StubFeedbackDriver):
         return super().encode_target(mode, value)
 
 
-def _recording_group(names: list[str]) -> tuple[MotorGroup, list[tuple[str, float]]]:
+def _no_switch_pressed(_name: str) -> bool:
+    """機構がストロークの途中に居る状態 (どの可動端スイッチも押されていない)。
+
+    **読み口を配線しないと三値の `None` (読めていない) しか返らず、`guard:` を
+    書いた軸は 1 歩も動けない。** それが正しい既定であることは
+    `tests/test_motion_guard.py` が別に固定しているので、同梱シーケンスを
+    通しで回すここでは「押されていない機体」を明示して与える。
+    """
+    return False
+
+
+def _recording_group(
+    names: list[str], *, sensor_active=_no_switch_pressed
+) -> tuple[MotorGroup, list[tuple[str, float]]]:
     mgr = MagicMock()
     mgr.send = AsyncMock()
     sink: list[tuple[str, float]] = []
-    # 可動端センサは「どれも押されていない」= ストロークの途中に居る機体。読み口を
-    # 与えないと三値の None (読めていない) になり、guard がすべての指令を拒む
-    group = MotorGroup(sensor_active=lambda _name: False)
+    group = MotorGroup(sensor_active=sensor_active)
     for name in names:
         group.add(MotorHandle(name, _RecordingDriver(name, sink), mgr, poll_interval=0.001))
     return group, sink
@@ -618,6 +629,10 @@ class TestShippedRobotConfig:
             "conveyor_stop",
             "conveyor_run",
             "origin_sensor_react",
+            # 向きの取り違えは反応の確認では見えない (押されている端へ進む指令だけが
+            # 通る)。退避できるかどうかを機体ごとに唱えるのが唯一の検出経路
+            "limit_escape_main",
+            "limit_escape_sub",
             "valves_closed",
             "valves_actuate",
             "pumps_run",
@@ -698,9 +713,7 @@ class TestShippedMotionGuard:
                 guard = table.axis(axis).guard
                 if guard is None or guard.limits is None:
                     continue
-                required |= {
-                    name for name in (guard.limits.plus, guard.limits.minus) if name is not None
-                }
+                required |= {*guard.limits.plus, *guard.limits.minus}
             if required - registered:
                 missing[str(positions_path)] = required - registered
 

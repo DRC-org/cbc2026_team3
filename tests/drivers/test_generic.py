@@ -257,31 +257,55 @@ class TestSensorInput:
         assert self.drv.is_fault() is False
         assert self.drv.has_overcurrent_warning() is False
 
-    def test_latch_keeps_a_contact_that_is_already_over(self):
+    def test_count_starts_at_zero(self):
+        assert self.drv.sensor_contact_count == 0
+
+    def test_count_keeps_a_contact_that_is_already_over(self):
         self._feed(sensor=True)
         self._feed()
 
         assert self.drv.sensor_active is False
-        assert self.drv.consume_sensor_latch() is True
+        assert self.drv.sensor_contact_count == 1
 
-    def test_latch_clears_on_read(self):
+    def test_count_does_not_clear_on_read(self):
+        """読むと消えると、先に読んだ側が相手のぶんまで消す。"""
         self._feed(sensor=True)
         self._feed()
 
-        assert self.drv.consume_sensor_latch() is True
-        assert self.drv.consume_sensor_latch() is False
+        assert self.drv.sensor_contact_count == 1
+        assert self.drv.sensor_contact_count == 1
 
-    def test_latch_never_answers_weaker_than_the_current_state(self):
+    def test_count_only_advances_on_the_rising_edge(self):
+        self._feed(sensor=True)
+        self._feed(sensor=True)
         self._feed(sensor=True)
 
-        assert self.drv.consume_sensor_latch() is True
-        assert self.drv.consume_sensor_latch() is True
+        assert self.drv.sensor_contact_count == 1
 
-    def test_latch_does_not_disturb_the_current_state(self):
+    def test_count_advances_once_per_contact(self):
+        for _ in range(3):
+            self._feed(sensor=True)
+            self._feed()
+
+        assert self.drv.sensor_contact_count == 3
+
+    def test_count_does_not_disturb_the_current_state(self):
         self._feed(sensor=True)
-        self.drv.consume_sensor_latch()
+        assert self.drv.sensor_contact_count == 1
 
         assert self.drv.sensor_active is True
+
+    def test_count_does_not_advance_when_decoding_fails(self, monkeypatch):
+        """解釈できていないフレームで数えると、接触していないのに到達と読む。"""
+
+        def _boom(_msg: can.Message) -> None:
+            raise ValueError("decode failed")
+
+        monkeypatch.setattr(self.drv, "decode_feedback", _boom)
+        with pytest.raises(ValueError):
+            self._feed(sensor=True)
+
+        assert self.drv.sensor_contact_count == 0
 
     def test_does_not_disturb_other_flags(self):
         self._feed(e_stop=True, watchdog=True, sensor=True)

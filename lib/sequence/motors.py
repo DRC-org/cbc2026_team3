@@ -304,14 +304,26 @@ class AxisHandle:
         return all(results)
 
     def observed_value(self) -> float:
+        return self._spec.to_value(self.observed_commands())
+
+    def observed_commands(self) -> dict[str, float]:
+        """実測位置を**指令の単位のまま**返す。「その場で止まれ」を書く唯一の口。
+
+        値へ換算して指令へ戻すと (`to_commands(to_value(…))`)、複数モータ軸では
+        平均を挟むぶん往復が丸め誤差を生み、それが非ゼロの `delta` として
+        `_check_guard` に届く —— **止めるための指令が、止まっていないことを理由に
+        拒否される**。実測を素通しすれば `delta` は厳密に 0 になる (`current` を
+        作るのもこの同じ辞書だから)。
+
+        ついでに各モータが**自分の位置**を保持する。平均へ寄せる指令は、止めるべき
+        瞬間に左右を動かしに行く。
+        """
         if self._spec.command_mode is not ControlMode.POSITION:
             raise PositionLookupError(
                 f"軸 '{self.name}' は位置フィードバックを持ちません"
                 f" (command_mode={self._spec.command_mode.value})"
             )
-        return self._spec.to_value(
-            {handle.name: handle.driver.feedback_position() for handle in self._handles}
-        )
+        return {handle.name: handle.driver.feedback_position() for handle in self._handles}
 
     def observed_values(self) -> dict[str, float]:
         if self._spec.command_mode is not ControlMode.POSITION:

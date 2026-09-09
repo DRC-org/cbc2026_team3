@@ -25,6 +25,19 @@ axes:
       align_distance: 5.0
       step: 0.5
       settle_s: 0.05
+    guard:
+      # 左右 2 本とも原点側 (homing.direction: -1) に付く。**2 本とも書く** ——
+      # 1 本しか書かないと、書かなかった側のスイッチが押されても止まらない。
+      # 逆 (plus) に書くと守りが反転し、押されている端へ進む指令だけが通る
+      limits:
+        minus:
+          - y_axis_r_origin_sensor
+          - y_axis_l_origin_sensor
+      # max_step / stall_torque は書かない = **その守りが無い**。
+      # max_step: 1 回の move_to が出す移動は 130〜530mm で、跳躍とストロークの
+      #   境目が実測できていない (狭く取ると正常な移動が拒否される)。
+      # stall_torque: M3508 の FEEDBACK は電流の生値で Nm ではないので、
+      #   Nm のしきい値をそのまま当てると桁が合わない。換算を決めてから書くこと
     motion:
       max_velocity: 200.0
       max_acceleration: 1200.0
@@ -54,6 +67,16 @@ axes:
       # 0.5deg では 1 歩も動かなかった (2026-09-05 実機。静止摩擦が下限を決める)
       step: 1.0
       settle_s: 0.05
+    guard:
+      # 原点は - 側 (homing.direction: -1)。逆 (plus) に書くと守りが反転し、
+      # 押されている端へ進む指令だけが通る。+ 側 (180deg) にスイッチは無い
+      limits:
+        minus: rotate_origin_sensor
+      # max_step / stall_torque は書かない = **その守りが無い**。
+      # max_step: 手動の刻みが最大 45deg なのに対し、正常な 1 回の移動が
+      #   何 deg まで出るかを実測していない。
+      # stall_torque: EDULITE 05 はトルクを Nm で返すが、機構が当たったときの
+      #   値を測っていない (低すぎると回転の途中で止まる)
     motors:
       rotate_r: { scale: 0.017453292519943295, offset: 0.0 }
       rotate_l: { scale: -0.017453292519943295, offset: 0.0 }
