@@ -871,6 +871,24 @@ ON 区間の実測より狭く取ること** —— 広いと粗い 1 歩で区�
 塞ぐ）。配線し忘れは安全側に倒れる（その軸だけ零点確定できない）が、症状は config からもログからも
 読めないので `tests/test_homing.py::TestAlignsWithTheGuardArmed` が両向きを固定している。
 
+**覆いは歯止めが読む口すべてに掛かる。緩みが露出しないことの根拠は、覆いの側ではなく制御権の側に
+ある。** `main()` は 1 つの `SensorSuspension` を両ハンドで共有し、覆った読み口を `MotorGroup` へ
+渡すので、整列段のあいだは**手動操縦が通る歯止めも同じだけ緩む**。それでも `y_axis` / `sub_y_axis`
+/ `sub_lift` / `rotate` を緩んだ状態で手動操縦できないのは、**その間これらの軸に手動操縦の制御権が
+無い**ためで、次の 3 枚が独立に効いている:
+
+1. 零点確定を走らせる 2 つの経路（`homing_start` と動作確認）は、**どのロボットかが手動操縦モードだと
+   開始できない**（`RobotServer._environment_deny`）
+2. 走り出した後は `_busy_label()` が立つので、**手動操縦モードへの切り替えが拒まれ**
+   （`RobotServer._set_operation_mode`）、**`manual_always` の軸すら拒まれる**
+   （`RobotServer._allow_manual_in_sequence`）
+3. 覆う対象になる軸は到達判定を持つ位置制御軸なので、そもそも `manual_always` を宣言できない
+   （`AxisSpec._check_manual_always`。上の `manual_always` の節と対）
+
+**この排他が緩んだら、覆いの適用範囲を歯止めのうち必要な口だけへ絞らなければならない** —— 覆い自体は
+口を選ばないので、制御権が開いた瞬間に「原点スイッチの効かない手動操縦」がそのまま生える。1 と 2 の
+両向きは `tests/test_server_homing.py::TestDenyGate` が固定している。
+
 **`align_distance` は `search_distance` と同格の無人の歯止め**で、`sensors` を書いた軸には必須・
 書いていない軸には書けない。**`sync_tolerance` より真に小さいことを起動時に強制する** —— 届くと
 零点確定の最中に偏差監視が発報し、症状は「動作確認の最初のステップでいつも緊急停止する」だけに
