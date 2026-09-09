@@ -17,7 +17,7 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ移動")
     async def move_to_home(self) -> None:
-        await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
+        await self.move_to(_all_valves("closed"))
         await self.move_to({"pump_vac": "run"})
 
     @step("ワーク吸着", require_trigger=True)
@@ -32,10 +32,9 @@ class SubHandSequence(Sequence):
 
     @step("ワーク解放 (配置)", require_trigger=True)
     async def release_at_place(self) -> None:
+        # 三方弁は閉じた側がパッドを大気開放するので、閉じるだけで残圧が抜けてワークが離れる
         await self.move_to(_all_valves("closed"))
-        await self.move_to({"pump_blow": "run"})
-        await self.move_to({"pump_blow": "stop"})
 
     @step("初期位置へ復帰")
     async def return_home(self) -> None:
-        await self.move_to(_all_valves("closed") | {"pump_blow": "stop"})
+        await self.move_to(_all_valves("closed"))

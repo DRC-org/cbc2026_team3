@@ -171,7 +171,7 @@ describe("MotorCheckPanel の除外表示", () => {
     mount({
       excluded_steps: [
         { step: "サブハンド 昇降", missing_axes: ["sub_lift"] },
-        { step: "サブハンド 吸気・排気ポンプ (聴音確認)", missing_axes: ["pump_blow", "pump_vac"] },
+        { step: "サブハンド 吸気ポンプ (聴音確認)", missing_axes: ["pump_vac"] },
       ],
     });
     await userEvent.click(screen.getByRole("button", TOGGLE));
@@ -179,7 +179,7 @@ describe("MotorCheckPanel の除外表示", () => {
     expect(screen.getByText(/2 件除外/)).toBeInTheDocument();
     expect(screen.getByText("サブハンド 昇降")).toBeInTheDocument();
     expect(screen.getByText(/sub_lift/)).toBeInTheDocument();
-    expect(screen.getByText(/pump_blow, pump_vac/)).toBeInTheDocument();
+    expect(screen.getByText(/pump_vac/)).toBeInTheDocument();
   });
 
   it("除外が無ければ何も出さない", async () => {

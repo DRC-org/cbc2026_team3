@@ -123,12 +123,10 @@ _SUB_POSITIONS = {
     "axes": {
         **{name: _axis(command_mode="on_off", settle_s=0.0) for name in _VALVE_AXES},
         "pump_vac": _axis(command_mode="duty", settle_s=0.0),
-        "pump_blow": _axis(command_mode="duty", settle_s=0.0),
     },
     "positions": {
         **{name: {"open": 1.0, "closed": 0.0} for name in _VALVE_AXES},
         "pump_vac": {"stop": 0.0, "run": 0.61},
-        "pump_blow": {"stop": 0.0, "run": 0.62},
     },
 }
 
@@ -257,26 +255,12 @@ class TestSubHandSteps:
                 "move_to_home",
                 [
                     *_valves(0.0),
-                    ("pump_blow", 0.0),
                     ("pump_vac", 0.61),
                 ],
             ),
             ("grip_by_suction", _valves(1.0)),
-            (
-                "release_at_place",
-                [
-                    *_valves(0.0),
-                    ("pump_blow", 0.62),
-                    ("pump_blow", 0.0),
-                ],
-            ),
-            (
-                "return_home",
-                [
-                    *_valves(0.0),
-                    ("pump_blow", 0.0),
-                ],
-            ),
+            ("release_at_place", _valves(0.0)),
+            ("return_home", _valves(0.0)),
         ],
     )
     async def test_step_sends_expected_targets(

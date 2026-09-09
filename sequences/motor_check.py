@@ -18,7 +18,6 @@ SUB_HOME: dict[str, str] = {
     "sub_pitch": "home",
     "sub_offset": "home",
     "pump_vac": "stop",
-    "pump_blow": "stop",
 }
 
 
@@ -113,12 +112,10 @@ class MotorCheckSequence(Sequence):
             await self.move_to({axis: "open"})
             await self.move_to({axis: "closed"})
 
-    @step("サブハンド 吸気・排気ポンプ (聴音確認)", axes={"pump_vac", "pump_blow"})
-    async def sub_pumps(self) -> None:
+    @step("サブハンド 吸気ポンプ (聴音確認)", axes={"pump_vac"})
+    async def sub_pump(self) -> None:
         await self.move_to({"pump_vac": "run"})
         await self.move_to({"pump_vac": "stop"})
-        await self.move_to({"pump_blow": "run"})
-        await self.move_to({"pump_blow": "stop"})
 
     @step("両ハンドを初期姿勢へ戻す", axes={*MAIN_HOME, *SUB_HOME})
     async def restore_home(self) -> None:
