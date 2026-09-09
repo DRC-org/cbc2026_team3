@@ -61,7 +61,7 @@ function ResultTable({ result }: { result: SwitchMeasurement }) {
   ];
   return (
     <div className="overflow-x-auto">
-      <table className="table table-xs w-auto">
+      <table className="table w-auto table-xs">
         <tbody>
           {rows.map(([label, value]) => (
             <tr key={label}>
