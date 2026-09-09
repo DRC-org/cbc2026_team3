@@ -24,7 +24,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | [`docs/mechanism_handoff.md`](docs/mechanism_handoff.md) | 機構が付いた日に埋める値の棚卸し。機構担当と共有する表 |
 | [`docs/operations.md`](docs/operations.md) | コマンド・CAN セットアップ・systemd 運用 |
 | [`firmware/README.md`](firmware/README.md) / [`web/README.md`](web/README.md) | 各サブプロジェクトの実務 |
-| [`docs/todo.md`](docs/todo.md) | **まだ決まっていないことの一覧。** 決着したら該当文書へ移してここからは消す |
+| [`docs/todo.md`](docs/todo.md) | **未着手と未決の一覧。** 実装まで済んだら該当文書へ移してここからは消す |
 | [`docs/history/`](docs/history/) | いつ何が起きたかの記録。**正ではない。参照して実装を決めない** |
 
 **`architecture.md` と `invariants.md` は対。構造は前者、その構造を崩してはならない理由は
