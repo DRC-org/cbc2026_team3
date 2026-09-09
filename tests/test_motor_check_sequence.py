@@ -105,7 +105,6 @@ class TestFinalPosture:
 
         assert last["conveyor"] == "stop"
         assert last["pump_vac"] == "stop"
-        assert last["pump_blow"] == "stop"
         for axis in VALVE_AXES:
             assert last[axis] == "closed"
 
@@ -249,7 +248,7 @@ class TestPartialConfiguration:
             "サブハンド ピッチ (左右直結ペア)": ("sub_pitch",),
             "サブハンド オフセット": ("sub_offset",),
             "サブハンド 電磁弁 6 個 (打音・目視確認)": tuple(sorted(VALVE_AXES)),
-            "サブハンド 吸気・排気ポンプ (聴音確認)": ("pump_blow", "pump_vac"),
+            "サブハンド 吸気ポンプ (聴音確認)": ("pump_vac",),
         }
 
     def test_本番構成では一つも除外されない(self) -> None:

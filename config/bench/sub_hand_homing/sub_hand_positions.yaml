@@ -74,14 +74,17 @@ axes:
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
+# 位置名は本番 (config/sub_hand_positions.yaml) と対である。動作確認シーケンスは
+# 位置名でしか指令できないので、名前がずれるとこのベンチでだけステップが引けない。
+# 値は本番と違ってよい (このベンチには機構が無く、ストロークだけを確かめる)。
 positions:
   sub_y_axis:
-    home: -20.0          # 収納位置 [mm]
     # 0.0 は動作点そのもの。tolerance 1.0mm と ON 区間 2mm の外へ離す
-    extended: -5.0       # 前方への展開位置 [mm]
+    retracted: -20.0     # 収納位置 [mm]
+    clear: -5.0          # 回転可能位置 [mm]
 
   sub_lift:
     # 0.0 は動作点そのもの。ON 区間の縁に座ると読みが揺れ、guard も 0.0 への
     # move_to を拒みうる
-    home: -5.0           # 待機位置 [mm]
-    lifted: -20.0        # 上昇位置 [mm]
+    top: -20.0           # 移動高さ [mm]
+    pick: -5.0           # 吸着高さ [mm]

@@ -1,0 +1,149 @@
+"""同梱の `config/sub_hand_positions.yaml` が「満たすべき関係」を保っているかを見る。
+
+値そのものは機構が付くまで仮値なので固定しない。固定するのは**値どうしの関係**で、
+崩れると試合シーケンス (`sequences/sub_hand.py`) が干渉制約を守れなくなる ——
+症状は「順序どおりに動いたのに機構が当たる」で、シーケンスからは読めない。
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+import yaml
+
+from lib.match_state import Court
+from lib.sequence.positions import PositionTable, load_position_table
+
+_CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
+_YAML_NAME = "sub_hand_positions.yaml"
+
+# 前端スイッチ (動作点 0.0mm) からこれより内側では sub_rotate を回すと干渉する。
+_ROTATE_CLEARANCE_MM = 150.0
+
+# 吸着は移動高さから 10mm だけ降りて行う。+ が下なので pick の値は top より大きい。
+_PICK_DROP_MM = 10.0
+
+# 前端スイッチより手前 = 150mm 未満に取る位置。ここからは clear を経由しないと回せない。
+_NEAR_FRONT = ("receive", "place_1", "place_2", "place_3", "place_4")
+
+
+@pytest.fixture(scope="module")
+def table() -> PositionTable:
+    return load_position_table(
+        yaml.safe_load((_CONFIG_DIR / _YAML_NAME).read_text()), source=_YAML_NAME
+    )
+
+
+def _value(table: PositionTable, axis: str, name: str) -> float:
+    return table.raw(axis, name)
+
+
+class TestSubYAxis:
+    def test_位置は仕様の名前が揃っている(self, table: PositionTable) -> None:
+        assert set(table.names("sub_y_axis")) == {
+            "retracted",
+            "clear",
+            *_NEAR_FRONT,
+        }
+
+    def test_clear_は前端スイッチから_150mm_以上離れている(self, table: PositionTable) -> None:
+        # ここでだけ sub_rotate を回してよい。近付けると回した機構が前端側に当たる
+        assert abs(_value(table, "sub_y_axis", "clear")) >= _ROTATE_CLEARANCE_MM
+
+    @pytest.mark.parametrize("name", _NEAR_FRONT)
+    def test_棚と箱は前端スイッチから_150mm_未満にある(
+        self, table: PositionTable, name: str
+    ) -> None:
+        # 150mm 以上まで下がると「clear を経由しないと回せない」が値として崩れ、
+        # 回転可能位置へ後退するステップが意味を失う
+        assert abs(_value(table, "sub_y_axis", name)) < _ROTATE_CLEARANCE_MM
+
+    def test_retracted_が一番後ろである(self, table: PositionTable) -> None:
+        others = [
+            _value(table, "sub_y_axis", name)
+            for name in table.names("sub_y_axis")
+            if name != "retracted"
+        ]
+
+        assert _value(table, "sub_y_axis", "retracted") < min(others)
+
+    def test_箱_4_箇所は互いに違う位置である(self, table: PositionTable) -> None:
+        boxes = [_value(table, "sub_y_axis", f"place_{n}") for n in range(1, 5)]
+
+        assert len(set(boxes)) == 4
+
+
+class TestSubLift:
+    def test_位置は仕様の名前が揃っている(self, table: PositionTable) -> None:
+        assert set(table.names("sub_lift")) == {"top", "pick", "place"}
+
+    def test_pick_は_top_のちょうど_10mm_下(self, table: PositionTable) -> None:
+        # + が下なので「下」は値が大きい側。符号を取り違えると 10mm 上へ逃げる
+        assert _value(table, "sub_lift", "pick") == pytest.approx(
+            _value(table, "sub_lift", "top") + _PICK_DROP_MM
+        )
+
+    def test_place_は_pick_より下にある(self, table: PositionTable) -> None:
+        assert _value(table, "sub_lift", "place") > _value(table, "sub_lift", "pick")
+
+
+class TestServoAxes:
+    @pytest.mark.parametrize(
+        ("axis", "names"),
+        [
+            ("sub_rotate", {"receive", "carry"}),
+            ("sub_pitch", {"open", "close"}),
+            ("sub_offset", {"open", "close"}),
+        ],
+    )
+    def test_位置は仕様の名前が揃っている(
+        self, table: PositionTable, axis: str, names: set[str]
+    ) -> None:
+        assert set(table.names(axis)) == names
+
+    @pytest.mark.parametrize(
+        ("axis", "name"),
+        [("sub_rotate", "receive"), ("sub_pitch", "open"), ("sub_offset", "open")],
+    )
+    def test_初期姿勢はファームの_initialAngleDeg_と揃っている(
+        self, table: PositionTable, axis: str, name: str
+    ) -> None:
+        """基板 #2 は通電と瞬断からの再起動のたび `initialAngleDeg` へ駆動する。
+
+        シーケンスの初期姿勢と食い違うと、電源を入れ直すたびに機構が別の姿勢へ飛ぶ。
+        現在値は 5 スロットとも 0.0f (`firmware/servo/include/config.h`)。
+        """
+        assert _value(table, axis, name) == pytest.approx(0.0)
+
+
+class TestEveryPosition:
+    # `manual` の可動範囲に収まっているかはここでは見ない。範囲外の位置定数は
+    # `_check_manual_range` が読み込みの時点で起動拒否にするので、この fixture が
+    # そもそも組めない (同じ判定を 2 箇所に書かない)。
+
+    def test_直動_2_軸はスイッチの動作点そのものを目標にしない(self, table: PositionTable) -> None:
+        """0.0 は前端・下端スイッチの動作点。tolerance 1.0mm は動作点を 1mm 越えた場所も
+
+        到達として受け、ON 区間の内側からの指令は可動端インターロックが拒否する。
+        """
+        at_origin = [
+            f"{axis}.{name}"
+            for axis in ("sub_y_axis", "sub_lift")
+            for name in table.names(axis)
+            if _value(table, axis, name) == 0.0
+        ]
+
+        assert at_origin == []
+
+    def test_位置定数はコート別に分岐していない(self, table: PositionTable) -> None:
+        """コートで変わるのは `sub_lift` の mm↔rad 換算 (scale の符号) だけである。
+
+        `positions` へコートの分岐を書くと、mm の座標系が片方のコートだけ別物になる。
+        """
+        for axis in table.axes:
+            for name in table.names(axis):
+                # コート別に書いてあると court 無しの raw が PositionLookupError になる
+                value = table.raw(axis, name)
+                assert value == table.raw(axis, name, court=Court.RED)
+                assert value == table.raw(axis, name, court=Court.BLUE)
