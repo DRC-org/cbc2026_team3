@@ -1,24 +1,33 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 
 from lib.sequence.engine import Sequence, step
-from lib.sequence.homing import HomingRunner, run_homing
+from lib.sequence.homing import HomingRunner, homing_axis_names, run_homing
 from sequences.main_hand import HOME as MAIN_HOME
 from sequences.sub_hand import VALVE_AXES
 
 logger = logging.getLogger(__name__)
 
 
+# **並び順が意味を持つ。** 1 通にまとめると干渉の宣言に引っかかる ——
+# `sub_y_axis` は `sub_lift` が `top` に居るあいだしか動かせず、`sub_pitch` と
+# `sub_offset` は同じ指令で動かせない (`config/sub_hand_positions.yaml` の `guard`)。
+# 順序は `SubHandSequence.move_to_initial` と同じで、どの姿勢から押しても踏まない
 SUB_HOME: dict[str, str] = {
-    "sub_y_axis": "retracted",
     "sub_lift": "top",
-    "sub_rotate": "receive",
+    "sub_y_axis": "retracted",
     "sub_pitch": "open",
     "sub_offset": "open",
+    "sub_rotate": "receive",
     "pump_vac": "stop",
 }
+
+
+def _one_by_one(targets: Mapping[str, str]) -> list[dict[str, str]]:
+    """1 軸ずつの指令へ分ける。**順序を持つのは宣言 (`SUB_HOME`) の側である。**"""
+    return [{axis: position} for axis, position in targets.items()]
 
 
 class MotorCheckSequence(Sequence):
@@ -45,7 +54,24 @@ class MotorCheckSequence(Sequence):
             logger.info("零点確定: 実行口が未注入のため飛ばす")
             return
 
-        await run_homing(self._homing, self.positions, self.motors, court=self.court)
+        table = self.positions
+        axes = homing_axis_names(table)
+        # **条件になる軸を先に確定し、寄せてから残りを確定する。** 零点確定は
+        # `release_distance` ぶん離脱して終わるので、確定しただけの昇降は下端の
+        # すぐ上に居る。そのまま前後軸を探索すると「昇降が下がったまま前後に走る」
+        # ことになり、干渉の歯止めが拒否する —— 拒否は誤動作ではなく手順が危ない
+        # ことの露見なので、直したのは手順の側である。
+        # **寄せ先に軸名を書かない** —— 位置定数の `guard.requires` から導く
+        prerequisites = table.homing_prerequisites(axes)
+        await self._home(axis for axis in axes if axis in prerequisites)
+        await self.move_to(prerequisites)
+        await self._home(axis for axis in axes if axis not in prerequisites)
+
+    async def _home(self, axes: Iterable[str]) -> None:
+        targets = list(axes)
+        if not targets or self._homing is None:
+            return
+        await run_homing(self._homing, self.positions, self.motors, court=self.court, axes=targets)
 
     @step("メインハンド 初期姿勢へ", axes=MAIN_HOME.keys())
     async def main_home(self) -> None:
@@ -79,7 +105,8 @@ class MotorCheckSequence(Sequence):
 
     @step("サブハンド 初期姿勢へ", axes=SUB_HOME.keys())
     async def sub_home(self) -> None:
-        await self.move_to(SUB_HOME)
+        for targets in _one_by_one(SUB_HOME):
+            await self.move_to(targets)
 
     @step("サブハンド 前後スライド (Y 方向)", axes={"sub_y_axis"})
     async def sub_y_axis(self) -> None:
@@ -120,5 +147,9 @@ class MotorCheckSequence(Sequence):
     @step("両ハンドを初期姿勢へ戻す", axes={*MAIN_HOME, *SUB_HOME})
     async def restore_home(self) -> None:
         # MAIN_HOME は試合中の待機姿勢でコンベアを回したままだが、
-        # 動作確認は駆動しっぱなしの軸を残さずに終える
-        await self.move_to({**MAIN_HOME, **SUB_HOME, "conveyor": "stop"})
+        # 動作確認は駆動しっぱなしの軸を残さずに終える。
+        # **メインハンドは 1 通のまま。** 経由点で `y_axis` と `rotate` を意図的に
+        # 同じ指令へ入れているので、ここを分けると分ける理由の無い軸まで分かれる
+        await self.move_to({**MAIN_HOME, "conveyor": "stop"})
+        for targets in _one_by_one(SUB_HOME):
+            await self.move_to(targets)

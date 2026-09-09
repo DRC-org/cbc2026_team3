@@ -14,6 +14,7 @@ import yaml
 
 from lib.match_state import Court
 from lib.motion_guard import RequiredRange
+from lib.sequence.homing import homing_axis_names, homing_order
 from lib.sequence.positions import PositionTable, load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -228,3 +229,52 @@ class TestInterferenceDeclaration:
 
         assert pitch is not None and pitch.not_with == ("sub_offset",)
         assert offset is not None and offset.not_with == ("sub_pitch",)
+
+
+_BENCH_YAML = "bench/sub_hand_homing/sub_hand_positions.yaml"
+
+
+def _load(relative: str) -> PositionTable:
+    path = _CONFIG_DIR / relative
+    return load_position_table(yaml.safe_load(path.read_text()), source=path.name)
+
+
+@pytest.mark.parametrize("relative", [_YAML_NAME, _BENCH_YAML])
+class TestHomingOrder:
+    """零点確定は「昇降 → top へ寄せる → 前後」の順でしか通らない。**本番とベンチの両方。**
+
+    `release_distance` ぶん離脱して終わるので、確定しただけの昇降は下端のすぐ上に
+    居る。`requires` を入れた以上、そこから前後軸を探索する手順は拒否される ——
+    拒否は誤動作ではなく、**昇降が下がったまま前後に走っていた**ことの露見である。
+    ベンチは mm の値が本番と違うだけで、同じ形が成り立っていなければならない。
+    """
+
+    def test_寄せ先は昇降の移動高さである(self, relative: str) -> None:
+        table = _load(relative)
+
+        assert table.homing_prerequisites() == {"sub_lift": "top"}
+
+    def test_参照される軸を先に確定する(self, relative: str) -> None:
+        table = _load(relative)
+        axes = homing_axis_names(table)
+
+        assert homing_order(table, axes).index("sub_lift") < homing_order(table, axes).index(
+            "sub_y_axis"
+        )
+        # 入力の並びに関係なく決まる (yaml の並べ替えで手順が変わってはならない)
+        assert homing_order(table, list(reversed(axes)))[0] == "sub_lift"
+
+    def test_零点確定を終えた昇降は区間の外に居る(self, relative: str) -> None:
+        """**寄せる段が要ることの根拠。** ここが中なら move_to は 1 通も出さない。"""
+        table = _load(relative)
+        homing = table.axis("sub_lift").homing
+        assert homing is not None and homing.release_distance is not None
+        # 探索は + 方向 (下端) へ進み、原点確定の後に逆向きへ release_distance 離脱する
+        left_at = -homing.direction * homing.release_distance
+
+        assert not _requirement(table, "sub_y_axis").contains(left_at)
+
+    def test_移動高さへ寄せれば区間の中に入る(self, relative: str) -> None:
+        table = _load(relative)
+
+        assert _requirement(table, "sub_y_axis").contains(table.raw("sub_lift", "top"))

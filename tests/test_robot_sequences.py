@@ -13,7 +13,7 @@ from lib.drivers.base import ControlMode
 from lib.match_state import ROLE_PRE_MATCH, Court, load_checklist_definitions
 from lib.motion_guard import MotionGuardSpec
 from lib.sequence.engine import Sequence, StepInfo
-from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.suction import SuctionSelectionError
 from sequences.main_hand import MainHandSequence
@@ -72,9 +72,22 @@ def _motor_names(table: PositionTable) -> list[str]:
     return names
 
 
+def _bind_axis_state(group: MotorGroup, table: PositionTable, seq: Sequence) -> None:
+    """軸間干渉の読み口を通しの経路にも配線する。**本番と同じ組み立てを使う。**
+
+    ここでテスト専用の読み口を書くと、通しが確かめているのは同梱の宣言ではなく
+    テストの作り物になる。鮮度の材料 (`CANManager`) だけは無いので「常に新しい」を
+    与える —— 途絶の扱いは `tests/test_sequence_motors.py` が別に固定している。
+    """
+    group.bind_axis_state(
+        build_axis_state_reader(table, group, court=lambda: seq.court, is_stale=lambda _name: False)
+    )
+
+
 def _wire(seq: Sequence, position_config: dict) -> tuple[list[tuple[str, float]], MotorGroup]:
     table = load_position_table(position_config)
     group, sink = _recording_group(_motor_names(table))
+    _bind_axis_state(group, table, seq)
     seq.bind_motors(group)
     seq.bind_positions(table)
     return sink, group
@@ -576,6 +589,7 @@ class TestShippedPositionYaml:
         table = _load_shipped(yaml_name)
         seq = sequence_cls()
         group, _ = _recording_group(_motor_names(table))
+        _bind_axis_state(group, table, seq)
         seq.bind_motors(group)
         seq.bind_positions(table)
 

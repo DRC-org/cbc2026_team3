@@ -5,7 +5,7 @@
 `AxisHandle` を通るのに対し、**層ごとに書き写すと片方だけ緩んだ状態が作れる**ため
 (左右ペアの偏差判定を `SyncGroup.violation()` へ一本化しているのと同じ理由)。
 
-守るのは 4 つで、どれも 2026-09-09 に実機で踏んだ事故に対応する:
+守るのは 5 つで、最初の 4 つはどれも 2026-09-09 に実機で踏んだ事故に対応する:
 
 1. **可動端のインターロック** —— リミットスイッチが押されている向きへは、それ以上
    指令を出さない。**逆向き (離れる向き) は必ず通す** —— 塞ぐと機構端に張り付いた
@@ -20,6 +20,9 @@
    1 の帰結として反対端のスイッチで止まるので、**押し込む前に止まって理由が出る**
 4. **急なトルク** —— 何かに当たったことは、位置が進まないことより先にトルクに出る。
    `stall_torque` を超えたら止める
+5. **軸どうしの干渉** —— 他の軸が指定の区間に居るあいだしか動かさない (`requires`) /
+   同じ指令で一緒に動かさない (`not_with`)。**依存は一方向**で、条件になる軸の位置は
+   注入された読み口 (`AxisStateReader`) から受ける —— ここは位置表もコートも見ない
 
 **センサの途絶 (STALE) をここで扱わないのは意図的**である。「押されていない」と
 「読めていない」は別の事実で、後者を可動端の判断に混ぜると**配線が抜けたセンサが
@@ -31,7 +34,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 
 __all__ = [
@@ -43,6 +46,7 @@ __all__ = [
     "MotionGuardSpec",
     "RequiredRange",
     "SensorSuspension",
+    "unknown_axis_state",
 ]
 
 
@@ -106,8 +110,10 @@ class RequiredRange:
     引くと、判断の層が「今どのコートか」「その名前はあるか」を抱え込み、状態も表も
     持たないという性質 (`MotionGuard` の docstring) が崩れる。
 
-    `label` / `unit` を運ぶのは拒否の文面のためだけである。数値だけを出しても
-    操縦者は「どこへ動かせば通るのか」が読めず、会場で手が止まる。
+    `names` / `unit` を運ぶのは拒否の文面のためだけである。数値だけを出しても
+    操縦者は「どこへ動かせば通るのか」が読めず、会場で手が止まる。**寄せ先が 1 点
+    (`at:`) かどうかは名前の数で読める** —— 零点確定の前に寄せる位置
+    (`PositionTable.homing_prerequisites`) はここから導く。
     """
 
     #: 参照する軸の名前
@@ -116,14 +122,36 @@ class RequiredRange:
     low: float
     #: 解決済みの上限 [参照先の unit]
     high: float
-    #: メッセージ用の位置名 ("top" / "retracted〜clear")
-    label: str
+    #: 宣言に書かれた位置名。`at:` なら 1 つ、`between:` なら 2 つ
+    names: tuple[str, ...]
     #: メッセージ用の単位 (参照先の unit)
     unit: str
 
     def __post_init__(self) -> None:
+        if not self.names:
+            raise ValueError(f"区間の位置名がありません: {self!r}")
         if self.low > self.high:
             raise ValueError(f"区間の下限が上限を超えています: [{self.low}, {self.high}]")
+
+    @property
+    def label(self) -> str:
+        """メッセージ用の位置名 ("top" / "retracted〜clear")。"""
+        return "〜".join(self.names)
+
+    @property
+    def single_position(self) -> str | None:
+        """寄せ先が 1 点に決まるならその位置名。`between:` は None。
+
+        2 点で挟んだ区間は「どちらへ寄せれば通るのか」が一意に決まらないので、
+        自動で寄せる先には使わない (順序を決めるのには使う)。
+        """
+        return self.names[0] if len(self.names) == 1 else None
+
+    def contains(self, value: float) -> bool:
+        return self.low <= value <= self.high
+
+    def describe(self) -> str:
+        return f"{self.label} ([{self.low:.4g}, {self.high:.4g}]{self.unit})"
 
 
 @dataclass(frozen=True)
@@ -142,6 +170,17 @@ class AxisReading:
 
 #: 軸名から `AxisReading` を返す読み口。歯止めは自分では読まず、必ず注入で受ける
 AxisStateReader = Callable[[str], AxisReading]
+
+
+def unknown_axis_state(_axis: str) -> AxisReading:
+    """読み口を注入されなかった経路が使う既定。**常に「読めていない」。**
+
+    `lib/sequence/motors.py` の `_unknown_sensor_state` と同じ作法で、既定を
+    「条件を満たしている」側へ倒さない。倒すと**配線を忘れた経路だけが干渉の
+    歯止めを丸ごと素通りし、しかもそれが画面にもログにも出ない**。
+    `requires` を書いた軸へ指令が届かないという形で必ず表に出す。
+    """
+    return AxisReading(value=None, target=None)
 
 
 @dataclass(frozen=True)
@@ -275,6 +314,7 @@ class MotionGuard:
         target: float,
         unit: str,
         sensor_active: object,
+        axis_state: AxisStateReader = unknown_axis_state,
     ) -> None:
         """`current` から `target` へ動かしてよいか。駄目なら送出する。
 
@@ -285,13 +325,16 @@ class MotionGuard:
             unit: 人間の単位 (メッセージ用)
             sensor_active: 進む向きの端のセンサの状態を返す呼び出し可能オブジェクト
                 (`Callable[[str], bool | None]`)。`None` は「読めていない」
+            axis_state: 条件になる**他の軸**の実測と目標を返す読み口。既定は
+                「常に読めていない」で、配線し忘れは素通りではなく拒否になる
 
         Raises:
             GuardViolation: 跳躍量を超えた / 進む向きの端が押されている
-                (または読めていない)
+                (または読めていない) / 干渉条件を満たしていない
         """
         delta = target - current
         self._check_jump(axis, delta, unit)
+        self.check_interference(axis=axis, delta=delta, axis_state=axis_state)
         self.check_limit(axis=axis, delta=delta, sensor_active=sensor_active)
 
     def _check_jump(self, axis: str, delta: float, unit: str) -> None:
@@ -303,6 +346,70 @@ class MotionGuard:
             f" (上限 {limit}{unit})。**スケールか固定小数点レンジの取り違えを疑うこと** ——"
             " 位置が桁ごとずれて読めていると、保持目標がそのまま桁の違う位置を指し、"
             "機構が可動端まで走ります"
+        )
+
+    def check_interference(self, *, axis: str, delta: float, axis_state: AxisStateReader) -> None:
+        """他の軸が条件の区間に居るか。駄目なら送出する。
+
+        **`delta == 0` は必ず素通りさせる。** 実測位置をそのまま書き戻す「その場で
+        止まれ」(`LimitMonitor._stop_here` / `HomingRunner._stop_here`) まで塞ぐと、
+        **止めるための指令が、止まっていないことを理由に拒否される**逆立ちが起きる
+        (可動端の判定が `delta == 0` を見ないのと同じ理由。§2 に記録がある)。
+
+        **実測と目標の両方**が区間に入っていることを要求する。区間は凸なので両方が
+        中なら残りの軌道も必ず中である。実測だけを見ると「top に居るが下降指令が
+        既に出ている」を通し、目標だけを見ると「top を書いた直後でまだ下に居る」を
+        通す。**`target` が `None` のときは実測だけで判る** —— 緊急停止で目標が
+        消えた後に全軸が動かせなくなると、退避路としての手動操縦が成立しない。
+
+        **`value` が `None` (読めていない) は拒否する。** 三値を `False` へ丸めない
+        のと同じで、読めていないことを「条件を満たしている」と読み替えない。
+
+        Raises:
+            GuardViolation: 条件の軸が読めていない / 区間の外に居る
+        """
+        if delta == 0.0:
+            return
+        for required in self._spec.requires:
+            reading = axis_state(required.axis)
+            if reading.value is None:
+                raise GuardViolation(
+                    f"軸 '{axis}' は '{required.axis}' が {required.describe()} に居るあいだしか"
+                    f"動かせませんが、'{required.axis}' の位置が読めていません"
+                    " (ドライバの電源と CAN 配線を確認してください)。"
+                    "**読めていないことを「条件を満たしている」と読み替えてはならない**ので、"
+                    "安全側に倒しています"
+                )
+            outside = [
+                f"{what} {value:.4g}{required.unit}"
+                for what, value in (("実測", reading.value), ("目標", reading.target))
+                if value is not None and not required.contains(value)
+            ]
+            if outside:
+                raise GuardViolation(
+                    f"軸 '{axis}' は '{required.axis}' が {required.describe()} に居るあいだしか"
+                    f"動かせません (今 {' / '.join(outside)})。"
+                    f"**先に '{required.axis}' を {required.label} へ寄せてください** "
+                    f"('{required.axis}' の零点がまだなら零点確定が先です)"
+                )
+
+    def check_not_with(self, *, axis: str, siblings: Collection[str]) -> None:
+        """同じ 1 通の指令に一緒に入れてよいか。駄目なら送出する。
+
+        **呼ぶのは `Sequence.move_to` だけである。** 手動操縦は 1 指令 1 軸なので、
+        そもそも「同じ指令に 2 軸入る」経路が無い。層が抜けているのではなく経路が
+        無い —— 手動で 2 軸を続けて動かして重なるほうは `not_with` の範囲外で、
+        塞げていない手として `docs/invariants.md` §4 に名指しで残してある。
+
+        Raises:
+            GuardViolation: 一緒に動かしてはならない軸が同じ指令に入っている
+        """
+        conflicts = [name for name in self._spec.not_with if name in siblings]
+        if not conflicts:
+            return
+        raise GuardViolation(
+            f"軸 '{axis}' と {_label(conflicts)} は同じ指令では動かせません"
+            " (途中の姿勢で機構が重なります)。段を分けて順に動かしてください"
         )
 
     def check_limit(self, *, axis: str, delta: float, sensor_active: object) -> None:

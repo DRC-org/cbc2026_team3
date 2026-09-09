@@ -45,8 +45,8 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.logging_setup import configure_logging
 from lib.manual import ManualController
-from lib.match_state import ChecklistItem, load_checklist_definitions
-from lib.motion_guard import SensorSuspension
+from lib.match_state import ChecklistItem, Court, load_checklist_definitions
+from lib.motion_guard import AxisStateReader, SensorSuspension
 from lib.sequence.engine import (
     NO_LIMIT_INTERVENTION,
     LimitIntervention,
@@ -54,7 +54,13 @@ from lib.sequence.engine import (
     Sequence,
 )
 from lib.sequence.homing import HomingError, HomingRunner, homing_axis_names
-from lib.sequence.motors import EStopChecker, MotorGroup, TargetSink, build_motor_group
+from lib.sequence.motors import (
+    EStopChecker,
+    MotorGroup,
+    TargetSink,
+    build_axis_state_reader,
+    build_motor_group,
+)
 from lib.sequence.positions import PositionTable, load_position_table
 from lib.server import RobotServer
 from lib.server_homing import HomingSource
@@ -352,6 +358,18 @@ def _wire_motor_check_sequence(
     for group in groups:
         for handle in group.handles:
             motors.add(handle)
+    # **軸間干渉の読み口はここにも要る。** ロボットごとの束とは別の束なので、
+    # `_wire_robot_motors` の配線は引き継がれない —— 忘れると毎セッション回す
+    # 動作確認と零点確定だけが「条件の軸が読めていない」で全軸拒否になる
+    motors.bind_axis_state(
+        _make_axis_state_reader(
+            merged,
+            motors,
+            court=lambda: sequence.court,
+            managers=can_managers,
+            feedback_timeout_ms=feedback_timeout_ms,
+        )
+    )
 
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
@@ -482,6 +500,36 @@ def _make_sensor_reader(
         return bool(getattr(sensor, "sensor_active", False))
 
     return sensor_active
+
+
+def _make_axis_state_reader(
+    positions: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Callable[[], Court],
+    managers: list[CANManager],
+    feedback_timeout_ms: float,
+) -> AxisStateReader:
+    """軸間干渉の判定が読む「他の軸は今どこか」を組む。**鮮度を通す。**
+
+    受信が途絶えた軸は `MotorState` の既定 0.0 を運び続けるので、鮮度を掛けないと
+    **1 通も届いていない軸が「原点に居る」として条件を満たす**。ここが `None` を
+    返せば歯止めは拒否側へ倒れ、`requires` を書いた軸が動かないという形で表に出る
+    (`_make_sensor_reader` が三値の `None` を運ぶのと同じ約束)。
+
+    **判定の中身は `lib/sequence/motors.py` が 1 つだけ持つ。** ここは鮮度の材料
+    (どの `CANManager` から `last_feedback_at` を取るか) を合わせるだけで、
+    書き写すと本番と動作確認で `None` の条件が食い違う。
+    """
+    freshness = FeedbackFreshness(
+        _merged_last_feedback_at(managers), timeout_ms=feedback_timeout_ms
+    )
+    return build_axis_state_reader(
+        positions,
+        motors,
+        court=court,
+        is_stale=lambda name: freshness.is_stale(name, freshness.now()),
+    )
 
 
 def _make_sensor_contact_reader(managers: list[CANManager]) -> Callable[[str], int | None]:
@@ -709,6 +757,7 @@ def _wire_robot_motors(
     can_manager: CANManager,
     motors: dict[str, MotorDriver],
     sequence: Sequence,
+    positions: PositionTable,
     *,
     feedback_timeout_ms: float,
     is_estop_active: EStopChecker,
@@ -726,17 +775,28 @@ def _wire_robot_motors(
     for loop in loops.values():
         target_sinks.update(loop.target_sinks())
 
-    sequence.bind_motors(
-        build_motor_group(
-            can_manager,
-            motors,
-            is_estop_active=is_estop_active,
-            target_sinks=target_sinks,
-            # 可動端インターロック: `guard:` を書いた軸が押されている端へ進むのを止める。
-            # 配線しないと三値の `None` (読めていない) しか返らず、その軸は 1 歩も動けない
-            sensor_active=sensor_active,
+    group = build_motor_group(
+        can_manager,
+        motors,
+        is_estop_active=is_estop_active,
+        target_sinks=target_sinks,
+        # 可動端インターロック: `guard:` を書いた軸が押されている端へ進むのを止める。
+        # 配線しないと三値の `None` (読めていない) しか返らず、その軸は 1 歩も動けない
+        sensor_active=sensor_active,
+    )
+    # 軸間干渉: `guard.requires` を書いた軸が、条件の軸を読めるようにする。読み口は
+    # 束そのものを引くので**束ね終わってから**配線する。**配線先はここと
+    # `_wire_motor_check_sequence` の 2 箇所**で、片方を忘れるとその経路だけが全軸拒否
+    group.bind_axis_state(
+        _make_axis_state_reader(
+            positions,
+            group,
+            court=lambda: sequence.court,
+            managers=[can_manager],
+            feedback_timeout_ms=feedback_timeout_ms,
         )
     )
+    sequence.bind_motors(group)
     return list(loops.values())
 
 
@@ -1026,6 +1086,7 @@ def _wire_one_robot(
         can_manager,
         motors,
         seq,
+        positions,
         feedback_timeout_ms=system.health.feedback_timeout_ms,
         is_estop_active=is_estop_active,
         sensor_active=sensor_read,

@@ -13,10 +13,11 @@ from lib.manual import ManualController
 from lib.match_state import Court
 from lib.sequence.engine import Sequence, step
 from lib.sequence.homing import HomingError
-from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
 from tests.fake_can import mock_can_manager
+from tests.feedback_frames import feed_generic
 from tests.server_fixtures import RecordingClient, ServerFixture
 
 _CONFIG = {
@@ -294,3 +295,139 @@ class TestCommand:
 
         assert "試合中" in client.of_type("command_rejected")[-1]["reason"]
         assert runner.homed == []
+
+
+_INTERFERING_CONFIG = {
+    "axes": {
+        "sub_lift": {
+            "unit": "mm",
+            "command_unit": "mm",
+            "tolerance": 1.0,
+            "homing": {
+                "sensor": "lift_switch",
+                "direction": 1,
+                "search_distance": 5.0,
+                "step": 1.0,
+            },
+        },
+        "sub_y_axis": {
+            "unit": "mm",
+            "command_unit": "mm",
+            "tolerance": 1.0,
+            "homing": {
+                "sensor": "sub_switch",
+                "direction": -1,
+                "search_distance": 5.0,
+                "step": 1.0,
+            },
+            "guard": {"requires": [{"axis": "sub_lift", "at": "top"}]},
+        },
+    },
+    "positions": {"sub_lift": {"top": -20.0}, "sub_y_axis": {"home": 0.0}},
+}
+
+
+class _SteppingRunner:
+    """探索の 1 歩を実際に打つ代役。**指令の入口 (= 歯止め) を必ず通る。**"""
+
+    def __init__(self) -> None:
+        self.homed: list[str] = []
+
+    async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
+        homing = spec.homing
+        assert homing is not None
+        await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
+        self.homed.append(spec.name)
+        return homing.step
+
+
+class TestPanelDoesNotMoveOtherAxes:
+    """零点合わせパネルは**選んだ軸しか動かさない**。寄せるのは操縦者の仕事。
+
+    自動で寄せると「1 本だけ確定するつもりが別の軸が動いた」が起き、`§3` の
+    「零点確定は選んだ軸しか動かさない」を崩す。代わりに**拒否の 1 行に手当てを
+    書く** —— 会場ではそれが手順書になる。
+    """
+
+    @staticmethod
+    def _build(*, lift_mm: float) -> tuple[ServerFixture, _SteppingRunner]:
+        table = load_position_table(_INTERFERING_CONFIG, source="<test>")
+        mgr = mock_can_manager()
+        group = MotorGroup(sensor_active=lambda _name: False)
+        for index, (name, value) in enumerate(
+            (("sub_lift", lift_mm), ("sub_y_axis", 0.0)), start=1
+        ):
+            driver = GenericDriver(name, can_id=index)
+            feed_generic(driver, position=value)
+            group.add(MotorHandle(name, driver, mgr))
+        group.bind_axis_state(
+            build_axis_state_reader(
+                table, group, court=lambda: Court.RED, is_stale=lambda _name: False
+            )
+        )
+
+        fx = ServerFixture.build()
+        fx.freeze_broadcast()
+        fx.add_robot("sub_hand", _IdleSequence("sub_hand"))
+        runner = _SteppingRunner()
+        fx.set_homing_source(
+            HomingSource(
+                runner=runner,  # type: ignore[arg-type]
+                table=table,
+                motors=group,
+                court=lambda: Court.RED,
+                axes_by_robot={"sub_hand": ("sub_lift", "sub_y_axis")},
+            )
+        )
+        return fx, runner
+
+    async def test_寄せていなければ手当ての入った理由が配信に載る(self) -> None:
+        fx, _runner = self._build(lift_mm=-10.0)
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.start_homing("sub_hand", ["sub_y_axis"])
+        await fx.wait_homing_idle()
+
+        (result,) = client.of_type("homing_state")[-1]["results"]
+        assert result["axis"] == "sub_y_axis"
+        reason = result["error"]
+        assert "sub_lift" in reason
+        assert "top" in reason
+        assert "寄せてください" in reason
+
+    async def test_選んだ軸以外を勝手に動かさない(self) -> None:
+        fx, runner = self._build(lift_mm=-10.0)
+
+        await fx.start_homing("sub_hand", ["sub_y_axis"])
+        await fx.wait_homing_idle()
+
+        assert runner.homed == []
+
+    async def test_寄せてあれば通る(self) -> None:
+        fx, runner = self._build(lift_mm=-20.0)
+
+        await fx.start_homing("sub_hand", ["sub_y_axis"])
+        await fx.wait_homing_idle()
+
+        assert runner.homed == ["sub_y_axis"]
+
+    async def test_まとめて回しても寄せないので後続は拒否される(self) -> None:
+        """**参照先を先に回すが、寄せはしない。**
+
+        零点確定は離脱して終わるので、確定しただけの `sub_lift` は `top` に
+        居ない。パネルはそこから寄せないので、`sub_y_axis` は手当ての入った理由と
+        ともに残る (寄せてから確定する手順を組むのは動作確認の側)。
+        """
+        fx, runner = self._build(lift_mm=-20.0)
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.start_homing("sub_hand")
+        await fx.wait_homing_idle()
+
+        assert runner.homed == ["sub_lift"]
+        results = client.of_type("homing_state")[-1]["results"]
+        assert [r["axis"] for r in results] == ["sub_lift", "sub_y_axis"]
+        assert results[0]["error"] is None
+        assert "寄せてください" in results[1]["error"]

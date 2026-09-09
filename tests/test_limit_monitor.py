@@ -590,3 +590,59 @@ class TestOutOfScope:
         await rig.monitor.step()
 
         assert rig.sent == []
+
+
+def _table_with_requires() -> PositionTable:
+    """可動端と**軸間干渉の両方**を宣言した軸。参照先はこの束に居ない。"""
+    return load_position_table(
+        {
+            "axes": {
+                "sub_y_axis": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": _SCALE,
+                    "tolerance": 0.1,
+                    "guard": {**_GUARD, "requires": [{"axis": "sub_lift", "at": "top"}]},
+                },
+                "sub_lift": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": _SCALE,
+                    "tolerance": 1.0,
+                },
+            },
+            "positions": {"sub_y_axis": {"home": 0.0}, "sub_lift": {"top": -20.0}},
+        },
+        source="<test>",
+    )
+
+
+class TestInterferenceIsNotWatchedHere:
+    """**周期監視が見るのは可動端だけ。** 軸間干渉は見ない (理由は `docs/invariants.md` §4)。
+
+    そのため監視が作る `AxisHandle` には読み口を配線しない。書き戻す「その場で
+    止まれ」は `delta == 0` なので干渉の判定を必ず素通りする —— 素通りしないと、
+    **止めるための指令が「条件の軸が読めていない」を理由に拒否される**。
+    """
+
+    def _rig(self, **sensors: bool | None) -> _Rig:
+        return _Rig(_table_with_requires(), dict(sensors))
+
+    async def test_干渉条件を持つ軸でも可動端では止められる(self) -> None:
+        rig = self._rig(rear_switch=True)
+        await rig.command(-10.0)
+
+        await rig.monitor.step()
+
+        assert rig.sent == [pytest.approx(0.0)]
+        assert rig.monitor.intervention("sub_y_axis").count == 1
+
+    async def test_干渉条件だけでは止めない(self) -> None:
+        """参照先が読めていなくても、可動端が立っていなければ監視は何もしない。"""
+        rig = self._rig()
+        await rig.command(-10.0)
+
+        await rig.monitor.step()
+
+        assert rig.sent == []
+        assert rig.monitor.intervention("sub_y_axis").count == 0

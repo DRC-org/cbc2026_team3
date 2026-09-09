@@ -131,14 +131,15 @@ CAN フレーム
 | `_load_pid_config` / `_build_position_pid` / `_build_position_loops` | `motors[name].pid` を読んで `_DEFAULT_PID` で補完し出力レンジを絞り、M3508 が居る**バスごとに 1 つ** `M3508PositionLoop` を生成 |
 | `_build_sync_groups` / `_attach_sync_groups` | `PositionTable.paired_axes()` → `SyncGroup`。全メンバが同一ループに載るものだけループへ登録 |
 | `_attach_motion_profiles` | `axes.<軸>.motion` を持つ軸へ台形プロファイルを後付けする |
-| `_wire_robot_motors` | `build_motor_group()` → `Sequence.bind_motors()` |
+| `_wire_robot_motors` | `build_motor_group()` → `MotorGroup.bind_axis_state()` → `Sequence.bind_motors()` |
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
 | `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバの `SET_ZERO`）を解決 |
 | `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
 | `_make_sensor_reader` / `_make_sensor_contact_reader` | 可動端インターロックと零点確定が共有するセンサの読み口。前者は三値の現在値（`None` = 読めていない）、後者は接触（OFF→ON）の累計（`None` = カウンタを提供しないドライバ） |
+| `_make_axis_state_reader` | 軸間干渉の判定が読む「他の軸は今どこか」（`build_axis_state_reader` に鮮度を合成するだけ）。**配線先は `_wire_robot_motors` と `_wire_motor_check_sequence` の 2 つの `MotorGroup`** で、片方を忘れるとその経路だけが全軸拒否になる（`tests/test_main_wiring.py` が両方を固定）。読めないものは `None`（位置定数に無い／位置指令でない／束に居ない／位置を測れないドライバ／鮮度切れ） |
 | `_make_limit_interventions` | `LimitMonitor` が止めた回数を `Sequence.bind_limit_interventions` へ渡す（保護に曲げられた `move_to` を失敗させる） |
 | `_build_manual_controller` | シーケンスと**同じ** `MotorGroup` を共有する `ManualController` |
-| `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す |
+| `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す（**この束にも `bind_axis_state()` が要る**。ロボットごとの束とは別物なので配線は引き継がれない） |
 | `_read_operstate` | `/sys/class/net/<ch>/operstate` を読み、down なら起動ログへ ERROR 1 行（起動は止めない） |
 
 生成した部品は `server.add_robot(robot_name, seq, can_manager, position_loops=…,
@@ -306,7 +307,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。軸間干渉の宣言（`RequiredRange` = 解決済みの区間 / `AxisReading` = 実測と目標を 1 組で運ぶ読み口）も持つが、**判定はまだ誰も呼んでいない** |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。**軸間干渉の判定 `check_interference()` / `check_not_with()`** も持つ（`RequiredRange` = 解決済みの区間 / `AxisReading` = 実測と目標を 1 組で運ぶ）。前者は `check_command()` から呼ばれて 3 経路すべてに掛かり、**後者は `Sequence.move_to` だけが呼ぶ**（手動は 1 指令 1 軸なので同じ指令に 2 軸入る経路が無い）。**`LimitMonitor` は `check_limit()` しか呼ばない**（干渉を周期監視しない理由は `invariants.md` §4） |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -1001,7 +1002,14 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 （`lib/sequence/positions.py`。`MotionGuard` は位置表もコートも見ない）。区間は**参照先の
 `tolerance` ぶん広げる** —— 広げないと、その位置へ到達許容差の内側で止まった実測が区間の
 外になり、次の段が会場でだけ拒否される。`not_with` は**片側に書けば読み込み時に対称化される**
-（両側に書かせると、片方を消したとき守りが半分だけ残る）。
+（両側に書かせると、片方を消したとき守りが半分だけ残る）。同じ軸を `at:` で参照する宣言が
+**別々の位置**を要求していたら起動を拒否する —— 零点確定の前に寄せる先（`homing_prerequisites()`）が
+1 つに決まらず、選ぶ側が黙って後勝ちで片方を落とすため。
+
+`PositionTable.homing_prerequisites()` は `requires` の `at:`（1 点）から「零点確定の前に寄せて
+おく軸 → 位置名」を導く（`between:` は寄せ先が一意に決まらないので順序にだけ効かせる）。
+`lib/sequence/homing.py` の `homing_order()` は同じ宣言から**参照先を先に回す並び**を作り、
+`run_homing()` が必ず通す。使い分けは `invariants.md` §4。
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で

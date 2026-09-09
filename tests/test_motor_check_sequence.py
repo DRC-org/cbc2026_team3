@@ -13,7 +13,7 @@ import sequences.sub_hand as sub_hand
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
 from lib.sequence.engine import Sequence
-from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle
+from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from sequences.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
 from tests.fake_drivers import StubFeedbackDriver
@@ -21,7 +21,10 @@ from tests.fake_drivers import StubFeedbackDriver
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
 
-async def _collect(available: Collection[str] | None = None) -> list[dict[str, str]]:
+async def _collect(
+    available: Collection[str] | None = None, *, only: str | None = None
+) -> list[dict[str, str]]:
+    """全ステップ (`only` を渡せばその 1 ステップ) が出す指令を順に集める。"""
     seq = MotorCheckSequence(available_axes=available)
     calls: list[dict[str, str]] = []
 
@@ -35,7 +38,8 @@ async def _collect(available: Collection[str] | None = None) -> list[dict[str, s
     try:
         assert seq.steps, "ステップが 1 つも無い (収集方法が壊れている)"
         for info in seq.steps:
-            await getattr(seq, info.method_name)()
+            if only is None or info.method_name == only:
+                await getattr(seq, info.method_name)()
     finally:
         Sequence.move_to = original  # type: ignore[method-assign]
     return calls
@@ -94,9 +98,11 @@ class TestPairedAxes:
 
 class TestFinalPosture:
     async def test_最後は両ハンドを初期姿勢へ戻す(self) -> None:
-        calls = await _collect()
+        posture: dict[str, str] = {}
+        for targets in await _collect(only="restore_home"):
+            posture.update(targets)
 
-        assert calls[-1] == {**MAIN_HOME, **SUB_HOME, "conveyor": "stop"}
+        assert posture == {**MAIN_HOME, **SUB_HOME, "conveyor": "stop"}
 
     async def test_駆動しっぱなしの軸を残さない(self) -> None:
         last: dict[str, str] = {}
@@ -107,6 +113,39 @@ class TestFinalPosture:
         assert last["pump_vac"] == "stop"
         for axis in VALVE_AXES:
             assert last[axis] == "closed"
+
+
+class TestSubHandIsCommandedOneAxisAtATime:
+    """サブハンドの初期姿勢を 1 通にまとめると干渉の宣言に引っかかる。
+
+    `sub_y_axis` は `sub_lift` が `top` に居るあいだしか動かせず (`requires`)、
+    `sub_pitch` と `sub_offset` は同じ指令で動かせない (`not_with`)。**段は 1 つの
+    まま**で、本体だけを分ける。
+    """
+
+    @pytest.mark.parametrize("method_name", ["sub_home", "restore_home"])
+    async def test_サブハンドは_1_軸ずつ宣言の順で送る(self, method_name: str) -> None:
+        calls = await _collect(only=method_name)
+        sub = [targets for targets in calls if set(targets) <= set(SUB_HOME)]
+
+        assert sub == [{axis: position} for axis, position in SUB_HOME.items()]
+
+    async def test_昇降を上げてから前後_ピッチとオフセットは別々(self) -> None:
+        order = list(SUB_HOME)
+
+        assert order.index("sub_lift") < order.index("sub_y_axis")
+        assert order.index("sub_pitch") < order.index("sub_offset")
+
+    async def test_メインハンドは_1_通のまま送る(self) -> None:
+        calls = await _collect(only="restore_home")
+
+        assert calls[0] == {**MAIN_HOME, "conveyor": "stop"}
+
+    def test_段の数は変わらない(self) -> None:
+        labels = [info.label for info in MotorCheckSequence("x").steps]
+
+        assert labels.count("サブハンド 初期姿勢へ") == 1
+        assert labels.count("両ハンドを初期姿勢へ戻す") == 1
 
 
 class TestHomingComesFirst:
@@ -276,3 +315,59 @@ class TestPartialConfiguration:
         seq = MotorCheckSequence(available_axes=[])
 
         assert not any(info.axes for info in seq.steps)
+
+
+class _ReachingDriver(StubFeedbackDriver):
+    """指令どおりに動く機体。到達模擬なので `move_to` が待たずに進む。"""
+
+    def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        if mode is ControlMode.POSITION:
+            self.set_observed(position=value)
+        return super().encode_target(mode, value)
+
+
+class _NoOpHoming:
+    """零点確定の代役。**軸を動かさない** (寄せる段が居ることをこの通しで見る)。"""
+
+    def __init__(self) -> None:
+        self.homed: list[str] = []
+
+    async def home(self, spec: AxisSpec, _handle: AxisHandle) -> float:
+        self.homed.append(spec.name)
+        return 0.0
+
+
+class TestShippedRunThrough:
+    """同梱の位置定数で**全ステップを到達模擬で通し、歯止めが 1 度も拒否しない**。
+
+    層ごとのテストは 1 枚ずつしか見ないので、「宣言が動作確認を壊さない」を
+    担保するのはこの通しだけである。零点確定は軸を動かさない代役なので、
+    `sub_lift` を `top` へ寄せているのは `home_axes` の 2 段目そのもの。
+    """
+
+    async def test_全ステップが拒否されずに通る(self) -> None:
+        table = _shipped_table()
+        seq = MotorCheckSequence(available_axes=table.axes)
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup(sensor_active=lambda _name: False)
+        for axis in table.axes:
+            for name in table.axis(axis).motor_names:
+                group.add(MotorHandle(name, _ReachingDriver(name, 1), mgr, poll_interval=0.001))
+        group.bind_axis_state(
+            build_axis_state_reader(
+                table, group, court=lambda: seq.court, is_stale=lambda _name: False
+            )
+        )
+        seq.bind_motors(group)
+        seq.bind_positions(table)
+        homing = _NoOpHoming()
+        seq.bind_homing(homing)  # type: ignore[arg-type]
+
+        for info in seq.steps:
+            await getattr(seq, info.method_name)()
+
+        # 宣言が効いていないと、この通しは何も見ていないことになる
+        assert table.axis("sub_y_axis").guard is not None
+        assert table.axis("sub_y_axis").guard.requires  # type: ignore[union-attr]
+        assert homing.homed[0] == "sub_lift", "参照される軸を先に確定していない"

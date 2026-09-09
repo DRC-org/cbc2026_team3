@@ -19,6 +19,7 @@ __all__ = [
     "HomingRunner",
     "SwitchMeasurement",
     "homing_axis_names",
+    "homing_order",
     "measure_switch",
     "run_homing",
 ]
@@ -802,6 +803,39 @@ def homing_axis_names(table: PositionTable) -> list[str]:
     return [name for name in table.axes if table.axis(name).homing is not None]
 
 
+def homing_order(table: PositionTable, axes: Collection[str]) -> list[str]:
+    """`guard.requires` の**参照先を先に**並べ替える。**余分な移動は 1 つもしない。**
+
+    零点確定は探索の 1 歩ごとに指令の入口を通るので、`requires` を書いた軸は条件の
+    軸が区間に居ないと 1 歩も動けない。参照先を後に回すと、その軸の零点が確定して
+    いないうちに条件を評価することになり、順序だけが理由で必ず拒否される。
+
+    **並べ替えるだけで、寄せる指令はここから出さない** —— 零点確定は「選んだ軸しか
+    動かさない」ことが守りになっている (`docs/invariants.md` §3)。寄せるかどうかは
+    経路ごとの判断で、動作確認は寄せ、零点合わせパネルは寄せない。
+
+    参照は読み込み時に非循環であることが保証されている (`_check_requires_acyclic`)。
+    """
+    requested = list(dict.fromkeys(axes))
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(axis: str) -> None:
+        if axis in seen:
+            return
+        seen.add(axis)
+        guard = table.axis(axis).guard
+        for required in () if guard is None else guard.requires:
+            # 今回回さない軸は並べ替えの対象外 (寄せ直しは呼び出し側の判断)
+            if required.axis in requested:
+                visit(required.axis)
+        ordered.append(axis)
+
+    for axis in requested:
+        visit(axis)
+    return ordered
+
+
 def _axis_handle(
     table: PositionTable, motors: MotorGroup, axis: str, court: Court
 ) -> tuple[AxisSpec, AxisHandle]:
@@ -810,6 +844,9 @@ def _axis_handle(
         spec,
         [getattr(motors, name) for name in spec.motor_names],
         sensor_active=motors.sensor_active,
+        # 零点確定も探索の 1 歩ごとに指令の入口を通るので、干渉条件が効く。
+        # 配線しないと `requires` を書いた軸だけが 1 歩も探索できない
+        axis_state=motors.axis_state,
     )
 
 
@@ -853,6 +890,7 @@ async def run_homing(
     if not targets:
         logger.info("零点確定: homing を持つ軸が無いため飛ばす")
         return []
+    targets = homing_order(table, targets)
 
     results: list[AxisHomingResult] = []
     for axis in targets:

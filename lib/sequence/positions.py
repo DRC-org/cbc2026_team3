@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
@@ -569,6 +569,26 @@ class PositionTable:
     def paired_axes(self) -> tuple[str, ...]:
         return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
 
+    def homing_prerequisites(self, axes: Collection[str] | None = None) -> dict[str, str]:
+        """`axes` を動かす前に寄せておく軸と、その位置名。**`guard.requires` から導く。**
+
+        入るのは `at:` (1 点) で書かれた条件だけで、`between:` は寄せ先が一意に
+        決まらないので入らない (順序を決めるのには効かせる)。**動作確認の手順が
+        軸名を書き写さずに済む唯一の口**で、宣言を変えれば手順も一緒に変わる。
+
+        同じ軸へ別々の位置を要求する宣言は読み込み時に弾いてあるので、ここで
+        後勝ちに潰れることはない。
+        """
+        targets = self.axes if axes is None else tuple(axes)
+        prerequisites: dict[str, str] = {}
+        for name in targets:
+            guard = self.axis(name).guard
+            for required in () if guard is None else guard.requires:
+                position = required.single_position
+                if position is not None:
+                    prerequisites[required.axis] = position
+        return prerequisites
+
     def raw(self, axis: str, name: str, *, court: Court | None = None) -> float:
         spec = self.axis(axis)
         values = self._positions.get(axis, {})
@@ -1088,6 +1108,7 @@ def _resolve_guard_interference(
         for name, declarations in declared_requires.items()
     }
     _check_requires_acyclic(source, resolved_requires)
+    _check_prerequisites_agree(source, resolved_requires)
     resolved_not_with = _symmetrize_not_with(source, axes, declared_not_with)
 
     updated = dict(axes)
@@ -1162,7 +1183,7 @@ def _resolve_required_range(
         axis=decl.axis,
         low=min(resolved) - tolerance,
         high=max(resolved) + tolerance,
-        label="〜".join(decl.names),
+        names=decl.names,
         unit=target.unit,
     )
 
@@ -1193,6 +1214,33 @@ def _check_requires_acyclic(source: str, requires: Mapping[str, tuple[RequiredRa
 
     for axis in requires:
         walk(axis)
+
+
+def _check_prerequisites_agree(
+    source: str, requires: Mapping[str, tuple[RequiredRange, ...]]
+) -> None:
+    """同じ軸を `at:` で参照する宣言は、同じ位置名でなければならない。
+
+    別々の位置を要求されると「どちらへ寄せれば両方が通るのか」が決まらず、
+    寄せ先を 1 つ選ぶ側 (`PositionTable.homing_prerequisites`) が黙って後勝ちで
+    片方を落とす。落ちたことは画面にもログにも出ないので、起動時に拒否する。
+    """
+    chosen: dict[str, tuple[str, str]] = {}
+    for axis, declarations in requires.items():
+        for required in declarations:
+            position = required.single_position
+            if position is None:
+                continue
+            previous = chosen.get(required.axis)
+            if previous is None:
+                chosen[required.axis] = (position, axis)
+                continue
+            if previous[0] != position:
+                raise ValueError(
+                    f"{source}: 軸 '{required.axis}' へ別々の位置が要求されています "
+                    f"(axes.{previous[1]} は '{previous[0]}'、axes.{axis} は '{position}')。"
+                    "零点確定の前に寄せる先が 1 つに決まりません"
+                )
 
 
 def _symmetrize_not_with(

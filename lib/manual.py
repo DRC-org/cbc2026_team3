@@ -147,6 +147,7 @@ class ManualController:
             spec,
             [getattr(self._motors, name) for name in spec.motor_names],
             sensor_active=self._motors.sensor_active,
+            axis_state=self._motors.axis_state,
         )
         await handle.set_target_value(commands)
 
