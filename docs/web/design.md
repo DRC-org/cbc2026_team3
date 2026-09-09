@@ -114,7 +114,7 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 | `Ruler` | 作動点測定の起動 | `SwitchMeasurePanel` |
 | `Send` | 絶対値入力の送信 | `AbsoluteEntry` |
 | `Minus` / `Plus` · `ChevronsLeft` / `ChevronsRight` | ジョグ · 可動端へ | `ContinuousControls` |
-| `Pause` / `Circle` | ステップ一覧の 許可待ち / 未到達 | `SequenceStepList` |
+| `ChevronRight` / `Pause` / `Circle` | ステップ一覧の 現在 / 許可待ち / 未到達 | `SequenceStepList` |
 | `TriangleAlert` | 警告 | 各所 |
 | `OctagonAlert` | `error` トースト | `Toaster` |
 | `CircleAlert` / `CircleHelp` / `Info` | 開始できない理由 / 押せない理由 / 補足 | `StartGate` / `MotorCheckButton` / `MatchPrep` |
@@ -122,9 +122,6 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 | `ListMinus` | 除外ステップ | `MotorCheckPanel` |
 | `X` | 軸の失敗 / 通知を閉じる | `HomingPanel` / `Toaster` |
 | `ChevronDown` / `ChevronRight` | 開閉 | `SubsystemStatus` / `MotorCheckPanel` |
-
-**`X` と `ChevronRight` は 2 つの意味を持ってしまっている**（`ChevronRight` はステップ一覧の
-「現在」の印にも使っている）。新しく足すときにこの 2 つへ寄せない。
 
 `Hand` はかつて手動操縦にも使っており、**試合中に手のアイコンを見てもトリガー待ちか手動操縦か
 判別できなかった**。`Play` と `ArrowRight` も同じ理由で分ける（同じ位置に同じ大きさで交互に
@@ -228,9 +225,7 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 
 **モーダルの中身は「押すと何が起きるか」を書く場所**であって飾りではない。
 `MotorCheckButton` が「**両機**の可動範囲に人・物がないこと」と書くのは、動くのが両機だから。
-文面が古いままだと操縦者は片方の機体しか見ずに開始する。逆に `HomingButtons` /
-`SwitchMeasurePanel` は「**○○だけ**を動かします」と宛先のロボット（作動点測定は軸と向きも）を
-名指しする —— 動くのが片方だけなので、言わないと別の機体を見張ったまま開始する。
+文面が古いままだと操縦者は片方の機体しか見ずに開始する。
 
 ---
 
