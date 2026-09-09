@@ -82,6 +82,31 @@ describe("HomingButtons", () => {
     expect(screen.getByRole("button", SUB_BUTTON)).toBeDisabled();
   });
 
+  it("robot を絞ると、その機体のボタンだけ出す", () => {
+    renderWithRobot(<HomingButtons robot="sub_hand" />, {
+      connected: true,
+      homing: { ...EMPTY_HOMING, available: true, blocked_reason: null, targets: TARGETS },
+    });
+
+    expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
+  });
+
+  it("絞った先に対象が無ければボタンを出さず知らせる", () => {
+    renderWithRobot(<HomingButtons robot="sub_hand" />, {
+      connected: true,
+      homing: {
+        ...EMPTY_HOMING,
+        available: true,
+        blocked_reason: null,
+        targets: { main_hand: ["y_axis"] },
+      },
+    });
+
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText("零点確定できる軸がありません。")).toBeInTheDocument();
+  });
+
   it("対象を読み取れなければボタンを出さずに知らせる", () => {
     mount({ targets: MALFORMED });
 

@@ -8,12 +8,18 @@ import { homingStatus } from "@/lib/homingStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
 
-export function HomingPanel() {
+interface HomingPanelProps {
+  /** 操縦者画面では他機の結果を出さない (Monitor では省略して全機) */
+  robot?: string;
+}
+
+export function HomingPanel({ robot: only }: HomingPanelProps = {}) {
   const { connected } = useRobotStatus();
   const { state } = useHoming();
   const { outcome, failures } = homingStatus(state, connected);
 
   if (outcome === "idle" && state.robot === null) return null;
+  if (only !== undefined && state.robot !== only) return null;
 
   const robot = state.robot === null ? "" : robotLabel(state.robot);
 

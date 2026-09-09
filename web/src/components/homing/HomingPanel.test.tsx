@@ -45,6 +45,22 @@ describe("HomingPanel", () => {
     expect(screen.getByText("y_axis")).toBeInTheDocument();
   });
 
+  it("robot を絞ると、他の機体の結果は出さない", () => {
+    const { container } = renderWithRobot(<HomingPanel robot="sub_hand" />, {
+      connected: true,
+      homing: {
+        ...EMPTY_HOMING,
+        available: true,
+        blocked_reason: null,
+        robot: "main_hand",
+        axes: ["y_axis"],
+        results: [{ axis: "y_axis", error: null }],
+      },
+    });
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("結果を読み取れなければ黙って空にしない", () => {
     mount({ robot: "sub_hand", results: MALFORMED });
 

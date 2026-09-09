@@ -12,7 +12,7 @@ import type {
 } from "@/lib/protocol";
 import { RobotControl } from "@/pages/RobotControl";
 import { motorState } from "@/test/motorState";
-import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
+import { DEFAULT_MATCH_STATE, EMPTY_HOMING, renderWithRobot } from "@/test/robotContext";
 
 const STEPS: SequenceStepInfo[] = [
   { index: 0, label: "初期位置へ移動", require_trigger: false },
@@ -748,5 +748,44 @@ describe("吸着パッドの選択面", () => {
       { type: "suction_pads_set", robot: "sub_hand", pads: ["valve_1"] },
       expect.any(String),
     );
+  });
+});
+
+describe("零点合わせ", () => {
+  const HOMING = {
+    ...EMPTY_HOMING,
+    available: true,
+    blocked_reason: null,
+    targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
+  };
+  const SUB_BUTTON = { name: "サブハンドの零点合わせを開始" };
+
+  it("準備中の半自動に、自分の担当機のボタンだけ出す", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      states: { sub_hand: robotState() },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
+      homing: HOMING,
+    });
+
+    expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
+  });
+
+  it("手動中はボタンを出さず、サーバーが配る拒否理由だけを出す", () => {
+    const reason = "'sub_hand' が手動操縦モードのため零点合わせを実行できません";
+    mountManual("setup", { homing: { ...HOMING, blocked_reason: reason } });
+
+    expect(screen.queryByRole("button", SUB_BUTTON)).toBeNull();
+    expect(screen.getByText(reason)).toBeInTheDocument();
+  });
+
+  it("試合中は出さない (サーバーがフェーズで拒む)", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      states: { sub_hand: robotState() },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "match", checklists: CHECKLISTS },
+      homing: HOMING,
+    });
+
+    expect(screen.queryByText("零点合わせ")).toBeNull();
   });
 });
