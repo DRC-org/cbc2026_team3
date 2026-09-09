@@ -430,7 +430,7 @@ class TestHomingStillWorks:
         `delta == 0` として素通りしてしまう (テストが何も見ていない状態になる)。
         """
         spec = table.axis("sub_y_axis")
-        state = {"position": start, "latched": False}
+        state = {"position": start, "contacts": 0, "on": False}
 
         def sensor_active(_name: str) -> bool:
             return state["position"] >= 5.0
@@ -444,8 +444,10 @@ class TestHomingStillWorks:
             await original(commands)
             state["position"] = spec.to_value(commands)
             driver.set_observed(position=commands["sub_y_axis"])
-            if sensor_active("front_switch"):
-                state["latched"] = True
+            on = sensor_active("front_switch")
+            if on and not state["on"]:
+                state["contacts"] += 1
+            state["on"] = on
 
         handle.set_target_value = _move  # type: ignore[method-assign]
         return handle, state
@@ -454,17 +456,15 @@ class TestHomingStillWorks:
         async def sleep(_seconds: float) -> None:
             return None
 
-        def latched(_name: str) -> bool:
-            hit = state["latched"]
-            state["latched"] = False
-            return hit
+        def contact_count(_name: str) -> int:
+            return state["contacts"]
 
         async def capture_origin(axis: str) -> None:
             state.setdefault("origins", []).append(axis)
 
         return HomingRunner(
             sensor_active=lambda _name: state["position"] >= 5.0,
-            sensor_latched=latched,
+            sensor_contact_count=contact_count,
             sensor_is_stale=lambda _name: False,
             motor_is_stale=lambda _name: False,
             motor_is_energized=lambda _name: True,

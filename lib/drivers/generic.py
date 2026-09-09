@@ -101,7 +101,7 @@ class GenericDriver(MotorDriver):
         self._watchdog_flag: bool = False
         self._unconfigured_id_flag: bool = False
         self._sensor_flag: bool = False
-        self._sensor_latched: bool = False
+        self._sensor_contacts: int = 0
         self._never_commanded_flag: bool = False
         self.control_type: ControlMode = control_type
         self._info: InfoFrame | None = None
@@ -168,14 +168,17 @@ class GenericDriver(MotorDriver):
 
     def update_state(self, msg: can.Message) -> MotorState:
         flags = msg.data[0]
+        # 解釈できていないフレームで接触を数えないよう、デコードを通してから進める
+        state = super().update_state(msg)
         self._e_stop_flag = bool(flags & _FLAG_E_STOP)
         self._watchdog_flag = bool(flags & _FLAG_WATCHDOG)
         self._unconfigured_id_flag = bool(flags & _FLAG_UNCONFIGURED_ID)
         sensor = bool(flags & _FLAG_SENSOR)
+        if sensor and not self._sensor_flag:
+            self._sensor_contacts += 1
         self._sensor_flag = sensor
-        self._sensor_latched = self._sensor_latched or sensor
         self._never_commanded_flag = bool(flags & _FLAG_NEVER_COMMANDED)
-        return super().update_state(msg)
+        return state
 
     def matches_feedback(self, msg: can.Message) -> bool:
         if msg.is_extended_id:
@@ -286,10 +289,10 @@ class GenericDriver(MotorDriver):
     def sensor_active(self) -> bool:
         return self._sensor_flag
 
-    def consume_sensor_latch(self) -> bool:
-        latched = self._sensor_latched or self._sensor_flag
-        self._sensor_latched = False
-        return latched
+    @property
+    def sensor_contact_count(self) -> int:
+        """接触 (OFF→ON) の累計。**読んでも減らない** ので読み手が何人いても壊れない。"""
+        return self._sensor_contacts
 
     def is_fault(self) -> bool:
         return self._unconfigured_id_flag or self.info_mismatch is not None

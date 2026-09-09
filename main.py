@@ -349,16 +349,16 @@ def _wire_motor_check_sequence(
             _merged_last_feedback_at(can_managers), timeout_ms=feedback_timeout_ms
         )
 
-        def _sensor_latched(name: str) -> bool | None:
-            # ラッチを持たないドライバで現在値へ落とすと、ON 区間が step より狭い
+        def _sensor_contact_count(name: str) -> int | None:
+            # カウンタを持たないドライバで現在値へ落とすと、ON 区間が step より狭い
             # ときの取りこぼしが黙って戻る。判断は HomingRunner が持つ
             sensor = sensors.get(name)
             if sensor is None:
                 return None
-            consume = getattr(sensor, "consume_sensor_latch", None)
-            if not callable(consume):
+            count = getattr(sensor, "sensor_contact_count", None)
+            if not isinstance(count, int):
                 return None
-            return bool(consume())
+            return count
 
         def _sensor_is_stale(name: str) -> bool:
             if name not in sensors:
@@ -413,7 +413,7 @@ def _wire_motor_check_sequence(
         sequence.bind_homing(
             HomingRunner(
                 sensor_active=sensor_read,
-                sensor_latched=_sensor_latched,
+                sensor_contact_count=_sensor_contact_count,
                 sensor_is_stale=_sensor_is_stale,
                 motor_is_stale=_motor_is_stale,
                 motor_is_energized=_motor_is_energized,

@@ -625,7 +625,7 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 |---|---|
 | 事前確認（4 つ。どれも 1 歩も動かさずに落ちる） | 位置指令の軸か / 原点を確定する手段があるか / センサの鮮度 / **対象軸モータの鮮度** |
 | 離脱 | 既にセンサに触れているなら、離れるまで動かす。判定は**現在値**（ラッチを使わない） |
-| 探索 | 毎ステップ `AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step`。到達判定は**センサのラッチ**（`GenericDriver.consume_sensor_latch`。探索開始直前に 1 度捨てる） |
+| 探索 | 毎ステップ `AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step`。到達判定は**接触の累計**（`GenericDriver.sensor_contact_count`。読んでも減らない単調カウンタで、探索開始直前に基準値を取り直す） |
 | 停滞判定 | `step/2` 未満が 3 歩連続で `HomingError` |
 | 検出後 | その場の実測位置を目標に送り直してから原点確定 |
 | 原点確定 | `set_group_origin_here`（グループ単位でしか行わない） |
