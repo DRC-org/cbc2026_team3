@@ -13,6 +13,7 @@ from lib.sequence.homing import (
     _STALL_LIMIT,
     HomingError,
     HomingRunner,
+    measure_switch,
     run_homing,
 )
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
@@ -1513,6 +1514,15 @@ class _RecordingHoming:
         return 0.0
 
 
+class _OneStepMeasure:
+    """測定の 1 歩だけを打つ代役。零点確定と同じ入口を通ることだけを見る。"""
+
+    async def measure(self, spec: AxisSpec, handle: AxisHandle, **kwargs: object) -> None:
+        homing = spec.homing
+        assert homing is not None
+        await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
+
+
 class _OneStepHoming:
     """探索の 1 歩だけを打つ代役。**指令の入口 (= 歯止め) を必ず通る。**"""
 
@@ -1594,6 +1604,25 @@ class TestHomingOrderFollowsInterference:
         assert "top" in str(exc.value)
         assert "寄せてください" in str(exc.value)
         assert group["slide"].target is None
+
+    async def test_作動点測定も同じ条件が掛かる(self) -> None:
+        """`measure_switch` は零点確定と同じ `AxisHandle` を通るので同じ歯止めに乗る。
+
+        `docs/checks_and_health.md` の表がそう書いてあるので、経路が分かれたら
+        ここが落ちる。
+        """
+        table = self._table()
+        group = _interfering_group(table, lift_mm=-10.0)
+
+        with pytest.raises(GuardViolation, match="寄せてください"):
+            await measure_switch(
+                _OneStepMeasure(),  # type: ignore[arg-type]
+                table,
+                group,
+                court=Court.RED,
+                axis="slide",
+                direction=-1,
+            )
 
     async def test_その場で止まれは条件の軸が読めなくても通る(self) -> None:
         """途絶で降りる直前の書き戻しが拒否されると、押し込む向きの古い目標が残る。
