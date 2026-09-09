@@ -165,11 +165,11 @@ constexpr ServoBoardConfig kServoBoards[] = {
     // ここへ駆動するので、機構を付ける前に「当たらない角度」を実測して入れること。
     {2,
      {
-         {SlotRole::Servo, 9, 0.0f, kSubRotateRLimits, kServoPulse270, true},   // SV0 sub_rotate_r
-         {SlotRole::Servo, 11, 0.0f, kSubRotateLLimits, kServoPulse270, true},  // SV1 sub_rotate_l
-         {SlotRole::Servo, 10, 0.0f, kSubPitchRLimits, kServoPulse270, true},   // SV2 sub_pitch_r
-         {SlotRole::Servo, 6, 0.0f, kSubPitchLLimits, kServoPulse270, true},    // SV3 sub_pitch_l
-         {SlotRole::Servo, 3, 0.0f, kSubOffsetLimits, kServoPulse270, true},    // SV4 sub_offset
+         {SlotRole::Servo, 9, 0.0f, kSubRotateRLimits, kServoPulse270, false},   // SV0 sub_rotate_r
+         {SlotRole::Servo, 11, 0.0f, kSubRotateLLimits, kServoPulse270, false},  // SV1 sub_rotate_l
+         {SlotRole::Servo, 10, 0.0f, kSubPitchRLimits, kServoPulse270, false},   // SV2 sub_pitch_r
+         {SlotRole::Servo, 6, 0.0f, kSubPitchLLimits, kServoPulse270, false},    // SV3 sub_pitch_l
+         {SlotRole::Servo, 3, 0.0f, kSubOffsetLimits, kServoPulse270, false},    // SV4 sub_offset
      }},
 };
 
@@ -188,7 +188,7 @@ constexpr ServoBoardConfig kServoBoards[] = {
          {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 rotate
          // TODO(実機で確認): sensorActiveLow は仮値。極性はスロットごとの配線で決まるので
          // 同じ基板の SV3 へ合わせてはならない。
-         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 y_axis 右
+         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV4 y_axis 右
      }},
     // 基板 #1（DIP=1）: 5 スロットとも TouchSensor で、駆動するモータは 1 台も無い。
     // 焼き忘れ検出は PC 側 sensors: の expected_firmware が担う。
@@ -196,11 +196,11 @@ constexpr ServoBoardConfig kServoBoards[] = {
     // TODO(実機で確認): SV0〜SV4 の sensorActiveLow は仮値。
     {1,
      {
-         {SlotRole::TouchSensor, 4, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV0 y_axis 左 (メイン)
-         {SlotRole::TouchSensor, 5, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV1 sub_y_axis 前端
-         {SlotRole::TouchSensor, 6, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV2 sub_y_axis 後端
-         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV3 sub_lift 上端
-         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, true},  // SV4 sub_lift 下端
+         {SlotRole::TouchSensor, 4, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV0 y_axis 左 (メイン)
+         {SlotRole::TouchSensor, 5, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV1 sub_y_axis 前端
+         {SlotRole::TouchSensor, 6, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV2 sub_y_axis 後端
+         {SlotRole::TouchSensor, 7, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV3 sub_lift 上端
+         {SlotRole::TouchSensor, 8, 0.0f, kProvisionalLimits, kServoPulse270, false},  // SV4 sub_lift 下端
      }},
 };
 

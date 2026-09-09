@@ -36,11 +36,11 @@ class MainHandSequence(Sequence):
     async def move_to_home(self) -> None:
         await self.move_to(HOME)
 
-    @step("自陣ワーク 3 列目まで前進", require_trigger=True)
+    @step("3 列目ワークへ移動", require_trigger=True)
     async def move_to_work_3(self) -> None:
         await self.move_to(_pick_at("work_3"))
 
-    @step("自陣ワーク 3 列目を把持", require_trigger=True)
+    @step("3 列目ワークを把持", require_trigger=True)
     async def grab_work_3(self) -> None:
         await self.move_to({"gripper": "closed"})
 
