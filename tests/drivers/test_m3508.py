@@ -377,6 +377,17 @@ class TestWrapInferenceAcrossFeedbackGap:
         assert self.driver.origin_trusted is True
         assert self.driver.health_detail() is None
 
+    def test_零点確定済みは原点確定で立ち_途切れで落ちる(self) -> None:
+        """途切れた後の累積角は原点からずれうるので、確定していたことも信用しない。"""
+        assert self.driver.origin_confirmed() is False
+        self._feed(8000)
+        self.driver.reset_multi_turn_origin()
+        assert self.driver.origin_confirmed() is True
+
+        self._feed(4108, after_s=1.0)
+
+        assert self.driver.origin_confirmed() is False
+
     def test_受信復帰だけでは信頼は戻らない(self) -> None:
         self._feed(8000)
         self._feed(4108, after_s=1.0)

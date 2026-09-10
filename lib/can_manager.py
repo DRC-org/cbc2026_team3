@@ -520,6 +520,8 @@ class CANManager:
             await self._send_steps(name, self._motors[name].deactivation_steps())
         for name in names:
             await self._send_steps(name, self._motors[name].origin_capture_steps())
+            # 原点はモータ内部に書かれたので、確定したことをドライバへ伝えられるのはここだけ
+            self._motors[name].mark_origin_confirmed()
 
         inactive = [
             name

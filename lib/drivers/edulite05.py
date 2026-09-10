@@ -107,9 +107,6 @@ class Edulite05Driver(MotorDriver):
 
         self._origin_offset = 0.0
         self._origin_captured = False
-        # 暫定原点と零点確定は別の軸で見る。前者はその場の姿勢を論理 0 にするだけで
-        # 機構原点と無関係なので、可動域による一意化の前提が立たない
-        self._origin_homed = False
         self._target_clamped = False
         self._prev_raw_position: float | None = None
         self._wrap_turns = 0
@@ -235,8 +232,9 @@ class Edulite05Driver(MotorDriver):
         **零点確定で原点が確定しているときだけ使える。** 暫定原点は機構原点と
         無関係なので、可動域と論理角が対応しない。
         """
-        if not self._origin_homed:
-            # 暫定原点のあいだは一意化そのものが成り立たないので、記録もしない
+        # 暫定原点はその場の姿勢を論理 0 にするだけで機構原点と無関係なので、
+        # 可動域による一意化の前提が立たない。記録もしない
+        if not self._origin_confirmed:
             return False
         if self._travel_range is None:
             self._log_travel_fallback("軸の機械的可動域 (axes.<軸>.travel) が設定されていない")
@@ -336,7 +334,8 @@ class Edulite05Driver(MotorDriver):
         )
         self._origin_offset = raw
         self._origin_captured = True
-        self._origin_homed = self._origin_homed or homed
+        if homed:
+            self.mark_origin_confirmed()
 
     def feedback_position(self) -> float:
         """論理位置 [rad]。`state.position` は電文どおりの生値のまま残す。"""

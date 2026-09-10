@@ -639,6 +639,8 @@ class TestGuardRejection:
         drivers: dict[str, _RecordingDriver] = {}
         for name in ("y_axis_r", "y_axis_l", "rotate"):
             drivers[name] = _RecordingDriver(name)
+            # 条件の軸は零点確定済み。未確定だと区間に居ても拒否される (別のテストが固定)
+            drivers[name].mark_origin_confirmed()
             group.add(MotorHandle(name, drivers[name], mgr))
         group.bind_axis_state(
             build_axis_state_reader(

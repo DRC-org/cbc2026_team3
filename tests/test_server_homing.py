@@ -12,7 +12,7 @@ from collections.abc import Mapping
 import can
 import pytest
 
-from lib.drivers.base import ControlMode
+from lib.drivers.base import ControlMode, MotorDriver
 from lib.drivers.generic import GenericDriver
 from lib.manual import ManualController
 from lib.match_state import Court
@@ -342,10 +342,20 @@ class _FollowingDriver(StubFeedbackDriver):
 
 
 class _SteppingRunner:
-    """探索の 1 歩を実際に打つ代役。**指令の入口 (= 歯止め) を必ず通る。**"""
+    """探索の 1 歩を実際に打つ代役。**指令の入口 (= 歯止め) を必ず通る。**
 
-    def __init__(self, events: list[tuple[str, object]], *, fails: set[str] | None = None) -> None:
+    通った軸は原点を書いたことにする —— 確定していない軸は寄せる段が信用しない。
+    """
+
+    def __init__(
+        self,
+        events: list[tuple[str, object]],
+        drivers: Mapping[str, MotorDriver],
+        *,
+        fails: set[str] | None = None,
+    ) -> None:
         self._events = events
+        self._drivers = drivers
         self._fails = fails or set()
 
     async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
@@ -354,6 +364,8 @@ class _SteppingRunner:
         homing = spec.homing
         assert homing is not None
         await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
+        for name in spec.motor_names:
+            self._drivers[name].mark_origin_confirmed()
         self._events.append(("home", spec.name))
         return homing.step
 
@@ -395,7 +407,7 @@ class _Panel:
         self.fx.add_robot("sub_hand", _IdleSequence("sub_hand"))
         self.fx.set_homing_source(
             HomingSource(
-                runner=_SteppingRunner(self.events, fails=fails),  # type: ignore[arg-type]
+                runner=_SteppingRunner(self.events, self.drivers, fails=fails),  # type: ignore[arg-type]
                 table=table,
                 motors=group,
                 court=lambda: Court.RED,
@@ -433,6 +445,8 @@ class TestPanelOrdersWhatWasSelected:
 
     async def test_前後だけを選んだら寄せずに拒否する(self) -> None:
         panel = _Panel(lift_mm=-10.0, wire_move_to=True)
+        # 昇降は前に確定してある (未確定なら拒否の理由が「零点確定が先」に変わる)
+        panel.drivers["sub_lift"].mark_origin_confirmed()
 
         (result,) = await panel.run(["sub_y_axis"])
 
@@ -454,7 +468,7 @@ class TestPanelOrdersWhatWasSelected:
         assert results[0]["error"] is None
         assert "寄せてください" in results[1]["error"]
 
-    async def test_昇降の零点確定に失敗したら寄せない(self) -> None:
+    async def test_昇降の零点確定に失敗したら寄せず_前後は動かさずに理由を返す(self) -> None:
         """原点が確定していない軸へ位置名で指令すると、どこへ動くか分からない。"""
         panel = _Panel(lift_mm=-10.0, wire_move_to=True, fails={"sub_lift"})
 
@@ -462,13 +476,27 @@ class TestPanelOrdersWhatWasSelected:
 
         assert panel.events == []
         assert "センサに届きません" in results[0]["error"]
-        assert "寄せてください" in results[1]["error"]
+        assert "sub_lift" in results[1]["error"]
+        assert "零点確定" in results[1]["error"]
         assert panel.drivers["sub_lift"].state.position == pytest.approx(-10.0)
+        assert panel.drivers["sub_y_axis"].state.position == pytest.approx(0.0)
 
-    async def test_前後だけでも条件を満たしていれば通る(self) -> None:
+    async def test_前後だけでも昇降が確定済みで条件を満たしていれば通る(self) -> None:
         panel = _Panel(lift_mm=-20.0, wire_move_to=True)
+        panel.drivers["sub_lift"].mark_origin_confirmed()
 
         (result,) = await panel.run(["sub_y_axis"])
 
         assert result["error"] is None
         assert panel.events == [("home", "sub_y_axis")]
+
+    async def test_昇降が未確定なら前後だけでは通らない(self) -> None:
+        """未確定の `sub_lift` が偶然 `top` を読んでも、機構がそこに居るとは限らない。"""
+        panel = _Panel(lift_mm=-20.0, wire_move_to=True)
+
+        (result,) = await panel.run(["sub_y_axis"])
+
+        assert panel.events == []
+        assert "sub_lift" in result["error"]
+        assert "零点が確定していません" in result["error"]
+        assert panel.drivers["sub_y_axis"].state.position == pytest.approx(0.0)

@@ -332,7 +332,7 @@ def _rejection(table: PositionTable) -> str:
         MotionGuard(guard).check_interference(
             axis="sub_y_axis",
             delta=-1.0,
-            axis_state=lambda _axis: AxisReading(value=left_at, target=None),
+            axis_state=lambda _axis: AxisReading(value=left_at, target=None, origin_confirmed=True),
         )
     return str(exc.value)
 

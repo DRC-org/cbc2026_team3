@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
@@ -353,7 +354,7 @@ class AxisHandle:
                 return reading
             # 実測は読めたままにする。目標だけを差し替えるので、「これから書く目標は
             # 中だが実測はまだ外」は今までどおり拒否される
-            return AxisReading(value=reading.value, target=pending_targets[axis])
+            return replace(reading, target=pending_targets[axis])
 
         return read
 
@@ -442,6 +443,17 @@ class AxisHandle:
         return self._motors[motor_name].to_tolerance(self._spec.tolerance)
 
 
+def origin_confirmed(spec: AxisSpec, motors: MotorGroup) -> bool:
+    """軸の原点が零点確定で書かれたまま残っているか。**モータ全員が確定していて初めて確定。**
+
+    干渉判定 (`build_axis_state_reader`) と零点確定・距離測定の寄せる段 (`_in_stages`)
+    が同じここを読む。答えを持つのはドライバで、ここは軸へ束ねるだけ。
+    """
+    return all(
+        name in motors and motors[name].driver.origin_confirmed() for name in spec.motor_names
+    )
+
+
 def build_axis_state_reader(
     positions: PositionTable,
     motors: MotorGroup,
@@ -474,17 +486,17 @@ def build_axis_state_reader(
         try:
             spec = positions.axis(axis).for_court(court())
         except PositionLookupError:
-            return AxisReading(value=None, target=None)
+            return unknown_axis_state(axis)
         if spec.command_mode is not ControlMode.POSITION:
-            return AxisReading(value=None, target=None)
+            return unknown_axis_state(axis)
 
         handles: list[MotorHandle] = []
         for name in spec.motor_names:
             if name not in motors:
-                return AxisReading(value=None, target=None)
+                return unknown_axis_state(axis)
             handle = motors[name]
             if not handle.driver.telemetry.position or is_stale(name):
-                return AxisReading(value=None, target=None)
+                return unknown_axis_state(axis)
             handles.append(handle)
 
         value = spec.to_value({h.name: h.driver.feedback_position() for h in handles})
@@ -496,7 +508,11 @@ def build_axis_state_reader(
                 written = {}
                 break
             written[handle.name] = handle.target
-        return AxisReading(value=value, target=spec.to_value(written) if written else None)
+        return AxisReading(
+            value=value,
+            target=spec.to_value(written) if written else None,
+            origin_confirmed=origin_confirmed(spec, motors),
+        )
 
     return read
 

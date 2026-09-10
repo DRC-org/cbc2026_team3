@@ -687,6 +687,17 @@ class TestProvisionalOrigin:
         assert driver.origin_offset == pytest.approx(raw)
         assert driver.feedback_position() == pytest.approx(0.0, abs=1e-9)
 
+    def test_暫定原点では零点確定済みにならない(self) -> None:
+        """その場の姿勢を論理 0 にしただけで、機構原点とは無関係。"""
+        driver = Edulite05Driver("m1", can_id=5, set_zero_on_start=True)
+        feed_edulite(driver, position=1.5)
+
+        driver.establish_provisional_origin()
+        assert driver.origin_confirmed() is False
+
+        driver.capture_origin_here()
+        assert driver.origin_confirmed() is True
+
     def test_2度目は効かない(self) -> None:
         """**再励磁のたびに控え直すと、そのときの姿勢が新しい原点になる。**
 

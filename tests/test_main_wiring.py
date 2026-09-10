@@ -2444,7 +2444,10 @@ class TestAxisStateWiring:
 
         read = seq.motors.axis_state
         assert read is not None
-        assert read("lift") == AxisReading(value=pytest.approx(-2.0, abs=1e-3), target=None)
+        # 零点確定を通していない M3508 は未確定 (累積角の原点は起動時の姿勢)
+        assert read("lift") == AxisReading(
+            value=pytest.approx(-2.0, abs=1e-3), target=None, origin_confirmed=False
+        )
 
     def test_途絶した軸は読めていないとして返る(self) -> None:
         """既定の 0.0 を運び続ける軸が「原点に居る」として条件を満たすのを防ぐ。"""
@@ -2468,7 +2471,7 @@ class TestAxisStateWiring:
 
         read = seq.motors.axis_state
         assert read is not None
-        assert read("lift") == AxisReading(value=None, target=None)
+        assert read("lift") == AxisReading(value=None, target=None, origin_confirmed=False)
 
     def test_統合動作確認が組む束にも配線されている(self) -> None:
         server = MagicMock()

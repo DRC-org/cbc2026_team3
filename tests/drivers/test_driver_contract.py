@@ -75,6 +75,15 @@ class TestOriginCaptureCapability:
     def test_既定は暫定原点を確立しない(self) -> None:
         assert _ProtocolOnlyDriver("x", 1).establish_provisional_origin() is False
 
+    def test_零点確定済みは書いた瞬間にしか立たない(self) -> None:
+        """既定は未確定。起動直後の座標は機構原点と無関係なので、埋めた既定値で立ててはならない。"""
+        driver = _ProtocolOnlyDriver("x", 1)
+        assert driver.origin_confirmed() is False
+
+        driver.mark_origin_confirmed()
+
+        assert driver.origin_confirmed() is True
+
     def test_ローカル原点を持たないドライバは控えられない(self) -> None:
         with pytest.raises(NotImplementedError):
             _ProtocolOnlyDriver("x", 1).capture_origin_here()

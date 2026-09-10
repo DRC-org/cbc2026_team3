@@ -271,6 +271,8 @@ class Dm3520Driver(MotorDriver):
         """
         self._reported_ranges.clear()
         self._range_write_attempts.clear()
+        # 同じ電源断で内部の原点もその瞬間の姿勢へ作り直される
+        self._origin_confirmed = False
         return [
             (self.encode_disable(), 0.05),
             (self.encode_ctrl_mode(self._CONTROL_TO_CTRL_MODE[self.mode]), 0.05),
@@ -300,12 +302,10 @@ class Dm3520Driver(MotorDriver):
         待ちが `disable` より長いのは、`initialization_steps()` の
         `set_zero_on_start` と揃えているため。
 
-        TODO(未修正): **ここで確定した原点は、物理緊急停止で本機の電源が数秒
-        落ちるたびに黙って無効になる** —— 本機は電源投入時に位置が 0.0rad へ
-        固定されるので、復帰時点で内部の原点がその瞬間の姿勢へ作り直される。
-        PC 側に検出手段が無く、UI にもログにもヘルスにも出ない。当面は
-        「物理緊急停止を踏んだら零点確定をやり直す」運用で受ける。詳細は
-        `docs/checks_and_health.md` の「零点確定」節。
+        **ここで確定した原点は、物理緊急停止で本機の電源が数秒落ちると無効になる**
+        —— 本機は電源投入時に位置が 0.0rad へ固定される。電源が落ちたこと自体は
+        PC から見えないので、再初期化 (`reinitialization_steps`) を跨いだら確定を
+        落とし、位置名の指令と干渉判定がこの軸を信用しない形で表に出す。
         """
         return [(self.encode_set_zero(), 0.2)]
 

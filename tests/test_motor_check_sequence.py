@@ -328,13 +328,19 @@ class _ReachingDriver(StubFeedbackDriver):
 
 
 class _NoOpHoming:
-    """零点確定の代役。**軸を動かさない** (寄せる段が居ることをこの通しで見る)。"""
+    """零点確定の代役。**軸を動かさない** (寄せる段が居ることをこの通しで見る)。
 
-    def __init__(self) -> None:
+    原点を書いたことにはする —— 確定していない軸は寄せる段が信用しない。
+    """
+
+    def __init__(self, group: MotorGroup) -> None:
         self.homed: list[str] = []
+        self._group = group
 
     async def home(self, spec: AxisSpec, _handle: AxisHandle) -> float:
         self.homed.append(spec.name)
+        for name in spec.motor_names:
+            self._group[name].driver.mark_origin_confirmed()
         return 0.0
 
 
@@ -363,7 +369,7 @@ class TestShippedRunThrough:
         )
         seq.bind_motors(group)
         seq.bind_positions(table)
-        homing = _NoOpHoming()
+        homing = _NoOpHoming(group)
         seq.bind_homing(homing)  # type: ignore[arg-type]
 
         for info in seq.steps:

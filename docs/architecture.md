@@ -312,7 +312,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
-| `drivers/base.py` | `MotorDriver` 基底 / `MotorState` / `ControlMode` / `TelemetrySupport`（測定可否の宣言）/ 原点の持ち方の宣言（`has_local_origin()` / `capture_origin_here()` / `establish_provisional_origin()` / `supports_origin_capture()`） |
+| `drivers/base.py` | `MotorDriver` 基底 / `MotorState` / `ControlMode` / `TelemetrySupport`（測定可否の宣言）/ 原点の持ち方の宣言（`has_local_origin()` / `capture_origin_here()` / `establish_provisional_origin()` / `supports_origin_capture()`）/ 零点確定済み（`origin_confirmed()` / `mark_origin_confirmed()`。落とす場面は各ドライバが持つ） |
 | `control/periodic.py` | 周期タスクの土台（`PeriodicTask` / `PausablePeriodicTask` / `LogThrottle`）+ 実周期の計測 |
 | `control/feedback.py` / `sync_guard.py` | フィードバック鮮度の判定（`FeedbackFreshness`。未受信は異常にしない）/ 左右直結ペアの局所保護（`SyncGuard`。判定とラッチだけ） |
 | `control/pid.py` / `trajectory.py` | モータ非依存 PID（測定値微分 / conditional integration / デッドバンド）/ 台形速度プロファイル |
@@ -1067,8 +1067,9 @@ interlocks:                # 軸どうしの干渉（§4）。位置名で書き
 `run_homing()` / `measure_distances()` に**寄せる口（`move_to`）を渡した経路だけ**が「①参照される軸を
 確定 → ②その軸を寄せる → ③残りを確定」の 3 段（`_in_stages`。両者が共有する）で回る。渡すのは統合
 動作確認（`sequences/motor_check.py`）と零点合わせ・距離測定（`HomingSource.move_to`。`main.py` が
-動作確認と同じ `Sequence.move_to` を配る）で、作動点測定（1 本）は渡さない。**寄せるのは今回選ばれた軸だけ**で、①で確定できなかった軸は寄せない。使い分けと理由は
-`invariants.md` §4。
+動作確認と同じ `Sequence.move_to` を配る）で、作動点測定（1 本）は渡さない。**寄せるのは今回選ばれた軸のうち
+零点が確定している軸だけ**（確定はドライバが持つ `origin_confirmed()` を `lib/sequence/motors.py::origin_confirmed` で
+軸へ束ねたもの。干渉判定の `AxisReading.origin_confirmed` と同じ口）。使い分けと理由は `invariants.md` §4。
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で

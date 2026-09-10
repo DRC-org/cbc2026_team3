@@ -902,9 +902,9 @@ def _interference_guard(**kwargs: object) -> MotionGuard:
     return MotionGuard(MotionGuardSpec(**params))  # type: ignore[arg-type]
 
 
-def _axis_at(value: float | None, target: float | None = None):
+def _axis_at(value: float | None, target: float | None = None, *, confirmed: bool = True):
     def read(_axis: str) -> AxisReading:
-        return AxisReading(value=value, target=target)
+        return AxisReading(value=value, target=target, origin_confirmed=confirmed)
 
     return read
 
@@ -953,10 +953,23 @@ class TestInterference:
                 axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(None, None)
             )
 
+    def test_零点が確定していなければ区間に居ても拒否する(self) -> None:
+        """未確定の座標で読んだ `top ± 1.0` は、機構がそこに居ることを意味しない。"""
+        with pytest.raises(GuardViolation, match="零点が確定していません") as exc:
+            _interference_guard().check_interference(
+                axis="sub_y_axis",
+                delta=-1.0,
+                axis_state=_axis_at(-140.0, -140.0, confirmed=False),
+            )
+
+        # 会場ではこの 1 行が手順書になる
+        assert "sub_lift" in str(exc.value)
+        assert "零点確定" in str(exc.value)
+
     def test_その場で止まれは必ず通る(self) -> None:
         """`delta == 0` を塞ぐと、止めるための指令が拒否される逆立ちが起きる。"""
         _interference_guard().check_interference(
-            axis="sub_y_axis", delta=0.0, axis_state=_axis_at(None, None)
+            axis="sub_y_axis", delta=0.0, axis_state=_axis_at(None, None, confirmed=False)
         )
 
     def test_requires_を書かない軸は素通りする(self) -> None:

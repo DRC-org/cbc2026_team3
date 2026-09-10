@@ -260,6 +260,15 @@ class TestCaptureOriginViaSetZero:
             zero = order.index(Dm3520Driver.SPECIAL_SET_ZERO)
             assert Dm3520Driver.SPECIAL_DISABLE in order[:zero]
 
+    async def test_切り直した瞬間に零点確定済みになる(self) -> None:
+        """原点はモータ内部に書かれるので、確定したことをドライバへ伝えられるのはここだけ。"""
+        mgr, _sent = self._prepare()
+        assert all(not mgr.motors[n].origin_confirmed() for n in ("sub_y_axis_m", "sub_lift_m"))
+
+        await mgr.capture_origin_via_set_zero(["sub_y_axis_m", "sub_lift_m"])
+
+        assert all(mgr.motors[n].origin_confirmed() for n in ("sub_y_axis_m", "sub_lift_m"))
+
     async def test_全員を無励磁にしてから全員を切り直す(self) -> None:
         mgr, sent = self._prepare()
 

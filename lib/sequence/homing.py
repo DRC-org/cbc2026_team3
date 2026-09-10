@@ -10,7 +10,7 @@ from typing import Protocol
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
-from lib.sequence.motors import AxisHandle, MotorGroup
+from lib.sequence.motors import AxisHandle, MotorGroup, origin_confirmed
 from lib.sequence.positions import AxisSpec, HomingSpec, PositionTable
 
 logger = logging.getLogger(__name__)
@@ -1096,16 +1096,28 @@ class _AxisOutcome(Protocol):
     def error(self) -> str | None: ...
 
 
+def _unconfirmed_message(axis: str, prerequisite: str, position: str) -> str:
+    return (
+        f"軸 '{axis}' は '{prerequisite}' を {position} へ寄せてからでないと動かせませんが、"
+        f"'{prerequisite}' の零点が確定していないため寄せられません"
+        f" (原点の決まっていない軸へ位置名で指令すると、どこへ動くか分かりません)。"
+        f"先に '{prerequisite}' の零点確定を済ませてください"
+    )
+
+
 async def _in_stages[Outcome: _AxisOutcome](
     table: PositionTable,
+    motors: MotorGroup,
     targets: list[str],
     move_to: MoveTo | None,
-    run: Callable[[list[str]], Awaitable[list[Outcome]]],
+    run: Callable[[list[str], Mapping[str, str]], Awaitable[list[Outcome]]],
 ) -> list[Outcome]:
     """①参照される軸 → ②寄せる → ③残り。**零点確定と距離測定が同じ順序を踏む唯一の場所。**
 
-    寄せるのは「今回選ばれた軸」だけ。①で失敗した軸は寄せない (原点が確定していない
-    軸へ位置名で指令するとどこへ動くか分からない)。
+    寄せるのは「今回選ばれた軸」のうち**零点が確定している軸**だけ。確定はドライバが
+    持ち (`origin_confirmed`)、①の成否ではなく確定で判断する —— 距離測定は①を通っても
+    原点を書かないので、成否で判断すると測れただけの軸を位置名で動かしてしまう。
+    確定していない軸を条件に持つ残りの軸は、動かさずに理由を返す。
     """
     targets = homing_order(table, targets)
 
@@ -1115,15 +1127,15 @@ async def _in_stages[Outcome: _AxisOutcome](
         if axis in targets
     }
     if move_to is None or not prerequisites:
-        return await run(targets)
+        return await run(targets, {})
 
     # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
     # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
     referenced = homing_order(table, prerequisites)
-    results = await run(referenced)
-    confirmed = {result.axis for result in results if result.error is None}
+    results = await run(referenced, {})
+    unconfirmed = [axis for axis in referenced if not origin_confirmed(table.axis(axis), motors)]
     for axis in referenced:
-        if axis not in confirmed:
+        if axis in unconfirmed:
             logger.error(
                 "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
                 axis,
@@ -1136,7 +1148,15 @@ async def _in_stages[Outcome: _AxisOutcome](
         await move_to({axis: prerequisites[axis]})
 
     rest = [axis for axis in targets if axis not in prerequisites]
-    results.extend(await run(rest))
+    blocked: dict[str, str] = {}
+    for axis in rest:
+        for prerequisite in table.homing_prerequisites([axis]):
+            if prerequisite in unconfirmed:
+                blocked[axis] = _unconfirmed_message(
+                    axis, prerequisite, prerequisites[prerequisite]
+                )
+                break
+    results.extend(await run(rest, blocked))
     return results
 
 
@@ -1172,12 +1192,12 @@ async def run_homing(
         logger.info("零点確定: homing を持つ軸が無いため飛ばす")
         return []
 
-    async def run(batch: list[str]) -> list[AxisHomingResult]:
+    async def run(batch: list[str], blocked: Mapping[str, str]) -> list[AxisHomingResult]:
         return await _home_each(
-            runner, table, motors, court, batch, on_axis, on_result, stop_on_error
+            runner, table, motors, court, batch, blocked, on_axis, on_result, stop_on_error
         )
 
-    return await _in_stages(table, targets, move_to, run)
+    return await _in_stages(table, motors, targets, move_to, run)
 
 
 async def measure_distances(
@@ -1195,16 +1215,19 @@ async def measure_distances(
 
     順序と寄せは零点確定と同じ 3 段 (`_in_stages`)。`requires` を書いた軸は条件の軸が
     区間に居ないと 1 歩も動けないので、先に測った軸を寄せてから残りを測る。
-    1 本の失敗で残りを諦めない。
+    測っても原点は確定しないので、条件の軸は**零点確定を済ませてある**ことが要る ——
+    未確定なら寄せず、残りは測らずに理由を返す。1 本の失敗で残りを諦めない。
     """
     targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
     if not targets:
         return []
 
-    async def run(batch: list[str]) -> list[SwitchDistance]:
-        return await _distance_each(runner, table, motors, court, batch, on_axis, on_result)
+    async def run(batch: list[str], blocked: Mapping[str, str]) -> list[SwitchDistance]:
+        return await _distance_each(
+            runner, table, motors, court, batch, blocked, on_axis, on_result
+        )
 
-    return await _in_stages(table, targets, move_to, run)
+    return await _in_stages(table, motors, targets, move_to, run)
 
 
 async def _distance_each(
@@ -1213,6 +1236,7 @@ async def _distance_each(
     motors: MotorGroup,
     court: Court | None,
     axes: list[str],
+    blocked: Mapping[str, str],
     on_axis: Callable[[str], Awaitable[None]] | None,
     on_result: Callable[[SwitchDistance], Awaitable[None]] | None,
 ) -> list[SwitchDistance]:
@@ -1223,6 +1247,8 @@ async def _distance_each(
         if on_axis is not None:
             await on_axis(axis)
         try:
+            if axis in blocked:
+                raise HomingError(blocked[axis])
             # 差を取るので零点がどこにあっても距離は変わらない
             low = await runner.measure(spec, handle, direction=-1.0)
             high = await runner.measure(spec, handle, direction=1.0)
@@ -1265,6 +1291,7 @@ async def _home_each(
     motors: MotorGroup,
     court: Court | None,
     axes: list[str],
+    blocked: Mapping[str, str],
     on_axis: Callable[[str], Awaitable[None]] | None,
     on_result: Callable[[AxisHomingResult], Awaitable[None]] | None,
     stop_on_error: bool,
@@ -1277,6 +1304,8 @@ async def _home_each(
             await on_axis(axis)
         _, handle = _axis_handle(table, motors, axis, court)
         try:
+            if axis in blocked:
+                raise HomingError(blocked[axis])
             await runner.home(spec, handle)
             await _retreat(spec, handle, table, court=court)
         except Exception as exc:

@@ -1997,13 +1997,16 @@ class _OneStepHoming:
         return homing.step
 
 
-def _interfering_group(table, *, lift_mm: float) -> MotorGroup:
+def _interfering_group(table, *, lift_mm: float, lift_confirmed: bool = True) -> MotorGroup:
+    """`lift` は零点確定済みが既定。未確定の座標で読んだ値は区間の判定に使えない。"""
     mgr = mock_can_manager()
     group = MotorGroup(sensor_active=lambda _name: False)
     for axis, value in (("lift", lift_mm), ("slide", 0.0)):
         motor = table.axis(axis).motors[0]
         driver = StubFeedbackDriver(motor.name, 1)
         driver.set_observed(position=motor.to_command(value))
+        if axis == "lift" and lift_confirmed:
+            driver.mark_origin_confirmed()
         group.add(MotorHandle(motor.name, driver, mgr))
     group.bind_axis_state(
         build_axis_state_reader(table, group, court=lambda: Court.RED, is_stale=lambda _name: False)
@@ -2067,6 +2070,22 @@ class TestHomingOrderFollowsInterference:
         assert "lift" in str(exc.value)
         assert "top" in str(exc.value)
         assert "寄せてください" in str(exc.value)
+        assert group["slide"].target is None
+
+    async def test_条件の軸が未確定なら区間に居ても拒否される(self) -> None:
+        """未確定の `lift` が偶然 `top` を読んでも、機構がそこに居るとは限らない。"""
+        table = self._table()
+        group = _interfering_group(table, lift_mm=-20.0, lift_confirmed=False)
+
+        with pytest.raises(GuardViolation, match="零点が確定していません"):
+            await run_homing(
+                _OneStepHoming(),  # type: ignore[arg-type]
+                table,
+                group,
+                court=Court.RED,
+                axes=["slide"],
+            )
+
         assert group["slide"].target is None
 
     async def test_作動点測定も同じ条件が掛かる(self) -> None:

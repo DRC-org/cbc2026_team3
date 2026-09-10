@@ -250,7 +250,8 @@ class TestMeasuresDistanceBetweenSwitches:
             ("slide", 1.0),
         ]
 
-    async def test_測れなかった軸は寄せず_残りは続ける(self) -> None:
+    async def test_測れなかった軸でも零点が確定していれば寄せて残りを続ける(self) -> None:
+        """寄せてよいかは測定の成否ではなく零点の確定で決まる (座標は測定で変わらない)。"""
         table = self._table()
         runner = _EdgeRunner(fail="lift")
 
@@ -263,11 +264,33 @@ class TestMeasuresDistanceBetweenSwitches:
             move_to=runner.move_to,
         )
 
-        assert ("move_to", {"lift": "top"}) not in runner.log
+        assert ("move_to", {"lift": "top"}) in runner.log
         assert [(r.axis, r.distance, r.error is None) for r in results] == [
             ("lift", None, False),
             ("slide", 452.0, True),
         ]
+
+    async def test_前提軸の零点が未確定なら寄せず_残りは測らずに理由を返す(self) -> None:
+        """測定は原点を書かない。測れただけの軸を位置名で動かすと、どこへ動くか分からない。"""
+        table = self._table()
+        runner = _EdgeRunner()
+
+        results = await measure_distances(
+            runner,  # type: ignore[arg-type]
+            table,
+            _interfering_group(table, lift_mm=-20.0, lift_confirmed=False),
+            court=Court.RED,
+            axes=["slide", "lift"],
+            move_to=runner.move_to,
+        )
+
+        assert runner.log == [("lift", -1.0), ("lift", 1.0)]
+        assert [(r.axis, r.distance) for r in results] == [("lift", 452.0), ("slide", None)]
+        error = results[1].error
+        assert error is not None
+        assert "lift" in error
+        assert "top" in error
+        assert "零点確定" in error
 
 
 class _ZeroingDriver(Edulite05Driver):

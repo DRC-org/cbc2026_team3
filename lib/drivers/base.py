@@ -51,6 +51,7 @@ class MotorDriver(abc.ABC):
         self.name = name
         self.can_id = can_id
         self._state = MotorState()
+        self._origin_confirmed = False
 
     @property
     def state(self) -> MotorState:
@@ -182,6 +183,19 @@ class MotorDriver(abc.ABC):
         `has_local_origin()` が True のドライバだけが実装する。
         """
         raise NotImplementedError(f"{type(self).__name__} は PC 側に原点を持ちません")
+
+    def origin_confirmed(self) -> bool:
+        """報告している位置の原点が、零点確定で書かれたまま残っているか。
+
+        起動時の暫定原点や、電源断で作り直された原点は「確定」ではない。
+        **失う場面を知るのはドライバだけ**なので、落とすのも各ドライバが自分で行う
+        (DM3520 は再初期化、M3508 は累積角の途切れ)。
+        """
+        return self._origin_confirmed
+
+    def mark_origin_confirmed(self) -> None:
+        """零点確定で原点を書いた瞬間に呼ぶ。"""
+        self._origin_confirmed = True
 
     def establish_provisional_origin(self) -> bool:
         """起動時の暫定原点を確立し、確立したら True。既定は何もしない。

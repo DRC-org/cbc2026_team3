@@ -400,6 +400,24 @@ class TestStartupSequence:
         assert 0xFE not in codes, "再励磁で原点を書き換えてはならない"
         assert codes == [0xFD, 0x00]  # disable → CTRL_MODE 書き込み
 
+    def test_再初期化を跨いだら零点確定は消える(self) -> None:
+        """電源断で内部の原点がその瞬間の姿勢へ作り直される。PC からは電源断そのものが
+        見えないので、再初期化 (= 電源が落ちたかもしれないところからの復帰) で落とす。"""
+        drv = _driver()
+        drv.mark_origin_confirmed()
+        assert drv.origin_confirmed() is True
+
+        drv.reinitialization_steps()
+
+        assert drv.origin_confirmed() is False
+
+    def test_起動時の_SET_ZERO_は零点確定ではない(self) -> None:
+        drv = _driver(set_zero_on_start=True)
+
+        drv.initialization_steps()
+
+        assert drv.origin_confirmed() is False
+
     def test_起動時の手順は再初期化に原点確定を足したもの(self) -> None:
         """2 つのリストを別々に並べると、片方だけへレジスタを足した状態が作れる。"""
         drv = _driver(set_zero_on_start=True)

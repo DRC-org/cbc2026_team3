@@ -175,6 +175,9 @@ class AxisReading:
     value: float | None
     #: 書かれている目標 [軸の unit]。None = 目標が無い
     target: float | None
+    #: 原点が零点確定で書かれたまま残っているか。False なら `value` / `target` は
+    #: どこを指しているか分からない座標なので、区間の判定に使ってはならない
+    origin_confirmed: bool
 
 
 #: 軸名から `AxisReading` を返す読み口。歯止めは自分では読まず、必ず注入で受ける
@@ -199,7 +202,7 @@ def unknown_axis_state(_axis: str) -> AxisReading:
     歯止めを丸ごと素通りし、しかもそれが画面にもログにも出ない**。
     `requires` を書いた軸へ指令が届かないという形で必ず表に出す。
     """
-    return AxisReading(value=None, target=None)
+    return AxisReading(value=None, target=None, origin_confirmed=False)
 
 
 @dataclass(frozen=True)
@@ -424,8 +427,11 @@ class MotionGuard:
         **`value` が `None` (読めていない) は拒否する。** 三値を `False` へ丸めない
         のと同じで、読めていないことを「条件を満たしている」と読み替えない。
 
+        **原点が確定していない軸も拒否する。** 区間は原点からの相対値なので、確定して
+        いない座標で読んだ値が偶然区間に入っても、機構がそこに居ることを意味しない。
+
         Raises:
-            GuardViolation: 条件の軸が読めていない / 区間の外に居る
+            GuardViolation: 条件の軸が読めていない / 零点が確定していない / 区間の外に居る
         """
         if delta == 0.0:
             return
@@ -437,6 +443,14 @@ class MotionGuard:
                     f"動かせませんが、'{required.axis}' の位置が読めていません"
                     " (ドライバの電源と CAN 配線を確認してください)。"
                     "読めていないことは条件を満たしていることではないので、安全側に倒しています"
+                )
+            if not reading.origin_confirmed:
+                raise GuardViolation(
+                    f"軸 '{axis}' は '{required.axis}' が {required.describe()} に居るあいだしか"
+                    f"動かせませんが、'{required.axis}' の零点が確定していません"
+                    f" (今の読み {reading.value:.4g}{required.unit} は原点の決まっていない"
+                    f"座標なので、居場所を表しません)。先に '{required.axis}' の零点確定を"
+                    "通してください"
                 )
             outside = [
                 f"{what} {value:.4g}{required.unit}"

@@ -59,7 +59,10 @@ def _recording_group(
     sink: list[tuple[str, float]] = []
     group = MotorGroup(sensor_active=sensor_active)
     for name in names:
-        group.add(MotorHandle(name, _RecordingDriver(name, sink), mgr, poll_interval=0.001))
+        driver = _RecordingDriver(name, sink)
+        # 通しは零点確定を済ませた後の状態。未確定だと guard.requires が先に拒否する
+        driver.mark_origin_confirmed()
+        group.add(MotorHandle(name, driver, mgr, poll_interval=0.001))
     return group, sink
 
 
