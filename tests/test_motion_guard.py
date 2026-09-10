@@ -222,72 +222,86 @@ class TestSeveralSwitchesOnOneEnd:
             guard.check_limit(axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=True))
 
 
-class TestUnexpectedContact:
-    """進む向きと反対側の端が「指令の時点では OFF、今は ON」なら止める。
+class TestPassThrough:
+    """押し込んだ向きの指令を、その端センサが ON のあいだ通さない。
 
-    向き・配線・`scale` の符号のどれを取り違えても、監視が見張る端と機構が向かう端が
-    入れ替わる。指令の時点から ON の端 (張り付きからの退避) は通す。
+    どちらの端に宣言されたセンサかは見ない —— 宣言 (`guard.limits` の前後) は実物と
+    入れ替わりうる。「OFF→ON へ変わった瞬間の指令の向き」だけを材料にする。
     """
 
-    def test_指令の時点で_OFF_だった反対側の端が押されたら止める(self) -> None:
+    def test_押し込んだ向きへはそれ以上進ませない(self) -> None:
         with pytest.raises(GuardViolation, match="front"):
-            _guard().check_unexpected_contact(
+            _guard().check_pass_through(
                 axis="sub_y_axis",
                 delta=-1.0,
                 sensor_active=_sensors(front=True),
-                was_active=_sensors(front=False),
+                pressed_toward={"front": -1},
             )
 
-    def test_指令の時点から押されていた端は通す(self) -> None:
-        _guard().check_unexpected_contact(
+    def test_宣言された側と押した向きが一致していても止める(self) -> None:
+        """判定は宣言を見ない。`check_limit` が先に言うので通常は文面が出ないだけ。"""
+        with pytest.raises(GuardViolation, match="rear"):
+            _guard().check_pass_through(
+                axis="sub_y_axis",
+                delta=-1.0,
+                sensor_active=_sensors(rear=True),
+                pressed_toward={"rear": -1},
+            )
+
+    def test_押した向きと逆の指令は通す(self) -> None:
+        """退避は必ず残る。押し込んだ向きの反対は必ず離れる向き。"""
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=1.0,
+            sensor_active=_sensors(front=True),
+            pressed_toward={"front": -1},
+        )
+
+    def test_覚えていない端は通す(self) -> None:
+        """指令の時点から ON だった端 (張り付きからの退避) は載らない。"""
+        _guard().check_pass_through(
             axis="sub_y_axis",
             delta=-1.0,
             sensor_active=_sensors(front=True),
-            was_active=_sensors(front=True),
+            pressed_toward={},
         )
 
-    def test_読めていない反対側の端は退避を妨げない(self) -> None:
-        _guard().check_unexpected_contact(
+    def test_OFF_に戻った端は覚えていても通す(self) -> None:
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=False),
+            pressed_toward={"front": -1},
+        )
+
+    def test_読めていない端は判断しない(self) -> None:
+        """途絶した端を退避の妨げにしない。読めていない端へ向かう指令は `check_limit` が拒む。"""
+        _guard().check_pass_through(
             axis="sub_y_axis",
             delta=-1.0,
             sensor_active=_sensors(front=None),
-            was_active=_sensors(front=False),
-        )
-
-    def test_指令の時点で読めていなかった端は判断しない(self) -> None:
-        _guard().check_unexpected_contact(
-            axis="sub_y_axis",
-            delta=-1.0,
-            sensor_active=_sensors(front=True),
-            was_active=_sensors(front=None),
-        )
-
-    def test_進む向きの端はここでは見ない(self) -> None:
-        """押されている端へ向かう判定は `check_limit` が持つ。二重に書かない。"""
-        _guard().check_unexpected_contact(
-            axis="sub_y_axis",
-            delta=-1.0,
-            sensor_active=_sensors(rear=True),
-            was_active=_sensors(rear=False),
+            pressed_toward={"front": -1},
         )
 
     def test_動かない指令は見ない(self) -> None:
-        _guard().check_unexpected_contact(
+        _guard().check_pass_through(
             axis="sub_y_axis",
             delta=0.0,
             sensor_active=_sensors(front=True),
-            was_active=_sensors(front=False),
+            pressed_toward={"front": -1},
         )
 
-    def test_文面にセンサ名と疑う先を載せる(self) -> None:
-        with pytest.raises(GuardViolation, match=r"反対.*'front'") as exc_info:
-            _guard().check_unexpected_contact(
+    def test_文面に塞がった向きと退避の向きと疑う先を載せる(self) -> None:
+        pattern = r"'front'.*- 向きへは.*退避は \+ 向き"
+        with pytest.raises(GuardViolation, match=pattern) as exc_info:
+            _guard().check_pass_through(
                 axis="sub_y_axis",
                 delta=-1.0,
                 sensor_active=_sensors(front=True),
-                was_active=_sensors(front=False),
+                pressed_toward={"front": -1},
             )
-        assert "scale" in str(exc_info.value)
+        assert "入れ替わっている可能性" in str(exc_info.value)
+        assert "guard.limits" in str(exc_info.value)
 
 
 class TestJumpGuard:

@@ -11,10 +11,11 @@
 目標そのものを書き換えないと、問い合わせ駆動の再送 (`TargetRefresher`) が古い目標を
 送り直して押し込み続ける。
 
-**反対側として宣言された端も見る。** 進む向きの端だけでは、配線のスロットや `scale` の
-符号の取り違えで機構が反対の端へ向かうとき誰も止めない (2026-09-10 実機: `sub_y_axis` が
-見張っていない側のスイッチを踏み越えた)。目標を書いた時点の端センサを目標ごとに控え、
-OFF だった端が ON になったら止める。指令の時点から ON の端は退避として通す。
+**宣言の前後に依らない貫通防止も重ねる。** `guard.limits` の前後が実物と入れ替わっていると、
+進む向きの端だけを見る作りでは機構が当たった側を誰も見ていない (2026-09-10 実機: `sub_y_axis` が
+見張っていない側のスイッチを踏み越えた)。そこで端センサごとに **OFF→ON へ変わった周期に出て
+いた指令の向き**を覚え、ON のあいだその向きの指令を止める (`MotionGuard.check_pass_through`)。
+OFF に戻ったら忘れる。判定は `MotionGuard` が持ち、ここは覚える役だけ。
 
 **見るのは可動端だけ。** `max_step` は「1 指令で実測位置から離れてよい量」の判定なので、
 移動中の実測位置に当てると長距離移動の途中で必ず誤発火する。トルクは誤発火が怖いので
@@ -86,9 +87,10 @@ class LimitMonitor(PeriodicTask):
         # 50Hz で撃ち続けるとバスが埋まるので、同じ目標のあいだは撃ち直さない
         self._stopped: dict[str, float] = {}
         self._interventions: dict[str, LimitIntervention] = {}
-        # 目標ごとに「書いた時点の端センサ」を控える。反対側の端が新たに押されたかは
-        # これと比べないと分からない (指令の入口は「その時点」しか持たない)
-        self._baselines: dict[str, tuple[float, dict[str, bool | None]]] = {}
+        # 端センサの前回値と、軸ごとの {センサ名: OFF→ON に変わった周期の指令の符号}。
+        # `None` (読めていない) の周期は前回値を進めない
+        self._last_active: dict[str, bool] = {}
+        self._pressed_toward: dict[str, dict[str, int]] = {}
         # 読み手は自分で基準値を控える (カウンタは読んでも減らないので、同じセンサを
         # 読む零点確定のぶんを消さない)。周期ごとに 1 度だけ進めるので二重に数えない
         self._contact_baseline: dict[str, int] = {}
@@ -154,40 +156,53 @@ class LimitMonitor(PeriodicTask):
         handles = [self._motors[name] for name in spec.motor_names]
         handle = AxisHandle(spec, handles, sensor_active=self._sensor_state)
 
-        target = self._commanded_value(spec, handles)
-        if target is None:
-            self._stopped.pop(axis, None)
-            self._baselines.pop(axis, None)
-            return
-        was_active = self._baseline_for(axis, spec, target)
-        if self._stopped.get(axis) == target:
-            return
-
         # 書き戻す値は指令の単位のまま持つ。値へ換算して戻すと往復の丸め誤差が
         # そのまま delta に残り、**止めるための指令が入口の歯止めに拒否される**
         observed_commands = handle.observed_commands()
-        delta = target - spec.to_value(observed_commands)
+        target = self._commanded_value(spec, handles)
+        if target is None:
+            self._stopped.pop(axis, None)
+        moving = target is not None and self._stopped.get(axis) != target
+        delta = target - spec.to_value(observed_commands) if moving else 0.0
+        # 動かしていない周期も前回値を進める。進めないと、止まっている間に手で押された
+        # スイッチが次の指令の周期に「その向きで当たった」と読まれる
+        pressed_toward = self._track_pressed(axis, spec, delta)
+        if not moving:
+            return
+
         guard = self._guards[axis]
         try:
             guard.check_limit(axis=axis, delta=delta, sensor_active=self._sensor_state)
-            guard.check_unexpected_contact(
-                axis=axis, delta=delta, sensor_active=self._sensor_state, was_active=was_active
+            guard.check_pass_through(
+                axis=axis,
+                delta=delta,
+                sensor_active=self._sensor_state,
+                pressed_toward=pressed_toward,
             )
         except GuardViolation as exc:
             await self._stop_here(axis, spec, handle, observed_commands, exc)
             return
         self._stopped.pop(axis, None)
 
-    def _baseline_for(self, axis: str, spec: AxisSpec, target: float) -> SensorReader:
-        """この目標を初めて見た周期の端センサの状態。目標が変わるまで持ち続ける。"""
-        held = self._baselines.get(axis)
-        if held is None or held[0] != target:
-            limits = None if spec.guard is None else spec.guard.limits
-            names = () if limits is None else (*limits.plus, *limits.minus)
-            states = {name: self._sensor_state(name) for name in names}
-            held = (target, states)
-            self._baselines[axis] = held
-        return held[1].get
+    def _track_pressed(self, axis: str, spec: AxisSpec, delta: float) -> dict[str, int]:
+        """この周期の端センサを見て、OFF→ON に変わった端に指令の向きを覚える。
+
+        指令の無い周期 (`delta == 0`) の OFF→ON は覚えない —— 動かしていないのに押されたなら
+        機構が当たったのではなく、次の指令はどちらの向きでも退避として通す。
+        """
+        pressed = self._pressed_toward.setdefault(axis, {})
+        limits = None if spec.guard is None else spec.guard.limits
+        names = () if limits is None else (*limits.plus, *limits.minus)
+        for name in names:
+            state = self._sensor_state(name)
+            if state is None:
+                continue
+            if not state:
+                pressed.pop(name, None)
+            elif self._last_active.get(name) is False and delta != 0.0:
+                pressed[name] = 1 if delta > 0.0 else -1
+            self._last_active[name] = state
+        return pressed
 
     def _commanded_value(self, spec: AxisSpec, handles: list[MotorHandle]) -> float | None:
         commands: dict[str, float] = {}

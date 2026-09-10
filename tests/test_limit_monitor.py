@@ -7,6 +7,7 @@
 - 目標へ向かう先の端が押されている / 読めていないなら、その場の実測位置で止める
 - **観測周期 (20ms) より狭い ON 区間**も取りこぼさない (接触の累計で拾う)
 - **離れる向きは邪魔しない** (零点確定の離脱段と、端に張り付いた軸の手動退避)
+- **宣言の前後に依らず**、OFF→ON に変わったときの指令の向きを ON のあいだ塞ぐ (貫通防止)
 - 一度止めた軸を毎周期撃ち直さない
 - `guard.limits` を書いていない軸は触らない
 - 止めた回数を数える (`move_to` が「曲げられた移動」を失敗として読む材料)
@@ -324,16 +325,14 @@ class TestNarrowContact:
         assert rig.sent == []
 
 
-class TestUnexpectedContact:
-    """**進む向きと反対側として宣言された端が、移動中に押されたら止める。**
+class TestPassThrough:
+    """**宣言の前後に依らない貫通防止。** 押し込んだ向きの指令を、その端が ON のあいだ通さない。
 
-    2026-09-10 実機: `sub_y_axis` を `retracted` (-430) へ手動で 1 回書き、後端の
-    リミットスイッチを踏み越えた。監視は進む向き (minus) の `sub_y_axis_r_limit_sensor`
-    だけを見ていたが、そのセンサは一度も ON にならず、押されていたのは反対側として
-    宣言された端だった (NC 化の配線替えでスロットが入れ替わった)。向き・配線・
-    `scale` の符号のどれを取り違えても症状は同じで、**目標を書いた時点で OFF だった端が
-    どちら側であれ ON になった**ことだけが共通の徴候である。
-    離れる向きの退避 (書いた時点で ON) は今までどおり通す。
+    2026-09-10 実機: `sub_y_axis` を `retracted` (-430) へ手動で 1 回書き、後端のリミット
+    スイッチを踏み越えた。原因は `guard.limits` の前後が実物と入れ替わっていたことで、監視は
+    進む向き (minus) として宣言された端だけを見ていた。この取り違えは繰り返し起きるので、
+    どちらの端に宣言されたかを見ず、**OFF→ON へ変わった周期に出ていた指令の向き**だけで止める。
+    止めた後に同じ向きへ指令し直しても ON のあいだは拒み、OFF に戻ったら忘れる。
     """
 
     async def test_反対側として宣言された端が移動中に押されたら止める(self) -> None:
@@ -353,21 +352,68 @@ class TestUnexpectedContact:
         assert record.count == 1
         assert record.reason is not None
         assert "front_switch" in record.reason
+        assert "入れ替わっている可能性" in record.reason
 
-    async def test_反対側の狭い接触も止める(self) -> None:
-        """現在値が OFF に戻っていても、この周期に数えた接触は押されたと読む。"""
+    async def test_止めた後に同じ向きへ指令し直しても通さない(self) -> None:
+        """ジョグの押し込み。指令の時点で既に ON でも、押した向きが同じなら退避ではない。"""
         rig = _rig(rear_switch=False, front_switch=False)
         rig.set_observed(-440.0)
         await rig.command(-450.0)
         await rig.monitor.step()
+        rig.sensors["front_switch"] = True
+        await rig.monitor.step()
+        assert rig.monitor.intervention("sub_y_axis").count == 1
 
-        rig.pulse("front_switch")
+        for _ in range(3):
+            await rig.command(-450.0)
+            await rig.monitor.step()
+            assert rig.sent == [-440.0 * _SCALE]
+
+        record = rig.monitor.intervention("sub_y_axis")
+        assert record.count == 4
+        assert record.reason is not None
+        assert "入れ替わっている可能性" in record.reason
+
+    async def test_押した向きと逆の指令は貫通防止では止めない(self) -> None:
+        """退避の向きを貫通防止が塞ぐことは無い。
+
+        この場面で退避を拒むのは `check_limit` の側 (front_switch が plus 端として宣言されて
+        いる)。宣言を直すまで両向きが塞がるのは、宣言が実物と食い違っている証拠そのもの。
+        """
+        rig = _rig(rear_switch=False, front_switch=False)
+        rig.set_observed(-440.0)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+        rig.sensors["front_switch"] = True
         await rig.monitor.step()
 
-        assert rig.sent == [-440.0 * _SCALE]
+        await rig.command(-430.0)
+        await rig.monitor.step()
 
-    async def test_指令の時点で押されていた端からは離れられる(self) -> None:
-        """端に張り付いた軸の退避と零点確定の離脱段。塞ぐと戻せなくなる。"""
+        reason = rig.monitor.intervention("sub_y_axis").reason
+        assert reason is not None
+        assert "入れ替わっている可能性" not in reason
+        assert "押されているため" in reason
+
+    async def test_OFF_に戻れば同じ向きへ進める(self) -> None:
+        """離れて OFF に戻った端は忘れる。忘れないと、正しく直した後もその向きが塞がる。"""
+        rig = _rig(rear_switch=False, front_switch=False)
+        rig.set_observed(-440.0)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+        rig.sensors["front_switch"] = True
+        await rig.monitor.step()
+        assert len(rig.sent) == 1
+
+        rig.sensors["front_switch"] = False
+        await rig.monitor.step()
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        assert rig.sent == []
+
+    async def test_指令の時点から押されていた端からは離れられる(self) -> None:
+        """端に張り付いた軸の退避と零点確定の離脱段。前回値が無い (起動時から ON) 端も同じ。"""
         rig = _rig(rear_switch=False, front_switch=True)
         rig.set_observed(-1.0)
         await rig.command(-10.0)
@@ -377,7 +423,58 @@ class TestUnexpectedContact:
 
         assert rig.sent == []
 
-    async def test_反対側の端が読めなくなっても離れる向きは通す(self) -> None:
+    async def test_目標の無い間に押された端は覚えない(self) -> None:
+        """緊急停止で目標が消えたあいだの OFF→ON は機構が当たったのではない。次の指令は通す。"""
+        rig = _rig(rear_switch=False, front_switch=False)
+        rig.set_observed(-440.0)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        rig.handle.clear_target()
+        rig.sensors["front_switch"] = True
+        await rig.monitor.step()
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        assert rig.sent == []
+
+    async def test_忘れた端が止まっている間に押されても古い向きで塞がない(self) -> None:
+        """OFF で忘れないと、後で手で押されたときに前の向きが残ったまま塞ぐ。"""
+        rig = _rig(rear_switch=False, front_switch=False)
+        rig.set_observed(-440.0)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+        rig.sensors["front_switch"] = True
+        await rig.monitor.step()
+        assert len(rig.sent) == 1
+        rig.sensors["front_switch"] = False
+        await rig.monitor.step()
+
+        rig.sensors["front_switch"] = True
+        await rig.monitor.step()
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        assert rig.sent == []
+
+    async def test_止めた後に押された端は覚えない(self) -> None:
+        """止めた軸は動かしていない。実測が漂って目標との差が出ても、その向きで当たったのではない。"""
+        rig = _rig(rear_switch=True, front_switch=False)
+        rig.set_observed(-447.5)
+        await rig.command(-450.0)
+        await rig.monitor.step()
+        assert len(rig.sent) == 1
+
+        rig.sensors["rear_switch"] = False
+        rig.set_observed(-447.4)
+        rig.sensors["front_switch"] = True
+        await rig.monitor.step()
+        await rig.command(-450.0)
+        await rig.monitor.step()
+
+        assert rig.sent == []
+
+    async def test_読めなくなった端は判断しない(self) -> None:
         """途絶した端は退避の妨げにしない。読めていない端へ向かう指令は入口が拒む。"""
         rig = _rig(rear_switch=False, front_switch=False)
         rig.set_observed(-440.0)
@@ -389,26 +486,37 @@ class TestUnexpectedContact:
 
         assert rig.sent == []
 
-    async def test_止めた後に押されたままの端から離れる指令は通す(self) -> None:
-        """止めた瞬間の目標ではなく、次に書かれた目標の時点の状態を基準にする。"""
+    async def test_読めない周期を挟んでも前回値を潰さない(self) -> None:
+        """OFF → None → ON は OFF→ON。None で前回値を消すと、途絶をまたいだ接触が退避に化ける。"""
         rig = _rig(rear_switch=False, front_switch=False)
         rig.set_observed(-440.0)
         await rig.command(-450.0)
         await rig.monitor.step()
+
+        rig.sensors["front_switch"] = None
+        await rig.monitor.step()
         rig.sensors["front_switch"] = True
         await rig.monitor.step()
-        assert len(rig.sent) == 1
 
-        await rig.command(-430.0)
+        assert rig.sent == [-440.0 * _SCALE]
+
+    async def test_狭い接触も止める(self) -> None:
+        """現在値が OFF に戻っていても、この周期に数えた接触は押されたと読む。"""
+        rig = _rig(rear_switch=False, front_switch=False)
+        rig.set_observed(-440.0)
+        await rig.command(-450.0)
         await rig.monitor.step()
 
-        assert len(rig.sent) == 1
+        rig.pulse("front_switch")
+        await rig.monitor.step()
 
-    async def test_踏み越えた端を戻る途中の接触は一度止め_次の指令で通す(self) -> None:
-        """踏み越えた先から戻る移動は、配線の取り違えと監視からは見分けが付かない。
+        assert rig.sent == [-440.0 * _SCALE]
 
-        一度は止めて操縦者に見せ、押されたままの端から離れる次の指令は通す
-        (指令の時点で ON なので退避として読める)。
+    async def test_踏み越えた端を戻る途中の接触は同じ向きを塞ぐ(self) -> None:
+        """踏み越えた先から戻る移動は、宣言の取り違えと監視からは見分けが付かない。
+
+        戻る向き (plus) で rear_switch が ON になったので plus を塞ぐ。指令し直しても
+        通らず、OFF に戻るまで待つ。
         """
         rig = _rig(rear_switch=False)
         rig.set_observed(-450.0)
@@ -422,14 +530,16 @@ class TestUnexpectedContact:
 
         await rig.command(-440.0)
         await rig.monitor.step()
-        rig.sensors["rear_switch"] = False
-        rig.set_observed(-444.0)
-        await rig.monitor.step()
+        assert rig.sent == [-447.0 * _SCALE]
 
-        assert len(rig.sent) == 1
+        rig.sensors["rear_switch"] = False
+        await rig.monitor.step()
+        await rig.command(-440.0)
+        await rig.monitor.step()
+        assert rig.sent == []
 
     async def test_進む向きの端が押されたときの文面は変えない(self) -> None:
-        """既存の判定が先に言う。反対側の文面が混ざると配線を疑う方向が逆になる。"""
+        """既存の判定が先に言う。貫通防止の文面が混ざると配線を疑う方向が逆になる。"""
         rig = _rig(rear_switch=True, front_switch=False)
         rig.set_observed(-447.5)
         await rig.command(-450.0)
@@ -439,7 +549,7 @@ class TestUnexpectedContact:
         reason = rig.monitor.intervention("sub_y_axis").reason
         assert reason is not None
         assert "rear_switch" in reason
-        assert "反対" not in reason
+        assert "入れ替わっている可能性" not in reason
 
 
 class TestSuspendedSensor:

@@ -21,10 +21,12 @@ OFF→ON を数える（DLC=1 も受理）。残ったのは「見張ってい�
 NC 化の配線替えでスロットと `guard.limits` の対応が入れ替わっていた。監視は進む向きの端しか
 見ないので、反対側として宣言された端が ON になっても素通りした。
 
-決着: `LimitMonitor` が目標ごとに「書いた時点の端センサ」を控え、進む向きと反対側の端が
-OFF → ON になったら止める（`MotionGuard.check_unexpected_contact`）。向き・配線・`scale` の符号の
-取り違えを 1 つの規則で拾う。規則は `docs/invariants.md` §3。配線の突き合わせそのものは
-指差喚呼（`config/checklist.yaml`）の側で受ける。
+原因は前後の宣言（`config/sub_hand.yaml` の `0x49` / `0x4A`）が実物と入れ替わっていたこと（実機で確認）。
+
+決着: 宣言の前後に依らない貫通防止を重ねた。`LimitMonitor` が端センサごとに OFF→ON へ変わった
+周期の指令の向きを覚え、ON のあいだその向きの指令を止める（`MotionGuard.check_pass_through`）。
+止めた後に同じ向きへ指令し直しても通らない。規則は `docs/invariants.md` §3。配線の突き合わせ
+そのものは指差喚呼（`config/checklist.yaml`）の側で受ける。
 
 ## 2026-09-10 電源断のあいだに `rotate` を 180deg 手で回したら、論理角が −180deg と読まれた
 
