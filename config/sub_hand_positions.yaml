@@ -90,7 +90,8 @@ axes:
     tolerance: 2.0       # 到達許容差 [deg]
     motors:
       sub_rotate_r: { scale: 1.0, offset: 0.0 }
-      # TODO(実機で確認): offset 270.0 は仮値。折り返し点は左右のサーボの取り付け向きで決まる。
+      # 左右直結ペアの折り返し点 (2026-09-10 実測。右 + 左 = 270)。取り付け向きで
+      # 決まるので、付け直したら測り直す。ずれていると直結した機構をその場で捻る
       sub_rotate_l: { scale: -1.0, offset: 270.0 }
 
   sub_pitch:
@@ -104,7 +105,7 @@ axes:
     tolerance: 2.0
     motors:
       sub_pitch_r: { scale: 1.0, offset: 0.0 }
-      # TODO(実機で確認): sub_rotate と同じく offset 270.0 は仮値。
+      # 2026-09-10 にこの軸単独で実測。sub_rotate の値を写してはならない (取り付けの向きは軸ごとに違う)
       sub_pitch_l: { scale: -1.0, offset: 270.0 }
 
   sub_offset:
