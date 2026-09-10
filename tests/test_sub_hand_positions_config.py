@@ -14,6 +14,8 @@ import pytest
 import yaml
 
 from lib.match_state import Court
+from lib.motion_guard import AxisReading, GuardViolation, MotionGuard, RequiredRange
+from lib.sequence.homing import homing_axis_names, homing_order
 from lib.sequence.positions import PositionTable, load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -39,6 +41,13 @@ def table() -> PositionTable:
 
 def _value(table: PositionTable, axis: str, name: str) -> float:
     return table.raw(axis, name)
+
+
+def _requirement(table: PositionTable, axis: str) -> RequiredRange:
+    guard = table.axis(axis).guard
+    assert guard is not None
+    (required,) = guard.requires
+    return required
 
 
 # 基板 #2 のスロットは can_id 0x50〜0x54 の昇順で `config.h` の宣言順に対応する。
@@ -168,6 +177,20 @@ class TestEveryPosition:
 
         assert at_origin == []
 
+    def test_ベンチの位置定数もすべて読める(self) -> None:
+        """干渉条件の起動拒否を足しても、机上ベンチの一式が読めなくなっていないこと。
+
+        `tests/test_config_schema.py` の `test_bench_config_set_loads` は
+        **そのベンチの robot yaml から辿れる 1 枚**しか開かない。ここは
+        `config/bench/**` に置いてある位置定数を名前で拾うので、robot yaml から
+        辿れない 1 枚が混じっても落ちる。
+        """
+        shipped = sorted(_CONFIG_DIR.glob("bench/*/*_positions.yaml"))
+
+        assert shipped, "config/bench にベンチ用の位置定数が 1 枚もありません"
+        for path in shipped:
+            load_position_table(yaml.safe_load(path.read_text()), source=str(path))
+
     def test_位置定数はコート別に分岐していない(self, table: PositionTable) -> None:
         """コートで変わるのは `sub_lift` の mm↔rad 換算 (scale の符号) だけである。
 
@@ -179,3 +202,170 @@ class TestEveryPosition:
                 value = table.raw(axis, name)
                 assert value == table.raw(axis, name, court=Court.RED)
                 assert value == table.raw(axis, name, court=Court.BLUE)
+
+
+class TestInterferenceDeclaration:
+    """`guard.requires` / `guard.not_with` の宣言が、守るべき制約と噛み合っているか。
+
+    宣言は位置名で書き、数値の区間は読み込み時に解決される。**150.0 はこのファイルの
+    `_ROTATE_CLEARANCE_MM` 1 箇所にしか無く**、それが `clear` を縛り、`clear` が
+    解決後の区間を縛る。ここで見るのは、その連鎖が切れていないこと。
+    """
+
+    def test_前後に動かしてよいのは昇降が移動高さのときだけ(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_y_axis")
+        tolerance = table.axis("sub_lift").tolerance
+        top = _value(table, "sub_lift", "top")
+
+        assert required.axis == "sub_lift"
+        assert tolerance is not None
+        # 区間を tolerance ぶん広げないと、top へ許容差の内側で止まった実測が
+        # 区間の外になり、次に前後へ動かす段が会場で拒否される
+        assert required.low == pytest.approx(top - tolerance)
+        assert required.high == pytest.approx(top + tolerance)
+
+    @pytest.mark.parametrize("name", ["pick", "place"])
+    def test_移動高さより下では前後に動かせない(self, table: PositionTable, name: str) -> None:
+        required = _requirement(table, "sub_y_axis")
+        value = _value(table, "sub_lift", name)
+
+        assert not required.low <= value <= required.high
+
+    def test_回転してよい区間は前端から_150mm_以上離れている(self, table: PositionTable) -> None:
+        # 区間の前端寄りの縁 (high) がこの余裕の内側に入ると、そこで回した機構が当たる
+        required = _requirement(table, "sub_rotate")
+
+        assert required.axis == "sub_y_axis"
+        assert abs(required.high) >= _ROTATE_CLEARANCE_MM
+
+    def test_回転してよい区間は_clear_を含む(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_rotate")
+        clear = _value(table, "sub_y_axis", "clear")
+
+        assert required.low <= clear <= required.high
+
+    @pytest.mark.parametrize("name", _NEAR_FRONT)
+    def test_回転してよい区間は前端寄りの位置を全部除外する(
+        self, table: PositionTable, name: str
+    ) -> None:
+        # between の端を書き間違える (retracted〜receive など) と、ここが通ってしまう
+        required = _requirement(table, "sub_rotate")
+        value = _value(table, "sub_y_axis", name)
+
+        assert not required.low <= value <= required.high
+
+    def test_ピッチとオフセットは同じ指令で動かせない(self, table: PositionTable) -> None:
+        """yaml には片側だけ書く。読み込み時に対称化されることを両側で見る。"""
+        pitch = table.axis("sub_pitch").guard
+        offset = table.axis("sub_offset").guard
+
+        assert pitch is not None and pitch.not_with == ("sub_offset",)
+        assert offset is not None and offset.not_with == ("sub_pitch",)
+
+
+_BENCH_YAML = "bench/sub_hand_homing/sub_hand_positions.yaml"
+
+
+def _load(relative: str) -> PositionTable:
+    path = _CONFIG_DIR / relative
+    return load_position_table(yaml.safe_load(path.read_text()), source=path.name)
+
+
+@pytest.mark.parametrize("relative", [_YAML_NAME, _BENCH_YAML])
+class TestHomingOrder:
+    """零点確定は「昇降 → top へ寄せる → 前後」の順でしか通らない。**本番とベンチの両方。**
+
+    `release_distance` ぶん離脱して終わるので、確定しただけの昇降は下端のすぐ上に
+    居る。`requires` を入れた以上、そこから前後軸を探索する手順は拒否される ——
+    拒否は誤動作ではなく、**昇降が下がったまま前後に走っていた**ことの露見である。
+    ベンチは mm の値が本番と違うだけで、同じ形が成り立っていなければならない。
+    """
+
+    def test_寄せ先は昇降の移動高さである(self, relative: str) -> None:
+        table = _load(relative)
+
+        assert table.homing_prerequisites() == {"sub_lift": "top"}
+
+    def test_参照される軸を先に確定する(self, relative: str) -> None:
+        table = _load(relative)
+        axes = homing_axis_names(table)
+
+        assert homing_order(table, axes).index("sub_lift") < homing_order(table, axes).index(
+            "sub_y_axis"
+        )
+        # 入力の並びに関係なく決まる (yaml の並べ替えで手順が変わってはならない)
+        assert homing_order(table, list(reversed(axes)))[0] == "sub_lift"
+
+    def test_零点確定を終えた昇降は区間の外に居る(self, relative: str) -> None:
+        """**寄せる段が要ることの根拠。** ここが中なら move_to は 1 通も出さない。"""
+        table = _load(relative)
+        homing = table.axis("sub_lift").homing
+        assert homing is not None and homing.release_distance is not None
+        # 探索は + 方向 (下端) へ進み、原点確定の後に逆向きへ release_distance 離脱する
+        left_at = -homing.direction * homing.release_distance
+
+        assert not _requirement(table, "sub_y_axis").contains(left_at)
+
+    def test_移動高さへ寄せれば区間の中に入る(self, relative: str) -> None:
+        table = _load(relative)
+
+        assert _requirement(table, "sub_y_axis").contains(table.raw("sub_lift", "top"))
+
+
+_DOC_DIR = _CONFIG_DIR.parent / "docs"
+
+
+def _left_after_homing(table: PositionTable, axis: str) -> float:
+    """零点確定を終えた軸が居る位置 [mm]。原点で当ててから離脱したぶんだけ戻る。"""
+    homing = table.axis(axis).homing
+    assert homing is not None and homing.release_distance is not None
+    return -homing.direction * homing.release_distance
+
+
+def _rejection(table: PositionTable) -> str:
+    """同梱 config そのままで `sub_y_axis` を動かしたときの拒否文面。"""
+    guard = table.axis("sub_y_axis").guard
+    assert guard is not None
+    left_at = _left_after_homing(table, "sub_lift")
+
+    with pytest.raises(GuardViolation) as exc:
+        MotionGuard(guard).check_interference(
+            axis="sub_y_axis",
+            delta=-1.0,
+            axis_state=lambda _axis: AxisReading(value=left_at, target=None),
+        )
+    return str(exc.value)
+
+
+class TestVenueCardNumbers:
+    """会場カードに書き写した数値が、実際の拒否文面と一致しているか。
+
+    **会場で読むのは文書の側である。** 文面は `config/sub_hand_positions.yaml` から
+    導かれるので、`top` / `tolerance` / `release_distance` を変えると文面が変わる。
+    ここが無いと、**文書の数値だけが黙って古くなる** (症状は「カードのとおりに
+    寄せたのに拒否が消えない」で、会場でしか出ない)。
+    """
+
+    def test_拒否の文面は同梱_config_から導かれる(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_y_axis")
+        message = _rejection(table)
+
+        assert f"[{required.low:.4g}, {required.high:.4g}]{required.unit}" in message
+        assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in message
+        assert required.label in message
+
+    def test_点検の文書が文面と同じ数値を書いている(self, table: PositionTable) -> None:
+        required = _requirement(table, "sub_y_axis")
+        text = (_DOC_DIR / "checks_and_health.md").read_text()
+
+        assert f"[{required.low:.4g}, {required.high:.4g}]{required.unit}" in text
+        assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in text
+        assert f"{table.raw('sub_lift', 'top'):g}mm" in text
+        assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
+
+    def test_会場カードが文面と同じ数値を書いている(self, table: PositionTable) -> None:
+        text = (_DOC_DIR / "venue_recovery.md").read_text()
+
+        # 手動で寄せる先と、零点確定が離脱する量。この 2 つで手が動く
+        assert f"{table.raw('sub_lift', 'top'):g}mm" in text
+        assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text

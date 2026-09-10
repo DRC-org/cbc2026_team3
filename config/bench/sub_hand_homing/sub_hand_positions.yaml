@@ -28,6 +28,8 @@ axes:
       max_step: 600.0
       # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
       stall_torque: 2.0
+      # 本番と対。区間の mm はこのベンチの top から解決されるので値は本番と違う
+      requires: [{ axis: sub_lift, at: top }]
     unit: mm
     command_unit: rad
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36

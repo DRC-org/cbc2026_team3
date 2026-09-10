@@ -54,16 +54,22 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 フェーズとコートの対応は `web/src/lib/phase.ts`。**読めなかった配信（`MALFORMED`）も語彙の
 1 つとして持つ** —— 索引が `undefined` になるとチップが無地・無文字で消える。
 
+**コートは 3 値。**「コート未設定」（`null`）は**中立色**で、「コート不明」（`MALFORMED`）の
+`error` とは別に出す —— 前者は操縦者がまだ選んでいないだけの正常な試合前状態で、後者は配信が
+読めていない異常。同じ色にすると、試合前に必ず出る状態が毎回「異常」に見えて色が意味を失う。
+索引ではなく `courtLabel()` / `courtTone()` を通す（`Record` は `null` で引けない）。
+
 ヘッダーの地はフェーズ色で塗らない。**左端のバーとチップだけ**で示す（全面を塗ると画面で
 最も明るい面になる）。
 
 ### ON のトグルは `success` の面塗り 1 種類
 
-`SuctionPadPanel`（次の吸着で使う弁の宣言）と `OnOffPadGroup`（弁の今すぐ開閉）はどちらも
-`border-success bg-success text-success-content` で ON を示し、OFF は既定のボタンのまま置く。
-2 つの面が同じ弁を別の色で描くと、同じ画面の 2 箇所で ON の意味が食い違う。
+`SuctionPadPanel`（半自動は次の吸着で使う弁の宣言、手動は今すぐ開閉）と `OnOffPadGroup`
+（弁の今すぐ開閉）はどちらも `border-success bg-success text-success-content` で ON を示し、
+OFF は既定のボタンのまま置く。2 つの面が同じ弁を別の色で描くと、同じ画面の 2 箇所で ON の
+意味が食い違う。**クラス文字列を持つのは `PadToggle` 1 箇所だけ**で、両方がそれを呼ぶ。
 
-**`OnOffPadGroup` の丸（`rounded-full`）は角丸 0 の唯一の例外。** 6 個以上が横に並ぶ群で、
+**丸トグル（`PadToggle` の `rounded-full`）は角丸 0 の唯一の例外。** 6 個以上が横に並ぶ群で、
 狙う対象を形で見つけられることを優先している。**未指令（`target` が `null`）は OFF の色では
 なく破線の輪郭**で描く —— 塗り分けだけだと「まだ押していない」と「OFF を送った」が同じ絵に
 なる。
@@ -275,3 +281,10 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 `22rem` 固定で縦に伸びる（`docs/web/pitfalls.md` の「daisyUI の `.alert` は grid」）。
 
 **トーストは履歴ではない** —— 数秒で消えるので、Monitor の試合中は `EventFeed` が残す。
+
+**理由文に Markdown を書かない。** トーストも零点合わせパネルの結果欄も素のテキストとして
+描くので、`**強調**` はアスタリスク込みでそのまま出る。強調は記号ではなく語順と文の分け方で
+出すこと。**サーバー側の文面がこの規則の対象**で（`lib/motion_guard.py` の `GuardViolation` と
+`lib/sequence/homing.py` の `HomingError`）、`tests/test_motion_guard.py::TestMessagesAreNotMarkdown`
+がソースの文字列リテラルを走査して固定する。ログにしか出ない文面（`activation_block_reason()`）は
+対象外 —— journalctl で読むので記号があっても害が無い。

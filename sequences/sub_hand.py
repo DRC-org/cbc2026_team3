@@ -6,8 +6,9 @@ from lib.suction import SuctionSelection, SuctionSelectionError
 VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
 
 # 前後に動かしてよいのは sub_lift が top のときだけ、sub_rotate を回してよいのは
-# sub_y_axis が clear に居るときだけ。順序を保証するのはこのファイルの並びしかない
-# (docs/invariants.md §4)。
+# sub_y_axis が clear に居るときだけ。条件そのものは config/sub_hand_positions.yaml の
+# guard.requires が宣言し、指令の入口が判定する (docs/invariants.md §4)。この並びは
+# 「拒否されずに通る唯一の順序」であって、守りの最後の 1 枚ではない。
 TO_SHELF: dict[str, str] = {"sub_y_axis": "receive"}
 TO_CLEAR: dict[str, str] = {"sub_y_axis": "clear"}
 TO_RETRACTED: dict[str, str] = {"sub_y_axis": "retracted"}

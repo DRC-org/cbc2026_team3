@@ -26,6 +26,7 @@ export interface HealthVerdict {
 export type SafetyIssueKind =
   | "unknown"
   | "sync_violation"
+  | "unresponsive"
   | "unenergized"
   | "loops_stopped"
   | "monitors_stopped"
@@ -124,12 +125,21 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
     });
   }
 
+  if (safety.unresponsive_motors.length > 0) {
+    issues.push({
+      kind: "unresponsive",
+      label: "応答なし",
+      detail: safety.unresponsive_motors.join(", "),
+      hint: "フィードバックが 1 通も届いていません。ドライバの電源と CAN 配線を確認してください (再励磁を押しても直りません)",
+    });
+  }
+
   if (safety.unenergized_motors.length > 0) {
     issues.push({
       kind: "unenergized",
       label: "無励磁のまま",
       detail: safety.unenergized_motors.join(", "),
-      hint: "指令は届いていますが励磁されていません。操縦者画面の「再励磁」ボタンを押してください (直らなければ緊急停止をもう一度押して解除し直すか、ドライバの電源と CAN 配線を確認)",
+      hint: "励磁されていません。操縦者画面の「再励磁」ボタンを押してください (直らなければ緊急停止をもう一度押して解除し直すか、ドライバの電源と CAN 配線を確認)",
     });
   }
 

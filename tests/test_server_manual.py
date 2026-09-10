@@ -7,9 +7,9 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.manual import ManualController
-from lib.match_state import Phase
+from lib.match_state import Court, Phase
 from lib.sequence.engine import Sequence, step
-from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
@@ -612,3 +612,75 @@ class TestGuardRejection:
         assert not reason.startswith("コマンドの処理に失敗")
         assert not any(r.levelname == "ERROR" for r in caplog.records)
         assert drivers["y_axis_r"].commands == []
+
+    @staticmethod
+    def _interference_fixture() -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
+        """`rotate` は `y_axis` が `clear` に居るあいだしか回せない、という宣言。
+
+        手動で前端寄りへ置いてから回すのは `docs/invariants.md` §4 が名指しして
+        いた穴で、シーケンスの並びでは守れない。
+        """
+        positions = {
+            "axes": {
+                "y_axis": {**_POSITIONS["axes"]["y_axis"], "tolerance": 1.0},
+                "rotate": {
+                    "unit": "deg",
+                    "command_unit": "deg",
+                    "tolerance": 1.0,
+                    "manual": {"min": -90.0, "max": 90.0, "steps": [5.0]},
+                    "guard": {"requires": [{"axis": "y_axis", "at": "clear"}]},
+                },
+            },
+            "positions": {"y_axis": {"home": 0.0, "clear": 15.0}, "rotate": {"home": 0.0}},
+        }
+        table = load_position_table(positions, source="<test>")
+        mgr = mock_can_manager()
+        group = MotorGroup()
+        drivers: dict[str, _RecordingDriver] = {}
+        for name in ("y_axis_r", "y_axis_l", "rotate"):
+            drivers[name] = _RecordingDriver(name)
+            group.add(MotorHandle(name, drivers[name], mgr))
+        group.bind_axis_state(
+            build_axis_state_reader(
+                table, group, court=lambda: Court.RED, is_stale=lambda _name: False
+            )
+        )
+        fx = ServerFixture.build()
+        fx.freeze_broadcast()
+        fx.add_robot(_ROBOT, _SlowSequence(), manual=ManualController(group, table))
+        return fx, drivers
+
+    async def test_前端寄りで回す手動指令は理由付きの拒否として返る(self, caplog) -> None:
+        fx, drivers = self._interference_fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        await _switch_as(fx, "manual", client)
+
+        with caplog.at_level("WARNING"):
+            await fx.command(
+                {"type": "manual_set", "robot": _ROBOT, "axis": "rotate", "value": 30.0},
+                requester=client,
+            )
+
+        reason = client.of_type("command_rejected")[-1]["reason"]
+        assert "y_axis" in reason
+        assert "clear" in reason
+        assert "寄せてください" in reason
+        assert not reason.startswith("コマンドの処理に失敗")
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+        assert drivers["rotate"].commands == []
+
+    async def test_条件を満たしていれば手動でも回せる(self) -> None:
+        fx, drivers = self._interference_fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+        await _switch_as(fx, "manual", client)
+        for name in ("y_axis_r", "y_axis_l"):
+            drivers[name].set_observed(position=15.0 * (55.0 if name.endswith("_r") else -55.0))
+
+        await fx.command(
+            {"type": "manual_set", "robot": _ROBOT, "axis": "rotate", "value": 30.0},
+            requester=client,
+        )
+
+        assert drivers["rotate"].commands == [(ControlMode.POSITION, 30.0)]

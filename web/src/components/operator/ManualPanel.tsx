@@ -14,6 +14,7 @@ interface ManualPanelProps {
   manual: ManualState;
   blockedReason: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
+  excludeAxes?: readonly string[];
 }
 
 const KEY_LEGEND: { keys: string[]; label: string }[] = [
@@ -23,7 +24,13 @@ const KEY_LEGEND: { keys: string[]; label: string }[] = [
   { keys: ["Shift", "Home", "End"], label: "端" },
 ];
 
-export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: ManualPanelProps) {
+export function ManualPanel({
+  robotKey,
+  manual,
+  blockedReason,
+  sendOrReport,
+  excludeAxes,
+}: ManualPanelProps) {
   const [picked, setPicked] = useState<string | null>(null);
 
   const onJog = (axis: string, delta: number) =>
@@ -33,10 +40,15 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
   const onMove = (axis: string, position: string) =>
     sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
-  const steerable = manual.axes.filter((axis) => axis.manual !== null);
-  const { pads, rest: presetOnly } = splitOnOffAxes(
-    manual.axes.filter((axis) => axis.manual === null),
-  );
+  // 呼び出し元が別の面で持つ軸（吸着パッドの弁）を除く。同じ軸が 2 つの面に並ぶと、
+  // どちらを押せば機体が動くのか画面から読めない
+  const axes =
+    excludeAxes === undefined
+      ? manual.axes
+      : manual.axes.filter((axis) => !excludeAxes.includes(axis.name));
+
+  const steerable = axes.filter((axis) => axis.manual !== null);
+  const { pads, rest: presetOnly } = splitOnOffAxes(axes.filter((axis) => axis.manual === null));
   const selected = steerable.some((axis) => axis.name === picked)
     ? picked
     : (steerable[0]?.name ?? null);
@@ -63,7 +75,7 @@ export function ManualPanel({ robotKey, manual, blockedReason, sendOrReport }: M
       bodyClassName="p-0"
       actions={blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
     >
-      {manual.axes.length === 0 ? (
+      {axes.length === 0 ? (
         <p className="p-2 text-base-content/70">
           このロボットには手動操縦できる軸がありません (位置定数が未読込です)。
         </p>

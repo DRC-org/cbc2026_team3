@@ -42,6 +42,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
   return {
     sync_violations: [],
     unenergized_motors: [],
+    unresponsive_motors: [],
     firmware_unconfirmed_motors: [],
     failed_tasks: [],
     reenergizing: false,
@@ -222,6 +223,21 @@ describe("SubsystemStatus", () => {
       );
 
       expect(screen.getByText("同期ずれラッチ y_axis")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
+    });
+
+    it("応答なしだけなら出さない (再励磁では直らない)", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unresponsive_motors: ["rotate_l"] })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.getByText("応答なし rotate_l")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "再励磁" })).not.toBeInTheDocument();
     });
 

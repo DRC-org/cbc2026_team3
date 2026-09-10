@@ -85,6 +85,8 @@ class TestRegistryCoverage:
             manual_deny_message=None,
             blocked_during_reenergize=False,
             reenergize_deny_message=None,
+            blocked_without_court=False,
+            court_deny_message=None,
         )
         monkeypatch.setitem(COMMANDS, broken.name, broken)
 
@@ -127,6 +129,27 @@ class TestRegistryCoverage:
             else:
                 assert spec.reenergize_deny_message is None
 
+    def test_court_gate_policy_is_declared_for_every_command(self) -> None:
+        for spec in COMMANDS.values():
+            if spec.blocked_without_court:
+                assert spec.court_deny_message
+            else:
+                assert spec.court_deny_message is None
+
+    def test_commands_that_move_the_robot_need_a_court(self) -> None:
+        blocked = {name for name, spec in COMMANDS.items() if spec.blocked_without_court}
+        assert blocked == {
+            "sequence_start",
+            "sequence_jump",
+            "trigger",
+            "manual_move",
+            "manual_set",
+            "manual_jog",
+            "homing_start",
+            "switch_measure_start",
+            "motor_check_start",
+        }
+
     def test_sequence_commands_are_blocked_while_reenergizing(self) -> None:
         blocked = {name for name, spec in COMMANDS.items() if spec.blocked_during_reenergize}
         assert blocked == {"sequence_start", "sequence_jump", "trigger"}
@@ -145,6 +168,8 @@ class TestSpecValidation:
             "manual_deny_message": None,
             "blocked_during_reenergize": False,
             "reenergize_deny_message": None,
+            "blocked_without_court": False,
+            "court_deny_message": None,
             "handler": "_cmd_dummy",
             "reject_channel": RejectChannel.COMMAND_REJECTED,
         }
@@ -186,6 +211,14 @@ class TestSpecValidation:
     def test_reenergize_ungated_command_must_not_carry_a_reason(self) -> None:
         with pytest.raises(ValueError):
             self._spec(reenergize_deny_message="使われない理由")
+
+    def test_court_gated_command_requires_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(blocked_without_court=True, court_deny_message=None)
+
+    def test_court_ungated_command_must_not_carry_a_reason(self) -> None:
+        with pytest.raises(ValueError):
+            self._spec(court_deny_message="使われない理由")
 
 
 class TestPhaseGate:

@@ -65,6 +65,7 @@ const STATE_FIELDS_UI_READS = [
   "safety",
   "safety.sync_violations",
   "safety.unenergized_motors",
+  "safety.unresponsive_motors",
   "safety.firmware_unconfirmed_motors",
   "safety.failed_tasks",
   "safety.reenergizing",
@@ -355,6 +356,7 @@ const SENSOR_STATE = fieldsOf<SensorState>({
 const SAFETY = fieldsOf<SafetyState>({
   sync_violations: "ui",
   unenergized_motors: "ui",
+  unresponsive_motors: "ui",
   firmware_unconfirmed_motors: "ui",
   failed_tasks: "ui",
   reenergizing: "ui",
@@ -527,6 +529,7 @@ const STATE_FIELDS: FieldSpec = {
     safety: "ui",
     manual: "ui",
     suction: "ui",
+    court_required: "ui",
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),

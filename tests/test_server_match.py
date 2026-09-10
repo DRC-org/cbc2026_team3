@@ -29,6 +29,8 @@ _DEFS = {
 
 
 async def _complete_checklist(ws) -> None:
+    # コートを選ぶまで can_start_match は偽。選ぶと指差喚呼がリセットされるので順序が要る
+    await ws.send_json({"type": "set_court", "court": "red"})
     for item in _DEFS[ROLE_PRE_MATCH]:
         await ws.send_json(
             {"type": "checklist_set", "role": ROLE_PRE_MATCH, "item_id": item.id, "checked": True}
@@ -103,7 +105,7 @@ class TestMatchStateSnapshotOnConnect:
             msg = await recv_type(ws, "match_state")
             assert msg is not None
             assert msg["phase"] == "setup"
-            assert msg["court"] == "red"
+            assert msg["court"] is None
             assert set(msg["checklists"]) == {ROLE_PRE_MATCH}
             await ws.close()
 
@@ -178,6 +180,7 @@ class TestCourtCommand:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "set_court", "court": "red"})
             await ws.send_json({"type": "set_court", "court": "green"})
             await asyncio.sleep(0.05)
 
@@ -273,6 +276,8 @@ class TestChecklistCheckAll:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
+            await recv_type(ws, "match_state")
+            await ws.send_json({"type": "set_court", "court": "red"})
             await recv_type(ws, "match_state")
             await ws.send_json({"type": "checklist_check_all"})
             msg = await recv_type(ws, "match_state")

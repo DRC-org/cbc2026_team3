@@ -39,7 +39,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
 from lib.match_state import ChecklistItem
-from lib.motion_guard import SensorSuspension
+from lib.motion_guard import AxisReading, SensorSuspension
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
 from lib.sequence.positions import PositionTable, load_position_table
@@ -366,6 +366,7 @@ class TestWireRobotMotors:
             manager,
             motors,
             seq,
+            PositionTable.empty(),
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: estop_flag[0],
             sensor_active=_no_sensors,
@@ -438,6 +439,7 @@ class TestBuildManualController:
             manager,
             motors,
             seq,
+            PositionTable.empty(),
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: estop_flag[0],
             sensor_active=_no_sensors,
@@ -516,6 +518,7 @@ class TestBuildTargetRefresher:
             manager,
             motors,
             seq,
+            PositionTable.empty(),
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
             sensor_active=_no_sensors,
@@ -544,6 +547,7 @@ class TestBuildTargetRefresher:
             manager,
             motors,
             seq,
+            PositionTable.empty(),
             feedback_timeout_ms=500.0,
             is_estop_active=lambda: False,
             sensor_active=_no_sensors,
@@ -1139,6 +1143,8 @@ class TestSystemConfigReachesTheServer:
 class TestRobotContextReachesTheServer:
     NOT_A_PARAMETER: ClassVar[dict[str, str]] = {
         "mode": "サーバーが持つ実行時状態 (起動時は必ず SEQUENCE から始まる)",
+        "court_dependent_axes": "位置定数から導く (書き写すと宣言と食い違う)",
+        "court_dependent_position_axes": "位置定数から導く (書き写すと宣言と食い違う)",
     }
 
     def _add_robot_call_arguments(self) -> set[str]:
@@ -2263,3 +2269,132 @@ class TestSensorReader:
         )
 
         assert read("front_switch") is None
+
+
+class TestAxisStateWiring:
+    """軸間干渉の読み口は **2 つの `MotorGroup` の両方**へ配線する。
+
+    ロボットごとの束と、統合動作確認が自前で組む束は別物なので、片方の配線は
+    もう片方へ引き継がれない。忘れると**その経路だけが「条件の軸が読めていない」
+    で全軸拒否**になる —— 動作確認は毎セッション回すので必ず踏む。
+    """
+
+    _CONFIG_DIR: ClassVar[pathlib.Path] = pathlib.Path(__file__).resolve().parent.parent / "config"
+
+    def _positions(self) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {
+                    "lift": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "tolerance": 1.0,
+                        "motors": {"lift_motor": {"scale": 10.0}},
+                    }
+                },
+                "positions": {"lift": {"top": -1.0}},
+            },
+            source="<test>",
+        )
+
+    def test_ロボットごとの束に配線されている(self) -> None:
+        manager = _StubCANManager()
+        driver = M3508Driver("lift_motor", can_id=1)
+        # 1 通目は多回転の基準になるので、動いたことを表すには 2 通要る
+        feed_m3508(driver, deg=0.0)
+        feed_m3508(driver, deg=-20.0)
+        manager.feedback_at["lift_motor"] = time.time()
+        seq = _DummySequence("main_hand")
+
+        _wire_robot_motors(
+            _robot(_m3508_config()),
+            manager,
+            {"lift_motor": driver},
+            seq,
+            self._positions(),
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            sensor_active=_no_sensors,
+        )
+
+        read = seq.motors.axis_state
+        assert read is not None
+        assert read("lift") == AxisReading(value=pytest.approx(-2.0, abs=1e-3), target=None)
+
+    def test_途絶した軸は読めていないとして返る(self) -> None:
+        """既定の 0.0 を運び続ける軸が「原点に居る」として条件を満たすのを防ぐ。"""
+        manager = _StubCANManager()
+        driver = M3508Driver("lift_motor", can_id=1)
+        feed_m3508(driver, deg=0.0)
+        feed_m3508(driver, deg=-20.0)
+        manager.feedback_at["lift_motor"] = time.time() - 5.0
+        seq = _DummySequence("main_hand")
+
+        _wire_robot_motors(
+            _robot(_m3508_config()),
+            manager,
+            {"lift_motor": driver},
+            seq,
+            self._positions(),
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            sensor_active=_no_sensors,
+        )
+
+        read = seq.motors.axis_state
+        assert read is not None
+        assert read("lift") == AxisReading(value=None, target=None)
+
+    def test_統合動作確認が組む束にも配線されている(self) -> None:
+        server = MagicMock()
+        table = load_position_table(
+            yaml.safe_load((self._CONFIG_DIR / "sub_hand_positions.yaml").read_text()) or {},
+            source="sub_hand_positions.yaml",
+        )
+
+        main._wire_motor_check_sequence(
+            server,
+            [],
+            {"sub_hand": table},
+            loops=[],
+            can_managers=[],
+            sync_monitors=[],
+            limit_monitors=[],
+            target_refreshers=[],
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            sensor_suspension=SensorSuspension(),
+        )
+
+        sequence = server.set_motor_check_sequence.call_args.args[0]
+        assert sequence.motors.axis_state is not None
+
+    def test_零点合わせパネルに寄せる口が配線されている(self) -> None:
+        """配線しないとパネルは寄せず、前後の零点確定が毎回 1 軸失敗で終わる。
+
+        寄せる口は**動作確認と同じ `move_to`** でなければならない。別に組むと
+        パネル経由だけが可動端保護や到達判定の外側に出る。
+        """
+        server = MagicMock()
+        table = load_position_table(
+            yaml.safe_load((self._CONFIG_DIR / "sub_hand_positions.yaml").read_text()) or {},
+            source="sub_hand_positions.yaml",
+        )
+
+        main._wire_motor_check_sequence(
+            server,
+            [],
+            {"sub_hand": table},
+            loops=[],
+            can_managers=[],
+            sync_monitors=[],
+            limit_monitors=[],
+            target_refreshers=[],
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            sensor_suspension=SensorSuspension(),
+        )
+
+        sequence = server.set_motor_check_sequence.call_args.args[0]
+        source = server.set_homing_source.call_args.args[0]
+        assert source.move_to == sequence.move_to

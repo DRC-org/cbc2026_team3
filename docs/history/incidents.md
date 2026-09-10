@@ -28,6 +28,26 @@ NC 化の配線替えでスロットと `guard.limits` の対応が入れ替わ�
 止めた後に同じ向きへ指令し直しても通らない。規則は `docs/invariants.md` §3。配線の突き合わせ
 そのものは指差喚呼（`config/checklist.yaml`）の側で受ける。
 
+## 2026-09-10 動力電源オフの起動で「無励磁」の誤診が 4 モータに永続表示された
+
+`rotate_l` / `rotate_r`（EDULITE 05）と `sub_y_axis` / `sub_lift`（DM3520）の 4 台に
+「無励磁のまま / 指令は届いていますが励磁されていません」が出続け、**再励磁を押しても
+消えない**。緊急停止のオーバーレイは出ておらず、停止ボタンは原因ではなかった。
+
+実体は「フィードバックが 1 通も届いていない」。動力電源を切ったまま起動していたので、
+POSITION モードで新鮮なフィードバックを要求する 4 台
+（`requires_fresh_feedback_for_activation()`）は `activation_steps()` を 1 通も送られず、
+名前が `RobotServer._inactive_motors` に固定された。**`_unenergized_motors` がこのラッチを
+鮮度を一切見ずに union していた**ため、`is_energized()` が `None`（未受信）でも「無励磁」と
+断言されていた。すぐ隣の `_firmware_unconfirmed_motors` は同じ `FeedbackFreshness` で
+鮮度切れを除外していたので、**同じファイルの隣り合う 2 つで扱いが違っていた**。
+文面の「指令は届いていますが」を裏付ける判定はコード上に存在しない（TX 失敗の記録は
+バス単位だけで、モータ単位の到達確認は無い）。
+
+決着: ラッチを鮮度で仕分け、鮮度切れを `state.safety.unresponsive_motors` へ分けて配る
+（`_split_inactive_motors`）。UI は「応答なし」として電源・CAN 配線を指し、再励磁ボタンを
+出さない。「指令は届いていますが」は文面から外した。現在の規則は
+`docs/checks_and_health.md` の「『無励磁』と『応答なし』は別の欄で配る」。
 ## 2026-09-10 電源断のあいだに `rotate` を 180deg 手で回したら、論理角が −180deg と読まれた
 
 論理 0deg の姿勢で物理緊急停止（モータ電源が落ちる）を掛け、電源が落ちているあいだに人が

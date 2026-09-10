@@ -22,7 +22,14 @@ from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from lib.server import _ENERGIZE_GRACE_S
-from tests.fake_can import direct_runner, mock_bus, mock_can_manager, mock_motor, set_motors
+from tests.fake_can import (
+    direct_runner,
+    keep_feedback_fresh,
+    mock_bus,
+    mock_can_manager,
+    mock_motor,
+    set_motors,
+)
 from tests.feedback_frames import feed_edulite
 from tests.server_fixtures import RecordingClient, ServerFixture, wait_until
 
@@ -59,6 +66,7 @@ def _can_manager_with_dropped_motor() -> tuple[CANManager, Edulite05Driver]:
     dropped = Edulite05Driver("dropped", can_id=1)
     set_motors(can_manager, {"dropped": dropped})
     feed_edulite(dropped, position=0.5, mode_state=0)
+    keep_feedback_fresh(can_manager)
     return can_manager, dropped
 
 
@@ -245,6 +253,7 @@ class TestFailureIsReported:
             {"rotate_r": rotate_r, "rotate_l": rotate_l, "gripper": gripper}
         )
         can_manager.activate_motors = AsyncMock(side_effect=RuntimeError("CAN 送信失敗"))
+        keep_feedback_fresh(can_manager)
 
         group = SyncGroup(
             name="rotate",
@@ -270,10 +279,10 @@ class TestFailureIsReported:
             await fx.wait_reenergize("main_hand")
             await asyncio.sleep(_ENERGIZE_GRACE_S + 0.1)
 
-            assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == [
-                "rotate_l",
-                "rotate_r",
-            ]
+            # 相方 `rotate_l` は励磁されたままなので報告しない (ラッチには居る)。
+            safety = fx.state_message("main_hand")["safety"]
+            assert safety["unenergized_motors"] == ["rotate_r"]
+            assert safety["unresponsive_motors"] == []
 
 
 class TestPreviouslyInactiveMotorsAreRetried:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
@@ -149,6 +150,14 @@ def set_sensors(mgr: CANManager, drivers: Mapping[str, object]) -> None:
 
 def set_last_feedback(mgr: CANManager, times: Mapping[str, float]) -> None:
     mgr.last_feedback_at.side_effect = lambda name: times.get(name)
+
+
+def keep_feedback_fresh(mgr: CANManager, names: Iterable[str] | None = None) -> None:
+    """モックの鮮度を常に「今」にする。実時間で待つテストが途中で途絶に化けないため。"""
+    fresh = None if names is None else set(names)
+    mgr.last_feedback_at.side_effect = lambda name: (
+        time.time() if fresh is None or name in fresh else None
+    )
 
 
 def deliver_frame(mgr: CANManager, bus_name: str, msg: can.Message) -> None:

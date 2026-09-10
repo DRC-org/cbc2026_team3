@@ -1,23 +1,23 @@
-import { Button } from "@/components/ui/Button";
+import { onOffPair } from "@/components/operator/OnOffPadGroup";
+import { PadToggle } from "@/components/operator/PadToggle";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotCommands } from "@/context/RobotContext";
-import { cx } from "@/lib/cx";
-import type { Malformed, SuctionState } from "@/lib/protocol";
+import type { Malformed, ManualState, SuctionState } from "@/lib/protocol";
 import { MALFORMED } from "@/lib/protocol";
 
 interface SuctionPadPanelProps {
   robotKey: string;
   suction: SuctionState | Malformed;
+  manual: ManualState;
   blockedReason: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
-const ENABLED_CLASS = "border-success bg-success text-success-content hover:bg-success/85";
-
 export function SuctionPadPanel({
   robotKey,
   suction,
+  manual,
   blockedReason,
   sendOrReport,
 }: SuctionPadPanelProps) {
@@ -29,7 +29,9 @@ export function SuctionPadPanel({
     );
   }
 
-  const enabled = suction.pads.filter((pad) => pad.enabled);
+  // 手動では同じ 6 個が「宣言」と「今すぐ開閉」で 2 段に並び、どちらが機体を動かすのか
+  // 画面から読めなかった。手動ではこの面が開閉そのものを持つ
+  const inManual = manual.mode === "manual";
 
   const toggle = (axis: string) => {
     // 送るのは差分ではなく「使う弁の全集合」。2 台の UI が別々に押しても最後に届いた形が正になる
@@ -39,6 +41,40 @@ export function SuctionPadPanel({
     sendOrReport({ type: "suction_pads_set", robot: robotKey, pads: next }, "吸着パッドの選択");
   };
 
+  const move = (axis: string, position: string) =>
+    sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
+
+  const declarePads = suction.pads.map((pad) => ({
+    key: pad.axis,
+    label: pad.label,
+    on: pad.enabled,
+    unknown: false,
+    disabled: blockedReason !== null,
+    ariaLabel: `パッド ${pad.label} を${pad.enabled ? "使わない" : "使う"}`,
+    onClick: () => toggle(pad.axis),
+  }));
+
+  const openPads = suction.pads.map((pad) => {
+    const axis = manual.axes.find((candidate) => candidate.name === pad.axis);
+    // 軸も位置名も配信から引く。無いものを推測で埋めるとその弁だけ別の弁が開く
+    const pair = axis === undefined ? null : onOffPair(axis);
+    const on = axis !== undefined && axis.target !== null && axis.target !== 0;
+    return {
+      key: pad.axis,
+      label: pad.label,
+      on,
+      unknown: axis === undefined || axis.target === null,
+      disabled: blockedReason !== null || pair === null,
+      ariaLabel: `パッド ${pad.label} を${on ? "閉じる" : "開く"}`,
+      onClick: () => {
+        if (pair !== null) move(pad.axis, on ? pair.off : pair.on);
+      },
+    };
+  });
+
+  const pads = inManual ? openPads : declarePads;
+  const onCount = pads.filter((pad) => pad.on).length;
+
   return (
     <Panel
       legend="吸着パッド"
@@ -47,33 +83,41 @@ export function SuctionPadPanel({
       actions={
         blockedReason ? (
           <StatusBadge tone="error">{blockedReason}</StatusBadge>
-        ) : enabled.length === 0 ? (
+        ) : inManual ? (
+          <span className="text-[0.85em] text-base-content/60">
+            開 {onCount}/{suction.pads.length}
+          </span>
+        ) : onCount === 0 ? (
           <StatusBadge tone="warning">未選択 — 吸着ステップは拒否されます</StatusBadge>
         ) : (
           <span className="text-[0.85em] text-base-content/60">
-            使用 {enabled.length}/{suction.pads.length}
+            使用 {onCount}/{suction.pads.length}
           </span>
         )
       }
     >
-      <div className="flex flex-wrap gap-1 p-2" role="group" aria-label="吸着に使うパッド">
-        {suction.pads.map((pad) => (
-          <Button
-            key={pad.axis}
-            className={cx("min-w-[3.5rem] font-mono", pad.enabled && ENABLED_CLASS)}
-            disabled={blockedReason !== null}
-            aria-pressed={pad.enabled}
-            aria-label={`パッド ${pad.label} を${pad.enabled ? "使わない" : "使う"}`}
-            onClick={() => toggle(pad.axis)}
-          >
-            {pad.label}
-          </Button>
+      <div
+        className="flex flex-wrap gap-2 p-2"
+        role="group"
+        aria-label={inManual ? "吸着パッドの開閉" : "吸着に使うパッド"}
+      >
+        {pads.map((pad) => (
+          <PadToggle
+            key={pad.key}
+            label={pad.label}
+            on={pad.on}
+            unknown={pad.unknown}
+            disabled={pad.disabled}
+            ariaLabel={pad.ariaLabel}
+            onClick={pad.onClick}
+          />
         ))}
       </div>
 
       <p className="shrink-0 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
-        ON のパッドだけを吸着に使います。次の「ワーク吸着」ステップから効きます（実行中の吸着には
-        反映されません）。
+        {inManual
+          ? "押した弁が今すぐ開きます（吸着に使う弁の選択は半自動のときに行います）。"
+          : "ON のパッドだけを吸着に使います。次の「ワーク吸着」ステップから効きます（実行中の吸着には反映されません）。"}
       </p>
     </Panel>
   );

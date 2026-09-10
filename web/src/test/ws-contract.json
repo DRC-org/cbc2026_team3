@@ -81,7 +81,7 @@
           ]
         }
       },
-      "court": "red",
+      "court": null,
       "phase": "setup",
       "timer": {
         "duration_ms": 180000,
@@ -149,6 +149,7 @@
       "type": "server_info"
     },
     "state": {
+      "court_required": true,
       "current_step": "初期位置へ移動",
       "e_stop_active": false,
       "health": {
@@ -376,7 +377,8 @@
             "running": true
           }
         ],
-        "unenergized_motors": []
+        "unenergized_motors": [],
+        "unresponsive_motors": []
       },
       "sensors": {
         "origin_sensor": {
@@ -426,6 +428,7 @@
       "waiting_trigger": false
     },
     "state_with_last_error": {
+      "court_required": true,
       "current_step": "Y 軸を投入位置へ",
       "e_stop_active": false,
       "health": {
@@ -657,7 +660,8 @@
             "running": true
           }
         ],
-        "unenergized_motors": []
+        "unenergized_motors": [],
+        "unresponsive_motors": []
       },
       "sensors": {
         "origin_sensor": {

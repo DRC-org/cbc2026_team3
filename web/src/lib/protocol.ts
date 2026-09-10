@@ -270,7 +270,8 @@ export interface MatchTimer {
 }
 
 export interface MatchState {
-  court: MatchCourt | Malformed;
+  /** `null` はコート未確定。**選ばれていないだけで、壊れた配信ではない。** */
+  court: MatchCourt | null | Malformed;
   phase: MatchPhase | Malformed;
   can_start_match: boolean;
   checklists: Record<string, ChecklistState> | Malformed;
@@ -354,6 +355,7 @@ export interface TargetRefresherState {
 export interface SafetyState {
   sync_violations: string[];
   unenergized_motors: string[];
+  unresponsive_motors: string[];
   firmware_unconfirmed_motors: string[];
   failed_tasks: string[];
   reenergizing: boolean;
@@ -386,6 +388,7 @@ export function safetyShapeErrors(value: unknown): string[] {
   for (const key of [
     "sync_violations",
     "unenergized_motors",
+    "unresponsive_motors",
     "firmware_unconfirmed_motors",
     "failed_tasks",
   ]) {
@@ -531,6 +534,8 @@ export interface RobotState {
   steps?: SequenceStepInfo[];
   manual?: ManualState;
   suction?: SuctionState | Malformed | null;
+  /** この台がコート確定を要るか。**判定はサーバー。UI が軸名から導き直さない。** */
+  court_required?: boolean;
 }
 
 export type ServerMessage =
@@ -621,7 +626,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
       return {
         type: "match_state",
         matchState: {
-          court: parseEnum(raw.court, MATCH_COURTS),
+          court: raw.court === null ? null : parseEnum(raw.court, MATCH_COURTS),
           phase: parseEnum(raw.phase, MATCH_PHASES),
           can_start_match: Boolean(raw.can_start_match),
           checklists: parseChecklists(raw.checklists),

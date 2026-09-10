@@ -5,6 +5,7 @@ import asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
 from lib.sequence.engine import AxisSyncError, Sequence, step
+from tests.fake_can import keep_feedback_fresh
 from tests.server_fixtures import ServerFixture, wait_until
 
 _ROBOT = "main_hand"
@@ -124,6 +125,7 @@ class TestInitialInactiveMotors:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
+            keep_feedback_fresh(fx.can_manager(_ROBOT))
             fx.server.set_initial_inactive_motors(_ROBOT, ["lift"])
 
             assert await wait_until(

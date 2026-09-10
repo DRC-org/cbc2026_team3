@@ -15,9 +15,10 @@ from lib.sequence.homing import (
     _STALL_LIMIT,
     HomingError,
     HomingRunner,
+    measure_switch,
     run_homing,
 )
-from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle
+from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import AxisSpec, load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
@@ -1785,3 +1786,175 @@ class TestAlignsWithTheGuardArmed:
 
         assert not suspension.is_suspended("sensor_r")
         assert not suspension.is_suspended("sensor_l")
+
+
+_INTERFERING_CONFIG = {
+    "axes": {
+        "lift": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "tolerance": 1.0,
+            "homing": {
+                "sensor": "lift_sensor",
+                "direction": 1,
+                "search_distance": 30.0,
+                "step": 1.0,
+                "settle_s": 0.0,
+                "release_distance": 10.0,
+            },
+        },
+        "slide": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "tolerance": 1.0,
+            "homing": {
+                "sensor": "slide_sensor",
+                "direction": -1,
+                "search_distance": 30.0,
+                "step": 1.0,
+                "settle_s": 0.0,
+            },
+            "guard": {"requires": [{"axis": "lift", "at": "top"}]},
+        },
+    },
+    "positions": {"lift": {"top": -20.0, "bottom": 0.0}, "slide": {"back": -5.0}},
+}
+
+
+class _RecordingHoming:
+    """回された軸の名前だけを控える零点確定の代役。1 歩も動かさない。"""
+
+    def __init__(self) -> None:
+        self.homed: list[str] = []
+
+    async def home(self, spec: AxisSpec, _handle: AxisHandle) -> float:
+        self.homed.append(spec.name)
+        return 0.0
+
+
+class _OneStepMeasure:
+    """測定の 1 歩だけを打つ代役。零点確定と同じ入口を通ることだけを見る。"""
+
+    async def measure(self, spec: AxisSpec, handle: AxisHandle, **kwargs: object) -> None:
+        homing = spec.homing
+        assert homing is not None
+        await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
+
+
+class _OneStepHoming:
+    """探索の 1 歩だけを打つ代役。**指令の入口 (= 歯止め) を必ず通る。**"""
+
+    async def home(self, spec: AxisSpec, handle: AxisHandle) -> float:
+        homing = spec.homing
+        assert homing is not None
+        await handle.set_target_value(spec.to_commands(homing.direction * homing.step))
+        return homing.step
+
+
+def _interfering_group(table, *, lift_mm: float) -> MotorGroup:
+    mgr = mock_can_manager()
+    group = MotorGroup(sensor_active=lambda _name: False)
+    for axis, value in (("lift", lift_mm), ("slide", 0.0)):
+        motor = table.axis(axis).motors[0]
+        driver = StubFeedbackDriver(motor.name, 1)
+        driver.set_observed(position=motor.to_command(value))
+        group.add(MotorHandle(motor.name, driver, mgr))
+    group.bind_axis_state(
+        build_axis_state_reader(table, group, court=lambda: Court.RED, is_stale=lambda _name: False)
+    )
+    return group
+
+
+class TestHomingOrderFollowsInterference:
+    """`requires` を書いた軸は、条件の軸を先に確定して寄せないと 1 歩も探索できない。
+
+    零点確定は探索の 1 歩ごとに `AxisHandle.set_target_value` を通るので、干渉の
+    判定がそのまま効く。**順序だけが理由で拒否される**ので、`run_homing` は
+    参照先を先に回す。
+    """
+
+    def _table(self):
+        return load_position_table(_INTERFERING_CONFIG, source="<test>")
+
+    async def test_参照先を先に回す(self) -> None:
+        table = self._table()
+        runner = _RecordingHoming()
+
+        await run_homing(
+            runner,  # type: ignore[arg-type]
+            table,
+            _interfering_group(table, lift_mm=-20.0),
+            court=Court.RED,
+            axes=["slide", "lift"],
+        )
+
+        assert runner.homed == ["lift", "slide"]
+
+    async def test_寄せてから確定すれば通る(self) -> None:
+        table = self._table()
+        group = _interfering_group(table, lift_mm=-20.0)
+
+        await run_homing(
+            _OneStepHoming(),  # type: ignore[arg-type]
+            table,
+            group,
+            court=Court.RED,
+            axes=["slide"],
+        )
+
+        assert group["slide"].target is not None
+
+    async def test_寄せる前だと手当ての入った拒否が返る(self) -> None:
+        """**会場ではこの 1 行が手順書になる。** 数値だけでは次に何をするか読めない。"""
+        table = self._table()
+        group = _interfering_group(table, lift_mm=-10.0)
+
+        with pytest.raises(GuardViolation) as exc:
+            await run_homing(
+                _OneStepHoming(),  # type: ignore[arg-type]
+                table,
+                group,
+                court=Court.RED,
+                axes=["slide"],
+            )
+
+        assert "lift" in str(exc.value)
+        assert "top" in str(exc.value)
+        assert "寄せてください" in str(exc.value)
+        assert group["slide"].target is None
+
+    async def test_作動点測定も同じ条件が掛かる(self) -> None:
+        """`measure_switch` は零点確定と同じ `AxisHandle` を通るので同じ歯止めに乗る。
+
+        `docs/checks_and_health.md` の表がそう書いてあるので、経路が分かれたら
+        ここが落ちる。
+        """
+        table = self._table()
+        group = _interfering_group(table, lift_mm=-10.0)
+
+        with pytest.raises(GuardViolation, match="寄せてください"):
+            await measure_switch(
+                _OneStepMeasure(),  # type: ignore[arg-type]
+                table,
+                group,
+                court=Court.RED,
+                axis="slide",
+                direction=-1,
+            )
+
+    async def test_その場で止まれは条件の軸が読めなくても通る(self) -> None:
+        """途絶で降りる直前の書き戻しが拒否されると、押し込む向きの古い目標が残る。
+
+        `HomingRunner` が「その場で止まれ」を書くのは、機体まるごとの応答が
+        怪しくなった瞬間である。条件の軸も同時に読めなくなるので、**そこで拒否
+        されると止める指令だけが出ない**。
+        """
+        table = self._table()
+        spec = table.axis("slide")
+        rec = _Recorder()
+        # 読み口を配線しない = 条件の軸は常に「読めていない」
+        handle = _handle(spec, rec, start_value=-3.0, sensor_active=rec.sensor_active)
+
+        await _runner(rec)._stop_here(spec, handle)
+
+        assert rec.commands == [pytest.approx({"slide": spec.motors[0].to_command(-3.0)})]

@@ -132,10 +132,10 @@ axes:
     timeout_s: 2.0
 
 positions:
-  # *_via_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
-  # 双方と干渉するため、干渉域を避けて段階的に寄せるための経由点。両軸で同じ位置名を
-  # 使い、対が崩れていないことを読めるようにしてある。
-  # TODO(実機で確認): 経由点の値はどれも等分割の仮値。実機で干渉を見ながら列ごとに詰めること。
+  # *_after_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
+  # 双方と干渉するため、干渉域を避けて段階的に戻すための退避点 (3 列目だけが踏む)。
+  # 両軸で同じ位置名を使い、対が崩れていないことを読めるようにしてある。
+  # TODO(実機で確認): *_after_* の値はどれも仮値。実機で干渉を見ながら詰めること。
   y_axis:
     home: 0.0
     # 零点確定の直後に退避する先 (homing.retreat_position)。rotate を回してよい位置。
@@ -149,7 +149,14 @@ positions:
     work_shared: 550.0
 
   rotate:
-    home: 0.0
+    # 0.0 は零点確定のスイッチの動作点そのもの。tolerance 2.0deg の到達帯が
+    # ON 区間 (実測 約 2deg) へ食い込むと、可動端インターロック
+    # (guard.limits.minus: rotate_origin_sensor) がその内側からの指令を拒む。
+    # y_axis.home と rotate.home が両方 0.0 だと HOME 姿勢そのものが干渉姿勢になるので、
+    # 離すのは rotate の側だけ (docs/invariants.md §4、tests/test_main_positions_config.py
+    # の TestShippedRotateHome が固定)。
+    # TODO(実機で確認): 干渉しない角の実測はまだ無い (docs/mechanism_handoff.md §1)
+    home: 5.0
     work_3_after_1: 165.0
     work_3_after_2: 155.0
     pick: 185.0

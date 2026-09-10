@@ -46,20 +46,23 @@ def _complete(state: MatchState, role: str) -> None:
         state.set_checklist_item(role, item.id, True)
 
 
-def _complete_all(state: MatchState) -> None:
+def _complete_all(state: MatchState, *, court: Court = Court.RED) -> None:
+    # コート未確定のあいだ can_start_match は偽なので、選ぶのが先。
+    # 指差喚呼より前に置くのは set_court が「変化」としてリセットを走らせるため
+    state.set_court(court)
     _complete(state, ROLE_PRE_MATCH)
 
 
 class TestDefaults:
     def test_initial_state(self) -> None:
         state = _make()
-        assert state.court is Court.RED
+        assert state.court is None
         assert state.phase is Phase.SETUP
         assert state.can_start_match is False
 
     def test_definitions_are_copied_into_each_state(self) -> None:
         first = _make()
-        _complete(first, ROLE_PRE_MATCH)
+        _complete_all(first)
         assert first.can_start_match is True
 
         second = _make()
@@ -72,6 +75,7 @@ class TestDefaults:
 class TestChecklistCompletion:
     def test_needs_every_item_complete(self) -> None:
         state = _make()
+        state.set_court(Court.RED)
         state.set_checklist_item(ROLE_PRE_MATCH, "power", True)
         assert state.checklists[ROLE_PRE_MATCH].completed is False
         assert state.can_start_match is False
@@ -98,6 +102,9 @@ class TestChecklistCompletion:
 
     def test_empty_checklist_counts_as_complete(self) -> None:
         state = MatchState(definitions={ROLE_PRE_MATCH: []})
+        assert state.phase is Phase.SETUP
+
+        state.set_court(Court.RED)
         assert state.phase is Phase.READY
 
 
@@ -127,6 +134,40 @@ class TestCourtChange:
         assert state.court is Court.RED
 
 
+class TestCourtUnresolved:
+    """コート未確定という状態。**開始ゲートは `can_start_match` 1 つで閉じる。**"""
+
+    def test_checklist_alone_does_not_open_the_start_gate(self) -> None:
+        state = _make()
+        _complete(state, ROLE_PRE_MATCH)
+
+        assert state.checklists[ROLE_PRE_MATCH].completed is True
+        assert state.can_start_match is False
+        assert state.phase is Phase.SETUP
+        assert state.match_start() is False
+
+    def test_selecting_the_court_opens_the_gate(self) -> None:
+        state = _make()
+        assert state.set_court(Court.BLUE) is True
+        _complete(state, ROLE_PRE_MATCH)
+
+        assert state.can_start_match is True
+        assert state.phase is Phase.READY
+
+    def test_first_selection_resets_the_checklist(self) -> None:
+        """未確定→赤も「変化」。**指差喚呼の外し直しに新しい仕掛けは要らない。**
+
+        `id: court`「コート設定と実配置の一致確認」を先にチェックしてからコートを
+        選ぶと、この既存の挙動が自動でそれを外す。専用の仕掛けを足さないこと。
+        """
+        state = _make()
+        _complete(state, ROLE_PRE_MATCH)
+
+        state.set_court(Court.RED)
+        assert state.checklists[ROLE_PRE_MATCH].completed is False
+        assert state.can_start_match is False
+
+
 class TestPhaseTransitions:
     def test_match_start_requires_ready(self) -> None:
         state = _make()
@@ -148,14 +189,21 @@ class TestPhaseTransitions:
 
     def test_match_reset_from_any_phase(self) -> None:
         state = _make()
-        state.set_court(Court.BLUE)
-        _complete_all(state)
+        _complete_all(state, court=Court.BLUE)
         state.match_start()
 
         assert state.match_reset() is True
         assert state.phase is Phase.SETUP
         assert state.checklists[ROLE_PRE_MATCH].completed is False
-        assert state.court is Court.BLUE
+
+    def test_match_reset_clears_the_court(self) -> None:
+        state = _make()
+        _complete_all(state, court=Court.BLUE)
+        state.match_start()
+
+        state.match_reset()
+        assert state.court is None
+        assert state.can_start_match is False
 
     def test_checklist_locked_during_match(self) -> None:
         state = _make()
@@ -194,7 +242,7 @@ class TestSerialization:
         payload = state.to_dict()
 
         assert payload["type"] == "match_state"
-        assert payload["court"] == "red"
+        assert payload["court"] is None
         assert payload["phase"] == "setup"
         assert payload["can_start_match"] is False
         assert set(payload["checklists"]) == {ROLE_PRE_MATCH}
@@ -364,7 +412,7 @@ class TestLoadDefinitions:
             )
 
     def test_unknown_role_would_have_opened_the_gate(self) -> None:
-        state = MatchState({ROLE_PRE_MATCH: []})
+        state = MatchState({ROLE_PRE_MATCH: []}, court=Court.RED)
 
         assert state.can_start_match is True
 

@@ -18,7 +18,7 @@ from lib.manual import ManualControlError, ManualController
 from lib.match_state import Court
 from lib.sequence.engine import Sequence, step
 from lib.sequence.interlock import AxisInterlock, InterlockSpec, InterlockViolation
-from lib.sequence.motors import MotorGroup, MotorHandle
+from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import PositionTable, load_position_table
 from sequences.sub_hand import SubHandSequence
 from tests.fake_drivers import StubFeedbackDriver
@@ -358,6 +358,16 @@ class TestSequence:
         seq = SubHandSequence()
         seq.bind_motors(group_with_sensors)
         seq.bind_positions(table)
+        # sub_lift の scale はコート別なので、コートを選ぶまで軸を解決できない
+        seq.set_court(Court.RED)
+        # guard.requires の読み口。本番と同じ組み立てを使う (鮮度の材料だけ無いので
+        # 「常に新しい」を与える)。配線しないと既定は「常に読めていない」で、
+        # 干渉インターロックまで届く前に MotionGuard が拒否する
+        group_with_sensors.bind_axis_state(
+            build_axis_state_reader(
+                table, group_with_sensors, court=lambda: seq.court, is_stale=lambda _name: False
+            )
+        )
 
         consulted = 0
         original = AxisInterlock.check

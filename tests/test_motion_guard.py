@@ -14,15 +14,20 @@
 
 from __future__ import annotations
 
+import ast
+import pathlib
+
 import pytest
 
 from lib.drivers.base import NO_TELEMETRY, ControlMode, TelemetrySupport
 from lib.manual import ManualController
 from lib.motion_guard import (
+    AxisReading,
     GuardViolation,
     LimitSpec,
     MotionGuard,
     MotionGuardSpec,
+    RequiredRange,
     SensorSuspension,
 )
 from lib.sequence.engine import Sequence
@@ -817,3 +822,178 @@ class TestSensorSuspension:
                 contacts["origin_r"] = 5
             assert count("origin_r") == 3
         assert count("origin_r") == 5
+
+
+_TOP = RequiredRange(axis="sub_lift", low=-141.0, high=-139.0, names=("top",), unit="mm")
+
+
+def _interference_guard(**kwargs: object) -> MotionGuard:
+    params: dict = {"requires": (_TOP,)}
+    params.update(kwargs)
+    return MotionGuard(MotionGuardSpec(**params))  # type: ignore[arg-type]
+
+
+def _axis_at(value: float | None, target: float | None = None):
+    def read(_axis: str) -> AxisReading:
+        return AxisReading(value=value, target=target)
+
+    return read
+
+
+class TestInterference:
+    """他の軸がどこに居るかを条件にする判定。**実測と目標の両方**を見る。
+
+    区間が凸なので両方が中なら残りの軌道も必ず中である。実測だけを見ると
+    「top に居るが下降指令が既に出ている」を通し、目標だけを見ると「top を
+    書いた直後でまだ下に居る」を通す。
+    """
+
+    def test_条件の軸が区間に居れば通る(self) -> None:
+        _interference_guard().check_interference(
+            axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(-140.0, -140.0)
+        )
+
+    def test_実測が区間の外なら拒否する(self) -> None:
+        with pytest.raises(GuardViolation, match="実測 -10") as exc:
+            _interference_guard().check_interference(
+                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(-10.0, -10.0)
+            )
+
+        # 会場ではこの 1 行が手順書になる。数値だけでは「どこへ動かせば通るか」が読めない
+        assert "sub_lift" in str(exc.value)
+        assert "top" in str(exc.value)
+        assert "寄せてください" in str(exc.value)
+
+    def test_目標が区間の外なら拒否する(self) -> None:
+        """実測はまだ top でも、下降指令が既に書かれていれば動かさない。"""
+        with pytest.raises(GuardViolation, match="目標 -10"):
+            _interference_guard().check_interference(
+                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(-140.0, -10.0)
+            )
+
+    def test_目標が無ければ実測だけで判定する(self) -> None:
+        """緊急停止で目標が消えた後に全軸が動かせなくなると、退避路が無くなる。"""
+        _interference_guard().check_interference(
+            axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(-140.0, None)
+        )
+
+    def test_読めていなければ拒否する(self) -> None:
+        """`None` を「条件を満たしている」へ丸めない。安全側は「止まる」である。"""
+        with pytest.raises(GuardViolation, match="読めていません"):
+            _interference_guard().check_interference(
+                axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(None, None)
+            )
+
+    def test_その場で止まれは必ず通る(self) -> None:
+        """`delta == 0` を塞ぐと、止めるための指令が拒否される逆立ちが起きる。"""
+        _interference_guard().check_interference(
+            axis="sub_y_axis", delta=0.0, axis_state=_axis_at(None, None)
+        )
+
+    def test_requires_を書かない軸は素通りする(self) -> None:
+        _interference_guard(requires=()).check_interference(
+            axis="sub_y_axis", delta=-1.0, axis_state=_axis_at(None, None)
+        )
+
+    def test_check_command_から呼ばれる(self) -> None:
+        """入口の判定に載っていなければ、単体で正しくても 1 度も効かない。"""
+        with pytest.raises(GuardViolation, match="sub_lift"):
+            _interference_guard().check_command(
+                axis="sub_y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(),
+                axis_state=_axis_at(-10.0, -10.0),
+            )
+
+    def test_読み口を渡さなければ拒否側へ倒れる(self) -> None:
+        """配線し忘れは素通りではなく「その軸が動かない」として表に出す。"""
+        with pytest.raises(GuardViolation, match="読めていません"):
+            _interference_guard().check_command(
+                axis="sub_y_axis",
+                current=0.0,
+                target=-1.0,
+                unit="mm",
+                sensor_active=_sensors(),
+            )
+
+
+class TestNotWith:
+    """同じ 1 通の指令に入れてはならない軸。**呼ぶのは `move_to` だけ。**"""
+
+    def test_同じ指令に相手が居れば拒否する(self) -> None:
+        guard = MotionGuard(MotionGuardSpec(not_with=("sub_offset",)))
+
+        with pytest.raises(GuardViolation, match="同じ指令では動かせません") as exc:
+            guard.check_not_with(axis="sub_pitch", siblings={"sub_pitch", "sub_offset"})
+
+        assert "段を分けて" in str(exc.value)
+
+    def test_相手が居なければ通る(self) -> None:
+        guard = MotionGuard(MotionGuardSpec(not_with=("sub_offset",)))
+
+        guard.check_not_with(axis="sub_pitch", siblings={"sub_pitch", "sub_lift"})
+
+    def test_not_with_を書かない軸は素通りする(self) -> None:
+        MotionGuard(MotionGuardSpec()).check_not_with(
+            axis="sub_pitch", siblings={"sub_pitch", "sub_offset"}
+        )
+
+
+#: 操縦者の画面へ出る文面を組むモジュール。**ここに `**` を書かない。**
+#:
+#: - `lib/motion_guard.py` の `GuardViolation` → トースト (`command_rejected`) と
+#:   零点合わせパネルの結果欄
+#: - `lib/sequence/homing.py` の `HomingError` → 零点合わせパネルの結果欄
+#:
+#: `lib/drivers/dm3520.py` の `activation_block_reason()` は入れていない ——
+#: 呼ぶのは `CANManager._activate_one` の `logger.error` だけで、画面へ出る側
+#: (`health_detail()`) は別の文面を持つ。ログは journalctl で読むので記号は害にならない
+_OPERATOR_MESSAGE_MODULES = ("lib/motion_guard.py", "lib/sequence/homing.py")
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _message_literals(relative: str) -> list[tuple[int, str]]:
+    """docstring を除いた文字列リテラル。コメントは `ast` に載らない。"""
+    tree = ast.parse((_REPO_ROOT / relative).read_text())
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and (body := getattr(node, "body", []))
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    }
+    return [
+        (node.lineno, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+class TestMessagesAreNotMarkdown:
+    """操縦者の画面に出る文面に `**` を混ぜない。
+
+    トースト (`web/src/components/shell/Toaster.tsx`) も零点合わせパネルも Markdown を
+    解釈しないので、アスタリスクが生のまま出て読みにくくなる。強調は記号ではなく語順と
+    文の分け方で出すこと。**docstring とコメントは対象外**
+    (あれはエディタと GitHub で読むもので、Markdown が効く)。
+
+    **見るのはソースの文字列リテラルである。** 文面 1 つずつを起こして確かめると、
+    足した文面をテストへ書き足し忘れたぶんが黙って漏れる。
+    """
+
+    @pytest.mark.parametrize("relative", _OPERATOR_MESSAGE_MODULES)
+    def test_文面に強調記号を書かない(self, relative: str) -> None:
+        offenders = [
+            f"{relative}:{line}: {text[:40]}"
+            for line, text in _message_literals(relative)
+            if "**" in text
+        ]
+
+        assert not offenders, "操縦者に出る文面に Markdown の記号がある: " + " / ".join(offenders)

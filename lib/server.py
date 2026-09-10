@@ -42,6 +42,7 @@ from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import ChecklistItem, Court, MatchState
 from lib.motion_guard import GuardViolation
 from lib.sequence.engine import Sequence
+from lib.sequence.positions import CourtUnresolvedError, PositionLookupError
 from lib.server_homing import HomingController, HomingSource
 from lib.server_motor_check import MotorCheckController, Pausable
 from lib.server_switch_measure import SwitchMeasureController
@@ -91,6 +92,23 @@ def _level_for_motor_state(state: MotorHealth) -> str:
     return "info"
 
 
+def _court_dependent_axes(sequence: Sequence) -> tuple[str, ...]:
+    """位置定数を持たないシーケンス (テストの差し込み) は空で扱う。"""
+    try:
+        table = sequence.positions
+    except RuntimeError:
+        return ()
+    return table.court_dependent_axes()
+
+
+def _court_dependent_position_axes(sequence: Sequence) -> tuple[str, ...]:
+    try:
+        table = sequence.positions
+    except RuntimeError:
+        return ()
+    return table.court_dependent_position_axes()
+
+
 @dataclass
 class RobotContext:
     sequence: Sequence
@@ -103,6 +121,10 @@ class RobotContext:
     mode: OperationMode = OperationMode.SEQUENCE
     #: 吸着に使うパッドの選択。持たないロボットは None (配信も null)
     suction: SuctionSelection | None = None
+    #: 指令の換算がコートで鏡になる軸。空ならこの台はコート未確定でも動かせる
+    court_dependent_axes: tuple[str, ...] = ()
+    #: コート別の値を持つ位置を抱える軸。位置名を引くときだけコートが要る
+    court_dependent_position_axes: tuple[str, ...] = ()
 
 
 class RobotServer:
@@ -228,6 +250,8 @@ class RobotServer:
             target_refreshers=list(target_refreshers or []),
             manual=manual,
             suction=suction,
+            court_dependent_axes=_court_dependent_axes(sequence),
+            court_dependent_position_axes=_court_dependent_position_axes(sequence),
         )
         sequence.set_court(self.match.court)
         if manual is not None:
@@ -241,6 +265,8 @@ class RobotServer:
         self._switch_measure.set_source(source)
 
     def _apply_court(self) -> None:
+        # 未確定 (None) もそのまま押し下げる。飛ばすと試合をリセットした後も
+        # 前の試合のコートが各層に残り、解決済みのまま動いてしまう
         self._motor_check.set_court(self.match.court)
         for ctx in self._robots.values():
             ctx.sequence.set_court(self.match.court)
@@ -380,6 +406,8 @@ class RobotServer:
             deny = self._manual_mode_deny_reason(spec, data)
         if deny is None:
             deny = self._reenergize_deny_reason(spec, data)
+        if deny is None:
+            deny = self._court_deny_reason(spec, data)
         if deny is not None:
             logger.info("コマンド拒否: %s (%s)", spec.name, deny)
             await self._reject_by_channel(spec, data, requester, deny)
@@ -430,6 +458,32 @@ class RobotServer:
         if not self._is_reenergizing(robot_name):
             return None
         return reason
+
+    def _court_deny_reason(self, spec: CommandSpec, data: dict) -> str | None:
+        """コート未確定で拒否するか。**ゲートはロボット単位。**
+
+        コートに依存しない台 (メインハンド) は退避路として動かせる必要があるので
+        塞がない。`data["robot"]` が無いコマンドは両ハンドを走らせるため、
+        1 台でも要るなら塞ぐ。要否の正は位置定数 (`PositionTable`) だけが持つ。
+        """
+        reason = spec.court_deny_reason()
+        if reason is None or self.match.court is not None:
+            return None
+
+        robot_name = data.get("robot")
+        if isinstance(robot_name, str):
+            ctx = self._robots.get(robot_name)
+            if ctx is None or not ctx.court_dependent_axes:
+                return None
+            return reason
+
+        # 台を名指ししないコマンドは、コート別の位置を引く台でも途中で失敗する
+        if any(
+            ctx.court_dependent_axes or ctx.court_dependent_position_axes
+            for ctx in self._robots.values()
+        ):
+            return reason
+        return None
 
     def _is_reenergizing(self, robot_name: str) -> bool:
         if self._reactivating:
@@ -732,6 +786,11 @@ class RobotServer:
             # 設計どおりの拒否。汎用の例外処理へ落とすと ERROR + Traceback で「失敗」に見える
             logger.warning("手動操縦を歯止めが拒否: %s (%s)", command, exc)
             await self._reject_command(requester, command, str(exc))
+        except (CourtUnresolvedError, PositionLookupError) as exc:
+            # コマンドゲートの内側にある 2 枚目。位置名を引く手動はゲートが
+            # 塞がない台 (コート別の位置だけを持つ軸) でもここで止まる
+            logger.warning("手動操縦をコート未確定が拒否: %s (%s)", command, exc)
+            await self._reject_command(requester, command, str(exc))
 
     async def _cmd_set_court(self, data: dict, requester: WSOrNone) -> None:
         await self._handle_set_court(data, requester)
@@ -850,7 +909,7 @@ class RobotServer:
 
         self._failed_tasks.clear()
 
-        logger.info("試合開始: court=%s", self.match.court.value)
+        logger.info("試合開始: court=%s", court.value if (court := self.match.court) else "?")
 
         await self._broadcast_match_state()
 
@@ -937,9 +996,12 @@ class RobotServer:
         for monitor in ctx.sync_monitors:
             violations |= set(monitor.violated)
 
+        unenergized, unresponsive = self._split_inactive_motors(robot_name)
+
         return {
             "sync_violations": sorted(violations),
-            "unenergized_motors": self._unenergized_motors(robot_name),
+            "unenergized_motors": sorted(unenergized),
+            "unresponsive_motors": sorted(unresponsive),
             "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
             "failed_tasks": list(self._failed_tasks.get(robot_name, ())),
             "reenergizing": self._is_reenergizing(robot_name),
@@ -982,21 +1044,46 @@ class RobotServer:
             ],
         }
 
-    def _unenergized_motors(self, robot_name: str) -> list[str]:
+    def _split_inactive_motors(self, robot_name: str) -> tuple[set[str], set[str]]:
+        """励磁されていないモータを「無励磁」と「応答なし」へ仕分ける。
+
+        手当てが逆なので 1 つの文面へ潰さない —— 応答が無い = ドライバの電源・CAN 配線 /
+        励磁されていない = 再励磁。`lib/drivers/dm3520.py` の `activation_block_reason`
+        が同じ理由で文面を 2 つに分けている。
+        """
         since = self._energize_expected_since
         if self._e_stop_active or since is None:
-            return []
+            return set(), set()
         if time.time() - since < _ENERGIZE_GRACE_S:
-            return []
+            return set(), set()
 
         ctx = self._robots[robot_name]
-        names = {
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        now = freshness.now()
+
+        candidates = {
             motor_name
             for motor_name, motor in ctx.can_manager.motors.items()
             if motor.is_energized() is False
         }
-        names.update(self._inactive_motors.get(robot_name, ()))
-        return sorted(names)
+        candidates.update(self._inactive_motors.get(robot_name, ()))
+
+        # 鮮度切れは消すのではなく「応答なし」へ移す。しかも `is_energized()` を一切見ない
+        # —— 読む値はフレームを復号した瞬間にしか書かれず、途絶えてもクリアされないので、
+        # 鮮度が切れた時点で True も False も信用できない。
+        unresponsive = {name for name in candidates if freshness.is_stale(name, now)}
+
+        fresh = candidates - unresponsive
+        # 鮮度が生きているものだけ `is_energized()` を信用する。起動時に失敗した後で
+        # 自力で励磁されたモータをラッチに居座らせない。
+        energized = set()
+        for motor_name in fresh:
+            motor = ctx.can_manager.motors.get(motor_name)
+            if motor is not None and motor.is_energized() is True:
+                energized.add(motor_name)
+        return fresh - energized, unresponsive
 
     def _firmware_unconfirmed_motors(self, robot_name: str) -> list[str]:
         if self._dry_run:
@@ -1430,6 +1517,8 @@ class RobotServer:
             "safety": self._safety_state(robot_name),
             "manual": self._manual_state(robot_name),
             "suction": ctx.suction.to_dict() if ctx.suction is not None else None,
+            # この台がコート確定を要るか。UI が軸名から導き直さないようサーバーが配る
+            "court_required": bool(ctx.court_dependent_axes),
         }
 
     def _sensor_states(self, robot_name: str) -> dict[str, dict]:

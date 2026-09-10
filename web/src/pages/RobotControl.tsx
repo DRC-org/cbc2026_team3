@@ -59,7 +59,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       : matchState.phase === MALFORMED
         ? "フェーズ不明"
         : "準備中";
-  const sequenceBlockedReason = connected ? null : "切断中のため送信できません";
+  // コート確定が要るかはサーバーが決める (state.court_required)。UI が軸名から導き直さない
+  const courtUnset = state?.court_required === true && matchState.court === null;
+  const sequenceBlockedReason = !connected
+    ? "切断中のため送信できません"
+    : courtUnset
+      ? "コートが未設定のためシーケンスを開始できません (試合準備でコートを選んでください)"
+      : null;
 
   const kind = state ? sequenceKind(state) : null;
 
@@ -75,7 +81,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     ? "切断中のため操作できません"
     : eStopActive
       ? "緊急停止中は手動操縦できません"
-      : null;
+      : courtUnset
+        ? "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)"
+        : null;
 
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
   const requestStart = () => {
@@ -118,23 +126,34 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     />
   );
 
+  // パッドの弁は SuctionPadPanel が持つので、同じ 6 個が手動操縦にも並ばないよう外す。
+  // パネルが出ない配信（MALFORMED / null）では外さない —— 操作口ごと消えてはならない
+  const suctionPadAxes =
+    state.suction === undefined || state.suction === null || state.suction === MALFORMED
+      ? undefined
+      : state.suction.pads.map((pad) => pad.axis);
+
   const manualPanel = (
     <ManualPanel
       robotKey={robotKey}
       manual={manual}
       blockedReason={manualBlockedReason}
       sendOrReport={sendOrReport}
+      excludeAxes={suctionPadAxes}
     />
   );
 
-  // どちらのモードでも出す。選択は機体を動かさず、次の吸着ステップから効くだけなので
-  // 塞ぐ理由は切断だけ
+  // どちらのモードでも出す。半自動では次の吸着で使う弁の宣言（機体を動かさない）、
+  // 手動ではその場の開閉
   const suctionPanel =
     state.suction === undefined || state.suction === null ? null : (
       <SuctionPadPanel
         robotKey={robotKey}
         suction={state.suction}
-        blockedReason={connected ? null : "切断中のため変更できません"}
+        manual={manual}
+        blockedReason={
+          inManual ? manualBlockedReason : connected ? null : "切断中のため変更できません"
+        }
         sendOrReport={sendOrReport}
       />
     );
