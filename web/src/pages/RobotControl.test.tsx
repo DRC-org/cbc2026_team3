@@ -792,6 +792,25 @@ describe("吸着パッドの面", () => {
     expect(screen.getByRole("group", { name: GROUP_NAME[mode] })).toBeInTheDocument();
   });
 
+  it.each<[MatchPhase, ManualState["mode"]]>([
+    ["setup", "sequence"],
+    ["setup", "manual"],
+    ["match", "sequence"],
+    ["match", "manual"],
+  ])("%s の %s モードでも機体状態と同じ列の直上に置く", (phase, mode) => {
+    mount(phase, robotState({ suction: SUCTION, manual: { mode, axes: VALVE_AXES } }));
+
+    const column = screen
+      .getByRole("group", { name: GROUP_NAME[mode] })
+      .closest("section")?.parentElement;
+    expect(column).not.toBeNull();
+
+    const panels = Array.from(column?.children ?? []);
+    const suctionIndex = panels.findIndex((el) => el.textContent?.includes("吸着パッド"));
+    const statusIndex = panels.findIndex((el) => el.textContent?.includes("機体状態"));
+    expect(statusIndex).toBe(suctionIndex + 1);
+  });
+
   it("吸着パッドを持たないロボットには出さない", () => {
     mount("match", robotState({ suction: null }));
 
@@ -801,7 +820,7 @@ describe("吸着パッドの面", () => {
   it("選択は自分の担当機へ宛てて送る", async () => {
     const { context } = mount("match", robotState({ suction: SUCTION }));
 
-    await userEvent.click(screen.getByRole("button", { name: "パッド 2 を使わない" }));
+    await userEvent.click(screen.getByRole("button", { name: "パッド 1 を使う" }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "suction_pads_set", robot: "sub_hand", pads: ["valve_1"] },

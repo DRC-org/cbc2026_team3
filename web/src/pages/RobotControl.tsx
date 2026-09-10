@@ -137,7 +137,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   // どちらのモードでも出す。半自動では次の吸着で使う弁の宣言（機体を動かさない）、
-  // 手動ではその場の開閉
+  // 手動ではその場の開閉。置くのは機体状態と同じ列 —— 左は機体を動かす面だけに寄せる
   const suctionPanel =
     state.suction === undefined || state.suction === null ? null : (
       <SuctionPadPanel
@@ -188,15 +188,22 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   if (setupPhase) {
     const openSubsystemPanel = subsystemPanel(true, "min-h-0 flex-1");
+    const statusColumn = (
+      <div className="flex min-h-0 flex-col gap-2">
+        {suctionPanel}
+        {openSubsystemPanel}
+      </div>
+    );
     return (
       <Page className="flex flex-col">
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
-          <div className="flex min-h-0 flex-col gap-2">
-            {suctionPanel}
-            {inManual ? manualPanel : openSubsystemPanel}
-          </div>
-          {inManual ? openSubsystemPanel : stepPanel}
+          {inManual ? (
+            <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
+          ) : (
+            statusColumn
+          )}
+          {inManual ? statusColumn : stepPanel}
         </div>
       </Page>
     );
@@ -207,10 +214,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       {modeSwitch}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
         {inManual ? (
-          <div className="flex min-h-0 flex-col gap-2">
-            {suctionPanel}
-            {manualPanel}
-          </div>
+          <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
         ) : (
           <div className="flex min-h-0 flex-col gap-2">
             <ActionPanel
@@ -230,14 +234,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               sendOrReport={sendOrReport}
             />
 
-            {suctionPanel}
-
             {stepPanel}
           </div>
         )}
 
         <div className="flex min-h-0 flex-col gap-2">
           <MatchTimer timer={matchState.timer} />
+
+          {suctionPanel}
 
           {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : undefined)}
         </div>
