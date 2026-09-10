@@ -27,6 +27,7 @@ from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import (
     direct_runner,
+    keep_feedback_fresh,
     mark_feedback_at,
     mock_bus,
     mock_can_manager,
@@ -495,6 +496,7 @@ class TestUnenergizedMotorsAreVisible:
         fx = _build_fixture()
         app = fx.create_app()
         fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["m1"])
+        keep_feedback_fresh(fx.can_manager("main_hand"))
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -514,15 +516,16 @@ class TestUnenergizedMotorsAreVisible:
         fx = _build_fixture()
         app = fx.create_app()
         fx.can_manager("main_hand").activate_motors = AsyncMock(return_value=["m1"])
+        keep_feedback_fresh(fx.can_manager("main_hand"))
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
             await _enter_e_stop(fx, ws)
 
             await ws.send_json({"type": "e_stop_release"})
-            await wait_until(
+            assert await wait_until(
                 lambda: fx.state_message("main_hand")["safety"]["unenergized_motors"] == ["m1"]
-            )
+            ), "停止で消えることを見る前に、まず載っていることを確かめる"
             await fx.activate_e_stop(reason="再度停止")
 
             assert fx.state_message("main_hand")["safety"]["unenergized_motors"] == []
@@ -544,6 +547,7 @@ class TestUnenergizedMotorsAreVisible:
             fx.can_manager("main_hand"),
             {"energized": energized, "dropped": dropped, "unknown": unknown},
         )
+        keep_feedback_fresh(fx.can_manager("main_hand"))
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")

@@ -131,14 +131,15 @@ CAN フレーム
 | `_load_pid_config` / `_build_position_pid` / `_build_position_loops` | `motors[name].pid` を読んで `_DEFAULT_PID` で補完し出力レンジを絞り、M3508 が居る**バスごとに 1 つ** `M3508PositionLoop` を生成 |
 | `_build_sync_groups` / `_attach_sync_groups` | `PositionTable.paired_axes()` → `SyncGroup`。全メンバが同一ループに載るものだけループへ登録 |
 | `_attach_motion_profiles` | `axes.<軸>.motion` を持つ軸へ台形プロファイルを後付けする |
-| `_wire_robot_motors` | `build_motor_group()` → `Sequence.bind_motors()` |
+| `_wire_robot_motors` | `build_motor_group()` → `MotorGroup.bind_axis_state()` → `Sequence.bind_motors()` |
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
 | `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバのローカル原点 / ドライバの `SET_ZERO`）を解決。**どれを使うかはドライバに聞く**（`has_local_origin()`。`isinstance` で分けない） |
 | `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
 | `_make_sensor_reader` / `_make_sensor_contact_reader` | 可動端インターロックと零点確定が共有するセンサの読み口。前者は三値の現在値（`None` = 読めていない）、後者は接触（OFF→ON）の累計（`None` = カウンタを提供しないドライバ） |
+| `_make_axis_state_reader` | 軸間干渉の判定が読む「他の軸は今どこか」（`build_axis_state_reader` に鮮度を合成するだけ）。**配線先は `_wire_robot_motors` と `_wire_motor_check_sequence` の 2 つの `MotorGroup`** で、片方を忘れるとその経路だけが全軸拒否になる（`tests/test_main_wiring.py` が両方を固定）。読めないものは `None`（位置定数に無い／位置指令でない／束に居ない／位置を測れないドライバ／鮮度切れ） |
 | `_make_limit_interventions` | `LimitMonitor` が止めた回数を `Sequence.bind_limit_interventions` へ渡す（保護に曲げられた `move_to` を失敗させる） |
 | `_build_manual_controller` | シーケンスと**同じ** `MotorGroup` を共有する `ManualController` |
-| `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す |
+| `_wire_motor_check_sequence` | 両ハンドの `MotorHandle` と `PositionTable.merged` を統合動作確認へ渡す（**この束にも `bind_axis_state()` が要る**。ロボットごとの束とは別物なので配線は引き継がれない） |
 | `_read_operstate` | `/sys/class/net/<ch>/operstate` を読み、down なら起動ログへ ERROR 1 行（起動は止めない） |
 
 生成した部品は `server.add_robot(robot_name, seq, can_manager, position_loops=…,
@@ -306,7 +307,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。覆う口は**現在値と接触の累計の 2 つ**で、`wrap()` が現在値を `False`（押されていない）へ、`wrap_count()` が累計を**覆う前に最後に読めた値**で凍らせる（`LimitMonitor` は両方を読むので、片方だけでは覆いに穴が残る） |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。覆う口は**現在値と接触の累計の 2 つ**で、`wrap()` が現在値を `False`（押されていない）へ、`wrap_count()` が累計を**覆う前に最後に読めた値**で凍らせる（`LimitMonitor` は両方を読むので、片方だけでは覆いに穴が残る）。**軸間干渉の判定 `check_interference()` / `check_not_with()`** も持つ（`RequiredRange` = 解決済みの区間 / `AxisReading` = 実測と目標を 1 組で運ぶ）。前者は `check_command()` から呼ばれて 3 経路すべてに掛かり、**後者は `Sequence.move_to` だけが呼ぶ**（手動は 1 指令 1 軸なので同じ指令に 2 軸入る経路が無い）。**`LimitMonitor` は `check_limit()` しか呼ばない**（干渉を周期監視しない理由は `invariants.md` §4） |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
@@ -993,6 +994,10 @@ axes:                      # 換算: command = value * scale + offset
       limits:              # 1 本なら文字列、同じ端に複数本あるなら並びで書く
         minus: [y_axis_r_origin_sensor, y_axis_l_origin_sensor]
       # max_step / stall_torque は実測が入るまで書かない
+      requires:            # 他の軸がこの区間に居るあいだしか動かさない（軸間干渉）
+        - { axis: lift, at: top }                  # 1 点
+        - { axis: carriage, between: [back, clear] }   # 2 点で挟む
+      not_with: [offset]   # 同じ指令で一緒に動かしてはならない軸。**片側だけ書く**
     motors:                # scale / offset はモータごとに書く
       y_axis_r: { scale: 864.15, offset: 0.0 }
       y_axis_l: { scale: -864.15, offset: 0.0 }   # 逆回転は scale の符号で表す
@@ -1028,7 +1033,33 @@ interlocks:                # 軸どうしの干渉（§4）。位置名で書き
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
 | `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
+| `guard.requires` に生の数値／未知の軸・位置名 | 同じ座標が 2 箇所に書かれて片方だけ古くなる／条件が解決できない |
+| `guard.requires` の参照先が `position` 以外／`tolerance` を持たない | 「今どこに居るか」を答えられない軸／区間を到達許容差ぶん広げられず、到達した実測が区間の外になる |
+| `guard.requires` の参照先の位置がコート別に分岐している | mm の座標系が片方のコートだけ別物になる（コートで変わってよいのは軸の `scale` の符号だけ） |
+| `guard.requires` の参照が循環している | どちらを先に動かしても相手に拒否される姿勢が作れ、抜ける手が無くなる |
+| `guard.not_with` が自分自身／`position` 以外の軸／両側に書かれている | 自分と一緒には動かせない軸／`guard` を書けない軸／片側を消したとき守りが半分だけ残る |
+| 零点確定する軸の `guard.requires` の `at:` 参照先に `homing` が無い | 原点が確定していない軸へ位置名で寄せることになり、どこへ動くか分からない |
 | `interlocks` に無い軸名・位置名、`tolerance` の無い軸、位置指令でない軸 | 綴り違いは「その姿勢では止まらない」としてしか現れず、機構を壊すまで出ない |
+
+`guard.requires` は**位置名でしか書けず、数値の区間への解決は読み込み時**に済ませる
+（`lib/sequence/positions.py`。`MotionGuard` は位置表もコートも見ない）。区間は**参照先の
+`tolerance` ぶん広げる** —— 広げないと、その位置へ到達許容差の内側で止まった実測が区間の
+外になり、次の段が会場でだけ拒否される。`not_with` は**片側に書けば読み込み時に対称化される**
+（両側に書かせると、片方を消したとき守りが半分だけ残る）。同じ軸を `at:` で参照する宣言が
+**別々の位置**を要求していたら起動を拒否する —— 零点確定の前に寄せる先（`homing_prerequisites()`）が
+1 つに決まらず、選ぶ側が黙って後勝ちで片方を落とすため。
+
+`PositionTable.homing_prerequisites()` は `requires` の `at:`（1 点）から「零点確定の前に寄せて
+おく軸 → 位置名」を導く（`between:` は寄せ先が一意に決まらないので順序にだけ効かせる）。
+**参照先が `homing:` を持たない宣言は起動を拒否する** —— 原点が確定していない軸へ位置名で寄せる
+ことになるため。`lib/sequence/homing.py` の `homing_order()` は同じ宣言から**参照先を先に回す並び**を
+作り、`run_homing()` が必ず通す。
+
+`run_homing()` に**寄せる口（`move_to`）を渡した経路だけ**が「①参照される軸を確定 → ②その軸を
+寄せる → ③残りを確定」の 3 段で回る。渡すのは統合動作確認（`sequences/motor_check.py`）と零点合わせ
+パネル（`HomingSource.move_to`。`main.py` が動作確認と同じ `Sequence.move_to` を配る）で、作動点測定は
+渡さない。**寄せるのは今回選ばれた軸だけ**で、①で確定できなかった軸は寄せない。使い分けと理由は
+`invariants.md` §4。
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
 いれば警告・エラーログを出して空の定数表を bind し、シーケンスが値を引いた時点で
@@ -1215,7 +1246,7 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 
 {
   "type": "match_state",
-  "court": "red",
+  "court": null,                       // 未確定。選ぶと "red" / "blue"。MALFORMED ではない
   "phase": "setup",
   "can_start_match": false,
   "checklists": {
@@ -1308,7 +1339,7 @@ DC 基板 = 1 つも測れない）。変動値は `$placeholders`（`epoch_seco
 
 | 軸 | 値 | 範囲 | 意味 |
 |---|---|---|---|
-| `court` | `red` / `blue` | 全体で 1 つ | 自陣コート。赤青で配置が左右反転する |
+| `court` | `red` / `blue` / **未確定 (`null`)** | 全体で 1 つ | 自陣コート。赤青で配置が左右反転する。起動時とリセット後は未確定 |
 | `phase` | `setup` → `ready` → `match` → `finished` | 全体で 1 つ | セッティングタイムと試合中を分離 |
 | `mode` | `sequence` / `manual` | **ロボットごと** | 制御権を誰が握っているか |
 
@@ -1325,10 +1356,11 @@ setup ⇄ ready → match → finished → setup
 ```
 
 ゲート対象ロールは **`pre_match` 1 つだけ**（= `ALL_ROLES`）。`court` を変更すると
-チェックリストは**全リセット**され `setup` に戻る。`match_reset` はコートを維持したまま
-チェックリストのみリセットし、全ロボットを `sequence` へ戻す。未知のコート値は理由付きで
-拒否する（`command_rejected` に有効値を添える）。**試合を開始できるかを決めるのはサーバーの
-`can_start_match` だけ。**
+チェックリストは**全リセット**され `setup` に戻る（未確定→赤も「変更」なので同じく外れる）。
+`match_reset` は**コートを未確定へ戻し**、チェックリストもリセットして全ロボットを
+`sequence` へ戻す。未知のコート値は理由付きで拒否する（`command_rejected` に有効値を添える）。
+**試合を開始できるかを決めるのはサーバーの `can_start_match` だけ** —— 指差喚呼の完了に加えて
+**コートが確定していること**もそこに載っており、未確定のあいだフェーズは `setup` に留まる。
 
 フェーズ集合は `PHASES_ANY`（全フェーズ = 素通りさせるという宣言）/ `PHASES_OUTSIDE_MATCH`
 （`setup` / `ready` / `finished`）/ `PHASES_PREPARATION`（`setup` / `ready`）/
@@ -1343,7 +1375,8 @@ setup ⇄ ready → match → finished → setup
 「全フェーズ許可なのに拒否理由が書いてある」といった矛盾を import 時に弾く。
 
 `lib/server.py` は語彙を持たない。`handle_command` は `spec_for(type)` で仕様を引き、
-3 段のゲート（開発用 → フェーズ → 緊急停止）を掛け、`spec.handler` の名前で `_cmd_*` を呼ぶ。
+6 段のゲート（開発用 → フェーズ → 緊急停止 → 手動操縦 → 再励磁 → コート未確定）を掛け、
+`spec.handler` の名前で `_cmd_*` を呼ぶ。
 **語彙に無いコマンドは拒否理由も返さず黙って捨てる。**
 
 #### フェーズによるコマンドゲート
@@ -1360,6 +1393,18 @@ setup ⇄ ready → match → finished → setup
 | `motor_check_abort` / `health_check` / `reenergize_motors` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
 | `suction_pads_set` | ✓ | ✓ | ✓ | ✓ | `PHASES_ANY` |
+
+#### コート未確定によるコマンドゲート
+
+`blocked_without_court` を立てたコマンドは、コートが決まるまで**そのロボットが
+コート依存軸を持つときだけ**拒否される（`sequence_start` / `sequence_jump` / `trigger` /
+`manual_move` / `manual_set` / `manual_jog` / `homing_start` / `switch_measure_start` /
+`motor_check_start`）。要否の正は `PositionTable.court_dependent_axes()`（`scale` が
+コート別の軸）だけが持ち、サーバーにも UI にも軸名を書き写さない。
+
+`motor_check_start` は `robot` を取らず両ハンドを走らせるので、**コート別の位置の値**を
+持つ軸（`PositionTable.court_dependent_position_axes()`。メインハンドの `conveyor.run`）も
+見て、1 台でも要るなら拒否する。理由は `docs/invariants.md` §6。
 
 最後の 4 行は「書き忘れ」ではなく**無ゲートであることの宣言**である。
 
@@ -1572,7 +1617,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 |---|---|
 | `_e_stop_active` がプロセスメモリ上のみ | サーバーを再起動すると緊急停止状態が消える。物理的な緊急停止ボタンの状態と同期する仕組みも無い |
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は `activate_motors()` を呼ぶが `encode_disable(clear_fault=True)` は送らない（fault の自動クリアは原因を隠すため意図的に行っていない）。実機で「解除しても動かない」場合は `health` の `FAULT` 表示で fault の内容を確認して電源再投入 |
-| フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らず WARNING をログに出すだけ。有効化を見送ったモータを UI に出す仕組みが欲しい |
+| フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らない。名前は `state.safety.unresponsive_motors` として UI へ出るが（`unenergized_motors` とは別欄。手当てが電源・配線で、再励磁では直らないため）、**PC 側から復旧させる手段は無い** |
 | ホーミングの実機検証は軸ごとに進捗が違う | `search_distance` はどの軸でもまだ効く経路を通っていない（当たる前に上限へ届いた実行が無い）。`y_axis` は 2026-09-09 に初めて走って 3 回中 1 回だけ通り、`align_step` を上げた後の実行がまだ無い。**軸ごとの現況は [`checks_and_health.md`](checks_and_health.md) の「零点確定（ホーミング）」節が正** |
 | down したバスでも起動できてしまう | 起動ログへ 1 行 ERROR を残すが起動は拒否しない（`--strict` を通していない構成を一律に潰さない判断）。受信ループは `rx_down` を立てて `BusHealth.DOWN` を出す |
 | `config/bench/main_hand/checklist.yaml` が `can_generic` 側の確認項目を持たない | この構成では本番の `gripper` / `conveyor` / `wall_*` / `rotate_origin_sensor` が構成に入るが、`conveyor_run` / `origin_sensor_react` に相当する項目が無い。`bench_return_home` の文言も `y_axis` の実態とねじれている |

@@ -116,14 +116,14 @@ class MatchState:
         self,
         definitions: dict[str, list[ChecklistItem]] | None = None,
         *,
-        court: Court = Court.RED,
+        court: Court | None = None,
         settings: MatchSettings = DEFAULT_MATCH,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._definitions: dict[str, list[ChecklistItem]] = definitions or {
             role: [] for role in ALL_ROLES
         }
-        self._court = court
+        self._court: Court | None = court
         self._settings = settings
         self._clock = clock
         self._started_at: float | None = None
@@ -133,7 +133,12 @@ class MatchState:
         self._rebuild_checklists()
 
     @property
-    def court(self) -> Court:
+    def court(self) -> Court | None:
+        """操縦者が選んだコート。**選ぶまでは `None` (未確定)。**
+
+        既定を赤にすると、青コートで選び忘れたことが画面にもログにも現れない
+        まま `sub_lift` の `scale` が符号ごと反転して昇降が逆へ走る。
+        """
         return self._court
 
     @property
@@ -142,7 +147,14 @@ class MatchState:
 
     @property
     def can_start_match(self) -> bool:
-        return all(state.completed for state in self.checklists.values())
+        """試合を開始できるか。**開始可否の単一情報源で、判定を外に増やさない。**
+
+        コート未確定をここへ載せると `_sync_phase` が拾って SETUP に留まるので、
+        開始ゲートは自動的に閉じる。
+        """
+        return self._court is not None and all(
+            state.completed for state in self.checklists.values()
+        )
 
     def allows(self, phases: frozenset[Phase]) -> bool:
         return self._phase in phases
@@ -223,6 +235,9 @@ class MatchState:
         return True
 
     def match_reset(self) -> bool:
+        # 試合ごとに必ず選び直させる。前の試合のコートが残ると、次の試合で
+        # 選び忘れたことが指差喚呼にも画面にも現れない
+        self._court = None
         self._reset_all_checklists()
         self._phase = Phase.SETUP
         self._started_at = None
@@ -255,7 +270,7 @@ class MatchState:
     def to_dict(self) -> dict:
         return {
             "type": "match_state",
-            "court": self._court.value,
+            "court": None if self._court is None else self._court.value,
             "phase": self._phase.value,
             "can_start_match": self.can_start_match,
             "timer": {

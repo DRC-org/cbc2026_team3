@@ -11,7 +11,11 @@ from lib.drivers.base import ControlMode
 from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import Court
 from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
-from lib.sequence.positions import PositionLookupError, load_position_table
+from lib.sequence.positions import (
+    CourtUnresolvedError,
+    PositionLookupError,
+    load_position_table,
+)
 from tests.fake_drivers import StubFeedbackDriver
 
 
@@ -295,8 +299,17 @@ class TestAxesInfo:
             {"name": "closed", "value": 0.0},
         ]
 
+    def test_コート未確定ならコート別の位置は値を出さない(self) -> None:
+        # 「引けなかった」を片方のコートの値で埋めると、選び忘れが画面から読めない
+        manual, _, _ = _build()
+        assert self._by_name(manual)["y_axis"]["positions"][2] == {
+            "name": "place",
+            "value": None,
+        }
+
     def test_コート別の位置は現在のコートの値で載る(self) -> None:
         manual, _, _ = _build()
+        manual.set_court(Court.RED)
         assert self._by_name(manual)["y_axis"]["positions"][2] == {
             "name": "place",
             "value": 3.0,
@@ -391,6 +404,30 @@ class TestCourtScale:
         driver = _EchoDriver("lift")
         group.add(MotorHandle("lift", driver, mgr))
         return ManualController(group, table, court=court), driver
+
+    def _unresolved(self) -> tuple[ManualController, _EchoDriver]:
+        table = load_position_table(_COURT_CONFIG, source="<test>")
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup()
+        driver = _EchoDriver("lift")
+        group.add(MotorHandle("lift", driver, mgr))
+        return ManualController(group, table), driver
+
+    @pytest.mark.parametrize("send", ["set_value", "move_to_position", "jog"])
+    async def test_コート未確定では指令を1通も出さない(self, send: str) -> None:
+        """コマンドゲートの内側にある 2 枚目。**サーバーのゲートを外しても止まる。**"""
+        ctrl, driver = self._unresolved()
+
+        with pytest.raises(CourtUnresolvedError):
+            if send == "move_to_position":
+                await ctrl.move_to_position("lift", "home")
+            elif send == "jog":
+                await ctrl.jog("lift", -1.0)
+            else:
+                await ctrl.set_value("lift", -10.0)
+
+        assert driver.commands == []
 
     async def test_set_value_uses_court_sign(self) -> None:
         red, red_driver = self._build(Court.RED)

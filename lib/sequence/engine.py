@@ -85,6 +85,22 @@ LimitInterventions = Callable[[str], LimitIntervention]
 NO_LIMIT_INTERVENTION = LimitIntervention(count=0)
 
 
+@dataclass(frozen=True)
+class _PlannedMove:
+    """1 軸ぶんの「これから出す 1 通」。**検査と送信で同じ 1 組を使う。**
+
+    検査のときと送信のときで別々に位置名から引き直すと、そのあいだにコートが
+    変わった場合に**検査した値と送った値が別物**になる。
+    """
+
+    handle: AxisHandle
+    position_name: str
+    wait_s: float | None
+    commands: dict[str, float]
+    #: 軸の unit へ直した目標。同じ指令に入る他の軸の条件を評価するのに使う
+    value: float
+
+
 def step(
     label: str,
     *,
@@ -130,7 +146,7 @@ class Sequence:
         self._resume_event: asyncio.Event = asyncio.Event()
         self._jump_request: int | None = None
         self._last_error: StepFailure | None = None
-        self._court: Court = Court.RED
+        self._court: Court | None = None
         self._motors: MotorGroup | None = None
         self._positions: PositionTable | None = None
         self._available_axes: frozenset[str] | None = None
@@ -210,8 +226,15 @@ class Sequence:
         *,
         timeout: float | None = None,
     ) -> None:
+        """位置名で指定した軸を同時に動かし、全軸が着くまで待つ。
+
+        **歯止めに掛かったときの `GuardViolation` は失敗であって拒否ではない。**
+        手動操縦は「その 1 指令を出さない」で済むので拒否として返す
+        (`RobotServer._run_manual`) が、シーケンスはその姿勢を前提に次の段が
+        組まれているので、飛ばして続行はできない。ここでは握り潰さず、
+        ステップの失敗として上へ抜けさせる。
+        """
         table = self.positions
-        pending: list[tuple[AxisHandle, str, float | None]] = []
         # 出荷のシーケンスは並びで干渉を避けているので発火しないはず。
         # 段を書き換えた人が気付くための歯止め
         AxisInterlock(table).check(
@@ -223,23 +246,41 @@ class Sequence:
         # 軸が途中に居るままシーケンスだけが先へ進む
         before = {axis: self._limit_intervention(axis) for axis in targets}
 
+        pending: list[_PlannedMove] = []
         for axis, position_name in targets.items():
             spec = table.axis(axis).for_court(self.court)
             handle = AxisHandle(
                 spec,
                 [getattr(self.motors, name) for name in spec.motor_names],
                 sensor_active=self.motors.sensor_active,
+                axis_state=self.motors.axis_state,
             )
-            await handle.set_target_value(
-                table.commands(axis, position_name, court=self.court),
+            commands = table.commands(axis, position_name, court=self.court)
+            pending.append(
+                _PlannedMove(
+                    handle=handle,
+                    position_name=position_name,
+                    wait_s=spec.timeout_s if timeout is None else timeout,
+                    commands=commands,
+                    value=spec.to_value(commands),
+                )
             )
-            pending.append((handle, position_name, spec.timeout_s if timeout is None else timeout))
+
+        # **全軸を検査してから 1 通目を出す。** 軸ごとに「検査 → 送信」を回すと、
+        # 2 軸目が拒否された時点で 1 軸目は既に走っており、ピッチとオフセットでは
+        # それが一番危ない半端な姿勢になる。同じ指令に入る軸の目標は、この指令が
+        # 書き終わった後の値で評価する (`pending_targets`)
+        planned = {move.handle.name: move.value for move in pending}
+        siblings = frozenset(planned)
+        for move in pending:
+            move.handle.check_not_with(siblings)
+            move.handle.check_target_value(move.commands, pending_targets=planned)
+
+        for move in pending:
+            await move.handle.set_target_value(move.commands, pending_targets=planned)
 
         results = await asyncio.gather(
-            *(
-                handle.wait_reached(timeout=wait_s, expect_target=True)
-                for handle, _, wait_s in pending
-            )
+            *(move.handle.wait_reached(timeout=move.wait_s, expect_target=True) for move in pending)
         )
         # 終了時の状態ではなく回数で見る。接点がバウンドして触れて離れると、軸は
         # 触れた位置で止まったままなのに状態だけが戻る
@@ -249,8 +290,8 @@ class Sequence:
             if (now := self._limit_intervention(axis)).count != previous.count
         ]
         failed = [
-            f"{handle.name}->{position_name}"
-            for (handle, position_name, _), reached in zip(pending, results, strict=True)
+            f"{move.handle.name}->{move.position_name}"
+            for move, reached in zip(pending, results, strict=True)
             if not reached
         ]
         # 片方で `raise` すると、両方起きた移動では先に見たほうしか残らない。切り分けは
@@ -266,22 +307,27 @@ class Sequence:
             raise error(f"シーケンス '{self.name}': {' / '.join(reasons)}")
 
         desynced = []
-        for handle, _, _ in pending:
-            error = handle.sync_violation()
+        for move in pending:
+            error = move.handle.sync_violation()
             if error is None:
                 continue
-            allowed = table.sync_tolerance(handle.name) or 0.0
-            desynced.append(f"{handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
+            allowed = table.sync_tolerance(move.handle.name) or 0.0
+            desynced.append(f"{move.handle.name}: 偏差 {error:.3f} > 許容 {allowed:.3f}")
         if desynced:
             raise AxisSyncError(
                 f"シーケンス '{self.name}': 軸内のモータ位置がずれています ({', '.join(desynced)})"
             )
 
     @property
-    def court(self) -> Court:
+    def court(self) -> Court | None:
+        """解決に使うコート。**選ばれるまでは `None`。**
+
+        既定を赤にすると、青コートで選び忘れたことがどこにも現れないまま
+        コート依存軸だけが鏡に走る。
+        """
         return self._court
 
-    def set_court(self, court: Court) -> None:
+    def set_court(self, court: Court | None) -> None:
         self._court = court
 
     @property

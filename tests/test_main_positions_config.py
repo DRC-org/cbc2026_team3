@@ -273,11 +273,14 @@ class TestShippedMainHandGuard:
             assert spec.guard.stall_torque is None, axis
 
 
-class TestShippedMainHandVias:
-    """n 列目ワークへ寄せる経由点 (`*_via_*`) が両軸で対になり、可動範囲に収まっていること。
+class TestShippedMainHandRetreats:
+    """コンベアへ寄せる退避点 (`*_after_*`) が両軸で対になり、可動範囲に収まっていること。
 
     値はどれも実機で干渉を見ながら詰める仮値である。**始点から終点へ単調に進むことは
     検査しない** —— 干渉を避けるために途中で一旦戻す経路を取る余地を残すため。
+
+    `after_place` は `rotate` だけが持つ 1 点なので対の検査の対象外である
+    (`_retreat_names` が見るのは軸をまたいで対になる `*_after_<n>` だけ)。
     """
 
     @pytest.fixture
@@ -291,29 +294,29 @@ class TestShippedMainHandVias:
         return load_position_table(yaml.safe_load(path.read_text()), source=str(path))
 
     @staticmethod
-    def _via_names(table, axis: str) -> set[str]:
-        return {name for name in table.names(axis) if "_via_" in name}
+    def _retreat_names(table, axis: str) -> set[str]:
+        return {name for name in table.names(axis) if "_after_" in name}
 
-    def test_経由点は両軸で同じ名前が揃っている(self, table) -> None:
+    def test_退避点は両軸で同じ名前が揃っている(self, table) -> None:
         """シーケンスは同じ位置名を `y_axis` と `rotate` の両方へ引く。
 
         片方にしか無い名前は、実行時に `PositionLookupError` が出るまで分からない。
         """
-        y_axis_vias = self._via_names(table, "y_axis")
-        rotate_vias = self._via_names(table, "rotate")
+        y_axis_retreats = self._retreat_names(table, "y_axis")
+        rotate_retreats = self._retreat_names(table, "rotate")
 
-        assert y_axis_vias, "y_axis に経由点が 1 つも無い"
-        assert y_axis_vias == rotate_vias, (
-            f"経由点の対が崩れている: y_axis のみ={sorted(y_axis_vias - rotate_vias)}, "
-            f"rotate のみ={sorted(rotate_vias - y_axis_vias)}"
+        assert y_axis_retreats, "y_axis に退避点が 1 つも無い"
+        assert y_axis_retreats == rotate_retreats, (
+            f"退避点の対が崩れている: y_axis のみ={sorted(y_axis_retreats - rotate_retreats)}, "
+            f"rotate のみ={sorted(rotate_retreats - y_axis_retreats)}"
         )
 
     @pytest.mark.parametrize("axis", ["y_axis", "rotate"])
-    def test_経由点は手動操縦の可動範囲に収まっている(self, table, axis: str) -> None:
+    def test_退避点は手動操縦の可動範囲に収まっている(self, table, axis: str) -> None:
         """範囲の判定は loader が持つ (`positions` 全件を `axes.<軸>.manual` と突き合わせる)。
 
         しきい値をここへ写すと対を機械的に守れなくなるので、同梱ファイルをその
         検証へ通すこと自体が検査であり、ここでは空振りでないことだけを確かめる。
         """
         assert table.axis(axis).manual is not None, f"{axis} に manual が無く範囲検証が効かない"
-        assert self._via_names(table, axis), f"{axis} に経由点が 1 つも無い"
+        assert self._retreat_names(table, axis), f"{axis} に退避点が 1 つも無い"

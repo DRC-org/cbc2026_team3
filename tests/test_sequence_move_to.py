@@ -12,6 +12,7 @@ import pytest
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
+from lib.motion_guard import GuardViolation
 from lib.sequence.engine import (
     NO_LIMIT_INTERVENTION,
     AxisSyncError,
@@ -21,7 +22,13 @@ from lib.sequence.engine import (
     SequenceTimeoutError,
     step,
 )
-from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, WaitInterruptedError
+from lib.sequence.motors import (
+    AxisHandle,
+    MotorGroup,
+    MotorHandle,
+    WaitInterruptedError,
+    build_axis_state_reader,
+)
 from lib.sequence.positions import load_position_table
 from tests.fake_drivers import StubFeedbackDriver
 
@@ -260,8 +267,10 @@ class TestMoveToInterruptedByEStop:
 
         original = AxisHandle.set_target_value
 
-        async def _clear_right_after_commanding(self: AxisHandle, values: object) -> None:
-            await original(self, values)  # type: ignore[arg-type]
+        async def _clear_right_after_commanding(
+            self: AxisHandle, values: object, **kwargs: object
+        ) -> None:
+            await original(self, values, **kwargs)  # type: ignore[arg-type]
             for handle in group.handles:
                 handle.clear_target()
 
@@ -640,3 +649,90 @@ class TestFailureReasonsAreCombined:
             await seq.move_to({"lift_motor": "work"})
 
         assert "可動端保護" not in str(caught.value)
+
+
+_GUARDED_CONFIG = {
+    "axes": {
+        "lift": {"unit": "mm", "command_unit": "deg", "scale": 1.0, "tolerance": 1.0},
+        "slide": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "scale": 1.0,
+            "tolerance": 1.0,
+            "guard": {"requires": [{"axis": "lift", "at": "top"}]},
+        },
+        "pitch": {
+            "unit": "deg",
+            "command_unit": "deg",
+            "tolerance": 1.0,
+            "guard": {"not_with": ["offset"]},
+        },
+        "offset": {"unit": "deg", "command_unit": "deg", "tolerance": 1.0},
+    },
+    "positions": {
+        "lift": {"top": -10.0, "bottom": 0.0},
+        "slide": {"back": -5.0, "front": 0.0},
+        "pitch": {"open": 0.0, "close": 90.0},
+        "offset": {"open": 0.0, "close": 90.0},
+    },
+}
+
+
+def _guarded_sequence() -> tuple[Sequence, MotorGroup, dict[str, _EchoDriver]]:
+    table = load_position_table(_GUARDED_CONFIG, source="<test>")
+    group, drivers = _make_group("lift", "slide", "pitch", "offset")
+    group.bind_axis_state(
+        build_axis_state_reader(table, group, court=lambda: Court.RED, is_stale=lambda _name: False)
+    )
+    seq = Sequence("guarded")
+    seq.bind_motors(group)
+    seq.bind_positions(table)
+    return seq, group, drivers
+
+
+class TestMoveToChecksEveryAxisBeforeSending:
+    """**全軸を検査してから 1 通目を出す。**
+
+    軸ごとに「検査 → 送信」を回すと、2 軸目が拒否された時点で 1 軸目は既に
+    走っている。ピッチとオフセットではそれが一番危ない半端な姿勢になる。
+    """
+
+    async def test_1_軸が拒否されたらもう_1_軸にも_1_通も出ない(self) -> None:
+        seq, _, drivers = _guarded_sequence()
+
+        # 拒否される軸をあとに置く。先に置くと「たまたま順番で守られた」だけになる
+        with pytest.raises(GuardViolation, match="lift"):
+            await seq.move_to({"offset": "close", "slide": "back"})
+
+        assert drivers["offset"].commands == []
+        assert drivers["slide"].commands == []
+
+    async def test_not_with_の対は同じ指令で拒否される(self) -> None:
+        seq, _, drivers = _guarded_sequence()
+
+        with pytest.raises(GuardViolation, match="同じ指令では動かせません"):
+            await seq.move_to({"pitch": "close", "offset": "close"})
+
+        assert drivers["pitch"].commands == []
+        assert drivers["offset"].commands == []
+
+    async def test_別々の指令なら順に通る(self) -> None:
+        seq, _, drivers = _guarded_sequence()
+
+        await seq.move_to({"pitch": "close"})
+        await seq.move_to({"offset": "close"})
+
+        assert drivers["pitch"].commands == [(ControlMode.POSITION, 90.0)]
+        assert drivers["offset"].commands == [(ControlMode.POSITION, 90.0)]
+
+    async def test_同じ指令に入る軸は書き終わった後の目標で評価する(self) -> None:
+        """`lift` は既に top に居るが、目標には古い bottom が残っている状態。"""
+        seq, group, drivers = _guarded_sequence()
+        await seq.move_to({"lift": "bottom"})
+        drivers["lift"].set_observed(position=-10.0)
+        drivers["lift"].commands.clear()
+
+        await seq.move_to({"lift": "top", "slide": "back"})
+
+        assert drivers["slide"].commands == [(ControlMode.POSITION, -5.0)]
+        assert group["lift"].target == -10.0

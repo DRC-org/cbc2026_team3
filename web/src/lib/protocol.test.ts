@@ -86,6 +86,7 @@ describe("parseServerMessage", () => {
       const SAFETY = {
         sync_violations: [],
         unenergized_motors: [],
+        unresponsive_motors: [],
         firmware_unconfirmed_motors: [],
         failed_tasks: [],
         reenergizing: false,
@@ -112,6 +113,7 @@ describe("parseServerMessage", () => {
       it.each([
         "sync_violations",
         "unenergized_motors",
+        "unresponsive_motors",
         "firmware_unconfirmed_motors",
         "failed_tasks",
         "reenergizing",
@@ -532,6 +534,10 @@ describe("parseServerMessage", () => {
       ["phase", { ...base, court: "red", phase: "paused" }],
     ])("未知の %s は MALFORMED にする (既定値へ倒さない)", (key, payload) => {
       expect(matchStateOf(payload)[key]).toBe(MALFORMED);
+    });
+
+    it("court の null は未確定として通す (MALFORMED へ潰さない)", () => {
+      expect(matchStateOf({ ...base, court: null, phase: "setup" }).court).toBeNull();
     });
 
     it("欠落も MALFORMED にする", () => {

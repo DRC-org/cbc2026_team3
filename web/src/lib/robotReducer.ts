@@ -84,7 +84,7 @@ export function emptySwitchMeasureState(): SwitchMeasureSnapshot {
 }
 
 const INITIAL_MATCH_STATE: MatchState = {
-  court: "red",
+  court: null,
   phase: "setup",
   can_start_match: false,
   checklists: {},

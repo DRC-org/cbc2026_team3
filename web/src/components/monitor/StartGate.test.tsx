@@ -60,6 +60,39 @@ describe("StartGate", () => {
     expect(screen.getByRole("button", { name: "試合を開始する" })).toBeDisabled();
   });
 
+  it("コート未設定を開始できない理由に出す", () => {
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: HEALTHY_STATES,
+      matchState: {
+        ...DEFAULT_MATCH_STATE,
+        court: null,
+        can_start_match: false,
+        checklists: {
+          pre_match: checklist([{ id: "a", label: "電源投入", checked: true }]),
+        },
+      },
+    });
+
+    expect(screen.getByText("コート")).toBeInTheDocument();
+    expect(screen.getByText(/未設定/)).toBeInTheDocument();
+  });
+
+  it("コートが決まっていれば理由に出さない", () => {
+    renderWithRobot(<StartGate onStart={vi.fn()} />, {
+      states: HEALTHY_STATES,
+      matchState: {
+        ...DEFAULT_MATCH_STATE,
+        court: "blue",
+        can_start_match: false,
+        checklists: {
+          pre_match: checklist([{ id: "a", label: "電源投入", checked: false }]),
+        },
+      },
+    });
+
+    expect(screen.queryByText("コート")).not.toBeInTheDocument();
+  });
+
   it("全て完了していれば開始できる", () => {
     renderWithRobot(<StartGate onStart={vi.fn()} />, {
       states: HEALTHY_STATES,

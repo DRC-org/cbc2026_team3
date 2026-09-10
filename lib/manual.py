@@ -35,15 +35,15 @@ class ManualController:
         motors: MotorGroup,
         positions: PositionTable,
         *,
-        court: Court = Court.RED,
+        court: Court | None = None,
     ) -> None:
         self._motors = motors
         self._positions = positions
-        self._court = court
+        self._court: Court | None = court
         self._interlock = AxisInterlock(positions)
         self._targets: dict[str, float] = {}
 
-    def set_court(self, court: Court) -> None:
+    def set_court(self, court: Court | None) -> None:
         self._court = court
 
     async def move_to_position(self, axis: str, name: str) -> float:
@@ -153,6 +153,7 @@ class ManualController:
             spec,
             [getattr(self._motors, name) for name in spec.motor_names],
             sensor_active=self._motors.sensor_active,
+            axis_state=self._motors.axis_state,
         )
         await handle.set_target_value(commands)
 

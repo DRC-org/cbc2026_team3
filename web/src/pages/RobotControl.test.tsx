@@ -55,6 +55,7 @@ function robotState(over: Partial<RobotState> = {}): RobotState {
     safety: {
       sync_violations: [],
       unenergized_motors: [],
+      unresponsive_motors: [],
       firmware_unconfirmed_motors: [],
       failed_tasks: [],
       reenergizing: false,
@@ -143,6 +144,7 @@ describe("試合中の右カラム", () => {
         safety: {
           sync_violations: [],
           unenergized_motors: ["rotate_l", "rotate_r"],
+          unresponsive_motors: [],
           firmware_unconfirmed_motors: [],
           failed_tasks: [],
           reenergizing: false,
@@ -206,6 +208,7 @@ describe("RobotControl の操作先", () => {
         safety: {
           sync_violations: [],
           unenergized_motors: ["rotate_l"],
+          unresponsive_motors: [],
           firmware_unconfirmed_motors: [],
           failed_tasks: [],
           reenergizing: false,
@@ -371,6 +374,7 @@ describe("RobotControl の診断表示", () => {
         safety: {
           sync_violations: ["rotate"],
           unenergized_motors: [],
+          unresponsive_motors: [],
           firmware_unconfirmed_motors: [],
           failed_tasks: [],
           reenergizing: false,
@@ -490,6 +494,34 @@ describe("手動操縦モード", () => {
     expect(screen.getAllByText("緊急停止中は手動操縦できません").length).toBeGreaterThan(0);
     await userEvent.click(screen.getByLabelText("rotate を home へ"));
     expect(context.send).not.toHaveBeenCalled();
+  });
+
+  it("コート未設定なら理由を出して手動指令を塞ぐ", async () => {
+    const { context } = mountManual("setup", {
+      states: { sub_hand: robotState({ manual: MANUAL, court_required: true }) },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", court: null, timer: null },
+    });
+
+    expect(
+      screen.getAllByText(
+        "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)",
+      ).length,
+    ).toBeGreaterThan(0);
+    await userEvent.click(screen.getByLabelText("rotate を home へ"));
+    expect(context.send).not.toHaveBeenCalled();
+  });
+
+  it("コート確定が要らない台は未設定でも手動できる", async () => {
+    const { context } = mountManual("setup", {
+      states: { sub_hand: robotState({ manual: MANUAL, court_required: false }) },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", court: null, timer: null },
+    });
+
+    await userEvent.click(screen.getByLabelText("rotate を home へ"));
+    expect(context.sendOrReport).toHaveBeenCalledWith(
+      { type: "manual_move", robot: "sub_hand", axis: "rotate", position: "home" },
+      "プリセット移動",
+    );
   });
 
   it("緊急停止中でもモード切替は送れる", async () => {

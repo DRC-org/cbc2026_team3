@@ -7,6 +7,8 @@ import can
 import pytest
 
 from lib.drivers.base import ControlMode
+from lib.match_state import Court
+from lib.motion_guard import AxisReading, GuardViolation
 from lib.sequence.engine import Sequence, step
 from lib.sequence.motors import (
     AxisHandle,
@@ -14,6 +16,7 @@ from lib.sequence.motors import (
     MotorGroup,
     MotorHandle,
     WaitInterruptedError,
+    build_axis_state_reader,
     build_motor_group,
 )
 from lib.sequence.positions import (
@@ -22,6 +25,8 @@ from lib.sequence.positions import (
     CourtUnresolvedError,
     MotorSpec,
     PositionLookupError,
+    PositionTable,
+    load_position_table,
 )
 from tests.fake_drivers import StubFeedbackDriver
 
@@ -512,3 +517,154 @@ class TestAxisHandle:
 
         with pytest.raises(PositionLookupError):
             axis.observed_values()
+
+
+_INTERFERENCE_CONFIG = {
+    "axes": {
+        "lift": {"unit": "mm", "command_unit": "rad", "scale": 2.0, "tolerance": 1.0},
+        "slide": {
+            "unit": "mm",
+            "command_unit": "rad",
+            "scale": 2.0,
+            "tolerance": 1.0,
+            "guard": {"requires": [{"axis": "lift", "at": "top"}]},
+        },
+        "pump": {"unit": "duty", "command_unit": "duty", "command_mode": "duty"},
+    },
+    "positions": {
+        "lift": {"top": -10.0, "bottom": 0.0},
+        "slide": {"back": -5.0, "front": 0.0},
+        "pump": {"stop": 0.0},
+    },
+}
+
+
+def _interference_rig(
+    *,
+    lift_mm: float | None = -10.0,
+    stale: set[str] | None = None,
+    wire_reader: bool = True,
+) -> tuple[AxisHandle, MotorGroup, PositionTable]:
+    """`slide` が `lift` を条件に持つ 1 組。`lift_mm` が None ならモータごと居ない。"""
+    table = load_position_table(_INTERFERENCE_CONFIG, source="<test>")
+    group = MotorGroup()
+    mgr = _make_can_manager()
+    names = ["slide"] if lift_mm is None else ["lift", "slide"]
+    for name in names:
+        driver = _FakeDriver(name, 1)
+        driver.set_observed(position=table.axis(name).motors[0].to_command(0.0))
+        group.add(MotorHandle(name, driver, mgr))
+    if lift_mm is not None:
+        lift = table.axis("lift")
+        group["lift"].driver.set_observed(position=lift.motors[0].to_command(lift_mm))
+    if wire_reader:
+        stale_names = stale or set()
+        group.bind_axis_state(
+            build_axis_state_reader(
+                table,
+                group,
+                court=lambda: Court.RED,
+                is_stale=lambda name: name in stale_names,
+            )
+        )
+    spec = table.axis("slide")
+    handle = AxisHandle(spec, [group["slide"]], axis_state=group.axis_state)
+    return handle, group, table
+
+
+async def _command_slide(handle: AxisHandle, table: PositionTable, name: str) -> None:
+    await handle.set_target_value(table.commands("slide", name))
+
+
+class TestInterferenceAtTheCommandEntry:
+    """干渉の判定は `AxisHandle.set_target_value` に載る。**3 経路とも必ずここを通る。**"""
+
+    async def test_条件の軸が区間に居れば送れる(self) -> None:
+        handle, group, table = _interference_rig(lift_mm=-10.0)
+
+        await _command_slide(handle, table, "back")
+
+        assert group["slide"].driver.encoded == [(ControlMode.POSITION, -10.0)]
+
+    async def test_条件の軸が区間の外なら_1_通も出ない(self) -> None:
+        handle, group, table = _interference_rig(lift_mm=0.0)
+
+        with pytest.raises(GuardViolation, match="lift"):
+            await _command_slide(handle, table, "back")
+
+        assert group["slide"].driver.encoded == []
+
+    async def test_読み口が未配線なら拒否される(self) -> None:
+        """素通りへ倒すと、配線を忘れた経路だけが歯止めを失い、それが表に出ない。"""
+        handle, group, table = _interference_rig(wire_reader=False)
+
+        with pytest.raises(GuardViolation, match="読めていません"):
+            await _command_slide(handle, table, "back")
+
+        assert group["slide"].driver.encoded == []
+
+    async def test_条件の軸が鮮度切れなら拒否される(self) -> None:
+        """受信が途絶えた軸は既定の 0.0 を運び続ける。丸めると原点に居ることになる。"""
+        handle, _, table = _interference_rig(lift_mm=-10.0, stale={"lift"})
+
+        with pytest.raises(GuardViolation, match="読めていません"):
+            await _command_slide(handle, table, "back")
+
+    async def test_条件の軸がこの束に居なければ拒否される(self) -> None:
+        handle, _, table = _interference_rig(lift_mm=None)
+
+        with pytest.raises(GuardViolation, match="読めていません"):
+            await _command_slide(handle, table, "back")
+
+    async def test_条件の軸に区間の外の目標が書かれていれば拒否される(self) -> None:
+        handle, group, table = _interference_rig(lift_mm=-10.0)
+        await group["lift"].set_target(
+            ControlMode.POSITION, table.commands("lift", "bottom")["lift"]
+        )
+
+        with pytest.raises(GuardViolation, match="目標"):
+            await _command_slide(handle, table, "back")
+
+    async def test_その場で止まれは条件を見ずに通る(self) -> None:
+        """止めるための指令が、止まっていないことを理由に拒否される逆立ちを防ぐ。"""
+        handle, group, _ = _interference_rig(lift_mm=0.0)
+
+        await handle.set_target_value(handle.observed_commands())
+
+        assert group["slide"].driver.encoded == [(ControlMode.POSITION, 0.0)]
+
+
+class TestAxisStateReader:
+    """「他の軸は今どこか」の読み口。**読めないものは `None` で運ぶ。**"""
+
+    def test_実測と目標を_1_組で返す(self) -> None:
+        _, group, _ = _interference_rig(lift_mm=-10.0)
+        read = group.axis_state
+        assert read is not None
+
+        assert read("lift") == AxisReading(value=-10.0, target=None)
+
+    async def test_目標は軸の単位へ直して返す(self) -> None:
+        _, group, table = _interference_rig(lift_mm=-10.0)
+        await group["lift"].set_target(
+            ControlMode.POSITION, table.commands("lift", "bottom")["lift"]
+        )
+        read = group.axis_state
+        assert read is not None
+
+        assert read("lift") == AxisReading(value=-10.0, target=0.0)
+
+    def test_位置定数に無い軸は読めていない(self) -> None:
+        _, group, _ = _interference_rig()
+        read = group.axis_state
+        assert read is not None
+
+        assert read("居ない軸") == AxisReading(value=None, target=None)
+
+    def test_位置を持たない軸は読めていない(self) -> None:
+        """duty / on_off は「今どこに居るか」を答えられない (常に 0 に見える)。"""
+        _, group, _ = _interference_rig()
+        read = group.axis_state
+        assert read is not None
+
+        assert read("pump") == AxisReading(value=None, target=None)

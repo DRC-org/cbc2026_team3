@@ -381,9 +381,10 @@ down です (起動は続けます)` を ERROR で残す（**起動は拒否し�
 立つことはなく、別の欄が同時に立って主張するため —— 同期ずれからの緊急停止が
 失敗したケースでは `SyncMonitor.violated` がラッチして `safety.sync_violations` が
 立ち、`describeSafetyIssues` が tone error へ倒して診断ツリーを開く。再励磁の失敗も、
-励磁状態を報告するドライバ（EDULITE 05 / DM3520）なら `_unenergized_motors` の
-`is_energized() is False` 側で拾われる。**この依存関係が崩れたら（同時に立つ欄が
-無くなったら）、こちらを主張側へ倒し直すこと。**
+励磁状態を報告するドライバ（EDULITE 05 / DM3520）なら `_split_inactive_motors` が
+`unenergized_motors` か `unresponsive_motors` のどちらかで拾う（フィードバックが
+届いていれば前者、鮮度が切れていれば後者。どちらも tone error へ倒す）。
+**この依存関係が崩れたら（同時に立つ欄が無くなったら）、こちらを主張側へ倒し直すこと。**
 
 journal で追うときに探す文字列は `投げっぱなしタスクが失敗しました` である。
 
@@ -492,13 +493,57 @@ DM3520 は指令フレームを無励磁のまま受理して黙って捨てる�
 まま**になる。操縦者に見えるのは「指令しても動かない」だけで、原因はどこにも出ない。
 
 そこで `MotorDriver.is_energized()`（判定手段が無いドライバは `None`）を
-`RobotServer._unenergized_motors()` が読み、`state.safety.unenergized_motors` として
+`RobotServer._split_inactive_motors()` が読み、`state.safety.unenergized_motors` として
 配信する。緊急停止中は無励磁が正しい状態なので報告しない。**この緊急停止ガードが
 唯一の抑止で、`activate_e_stop` 側にも同じ判定を置いてはならない**（片方を消しても
 症状が出なくなり、後で本物のガードを消しても気付けなくなる）。
 
 `None` を「無励磁」へ倒さないこと。自作モタドラも C620 も励磁の有無を報告しないので、
 倒すと常時警告になる（「測ったように見える 0」と同じ罠）。
+
+#### 「無励磁」と「応答なし」は別の欄で配る
+
+`is_energized()` が読む値のほかに、**起動時と再励磁で励磁できなかったモータの名前**が
+ラッチとして残る（`RobotServer._inactive_motors`）。このラッチは 2 通りの理由で溜まる。
+EDULITE 05 と DM3520 は POSITION モードでは新鮮なフィードバックが無いと
+`activation_steps()` を 1 通も送らない（`requires_fresh_feedback_for_activation()`）ので、
+**動力電源が落ちていればフィードバックが 1 通も来ないまま全数がラッチに入る**。手当ては
+「再励磁」ではなく電源と CAN 配線であり、再励磁を何度押しても消えない。
+
+そのため `_split_inactive_motors()` が、`is_energized() is False` のモータとラッチを
+**同じ 1 つの候補集合へ入れてから**、**フィードバック鮮度**（`FeedbackFreshness`。
+`_firmware_unconfirmed_motors` と同じ組み方）で仕分ける。鮮度切れは
+`state.safety.unresponsive_motors` へ、生きているものは `unenergized_motors` へ。
+**片方から外したものは必ずもう片方に載る**（`None` を「無励磁」へ倒さない規則が、
+`is_energized()` の三値だけでなくこの経路にも効くようにしたもの。黙って消すと、
+機体が動かないのに画面が理由を言わない状態に戻る）。
+
+**鮮度が切れたら `is_energized()` の値によらず「応答なし」へ倒す。** 判定の順序が仕様で、
+上から: ①鮮度切れ → `unresponsive`（**`is_energized()` を一切見ない**）→ ②鮮度が生きていて
+`is_energized()` が `True` → 報告しない（起動時に失敗した後で自力で励磁された）→
+③それ以外 → `unenergized`。
+
+`is_energized()` が読む値（EDULITE の `mode_state` / DM3520 の `error_code`）は**フレームを
+復号した瞬間にしか書かれず、途絶えてもクリアされない**ので、鮮度が切れた時点で `True` も
+`False` も信用できない。**片方だけ洗うと同じ形の穴が残る:**
+
+- 古い `False`: 稼働中に励磁が落ちてその直後に CAN も落ちると、モータはラッチを 1 度も
+  通らないまま `unenergized_motors` に永久に残る（**下の表の「フィードバックは届いて
+  いるのに」をコードが保証しない**。2026-09-05 の UNDERVOLTAGE と地続きの経路）
+- 古い `True`: 励磁されたことを 1 度報告してから黙ったモータが、②で候補から外れて
+  **どちらの欄にも現れない**
+
+| 欄 | 意味 | 手当て |
+|---|---|---|
+| `unenergized_motors` | フィードバックは届いているのに励磁されていない | 操縦者画面の「再励磁」 |
+| `unresponsive_motors` | フィードバックの鮮度が切れている（1 通も来ていない / 途絶えた）。励磁されているかは**分からない** | ドライバの電源と CAN 配線（**再励磁では直らない**ので UI もボタンを出さない） |
+
+**文面を分けるのは手当てが逆だから。** 同じ区別を `Dm3520Driver.activation_block_reason()`
+が既に持っており（応答が無い / 読み返しが食い違う）、上の層でそれを 1 つに潰していた。
+UI 側の文言は `web/src/lib/healthVerdict.ts` の `describeSafetyIssues` が持ち、**根本原因が
+先に来るよう `unresponsive` を `unenergized` より前に返す**。緊急停止中と励磁の猶予中に
+両方とも空になるガードは共有する（緊急停止中は目標値再送が止まってフィードバックの
+問い合わせも止まるので、分けると停止のたびに全数が「応答なし」で湧く）。
 
 #### EDULITE 05 でも実際に起きた（2026-09-05）
 
@@ -770,6 +815,46 @@ Monitor の 1 行サマリーに件数を出す。
 
 設定は `config/*_positions.yaml` の `axes.<軸>.homing`。**動作確認固有の値ではなく
 軸の機構的性質**（どちら向きに、どれだけ動かせば原点に当たるか）なので位置定数と同居する。
+
+### 軸の順序 —— 昇降 → `top` へ寄せる → 前後
+
+`sub_y_axis` は `axes.sub_y_axis.guard.requires` で「`sub_lift` が `top` に居るあいだしか
+動かせない」と宣言してある（`invariants.md` §4）。零点確定は探索の 1 歩ごとに指令の入口を
+通るので、**この条件は零点確定そのものにも掛かる**。零点確定は `release_distance` の
+10mm ぶん離脱して終わるため、確定しただけの `sub_lift` は下端の 10mm 上に居て
+`top`（-140mm ± 1mm）の外にある。
+
+**順序を組むのは `run_homing` 1 箇所だけ**で、寄せる口（`move_to`）を渡された経路が
+「①参照される軸を確定 → ②その軸を寄せる → ③残りを確定」で回る。**寄せるのは今回
+選ばれた軸だけ**で、①で確定できなかった軸は寄せない（原点が確定していない軸へ位置名で
+指令すると、どこへ動くか分からない）。
+
+| 経路 | 寄せるか | 前後だけを選んだら |
+|---|---|---|
+| ②統合動作確認（`home_axes`） | **寄せる**（全軸を回すので昇降が必ず入る） | —— |
+| 零点合わせパネル（`homing_start`） | **選ばれていれば寄せる** | 拒否して文面で案内 |
+| 作動点測定（`switch_measure`） | 寄せない | 拒否して文面で案内 |
+
+**パネルで昇降と前後の両方を選べば拒否は出ない。** 前後だけを選ぶと拒否される ——
+選んでいない軸を寄せると「零点確定は選んだ軸しか動かさない」が壊れるので、**この
+非対称は仕様である**（`tests/test_server_homing.py` が両向きを固定している）。
+
+> 軸 'sub_y_axis' は 'sub_lift' が top ([-141, -139]mm) に居るあいだしか動かせません
+> (今 実測 -10mm)。先に 'sub_lift' を top へ寄せてください
+> ('sub_lift' の零点がまだなら零点確定が先です)
+
+**この文面の数値は同梱 config から導かれる。** `tests/test_sub_hand_positions_config.py` が
+実際の拒否文面とこの節・会場カードの数値を突き合わせるので、`top` / `tolerance` /
+`release_distance` を変えれば文書の側が落ちる。
+
+前後だけを確定したいときの手当ては 2 つ。**昇降も一緒に選び直す**のが早い。どうしても
+前後だけを回したいなら、手動操縦で `sub_lift` を `top`（-140mm 付近）へ寄せ、
+**手動操縦モードを抜けてから**選ぶ（`homing_start` はどれかのロボットが手動操縦モードだと
+開始できない。`RobotServer._environment_deny`）。
+
+寄せ先は `PositionTable.homing_prerequisites()` が `guard.requires` から導く。**シーケンスにも
+手順書にも軸名を書き写さない** —— 宣言を変えれば手順も一緒に変わる。参照先が `homing:` を
+持たない軸だと起動を拒否する（原点が確定していない軸へ位置名で寄せることになるため）。
 
 ### 単独で走らせる（`homing_start`）
 
@@ -1596,7 +1681,7 @@ checklist.yaml すべて —— 本番と `config/bench/*` —— が対象）�
   `cbc-control.service` の `Wants=cbc-can.service` は**何も守っていない**
   （`--strict` を付けない判断とその理由は `scripts/cbc-can.service` のコメント）。
   つまり「揃っているか」に答えるのは、この 1 行の指差喚呼だけである
-- **`health_ready`** — ①は `state.safety.unenergized_motors` まで配信しているが、
+- **`health_ready`** — ①は `state.safety.unenergized_motors` / `unresponsive_motors` まで配信しているが、
   無励磁は「指令しても動かない」としてしか現れず、①の色（`MotorHealth`）は **OK の
   まま**である（「励磁されていない」はヘルスに現れない、を参照）。試合が始まってから
   気付くことになるので、始まる前に 1 度だけ人が読む

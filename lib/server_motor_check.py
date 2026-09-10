@@ -39,11 +39,11 @@ class MotorCheckController:
         self._error: str | None = None
         self._last_payload: dict | None = None
 
-    def set_sequence(self, sequence: Sequence, *, court: Court) -> None:
+    def set_sequence(self, sequence: Sequence, *, court: Court | None) -> None:
         self._sequence = sequence
         sequence.set_court(court)
 
-    def set_court(self, court: Court) -> None:
+    def set_court(self, court: Court | None) -> None:
         if self._sequence is not None:
             self._sequence.set_court(court)
 

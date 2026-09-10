@@ -60,6 +60,13 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 **`switch_measure_state` の `result` も同じ。** 数値が 1 つでも読めなければ結果全体を
 `MALFORMED` にする。`0` で埋めると「作動点が原点だった」という測れた値に化ける。
 
+**`state.safety` は「無励磁」と「応答なし」を別の欄で配る**（`unenergized_motors` /
+`unresponsive_motors`）。手当てが逆（再励磁 / ドライバの電源と CAN 配線）なので、
+UI はどちらを出すかで文面と再励磁ボタンの有無を変える。仕分けはサーバーが
+フィードバック鮮度で行い、**片方から外れたものは必ずもう片方に載る** ——
+UI 側で `unenergized_motors` から導出し直してはならない
+（`docs/checks_and_health.md`「『無励磁』と『応答なし』は別の欄で配る」）。
+
 **`state.manual.axes[].positions` は `{ name, value }`。** 名前だけを配っていた頃は、
 プリセットが可動範囲のどこを指すのかが画面から読めなかった（バーには現在値の線 1 本だけ）。
 `value` は人間の単位で、コート別に定義された位置は**現在のコートの値**になる。
@@ -153,6 +160,17 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 `parseManual` / `parseSuction` / `parseHomingResults` / `parseAxisNames` / `parseHomingTargets` /
 `parseSwitchDirection` / `parseSwitchMeasurement` / `readMeasured` / `readCommand` / `parseEnum`。
 
+**`match_state.court` も 3 値を区別する。** `null` は**コート未確定**（操縦者がまだ選んでいない、
+正常な試合前の状態）で `MALFORMED` ではない。`parseEnum` に素通しすると `null` が `MALFORMED` へ
+潰れ、3 画面が正常な試合前状態を「壊れている」と表示する。ラベルと色は `courtLabel()` /
+`courtTone()`（`web/src/lib/phase.ts`）が持ち、未確定は中立色の「コート未設定」。
+
+**`state.court_required` はサーバーが決める。** その台がコート確定を要るか（換算がコートで
+鏡になる軸を持つか）は位置定数だけが知っているので、UI は軸名から導き直さない。真のときに
+`match_state.court` が `null` なら、操縦者画面は手動とシーケンスの操作をサーバーと同じ理由文で
+閉じる（`RobotControl`）。**受信は `=== true` で厳密に見る** —— 欠落を真へ倒すと、古いサーバーに
+繋いだだけで操作が消える。
+
 **`state.suction` は 3 値を区別する。** `null` は「このロボットに吸着パッドが無い」
 （パネルを描かない）、欠落（`undefined`）は「古いサーバー」（同じく描かない）、`pads[]` の
 どれかが `axis` / `label` / `enabled` を欠けば `MALFORMED`（操作を出さず「読み取れませんでした」）。
@@ -233,6 +251,10 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
   判定できていない状態で、`success` を返すとフェイルセーフを UI が打ち消す
 - **UI はしきい値のフォールバック値を持たない。** 正は config だけが持ち `server_info` で届く
   （`tempThresholdsOf`）。未配信の間は `neutral` に倒す
+
+`describeSafetyIssues` の並びも仕様（先頭が上の #2 のラベルになる）: 同期ずれラッチ →
+**応答なし → 無励磁** → 位置制御ループ停止 → 同期監視停止 → 目標値再送停止。
+応答なしを無励磁より先に置くのは、両方立ったときに根本原因（電源・配線）を先頭へ出すため。
 
 **試合を開始できるかを決めるのはサーバーの `can_start_match` だけ。** `checklists` から導出し
 直してはならない（一度これを `StartGate` でやって、サーバーが「開始できる」と配信しているのに

@@ -54,6 +54,11 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 フェーズとコートの対応は `web/src/lib/phase.ts`。**読めなかった配信（`MALFORMED`）も語彙の
 1 つとして持つ** —— 索引が `undefined` になるとチップが無地・無文字で消える。
 
+**コートは 3 値。**「コート未設定」（`null`）は**中立色**で、「コート不明」（`MALFORMED`）の
+`error` とは別に出す —— 前者は操縦者がまだ選んでいないだけの正常な試合前状態で、後者は配信が
+読めていない異常。同じ色にすると、試合前に必ず出る状態が毎回「異常」に見えて色が意味を失う。
+索引ではなく `courtLabel()` / `courtTone()` を通す（`Record` は `null` で引けない）。
+
 ヘッダーの地はフェーズ色で塗らない。**左端のバーとチップだけ**で示す（全面を塗ると画面で
 最も明るい面になる）。
 
@@ -275,3 +280,10 @@ START / NEXT ボタン自身が `<Kbd>` として持つ。離れた場所に一�
 `22rem` 固定で縦に伸びる（`docs/web/pitfalls.md` の「daisyUI の `.alert` は grid」）。
 
 **トーストは履歴ではない** —— 数秒で消えるので、Monitor の試合中は `EventFeed` が残す。
+
+**理由文に Markdown を書かない。** トーストも零点合わせパネルの結果欄も素のテキストとして
+描くので、`**強調**` はアスタリスク込みでそのまま出る。強調は記号ではなく語順と文の分け方で
+出すこと。**サーバー側の文面がこの規則の対象**で（`lib/motion_guard.py` の `GuardViolation` と
+`lib/sequence/homing.py` の `HomingError`）、`tests/test_motion_guard.py::TestMessagesAreNotMarkdown`
+がソースの文字列リテラルを走査して固定する。ログにしか出ない文面（`activation_block_reason()`）は
+対象外 —— journalctl で読むので記号があっても害が無い。

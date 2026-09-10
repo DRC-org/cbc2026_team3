@@ -19,6 +19,7 @@ __all__ = [
     "HomingRunner",
     "SwitchMeasurement",
     "homing_axis_names",
+    "homing_order",
     "measure_switch",
     "run_homing",
 ]
@@ -53,6 +54,8 @@ SleepFunc = Callable[[float], Awaitable[None]]
 #: 整列段のあいだ、指定したセンサを可動端の歯止めから外す
 #: (`lib.motion_guard.SensorSuspension.suspend`)
 SuspendSensors = Callable[[Iterable[str]], contextlib.AbstractContextManager[None]]
+#: 位置名で軸を寄せる口 (`Sequence.move_to`)。零点確定は自分では組まず、必ず注入で受ける
+MoveTo = Callable[[Mapping[str, str]], Awaitable[None]]
 
 
 def _no_suspension(_names: Iterable[str]) -> contextlib.AbstractContextManager[None]:
@@ -431,8 +434,8 @@ class HomingRunner:
                 f"軸 '{spec.name}' を原点センサ {_label(homing.sensor_names)} から"
                 "離せませんでした"
                 f" ({limit}{spec.unit} 動かしても OFF に"
-                " ならない)。**センサの極性が逆だとどこへ動かしても ON のまま**に"
-                " なるので、ファーム側の極性設定 (sensorActiveLow) を"
+                " ならない)。まずセンサの極性を疑ってください —— 逆だとどこへ動かしても"
+                " ON のままになります。ファーム側の極性設定 (sensorActiveLow) を"
                 "接点の固着・配線の短絡と併せて確認してください。"
                 " 極性が正しいなら ON 区間がこの距離より広いので"
                 " homing.release_distance を実測へ広げてください"
@@ -562,8 +565,8 @@ class HomingRunner:
             f"直前の 1 歩は指令 {commanded[motor]:.2f}{spec.unit} に対し"
             f" 実測 {moved[motor]:.2f}{spec.unit}。"
             f" 保持側の引きずられ量: {dragged}。"
-            "**機構に遊びが無いと片側だけを動かせず、相方を引きずったまま止まって"
-            "見えます** —— 1 台では静止摩擦を越えられていない"
+            "機構に遊びが無いと片側だけを動かせず、相方を引きずったまま止まって"
+            "見えます —— 1 台では静止摩擦を越えられていない"
             " (homing.align_step を大きくする)・機構の引っかかり・モータの励磁を"
             "確認してください"
         )
@@ -604,8 +607,9 @@ class HomingRunner:
             raise HomingError(
                 f"軸 '{spec.name}' の整列段でモータ '{motor}' を {limit}{spec.unit}"
                 f" 動かしても原点センサ '{sensors[motor]}' が反応しませんでした。"
-                "**センサの極性が逆だと押しても ON になりません** —— ファーム側の"
-                "極性設定 (sensorActiveLow) と、スイッチの配線・断線を確認してください"
+                "まずセンサの極性を疑ってください —— 逆だと押しても ON になりません。"
+                "ファーム側の極性設定 (sensorActiveLow) と、"
+                "スイッチの配線・断線を確認してください"
             )
 
     async def _wait_align_step(
@@ -859,14 +863,50 @@ def homing_axis_names(table: PositionTable) -> list[str]:
     return [name for name in table.axes if table.axis(name).homing is not None]
 
 
+def homing_order(table: PositionTable, axes: Collection[str]) -> list[str]:
+    """`guard.requires` の**参照先を先に**並べ替える。**余分な移動は 1 つもしない。**
+
+    零点確定は探索の 1 歩ごとに指令の入口を通るので、`requires` を書いた軸は条件の
+    軸が区間に居ないと 1 歩も動けない。参照先を後に回すと、その軸の零点が確定して
+    いないうちに条件を評価することになり、順序だけが理由で必ず拒否される。
+
+    **並べ替えるだけで、寄せる指令はここから出さない** —— 零点確定は「選んだ軸しか
+    動かさない」ことが守りになっている (`docs/invariants.md` §3)。寄せるかどうかは
+    経路ごとの判断で、動作確認は寄せ、零点合わせパネルは寄せない。
+
+    参照は読み込み時に非循環であることが保証されている (`_check_requires_acyclic`)。
+    """
+    requested = list(dict.fromkeys(axes))
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(axis: str) -> None:
+        if axis in seen:
+            return
+        seen.add(axis)
+        guard = table.axis(axis).guard
+        for required in () if guard is None else guard.requires:
+            # 今回回さない軸は並べ替えの対象外 (寄せ直しは呼び出し側の判断)
+            if required.axis in requested:
+                visit(required.axis)
+        ordered.append(axis)
+
+    for axis in requested:
+        visit(axis)
+    return ordered
+
+
 def _axis_handle(
-    table: PositionTable, motors: MotorGroup, axis: str, court: Court
+    table: PositionTable, motors: MotorGroup, axis: str, court: Court | None
 ) -> tuple[AxisSpec, AxisHandle]:
     spec = table.axis(axis).for_court(court)
     return spec, AxisHandle(
         spec,
         [getattr(motors, name) for name in spec.motor_names],
         sensor_active=motors.sensor_active,
+        # 零点確定も探索の 1 歩ごとに指令の入口を通るので、干渉条件が効く。
+        # 配線しないと `requires` を書いた軸だけが 1 歩も探索できない
+        axis_state=motors.axis_state,
     )
 
 
@@ -906,7 +946,7 @@ async def measure_switch(
     table: PositionTable,
     motors: MotorGroup,
     *,
-    court: Court,
+    court: Court | None,
     axis: str,
     direction: float,
     step: float | None = None,
@@ -926,8 +966,9 @@ async def run_homing(
     table: PositionTable,
     motors: MotorGroup,
     *,
-    court: Court,
+    court: Court | None,
     axes: Collection[str] | None = None,
+    move_to: MoveTo | None = None,
     on_axis: Callable[[str], Awaitable[None]] | None = None,
     on_result: Callable[[AxisHomingResult], Awaitable[None]] | None = None,
     stop_on_error: bool = True,
@@ -936,14 +977,75 @@ async def run_homing(
 
     `stop_on_error=False` は 1 本の失敗で残りを諦めない。軸ごとに独立した確定なので、
     操縦者は 1 回の実行で全軸の可否を知りたい。
+
+    `move_to` を渡すと **①参照される軸を確定 → ②その軸を寄せる → ③残りを確定**の
+    3 段で回す。零点確定は `release_distance` ぶん離脱して終わるので、確定しただけの
+    軸は `requires` の区間に居ない —— 寄せる段が無いと、参照する側は順序だけを理由に
+    必ず拒否される。渡さなければ並べ替えるだけで、1 本も余計に動かさない。
+
+    **寄せるのは「今回選ばれた軸」だけである。** 選ばれていない軸を寄せると
+    「零点確定は選んだ軸しか動かさない」が壊れるので、その場合は寄せずに拒否させ、
+    文面で手当てを案内する (`docs/invariants.md` §4)。零点合わせパネルで昇降と前後の
+    両方を選べば①〜③が回り、前後だけを選べば拒否される。**この非対称が仕様である。**
+
+    **①で確定できなかった軸は寄せない。** 原点が確定していない軸へ位置名で指令すると
+    どこへ動くか分からない。
     """
-    targets = homing_axis_names(table) if axes is None else list(axes)
+    targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
     if not targets:
         logger.info("零点確定: homing を持つ軸が無いため飛ばす")
         return []
+    targets = homing_order(table, targets)
 
+    prerequisites = {
+        axis: position
+        for axis, position in table.homing_prerequisites(targets).items()
+        if axis in targets
+    }
+    if move_to is None or not prerequisites:
+        return await _home_each(
+            runner, table, motors, court, targets, on_axis, on_result, stop_on_error
+        )
+
+    # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
+    # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
+    referenced = homing_order(table, prerequisites)
+    results = await _home_each(
+        runner, table, motors, court, referenced, on_axis, on_result, stop_on_error
+    )
+    confirmed = {result.axis for result in results if result.error is None}
+    for axis in referenced:
+        if axis not in confirmed:
+            logger.error(
+                "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
+                axis,
+                prerequisites[axis],
+            )
+            continue
+        # 1 軸ずつ送る。まとめて 1 通にすると、前提軸どうしに not_with があるとき
+        # 自分の指令が自分の歯止めに拒否される
+        logger.info("零点確定: %s を %s へ寄せる", axis, prerequisites[axis])
+        await move_to({axis: prerequisites[axis]})
+
+    rest = [axis for axis in targets if axis not in prerequisites]
+    results.extend(
+        await _home_each(runner, table, motors, court, rest, on_axis, on_result, stop_on_error)
+    )
+    return results
+
+
+async def _home_each(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    court: Court | None,
+    axes: list[str],
+    on_axis: Callable[[str], Awaitable[None]] | None,
+    on_result: Callable[[AxisHomingResult], Awaitable[None]] | None,
+    stop_on_error: bool,
+) -> list[AxisHomingResult]:
     results: list[AxisHomingResult] = []
-    for axis in targets:
+    for axis in axes:
         spec = table.axis(axis).for_court(court)
         logger.info("零点確定: %s", axis)
         if on_axis is not None:

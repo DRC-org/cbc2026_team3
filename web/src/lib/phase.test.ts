@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   COURT_LABEL,
+  courtLabel,
+  courtTone,
   PHASE_BAND_CLASS,
   PHASE_LABEL,
   PHASE_TONE,
   isDuringMatch,
   isSetupPhase,
 } from "@/lib/phase";
+import { MALFORMED } from "@/lib/protocol";
 import type { MatchPhase } from "@/lib/protocol";
 
 const ALL_PHASES: MatchPhase[] = ["setup", "ready", "match", "finished"];
@@ -56,5 +59,15 @@ describe("ラベル・配色テーブル", () => {
   it("コートのラベルが定義されている", () => {
     expect(COURT_LABEL.red).toBe("赤コート");
     expect(COURT_LABEL.blue).toBe("青コート");
+  });
+
+  it("未確定のコートは中立色の「コート未設定」", () => {
+    expect(courtLabel(null)).toBe("コート未設定");
+    expect(courtTone(null)).toBe("neutral");
+  });
+
+  it("読めなかったコートは未確定と別物として出す", () => {
+    expect(courtLabel(MALFORMED)).toBe("コート不明");
+    expect(courtTone(MALFORMED)).toBe("error");
   });
 });
