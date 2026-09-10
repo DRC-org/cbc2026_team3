@@ -1,7 +1,6 @@
 import { Check, Info, RotateCcw, Zap } from "lucide-react";
 import { memo } from "react";
 
-import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
 import { SwitchMeasurePanel } from "@/components/homing/SwitchMeasurePanel";
 import { ChecklistItems } from "@/components/monitor/ChecklistItems";
@@ -191,9 +190,7 @@ export const MatchPrep = memo(function MatchPrep({
             <MotorCheckButton />
           </div>
           <MotorCheckPanel />
-          <div className="flex flex-wrap items-center gap-2">
-            <HomingButtons />
-          </div>
+          {/* 起動口は動作確認だけ (零点確定はその中で走る)。機体単独の零点合わせは操縦者画面 */}
           <HomingPanel />
           <SwitchMeasurePanel />
           {itemsOf("motor_check")}

@@ -58,8 +58,9 @@ export function MotorCheckButton() {
         }
       >
         <p>
+          先にリミットスイッチで零点を確定し、続けて
           <span className="font-medium text-info">メインハンドとサブハンドの全アクチュエータ</span>
-          を、決まった順序で 1 つずつ動かします。
+          を決まった順序で 1 つずつ動かします。
         </p>
         <p className="mt-2 flex items-center gap-1.5 text-error">
           <Icon as={TriangleAlert} />

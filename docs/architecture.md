@@ -797,7 +797,7 @@ class PickAndPlace(Sequence):
 | ファイル | 走らせ方 | 中身 |
 |---|---|---|
 | `sequences/main_hand.py` / `sub_hand.py` | 操縦者の `sequence_start`（それぞれのタブ） | ワークの取得 → 搬送 → 配置 / 受け取り → 吸着 → 配置 |
-| `sequences/motor_check.py` | Monitor の設定面から `motor_check_start`（零点確定だけなら `homing_start`） | **両ハンド 1 本**。零点確定 → 各軸を運用で使う位置名へ動かす → `restore_home` |
+| `sequences/motor_check.py` | Monitor の設定面から `motor_check_start`（零点確定だけなら操縦者画面の `homing_start`） | **両ハンド 1 本**。零点確定 → 各軸を運用で使う位置名へ動かす → `restore_home` |
 
 **`sequences/*.py` に数値を書かない。** 共通化してよいのは「どの軸をどの位置名へ動かすか」の
 **組**だけで、複数軸の組が複数ステップに現れるときだけモジュール定数（`main_hand.HOME`）か

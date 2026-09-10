@@ -11,11 +11,11 @@ import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
 
 interface HomingButtonsProps {
-  /** 操縦者画面ではその担当機のぶんだけ出す (Monitor では省略して全機) */
-  robot?: string;
+  /** 担当機のぶんだけ出す。全機を回す口は動作確認なので全機版は無い */
+  robot: string;
 }
 
-export function HomingButtons({ robot: only }: HomingButtonsProps = {}) {
+export function HomingButtons({ robot: only }: HomingButtonsProps) {
   const { connected } = useRobotStatus();
   const { state, start } = useHoming();
   const [pending, setPending] = useState<[string, string[]] | null>(null);

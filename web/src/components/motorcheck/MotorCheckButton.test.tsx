@@ -50,6 +50,8 @@ describe("MotorCheckButton", () => {
     await userEvent.click(screen.getByRole("button", START_BUTTON));
     expect(context.sendOrReport).not.toHaveBeenCalled();
     expect(screen.getByText(/両機の可動範囲に人・物がないこと/)).toBeInTheDocument();
+    // 零点合わせのボタンは無いので、確認の文面が「中で零点も確定する」ことを伝える唯一の場所
+    expect(screen.getByText(/先にリミットスイッチで零点を確定し/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "開始" }));
     expect(context.sendOrReport).toHaveBeenCalledWith(

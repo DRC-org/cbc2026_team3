@@ -10,7 +10,7 @@ import { EMPTY_HOMING, renderWithRobot } from "@/test/robotContext";
 const TARGETS = { main_hand: ["y_axis", "rotate"], sub_hand: ["sub_y_axis"] };
 
 function mount(homing: Partial<HomingSnapshot> = {}, extra: Record<string, unknown> = {}) {
-  return renderWithRobot(<HomingButtons />, {
+  return renderWithRobot(<HomingButtons robot="sub_hand" />, {
     connected: true,
     homing: {
       ...EMPTY_HOMING,
@@ -26,13 +26,13 @@ function mount(homing: Partial<HomingSnapshot> = {}, extra: Record<string, unkno
 const SUB_BUTTON = { name: "サブハンドの零点合わせを開始" };
 
 describe("HomingButtons", () => {
-  it("ロボットごとにボタンを出し、宛先の軸を押す前に見せる", () => {
+  it("担当機のボタンだけを出し、宛先の軸を押す前に見せる", () => {
     mount();
 
     expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
-    expect(screen.getByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
     expect(screen.getByText("sub_y_axis")).toBeInTheDocument();
-    expect(screen.getByText("y_axis, rotate")).toBeInTheDocument();
+    expect(screen.queryByText("y_axis, rotate")).toBeNull();
   });
 
   it("確認してから、押したロボットの軸だけを送る", async () => {
@@ -74,7 +74,7 @@ describe("HomingButtons", () => {
   });
 
   it("切断中は押せない", () => {
-    renderWithRobot(<HomingButtons />, {
+    renderWithRobot(<HomingButtons robot="sub_hand" />, {
       connected: false,
       homing: { ...EMPTY_HOMING, available: true, blocked_reason: null, targets: TARGETS },
     });
@@ -82,17 +82,7 @@ describe("HomingButtons", () => {
     expect(screen.getByRole("button", SUB_BUTTON)).toBeDisabled();
   });
 
-  it("robot を絞ると、その機体のボタンだけ出す", () => {
-    renderWithRobot(<HomingButtons robot="sub_hand" />, {
-      connected: true,
-      homing: { ...EMPTY_HOMING, available: true, blocked_reason: null, targets: TARGETS },
-    });
-
-    expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
-  });
-
-  it("絞った先に対象が無ければボタンを出さず知らせる", () => {
+  it("担当機に対象が無ければボタンを出さず知らせる", () => {
     renderWithRobot(<HomingButtons robot="sub_hand" />, {
       connected: true,
       homing: {

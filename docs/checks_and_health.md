@@ -864,7 +864,7 @@ Monitor の 1 行サマリーに件数を出す。
 `y_axis` が動き出した）。
 
 ```
-Monitor の設定面 [零点合わせ: サブハンド]  ← ボタンは**ロボットごと**。対象の軸を添えて出す
+操縦者画面 [零点合わせ: サブハンド]        ← ボタンは**担当機のぶんだけ**。対象の軸を添えて出す
         │  homing_start { robot, axes? }   ← robot は必須。省いた形は拒む
         ▼
 HomingController.deny_reason()      ← ②と同じ環境条件（_environment_deny）を見る

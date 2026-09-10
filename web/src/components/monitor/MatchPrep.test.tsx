@@ -5,7 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 import { MatchPrep } from "@/components/monitor/MatchPrep";
 import type { ChecklistItem, ChecklistState, MatchPhase } from "@/lib/protocol";
 import { MALFORMED } from "@/lib/protocol";
-import { DEFAULT_MATCH_STATE, DEFAULT_SERVER_INFO, renderWithRobot } from "@/test/robotContext";
+import {
+  DEFAULT_MATCH_STATE,
+  DEFAULT_SERVER_INFO,
+  EMPTY_HOMING,
+  renderWithRobot,
+} from "@/test/robotContext";
 
 function item(id: string, group?: string | null, checked = false): ChecklistItem {
   return { id, label: id, checked, group };
@@ -68,6 +73,41 @@ describe("MatchPrep の項目配置", () => {
 
     const check = section("アクチュエータ動作確認");
     expect(within(check).getByRole("button", { name: "手順と結果" })).toBeInTheDocument();
+  });
+
+  it("起動ボタンは動作確認の 1 つだけ (零点確定はその中で走る)", () => {
+    renderWithRobot(<MatchPrep onRequestReset={vi.fn()} />, {
+      connected: true,
+      matchState: { ...DEFAULT_MATCH_STATE, checklists: { pre_match: ITEMS } },
+      homing: {
+        ...EMPTY_HOMING,
+        available: true,
+        blocked_reason: null,
+        targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
+      },
+    });
+
+    expect(screen.getByRole("button", { name: "動作確認を開始" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /零点合わせを開始/ })).toBeNull();
+  });
+
+  it("操縦者画面から回した零点合わせの結果は読める (押せないが見える)", () => {
+    renderWithRobot(<MatchPrep onRequestReset={vi.fn()} />, {
+      connected: true,
+      matchState: { ...DEFAULT_MATCH_STATE, checklists: { pre_match: ITEMS } },
+      homing: {
+        ...EMPTY_HOMING,
+        available: true,
+        blocked_reason: null,
+        robot: "sub_hand",
+        axes: ["sub_y_axis"],
+        results: [{ axis: "sub_y_axis", error: "原点センサに到達しませんでした" }],
+      },
+    });
+
+    const check = section("アクチュエータ動作確認");
+    expect(within(check).getByText("零点合わせ")).toBeInTheDocument();
+    expect(within(check).getByText("原点センサに到達しませんでした")).toBeInTheDocument();
   });
 
   it("group を持たない項目・未知の group の項目も必ず操作できる形で描く", () => {
