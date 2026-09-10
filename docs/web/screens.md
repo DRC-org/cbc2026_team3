@@ -54,8 +54,8 @@
 | | 準備中 | 試合中・終了 |
 |---|---|---|
 | **Monitor** | `StartGate`（全幅・主役）+ 左 `MatchPrep` / 右 機体状態 | `MatchStrip` + `RobotStatusRow` ×2 + `EventFeed` |
-| **操縦者・半自動** | `ModeSwitch` + 左 零点合わせ + 作動点測定 + 機体状態（展開） / 右 ステップ | `ModeSwitch` + 左 `ActionPanel`+`AlwaysManualPanel`+ステップ / 右 `MatchTimer`+機体状態 |
-| **操縦者・手動** | `ModeSwitch` + 左 零点合わせ + 作動点測定 + `ManualPanel` / 右 機体状態 | `ModeSwitch` + 左 `ManualPanel` / 右 `MatchTimer`+機体状態 |
+| **操縦者・半自動** | `ModeSwitch` + 左 零点合わせ + 機体状態（展開） / 右 ステップ | `ModeSwitch` + 左 `ActionPanel`+`AlwaysManualPanel`+ステップ / 右 `MatchTimer`+機体状態 |
+| **操縦者・手動** | `ModeSwitch` + 左 零点合わせ + `ManualPanel` + 作動点測定（サブハンドのみ） / 右 機体状態 | `ModeSwitch` + 左 `ManualPanel` / 右 `MatchTimer`+機体状態 |
 
 吸着パッドを持つ機体（`state.suction` が `null` でない）は、操縦者画面の**左列の先頭に
 `SuctionPadPanel` が乗る**（フェーズ・モードを問わず。試合中の半自動だけは `AlwaysManualPanel`
@@ -63,8 +63,10 @@
 
 指差喚呼と動作確認は **Monitor の準備面にしか無い**。操縦者 2 名が同じ場所に立つので機体ごとに
 置くと二度読み上げになり、動作確認は両ハンドを 1 本のシーケンスで駆動する。
-**零点合わせと作動点測定は操縦者画面の準備中にも出す**（機体ごとに走るので、担当機のぶんだけ）——
-手動で軸を動かしていて座標のずれに気付くのはその画面だから。
+**零点合わせだけは操縦者画面の準備中にも出す**（機体ごとに走るので、担当機のぶんだけ）——
+手動で軸を動かしていて座標のずれに気付くのはその画面だから。作動点測定は手で寄せながら測る
+流れなので、**手動操縦の区画（`ManualPanel` の下）にだけ**出す（`lib/robots.ts` の
+`switchMeasure` を持つ機体 = サブハンドのみ。本数は配信の軸 × 向きから組む）。
 
 ---
 
@@ -178,10 +180,11 @@
 └─────────────┴──────────┘      └─────────────┴──────────┘
 ```
 
-左の面の上には `零点合わせ` と `作動点測定` のパネル（`shrink-0`）が乗り、吸着パッドを持つ機体では
-さらにその上に `SuctionPadPanel`（`shrink-0`）が乗る。左の面が残りの高さを取る（`flex-1`）。
-`零点合わせ` の中身は `HomingButtons robot={robotKey}` + `HomingPanel robot={robotKey}`、
-`作動点測定` は `SwitchMeasureButtons robot={robotKey}`。**どちらも手動中に出す。** どちらかの機体が
+左の面の上には `零点合わせ` パネル（`shrink-0`）が乗り、吸着パッドを持つ機体ではさらにその上に
+`SuctionPadPanel`（`shrink-0`）が乗る。左の面が残りの高さを取る（`flex-1`）。手動ではその下に
+`作動点測定`（`SwitchMeasureButtons robot={robotKey}`、`shrink-0`、サブハンドのみ）が付く。
+`零点合わせ` の中身は `HomingButtons robot={robotKey}` + `HomingPanel robot={robotKey}`。
+**零点合わせは手動中も出す。** どちらかの機体が
 手動モードだとサーバーは `homing_start` / `switch_measure_start` を必ず拒否する（`lib/server.py` の
 `_environment_deny`。全機を見る）ので、ボタンは押されたら**知っているロボット全部へ
 `set_operation_mode`（半自動）を送ってから**本命を送る（`hooks/useSequenceModeRestore`）。

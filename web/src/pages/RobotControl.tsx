@@ -23,6 +23,7 @@ import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
 import type { ManualState, OperationMode } from "@/lib/protocol";
+import { hasSwitchMeasure } from "@/lib/robots";
 import { isRestartFromTop, sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
@@ -168,11 +169,12 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     </Panel>
   );
 
-  const switchMeasurePanel = (
+  // 手で寄せながら測る流れなので、手動操縦の区画にだけ置く
+  const switchMeasurePanel = hasSwitchMeasure(robotKey) ? (
     <Panel legend="作動点測定" className="shrink-0" bodyClassName="gap-1.5">
       <SwitchMeasureButtons robot={robotKey} />
     </Panel>
-  );
+  ) : null;
 
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
@@ -219,8 +221,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           <div className="flex min-h-0 flex-col gap-2">
             {suctionPanel}
             {homingPanel}
-            {switchMeasurePanel}
             {inManual ? manualPanel : openSubsystemPanel}
+            {inManual ? switchMeasurePanel : null}
           </div>
           {inManual ? openSubsystemPanel : stepPanel}
         </div>

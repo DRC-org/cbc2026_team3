@@ -858,30 +858,38 @@ describe("零点合わせ", () => {
     expect(screen.queryByText(reason)).toBeNull();
   });
 
-  it("作動点測定は準備中に軸 × 向きのボタンで出す (手動中も)", () => {
-    const switchMeasure = {
-      ...EMPTY_SWITCH_MEASURE,
-      available: true,
-      blocked_reason: null,
-      targets: { sub_hand: ["sub_y_axis", "sub_lift"] },
-    };
-    for (const mountIt of [
-      () =>
-        renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
-          states: { sub_hand: robotState() },
-          matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
-          switchMeasure,
-        }),
-      () => mountManual("setup", { switchMeasure }),
-    ]) {
-      const view = mountIt();
-      expect(screen.getByText("作動点測定")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "sub_lift の+ 方向の作動点測定を開始" }),
-      ).toBeEnabled();
-      expect(screen.getAllByRole("button", { name: /の作動点測定を開始/ })).toHaveLength(4);
-      view.unmount();
-    }
+  const SWITCH_MEASURE = {
+    ...EMPTY_SWITCH_MEASURE,
+    available: true,
+    blocked_reason: null,
+    targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis", "sub_lift"] },
+  };
+
+  it("作動点測定は手動操縦の区画にだけ、軸 × 向きのボタンで出す", () => {
+    mountManual("setup", { switchMeasure: SWITCH_MEASURE });
+
+    expect(screen.getByText("作動点測定")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "sub_lift の+ 方向の作動点測定を開始" }),
+    ).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: /の作動点測定を開始/ })).toHaveLength(4);
+  });
+
+  it("半自動中とメインハンドの画面には作動点測定を出さない", () => {
+    const sequence = renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      states: { sub_hand: robotState() },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
+      switchMeasure: SWITCH_MEASURE,
+    });
+    expect(screen.queryByText("作動点測定")).toBeNull();
+    sequence.unmount();
+
+    renderWithRobot(<RobotControl robotKey="main_hand" label="メインハンド" />, {
+      states: { main_hand: robotState({ robot: "main_hand", manual: MANUAL }) },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
+      switchMeasure: SWITCH_MEASURE,
+    });
+    expect(screen.queryByText("作動点測定")).toBeNull();
   });
 
   it("試合中は出さない (サーバーがフェーズで拒む)", () => {
