@@ -1627,7 +1627,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 
 | 課題 | 現状 |
 |---|---|
-| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドの直動 2 軸**（サーボ 3 軸は 2026-09-10 に実測済み。可動域だけ全域のまま） |
+| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance` と `travel`、**`rotate` の `manual` の上端と `positions.rotate.pick`**（どちらも 185.0deg だが**実測の裏付けは 180.0deg まで**。[`mechanism_handoff.md`](mechanism_handoff.md) §1）、`y_axis` の `homing`、**サブハンドの直動 2 軸**（サーボ 3 軸は 2026-09-10 に実測済み。可動域だけ全域のまま） |
 | M3508 の位置制御の一部が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は 150mm で取り直し済みだが、**短距離（15mm）での `sync_kp` の取り直しが残る**（最適値が振幅で変わる軸である） |
 | 低速域のスティックスリップが未観測 | 予測であって観測ではない。対抗手段は `ki`（既に 10）と `velocity_ff`。静摩擦補償は今回スコープ外 |
 | PID ゲインと `velocity_ff` は実行中に変更できず UI にも配信されない | 調整は config 変更 + 再起動。`pid.kd` と `motion.velocity_ff` は 2 つの yaml にまたがる対 |
