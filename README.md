@@ -31,6 +31,7 @@ CAN バスのセットアップ、Web UI のビルド、systemd への配置は
 | ファームウェアのビルドと書き込み | [`firmware/README.md`](firmware/README.md) |
 | 操縦 UI が今どうなっているか | [`docs/web/`](docs/web/) — 画面・配色・データフロー・罠の 4 枚 |
 | 操縦 UI の開発（コマンドと構成） | [`web/README.md`](web/README.md) |
+| 未着手と未決に何が残っているか | [`docs/todo.md`](docs/todo.md) — 実装まで済んだら該当文書へ移してここから消す |
 | いつ何が起きたか（実機で観測した事象の記録） | [`docs/history/`](docs/history/) — 正ではない |
 
 `docs/architecture.md` と `docs/invariants.md` は対になっている。**構造は architecture、
