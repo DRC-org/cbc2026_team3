@@ -292,6 +292,18 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_switch_measure_start",
     ),
     _spec(
+        "switch_distance_start",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は距離測定を実行できません",
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため距離測定を実行できません",
+        blocked_without_court=True,
+        court_deny_message=(
+            "コートが未設定のため距離測定を実行できません (試合準備でコートを選んでください)"
+        ),
+        handler="_cmd_switch_distance_start",
+    ),
+    _spec(
         "reenergize_motors",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,

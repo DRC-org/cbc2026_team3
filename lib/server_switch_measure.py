@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from lib.sequence.homing import SwitchMeasurement, measure_switch
+from lib.sequence.homing import SwitchDistance, SwitchMeasurement, measure_distances, measure_switch
 from lib.server_homing import HomingSource
 
 logger = logging.getLogger(__name__)
@@ -34,10 +34,10 @@ def _positive(label: str, value: object) -> tuple[float | None, str | None]:
 
 
 class SwitchMeasureController:
-    """ロボット・軸・向きを指定してリミットスイッチの作動点を実測する。
+    """リミットスイッチの作動点 (軸と向き) と、両端のスイッチ間の距離 (ロボット単位) を実測する。
 
     実行は零点合わせと同じ `HomingRunner` の二段探索を通し、原点を書き込む段だけを
-    行わない。対象の軸は零点合わせと共通 (`HomingSource`)。
+    行わない。対象の軸・寄せる口は零点合わせと共通 (`HomingSource`)。
     """
 
     def __init__(
@@ -57,6 +57,8 @@ class SwitchMeasureController:
         self._axis: str | None = None
         self._direction: float | None = None
         self._result: SwitchMeasurement | None = None
+        #: 距離測定の実行中と結果。作動点測定 (1 本) のときは None
+        self._distances: list[SwitchDistance] | None = None
         self._error: str | None = None
         self._last_payload: dict | None = None
 
@@ -111,6 +113,7 @@ class SwitchMeasureController:
         self._direction = request.direction
         # 前回の実測を残したまま走らせると、失敗しても古い値が読めてしまう
         self._result = None
+        self._distances = None
 
         async def _run() -> None:
             logger.info(
@@ -145,14 +148,78 @@ class SwitchMeasureController:
         await self.publish()
         return None
 
-    def _resolve(self, data: dict) -> tuple[_Request | None, str | None]:
+    async def start_distance(self, data: dict) -> str | None:
+        """そのロボットの全軸で距離測定を開始する。**拒んだ理由を返す (通れば None)。**"""
+        deny = self.deny_reason()
+        if deny is not None:
+            return await self._reject(deny)
+
+        robot, known, reason = self._resolve_robot(data)
+        if robot is None or known is None:
+            return await self._reject(reason or "距離測定の対象を決められません")
+
+        source = self._source
+        assert source is not None
+
+        self._error = None
+        self._robot = robot
+        self._axis = None
+        self._direction = None
+        self._result = None
+        self._distances = []
+
+        async def _on_axis(axis: str) -> None:
+            self._axis = axis
+            await self.publish()
+
+        async def _on_result(result: SwitchDistance) -> None:
+            assert self._distances is not None
+            self._distances.append(result)
+            await self.publish()
+
+        async def _run() -> None:
+            logger.info("距離測定: robot=%s 軸=%s", robot, ", ".join(known))
+            try:
+                await measure_distances(
+                    source.runner,
+                    source.table,
+                    source.motors,
+                    court=source.court(),
+                    axes=known,
+                    # 寄せる口は零点合わせと同じ。前後は昇降が top に居ないと 1 歩も動けない
+                    move_to=source.move_to,
+                    on_axis=_on_axis,
+                    on_result=_on_result,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("距離測定に失敗: %s (%s)", robot, exc)
+                self._error = str(exc)
+            finally:
+                self._axis = None
+                self._running = False
+                await self.publish()
+
+        self._running = True
+        self._task = asyncio.create_task(_run())
+        await self.publish()
+        return None
+
+    def _resolve_robot(self, data: dict) -> tuple[str | None, tuple[str, ...] | None, str | None]:
         robot = data.get("robot")
         if not isinstance(robot, str) or not robot:
-            return None, "ロボットが指定されていません"
+            return None, None, "ロボットが指定されていません"
 
         known = self.targets(robot)
         if not known:
-            return None, f"'{robot}' に作動点を測定できる軸がありません"
+            return None, None, f"'{robot}' に作動点を測定できる軸がありません"
+        return robot, known, None
+
+    def _resolve(self, data: dict) -> tuple[_Request | None, str | None]:
+        robot, known, reason = self._resolve_robot(data)
+        if robot is None or known is None:
+            return None, reason
 
         axis = data.get("axis")
         if not isinstance(axis, str) or not axis:
@@ -200,6 +267,9 @@ class SwitchMeasureController:
             "axis": self._axis,
             "direction": self._direction,
             "result": self._result.to_dict() if self._result is not None else None,
+            "distances": None
+            if self._distances is None
+            else [result.to_dict() for result in self._distances],
             "error": self._error,
             "targets": {
                 robot: list(axes)

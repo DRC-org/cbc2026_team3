@@ -715,6 +715,7 @@
       "axis": null,
       "blocked_reason": null,
       "direction": null,
+      "distances": null,
       "error": null,
       "result": null,
       "robot": null,
@@ -731,6 +732,7 @@
       "axis": "y_axis",
       "blocked_reason": null,
       "direction": 1.0,
+      "distances": null,
       "error": "軸 'y_axis' が 5.0mm 動かしてもリミットスイッチ 'origin_sensor' に 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)",
       "result": null,
       "robot": "main_hand",
@@ -747,6 +749,7 @@
       "axis": "y_axis",
       "blocked_reason": null,
       "direction": -1.0,
+      "distances": null,
       "error": null,
       "result": {
         "axis": "y_axis",

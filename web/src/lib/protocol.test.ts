@@ -675,6 +675,7 @@ describe("parseServerMessage", () => {
         axis: "sub_y_axis",
         direction: -1,
         result: RESULT,
+        distances: null,
         error: null,
         targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
       });
@@ -689,10 +690,44 @@ describe("parseServerMessage", () => {
           axis: "sub_y_axis",
           direction: -1,
           result: RESULT,
+          distances: null,
           error: null,
           targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
         },
       });
+    });
+
+    it("距離は測れた軸と測れなかった軸を混ぜて運び、数値が欠けた軸は MALFORMED", () => {
+      const ok = { axis: "sub_lift", unit: "mm", distance: 159.0, step: 0.1, coarse_step: 0.5 };
+      const failed = {
+        axis: "sub_y_axis",
+        unit: "mm",
+        distance: null,
+        step: null,
+        coarse_step: null,
+      };
+      const message = parse({
+        type: "switch_measure_state",
+        distances: [
+          { ...ok, error: null },
+          { ...failed, error: "到達しませんでした" },
+        ],
+        targets: {},
+      });
+      expect(message?.type).toBe("switch_measure_state");
+      if (message?.type !== "switch_measure_state") return;
+      expect(message.switchMeasure.distances).toEqual([
+        { ...ok, error: null },
+        { ...failed, error: "到達しませんでした" },
+      ]);
+
+      const broken = parse({
+        type: "switch_measure_state",
+        distances: [{ ...ok, distance: "159.0", error: null }],
+        targets: {},
+      });
+      if (broken?.type !== "switch_measure_state") return;
+      expect(broken.switchMeasure.distances).toBe(MALFORMED);
     });
 
     it("未実行の result は null、数値が欠けた result は MALFORMED (0 で埋めない)", () => {

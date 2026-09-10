@@ -849,12 +849,13 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | 要素 | 中身 |
 |---|---|
 | 宛先 | **`robot` / `axis` / `direction` が必須**。零点合わせと同じく全機を回す形は持たない |
-| 向き | 指定させる。`homing.direction` を使い回さない（**測りたいのは `homing` が使わない側の端でもある**） |
+| 向き | 指定させる。`homing.direction` を使い回さない（**測りたいのは `homing` が使わない側の端でもある**）。測る向きの端のスイッチは `guard.limits` から引き、宣言が無ければ原点センサ |
 | 実行 | `HomingRunner.measure()`。`home()` と同じ `_approach()`（離脱 → 粗探索 → 寄せ直し）を通り、`_capture_origin()` を呼ばない |
 | 刻み・上限 | 既定は `homing` の `coarse_step` / `step` / `search_distance`。指定は `HomingSpec` を `replace()` して載せるので、**探索の各段が見る歯止めがそのまま測定の歯止めになる**（別変数で持たない）。`HomingSpec` の検証もそのまま効く |
 | 結果 | 作動点・離脱点・ON 区間の幅・**使った刻み**（作動点のばらつきは刻みそのものなので、値と一緒でないと精度が読めない） |
 | ゲート | `SwitchMeasureController.deny_reason()`。動作確認・零点合わせと相互排他（`RobotServer._axis_holders()` が単一情報源） |
 | 配信 | 進捗も結果も拒否理由も `switch_measure_state` 1 通。拒否は加えて `command_rejected` で要求元へ返す |
+| 距離 | `switch_distance_start { robot }`（同じコントローラの `start_distance()`）。そのロボットの対象軸を全部、軸ごとに − 側・+ 側の 2 回測って作動点の差を出す（`measure_distances`）。順序と寄せは `run_homing` と同じ `_in_stages`。結果は `switch_measure_state.distances`（軸ごとの距離・刻み・失敗理由） |
 
 対象の軸は零点合わせと共通（`HomingSource`）。`RobotServer.set_homing_source()` が両方へ配る。
 
@@ -1061,10 +1062,10 @@ interlocks:                # 軸どうしの干渉（§4）。位置名で書き
 ことになるため。`lib/sequence/homing.py` の `homing_order()` は同じ宣言から**参照先を先に回す並び**を
 作り、`run_homing()` が必ず通す。
 
-`run_homing()` に**寄せる口（`move_to`）を渡した経路だけ**が「①参照される軸を確定 → ②その軸を
-寄せる → ③残りを確定」の 3 段で回る。渡すのは統合動作確認（`sequences/motor_check.py`）と零点合わせ
-パネル（`HomingSource.move_to`。`main.py` が動作確認と同じ `Sequence.move_to` を配る）で、作動点測定は
-渡さない。**寄せるのは今回選ばれた軸だけ**で、①で確定できなかった軸は寄せない。使い分けと理由は
+`run_homing()` / `measure_distances()` に**寄せる口（`move_to`）を渡した経路だけ**が「①参照される軸を
+確定 → ②その軸を寄せる → ③残りを確定」の 3 段（`_in_stages`。両者が共有する）で回る。渡すのは統合
+動作確認（`sequences/motor_check.py`）と零点合わせ・距離測定（`HomingSource.move_to`。`main.py` が
+動作確認と同じ `Sequence.move_to` を配る）で、作動点測定（1 本）は渡さない。**寄せるのは今回選ばれた軸だけ**で、①で確定できなかった軸は寄せない。使い分けと理由は
 `invariants.md` §4。
 
 `main.py` 側は**起動自体は続行**する（`_load_position_table_file`）。yaml が無い／壊れて
@@ -1390,7 +1391,7 @@ setup ⇄ ready → match → finished → setup
 | コマンド | setup | ready | match | finished | 許可フェーズ集合 |
 |---|:-:|:-:|:-:|:-:|---|
 | `set_court` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
-| `motor_check_start` / `homing_start` / `switch_measure_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
+| `motor_check_start` / `homing_start` / `switch_measure_start` / `switch_distance_start` | ✓ | ✓ | ✗ | ✓ | `PHASES_OUTSIDE_MATCH` |
 | `checklist_set` / `checklist_reset` / `checklist_check_all` | ✓ | ✓ | ✗ | ✗ | `PHASES_PREPARATION` |
 | `match_start` | ✗ | ✓ | ✗ | ✗ | `PHASES_START_GATE` |
 | `match_finish` | ✗ | ✗ | ✓ | ✗ | `PHASES_DURING_MATCH` |
@@ -1405,7 +1406,7 @@ setup ⇄ ready → match → finished → setup
 `blocked_without_court` を立てたコマンドは、コートが決まるまで**そのロボットが
 コート依存軸を持つときだけ**拒否される（`sequence_start` / `sequence_jump` / `trigger` /
 `manual_move` / `manual_set` / `manual_jog` / `homing_start` / `switch_measure_start` /
-`motor_check_start`）。要否の正は `PositionTable.court_dependent_axes()`（`scale` が
+`switch_distance_start` / `motor_check_start`）。要否の正は `PositionTable.court_dependent_axes()`（`scale` が
 コート別の軸）だけが持ち、サーバーにも UI にも軸名を書き写さない。
 
 `motor_check_start` は `robot` を取らず両ハンドを走らせるので、**コート別の位置の値**を
@@ -1420,7 +1421,7 @@ setup ⇄ ready → match → finished → setup
 |---|:-:|---|
 | `sequence_start` / `sequence_jump` / `trigger` / `match_start` | ✗ | シーケンスが進むと次のステップが停止指令を上書きする（拒否文はコマンドごとに別。`lib/commands.py`） |
 | `motor_check_start` | ✗ | 同上（拒否は `motor_check_error` で通知） |
-| `homing_start` / `switch_measure_start` | ✗ | 同上（拒否は `command_rejected` で通知） |
+| `homing_start` / `switch_measure_start` / `switch_distance_start` | ✗ | 同上（拒否は `command_rejected` で通知） |
 | `manual_move` / `manual_set` / `manual_jog` | ✗ | 目標値を送るため |
 | `set_operation_mode` | ✓ | 機体を動かさない切替そのもの |
 | `sequence_stop` / `e_stop` / `e_stop_release` / `motor_check_abort` | ✓ | 止める方向の操作は緊急停止中こそ通す |

@@ -830,66 +830,107 @@ describe("吸着パッドの面", () => {
   });
 });
 
-describe("零点合わせ", () => {
+describe("測定系のボタン (零点合わせ / リミットスイッチ間の距離測定)", () => {
   const HOMING = {
     ...EMPTY_HOMING,
     available: true,
     blocked_reason: null,
     targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
   };
-  const SUB_BUTTON = { name: "サブハンドの零点合わせを開始" };
-
-  it("準備中の半自動に、自分の担当機のボタンだけ出す", () => {
-    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
-      states: { sub_hand: robotState() },
-      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
-      homing: HOMING,
-    });
-
-    expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
-  });
-
-  it("手動中もボタンを出す (押せば半自動へ戻してから送る)", () => {
-    const reason = "'sub_hand' が手動操縦モードのため零点合わせを実行できません";
-    mountManual("setup", { homing: { ...HOMING, blocked_reason: reason } });
-
-    expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
-    expect(screen.queryByText(reason)).toBeNull();
-  });
-
   const SWITCH_MEASURE = {
     ...EMPTY_SWITCH_MEASURE,
     available: true,
     blocked_reason: null,
     targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis", "sub_lift"] },
   };
+  const SUB_BUTTON = { name: "サブハンドの零点合わせを開始" };
+  const DISTANCE_BUTTON = { name: "サブハンドのリミットスイッチ間の距離測定を開始" };
+  const SUCTION: RobotState["suction"] = { pads: [{ axis: "valve_1", label: "1", enabled: true }] };
 
-  it("作動点測定は手動操縦の区画にだけ、軸 × 向きのボタンで出す", () => {
-    mountManual("setup", { switchMeasure: SWITCH_MEASURE });
+  it("準備中の半自動に、自分の担当機のボタンを 2 つだけ、吸着パッドの上に出す", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      states: { sub_hand: robotState({ suction: SUCTION }) },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
+      homing: HOMING,
+      switchMeasure: SWITCH_MEASURE,
+    });
 
-    expect(screen.getByText("作動点測定")).toBeInTheDocument();
+    const homing = screen.getByRole("button", SUB_BUTTON);
+    const distance = screen.getByRole("button", DISTANCE_BUTTON);
+    expect(homing).toBeEnabled();
+    expect(distance).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
+    expect(screen.queryAllByRole("button", { name: /測定を開始|合わせを開始/ })).toHaveLength(2);
+
+    const suction = screen.getByRole("group", { name: "吸着に使うパッド" });
+    expect(homing.compareDocumentPosition(suction) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "sub_lift の+ 方向の作動点測定を開始" }),
-    ).toBeEnabled();
-    expect(screen.getAllByRole("button", { name: /の作動点測定を開始/ })).toHaveLength(4);
+      distance.compareDocumentPosition(suction) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // 大きな Panel の箱で囲まない
+    expect(screen.queryByText("零点合わせ")).toBeNull();
+    expect(screen.queryByText("作動点測定")).toBeNull();
   });
 
-  it("半自動中とメインハンドの画面には作動点測定を出さない", () => {
-    const sequence = renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+  it("手動中は出さない", () => {
+    mountManual("setup", { homing: HOMING, switchMeasure: SWITCH_MEASURE });
+
+    expect(screen.queryByRole("button", SUB_BUTTON)).toBeNull();
+    expect(screen.queryByRole("button", DISTANCE_BUTTON)).toBeNull();
+  });
+
+  it("メインハンドの画面には距離測定を出さない", () => {
+    renderWithRobot(<RobotControl robotKey="main_hand" label="メインハンド" />, {
+      states: { main_hand: robotState({ robot: "main_hand" }) },
+      matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
+      homing: HOMING,
+      switchMeasure: SWITCH_MEASURE,
+    });
+
+    expect(screen.getByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /距離測定を開始/ })).toBeNull();
+  });
+
+  it("距離測定は担当機を宛先にして送る (軸も向きも UI が選ばない)", async () => {
+    const { context } = renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
       states: { sub_hand: robotState() },
       matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
       switchMeasure: SWITCH_MEASURE,
     });
-    expect(screen.queryByText("作動点測定")).toBeNull();
-    sequence.unmount();
 
-    renderWithRobot(<RobotControl robotKey="main_hand" label="メインハンド" />, {
-      states: { main_hand: robotState({ robot: "main_hand", manual: MANUAL }) },
+    await userEvent.click(screen.getByRole("button", DISTANCE_BUTTON));
+    await userEvent.click(screen.getByRole("button", { name: "開始" }));
+
+    expect(context.sendOrReport).toHaveBeenLastCalledWith(
+      { type: "switch_distance_start", robot: "sub_hand" },
+      expect.any(String),
+    );
+  });
+
+  it("距離の結果は軸ごとに刻みを添えて出し、測れなかった軸は理由を出す", () => {
+    renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+      states: { sub_hand: robotState() },
       matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
-      switchMeasure: SWITCH_MEASURE,
+      switchMeasure: {
+        ...SWITCH_MEASURE,
+        robot: "sub_hand",
+        distances: [
+          { axis: "sub_lift", unit: "mm", distance: 159, step: 0.1, coarse_step: 0.5, error: null },
+          {
+            axis: "sub_y_axis",
+            unit: "mm",
+            distance: null,
+            step: null,
+            coarse_step: null,
+            error: "到達しませんでした",
+          },
+        ],
+      },
     });
-    expect(screen.queryByText("作動点測定")).toBeNull();
+
+    expect(screen.getByText("159 mm")).toBeInTheDocument();
+    expect(screen.getByText(/刻み 0.1 mm/)).toBeInTheDocument();
+    expect(screen.getByText("到達しませんでした")).toBeInTheDocument();
   });
 
   it("試合中は出さない (サーバーがフェーズで拒む)", () => {
@@ -899,7 +940,7 @@ describe("零点合わせ", () => {
       homing: HOMING,
     });
 
-    expect(screen.queryByText("零点合わせ")).toBeNull();
-    expect(screen.queryByText("作動点測定")).toBeNull();
+    expect(screen.queryByRole("button", SUB_BUTTON)).toBeNull();
+    expect(screen.queryByRole("button", DISTANCE_BUTTON)).toBeNull();
   });
 });

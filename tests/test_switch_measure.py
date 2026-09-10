@@ -1,8 +1,10 @@
-"""リミットスイッチの作動点測定 (`switch_measure_start` / `HomingRunner.measure`)。
+"""リミットスイッチの作動点測定 (`switch_measure_start` / `HomingRunner.measure`) と、
+両端のスイッチ間の距離測定 (`switch_distance_start` / `measure_distances`)。
 
 零点確定と同じ二段探索を通しながら**原点を書き込まない**経路。要は 4 つ ——
 指定した向きの端を測ること、上限より先へ動かないこと、零点合わせ・動作確認と
-同時に走らないこと、そして **SET_ZERO を 1 通も出さないこと**。
+同時に走らないこと、そして **SET_ZERO を 1 通も出さないこと**。距離測定はそれに加えて、
+軸の順序と寄せが零点合わせと同じ 3 段を踏むこと。
 """
 
 from __future__ import annotations
@@ -16,7 +18,14 @@ from lib.drivers.base import MotorState
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.match_state import Court
 from lib.sequence.engine import Sequence, step
-from lib.sequence.homing import HomingError, SwitchMeasurement, measure_switch, run_homing
+from lib.sequence.homing import (
+    HomingError,
+    SwitchDistance,
+    SwitchMeasurement,
+    measure_distances,
+    measure_switch,
+    run_homing,
+)
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
@@ -25,7 +34,16 @@ from tests.server_fixtures import RecordingClient, ServerFixture
 
 # 零点確定の検証と**同じ模型**で測る。センサの模し方を書き写すと、片方だけが
 # 実機の挙動へ追随した状態が作れる
-from tests.test_homing import _axis_commands, _handle, _Recorder, _runner, _table
+from tests.test_homing import (
+    _INTERFERING_CONFIG,
+    _axis_commands,
+    _handle,
+    _interfering_group,
+    _Recorder,
+    _runner,
+    _SensorModel,
+    _table,
+)
 
 
 class TestMeasuresBothEdges:
@@ -120,6 +138,136 @@ class TestDoesNotWriteOrigin:
         result = await _runner(rec).measure(spec, _handle(spec, rec), direction=-1)
 
         assert result.engage == -3.0
+
+    async def test_逆側の端は_guard_limits_に宣言したスイッチを見る(self) -> None:
+        # 原点センサは片端にしか無い。反対の端は歯止めに宣言したスイッチで測る
+        table = load_position_table(
+            {
+                "axes": {
+                    "y_axis": {
+                        "unit": "mm",
+                        "command_unit": "mm",
+                        "tolerance": 0.1,
+                        "homing": {
+                            "sensor": "origin_sensor",
+                            "direction": -1,
+                            "search_distance": 10.0,
+                            "step": 1.0,
+                            "settle_s": 0.0,
+                        },
+                        "guard": {"limits": {"minus": "origin_sensor", "plus": "far_sensor"}},
+                        "motors": {"y_axis_r": {"scale": 1.0}},
+                    }
+                },
+                "positions": {"y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder(
+            sensors={
+                "origin_sensor": _SensorModel(active_band=(-6.0, -3.0)),
+                "far_sensor": _SensorModel(active_band=(3.0, 6.0)),
+            }
+        )
+        handle = _handle(spec, rec, sensor_active=rec.sensor_active)
+
+        result = await _runner(rec).measure(spec, handle, direction=1)
+
+        assert result.engage == 3.0
+
+
+class _EdgeRunner:
+    """両端の作動点を向きで返す `HomingRunner` の代役。何をどの順で測り、いつ寄せたかを控える。"""
+
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.log: list[object] = []
+        self._fail = fail
+
+    async def measure(
+        self, spec: AxisSpec, _handle: object, *, direction: float, **_kwargs: object
+    ) -> SwitchMeasurement:
+        self.log.append((spec.name, direction))
+        if spec.name == self._fail:
+            raise HomingError(f"軸 '{spec.name}' が到達しませんでした")
+        engage = 5.0 if direction > 0 else -447.0
+        return SwitchMeasurement(
+            axis=spec.name,
+            unit=spec.unit,
+            direction=direction,
+            engage=engage,
+            release=engage - direction * 2.0,
+            width=2.0,
+            step=0.1,
+            coarse_step=1.0,
+        )
+
+    async def move_to(self, targets: dict[str, str]) -> None:
+        self.log.append(("move_to", dict(targets)))
+
+
+class TestMeasuresDistanceBetweenSwitches:
+    def _table(self) -> PositionTable:
+        return load_position_table(_INTERFERING_CONFIG, source="<test>")
+
+    async def test_距離は両端の作動点の差(self) -> None:
+        table = self._table()
+        runner = _EdgeRunner()
+
+        results = await measure_distances(
+            runner,  # type: ignore[arg-type]
+            table,
+            _interfering_group(table, lift_mm=-20.0),
+            court=Court.RED,
+            axes=["lift"],
+        )
+
+        assert results == [
+            SwitchDistance(
+                axis="lift", unit="mm", distance=452.0, step=0.1, coarse_step=1.0, error=None
+            )
+        ]
+
+    async def test_参照される軸を先に測り_寄せてから残りを測る(self) -> None:
+        """`slide` は `lift` が `top` に居ないと 1 歩も動けない。零点合わせと同じ 3 段を踏む。"""
+        table = self._table()
+        runner = _EdgeRunner()
+
+        await measure_distances(
+            runner,  # type: ignore[arg-type]
+            table,
+            _interfering_group(table, lift_mm=-20.0),
+            court=Court.RED,
+            axes=["slide", "lift"],
+            move_to=runner.move_to,
+        )
+
+        assert runner.log == [
+            ("lift", -1.0),
+            ("lift", 1.0),
+            ("move_to", {"lift": "top"}),
+            ("slide", -1.0),
+            ("slide", 1.0),
+        ]
+
+    async def test_測れなかった軸は寄せず_残りは続ける(self) -> None:
+        table = self._table()
+        runner = _EdgeRunner(fail="lift")
+
+        results = await measure_distances(
+            runner,  # type: ignore[arg-type]
+            table,
+            _interfering_group(table, lift_mm=-20.0),
+            court=Court.RED,
+            axes=["slide", "lift"],
+            move_to=runner.move_to,
+        )
+
+        assert ("move_to", {"lift": "top"}) not in runner.log
+        assert [(r.axis, r.distance, r.error is None) for r in results] == [
+            ("lift", None, False),
+            ("slide", 452.0, True),
+        ]
 
 
 class _ZeroingDriver(Edulite05Driver):
@@ -277,7 +425,7 @@ class _RecordingRunner:
             axis=spec.name,
             unit=spec.unit,
             direction=direction,
-            engage=-447.0,
+            engage=-447.0 if direction < 0 else 5.0,
             release=-441.2,
             width=5.8,
             step=step if step is not None else 1.0,
@@ -501,4 +649,49 @@ class TestCommand:
         await fx.command({"type": "switch_measure_start", **_payload()}, requester=client)
 
         assert client.of_type("command_rejected")
+        assert runner.measured == []
+
+
+class TestDistanceCommand:
+    async def test_ロボットの全軸を両端へ測って距離を配る(self) -> None:
+        fx, runner = _build()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command({"type": "switch_distance_start", "robot": "sub_hand"})
+        await fx.wait_switch_measure_idle()
+
+        assert runner.measured == [("sub_y_axis", -1.0), ("sub_y_axis", 1.0)]
+        state = client.of_type("switch_measure_state")[-1]
+        assert state["distances"] == [
+            {
+                "axis": "sub_y_axis",
+                "unit": "mm",
+                "distance": 452.0,
+                "step": 1.0,
+                "coarse_step": None,
+                "error": None,
+            }
+        ]
+        assert state["running"] is False
+        assert state["result"] is None
+
+    async def test_作動点測定と同じ条件で拒む(self) -> None:
+        fx, runner = _build()
+        fx.set_homing_running(True)
+        client = RecordingClient()
+
+        await fx.command({"type": "switch_distance_start", "robot": "sub_hand"}, requester=client)
+
+        rejected = client.of_type("command_rejected")
+        assert rejected and rejected[-1]["command"] == "switch_distance_start"
+        assert "零点合わせ" in rejected[-1]["reason"]
+        assert runner.measured == []
+
+    async def test_ロボットを省いたら拒む(self) -> None:
+        fx, runner = _build()
+
+        reason = await fx.server._switch_measure.start_distance({})
+
+        assert reason is not None and "ロボット" in reason
         assert runner.measured == []

@@ -495,6 +495,7 @@ const SWITCH_MEASURE_FIELDS: FieldSpec = {
     axis: "ui",
     direction: "ui",
     result: "ui",
+    distances: "ui",
     error: "ui",
     targets: "ui",
   }),

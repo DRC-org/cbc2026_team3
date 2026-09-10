@@ -605,6 +605,11 @@ class RobotServer:
         if reason is not None:
             await self._reject_command(requester, "switch_measure_start", reason)
 
+    async def _cmd_switch_distance_start(self, data: dict, requester: WSOrNone) -> None:
+        reason = await self._switch_measure.start_distance(data)
+        if reason is not None:
+            await self._reject_command(requester, "switch_distance_start", reason)
+
     async def _cmd_set_operation_mode(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if not isinstance(robot_name, str) or robot_name not in self._robots:

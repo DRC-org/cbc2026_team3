@@ -128,7 +128,7 @@ OFF は既定のボタンのまま置く。2 つの面が同じ弁を別の色�
 | `Zap` | 開発用の一括チェック（同上） | `MatchPrep` |
 | `Activity` | 動作確認の起動 | `MotorCheckButton` |
 | `Crosshair` | 零点合わせの起動 | `HomingButtons` |
-| `Ruler` | 作動点測定の起動 | `SwitchMeasurePanel` |
+| `Ruler` | 作動点測定・距離測定の起動 | `SwitchMeasurePanel` / `SwitchDistanceButton` |
 | `Send` | 絶対値入力の送信 | `AbsoluteEntry` |
 | `Minus` / `Plus` · `ChevronsLeft` / `ChevronsRight` | ジョグ · 可動端へ | `ContinuousControls` |
 | `ChevronRight` / `Pause` / `Circle` | ステップ一覧の 現在 / 許可待ち / 未到達 | `SequenceStepList` |

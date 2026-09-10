@@ -54,19 +54,19 @@
 | | 準備中 | 試合中・終了 |
 |---|---|---|
 | **Monitor** | `StartGate`（全幅・主役）+ 左 `MatchPrep` / 右 機体状態 | `MatchStrip` + `RobotStatusRow` ×2 + `EventFeed` |
-| **操縦者・半自動** | `ModeSwitch` + 左 零点合わせ + 機体状態（展開） / 右 ステップ | `ModeSwitch` + 左 `ActionPanel`+`AlwaysManualPanel`+ステップ / 右 `MatchTimer`+機体状態 |
-| **操縦者・手動** | `ModeSwitch` + 左 零点合わせ + `ManualPanel` + 作動点測定（サブハンドのみ） / 右 機体状態 | `ModeSwitch` + 左 `ManualPanel` / 右 `MatchTimer`+機体状態 |
+| **操縦者・半自動** | `ModeSwitch` + 左 測定ボタン 2 つ（零点合わせ / 距離測定）+ 機体状態（展開） / 右 ステップ | `ModeSwitch` + 左 `ActionPanel`+`AlwaysManualPanel`+ステップ / 右 `MatchTimer`+機体状態 |
+| **操縦者・手動** | `ModeSwitch` + 左 `ManualPanel` / 右 機体状態 | `ModeSwitch` + 左 `ManualPanel` / 右 `MatchTimer`+機体状態 |
 
 吸着パッドを持つ機体（`state.suction` が `null` でない）は、操縦者画面の**左列の先頭に
-`SuctionPadPanel` が乗る**（フェーズ・モードを問わず。試合中の半自動だけは `AlwaysManualPanel`
-の下）。
+`SuctionPadPanel` が乗る**（フェーズ・モードを問わず。準備中の半自動では測定ボタン 2 つの下、
+試合中の半自動では `AlwaysManualPanel` の下）。
 
 指差喚呼と動作確認は **Monitor の準備面にしか無い**。操縦者 2 名が同じ場所に立つので機体ごとに
 置くと二度読み上げになり、動作確認は両ハンドを 1 本のシーケンスで駆動する。
-**零点合わせだけは操縦者画面の準備中にも出す**（機体ごとに走るので、担当機のぶんだけ）——
-手動で軸を動かしていて座標のずれに気付くのはその画面だから。作動点測定は手で寄せながら測る
-流れなので、**手動操縦の区画（`ManualPanel` の下）にだけ**出す（`lib/robots.ts` の
-`switchMeasure` を持つ機体 = サブハンドのみ。本数は配信の軸 × 向きから組む）。
+**零点合わせとリミットスイッチ間の距離測定は操縦者画面の準備中の半自動にも出す**（機体ごとに
+走るので、担当機のぶんだけ。距離測定は `lib/robots.ts` の `switchMeasure` を持つ機体 =
+サブハンドのみ）—— 手動で軸を動かしていて座標のずれに気付くのはその画面だから。手動中は出さない。
+スイッチ 1 本ずつ刻みを変えて測る作動点測定は Monitor にしか無い。
 
 ---
 
@@ -180,16 +180,15 @@
 └─────────────┴──────────┘      └─────────────┴──────────┘
 ```
 
-左の面の上には `零点合わせ` パネル（`shrink-0`）が乗り、吸着パッドを持つ機体ではさらにその上に
-`SuctionPadPanel`（`shrink-0`）が乗る。左の面が残りの高さを取る（`flex-1`）。手動ではその下に
-`作動点測定`（`SwitchMeasureButtons robot={robotKey}`、`shrink-0`、サブハンドのみ）が付く。
-`零点合わせ` の中身は `HomingButtons robot={robotKey}` + `HomingPanel robot={robotKey}`。
-**零点合わせは手動中も出す。** どちらかの機体が
-手動モードだとサーバーは `homing_start` / `switch_measure_start` を必ず拒否する（`lib/server.py` の
-`_environment_deny`。全機を見る）ので、ボタンは押されたら**知っているロボット全部へ
-`set_operation_mode`（半自動）を送ってから**本命を送る（`hooks/useSequenceModeRestore`）。
-半自動へ戻しても機体は動かない。手動中は `blocked_reason` で塞がず（その理由は押せば解消する）、
-切断中と緊急停止中だけ塞ぐ。確認ダイアログに「全機を半自動へ戻してから開始」と書く。
+半自動では左の面の上に測定ボタン 2 つ（`HomingButtons robot={robotKey}` +
+`SwitchDistanceButton robot={robotKey}`。**`Panel` で囲まず**小さく横に並べる）と
+`HomingPanel robot={robotKey}` が乗り、その下に吸着パッドを持つ機体では `SuctionPadPanel`
+（`shrink-0`）が乗る。左の面が残りの高さを取る（`flex-1`）。手動中は測定ボタンを出さない。
+どちらかの機体が手動モードだとサーバーは `homing_start` / `switch_distance_start` を必ず拒否する
+（`lib/server.py` の `_environment_deny`。全機を見る）ので、ボタンは押されたら**知っているロボット
+全部へ `set_operation_mode`（半自動）を送ってから**本命を送る（`hooks/useSequenceModeRestore`）。
+半自動へ戻しても機体は動かない。他機が手動中でも `blocked_reason` で塞がず（その理由は押せば
+解消する）、切断中と緊急停止中だけ塞ぐ。確認ダイアログに「全機を半自動へ戻してから開始」と書く。
 試合中・終了はフェーズで拒まれるので置かない。
 
 **格子はモードで変えず、どちらの面が 1fr を取るかだけが入れ替わる。** 準備中の主目的は
@@ -200,7 +199,7 @@
 されるので、押せる見た目にすると「押したのに何も起きない」だけが残る）。理由は
 `stepJumpBlockedReason` が 1 箇所で決め、パネルの見出し行に「試合中のみ操作可」として出る。
 指差喚呼と動作確認は Monitor 側にあるので、この画面が準備中に答える問いは
-「機体は健全か」「これから何が起きるか」「この機体の零点を合わせ直せるか（作動点を測れるか）」の 3 つ。
+「機体は健全か」「これから何が起きるか」「この機体の零点を合わせ直せるか（スイッチ間の距離を測れるか）」の 3 つ。
 
 ### 試合中・終了 — `grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)]`
 
@@ -379,7 +378,7 @@ Monitor の動作確認の下には結果（`HomingPanel`）と刻みを変え�
 |---|---|
 | `HomingButtons` | **サーバーが配る `targets`（ロボット → 対象軸）からロボットごとに 1 つずつ**出す。軸は選ばせない（`sub_y_axis` は `sub_lift` が `top` に居ることを要求するので、前後だけ選ぶと必ず拒否される。まとめて送れば `run_homing` が 3 段で回す）。ボタンに宛先のロボット名と対象軸を書き、確認ダイアログでも宛先を名指しする —— 押した先が別の機体だったのが 2026-09-09 の事故。押せないときは動作確認と同じく無効化 + 理由を別行。手動中は押せる（全機を半自動へ戻してから送る）。`robot` は必須で、その機体のぶんだけ出す |
 | `HomingPanel` | 実行中の軸と、軸ごとの成否・失敗理由。**インライン**（駆動中に EMG STOP を覆わない）。実行前は何も出さない。`robot` を渡すと他機の結果は出さない（Monitor では省略して全機） |
-| `SwitchMeasureButtons` | 操縦者用の作動点測定。**配信された軸 × 向きごとに 1 つずつ**ボタンを出し（サブハンドならスイッチ 4 本と 1 対 1。本数は決め打たない）、セレクタも刻みの入力欄も持たない（空欄＝`homing` の既定で足りる）。向きの呼び名は `directionLabel`、軸名は配信のまま —— 「前端」「上端」を UI に書き写さない。結果は測定した軸の行の下。手動中は押せる（全機を半自動へ戻してから送る）。バッジと結果表は `SwitchMeasureResult` を `SwitchMeasurePanel` と共有 |
+| `SwitchDistanceButton` | 操縦者用のリミットスイッチ間の距離測定。**ボタン 1 つ**でそのロボットの対象軸（配信の `targets`）を全部、両端まで寄せて「スイッチが入る点どうしの距離」を測る（`switch_distance_start { robot }`。軸も向きも UI が選ばない）。刻みの入力欄は持たない（`homing` の既定）。結果は軸ごとに距離と使った刻み、測れなかった軸は理由。バッジは `SwitchMeasureResult` の `SwitchMeasureBadge` を共有 |
 | `SwitchMeasurePanel` | Monitor 用の作動点測定（刻みを変えられるフルパネル）。零点合わせの直下。ロボット・軸・向きを選び、刻み・粗刻み・上限は任意（空欄なら `homing` の既定）。**押す前に「どのロボットのどの軸がどちらへ動くか」が読めること** —— 確認ダイアログでその 3 つを名指しする。結果は表（作動点 / 離脱点 / ON 区間 / 刻み。単位はサーバーが配る `result.unit`） |
 
 **動作確認・零点合わせ・作動点測定の相互排他は UI で判定しない。** どれが走っていても

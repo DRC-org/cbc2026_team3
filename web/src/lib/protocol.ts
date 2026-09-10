@@ -172,6 +172,16 @@ export interface SwitchMeasurement {
   coarse_step: number | null;
 }
 
+/** 1 軸の両端のスイッチが入る点どうしの距離。測れなかった軸は distance が null で error に理由 */
+export interface SwitchDistance {
+  axis: string;
+  unit: string;
+  distance: number | null;
+  step: number | null;
+  coarse_step: number | null;
+  error: string | null;
+}
+
 export interface SwitchMeasureSnapshot {
   available: boolean;
   blocked_reason: string | null;
@@ -180,6 +190,8 @@ export interface SwitchMeasureSnapshot {
   axis: string | null;
   direction: SwitchDirection | null;
   result: SwitchMeasurement | Malformed | null;
+  /** 距離測定の途中経過と結果。作動点測定 (1 本) のときは null */
+  distances: SwitchDistance[] | Malformed | null;
   error: string | null;
   targets: Record<string, string[]> | Malformed;
 }
@@ -210,6 +222,32 @@ export function parseSwitchMeasurement(raw: unknown): SwitchMeasurement | Malfor
     step: raw.step as number,
     coarse_step: raw.coarse_step as number | null,
   };
+}
+
+function parseSwitchDistance(raw: unknown): SwitchDistance | Malformed {
+  if (!isObject(raw)) return MALFORMED;
+  if (typeof raw.axis !== "string" || typeof raw.unit !== "string") return MALFORMED;
+  const error = typeof raw.error === "string" ? raw.error : null;
+  // 測れた軸は距離と刻みが数値で揃う。失敗した軸は null のまま運ぶ (0 で埋めない)
+  for (const key of ["distance", "step", "coarse_step"] as const) {
+    if (raw[key] !== null && !isFiniteNumber(raw[key])) return MALFORMED;
+  }
+  if (error === null && raw.distance === null) return MALFORMED;
+  return {
+    axis: raw.axis,
+    unit: raw.unit,
+    distance: raw.distance as number | null,
+    step: raw.step as number | null,
+    coarse_step: raw.coarse_step as number | null,
+    error,
+  };
+}
+
+export function parseSwitchDistances(raw: unknown): SwitchDistance[] | Malformed | null {
+  if (raw === null) return null;
+  if (!Array.isArray(raw)) return MALFORMED;
+  const parsed = raw.map(parseSwitchDistance);
+  return parsed.some((item) => item === MALFORMED) ? MALFORMED : (parsed as SwitchDistance[]);
 }
 
 export interface ServerInfo {
@@ -703,6 +741,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           axis: typeof raw.axis === "string" ? raw.axis : null,
           direction: parseSwitchDirection(raw.direction),
           result: parseSwitchMeasurement(raw.result),
+          distances: parseSwitchDistances(raw.distances),
           error: typeof raw.error === "string" ? raw.error : null,
           targets: parseHomingTargets(raw.targets),
         },

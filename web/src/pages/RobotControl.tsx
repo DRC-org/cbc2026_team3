@@ -4,7 +4,7 @@ import { useState } from "react";
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
-import { SwitchMeasureButtons } from "@/components/homing/SwitchMeasureButtons";
+import { SwitchDistanceButton } from "@/components/homing/SwitchDistanceButton";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
@@ -159,22 +159,16 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       />
     );
 
-  // 手動中も出す。押せば全機を半自動へ戻してから送るので、操縦者がモードを往復しなくてよい
-  const homingPanel = (
-    <Panel legend="零点合わせ" className="shrink-0" bodyClassName="gap-1.5">
+  // 測定系はボタン 2 つだけ。箱で囲まず吸着パッドの上に小さく並べる
+  const measurePanel = (
+    <div className="flex shrink-0 flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <HomingButtons robot={robotKey} />
+        {hasSwitchMeasure(robotKey) ? <SwitchDistanceButton robot={robotKey} /> : null}
       </div>
       <HomingPanel robot={robotKey} />
-    </Panel>
+    </div>
   );
-
-  // 手で寄せながら測る流れなので、手動操縦の区画にだけ置く
-  const switchMeasurePanel = hasSwitchMeasure(robotKey) ? (
-    <Panel legend="作動点測定" className="shrink-0" bodyClassName="gap-1.5">
-      <SwitchMeasureButtons robot={robotKey} />
-    </Panel>
-  ) : null;
 
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
@@ -219,10 +213,9 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
           <div className="flex min-h-0 flex-col gap-2">
+            {inManual ? null : measurePanel}
             {suctionPanel}
-            {homingPanel}
             {inManual ? manualPanel : openSubsystemPanel}
-            {inManual ? switchMeasurePanel : null}
           </div>
           {inManual ? openSubsystemPanel : stepPanel}
         </div>

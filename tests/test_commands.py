@@ -41,6 +41,7 @@ _EXPECTED_COMMANDS = {
     "motor_check_abort",
     "homing_start",
     "switch_measure_start",
+    "switch_distance_start",
     "reenergize_motors",
     "set_court",
     "checklist_set",
@@ -147,6 +148,7 @@ class TestRegistryCoverage:
             "manual_jog",
             "homing_start",
             "switch_measure_start",
+            "switch_distance_start",
             "motor_check_start",
         }
 
@@ -264,6 +266,7 @@ class TestEStopGate:
             "motor_check_start",
             "homing_start",
             "switch_measure_start",
+            "switch_distance_start",
             "manual_move",
             "manual_set",
             "manual_jog",

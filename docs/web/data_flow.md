@@ -38,7 +38,7 @@ context/RobotContext.tsx   購読頻度で 3 分割して配る
 | `match_state` | フェーズ・コート・指差喚呼・タイマー | 変化時 |
 | `motor_check_state` | 動作確認の進捗・結果・拒否理由・除外ステップ | 変化時 |
 | `homing_state` | 零点合わせの宛先（`robot` / `axes`）・現在の軸・軸ごとの成否・拒否理由・ロボットごとの対象軸（`targets`） | 変化時 |
-| `switch_measure_state` | 作動点測定の宛先（`robot` / `axis` / `direction`）・実測（`result`: 作動点 / 離脱点 / ON 区間 / 刻み / 粗刻み）・拒否理由・対象軸（`targets`） | 変化時 |
+| `switch_measure_state` | 作動点測定の宛先（`robot` / `axis` / `direction`）・実測（`result`: 作動点 / 離脱点 / ON 区間 / 刻み / 粗刻み）・距離測定の軸ごとの結果（`distances`: 距離 / 刻み / 粗刻み / 失敗理由。作動点測定のときは `null`）・拒否理由・対象軸（`targets`） | 変化時 |
 | `server_info` | `dev_tools` / `dry_run` フラグ・温度しきい値（`temp_warning_c` / `temp_critical_c`） | 接続直後 |
 | `e_stop_state` | 緊急停止の有無と**理由** | 変化時 + 定期再配信 |
 | `health_change` | ヘルス変化（`EventFeed` とトースト） | 発生時 |
@@ -97,7 +97,7 @@ UI 側で `unenergized_motors` から導出し直してはならない
 | 試合運用 | `match_start` / `match_finish` / `match_reset` / `set_court` |
 | 指差喚呼 | `checklist_set` / `checklist_reset` / `checklist_check_all`（`--dev-tools` 限定） |
 | 動作確認 | `motor_check_start` / `motor_check_abort` |
-| 零点合わせ・作動点測定 | `homing_start` / `switch_measure_start` |
+| 零点合わせ・作動点測定・距離測定 | `homing_start` / `switch_measure_start` / `switch_distance_start` |
 | 手動操縦 | `set_operation_mode` / `manual_move` / `manual_set` / `manual_jog` |
 | 吸着パッド | `suction_pads_set`（使う弁の**全集合**。差分ではない） |
 | その他 | `reenergize_motors` / `health_check` |

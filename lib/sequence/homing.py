@@ -5,6 +5,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
+from typing import Protocol
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
@@ -17,9 +18,11 @@ __all__ = [
     "AxisHomingResult",
     "HomingError",
     "HomingRunner",
+    "SwitchDistance",
     "SwitchMeasurement",
     "homing_axis_names",
     "homing_order",
+    "measure_distances",
     "measure_switch",
     "run_homing",
 ]
@@ -177,6 +180,45 @@ class SwitchMeasurement:
         }
 
 
+@dataclass(frozen=True)
+class SwitchDistance:
+    """1 軸の両端のスイッチが入る点どうしの距離。測れなかった軸は `distance` が None。"""
+
+    axis: str
+    unit: str
+    distance: float | None
+    #: 両端とも同じ刻みで測る。値と一緒に配らないと精度が読めない
+    step: float | None
+    coarse_step: float | None
+    error: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "axis": self.axis,
+            "unit": self.unit,
+            "distance": self.distance,
+            "step": self.step,
+            "coarse_step": self.coarse_step,
+            "error": self.error,
+        }
+
+
+def _probe_sensors(spec: AxisSpec, homing: HomingSpec, direction: float) -> dict[str, object]:
+    """測る向きの端に居るスイッチ。原点センサは片端にしか無いので `guard.limits` から引く。"""
+    limits = spec.guard.limits if spec.guard is not None else None
+    names = () if limits is None else (limits.plus if direction > 0 else limits.minus)
+    if not names or set(names) == set(homing.sensor_names):
+        return {}
+    if len(names) == 1:
+        return {"sensor": names[0], "motor_sensors": None}
+    if len(names) == len(spec.motor_names):
+        return {"sensor": None, "motor_sensors": tuple(zip(spec.motor_names, names, strict=True))}
+    raise HomingError(
+        f"軸 '{spec.name}' の {'+' if direction > 0 else '-'} 側のスイッチ {', '.join(names)} を"
+        f" モータ {', '.join(spec.motor_names)} に対応づけられません"
+    )
+
+
 def _probe_spec(
     spec: AxisSpec,
     homing: HomingSpec,
@@ -185,13 +227,14 @@ def _probe_spec(
     coarse_step: float | None,
     limit: float | None,
 ) -> HomingSpec:
-    """測定用に向きと刻みだけ差し替えた `HomingSpec`。
+    """測定用に向き・見るスイッチ・刻みだけ差し替えた `HomingSpec`。
 
     **上限は `search_distance` として載せる。** 別の変数で持つと探索の各段が見る
     歯止めと測定の歯止めが二重になり、片方だけが直った状態が作れる。
     `HomingSpec` の検証もそのまま効く。
     """
     changes: dict[str, object] = {"direction": float(direction)}
+    changes.update(_probe_sensors(spec, homing, direction))
     if step is not None:
         changes["step"] = step
     if coarse_step is not None:
@@ -961,6 +1004,57 @@ async def measure_switch(
     )
 
 
+class _AxisOutcome(Protocol):
+    @property
+    def axis(self) -> str: ...
+    @property
+    def error(self) -> str | None: ...
+
+
+async def _in_stages[Outcome: _AxisOutcome](
+    table: PositionTable,
+    targets: list[str],
+    move_to: MoveTo | None,
+    run: Callable[[list[str]], Awaitable[list[Outcome]]],
+) -> list[Outcome]:
+    """①参照される軸 → ②寄せる → ③残り。**零点確定と距離測定が同じ順序を踏む唯一の場所。**
+
+    寄せるのは「今回選ばれた軸」だけ。①で失敗した軸は寄せない (原点が確定していない
+    軸へ位置名で指令するとどこへ動くか分からない)。
+    """
+    targets = homing_order(table, targets)
+
+    prerequisites = {
+        axis: position
+        for axis, position in table.homing_prerequisites(targets).items()
+        if axis in targets
+    }
+    if move_to is None or not prerequisites:
+        return await run(targets)
+
+    # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
+    # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
+    referenced = homing_order(table, prerequisites)
+    results = await run(referenced)
+    confirmed = {result.axis for result in results if result.error is None}
+    for axis in referenced:
+        if axis not in confirmed:
+            logger.error(
+                "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
+                axis,
+                prerequisites[axis],
+            )
+            continue
+        # 1 軸ずつ送る。まとめて 1 通にすると、前提軸どうしに not_with があるとき
+        # 自分の指令が自分の歯止めに拒否される
+        logger.info("零点確定: %s を %s へ寄せる", axis, prerequisites[axis])
+        await move_to({axis: prerequisites[axis]})
+
+    rest = [axis for axis in targets if axis not in prerequisites]
+    results.extend(await run(rest))
+    return results
+
+
 async def run_homing(
     runner: HomingRunner,
     table: PositionTable,
@@ -979,58 +1073,104 @@ async def run_homing(
     操縦者は 1 回の実行で全軸の可否を知りたい。
 
     `move_to` を渡すと **①参照される軸を確定 → ②その軸を寄せる → ③残りを確定**の
-    3 段で回す。零点確定は `release_distance` ぶん離脱して終わるので、確定しただけの
-    軸は `requires` の区間に居ない —— 寄せる段が無いと、参照する側は順序だけを理由に
-    必ず拒否される。渡さなければ並べ替えるだけで、1 本も余計に動かさない。
+    3 段で回す (`_in_stages`)。零点確定は `release_distance` ぶん離脱して終わるので、
+    確定しただけの軸は `requires` の区間に居ない —— 寄せる段が無いと、参照する側は
+    順序だけを理由に必ず拒否される。渡さなければ並べ替えるだけで、1 本も余計に動かさない。
 
     **寄せるのは「今回選ばれた軸」だけである。** 選ばれていない軸を寄せると
     「零点確定は選んだ軸しか動かさない」が壊れるので、その場合は寄せずに拒否させ、
     文面で手当てを案内する (`docs/invariants.md` §4)。零点合わせパネルで昇降と前後の
     両方を選べば①〜③が回り、前後だけを選べば拒否される。**この非対称が仕様である。**
-
-    **①で確定できなかった軸は寄せない。** 原点が確定していない軸へ位置名で指令すると
-    どこへ動くか分からない。
     """
     targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
     if not targets:
         logger.info("零点確定: homing を持つ軸が無いため飛ばす")
         return []
-    targets = homing_order(table, targets)
 
-    prerequisites = {
-        axis: position
-        for axis, position in table.homing_prerequisites(targets).items()
-        if axis in targets
-    }
-    if move_to is None or not prerequisites:
+    async def run(batch: list[str]) -> list[AxisHomingResult]:
         return await _home_each(
-            runner, table, motors, court, targets, on_axis, on_result, stop_on_error
+            runner, table, motors, court, batch, on_axis, on_result, stop_on_error
         )
 
-    # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
-    # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
-    referenced = homing_order(table, prerequisites)
-    results = await _home_each(
-        runner, table, motors, court, referenced, on_axis, on_result, stop_on_error
-    )
-    confirmed = {result.axis for result in results if result.error is None}
-    for axis in referenced:
-        if axis not in confirmed:
-            logger.error(
-                "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
-                axis,
-                prerequisites[axis],
-            )
-            continue
-        # 1 軸ずつ送る。まとめて 1 通にすると、前提軸どうしに not_with があるとき
-        # 自分の指令が自分の歯止めに拒否される
-        logger.info("零点確定: %s を %s へ寄せる", axis, prerequisites[axis])
-        await move_to({axis: prerequisites[axis]})
+    return await _in_stages(table, targets, move_to, run)
 
-    rest = [axis for axis in targets if axis not in prerequisites]
-    results.extend(
-        await _home_each(runner, table, motors, court, rest, on_axis, on_result, stop_on_error)
-    )
+
+async def measure_distances(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court | None,
+    axes: Collection[str] | None = None,
+    move_to: MoveTo | None = None,
+    on_axis: Callable[[str], Awaitable[None]] | None = None,
+    on_result: Callable[[SwitchDistance], Awaitable[None]] | None = None,
+) -> list[SwitchDistance]:
+    """軸ごとに両端の作動点を測り、その差を返す。**零点は書き込まない。**
+
+    順序と寄せは零点確定と同じ 3 段 (`_in_stages`)。`requires` を書いた軸は条件の軸が
+    区間に居ないと 1 歩も動けないので、先に測った軸を寄せてから残りを測る。
+    1 本の失敗で残りを諦めない。
+    """
+    targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
+    if not targets:
+        return []
+
+    async def run(batch: list[str]) -> list[SwitchDistance]:
+        return await _distance_each(runner, table, motors, court, batch, on_axis, on_result)
+
+    return await _in_stages(table, targets, move_to, run)
+
+
+async def _distance_each(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    court: Court | None,
+    axes: list[str],
+    on_axis: Callable[[str], Awaitable[None]] | None,
+    on_result: Callable[[SwitchDistance], Awaitable[None]] | None,
+) -> list[SwitchDistance]:
+    results: list[SwitchDistance] = []
+    for axis in axes:
+        spec, handle = _axis_handle(table, motors, axis, court)
+        logger.info("距離測定: %s", axis)
+        if on_axis is not None:
+            await on_axis(axis)
+        try:
+            # 差を取るので零点がどこにあっても距離は変わらない
+            low = await runner.measure(spec, handle, direction=-1.0)
+            high = await runner.measure(spec, handle, direction=1.0)
+        except Exception as exc:
+            logger.error("距離測定に失敗: %s (%s)", axis, exc)
+            result = SwitchDistance(
+                axis=axis,
+                unit=spec.unit,
+                distance=None,
+                step=None,
+                coarse_step=None,
+                error=str(exc),
+            )
+        else:
+            result = SwitchDistance(
+                axis=axis,
+                unit=spec.unit,
+                distance=abs(high.engage - low.engage),
+                step=high.step,
+                coarse_step=high.coarse_step,
+                error=None,
+            )
+            logger.info(
+                "[distance] %s: %.3f%s (刻み %g%s)",
+                axis,
+                result.distance,
+                spec.unit,
+                high.step,
+                spec.unit,
+            )
+        results.append(result)
+        if on_result is not None:
+            await on_result(result)
     return results
 
 
