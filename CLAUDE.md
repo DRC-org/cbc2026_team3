@@ -74,7 +74,8 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 ```bash
 uv run python main.py             # サーバー起動（localhost:8080）
 uv run python main.py --dry-run   # CAN バスなしで起動
-uv run pytest                     # Python 側の全テスト（並列で約 12 秒）
+uv run pytest                     # Python 側のテスト（並列 + slow 除外で約 9 秒）
+uv run pytest -m ""               # slow も含めた全件（CI と同じ）
 uv run ruff check . && uv run ruff format .
 cd web && pnpm check              # lint + format + 型検査 + テスト + ビルド
 pio test -e native -d firmware/servo  # ファームの native テスト（実機不要）

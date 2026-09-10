@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _WATCHDOG = _PROJECT_ROOT / "scripts" / "can_watchdog.sh"
 
