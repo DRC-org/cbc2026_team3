@@ -275,17 +275,13 @@ class TestMainHandSteps:
         2 通に割ると片軸だけが動いた中間姿勢ができ、そこが干渉姿勢かは
         位置定数からは読めない。**経由点を廃した今、対を保つのはこの 1 通である。**
         """
-        table = load_position_table(_MAIN_POSITIONS)
-        seq = MainHandSequence()
-        sink, _ = _wire(seq, _MAIN_POSITIONS)
+        moves = [
+            targets
+            for info, targets in await _run_each_move(MainHandSequence(), _MAIN_POSITIONS)
+            if info.method_name == method_name
+        ]
 
-        await getattr(seq, method_name)()
-
-        issued = dict(sink)
-        for axis, name in (("y_axis", work), ("rotate", "pick")):
-            for motor, command in table.commands(axis, name).items():
-                assert issued.get(motor) == command, f"{method_name}: {motor} が {name} へ行かない"
-        assert len(sink) == len(issued), f"{method_name} が同じモータへ 2 度指令している"
+        assert moves == [{"y_axis": work, "rotate": "pick"}]
 
     async def test_starts_and_ends_at_home(self) -> None:
         per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
