@@ -972,6 +972,9 @@ axes:                      # 換算: command = value * scale + offset
     offset: 0.0            # 機械原点と電気原点のずれ（指令単位）
     timeout_s: 4.0         # 到達待ちの上限。未指定なら 5.0
     tolerance: 1.0         # 到達許容差（人間の単位）。未指定ならドライバ既定値
+    min_speed: 20.0        # ドライバ内蔵の位置ループが速度を決める軸が、実測で下回らない速さ
+                           # [unit/s]。timeout_s の検算にだけ使い、指令には効かない。
+                           # motion とは併記できない
 
   y_axis:                  # 複数モータで駆動する論理軸。軸名はモータ名でなくてよい
     unit: mm
@@ -1030,11 +1033,12 @@ interlocks:                # 軸どうしの干渉（§4）。位置名で書き
 | `motors:` と軸直下の `scale` / `offset` の併記 | どちらが効くか曖昧 |
 | モータ 1 台の軸に `sync_tolerance` | 防護が効いていないことに気付けない |
 | `sync_kp` があって `sync_limit` が無い / `motion` の 2 値の片方だけ | 押し合いの歯止めが無い / 軌道が決まらない（[invariants.md](invariants.md)「保護は止めるだけ…」） |
-| `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` / `travel:` | 可動範囲・軌道・原点という概念が無い |
+| `command_mode: position` 以外の軸に `manual:` / `motion:` / `min_speed:` / `homing:` / `travel:` | 可動範囲・軌道・原点という概念が無い |
+| `motion` と `min_speed` の併記 | 所要時間をどちらで検算したかが読めない |
 | `duty` / `on_off` 以外の軸に `manual_always: true` | シーケンスの到達待ちを手動が上書きできてしまう |
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
-| `timeout_s` が `motion` の所要時間に足りない | 必ずタイムアウトする軸になる |
+| `timeout_s` が `motion` / `min_speed` の所要時間に足りない（最大移動は `positions` と `manual` の端を合わせた幅） | 必ずタイムアウトする軸になる |
 | `guard.requires` に生の数値／未知の軸・位置名 | 同じ座標が 2 箇所に書かれて片方だけ古くなる／条件が解決できない |
 | `guard.requires` の参照先が `position` 以外／`tolerance` を持たない | 「今どこに居るか」を答えられない軸／区間を到達許容差ぶん広げられず、到達した実測が区間の外になる |
 | `guard.requires` の参照先の位置がコート別に分岐している | mm の座標系が片方のコートだけ別物になる（コートで変わってよいのは軸の `scale` の符号だけ） |

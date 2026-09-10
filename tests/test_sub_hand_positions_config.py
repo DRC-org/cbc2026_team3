@@ -369,3 +369,26 @@ class TestVenueCardNumbers:
         # 手動で寄せる先と、零点確定が離脱する量。この 2 つで手が動く
         assert f"{table.raw('sub_lift', 'top'):g}mm" in text
         assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
+
+
+class TestLinearAxisTimeout:
+    """直動 2 軸の `timeout_s` は起動時の検算に載っていなければならない。
+
+    速度をドライバ内蔵の位置ループが決める軸は `motion` を持たないので、`min_speed` を
+    書かない限り `timeout_s` は誰にも咎められない。症状は「零点確定の寄せが毎回
+    時間切れで落ちる」で、機構にもモータにも異常が無い。
+    """
+
+    _LINEAR_AXES = ("sub_y_axis", "sub_lift")
+
+    def test_直動_2_軸は_min_speed_で検算に載っている(self, table: PositionTable) -> None:
+        for axis in self._LINEAR_AXES:
+            assert table.axis(axis).min_speed is not None, axis
+
+    @pytest.mark.parametrize("axis", _LINEAR_AXES)
+    def test_manual_の全幅に足りない_timeout_s_は起動を拒否する(self, axis: str) -> None:
+        config = yaml.safe_load((_CONFIG_DIR / _YAML_NAME).read_text())
+        config["axes"][axis]["timeout_s"] = 4.0
+
+        with pytest.raises(ValueError, match=rf"axes\.{axis} は min_speed .*timeout_s \(4\.0\)"):
+            load_position_table(config, source=_YAML_NAME)
