@@ -107,3 +107,10 @@ PID とプロファイルの値そのものは [`mechanism_handoff.md`](mechanis
 yaml を直して再起動するまでその軸は動かせない。ON のあいだその端を `check_limit` から
 外せば退避が通るが、入口（`AxisHandle`）と監視で `MotionGuard` が別インスタンスなので、
 覚えた向きの置き場所を決める必要がある。
+
+## 9. M3508 軸の原点付け替えが古い目標を消さない
+
+DM3520 は `hold_target_refresh` を通って付け替え後の目標を捨てるが、PC 側位置ループの軸
+（`main.py` の `loop.set_origin_here` 経路）は `MotorHandle.target` が旧座標系のまま残る。
+可動端監視が付け替え直後に旧目標と新実測の差を移動と読みうる。メインハンドで
+`y_axis` / `rotate` の零点確定を回す前に塞ぐこと（2026-09-10 の貫通防止の誤爆と同型）。
