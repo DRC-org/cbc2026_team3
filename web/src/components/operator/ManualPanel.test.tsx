@@ -154,9 +154,9 @@ describe("ManualPanel", () => {
 
   it("操作できないときは理由を出して 1 通も送らせない", async () => {
     const user = userEvent.setup();
-    const { send } = renderPanel(MANUAL, "緊急停止中は手動操縦できません");
+    const { send } = renderPanel(MANUAL, "緊急停止中");
 
-    expect(screen.getByText("緊急停止中は手動操縦できません")).toBeInTheDocument();
+    expect(screen.getByText("緊急停止中")).toBeInTheDocument();
     await user.click(screen.getByLabelText("gripper を open へ"));
     expect(send).not.toHaveBeenCalled();
   });
@@ -207,9 +207,9 @@ describe("ManualPanel", () => {
     });
   });
 
-  it("軸が 1 つも無ければ理由を説明する", () => {
+  it("軸が 1 つも無ければチップで言う", () => {
     renderPanel({ mode: "manual", axes: [] });
-    expect(screen.getByText(/手動操縦できる軸がありません/)).toBeInTheDocument();
+    expect(screen.getByText("手動軸なし")).toBeInTheDocument();
   });
 
   describe("キーボードの操作対象", () => {
@@ -307,6 +307,11 @@ describe("ManualPanel", () => {
       for (const key of ["↑", "↓", "←", "→", "[", "]", "Home", "End"]) {
         expect(screen.getByText(key)).toBeInTheDocument();
       }
+    });
+
+    it("凡例に文章を添えない (クランプはサーバーが持つ)", () => {
+      renderPanel();
+      expect(document.body.textContent ?? "").not.toMatch(/可動範囲内でのみ/);
     });
 
     it("連続操作できる軸が無ければ凡例を出さない", () => {

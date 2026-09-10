@@ -113,32 +113,32 @@ describe("SuctionPadPanel", () => {
     expect(screen.getByText("使用 2/3")).toBeInTheDocument();
   });
 
-  it("1 つも選んでいなければ吸着ステップが拒否されると警告する", () => {
+  it("1 つも選んでいなければ未選択のチップを出す", () => {
     renderPanel({ pads: THREE_PADS.pads.map((pad) => ({ ...pad, enabled: false })) });
 
-    expect(screen.getByText(/吸着ステップは拒否されます/)).toBeInTheDocument();
+    expect(screen.getByText("未選択")).toBeInTheDocument();
   });
 
   it("塞がれているときは理由を出してボタンを無効にする", async () => {
-    const { send } = renderPanel(THREE_PADS, "切断中のため変更できません");
+    const { send } = renderPanel(THREE_PADS, "切断中");
 
-    expect(screen.getByText("切断中のため変更できません")).toBeInTheDocument();
+    expect(screen.getByText("切断中")).toBeInTheDocument();
     const button = screen.getByRole("button", { name: "パッド 2 を使う" });
     expect(button).toBeDisabled();
     await userEvent.click(button);
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("次の吸着ステップから効くことを断る", () => {
-    renderPanel(THREE_PADS);
+  it("効く時点の註記を持たない (役割はモードが決める)", () => {
+    const { view } = renderPanel(THREE_PADS);
 
-    expect(screen.getByText(/次の「ワーク吸着」ステップから効きます/)).toBeInTheDocument();
+    expect(view.container.textContent ?? "").not.toMatch(/ステップから効きます|今すぐ開きます/);
   });
 
-  it("読めない配信では操作を出さず、読めなかったと言う", () => {
+  it("読めない配信では操作を出さず、判定不能のチップを出す", () => {
     renderPanel(MALFORMED);
 
-    expect(screen.getByText("吸着パッドの状態を読み取れませんでした")).toBeInTheDocument();
+    expect(screen.getByText("パッド状態 判定不能")).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -238,20 +238,19 @@ describe("SuctionPadPanel", () => {
       ]);
 
       expect(screen.getByText("開 0/3")).toBeInTheDocument();
-      expect(screen.queryByText(/吸着ステップは拒否されます/)).toBeNull();
+      expect(screen.queryByText("未選択")).toBeNull();
     });
 
-    it("押した弁が今すぐ開くことを断る", () => {
-      renderManual();
+    it("手動でも註記を持たない", () => {
+      const { view } = renderManual();
 
-      expect(screen.getByText(/押した弁が今すぐ開きます/)).toBeInTheDocument();
-      expect(screen.queryByText(/次の「ワーク吸着」ステップから効きます/)).toBeNull();
+      expect(view.container.textContent ?? "").not.toMatch(/ステップから効きます|今すぐ開きます/);
     });
 
     it("塞がれているときは 1 つも押せない", async () => {
-      const { send } = renderManual("緊急停止中は手動操縦できません");
+      const { send } = renderManual("緊急停止中");
 
-      expect(screen.getByText("緊急停止中は手動操縦できません")).toBeInTheDocument();
+      expect(screen.getByText("緊急停止中")).toBeInTheDocument();
       for (const button of screen.getAllByRole("button")) {
         expect(button).toBeDisabled();
         await userEvent.click(button);

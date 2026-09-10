@@ -103,9 +103,9 @@ describe("AlwaysManualPanel", () => {
   });
 
   it("塞がれているときは理由を出してボタンを無効にする", async () => {
-    const { send } = renderPanel([CONVEYOR], "緊急停止中は手動操縦できません");
+    const { send } = renderPanel([CONVEYOR], "緊急停止中");
 
-    expect(screen.getByText("緊急停止中は手動操縦できません")).toBeInTheDocument();
+    expect(screen.getByText("緊急停止中")).toBeInTheDocument();
     expect(screen.getByLabelText("conveyor を run へ")).toBeDisabled();
     await userEvent.click(screen.getByLabelText("conveyor を run へ"));
     expect(send).not.toHaveBeenCalled();
@@ -130,9 +130,9 @@ describe("AlwaysManualPanel", () => {
     );
   });
 
-  it("シーケンスに上書きされることを断る", () => {
-    renderPanel([CONVEYOR]);
+  it("固定の註記を置かない (操縦中に読む文章を持たない)", () => {
+    const { view } = renderPanel([CONVEYOR]);
 
-    expect(screen.getByText(/上書きされます/)).toBeInTheDocument();
+    expect(view.container.textContent ?? "").not.toMatch(/上書きされます/);
   });
 });

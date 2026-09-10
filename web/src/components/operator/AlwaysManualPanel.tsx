@@ -54,10 +54,6 @@ export function AlwaysManualPanel({
           />
         ))}
       </div>
-
-      <p className="shrink-0 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
-        シーケンスが後からこの軸へ書き直します（手動の値は上書きされます）。
-      </p>
     </Panel>
   );
 }
