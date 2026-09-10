@@ -6,6 +6,7 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useHoming } from "@/hooks/useHoming";
+import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
 import { homingStatus, robotTargets } from "@/lib/homingStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
@@ -16,12 +17,15 @@ interface HomingButtonsProps {
 }
 
 export function HomingButtons({ robot: only }: HomingButtonsProps) {
-  const { connected } = useRobotStatus();
+  const { connected, eStopActive } = useRobotStatus();
   const { state, start } = useHoming();
+  const { anyManual, restore } = useSequenceModeRestore();
   const [pending, setPending] = useState<[string, string[]] | null>(null);
 
+  // 手動中の拒否は押せば自分で解消する (全機を半自動へ戻してから送る) ので、その理由では塞がない
   const { reasonLabel } = homingStatus(state, connected);
-  const disabled = reasonLabel !== null;
+  const blocked = anyManual && connected && !eStopActive ? null : reasonLabel;
+  const disabled = blocked !== null;
   const targets = robotTargets(state, only);
 
   if (targets === MALFORMED) {
@@ -67,7 +71,7 @@ export function HomingButtons({ robot: only }: HomingButtonsProps) {
             <Button
               tone="info"
               onClick={() => {
-                if (pending) start(pending[0], pending[1]);
+                if (pending && restore()) start(pending[0], pending[1]);
                 setPending(null);
               }}
             >
@@ -83,16 +87,17 @@ export function HomingButtons({ robot: only }: HomingButtonsProps) {
         <p className="mt-2">
           対象の軸: <span className="font-mono">{pending ? pending[1].join(", ") : ""}</span>
         </p>
+        {anyManual ? (
+          <p className="mt-2">手動操縦を抜け、全機を半自動へ戻してから開始します。</p>
+        ) : null}
         <p className="mt-2 flex items-center gap-1.5 text-error">
           <Icon as={TriangleAlert} />
           この機体の可動範囲に人・物がないことを確認してから開始してください。
         </p>
       </Modal>
 
-      {disabled && reasonLabel ? (
-        <span className="flex basis-full items-center gap-1.5 text-base-content/70">
-          {reasonLabel}
-        </span>
+      {blocked !== null ? (
+        <span className="flex basis-full items-center gap-1.5 text-base-content/70">{blocked}</span>
       ) : null}
     </>
   );

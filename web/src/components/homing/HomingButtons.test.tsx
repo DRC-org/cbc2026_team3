@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { HomingButtons } from "@/components/homing/HomingButtons";
 import { MALFORMED } from "@/lib/protocol";
-import type { HomingSnapshot } from "@/lib/protocol";
+import type { HomingSnapshot, RobotState } from "@/lib/protocol";
 import { EMPTY_HOMING, renderWithRobot } from "@/test/robotContext";
 
 const TARGETS = { main_hand: ["y_axis", "rotate"], sub_hand: ["sub_y_axis"] };
@@ -24,6 +24,13 @@ function mount(homing: Partial<HomingSnapshot> = {}, extra: Record<string, unkno
 }
 
 const SUB_BUTTON = { name: "サブハンドの零点合わせを開始" };
+
+function robotIn(mode: "sequence" | "manual"): RobotState {
+  return { manual: { mode, axes: [] } } as unknown as RobotState;
+}
+
+const MANUAL_STATES = { main_hand: robotIn("manual"), sub_hand: robotIn("sequence") };
+const MANUAL_REASON = "'main_hand' が手動操縦モードのため零点合わせを実行できません";
 
 describe("HomingButtons", () => {
   it("担当機のボタンだけを出し、宛先の軸を押す前に見せる", () => {
@@ -102,5 +109,67 @@ describe("HomingButtons", () => {
 
     expect(screen.queryByRole("button", SUB_BUTTON)).not.toBeInTheDocument();
     expect(screen.getByText(/読み取れませんでした/)).toBeInTheDocument();
+  });
+
+  describe("手動操縦中", () => {
+    it("サーバーの拒否理由では塞がず、確認に半自動へ戻す旨を出す", async () => {
+      mount({ blocked_reason: MANUAL_REASON }, { states: MANUAL_STATES });
+
+      expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
+      expect(screen.queryByText(MANUAL_REASON)).toBeNull();
+
+      await userEvent.click(screen.getByRole("button", SUB_BUTTON));
+
+      expect(screen.getByText(/全機を半自動へ戻してから開始/)).toBeInTheDocument();
+    });
+
+    it("全機を半自動へ戻してから零点合わせを送る", async () => {
+      const sendOrReport = vi.fn<(data: unknown, what: string) => boolean>(() => true);
+      mount({ blocked_reason: MANUAL_REASON }, { states: MANUAL_STATES, sendOrReport });
+
+      await userEvent.click(screen.getByRole("button", SUB_BUTTON));
+      await userEvent.click(screen.getByRole("button", { name: "開始" }));
+
+      expect(sendOrReport.mock.calls.map(([data]) => data)).toEqual([
+        { type: "set_operation_mode", robot: "main_hand", mode: "sequence" },
+        { type: "set_operation_mode", robot: "sub_hand", mode: "sequence" },
+        { type: "homing_start", robot: "sub_hand", axes: ["sub_y_axis"] },
+      ]);
+    });
+
+    it("半自動へ戻せなければ零点合わせを送らない", async () => {
+      const sendOrReport = vi.fn(() => false);
+      mount({ blocked_reason: MANUAL_REASON }, { states: MANUAL_STATES, sendOrReport });
+
+      await userEvent.click(screen.getByRole("button", SUB_BUTTON));
+      await userEvent.click(screen.getByRole("button", { name: "開始" }));
+
+      expect(sendOrReport).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "homing_start" }),
+        expect.any(String),
+      );
+    });
+
+    it("切断中・緊急停止中は手動でも塞ぐ", () => {
+      const view = mount(
+        { blocked_reason: "緊急停止中のため零点合わせを実行できません" },
+        { states: MANUAL_STATES, eStopActive: true },
+      );
+      expect(screen.getByRole("button", SUB_BUTTON)).toBeDisabled();
+      expect(screen.getByText("緊急停止中のため零点合わせを実行できません")).toBeInTheDocument();
+      view.unmount();
+
+      mount({ blocked_reason: MANUAL_REASON }, { states: MANUAL_STATES, connected: false });
+      expect(screen.getByRole("button", SUB_BUTTON)).toBeDisabled();
+      expect(screen.getByText("切断中のため不可")).toBeInTheDocument();
+    });
+
+    it("全機が半自動なら確認に半自動へ戻す旨を出さない", async () => {
+      mount({}, { states: { sub_hand: robotIn("sequence") } });
+
+      await userEvent.click(screen.getByRole("button", SUB_BUTTON));
+
+      expect(screen.queryByText(/半自動へ戻してから/)).toBeNull();
+    });
   });
 });

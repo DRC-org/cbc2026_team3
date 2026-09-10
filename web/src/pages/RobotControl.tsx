@@ -4,6 +4,7 @@ import { useState } from "react";
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
+import { SwitchMeasureButtons } from "@/components/homing/SwitchMeasureButtons";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
@@ -19,7 +20,6 @@ import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
-import { homingStatus } from "@/lib/homingStatus";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
 import type { ManualState, OperationMode } from "@/lib/protocol";
@@ -32,7 +32,7 @@ interface RobotControlProps {
 
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
-  const { matchState, connected, eStopActive, serverInfo, homing } = useRobotStatus();
+  const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
   const { sendOrReport } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
@@ -158,21 +158,21 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       />
     );
 
-  // 手動中はサーバーが必ず拒むので、無効ボタンではなく配られた拒否理由だけを出す
-  const homingReason = homingStatus(homing, connected).reasonLabel;
-  const homingPanel =
-    inManual && homingReason === null ? null : (
-      <Panel legend="零点合わせ" className="shrink-0" bodyClassName="gap-1.5">
-        {inManual ? (
-          <p className="text-base-content/70">{homingReason}</p>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <HomingButtons robot={robotKey} />
-          </div>
-        )}
-        <HomingPanel robot={robotKey} />
-      </Panel>
-    );
+  // 手動中も出す。押せば全機を半自動へ戻してから送るので、操縦者がモードを往復しなくてよい
+  const homingPanel = (
+    <Panel legend="零点合わせ" className="shrink-0" bodyClassName="gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <HomingButtons robot={robotKey} />
+      </div>
+      <HomingPanel robot={robotKey} />
+    </Panel>
+  );
+
+  const switchMeasurePanel = (
+    <Panel legend="作動点測定" className="shrink-0" bodyClassName="gap-1.5">
+      <SwitchMeasureButtons robot={robotKey} />
+    </Panel>
+  );
 
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
@@ -219,6 +219,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           <div className="flex min-h-0 flex-col gap-2">
             {suctionPanel}
             {homingPanel}
+            {switchMeasurePanel}
             {inManual ? manualPanel : openSubsystemPanel}
           </div>
           {inManual ? openSubsystemPanel : stepPanel}

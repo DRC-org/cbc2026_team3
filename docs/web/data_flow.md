@@ -234,6 +234,7 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 | `lib/checklistGroups.ts` | 指差喚呼の項目をどの区分へ置くか |
 | `lib/syncVerdict.ts` | 左右ペア軸のずれ表示 |
 | `hooks/useRemainingMs.ts` | 試合の残り時間（アンカーと秒境界の起床）。操縦者の `MatchTimer` と Monitor の `MatchStrip` が同じ値を出す |
+| `hooks/useSequenceModeRestore.ts` | 「どれか 1 機でも手動か」と、全機を半自動へ戻す送信。零点合わせと作動点測定のボタンが共有する（サーバーの拒否ゲートは全機を見る） |
 
 ### `evaluateHealth` の判定順
 

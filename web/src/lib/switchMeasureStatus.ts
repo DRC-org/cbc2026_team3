@@ -1,6 +1,8 @@
 import { MALFORMED } from "@/lib/protocol";
 import type { SwitchDirection, SwitchMeasureSnapshot } from "@/lib/protocol";
 
+export const SWITCH_DIRECTIONS: SwitchDirection[] = [-1, 1];
+
 export type SwitchMeasureOutcome = "idle" | "running" | "failed" | "done";
 
 export interface SwitchMeasureStatus {

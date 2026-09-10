@@ -13,7 +13,12 @@ import type {
 import { MALFORMED } from "@/lib/protocol";
 import { RobotControl } from "@/pages/RobotControl";
 import { motorState } from "@/test/motorState";
-import { DEFAULT_MATCH_STATE, EMPTY_HOMING, renderWithRobot } from "@/test/robotContext";
+import {
+  DEFAULT_MATCH_STATE,
+  EMPTY_HOMING,
+  EMPTY_SWITCH_MEASURE,
+  renderWithRobot,
+} from "@/test/robotContext";
 
 const STEPS: SequenceStepInfo[] = [
   { index: 0, label: "初期位置へ移動", require_trigger: false },
@@ -845,12 +850,38 @@ describe("零点合わせ", () => {
     expect(screen.queryByRole("button", { name: "メインハンドの零点合わせを開始" })).toBeNull();
   });
 
-  it("手動中はボタンを出さず、サーバーが配る拒否理由だけを出す", () => {
+  it("手動中もボタンを出す (押せば半自動へ戻してから送る)", () => {
     const reason = "'sub_hand' が手動操縦モードのため零点合わせを実行できません";
     mountManual("setup", { homing: { ...HOMING, blocked_reason: reason } });
 
-    expect(screen.queryByRole("button", SUB_BUTTON)).toBeNull();
-    expect(screen.getByText(reason)).toBeInTheDocument();
+    expect(screen.getByRole("button", SUB_BUTTON)).toBeEnabled();
+    expect(screen.queryByText(reason)).toBeNull();
+  });
+
+  it("作動点測定は準備中に軸 × 向きのボタンで出す (手動中も)", () => {
+    const switchMeasure = {
+      ...EMPTY_SWITCH_MEASURE,
+      available: true,
+      blocked_reason: null,
+      targets: { sub_hand: ["sub_y_axis", "sub_lift"] },
+    };
+    for (const mountIt of [
+      () =>
+        renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {
+          states: { sub_hand: robotState() },
+          matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", checklists: CHECKLISTS },
+          switchMeasure,
+        }),
+      () => mountManual("setup", { switchMeasure }),
+    ]) {
+      const view = mountIt();
+      expect(screen.getByText("作動点測定")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "sub_lift の+ 方向の作動点測定を開始" }),
+      ).toBeEnabled();
+      expect(screen.getAllByRole("button", { name: /の作動点測定を開始/ })).toHaveLength(4);
+      view.unmount();
+    }
   });
 
   it("試合中は出さない (サーバーがフェーズで拒む)", () => {
@@ -861,5 +892,6 @@ describe("零点合わせ", () => {
     });
 
     expect(screen.queryByText("零点合わせ")).toBeNull();
+    expect(screen.queryByText("作動点測定")).toBeNull();
   });
 });
