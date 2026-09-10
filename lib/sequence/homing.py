@@ -386,20 +386,18 @@ class HomingRunner:
         if homing.coarse_step is not None:
             start = self._observe(spec, handle)
             limit = _remaining_distance(homing, travelled=travelled, released=released)
-            observed = await self._seek(
+            observed = await self._glide(
                 spec,
                 handle,
                 homing,
                 contacts,
-                step=homing.coarse_step,
-                direction=homing.direction,
-                want_active=True,
+                lead=homing.coarse_step,
                 limit=limit,
                 limit_message=_not_reached_message(spec, homing, limit),
             )
             travelled += abs(observed - start)
             logger.info(
-                "[homing] %s: 粗探索 (%g%s 刻み) で %.2f%s 動かして接触。"
+                "[homing] %s: 粗探索 (目標を %g%s 先行) で %.2f%s 動かして接触。"
                 "離脱して %g%s 刻みで寄せ直す",
                 spec.name,
                 homing.coarse_step,
@@ -409,13 +407,13 @@ class HomingRunner:
                 homing.step,
                 spec.unit,
             )
-            # 粗い 1 歩が ON 区間より広いと、当てた時点でもう区間の外 (機構端の側) に
+            # 先行量が ON 区間より広いと、止まった時点でもう区間の外 (機構端の側) に
             # 居る。そのまま寄せ直すと探索方向へ走り抜けるので動かす前に問い直す
             if not any(self._sensor_active(name) is True for name in homing.sensor_names):
                 raise HomingError(
-                    f"軸 '{spec.name}' は粗探索 ({homing.coarse_step}{spec.unit} 刻み) の"
-                    f" 1 歩で原点センサ {_label(homing.sensor_names)} の ON 区間を"
-                    "跨ぎ切りました (当てた直後にもう OFF)。このまま寄せ直すと探索方向へ"
+                    f"軸 '{spec.name}' は粗探索 (目標を {homing.coarse_step}{spec.unit} 先行)"
+                    f" で原点センサ {_label(homing.sensor_names)} の ON 区間を"
+                    "跨ぎ切りました (止まった時点でもう OFF)。このまま寄せ直すと探索方向へ"
                     "走り抜けるので止めます。"
                     "homing.coarse_step を ON 区間の実測より狭くしてください"
                 )
@@ -705,19 +703,11 @@ class HomingRunner:
     ) -> float:
         """センサが `want_active` になるまで `direction` 方向へ `step` ずつ動かす。
 
-        **探索・離脱・二段探索の各段がこの 1 本を通る。** 歯止めを向きごとに書き分けると
-        「探索は止まるのに離脱は永久に動き続ける」形が作れる。
+        **探索・離脱がこの 1 本を通る** (粗探索だけは止まらずに流す `_glide`)。歯止めを
+        向きごとに書き分けると「探索は止まるのに離脱は永久に動き続ける」形が作れる。
         """
         if want_active:
-            # 離脱段や前回の零点確定で数えたぶんまで見ていると 1 歩目で到達と読む。
-            # カウンタを提供しないセンサもここで弾く
-            unsupported = contacts.rebase()
-            if unsupported:
-                raise HomingError(
-                    f"軸 '{spec.name}' の原点センサ {_label(unsupported)} は接触のカウンタを"
-                    "提供しません (現在値だけでは指令 1 回ぶんの通過を取りこぼすので"
-                    "探索を開始しません)"
-                )
+            self._rebase_contacts(spec, contacts)
 
         start = self._observe(spec, handle)
         observed = start
@@ -764,6 +754,89 @@ class HomingRunner:
                     f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
                     " 機構の引っかかり・探索方向・モータの励磁を確認してください"
                 )
+
+    async def _glide(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        contacts: _SensorContacts,
+        *,
+        lead: float,
+        limit: float,
+        limit_message: str,
+    ) -> float:
+        """接触するまで、目標を実測の `lead` だけ先へ毎周期出し直して止まらずに流す。
+
+        粗探索専用。到達を待つ刻み送りは 1 歩ごとに静止するので `limit_speed` の半分以下に
+        律速し、操縦者にはガクつきとして見える。先行量が `coarse_step` そのものなのは、
+        接触してから止まるまでの行き過ぎを ON 区間より狭い値に収めるため (`_approach` の
+        跨ぎ切りの判定がそのまま効く)。
+        """
+        self._rebase_contacts(spec, contacts)
+        failure = await self._glide_until_contact(
+            spec, handle, homing, contacts, lead=lead, limit=limit, limit_message=limit_message
+        )
+        # 最後に送った目標は必ず実測より先に居るので、降りる理由を問わずその場へ止め直す
+        await self._stop_here(spec, handle)
+        if failure is not None:
+            raise HomingError(failure)
+        return self._observe(spec, handle)
+
+    async def _glide_until_contact(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        contacts: _SensorContacts,
+        *,
+        lead: float,
+        limit: float,
+        limit_message: str,
+    ) -> str | None:
+        """接触したら None、それ以外の理由で降りるならその文言。"""
+        progress = _progress_threshold(lead)
+        start = self._observe(spec, handle)
+        observed = start
+        # 「歩」が無いので、1 歩ぶんの追従に許す周期数のあいだに半歩も進まなければ停滞
+        mark = start
+        idle = 0
+        while True:
+            lost = self._feedback_lost(spec, homing)
+            if lost is not None:
+                return lost
+            if abs(observed - start) >= limit:
+                return limit_message
+
+            await handle.set_target_value(spec.to_commands(observed + homing.direction * lead))
+            await self._sleep(homing.settle_s)
+            if contacts.any_contacted():
+                return None
+
+            observed = self._observe(spec, handle)
+            if abs(observed - mark) >= progress:
+                mark = observed
+                idle = 0
+                continue
+            idle += 1
+            if idle >= _FOLLOW_ATTEMPTS:
+                return (
+                    f"軸 '{spec.name}' が指令しても動きません"
+                    f" ({_FOLLOW_ATTEMPTS} 周期 ({_FOLLOW_ATTEMPTS * homing.settle_s:g} 秒) で"
+                    f" {progress}{spec.unit} 進まなかった)。"
+                    " 機構の引っかかり・探索方向・モータの励磁を確認してください"
+                )
+
+    def _rebase_contacts(self, spec: AxisSpec, contacts: _SensorContacts) -> None:
+        # 離脱段や前回の零点確定で数えたぶんまで見ていると 1 歩目で到達と読む。
+        # カウンタを提供しないセンサもここで弾く
+        unsupported = contacts.rebase()
+        if unsupported:
+            raise HomingError(
+                f"軸 '{spec.name}' の原点センサ {_label(unsupported)} は接触のカウンタを"
+                "提供しません (現在値だけでは指令 1 回ぶんの通過を取りこぼすので"
+                "探索を開始しません)"
+            )
 
     def _check_preconditions(
         self, spec: AxisSpec, homing: HomingSpec, *, require_origin: bool = True
