@@ -112,15 +112,16 @@ CAN フレーム
 ### 起動と後始末の段（`main.py`）
 
 `main()` は **「読む → bind の可否を見る → 配線する → 起動する → 畳む」** の 4 段
-（+ 事前確認 1 段）で構成する。ロボット 1 台ぶんの配線は `_wire_one_robot` が持つ。
+（+ 事前確認 2 段）で構成する。ロボット 1 台ぶんの配線は `_wire_one_robot` が持つ。
 
 | 段 | 関数 | 内容 |
 |---|---|---|
 | 読む | `_load_all_configs` | `lib/config_schema.py` の 4 ローダを呼ぶ。誤記は `SystemExit` の 1 行 |
 | bind | `_ensure_port_available(host, port)` | 配線の**手前**で行う（会場での二重起動を CAN を開く前に落とす） |
+| 持ち主 | `_claim_can_buses(can_buses, robots)` | 開くバス全部を `flock` で主張する（`lib/bus_lock.py`）。ロボット単位でなく**プロセス単位で 1 回**（両ハンドが `can_generic` を共有する）。`--dry-run` は掴まない |
 | 配線 | `_wire_one_robot` ×ロボット数 | 下表 |
 | 起動 | `_start_all` | `CANManager.run()` → 位置制御ループ → 同期監視 → 可動端監視 → 目標値再送 → サーバー |
-| 畳む | `_shutdown_all` | 位置制御ループ → 目標値再送 → 可動端監視 → 同期監視 → CAN → サーバーの順（順序は不変条件） |
+| 畳む | `_shutdown_all` | 位置制御ループ → 目標値再送 → 可動端監視 → 同期監視 → CAN → バスの持ち主を手放す → サーバーの順（順序は不変条件） |
 
 `_wire_one_robot` が呼ぶヘルパ:
 

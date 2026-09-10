@@ -11,13 +11,14 @@ import os
 import pathlib
 import signal
 import socket
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from types import ModuleType
 
 import can
 import yaml
 
 from lib.axis_sync import SyncGroup
+from lib.bus_lock import BusClaim, BusClaimedError, claim_bus
 from lib.can_manager import CANManager
 from lib.config_schema import (
     HealthThresholds,
@@ -606,6 +607,41 @@ def _robot_bus_names(robot: RobotConfig, can_buses: Mapping[str, str]) -> list[s
     used = {cfg.bus for cfg in robot.motors.values()}
     used |= {cfg.bus for cfg in robot.sensors.values()}
     return [name for name in can_buses if name in used]
+
+
+def _claim_can_buses(
+    can_buses: Mapping[str, str], robots: list[RobotConfig], *, dry_run: bool
+) -> list[BusClaim]:
+    """このプロセスが開く CAN バス全部の持ち主を、開く前にまとめて主張する。
+
+    ロボット単位ではなくプロセス単位で 1 回にするのは、両ハンドが同じバス
+    (`can_generic`) をそれぞれの `CANManager` で開くため。
+    """
+    if dry_run:
+        return []
+    used = {name for robot in robots for name in _robot_bus_names(robot, can_buses)}
+    claims: list[BusClaim] = []
+    for bus_name in can_buses:
+        if bus_name not in used:
+            continue
+        channel = can_buses[bus_name]
+        try:
+            claims.append(claim_bus(channel))
+        except BusClaimedError as exc:
+            raise SystemExit(str(exc)) from exc
+        except OSError as exc:
+            raise SystemExit(
+                f"CAN バス '{channel}' の持ち主を主張するロックファイルを開けません ({exc})"
+            ) from exc
+    return claims
+
+
+def _release_can_buses(claims: Iterable[BusClaim]) -> None:
+    for claim in claims:
+        try:
+            claim.release()
+        except Exception:
+            logger.exception("CAN バスの持ち主の解除に失敗: channel=%s", claim.channel)
 
 
 def _make_m3508(motor: MotorConfig) -> MotorDriver:
@@ -1278,7 +1314,9 @@ async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
     await server.start()
 
 
-async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
+async def _shutdown_all(
+    server: RobotServer, wirings: list[_RobotWiring], *, bus_claims: Iterable[BusClaim] = ()
+) -> None:
     for wiring in wirings:
         for loop in wiring.position_loops:
             await _shutdown_step(f"位置制御ループ (bus={loop.bus_name})", loop.stop())
@@ -1293,6 +1331,7 @@ async def _shutdown_all(server: RobotServer, wirings: list[_RobotWiring]) -> Non
             await _shutdown_step("同期監視", monitor.stop())
     for wiring in wirings:
         await _shutdown_step("CAN シャットダウン", wiring.can_manager.shutdown())
+    _release_can_buses(bus_claims)
     await _shutdown_step("サーバー終了処理", server.cleanup())
     logger.info("後始末完了")
 
@@ -1357,6 +1396,9 @@ async def main() -> None:
     logger.info("試合時間: %s 秒", _format_number(system.match.duration_s))
 
     _ensure_port_available(args.host, args.port)
+    bus_claims = _claim_can_buses(
+        system.can_buses, [robot for _path, robot in loaded], dry_run=args.dry_run
+    )
 
     server = _build_server(args, system)
 
@@ -1404,7 +1446,7 @@ async def main() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await _shutdown_all(server, wirings)
+        await _shutdown_all(server, wirings, bus_claims=bus_claims)
 
 
 if __name__ == "__main__":

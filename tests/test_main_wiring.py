@@ -20,6 +20,7 @@ import yaml
 
 import main
 from lib.axis_sync import MotorSpec, SyncGroup
+from lib.bus_lock import BusClaimedError
 from lib.can_manager import CANManager
 from lib.config_schema import (
     HealthThresholds,
@@ -2522,3 +2523,121 @@ class TestAxisStateWiring:
         sequence = server.set_motor_check_sequence.call_args.args[0]
         source = server.set_homing_source.call_args.args[0]
         assert source.move_to == sequence.move_to
+
+
+class TestClaimCanBuses:
+    """同じ CAN バスを 2 つのプロセスが掴めないようにする。主張はプロセス単位で開く前に 1 回。"""
+
+    _BUSES: ClassVar[dict[str, str]] = {
+        "m3508_bus": "can_m3508",
+        "generic_bus": "can_generic",
+        "dm3520_bus": "can_dm3520",
+    }
+
+    @staticmethod
+    def _main_hand() -> RobotConfig:
+        return _robot(
+            {
+                "robot_name": "main_hand",
+                "motors": {
+                    "y_left": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1},
+                    "conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1},
+                },
+            }
+        )
+
+    @staticmethod
+    def _sub_hand() -> RobotConfig:
+        return _robot(
+            {
+                "robot_name": "sub_hand",
+                "motors": {
+                    "sub_y": {"driver": "dm3520", "bus": "dm3520_bus", "can_id": 1},
+                    "sub_lift": {"driver": "generic", "bus": "generic_bus", "can_id": 2},
+                },
+            }
+        )
+
+    def test_両ハンドが共有するバスも含めてチャネルごとに1回だけ掴む(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        claimed: list[str] = []
+        monkeypatch.setattr(
+            main, "claim_bus", lambda channel: claimed.append(channel) or MagicMock()
+        )
+
+        claims = main._claim_can_buses(
+            self._BUSES, [self._main_hand(), self._sub_hand()], dry_run=False
+        )
+
+        assert claimed == ["can_m3508", "can_generic", "can_dm3520"]
+        assert len(claims) == 3
+
+    def test_使わないバスは掴まない(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        claimed: list[str] = []
+        monkeypatch.setattr(
+            main, "claim_bus", lambda channel: claimed.append(channel) or MagicMock()
+        )
+
+        main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+
+        assert claimed == ["can_generic", "can_dm3520"]
+
+    def test_dry_run_では掴まない(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fail(_channel: str) -> None:
+            raise AssertionError("dry_run では claim_bus を呼んではならない")
+
+        monkeypatch.setattr(main, "claim_bus", _fail)
+
+        assert main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=True) == []
+
+    def test_持ち主が居れば相手を名指しして起動を止める(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _held(channel: str) -> None:
+            raise BusClaimedError(channel, "PID 4242: python -u main.py --dev-tools --port 8081")
+
+        monkeypatch.setattr(main, "claim_bus", _held)
+
+        with pytest.raises(SystemExit) as exc:
+            main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+
+        message = str(exc.value)
+        assert "can_generic" in message
+        assert "PID 4242" in message
+        assert "--port 8081" in message
+
+    def test_ロックファイルを開けなければ一行のメッセージで落とす(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _denied(_channel: str) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(main, "claim_bus", _denied)
+
+        with pytest.raises(SystemExit) as exc:
+            main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+
+        assert "can_generic" in str(exc.value)
+        assert "Permission denied" in str(exc.value)
+
+    def test_ポート確認の後_配線の前に掴む(self) -> None:
+        source = inspect.getsource(main.main)
+        assert (
+            source.index("_ensure_port_available")
+            < source.index("_claim_can_buses")
+            < source.index("_wire_one_robot")
+        )
+
+    async def test_後始末で手放し_1つ失敗しても残りを続ける(self) -> None:
+        failing = MagicMock()
+        failing.channel = "can_generic"
+        failing.release.side_effect = OSError("bad fd")
+        healthy = MagicMock()
+        server = MagicMock()
+        server.cleanup = AsyncMock()
+
+        await main._shutdown_all(server, [], bus_claims=[failing, healthy])
+
+        healthy.release.assert_called_once_with()
+        server.cleanup.assert_awaited_once_with()
