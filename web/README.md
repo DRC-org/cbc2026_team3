@@ -3,8 +3,7 @@
 キャチロボバトルコンテスト 2026 出場ロボットの操縦 UI。
 Vite + React + TypeScript + Tailwind v4 / daisyUI 5。
 
-構造は [`../docs/architecture.md`](../docs/architecture.md)、崩してはならない設計と
-その理由は [`../docs/invariants.md`](../docs/invariants.md) を参照。
+崩してはならない設計とその理由は [`../docs/invariants.md`](../docs/invariants.md) を参照。
 
 ## コマンド
 

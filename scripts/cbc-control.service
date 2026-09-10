@@ -2,7 +2,7 @@
 
 [Unit]
 Description=CBC2026 Team3 中央制御プログラム (Web Controller 同梱)
-Documentation=file://@PROJECT_DIR@/docs/impl_plan.md
+Documentation=file://@PROJECT_DIR@/docs/venue_recovery.md
 # man 5 systemd.unit: Requires= は依存先が明示的に stop / restart されると
 # こちらへ伝播する。udev ルールは CANable が add されるたびに
 # `systemctl restart cbc-can.service` を打つので、ここは Wants= でなければならない。

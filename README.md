@@ -22,19 +22,13 @@ CAN バスのセットアップ、Web UI のビルド、systemd への配置は
 | 読みたいこと | 文書 |
 |---|---|
 | **試合当日に手が止まった** | [`docs/venue_recovery.md`](docs/venue_recovery.md) — 会場カード。これ 1 枚 |
-| 何がどう組まれているか | [`docs/architecture.md`](docs/architecture.md) |
 | **なぜそう組んだか / 触ってはいけない理由** | [`docs/invariants.md`](docs/invariants.md) |
-| 点検・ヘルス・動作確認は今どうなっているか | [`docs/checks_and_health.md`](docs/checks_and_health.md) |
 | 自作モータドライバの CAN プロトコル | [`docs/motor_driver_can_protocol.md`](docs/motor_driver_can_protocol.md) |
-| 機構が付いた日に埋める値 | [`docs/mechanism_handoff.md`](docs/mechanism_handoff.md) |
 | コマンド・CAN セットアップ・サービス運用 | [`docs/operations.md`](docs/operations.md) |
 | ファームウェアのビルドと書き込み | [`firmware/README.md`](firmware/README.md) |
-| 操縦 UI が今どうなっているか | [`docs/web/`](docs/web/) — 画面・配色・データフロー・罠の 4 枚 |
 | 操縦 UI の開発（コマンドと構成） | [`web/README.md`](web/README.md) |
-| いつ何が起きたか（実機で観測した事象の記録） | [`docs/history/`](docs/history/) — 正ではない |
 
-`docs/architecture.md` と `docs/invariants.md` は対になっている。**構造は architecture、
-その構造を崩してはならない理由は invariants** にあり、同じ話を両方には書かない。
+**設計を崩してはならない理由は `docs/invariants.md`、当日の手順は `docs/venue_recovery.md`。**
 
 ## ディレクトリ
 
