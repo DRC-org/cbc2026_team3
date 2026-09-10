@@ -501,6 +501,58 @@ class TestPassThrough:
         assert rig.sent == []
         assert rig.monitor.intervention("sub_y_axis").count == 1
 
+    async def test_触れた端から離れる途中の_OFF_ON_は離れる向きを覚えない(self) -> None:
+        """触れた状態から始めた零点確定の離脱 (2026-09-10 実機: `sub_lift`)。
+
+        離れていく途中で接点が到達許容差以上の区間 OFF を読み、また ON に戻る。軸は ON を
+        読んだ位置の向こう側へは行っていないので同じ押しで、- を「当たった向き」と覚えると
+        退避 (-) を貫通防止が、+ を宣言された側の歯止めが塞いで両向きが止まる。
+        """
+        rig = _rig(rear_switch=False, front_switch=True)
+        rig.set_observed(-1.0)
+        await rig.command(-10.0)
+        await rig.monitor.step()
+        rig.sensors["front_switch"] = False
+        rig.set_observed(-1.5)
+        await rig.monitor.step()
+        rig.set_observed(-2.5)
+        await rig.monitor.step()
+        rig.sensors["front_switch"] = True
+        rig.set_observed(-3.0)
+        await rig.monitor.step()
+
+        assert rig.sent == []
+        assert rig.monitor.intervention("sub_y_axis").count == 0
+
+    async def test_触れていた端の向こう側へ離れてから戻れば当たった向きを覚える(self) -> None:
+        """本物の接触。ON を読んだ位置から許容差以上離れて戻ってきた OFF→ON は新しい押し。
+
+        rear_switch は minus 側の宣言なので + へ戻る移動を `check_limit` は見ない ——
+        貫通防止だけがこれを止める。触れていたのは指令の無いあいだ (手で押した / 目標なし)。
+        """
+        rig = _rig(rear_switch=True, front_switch=False)
+        rig.set_observed(-1.0)
+        await rig.monitor.step()
+        rig.sensors["rear_switch"] = False
+        await rig.monitor.step()
+        await rig.command(-10.0)
+        rig.set_observed(-5.0)
+        await rig.monitor.step()
+        await rig.command(0.0)
+        rig.set_observed(-3.0)
+        await rig.monitor.step()
+        assert rig.sent == []
+
+        rig.sensors["rear_switch"] = True
+        rig.set_observed(-1.5)
+        await rig.monitor.step()
+
+        assert rig.sent == [-1.5 * _SCALE]
+        record = rig.monitor.intervention("sub_y_axis")
+        assert record.count == 1
+        assert record.reason is not None
+        assert "入れ替わっている疑い" in record.reason
+
     async def test_指令の時点から押されていた端からは離れられる(self) -> None:
         """端に張り付いた軸の退避と零点確定の離脱段。前回値が無い (起動時から ON) 端も同じ。"""
         rig = _rig(rear_switch=False, front_switch=True)

@@ -15,10 +15,10 @@
 進む向きの端だけを見る作りでは機構が当たった側を誰も見ていない (2026-09-10 実機: `sub_y_axis` が
 見張っていない側のスイッチを踏み越えた)。そこで端センサごとに **OFF→ON へ変わった周期に出て
 いた指令の向き**を覚え、ON のあいだその向きの指令を止める (`MotionGuard.check_pass_through`)。
-OFF に戻り、そこから到達許容差 (`tolerance`) 以上離れたら忘れる。**離れないままの OFF→ON は
-同じ押しで、向きを覚え直さない** —— 零点確定は端の作動点に座って終わるので、退避の 1 歩目に
-ON を読み直す (2026-09-10 実機: `sub_lift` の退避が「- 向きで押された」と誤って止まった)。
-判定は `MotionGuard` が持ち、ここは覚える役だけ。
+OFF に戻り、そこから到達許容差 (`tolerance`) 以上離れたら忘れる。**覚えるのは、最後に ON を読んだ
+位置の向こう側へ許容差以上離れてから戻ってきた OFF→ON だけ。** 触れた端から離れていく途中の
+OFF→ON は同じ押しで、退避の向きを覚えない (2026-09-10 実機: `sub_lift` の退避が「- 向きで押された」
+と誤って止まり、両向きが塞がった)。判定は `MotionGuard` が持ち、ここは覚える役だけ。
 
 **見るのは可動端だけ。** `max_step` は「1 指令で実測位置から離れてよい量」の判定なので、
 移動中の実測位置に当てると長距離移動の途中で必ず誤発火する。トルクは誤発火が怖いので
@@ -76,11 +76,29 @@ SensorContactCount = Callable[[str], int | None]
 
 
 @dataclass
-class _Release:
-    """端が OFF に変わってから、軸がそこからどれだけ離れたか [軸の unit]。"""
+class _Contact:
+    """端を最後に ON で読んだ位置と、その後に軸が動いた範囲 [軸の unit]。"""
 
     anchor: float
-    excursion: float = 0.0
+    low: float
+    high: float
+
+    def extend(self, position: float) -> None:
+        self.low = min(self.low, position)
+        self.high = max(self.high, position)
+
+    def shift(self, by: float) -> None:
+        self.anchor += by
+        self.low += by
+        self.high += by
+
+    def departed(self, tolerance: float) -> bool:
+        return max(self.high - self.anchor, self.anchor - self.low) >= tolerance
+
+    def returning(self, direction: int, tolerance: float) -> bool:
+        """`direction` へ進む軸が、ON を読んだ位置の向こう側へ離れてから戻ってきたか。"""
+        away = self.high - self.anchor if direction < 0 else self.anchor - self.low
+        return away >= tolerance
 
 
 class LimitMonitor(PeriodicTask):
@@ -111,7 +129,8 @@ class LimitMonitor(PeriodicTask):
         # `None` (読めていない) の周期は前回値を進めない
         self._last_active: dict[str, bool] = {}
         self._pressed_toward: dict[str, dict[str, int]] = {}
-        self._released: dict[str, _Release] = {}
+        self._last_on: dict[str, _Contact] = {}
+        self._last_position: dict[str, float] = {}
         # 読み手は自分で基準値を控える (カウンタは読んでも減らないので、同じセンサを
         # 読む零点確定のぶんを消さない)。周期ごとに 1 度だけ進めるので二重に数えない
         self._contact_baseline: dict[str, int] = {}
@@ -223,35 +242,37 @@ class LimitMonitor(PeriodicTask):
         指令の無い周期 (`delta == 0`) の OFF→ON は覚えない —— 動かしていないのに押されたなら
         機構が当たったのではなく、次の指令はどちらの向きでも退避として通す。
 
-        OFF に戻った端は、軸がそこから到達許容差以上離れるまで覚えたままにする。離れない
-        ままの OFF→ON は端の作動点に座った接点のゆらぎで、新しい接触ではない —— 忘れると
-        押し込みの続きが通り、覚え直すと退避の向きを「当たった向き」と取り違える。
+        覚えるのは、最後に ON を読んだ位置の向こう側 (進む向きの手前) へ到達許容差以上離れて
+        から戻ってきた OFF→ON だけ。離れていく途中の OFF→ON は端の作動点に座った接点のゆらぎ
+        や離れ際のバウンドで、新しい接触ではない —— 覚えると退避の向きを「当たった向き」と
+        取り違える。OFF に戻った端は、軸がそこから許容差以上離れるまで覚えたままにする。
         """
         pressed = self._pressed_toward.setdefault(axis, {})
         limits = None if spec.guard is None else spec.guard.limits
         names = () if limits is None else (*limits.plus, *limits.minus)
         # 到達許容差の内側は「同じ位置」。持たない軸は離れたかどうかを問わない
         hysteresis = spec.tolerance or 0.0
+        # 指令の無いあいだの実測の変化は移動ではない (原点の付け替えで跳ぶ)
+        shift = 0.0 if commanded else position - self._last_position.get(axis, position)
+        self._last_position[axis] = position
         for name in names:
             state = self._sensor_state(name)
             if state is None:
                 continue
+            contact = self._last_on.get(name)
+            if contact is not None:
+                if commanded:
+                    contact.extend(position)
+                else:
+                    contact.shift(shift)
             if state:
-                release = self._released.pop(name, None)
-                left = release is None or release.excursion >= hysteresis
-                if left and self._last_active.get(name) is False and delta != 0.0:
-                    pressed[name] = 1 if delta > 0.0 else -1
-            else:
-                if self._last_active.get(name) is True:
-                    self._released[name] = _Release(position)
-                release = self._released.get(name)
-                if release is not None and not commanded:
-                    # 指令の無いあいだの実測の変化は移動ではない (原点の付け替えで跳ぶ)
-                    release.anchor, release.excursion = position, 0.0
-                elif release is not None:
-                    release.excursion = max(release.excursion, abs(position - release.anchor))
-                if release is None or release.excursion >= hysteresis:
-                    pressed.pop(name, None)
+                direction = 1 if delta > 0.0 else -1
+                returned = contact is None or contact.returning(direction, hysteresis)
+                if returned and self._last_active.get(name) is False and delta != 0.0:
+                    pressed[name] = direction
+                self._last_on[name] = _Contact(position, position, position)
+            elif contact is None or contact.departed(hysteresis):
+                pressed.pop(name, None)
             self._last_active[name] = state
         return pressed
 
