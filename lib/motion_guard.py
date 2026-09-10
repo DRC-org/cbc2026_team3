@@ -21,6 +21,10 @@
 4. **急なトルク** —— 何かに当たったことは、位置が進まないことより先にトルクに出る。
    `stall_torque` を超えたら止める
 
+5 つ目は 2026-09-10 に踏んだ: **進む向きと反対側の端が、指令の時点では OFF なのに ON に
+なった** —— 向き・配線・`scale` の符号のどれを取り違えても、見張る端と機構が向かう端が
+入れ替わる。移動中の監視だけが判断でき、退避 (指令の時点から ON) は通す。
+
 **センサの途絶 (STALE) をここで扱わないのは意図的**である。「押されていない」と
 「読めていない」は別の事実で、後者を可動端の判断に混ぜると**配線が抜けたセンサが
 「押されていない = 進んでよい」に化ける**。読めていないセンサは `active=None` として
@@ -319,6 +323,43 @@ class MotionGuard:
             raise GuardViolation(
                 f"軸 '{axis}' の可動端センサ {_label(pressed)} が押されているため、"
                 "その向きへは動かしません。**離れる向きの指令は通ります**"
+            )
+
+    def check_unexpected_contact(
+        self, *, axis: str, delta: float, sensor_active: object, was_active: object
+    ) -> None:
+        """`delta` と反対側の端が「指令の時点では OFF、今は ON」なら送出する。
+
+        向き・配線・`scale` の符号のどれを取り違えても、`check_limit` が見張る端と
+        機構が向かう端は入れ替わる。そのとき共通に現れる徴候は**書いた時点で OFF だった
+        端が ON になった**ことだけなので、どちら側の端かを問わずそれで止める。
+        移動中の監視 (`LimitMonitor`) だけが呼ぶ —— 指令の入口は「指令の時点」しか
+        持たないので、この判断は成立しない。
+
+        Args:
+            was_active: 目標を書いた時点のセンサ状態を返す呼び出し可能オブジェクト
+                (`sensor_active` と同じ三値)
+
+        Raises:
+            GuardViolation: 反対側の端が新たに押された
+        """
+        limits = self._spec.limits
+        if limits is None or delta == 0.0:
+            return
+        # 指令の時点から ON の端は張り付きからの退避 (零点確定の離脱段も同じ)。
+        # `None` (読めていない) は今も当時も判断しない —— 途絶した端を退避の妨げに
+        # しないためで、読めていない端へ向かう指令は `check_limit` が拒む
+        tripped = [
+            name
+            for name in limits.sensors_for(-delta)
+            if was_active(name) is False and sensor_active(name) is True  # type: ignore[operator]
+        ]
+        if tripped:
+            raise GuardViolation(
+                f"軸 '{axis}' の進む向きと反対の端センサ {_label(tripped)} が移動中に"
+                "押されました (指令の時点では OFF)。**見張っていた端と機構が向かった端が"
+                "入れ替わっています** —— センサの配線スロット・`guard.limits` の向き・"
+                "`scale` の符号を確認してください"
             )
 
     def check_torque(self, *, axis: str, torque: float | None) -> None:

@@ -222,6 +222,74 @@ class TestSeveralSwitchesOnOneEnd:
             guard.check_limit(axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=True))
 
 
+class TestUnexpectedContact:
+    """進む向きと反対側の端が「指令の時点では OFF、今は ON」なら止める。
+
+    向き・配線・`scale` の符号のどれを取り違えても、監視が見張る端と機構が向かう端が
+    入れ替わる。指令の時点から ON の端 (張り付きからの退避) は通す。
+    """
+
+    def test_指令の時点で_OFF_だった反対側の端が押されたら止める(self) -> None:
+        with pytest.raises(GuardViolation, match="front"):
+            _guard().check_unexpected_contact(
+                axis="sub_y_axis",
+                delta=-1.0,
+                sensor_active=_sensors(front=True),
+                was_active=_sensors(front=False),
+            )
+
+    def test_指令の時点から押されていた端は通す(self) -> None:
+        _guard().check_unexpected_contact(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=True),
+            was_active=_sensors(front=True),
+        )
+
+    def test_読めていない反対側の端は退避を妨げない(self) -> None:
+        _guard().check_unexpected_contact(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=None),
+            was_active=_sensors(front=False),
+        )
+
+    def test_指令の時点で読めていなかった端は判断しない(self) -> None:
+        _guard().check_unexpected_contact(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=True),
+            was_active=_sensors(front=None),
+        )
+
+    def test_進む向きの端はここでは見ない(self) -> None:
+        """押されている端へ向かう判定は `check_limit` が持つ。二重に書かない。"""
+        _guard().check_unexpected_contact(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(rear=True),
+            was_active=_sensors(rear=False),
+        )
+
+    def test_動かない指令は見ない(self) -> None:
+        _guard().check_unexpected_contact(
+            axis="sub_y_axis",
+            delta=0.0,
+            sensor_active=_sensors(front=True),
+            was_active=_sensors(front=False),
+        )
+
+    def test_文面にセンサ名と疑う先を載せる(self) -> None:
+        with pytest.raises(GuardViolation, match=r"反対.*'front'") as exc_info:
+            _guard().check_unexpected_contact(
+                axis="sub_y_axis",
+                delta=-1.0,
+                sensor_active=_sensors(front=True),
+                was_active=_sensors(front=False),
+            )
+        assert "scale" in str(exc_info.value)
+
+
 class TestJumpGuard:
     def test_桁の違う目標を止める(self) -> None:
         """**実機で踏んだ形そのもの。**
