@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
@@ -32,6 +33,17 @@ _FOLLOW_ATTEMPTS = 5
 _STALL_LIMIT = 3
 
 _PROGRESS_FRACTION = 0.5
+
+#: 粗探索で目標を出し直す周期。`coarse_step / limit_speed` (実機 0.5mm / 17.4mm/s ≒ 29ms) より
+#: 短くないと軸が目標に追いついて周期ごとに止まる。DM3520 は指令のたびに状態を返すので実測も
+#: この周期で更新され、同じ実測から同じ目標を 2 回出すことは無い (CAN の往復は 1ms 台)
+_GLIDE_PERIOD_S = 0.01
+
+#: 粗探索で半歩 (`coarse_step/2`) 進まないまま許す時間。刻み送りが 1 歩の追従に許していた
+#: `_FOLLOW_ATTEMPTS` * settle_s と同じ長さで、周期を詰めても停滞の感度が変わらないよう秒で持つ
+_GLIDE_STALL_S = 0.25
+
+_GLIDE_STALL_PERIODS = math.ceil(_GLIDE_STALL_S / _GLIDE_PERIOD_S)
 
 #: `homing.release_distance` を書かなかった軸の離脱上限を step から作る倍数。
 #: `search_distance` を流用すると反対側の機構端まで走り抜ける
@@ -798,7 +810,7 @@ class HomingRunner:
         progress = _progress_threshold(lead)
         start = self._observe(spec, handle)
         observed = start
-        # 「歩」が無いので、1 歩ぶんの追従に許す周期数のあいだに半歩も進まなければ停滞
+        # 「歩」が無いので、時間で見る: `_GLIDE_STALL_S` のあいだに半歩も進まなければ停滞
         mark = start
         idle = 0
         while True:
@@ -809,7 +821,7 @@ class HomingRunner:
                 return limit_message
 
             await handle.set_target_value(spec.to_commands(observed + homing.direction * lead))
-            await self._sleep(homing.settle_s)
+            await self._sleep(_GLIDE_PERIOD_S)
             if contacts.any_contacted():
                 return None
 
@@ -819,11 +831,10 @@ class HomingRunner:
                 idle = 0
                 continue
             idle += 1
-            if idle >= _FOLLOW_ATTEMPTS:
+            if idle >= _GLIDE_STALL_PERIODS:
                 return (
                     f"軸 '{spec.name}' が指令しても動きません"
-                    f" ({_FOLLOW_ATTEMPTS} 周期 ({_FOLLOW_ATTEMPTS * homing.settle_s:g} 秒) で"
-                    f" {progress}{spec.unit} 進まなかった)。"
+                    f" ({_GLIDE_STALL_S:g} 秒で {progress}{spec.unit} 進まなかった)。"
                     " 機構の引っかかり・探索方向・モータの励磁を確認してください"
                 )
 

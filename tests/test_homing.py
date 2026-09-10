@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+import yaml
 
 from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
@@ -12,6 +14,8 @@ from lib.match_state import Court
 from lib.motion_guard import GuardViolation, SensorSuspension
 from lib.sequence.homing import (
     _FOLLOW_ATTEMPTS,
+    _GLIDE_PERIOD_S,
+    _GLIDE_STALL_PERIODS,
     _STALL_LIMIT,
     HomingError,
     HomingRunner,
@@ -1071,13 +1075,13 @@ class TestTwoStageSearch:
         )
         spec = table.axis("y_axis")
         rec = _Recorder()
-        # 待ち 5 回ぶんでも粗い 1 歩 (1.0mm) の 0.4mm しか進まない
-        handle = _slow_handle(spec, rec, per_tick=0.08)
+        # 停滞に許す時間いっぱいでも粗い 1 歩 (1.0mm) の 4 割しか進まない
+        handle = _slow_handle(spec, rec, per_tick=0.4 / _GLIDE_STALL_PERIODS)
 
         with pytest.raises(HomingError, match="動きません"):
             await _runner(rec).home(spec, handle)
 
-        assert len(rec.commands) <= _FOLLOW_ATTEMPTS + 1
+        assert len(rec.commands) <= _GLIDE_STALL_PERIODS + 1
         assert rec.origins == []
 
     async def test_細探索の停滞判定は細かい刻みを基準にする(self) -> None:
@@ -1176,8 +1180,8 @@ class TestGlidesThroughTheCoarseSearch:
         with pytest.raises(HomingError, match="動きません"):
             await _runner(rec).home(spec, handle)
 
-        # 1 歩ぶんの追従に許す周期数だけ先行させ、止め直す 1 通で終わる
-        assert len(rec.commands) == _FOLLOW_ATTEMPTS + 1
+        # 停滞に許す時間ぶんだけ先行させ、止め直す 1 通で終わる
+        assert len(rec.commands) == _GLIDE_STALL_PERIODS + 1
         assert _axis_commands(rec, "y_axis_r")[-1] == pytest.approx(0.0)
         assert rec.origins == []
 
@@ -1206,6 +1210,53 @@ class TestGlidesThroughTheCoarseSearch:
         assert commands[-1] == pytest.approx(rec.axis_position())
         assert min(commands) >= -5.0
         assert rec.origins == []
+
+    async def test_出し直しは整定待ちではなく粗探索の周期で行う(self) -> None:
+        """`settle_s` は到達後の整定を待つ時間で、流し続ける粗探索では待っていない。"""
+        spec = _table(
+            direction=-1,
+            step=0.1,
+            coarse_step=1.0,
+            search_distance=20.0,
+            release_distance=2.0,
+            settle_s=0.05,
+        ).axis("y_axis")
+        rec = _Recorder(active_at_or_below=-2.05)
+        handle = _slow_handle(spec, rec, per_tick=0.3)
+        waited: list[float] = []
+        advance = rec.sleep
+
+        async def _record(seconds: float) -> None:
+            waited.append(seconds)
+            await advance(seconds)
+
+        rec.sleep = _record  # type: ignore[method-assign]
+
+        await _runner(rec).home(spec, handle)
+
+        # 粗探索の 7 周期はすべて `_GLIDE_PERIOD_S`。その後の離脱・寄せ直しは settle_s
+        assert waited[:7] == [_GLIDE_PERIOD_S] * 7
+        assert waited[7] == 0.05
+
+    def test_実機の速度では軸が先行させた目標に追いつかない(self) -> None:
+        """`周期 * limit_speed < coarse_step` でなければ周期ごとに止まってガクつく。
+
+        速度は `limit_speed` の実測 (2026-09-10、`docs/mechanism_handoff.md`)。粗探索を
+        書いた軸を増やしたらここにも実測を足すこと。
+        """
+        speeds_mm_s = {"sub_lift": 17.4, "sub_y_axis": 34.8}
+        table = load_position_table(
+            yaml.safe_load(Path("config/sub_hand_positions.yaml").read_text(encoding="utf-8")),
+            source="config/sub_hand_positions.yaml",
+        )
+        coarse = {
+            name: table.axis(name).homing.coarse_step
+            for name in table.axes
+            if table.axis(name).homing is not None and table.axis(name).homing.coarse_step
+        }
+        assert set(coarse) == set(speeds_mm_s)
+        for name, lead in coarse.items():
+            assert _GLIDE_PERIOD_S * speeds_mm_s[name] < lead, name
 
     async def test_流している途中で途絶したら止め直して降りる(self) -> None:
         spec = self._table().axis("y_axis")
