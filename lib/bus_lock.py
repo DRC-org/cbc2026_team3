@@ -10,23 +10,30 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import pathlib
 import sys
 import tempfile
+from collections.abc import Sequence
+
+logger = logging.getLogger(__name__)
 
 _RUN_LOCK_DIR = pathlib.Path("/run/lock")
 
 
-def default_lock_dir() -> pathlib.Path:
-    # /run/lock は tmpfs で再起動ごとに消える。無い環境だけ /tmp へ落とす
-    if _RUN_LOCK_DIR.is_dir():
-        return _RUN_LOCK_DIR
-    return pathlib.Path(tempfile.gettempdir())
+def default_lock_dirs() -> list[pathlib.Path]:
+    """主張を置く場所の候補。先頭から順に試し、開けなければ次へ落とす。
+
+    /run/lock は tmpfs で再起動ごとに消えるので第一候補。別ユーザー (root の systemd
+    起動など) が残したファイルは開けないことがあり、そのときは /tmp で競う。
+    """
+    dirs = [_RUN_LOCK_DIR, pathlib.Path(tempfile.gettempdir())]
+    return [d for i, d in enumerate(dirs) if d.is_dir() and d not in dirs[:i]]
 
 
-def lock_path(channel: str, *, lock_dir: pathlib.Path | None = None) -> pathlib.Path:
-    return (lock_dir or default_lock_dir()) / f"cbc-can-{channel}.lock"
+def lock_path(channel: str, lock_dir: pathlib.Path) -> pathlib.Path:
+    return lock_dir / f"cbc-can-{channel}.lock"
 
 
 class BusClaimedError(RuntimeError):
@@ -62,16 +69,41 @@ class BusClaim:
             os.close(fd)
 
 
-def claim_bus(channel: str, *, lock_dir: pathlib.Path | None = None) -> BusClaim:
+def claim_bus(channel: str, *, lock_dirs: Sequence[pathlib.Path] | None = None) -> BusClaim:
     """`channel` の持ち主を主張する。既に生きている持ち主が居れば `BusClaimedError`。
+
+    候補の置き場所を順に試す。**持ち主が居る場所からは次へ落ちない** —— 落ちると
+    2 つ目が別の場所で持ち主になれてしまい、主張そのものが無意味になる。
 
     Raises:
         BusClaimedError: 他のプロセスが掴んでいる (文面に相手の PID とコマンドライン)
-        OSError: ロックファイルを開けない (権限など)
+        OSError: どの候補でもロックファイルを開けない (権限など)
     """
-    path = lock_path(channel, lock_dir=lock_dir)
-    # 別ユーザーで起動した相手とも同じファイルで競うために全員へ書き込みを許す
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+    dirs = list(lock_dirs) if lock_dirs is not None else default_lock_dirs()
+    if not dirs:
+        raise FileNotFoundError("ロックファイルを置ける場所がありません")
+    for index, lock_dir in enumerate(dirs):
+        path = lock_path(channel, lock_dir)
+        try:
+            # 別ユーザーで起動した相手とも同じファイルで競うために全員へ書き込みを許す
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+        except OSError as exc:
+            if index == len(dirs) - 1:
+                raise
+            logger.warning(
+                "CAN バス '%s' のロックファイル %s を開けません (%s)。%s で主張します"
+                " (二重起動の検出は同じ場所で主張する相手にしか効きません)",
+                channel,
+                path,
+                exc,
+                dirs[index + 1],
+            )
+            continue
+        return _lock(channel, path, fd)
+    raise AssertionError("unreachable")
+
+
+def _lock(channel: str, path: pathlib.Path, fd: int) -> BusClaim:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

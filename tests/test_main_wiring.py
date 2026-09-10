@@ -2607,19 +2607,25 @@ class TestClaimCanBuses:
         assert "PID 4242" in message
         assert "--port 8081" in message
 
-    def test_ロックファイルを開けなければ一行のメッセージで落とす(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_ロックファイルを開けなければERRORを残して起動は続ける(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        def _denied(_channel: str) -> None:
-            raise PermissionError(13, "Permission denied")
+        def _denied(channel: str) -> MagicMock:
+            if channel == "can_generic":
+                raise PermissionError(13, "Permission denied")
+            return MagicMock()
 
         monkeypatch.setattr(main, "claim_bus", _denied)
 
-        with pytest.raises(SystemExit) as exc:
-            main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+        with caplog.at_level(logging.ERROR):
+            claims = main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
 
-        assert "can_generic" in str(exc.value)
-        assert "Permission denied" in str(exc.value)
+        assert len(claims) == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "can_generic" in errors[0]
+        assert "Permission denied" in errors[0]
+        assert "検出が効いていません" in errors[0]
 
     def test_ポート確認の後_配線の前に掴む(self) -> None:
         source = inspect.getsource(main.main)

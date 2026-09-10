@@ -630,9 +630,14 @@ def _claim_can_buses(
         except BusClaimedError as exc:
             raise SystemExit(str(exc)) from exc
         except OSError as exc:
-            raise SystemExit(
-                f"CAN バス '{channel}' の持ち主を主張するロックファイルを開けません ({exc})"
-            ) from exc
+            # 主張できないことを理由に機体を動かせなくしない。検出が効いていないことだけを残す
+            logger.error(
+                "CAN バス '%s' の持ち主を主張できません (%s)。二重起動の検出が効いていません"
+                " —— 同じバスへ別のプロセスが指令すると互いの目標を上書きし合い、"
+                "機構の故障に見えます (起動は続けます)",
+                channel,
+                exc,
+            )
     return claims
 
 
