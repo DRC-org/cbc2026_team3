@@ -532,8 +532,13 @@ export interface SuctionPad {
   enabled: boolean;
 }
 
+export const SUCTION_FILL_FROM = ["left", "right"] as const;
+export type SuctionFillFrom = (typeof SUCTION_FILL_FROM)[number];
+
 export interface SuctionState {
   pads: SuctionPad[];
+  // どちらの端から ON にしていくか。コートから決めるのはサーバーで、未確定なら null
+  fill_from: SuctionFillFrom | null;
 }
 
 function isSuctionPad(value: unknown): boolean {
@@ -551,6 +556,9 @@ export function parseSuction(raw: unknown): SuctionState | Malformed | null | un
   if (raw === null) return null;
   if (!isObject(raw) || !Array.isArray(raw.pads)) return MALFORMED;
   if (!raw.pads.every(isSuctionPad)) return MALFORMED;
+  if (raw.fill_from !== null && !SUCTION_FILL_FROM.includes(raw.fill_from as SuctionFillFrom)) {
+    return MALFORMED;
+  }
   return raw as unknown as SuctionState;
 }
 

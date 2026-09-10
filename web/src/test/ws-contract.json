@@ -410,6 +410,7 @@
         }
       ],
       "suction": {
+        "fill_from": "left",
         "pads": [
           {
             "axis": "valve_1",
@@ -693,6 +694,7 @@
         }
       ],
       "suction": {
+        "fill_from": "left",
         "pads": [
           {
             "axis": "valve_1",

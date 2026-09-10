@@ -1527,7 +1527,9 @@ class RobotServer:
             "health": snapshot_dict,
             "safety": self._safety_state(robot_name),
             "manual": self._manual_state(robot_name),
-            "suction": ctx.suction.to_dict() if ctx.suction is not None else None,
+            "suction": ctx.suction.to_dict(court=self.match.court)
+            if ctx.suction is not None
+            else None,
             # この台がコート確定を要るか。UI が軸名から導き直さないようサーバーが配る
             "court_required": bool(ctx.court_dependent_axes),
         }

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from lib.match_state import Court
 from lib.suction import SuctionPad, SuctionSelection, suction_of
 
 _AXES = ("valve_1", "valve_2", "valve_3")
@@ -84,8 +85,17 @@ class TestPayload:
                 {"axis": "valve_1", "label": "1", "enabled": False},
                 {"axis": "valve_2", "label": "2", "enabled": True},
                 {"axis": "valve_3", "label": "3", "enabled": False},
-            ]
+            ],
+            "fill_from": None,
         }
+
+    @pytest.mark.parametrize(
+        ("court", "fill_from"), [(Court.RED, "left"), (Court.BLUE, "right"), (None, None)]
+    )
+    def test_ON_にしていく端はコートから決め_未確定なら断定しない(
+        self, court: Court | None, fill_from: str | None
+    ) -> None:
+        assert SuctionSelection.numbered(_AXES).to_dict(court=court)["fill_from"] == fill_from
 
 
 class TestSuctionOf:

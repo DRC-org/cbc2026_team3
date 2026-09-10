@@ -256,6 +256,7 @@ describe("parseServerMessage", () => {
           { axis: "valve_1", label: "1", enabled: true },
           { axis: "valve_2", label: "2", enabled: false },
         ],
+        fill_from: null,
       };
 
       const suctionOf = (suction: unknown) => {
@@ -279,17 +280,17 @@ describe("parseServerMessage", () => {
       it.each(["axis", "label", "enabled"])("%s が欠けたら MALFORMED (空へ倒さない)", (key) => {
         const broken: Record<string, unknown> = { axis: "valve_1", label: "1", enabled: true };
         delete broken[key];
-        expect(suctionOf({ pads: [broken] })).toBe(MALFORMED);
+        expect(suctionOf({ pads: [broken], fill_from: null })).toBe(MALFORMED);
       });
 
       it("enabled が真偽値でなければ MALFORMED (押せるボタンを配信の崩れで増やさない)", () => {
-        expect(suctionOf({ pads: [{ axis: "valve_1", label: "1", enabled: "yes" }] })).toBe(
-          MALFORMED,
-        );
+        expect(
+          suctionOf({ pads: [{ axis: "valve_1", label: "1", enabled: "yes" }], fill_from: null }),
+        ).toBe(MALFORMED);
       });
 
       it("pads が配列でなければ MALFORMED", () => {
-        expect(suctionOf({ pads: "valve_1" })).toBe(MALFORMED);
+        expect(suctionOf({ pads: "valve_1", fill_from: null })).toBe(MALFORMED);
         expect(suctionOf("valve_1")).toBe(MALFORMED);
       });
     });

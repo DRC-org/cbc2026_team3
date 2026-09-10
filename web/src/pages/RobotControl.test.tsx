@@ -758,6 +758,7 @@ describe("吸着パッドの面", () => {
       { axis: "valve_1", label: "1", enabled: true },
       { axis: "valve_2", label: "2", enabled: true },
     ],
+    fill_from: null,
   };
 
   const VALVE_AXES: ManualAxis[] = ["valve_1", "valve_2"].map((name) => ({
@@ -845,7 +846,10 @@ describe("測定系のボタン (零点合わせ / リミットスイッチ間�
   };
   const SUB_BUTTON = { name: "サブハンドの零点合わせを開始" };
   const DISTANCE_BUTTON = { name: "サブハンドのリミットスイッチ間の距離測定を開始" };
-  const SUCTION: RobotState["suction"] = { pads: [{ axis: "valve_1", label: "1", enabled: true }] };
+  const SUCTION: RobotState["suction"] = {
+    pads: [{ axis: "valve_1", label: "1", enabled: true }],
+    fill_from: null,
+  };
 
   it("準備中の半自動に、自分の担当機のボタンを 2 つだけ、吸着パッドの上に出す", () => {
     renderWithRobot(<RobotControl robotKey="sub_hand" label="サブハンド" />, {

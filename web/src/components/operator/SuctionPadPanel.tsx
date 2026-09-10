@@ -73,6 +73,12 @@ export function SuctionPadPanel({
   });
 
   const pads = inManual ? openPads : declarePads;
+  const fillFromNote =
+    suction.fill_from === "left"
+      ? "左端から順に ON にしてください。"
+      : suction.fill_from === "right"
+        ? "右端から順に ON にしてください。"
+        : "コートが未確定なので、どちらの端から ON にするかは出せません。";
   const onCount = pads.filter((pad) => pad.on).length;
 
   return (
@@ -117,7 +123,7 @@ export function SuctionPadPanel({
       <p className="shrink-0 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
         {inManual
           ? "押した弁が今すぐ開きます（吸着に使う弁の選択は半自動のときに行います）。"
-          : "ON のパッドだけを吸着に使います。次の「ワーク吸着」ステップから効きます（実行中の吸着には反映されません）。"}
+          : `${fillFromNote} ON のパッドだけを吸着に使います。次の「ワーク吸着」ステップから効きます（実行中の吸着には反映されません）。`}
       </p>
     </Panel>
   );

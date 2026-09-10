@@ -12,6 +12,7 @@ const THREE_PADS: SuctionState = {
     { axis: "valve_2", label: "2", enabled: false },
     { axis: "valve_3", label: "3", enabled: true },
   ],
+  fill_from: null,
 };
 
 const OPEN_CLOSED: ManualPosition[] = [
@@ -64,6 +65,28 @@ function renderPanel(
 }
 
 describe("SuctionPadPanel", () => {
+  it.each([
+    ["left", "左端から順に ON にしてください"],
+    ["right", "右端から順に ON にしてください"],
+  ] as const)("半自動では ON にしていく端 (%s) を配信のまま出す", (fillFrom, text) => {
+    renderPanel({ ...THREE_PADS, fill_from: fillFrom });
+
+    expect(screen.getByText(new RegExp(text))).toBeInTheDocument();
+  });
+
+  it("コート未確定では端を断定しない", () => {
+    renderPanel({ ...THREE_PADS, fill_from: null });
+
+    expect(screen.queryByText(/端から順に/)).toBeNull();
+    expect(screen.getByText(/コートが未確定/)).toBeInTheDocument();
+  });
+
+  it("手動では端の話を出さない (宣言ではなく今すぐ開閉の面)", () => {
+    renderPanel({ ...THREE_PADS, fill_from: "left" }, null, manualWith([valveAxis("valve_1", 1)]));
+
+    expect(screen.queryByText(/端から順に/)).toBeNull();
+  });
+
   it("サーバーが配ったラベルで並べ、軸名は画面に出さない", () => {
     renderPanel(THREE_PADS);
 
@@ -114,7 +137,10 @@ describe("SuctionPadPanel", () => {
   });
 
   it("1 つも選んでいなければ吸着ステップが拒否されると警告する", () => {
-    renderPanel({ pads: THREE_PADS.pads.map((pad) => ({ ...pad, enabled: false })) });
+    renderPanel({
+      ...THREE_PADS,
+      pads: THREE_PADS.pads.map((pad) => ({ ...pad, enabled: false })),
+    });
 
     expect(screen.getByText(/吸着ステップは拒否されます/)).toBeInTheDocument();
   });

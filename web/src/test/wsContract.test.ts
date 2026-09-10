@@ -82,6 +82,7 @@ const STATE_FIELDS_UI_READS = [
   "manual.axes",
   "suction",
   "suction.pads",
+  "suction.fill_from",
 ] as const;
 
 const EXPECTATIONS: Record<string, Expectation> = {
@@ -505,6 +506,7 @@ const SWITCH_MEASURE_FIELDS: FieldSpec = {
 
 const SUCTION = fieldsOf<SuctionState>({
   pads: "ui",
+  fill_from: "ui",
 });
 
 const SUCTION_PAD = fieldsOf<SuctionPad>({
