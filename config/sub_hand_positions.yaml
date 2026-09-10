@@ -29,11 +29,10 @@ axes:
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
     scale: 1.0668451
     offset: 0.0
-    # 速度は limit_speed の単位が確定しておらず換算で出せない (docs/mechanism_handoff.md)。
-    # 零点確定の粗探索ログから実速度が下回らないと分かる下限を置き、timeout_s は
-    # manual の全幅 442mm をその下限で割った 22.1 秒に余裕を足した仮値。実測で詰めること
-    min_speed: 20.0
-    timeout_s: 25.0
+    # 未実測。limit_speed が sub_lift (実測 17.4mm/s) の 2 倍なので比例と仮定した値。
+    # timeout_s は manual の全幅 442mm ÷ 34.8mm/s = 12.7 秒に加減速と整定の余裕 4 割
+    min_speed: 34.8
+    timeout_s: 18.0
     tolerance: 1.0
     manual:
       # 後端スイッチの実測 -447.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
@@ -65,9 +64,10 @@ axes:
     command_unit: rad
     scale: { blue: 1.0668451, red: -1.0668451 }
     offset: 0.0
-    # 前後軸と同じ根拠の下限。timeout_s は manual の全幅 154mm ÷ 20mm/s = 7.7 秒に
-    # 余裕を足した仮値。長いほど引っかかった軸の報告が遅れるので、実測で詰めること
-    min_speed: 20.0
+    # 2026-09-10 実測 (top へ寄せる 1 通の move_to の定速区間、limit_speed 1.0)。
+    # timeout_s は manual の全幅 154mm ÷ 17.4mm/s = 8.9 秒に加減速と整定の余裕 3 割強。
+    # 長いほど引っかかった軸の報告が遅れるので、これ以上は伸ばさない
+    min_speed: 17.4
     timeout_s: 12.0
     tolerance: 1.0
     manual:
