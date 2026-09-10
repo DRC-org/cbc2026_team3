@@ -3,6 +3,19 @@
 各エントリは「いつ / 何が起きたか（症状・実測値）/ どう決着したか」だけを持つ。
 設計の理由は `docs/invariants.md`、現況は `docs/checks_and_health.md` が正。
 
+## 2026-09-10 緊急停止を解除すると `sub_y_axis` / `sub_lift` が誰も指令していないのに機構端まで走る
+
+物理非常停止からの解除で、DM3520 の 2 軸が enable の直後に機構端へ走った（操縦者が再度停止）。
+ログでは 09:55:55.822 に解除コマンド受信、09:55:55.980 に `p_max 実機 12.5 -> config 1000` の
+書き直し。この 158ms の窓に 20Hz の `QueryDrivenTargetRefresher` が「今の姿勢を保て」のラッチを
+取っており、その値は 12.5 で送られた位置を 1000 で復号した 80 倍読み。解除経路
+`_reactivate_motors` はラッチを捨てないので、enable が届いた次の周期にそこへ走った
+（手動再励磁 `_reenergize_motors` だけが `clear_target` を呼んでいた）。
+
+決着: 解除の再励磁を `hold_target_refresh`（原点の付け替えと同じ）で囲み、励磁のあいだ再送を
+黙らせて抜けるときにラッチを捨てる。加えて `activation_block_reason()` が非 None のあいだは
+`idle_target_value()` をラッチも送信もしない。規則は `docs/invariants.md` §3。
+
 ## 2026-09-10 `sub_y_axis` が後端スイッチを踏み越えたのに、移動中の可動端監視が黙っていた
 
 手動操縦で `sub_y_axis` を `retracted`（−430mm）へ動かしたところ後端のリミットスイッチを

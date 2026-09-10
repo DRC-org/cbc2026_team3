@@ -11,7 +11,7 @@ import os
 import pathlib
 import signal
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from types import ModuleType
 
 import can
@@ -36,6 +36,7 @@ from lib.control.target_refresh import (
     GenericTargetRefresher,
     QueryDrivenTargetRefresher,
     TargetRefresher,
+    hold_target_refresh,
 )
 from lib.control.trajectory import TrapezoidalProfile
 from lib.drivers.base import MotorDriver
@@ -211,44 +212,6 @@ def _suspend_sync_monitoring(monitors: list[SyncMonitor], axis: str) -> Iterator
         yield
 
 
-@contextlib.asynccontextmanager
-async def _hold_target_refresh(
-    refreshers: list[TargetRefresher], names: list[str]
-) -> AsyncIterator[None]:
-    """原点を付け替えるあいだ再送を黙らせ、抜けるときに目標とラッチを捨てる。
-
-    **原点の付け替えは「論理値 0 が指す物理位置」を動かす操作なので、付け替えの前に
-    記録した目標もラッチも、付け替えた後には別の物理位置を指す。** 探索がヒットした
-    直後に `HomingRunner` が「その場で止める」ために書いた目標がまさにそれで、
-    その値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
-    再開すると、20Hz の再送が新しいオフセットで `encode_target()` を通り、
-    そのぶんだけ離れた位置へ押し続ける
-    (`QueryDrivenTargetRefresher.clear_target` が再励磁について書いているのと
-    同じ上書きが、こちらでは恒久的に効き続ける)。
-
-    **捨てるだけでは足りず、付け替えのあいだ黙らせる必要がある。** 目標を先に
-    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、付け替えの直前に
-    取ったラッチが直後には別の位置を指す。黙らせておけば、ラッチは抜けた後に
-    新しい原点で取り直される。
-
-    捨てるのは対象軸のモータだけ。全台へ広げると無関係な軸の `wait_reached` まで
-    巻き込んで中断させる (`_TargetRefresherBase.clear_target` と同じ理由)。
-    """
-    targeted = [r for r in refreshers if set(names) & set(r.motor_names)]
-    for refresher in targeted:
-        await refresher.pause(reason="原点の付け替え")
-    try:
-        yield
-    finally:
-        # **捨ててから再開する。** 順序を逆にすると、捨てるまでの 1 周期で
-        # 古い目標が新しい原点のもとへ送られる
-        for refresher in targeted:
-            for name in names:
-                if name in refresher.motor_names:
-                    refresher.clear_target(name)
-            refresher.resume()
-
-
 def _make_origin_resolver(
     loops: list[M3508PositionLoop],
     table: PositionTable,
@@ -297,7 +260,7 @@ def _make_origin_resolver(
                 # 通った瞬間に差のぶん機構が走る。偏差監視は、`HomingRunner._align`
                 # が左右を意図的にずらした直後の姿勢を控えるので直前まで立っている。
                 with _suspend_sync_monitoring(monitors, axis):
-                    async with _hold_target_refresh(refreshers, names):
+                    async with hold_target_refresh(refreshers, names, reason="原点の付け替え"):
                         if local:
                             await manager.capture_origin_in_place(
                                 names, should_abort=is_estop_active
