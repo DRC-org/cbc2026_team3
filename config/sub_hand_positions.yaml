@@ -46,8 +46,8 @@ axes:
     homing:
       sensor: sub_lift_b_limit_sensor
       direction: 1
-      # スイッチ間の実測は 159mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
-      search_distance: 220.0
+      # manual の全幅を賄う。狭いと上端側から始めたとき下端スイッチへ届かない
+      search_distance: 470.0
       step: 0.1
       # ON 区間の実測 2.37mm (2026-09-10 作動点測定) より狭く取る
       coarse_step: 0.5
@@ -58,7 +58,8 @@ axes:
       limits:
         plus: sub_lift_b_limit_sensor
         minus: sub_lift_t_limit_sensor
-      max_step: 250.0
+      # 桁の違う目標だけを止める。manual の全幅より広く取る
+      max_step: 500.0
       stall_torque: 2.0
     unit: mm
     command_unit: rad
@@ -71,8 +72,9 @@ axes:
     timeout_s: 200.0
     tolerance: 1.0
     manual:
-      # 上端スイッチの実測 -159.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
-      min: -152.0
+      # 上端スイッチは未実測。届く前に宣言で止まらないよう広めに取り、
+      # 実際の端は上端スイッチと stall_torque に見させる
+      min: -450.0
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
