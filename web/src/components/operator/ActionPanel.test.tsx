@@ -89,12 +89,12 @@ describe("ActionPanel", () => {
   });
 
   describe("中断位置から押す START", () => {
-    it("先頭から走り直すことをボタンと状態表示の両方で言う", () => {
+    it("先頭から走り直すことはボタンが言い、状態表示は停止中に留める", () => {
       mount(makeState({ step_index: 3, running: false }));
 
       expect(screen.getByRole("button", { name: "シーケンスを先頭から再開" })).toBeEnabled();
       expect(screen.getByText("先頭から再開")).toBeInTheDocument();
-      expect(screen.getByText(/先頭から走り直します/)).toBeInTheDocument();
+      expect(screen.getByText("停止中")).toBeInTheDocument();
       expect(screen.queryByText(/待機中/)).not.toBeInTheDocument();
     });
 
@@ -126,13 +126,13 @@ describe("ActionPanel", () => {
   });
 
   describe("切断中", () => {
-    const DISCONNECTED = { blockedReason: "切断中のため送信できません" };
+    const DISCONNECTED = { blockedReason: "切断中" };
 
     it("START を押せなくし、理由をボタンに出す", () => {
       mount(makeState(), DISCONNECTED);
 
       expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();
-      expect(screen.getByText("切断中のため送信できません")).toBeInTheDocument();
+      expect(screen.getByText("切断中")).toBeInTheDocument();
     });
 
     it("NEXT を押せなくし、理由をボタンに出す", () => {
@@ -140,7 +140,7 @@ describe("ActionPanel", () => {
 
       expect(screen.queryByRole("button", { name: "次のステップへ進む" })).toBeNull();
       expect(screen.getByRole("button", { name: /操作不可/ })).toBeDisabled();
-      expect(screen.getByText("切断中のため送信できません")).toBeInTheDocument();
+      expect(screen.getByText("切断中")).toBeInTheDocument();
     });
 
     it("STOP も押せない (届かない停止で止まったと思わせない)", () => {
@@ -154,7 +154,7 @@ describe("ActionPanel", () => {
     it("走るステップ数と、止まるステップ名を出す", () => {
       mount(makeState({ step_index: 1, running: true, waiting_trigger: true }));
 
-      expect(screen.getByText("2 ステップ走って「ハンド閉じる」で停止")).toBeInTheDocument();
+      expect(screen.getByText("2 ステップ先「ハンド閉じる」で停止")).toBeInTheDocument();
     });
 
     it("許可待ちが現れないまま終端まで走る場合は、止まらないことを言う", () => {
@@ -172,19 +172,19 @@ describe("ActionPanel", () => {
         }),
       );
 
-      expect(screen.getByText(/最後まで走り切/)).toBeInTheDocument();
+      expect(screen.getByText("残り 2 ステップ 停止なし")).toBeInTheDocument();
       expect(screen.queryByText(/で停止/)).not.toBeInTheDocument();
     });
 
     it("最終ステップではその旨を出す", () => {
       mount(makeState({ step_index: STEPS.length - 1, running: true }));
-      expect(screen.getByText("これが最終ステップです")).toBeInTheDocument();
+      expect(screen.getByText("最終ステップ")).toBeInTheDocument();
     });
 
     it("完走後は終了を伝える", () => {
       mount(makeState({ step_index: STEPS.length }));
       expect(screen.getByText("全ステップ完了")).toBeInTheDocument();
-      expect(screen.getByText("シーケンスは終了しています")).toBeInTheDocument();
+      expect(screen.getByText("終了")).toBeInTheDocument();
     });
   });
 

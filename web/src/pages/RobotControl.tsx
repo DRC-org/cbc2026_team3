@@ -58,11 +58,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         : "準備中";
   // コート確定が要るかはサーバーが決める (state.court_required)。UI が軸名から導き直さない
   const courtUnset = state?.court_required === true && matchState.court === null;
-  const sequenceBlockedReason = !connected
-    ? "切断中のため送信できません"
-    : courtUnset
-      ? "コートが未設定のためシーケンスを開始できません (試合準備でコートを選んでください)"
-      : null;
+  const sequenceBlockedReason = !connected ? "切断中" : courtUnset ? "コート未設定" : null;
 
   const kind = state ? sequenceKind(state) : null;
 
@@ -73,13 +69,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const manual: ManualState = state?.manual ?? { mode: "sequence", axes: [] };
   const inManual = manual.mode === "manual";
 
-  const modeBlockedReason = connected ? null : "切断中のため切り替えできません";
+  const modeBlockedReason = connected ? null : "切断中";
   const manualBlockedReason = !connected
-    ? "切断中のため操作できません"
+    ? "切断中"
     : eStopActive
-      ? "緊急停止中は手動操縦できません"
+      ? "緊急停止中"
       : courtUnset
-        ? "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)"
+        ? "コート未設定"
         : null;
 
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
@@ -107,7 +103,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     return (
       <Page className="flex flex-col items-center justify-center">
         <Panel legend={label} className="flex-none">
-          <p className="text-base-content/70">データ未受信 — 接続待機中...</p>
+          <p className="text-base-content/70">データ未受信</p>
         </Panel>
       </Page>
     );
@@ -141,16 +137,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   );
 
   // どちらのモードでも出す。半自動では次の吸着で使う弁の宣言（機体を動かさない）、
-  // 手動ではその場の開閉
+  // 手動ではその場の開閉。置くのは機体状態と同じ列 —— 左は機体を動かす面だけに寄せる
   const suctionPanel =
     state.suction === undefined || state.suction === null ? null : (
       <SuctionPadPanel
         robotKey={robotKey}
         suction={state.suction}
         manual={manual}
-        blockedReason={
-          inManual ? manualBlockedReason : connected ? null : "切断中のため変更できません"
-        }
+        blockedReason={inManual ? manualBlockedReason : connected ? null : "切断中"}
         sendOrReport={sendOrReport}
       />
     );
@@ -165,6 +159,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         connected={connected}
         tempThresholds={tempThresholdsOf(serverInfo)}
         defaultOpen={open}
+        concise
         onReenergize={handleReenergize}
       />
     </Panel>
@@ -193,15 +188,22 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   if (setupPhase) {
     const openSubsystemPanel = subsystemPanel(true, "min-h-0 flex-1");
+    const statusColumn = (
+      <div className="flex min-h-0 flex-col gap-2">
+        {suctionPanel}
+        {openSubsystemPanel}
+      </div>
+    );
     return (
       <Page className="flex flex-col">
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
-          <div className="flex min-h-0 flex-col gap-2">
-            {suctionPanel}
-            {inManual ? manualPanel : openSubsystemPanel}
-          </div>
-          {inManual ? openSubsystemPanel : stepPanel}
+          {inManual ? (
+            <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
+          ) : (
+            statusColumn
+          )}
+          {inManual ? statusColumn : stepPanel}
         </div>
       </Page>
     );
@@ -212,10 +214,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       {modeSwitch}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
         {inManual ? (
-          <div className="flex min-h-0 flex-col gap-2">
-            {suctionPanel}
-            {manualPanel}
-          </div>
+          <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
         ) : (
           <div className="flex min-h-0 flex-col gap-2">
             <ActionPanel
@@ -235,14 +234,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               sendOrReport={sendOrReport}
             />
 
-            {suctionPanel}
-
             {stepPanel}
           </div>
         )}
 
         <div className="flex min-h-0 flex-col gap-2">
           <MatchTimer timer={matchState.timer} />
+
+          {suctionPanel}
 
           {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : undefined)}
         </div>

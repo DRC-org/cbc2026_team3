@@ -12,6 +12,7 @@
 入っており、崩してはいけない順序は `tests/test_robot_sequences.py` と
 `tests/test_sub_hand_positions_config.py` が**値ではなく関係**で固定している。
 残っているのは実測だけ。
+箱同士の距離147mm
 
 埋める値と満たすべき条件は [`mechanism_handoff.md`](mechanism_handoff.md) §2 が正。
 残るのは `sub_y_axis` / `sub_lift`（サーボ 3 軸は 2026-09-10 に実測済み。可動域クランプは
