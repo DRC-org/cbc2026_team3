@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { SuctionPadPanel } from "@/components/operator/SuctionPadPanel";
-import type { SuctionState } from "@/lib/protocol";
+import type { ManualAxis, ManualPosition, ManualState, SuctionState } from "@/lib/protocol";
 import { MALFORMED } from "@/lib/protocol";
 
 const THREE_PADS: SuctionState = {
@@ -14,15 +14,48 @@ const THREE_PADS: SuctionState = {
   ],
 };
 
+const OPEN_CLOSED: ManualPosition[] = [
+  { name: "closed", value: 0 },
+  { name: "open", value: 1 },
+];
+
+function valveAxis(
+  name: string,
+  target: number | null,
+  positions: ManualPosition[] = OPEN_CLOSED,
+): ManualAxis {
+  return {
+    name,
+    unit: "on_off",
+    command_mode: "on_off",
+    value: null,
+    target,
+    manual: null,
+    manual_always: true,
+    deviation: null,
+    sync_tolerance: null,
+    positions,
+    motors: [name],
+  };
+}
+
+const SEQUENCE: ManualState = { mode: "sequence", axes: [] };
+
+function manualWith(axes: ManualAxis[]): ManualState {
+  return { mode: "manual", axes };
+}
+
 function renderPanel(
   suction: SuctionState | typeof MALFORMED,
   blockedReason: string | null = null,
+  manual: ManualState = SEQUENCE,
 ) {
   const send = vi.fn(() => true);
   const view = render(
     <SuctionPadPanel
       robotKey="sub_hand"
       suction={suction}
+      manual={manual}
       blockedReason={blockedReason}
       sendOrReport={send}
     />,
@@ -107,5 +140,123 @@ describe("SuctionPadPanel", () => {
 
     expect(screen.getByText("吸着パッドの状態を読み取れませんでした")).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  describe("手動モード", () => {
+    const AXES = [valveAxis("valve_1", 1), valveAxis("valve_2", 0), valveAxis("valve_3", null)];
+
+    function renderManual(blockedReason: string | null = null, axes: ManualAxis[] = AXES) {
+      return renderPanel(THREE_PADS, blockedReason, manualWith(axes));
+    }
+
+    it("円の中は配信のラベルのまま、弁の名前は画面に出さない", () => {
+      renderManual();
+
+      const group = screen.getByRole("group", { name: "吸着パッドの開閉" });
+      expect(group).toHaveTextContent("123");
+      expect(screen.queryByText(/valve_/)).toBeNull();
+    });
+
+    it("開いている弁を押すと OFF 側の位置名で manual_move を送る", async () => {
+      const { send } = renderManual();
+
+      const button = screen.getByRole("button", { name: "パッド 1 を閉じる" });
+      expect(button).toHaveAttribute("aria-pressed", "true");
+      expect(button).toHaveClass("bg-success");
+
+      await userEvent.click(button);
+
+      expect(send).toHaveBeenCalledWith(
+        { type: "manual_move", robot: "sub_hand", axis: "valve_1", position: "closed" },
+        expect.any(String),
+      );
+    });
+
+    it("閉じている弁を押すと ON 側の位置名で manual_move を送る", async () => {
+      const { send } = renderManual();
+
+      const button = screen.getByRole("button", { name: "パッド 2 を開く" });
+      expect(button).toHaveAttribute("aria-pressed", "false");
+      expect(button).not.toHaveClass("border-dashed");
+
+      await userEvent.click(button);
+
+      expect(send).toHaveBeenCalledWith(
+        { type: "manual_move", robot: "sub_hand", axis: "valve_2", position: "open" },
+        expect.any(String),
+      );
+    });
+
+    it("一度も指令していない弁は OFF と別の見た目で描き、押すと ON 側へ送る", async () => {
+      const { send } = renderManual();
+
+      const button = screen.getByRole("button", { name: "パッド 3 を開く" });
+      expect(button).toHaveClass("border-dashed");
+
+      await userEvent.click(button);
+
+      expect(send).toHaveBeenCalledWith(
+        { type: "manual_move", robot: "sub_hand", axis: "valve_3", position: "open" },
+        expect.any(String),
+      );
+    });
+
+    it("対応する軸が配信に無いパッドは、そのパッドだけ押せない", async () => {
+      const { send } = renderManual(null, [valveAxis("valve_1", 1), valveAxis("valve_3", 0)]);
+
+      const missing = screen.getByRole("button", { name: "パッド 2 を開く" });
+      expect(missing).toBeDisabled();
+      expect(missing).toHaveClass("border-dashed");
+      await userEvent.click(missing);
+      expect(send).not.toHaveBeenCalled();
+
+      expect(screen.getByRole("button", { name: "パッド 1 を閉じる" })).toBeEnabled();
+    });
+
+    it("ON 側 / OFF 側のどちらかが欠けたパッドは推測せず押せない", async () => {
+      const { send } = renderManual(null, [
+        valveAxis("valve_1", 1, [{ name: "open", value: 1 }]),
+        valveAxis("valve_2", 0, [{ name: "closed", value: 0 }]),
+        valveAxis("valve_3", 0),
+      ]);
+
+      for (const name of ["パッド 1 を閉じる", "パッド 2 を開く"]) {
+        const button = screen.getByRole("button", { name });
+        expect(button).toBeDisabled();
+        await userEvent.click(button);
+      }
+      expect(send).not.toHaveBeenCalled();
+
+      expect(screen.getByRole("button", { name: "パッド 3 を開く" })).toBeEnabled();
+    });
+
+    it("開いている数を出し、0 個でも吸着ステップの警告は出さない", () => {
+      renderManual(null, [
+        valveAxis("valve_1", 0),
+        valveAxis("valve_2", 0),
+        valveAxis("valve_3", 0),
+      ]);
+
+      expect(screen.getByText("開 0/3")).toBeInTheDocument();
+      expect(screen.queryByText(/吸着ステップは拒否されます/)).toBeNull();
+    });
+
+    it("押した弁が今すぐ開くことを断る", () => {
+      renderManual();
+
+      expect(screen.getByText(/押した弁が今すぐ開きます/)).toBeInTheDocument();
+      expect(screen.queryByText(/次の「ワーク吸着」ステップから効きます/)).toBeNull();
+    });
+
+    it("塞がれているときは 1 つも押せない", async () => {
+      const { send } = renderManual("緊急停止中は手動操縦できません");
+
+      expect(screen.getByText("緊急停止中は手動操縦できません")).toBeInTheDocument();
+      for (const button of screen.getAllByRole("button")) {
+        expect(button).toBeDisabled();
+        await userEvent.click(button);
+      }
+      expect(send).not.toHaveBeenCalled();
+    });
   });
 });

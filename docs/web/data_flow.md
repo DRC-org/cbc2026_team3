@@ -177,6 +177,12 @@ DC 基板・電磁弁基板はエンコーダも電流センスも温度セン�
 `enabled` を `true` へ倒す既定値を置いてはならない —— 配信の崩れで「使う弁」が増える側へ倒れる。
 ラベルは配信の `label` をそのまま描く（`SuctionPadPanel`）。
 
+**手動中の `SuctionPadPanel` は `state.suction` と `state.manual` の 2 つを突き合わせる。**
+`pads[].axis` で `manual.axes` を引き、ON / OFF の位置名はその軸の `positions[].value` から
+（`onOffPair`）。**軸が無い／片側の位置名が無いパッドは推測で埋めず、そのパッドだけ無効にする**
+—— 片側を埋めると、押した弁とは別の弁が開く側へ倒れうる。`MALFORMED` のときは弁の軸を
+`ManualPanel` から外さない（パネルが操作を出さない配信で、操作口ごと画面から消える）。
+
 **`parseManual` が見るのは `positions` だけ**（他の欄も `manual.axes` の他の軸も素通し）。
 `positions` は**形を変えた唯一の既存欄**なので、サーバーと `web/dist` の版がずれる窓が
 実際にある —— 旧形式（素の文字列）は `value: null` へ落とし、操作を保ったまま

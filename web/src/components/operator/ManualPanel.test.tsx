@@ -63,7 +63,11 @@ const TWO_STEERABLE: ManualState = {
   axes: [Y_AXIS, { ...Y_AXIS, name: "rotate", unit: "deg", motors: ["rotate_r", "rotate_l"] }],
 };
 
-function renderPanel(manual: ManualState = MANUAL, blockedReason: string | null = null) {
+function renderPanel(
+  manual: ManualState = MANUAL,
+  blockedReason: string | null = null,
+  excludeAxes?: readonly string[],
+) {
   const send = vi.fn(() => true);
   render(
     <ManualPanel
@@ -71,6 +75,7 @@ function renderPanel(manual: ManualState = MANUAL, blockedReason: string | null 
       manual={manual}
       blockedReason={blockedReason}
       sendOrReport={send}
+      excludeAxes={excludeAxes}
     />,
   );
   return { send };
@@ -169,6 +174,37 @@ describe("ManualPanel", () => {
 
     expect(screen.queryByLabelText("valve_1 を ON にする")).toBeNull();
     expect(screen.getByLabelText("valve_1 を open へ")).toBeInTheDocument();
+  });
+
+  describe("excludeAxes", () => {
+    const WITH_VALVE: ManualState = { mode: "manual", axes: [Y_AXIS, GRIPPER, VALVE] };
+
+    it("渡さなければ弁も群に並ぶ", () => {
+      renderPanel(WITH_VALVE);
+
+      expect(screen.getByLabelText("valve_1 を ON にする")).toBeInTheDocument();
+    });
+
+    it("渡した軸は群にも行にも出さない", () => {
+      renderPanel(WITH_VALVE, null, ["valve_1", "gripper"]);
+
+      expect(screen.queryByLabelText("valve_1 を ON にする")).toBeNull();
+      expect(screen.queryByText("valve_1")).toBeNull();
+      expect(screen.queryByText("gripper")).toBeNull();
+      expect(screen.getByText("y_axis")).toBeInTheDocument();
+    });
+
+    it("除いた軸はキーボードの操作対象にも入らない", async () => {
+      const user = userEvent.setup();
+      const { send } = renderPanel(TWO_STEERABLE, null, ["y_axis"]);
+
+      await user.keyboard("{ArrowRight}");
+
+      expect(send).toHaveBeenCalledWith(
+        { type: "manual_jog", robot: "main_hand", axis: "rotate", delta: 0.5 },
+        "ジョグ",
+      );
+    });
   });
 
   it("軸が 1 つも無ければ理由を説明する", () => {

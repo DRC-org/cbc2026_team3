@@ -64,11 +64,12 @@ badge-success` のように揃った 1 本の文字列で持つ。理由は `doc
 
 ### ON のトグルは `success` の面塗り 1 種類
 
-`SuctionPadPanel`（次の吸着で使う弁の宣言）と `OnOffPadGroup`（弁の今すぐ開閉）はどちらも
-`border-success bg-success text-success-content` で ON を示し、OFF は既定のボタンのまま置く。
-2 つの面が同じ弁を別の色で描くと、同じ画面の 2 箇所で ON の意味が食い違う。
+`SuctionPadPanel`（半自動は次の吸着で使う弁の宣言、手動は今すぐ開閉）と `OnOffPadGroup`
+（弁の今すぐ開閉）はどちらも `border-success bg-success text-success-content` で ON を示し、
+OFF は既定のボタンのまま置く。2 つの面が同じ弁を別の色で描くと、同じ画面の 2 箇所で ON の
+意味が食い違う。**クラス文字列を持つのは `PadToggle` 1 箇所だけ**で、両方がそれを呼ぶ。
 
-**`OnOffPadGroup` の丸（`rounded-full`）は角丸 0 の唯一の例外。** 6 個以上が横に並ぶ群で、
+**丸トグル（`PadToggle` の `rounded-full`）は角丸 0 の唯一の例外。** 6 個以上が横に並ぶ群で、
 狙う対象を形で見つけられることを優先している。**未指令（`target` が `null`）は OFF の色では
 なく破線の輪郭**で描く —— 塗り分けだけだと「まだ押していない」と「OFF を送った」が同じ絵に
 なる。

@@ -31,6 +31,7 @@
 | スクロール面の溢れを画面に出さない | 区分の見出しだけが下端で切れ、**その下の主操作ごと画面外**にあることが読めない | `monitor/MatchPrep.test.tsx` |
 | 自分から開くだけで、開いた先を見せない | 動作確認が失敗しても**「未完了バッジが付いただけ」に見える** | `motorcheck/MotorCheckPanel.test.tsx` |
 | サーバーが必ず拒否する面へボタンを出す | 打音・目視の最中に押せるボタンが並び、押すと拒否トーストだけが出る | `pages/RobotControl.test.tsx` |
+| 同じ弁を 2 つの操作面に並べる | 同じ 6 個が 2 段に並び、**どちらを押せば機体が動くのか読めない** | `pages/RobotControl.test.tsx` / `operator/ManualPanel.test.tsx` |
 | daisyUI の `.alert` の子に `flex-1` を書く | 通知の文字がカードの外へ流れ、`…` すら出ない | `shell/Toaster.test.tsx` |
 
 ---
@@ -295,6 +296,22 @@ React ツリーごとアンマウントした。
 守っているのは `pages/RobotControl.test.tsx`（準備中・手動モード中には出さない）と
 `operator/AlwaysManualPanel.test.tsx`（対象軸が無ければパネルごと描かない / 欄が欠けた配信では
 1 つも出さない）。
+
+### 同じ対象への操作面を 1 画面に 2 つ並べない
+
+手動モードで、`SuctionPadPanel`（□ の 1〜6 = 次の吸着で使う弁の宣言）と `ManualPanel` の中の
+`OnOffPadGroup`（〇 の `valve_1`〜`valve_6` = 今すぐ開閉）が**上下 2 段に並んだ**。同じ 6 個が
+同じ順で 2 回出ていて、**押すと機体が動くのはどちらなのかが画面から読めない** —— 形（□ / 〇）も
+ラベル（`1` / `valve_1`）も違うのに、操縦者には「同じものが 2 つある」としか見えなかった。
+
+直した形は**モードで役割を 1 つに寄せる**こと。手動では `SuctionPadPanel` 自体が開閉を持ち
+（押した弁が今すぐ開く）、その弁は `ManualPanel` の `excludeAxes` で外す。半自動では
+`SuctionPadPanel` が宣言、`AlwaysManualPanel` が今すぐ開閉で、役割が別の面に分かれたまま残る。
+**操作面を増やす方向で解かない** —— どちらが効くかを註記で説明しても、視線を戻した一瞬では
+読まれない。
+
+`excludeAxes` を渡すのは `state.suction` がパッドを持つときだけ。`MALFORMED` / `null` の配信で
+渡すと、パネルが操作を出さない状況で**弁の操作口ごと画面から消える**。
 
 ### サーバーの判定より楽観的にならない
 
