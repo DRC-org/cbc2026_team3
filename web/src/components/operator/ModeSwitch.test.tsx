@@ -91,28 +91,28 @@ describe("ModeSwitch", () => {
   });
 
   it("切り替えられないときは理由を出して両方を塞ぐ", () => {
-    renderSwitch("sequence", "切断中のため操作できません");
+    renderSwitch("sequence", "切断中");
 
     expect(segments().manual).toBeDisabled();
     expect(segments().sequence).toBeDisabled();
-    expect(screen.getByText("切断中のため操作できません")).toBeInTheDocument();
+    expect(screen.getByText("切断中")).toBeInTheDocument();
   });
 
   it("手動中も同じ理由で両方を塞ぐ", () => {
-    renderSwitch("manual", "切断中のため操作できません");
+    renderSwitch("manual", "切断中");
 
     expect(segments().manual).toBeDisabled();
     expect(segments().sequence).toBeDisabled();
-    expect(screen.getByText("切断中のため操作できません")).toBeInTheDocument();
+    expect(screen.getByText("切断中")).toBeInTheDocument();
   });
 
   it("手動中はシーケンスが止まっていることを書く", () => {
     const { view } = renderSwitch("manual");
-    expect(screen.getByText(/シーケンスは停止しています/)).toBeInTheDocument();
+    expect(screen.getByText("シーケンス停止中")).toBeInTheDocument();
     view.unmount();
 
     renderSwitch("sequence");
-    expect(screen.queryByText(/シーケンスは停止しています/)).toBeNull();
+    expect(screen.queryByText("シーケンス停止中")).toBeNull();
   });
 
   it("手動中は帯そのものを警告色にする", () => {
@@ -134,7 +134,7 @@ describe("ModeSwitch", () => {
 
   it("塞がれていても帯の高さは変わらない", () => {
     const a = renderSwitch("sequence");
-    const b = renderSwitch("sequence", "切断中のため操作できません");
+    const b = renderSwitch("sequence", "切断中");
     expect(layoutClasses(a.band)).toEqual(layoutClasses(b.band));
   });
 
@@ -168,8 +168,8 @@ describe("ModeSwitch", () => {
     const cases: Array<[Parameters<typeof renderSwitch>[0], string | null]> = [
       ["sequence", null],
       ["manual", null],
-      ["sequence", "切断中のため操作できません"],
-      ["manual", "切断中のため操作できません"],
+      ["sequence", "切断中"],
+      ["manual", "切断中"],
     ];
 
     for (const [mode, reason] of cases) {

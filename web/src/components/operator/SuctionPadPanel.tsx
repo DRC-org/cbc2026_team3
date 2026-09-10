@@ -24,7 +24,7 @@ export function SuctionPadPanel({
   if (suction === MALFORMED) {
     return (
       <Panel legend="吸着パッド" className="shrink-0">
-        <StatusBadge tone="error">吸着パッドの状態を読み取れませんでした</StatusBadge>
+        <StatusBadge tone="error">パッド状態 判定不能</StatusBadge>
       </Panel>
     );
   }
@@ -88,7 +88,7 @@ export function SuctionPadPanel({
             開 {onCount}/{suction.pads.length}
           </span>
         ) : onCount === 0 ? (
-          <StatusBadge tone="warning">未選択 — 吸着ステップは拒否されます</StatusBadge>
+          <StatusBadge tone="warning">未選択</StatusBadge>
         ) : (
           <span className="text-[0.85em] text-base-content/60">
             使用 {onCount}/{suction.pads.length}
@@ -113,12 +113,6 @@ export function SuctionPadPanel({
           />
         ))}
       </div>
-
-      <p className="shrink-0 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
-        {inManual
-          ? "押した弁が今すぐ開きます（吸着に使う弁の選択は半自動のときに行います）。"
-          : "ON のパッドだけを吸着に使います。次の「ワーク吸着」ステップから効きます（実行中の吸着には反映されません）。"}
-      </p>
     </Panel>
   );
 }
