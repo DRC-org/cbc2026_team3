@@ -86,11 +86,12 @@ PID とプロファイルの値そのものは [`mechanism_handoff.md`](mechanis
 
 `feat/sub-hand-control` を `origin/main` へ合流させたときに、片方へ寄せず持ち越した判断。
 
-- **`config/main_hand_positions.yaml` の `rotate.home` を 0.0 から 5.0 へ動かした。** 0.0 は
-  零点確定のスイッチの動作点そのもので、`tolerance` 2.0deg の到達帯が ON 区間（実測 約 2deg）へ
-  食い込み、可動端インターロックが ON 区間の内側からの指令を拒む。**0.0 は相手が「実機の実測に
-  合わせる」コミットで入れた値**なので、**メインハンド担当は実機で干渉しない角を実測して確定する
-  こと**（`docs/mechanism_handoff.md` §1）
+- **`rotate.home` / `.place` が実測基準を下回ったまま据え置き。** 2026-09-10 に機構担当が実測し、
+  `y_axis = 0` では `rotate` に **10deg** あれば当たらないと分かったが、どちらも **5.0deg** のまま
+  据え置くと判断した。`sequences/main_hand.py` の `HOME` / `TO_CONVEYOR` が投げる組も、同日に
+  新設した `axes.rotate.homing.retreat_position: home` の退避先も、この 5.0deg である。**残るのは
+  「5.0 を寄せるか 10deg を測り直すか」の判断**で、機構担当と一緒に決める（`docs/mechanism_handoff.md`
+  §1）。0.0 を取れない理由（零点確定のスイッチの ON 区間）は 5.0 でも満たしている
 - **`rotate.pick_shared: 165.0` がどこからも参照されていない。** `_pick_at()` は `work_shared` も
   含め全列で `rotate: pick` を使う。足した側の作業が途中と思われるので消していない
 - **軸間干渉の歯止めが 2 つある。** `guard.requires` / `.not_with`（移動そのものの禁止）と
@@ -100,3 +101,13 @@ PID とプロファイルの値そのものは [`mechanism_handoff.md`](mechanis
 - **出荷の動作確認（`sequences/motor_check.py`）の `sub_pitch` の段が `interlocks:` に拒否されていた**
   （`sub_offset` が `open` のまま `sub_pitch: close` を送っていた）。統合時に
   「閉じるとき オフセット → ピッチ」の順へ直した。**`origin/main` 単体では実機で止まる状態だった**
+
+## 8. メインハンド `rotate` の可動範囲に実測の裏付けが無い
+
+`axes.rotate.manual` の上端と `positions.rotate.pick` は 2026-09-10 のコミット `5da9deb` で
+**180.0 → 185.0deg** へ広がったが、**185.0 を測った記録が無い**（裏付けは 2026-09-04 の
+180.0deg まで）。`axes.rotate.homing.search_distance` は `manual` の全幅と一致させる約束に
+従って 185.0deg なので、**根拠の無い 5deg が「当たるまで動かす」歯止めにも乗っている。**
+`axes.rotate.travel`（0.0〜200.0deg）も可動端を突き当てて測っていない。
+
+埋める値と満たすべき条件は [`mechanism_handoff.md`](mechanism_handoff.md) §0 / §1 が正。
