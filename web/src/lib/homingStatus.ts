@@ -26,7 +26,11 @@ export function homingStatus(state: HomingSnapshot, connected: boolean): HomingS
   return { outcome: "idle", reasonLabel, failures, succeeded };
 }
 
-export function robotTargets(state: HomingSnapshot): [string, string[]][] | typeof MALFORMED {
+export function robotTargets(
+  state: HomingSnapshot,
+  robot?: string,
+): [string, string[]][] | typeof MALFORMED {
   if (state.targets === MALFORMED) return MALFORMED;
-  return Object.entries(state.targets);
+  const entries = Object.entries(state.targets);
+  return robot === undefined ? entries : entries.filter(([name]) => name === robot);
 }

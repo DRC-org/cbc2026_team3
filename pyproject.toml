@@ -13,13 +13,17 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.8",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-p no:launch_testing_ros_pytest_entrypoint -p no:launch_testing -p no:launch_ros"
+# -n auto と slow の除外で 67s → 9s。大会本番期に待たされないための既定。
+# slow は実プロセスを起こす通しで、CI (uv run pytest -m "") では走る
+addopts = "-n auto -m \"not slow\" -p no:launch_testing_ros_pytest_entrypoint -p no:launch_testing -p no:launch_ros"
+markers = ["slow: 実プロセスを起こす通し。既定では走らせない (CI は走らせる)"]
 
 [tool.ruff]
 target-version = "py312"

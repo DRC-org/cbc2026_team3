@@ -273,3 +273,19 @@ def dm3520_config_response(driver: Dm3520Driver, register: int, value: float) ->
 
 def feed_dm3520(driver: Dm3520Driver, **kwargs: float | int | None) -> None:
     driver.update_state(dm3520_feedback(driver, **kwargs))  # type: ignore[arg-type]
+
+
+def confirm_dm3520_ranges(
+    driver: Dm3520Driver,
+    *,
+    p_max: float | None = None,
+    v_max: float | None = None,
+    t_max: float | None = None,
+) -> None:
+    """実機の固定小数点レンジの読み返しを流す。省略した値は config (driver の値) と一致させる。"""
+    for register, value in (
+        (Dm3520Driver.REG_P_MAX, driver.p_max if p_max is None else p_max),
+        (Dm3520Driver.REG_V_MAX, driver.v_max if v_max is None else v_max),
+        (Dm3520Driver.REG_T_MAX, driver.t_max if t_max is None else t_max),
+    ):
+        driver.matches_feedback(dm3520_config_response(driver, register, value))

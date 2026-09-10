@@ -16,8 +16,9 @@ from lib.can_manager import CANManager
 from lib.control.limit_monitor import LimitMonitor
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
-from lib.control.target_refresh import GenericTargetRefresher
+from lib.control.target_refresh import GenericTargetRefresher, QueryDrivenTargetRefresher
 from lib.drivers.base import ControlMode
+from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
 from lib.health import BusHealth, BusHealthInfo, HealthSnapshot, MotorHealth, MotorHealthInfo
@@ -35,7 +36,7 @@ from tests.fake_can import (
     set_motors,
 )
 from tests.fake_drivers import StubFeedbackDriver
-from tests.feedback_frames import feed_generic, feed_m3508
+from tests.feedback_frames import confirm_dm3520_ranges, feed_dm3520, feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
@@ -852,6 +853,89 @@ class TestEStopDropsRefreshTargets:
         await fx.activate_e_stop()
 
         assert handle.has_target is False
+
+
+class TestReleaseDropsStaleLatch:
+    """解除の再励磁は、停止中に取った「今の姿勢を保て」のラッチを捨ててから励磁を通す。
+
+    手動再励磁 (`TestStaleTargetIsClearedBeforeActivation`) と同じ形。レンジは確認済みに
+    しておき、`QueryDrivenTargetRefresher` のレンジゲートに頼らずこの 1 枚だけで確かめる。
+    """
+
+    def _build(self) -> tuple[ServerFixture, Dm3520Driver, QueryDrivenTargetRefresher, list[bool]]:
+        fx = ServerFixture.build()
+        can_manager = mock_can_manager(bus_name="can_dm3520")
+        can_manager.send = AsyncMock()
+        lift = Dm3520Driver("sub_lift", 0x05, master_id=0x11, p_max=1000.0)
+        confirm_dm3520_ranges(lift)
+        set_motors(can_manager, {"sub_lift": lift})
+        keep_feedback_fresh(can_manager)
+        refresher = QueryDrivenTargetRefresher(
+            [MotorHandle("sub_lift", lift, can_manager)],
+            can_manager,
+            is_estop_active=lambda: fx.e_stop_active,
+        )
+        paused_during: list[bool] = []
+
+        async def _activate(**_kwargs: object) -> list[str]:
+            paused_during.append(refresher.is_paused)
+            # 励磁の応答で届く、鮮度確認済みの実測位置
+            feed_dm3520(lift, position=1.0)
+            return []
+
+        can_manager.activate_motors = AsyncMock(side_effect=_activate)
+        fx.add_robot(
+            "main_hand", GatedSequence("main_hand"), can_manager, target_refreshers=[refresher]
+        )
+        fx.add_robot("sub_hand", GatedSequence("sub_hand"))
+        return fx, lift, refresher, paused_during
+
+    @staticmethod
+    def _sent_positions(can_manager) -> list[float]:
+        return [
+            struct.unpack("<ff", bytes(c.args[1].data))[0]
+            for c in can_manager.send.await_args_list
+            if c.args[0] == "sub_lift" and bytes(c.args[1].data)[-1] not in (0xFC, 0xFD)
+        ]
+
+    async def test_latch_taken_after_release_is_dropped_and_retaken_from_the_enable(self) -> None:
+        fx, lift, refresher, _paused = self._build()
+        can_manager = fx.can_manager("main_hand")
+        await fx.activate_e_stop()
+        feed_dm3520(lift, position=80.0)
+
+        await fx.command({"type": "e_stop_release"})
+        # 解除直後・励磁が届く前の 1 周期が信用できない値をラッチする
+        await refresher.step()
+        assert self._sent_positions(can_manager)[-1] == pytest.approx(80.0, abs=0.1)
+
+        await fx.wait_reactivation()
+        can_manager.send.reset_mock()
+        await refresher.step()
+
+        assert self._sent_positions(can_manager) == [pytest.approx(1.0, abs=0.1)]
+
+    async def test_refresher_is_silent_while_the_enable_is_in_flight(self) -> None:
+        fx, _lift, refresher, paused_during = self._build()
+        await fx.activate_e_stop()
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        assert paused_during == [True]
+        assert refresher.is_paused is False
+
+    async def test_refresher_is_resumed_even_when_activation_fails(self) -> None:
+        fx, _lift, refresher, _paused = self._build()
+        fx.can_manager("main_hand").activate_motors = AsyncMock(
+            side_effect=RuntimeError("CAN 送信失敗")
+        )
+        await fx.activate_e_stop()
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+
+        assert refresher.is_paused is False
 
 
 class TestEStopCompletionLogIsOneLine:

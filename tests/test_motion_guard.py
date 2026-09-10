@@ -227,6 +227,90 @@ class TestSeveralSwitchesOnOneEnd:
             guard.check_limit(axis="sub_y_axis", delta=1.0, sensor_active=_sensors(front=True))
 
 
+class TestPassThrough:
+    """押し込んだ向きの指令を、その端センサが ON のあいだ通さない。
+
+    どちらの端に宣言されたセンサかは見ない —— 宣言 (`guard.limits` の前後) は実物と
+    入れ替わりうる。「OFF→ON へ変わった瞬間の指令の向き」だけを材料にする。
+    """
+
+    def test_押し込んだ向きへはそれ以上進ませない(self) -> None:
+        with pytest.raises(GuardViolation, match="front"):
+            _guard().check_pass_through(
+                axis="sub_y_axis",
+                delta=-1.0,
+                sensor_active=_sensors(front=True),
+                pressed_toward={"front": -1},
+            )
+
+    def test_宣言された側と押した向きが一致していても止める(self) -> None:
+        """判定は宣言を見ない。`check_limit` が先に言うので通常は文面が出ないだけ。"""
+        with pytest.raises(GuardViolation, match="rear"):
+            _guard().check_pass_through(
+                axis="sub_y_axis",
+                delta=-1.0,
+                sensor_active=_sensors(rear=True),
+                pressed_toward={"rear": -1},
+            )
+
+    def test_押した向きと逆の指令は通す(self) -> None:
+        """退避は必ず残る。押し込んだ向きの反対は必ず離れる向き。"""
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=1.0,
+            sensor_active=_sensors(front=True),
+            pressed_toward={"front": -1},
+        )
+
+    def test_覚えていない端は通す(self) -> None:
+        """指令の時点から ON だった端 (張り付きからの退避) は載らない。"""
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=True),
+            pressed_toward={},
+        )
+
+    def test_OFF_に戻った端は覚えていても通す(self) -> None:
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=False),
+            pressed_toward={"front": -1},
+        )
+
+    def test_読めていない端は判断しない(self) -> None:
+        """途絶した端を退避の妨げにしない。読めていない端へ向かう指令は `check_limit` が拒む。"""
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=-1.0,
+            sensor_active=_sensors(front=None),
+            pressed_toward={"front": -1},
+        )
+
+    def test_動かない指令は見ない(self) -> None:
+        _guard().check_pass_through(
+            axis="sub_y_axis",
+            delta=0.0,
+            sensor_active=_sensors(front=True),
+            pressed_toward={"front": -1},
+        )
+
+    def test_文面に両向きが塞がることと抜け出し方を載せる(self) -> None:
+        """逆向きは `check_limit` が塞ぐので操縦者は詰まる。yaml を直して再起動、まで言い切る。"""
+        pattern = r"'front'.*貫通防止が - 向きを.*歯止めが \+ 向きを塞ぐ"
+        with pytest.raises(GuardViolation, match=pattern) as exc_info:
+            _guard().check_pass_through(
+                axis="sub_y_axis",
+                delta=-1.0,
+                sensor_active=_sensors(front=True),
+                pressed_toward={"front": -1},
+            )
+        message = str(exc_info.value)
+        assert "入れ替わっている疑い" in message
+        assert "再起動するまでこの軸は動かせません" in message
+
+
 class TestJumpGuard:
     def test_桁の違う目標を止める(self) -> None:
         """**実機で踏んだ形そのもの。**

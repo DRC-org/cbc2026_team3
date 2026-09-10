@@ -24,6 +24,12 @@
    同じ指令で一緒に動かさない (`not_with`)。**依存は一方向**で、条件になる軸の位置は
    注入された読み口 (`AxisStateReader`) から受ける —— ここは位置表もコートも見ない
 
+5 つ目は 2026-09-10 に踏んだ: **端センサの宣言 (`guard.limits` の前後) が実物と入れ替わって
+いた**。1 はどちらの端かを宣言から読むので、入れ替わっていると見張らない側で機構が当たる。
+そこで宣言に依らない守りを重ねる —— **センサが OFF→ON へ変わった瞬間に出ていた指令の向きを
+「当たった向き」と覚え、ON のあいだその向きの指令を通さない** (`check_pass_through`)。
+覚えるのは `LimitMonitor` で、判断だけをここが持つ。
+
 **センサの途絶 (STALE) をここで扱わないのは意図的**である。「押されていない」と
 「読めていない」は別の事実で、後者を可動端の判断に混ぜると**配線が抜けたセンサが
 「押されていない = 進んでよい」に化ける**。読めていないセンサは `active=None` として
@@ -34,7 +40,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 
 __all__ = [
@@ -479,6 +485,49 @@ class MotionGuard:
             raise GuardViolation(
                 f"軸 '{axis}' の可動端センサ {_label(pressed)} が押されているため、"
                 "その向きへは動かしません。離れる向きの指令は通ります"
+            )
+
+    def check_pass_through(
+        self, *, axis: str, delta: float, sensor_active: object, pressed_toward: Mapping[str, int]
+    ) -> None:
+        """`delta` の向きが、押されている端センサの「当たった向き」と同じなら送出する。
+
+        **どちらの端に宣言されたセンサかは見ない。** 宣言 (`guard.limits` の前後) は実物と
+        入れ替わりうるが、「OFF→ON へ変わった瞬間に出ていた指令の向き」は機構がそのセンサへ
+        向かっていた向きそのものなので、宣言が間違っていても当たった側で止まる。逆向きは
+        常に通す (押し込んだ向きの反対は必ず離れる向きなので、退避がここで塞がることは無い)。
+        止めた後に同じ向きへ指令し直しても ON のあいだは拒む —— 指令の時点で既に ON かどうか
+        では、張り付きからの退避と押し込みの続きが見分けられない。
+
+        Args:
+            pressed_toward: センサ名 → そのセンサが OFF→ON へ変わったときの指令の符号
+                (`+1` / `-1`)。指令の時点から ON だった端や、指令の無いときに ON になった端は
+                載らない (退避として通す)。`LimitMonitor` が周期ごとに作る
+
+        Raises:
+            GuardViolation: 押し込んだ向きへさらに進もうとしている
+        """
+        limits = self._spec.limits
+        if limits is None or delta == 0.0:
+            return
+        direction = 1 if delta > 0.0 else -1
+        # `None` (読めていない) は判断しない —— 途絶した端を退避の妨げにしないためで、
+        # 読めていない端へ向かう指令は `check_limit` が拒む
+        blocked = [
+            name
+            for name in (*limits.plus, *limits.minus)
+            if pressed_toward.get(name) == direction and sensor_active(name) is True  # type: ignore[operator]
+        ]
+        if blocked:
+            toward, away = ("+", "-") if direction > 0 else ("-", "+")
+            # 逆向きは宣言された側の歯止め (`check_limit`) が塞ぐので、操縦者から見れば
+            # 両向きとも動かない。抜け出し方まで言い切らないと画面の前で詰まる
+            raise GuardViolation(
+                f"軸 '{axis}' の可動端センサ {_label(blocked)} は {toward} 向きへ動かしたときに"
+                "押されました。guard.limits の前後が実物と入れ替わっている疑いが強い ——"
+                f" 貫通防止が {toward} 向きを、宣言された側の歯止めが {away} 向きを塞ぐので、"
+                "yaml (`guard.limits` の前後・センサの配線スロット・`scale` の符号) を直して"
+                "再起動するまでこの軸は動かせません"
             )
 
     def check_torque(self, *, axis: str, torque: float | None) -> None:

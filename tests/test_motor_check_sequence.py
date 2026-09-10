@@ -338,6 +338,7 @@ class _NoOpHoming:
         return 0.0
 
 
+@pytest.mark.usefixtures("instant_settle")
 class TestShippedRunThrough:
     """同梱の位置定数で**全ステップを到達模擬で通し、歯止めが 1 度も拒否しない**。
 

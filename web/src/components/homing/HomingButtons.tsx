@@ -10,14 +10,19 @@ import { homingStatus, robotTargets } from "@/lib/homingStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
 
-export function HomingButtons() {
+interface HomingButtonsProps {
+  /** 操縦者画面ではその担当機のぶんだけ出す (Monitor では省略して全機) */
+  robot?: string;
+}
+
+export function HomingButtons({ robot: only }: HomingButtonsProps = {}) {
   const { connected } = useRobotStatus();
   const { state, start } = useHoming();
   const [pending, setPending] = useState<[string, string[]] | null>(null);
 
   const { reasonLabel } = homingStatus(state, connected);
   const disabled = reasonLabel !== null;
-  const targets = robotTargets(state);
+  const targets = robotTargets(state, only);
 
   if (targets === MALFORMED) {
     return (

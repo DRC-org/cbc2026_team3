@@ -27,7 +27,7 @@ from lib.control.limit_monitor import LimitMonitor
 from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
-from lib.control.target_refresh import TargetRefresher
+from lib.control.target_refresh import TargetRefresher, hold_target_refresh
 from lib.drivers.base import TelemetrySupport
 from lib.drivers.generic import GenericDriver
 from lib.health import (
@@ -1124,7 +1124,13 @@ class RobotServer:
 
         for name, ctx in self._robots.items():
             await self._settle_pending_reenergize(name)
-            await self._activate_motors_for_robot(name, ctx)
+            # 停止中に取った「今の姿勢を保て」のラッチは信用できない値でありうる。
+            # 励磁が届くまで黙らせ、励磁後の実測で取り直させる
+            refreshed = [motor for r in ctx.target_refreshers for motor in r.motor_names]
+            async with hold_target_refresh(
+                ctx.target_refreshers, refreshed, reason="緊急停止解除の再励磁"
+            ):
+                await self._activate_motors_for_robot(name, ctx)
 
         self._energize_expected_since = time.time()
 

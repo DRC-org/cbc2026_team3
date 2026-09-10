@@ -611,6 +611,7 @@ def _load_config(robot_config: str) -> dict:
     return yaml.safe_load((_CONFIG_DIR / robot_config).read_text())
 
 
+@pytest.mark.usefixtures("instant_settle")
 class TestShippedPositionYaml:
     @pytest.mark.parametrize(("yaml_name", "robot_config", "sequence_cls"), _ROBOTS)
     async def test_all_steps_run_against_shipped_yaml(
