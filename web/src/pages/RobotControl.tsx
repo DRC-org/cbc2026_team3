@@ -115,23 +115,34 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     />
   );
 
+  // パッドの弁は SuctionPadPanel が持つので、同じ 6 個が手動操縦にも並ばないよう外す。
+  // パネルが出ない配信（MALFORMED / null）では外さない —— 操作口ごと消えてはならない
+  const suctionPadAxes =
+    state.suction === undefined || state.suction === null || state.suction === MALFORMED
+      ? undefined
+      : state.suction.pads.map((pad) => pad.axis);
+
   const manualPanel = (
     <ManualPanel
       robotKey={robotKey}
       manual={manual}
       blockedReason={manualBlockedReason}
       sendOrReport={sendOrReport}
+      excludeAxes={suctionPadAxes}
     />
   );
 
-  // どちらのモードでも出す。選択は機体を動かさず、次の吸着ステップから効くだけなので
-  // 塞ぐ理由は切断だけ
+  // どちらのモードでも出す。半自動では次の吸着で使う弁の宣言（機体を動かさない）、
+  // 手動ではその場の開閉
   const suctionPanel =
     state.suction === undefined || state.suction === null ? null : (
       <SuctionPadPanel
         robotKey={robotKey}
         suction={state.suction}
-        blockedReason={connected ? null : "切断中のため変更できません"}
+        manual={manual}
+        blockedReason={
+          inManual ? manualBlockedReason : connected ? null : "切断中のため変更できません"
+        }
         sendOrReport={sendOrReport}
       />
     );

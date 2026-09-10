@@ -10,6 +10,7 @@ import type {
   RobotState,
   SequenceStepInfo,
 } from "@/lib/protocol";
+import { MALFORMED } from "@/lib/protocol";
 import { RobotControl } from "@/pages/RobotControl";
 import { motorState } from "@/test/motorState";
 import { DEFAULT_MATCH_STATE, renderWithRobot } from "@/test/robotContext";
@@ -714,7 +715,7 @@ describe("準備中のステップ一覧", () => {
   });
 });
 
-describe("吸着パッドの選択面", () => {
+describe("吸着パッドの面", () => {
   const SUCTION: RobotState["suction"] = {
     pads: [
       { axis: "valve_1", label: "1", enabled: true },
@@ -722,15 +723,38 @@ describe("吸着パッドの選択面", () => {
     ],
   };
 
+  const VALVE_AXES: ManualAxis[] = ["valve_1", "valve_2"].map((name) => ({
+    name,
+    unit: "on_off",
+    command_mode: "on_off",
+    value: null,
+    target: 0,
+    manual: null,
+    manual_always: true,
+    deviation: null,
+    sync_tolerance: null,
+    positions: [
+      { name: "closed", value: 0 },
+      { name: "open", value: 1 },
+    ],
+    motors: [name],
+  }));
+
+  // 半自動は「次の吸着で使う弁の宣言」、手動は「今すぐ開閉」で面の役割が変わる
+  const GROUP_NAME: Record<ManualState["mode"], string> = {
+    sequence: "吸着に使うパッド",
+    manual: "吸着パッドの開閉",
+  };
+
   it.each<[MatchPhase, ManualState["mode"]]>([
     ["setup", "sequence"],
     ["setup", "manual"],
     ["match", "sequence"],
     ["match", "manual"],
-  ])("%s の %s モードでも出す (選択は機体を動かさない)", (phase, mode) => {
-    mount(phase, robotState({ suction: SUCTION, manual: { mode, axes: [] } }));
+  ])("%s の %s モードでも出す", (phase, mode) => {
+    mount(phase, robotState({ suction: SUCTION, manual: { mode, axes: VALVE_AXES } }));
 
-    expect(screen.getByRole("group", { name: "吸着に使うパッド" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: GROUP_NAME[mode] })).toBeInTheDocument();
   });
 
   it("吸着パッドを持たないロボットには出さない", () => {
@@ -748,5 +772,23 @@ describe("吸着パッドの選択面", () => {
       { type: "suction_pads_set", robot: "sub_hand", pads: ["valve_1"] },
       expect.any(String),
     );
+  });
+
+  it("手動でもパッドの弁を手動操縦へ二度描きしない", () => {
+    mount("match", robotState({ suction: SUCTION, manual: { mode: "manual", axes: VALVE_AXES } }));
+
+    expect(screen.getByRole("group", { name: "吸着パッドの開閉" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "開閉トグル" })).toBeNull();
+    expect(screen.queryByLabelText("valve_1 を ON にする")).toBeNull();
+  });
+
+  it("読み取れない配信では弁の操作口を手動操縦に残す", () => {
+    mount(
+      "match",
+      robotState({ suction: MALFORMED, manual: { mode: "manual", axes: VALVE_AXES } }),
+    );
+
+    expect(screen.getByText("吸着パッドの状態を読み取れませんでした")).toBeInTheDocument();
+    expect(screen.getByLabelText("valve_1 を ON にする")).toBeInTheDocument();
   });
 });
