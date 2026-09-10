@@ -30,6 +30,7 @@ export type SafetyIssueKind =
   | "unenergized"
   | "loops_stopped"
   | "monitors_stopped"
+  | "limit_monitors_stopped"
   | "refreshers_stopped";
 
 export interface SafetyIssue {
@@ -120,7 +121,7 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
       kind: "sync_violation",
       label: "同期ずれラッチ",
       detail: safety.sync_violations.join(", "),
-      hint: "機構を直してから緊急停止を解除し直してください (解除しただけでは動きません)",
+      hint: "機構のずれか左右の原点の食い違いを直してから緊急停止を解除し直してください (解除しただけでは動きません。どちらなのかは緊急停止の理由が出します)",
     });
   }
 
@@ -159,6 +160,16 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
       label: "同期監視停止",
       detail: deadMonitors.length > 0 ? deadMonitors.join(", ") : "全軸",
       hint: "左右のずれを誰も見ていません。ペア軸の破損を検知できません",
+    });
+  }
+
+  const deadLimitMonitors = safety.limit_monitors.filter((m) => !m.running).flatMap((m) => m.axes);
+  if (deadLimitMonitors.length > 0 || !safety.limit_monitors_running) {
+    issues.push({
+      kind: "limit_monitors_stopped",
+      label: "可動端監視停止",
+      detail: deadLimitMonitors.length > 0 ? deadLimitMonitors.join(", ") : "全軸",
+      hint: "移動中に端のスイッチを誰も見ていません。遠い目標を 1 回指令すると可動端を踏み越えます",
     });
   }
 

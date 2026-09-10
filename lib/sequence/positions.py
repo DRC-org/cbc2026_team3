@@ -12,18 +12,21 @@ from lib.match_state import Court
 # 可動端インターロック・跳躍量・トルクの判断は最下位層に閉じてある。ここは
 # 「宣言を yaml から読む」だけで、判断そのものは持たない
 from lib.motion_guard import LimitSpec, MotionGuardSpec, RequiredRange
+from lib.sequence.interlock import InterlockSpec
 
 __all__ = [
     "DEFAULT_TIMEOUT_S",
     "AxisSpec",
     "CourtMotorSpec",
     "CourtUnresolvedError",
+    "InterlockSpec",
     "ManualSpec",
     "MotionGuardSpec",
     "MotionSpec",
     "MotorSpec",
     "PositionLookupError",
     "PositionTable",
+    "TravelSpec",
     "load_position_table",
 ]
 
@@ -63,6 +66,26 @@ class CourtMotorSpec(MotorSpec):
             f"モータ '{self.name}' の scale はコート別なのにコートが解決されていません "
             "(AxisSpec.for_court を通してください)"
         )
+
+
+@dataclass(frozen=True)
+class TravelSpec:
+    """軸が**機械的に到達しうる**範囲。`ManualSpec` とは別物である。
+
+    あちらは「手動操縦で動かしてよい範囲」で、意図的に狭められる。こちらは
+    機構が届いてしまう範囲なので、1 つの値に載せると片方を狭めた瞬間に
+    もう片方が黙って壊れる。
+    """
+
+    min_value: float
+    max_value: float
+
+    @property
+    def span(self) -> float:
+        return self.max_value - self.min_value
+
+    def to_dict(self) -> dict[str, object]:
+        return {"min": self.min_value, "max": self.max_value}
 
 
 @dataclass(frozen=True)
@@ -119,6 +142,13 @@ class HomingSpec:
     coarse_step: float | None = None
     motor_sensors: tuple[tuple[str, str], ...] | None = None
     align_distance: float | None = None
+    #: 整列段 1 歩の刻み [軸の unit]。None なら step と同じ。
+    #: 探索段は左右 2 台で押すのに整列段は 1 台なので、同じ刻みでは同じ押しが出ない
+    align_step: float | None = None
+    #: 零点確定の直後に退避する位置名 (`positions.<軸>` のキー)。原点姿勢が他の軸と
+    #: 干渉する軸で、次の軸を寄せる前に干渉域を抜けるために要る。距離ではなく位置名で
+    #: 持つのは、0.0 そのものがスイッチの動作点だから (`sub_y_axis` と同じ流儀)
+    retreat_position: str | None = None
 
     def __post_init__(self) -> None:
         if self.sensor is not None and self.motor_sensors is not None:
@@ -151,6 +181,7 @@ class HomingSpec:
             )
         self._validate_coarse_step()
         self._validate_align_distance()
+        self._validate_align_step()
 
     def _validate_coarse_step(self) -> None:
         if self.coarse_step is None:
@@ -193,6 +224,28 @@ class HomingSpec:
             raise ValueError(
                 f"homing.align_distance ({self.align_distance}) が "
                 f"step ({self.step}) より小さいため 1 歩も進めません"
+            )
+
+    def _validate_align_step(self) -> None:
+        if self.align_step is None:
+            return
+        if self.motor_sensors is None:
+            raise ValueError(
+                "homing.align_step は sensors を書いた軸にのみ指定できます "
+                "(整列段が無いので書いても効きません)"
+            )
+        if self.align_step <= 0.0:
+            raise ValueError(f"homing.align_step は正の値: {self.align_step!r}")
+        if self.align_step < self.step:
+            # 整列段は 1 台で押すので、探索段より細かい刻みでは静止摩擦を越えられない
+            raise ValueError(
+                f"homing.align_step ({self.align_step}) は "
+                f"step ({self.step}) 以上である必要があります"
+            )
+        if self.align_distance is not None and self.align_step >= self.align_distance:
+            raise ValueError(
+                f"homing.align_step ({self.align_step}) が "
+                f"align_distance ({self.align_distance}) 以上のため 1 歩で上限を越えます"
             )
 
     @property
@@ -244,6 +297,11 @@ class AxisSpec:
     settle_s: float = 0.0
     manual: ManualSpec | None = None
     manual_always: bool = False
+    # 軸が機械的に到達しうる範囲。**`manual` の流用ではない** (あちらは手動操縦で
+    # 動かしてよい範囲で、意図的に狭められる)。1 回転未満なら電文値から論理角への
+    # 等価表現が 1 つに決まるので、ドライバが回転数を一意化できる。None なら
+    # 一意化しない —— 「可動域 0」ではないので既定値では埋めない
+    travel: TravelSpec | None = None
     homing: HomingSpec | None = None
     motion: MotionSpec | None = None
     # 指令を出す直前の歯止め (可動端インターロック・跳躍量・トルク)。
@@ -268,6 +326,11 @@ class AxisSpec:
         if self.guard is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: guard は位置指令の軸にのみ書けます "
+                f"(command_mode={self.command_mode.value})"
+            )
+        if self.travel is not None and self.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"axes.{self.name}: travel は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
         self._check_manual_always()
@@ -457,12 +520,15 @@ _AXIS_KEYS = frozenset(
         "homing",
         "motion",
         "guard",
+        "travel",
     }
 )
 
 _MOTOR_KEYS = frozenset({"scale", "offset"})
 
 _MANUAL_KEYS = frozenset({"min", "max", "steps"})
+
+_TRAVEL_KEYS = frozenset({"min", "max"})
 
 _HOMING_KEYS = frozenset(
     {
@@ -473,8 +539,10 @@ _HOMING_KEYS = frozenset(
         "step",
         "settle_s",
         "align_distance",
+        "align_step",
         "release_distance",
         "coarse_step",
+        "retreat_position",
     }
 )
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
@@ -508,12 +576,14 @@ class PositionTable:
         axes: Mapping[str, AxisSpec],
         positions: Mapping[str, Mapping[str, float | dict[str, float]]],
         *,
+        interlocks: Sequence[InterlockSpec] = (),
         source: str = "<inline>",
     ) -> None:
         self._axes: dict[str, AxisSpec] = dict(axes)
         self._positions: dict[str, dict[str, float | dict[str, float]]] = {
             axis: dict(values) for axis, values in positions.items()
         }
+        self._interlocks = tuple(interlocks)
         self._source = source
 
     @classmethod
@@ -524,9 +594,11 @@ class PositionTable:
     def merged(cls, tables: Sequence[PositionTable]) -> PositionTable:
         axes: dict[str, AxisSpec] = {}
         positions: dict[str, dict[str, float | dict[str, float]]] = {}
+        interlocks: list[InterlockSpec] = []
         owner: dict[str, str] = {}
 
         for table in tables:
+            interlocks.extend(table._interlocks)
             for name, spec in table._axes.items():
                 if name in axes:
                     raise ValueError(
@@ -540,7 +612,7 @@ class PositionTable:
                 positions[name] = dict(values)
 
         source = " + ".join(table.source for table in tables) or "<merged>"
-        return cls(axes, positions, source=source)
+        return cls(axes, positions, interlocks=interlocks, source=source)
 
     @property
     def source(self) -> str:
@@ -549,6 +621,10 @@ class PositionTable:
     @property
     def axes(self) -> tuple[str, ...]:
         return tuple(self._axes)
+
+    @property
+    def interlocks(self) -> tuple[InterlockSpec, ...]:
+        return self._interlocks
 
     def names(self, axis: str) -> tuple[str, ...]:
         return tuple(self._positions.get(axis, {}))
@@ -775,6 +851,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
         guard=_parse_guard(name, raw.get("guard")),
+        travel=_parse_travel(name, raw.get("travel")),
     )
 
 
@@ -848,6 +925,12 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
     motor_sensors = _parse_homing_sensor_map(path, raw.get("sensors"))
     align_distance = _number(path, raw, "align_distance", None)
 
+    retreat_position = raw.get("retreat_position")
+    if retreat_position is not None and (
+        not isinstance(retreat_position, str) or not retreat_position
+    ):
+        raise ValueError(f"{path}.retreat_position は位置名の文字列: {retreat_position!r}")
+
     try:
         return HomingSpec(
             sensor=sensor,
@@ -857,6 +940,8 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             step=float(raw["step"]),
             settle_s=float(raw.get("settle_s", 0.05)),
             align_distance=align_distance,
+            align_step=_number(path, raw, "align_step", None),
+            retreat_position=retreat_position,
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
             ),
@@ -1380,6 +1465,27 @@ def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> Man
     return ManualSpec(min_value=float(min_value), max_value=float(max_value), steps=steps)
 
 
+def _parse_travel(axis_name: str, raw: object) -> TravelSpec | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"axes.{axis_name}.travel は辞書である必要があります: {raw!r}")
+
+    unknown = set(raw) - _TRAVEL_KEYS
+    if unknown:
+        raise ValueError(f"axes.{axis_name}.travel に未知のキー: {', '.join(sorted(unknown))}")
+
+    path = f"axes.{axis_name}.travel"
+    min_value = _number(path, raw, "min", None)
+    max_value = _number(path, raw, "max", None)
+    if min_value is None or max_value is None:
+        missing = ", ".join(key for key in ("min", "max") if raw.get(key) is None)
+        raise ValueError(f"{path} に {missing} がありません (機械的可動域が決まりません)")
+    if min_value >= max_value:
+        raise ValueError(f"{path}.min は max より小さい必要があります: {min_value} >= {max_value}")
+    return TravelSpec(min_value=float(min_value), max_value=float(max_value))
+
+
 def _parse_manual_always(axis_name: str, raw: object) -> bool:
     # 型だけを見る (command_mode との整合は AxisSpec.__post_init__)。"false" のような
     # 文字列を真と読むと、書いたつもりの無い軸がシーケンス中に手動で動かせてしまう
@@ -1461,10 +1567,138 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
         _check_manual_range(source, axes[axis], positions[axis])
         _check_motion_timeout(source, axes[axis], positions[axis])
 
+    # positions を 1 つも書かなかった軸も通す (退避先の書き忘れは「位置が無い」形で現れる)
+    for axis, spec in axes.items():
+        _check_retreat_position(source, spec, positions.get(axis, {}))
+
     # 干渉条件は他の軸の位置名を参照するので、表が全部揃った後でしか解決できない
     axes = _resolve_guard_interference(source, axes, positions, axes_raw)
 
-    return PositionTable(axes, positions, source=source)
+    interlocks = _parse_interlocks(source, config.get("interlocks"), axes, positions)
+
+    return PositionTable(axes, positions, interlocks=interlocks, source=source)
+
+
+_INTERLOCK_KEYS = frozenset({"when", "require"})
+
+
+def _parse_interlocks(
+    source: str,
+    raw: object,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, float | dict[str, float]]],
+) -> tuple[InterlockSpec, ...]:
+    """軸どうしの干渉を読む。**書かなければ歯止めは無い** (`guard` と同じ作法)。
+
+    軸名・位置名の綴り違いは黙って通すと「その姿勢では止まらない」としてしか
+    現れず、機構を壊すまで出ないので起動前に落とす。
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{source}: interlocks は並びである必要があります: {raw!r}")
+
+    specs: list[InterlockSpec] = []
+    for index, entry in enumerate(raw):
+        path = f"interlocks[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{source}: {path} は辞書である必要があります: {entry!r}")
+        unknown = sorted(set(entry) - _INTERLOCK_KEYS)
+        if unknown:
+            raise ValueError(f"{source}: {path} に未知のキー: {', '.join(unknown)}")
+        missing = sorted(_INTERLOCK_KEYS - set(entry))
+        if missing:
+            raise ValueError(f"{source}: {path} に必須キーがありません: {', '.join(missing)}")
+        try:
+            specs.append(
+                InterlockSpec(
+                    when=_parse_interlock_side(
+                        source, f"{path}.when", entry["when"], axes, positions
+                    ),
+                    require=_parse_interlock_side(
+                        source, f"{path}.require", entry["require"], axes, positions
+                    ),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(f"{source}: {path}: {exc}") from exc
+    return tuple(specs)
+
+
+def _parse_interlock_side(
+    source: str,
+    path: str,
+    raw: object,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, float | dict[str, float]]],
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{source}: {path} は軸名 → 位置名の空でない辞書: {raw!r}")
+
+    pairs: list[tuple[str, str]] = []
+    for axis, name in raw.items():
+        spec = axes.get(axis)
+        if spec is None:
+            raise ValueError(
+                f"{source}: {path} の軸 '{axis}' が axes にありません "
+                f"(定義済みの軸: {', '.join(axes) or '(なし)'})"
+            )
+        if not isinstance(name, str) or name not in positions.get(axis, {}):
+            available = ", ".join(positions.get(axis, {})) or "(なし)"
+            raise ValueError(
+                f"{source}: {path}.{axis} の位置 '{name}' が positions.{axis} にありません "
+                f"(定義済みの位置: {available})"
+            )
+        if spec.command_mode is not ControlMode.POSITION:
+            raise ValueError(
+                f"{source}: {path}.{axis} は位置指令の軸ではありません "
+                f"(command_mode={spec.command_mode.value})"
+            )
+        if spec.tolerance is None:
+            # 「その位置に居る」を決める幅が無いと、干渉の判定そのものが立たない
+            raise ValueError(
+                f"{source}: {path}.{axis} には axes.{axis}.tolerance が必要です "
+                "(位置に居るかどうかを判定する許容差がありません)"
+            )
+        pairs.append((axis, name))
+    return tuple(pairs)
+
+
+def _check_retreat_position(
+    source: str,
+    spec: AxisSpec,
+    values: Mapping[str, float | dict[str, float]],
+) -> None:
+    """零点確定の直後に退避する位置が、**原点から離れる側**にあること。
+
+    原点側に取ると退避したことにならず、干渉したまま次の軸を寄せることになる
+    (症状は「次の軸が 1 歩も動かずに零点確定で失敗する」)。
+    """
+    homing = spec.homing
+    if homing is None or homing.retreat_position is None:
+        return
+
+    name = homing.retreat_position
+    if name not in values:
+        available = ", ".join(values) or "(なし)"
+        raise ValueError(
+            f"{source}: axes.{spec.name}.homing.retreat_position の '{name}' が "
+            f"positions.{spec.name} にありません。定義済みの位置: {available}"
+        )
+
+    value = values[name]
+    candidates = list(value.values()) if isinstance(value, dict) else [float(value)]
+    wrong = [candidate for candidate in candidates if homing.direction * candidate >= 0.0]
+    if not wrong:
+        return
+
+    side = "正" if homing.direction < 0 else "負"
+    raise ValueError(
+        f"{source}: positions.{spec.name}.{name} "
+        f"({', '.join(str(candidate) for candidate in wrong)}) が原点から離れる側に"
+        f"ありません (homing.direction={homing.direction:+g} なので {side}の値が要ります)。"
+        "退避になっていないと、干渉したまま次の軸を寄せます"
+    )
 
 
 def _check_motion_timeout(

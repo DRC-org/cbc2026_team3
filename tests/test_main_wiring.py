@@ -4,11 +4,13 @@ import ast
 import dataclasses
 import inspect
 import logging
+import math
 import pathlib
 import socket
 import struct
 import time
 import types
+from collections.abc import Callable
 from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -25,6 +27,7 @@ from lib.config_schema import (
     RobotConfig,
     SystemConfig,
     load_robot_config,
+    load_system_config,
 )
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
@@ -45,6 +48,7 @@ from main import (
     _DEFAULT_PID,
     _attach_motion_profiles,
     _attach_sync_groups,
+    _attach_travel_ranges,
     _build_limit_monitors,
     _build_manual_controller,
     _build_position_loops,
@@ -68,7 +72,7 @@ from tests.fake_can import (
 )
 from tests.fake_clock import FakeClock
 from tests.fake_drivers import StubFeedbackDriver
-from tests.feedback_frames import feed_generic, feed_m3508, generic_info
+from tests.feedback_frames import edulite_feedback, feed_generic, feed_m3508, generic_info
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -984,9 +988,80 @@ class TestAttachHelpersAreCalledFromTheCompositionRoot:
                 }
         raise AssertionError(f"main.py に {function} の定義が無い")
 
-    @pytest.mark.parametrize("helper", ["_attach_sync_groups", "_attach_motion_profiles"])
+    @pytest.mark.parametrize(
+        "helper", ["_attach_sync_groups", "_attach_motion_profiles", "_attach_travel_ranges"]
+    )
     def test_wire_one_robot_calls_the_helper(self, helper: str) -> None:
         assert helper in self._called_names("_wire_one_robot")
+
+
+class TestTravelRangesReachTheDrivers:
+    """軸の可動域はモータ座標へ直して渡す。**`scale` が負の側は整列してから。**
+
+    整列を外すと `set_travel_range` が min >= max を受け取り、起動が落ちるか
+    (落ちなければ) 回転数の一意化が可動域の外側を中心に選ぶ。
+    """
+
+    def _table(self) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {
+                    "rotate": {
+                        "unit": "deg",
+                        "command_unit": "rad",
+                        "travel": {"min": 0.0, "max": 180.0},
+                        "motors": {
+                            "rotate_r": {"scale": math.radians(1.0), "offset": 0.0},
+                            "rotate_l": {"scale": -math.radians(1.0), "offset": 0.0},
+                        },
+                    }
+                },
+                "positions": {"rotate": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    def _drivers(self) -> dict[str, Edulite05Driver]:
+        return {
+            "rotate_r": Edulite05Driver("rotate_r", can_id=0x11),
+            "rotate_l": Edulite05Driver("rotate_l", can_id=0x12),
+        }
+
+    def test_scale_が正のモータへはそのまま渡る(self) -> None:
+        drivers = self._drivers()
+
+        _attach_travel_ranges(self._table(), drivers)
+
+        assert drivers["rotate_r"].travel_range == pytest.approx((0.0, math.pi))
+
+    def test_scale_が負のモータには整列してから渡る(self) -> None:
+        drivers = self._drivers()
+
+        _attach_travel_ranges(self._table(), drivers)
+
+        assert drivers["rotate_l"].travel_range == pytest.approx((-math.pi, 0.0))
+
+    def test_travel_を書かない軸へは渡さない(self) -> None:
+        table = load_position_table(
+            {
+                "axes": {"lift": {"unit": "mm", "scale": 1.0}},
+                "positions": {"lift": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+        drivers = {"lift": Edulite05Driver("lift", can_id=0x21)}
+
+        _attach_travel_ranges(table, drivers)
+
+        assert drivers["lift"].travel_range is None
+
+    def test_このロボットに居ないモータは警告して飛ばす(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="main"):
+            _attach_travel_ranges(self._table(), {})
+
+        assert len(caplog.records) == 2
 
 
 class TestShippedMainHandConfig:
@@ -1592,6 +1667,79 @@ class TestLimitMonitorWiring:
         monitor.stop.assert_awaited_once_with()
 
 
+class TestLimitMonitorSensorSuspensionWiring:
+    """可動端監視へ渡す読み口は、**現在値も接触の累計も**整列段の覆いを通す。
+
+    片方を生のまま渡すと、覆ったはずのセンサでも接触を数えた周期だけ「押されている」と
+    判定され、整列段の最中に目標が実測位置へ書き直される (覆う目的そのものが果たせない)。
+    零点確定自身へ渡すぶんは生のまま —— 探索も離脱も「今 ON か」で進む。
+    """
+
+    def _wired_contact_reader(
+        self,
+        suspension: SensorSuspension,
+        contact_count: Callable[[str], int | None],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: pathlib.Path,
+    ) -> Callable[[str], int | None]:
+        captured: dict[str, Callable[[str], int | None]] = {}
+
+        def _capture(_positions, _sequence, *, sensor_active, sensor_contact_count):
+            captured["count"] = sensor_contact_count
+            return []
+
+        monkeypatch.setattr(main, "_setup_robot", lambda *_a, **_k: (CANManager(), {}))
+        monkeypatch.setattr(main, "_make_sensor_contact_reader", lambda _managers: contact_count)
+        monkeypatch.setattr(main, "_build_limit_monitors", _capture)
+
+        main._wire_one_robot(
+            MagicMock(),
+            tmp_path / "bench.yaml",
+            _robot(
+                {
+                    "robot_name": "bench",
+                    "motors": {
+                        "bench_axis": {"driver": "generic", "bus": "bench_bus", "can_id": 1}
+                    },
+                }
+            ),
+            load_system_config({"can_buses": {"bench_bus": "can0"}}, source="<test>"),
+            dry_run=True,
+            is_estop_active=lambda: False,
+            e_stop_tasks=set(),
+            sensor_suspension=suspension,
+        )
+        return captured["count"]
+
+    def test_接触の累計も覆いを通して渡す(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        contacts = {"y_axis_l_origin_sensor": 3}
+        suspension = SensorSuspension()
+
+        read = self._wired_contact_reader(suspension, contacts.get, monkeypatch, tmp_path)
+
+        assert read("y_axis_l_origin_sensor") == 3
+        with suspension.suspend(["y_axis_l_origin_sensor"]):
+            contacts["y_axis_l_origin_sensor"] = 9
+            assert read("y_axis_l_origin_sensor") == 3
+        assert read("y_axis_l_origin_sensor") == 9
+
+    def test_零点確定へは生の累計を渡す(self) -> None:
+        """覆った値を零点確定自身が読むと、到達判定が自分の目を塞ぐ。"""
+        tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+        runner = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "HomingRunner"
+        )
+        passed = {kw.arg: ast.unparse(kw.value) for kw in runner.keywords}
+
+        assert passed["sensor_contact_count"] == "_make_sensor_contact_reader(can_managers)"
+
+
 class TestOriginResolver:
     def _table(self) -> PositionTable:
         return load_position_table(
@@ -1674,7 +1822,7 @@ class TestOriginResolver:
         assert resolve("rotate") is None
 
 
-class TestOriginResolverViaSetZero:
+class TestOriginResolverViaDriver:
     def _table(self) -> PositionTable:
         return load_position_table(
             {
@@ -1697,6 +1845,8 @@ class TestOriginResolverViaSetZero:
         mgr.add_bus("can_edulite", mock_bus())
         for name, can_id in (("rotate_r", 0x11), ("rotate_l", 0x12)):
             mgr.add_motor("can_edulite", Edulite05Driver(name, can_id=can_id))
+            # 原点を控えるには鮮度が要る (未受信の 0.0 を現在位置と信じない)
+            deliver_frame(mgr, "can_edulite", edulite_feedback(mgr.motors[name], position=1.5))
 
         async def _send(motor_name: str, msg: can.Message) -> None:
             sent.append((motor_name, msg))
@@ -1714,7 +1864,12 @@ class TestOriginResolverViaSetZero:
             last_feedback_at=lambda _name: None,
         )
 
-    async def test_edulite_のペア軸は_set_zero_で確定できる(self) -> None:
+    async def test_edulite_のペア軸は_PC_側の原点で確定する(self) -> None:
+        """**`SET_ZERO` と PC 側オフセットを併用してはならない。**
+
+        どちらも生の座標系そのものを動かす操作なので、同時に効かせると原点が
+        二重定義になる (`docs/invariants.md` §3)。
+        """
         mgr, sent = self._manager()
 
         capture = main._make_origin_resolver(
@@ -1724,51 +1879,55 @@ class TestOriginResolverViaSetZero:
         assert capture is not None
         await capture()
 
-        comm_types = [
-            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
-        ]
-        assert ("rotate_r", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
-        assert ("rotate_l", Edulite05Driver.COMM_TYPE_SET_ZERO) in comm_types
+        assert sent == [], "原点は CAN の往復なしで確定する"
         for name in ("rotate_r", "rotate_l"):
-            order = [t for n, t in comm_types if n == name]
-            zero = order.index(Edulite05Driver.COMM_TYPE_SET_ZERO)
-            assert Edulite05Driver.COMM_TYPE_DISABLE in order[:zero]
-            assert Edulite05Driver.COMM_TYPE_ENABLE in order[zero:]
+            assert mgr.motors[name].feedback_position() == pytest.approx(0.0, abs=1e-9)
+
+    async def test_原点の持ち方が違うモータが混ざった軸は手段が無い(self) -> None:
+        """片方の経路へ流すと、もう片方は原点が動かないまま「成功した」と返る。"""
+        mgr = CANManager(run_blocking=direct_runner())
+        mgr.add_bus("can_edulite", mock_bus())
+        mgr.add_bus("can_dm3520", mock_bus())
+        mgr.add_motor("can_edulite", Edulite05Driver("rotate_r", can_id=0x11))
+        mgr.add_motor("can_dm3520", Dm3520Driver("rotate_l", can_id=0x01, master_id=0x11))
+
+        resolve = main._make_origin_resolver(
+            [], self._table(), can_managers=[mgr], is_estop_active=lambda: False
+        )
+
+        assert resolve("rotate") is None
 
     async def test_緊急停止インターロックを零点確定へ渡す(self) -> None:
         """**渡し忘れると「緊急停止を見ない零点確定」が黙って通る。**
 
-        付け替えの窓 (約 0.5 秒) で停止が入ると、停止の disable の後に再励磁の
-        enable が届き、停止中に励磁されたまま残る (ログにもヘルスにも出ない)。
+        探索が完遂していない姿勢を原点にすると、黙って成功した誤った原点が残り、
+        以後の `move_to` が全部そのぶんずれた場所へ動く。
         """
-        mgr, sent = self._manager()
+        mgr, _sent = self._manager()
 
         capture = main._make_origin_resolver(
             [], self._table(), can_managers=[mgr], is_estop_active=lambda: True
         )("rotate")
 
         assert capture is not None
-        with pytest.raises(RuntimeError, match="再励磁"):
+        with pytest.raises(RuntimeError, match="緊急停止"):
             await capture()
 
-        comm_types = [
-            (name, Edulite05Driver.parse_can_id(msg.arbitration_id)[0]) for name, msg in sent
-        ]
-        assert ("rotate_r", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
-        assert ("rotate_l", Edulite05Driver.COMM_TYPE_ENABLE) not in comm_types
+        for name in ("rotate_r", "rotate_l"):
+            assert mgr.motors[name].origin_offset == 0.0
 
     async def test_原点付け替え中は同期監視を止める(self) -> None:
         mgr, _sent = self._manager()
         monitor = self._monitor()
         suspended_during: list[bool] = []
 
-        original = mgr.capture_origin_via_set_zero
+        original = mgr.capture_origin_in_place
 
         async def _spy(names, **kwargs):
             suspended_during.append(monitor.is_suspended("rotate"))
             await original(names, **kwargs)
 
-        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],
@@ -1826,13 +1985,13 @@ class TestOriginResolverViaSetZero:
         refresher = QueryDrivenTargetRefresher(handles, mgr)
         paused_during: list[bool] = []
 
-        original = mgr.capture_origin_via_set_zero
+        original = mgr.capture_origin_in_place
 
         async def _spy(names, **kwargs):
             paused_during.append(refresher.is_paused)
             await original(names, **kwargs)
 
-        mgr.capture_origin_via_set_zero = _spy  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _spy  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],
@@ -1859,7 +2018,7 @@ class TestOriginResolverViaSetZero:
         async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
-        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],
@@ -1883,7 +2042,7 @@ class TestOriginResolverViaSetZero:
         async def _boom(_names, **_kwargs):
             raise RuntimeError("再励磁できません")
 
-        mgr.capture_origin_via_set_zero = _boom  # type: ignore[method-assign]
+        mgr.capture_origin_in_place = _boom  # type: ignore[method-assign]
 
         capture = main._make_origin_resolver(
             [],

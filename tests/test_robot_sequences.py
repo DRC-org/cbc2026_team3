@@ -117,45 +117,26 @@ _MAIN_POSITIONS = {
         "wall_r": _axis(),
     },
     "positions": {
-        # 経由点は経路の順序をそのまま指令値で読むための目印なので、軸をまたいで
+        # 退避点は経路の順序をそのまま指令値で読むための目印なので、軸をまたいで
         # 1 つも重複しない値を与える (重複すると入れ替わっても検査が通ってしまう)
         "y_axis": {
             "home": 11.0,
+            "clear": 17.0,
             "work_1": 12.0,
             "work_2": 12.5,
             "work_3": 13.0,
             "work_shared": 16.0,
-            "approach": 14.0,
-            "place": 15.0,
-            "work_1_via_1": 101.0,
-            "work_1_via_2": 102.0,
-            "work_1_via_3": 103.0,
-            "work_2_via_1": 201.0,
-            "work_2_via_2": 202.0,
-            "work_2_via_3": 203.0,
-            "work_3_via_1": 301.0,
-            "work_3_via_2": 302.0,
-            "work_3_via_3": 303.0,
-            "work_shared_via_1": 401.0,
-            "work_shared_via_2": 402.0,
-            "work_shared_via_3": 403.0,
+            "work_3_after_1": 101.0,
+            "work_3_after_2": 102.0,
         },
         "rotate": {
             "home": 20.0,
             "pick": 21.0,
+            "pick_shared": 23.0,
             "place": 22.0,
-            "work_1_via_1": 501.0,
-            "work_1_via_2": 502.0,
-            "work_1_via_3": 503.0,
-            "work_2_via_1": 601.0,
-            "work_2_via_2": 602.0,
-            "work_2_via_3": 603.0,
-            "work_3_via_1": 701.0,
-            "work_3_via_2": 702.0,
-            "work_3_via_3": 703.0,
-            "work_shared_via_1": 801.0,
-            "work_shared_via_2": 802.0,
-            "work_shared_via_3": 803.0,
+            "after_place": 24.0,
+            "work_3_after_1": 501.0,
+            "work_3_after_2": 502.0,
         },
         "gripper": {"open": 31.0, "closed": 32.0},
         "conveyor": {"stop": 0.0, "run": 0.4},
@@ -172,8 +153,8 @@ _MAIN_HOME_TARGETS = [
     ("gripper", 31.0),
     ("wall_f", 41.0),
     ("wall_r", 44.0),
-    # HOME 姿勢はコンベアを回したまま待つ。止めるのは復帰の最後だけ
-    ("conveyor", 0.4),
+    # HOME 姿勢はコンベアを止めて待つ
+    ("conveyor", 0.0),
 ]
 
 _VALVE_AXES = [f"valve_{i}" for i in range(1, 7)]
@@ -202,6 +183,30 @@ async def _run_each_step(
     return per_step, group
 
 
+async def _run_each_move(
+    seq: Sequence, position_config: dict
+) -> list[tuple[StepInfo, dict[str, str]]]:
+    """`move_to` 1 通ごとに「その通が属する段」と「位置名の組」を控える。
+
+    平らな指令列では「同じ 1 通」と「続けて送った 2 通」が区別できない。
+    同時に動かしてはいけない軸の検査は、通の境目が見えないと成り立たない。
+    """
+    _wire(seq, position_config)
+    moves: list[tuple[StepInfo, dict[str, str]]] = []
+    original = seq.move_to
+    current: list[StepInfo] = []
+
+    async def recording(targets, **kwargs) -> None:
+        moves.append((current[-1], dict(targets)))
+        await original(targets, **kwargs)
+
+    seq.move_to = recording  # type: ignore[method-assign]
+    for info in seq.steps:
+        current.append(info)
+        await getattr(seq, info.method_name)()
+    return moves
+
+
 def _single_motor_value(table: PositionTable, axis: str, position: str) -> float:
     (value,) = table.commands(axis, position).values()
     return value
@@ -224,11 +229,15 @@ _MAIN_APPROACH_STEPS = [
     ("move_to_work_2", "work_2"),
 ]
 
+# コンベアへ運ぶ途中で退避点を踏むステップと、踏む退避点の並び。
+# 退避点を持つのは 3 列目だけで、残りの列は直接寄せる (docs/invariants.md §4)。
+_MAIN_RETREAT_STEPS = [("move_work_3_to_conveyor", ("work_3_after_1", "work_3_after_2"))]
+
 
 class TestMainHandSteps:
-    @pytest.mark.parametrize(("method_name", "work"), _MAIN_APPROACH_STEPS)
-    async def test_列へは経由点_3_つを順に踏んでから寄せる(
-        self, method_name: str, work: str
+    @pytest.mark.parametrize(("method_name", "retreats"), _MAIN_RETREAT_STEPS)
+    async def test_コンベアへは退避点を順に踏んでから寄せる(
+        self, method_name: str, retreats: tuple[str, ...]
     ) -> None:
         """`y_axis` と `rotate` を一息に動かすと機構が干渉する (docs/invariants.md §4)。
 
@@ -245,8 +254,11 @@ class TestMainHandSteps:
         for name, value in sink:
             issued[name].append(value)
 
-        vias = [f"{work}_via_{n}" for n in (1, 2, 3)]
-        for axis, path in (("y_axis", [*vias, work]), ("rotate", [*vias, "pick"])):
+        # 退避点を踏んだあと TO_CONVEYOR が y_axis を home・rotate を place へ入れる
+        for axis, path in (
+            ("y_axis", [*retreats, "home"]),
+            ("rotate", [*retreats, "place"]),
+        ):
             for motor in table.axis(axis).motor_names:
                 expected = [table.commands(axis, position)[motor] for position in path]
                 assert len(set(expected)) == len(expected), (
@@ -256,6 +268,25 @@ class TestMainHandSteps:
                     f"{method_name}: {motor} が {path} の順に動いていない"
                 )
 
+    @pytest.mark.parametrize(("method_name", "work"), _MAIN_APPROACH_STEPS)
+    async def test_列へは両軸を同じ_1_通で寄せる(self, method_name: str, work: str) -> None:
+        """列へ寄せる段は `y_axis` と `rotate` を 1 通で送る。
+
+        2 通に割ると片軸だけが動いた中間姿勢ができ、そこが干渉姿勢かは
+        位置定数からは読めない。**経由点を廃した今、対を保つのはこの 1 通である。**
+        """
+        table = load_position_table(_MAIN_POSITIONS)
+        seq = MainHandSequence()
+        sink, _ = _wire(seq, _MAIN_POSITIONS)
+
+        await getattr(seq, method_name)()
+
+        issued = dict(sink)
+        for axis, name in (("y_axis", work), ("rotate", "pick")):
+            for motor, command in table.commands(axis, name).items():
+                assert issued.get(motor) == command, f"{method_name}: {motor} が {name} へ行かない"
+        assert len(sink) == len(issued), f"{method_name} が同じモータへ 2 度指令している"
+
     async def test_starts_and_ends_at_home(self) -> None:
         per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
 
@@ -264,24 +295,27 @@ class TestMainHandSteps:
         assert dict(per_step[-1][1]) == {**dict(_MAIN_HOME_TARGETS), "conveyor": 0.0}
 
     async def test_release_is_a_step_of_its_own(self) -> None:
-        table = load_position_table(_MAIN_POSITIONS)
-        gripper = table.axis("gripper").motor_names[0]
-        opened = _single_motor_value(table, "gripper", "open")
-        closed = _single_motor_value(table, "gripper", "closed")
-        per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
+        """ワークを放す通は `gripper` 1 軸だけを動かす。
+
+        同じ 1 通で他軸も動かすと、掴みが開くのと機構が動くのが同時になり、
+        放す位置が定まらない。**段が分かれているだけでは足りない** —— 放した後に
+        退避する通を同じ段へ足すのは安全なので、見るのは通の単位である。
+        """
+        moves = await _run_each_move(MainHandSequence(), _MAIN_POSITIONS)
 
         holding = False
         releases = 0
-        for info, commands in per_step:
-            issued = dict(commands)
-            if issued.get(gripper) == closed:
+        for info, targets in moves:
+            if targets.get("gripper") == "closed":
                 holding = True
                 continue
-            if issued.get(gripper) != opened or not holding:
+            if targets.get("gripper") != "open" or not holding:
                 continue
             releases += 1
             holding = False
-            assert set(issued) == {gripper}, f"{info.method_name} がリリースと同時に他軸を動かす"
+            assert set(targets) == {"gripper"}, (
+                f"{info.method_name} がリリースと同じ 1 通で他軸を動かす"
+            )
 
         assert releases > 0, "ワークを持ったまま開くステップが 1 つも無い"
 

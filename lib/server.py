@@ -1007,6 +1007,7 @@ class RobotServer:
             "reenergizing": self._is_reenergizing(robot_name),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
             "monitors_running": all(monitor.is_running for monitor in ctx.sync_monitors),
+            "limit_monitors_running": all(monitor.is_running for monitor in ctx.limit_monitors),
             "refreshers_running": all(r.is_running for r in ctx.target_refreshers),
             "position_loops": [
                 {
@@ -1024,6 +1025,14 @@ class RobotServer:
                     "violated": sorted(monitor.violated),
                 }
                 for monitor in ctx.sync_monitors
+            ],
+            "limit_monitors": [
+                {
+                    "axes": list(monitor.axis_names),
+                    "running": monitor.is_running,
+                    "stopped": sorted(monitor.stopped_axes),
+                }
+                for monitor in ctx.limit_monitors
             ],
             "target_refreshers": [
                 {

@@ -673,6 +673,7 @@ _BENCH_DIRS = (
     "solenoid",
     "dm3520",
     "sub_hand_homing",
+    "sub_servo",
     "y_axis_tuning",
 )
 

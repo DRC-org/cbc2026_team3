@@ -195,6 +195,23 @@ def feed_edulite(driver: Edulite05Driver, **kwargs: float | int | None) -> None:
     driver.update_state(edulite_feedback(driver, **kwargs))  # type: ignore[arg-type]
 
 
+def edulite_read_param_response(
+    driver: Edulite05Driver,
+    *,
+    param_id: int,
+    payload: bytes,
+    motor_id: int | None = None,
+    host_id: int | None = None,
+) -> can.Message:
+    arbitration_id = driver.build_can_id(
+        driver.COMM_TYPE_READ_PARAM,
+        driver.can_id if motor_id is None else motor_id,
+        driver.host_id if host_id is None else host_id,
+    )
+    data = struct.pack("<Hxx", param_id) + payload
+    return can.Message(arbitration_id=arbitration_id, data=data, is_extended_id=True)
+
+
 def _dm3520_to_raw(value: float, max_abs: float, bits: int) -> int:
     span = (1 << bits) - 1
     clamped = min(max(value, -max_abs), max_abs)

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
+from lib.sequence.interlock import AxisInterlock, InterlockViolation
 from lib.sequence.motors import AxisHandle
 from lib.sequence.positions import PositionLookupError
 
@@ -39,6 +40,7 @@ class ManualController:
         self._motors = motors
         self._positions = positions
         self._court: Court | None = court
+        self._interlock = AxisInterlock(positions)
         self._targets: dict[str, float] = {}
 
     def set_court(self, court: Court | None) -> None:
@@ -75,6 +77,10 @@ class ManualController:
         送信と起点の記録を 1 箇所に閉じてあるのは、丸め方の違う 2 つの入口
         (`set_value` / `jog`) が同じ後始末を書き写さないため。
         """
+        try:
+            self._interlock.check({spec.name: value}, court=self._court, motors=self._motors)
+        except InterlockViolation as exc:
+            raise ManualControlError(str(exc)) from exc
         await self._send(spec, spec.to_commands(value))
         self._targets[spec.name] = value
         return value

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 
 import pytest
 
+from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
 from lib.match_state import Court
 from lib.motion_guard import GuardViolation, SensorSuspension
@@ -86,7 +88,12 @@ def _rotate_table():
     )
 
 
-def _paired_table(**homing_overrides: object):
+def _paired_table(
+    *,
+    positions: dict[str, float] | None = None,
+    timeout_s: float = 5.0,
+    **homing_overrides: object,
+):
     homing: dict = {
         "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
         "direction": -1,
@@ -103,12 +110,13 @@ def _paired_table(**homing_overrides: object):
                     "unit": "mm",
                     "command_unit": "deg",
                     "tolerance": 0.1,
+                    "timeout_s": timeout_s,
                     "sync_tolerance": 100.0,
                     "homing": homing,
                     "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
                 }
             },
-            "positions": {"y_axis": {"home": 0.0}},
+            "positions": {"y_axis": positions if positions is not None else {"home": 0.0}},
         },
         source="<test>",
     )
@@ -424,6 +432,45 @@ def _runner(recorder: _Recorder, *, suspension: SensorSuspension | None = None) 
         sleep=recorder.sleep,
         **extra,  # type: ignore[arg-type]
     )
+
+
+class _Group:
+    """``run_homing`` が自分で ``AxisHandle`` を組む経路ぶんの模型。
+
+    ``_handle`` は組み上がった ``AxisHandle`` を差し替えるので、**零点確定の後の
+    退避はそこを通らない** (退避を持つのは `run_homing` の側)。
+
+    ``follows`` を途中で倒すと「零点は確定できたのに退避だけが届かない」機構になる。
+    """
+
+    def __init__(self, spec: AxisSpec, rec: _Recorder, *, start_value: float = 0.0) -> None:
+        self.targets: list[tuple[str, float]] = []
+        self.follows = True
+        self.motors = MotorGroup(sensor_active=rec.sensor_active)
+        self._spec = spec
+        mgr = mock_can_manager()
+        drivers: dict[str, StubFeedbackDriver] = {}
+        for motor in spec.motors:
+            driver = StubFeedbackDriver(motor.name, 1)
+            driver.set_observed(position=motor.to_command(start_value))
+            drivers[motor.name] = driver
+            self.motors.add(
+                MotorHandle(motor.name, driver, mgr, target_sink=self._sink(motor.name, driver))
+            )
+        rec.drivers = drivers
+        rec.spec = spec
+
+    def _sink(self, name: str, driver: StubFeedbackDriver):
+        async def _send(_mode: ControlMode, value: float) -> None:
+            self.targets.append((name, value))
+            if self.follows:
+                driver.set_observed(position=value)
+
+        return _send
+
+    def values(self, motor: str) -> list[float]:
+        spec = next(m for m in self._spec.motors if m.name == motor)
+        return [spec.to_value(value) for name, value in self.targets if name == motor]
 
 
 class TestStartsFromTheMeasuredPosition:
@@ -1149,6 +1196,62 @@ class TestAlignsBothSwitches:
         assert rec.origins == []
         assert len(rec.commands) <= 2 + _STALL_LIMIT
 
+    async def test_整列段の停滞は判断材料を載せて降りる(self) -> None:
+        """原因は 4 通りあり、文言だけでは切り分けられない。
+
+        操縦者に届くのはこの 1 行だけなので、センサの現在値・進めた側の移動量・
+        直前 1 歩の指令と実測・保持側の引きずられ量が載っていること。
+        """
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-5.0))
+        # 整列段に入ってからは進めたい側が 1mm も動かず、保持側だけが遊びのぶん引きずられる
+        handle = _handle(spec, rec, follows=lambda: len(rec.commands) <= 2)
+        drivers = rec.drivers
+        recorded = handle.set_target_value
+        spec_r = next(m for m in spec.motors if m.name == "y_axis_r")
+
+        async def _drag(commands):
+            await recorded(commands)
+            if len(rec.commands) > 2:
+                current = rec.motor_position("y_axis_r")
+                drivers["y_axis_r"].set_observed(position=spec_r.to_command(current - 0.3))
+
+        handle.set_target_value = _drag  # type: ignore[method-assign]
+
+        with pytest.raises(HomingError, match="動きません") as excinfo:
+            await _runner(rec).home(spec, handle)
+
+        message = str(excinfo.value)
+        # 全原点センサの現在値 (`_log_sensor_states` と同じ三値の表記)
+        assert "sensor_r=ON" in message
+        assert "sensor_l=OFF" in message
+        # 進めようとした側のこの段での移動量と、直前 1 歩の指令値・実測値
+        assert "y_axis_l は +0.00mm" in message
+        assert "指令 -2.00mm" in message
+        assert "実測 -1.00mm" in message
+        # 保持側が引きずられた量 (遊びの有無を切り分ける唯一の材料)
+        assert "引きずられ量: y_axis_r -0.90mm" in message
+        # 4 つ目の原因 (整列段は片側 1 台でしか押さない)
+        assert "静止摩擦" in message
+        assert "homing.align_step" in message
+
+    async def test_整列段の停滞はセンサ現在値をログにも残す(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """成功時にしかセンサの現在値が残らないと、落ちた実機から原因を追えない。"""
+        spec = _paired_table().axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-5.0))
+        handle = _handle(spec, rec, follows=lambda: len(rec.commands) <= 2)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="lib.sequence.homing"),
+            pytest.raises(HomingError, match="動きません"),
+        ):
+            await _runner(rec).home(spec, handle)
+
+        assert "sensor_r=ON" in caplog.text
+        assert "sensor_l=OFF" in caplog.text
+
     async def test_保持側は引きずられても指令を書き換えない(self) -> None:
         """再アンカーすると、遊びの無い機構では保持側が相方に連れられて進み続ける。"""
         spec = _paired_table().axis("y_axis")
@@ -1171,6 +1274,34 @@ class TestAlignsBothSwitches:
         assert len(align) >= 3
         assert align == pytest.approx([align[0]] * len(align))
         assert rec.motor_position("y_axis_r") != pytest.approx(align[0])
+
+    async def test_整列段の刻みは探索段と別に決められる(self) -> None:
+        """探索段は左右 2 台で押すのに整列段は 1 台なので、同じ刻みでは同じ押しが出ない。"""
+        spec = _paired_table(step=0.5, align_step=1.0).axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-3.0))
+
+        await _runner(rec).home(spec, _handle(spec, rec))
+
+        # 探索は 0.5mm 刻み (-0.5, -1.0)、整列は 1.0mm 刻み (-2.0, -3.0)
+        assert _axis_commands(rec, "y_axis_l") == pytest.approx(
+            [-0.5, -1.0, -1.0, -2.0, -3.0, -3.0]
+        )
+        assert _axis_commands(rec, "y_axis_r") == pytest.approx([-0.5] + [-1.0] * 5)
+
+    async def test_整列段の停滞判定は整列段の刻みを基準にする(self) -> None:
+        """基準が探索段の刻みだと、整列段の 1 歩の 2 割しか動かない機構が正常に見える。"""
+        spec = _paired_table(step=0.5, align_step=2.0).axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-0.35, left=-50.0))
+        # 待ち 5 回ぶんでも整列段の 1 歩 (2.0mm) の 0.4mm しか進まない
+        handle = _slow_handle(spec, rec, per_tick=0.08)
+
+        with pytest.raises(HomingError, match="動きません") as excinfo:
+            await _runner(rec).home(spec, handle)
+
+        assert "y_axis_l" in str(excinfo.value)
+        assert rec.origins == []
+        # 探索 2 歩 + 止め直し 1 通の後、整列段は停滞の上限までしか進まない
+        assert len(rec.commands) <= 3 + _STALL_LIMIT
 
     async def test_センサが一本でも途絶していたら一歩も動かさない(self) -> None:
         spec = _paired_table().axis("y_axis")
@@ -1278,6 +1409,48 @@ class TestSpecValidation:
         with pytest.raises(ValueError, match="speed"):
             _table(speed=1.0)
 
+    def test_整列段の刻みは整列段を持つ軸にしか書けない(self) -> None:
+        """単数センサの軸に書いても整列段そのものが無く、効かない設定になる。"""
+        with pytest.raises(ValueError, match="align_step"):
+            _table(align_step=2.0)
+
+    @pytest.mark.parametrize(
+        ("align_step", "message"),
+        [
+            (0.0, "align_step は正の値"),
+            (-1.0, "align_step は正の値"),
+            # 探索段 (step 1.0) より細かい刻みでは 1 台で押し切れない
+            (0.5, r"step \(1\.0\) 以上"),
+            # 1 歩で align_distance (5.0) を越える
+            (5.0, r"align_distance \(5\.0\) 以上"),
+        ],
+    )
+    def test_整列段の刻みの不正な値を拒否する(self, align_step: float, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            _paired_table(align_step=align_step)
+
+    @pytest.mark.parametrize(
+        ("direction", "clear"),
+        [
+            (-1, 0.0),  # 原点そのもの (スイッチの動作点) は退避になっていない
+            (-1, -4.0),
+            (1, 4.0),
+        ],
+    )
+    def test_退避位置が原点から離れる側でなければ拒否する(
+        self, direction: int, clear: float
+    ) -> None:
+        with pytest.raises(ValueError, match="離れる側"):
+            _paired_table(
+                direction=direction,
+                retreat_position="clear",
+                positions={"home": 0.0, "clear": clear},
+            )
+
+    def test_退避位置が定義されていなければ拒否する(self) -> None:
+        with pytest.raises(ValueError, match="retreat_position"):
+            _paired_table(retreat_position="clear")
+
     def test_到達判定を持たない軸には書けない(self) -> None:
         """duty / on_off は指令が届いたかを観測できず、少しずつ寄せる操作が成立しない。"""
         with pytest.raises(ValueError, match="homing は位置指令の軸"):
@@ -1299,6 +1472,151 @@ class TestSpecValidation:
                 },
                 source="<test>",
             )
+
+
+class TestRetreatsAfterHoming:
+    """原点姿勢が他の軸と干渉する軸は、零点を確定した直後に干渉域を抜ける。
+
+    退避は `HomingRunner` ではなく `run_homing` が持つ (位置定数の表を持って
+    いるのがそちらだから)。
+    """
+
+    @staticmethod
+    def _sensors(right: float, left: float) -> dict[str, _SensorModel]:
+        return {
+            "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=right),
+            "sensor_l": _SensorModel(motor="y_axis_l", active_at_or_below=left),
+        }
+
+    async def test_零点確定の直後に退避位置へ動かす(self) -> None:
+        table = _paired_table(retreat_position="clear", positions={"home": 0.0, "clear": 4.0})
+        spec = table.axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-2.0))
+        group = _Group(spec, rec)
+
+        results = await run_homing(
+            _runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"]
+        )
+
+        assert [result.error for result in results] == [None]
+        # 原点を確定した位置は退避の前 (退避してから確定すると原点が 4mm ずれる)
+        assert rec.captured_each == [pytest.approx({"y_axis_r": -1.0, "y_axis_l": -2.0})]
+        assert group.values("y_axis_r")[-1] == pytest.approx(4.0)
+        assert group.values("y_axis_l")[-1] == pytest.approx(4.0)
+
+    async def test_退避位置を書かない軸は零点確定で終わる(self) -> None:
+        table = _paired_table(positions={"home": 0.0, "clear": 4.0})
+        spec = table.axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-2.0))
+        group = _Group(spec, rec)
+
+        await run_homing(_runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"])
+
+        assert rec.origins == ["y_axis"]
+        assert group.values("y_axis_r")[-1] == pytest.approx(-1.0)
+
+    async def test_退避に失敗したらその軸の失敗として報告する(self) -> None:
+        """退避できていないまま次の軸を回すのが、この機能の理由そのものである。"""
+        table = _paired_table(
+            retreat_position="clear",
+            positions={"home": 0.0, "clear": 4.0},
+            timeout_s=0.05,
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-2.0))
+        group = _Group(spec, rec)
+        captured = rec.capture_origin
+
+        async def _stop_following(axis: str) -> None:
+            await captured(axis)
+            group.follows = False
+
+        rec.capture_origin = _stop_following  # type: ignore[method-assign]
+
+        results = await run_homing(
+            _runner(rec),
+            table,
+            group.motors,
+            court=Court.RED,
+            axes=["y_axis"],
+            stop_on_error=False,
+        )
+
+        assert rec.origins == ["y_axis"]
+        assert results[0].error is not None
+        assert "clear" in results[0].error
+
+    async def test_指令と待ちのあいだで目標が消えたら退避の失敗として報告する(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """緊急停止が目標を消した窓は「到達」ではない。
+
+        目標が無いまま待ち始めると「目標が無ければ到達済み」に吸われ、**退避して
+        いないのに退避できたことになって次の軸を干渉したまま寄せる**。
+        機構は指令に追従するので、この失敗は目標の消失だけが作る。
+        """
+        table = _paired_table(
+            retreat_position="clear",
+            positions={"home": 0.0, "clear": 4.0},
+            timeout_s=0.05,
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-2.0))
+        group = _Group(spec, rec)
+        captured = rec.capture_origin
+        retreating = False
+
+        # 実時間で緊急停止を狙うとフレークになる。零点確定の直後という
+        # 「退避の 1 通目」を捕まえて、毎回同じ順序で目標を消す
+        async def _mark_retreat(axis: str) -> None:
+            nonlocal retreating
+            await captured(axis)
+            retreating = True
+
+        rec.capture_origin = _mark_retreat  # type: ignore[method-assign]
+
+        original = AxisHandle.set_target_value
+
+        async def _clear_right_after_commanding(self: AxisHandle, commands) -> None:
+            await original(self, commands)
+            if retreating:
+                for handle in group.motors.handles:
+                    handle.clear_target()
+
+        monkeypatch.setattr(AxisHandle, "set_target_value", _clear_right_after_commanding)
+
+        results = await run_homing(
+            _runner(rec),
+            table,
+            group.motors,
+            court=Court.RED,
+            axes=["y_axis"],
+            stop_on_error=False,
+        )
+
+        assert rec.origins == ["y_axis"]
+        assert results[0].error is not None
+        assert "中断" in results[0].error
+
+    async def test_退避に失敗したら通し実行はそこで止まる(self) -> None:
+        table = _paired_table(
+            retreat_position="clear",
+            positions={"home": 0.0, "clear": 4.0},
+            timeout_s=0.05,
+        )
+        spec = table.axis("y_axis")
+        rec = _Recorder(sensors=self._sensors(right=-1.0, left=-2.0))
+        group = _Group(spec, rec)
+        captured = rec.capture_origin
+
+        async def _stop_following(axis: str) -> None:
+            await captured(axis)
+            group.follows = False
+
+        rec.capture_origin = _stop_following  # type: ignore[method-assign]
+
+        with pytest.raises(HomingError, match="clear"):
+            await run_homing(_runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"])
 
 
 class TestStopsInTheCommandUnits:

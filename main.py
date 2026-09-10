@@ -217,18 +217,17 @@ async def _hold_target_refresh(
 ) -> AsyncIterator[None]:
     """原点を付け替えるあいだ再送を黙らせ、抜けるときに目標とラッチを捨てる。
 
-    **`SET_ZERO` は「生値 0 が指す物理位置」を付け替える操作なので、付け替えの前に
+    **原点の付け替えは「論理値 0 が指す物理位置」を動かす操作なので、付け替えの前に
     記録した目標もラッチも、付け替えた後には別の物理位置を指す。** 探索がヒットした
     直後に `HomingRunner` が「その場で止める」ために書いた目標がまさにそれで、
-    その生値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
-    再励磁すると、20Hz の再送がそのぶんだけ離れた位置へ押し続ける ——
-    `activation_steps(after_set_zero=True)` が保持目標へ 0 を書く手当ては、
-    50ms 後の再送 1 通で上書きされて効かない
+    その値は**零点確定で補正しようとしていたズレそのもの**である。残したまま
+    再開すると、20Hz の再送が新しいオフセットで `encode_target()` を通り、
+    そのぶんだけ離れた位置へ押し続ける
     (`QueryDrivenTargetRefresher.clear_target` が再励磁について書いているのと
     同じ上書きが、こちらでは恒久的に効き続ける)。
 
     **捨てるだけでは足りず、付け替えのあいだ黙らせる必要がある。** 目標を先に
-    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、`SET_ZERO` の直前に
+    捨てても、再送は「今の姿勢を保て」のラッチを取り直すので、付け替えの直前に
     取ったラッチが直後には別の位置を指す。黙らせておけば、ラッチは抜けた後に
     新しい原点で取り直される。
 
@@ -272,21 +271,41 @@ def _make_origin_resolver(
     monitors = sync_monitors or []
     refreshers = target_refreshers or []
 
-    def _resolve_via_set_zero(axis: str) -> Callable[[], Awaitable[None]] | None:
+    def _resolve_via_driver(axis: str) -> Callable[[], Awaitable[None]] | None:
         names = table.axis(axis).motor_names
         for manager in managers:
             drivers = [manager.motors.get(name) for name in names]
             if any(driver is None for driver in drivers):
                 continue
-            if not all(driver.supports_origin_capture() for driver in drivers if driver):
+            present = [driver for driver in drivers if driver]
+            if not all(driver.supports_origin_capture() for driver in present):
                 return None
+            # 原点の持ち主はドライバが答える (`main.py` にドライバ種別を書き写さない)。
+            owners = [driver.has_local_origin() for driver in present]
+            if any(owners) and not all(owners):
+                # 混ざったまま片方の経路へ流すと、もう片方は原点が動かないまま
+                # 「成功した」と返る (黙って誤った原点ができる)。
+                logger.error(
+                    "軸 '%s' は原点の持ち方が違うモータが混ざっているので零点確定できません", axis
+                )
+                return None
+            local = all(owners)
 
-            async def capture(manager: CANManager = manager) -> None:
+            async def capture(manager: CANManager = manager, local: bool = local) -> None:
+                # **窓が短くなっても両方要る。** 再送は付け替えの瞬間に旧座標系の
+                # 論理値をキャッシュしていると、新しいオフセットで `encode_target` を
+                # 通った瞬間に差のぶん機構が走る。偏差監視は、`HomingRunner._align`
+                # が左右を意図的にずらした直後の姿勢を控えるので直前まで立っている。
                 with _suspend_sync_monitoring(monitors, axis):
                     async with _hold_target_refresh(refreshers, names):
-                        await manager.capture_origin_via_set_zero(
-                            names, should_abort=is_estop_active
-                        )
+                        if local:
+                            await manager.capture_origin_in_place(
+                                names, should_abort=is_estop_active
+                            )
+                        else:
+                            await manager.capture_origin_via_set_zero(
+                                names, should_abort=is_estop_active
+                            )
 
             return capture
         return None
@@ -299,7 +318,7 @@ def _make_origin_resolver(
             for motor in spec.motor_names:
                 if motor in loop.motor_names:
                     return _as_async(functools.partial(loop.set_origin_here, motor))
-        return _resolve_via_set_zero(axis)
+        return _resolve_via_driver(axis)
 
     return resolve
 
@@ -909,6 +928,37 @@ def _attach_sync_groups(groups: list[SyncGroup], loops: list[M3508PositionLoop])
         logger.info("同期監視: %s を位置制御ループ (bus=%s) に登録", group.name, target.bus_name)
 
 
+def _attach_travel_ranges(positions: PositionTable, motors: dict[str, MotorDriver]) -> None:
+    """軸の機械的可動域をモータ座標へ直してドライバへ渡す。
+
+    使うかどうかはドライバ契約の既定実装 (`MotorDriver.set_travel_range`) が決める。
+    ここでドライバ種別を見ると、同じ判断が config とコードの 2 箇所に生える。
+    """
+    for axis_name in positions.axes:
+        travel = positions.axis(axis_name).travel
+        if travel is None:
+            continue
+        for motor in positions.axis(axis_name).motors:
+            driver = motors.get(motor.name)
+            if driver is None:
+                logger.warning(
+                    "可動域の受け渡しをスキップ: 軸 %s のモータ %s がこのロボットに存在しません",
+                    axis_name,
+                    motor.name,
+                )
+                continue
+            # scale が負のモータでは軸の min/max が入れ替わる
+            ends = (motor.to_command(travel.min_value), motor.to_command(travel.max_value))
+            driver.set_travel_range(min(ends), max(ends))
+            logger.debug(
+                "可動域を配線: 軸 %s のモータ %s へ %.4f..%.4f (指令単位)",
+                axis_name,
+                motor.name,
+                min(ends),
+                max(ends),
+            )
+
+
 def _attach_motion_profiles(positions: PositionTable, loops: list[M3508PositionLoop]) -> None:
     for axis_name in positions.axes:
         spec = positions.axis(axis_name)
@@ -959,9 +1009,9 @@ def _make_sync_violation_handler(
     robot_name: str,
     positions: PositionTable,
     tasks: set[asyncio.Task[None]],
-) -> Callable[[str, float], None]:
+) -> Callable[[str, float, int], None]:
 
-    def on_violation(axis_name: str, deviation: float) -> None:
+    def on_violation(axis_name: str, deviation: float, retrips: int = 1) -> None:
         spec = positions.axis(axis_name)
         unit = spec.unit
         tolerance = float(spec.sync_tolerance or 0.0)
@@ -969,6 +1019,14 @@ def _make_sync_violation_handler(
             f"{robot_name} の {axis_name} の左右ずれ {deviation:.3f}{unit} が"
             f" 許容 {tolerance:.3f}{unit} を超えました"
         )
+        # 解除するたび即停止するループは、機構のずれと左右の原点の食い違いの区別が
+        # 画面から付かない。再発回数と次の一手だけが操縦者を原因へ導く手掛かりになる。
+        # 改行は EStopOverlay の 1 要素で詰まるので 1 行に収める。
+        if retrips >= 2:
+            reason += (
+                f"。解除しても {retrips} 回続けて再発しています"
+                " —— 左右の原点が食い違っている可能性があります。零点合わせを実行してください"
+            )
         task = asyncio.create_task(server.activate_e_stop(reason=reason))
         tasks.add(task)
         server.watch_task(
@@ -1105,6 +1163,7 @@ def _wire_one_robot(
     sync_groups = _build_sync_groups(positions, motors)
     _attach_sync_groups(sync_groups, loops)
     _attach_motion_profiles(positions, loops)
+    _attach_travel_ranges(positions, motors)
     monitors: list[SyncMonitor] = []
     if sync_groups:
         monitors.append(
@@ -1125,7 +1184,11 @@ def _wire_one_robot(
         positions,
         seq,
         sensor_active=sensor_read,
-        sensor_contact_count=_make_sensor_contact_reader([can_manager]),
+        # 接触の累計も同じ覆いを通す。現在値だけを覆うと、整列段のあいだに数えた接触が
+        # その周期だけ「押されている」に化け、覆ったはずの軸の目標が実測へ書き直される
+        sensor_contact_count=sensor_suspension.wrap_count(
+            _make_sensor_contact_reader([can_manager])
+        ),
     )
     seq.bind_limit_interventions(_make_limit_interventions(limit_monitors))
 

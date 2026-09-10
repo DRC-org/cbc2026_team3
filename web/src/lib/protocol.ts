@@ -340,6 +340,12 @@ export interface SyncMonitorState {
   violated: string[];
 }
 
+export interface LimitMonitorState {
+  axes: string[];
+  running: boolean;
+  stopped: string[];
+}
+
 export interface TargetRefresherState {
   motors: string[];
   running: boolean;
@@ -355,9 +361,11 @@ export interface SafetyState {
   reenergizing: boolean;
   loops_running: boolean;
   monitors_running: boolean;
+  limit_monitors_running: boolean;
   refreshers_running: boolean;
   position_loops: PositionLoopState[];
   sync_monitors: SyncMonitorState[];
+  limit_monitors: LimitMonitorState[];
   target_refreshers: TargetRefresherState[];
 }
 
@@ -368,6 +376,8 @@ function isStringArray(value: unknown): boolean {
 const SAFETY_TASK_SHAPES: Record<string, (task: Raw) => boolean> = {
   position_loops: (t) => typeof t.bus === "string" && typeof t.running === "boolean",
   sync_monitors: (t) => isStringArray(t.axes) && typeof t.running === "boolean",
+  limit_monitors: (t) =>
+    isStringArray(t.axes) && typeof t.running === "boolean" && isStringArray(t.stopped),
   target_refreshers: (t) => isStringArray(t.motors) && typeof t.running === "boolean",
 };
 
@@ -384,7 +394,13 @@ export function safetyShapeErrors(value: unknown): string[] {
   ]) {
     if (!isStringArray(value[key])) broken.push(key);
   }
-  for (const key of ["loops_running", "monitors_running", "refreshers_running", "reenergizing"]) {
+  for (const key of [
+    "loops_running",
+    "monitors_running",
+    "limit_monitors_running",
+    "refreshers_running",
+    "reenergizing",
+  ]) {
     if (typeof value[key] !== "boolean") broken.push(key);
   }
   for (const [key, isValidTask] of Object.entries(SAFETY_TASK_SHAPES)) {

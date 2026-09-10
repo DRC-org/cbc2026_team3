@@ -24,6 +24,14 @@ axes:
       search_distance: 650.0
       align_distance: 5.0
       step: 0.5
+      # 整列段は片側 1 台で押すので、探索段 (左右 2 台) と同じ 0.5mm では
+      # 1 台ぶんの P 項 880counts が静止摩擦の実測 900counts に届かない。
+      # 同じ力を 1 台で出すには 2 倍の刻みが要る (1.0mm = 1760counts)。
+      # 引き換えに左右の整列の粒度は 1.0mm になる
+      align_step: 1.0
+      # y_axis = 0 と rotate = 0 は機構が干渉する。rotate の零点確定より前に
+      # 干渉域を抜けておかないと rotate が 1 歩も動けない
+      retreat_position: clear
       settle_s: 0.05
     guard:
       # 左右 2 本とも原点側 (homing.direction: -1) に付く。**2 本とも書く** ——
@@ -53,11 +61,19 @@ axes:
     timeout_s: 3.0
     tolerance: 2.0
     sync_tolerance: 5.0
-    # TODO(実機で確認): 範囲は実測だが、端まで振って他の機構と干渉しないことは未確認。
     manual:
       min: 0.0
-      max: 180.0
+      max: 185.0
       steps: [1.0, 5.0, 15.0, 45.0]
+    # 機械的に到達しうる範囲。**上の manual とは別物**（あちらは手動で動かしてよい
+    # 範囲で、意図的に狭められる）。1 回転未満なので EDULITE 05 はここから回転数を
+    # 一意に決められ、電源が落ちているあいだに人が軸を回しても論理角を取り違えない。
+    # TODO(実機で確認): 可動端を突き当てて実測していない暫定値。manual (0〜185deg) より
+    # 広めに取ってある —— 狭すぎると正常な姿勢で WARNING が出るのに対し、広すぎても
+    # 一意化は効く（曖昧になるのは 1 回転を超えたときだけ）ため
+    travel:
+      min: 0.0
+      max: 200.0
     # TODO(実機で確認): search_distance だけが暫定値 (触れていない位置から何 deg で
     # 当たるかは未計測)。詰めるときは上の manual の min/max も同時に寄せること。
     homing:
@@ -116,45 +132,37 @@ axes:
     timeout_s: 2.0
 
 positions:
-  # *_via_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
-  # 双方と干渉するため、干渉域を避けて段階的に寄せるための経由点。両軸で同じ位置名を
-  # 使い、対が崩れていないことを読めるようにしてある。
-  # TODO(実機で確認): 経由点の値はどれも等分割の仮値。実機で干渉を見ながら列ごとに詰めること。
+  # *_after_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
+  # 双方と干渉するため、干渉域を避けて段階的に戻すための退避点 (3 列目だけが踏む)。
+  # 両軸で同じ位置名を使い、対が崩れていないことを読めるようにしてある。
+  # TODO(実機で確認): *_after_* の値はどれも仮値。実機で干渉を見ながら詰めること。
   y_axis:
     home: 0.0
-    work_1_via_1: 30.0
-    work_1_via_2: 60.0
-    work_1_via_3: 90.0
+    # 零点確定の直後に退避する先 (homing.retreat_position)。rotate を回してよい位置。
+    # TODO(実機で確認): 仮値。rotate の干渉域を抜ける実測値へ詰めること
+    clear: 40.0
     work_1: 120.0
-    work_2_via_1: 80.0
-    work_2_via_2: 160.0
-    work_2_via_3: 240.0
     work_2: 320.0
-    work_3_via_1: 130.0
-    work_3_via_2: 260.0
-    work_3_via_3: 390.0
-    work_3: 520.0
-    work_shared_via_1: 162.5
-    work_shared_via_2: 325.0
-    work_shared_via_3: 487.5
-    work_shared: 650.0
+    work_3: 450.0
+    work_3_after_1: 380.0
+    work_3_after_2: 350.0
+    work_shared: 550.0
 
   rotate:
-    home: 0.0
-    work_1_via_1: 45.0
-    work_1_via_2: 90.0
-    work_1_via_3: 135.0
-    work_2_via_1: 45.0
-    work_2_via_2: 90.0
-    work_2_via_3: 135.0
-    work_3_via_1: 45.0
-    work_3_via_2: 90.0
-    work_3_via_3: 135.0
-    work_shared_via_1: 45.0
-    work_shared_via_2: 90.0
-    work_shared_via_3: 135.0
-    pick: 180.0
+    # 0.0 は零点確定のスイッチの動作点そのもの。tolerance 2.0deg の到達帯が
+    # ON 区間 (実測 約 2deg) へ食い込むと、可動端インターロック
+    # (guard.limits.minus: rotate_origin_sensor) がその内側からの指令を拒む。
+    # y_axis.home と rotate.home が両方 0.0 だと HOME 姿勢そのものが干渉姿勢になるので、
+    # 離すのは rotate の側だけ (docs/invariants.md §4、tests/test_main_positions_config.py
+    # の TestShippedRotateHome が固定)。
+    # TODO(実機で確認): 干渉しない角の実測はまだ無い (docs/mechanism_handoff.md §1)
+    home: 5.0
+    work_3_after_1: 165.0
+    work_3_after_2: 155.0
+    pick: 185.0
+    pick_shared: 165.0
     place: 5.0
+    after_place: 30.0
 
   gripper:
     open: 0.0

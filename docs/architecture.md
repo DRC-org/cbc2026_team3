@@ -133,7 +133,7 @@ CAN フレーム
 | `_attach_motion_profiles` | `axes.<軸>.motion` を持つ軸へ台形プロファイルを後付けする |
 | `_wire_robot_motors` | `build_motor_group()` → `MotorGroup.bind_axis_state()` → `Sequence.bind_motors()` |
 | `_build_target_refresher(s)` | generic 用と問い合わせ駆動（EDULITE 05 / DM3520）用の 20Hz 再送 |
-| `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバの `SET_ZERO`）を解決 |
+| `_make_origin_resolver` | 零点確定の手段（PC 側位置制御ループ / ドライバのローカル原点 / ドライバの `SET_ZERO`）を解決。**どれを使うかはドライバに聞く**（`has_local_origin()`。`isinstance` で分けない） |
 | `_build_limit_monitors` | `axes.<軸>.guard.limits` を書いた軸の移動中インターロック（`LimitMonitor`）。対象が 1 本も無ければ回さない |
 | `_make_sensor_reader` / `_make_sensor_contact_reader` | 可動端インターロックと零点確定が共有するセンサの読み口。前者は三値の現在値（`None` = 読めていない）、後者は接触（OFF→ON）の累計（`None` = カウンタを提供しないドライバ） |
 | `_make_axis_state_reader` | 軸間干渉の判定が読む「他の軸は今どこか」（`build_axis_state_reader` に鮮度を合成するだけ）。**配線先は `_wire_robot_motors` と `_wire_motor_check_sequence` の 2 つの `MotorGroup`** で、片方を忘れるとその経路だけが全軸拒否になる（`tests/test_main_wiring.py` が両方を固定）。読めないものは `None`（位置定数に無い／位置指令でない／束に居ない／位置を測れないドライバ／鮮度切れ） |
@@ -296,7 +296,7 @@ cbc2026_team3/
 ```
 配信・受理    server.py / ws_hub.py / server_motor_check.py / server_dryrun.py
 制御権と手順  manual.py / sequence/engine.py / sequences/*.py
-軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py
+軸への指令    sequence/motors.py / sequence/homing.py / sequence/positions.py / sequence/interlock.py
 周期タスク    control/position_loop.py / sync_monitor.py / limit_monitor.py /
               target_refresh.py / trajectory.py ─ periodic.py / feedback.py /
               sync_guard.py / pid.py
@@ -307,11 +307,11 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | モジュール | 持つもの |
 |---|---|
 | `axis_sync.py` | 左右直結ペアの単位換算とずれ判定（`MotorSpec` / `SyncGroup`）。**偏差監視の 3 段すべてがここの `violation()` を呼ぶ** |
-| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。**軸間干渉の判定 `check_interference()` / `check_not_with()`** も持つ（`RequiredRange` = 解決済みの区間 / `AxisReading` = 実測と目標を 1 組で運ぶ）。前者は `check_command()` から呼ばれて 3 経路すべてに掛かり、**後者は `Sequence.move_to` だけが呼ぶ**（手動は 1 指令 1 軸なので同じ指令に 2 軸入る経路が無い）。**`LimitMonitor` は `check_limit()` しか呼ばない**（干渉を周期監視しない理由は `invariants.md` §4） |
+| `motion_guard.py` | 指令を出してよいかの判断（`MotionGuardSpec` / `MotionGuard`）。可動端インターロック・跳躍量・トルクだけを持ち、送信も状態も持たない。`axis_sync.py` と同じ最下位層。**可動端の判定 `check_limit()` は指令経路と `LimitMonitor` の両方がここを呼ぶ**。`LimitSpec` は**向きごとに何本でも**持ち（左右直結ペアは同じ端に 1 本ずつ）、1 本でも押されて／読めていなければその向きを塞ぐ。`SensorSuspension` は零点確定の整列段だけがセンサを外す口（歯止めが読む口にだけ掛ける覆い）。覆う口は**現在値と接触の累計の 2 つ**で、`wrap()` が現在値を `False`（押されていない）へ、`wrap_count()` が累計を**覆う前に最後に読めた値**で凍らせる（`LimitMonitor` は両方を読むので、片方だけでは覆いに穴が残る）。**軸間干渉の判定 `check_interference()` / `check_not_with()`** も持つ（`RequiredRange` = 解決済みの区間 / `AxisReading` = 実測と目標を 1 組で運ぶ）。前者は `check_command()` から呼ばれて 3 経路すべてに掛かり、**後者は `Sequence.move_to` だけが呼ぶ**（手動は 1 指令 1 軸なので同じ指令に 2 軸入る経路が無い）。**`LimitMonitor` は `check_limit()` しか呼ばない**（干渉を周期監視しない理由は `invariants.md` §4） |
 | `can_manager.py` | SocketCAN 複数バス管理。受信ループと `_dispatch_frame`、励磁シーケンス、ヘルス |
 | `commands.py` | WS コマンドの語彙（名前・許可フェーズ・緊急停止時の可否・ハンドラ・拒否経路）の単一情報源 |
 | `config_schema.py` | yaml の検証付き読み込み。**しきい値の既定値もここだけが持つ** |
-| `drivers/base.py` | `MotorDriver` 基底 / `MotorState` / `ControlMode` / `TelemetrySupport`（測定可否の宣言） |
+| `drivers/base.py` | `MotorDriver` 基底 / `MotorState` / `ControlMode` / `TelemetrySupport`（測定可否の宣言）/ 原点の持ち方の宣言（`has_local_origin()` / `capture_origin_here()` / `establish_provisional_origin()` / `supports_origin_capture()`） |
 | `control/periodic.py` | 周期タスクの土台（`PeriodicTask` / `PausablePeriodicTask` / `LogThrottle`）+ 実周期の計測 |
 | `control/feedback.py` / `sync_guard.py` | フィードバック鮮度の判定（`FeedbackFreshness`。未受信は異常にしない）/ 左右直結ペアの局所保護（`SyncGuard`。判定とラッチだけ） |
 | `control/pid.py` / `trajectory.py` | モータ非依存 PID（測定値微分 / conditional integration / デッドバンド）/ 台形速度プロファイル |
@@ -320,6 +320,7 @@ CAN           can_manager.py ── drivers/{base,m3508,edulite05,dm3520,generic
 | `control/limit_monitor.py` | 移動中の可動端インターロック（50Hz）。目標へ向かう先の端が押されていたら実測位置を目標へ書き直して止める。判定は `MotionGuard.check_limit`。観測周期より狭い ON 区間は接触の累計で拾い、止めた回数（`intervention()`）を `move_to` へ渡す |
 | `control/target_refresh.py` | `GenericTargetRefresher` / `QueryDrivenTargetRefresher`（ともに 20Hz） |
 | `sequence/positions.py` | 位置定数 yaml の読み込み・単位換算・論理軸の解決（`PositionTable` / `AxisSpec`） |
+| `sequence/interlock.py` | 軸どうしの干渉（`AxisInterlock` / `InterlockSpec`）。位置定数 yaml の `interlocks:` を「指令が通った後の姿勢」で判定し、`ManualController._apply` と `Sequence.move_to` の両方がここを呼ぶ。他方の軸は最後に指令した目標 → 無ければフィードバック |
 | `sequence/homing.py` / `motors.py` / `engine.py` | 零点確定（`HomingRunner`。センサ読みと原点確定は注入）/ `MotorHandle` と `AxisHandle` / `@step` ベースのシーケンスエンジン |
 | `manual.py` / `tuning/metrics.py` | 手動操縦（`OperationMode` / `ManualController`。軸単位でしか指令しない）/ ステップ応答の指標算出（呼び出し元は `scripts/tune_y_axis.py` だけ） |
 | `health.py` / `match_state.py` | ヘルスの語彙と集約（`worst_bus_health`）/ フェーズ・コート・指差喚呼・試合時間（`ALL_ROLES` はここだけ） |
@@ -415,7 +416,7 @@ barrel（`index.ts`）は作らず、常に実ファイルまで指す。コマ�
 
 | モータ | 位置ループの所在 | PC が送るもの |
 |---|---|---|
-| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時に `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、config の `position_kp`）を書き、実測角を保持目標に書いてから励磁する | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
+| RobStride EDULITE 05 | **モータ内蔵ドライバ**。起動時と再励磁のたびに `run_mode=位置` と `PARAM_LOC_KP`（既定 30.0、config の `position_kp`）を書き、実測角を保持目標に書いてから励磁する（`WRITE_PARAM` の設定は電源断で失われるので `reinitialization_steps()` が持ち、`initialization_steps()` はそれへ委譲するだけ） | 目標角のみ（`PARAM_LOC_REF` への float 書き込み） |
 | Damiao DM3520 | **ドライバ内蔵**（Position Velocity Mode = 位置 → 速度 → 電流の三重ループ） | `p_des` [rad] / `v_des` [rad/s] の float32 2 つ |
 | 自作モタドラ（DC / サーボ / 電磁弁） | **閉じていない。** DC は duty をそのまま出し、サーボは角度補間だけ、電磁弁は GPIO の ON/OFF | 目標値のみ（`SET_TARGET` の Byte0 が制御タイプを毎通運ぶ） |
 | DJI M3508 (C620) | **電流ループのみ ESC 内。位置ループは PC 側**（`lib/control/position_loop.py`、200Hz） | 電流指令（`0x200` フレーム。4 モータ分を 1 通に束ねる） |
@@ -479,6 +480,27 @@ config の `pid: null` が「ドライバ側で制御していて PC 側 PID を
 ゲインは起動時に読んで以後動かない。実行中に差し替える経路は無く、実機で詰め直すのは
 `scripts/tune_y_axis.py` + `config/bench/y_axis_tuning/`（上書きはプロセス内に閉じる）。
 `_DEFAULT_PID` は同梱のどの config からも到達しない（全 M3508 が `pid:` を明示している）。
+
+### EDULITE 05 の 3 つの座標（電文 / 連続化 / 論理）
+
+位置ループはモータ内蔵だが、**PC 側は座標を 3 段で持つ**。境界は
+`lib/drivers/edulite05.py` の 1 箇所だけで、外へ出るのは論理座標だけである。
+
+| 座標 | 何か | 読み口 |
+|---|---|---|
+| 電文 | `PARAM_LOC_REF` / フィードバックにそのまま載る値 [rad]。**電源投入で [0, 360) へ畳み直される** | `MotorState.position`（診断の生値カラム） |
+| 連続化 | 電文値 + `_wrap_turns` × 2π。回転数は 2 通りの決め方がある —— **軸の可動域（`axes.<軸>.travel`）が渡されていて 1 回転未満で、かつ零点確定済みなら「論理角が可動域の中心にいちばん近くなる」値**（差分を見ない）。それ以外は前回の電文値との差が ±π を超えたら ±1 補正する | `travel_range`（診断） |
+| 論理 | 連続化 − 原点オフセット。原点オフセットは `capture_origin_here()` が**連続化座標で**控える（起動時の暫定原点も零点確定もこの 1 本を通り、**モータ側の `SET_ZERO` は 1 通も出さない**） | `feedback_position()` / `idle_target_value()` / `origin_offset` |
+
+`encode_target(POSITION)` は逆順に戻す —— `(論理値 + 原点オフセット) − 回転数 × 2π` を作り、
+**その電文座標のまま** `POS_MIN`/`POS_MAX`（uint16 の写像レンジ）でクランプする。
+理由と踏んではならない形は `invariants.md` §2。
+
+可動域は `main._attach_travel_ranges` が `MotorSpec.to_command()` でモータ座標へ直し、
+**`scale` が負のモータでは min/max を整列してから**ドライバ契約の `set_travel_range()`
+（`lib/drivers/base.py` に既定 no-op）へ渡す。`main.py` はここでドライバ種別を見ない。
+零点確定は `capture_origin_here()`、起動時の暫定原点は `establish_provisional_origin()` で、
+**ドライバはこの 2 つを別のフラグで区別する**（一意化は前者の後だけ効く）。
 
 ### 台形速度プロファイル（`lib/control/trajectory.py`）
 
@@ -639,17 +661,26 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 | 離脱 | 既にセンサに触れているなら、離れるまで動かす。判定は**現在値**（ラッチを使わない） |
 | 探索 | 毎ステップ `AxisHandle.observed_value()` を読み直して `commanded = observed + direction*step`。到達判定は**接触の累計**（`GenericDriver.sensor_contact_count`。読んでも減らない単調カウンタで、探索開始直前に基準値を取り直す） |
 | 停滞判定 | `step/2` 未満が 3 歩連続で `HomingError` |
-| 整列段（`homing.sensors` を書いた軸のみ） | まだ当たっていない側のモータだけを進める。**この段のあいだだけその軸の原点センサを可動端の歯止めから外す**（`SensorSuspension`。外さないと、既に押された 1 本を見た歯止めが指令の入口でも 50Hz 監視でも拒否して必ず失敗する） |
+| 整列段（`homing.sensors` を書いた軸のみ） | まだ当たっていない側のモータだけを進める。1 歩の刻みは `homing.align_step`（書かない軸は `step`。片側 1 台でしか押さないので探索段とは別に決まる）で、停滞判定と追従待ちの基準もこの刻みから作る。**この段のあいだだけその軸の原点センサを可動端の歯止めから外す**（`SensorSuspension`。外さないと、既に押された 1 本を見た歯止めが指令の入口でも 50Hz 監視でも拒否して必ず失敗する） |
 | 検出後 | その場の実測位置を目標に送り直してから原点確定（`_stop_here`。**指令の単位のまま**書き戻す。値へ換算して戻すと往復の丸め誤差で入口の歯止めに拒否される） |
 | 原点確定 | `set_group_origin_here`（グループ単位でしか行わない） |
+| 退避（`homing.retreat_position` を書いた軸のみ） | 確定した原点から、位置名で書かれた場所へ動かして到達を待つ。**`HomingRunner` ではなく `run_homing()` 側**にある（位置定数の表を持つのがこちら）。届かなければその軸の失敗（`HomingError`）。原点姿勢が他の軸と干渉する軸で、次の軸の零点確定が 1 歩も動けなくなるのを防ぐ |
 
-**原点を確定する手段は 2 つ**で、可否はドライバ自身の `supports_origin_capture()` が答える
+**原点を確定する手段は 3 つ**で、可否はドライバ自身の `supports_origin_capture()` が答える
 （`main._make_origin_resolver` にドライバ種別を書き写さない）:
 
-| 手段 | 対象 |
-|---|---|
-| PC 側位置制御ループの原点張り直し | M3508 |
-| ドライバへの `SET_ZERO` | EDULITE 05（`deactivation_steps()` と `origin_capture_steps()` の両方を持つ） |
+| 手段 | 対象 | 経路 |
+|---|---|---|
+| PC 側位置制御ループの原点張り直し | M3508 | `M3508PositionLoop.set_group_origin_here` |
+| ドライバのローカル原点 | EDULITE 05（`has_local_origin()` を宣言） | `CANManager.capture_origin_in_place`。**PC 側で完結し、CAN へは 1 通も出さない**（無励磁化も再励磁もしない） |
+| ドライバへの `SET_ZERO` | DM3520（`deactivation_steps()` と `origin_capture_steps()` の**両方**を持つ） | `CANManager.capture_origin_via_set_zero`。CAN 往復あり（無励磁化 → 付け替え → 再励磁） |
+
+`main._make_origin_resolver` は上から順に探し、どの経路でも**付け替えのあいだ偏差監視を止め、
+20Hz の再送を黙らせて目標とラッチを捨てる**（窓が短いローカル原点でも要る。理由は
+`invariants.md` §3）。
+
+`Edulite05Driver` は起動時の暫定原点も PC 側で控える（`establish_provisional_origin()`。
+`CANManager.activate_motor` が鮮度確認の後に 1 度だけ呼ぶ）。
 
 **手段が無い軸は探索を始める前に落ち、起動ログにも `ERROR` で出る。**
 どの軸で現在有効かは [`checks_and_health.md`](checks_and_health.md) の
@@ -680,7 +711,7 @@ M3508 だけが再送不要（位置制御ループが 200Hz で送り続け、C
 物理非常停止は DC 基板の `REF` が受けてファーム側でラッチされ、解除は CAN の `E_STOP` 解除
 フレームだけ（電磁弁基板に `REF` 入力は無い）。**再励磁**（`reenergize_motors`）は励磁が
 落ちたモータを機体を止めずに戻すコマンドで、無励磁のモータ（と直結ペアの相方）だけ目標ラッチを
-剥がしてから `activate_motors(only=…)` で絞って励磁する。100ms〜1.5 秒かかる別タスクで走り、
+剥がしてから `activate_motors(only=…)` で絞って励磁する。100ms〜2 秒かかる別タスクで走り、
 そのあいだ `safety.reenergizing` が立つ（在飛判定は `RobotServer._is_reenergizing` が
 `_reenergize_tasks` / `_reactivate_tasks` の両方を畳んで答える）。
 
@@ -846,6 +877,7 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 インターロック・M3508 の PID 迂回・20Hz 再送・左右ペアの偏差監視がそのまま効く。ただし
 `move_to` 完了時の段は手動では通らないので、効くのは常駐の段だけ —— `y_axis` は 200Hz と
 50Hz、`rotate` は 50Hz のみである）。
+軸どうしの干渉（`interlocks:`）は `_apply` が `AxisInterlock` で判定し、`ManualControlError` で拒否する（§4）。
 **モータ単位の指令口を作らない**（UI にもモータ単位のジョグを出さない）。ジョグの起点は直前の
 手動目標値で、起点が無い（初回・緊急停止後）ときだけフィードバックから逆換算する。モータの
 目標値はモード切替で消さない（消すのはジョグの起点だけ）。範囲外の値は**拒否ではなくクランプ**
@@ -884,9 +916,9 @@ Monitor の設定面（`MatchPrep`）から起動する両ハンド 1 本のシ�
 | `config/system.yaml` | PC 上に 1 つしか存在しない設定。バス別名・`health`・`match` |
 | `config/can_buses.yaml` | CAN バス定義（serial ↔ 固定名・bitrate・txqueuelen・restart_ms）の単一情報源 |
 | `config/<robot>.yaml` | そのロボットのモータ構成（`robot_name` / `motors` / `sensors`） |
-| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲・`motion` / `homing` / `sync_*` |
+| `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲・機械的可動域（`travel`）・`motion` / `homing` / `sync_*` |
 | `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
-| `config/bench/<対象>/` | 机上ベンチ用の一式（8 セット） |
+| `config/bench/<対象>/` | 机上ベンチ用の一式（10 セット） |
 
 パスは `--system` / `--config`（複数可）/ `--checklist` で差し替えられる。
 位置定数の読み先は「robot config と同じディレクトリの `<robot_name>_positions.yaml`」
@@ -951,6 +983,11 @@ axes:                      # 換算: command = value * scale + offset
                            # 台形プロファイル（§4）。velocity_ff は pid.kd と同値に保つ
     manual: { min: 0.0, max: 650.0, steps: [1.0, 10.0, 100.0] }
                            # 手動で連続値を送ってよい軸だけが書く
+    travel: { min: 0.0, max: 180.0 }
+                           # 機械的に到達しうる範囲。**manual とは別物**（あちらは手動で
+                           # 動かしてよい範囲）。1 回転未満なら EDULITE 05 が電文値から
+                           # 回転数を一意に決める（§4 / invariants.md §2）。書かない
+                           # = 一意化しない
     homing: { sensor: …, direction: -1, step: 1.0, settle_s: 0.05, search_distance: 180.0 }
                            # 零点確定（§4）。search_distance は省略できない
     guard:                 # 可動端インターロック（§4）。書かない項目は「その守りが無い」
@@ -977,6 +1014,10 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
   conveyor:
     run: { red: 0.3, blue: -0.3 }   # コートで変わる位置だけ辞書で書く（両方必須）
   gripper: { open: …, closed: … }   # 離散状態アクチュエータは「名前付き状態」として書く
+
+interlocks:                # 軸どうしの干渉（§4）。位置名で書き、「居る」かどうかは各軸の tolerance で決まる
+  - when: { sub_pitch: close }
+    require: { sub_offset: close }
 ```
 
 **読み込みを拒否する組み合わせ**:
@@ -987,7 +1028,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `motors:` と軸直下の `scale` / `offset` の併記 | どちらが効くか曖昧 |
 | モータ 1 台の軸に `sync_tolerance` | 防護が効いていないことに気付けない |
 | `sync_kp` があって `sync_limit` が無い / `motion` の 2 値の片方だけ | 押し合いの歯止めが無い / 軌道が決まらない（[invariants.md](invariants.md)「保護は止めるだけ…」） |
-| `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` | 可動範囲・軌道・原点という概念が無い |
+| `command_mode: position` 以外の軸に `manual:` / `motion:` / `homing:` / `travel:` | 可動範囲・軌道・原点という概念が無い |
 | `duty` / `on_off` 以外の軸に `manual_always: true` | シーケンスの到達待ちを手動が上書きできてしまう |
 | `positions` の値が `manual` の範囲外 | 「シーケンスで行ける位置へ手動では行けない」軸ができる |
 | `homing` のセンサが `guard.limits` の逆側にある／載っていない（`guard.limits` を書いた軸のみ） | 守りが反転して押されている端へ進む指令だけが通る／探索で当てた端を誰も守らない |
@@ -998,6 +1039,7 @@ positions:                 # 値は axes.<軸>.unit の単位で書く
 | `guard.requires` の参照が循環している | どちらを先に動かしても相手に拒否される姿勢が作れ、抜ける手が無くなる |
 | `guard.not_with` が自分自身／`position` 以外の軸／両側に書かれている | 自分と一緒には動かせない軸／`guard` を書けない軸／片側を消したとき守りが半分だけ残る |
 | 零点確定する軸の `guard.requires` の `at:` 参照先に `homing` が無い | 原点が確定していない軸へ位置名で寄せることになり、どこへ動くか分からない |
+| `interlocks` に無い軸名・位置名、`tolerance` の無い軸、位置指令でない軸 | 綴り違いは「その姿勢では止まらない」としてしか現れず、機構を壊すまで出ない |
 
 `guard.requires` は**位置名でしか書けず、数値の区間への解決は読み込み時**に済ませる
 （`lib/sequence/positions.py`。`MotionGuard` は位置表もコートも見ない）。区間は**参照先の
@@ -1082,7 +1124,7 @@ uv run python main.py --system config/bench/<対象>/system.yaml \
 （`y_axis` / `rotate`）同時に監視される状態 / `can_id` が両バスで 1・2 と重なっていても
 衝突しないこと。
 
-**8 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る** —— ①system /
+**10 セットとも `tests/test_config_schema.py::TestShippedBenchConfigs` が守る** —— ①system /
 robot / positions / checklist が揃っていて読めること ②登録したモータが**すべて**位置定数から
 指令できること ③開くバスがそのセットで使うものだけであること ④**同梱のディレクトリが漏れなく
 `_BENCH_DIRS` に載っていること**（`test_every_shipped_bench_dir_is_covered`）⑤本番 config を
@@ -1145,11 +1187,13 @@ robot / positions / checklist が揃っていて読めること ②登録した�
   "safety": {
     "sync_violations": ["y_axis"],       // ラッチ中の軸名（ループと SyncMonitor の和集合）
     "loops_running": true, "monitors_running": true, "refreshers_running": true,
+    "limit_monitors_running": true,      // 同期監視とは対処が違うので monitors_running に畳まない
     "reenergizing": false,
     "firmware_unconfirmed_motors": [],   // INFO 未受信で焼き忘れ検出が働いていないモータ
     "position_loops":   [{ "bus": "m3508_bus", "running": true, "paused": false,
                            "sync_violations": ["y_axis"] }],
     "sync_monitors":    [{ "axes": ["y_axis", "rotate"], "running": true, "violated": [] }],
+    "limit_monitors":   [{ "axes": ["sub_y_axis"], "running": true, "stopped": [] }],  // stopped = 今端で止めている軸
     "target_refreshers":[{ "motors": ["conveyor", "gripper"], "running": true, "paused": false }]
   },
   "manual": {
@@ -1186,6 +1230,15 @@ robot / positions / checklist が揃っていて読めること ②登録した�
 
 `reason` は操縦者操作の `e_stop` では付かない。サーバーが保持し、解除まで再配信のたびに
 載せる。最初に判明した理由を優先し、後から来た理由で上書きしない。
+
+同期ずれの理由文は、解除を跨いで再発した 2 回目以降だけ後段が伸びる（`SyncMonitor` が
+軸ごとに数える再発回数を `main._make_sync_violation_handler` が受け取る）。**改行は
+`EStopOverlay` の 1 要素へそのまま流れて詰まるので 1 行で組む。**
+
+```jsonc
+{ "type": "e_stop_state", "active": true,
+  "reason": "main_hand の rotate の左右ずれ 175.879deg が 許容 5.000deg を超えました。解除しても 3 回続けて再発しています —— 左右の原点が食い違っている可能性があります。零点合わせを実行してください" }
+```
 
 ```jsonc
 { "type": "server_info", "dev_tools": false, "dry_run": false,
@@ -1565,8 +1618,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 | `_e_stop_active` がプロセスメモリ上のみ | サーバーを再起動すると緊急停止状態が消える。物理的な緊急停止ボタンの状態と同期する仕組みも無い |
 | 緊急停止で fault がラッチされた場合の復帰手順が無い | `e_stop_release` は `activate_motors()` を呼ぶが `encode_disable(clear_fault=True)` は送らない（fault の自動クリアは原因を隠すため意図的に行っていない）。実機で「解除しても動かない」場合は `health` の `FAULT` 表示で fault の内容を確認して電源再投入 |
 | フィードバックが得られないモータが無励磁のまま残る | `activate_motor()` は待機（既定 0.5s）中にフィードバックを受け取れないと enable を送らない。名前は `state.safety.unresponsive_motors` として UI へ出るが（`unenergized_motors` とは別欄。手当てが電源・配線で、再励磁では直らないため）、**PC 側から復旧させる手段は無い** |
-| ホーミングは `rotate` だけ実機検証済み | `search_distance` はまだ効く経路を通っていない。`step` 1.0deg での通し確認も未取得。`y_axis` はスイッチ未装着で `homing:` ごとコメントアウト中 |
-| 零点確定が有効なのは `rotate` だけ | `sub_y_axis` / `sub_lift`（DM3520）はドライバが `supports_origin_capture()` を宣言しない（`SET_ZERO` の安全な順序が `disable` を要求し、`sub_lift` は自重で落ちる）。`y_axis` は手段があるがスイッチ未装着。原点が確定できない軸は電源投入位置がそのまま原点で、ずれは指差喚呼が人の目で埋める |
+| ホーミングの実機検証は軸ごとに進捗が違う | `search_distance` はどの軸でもまだ効く経路を通っていない（当たる前に上限へ届いた実行が無い）。`y_axis` は 2026-09-09 に初めて走って 3 回中 1 回だけ通り、`align_step` を上げた後の実行がまだ無い。**軸ごとの現況は [`checks_and_health.md`](checks_and_health.md) の「零点確定（ホーミング）」節が正** |
 | down したバスでも起動できてしまう | 起動ログへ 1 行 ERROR を残すが起動は拒否しない（`--strict` を通していない構成を一律に潰さない判断）。受信ループは `rx_down` を立てて `BusHealth.DOWN` を出す |
 | `config/bench/main_hand/checklist.yaml` が `can_generic` 側の確認項目を持たない | この構成では本番の `gripper` / `conveyor` / `wall_*` / `rotate_origin_sensor` が構成に入るが、`conveyor_run` / `origin_sensor_react` に相当する項目が無い。`bench_return_home` の文言も `y_axis` の実態とねじれている |
 | `config/bench/y_axis_tuning/system.yaml` のコメントが本番の `sync_tolerance` と食い違う | ベンチ 2.0mm に対し本番 10.0mm。どちらが正かは現時点の記述からは判断できない |
@@ -1575,7 +1627,7 @@ SocketCAN のフレーム往復は実機の 4 本でしか通っていない。�
 
 | 課題 | 現状 |
 |---|---|
-| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドはほぼ全部** |
+| 機構定数は軸によって実測済みと仮値が混在する | **実測済み**: メインハンド `y_axis` の `pid` / `motion` / `sync_kp` / `positions` / `manual`、`rotate` の `positions` / `manual` / 原点スイッチの極性 / `homing.direction`。**仮値**: サーボ 3 軸（`gripper` / `wall_f` / `wall_r`）の `positions` とファームの可動域、`conveyor.run` のコート別の符号、`rotate` の `homing.search_distance`、`y_axis` の `homing`、**サブハンドの直動 2 軸**（サーボ 3 軸は 2026-09-10 に実測済み。可動域だけ全域のまま） |
 | M3508 の位置制御の一部が実機未検証 | 多回転アンラップ・到達判定とも単体テストのみ。PID は 150mm で取り直し済みだが、**短距離（15mm）での `sync_kp` の取り直しが残る**（最適値が振幅で変わる軸である） |
 | 低速域のスティックスリップが未観測 | 予測であって観測ではない。対抗手段は `ki`（既に 10）と `velocity_ff`。静摩擦補償は今回スコープ外 |
 | PID ゲインと `velocity_ff` は実行中に変更できず UI にも配信されない | 調整は config 変更 + 再起動。`pid.kd` と `motion.velocity_ff` は 2 つの yaml にまたがる対 |

@@ -118,10 +118,14 @@ class MotorCheckSequence(Sequence):
         await self.move_to({"sub_rotate": "carry"})
         await self.move_to({"sub_rotate": "receive"})
 
-    @step("サブハンド ピッチ (左右直結ペア)", axes={"sub_pitch"})
+    @step("サブハンド ピッチ (左右直結ペア)", axes={"sub_pitch", "sub_offset"})
     async def sub_pitch(self) -> None:
+        # ピッチが close のあいだオフセットは close でなければならない
+        # (docs/invariants.md §4)。閉じるとき オフセット → ピッチ、開くとき その逆
+        await self.move_to({"sub_offset": "close"})
         await self.move_to({"sub_pitch": "close"})
         await self.move_to({"sub_pitch": "open"})
+        await self.move_to({"sub_offset": "open"})
 
     @step("サブハンド オフセット", axes={"sub_offset"})
     async def sub_offset(self) -> None:
@@ -141,9 +145,9 @@ class MotorCheckSequence(Sequence):
 
     @step("両ハンドを初期姿勢へ戻す", axes={*MAIN_HOME, *SUB_HOME})
     async def restore_home(self) -> None:
-        # MAIN_HOME は試合中の待機姿勢でコンベアを回したままだが、
-        # 動作確認は駆動しっぱなしの軸を残さずに終える。
-        # **メインハンドは 1 通のまま。** 経由点で `y_axis` と `rotate` を意図的に
+        # コンベアは MAIN_HOME でも止まるが、「駆動しっぱなしの軸を残さずに終える」は
+        # 動作確認だけの要件なので MAIN_HOME に頼らず明示する。
+        # **メインハンドは 1 通のまま。** 列へ寄せる段が `y_axis` と `rotate` を意図的に
         # 同じ指令へ入れているので、ここを分けると分ける理由の無い軸まで分かれる
         await self.move_to({**MAIN_HOME, "conveyor": "stop"})
         for targets in _one_by_one(SUB_HOME):

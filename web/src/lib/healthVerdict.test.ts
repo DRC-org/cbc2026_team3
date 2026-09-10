@@ -73,8 +73,10 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     reenergizing: false,
     loops_running: true,
     monitors_running: true,
+    limit_monitors_running: true,
     position_loops: [{ bus: "can_m3508", running: true, paused: false, sync_violations: [] }],
     sync_monitors: [{ axes: ["y_axis"], running: true, violated: [] }],
+    limit_monitors: [{ axes: ["sub_y_axis"], running: true, stopped: [] }],
     refreshers_running: true,
     target_refreshers: [{ motors: ["gripper"], running: true, paused: false }],
     ...over,
@@ -168,6 +170,9 @@ describe("evaluateHealth", () => {
     it("保護ループの停止は error", () => {
       expect(verdictWhenConnected(health(), safety({ loops_running: false })).tone).toBe("error");
       expect(verdictWhenConnected(health(), safety({ monitors_running: false })).tone).toBe(
+        "error",
+      );
+      expect(verdictWhenConnected(health(), safety({ limit_monitors_running: false })).tone).toBe(
         "error",
       );
     });
@@ -330,6 +335,7 @@ describe("describeSafetyIssues", () => {
     expect(issues[0].detail).toMatch(/y_axis/);
     expect(issues[0].detail).toMatch(/rotate/);
     expect(issues[0].hint).toMatch(/解除/);
+    expect(issues[0].hint).toMatch(/原点/);
   });
 
   it("無励磁のまま残ったモータを名前付きで返す", () => {
@@ -397,6 +403,17 @@ describe("describeSafetyIssues", () => {
     expect(issues.some((i) => i.detail.includes("y_axis"))).toBe(true);
   });
 
+  it("止まっている可動端監視を軸名付きで返す", () => {
+    const issues = describeSafetyIssues(
+      safety({
+        limit_monitors_running: false,
+        limit_monitors: [{ axes: ["sub_y_axis"], running: false, stopped: [] }],
+      }),
+    );
+    expect(issues.some((i) => i.kind === "limit_monitors_stopped")).toBe(true);
+    expect(issues.some((i) => i.detail.includes("sub_y_axis"))).toBe(true);
+  });
+
   it("止まっている目標値再送をモータ名付きで返す", () => {
     const issues = describeSafetyIssues(
       safety({
@@ -454,9 +471,11 @@ describe("describeSafetyIssues", () => {
       "reenergizing",
       "loops_running",
       "monitors_running",
+      "limit_monitors_running",
       "refreshers_running",
       "position_loops",
       "sync_monitors",
+      "limit_monitors",
       "target_refreshers",
     ] as const)("%s が欠けても投げず、判定不能を 1 件返す", (key) => {
       const issues = describeSafetyIssues(drop(key));

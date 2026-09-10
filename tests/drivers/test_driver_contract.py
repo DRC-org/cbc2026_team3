@@ -68,25 +68,28 @@ class TestOriginCaptureCapability:
     def test_既定は手段なし(self) -> None:
         driver = _ProtocolOnlyDriver("x", 1)
         assert driver.supports_origin_capture() is False
+        assert driver.has_local_origin() is False
         assert driver.deactivation_steps() == []
         assert driver.origin_capture_steps() == []
+
+    def test_既定は暫定原点を確立しない(self) -> None:
+        assert _ProtocolOnlyDriver("x", 1).establish_provisional_origin() is False
+
+    def test_ローカル原点を持たないドライバは控えられない(self) -> None:
+        with pytest.raises(NotImplementedError):
+            _ProtocolOnlyDriver("x", 1).capture_origin_here()
 
     def test_edulite_は切り直せる(self) -> None:
         driver = Edulite05Driver("rotate_r", can_id=0x11)
         assert driver.supports_origin_capture() is True
 
-    def test_edulite_は無励磁にしてから切り直す(self) -> None:
+    def test_edulite_の原点は_PC_側にあり_CAN_往復を持たない(self) -> None:
+        """ローカル原点を持つドライバは、切り直すフレームが 1 通も無くても名乗れる。"""
         driver = Edulite05Driver("rotate_r", can_id=0x11)
 
-        ((disable, _delay),) = driver.deactivation_steps()
-        ((set_zero, _zero_delay),) = driver.origin_capture_steps()
-
-        assert Edulite05Driver.parse_can_id(disable.arbitration_id)[0] == (
-            Edulite05Driver.COMM_TYPE_DISABLE
-        )
-        assert Edulite05Driver.parse_can_id(set_zero.arbitration_id)[0] == (
-            Edulite05Driver.COMM_TYPE_SET_ZERO
-        )
+        assert driver.has_local_origin() is True
+        assert driver.origin_capture_steps() == []
+        assert driver.supports_origin_capture() is True
 
     def test_dm3520_は切り直せる(self) -> None:
         driver = Dm3520Driver("sub_y_axis", can_id=0x01, master_id=0x11)
@@ -108,7 +111,11 @@ class TestOriginCaptureCapability:
         assert GenericDriver("servo", can_id=0x41).supports_origin_capture() is False
 
     def test_m3508_は対象外(self) -> None:
-        assert M3508Driver("y_axis_r", can_id=1).supports_origin_capture() is False
+        """累積角の原点は `M3508PositionLoop` が持つ。ドライバ単体では切り直せない。"""
+        driver = M3508Driver("y_axis_r", can_id=1)
+
+        assert driver.has_local_origin() is False
+        assert driver.supports_origin_capture() is False
 
     def test_切り直すフレームだけでは名乗れない(self) -> None:
 

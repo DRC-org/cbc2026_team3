@@ -12,6 +12,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.can_manager import CANManager
+from lib.control.limit_monitor import LimitMonitor
+from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import M3508PositionLoop, make_position_pid
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
@@ -25,7 +27,7 @@ from lib.health import (
 from lib.manual import ManualController
 from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court
 from lib.sequence.engine import AxisSyncError, Sequence, step
-from lib.sequence.homing import HomingError
+from lib.sequence.homing import HomingError, SwitchMeasurement
 from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
@@ -71,6 +73,7 @@ REQUIRED_TYPES = frozenset(
         "command_rejected",
         "motor_check_state",
         "homing_state",
+        "switch_measure_state",
     }
 )
 
@@ -240,13 +243,44 @@ def _suction_selection() -> SuctionSelection:
     return selection
 
 
-class _FailingHoming:
-    """原点へ届かない軸の代役。UI が「失敗した軸と理由」を受け取れるかを golden で固定する。"""
+class _ContractHoming:
+    """`HomingRunner` の代役。
+
+    零点合わせは原点へ届かず失敗し、作動点測定は探索方向 (-1) だけ測れて反対側 (+1) は
+    届かない。UI が「失敗した軸と理由」と「実測の形」の両方を受け取れるかを golden で
+    固定する。
+    """
 
     async def home(self, spec: AxisSpec, _handle: object) -> float:
         raise HomingError(
             f"軸 '{spec.name}' が 5.0mm 動かしても原点センサ 'origin_sensor' に"
             " 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)"
+        )
+
+    async def measure(
+        self,
+        spec: AxisSpec,
+        _handle: object,
+        *,
+        direction: float,
+        step: float | None = None,
+        coarse_step: float | None = None,
+        limit: float | None = None,
+    ) -> SwitchMeasurement:
+        if direction > 0:
+            raise HomingError(
+                f"軸 '{spec.name}' が 5.0mm 動かしてもリミットスイッチ 'origin_sensor' に"
+                " 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)"
+            )
+        return SwitchMeasurement(
+            axis=spec.name,
+            unit=spec.unit,
+            direction=direction,
+            engage=-447.0,
+            release=-441.2,
+            width=5.8,
+            step=step if step is not None else 1.0,
+            coarse_step=coarse_step,
         )
 
 
@@ -271,11 +305,38 @@ def _homing_source(group: MotorGroup) -> HomingSource:
         source="<ws-contract>",
     )
     return HomingSource(
-        runner=_FailingHoming(),  # type: ignore[arg-type]
+        runner=_ContractHoming(),  # type: ignore[arg-type]
         table=table,
         motors=group,
         court=lambda: Court.RED,
         axes_by_robot={_ROBOT: ("y_axis",)},
+    )
+
+
+def _limit_monitor(group: MotorGroup) -> LimitMonitor:
+    """可動端監視 1 本。両端のセンサを宣言した軸の形を golden に固定する。"""
+    table = load_position_table(
+        {
+            "axes": {
+                "gripper": {
+                    "unit": "deg",
+                    "command_unit": "deg",
+                    "guard": {
+                        "limits": {"plus": "rotate_origin_sensor", "minus": "origin_sensor"},
+                        "max_step": 100.0,
+                    },
+                }
+            },
+            "positions": {"gripper": {"open": 5.0, "closed": 0.0}},
+        },
+        source="<ws-contract>",
+    )
+    return LimitMonitor(
+        table,
+        group,
+        sensor_active=lambda name: name == "origin_sensor",
+        sensor_contact_count=lambda _name: 0,
+        court=lambda: Court.RED,
     )
 
 
@@ -288,7 +349,7 @@ def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
     }
 
 
-_Fixture = tuple[ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher, MotorGroup]
+_Fixture = tuple[ServerFixture, tuple[PeriodicTask, ...], MotorGroup]
 
 
 def _build_fixture() -> _Fixture:
@@ -314,6 +375,7 @@ def _build_fixture() -> _Fixture:
         loop.target_sinks(),
     )
     refresher = GenericTargetRefresher([group["gripper"], group["conveyor"]])
+    limit_monitor = _limit_monitor(group)
 
     sequence = _ContractSequence()
     sequence.bind_motors(group)
@@ -325,23 +387,23 @@ def _build_fixture() -> _Fixture:
         mgr,
         position_loops=[loop],
         sync_monitors=[monitor],
+        limit_monitors=[limit_monitor],
         target_refreshers=[refresher],
         manual=_manual_controller(group),
         suction=_suction_selection(),
     )
     fx.set_motor_check_sequence(_ContractCheckSequence())
     fx.freeze_broadcast()
-    return fx, loop, monitor, refresher, group
+    return fx, (loop, monitor, limit_monitor, refresher), group
 
 
 async def collect_samples() -> dict[str, dict[str, Any]]:
-    fx, loop, monitor, refresher, group = _build_fixture()
+    fx, tasks, group = _build_fixture()
     app = fx.create_app()
     samples: dict[str, dict[str, Any]] = {}
 
-    loop.start()
-    monitor.start()
-    refresher.start()
+    for task in tasks:
+        task.start()
     try:
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
@@ -388,6 +450,17 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             samples["homing_state"] = [
                 msg for msg in await drain(ws) if msg.get("type") == "homing_state"
             ][-1]
+
+            await fx.publish_switch_measure_state()
+            samples["switch_measure_state"] = await require_type(ws, "switch_measure_state")
+            for name, direction in (("with_result", -1), ("with_error", 1)):
+                await fx.start_switch_measure(
+                    {"robot": _ROBOT, "axis": "y_axis", "direction": direction}
+                )
+                await fx.wait_switch_measure_idle()
+                samples[f"switch_measure_state_{name}"] = [
+                    msg for msg in await drain(ws) if msg.get("type") == "switch_measure_state"
+                ][-1]
             await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "manual"})
 
             await fx.publish_e_stop_state()
@@ -411,9 +484,8 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
 
             await ws.close()
     finally:
-        await loop.stop()
-        await monitor.stop()
-        await refresher.stop()
+        for task in tasks:
+            await task.stop()
 
     return samples
 
