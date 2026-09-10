@@ -291,8 +291,9 @@ class TestPassThrough:
             pressed_toward={"front": -1},
         )
 
-    def test_文面に塞がった向きと退避の向きと疑う先を載せる(self) -> None:
-        pattern = r"'front'.*- 向きへは.*退避は \+ 向き"
+    def test_文面に両向きが塞がることと抜け出し方を載せる(self) -> None:
+        """逆向きは `check_limit` が塞ぐので操縦者は詰まる。yaml を直して再起動、まで言い切る。"""
+        pattern = r"'front'.*貫通防止が - 向きを.*歯止めが \+ 向きを塞ぐ"
         with pytest.raises(GuardViolation, match=pattern) as exc_info:
             _guard().check_pass_through(
                 axis="sub_y_axis",
@@ -300,8 +301,9 @@ class TestPassThrough:
                 sensor_active=_sensors(front=True),
                 pressed_toward={"front": -1},
             )
-        assert "入れ替わっている可能性" in str(exc_info.value)
-        assert "guard.limits" in str(exc_info.value)
+        message = str(exc_info.value)
+        assert "入れ替わっている疑い" in message
+        assert "再起動するまでこの軸は動かせません" in message
 
 
 class TestJumpGuard:

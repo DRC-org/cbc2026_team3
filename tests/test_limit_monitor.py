@@ -112,7 +112,11 @@ class _Rig:
         self.driver.set_observed(position=value * _SCALE)
 
     async def command(self, value: float) -> None:
-        """歯止めを通さずに目標を書く (長距離移動を 1 回指令した直後の状態)。"""
+        """歯止めを通さずに目標を書く (長距離移動を 1 回指令した直後の状態)。
+
+        **`sent` を空にする。** 以後の `sent` は監視が止めた記録なので、指令の後に
+        `len(sent) == 1` を「通った」と読んではならない (空が通過、1 件は停止)。
+        """
         await self.handle.set_target(ControlMode.POSITION, value * _SCALE)
         self.sent.clear()
 
@@ -352,7 +356,7 @@ class TestPassThrough:
         assert record.count == 1
         assert record.reason is not None
         assert "front_switch" in record.reason
-        assert "入れ替わっている可能性" in record.reason
+        assert "入れ替わっている疑い" in record.reason
 
     async def test_止めた後に同じ向きへ指令し直しても通さない(self) -> None:
         """ジョグの押し込み。指令の時点で既に ON でも、押した向きが同じなら退避ではない。"""
@@ -372,13 +376,14 @@ class TestPassThrough:
         record = rig.monitor.intervention("sub_y_axis")
         assert record.count == 4
         assert record.reason is not None
-        assert "入れ替わっている可能性" in record.reason
+        assert "入れ替わっている疑い" in record.reason
 
-    async def test_押した向きと逆の指令は貫通防止では止めない(self) -> None:
-        """退避の向きを貫通防止が塞ぐことは無い。
+    async def test_止めた後は両向きとも塞がる(self) -> None:
+        """押した向きは貫通防止が、逆向きは宣言された側の歯止め (`check_limit`) が塞ぐ。
 
-        この場面で退避を拒むのは `check_limit` の側 (front_switch が plus 端として宣言されて
-        いる)。宣言を直すまで両向きが塞がるのは、宣言が実物と食い違っている証拠そのもの。
+        両塞ぎになるのは宣言が実物と食い違っているときだけで、その状態で動かし続けさせない。
+        `command()` は `sent` をクリアするので、**指令の後の `sent` は「止められた」の記録**
+        —— 空であることが通過の証拠で、1 件あるのは通過ではない。
         """
         rig = _rig(rear_switch=False, front_switch=False)
         rig.set_observed(-440.0)
@@ -386,14 +391,22 @@ class TestPassThrough:
         await rig.monitor.step()
         rig.sensors["front_switch"] = True
         await rig.monitor.step()
+        assert rig.sent == [-440.0 * _SCALE]
+
+        await rig.command(-450.0)
+        await rig.monitor.step()
+        assert rig.sent == [-440.0 * _SCALE]
+        reason = rig.monitor.intervention("sub_y_axis").reason
+        assert reason is not None
+        assert "入れ替わっている疑い" in reason
 
         await rig.command(-430.0)
         await rig.monitor.step()
-
+        assert rig.sent == [-440.0 * _SCALE]
         reason = rig.monitor.intervention("sub_y_axis").reason
         assert reason is not None
-        assert "入れ替わっている可能性" not in reason
         assert "押されているため" in reason
+        assert "入れ替わっている疑い" not in reason
 
     async def test_OFF_に戻れば同じ向きへ進める(self) -> None:
         """離れて OFF に戻った端は忘れる。忘れないと、正しく直した後もその向きが塞がる。"""
@@ -549,7 +562,7 @@ class TestPassThrough:
         reason = rig.monitor.intervention("sub_y_axis").reason
         assert reason is not None
         assert "rear_switch" in reason
-        assert "入れ替わっている可能性" not in reason
+        assert "入れ替わっている疑い" not in reason
 
 
 class TestSuspendedSensor:

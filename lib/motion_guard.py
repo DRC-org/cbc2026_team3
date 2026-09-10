@@ -360,11 +360,14 @@ class MotionGuard:
         ]
         if blocked:
             toward, away = ("+", "-") if direction > 0 else ("-", "+")
+            # 逆向きは宣言された側の歯止め (`check_limit`) が塞ぐので、操縦者から見れば
+            # 両向きとも動かない。抜け出し方まで言い切らないと画面の前で詰まる
             raise GuardViolation(
                 f"軸 '{axis}' の可動端センサ {_label(blocked)} は {toward} 向きへ動かしたときに"
-                f"押されたので、{toward} 向きへはこれ以上動かしません (退避は {away} 向き)。"
-                "**見張っている端と機構が当たった端が入れ替わっている可能性があります** ——"
-                " `guard.limits` の前後・センサの配線スロット・`scale` の符号を確認してください"
+                "押されました。**`guard.limits` の前後が実物と入れ替わっている疑いが強い** ——"
+                f" 貫通防止が {toward} 向きを、宣言された側の歯止めが {away} 向きを塞ぐので、"
+                "yaml (`guard.limits` の前後・センサの配線スロット・`scale` の符号) を直して"
+                "再起動するまでこの軸は動かせません"
             )
 
     def check_torque(self, *, axis: str, torque: float | None) -> None:
