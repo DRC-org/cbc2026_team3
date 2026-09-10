@@ -6,7 +6,14 @@ from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, 
 from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
-from lib.motion_guard import AxisReading, AxisStateReader, MotionGuard, unknown_axis_state
+from lib.motion_guard import (
+    AxisReading,
+    AxisStateReader,
+    MotionGuard,
+    PressedTowardReader,
+    no_pressed_toward,
+    unknown_axis_state,
+)
 from lib.sequence.positions import PositionLookupError
 
 if TYPE_CHECKING:
@@ -159,9 +166,18 @@ class MotorGroup:
         # 1 度配線すれば 3 経路とも同じものを見る
         self._sensor_active = sensor_active
         self._axis_state: AxisStateReader | None = None
+        self._pressed_toward: PressedTowardReader | None = None
 
     def add(self, handle: MotorHandle) -> None:
         self._handles[handle.name] = handle
+
+    def bind_pressed_toward(self, reader: PressedTowardReader) -> None:
+        """端センサが当たった向きの読み口 (`LimitMonitor` の記憶) を配線する。
+
+        指令の入口がこれを見ないと、宣言と記憶が食い違う端で監視は退避を通すのに
+        入口が宣言された側として拒み、その軸は両向きとも動かせなくなる。
+        """
+        self._pressed_toward = reader
 
     def bind_axis_state(self, reader: AxisStateReader) -> None:
         """軸間干渉の判定が読む「他の軸は今どこか」の読み口を配線する。
@@ -182,6 +198,11 @@ class MotorGroup:
     def axis_state(self) -> AxisStateReader | None:
         """他の軸の実測と目標の読み口。配線されていなければ None。"""
         return self._axis_state
+
+    @property
+    def pressed_toward(self) -> PressedTowardReader | None:
+        """端センサが当たった向きの読み口。配線されていなければ None。"""
+        return self._pressed_toward
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -221,6 +242,7 @@ class AxisHandle:
         *,
         sensor_active: SensorReader | None = None,
         axis_state: AxisStateReader | None = None,
+        pressed_toward: PressedTowardReader | None = None,
     ) -> None:
         # 3 経路 (手動・move_to・零点確定) が必ずここを通るので、解決忘れはここで落とす
         spec.require_resolved()
@@ -233,6 +255,7 @@ class AxisHandle:
         # 未配線は「常に読めていない」。素通りへ倒すと、配線を忘れた経路だけが
         # 干渉の歯止めを丸ごと失い、それが画面にもログにも出ない
         self._axis_state = axis_state or unknown_axis_state
+        self._pressed_toward = pressed_toward or no_pressed_toward
 
     @property
     def name(self) -> str:
@@ -303,6 +326,7 @@ class AxisHandle:
             unit=self._spec.unit,
             sensor_active=self._sensor_active,
             axis_state=self._axis_state_with(pending_targets),
+            pressed_toward=self._pressed_toward,
         )
         if target != current:
             self._guard.check_torque(axis=self.name, torque=self._observed_torque())

@@ -950,6 +950,7 @@ def _axis_handle(
         # 零点確定も探索の 1 歩ごとに指令の入口を通るので、干渉条件が効く。
         # 配線しないと `requires` を書いた軸だけが 1 歩も探索できない
         axis_state=motors.axis_state,
+        pressed_toward=motors.pressed_toward,
     )
 
 

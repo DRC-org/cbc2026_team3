@@ -47,7 +47,7 @@ from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.logging_setup import configure_logging
 from lib.manual import ManualController
 from lib.match_state import ChecklistItem, Court, load_checklist_definitions
-from lib.motion_guard import AxisStateReader, SensorSuspension
+from lib.motion_guard import AxisStateReader, PressedTowardReader, SensorSuspension
 from lib.sequence.engine import (
     NO_LIMIT_INTERVENTION,
     LimitIntervention,
@@ -219,6 +219,7 @@ def _make_origin_resolver(
     can_managers: list[CANManager] | None = None,
     sync_monitors: list[SyncMonitor] | None = None,
     target_refreshers: list[TargetRefresher] | None = None,
+    limit_monitors: list[LimitMonitor] | None = None,
     is_estop_active: EStopChecker,
 ) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
     """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
@@ -229,10 +230,15 @@ def _make_origin_resolver(
 
     `is_estop_active` に既定値を置かないのは、渡し忘れが「緊急停止を見ない
     零点確定」として黙って通るため。
+
+    確定した後に可動端監視へ付け替えを伝える (`LimitMonitor.origin_replaced`)。
+    伝えないと、前の座標で覚えた接触位置が付け替え後の実測と比べられ、スイッチに
+    載ったままの端が退避の向きで「当たった」と覚えられる。
     """
     managers = can_managers or []
     monitors = sync_monitors or []
     refreshers = target_refreshers or []
+    guards = limit_monitors or []
 
     def _resolve_via_driver(axis: str) -> Callable[[], Awaitable[None]] | None:
         names = table.axis(axis).motor_names
@@ -273,7 +279,7 @@ def _make_origin_resolver(
             return capture
         return None
 
-    def resolve(axis: str) -> Callable[[], Awaitable[None]] | None:
+    def _resolve_capture(axis: str) -> Callable[[], Awaitable[None]] | None:
         spec = table.axis(axis)
         for loop in loops:
             if axis in loop.sync_group_names:
@@ -282,6 +288,18 @@ def _make_origin_resolver(
                 if motor in loop.motor_names:
                     return _as_async(functools.partial(loop.set_origin_here, motor))
         return _resolve_via_driver(axis)
+
+    def resolve(axis: str) -> Callable[[], Awaitable[None]] | None:
+        capture = _resolve_capture(axis)
+        if capture is None:
+            return None
+
+        async def run() -> None:
+            await capture()
+            for guard in guards:
+                guard.origin_replaced(axis)
+
+        return run
 
     return resolve
 
@@ -353,6 +371,10 @@ def _wire_motor_check_sequence(
         )
     )
 
+    # 当たった向きの記憶もこの束へ配線する。忘れると、宣言と食い違う端からの退避を
+    # 監視は通すのに動作確認と零点確定の入口だけが宣言された側として拒む
+    motors.bind_pressed_toward(_make_pressed_toward_reader(limit_monitors))
+
     sequence.bind_motors(motors)
     sequence.bind_positions(merged)
     # 動作確認も `move_to` で駆動するので、保護に曲げられた移動はここでも失敗させる
@@ -392,6 +414,7 @@ def _wire_motor_check_sequence(
             can_managers=can_managers,
             sync_monitors=sync_monitors,
             target_refreshers=target_refreshers,
+            limit_monitors=limit_monitors,
             is_estop_active=is_estop_active,
         )
 
@@ -838,6 +861,23 @@ def _build_limit_monitors(
     return [monitor]
 
 
+def _make_pressed_toward_reader(monitors: list[LimitMonitor]) -> PressedTowardReader:
+    """指令の入口が読む「端センサが当たった向き」。監視の記憶をそのまま引く。
+
+    入口と監視で別々に持つと、宣言と食い違う端で監視は退避を通すのに入口が拒む状態が
+    作れる。センサ名はロボット横断に一意なので、最初に覚えていると答えた監視の値でよい。
+    """
+
+    def read(name: str) -> int | None:
+        for monitor in monitors:
+            direction = monitor.pressed_toward(name)
+            if direction is not None:
+                return direction
+        return None
+
+    return read
+
+
 def _make_limit_interventions(monitors: list[LimitMonitor]) -> LimitInterventions:
     """`move_to` が「保護に曲げられた移動」を知る読み口。
 
@@ -1154,6 +1194,8 @@ def _wire_one_robot(
         ),
     )
     seq.bind_limit_interventions(_make_limit_interventions(limit_monitors))
+    # 配線先はここと `_wire_motor_check_sequence` の 2 箇所 (`bind_axis_state` と同じ)
+    seq.motors.bind_pressed_toward(_make_pressed_toward_reader(limit_monitors))
 
     server.add_robot(
         robot_name,

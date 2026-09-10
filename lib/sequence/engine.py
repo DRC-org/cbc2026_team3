@@ -254,6 +254,7 @@ class Sequence:
                 [getattr(self.motors, name) for name in spec.motor_names],
                 sensor_active=self.motors.sensor_active,
                 axis_state=self.motors.axis_state,
+                pressed_toward=self.motors.pressed_toward,
             )
             commands = table.commands(axis, position_name, court=self.court)
             pending.append(
