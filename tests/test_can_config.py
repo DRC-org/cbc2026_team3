@@ -12,6 +12,8 @@ _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _SCRIPT_PATH = _PROJECT_ROOT / "scripts" / "can_config.py"
 _REAL_CONFIG = _PROJECT_ROOT / "config" / "can_buses.yaml"
 _SYSTEM_CONFIG = _PROJECT_ROOT / "config" / "system.yaml"
+_UNIT_TEMPLATES = sorted((_PROJECT_ROOT / "scripts").glob("*.service"))
+_DOC_URI_PREFIX = "file://@PROJECT_DIR@/"
 
 
 def _load_module():
@@ -248,6 +250,30 @@ class TestRealConfig:
 
         assert f"Requires={can_config._SERVICE_NAME}" not in directives
         assert f"Wants={can_config._SERVICE_NAME}" in directives
+
+
+class TestUnitDocumentation:
+    # glob が空振りすると下の parametrize がゼロ件で黙って通る。
+    def test_unit_templates_are_collected(self) -> None:
+        assert [path.name for path in _UNIT_TEMPLATES]
+
+    # systemctl status / show -p Documentation から辿るリンクなので、文書を消しても
+    # 改名しても unit 側は黙ったまま切れたパスを指し続ける。
+    @pytest.mark.parametrize("unit", _UNIT_TEMPLATES, ids=lambda path: path.name)
+    def test_documentation_points_at_an_existing_document(self, unit: pathlib.Path) -> None:
+        for line in unit.read_text(encoding="utf-8").splitlines():
+            if not line.strip().startswith("Documentation="):
+                continue
+
+            # man 5 systemd.unit: Documentation= は空白区切りで URI を複数取れる。
+            for uri in line.split("=", 1)[1].split():
+                if not uri.startswith(_DOC_URI_PREFIX):
+                    continue
+
+                relative = uri[len(_DOC_URI_PREFIX) :]
+                assert (_PROJECT_ROOT / relative).exists(), (
+                    f"{unit.name} の Documentation= が存在しない文書を指している: {relative}"
+                )
 
 
 class TestCommandLine:

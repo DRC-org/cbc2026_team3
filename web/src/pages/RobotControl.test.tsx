@@ -392,8 +392,15 @@ describe("RobotControl の診断表示", () => {
     );
 
     expect(screen.getByRole("button", { expanded: true })).toBeInTheDocument();
+    // 文章は落とすが、異常そのものはチップに残す
     expect(screen.getByText("同期ずれラッチ rotate")).toBeInTheDocument();
-    expect(screen.getByText(/解除し直して/)).toBeInTheDocument();
+    expect(screen.queryByText(/解除し直して/)).toBeNull();
+  });
+
+  it("安全機構を読めなかったことも、チップで画面に残す", () => {
+    mount("match", robotState({ safety: MALFORMED }));
+
+    expect(screen.getByText(/安全機構 判定不能/)).toBeInTheDocument();
   });
 });
 
@@ -492,7 +499,7 @@ describe("手動操縦モード", () => {
   it("緊急停止中は理由を出して指令を塞ぐ", async () => {
     const { context } = mountManual("match", { eStopActive: true });
 
-    expect(screen.getAllByText("緊急停止中は手動操縦できません").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("緊急停止中").length).toBeGreaterThan(0);
     await userEvent.click(screen.getByLabelText("rotate を home へ"));
     expect(context.send).not.toHaveBeenCalled();
   });
@@ -503,11 +510,7 @@ describe("手動操縦モード", () => {
       matchState: { ...DEFAULT_MATCH_STATE, phase: "setup", court: null, timer: null },
     });
 
-    expect(
-      screen.getAllByText(
-        "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)",
-      ).length,
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText("コート未設定").length).toBeGreaterThan(0);
     await userEvent.click(screen.getByLabelText("rotate を home へ"));
     expect(context.send).not.toHaveBeenCalled();
   });
@@ -659,7 +662,7 @@ describe("RobotControl の切断中", () => {
 
     expect(screen.queryByRole("button", { name: "次のステップへ進む" })).toBeNull();
     expect(view.container.querySelectorAll("button[disabled]").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("切断中のため送信できません").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("切断中").length).toBeGreaterThan(0);
   });
 
   it("ステップジャンプも押せなくする", () => {
@@ -699,7 +702,7 @@ describe("ステップ一覧の見出し", () => {
       matchState: { ...DEFAULT_MATCH_STATE, phase: "match", checklists: CHECKLISTS },
     });
 
-    expect(within(stepPanel()).getByText("切断中のため送信できません")).toBeInTheDocument();
+    expect(within(stepPanel()).getByText("切断中")).toBeInTheDocument();
   });
 });
 
@@ -789,6 +792,25 @@ describe("吸着パッドの面", () => {
     expect(screen.getByRole("group", { name: GROUP_NAME[mode] })).toBeInTheDocument();
   });
 
+  it.each<[MatchPhase, ManualState["mode"]]>([
+    ["setup", "sequence"],
+    ["setup", "manual"],
+    ["match", "sequence"],
+    ["match", "manual"],
+  ])("%s の %s モードでも機体状態と同じ列の直上に置く", (phase, mode) => {
+    mount(phase, robotState({ suction: SUCTION, manual: { mode, axes: VALVE_AXES } }));
+
+    const column = screen
+      .getByRole("group", { name: GROUP_NAME[mode] })
+      .closest("section")?.parentElement;
+    expect(column).not.toBeNull();
+
+    const panels = Array.from(column?.children ?? []);
+    const suctionIndex = panels.findIndex((el) => el.textContent?.includes("吸着パッド"));
+    const statusIndex = panels.findIndex((el) => el.textContent?.includes("機体状態"));
+    expect(statusIndex).toBe(suctionIndex + 1);
+  });
+
   it("吸着パッドを持たないロボットには出さない", () => {
     mount("match", robotState({ suction: null }));
 
@@ -798,7 +820,7 @@ describe("吸着パッドの面", () => {
   it("選択は自分の担当機へ宛てて送る", async () => {
     const { context } = mount("match", robotState({ suction: SUCTION }));
 
-    await userEvent.click(screen.getByRole("button", { name: "パッド 2 を使わない" }));
+    await userEvent.click(screen.getByRole("button", { name: "パッド 1 を使う" }));
 
     expect(context.sendOrReport).toHaveBeenCalledWith(
       { type: "suction_pads_set", robot: "sub_hand", pads: ["valve_1"] },
@@ -820,7 +842,7 @@ describe("吸着パッドの面", () => {
       robotState({ suction: MALFORMED, manual: { mode: "manual", axes: VALVE_AXES } }),
     );
 
-    expect(screen.getByText("吸着パッドの状態を読み取れませんでした")).toBeInTheDocument();
+    expect(screen.getByText("パッド状態 判定不能")).toBeInTheDocument();
     expect(screen.getByLabelText("valve_1 を ON にする")).toBeInTheDocument();
   });
 });

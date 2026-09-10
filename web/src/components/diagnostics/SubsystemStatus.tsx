@@ -37,10 +37,12 @@ interface SubsystemStatusProps {
   connected: boolean;
   defaultOpen?: boolean;
   showVerdict?: boolean;
+  /** 操縦画面向け。復旧手順の文を落としてチップだけにする（機体を見る時間を文章に取られない） */
+  concise?: boolean;
   onReenergize?: () => void;
 }
 
-function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
+function WorkpieceRiskNotice({ buses, concise }: { buses: BusHealth[]; concise: boolean }) {
   if (buses.length === 0) return null;
 
   return (
@@ -52,16 +54,18 @@ function WorkpieceRiskNotice({ buses }: { buses: BusHealth[] }) {
             <StatusBadge tone="warning">CAN 途絶 {bus.rx_down_episodes}回</StatusBadge>
             <span className="min-w-0 truncate font-mono text-base-content/80">{bus.name}</span>
           </span>
-          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
-            吸着していたワークが落ちた可能性があります (基板のコマンドウォッチドッグが満了)
-          </span>
+          {concise ? null : (
+            <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+              吸着していたワークが落ちた可能性があります (基板のコマンドウォッチドッグが満了)
+            </span>
+          )}
         </li>
       ))}
     </ul>
   );
 }
 
-function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
+function FirmwareUnconfirmedNotice({ motors, concise }: { motors: string[]; concise: boolean }) {
   if (motors.length === 0) return null;
 
   return (
@@ -73,16 +77,18 @@ function FirmwareUnconfirmedNotice({ motors }: { motors: string[] }) {
             <StatusBadge tone="info">版番号 未確認</StatusBadge>
             <span className="min-w-0 truncate font-mono text-base-content/80">{motor}</span>
           </span>
-          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
-            FEEDBACK は届くのに INFO が来ません。ファームを焼き直して candump で確認してください
-          </span>
+          {concise ? null : (
+            <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+              FEEDBACK は届くのに INFO が来ません。ファームを焼き直して candump で確認してください
+            </span>
+          )}
         </li>
       ))}
     </ul>
   );
 }
 
-function FailedTasksNotice({ labels }: { labels: string[] }) {
+function FailedTasksNotice({ labels, concise }: { labels: string[]; concise: boolean }) {
   if (labels.length === 0) return null;
 
   return (
@@ -94,9 +100,11 @@ function FailedTasksNotice({ labels }: { labels: string[] }) {
             <StatusBadge tone="info">タスク失敗</StatusBadge>
             <span className="min-w-0 truncate text-base-content/80">{label}</span>
           </span>
-          <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
-            再起動ではなく journal (journalctl -u cbc-control) で原因を確認してください
-          </span>
+          {concise ? null : (
+            <span className="pl-[1.4rem] text-[0.85em] text-base-content/70">
+              再起動ではなく journal (journalctl -u cbc-control) で原因を確認してください
+            </span>
+          )}
         </li>
       ))}
     </ul>
@@ -107,48 +115,55 @@ function SafetyIssues({
   safety,
   onReenergize,
   verdictShown,
+  concise,
 }: {
   safety: SafetyPayload | undefined;
   onReenergize?: () => void;
   verdictShown: boolean;
+  concise: boolean;
 }) {
-  const issues = describeSafetyIssues(safety);
   const pending = isReenergizePending(safety);
-  if (issues.length === 0) return null;
+  const rows = describeSafetyIssues(safety).map((issue, index) => ({
+    issue,
+    restated: verdictShown && index === 0,
+    reenergize: issue.kind === "unenergized" ? onReenergize : undefined,
+  }));
+  // 見出しも手順もボタンも無い行は、赤い帯だけが残って何も言わない
+  const visible = rows.filter((row) => !(row.restated && concise && row.reenergize === undefined));
+  if (visible.length === 0) return null;
 
   return (
     <ul className="flex shrink-0 flex-col gap-1 border-l-[0.25rem] border-l-error bg-error/5 px-2 py-1">
-      {issues.map((issue, index) => {
-        const restated = verdictShown && index === 0;
-        return (
-          <li key={issue.label} className="flex min-w-0 flex-col">
-            {restated ? null : (
-              <span className="flex min-w-0 items-center gap-1.5">
-                <Icon as={ShieldAlert} className="shrink-0 text-error" />
-                <span className="shrink-0 font-medium">{issue.label}</span>
-                <span className="min-w-0 truncate font-mono text-base-content/80">
-                  {issue.detail}
-                </span>
+      {visible.map(({ issue, restated, reenergize }) => (
+        <li key={issue.label} className="flex min-w-0 flex-col">
+          {restated ? null : (
+            <span className="flex min-w-0 items-center gap-1.5">
+              <Icon as={ShieldAlert} className="shrink-0 text-error" />
+              <span className="shrink-0 font-medium">{issue.label}</span>
+              <span className="min-w-0 truncate font-mono text-base-content/80">
+                {issue.detail}
               </span>
-            )}
+            </span>
+          )}
+          {concise ? null : (
             <span
               className={cx("text-[0.85em] text-base-content/70", restated ? null : "pl-[1.4rem]")}
             >
               {issue.hint}
             </span>
-            {issue.kind === "unenergized" && onReenergize ? (
-              <Button
-                tone="warn"
-                className={cx("self-start", restated ? null : "ml-[1.4rem]")}
-                onClick={onReenergize}
-                disabled={pending}
-              >
-                {pending ? "処理中…" : "再励磁"}
-              </Button>
-            ) : null}
-          </li>
-        );
-      })}
+          )}
+          {reenergize ? (
+            <Button
+              tone="warn"
+              className={cx("self-start", restated ? null : "ml-[1.4rem]")}
+              onClick={reenergize}
+              disabled={pending}
+            >
+              {pending ? "処理中…" : "再励磁"}
+            </Button>
+          ) : null}
+        </li>
+      ))}
     </ul>
   );
 }
@@ -162,6 +177,7 @@ export function SubsystemStatus({
   tempThresholds = null,
   defaultOpen = false,
   showVerdict = true,
+  concise = false,
   onReenergize,
 }: SubsystemStatusProps) {
   const verdict = evaluateHealth(health, safety, connected);
@@ -200,15 +216,20 @@ export function SubsystemStatus({
 
       {open ? (
         <div id={detailsId} className="flex min-h-0 flex-1 flex-col gap-1 pt-1">
-          {verdict.detail ? (
+          {verdict.detail && !concise ? (
             <p className="shrink-0 border-l-[0.25rem] border-l-error bg-error/5 px-2 py-1">
               {verdict.detail}
             </p>
           ) : null}
-          <WorkpieceRiskNotice buses={riskyBuses} />
-          <FirmwareUnconfirmedNotice motors={unconfirmedMotors} />
-          <FailedTasksNotice labels={failedTaskLabels} />
-          <SafetyIssues safety={safety} onReenergize={onReenergize} verdictShown={showVerdict} />
+          <WorkpieceRiskNotice buses={riskyBuses} concise={concise} />
+          <FirmwareUnconfirmedNotice motors={unconfirmedMotors} concise={concise} />
+          <FailedTasksNotice labels={failedTaskLabels} concise={concise} />
+          <SafetyIssues
+            safety={safety}
+            onReenergize={onReenergize}
+            verdictShown={showVerdict}
+            concise={concise}
+          />
           <HealthIndicator health={readable} />
           <SensorSummary sensors={sensors} />
           <MotorSummary

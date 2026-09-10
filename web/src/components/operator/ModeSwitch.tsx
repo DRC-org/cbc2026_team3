@@ -75,7 +75,7 @@ export function ModeSwitch({
       {manual ? (
         <span className="flex shrink-0 items-center gap-1.5 text-warning">
           <Icon as={TriangleAlert} />
-          シーケンスは停止しています
+          シーケンス停止中
         </span>
       ) : null}
 

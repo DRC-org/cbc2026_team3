@@ -24,7 +24,7 @@ export function SuctionPadPanel({
   if (suction === MALFORMED) {
     return (
       <Panel legend="吸着パッド" className="shrink-0">
-        <StatusBadge tone="error">吸着パッドの状態を読み取れませんでした</StatusBadge>
+        <StatusBadge tone="error">パッド状態 判定不能</StatusBadge>
       </Panel>
     );
   }
@@ -33,25 +33,27 @@ export function SuctionPadPanel({
   // 画面から読めなかった。手動ではこの面が開閉そのものを持つ
   const inManual = manual.mode === "manual";
 
-  const toggle = (axis: string) => {
+  // ワークは棚の手前から順に取るので飛び飛びのパッドを選ぶ場面が無く、押す 1 回で個数が決まる
+  const selectUpTo = (index: number) => {
     // 送るのは差分ではなく「使う弁の全集合」。2 台の UI が別々に押しても最後に届いた形が正になる
-    const next = suction.pads
-      .filter((pad) => (pad.axis === axis ? !pad.enabled : pad.enabled))
-      .map((pad) => pad.axis);
+    const next = suction.pads.slice(0, index + 1).map((pad) => pad.axis);
     sendOrReport({ type: "suction_pads_set", robot: robotKey, pads: next }, "吸着パッドの選択");
   };
 
   const move = (axis: string, position: string) =>
     sendOrReport({ type: "manual_move", robot: robotKey, axis, position }, "プリセット移動");
 
-  const declarePads = suction.pads.map((pad) => ({
+  const declarePads = suction.pads.map((pad, index) => ({
     key: pad.axis,
     label: pad.label,
     on: pad.enabled,
     unknown: false,
     disabled: blockedReason !== null,
-    ariaLabel: `パッド ${pad.label} を${pad.enabled ? "使わない" : "使う"}`,
-    onClick: () => toggle(pad.axis),
+    ariaLabel:
+      index === 0
+        ? `パッド ${pad.label} を使う`
+        : `パッド ${suction.pads[0].label}〜${pad.label} を使う`,
+    onClick: () => selectUpTo(index),
   }));
 
   const openPads = suction.pads.map((pad) => {
@@ -88,7 +90,7 @@ export function SuctionPadPanel({
             開 {onCount}/{suction.pads.length}
           </span>
         ) : onCount === 0 ? (
-          <StatusBadge tone="warning">未選択 — 吸着ステップは拒否されます</StatusBadge>
+          <StatusBadge tone="warning">未選択</StatusBadge>
         ) : (
           <span className="text-[0.85em] text-base-content/60">
             使用 {onCount}/{suction.pads.length}
@@ -113,12 +115,6 @@ export function SuctionPadPanel({
           />
         ))}
       </div>
-
-      <p className="shrink-0 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
-        {inManual
-          ? "押した弁が今すぐ開きます（吸着に使う弁の選択は半自動のときに行います）。"
-          : "ON のパッドだけを吸着に使います。次の「ワーク吸着」ステップから効きます（実行中の吸着には反映されません）。"}
-      </p>
     </Panel>
   );
 }

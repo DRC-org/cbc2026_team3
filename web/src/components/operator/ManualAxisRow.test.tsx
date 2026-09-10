@@ -334,7 +334,7 @@ describe("ManualAxisRow", () => {
 
     it("操作が塞がれていればキーでも動かない", async () => {
       const user = userEvent.setup();
-      const { onJog } = renderRow(PAIRED, "緊急停止中は手動操縦できません", true);
+      const { onJog } = renderRow(PAIRED, "緊急停止中", true);
 
       await user.keyboard("{ArrowRight}");
 
@@ -511,7 +511,7 @@ describe("ManualAxisRow", () => {
 
   describe("操作できないとき", () => {
     it("全操作が塞がれる", () => {
-      renderRow(PAIRED, "緊急停止中は手動操縦できません");
+      renderRow(PAIRED, "緊急停止中");
       expect(screen.getByLabelText("y_axis を 0.5mm 進める")).toBeDisabled();
       expect(screen.getByLabelText("y_axis の目標値")).toBeDisabled();
       expect(screen.getByLabelText("y_axis を home へ")).toBeDisabled();

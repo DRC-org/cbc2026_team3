@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { RobotProvider } from "@/context/RobotContext";
+import { MALFORMED } from "@/lib/protocol";
 import type { HealthSnapshot, MotorState, SafetyState } from "@/lib/protocol";
 import { motorState } from "@/test/motorState";
 import { createRobotContext, renderWithRobot } from "@/test/robotContext";
@@ -688,5 +689,97 @@ describe("SubsystemStatus", () => {
     expect(screen.queryByText("異常なし")).not.toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.getByText("can_m3508")).toBeInTheDocument();
+  });
+
+  describe("concise (操縦画面は文章を持たない)", () => {
+    it("復旧手順の文を落としても、異常のチップと対象名は残す", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          concise
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ sync_violations: ["y_axis"], unenergized_motors: ["rotate_l"] })}
+        />,
+      );
+
+      expect(screen.getByText("同期ずれラッチ y_axis")).toBeInTheDocument();
+      expect(screen.getByText("無励磁のまま")).toBeInTheDocument();
+      expect(screen.getByText("rotate_l")).toBeInTheDocument();
+      expect(screen.queryByText(/解除し直して/)).toBeNull();
+      expect(screen.queryByText(/励磁されていません/)).toBeNull();
+    });
+
+    it("先頭 1 件だけの異常でも、再励磁ボタンは残す", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          concise
+          connected
+          health={HEALTH}
+          motors={MOTORS}
+          safety={safety({ unenergized_motors: ["rotate_l"] })}
+          onReenergize={() => {}}
+        />,
+      );
+
+      expect(screen.getByText(/無励磁のまま rotate_l/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "再励磁" })).toBeInTheDocument();
+    });
+
+    it("チップが言い切った 1 件だけなら、空の赤帯を残さない", () => {
+      const { container } = renderWithRobot(
+        <SubsystemStatus concise connected health={HEALTH} motors={MOTORS} safety={MALFORMED} />,
+      );
+
+      expect(screen.getByText(/安全機構 判定不能/)).toBeInTheDocument();
+      expect(container.querySelector("ul.border-l-error")).toBeNull();
+    });
+
+    it("ワーク落下・版番号未確認・タスク失敗も、チップと対象名だけにする", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          concise
+          connected
+          health={{
+            ...HEALTH,
+            buses: [{ ...HEALTH.buses[0], may_affect_workpiece: true, rx_down_episodes: 2 }],
+          }}
+          motors={MOTORS}
+          safety={safety({
+            firmware_unconfirmed_motors: ["gripper"],
+            failed_tasks: ["再励磁 (RuntimeError)"],
+          })}
+        />,
+      );
+
+      expect(screen.getByText(/CAN 途絶 2回/)).toBeInTheDocument();
+      expect(screen.getByText("版番号 未確認")).toBeInTheDocument();
+      expect(screen.getByText("タスク失敗")).toBeInTheDocument();
+      expect(screen.getByText("再励磁 (RuntimeError)")).toBeInTheDocument();
+      expect(screen.queryByText(/ワークが落ちた可能性/)).toBeNull();
+      expect(screen.queryByText(/candump/)).toBeNull();
+      expect(screen.queryByText(/journal/)).toBeNull();
+    });
+
+    it("サーバーが配る判定理由の文も出さない (チップは残す)", () => {
+      renderWithRobot(
+        <SubsystemStatus
+          concise
+          connected
+          health={{
+            timestamp: 0,
+            overall: "down",
+            buses: [],
+            motors: [],
+            detail: "ヘルス計算に失敗しました: boom",
+          }}
+          motors={MOTORS}
+          safety={safety()}
+        />,
+      );
+
+      expect(screen.getByText("健全性 判定不能")).toBeInTheDocument();
+      expect(screen.queryByText(/ヘルス計算に失敗しました/)).toBeNull();
+    });
   });
 });
