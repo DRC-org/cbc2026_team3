@@ -133,6 +133,8 @@ class SubHandSequence(Sequence):
     @step("1 個目: 受け取り姿勢へ")
     async def work_1_receive_pose(self) -> None:
         await self.move_to(RECEIVE_POSE)
+        # 次のワークを吸う高さまで下ろしておく。top のままだと棚へ突っ込む
+        await self.move_to(DOWN_TO_PICK)
 
     @step("2 個目: 棚へ寄せる", require_trigger=True)
     async def work_2_to_shelf(self) -> None:
@@ -201,6 +203,8 @@ class SubHandSequence(Sequence):
     @step("2 個目: 受け取り姿勢へ")
     async def work_2_receive_pose(self) -> None:
         await self.move_to(RECEIVE_POSE)
+        # 次のワークを吸う高さまで下ろしておく。top のままだと棚へ突っ込む
+        await self.move_to(DOWN_TO_PICK)
 
     @step("3 個目: 棚へ寄せる", require_trigger=True)
     async def work_3_to_shelf(self) -> None:
@@ -269,6 +273,8 @@ class SubHandSequence(Sequence):
     @step("3 個目: 受け取り姿勢へ")
     async def work_3_receive_pose(self) -> None:
         await self.move_to(RECEIVE_POSE)
+        # 次のワークを吸う高さまで下ろしておく。top のままだと棚へ突っ込む
+        await self.move_to(DOWN_TO_PICK)
 
     @step("4 個目: 棚へ寄せる", require_trigger=True)
     async def work_4_to_shelf(self) -> None:
@@ -337,6 +343,8 @@ class SubHandSequence(Sequence):
     @step("4 個目: 受け取り姿勢へ")
     async def work_4_receive_pose(self) -> None:
         await self.move_to(RECEIVE_POSE)
+        # 次のワークを吸う高さまで下ろしておく。top のままだと棚へ突っ込む
+        await self.move_to(DOWN_TO_PICK)
 
     @step("初期位置へ復帰")
     async def return_to_retracted(self) -> None:
