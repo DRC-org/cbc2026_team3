@@ -28,7 +28,7 @@ from lib.control.periodic import PeriodicTask
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import TargetRefresher, hold_target_refresh
-from lib.drivers.base import TelemetrySupport
+from lib.drivers.base import ControlMode, TelemetrySupport
 from lib.drivers.generic import GenericDriver
 from lib.health import (
     BusHealth,
@@ -1008,6 +1008,7 @@ class RobotServer:
             "unenergized_motors": sorted(unenergized),
             "unresponsive_motors": sorted(unresponsive),
             "firmware_unconfirmed_motors": self._firmware_unconfirmed_motors(robot_name),
+            "physical_stop": self._physical_stop_watch(robot_name),
             "failed_tasks": list(self._failed_tasks.get(robot_name, ())),
             "reenergizing": self._is_reenergizing(robot_name),
             "loops_running": all(loop.is_running for loop in ctx.position_loops),
@@ -1047,6 +1048,34 @@ class RobotServer:
                 }
                 for refresher in ctx.target_refreshers
             ],
+        }
+
+    def _physical_stop_watch(self, robot_name: str) -> dict[str, object]:
+        """物理非常停止 (DC 基板の `REF`) の押下を今検出できるか。
+
+        検出経路は基板のフィードバックに載る緊急停止ビットだけなので、DC 基板が黙って
+        いれば押されていても分からない。「分からない」を「押されていない」へ倒さず、
+        かつ「途絶 = 押された」へも倒さない —— 後者は CAN の 1 通落ちで全体停止が掛かり、
+        本番で機体が止まったまま戻せなくなる。倒す代わりに、検出手段が生きていないこと
+        自体を配って画面に出す。
+
+        物理停止を受けるピンは DC 用基板にしか無いので、監視元は `duty` の基板に限る。
+        """
+        ctx = self._robots[robot_name]
+        sources = sorted(
+            name
+            for name, motor in ctx.can_manager.motors.items()
+            if isinstance(motor, GenericDriver) and motor.control_type is ControlMode.DUTY
+        )
+        freshness = FeedbackFreshness(
+            ctx.can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+        )
+        now = freshness.now()
+        unwatched = [name for name in sources if freshness.is_stale(name, now)]
+        return {
+            "watched": bool(sources) and not unwatched,
+            "sources": sources,
+            "unwatched": unwatched,
         }
 
     def _split_inactive_motors(self, robot_name: str) -> tuple[set[str], set[str]]:
@@ -1444,6 +1473,8 @@ class RobotServer:
                     continue
                 received_at = last_feedback.get(motor_name)
                 if received_at is None or received_at <= self._board_e_stop_ignore_before:
+                    # 読めていないフィードバックからは押下を主張しない。取りこぼしうる
+                    # ことは `_physical_stop_watch` が safety へ載せて画面に出す。
                     continue
                 return (
                     f"{robot_name} の {motor_name} が基板側の緊急停止を報告 "

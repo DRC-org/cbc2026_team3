@@ -33,6 +33,7 @@ from tests.fake_can import (
     mock_bus,
     mock_can_manager,
     mock_driver,
+    set_last_feedback,
     set_motors,
 )
 from tests.fake_drivers import StubFeedbackDriver
@@ -1280,6 +1281,84 @@ class TestBoardReportedEStop:
         await fx.publish_state()
 
         assert fx.e_stop_active is True
+
+
+class TestPhysicalStopWatch:
+    """物理停止 (DC 基板の `REF`) を今検出できるかを配ることを守る。
+
+    DC 基板が黙っていると押されていても `_detect_board_e_stop` は気付けない。
+    そこを「押された」へ倒すと CAN の 1 通落ちで復帰不能になるので、倒さずに
+    「検出手段が生きていない」を配る側で守る。
+    """
+
+    def _fixture(self, drivers: dict[str, object], *, fresh: tuple[str, ...] = ()) -> ServerFixture:
+        fx = _build_fixture()
+        mgr = fx.can_manager("main_hand")
+        set_motors(mgr, drivers)
+        keep_feedback_fresh(mgr, fresh)
+        return fx
+
+    def _watch(self, fx: ServerFixture) -> dict:
+        return fx.state_message("main_hand")["safety"]["physical_stop"]
+
+    def _dc_board(self, name: str = "conveyor") -> GenericDriver:
+        return GenericDriver(name, 0x81, control_type=ControlMode.DUTY)
+
+    def test_黙った_dc_基板は監視できていないと配る(self) -> None:
+        fx = self._fixture({"conveyor": self._dc_board()})
+
+        watch = self._watch(fx)
+
+        assert watch["sources"] == ["conveyor"]
+        assert watch["unwatched"] == ["conveyor"]
+        assert watch["watched"] is False
+
+    def test_鮮度切れの_dc_基板も監視できていないと配る(self) -> None:
+        fx = self._fixture({"conveyor": self._dc_board()})
+        mgr = fx.can_manager("main_hand")
+        set_last_feedback(mgr, {"conveyor": time.time() - 10.0})
+
+        watch = self._watch(fx)
+
+        assert watch["unwatched"] == ["conveyor"]
+        assert watch["watched"] is False
+
+    def test_フィードバックが届いていれば監視できていると配る(self) -> None:
+        fx = self._fixture({"conveyor": self._dc_board()}, fresh=("conveyor",))
+
+        watch = self._watch(fx)
+
+        assert watch["sources"] == ["conveyor"]
+        assert watch["unwatched"] == []
+        assert watch["watched"] is True
+
+    def test_dc_基板の無い構成では検出手段が無いと配る(self) -> None:
+        servo = GenericDriver("rotate_r", 0x50, control_type=ControlMode.POSITION)
+        fx = self._fixture({"rotate_r": servo}, fresh=("rotate_r",))
+
+        watch = self._watch(fx)
+
+        assert watch["sources"] == []
+        assert watch["watched"] is False, "物理停止を受ける基板が無い構成を平常と言っている"
+
+    def test_黙ったサーボ基板は物理停止の監視元に数えない(self) -> None:
+        drivers = {
+            "conveyor": self._dc_board(),
+            "rotate_r": GenericDriver("rotate_r", 0x50, control_type=ControlMode.POSITION),
+        }
+        fx = self._fixture(drivers, fresh=("conveyor",))
+
+        watch = self._watch(fx)
+
+        assert watch["sources"] == ["conveyor"]
+        assert watch["watched"] is True
+
+    async def test_黙った_dc_基板でサーバー全体を止めはしない(self) -> None:
+        fx = self._fixture({"conveyor": self._dc_board()})
+
+        await fx.publish_state()
+
+        assert fx.e_stop_active is False, "途絶を押下へ倒すと 1 通落ちで復帰不能になる"
 
 
 _BOARD_CAN_ID = 0x11

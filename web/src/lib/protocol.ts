@@ -390,11 +390,18 @@ export interface TargetRefresherState {
   paused: boolean;
 }
 
+export interface PhysicalStopWatch {
+  watched: boolean;
+  sources: string[];
+  unwatched: string[];
+}
+
 export interface SafetyState {
   sync_violations: string[];
   unenergized_motors: string[];
   unresponsive_motors: string[];
   firmware_unconfirmed_motors: string[];
+  physical_stop: PhysicalStopWatch;
   failed_tasks: string[];
   reenergizing: boolean;
   loops_running: boolean;
@@ -440,6 +447,15 @@ export function safetyShapeErrors(value: unknown): string[] {
     "reenergizing",
   ]) {
     if (typeof value[key] !== "boolean") broken.push(key);
+  }
+  const physicalStop = value.physical_stop;
+  if (
+    !isObject(physicalStop) ||
+    typeof physicalStop.watched !== "boolean" ||
+    !isStringArray(physicalStop.sources) ||
+    !isStringArray(physicalStop.unwatched)
+  ) {
+    broken.push("physical_stop");
   }
   for (const [key, isValidTask] of Object.entries(SAFETY_TASK_SHAPES)) {
     const tasks = value[key];

@@ -347,6 +347,15 @@
         "limit_monitors_running": true,
         "loops_running": true,
         "monitors_running": true,
+        "physical_stop": {
+          "sources": [
+            "conveyor"
+          ],
+          "unwatched": [
+            "conveyor"
+          ],
+          "watched": false
+        },
         "position_loops": [
           {
             "bus": "can_m3508",
@@ -631,6 +640,15 @@
         "limit_monitors_running": true,
         "loops_running": true,
         "monitors_running": true,
+        "physical_stop": {
+          "sources": [
+            "conveyor"
+          ],
+          "unwatched": [
+            "conveyor"
+          ],
+          "watched": false
+        },
         "position_loops": [
           {
             "bus": "can_m3508",
