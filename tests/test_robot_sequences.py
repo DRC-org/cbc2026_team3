@@ -131,6 +131,8 @@ _MAIN_POSITIONS = {
             "work_shared": 16.0,
             "work_3_after_1": 101.0,
             "work_3_after_2": 102.0,
+            "work_1_after_1": 103.0,
+            "work_shared_after_1": 104.0,
         },
         "rotate": {
             "home": 20.0,
@@ -140,6 +142,8 @@ _MAIN_POSITIONS = {
             "after_place": 24.0,
             "work_3_after_1": 501.0,
             "work_3_after_2": 502.0,
+            "work_1_after_1": 503.0,
+            "work_shared_after_1": 504.0,
         },
         "gripper": {"open": 31.0, "closed": 32.0},
         "conveyor": {"stop": 0.0, "run": 0.4},

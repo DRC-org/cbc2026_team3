@@ -114,6 +114,10 @@ scripts/deploy.sh --no-install
 **`--no-install` を付ける。** 素の `deploy.sh` は `uv sync --frozen` と
 `pnpm install --frozen-lockfile` を無条件で走らせ、ロックが満たされていなければ
 そこでネットワークを取りに行く。会場の回線でそれをやると依存解決で止まる。
+`--no-install` は `git pull` も飛ばす。
+
+**反映すると全サービスが再起動し、CAN は全バス down/up、UI は全員切断される。**
+操作中の人がいないときに回すこと。
 
 **会場入りの前日までに、ネットワークのある場所で素の `scripts/deploy.sh` を
 一度回してキャッシュを温めておくこと。** `--no-install` は `web/node_modules` が
