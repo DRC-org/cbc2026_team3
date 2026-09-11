@@ -446,7 +446,7 @@ async def _collect_moves(seq: Sequence) -> list[tuple[int, dict[str, str]]]:
 
 
 class TestSubHandSteps:
-    def test_ワーク_4_個ぶんの_66_ステップである(self) -> None:
+    def test_ワーク_4_個ぶんの_70_ステップである(self) -> None:
         labels = [s["label"] for s in SubHandSequence().steps_info]
 
         assert labels == _expected_sub_labels()
