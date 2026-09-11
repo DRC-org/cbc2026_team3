@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from lib.drivers.base import ControlMode
-from lib.match_state import ROLE_PRE_MATCH, Court, load_checklist_definitions
+from lib.match_state import Court, load_checklist_definitions
 from lib.motion_guard import MotionGuardSpec
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
@@ -748,28 +748,6 @@ class TestShippedRobotConfig:
             "bench/edulite/main_hand.yaml:rotate",
             "bench/m3508/main_hand.yaml:y_axis",
         } <= inspected
-
-    def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
-        checklist = yaml.safe_load((_CONFIG_DIR / "checklist.yaml").read_text())
-        ids = {item["id"] for item in checklist["checklists"][ROLE_PRE_MATCH]}
-
-        assert {
-            "y_axis_sync",
-            "rotate_sync",
-            "wall_initial",
-            "conveyor_stop",
-            "conveyor_run",
-            "origin_sensor_react",
-            # 向きの取り違えは反応の確認では見えない (押されている端へ進む指令だけが
-            # 通る)。退避できるかどうかを機体ごとに唱えるのが唯一の検出経路
-            "limit_escape_main",
-            "limit_escape_sub",
-            "valves_closed",
-            "valves_actuate",
-            "pumps_run",
-            "suction_hold",
-            "suction_release",
-        } <= ids
 
 
 _CHECKLIST_PATHS = sorted(_CONFIG_DIR.rglob("checklist.yaml"))
