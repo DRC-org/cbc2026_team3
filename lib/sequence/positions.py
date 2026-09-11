@@ -149,6 +149,9 @@ class HomingSpec:
     #: 干渉する軸で、次の軸を寄せる前に干渉域を抜けるために要る。距離ではなく位置名で
     #: 持つのは、0.0 そのものがスイッチの動作点だから (`sub_y_axis` と同じ流儀)
     retreat_position: str | None = None
+    #: 原点合わせの誤差 [軸の unit]。目標がこの範囲内の移動は、原点スイッチで止まっても
+    #: 着座として到着扱いにする (home を原点から離せない軸のため)
+    origin_error: float | None = None
 
     def __post_init__(self) -> None:
         if self.sensor is not None and self.motor_sensors is not None:
@@ -174,6 +177,8 @@ class HomingSpec:
             raise ValueError(f"homing.settle_s は 0 以上: {self.settle_s!r}")
         if self.release_distance is not None and self.release_distance <= 0.0:
             raise ValueError(f"homing.release_distance は正の値: {self.release_distance!r}")
+        if self.origin_error is not None and self.origin_error <= 0.0:
+            raise ValueError(f"homing.origin_error は正の値: {self.origin_error!r}")
         if self.step > self.search_distance:
             raise ValueError(
                 f"homing.step ({self.step}) が "
@@ -563,6 +568,7 @@ _HOMING_KEYS = frozenset(
         "release_distance",
         "coarse_step",
         "retreat_position",
+        "origin_error",
     }
 )
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
@@ -963,6 +969,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             align_distance=align_distance,
             align_step=_number(path, raw, "align_step", None),
             retreat_position=retreat_position,
+            origin_error=_number(path, raw, "origin_error", None),
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
             ),

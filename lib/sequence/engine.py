@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from lib.match_state import Court
 from lib.sequence.interlock import AxisInterlock
 from lib.sequence.motors import AxisHandle
-from lib.sequence.positions import PositionTable
+from lib.sequence.positions import AxisSpec, PositionTable
 
 if TYPE_CHECKING:
     from lib.sequence.motors import MotorGroup
@@ -101,6 +101,44 @@ class _PlannedMove:
     value: float
 
 
+@dataclass(frozen=True)
+class _OriginSeat:
+    """原点スイッチへの着座を到着とみなす窓 (`homing.origin_error`)。
+
+    home を原点から離せない軸は、原点合わせのばらつきぶん手前でスイッチに当たる。
+    窓は事前 (既に着座) と事後 (保護が止めた) の両方がここだけを見る。
+    """
+
+    handle: AxisHandle
+    unit: str
+    sensors: tuple[str, ...]
+    direction: float
+    error: float
+    slack: float
+
+    @classmethod
+    def for_target(cls, spec: AxisSpec, handle: AxisHandle, target: float) -> _OriginSeat | None:
+        homing = spec.homing
+        if homing is None or homing.origin_error is None:
+            return None
+        seat = cls(
+            handle=handle,
+            unit=spec.unit,
+            sensors=homing.sensor_names,
+            direction=homing.direction,
+            error=homing.origin_error,
+            slack=spec.tolerance or 0.0,
+        )
+        return seat if seat.distance(target) <= seat.error else None
+
+    def distance(self, value: float) -> float:
+        """原点からスイッチの反対側へ測った距離。"""
+        return -self.direction * value
+
+    def contains(self, value: float) -> bool:
+        return -self.slack <= self.distance(value) <= self.error + self.slack
+
+
 def step(
     label: str,
     *,
@@ -163,6 +201,45 @@ class Sequence:
         if self._limit_interventions is None:
             return NO_LIMIT_INTERVENTION
         return self._limit_interventions(axis)
+
+    def _origin_sensors(self, seat: _OriginSeat) -> list[bool | None]:
+        read = self.motors.sensor_active
+        # 未配線を False へ倒すと、読めていない原点センサで着座が成立してしまう
+        return [None if read is None else read(name) for name in seat.sensors]
+
+    def _already_seated(self, seat: _OriginSeat, target: float) -> bool:
+        """原点スイッチに載ったまま、さらに原点側へ指令しようとしているか。"""
+        if not any(state is True for state in self._origin_sensors(seat)):
+            return False
+        position = seat.handle.observed_value()
+        if not seat.contains(position) or seat.distance(target) >= seat.distance(position):
+            return False
+        logger.info(
+            "原点スイッチに着座済み: axis=%s, 実測=%.3f%s (原点側へ押し込まずその場で止めます)",
+            seat.handle.name,
+            position,
+            seat.unit,
+        )
+        return True
+
+    def _accept_seat(self, seat: _OriginSeat) -> bool:
+        """保護が止めた位置を着座として到着扱いにしてよいか。"""
+        # 読めていない原点センサがあると、止まった理由がスイッチなのか途絶なのか分からない
+        if any(state is None for state in self._origin_sensors(seat)):
+            return False
+        position = seat.handle.observed_value()
+        if not seat.contains(position):
+            return False
+        logger.info(
+            "原点スイッチで着座: axis=%s, 実測=%.3f%s "
+            "(原点誤差 %s%s の範囲内なので到着とみなします)",
+            seat.handle.name,
+            position,
+            seat.unit,
+            seat.error,
+            seat.unit,
+        )
+        return True
 
     @property
     def has_motors(self) -> bool:
@@ -247,6 +324,7 @@ class Sequence:
         before = {axis: self._limit_intervention(axis) for axis in targets}
 
         pending: list[_PlannedMove] = []
+        seats: dict[str, _OriginSeat] = {}
         for axis, position_name in targets.items():
             spec = table.axis(axis).for_court(self.court)
             handle = AxisHandle(
@@ -257,13 +335,21 @@ class Sequence:
                 pressed_toward=self.motors.pressed_toward,
             )
             commands = table.commands(axis, position_name, court=self.court)
+            value = spec.to_value(commands)
+            seat = _OriginSeat.for_target(spec, handle, value)
+            if seat is not None:
+                seats[axis] = seat
+                # 入口の歯止めは押されている端へ向かう指令を拒むので、その場で止まれへ置き換える
+                if self._already_seated(seat, value):
+                    commands = handle.observed_commands()
+                    value = spec.to_value(commands)
             pending.append(
                 _PlannedMove(
                     handle=handle,
                     position_name=position_name,
                     wait_s=spec.timeout_s if timeout is None else timeout,
                     commands=commands,
-                    value=spec.to_value(commands),
+                    value=value,
                 )
             )
 
@@ -285,11 +371,15 @@ class Sequence:
         )
         # 終了時の状態ではなく回数で見る。接点がバウンドして触れて離れると、軸は
         # 触れた位置で止まったままなのに状態だけが戻る
-        stopped = [
-            f"{axis}: {now.reason}"
-            for axis, previous in before.items()
-            if (now := self._limit_intervention(axis)).count != previous.count
-        ]
+        stopped: list[str] = []
+        for axis, previous in before.items():
+            now = self._limit_intervention(axis)
+            if now.count == previous.count:
+                continue
+            seat = seats.get(axis)
+            if seat is not None and self._accept_seat(seat):
+                continue
+            stopped.append(f"{axis}: {now.reason}")
         failed = [
             f"{move.handle.name}->{move.position_name}"
             for move, reached in zip(pending, results, strict=True)

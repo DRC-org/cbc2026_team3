@@ -568,6 +568,110 @@ class TestLimitIntervention:
         await seq.move_to({"lift_motor": "work"})
 
 
+_SEAT_CONFIG = {
+    "axes": {
+        "slide": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "scale": 1.0,
+            "tolerance": 1.0,
+            "timeout_s": 0.05,
+            "homing": {
+                "sensor": "origin_switch",
+                "direction": -1,
+                "search_distance": 100.0,
+                "step": 0.5,
+                "origin_error": 4.0,
+            },
+            "guard": {"limits": {"minus": "origin_switch"}},
+        },
+    },
+    "positions": {"slide": {"home": 0.0, "work": 50.0}},
+}
+
+
+class _SeatingDriver(_EchoDriver):
+    """原点へ向かう途中で原点スイッチに当たり、保護が目標を実測へ書き直した機体。"""
+
+    def __init__(
+        self,
+        interventions: _Interventions,
+        sensors: dict[str, bool | None],
+        *,
+        stop_at: float,
+        sensor_after: bool | None,
+    ) -> None:
+        super().__init__("slide", reaches=False)
+        self._interventions = interventions
+        self._sensors = sensors
+        self._stop_at = stop_at
+        self._sensor_after = sensor_after
+        self.set_observed(position=30.0)
+
+    def encode_target(self, mode: ControlMode, value: float) -> can.Message:
+        self.set_observed(position=self._stop_at)
+        self._sensors["origin_switch"] = self._sensor_after
+        self._interventions.stop("slide", "可動端センサ 'origin_switch' が押されているため")
+        return super().encode_target(mode, value)
+
+    def is_target_reached(self, *args: object, **kwargs: object) -> bool:
+        return True
+
+
+class TestOriginSeat:
+    """**原点合わせの誤差の範囲で原点スイッチに当たった移動は着座として通す。**"""
+
+    def _sequence(
+        self,
+        driver: _EchoDriver,
+        sensors: dict[str, bool | None],
+        interventions: _Interventions,
+    ) -> Sequence:
+        mgr = MagicMock()
+        mgr.send = AsyncMock()
+        group = MotorGroup(sensor_active=sensors.get)
+        group.add(MotorHandle("slide", driver, mgr, poll_interval=0.001))
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_SEAT_CONFIG))
+        seq.bind_limit_interventions(interventions)
+        return seq
+
+    def _seating(self, *, stop_at: float, sensor_after: bool | None) -> Sequence:
+        interventions = _Interventions()
+        sensors: dict[str, bool | None] = {"origin_switch": False}
+        driver = _SeatingDriver(interventions, sensors, stop_at=stop_at, sensor_after=sensor_after)
+        return self._sequence(driver, sensors, interventions)
+
+    async def test_誤差の範囲で原点スイッチに当たったら到着とみなす(self) -> None:
+        seq = self._seating(stop_at=2.5, sensor_after=True)
+
+        await seq.move_to({"slide": "home"})
+
+    async def test_誤差の範囲外で止められたら失敗する(self) -> None:
+        seq = self._seating(stop_at=20.0, sensor_after=True)
+
+        with pytest.raises(LimitInterventionError, match="origin_switch"):
+            await seq.move_to({"slide": "home"})
+
+    async def test_原点センサが読めていなければ失敗する(self) -> None:
+        """止まった理由がスイッチなのか途絶なのか分からない。"""
+        seq = self._seating(stop_at=2.5, sensor_after=None)
+
+        with pytest.raises(LimitInterventionError, match="origin_switch"):
+            await seq.move_to({"slide": "home"})
+
+    async def test_着座したまま原点へ指令し直しても押し込まない(self) -> None:
+        """入口の歯止めは押されている端へ向かう指令を拒むので、その場で止まれに置き換える。"""
+        driver = _EchoDriver("slide")
+        driver.set_observed(position=2.5)
+        seq = self._sequence(driver, {"origin_switch": True}, _Interventions())
+
+        await seq.move_to({"slide": "home"})
+
+        assert driver.commands == [(ControlMode.POSITION, 2.5)]
+
+
 _TWO_AXIS_CONFIG = {
     "axes": {
         "lift_motor": {"unit": "mm", "command_unit": "deg", "scale": 100.0, "timeout_s": 0.05},
