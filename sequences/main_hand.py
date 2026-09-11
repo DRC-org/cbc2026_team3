@@ -57,7 +57,7 @@ class MainHandSequence(Sequence):
 
     @step("共通ワークへ移動", require_trigger=True)
     async def move_to_work_shared(self) -> None:
-        await self.move_to(_pick_at("work_shared"))
+        await self.move_to({"y_axis": "work_shared", "rotate": "pick_shared"})
 
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_3(self) -> None:
