@@ -235,9 +235,10 @@ _SPECS: tuple[CommandSpec, ...] = (
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
     ),
     _spec(
+        # 原点を失ったときの復帰手段は試合中にも要る。塞ぐのは緊急停止・手動操縦・
+        # シーケンス実行中・再励磁中で、それは `_environment_deny` が全フェーズ共通で持つ
         "homing_start",
-        allowed_phases=PHASES_OUTSIDE_MATCH,
-        phase_deny_message="試合中は零点合わせを実行できません",
+        allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,
         e_stop_deny_message="緊急停止中のため零点合わせを実行できません",
         blocked_without_court=True,
