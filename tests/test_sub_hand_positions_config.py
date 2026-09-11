@@ -29,7 +29,11 @@ _ROTATE_CLEARANCE_MM = 150.0
 _PICK_DROP_MM = 10.0
 
 # 前端スイッチより手前 = 150mm 未満に取る位置。ここからは clear を経由しないと回せない。
-_NEAR_FRONT = ("receive", "place_1", "place_2", "place_3", "place_4")
+# 箱で近いのは一番前の 1 つだけ。残りは 147mm 間隔で後ろへ並ぶので 150mm より遠く、
+# 直接回しても当たらない (それでもシーケンスは全箱で clear を経由する)。
+_NEAR_FRONT = ("receive", "place_1")
+
+_BOXES = ("place_1", "place_2", "place_3", "place_4")
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +82,8 @@ class TestSubYAxis:
         assert set(table.names("sub_y_axis")) == {
             "retracted",
             "clear",
-            *_NEAR_FRONT,
+            "receive",
+            *_BOXES,
         }
 
     def test_clear_は前端スイッチから_150mm_以上離れている(self, table: PositionTable) -> None:
@@ -102,9 +107,12 @@ class TestSubYAxis:
 
         assert _value(table, "sub_y_axis", "retracted") < min(others)
 
-    def test_箱_4_箇所は互いに違う位置である(self, table: PositionTable) -> None:
-        boxes = [_value(table, "sub_y_axis", f"place_{n}") for n in range(1, 5)]
+    def test_箱_4_箇所は前から順に後ろへ並ぶ(self, table: PositionTable) -> None:
+        # 番号と並びが食い違うと、シーケンスが箱を跨いで前後する (順序はステップの前提)。
+        # 後ろほど値が小さい (前端が 0.0 で後ろが負)。
+        boxes = [_value(table, "sub_y_axis", name) for name in _BOXES]
 
+        assert boxes == sorted(boxes, reverse=True)
         assert len(set(boxes)) == 4
 
 
