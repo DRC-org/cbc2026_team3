@@ -88,6 +88,7 @@ class TestSubYAxis:
     def test_位置は仕様の名前が揃っている(self, table: PositionTable) -> None:
         assert set(table.names("sub_y_axis")) == {
             "retracted",
+            "home",
             "clear",
             "receive",
             *_BOXES,
