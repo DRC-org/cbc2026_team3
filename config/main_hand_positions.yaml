@@ -32,6 +32,9 @@ axes:
       # y_axis = 0 と rotate = 0 は機構が干渉する。rotate の零点確定より前に
       # 干渉域を抜けておかないと rotate が 1 歩も動けない
       retreat_position: clear
+      # 原点合わせの誤差。home への移動がこの範囲で原点スイッチに当たったら着座として
+      # 到着扱いにする (home は姿勢の制約で原点から離せないため)
+      origin_error: 4.0
       settle_s: 0.05
     guard:
       # 左右 2 本とも原点側 (homing.direction: -1) に付く。**2 本とも書く** ——
