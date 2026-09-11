@@ -159,7 +159,6 @@ _MAIN_HOME_TARGETS = [
     ("rotate_l", -20.0),
     ("gripper", 31.0),
     ("wall_f", 41.0),
-    ("wall_r", 44.0),
     # HOME 姿勢はコンベアを止めて待つ
     ("conveyor", 0.0),
 ]
@@ -557,6 +556,7 @@ class TestSubHandSteps:
             {"sub_pitch": "open"},
             {"sub_offset": "open"},
             {"sub_rotate": "receive"},
+            {"wall_r": "initial"},
         ]
 
     async def test_復帰は初期位置へ戻すだけ(self) -> None:
