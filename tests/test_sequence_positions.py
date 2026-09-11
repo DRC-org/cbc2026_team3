@@ -1792,6 +1792,36 @@ class TestGuardInterference:
         required = self._required(table, "arm")
         assert (required.low, required.high) == (pytest.approx(-430.5), pytest.approx(-199.5))
 
+    def test_slack_を書いた条件はその幅で解決される(self) -> None:
+        """参照先の tolerance では飲めないずれ (自重で下がるなど) を条件側で吸う。"""
+        table = self._load(carriage={"requires": [{"axis": "lift", "at": "top", "slack": 15.0}]})
+
+        required = self._required(table, "carriage")
+        assert required.low == pytest.approx(-155.0)
+        assert required.high == pytest.approx(-125.0)
+
+    def test_slack_を書いていない条件は参照先の_tolerance_のまま(self) -> None:
+        """**書いた軸しか緩まない。** 同じ表に書いた他の条件の幅は 1mm も変わらない。"""
+        table = self._load(
+            carriage={"requires": [{"axis": "lift", "at": "top", "slack": 15.0}]},
+            arm={"requires": [{"axis": "carriage", "between": ["retracted", "clear"]}]},
+        )
+
+        required = self._required(table, "arm")
+        assert required.low == pytest.approx(-430.5)
+        assert required.high == pytest.approx(-199.5)
+
+    @pytest.mark.parametrize("slack", [0.0, -1.0, float("inf"), float("nan")])
+    def test_正の有限値でない_slack_は起動拒否(self, slack: float) -> None:
+        """0 幅に縮むと、到達許容差の内側で止まった実測が必ず区間の外になる。"""
+        with pytest.raises(ValueError, match="正の有限値"):
+            self._load(carriage={"requires": [{"axis": "lift", "at": "top", "slack": slack}]})
+
+    @pytest.mark.parametrize("slack", ["15.0", True, [15.0]])
+    def test_数値でない_slack_は起動拒否(self, slack: object) -> None:
+        with pytest.raises(ValueError, match="数値"):
+            self._load(carriage={"requires": [{"axis": "lift", "at": "top", "slack": slack}]})
+
     def test_書かない軸は素通り(self) -> None:
         """既定は空。書かなかった軸に干渉の歯止めは 1 つも掛からない。"""
         table = self._load(carriage={"max_step": 100.0})

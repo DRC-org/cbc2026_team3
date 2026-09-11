@@ -54,6 +54,30 @@ def _requirement(table: PositionTable, axis: str) -> RequiredRange:
     return required
 
 
+def _declared_slack(axis: str) -> float:
+    """yaml に書いた許容幅。解決した区間がこの幅で広がっていることを確かめるのに使う。"""
+    raw = yaml.safe_load((_CONFIG_DIR / _YAML_NAME).read_text())
+    (entry,) = raw["axes"][axis]["guard"]["requires"]
+    return float(entry["slack"])
+
+
+def _moves_with_lift_at(table: PositionTable, lift_mm: float) -> bool:
+    """昇降がその高さに居るとき、同梱 config で前後の指令が通るか。"""
+    guard = table.axis("sub_y_axis").guard
+    assert guard is not None
+    try:
+        MotionGuard(guard).check_interference(
+            axis="sub_y_axis",
+            delta=-1.0,
+            axis_state=lambda _axis: AxisReading(
+                value=lift_mm, target=lift_mm, origin_confirmed=True
+            ),
+        )
+    except GuardViolation:
+        return False
+    return True
+
+
 # 基板 #2 のスロットは can_id 0x50〜0x54 の昇順で `config.h` の宣言順に対応する。
 _BOARD2_CAN_IDS = range(0x50, 0x55)
 
@@ -222,22 +246,33 @@ class TestInterferenceDeclaration:
 
     def test_前後に動かしてよいのは昇降が移動高さのときだけ(self, table: PositionTable) -> None:
         required = _requirement(table, "sub_y_axis")
-        tolerance = table.axis("sub_lift").tolerance
         top = _value(table, "sub_lift", "top")
+        slack = _declared_slack("sub_y_axis")
 
         assert required.axis == "sub_lift"
-        assert tolerance is not None
-        # 区間を tolerance ぶん広げないと、top へ許容差の内側で止まった実測が
-        # 区間の外になり、次に前後へ動かす段が会場で拒否される
-        assert required.low == pytest.approx(top - tolerance)
-        assert required.high == pytest.approx(top + tolerance)
+        # 区間を広げないと、top へ止まった実測が区間の外になり、次に前後へ動かす段が
+        # 会場で拒否される。幅は slack が決める (tolerance では自重のずれを飲めない)
+        assert required.low == pytest.approx(top - slack)
+        assert required.high == pytest.approx(top + slack)
 
-    @pytest.mark.parametrize("name", ["pick", "place"])
-    def test_移動高さより下では前後に動かせない(self, table: PositionTable, name: str) -> None:
-        required = _requirement(table, "sub_y_axis")
-        value = _value(table, "sub_lift", name)
+    @pytest.mark.parametrize("offset_mm", [10.0, -10.0])
+    def test_top_から_10mm_ずれても前後に動かせる(
+        self, table: PositionTable, offset_mm: float
+    ) -> None:
+        """2026-09-11 の実機。top に止めても自重で 1cm ほど下がる (+ が下)。
 
-        assert not required.low <= value <= required.high
+        ここが拒否だと、会場で前後が 1mm も動かない。
+        """
+        assert _moves_with_lift_at(table, _value(table, "sub_lift", "top") + offset_mm)
+
+    def test_移動高さから離れたら前後に動かせない(self, table: PositionTable) -> None:
+        """`place` は箱へ下ろす高さ。ここで前後に走ると機構が当たる。
+
+        **`pick` は区間の中に入る。** 自重のずれ 1cm を飲む以上、top のちょうど
+        10mm 下にある `pick` とは区別できない (`slack` を 10mm 未満にすると、
+        今度は実機のずれが拒否される)。
+        """
+        assert not _moves_with_lift_at(table, _value(table, "sub_lift", "place"))
 
     def test_回転してよい区間は前端から_150mm_以上離れている(self, table: PositionTable) -> None:
         # 区間の前端寄りの縁 (high) がこの余裕の内側に入ると、そこで回した機構が当たる

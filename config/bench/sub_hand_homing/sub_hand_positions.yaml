@@ -66,7 +66,7 @@ axes:
         plus: sub_lift_b_limit_sensor
         minus: sub_lift_t_limit_sensor
       # 桁の違う目標だけを止める。本番と揃える (tests/test_robot_sequences.py が一致を見る)
-      max_step: 500.0
+      max_step: 150.0
       stall_torque: 2.0
     unit: mm
     command_unit: rad
