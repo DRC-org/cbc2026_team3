@@ -11,6 +11,8 @@ Type=simple
 ExecStart=@PROJECT_DIR@/scripts/can_watchdog.sh
 Restart=always
 RestartSec=5
+# can_watchdog.sh は TERM で exit 143 する。手動 stop を failed 扱いにしない
+SuccessExitStatus=143
 
 [Install]
 WantedBy=multi-user.target
