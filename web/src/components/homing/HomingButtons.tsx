@@ -7,7 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useHoming } from "@/hooks/useHoming";
 import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
-import { homingStatus, robotTargets } from "@/lib/homingStatus";
+import { homingEntry, homingStatus, robotTargets } from "@/lib/homingStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
 
@@ -22,10 +22,12 @@ export function HomingButtons({ robot: only }: HomingButtonsProps) {
   const { anyManual, restore } = useSequenceModeRestore();
   const [pending, setPending] = useState<[string, string[]] | null>(null);
 
+  const entry = homingEntry(state, only);
   // 手動中の拒否は押せば自分で解消する (全機を半自動へ戻してから送る) ので、その理由では塞がない
-  const { reasonLabel } = homingStatus(state, connected);
+  const { reasonLabel } = homingStatus(entry, connected);
   const blocked = anyManual && connected && !eStopActive ? null : reasonLabel;
   const disabled = blocked !== null;
+  const running = entry !== MALFORMED && entry?.running === true;
   const targets = robotTargets(state, only);
 
   if (targets === MALFORMED) {
@@ -50,7 +52,7 @@ export function HomingButtons({ robot: only }: HomingButtonsProps) {
           onClick={() => setPending([robot, axes])}
           aria-label={`${robotLabel(robot)}の零点合わせを開始`}
         >
-          {state.running && state.robot === robot ? (
+          {running ? (
             <span className="loading loading-xs loading-spinner" />
           ) : (
             <Icon as={Crosshair} />

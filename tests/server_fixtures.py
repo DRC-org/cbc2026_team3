@@ -144,14 +144,14 @@ class ServerFixture:
     def homing_state(self) -> dict:
         return self.server._homing.payload()
 
-    def set_homing_running(self, running: bool) -> None:
-        self.server._homing._running = running
+    def set_homing_running(self, running: bool, robot: str = "sub_hand") -> None:
+        self.server._homing._run_of(robot).running = running
 
     async def wait_homing_idle(self, *, timeout: float = 2.0) -> None:
-        task = self.server._homing._task
-        if task is None:
+        tasks = [run.task for run in self.server._homing._runs.values() if run.task is not None]
+        if not tasks:
             return
-        await asyncio.wait_for(task, timeout=timeout)
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
 
     async def start_switch_measure(self, payload: dict) -> str | None:
         return await self.server._switch_measure.start(payload)

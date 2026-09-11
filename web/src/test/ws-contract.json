@@ -39,19 +39,23 @@
     },
     "homing_state": {
       "available": true,
-      "axes": [
-        "y_axis"
-      ],
-      "blocked_reason": null,
-      "current_axis": null,
-      "error": null,
-      "results": [
-        {
-          "axis": "y_axis",
-          "error": "軸 'y_axis' が 5.0mm 動かしても原点センサ 'origin_sensor' に 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)"
+      "robots": {
+        "main_hand": {
+          "axes": [
+            "y_axis"
+          ],
+          "blocked_reason": null,
+          "current_axis": null,
+          "error": null,
+          "results": [
+            {
+              "axis": "y_axis",
+              "error": "軸 'y_axis' が 5.0mm 動かしても原点センサ 'origin_sensor' に 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)"
+            }
+          ],
+          "running": false
         }
-      ],
-      "robot": "main_hand",
+      },
       "running": false,
       "targets": {
         "main_hand": [

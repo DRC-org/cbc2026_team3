@@ -58,14 +58,9 @@ export function emptyMotorCheckState(): MotorCheckSnapshot {
 export function emptyHomingState(): HomingSnapshot {
   return {
     available: false,
-    blocked_reason: "サーバーから零点合わせの状態を受信していません",
     running: false,
-    robot: null,
-    axes: [],
-    current_axis: null,
-    results: [],
-    error: null,
     targets: {},
+    robots: {},
   };
 }
 
