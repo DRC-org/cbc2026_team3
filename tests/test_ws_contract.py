@@ -197,8 +197,10 @@ def _sequence_positions() -> PositionTable:
                     "scale": {"red": -1.0, "blue": 1.0},
                     "tolerance": 1.0,
                 },
+                # 位置を控えられる軸。実測を持つ軸が無いと position_capture の形が採れない
+                "gripper": {"unit": "deg", "command_unit": "deg", "tolerance": 1.0},
             },
-            "positions": {"lift": {"top": 0.0}},
+            "positions": {"lift": {"top": 0.0}, "gripper": {"open": 5.0, "closed": 0.0}},
         },
         source="<ws-contract-sequence>",
     )
@@ -419,6 +421,17 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
                 {"type": "manual_set", "robot": _ROBOT, "axis": "y_axis", "value": 4.0}
             )
             await group["conveyor"].set_target(ControlMode.DUTY, 0.3)
+
+            # 位置を控えた形も golden に残す (控えが空だと entries の欄が契約に載らない)。
+            # 鮮度は控えるあいだだけ生かす —— state の他の欄 (sensors.stale など) を動かさない
+            capture_mgr = fx.can_manager(_ROBOT)
+            group["gripper"].driver.mark_origin_confirmed()
+            set_last_feedback(capture_mgr, {"origin_sensor": time.time(), "gripper": time.time()})
+            await fx.command(
+                {"type": "position_capture", "robot": _ROBOT, "axis": "gripper", "name": "open"}
+            )
+            set_last_feedback(capture_mgr, {"origin_sensor": time.time()})
+
             await fx.publish_state()
             samples["state"] = await require_type(ws, "state")
 

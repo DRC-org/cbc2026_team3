@@ -10,6 +10,7 @@ import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
+import { PositionCapturePanel } from "@/components/operator/PositionCapturePanel";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
 import { SuctionPadPanel } from "@/components/operator/SuctionPadPanel";
 import { Button } from "@/components/ui/Button";
@@ -153,6 +154,17 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       />
     );
 
+  // 手で寄せながら控える流れなので手動の列に置く。位置定数を持たない台では出さない
+  const capturePanel =
+    !inManual || state.position_capture === undefined || state.position_capture === null ? null : (
+      <PositionCapturePanel
+        robotKey={robotKey}
+        capture={state.position_capture}
+        blockedReason={manualBlockedReason}
+        sendOrReport={sendOrReport}
+      />
+    );
+
   // 測定系はボタン 2 つだけ。箱で囲まず吸着パッドの上に小さく並べる
   const measurePanel = (
     <div className="flex shrink-0 flex-col gap-1.5">
@@ -214,7 +226,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
           {inManual ? (
-            <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
+            <div className="flex min-h-0 flex-col gap-2">
+              {manualPanel}
+              {capturePanel}
+            </div>
           ) : (
             <div className="flex min-h-0 flex-col gap-2">
               {measurePanel}
@@ -233,7 +248,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       {modeSwitch}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
         {inManual ? (
-          <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
+          <div className="flex min-h-0 flex-col gap-2">
+            {manualPanel}
+            {capturePanel}
+          </div>
         ) : (
           <div className="flex min-h-0 flex-col gap-2">
             <ActionPanel

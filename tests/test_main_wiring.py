@@ -1146,6 +1146,7 @@ class TestRobotContextReachesTheServer:
         "mode": "サーバーが持つ実行時状態 (起動時は必ず SEQUENCE から始まる)",
         "court_dependent_axes": "位置定数から導く (書き写すと宣言と食い違う)",
         "court_dependent_position_axes": "位置定数から導く (書き写すと宣言と食い違う)",
+        "captures": "位置定数とモータ群から導く (控えの正はサーバー 1 個)",
     }
 
     def _add_robot_call_arguments(self) -> set[str]:

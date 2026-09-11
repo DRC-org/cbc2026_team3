@@ -578,6 +578,47 @@ export function parseSuction(raw: unknown): SuctionState | Malformed | null | un
   return raw as unknown as SuctionState;
 }
 
+export interface PositionCaptureEntry {
+  axis: string;
+  name: string;
+  /** 控えた実測値。単位は unit で、位置定数 yaml に書く値そのもの */
+  value: number;
+  unit: string;
+  captured_at: EpochSeconds;
+}
+
+export interface PositionCaptureState {
+  /** 控えられる軸と、その軸が受ける位置名。**UI は配られたものだけを並べる** */
+  targets: Record<string, string[]>;
+  entries: PositionCaptureEntry[];
+  /** そのまま位置定数 yaml へ貼れる断片。1 つも控えていなければ null */
+  yaml: string | null;
+}
+
+function isPositionCaptureEntry(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  return (
+    typeof value.axis === "string" &&
+    typeof value.name === "string" &&
+    typeof value.value === "number" &&
+    typeof value.unit === "string" &&
+    typeof value.captured_at === "number"
+  );
+}
+
+// null は「このロボットが位置定数を持たない」。欠落 (undefined) や形の崩れとは区別する
+export function parsePositionCapture(
+  raw: unknown,
+): PositionCaptureState | Malformed | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (!isObject(raw) || !isObject(raw.targets) || !Array.isArray(raw.entries)) return MALFORMED;
+  if (!Object.values(raw.targets).every(isStringArray)) return MALFORMED;
+  if (!raw.entries.every(isPositionCaptureEntry)) return MALFORMED;
+  if (raw.yaml !== null && typeof raw.yaml !== "string") return MALFORMED;
+  return raw as unknown as PositionCaptureState;
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -596,6 +637,7 @@ export interface RobotState {
   steps?: SequenceStepInfo[];
   manual?: ManualState;
   suction?: SuctionState | Malformed | null;
+  position_capture?: PositionCaptureState | Malformed | null;
   /** この台がコート確定を要るか。**判定はサーバー。UI が軸名から導き直さない。** */
   court_required?: boolean;
 }
@@ -669,6 +711,8 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
       const suction = parseSuction(raw.suction);
       if (suction !== undefined) state.suction = suction;
+      const capture = parsePositionCapture(raw.position_capture);
+      if (capture !== undefined) state.position_capture = capture;
 
       return { type: "state", robot, state };
     }

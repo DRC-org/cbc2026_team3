@@ -22,6 +22,8 @@ import type {
   MotorHealth,
   MotorState,
   PhysicalStopWatch,
+  PositionCaptureEntry,
+  PositionCaptureState,
   PositionLoopState,
   RobotState,
   SafetyState,
@@ -86,6 +88,10 @@ const STATE_FIELDS_UI_READS = [
   "suction",
   "suction.pads",
   "suction.fill_from",
+  "position_capture",
+  "position_capture.targets",
+  "position_capture.entries",
+  "position_capture.yaml",
 ] as const;
 
 const EXPECTATIONS: Record<string, Expectation> = {
@@ -98,6 +104,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].manual).toEqual(sample.manual);
     expect(result.states[robot].sensors).toEqual(sample.sensors);
     expect(result.states[robot].suction).toEqual(sample.suction);
+    expect(result.states[robot].position_capture).toEqual(sample.position_capture);
   },
 
   state_with_last_error: (result, sample) => {
@@ -525,6 +532,20 @@ const SUCTION_PAD = fieldsOf<SuctionPad>({
   enabled: "ui",
 });
 
+const POSITION_CAPTURE = fieldsOf<PositionCaptureState>({
+  targets: "ui",
+  entries: "ui",
+  yaml: "ui",
+});
+
+const POSITION_CAPTURE_ENTRY = fieldsOf<PositionCaptureEntry>({
+  axis: "ui",
+  name: "ui",
+  value: "ui",
+  unit: "ui",
+  captured_at: "ui",
+});
+
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
     type: "parser",
@@ -542,12 +563,15 @@ const STATE_FIELDS: FieldSpec = {
     safety: "ui",
     manual: "ui",
     suction: "ui",
+    position_capture: "ui",
     court_required: "ui",
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
   }),
   ...nest("suction", SUCTION),
   ...nest("suction.pads[]", SUCTION_PAD),
+  ...nest("position_capture", POSITION_CAPTURE),
+  ...nest("position_capture.entries[]", POSITION_CAPTURE_ENTRY),
   ...nest("motors.*", MOTOR_STATE),
   ...nest("sensors.*", SENSOR_STATE),
   ...nest("health", HEALTH),

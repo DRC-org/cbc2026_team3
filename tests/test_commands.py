@@ -55,6 +55,7 @@ _EXPECTED_COMMANDS = {
     "manual_set",
     "manual_jog",
     "suction_pads_set",
+    "position_capture",
 }
 
 
@@ -137,7 +138,7 @@ class TestRegistryCoverage:
             else:
                 assert spec.court_deny_message is None
 
-    def test_commands_that_move_the_robot_need_a_court(self) -> None:
+    def test_court_gated_commands_are_listed(self) -> None:
         blocked = {name for name, spec in COMMANDS.items() if spec.blocked_without_court}
         assert blocked == {
             "sequence_start",
@@ -150,6 +151,8 @@ class TestRegistryCoverage:
             "switch_measure_start",
             "switch_distance_start",
             "motor_check_start",
+            # 機体は動かさないが、コート別 scale の軸は mm の値がコートで決まる
+            "position_capture",
         }
 
     def test_sequence_commands_are_blocked_while_reenergizing(self) -> None:
@@ -271,6 +274,8 @@ class TestEStopGate:
             "manual_set",
             "manual_jog",
             "reenergize_motors",
+            # 無励磁で自重落下した位置を「正しい位置」として控えさせない
+            "position_capture",
         }
 
     @pytest.mark.parametrize(

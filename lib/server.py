@@ -41,6 +41,7 @@ from lib.health import (
 from lib.manual import ManualControlError, ManualController, OperationMode
 from lib.match_state import ChecklistItem, Court, MatchState
 from lib.motion_guard import GuardViolation
+from lib.position_capture import PositionCaptureStore
 from lib.sequence.engine import Sequence
 from lib.sequence.positions import CourtUnresolvedError, PositionLookupError
 from lib.server_homing import HomingController, HomingSource
@@ -121,6 +122,8 @@ class RobotContext:
     mode: OperationMode = OperationMode.SEQUENCE
     #: 吸着に使うパッドの選択。持たないロボットは None (配信も null)
     suction: SuctionSelection | None = None
+    #: 実機で位置定数を決めるための控え帳。位置定数を持たないロボットは None
+    captures: PositionCaptureStore | None = None
     #: 指令の換算がコートで鏡になる軸。空ならこの台はコート未確定でも動かせる
     court_dependent_axes: tuple[str, ...] = ()
     #: コート別の値を持つ位置を抱える軸。位置名を引くときだけコートが要る
@@ -250,12 +253,37 @@ class RobotServer:
             target_refreshers=list(target_refreshers or []),
             manual=manual,
             suction=suction,
+            captures=self._make_capture_store(sequence, can_manager),
             court_dependent_axes=_court_dependent_axes(sequence),
             court_dependent_position_axes=_court_dependent_position_axes(sequence),
         )
         sequence.set_court(self.match.court)
         if manual is not None:
             manual.set_court(self.match.court)
+
+    def _make_capture_store(
+        self, sequence: Sequence, can_manager: CANManager
+    ) -> PositionCaptureStore | None:
+        try:
+            table = sequence.positions
+            motors = sequence.motors
+        except RuntimeError:
+            return None
+
+        def stale_motors(names: Collection[str]) -> tuple[str, ...]:
+            # 鮮度の判定は既存の単一情報源へ通す。時刻は 1 回だけ取る
+            freshness = FeedbackFreshness(
+                can_manager.last_feedback_at, timeout_ms=self._health.feedback_timeout_ms
+            )
+            now = freshness.now()
+            return tuple(name for name in names if freshness.is_stale(name, now))
+
+        return PositionCaptureStore(
+            table,
+            motors,
+            court=lambda: self.match.court,
+            stale_motors=stale_motors,
+        )
 
     def set_motor_check_sequence(self, sequence: Sequence) -> None:
         self._motor_check.set_sequence(sequence, court=self.match.court)
@@ -598,6 +626,24 @@ class RobotServer:
             return
         logger.info(
             "吸着パッド選択: robot=%s 使用=%s", robot_name, ", ".join(suction.enabled()) or "なし"
+        )
+
+    async def _cmd_position_capture(self, data: dict, requester: WSOrNone) -> None:
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            return
+        captures = self._robots[robot_name].captures
+        if captures is None:
+            await self._reject_command(
+                requester, "position_capture", f"'{robot_name}' は位置定数を持っていません"
+            )
+            return
+        reason = captures.capture(data.get("axis"), data.get("name"))
+        if reason is not None:
+            await self._reject_command(requester, "position_capture", reason)
+            return
+        logger.info(
+            "位置を控えた: robot=%s 軸=%s 位置=%s", robot_name, data.get("axis"), data.get("name")
         )
 
     async def _cmd_switch_measure_start(self, data: dict, requester: WSOrNone) -> None:
@@ -1561,6 +1607,9 @@ class RobotServer:
             "suction": ctx.suction.to_dict(court=self.match.court)
             if ctx.suction is not None
             else None,
+            # 実機で決める位置定数の控え帳。控えられる軸と位置名もサーバーが配る
+            # (UI が位置名を書き写すと、yaml へ足した名前が片方の画面に出ない)
+            "position_capture": ctx.captures.to_dict() if ctx.captures is not None else None,
             # この台がコート確定を要るか。UI が軸名から導き直さないようサーバーが配る
             "court_required": bool(ctx.court_dependent_axes),
         }

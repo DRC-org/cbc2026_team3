@@ -330,6 +330,27 @@
           "vel": 0.0
         }
       },
+      "position_capture": {
+        "entries": [
+          {
+            "axis": "gripper",
+            "captured_at": 1700000000.0,
+            "name": "open",
+            "unit": "deg",
+            "value": 5.0
+          }
+        ],
+        "targets": {
+          "gripper": [
+            "open",
+            "closed"
+          ],
+          "lift": [
+            "top"
+          ]
+        },
+        "yaml": "# <ws-contract-sequence> の positions: 配下へ貼る\n  gripper:\n    open: 5.0             # [deg]"
+      },
       "robot": "main_hand",
       "running": false,
       "safety": {
@@ -622,6 +643,27 @@
           "torque": 0.2,
           "vel": 0.0
         }
+      },
+      "position_capture": {
+        "entries": [
+          {
+            "axis": "gripper",
+            "captured_at": 1700000000.0,
+            "name": "open",
+            "unit": "deg",
+            "value": 5.0
+          }
+        ],
+        "targets": {
+          "gripper": [
+            "open",
+            "closed"
+          ],
+          "lift": [
+            "top"
+          ]
+        },
+        "yaml": "# <ws-contract-sequence> の positions: 配下へ貼る\n  gripper:\n    open: 5.0             # [deg]"
       },
       "robot": "main_hand",
       "running": false,
