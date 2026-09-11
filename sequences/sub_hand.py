@@ -12,6 +12,7 @@ VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valv
 TO_SHELF: dict[str, str] = {"sub_y_axis": "receive"}
 TO_CLEAR: dict[str, str] = {"sub_y_axis": "clear"}
 TO_RETRACTED: dict[str, str] = {"sub_y_axis": "retracted"}
+TO_HOME: dict[str, str] = {"sub_y_axis": "home"}
 
 DOWN_TO_PICK: dict[str, str] = {"sub_lift": "pick"}
 DOWN_TO_PLACE: dict[str, str] = {"sub_lift": "place"}
@@ -56,10 +57,11 @@ class SubHandSequence(Sequence):
     @step("初期位置へ移動")
     async def move_to_initial(self) -> None:
         await self.move_to(_all_valves("closed") | PUMP_RUN)
-        # 昇降を上げてから前後、後退しきってから回転の順に戻す。どの姿勢から
-        # 押されても干渉制約を踏まないのはこの順序だけである
-        await self.move_to(UP_TO_TOP)
-        await self.move_to(TO_RETRACTED)
+        # 昇降を寄せてから前後、後退しきってから回転の順に戻す。どの姿勢から
+        # 押されても干渉制約を踏まないのはこの順序だけである。
+        # 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ
+        await self.move_to(DOWN_TO_PICK)
+        await self.move_to(TO_HOME)
         await self.move_to(OPEN_PITCH)
         await self.move_to(OPEN_OFFSET)
         await self.move_to(RECEIVE_POSE)
@@ -338,4 +340,4 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ復帰")
     async def return_to_retracted(self) -> None:
-        await self.move_to(TO_RETRACTED)
+        await self.move_to(TO_HOME)

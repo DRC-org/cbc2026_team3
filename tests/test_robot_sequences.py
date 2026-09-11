@@ -489,8 +489,8 @@ class TestSubHandSteps:
 
         assert turns == 1 + 4 * 2
 
-    async def test_前後に動かす直前の昇降は_top_か棚から離した高さ(self) -> None:
-        # 棚からの後退だけは lifted (棚の上では top まで上げられない)。それ以外は top
+    async def test_前後に動かす直前の昇降は上げた高さのどれか(self) -> None:
+        # 棚からの後退は lifted、初期位置は零点確定と同じ pick、それ以外は top
         lift: str | None = None
         moves = 0
 
@@ -500,7 +500,7 @@ class TestSubHandSteps:
             if "sub_y_axis" not in targets:
                 continue
             moves += 1
-            assert lift in ("top", "lifted"), (
+            assert lift in ("top", "lifted", "pick"), (
                 f"ステップ {index}: sub_lift が '{lift}' のまま前後に動かしている"
             )
 
@@ -551,20 +551,20 @@ class TestSubHandSteps:
 
         assert calls == [
             {**dict.fromkeys(_VALVE_AXES, "closed"), "pump_vac": "run"},
-            {"sub_lift": "top"},
-            {"sub_y_axis": "retracted"},
+            {"sub_lift": "pick"},
+            {"sub_y_axis": "home"},
             {"sub_pitch": "open"},
             {"sub_offset": "open"},
             {"sub_rotate": "receive"},
         ]
 
-    async def test_復帰は収納位置へ戻すだけ(self) -> None:
+    async def test_復帰は初期位置へ戻すだけ(self) -> None:
         seq = SubHandSequence()
         last = len(seq.steps) - 1
 
         calls = [targets for index, targets in await _collect_moves(seq) if index == last]
 
-        assert calls == [{"sub_y_axis": "retracted"}]
+        assert calls == [{"sub_y_axis": "home"}]
 
     def test_default_suction_covers_every_valve(self) -> None:
         seq = SubHandSequence()
