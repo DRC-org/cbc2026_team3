@@ -221,6 +221,7 @@ def _make_origin_resolver(
     sync_monitors: list[SyncMonitor] | None = None,
     target_refreshers: list[TargetRefresher] | None = None,
     limit_monitors: list[LimitMonitor] | None = None,
+    motors: MotorGroup | None = None,
     is_estop_active: EStopChecker,
 ) -> Callable[[str], Callable[[], Awaitable[None]] | None]:
     """軸名 → その軸の原点を確定する操作。手段が無ければ None を返す解決器。
@@ -235,11 +236,16 @@ def _make_origin_resolver(
     確定した後に可動端監視へ付け替えを伝える (`LimitMonitor.origin_replaced`)。
     伝えないと、前の座標で覚えた接触位置が付け替え後の実測と比べられ、スイッチに
     載ったままの端が退避の向きで「当たった」と覚えられる。
+
+    控えてある目標も同じ時点で捨てる。**どの経路で確定しても捨てる** —— ドライバ経路は
+    `hold_target_refresh` が捨てるが、PC 側位置制御ループの軸はそこを通らないので、
+    旧座標の目標が `MotorHandle` に残る。
     """
     managers = can_managers or []
     monitors = sync_monitors or []
     refreshers = target_refreshers or []
     guards = limit_monitors or []
+    handles = motors if motors is not None else MotorGroup()
 
     def _resolve_via_driver(axis: str) -> Callable[[], Awaitable[None]] | None:
         names = table.axis(axis).motor_names
@@ -297,6 +303,11 @@ def _make_origin_resolver(
 
         async def run() -> None:
             await capture()
+            # 残した目標は旧座標を指す。可動端監視はそれを「今そこへ向かっている」と
+            # 読み、付け替えの跳びを移動として判定に掛ける
+            for name in table.axis(axis).motor_names:
+                if name in handles:
+                    handles[name].clear_target()
             for guard in guards:
                 guard.origin_replaced(axis)
 
@@ -416,6 +427,7 @@ def _wire_motor_check_sequence(
             sync_monitors=sync_monitors,
             target_refreshers=target_refreshers,
             limit_monitors=limit_monitors,
+            motors=motors,
             is_estop_active=is_estop_active,
         )
 

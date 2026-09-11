@@ -1849,6 +1849,33 @@ class TestOriginResolver:
         # 付け替えた後に伝える (伝えた時点で実測は新しい座標)
         assert guard.replaced == [("y_axis", pytest.approx(0.0))]
 
+    async def test_付け替えた軸の控えてある目標を捨てる(self) -> None:
+        """旧座標の目標が残ると、可動端監視がその差を「今そこへ向かっている」と読む。"""
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+        }
+        loop = self._loop(motors)
+        for driver in motors.values():
+            feed_m3508(driver, deg=0.0)
+            feed_m3508(driver, deg=30.0)
+        manager = _StubCANManager()
+        group = MotorGroup()
+        for name, driver in motors.items():
+            group.add(MotorHandle(name, driver, manager, target_sink=loop.target_sink(name)))
+        for name in motors:
+            await group[name].set_target(ControlMode.POSITION, 1.0)
+
+        capture = main._make_origin_resolver(
+            [loop], self._table(), motors=group, is_estop_active=lambda: False
+        )("y_axis")
+
+        assert capture is not None
+        await capture()
+
+        assert [group[name].target for name in motors] == [None, None]
+        assert [group[name].mode for name in motors] == [None, None]
+
     def test_位置制御ループにも_set_zero_にも載らない軸は手段が無い(self) -> None:
         mgr = CANManager(run_blocking=direct_runner())
         mgr.add_bus("can_generic", mock_bus())
@@ -2210,6 +2237,30 @@ class TestMotorCheckWiring:
             sensor_suspension=SensorSuspension(),
         )
         return server
+
+    def test_零点確定の解決器にモータの束を渡す(self) -> None:
+        """渡さないと、付け替えた軸に残った旧座標の目標を捨てる相手が居ない。"""
+        group = MotorGroup()
+        group.add(MotorHandle("y_axis_r", M3508Driver("y_axis_r", can_id=1), _StubCANManager()))
+
+        with patch.object(
+            main, "_make_origin_resolver", wraps=main._make_origin_resolver
+        ) as resolver:
+            main._wire_motor_check_sequence(
+                MagicMock(),
+                [group],
+                {"main_hand": self._table("main_hand_positions.yaml")},
+                loops=[],
+                can_managers=[],
+                sync_monitors=[],
+                limit_monitors=[],
+                target_refreshers=[],
+                feedback_timeout_ms=500.0,
+                is_estop_active=lambda: False,
+                sensor_suspension=SensorSuspension(),
+            )
+
+        assert "y_axis_r" in resolver.call_args.kwargs["motors"]
 
     def test_メインハンドだけの構成でも登録する(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
