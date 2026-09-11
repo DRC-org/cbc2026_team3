@@ -366,9 +366,30 @@ class Sequence:
         for move in pending:
             await move.handle.set_target_value(move.commands, pending_targets=planned)
 
-        results = await asyncio.gather(
-            *(move.handle.wait_reached(timeout=move.wait_s, expect_target=True) for move in pending)
-        )
+        # 停止要求と競わせる。ステップの境界だけで見ると、長い移動の途中で通常停止を
+        # 押しても着くまで止まらない (2026-09-11 実機で「止まるまで長い」)
+        waits = [
+            asyncio.ensure_future(
+                move.handle.wait_reached(timeout=move.wait_s, expect_target=True)
+            )
+            for move in pending
+        ]
+        stop_wait = asyncio.ensure_future(self._stop_event.wait())
+        try:
+            await asyncio.wait([*waits, stop_wait], return_when=asyncio.FIRST_COMPLETED)
+            if self._stop_event.is_set():
+                for wait in waits:
+                    wait.cancel()
+                # その場で止める。目標を残すと停止後もそこへ走り続ける
+                for move in pending:
+                    await move.handle.set_target_value(move.handle.observed_commands())
+                return
+            results = [await wait for wait in waits]
+        finally:
+            stop_wait.cancel()
+            for wait in waits:
+                if not wait.done():
+                    wait.cancel()
         # 終了時の状態ではなく回数で見る。接点がバウンドして触れて離れると、軸は
         # 触れた位置で止まったままなのに状態だけが戻る
         stopped: list[str] = []
