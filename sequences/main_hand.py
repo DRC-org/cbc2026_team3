@@ -53,7 +53,7 @@ class MainHandSequence(Sequence):
     @step("3 列目ワークをリリース", require_trigger=True)
     async def release_work_3(self) -> None:
         await self.move_to(RELEASE)
-        await self.move_to({"rotate": "after_place"})
+        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
 
     @step("共通ワークへ移動", require_trigger=True)
     async def move_to_work_shared(self) -> None:
@@ -74,6 +74,7 @@ class MainHandSequence(Sequence):
     @step("共通ワークをリリース", require_trigger=True)
     async def release_work_shared(self) -> None:
         await self.move_to(RELEASE)
+        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
 
     @step("1 列目ワークへ移動", require_trigger=True)
     async def move_to_work_1(self) -> None:
@@ -94,6 +95,7 @@ class MainHandSequence(Sequence):
     @step("1 列目ワークをリリース", require_trigger=True)
     async def release_work_1(self) -> None:
         await self.move_to(RELEASE)
+        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
 
     @step("2 列目ワークへ移動")
     async def move_to_work_2(self) -> None:
@@ -114,6 +116,7 @@ class MainHandSequence(Sequence):
     @step("2 列目ワークをリリース", require_trigger=True)
     async def release_work_2(self) -> None:
         await self.move_to(RELEASE)
+        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
 
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_2(self) -> None:
