@@ -127,6 +127,8 @@ class Dm3520Driver(MotorDriver):
         # 載っていないレジスタは「まだ読めていない」であって「一致した」ではない。
         self._reported_ranges: dict[int, float] = {}
         self._range_write_attempts: dict[int, int] = {}
+        #: 再初期化を跨いだ原点を戻してよいか。レンジの読み返しが付くまで保留する
+        self._origin_restorable = False
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -213,6 +215,7 @@ class Dm3520Driver(MotorDriver):
         if register not in {reg for reg, _, _ in self._expected_ranges()}:
             return
         self._reported_ranges[register] = struct.unpack("<f", bytes(data[4:8]))[0]
+        self._restore_origin_if_power_held()
 
     def matches_feedback(self, msg: can.Message) -> bool:
         if msg.is_extended_id or len(msg.data) != 8:
@@ -271,7 +274,12 @@ class Dm3520Driver(MotorDriver):
         """
         self._reported_ranges.clear()
         self._range_write_attempts.clear()
-        # 同じ電源断で内部の原点もその瞬間の姿勢へ作り直される
+        # 同じ電源断で内部の原点もその瞬間の姿勢へ作り直される。**ただし電源が落ちた
+        # とは限らない** —— ソフトの緊急停止でもここを通る。レンジはフラッシュへ焼いて
+        # いないので、電源が落ちていれば必ず出荷値へ戻る。読み返しが config のままなら
+        # 電源は生きていて内部の原点も生きている、と判る (`_restore_origin_if_power_held`)。
+        # 判るまでは未確定として扱う —— 「まだ判らない」を「生きている」へ倒さない
+        self._origin_restorable = self._origin_confirmed
         self._origin_confirmed = False
         return [
             (self.encode_disable(), 0.05),
@@ -344,6 +352,30 @@ class Dm3520Driver(MotorDriver):
             del self._reported_ranges[register]
             messages.append(self.encode_write_register_f32(register, expected))
         return messages
+
+    def _restore_origin_if_power_held(self) -> None:
+        """電源が落ちていなかったと判ったら、再初期化で落とした原点を戻す。
+
+        戻すのは**再初期化の直前に確定していた**ぶんだけで、確定していなかった原点が
+        ここで立つことはない。1 つでも食い違えば電源が落ちたとみて、以降は戻さない
+        (書き直して一致した後も戻さない —— 一致するのは PC が書いたからである)。
+        """
+        if not self._origin_restorable:
+            return
+        for register, _, expected in self._expected_ranges():
+            reported, matched = self._range_status(register, expected)
+            if reported is None:
+                return  # まだ読み返しが揃っていない
+            if not matched:
+                self._origin_restorable = False
+                return
+        self._origin_confirmed = True
+        self._origin_restorable = False
+        logger.info(
+            "モータ '%s' の原点を保ちました (固定小数点レンジが config のままで、"
+            "電源が落ちていないと判りました)",
+            self.name,
+        )
 
     def _range_status(self, register: int, expected: float) -> tuple[float | None, bool]:
         """(実機が申告した値, config と一致しているか)。一致の判定はここだけが持つ。"""

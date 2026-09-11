@@ -122,8 +122,6 @@ axes:
     timeout_s: 3.0
     tolerance: 2.0
 
-  # 後壁。timeout_s はファームのスルーレート (90deg/s) と対で、突き合わせは
-  # tests/test_servo_travel_budget.py が行う
   wall_r:
     unit: deg
     command_unit: deg
@@ -198,6 +196,13 @@ positions:
     above_box: -150.0    # 箱の縁の高さ [mm]。place の 10mm 上
     place: -140.0        # 箱へ下ろす高さ [mm]。top から 30mm 下げるだけ (2026-09-11)
 
+  # TODO(実機で確認): closed が initial と同値なので動作確認の 1 段目が指令量 0 になり、
+  # closed へ届かない故障を拾えない。後壁の実可動域が決まったら別々の値にすること。
+  wall_r:
+    initial: 90.0
+    closed: 90.0
+    open: 180.0
+
   # サーボ 3 軸は 2026-09-10 に実機で実測した。初期姿勢の角 (sub_rotate.receive /
   # sub_pitch.open / sub_offset.open) は firmware/servo/include/config.h の基板 #2 の
   # initialAngleDeg と対で、通電・瞬断からの再起動でその角へ駆動する
@@ -218,13 +223,6 @@ positions:
   sub_offset:
     open: 0.0            # 開いた持ち方 [deg]
     close: 170.0         # 閉じた持ち方 [deg]。2026-09-11 に 180 から変更
-
-  # TODO(実機で確認): closed が initial と同値なので動作確認の 1 段目が指令量 0 になり、
-  # closed へ届かない故障を拾えない。後壁の実可動域が決まったら別々の値にすること。
-  wall_r:
-    initial: 90.0
-    closed: 90.0
-    open: 180.0
 
   # 三方弁なので閉じた側が大気開放になる。ワークの解放は閉じるだけで済み、
   # 排気の駆動源を別に持たない。

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from lib.sequence.engine import Sequence, step
 
-# 後壁 (wall_r) はサブハンドの管轄へ移した (config/sub_hand.yaml)
 HOME: dict[str, str] = {
     "y_axis": "home",
     "rotate": "home",

@@ -411,6 +411,52 @@ class TestStartupSequence:
 
         assert drv.origin_confirmed() is False
 
+    def test_レンジが_config_のままなら再初期化を跨いでも零点確定は残る(self) -> None:
+        """レンジはフラッシュへ焼いていないので、電源が落ちれば必ず出荷値へ戻る。
+
+        読み返しが config のままなら電源は落ちておらず、内部の原点も生きている。
+        ソフトの緊急停止のたびに零点合わせをやり直さずに済む。
+        """
+        drv = _driver()
+        drv.mark_origin_confirmed()
+
+        drv.reinitialization_steps()
+        assert drv.origin_confirmed() is False, "読み返しが揃うまでは未確定でなければならない"
+
+        _confirm_ranges(drv)
+
+        assert drv.origin_confirmed() is True
+
+    def test_レンジが出荷値へ戻っていたら零点確定は戻らない(self) -> None:
+        """電源が落ちた証拠。ここを戻すと、作り直された原点のまま位置名で動かす。"""
+        drv = _driver()
+        drv.mark_origin_confirmed()
+        drv.reinitialization_steps()
+
+        _confirm_ranges(drv, p_max=12.5)
+
+        assert drv.origin_confirmed() is False
+
+    def test_書き直して一致しても零点確定は戻らない(self) -> None:
+        """一致するのは PC が書いたからで、電源が落ちていなかったからではない。"""
+        drv = _driver()
+        drv.mark_origin_confirmed()
+        drv.reinitialization_steps()
+        _confirm_ranges(drv, p_max=12.5)
+
+        drv.configuration_probe_messages()  # 食い違ったぶんを書き直す
+        _confirm_ranges(drv)
+
+        assert drv.origin_confirmed() is False
+
+    def test_確定していなかった原点がレンジの一致で立つことはない(self) -> None:
+        drv = _driver()
+
+        drv.reinitialization_steps()
+        _confirm_ranges(drv)
+
+        assert drv.origin_confirmed() is False
+
     def test_起動時の_SET_ZERO_は零点確定ではない(self) -> None:
         drv = _driver(set_zero_on_start=True)
 

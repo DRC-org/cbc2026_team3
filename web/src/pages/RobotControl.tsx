@@ -172,12 +172,15 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       />
     );
 
-  // 測定系はボタン 2 つだけ。箱で囲まず吸着パッドの上に小さく並べる
-  const measurePanel = (
+  // 測定系はボタン 2 つだけ。箱で囲まず吸着パッドの上に小さく並べる。
+  // 試合中も零点合わせの在り処は画面から読めるようにする (押せないときは理由が出る)
+  const measurePanel = (withSwitchDistance: boolean) => (
     <div className="flex shrink-0 flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <HomingButtons robot={robotKey} />
-        {hasSwitchMeasure(robotKey) ? <SwitchDistanceButton robot={robotKey} /> : null}
+        {withSwitchDistance && hasSwitchMeasure(robotKey) ? (
+          <SwitchDistanceButton robot={robotKey} />
+        ) : null}
       </div>
       <HomingPanel robot={robotKey} />
     </div>
@@ -240,7 +243,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             </div>
           ) : (
             <div className="flex min-h-0 flex-col gap-2">
-              {measurePanel}
+              {measurePanel(true)}
               {suctionPanel}
               {openSubsystemPanel}
             </div>
@@ -286,6 +289,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               blockedReason={nudgeBlockedReason}
               sendOrReport={sendOrReport}
             />
+
+            {measurePanel(false)}
 
             {stepPanel}
           </div>

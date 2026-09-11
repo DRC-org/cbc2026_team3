@@ -26,6 +26,7 @@ LIFT_OFF_SHELF: dict[str, str] = {"sub_lift": "lifted"}
 
 CARRY_POSE: dict[str, str] = {"sub_rotate": "carry"}
 RECEIVE_POSE: dict[str, str] = {"sub_rotate": "receive"}
+WALL_R_INITIAL: dict[str, str] = {"wall_r": "initial"}
 
 # ピッチとオフセットは同時に動かさない。閉じるとき オフセット -> ピッチ、
 # 開くとき ピッチ -> オフセット。
@@ -35,9 +36,6 @@ OPEN_PITCH: dict[str, str] = {"sub_pitch": "open"}
 OPEN_OFFSET: dict[str, str] = {"sub_offset": "open"}
 
 PUMP_RUN: dict[str, str] = {"pump_vac": "run"}
-
-# 後壁。2026-09-11 にメインハンドから管轄を移した
-WALL_R_INITIAL: dict[str, str] = {"wall_r": "initial"}
 
 
 def _all_valves(state: str) -> dict[str, str]:
@@ -76,7 +74,7 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ移動")
     async def move_to_initial(self) -> None:
-        await self.move_to(_all_valves("closed") | PUMP_RUN | WALL_R_INITIAL)
+        await self.move_to(_all_valves("closed") | PUMP_RUN)
         # 昇降を寄せてから前後、後退しきってから回転の順に戻す。どの姿勢から
         # 押されても干渉制約を踏まないのはこの順序だけである。
         # 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ
@@ -85,6 +83,7 @@ class SubHandSequence(Sequence):
         await self.move_to(OPEN_PITCH)
         await self.move_to(OPEN_OFFSET)
         await self.move_to(RECEIVE_POSE)
+        await self.move_to(WALL_R_INITIAL)
 
     @step("1 個目: 棚へ寄せる", require_trigger=True)
     async def work_1_to_shelf(self) -> None:

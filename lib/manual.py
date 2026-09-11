@@ -111,7 +111,7 @@ class ManualController:
                     "unit": spec.unit,
                     "command_mode": spec.command_mode.value,
                     "value": self._safe_observed_value(spec),
-                    "target": self._targets.get(name),
+                    "target": self._axis_target(spec),
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
                     "manual_always": spec.manual_always,
                     "deviation": self._safe_deviation(spec),
@@ -161,6 +161,29 @@ class ManualController:
             pressed_toward=self._motors.pressed_toward,
         )
         await handle.set_target_value(commands)
+
+    def _axis_target(self, spec: AxisSpec) -> float | None:
+        """**実際にモータへ送った目標**を軸の値へ戻す。手動のぶんだけ配ってはならない。
+
+        手動目標 (`_targets`) だけを配ると、シーケンス・零点確定・吸着ステップで
+        動かした結果が画面から消える —— 弁を開いて吸っているのに UI では閉じたまま、
+        サーボを動かしたのに無かったことになる (2026-09-11 実機)。基板は指令を保持
+        しているので、画面だけが実態とずれる。
+
+        ジョグの起点は `_targets` のままにする (フィードバックから取ると追従中の
+        連打が吸われる。`docs/invariants.md` §4)。
+        """
+        commands: dict[str, float] = {}
+        try:
+            for name in spec.motor_names:
+                target = getattr(self._motors, name).target
+                if target is None:
+                    return None
+                commands[name] = target
+            return spec.to_value(commands)
+        except (AttributeError, KeyError, ValueError):
+            # 登録されていないモータの軸 (机上の構成)。測れないものは null で配る
+            return None
 
     def _feedback_positions(self, spec: AxisSpec) -> dict[str, float]:
         return {
