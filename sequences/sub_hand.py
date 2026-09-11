@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from lib.sequence.engine import Sequence, step
 from lib.suction import SuctionSelection, SuctionSelectionError
+
+logger = logging.getLogger(__name__)
 
 VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
 
@@ -15,6 +19,7 @@ TO_RETRACTED: dict[str, str] = {"sub_y_axis": "retracted"}
 TO_HOME: dict[str, str] = {"sub_y_axis": "home"}
 
 DOWN_TO_PICK: dict[str, str] = {"sub_lift": "pick"}
+DOWN_TO_ABOVE_BOX: dict[str, str] = {"sub_lift": "above_box"}
 DOWN_TO_PLACE: dict[str, str] = {"sub_lift": "place"}
 UP_TO_TOP: dict[str, str] = {"sub_lift": "top"}
 LIFT_OFF_SHELF: dict[str, str] = {"sub_lift": "lifted"}
@@ -49,6 +54,18 @@ class SubHandSequence(Sequence):
             )
         # 選ばれていない弁は閉じ直す。開いたままの弁が 1 つあると真空が抜ける
         await self.move_to(_all_valves("closed") | dict.fromkeys(enabled, "open"))
+
+    def _log_placed_position(self) -> None:
+        """下ろした前後の位置を残す。あとから位置定数を詰めるのに使う。"""
+        try:
+            reading = self.motors.axis_state("sub_y_axis")
+        except RuntimeError:
+            # 機体に繋がっていない (机上のステップ検査など)。ログだけなので黙って抜ける
+            return
+        if reading.value is None:
+            logger.info("[%s] 箱へ下ろした前後の位置: 読めていません", self.name)
+            return
+        logger.info("[%s] 箱へ下ろした前後の位置: %.2fmm", self.name, reading.value)
 
     async def _release(self) -> None:
         # 三方弁は閉じた側がパッドを大気開放するので、閉じるだけで残圧が抜けてワークが離れる
@@ -106,9 +123,14 @@ class SubHandSequence(Sequence):
     async def work_1_close_pitch(self) -> None:
         await self.move_to(CLOSE_PITCH)
 
+    @step("1 個目: 箱の縁の高さへ下降", require_trigger=True)
+    async def work_1_down_to_above_box(self) -> None:
+        await self.move_to(DOWN_TO_ABOVE_BOX)
+
     @step("1 個目: 箱へ下降", require_trigger=True)
     async def work_1_down_to_place(self) -> None:
         await self.move_to(DOWN_TO_PLACE)
+        self._log_placed_position()
 
     @step("1 個目: ワーク解放 (配置)", require_trigger=True)
     async def work_1_release(self) -> None:
@@ -176,9 +198,14 @@ class SubHandSequence(Sequence):
     async def work_2_close_pitch(self) -> None:
         await self.move_to(CLOSE_PITCH)
 
+    @step("2 個目: 箱の縁の高さへ下降", require_trigger=True)
+    async def work_2_down_to_above_box(self) -> None:
+        await self.move_to(DOWN_TO_ABOVE_BOX)
+
     @step("2 個目: 箱へ下降", require_trigger=True)
     async def work_2_down_to_place(self) -> None:
         await self.move_to(DOWN_TO_PLACE)
+        self._log_placed_position()
 
     @step("2 個目: ワーク解放 (配置)", require_trigger=True)
     async def work_2_release(self) -> None:
@@ -246,9 +273,14 @@ class SubHandSequence(Sequence):
     async def work_3_close_pitch(self) -> None:
         await self.move_to(CLOSE_PITCH)
 
+    @step("3 個目: 箱の縁の高さへ下降", require_trigger=True)
+    async def work_3_down_to_above_box(self) -> None:
+        await self.move_to(DOWN_TO_ABOVE_BOX)
+
     @step("3 個目: 箱へ下降", require_trigger=True)
     async def work_3_down_to_place(self) -> None:
         await self.move_to(DOWN_TO_PLACE)
+        self._log_placed_position()
 
     @step("3 個目: ワーク解放 (配置)", require_trigger=True)
     async def work_3_release(self) -> None:
@@ -316,9 +348,14 @@ class SubHandSequence(Sequence):
     async def work_4_close_pitch(self) -> None:
         await self.move_to(CLOSE_PITCH)
 
+    @step("4 個目: 箱の縁の高さへ下降", require_trigger=True)
+    async def work_4_down_to_above_box(self) -> None:
+        await self.move_to(DOWN_TO_ABOVE_BOX)
+
     @step("4 個目: 箱へ下降", require_trigger=True)
     async def work_4_down_to_place(self) -> None:
         await self.move_to(DOWN_TO_PLACE)
+        self._log_placed_position()
 
     @step("4 個目: ワーク解放 (配置)", require_trigger=True)
     async def work_4_release(self) -> None:

@@ -765,23 +765,36 @@ class RobotServer:
         # モード判定は軸の解決より後。manual_always の軸はシーケンス制御中でも通すので、
         # どちらの軸かが分かるまで可否を決められない
         if ctx.mode is not OperationMode.MANUAL and not await self._allow_manual_in_sequence(
-            ctx.manual, axis, command, requester
+            ctx, axis, command, requester
         ):
             return None
         return ctx.manual, axis
 
     async def _allow_manual_in_sequence(
         self,
-        manual: ManualController,
+        ctx: RobotContext,
         axis: str,
         command: str,
         requester: WSOrNone,
     ) -> bool:
+        manual = ctx.manual
+        assert manual is not None
         try:
             always_manual = manual.is_always_manual(axis)
         except ManualControlError as exc:
             await self._reject_command(requester, command, str(exc))
             return False
+
+        # トリガー待ちで止まっているあいだは wait_reached が走っていないので、位置指令の
+        # 軸へ書いても到達判定を壊さない (箱の上で前後を詰める。2026-09-11 実機の求め)。
+        # 次のステップは位置名で書き直すので、詰めた値が後の段へ持ち越されることもない
+        if not always_manual and ctx.sequence.waiting_trigger:
+            try:
+                if manual.has_range(axis):
+                    return True
+            except ManualControlError as exc:
+                await self._reject_command(requester, command, str(exc))
+                return False
 
         if not always_manual:
             allowed = ", ".join(manual.always_manual_axes()) or "(なし)"
