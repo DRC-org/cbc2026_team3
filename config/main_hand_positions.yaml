@@ -157,13 +157,6 @@ positions:
     work_shared: 550.0
 
   rotate:
-    # 0.0 は零点確定のスイッチの動作点そのもの。tolerance 2.0deg の到達帯が
-    # ON 区間 (実測 約 2deg) へ食い込むと、可動端インターロック
-    # (guard.limits.minus: rotate_origin_sensor) がその内側からの指令を拒む。
-    # y_axis.home と rotate.home が両方 0.0 だと HOME 姿勢そのものが干渉姿勢になるので、
-    # 離すのは rotate の側だけ (docs/invariants.md §4、tests/test_main_positions_config.py
-    # の TestShippedRotateHome が固定)。
-    # TODO(実機で確認): 干渉しない角の実測はまだ無い (docs/mechanism_handoff.md §1)
     home: 5.0
     work_3_after_1: 165.0
     work_3_after_2: 155.0
