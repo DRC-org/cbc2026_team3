@@ -176,6 +176,8 @@ class PositionCaptureStore:
         """全モータの実測から軸の値を出す。**欠けた 1 台を黙って外した平均は作らない**
         (`origin_confirmed` が全員そろっていることを先に確かめている)。"""
         try:
+            # 換算 (scale) だけがコート別で、mm の座標系は両コート共通。コートが
+            # 決まるまでは生角を値へ直せないので、控える値も出せない
             resolved = spec.for_court(self._court())
             observed = {
                 motor: self._motors[motor].driver.feedback_position() for motor in spec.motor_names

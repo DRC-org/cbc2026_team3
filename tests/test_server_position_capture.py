@@ -25,7 +25,8 @@ _MOTORS = ("sub_lift", "sub_y_axis_r", "sub_y_axis_l", "pump_vac")
 
 _POSITIONS = {
     "axes": {
-        # コートで mm↔rad の符号が鏡になる軸 (実機の sub_lift と同じ形)
+        # mm↔rad の換算だけがコートで鏡になる軸 (実機の sub_lift と同じ形)。
+        # mm の座標系は両コート共通で、控える値そのものはコートで変わらない
         "sub_lift": {
             "unit": "mm",
             "command_unit": "rad",
@@ -126,7 +127,8 @@ class TestCapturedValue:
 
         await _capture(fx, "sub_lift", "top")
 
-        # 赤は scale が -2.0。青と同じ実測でも mm は符号が反転する
+        # 赤は scale が -2.0。コートで変わるのは換算だけなので、同じ生角の実測からは
+        # 逆符号の mm が出る (どちらのコートでも同じ姿勢なら同じ mm になる)
         assert _entries(fx)[0]["value"] == pytest.approx(120.0)
 
     async def test_左右ペアは両方の実測から軸の値を出す(self) -> None:

@@ -151,7 +151,8 @@ class TestRegistryCoverage:
             "switch_measure_start",
             "switch_distance_start",
             "motor_check_start",
-            # 機体は動かさないが、コート別 scale の軸は mm の値がコートで決まる
+            # 機体は動かさないが、生角を mm へ直す換算 (scale) がコート別。
+            # 位置定数の mm は両コート共通で、換算そのものがコート未確定では決まらない
             "position_capture",
         }
 
