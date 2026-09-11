@@ -191,7 +191,7 @@ positions:
   # receive で 270deg・carry で 180deg になる (どちらも r + l = 270 で対になる)。
   sub_rotate:
     receive: 0.0         # 受け取り姿勢 [deg]
-    carry: 90.0          # 搬送姿勢 [deg]
+    carry: 85.0          # 搬送姿勢 [deg]。2026-09-11 に receive 側へ 5deg 戻した
 
   # 実機で確認済み (2026-09-10)。軸の値は右の生角で、左は offset 270.0 により
   # open で 10deg・close で 190deg になる (どちらも r + l = 270 で対になる)。
