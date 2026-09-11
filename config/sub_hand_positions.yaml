@@ -21,7 +21,8 @@ axes:
         minus: sub_lift_t_limit_sensor
       # 桁の違う目標だけを止める。manual の全幅より広く取る
       max_step: 300.0
-      stall_torque: 2.0
+      # 動き出しで 2.14Nm まで立つ (2026-09-11 距離測定)。前後と同じ 4.0 に
+      stall_torque: 4.0
     unit: mm
     command_unit: rad
     scale: { blue: 1.0668451, red: -1.0668451 }
@@ -75,8 +76,8 @@ axes:
     timeout_s: 200.0
     tolerance: 1.0
     manual:
-      # 後端スイッチの実測 -447.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
-      min: -440.0
+      # スイッチ間の実測 351.3mm (2026-09-11 距離測定) の手前
+      min: -345.0
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
@@ -154,7 +155,7 @@ positions:
   sub_y_axis:
     # 0.0 は前端スイッチの動作点そのもの。tolerance 1.0mm (移動許容 0.3mm) と
     # ON 区間 2mm の外へ離す。どれも manual の -440.0〜2.0mm の内側に取る。
-    retracted: -430.0    # 収納位置 [mm]。一番後ろ
+    retracted: -340.0    # 収納位置 [mm]。一番後ろ (後端スイッチ -351.3 の手前。2026-09-11)
     # sub_rotate を回してよいのはここだけ。前端スイッチから 150mm 以上離すこと
     # (機構が回転しながら前端側の構造物に当たる)。
     clear: -200.0        # 回転可能位置 [mm]
