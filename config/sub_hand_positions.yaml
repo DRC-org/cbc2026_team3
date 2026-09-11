@@ -122,6 +122,13 @@ axes:
     timeout_s: 3.0
     tolerance: 2.0
 
+  wall_r:
+    unit: deg
+    command_unit: deg
+    scale: 1.0
+    offset: 0.0
+    timeout_s: 2.0
+
   # settle_s は弁の応答時間 + 吸着が効くまでの時間。2026-09-11 に実機で 3 秒へ
   # (0.2 だと吸い切る前に持ち上げてワークを落とす)。
   # manual_always: 吸着が外れないときに、弁 1 個のためシーケンスの制御権を奪わずに済む
@@ -188,6 +195,13 @@ positions:
     # 箱へ下ろす手前で一度止まる高さ。ワークが箱に入らないところで前後を詰める
     above_box: -150.0    # 箱の縁の高さ [mm]。place の 10mm 上
     place: -140.0        # 箱へ下ろす高さ [mm]。top から 30mm 下げるだけ (2026-09-11)
+
+  # TODO(実機で確認): closed が initial と同値なので動作確認の 1 段目が指令量 0 になり、
+  # closed へ届かない故障を拾えない。後壁の実可動域が決まったら別々の値にすること。
+  wall_r:
+    initial: 90.0
+    closed: 90.0
+    open: 180.0
 
   # サーボ 3 軸は 2026-09-10 に実機で実測した。初期姿勢の角 (sub_rotate.receive /
   # sub_pitch.open / sub_offset.open) は firmware/servo/include/config.h の基板 #2 の
