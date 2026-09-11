@@ -486,6 +486,27 @@ class TestPassThrough:
         await rig.monitor.step()
         rig.sent.clear()
 
+    async def test_接触の周期に指令だけ離脱へ反転していても向きを取り違えない(self) -> None:
+        """2026-09-11 実機 `sub_lift`、零点確定の粗探索。
+
+        粗探索は 10ms ごとに目標を先行させて進み、接触を掴んだその場で離脱へ反転する。
+        50ms の監視が初めて ON を読むときには指令だけが - を向いていて、機構はまだ + へ
+        動いている。指令の向きで覚えると当てに行った向きの逆を記録し、その端から離れる
+        まで探索の向きが塞がる (実機では 2 回とも同じところで失敗した)。
+        """
+        rig = _rig(rear_switch=False, front_switch=False)
+        rig.set_observed(-1.4)
+        await rig.command(-0.9)
+        await rig.monitor.step()
+
+        # 粗探索が接触を掴み、監視の次の周期までに離脱 (-) を指令し終えている
+        rig.set_observed(-0.7)
+        rig.sensors["front_switch"] = True
+        await rig.command(-10.7)
+        await rig.monitor.step()
+
+        assert rig.monitor.pressed_toward("front_switch") is None
+
     async def test_原点の付け替えを跨いでも退避は通る(self) -> None:
         """零点確定の直後 (2026-09-10 実機: `sub_lift`、4 回目の誤爆)。
 

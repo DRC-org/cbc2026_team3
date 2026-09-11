@@ -139,6 +139,7 @@ class LimitMonitor(PeriodicTask):
         self._last_active: dict[str, bool] = {}
         self._pressed_toward: dict[str, int] = {}
         self._last_on: dict[str, _Contact] = {}
+        self._last_position: dict[str, float] = {}
         # 読み手は自分で基準値を控える (カウンタは読んでも減らないので、同じセンサを
         # 読む零点確定のぶんを消さない)。周期ごとに 1 度だけ進めるので二重に数えない
         self._contact_baseline: dict[str, int] = {}
@@ -177,6 +178,8 @@ class LimitMonitor(PeriodicTask):
         limits = self._positions.axis(axis).guard.limits  # type: ignore[union-attr]
         names = () if limits is None else (*limits.plus, *limits.minus)
         self._stopped.pop(axis, None)
+        # 座標系が変わるので、跨いだ差を「動いた量」として読ませない
+        self._last_position.pop(axis, None)
         resolved = self._resolve(axis)
         position = (
             None if resolved is None else resolved[0].to_value(resolved[1].observed_commands())
@@ -290,11 +293,22 @@ class LimitMonitor(PeriodicTask):
         から戻ってきた OFF→ON だけ。離れていく途中の OFF→ON は端の作動点に座った接点のゆらぎ
         や離れ際のバウンドで、新しい接触ではない —— 覚えると退避の向きを「当たった向き」と
         取り違える。OFF に戻った端は、軸がそこから許容差以上離れるまで覚えたままにする。
+
+        **指令が実測と逆を向いている周期は覚えない。** 零点確定の粗探索は 10ms ごとに
+        目標を先行させて進み、接触を掴んだその場で離脱へ反転する。50ms の監視が初めて
+        ON を読むときには指令だけが反転していて、機構はまだ当たった向きへ動いている ——
+        指令の向きで覚えると、当てに行った向きの逆を「当たった向き」として記録し、
+        以後その端から離れるまで探索の向きが塞がる。
         """
         limits = None if spec.guard is None else spec.guard.limits
         names = () if limits is None else (*limits.plus, *limits.minus)
         # 到達許容差の内側は「同じ位置」。持たない軸は離れたかどうかを問わない
         hysteresis = spec.tolerance or 0.0
+        previous = self._last_position.get(spec.name)
+        self._last_position[spec.name] = position
+        moved = 0.0 if previous is None else position - previous
+        # 実測のゆらぎで向きが反転しない幅に留める
+        reversed_command = abs(moved) > hysteresis * 0.1 and (moved > 0.0) != (delta > 0.0)
         for name in names:
             state = self._sensor_state(name)
             if state is None:
@@ -305,7 +319,12 @@ class LimitMonitor(PeriodicTask):
             if state:
                 direction = 1 if delta > 0.0 else -1
                 returned = contact is None or contact.returning(direction, hysteresis)
-                if returned and self._last_active.get(name) is False and delta != 0.0:
+                if (
+                    returned
+                    and not reversed_command
+                    and self._last_active.get(name) is False
+                    and delta != 0.0
+                ):
                     self._pressed_toward[name] = direction
                 self._last_on[name] = _Contact(position, position, position)
             elif contact is None or contact.departed(hysteresis):
