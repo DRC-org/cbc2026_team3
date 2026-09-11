@@ -132,8 +132,9 @@ class TestSubLift:
         # + が下なので「下」は値が大きい側。符号を取り違えると移動高さより上へ逃げる
         assert _value(table, "sub_lift", "pick") >= _value(table, "sub_lift", "top")
 
-    def test_place_は_pick_より下にある(self, table: PositionTable) -> None:
-        assert _value(table, "sub_lift", "place") > _value(table, "sub_lift", "pick")
+    def test_箱へ下ろす手前は箱へ下ろす高さより上にある(self, table: PositionTable) -> None:
+        # + が下。ここが逆だと、縁で止めるつもりの段が先に箱の中まで下りる
+        assert _value(table, "sub_lift", "above_box") < _value(table, "sub_lift", "place")
 
 
 class TestServoAxes:
