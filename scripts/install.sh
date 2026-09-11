@@ -132,7 +132,7 @@ done
 cat <<EOS
 
 次の手順:
-  scripts/deploy.sh              # 依存導入 + Web UI ビルド + サービス再起動
+  scripts/deploy.sh              # git pull + 依存導入 + Web UI ビルド + 全サービス再起動
   sudo systemctl start ${CONTROL_SERVICE_NAME}    # 制御プログラム起動
   journalctl -u ${CONTROL_SERVICE_NAME} -f        # ログ追跡
 EOS

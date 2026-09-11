@@ -98,17 +98,25 @@ CAN バス 'can_generic' は別のプロセスが掴んでいます (PID 55571: 
 
 ```bash
 sudo scripts/install.sh           # 3 unit を配置（cbc-control だけ enable しない）
-scripts/deploy.sh                 # 依存導入 + Web UI ビルド + サービス再起動
-scripts/deploy.sh --no-install    # 会場用。依存導入を飛ばしてビルドと再起動だけ
+scripts/deploy.sh                 # git pull + 依存導入 + Web UI ビルド + 全サービス再起動
+scripts/deploy.sh --no-pull       # pull だけ飛ばす
+scripts/deploy.sh --no-install    # 会場用。pull と依存導入を飛ばしてビルドと再起動だけ
 sudo systemctl start cbc-control  # 制御プログラム + Web UI 起動（8080）
 journalctl -u cbc-control -f      # ログ追跡
 journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
 ```
 
-**会場では `--no-install` を使う。** 素の `deploy.sh` は `uv sync --frozen` と
+**会場では `--no-install` を使う。** 素の `deploy.sh` は `git pull --ff-only` と `uv sync --frozen` と
 `pnpm install --frozen-lockfile` を無条件に走らせ、ロックが満たされていなければ依存解決へ降りる
-——「UI を 1 行直して反映」しようとした瞬間にネットワークで止まる。**会場入りの前に一度
+——「UI を 1 行直して反映」しようとした瞬間にネットワークで止まる。`--no-install` は pull も飛ばし、
+ネットワークに一切触れない。**会場入りの前に一度
 ネットワークのある場所で素の `deploy.sh` を回してキャッシュを温めておくこと。**
+
+`deploy.sh` は `cbc-can` / `cbc-can-watchdog` / `cbc-control` の 3 unit を reset-failed したうえで
+止まっていても起動し直す。**CAN は全バス down/up し、Web UI の接続は全部切れる**ので、操作中の人が
+いないときに回す。本体チェックアウト（`cbc-control` の `WorkingDirectory`）以外から実行したとき、
+`cbc-control` 以外のプロセス（手で `nohup` した `main.py` など）が 8080 を握っているときは
+`exit 1` で拒否する（後者は PID を表示するだけで kill はしない）。
 
 **`cbc-control` は `StartLimitBurst=3` / `RestartSec=2` なので、約 6 秒で `failed` に固定され、
 以後 `systemctl start` すら通らなくなる。** CANable が 1 本欠けていると `main.py` は 1 秒未満で
@@ -118,8 +126,8 @@ journalctl -u cbc-can-watchdog -f # bus-off 復旧の記録
 
 制御プログラムと Web Controller は同一プロセス（`lib/server.py` が `web/dist/` を SPA 配信する）。
 **`cbc-control.service` は enable しない** — 電源投入だけで機体が通電・待機状態にならないよう、
-起動タイミングは操縦者が握る。`cbc-can.service` と `cbc-can-watchdog.service` は enable する
-（どちらも機体を動かさない）。
+起動タイミングは操縦者が握る（`deploy.sh` が起動するのは操縦者が明示的に回したときだけ）。
+`cbc-can.service` と `cbc-can-watchdog.service` は enable する（どちらも機体を動かさない）。
 
 ### スクリプトの土台
 
