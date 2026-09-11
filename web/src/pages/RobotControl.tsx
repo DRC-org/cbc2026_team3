@@ -85,6 +85,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         ? "コート未設定"
         : null;
 
+  // 位置の微調整はトリガー待ちのあいだだけ通る (サーバーの _allow_manual_in_sequence と対)
+  const nudgeBlockedReason =
+    manualBlockedReason ?? (state?.waiting_trigger === true ? null : "トリガー待ちのときだけ");
+
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
   const requestStart = () => {
     if (needsRestartConfirm) setRestartConfirmOpen(true);
@@ -274,15 +278,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               sendOrReport={sendOrReport}
             />
 
-            {/* トリガー待ちのあいだだけ位置を詰められる (サーバーも同じ条件で通す) */}
-            {state.waiting_trigger === true ? (
-              <NudgePanel
-                robotKey={robotKey}
-                manual={manual}
-                blockedReason={manualBlockedReason}
-                sendOrReport={sendOrReport}
-              />
-            ) : null}
+            {/* 常に出す。押せないときは理由を出す —— 隠すと在り処が画面から読めない */}
+            <NudgePanel
+              robotKey={robotKey}
+              manual={manual}
+              blockedReason={nudgeBlockedReason}
+              sendOrReport={sendOrReport}
+            />
 
             {stepPanel}
           </div>
