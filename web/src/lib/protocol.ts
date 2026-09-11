@@ -123,16 +123,38 @@ export interface HomingAxisResult {
   error: string | null;
 }
 
-export interface HomingSnapshot {
-  available: boolean;
+export interface HomingRobotSnapshot {
   blocked_reason: string | null;
   running: boolean;
-  robot: string | null;
   axes: string[] | Malformed;
   current_axis: string | null;
   results: HomingAxisResult[] | Malformed;
   error: string | null;
+}
+
+/** ロボット間は並行して走る。running はどれか 1 機でも走っていれば true */
+export interface HomingSnapshot {
+  available: boolean;
+  running: boolean;
   targets: Record<string, string[]> | Malformed;
+  robots: Record<string, HomingRobotSnapshot> | Malformed;
+}
+
+function parseHomingRobots(raw: unknown): Record<string, HomingRobotSnapshot> | Malformed {
+  if (!isObject(raw)) return MALFORMED;
+  const robots: Record<string, HomingRobotSnapshot> = {};
+  for (const [robot, entry] of Object.entries(raw)) {
+    if (!isObject(entry)) return MALFORMED;
+    robots[robot] = {
+      blocked_reason: typeof entry.blocked_reason === "string" ? entry.blocked_reason : null,
+      running: entry.running === true,
+      axes: parseAxisNames(entry.axes),
+      current_axis: typeof entry.current_axis === "string" ? entry.current_axis : null,
+      results: parseHomingResults(entry.results),
+      error: typeof entry.error === "string" ? entry.error : null,
+    };
+  }
+  return robots;
 }
 
 export function parseHomingResults(raw: unknown): HomingAxisResult[] | Malformed {
@@ -787,14 +809,9 @@ function parseKnown(raw: Raw): ServerMessage | null {
         type: "homing_state",
         homing: {
           available: raw.available === true,
-          blocked_reason: typeof raw.blocked_reason === "string" ? raw.blocked_reason : null,
           running: raw.running === true,
-          robot: typeof raw.robot === "string" ? raw.robot : null,
-          axes: parseAxisNames(raw.axes),
-          current_axis: typeof raw.current_axis === "string" ? raw.current_axis : null,
-          results: parseHomingResults(raw.results),
-          error: typeof raw.error === "string" ? raw.error : null,
           targets: parseHomingTargets(raw.targets),
+          robots: parseHomingRobots(raw.robots),
         },
       };
 

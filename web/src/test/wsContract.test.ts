@@ -10,6 +10,7 @@ import type {
   HealthChange,
   HealthSnapshot,
   HomingAxisResult,
+  HomingRobotSnapshot,
   HomingSnapshot,
   LimitMonitorState,
   ManualAxis,
@@ -188,12 +189,11 @@ const EXPECTATIONS: Record<string, Expectation> = {
     const state = result.homing;
     expect(state.available).toBe(sample.available);
     expect(state.running).toBe(sample.running);
-    expect(state.robot).toBe(sample.robot);
-    expect(state.axes).toEqual(sample.axes);
-    expect(state.results).toEqual(sample.results);
     expect(state.targets).toEqual(sample.targets);
+    expect(state.robots).toEqual(sample.robots);
     // 失敗した軸の理由が UI まで残る (これが読めないと「なぜ止まったか」が画面から消える)
-    expect(state.results).not.toHaveLength(0);
+    const robots = sample.robots as Record<string, { results: unknown[] }>;
+    expect(Object.values(robots).flatMap((robot) => robot.results)).not.toHaveLength(0);
   },
 
   motor_check_state_with_exclusions: (result, sample) => {
@@ -475,20 +475,25 @@ const HOMING_RESULT = fieldsOf<HomingAxisResult>({
   error: "ui",
 });
 
+const HOMING_ROBOT = fieldsOf<HomingRobotSnapshot>({
+  blocked_reason: "ui",
+  running: "ui",
+  axes: "ui",
+  current_axis: "ui",
+  results: "ui",
+  error: "ui",
+});
+
 const HOMING_FIELDS: FieldSpec = {
   ...fieldsOf<Wire<HomingSnapshot>>({
     type: "parser",
     available: "ui",
-    blocked_reason: "ui",
     running: "ui",
-    robot: "ui",
-    axes: "ui",
-    current_axis: "ui",
-    results: "ui",
-    error: "ui",
     targets: "ui",
+    robots: "ui",
   }),
-  ...nest("results[]", HOMING_RESULT),
+  ...nest("robots.*", HOMING_ROBOT),
+  ...nest("robots.*.results[]", HOMING_RESULT),
   "targets.*": "ui",
 };
 
@@ -652,7 +657,7 @@ const DECLARED: Record<string, FieldSpec> = {
   switch_measure_state_with_error: SWITCH_MEASURE_FIELDS,
 };
 
-const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists", "targets"]);
+const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists", "targets", "robots"]);
 
 function flattenPaths(value: unknown, prefix = ""): string[] {
   if (Array.isArray(value)) return value.flatMap((item) => flattenPaths(item, `${prefix}[]`));

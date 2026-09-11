@@ -4,7 +4,8 @@ import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useHoming } from "@/hooks/useHoming";
-import { homingStatus } from "@/lib/homingStatus";
+import { homingEntry, homingStatus } from "@/lib/homingStatus";
+import type { HomingEntry } from "@/lib/homingStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
 
@@ -16,18 +17,48 @@ interface HomingPanelProps {
 export function HomingPanel({ robot: only }: HomingPanelProps = {}) {
   const { connected } = useRobotStatus();
   const { state } = useHoming();
-  const { outcome, failures } = homingStatus(state, connected);
 
-  if (outcome === "idle" && state.robot === null) return null;
-  if (only !== undefined && state.robot !== only) return null;
+  if (state.robots === MALFORMED) {
+    return (
+      <p className="flex items-center gap-1.5 text-warning">
+        <Icon as={TriangleAlert} />
+        零点合わせの状態を読み取れませんでした (配信の形が読めていません)
+      </p>
+    );
+  }
 
-  const robot = state.robot === null ? "" : robotLabel(state.robot);
+  const robots = only === undefined ? Object.keys(state.robots) : [only];
+
+  return (
+    <>
+      {robots.map((robot) => (
+        <HomingRobotPanel
+          key={robot}
+          robot={robot}
+          entry={homingEntry(state, robot)}
+          connected={connected}
+        />
+      ))}
+    </>
+  );
+}
+
+interface HomingRobotPanelProps {
+  robot: string;
+  entry: HomingEntry;
+  connected: boolean;
+}
+
+function HomingRobotPanel({ robot, entry, connected }: HomingRobotPanelProps) {
+  const { outcome, failures } = homingStatus(entry, connected);
+
+  if (entry === undefined || entry === MALFORMED || outcome === "idle") return null;
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2">
         <span className="text-base-content/70">零点合わせ</span>
-        <span className="min-w-0 truncate font-medium">{robot}</span>
+        <span className="min-w-0 truncate font-medium">{robotLabel(robot)}</span>
         {outcome === "running" ? (
           <StatusBadge tone="info">実行中</StatusBadge>
         ) : outcome === "failed" ? (
@@ -35,21 +66,21 @@ export function HomingPanel({ robot: only }: HomingPanelProps = {}) {
         ) : outcome === "done" ? (
           <StatusBadge tone="success">完了</StatusBadge>
         ) : null}
-        {state.running && state.current_axis ? (
-          <span className="min-w-0 truncate font-mono text-info">{state.current_axis}</span>
+        {entry.running && entry.current_axis ? (
+          <span className="min-w-0 truncate font-mono text-info">{entry.current_axis}</span>
         ) : null}
       </div>
 
-      {state.error ? <p className="text-error">{state.error}</p> : null}
+      {entry.error ? <p className="text-error">{entry.error}</p> : null}
 
-      {state.results === MALFORMED || failures === MALFORMED ? (
+      {entry.results === MALFORMED || failures === MALFORMED ? (
         <p className="flex items-center gap-1.5 text-warning">
           <Icon as={TriangleAlert} />
           零点合わせの結果を読み取れませんでした (配信の形が読めていません)
         </p>
       ) : (
         <ul className="flex flex-col">
-          {state.results.map((result) => (
+          {entry.results.map((result) => (
             <li key={result.axis} className="flex items-baseline gap-2 px-1 py-[0.15rem]">
               <Icon
                 as={result.error === null ? Check : X}

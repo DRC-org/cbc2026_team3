@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from lib.match_state import Court
 from lib.sequence.homing import AxisHomingResult, HomingRunner, MoveTo, run_homing
@@ -28,12 +28,25 @@ class HomingSource:
     move_to: MoveTo | None = None
 
 
+@dataclass
+class _RobotRun:
+    task: asyncio.Task[None] | None = None
+    # 後始末の publish はまだタスクの中なので、task.done() では実行中に見える
+    running: bool = False
+    axes: tuple[str, ...] = ()
+    current: str | None = None
+    results: list[AxisHomingResult] = field(default_factory=list)
+    error: str | None = None
+
+
 class HomingController:
     """ロボットと軸を指定して零点確定だけを走らせる。
 
     実行は動作確認と同じ `run_homing` を通す。手順を書き写すと、片方だけが
     コートやセンサの扱いを直された状態が作れる。**「参照される軸を確定 → 寄せる →
     残りを確定」の 3 段も `run_homing` が持つ**ので、ここは寄せる口を渡すだけ。
+
+    ロボット間は並行して走らせてよく、同じロボットへの重ね掛けだけ拒む。
     """
 
     def __init__(
@@ -46,14 +59,7 @@ class HomingController:
         self._broadcast = broadcast
 
         self._source: HomingSource | None = None
-        self._task: asyncio.Task[None] | None = None
-        # 後始末の publish はまだタスクの中なので、task.done() では実行中に見える
-        self._running = False
-        self._robot: str | None = None
-        self._axes: tuple[str, ...] = ()
-        self._current: str | None = None
-        self._results: list[AxisHomingResult] = []
-        self._error: str | None = None
+        self._runs: dict[str, _RobotRun] = {}
         self._last_payload: dict | None = None
 
     def set_source(self, source: HomingSource) -> None:
@@ -61,47 +67,61 @@ class HomingController:
 
     @property
     def running(self) -> bool:
-        return self._running
-
-    @property
-    def error(self) -> str | None:
-        return self._error
+        """どれか 1 機でも走っていれば True。手動操縦の制御権を塞ぐ排他はこれを見る。"""
+        return any(run.running for run in self._runs.values())
 
     def targets(self, robot: str) -> tuple[str, ...]:
         if self._source is None:
             return ()
         return self._source.axes_by_robot.get(robot, ())
 
-    def deny_reason(self) -> str | None:
+    def _run_of(self, robot: str) -> _RobotRun:
+        return self._runs.setdefault(robot, _RobotRun())
+
+    def _common_deny(self) -> str | None:
         if self._source is None or not self._source.axes_by_robot:
             return "零点確定できる軸が読み込まれていません"
+        return self._environment_deny()
 
-        environment = self._environment_deny()
-        if environment is not None:
-            return environment
-
-        if self.running:
-            return "既に零点合わせを実行中です"
+    def _robot_deny(self, robot: str) -> str | None:
+        run = self._runs.get(robot)
+        if run is not None and run.running:
+            return "既にこのロボットの零点合わせを実行中です"
         return None
+
+    def deny_reason(self, robot: str) -> str | None:
+        return self._common_deny() or self._robot_deny(robot)
 
     async def start(self, robot: str, axes: object) -> str | None:
         """零点合わせを開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self.deny_reason()
+        deny = self._common_deny()
         if deny is not None:
-            return await self._reject(deny)
+            return await self._reject(robot, deny)
 
         targets, reason = self._resolve(robot, axes)
         if targets is None:
-            return await self._reject(reason or "零点合わせの対象を決められません")
+            return await self._reject(robot, reason or "零点合わせの対象を決められません")
+
+        deny = self._robot_deny(robot)
+        if deny is not None:
+            return await self._reject(robot, deny)
 
         source = self._source
         assert source is not None
 
-        self._error = None
-        self._robot = robot
-        self._axes = targets
-        self._current = None
-        self._results = []
+        run = self._run_of(robot)
+        run.error = None
+        run.axes = targets
+        run.current = None
+        run.results = []
+
+        async def _on_axis(axis: str) -> None:
+            run.current = axis
+            await self.publish()
+
+        async def _on_result(result: AxisHomingResult) -> None:
+            run.results.append(result)
+            await self.publish()
 
         async def _run() -> None:
             logger.info("零点合わせ: robot=%s 軸=%s", robot, ", ".join(targets))
@@ -116,22 +136,22 @@ class HomingController:
                     # 寄せずに拒否させ、文面で手当てを案内する (`run_homing` の
                     # docstring。この非対称が仕様)
                     move_to=source.move_to,
-                    on_axis=self._on_axis,
-                    on_result=self._on_result,
+                    on_axis=_on_axis,
+                    on_result=_on_result,
                     stop_on_error=False,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("零点合わせエラー: %s", exc)
-                self._error = str(exc)
+                run.error = str(exc)
             finally:
-                self._current = None
-                self._running = False
+                run.current = None
+                run.running = False
                 await self.publish()
 
-        self._running = True
-        self._task = asyncio.create_task(_run())
+        run.running = True
+        run.task = asyncio.create_task(_run())
         await self.publish()
         return None
 
@@ -156,36 +176,37 @@ class HomingController:
             )
         return tuple(axes), None
 
-    async def _on_axis(self, axis: str) -> None:
-        self._current = axis
-        await self.publish()
-
-    async def _on_result(self, result: AxisHomingResult) -> None:
-        self._results.append(result)
-        await self.publish()
-
-    async def _reject(self, reason: str) -> str:
-        self._error = reason
-        logger.info("零点合わせ拒否: %s", reason)
-        await self.publish()
+    async def _reject(self, robot: object, reason: str) -> str:
+        logger.info("零点合わせ拒否: robot=%s %s", robot, reason)
+        # 走っているロボットの error はその実行の結果なので上書きしない
+        if isinstance(robot, str) and self.targets(robot):
+            run = self._run_of(robot)
+            if not run.running:
+                run.error = reason
+                await self.publish()
         return reason
 
     def payload(self) -> dict:
         source = self._source
+        axes_by_robot = source.axes_by_robot if source else {}
+        common = self._common_deny()
+        robots = {}
+        for robot in axes_by_robot:
+            run = self._runs.get(robot) or _RobotRun()
+            robots[robot] = {
+                "blocked_reason": common or self._robot_deny(robot),
+                "running": run.running,
+                "axes": list(run.axes),
+                "current_axis": run.current,
+                "results": [{"axis": r.axis, "error": r.error} for r in run.results],
+                "error": run.error,
+            }
         return {
             "type": "homing_state",
-            "available": source is not None and bool(source.axes_by_robot),
-            "blocked_reason": self.deny_reason(),
+            "available": bool(axes_by_robot),
             "running": self.running,
-            "robot": self._robot,
-            "axes": list(self._axes),
-            "current_axis": self._current,
-            "results": [{"axis": result.axis, "error": result.error} for result in self._results],
-            "error": self._error,
-            "targets": {
-                robot: list(axes)
-                for robot, axes in (source.axes_by_robot.items() if source else ())
-            },
+            "targets": {robot: list(axes) for robot, axes in axes_by_robot.items()},
+            "robots": robots,
         }
 
     async def publish(self) -> None:

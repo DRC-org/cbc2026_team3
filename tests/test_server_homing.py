@@ -166,7 +166,7 @@ class TestDenyGate:
 
         assert reason is not None and "緊急停止" in reason
         assert runner.homed == []
-        assert "緊急停止" in (fx.homing_state()["blocked_reason"] or "")
+        assert "緊急停止" in (fx.homing_state()["robots"]["sub_hand"]["blocked_reason"] or "")
 
     async def test_動作確認の実行中は拒む(self) -> None:
         fx, runner = _build()
@@ -219,18 +219,39 @@ class TestDenyGate:
         assert fx.operation_mode("main_hand") == "sequence"
         assert "零点合わせ" in client.of_type("command_rejected")[-1]["reason"]
 
-    async def test_実行中の重ね掛けを拒む(self) -> None:
+    async def test_同じロボットの重ね掛けは拒む(self) -> None:
         fx, runner = _build()
         runner.release = asyncio.Event()
 
         assert await fx.start_homing("sub_hand") is None
         await asyncio.wait_for(runner.entered.wait(), timeout=2.0)
-        reason = await fx.start_homing("main_hand")
+        reason = await fx.start_homing("sub_hand")
         runner.release.set()
         await fx.wait_homing_idle()
 
         assert reason is not None and "実行中" in reason
         assert runner.homed == ["sub_y_axis"]
+
+    async def test_別ロボットは並行して走る(self) -> None:
+        fx, runner = _build()
+        runner.release = asyncio.Event()
+
+        assert await fx.start_homing("sub_hand") is None
+        await asyncio.wait_for(runner.entered.wait(), timeout=2.0)
+        runner.entered.clear()
+        assert await fx.start_homing("main_hand") is None
+        await asyncio.wait_for(runner.entered.wait(), timeout=2.0)
+        state = fx.homing_state()
+        homed_while_both_held = list(runner.homed)
+        runner.release.set()
+        await fx.wait_homing_idle()
+
+        assert homed_while_both_held == ["sub_y_axis", "y_axis"]
+        assert state["running"] is True
+        assert state["robots"]["sub_hand"]["running"] is True
+        assert state["robots"]["main_hand"]["running"] is True
+        assert sorted(runner.homed) == ["sub_y_axis", "y_axis"]
+        assert fx.homing_state()["running"] is False
 
 
 class TestBroadcast:
@@ -242,7 +263,7 @@ class TestBroadcast:
         await fx.start_homing("sub_hand")
         await fx.wait_homing_idle()
 
-        results = client.of_type("homing_state")[-1]["results"]
+        results = client.of_type("homing_state")[-1]["robots"]["sub_hand"]["results"]
         assert results == [{"axis": "sub_y_axis", "error": "センサに届きません"}]
 
     async def test_実行中の軸が配信に載る(self) -> None:
@@ -258,16 +279,19 @@ class TestBroadcast:
         await fx.wait_homing_idle()
 
         assert running["running"] is True
-        assert running["current_axis"] == "sub_y_axis"
-        assert running["robot"] == "sub_hand"
+        assert running["robots"]["sub_hand"]["running"] is True
+        assert running["robots"]["sub_hand"]["current_axis"] == "sub_y_axis"
+        assert running["robots"]["main_hand"]["running"] is False
 
     async def test_ロボットごとの対象軸を配る(self) -> None:
         fx, _runner = _build()
 
-        assert fx.homing_state()["targets"] == {
+        state = fx.homing_state()
+        assert state["targets"] == {
             "main_hand": ["y_axis"],
             "sub_hand": ["sub_y_axis"],
         }
+        assert set(state["robots"]) == {"main_hand", "sub_hand"}
 
 
 class TestCommand:
@@ -419,7 +443,7 @@ class _Panel:
     async def run(self, axes: list[str] | None = None) -> list[dict]:
         await self.fx.start_homing("sub_hand", axes)
         await self.fx.wait_homing_idle()
-        return self.fx.homing_state()["results"]
+        return self.fx.homing_state()["robots"]["sub_hand"]["results"]
 
 
 class TestPanelOrdersWhatWasSelected:
