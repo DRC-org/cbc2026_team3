@@ -315,15 +315,43 @@ class TestCommand:
         assert rejected and rejected[-1]["command"] == "homing_start"
         assert runner.homed == []
 
-    async def test_試合中は拒む(self) -> None:
+    async def test_試合中も走らせられる(self) -> None:
+        # 原点を失ったときの復帰手段は試合中にも要る。塞ぐのは手動操縦・シーケンス
+        # 実行中・緊急停止・再励磁中だけで、フェーズでは塞がない
         fx, runner = _build()
         fx.enter_match()
         client = RecordingClient()
 
         await fx.command({"type": "homing_start", "robot": "sub_hand"}, requester=client)
+        await fx.wait_homing_idle()
 
-        assert "試合中" in client.of_type("command_rejected")[-1]["reason"]
-        assert runner.homed == []
+        assert client.of_type("command_rejected") == []
+        assert runner.homed == ["sub_y_axis"]
+
+    @pytest.mark.parametrize(
+        ("command", "payload"),
+        [
+            ("sequence_start", {}),
+            ("sequence_jump", {"step_index": 0}),
+            ("trigger", {}),
+        ],
+    )
+    async def test_零点合わせ中はシーケンス側を通さない(self, command: str, payload: dict) -> None:
+        # 試合中も走れるようになったぶん、軸の書き手が二重になる経路がここで開く
+        fx, runner = _build()
+        fx.enter_match()
+        runner.release = asyncio.Event()
+        client = RecordingClient()
+
+        assert await fx.start_homing("sub_hand") is None
+        await asyncio.wait_for(runner.entered.wait(), timeout=2.0)
+        await fx.command({"type": command, "robot": "sub_hand", **payload}, requester=client)
+        rejected = client.of_type("command_rejected")
+        runner.release.set()
+        await fx.wait_homing_idle()
+
+        assert rejected and rejected[-1]["command"] == command
+        assert "零点合わせ" in rejected[-1]["reason"]
 
 
 _INTERFERING_CONFIG = {
