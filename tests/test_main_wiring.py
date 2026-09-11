@@ -1145,6 +1145,8 @@ class TestRobotContextReachesTheServer:
         "court_dependent_axes": "位置定数から導く (書き写すと宣言と食い違う)",
         "court_dependent_position_axes": "位置定数から導く (書き写すと宣言と食い違う)",
         "captures": "位置定数とモータ群から導く (控えの正はサーバー 1 個)",
+        "positions_reloaded_at": "サーバーが持つ実行時状態 (読み直すまで未設定)",
+        "positions_reload_changed": "サーバーが持つ実行時状態 (読み直すまで空)",
     }
 
     def _add_robot_call_arguments(self) -> set[str]:

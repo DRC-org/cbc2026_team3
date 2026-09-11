@@ -25,6 +25,7 @@ __all__ = [
     "MotionSpec",
     "MotorSpec",
     "PositionLookupError",
+    "PositionReloadError",
     "PositionTable",
     "TravelSpec",
     "load_position_table",
@@ -39,6 +40,10 @@ class PositionLookupError(RuntimeError):
 
 class CourtUnresolvedError(RuntimeError):
     """コート別の scale を持つ軸を、コートを解決せずに換算しようとした。"""
+
+
+class PositionReloadError(RuntimeError):
+    """位置定数の読み直しを拒んだ。**送出しても今の値はそのまま残る。**"""
 
 
 @dataclass(frozen=True)
@@ -639,6 +644,51 @@ class PositionTable:
 
         source = " + ".join(table.source for table in tables) or "<merged>"
         return cls(axes, positions, interlocks=interlocks, source=source)
+
+    def adopt_positions(self, other: PositionTable) -> tuple[str, ...]:
+        """`positions:` の値だけを差し替え、変わった位置名を返す (`軸.位置名`)。
+
+        **軸の定義 (`axes:`) と `interlocks:` が 1 つでも違えば拒む。** 単位換算・
+        可動域・同期しきい値・台形プロファイルは起動時にモータと制御ループへ配り
+        終えていて、ここで入れ替えても配った先が古いまま残る。引くたびにこの
+        テーブルを見る `positions:` の値だけが、動かしたまま差し替えてよい。
+
+        差し替えは自分自身へ上書きする。`PositionTable` を参照で持っている
+        シーケンス・手動操縦・控え帳に、bind をやり直さずそのまま届かせるため。
+        """
+        removed = sorted(set(self._axes) - set(other._axes))
+        added = sorted(set(other._axes) - set(self._axes))
+        modified = sorted(
+            name
+            for name in set(self._axes) & set(other._axes)
+            if self._axes[name] != other._axes[name]
+        )
+        if removed or added or modified:
+            raise PositionReloadError(
+                "軸の定義 (axes:) が変わっているので読み直せません"
+                f" (消えた: {', '.join(removed) or 'なし'} /"
+                f" 増えた: {', '.join(added) or 'なし'} /"
+                f" 変わった: {', '.join(modified) or 'なし'})。"
+                "単位換算・可動域・同期しきい値はモータと制御ループへ配り終えているため、"
+                "反映には再起動が要ります"
+            )
+        if self._interlocks != other._interlocks:
+            raise PositionReloadError(
+                "軸間干渉 (interlocks:) が変わっているので読み直せません。反映には再起動が要ります"
+            )
+
+        changed: list[str] = []
+        for axis in sorted(set(self._positions) | set(other._positions)):
+            before = self._positions.get(axis, {})
+            after = other._positions.get(axis, {})
+            changed.extend(
+                f"{axis}.{name}"
+                for name in sorted(set(before) | set(after))
+                if before.get(name) != after.get(name)
+            )
+
+        self._positions = {axis: dict(values) for axis, values in other._positions.items()}
+        return tuple(changed)
 
     @property
     def source(self) -> str:

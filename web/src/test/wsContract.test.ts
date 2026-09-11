@@ -24,6 +24,7 @@ import type {
   PositionCaptureEntry,
   PositionCaptureState,
   PositionLoopState,
+  PositionsReloadState,
   RobotState,
   SafetyState,
   SequenceFailure,
@@ -91,6 +92,9 @@ const STATE_FIELDS_UI_READS = [
   "position_capture.targets",
   "position_capture.entries",
   "position_capture.yaml",
+  "positions_reload",
+  "positions_reload.reloaded_at",
+  "positions_reload.changed",
 ] as const;
 
 const EXPECTATIONS: Record<string, Expectation> = {
@@ -104,6 +108,7 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.states[robot].sensors).toEqual(sample.sensors);
     expect(result.states[robot].suction).toEqual(sample.suction);
     expect(result.states[robot].position_capture).toEqual(sample.position_capture);
+    expect(result.states[robot].positions_reload).toEqual(sample.positions_reload);
   },
 
   state_with_last_error: (result, sample) => {
@@ -540,6 +545,11 @@ const POSITION_CAPTURE_ENTRY = fieldsOf<PositionCaptureEntry>({
   captured_at: "ui",
 });
 
+const POSITIONS_RELOAD = fieldsOf<PositionsReloadState>({
+  reloaded_at: "ui",
+  changed: "ui",
+});
+
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
     type: "parser",
@@ -558,6 +568,7 @@ const STATE_FIELDS: FieldSpec = {
     manual: "ui",
     suction: "ui",
     position_capture: "ui",
+    positions_reload: "ui",
     court_required: "ui",
     last_error: "ui",
     current_step: { unused: "現在ステップ名は steps[step_index].label を唯一の表示元にする" },
@@ -566,6 +577,7 @@ const STATE_FIELDS: FieldSpec = {
   ...nest("suction.pads[]", SUCTION_PAD),
   ...nest("position_capture", POSITION_CAPTURE),
   ...nest("position_capture.entries[]", POSITION_CAPTURE_ENTRY),
+  ...nest("positions_reload", POSITIONS_RELOAD),
   ...nest("motors.*", MOTOR_STATE),
   ...nest("sensors.*", SENSOR_STATE),
   ...nest("health", HEALTH),

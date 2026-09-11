@@ -384,6 +384,7 @@ def _build_fixture() -> _Fixture:
         target_refreshers=[refresher],
         manual=_manual_controller(group),
         suction=_suction_selection(),
+        reload_positions=lambda: ("y_axis.place",),
     )
     fx.set_motor_check_sequence(_ContractCheckSequence())
     fx.freeze_broadcast()

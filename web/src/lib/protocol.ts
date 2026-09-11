@@ -602,6 +602,25 @@ export function parsePositionCapture(
   return raw as unknown as PositionCaptureState;
 }
 
+export interface PositionsReloadState {
+  /** 最後に位置定数 yaml を読み直した時刻。一度も読み直していなければ null */
+  reloaded_at: EpochSeconds | null;
+  /** そのとき変わった位置 (`軸.位置名`)。値が同じなら空 */
+  changed: string[];
+}
+
+// null は「この台は位置定数 yaml を読み直せない」。欠落 (undefined) や形の崩れとは区別する
+export function parsePositionsReload(
+  raw: unknown,
+): PositionsReloadState | Malformed | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (!isObject(raw)) return MALFORMED;
+  if (raw.reloaded_at !== null && typeof raw.reloaded_at !== "number") return MALFORMED;
+  if (!isStringArray(raw.changed)) return MALFORMED;
+  return raw as unknown as PositionsReloadState;
+}
+
 export interface RobotState {
   type?: "state";
   robot: string;
@@ -621,6 +640,8 @@ export interface RobotState {
   manual?: ManualState;
   suction?: SuctionState | Malformed | null;
   position_capture?: PositionCaptureState | Malformed | null;
+  /** 位置定数 yaml の読み直し。**null なら口が無い台** (UI はボタンを出さない) */
+  positions_reload?: PositionsReloadState | Malformed | null;
   /** この台がコート確定を要るか。**判定はサーバー。UI が軸名から導き直さない。** */
   court_required?: boolean;
 }
@@ -696,6 +717,8 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (suction !== undefined) state.suction = suction;
       const capture = parsePositionCapture(raw.position_capture);
       if (capture !== undefined) state.position_capture = capture;
+      const positionsReload = parsePositionsReload(raw.positions_reload);
+      if (positionsReload !== undefined) state.positions_reload = positionsReload;
 
       return { type: "state", robot, state };
     }

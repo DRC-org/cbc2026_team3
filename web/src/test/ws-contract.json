@@ -336,6 +336,10 @@
         },
         "yaml": "# <ws-contract-sequence> の positions: 配下へ貼る\n  gripper:\n    open: 5.0             # [deg]"
       },
+      "positions_reload": {
+        "changed": [],
+        "reloaded_at": null
+      },
       "robot": "main_hand",
       "running": false,
       "safety": {
@@ -649,6 +653,10 @@
           ]
         },
         "yaml": "# <ws-contract-sequence> の positions: 配下へ貼る\n  gripper:\n    open: 5.0             # [deg]"
+      },
+      "positions_reload": {
+        "changed": [],
+        "reloaded_at": null
       },
       "robot": "main_hand",
       "running": false,

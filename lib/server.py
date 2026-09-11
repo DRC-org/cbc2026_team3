@@ -43,7 +43,11 @@ from lib.match_state import Court, MatchState
 from lib.motion_guard import GuardViolation
 from lib.position_capture import PositionCaptureStore
 from lib.sequence.engine import Sequence
-from lib.sequence.positions import CourtUnresolvedError, PositionLookupError
+from lib.sequence.positions import (
+    CourtUnresolvedError,
+    PositionLookupError,
+    PositionReloadError,
+)
 from lib.server_homing import HomingController, HomingSource
 from lib.server_motor_check import MotorCheckController, Pausable
 from lib.server_switch_measure import SwitchMeasureController
@@ -110,6 +114,11 @@ def _court_dependent_position_axes(sequence: Sequence) -> tuple[str, ...]:
     return table.court_dependent_position_axes()
 
 
+#: 位置定数 yaml を読み直して、変わった位置名 (`軸.位置名`) を返す。
+#: 読めない・軸が変わったときは `PositionReloadError` を送出し、今の値を残す
+PositionsReloader = Callable[[], tuple[str, ...]]
+
+
 @dataclass
 class RobotContext:
     sequence: Sequence
@@ -128,6 +137,11 @@ class RobotContext:
     court_dependent_axes: tuple[str, ...] = ()
     #: コート別の値を持つ位置を抱える軸。位置名を引くときだけコートが要る
     court_dependent_position_axes: tuple[str, ...] = ()
+    #: 位置定数 yaml を読み直す口。持たない台は None (UI にもボタンを出さない)
+    reload_positions: PositionsReloader | None = None
+    #: 最後に読み直した時刻と、そのとき変わった位置名
+    positions_reloaded_at: float | None = None
+    positions_reload_changed: tuple[str, ...] = ()
 
 
 class RobotServer:
@@ -242,6 +256,7 @@ class RobotServer:
         target_refreshers: list[TargetRefresher] | None = None,
         manual: ManualController | None = None,
         suction: SuctionSelection | None = None,
+        reload_positions: PositionsReloader | None = None,
     ) -> None:
         self._robots[name] = RobotContext(
             sequence=sequence,
@@ -255,6 +270,7 @@ class RobotServer:
             captures=self._make_capture_store(sequence, can_manager),
             court_dependent_axes=_court_dependent_axes(sequence),
             court_dependent_position_axes=_court_dependent_position_axes(sequence),
+            reload_positions=reload_positions,
         )
         sequence.set_court(self.match.court)
         if manual is not None:
@@ -642,6 +658,50 @@ class RobotServer:
         logger.info(
             "位置を控えた: robot=%s 軸=%s 位置=%s", robot_name, data.get("axis"), data.get("name")
         )
+
+    async def _cmd_positions_reload(self, data: dict, requester: WSOrNone) -> None:
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            return
+        ctx = self._robots[robot_name]
+        if ctx.reload_positions is None:
+            await self._reject_command(
+                requester, "positions_reload", f"'{robot_name}' は位置定数を持っていません"
+            )
+            return
+
+        # 読み直しの最中に軸を握っている点検やシーケンスがいると、次の 1 歩の行き先だけが
+        # 差し替わる。止まっているあいだに入れ替える
+        busy = self._busy_label()
+        if busy is not None:
+            await self._reject_command(
+                requester, "positions_reload", f"{busy}の実行中は位置定数を読み直せません"
+            )
+            return
+        if ctx.sequence.is_running:
+            await self._reject_command(
+                requester, "positions_reload", "シーケンスの実行中は位置定数を読み直せません"
+            )
+            return
+
+        try:
+            changed = ctx.reload_positions()
+        except PositionReloadError as exc:
+            logger.warning("位置定数の読み直しを拒否: robot=%s (%s)", robot_name, exc)
+            await self._reject_command(requester, "positions_reload", str(exc))
+            return
+
+        ctx.positions_reloaded_at = time.time()
+        ctx.positions_reload_changed = changed
+        # コート別の値を持つ位置は yaml 側で増減しうる。ゲートの材料も入れ替える
+        ctx.court_dependent_position_axes = _court_dependent_position_axes(ctx.sequence)
+        logger.info(
+            "位置定数を読み直した: robot=%s 変化 %d 件 (%s)",
+            robot_name,
+            len(changed),
+            ", ".join(changed) or "なし",
+        )
+        await self._broadcast_state()
 
     async def _cmd_switch_measure_start(self, data: dict, requester: WSOrNone) -> None:
         reason = await self._switch_measure.start(data)
@@ -1599,6 +1659,8 @@ class RobotServer:
             # 実機で決める位置定数の控え帳。控えられる軸と位置名もサーバーが配る
             # (UI が位置名を書き写すと、yaml へ足した名前が片方の画面に出ない)
             "position_capture": ctx.captures.to_dict() if ctx.captures is not None else None,
+            # 位置定数 yaml の読み直し。口を持たない台は null (UI はボタンを出さない)
+            "positions_reload": self._positions_reload_state(robot_name),
             # この台がコート確定を要るか。UI が軸名から導き直さないようサーバーが配る
             "court_required": bool(ctx.court_dependent_axes),
         }
@@ -1620,6 +1682,15 @@ class RobotServer:
                 "stale": freshness.is_stale(sensor_name, now),
             }
         return sensors
+
+    def _positions_reload_state(self, robot_name: str) -> dict | None:
+        ctx = self._robots[robot_name]
+        if ctx.reload_positions is None:
+            return None
+        return {
+            "reloaded_at": ctx.positions_reloaded_at,
+            "changed": list(ctx.positions_reload_changed),
+        }
 
     def _manual_state(self, robot_name: str) -> dict:
         ctx = self._robots[robot_name]
