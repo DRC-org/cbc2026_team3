@@ -274,11 +274,11 @@ class TestHomingOrder:
             "sub_y_axis"
         )
 
-    def test_昇降は確定した直後に移動高さへ退避する(self, relative: str) -> None:
+    def test_昇降は確定した直後に前後を走らせる高さへ退避する(self, relative: str) -> None:
         table = _load(relative)
         homing = table.axis("sub_lift").homing
 
-        assert homing is not None and homing.retreat_position == "top"
+        assert homing is not None and homing.retreat_position == "pick"
 
     def test_零点確定を終えただけの昇降は移動高さに居ない(self, relative: str) -> None:
         """**退避する段が要ることの根拠。** ここが移動高さなら退避は要らない。"""
@@ -288,7 +288,7 @@ class TestHomingOrder:
         # 探索は + 方向 (下端) へ進み、原点確定の後に逆向きへ release_distance 離脱する
         left_at = -homing.direction * homing.release_distance
 
-        assert abs(left_at - table.raw("sub_lift", "top")) > table.axis("sub_lift").tolerance
+        assert abs(left_at - table.raw("sub_lift", "pick")) > table.axis("sub_lift").tolerance
 
 
 class TestLinearAxisTimeout:

@@ -20,8 +20,8 @@ axes:
       coarse_step: 0.5
       release_distance: 10.0
       settle_s: 0.05
-      # 本番と対。確定した直後は下端のすぐ上なので、自分で移動高さまで上がる
-      retreat_position: top
+      # 本番と対。確定した直後は下端のすぐ上なので、自分で前後を走らせる高さまで上がる
+      retreat_position: pick
     guard:
       # + が下なので plus が下端。逆に書くと守りが反転する
       limits:
