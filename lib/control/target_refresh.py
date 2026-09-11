@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from typing import TYPE_CHECKING
 
-from lib.control.periodic import PausablePeriodicTask
+from lib.control.periodic import PausablePeriodicTask, is_bus_send_failure
 from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.sequence.motors import MotorHandle
@@ -83,7 +83,9 @@ class GenericTargetRefresher(_TargetRefresherBase):
                 await handle.resend_target()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if is_bus_send_failure(exc):
+                    continue
                 self._log.exception(
                     f"send:{handle.name}",
                     "目標値の再送に失敗 (motor=%s)",
@@ -127,7 +129,9 @@ class QueryDrivenTargetRefresher(_TargetRefresherBase):
                 await self._send_idle_target(handle)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if is_bus_send_failure(exc):
+                    continue
                 self._log.exception(
                     f"send:{handle.name}",
                     "DM3520 への目標値送信に失敗 (motor=%s)",

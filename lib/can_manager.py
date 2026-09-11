@@ -138,6 +138,9 @@ class CANManager:
         self._last_tx_at: dict[str, float] = {}
         self._tx_error_count: dict[str, int] = {}
         self._tx_error_score: dict[str, int] = {}
+        self._tx_down: dict[str, bool] = {}
+        self._tx_down_since: dict[str, float] = {}
+        self._tx_down_reason: dict[str, str] = {}
         self._rx_error_count: dict[str, int] = {}
         self._bus_off: dict[str, bool] = {}
         self._rx_down: dict[str, bool] = {}
@@ -157,6 +160,7 @@ class CANManager:
 
         self._tx_error_count.setdefault(name, 0)
         self._tx_error_score.setdefault(name, 0)
+        self._tx_down.setdefault(name, False)
         self._rx_error_count.setdefault(name, 0)
         self._bus_off.setdefault(name, False)
         self._rx_down.setdefault(name, False)
@@ -211,25 +215,45 @@ class CANManager:
         bus = self._buses[bus_name]
         try:
             await self._run_blocking(bus.send, msg)
-        except can.CanError:
-            self._record_tx_failure(bus_name)
-            raise
-        except Exception:
-            self._record_tx_failure(bus_name)
+        except Exception as exc:
+            self._record_tx_failure(bus_name, exc)
             raise
         else:
             self._last_tx_at[bus_name] = time.time()
             self._record_tx_success(bus_name)
 
-    def _record_tx_failure(self, bus_name: str) -> None:
+    def _record_tx_failure(self, bus_name: str, exc: BaseException) -> None:
+        """送信失敗を数え、**状態が変わったときだけ** 1 行出す。
+
+        非常停止中はモータ電源が落ちて全バスが毎周期失敗するので、毎回出すと
+        他のログが読めなくなる。理由が変わったら出し直す —— 想定外の失敗
+        (Transmit buffer full 以外) が黙って消えると原因が追えない。
+        """
         self._tx_error_count[bus_name] = self._tx_error_count.get(bus_name, 0) + 1
         self._tx_error_score[bus_name] = min(
             _TX_ERROR_SCORE_MAX, self._tx_error_score.get(bus_name, 0) + _TX_ERROR_SCORE_FAIL
         )
 
+        reason = f"{type(exc).__name__}: {exc}"
+        if self._tx_down.get(bus_name, False) and self._tx_down_reason.get(bus_name) == reason:
+            return
+        if not self._tx_down.get(bus_name, False):
+            self._tx_down_since[bus_name] = time.time()
+        self._tx_down[bus_name] = True
+        self._tx_down_reason[bus_name] = reason
+        logger.error(
+            "CAN 送信が失敗しています。復帰まで再試行します (bus=%s, %s)", bus_name, reason
+        )
+
     def _record_tx_success(self, bus_name: str) -> None:
         self._tx_error_score[bus_name] = max(0, self._tx_error_score.get(bus_name, 0) - 1)
         self._bus_off[bus_name] = False
+        if self._tx_down.get(bus_name, False):
+            since = self._tx_down_since.pop(bus_name, None)
+            gap_s = time.time() - since if since is not None else 0.0
+            self._tx_down_reason.pop(bus_name, None)
+            logger.warning("CAN 送信が復帰しました (bus=%s, 中断 %.2f 秒)", bus_name, gap_s)
+        self._tx_down[bus_name] = False
 
     async def _receive_loop(self, bus_name: str) -> None:
         bus = self._buses[bus_name]
