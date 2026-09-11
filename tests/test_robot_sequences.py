@@ -391,7 +391,7 @@ _SUB_CYCLE_LABELS = (
     "回転可能位置へ後退",
     "移動高さへ上昇",
     "搬送姿勢へ",
-    "箱 {n} の上へ",
+    "箱 {box} の上へ",
     "オフセットを閉じる",
     "ピッチを閉じる",
     "箱へ下降",
@@ -414,10 +414,14 @@ _SUB_GRIP_METHODS = tuple(f"work_{n}_grip" for n in range(1, 5))
 _SUB_RELEASE_METHODS = tuple(f"work_{n}_release" for n in range(1, 5))
 
 
+# ワーク n 個目を置く箱の番号。2026-09-11 に 2 -> 3 -> 1 -> 4 の順にした
+_SUB_BOX_ORDER = (2, 3, 1, 4)
+
+
 def _expected_sub_labels() -> list[str]:
     labels = ["初期位置へ移動"]
-    for n in range(1, 5):
-        labels += [f"{n} 個目: {label.format(n=n)}" for label in _SUB_CYCLE_LABELS]
+    for n, box in enumerate(_SUB_BOX_ORDER, start=1):
+        labels += [f"{n} 個目: {label.format(box=box)}" for label in _SUB_CYCLE_LABELS]
     labels.append("初期位置へ復帰")
     return labels
 
