@@ -616,6 +616,9 @@ class PositionTable:
         }
         self._interlocks = tuple(interlocks)
         self._source = source
+        # 軸名 → その軸を持つ別のロボットの表。**写さずに引き続ける** ——
+        # 値を写すと、持ち主側だけを読み直したときに同じ位置が 2 つに割れる
+        self._borrowed: dict[str, PositionTable] = {}
 
     @classmethod
     def empty(cls, *, source: str = "<inline>") -> PositionTable:
@@ -630,6 +633,7 @@ class PositionTable:
 
         for table in tables:
             interlocks.extend(table._interlocks)
+            # 借り受けた軸は持ち主の表が出す (両方数えると「二重定義」に見える)
             for name, spec in table._axes.items():
                 if name in axes:
                     raise ValueError(
@@ -644,6 +648,36 @@ class PositionTable:
 
         source = " + ".join(table.source for table in tables) or "<merged>"
         return cls(axes, positions, interlocks=interlocks, source=source)
+
+    def borrow_axis(self, axis: str, owner: PositionTable) -> None:
+        """他のロボットの位置定数が持つ軸を、この表からも引けるようにする。
+
+        **定義も位置の値も持ち主の表を引き続ける** (写さない)。写すと、持ち主側
+        だけを読み直したときに同じ軸の値が 2 つに割れ、どちらの機体から指令したかで
+        行き先が変わる。モータの実体も同じ `MotorHandle` を貸すので、CAN へ出るのは
+        今までどおり 1 通である。
+
+        `axes:` の読み直し (`adopt_positions`) と統合動作確認の突き合わせ
+        (`merged`) が見るのは自分で持つ軸だけで、借りた軸は持ち主の側が答える。
+        """
+        if axis in self._axes:
+            raise ValueError(
+                f"軸 '{axis}' は {self._source} が自分で定義しているので借りられません"
+            )
+        if axis not in owner._axes:
+            raise PositionLookupError(
+                f"軸 '{axis}' が {owner.source} に定義されていません "
+                f"(貸し出せるのは自分で定義した軸だけです)"
+            )
+        self._borrowed[axis] = owner
+
+    def borrowed_axes(self) -> tuple[str, ...]:
+        """他のロボットから借りている軸。"""
+        return tuple(self._borrowed)
+
+    def owned_axes(self) -> tuple[str, ...]:
+        """この表が自分で定義している軸。**控え帳の貼り先はこちらで決まる。**"""
+        return tuple(self._axes)
 
     def adopt_positions(self, other: PositionTable) -> tuple[str, ...]:
         """`positions:` の値だけを差し替え、変わった位置名を返す (`軸.位置名`)。
@@ -696,35 +730,42 @@ class PositionTable:
 
     @property
     def axes(self) -> tuple[str, ...]:
-        return tuple(self._axes)
+        return (*self._axes, *self._borrowed)
 
     @property
     def interlocks(self) -> tuple[InterlockSpec, ...]:
         return self._interlocks
 
     def names(self, axis: str) -> tuple[str, ...]:
-        return tuple(self._positions.get(axis, {}))
+        return tuple(self._values(axis))
 
     def axis(self, axis: str) -> AxisSpec:
+        owner = self._borrowed.get(axis)
+        if owner is not None:
+            return owner.axis(axis)
         spec = self._axes.get(axis)
         if spec is None:
-            available = ", ".join(self._axes) or "(なし)"
+            available = ", ".join(self.axes) or "(なし)"
             raise PositionLookupError(
                 f"軸 '{axis}' が {self._source} に定義されていません。定義済みの軸: {available}"
             )
         return spec
 
+    def _specs(self) -> list[tuple[str, AxisSpec]]:
+        """借りた軸も含めた (軸名, 定義) の列。"""
+        return [(name, self.axis(name)) for name in self.axes]
+
     def sync_tolerance(self, axis: str) -> float | None:
         return self.axis(axis).sync_tolerance
 
     def manual_axes(self) -> tuple[str, ...]:
-        return tuple(name for name, spec in self._axes.items() if spec.manual is not None)
+        return tuple(name for name, spec in self._specs() if spec.manual is not None)
 
     def manual_always_axes(self) -> tuple[str, ...]:
-        return tuple(name for name, spec in self._axes.items() if spec.manual_always)
+        return tuple(name for name, spec in self._specs() if spec.manual_always)
 
     def paired_axes(self) -> tuple[str, ...]:
-        return tuple(name for name, spec in self._axes.items() if spec.sync_tolerance is not None)
+        return tuple(name for name, spec in self._specs() if spec.sync_tolerance is not None)
 
     def court_dependent_axes(self) -> tuple[str, ...]:
         """**指令の換算がコートで鏡になる軸。**コートが決まるまで 1 通も出せない。
@@ -733,7 +774,7 @@ class PositionTable:
         書き写さないため。コート別の**位置の値**を持つだけの軸はここに入らない
         (それは `court_dependent_position_axes`)。
         """
-        return tuple(name for name, spec in self._axes.items() if spec.court_dependent)
+        return tuple(name for name, spec in self._specs() if spec.court_dependent)
 
     def court_dependent_position_axes(self) -> tuple[str, ...]:
         """コート別の値を持つ位置を抱える軸。**その位置名を引くときだけコートが要る。**
@@ -742,8 +783,8 @@ class PositionTable:
         """
         return tuple(
             axis
-            for axis, values in self._positions.items()
-            if any(isinstance(value, dict) for value in values.values())
+            for axis in self.axes
+            if any(isinstance(value, dict) for value in self._values(axis).values())
         )
 
     def homing_prerequisites(self, axes: Collection[str] | None = None) -> dict[str, str]:
@@ -766,14 +807,21 @@ class PositionTable:
                     prerequisites[required.axis] = position
         return prerequisites
 
+    def _values(self, axis: str) -> dict[str, float | dict[str, float]]:
+        """その軸の位置の値。借りた軸なら持ち主の表のものをそのまま返す。"""
+        owner = self._borrowed.get(axis)
+        if owner is not None:
+            return owner._values(axis)
+        return self._positions.get(axis, {})
+
     def raw(self, axis: str, name: str, *, court: Court | None = None) -> float:
         spec = self.axis(axis)
-        values = self._positions.get(axis, {})
+        values = self._values(axis)
         if name not in values:
             available = ", ".join(values) or "(なし)"
             raise PositionLookupError(
-                f"位置 '{spec.name}.{name}' が {self._source} に定義されていません。"
-                f"定義済みの位置: {available}"
+                f"位置 '{spec.name}.{name}' が {self._borrowed.get(axis, self).source} に"
+                f"定義されていません。定義済みの位置: {available}"
             )
 
         value = values[name]

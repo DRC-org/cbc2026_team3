@@ -36,6 +36,9 @@ OPEN_OFFSET: dict[str, str] = {"sub_offset": "open"}
 
 PUMP_RUN: dict[str, str] = {"pump_vac": "run"}
 
+# 後壁。2026-09-11 にメインハンドから管轄を移した
+WALL_R_INITIAL: dict[str, str] = {"wall_r": "initial"}
+
 
 def _all_valves(state: str) -> dict[str, str]:
     return dict.fromkeys(VALVE_AXES, state)
@@ -73,7 +76,7 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ移動")
     async def move_to_initial(self) -> None:
-        await self.move_to(_all_valves("closed") | PUMP_RUN)
+        await self.move_to(_all_valves("closed") | PUMP_RUN | WALL_R_INITIAL)
         # 昇降を寄せてから前後、後退しきってから回転の順に戻す。どの姿勢から
         # 押されても干渉制約を踏まないのはこの順序だけである。
         # 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ

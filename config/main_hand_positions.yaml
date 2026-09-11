@@ -127,20 +127,15 @@ axes:
     manual_always: true
 
   # timeout_s はファームのスルーレート (90deg/s) から決まる。突き合わせは
-  # tests/test_servo_travel_budget.py が行う
+  # tests/test_servo_travel_budget.py が行う。
+  # **この軸はサブハンドへも貸している** (config/system.yaml の shared_axes)。
+  # 貸し先は定義も値もここを引き続けるので、直すのはこの 1 箇所だけでよい
   wall_f:
     unit: deg
     command_unit: deg
     scale: 1.0
     offset: 0.0
     timeout_s: 3.0
-
-  wall_r:
-    unit: deg
-    command_unit: deg
-    scale: 1.0
-    offset: 0.0
-    timeout_s: 2.0
 
 positions:
   # *_after_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
@@ -188,10 +183,3 @@ positions:
     initial: 270.0
     closed: 180.0
     open: 80.0
-
-  # TODO(実機で確認): closed が initial と同値なので動作確認の 1 段目が指令量 0 になり、
-  # closed へ届かない故障を拾えない。後壁の実可動域が決まったら別々の値にすること。
-  wall_r:
-    initial: 90.0
-    closed: 90.0
-    open: 180.0

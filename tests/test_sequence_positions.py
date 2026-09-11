@@ -961,6 +961,66 @@ class TestMerged:
         assert PositionTable.merged([]).axes == ()
 
 
+class TestBorrowedAxis:
+    """複数のロボットから指令する軸 (`config/system.yaml` の `shared_axes`)。
+
+    **貸し先は持ち主の表を引き続ける** —— 値を写すと持ち主側だけを読み直したときに
+    同じ位置が 2 つに割れ、どちらの機体から指令したかで行き先が変わる。
+    """
+
+    @staticmethod
+    def _one(axis: str, value: float, *, source: str) -> PositionTable:
+        return load_position_table(
+            {
+                "axes": {axis: {"unit": "deg", "command_unit": "deg"}},
+                "positions": {axis: {"open": value}},
+            },
+            source=source,
+        )
+
+    def _pair(self) -> tuple[PositionTable, PositionTable]:
+        owner = self._one("wall_f", 80.0, source="<owner>")
+        borrower = self._one("valve_1", 1.0, source="<borrower>")
+        borrower.borrow_axis("wall_f", owner)
+        return owner, borrower
+
+    def test_借りた軸を持ち主と同じ値で引ける(self) -> None:
+        _, borrower = self._pair()
+
+        assert set(borrower.axes) == {"valve_1", "wall_f"}
+        assert borrower.names("wall_f") == ("open",)
+        assert borrower.raw("wall_f", "open") == 80.0
+        assert borrower.commands("wall_f", "open") == {"wall_f": 80.0}
+
+    def test_持ち主を読み直すと貸し先にも届く(self) -> None:
+        owner, borrower = self._pair()
+
+        owner.adopt_positions(self._one("wall_f", 70.0, source="<owner>"))
+
+        assert borrower.raw("wall_f", "open") == 70.0
+
+    def test_貸し先を読み直しても借りた軸は消えない(self) -> None:
+        """借りた軸は `axes:` の突き合わせにも入らない (入ると「増えた軸」で拒まれる)。"""
+        _, borrower = self._pair()
+
+        assert borrower.adopt_positions(self._one("valve_1", 1.0, source="<borrower>")) == ()
+        assert borrower.raw("wall_f", "open") == 80.0
+
+    def test_統合動作確認のマージで二重定義にならない(self) -> None:
+        owner, borrower = self._pair()
+
+        merged = PositionTable.merged([owner, borrower])
+
+        assert set(merged.axes) == {"wall_f", "valve_1"}
+
+    def test_自分で定義した軸は借りられない(self) -> None:
+        owner = self._one("wall_f", 80.0, source="<owner>")
+        borrower = self._one("wall_f", 90.0, source="<borrower>")
+
+        with pytest.raises(ValueError, match="wall_f"):
+            borrower.borrow_axis("wall_f", owner)
+
+
 class TestSyncGain:
     def _paired(self, **extra: object) -> dict:
         return {

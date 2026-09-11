@@ -365,8 +365,8 @@ CAN 越しには指令どおり動いたようにしか見えない）。
 | 基板 | スロット | ピン | 役割 | 型 | デバイス ID | モータ / 用途 |
 |---|---|---|---|---|---|---|
 | #0 | SV0 | D4 | `Servo` | 270° | `0x40` | `gripper`（メインハンド） |
-| #0 | SV1 | D5 | `Servo` | 270° | `0x41` | `wall_f`（メインハンド） |
-| #0 | SV2 | D6 | `Servo` | 270° | `0x42` | `wall_r`（メインハンド） |
+| #0 | SV1 | D5 | `Servo` | 270° | `0x41` | `wall_f`（メインハンド／サブハンド共用） |
+| #0 | SV2 | D6 | `Servo` | 270° | `0x42` | `wall_r`（サブハンド） |
 | #0 | SV3 | D7 | **`TouchSensor`** | ― | `0x43` | `rotate_origin_sensor`（`rotate` の原点） |
 | #0 | SV4 | D8 | **`TouchSensor`** | ― | `0x44` | `y_axis_r_origin_sensor`（`y_axis` 右のスイッチ） |
 | #1 | SV0 | D4 | **`TouchSensor`** | ― | `0x48` | `y_axis_l_origin_sensor`（**メインハンド**。`y_axis` 左のスイッチ） |

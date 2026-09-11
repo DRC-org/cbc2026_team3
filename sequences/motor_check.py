@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # の `guard.not_with`)。昇降を先に上げるのは機構が当たらない高さで前後へ走らせるため。
 # 順序は `SubHandSequence.move_to_initial` と同じで、どの姿勢から押しても踏まない
 SUB_HOME: dict[str, str] = {
+    # 後壁は他の軸と当たらないので先に戻す (順序の制約があるのは昇降から下)
+    "wall_r": "initial",
     "sub_lift": "top",
     "sub_y_axis": "retracted",
     "sub_pitch": "open",
@@ -87,11 +89,13 @@ class MotorCheckSequence(Sequence):
         await self.move_to({"gripper": "closed"})
         await self.move_to({"gripper": "open"})
 
-    @step("メインハンド 壁 前後", axes={"wall_f", "wall_r"})
-    async def main_walls(self) -> None:
-        await self.move_to({"wall_f": "closed", "wall_r": "closed"})
-        await self.move_to({"wall_f": "open", "wall_r": "open"})
-        await self.move_to({"wall_f": "initial", "wall_r": "initial"})
+    # 前壁はメインハンドが持ち主でサブハンドへも貸している (config/system.yaml)。
+    # 後壁はサブハンドの管轄なので段を分ける
+    @step("メインハンド コンベア前壁", axes={"wall_f"})
+    async def main_wall_f(self) -> None:
+        await self.move_to({"wall_f": "closed"})
+        await self.move_to({"wall_f": "open"})
+        await self.move_to({"wall_f": "initial"})
 
     @step("メインハンド コンベア (目視確認)", axes={"conveyor"})
     async def main_conveyor(self) -> None:
@@ -102,6 +106,12 @@ class MotorCheckSequence(Sequence):
     async def sub_home(self) -> None:
         for targets in _one_by_one(SUB_HOME):
             await self.move_to(targets)
+
+    @step("サブハンド コンベア後壁", axes={"wall_r"})
+    async def sub_wall_r(self) -> None:
+        await self.move_to({"wall_r": "closed"})
+        await self.move_to({"wall_r": "open"})
+        await self.move_to({"wall_r": "initial"})
 
     @step("サブハンド 前後スライド (Y 方向)", axes={"sub_y_axis"})
     async def sub_y_axis(self) -> None:

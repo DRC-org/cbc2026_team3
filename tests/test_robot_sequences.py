@@ -117,7 +117,6 @@ _MAIN_POSITIONS = {
         "gripper": _axis(),
         "conveyor": _axis(command_mode="duty", settle_s=0.0),
         "wall_f": _axis(),
-        "wall_r": _axis(),
     },
     "positions": {
         # 退避点は経路の順序をそのまま指令値で読むための目印なので、軸をまたいで
@@ -148,7 +147,6 @@ _MAIN_POSITIONS = {
         "gripper": {"open": 31.0, "closed": 32.0},
         "conveyor": {"stop": 0.0, "run": 0.4},
         "wall_f": {"initial": 41.0, "closed": 42.0, "open": 43.0},
-        "wall_r": {"initial": 44.0, "closed": 45.0, "open": 46.0},
     },
 }
 
@@ -159,7 +157,6 @@ _MAIN_HOME_TARGETS = [
     ("rotate_l", -20.0),
     ("gripper", 31.0),
     ("wall_f", 41.0),
-    ("wall_r", 44.0),
     # HOME 姿勢はコンベアを止めて待つ
     ("conveyor", 0.0),
 ]
@@ -170,10 +167,12 @@ _SUB_POSITIONS = {
     "axes": {
         **{name: _axis(command_mode="on_off", settle_s=0.0) for name in _VALVE_AXES},
         "pump_vac": _axis(command_mode="duty", settle_s=0.0),
+        "wall_r": _axis(),
     },
     "positions": {
         **{name: {"open": 1.0, "closed": 0.0} for name in _VALVE_AXES},
         "pump_vac": {"stop": 0.0, "run": 0.61},
+        "wall_r": {"initial": 44.0, "closed": 45.0, "open": 46.0},
     },
 }
 
@@ -551,7 +550,7 @@ class TestSubHandSteps:
         calls = [targets for index, targets in moves if index == 0]
 
         assert calls == [
-            {**dict.fromkeys(_VALVE_AXES, "closed"), "pump_vac": "run"},
+            {**dict.fromkeys(_VALVE_AXES, "closed"), "pump_vac": "run", "wall_r": "initial"},
             {"sub_lift": "pick"},
             {"sub_y_axis": "home"},
             {"sub_pitch": "open"},

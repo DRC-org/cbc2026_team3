@@ -267,7 +267,7 @@ class TestPartialConfiguration:
             "メインハンド y 軸 (左右直結ペア)",
             "メインハンド エンドエフェクタ回転 (左右直結ペア)",
             "メインハンド グリッパ",
-            "メインハンド 壁 前後",
+            "メインハンド コンベア前壁",
             "メインハンド コンベア (目視確認)",
         ]
 
@@ -282,6 +282,7 @@ class TestPartialConfiguration:
 
         assert excluded == {
             "サブハンド 初期姿勢へ": tuple(sorted(SUB_HOME)),
+            "サブハンド コンベア後壁": ("wall_r",),
             "サブハンド 前後スライド (Y 方向)": ("sub_y_axis",),
             "サブハンド 昇降": ("sub_lift",),
             "サブハンド 回転 (左右直結ペア)": ("sub_rotate",),
