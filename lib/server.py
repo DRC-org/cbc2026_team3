@@ -53,6 +53,7 @@ from lib.server_motor_check import MotorCheckController, Pausable
 from lib.server_switch_measure import SwitchMeasureController
 from lib.suction import SuctionSelection
 from lib.ws_hub import WsHub
+from lib.ws_state import StateThinner
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,9 @@ _FIRMWARE_INFO_GRACE_S = 3.0
 
 _PENDING_TASK_CANCEL_TIMEOUT_S = 0.5
 
+# 配信が遅れているときに空ける上限。これ以上空けると画面の値が古すぎて操縦に使えない
+_BROADCAST_MAX_INTERVAL_S = 0.5
+
 type WSOrNone = web.WebSocketResponse | None
 
 
@@ -74,11 +78,19 @@ def _measured_only(
     values: dict[str, float], telemetry: TelemetrySupport
 ) -> dict[str, float | None]:
     return {
-        "pos": values["pos"] if telemetry.position else None,
-        "vel": values["vel"] if telemetry.velocity else None,
-        "torque": values["torque"] if telemetry.current else None,
-        "temp": values["temp"] if telemetry.temperature else None,
+        "pos": _display(values["pos"]) if telemetry.position else None,
+        "vel": _display(values["vel"]) if telemetry.velocity else None,
+        "torque": _display(values["torque"]) if telemetry.current else None,
+        "temp": _display(values["temp"], digits=1) if telemetry.temperature else None,
     }
+
+
+def _display(value: float | None, *, digits: int = 3) -> float | None:
+    """配信の桁を画面で読める幅へ丸める (float の生桁は細い WiFi では純粋な無駄)。
+
+    **丸めるのは配信の境界だけ。** 制御経路は元の float を見る。
+    """
+    return None if value is None else round(value, digits)
 
 
 def _level_for_state(state: BusHealth) -> str:
@@ -160,6 +172,7 @@ class RobotServer:
         self._app: web.Application | None = None
         self._robots: dict[str, RobotContext] = {}
         self._ws = WsHub()
+        self._state_thinner = StateThinner()
         self._broadcast_interval: float = 0.05
         self._broadcast_task: asyncio.Task[None] | None = None
         self._e_stop_active: bool = False
@@ -390,6 +403,8 @@ class RobotServer:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self._ws.add(ws)
+        # 繋いだ直後の 1 通を全欄に戻す (差分は「相手が前回値を持っている」前提で落としている)
+        self._state_thinner.request_full()
         logger.info("WebSocket 接続: %s", request.remote)
 
         for snapshot in (
@@ -640,6 +655,14 @@ class RobotServer:
         logger.info(
             "吸着パッド選択: robot=%s 使用=%s", robot_name, ", ".join(suction.enabled()) or "なし"
         )
+
+    async def _cmd_ping(self, data: dict, requester: WSOrNone) -> None:
+        """往復時間の実測。送り主の目印をそのまま返すだけ (時計は合わせない)。"""
+        if requester is None or requester.closed:
+            return
+        msg = json.dumps({"type": "pong", "t": data.get("t")}, ensure_ascii=False)
+        if not await self._ws.send_or_drop(requester, msg):
+            await self._ws.drop({requester})
 
     async def _cmd_position_capture(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
@@ -951,7 +974,10 @@ class RobotServer:
 
         handle = group[motor_name]
         mode = handle.mode
-        return {"command": handle.target, "command_mode": None if mode is None else mode.value}
+        return {
+            "command": _display(handle.target),
+            "command_mode": None if mode is None else mode.value,
+        }
 
     async def _handle_set_court(
         self,
@@ -1473,6 +1499,7 @@ class RobotServer:
 
     async def _broadcast_loop(self) -> None:
         while True:
+            started = time.monotonic()
             try:
                 await self._broadcast_state()
                 await self._motor_check.publish()
@@ -1482,7 +1509,16 @@ class RobotServer:
                 raise
             except Exception:
                 logger.exception("状態配信に失敗しました (配信は継続します)")
-            await asyncio.sleep(self._broadcast_interval)
+            await asyncio.sleep(self._broadcast_delay(time.monotonic() - started))
+
+    def _broadcast_delay(self, elapsed: float) -> float:
+        """送信に食われた時間の分だけ次の周期を空ける。
+
+        細い WiFi では送信そのものが遅れる。そこへ 20Hz で積み増すと送信上限
+        (`_WS_SEND_TIMEOUT_S`) に当たって操縦者が切り離される —— 表示の滑らかさより
+        繋がり続ける方を採る。速さが戻れば次の周期で元に戻る (状態を持たない)。
+        """
+        return max(self._broadcast_interval, min(elapsed * 2.0, _BROADCAST_MAX_INTERVAL_S))
 
     def _compute_health(self, robot_name: str) -> HealthSnapshot:
         ctx = self._robots[robot_name]
@@ -1593,7 +1629,9 @@ class RobotServer:
         state_messages: list[dict] = []
         change_events: list[dict] = []
         for robot_name, snap in snapshots.items():
-            state_messages.append(self._build_state_message(robot_name, snapshot=snap))
+            state_messages.append(
+                self._state_thinner.thin(self._build_state_message(robot_name, snapshot=snap))
+            )
 
             prev = self._last_health.get(robot_name)
             change_events.extend(self._diff_health(robot_name, prev, snap))
@@ -1694,10 +1732,12 @@ class RobotServer:
 
     def _manual_state(self, robot_name: str) -> dict:
         ctx = self._robots[robot_name]
-        return {
-            "mode": ctx.mode.value,
-            "axes": ctx.manual.axes_info() if ctx.manual is not None else [],
-        }
+        axes = ctx.manual.axes_info() if ctx.manual is not None else []
+        for axis in axes:
+            # 画面の桁へ丸める。生桁のままだと、表示に出ない揺れで軸行が毎フレーム再送される
+            for key in ("value", "target", "deviation"):
+                axis[key] = _display(axis.get(key))
+        return {"mode": ctx.mode.value, "axes": axes}
 
     async def start(self) -> None:
         app = self.create_app()

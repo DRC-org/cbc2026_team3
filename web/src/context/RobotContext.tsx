@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 
+import type { LinkState } from "@/lib/linkQuality";
 import type {
   HomingSnapshot,
   MatchCourt,
@@ -27,6 +28,7 @@ export interface RobotStatus {
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
+  link: LinkState;
   wsUrl: string;
   wsUrlSource: WsUrlSource;
 }
@@ -75,6 +77,7 @@ export function RobotProvider({
     matchState,
     serverInfo,
     rejection,
+    link,
     wsUrl,
     wsUrlSource,
     clearRejection,
@@ -105,6 +108,7 @@ export function RobotProvider({
       matchState,
       serverInfo,
       rejection,
+      link,
       wsUrl,
       wsUrlSource,
     }),
@@ -120,6 +124,7 @@ export function RobotProvider({
       matchState,
       serverInfo,
       rejection,
+      link,
       wsUrl,
       wsUrlSource,
     ],

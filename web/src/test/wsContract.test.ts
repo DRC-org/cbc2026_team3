@@ -44,9 +44,20 @@ import contract from "@/test/ws-contract.json";
 
 const URL = "ws://contract/ws";
 
+/** `tests/test_ws_contract.py` の PING_TOKEN。golden に時刻を焼かないための固定値 */
+const PING_TOKEN = 1700000000000;
+
 type Sample = Record<string, unknown>;
 
 const SAMPLES = contract.samples as unknown as Record<string, Sample>;
+
+/** 差分配信のサンプル (`full` が無い `state`)。欄が欠けているのが正しい姿。 */
+function isStatePatch(sample: Sample): boolean {
+  return sample.type === "state" && sample.full !== true;
+}
+
+/** 差分でも毎フレーム載る欄 (`lib/ws_state.py` の `ALWAYS_SEND`)。 */
+const PATCH_ALWAYS_PRESENT = ["type", "robot", "e_stop_active", "safety"] as const;
 
 type SocketResult = ReturnType<typeof useRobotSocket>;
 type Expectation = (result: SocketResult, sample: Sample) => void;
@@ -169,6 +180,13 @@ const EXPECTATIONS: Record<string, Expectation> = {
     expect(result.eStopReason).toBe(sample.reason);
   },
 
+  pong: (result, sample) => {
+    // 目印がそのまま返り、往復時間になる (返ってこない = 回線が死んでいる)
+    expect(sample.t).toBe(PING_TOKEN);
+    expect(result.link.rttMs).not.toBeNull();
+    expect(result.link.lastPongAtMs).not.toBeNull();
+  },
+
   command_rejected: (result, sample) => {
     expect(result.rejection).toMatchObject({
       command: sample.command,
@@ -271,6 +289,8 @@ describe("WS 契約 (ws-contract.json)", () => {
       if (!expectation) throw new Error(`契約サンプル ${name} に対応する検証がありません`);
 
       const { result } = renderConnected();
+      // 差分は前回値へ重ねるものなので、全欄の 1 通を先に流す (実配信と同じ順序)
+      if (isStatePatch(SAMPLES[name])) act(() => latestSocket().receive(SAMPLES.state));
       act(() => latestSocket().receive(SAMPLES[name]));
 
       expectation(result.current, SAMPLES[name]);
@@ -553,6 +573,7 @@ const POSITIONS_RELOAD = fieldsOf<PositionsReloadState>({
 const STATE_FIELDS: FieldSpec = {
   ...fieldsOf<RobotState>({
     type: "parser",
+    full: "parser",
     robot: "ui",
     sequence: "ui",
     step_index: "ui",
@@ -647,6 +668,11 @@ const DECLARED: Record<string, FieldSpec> = {
     reason: "ui",
   }),
 
+  pong: fieldsOf<WireOf<"pong">>({
+    type: "parser",
+    t: "ui",
+  }),
+
   motor_check_state: MOTOR_CHECK_FIELDS,
   motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
   homing_state: HOMING_FIELDS,
@@ -706,6 +732,12 @@ describe("WS 契約 (逆方向 — サーバーが送るものを TS が知っ�
     });
 
     it("UI が読むと宣言した欄が実配信から消えていない", () => {
+      // 差分は「変わった欄」だけ届く。欠けた欄は前回値が残るので、ここで要求するのは
+      // 安全の判断に使う欄だけ (全欄が揃っているかは full のサンプルが見ている)
+      if (isStatePatch(SAMPLES[name])) {
+        for (const field of PATCH_ALWAYS_PRESENT) expect(SAMPLES[name]).toHaveProperty(field);
+        return;
+      }
       expect(missingDeclaredPaths(name, DECLARED[name], SAMPLES[name])).toEqual([]);
     });
   });

@@ -1,6 +1,7 @@
-import { useCallback, useReducer } from "react";
+import { useCallback, useEffect, useReducer } from "react";
 
 import { useWebSocket } from "@/hooks/useWebSocket";
+import type { LinkState } from "@/lib/linkQuality";
 import { parseServerMessage } from "@/lib/protocol";
 import type {
   HomingSnapshot,
@@ -26,11 +27,14 @@ interface UseRobotSocketReturn {
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
+  link: LinkState;
   clearRejection: () => void;
   setEStopActive: (active: boolean) => void;
   reportUnsent: (command: string, reason: string) => void;
   send: (data: object) => boolean;
 }
+
+const PING_INTERVAL_MS = 1000;
 
 export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketReturn {
   const [state, dispatch] = useReducer(robotReducer, INITIAL_ROBOT_UI_STATE);
@@ -41,6 +45,22 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
   }, []);
 
   const { connected, send } = useWebSocket(url, handleMessage);
+
+  // 往復時間を測り続ける。細い WiFi では「繋がっているのに指令が届かない」が起きるので、
+  // 接続中かどうかだけでは操縦者が判断できない
+  useEffect(() => {
+    if (!connected) {
+      dispatch({ type: "link_reset" });
+      return;
+    }
+    const ping = () => {
+      const nowMs = Date.now();
+      if (send({ type: "ping", t: nowMs })) dispatch({ type: "ping_sent", nowMs });
+    };
+    ping();
+    const timer = setInterval(ping, PING_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [connected, send]);
 
   const clearRejection = useCallback(() => dispatch({ type: "clear_rejection" }), []);
   const reportUnsent = useCallback(
@@ -65,6 +85,7 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
     matchState: state.matchState,
     serverInfo: state.serverInfo,
     rejection: state.rejection,
+    link: state.link,
     clearRejection,
     setEStopActive,
     reportUnsent,

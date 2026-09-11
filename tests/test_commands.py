@@ -49,6 +49,7 @@ _EXPECTED_COMMANDS = {
     "suction_pads_set",
     "position_capture",
     "positions_reload",
+    "ping",
 }
 
 

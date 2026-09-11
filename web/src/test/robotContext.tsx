@@ -4,6 +4,7 @@ import { vi } from "vitest";
 
 import { RobotProvider } from "@/context/RobotContext";
 import type { RobotContextValue } from "@/context/RobotContext";
+import { INITIAL_LINK_STATE } from "@/lib/linkQuality";
 import type {
   HomingSnapshot,
   MatchState,
@@ -46,6 +47,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     eStopActive: false,
     eStopReason: null,
     eStopOverlayHidden: false,
+    link: INITIAL_LINK_STATE,
     healthEvents: [],
     motorCheck: emptyMotorCheckState(),
     homing: emptyHomingState(),

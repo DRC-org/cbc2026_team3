@@ -348,6 +348,14 @@ _SPECS: tuple[CommandSpec, ...] = (
         allowed_during_e_stop=True,
         handler="_cmd_suction_pads_set",
     ),
+    # 往復時間の実測。機体には触らないので全フェーズ素通し (WiFi が細いときに
+    # 「指令が遅れている」と操縦者が読めるのは、この 1 本だけ)
+    _spec(
+        "ping",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=True,
+        handler="_cmd_ping",
+    ),
 )
 
 COMMANDS: dict[str, CommandSpec] = {spec.name: spec for spec in _SPECS}

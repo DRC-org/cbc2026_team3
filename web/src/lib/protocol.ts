@@ -624,6 +624,11 @@ export function parsePositionsReload(
 export interface RobotState {
   type?: "state";
   robot: string;
+  /**
+   * 全欄が載っているか。**偽 (欄ごと無い) なら差分** —— 欠けた欄は前回値のまま
+   * （サーバーが細い WiFi 向けに同じ値の欄を落としている。`lib/ws_state.py`）
+   */
+  full?: boolean;
   sequence: string;
   current_step: string | null;
   step_index: number;
@@ -647,7 +652,7 @@ export interface RobotState {
 }
 
 export type ServerMessage =
-  | { type: "state"; robot: string; state: RobotState }
+  | { type: "state"; robot: string; full: boolean; state: RobotState }
   | { type: "server_info"; serverInfo: ServerInfo }
   | { type: "match_state"; matchState: MatchState }
   | { type: "e_stop_state"; active: boolean; reason: string | null }
@@ -655,7 +660,8 @@ export type ServerMessage =
   | { type: "health_change"; event: HealthChange }
   | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot }
   | { type: "homing_state"; homing: HomingSnapshot }
-  | { type: "switch_measure_state"; switchMeasure: SwitchMeasureSnapshot };
+  | { type: "switch_measure_state"; switchMeasure: SwitchMeasureSnapshot }
+  | { type: "pong"; t: number | null };
 
 type Raw = Record<string, unknown>;
 
@@ -711,7 +717,8 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (health !== undefined) state.health = health;
       const sensors = parseSensors(raw.sensors);
       if (sensors !== undefined) state.sensors = sensors;
-      state.last_error = parseSequenceFailure(raw.last_error);
+      // 差分では欄ごと来ない。無い欄へ null を書くと前回値を消してしまう
+      if ("last_error" in raw) state.last_error = parseSequenceFailure(raw.last_error);
       if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
       const suction = parseSuction(raw.suction);
       if (suction !== undefined) state.suction = suction;
@@ -720,8 +727,12 @@ function parseKnown(raw: Raw): ServerMessage | null {
       const positionsReload = parsePositionsReload(raw.positions_reload);
       if (positionsReload !== undefined) state.positions_reload = positionsReload;
 
-      return { type: "state", robot, state };
+      return { type: "state", robot, full: raw.full === true, state };
     }
+
+    // 往復時間の実測。送った目印がそのまま返る (時刻合わせはしない)
+    case "pong":
+      return { type: "pong", t: typeof raw.t === "number" ? raw.t : null };
 
     case "server_info":
       return {

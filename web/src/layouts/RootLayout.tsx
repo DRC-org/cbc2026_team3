@@ -143,6 +143,7 @@ export function RootLayout() {
         matchState: socket.matchState,
         serverInfo: socket.serverInfo,
         rejection: socket.rejection,
+        link: socket.link,
         clearRejection,
         wsUrl,
         wsUrlSource,
