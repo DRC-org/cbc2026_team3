@@ -331,6 +331,7 @@ class _TwoStep(Sequence):
         await self.move_to({"sub_offset": "close"})
 
 
+@pytest.mark.usefixtures("instant_settle")
 class TestSequence:
     async def test_逆順に書き換えた段は_move_to_で拒否される(self) -> None:
         table = load_position_table(_config(), source="<test>")

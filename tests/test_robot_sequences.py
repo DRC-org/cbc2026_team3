@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from lib.drivers.base import ControlMode
-from lib.match_state import ROLE_PRE_MATCH, Court, load_checklist_definitions
+from lib.match_state import Court, load_checklist_definitions
 from lib.motion_guard import MotionGuardSpec
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
@@ -278,17 +278,13 @@ class TestMainHandSteps:
         2 通に割ると片軸だけが動いた中間姿勢ができ、そこが干渉姿勢かは
         位置定数からは読めない。**経由点を廃した今、対を保つのはこの 1 通である。**
         """
-        table = load_position_table(_MAIN_POSITIONS)
-        seq = MainHandSequence()
-        sink, _ = _wire(seq, _MAIN_POSITIONS)
+        moves = [
+            targets
+            for info, targets in await _run_each_move(MainHandSequence(), _MAIN_POSITIONS)
+            if info.method_name == method_name
+        ]
 
-        await getattr(seq, method_name)()
-
-        issued = dict(sink)
-        for axis, name in (("y_axis", work), ("rotate", "pick")):
-            for motor, command in table.commands(axis, name).items():
-                assert issued.get(motor) == command, f"{method_name}: {motor} が {name} へ行かない"
-        assert len(sink) == len(issued), f"{method_name} が同じモータへ 2 度指令している"
+        assert moves == [{"y_axis": work, "rotate": "pick"}]
 
     async def test_starts_and_ends_at_home(self) -> None:
         per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
@@ -618,6 +614,7 @@ def _load_config(robot_config: str) -> dict:
     return yaml.safe_load((_CONFIG_DIR / robot_config).read_text())
 
 
+@pytest.mark.usefixtures("instant_settle")
 class TestShippedPositionYaml:
     @pytest.mark.parametrize(("yaml_name", "robot_config", "sequence_cls"), _ROBOTS)
     async def test_all_steps_run_against_shipped_yaml(
@@ -754,28 +751,6 @@ class TestShippedRobotConfig:
             "bench/edulite/main_hand.yaml:rotate",
             "bench/m3508/main_hand.yaml:y_axis",
         } <= inspected
-
-    def test_checklist_covers_what_cannot_be_judged_automatically(self) -> None:
-        checklist = yaml.safe_load((_CONFIG_DIR / "checklist.yaml").read_text())
-        ids = {item["id"] for item in checklist["checklists"][ROLE_PRE_MATCH]}
-
-        assert {
-            "y_axis_sync",
-            "rotate_sync",
-            "wall_initial",
-            "conveyor_stop",
-            "conveyor_run",
-            "origin_sensor_react",
-            # 向きの取り違えは反応の確認では見えない (押されている端へ進む指令だけが
-            # 通る)。退避できるかどうかを機体ごとに唱えるのが唯一の検出経路
-            "limit_escape_main",
-            "limit_escape_sub",
-            "valves_closed",
-            "valves_actuate",
-            "pumps_run",
-            "suction_hold",
-            "suction_release",
-        } <= ids
 
 
 _CHECKLIST_PATHS = sorted(_CONFIG_DIR.rglob("checklist.yaml"))

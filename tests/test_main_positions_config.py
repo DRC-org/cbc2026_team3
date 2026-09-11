@@ -137,6 +137,61 @@ class TestShippedYAxisHoming:
         assert homing.search_distance == pytest.approx(manual.max_value - manual.min_value)
 
 
+class TestShippedRotateHoming:
+    """`rotate` も零点確定を終えたら干渉域を抜けること。
+
+    守りが `y_axis` の側にしか無いと、零点合わせパネルで「`rotate` だけ確定 →
+    後から `y_axis` だけ確定」と回したときに `y_axis` の探索段が干渉域へ降り、
+    停滞判定で失敗する。**症状は `y_axis` 側の失敗としてしか出ない**ので、
+    退避を config に持たせておくことでしか防げない。
+    """
+
+    @pytest.fixture
+    def table(self):
+        return _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+
+    @pytest.fixture
+    def homing(self, table):
+        spec = table.axis("rotate").homing
+        assert spec is not None, "rotate の零点確定が無効になっている"
+        return spec
+
+    def test_retreats_before_the_next_axis_is_homed(self, table, homing) -> None:
+        """`y_axis` も零点確定を持つ以上、`rotate` は確定した位置に居座ってはならない。"""
+        assert table.axis("y_axis").homing is not None, "y_axis の零点確定が無効"
+        assert homing.retreat_position is not None
+        # 原点は - 側 (homing.direction: -1) なので、退避先は + 側にある
+        assert table.raw("rotate", homing.retreat_position) > 0.0
+
+    def test_retreat_target_is_clear_of_the_origin_switch(self, table, homing) -> None:
+        """退避先の到達帯が原点センサの ON 区間へ食い込まないこと。
+
+        食い込むと、可動端インターロック (`guard.limits.minus: rotate_origin_sensor`)
+        が ON 区間の内側からの指令を拒み、退避そのものが失敗する。
+        """
+        spec = table.axis("rotate")
+        assert spec.tolerance is not None, "tolerance が無く到達帯を決められない"
+        assert homing.retreat_position is not None
+        # 原点センサの ON 区間の実測 (docs/mechanism_handoff.md §1)
+        on_span_deg = 2.0
+
+        reachable_low = table.raw("rotate", homing.retreat_position) - spec.tolerance
+        assert reachable_low > on_span_deg
+
+    def test_search_distance_matches_the_manual_span(self, table, homing) -> None:
+        """探索の打ち切り上限は `manual` の全幅と一致していること。
+
+        `search_distance` は「当たるまで動かす」動作に対する唯一の無人の歯止めで
+        あり、同時に探索の打ち切り上限でもある。片方だけ動かすと、狭ければ
+        宣言範囲の端から始めた探索が原点へ届く前に打ち切られ、広ければ宣言した
+        範囲の外まで押し込む。
+        """
+        manual = table.axis("rotate").manual
+
+        assert manual is not None
+        assert homing.search_distance == pytest.approx(manual.max_value - manual.min_value)
+
+
 class TestShippedRotateTravel:
     """`rotate` の機械的可動域。**回転数の一意化が成り立つ唯一の根拠**である。
 

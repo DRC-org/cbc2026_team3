@@ -11,6 +11,8 @@ import pytest
 
 _PROJECT_DIR = pathlib.Path(__file__).resolve().parent.parent
 
+pytestmark = pytest.mark.slow
+
 _STARTUP_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 15.0
 

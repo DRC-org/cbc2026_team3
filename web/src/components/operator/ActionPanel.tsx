@@ -57,12 +57,12 @@ export function ActionPanel({
   const burstEnd = burst.at(-1);
   const stopsAtTrigger = burstEnd?.require_trigger ?? false;
   const burstMessage = isComplete
-    ? "シーケンスは終了しています"
+    ? "終了"
     : burstEnd === undefined
-      ? "これが最終ステップです"
+      ? "最終ステップ"
       : stopsAtTrigger
-        ? `${burst.length} ステップ走って「${burstEnd.label}」で停止`
-        : `残り ${burst.length} ステップを最後まで走り切ります (途中で止まりません)`;
+        ? `${burst.length} ステップ先「${burstEnd.label}」で停止`
+        : `残り ${burst.length} ステップ 停止なし`;
   const idle = inMatch && kind === "idle";
 
   const status: { label: string; tone: Tone } = !inMatch
@@ -72,12 +72,12 @@ export function ActionPanel({
       : kind === "complete"
         ? { label: "完走", tone: "success" }
         : kind === "waiting_trigger"
-          ? { label: "許可待ち — NEXT を押してください", tone: "warning" }
+          ? { label: "許可待ち", tone: "warning" }
           : kind === "running"
             ? { label: "実行中", tone: "info" }
             : restartFromTop
-              ? { label: "停止中 — START は先頭から走り直します", tone: "warning" }
-              : { label: "待機中 — START で開始", tone: "neutral" };
+              ? { label: "停止中", tone: "warning" }
+              : { label: "待機中", tone: "neutral" };
 
   return (
     <Panel accentTone={status.tone} className="shrink-0" bodyClassName="p-0">

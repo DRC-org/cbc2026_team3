@@ -2,7 +2,7 @@
 
 [Unit]
 Description=CBC2026 Team3 CAN bus-off 復旧ウォッチドッグ
-Documentation=file://@PROJECT_DIR@/docs/checks_and_health.md
+Documentation=file://@PROJECT_DIR@/docs/operations.md
 After=cbc-can.service
 Requires=cbc-can.service
 

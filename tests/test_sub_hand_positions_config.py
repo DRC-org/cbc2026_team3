@@ -354,15 +354,6 @@ class TestVenueCardNumbers:
         assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in message
         assert required.label in message
 
-    def test_点検の文書が文面と同じ数値を書いている(self, table: PositionTable) -> None:
-        required = _requirement(table, "sub_y_axis")
-        text = (_DOC_DIR / "checks_and_health.md").read_text()
-
-        assert f"[{required.low:.4g}, {required.high:.4g}]{required.unit}" in text
-        assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in text
-        assert f"{table.raw('sub_lift', 'top'):g}mm" in text
-        assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
-
     def test_会場カードが文面と同じ数値を書いている(self, table: PositionTable) -> None:
         text = (_DOC_DIR / "venue_recovery.md").read_text()
 

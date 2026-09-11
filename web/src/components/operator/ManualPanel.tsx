@@ -76,9 +76,7 @@ export function ManualPanel({
       actions={blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
     >
       {axes.length === 0 ? (
-        <p className="p-2 text-base-content/70">
-          このロボットには手動操縦できる軸がありません (位置定数が未読込です)。
-        </p>
+        <p className="p-2 text-base-content/70">手動軸なし</p>
       ) : (
         <>
           <div className="scroll @container flex min-h-0 flex-1 flex-col">
@@ -125,7 +123,6 @@ export function ManualPanel({
                   {label}
                 </span>
               ))}
-              <span className="ml-auto shrink-0">可動範囲内でのみ動きます</span>
             </div>
           )}
         </>

@@ -75,13 +75,21 @@ axes:
       min: 0.0
       max: 200.0
     # TODO(実機で確認): search_distance だけが暫定値 (触れていない位置から何 deg で
-    # 当たるかは未計測)。詰めるときは上の manual の min/max も同時に寄せること。
+    # 当たるかは未計測)。
     homing:
       sensor: rotate_origin_sensor
       direction: -1
-      search_distance: 180.0
+      # search_distance は上の manual の全幅 (max - min) と対で、どちらを動かしたら
+      # もう一方も同時に寄せる。狭いと宣言範囲の端から始めた探索が原点へ届く前に
+      # 打ち切られ、広いと宣言範囲の外まで押し込む。対を機械的に守るのは
+      # tests/test_main_positions_config.py の一致検査だけである
+      search_distance: 185.0
       # 0.5deg では 1 歩も動かなかった (2026-09-05 実機。静止摩擦が下限を決める)
       step: 1.0
+      # y_axis = 0 と rotate = 0 は機構が干渉する。rotate が原点に居座ったままだと、
+      # 後から y_axis だけ零点確定を走らせたときに探索段が干渉域へ降りて 1 歩も動けず、
+      # しかも症状は y_axis 側の失敗としてしか出ない
+      retreat_position: home
       settle_s: 0.05
     guard:
       # 原点は - 側 (homing.direction: -1)。逆 (plus) に書くと守りが反転し、
@@ -149,13 +157,6 @@ positions:
     work_shared: 550.0
 
   rotate:
-    # 0.0 は零点確定のスイッチの動作点そのもの。tolerance 2.0deg の到達帯が
-    # ON 区間 (実測 約 2deg) へ食い込むと、可動端インターロック
-    # (guard.limits.minus: rotate_origin_sensor) がその内側からの指令を拒む。
-    # y_axis.home と rotate.home が両方 0.0 だと HOME 姿勢そのものが干渉姿勢になるので、
-    # 離すのは rotate の側だけ (docs/invariants.md §4、tests/test_main_positions_config.py
-    # の TestShippedRotateHome が固定)。
-    # TODO(実機で確認): 干渉しない角の実測はまだ無い (docs/mechanism_handoff.md §1)
     home: 5.0
     work_3_after_1: 165.0
     work_3_after_2: 155.0

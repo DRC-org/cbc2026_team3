@@ -1,93 +1,18 @@
 checklists:
   pre_match:
-    - id: can_bus_strict
-      label: scripts/setup_can.sh --strict が全バス起動で通ること確認 (欠け 0 / 失敗 0)
+    - id: installation
+      label: ロボットの固定は正しいか
       group: preflight
-    - id: health_ready
-      label: Monitor のヘルスが READY・無励磁のモータが 0 台であること確認
-      group: preflight
-    - id: estop_release
-      label: 非常停止スイッチ解除確認
-      group: preflight
-    - id: main_home_position
-      label: メインハンド初期位置確認
-      group: preflight
-    - id: sub_home_position
-      label: サブハンド初期位置確認
-      group: preflight
-    - id: main_gripper_open
-      label: グリッパ開状態確認
-      group: preflight
-    - id: wall_initial
-      label: 壁 前後とも初期位置確認
-      group: preflight
-    - id: valves_closed
-      label: 電磁弁 6 個が全て閉じていること確認 (通電音がしないこと)
-      group: preflight
-    # 物理非常停止で DM3520 の電源が落ちると原点が作り直されるが、PC 側に検出手段が無い。
-    - id: sub_dm3520_origin
-      label: サブハンド 前後・昇降が可動範囲内にあること確認 (原点は 2 軸とも動作確認の零点確定で決まる。物理非常停止を踏んだ後はやり直すこと)
+    - id: error_pcb
+      label: エラーの基板はないか
       group: preflight
 
     - id: court
-      label: コート設定 (赤/青) と実配置の一致確認
+      label: コート設定は正しいか
       group: court
 
     - id: motor_check
-      label: アクチュエータ動作確認 完了
-      group: motor_check
-    - id: y_axis_sync
-      label: y 軸 左右のずれがないこと確認
-      group: motor_check
-    - id: rotate_sync
-      label: エンドエフェクタ回転 左右のずれがないこと確認
-      group: motor_check
-    - id: sub_servo_move
-      label: サブハンド 回転・ピッチ・オフセットの 3 軸が動作確認中に実際に動くこと目視確認 (サーボは指令角を返すだけなので自動判定できない)
-      group: motor_check
-    - id: sub_servo_pair_sync
-      label: サブハンド 回転・ピッチの左右が同じ姿勢であること確認 (サーボは偏差監視が効かず、ずれの検出はここだけ)
-      group: motor_check
-    - id: firmware_match
-      label: 自作モタドラ 3 種のファーム版・サーボ可動角の異常表示と「版番号 未確認」が出ていないこと確認
-      group: motor_check
-    - id: origin_sensor_react
-      label: メインハンドの原点センサ 3 本 (rotate / y_axis 左右) に順に触れ、Controller の診断ツリーで 3 本とも反応することを確認
-      group: motor_check
-    - id: limit_sensor_react
-      label: サブハンドの可動端センサ 4 本 (前後の前端・後端 / 昇降の上端・下端) に順に触れ、診断ツリーで 4 本とも反応することを確認
-      group: motor_check
-    # 向きの取り違えは「押されている端へ進む指令だけが通る」形で現れるので、
-    # 反応の確認 (上の 2 項目) では見えない。退避できるかどうかで 1 操作で判別する。
-    - id: limit_escape_main
-      label: メインハンドの可動端センサ 3 本 (rotate / y_axis 左右) を 1 本ずつ押したまま、手動操縦でそのスイッチから離れる向きへ動くことを確認 (逆向きにしか動かなければ guard.limits の plus/minus が逆)
-      group: motor_check
-    - id: limit_escape_sub
-      label: サブハンドの可動端センサ 4 本 (前後の前端・後端 / 昇降の上端・下端) を 1 本ずつ押したまま、手動操縦でそのスイッチから離れる向きへ動くことを確認 (逆向きにしか動かなければ guard.limits の plus/minus が逆)
-      group: motor_check
-    - id: rotate_holds
-      label: rotate を非常停止し、無励磁でも自重で回らないこと確認 (電源断のあいだに回ると生角度の連続化が 1 回転を捏造する)
-      group: motor_check
-    - id: sub_lift_holds
-      label: 昇降軸を上げた状態で非常停止し、無励磁でも自重で落ちないこと確認 (DM3520 に保持ブレーキは無い)
-      group: motor_check
-    - id: conveyor_run
-      label: コンベアが選択中のコートの向きへ回ること確認 (逆コートは切替後に再確認)
-      group: motor_check
-    - id: conveyor_stop
-      label: コンベア停止確認
-      group: motor_check
-    - id: pumps_run
-      label: 吸気ポンプが回ること確認 (聴音。DC 基板は回転を報告しない)
-      group: motor_check
-    - id: valves_actuate
-      label: 手動操縦で valve_1〜6 を個別に開閉し、6 個とも打音・動作を目視確認
-      group: motor_check
-    - id: suction_hold
-      label: 吸気ポンプ運転中に弁を開き、ワークを吸着して保持できること確認
-      group: motor_check
-    - id: suction_release
-      label: 弁を閉じるだけでワークが確実に離れること確認 (三方弁の大気開放。残圧で張り付かないこと)
+      label: ロボットの動作は正しいか
       group: motor_check
 
     - id: estop_functional

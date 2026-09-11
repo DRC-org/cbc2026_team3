@@ -41,7 +41,7 @@ jobs:
         run: uv run ruff format --check .
 
       - name: テスト
-        run: uv run pytest
+        run: uv run pytest -m ""
 
   web:
     name: Web UI (lint + 型検査 + vitest + ビルド)
