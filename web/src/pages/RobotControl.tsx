@@ -5,6 +5,7 @@ import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
 import { SwitchDistanceButton } from "@/components/homing/SwitchDistanceButton";
+import { StartGate } from "@/components/monitor/StartGate";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
@@ -35,7 +36,7 @@ interface RobotControlProps {
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
   const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
-  const { sendOrReport } = useRobotCommands();
+  const { sendOrReport, matchStart } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
 
@@ -223,6 +224,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     );
     return (
       <Page className="flex flex-col">
+        <StartGate onStart={matchStart} />
         {modeSwitch}
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
           {inManual ? (
