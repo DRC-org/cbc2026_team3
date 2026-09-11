@@ -11,6 +11,7 @@ import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
+import { NudgePanel } from "@/components/operator/NudgePanel";
 import { PositionCapturePanel } from "@/components/operator/PositionCapturePanel";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
 import { SuctionPadPanel } from "@/components/operator/SuctionPadPanel";
@@ -272,6 +273,16 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               blockedReason={manualBlockedReason}
               sendOrReport={sendOrReport}
             />
+
+            {/* トリガー待ちのあいだだけ位置を詰められる (サーバーも同じ条件で通す) */}
+            {state.waiting_trigger === true ? (
+              <NudgePanel
+                robotKey={robotKey}
+                manual={manual}
+                blockedReason={manualBlockedReason}
+                sendOrReport={sendOrReport}
+              />
+            ) : null}
 
             {stepPanel}
           </div>

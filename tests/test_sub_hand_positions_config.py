@@ -126,7 +126,7 @@ class TestSubYAxis:
 
 class TestSubLift:
     def test_位置は仕様の名前が揃っている(self, table: PositionTable) -> None:
-        assert set(table.names("sub_lift")) == {"top", "pick", "lifted", "place"}
+        assert set(table.names("sub_lift")) == {"top", "pick", "lifted", "above_box", "place"}
 
     def test_pick_は_top_より上に行かない(self, table: PositionTable) -> None:
         # + が下なので「下」は値が大きい側。符号を取り違えると移動高さより上へ逃げる

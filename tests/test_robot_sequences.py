@@ -382,7 +382,7 @@ class TestMainHandSteps:
         assert run in commanded, "シーケンス中にコンベアを一度も回していない"
 
 
-# ワーク 1 個ぶん 17 ステップ x 4 個 + 初期位置 + 復帰。
+# ワーク 1 個ぶん 18 ステップ x 4 個 + 初期位置 + 復帰。
 _SUB_CYCLE_LABELS = (
     "棚へ寄せる",
     "吸着高さへ下降",
@@ -394,6 +394,7 @@ _SUB_CYCLE_LABELS = (
     "箱 {box} の上へ",
     "オフセットを閉じる",
     "ピッチを閉じる",
+    "箱の縁の高さへ下降",
     "箱へ下降",
     "ワーク解放 (配置)",
     "上昇",
@@ -403,8 +404,8 @@ _SUB_CYCLE_LABELS = (
     "受け取り姿勢へ",
 )
 
-# 17 ステップのうち操縦者のトリガー待ちを持つ位置 (0 始まり)。
-_SUB_TRIGGER_OFFSETS = (0, 2, 10, 11)
+# 18 ステップのうち操縦者のトリガー待ちを持つ位置 (0 始まり)。
+_SUB_TRIGGER_OFFSETS = (0, 2, 10, 11, 12)
 
 # 前端スイッチ (動作点 0.0mm) からこれより内側に居るあいだ sub_rotate を回すと機構が
 # 干渉する (docs/invariants.md §4)。守っているのはステップの並びだけである。
@@ -453,18 +454,18 @@ async def _collect_moves(seq: Sequence) -> list[tuple[int, dict[str, str]]]:
 
 
 class TestSubHandSteps:
-    def test_ワーク_4_個ぶんの_70_ステップである(self) -> None:
+    def test_ワーク_4_個ぶんの_74_ステップである(self) -> None:
         labels = [s["label"] for s in SubHandSequence().steps_info]
 
         assert labels == _expected_sub_labels()
-        assert len(labels) == 1 + 17 * 4 + 1
+        assert len(labels) == 1 + 18 * 4 + 1
 
     def test_トリガー待ちは仕様どおりの位置だけに付く(self) -> None:
         steps = SubHandSequence().steps_info
 
         waiting = {s["index"] for s in steps if s["require_trigger"]}
 
-        assert waiting == {1 + 17 * n + offset for n in range(4) for offset in _SUB_TRIGGER_OFFSETS}
+        assert waiting == {1 + 18 * n + offset for n in range(4) for offset in _SUB_TRIGGER_OFFSETS}
 
     async def test_回転の直前は前端スイッチから_150mm_以上離れている(self) -> None:
         table = _load_shipped("sub_hand_positions.yaml")

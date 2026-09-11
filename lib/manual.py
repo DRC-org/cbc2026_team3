@@ -93,6 +93,10 @@ class ManualController:
     def always_manual_axes(self) -> tuple[str, ...]:
         return self._positions.manual_always_axes()
 
+    def has_range(self, axis: str) -> bool:
+        """`manual:` を持つ軸か (連続値を送ってよい軸か)。未定義の軸は送出する。"""
+        return self._axis(axis).manual is not None
+
     def observed_value(self, axis: str) -> float:
         spec = self._axis(axis)
         return spec.to_value(self._feedback_positions(spec))
