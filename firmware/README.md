@@ -485,8 +485,7 @@ HAL の `GPIOA` / `GPIOB` はポインタへのキャストを含むマクロで
 指令角」であって実測ではない（仕様書 §7.4）。
 
 DC 基板と電磁弁基板は自動判定ができないので、**動くところまでを動作確認シーケンスが担い、
-実際に動いたかは指差喚呼が受け持つ**（`config/checklist.yaml` の `conveyor_run` /
-`valves_actuate` で目視・打音確認）。理由は
+実際に動いたかは人が目視・打音で確認する**。理由は
 [`../docs/invariants.md`](../docs/invariants.md) の §7。
 
 ## config.h の要確認項目（通電前に必ず）

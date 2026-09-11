@@ -13,7 +13,7 @@ from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import load_position_table
 from tests.fake_can import mock_can_manager
 from tests.fake_drivers import StubFeedbackDriver
-from tests.server_fixtures import DEFAULT_CHECKLIST, RecordingClient, ServerFixture
+from tests.server_fixtures import RecordingClient, ServerFixture
 
 _ROBOT = "main_hand"
 
@@ -94,9 +94,8 @@ def _fixture(
     sequence: Sequence | None = None,
     *,
     with_manual: bool = True,
-    checklist: bool = False,
 ) -> tuple[ServerFixture, dict[str, _RecordingDriver]]:
-    fx = ServerFixture.build(checklist_definitions=DEFAULT_CHECKLIST if checklist else None)
+    fx = ServerFixture.build()
     fx.freeze_broadcast()
     manual, drivers = _make_manual()
     fx.add_robot(
@@ -157,7 +156,7 @@ class TestModeSwitch:
 class TestPhaseIndependence:
     @pytest.mark.parametrize("phase", [p.value for p in Phase])
     async def test_どのフェーズでも手動へ入れる(self, phase: str) -> None:
-        fx, _ = _fixture(checklist=True)
+        fx, _ = _fixture()
         await _advance_to(fx, phase)
         assert fx.match.phase.value == phase
 
@@ -166,7 +165,7 @@ class TestPhaseIndependence:
 
     @pytest.mark.parametrize("phase", [p.value for p in Phase])
     async def test_どのフェーズでも手動指令が通る(self, phase: str) -> None:
-        fx, drivers = _fixture(checklist=True)
+        fx, drivers = _fixture()
         await _advance_to(fx, phase)
 
         await _switch(fx, "manual")
@@ -548,7 +547,7 @@ class TestEStopClearsJogOrigin:
 async def _advance_to(fx: ServerFixture, phase: str) -> None:
     if phase == "setup":
         return
-    fx.complete_all_checklists()
+    fx.make_ready()
     if phase == "ready":
         return
     await fx.command({"type": "match_start"})

@@ -39,7 +39,7 @@ export function useResetConfirm() {
     >
       <p>セッティングタイムに戻します。</p>
       <p className="mt-2 text-base-content/70">
-        チェックリストは全てリセットされ、再度の指差喚呼が必要になります。
+        コートは未設定に戻り、選び直すまで試合を開始できません。
       </p>
     </Modal>
   );

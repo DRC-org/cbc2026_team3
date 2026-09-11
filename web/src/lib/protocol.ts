@@ -284,44 +284,6 @@ export type MatchCourt = (typeof MATCH_COURTS)[number];
 
 export const MATCH_PHASES = ["setup", "ready", "match", "finished"] as const;
 export type MatchPhase = (typeof MATCH_PHASES)[number];
-export type ChecklistRole = "pre_match";
-
-export const CHECKLIST_ROLE: ChecklistRole = "pre_match";
-
-export interface ChecklistItem {
-  id: string;
-  label: string;
-  checked: boolean;
-  group?: string | null;
-}
-
-export interface ChecklistState {
-  items: ChecklistItem[];
-  completed: boolean;
-}
-
-function isChecklistState(value: unknown): boolean {
-  if (!isObject(value)) return false;
-  if (typeof value.completed !== "boolean") return false;
-  return (
-    Array.isArray(value.items) &&
-    value.items.every(
-      (item) =>
-        isObject(item) &&
-        typeof item.id === "string" &&
-        typeof item.label === "string" &&
-        typeof item.checked === "boolean" &&
-        (item.group === undefined || item.group === null || typeof item.group === "string"),
-    )
-  );
-}
-
-export function parseChecklists(raw: unknown): Record<string, ChecklistState> | Malformed {
-  if (raw === undefined) return {};
-  if (!isObject(raw)) return MALFORMED;
-  if (!Object.values(raw).every(isChecklistState)) return MALFORMED;
-  return raw as Record<string, ChecklistState>;
-}
 
 export interface MatchTimer {
   running: boolean;
@@ -334,7 +296,6 @@ export interface MatchState {
   court: MatchCourt | null | Malformed;
   phase: MatchPhase | Malformed;
   can_start_match: boolean;
-  checklists: Record<string, ChecklistState> | Malformed;
   timer: MatchTimer | null;
 }
 
@@ -757,7 +718,6 @@ function parseKnown(raw: Raw): ServerMessage | null {
           court: raw.court === null ? null : parseEnum(raw.court, MATCH_COURTS),
           phase: parseEnum(raw.phase, MATCH_PHASES),
           can_start_match: Boolean(raw.can_start_match),
-          checklists: parseChecklists(raw.checklists),
           timer: parseTimer(raw.timer),
         },
       };

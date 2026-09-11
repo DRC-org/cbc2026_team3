@@ -14,8 +14,7 @@
 # 使い方:
 #   scripts/setup_can.sh
 #   uv run python main.py --system config/bench/sub_servo/system.yaml \
-#       --config config/bench/sub_servo/sub_hand.yaml \
-#       --checklist config/bench/sub_servo/checklist.yaml --port 8082
+#       --config config/bench/sub_servo/sub_hand.yaml --port 8082
 #
 # **cbc-can-watchdog は止めない。** 止めるのは相手の居ないバスを開くときで、
 # can_generic には基板 #0〜#2 と電磁弁基板が居る。他のベンチと同時に走らせる

@@ -39,7 +39,7 @@ from lib.health import (
     worst_bus_health,
 )
 from lib.manual import ManualControlError, ManualController, OperationMode
-from lib.match_state import ChecklistItem, Court, MatchState
+from lib.match_state import Court, MatchState
 from lib.motion_guard import GuardViolation
 from lib.position_capture import PositionCaptureStore
 from lib.sequence.engine import Sequence
@@ -137,7 +137,6 @@ class RobotServer:
         port: int = 8080,
         *,
         health: HealthThresholds = DEFAULT_HEALTH,
-        checklist_definitions: dict[str, list[ChecklistItem]] | None = None,
         match_settings: MatchSettings = DEFAULT_MATCH,
         dry_run: bool = False,
         dev_tools: bool = False,
@@ -162,7 +161,7 @@ class RobotServer:
         self._dev_tools: bool = dev_tools
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
-        self.match = MatchState(definitions=checklist_definitions, settings=match_settings)
+        self.match = MatchState(settings=match_settings)
 
         self._health = health
         self._last_health: dict[str, HealthSnapshot] = {}
@@ -425,9 +424,7 @@ class RobotServer:
             logger.debug("未知のコマンド: %s", data.get("type"))
             return
 
-        deny = spec.dev_tools_deny_reason(self._dev_tools)
-        if deny is None:
-            deny = spec.phase_deny_reason(self.match.phase)
+        deny = spec.phase_deny_reason(self.match.phase)
         if deny is None and self._e_stop_active:
             deny = spec.e_stop_deny_reason()
         if deny is None:
@@ -845,27 +842,6 @@ class RobotServer:
 
     async def _cmd_set_court(self, data: dict, requester: WSOrNone) -> None:
         await self._handle_set_court(data, requester)
-
-    async def _cmd_checklist_set(self, data: dict, _requester: WSOrNone) -> None:
-        role = data.get("role")
-        item_id = data.get("item_id")
-        checked = bool(data.get("checked"))
-        if isinstance(role, str) and isinstance(item_id, str):
-            if self.match.set_checklist_item(role, item_id, checked):
-                await self._broadcast_match_state()
-            else:
-                logger.warning("未知のチェック項目: role=%s item=%s", role, item_id)
-
-    async def _cmd_checklist_check_all(self, data: dict, _requester: WSOrNone) -> None:
-        role = data.get("role")
-        self.match.check_all_checklist_items(role if isinstance(role, str) else None)
-        logger.warning("開発用: 指差喚呼を一括チェックしました (role=%s)", role or "all")
-        await self._broadcast_match_state()
-
-    async def _cmd_checklist_reset(self, data: dict, _requester: WSOrNone) -> None:
-        role = data.get("role")
-        self.match.reset_checklist(role if isinstance(role, str) else None)
-        await self._broadcast_match_state()
 
     async def _cmd_match_start(self, _data: dict, requester: WSOrNone) -> None:
         await self._handle_match_start(requester)

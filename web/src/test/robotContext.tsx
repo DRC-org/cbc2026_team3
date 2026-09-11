@@ -29,7 +29,6 @@ export const DEFAULT_MATCH_STATE: MatchState = {
   court: "red",
   phase: "setup",
   can_start_match: false,
-  checklists: {},
   timer: null,
 };
 
@@ -66,8 +65,6 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     onEStopRelease: vi.fn(),
     hideEStopOverlay: vi.fn(),
     setCourt: vi.fn(),
-    setChecklistItem: vi.fn(),
-    checkAllChecklist: vi.fn(),
     matchStart: vi.fn(),
     matchFinish: vi.fn(),
     matchReset: vi.fn(),

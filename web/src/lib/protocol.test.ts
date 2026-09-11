@@ -383,7 +383,6 @@ describe("parseServerMessage", () => {
           court: "blue",
           phase: "match",
           can_start_match: true,
-          checklists: { pre_match: { items: [], completed: true } },
           timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         }),
       ).toEqual({
@@ -392,37 +391,14 @@ describe("parseServerMessage", () => {
           court: "blue",
           phase: "match",
           can_start_match: true,
-          checklists: { pre_match: { items: [], completed: true } },
           timer: { running: true, elapsed_ms: 12_000, duration_ms: 180_000 },
         },
       });
     });
 
-    it("checklists / can_start_match が欠けても既定値で成立させる", () => {
+    it("can_start_match が欠けても既定値で成立させる", () => {
       const msg = parse({ type: "match_state", court: "red", phase: "ready" });
-      expect(msg).toMatchObject({
-        matchState: { checklists: {}, can_start_match: false },
-      });
-    });
-
-    it.each([
-      ["items が配列でない", { pre_match: { items: null, completed: false } }],
-      ["completed が無い", { pre_match: { items: [] } }],
-      [
-        "項目の checked が boolean でない",
-        {
-          pre_match: { items: [{ id: "a", label: "A", checked: "yes" }], completed: false },
-        },
-      ],
-      ["そもそもオブジェクトでない", "pre_match"],
-    ])("checklists が読めない形なら MALFORMED (%s)", (_name, checklists) => {
-      const msg = parse({ type: "match_state", court: "red", phase: "ready", checklists });
-      expect(msg).toMatchObject({ matchState: { checklists: MALFORMED } });
-    });
-
-    it("読めない checklists でもフェーズは捨てない", () => {
-      const msg = parse({ type: "match_state", court: "red", phase: "match", checklists: 7 });
-      expect(msg).toMatchObject({ matchState: { phase: "match", court: "red" } });
+      expect(msg).toMatchObject({ matchState: { can_start_match: false } });
     });
 
     it("タイマーが欠けても match_state ごと捨てない", () => {

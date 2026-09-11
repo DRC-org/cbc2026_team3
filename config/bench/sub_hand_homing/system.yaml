@@ -22,8 +22,7 @@
 #   # ベンチのあいだは止める。終わったら必ず戻すこと
 #   sudo systemctl stop cbc-can-watchdog
 #   uv run python main.py --system config/bench/sub_hand_homing/system.yaml \
-#       --config config/bench/sub_hand_homing/sub_hand.yaml \
-#       --checklist config/bench/sub_hand_homing/checklist.yaml
+#       --config config/bench/sub_hand_homing/sub_hand.yaml
 #   sudo systemctl start cbc-can-watchdog
 
 can_buses:

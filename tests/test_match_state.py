@@ -10,47 +10,25 @@ from lib.match_state import (
     PHASES_ANY,
     PHASES_DURING_MATCH,
     PHASES_OUTSIDE_MATCH,
-    PHASES_PREPARATION,
     PHASES_START_GATE,
-    ROLE_PRE_MATCH,
-    ChecklistItem,
     Court,
     MatchState,
     Phase,
 )
 from tests.fake_clock import FakeClock
 
-_DEFS = {
-    ROLE_PRE_MATCH: [
-        ChecklistItem(id="power", label="電源投入確認"),
-        ChecklistItem(id="home", label="メインハンド初期位置確認"),
-    ],
-}
-
 
 def _make() -> MatchState:
-    return MatchState(definitions=_DEFS)
+    return MatchState()
 
 
 def _make_with_clock(clock: FakeClock, *, duration_s: float = 180.0) -> MatchState:
-    return MatchState(definitions=_DEFS, settings=MatchSettings(duration_s=duration_s), clock=clock)
+    return MatchState(settings=MatchSettings(duration_s=duration_s), clock=clock)
 
 
 def _enter_match(state: MatchState) -> None:
-    _complete_all(state)
+    state.set_court(Court.RED)
     assert state.match_start() is True
-
-
-def _complete(state: MatchState, role: str) -> None:
-    for item in state.checklists[role].items:
-        state.set_checklist_item(role, item.id, True)
-
-
-def _complete_all(state: MatchState, *, court: Court = Court.RED) -> None:
-    # コート未確定のあいだ can_start_match は偽なので、選ぶのが先。
-    # 指差喚呼より前に置くのは set_court が「変化」としてリセットを走らせるため
-    state.set_court(court)
-    _complete(state, ROLE_PRE_MATCH)
 
 
 class TestDefaults:
@@ -60,75 +38,27 @@ class TestDefaults:
         assert state.phase is Phase.SETUP
         assert state.can_start_match is False
 
-    def test_definitions_are_copied_into_each_state(self) -> None:
-        first = _make()
-        _complete_all(first)
-        assert first.can_start_match is True
-
-        second = _make()
-        assert second.can_start_match is False
-
-    def test_role_is_a_single_pre_match_list(self) -> None:
-        assert set(_make().checklists) == {ROLE_PRE_MATCH}
-
-
-class TestChecklistCompletion:
-    def test_needs_every_item_complete(self) -> None:
-        state = _make()
-        state.set_court(Court.RED)
-        state.set_checklist_item(ROLE_PRE_MATCH, "power", True)
-        assert state.checklists[ROLE_PRE_MATCH].completed is False
-        assert state.can_start_match is False
-        assert state.phase is Phase.SETUP
-
-        state.set_checklist_item(ROLE_PRE_MATCH, "home", True)
-        assert state.checklists[ROLE_PRE_MATCH].completed is True
-        assert state.can_start_match is True
-        assert state.phase is Phase.READY
-
-    def test_unchecking_returns_to_setup(self) -> None:
-        state = _make()
-        _complete_all(state)
-        assert state.phase is Phase.READY
-
-        state.set_checklist_item(ROLE_PRE_MATCH, "power", False)
-        assert state.phase is Phase.SETUP
-        assert state.can_start_match is False
-
-    def test_unknown_role_or_item_is_rejected(self) -> None:
-        state = _make()
-        assert state.set_checklist_item("nobody", "power", True) is False
-        assert state.set_checklist_item(ROLE_PRE_MATCH, "no_such_item", True) is False
-
-    def test_empty_checklist_counts_as_complete(self) -> None:
-        state = MatchState(definitions={ROLE_PRE_MATCH: []})
-        assert state.phase is Phase.SETUP
-
-        state.set_court(Court.RED)
-        assert state.phase is Phase.READY
-
 
 class TestCourtChange:
-    def test_court_change_resets_checklists(self) -> None:
+    def test_court_change_keeps_ready(self) -> None:
         state = _make()
-        _complete_all(state)
+        state.set_court(Court.RED)
         assert state.phase is Phase.READY
 
         assert state.set_court(Court.BLUE) is True
         assert state.court is Court.BLUE
-        assert state.phase is Phase.SETUP
+        assert state.phase is Phase.READY
 
     def test_same_value_is_noop(self) -> None:
         state = _make()
-        _complete_all(state)
+        state.set_court(Court.RED)
 
         assert state.set_court(Court.RED) is True
         assert state.phase is Phase.READY
 
     def test_court_change_denied_during_match(self) -> None:
         state = _make()
-        _complete_all(state)
-        state.match_start()
+        _enter_match(state)
 
         assert state.set_court(Court.BLUE) is False
         assert state.court is Court.RED
@@ -137,35 +67,12 @@ class TestCourtChange:
 class TestCourtUnresolved:
     """コート未確定という状態。**開始ゲートは `can_start_match` 1 つで閉じる。**"""
 
-    def test_checklist_alone_does_not_open_the_start_gate(self) -> None:
-        state = _make()
-        _complete(state, ROLE_PRE_MATCH)
-
-        assert state.checklists[ROLE_PRE_MATCH].completed is True
-        assert state.can_start_match is False
-        assert state.phase is Phase.SETUP
-        assert state.match_start() is False
-
     def test_selecting_the_court_opens_the_gate(self) -> None:
         state = _make()
         assert state.set_court(Court.BLUE) is True
-        _complete(state, ROLE_PRE_MATCH)
 
         assert state.can_start_match is True
         assert state.phase is Phase.READY
-
-    def test_first_selection_resets_the_checklist(self) -> None:
-        """未確定→赤も「変化」。**指差喚呼の外し直しに新しい仕掛けは要らない。**
-
-        `id: court`「コート設定と実配置の一致確認」を先にチェックしてからコートを
-        選ぶと、この既存の挙動が自動でそれを外す。専用の仕掛けを足さないこと。
-        """
-        state = _make()
-        _complete(state, ROLE_PRE_MATCH)
-
-        state.set_court(Court.RED)
-        assert state.checklists[ROLE_PRE_MATCH].completed is False
-        assert state.can_start_match is False
 
 
 class TestPhaseTransitions:
@@ -174,7 +81,7 @@ class TestPhaseTransitions:
         assert state.match_start() is False
         assert state.phase is Phase.SETUP
 
-        _complete_all(state)
+        state.set_court(Court.RED)
         assert state.match_start() is True
         assert state.phase is Phase.MATCH
 
@@ -182,47 +89,36 @@ class TestPhaseTransitions:
         state = _make()
         assert state.match_finish() is False
 
-        _complete_all(state)
-        state.match_start()
+        _enter_match(state)
         assert state.match_finish() is True
         assert state.phase is Phase.FINISHED
 
     def test_match_reset_from_any_phase(self) -> None:
         state = _make()
-        _complete_all(state, court=Court.BLUE)
-        state.match_start()
+        _enter_match(state)
 
         assert state.match_reset() is True
         assert state.phase is Phase.SETUP
-        assert state.checklists[ROLE_PRE_MATCH].completed is False
 
     def test_match_reset_clears_the_court(self) -> None:
         state = _make()
-        _complete_all(state, court=Court.BLUE)
+        state.set_court(Court.BLUE)
         state.match_start()
 
         state.match_reset()
         assert state.court is None
         assert state.can_start_match is False
-
-    def test_checklist_locked_during_match(self) -> None:
-        state = _make()
-        _complete_all(state)
-        state.match_start()
-        assert state.set_checklist_item(ROLE_PRE_MATCH, "power", False) is False
-        assert state.phase is Phase.MATCH
+        assert state.match_start() is False
 
 
 class TestPhaseSets:
     def test_allows_follows_current_phase(self) -> None:
         state = _make()
-        assert state.allows(PHASES_PREPARATION) is True
+        assert state.allows(PHASES_OUTSIDE_MATCH) is True
         assert state.allows(PHASES_DURING_MATCH) is False
 
-        _complete_all(state)
-        state.match_start()
+        _enter_match(state)
         assert state.allows(PHASES_DURING_MATCH) is True
-        assert state.allows(PHASES_PREPARATION) is False
         assert state.allows(PHASES_OUTSIDE_MATCH) is False
 
     def test_any_covers_every_phase(self) -> None:
@@ -237,22 +133,12 @@ class TestPhaseSets:
 
 class TestSerialization:
     def test_to_dict_shape(self) -> None:
-        state = _make()
-        state.set_checklist_item(ROLE_PRE_MATCH, "home", True)
-        payload = state.to_dict()
+        payload = _make().to_dict()
 
         assert payload["type"] == "match_state"
         assert payload["court"] is None
         assert payload["phase"] == "setup"
         assert payload["can_start_match"] is False
-        assert set(payload["checklists"]) == {ROLE_PRE_MATCH}
-
-        checklist = payload["checklists"][ROLE_PRE_MATCH]
-        assert checklist["completed"] is False
-        assert checklist["items"] == [
-            {"id": "power", "label": "電源投入確認", "checked": False, "group": None},
-            {"id": "home", "label": "メインハンド初期位置確認", "checked": True, "group": None},
-        ]
 
 
 class TestMatchTimer:
@@ -343,81 +229,3 @@ class TestMatchTimer:
     def test_duration_comes_from_settings_not_a_literal(self) -> None:
         state = _make_with_clock(FakeClock(), duration_s=90.0)
         assert state.to_dict()["timer"]["duration_ms"] == 90000
-
-
-class TestLoadDefinitions:
-    def test_load_from_mapping(self) -> None:
-        from lib.match_state import load_checklist_definitions
-
-        defs = load_checklist_definitions(
-            {
-                "checklists": {
-                    ROLE_PRE_MATCH: [{"id": "power", "label": "電源投入確認"}],
-                }
-            }
-        )
-        assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="power", label="電源投入確認")]
-
-    def test_load_always_defines_every_role(self) -> None:
-        from lib.match_state import ALL_ROLES, load_checklist_definitions
-
-        defs = load_checklist_definitions({})
-        assert set(defs) == set(ALL_ROLES)
-        assert defs[ROLE_PRE_MATCH] == []
-
-    def test_load_skips_malformed_entries(self) -> None:
-        from lib.match_state import load_checklist_definitions
-
-        defs = load_checklist_definitions(
-            {
-                "checklists": {
-                    ROLE_PRE_MATCH: [
-                        {"id": "ok", "label": "有効"},
-                        {"label": "id なし"},
-                        "文字列",
-                    ],
-                }
-            }
-        )
-        assert defs[ROLE_PRE_MATCH] == [ChecklistItem(id="ok", label="有効")]
-
-    def test_load_carries_group(self) -> None:
-        from lib.match_state import load_checklist_definitions
-
-        defs = load_checklist_definitions(
-            {
-                "checklists": {
-                    ROLE_PRE_MATCH: [
-                        {"id": "court", "label": "コート一致", "group": "court"},
-                        {"id": "power", "label": "電源投入"},
-                    ],
-                }
-            }
-        )
-        assert defs[ROLE_PRE_MATCH] == [
-            ChecklistItem(id="court", label="コート一致", group="court"),
-            ChecklistItem(id="power", label="電源投入", group=None),
-        ]
-
-    def test_load_rejects_unknown_role(self) -> None:
-        from lib.match_state import load_checklist_definitions
-
-        with pytest.raises(ValueError, match="main_hand"):
-            load_checklist_definitions(
-                {
-                    "checklists": {
-                        "main_hand": [{"id": "power", "label": "電源投入確認"}],
-                    }
-                }
-            )
-
-    def test_unknown_role_would_have_opened_the_gate(self) -> None:
-        state = MatchState({ROLE_PRE_MATCH: []}, court=Court.RED)
-
-        assert state.can_start_match is True
-
-    def test_group_survives_rebuild_and_reaches_the_wire(self) -> None:
-        state = MatchState({ROLE_PRE_MATCH: [ChecklistItem(id="court", label="C", group="court")]})
-
-        items = state.to_dict()["checklists"][ROLE_PRE_MATCH]["items"]
-        assert items == [{"id": "court", "label": "C", "checked": False, "group": "court"}]

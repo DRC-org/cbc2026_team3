@@ -19,7 +19,6 @@ from lib.drivers.dm3520 import Dm3520Driver
 from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import M3508Driver
-from lib.match_state import ALL_ROLES
 from lib.sequence.positions import load_position_table
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -692,7 +691,7 @@ def _bench_robot_yaml_path(bench: str, bench_dir: pathlib.Path) -> pathlib.Path:
         for path in bench_dir.iterdir()
         if path.name.endswith(".yaml")
         and not path.name.endswith("_positions.yaml")
-        and path.name not in ("system.yaml", "checklist.yaml")
+        and path.name != "system.yaml"
     )
 
 
@@ -736,14 +735,6 @@ class TestShippedBenchConfigs:
 
         axis_motors = {name for axis in table.axes for name in table.axis(axis).motor_names}
         assert set(config.motors) == axis_motors
-
-    @pytest.mark.parametrize("bench", _BENCH_DIRS)
-    def test_bench_checklist_uses_a_known_role(self, bench: str) -> None:
-        bench_dir = _CONFIG_DIR / "bench" / bench
-        checklist = yaml.safe_load((bench_dir / "checklist.yaml").read_text())["checklists"]
-
-        assert set(checklist) <= set(ALL_ROLES)
-        assert any(checklist.values())
 
     @pytest.mark.parametrize("bench", _BENCH_DIRS)
     def test_bench_opens_only_the_buses_on_the_desk(self, bench: str) -> None:

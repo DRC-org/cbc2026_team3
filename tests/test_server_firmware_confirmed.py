@@ -293,7 +293,7 @@ class TestGraceIsAnchoredToStartupOnly:
                 "gripper"
             ]
 
-            fx.complete_all_checklists()
+            fx.make_ready()
             await fx.command({"type": "match_start"})
             assert fx.match.phase.value == "match", "試合開始が通っていない"
 

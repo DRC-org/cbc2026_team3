@@ -286,7 +286,7 @@ class Edulite05Driver(MotorDriver):
         (あるいは 1 回転以上ある) ときの差分アンラップは「2 つの電文のあいだに軸が
         半回転以上動かない」ことに立っており、**可動端がちょうど半回転にある軸は
         その境界で符号を取り違える**。電源断を跨ぐ窓は `rotate` が無励磁で自重で
-        回らないこと (指差喚呼 `rotate_holds`) が人の手で担保する。
+        回らないことを人の目で担保する。
         """
         if not self._uniquify_wrap(raw) and self._prev_raw_position is not None:
             diff = raw - self._prev_raw_position

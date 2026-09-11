@@ -80,8 +80,7 @@ uv run python main.py --config config/sub_hand.yaml
 # (b) 机上ベンチの一式で、生きている基板だけを確かめる
 uv run python main.py \
   --system config/bench/servo/system.yaml \
-  --config config/bench/servo/main_hand.yaml \
-  --checklist config/bench/servo/checklist.yaml
+  --config config/bench/servo/main_hand.yaml
 #    対象は m3508 / edulite / main_hand / dc / servo / solenoid / dm3520 /
 #    sub_hand_homing / y_axis_tuning の 9 セット
 #    main_hand だけは CANable 3 本 (can_m3508 + can_edulite + can_generic) を
@@ -89,10 +88,9 @@ uv run python main.py \
 #    会場で 1 本欠けているときに選んではならない (起動しない)
 #    main_hand だけは --config も本番の config/main_hand.yaml を渡す
 #    (config/bench/main_hand/ は robot yaml / positions を持たない。
-#     --system と --checklist だけを bench/main_hand/ から渡す):
+#     --system だけを bench/main_hand/ から渡す):
 #      uv run python main.py --system config/bench/main_hand/system.yaml \
-#          --config config/main_hand.yaml \
-#          --checklist config/bench/main_hand/checklist.yaml
+#          --config config/main_hand.yaml
 
 # (c) 機体を動かさずに UI と手順だけ確認する
 uv run python main.py --dry-run
@@ -206,13 +204,12 @@ journalctl -u cbc-can-watchdog -f      # [ WD ] ... down/up で復旧を試み�
 
 ### 3-3c. 何を押しても「コートが未設定」で拒否される
 
-**故障ではない。コートを選んでいない。** 試合準備でコートを押すまで、サブハンドの
+**故障ではない。コートを選んでいない。** コート設定カードでコートを押すまで、サブハンドの
 指令（手動・零点合わせ・作動点測定・動作確認）は拒否され、試合も開始できない。
 昇降 `sub_lift` はコートで回る向きが逆になるので、選ばないまま動かすと逆へ走る。
 
-**手当ては 1 つ。Monitor の試合準備で赤／青を押す。** 押すと指差喚呼は全項目
-リセットされる（コートと実配置の一致確認をやり直すため）ので、**コートを先に押してから
-読み上げる**。試合をリセットすると未設定へ戻るので、試合ごとに押し直す。
+**手当ては 1 つ。Monitor のコート設定カードで赤／青を押す。** 試合をリセットすると
+未設定へ戻るので、試合ごとに押し直す。
 
 **メインハンドは選ばなくても動く**（退避路として残してある）。ただしコンベアの `run`
 だけはコート別の値なので、そこだけは選ぶまで拒否される。
@@ -249,7 +246,7 @@ journalctl -u cbc-can-watchdog -f      # [ WD ] ... down/up で復旧を試み�
 気付ける材料は「物理緊急停止を踏んだ」という事実しか無い。
 
 **`rotate` が電源断のあいだに自重で半回転以上回っていたら、この表は当てにならない**
-（指差喚呼 `rotate_holds` が担保している前提）。回った疑いがあるなら零点合わせを回す。
+（`rotate` が無励磁で自重で回らないことを人が確かめている前提）。回った疑いがあるなら零点合わせを回す。
 
 ### 3-4c. E-STOP 中に機構を手で大きく動かしたとき
 
@@ -298,16 +295,16 @@ fault で励磁が落ちた後、fault が消えても自動では戻らない�
 
 ---
 
-## 4. 試合直前の点検（指差喚呼と対で打つコマンド）
+## 4. 試合直前の点検
 
 ```bash
-scripts/setup_can.sh --strict          # 指差喚呼 can_bus_strict
+scripts/setup_can.sh --strict
 ```
 
 `4/4 バス起動 (未採取 0 / 欠け 0 / 失敗 0)` が出ること。
 1 本でも欠けていたら §1 へ。
 
-そのあと Monitor でヘルスが READY・無励磁 0 台であること（指差喚呼 `health_ready`）、
-最後に**実際に非常停止を押して止まること**（指差喚呼 `estop_functional`）を確かめる。
+そのあと Monitor でヘルスが READY・無励磁 0 台であること、
+最後に**実際に非常停止を押して止まること**を確かめる。
 物理停止は DC 基板経由なので、**配線 1 本で機能ごと失われる**。失われていれば安全機構の欄に
 「物理停止 検出不能」が出るので、押して確かめる前にそこを見ること。

@@ -25,7 +25,7 @@ from lib.health import (
     MotorHealth,
 )
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court
+from lib.match_state import Court
 from lib.sequence.engine import AxisSyncError, Sequence, step
 from lib.sequence.homing import HomingError, SwitchMeasurement
 from lib.sequence.motors import MotorGroup, MotorHandle
@@ -342,20 +342,11 @@ def _limit_monitor(group: MotorGroup) -> LimitMonitor:
     )
 
 
-def _checklist_definitions() -> dict[str, list[ChecklistItem]]:
-    return {
-        ROLE_PRE_MATCH: [
-            ChecklistItem(id="y_axis_sync", label="Y 軸の左右が揃っている"),
-            ChecklistItem(id="sub_arm_home", label="補助アームが初期位置"),
-        ],
-    }
-
-
 _Fixture = tuple[ServerFixture, tuple[PeriodicTask, ...], MotorGroup]
 
 
 def _build_fixture() -> _Fixture:
-    fx = ServerFixture.build(checklist_definitions=_checklist_definitions())
+    fx = ServerFixture.build()
     generics = _generic_drivers()
     mgr = _make_can_manager(generics, _sensor_drivers())
 
