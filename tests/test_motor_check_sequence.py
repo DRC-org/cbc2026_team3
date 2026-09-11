@@ -118,9 +118,9 @@ class TestFinalPosture:
 class TestSubHandIsCommandedOneAxisAtATime:
     """サブハンドの初期姿勢を 1 通にまとめると干渉の宣言に引っかかる。
 
-    `sub_y_axis` は `sub_lift` が `top` に居るあいだしか動かせず (`requires`)、
-    `sub_pitch` と `sub_offset` は同じ指令で動かせない (`not_with`)。**段は 1 つの
-    まま**で、本体だけを分ける。
+    `sub_pitch` と `sub_offset` は同じ指令で動かせない (`not_with`)。昇降を先に
+    上げてから前後を動かすのは宣言 (`SUB_HOME`) の並びが持つ。**段は 1 つのまま**で、
+    本体だけを分ける。
     """
 
     @pytest.mark.parametrize("method_name", ["sub_home", "restore_home"])
@@ -162,7 +162,7 @@ class TestHomingComesFirst:
         table = _shipped_table()
         homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
 
-        assert homing_axes == ["y_axis", "rotate", "sub_y_axis", "sub_lift"]
+        assert homing_axes == ["y_axis", "rotate", "sub_lift", "sub_y_axis"]
 
 
 class _EchoDriver(StubFeedbackDriver):
@@ -376,7 +376,6 @@ class TestShippedRunThrough:
         for info in seq.steps:
             await getattr(seq, info.method_name)()
 
-        # 宣言が効いていないと、この通しは何も見ていないことになる
-        assert table.axis("sub_y_axis").guard is not None
-        assert table.axis("sub_y_axis").guard.requires  # type: ignore[union-attr]
-        assert homing.homed[0] == "sub_lift", "参照される軸を先に確定していない"
+        # 昇降が先に確定していないと、前後の探索は下がったままの高さで走る
+        sub = [name for name in homing.homed if name.startswith("sub_")]
+        assert sub == ["sub_lift", "sub_y_axis"]

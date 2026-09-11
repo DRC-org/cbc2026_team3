@@ -1,46 +1,4 @@
 axes:
-  sub_y_axis:
-    homing:
-      sensor: sub_y_axis_f_limit_sensor
-      direction: 1
-      # スイッチ間の実測は 447mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
-      search_distance: 650.0
-      # ON 区間の実測 2.2mm より狭く取る (広いと粗い 1 歩で跨ぎ切る)
-      coarse_step: 1.0
-      # スイッチの移動許容 0.3mm より小さく。原点のばらつきは刻み幅そのもの
-      step: 0.1
-      release_distance: 10.0
-      settle_s: 0.05
-    guard:
-      # 逆に書くと守りが反転し、押されている端へ進む指令だけが通る
-      limits:
-        plus: sub_y_axis_f_limit_sensor
-        minus: sub_y_axis_r_limit_sensor
-      # 桁の違う目標だけを止める。実ストロークより広く取る
-      max_step: 600.0
-      # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
-      stall_torque: 2.0
-      # 昇降が上がっていない高さで前後に走ると機構が当たる。区間は slack (無ければ
-      # 参照先の tolerance) ぶん広げて解決される (lib/sequence/positions.py)。
-      # slack が別に要るのは、top に止めても自重で 1cm ほど下がるため —— tolerance を
-      # 広げて飲むと pick (top の 10mm 下) と区別できなくなり、到達判定まで粗くなる
-      requires: [{ axis: sub_lift, at: top, slack: 15.0 }]
-    unit: mm
-    command_unit: rad
-    # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
-    scale: 1.0668451
-    offset: 0.0
-    # この軸は未実測。同じ機構の sub_lift が渋って 7.3mm/s まで落ちた実測があるので
-    # そちらへ合わせる (速く見積もると短すぎる timeout_s が検算を通ってしまう)
-    min_speed: 7.0
-    timeout_s: 200.0
-    tolerance: 1.0
-    manual:
-      # 後端スイッチの実測 -447.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
-      min: -440.0
-      max: 2.0
-      steps: [1.0, 5.0, 10.0]
-
   # 昇降。**+ 方向が下**。コートでモータの回転と上下の対応が鏡になり、スイッチは
   # 重力側に固定なので、scale の符号だけをコート別に持つ (2026-09-09 両コートで実機確認)。
   sub_lift:
@@ -49,6 +7,8 @@ axes:
       direction: 1
       # manual の全幅を賄う。狭いと上端側から始めたとき下端スイッチへ届かない
       search_distance: 120.0
+      # 確定した直後は下端のすぐ上に居る。前後軸を探索する高さまで自分で上がる
+      retreat_position: top
       step: 0.1
       # ON 区間の実測 2.37mm (2026-09-10 作動点測定) より狭く取る
       coarse_step: 0.5
@@ -76,6 +36,47 @@ axes:
       # 上端スイッチの実測 -86.03mm (2026-09-11) の手前。ON 区間はまだ測っていないので
       # 2mm 残す。実際の端は上端スイッチと stall_torque に見させる
       min: -84.0
+      max: 2.0
+      steps: [1.0, 5.0, 10.0]
+
+  sub_y_axis:
+    homing:
+      sensor: sub_y_axis_f_limit_sensor
+      direction: 1
+      # スイッチ間の実測は 447mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
+      search_distance: 650.0
+      # ON 区間の実測 2.2mm より狭く取る (広いと粗い 1 歩で跨ぎ切る)
+      coarse_step: 1.0
+      # スイッチの移動許容 0.3mm より小さく。原点のばらつきは刻み幅そのもの
+      step: 0.1
+      release_distance: 10.0
+      settle_s: 0.05
+    guard:
+      # 逆に書くと守りが反転し、押されている端へ進む指令だけが通る
+      limits:
+        plus: sub_y_axis_f_limit_sensor
+        minus: sub_y_axis_r_limit_sensor
+      # 桁の違う目標だけを止める。実ストロークより広く取る
+      max_step: 600.0
+      # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
+      stall_torque: 2.0
+      # 昇降の高さは条件にしない (2026-09-11 の判断)。当たらないのは pick〜top の
+      # あたりだが、零点未確定の昇降を条件にすると前後が 1mm も動かせず、手で寄せて
+      # 測る作業が回らない。守りは零点確定の並び (sub_lift が先・top へ退避) と
+      # 操縦者の目視に移した
+    unit: mm
+    command_unit: rad
+    # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
+    scale: 1.0668451
+    offset: 0.0
+    # この軸は未実測。同じ機構の sub_lift が渋って 7.3mm/s まで落ちた実測があるので
+    # そちらへ合わせる (速く見積もると短すぎる timeout_s が検算を通ってしまう)
+    min_speed: 7.0
+    timeout_s: 200.0
+    tolerance: 1.0
+    manual:
+      # 後端スイッチの実測 -447.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
+      min: -440.0
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 
