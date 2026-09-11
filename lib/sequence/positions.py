@@ -570,7 +570,7 @@ _HOMING_REQUIRED = frozenset({"direction", "search_distance", "step"})
 
 _GUARD_KEYS = frozenset({"limits", "max_step", "stall_torque", "requires", "not_with"})
 
-_GUARD_REQUIRES_KEYS = frozenset({"axis", "at", "between"})
+_GUARD_REQUIRES_KEYS = frozenset({"axis", "at", "between", "slack"})
 
 _GUARD_LIMIT_KEYS = frozenset({"plus", "minus"})
 
@@ -1114,6 +1114,8 @@ class _RequiresDecl:
     names: tuple[str, ...]
     #: エラー文用の yaml パス (`axes.sub_rotate.guard.requires[0]`)
     path: str
+    #: この条件だけに効く許容幅 [参照先の unit]。None なら参照先の `tolerance`
+    slack: float | None = None
 
 
 def _guard_declarations(
@@ -1146,6 +1148,8 @@ def _parse_guard_requires(axis_name: str, raw: object) -> tuple[_RequiresDecl, .
     書式は `at:` (1 点) と `between: [a, b]` (2 点で挟む) の 2 つだけ。数値を許すと
     同じ座標が位置定数と歯止めの 2 箇所に書かれ、位置を動かしたときに片方だけが
     古くなる (CLAUDE.md「同じ判定を 2 箇所に書かない」)。
+
+    `slack:` だけは幅なので数値で書く。省略すれば従来どおり参照先の `tolerance`。
     """
     if raw is None:
         return ()
@@ -1181,9 +1185,32 @@ def _parse_guard_requires(axis_name: str, raw: object) -> tuple[_RequiresDecl, .
             names: tuple[str, ...] = (_guard_position_name(f"{path}.at", entry["at"]),)
         else:
             names = _parse_guard_between(f"{path}.between", entry["between"])
-        declarations.append(_RequiresDecl(axis=target, names=names, path=path))
+        declarations.append(
+            _RequiresDecl(
+                axis=target,
+                names=names,
+                path=path,
+                slack=_parse_guard_slack(f"{path}.slack", entry.get("slack")),
+            )
+        )
 
     return tuple(declarations)
+
+
+def _parse_guard_slack(where: str, raw: object) -> float | None:
+    """この条件だけに効く許容幅。**書かなければ None** (参照先の `tolerance` のまま)。
+
+    0 と負を弾くのは、条件が誰も満たせない区間へ縮むのを起動時に見せるため
+    (`at:` を 0 幅にすると、到達許容差の内側で止まった実測が必ず外になる)。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{where} は数値である必要があります: {raw!r}")
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{where} は正の有限値である必要があります: {raw!r}")
+    return value
 
 
 def _parse_guard_between(where: str, raw: object) -> tuple[str, str]:
@@ -1305,16 +1332,18 @@ def _resolve_required_range(
             )
         resolved.append(float(value))
 
-    # **参照先の tolerance ぶん広げる。** 広げないと試合シーケンスが自分で壊れる ——
+    # **区間を広げる。** 広げないと試合シーケンスが自分で壊れる ——
     # 端の位置へ到達許容差の内側で止まった実測は、広げていない区間からはみ出し、
     # 次の段がその実測を見て拒否する。会場でしか出ない壊れ方になる。
-    # 参照先の scale がコート別 (sub_lift) でも tolerance は人間の単位なので、
-    # ここでは換算を 1 度も通さない —— 通すとコート未解決で読み込みごと落ちる
-    tolerance = target.tolerance
+    # 既定は参照先の tolerance で、宣言に slack を書いた条件だけがその幅を使う
+    # (書いていない条件の幅は 1 つも変わらない)。
+    # 参照先の scale がコート別 (sub_lift) でも幅は人間の単位なので、ここでは換算を
+    # 1 度も通さない —— 通すとコート未解決で読み込みごと落ちる
+    slack = decl.slack if decl.slack is not None else target.tolerance
     return RequiredRange(
         axis=decl.axis,
-        low=min(resolved) - tolerance,
-        high=max(resolved) + tolerance,
+        low=min(resolved) - slack,
+        high=max(resolved) + slack,
         names=decl.names,
         unit=target.unit,
     )

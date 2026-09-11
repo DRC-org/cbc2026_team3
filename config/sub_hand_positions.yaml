@@ -20,10 +20,11 @@ axes:
       max_step: 600.0
       # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
       stall_torque: 2.0
-      # 昇降が上がっていない高さで前後に走ると機構が当たる。区間は参照先の
-      # tolerance ぶん広げて解決される (lib/sequence/positions.py) ので、
-      # top へ許容差の内側で止まった実測もこの条件を満たす
-      requires: [{ axis: sub_lift, at: top }]
+      # 昇降が上がっていない高さで前後に走ると機構が当たる。区間は slack (無ければ
+      # 参照先の tolerance) ぶん広げて解決される (lib/sequence/positions.py)。
+      # slack が別に要るのは、top に止めても自重で 1cm ほど下がるため —— tolerance を
+      # 広げて飲むと pick (top の 10mm 下) と区別できなくなり、到達判定まで粗くなる
+      requires: [{ axis: sub_lift, at: top, slack: 15.0 }]
     unit: mm
     command_unit: rad
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36

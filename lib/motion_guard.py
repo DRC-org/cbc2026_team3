@@ -127,7 +127,8 @@ class RequiredRange:
 
     #: 参照する軸の名前
     axis: str
-    #: 解決済みの下限 [参照先の unit]。参照先の tolerance ぶん広げた後の値
+    #: 解決済みの下限 [参照先の unit]。宣言の `slack` (無ければ参照先の tolerance)
+    #: ぶん広げた後の値
     low: float
     #: 解決済みの上限 [参照先の unit]
     high: float
