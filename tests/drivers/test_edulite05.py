@@ -973,3 +973,122 @@ class TestTravelRangeFallbackIsLoggedOnce:
             feed_edulite(driver, position=0.5 + math.radians(90.0))
 
         assert caplog.records == []
+
+
+class TestFaultLatchClear:
+    """fault ラッチの解除。**解除と「原因が去った確認」を 1 枚ずつ単独で確かめる。**
+
+    2026-09-05 に UNDERVOLTAGE で励磁が落ち、原因が去っても再励磁で戻らなかった。
+    """
+
+    @staticmethod
+    def _faulted(fault: Edulite05Fault = Edulite05Fault.UNDERVOLTAGE) -> Edulite05Driver:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, fault_bits=int(fault), mode_state=0)
+        return driver
+
+    def test_faultが無ければ解除を打たない(self) -> None:
+        """**無条件に打ってはならない。** 原因を隠す方向にしか効かない。"""
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver)
+
+        first = driver.reinitialization_steps()[0][0]
+
+        assert first.data == bytes(8)
+        assert driver.activation_block_reason() is None
+        assert driver.configuration_probe_messages() == []
+
+    def test_faultを検出したときだけ無励磁化の1通に解除を載せる(self) -> None:
+        driver = self._faulted()
+
+        first = driver.reinitialization_steps()[0][0]
+
+        assert driver.parse_can_id(first.arbitration_id)[0] == driver.COMM_TYPE_DISABLE
+        assert first.data == b"\x01" + bytes(7)
+
+    def test_解除を打っただけでは励磁しない(self) -> None:
+        """**ラッチだけ外して動き出す形を塞ぐ。** 解除後の実測をまだ 1 通も見ていない。"""
+        driver = self._faulted()
+
+        driver.reinitialization_steps()
+
+        assert driver.activation_block_reason() is not None
+
+    def test_解除の後もfaultが残っていれば励磁しない(self) -> None:
+        driver = self._faulted()
+        driver.reinitialization_steps()
+
+        feed_edulite(driver, fault_bits=int(Edulite05Fault.UNDERVOLTAGE), mode_state=0)
+
+        reason = driver.activation_block_reason()
+        assert reason is not None
+        assert "低電圧" in reason
+
+    def test_faultが消えた実測を見てはじめて励磁を許す(self) -> None:
+        driver = self._faulted()
+        driver.reinitialization_steps()
+
+        feed_edulite(driver, fault_bits=0, mode_state=0)
+
+        assert driver.activation_block_reason() is None
+        assert driver.configuration_probe_messages() == []
+
+    def test_確認の問い合わせは機構を動かさず解除も打ち直さない(self) -> None:
+        """フィードバックは問い合わせ駆動なので、打たなければ解除の結果が返らない。"""
+        driver = self._faulted()
+        driver.reinitialization_steps()
+
+        probes = driver.configuration_probe_messages()
+
+        assert [driver.parse_can_id(msg.arbitration_id)[0] for msg in probes] == [
+            driver.COMM_TYPE_DISABLE
+        ]
+        assert probes[0].data == bytes(8)
+
+    def test_解除待ちはドライバの異常報告に混ぜない(self) -> None:
+        """`is_fault()` はドライバが報告したビットだけを映す (PC 側の判断は別)。"""
+        driver = self._faulted()
+        driver.reinitialization_steps()
+
+        assert driver.is_fault() is True
+        assert driver.activation_block_reason() is not None
+
+        feed_edulite(driver, fault_bits=0, mode_state=0)
+
+        assert driver.is_fault() is False
+
+
+class TestHealthDetail:
+    """どの fault で止まっているかを操縦者の画面へ出す。"""
+
+    def test_faultが無ければ何も出さない(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver)
+
+        assert driver.health_detail() is None
+
+    def test_立っているビットを日本語で並べる(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(
+            driver,
+            fault_bits=int(Edulite05Fault.UNDERVOLTAGE | Edulite05Fault.OVERTEMP),
+            mode_state=0,
+        )
+
+        detail = driver.health_detail()
+
+        assert detail is not None
+        assert "低電圧" in detail
+        assert "過温度" in detail
+        assert "ホールセンサ異常" not in detail
+
+    def test_解除待ちのあいだは励磁しない理由を出す(self) -> None:
+        driver = Edulite05Driver("m1", can_id=5)
+        feed_edulite(driver, fault_bits=int(Edulite05Fault.MAG_ENCODER), mode_state=0)
+        driver.reinitialization_steps()
+
+        detail = driver.health_detail()
+
+        assert detail == driver.activation_block_reason()
+        assert detail is not None
+        assert "磁気エンコーダ異常" in detail
