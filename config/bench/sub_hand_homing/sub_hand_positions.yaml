@@ -64,7 +64,7 @@ axes:
       # 桁の違う目標だけを止める。実ストロークより広く取る
       max_step: 600.0
       # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
-      stall_torque: 2.0
+      stall_torque: 4.0
     unit: mm
     command_unit: rad
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
