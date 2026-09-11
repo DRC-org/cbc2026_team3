@@ -5,6 +5,7 @@ from lib.suction import SuctionSelection, SuctionSelectionError
 
 VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
 
+# 置く箱の順は 2 -> 3 -> 1 -> 4 (2026-09-11)。箱 1 は後回しにする。
 # 吸着したら 10mm だけ上げて棚から離し、後退してから移動高さへ上げる (棚の上では
 # 高く上げられない)。回すのは上げてから (低いままだとワークが箱に当たる。2026-09-11 実機)。
 # 軸どうしの干渉を止める宣言は無いので、守っているのはこの並びだけ。
@@ -91,9 +92,9 @@ class SubHandSequence(Sequence):
     async def work_1_carry_pose(self) -> None:
         await self.move_to(CARRY_POSE)
 
-    @step("1 個目: 箱 1 の上へ")
+    @step("1 個目: 箱 2 の上へ")
     async def work_1_over_box(self) -> None:
-        await self.move_to({"sub_y_axis": "place_1"})
+        await self.move_to({"sub_y_axis": "place_2"})
 
     @step("1 個目: オフセットを閉じる")
     async def work_1_close_offset(self) -> None:
@@ -159,9 +160,9 @@ class SubHandSequence(Sequence):
     async def work_2_carry_pose(self) -> None:
         await self.move_to(CARRY_POSE)
 
-    @step("2 個目: 箱 2 の上へ")
+    @step("2 個目: 箱 3 の上へ")
     async def work_2_over_box(self) -> None:
-        await self.move_to({"sub_y_axis": "place_2"})
+        await self.move_to({"sub_y_axis": "place_3"})
 
     @step("2 個目: オフセットを閉じる")
     async def work_2_close_offset(self) -> None:
@@ -227,9 +228,9 @@ class SubHandSequence(Sequence):
     async def work_3_carry_pose(self) -> None:
         await self.move_to(CARRY_POSE)
 
-    @step("3 個目: 箱 3 の上へ")
+    @step("3 個目: 箱 1 の上へ")
     async def work_3_over_box(self) -> None:
-        await self.move_to({"sub_y_axis": "place_3"})
+        await self.move_to({"sub_y_axis": "place_1"})
 
     @step("3 個目: オフセットを閉じる")
     async def work_3_close_offset(self) -> None:
