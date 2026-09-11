@@ -82,7 +82,18 @@ uv run pytest -m ""               # slow も含めた全件（CI と同じ）
 uv run ruff check . && uv run ruff format .
 cd web && pnpm check              # lint + format + 型検査 + テスト + ビルド
 pio test -e native -d firmware/servo  # ファームの native テスト（実機不要）
+scripts/deploy.sh                 # 実機へ反映: pull + 依存導入 + UI ビルド + 全サービス再起動
 ```
+
+## 実機のプログラムを再起動・反映するとき
+
+- サービスが参照する本体チェックアウト（`systemctl show cbc-control -p WorkingDirectory`、
+  現状 `/home/drc/cbc2026_team3`）で `scripts/deploy.sh` を実行する。worktree の deploy.sh はガードで止まる
+- deploy.sh は upstream から pull する。反映したい変更は先に本体チェックアウトのブランチの upstream へ push しておく
+- `main.py` を `nohup` / `setsid` で手動常駐させない（8080 を握り、cbc-control が起動のたびに落ちる）。
+  `--dry-run` や机上ベンチの一時起動は `timeout` 付きで
+- 再起動で UI 接続は全部切れ、CAN も全バス down/up する。操作中の人がいないか確かめてから
+- 会場（ネットワークなし）では `--no-install`
 
 ## 設定ファイルの分担
 
