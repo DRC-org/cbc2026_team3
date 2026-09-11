@@ -83,10 +83,8 @@ axes:
   # サーボ 3 軸の timeout_s は firmware/servo/include/config.h のスルーレート
   # (90deg/s) と対。突き合わせは tests/test_servo_travel_budget.py。
   sub_rotate:
-    guard:
-      # 前端から 150mm 以内で回すと、回転した機構が前端側の構造物に当たる。
-      # 回してよい範囲は retracted〜clear で、mm の値は positions が 1 箇所で持つ
-      requires: [{ axis: sub_y_axis, between: [retracted, clear] }]
+    # 前後の位置は条件にしない (2026-09-11 に外した)。棚の手前で回すと当たるが、
+    # 調整中に回せないほうが困る。当たるかは操縦者の目視
     unit: deg
     command_unit: deg
     timeout_s: 2.0
