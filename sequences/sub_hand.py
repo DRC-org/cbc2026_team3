@@ -26,6 +26,7 @@ LIFT_OFF_SHELF: dict[str, str] = {"sub_lift": "lifted"}
 
 CARRY_POSE: dict[str, str] = {"sub_rotate": "carry"}
 RECEIVE_POSE: dict[str, str] = {"sub_rotate": "receive"}
+WALL_R_INITIAL: dict[str, str] = {"wall_r": "initial"}
 
 # ピッチとオフセットは同時に動かさない。閉じるとき オフセット -> ピッチ、
 # 開くとき ピッチ -> オフセット。
@@ -82,6 +83,7 @@ class SubHandSequence(Sequence):
         await self.move_to(OPEN_PITCH)
         await self.move_to(OPEN_OFFSET)
         await self.move_to(RECEIVE_POSE)
+        await self.move_to(WALL_R_INITIAL)
 
     @step("1 個目: 棚へ寄せる", require_trigger=True)
     async def work_1_to_shelf(self) -> None:

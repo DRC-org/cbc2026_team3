@@ -70,14 +70,6 @@ motors:
     expected_firmware: 6
     expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
 
-  wall_r:
-    driver: generic
-    bus: generic_bus
-    can_id: 0x42               # サーボ基板 #0 SV2
-    control_type: position
-    expected_firmware: 6
-    expected_angle_range_deg: 270.0     # firmware/servo/include/config.h と対
-
 sensors:
   rotate_origin_sensor:
     bus: generic_bus

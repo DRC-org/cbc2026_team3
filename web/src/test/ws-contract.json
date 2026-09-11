@@ -279,7 +279,7 @@
               }
             ],
             "sync_tolerance": null,
-            "target": null,
+            "target": 0.3,
             "unit": "duty",
             "value": null
           }

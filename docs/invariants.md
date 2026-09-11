@@ -953,6 +953,12 @@ CAN shutdown）が 1 段も走らない。`_install_stop_signal_handler()` が m
 （`SensorSuspension`）がセンサ単位の参照カウントでセンサ名がロボット横断に一意なことと、原点確定が
 軸単位なこと。手動操縦の制御権を塞ぐ `HomingController.running` は、どれか 1 機でも走っていれば立つ。
 
+**零点確定はフェーズで塞がない**（`homing_start` は `PHASES_ANY`）。原点を失った機体を試合中に
+戻せないと、その試合は最後まで動かせない。代わりに、軸の書き手が二重にならないよう
+`sequence_start` / `sequence_jump` / `trigger` を `_busy_label()` が立っているあいだ拒む
+（`RobotServer._deny_while_axis_check`）。逆向き（点検を始める側）は `_environment_deny` が持つ。
+`match_start` も `_busy_label()` で塞がるので、走っている零点確定を跨いで試合が始まることもない。
+
 **スイッチの作動点を測る経路も、同じ探索を通る**（`HomingRunner.measure`）。機構が変わるたびに
 作動点は動く（2026-09-09 の 1 日で前後 −500〜−520 → −447.0、上下 −189 → −159.0）ので測る手段が
 要るが、掃引をもう 1 本書くと片方だけが直された状態が作れる。**違いは原点を書き込まない 1 点だけ

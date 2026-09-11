@@ -21,6 +21,7 @@ SUB_HOME: dict[str, str] = {
     "sub_pitch": "open",
     "sub_offset": "open",
     "sub_rotate": "receive",
+    "wall_r": "initial",
     "pump_vac": "stop",
 }
 

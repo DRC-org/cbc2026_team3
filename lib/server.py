@@ -547,7 +547,9 @@ class RobotServer:
         task = self._reenergize_tasks.get(robot_name)
         return task is not None and not task.done()
 
-    async def _cmd_trigger(self, data: dict, _requester: WSOrNone) -> None:
+    async def _cmd_trigger(self, data: dict, requester: WSOrNone) -> None:
+        if await self._deny_while_axis_check("trigger", "トリガーを送れません", requester):
+            return
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
             self._robots[robot_name].sequence.trigger()
@@ -606,7 +608,9 @@ class RobotServer:
     async def _cmd_health_check(self, _data: dict, _requester: WSOrNone) -> None:
         await self._broadcast_state()
 
-    async def _cmd_sequence_jump(self, data: dict, _requester: WSOrNone) -> None:
+    async def _cmd_sequence_jump(self, data: dict, requester: WSOrNone) -> None:
+        if await self._deny_while_axis_check("sequence_jump", "ステップを選べません", requester):
+            return
         robot_name = data.get("robot")
         step_index = data.get("step_index")
         if isinstance(step_index, bool) or not isinstance(step_index, int):
@@ -621,7 +625,11 @@ class RobotServer:
             self._stop_sequence(self._robots[robot_name])
             logger.info("sequence_stop: %s", robot_name)
 
-    async def _cmd_sequence_start(self, data: dict, _requester: WSOrNone) -> None:
+    async def _cmd_sequence_start(self, data: dict, requester: WSOrNone) -> None:
+        if await self._deny_while_axis_check(
+            "sequence_start", "シーケンスを開始できません", requester
+        ):
+            return
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
             self._robots[robot_name].sequence.request_start()
@@ -1475,6 +1483,23 @@ class RobotServer:
             if running and label != what:
                 return f"{label}の実行中は{what}を実行できません"
         return None
+
+    async def _deny_while_axis_check(
+        self,
+        command: str,
+        what: str,
+        requester: WSOrNone,
+    ) -> bool:
+        """軸を握る点検の実行中は通さない。**判定は `_busy_label()` だけが持つ。**
+
+        零点合わせは全フェーズで走れるので、シーケンス側の 3 つ (開始・ジャンプ・
+        トリガー) は試合中にも塞ぐ必要がある。逆向きは `_environment_deny` が持つ。
+        """
+        busy = self._busy_label()
+        if busy is None:
+            return False
+        await self._reject_command(requester, command, f"{busy}の実行中は{what}")
+        return True
 
     def _busy_label(self) -> str | None:
         """今この瞬間、軸を握っている点検があればその名前。"""

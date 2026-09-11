@@ -7,7 +7,6 @@ HOME: dict[str, str] = {
     "rotate": "home",
     "gripper": "open",
     "wall_f": "initial",
-    "wall_r": "initial",
     "conveyor": "stop",
 }
 
