@@ -5,10 +5,9 @@ from lib.suction import SuctionSelection, SuctionSelectionError
 
 VALVE_AXES: tuple[str, ...] = ("valve_1", "valve_2", "valve_3", "valve_4", "valve_5", "valve_6")
 
-# 前後に動かしてよいのは sub_lift が top のときだけ、sub_rotate を回してよいのは
-# sub_y_axis が clear に居るときだけ。条件そのものは config/sub_hand_positions.yaml の
-# guard.requires が宣言し、指令の入口が判定する (docs/invariants.md §4)。この並びは
-# 「拒否されずに通る唯一の順序」であって、守りの最後の 1 枚ではない。
+# 吸着したら 10mm だけ上げて棚から離し、後退してから移動高さへ上げる (棚の上では
+# 高く上げられない)。回すのは上げてから (低いままだとワークが箱に当たる。2026-09-11 実機)。
+# 軸どうしの干渉を止める宣言は無いので、守っているのはこの並びだけ。
 TO_SHELF: dict[str, str] = {"sub_y_axis": "receive"}
 TO_CLEAR: dict[str, str] = {"sub_y_axis": "clear"}
 TO_RETRACTED: dict[str, str] = {"sub_y_axis": "retracted"}
@@ -16,6 +15,7 @@ TO_RETRACTED: dict[str, str] = {"sub_y_axis": "retracted"}
 DOWN_TO_PICK: dict[str, str] = {"sub_lift": "pick"}
 DOWN_TO_PLACE: dict[str, str] = {"sub_lift": "place"}
 UP_TO_TOP: dict[str, str] = {"sub_lift": "top"}
+LIFT_OFF_SHELF: dict[str, str] = {"sub_lift": "lifted"}
 
 CARRY_POSE: dict[str, str] = {"sub_rotate": "carry"}
 RECEIVE_POSE: dict[str, str] = {"sub_rotate": "receive"}
@@ -77,11 +77,15 @@ class SubHandSequence(Sequence):
 
     @step("1 個目: 持ち上げ")
     async def work_1_lift_up(self) -> None:
-        await self.move_to(UP_TO_TOP)
+        await self.move_to(LIFT_OFF_SHELF)
 
     @step("1 個目: 回転可能位置へ後退")
     async def work_1_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+
+    @step("1 個目: 移動高さへ上昇")
+    async def work_1_up_before_turn(self) -> None:
+        await self.move_to(UP_TO_TOP)
 
     @step("1 個目: 搬送姿勢へ")
     async def work_1_carry_pose(self) -> None:
@@ -141,11 +145,15 @@ class SubHandSequence(Sequence):
 
     @step("2 個目: 持ち上げ")
     async def work_2_lift_up(self) -> None:
-        await self.move_to(UP_TO_TOP)
+        await self.move_to(LIFT_OFF_SHELF)
 
     @step("2 個目: 回転可能位置へ後退")
     async def work_2_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+
+    @step("2 個目: 移動高さへ上昇")
+    async def work_2_up_before_turn(self) -> None:
+        await self.move_to(UP_TO_TOP)
 
     @step("2 個目: 搬送姿勢へ")
     async def work_2_carry_pose(self) -> None:
@@ -205,11 +213,15 @@ class SubHandSequence(Sequence):
 
     @step("3 個目: 持ち上げ")
     async def work_3_lift_up(self) -> None:
-        await self.move_to(UP_TO_TOP)
+        await self.move_to(LIFT_OFF_SHELF)
 
     @step("3 個目: 回転可能位置へ後退")
     async def work_3_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+
+    @step("3 個目: 移動高さへ上昇")
+    async def work_3_up_before_turn(self) -> None:
+        await self.move_to(UP_TO_TOP)
 
     @step("3 個目: 搬送姿勢へ")
     async def work_3_carry_pose(self) -> None:
@@ -269,11 +281,15 @@ class SubHandSequence(Sequence):
 
     @step("4 個目: 持ち上げ")
     async def work_4_lift_up(self) -> None:
-        await self.move_to(UP_TO_TOP)
+        await self.move_to(LIFT_OFF_SHELF)
 
     @step("4 個目: 回転可能位置へ後退")
     async def work_4_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+
+    @step("4 個目: 移動高さへ上昇")
+    async def work_4_up_before_turn(self) -> None:
+        await self.move_to(UP_TO_TOP)
 
     @step("4 個目: 搬送姿勢へ")
     async def work_4_carry_pose(self) -> None:

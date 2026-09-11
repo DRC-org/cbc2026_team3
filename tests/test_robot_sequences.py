@@ -379,13 +379,14 @@ class TestMainHandSteps:
         assert run in commanded, "シーケンス中にコンベアを一度も回していない"
 
 
-# ワーク 1 個ぶん 16 ステップ x 4 個 + 初期位置 + 復帰。
+# ワーク 1 個ぶん 17 ステップ x 4 個 + 初期位置 + 復帰。
 _SUB_CYCLE_LABELS = (
     "棚へ寄せる",
     "吸着高さへ下降",
     "ワーク吸着",
     "持ち上げ",
     "回転可能位置へ後退",
+    "移動高さへ上昇",
     "搬送姿勢へ",
     "箱 {n} の上へ",
     "オフセットを閉じる",
@@ -399,8 +400,8 @@ _SUB_CYCLE_LABELS = (
     "受け取り姿勢へ",
 )
 
-# 16 ステップのうち操縦者のトリガー待ちを持つ位置 (0 始まり)。
-_SUB_TRIGGER_OFFSETS = (0, 2, 9, 10)
+# 17 ステップのうち操縦者のトリガー待ちを持つ位置 (0 始まり)。
+_SUB_TRIGGER_OFFSETS = (0, 2, 10, 11)
 
 # 前端スイッチ (動作点 0.0mm) からこれより内側に居るあいだ sub_rotate を回すと機構が
 # 干渉する (docs/invariants.md §4)。守っているのはステップの並びだけである。
@@ -449,14 +450,14 @@ class TestSubHandSteps:
         labels = [s["label"] for s in SubHandSequence().steps_info]
 
         assert labels == _expected_sub_labels()
-        assert len(labels) == 1 + 16 * 4 + 1
+        assert len(labels) == 1 + 17 * 4 + 1
 
     def test_トリガー待ちは仕様どおりの位置だけに付く(self) -> None:
         steps = SubHandSequence().steps_info
 
         waiting = {s["index"] for s in steps if s["require_trigger"]}
 
-        assert waiting == {1 + 16 * n + offset for n in range(4) for offset in _SUB_TRIGGER_OFFSETS}
+        assert waiting == {1 + 17 * n + offset for n in range(4) for offset in _SUB_TRIGGER_OFFSETS}
 
     async def test_回転の直前は前端スイッチから_150mm_以上離れている(self) -> None:
         table = _load_shipped("sub_hand_positions.yaml")
@@ -481,7 +482,8 @@ class TestSubHandSteps:
 
         assert turns == 1 + 4 * 2
 
-    async def test_前後に動かす直前の昇降は必ず_top(self) -> None:
+    async def test_前後に動かす直前の昇降は_top_か棚から離した高さ(self) -> None:
+        # 棚からの後退だけは lifted (棚の上では top まで上げられない)。それ以外は top
         lift: str | None = None
         moves = 0
 
@@ -491,7 +493,9 @@ class TestSubHandSteps:
             if "sub_y_axis" not in targets:
                 continue
             moves += 1
-            assert lift == "top", f"ステップ {index}: sub_lift が '{lift}' のまま前後に動かしている"
+            assert lift in ("top", "lifted"), (
+                f"ステップ {index}: sub_lift が '{lift}' のまま前後に動かしている"
+            )
 
         assert moves == 1 + 4 * 4 + 1
 
