@@ -369,9 +369,7 @@ class Sequence:
         # 停止要求と競わせる。ステップの境界だけで見ると、長い移動の途中で通常停止を
         # 押しても着くまで止まらない (2026-09-11 実機で「止まるまで長い」)
         waits = [
-            asyncio.ensure_future(
-                move.handle.wait_reached(timeout=move.wait_s, expect_target=True)
-            )
+            asyncio.ensure_future(move.handle.wait_reached(timeout=move.wait_s, expect_target=True))
             for move in pending
         ]
         stop_wait = asyncio.ensure_future(self._stop_event.wait())
