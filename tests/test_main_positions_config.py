@@ -6,8 +6,13 @@ import pathlib
 import pytest
 import yaml
 
-from lib.sequence.positions import PositionLookupError, load_position_table
-from main import _load_position_table_file, _positions_path
+from lib.sequence.positions import (
+    PositionLookupError,
+    PositionReloadError,
+    PositionTable,
+    load_position_table,
+)
+from main import _load_position_table_file, _positions_path, _reload_positions
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
 
@@ -375,3 +380,53 @@ class TestShippedMainHandRetreats:
         """
         assert table.axis(axis).manual is not None, f"{axis} に manual が無く範囲検証が効かない"
         assert self._retreat_names(table, axis), f"{axis} に退避点が 1 つも無い"
+
+
+class TestReloadPositions:
+    """走らせたまま位置定数 yaml を読み直す口。
+
+    守るのは 1 つ —— **拒んだときに今の値が残っていること。**「読めなかった」を
+    起動時と同じく空テーブルへ倒すと、動いている機体から行き先が丸ごと消える。
+    """
+
+    def _table_and_path(self, tmp_path: pathlib.Path) -> tuple[PositionTable, pathlib.Path]:
+        path = tmp_path / "main_hand_positions.yaml"
+        path.write_text(_VALID_YAML)
+        return _load_position_table_file(path), path
+
+    def test_adopts_new_values(self, tmp_path: pathlib.Path) -> None:
+        table, path = self._table_and_path(tmp_path)
+        path.write_text(_VALID_YAML.replace("home: 3.0", "home: 4.0\n    work: 5.0"))
+
+        changed = _reload_positions(table, path)
+
+        assert changed == ("lift_motor.home", "lift_motor.work")
+        assert table.commands("lift_motor", "home") == {"lift_motor": pytest.approx(8.0)}
+
+    def test_broken_yaml_keeps_current_values(self, tmp_path: pathlib.Path) -> None:
+        table, path = self._table_and_path(tmp_path)
+        path.write_text("axes: [これは辞書ではない]")
+
+        with pytest.raises(PositionReloadError):
+            _reload_positions(table, path)
+
+        assert table.commands("lift_motor", "home") == {"lift_motor": pytest.approx(6.0)}
+
+    def test_missing_file_keeps_current_values(self, tmp_path: pathlib.Path) -> None:
+        table, path = self._table_and_path(tmp_path)
+        path.unlink()
+
+        with pytest.raises(PositionReloadError):
+            _reload_positions(table, path)
+
+        assert table.commands("lift_motor", "home") == {"lift_motor": pytest.approx(6.0)}
+
+    def test_changed_axis_definition_is_refused(self, tmp_path: pathlib.Path) -> None:
+        table, path = self._table_and_path(tmp_path)
+        # 単位換算は起動時にモータと制御ループへ配り終えている。入れ替えても届かない
+        path.write_text(_VALID_YAML.replace("scale: 2.0", "scale: 3.0"))
+
+        with pytest.raises(PositionReloadError, match="axes"):
+            _reload_positions(table, path)
+
+        assert table.commands("lift_motor", "home") == {"lift_motor": pytest.approx(6.0)}

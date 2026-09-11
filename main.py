@@ -63,7 +63,7 @@ from lib.sequence.motors import (
     build_axis_state_reader,
     build_motor_group,
 )
-from lib.sequence.positions import PositionTable, load_position_table
+from lib.sequence.positions import PositionReloadError, PositionTable, load_position_table
 from lib.server import RobotServer
 from lib.server_homing import HomingSource
 from lib.suction import suction_of
@@ -187,6 +187,22 @@ def _load_position_table_file(path: pathlib.Path) -> PositionTable:
     except (OSError, ValueError, yaml.YAMLError) as exc:
         logger.error("位置定数ファイルを読み込めません: %s (%s) — 定数なしで起動", path, exc)
         return PositionTable.empty(source=str(path))
+
+
+def _reload_positions(table: PositionTable, path: pathlib.Path) -> tuple[str, ...]:
+    """位置定数 yaml を読み直し、**値だけ**を今のテーブルへ入れる。変わった位置名を返す。
+
+    起動時の `_load_position_table_file` と違い、読めなければ空で通さずに送出する。
+    「読めなかった」を「位置が 1 つも無い」に化けさせると、動作中の機体から
+    行き先が丸ごと消える。拒んだときは今の値がそのまま残る。
+    """
+    if not path.exists():
+        raise PositionReloadError(f"位置定数ファイルが見つかりません: {path}")
+    try:
+        fresh = load_position_table(_load_config(path) or {}, source=str(path))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise PositionReloadError(f"位置定数ファイルを読み込めません ({exc})") from exc
+    return table.adopt_positions(fresh)
 
 
 @contextlib.contextmanager
@@ -1175,7 +1191,8 @@ def _wire_one_robot(
     if seq is None:
         seq = _PlaceholderSequence(robot_name)
 
-    positions = _load_position_table_file(_positions_path(config_path, robot_name))
+    positions_path = _positions_path(config_path, robot_name)
+    positions = _load_position_table_file(positions_path)
     seq.bind_positions(positions)
 
     # 歯止め (指令の入口と 50Hz 監視) が読む口は覆いを通す。零点確定の整列段が
@@ -1245,6 +1262,9 @@ def _wire_one_robot(
         target_refreshers=refreshers,
         manual=manual,
         suction=suction_of(seq),
+        # 位置定数だけは走らせたまま読み直せる。控えた値を貼ってから試すのに
+        # 全サービス再起動 (UI 切断 + CAN down/up) を挟まずに済む
+        reload_positions=functools.partial(_reload_positions, positions, positions_path),
     )
     logger.info(
         "ロボット登録: %s (モータ %d 台 / 軸 %d 本 / 位置制御ループ %s / 同期監視 %s"

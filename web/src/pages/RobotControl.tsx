@@ -166,6 +166,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       <PositionCapturePanel
         robotKey={robotKey}
         capture={state.position_capture}
+        reload={state.positions_reload ?? null}
         blockedReason={manualBlockedReason}
         sendOrReport={sendOrReport}
       />

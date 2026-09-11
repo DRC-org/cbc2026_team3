@@ -48,6 +48,7 @@ _EXPECTED_COMMANDS = {
     "manual_jog",
     "suction_pads_set",
     "position_capture",
+    "positions_reload",
 }
 
 

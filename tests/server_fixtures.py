@@ -19,7 +19,12 @@ from lib.health import HealthSnapshot
 from lib.manual import ManualController
 from lib.match_state import Court, MatchState
 from lib.sequence.engine import Sequence
-from lib.server import _ENERGIZE_GRACE_S, _FIRMWARE_INFO_GRACE_S, RobotServer
+from lib.server import (
+    _ENERGIZE_GRACE_S,
+    _FIRMWARE_INFO_GRACE_S,
+    PositionsReloader,
+    RobotServer,
+)
 from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager
 
@@ -49,6 +54,7 @@ class ServerFixture:
         target_refreshers: list[GenericTargetRefresher] | None = None,
         manual: ManualController | None = None,
         suction: SuctionSelection | None = None,
+        reload_positions: PositionsReloader | None = None,
     ) -> Any:
         mgr = can_manager if can_manager is not None else mock_can_manager()
         self.server.add_robot(
@@ -61,6 +67,7 @@ class ServerFixture:
             target_refreshers=target_refreshers,
             manual=manual,
             suction=suction,
+            reload_positions=reload_positions,
         )
         self._sequences[name] = sequence
         self._can_managers[name] = mgr

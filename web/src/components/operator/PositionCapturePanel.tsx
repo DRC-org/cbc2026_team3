@@ -1,4 +1,4 @@
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -7,13 +7,15 @@ import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotCommands } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
-import type { Malformed, PositionCaptureState } from "@/lib/protocol";
+import type { Malformed, PositionCaptureState, PositionsReloadState } from "@/lib/protocol";
 import { MALFORMED } from "@/lib/protocol";
 import { formatClock } from "@/lib/time";
 
 interface PositionCapturePanelProps {
   robotKey: string;
   capture: PositionCaptureState | Malformed;
+  /** 位置定数 yaml の読み直し。**null なら口が無い台** (ボタンを出さない) */
+  reload: PositionsReloadState | Malformed | null;
   blockedReason: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
 }
@@ -23,6 +25,7 @@ type CopyState = "idle" | "copied" | "failed";
 export function PositionCapturePanel({
   robotKey,
   capture,
+  reload,
   blockedReason,
   sendOrReport,
 }: PositionCapturePanelProps) {
@@ -131,6 +134,30 @@ export function PositionCapturePanel({
           >
             {fragment}
           </pre>
+        </div>
+      )}
+
+      {reload === null ? null : reload === MALFORMED ? (
+        <StatusBadge tone="error">読み直しの状態 判定不能</StatusBadge>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <Button
+            aria-label="位置定数 yaml を読み直す"
+            title="yaml へ貼った値をサーバーへ読ませる（再起動も CAN の入れ直しも要らない）"
+            onClick={() =>
+              sendOrReport({ type: "positions_reload", robot: robotKey }, "位置定数の読み直し")
+            }
+          >
+            <Icon as={RefreshCw} />
+            yaml を読み直す
+          </Button>
+          <span className="text-[0.85em] text-base-content/60" title={reload.changed.join(", ")}>
+            {reload.reloaded_at === null
+              ? "貼ったあとに押す"
+              : `${formatClock(reload.reloaded_at * 1000)} に読み直し・${
+                  reload.changed.length === 0 ? "変化なし" : `${reload.changed.length} 件変化`
+                }`}
+          </span>
         </div>
       )}
     </Panel>

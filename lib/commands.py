@@ -330,6 +330,17 @@ _SPECS: tuple[CommandSpec, ...] = (
         ),
         handler="_cmd_position_capture",
     ),
+    # yaml を読み直すだけで機体は動かない。緊急停止で止めて直し、そのまま試す経路を残す。
+    # 試合中に通すと、走っている足元で次のステップの行き先だけが入れ替わる
+    _spec(
+        "positions_reload",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は位置定数を読み直せません",
+        allowed_during_e_stop=True,
+        # 手動操縦中も通す。手で合わせて控え、yaml へ貼って読み直し、その位置へ
+        # 動かして確かめる —— 位置定数を決める手順はモードを跨がない
+        handler="_cmd_positions_reload",
+    ),
     # 選択を変えるだけで機体は動かない。次の吸着ステップから効くので、緊急停止中の準備にも通す
     _spec(
         "suction_pads_set",
