@@ -67,33 +67,30 @@ class MainHandSequence(Sequence):
     async def grab_work_shared(self) -> None:
         await self.move_to({"gripper": "closed"})
 
+    @step("共通ワークを引き出す", require_trigger=True)
+    async def pull_out_work_shared(self) -> None:
+        await self.move_to({"y_axis": "work_shared_after_1", "rotate": "work_shared_after_1"})
+
+    @step("共通ワークを開放", require_trigger=True)
+    async def release_work_shared_after_pull_out(self) -> None:
+        await self.move_to({"gripper": "open"})
+
+    @step("3 列目に置いた共通ワークへ移動", require_trigger=True)
+    async def move_to_work_shared_3(self) -> None:
+        await self.move_to(_pick_at("work_shared"))
+
+    @step("3 列目に置いた共通ワークを把持", require_trigger=True)
+    async def grab_work_shared_3(self) -> None:
+        await self.move_to({"gripper": "closed"})
+
     @step("共通ワークをコンベアの位置へ", require_trigger=True)
     async def move_work_shared_to_conveyor(self) -> None:
+        await self.move_to({"y_axis": "work_3_after_1", "rotate": "work_3_after_1"})
+        await self.move_to({"y_axis": "work_3_after_2", "rotate": "work_3_after_2"})
         await self.move_to(TO_CONVEYOR)
 
     @step("共通ワークをリリース", require_trigger=True)
     async def release_work_shared(self) -> None:
-        await self.move_to(RELEASE)
-        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
-
-    @step("1 列目ワークへ移動", require_trigger=True)
-    async def move_to_work_1(self) -> None:
-        await self.move_to(_pick_at("work_1"))
-
-    @step("コンベアの壁を閉じてワークを寄せる")
-    async def close_wall_f_shared(self) -> None:
-        await self.move_to(SWEEP_TO_CONVEYOR)
-
-    @step("1 列目ワークを把持", require_trigger=True)
-    async def grab_work_1(self) -> None:
-        await self.move_to({"gripper": "closed"})
-
-    @step("1 列目ワークをコンベアの位置へ", require_trigger=True)
-    async def move_work_1_to_conveyor(self) -> None:
-        await self.move_to(TO_CONVEYOR)
-
-    @step("1 列目ワークをリリース", require_trigger=True)
-    async def release_work_1(self) -> None:
         await self.move_to(RELEASE)
         await self.move_to({"rotate": "after_place", "y_axis": "clear"})
 
@@ -102,7 +99,7 @@ class MainHandSequence(Sequence):
         await self.move_to(_pick_at("work_2"))
 
     @step("コンベアの壁を閉じてワークを寄せる")
-    async def close_wall_f_1(self) -> None:
+    async def close_wall_f_shared(self) -> None:
         await self.move_to(SWEEP_TO_CONVEYOR)
 
     @step("2 列目ワークを把持", require_trigger=True)
@@ -118,8 +115,30 @@ class MainHandSequence(Sequence):
         await self.move_to(RELEASE)
         await self.move_to({"rotate": "after_place", "y_axis": "clear"})
 
+    @step("1 列目ワークへ移動", require_trigger=True)
+    async def move_to_work_1(self) -> None:
+        await self.move_to(_pick_at("work_1"))
+
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_2(self) -> None:
+        await self.move_to(SWEEP_TO_CONVEYOR)
+
+    @step("1 列目ワークを把持", require_trigger=True)
+    async def grab_work_1(self) -> None:
+        await self.move_to({"gripper": "closed"})
+
+    @step("1 列目ワークをコンベアの位置へ", require_trigger=True)
+    async def move_work_1_to_conveyor(self) -> None:
+        await self.move_to({"y_axis": "work_1_after_1", "rotate": "work_1_after_1"})
+        await self.move_to(TO_CONVEYOR)
+
+    @step("1 列目ワークをリリース", require_trigger=True)
+    async def release_work_1(self) -> None:
+        await self.move_to(RELEASE)
+        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
+
+    @step("コンベアの壁を閉じてワークを寄せる")
+    async def close_wall_f_1(self) -> None:
         await self.move_to(SWEEP_TO_CONVEYOR)
 
     @step("初期位置へ復帰")
