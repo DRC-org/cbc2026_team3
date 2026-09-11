@@ -18,7 +18,7 @@ from lib.sequence.motors import MotorGroup, MotorHandle
 from lib.sequence.positions import load_position_table
 from tests.fake_can import keep_feedback_fresh, mock_can_manager, set_last_feedback
 from tests.fake_drivers import StubFeedbackDriver
-from tests.server_fixtures import DEFAULT_CHECKLIST, RecordingClient, ServerFixture
+from tests.server_fixtures import RecordingClient, ServerFixture
 
 _ROBOT = "sub_hand"
 _MOTORS = ("sub_lift", "sub_y_axis_r", "sub_y_axis_l", "pump_vac")
@@ -61,8 +61,8 @@ class _IdleSequence(Sequence):
         return None
 
 
-def _fixture(*, court: Court | None = Court.BLUE, fresh: bool = True, checklist: bool = False):
-    fx = ServerFixture.build(checklist_definitions=DEFAULT_CHECKLIST if checklist else None)
+def _fixture(*, court: Court | None = Court.BLUE, fresh: bool = True):
+    fx = ServerFixture.build()
     fx.freeze_broadcast()
 
     mgr = mock_can_manager(_MOTORS)
@@ -222,7 +222,7 @@ class TestRejects:
         assert "コートが未設定" in _reason(client)
 
     async def test_試合中は控えられない(self) -> None:
-        fx, drivers, _ = _fixture(checklist=True)
+        fx, drivers, _ = _fixture()
         drivers["sub_lift"].set_observed(position=-240.0)
         fx.enter_match()
         assert fx.match.phase is Phase.MATCH

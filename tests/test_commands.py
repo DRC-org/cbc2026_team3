@@ -24,11 +24,6 @@ def e_stop_deny_reason(command: str) -> str | None:
     return None if spec is None else spec.e_stop_deny_reason()
 
 
-def dev_tools_deny_reason(command: str, dev_tools_enabled: bool) -> str | None:
-    spec = spec_for(command)
-    return None if spec is None else spec.dev_tools_deny_reason(dev_tools_enabled)
-
-
 _EXPECTED_COMMANDS = {
     "trigger",
     "e_stop",
@@ -44,9 +39,6 @@ _EXPECTED_COMMANDS = {
     "switch_distance_start",
     "reenergize_motors",
     "set_court",
-    "checklist_set",
-    "checklist_reset",
-    "checklist_check_all",
     "match_start",
     "match_finish",
     "match_reset",
@@ -82,7 +74,6 @@ class TestRegistryCoverage:
             e_stop_deny_message="",
             handler="_cmd_does_not_exist",
             reject_channel=RejectChannel.COMMAND_REJECTED,
-            requires_dev_tools=False,
             blocked_during_manual=False,
             manual_deny_message=None,
             blocked_during_reenergize=False,
@@ -169,7 +160,6 @@ class TestSpecValidation:
             "phase_deny_message": None,
             "allowed_during_e_stop": True,
             "e_stop_deny_message": None,
-            "requires_dev_tools": False,
             "blocked_during_manual": False,
             "manual_deny_message": None,
             "blocked_during_reenergize": False,
@@ -340,30 +330,6 @@ class TestManualCommandsAreNotPhaseGated:
     @pytest.mark.parametrize("phase", list(Phase))
     def test_every_phase_is_allowed(self, command: str, phase: Phase) -> None:
         assert phase_deny_reason(command, phase) is None
-
-
-class TestDevToolsGate:
-    def test_only_declared_dev_commands_require_the_flag(self) -> None:
-        dev_only = {name for name, spec in COMMANDS.items() if spec.requires_dev_tools}
-        assert dev_only == {"checklist_check_all"}
-
-    def test_dev_command_is_denied_without_the_flag(self) -> None:
-        assert dev_tools_deny_reason("checklist_check_all", False) is not None
-        assert dev_tools_deny_reason("checklist_check_all", True) is None
-
-    @pytest.mark.parametrize("command", ["checklist_set", "e_stop", "match_start"])
-    def test_normal_commands_are_unaffected_by_the_flag(self, command: str) -> None:
-        assert dev_tools_deny_reason(command, False) is None
-        assert dev_tools_deny_reason(command, True) is None
-
-    def test_unknown_command_has_no_dev_reason(self) -> None:
-        assert dev_tools_deny_reason("totally_unknown", False) is None
-
-    def test_dev_command_shares_the_checklist_phase_gate(self) -> None:
-        assert (
-            COMMANDS["checklist_check_all"].allowed_phases
-            == COMMANDS["checklist_set"].allowed_phases
-        )
 
 
 class TestPreparationOnlyCommands:

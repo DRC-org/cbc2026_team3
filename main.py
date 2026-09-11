@@ -47,7 +47,7 @@ from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.logging_setup import configure_logging
 from lib.manual import ManualController
-from lib.match_state import ChecklistItem, Court, load_checklist_definitions
+from lib.match_state import Court
 from lib.motion_guard import AxisStateReader, PressedTowardReader, SensorSuspension
 from lib.sequence.engine import (
     NO_LIMIT_INTERVENTION,
@@ -74,7 +74,6 @@ logger = logging.getLogger(__name__)
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent / "config"
 _DEFAULT_CONFIGS = ["main_hand.yaml", "sub_hand.yaml"]
 _SYSTEM_CONFIG = "system.yaml"
-_CHECKLIST_CONFIG = "checklist.yaml"
 _POSITIONS_SUFFIX = "_positions.yaml"
 
 # TODO(実機で確認): 「動かないより暴れない」を優先した保守的な仮値。
@@ -108,10 +107,6 @@ def _parse_args() -> argparse.Namespace:
         help="共通設定 yaml のパス (デフォルト: config/system.yaml)",
     )
     parser.add_argument(
-        "--checklist",
-        help="指差喚呼チェックリストの yaml パス (デフォルト: config/checklist.yaml)",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="CAN バスなしで起動 (mock バスを使用)",
@@ -120,7 +115,7 @@ def _parse_args() -> argparse.Namespace:
         "--dev-tools",
         action="store_true",
         help=(
-            "開発用コマンドを解禁する (指差喚呼の一括チェック等)。"
+            "開発用表示を解禁する (緊急停止ダイアログの非表示等)。"
             f"環境変数 {_DEV_TOOLS_ENV}=1 でも有効になる。試合運用では使わないこと"
         ),
     )
@@ -177,16 +172,6 @@ def _load_all_configs(
         loaded.append((config_path, robot))
 
     return system, loaded
-
-
-def _load_checklist_definitions(path: pathlib.Path) -> dict[str, list[ChecklistItem]]:
-    if not path.exists():
-        logger.warning("チェックリスト設定が見つかりません: %s (項目なしで起動)", path)
-        return load_checklist_definitions({})
-    try:
-        return load_checklist_definitions(_load_config(path) or {})
-    except (ValueError, yaml.YAMLError) as exc:
-        raise SystemExit(f"設定を読み込めません: {exc}") from exc
 
 
 def _positions_path(config_path: pathlib.Path, robot_name: str) -> pathlib.Path:
@@ -1366,30 +1351,15 @@ def _describe_thresholds(health: HealthThresholds) -> str:
     )
 
 
-def _describe_checklist(definitions: Mapping[str, list[ChecklistItem]]) -> str:
-    if not definitions:
-        return "なし"
-    if len(definitions) == 1:
-        return f"{len(next(iter(definitions.values())))} 項目"
-    return ", ".join(f"{role} {len(items)} 項目" for role, items in definitions.items())
-
-
 def _build_server(args: argparse.Namespace, system: SystemConfig) -> RobotServer:
     dev_tools = args.dev_tools or _env_flag(_DEV_TOOLS_ENV)
     if dev_tools:
-        logger.warning("開発用コマンドが有効です (指差喚呼の一括チェック等)。試合運用では外すこと")
-
-    checklist_path = (
-        pathlib.Path(args.checklist) if args.checklist else _CONFIG_DIR / _CHECKLIST_CONFIG
-    )
-    checklist_definitions = _load_checklist_definitions(checklist_path)
-    logger.info("指差喚呼: %s", _describe_checklist(checklist_definitions))
+        logger.warning("開発用表示が有効です。試合運用では外すこと")
 
     return RobotServer(
         host=args.host,
         port=args.port,
         health=system.health,
-        checklist_definitions=checklist_definitions,
         match_settings=system.match,
         dry_run=args.dry_run,
         dev_tools=dev_tools,

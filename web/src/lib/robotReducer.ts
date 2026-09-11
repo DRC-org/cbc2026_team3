@@ -83,7 +83,6 @@ const INITIAL_MATCH_STATE: MatchState = {
   court: null,
   phase: "setup",
   can_start_match: false,
-  checklists: {},
   timer: null,
 };
 

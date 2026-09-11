@@ -103,7 +103,6 @@ scripts/deploy.sh                 # 実機へ反映: pull + 依存導入 + UI �
 | `config/can_buses.yaml` | CAN バス定義の単一情報源。udev ルールとセットアップスクリプトの双方が参照する |
 | `config/<robot>.yaml` | そのロボットのモータ構成（ドライバ種別・バス別名・CAN ID・PID） |
 | `config/<robot>_positions.yaml` | 論理軸の単位換算・機構位置の定数・手動操縦の可動範囲 (`manual`)・機械的可動域 (`travel`) |
-| `config/checklist.yaml` | セッティングタイムの指差喚呼チェックリスト |
 | `config/bench/<対象>/` | 机上ベンチ用の一式 |
 
 読み込みと検証は `lib/config_schema.py` に一本化してある。

@@ -13,7 +13,7 @@ import { RobotProvider } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
 import { useWsUrl } from "@/hooks/useWsUrl";
-import type { ChecklistRole, MatchCourt } from "@/lib/protocol";
+import type { MatchCourt } from "@/lib/protocol";
 import { TABS } from "@/lib/tabs";
 
 function TabHotkeys() {
@@ -118,18 +118,6 @@ export function RootLayout() {
     },
     [sendOrReport],
   );
-  const setChecklistItem = useCallback(
-    (role: ChecklistRole, itemId: string, checked: boolean) => {
-      sendOrReport({ type: "checklist_set", role, item_id: itemId, checked }, "指差喚呼のチェック");
-    },
-    [sendOrReport],
-  );
-  const checkAllChecklist = useCallback(
-    (role: ChecklistRole) => {
-      sendOrReport({ type: "checklist_check_all", role }, "指差喚呼の一括チェック");
-    },
-    [sendOrReport],
-  );
   const matchStart = useCallback(() => {
     sendOrReport({ type: "match_start" }, "試合開始");
   }, [sendOrReport]);
@@ -167,8 +155,6 @@ export function RootLayout() {
         onEStopRelease,
         hideEStopOverlay,
         setCourt,
-        setChecklistItem,
-        checkAllChecklist,
         matchStart,
         matchFinish,
         matchReset,

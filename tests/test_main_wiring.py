@@ -39,7 +39,6 @@ from lib.drivers.edulite05 import Edulite05Driver
 from lib.drivers.generic import GenericDriver
 from lib.drivers.m3508 import CURRENT_MAX, M3508Driver
 from lib.health import MotorHealth
-from lib.match_state import ChecklistItem
 from lib.motion_guard import AxisReading, SensorSuspension
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import EStopActiveError, MotorGroup, MotorHandle
@@ -58,7 +57,6 @@ from main import (
     _build_target_refreshers,
     _create_motor,
     _load_all_configs,
-    _load_checklist_definitions,
     _load_pid_config,
     _make_sensor_reader,
     _wire_robot_motors,
@@ -1247,20 +1245,6 @@ class TestLoadAllConfigs:
         assert loaded == []
         assert any("absent.yaml" in record.getMessage() for record in caplog.records)
 
-    def test_invalid_checklist_aborts_with_a_message(self, tmp_path: pathlib.Path) -> None:
-        path = self._write(
-            tmp_path,
-            "checklist.yaml",
-            "checklists:\n  main_hand:\n    - id: a\n      label: A\n",
-        )
-
-        with pytest.raises(SystemExit) as exc:
-            _load_checklist_definitions(path)
-
-        message = str(exc.value)
-        assert "設定を読み込めません" in message
-        assert "main_hand" in message
-
 
 class TestSequenceClassSelection:
     def _module(self, source: str) -> types.ModuleType:
@@ -2319,22 +2303,6 @@ class TestStartupSummaryLines:
     def test_整数で表せる値から小数点以下を落とす(self) -> None:
         assert main._format_number(180.0) == "180"
         assert main._format_number(180.5) == "180.5"
-
-    def test_ロールが1つなら件数だけを出す(self) -> None:
-        items = [ChecklistItem(id=f"i{n}", label=f"項目{n}") for n in range(3)]
-
-        assert main._describe_checklist({"pre_match": items}) == "3 項目"
-
-    def test_ロールが複数ならロール名を添える(self) -> None:
-        text = main._describe_checklist(
-            {
-                "main_hand": [ChecklistItem(id="a", label="A")],
-                "sub_hand": [ChecklistItem(id="b", label="B"), ChecklistItem(id="c", label="C")],
-            }
-        )
-
-        assert "main_hand 1 項目" in text
-        assert "sub_hand 2 項目" in text
 
 
 class TestSensorReader:

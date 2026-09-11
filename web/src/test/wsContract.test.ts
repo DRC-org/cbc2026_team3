@@ -4,8 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRobotSocket } from "@/hooks/useRobotSocket";
 import type {
   BusHealth,
-  ChecklistItem,
-  ChecklistState,
   ExcludedStep,
   HealthChange,
   HealthSnapshot,
@@ -131,7 +129,6 @@ const EXPECTATIONS: Record<string, Expectation> = {
       court: sample.court,
       phase: sample.phase,
       can_start_match: sample.can_start_match,
-      checklists: sample.checklists,
       timer: sample.timer,
     });
   },
@@ -443,14 +440,6 @@ const MATCH_TIMER = fieldsOf<MatchTimer>({
   duration_ms: "ui",
 });
 
-const CHECKLIST_ITEM = fieldsOf<ChecklistItem>({
-  id: "ui",
-  label: "ui",
-  checked: "ui",
-  group: "ui",
-});
-const CHECKLIST_STATE = fieldsOf<ChecklistState>({ items: "ui", completed: "ui" });
-
 const MOTOR_CHECK_FIELDS: FieldSpec = {
   ...fieldsOf<Wire<MotorCheckSnapshot>>({
     type: "parser",
@@ -630,12 +619,9 @@ const DECLARED: Record<string, FieldSpec> = {
       court: "ui",
       phase: "ui",
       can_start_match: "ui",
-      checklists: "ui",
       timer: "ui",
     }),
     ...nest("timer", MATCH_TIMER),
-    ...nest("checklists.*", CHECKLIST_STATE),
-    ...nest("checklists.*.items[]", CHECKLIST_ITEM),
   },
 
   e_stop_state: E_STOP_FIELDS,
@@ -657,7 +643,7 @@ const DECLARED: Record<string, FieldSpec> = {
   switch_measure_state_with_error: SWITCH_MEASURE_FIELDS,
 };
 
-const DYNAMIC_MAPS = new Set(["motors", "sensors", "checklists", "targets", "robots"]);
+const DYNAMIC_MAPS = new Set(["motors", "sensors", "targets", "robots"]);
 
 function flattenPaths(value: unknown, prefix = ""): string[] {
   if (Array.isArray(value)) return value.flatMap((item) => flattenPaths(item, `${prefix}[]`));

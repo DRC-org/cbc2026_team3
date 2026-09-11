@@ -107,7 +107,7 @@ class TestWatchTaskRecordsFailure:
         await fx.publish_state()
         assert fx.state_message("main_hand")["safety"]["failed_tasks"] != []
 
-        fx.complete_all_checklists()
+        fx.make_ready()
         await fx.command({"type": "match_start"})
 
         assert fx.state_message("main_hand")["safety"]["failed_tasks"] == []

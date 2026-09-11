@@ -10,31 +10,14 @@ from lib.config_schema import MatchSettings
 from lib.control.position_loop import M3508PositionLoop
 from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
-from lib.match_state import (
-    ROLE_PRE_MATCH,
-    ChecklistItem,
-    Court,
-    Phase,
-)
+from lib.match_state import Court, Phase
 from lib.sequence.engine import Sequence, step
 from tests.fake_can import mock_can_manager
 from tests.server_fixtures import ServerFixture, recv_type, seed_jitter_overrun
 
-_DEFS = {
-    ROLE_PRE_MATCH: [
-        ChecklistItem(id="home", label="初期位置確認"),
-        ChecklistItem(id="gripper", label="グリッパ開状態確認"),
-    ],
-}
 
-
-async def _complete_checklist(ws) -> None:
-    # コートを選ぶまで can_start_match は偽。選ぶと指差喚呼がリセットされるので順序が要る
+async def _select_court(ws) -> None:
     await ws.send_json({"type": "set_court", "court": "red"})
-    for item in _DEFS[ROLE_PRE_MATCH]:
-        await ws.send_json(
-            {"type": "checklist_set", "role": ROLE_PRE_MATCH, "item_id": item.id, "checked": True}
-        )
 
 
 _ROBOT_NAMES = ("main_hand", "sub_hand")
@@ -43,7 +26,7 @@ _ROBOT_NAMES = ("main_hand", "sub_hand")
 def _build_fixture_with_periodic_tasks() -> tuple[
     ServerFixture, M3508PositionLoop, SyncMonitor, GenericTargetRefresher
 ]:
-    fx = ServerFixture.build(checklist_definitions=_DEFS)
+    fx = ServerFixture.build()
     mgr = mock_can_manager(("y_axis_r",))
 
     position_loop = M3508PositionLoop(mgr, "bus0")
@@ -89,7 +72,7 @@ class _GatedCheckSequence(Sequence):
 
 
 def _build_fixture(**server_kwargs: object) -> ServerFixture:
-    fx = ServerFixture.build(checklist_definitions=_DEFS, **server_kwargs)
+    fx = ServerFixture.build(**server_kwargs)
     for name in _ROBOT_NAMES:
         fx.add_robot(name, DummySequence(name))
     return fx
@@ -106,7 +89,6 @@ class TestMatchStateSnapshotOnConnect:
             assert msg is not None
             assert msg["phase"] == "setup"
             assert msg["court"] is None
-            assert set(msg["checklists"]) == {ROLE_PRE_MATCH}
             await ws.close()
 
 
@@ -138,7 +120,7 @@ class TestMatchTimerBroadcast:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _complete_checklist(ws)
+            await _select_court(ws)
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
 
@@ -188,37 +170,13 @@ class TestCourtCommand:
             assert not ws.closed
             await ws.close()
 
-
-class TestChecklistCommands:
-    async def test_checklist_set_broadcasts_match_state(self) -> None:
+    async def test_selecting_the_court_unlocks_ready(self) -> None:
         fx = _build_fixture()
         app = fx.create_app()
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await recv_type(ws, "match_state")
-
-            await ws.send_json(
-                {
-                    "type": "checklist_set",
-                    "role": ROLE_PRE_MATCH,
-                    "item_id": "home",
-                    "checked": True,
-                }
-            )
-            msg = await recv_type(ws, "match_state")
-            assert msg is not None
-            assert msg["checklists"][ROLE_PRE_MATCH]["completed"] is False
-            assert msg["can_start_match"] is False
-            await ws.close()
-
-    async def test_every_item_unlocks_ready(self) -> None:
-        fx = _build_fixture()
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await _complete_checklist(ws)
+            await _select_court(ws)
             await asyncio.sleep(0.05)
 
             assert fx.match.phase is Phase.READY
@@ -251,75 +209,6 @@ class TestServerInfoOnConnect:
             await ws.close()
 
 
-class TestChecklistCheckAll:
-    async def test_rejected_without_dev_tools(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_DEFS)
-        for name in _ROBOT_NAMES:
-            fx.add_robot(name, DummySequence(name))
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "checklist_check_all"})
-            msg = await recv_type(ws, "command_rejected")
-            assert msg is not None
-            assert msg["command"] == "checklist_check_all"
-            assert fx.match.can_start_match is False
-            assert fx.match.phase is Phase.SETUP
-            await ws.close()
-
-    async def test_checks_every_role_with_dev_tools(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
-        for name in _ROBOT_NAMES:
-            fx.add_robot(name, DummySequence(name))
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await recv_type(ws, "match_state")
-            await ws.send_json({"type": "set_court", "court": "red"})
-            await recv_type(ws, "match_state")
-            await ws.send_json({"type": "checklist_check_all"})
-            msg = await recv_type(ws, "match_state")
-            assert msg is not None
-            assert all(item["checked"] for item in msg["checklists"][ROLE_PRE_MATCH]["items"])
-            assert msg["can_start_match"] is True
-            assert fx.match.phase is Phase.READY
-            await ws.close()
-
-    async def test_unknown_role_checks_nothing(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
-        for name in _ROBOT_NAMES:
-            fx.add_robot(name, DummySequence(name))
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await recv_type(ws, "match_state")
-            await ws.send_json({"type": "checklist_check_all", "role": "nobody"})
-            await asyncio.sleep(0.05)
-
-            assert fx.match.checklists[ROLE_PRE_MATCH].completed is False
-            assert fx.match.can_start_match is False
-            assert fx.match.phase is Phase.SETUP
-            await ws.close()
-
-    async def test_rejected_during_match(self) -> None:
-        fx = ServerFixture.build(checklist_definitions=_DEFS, dev_tools=True)
-        for name in _ROBOT_NAMES:
-            fx.add_robot(name, DummySequence(name))
-        fx.enter_match()
-        app = fx.create_app()
-
-        async with TestClient(TestServer(app)) as client:
-            ws = await client.ws_connect("/ws")
-            await ws.send_json({"type": "checklist_check_all"})
-            msg = await recv_type(ws, "command_rejected")
-            assert msg is not None
-            assert msg["command"] == "checklist_check_all"
-            await ws.close()
-
-
 class TestPhaseGate:
     async def test_sequence_start_rejected_before_match(self) -> None:
         fx = _build_fixture()
@@ -344,7 +233,7 @@ class TestPhaseGate:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
 
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
@@ -390,7 +279,7 @@ class TestMatchStartDuringMotorCheck:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             assert await fx.start_motor_check() is True
             await fx.wait_motor_check_running()
 
@@ -414,7 +303,7 @@ class TestMatchStartDuringMotorCheck:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             check.gate.set()
             assert await fx.start_motor_check() is True
             await fx.wait_motor_check_idle()
@@ -433,7 +322,7 @@ class TestMatchStartDoesNotMoveRobots:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
 
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.15)
@@ -452,7 +341,7 @@ class TestMatchFinishAndReset:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
             await ws.send_json({"type": "sequence_start", "robot": "main_hand"})
@@ -471,7 +360,7 @@ class TestMatchFinishAndReset:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
 
@@ -479,7 +368,7 @@ class TestMatchFinishAndReset:
             await asyncio.sleep(0.05)
 
             assert fx.match.phase is Phase.SETUP
-            assert fx.match.checklists[ROLE_PRE_MATCH].completed is False
+            assert fx.match.court is None
             await ws.close()
 
 
@@ -490,7 +379,7 @@ class TestMatchStartResetsRxDownEpisodes:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            await _complete_checklist(ws)
+            await _select_court(ws)
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
 
@@ -520,7 +409,7 @@ class TestJitterResetOnMatchStart:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
 
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
@@ -557,7 +446,7 @@ class TestJitterResetOnMatchStart:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             assert await fx.start_motor_check() is True
             await fx.wait_motor_check_running()
 
@@ -590,7 +479,7 @@ class TestJitterSummaryOnMatchFinish:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             await ws.send_json({"type": "match_start"})
             await asyncio.sleep(0.05)
             assert fx.match.phase is Phase.MATCH

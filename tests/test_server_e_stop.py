@@ -67,7 +67,7 @@ def _build_fixture() -> ServerFixture:
 
 
 async def _start_both_sequences(fx: ServerFixture, ws) -> list[GatedSequence]:
-    fx.complete_all_checklists()
+    fx.make_ready()
     await ws.send_json({"type": "match_start"})
     for name in _ROBOT_NAMES:
         await ws.send_json({"type": "sequence_start", "robot": name})
@@ -329,7 +329,7 @@ class TestEStopBlocksMatchStart:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
             assert fx.match.phase is Phase.READY
 
             await ws.send_json({"type": "e_stop"})
@@ -356,7 +356,7 @@ class TestEStopBlocksMatchStart:
 
         async with TestClient(TestServer(app)) as client:
             ws = await client.ws_connect("/ws")
-            fx.complete_all_checklists()
+            fx.make_ready()
 
             await ws.send_json({"type": "e_stop"})
             await wait_until(lambda: fx.e_stop_active)

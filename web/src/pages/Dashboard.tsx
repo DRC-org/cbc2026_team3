@@ -1,7 +1,8 @@
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
+import { ActuatorCheck } from "@/components/monitor/ActuatorCheck";
+import { CourtSettings } from "@/components/monitor/CourtSettings";
 import { EventFeed } from "@/components/monitor/EventFeed";
 import { MatchStrip, useResetConfirm } from "@/components/monitor/MatchControl";
-import { MatchPrep } from "@/components/monitor/MatchPrep";
 import { RobotStatusRow } from "@/components/monitor/RobotStatusRow";
 import { StartGate } from "@/components/monitor/StartGate";
 import { Page } from "@/components/ui/Page";
@@ -29,7 +30,10 @@ export function Dashboard() {
             <StartGate onStart={matchStart} />
           </div>
 
-          <MatchPrep onRequestReset={requestReset} />
+          <div className="flex min-h-0 flex-col gap-2">
+            <CourtSettings onRequestReset={requestReset} />
+            <ActuatorCheck />
+          </div>
 
           <Panel legend="機体状態" className="min-h-0" bodyClassName="p-1">
             <ScrollArea className="gap-2">

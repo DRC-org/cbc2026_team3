@@ -37,7 +37,7 @@ CAN バスのセットアップ、Web UI のビルド、systemd への配置は
 | `main.py` | 起動。config を読み、CAN とシーケンスを配線し、サーバーを立てる |
 | `lib/` | 共通ライブラリ（両ロボットで共有）。ドライバ・CAN・制御ループ・サーバー |
 | `sequences/` | シーケンス定義。数値は持たず、位置定数 yaml を参照する |
-| `config/` | YAML 設定。ロボット構成・位置定数・指差喚呼・机上ベンチ用の一式 |
+| `config/` | YAML 設定。ロボット構成・位置定数・机上ベンチ用の一式 |
 | `web/` | 操縦 UI（Vite + React + TypeScript） |
 | `firmware/` | 自作モータドライバのファームウェア（DC / サーボ / 電磁弁） |
 | `scripts/` | CAN セットアップ・systemd unit・実機チューニング CLI |

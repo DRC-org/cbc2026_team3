@@ -7,12 +7,9 @@ from lib.match_state import (
     PHASES_ANY,
     PHASES_DURING_MATCH,
     PHASES_OUTSIDE_MATCH,
-    PHASES_PREPARATION,
     PHASES_START_GATE,
     Phase,
 )
-
-DEV_TOOLS_DENY_MESSAGE = "開発用コマンドです (--dev-tools / CBC_DEV_TOOLS=1 で起動したときのみ有効)"
 
 
 class RejectChannel(StrEnum):
@@ -27,7 +24,6 @@ class CommandSpec:
     phase_deny_message: str | None
     allowed_during_e_stop: bool
     e_stop_deny_message: str | None
-    requires_dev_tools: bool
     blocked_during_manual: bool
     manual_deny_message: str | None
     blocked_during_reenergize: bool
@@ -84,11 +80,6 @@ class CommandSpec:
     def court_deny_reason(self) -> str | None:
         return self.court_deny_message if self.blocked_without_court else None
 
-    def dev_tools_deny_reason(self, dev_tools_enabled: bool) -> str | None:
-        if not self.requires_dev_tools or dev_tools_enabled:
-            return None
-        return DEV_TOOLS_DENY_MESSAGE
-
 
 def _spec(
     name: str,
@@ -97,7 +88,6 @@ def _spec(
     phase_deny_message: str | None = None,
     allowed_during_e_stop: bool,
     e_stop_deny_message: str | None = None,
-    requires_dev_tools: bool = False,
     blocked_during_manual: bool = False,
     manual_deny_message: str | None = None,
     blocked_during_reenergize: bool = False,
@@ -113,7 +103,6 @@ def _spec(
         phase_deny_message=phase_deny_message,
         allowed_during_e_stop=allowed_during_e_stop,
         e_stop_deny_message=e_stop_deny_message,
-        requires_dev_tools=requires_dev_tools,
         blocked_during_manual=blocked_during_manual,
         manual_deny_message=manual_deny_message,
         blocked_during_reenergize=blocked_during_reenergize,
@@ -138,7 +127,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         reenergize_deny_message="再励磁の処理中のためシーケンスを開始できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のためシーケンスを開始できません (試合準備でコートを選んでください)"
+            "コートが未設定のためシーケンスを開始できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_sequence_start",
     ),
@@ -154,7 +143,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         reenergize_deny_message="再励磁の処理中のためステップ移動できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のためステップ移動できません (試合準備でコートを選んでください)"
+            "コートが未設定のためステップ移動できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_sequence_jump",
     ),
@@ -170,7 +159,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         reenergize_deny_message="再励磁の処理中のためトリガーを送れません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のためトリガーを送れません (試合準備でコートを選んでください)"
+            "コートが未設定のためトリガーを送れません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_trigger",
     ),
@@ -213,7 +202,7 @@ _SPECS: tuple[CommandSpec, ...] = (
     _spec(
         "match_start",
         allowed_phases=PHASES_START_GATE,
-        phase_deny_message="チェックリスト完了後に試合を開始できます",
+        phase_deny_message="コート設定でコートを選んでから試合を開始できます",
         allowed_during_e_stop=False,
         e_stop_deny_message="緊急停止中のため試合を開始できません",
         handler="_cmd_match_start",
@@ -233,28 +222,6 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_set_court",
     ),
     _spec(
-        "checklist_set",
-        allowed_phases=PHASES_PREPARATION,
-        phase_deny_message="このフェーズではチェックリストを操作できません",
-        allowed_during_e_stop=True,
-        handler="_cmd_checklist_set",
-    ),
-    _spec(
-        "checklist_reset",
-        allowed_phases=PHASES_PREPARATION,
-        phase_deny_message="このフェーズではチェックリストを操作できません",
-        allowed_during_e_stop=True,
-        handler="_cmd_checklist_reset",
-    ),
-    _spec(
-        "checklist_check_all",
-        allowed_phases=PHASES_PREPARATION,
-        phase_deny_message="このフェーズではチェックリストを操作できません",
-        allowed_during_e_stop=True,
-        requires_dev_tools=True,
-        handler="_cmd_checklist_check_all",
-    ),
-    _spec(
         "motor_check_start",
         allowed_phases=PHASES_OUTSIDE_MATCH,
         phase_deny_message="試合中は動作確認を実行できません",
@@ -262,7 +229,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため動作確認を実行できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため動作確認を実行できません (試合準備でコートを選んでください)"
+            "コートが未設定のため動作確認を実行できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_motor_check_start",
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
@@ -275,7 +242,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため零点合わせを実行できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため零点合わせを実行できません (試合準備でコートを選んでください)"
+            "コートが未設定のため零点合わせを実行できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_homing_start",
     ),
@@ -287,7 +254,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため作動点測定を実行できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため作動点測定を実行できません (試合準備でコートを選んでください)"
+            "コートが未設定のため作動点測定を実行できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_switch_measure_start",
     ),
@@ -299,7 +266,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため距離測定を実行できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため距離測定を実行できません (試合準備でコートを選んでください)"
+            "コートが未設定のため距離測定を実行できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_switch_distance_start",
     ),
@@ -323,7 +290,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため手動操縦できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)"
+            "コートが未設定のため手動操縦できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_manual_move",
     ),
@@ -334,7 +301,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため手動操縦できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)"
+            "コートが未設定のため手動操縦できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_manual_set",
     ),
@@ -345,7 +312,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message="緊急停止中のため手動操縦できません",
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)"
+            "コートが未設定のため手動操縦できません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_manual_jog",
     ),
@@ -359,7 +326,7 @@ _SPECS: tuple[CommandSpec, ...] = (
         e_stop_deny_message=("緊急停止中は位置を控えられません (無励磁で下がった位置が残ります)"),
         blocked_without_court=True,
         court_deny_message=(
-            "コートが未設定のため位置を控えられません (試合準備でコートを選んでください)"
+            "コートが未設定のため位置を控えられません (コート設定でコートを選んでください)"
         ),
         handler="_cmd_position_capture",
     ),

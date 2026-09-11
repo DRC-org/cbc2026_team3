@@ -17,13 +17,11 @@ from lib.control.sync_monitor import SyncMonitor
 from lib.control.target_refresh import GenericTargetRefresher
 from lib.health import HealthSnapshot
 from lib.manual import ManualController
-from lib.match_state import ROLE_PRE_MATCH, ChecklistItem, Court, MatchState
+from lib.match_state import Court, MatchState
 from lib.sequence.engine import Sequence
 from lib.server import _ENERGIZE_GRACE_S, _FIRMWARE_INFO_GRACE_S, RobotServer
 from lib.suction import SuctionSelection
 from tests.fake_can import mock_can_manager
-
-DEFAULT_CHECKLIST = {ROLE_PRE_MATCH: [ChecklistItem(id="home", label="初期位置確認")]}
 
 FROZEN_BROADCAST_INTERVAL_S = 3600.0
 
@@ -37,7 +35,6 @@ class ServerFixture:
 
     @classmethod
     def build(cls, **server_kwargs: Any) -> ServerFixture:
-        server_kwargs.setdefault("checklist_definitions", DEFAULT_CHECKLIST)
         return cls(RobotServer(**server_kwargs))
 
     def add_robot(
@@ -175,19 +172,11 @@ class ServerFixture:
 
         setattr(self.server, COMMANDS[command].handler, _raise)
 
-    def complete_checklist(self, role: str) -> None:
-        for item in self.match.checklists[role].items:
-            self.match.set_checklist_item(role, item.id, True)
-
-    def complete_all_checklists(self) -> None:
-        # コート未確定のあいだ can_start_match は偽なので、選ぶのが先。
-        # 指差喚呼より前に置くのは set_court が「変化」としてリセットを走らせるため
-        self.match.set_court(Court.RED)
-        for role in self.match.checklists:
-            self.complete_checklist(role)
+    def make_ready(self, court: Court = Court.RED) -> None:
+        self.match.set_court(court)
 
     def enter_match(self) -> None:
-        self.complete_all_checklists()
+        self.make_ready()
         assert self.match.match_start(), "READY に到達していないため試合へ入れない"
 
     def freeze_broadcast(self) -> None:

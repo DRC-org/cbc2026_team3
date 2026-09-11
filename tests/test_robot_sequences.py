@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from lib.drivers.base import ControlMode
-from lib.match_state import Court, load_checklist_definitions
+from lib.match_state import Court
 from lib.motion_guard import MotionGuardSpec
 from lib.sequence.engine import Sequence, StepInfo
 from lib.sequence.motors import MotorGroup, MotorHandle, build_axis_state_reader
@@ -759,43 +759,6 @@ class TestShippedRobotConfig:
             "bench/edulite/main_hand.yaml:rotate",
             "bench/m3508/main_hand.yaml:y_axis",
         } <= inspected
-
-
-_CHECKLIST_PATHS = sorted(_CONFIG_DIR.rglob("checklist.yaml"))
-_CHECKLIST_TEST_IDS = [str(path.relative_to(_CONFIG_DIR)) for path in _CHECKLIST_PATHS]
-
-
-class TestShippedChecklists:
-    def test_scan_finds_every_shipped_checklist(self) -> None:
-        expected = {pathlib.Path("checklist.yaml")} | {
-            pathlib.Path("bench") / bench_dir.name / "checklist.yaml"
-            for bench_dir in (_CONFIG_DIR / "bench").iterdir()
-            if bench_dir.is_dir()
-        }
-
-        assert {path.relative_to(_CONFIG_DIR) for path in _CHECKLIST_PATHS} == expected
-
-    @pytest.mark.parametrize("path", _CHECKLIST_PATHS, ids=_CHECKLIST_TEST_IDS)
-    def test_no_entry_is_silently_dropped(self, path: pathlib.Path) -> None:
-        raw = yaml.safe_load(path.read_text()) or {}
-        written = sum(len(entries) for entries in (raw.get("checklists") or {}).values())
-
-        loaded = load_checklist_definitions(raw)
-
-        assert sum(len(items) for items in loaded.values()) == written
-
-    @pytest.mark.parametrize("path", _CHECKLIST_PATHS, ids=_CHECKLIST_TEST_IDS)
-    def test_item_ids_are_unique_within_a_role(self, path: pathlib.Path) -> None:
-        loaded = load_checklist_definitions(yaml.safe_load(path.read_text()) or {})
-
-        duplicated: dict[str, list[str]] = {}
-        for role, items in loaded.items():
-            counts = collections.Counter(item.id for item in items)
-            dups = sorted(item_id for item_id, count in counts.items() if count > 1)
-            if dups:
-                duplicated[role] = dups
-
-        assert duplicated == {}
 
 
 class TestShippedMotionGuard:

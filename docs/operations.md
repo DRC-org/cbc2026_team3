@@ -9,7 +9,7 @@
 ```bash
 uv run python main.py             # サーバー起動（localhost:8080）
 uv run python main.py --dry-run   # CAN バスなしで起動（virtual バス。配線確認に使える）
-uv run python main.py --dev-tools # 開発用コマンドを解禁（CBC_DEV_TOOLS=1 でも可）
+uv run python main.py --dev-tools # 開発用表示を解禁（CBC_DEV_TOOLS=1 でも可）
 uv run python main.py --log-level debug # debug|info|warning|error（既定 info）
 
 uv run pytest                     # 全テスト
@@ -20,7 +20,7 @@ uv run ruff check .               # リント
 uv run ruff format .              # フォーマット
 ```
 
-構成の差し替えは `--system` / `--config` / `--checklist`（机上ベンチ用の一式は
+構成の差し替えは `--system` / `--config`（机上ベンチ用の一式は
 `config/bench/<対象>/`）。
 
 ## Web UI（`web/`）
@@ -59,7 +59,7 @@ scripts/setup_can.sh              # 手動 up。見つかったバスだけ立�
 scripts/setup_can.sh --strict     # 試合前点検。定義済みの全バス（現行 4 本）が揃わなければ異常終了
 ```
 
-**`--strict` を打つ導線は指差喚呼**（`config/checklist.yaml` の `can_bus_strict`）。
+**`--strict` は試合直前の点検で人が打つ**（[`venue_recovery.md`](venue_recovery.md) §4）。
 `cbc-can.service` は `--strict` を付けずに呼ぶので **CAN が 0 本でも success で終わり**、
 `cbc-control.service` の `Wants=cbc-can.service` は揃っていることを保証しない。
 **「揃っているか」に答えるのは人である。**

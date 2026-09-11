@@ -2,7 +2,6 @@ import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 
 import type {
-  ChecklistRole,
   HomingSnapshot,
   MatchCourt,
   MatchState,
@@ -43,8 +42,6 @@ export interface RobotCommands {
   onEStopRelease: () => void;
   hideEStopOverlay: () => void;
   setCourt: (court: MatchCourt) => void;
-  setChecklistItem: (role: ChecklistRole, itemId: string, checked: boolean) => void;
-  checkAllChecklist: (role: ChecklistRole) => void;
   matchStart: () => void;
   matchFinish: () => void;
   matchReset: () => void;
@@ -90,8 +87,6 @@ export function RobotProvider({
     onEStopRelease,
     hideEStopOverlay,
     setCourt,
-    setChecklistItem,
-    checkAllChecklist,
     matchStart,
     matchFinish,
     matchReset,
@@ -142,8 +137,6 @@ export function RobotProvider({
       onEStopRelease,
       hideEStopOverlay,
       setCourt,
-      setChecklistItem,
-      checkAllChecklist,
       matchStart,
       matchFinish,
       matchReset,
@@ -159,8 +152,6 @@ export function RobotProvider({
       onEStopRelease,
       hideEStopOverlay,
       setCourt,
-      setChecklistItem,
-      checkAllChecklist,
       matchStart,
       matchFinish,
       matchReset,

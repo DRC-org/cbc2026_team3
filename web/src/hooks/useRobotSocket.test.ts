@@ -180,7 +180,6 @@ describe("match_state メッセージ", () => {
         court: "blue",
         phase: "match",
         can_start_match: true,
-        checklists: { pre_match: { items: [], completed: true } },
         timer: { running: true, elapsed_ms: 3_000, duration_ms: 180_000 },
       }),
     );
@@ -189,12 +188,11 @@ describe("match_state メッセージ", () => {
       court: "blue",
       phase: "match",
       can_start_match: true,
-      checklists: { pre_match: { items: [], completed: true } },
       timer: { running: true, elapsed_ms: 3_000, duration_ms: 180_000 },
     });
   });
 
-  it("checklists が欠けても既定値で成立させる", () => {
+  it("can_start_match が欠けても既定値で成立させる", () => {
     const { result } = renderConnected();
 
     act(() =>
@@ -205,7 +203,6 @@ describe("match_state メッセージ", () => {
       }),
     );
 
-    expect(result.current.matchState.checklists).toEqual({});
     expect(result.current.matchState.can_start_match).toBe(false);
   });
 });

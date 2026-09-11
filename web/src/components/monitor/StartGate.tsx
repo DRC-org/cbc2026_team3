@@ -9,7 +9,6 @@ import { useArmedPress } from "@/hooks/useArmedPress";
 import { cx } from "@/lib/cx";
 import { evaluateHealth } from "@/lib/healthVerdict";
 import { courtLabel, courtTone } from "@/lib/phase";
-import { MALFORMED } from "@/lib/protocol";
 import { ROBOTS } from "@/lib/robots";
 import type { Tone } from "@/lib/tone";
 import { TONE_TEXT_CLASS } from "@/lib/tone";
@@ -23,10 +22,6 @@ interface Warning extends Blocker {
   key: string;
   tone: Tone;
 }
-
-const ROLE_LABEL: Record<string, string> = {
-  pre_match: "指差喚呼",
-};
 
 export function StartGate({ onStart }: { onStart: () => void }) {
   const { matchState, connected } = useRobotStatus();
@@ -43,26 +38,12 @@ export function StartGate({ onStart }: { onStart: () => void }) {
   }
 
   if (court === null) {
-    blockers.push({ label: "コート", detail: "未設定 — 試合準備で赤か青を選んでください" });
+    blockers.push({ label: "コート", detail: "未設定 — コート設定で赤か青を選んでください" });
   }
 
-  if (!canStart) {
-    const checklists = matchState.checklists;
-    const incomplete =
-      checklists === MALFORMED ? [] : Object.entries(checklists).filter(([, c]) => !c.completed);
-    for (const [role, checklist] of incomplete) {
-      const remaining = checklist.items.filter((i) => !i.checked);
-      blockers.push({
-        label: ROLE_LABEL[role] ?? role,
-        detail: remaining.length === 0 ? "未完了" : `残り ${remaining.length} 件`,
-      });
-    }
-    if (incomplete.length === 0) {
-      blockers.push({
-        label: "指差喚呼",
-        detail: checklists === MALFORMED ? "配信を読めていません" : "未完了の項目があります",
-      });
-    }
+  // 開始可否はサーバーの can_start_match だけが決める。理由を説明できなくても一覧を空にしない
+  if (!canStart && blockers.length === 0) {
+    blockers.push({ label: "開始条件", detail: "サーバーが開始を許可していません" });
   }
 
   const warnings = ROBOTS.flatMap(({ key, label }): Warning[] => {
@@ -121,10 +102,10 @@ export function StartGate({ onStart }: { onStart: () => void }) {
           ) : ready ? (
             <span className="text-base-content/70">
               {warnings.length === 0
-                ? "全ての指差喚呼が完了しています。周囲の安全を確認して開始してください。"
+                ? "周囲の安全を確認して開始してください。"
                 : hasError
-                  ? "指差喚呼は完了していますが、機体に異常があります。"
-                  : "指差喚呼は完了していますが、機体に要確認があります。"}
+                  ? "機体に異常があります。"
+                  : "機体に要確認があります。"}
             </span>
           ) : (
             <ul className="flex flex-col gap-[0.15rem]">
