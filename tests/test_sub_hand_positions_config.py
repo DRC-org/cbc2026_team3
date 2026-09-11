@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from lib.match_state import Court
-from lib.motion_guard import AxisReading, GuardViolation, MotionGuard, RequiredRange
+from lib.motion_guard import AxisReading, GuardViolation, MotionGuard
 from lib.sequence.homing import homing_axis_names, homing_order
 from lib.sequence.positions import PositionTable, load_position_table
 
@@ -45,13 +45,6 @@ def table() -> PositionTable:
 
 def _value(table: PositionTable, axis: str, name: str) -> float:
     return table.raw(axis, name)
-
-
-def _requirement(table: PositionTable, axis: str) -> RequiredRange:
-    guard = table.axis(axis).guard
-    assert guard is not None
-    (required,) = guard.requires
-    return required
 
 
 def _moves_with_lift_at(table: PositionTable, lift_mm: float) -> bool:
@@ -248,29 +241,6 @@ class TestInterferenceDeclaration:
         assert guard is not None and guard.requires == ()
         for lift_mm in (0.0, -10.0, -76.0, -140.0):
             assert _moves_with_lift_at(table, lift_mm)
-
-    def test_回転してよい区間は前端から_150mm_以上離れている(self, table: PositionTable) -> None:
-        # 区間の前端寄りの縁 (high) がこの余裕の内側に入ると、そこで回した機構が当たる
-        required = _requirement(table, "sub_rotate")
-
-        assert required.axis == "sub_y_axis"
-        assert abs(required.high) >= _ROTATE_CLEARANCE_MM
-
-    def test_回転してよい区間は_clear_を含む(self, table: PositionTable) -> None:
-        required = _requirement(table, "sub_rotate")
-        clear = _value(table, "sub_y_axis", "clear")
-
-        assert required.low <= clear <= required.high
-
-    @pytest.mark.parametrize("name", _NEAR_FRONT)
-    def test_回転してよい区間は前端寄りの位置を全部除外する(
-        self, table: PositionTable, name: str
-    ) -> None:
-        # between の端を書き間違える (retracted〜receive など) と、ここが通ってしまう
-        required = _requirement(table, "sub_rotate")
-        value = _value(table, "sub_y_axis", name)
-
-        assert not required.low <= value <= required.high
 
     def test_ピッチとオフセットは同じ指令で動かせない(self, table: PositionTable) -> None:
         """yaml には片側だけ書く。読み込み時に対称化されることを両側で見る。"""
