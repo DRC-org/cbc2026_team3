@@ -122,7 +122,8 @@ axes:
     timeout_s: 3.0
     tolerance: 2.0
 
-  # TODO(実機で確認): settle_s は弁の応答時間 + 吸着が効くまでの時間。
+  # settle_s は弁の応答時間 + 吸着が効くまでの時間。2026-09-11 に実機で 3 秒へ
+  # (0.2 だと吸い切る前に持ち上げてワークを落とす)。
   # manual_always: 吸着が外れないときに、弁 1 個のためシーケンスの制御権を奪わずに済む
   valve_1: &valve_axis
     unit: on_off
@@ -130,8 +131,8 @@ axes:
     command_mode: on_off
     scale: 1.0
     offset: 0.0
-    settle_s: 0.2
-    timeout_s: 1.0
+    settle_s: 3.0
+    timeout_s: 4.0
     manual_always: true
   valve_2: *valve_axis
   valve_3: *valve_axis
@@ -185,8 +186,8 @@ positions:
     pick: -81.0          # 吸着高さ [mm]。2026-09-11 に 5mm 下げた
     lifted: -91.0        # 吸着後に棚から離す高さ [mm]。**pick のちょうど 10mm 上**。ここから後退する
     # 箱へ下ろす手前で一度止まる高さ。ワークが箱に入らないところで前後を詰める
-    above_box: -45.0     # 箱の縁の高さ [mm]。仮値 (実機で詰める)
-    place: -20.0         # 箱へ下ろす高さ [mm]。箱 4 箇所とも同じ高さ
+    above_box: -150.0    # 箱の縁の高さ [mm]。place の 10mm 上
+    place: -140.0        # 箱へ下ろす高さ [mm]。top から 30mm 下げるだけ (2026-09-11)
 
   # サーボ 3 軸は 2026-09-10 に実機で実測した。初期姿勢の角 (sub_rotate.receive /
   # sub_pitch.open / sub_offset.open) は firmware/servo/include/config.h の基板 #2 の
