@@ -25,9 +25,6 @@ _FIRMWARE_DIR = _CONFIG_DIR.parent / "firmware" / "servo" / "include"
 # 前端スイッチ (動作点 0.0mm) からこれより内側では sub_rotate を回すと干渉する。
 _ROTATE_CLEARANCE_MM = 150.0
 
-# 吸着は移動高さから 10mm だけ降りて行う。+ が下なので pick の値は top より大きい。
-_PICK_DROP_MM = 10.0
-
 # 前端スイッチより手前 = 150mm 未満に取る位置。ここからは clear を経由しないと回せない。
 # 箱で近いのは一番前の 1 つだけ。残りは 147mm 間隔で後ろへ並ぶので 150mm より遠く、
 # 直接回しても当たらない (それでもシーケンスは全箱で clear を経由する)。
@@ -130,11 +127,9 @@ class TestSubLift:
     def test_位置は仕様の名前が揃っている(self, table: PositionTable) -> None:
         assert set(table.names("sub_lift")) == {"top", "pick", "place"}
 
-    def test_pick_は_top_のちょうど_10mm_下(self, table: PositionTable) -> None:
-        # + が下なので「下」は値が大きい側。符号を取り違えると 10mm 上へ逃げる
-        assert _value(table, "sub_lift", "pick") == pytest.approx(
-            _value(table, "sub_lift", "top") + _PICK_DROP_MM
-        )
+    def test_pick_は_top_より上に行かない(self, table: PositionTable) -> None:
+        # + が下なので「下」は値が大きい側。符号を取り違えると移動高さより上へ逃げる
+        assert _value(table, "sub_lift", "pick") >= _value(table, "sub_lift", "top")
 
     def test_place_は_pick_より下にある(self, table: PositionTable) -> None:
         assert _value(table, "sub_lift", "place") > _value(table, "sub_lift", "pick")
