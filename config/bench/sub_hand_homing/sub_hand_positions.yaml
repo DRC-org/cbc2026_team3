@@ -7,6 +7,43 @@
 # 指令の届かない軸が並ぶ。
 
 axes:
+  # 昇降。**+ 方向が下**。コートでモータの回転と上下の対応が鏡になり、スイッチは
+  # 重力側に固定なので、scale の符号だけをコート別に持つ (2026-09-09 両コートで実機確認)。
+  sub_lift:
+    homing:
+      sensor: sub_lift_b_limit_sensor
+      direction: 1
+      # スイッチ間の実測は 159mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
+      search_distance: 220.0
+      step: 0.1
+      # ON 区間 1.0mm より狭く取る (前後軸より狭いのはこの実測差による)
+      coarse_step: 0.5
+      release_distance: 10.0
+      settle_s: 0.05
+      # 本番と対。確定した直後は下端のすぐ上なので、自分で移動高さまで上がる
+      retreat_position: top
+    guard:
+      # + が下なので plus が下端。逆に書くと守りが反転する
+      limits:
+        plus: sub_lift_b_limit_sensor
+        minus: sub_lift_t_limit_sensor
+      # 桁の違う目標だけを止める。本番と揃える (tests/test_robot_sequences.py が一致を見る)
+      max_step: 150.0
+      stall_torque: 2.0
+    unit: mm
+    command_unit: rad
+    scale: { blue: 1.0668451, red: -1.0668451 }
+    offset: 0.0
+    # limit_speed は本番と同じ 1.0 なので、本番と同じ実測 17.39mm/s の直下と余裕 3 割
+    min_speed: 17.0
+    timeout_s: 12.0
+    tolerance: 1.0
+    manual:
+      # 上端スイッチの実測 -159.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
+      min: -152.0
+      max: 2.0
+      steps: [1.0, 5.0, 10.0]
+
   sub_y_axis:
     homing:
       sensor: sub_y_axis_f_limit_sensor
@@ -28,8 +65,6 @@ axes:
       max_step: 600.0
       # 移動中は 0.6Nm 以下、押し込みで 0.7Nm 超 (2026-09-09 実測)
       stall_torque: 2.0
-      # 本番と対。区間の mm はこのベンチの top から解決されるので値は本番と違う
-      requires: [{ axis: sub_lift, at: top }]
     unit: mm
     command_unit: rad
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
@@ -44,41 +79,6 @@ axes:
     manual:
       # 後端スイッチの実測 -447.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
       min: -440.0
-      max: 2.0
-      steps: [1.0, 5.0, 10.0]
-
-  # 昇降。**+ 方向が下**。コートでモータの回転と上下の対応が鏡になり、スイッチは
-  # 重力側に固定なので、scale の符号だけをコート別に持つ (2026-09-09 両コートで実機確認)。
-  sub_lift:
-    homing:
-      sensor: sub_lift_b_limit_sensor
-      direction: 1
-      # スイッチ間の実測は 159mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
-      search_distance: 220.0
-      step: 0.1
-      # ON 区間 1.0mm より狭く取る (前後軸より狭いのはこの実測差による)
-      coarse_step: 0.5
-      release_distance: 10.0
-      settle_s: 0.05
-    guard:
-      # + が下なので plus が下端。逆に書くと守りが反転する
-      limits:
-        plus: sub_lift_b_limit_sensor
-        minus: sub_lift_t_limit_sensor
-      # 桁の違う目標だけを止める。本番と揃える (tests/test_robot_sequences.py が一致を見る)
-      max_step: 150.0
-      stall_torque: 2.0
-    unit: mm
-    command_unit: rad
-    scale: { blue: 1.0668451, red: -1.0668451 }
-    offset: 0.0
-    # limit_speed は本番と同じ 1.0 なので、本番と同じ実測 17.39mm/s の直下と余裕 3 割
-    min_speed: 17.0
-    timeout_s: 12.0
-    tolerance: 1.0
-    manual:
-      # 上端スイッチの実測 -159.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮
-      min: -152.0
       max: 2.0
       steps: [1.0, 5.0, 10.0]
 

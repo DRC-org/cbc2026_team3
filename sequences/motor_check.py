@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 # **並び順が意味を持つ。** 1 通にまとめると干渉の宣言に引っかかる ——
-# `sub_y_axis` は `sub_lift` が `top` に居るあいだしか動かせず、`sub_pitch` と
-# `sub_offset` は同じ指令で動かせない (`config/sub_hand_positions.yaml` の `guard`)。
+# `sub_pitch` と `sub_offset` は同じ指令で動かせない (`config/sub_hand_positions.yaml`
+# の `guard.not_with`)。昇降を先に上げるのは機構が当たらない高さで前後へ走らせるため。
 # 順序は `SubHandSequence.move_to_initial` と同じで、どの姿勢から押しても踏まない
 SUB_HOME: dict[str, str] = {
     "sub_lift": "top",

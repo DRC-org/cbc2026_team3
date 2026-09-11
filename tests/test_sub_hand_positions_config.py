@@ -54,13 +54,6 @@ def _requirement(table: PositionTable, axis: str) -> RequiredRange:
     return required
 
 
-def _declared_slack(axis: str) -> float:
-    """yaml に書いた許容幅。解決した区間がこの幅で広がっていることを確かめるのに使う。"""
-    raw = yaml.safe_load((_CONFIG_DIR / _YAML_NAME).read_text())
-    (entry,) = raw["axes"][axis]["guard"]["requires"]
-    return float(entry["slack"])
-
-
 def _moves_with_lift_at(table: PositionTable, lift_mm: float) -> bool:
     """昇降がその高さに居るとき、同梱 config で前後の指令が通るか。"""
     guard = table.axis("sub_y_axis").guard
@@ -244,35 +237,17 @@ class TestInterferenceDeclaration:
     解決後の区間を縛る。ここで見るのは、その連鎖が切れていないこと。
     """
 
-    def test_前後に動かしてよいのは昇降が移動高さのときだけ(self, table: PositionTable) -> None:
-        required = _requirement(table, "sub_y_axis")
-        top = _value(table, "sub_lift", "top")
-        slack = _declared_slack("sub_y_axis")
+    def test_前後は昇降の高さに関わらず動かせる(self, table: PositionTable) -> None:
+        """昇降の高さは条件にしない (2026-09-11)。
 
-        assert required.axis == "sub_lift"
-        # 区間を広げないと、top へ止まった実測が区間の外になり、次に前後へ動かす段が
-        # 会場で拒否される。幅は slack が決める (tolerance では自重のずれを飲めない)
-        assert required.low == pytest.approx(top - slack)
-        assert required.high == pytest.approx(top + slack)
-
-    @pytest.mark.parametrize("offset_mm", [10.0, -10.0])
-    def test_top_から_10mm_ずれても前後に動かせる(
-        self, table: PositionTable, offset_mm: float
-    ) -> None:
-        """2026-09-11 の実機。top に止めても自重で 1cm ほど下がる (+ が下)。
-
-        ここが拒否だと、会場で前後が 1mm も動かない。
+        当たらないのは `pick`〜`top` のあたりだが、零点が確定していない昇降を条件に
+        すると前後が 1mm も動かせず、手で寄せて測る作業が回らない。守りは零点確定の
+        並び (`TestHomingOrder`) と操縦者の目視へ移した。
         """
-        assert _moves_with_lift_at(table, _value(table, "sub_lift", "top") + offset_mm)
-
-    def test_移動高さから離れたら前後に動かせない(self, table: PositionTable) -> None:
-        """`place` は箱へ下ろす高さ。ここで前後に走ると機構が当たる。
-
-        **`pick` は区間の中に入る。** 自重のずれ 1cm を飲む以上、top のちょうど
-        10mm 下にある `pick` とは区別できない (`slack` を 10mm 未満にすると、
-        今度は実機のずれが拒否される)。
-        """
-        assert not _moves_with_lift_at(table, _value(table, "sub_lift", "place"))
+        guard = table.axis("sub_y_axis").guard
+        assert guard is not None and guard.requires == ()
+        for lift_mm in (0.0, -10.0, -76.0, -140.0):
+            assert _moves_with_lift_at(table, lift_mm)
 
     def test_回転してよい区間は前端から_150mm_以上離れている(self, table: PositionTable) -> None:
         # 区間の前端寄りの縁 (high) がこの余裕の内側に入ると、そこで回した機構が当たる
@@ -316,93 +291,39 @@ def _load(relative: str) -> PositionTable:
 
 @pytest.mark.parametrize("relative", [_YAML_NAME, _BENCH_YAML])
 class TestHomingOrder:
-    """零点確定は「昇降 → top へ寄せる → 前後」の順でしか通らない。**本番とベンチの両方。**
+    """零点確定は「昇降 → 自分で移動高さへ退避 → 前後」の順でしか通らない。
 
-    `release_distance` ぶん離脱して終わるので、確定しただけの昇降は下端のすぐ上に
-    居る。`requires` を入れた以上、そこから前後軸を探索する手順は拒否される ——
-    拒否は誤動作ではなく、**昇降が下がったまま前後に走っていた**ことの露見である。
-    ベンチは mm の値が本番と違うだけで、同じ形が成り立っていなければならない。
+    `guard.requires` を外した (前後は昇降の高さに関わらず動かせる) ので、順序を
+    決めるのは **yaml の並び**、高さを作るのは **`sub_lift` の `retreat_position`**
+    になった。どちらかが抜けると、確定しただけの昇降 (下端のすぐ上) のまま前後を
+    探索して機構が当たる。ベンチは mm の値が本番と違うだけで、同じ形が要る。
     """
 
-    def test_寄せ先は昇降の移動高さである(self, relative: str) -> None:
-        table = _load(relative)
-
-        assert table.homing_prerequisites() == {"sub_lift": "top"}
-
-    def test_参照される軸を先に確定する(self, relative: str) -> None:
+    def test_昇降を先に確定する(self, relative: str) -> None:
         table = _load(relative)
         axes = homing_axis_names(table)
 
+        # 並べ替える宣言が無いので、yaml の並びがそのまま順になる
+        assert axes.index("sub_lift") < axes.index("sub_y_axis")
         assert homing_order(table, axes).index("sub_lift") < homing_order(table, axes).index(
             "sub_y_axis"
         )
-        # 入力の並びに関係なく決まる (yaml の並べ替えで手順が変わってはならない)
-        assert homing_order(table, list(reversed(axes)))[0] == "sub_lift"
 
-    def test_零点確定を終えた昇降は区間の外に居る(self, relative: str) -> None:
-        """**寄せる段が要ることの根拠。** ここが中なら move_to は 1 通も出さない。"""
+    def test_昇降は確定した直後に移動高さへ退避する(self, relative: str) -> None:
+        table = _load(relative)
+        homing = table.axis("sub_lift").homing
+
+        assert homing is not None and homing.retreat_position == "top"
+
+    def test_零点確定を終えただけの昇降は移動高さに居ない(self, relative: str) -> None:
+        """**退避する段が要ることの根拠。** ここが移動高さなら退避は要らない。"""
         table = _load(relative)
         homing = table.axis("sub_lift").homing
         assert homing is not None and homing.release_distance is not None
         # 探索は + 方向 (下端) へ進み、原点確定の後に逆向きへ release_distance 離脱する
         left_at = -homing.direction * homing.release_distance
 
-        assert not _requirement(table, "sub_y_axis").contains(left_at)
-
-    def test_移動高さへ寄せれば区間の中に入る(self, relative: str) -> None:
-        table = _load(relative)
-
-        assert _requirement(table, "sub_y_axis").contains(table.raw("sub_lift", "top"))
-
-
-_DOC_DIR = _CONFIG_DIR.parent / "docs"
-
-
-def _left_after_homing(table: PositionTable, axis: str) -> float:
-    """零点確定を終えた軸が居る位置 [mm]。原点で当ててから離脱したぶんだけ戻る。"""
-    homing = table.axis(axis).homing
-    assert homing is not None and homing.release_distance is not None
-    return -homing.direction * homing.release_distance
-
-
-def _rejection(table: PositionTable) -> str:
-    """同梱 config そのままで `sub_y_axis` を動かしたときの拒否文面。"""
-    guard = table.axis("sub_y_axis").guard
-    assert guard is not None
-    left_at = _left_after_homing(table, "sub_lift")
-
-    with pytest.raises(GuardViolation) as exc:
-        MotionGuard(guard).check_interference(
-            axis="sub_y_axis",
-            delta=-1.0,
-            axis_state=lambda _axis: AxisReading(value=left_at, target=None, origin_confirmed=True),
-        )
-    return str(exc.value)
-
-
-class TestVenueCardNumbers:
-    """会場カードに書き写した数値が、実際の拒否文面と一致しているか。
-
-    **会場で読むのは文書の側である。** 文面は `config/sub_hand_positions.yaml` から
-    導かれるので、`top` / `tolerance` / `release_distance` を変えると文面が変わる。
-    ここが無いと、**文書の数値だけが黙って古くなる** (症状は「カードのとおりに
-    寄せたのに拒否が消えない」で、会場でしか出ない)。
-    """
-
-    def test_拒否の文面は同梱_config_から導かれる(self, table: PositionTable) -> None:
-        required = _requirement(table, "sub_y_axis")
-        message = _rejection(table)
-
-        assert f"[{required.low:.4g}, {required.high:.4g}]{required.unit}" in message
-        assert f"実測 {_left_after_homing(table, 'sub_lift'):.4g}{required.unit}" in message
-        assert required.label in message
-
-    def test_会場カードが文面と同じ数値を書いている(self, table: PositionTable) -> None:
-        text = (_DOC_DIR / "venue_recovery.md").read_text()
-
-        # 手動で寄せる先と、零点確定が離脱する量。この 2 つで手が動く
-        assert f"{table.raw('sub_lift', 'top'):g}mm" in text
-        assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
+        assert abs(left_at - table.raw("sub_lift", "top")) > table.axis("sub_lift").tolerance
 
 
 class TestLinearAxisTimeout:
