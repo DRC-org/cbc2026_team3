@@ -228,12 +228,13 @@ def _paired_motor_names(table: PositionTable) -> list[tuple[str, str]]:
     return pairs
 
 
-# n 列目へ寄せるステップと、そのステップが向かうワーク名。
+# n 列目へ寄せるステップと、そのステップが向かう (ワーク名, 回転の姿勢)。
+# 共通ワークだけ回転が pick_shared (2026-09-11 に実機で分けた)。
 _MAIN_APPROACH_STEPS = [
-    ("move_to_work_3", "work_3"),
-    ("move_to_work_shared", "work_shared"),
-    ("move_to_work_1", "work_1"),
-    ("move_to_work_2", "work_2"),
+    ("move_to_work_3", "work_3", "pick"),
+    ("move_to_work_shared", "work_shared", "pick_shared"),
+    ("move_to_work_1", "work_1", "pick"),
+    ("move_to_work_2", "work_2", "pick"),
 ]
 
 # コンベアへ運ぶ途中で退避点を踏むステップと、踏む退避点の並び。
@@ -275,8 +276,10 @@ class TestMainHandSteps:
                     f"{method_name}: {motor} が {path} の順に動いていない"
                 )
 
-    @pytest.mark.parametrize(("method_name", "work"), _MAIN_APPROACH_STEPS)
-    async def test_列へは両軸を同じ_1_通で寄せる(self, method_name: str, work: str) -> None:
+    @pytest.mark.parametrize(("method_name", "work", "rotate"), _MAIN_APPROACH_STEPS)
+    async def test_列へは両軸を同じ_1_通で寄せる(
+        self, method_name: str, work: str, rotate: str
+    ) -> None:
         """列へ寄せる段は `y_axis` と `rotate` を 1 通で送る。
 
         2 通に割ると片軸だけが動いた中間姿勢ができ、そこが干渉姿勢かは
@@ -288,7 +291,7 @@ class TestMainHandSteps:
             if info.method_name == method_name
         ]
 
-        assert moves == [{"y_axis": work, "rotate": "pick"}]
+        assert moves == [{"y_axis": work, "rotate": rotate}]
 
     async def test_starts_and_ends_at_home(self) -> None:
         per_step, _ = await _run_each_step(MainHandSequence(), _MAIN_POSITIONS)
