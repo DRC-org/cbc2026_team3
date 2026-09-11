@@ -355,6 +355,8 @@ class TestSequence:
         group, _ = _group(*motors)
         group_with_sensors = MotorGroup(sensor_active=lambda _name: False)
         for handle in group.handles:
+            # 通しは零点確定を済ませた後の状態。未確定だと guard.requires が先に拒否する
+            handle.driver.mark_origin_confirmed()
             group_with_sensors.add(handle)
         seq = SubHandSequence()
         seq.bind_motors(group_with_sensors)

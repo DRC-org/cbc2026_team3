@@ -78,6 +78,7 @@ export function emptySwitchMeasureState(): SwitchMeasureSnapshot {
     axis: null,
     direction: null,
     result: null,
+    distances: null,
     error: null,
     targets: {},
   };

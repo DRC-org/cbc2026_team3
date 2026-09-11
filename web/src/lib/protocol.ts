@@ -172,6 +172,16 @@ export interface SwitchMeasurement {
   coarse_step: number | null;
 }
 
+/** 1 軸の両端のスイッチが入る点どうしの距離。測れなかった軸は distance が null で error に理由 */
+export interface SwitchDistance {
+  axis: string;
+  unit: string;
+  distance: number | null;
+  step: number | null;
+  coarse_step: number | null;
+  error: string | null;
+}
+
 export interface SwitchMeasureSnapshot {
   available: boolean;
   blocked_reason: string | null;
@@ -180,6 +190,8 @@ export interface SwitchMeasureSnapshot {
   axis: string | null;
   direction: SwitchDirection | null;
   result: SwitchMeasurement | Malformed | null;
+  /** 距離測定の途中経過と結果。作動点測定 (1 本) のときは null */
+  distances: SwitchDistance[] | Malformed | null;
   error: string | null;
   targets: Record<string, string[]> | Malformed;
 }
@@ -210,6 +222,32 @@ export function parseSwitchMeasurement(raw: unknown): SwitchMeasurement | Malfor
     step: raw.step as number,
     coarse_step: raw.coarse_step as number | null,
   };
+}
+
+function parseSwitchDistance(raw: unknown): SwitchDistance | Malformed {
+  if (!isObject(raw)) return MALFORMED;
+  if (typeof raw.axis !== "string" || typeof raw.unit !== "string") return MALFORMED;
+  const error = typeof raw.error === "string" ? raw.error : null;
+  // 測れた軸は距離と刻みが数値で揃う。失敗した軸は null のまま運ぶ (0 で埋めない)
+  for (const key of ["distance", "step", "coarse_step"] as const) {
+    if (raw[key] !== null && !isFiniteNumber(raw[key])) return MALFORMED;
+  }
+  if (error === null && raw.distance === null) return MALFORMED;
+  return {
+    axis: raw.axis,
+    unit: raw.unit,
+    distance: raw.distance as number | null,
+    step: raw.step as number | null,
+    coarse_step: raw.coarse_step as number | null,
+    error,
+  };
+}
+
+export function parseSwitchDistances(raw: unknown): SwitchDistance[] | Malformed | null {
+  if (raw === null) return null;
+  if (!Array.isArray(raw)) return MALFORMED;
+  const parsed = raw.map(parseSwitchDistance);
+  return parsed.some((item) => item === MALFORMED) ? MALFORMED : (parsed as SwitchDistance[]);
 }
 
 export interface ServerInfo {
@@ -352,11 +390,18 @@ export interface TargetRefresherState {
   paused: boolean;
 }
 
+export interface PhysicalStopWatch {
+  watched: boolean;
+  sources: string[];
+  unwatched: string[];
+}
+
 export interface SafetyState {
   sync_violations: string[];
   unenergized_motors: string[];
   unresponsive_motors: string[];
   firmware_unconfirmed_motors: string[];
+  physical_stop: PhysicalStopWatch;
   failed_tasks: string[];
   reenergizing: boolean;
   loops_running: boolean;
@@ -402,6 +447,15 @@ export function safetyShapeErrors(value: unknown): string[] {
     "reenergizing",
   ]) {
     if (typeof value[key] !== "boolean") broken.push(key);
+  }
+  const physicalStop = value.physical_stop;
+  if (
+    !isObject(physicalStop) ||
+    typeof physicalStop.watched !== "boolean" ||
+    !isStringArray(physicalStop.sources) ||
+    !isStringArray(physicalStop.unwatched)
+  ) {
+    broken.push("physical_stop");
   }
   for (const [key, isValidTask] of Object.entries(SAFETY_TASK_SHAPES)) {
     const tasks = value[key];
@@ -494,8 +548,13 @@ export interface SuctionPad {
   enabled: boolean;
 }
 
+export const SUCTION_FILL_FROM = ["left", "right"] as const;
+export type SuctionFillFrom = (typeof SUCTION_FILL_FROM)[number];
+
 export interface SuctionState {
   pads: SuctionPad[];
+  // どちらの端から ON にしていくか。コートから決めるのはサーバーで、未確定なら null
+  fill_from: SuctionFillFrom | null;
 }
 
 function isSuctionPad(value: unknown): boolean {
@@ -513,7 +572,51 @@ export function parseSuction(raw: unknown): SuctionState | Malformed | null | un
   if (raw === null) return null;
   if (!isObject(raw) || !Array.isArray(raw.pads)) return MALFORMED;
   if (!raw.pads.every(isSuctionPad)) return MALFORMED;
+  if (raw.fill_from !== null && !SUCTION_FILL_FROM.includes(raw.fill_from as SuctionFillFrom)) {
+    return MALFORMED;
+  }
   return raw as unknown as SuctionState;
+}
+
+export interface PositionCaptureEntry {
+  axis: string;
+  name: string;
+  /** 控えた実測値。単位は unit で、位置定数 yaml に書く値そのもの */
+  value: number;
+  unit: string;
+  captured_at: EpochSeconds;
+}
+
+export interface PositionCaptureState {
+  /** 控えられる軸と、その軸が受ける位置名。**UI は配られたものだけを並べる** */
+  targets: Record<string, string[]>;
+  entries: PositionCaptureEntry[];
+  /** そのまま位置定数 yaml へ貼れる断片。1 つも控えていなければ null */
+  yaml: string | null;
+}
+
+function isPositionCaptureEntry(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  return (
+    typeof value.axis === "string" &&
+    typeof value.name === "string" &&
+    typeof value.value === "number" &&
+    typeof value.unit === "string" &&
+    typeof value.captured_at === "number"
+  );
+}
+
+// null は「このロボットが位置定数を持たない」。欠落 (undefined) や形の崩れとは区別する
+export function parsePositionCapture(
+  raw: unknown,
+): PositionCaptureState | Malformed | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  if (!isObject(raw) || !isObject(raw.targets) || !Array.isArray(raw.entries)) return MALFORMED;
+  if (!Object.values(raw.targets).every(isStringArray)) return MALFORMED;
+  if (!raw.entries.every(isPositionCaptureEntry)) return MALFORMED;
+  if (raw.yaml !== null && typeof raw.yaml !== "string") return MALFORMED;
+  return raw as unknown as PositionCaptureState;
 }
 
 export interface RobotState {
@@ -534,6 +637,7 @@ export interface RobotState {
   steps?: SequenceStepInfo[];
   manual?: ManualState;
   suction?: SuctionState | Malformed | null;
+  position_capture?: PositionCaptureState | Malformed | null;
   /** この台がコート確定を要るか。**判定はサーバー。UI が軸名から導き直さない。** */
   court_required?: boolean;
 }
@@ -607,6 +711,8 @@ function parseKnown(raw: Raw): ServerMessage | null {
       if (raw.manual !== undefined) state.manual = parseManual(raw.manual);
       const suction = parseSuction(raw.suction);
       if (suction !== undefined) state.suction = suction;
+      const capture = parsePositionCapture(raw.position_capture);
+      if (capture !== undefined) state.position_capture = capture;
 
       return { type: "state", robot, state };
     }
@@ -703,6 +809,7 @@ function parseKnown(raw: Raw): ServerMessage | null {
           axis: typeof raw.axis === "string" ? raw.axis : null,
           direction: parseSwitchDirection(raw.direction),
           result: parseSwitchMeasurement(raw.result),
+          distances: parseSwitchDistances(raw.distances),
           error: typeof raw.error === "string" ? raw.error : null,
           targets: parseHomingTargets(raw.targets),
         },

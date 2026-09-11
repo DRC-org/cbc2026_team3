@@ -304,6 +304,10 @@ class AxisSpec:
     travel: TravelSpec | None = None
     homing: HomingSpec | None = None
     motion: MotionSpec | None = None
+    # ドライバ内蔵の位置ループが速度を決める軸が、実測で下回らないと分かっている速さ
+    # [unit/s]。timeout_s の検算にだけ使い、指令には影響しない。None なら検算しない
+    # (書かない = 「速度が分からない」であって「速い」ではない)
+    min_speed: float | None = None
     # 指令を出す直前の歯止め (可動端インターロック・跳躍量・トルク)。
     # None ならこの軸は今までどおり素通り。既定値で埋めないのは、埋めた値が
     # 効いているのか書き忘れなのかがコードから読めなくなるため
@@ -322,6 +326,21 @@ class AxisSpec:
                 f"axes.{self.name}: motion は位置指令の軸にのみ書けます "
                 f"(command_mode={self.command_mode.value})"
             )
+        if self.min_speed is not None:
+            if self.command_mode is not ControlMode.POSITION:
+                raise ValueError(
+                    f"axes.{self.name}: min_speed は位置指令の軸にのみ書けます "
+                    f"(command_mode={self.command_mode.value})"
+                )
+            if self.min_speed <= 0.0:
+                raise ValueError(f"axes.{self.name}.min_speed は正の値: {self.min_speed!r}")
+            # 速度を PC 側で決める軸の所要時間は motion が厳密に持つ。両方あると
+            # どちらで検算したかが読めなくなる
+            if self.motion is not None:
+                raise ValueError(
+                    f"axes.{self.name}: min_speed と motion は併記できません "
+                    "(motion を書いた軸の所要時間は motion から決まります)"
+                )
         # duty / on_off は現在位置が常に 0 として読めるので、書けても 1 度も判定しない
         if self.guard is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
@@ -519,6 +538,7 @@ _AXIS_KEYS = frozenset(
         "manual_always",
         "homing",
         "motion",
+        "min_speed",
         "guard",
         "travel",
     }
@@ -850,6 +870,7 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         manual_always=_parse_manual_always(name, raw.get("manual_always")),
         homing=_parse_homing(name, raw.get("homing")),
         motion=_parse_motion(name, raw.get("motion")),
+        min_speed=_number(path, raw, "min_speed", None),
         guard=_parse_guard(name, raw.get("guard")),
         travel=_parse_travel(name, raw.get("travel")),
     )
@@ -1563,13 +1584,14 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
         positions[axis] = {
             name: _parse_value(axis, name, raw_value) for name, raw_value in values.items()
         }
-        # どちらも軸の単位 (mm) だけを見るので、コート別 scale の符号には依らない
+        # 軸の単位 (mm) だけを見るので、コート別 scale の符号には依らない
         _check_manual_range(source, axes[axis], positions[axis])
-        _check_motion_timeout(source, axes[axis], positions[axis])
 
-    # positions を 1 つも書かなかった軸も通す (退避先の書き忘れは「位置が無い」形で現れる)
+    # positions を 1 つも書かなかった軸も通す (退避先の書き忘れは「位置が無い」形で現れ、
+    # 所要時間は manual の幅だけでも決まる)
     for axis, spec in axes.items():
         _check_retreat_position(source, spec, positions.get(axis, {}))
+        _check_motion_timeout(source, spec, positions.get(axis, {}))
 
     # 干渉条件は他の軸の位置名を参照するので、表が全部揃った後でしか解決できない
     axes = _resolve_guard_interference(source, axes, positions, axes_raw)
@@ -1706,29 +1728,37 @@ def _check_motion_timeout(
     spec: AxisSpec,
     values: Mapping[str, float | dict[str, float]],
 ) -> None:
-    motion = spec.motion
-    if motion is None:
-        return
-
     candidates = [
         float(candidate)
         for value in values.values()
         for candidate in (value.values() if isinstance(value, dict) else (value,))
     ]
+    # move_to の出発点は手動操縦で manual の端まで行きうるし、零点確定の退避は
+    # スイッチ (位置名の無い場所) から始まる。位置名どうしの幅だけでは足りない
+    if spec.manual is not None:
+        candidates.extend((spec.manual.min_value, spec.manual.max_value))
     if len(candidates) < 2:
         return
 
     span = max(candidates) - min(candidates)
-    required = motion.duration_for(span)
+    if spec.motion is not None:
+        required = spec.motion.duration_for(span)
+        basis = "motion の制限では"
+        remedy = "max_velocity / max_acceleration を上げてください"
+    elif spec.min_speed is not None:
+        required = span / spec.min_speed
+        basis = f"min_speed ({spec.min_speed} {spec.unit}/s) では"
+        remedy = "min_speed を実測で上げてください"
+    else:
+        return
     if required <= spec.timeout_s:
         return
 
     suggested = math.ceil(required * 100.0) / 100.0
     raise ValueError(
-        f"{source}: axes.{spec.name} は motion の制限では最大移動 {span} {spec.unit} に "
+        f"{source}: axes.{spec.name} は {basis}最大移動 {span} {spec.unit} に "
         f"{required:.3f} 秒かかり、timeout_s ({spec.timeout_s}) を必ず超えます "
-        f"(timeout_s を {suggested} 以上にするか、max_velocity / max_acceleration を"
-        "上げてください)"
+        f"(timeout_s を {suggested} 以上にするか、{remedy})"
     )
 
 

@@ -3,7 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from lib.match_state import Court
+
 __all__ = ["SuctionPad", "SuctionSelection", "SuctionSelectionError", "suction_of"]
+
+
+# ワークは端から連続して載るので ON にする端がコートで決まる。対応は実機で未確認の仮
+_FILL_FROM: dict[Court, str] = {Court.RED: "left", Court.BLUE: "right"}
 
 
 class SuctionSelectionError(RuntimeError):
@@ -67,12 +73,13 @@ class SuctionSelection:
         self._enabled = frozenset(axes)
         return None
 
-    def to_dict(self) -> dict:
+    def to_dict(self, court: Court | None = None) -> dict:
         return {
             "pads": [
                 {"axis": pad.axis, "label": pad.label, "enabled": pad.axis in self._enabled}
                 for pad in self._pads
-            ]
+            ],
+            "fill_from": None if court is None else _FILL_FROM[court],
         }
 
 

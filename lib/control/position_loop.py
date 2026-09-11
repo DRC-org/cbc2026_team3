@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from lib.axis_sync import SyncGroup
 from lib.config_schema import DEFAULT_HEALTH
 from lib.control.feedback import FeedbackFreshness
-from lib.control.periodic import PausablePeriodicTask
+from lib.control.periodic import PausablePeriodicTask, is_bus_send_failure
 from lib.control.pid import PIDController
 from lib.control.sync_guard import SyncGuard
 from lib.control.trajectory import TrapezoidalProfile
@@ -275,8 +275,9 @@ class M3508PositionLoop(PausablePeriodicTask):
     async def _on_run_start(self) -> None:
         self._last_tick = self._time_source()
 
-    async def _on_tick_error(self) -> None:
-        self._log.exception("tick", "位置制御ループの周期処理で例外 (bus=%s)", self._bus_name)
+    async def _on_tick_error(self, exc: BaseException) -> None:
+        if not is_bus_send_failure(exc):
+            self._log.exception("tick", "位置制御ループの周期処理で例外 (bus=%s)", self._bus_name)
         self._discard_profile_anchors()
         await self._send_zero_safely()
 
@@ -405,5 +406,7 @@ class M3508PositionLoop(PausablePeriodicTask):
             await self._send([0, 0, 0, 0])
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            if is_bus_send_failure(exc):
+                return
             self._log.exception("zero", "0 電流フレームの送信に失敗 (bus=%s)", self._bus_name)

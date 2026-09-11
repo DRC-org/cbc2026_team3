@@ -57,9 +57,9 @@ class _Recorder(PeriodicTask):
             self.fail_ticks -= 1
             raise RuntimeError("tick 内部エラー (テスト)")
 
-    async def _on_tick_error(self) -> None:
+    async def _on_tick_error(self, exc: BaseException) -> None:
         self.errors += 1
-        await super()._on_tick_error()
+        await super()._on_tick_error(exc)
 
     async def _on_run_exit(self) -> None:
         self.exits += 1

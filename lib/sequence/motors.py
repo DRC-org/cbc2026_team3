@@ -3,10 +3,18 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from lib.drivers.base import ControlMode
-from lib.motion_guard import AxisReading, AxisStateReader, MotionGuard, unknown_axis_state
+from lib.motion_guard import (
+    AxisReading,
+    AxisStateReader,
+    MotionGuard,
+    PressedTowardReader,
+    no_pressed_toward,
+    unknown_axis_state,
+)
 from lib.sequence.positions import PositionLookupError
 
 if TYPE_CHECKING:
@@ -159,9 +167,18 @@ class MotorGroup:
         # 1 度配線すれば 3 経路とも同じものを見る
         self._sensor_active = sensor_active
         self._axis_state: AxisStateReader | None = None
+        self._pressed_toward: PressedTowardReader | None = None
 
     def add(self, handle: MotorHandle) -> None:
         self._handles[handle.name] = handle
+
+    def bind_pressed_toward(self, reader: PressedTowardReader) -> None:
+        """端センサが当たった向きの読み口 (`LimitMonitor` の記憶) を配線する。
+
+        指令の入口がこれを見ないと、宣言と記憶が食い違う端で監視は退避を通すのに
+        入口が宣言された側として拒み、その軸は両向きとも動かせなくなる。
+        """
+        self._pressed_toward = reader
 
     def bind_axis_state(self, reader: AxisStateReader) -> None:
         """軸間干渉の判定が読む「他の軸は今どこか」の読み口を配線する。
@@ -182,6 +199,11 @@ class MotorGroup:
     def axis_state(self) -> AxisStateReader | None:
         """他の軸の実測と目標の読み口。配線されていなければ None。"""
         return self._axis_state
+
+    @property
+    def pressed_toward(self) -> PressedTowardReader | None:
+        """端センサが当たった向きの読み口。配線されていなければ None。"""
+        return self._pressed_toward
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -221,6 +243,7 @@ class AxisHandle:
         *,
         sensor_active: SensorReader | None = None,
         axis_state: AxisStateReader | None = None,
+        pressed_toward: PressedTowardReader | None = None,
     ) -> None:
         # 3 経路 (手動・move_to・零点確定) が必ずここを通るので、解決忘れはここで落とす
         spec.require_resolved()
@@ -233,6 +256,7 @@ class AxisHandle:
         # 未配線は「常に読めていない」。素通りへ倒すと、配線を忘れた経路だけが
         # 干渉の歯止めを丸ごと失い、それが画面にもログにも出ない
         self._axis_state = axis_state or unknown_axis_state
+        self._pressed_toward = pressed_toward or no_pressed_toward
 
     @property
     def name(self) -> str:
@@ -303,6 +327,7 @@ class AxisHandle:
             unit=self._spec.unit,
             sensor_active=self._sensor_active,
             axis_state=self._axis_state_with(pending_targets),
+            pressed_toward=self._pressed_toward,
         )
         if target != current:
             self._guard.check_torque(axis=self.name, torque=self._observed_torque())
@@ -329,7 +354,7 @@ class AxisHandle:
                 return reading
             # 実測は読めたままにする。目標だけを差し替えるので、「これから書く目標は
             # 中だが実測はまだ外」は今までどおり拒否される
-            return AxisReading(value=reading.value, target=pending_targets[axis])
+            return replace(reading, target=pending_targets[axis])
 
         return read
 
@@ -418,6 +443,17 @@ class AxisHandle:
         return self._motors[motor_name].to_tolerance(self._spec.tolerance)
 
 
+def origin_confirmed(spec: AxisSpec, motors: MotorGroup) -> bool:
+    """軸の原点が零点確定で書かれたまま残っているか。**モータ全員が確定していて初めて確定。**
+
+    干渉判定 (`build_axis_state_reader`) と零点確定・距離測定の寄せる段 (`_in_stages`)
+    が同じここを読む。答えを持つのはドライバで、ここは軸へ束ねるだけ。
+    """
+    return all(
+        name in motors and motors[name].driver.origin_confirmed() for name in spec.motor_names
+    )
+
+
 def build_axis_state_reader(
     positions: PositionTable,
     motors: MotorGroup,
@@ -450,17 +486,17 @@ def build_axis_state_reader(
         try:
             spec = positions.axis(axis).for_court(court())
         except PositionLookupError:
-            return AxisReading(value=None, target=None)
+            return unknown_axis_state(axis)
         if spec.command_mode is not ControlMode.POSITION:
-            return AxisReading(value=None, target=None)
+            return unknown_axis_state(axis)
 
         handles: list[MotorHandle] = []
         for name in spec.motor_names:
             if name not in motors:
-                return AxisReading(value=None, target=None)
+                return unknown_axis_state(axis)
             handle = motors[name]
             if not handle.driver.telemetry.position or is_stale(name):
-                return AxisReading(value=None, target=None)
+                return unknown_axis_state(axis)
             handles.append(handle)
 
         value = spec.to_value({h.name: h.driver.feedback_position() for h in handles})
@@ -472,7 +508,11 @@ def build_axis_state_reader(
                 written = {}
                 break
             written[handle.name] = handle.target
-        return AxisReading(value=value, target=spec.to_value(written) if written else None)
+        return AxisReading(
+            value=value,
+            target=spec.to_value(written) if written else None,
+            origin_confirmed=origin_confirmed(spec, motors),
+        )
 
     return read
 

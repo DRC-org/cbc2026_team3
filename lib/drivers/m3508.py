@@ -143,6 +143,7 @@ class M3508Driver(MotorDriver):
         self._reanchor_count += 1
         self._last_reanchor_gap_s = gap_s
         self._origin_trusted = False
+        self._origin_confirmed = False
         logger.warning(
             "フィードバックが %.0fms 途切れたため累積角の折り返し推定を中止しました "
             "(motor=%s, 前後の rpm=%d/%d)。原点がずれている可能性があります",
@@ -177,6 +178,7 @@ class M3508Driver(MotorDriver):
     def reset_multi_turn_origin(self) -> None:
         self._origin_counts = self._accumulated_counts
         self._origin_trusted = True
+        self.mark_origin_confirmed()
 
     def default_tolerance(self, mode: ControlMode) -> float:
         if mode is ControlMode.POSITION:

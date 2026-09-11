@@ -4,11 +4,13 @@ import { useState } from "react";
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
 import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
+import { SwitchDistanceButton } from "@/components/homing/SwitchDistanceButton";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
 import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
+import { PositionCapturePanel } from "@/components/operator/PositionCapturePanel";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
 import { SuctionPadPanel } from "@/components/operator/SuctionPadPanel";
 import { Button } from "@/components/ui/Button";
@@ -19,10 +21,10 @@ import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
-import { homingStatus } from "@/lib/homingStatus";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
 import type { ManualState, OperationMode } from "@/lib/protocol";
+import { hasSwitchMeasure } from "@/lib/robots";
 import { isRestartFromTop, sequenceKind } from "@/lib/sequenceStatus";
 
 interface RobotControlProps {
@@ -32,7 +34,7 @@ interface RobotControlProps {
 
 export function RobotControl({ robotKey, label }: RobotControlProps) {
   const states = useRobotStates();
-  const { matchState, connected, eStopActive, serverInfo, homing } = useRobotStatus();
+  const { matchState, connected, eStopActive, serverInfo } = useRobotStatus();
   const { sendOrReport } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
@@ -152,21 +154,27 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       />
     );
 
-  // 手動中はサーバーが必ず拒むので、無効ボタンではなく配られた拒否理由だけを出す
-  const homingReason = homingStatus(homing, connected).reasonLabel;
-  const homingPanel =
-    inManual && homingReason === null ? null : (
-      <Panel legend="零点合わせ" className="shrink-0" bodyClassName="gap-1.5">
-        {inManual ? (
-          <p className="text-base-content/70">{homingReason}</p>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <HomingButtons robot={robotKey} />
-          </div>
-        )}
-        <HomingPanel robot={robotKey} />
-      </Panel>
+  // 手で寄せながら控える流れなので手動の列に置く。位置定数を持たない台では出さない
+  const capturePanel =
+    !inManual || state.position_capture === undefined || state.position_capture === null ? null : (
+      <PositionCapturePanel
+        robotKey={robotKey}
+        capture={state.position_capture}
+        blockedReason={manualBlockedReason}
+        sendOrReport={sendOrReport}
+      />
     );
+
+  // 測定系はボタン 2 つだけ。箱で囲まず吸着パッドの上に小さく並べる
+  const measurePanel = (
+    <div className="flex shrink-0 flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <HomingButtons robot={robotKey} />
+        {hasSwitchMeasure(robotKey) ? <SwitchDistanceButton robot={robotKey} /> : null}
+      </div>
+      <HomingPanel robot={robotKey} />
+    </div>
+  );
 
   const subsystemPanel = (open: boolean, className?: string) => (
     <Panel legend="機体状態" className={className}>
@@ -219,13 +227,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(19rem,26rem)] gap-2">
           {inManual ? (
             <div className="flex min-h-0 flex-col gap-2">
-              {homingPanel}
               {manualPanel}
+              {capturePanel}
             </div>
           ) : (
             <div className="flex min-h-0 flex-col gap-2">
+              {measurePanel}
               {suctionPanel}
-              {homingPanel}
               {openSubsystemPanel}
             </div>
           )}
@@ -240,7 +248,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       {modeSwitch}
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
         {inManual ? (
-          <div className="flex min-h-0 flex-col gap-2">{manualPanel}</div>
+          <div className="flex min-h-0 flex-col gap-2">
+            {manualPanel}
+            {capturePanel}
+          </div>
         ) : (
           <div className="flex min-h-0 flex-col gap-2">
             <ActionPanel

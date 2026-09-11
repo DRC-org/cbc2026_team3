@@ -1229,6 +1229,105 @@ class TestMotionSpec:
 
         assert table.axis("y_axis").motion is not None
 
+    def test_manual_の端も最大移動距離に数える(self) -> None:
+        # 位置名どうしの幅 (15mm) なら 1.0 秒で足りるが、manual の端からの出発 (65mm) は足りない
+        config = self._axis(
+            motion={"max_velocity": 60.0, "max_acceleration": 400.0},
+            timeout_s=1.0,
+            manual={"min": -50.0, "max": 15.0, "steps": [1.0]},
+        )
+        with pytest.raises(ValueError, match=r"最大移動 65\.0 mm"):
+            load_position_table(config, source="<test>")
+
+
+class TestMinSpeed:
+    """ドライバ内蔵の位置ループが速度を決める軸の timeout_s 検算 (axes.<軸>.min_speed)。"""
+
+    def _axis(self, *, min_speed: object, **extra: object) -> dict:
+        return {
+            "axes": {
+                "sub_lift": {
+                    "unit": "mm",
+                    "command_unit": "rad",
+                    "scale": 1.0668451,
+                    "min_speed": min_speed,
+                    **extra,
+                }
+            },
+            "positions": {"sub_lift": {"top": -140.0, "place": -20.0}},
+        }
+
+    def test_min_speed_を書かない軸は検算しない(self) -> None:
+        table = _table()
+
+        assert table.axis("lift_motor").min_speed is None
+
+    def test_timeout_s_に収まる設定は通る(self) -> None:
+        table = load_position_table(self._axis(min_speed=20.0, timeout_s=12.0), source="<test>")
+
+        assert table.axis("sub_lift").min_speed == pytest.approx(20.0)
+
+    def test_必ずタイムアウトする軸は起動を拒否する(self) -> None:
+        with pytest.raises(ValueError) as exc:
+            load_position_table(self._axis(min_speed=20.0, timeout_s=4.0), source="<test>")
+
+        message = str(exc.value)
+        assert "axes.sub_lift" in message
+        assert "min_speed (20.0 mm/s)" in message
+        assert "timeout_s (4.0)" in message
+        assert "timeout_s を 6.0 以上" in message
+
+    def test_manual_の端も最大移動距離に数える(self) -> None:
+        # 位置名どうしの幅 120mm は 7.0 秒で足りるが、manual の全幅 154mm は足りない
+        config = self._axis(
+            min_speed=20.0,
+            timeout_s=7.0,
+            manual={"min": -152.0, "max": 2.0, "steps": [1.0]},
+        )
+        with pytest.raises(ValueError, match=r"最大移動 154\.0 mm"):
+            load_position_table(config, source="<test>")
+
+    def test_位置定数を持たない軸でも_manual_の幅で検算する(self) -> None:
+        config = self._axis(
+            min_speed=20.0,
+            timeout_s=7.0,
+            manual={"min": -152.0, "max": 2.0, "steps": [1.0]},
+        )
+        config["positions"] = {}
+        with pytest.raises(ValueError, match=r"最大移動 154\.0 mm"):
+            load_position_table(config, source="<test>")
+
+    def test_正でない_min_speed_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="min_speed は正の値"):
+            load_position_table(self._axis(min_speed=0.0), source="<test>")
+
+    def test_数値でない_min_speed_は拒否する(self) -> None:
+        with pytest.raises(ValueError, match="min_speed が数値ではありません"):
+            load_position_table(self._axis(min_speed="fast"), source="<test>")
+
+    def test_motion_との併記は拒否する(self) -> None:
+        config = self._axis(
+            min_speed=20.0,
+            timeout_s=12.0,
+            motion={"max_velocity": 60.0, "max_acceleration": 400.0},
+        )
+        with pytest.raises(ValueError, match="min_speed と motion は併記できません"):
+            load_position_table(config, source="<test>")
+
+    def test_位置指令でない軸への_min_speed_は拒否する(self) -> None:
+        config = {
+            "axes": {
+                "pump": {
+                    "unit": "duty",
+                    "command_unit": "duty",
+                    "command_mode": "duty",
+                    "min_speed": 20.0,
+                }
+            }
+        }
+        with pytest.raises(ValueError, match="min_speed は位置指令の軸にのみ"):
+            load_position_table(config, source="<test>")
+
 
 class TestMotionGuardSpec:
     """指令を出す直前の歯止めの宣言 (axes.<軸>.guard)。

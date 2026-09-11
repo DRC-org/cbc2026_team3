@@ -544,8 +544,12 @@ def _interference_rig(
     lift_mm: float | None = -10.0,
     stale: set[str] | None = None,
     wire_reader: bool = True,
+    lift_confirmed: bool = True,
 ) -> tuple[AxisHandle, MotorGroup, PositionTable]:
-    """`slide` が `lift` を条件に持つ 1 組。`lift_mm` が None ならモータごと居ない。"""
+    """`slide` が `lift` を条件に持つ 1 組。`lift_mm` が None ならモータごと居ない。
+
+    `lift` は零点確定済みが既定。未確定の座標で読んだ値は区間の判定に使えない。
+    """
     table = load_position_table(_INTERFERENCE_CONFIG, source="<test>")
     group = MotorGroup()
     mgr = _make_can_manager()
@@ -557,6 +561,8 @@ def _interference_rig(
     if lift_mm is not None:
         lift = table.axis("lift")
         group["lift"].driver.set_observed(position=lift.motors[0].to_command(lift_mm))
+        if lift_confirmed:
+            group["lift"].driver.mark_origin_confirmed()
     if wire_reader:
         stale_names = stale or set()
         group.bind_axis_state(
@@ -610,6 +616,15 @@ class TestInterferenceAtTheCommandEntry:
         with pytest.raises(GuardViolation, match="読めていません"):
             await _command_slide(handle, table, "back")
 
+    async def test_条件の軸の零点が未確定なら区間に居ても拒否される(self) -> None:
+        """未確定の `lift` が偶然 `top` を読んでも、機構がそこに居るとは限らない。"""
+        handle, group, table = _interference_rig(lift_mm=-10.0, lift_confirmed=False)
+
+        with pytest.raises(GuardViolation, match="零点が確定していません"):
+            await _command_slide(handle, table, "back")
+
+        assert group["slide"].driver.encoded == []
+
     async def test_条件の軸がこの束に居なければ拒否される(self) -> None:
         handle, _, table = _interference_rig(lift_mm=None)
 
@@ -642,7 +657,15 @@ class TestAxisStateReader:
         read = group.axis_state
         assert read is not None
 
-        assert read("lift") == AxisReading(value=-10.0, target=None)
+        assert read("lift") == AxisReading(value=-10.0, target=None, origin_confirmed=True)
+
+    def test_零点確定済みはドライバから束ねて運ぶ(self) -> None:
+        """判定は 1 箇所 (`origin_confirmed`)。読み口が別に持つと片方だけ緩む。"""
+        _, group, _ = _interference_rig(lift_mm=-10.0, lift_confirmed=False)
+        read = group.axis_state
+        assert read is not None
+
+        assert read("lift") == AxisReading(value=-10.0, target=None, origin_confirmed=False)
 
     async def test_目標は軸の単位へ直して返す(self) -> None:
         _, group, table = _interference_rig(lift_mm=-10.0)
@@ -652,14 +675,14 @@ class TestAxisStateReader:
         read = group.axis_state
         assert read is not None
 
-        assert read("lift") == AxisReading(value=-10.0, target=0.0)
+        assert read("lift") == AxisReading(value=-10.0, target=0.0, origin_confirmed=True)
 
     def test_位置定数に無い軸は読めていない(self) -> None:
         _, group, _ = _interference_rig()
         read = group.axis_state
         assert read is not None
 
-        assert read("居ない軸") == AxisReading(value=None, target=None)
+        assert read("居ない軸") == AxisReading(value=None, target=None, origin_confirmed=False)
 
     def test_位置を持たない軸は読めていない(self) -> None:
         """duty / on_off は「今どこに居るか」を答えられない (常に 0 に見える)。"""
@@ -667,4 +690,4 @@ class TestAxisStateReader:
         read = group.axis_state
         assert read is not None
 
-        assert read("pump") == AxisReading(value=None, target=None)
+        assert read("pump") == AxisReading(value=None, target=None, origin_confirmed=False)

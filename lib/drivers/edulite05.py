@@ -36,6 +36,15 @@ class Edulite05Fault(IntFlag):
     UNCALIBRATED = 32
 
 
+_FAULT_LABELS: dict[Edulite05Fault, str] = {
+    Edulite05Fault.UNDERVOLTAGE: "低電圧",
+    Edulite05Fault.OVERCURRENT: "過電流",
+    Edulite05Fault.OVERTEMP: "過温度",
+    Edulite05Fault.MAG_ENCODER: "磁気エンコーダ異常",
+    Edulite05Fault.HALL: "ホールセンサ異常",
+    Edulite05Fault.UNCALIBRATED: "未校正",
+}
+
 _TURN = 2.0 * math.pi
 
 
@@ -104,12 +113,10 @@ class Edulite05Driver(MotorDriver):
         self.set_zero_on_start = bool(set_zero_on_start)
         self.mode_state: int | None = None
         self.fault_bits = Edulite05Fault.NONE
+        self._fault_clear_armed = False
 
         self._origin_offset = 0.0
         self._origin_captured = False
-        # 暫定原点と零点確定は別の軸で見る。前者はその場の姿勢を論理 0 にするだけで
-        # 機構原点と無関係なので、可動域による一意化の前提が立たない
-        self._origin_homed = False
         self._target_clamped = False
         self._prev_raw_position: float | None = None
         self._wrap_turns = 0
@@ -235,8 +242,9 @@ class Edulite05Driver(MotorDriver):
         **零点確定で原点が確定しているときだけ使える。** 暫定原点は機構原点と
         無関係なので、可動域と論理角が対応しない。
         """
-        if not self._origin_homed:
-            # 暫定原点のあいだは一意化そのものが成り立たないので、記録もしない
+        # 暫定原点はその場の姿勢を論理 0 にするだけで機構原点と無関係なので、
+        # 可動域による一意化の前提が立たない。記録もしない
+        if not self._origin_confirmed:
             return False
         if self._travel_range is None:
             self._log_travel_fallback("軸の機械的可動域 (axes.<軸>.travel) が設定されていない")
@@ -336,7 +344,8 @@ class Edulite05Driver(MotorDriver):
         )
         self._origin_offset = raw
         self._origin_captured = True
-        self._origin_homed = self._origin_homed or homed
+        if homed:
+            self.mark_origin_confirmed()
 
     def feedback_position(self) -> float:
         """論理位置 [rad]。`state.position` は電文どおりの生値のまま残す。"""
@@ -418,8 +427,20 @@ class Edulite05Driver(MotorDriver):
         (0x12) で書く。マニュアルの type 18 は "lost after power failure" なので、
         物理非常停止で電源が落ちた個体は**位置モードですらない**状態で立ち上がる。
         """
+        # fault が立っているときだけラッチ解除を載せる。無条件に打つと原因を隠すうえ、
+        # 「消えたことを確かめずにラッチだけ外して励磁する」経路そのものになる。
+        # 先頭の disable で無励磁にするので、打つ相手が無励磁なのは指令として分かっている
+        clearing = self.is_fault()
+        if clearing:
+            self._fault_clear_armed = True
+            logger.warning(
+                "EDULITE 05 の fault ラッチを解除します (motor=%s, fault=%s)。"
+                "解除後の実測で fault が消えるまで励磁しません",
+                self.name,
+                self.fault_summary(),
+            )
         steps = [
-            (self.encode_disable(), 0.05),
+            (self.encode_disable(clear_fault=clearing), 0.05),
             (self.encode_run_mode(self._CONTROL_TO_RUN_MODE[self.mode]), 0.05),
             (self.encode_write_param_float(self.PARAM_LIMIT_SPD, self.limit_speed), 0.05),
             (self.encode_write_param_float(self.PARAM_LIMIT_CUR, self.limit_current), 0.05),
@@ -464,6 +485,10 @@ class Edulite05Driver(MotorDriver):
         _comm_type, data_area2, _dest_id = self.parse_can_id(msg.arbitration_id)
         self.mode_state = (data_area2 >> 14) & 0x03
         self.fault_bits = Edulite05Fault((data_area2 >> 8) & 0x3F)
+        if self._fault_clear_armed and self.fault_bits is Edulite05Fault.NONE:
+            # ラッチ解除の後に fault の無い実測を見た。**原因が去ったと言える唯一の材料**
+            self._fault_clear_armed = False
+            logger.info("EDULITE 05 の fault が消えました (motor=%s)", self.name)
         pos_raw, vel_raw, torque_raw, temp_raw = struct.unpack(">HHHH", msg.data)
         position = self.uint16_to_float(pos_raw, self.POS_MIN, self.POS_MAX)
         self._track_wrap(position)
@@ -495,6 +520,52 @@ class Edulite05Driver(MotorDriver):
 
     def is_fault(self) -> bool:
         return self.fault_bits != Edulite05Fault.NONE
+
+    def fault_summary(self) -> str:
+        """立っている fault ビットを日本語で並べる。ログと画面の文面はこれ 1 つから作る。"""
+        labels = [label for bit, label in _FAULT_LABELS.items() if self.fault_bits & bit]
+        return "、".join(labels) if labels else "なし"
+
+    def configuration_probe_messages(self) -> list[can.Message]:
+        """ラッチ解除の後、fault が消えたかを実測で確かめるための問い合わせ。
+
+        フィードバックは問い合わせ駆動なので、打たなければ解除の結果が 1 通も返らない。
+        送るのは disable だけで機構は動かない。`CANManager._confirm_configuration` が
+        空になるまで送り直すので、原因が去っていれば同じ再励磁の中で励磁まで進む。
+        """
+        if not self._fault_clear_armed:
+            return []
+        return [self.encode_disable()]
+
+    def activation_block_reason(self) -> str | None:
+        """ラッチ解除の後、fault が消えた実測を見るまで励磁しない。
+
+        確認せずに励磁すると、原因 (低電圧など) が残ったままラッチだけ外れた状態で
+        機構が動き出す。**`is_fault()` へ入れてはならない** —— ドライバの異常報告では
+        なく PC 側が安全側へ倒した判断である。
+        """
+        if not self._fault_clear_armed:
+            return None
+        return (
+            f"fault ({self.fault_summary()}) のラッチを解除しましたが、消えたことを"
+            "実測でまだ確認できていないため励磁しません。電源電圧・CAN 配線・"
+            "機構の引っ掛かりを確認してください"
+        )
+
+    def health_detail(self) -> str | None:
+        """励磁を止めている理由と、立っている fault を操縦者へ渡す。
+
+        ログにしか出ないと、操縦者からは配線不良と区別が付かない。
+        """
+        blocked = self.activation_block_reason()
+        if blocked is not None:
+            return blocked
+        if self.is_fault():
+            return (
+                f"ドライバが fault を報告しています ({self.fault_summary()})。"
+                "再励磁を押すとラッチ解除を送ります"
+            )
+        return None
 
     _RPM_TO_RAD_PER_S = 2.0 * math.pi / 60.0
 

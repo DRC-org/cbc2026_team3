@@ -292,6 +292,18 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_switch_measure_start",
     ),
     _spec(
+        "switch_distance_start",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は距離測定を実行できません",
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため距離測定を実行できません",
+        blocked_without_court=True,
+        court_deny_message=(
+            "コートが未設定のため距離測定を実行できません (試合準備でコートを選んでください)"
+        ),
+        handler="_cmd_switch_distance_start",
+    ),
+    _spec(
         "reenergize_motors",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,
@@ -336,6 +348,20 @@ _SPECS: tuple[CommandSpec, ...] = (
             "コートが未設定のため手動操縦できません (試合準備でコートを選んでください)"
         ),
         handler="_cmd_manual_jog",
+    ),
+    # 機体は動かさないが、控える値は実測そのもの。緊急停止中に通すと、無励磁で自重落下
+    # した位置を「その位置名の正しい値」として控えてしまう
+    _spec(
+        "position_capture",
+        allowed_phases=PHASES_OUTSIDE_MATCH,
+        phase_deny_message="試合中は位置を控えられません",
+        allowed_during_e_stop=False,
+        e_stop_deny_message=("緊急停止中は位置を控えられません (無励磁で下がった位置が残ります)"),
+        blocked_without_court=True,
+        court_deny_message=(
+            "コートが未設定のため位置を控えられません (試合準備でコートを選んでください)"
+        ),
+        handler="_cmd_position_capture",
     ),
     # 選択を変えるだけで機体は動かない。次の吸着ステップから効くので、緊急停止中の準備にも通す
     _spec(

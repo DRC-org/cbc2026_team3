@@ -19,6 +19,8 @@ interface UseSwitchMeasureReturn {
     direction: SwitchDirection,
     options?: SwitchMeasureOptions,
   ) => void;
+  /** そのロボットの対象軸を全部、両端まで寄せてスイッチ間の距離を測る */
+  startDistance: (robot: string) => void;
 }
 
 export function useSwitchMeasure(): UseSwitchMeasureReturn {
@@ -48,5 +50,15 @@ export function useSwitchMeasure(): UseSwitchMeasureReturn {
     [sendOrReport],
   );
 
-  return useMemo(() => ({ state: switchMeasure, start }), [switchMeasure, start]);
+  const startDistance = useCallback(
+    (robot: string) => {
+      sendOrReport({ type: "switch_distance_start", robot }, "距離測定の開始");
+    },
+    [sendOrReport],
+  );
+
+  return useMemo(
+    () => ({ state: switchMeasure, start, startDistance }),
+    [switchMeasure, start, startDistance],
+  );
 }

@@ -681,6 +681,9 @@ _GUARDED_CONFIG = {
 def _guarded_sequence() -> tuple[Sequence, MotorGroup, dict[str, _EchoDriver]]:
     table = load_position_table(_GUARDED_CONFIG, source="<test>")
     group, drivers = _make_group("lift", "slide", "pitch", "offset")
+    for driver in drivers.values():
+        # 零点確定を済ませた後の状態。未確定だと区間に居ても拒否される
+        driver.mark_origin_confirmed()
     group.bind_axis_state(
         build_axis_state_reader(table, group, court=lambda: Court.RED, is_stale=lambda _name: False)
     )

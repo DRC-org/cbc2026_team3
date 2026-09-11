@@ -14,8 +14,16 @@
 **宣言の前後に依らない貫通防止も重ねる。** `guard.limits` の前後が実物と入れ替わっていると、
 進む向きの端だけを見る作りでは機構が当たった側を誰も見ていない (2026-09-10 実機: `sub_y_axis` が
 見張っていない側のスイッチを踏み越えた)。そこで端センサごとに **OFF→ON へ変わった周期に出て
-いた指令の向き**を覚え、ON のあいだその向きの指令を止める (`MotionGuard.check_pass_through`)。
-OFF に戻ったら忘れる。判定は `MotionGuard` が持ち、ここは覚える役だけ。
+いた指令の向き**を覚え、ON のあいだその向きの指令を止める (判定は `MotionGuard.check_limit` が
+宣言と一緒に持ち、ここは覚える役だけ。**指令の入口も同じ記憶を読む** (`pressed_toward()`) ので、
+覚えた向きの反対はどちらの経路でも通る)。OFF に戻り、そこから到達許容差 (`tolerance`) 以上離れたら
+忘れる。**覚えるのは、最後に ON を読んだ位置の向こう側へ許容差以上離れてから戻ってきた OFF→ON
+だけ。** 触れた端から離れていく途中の OFF→ON は同じ押しで、退避の向きを覚えない。
+**原点が付け替わった軸の記憶は捨てる** (`origin_replaced()`)。覚えた位置は前の座標のもので、
+付け替え後の実測とは比べられない —— 比べると付け替えの跳びが「向こう側へ離れた」と読まれ、
+スイッチに載ったままの端が次の指令の向きで「当たった」と覚えられる (2026-09-10 実機: `sub_lift` の
+零点確定直後の退避が止まり、その軸が動かせなくなった)。付け替えを行う側
+(`main._make_origin_resolver`) が伝える。跳びの大きさから推し量らない。
 
 **見るのは可動端だけ。** `max_step` は「1 指令で実測位置から離れてよい量」の判定なので、
 移動中の実測位置に当てると長距離移動の途中で必ず誤発火する。トルクは誤発火が怖いので
@@ -45,6 +53,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from lib.control.periodic import PeriodicTask
@@ -71,6 +80,36 @@ SleepFunc = Callable[[float], Awaitable[None]]
 SensorContactCount = Callable[[str], int | None]
 
 
+@dataclass
+class _Contact:
+    """端を最後に ON で読んだ位置と、その後に軸が動いた範囲 [軸の unit]。
+
+    `anchor` が None なのは、原点の付け替えのとき OFF だった端。ON を読んだ位置が無いので
+    「向こう側へ離れた」は問えず、代わりに付け替えた位置から許容差以上動いたかを問う ——
+    問わないと、縁に座った接点の次のゆらぎが初めての接触に見える。
+    """
+
+    anchor: float | None
+    low: float
+    high: float
+
+    def extend(self, position: float) -> None:
+        self.low = min(self.low, position)
+        self.high = max(self.high, position)
+
+    def departed(self, tolerance: float) -> bool:
+        if self.anchor is None:
+            return True
+        return max(self.high - self.anchor, self.anchor - self.low) >= tolerance
+
+    def returning(self, direction: int, tolerance: float) -> bool:
+        """`direction` へ進む軸が、ON を読んだ位置の向こう側へ離れてから戻ってきたか。"""
+        if self.anchor is None:
+            return self.high - self.low >= tolerance
+        away = self.high - self.anchor if direction < 0 else self.anchor - self.low
+        return away >= tolerance
+
+
 class LimitMonitor(PeriodicTask):
     def __init__(
         self,
@@ -95,10 +134,12 @@ class LimitMonitor(PeriodicTask):
         # 50Hz で撃ち続けるとバスが埋まるので、同じ目標のあいだは撃ち直さない
         self._stopped: dict[str, float] = {}
         self._interventions: dict[str, LimitIntervention] = {}
-        # 端センサの前回値と、軸ごとの {センサ名: OFF→ON に変わった周期の指令の符号}。
-        # `None` (読めていない) の周期は前回値を進めない
+        # 端センサの前回値と、{センサ名: OFF→ON に変わった周期の指令の符号}。センサ名は
+        # ロボット横断に一意なので軸で分けない。`None` (読めていない) の周期は前回値を進めない
         self._last_active: dict[str, bool] = {}
-        self._pressed_toward: dict[str, dict[str, int]] = {}
+        self._pressed_toward: dict[str, int] = {}
+        self._last_on: dict[str, _Contact] = {}
+        self._last_position: dict[str, float] = {}
         # 読み手は自分で基準値を控える (カウンタは読んでも減らないので、同じセンサを
         # 読む零点確定のぶんを消さない)。周期ごとに 1 度だけ進めるので二重に数えない
         self._contact_baseline: dict[str, int] = {}
@@ -116,6 +157,43 @@ class LimitMonitor(PeriodicTask):
     def intervention(self, axis: str) -> LimitIntervention:
         """その軸で移動を止めた回数と直近の理由。**単調増加で、離れても減らない。**"""
         return self._interventions.get(axis, NO_LIMIT_INTERVENTION)
+
+    def pressed_toward(self, name: str) -> int | None:
+        """端センサ `name` が OFF→ON へ変わったときの指令の符号。覚えていなければ None。
+
+        指令の入口 (`AxisHandle`) が読む。監視と入口が別々の記憶を持つと、片方だけが
+        退避を通す状態が作れる。
+        """
+        return self._pressed_toward.get(name)
+
+    def origin_replaced(self, axis: str) -> None:
+        """軸 `axis` の原点が付け替わった。前の座標で覚えたものを捨てる。
+
+        接触位置も当たった向きも前の座標のもので、付け替え後の実測とは比べられない。
+        端の状態と今の位置は控え直す —— 捨てただけだと、縁に座った接点の次のゆらぎ (OFF→ON)
+        が初めての接触に見え、その周期の指令の向きを覚える。
+        """
+        if axis not in self._guards:
+            return
+        limits = self._positions.axis(axis).guard.limits  # type: ignore[union-attr]
+        names = () if limits is None else (*limits.plus, *limits.minus)
+        self._stopped.pop(axis, None)
+        # 座標系が変わるので、跨いだ差を「動いた量」として読ませない
+        self._last_position.pop(axis, None)
+        resolved = self._resolve(axis)
+        position = (
+            None if resolved is None else resolved[0].to_value(resolved[1].observed_commands())
+        )
+        for name in names:
+            self._pressed_toward.pop(name, None)
+            self._last_on.pop(name, None)
+            self._last_active.pop(name, None)
+            state = self._sensor_state(name)
+            if state is None:
+                continue
+            self._last_active[name] = state
+            if position is not None:
+                self._last_on[name] = _Contact(position if state else None, position, position)
 
     def _label(self) -> str:
         return f"可動端監視 ({', '.join(self.axis_names) or '対象なし'})"
@@ -160,64 +238,98 @@ class LimitMonitor(PeriodicTask):
             return None
         return bool(active) or name in self._contacted
 
-    async def _check_axis(self, axis: str) -> None:
+    def _resolve(self, axis: str) -> tuple[AxisSpec, AxisHandle] | None:
+        """コートを解決した軸の仕様と、書き戻しに使う口。コート未確定なら None。"""
         court = self._court()
         spec = self._positions.axis(axis)
         if court is None and spec.court_dependent:
+            return None
+        spec = spec.for_court(court)
+        handles = [self._motors[name] for name in spec.motor_names]
+        return spec, AxisHandle(spec, handles, sensor_active=self._sensor_state)
+
+    async def _check_axis(self, axis: str) -> None:
+        resolved = self._resolve(axis)
+        if resolved is None:
             self._warn_unresolved(axis)
             return
         self._unresolved_warned.discard(axis)
-        spec = spec.for_court(court)
-        handles = [self._motors[name] for name in spec.motor_names]
-        handle = AxisHandle(spec, handles, sensor_active=self._sensor_state)
+        spec, handle = resolved
 
         # 書き戻す値は指令の単位のまま持つ。値へ換算して戻すと往復の丸め誤差が
         # そのまま delta に残り、**止めるための指令が入口の歯止めに拒否される**
         observed_commands = handle.observed_commands()
-        target = self._commanded_value(spec, handles)
+        position = spec.to_value(observed_commands)
+        target = self._commanded_value(spec, [self._motors[name] for name in spec.motor_names])
         if target is None:
             self._stopped.pop(axis, None)
         moving = target is not None and self._stopped.get(axis) != target
-        delta = target - spec.to_value(observed_commands) if moving else 0.0
+        delta = target - position if moving else 0.0
         # 動かしていない周期も前回値を進める。進めないと、止まっている間に手で押された
         # スイッチが次の指令の周期に「その向きで当たった」と読まれる
-        pressed_toward = self._track_pressed(axis, spec, delta)
+        self._track_pressed(spec, delta, position=position)
         if not moving:
             return
 
-        guard = self._guards[axis]
         try:
-            guard.check_limit(axis=axis, delta=delta, sensor_active=self._sensor_state)
-            guard.check_pass_through(
+            self._guards[axis].check_limit(
                 axis=axis,
                 delta=delta,
                 sensor_active=self._sensor_state,
-                pressed_toward=pressed_toward,
+                pressed_toward=self.pressed_toward,
             )
         except GuardViolation as exc:
             await self._stop_here(axis, spec, handle, observed_commands, exc)
             return
         self._stopped.pop(axis, None)
 
-    def _track_pressed(self, axis: str, spec: AxisSpec, delta: float) -> dict[str, int]:
+    def _track_pressed(self, spec: AxisSpec, delta: float, *, position: float) -> None:
         """この周期の端センサを見て、OFF→ON に変わった端に指令の向きを覚える。
 
         指令の無い周期 (`delta == 0`) の OFF→ON は覚えない —— 動かしていないのに押されたなら
         機構が当たったのではなく、次の指令はどちらの向きでも退避として通す。
+
+        覚えるのは、最後に ON を読んだ位置の向こう側 (進む向きの手前) へ到達許容差以上離れて
+        から戻ってきた OFF→ON だけ。離れていく途中の OFF→ON は端の作動点に座った接点のゆらぎ
+        や離れ際のバウンドで、新しい接触ではない —— 覚えると退避の向きを「当たった向き」と
+        取り違える。OFF に戻った端は、軸がそこから許容差以上離れるまで覚えたままにする。
+
+        **指令が実測と逆を向いている周期は覚えない。** 零点確定の粗探索は 10ms ごとに
+        目標を先行させて進み、接触を掴んだその場で離脱へ反転する。50ms の監視が初めて
+        ON を読むときには指令だけが反転していて、機構はまだ当たった向きへ動いている ——
+        指令の向きで覚えると、当てに行った向きの逆を「当たった向き」として記録し、
+        以後その端から離れるまで探索の向きが塞がる。
         """
-        pressed = self._pressed_toward.setdefault(axis, {})
         limits = None if spec.guard is None else spec.guard.limits
         names = () if limits is None else (*limits.plus, *limits.minus)
+        # 到達許容差の内側は「同じ位置」。持たない軸は離れたかどうかを問わない
+        hysteresis = spec.tolerance or 0.0
+        previous = self._last_position.get(spec.name)
+        self._last_position[spec.name] = position
+        moved = 0.0 if previous is None else position - previous
+        # 実測のゆらぎで向きが反転しない幅に留める
+        reversed_command = abs(moved) > hysteresis * 0.1 and (moved > 0.0) != (delta > 0.0)
         for name in names:
             state = self._sensor_state(name)
             if state is None:
                 continue
-            if not state:
-                pressed.pop(name, None)
-            elif self._last_active.get(name) is False and delta != 0.0:
-                pressed[name] = 1 if delta > 0.0 else -1
+            contact = self._last_on.get(name)
+            if contact is not None:
+                contact.extend(position)
+            if state:
+                direction = 1 if delta > 0.0 else -1
+                returned = contact is None or contact.returning(direction, hysteresis)
+                if (
+                    returned
+                    and not reversed_command
+                    and self._last_active.get(name) is False
+                    and delta != 0.0
+                ):
+                    self._pressed_toward[name] = direction
+                self._last_on[name] = _Contact(position, position, position)
+            elif contact is None or contact.departed(hysteresis):
+                self._pressed_toward.pop(name, None)
             self._last_active[name] = state
-        return pressed
 
     def _warn_unresolved(self, axis: str) -> None:
         """コート未確定の軸は監視できない。**保護の穴にはならない。**

@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
+from typing import Protocol
 
 from lib.drivers.base import ControlMode
 from lib.match_state import Court
-from lib.sequence.motors import AxisHandle, MotorGroup
+from lib.sequence.motors import AxisHandle, MotorGroup, origin_confirmed
 from lib.sequence.positions import AxisSpec, HomingSpec, PositionTable
 
 logger = logging.getLogger(__name__)
@@ -17,9 +19,11 @@ __all__ = [
     "AxisHomingResult",
     "HomingError",
     "HomingRunner",
+    "SwitchDistance",
     "SwitchMeasurement",
     "homing_axis_names",
     "homing_order",
+    "measure_distances",
     "measure_switch",
     "run_homing",
 ]
@@ -29,6 +33,17 @@ _FOLLOW_ATTEMPTS = 5
 _STALL_LIMIT = 3
 
 _PROGRESS_FRACTION = 0.5
+
+#: 粗探索で目標を出し直す周期。`coarse_step / limit_speed` (実機 0.5mm / 17.4mm/s ≒ 29ms) より
+#: 短くないと軸が目標に追いついて周期ごとに止まる。DM3520 は指令のたびに状態を返すので実測も
+#: この周期で更新され、同じ実測から同じ目標を 2 回出すことは無い (CAN の往復は 1ms 台)
+_GLIDE_PERIOD_S = 0.01
+
+#: 粗探索で半歩 (`coarse_step/2`) 進まないまま許す時間。刻み送りが 1 歩の追従に許していた
+#: `_FOLLOW_ATTEMPTS` * settle_s と同じ長さで、周期を詰めても停滞の感度が変わらないよう秒で持つ
+_GLIDE_STALL_S = 0.25
+
+_GLIDE_STALL_PERIODS = math.ceil(_GLIDE_STALL_S / _GLIDE_PERIOD_S)
 
 #: `homing.release_distance` を書かなかった軸の離脱上限を step から作る倍数。
 #: `search_distance` を流用すると反対側の機構端まで走り抜ける
@@ -177,6 +192,45 @@ class SwitchMeasurement:
         }
 
 
+@dataclass(frozen=True)
+class SwitchDistance:
+    """1 軸の両端のスイッチが入る点どうしの距離。測れなかった軸は `distance` が None。"""
+
+    axis: str
+    unit: str
+    distance: float | None
+    #: 両端とも同じ刻みで測る。値と一緒に配らないと精度が読めない
+    step: float | None
+    coarse_step: float | None
+    error: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "axis": self.axis,
+            "unit": self.unit,
+            "distance": self.distance,
+            "step": self.step,
+            "coarse_step": self.coarse_step,
+            "error": self.error,
+        }
+
+
+def _probe_sensors(spec: AxisSpec, homing: HomingSpec, direction: float) -> dict[str, object]:
+    """測る向きの端に居るスイッチ。原点センサは片端にしか無いので `guard.limits` から引く。"""
+    limits = spec.guard.limits if spec.guard is not None else None
+    names = () if limits is None else (limits.plus if direction > 0 else limits.minus)
+    if not names or set(names) == set(homing.sensor_names):
+        return {}
+    if len(names) == 1:
+        return {"sensor": names[0], "motor_sensors": None}
+    if len(names) == len(spec.motor_names):
+        return {"sensor": None, "motor_sensors": tuple(zip(spec.motor_names, names, strict=True))}
+    raise HomingError(
+        f"軸 '{spec.name}' の {'+' if direction > 0 else '-'} 側のスイッチ {', '.join(names)} を"
+        f" モータ {', '.join(spec.motor_names)} に対応づけられません"
+    )
+
+
 def _probe_spec(
     spec: AxisSpec,
     homing: HomingSpec,
@@ -185,13 +239,14 @@ def _probe_spec(
     coarse_step: float | None,
     limit: float | None,
 ) -> HomingSpec:
-    """測定用に向きと刻みだけ差し替えた `HomingSpec`。
+    """測定用に向き・見るスイッチ・刻みだけ差し替えた `HomingSpec`。
 
     **上限は `search_distance` として載せる。** 別の変数で持つと探索の各段が見る
     歯止めと測定の歯止めが二重になり、片方だけが直った状態が作れる。
     `HomingSpec` の検証もそのまま効く。
     """
     changes: dict[str, object] = {"direction": float(direction)}
+    changes.update(_probe_sensors(spec, homing, direction))
     if step is not None:
         changes["step"] = step
     if coarse_step is not None:
@@ -343,20 +398,18 @@ class HomingRunner:
         if homing.coarse_step is not None:
             start = self._observe(spec, handle)
             limit = _remaining_distance(homing, travelled=travelled, released=released)
-            observed = await self._seek(
+            observed = await self._glide(
                 spec,
                 handle,
                 homing,
                 contacts,
-                step=homing.coarse_step,
-                direction=homing.direction,
-                want_active=True,
+                lead=homing.coarse_step,
                 limit=limit,
                 limit_message=_not_reached_message(spec, homing, limit),
             )
             travelled += abs(observed - start)
             logger.info(
-                "[homing] %s: 粗探索 (%g%s 刻み) で %.2f%s 動かして接触。"
+                "[homing] %s: 粗探索 (目標を %g%s 先行) で %.2f%s 動かして接触。"
                 "離脱して %g%s 刻みで寄せ直す",
                 spec.name,
                 homing.coarse_step,
@@ -366,13 +419,13 @@ class HomingRunner:
                 homing.step,
                 spec.unit,
             )
-            # 粗い 1 歩が ON 区間より広いと、当てた時点でもう区間の外 (機構端の側) に
+            # 先行量が ON 区間より広いと、止まった時点でもう区間の外 (機構端の側) に
             # 居る。そのまま寄せ直すと探索方向へ走り抜けるので動かす前に問い直す
             if not any(self._sensor_active(name) is True for name in homing.sensor_names):
                 raise HomingError(
-                    f"軸 '{spec.name}' は粗探索 ({homing.coarse_step}{spec.unit} 刻み) の"
-                    f" 1 歩で原点センサ {_label(homing.sensor_names)} の ON 区間を"
-                    "跨ぎ切りました (当てた直後にもう OFF)。このまま寄せ直すと探索方向へ"
+                    f"軸 '{spec.name}' は粗探索 (目標を {homing.coarse_step}{spec.unit} 先行)"
+                    f" で原点センサ {_label(homing.sensor_names)} の ON 区間を"
+                    "跨ぎ切りました (止まった時点でもう OFF)。このまま寄せ直すと探索方向へ"
                     "走り抜けるので止めます。"
                     "homing.coarse_step を ON 区間の実測より狭くしてください"
                 )
@@ -662,19 +715,11 @@ class HomingRunner:
     ) -> float:
         """センサが `want_active` になるまで `direction` 方向へ `step` ずつ動かす。
 
-        **探索・離脱・二段探索の各段がこの 1 本を通る。** 歯止めを向きごとに書き分けると
-        「探索は止まるのに離脱は永久に動き続ける」形が作れる。
+        **探索・離脱がこの 1 本を通る** (粗探索だけは止まらずに流す `_glide`)。歯止めを
+        向きごとに書き分けると「探索は止まるのに離脱は永久に動き続ける」形が作れる。
         """
         if want_active:
-            # 離脱段や前回の零点確定で数えたぶんまで見ていると 1 歩目で到達と読む。
-            # カウンタを提供しないセンサもここで弾く
-            unsupported = contacts.rebase()
-            if unsupported:
-                raise HomingError(
-                    f"軸 '{spec.name}' の原点センサ {_label(unsupported)} は接触のカウンタを"
-                    "提供しません (現在値だけでは指令 1 回ぶんの通過を取りこぼすので"
-                    "探索を開始しません)"
-                )
+            self._rebase_contacts(spec, contacts)
 
         start = self._observe(spec, handle)
         observed = start
@@ -721,6 +766,88 @@ class HomingRunner:
                     f" ({_STALL_LIMIT} 歩連続で {progress}{spec.unit} 進まなかった)。"
                     " 機構の引っかかり・探索方向・モータの励磁を確認してください"
                 )
+
+    async def _glide(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        contacts: _SensorContacts,
+        *,
+        lead: float,
+        limit: float,
+        limit_message: str,
+    ) -> float:
+        """接触するまで、目標を実測の `lead` だけ先へ毎周期出し直して止まらずに流す。
+
+        粗探索専用。到達を待つ刻み送りは 1 歩ごとに静止するので `limit_speed` の半分以下に
+        律速し、操縦者にはガクつきとして見える。先行量が `coarse_step` そのものなのは、
+        接触してから止まるまでの行き過ぎを ON 区間より狭い値に収めるため (`_approach` の
+        跨ぎ切りの判定がそのまま効く)。
+        """
+        self._rebase_contacts(spec, contacts)
+        failure = await self._glide_until_contact(
+            spec, handle, homing, contacts, lead=lead, limit=limit, limit_message=limit_message
+        )
+        # 最後に送った目標は必ず実測より先に居るので、降りる理由を問わずその場へ止め直す
+        await self._stop_here(spec, handle)
+        if failure is not None:
+            raise HomingError(failure)
+        return self._observe(spec, handle)
+
+    async def _glide_until_contact(
+        self,
+        spec: AxisSpec,
+        handle: AxisHandle,
+        homing: HomingSpec,
+        contacts: _SensorContacts,
+        *,
+        lead: float,
+        limit: float,
+        limit_message: str,
+    ) -> str | None:
+        """接触したら None、それ以外の理由で降りるならその文言。"""
+        progress = _progress_threshold(lead)
+        start = self._observe(spec, handle)
+        observed = start
+        # 「歩」が無いので、時間で見る: `_GLIDE_STALL_S` のあいだに半歩も進まなければ停滞
+        mark = start
+        idle = 0
+        while True:
+            lost = self._feedback_lost(spec, homing)
+            if lost is not None:
+                return lost
+            if abs(observed - start) >= limit:
+                return limit_message
+
+            await handle.set_target_value(spec.to_commands(observed + homing.direction * lead))
+            await self._sleep(_GLIDE_PERIOD_S)
+            if contacts.any_contacted():
+                return None
+
+            observed = self._observe(spec, handle)
+            if abs(observed - mark) >= progress:
+                mark = observed
+                idle = 0
+                continue
+            idle += 1
+            if idle >= _GLIDE_STALL_PERIODS:
+                return (
+                    f"軸 '{spec.name}' が指令しても動きません"
+                    f" ({_GLIDE_STALL_S:g} 秒で {progress}{spec.unit} 進まなかった)。"
+                    " 機構の引っかかり・探索方向・モータの励磁を確認してください"
+                )
+
+    def _rebase_contacts(self, spec: AxisSpec, contacts: _SensorContacts) -> None:
+        # 離脱段や前回の零点確定で数えたぶんまで見ていると 1 歩目で到達と読む。
+        # カウンタを提供しないセンサもここで弾く
+        unsupported = contacts.rebase()
+        if unsupported:
+            raise HomingError(
+                f"軸 '{spec.name}' の原点センサ {_label(unsupported)} は接触のカウンタを"
+                "提供しません (現在値だけでは指令 1 回ぶんの通過を取りこぼすので"
+                "探索を開始しません)"
+            )
 
     def _check_preconditions(
         self, spec: AxisSpec, homing: HomingSpec, *, require_origin: bool = True
@@ -907,6 +1034,7 @@ def _axis_handle(
         # 零点確定も探索の 1 歩ごとに指令の入口を通るので、干渉条件が効く。
         # 配線しないと `requires` を書いた軸だけが 1 歩も探索できない
         axis_state=motors.axis_state,
+        pressed_toward=motors.pressed_toward,
     )
 
 
@@ -961,6 +1089,77 @@ async def measure_switch(
     )
 
 
+class _AxisOutcome(Protocol):
+    @property
+    def axis(self) -> str: ...
+    @property
+    def error(self) -> str | None: ...
+
+
+def _unconfirmed_message(axis: str, prerequisite: str, position: str) -> str:
+    return (
+        f"軸 '{axis}' は '{prerequisite}' を {position} へ寄せてからでないと動かせませんが、"
+        f"'{prerequisite}' の零点が確定していないため寄せられません"
+        f" (原点の決まっていない軸へ位置名で指令すると、どこへ動くか分かりません)。"
+        f"先に '{prerequisite}' の零点確定を済ませてください"
+    )
+
+
+async def _in_stages[Outcome: _AxisOutcome](
+    table: PositionTable,
+    motors: MotorGroup,
+    targets: list[str],
+    move_to: MoveTo | None,
+    run: Callable[[list[str], Mapping[str, str]], Awaitable[list[Outcome]]],
+) -> list[Outcome]:
+    """①参照される軸 → ②寄せる → ③残り。**零点確定と距離測定が同じ順序を踏む唯一の場所。**
+
+    寄せるのは「今回選ばれた軸」のうち**零点が確定している軸**だけ。確定はドライバが
+    持ち (`origin_confirmed`)、①の成否ではなく確定で判断する —— 距離測定は①を通っても
+    原点を書かないので、成否で判断すると測れただけの軸を位置名で動かしてしまう。
+    確定していない軸を条件に持つ残りの軸は、動かさずに理由を返す。
+    """
+    targets = homing_order(table, targets)
+
+    prerequisites = {
+        axis: position
+        for axis, position in table.homing_prerequisites(targets).items()
+        if axis in targets
+    }
+    if move_to is None or not prerequisites:
+        return await run(targets, {})
+
+    # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
+    # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
+    referenced = homing_order(table, prerequisites)
+    results = await run(referenced, {})
+    unconfirmed = [axis for axis in referenced if not origin_confirmed(table.axis(axis), motors)]
+    for axis in referenced:
+        if axis in unconfirmed:
+            logger.error(
+                "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
+                axis,
+                prerequisites[axis],
+            )
+            continue
+        # 1 軸ずつ送る。まとめて 1 通にすると、前提軸どうしに not_with があるとき
+        # 自分の指令が自分の歯止めに拒否される
+        logger.info("零点確定: %s を %s へ寄せる", axis, prerequisites[axis])
+        await move_to({axis: prerequisites[axis]})
+
+    rest = [axis for axis in targets if axis not in prerequisites]
+    blocked: dict[str, str] = {}
+    for axis in rest:
+        for prerequisite in table.homing_prerequisites([axis]):
+            if prerequisite in unconfirmed:
+                blocked[axis] = _unconfirmed_message(
+                    axis, prerequisite, prerequisites[prerequisite]
+                )
+                break
+    results.extend(await run(rest, blocked))
+    return results
+
+
 async def run_homing(
     runner: HomingRunner,
     table: PositionTable,
@@ -979,58 +1178,110 @@ async def run_homing(
     操縦者は 1 回の実行で全軸の可否を知りたい。
 
     `move_to` を渡すと **①参照される軸を確定 → ②その軸を寄せる → ③残りを確定**の
-    3 段で回す。零点確定は `release_distance` ぶん離脱して終わるので、確定しただけの
-    軸は `requires` の区間に居ない —— 寄せる段が無いと、参照する側は順序だけを理由に
-    必ず拒否される。渡さなければ並べ替えるだけで、1 本も余計に動かさない。
+    3 段で回す (`_in_stages`)。零点確定は `release_distance` ぶん離脱して終わるので、
+    確定しただけの軸は `requires` の区間に居ない —— 寄せる段が無いと、参照する側は
+    順序だけを理由に必ず拒否される。渡さなければ並べ替えるだけで、1 本も余計に動かさない。
 
     **寄せるのは「今回選ばれた軸」だけである。** 選ばれていない軸を寄せると
     「零点確定は選んだ軸しか動かさない」が壊れるので、その場合は寄せずに拒否させ、
     文面で手当てを案内する (`docs/invariants.md` §4)。零点合わせパネルで昇降と前後の
     両方を選べば①〜③が回り、前後だけを選べば拒否される。**この非対称が仕様である。**
-
-    **①で確定できなかった軸は寄せない。** 原点が確定していない軸へ位置名で指令すると
-    どこへ動くか分からない。
     """
     targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
     if not targets:
         logger.info("零点確定: homing を持つ軸が無いため飛ばす")
         return []
-    targets = homing_order(table, targets)
 
-    prerequisites = {
-        axis: position
-        for axis, position in table.homing_prerequisites(targets).items()
-        if axis in targets
-    }
-    if move_to is None or not prerequisites:
+    async def run(batch: list[str], blocked: Mapping[str, str]) -> list[AxisHomingResult]:
         return await _home_each(
-            runner, table, motors, court, targets, on_axis, on_result, stop_on_error
+            runner, table, motors, court, batch, blocked, on_axis, on_result, stop_on_error
         )
 
-    # 回すのは prerequisites に載った軸だけ。「今回選ばれた軸か」を判定するのは
-    # 上の内包表記 1 箇所で、ここはその結果を依存順に並べ直すだけ
-    referenced = homing_order(table, prerequisites)
-    results = await _home_each(
-        runner, table, motors, court, referenced, on_axis, on_result, stop_on_error
-    )
-    confirmed = {result.axis for result in results if result.error is None}
-    for axis in referenced:
-        if axis not in confirmed:
-            logger.error(
-                "零点確定: 軸 %s の零点が確定していないため %s へ寄せません",
-                axis,
-                prerequisites[axis],
-            )
-            continue
-        # 1 軸ずつ送る。まとめて 1 通にすると、前提軸どうしに not_with があるとき
-        # 自分の指令が自分の歯止めに拒否される
-        logger.info("零点確定: %s を %s へ寄せる", axis, prerequisites[axis])
-        await move_to({axis: prerequisites[axis]})
+    return await _in_stages(table, motors, targets, move_to, run)
 
-    rest = [axis for axis in targets if axis not in prerequisites]
-    results.extend(
-        await _home_each(runner, table, motors, court, rest, on_axis, on_result, stop_on_error)
-    )
+
+async def measure_distances(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court | None,
+    axes: Collection[str] | None = None,
+    move_to: MoveTo | None = None,
+    on_axis: Callable[[str], Awaitable[None]] | None = None,
+    on_result: Callable[[SwitchDistance], Awaitable[None]] | None = None,
+) -> list[SwitchDistance]:
+    """軸ごとに両端の作動点を測り、その差を返す。**零点は書き込まない。**
+
+    順序と寄せは零点確定と同じ 3 段 (`_in_stages`)。`requires` を書いた軸は条件の軸が
+    区間に居ないと 1 歩も動けないので、先に測った軸を寄せてから残りを測る。
+    測っても原点は確定しないので、条件の軸は**零点確定を済ませてある**ことが要る ——
+    未確定なら寄せず、残りは測らずに理由を返す。1 本の失敗で残りを諦めない。
+    """
+    targets = homing_axis_names(table) if axes is None else list(dict.fromkeys(axes))
+    if not targets:
+        return []
+
+    async def run(batch: list[str], blocked: Mapping[str, str]) -> list[SwitchDistance]:
+        return await _distance_each(
+            runner, table, motors, court, batch, blocked, on_axis, on_result
+        )
+
+    return await _in_stages(table, motors, targets, move_to, run)
+
+
+async def _distance_each(
+    runner: HomingRunner,
+    table: PositionTable,
+    motors: MotorGroup,
+    court: Court | None,
+    axes: list[str],
+    blocked: Mapping[str, str],
+    on_axis: Callable[[str], Awaitable[None]] | None,
+    on_result: Callable[[SwitchDistance], Awaitable[None]] | None,
+) -> list[SwitchDistance]:
+    results: list[SwitchDistance] = []
+    for axis in axes:
+        spec, handle = _axis_handle(table, motors, axis, court)
+        logger.info("距離測定: %s", axis)
+        if on_axis is not None:
+            await on_axis(axis)
+        try:
+            if axis in blocked:
+                raise HomingError(blocked[axis])
+            # 差を取るので零点がどこにあっても距離は変わらない
+            low = await runner.measure(spec, handle, direction=-1.0)
+            high = await runner.measure(spec, handle, direction=1.0)
+        except Exception as exc:
+            logger.error("距離測定に失敗: %s (%s)", axis, exc)
+            result = SwitchDistance(
+                axis=axis,
+                unit=spec.unit,
+                distance=None,
+                step=None,
+                coarse_step=None,
+                error=str(exc),
+            )
+        else:
+            result = SwitchDistance(
+                axis=axis,
+                unit=spec.unit,
+                distance=abs(high.engage - low.engage),
+                step=high.step,
+                coarse_step=high.coarse_step,
+                error=None,
+            )
+            logger.info(
+                "[distance] %s: %.3f%s (刻み %g%s)",
+                axis,
+                result.distance,
+                spec.unit,
+                high.step,
+                spec.unit,
+            )
+        results.append(result)
+        if on_result is not None:
+            await on_result(result)
     return results
 
 
@@ -1040,6 +1291,7 @@ async def _home_each(
     motors: MotorGroup,
     court: Court | None,
     axes: list[str],
+    blocked: Mapping[str, str],
     on_axis: Callable[[str], Awaitable[None]] | None,
     on_result: Callable[[AxisHomingResult], Awaitable[None]] | None,
     stop_on_error: bool,
@@ -1052,6 +1304,8 @@ async def _home_each(
             await on_axis(axis)
         _, handle = _axis_handle(table, motors, axis, court)
         try:
+            if axis in blocked:
+                raise HomingError(blocked[axis])
             await runner.home(spec, handle)
             await _retreat(spec, handle, table, court=court)
         except Exception as exc:

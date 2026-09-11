@@ -6,15 +6,28 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+import can
+
 __all__ = [
     "JITTER_OVERRUN_MARGIN",
     "LOG_THROTTLE_S",
     "LogThrottle",
     "PausablePeriodicTask",
     "PeriodicTask",
+    "is_bus_send_failure",
 ]
 
 LOG_THROTTLE_S = 1.0
+
+
+def is_bus_send_failure(exc: BaseException) -> bool:
+    """CAN が送れない状態か (CANManager がバス単位で 1 行に畳んで報告済み)。
+
+    非常停止でモータ電源が落ちている間は全バスの送信が毎周期失敗する。周期タスクごとに
+    スタックトレースを出すと他のログが埋まるので、ここで判定して黙る。
+    """
+    return isinstance(exc, can.CanError)
+
 
 JITTER_OVERRUN_MARGIN = 0.5
 
@@ -85,7 +98,9 @@ class PeriodicTask(abc.ABC):
     async def _on_run_start(self) -> None:  # noqa: B027  (任意フック。既定は何もしない)
         """ループに入る直前のフック (時刻基準の取り直しなど)。"""
 
-    async def _on_tick_error(self) -> None:
+    async def _on_tick_error(self, exc: BaseException) -> None:
+        if is_bus_send_failure(exc):
+            return
         self._log.exception("tick", "%s の周期処理で例外", self._label())
 
     async def _on_run_exit(self) -> None:  # noqa: B027  (任意フック。既定は何もしない)
@@ -151,8 +166,8 @@ class PeriodicTask(abc.ABC):
                     await self._tick()
                 except asyncio.CancelledError:
                     raise
-                except Exception:
-                    await self._on_tick_error()
+                except Exception as exc:
+                    await self._on_tick_error(exc)
 
                 delay = next_at - self._time_source()
                 if delay > 0.0:

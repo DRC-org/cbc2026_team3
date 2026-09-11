@@ -29,7 +29,11 @@ _ROTATE_CLEARANCE_MM = 150.0
 _PICK_DROP_MM = 10.0
 
 # 前端スイッチより手前 = 150mm 未満に取る位置。ここからは clear を経由しないと回せない。
-_NEAR_FRONT = ("receive", "place_1", "place_2", "place_3", "place_4")
+# 箱で近いのは一番前の 1 つだけ。残りは 147mm 間隔で後ろへ並ぶので 150mm より遠く、
+# 直接回しても当たらない (それでもシーケンスは全箱で clear を経由する)。
+_NEAR_FRONT = ("receive", "place_1")
+
+_BOXES = ("place_1", "place_2", "place_3", "place_4")
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +82,8 @@ class TestSubYAxis:
         assert set(table.names("sub_y_axis")) == {
             "retracted",
             "clear",
-            *_NEAR_FRONT,
+            "receive",
+            *_BOXES,
         }
 
     def test_clear_は前端スイッチから_150mm_以上離れている(self, table: PositionTable) -> None:
@@ -102,9 +107,12 @@ class TestSubYAxis:
 
         assert _value(table, "sub_y_axis", "retracted") < min(others)
 
-    def test_箱_4_箇所は互いに違う位置である(self, table: PositionTable) -> None:
-        boxes = [_value(table, "sub_y_axis", f"place_{n}") for n in range(1, 5)]
+    def test_箱_4_箇所は前から順に後ろへ並ぶ(self, table: PositionTable) -> None:
+        # 番号と並びが食い違うと、シーケンスが箱を跨いで前後する (順序はステップの前提)。
+        # 後ろほど値が小さい (前端が 0.0 で後ろが負)。
+        boxes = [_value(table, "sub_y_axis", name) for name in _BOXES]
 
+        assert boxes == sorted(boxes, reverse=True)
         assert len(set(boxes)) == 4
 
 
@@ -332,7 +340,7 @@ def _rejection(table: PositionTable) -> str:
         MotionGuard(guard).check_interference(
             axis="sub_y_axis",
             delta=-1.0,
-            axis_state=lambda _axis: AxisReading(value=left_at, target=None),
+            axis_state=lambda _axis: AxisReading(value=left_at, target=None, origin_confirmed=True),
         )
     return str(exc.value)
 
@@ -360,3 +368,26 @@ class TestVenueCardNumbers:
         # 手動で寄せる先と、零点確定が離脱する量。この 2 つで手が動く
         assert f"{table.raw('sub_lift', 'top'):g}mm" in text
         assert f"{abs(_left_after_homing(table, 'sub_lift')):g}mm" in text
+
+
+class TestLinearAxisTimeout:
+    """直動 2 軸の `timeout_s` は起動時の検算に載っていなければならない。
+
+    速度をドライバ内蔵の位置ループが決める軸は `motion` を持たないので、`min_speed` を
+    書かない限り `timeout_s` は誰にも咎められない。症状は「零点確定の寄せが毎回
+    時間切れで落ちる」で、機構にもモータにも異常が無い。
+    """
+
+    _LINEAR_AXES = ("sub_y_axis", "sub_lift")
+
+    def test_直動_2_軸は_min_speed_で検算に載っている(self, table: PositionTable) -> None:
+        for axis in self._LINEAR_AXES:
+            assert table.axis(axis).min_speed is not None, axis
+
+    @pytest.mark.parametrize("axis", _LINEAR_AXES)
+    def test_manual_の全幅に足りない_timeout_s_は起動を拒否する(self, axis: str) -> None:
+        config = yaml.safe_load((_CONFIG_DIR / _YAML_NAME).read_text())
+        config["axes"][axis]["timeout_s"] = 4.0
+
+        with pytest.raises(ValueError, match=rf"axes\.{axis} は min_speed .*timeout_s \(4\.0\)"):
+            load_position_table(config, source=_YAML_NAME)

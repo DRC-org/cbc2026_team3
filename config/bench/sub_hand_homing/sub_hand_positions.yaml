@@ -35,7 +35,10 @@ axes:
     # 位置はロータ角なので減速比が乗る: Gr * 2 / (m * z) = 19.203211 * 2 / 36
     scale: 1.0668451
     offset: 0.0
-    timeout_s: 4.0
+    # このベンチは limit_speed が本番の半分なので、本番の安全側の仮値 20mm/s も半分。
+    # timeout_s は manual の全幅 442mm ÷ 10mm/s = 44.2 秒に整定の余裕
+    min_speed: 10.0
+    timeout_s: 50.0
     tolerance: 1.0
     # 探索は AxisHandle.set_target_value を直接呼ぶので、この範囲を 1 度も通らない
     manual:
@@ -62,13 +65,16 @@ axes:
       limits:
         plus: sub_lift_b_limit_sensor
         minus: sub_lift_t_limit_sensor
-      max_step: 250.0
+      # 桁の違う目標だけを止める。本番と揃える (tests/test_robot_sequences.py が一致を見る)
+      max_step: 500.0
       stall_torque: 2.0
     unit: mm
     command_unit: rad
     scale: { blue: 1.0668451, red: -1.0668451 }
     offset: 0.0
-    timeout_s: 4.0
+    # limit_speed は本番と同じ 1.0 なので、本番と同じ実測 17.39mm/s の直下と余裕 3 割
+    min_speed: 17.0
+    timeout_s: 12.0
     tolerance: 1.0
     manual:
       # 上端スイッチの実測 -159.0 の手前 (2026-09-09 赤コート)。スイッチ位置が動くので仮

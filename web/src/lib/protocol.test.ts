@@ -88,6 +88,7 @@ describe("parseServerMessage", () => {
         unenergized_motors: [],
         unresponsive_motors: [],
         firmware_unconfirmed_motors: [],
+        physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [] },
         failed_tasks: [],
         reenergizing: false,
         loops_running: true,
@@ -115,6 +116,7 @@ describe("parseServerMessage", () => {
         "unenergized_motors",
         "unresponsive_motors",
         "firmware_unconfirmed_motors",
+        "physical_stop",
         "failed_tasks",
         "reenergizing",
         "loops_running",
@@ -256,6 +258,7 @@ describe("parseServerMessage", () => {
           { axis: "valve_1", label: "1", enabled: true },
           { axis: "valve_2", label: "2", enabled: false },
         ],
+        fill_from: null,
       };
 
       const suctionOf = (suction: unknown) => {
@@ -279,17 +282,17 @@ describe("parseServerMessage", () => {
       it.each(["axis", "label", "enabled"])("%s が欠けたら MALFORMED (空へ倒さない)", (key) => {
         const broken: Record<string, unknown> = { axis: "valve_1", label: "1", enabled: true };
         delete broken[key];
-        expect(suctionOf({ pads: [broken] })).toBe(MALFORMED);
+        expect(suctionOf({ pads: [broken], fill_from: null })).toBe(MALFORMED);
       });
 
       it("enabled が真偽値でなければ MALFORMED (押せるボタンを配信の崩れで増やさない)", () => {
-        expect(suctionOf({ pads: [{ axis: "valve_1", label: "1", enabled: "yes" }] })).toBe(
-          MALFORMED,
-        );
+        expect(
+          suctionOf({ pads: [{ axis: "valve_1", label: "1", enabled: "yes" }], fill_from: null }),
+        ).toBe(MALFORMED);
       });
 
       it("pads が配列でなければ MALFORMED", () => {
-        expect(suctionOf({ pads: "valve_1" })).toBe(MALFORMED);
+        expect(suctionOf({ pads: "valve_1", fill_from: null })).toBe(MALFORMED);
         expect(suctionOf("valve_1")).toBe(MALFORMED);
       });
     });
@@ -675,6 +678,7 @@ describe("parseServerMessage", () => {
         axis: "sub_y_axis",
         direction: -1,
         result: RESULT,
+        distances: null,
         error: null,
         targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
       });
@@ -689,10 +693,44 @@ describe("parseServerMessage", () => {
           axis: "sub_y_axis",
           direction: -1,
           result: RESULT,
+          distances: null,
           error: null,
           targets: { main_hand: ["y_axis"], sub_hand: ["sub_y_axis"] },
         },
       });
+    });
+
+    it("距離は測れた軸と測れなかった軸を混ぜて運び、数値が欠けた軸は MALFORMED", () => {
+      const ok = { axis: "sub_lift", unit: "mm", distance: 159.0, step: 0.1, coarse_step: 0.5 };
+      const failed = {
+        axis: "sub_y_axis",
+        unit: "mm",
+        distance: null,
+        step: null,
+        coarse_step: null,
+      };
+      const message = parse({
+        type: "switch_measure_state",
+        distances: [
+          { ...ok, error: null },
+          { ...failed, error: "到達しませんでした" },
+        ],
+        targets: {},
+      });
+      expect(message?.type).toBe("switch_measure_state");
+      if (message?.type !== "switch_measure_state") return;
+      expect(message.switchMeasure.distances).toEqual([
+        { ...ok, error: null },
+        { ...failed, error: "到達しませんでした" },
+      ]);
+
+      const broken = parse({
+        type: "switch_measure_state",
+        distances: [{ ...ok, distance: "159.0", error: null }],
+        targets: {},
+      });
+      if (broken?.type !== "switch_measure_state") return;
+      expect(broken.switchMeasure.distances).toBe(MALFORMED);
     });
 
     it("未実行の result は null、数値が欠けた result は MALFORMED (0 で埋めない)", () => {

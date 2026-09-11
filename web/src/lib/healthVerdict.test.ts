@@ -69,6 +69,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     unenergized_motors: [],
     unresponsive_motors: [],
     firmware_unconfirmed_motors: [],
+    physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [] },
     failed_tasks: [],
     reenergizing: false,
     loops_running: true,
@@ -445,6 +446,39 @@ describe("describeSafetyIssues", () => {
     expect(issues[0].detail).toBe("全モータ");
   });
 
+  it("物理停止を監視できていないと基板名付きで返す", () => {
+    const issues = describeSafetyIssues(
+      safety({ physical_stop: { watched: false, sources: ["pump_vac"], unwatched: ["pump_vac"] } }),
+    );
+    const issue = issues.find((i) => i.kind === "physical_stop_unwatched");
+    expect(issue?.detail).toBe("pump_vac");
+    expect(issue?.hint).toMatch(/CAN 配線/);
+  });
+
+  it("物理停止を受ける基板が構成に無いことも黙らない", () => {
+    const issues = describeSafetyIssues(
+      safety({ physical_stop: { watched: false, sources: [], unwatched: [] } }),
+    );
+    const issue = issues.find((i) => i.kind === "physical_stop_unwatched");
+    expect(issue?.detail).toBe("DC 基板なし");
+  });
+
+  it("物理停止を監視できていないと異常判定へ倒す (画面が平常のままにならない)", () => {
+    const verdict = verdictWhenConnected(
+      health(),
+      safety({ physical_stop: { watched: false, sources: ["pump_vac"], unwatched: ["pump_vac"] } }),
+    );
+    expect(verdict.tone).toBe("error");
+  });
+
+  it("監視できているなら黙る", () => {
+    expect(
+      describeSafetyIssues(
+        safety({ physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [] } }),
+      ),
+    ).toEqual([]);
+  });
+
   it("動作確認中の一時停止 (paused) は異常として扱わない", () => {
     const issues = describeSafetyIssues(
       safety({
@@ -467,6 +501,7 @@ describe("describeSafetyIssues", () => {
       "unenergized_motors",
       "unresponsive_motors",
       "firmware_unconfirmed_motors",
+      "physical_stop",
       "failed_tasks",
       "reenergizing",
       "loops_running",

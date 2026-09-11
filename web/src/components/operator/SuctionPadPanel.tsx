@@ -75,6 +75,12 @@ export function SuctionPadPanel({
   });
 
   const pads = inManual ? openPads : declarePads;
+  const fillFromNote =
+    suction.fill_from === "left"
+      ? "左端から"
+      : suction.fill_from === "right"
+        ? "右端から"
+        : "コート未確定";
   const onCount = pads.filter((pad) => pad.on).length;
 
   return (
@@ -89,11 +95,16 @@ export function SuctionPadPanel({
           <span className="text-[0.85em] text-base-content/60">
             開 {onCount}/{suction.pads.length}
           </span>
-        ) : onCount === 0 ? (
-          <StatusBadge tone="warning">未選択</StatusBadge>
         ) : (
-          <span className="text-[0.85em] text-base-content/60">
-            使用 {onCount}/{suction.pads.length}
+          <span className="flex items-center gap-1.5 text-[0.85em] text-base-content/60">
+            {fillFromNote}
+            {onCount === 0 ? (
+              <StatusBadge tone="warning">未選択</StatusBadge>
+            ) : (
+              <span>
+                使用 {onCount}/{suction.pads.length}
+              </span>
+            )}
           </span>
         )
       }

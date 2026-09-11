@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+import yaml
 
 from lib.drivers.base import ControlMode
 from lib.drivers.generic import GenericDriver
@@ -12,6 +14,8 @@ from lib.match_state import Court
 from lib.motion_guard import GuardViolation, SensorSuspension
 from lib.sequence.homing import (
     _FOLLOW_ATTEMPTS,
+    _GLIDE_PERIOD_S,
+    _GLIDE_STALL_PERIODS,
     _STALL_LIMIT,
     HomingError,
     HomingRunner,
@@ -1071,13 +1075,13 @@ class TestTwoStageSearch:
         )
         spec = table.axis("y_axis")
         rec = _Recorder()
-        # 待ち 5 回ぶんでも粗い 1 歩 (1.0mm) の 0.4mm しか進まない
-        handle = _slow_handle(spec, rec, per_tick=0.08)
+        # 停滞に許す時間いっぱいでも粗い 1 歩 (1.0mm) の 4 割しか進まない
+        handle = _slow_handle(spec, rec, per_tick=0.4 / _GLIDE_STALL_PERIODS)
 
         with pytest.raises(HomingError, match="動きません"):
             await _runner(rec).home(spec, handle)
 
-        assert len(rec.commands) <= _STALL_LIMIT + 1
+        assert len(rec.commands) <= _GLIDE_STALL_PERIODS + 1
         assert rec.origins == []
 
     async def test_細探索の停滞判定は細かい刻みを基準にする(self) -> None:
@@ -1124,6 +1128,148 @@ class TestTwoStageSearch:
         axis_commands = [cmd["y_axis_r"] / 2.0 for cmd in rec.commands]
         assert axis_commands == pytest.approx([-1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -6.0])
         assert rec.captured_at == pytest.approx([-6.0])
+
+
+class TestGlidesThroughTheCoarseSearch:
+    """粗探索は到達を待たず、目標を `coarse_step` だけ先へ毎周期出し直して流す。
+
+    刻み送りは 1 歩ごとに静止するので `limit_speed` の半分以下に律速し、操縦者には
+    ガクつきとして見える。**先行量は `coarse_step` そのもの** —— 接触してから止まる
+    までの行き過ぎがこの値に収まるので、「ON 区間より狭く取る」がそのまま生きる。
+    """
+
+    @staticmethod
+    def _table():
+        return _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=20.0, release_distance=2.0
+        )
+
+    async def test_先行させた目標を毎周期出し直す(self) -> None:
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(active_at_or_below=-2.05)
+        # 1 周期に 0.3mm しか寄らない機構。刻み送りなら 1 歩の到達を 4 周期待つ
+        handle = _slow_handle(spec, rec, per_tick=0.3)
+
+        await _runner(rec).home(spec, handle)
+
+        coarse = _axis_commands(rec, "y_axis_r")[:8]
+        # 毎周期、そのときの実測 (0.3 ずつ進む) の 1.0 先を出し直し、接触した -2.1 で止め直す
+        assert coarse == pytest.approx([-1.0, -1.3, -1.6, -1.9, -2.2, -2.5, -2.8, -2.1])
+        assert rec.captured_at[0] == pytest.approx(-2.05, abs=0.1)
+
+    async def test_接触したら先行をやめてその場へ止め直す(self) -> None:
+        spec = self._table().axis("y_axis")
+        # 1 周期の移動 0.5mm で区間の中 (-2.5) に着く。入口 -2.1 は周期の格子とずらしてある
+        rec = _Recorder(active_band=(-2.7, -2.1))
+        handle = _slow_handle(spec, rec, per_tick=0.5)
+
+        await _runner(rec).home(spec, handle)
+
+        commands = _axis_commands(rec, "y_axis_r")
+        # 実測が -2.5 に達した周期で接触。次の指令は先行 (-3.5) ではなくその場 (-2.5)
+        assert commands[:6] == pytest.approx([-1.0, -1.5, -2.0, -2.5, -3.0, -2.5])
+        # 以降は離脱 (逆向き) で、探索方向へ先行させる指令は出ない
+        assert commands[6] > -2.5
+        assert rec.captured_at[0] == pytest.approx(-2.1, abs=0.1)
+
+    async def test_引っかかった機構は停滞で降りる(self) -> None:
+        spec = self._table().axis("y_axis")
+        rec = _Recorder()
+        handle = _handle(spec, rec, follows=False)
+
+        with pytest.raises(HomingError, match="動きません"):
+            await _runner(rec).home(spec, handle)
+
+        # 停滞に許す時間ぶんだけ先行させ、止め直す 1 通で終わる
+        assert len(rec.commands) == _GLIDE_STALL_PERIODS + 1
+        assert _axis_commands(rec, "y_axis_r")[-1] == pytest.approx(0.0)
+        assert rec.origins == []
+
+    async def test_ゆっくり流れる機構は停滞と数えない(self) -> None:
+        """周期ごとの移動で数えると半歩に届かない機構でも、進み続けている限り流す。"""
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(active_at_or_below=-3.05)
+        handle = _slow_handle(spec, rec, per_tick=0.15)
+
+        await _runner(rec).home(spec, handle)
+
+        assert rec.captured_at[0] == pytest.approx(-3.05, abs=0.1)
+
+    async def test_探索距離を越えたら止め直して降りる(self) -> None:
+        spec = _table(
+            direction=-1, step=0.1, coarse_step=1.0, search_distance=4.0, release_distance=2.0
+        ).axis("y_axis")
+        rec = _Recorder()
+        handle = _slow_handle(spec, rec, per_tick=0.5)
+
+        with pytest.raises(HomingError, match="到達しませんでした"):
+            await _runner(rec).home(spec, handle)
+
+        commands = _axis_commands(rec, "y_axis_r")
+        # 先行させた目標は実測より先に居るので、降りる前にその場へ止め直す
+        assert commands[-1] == pytest.approx(rec.axis_position())
+        assert min(commands) >= -5.0
+        assert rec.origins == []
+
+    async def test_出し直しは整定待ちではなく粗探索の周期で行う(self) -> None:
+        """`settle_s` は到達後の整定を待つ時間で、流し続ける粗探索では待っていない。"""
+        spec = _table(
+            direction=-1,
+            step=0.1,
+            coarse_step=1.0,
+            search_distance=20.0,
+            release_distance=2.0,
+            settle_s=0.05,
+        ).axis("y_axis")
+        rec = _Recorder(active_at_or_below=-2.05)
+        handle = _slow_handle(spec, rec, per_tick=0.3)
+        waited: list[float] = []
+        advance = rec.sleep
+
+        async def _record(seconds: float) -> None:
+            waited.append(seconds)
+            await advance(seconds)
+
+        rec.sleep = _record  # type: ignore[method-assign]
+
+        await _runner(rec).home(spec, handle)
+
+        # 粗探索の 7 周期はすべて `_GLIDE_PERIOD_S`。その後の離脱・寄せ直しは settle_s
+        assert waited[:7] == [_GLIDE_PERIOD_S] * 7
+        assert waited[7] == 0.05
+
+    def test_実機の速度では軸が先行させた目標に追いつかない(self) -> None:
+        """`周期 * limit_speed < coarse_step` でなければ周期ごとに止まってガクつく。
+
+        速度は `limit_speed` の実測 (2026-09-10、`docs/mechanism_handoff.md`)。粗探索を
+        書いた軸を増やしたらここにも実測を足すこと。
+        """
+        speeds_mm_s = {"sub_lift": 17.4, "sub_y_axis": 34.8}
+        table = load_position_table(
+            yaml.safe_load(Path("config/sub_hand_positions.yaml").read_text(encoding="utf-8")),
+            source="config/sub_hand_positions.yaml",
+        )
+        coarse = {
+            name: table.axis(name).homing.coarse_step
+            for name in table.axes
+            if table.axis(name).homing is not None and table.axis(name).homing.coarse_step
+        }
+        assert set(coarse) == set(speeds_mm_s)
+        for name, lead in coarse.items():
+            assert _GLIDE_PERIOD_S * speeds_mm_s[name] < lead, name
+
+    async def test_流している途中で途絶したら止め直して降りる(self) -> None:
+        spec = self._table().axis("y_axis")
+        rec = _Recorder(stale_after_commands=3)
+        handle = _slow_handle(spec, rec, per_tick=0.5)
+
+        with pytest.raises(HomingError, match="応答していません"):
+            await _runner(rec).home(spec, handle)
+
+        commands = _axis_commands(rec, "y_axis_r")
+        assert len(commands) == 4
+        assert commands[-1] == pytest.approx(rec.axis_position())
+        assert rec.origins == []
 
 
 class TestAlignsBothSwitches:
@@ -1851,13 +1997,16 @@ class _OneStepHoming:
         return homing.step
 
 
-def _interfering_group(table, *, lift_mm: float) -> MotorGroup:
+def _interfering_group(table, *, lift_mm: float, lift_confirmed: bool = True) -> MotorGroup:
+    """`lift` は零点確定済みが既定。未確定の座標で読んだ値は区間の判定に使えない。"""
     mgr = mock_can_manager()
     group = MotorGroup(sensor_active=lambda _name: False)
     for axis, value in (("lift", lift_mm), ("slide", 0.0)):
         motor = table.axis(axis).motors[0]
         driver = StubFeedbackDriver(motor.name, 1)
         driver.set_observed(position=motor.to_command(value))
+        if axis == "lift" and lift_confirmed:
+            driver.mark_origin_confirmed()
         group.add(MotorHandle(motor.name, driver, mgr))
     group.bind_axis_state(
         build_axis_state_reader(table, group, court=lambda: Court.RED, is_stale=lambda _name: False)
@@ -1921,6 +2070,22 @@ class TestHomingOrderFollowsInterference:
         assert "lift" in str(exc.value)
         assert "top" in str(exc.value)
         assert "寄せてください" in str(exc.value)
+        assert group["slide"].target is None
+
+    async def test_条件の軸が未確定なら区間に居ても拒否される(self) -> None:
+        """未確定の `lift` が偶然 `top` を読んでも、機構がそこに居るとは限らない。"""
+        table = self._table()
+        group = _interfering_group(table, lift_mm=-20.0, lift_confirmed=False)
+
+        with pytest.raises(GuardViolation, match="零点が確定していません"):
+            await run_homing(
+                _OneStepHoming(),  # type: ignore[arg-type]
+                table,
+                group,
+                court=Court.RED,
+                axes=["slide"],
+            )
+
         assert group["slide"].target is None
 
     async def test_作動点測定も同じ条件が掛かる(self) -> None:

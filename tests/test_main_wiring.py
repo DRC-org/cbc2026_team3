@@ -20,6 +20,7 @@ import yaml
 
 import main
 from lib.axis_sync import MotorSpec, SyncGroup
+from lib.bus_lock import BusClaimedError
 from lib.can_manager import CANManager
 from lib.config_schema import (
     HealthThresholds,
@@ -1145,6 +1146,7 @@ class TestRobotContextReachesTheServer:
         "mode": "サーバーが持つ実行時状態 (起動時は必ず SEQUENCE から始まる)",
         "court_dependent_axes": "位置定数から導く (書き写すと宣言と食い違う)",
         "court_dependent_position_axes": "位置定数から導く (書き写すと宣言と食い違う)",
+        "captures": "位置定数とモータ群から導く (控えの正はサーバー 1 個)",
     }
 
     def _add_robot_call_arguments(self) -> set[str]:
@@ -1740,6 +1742,23 @@ class TestLimitMonitorSensorSuspensionWiring:
         assert passed["sensor_contact_count"] == "_make_sensor_contact_reader(can_managers)"
 
 
+class _RecordingLimitMonitor:
+    """`LimitMonitor` のうち解決器と入口が触る口だけ。伝えられた軸とその時点の実測を控える。"""
+
+    axis_names: tuple[str, ...] = ()
+
+    def __init__(self, observe: Callable[[], float] | None = None) -> None:
+        self.replaced: list[tuple[str, float | None]] = []
+        self._observe = observe
+        self.directions: dict[str, int] = {}
+
+    def origin_replaced(self, axis: str) -> None:
+        self.replaced.append((axis, None if self._observe is None else self._observe()))
+
+    def pressed_toward(self, name: str) -> int | None:
+        return self.directions.get(name)
+
+
 class TestOriginResolver:
     def _table(self) -> PositionTable:
         return load_position_table(
@@ -1808,6 +1827,55 @@ class TestOriginResolver:
 
         assert motors["y_axis_r"].multi_turn_position == pytest.approx(0.0)
         assert motors["y_axis_l"].multi_turn_position == pytest.approx(0.0)
+
+    async def test_確定した後に可動端監視へ付け替えを伝える(self) -> None:
+        """伝えないと、前の座標で覚えた接触位置が付け替え後の実測と比べられる。"""
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+        }
+        loop = self._loop(motors)
+        for driver in motors.values():
+            feed_m3508(driver, deg=0.0)
+            feed_m3508(driver, deg=30.0)
+        guard = _RecordingLimitMonitor(lambda: motors["y_axis_r"].multi_turn_position)
+
+        capture = main._make_origin_resolver(
+            [loop], self._table(), limit_monitors=[guard], is_estop_active=lambda: False
+        )("y_axis")
+
+        assert capture is not None
+        await capture()
+
+        # 付け替えた後に伝える (伝えた時点で実測は新しい座標)
+        assert guard.replaced == [("y_axis", pytest.approx(0.0))]
+
+    async def test_付け替えた軸の控えてある目標を捨てる(self) -> None:
+        """旧座標の目標が残ると、可動端監視がその差を「今そこへ向かっている」と読む。"""
+        motors = {
+            "y_axis_r": M3508Driver("y_axis_r", can_id=1),
+            "y_axis_l": M3508Driver("y_axis_l", can_id=2),
+        }
+        loop = self._loop(motors)
+        for driver in motors.values():
+            feed_m3508(driver, deg=0.0)
+            feed_m3508(driver, deg=30.0)
+        manager = _StubCANManager()
+        group = MotorGroup()
+        for name, driver in motors.items():
+            group.add(MotorHandle(name, driver, manager, target_sink=loop.target_sink(name)))
+        for name in motors:
+            await group[name].set_target(ControlMode.POSITION, 1.0)
+
+        capture = main._make_origin_resolver(
+            [loop], self._table(), motors=group, is_estop_active=lambda: False
+        )("y_axis")
+
+        assert capture is not None
+        await capture()
+
+        assert [group[name].target for name in motors] == [None, None]
+        assert [group[name].mode for name in motors] == [None, None]
 
     def test_位置制御ループにも_set_zero_にも載らない軸は手段が無い(self) -> None:
         mgr = CANManager(run_blocking=direct_runner())
@@ -1882,6 +1950,23 @@ class TestOriginResolverViaDriver:
         assert sent == [], "原点は CAN の往復なしで確定する"
         for name in ("rotate_r", "rotate_l"):
             assert mgr.motors[name].feedback_position() == pytest.approx(0.0, abs=1e-9)
+
+    async def test_ドライバ経路でも確定した後に可動端監視へ伝える(self) -> None:
+        mgr, _sent = self._manager()
+        guard = _RecordingLimitMonitor(lambda: mgr.motors["rotate_r"].feedback_position())
+
+        capture = main._make_origin_resolver(
+            [],
+            self._table(),
+            can_managers=[mgr],
+            limit_monitors=[guard],
+            is_estop_active=lambda: False,
+        )("rotate")
+
+        assert capture is not None
+        await capture()
+
+        assert guard.replaced == [("rotate", pytest.approx(0.0, abs=1e-9))]
 
     async def test_原点の持ち方が違うモータが混ざった軸は手段が無い(self) -> None:
         """片方の経路へ流すと、もう片方は原点が動かないまま「成功した」と返る。"""
@@ -2154,6 +2239,30 @@ class TestMotorCheckWiring:
         )
         return server
 
+    def test_零点確定の解決器にモータの束を渡す(self) -> None:
+        """渡さないと、付け替えた軸に残った旧座標の目標を捨てる相手が居ない。"""
+        group = MotorGroup()
+        group.add(MotorHandle("y_axis_r", M3508Driver("y_axis_r", can_id=1), _StubCANManager()))
+
+        with patch.object(
+            main, "_make_origin_resolver", wraps=main._make_origin_resolver
+        ) as resolver:
+            main._wire_motor_check_sequence(
+                MagicMock(),
+                [group],
+                {"main_hand": self._table("main_hand_positions.yaml")},
+                loops=[],
+                can_managers=[],
+                sync_monitors=[],
+                limit_monitors=[],
+                target_refreshers=[],
+                feedback_timeout_ms=500.0,
+                is_estop_active=lambda: False,
+                sensor_suspension=SensorSuspension(),
+            )
+
+        assert "y_axis_r" in resolver.call_args.kwargs["motors"]
+
     def test_メインハンドだけの構成でも登録する(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
             server = self._wire({"main_hand": self._table("main_hand_positions.yaml")})
@@ -2271,6 +2380,74 @@ class TestSensorReader:
         assert read("front_switch") is None
 
 
+class TestPressedTowardWiring:
+    """端センサが当たった向きの記憶は **2 つの `MotorGroup` の両方**へ配線する。
+
+    入口が記憶を見ないと、宣言と食い違う端で監視は退避を通すのに入口が宣言された側として
+    拒み、その軸は両向きとも動かせない。配線先は `bind_axis_state` と同じ 2 箇所。
+    """
+
+    _CONFIG_DIR: ClassVar[pathlib.Path] = pathlib.Path(__file__).resolve().parent.parent / "config"
+
+    def test_ロボットごとの束に配線されている(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        guard = _RecordingLimitMonitor()
+        guard.directions["bench_rear"] = -1
+        monkeypatch.setattr(main, "_setup_robot", lambda *_a, **_k: (CANManager(), {}))
+        monkeypatch.setattr(main, "_build_limit_monitors", lambda *_a, **_k: [guard])
+
+        wiring = main._wire_one_robot(
+            MagicMock(),
+            tmp_path / "bench.yaml",
+            _robot(
+                {
+                    "robot_name": "bench",
+                    "motors": {
+                        "bench_axis": {"driver": "generic", "bus": "bench_bus", "can_id": 1}
+                    },
+                }
+            ),
+            load_system_config({"can_buses": {"bench_bus": "can0"}}, source="<test>"),
+            dry_run=True,
+            is_estop_active=lambda: False,
+            e_stop_tasks=set(),
+            sensor_suspension=SensorSuspension(),
+        )
+
+        read = wiring.sequence.motors.pressed_toward
+        assert read is not None
+        assert read("bench_rear") == -1
+        assert read("bench_front") is None
+
+    def test_統合動作確認が組む束にも配線されている(self) -> None:
+        server = MagicMock()
+        table = load_position_table(
+            yaml.safe_load((self._CONFIG_DIR / "sub_hand_positions.yaml").read_text()) or {},
+            source="sub_hand_positions.yaml",
+        )
+        guard = _RecordingLimitMonitor()
+        guard.directions["sub_lift_b_limit_sensor"] = -1
+
+        main._wire_motor_check_sequence(
+            server,
+            [],
+            {"sub_hand": table},
+            loops=[],
+            can_managers=[],
+            sync_monitors=[],
+            limit_monitors=[guard],  # type: ignore[list-item]
+            target_refreshers=[],
+            feedback_timeout_ms=500.0,
+            is_estop_active=lambda: False,
+            sensor_suspension=SensorSuspension(),
+        )
+
+        read = server.set_motor_check_sequence.call_args.args[0].motors.pressed_toward
+        assert read is not None
+        assert read("sub_lift_b_limit_sensor") == -1
+
+
 class TestAxisStateWiring:
     """軸間干渉の読み口は **2 つの `MotorGroup` の両方**へ配線する。
 
@@ -2319,7 +2496,10 @@ class TestAxisStateWiring:
 
         read = seq.motors.axis_state
         assert read is not None
-        assert read("lift") == AxisReading(value=pytest.approx(-2.0, abs=1e-3), target=None)
+        # 零点確定を通していない M3508 は未確定 (累積角の原点は起動時の姿勢)
+        assert read("lift") == AxisReading(
+            value=pytest.approx(-2.0, abs=1e-3), target=None, origin_confirmed=False
+        )
 
     def test_途絶した軸は読めていないとして返る(self) -> None:
         """既定の 0.0 を運び続ける軸が「原点に居る」として条件を満たすのを防ぐ。"""
@@ -2343,7 +2523,7 @@ class TestAxisStateWiring:
 
         read = seq.motors.axis_state
         assert read is not None
-        assert read("lift") == AxisReading(value=None, target=None)
+        assert read("lift") == AxisReading(value=None, target=None, origin_confirmed=False)
 
     def test_統合動作確認が組む束にも配線されている(self) -> None:
         server = MagicMock()
@@ -2398,3 +2578,127 @@ class TestAxisStateWiring:
         sequence = server.set_motor_check_sequence.call_args.args[0]
         source = server.set_homing_source.call_args.args[0]
         assert source.move_to == sequence.move_to
+
+
+class TestClaimCanBuses:
+    """同じ CAN バスを 2 つのプロセスが掴めないようにする。主張はプロセス単位で開く前に 1 回。"""
+
+    _BUSES: ClassVar[dict[str, str]] = {
+        "m3508_bus": "can_m3508",
+        "generic_bus": "can_generic",
+        "dm3520_bus": "can_dm3520",
+    }
+
+    @staticmethod
+    def _main_hand() -> RobotConfig:
+        return _robot(
+            {
+                "robot_name": "main_hand",
+                "motors": {
+                    "y_left": {"driver": "m3508", "bus": "m3508_bus", "can_id": 1},
+                    "conveyor": {"driver": "generic", "bus": "generic_bus", "can_id": 1},
+                },
+            }
+        )
+
+    @staticmethod
+    def _sub_hand() -> RobotConfig:
+        return _robot(
+            {
+                "robot_name": "sub_hand",
+                "motors": {
+                    "sub_y": {"driver": "dm3520", "bus": "dm3520_bus", "can_id": 1},
+                    "sub_lift": {"driver": "generic", "bus": "generic_bus", "can_id": 2},
+                },
+            }
+        )
+
+    def test_両ハンドが共有するバスも含めてチャネルごとに1回だけ掴む(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        claimed: list[str] = []
+        monkeypatch.setattr(
+            main, "claim_bus", lambda channel: claimed.append(channel) or MagicMock()
+        )
+
+        claims = main._claim_can_buses(
+            self._BUSES, [self._main_hand(), self._sub_hand()], dry_run=False
+        )
+
+        assert claimed == ["can_m3508", "can_generic", "can_dm3520"]
+        assert len(claims) == 3
+
+    def test_使わないバスは掴まない(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        claimed: list[str] = []
+        monkeypatch.setattr(
+            main, "claim_bus", lambda channel: claimed.append(channel) or MagicMock()
+        )
+
+        main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+
+        assert claimed == ["can_generic", "can_dm3520"]
+
+    def test_dry_run_では掴まない(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fail(_channel: str) -> None:
+            raise AssertionError("dry_run では claim_bus を呼んではならない")
+
+        monkeypatch.setattr(main, "claim_bus", _fail)
+
+        assert main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=True) == []
+
+    def test_持ち主が居れば相手を名指しして起動を止める(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _held(channel: str) -> None:
+            raise BusClaimedError(channel, "PID 4242: python -u main.py --dev-tools --port 8081")
+
+        monkeypatch.setattr(main, "claim_bus", _held)
+
+        with pytest.raises(SystemExit) as exc:
+            main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+
+        message = str(exc.value)
+        assert "can_generic" in message
+        assert "PID 4242" in message
+        assert "--port 8081" in message
+
+    def test_ロックファイルを開けなければERRORを残して起動は続ける(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        def _denied(channel: str) -> MagicMock:
+            if channel == "can_generic":
+                raise PermissionError(13, "Permission denied")
+            return MagicMock()
+
+        monkeypatch.setattr(main, "claim_bus", _denied)
+
+        with caplog.at_level(logging.ERROR):
+            claims = main._claim_can_buses(self._BUSES, [self._sub_hand()], dry_run=False)
+
+        assert len(claims) == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "can_generic" in errors[0]
+        assert "Permission denied" in errors[0]
+        assert "検出が効いていません" in errors[0]
+
+    def test_ポート確認の後_配線の前に掴む(self) -> None:
+        source = inspect.getsource(main.main)
+        assert (
+            source.index("_ensure_port_available")
+            < source.index("_claim_can_buses")
+            < source.index("_wire_one_robot")
+        )
+
+    async def test_後始末で手放し_1つ失敗しても残りを続ける(self) -> None:
+        failing = MagicMock()
+        failing.channel = "can_generic"
+        failing.release.side_effect = OSError("bad fd")
+        healthy = MagicMock()
+        server = MagicMock()
+        server.cleanup = AsyncMock()
+
+        await main._shutdown_all(server, [], bus_claims=[failing, healthy])
+
+        healthy.release.assert_called_once_with()
+        server.cleanup.assert_awaited_once_with()

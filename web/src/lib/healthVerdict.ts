@@ -31,7 +31,8 @@ export type SafetyIssueKind =
   | "loops_stopped"
   | "monitors_stopped"
   | "limit_monitors_stopped"
-  | "refreshers_stopped";
+  | "refreshers_stopped"
+  | "physical_stop_unwatched";
 
 export interface SafetyIssue {
   kind: SafetyIssueKind;
@@ -182,6 +183,19 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
       label: "目標値再送停止",
       detail: deadRefreshers.length > 0 ? deadRefreshers.join(", ") : "全モータ",
       hint: "20Hz の再送が止まっています。500ms 後にファーム側ウォッチドッグでグリッパ・コンベア・壁が停止します",
+    });
+  }
+
+  // 物理停止を検出できるかはサーバーが判定する。UI は配られた watched を出すだけ
+  if (!safety.physical_stop.watched) {
+    const noSource = safety.physical_stop.sources.length === 0;
+    issues.push({
+      kind: "physical_stop_unwatched",
+      label: "物理停止 検出不能",
+      detail: noSource ? "DC 基板なし" : safety.physical_stop.unwatched.join(", "),
+      hint: noSource
+        ? "物理非常停止スイッチを受ける DC 基板がこの機体の構成にありません。押しても PC は止まりません"
+        : "物理非常停止スイッチを押しても PC が気付けません (DC 基板のフィードバックが届いていない)。CAN 配線と基板の電源を確認してください",
     });
   }
 

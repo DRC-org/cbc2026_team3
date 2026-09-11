@@ -330,6 +330,27 @@
           "vel": 0.0
         }
       },
+      "position_capture": {
+        "entries": [
+          {
+            "axis": "gripper",
+            "captured_at": 1700000000.0,
+            "name": "open",
+            "unit": "deg",
+            "value": 5.0
+          }
+        ],
+        "targets": {
+          "gripper": [
+            "open",
+            "closed"
+          ],
+          "lift": [
+            "top"
+          ]
+        },
+        "yaml": "# <ws-contract-sequence> の positions: 配下へ貼る\n  gripper:\n    open: 5.0             # [deg]"
+      },
       "robot": "main_hand",
       "running": false,
       "safety": {
@@ -347,6 +368,15 @@
         "limit_monitors_running": true,
         "loops_running": true,
         "monitors_running": true,
+        "physical_stop": {
+          "sources": [
+            "conveyor"
+          ],
+          "unwatched": [
+            "conveyor"
+          ],
+          "watched": false
+        },
         "position_loops": [
           {
             "bus": "can_m3508",
@@ -410,6 +440,7 @@
         }
       ],
       "suction": {
+        "fill_from": "left",
         "pads": [
           {
             "axis": "valve_1",
@@ -613,6 +644,27 @@
           "vel": 0.0
         }
       },
+      "position_capture": {
+        "entries": [
+          {
+            "axis": "gripper",
+            "captured_at": 1700000000.0,
+            "name": "open",
+            "unit": "deg",
+            "value": 5.0
+          }
+        ],
+        "targets": {
+          "gripper": [
+            "open",
+            "closed"
+          ],
+          "lift": [
+            "top"
+          ]
+        },
+        "yaml": "# <ws-contract-sequence> の positions: 配下へ貼る\n  gripper:\n    open: 5.0             # [deg]"
+      },
       "robot": "main_hand",
       "running": false,
       "safety": {
@@ -630,6 +682,15 @@
         "limit_monitors_running": true,
         "loops_running": true,
         "monitors_running": true,
+        "physical_stop": {
+          "sources": [
+            "conveyor"
+          ],
+          "unwatched": [
+            "conveyor"
+          ],
+          "watched": false
+        },
         "position_loops": [
           {
             "bus": "can_m3508",
@@ -693,6 +754,7 @@
         }
       ],
       "suction": {
+        "fill_from": "left",
         "pads": [
           {
             "axis": "valve_1",
@@ -715,6 +777,7 @@
       "axis": null,
       "blocked_reason": null,
       "direction": null,
+      "distances": null,
       "error": null,
       "result": null,
       "robot": null,
@@ -731,6 +794,7 @@
       "axis": "y_axis",
       "blocked_reason": null,
       "direction": 1.0,
+      "distances": null,
       "error": "軸 'y_axis' が 5.0mm 動かしてもリミットスイッチ 'origin_sensor' に 到達しませんでした (探索方向・機構の引っかかり・センサの配線を確認してください)",
       "result": null,
       "robot": "main_hand",
@@ -747,6 +811,7 @@
       "axis": "y_axis",
       "blocked_reason": null,
       "direction": -1.0,
+      "distances": null,
       "error": null,
       "result": {
         "axis": "y_axis",
