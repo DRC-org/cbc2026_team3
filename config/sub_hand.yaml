@@ -7,7 +7,7 @@ motors:
     can_id: 0x01
     master_id: 0x11
     mode: position
-    limit_speed: 3.0           # 2026-09-11 に 2.0 から 1.5 倍
+    limit_speed: 6.0           # 2026-09-12 に 3.0 から倍
     p_max: 1000.0              # レジスタ 0x15 [rad]  (scale 換算で ±937mm)
     v_max: 200.0               # レジスタ 0x16 [rad/s]
     t_max: 10.0                # レジスタ 0x17 [Nm]
@@ -20,7 +20,7 @@ motors:
     master_id: 0x12
     mode: position
     # TODO: 機構の重量が分かったら実機で詰めること
-    limit_speed: 1.5           # 2026-09-11 に 1.0 から 1.5 倍
+    limit_speed: 3.0           # 2026-09-12 に 1.5 から倍
     p_max: 1000.0              # sub_y_axis と同じ理由
     v_max: 200.0
     t_max: 10.0
