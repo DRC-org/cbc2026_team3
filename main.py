@@ -72,6 +72,7 @@ from lib.sequence.positions import (
 from lib.server import RobotServer
 from lib.server_homing import HomingSource
 from lib.suction import suction_of
+from sequences.initial_poses import INITIAL_POSES_BY_ROBOT
 from sequences.motor_check import MotorCheckSequence
 
 logger = logging.getLogger(__name__)
@@ -488,6 +489,14 @@ def _wire_motor_check_sequence(
         )
 
     server.set_motor_check_sequence(sequence)
+    # 繋がっていないロボットの初期位置は配らない (UI に押せないボタンが出る)
+    server.set_return_home_poses(
+        {
+            name: poses
+            for name, poses in INITIAL_POSES_BY_ROBOT.items()
+            if name in server.robot_names
+        }
+    )
     logger.info(
         "統合動作確認シーケンス登録: %d ステップ (除外 %d, モータ %d 台, 軸 %d 本, 零点確定: %s)",
         len(sequence.steps),

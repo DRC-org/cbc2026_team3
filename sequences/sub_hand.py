@@ -42,6 +42,20 @@ def _all_valves(state: str) -> dict[str, str]:
     return dict.fromkeys(VALVE_AXES, state)
 
 
+# **並び順が意味を持つ。** 昇降を寄せてから前後、後退しきってから回転の順に戻す。
+# どの姿勢から押されても干渉制約を踏まないのはこの順序だけである。
+# 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ
+INITIAL_POSES: tuple[dict[str, str], ...] = (
+    _all_valves("closed") | PUMP_RUN,
+    DOWN_TO_PICK,
+    TO_HOME,
+    OPEN_PITCH,
+    OPEN_OFFSET,
+    RECEIVE_POSE,
+    WALL_R_INITIAL,
+)
+
+
 class SubHandSequence(Sequence):
     def __init__(self, name: str = "sub_hand", suction: SuctionSelection | None = None) -> None:
         super().__init__(name)
@@ -74,16 +88,8 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ移動")
     async def move_to_initial(self) -> None:
-        await self.move_to(_all_valves("closed") | PUMP_RUN)
-        # 昇降を寄せてから前後、後退しきってから回転の順に戻す。どの姿勢から
-        # 押されても干渉制約を踏まないのはこの順序だけである。
-        # 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ
-        await self.move_to(DOWN_TO_PICK)
-        await self.move_to(TO_HOME)
-        await self.move_to(OPEN_PITCH)
-        await self.move_to(OPEN_OFFSET)
-        await self.move_to(RECEIVE_POSE)
-        await self.move_to(WALL_R_INITIAL)
+        for targets in INITIAL_POSES:
+            await self.move_to(targets)
 
     @step("1 個目: 棚へ寄せる", require_trigger=True)
     async def work_1_to_shelf(self) -> None:

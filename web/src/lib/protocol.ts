@@ -157,6 +157,43 @@ function parseHomingRobots(raw: unknown): Record<string, HomingRobotSnapshot> | 
   return robots;
 }
 
+export interface ReturnHomeRobotSnapshot {
+  blocked_reason: string | null;
+  running: boolean;
+  steps: number | Malformed;
+  current_step: number | null;
+  completed: boolean | null;
+  error: string | null;
+}
+
+/** ロボット間は並行して走る。running はどれか 1 機でも走っていれば true */
+export interface ReturnHomeSnapshot {
+  available: boolean;
+  running: boolean;
+  robots: Record<string, ReturnHomeRobotSnapshot> | Malformed;
+}
+
+function parseReturnHomeRobots(raw: unknown): Record<string, ReturnHomeRobotSnapshot> | Malformed {
+  if (!isObject(raw)) return MALFORMED;
+  const robots: Record<string, ReturnHomeRobotSnapshot> = {};
+  for (const [robot, entry] of Object.entries(raw)) {
+    if (!isObject(entry)) return MALFORMED;
+    robots[robot] = {
+      blocked_reason: typeof entry.blocked_reason === "string" ? entry.blocked_reason : null,
+      running: entry.running === true,
+      steps:
+        typeof entry.steps === "number" && Number.isFinite(entry.steps) ? entry.steps : MALFORMED,
+      current_step:
+        typeof entry.current_step === "number" && Number.isFinite(entry.current_step)
+          ? entry.current_step
+          : null,
+      completed: typeof entry.completed === "boolean" ? entry.completed : null,
+      error: typeof entry.error === "string" ? entry.error : null,
+    };
+  }
+  return robots;
+}
+
 export function parseHomingResults(raw: unknown): HomingAxisResult[] | Malformed {
   if (!Array.isArray(raw)) return MALFORMED;
   const ok = raw.every(
@@ -660,6 +697,7 @@ export type ServerMessage =
   | { type: "health_change"; event: HealthChange }
   | { type: "motor_check_state"; motorCheck: MotorCheckSnapshot }
   | { type: "homing_state"; homing: HomingSnapshot }
+  | { type: "return_home_state"; returnHome: ReturnHomeSnapshot }
   | { type: "switch_measure_state"; switchMeasure: SwitchMeasureSnapshot }
   | { type: "pong"; t: number | null };
 
@@ -806,6 +844,16 @@ function parseKnown(raw: Raw): ServerMessage | null {
           running: raw.running === true,
           targets: parseHomingTargets(raw.targets),
           robots: parseHomingRobots(raw.robots),
+        },
+      };
+
+    case "return_home_state":
+      return {
+        type: "return_home_state",
+        returnHome: {
+          available: raw.available === true,
+          running: raw.running === true,
+          robots: parseReturnHomeRobots(raw.robots),
         },
       };
 

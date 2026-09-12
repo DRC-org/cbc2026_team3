@@ -157,6 +157,29 @@ class ServerFixture:
             return
         await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
 
+    def set_return_home_poses(self, poses: Any) -> None:
+        self.server.set_return_home_poses(poses)
+
+    async def start_return_home(self, robot: Any) -> str | None:
+        return await self.server._return_home.start(robot)
+
+    def return_home_state(self) -> dict:
+        return self.server._return_home.payload()
+
+    def set_return_home_running(self, running: bool, robot: str = "sub_hand") -> None:
+        self.server._return_home._run_of(robot).running = running
+
+    async def wait_return_home_idle(self, *, timeout: float = 2.0) -> None:
+        tasks = [
+            run.task for run in self.server._return_home._runs.values() if run.task is not None
+        ]
+        if not tasks:
+            return
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
+
+    async def publish_return_home_state(self) -> None:
+        await self.server._return_home.publish()
+
     async def start_switch_measure(self, payload: dict) -> str | None:
         return await self.server._switch_measure.start(payload)
 
