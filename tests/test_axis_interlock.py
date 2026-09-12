@@ -351,6 +351,14 @@ class TestSequence:
             yaml.safe_load((_CONFIG_DIR / "sub_hand_positions.yaml").read_text()),
             source="sub_hand_positions.yaml",
         )
+        # 出荷では config/system.yaml の shared_axes でメインハンドの wall_f を借りる
+        table.borrow_axis(
+            "wall_f",
+            load_position_table(
+                yaml.safe_load((_CONFIG_DIR / "main_hand_positions.yaml").read_text()),
+                source="main_hand_positions.yaml",
+            ),
+        )
         motors = [m for axis in table.axes for m in table.axis(axis).motor_names]
         group, _ = _group(*motors)
         group_with_sensors = MotorGroup(sensor_active=lambda _name: False)

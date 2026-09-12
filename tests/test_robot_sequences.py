@@ -158,12 +158,28 @@ _SUB_POSITIONS = {
     "axes": {
         **{name: _axis(command_mode="on_off", settle_s=0.0) for name in _VALVE_AXES},
         "pump_vac": _axis(command_mode="duty", settle_s=0.0),
+        # 出荷ではメインハンドから借りる (config/system.yaml の shared_axes)
+        "wall_f": _axis(),
     },
     "positions": {
         **{name: {"open": 1.0, "closed": 0.0} for name in _VALVE_AXES},
         "pump_vac": {"stop": 0.0, "run": 0.61},
+        "wall_f": {"initial": 41.0, "closed": 42.0, "open": 43.0, "assist": 44.0},
     },
 }
+
+
+def _borrow_shared_axes(table: PositionTable, robot_name: str) -> None:
+    """出荷の表に、config/system.yaml の shared_axes で借りる軸を足す (本体と同じ形)。"""
+    system = yaml.safe_load((_CONFIG_DIR / "system.yaml").read_text()) or {}
+    for axis, borrowers in (system.get("shared_axes") or {}).items():
+        if robot_name not in borrowers:
+            continue
+        for path in sorted(_CONFIG_DIR.glob("*_positions.yaml")):
+            owner = _load_shipped(path.name)
+            if axis in owner.owned_axes():
+                table.borrow_axis(axis, owner)
+                break
 
 
 async def _run_each_step(
@@ -370,6 +386,25 @@ class TestSubHandSteps:
 
         assert moves > 0, "sub_y_axis を 1 度も動かしていない (検査が空振りしている)"
 
+    async def test_ピッチとオフセットを動かす直前の回転は必ず_carry(self) -> None:
+        """棒を伸ばしたので、receive の姿勢でピッチ・オフセットを動かすと棚側と当たる
+        (2026-09-12)。回転はサーボで `guard.requires` の参照先にできないので、
+        守っているのはこの並びだけである。"""
+        rotate: str | None = None
+        moves = 0
+
+        for index, targets in await _collect_moves(SubHandSequence()):
+            if "sub_rotate" in targets:
+                rotate = targets["sub_rotate"]
+            if "sub_pitch" not in targets and "sub_offset" not in targets:
+                continue
+            moves += 1
+            assert rotate == "carry", (
+                f"ステップ {index}: 回転が '{rotate}' のままピッチかオフセットを動かしている"
+            )
+
+        assert moves == 2 + 4 * 4
+
     async def test_ピッチとオフセットを同じ指令で動かさない(self) -> None:
         for index, targets in await _collect_moves(SubHandSequence()):
             assert not {"sub_pitch", "sub_offset"} <= set(targets), (
@@ -391,7 +426,9 @@ class TestSubHandSteps:
         await getattr(seq, method_name)()
 
         assert dict(sink) == {
-            name: (1.0 if name in ("valve_2", "valve_5") else 0.0) for name in _VALVE_AXES
+            **{name: (1.0 if name in ("valve_2", "valve_5") else 0.0) for name in _VALVE_AXES},
+            # 吸ってからメインハンドの壁で押し付ける (#224)
+            "wall_f": 44.0,
         }
 
     @pytest.mark.parametrize("method_name", _SUB_GRIP_METHODS)
@@ -446,6 +483,7 @@ class TestShippedPositionYaml:
         self, yaml_name: str, robot_config: str, sequence_cls: type[Sequence]
     ) -> None:
         table = _load_shipped(yaml_name)
+        _borrow_shared_axes(table, robot_config.removesuffix(".yaml"))
         seq = sequence_cls()
         seq.set_court(Court.RED)
         group, _ = _recording_group(_motor_names(table))

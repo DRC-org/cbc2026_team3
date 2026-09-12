@@ -15,7 +15,13 @@ from lib.match_state import Court
 from lib.sequence.engine import Sequence
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
-from sequences.motor_check import MAIN_HOME, SUB_HOME, VALVE_AXES, MotorCheckSequence
+from sequences.motor_check import (
+    MAIN_HOME,
+    SUB_HOME,
+    SUB_HOME_STEPS,
+    VALVE_AXES,
+    MotorCheckSequence,
+)
 from tests.fake_drivers import StubFeedbackDriver
 
 _CONFIG_DIR = pathlib.Path(__file__).resolve().parent.parent / "config"
@@ -128,7 +134,7 @@ class TestSubHandIsCommandedOneAxisAtATime:
         calls = await _collect(only=method_name)
         sub = [targets for targets in calls if set(targets) <= set(SUB_HOME)]
 
-        assert sub == [{axis: position} for axis, position in SUB_HOME.items()]
+        assert sub == [{axis: position} for axis, position in SUB_HOME_STEPS]
 
     async def test_昇降を上げてから前後_ピッチとオフセットは別々(self) -> None:
         order = list(SUB_HOME)
