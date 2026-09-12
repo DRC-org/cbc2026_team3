@@ -52,15 +52,18 @@ def _all_valves(state: str) -> dict[str, str]:
 # 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ
 # ピッチとオフセットは回転が carry のときしか動かせない (棒を伸ばしたので receive では
 # 棚側と当たる。2026-09-12)。守っているのはこの並びだけ
-INITIAL_POSES: tuple[dict[str, str], ...] = (
+INITIAL_BEFORE_OPEN: tuple[dict[str, str], ...] = (
     _all_valves("closed") | PUMP_RUN,
     DOWN_TO_PICK,
     TO_HOME,
-    CARRY_POSE,
-    OPEN_PITCH,
-    OPEN_OFFSET,
-    RECEIVE_POSE,
-    WALL_R_INITIAL,
+)
+# 開くために carry へ回る往復。既に両方開いていれば省く (毎回 5 秒ほど掛かる。2026-09-12)
+OPEN_VIA_CARRY: tuple[dict[str, str], ...] = (CARRY_POSE, OPEN_PITCH, OPEN_OFFSET)
+INITIAL_AFTER_OPEN: tuple[dict[str, str], ...] = (RECEIVE_POSE, WALL_R_INITIAL)
+INITIAL_POSES: tuple[dict[str, str], ...] = (
+    *INITIAL_BEFORE_OPEN,
+    *OPEN_VIA_CARRY,
+    *INITIAL_AFTER_OPEN,
 )
 
 
@@ -77,11 +80,9 @@ class SubHandSequence(Sequence):
             )
         # 選ばれていない弁は閉じ直す。開いたままの弁が 1 つあると真空が抜ける
         open_valves = _all_valves("closed") | dict.fromkeys(enabled, "open")
-        await self.move_to(open_valves)
-        # 吸ってからメインハンドの壁で押し付け、吸い付くまで待つ。待ちは弁の settle_s を
-        # 借りる (同じ指令なので機体は動かない)。ここへ秒を書くと config と 2 箇所になる
-        await self.move_to(WALL_F_ASSIST)
-        await self.move_to(open_valves)
+        # 吸い始めと同時にメインハンドの壁で押し付け、吸い付くまでの待ちは弁の settle_s
+        # 1 回ぶんだけ (前は弁→壁→弁で待ちが 2 回入り 6 秒掛かった。2026-09-12)
+        await self.move_to(open_valves | WALL_F_ASSIST)
 
     def _log_placed_position(self) -> None:
         """下ろした前後の位置を残す。あとから位置定数を詰めるのに使う。"""
@@ -101,8 +102,30 @@ class SubHandSequence(Sequence):
 
     @step("初期位置へ移動")
     async def move_to_initial(self) -> None:
-        for targets in INITIAL_POSES:
+        for targets in INITIAL_BEFORE_OPEN:
             await self.move_to(targets)
+        # ピッチとオフセットの今の位置を見て、既に開いていれば carry へ回る往復を省く。
+        # 読めなければ従来どおり回って開く (閉じたまま棚へ行くと当たる)
+        if self._axis_at("sub_pitch", "open") and self._axis_at("sub_offset", "open"):
+            logger.info("[%s] ピッチとオフセットは開いているので carry へ回らない", self.name)
+        else:
+            for targets in OPEN_VIA_CARRY:
+                await self.move_to(targets)
+        for targets in INITIAL_AFTER_OPEN:
+            await self.move_to(targets)
+
+    def _axis_at(self, axis: str, name: str) -> bool:
+        """軸の実測が位置名の値に (到達許容差の内で) 居るか。読めなければ False。"""
+        try:
+            reading = self.motors.axis_state(axis)
+            spec = self.positions.axis(axis)
+            value = self.positions.raw(axis, name, court=self.court)
+        except Exception:
+            return False
+        if reading.value is None:
+            return False
+        tolerance = spec.tolerance if spec.tolerance is not None else 1.0
+        return abs(reading.value - value) <= tolerance
 
     @step("1 個目: 棚へ寄せる", require_trigger=True)
     async def work_1_to_shelf(self) -> None:
