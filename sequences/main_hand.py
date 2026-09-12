@@ -43,7 +43,8 @@ class MainHandSequence(Sequence):
 
     @step("3 列目ワークへ移動", require_trigger=True)
     async def move_to_work_3(self) -> None:
-        await self.move_to(_pick_at("work_3"))
+        # rotate 振り下ろし姿勢のまま y_axis が水平移動するのを避けるため着地時刻を揃える
+        await self.move_to(_pick_at("work_3"), sync=True)
 
     @step("3 列目ワークを把持", require_trigger=True)
     async def grab_work_3(self) -> None:
@@ -64,7 +65,7 @@ class MainHandSequence(Sequence):
 
     @step("共通ワークへ移動", require_trigger=True)
     async def move_to_work_shared(self) -> None:
-        await self.move_to({"y_axis": "work_shared", "rotate": "pick"})
+        await self.move_to({"y_axis": "work_shared", "rotate": "pick"}, sync=True)
         await self.move_to({"y_axis": "work_shared", "rotate": "pick_shared"})
 
     @step("コンベアの壁を閉じてワークを寄せる")
@@ -85,7 +86,7 @@ class MainHandSequence(Sequence):
 
     @step("3 列目に置いた共通ワークへ移動", require_trigger=True)
     async def move_to_work_shared_3(self) -> None:
-        await self.move_to(_pick_at("work_3"))
+        await self.move_to(_pick_at("work_3"), sync=True)
 
     @step("3 列目に置いた共通ワークを把持", require_trigger=True)
     async def grab_work_shared_3(self) -> None:
