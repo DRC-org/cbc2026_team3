@@ -497,6 +497,8 @@ export interface ManualRange {
   min: number;
   max: number;
   steps: number[];
+  /** 微調整のボタンに書く向きの言葉 (yaml が持つ)。無ければ ± で出す */
+  labels: { minus: string; plus: string } | null;
 }
 
 export interface ManualAxis {
@@ -505,6 +507,8 @@ export interface ManualAxis {
   command_mode: "position" | "velocity" | "current" | "duty" | "on_off";
   value: number | null;
   target: number | null;
+  /** このステップで最初に微調整したときの起点。無ければ null */
+  baseline: number | null;
   manual: ManualRange | null;
   manual_always: boolean;
   deviation: number | null;

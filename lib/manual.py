@@ -42,7 +42,12 @@ class ManualController:
         self._positions = positions
         self._court: Court | None = court
         self._interlock = AxisInterlock(positions)
-        self._targets: dict[str, float] = {}
+        # 微調整の基準: 軸ごとに (epoch, 最初のジョグの直前の目標)。epoch は呼ぶ側が決める
+        # 「同じステップのあいだ」の印で、変わったら取り直す
+        self._baselines: dict[str, tuple[object, float]] = {}
+        # 目標を起点にしてよいか分からない軸。緊急停止・再励磁のあとはモータが目標を
+        # 持ったまま無励磁で動いているので、次の 1 回だけ実測から起点を取る
+        self._stale: set[str] = set()
 
     def set_court(self, court: Court | None) -> None:
         self._court = court
@@ -59,31 +64,38 @@ class ManualController:
         manual = self._require_manual(spec)
         return await self._apply(spec, manual.clamp(float(value)))
 
-    async def jog(self, axis: str, delta: float) -> float:
-        """直前の手動目標から相対移動する。``manual:`` を持つ軸のみ。
+    async def jog(self, axis: str, delta: float, *, epoch: object = None) -> float:
+        """今の目標から相対移動する。``manual:`` を持つ軸のみ。
 
-        起点にフィードバックを使わないのは、追従中の連打が吸われるため。
+        起点は**モータが今持っている目標** (無ければ実測)。手動で送った値を別に控えて
+        起点にすると、シーケンスが位置名で動かした後もその古い値から動き出す
+        (箱 2 で詰めた値を箱 3 で起点にして 160mm 飛ぶ)。実測を起点にしないのは、
+        追従中の連打が吸われるため。
         丸めが `clamp` ではなく `clamp_from` なのは、起点が範囲の外に居るとき
         `clamp` が 1 歩目だけを境界まで飛ばすため (零点確定前は範囲の外が普通)。
         """
         spec = self._axis(axis)
         manual = self._require_manual(spec)
-        stored = self._targets.get(axis)
-        origin = float(stored if stored is not None else self.observed_value(axis))
+        target = None if spec.name in self._stale else self._axis_target(spec)
+        origin = float(target if target is not None else self.observed_value(axis))
+        held = self._baselines.get(spec.name)
+        if held is None or held[0] != epoch:
+            self._baselines[spec.name] = (epoch, origin)
         return await self._apply(spec, manual.clamp_from(origin, origin + float(delta)))
 
-    async def _apply(self, spec: AxisSpec, value: float) -> float:
-        """丸め終わった値を送り、ジョグの起点として控える。
+    def baseline(self, axis: str, epoch: object) -> float | None:
+        """その epoch で最初にジョグしたときの起点。別の epoch のものは返さない。"""
+        held = self._baselines.get(axis)
+        return None if held is None or held[0] != epoch else held[1]
 
-        送信と起点の記録を 1 箇所に閉じてあるのは、丸め方の違う 2 つの入口
-        (`set_value` / `jog`) が同じ後始末を書き写さないため。
-        """
+    async def _apply(self, spec: AxisSpec, value: float) -> float:
+        """丸め終わった値を干渉条件にかけてから送る (`set_value` / `jog` の共通の出口)。"""
         try:
             self._interlock.check({spec.name: value}, court=self._court, motors=self._motors)
         except InterlockViolation as exc:
             raise ManualControlError(str(exc)) from exc
         await self._send(spec, spec.to_commands(value))
-        self._targets[spec.name] = value
+        self._stale.discard(spec.name)
         return value
 
     def axis_members(self, axis: str) -> tuple[str, ...]:
@@ -106,7 +118,7 @@ class ManualController:
         spec = self._axis(axis)
         return spec.to_value(self._feedback_positions(spec))
 
-    def axes_info(self) -> list[dict]:
+    def axes_info(self, *, epoch: object = None) -> list[dict]:
         info: list[dict] = []
         for name in self._positions.axes:
             spec = self._axis(name)
@@ -117,6 +129,7 @@ class ManualController:
                     "command_mode": spec.command_mode.value,
                     "value": self._safe_observed_value(spec),
                     "target": self._axis_target(spec),
+                    "baseline": self.baseline(name, epoch),
                     "manual": spec.manual.to_dict() if spec.manual is not None else None,
                     "manual_always": spec.manual_always,
                     "deviation": self._safe_deviation(spec),
@@ -163,16 +176,18 @@ class ManualController:
         return value
 
     def reset(self) -> None:
-        self._targets.clear()
+        self._baselines.clear()
+        self._stale.update(self._positions.axes)
 
     def reset_axes_for_motors(self, motor_names: Collection[str]) -> None:
         dropped = set(motor_names)
         for axis in [
             name
-            for name in self._targets
+            for name in self._positions.axes
             if dropped.intersection(self._positions.axis(name).motor_names)
         ]:
-            del self._targets[axis]
+            self._baselines.pop(axis, None)
+            self._stale.add(axis)
 
     def on_e_stop(self) -> None:
         self.reset()
@@ -210,8 +225,8 @@ class ManualController:
         サーボを動かしたのに無かったことになる (2026-09-11 実機)。基板は指令を保持
         しているので、画面だけが実態とずれる。
 
-        ジョグの起点は `_targets` のままにする (フィードバックから取ると追従中の
-        連打が吸われる。`docs/invariants.md` §4)。
+        ジョグの起点もこれ (フィードバックから取ると追従中の連打が吸われる。
+        `docs/invariants.md` §4)。
         """
         commands: dict[str, float] = {}
         try:

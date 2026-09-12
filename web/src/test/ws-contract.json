@@ -219,10 +219,12 @@
       "manual": {
         "axes": [
           {
+            "baseline": null,
             "command_mode": "position",
             "deviation": 0.0,
             "linkage": null,
             "manual": {
+              "labels": null,
               "max": 20.0,
               "min": -2.0,
               "steps": [
@@ -252,6 +254,7 @@
             "value": 0.0
           },
           {
+            "baseline": null,
             "command_mode": "position",
             "deviation": null,
             "linkage": null,
@@ -277,6 +280,7 @@
             "value": 5.0
           },
           {
+            "baseline": null,
             "command_mode": "duty",
             "deviation": null,
             "linkage": null,

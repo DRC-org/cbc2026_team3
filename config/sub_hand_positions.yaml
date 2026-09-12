@@ -43,6 +43,8 @@ axes:
       max: 2.0
       # 先頭が既定の刻み。寄せるのに 1mm 刻みだと回らない
       steps: [50.0, 10.0, 5.0, 1.0]
+      # + が下 (微調整のボタンの言葉)
+      labels: { minus: "▲ 上", plus: "▼ 下" }
 
   sub_y_axis:
     homing:
@@ -88,6 +90,8 @@ axes:
       max: 2.0
       # 先頭が既定の刻み。寄せるのに 1mm 刻みだと回らない
       steps: [50.0, 10.0, 5.0, 1.0]
+      # + が前 (棚側)
+      labels: { minus: "◀ 後", plus: "前 ▶" }
 
   # サーボ 3 軸の timeout_s は firmware/servo/include/config.h のスルーレート
   # (90deg/s) と対。突き合わせは tests/test_servo_travel_budget.py。

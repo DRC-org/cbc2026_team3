@@ -538,7 +538,12 @@ class TestStateBroadcast:
     async def test_可動範囲は連続操作できる軸だけに載る(self) -> None:
         fx, _ = _fixture()
         axes = {a["name"]: a for a in fx.state_message(_ROBOT)["manual"]["axes"]}
-        assert axes["y_axis"]["manual"] == {"min": -2.0, "max": 20.0, "steps": [0.5, 2.0]}
+        assert axes["y_axis"]["manual"] == {
+            "min": -2.0,
+            "max": 20.0,
+            "steps": [0.5, 2.0],
+            "labels": None,
+        }
         assert axes["gripper"]["manual"] is None
 
     async def test_手動を持たないロボットでも配信は成立する(self) -> None:

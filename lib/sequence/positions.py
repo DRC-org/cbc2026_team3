@@ -157,6 +157,9 @@ class ManualSpec:
     min_value: float
     max_value: float
     steps: tuple[float, ...]
+    #: 微調整のボタンに書く向きの言葉 (minus, plus)。「+ が下」のような機体の向きは
+    #: yaml が知っているので、UI に軸名から推させない
+    labels: tuple[str, str] | None = None
 
     def clamp(self, value: float) -> float:
         if value < self.min_value:
@@ -189,7 +192,13 @@ class ManualSpec:
         return self.min_value <= value <= self.max_value
 
     def to_dict(self) -> dict[str, object]:
-        return {"min": self.min_value, "max": self.max_value, "steps": list(self.steps)}
+        labels = None if self.labels is None else {"minus": self.labels[0], "plus": self.labels[1]}
+        return {
+            "min": self.min_value,
+            "max": self.max_value,
+            "steps": list(self.steps),
+            "labels": labels,
+        }
 
 
 @dataclass(frozen=True)
@@ -655,7 +664,7 @@ _AXIS_KEYS = frozenset(
 
 _MOTOR_KEYS = frozenset({"scale", "offset"})
 
-_MANUAL_KEYS = frozenset({"min", "max", "steps"})
+_MANUAL_KEYS = frozenset({"min", "max", "steps", "labels"})
 
 _TRAVEL_KEYS = frozenset({"min", "max"})
 
@@ -1802,7 +1811,21 @@ def _parse_manual(axis_name: str, raw: object, command_mode: ControlMode) -> Man
         raise ValueError(f"{path}.min は max より小さい必要があります: {min_value} >= {max_value}")
 
     steps = _parse_manual_steps(path, raw.get("steps"))
-    return ManualSpec(min_value=float(min_value), max_value=float(max_value), steps=steps)
+    labels = _parse_manual_labels(path, raw.get("labels"))
+    return ManualSpec(
+        min_value=float(min_value), max_value=float(max_value), steps=steps, labels=labels
+    )
+
+
+def _parse_manual_labels(path: str, raw: object) -> tuple[str, str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"minus", "plus"}:
+        raise ValueError(f"{path}.labels は minus と plus の 2 つを持つ辞書: {raw!r}")
+    for key in ("minus", "plus"):
+        if not isinstance(raw[key], str) or not raw[key].strip():
+            raise ValueError(f"{path}.labels.{key} は空でない文字列: {raw[key]!r}")
+    return (raw["minus"], raw["plus"])
 
 
 def _parse_travel(axis_name: str, raw: object) -> TravelSpec | None:
