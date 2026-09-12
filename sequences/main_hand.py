@@ -119,6 +119,7 @@ class MainHandSequence(Sequence):
     @step("2 列目ワークをコンベアの位置へ")
     async def move_work_2_to_conveyor(self) -> None:
         await self.move_to({"wall_f": "open"})
+        await self.move_to({"y_axis": "work_2_after_1"})
         await self.move_to(PRE_CONVEYOR)
         await self.move_to(TO_CONVEYOR)
 
@@ -142,8 +143,9 @@ class MainHandSequence(Sequence):
 
     @step("1 列目ワークをコンベアの位置へ", require_trigger=True)
     async def move_work_1_to_conveyor(self) -> None:
+        await self.move_to({"y_axis": "work_1_after_1"})
         await self.move_to(
-            {"y_axis": "work_1_after_1", "rotate": "work_1_after_1", "wall_f": "open"}
+            {"y_axis": "work_1_after_2", "rotate": "work_1_after_2", "wall_f": "open"}
         )
         await self.move_to(PRE_CONVEYOR)
         await self.move_to(TO_CONVEYOR)

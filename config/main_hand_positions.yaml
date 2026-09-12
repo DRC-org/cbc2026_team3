@@ -148,8 +148,10 @@ positions:
     # rotate = 0 で干渉しないのは y_axis >= 40mm。tolerance 1.0mm ぶん手前に着地しても満たす値
     clear: 42.0
     work_1: 75.0
-    work_1_after_1: 225.0
+    work_1_after_1: 45.0
+    work_1_after_2: 225.0
     work_2: 270.0
+    work_2_after_1: 240.0
     work_3: 466.0
     work_3_after_1: 396.0
     work_3_after_2: 366.0
@@ -158,7 +160,7 @@ positions:
 
   rotate:
     home: 5.0
-    work_1_after_1: 90.0
+    work_1_after_2: 90.0
     work_3_after_1: 165.0
     work_3_after_2: 155.0
     # TODO(実機で確認): 仮値。引き出し中は rotate を回さないよう pick と同値
