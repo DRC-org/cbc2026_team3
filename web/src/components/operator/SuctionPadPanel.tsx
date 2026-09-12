@@ -42,7 +42,8 @@ export function SuctionPadPanel({
   // 画面から読めなかった。手動ではこの面が開閉そのものを持つ
   const inManual = manual.mode === "manual";
   const actuating = inManual || direct;
-  const padsBlockedReason = actuating && !inManual ? (directBlockedReason ?? blockedReason) : blockedReason;
+  const padsBlockedReason =
+    actuating && !inManual ? (directBlockedReason ?? blockedReason) : blockedReason;
 
   // ワークは棚の手前から順に取るので飛び飛びのパッドを選ぶ場面が無く、押す 1 回で個数が決まる
   const selectUpTo = (index: number) => {

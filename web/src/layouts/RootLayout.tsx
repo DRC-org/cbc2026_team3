@@ -139,6 +139,7 @@ export function RootLayout() {
         healthEvents: socket.healthEvents,
         motorCheck: socket.motorCheck,
         homing: socket.homing,
+        returnHome: socket.returnHome,
         switchMeasure: socket.switchMeasure,
         matchState: socket.matchState,
         serverInfo: socket.serverInfo,

@@ -8,7 +8,7 @@ import math
 import pathlib
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from aiohttp import WSMsgType, web
@@ -50,6 +50,7 @@ from lib.sequence.positions import (
 )
 from lib.server_homing import HomingController, HomingSource
 from lib.server_motor_check import MotorCheckController, Pausable
+from lib.server_return_home import ReturnHomeController
 from lib.server_switch_measure import SwitchMeasureController
 from lib.suction import SuctionSelection
 from lib.ws_hub import WsHub
@@ -209,6 +210,11 @@ class RobotServer:
             environment_deny=self._switch_measure_environment_deny,
             broadcast=self._ws.broadcast_json,
         )
+        self._return_home = ReturnHomeController(
+            environment_deny=self._return_home_environment_deny,
+            is_e_stop_active=lambda: self._e_stop_active,
+            broadcast=self._ws.broadcast_json,
+        )
 
         self._verify_command_handlers()
 
@@ -321,6 +327,11 @@ class RobotServer:
     def set_homing_source(self, source: HomingSource) -> None:
         self._homing.set_source(source)
         self._switch_measure.set_source(source)
+        # 原点復帰も同じ口で動かす。別に組むと、そこだけが可動端保護や到達判定の外へ出る
+        self._return_home.set_source(source)
+
+    def set_return_home_poses(self, poses: Mapping[str, tuple[Mapping[str, str], ...]]) -> None:
+        self._return_home.set_poses(poses)
 
     def set_court_store(self, path: pathlib.Path) -> None:
         self._court_store = path
@@ -446,6 +457,7 @@ class RobotServer:
             self._motor_check.payload(),
             self._homing.payload(),
             self._switch_measure.payload(),
+            self._return_home.payload(),
         ):
             if not await self._ws.send_or_drop(ws, json.dumps(snapshot, ensure_ascii=False)):
                 await self._ws.drop({ws})
@@ -766,6 +778,11 @@ class RobotServer:
             ", ".join(changed) or "なし",
         )
         await self._broadcast_state()
+
+    async def _cmd_return_home(self, data: dict, requester: WSOrNone) -> None:
+        reason = await self._return_home.start(data.get("robot"))
+        if reason is not None:
+            await self._reject_command(requester, "return_home", reason)
 
     async def _cmd_switch_measure_start(self, data: dict, requester: WSOrNone) -> None:
         reason = await self._switch_measure.start(data)
@@ -1088,6 +1105,7 @@ class RobotServer:
         if self._e_stop_reason is None:
             self._e_stop_reason = reason
         self._motor_check.abort()
+        self._return_home.abort()
         for ctx in self._robots.values():
             if ctx.manual is not None:
                 ctx.manual.on_e_stop()
@@ -1522,12 +1540,16 @@ class RobotServer:
             "switch_measure_start", "作動点測定"
         )
 
+    def _return_home_environment_deny(self) -> str | None:
+        return self._busy_deny("原点復帰") or self._environment_deny("return_home", "原点復帰")
+
     def _axis_holders(self) -> tuple[tuple[str, bool], ...]:
         """軸を握りうる点検と、今それが走っているか。**相互排他はここ 1 箇所で決まる。**"""
         return (
             ("動作確認", self._motor_check.running),
             ("零点合わせ", self._homing.running),
             ("作動点測定", self._switch_measure.running),
+            ("原点復帰", self._return_home.running),
         )
 
     def _busy_deny(self, what: str) -> str | None:
@@ -1582,6 +1604,7 @@ class RobotServer:
                 await self._motor_check.publish()
                 await self._homing.publish()
                 await self._switch_measure.publish()
+                await self._return_home.publish()
             except asyncio.CancelledError:
                 raise
             except Exception:

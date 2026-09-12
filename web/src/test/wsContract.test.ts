@@ -25,6 +25,8 @@ import type {
   PositionCaptureState,
   PositionLoopState,
   PositionsReloadState,
+  ReturnHomeRobotSnapshot,
+  ReturnHomeSnapshot,
   RobotState,
   SafetyState,
   SequenceFailure,
@@ -214,6 +216,16 @@ const EXPECTATIONS: Record<string, Expectation> = {
     // 失敗した軸の理由が UI まで残る (これが読めないと「なぜ止まったか」が画面から消える)
     const robots = sample.robots as Record<string, { results: unknown[] }>;
     expect(Object.values(robots).flatMap((robot) => robot.results)).not.toHaveLength(0);
+  },
+
+  return_home_state: (result, sample) => {
+    const state = result.returnHome;
+    expect(state.available).toBe(sample.available);
+    expect(state.running).toBe(sample.running);
+    expect(state.robots).toEqual(sample.robots);
+    // 手順数は静的に決まる。読めないまま 0 埋めすると「3/0」のような進捗が出る
+    const robots = sample.robots as Record<string, { steps: unknown }>;
+    for (const robot of Object.values(robots)) expect(typeof robot.steps).toBe("number");
   },
 
   motor_check_state_with_exclusions: (result, sample) => {
@@ -511,6 +523,25 @@ const HOMING_FIELDS: FieldSpec = {
   "targets.*": "ui",
 };
 
+const RETURN_HOME_ROBOT = fieldsOf<ReturnHomeRobotSnapshot>({
+  blocked_reason: "ui",
+  running: "ui",
+  steps: "ui",
+  current_step: "ui",
+  completed: { unused: "直近の結果は配信の error と進捗表示で足りる" },
+  error: "ui",
+});
+
+const RETURN_HOME_FIELDS: FieldSpec = {
+  ...fieldsOf<Wire<ReturnHomeSnapshot>>({
+    type: "parser",
+    available: "ui",
+    running: "ui",
+    robots: "ui",
+  }),
+  ...nest("robots.*", RETURN_HOME_ROBOT),
+};
+
 const SWITCH_MEASUREMENT = fieldsOf<SwitchMeasurement>({
   axis: "ui",
   unit: "ui",
@@ -676,6 +707,7 @@ const DECLARED: Record<string, FieldSpec> = {
   motor_check_state: MOTOR_CHECK_FIELDS,
   motor_check_state_with_exclusions: MOTOR_CHECK_FIELDS,
   homing_state: HOMING_FIELDS,
+  return_home_state: RETURN_HOME_FIELDS,
   switch_measure_state: SWITCH_MEASURE_FIELDS,
   switch_measure_state_with_result: SWITCH_MEASURE_FIELDS,
   switch_measure_state_with_error: SWITCH_MEASURE_FIELDS,

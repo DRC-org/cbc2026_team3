@@ -8,6 +8,7 @@ import type {
   MatchState,
   MotorCheckSnapshot,
   RobotState,
+  ReturnHomeSnapshot,
   ServerInfo,
   SwitchMeasureSnapshot,
 } from "@/lib/protocol";
@@ -24,6 +25,7 @@ export interface RobotStatus {
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
   homing: HomingSnapshot;
+  returnHome: ReturnHomeSnapshot;
   switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
@@ -73,6 +75,7 @@ export function RobotProvider({
     healthEvents,
     motorCheck,
     homing,
+    returnHome,
     switchMeasure,
     matchState,
     serverInfo,
@@ -104,6 +107,7 @@ export function RobotProvider({
       healthEvents,
       motorCheck,
       homing,
+      returnHome,
       switchMeasure,
       matchState,
       serverInfo,
@@ -120,6 +124,7 @@ export function RobotProvider({
       healthEvents,
       motorCheck,
       homing,
+      returnHome,
       switchMeasure,
       matchState,
       serverInfo,

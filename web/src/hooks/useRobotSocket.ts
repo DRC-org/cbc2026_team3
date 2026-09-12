@@ -8,6 +8,7 @@ import type {
   MatchState,
   MotorCheckSnapshot,
   RobotState,
+  ReturnHomeSnapshot,
   ServerInfo,
   SwitchMeasureSnapshot,
 } from "@/lib/protocol";
@@ -23,6 +24,7 @@ interface UseRobotSocketReturn {
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
   homing: HomingSnapshot;
+  returnHome: ReturnHomeSnapshot;
   switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
@@ -81,6 +83,7 @@ export function useRobotSocket(url: string = originWsUrl()): UseRobotSocketRetur
     healthEvents: state.healthEvents,
     motorCheck: state.motorCheck,
     homing: state.homing,
+    returnHome: state.returnHome,
     switchMeasure: state.switchMeasure,
     matchState: state.matchState,
     serverInfo: state.serverInfo,

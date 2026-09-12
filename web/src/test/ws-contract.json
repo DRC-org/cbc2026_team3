@@ -130,6 +130,21 @@
       "t": 1700000000000,
       "type": "pong"
     },
+    "return_home_state": {
+      "available": true,
+      "robots": {
+        "main_hand": {
+          "blocked_reason": null,
+          "completed": true,
+          "current_step": null,
+          "error": null,
+          "running": false,
+          "steps": 1
+        }
+      },
+      "running": false,
+      "type": "return_home_state"
+    },
     "server_info": {
       "dev_tools": false,
       "dry_run": false,

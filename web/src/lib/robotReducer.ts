@@ -6,6 +6,7 @@ import type {
   MatchState,
   MotorCheckSnapshot,
   RobotState,
+  ReturnHomeSnapshot,
   ServerInfo,
   ServerMessage,
   SwitchMeasureSnapshot,
@@ -31,6 +32,7 @@ export interface RobotUiState {
   healthEvents: HealthChangeEvent[];
   motorCheck: MotorCheckSnapshot;
   homing: HomingSnapshot;
+  returnHome: ReturnHomeSnapshot;
   switchMeasure: SwitchMeasureSnapshot;
   matchState: MatchState;
   serverInfo: ServerInfo;
@@ -66,6 +68,14 @@ export function emptyHomingState(): HomingSnapshot {
     available: false,
     running: false,
     targets: {},
+    robots: {},
+  };
+}
+
+export function emptyReturnHomeState(): ReturnHomeSnapshot {
+  return {
+    available: false,
+    running: false,
     robots: {},
   };
 }
@@ -106,6 +116,7 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   healthEvents: [],
   motorCheck: emptyMotorCheckState(),
   homing: emptyHomingState(),
+  returnHome: emptyReturnHomeState(),
   switchMeasure: emptySwitchMeasureState(),
   matchState: INITIAL_MATCH_STATE,
   serverInfo: INITIAL_SERVER_INFO,
@@ -171,6 +182,9 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
 
     case "homing_state":
       return { ...state, homing: message.homing };
+
+    case "return_home_state":
+      return { ...state, returnHome: message.returnHome };
 
     case "switch_measure_state":
       return { ...state, switchMeasure: message.switchMeasure };

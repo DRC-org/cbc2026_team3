@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import time
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -75,6 +76,7 @@ REQUIRED_TYPES = frozenset(
         "motor_check_state",
         "homing_state",
         "switch_measure_state",
+        "return_home_state",
         "pong",
     }
 )
@@ -308,12 +310,18 @@ def _homing_source(group: MotorGroup) -> HomingSource:
         },
         source="<ws-contract>",
     )
+
+    async def _move_to(_targets: Mapping[str, str]) -> None:
+        """位置名で寄せる口。この表は `guard.requires` を持たないので零点確定では
+        呼ばれず、原点復帰 (`return_home`) の宛先としてだけ通る。"""
+
     return HomingSource(
         runner=_ContractHoming(),  # type: ignore[arg-type]
         table=table,
         motors=group,
         court=lambda: Court.RED,
         axes_by_robot={_ROBOT: ("y_axis",)},
+        move_to=_move_to,
     )
 
 
@@ -460,6 +468,16 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
             # 走り終えた形を採る (進捗の途中経過も同じ型で流れるので最後の 1 通を選ぶ)
             samples["homing_state"] = [
                 msg for msg in await drain(ws) if msg.get("type") == "homing_state"
+            ][-1]
+
+            # 原点復帰は零点が確定した後にだけ通る (未確定の軸へ位置名で指令しない)
+            for name in ("y_axis_r", "y_axis_l"):
+                group[name].driver.mark_origin_confirmed()
+            fx.set_return_home_poses({_ROBOT: ({"y_axis": "home"},)})
+            await fx.start_return_home(_ROBOT)
+            await fx.wait_return_home_idle()
+            samples["return_home_state"] = [
+                msg for msg in await drain(ws) if msg.get("type") == "return_home_state"
             ][-1]
 
             await fx.publish_switch_measure_state()

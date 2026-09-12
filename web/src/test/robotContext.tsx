@@ -9,12 +9,14 @@ import type {
   HomingSnapshot,
   MatchState,
   MotorCheckSnapshot,
+  ReturnHomeSnapshot,
   ServerInfo,
   SwitchMeasureSnapshot,
 } from "@/lib/protocol";
 import {
   emptyHomingState,
   emptyMotorCheckState,
+  emptyReturnHomeState,
   emptySwitchMeasureState,
 } from "@/lib/robotReducer";
 
@@ -23,6 +25,8 @@ export type { RobotContextValue };
 export const EMPTY_MOTOR_CHECK: MotorCheckSnapshot = emptyMotorCheckState();
 
 export const EMPTY_HOMING: HomingSnapshot = emptyHomingState();
+
+export const EMPTY_RETURN_HOME: ReturnHomeSnapshot = emptyReturnHomeState();
 
 export const EMPTY_SWITCH_MEASURE: SwitchMeasureSnapshot = emptySwitchMeasureState();
 
@@ -51,6 +55,7 @@ export function createRobotContext(overrides: Partial<RobotContextValue> = {}): 
     healthEvents: [],
     motorCheck: emptyMotorCheckState(),
     homing: emptyHomingState(),
+    returnHome: emptyReturnHomeState(),
     switchMeasure: emptySwitchMeasureState(),
     matchState: DEFAULT_MATCH_STATE,
     serverInfo: DEFAULT_SERVER_INFO,

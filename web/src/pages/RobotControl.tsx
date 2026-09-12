@@ -2,10 +2,11 @@ import { TriangleAlert } from "lucide-react";
 import { useState } from "react";
 
 import { SubsystemStatus } from "@/components/diagnostics/SubsystemStatus";
-import { CourtSettings } from "@/components/monitor/CourtSettings";
 import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
+import { ReturnHomeButton } from "@/components/homing/ReturnHomeButton";
 import { SwitchDistanceButton } from "@/components/homing/SwitchDistanceButton";
+import { CourtSettings } from "@/components/monitor/CourtSettings";
 import { StartGate } from "@/components/monitor/StartGate";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
@@ -184,6 +185,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     <div className="flex shrink-0 flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <HomingButtons robot={robotKey} />
+        <ReturnHomeButton robot={robotKey} />
         {withSwitchDistance && hasSwitchMeasure(robotKey) ? (
           <SwitchDistanceButton robot={robotKey} />
         ) : null}
