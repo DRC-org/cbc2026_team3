@@ -511,6 +511,8 @@ export interface ManualAxis {
   sync_tolerance: number | null;
   positions: ManualPosition[];
   motors: string[];
+  /** リンク機構の軸だけ。左右の中心のずれ [mm] と、その上限 */
+  linkage: { center: number; max: number; limit: number | null } | null;
 }
 
 export interface ManualPosition {

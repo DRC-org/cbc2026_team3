@@ -357,6 +357,19 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_positions_reload",
     ),
     # 選択を変えるだけで機体は動かない。次の吸着ステップから効くので、緊急停止中の準備にも通す
+    # リンク機構 (ピッチ) の左右の中心をずらす。控えるだけでなく今の目標を送り直して
+    # その場で効かせるので、手動操縦と同じゲート
+    _spec(
+        "linkage_center_set",
+        allowed_phases=PHASES_ANY,
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため中心を動かせません",
+        blocked_without_court=True,
+        court_deny_message=(
+            "コートが未設定のため中心を動かせません (コート設定でコートを選んでください)"
+        ),
+        handler="_cmd_linkage_center_set",
+    ),
     _spec(
         "suction_pads_set",
         allowed_phases=PHASES_ANY,

@@ -11,17 +11,32 @@ interface NudgePanelProps {
   robotKey: string;
   manual: ManualState;
   blockedReason: string | null;
+  /** リンク機構の中心をずらす口の理由。トリガー待ちに依らず手動と同じゲート */
+  centerBlockedReason: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
 /** トリガー待ちで止まっているあいだだけ出す、位置の微調整。 */
-export function NudgePanel({ robotKey, manual, blockedReason, sendOrReport }: NudgePanelProps) {
+export function NudgePanel({
+  robotKey,
+  manual,
+  blockedReason,
+  centerBlockedReason,
+  sendOrReport,
+}: NudgePanelProps) {
   // 連続値を送れる軸だけ (サーバーが `manual` を配る)。常時操作の軸は別パネルが持つ
   const axes = manual.axes.filter((axis) => axis.manual !== null && axis.manual_always !== true);
-  if (axes.length === 0) return null;
+  // リンク機構の軸は中心を左右へずらせる (サーバーが `linkage` を配る)
+  const linked = manual.axes.filter((axis) => axis.linkage !== null);
+  if (axes.length === 0 && linked.length === 0) return null;
 
   const nudge = (axis: string, delta: number) =>
     sendOrReport({ type: "manual_jog", robot: robotKey, axis, delta }, "位置の微調整");
+  const shiftCenter = (axis: string, current: number, delta: number) =>
+    sendOrReport(
+      { type: "linkage_center_set", robot: robotKey, axis, center: current + delta },
+      "中心の微調整",
+    );
 
   return (
     <Panel
@@ -56,6 +71,36 @@ export function NudgePanel({ robotKey, manual, blockedReason, sendOrReport }: Nu
             <span className="text-[0.85em] text-base-content/50">{axis.unit}</span>
           </div>
         ))}
+        {linked.map((axis) => {
+          const linkage = axis.linkage;
+          if (linkage === null) return null;
+          // 今の隙間でずらせる上限。縮めきり (open) では 0 で、閉じたときに効く
+          const limit = linkage.limit ?? linkage.max;
+          return (
+            <div key={`${axis.name}-center`} className="flex items-center gap-1.5">
+              <span className="text-[0.85em] text-base-content/70">{axis.name} 中心</span>
+              <Button
+                disabled={centerBlockedReason !== null || linkage.center - NUDGE_STEP < -limit}
+                aria-label={`${axis.name} の中心を左へ ${NUDGE_STEP}mm`}
+                onClick={() => shiftCenter(axis.name, linkage.center, -NUDGE_STEP)}
+              >
+                ◀ {NUDGE_STEP}
+              </Button>
+              <span className="min-w-[4.5em] text-center text-[0.85em] tabular-nums">
+                {linkage.center > 0 ? "+" : ""}
+                {linkage.center.toFixed(1)}mm
+              </span>
+              <Button
+                disabled={centerBlockedReason !== null || linkage.center + NUDGE_STEP > limit}
+                aria-label={`${axis.name} の中心を右へ ${NUDGE_STEP}mm`}
+                onClick={() => shiftCenter(axis.name, linkage.center, NUDGE_STEP)}
+              >
+                {NUDGE_STEP} ▶
+              </Button>
+              <span className="text-[0.85em] text-base-content/50">±{limit.toFixed(0)}</span>
+            </div>
+          );
+        })}
       </div>
     </Panel>
   );

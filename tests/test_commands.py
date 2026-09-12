@@ -47,6 +47,7 @@ _EXPECTED_COMMANDS = {
     "manual_move",
     "manual_set",
     "manual_jog",
+    "linkage_center_set",
     "suction_pads_set",
     "position_capture",
     "positions_reload",
@@ -141,6 +142,8 @@ class TestRegistryCoverage:
             "manual_move",
             "manual_set",
             "manual_jog",
+            # 中心を変えた直後に今の目標を送り直すので、手動操縦と同じくコートが要る
+            "linkage_center_set",
             "homing_start",
             "return_home",
             "switch_measure_start",
@@ -269,6 +272,7 @@ class TestEStopGate:
             "manual_move",
             "manual_set",
             "manual_jog",
+            "linkage_center_set",
             "reenergize_motors",
             # 無励磁で自重落下した位置を「正しい位置」として控えさせない
             "position_capture",
