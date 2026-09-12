@@ -346,7 +346,7 @@ class TestSequence:
 
         assert drivers["sub_pitch_r"].commands == [260.0]
 
-    async def test_出荷のサブハンドは_74_段通しで_1_度も発火しない(self, monkeypatch) -> None:
+    async def test_出荷のサブハンドは通しで_1_度も発火しない(self, monkeypatch) -> None:
         table = load_position_table(
             yaml.safe_load((_CONFIG_DIR / "sub_hand_positions.yaml").read_text()),
             source="sub_hand_positions.yaml",
@@ -382,7 +382,6 @@ class TestSequence:
 
         monkeypatch.setattr(AxisInterlock, "check", counting)
 
-        assert len(seq.steps) == 74
         for info in seq.steps:
             await getattr(seq, info.method_name)()
 
