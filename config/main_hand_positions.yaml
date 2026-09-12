@@ -60,6 +60,10 @@ axes:
     command_unit: rad
     timeout_s: 3.0
     tolerance: 2.0
+    # TODO(実機で確認): 未計測の暫定値。config/main_hand.yaml の motors.rotate_*.limit_speed
+    # (2.0 rad/s ≒ 115 deg/s) の内側に取ってある。過小に書くほど安全側 —— 着地時刻を
+    # 揃える遅延が短くなるだけで、今までの挙動に寄る
+    min_speed: 100.0
     sync_tolerance: 5.0
     manual:
       min: 0.0
