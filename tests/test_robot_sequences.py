@@ -414,6 +414,33 @@ class TestSubHandSteps:
                 f"ステップ {index}: ピッチとオフセットを同時に動かしている"
             )
 
+    async def test_箱へ下ろす段は微調整で既に下に居れば上がらない(self) -> None:
+        """止まっている間に昇降を下げて詰めた後、一度 above_box まで上がってから
+        下りるのを避ける (2026-09-12)。**sub_lift は + が下** なので符号を間違えると
+        常に飛ばして箱へ下りなくなる。"""
+        table = _load_shipped("sub_hand_positions.yaml")
+        _borrow_shared_axes(table, "sub_hand")
+        seq = SubHandSequence()
+        seq.set_court(Court.RED)
+        group, sink = _recording_group(_motor_names(table))
+        _bind_axis_state(group, table, seq)
+        seq.bind_motors(group)
+        seq.bind_positions(table)
+        lift_motors = set(table.axis("sub_lift").motor_names)
+
+        def lift_commands() -> list[float]:
+            return [value for name, value in sink if name in lift_motors]
+
+        await seq.move_to({"sub_lift": "top"})
+        before = len(lift_commands())
+        await seq.work_1_down_to_above_box()
+        assert len(lift_commands()) > before, "top からは above_box へ下ろす"
+
+        await seq.move_to({"sub_lift": "place"})  # 微調整で above_box より下へ詰めた状態
+        before = len(lift_commands())
+        await seq.work_1_down_to_above_box()
+        assert len(lift_commands()) == before, "既に下に居るのに above_box へ上がっている"
+
     def test_default_suction_covers_every_valve(self) -> None:
         seq = SubHandSequence()
 

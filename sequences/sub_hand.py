@@ -19,13 +19,14 @@ TO_RETRACTED: dict[str, str] = {"sub_y_axis": "retracted"}
 TO_HOME: dict[str, str] = {"sub_y_axis": "home"}
 
 DOWN_TO_PICK: dict[str, str] = {"sub_lift": "pick"}
-DOWN_TO_ABOVE_BOX: dict[str, str] = {"sub_lift": "above_box"}
-DOWN_TO_PLACE: dict[str, str] = {"sub_lift": "place"}
 UP_TO_TOP: dict[str, str] = {"sub_lift": "top"}
 LIFT_OFF_SHELF: dict[str, str] = {"sub_lift": "lifted"}
 
 CARRY_POSE: dict[str, str] = {"sub_rotate": "carry"}
 RECEIVE_POSE: dict[str, str] = {"sub_rotate": "receive"}
+# 箱 1 は carry のまま下ろすと当たるので、入れる角度へ傾けてから前へ出す (2026-09-12)。
+# 回すのは前端から 150mm 離れた clear で、持ち方の開閉は carry でしか行わない
+INSERT_1_POSE: dict[str, str] = {"sub_rotate": "insert_1"}
 WALL_R_INITIAL: dict[str, str] = {"wall_r": "initial"}
 WALL_R_OPEN: dict[str, str] = {"wall_r": "open"}
 # メインハンドの壁 (config/system.yaml の shared_axes で借りている)。吸うあいだだけ
@@ -95,6 +96,26 @@ class SubHandSequence(Sequence):
             logger.info("[%s] 箱へ下ろした前後の位置: 読めていません", self.name)
             return
         logger.info("[%s] 箱へ下ろした前後の位置: %.2fmm", self.name, reading.value)
+
+    async def _lower_lift(self, name: str) -> None:
+        """昇降を name へ下げる。微調整で既にそれより下に居れば動かさない。
+
+        止まっている間に下げて詰めた後は、一度 name まで上がってから次で下りていた
+        (2026-09-12)。実測が読めなければ普通に下げる。
+        """
+        if self._lift_below(name):
+            logger.info("[%s] sub_lift は既に %s より下に居るので動かさない", self.name, name)
+            return
+        await self.move_to({"sub_lift": name})
+
+    def _lift_below(self, name: str) -> bool:
+        """昇降の実測が位置名の値より下 (+ 側) に居るか。読めなければ False。"""
+        try:
+            reading = self.motors.axis_state("sub_lift")
+            value = self.positions.raw("sub_lift", name, court=self.court)
+        except Exception:
+            return False
+        return reading.value is not None and reading.value > value
 
     async def _release(self) -> None:
         # 三方弁は閉じた側がパッドを大気開放するので、閉じるだけで残圧が抜けてワークが離れる
@@ -173,11 +194,11 @@ class SubHandSequence(Sequence):
 
     @step("1 個目: 箱の縁の高さへ下降", require_trigger=True)
     async def work_1_down_to_above_box(self) -> None:
-        await self.move_to(DOWN_TO_ABOVE_BOX)
+        await self._lower_lift("above_box")
 
     @step("1 個目: 箱へ下降", require_trigger=True)
     async def work_1_down_to_place(self) -> None:
-        await self.move_to(DOWN_TO_PLACE)
+        await self._lower_lift("place")
         self._log_placed_position()
 
     @step("1 個目: ワーク解放 (配置)", require_trigger=True)
@@ -252,11 +273,11 @@ class SubHandSequence(Sequence):
 
     @step("2 個目: 箱の縁の高さへ下降", require_trigger=True)
     async def work_2_down_to_above_box(self) -> None:
-        await self.move_to(DOWN_TO_ABOVE_BOX)
+        await self._lower_lift("above_box")
 
     @step("2 個目: 箱へ下降", require_trigger=True)
     async def work_2_down_to_place(self) -> None:
-        await self.move_to(DOWN_TO_PLACE)
+        await self._lower_lift("place")
         self._log_placed_position()
 
     @step("2 個目: ワーク解放 (配置)", require_trigger=True)
@@ -317,10 +338,7 @@ class SubHandSequence(Sequence):
     async def work_3_carry_pose(self) -> None:
         await self.move_to(CARRY_POSE)
 
-    @step("3 個目: 箱 1 の上へ")
-    async def work_3_over_box(self) -> None:
-        await self.move_to({"sub_y_axis": "place_1"})
-
+    # 箱 1 は前端に近く、そこで回せない。持ち方を閉じて傾けるのを clear で済ませてから出す
     @step("3 個目: オフセットを閉じる")
     async def work_3_close_offset(self) -> None:
         await self.move_to(CLOSE_OFFSET)
@@ -329,13 +347,21 @@ class SubHandSequence(Sequence):
     async def work_3_close_pitch(self) -> None:
         await self.move_to(CLOSE_PITCH)
 
+    @step("3 個目: 箱 1 へ入れる角度へ回す")
+    async def work_3_insert_pose(self) -> None:
+        await self.move_to(INSERT_1_POSE)
+
+    @step("3 個目: 箱 1 の上へ")
+    async def work_3_over_box(self) -> None:
+        await self.move_to({"sub_y_axis": "place_1"})
+
     @step("3 個目: 箱の縁の高さへ下降", require_trigger=True)
     async def work_3_down_to_above_box(self) -> None:
-        await self.move_to(DOWN_TO_ABOVE_BOX)
+        await self._lower_lift("above_box")
 
     @step("3 個目: 箱へ下降", require_trigger=True)
     async def work_3_down_to_place(self) -> None:
-        await self.move_to(DOWN_TO_PLACE)
+        await self._lower_lift("place")
         self._log_placed_position()
 
     @step("3 個目: ワーク解放 (配置)", require_trigger=True)
@@ -346,6 +372,14 @@ class SubHandSequence(Sequence):
     async def work_3_up_to_top(self) -> None:
         await self.move_to(UP_TO_TOP)
 
+    @step("3 個目: 回転可能位置へ後退")
+    async def work_3_clear_after_place(self) -> None:
+        await self.move_to(TO_CLEAR)
+
+    @step("3 個目: 搬送姿勢へ戻す")
+    async def work_3_carry_pose_back(self) -> None:
+        await self.move_to(CARRY_POSE)
+
     @step("3 個目: ピッチを開く")
     async def work_3_open_pitch(self) -> None:
         await self.move_to(OPEN_PITCH)
@@ -353,10 +387,6 @@ class SubHandSequence(Sequence):
     @step("3 個目: オフセットを開く")
     async def work_3_open_offset(self) -> None:
         await self.move_to(OPEN_OFFSET)
-
-    @step("3 個目: 回転可能位置へ後退")
-    async def work_3_clear_after_place(self) -> None:
-        await self.move_to(TO_CLEAR)
 
     @step("3 個目: 受け取り姿勢へ")
     async def work_3_receive_pose(self) -> None:
@@ -410,11 +440,11 @@ class SubHandSequence(Sequence):
 
     @step("4 個目: 箱の縁の高さへ下降", require_trigger=True)
     async def work_4_down_to_above_box(self) -> None:
-        await self.move_to(DOWN_TO_ABOVE_BOX)
+        await self._lower_lift("above_box")
 
     @step("4 個目: 箱へ下降", require_trigger=True)
     async def work_4_down_to_place(self) -> None:
-        await self.move_to(DOWN_TO_PLACE)
+        await self._lower_lift("place")
         self._log_placed_position()
 
     @step("4 個目: ワーク解放 (配置)", require_trigger=True)

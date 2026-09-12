@@ -8,7 +8,6 @@ import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { Modal } from "@/components/ui/Modal";
 import { ClearanceWarning, SemiAutoRestoreNotice } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
-import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
 import { useSwitchMeasure } from "@/hooks/useSwitchMeasure";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
@@ -24,14 +23,11 @@ interface SwitchDistanceButtonProps {
  * 刻みは homing の既定に任せる。スイッチ 1 本ずつ刻みを変えて測るのは Monitor の `SwitchMeasurePanel`
  */
 export function SwitchDistanceButton({ robot }: SwitchDistanceButtonProps) {
-  const { connected, eStopActive } = useRobotStatus();
+  const { connected } = useRobotStatus();
   const { state, startDistance } = useSwitchMeasure();
-  const { anyManual, restore } = useSequenceModeRestore();
   const [pending, setPending] = useState(false);
 
-  // 手動中の拒否は押せば自分で解消する (全機を半自動へ戻してから送る) ので、その理由では塞がない
-  const { outcome, reasonLabel } = switchDistanceStatus(state, connected);
-  const blocked = anyManual && connected && !eStopActive ? null : reasonLabel;
+  const { outcome, reasonLabel: blocked } = switchDistanceStatus(state, connected);
 
   if (state.targets === MALFORMED) {
     return <MalformedNotice subject="距離測定の対象" />;
@@ -108,7 +104,7 @@ export function SwitchDistanceButton({ robot }: SwitchDistanceButtonProps) {
             <Button
               tone="info"
               onClick={() => {
-                if (restore()) startDistance(robot);
+                startDistance(robot);
                 setPending(false);
               }}
             >
@@ -125,7 +121,7 @@ export function SwitchDistanceButton({ robot }: SwitchDistanceButtonProps) {
         <p className="mt-2">
           対象の軸: <span className="font-mono">{axes.join(", ")}</span>
         </p>
-        {anyManual ? <SemiAutoRestoreNotice /> : null}
+        <SemiAutoRestoreNotice />
         <ClearanceWarning />
       </Modal>
     </>

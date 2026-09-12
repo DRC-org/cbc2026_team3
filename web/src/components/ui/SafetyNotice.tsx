@@ -18,7 +18,7 @@ export function ClearanceWarning({ scope = "robot" }: ClearanceWarningProps) {
   );
 }
 
-/** 手動操縦中に押されたとき、開始前に半自動へ戻すことの予告 */
+/** サーバーが開始時に対象機の制御権を引き取ることの予告 */
 export function SemiAutoRestoreNotice() {
-  return <p className="mt-2">手動操縦を抜け、全機を半自動へ戻してから開始します。</p>;
+  return <p className="mt-2">開始すると対象機は半自動へ戻り、走っているシーケンスは止まります。</p>;
 }

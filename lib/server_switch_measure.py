@@ -43,11 +43,13 @@ class SwitchMeasureController:
     def __init__(
         self,
         *,
-        environment_deny: Callable[..., str | None],
+        environment_deny: Callable[[str | None], str | None],
+        seize_control: Callable[[str], Awaitable[str | None]],
         reenergize: Callable[[str], Awaitable[None]],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
+        self._seize_control = seize_control
         self._reenergize = reenergize
         self._broadcast = broadcast
 
@@ -72,6 +74,7 @@ class SwitchMeasureController:
         return self._running
 
     def running_for(self, robot: str) -> bool:
+        """その台で走っているか。台を名指しする点検どうしの排他はこれを見る。"""
         return self._running and self._robot == robot
 
     @property
@@ -87,27 +90,40 @@ class SwitchMeasureController:
             return ()
         return self._source.axes_by_robot.get(robot, ())
 
-    def deny_reason(self, robot: str | None = None) -> str | None:
+    def _read_deny(self) -> str | None:
+        """台に依らない読み込み条件。"""
         if self._source is None or not self._source.axes_by_robot:
             return "作動点を測定できる軸が読み込まれていません"
+        return None
+
+    def deny_reason(self, robot: str | None = None) -> str | None:
+        """可否。**台を名指しすればその台の条件で決まる** (配信は台に依らない分だけ)。"""
+        read_deny = self._read_deny()
+        if read_deny is not None:
+            return read_deny
 
         environment = self._environment_deny(robot)
         if environment is not None:
             return environment
 
+        # 状態の置き場が 1 組しかないので、走っているあいだは相手の台でも測れない
         if self.running:
             return "既に作動点測定を実行中です"
         return None
 
     async def start(self, data: dict) -> str | None:
         """作動点測定を開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self.deny_reason(data.get("robot") if isinstance(data.get("robot"), str) else None)
-        if deny is not None:
-            return await self._reject(deny)
+        read_deny = self._read_deny()
+        if read_deny is not None:
+            return await self._reject(read_deny)
 
         request, reason = self._resolve(data)
         if request is None:
             return await self._reject(reason or "作動点測定の対象を決められません")
+
+        deny = self.deny_reason(request.robot)
+        if deny is not None:
+            return await self._reject(deny)
 
         source = self._source
         assert source is not None
@@ -121,16 +137,24 @@ class SwitchMeasureController:
         self._distances = None
 
         async def _run() -> None:
-            logger.info(
-                "作動点測定: robot=%s 軸=%s 向き=%+g",
-                request.robot,
-                request.axis,
-                request.direction,
-            )
             try:
-                # 無励磁のモータを戻すのはここ。コマンドハンドラで待つと、同じ接続の
-                # EMG STOP がそのぶん通らない
+                # 制御権の引き取り (シーケンスが降りるのを待つ) はここ。コマンド
+                # ハンドラで待つと、同じ接続の EMG STOP がそのぶん遅れる
+                seized = await self._seize_control(request.robot)
+                if seized is not None:
+                    self._error = seized
+                    return
+
+                # 無励磁のモータを戻すのも同じ理由でここ。シーケンスが降りてからでないと
+                # 再励磁の目標の捨て直しが、走っている指令とぶつかる
                 await self._reenergize(request.robot)
+
+                logger.info(
+                    "作動点測定: robot=%s 軸=%s 向き=%+g",
+                    request.robot,
+                    request.axis,
+                    request.direction,
+                )
                 self._result = await measure_switch(
                     source.runner,
                     source.table,
@@ -151,20 +175,26 @@ class SwitchMeasureController:
                 self._running = False
                 await self.publish()
 
+        # 制御権を奪う前に running を立てる。状態の置き場は 1 組しかないので、
+        # 奪っているあいだに次の測定が入るとその 1 組を取り合う
         self._running = True
-        self._task = asyncio.create_task(_run())
         await self.publish()
+        self._task = asyncio.create_task(_run())
         return None
 
     async def start_distance(self, data: dict) -> str | None:
         """そのロボットの全軸で距離測定を開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self.deny_reason(data.get("robot") if isinstance(data.get("robot"), str) else None)
-        if deny is not None:
-            return await self._reject(deny)
+        read_deny = self._read_deny()
+        if read_deny is not None:
+            return await self._reject(read_deny)
 
         robot, known, reason = self._resolve_robot(data)
         if robot is None or known is None:
             return await self._reject(reason or "距離測定の対象を決められません")
+
+        deny = self.deny_reason(robot)
+        if deny is not None:
+            return await self._reject(deny)
 
         source = self._source
         assert source is not None
@@ -186,9 +216,16 @@ class SwitchMeasureController:
             await self.publish()
 
         async def _run() -> None:
-            logger.info("距離測定: robot=%s 軸=%s", robot, ", ".join(known))
             try:
+                # 制御権の引き取りと再励磁はここ (作動点測定と同じ理由)
+                seized = await self._seize_control(robot)
+                if seized is not None:
+                    self._error = seized
+                    return
+
                 await self._reenergize(robot)
+
+                logger.info("距離測定: robot=%s 軸=%s", robot, ", ".join(known))
                 await measure_distances(
                     source.runner,
                     source.table,
@@ -211,8 +248,8 @@ class SwitchMeasureController:
                 await self.publish()
 
         self._running = True
-        self._task = asyncio.create_task(_run())
         await self.publish()
+        self._task = asyncio.create_task(_run())
         return None
 
     def _resolve_robot(self, data: dict) -> tuple[str | None, tuple[str, ...] | None, str | None]:

@@ -42,12 +42,14 @@ class ReturnHomeController:
     def __init__(
         self,
         *,
-        environment_deny: Callable[..., str | None],
+        environment_deny: Callable[[str], str | None],
+        seize_control: Callable[[str], Awaitable[str | None]],
         reenergize: Callable[[str], Awaitable[None]],
         is_e_stop_active: Callable[[], bool],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
+        self._seize_control = seize_control
         self._reenergize = reenergize
         self._is_e_stop_active = is_e_stop_active
         self._broadcast = broadcast
@@ -65,26 +67,32 @@ class ReturnHomeController:
 
     @property
     def running(self) -> bool:
-        """どれか 1 機でも走っていれば True。軸を握る点検どうしの排他はこれを見る。"""
+        """どれか 1 機でも走っていれば True。手動操縦の制御権を塞ぐ排他はこれを見る。"""
         return any(run.running for run in self._runs.values())
 
     def running_for(self, robot: str) -> bool:
+        """その台で走っているか。台を名指しする点検どうしの排他はこれを見る。"""
         run = self._runs.get(robot)
         return run is not None and run.running
 
     def _run_of(self, robot: str) -> _RobotRun:
         return self._runs.setdefault(robot, _RobotRun())
 
-    def _common_deny(self, robot: str | None = None) -> str | None:
+    def _read_deny(self) -> str | None:
+        """台に依らない読み込み条件。"""
         if self._source is None:
             return "初期位置へ戻す口が読み込まれていません"
         if not self._poses:
             return "初期位置が定義されているロボットがありません"
-        return self._environment_deny(robot)
+        return None
 
     def _robot_deny(self, robot: str) -> str | None:
-        run = self._runs.get(robot)
-        if run is not None and run.running:
+        """その台の環境条件・重ね掛け・零点。**可否は台ごとに決まる** (相手の台は見ない)。"""
+        deny = self._environment_deny(robot)
+        if deny is not None:
+            return deny
+
+        if self.running_for(robot):
             return "既にこのロボットの原点復帰を実行中です"
 
         unconfirmed = self._unconfirmed_axes(robot)
@@ -120,11 +128,11 @@ class ReturnHomeController:
         return tuple(found)
 
     def deny_reason(self, robot: str) -> str | None:
-        return self._common_deny(robot) or self._robot_deny(robot)
+        return self._read_deny() or self._robot_deny(robot)
 
     async def start(self, robot: object) -> str | None:
         """原点復帰を開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self._common_deny(robot if isinstance(robot, str) else None)
+        deny = self._read_deny()
         if deny is not None:
             return await self._reject(robot, deny)
 
@@ -151,11 +159,19 @@ class ReturnHomeController:
         run.index = None
 
         async def _run() -> None:
-            logger.info("原点復帰: robot=%s 手順=%d", robot, len(poses))
             try:
-                # 無励磁のモータを戻すのはここ。コマンドハンドラで待つと、同じ接続の
-                # EMG STOP がそのぶん通らない
+                # 制御権の引き取り (シーケンスが降りるのを待つ) はここ。コマンド
+                # ハンドラで待つと、同じ接続の EMG STOP がそのぶん遅れる
+                seized = await self._seize_control(robot)
+                if seized is not None:
+                    run.error = seized
+                    return
+
+                # 無励磁のモータを戻すのも同じ理由でここ。シーケンスが降りてからでないと
+                # 再励磁の目標の捨て直しが、走っている指令とぶつかる
                 await self._reenergize(robot)
+
+                logger.info("原点復帰: robot=%s 手順=%d", robot, len(poses))
                 for index, pose in enumerate(poses, start=1):
                     # 緊急停止と中断はここで見る。指令の入口も無励磁を拒むが、
                     # 走り終えるのを待ってから気付くより 1 手順ぶん早く止まる
@@ -182,9 +198,11 @@ class ReturnHomeController:
                 run.completed = run.error is None
                 await self.publish()
 
+        # 制御権を奪う前に running を立てる。奪っているあいだに二重押しや
+        # 別の点検が割り込むと、同じ軸にタスクが 2 つ走る
         run.running = True
-        run.task = asyncio.create_task(_run())
         await self.publish()
+        run.task = asyncio.create_task(_run())
         return None
 
     def abort(self) -> None:
@@ -203,12 +221,12 @@ class ReturnHomeController:
         return reason
 
     def payload(self) -> dict:
-        common = self._common_deny()
+        read_deny = self._read_deny()
         robots = {}
         for robot, poses in self._poses.items():
             run = self._runs.get(robot) or _RobotRun()
             robots[robot] = {
-                "blocked_reason": common or self._robot_deny(robot),
+                "blocked_reason": read_deny or self._robot_deny(robot),
                 "running": run.running,
                 "steps": len(poses),
                 "current_step": run.index,

@@ -251,8 +251,9 @@ _SPECS: tuple[CommandSpec, ...] = (
         reject_channel=RejectChannel.MOTOR_CHECK_ERROR,
     ),
     _spec(
-        # 原点を失ったときの復帰手段は試合中にも要る。塞ぐのは緊急停止・手動操縦・
-        # シーケンス実行中・再励磁中で、それは `_environment_deny` が全フェーズ共通で持つ
+        # 原点を失ったときの復帰手段は試合中にも要る。塞ぐのは緊急停止・再励磁中と
+        # 対象ロボットの他の点検だけ (`_environment_deny` が全フェーズ共通で持つ)。
+        # 対象ロボットの手動操縦・シーケンスは塞がず、開始時に制御権を奪う
         "homing_start",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,
@@ -265,8 +266,7 @@ _SPECS: tuple[CommandSpec, ...] = (
     ),
     _spec(
         # 姿勢が崩れたときの復帰手段は試合中にも要る (`homing_start` と同じ考え方)。
-        # 塞ぐのは緊急停止・手動操縦・シーケンス実行中・再励磁中で、それは
-        # `_environment_deny` が全フェーズ共通で持つ
+        # ゲートも同じく対象ロボットだけを見る
         "return_home",
         allowed_phases=PHASES_ANY,
         allowed_during_e_stop=False,

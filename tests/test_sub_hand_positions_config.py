@@ -141,7 +141,7 @@ class TestServoAxes:
     @pytest.mark.parametrize(
         ("axis", "names"),
         [
-            ("sub_rotate", {"receive", "carry"}),
+            ("sub_rotate", {"receive", "carry", "insert_1"}),
             ("sub_pitch", {"open", "close"}),
             ("sub_offset", {"open", "close"}),
         ],
