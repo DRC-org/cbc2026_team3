@@ -184,6 +184,14 @@ class MotorDriver(abc.ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} は PC 側に原点を持ちません")
 
+    def position_reference_established(self) -> bool:
+        """報告している論理位置の基準 (原点) が確立済みか。既定は True。
+
+        未確立の間に報告する論理値は物理姿勢を指していないので、偏差判定の材料に
+        してはならない。
+        """
+        return True
+
     def origin_confirmed(self) -> bool:
         """報告している位置の原点が、零点確定で書かれたまま残っているか。
 

@@ -708,6 +708,9 @@ class _SyncFixture:
     async def activate_e_stop(self, *, reason: str | None = None) -> None:
         await self._server_fx.activate_e_stop(reason=reason)
 
+    async def wait_reactivation(self) -> None:
+        await self._server_fx.wait_reactivation()
+
     @property
     def e_stop_active(self) -> bool:
         return self._server_fx.e_stop_active
@@ -767,6 +770,30 @@ class TestSyncLatchRelease:
 
         assert len(fx.violations) == 2
         assert fx.e_stop_active is True
+
+    async def test_再励磁のあいだは同期監視を止める(self) -> None:
+        fx = _SyncFixture()
+        gate = asyncio.Event()
+
+        async def _slow_activate(**_kwargs: object) -> list[str]:
+            await gate.wait()
+            return []
+
+        fx.mgr.activate_motors = _slow_activate
+
+        await fx.command({"type": "e_stop"})
+        await fx.command({"type": "e_stop_release"})
+        assert await wait_until(lambda: fx.monitor.is_suspended("y_axis"))
+
+        # 暫定原点を控える前の生値で判定させない
+        fx.deviate()
+        fx.monitor.step()
+        fx.monitor.step()
+        assert fx.violations == []
+
+        gate.set()
+        await fx.wait_reactivation()
+        assert fx.monitor.is_suspended("y_axis") is False
 
     async def test_release_does_not_disable_position_loop_detection(self) -> None:
         fx = _SyncFixture()

@@ -15,9 +15,13 @@ SCALE = 864.15
 class _StubDriver:
     def __init__(self, position: float = 0.0) -> None:
         self.position = position
+        self.reference_established = True
 
     def feedback_position(self) -> float:
         return self.position
+
+    def position_reference_established(self) -> bool:
+        return self.reference_established
 
 
 def _pair_group(name: str = "y_axis", tolerance: float = 2.0) -> SyncGroup:
@@ -248,6 +252,33 @@ class TestSuspendGroup:
         fx = _Fixture()
         with pytest.raises(KeyError), fx.monitor.suspend_group("sub_lift"):
             pass
+
+
+class TestUnestablishedOrigin:
+    def _violating(self) -> _Fixture:
+        fx = _Fixture(violation_samples=1)
+        fx.place("y_axis_r", 10.0)
+        fx.place("y_axis_l", 20.0)
+        return fx
+
+    async def test_原点未確立のメンバーが居れば発報しない(self) -> None:
+        fx = self._violating()
+        fx.drivers["y_axis_l"].reference_established = False
+
+        for _ in range(5):
+            fx.monitor.step()
+
+        assert fx.violations == []
+
+    async def test_原点確立後は従来どおり発報する(self) -> None:
+        fx = self._violating()
+        fx.drivers["y_axis_l"].reference_established = False
+        fx.monitor.step()
+
+        fx.drivers["y_axis_l"].reference_established = True
+        fx.monitor.step()
+
+        assert len(fx.violations) == 1
 
 
 class TestFeedbackFreshness:

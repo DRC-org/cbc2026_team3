@@ -8,7 +8,7 @@ import math
 import pathlib
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Iterator
 from dataclasses import dataclass, field
 
 from aiohttp import WSMsgType, web
@@ -1268,7 +1268,24 @@ class RobotServer:
             if device.firmware_confirmed() is False and not freshness.is_stale(device_name, now)
         )
 
+    @contextlib.contextmanager
+    def _suspend_all_sync_monitoring(self, *, reason: str) -> Iterator[None]:
+        """再励磁のあいだ全ロボットの同期監視を止める。
+
+        再励磁は数百 ms かかるが同期監視は 40ms で再トリップするので、止めないと
+        原点を控え直す手前で必ず緊急停止が先着する。
+        """
+        with contextlib.ExitStack() as stack:
+            for ctx in self._robots.values():
+                for monitor in ctx.sync_monitors:
+                    stack.enter_context(monitor.suspend_all(reason=reason))
+            yield
+
     async def _reactivate_motors(self) -> None:
+        with self._suspend_all_sync_monitoring(reason="緊急停止解除の再励磁"):
+            await self._reactivate_motors_inner()
+
+    async def _reactivate_motors_inner(self) -> None:
         await self._settle_pending_reactivation()
         await self._send_e_stop_clear_broadcast()
 
