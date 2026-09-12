@@ -52,7 +52,7 @@ class HomingController:
     def __init__(
         self,
         *,
-        environment_deny: Callable[[], str | None],
+        environment_deny: Callable[..., str | None],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
@@ -70,6 +70,10 @@ class HomingController:
         """どれか 1 機でも走っていれば True。手動操縦の制御権を塞ぐ排他はこれを見る。"""
         return any(run.running for run in self._runs.values())
 
+    def running_for(self, robot: str) -> bool:
+        run = self._runs.get(robot)
+        return run is not None and run.running
+
     def targets(self, robot: str) -> tuple[str, ...]:
         if self._source is None:
             return ()
@@ -78,10 +82,10 @@ class HomingController:
     def _run_of(self, robot: str) -> _RobotRun:
         return self._runs.setdefault(robot, _RobotRun())
 
-    def _common_deny(self) -> str | None:
+    def _common_deny(self, robot: str | None = None) -> str | None:
         if self._source is None or not self._source.axes_by_robot:
             return "零点確定できる軸が読み込まれていません"
-        return self._environment_deny()
+        return self._environment_deny(robot)
 
     def _robot_deny(self, robot: str) -> str | None:
         run = self._runs.get(robot)
@@ -90,11 +94,11 @@ class HomingController:
         return None
 
     def deny_reason(self, robot: str) -> str | None:
-        return self._common_deny() or self._robot_deny(robot)
+        return self._common_deny(robot) or self._robot_deny(robot)
 
     async def start(self, robot: str, axes: object) -> str | None:
         """零点合わせを開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self._common_deny()
+        deny = self._common_deny(robot if isinstance(robot, str) else None)
         if deny is not None:
             return await self._reject(robot, deny)
 

@@ -190,24 +190,47 @@ class TestDenyGate:
         assert started is False
         assert "零点合わせ" in (fx.motor_check_error() or "")
 
-    async def test_手動操縦モードのロボットが居たら拒む(self) -> None:
+    async def test_同じロボットが手動操縦モードなら拒む(self) -> None:
         """整列段が原点センサを歯止めから外している間、その軸を手動で動かせないことの半分。
 
         覆いは歯止めが読む口すべてに掛かるので、手動操縦の入口 (`AxisHandle`) が
         見る歯止めも同時に緩む。**緩んだ歯止めが露出しないのは、この排他があるから**。
+        排他は台ごと —— 別の台の手動操縦はこの台の軸 (とその原点センサ) に触れない。
         """
         fx, runner = _build(manual=True)
-        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        await fx.command({"type": "set_operation_mode", "robot": "sub_hand", "mode": "manual"})
 
         reason = await fx.start_homing("sub_hand")
 
         assert reason is not None and "手動操縦モード" in reason
         assert runner.homed == []
 
-    async def test_実行中は手動操縦へ切り替えられない(self) -> None:
+    async def test_別のロボットが手動操縦モードでも拒まない(self) -> None:
+        fx, runner = _build(manual=True)
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+
+        assert await fx.start_homing("sub_hand") is None
+        await fx.wait_homing_idle()
+        assert runner.homed == ["sub_y_axis"]
+
+    async def test_実行中は同じロボットを手動操縦へ切り替えられない(self) -> None:
         """もう半分。走り出した後から制御権を奪う経路も塞がっていないと意味が無い。"""
         fx, _runner = _build(manual=True)
-        fx.set_homing_running(True)
+        fx.set_homing_running(True, "sub_hand")
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "set_operation_mode", "robot": "sub_hand", "mode": "manual"},
+            requester=client,
+        )
+
+        assert fx.operation_mode("sub_hand") == "sequence"
+        assert "零点合わせ" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_実行中でも別のロボットは手動操縦へ切り替えられる(self) -> None:
+        fx, _runner = _build(manual=True)
+        fx.set_homing_running(True, "sub_hand")
         client = RecordingClient()
         fx.attach_clients(client)
 
@@ -216,8 +239,8 @@ class TestDenyGate:
             requester=client,
         )
 
-        assert fx.operation_mode("main_hand") == "sequence"
-        assert "零点合わせ" in client.of_type("command_rejected")[-1]["reason"]
+        assert fx.operation_mode("main_hand") == "manual"
+        assert client.of_type("command_rejected") == []
 
     async def test_同じロボットの重ね掛けは拒む(self) -> None:
         fx, runner = _build()
@@ -352,6 +375,24 @@ class TestCommand:
 
         assert rejected and rejected[-1]["command"] == command
         assert "零点合わせ" in rejected[-1]["reason"]
+
+    async def test_零点合わせ中でも別のロボットのシーケンス側は通る(self) -> None:
+        """サブの零点合わせ中にメインが止まるのは邪魔なだけ。握っている軸は台ごとに別。"""
+        fx, runner = _build()
+        fx.enter_match()
+        runner.release = asyncio.Event()
+        client = RecordingClient()
+
+        assert await fx.start_homing("sub_hand") is None
+        await asyncio.wait_for(runner.entered.wait(), timeout=2.0)
+        await fx.command({"type": "trigger", "robot": "main_hand"}, requester=client)
+        rejected = [
+            msg for msg in client.of_type("command_rejected") if "零点合わせ" in msg["reason"]
+        ]
+        runner.release.set()
+        await fx.wait_homing_idle()
+
+        assert rejected == []
 
 
 _INTERFERING_CONFIG = {

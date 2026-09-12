@@ -43,7 +43,7 @@ class SwitchMeasureController:
     def __init__(
         self,
         *,
-        environment_deny: Callable[[], str | None],
+        environment_deny: Callable[..., str | None],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
@@ -69,6 +69,9 @@ class SwitchMeasureController:
     def running(self) -> bool:
         return self._running
 
+    def running_for(self, robot: str) -> bool:
+        return self._running and self._robot == robot
+
     @property
     def error(self) -> str | None:
         return self._error
@@ -82,11 +85,11 @@ class SwitchMeasureController:
             return ()
         return self._source.axes_by_robot.get(robot, ())
 
-    def deny_reason(self) -> str | None:
+    def deny_reason(self, robot: str | None = None) -> str | None:
         if self._source is None or not self._source.axes_by_robot:
             return "作動点を測定できる軸が読み込まれていません"
 
-        environment = self._environment_deny()
+        environment = self._environment_deny(robot)
         if environment is not None:
             return environment
 
@@ -96,7 +99,7 @@ class SwitchMeasureController:
 
     async def start(self, data: dict) -> str | None:
         """作動点測定を開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self.deny_reason()
+        deny = self.deny_reason(data.get("robot") if isinstance(data.get("robot"), str) else None)
         if deny is not None:
             return await self._reject(deny)
 
@@ -150,7 +153,7 @@ class SwitchMeasureController:
 
     async def start_distance(self, data: dict) -> str | None:
         """そのロボットの全軸で距離測定を開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self.deny_reason()
+        deny = self.deny_reason(data.get("robot") if isinstance(data.get("robot"), str) else None)
         if deny is not None:
             return await self._reject(deny)
 

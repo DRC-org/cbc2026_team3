@@ -607,7 +607,9 @@ class RobotServer:
         return bool(touching.intersection(motor_names))
 
     async def _cmd_trigger(self, data: dict, requester: WSOrNone) -> None:
-        if await self._deny_while_axis_check("trigger", "トリガーを送れません", requester):
+        if await self._deny_while_axis_check(
+            "trigger", "トリガーを送れません", requester, data.get("robot")
+        ):
             return
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:
@@ -637,7 +639,7 @@ class RobotServer:
         if not isinstance(robot_name, str) or robot_name not in self._robots:
             return
 
-        busy = self._busy_label()
+        busy = self._busy_label(robot_name)
         if busy is not None:
             await self._reject_command(
                 requester, "reenergize_motors", f"{busy}の実行中は再励磁できません"
@@ -668,7 +670,9 @@ class RobotServer:
         await self._broadcast_state()
 
     async def _cmd_sequence_jump(self, data: dict, requester: WSOrNone) -> None:
-        if await self._deny_while_axis_check("sequence_jump", "ステップを選べません", requester):
+        if await self._deny_while_axis_check(
+            "sequence_jump", "ステップを選べません", requester, data.get("robot")
+        ):
             return
         robot_name = data.get("robot")
         step_index = data.get("step_index")
@@ -681,7 +685,7 @@ class RobotServer:
     async def _cmd_sequence_force_step(self, data: dict, requester: WSOrNone) -> None:
         """可動端の歯止めで止まったステップを、歯止めを外して走らせ直す (その 1 ステップだけ)。"""
         if await self._deny_while_axis_check(
-            "sequence_force_step", "歯止めを外して続行できません", requester
+            "sequence_force_step", "歯止めを外して続行できません", requester, data.get("robot")
         ):
             return
         robot_name = data.get("robot")
@@ -723,7 +727,7 @@ class RobotServer:
 
     async def _cmd_sequence_start(self, data: dict, requester: WSOrNone) -> None:
         if await self._deny_while_axis_check(
-            "sequence_start", "シーケンスを開始できません", requester
+            "sequence_start", "シーケンスを開始できません", requester, data.get("robot")
         ):
             return
         robot_name = data.get("robot")
@@ -945,7 +949,7 @@ class RobotServer:
                     f"'{robot_name}' は手動操縦に対応していません (位置定数が未読込)",
                 )
                 return False
-            busy = self._busy_label()
+            busy = self._busy_label(robot_name)
             if busy is not None:
                 await self._reject_command(
                     requester,
@@ -1048,11 +1052,14 @@ class RobotServer:
         # 動作確認は conveyor / valve をまさにこの軸で駆動し、操縦者が目視・打音で確かめる。
         # 排他は「sequence モードでは手動が全部拒否される」に乗っていたので、軸単位で
         # 緩めたぶんをここで塞ぎ直す (`_motor_check_environment_deny` と対になる)
-        busy = self._busy_label()
+        busy = self._busy_label(self._robot_name_of(ctx))
         if busy is not None:
             await self._reject_command(requester, command, f"{busy}の実行中は手動で操作できません")
             return False
         return True
+
+    def _robot_name_of(self, ctx: RobotContext) -> str | None:
+        return next((name for name, other in self._robots.items() if other is ctx), None)
 
     async def _manual_number(
         self,
@@ -1619,8 +1626,11 @@ class RobotServer:
             payload["reason"] = self._e_stop_reason
         await self._ws.broadcast_json(payload)
 
-    def _environment_deny(self, command: str, what: str) -> str | None:
-        """動かしてよい状況か。**動作確認と零点合わせで同じ判定を見る。**"""
+    def _environment_deny(self, command: str, what: str, robot: str | None = None) -> str | None:
+        """動かしてよい状況か。**動作確認と零点合わせで同じ判定を見る。**
+
+        `robot` を渡すとその台の状態 (再励磁・手動操縦・シーケンス) だけを見る。
+        """
         phase_deny = COMMANDS[command].phase_deny_reason(self.match.phase)
         if phase_deny is not None:
             return phase_deny
@@ -1628,45 +1638,69 @@ class RobotServer:
         if self._e_stop_active:
             return f"緊急停止中のため{what}を実行できません"
 
-        for name in self._robots:
+        robots = self._robots if robot is None else {robot: self._robots[robot]}
+        for name in robots:
             if self._is_reenergizing(name):
                 return f"'{name}' の再励磁が完了していないため{what}を実行できません"
 
-        for name, ctx in self._robots.items():
+        for name, ctx in robots.items():
             if ctx.mode is OperationMode.MANUAL:
                 return f"'{name}' が手動操縦モードのため{what}を実行できません"
-        for name, ctx in self._robots.items():
+        for name, ctx in robots.items():
             if ctx.sequence.is_running:
                 return f"'{name}' の通常シーケンス実行中のため{what}を実行できません"
         return None
 
+    def _known_robot(self, robot: object) -> str | None:
+        return robot if isinstance(robot, str) and robot in self._robots else None
+
     def _motor_check_environment_deny(self) -> str | None:
+        # 動作確認は両方の台を順に動かすので台に依らず見る
         return self._busy_deny("動作確認") or self._environment_deny(
             "motor_check_start", "動作確認"
         )
 
-    def _homing_environment_deny(self) -> str | None:
-        return self._busy_deny("零点合わせ") or self._environment_deny("homing_start", "零点合わせ")
-
-    def _switch_measure_environment_deny(self) -> str | None:
-        return self._busy_deny("作動点測定") or self._environment_deny(
-            "switch_measure_start", "作動点測定"
+    def _homing_environment_deny(self, robot: object = None) -> str | None:
+        known = self._known_robot(robot)
+        return self._busy_deny("零点合わせ", known) or self._environment_deny(
+            "homing_start", "零点合わせ", known
         )
 
-    def _return_home_environment_deny(self) -> str | None:
-        return self._busy_deny("原点復帰") or self._environment_deny("return_home", "原点復帰")
+    def _switch_measure_environment_deny(self, robot: object = None) -> str | None:
+        known = self._known_robot(robot)
+        return self._busy_deny("作動点測定", known) or self._environment_deny(
+            "switch_measure_start", "作動点測定", known
+        )
 
-    def _axis_holders(self) -> tuple[tuple[str, bool], ...]:
-        """軸を握りうる点検と、今それが走っているか。**相互排他はここ 1 箇所で決まる。**"""
+    def _return_home_environment_deny(self, robot: object = None) -> str | None:
+        known = self._known_robot(robot)
+        return self._busy_deny("原点復帰", known) or self._environment_deny(
+            "return_home", "原点復帰", known
+        )
+
+    def _axis_holders(self, robot: str | None = None) -> tuple[tuple[str, bool], ...]:
+        """軸を握りうる点検と、今それが走っているか。**相互排他はここ 1 箇所で決まる。**
+
+        `robot` を渡すとその台の軸を握る点検だけを見る。サブの零点合わせ中にメインが
+        止まる (逆も) のは邪魔なだけで、握っている軸は台ごとに別 (2026-09-12 実機の求め)。
+        動作確認は両方の台を順に動かすので台に依らず塞ぐ。
+        """
+        if robot is None:
+            return (
+                ("動作確認", self._motor_check.running),
+                ("零点合わせ", self._homing.running),
+                ("作動点測定", self._switch_measure.running),
+                ("原点復帰", self._return_home.running),
+            )
         return (
             ("動作確認", self._motor_check.running),
-            ("零点合わせ", self._homing.running),
-            ("作動点測定", self._switch_measure.running),
-            ("原点復帰", self._return_home.running),
+            ("零点合わせ", self._homing.running_for(robot)),
+            ("作動点測定", self._switch_measure.running_for(robot)),
+            ("原点復帰", self._return_home.running_for(robot)),
         )
 
-    def _busy_deny(self, what: str) -> str | None:
-        for label, running in self._axis_holders():
+    def _busy_deny(self, what: str, robot: str | None = None) -> str | None:
+        for label, running in self._axis_holders(robot):
             if running and label != what:
                 return f"{label}の実行中は{what}を実行できません"
         return None
@@ -1676,21 +1710,22 @@ class RobotServer:
         command: str,
         what: str,
         requester: WSOrNone,
+        robot: object = None,
     ) -> bool:
         """軸を握る点検の実行中は通さない。**判定は `_busy_label()` だけが持つ。**
 
         零点合わせは全フェーズで走れるので、シーケンス側の 3 つ (開始・ジャンプ・
         トリガー) は試合中にも塞ぐ必要がある。逆向きは `_environment_deny` が持つ。
         """
-        busy = self._busy_label()
+        busy = self._busy_label(robot if isinstance(robot, str) else None)
         if busy is None:
             return False
         await self._reject_command(requester, command, f"{busy}の実行中は{what}")
         return True
 
-    def _busy_label(self) -> str | None:
-        """今この瞬間、軸を握っている点検があればその名前。"""
-        for label, running in self._axis_holders():
+    def _busy_label(self, robot: str | None = None) -> str | None:
+        """今この瞬間、軸を握っている点検があればその名前 (`robot` を渡すとその台だけ)。"""
+        for label, running in self._axis_holders(robot):
             if running:
                 return label
         return None
