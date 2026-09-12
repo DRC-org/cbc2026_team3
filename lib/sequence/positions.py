@@ -216,6 +216,9 @@ class HomingSpec:
     #: 原点合わせの誤差 [軸の unit]。目標がこの範囲内の移動は、原点スイッチで止まっても
     #: 着座として到着扱いにする (home を原点から離せない軸のため)
     origin_error: float | None = None
+    #: 探索を始める前に位置名で寄せる他の軸 ((軸名, 位置名) の並び)。探索の経路に居る
+    #: 機構 (後壁) を退けるために要る。位置名で持つのは retreat_position と同じ理由
+    prepare: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.sensor is not None and self.motor_sensors is not None:
@@ -665,6 +668,7 @@ _HOMING_KEYS = frozenset(
         "coarse_step",
         "retreat_position",
         "origin_error",
+        "prepare",
     }
 )
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
@@ -1185,6 +1189,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
         not isinstance(retreat_position, str) or not retreat_position
     ):
         raise ValueError(f"{path}.retreat_position は位置名の文字列: {retreat_position!r}")
+    prepare = _parse_homing_prepare(path, raw.get("prepare"))
 
     try:
         return HomingSpec(
@@ -1197,6 +1202,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             align_distance=align_distance,
             align_step=_number(path, raw, "align_step", None),
             retreat_position=retreat_position,
+            prepare=prepare,
             origin_error=_number(path, raw, "origin_error", None),
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
@@ -1220,6 +1226,21 @@ def _parse_homing_sensor_map(path: str, raw: object) -> tuple[tuple[str, str], .
         if not isinstance(sensor_name, str) or not sensor_name:
             raise ValueError(f"{path}.sensors.{motor_name} はセンサ名の文字列: {sensor_name!r}")
         pairs.append((motor_name, sensor_name))
+    return tuple(pairs)
+
+
+def _parse_homing_prepare(path: str, raw: object) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{path}.prepare は軸名 → 位置名の辞書: {raw!r}")
+    pairs: list[tuple[str, str]] = []
+    for axis_name, position in raw.items():
+        if not isinstance(axis_name, str) or not axis_name:
+            raise ValueError(f"{path}.prepare のキーは軸名の文字列: {axis_name!r}")
+        if not isinstance(position, str) or not position:
+            raise ValueError(f"{path}.prepare.{axis_name} は位置名の文字列: {position!r}")
+        pairs.append((axis_name, position))
     return tuple(pairs)
 
 
@@ -1855,6 +1876,7 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
     # 所要時間は manual の幅だけでも決まる)
     for axis, spec in axes.items():
         _check_retreat_position(source, spec, positions.get(axis, {}))
+        _check_homing_prepare(source, spec, axes, positions)
         _check_motion_timeout(source, spec, positions.get(axis, {}))
 
     # 干渉条件は他の軸の位置名を参照するので、表が全部揃った後でしか解決できない
@@ -1985,6 +2007,34 @@ def _check_retreat_position(
         f"ありません (homing.direction={homing.direction:+g} なので {side}の値が要ります)。"
         "退避になっていないと、干渉したまま次の軸を寄せます"
     )
+
+
+def _check_homing_prepare(
+    source: str,
+    spec: AxisSpec,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, object]],
+) -> None:
+    """探索の前に寄せる軸と位置名が表にあること (無いと探索の直前に落ちる)。"""
+    homing = spec.homing
+    if homing is None:
+        return
+    for axis, name in homing.prepare:
+        where = f"{source}: axes.{spec.name}.homing.prepare"
+        if axis == spec.name:
+            raise ValueError(
+                f"{where} に自分自身 '{axis}' は書けません"
+                " (零点の決まっていない軸は位置名で動かせません)"
+            )
+        if axis not in axes:
+            raise ValueError(f"{where} の軸 '{axis}' が axes にありません")
+        values = positions.get(axis, {})
+        if name not in values:
+            available = ", ".join(values) or "(なし)"
+            raise ValueError(
+                f"{where} の '{axis}: {name}' が positions.{axis} にありません。"
+                f"定義済みの位置: {available}"
+            )
 
 
 def _check_motion_timeout(
