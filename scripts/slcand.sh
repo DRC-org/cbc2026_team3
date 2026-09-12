@@ -113,6 +113,19 @@ if ! "${SCRIPT_DIR}/setup_can.sh" --only "$IFACE" --wait "$LINK_WAIT"; then
     log_warn "${IFACE}: netdev を up できませんでした"
 fi
 
+# USB を抜いても slcand は終了せず、無効になった fd を掴んだまま残る (実機で確認)。
+# 残ると wait がずっと返らず unit の Restart も発動しないので、挿し直しても誰も
+# tty を開かない = 基板が送信できないまま CAN エラー表示になる。netdev は tty と
+# 一緒に消えるので、それを途絶の判定に使って slcand を落とし、繋ぎ直させる。
+while kill -0 "$slcand_pid" 2>/dev/null; do
+    if ! ip link show "$IFACE" &>/dev/null; then
+        log_warn "${IFACE}: netdev が消えました。slcand を落として繋ぎ直します"
+        "${SUDO[@]}" kill "$slcand_pid" 2>/dev/null || true
+        break
+    fi
+    sleep "$POLL_INTERVAL"
+done
+
 status=0
 wait "$slcand_pid" || status=$?
 log_warn "${IFACE}: slcand が終了しました (status=${status})"

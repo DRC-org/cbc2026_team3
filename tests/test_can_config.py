@@ -250,6 +250,8 @@ class TestRealConfig:
             if can_config._link(entry) == can_config.LINK_SLCAN:
                 symlink = can_config.slcan_device(name).removeprefix("/dev/")
                 assert f'SYMLINK+="{symlink}"' in rules
+                # 挿し直しで slcand が繋ぎ直らないと、基板は tty へ送れないまま黙る。
+                assert f"restart {can_config.slcand_unit(name)}" in rules
             else:
                 assert f'NAME="{name}"' in rules
 
