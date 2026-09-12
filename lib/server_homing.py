@@ -52,10 +52,12 @@ class HomingController:
     def __init__(
         self,
         *,
-        environment_deny: Callable[[], str | None],
+        environment_deny: Callable[[str], str | None],
+        seize_control: Callable[[str], Awaitable[str | None]],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
+        self._seize_control = seize_control
         self._broadcast = broadcast
 
         self._source: HomingSource | None = None
@@ -70,6 +72,11 @@ class HomingController:
         """どれか 1 機でも走っていれば True。手動操縦の制御権を塞ぐ排他はこれを見る。"""
         return any(run.running for run in self._runs.values())
 
+    def running_for(self, robot: str) -> bool:
+        """その台で走っているか。台を名指しする点検どうしの排他はこれを見る。"""
+        run = self._runs.get(robot)
+        return run is not None and run.running
+
     def targets(self, robot: str) -> tuple[str, ...]:
         if self._source is None:
             return ()
@@ -78,23 +85,27 @@ class HomingController:
     def _run_of(self, robot: str) -> _RobotRun:
         return self._runs.setdefault(robot, _RobotRun())
 
-    def _common_deny(self) -> str | None:
+    def _read_deny(self) -> str | None:
+        """台に依らない読み込み条件。"""
         if self._source is None or not self._source.axes_by_robot:
             return "零点確定できる軸が読み込まれていません"
-        return self._environment_deny()
+        return None
 
     def _robot_deny(self, robot: str) -> str | None:
-        run = self._runs.get(robot)
-        if run is not None and run.running:
+        """その台の環境条件と重ね掛け。**可否は台ごとに決まる** (相手の台は見ない)。"""
+        deny = self._environment_deny(robot)
+        if deny is not None:
+            return deny
+        if self.running_for(robot):
             return "既にこのロボットの零点合わせを実行中です"
         return None
 
     def deny_reason(self, robot: str) -> str | None:
-        return self._common_deny() or self._robot_deny(robot)
+        return self._read_deny() or self._robot_deny(robot)
 
-    async def start(self, robot: str, axes: object) -> str | None:
+    async def start(self, robot: object, axes: object) -> str | None:
         """零点合わせを開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self._common_deny()
+        deny = self._read_deny()
         if deny is not None:
             return await self._reject(robot, deny)
 
@@ -102,6 +113,7 @@ class HomingController:
         if targets is None:
             return await self._reject(robot, reason or "零点合わせの対象を決められません")
 
+        assert isinstance(robot, str)
         deny = self._robot_deny(robot)
         if deny is not None:
             return await self._reject(robot, deny)
@@ -124,8 +136,15 @@ class HomingController:
             await self.publish()
 
         async def _run() -> None:
-            logger.info("零点合わせ: robot=%s 軸=%s", robot, ", ".join(targets))
             try:
+                # 制御権の引き取り (シーケンスが降りるのを待つ) はここ。コマンド
+                # ハンドラで待つと、同じ接続の EMG STOP がそのぶん遅れる
+                seized = await self._seize_control(robot)
+                if seized is not None:
+                    run.error = seized
+                    return
+
+                logger.info("零点合わせ: robot=%s 軸=%s", robot, ", ".join(targets))
                 await run_homing(
                     source.runner,
                     source.table,
@@ -150,9 +169,11 @@ class HomingController:
                 run.running = False
                 await self.publish()
 
+        # 制御権を奪う前に running を立てる。奪っているあいだに二重押しや
+        # 別の点検が割り込むと、同じ軸にタスクが 2 つ走る
         run.running = True
-        run.task = asyncio.create_task(_run())
         await self.publish()
+        run.task = asyncio.create_task(_run())
         return None
 
     def _resolve(self, robot: object, axes: object) -> tuple[tuple[str, ...] | None, str | None]:
@@ -189,12 +210,12 @@ class HomingController:
     def payload(self) -> dict:
         source = self._source
         axes_by_robot = source.axes_by_robot if source else {}
-        common = self._common_deny()
+        read_deny = self._read_deny()
         robots = {}
         for robot in axes_by_robot:
             run = self._runs.get(robot) or _RobotRun()
             robots[robot] = {
-                "blocked_reason": common or self._robot_deny(robot),
+                "blocked_reason": read_deny or self._robot_deny(robot),
                 "running": run.running,
                 "axes": list(run.axes),
                 "current_axis": run.current,

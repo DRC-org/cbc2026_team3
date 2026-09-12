@@ -57,6 +57,20 @@ class _IdleSequence(Sequence):
         return
 
 
+class _HoldSequence(Sequence):
+    """解放されるまでステップの中で止まる。制御権を奪う経路を通すための代役。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @step("解放されるまで待つ")
+    async def hold(self) -> None:
+        self.entered.set()
+        await self.release.wait()
+
+
 class _RecordingRunner:
     """`HomingRunner` の代役。どの軸が実際に零点確定を通ったかだけを見る。"""
 
@@ -94,12 +108,14 @@ def _build(
     runner: _RecordingRunner | None = None,
     robots: tuple[str, ...] = ("main_hand", "sub_hand"),
     manual: bool = False,
+    sequences: dict[str, Sequence] | None = None,
 ) -> tuple[ServerFixture, _RecordingRunner]:
     fx = ServerFixture.build()
     fx.freeze_broadcast()
     for name in robots:
         controller = ManualController(_motors(), _table()) if manual else None
-        fx.add_robot(name, _IdleSequence(name), manual=controller)
+        sequence = (sequences or {}).get(name) or _IdleSequence(name)
+        fx.add_robot(name, sequence, manual=controller)
 
     runner = runner or _RecordingRunner()
     fx.set_homing_source(
@@ -168,12 +184,14 @@ class TestDenyGate:
         assert runner.homed == []
         assert "緊急停止" in (fx.homing_state()["robots"]["sub_hand"]["blocked_reason"] or "")
 
-    async def test_動作確認の実行中は拒む(self) -> None:
+    @pytest.mark.parametrize("robot", ["main_hand", "sub_hand"])
+    async def test_動作確認の実行中はどの台も拒む(self, robot: str) -> None:
+        # 動作確認は両ハンド 1 本のシーケンスなので、ここだけ全機横断で塞ぐ
         fx, runner = _build()
         pending: asyncio.Task[None] = asyncio.create_task(asyncio.Event().wait())  # type: ignore[arg-type]
         fx.set_motor_check_task(pending)
         try:
-            reason = await fx.start_homing("sub_hand")
+            reason = await fx.start_homing(robot)
         finally:
             pending.cancel()
 
@@ -190,24 +208,54 @@ class TestDenyGate:
         assert started is False
         assert "零点合わせ" in (fx.motor_check_error() or "")
 
-    async def test_手動操縦モードのロボットが居たら拒む(self) -> None:
+    async def test_相手が手動操縦中でも対象の零点合わせは通る(self) -> None:
+        """原点を失った台を戻せないと試合が終わる。ゲートは対象ロボットだけを見る。"""
+        fx, runner = _build(manual=True)
+        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        client = RecordingClient()
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"}, requester=client)
+        await fx.wait_homing_idle()
+
+        assert client.of_type("command_rejected") == []
+        assert runner.homed == ["sub_y_axis"]
+        assert fx.operation_mode("main_hand") == "manual"
+
+    async def test_自機が手動操縦中なら半自動へ戻して走る(self) -> None:
         """整列段が原点センサを歯止めから外している間、その軸を手動で動かせないことの半分。
 
         覆いは歯止めが読む口すべてに掛かるので、手動操縦の入口 (`AxisHandle`) が
-        見る歯止めも同時に緩む。**緩んだ歯止めが露出しないのは、この排他があるから**。
+        見る歯止めも同時に緩む。**緩んだ歯止めが露出しないのは、手動を奪うから**。
         """
         fx, runner = _build(manual=True)
-        await fx.command({"type": "set_operation_mode", "robot": "main_hand", "mode": "manual"})
+        await fx.command({"type": "set_operation_mode", "robot": "sub_hand", "mode": "manual"})
+        client = RecordingClient()
 
-        reason = await fx.start_homing("sub_hand")
+        await fx.command({"type": "homing_start", "robot": "sub_hand"}, requester=client)
+        await fx.wait_homing_idle()
 
-        assert reason is not None and "手動操縦モード" in reason
-        assert runner.homed == []
+        assert client.of_type("command_rejected") == []
+        assert fx.operation_mode("sub_hand") == "sequence"
+        assert runner.homed == ["sub_y_axis"]
 
-    async def test_実行中は手動操縦へ切り替えられない(self) -> None:
+    async def test_実行中は同じ台を手動操縦へ切り替えられない(self) -> None:
         """もう半分。走り出した後から制御権を奪う経路も塞がっていないと意味が無い。"""
         fx, _runner = _build(manual=True)
-        fx.set_homing_running(True)
+        fx.set_homing_running(True, "sub_hand")
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "set_operation_mode", "robot": "sub_hand", "mode": "manual"},
+            requester=client,
+        )
+
+        assert fx.operation_mode("sub_hand") == "sequence"
+        assert "零点合わせ" in client.of_type("command_rejected")[-1]["reason"]
+
+    async def test_実行中でも相手の台は手動操縦へ切り替えられる(self) -> None:
+        fx, _runner = _build(manual=True)
+        fx.set_homing_running(True, "sub_hand")
         client = RecordingClient()
         fx.attach_clients(client)
 
@@ -216,8 +264,28 @@ class TestDenyGate:
             requester=client,
         )
 
-        assert fx.operation_mode("main_hand") == "sequence"
-        assert "零点合わせ" in client.of_type("command_rejected")[-1]["reason"]
+        assert fx.operation_mode("main_hand") == "manual"
+        assert client.of_type("command_rejected") == []
+
+    async def test_相手のシーケンス実行中でも通る(self) -> None:
+        """トリガー待ちでも `is_running` は立つので、塞ぐと試合中に原点を取り直せない。"""
+        held = _HoldSequence("main_hand")
+        fx, runner = _build(sequences={"main_hand": held})
+        task = asyncio.create_task(held.run_forever())
+        held.request_start()
+        await asyncio.wait_for(held.entered.wait(), timeout=2.0)
+        client = RecordingClient()
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"}, requester=client)
+        await fx.wait_homing_idle()
+
+        assert client.of_type("command_rejected") == []
+        assert runner.homed == ["sub_y_axis"]
+        assert held.is_running is True
+
+        held.release.set()
+        held.request_stop()
+        task.cancel()
 
     async def test_同じロボットの重ね掛けは拒む(self) -> None:
         fx, runner = _build()
@@ -252,6 +320,71 @@ class TestDenyGate:
         assert state["robots"]["main_hand"]["running"] is True
         assert sorted(runner.homed) == ["sub_y_axis", "y_axis"]
         assert fx.homing_state()["running"] is False
+
+
+class TestSeizesControl:
+    """自機のシーケンスは拒否理由にせず、開始時に止める。**同じ軸に書き手を 2 つ作らない。**"""
+
+    async def test_自機のシーケンスを止めてから走る(self) -> None:
+        held = _HoldSequence("sub_hand")
+        fx, runner = _build(sequences={"sub_hand": held})
+        task = asyncio.create_task(held.run_forever())
+        held.request_start()
+        await asyncio.wait_for(held.entered.wait(), timeout=2.0)
+        client = RecordingClient()
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"}, requester=client)
+        # ステップの境目でしか降りないので、走っている 1 ステップを終わらせてやる
+        held.release.set()
+        await fx.wait_homing_idle()
+
+        assert client.of_type("command_rejected") == []
+        assert held.is_running is False
+        assert runner.homed == ["sub_y_axis"]
+
+        task.cancel()
+
+    async def test_開始コマンドはシーケンスが止まる前に返る(self) -> None:
+        """待つのは点検の実行タスク側。**ハンドラで待つと同じ接続の EMG STOP が遅れる。**"""
+        held = _HoldSequence("sub_hand")
+        fx, _runner = _build(sequences={"sub_hand": held})
+        task = asyncio.create_task(held.run_forever())
+        held.request_start()
+        await asyncio.wait_for(held.entered.wait(), timeout=2.0)
+
+        # ハンドラが降りるのを待っていれば `_CONTROL_SEIZE_TIMEOUT_S` ぶん返らない
+        await asyncio.wait_for(
+            fx.command({"type": "homing_start", "robot": "sub_hand"}), timeout=0.5
+        )
+
+        assert held.is_running is True
+        assert fx.homing_state()["robots"]["sub_hand"]["running"] is True
+
+        held.release.set()
+        held.request_stop()
+        task.cancel()
+
+    async def test_止まりきらなければ開始せず理由を配信に載せる(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("lib.server._CONTROL_SEIZE_TIMEOUT_S", 0.05)
+        held = _HoldSequence("sub_hand")
+        fx, runner = _build(sequences={"sub_hand": held})
+        task = asyncio.create_task(held.run_forever())
+        held.request_start()
+        await asyncio.wait_for(held.entered.wait(), timeout=2.0)
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"})
+        await fx.wait_homing_idle()
+
+        state = fx.homing_state()["robots"]["sub_hand"]
+        assert "止まらなかった" in (state["error"] or "")
+        assert state["running"] is False
+        assert runner.homed == []
+
+        held.release.set()
+        held.request_stop()
+        task.cancel()
 
 
 class TestBroadcast:

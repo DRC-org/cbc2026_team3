@@ -8,7 +8,6 @@ import { Modal } from "@/components/ui/Modal";
 import { ClearanceWarning, SemiAutoRestoreNotice } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useHoming } from "@/hooks/useHoming";
-import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
 import { homingEntry, homingStatus, robotTargets } from "@/lib/homingStatus";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
@@ -19,15 +18,12 @@ interface HomingButtonsProps {
 }
 
 export function HomingButtons({ robot: only }: HomingButtonsProps) {
-  const { connected, eStopActive } = useRobotStatus();
+  const { connected } = useRobotStatus();
   const { state, start } = useHoming();
-  const { anyManual, restore } = useSequenceModeRestore();
   const [pending, setPending] = useState<[string, string[]] | null>(null);
 
   const entry = homingEntry(state, only);
-  // 手動中の拒否は押せば自分で解消する (全機を半自動へ戻してから送る) ので、その理由では塞がない
-  const { reasonLabel } = homingStatus(entry, connected);
-  const blocked = anyManual && connected && !eStopActive ? null : reasonLabel;
+  const { reasonLabel: blocked } = homingStatus(entry, connected);
   const disabled = blocked !== null;
   const running = entry !== MALFORMED && entry?.running === true;
   const targets = robotTargets(state, only);
@@ -70,7 +66,7 @@ export function HomingButtons({ robot: only }: HomingButtonsProps) {
             <Button
               tone="info"
               onClick={() => {
-                if (pending && restore()) start(pending[0], pending[1]);
+                if (pending) start(pending[0], pending[1]);
                 setPending(null);
               }}
             >
@@ -86,7 +82,7 @@ export function HomingButtons({ robot: only }: HomingButtonsProps) {
         <p className="mt-2">
           対象の軸: <span className="font-mono">{pending ? pending[1].join(", ") : ""}</span>
         </p>
-        {anyManual ? <SemiAutoRestoreNotice /> : null}
+        <SemiAutoRestoreNotice />
         <ClearanceWarning />
       </Modal>
 

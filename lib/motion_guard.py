@@ -259,9 +259,12 @@ class SensorSuspension:
     露出しないのは、**整列段のあいだ当該軸に手動操縦の制御権が無い**ためで、根拠は
     覆いの側ではなく制御権の側にある:
 
-    - 零点確定を走らせる 2 つの経路 (`homing_start` と動作確認) は、**どのロボットかが
-      手動操縦モードだと開始できない** (`RobotServer._environment_deny`)
-    - 走り出した後は `_busy_label()` が立つので、**手動操縦モードへの切り替えが拒まれ**
+    - 動作確認は**どのロボットかが手動操縦モードだと開始できない**
+      (`RobotServer._all_robots_free_deny`)。`homing_start` は塞ぐ代わりに**開始時に
+      対象ロボットの手動操縦を解除する** (`RobotServer._seize_control`) ので、
+      走り出した時点でその台に手動操縦の制御権は無い
+    - 走り出した後は対象ロボットの `_busy_label()` が立つので、**手動操縦モードへの
+      切り替えが拒まれ**
       (`RobotServer._set_operation_mode`)、**`manual_always` の軸すら拒まれる**
       (`RobotServer._allow_manual_in_sequence`)
     - そもそも覆う対象になる軸は到達判定を持つ位置制御軸なので `manual_always` を

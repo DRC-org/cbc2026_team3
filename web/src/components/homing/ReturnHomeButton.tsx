@@ -8,7 +8,6 @@ import { Modal } from "@/components/ui/Modal";
 import { ClearanceWarning, SemiAutoRestoreNotice } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useReturnHome } from "@/hooks/useReturnHome";
-import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
 import { MALFORMED } from "@/lib/protocol";
 import { robotLabel } from "@/lib/robotLabel";
 
@@ -20,9 +19,8 @@ interface ReturnHomeButtonProps {
 const DISCONNECTED = "切断中のため不可";
 
 export function ReturnHomeButton({ robot }: ReturnHomeButtonProps) {
-  const { connected, eStopActive } = useRobotStatus();
+  const { connected } = useRobotStatus();
   const { state, start } = useReturnHome();
-  const { anyManual, restore } = useSequenceModeRestore();
   const [pending, setPending] = useState(false);
 
   if (state.robots === MALFORMED) {
@@ -34,9 +32,7 @@ export function ReturnHomeButton({ robot }: ReturnHomeButtonProps) {
     return <p className="text-base-content/70">原点復帰できる手順がありません。</p>;
   }
 
-  const reasonLabel = connected ? entry.blocked_reason : DISCONNECTED;
-  // 手動中の拒否は押せば自分で解消する (全機を半自動へ戻してから送る) ので、その理由では塞がない
-  const blocked = anyManual && connected && !eStopActive ? null : reasonLabel;
+  const blocked = connected ? entry.blocked_reason : DISCONNECTED;
   const progress =
     entry.running && entry.current_step !== null && entry.steps !== MALFORMED
       ? `${entry.current_step}/${entry.steps}`
@@ -71,7 +67,7 @@ export function ReturnHomeButton({ robot }: ReturnHomeButtonProps) {
             <Button
               tone="info"
               onClick={() => {
-                if (restore()) start(robot);
+                start(robot);
                 setPending(false);
               }}
             >
@@ -84,7 +80,7 @@ export function ReturnHomeButton({ robot }: ReturnHomeButtonProps) {
           <span className="font-medium text-info">{robotLabel(robot)}だけ</span>
           を動かします。試合シーケンスの初期位置へ戻します。
         </p>
-        {anyManual ? <SemiAutoRestoreNotice /> : null}
+        <SemiAutoRestoreNotice />
         <ClearanceWarning />
       </Modal>
 
