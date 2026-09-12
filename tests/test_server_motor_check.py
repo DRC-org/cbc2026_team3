@@ -625,6 +625,7 @@ class TestBroadcast:
             "step_index": 0,
             "step": "グリッパ 開閉",
             "message": "軸内のモータ位置がずれています (y_axis: 偏差 3.0 > 許容 2.0)",
+            "limit_related": False,
         }
         assert "グリッパ 開閉" in (state["error"] or "")
         assert "ずれています" in (state["error"] or "")

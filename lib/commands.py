@@ -148,6 +148,22 @@ _SPECS: tuple[CommandSpec, ...] = (
         handler="_cmd_sequence_jump",
     ),
     _spec(
+        "sequence_force_step",
+        allowed_phases=PHASES_DURING_MATCH,
+        phase_deny_message="試合中のみ歯止めを外して続行できます",
+        allowed_during_e_stop=False,
+        e_stop_deny_message="緊急停止中のため歯止めを外して続行できません",
+        blocked_during_manual=True,
+        manual_deny_message="手動操縦中のため歯止めを外して続行できません",
+        blocked_during_reenergize=True,
+        reenergize_deny_message="再励磁の処理中のため歯止めを外して続行できません",
+        blocked_without_court=True,
+        court_deny_message=(
+            "コートが未設定のため歯止めを外して続行できません (コート設定でコートを選んでください)"
+        ),
+        handler="_cmd_sequence_force_step",
+    ),
+    _spec(
         "trigger",
         allowed_phases=PHASES_DURING_MATCH,
         phase_deny_message="試合中のみトリガーを送れます",

@@ -675,6 +675,43 @@ class RobotServer:
             self._robots[robot_name].sequence.request_jump(step_index)
             logger.info("sequence_jump: %s -> %d", robot_name, step_index)
 
+    async def _cmd_sequence_force_step(self, data: dict, requester: WSOrNone) -> None:
+        """可動端の歯止めで止まったステップを、歯止めを外して走らせ直す (その 1 ステップだけ)。"""
+        if await self._deny_while_axis_check(
+            "sequence_force_step", "歯止めを外して続行できません", requester
+        ):
+            return
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            return
+        sequence = self._robots[robot_name].sequence
+        failure = sequence.last_error
+        if failure is None or not failure.limit_related:
+            await self._reject_command(
+                requester,
+                "sequence_force_step",
+                "可動端の歯止めで止まったステップがありません"
+                " (歯止めを外して続行できるのは、その失敗の直後だけです)",
+            )
+            return
+        if sequence.is_running:
+            await self._reject_command(
+                requester, "sequence_force_step", "シーケンス実行中は歯止めを外せません"
+            )
+            return
+        if not sequence.can_force:
+            await self._reject_command(
+                requester, "sequence_force_step", f"'{robot_name}' には歯止めを外す口がありません"
+            )
+            return
+        logger.warning(
+            "sequence_force_step: %s -> %d「%s」可動端の歯止めを外して続行 (操縦者の指示)",
+            robot_name,
+            failure.step_index,
+            failure.label,
+        )
+        sequence.request_force_step(failure.step_index)
+
     async def _cmd_sequence_stop(self, data: dict, _requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if robot_name and robot_name in self._robots:

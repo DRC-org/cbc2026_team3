@@ -478,6 +478,7 @@
       "current_step": "Y 軸を投入位置へ",
       "e_stop_active": false,
       "last_error": {
+        "limit_related": false,
         "message": "シーケンス 'main_hand_seq': 軸内のモータ位置がずれています (y_axis: 偏差 3.100 > 許容 2.000)",
         "step": "Y 軸を投入位置へ",
         "step_index": 2

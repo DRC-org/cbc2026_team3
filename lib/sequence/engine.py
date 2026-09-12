@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from lib.match_state import Court
+from lib.motion_guard import GuardViolation
 from lib.sequence.interlock import AxisInterlock
 from lib.sequence.motors import AxisHandle
 from lib.sequence.positions import AxisSpec, PositionTable
@@ -60,9 +62,21 @@ class StepFailure:
     step_index: int
     label: str
     message: str
+    #: 可動端の歯止め (入口の拒否か移動中の介入) で止まった失敗。操縦者が歯止めを外して
+    #: そのステップだけ走らせ直せる (`Sequence.request_force_step`)
+    limit_related: bool = False
 
     def to_dict(self) -> dict:
-        return {"step_index": self.step_index, "step": self.label, "message": self.message}
+        return {
+            "step_index": self.step_index,
+            "step": self.label,
+            "message": self.message,
+            "limit_related": self.limit_related,
+        }
+
+
+#: 可動端センサをその間だけ「押されていない」として読ませる口 (`SensorSuspension.suspend`)
+SuspendSensors = Callable[[Collection[str]], AbstractContextManager[None]]
 
 
 @dataclass(frozen=True)
@@ -221,9 +235,32 @@ class Sequence:
         self._available_axes: frozenset[str] | None = None
         self._excluded_steps: tuple[ExcludedStep, ...] = ()
         self._limit_interventions: LimitInterventions | None = None
+        self._suspend_sensors: SuspendSensors | None = None
+        self._limit_sensors: tuple[str, ...] = ()
+        self._force_index: int | None = None
 
     def bind_motors(self, group: MotorGroup) -> None:
         self._motors = group
+
+    def bind_limit_override(self, suspend: SuspendSensors, sensors: Collection[str]) -> None:
+        """可動端で止まったステップを、歯止めを外して走らせ直す口。
+
+        外すのは **そのステップ 1 つのあいだ** だけで、範囲は `guard.limits` に宣言された
+        センサ全部 (指令の入口と移動中の監視の両方が同じ覆いを読む)。どのセンサが止めたかを
+        失敗から辿り直さないのは、宣言と実物が入れ替わっている疑いのある端でも同じ口で
+        抜けられるようにするため。判断そのもの (`MotionGuard.check_limit`) には触らない。
+        """
+        self._suspend_sensors = suspend
+        self._limit_sensors = tuple(dict.fromkeys(sensors))
+
+    @property
+    def can_force(self) -> bool:
+        return self._suspend_sensors is not None and bool(self._limit_sensors)
+
+    def request_force_step(self, index: int) -> None:
+        """index のステップだけ可動端の歯止めを外して走らせ、その後は通常に戻す。"""
+        self._force_index = index
+        self._request_index(index)
 
     def bind_limit_interventions(self, interventions: LimitInterventions) -> None:
         self._limit_interventions = interventions
@@ -625,8 +662,22 @@ class Sequence:
                 )
 
                 method = getattr(self, step_info.method_name)
+                # 外すのはこの 1 ステップだけ。成否に依らずここで印を消す
+                forced = self._force_index == self._current_index and self.can_force
+                self._force_index = None
                 try:
-                    await method()
+                    if forced:
+                        assert self._suspend_sensors is not None
+                        logger.warning(
+                            "[%s] %s: 可動端の歯止めを外して実行 (%s を押されていない扱い)",
+                            self.name,
+                            step_info.label,
+                            ", ".join(self._limit_sensors),
+                        )
+                        with self._suspend_sensors(self._limit_sensors):
+                            await method()
+                    else:
+                        await method()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -637,6 +688,7 @@ class Sequence:
                         step_index=self._current_index,
                         label=step_info.label,
                         message=str(exc) or "ステップの実行に失敗しました",
+                        limit_related=isinstance(exc, (GuardViolation, LimitInterventionError)),
                     )
                     break
 
@@ -655,4 +707,5 @@ class Sequence:
         self._trigger_event.clear()
         self._stop_event.clear()
         self._jump_request = None
+        self._force_index = None
         self._last_error = None

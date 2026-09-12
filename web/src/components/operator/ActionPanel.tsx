@@ -24,6 +24,8 @@ interface ActionPanelProps {
   onStart: () => void;
   onStop: () => void;
   onTrigger: () => void;
+  /** 可動端の歯止めで止まったステップを、歯止めを外して走らせ直す (確認は呼ぶ側が挟む) */
+  onForce?: () => void;
 }
 
 const PRIMARY_CLASS = "h-full w-full rounded-none border-0 text-[1.3em]";
@@ -36,6 +38,7 @@ export function ActionPanel({
   onStart,
   onStop,
   onTrigger,
+  onForce,
 }: ActionPanelProps) {
   const { total_steps: totalSteps, step_index: stepIndex } = state;
   const steps = state.steps ?? [];
@@ -100,6 +103,17 @@ export function ActionPanel({
             </span>
             <span className="text-base-content/80">{state.last_error.message}</span>
           </span>
+          {state.last_error.limit_related && onForce ? (
+            <Button
+              tone="danger"
+              className="ml-auto shrink-0 btn-sm"
+              disabled={!inMatch || blocked || kind !== "idle"}
+              onClick={onForce}
+              aria-label="可動端の歯止めを外してこのステップを走らせ直す"
+            >
+              歯止めを外して続行
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
