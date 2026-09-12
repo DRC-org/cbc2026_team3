@@ -2,7 +2,7 @@
 #
 # コードを更新したあとの反映を 1 コマンドにまとめる。
 #   git pull --ff-only → 依存導入 (uv sync / pnpm install) → Web UI ビルド (pnpm build)
-#   → CAN / ウォッチドッグ / 制御の 3 サービスを再起動 (停止中・failed でも起動する)
+#   → CAN / slcand / ウォッチドッグ / 制御のサービスを再起動 (停止中・failed でも起動する)
 #
 # !!! pull と依存導入はネットワークを要求しうる。会場では --no-install を使う !!!
 #
@@ -175,6 +175,16 @@ require_can_config
 CAN_SERVICE_NAME="$(can_config_path service_name)"
 UNITS=("$CAN_SERVICE_NAME" "$WATCHDOG_SERVICE" "$CONTROL_SERVICE")
 
+# slcan バスの slcand 常駐。対象は can_config.py の「採取済みか」が決める。
+if ! slcan_units=$(can_config_slcan --assigned-only); then
+    log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
+    exit 1
+fi
+while IFS=$'\t' read -r _name _dev _speed unit; do
+    [[ -z "${unit:-}" ]] && continue
+    UNITS+=("$unit")
+done <<< "$slcan_units"
+
 main_pid="$(systemctl show -p MainPID --value "$CONTROL_SERVICE")"
 for pid in $(port_listener_pids); do
     [[ "$pid" == "$main_pid" ]] && continue
@@ -234,5 +244,5 @@ if [[ $restart_ok -eq 0 || ${#failed_units[@]} -gt 0 || $port_ok -eq 0 ]]; then
     exit 1
 fi
 
-log_info "3 サービスを再起動しました (${CONTROL_SERVICE} は PID ${main_pid} で :${PORT} を待ち受け中)"
+log_info "${#UNITS[@]} サービスを再起動しました (${CONTROL_SERVICE} は PID ${main_pid} で :${PORT} を待ち受け中)"
 warn_if_needs_install

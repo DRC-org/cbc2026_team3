@@ -3,21 +3,21 @@ robot_name: main_hand
 motors:
   dc_ch0:
     driver: generic
-    bus: generic_bus
+    bus: dc_bus
     can_id: 0x80
     control_type: duty
     expected_firmware: 2
 
   dc_ch1:
     driver: generic
-    bus: generic_bus
+    bus: dc_bus
     can_id: 0x81
     control_type: duty
     expected_firmware: 2
 
   dc_ch2:
     driver: generic
-    bus: generic_bus
+    bus: dc_bus
     can_id: 0x82
     control_type: duty
     expected_firmware: 2

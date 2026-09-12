@@ -2,3 +2,4 @@ can_buses:
   m3508_bus: can_m3508
   edulite_bus: can_edulite
   generic_bus: can_generic
+  dc_bus: can_dc

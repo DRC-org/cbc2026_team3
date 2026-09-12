@@ -17,8 +17,10 @@ log_err()  { echo "${LOG_ERR_PREFIX} $*" >&2; }
 
 if [[ $EUID -eq 0 ]]; then
     IP=(ip)
+    SUDO=()
 else
     IP=(sudo ip)
+    SUDO=(sudo)
 fi
 
 # 各スクリプトのヘッダコメントをそのまま --help として出す (行番号は持たない)。
@@ -70,4 +72,8 @@ can_config_path() {
 # どこにも伝えず set -e / pipefail でも捕まらないので、必ず変数へ受けて判定する。
 can_config_list() {
     "$PYTHON" "$CAN_CONFIG" list "$@"
+}
+
+can_config_slcan() {
+    "$PYTHON" "$CAN_CONFIG" slcan "$@"
 }

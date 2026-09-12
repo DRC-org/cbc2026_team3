@@ -1,0 +1,27 @@
+# テンプレート。@PROJECT_DIR@ / @RUN_USER@ は install.sh が置換する。
+# インスタンス名は CAN バス名 (例: cbc-slcand@can_dc.service)。
+
+[Unit]
+Description=CBC2026 Team3 SLCAN デーモン (%I)
+Documentation=file://@PROJECT_DIR@/docs/operations.md
+# 順序だけで依存は張らない。この unit が落ちても cbc-can.service は上がる。
+Before=cbc-can.service
+After=network-pre.target
+
+# systemd v229 以降、これは [Service] に書くと黙って無視される。
+# 0 = 何回落ちても諦めない。諦めて failed で止まると会場で人手の復旧が要る。
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=@PROJECT_DIR@/scripts/slcand.sh %I
+
+# 基板が挿さっていない間 slcand.sh は tty を待って黙っているので、ここは回らない。
+Restart=always
+RestartSec=10
+
+# slcand.sh は TERM で exit 143 する。手動 stop を failed 扱いにしない
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
