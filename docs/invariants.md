@@ -911,6 +911,13 @@ PC 側の検出経路は DC 基板のフィードバックに載る緊急停止�
   systemd が死を検出して起こし直し、その前に取り残された `slcand` と netdev を掃除する。
   **この掃除を消すと、挿し直しても無音のままの netdev が居座る**。`setup_can.sh` から
   `slcand` を起こし直すと起こす主体が 2 つになり、tty を奪い合って同じ穴が開く
+- **`slcand` は tty が消えても死なない。** USB を抜くと netdev `can_dc` は消えるのに、`slcand`
+  は無効になった fd を掴んだまま残る（実機で確認）。`slcand.sh` が `wait` するだけだと unit は
+  `active` のままで `Restart` も発動せず、**挿し直しても誰も新しい tty を開かない** ——
+  基板は USB CDC へ 1 通も書けず、送信失敗を数えて CAN エラー表示（赤点滅）になる。
+  `slcand.sh` は **netdev の消滅を途絶の判定に使って `slcand` を落とす**（ここを消すと上の穴が開く）。
+  udev も `ACTION=="add"` で `cbc-slcand@<バス名>.service` を restart し、`RestartSec` を待たずに
+  戻す —— restart するのは unit であって、`slcand` を起こす主体は増えない
 - **netdev が戻っても `cbc-control` の socket は戻らない。** netdev が unregister されると
   カーネルが bind 済みの raw socket を切り離し、同名の netdev が再登録されても**再 bind
   されない**（`ip link down/up` とは別物で、そちらは socket を保つ）。自動復旧で戻るのは

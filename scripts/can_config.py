@@ -218,9 +218,13 @@ def _slcan_rules(name: str, entry: dict, restart: str) -> list[str]:
     )
     match = f'SUBSYSTEM=="tty", {ids}, ATTRS{{serial}}=="{_value(entry, "serial")}"'
     symlink = slcan_device(name).removeprefix("/dev/")
+    slcand_restart = f'RUN+="/usr/bin/systemctl --no-block restart {slcand_unit(name)}"'
     return [
         # ACTION を絞らないのは、change イベントで udev が symlink を消さないようにするため。
         f'{match}, SYMLINK+="{symlink}"',
+        # 挿し直しの復帰を unit の RestartSec 待ちにしない。slcand.sh は古い slcand を
+        # pkill してから起動するので、多重に叩かれても二重起動にはならない。
+        f'{match}, ACTION=="add", {slcand_restart}',
         f'{match}, ACTION=="add", {restart}',
     ]
 
