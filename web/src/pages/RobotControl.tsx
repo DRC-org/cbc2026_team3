@@ -14,7 +14,7 @@ import { ManualPanel } from "@/components/operator/ManualPanel";
 import { MatchTimer } from "@/components/operator/MatchTimer";
 import { ModeSwitch } from "@/components/operator/ModeSwitch";
 import { NudgePanel } from "@/components/operator/NudgePanel";
-import { PositionCapturePanel } from "@/components/operator/PositionCapturePanel";
+import { PositionsReloadButton } from "@/components/operator/PositionsReloadButton";
 import { SequenceStepList } from "@/components/operator/SequenceStepList";
 import { SuctionPadPanel } from "@/components/operator/SuctionPadPanel";
 import { Button } from "@/components/ui/Button";
@@ -167,21 +167,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // 試合のリセットは Monitor だけが持つので RESET は出さない
   const courtPanel = state.court_required === true ? <CourtSettings /> : null;
 
-  // 手で寄せながら控える流れなので手動の列に置く。位置定数を持たない台では出さない。
-  // 位置定数を決める作業用なので --dev-tools のときだけ (試合中の画面には出さない)
-  const capturePanel =
-    !serverInfo.dev_tools ||
-    !inManual ||
-    state.position_capture === undefined ||
-    state.position_capture === null ? null : (
-      <PositionCapturePanel
-        robotKey={robotKey}
-        capture={state.position_capture}
-        reload={state.positions_reload ?? null}
-        blockedReason={manualBlockedReason}
-        sendOrReport={sendOrReport}
-      />
-    );
+  // 位置を控える面は消した (2026-09-12)。yaml を読み直す口だけ手動の列に残す
+  const capturePanel = !inManual ? null : (
+    <PositionsReloadButton
+      robotKey={robotKey}
+      reload={state.positions_reload ?? null}
+      sendOrReport={sendOrReport}
+    />
+  );
 
   // 測定系はボタン 2 つだけ。箱で囲まず吸着パッドの上に小さく並べる。
   // 試合中も零点合わせの在り処は画面から読めるようにする (押せないときは理由が出る)
