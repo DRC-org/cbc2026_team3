@@ -44,10 +44,14 @@ export function SuctionPadPanel({
   const actuating = inManual || direct;
   const padsBlocked = actuating && !inManual ? directBlocked || blocked : blocked;
 
-  // ワークは棚の手前から順に取るので飛び飛びのパッドを選ぶ場面が無く、押す 1 回で個数が決まる
+  // ワークは棚の端から順に載るので飛び飛びのパッドを選ぶ場面が無く、押す 1 回で個数が決まる。
+  // どちらの端から詰めるかはコートで鏡になる (サーバーの fill_from。青は 6 側から。2026-09-12 実機)
+  const fromRight = suction.fill_from === "right";
+  const lastIndex = suction.pads.length - 1;
   const selectUpTo = (index: number) => {
     // 送るのは差分ではなく「使う弁の全集合」。2 台の UI が別々に押しても最後に届いた形が正になる
-    const next = suction.pads.slice(0, index + 1).map((pad) => pad.axis);
+    const chosen = fromRight ? suction.pads.slice(index) : suction.pads.slice(0, index + 1);
+    const next = chosen.map((pad) => pad.axis);
     sendOrReport({ type: "suction_pads_set", robot: robotKey, pads: next }, "吸着パッドの選択");
   };
 
@@ -60,8 +64,11 @@ export function SuctionPadPanel({
     on: pad.enabled,
     unknown: false,
     disabled: padsBlocked,
-    ariaLabel:
-      index === 0
+    ariaLabel: fromRight
+      ? index === lastIndex
+        ? `パッド ${pad.label} を使う`
+        : `パッド ${pad.label}〜${suction.pads[lastIndex].label} を使う`
+      : index === 0
         ? `パッド ${pad.label} を使う`
         : `パッド ${suction.pads[0].label}〜${pad.label} を使う`,
     onClick: () => selectUpTo(index),

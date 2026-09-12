@@ -8,7 +8,8 @@ from lib.match_state import Court
 __all__ = ["SuctionPad", "SuctionSelection", "SuctionSelectionError", "suction_of"]
 
 
-# ワークは端から連続して載るので ON にする端がコートで決まる。対応は実機で未確認の仮
+# ワークは端から連続して載るので ON にする端がコートで決まる。赤は 1 側、青は 6 側から
+# (2026-09-12 実機で確認)。UI はこれを見て「押したパッドから端まで」を送る
 _FILL_FROM: dict[Court, str] = {Court.RED: "left", Court.BLUE: "right"}
 
 
