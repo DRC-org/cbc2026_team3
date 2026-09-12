@@ -1,4 +1,60 @@
 axes:
+  rotate:
+    unit: deg
+    command_unit: rad
+    timeout_s: 3.0
+    tolerance: 2.0
+    # TODO(実機で確認): 未計測の暫定値。config/main_hand.yaml の motors.rotate_*.limit_speed
+    # (2.0 rad/s ≒ 115 deg/s) の内側に取ってある。過小に書くほど安全側 —— 着地時刻を
+    # 揃える遅延が短くなるだけで、今までの挙動に寄る
+    min_speed: 100.0
+    sync_tolerance: 5.0
+    manual:
+      min: 0.0
+      max: 185.0
+      steps: [1.0, 5.0, 15.0, 45.0]
+    # 機械的に到達しうる範囲。**上の manual とは別物**（あちらは手動で動かしてよい
+    # 範囲で、意図的に狭められる）。1 回転未満なので EDULITE 05 はここから回転数を
+    # 一意に決められ、電源が落ちているあいだに人が軸を回しても論理角を取り違えない。
+    # TODO(実機で確認): 可動端を突き当てて実測していない暫定値。manual (0〜185deg) より
+    # 広めに取ってある —— 狭すぎると正常な姿勢で WARNING が出るのに対し、広すぎても
+    # 一意化は効く（曖昧になるのは 1 回転を超えたときだけ）ため
+    travel:
+      min: 0.0
+      max: 200.0
+    # TODO(実機で確認): search_distance だけが暫定値 (触れていない位置から何 deg で
+    # 当たるかは未計測)。
+    homing:
+      sensor: rotate_origin_sensor
+      direction: -1
+      # search_distance は上の manual の全幅 (max - min) と対で、どちらを動かしたら
+      # もう一方も同時に寄せる。狭いと宣言範囲の端から始めた探索が原点へ届く前に
+      # 打ち切られ、広いと宣言範囲の外まで押し込む。対を機械的に守るのは
+      # tests/test_main_positions_config.py の一致検査だけである
+      search_distance: 185.0
+      # 0.5deg では 1 歩も動かなかった (2026-09-05 実機。静止摩擦が下限を決める)
+      step: 1.0
+      # rotate = 0 では y_axis >= 40mm なら干渉しない。y_axis の tolerance 1.0mm と余裕を足した量
+      prepare_relative: { y_axis: 45.0 }
+      # y_axis = 0 と rotate = 0 は機構が干渉する。rotate が原点に居座ったままだと、
+      # 後から y_axis だけ零点確定を走らせたときに探索段が干渉域へ降りて 1 歩も動けず、
+      # しかも症状は y_axis 側の失敗としてしか出ない
+      retreat_position: home
+      settle_s: 0.05
+    guard:
+      # 原点は - 側 (homing.direction: -1)。逆 (plus) に書くと守りが反転し、
+      # 押されている端へ進む指令だけが通る。+ 側 (180deg) にスイッチは無い
+      limits:
+        minus: rotate_origin_sensor
+      # max_step / stall_torque は書かない = **その守りが無い**。
+      # max_step: 手動の刻みが最大 45deg なのに対し、正常な 1 回の移動が
+      #   何 deg まで出るかを実測していない。
+      # stall_torque: EDULITE 05 はトルクを Nm で返すが、機構が当たったときの
+      #   値を測っていない (低すぎると回転の途中で止まる)
+    motors:
+      rotate_r: { scale: 0.017453292519943295, offset: 0.0 }
+      rotate_l: { scale: -0.017453292519943295, offset: 0.0 }
+
   y_axis:
     unit: mm
     command_unit: deg
@@ -57,62 +113,6 @@ axes:
       y_axis_r: { scale: 55.0131, offset: 0.0 }
       y_axis_l: { scale: -55.0131, offset: 0.0 }
 
-  rotate:
-    unit: deg
-    command_unit: rad
-    timeout_s: 3.0
-    tolerance: 2.0
-    # TODO(実機で確認): 未計測の暫定値。config/main_hand.yaml の motors.rotate_*.limit_speed
-    # (2.0 rad/s ≒ 115 deg/s) の内側に取ってある。過小に書くほど安全側 —— 着地時刻を
-    # 揃える遅延が短くなるだけで、今までの挙動に寄る
-    min_speed: 100.0
-    sync_tolerance: 5.0
-    manual:
-      min: 0.0
-      max: 185.0
-      steps: [1.0, 5.0, 15.0, 45.0]
-    # 機械的に到達しうる範囲。**上の manual とは別物**（あちらは手動で動かしてよい
-    # 範囲で、意図的に狭められる）。1 回転未満なので EDULITE 05 はここから回転数を
-    # 一意に決められ、電源が落ちているあいだに人が軸を回しても論理角を取り違えない。
-    # TODO(実機で確認): 可動端を突き当てて実測していない暫定値。manual (0〜185deg) より
-    # 広めに取ってある —— 狭すぎると正常な姿勢で WARNING が出るのに対し、広すぎても
-    # 一意化は効く（曖昧になるのは 1 回転を超えたときだけ）ため
-    travel:
-      min: 0.0
-      max: 200.0
-    # TODO(実機で確認): search_distance だけが暫定値 (触れていない位置から何 deg で
-    # 当たるかは未計測)。
-    homing:
-      sensor: rotate_origin_sensor
-      direction: -1
-      # search_distance は上の manual の全幅 (max - min) と対で、どちらを動かしたら
-      # もう一方も同時に寄せる。狭いと宣言範囲の端から始めた探索が原点へ届く前に
-      # 打ち切られ、広いと宣言範囲の外まで押し込む。対を機械的に守るのは
-      # tests/test_main_positions_config.py の一致検査だけである
-      search_distance: 185.0
-      # 0.5deg では 1 歩も動かなかった (2026-09-05 実機。静止摩擦が下限を決める)
-      step: 1.0
-      # rotate = 0 では y_axis >= 40mm なら干渉しない。y_axis の tolerance 1.0mm と余裕を足した量
-      prepare_relative: { y_axis: 45.0 }
-      # y_axis = 0 と rotate = 0 は機構が干渉する。rotate が原点に居座ったままだと、
-      # 後から y_axis だけ零点確定を走らせたときに探索段が干渉域へ降りて 1 歩も動けず、
-      # しかも症状は y_axis 側の失敗としてしか出ない
-      retreat_position: home
-      settle_s: 0.05
-    guard:
-      # 原点は - 側 (homing.direction: -1)。逆 (plus) に書くと守りが反転し、
-      # 押されている端へ進む指令だけが通る。+ 側 (180deg) にスイッチは無い
-      limits:
-        minus: rotate_origin_sensor
-      # max_step / stall_torque は書かない = **その守りが無い**。
-      # max_step: 手動の刻みが最大 45deg なのに対し、正常な 1 回の移動が
-      #   何 deg まで出るかを実測していない。
-      # stall_torque: EDULITE 05 はトルクを Nm で返すが、機構が当たったときの
-      #   値を測っていない (低すぎると回転の途中で止まる)
-    motors:
-      rotate_r: { scale: 0.017453292519943295, offset: 0.0 }
-      rotate_l: { scale: -0.017453292519943295, offset: 0.0 }
-
   gripper:
     unit: deg
     command_unit: deg
@@ -143,6 +143,19 @@ axes:
     timeout_s: 3.0
 
 positions:
+  rotate:
+    home: 5.0
+    work_1_after_2: 90.0
+    work_3_after_1: 165.0
+    work_3_after_2: 155.0
+    # TODO(実機で確認): 仮値。引き出し中は rotate を回さないよう pick と同値
+    work_shared_after_1: 185.0
+    pick: 185.0
+    pick_shared: 165.0
+    via_place: 0.0
+    place: 5.0
+    after_place: 30.0
+
   y_axis:
     home: 0.0
     # rotate = 0 で干渉しないのは y_axis >= 40mm。tolerance 1.0mm ぶん手前に着地しても満たす値
@@ -157,19 +170,6 @@ positions:
     work_3_after_2: 366.0
     work_shared: 550.0
     work_shared_after_1: 400.0
-
-  rotate:
-    home: 5.0
-    work_1_after_2: 90.0
-    work_3_after_1: 165.0
-    work_3_after_2: 155.0
-    # TODO(実機で確認): 仮値。引き出し中は rotate を回さないよう pick と同値
-    work_shared_after_1: 185.0
-    pick: 185.0
-    pick_shared: 165.0
-    via_place: 0.0
-    place: 5.0
-    after_place: 30.0
 
   gripper:
     open: 0.0
