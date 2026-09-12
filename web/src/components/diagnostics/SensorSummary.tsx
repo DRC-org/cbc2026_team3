@@ -11,13 +11,17 @@ interface SensorSummaryProps {
 
 interface SensorVerdict {
   tone: Tone;
-  label: string;
+  /** null はドットの色だけで伝える（平常時の文字を出さない） */
+  label: string | null;
+  title: string;
 }
 
 function verdictOf(sensor: SensorState): SensorVerdict {
-  if (sensor.stale) return { tone: "warning", label: "STALE" };
-  if (sensor.active === null) return { tone: "neutral", label: "—" };
-  return sensor.active ? { tone: "info", label: "接触" } : { tone: "neutral", label: "開放" };
+  if (sensor.stale) return { tone: "warning", label: "STALE", title: "STALE" };
+  if (sensor.active === null) return { tone: "neutral", label: "—", title: "測定手段なし" };
+  return sensor.active
+    ? { tone: "info", label: "接触", title: "接触" }
+    : { tone: "neutral", label: null, title: "開放" };
 }
 
 export function SensorSummary({ sensors }: SensorSummaryProps) {
@@ -39,7 +43,6 @@ export function SensorSummary({ sensors }: SensorSummaryProps) {
 
   return (
     <div className="flex shrink-0 flex-col gap-1">
-      <span className="text-base-content/70">センサ {entries.length} 本</span>
       <div className="flex flex-col [&>*:nth-child(odd)]:bg-base-200">
         {entries.map(([name, sensor]) => {
           const verdict = verdictOf(sensor);
@@ -49,7 +52,9 @@ export function SensorSummary({ sensors }: SensorSummaryProps) {
               className="flex min-w-0 items-center justify-between gap-2 px-1 py-[0.15rem]"
             >
               <span className="min-w-0 truncate font-medium">{name}</span>
-              <StatusBadge tone={verdict.tone}>{verdict.label}</StatusBadge>
+              <StatusBadge tone={verdict.tone} title={verdict.title}>
+                {verdict.label}
+              </StatusBadge>
             </div>
           );
         })}

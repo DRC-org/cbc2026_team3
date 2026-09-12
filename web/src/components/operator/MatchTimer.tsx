@@ -12,7 +12,7 @@ export function MatchTimer({ timer }: MatchTimerProps) {
 
   if (remaining === null) {
     return (
-      <Panel legend="残り時間" className="shrink-0">
+      <Panel className="shrink-0">
         <div className="text-center text-[1.1em] text-base-content/60">タイマー未受信</div>
       </Panel>
     );
@@ -21,7 +21,7 @@ export function MatchTimer({ timer }: MatchTimerProps) {
   const caption = timer?.running ? null : timer?.elapsed_ms === 0 ? "開始前" : "試合終了時点";
 
   return (
-    <Panel legend="残り時間" className="shrink-0">
+    <Panel className="shrink-0">
       <div className="flex flex-col items-center gap-[0.1em] py-1">
         <span className="font-mono text-[3.4em] leading-none font-bold tabular-nums">
           {formatRemaining(remaining)}

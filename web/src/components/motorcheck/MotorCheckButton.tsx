@@ -1,9 +1,10 @@
-import { Activity, CircleHelp, TriangleAlert } from "lucide-react";
+import { Activity, CircleHelp } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
+import { ClearanceWarning } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { motorCheckStatus } from "@/lib/motorCheckStatus";
@@ -62,10 +63,7 @@ export function MotorCheckButton() {
           <span className="font-medium text-info">メインハンドとサブハンドの全アクチュエータ</span>
           を決まった順序で 1 つずつ動かします。
         </p>
-        <p className="mt-2 flex items-center gap-1.5 text-error">
-          <Icon as={TriangleAlert} />
-          両機の可動範囲に人・物がないことを確認してから開始してください。
-        </p>
+        <ClearanceWarning scope="all" />
         <p className="mt-1 text-base-content/70">
           実行中も緊急停止 (EMG STOP) は即時優先で動作します。
         </p>

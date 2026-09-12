@@ -67,29 +67,30 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         : "準備中";
   // コート確定が要るかはサーバーが決める (state.court_required)。UI が軸名から導き直さない
   const courtUnset = state?.court_required === true && matchState.court === null;
-  const sequenceBlockedReason = !connected ? "切断中" : courtUnset ? "コート未設定" : null;
+
+  // 切断中・緊急停止中・コート未設定は ConnectionBanner / EStopBanner / ヘッダーのコートバッジが
+  // 言うので、パネルには理由を配らず無効化だけ伝える
+  const sequenceBlocked = !connected || courtUnset;
+  const modeBlocked = !connected;
 
   const kind = state ? sequenceKind(state) : null;
 
-  const stepJumpBlockedReason =
-    sequenceBlockedReason ??
-    (!inMatch ? "試合中のみ操作可" : kind === "running" ? "停止してから選択" : null);
+  // パネル固有の理由は他が言っていないのでそのパネルにだけ出す
+  const stepJumpReason = !inMatch
+    ? "試合中のみ操作可"
+    : kind === "running"
+      ? "停止してから選択"
+      : null;
+  const stepJumpBlocked = sequenceBlocked || stepJumpReason !== null;
 
   const manual: ManualState = state?.manual ?? { mode: "sequence", axes: [] };
   const inManual = manual.mode === "manual";
 
-  const modeBlockedReason = connected ? null : "切断中";
-  const manualBlockedReason = !connected
-    ? "切断中"
-    : eStopActive
-      ? "緊急停止中"
-      : courtUnset
-        ? "コート未設定"
-        : null;
+  const manualBlocked = !connected || eStopActive || courtUnset;
 
   // 位置の微調整はトリガー待ちのあいだだけ通る (サーバーの _allow_manual_in_sequence と対)
-  const nudgeBlockedReason =
-    manualBlockedReason ?? (state?.waiting_trigger === true ? null : "トリガー待ちのときだけ");
+  const nudgeReason = state?.waiting_trigger === true ? null : "トリガー待ちのときだけ";
+  const nudgeBlocked = manualBlocked || nudgeReason !== null;
 
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
   const requestStart = () => {
@@ -126,9 +127,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     <ModeSwitch
       mode={manual.mode}
       onChange={handleMode}
-      blockedReason={modeBlockedReason}
+      blocked={modeBlocked}
       sequenceName={state.sequence}
-      totalSteps={setupPhase && inManual ? state.total_steps : null}
     />
   );
 
@@ -143,7 +143,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     <ManualPanel
       robotKey={robotKey}
       manual={manual}
-      blockedReason={manualBlockedReason}
+      blocked={manualBlocked}
       sendOrReport={sendOrReport}
       excludeAxes={suctionPadAxes}
     />
@@ -157,8 +157,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         robotKey={robotKey}
         suction={state.suction}
         manual={manual}
-        blockedReason={inManual ? manualBlockedReason : connected ? null : "切断中"}
-        directBlockedReason={manualBlockedReason}
+        blocked={inManual ? manualBlocked : !connected}
+        directBlocked={manualBlocked}
         sendOrReport={sendOrReport}
       />
     );
@@ -178,7 +178,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         robotKey={robotKey}
         capture={state.position_capture}
         reload={state.positions_reload ?? null}
-        blockedReason={manualBlockedReason}
+        blocked={manualBlocked}
         sendOrReport={sendOrReport}
       />
     );
@@ -220,8 +220,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       className="min-h-0 flex-1"
       bodyClassName="p-0"
       actions={
-        stepJumpBlockedReason ? (
-          <span className="text-[0.85em] text-base-content/60">{stepJumpBlockedReason}</span>
+        stepJumpReason ? (
+          <span className="text-[0.85em] text-base-content/60">{stepJumpReason}</span>
         ) : null
       }
     >
@@ -230,7 +230,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         stepIndex={state.step_index}
         waitingTrigger={state.waiting_trigger}
         onJump={handleJump}
-        disabled={stepJumpBlockedReason !== null}
+        disabled={stepJumpBlocked}
       />
     </Panel>
   );
@@ -283,7 +283,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               state={state}
               inMatch={inMatch}
               blockedLabel={blockedLabel}
-              blockedReason={sequenceBlockedReason}
+              blocked={sequenceBlocked}
               onStart={requestStart}
               onStop={handleStop}
               onTrigger={handleTrigger}
@@ -292,7 +292,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             <AlwaysManualPanel
               robotKey={robotKey}
               manual={manual}
-              blockedReason={manualBlockedReason}
+              blocked={manualBlocked}
               sendOrReport={sendOrReport}
               excludeAxes={suctionPadAxes}
             />
@@ -301,7 +301,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             <NudgePanel
               robotKey={robotKey}
               manual={manual}
-              blockedReason={nudgeBlockedReason}
+              blocked={nudgeBlocked}
+              blockedReason={nudgeReason}
               sendOrReport={sendOrReport}
             />
 

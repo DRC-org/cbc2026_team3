@@ -1,10 +1,12 @@
-import { Ruler, TriangleAlert } from "lucide-react";
+import { Ruler } from "lucide-react";
 import { useState } from "react";
 
 import { SwitchMeasureBadge, SwitchMeasureResult } from "@/components/homing/SwitchMeasureResult";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { Modal } from "@/components/ui/Modal";
+import { ClearanceWarning } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useSwitchMeasure } from "@/hooks/useSwitchMeasure";
 import type { SwitchMeasureOptions } from "@/hooks/useSwitchMeasure";
@@ -71,10 +73,7 @@ export function SwitchMeasurePanel() {
     return (
       <div className="flex flex-col gap-1">
         {header}
-        <p className="flex items-center gap-1.5 text-warning">
-          <Icon as={TriangleAlert} />
-          作動点測定の対象を読み取れませんでした (配信の形が読めていません)
-        </p>
+        <MalformedNotice subject="作動点測定の対象" />
       </div>
     );
   }
@@ -228,10 +227,7 @@ export function SwitchMeasurePanel() {
           へ動かします
         </p>
         <p className="text-base-content/70">{optionSummary}</p>
-        <p className="mt-2 flex items-center gap-1.5 text-error">
-          <Icon as={TriangleAlert} />
-          この機体の可動範囲に人・物がないことを確認してから開始してください。
-        </p>
+        <ClearanceWarning />
       </Modal>
     </div>
   );

@@ -10,12 +10,20 @@ const NUDGE_STEP = 2;
 interface NudgePanelProps {
   robotKey: string;
   manual: ManualState;
+  blocked: boolean;
+  /** このパネル固有の理由だけ。全体に効く理由 (切断中など) は上部の帯が言う */
   blockedReason: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
 /** トリガー待ちで止まっているあいだだけ出す、位置の微調整。 */
-export function NudgePanel({ robotKey, manual, blockedReason, sendOrReport }: NudgePanelProps) {
+export function NudgePanel({
+  robotKey,
+  manual,
+  blocked,
+  blockedReason,
+  sendOrReport,
+}: NudgePanelProps) {
   // 連続値を送れる軸だけ (サーバーが `manual` を配る)。常時操作の軸は別パネルが持つ
   const axes = manual.axes.filter((axis) => axis.manual !== null && axis.manual_always !== true);
   if (axes.length === 0) return null;
@@ -27,27 +35,21 @@ export function NudgePanel({ robotKey, manual, blockedReason, sendOrReport }: Nu
     <Panel
       legend="位置の微調整"
       className="shrink-0"
-      actions={
-        blockedReason ? (
-          <StatusBadge tone="error">{blockedReason}</StatusBadge>
-        ) : (
-          <span className="text-[0.85em] text-base-content/60">トリガー待ちのあいだだけ</span>
-        )
-      }
+      actions={blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
     >
       <div className="flex flex-wrap gap-3">
         {axes.map((axis) => (
           <div key={axis.name} className="flex items-center gap-1.5">
             <span className="text-[0.85em] text-base-content/70">{axis.name}</span>
             <Button
-              disabled={blockedReason !== null}
+              disabled={blocked}
               aria-label={`${axis.name} を ${NUDGE_STEP}${axis.unit} 戻す`}
               onClick={() => nudge(axis.name, -NUDGE_STEP)}
             >
               -{NUDGE_STEP}
             </Button>
             <Button
-              disabled={blockedReason !== null}
+              disabled={blocked}
               aria-label={`${axis.name} を ${NUDGE_STEP}${axis.unit} 進める`}
               onClick={() => nudge(axis.name, NUDGE_STEP)}
             >

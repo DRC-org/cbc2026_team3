@@ -3,7 +3,6 @@ import { ArrowRight, Ban, Hand, Play, Square, TriangleAlert } from "lucide-react
 import { TriggerButton } from "@/components/operator/TriggerButton";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
-import { Kbd } from "@/components/ui/Kbd";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { cx } from "@/lib/cx";
@@ -21,7 +20,7 @@ interface ActionPanelProps {
   state: RobotState;
   inMatch: boolean;
   blockedLabel: string;
-  blockedReason: string | null;
+  blocked: boolean;
   onStart: () => void;
   onStop: () => void;
   onTrigger: () => void;
@@ -33,14 +32,13 @@ export function ActionPanel({
   state,
   inMatch,
   blockedLabel,
-  blockedReason,
+  blocked,
   onStart,
   onStop,
   onTrigger,
 }: ActionPanelProps) {
   const { total_steps: totalSteps, step_index: stepIndex } = state;
   const steps = state.steps ?? [];
-  const blocked = blockedReason !== null;
 
   const kind = sequenceKind(state);
   const restartFromTop = isRestartFromTop(state);
@@ -111,9 +109,11 @@ export function ActionPanel({
             {displayIndex}
             <span className="text-[0.45em] text-base-content/40">/{totalSteps}</span>
           </span>
-          <span className="min-w-0 text-[3em] leading-[1.1] font-semibold">
-            {isComplete ? "全ステップ完了" : (current?.label ?? "—")}
-          </span>
+          {isComplete ? null : (
+            <span className="min-w-0 text-[3em] leading-[1.1] font-semibold">
+              {current?.label ?? "—"}
+            </span>
+          )}
         </div>
       </div>
 
@@ -142,25 +142,18 @@ export function ActionPanel({
             tone={restartFromTop ? "warn" : "ok"}
             disabled={blocked}
             onClick={onStart}
-            aria-label={
-              blocked
-                ? `操作不可: ${blockedReason}`
-                : restartFromTop
-                  ? "シーケンスを先頭から再開"
-                  : "シーケンスを先頭から開始"
-            }
+            aria-label={restartFromTop ? "シーケンスを先頭から再開" : "シーケンスを先頭から開始"}
             className={PRIMARY_CLASS}
           >
             <Icon as={blocked ? Ban : Play} />
-            {blocked ? blockedReason : restartFromTop ? "先頭から再開" : "START"}
-            {blocked ? null : <Kbd>Space</Kbd>}
+            {restartFromTop ? "先頭から再開" : "START"}
           </Button>
         ) : (
           <TriggerButton
             kind={kind}
             onTrigger={onTrigger}
             disabled={!inMatch || blocked}
-            disabledLabel={blockedReason ?? blockedLabel}
+            disabledLabel={inMatch ? null : blockedLabel}
           />
         )}
       </div>

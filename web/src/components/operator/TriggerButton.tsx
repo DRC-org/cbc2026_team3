@@ -2,14 +2,14 @@ import { ArrowRight, Ban, Check } from "lucide-react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
-import { Kbd } from "@/components/ui/Kbd";
 import type { SequenceKind } from "@/lib/sequenceStatus";
 
 interface TriggerButtonProps {
   kind: SequenceKind;
   onTrigger: () => void;
   disabled?: boolean;
-  disabledLabel?: string;
+  /** 全体に効く理由 (切断中など) は上部の帯が言うので、その場合は null で呼ぶ */
+  disabledLabel?: string | null;
 }
 
 const FILL_CLASS = "flex h-full w-full items-center justify-center gap-3 text-[1.4em]";
@@ -18,13 +18,14 @@ export function TriggerButton({
   kind,
   onTrigger,
   disabled = false,
-  disabledLabel = "試合開始前",
+  disabledLabel = null,
 }: TriggerButtonProps) {
   if (disabled) {
+    const label = disabledLabel ?? "操作不可";
     return (
-      <Button disabled className={FILL_CLASS} aria-label={`操作不可: ${disabledLabel}`}>
+      <Button disabled className={FILL_CLASS} aria-label={`操作不可: ${label}`}>
         <Icon as={Ban} />
-        {disabledLabel}
+        {label}
       </Button>
     );
   }
@@ -57,7 +58,6 @@ export function TriggerButton({
       >
         <Icon as={ArrowRight} />
         NEXT
-        <Kbd className="bg-next-fg/10 text-next-fg">Space</Kbd>
       </Button>
     );
   }

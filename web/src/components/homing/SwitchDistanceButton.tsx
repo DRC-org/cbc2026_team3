@@ -1,10 +1,12 @@
-import { Ruler, TriangleAlert } from "lucide-react";
+import { Ruler } from "lucide-react";
 import { useState } from "react";
 
 import { SwitchMeasureBadge } from "@/components/homing/SwitchMeasureResult";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { Modal } from "@/components/ui/Modal";
+import { ClearanceWarning, SemiAutoRestoreNotice } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
 import { useSwitchMeasure } from "@/hooks/useSwitchMeasure";
@@ -32,12 +34,7 @@ export function SwitchDistanceButton({ robot }: SwitchDistanceButtonProps) {
   const blocked = anyManual && connected && !eStopActive ? null : reasonLabel;
 
   if (state.targets === MALFORMED) {
-    return (
-      <p className="flex items-center gap-1.5 text-warning">
-        <Icon as={TriangleAlert} />
-        距離測定の対象を読み取れませんでした (配信の形が読めていません)
-      </p>
-    );
+    return <MalformedNotice subject="距離測定の対象" />;
   }
 
   const axes = state.targets[robot] ?? [];
@@ -72,10 +69,7 @@ export function SwitchDistanceButton({ robot }: SwitchDistanceButtonProps) {
           </div>
           {state.error ? <p className="text-error">{state.error}</p> : null}
           {state.distances === MALFORMED ? (
-            <p className="flex items-center gap-1.5 text-warning">
-              <Icon as={TriangleAlert} />
-              距離測定の結果を読み取れませんでした (配信の形が読めていません)
-            </p>
+            <MalformedNotice subject="距離測定の結果" />
           ) : (
             <ul className="flex flex-col">
               {state.distances?.map((item) => (
@@ -131,13 +125,8 @@ export function SwitchDistanceButton({ robot }: SwitchDistanceButtonProps) {
         <p className="mt-2">
           対象の軸: <span className="font-mono">{axes.join(", ")}</span>
         </p>
-        {anyManual ? (
-          <p className="mt-2">手動操縦を抜け、全機を半自動へ戻してから開始します。</p>
-        ) : null}
-        <p className="mt-2 flex items-center gap-1.5 text-error">
-          <Icon as={TriangleAlert} />
-          この機体の可動範囲に人・物がないことを確認してから開始してください。
-        </p>
+        {anyManual ? <SemiAutoRestoreNotice /> : null}
+        <ClearanceWarning />
       </Modal>
     </>
   );

@@ -16,7 +16,7 @@ interface PositionCapturePanelProps {
   capture: PositionCaptureState | Malformed;
   /** 位置定数 yaml の読み直し。**null なら口が無い台** (ボタンを出さない) */
   reload: PositionsReloadState | Malformed | null;
-  blockedReason: string | null;
+  blocked: boolean;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
@@ -26,7 +26,7 @@ export function PositionCapturePanel({
   robotKey,
   capture,
   reload,
-  blockedReason,
+  blocked,
   sendOrReport,
 }: PositionCapturePanelProps) {
   const [copyState, setCopyState] = useState<CopyState>("idle");
@@ -62,11 +62,7 @@ export function PositionCapturePanel({
       className="shrink-0"
       bodyClassName="gap-2 p-2"
       actions={
-        blockedReason ? (
-          <StatusBadge tone="error">{blockedReason}</StatusBadge>
-        ) : (
-          <span className="text-[0.85em] text-base-content/60">控え {capture.entries.length}</span>
-        )
+        <span className="text-[0.85em] text-base-content/60">控え {capture.entries.length}</span>
       }
     >
       {axes.length === 0 ? (
@@ -83,7 +79,7 @@ export function PositionCapturePanel({
                 <Button
                   key={name}
                   tone={entry ? "ok" : "default"}
-                  disabled={blockedReason !== null}
+                  disabled={blocked}
                   aria-label={`${axis} の現在位置を ${name} として控える`}
                   title={
                     entry

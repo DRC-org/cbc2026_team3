@@ -66,9 +66,9 @@ export function AbsoluteEntry({ axis, min, max, disabled, onSet }: AbsoluteEntry
         disabled={disabled || !filled}
         onClick={submit}
         aria-label={`${axis.name} を入力値へ移動`}
+        title="移動"
       >
         <Icon as={Send} />
-        移動
       </Button>
       {outOfRange ? (
         <span className="text-[0.8em] text-warning">

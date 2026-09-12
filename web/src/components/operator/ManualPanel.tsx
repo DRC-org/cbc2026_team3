@@ -4,15 +4,16 @@ import { ManualAxisRow } from "@/components/operator/ManualAxisRow";
 import { OnOffPadGroup, splitOnOffAxes } from "@/components/operator/OnOffPadGroup";
 import { Kbd } from "@/components/ui/Kbd";
 import { Panel } from "@/components/ui/Panel";
-import { StatusBadge } from "@/components/ui/StatusBadge";
+import { useRobotStatus } from "@/context/RobotContext";
 import type { RobotCommands } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
+import { isDuringMatch } from "@/lib/phase";
 import type { ManualState } from "@/lib/protocol";
 
 interface ManualPanelProps {
   robotKey: string;
   manual: ManualState;
-  blockedReason: string | null;
+  blocked: boolean;
   sendOrReport: RobotCommands["sendOrReport"];
   excludeAxes?: readonly string[];
 }
@@ -27,11 +28,13 @@ const KEY_LEGEND: { keys: string[]; label: string }[] = [
 export function ManualPanel({
   robotKey,
   manual,
-  blockedReason,
+  blocked,
   sendOrReport,
   excludeAxes,
 }: ManualPanelProps) {
   const [picked, setPicked] = useState<string | null>(null);
+  const { matchState } = useRobotStatus();
+  const inMatch = isDuringMatch(matchState.phase);
 
   const onJog = (axis: string, delta: number) =>
     sendOrReport({ type: "manual_jog", robot: robotKey, axis, delta }, "ジョグ");
@@ -69,12 +72,7 @@ export function ManualPanel({
   );
 
   return (
-    <Panel
-      legend="手動操縦"
-      className="min-h-0 flex-1"
-      bodyClassName="p-0"
-      actions={blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
-    >
+    <Panel legend="手動操縦" className="min-h-0 flex-1" bodyClassName="p-0">
       {axes.length === 0 ? (
         <p className="p-2 text-base-content/70">手動軸なし</p>
       ) : (
@@ -84,7 +82,7 @@ export function ManualPanel({
               <ManualAxisRow
                 key={axis.name}
                 axis={axis}
-                blockedReason={blockedReason}
+                blocked={blocked}
                 selected={axis.name === selected}
                 onSelect={() => setPicked(axis.name)}
                 onJog={onJog}
@@ -93,7 +91,7 @@ export function ManualPanel({
               />
             ))}
 
-            <OnOffPadGroup axes={pads} blockedReason={blockedReason} onMove={onMove} />
+            <OnOffPadGroup axes={pads} blocked={blocked} onMove={onMove} />
 
             {presetOnly.length === 0 ? null : (
               <div className="grid @min-[40rem]:grid-cols-2 @min-[56rem]:grid-cols-3">
@@ -101,7 +99,7 @@ export function ManualPanel({
                   <ManualAxisRow
                     key={axis.name}
                     axis={axis}
-                    blockedReason={blockedReason}
+                    blocked={blocked}
                     selected={false}
                     onSelect={() => {}}
                     onJog={onJog}
@@ -113,7 +111,8 @@ export function ManualPanel({
             )}
           </div>
 
-          {selected === null ? null : (
+          {/* 試合中は覚えている前提で隠す。セッティング中だけ出す */}
+          {selected === null || inMatch ? null : (
             <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-base-300 px-2 py-1 text-[0.8em] text-base-content/55">
               {KEY_LEGEND.map(({ keys, label }) => (
                 <span key={label} className="flex shrink-0 items-center gap-1">

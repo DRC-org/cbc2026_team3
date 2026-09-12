@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useMotorCheck } from "@/hooks/useMotorCheck";
@@ -84,15 +85,10 @@ export function MotorCheckPanel() {
           ) : null}
 
           {state.excluded_steps === MALFORMED ? (
-            <div className="text-warning">
-              <p className="flex items-center gap-1.5 font-medium">
-                <Icon as={TriangleAlert} />
-                除外ステップを読み取れませんでした
-              </p>
-              <p className="mt-1">
-                ステップ一覧が全てを表しているとは限りません (配信の形が読めていません)。
-              </p>
-            </div>
+            <MalformedNotice
+              subject="除外ステップ"
+              detail="ステップ一覧が全てを表しているとは限りません (配信の形が読めていません)。"
+            />
           ) : state.excluded_steps.length > 0 ? (
             <div className="rounded-sm border border-warning/40 bg-warning/10 px-3 py-2">
               <p className="flex items-center gap-1.5 font-medium text-warning">
@@ -113,15 +109,10 @@ export function MotorCheckPanel() {
           ) : null}
 
           {state.steps === MALFORMED ? (
-            <div className="text-warning">
-              <p className="flex items-center gap-1.5 font-medium">
-                <Icon as={TriangleAlert} />
-                ステップ一覧を読み取れませんでした
-              </p>
-              <p className="mt-1">
-                配信の形が読めていません。動作確認の結果は判断材料になりません。
-              </p>
-            </div>
+            <MalformedNotice
+              subject="ステップ一覧"
+              detail="配信の形が読めていません。動作確認の結果は判断材料になりません。"
+            />
           ) : state.steps.length === 0 ? (
             <p className="px-1 py-1 text-base-content/70">
               {state.available

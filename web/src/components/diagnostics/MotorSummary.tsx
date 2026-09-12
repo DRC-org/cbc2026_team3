@@ -23,9 +23,10 @@ export function MotorSummary({ motors, healthMotors, tempThresholds = null }: Mo
 
   return (
     <div className="@container flex min-h-0 flex-1 flex-col gap-1">
-      <div className="flex shrink-0 items-center justify-between gap-2">
-        <span className="text-base-content/70">{total} 基</span>
-        <StatusBadge tone={verdict.tone}>{verdict.label}</StatusBadge>
+      <div className="flex shrink-0 items-center justify-end gap-2">
+        <StatusBadge tone={verdict.tone} title={verdict.label}>
+          {verdict.quiet ? null : verdict.label}
+        </StatusBadge>
       </div>
       <MotorStatHeader className="shrink-0 border-b border-base-300 pb-[0.1rem]" />
       <ScrollArea className="[&>*:nth-child(odd)]:bg-base-200">

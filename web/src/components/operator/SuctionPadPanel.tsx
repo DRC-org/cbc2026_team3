@@ -13,9 +13,9 @@ interface SuctionPadPanelProps {
   robotKey: string;
   suction: SuctionState | Malformed;
   manual: ManualState;
-  blockedReason: string | null;
-  /** 半自動で「今すぐ開閉」へ切り替えたときの理由 (手動操縦と同じゲート) */
-  directBlockedReason?: string | null;
+  blocked: boolean;
+  /** 半自動で「今すぐ開閉」へ切り替えたときのゲート (手動操縦と同じ) */
+  directBlocked?: boolean;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
@@ -23,8 +23,8 @@ export function SuctionPadPanel({
   robotKey,
   suction,
   manual,
-  blockedReason,
-  directBlockedReason = null,
+  blocked,
+  directBlocked = false,
   sendOrReport,
 }: SuctionPadPanelProps) {
   // 半自動でも切り替えれば今すぐ開閉できる (弁は manual_always なのでサーバーが通す)。
@@ -42,8 +42,7 @@ export function SuctionPadPanel({
   // 画面から読めなかった。手動ではこの面が開閉そのものを持つ
   const inManual = manual.mode === "manual";
   const actuating = inManual || direct;
-  const padsBlockedReason =
-    actuating && !inManual ? (directBlockedReason ?? blockedReason) : blockedReason;
+  const padsBlocked = actuating && !inManual ? directBlocked || blocked : blocked;
 
   // ワークは棚の手前から順に取るので飛び飛びのパッドを選ぶ場面が無く、押す 1 回で個数が決まる
   const selectUpTo = (index: number) => {
@@ -60,7 +59,7 @@ export function SuctionPadPanel({
     label: pad.label,
     on: pad.enabled,
     unknown: false,
-    disabled: padsBlockedReason !== null,
+    disabled: padsBlocked,
     ariaLabel:
       index === 0
         ? `パッド ${pad.label} を使う`
@@ -78,7 +77,7 @@ export function SuctionPadPanel({
       label: pad.label,
       on,
       unknown: axis === undefined || axis.target === null,
-      disabled: padsBlockedReason !== null || pair === null,
+      disabled: padsBlocked || pair === null,
       ariaLabel: `パッド ${pad.label} を${on ? "閉じる" : "開く"}`,
       onClick: () => {
         if (pair !== null) move(pad.axis, on ? pair.off : pair.on);
@@ -102,9 +101,7 @@ export function SuctionPadPanel({
       bodyClassName="p-0"
       actions={
         <span className="flex items-center gap-2">
-          {padsBlockedReason ? (
-            <StatusBadge tone="error">{padsBlockedReason}</StatusBadge>
-          ) : actuating ? (
+          {actuating ? (
             <span className="text-[0.85em] text-base-content/60">
               開 {onCount}/{suction.pads.length}
             </span>
