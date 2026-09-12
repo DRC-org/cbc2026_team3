@@ -98,8 +98,9 @@ export function SequenceStepList({
                 disabled={disabled}
                 aria-current={isActive ? "step" : undefined}
                 aria-label={`ステップ ${i + 1}: ${step.label}`}
+                title={step.label}
                 className={cx(
-                  "flex w-full cursor-pointer items-center gap-2 border-l-2 border-transparent px-1.5 py-[0.15rem] text-left",
+                  "flex w-full cursor-pointer items-center gap-2 border-l-2 border-transparent px-1 py-[0.15rem] text-left",
                   "enabled:hover:bg-base-200 disabled:cursor-not-allowed",
                   STEP_TONE_CLASS[kind],
                   STEP_ACTIVE_CLASS[kind],
