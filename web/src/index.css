@@ -53,6 +53,14 @@
 }
 
 @layer base {
+  /* iOS/iPadOS Safari でドキュメント側のスクロール領域が残るとラバーバンドが起きるため塞ぐ */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   html {
     font-size: clamp(13px, min(1.05vw, 2.1vh), 20px);
     font-family: var(--font-sans);
@@ -61,6 +69,10 @@
   body {
     background-color: var(--color-base-200);
     color: var(--color-base-content);
+  }
+
+  #root {
+    height: 100%;
   }
 
   :focus-visible {
@@ -72,6 +84,7 @@
 @layer components {
   .scroll {
     overflow: auto;
+    overscroll-behavior: contain;
     scrollbar-color: var(--color-base-300) transparent;
   }
 
