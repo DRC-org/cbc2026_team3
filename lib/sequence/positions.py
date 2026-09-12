@@ -51,8 +51,8 @@ class LinkageCenter:
     """左右の中心のずれ [mm]。**表を読み直しても軸を跨いでも同じ 1 つを指す**ので、
     frozen な `AxisSpec` の外に出してある。正が右へ。"""
 
-    def __init__(self) -> None:
-        self.value: float = 0.0
+    def __init__(self, value: float = 0.0) -> None:
+        self.value: float = float(value)
 
 
 @dataclass(frozen=True)
@@ -1097,7 +1097,7 @@ def _parse_linkage(axis_name: str, raw: object) -> LinkageSpec | None:
     path = f"axes.{axis_name}.linkage"
     if not isinstance(raw, dict):
         raise ValueError(f"{path} は辞書である必要があります: {raw!r}")
-    unknown = set(raw) - {"crank", "rod", "span", "left", "right"}
+    unknown = set(raw) - {"crank", "rod", "span", "left", "right", "center"}
     if unknown:
         raise ValueError(f"{path} に未知のキー: {', '.join(sorted(unknown))}")
     lengths = {}
@@ -1124,8 +1124,11 @@ def _parse_linkage(axis_name: str, raw: object) -> LinkageSpec | None:
             raise ValueError(f"{path}.{key} は zero [deg] と sign (1 か -1) が要ります")
         return LinkageSide(motor=motor, zero=zero, sign=sign)
 
+    center = _number(path, raw, "center", 0.0)
+    if center is None or abs(center) > geometry.crank:
+        raise ValueError(f"{path}.center は ±{geometry.crank:g}mm の内の数: {raw.get('center')!r}")
     return LinkageSpec(
-        geometry=geometry, left=side("left"), right=side("right"), center=LinkageCenter()
+        geometry=geometry, left=side("left"), right=side("right"), center=LinkageCenter(center)
     )
 
 
