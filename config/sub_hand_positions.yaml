@@ -50,6 +50,8 @@ axes:
     homing:
       sensor: sub_y_axis_f_limit_sensor
       direction: 1
+      # 確定したら初期位置と同じ home まで下がる (前端に居たままだと棚側に当たる。2026-09-12)
+      retreat_position: home
       # スイッチ間の実測は 447mm (2026-09-09 赤コート)。機構が動くうちは余裕を広く取る
       search_distance: 650.0
       # ON 区間の実測 2.2mm より狭く取る (広いと粗い 1 歩で跨ぎ切る)。
