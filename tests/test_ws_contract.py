@@ -48,6 +48,7 @@ _ROBOT = "main_hand"
 _M3508_BUS = "can_m3508"
 
 FIXED_EPOCH = 1700000000.0
+PING_TOKEN = 1700000000000
 FIXED_DURATION_MS = 0.0
 
 _EPOCH_KEYS = frozenset(
@@ -74,6 +75,7 @@ REQUIRED_TYPES = frozenset(
         "motor_check_state",
         "homing_state",
         "switch_measure_state",
+        "pong",
     }
 )
 
@@ -446,6 +448,10 @@ async def collect_samples() -> dict[str, dict[str, Any]]:
 
             await ws.send_json({"type": "trigger", "robot": _ROBOT})
             samples["command_rejected"] = await require_type(ws, "command_rejected")
+
+            # 往復時間の実測。目印は固定値で送る (golden に時刻を焼き付けないため)
+            await ws.send_json({"type": "ping", "t": PING_TOKEN})
+            samples["pong"] = await require_type(ws, "pong")
 
             fx.set_homing_source(_homing_source(group))
             await fx.command({"type": "set_operation_mode", "robot": _ROBOT, "mode": "sequence"})

@@ -101,7 +101,12 @@ describe("送信", () => {
   it("接続済みなら JSON 化して送る", () => {
     const { result } = renderConnected();
     act(() => result.current.send({ type: "trigger", robot: "main_hand" }));
-    expect(latestSocket().sentJson()).toEqual([{ type: "trigger", robot: "main_hand" }]);
+    // 接続すると往復時間の ping も流れるので、操作の 1 通だけを取り出して見る
+    expect(
+      latestSocket()
+        .sentJson()
+        .filter((msg) => (msg as { type: string }).type !== "ping"),
+    ).toEqual([{ type: "trigger", robot: "main_hand" }]);
   });
 
   it("未接続では送信せず例外も投げない", () => {
@@ -131,18 +136,46 @@ describe("state メッセージ", () => {
     const { result } = renderConnected();
     const socket = latestSocket();
 
-    act(() => socket.receive({ type: "state", robot: "main_hand", step_index: 1 }));
-    act(() => socket.receive({ type: "state", robot: "sub_hand", step_index: 5 }));
+    act(() => socket.receive({ type: "state", robot: "main_hand", full: true, step_index: 1 }));
+    act(() => socket.receive({ type: "state", robot: "sub_hand", full: true, step_index: 5 }));
 
     expect(result.current.states.main_hand.step_index).toBe(1);
     expect(result.current.states.sub_hand.step_index).toBe(5);
+  });
+
+  it("差分の state は前回値へ重ねる (欠けた欄は消えない)", () => {
+    const { result } = renderConnected();
+    const socket = latestSocket();
+
+    act(() =>
+      socket.receive({
+        type: "state",
+        robot: "main_hand",
+        full: true,
+        step_index: 1,
+        sequence: "main_hand_seq",
+      }),
+    );
+    act(() => socket.receive({ type: "state", robot: "main_hand", step_index: 2 }));
+
+    expect(result.current.states.main_hand.step_index).toBe(2);
+    expect(result.current.states.main_hand.sequence).toBe("main_hand_seq");
+  });
+
+  it("全欄の 1 通が来る前の差分は捨てる (半端な状態を組み立てない)", () => {
+    const { result } = renderConnected();
+    act(() => latestSocket().receive({ type: "state", robot: "main_hand", step_index: 2 }));
+
+    expect(result.current.states).toEqual({});
   });
 
   it("e_stop_active を含む場合は非常停止状態へ反映する", () => {
     const { result } = renderConnected();
     const socket = latestSocket();
 
-    act(() => socket.receive({ type: "state", robot: "main_hand", e_stop_active: true }));
+    act(() =>
+      socket.receive({ type: "state", robot: "main_hand", full: true, e_stop_active: true }),
+    );
     expect(result.current.eStopActive).toBe(true);
 
     act(() => socket.receive({ type: "state", robot: "main_hand", e_stop_active: false }));

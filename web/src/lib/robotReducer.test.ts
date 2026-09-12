@@ -26,7 +26,7 @@ describe("robotReducer", () => {
       court: "red",
       phase: "match",
     });
-    const next = receive(first, { type: "state", robot: "main_hand", step_index: 2 });
+    const next = receive(first, { type: "state", robot: "main_hand", full: true, step_index: 2 });
 
     expect(next.states).not.toBe(first.states);
     expect(next.matchState).toBe(first.matchState);
@@ -61,7 +61,12 @@ describe("robotReducer", () => {
     });
     expect(stopped.eStopReason).toBe("同期ずれ y_axis");
 
-    const during = receive(stopped, { type: "state", robot: "main_hand", e_stop_active: true });
+    const during = receive(stopped, {
+      type: "state",
+      robot: "main_hand",
+      full: true,
+      e_stop_active: true,
+    });
     expect(during.eStopReason).toBe("同期ずれ y_axis");
 
     const released = receive(during, { type: "state", robot: "main_hand", e_stop_active: false });

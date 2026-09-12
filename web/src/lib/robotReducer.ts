@@ -1,3 +1,5 @@
+import type { LinkState } from "@/lib/linkQuality";
+import { INITIAL_LINK_STATE } from "@/lib/linkQuality";
 import type {
   HealthChange,
   HomingSnapshot,
@@ -8,6 +10,7 @@ import type {
   ServerMessage,
   SwitchMeasureSnapshot,
 } from "@/lib/protocol";
+import { mergeRobotState } from "@/lib/robotState";
 import type { EpochMs } from "@/lib/time";
 
 export interface HealthChangeEvent extends HealthChange {
@@ -32,12 +35,15 @@ export interface RobotUiState {
   matchState: MatchState;
   serverInfo: ServerInfo;
   rejection: CommandRejectedEvent | null;
+  link: LinkState;
 }
 
 export type RobotAction =
   | { type: "message"; message: ServerMessage; nowMs: EpochMs }
   | { type: "e_stop_local"; active: boolean }
   | { type: "command_unsent"; command: string; reason: string; nowMs: EpochMs }
+  | { type: "ping_sent"; nowMs: EpochMs }
+  | { type: "link_reset" }
   | { type: "clear_rejection" };
 
 export function emptyMotorCheckState(): MotorCheckSnapshot {
@@ -104,6 +110,7 @@ export const INITIAL_ROBOT_UI_STATE: RobotUiState = {
   matchState: INITIAL_MATCH_STATE,
   serverInfo: INITIAL_SERVER_INFO,
   rejection: null,
+  link: INITIAL_LINK_STATE,
 };
 
 const HEALTH_EVENT_BUFFER = 5;
@@ -111,13 +118,21 @@ const HEALTH_EVENT_BUFFER = 5;
 function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochMs): RobotUiState {
   switch (message.type) {
     case "state": {
+      const previous = state.states[message.robot];
+      // 差分だけを先に受けても組み立てられない。全欄の 1 通が来るまで待つ
+      if (!message.full && previous === undefined) return state;
+      const robotState =
+        message.full || previous === undefined
+          ? message.state
+          : mergeRobotState(previous, message.state);
+
       const next: RobotUiState = {
         ...state,
-        states: { ...state.states, [message.robot]: message.state },
+        states: { ...state.states, [message.robot]: robotState },
       };
-      if (typeof message.state.e_stop_active !== "boolean") return next;
-      next.eStopActive = message.state.e_stop_active;
-      if (!message.state.e_stop_active) next.eStopReason = null;
+      if (typeof robotState.e_stop_active !== "boolean") return next;
+      next.eStopActive = robotState.e_stop_active;
+      if (!robotState.e_stop_active) next.eStopReason = null;
       return next;
     }
 
@@ -159,6 +174,15 @@ function applyMessage(state: RobotUiState, message: ServerMessage, nowMs: EpochM
 
     case "switch_measure_state":
       return { ...state, switchMeasure: message.switchMeasure };
+
+    case "pong": {
+      // 目印を返せないサーバー (古い版) では往復時間を出さない。0 で埋めると速く見える
+      if (message.t === null) return state;
+      return {
+        ...state,
+        link: { ...state.link, rttMs: Math.max(0, nowMs - message.t), lastPongAtMs: nowMs },
+      };
+    }
   }
 }
 
@@ -178,6 +202,11 @@ export function robotReducer(state: RobotUiState, action: RobotAction): RobotUiS
           source: "local",
         },
       };
+    case "ping_sent":
+      return { ...state, link: { ...state.link, lastPingAtMs: action.nowMs } };
+    // 繋ぎ直したら測り直す (前の回線の往復時間を出し続けない)
+    case "link_reset":
+      return state.link === INITIAL_LINK_STATE ? state : { ...state, link: INITIAL_LINK_STATE };
     case "clear_rejection":
       return state.rejection === null ? state : { ...state, rejection: null };
   }

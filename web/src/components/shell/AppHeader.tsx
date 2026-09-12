@@ -6,8 +6,9 @@ import { Icon } from "@/components/ui/Icon";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotCommands, useRobotStatus } from "@/context/RobotContext";
 import { cx } from "@/lib/cx";
+import { linkVerdict } from "@/lib/linkQuality";
 import { PHASE_BAND_CLASS, PHASE_LABEL, PHASE_TONE, courtLabel, courtTone } from "@/lib/phase";
-import { TONE_STATUS_CLASS } from "@/lib/tone";
+import { TONE_STATUS_CLASS, TONE_TEXT_CLASS } from "@/lib/tone";
 
 function wsHostLabel(url: string): string {
   try {
@@ -18,9 +19,10 @@ function wsHostLabel(url: string): string {
 }
 
 export function AppHeader() {
-  const { connected, matchState, wsUrl } = useRobotStatus();
+  const { connected, link, matchState, wsUrl } = useRobotStatus();
   const { onEStop, openWsSettings } = useRobotCommands();
   const { court, phase } = matchState;
+  const linkState = linkVerdict(link, connected);
 
   return (
     <header
@@ -42,10 +44,8 @@ export function AppHeader() {
               className="flex cursor-pointer items-center gap-1.5 hover:text-base-content"
               title={`接続先: ${wsUrl}（クリックで変更）`}
             >
-              <span
-                className={cx(TONE_STATUS_CLASS[connected ? "success" : "error"], "status-sm")}
-              />
-              {connected ? "Connected" : "Disconnected"}
+              <span className={cx(TONE_STATUS_CLASS[linkState.tone], "status-sm")} />
+              <span className={TONE_TEXT_CLASS[linkState.tone]}>{linkState.label}</span>
               <span className="font-mono">{wsHostLabel(wsUrl)}</span>
             </button>
 

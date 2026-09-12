@@ -24,11 +24,22 @@ describe("parseServerMessage", () => {
 
   describe("state", () => {
     it("robot 付きの state を受ける (配信内容はそのまま保持する)", () => {
+      const msg = parse({ type: "state", robot: "main_hand", full: true, step_index: 3 });
+      expect(msg).toEqual({
+        type: "state",
+        robot: "main_hand",
+        full: true,
+        state: { type: "state", robot: "main_hand", full: true, step_index: 3 },
+      });
+    });
+
+    it("差分の state は full が偽で届く (欠けた欄は前回値のまま)", () => {
       const msg = parse({ type: "state", robot: "main_hand", step_index: 3 });
       expect(msg).toEqual({
         type: "state",
         robot: "main_hand",
-        state: { type: "state", robot: "main_hand", step_index: 3, last_error: null },
+        full: false,
+        state: { type: "state", robot: "main_hand", step_index: 3 },
       });
     });
 
