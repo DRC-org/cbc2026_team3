@@ -426,6 +426,7 @@ const MANUAL_RANGE = fieldsOf<ManualRange>({
   min: "ui",
   max: "ui",
   steps: "ui",
+  labels: "ui",
 });
 
 const MANUAL_POSITION = fieldsOf<ManualPosition>({
@@ -438,6 +439,7 @@ const MANUAL_AXIS = fieldsOf<ManualAxis>({
   unit: "ui",
   value: "ui",
   target: "ui",
+  baseline: "ui",
   manual: "ui",
   manual_always: "ui",
   deviation: "ui",

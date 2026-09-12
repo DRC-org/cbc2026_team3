@@ -873,7 +873,14 @@ class RobotServer:
         delta = await self._manual_number(data, "delta", "manual_jog", requester)
         if delta is None:
             return
-        await self._run_manual("manual_jog", requester, manual.jog(axis, delta))
+        epoch = self._manual_epoch(self._robots[data["robot"]])
+        await self._run_manual("manual_jog", requester, manual.jog(axis, delta, epoch=epoch))
+
+    @staticmethod
+    def _manual_epoch(ctx: RobotContext) -> tuple:
+        """微調整の基準を取り直す区切り。ステップが進むかモードが変わったら別物。"""
+        progress = ctx.sequence.progress
+        return (ctx.mode.value, progress["step_index"], progress["waiting_trigger"])
 
     async def _apply_operation_mode(
         self,
@@ -1883,10 +1890,10 @@ class RobotServer:
 
     def _manual_state(self, robot_name: str) -> dict:
         ctx = self._robots[robot_name]
-        axes = ctx.manual.axes_info() if ctx.manual is not None else []
+        axes = ctx.manual.axes_info(epoch=self._manual_epoch(ctx)) if ctx.manual is not None else []
         for axis in axes:
             # 画面の桁へ丸める。生桁のままだと、表示に出ない揺れで軸行が毎フレーム再送される
-            for key in ("value", "target", "deviation"):
+            for key in ("value", "target", "deviation", "baseline"):
                 axis[key] = _display(axis.get(key))
         return {"mode": ctx.mode.value, "axes": axes}
 

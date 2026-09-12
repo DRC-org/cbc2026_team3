@@ -1,11 +1,15 @@
+import { useState } from "react";
+
 import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotCommands } from "@/context/RobotContext";
-import type { ManualState } from "@/lib/protocol";
+import { cx } from "@/lib/cx";
+import type { ManualAxis, ManualState } from "@/lib/protocol";
 
-// 箱の上で位置を詰めるための刻み。大きくすると 1 押しで箱を跨ぐ
-const NUDGE_STEP = 2;
+// 箱の上で位置を詰めるための刻み。既定は 2 (大きいと 1 押しで箱を跨ぐ)
+const NUDGE_STEPS = [1, 2, 5] as const;
+const DEFAULT_STEP = 2;
 
 interface NudgePanelProps {
   robotKey: string;
@@ -18,7 +22,10 @@ interface NudgePanelProps {
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
-/** トリガー待ちで止まっているあいだだけ出す、位置の微調整。 */
+const fmt = (value: number | null) => (value === null ? "—" : value.toFixed(1));
+const signed = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+
+/** 半自動で止まっているあいだの位置の微調整。向きの言葉は yaml (manual.labels) が持つ。 */
 export function NudgePanel({
   robotKey,
   manual,
@@ -27,6 +34,7 @@ export function NudgePanel({
   centerBlocked,
   sendOrReport,
 }: NudgePanelProps) {
+  const [step, setStep] = useState<number>(DEFAULT_STEP);
   // 連続値を送れる軸だけ (サーバーが `manual` を配る)。常時操作の軸は別パネルが持つ
   const axes = manual.axes.filter((axis) => axis.manual !== null && axis.manual_always !== true);
   // リンク機構の軸は中心を左右へずらせる (サーバーが `linkage` を配る)
@@ -35,38 +43,55 @@ export function NudgePanel({
 
   const nudge = (axis: string, delta: number) =>
     sendOrReport({ type: "manual_jog", robot: robotKey, axis, delta }, "位置の微調整");
+  const returnTo = (axis: string, value: number) =>
+    sendOrReport({ type: "manual_set", robot: robotKey, axis, value }, "基準へ戻す");
   const shiftCenter = (axis: string, current: number, delta: number) =>
     sendOrReport(
       { type: "linkage_center_set", robot: robotKey, axis, center: current + delta },
       "中心の微調整",
     );
 
+  const stepToggle = (
+    <div className="join" role="group" aria-label="微調整の刻み">
+      {NUDGE_STEPS.map((candidate) => (
+        <Button
+          key={candidate}
+          className={cx(
+            "join-item btn-sm min-w-[2.2em]",
+            candidate === step && "btn-active border-neutral bg-neutral text-neutral-content",
+          )}
+          aria-pressed={candidate === step}
+          aria-label={`刻みを ${candidate}mm にする`}
+          onClick={() => setStep(candidate)}
+        >
+          {candidate}
+        </Button>
+      ))}
+    </div>
+  );
+
   return (
     <Panel
       legend="位置の微調整"
       className="shrink-0"
-      actions={blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
+      actions={
+        <span className="flex items-center gap-2">
+          {blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
+          {stepToggle}
+          <span className="text-[0.85em] text-base-content/50">mm</span>
+        </span>
+      }
     >
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-col gap-1.5">
         {axes.map((axis) => (
-          <div key={axis.name} className="flex items-center gap-1.5">
-            <span className="text-[0.85em] text-base-content/70">{axis.name}</span>
-            <Button
-              disabled={blocked}
-              aria-label={`${axis.name} を ${NUDGE_STEP}${axis.unit} 戻す`}
-              onClick={() => nudge(axis.name, -NUDGE_STEP)}
-            >
-              -{NUDGE_STEP}
-            </Button>
-            <Button
-              disabled={blocked}
-              aria-label={`${axis.name} を ${NUDGE_STEP}${axis.unit} 進める`}
-              onClick={() => nudge(axis.name, NUDGE_STEP)}
-            >
-              +{NUDGE_STEP}
-            </Button>
-            <span className="text-[0.85em] text-base-content/50">{axis.unit}</span>
-          </div>
+          <NudgeRow
+            key={axis.name}
+            axis={axis}
+            step={step}
+            blocked={blocked}
+            onNudge={nudge}
+            onReturn={returnTo}
+          />
         ))}
         {linked.map((axis) => {
           const linkage = axis.linkage;
@@ -74,31 +99,97 @@ export function NudgePanel({
           // 今の隙間でずらせる上限。縮めきり (open) では 0 で、閉じたときに効く
           const limit = linkage.limit ?? linkage.max;
           return (
-            <div key={`${axis.name}-center`} className="flex items-center gap-1.5">
-              <span className="text-[0.85em] text-base-content/70">{axis.name} 中心</span>
+            <div key={`${axis.name}-center`} className="flex items-center gap-2">
               <Button
-                disabled={centerBlocked || linkage.center - NUDGE_STEP < -limit}
-                aria-label={`${axis.name} の中心を左へ ${NUDGE_STEP}mm`}
-                onClick={() => shiftCenter(axis.name, linkage.center, -NUDGE_STEP)}
+                className="min-h-[2.4em] min-w-[5.5em] text-[1.05em]"
+                disabled={centerBlocked || linkage.center - step < -limit}
+                aria-label={`${axis.name} の中心を左へ ${step}mm`}
+                onClick={() => shiftCenter(axis.name, linkage.center, -step)}
               >
-                ◀ {NUDGE_STEP}
+                ◀ 左 {step}
               </Button>
-              <span className="min-w-[4.5em] text-center text-[0.85em] tabular-nums">
-                {linkage.center > 0 ? "+" : ""}
-                {linkage.center.toFixed(1)}mm
+              <span className="flex min-w-[10em] flex-col items-center leading-tight">
+                <span className="text-[0.8em] text-base-content/60">{axis.name} 中心</span>
+                <span className="tabular-nums">
+                  {signed(linkage.center)}mm
+                  <span className="ml-1 text-[0.8em] text-base-content/50">
+                    ±{limit.toFixed(0)}
+                  </span>
+                </span>
               </span>
               <Button
-                disabled={centerBlocked || linkage.center + NUDGE_STEP > limit}
-                aria-label={`${axis.name} の中心を右へ ${NUDGE_STEP}mm`}
-                onClick={() => shiftCenter(axis.name, linkage.center, NUDGE_STEP)}
+                className="min-h-[2.4em] min-w-[5.5em] text-[1.05em]"
+                disabled={centerBlocked || linkage.center + step > limit}
+                aria-label={`${axis.name} の中心を右へ ${step}mm`}
+                onClick={() => shiftCenter(axis.name, linkage.center, step)}
               >
-                {NUDGE_STEP} ▶
+                右 {step} ▶
               </Button>
-              <span className="text-[0.85em] text-base-content/50">±{limit.toFixed(0)}</span>
             </div>
           );
         })}
       </div>
     </Panel>
+  );
+}
+
+interface NudgeRowProps {
+  axis: ManualAxis;
+  step: number;
+  blocked: boolean;
+  onNudge: (axis: string, delta: number) => void;
+  onReturn: (axis: string, value: number) => void;
+}
+
+function NudgeRow({ axis, step, blocked, onNudge, onReturn }: NudgeRowProps) {
+  const labels = axis.manual?.labels ?? null;
+  const minusLabel = labels === null ? `− ${step}` : `${labels.minus} ${step}`;
+  const plusLabel = labels === null ? `+ ${step}` : `${labels.plus} ${step}`;
+  // 基準 (このステップで最初に押す前の目標) からの累計。押しすぎたら一発で戻れる
+  const offset =
+    axis.baseline === null || axis.target === null ? null : axis.target - axis.baseline;
+  const moved = offset !== null && Math.abs(offset) >= 0.05;
+
+  return (
+    <div className="flex items-center gap-2">
+      <Button
+        className="min-h-[2.4em] min-w-[5.5em] text-[1.05em]"
+        disabled={blocked}
+        aria-label={`${axis.name} を ${step}${axis.unit} 戻す`}
+        onClick={() => onNudge(axis.name, -step)}
+      >
+        {minusLabel}
+      </Button>
+      <span className="flex min-w-[10em] flex-col items-center leading-tight">
+        <span className="text-[0.8em] text-base-content/60">{axis.name}</span>
+        <span className="tabular-nums">
+          {fmt(axis.target)}
+          <span className="ml-0.5 text-[0.8em] text-base-content/50">{axis.unit}</span>
+          {offset === null ? null : (
+            <span className={cx("ml-1.5", moved ? "text-warning" : "text-base-content/50")}>
+              ({signed(offset)})
+            </span>
+          )}
+        </span>
+      </span>
+      <Button
+        className="min-h-[2.4em] min-w-[5.5em] text-[1.05em]"
+        disabled={blocked}
+        aria-label={`${axis.name} を ${step}${axis.unit} 進める`}
+        onClick={() => onNudge(axis.name, step)}
+      >
+        {plusLabel}
+      </Button>
+      {axis.baseline !== null && moved ? (
+        <Button
+          className="btn-sm"
+          disabled={blocked}
+          aria-label={`${axis.name} を基準 ${fmt(axis.baseline)}${axis.unit} へ戻す`}
+          onClick={() => onReturn(axis.name, axis.baseline as number)}
+        >
+          基準へ戻す
+        </Button>
+      ) : null}
+    </div>
   );
 }

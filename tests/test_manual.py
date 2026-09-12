@@ -214,6 +214,15 @@ class TestJogOrigin:
         drivers["y_axis_l"].set_observed(position=-2.0 * 55.0)
         assert await manual.jog("y_axis", 1.0) == pytest.approx(3.0)
 
+    async def test_シーケンスが位置名で動かした後はその目標から動く(self) -> None:
+        """箱 2 で詰めた値を箱 3 で起点にすると 160mm 飛ぶ (2026-09-12 に机上で発見)。"""
+        manual, _, _ = _build(follow=False)
+        await manual.jog("y_axis", 2.0)  # 箱 2 で詰めた
+        # シーケンスが手動を通さずに次の箱へ動かした
+        await manual._motors.y_axis_r.set_target(ControlMode.POSITION, 12.0 * 55.0)
+        await manual._motors.y_axis_l.set_target(ControlMode.POSITION, -12.0 * 55.0)
+        assert await manual.jog("y_axis", 2.0) == pytest.approx(14.0)
+
     async def test_モード切替の_reset_でも起点を捨てる(self) -> None:
         manual, drivers, _ = _build(follow=False)
         await manual.set_value("y_axis", 15.0)
@@ -221,6 +230,28 @@ class TestJogOrigin:
         drivers["y_axis_r"].set_observed(position=0.0)
         drivers["y_axis_l"].set_observed(position=0.0)
         assert await manual.jog("y_axis", 1.0) == pytest.approx(1.0)
+
+
+class TestNudgeBaseline:
+    async def test_基準は同じ_epoch_の最初のジョグ直前の目標(self) -> None:
+        manual, _, _ = _build(follow=False)
+        await manual.set_value("y_axis", 10.0)
+        await manual.jog("y_axis", 2.0, epoch=("sequence", 3))
+        await manual.jog("y_axis", 2.0, epoch=("sequence", 3))
+        assert manual.baseline("y_axis", ("sequence", 3)) == pytest.approx(10.0)
+        # ステップが進んだら取り直す。前のステップの基準は返さない
+        await manual.jog("y_axis", 1.0, epoch=("sequence", 4))
+        assert manual.baseline("y_axis", ("sequence", 4)) == pytest.approx(14.0)
+        assert manual.baseline("y_axis", ("sequence", 3)) is None
+        assert manual.baseline("rotate", ("sequence", 4)) is None
+
+    async def test_axes_info_は今の_epoch_の基準だけ配る(self) -> None:
+        manual, _, _ = _build(follow=False)
+        await manual.jog("y_axis", 2.0, epoch="a")
+        by_name = {axis["name"]: axis for axis in manual.axes_info(epoch="a")}
+        assert by_name["y_axis"]["baseline"] == pytest.approx(0.0)
+        by_name = {axis["name"]: axis for axis in manual.axes_info(epoch="b")}
+        assert by_name["y_axis"]["baseline"] is None
 
 
 class TestPairedAxis:
@@ -339,7 +370,12 @@ class TestAxesInfo:
     def test_連続操作できる軸だけが可動範囲を持つ(self) -> None:
         manual, _, _ = _build()
         axes = self._by_name(manual)
-        assert axes["y_axis"]["manual"] == {"min": -2.0, "max": 20.0, "steps": [0.5, 2.0]}
+        assert axes["y_axis"]["manual"] == {
+            "min": -2.0,
+            "max": 20.0,
+            "steps": [0.5, 2.0],
+            "labels": None,
+        }
         assert axes["gripper"]["manual"] is None
         assert axes["conveyor"]["manual"] is None
 
