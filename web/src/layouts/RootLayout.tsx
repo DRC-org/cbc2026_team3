@@ -51,7 +51,7 @@ const AppShell = memo(function AppShell({
   return (
     <ModalProvider>
       <TabHotkeys />
-      <div className="flex h-svh w-full flex-col overflow-hidden bg-base-200 text-base-content">
+      <div className="flex h-full w-full flex-col overflow-hidden bg-base-200 text-base-content">
         <ConnectionBanner />
         <EStopBanner />
         <AppHeader />
