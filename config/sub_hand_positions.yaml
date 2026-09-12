@@ -16,6 +16,8 @@ axes:
       coarse_step: 0.75
       release_distance: 10.0
       settle_s: 0.05
+      # 後壁が探索の経路に居るので、探す前に開く (2026-09-12 実機)
+      prepare: { wall_r: open }
     guard:
       # + が下なので plus が下端。逆に書くと守りが反転する
       limits:
@@ -55,6 +57,8 @@ axes:
       step: 0.1
       release_distance: 10.0
       settle_s: 0.05
+      # 後壁が探索の経路に居るので、探す前に開く (2026-09-12 実機)
+      prepare: { wall_r: open }
     guard:
       # 逆に書くと守りが反転し、押されている端へ進む指令だけが通る
       limits:

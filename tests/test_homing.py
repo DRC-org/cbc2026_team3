@@ -2123,3 +2123,111 @@ class TestHomingOrderFollowsInterference:
         await _runner(rec)._stop_here(spec, handle)
 
         assert rec.commands == [pytest.approx({"slide": spec.motors[0].to_command(-3.0)})]
+
+
+class TestPrepare:
+    """探索を始める前に、経路に居る他の軸を位置名で退ける (後壁を開いてから前後を探す)。"""
+
+    @staticmethod
+    def _table(**homing_overrides: object):
+        homing: dict = {
+            "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
+            "direction": -1,
+            "search_distance": 30.0,
+            "step": 1.0,
+            "settle_s": 0.0,
+            "align_distance": 5.0,
+            "prepare": {"wall": "open"},
+        }
+        homing.update(homing_overrides)
+        return load_position_table(
+            {
+                "axes": {
+                    "wall": {
+                        "unit": "deg",
+                        "command_unit": "deg",
+                        "tolerance": 0.5,
+                        "timeout_s": 0.05,
+                        "motors": {"wall": {"scale": 1.0}},
+                    },
+                    "y_axis": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "tolerance": 0.1,
+                        "timeout_s": 5.0,
+                        "sync_tolerance": 100.0,
+                        "homing": homing,
+                        "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                    },
+                },
+                "positions": {
+                    "wall": {"closed": 90.0, "open": 180.0},
+                    "y_axis": {"home": 0.0},
+                },
+            },
+            source="<test>",
+        )
+
+    @staticmethod
+    def _with_wall(group: _Group, *, follows: bool) -> None:
+        driver = StubFeedbackDriver("wall", 1)
+        driver.set_observed(position=90.0)
+
+        async def _send(_mode: ControlMode, value: float) -> None:
+            group.targets.append(("wall", value))
+            if follows:
+                driver.set_observed(position=value)
+
+        group.motors.add(MotorHandle("wall", driver, mock_can_manager(), target_sink=_send))
+
+    @staticmethod
+    def _sensors() -> dict[str, _SensorModel]:
+        return {
+            "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=-1.0),
+            "sensor_l": _SensorModel(motor="y_axis_l", active_at_or_below=-2.0),
+        }
+
+    async def test_探索の一歩目より前に退ける(self) -> None:
+        table = self._table()
+        rec = _Recorder(sensors=self._sensors())
+        group = _Group(table.axis("y_axis"), rec)
+        self._with_wall(group, follows=True)
+
+        results = await run_homing(
+            _runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"]
+        )
+
+        assert [result.error for result in results] == [None]
+        assert rec.origins == ["y_axis"]
+        assert group.targets[0] == ("wall", pytest.approx(180.0))
+
+    async def test_退けられなければ探索を始めずにその軸の失敗にする(self) -> None:
+        table = self._table()
+        rec = _Recorder(sensors=self._sensors())
+        group = _Group(table.axis("y_axis"), rec)
+        self._with_wall(group, follows=False)
+
+        results = await run_homing(
+            _runner(rec),
+            table,
+            group.motors,
+            court=Court.RED,
+            axes=["y_axis"],
+            stop_on_error=False,
+        )
+
+        assert rec.origins == []
+        assert results[0].error is not None and "wall" in results[0].error
+        assert group.targets == [("wall", pytest.approx(180.0))]
+
+    @pytest.mark.parametrize(
+        ("prepare", "message"),
+        [
+            ({"y_axis": "home"}, "自分自身"),
+            ({"nowhere": "open"}, "axes にありません"),
+            ({"wall": "ajar"}, "positions.wall にありません"),
+        ],
+    )
+    def test_表に無い軸や位置名は読み込みで拒否する(self, prepare: dict, message: str) -> None:
+        with pytest.raises(ValueError, match=message):
+            self._table(prepare=prepare)

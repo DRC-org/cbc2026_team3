@@ -314,3 +314,15 @@ class TestLinearAxisTimeout:
 
         with pytest.raises(ValueError, match=rf"axes\.{axis} は min_speed .*timeout_s \(4\.0\)"):
             load_position_table(config, source=_YAML_NAME)
+
+
+class TestHomingPrepare:
+    """後壁 (wall_r) が探索の経路に居るので、探す前に開く (2026-09-12 実機)。"""
+
+    def test_探索の前に後壁を開く(self) -> None:
+        table = _load(_YAML_NAME)
+        for axis in ("sub_lift", "sub_y_axis"):
+            homing = table.axis(axis).homing
+            assert homing is not None and homing.prepare == (("wall_r", "open"),)
+        # 開く角が閉じた角と同じなら退けたことにならない
+        assert table.raw("wall_r", "open") != table.raw("wall_r", "closed")
