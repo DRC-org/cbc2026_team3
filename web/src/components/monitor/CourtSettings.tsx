@@ -18,7 +18,8 @@ const COURT_OPTIONS: { value: MatchCourt; label: string; selectedClass: string }
 export const CourtSettings = memo(function CourtSettings({
   onRequestReset,
 }: {
-  onRequestReset: () => void;
+  /** 省くと RESET を出さない (操縦者の画面。試合のリセットは Monitor だけが持つ) */
+  onRequestReset?: () => void;
 }) {
   const { matchState, connected } = useRobotStatus();
   const { setCourt } = useRobotCommands();
@@ -33,14 +34,16 @@ export const CourtSettings = memo(function CourtSettings({
       legend="コート設定"
       className="shrink-0"
       actions={
-        <Button
-          disabled={resetLocked}
-          onClick={onRequestReset}
-          aria-label="試合をリセットしてセッティングタイムへ戻す"
-        >
-          <Icon as={RotateCcw} />
-          RESET
-        </Button>
+        onRequestReset === undefined ? null : (
+          <Button
+            disabled={resetLocked}
+            onClick={onRequestReset}
+            aria-label="試合をリセットしてセッティングタイムへ戻す"
+          >
+            <Icon as={RotateCcw} />
+            RESET
+          </Button>
+        )
       }
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

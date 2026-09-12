@@ -10,6 +10,8 @@ interface AlwaysManualPanelProps {
   manual: ManualState;
   blockedReason: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
+  /** 別のパネルが持つ軸。吸着パッドの弁は吸着パッドの面が「今すぐ開閉」を持つ */
+  excludeAxes?: string[];
 }
 
 export function AlwaysManualPanel({
@@ -17,10 +19,13 @@ export function AlwaysManualPanel({
   manual,
   blockedReason,
   sendOrReport,
+  excludeAxes,
 }: AlwaysManualPanelProps) {
   // 欄が落ちた配信でパネルごと消える側へ倒すため厳密に比較する。シーケンス実行中に
   // 押せるボタンが、配信の欠落で増えてはならない
-  const axes = manual.axes.filter((axis) => axis.manual_always === true);
+  const axes = manual.axes.filter(
+    (axis) => axis.manual_always === true && !(excludeAxes ?? []).includes(axis.name),
+  );
   if (axes.length === 0) return null;
   const { pads, rest } = splitOnOffAxes(axes);
 
