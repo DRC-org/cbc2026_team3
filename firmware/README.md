@@ -32,6 +32,10 @@ firmware/
     platformio.ini     固有行のみ（default_envs / extra_configs / test_dir / lib_deps）
     include/config.h   ピン配置・チャンネル表・機体依存定数（要確認項目はここ）
     src/main.cpp       ペリフェラル初期化・出力反映・CAN 送受信
+  dc_motor_slcan/      **DC 基板の代替版**（CAN トランシーバ故障のため USB CDC + SLCAN）
+    include/config.h   dc_motor とは別ファイル。**`kFirmwareVersion` は dc_motor と同値に保つ**
+    src/main.cpp       dc_motor とほぼ同じ。CAN の出し入れだけ slcan_backend を呼ぶ
+    src/slcan_backend.{h,cpp}  Serial と SlcanCodec の結線（`begin` / `send` / `poll`）
   servo/               サーボ用モタドラのファーム（1 枚で 5 スロット。**基板 3 枚 / MCU 2 種**）
     platformio.ini     固有行のみ。**実機 env が 2 つ**（nano = #0/#1 / uno_r4_minima = #2）
     include/config.h   ピン配置・スロット表・機体依存定数（要確認項目はここ）。**1 プロジェクト 1 ファイル**
@@ -110,6 +114,7 @@ pio test -e native -d firmware/servo
 
 # ビルド（env が基板ごとに違う。**サーボは 2 env とも必要**）
 pio run -e uno_r4_minima -d firmware/dc_motor
+pio run -e uno_r4_minima -d firmware/dc_motor_slcan   # DC 基板の SLCAN 版
 pio run -e nano          -d firmware/servo      # サーボ基板 #0 / #1（Arduino Nano）
 pio run -e uno_r4_minima -d firmware/servo      # サーボ基板 #2（UNO R4 Minima）
 pio run                  -d firmware/servo      # 上の 2 つを両方（default_envs が両方）
@@ -124,15 +129,34 @@ pio run -e uno_r4_minima -d firmware/servo -t upload --upload-port /dev/ttyACM0
 pio device monitor -e uno_r4_minima -d firmware/servo
 
 # 書き込み（基板を USB で接続してから）
-pio run -e uno_r4_minima -d firmware/dc_motor -t upload
+# ★ DC 基板の現物へ焼くのは dc_motor_slcan のほう（下記「DC 基板は 2 プロジェクトある」）
+pio run -e uno_r4_minima -d firmware/dc_motor_slcan -t upload
+pio run -e uno_r4_minima -d firmware/dc_motor -t upload          # 切り戻し用（内蔵 CAN 版）
 pio run -e uno_r4_minima -d firmware/dc_motor -t upload --upload-port /dev/ttyACM0
 
-# シリアルモニタ（115200 baud）
+# シリアルモニタ（115200 baud）。**SLCAN 版へは打たない**（slcand と tty を奪い合う）
 pio device monitor -e uno_r4_minima -d firmware/dc_motor
 
 # クリーン
 pio run -e uno_r4_minima -d firmware/dc_motor -t clean
 ```
+
+### DC 基板は 2 プロジェクトある（`dc_motor` / `dc_motor_slcan`）
+
+CAN トランシーバが壊れたため、**現物へ焼くのは `dc_motor_slcan`**（内蔵 CAN を使わず USB CDC で
+SLCAN を喋る。PC 側は `slcand` が SocketCAN の netdev `can_dc` へ昇格させる）。`dc_motor`
+（内蔵 CAN 版）はトランシーバを直したときに切り戻せるよう無改変で残してある。**`main.cpp` も
+`include/config.h` も別ファイル**で、共有しているのは `firmware/lib/MotorCan/` だけである
+（SLCAN の純ロジック `SlcanCodec` もそこに置いて native テストの対象にしてある）。
+
+- **CAN 上の振る舞いは両者で同一。** プロトコル（`docs/motor_driver_can_protocol.md`）も
+  PC 側のコードも分岐しない。SLCAN の仕様は同 §1.1
+- **`kFirmwareVersion` は 2 つの `config.h` で同値に保つ。** 分けると片方を焼いた基板が一斉に
+  FAULT になる（理由は `docs/invariants.md` §7。`tests/test_firmware_version_sync.py` が固定）
+- **SLCAN 版に `ENABLE_SERIAL_DEBUG` は持たせられない**（同じ `Serial` の奪い合いになるので、
+  定義するとビルドが `#error` で止まる）。duty 直叩きを使いたいときは `dc_motor` を焼く
+- 基板と配線は同一で、**内蔵 CAN のピン `D4`/`D5` は使わないが空けたままにする**
+  （`static_assert` が他用途への割り当てを検出する）
 
 **書き込みの作法も MCU で違う。** Nano（サーボ #0/#1）だけがブートローダの
 ボーレート問題を持つ —— `platformio.ini` の `board` は `nanoatmega328`（**古い
@@ -242,7 +266,9 @@ CAN 衝突と誤検出し、Nano ビルドは R4 側の D9 を RGB LED との衝
 
 ## デバッグ用シリアル（dc_motor）
 
-USB CDC の `Serial`（115200 baud）から duty を直接入力できる。
+USB CDC の `Serial`（115200 baud）から duty を直接入力できる。**`dc_motor_slcan` には無い**
+（同じ `Serial` を SLCAN が占有するため。`ENABLE_SERIAL_DEBUG` を定義するとビルドが
+`#error` で止まる）。
 
 - `0 0.3` のように「`<チャンネル番号> <duty>`」を送るとそのチャンネルが回る。
   **チャンネル番号と duty は空白で区切る。** 区切りが無い行は捨てる（番号を読み違えると

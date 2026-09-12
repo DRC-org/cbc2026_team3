@@ -71,6 +71,7 @@ asyncio 単一プロセスで CAN 通信・シーケンス制御・Web サーバ
 | 軸間干渉・可動端・シーケンスの並び | §4 運用と操作モード |
 | `lib/can_manager.py`, `lib/drivers/` | §1 CAN バスとフレーム |
 | `firmware/` | §7 + `docs/motor_driver_can_protocol.md` |
+| DC 基板の USB CDC + SLCAN リンク（`firmware/dc_motor_slcan/`, `scripts/slcand.sh`, `scripts/setup_can.sh`, `scripts/can_config.py`） | §1 + §3（物理非常停止がこの 1 本に乗っている）+ §7 |
 
 ## コマンド
 
@@ -121,7 +122,8 @@ scripts/deploy.sh                 # 実機へ反映: pull + 依存導入 + UI �
 - **測れない値を 0 で埋めない。** 「測る手段が無い」は `null`、「読めなかった」は `MALFORMED`
 - **止める処理・後始末は、1 つ失敗しても残りを続ける形にする**
 - **プロトコルかピン配置を変えたら、ファームの `kFirmwareVersion` と `config/**/*.yaml` の
-  `expected_firmware` を同じコミットで揃える**
+  `expected_firmware` を同じコミットで揃える**（DC 基板は `dc_motor` と `dc_motor_slcan` の
+  2 つとも。同値でないと片方を焼いた基板が一斉に FAULT になる）
 
 ## 言語
 
