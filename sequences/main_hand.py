@@ -28,8 +28,6 @@ TO_CONVEYOR: dict[str, str] = {
     "conveyor": "stop",
 }
 
-SWEEP_TO_CONVEYOR: dict[str, str] = {"wall_f": "closed", "conveyor": "run"}
-
 RELEASE: dict[str, str] = {"gripper": "open"}
 
 
@@ -43,7 +41,6 @@ class MainHandSequence(Sequence):
 
     @step("3 列目ワークへ移動", require_trigger=True)
     async def move_to_work_3(self) -> None:
-        # rotate 振り下ろし姿勢のまま y_axis が水平移動するのを避けるため着地時刻を揃える
         await self.move_to(_pick_at("work_3"), sync=True)
 
     @step("3 列目ワークを把持", require_trigger=True)
@@ -66,11 +63,12 @@ class MainHandSequence(Sequence):
     @step("共通ワークへ移動", require_trigger=True)
     async def move_to_work_shared(self) -> None:
         await self.move_to({"y_axis": "work_shared", "rotate": "pick"}, sync=True)
-        await self.move_to({"y_axis": "work_shared", "rotate": "pick_shared"})
+        await self.move_to({"y_axis": "work_shared", "rotate": "pick_shared"}, sync=True)
 
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_3(self) -> None:
-        await self.move_to(SWEEP_TO_CONVEYOR)
+        await self.move_to({"wall_f": "closed"})
+        await self.move_to({"conveyor": "run"})
 
     @step("共通ワークを把持", require_trigger=True)
     async def grab_work_shared(self) -> None:
@@ -107,11 +105,12 @@ class MainHandSequence(Sequence):
 
     @step("2 列目ワークへ移動")
     async def move_to_work_2(self) -> None:
-        await self.move_to(_pick_at("work_2"))
+        await self.move_to(_pick_at("work_2"), sync=True)
 
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_shared(self) -> None:
-        await self.move_to(SWEEP_TO_CONVEYOR)
+        await self.move_to({"wall_f": "closed"})
+        await self.move_to({"conveyor": "run"})
 
     @step("2 列目ワークを把持", require_trigger=True)
     async def grab_work_2(self) -> None:
@@ -130,11 +129,12 @@ class MainHandSequence(Sequence):
 
     @step("1 列目ワークへ移動", require_trigger=True)
     async def move_to_work_1(self) -> None:
-        await self.move_to(_pick_at("work_1"))
+        await self.move_to(_pick_at("work_1"), sync=True)
 
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_2(self) -> None:
-        await self.move_to(SWEEP_TO_CONVEYOR)
+        await self.move_to({"wall_f": "closed"})
+        await self.move_to({"conveyor": "run"})
 
     @step("1 列目ワークを把持", require_trigger=True)
     async def grab_work_1(self) -> None:
@@ -155,8 +155,9 @@ class MainHandSequence(Sequence):
 
     @step("コンベアの壁を閉じてワークを寄せる")
     async def close_wall_f_1(self) -> None:
-        await self.move_to({"rotate": "after_place", "y_axis": "clear"})
-        await self.move_to(SWEEP_TO_CONVEYOR)
+        await self.move_to({"y_axis": "work_1_after_1", "rotate": "work_1_after_1"})
+        await self.move_to({"wall_f": "closed"})
+        await self.move_to({"conveyor": "run"})
 
     @step("初期位置へ復帰", require_trigger=True)
     async def return_home(self) -> None:
