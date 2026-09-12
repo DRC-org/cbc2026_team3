@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>メインハンド干渉シミュレータ</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f2f4f6;
+  --panel: #ffffff;
+  --panel-2: #e9edf1;
+  --panel-3: #dde3e9;
+  --border: #cbd2d9;
+  --border-strong: #9aa4ae;
+  --fg: #1a1d21;
+  --muted: #5b636c;
+  --ok: #2f7a4f;
+  --ok-bg: #e4f0e9;
+  --ng: #b3372c;
+  --ng-bg: #f7e4e2;
+  --warn: #96620a;
+  --warn-bg: #f8eedb;
+  --info: #25667f;
+  --accent: #4a5361;
+
+  /* render.js は canvas の計算済みスタイルから --sim-* を読む（Render.COLOR_TOKENS と同名） */
+  --sim-fg: #3b4248;
+  --sim-muted: #5b636c;
+  --sim-grid: rgba(90, 99, 108, 0.16);
+  --sim-grid-strong: rgba(90, 99, 108, 0.42);
+  --sim-plot-bg: #f7f9fa;
+  --sim-frame: #9aa4ae;
+  --sim-obstacle: rgba(90, 99, 108, 0.30);
+  --sim-obstacle-edge: #6b7480;
+  --sim-work: #7c5c17;
+  --sim-wall: #8a5a1f;
+  --sim-rail: #9aa4ae;
+  --sim-carriage: #5b636c;
+  --sim-arm: #3f5d70;
+  --sim-hand: #25667f;
+  --sim-ghost: rgba(90, 99, 108, 0.50);
+  --sim-hit: #b3372c;
+  --sim-safe: #2f7a4f;
+  --sim-cursor: #1a1d21;
+  --sim-calib: #7a4a86;
+
+  --sim-owner-0: #a34a42;
+  --sim-owner-1: #9a6a22;
+  --sim-owner-2: #7d7a24;
+  --sim-owner-3: #3f7a52;
+  --sim-owner-4: #35707f;
+  --sim-owner-5: #5a638f;
+  --sim-owner-6: #7d5488;
+  --sim-owner-7: #8a5560;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #15181b;
+    --panel: #1d2125;
+    --panel-2: #262b30;
+    --panel-3: #2f353b;
+    --border: #3a4148;
+    --border-strong: #5b646d;
+    --fg: #e6e9ec;
+    --muted: #9aa4ae;
+    --ok: #63b98a;
+    --ok-bg: #1d2b23;
+    --ng: #e88379;
+    --ng-bg: #2e1e1c;
+    --warn: #d4a24a;
+    --warn-bg: #2c2418;
+    --info: #6fb3cc;
+    --accent: #a7b0ba;
+
+    --sim-fg: #c8cfd6;
+    --sim-muted: #9aa4ae;
+    --sim-grid: rgba(154, 164, 174, 0.16);
+    --sim-grid-strong: rgba(154, 164, 174, 0.40);
+    --sim-plot-bg: #191d21;
+    --sim-frame: #5b646d;
+    --sim-obstacle: rgba(154, 164, 174, 0.28);
+    --sim-obstacle-edge: #8b949e;
+    --sim-work: #d4a24a;
+    --sim-wall: #d18e4c;
+    --sim-rail: #6b7480;
+    --sim-carriage: #9aa4ae;
+    --sim-arm: #86a9bd;
+    --sim-hand: #6fb3cc;
+    --sim-ghost: rgba(154, 164, 174, 0.50);
+    --sim-hit: #e88379;
+    --sim-safe: #63b98a;
+    --sim-cursor: #f0e3b0;
+    --sim-calib: #c08fd0;
+
+    --sim-owner-0: #d98078;
+    --sim-owner-1: #d0a05c;
+    --sim-owner-2: #c3c06a;
+    --sim-owner-3: #74bd90;
+    --sim-owner-4: #6fb3cc;
+    --sim-owner-5: #8f97d8;
+    --sim-owner-6: #bb8fd0;
+    --sim-owner-7: #cf9199;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #15181b;
+  --panel: #1d2125;
+  --panel-2: #262b30;
+  --panel-3: #2f353b;
+  --border: #3a4148;
+  --border-strong: #5b646d;
+  --fg: #e6e9ec;
+  --muted: #9aa4ae;
+  --ok: #63b98a;
+  --ok-bg: #1d2b23;
+  --ng: #e88379;
+  --ng-bg: #2e1e1c;
+  --warn: #d4a24a;
+  --warn-bg: #2c2418;
+  --info: #6fb3cc;
+  --accent: #a7b0ba;
+
+  --sim-fg: #c8cfd6;
+  --sim-muted: #9aa4ae;
+  --sim-grid: rgba(154, 164, 174, 0.16);
+  --sim-grid-strong: rgba(154, 164, 174, 0.40);
+  --sim-plot-bg: #191d21;
+  --sim-frame: #5b646d;
+  --sim-obstacle: rgba(154, 164, 174, 0.28);
+  --sim-obstacle-edge: #8b949e;
+  --sim-work: #d4a24a;
+  --sim-wall: #d18e4c;
+  --sim-rail: #6b7480;
+  --sim-carriage: #9aa4ae;
+  --sim-arm: #86a9bd;
+  --sim-hand: #6fb3cc;
+  --sim-ghost: rgba(154, 164, 174, 0.50);
+  --sim-hit: #e88379;
+  --sim-safe: #63b98a;
+  --sim-cursor: #f0e3b0;
+  --sim-calib: #c08fd0;
+
+  --sim-owner-0: #d98078;
+  --sim-owner-1: #d0a05c;
+  --sim-owner-2: #c3c06a;
+  --sim-owner-3: #74bd90;
+  --sim-owner-4: #6fb3cc;
+  --sim-owner-5: #8f97d8;
+  --sim-owner-6: #bb8fd0;
+  --sim-owner-7: #cf9199;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 8px 8px 40px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Noto Sans JP", "Hiragino Sans", Meiryo, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+.mono { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+
+h1 { font-size: 15px; margin: 0; font-weight: 600; }
+h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+h3 { font-size: 12px; margin: 8px 0 4px; font-weight: 600; color: var(--muted); }
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px 8px;
+}
+header .spacer { flex: 1 1 auto; }
+
+section.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.scrollx { overflow-x: auto; max-width: 100%; }
+
+button, select, input {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 0;
+  padding: 3px 7px;
+}
+button { cursor: pointer; }
+button:hover { background: var(--panel-3); }
+button[aria-pressed="true"], button.on {
+  background: var(--accent);
+  color: var(--panel);
+  border-color: var(--accent);
+}
+input[type="number"], input[type="text"] { background: var(--panel); width: 100%; }
+input[type="range"] { width: 100%; padding: 0; border: 0; background: transparent; accent-color: var(--info); }
+:focus-visible { outline: 2px solid var(--info); outline-offset: 1px; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; vertical-align: top; white-space: nowrap; }
+th { background: var(--panel-2); font-weight: 600; color: var(--muted); }
+tbody tr:hover { background: var(--panel-2); }
+tbody tr.sel { outline: 2px solid var(--info); outline-offset: -2px; }
+tbody tr.bad { background: var(--ng-bg); }
+tbody tr.bad:hover { background: var(--ng-bg); }
+
+.tag {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  font-weight: 600;
+}
+.tag.ok { color: var(--ok); background: var(--ok-bg); }
+.tag.ng { color: var(--ng); background: var(--ng-bg); }
+.tag.warn { color: var(--warn); background: var(--warn-bg); }
+.tag.mute { color: var(--muted); background: var(--panel-2); }
+
+.banner {
+  border: 2px solid var(--ng);
+  background: var(--ng-bg);
+  color: var(--ng);
+  padding: 8px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.banner.warn { border-color: var(--warn); background: var(--warn-bg); color: var(--warn); }
+.note { color: var(--muted); font-size: 12px; }
+
+.cols { display: grid; grid-template-columns: 1fr; gap: 8px; }
+@media (min-width: 900px) {
+  .cols { grid-template-columns: minmax(0, 1fr) minmax(320px, 26rem); align-items: start; }
+}
+
+.figwrap { position: relative; width: 100%; }
+canvas { display: block; width: 100%; background: var(--panel); border: 1px solid var(--border); }
+#top-canvas { height: 340px; }
+#cs-canvas { height: 320px; cursor: crosshair; }
+.canvas-err { color: var(--ng); font-size: 12px; padding: 2px 0; }
+
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.ctl { margin-bottom: 10px; }
+.ctl-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ctl-val { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.num { width: 5.5rem; flex: 0 0 auto; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chips button { font-size: 11px; padding: 1px 5px; }
+
+.verdict { border: 1px solid var(--border); padding: 6px; background: var(--panel-2); }
+.verdict.ok { border-color: var(--ok); }
+.verdict.ng { border-color: var(--ng); }
+
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 4px 0 0; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; }
+
+details.group { border: 1px solid var(--border); margin-bottom: 6px; }
+details.group > summary { cursor: pointer; padding: 3px 6px; background: var(--panel-2); font-weight: 600; }
+.pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 6px 10px; padding: 6px; }
+.pfield label { display: block; color: var(--muted); font-size: 11px; }
+.pfield .unit { color: var(--muted); }
+
+textarea {
+  width: 100%;
+  min-height: 15rem;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  white-space: pre;
+}
+
+ul.legend { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px 12px; }
+ul.legend li { font-size: 11px; color: var(--muted); }
+ul.legend code { color: var(--fg); }
+</style>
+</head>
+<body>
+
+<div id="boot" class="banner">
+  モジュールを読み込み中… この表示が消えない場合、<code>geometry.js</code> /
+  <code>steps.js</code> / <code>render.js</code> / <code>app.js</code> のどれかが
+  読み込めていません。
+  <div id="boot-detail" class="mono" style="font-weight:400;margin-top:6px"></div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>メインハンド干渉シミュレータ</h1>
+    <span class="note">y_axis × rotate の干渉を机上で洗い出す</span>
+    <span class="spacer"></span>
+    <button id="btn-theme" type="button">明暗切替</button>
+    <button id="btn-clear-store" type="button">保存を消す</button>
+  </header>
+
+  <!-- 1. 校正照合 -->
+  <section class="panel" id="sec-calib">
+    <h2>1. 校正照合 — 入れた寸法が実機と合っているか</h2>
+    <p class="note">実機で分かっている事実との答え合わせ。ここが NG なら寸法が実機と違うので、下の判定は信用できない。</p>
+    <div class="scrollx"><table id="calib-table">
+      <thead><tr><th>判定</th><th>実機で分かっていること</th><th>照合点</th><th>期待</th><th>実測</th><th>相手</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <h3>必ず確かめたい 1 件 — 試合中に必ず通る姿勢が境界の内側にいる</h3>
+    <div id="boundary" class="verdict"></div>
+  </section>
+
+  <div id="warn-banner"></div>
+
+  <div class="cols">
+    <div>
+      <!-- 2. 図 -->
+      <section class="panel">
+        <h2>2. 上面図</h2>
+        <div class="figwrap"><canvas id="top-canvas"></canvas></div>
+        <div id="top-err" class="canvas-err"></div>
+        <ul class="legend" id="legend"></ul>
+      </section>
+      <section class="panel">
+        <h2>2b. C 空間マップ（クリックで姿勢ジャンプ）</h2>
+        <div class="row">
+          <label>解像度
+            <select id="cs-res">
+              <option value="coarse">粗</option>
+              <option value="normal" selected>標準</option>
+              <option value="fine">細</option>
+            </select>
+          </label>
+          <label><input type="checkbox" id="cs-labels" checked> 位置名を描く</label>
+          <span id="cs-status" class="note"></span>
+        </div>
+        <div class="figwrap"><canvas id="cs-canvas"></canvas></div>
+        <div id="cs-err" class="canvas-err"></div>
+      </section>
+    </div>
+
+    <div>
+      <!-- 3. 姿勢の操作 -->
+      <section class="panel">
+        <h2>3. 姿勢の操作</h2>
+        <div id="pose-verdict" class="verdict"></div>
+
+        <div class="ctl" style="margin-top:10px">
+          <div class="ctl-head"><label for="y-range">y_axis <span class="note">mm</span></label>
+            <span class="ctl-val" id="y-show"></span></div>
+          <input type="range" id="y-range">
+          <div class="row" style="margin:4px 0 0">
+            <input type="number" class="num" id="y-num" step="0.5">
+            <span class="chips" id="y-chips"></span>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-head"><label for="r-range">rotate <span class="note">deg</span></label>
+            <span class="ctl-val" id="r-show"></span></div>
+          <input type="range" id="r-range">
+          <div class="row" style="margin:4px 0 0">
+            <input type="number" class="num" id="r-num" step="0.5">
+            <span class="chips" id="r-chips"></span>
+          </div>
+        </div>
+
+        <div class="ctl">
+          <div class="ctl-head"><label for="w-range">wall_f <span class="note">deg</span></label>
+            <span class="ctl-val" id="w-show"></span></div>
+          <input type="range" id="w-range" min="80" max="270" step="1">
+          <div class="row" style="margin:4px 0 0">
+            <input type="number" class="num" id="w-num" step="1" min="80" max="270">
+            <span class="chips" id="w-chips"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 4. シーケンスの矩形領域 -->
+  <section class="panel" id="sec-rects">
+    <h2>4. シーケンスの矩形領域（始点〜終点の全域を判定）</h2>
+    <div class="row">
+      <label>プラン
+        <select id="plan">
+          <option value="active">active（現在有効な段）</option>
+          <option value="full">full（コメントアウトを含む全段）</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="f-both"> 両軸が動く動作だけ</label>
+      <button type="button" id="f-hits" aria-pressed="false">干渉している行を上に集める</button>
+      <button type="button" id="f-clear">選択解除</button>
+      <span id="rect-summary" class="note"></span>
+    </div>
+    <div class="scrollx"><table id="rect-table">
+      <thead><tr><th>#</th><th>判定</th><th>段名</th><th>動作</th><th>始点 (y, rot)</th><th>終点 (y, rot)</th><th>最悪点</th><th>相手</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+
+  <!-- 5. 寸法 -->
+  <section class="panel" id="sec-params">
+    <h2>5. 寸法パラメータ</h2>
+    <div class="row">
+      <button type="button" id="btn-params-reset">既定値に戻す</button>
+      <span class="note">変更すると再描画（C 空間の再計算は 120ms まとめ）</span>
+    </div>
+    <div id="params"></div>
+  </section>
+
+  <!-- 6. 位置定数 -->
+  <section class="panel" id="sec-positions">
+    <h2>6. 位置定数の編集と yaml 出力</h2>
+    <div class="row">
+      <button type="button" id="btn-pos-reset">既定値に戻す</button>
+      <button type="button" id="btn-copy">yaml をコピー</button>
+      <span id="copy-status" class="note"></span>
+    </div>
+    <div id="positions"></div>
+    <h3><code>config/main_hand_positions.yaml</code> の <code>positions:</code> に貼る</h3>
+    <textarea id="yaml" readonly spellcheck="false"></textarea>
+  </section>
+</div>
+
+<script>
+// 依存が落ちたときに真っ白にしないための最小限の受け皿
+window.__bootErrors = [];
+window.addEventListener('error', function (e) {
+  window.__bootErrors.push(String((e && (e.message || e.type)) || 'error'));
+  var d = document.getElementById('boot-detail');
+  if (d) d.textContent = window.__bootErrors.join('\n');
+});
+</script>
+<script src="geometry.js"></script>
+<script src="steps.js"></script>
+<script src="render.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
