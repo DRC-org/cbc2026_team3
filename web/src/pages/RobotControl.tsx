@@ -24,6 +24,7 @@ import { Page } from "@/components/ui/Page";
 import { Panel } from "@/components/ui/Panel";
 import { useRobotCommands, useRobotStates, useRobotStatus } from "@/context/RobotContext";
 import { useHotkeys } from "@/hooks/useHotkeys";
+import { cx } from "@/lib/cx";
 import { tempThresholdsOf } from "@/lib/healthVerdict";
 import { isDuringMatch, isSetupPhase } from "@/lib/phase";
 import { MALFORMED } from "@/lib/protocol";
@@ -266,46 +267,56 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   return (
     <Page className="flex flex-col">
       {modeSwitch}
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)] gap-2">
+      {/* 半自動はステップに専用の列を割く —— 縦積みだと数行しか見えない */}
+      <div
+        className={cx(
+          "grid min-h-0 flex-1 gap-2",
+          inManual
+            ? "grid-cols-[minmax(0,1fr)_minmax(17rem,21rem)]"
+            : "grid-cols-[minmax(0,1fr)_minmax(15rem,20rem)_minmax(15rem,19rem)]",
+        )}
+      >
         {inManual ? (
           <div className="flex min-h-0 flex-col gap-2">
             {manualPanel}
             {capturePanel}
           </div>
         ) : (
-          <div className="flex min-h-0 flex-col gap-2">
-            <ActionPanel
-              state={state}
-              inMatch={inMatch}
-              blockedLabel={blockedLabel}
-              blocked={sequenceBlocked}
-              onStart={requestStart}
-              onStop={handleStop}
-              onTrigger={handleTrigger}
-            />
+          <>
+            <div className="flex min-h-0 flex-col gap-2">
+              <ActionPanel
+                state={state}
+                inMatch={inMatch}
+                blockedLabel={blockedLabel}
+                blocked={sequenceBlocked}
+                onStart={requestStart}
+                onStop={handleStop}
+                onTrigger={handleTrigger}
+              />
 
-            <AlwaysManualPanel
-              robotKey={robotKey}
-              manual={manual}
-              blocked={manualBlocked}
-              sendOrReport={sendOrReport}
-              excludeAxes={suctionPadAxes}
-            />
+              <AlwaysManualPanel
+                robotKey={robotKey}
+                manual={manual}
+                blocked={manualBlocked}
+                sendOrReport={sendOrReport}
+                excludeAxes={suctionPadAxes}
+              />
 
-            {/* 常に出す。押せないときは理由を出す —— 隠すと在り処が画面から読めない */}
-            <NudgePanel
-              robotKey={robotKey}
-              manual={manual}
-              blocked={nudgeBlocked}
-              blockedReason={nudgeReason}
-              centerBlocked={manualBlocked}
-              sendOrReport={sendOrReport}
-            />
+              {/* 常に出す。押せないときは理由を出す —— 隠すと在り処が画面から読めない */}
+              <NudgePanel
+                robotKey={robotKey}
+                manual={manual}
+                blocked={nudgeBlocked}
+                blockedReason={nudgeReason}
+                centerBlocked={manualBlocked}
+                sendOrReport={sendOrReport}
+              />
 
-            {measurePanel(false)}
+              {measurePanel(false)}
+            </div>
 
-            {stepPanel}
-          </div>
+            <div className="flex min-h-0 flex-col">{stepPanel}</div>
+          </>
         )}
 
         <div className="flex min-h-0 flex-col gap-2">
