@@ -53,9 +53,11 @@ class HomingController:
         self,
         *,
         environment_deny: Callable[..., str | None],
+        reenergize: Callable[[str], Awaitable[None]],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
+        self._reenergize = reenergize
         self._broadcast = broadcast
 
         self._source: HomingSource | None = None
@@ -130,6 +132,9 @@ class HomingController:
         async def _run() -> None:
             logger.info("零点合わせ: robot=%s 軸=%s", robot, ", ".join(targets))
             try:
+                # 無励磁のモータを戻すのはここ。コマンドハンドラで待つと、同じ接続の
+                # EMG STOP がそのぶん通らない
+                await self._reenergize(robot)
                 await run_homing(
                     source.runner,
                     source.table,

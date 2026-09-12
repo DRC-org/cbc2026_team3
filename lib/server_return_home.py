@@ -43,10 +43,12 @@ class ReturnHomeController:
         self,
         *,
         environment_deny: Callable[..., str | None],
+        reenergize: Callable[[str], Awaitable[None]],
         is_e_stop_active: Callable[[], bool],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
+        self._reenergize = reenergize
         self._is_e_stop_active = is_e_stop_active
         self._broadcast = broadcast
 
@@ -151,6 +153,9 @@ class ReturnHomeController:
         async def _run() -> None:
             logger.info("原点復帰: robot=%s 手順=%d", robot, len(poses))
             try:
+                # 無励磁のモータを戻すのはここ。コマンドハンドラで待つと、同じ接続の
+                # EMG STOP がそのぶん通らない
+                await self._reenergize(robot)
                 for index, pose in enumerate(poses, start=1):
                     # 緊急停止と中断はここで見る。指令の入口も無励磁を拒むが、
                     # 走り終えるのを待ってから気付くより 1 手順ぶん早く止まる

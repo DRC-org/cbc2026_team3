@@ -611,6 +611,37 @@ class TestReenergizeBeforeHoming:
         assert mgr.activate_motors.await_args.kwargs["only"] == {"sub_y_axis"}
         assert runner.homed == ["sub_y_axis"]
 
+    async def test_再励磁の完了を待たずにコマンドハンドラが返る(self) -> None:
+        """緊急停止も同じ WS コマンドで、1 本の接続のコマンドは逐次処理される。
+
+        ハンドラで再励磁 (DM3520 の読み返しで十数秒) を待つと、そのあいだ押した
+        操縦者の EMG STOP が処理されない。
+        """
+        fx, _runner = _build()
+        mgr = fx.can_manager("sub_hand")
+        driver = mock_driver("sub_y_axis", 1)
+        driver.is_energized.return_value = False
+        set_motors(mgr, {"sub_y_axis": driver})
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocking(*_args: object, **_kwargs: object) -> list:
+            entered.set()
+            await release.wait()
+            return []
+
+        mgr.activate_motors.side_effect = _blocking
+
+        await asyncio.wait_for(fx.command({"type": "homing_start", "robot": "sub_hand"}), 2.0)
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+
+        await asyncio.wait_for(fx.command({"type": "e_stop"}), 2.0)
+
+        assert fx.e_stop_active is True
+
+        release.set()
+        await fx.wait_homing_idle()
+
     async def test_励磁していれば再励磁を挟まない(self) -> None:
         fx, runner = _build()
         mgr = fx.can_manager("sub_hand")

@@ -44,9 +44,11 @@ class SwitchMeasureController:
         self,
         *,
         environment_deny: Callable[..., str | None],
+        reenergize: Callable[[str], Awaitable[None]],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
+        self._reenergize = reenergize
         self._broadcast = broadcast
 
         self._source: HomingSource | None = None
@@ -126,6 +128,9 @@ class SwitchMeasureController:
                 request.direction,
             )
             try:
+                # 無励磁のモータを戻すのはここ。コマンドハンドラで待つと、同じ接続の
+                # EMG STOP がそのぶん通らない
+                await self._reenergize(request.robot)
                 self._result = await measure_switch(
                     source.runner,
                     source.table,
@@ -183,6 +188,7 @@ class SwitchMeasureController:
         async def _run() -> None:
             logger.info("距離測定: robot=%s 軸=%s", robot, ", ".join(known))
             try:
+                await self._reenergize(robot)
                 await measure_distances(
                     source.runner,
                     source.table,

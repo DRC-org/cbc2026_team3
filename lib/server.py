@@ -209,14 +209,17 @@ class RobotServer:
         )
         self._homing = HomingController(
             environment_deny=self._homing_environment_deny,
+            reenergize=lambda robot: self._reenergize_if_dropped(robot, "零点合わせ"),
             broadcast=self._ws.broadcast_json,
         )
         self._switch_measure = SwitchMeasureController(
             environment_deny=self._switch_measure_environment_deny,
+            reenergize=lambda robot: self._reenergize_if_dropped(robot, "作動点測定"),
             broadcast=self._ws.broadcast_json,
         )
         self._return_home = ReturnHomeController(
             environment_deny=self._return_home_environment_deny,
+            reenergize=lambda robot: self._reenergize_if_dropped(robot, "原点復帰"),
             is_e_stop_active=lambda: self._e_stop_active,
             broadcast=self._ws.broadcast_json,
         )
@@ -742,23 +745,26 @@ class RobotServer:
         self._motor_check.abort()
 
     async def _cmd_homing_start(self, data: dict, requester: WSOrNone) -> None:
-        robot_name = data.get("robot")
-        if isinstance(robot_name, str) and robot_name in self._robots:
-            await self._reenergize_if_dropped(robot_name, "零点合わせ")
-        reason = await self._homing.start(robot_name, data.get("axes"))
+        reason = await self._homing.start(data.get("robot"), data.get("axes"))
         if reason is not None:
             await self._reject_command(requester, "homing_start", reason)
 
     async def _reenergize_if_dropped(self, robot_name: str, what: str) -> None:
-        """無励磁のモータがあれば先に再励磁して待つ。
+        """無励磁のモータがあれば先に再励磁して待つ。**呼ぶのは点検の実行タスクの中だけ。**
 
         物理非常停止で電源が落ちたあとは、ソフトの停止→解除か再励磁を挟まないとモータが
         保持に戻らず、零点合わせが「励磁していない」で止まる (2026-09-12 実機の求め)。
         緊急停止中・再励磁中は何もしない (このあとの判定がそれぞれの理由で拒む)。
+
+        **コマンドハンドラからは待たない** —— 緊急停止も同じ WebSocket のコマンドで、
+        1 本の接続のコマンドは逐次処理されるため、ハンドラで待つと DM3520 の読み返しを
+        待つあいだ (十数秒) 押した操縦者の EMG STOP が通らない。
         """
         if self._e_stop_active or self._is_reenergizing(robot_name):
             return
-        ctx = self._robots[robot_name]
+        ctx = self._robots.get(robot_name)
+        if ctx is None:
+            return
         dropped = sorted(
             name for name, motor in ctx.can_manager.motors.items() if motor.is_energized() is False
         )
