@@ -81,7 +81,16 @@ class ManualController:
         held = self._baselines.get(spec.name)
         if held is None or held[0] != epoch:
             self._baselines[spec.name] = (epoch, origin)
-        return await self._apply(spec, manual.clamp_from(origin, origin + float(delta)))
+        value = manual.clamp_from(origin, origin + float(delta))
+        logger.info(
+            "manual jog: axis=%s delta=%+g origin=%.3f -> %.3f (%s)",
+            axis,
+            float(delta),
+            origin,
+            value,
+            "目標" if target is not None else "実測",
+        )
+        return await self._apply(spec, value)
 
     def baseline(self, axis: str, epoch: object) -> float | None:
         """その epoch で最初にジョグしたときの起点。別の epoch のものは返さない。"""
