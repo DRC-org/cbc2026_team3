@@ -88,9 +88,16 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
 
   const manualBlocked = !connected || eStopActive || courtUnset;
 
-  // 位置の微調整はトリガー待ちのあいだだけ通る (サーバーの _allow_manual_in_sequence と対)
-  const nudgeReason = state?.waiting_trigger === true ? null : "トリガー待ちのときだけ";
+  // 半自動の手動操作は動いている最中だけ塞ぐ (サーバーの _allow_manual_in_sequence と対)。
+  // トリガー待ちは ±2mm の微調整だけ、止まっているあいだは全部通る
+  const sequenceMoving = kind === "running";
+  const nudgeReason = sequenceMoving ? "移動中は不可" : null;
   const nudgeBlocked = manualBlocked || nudgeReason !== null;
+  const semiAutoManualReason = sequenceMoving
+    ? "移動中は不可"
+    : kind === "waiting_trigger"
+      ? "トリガー待ちは微調整のみ"
+      : null;
 
   const needsRestartConfirm = state ? isRestartFromTop(state) : false;
   const requestStart = () => {
@@ -146,6 +153,23 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       blocked={manualBlocked}
       sendOrReport={sendOrReport}
       excludeAxes={suctionPadAxes}
+    />
+  );
+
+  // 半自動でも止まっているあいだは位置移動を全部通す (2026-09-12 実機の求め)。常時操作の
+  // 軸は AlwaysManualPanel が持つので外し、矢印キーは取らない (Space がトリガー)
+  const alwaysManualAxes = manual.axes
+    .filter((axis) => axis.manual_always === true)
+    .map((axis) => axis.name);
+  const semiAutoManualPanel = (
+    <ManualPanel
+      robotKey={robotKey}
+      manual={manual}
+      blocked={manualBlocked || semiAutoManualReason !== null}
+      sendOrReport={sendOrReport}
+      excludeAxes={[...(suctionPadAxes ?? []), ...alwaysManualAxes]}
+      hotkeys={false}
+      note={semiAutoManualReason}
     />
   );
 
@@ -251,6 +275,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             <div className="flex min-h-0 flex-col gap-2">
               {courtPanel}
               {measurePanel(true)}
+              {semiAutoManualPanel}
               {suctionPanel}
               {openSubsystemPanel}
             </div>
@@ -289,6 +314,8 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               sendOrReport={sendOrReport}
               excludeAxes={suctionPadAxes}
             />
+
+            {semiAutoManualPanel}
 
             {/* 常に出す。押せないときは理由を出す —— 隠すと在り処が画面から読めない */}
             <NudgePanel

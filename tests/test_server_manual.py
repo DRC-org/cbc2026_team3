@@ -275,17 +275,46 @@ class TestControlOwnership:
         task.cancel()
 
 
+async def _running_fixture() -> tuple[ServerFixture, dict[str, _RecordingDriver], _SlowSequence]:
+    """半自動でシーケンスが 1 段目で止まらずに動いている最中 (release で抜ける)。"""
+    seq = _SlowSequence()
+    fx, drivers = _fixture(seq)
+    fx.enter_match()
+    seq.task = asyncio.create_task(seq.run_forever())  # type: ignore[attr-defined]
+    await fx.command({"type": "sequence_start", "robot": _ROBOT})
+    await asyncio.wait_for(seq.entered.wait(), timeout=1.0)
+    return fx, drivers, seq
+
+
 class TestManualCommandGate:
-    async def test_半自動運転中の手動指令は拒否する(self) -> None:
-        fx, drivers = _fixture()
+    async def test_半自動でシーケンスが動いている最中の手動指令は拒否する(self) -> None:
+        fx, drivers, seq = await _running_fixture()
         client = RecordingClient()
         fx.attach_clients(client)
+
         await fx.command(
             {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "open"},
             requester=client,
         )
+
         assert drivers["gripper"].commands == []
-        assert "手動操縦モードではありません" in client.of_type("command_rejected")[-1]["reason"]
+        assert "シーケンス実行中" in client.of_type("command_rejected")[-1]["reason"]
+        seq.release.set()
+        seq.task.cancel()  # type: ignore[attr-defined]
+
+    async def test_半自動でも止まっているあいだは手動指令が通る(self) -> None:
+        """開始前・停止後は半自動のまま位置を動かせる (2026-09-12 実機の求め)。"""
+        fx, drivers = _fixture()
+        client = RecordingClient()
+        fx.attach_clients(client)
+
+        await fx.command(
+            {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "open"},
+            requester=client,
+        )
+
+        assert client.of_type("command_rejected") == []
+        assert drivers["gripper"].commands != []
 
     @pytest.mark.parametrize(
         "payload",
@@ -359,8 +388,8 @@ class TestManualCommandGate:
 
 
 class TestManualAlwaysAxisGate:
-    async def test_シーケンス制御中でも対象軸のプリセット指令は通る(self) -> None:
-        fx, drivers = _fixture()
+    async def test_シーケンス実行中でも常時操作の軸のプリセット指令は通る(self) -> None:
+        fx, drivers, seq = await _running_fixture()
         assert fx.operation_mode(_ROBOT) == "sequence"
         client = RecordingClient()
         fx.attach_clients(client)
@@ -372,19 +401,8 @@ class TestManualAlwaysAxisGate:
 
         assert drivers["conveyor"].commands == [(ControlMode.DUTY, pytest.approx(0.0))]
         assert client.of_type("command_rejected") == []
-
-    async def test_シーケンス制御中は非対象軸のプリセット指令を拒否する(self) -> None:
-        fx, drivers = _fixture()
-        client = RecordingClient()
-        fx.attach_clients(client)
-
-        await fx.command(
-            {"type": "manual_move", "robot": _ROBOT, "axis": "gripper", "position": "open"},
-            requester=client,
-        )
-
-        assert drivers["gripper"].commands == []
-        assert "手動操縦モードではありません" in client.of_type("command_rejected")[-1]["reason"]
+        seq.release.set()
+        seq.task.cancel()  # type: ignore[attr-defined]
 
     async def test_未定義の軸はモードではなく軸の理由で拒否する(self) -> None:
         fx, _ = _fixture()
