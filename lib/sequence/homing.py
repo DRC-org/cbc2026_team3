@@ -1069,6 +1069,51 @@ async def _retreat(
     logger.info("[homing] %s: 零点確定後に '%s' (%.2f%s) へ退避", spec.name, name, value, spec.unit)
 
 
+async def _prepare_relative(
+    spec: AxisSpec,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court | None,
+) -> None:
+    """探索を始める前に、干渉する他の軸を相対で原点と反対側へ逃がす。
+
+    **`_prepare` と違い、相手の零点が未確定でも使える。** 互いの原点姿勢が干渉する
+    2 軸 (`y_axis` の 0 と `rotate` の 0) は、位置名で寄せようとすると互いに相手の
+    零点確定を待つ。どちらの軸も原点が可動域の下端なので、零点が未確定でも物理位置は
+    必ず原点より上 —— 現在位置から原点と反対向きへ逃がせば、安全条件は必ず満たせる。
+    """
+    homing = spec.homing
+    if homing is None:
+        return
+    for axis, distance in homing.prepare_relative:
+        other, handle = _axis_handle(table, motors, axis, court)
+        away = -other.homing.direction if other.homing is not None else 1.0
+        target = handle.observed_value() + away * distance
+        await handle.set_target_value(other.to_commands(target))
+        # 探索段と逆で、**届かなくても失敗にしない。** 届かないのは可動端に当たった
+        # ときで、当たったこと自体が原点から十分離れている証拠になる
+        if not await handle.wait_reached(timeout=other.timeout_s, expect_target=True):
+            logger.warning(
+                "[homing] %s: 探索前の %s の相対退避が %.2f%s に届きませんでした"
+                " (可動端に当たった可能性が高く、当たった時点で干渉域の外なので続行します)",
+                spec.name,
+                axis,
+                target,
+                other.unit,
+            )
+        else:
+            logger.info(
+                "[homing] %s: 探索前に %s を %+.2f%s 逃がしました",
+                spec.name,
+                axis,
+                away * distance,
+                other.unit,
+            )
+        # 可動端へ押し当てたまま探索へ入ると相手が電流を出し続けるので、その場で止める
+        await handle.set_target_value(handle.observed_commands())
+
+
 async def _prepare(
     spec: AxisSpec,
     table: PositionTable,
@@ -1280,6 +1325,7 @@ async def _distance_each(
         try:
             if axis in blocked:
                 raise HomingError(blocked[axis])
+            await _prepare_relative(spec, table, motors, court=court)
             await _prepare(spec, table, motors, court=court)
             # 差を取るので零点がどこにあっても距離は変わらない
             low = await runner.measure(spec, handle, direction=-1.0)
@@ -1338,6 +1384,7 @@ async def _home_each(
         try:
             if axis in blocked:
                 raise HomingError(blocked[axis])
+            await _prepare_relative(spec, table, motors, court=court)
             await _prepare(spec, table, motors, court=court)
             await runner.home(spec, handle)
             await _retreat(spec, handle, table, court=court)
