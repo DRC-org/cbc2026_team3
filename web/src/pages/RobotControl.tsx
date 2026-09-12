@@ -167,9 +167,13 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   // 試合のリセットは Monitor だけが持つので RESET は出さない
   const courtPanel = state.court_required === true ? <CourtSettings /> : null;
 
-  // 手で寄せながら控える流れなので手動の列に置く。位置定数を持たない台では出さない
+  // 手で寄せながら控える流れなので手動の列に置く。位置定数を持たない台では出さない。
+  // 位置定数を決める作業用なので --dev-tools のときだけ (試合中の画面には出さない)
   const capturePanel =
-    !inManual || state.position_capture === undefined || state.position_capture === null ? null : (
+    !serverInfo.dev_tools ||
+    !inManual ||
+    state.position_capture === undefined ||
+    state.position_capture === null ? null : (
       <PositionCapturePanel
         robotKey={robotKey}
         capture={state.position_capture}
