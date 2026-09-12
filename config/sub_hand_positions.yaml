@@ -220,7 +220,7 @@ positions:
   wall_r:
     initial: 90.0
     closed: 90.0
-    open: 180.0
+    open: 270.0
 
   # サーボ 3 軸は 2026-09-10 に実機で実測した。初期姿勢の角 (sub_rotate.receive /
   # sub_pitch.open / sub_offset.open) は firmware/servo/include/config.h の基板 #2 の
