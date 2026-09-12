@@ -11,9 +11,6 @@ axes:
       min: 0.0
       max: 650.0
       steps: [1.0, 5.0, 10.0, 50.0, 100.0]
-    # TODO(実機で確認): この軸のホーミングは実機で 1 度も走らせていない。
-    # direction / align_distance / step と左右 2 本の極性 (ファーム側 sensorActiveLow)
-    # はどれも未実測。初回は人が付いて EMG STOP を押せる状態で回すこと。
     homing:
       sensors:
         y_axis_r: y_axis_r_origin_sensor
@@ -138,16 +135,12 @@ axes:
     timeout_s: 3.0
 
 positions:
-  # *_after_* は y_axis と rotate を一息に動かすと回した機構がコンベア側・ワーク側の
-  # 双方と干渉するため、干渉域を避けて段階的に戻すための退避点 (3 列目だけが踏む)。
-  # 両軸で同じ位置名を使い、対が崩れていないことを読めるようにしてある。
-  # TODO(実機で確認): *_after_* の値はどれも仮値。実機で干渉を見ながら詰めること。
   y_axis:
     home: 0.0
     clear: 40.0
-    work_1: 65.0
+    work_1: 75.0
     work_1_after_1: 225.0
-    work_2: 255.0
+    work_2: 270.0
     work_3: 466.0
     work_3_after_1: 396.0
     work_3_after_2: 366.0
@@ -171,9 +164,6 @@ positions:
     open: 0.0
     closed: 65.0
 
-  # TODO(実機で確認): 赤を正 (= 正転) とする符号は仮置き。対になる
-  # firmware/dc_motor/include/config.h の kDirForwardIsLow も TODO のまま。
-  # 0.3 はファーム側 kDefaultMaxDuty と同値で、超えるとクランプされる。
   conveyor:
     stop: 0.0
     slow: { red: 0.15, blue: -0.15 }
