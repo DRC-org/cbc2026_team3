@@ -17,7 +17,7 @@ axes:
       search_distance: 220.0
       step: 0.1
       # ON 区間 1.0mm より狭く取る (前後軸より狭いのはこの実測差による)
-      coarse_step: 2.0
+      coarse_step: 1.5
       release_distance: 10.0
       settle_s: 0.05
       # 本番と対。確定した直後は下端のすぐ上なので、自分で前後を走らせる高さまで上がる
