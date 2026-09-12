@@ -1399,6 +1399,8 @@ async def _start_all(server: RobotServer, wirings: list[_RobotWiring]) -> None:
     for wiring in wirings:
         for refresher in wiring.target_refreshers:
             refresher.start()
+    # 機体の配線が終わってから戻す (各層へ押し下げるので、先に戻すと空振りする)
+    server.restore_court()
     await server.start()
 
 
@@ -1474,6 +1476,9 @@ async def main() -> None:
     )
 
     server = _build_server(args, system)
+    # コートは再起動を跨いで保つ (物理緊急停止の復帰でサービスを落とし直すことがある)。
+    # 試合のリセットで消したぶんは戻らない
+    server.set_court_store(system_path.parent / ".runtime" / "court.json")
 
     e_stop_tasks: set[asyncio.Task[None]] = set()
 

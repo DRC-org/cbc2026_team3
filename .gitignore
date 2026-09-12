@@ -9,6 +9,8 @@ build/
 web/node_modules/
 web/dist/
 web/.wrangler/
+# 実機で控える揮発しない状態 (コートなど)
+config/.runtime/
 .claude/worktrees/
 
 # PlatformIO (firmware/)
