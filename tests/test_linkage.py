@@ -39,9 +39,7 @@ class TestGeometry:
         crank, rod = _SUB_PITCH.crank, _SUB_PITCH.rod
         for servo_deg in (90.0, 140.0, 200.0):
             theta = math.radians(servo_deg - _SUB_PITCH.servo_zero)
-            expected = crank * math.cos(theta) + math.sqrt(
-                rod**2 - (crank * math.sin(theta)) ** 2
-            )
+            expected = crank * math.cos(theta) + math.sqrt(rod**2 - (crank * math.sin(theta)) ** 2)
             assert _SUB_PITCH.reach(servo_deg) == pytest.approx(expected)
 
 
