@@ -755,17 +755,21 @@ class RobotServer:
         if center is None:
             return
         try:
-            stored = ctx.manual.set_linkage_center(axis, center)
-            resent = await ctx.manual.resend_target(axis)
+            resent = await ctx.manual.shift_linkage_center(axis, center)
         except ManualControlError as exc:
+            await self._reject_command(requester, "linkage_center_set", str(exc))
+            return
+        except Exception as exc:
+            # 途中の段で目標が消えた (緊急停止) / 換算できない。理由を画面へ返す
+            logger.warning("リンクの中心をずらせません: %s", exc)
             await self._reject_command(requester, "linkage_center_set", str(exc))
             return
         logger.info(
             "リンクの中心: robot=%s axis=%s center=%+.1fmm%s",
             robot_name,
             axis,
-            stored,
-            "" if resent is None else f" (隙間 {resent:.1f}mm を送り直し)",
+            center,
+            "" if resent is None else f" (隙間 {resent:.1f}mm を片側ずつ送り直し)",
         )
 
     async def _cmd_suction_pads_set(self, data: dict, requester: WSOrNone) -> None:

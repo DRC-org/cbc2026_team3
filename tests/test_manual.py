@@ -490,3 +490,65 @@ class TestCourtScale:
 
         assert ctrl.observed_value("lift") == pytest.approx(-10.0)
         assert ctrl.axes_info()[0]["value"] == pytest.approx(-10.0)
+
+
+_LINK_CONFIG = {
+    "axes": {
+        "pitch": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "timeout_s": 1.0,
+            "tolerance": 2.0,
+            "linkage": {
+                "crank": 65.0,
+                "rod": 90.0,
+                "span": 230.0,
+                "right": {"motor": "pitch_r", "zero": 80.0, "sign": 1},
+                "left": {"motor": "pitch_l", "zero": 190.0, "sign": -1},
+            },
+            "motors": {
+                "pitch_r": {"scale": 1.0, "offset": 0.0},
+                "pitch_l": {"scale": 1.0, "offset": 0.0},
+            },
+        }
+    },
+    "positions": {"pitch": {"open": 180.0, "close": 0.0}},
+}
+
+
+def _build_link() -> tuple[ManualController, list[tuple[str, float]]]:
+    table = load_position_table(_LINK_CONFIG, source="<test>")
+    mgr = MagicMock()
+    mgr.send = AsyncMock()
+    group = MotorGroup()
+    sent: list[tuple[str, float]] = []
+    for name in ("pitch_l", "pitch_r"):
+        driver = _EchoDriver(name)
+
+        def _sink(mode: ControlMode, value: float, *, _name: str = name, _drv=driver) -> None:
+            sent.append((_name, round(value, 1)))
+            _drv.set_observed(position=value)
+
+        async def _send(mode: ControlMode, value: float, *, _sink=_sink) -> None:
+            _sink(mode, value)
+
+        group.add(MotorHandle(name, driver, mgr, target_sink=_send))
+    return ManualController(group, table), sent
+
+
+class TestLinkageCenterShift:
+    async def test_縮む側を逃がしてから伸びる側を動かし最後に戻す(self) -> None:
+        manual, sent = _build_link()
+        await manual.move_to_position("pitch", "close")
+        sent.clear()
+
+        gap = await manual.shift_linkage_center("pitch", 10.0)
+
+        assert gap == pytest.approx(0.0)
+        # 中心 +10 は右が縮む。右を縮めきり (260deg) へ → 左を目的へ → 右を目的へ
+        assert sent == [("pitch_r", 260.0), ("pitch_l", 146.3), ("pitch_r", 138.4)]
+
+    async def test_目標が無ければ控えるだけで動かさない(self) -> None:
+        manual, sent = _build_link()
+        assert await manual.shift_linkage_center("pitch", 5.0) is None
+        assert sent == []
