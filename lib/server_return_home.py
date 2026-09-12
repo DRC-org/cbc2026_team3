@@ -44,11 +44,13 @@ class ReturnHomeController:
         *,
         environment_deny: Callable[[str], str | None],
         seize_control: Callable[[str], Awaitable[str | None]],
+        reenergize: Callable[[str], Awaitable[None]],
         is_e_stop_active: Callable[[], bool],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
         self._seize_control = seize_control
+        self._reenergize = reenergize
         self._is_e_stop_active = is_e_stop_active
         self._broadcast = broadcast
 
@@ -164,6 +166,10 @@ class ReturnHomeController:
                 if seized is not None:
                     run.error = seized
                     return
+
+                # 無励磁のモータを戻すのも同じ理由でここ。シーケンスが降りてからでないと
+                # 再励磁の目標の捨て直しが、走っている指令とぶつかる
+                await self._reenergize(robot)
 
                 logger.info("原点復帰: robot=%s 手順=%d", robot, len(poses))
                 for index, pose in enumerate(poses, start=1):

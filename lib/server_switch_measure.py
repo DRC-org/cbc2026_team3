@@ -45,10 +45,12 @@ class SwitchMeasureController:
         *,
         environment_deny: Callable[[str | None], str | None],
         seize_control: Callable[[str], Awaitable[str | None]],
+        reenergize: Callable[[str], Awaitable[None]],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
         self._seize_control = seize_control
+        self._reenergize = reenergize
         self._broadcast = broadcast
 
         self._source: HomingSource | None = None
@@ -143,6 +145,10 @@ class SwitchMeasureController:
                     self._error = seized
                     return
 
+                # 無励磁のモータを戻すのも同じ理由でここ。シーケンスが降りてからでないと
+                # 再励磁の目標の捨て直しが、走っている指令とぶつかる
+                await self._reenergize(request.robot)
+
                 logger.info(
                     "作動点測定: robot=%s 軸=%s 向き=%+g",
                     request.robot,
@@ -211,11 +217,13 @@ class SwitchMeasureController:
 
         async def _run() -> None:
             try:
-                # 制御権の引き取りはここ (作動点測定と同じ理由)
+                # 制御権の引き取りと再励磁はここ (作動点測定と同じ理由)
                 seized = await self._seize_control(robot)
                 if seized is not None:
                     self._error = seized
                     return
+
+                await self._reenergize(robot)
 
                 logger.info("距離測定: robot=%s 軸=%s", robot, ", ".join(known))
                 await measure_distances(

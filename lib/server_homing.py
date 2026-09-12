@@ -54,10 +54,12 @@ class HomingController:
         *,
         environment_deny: Callable[[str], str | None],
         seize_control: Callable[[str], Awaitable[str | None]],
+        reenergize: Callable[[str], Awaitable[None]],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
         self._environment_deny = environment_deny
         self._seize_control = seize_control
+        self._reenergize = reenergize
         self._broadcast = broadcast
 
         self._source: HomingSource | None = None
@@ -143,6 +145,10 @@ class HomingController:
                 if seized is not None:
                     run.error = seized
                     return
+
+                # 無励磁のモータを戻すのも同じ理由でここ。シーケンスが降りてからでないと
+                # 再励磁の目標の捨て直しが、走っている指令とぶつかる
+                await self._reenergize(robot)
 
                 logger.info("零点合わせ: robot=%s 軸=%s", robot, ", ".join(targets))
                 await run_homing(
