@@ -141,6 +141,37 @@ class TestShippedYAxisHoming:
         assert manual is not None
         assert homing.search_distance == pytest.approx(manual.max_value - manual.min_value)
 
+    def test_探索前に_rotate_を安全な角度まで逃がす(self, homing) -> None:
+        """`y_axis` = 0mm で確実に干渉しないのは `rotate` >= 10deg (実機実測)。
+
+        到達帯の下限で満たす必要があるので `rotate` の `tolerance` ぶんの余裕が要る。
+        足りないまま探索へ入ると干渉して EDULITE 05 が電流上限に張り付き、CAN が
+        3 本とも落ちる (`docs/invariants.md`)。
+        """
+        table = _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+        safe_rotate_deg = 10.0
+        rotate = table.axis("rotate")
+
+        assert rotate.tolerance is not None
+        assert dict(homing.prepare_relative).get("rotate", 0.0) >= (
+            safe_rotate_deg + rotate.tolerance
+        )
+
+    def test_退避先は到達帯の下限でも干渉域を抜けている(self, homing) -> None:
+        """`rotate` = 0deg で確実に干渉しないのは `y_axis` >= 40mm (実機実測)。
+
+        退避先は零点確定のたびに通る。`tolerance` ぶん手前に着地しうるので、
+        安全条件そのものを退避先にすると干渉域へ食い込む。
+        """
+        table = _load_position_table_file(_CONFIG_DIR / "main_hand_positions.yaml")
+        safe_y_axis_mm = 40.0
+        spec = table.axis("y_axis")
+
+        assert spec.tolerance is not None, "tolerance が無く到達帯を決められない"
+        assert homing.retreat_position is not None
+        reachable_low = table.raw("y_axis", homing.retreat_position) - spec.tolerance
+        assert reachable_low >= safe_y_axis_mm
+
 
 class TestShippedRotateHoming:
     """`rotate` も零点確定を終えたら干渉域を抜けること。
@@ -195,6 +226,19 @@ class TestShippedRotateHoming:
 
         assert manual is not None
         assert homing.search_distance == pytest.approx(manual.max_value - manual.min_value)
+
+    def test_探索前に_y_axis_を安全な位置まで逃がす(self, table, homing) -> None:
+        """`rotate` = 0deg で確実に干渉しないのは `y_axis` >= 40mm (実機実測)。
+
+        到達帯の下限で満たす必要があるので `y_axis` の `tolerance` ぶんの余裕が要る。
+        """
+        safe_y_axis_mm = 40.0
+        y_axis = table.axis("y_axis")
+
+        assert y_axis.tolerance is not None
+        assert dict(homing.prepare_relative).get("y_axis", 0.0) >= (
+            safe_y_axis_mm + y_axis.tolerance
+        )
 
 
 class TestShippedRotateTravel:

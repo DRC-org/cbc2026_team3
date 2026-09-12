@@ -2231,3 +2231,169 @@ class TestPrepare:
     def test_表に無い軸や位置名は読み込みで拒否する(self, prepare: dict, message: str) -> None:
         with pytest.raises(ValueError, match=message):
             self._table(prepare=prepare)
+
+
+class TestPrepareRelative:
+    """探索を始める前に、干渉する他の軸を相対で原点と反対側へ逃がす。
+
+    `prepare` (絶対位置名) と違い**相手の零点が未確定でも使える**ことが存在理由で、
+    メインハンドの `y_axis` と `rotate` はこれでしか順序の鶏卵を解けない
+    (`docs/invariants.md`)。
+    """
+
+    @staticmethod
+    def _table(*, rotate_direction: float = -1, **homing_overrides: object):
+        homing: dict = {
+            "sensors": {"y_axis_r": "sensor_r", "y_axis_l": "sensor_l"},
+            "direction": -1,
+            "search_distance": 30.0,
+            "step": 1.0,
+            "settle_s": 0.0,
+            "align_distance": 5.0,
+            "prepare_relative": {"rotate": 12.0},
+        }
+        homing.update(homing_overrides)
+        return load_position_table(
+            {
+                "axes": {
+                    "rotate": {
+                        "unit": "deg",
+                        "command_unit": "deg",
+                        "tolerance": 0.5,
+                        "timeout_s": 0.05,
+                        "homing": {
+                            "sensor": "rotate_origin_sensor",
+                            "direction": rotate_direction,
+                            "search_distance": 180.0,
+                            "step": 1.0,
+                            "settle_s": 0.0,
+                        },
+                        "motors": {"rotate": {"scale": 1.0}},
+                    },
+                    "y_axis": {
+                        "unit": "mm",
+                        "command_unit": "deg",
+                        "tolerance": 0.1,
+                        "timeout_s": 5.0,
+                        "sync_tolerance": 100.0,
+                        "homing": homing,
+                        "motors": {"y_axis_r": {"scale": 2.0}, "y_axis_l": {"scale": -2.0}},
+                    },
+                },
+                "positions": {"rotate": {"home": 5.0}, "y_axis": {"home": 0.0}},
+            },
+            source="<test>",
+        )
+
+    @staticmethod
+    def _with_rotate(group: _Group, *, follows: bool, start: float = 30.0) -> None:
+        """零点**未確定**の相手。`StubFeedbackDriver` は既定で確定していない。"""
+        driver = StubFeedbackDriver("rotate", 2)
+        driver.set_observed(position=start)
+
+        async def _send(_mode: ControlMode, value: float) -> None:
+            group.targets.append(("rotate", value))
+            if follows:
+                driver.set_observed(position=value)
+
+        group.motors.add(MotorHandle("rotate", driver, mock_can_manager(), target_sink=_send))
+
+    @staticmethod
+    def _sensors() -> dict[str, _SensorModel]:
+        return {
+            "sensor_r": _SensorModel(motor="y_axis_r", active_at_or_below=-1.0),
+            "sensor_l": _SensorModel(motor="y_axis_l", active_at_or_below=-2.0),
+        }
+
+    @pytest.mark.parametrize(
+        ("rotate_direction", "escaped"),
+        [(-1, 42.0), (1, 18.0)],
+    )
+    async def test_探索の前に実測位置から原点と反対向きへ逃がす(
+        self, rotate_direction: float, escaped: float
+    ) -> None:
+        """向きを相手の `homing.direction` の逆で決めていること。
+
+        絶対値で持つと原点が + 側にある軸で干渉域へ押し込む指令になる。
+        """
+        table = self._table(rotate_direction=rotate_direction)
+        rec = _Recorder(sensors=self._sensors())
+        group = _Group(table.axis("y_axis"), rec)
+        self._with_rotate(group, follows=True, start=30.0)
+
+        results = await run_homing(
+            _runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"]
+        )
+
+        assert [result.error for result in results] == [None]
+        assert rec.origins == ["y_axis"]
+        assert group.targets[0] == ("rotate", pytest.approx(escaped))
+
+    async def test_相手の零点が未確定でも逃がせる(self) -> None:
+        """**これが `prepare_relative` の存在理由。** 同じ相手を `prepare` は断る。
+
+        断られるままだと `y_axis` と `rotate` が互いの零点確定を待ち合う。
+        """
+        rec = _Recorder(sensors=self._sensors())
+        table = self._table()
+        group = _Group(table.axis("y_axis"), rec)
+        self._with_rotate(group, follows=True)
+
+        results = await run_homing(
+            _runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"]
+        )
+
+        assert [result.error for result in results] == [None]
+
+        by_name = self._table(prepare_relative=None, prepare={"rotate": "home"})
+        rec_name = _Recorder(sensors=self._sensors())
+        group_name = _Group(by_name.axis("y_axis"), rec_name)
+        self._with_rotate(group_name, follows=True)
+
+        refused = await run_homing(
+            _runner(rec_name),
+            by_name,
+            group_name.motors,
+            court=Court.RED,
+            axes=["y_axis"],
+            stop_on_error=False,
+        )
+
+        assert refused[0].error is not None and "零点が確定していません" in refused[0].error
+
+    async def test_可動端に当たって届かなくても探索を続ける(self) -> None:
+        """探索段とは判断が逆。当たったこと自体が干渉域の外に居る証拠になる。
+
+        ここを失敗にすると、可動端まで逃げた正常な機体で零点確定が始まらない。
+        """
+        table = self._table()
+        rec = _Recorder(sensors=self._sensors())
+        group = _Group(table.axis("y_axis"), rec)
+        self._with_rotate(group, follows=False, start=30.0)
+
+        results = await run_homing(
+            _runner(rec), table, group.motors, court=Court.RED, axes=["y_axis"]
+        )
+
+        assert [result.error for result in results] == [None]
+        assert rec.origins == ["y_axis"]
+        # 押し当てたまま探索へ入ると相手が電流を出し続けるので、実測で置き直して止める
+        assert [value for name, value in group.targets if name == "rotate"] == [
+            pytest.approx(42.0),
+            pytest.approx(30.0),
+        ]
+
+    @pytest.mark.parametrize(
+        ("prepare_relative", "message"),
+        [
+            ({"rotate": 0.0}, "正の有限値"),
+            ({"rotate": -12.0}, "正の有限値"),
+            ({"rotate": float("inf")}, "正の有限値"),
+            ({"nowhere": 12.0}, "axes にありません"),
+        ],
+    )
+    def test_逃がせない量や軸は読み込みで拒否する(
+        self, prepare_relative: dict, message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            self._table(prepare_relative=prepare_relative)

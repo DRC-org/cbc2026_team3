@@ -26,6 +26,8 @@ axes:
       # 同じ力を 1 台で出すには 2 倍の刻みが要る (1.0mm = 1760counts)。
       # 引き換えに左右の整列の粒度は 1.0mm になる
       align_step: 1.0
+      # y_axis = 0 では rotate >= 10deg なら干渉しない。rotate の tolerance 2.0deg を足した量
+      prepare_relative: { rotate: 12.0 }
       # y_axis = 0 と rotate = 0 は機構が干渉する。rotate の零点確定より前に
       # 干渉域を抜けておかないと rotate が 1 歩も動けない
       retreat_position: clear
@@ -90,6 +92,8 @@ axes:
       search_distance: 185.0
       # 0.5deg では 1 歩も動かなかった (2026-09-05 実機。静止摩擦が下限を決める)
       step: 1.0
+      # rotate = 0 では y_axis >= 40mm なら干渉しない。y_axis の tolerance 1.0mm と余裕を足した量
+      prepare_relative: { y_axis: 45.0 }
       # y_axis = 0 と rotate = 0 は機構が干渉する。rotate が原点に居座ったままだと、
       # 後から y_axis だけ零点確定を走らせたときに探索段が干渉域へ降りて 1 歩も動けず、
       # しかも症状は y_axis 側の失敗としてしか出ない
@@ -141,7 +145,8 @@ axes:
 positions:
   y_axis:
     home: 0.0
-    clear: 40.0
+    # rotate = 0 で干渉しないのは y_axis >= 40mm。tolerance 1.0mm ぶん手前に着地しても満たす値
+    clear: 42.0
     work_1: 75.0
     work_1_after_1: 225.0
     work_2: 270.0

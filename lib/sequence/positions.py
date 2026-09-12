@@ -219,6 +219,11 @@ class HomingSpec:
     #: 探索を始める前に位置名で寄せる他の軸 ((軸名, 位置名) の並び)。探索の経路に居る
     #: 機構 (後壁) を退けるために要る。位置名で持つのは retreat_position と同じ理由
     prepare: tuple[tuple[str, str], ...] = ()
+    #: 探索を始める前に相対で逃がす他の軸 ((軸名, 相対量) の並び)。相手の零点が未確定でも
+    #: 使える —— どちらの軸も原点が可動域の下端なので、現在位置から原点と反対向きへ
+    #: 動かせば物理位置は必ず安全条件を満たす。位置名で寄せる `prepare` では解けない
+    #: 鶏卵 (互いに相手の零点確定を待つ) を断つためにある
+    prepare_relative: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.sensor is not None and self.motor_sensors is not None:
@@ -669,6 +674,7 @@ _HOMING_KEYS = frozenset(
         "retreat_position",
         "origin_error",
         "prepare",
+        "prepare_relative",
     }
 )
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
@@ -1190,6 +1196,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
     ):
         raise ValueError(f"{path}.retreat_position は位置名の文字列: {retreat_position!r}")
     prepare = _parse_homing_prepare(path, raw.get("prepare"))
+    prepare_relative = _parse_homing_prepare_relative(path, raw.get("prepare_relative"))
 
     try:
         return HomingSpec(
@@ -1203,6 +1210,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             align_step=_number(path, raw, "align_step", None),
             retreat_position=retreat_position,
             prepare=prepare,
+            prepare_relative=prepare_relative,
             origin_error=_number(path, raw, "origin_error", None),
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
@@ -1241,6 +1249,32 @@ def _parse_homing_prepare(path: str, raw: object) -> tuple[tuple[str, str], ...]
         if not isinstance(position, str) or not position:
             raise ValueError(f"{path}.prepare.{axis_name} は位置名の文字列: {position!r}")
         pairs.append((axis_name, position))
+    return tuple(pairs)
+
+
+def _parse_homing_prepare_relative(path: str, raw: object) -> tuple[tuple[str, float], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{path}.prepare_relative は軸名 → 相対量の辞書: {raw!r}")
+    pairs: list[tuple[str, float]] = []
+    for axis_name, distance in raw.items():
+        if not isinstance(axis_name, str) or not axis_name:
+            raise ValueError(f"{path}.prepare_relative のキーは軸名の文字列: {axis_name!r}")
+        try:
+            value = float(distance)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{path}.prepare_relative.{axis_name} が数値ではありません: {distance!r}"
+            ) from exc
+        # 向きは相手の homing.direction が決めるので、ここは逃がす量だけを持つ。
+        # 0 や負を通すと「逃がしたつもりで干渉域へ戻す」指令になる
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(
+                f"{path}.prepare_relative.{axis_name} は正の有限値: {distance!r}"
+                " (逃がす量なので 0 や負では干渉域を抜けられません)"
+            )
+        pairs.append((axis_name, value))
     return tuple(pairs)
 
 
@@ -1877,6 +1911,7 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
     for axis, spec in axes.items():
         _check_retreat_position(source, spec, positions.get(axis, {}))
         _check_homing_prepare(source, spec, axes, positions)
+        _check_homing_prepare_relative(source, spec, axes)
         _check_motion_timeout(source, spec, positions.get(axis, {}))
 
     # 干渉条件は他の軸の位置名を参照するので、表が全部揃った後でしか解決できない
@@ -2035,6 +2070,26 @@ def _check_homing_prepare(
                 f"{where} の '{axis}: {name}' が positions.{axis} にありません。"
                 f"定義済みの位置: {available}"
             )
+
+
+def _check_homing_prepare_relative(
+    source: str,
+    spec: AxisSpec,
+    axes: Mapping[str, AxisSpec],
+) -> None:
+    """探索の前に相対で逃がす軸が実在すること。**位置表は引かない** (相対量なので)。"""
+    homing = spec.homing
+    if homing is None:
+        return
+    for axis, _distance in homing.prepare_relative:
+        where = f"{source}: axes.{spec.name}.homing.prepare_relative"
+        if axis == spec.name:
+            raise ValueError(
+                f"{where} に自分自身 '{axis}' は書けません"
+                " (これから探す軸を逃がしても探索の出発点が動くだけです)"
+            )
+        if axis not in axes:
+            raise ValueError(f"{where} の軸 '{axis}' が axes にありません")
 
 
 def _check_motion_timeout(
