@@ -303,6 +303,14 @@ class Edulite05Driver(MotorDriver):
     def has_local_origin(self) -> bool:
         return True
 
+    def position_reference_established(self) -> bool:
+        """暫定原点を控えるまでの生値は物理姿勢を指さない。
+
+        `set_zero_on_start` が False の運用は生値をそのまま論理値として使う意図なので
+        常に True。
+        """
+        return not self.set_zero_on_start or self._origin_captured
+
     def establish_provisional_origin(self) -> bool:
         """起動時に暫定原点を控える。**`SET_ZERO` は 1 通も送らない。**
 

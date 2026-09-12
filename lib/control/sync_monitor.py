@@ -55,6 +55,7 @@ class SyncMonitor(PeriodicTask):
         self._counts: dict[str, int] = {}
         self._violated: set[str] = set()
         self._suspended: dict[str, int] = {}
+        self._unreferenced_logged: set[str] = set()
         # 緊急停止の解除で `reset()` が走ってもここだけは残す。解除するたび即再発する
         # 状態を「何回目か」として理由文へ載せられるのは、ラッチをまたぐこの数だけ。
         self._retrips: dict[str, int] = {}
@@ -76,12 +77,12 @@ class SyncMonitor(PeriodicTask):
         self._violated.clear()
 
     @contextlib.contextmanager
-    def suspend_group(self, name: str) -> Iterator[None]:
+    def suspend_group(self, name: str, *, reason: str = "原点の付け替え") -> Iterator[None]:
         if name not in self.group_names:
             raise KeyError(f"同期監視は軸 '{name}' を持っていません")
 
         self._suspended[name] = self._suspended.get(name, 0) + 1
-        logger.info("同期監視を一時停止 (axis=%s, 理由=原点の付け替え)", name)
+        logger.info("同期監視を一時停止 (axis=%s, 理由=%s)", name, reason)
         try:
             yield
         finally:
@@ -92,6 +93,13 @@ class SyncMonitor(PeriodicTask):
                 self._suspended.pop(name, None)
                 self._counts[name] = 0
                 logger.info("同期監視を再開 (axis=%s)", name)
+
+    @contextlib.contextmanager
+    def suspend_all(self, *, reason: str) -> Iterator[None]:
+        with contextlib.ExitStack() as stack:
+            for name in self.group_names:
+                stack.enter_context(self.suspend_group(name, reason=reason))
+            yield
 
     def is_suspended(self, name: str) -> bool:
         return self._suspended.get(name, 0) > 0
@@ -145,8 +153,20 @@ class SyncMonitor(PeriodicTask):
                 continue
             if self._freshness.is_stale(member.name, now):
                 continue
+            # 原点が未確立のうちに報告される論理値は物理姿勢を指さないので、偏差判定の
+            # 材料にしない (メンバーが 2 未満になり deviation は None になる)
+            if not driver.position_reference_established():
+                self._note_unreferenced(member.name)
+                continue
             positions[member.name] = driver.feedback_position()
         return positions
+
+    def _note_unreferenced(self, motor_name: str) -> None:
+        # 20ms 周期なので、除外が始まった 1 回だけ残す
+        if motor_name in self._unreferenced_logged:
+            return
+        self._unreferenced_logged.add(motor_name)
+        logger.info("原点が未確立のため同期判定から除外 (motor=%s)", motor_name)
 
     def _notify(self, group_name: str, deviation: float, retrips: int) -> None:
         if self._on_violation is None:
