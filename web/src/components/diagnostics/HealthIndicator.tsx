@@ -19,8 +19,16 @@ function busTone(state: BusHealthState): HealthTone {
 
 const CELL_CLASS = "text-[0.85em]";
 
+// OK はドットの色だけで伝える
+const visibleLabel = (tone: HealthTone): string | null =>
+  tone === "success" ? null : TONE_LABEL[tone];
+
 function StatusTag({ tone }: { tone: HealthTone }) {
-  return <StatusBadge tone={tone}>{TONE_LABEL[tone]}</StatusBadge>;
+  return (
+    <StatusBadge tone={tone} title={TONE_LABEL[tone]}>
+      {visibleLabel(tone)}
+    </StatusBadge>
+  );
 }
 
 function BusRow({ bus }: { bus: BusHealth }) {
@@ -36,8 +44,12 @@ function BusRow({ bus }: { bus: BusHealth }) {
       <td className={`${CELL_CLASS} truncate`}>{bus.name}</td>
       <td className={`${CELL_CLASS} font-mono text-base-content/70`}>{bus.channel}</td>
       <td className={`${CELL_CLASS} text-right`}>
-        <StatusBadge tone={tone} detail={notes.length > 0 ? notes.join(" ") : undefined}>
-          {TONE_LABEL[tone]}
+        <StatusBadge
+          tone={tone}
+          title={TONE_LABEL[tone]}
+          detail={notes.length > 0 ? notes.join(" ") : undefined}
+        >
+          {visibleLabel(tone)}
         </StatusBadge>
       </td>
     </tr>
@@ -56,8 +68,7 @@ export function HealthIndicator({ health }: { health: HealthSnapshot | undefined
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-base-content/70">{health.buses.length} 系統</span>
+      <div className="flex items-center justify-end gap-2">
         <StatusTag tone={busTone(health.overall)} />
       </div>
       {health.buses.length === 0 ? (

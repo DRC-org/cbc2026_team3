@@ -10,9 +10,11 @@ const NUDGE_STEP = 2;
 interface NudgePanelProps {
   robotKey: string;
   manual: ManualState;
+  blocked: boolean;
+  /** このパネル固有の理由だけ。全体に効く理由 (切断中など) は上部の帯が言う */
   blockedReason: string | null;
-  /** リンク機構の中心をずらす口の理由。トリガー待ちに依らず手動と同じゲート */
-  centerBlockedReason: string | null;
+  /** リンク機構の中心をずらす口。トリガー待ちに依らず手動と同じゲート */
+  centerBlocked: boolean;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
@@ -20,8 +22,9 @@ interface NudgePanelProps {
 export function NudgePanel({
   robotKey,
   manual,
+  blocked,
   blockedReason,
-  centerBlockedReason,
+  centerBlocked,
   sendOrReport,
 }: NudgePanelProps) {
   // 連続値を送れる軸だけ (サーバーが `manual` を配る)。常時操作の軸は別パネルが持つ
@@ -42,27 +45,21 @@ export function NudgePanel({
     <Panel
       legend="位置の微調整"
       className="shrink-0"
-      actions={
-        blockedReason ? (
-          <StatusBadge tone="error">{blockedReason}</StatusBadge>
-        ) : (
-          <span className="text-[0.85em] text-base-content/60">トリガー待ちのあいだだけ</span>
-        )
-      }
+      actions={blockedReason ? <StatusBadge tone="error">{blockedReason}</StatusBadge> : null}
     >
       <div className="flex flex-wrap gap-3">
         {axes.map((axis) => (
           <div key={axis.name} className="flex items-center gap-1.5">
             <span className="text-[0.85em] text-base-content/70">{axis.name}</span>
             <Button
-              disabled={blockedReason !== null}
+              disabled={blocked}
               aria-label={`${axis.name} を ${NUDGE_STEP}${axis.unit} 戻す`}
               onClick={() => nudge(axis.name, -NUDGE_STEP)}
             >
               -{NUDGE_STEP}
             </Button>
             <Button
-              disabled={blockedReason !== null}
+              disabled={blocked}
               aria-label={`${axis.name} を ${NUDGE_STEP}${axis.unit} 進める`}
               onClick={() => nudge(axis.name, NUDGE_STEP)}
             >
@@ -80,7 +77,7 @@ export function NudgePanel({
             <div key={`${axis.name}-center`} className="flex items-center gap-1.5">
               <span className="text-[0.85em] text-base-content/70">{axis.name} 中心</span>
               <Button
-                disabled={centerBlockedReason !== null || linkage.center - NUDGE_STEP < -limit}
+                disabled={centerBlocked || linkage.center - NUDGE_STEP < -limit}
                 aria-label={`${axis.name} の中心を左へ ${NUDGE_STEP}mm`}
                 onClick={() => shiftCenter(axis.name, linkage.center, -NUDGE_STEP)}
               >
@@ -91,7 +88,7 @@ export function NudgePanel({
                 {linkage.center.toFixed(1)}mm
               </span>
               <Button
-                disabled={centerBlockedReason !== null || linkage.center + NUDGE_STEP > limit}
+                disabled={centerBlocked || linkage.center + NUDGE_STEP > limit}
                 aria-label={`${axis.name} の中心を右へ ${NUDGE_STEP}mm`}
                 onClick={() => shiftCenter(axis.name, linkage.center, NUDGE_STEP)}
               >

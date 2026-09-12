@@ -1,6 +1,7 @@
-import { Check, TriangleAlert, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 
 import { Icon } from "@/components/ui/Icon";
+import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useHoming } from "@/hooks/useHoming";
@@ -19,12 +20,7 @@ export function HomingPanel({ robot: only }: HomingPanelProps = {}) {
   const { state } = useHoming();
 
   if (state.robots === MALFORMED) {
-    return (
-      <p className="flex items-center gap-1.5 text-warning">
-        <Icon as={TriangleAlert} />
-        零点合わせの状態を読み取れませんでした (配信の形が読めていません)
-      </p>
-    );
+    return <MalformedNotice subject="零点合わせの状態" />;
   }
 
   const robots = only === undefined ? Object.keys(state.robots) : [only];
@@ -74,10 +70,7 @@ function HomingRobotPanel({ robot, entry, connected }: HomingRobotPanelProps) {
       {entry.error ? <p className="text-error">{entry.error}</p> : null}
 
       {entry.results === MALFORMED || failures === MALFORMED ? (
-        <p className="flex items-center gap-1.5 text-warning">
-          <Icon as={TriangleAlert} />
-          零点合わせの結果を読み取れませんでした (配信の形が読めていません)
-        </p>
+        <MalformedNotice subject="零点合わせの結果" />
       ) : (
         <ul className="flex flex-col">
           {entry.results.map((result) => (

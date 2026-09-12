@@ -135,7 +135,9 @@ export function MotorStatus({
         <span className="min-w-0 truncate font-medium">{name}</span>
         {health ? (
           <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
-            <StatusBadge tone={HEALTH_TONE[health.state]}>{health.state.toUpperCase()}</StatusBadge>
+            <StatusBadge tone={HEALTH_TONE[health.state]} title={health.state.toUpperCase()}>
+              {health.state === "ok" ? null : health.state.toUpperCase()}
+            </StatusBadge>
             {health.state === "ok" ? null : (
               <span className="text-[0.8em] text-base-content/60">
                 {formatAge(health.feedback_age_ms)}

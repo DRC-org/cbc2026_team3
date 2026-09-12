@@ -23,6 +23,11 @@ export function AppHeader() {
   const { onEStop, openWsSettings } = useRobotCommands();
   const { court, phase } = matchState;
   const linkState = linkVerdict(link, connected);
+  // ドットの色と同じ情報なので、正常時だけ文字を伏せる（異常・レイテンシは文字で出す）
+  const linkLabelHidden = linkState.label === "Connected";
+  const courtText = courtLabel(court);
+  // 赤／青はバッジの色で読めるので文字を伏せる。未設定・不明は色で表せないので出す
+  const courtLabelHidden = court === "red" || court === "blue";
 
   return (
     <header
@@ -42,10 +47,13 @@ export function AppHeader() {
               type="button"
               onClick={openWsSettings}
               className="flex cursor-pointer items-center gap-1.5 hover:text-base-content"
-              title={`接続先: ${wsUrl}（クリックで変更）`}
+              title={`${linkState.label} / 接続先: ${wsUrl}（クリックで変更）`}
+              aria-label={`${linkState.label} / 接続先: ${wsUrl}（クリックで変更）`}
             >
               <span className={cx(TONE_STATUS_CLASS[linkState.tone], "status-sm")} />
-              <span className={TONE_TEXT_CLASS[linkState.tone]}>{linkState.label}</span>
+              <span className={cx(TONE_TEXT_CLASS[linkState.tone], linkLabelHidden && "sr-only")}>
+                {linkState.label}
+              </span>
               <span className="font-mono">{wsHostLabel(wsUrl)}</span>
             </button>
 
@@ -54,7 +62,9 @@ export function AppHeader() {
 
           <div className="flex shrink-0 items-center gap-1.5">
             <StatusBadge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</StatusBadge>
-            <StatusBadge tone={courtTone(court)}>{courtLabel(court)}</StatusBadge>
+            <StatusBadge tone={courtTone(court)} title={courtText}>
+              <span className={courtLabelHidden ? "sr-only" : undefined}>{courtText}</span>
+            </StatusBadge>
           </div>
         </div>
       </div>

@@ -193,9 +193,6 @@ export function SubsystemStatus({
     verdict.tone === "error" || verdict.tone === "warning" || riskyBuses.length > 0;
   const open = !showVerdict || forcedOpen || manualOpen;
 
-  const busCount = readable?.buses.length ?? 0;
-  const motorCount = Object.keys(motors).length;
-
   return (
     <div className="flex min-h-0 flex-col">
       {showVerdict ? (
@@ -207,10 +204,9 @@ export function SubsystemStatus({
           className="flex shrink-0 cursor-pointer items-center gap-2 px-1 py-1 text-left hover:bg-base-200"
         >
           <Icon as={open ? ChevronDown : ChevronRight} className="text-base-content/60" />
-          <StatusBadge tone={verdict.tone}>{verdict.label}</StatusBadge>
-          <span className="min-w-0 flex-1 truncate text-base-content/70">
-            CAN {busCount} · モータ {motorCount}
-          </span>
+          <StatusBadge tone={verdict.tone} title={verdict.label} className="min-w-0">
+            {verdict.quiet ? null : verdict.label}
+          </StatusBadge>
         </button>
       ) : null}
 

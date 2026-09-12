@@ -3,14 +3,16 @@ import { useEffect, useRef } from "react";
 import { ContinuousControls } from "@/components/operator/ContinuousControls";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { useRobotStatus } from "@/context/RobotContext";
 import { commandValueText, hasUnit } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
+import { isDuringMatch } from "@/lib/phase";
 import type { ManualAxis } from "@/lib/protocol";
 import { evaluateSync } from "@/lib/syncVerdict";
 
 interface ManualAxisRowProps {
   axis: ManualAxis;
-  blockedReason: string | null;
+  blocked: boolean;
   selected: boolean;
   onSelect: () => void;
   onJog: (axis: string, delta: number) => void;
@@ -18,15 +20,25 @@ interface ManualAxisRowProps {
   onMove: (axis: string, position: string) => void;
 }
 
+// 単位は軸名の横に 1 回だけ出すので、値そのものには付けない
 function format(value: number | null, axis: ManualAxis): string {
   if (value === null) return "—";
-  const text = commandValueText(value, axis.command_mode, 2);
-  return hasUnit(axis.command_mode) && axis.unit ? `${text} ${axis.unit}` : text;
+  return commandValueText(value, axis.command_mode, 2);
+}
+
+function unitOf(axis: ManualAxis): string | null {
+  return hasUnit(axis.command_mode) && axis.unit ? axis.unit : null;
+}
+
+function withUnit(value: number | null, axis: ManualAxis): string {
+  const unit = unitOf(axis);
+  const text = format(value, axis);
+  return unit ? `${text} ${unit}` : text;
 }
 
 export function ManualAxisRow({
   axis,
-  blockedReason,
+  blocked,
   selected,
   onSelect,
   onJog,
@@ -34,14 +46,22 @@ export function ManualAxisRow({
   onMove,
 }: ManualAxisRowProps) {
   const range = axis.manual;
-  const disabled = blockedReason !== null;
+  const disabled = blocked;
   const rowRef = useRef<HTMLDivElement>(null);
+  const { matchState } = useRobotStatus();
+  const inMatch = isDuringMatch(matchState.phase);
 
   useEffect(() => {
     if (selected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
 
   const presetOnly = range === null;
+  const unit = unitOf(axis);
+  const motorNames =
+    axis.motors.length === 1 && axis.motors[0] === axis.name ? null : axis.motors.join(" / ");
+  const currentText = `現在 ${withUnit(axis.value, axis)}`;
+  const targetText = `目標 ${withUnit(axis.target, axis)}`;
+
   const presetButtons =
     axis.positions.length === 0 ? null : (
       <div className="flex flex-wrap items-center gap-1">
@@ -77,31 +97,50 @@ export function ManualAxisRow({
           presetOnly ? "items-center" : "items-baseline",
         )}
       >
-        <span className="min-w-0 shrink-0 font-medium">{axis.name}</span>
-        {axis.motors.length === 1 && axis.motors[0] === axis.name ? null : (
-          <span className="shrink-0 text-[0.8em] text-base-content/45">
-            {axis.motors.join(" / ")}
-          </span>
+        <span
+          className="min-w-0 shrink-0 font-medium"
+          title={motorNames === null ? undefined : `モータ ${motorNames}`}
+        >
+          {axis.name}
+          {unit ? (
+            <span className="ml-1 text-[0.75em] font-normal text-base-content/45">{unit}</span>
+          ) : null}
+        </span>
+        {/* モータ名は試合中には使わない。セッティング中だけ出す */}
+        {motorNames === null || inMatch ? null : (
+          <span className="shrink-0 text-[0.8em] text-base-content/45">{motorNames}</span>
         )}
 
         <SyncIndicator axis={axis} />
 
         {presetOnly ? presetButtons : null}
 
-        <span className="ml-auto flex shrink-0 items-baseline gap-3 font-mono tabular-nums">
+        {/* ラベル語を置かず、大きさと上下の位置で現在値と目標値を分ける */}
+        <span className="ml-auto flex shrink-0 flex-col items-end font-mono leading-tight tabular-nums">
           {axis.command_mode === "position" ? (
-            <span className="text-[1.15em] font-medium">
-              <span className="mr-1 font-sans text-[0.7em] font-normal text-base-content/55">
-                現在
+            <>
+              <span
+                className="text-[1.15em] font-medium"
+                title={currentText}
+                aria-label={currentText}
+              >
+                {format(axis.value, axis)}
               </span>
-              {format(axis.value, axis)}
+              <span
+                className="text-[0.8em] text-base-content/55"
+                title={targetText}
+                aria-label={targetText}
+              >
+                {format(axis.target, axis)}
+                <Delta value={axis.value} target={axis.target} />
+              </span>
+            </>
+          ) : (
+            <span className="text-base-content/70" title={targetText} aria-label={targetText}>
+              {format(axis.target, axis)}
+              <Delta value={axis.value} target={axis.target} />
             </span>
-          ) : null}
-          <span className="text-base-content/70">
-            <span className="mr-1 font-sans text-[0.8em] text-base-content/55">目標</span>
-            {format(axis.target, axis)}
-            <Delta value={axis.value} target={axis.target} />
-          </span>
+          )}
         </span>
       </div>
 
@@ -128,7 +167,7 @@ function Delta({ value, target }: { value: number | null; target: number | null 
   const delta = target - value;
   if (Math.abs(delta) < 0.005) return null;
   return (
-    <span className="ml-1 text-[0.8em] text-base-content/50">
+    <span className="ml-1 text-[0.9em] text-base-content/50">
       ({delta > 0 ? "+" : ""}
       {delta.toFixed(2)})
     </span>
@@ -139,21 +178,13 @@ function SyncIndicator({ axis }: { axis: ManualAxis }) {
   const verdict = evaluateSync(axis);
   const { deviation, sync_tolerance: tolerance } = axis;
   if (typeof deviation !== "number") return null;
+  // 正常時の偏差は読む必要がない。異常のときだけ出す
+  if (!verdict.alert) return null;
 
   const text = `ずれ ${deviation.toFixed(2)}${axis.unit ? ` ${axis.unit}` : ""}`;
   const title =
     typeof tolerance === "number" ? `許容差 ${tolerance.toFixed(2)} ${axis.unit}` : undefined;
 
-  if (!verdict.alert) {
-    return (
-      <span
-        className="shrink-0 font-mono text-[0.8em] text-base-content/45 tabular-nums"
-        title={title}
-      >
-        {text}
-      </span>
-    );
-  }
   return (
     <StatusBadge tone={verdict.tone} className="shrink-0" title={title}>
       {text}

@@ -21,6 +21,8 @@ export interface HealthVerdict {
   tone: Tone;
   label: string;
   detail?: string;
+  /** 平常であることだけを言うラベル。UI は文字を出さずドットの色だけで伝えてよい */
+  quiet?: boolean;
 }
 
 export type SafetyIssueKind =
@@ -64,7 +66,7 @@ export function summarizeMotors(healthMotors: MotorHealth[] | undefined): Health
   }
 
   const anomalies = healthMotors.filter((m) => m.state !== "ok");
-  if (anomalies.length === 0) return { tone: "success", label: "All operational" };
+  if (anomalies.length === 0) return { tone: "success", label: "All operational", quiet: true };
 
   const tone: Tone = anomalies.some((m) => m.state === "fault") ? "error" : "warning";
   return { tone, label: `異常 ${anomalies.length} 件` };
@@ -277,5 +279,5 @@ export function evaluateHealth(
     };
   }
 
-  return { tone: "success", label: "異常なし" };
+  return { tone: "success", label: "異常なし", quiet: true };
 }

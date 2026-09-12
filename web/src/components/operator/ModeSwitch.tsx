@@ -10,9 +10,8 @@ import { TONE_BORDER_L_CLASS } from "@/lib/tone";
 interface ModeSwitchProps {
   mode: OperationMode;
   onChange: (mode: OperationMode) => void;
-  blockedReason: string | null;
+  blocked: boolean;
   sequenceName: string;
-  totalSteps: number | null;
 }
 
 const MODE_OPTIONS: {
@@ -35,13 +34,7 @@ const MODE_OPTIONS: {
   },
 ];
 
-export function ModeSwitch({
-  mode,
-  onChange,
-  blockedReason,
-  sequenceName,
-  totalSteps,
-}: ModeSwitchProps) {
+export function ModeSwitch({ mode, onChange, blocked, sequenceName }: ModeSwitchProps) {
   const manual = mode === "manual";
 
   return (
@@ -59,7 +52,7 @@ export function ModeSwitch({
             <Button
               key={opt.value}
               className={cx("join-item h-[1.5rem] min-h-0 px-2", selected && opt.selectedClass)}
-              disabled={blockedReason !== null}
+              disabled={blocked}
               aria-pressed={selected}
               onClick={() => {
                 if (!selected) onChange(opt.value);
@@ -80,13 +73,6 @@ export function ModeSwitch({
       ) : null}
 
       <span className="min-w-0 truncate font-mono text-base-content/70">{sequenceName}</span>
-      {totalSteps === null ? null : (
-        <span className="shrink-0 text-base-content/70">全 {totalSteps} ステップ</span>
-      )}
-
-      {blockedReason ? (
-        <span className="ml-auto min-w-0 truncate text-base-content/70">{blockedReason}</span>
-      ) : null}
     </div>
   );
 }

@@ -591,6 +591,7 @@ describe("summarizeMotors", () => {
     expect(summarizeMotors([motorHealth(), motorHealth({ name: "y_axis_l" })])).toEqual({
       tone: "success",
       label: "All operational",
+      quiet: true,
     });
   });
 

@@ -89,6 +89,7 @@ export function RobotStatusRow({
           sensors={state.sensors}
           connected={connected}
           tempThresholds={tempThresholds}
+          concise
           onReenergize={() =>
             sendOrReport({ type: "reenergize_motors", robot: robotKey }, "再励磁")
           }

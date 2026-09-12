@@ -1,3 +1,5 @@
+import { useRobotStatus } from "@/context/RobotContext";
+import { isDuringMatch } from "@/lib/phase";
 import type { ManualAxis } from "@/lib/protocol";
 
 function ratio(value: number, min: number, max: number): number {
@@ -7,13 +9,22 @@ function ratio(value: number, min: number, max: number): number {
 export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; max: number }) {
   const valuePct = axis.value === null ? null : ratio(axis.value, min, max);
   const targetPct = axis.target === null ? null : ratio(axis.target, min, max);
+  const { matchState } = useRobotStatus();
+  // 可動端の数値は試合中には使わない。セッティング中だけ出す（hover では常に読める）
+  const showEnds = !isDuringMatch(matchState.phase);
+  const rangeTitle = `可動範囲 ${min} 〜 ${max} ${axis.unit}`;
 
   return (
     <div className="flex items-center gap-2 text-[0.8em] text-base-content/70">
-      <span className="w-16 shrink-0 text-right font-mono tabular-nums">
-        {min} {axis.unit}
-      </span>
-      <div className="relative h-2.5 min-w-0 flex-1 border border-base-300 bg-base-200">
+      {showEnds ? (
+        <span className="w-12 shrink-0 text-right font-mono tabular-nums" title={rangeTitle}>
+          {min}
+        </span>
+      ) : null}
+      <div
+        className="relative h-2.5 min-w-0 flex-1 border border-base-300 bg-base-200"
+        title={rangeTitle}
+      >
         {axis.positions.map((position) =>
           position.value === null ? null : (
             <span
@@ -51,9 +62,11 @@ export function RangeBar({ axis, min, max }: { axis: ManualAxis; min: number; ma
           />
         )}
       </div>
-      <span className="w-16 shrink-0 font-mono tabular-nums">
-        {max} {axis.unit}
-      </span>
+      {showEnds ? (
+        <span className="w-12 shrink-0 font-mono tabular-nums" title={rangeTitle}>
+          {max}
+        </span>
+      ) : null}
     </div>
   );
 }

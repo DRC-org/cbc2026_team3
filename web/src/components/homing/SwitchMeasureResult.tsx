@@ -1,6 +1,4 @@
-import { TriangleAlert } from "lucide-react";
-
-import { Icon } from "@/components/ui/Icon";
+import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { MALFORMED } from "@/lib/protocol";
 import type { SwitchMeasureSnapshot, SwitchMeasurement } from "@/lib/protocol";
@@ -60,10 +58,7 @@ export function SwitchMeasureResult({ state }: { state: SwitchMeasureSnapshot })
       {state.error ? <p className="text-error">{state.error}</p> : null}
 
       {state.result === MALFORMED ? (
-        <p className="flex items-center gap-1.5 text-warning">
-          <Icon as={TriangleAlert} />
-          作動点測定の結果を読み取れませんでした (配信の形が読めていません)
-        </p>
+        <MalformedNotice subject="作動点測定の結果" />
       ) : state.result !== null ? (
         <ResultTable result={state.result} />
       ) : null}

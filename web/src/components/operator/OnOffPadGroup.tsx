@@ -28,11 +28,11 @@ export function splitOnOffAxes(axes: ManualAxis[]): { pads: ManualAxis[]; rest: 
 
 interface OnOffPadGroupProps {
   axes: ManualAxis[];
-  blockedReason: string | null;
+  blocked: boolean;
   onMove: (axis: string, position: string) => void;
 }
 
-export function OnOffPadGroup({ axes, blockedReason, onMove }: OnOffPadGroupProps) {
+export function OnOffPadGroup({ axes, blocked, onMove }: OnOffPadGroupProps) {
   const pads = axes.flatMap((axis) => {
     const pair = onOffPair(axis);
     return pair === null ? [] : [{ axis, pair }];
@@ -50,7 +50,7 @@ export function OnOffPadGroup({ axes, blockedReason, onMove }: OnOffPadGroupProp
             on={on}
             unknown={axis.target === null}
             caption={axis.name}
-            disabled={blockedReason !== null}
+            disabled={blocked}
             ariaLabel={`${axis.name} を ${on ? "OFF" : "ON"} にする`}
             onClick={() => onMove(axis.name, on ? pair.off : pair.on)}
           />

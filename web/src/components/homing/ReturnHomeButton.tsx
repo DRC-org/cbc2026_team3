@@ -1,9 +1,11 @@
-import { House, TriangleAlert } from "lucide-react";
+import { House } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { MalformedNotice } from "@/components/ui/MalformedNotice";
 import { Modal } from "@/components/ui/Modal";
+import { ClearanceWarning, SemiAutoRestoreNotice } from "@/components/ui/SafetyNotice";
 import { useRobotStatus } from "@/context/RobotContext";
 import { useReturnHome } from "@/hooks/useReturnHome";
 import { useSequenceModeRestore } from "@/hooks/useSequenceModeRestore";
@@ -24,12 +26,7 @@ export function ReturnHomeButton({ robot }: ReturnHomeButtonProps) {
   const [pending, setPending] = useState(false);
 
   if (state.robots === MALFORMED) {
-    return (
-      <p className="flex items-center gap-1.5 text-warning">
-        <Icon as={TriangleAlert} />
-        原点復帰の状態を読み取れませんでした (配信の形が読めていません)
-      </p>
-    );
+    return <MalformedNotice subject="原点復帰の状態" />;
   }
 
   const entry = Object.hasOwn(state.robots, robot) ? state.robots[robot] : undefined;
@@ -87,13 +84,8 @@ export function ReturnHomeButton({ robot }: ReturnHomeButtonProps) {
           <span className="font-medium text-info">{robotLabel(robot)}だけ</span>
           を動かします。試合シーケンスの初期位置へ戻します。
         </p>
-        {anyManual ? (
-          <p className="mt-2">手動操縦を抜け、全機を半自動へ戻してから開始します。</p>
-        ) : null}
-        <p className="mt-2 flex items-center gap-1.5 text-error">
-          <Icon as={TriangleAlert} />
-          この機体の可動範囲に人・物がないことを確認してから開始してください。
-        </p>
+        {anyManual ? <SemiAutoRestoreNotice /> : null}
+        <ClearanceWarning />
       </Modal>
 
       {blocked !== null ? (
