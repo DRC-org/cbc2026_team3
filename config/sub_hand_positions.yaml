@@ -16,6 +16,8 @@ axes:
       coarse_step: 0.75
       release_distance: 10.0
       settle_s: 0.05
+      # 後壁が探索の経路に居るので、探す前に開く (2026-09-12 実機)
+      prepare: { wall_r: open }
     guard:
       # + が下なので plus が下端。逆に書くと守りが反転する
       limits:
@@ -55,6 +57,8 @@ axes:
       step: 0.1
       release_distance: 10.0
       settle_s: 0.05
+      # 後壁が探索の経路に居るので、探す前に開く (2026-09-12 実機)
+      prepare: { wall_r: open }
     guard:
       # 逆に書くと守りが反転し、押されている端へ進む指令だけが通る
       limits:
@@ -105,14 +109,25 @@ axes:
       # ピッチとオフセットを同じ指令で動かすと途中の姿勢で重なる。
       # 片側だけ書く —— 読み込み時に sub_offset 側へも対称化される
       not_with: [sub_offset]
-    unit: deg
+    # サーボの回転をクランク 65 / ロッド 90 のリンクで直線にしている (2026-09-12)。
+    # 軸の値は**左右の先端どうしの隙間 [mm]** で、0 が真ん中でぴったり合う姿勢。
+    # 左右の和は span - 隙間 に固定されるので、中心をずらしても押し合いようがない
+    unit: mm
     command_unit: deg
     timeout_s: 3.0
     tolerance: 2.0
+    linkage:
+      crank: 65.0
+      rod: 90.0
+      span: 230.0           # 左右のサーボ軸間
+      # zero は伸びきり (クランク角 0deg) のサーボ角。左は取り付けが鏡なので sign が逆
+      # (右 + 左 = 270 の関係は今までどおり)
+      right: { motor: sub_pitch_r, zero: 80.0, sign: 1 }
+      left: { motor: sub_pitch_l, zero: 190.0, sign: -1 }
     motors:
+      # 換算は linkage が持つ。ここの scale/offset は使わない
       sub_pitch_r: { scale: 1.0, offset: 0.0 }
-      # 2026-09-10 にこの軸単独で実測。sub_rotate の値を写してはならない (取り付けの向きは軸ごとに違う)
-      sub_pitch_l: { scale: -1.0, offset: 270.0 }
+      sub_pitch_l: { scale: 1.0, offset: 0.0 }
 
   sub_offset:
     unit: deg
@@ -215,11 +230,11 @@ positions:
 
   # 実機で確認済み (2026-09-10)。軸の値は右の生角で、左は offset 270.0 により
   # open で 10deg・close で 190deg になる (どちらも r + l = 270 で対になる)。
+  # 値は左右の先端どうしの隙間 [mm]。open は縮めきり (片側 25mm、サーボ 260/10deg)、
+  # close は真ん中でぴったり (片側 115mm、サーボ 131.3/138.7deg)
   sub_pitch:
-    open: 260.0          # 開いた持ち方 [deg]
-    # 棒を 65/90 へ伸ばした後の値 (2026-09-12)。80 のままだと左右が 80mm 押し合う。
-    # 片側 115mm = サーボ軸間 230mm の半分になる角 (lib/linkage.py で算出)
-    close: 131.3         # 閉じた持ち方 [deg]
+    open: 180.0          # 開いた持ち方 [mm]
+    close: 0.0           # 閉じた持ち方 [mm]
 
   # 実機で確認済み (2026-09-10)。0 -> 5 -> 30 -> 180deg を通した。
   sub_offset:

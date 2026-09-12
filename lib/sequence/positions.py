@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 from lib.axis_sync import MotorSpec, SyncGroup
 from lib.drivers.base import ControlMode
+from lib.linkage import Linkage, LinkageError
 from lib.match_state import Court
 
 # 可動端インターロック・跳躍量・トルクの判断は最下位層に閉じてある。ここは
@@ -44,6 +45,64 @@ class CourtUnresolvedError(RuntimeError):
 
 class PositionReloadError(RuntimeError):
     """位置定数の読み直しを拒んだ。**送出しても今の値はそのまま残る。**"""
+
+
+class LinkageCenter:
+    """左右の中心のずれ [mm]。**表を読み直しても軸を跨いでも同じ 1 つを指す**ので、
+    frozen な `AxisSpec` の外に出してある。正が右へ。"""
+
+    def __init__(self) -> None:
+        self.value: float = 0.0
+
+
+@dataclass(frozen=True)
+class LinkageSide:
+    """片側のサーボ。`zero` は伸びきり (クランク角 0deg) のサーボ角、`sign` は回す向き。"""
+
+    motor: str
+    zero: float
+    sign: float
+
+    def servo(self, crank_deg: float) -> float:
+        return self.zero + self.sign * crank_deg
+
+    def crank(self, servo_deg: float) -> float:
+        return (servo_deg - self.zero) * self.sign
+
+
+@dataclass(frozen=True)
+class LinkageSpec:
+    """サーボの回転をリンクで直線にする軸。軸の値は**左右の先端どうしの隙間 [mm]**。
+
+    左右の和は `span - 隙間` に固定されるので、中心をどれだけ動かしても押し合いようが
+    ない。中心は `center` (共有の入れ物) が持ち、指令のたびにその隙間でずらせる量へ
+    丸める (縮めきった姿勢では 0 になる)。
+    """
+
+    geometry: Linkage
+    left: LinkageSide
+    right: LinkageSide
+    center: LinkageCenter
+
+    @property
+    def motor_names(self) -> tuple[str, str]:
+        return (self.left.motor, self.right.motor)
+
+    def effective_center(self, gap_mm: float) -> float:
+        limit = self.geometry.center_limit(gap_mm)
+        return max(-limit, min(limit, self.center.value))
+
+    def to_commands(self, gap_mm: float) -> dict[str, float]:
+        left_mm, right_mm = self.geometry.reaches(gap_mm, self.effective_center(gap_mm))
+        return {
+            self.left.motor: self.left.servo(self.geometry.crank_angle(left_mm)),
+            self.right.motor: self.right.servo(self.geometry.crank_angle(right_mm)),
+        }
+
+    def to_value(self, commands: Mapping[str, float]) -> float:
+        left_mm = self.geometry.reach_from_crank(self.left.crank(commands[self.left.motor]))
+        right_mm = self.geometry.reach_from_crank(self.right.crank(commands[self.right.motor]))
+        return self.geometry.span - left_mm - right_mm
 
 
 @dataclass(frozen=True)
@@ -157,6 +216,9 @@ class HomingSpec:
     #: 原点合わせの誤差 [軸の unit]。目標がこの範囲内の移動は、原点スイッチで止まっても
     #: 着座として到着扱いにする (home を原点から離せない軸のため)
     origin_error: float | None = None
+    #: 探索を始める前に位置名で寄せる他の軸 ((軸名, 位置名) の並び)。探索の経路に居る
+    #: 機構 (後壁) を退けるために要る。位置名で持つのは retreat_position と同じ理由
+    prepare: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.sensor is not None and self.motor_sensors is not None:
@@ -323,10 +385,17 @@ class AxisSpec:
     # None ならこの軸は今までどおり素通り。既定値で埋めないのは、埋めた値が
     # 効いているのか書き忘れなのかがコードから読めなくなるため
     guard: MotionGuardSpec | None = None
+    # サーボの回転をリンクで直線にする軸。None なら scale/offset の線形換算
+    linkage: LinkageSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.motors:
             raise ValueError(f"axes.{self.name} にモータがありません")
+        if self.linkage is not None and set(self.linkage.motor_names) != set(self.motor_names):
+            raise ValueError(
+                f"axes.{self.name}.linkage の left/right ({', '.join(self.linkage.motor_names)}) が"
+                f" motors ({', '.join(self.motor_names)}) と一致しません"
+            )
         if self.homing is not None and self.command_mode is not ControlMode.POSITION:
             raise ValueError(
                 f"axes.{self.name}: homing は位置指令の軸にのみ書けます "
@@ -504,10 +573,19 @@ class AxisSpec:
 
     def to_commands(self, value: float) -> dict[str, float]:
         self.require_resolved()
+        if self.linkage is not None:
+            try:
+                return self.linkage.to_commands(value)
+            except LinkageError as exc:
+                raise PositionLookupError(f"軸 '{self.name}': {exc}") from exc
         return {motor.name: motor.to_command(value) for motor in self.motors}
 
     def to_commands_each(self, values: Mapping[str, float]) -> dict[str, float]:
         self.require_resolved()
+        if self.linkage is not None:
+            raise PositionLookupError(
+                f"軸 '{self.name}' はリンク機構なので片側ずつは指令できません (隙間で指定する)"
+            )
         missing = sorted(name for name in self.motor_names if name not in values)
         extra = sorted(set(values) - set(self.motor_names))
         if missing or extra:
@@ -519,6 +597,12 @@ class AxisSpec:
 
     def to_value(self, commands: Mapping[str, float]) -> float:
         self.require_resolved()
+        if self.linkage is not None:
+            if any(name not in commands for name in self.linkage.motor_names):
+                raise PositionLookupError(
+                    f"軸 '{self.name}' の隙間は左右両方の角が揃わないと算出できません"
+                )
+            return self.linkage.to_value(commands)
         values = [
             motor.to_value(commands[motor.name]) for motor in self.motors if motor.name in commands
         ]
@@ -558,6 +642,7 @@ _AXIS_KEYS = frozenset(
         "homing",
         "motion",
         "min_speed",
+        "linkage",
         "guard",
         "travel",
     }
@@ -583,6 +668,7 @@ _HOMING_KEYS = frozenset(
         "coarse_step",
         "retreat_position",
         "origin_error",
+        "prepare",
     }
 )
 #: 探索距離を既定値で埋めると、配線が抜けた状態で機構端まで押し込む経路ができる
@@ -986,6 +1072,45 @@ def _parse_axis(name: str, raw: object) -> AxisSpec:
         min_speed=_number(path, raw, "min_speed", None),
         guard=_parse_guard(name, raw.get("guard")),
         travel=_parse_travel(name, raw.get("travel")),
+        linkage=_parse_linkage(name, raw.get("linkage")),
+    )
+
+
+def _parse_linkage(axis_name: str, raw: object) -> LinkageSpec | None:
+    if raw is None:
+        return None
+    path = f"axes.{axis_name}.linkage"
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} は辞書である必要があります: {raw!r}")
+    unknown = set(raw) - {"crank", "rod", "span", "left", "right"}
+    if unknown:
+        raise ValueError(f"{path} に未知のキー: {', '.join(sorted(unknown))}")
+    lengths = {}
+    for key in ("crank", "rod", "span"):
+        value = _number(path, raw, key, None)
+        if value is None:
+            raise ValueError(f"{path}.{key} がありません")
+        lengths[key] = value
+    try:
+        geometry = Linkage(servo_zero=0.0, **lengths)
+    except LinkageError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+    def side(key: str) -> LinkageSide:
+        side_raw = raw.get(key)
+        if not isinstance(side_raw, dict):
+            raise ValueError(f"{path}.{key} は {{motor, zero, sign}} の辞書である必要があります")
+        motor = side_raw.get("motor")
+        if not isinstance(motor, str) or not motor:
+            raise ValueError(f"{path}.{key}.motor がありません")
+        zero = _number(f"{path}.{key}", side_raw, "zero", None)
+        sign = _number(f"{path}.{key}", side_raw, "sign", None)
+        if zero is None or sign not in (1.0, -1.0):
+            raise ValueError(f"{path}.{key} は zero [deg] と sign (1 か -1) が要ります")
+        return LinkageSide(motor=motor, zero=zero, sign=sign)
+
+    return LinkageSpec(
+        geometry=geometry, left=side("left"), right=side("right"), center=LinkageCenter()
     )
 
 
@@ -1064,6 +1189,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
         not isinstance(retreat_position, str) or not retreat_position
     ):
         raise ValueError(f"{path}.retreat_position は位置名の文字列: {retreat_position!r}")
+    prepare = _parse_homing_prepare(path, raw.get("prepare"))
 
     try:
         return HomingSpec(
@@ -1076,6 +1202,7 @@ def _parse_homing(axis_name: str, raw: object) -> HomingSpec | None:
             align_distance=align_distance,
             align_step=_number(path, raw, "align_step", None),
             retreat_position=retreat_position,
+            prepare=prepare,
             origin_error=_number(path, raw, "origin_error", None),
             release_distance=(
                 float(raw["release_distance"]) if raw.get("release_distance") is not None else None
@@ -1099,6 +1226,21 @@ def _parse_homing_sensor_map(path: str, raw: object) -> tuple[tuple[str, str], .
         if not isinstance(sensor_name, str) or not sensor_name:
             raise ValueError(f"{path}.sensors.{motor_name} はセンサ名の文字列: {sensor_name!r}")
         pairs.append((motor_name, sensor_name))
+    return tuple(pairs)
+
+
+def _parse_homing_prepare(path: str, raw: object) -> tuple[tuple[str, str], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{path}.prepare は軸名 → 位置名の辞書: {raw!r}")
+    pairs: list[tuple[str, str]] = []
+    for axis_name, position in raw.items():
+        if not isinstance(axis_name, str) or not axis_name:
+            raise ValueError(f"{path}.prepare のキーは軸名の文字列: {axis_name!r}")
+        if not isinstance(position, str) or not position:
+            raise ValueError(f"{path}.prepare.{axis_name} は位置名の文字列: {position!r}")
+        pairs.append((axis_name, position))
     return tuple(pairs)
 
 
@@ -1734,6 +1876,7 @@ def load_position_table(config: dict | None, *, source: str = "<inline>") -> Pos
     # 所要時間は manual の幅だけでも決まる)
     for axis, spec in axes.items():
         _check_retreat_position(source, spec, positions.get(axis, {}))
+        _check_homing_prepare(source, spec, axes, positions)
         _check_motion_timeout(source, spec, positions.get(axis, {}))
 
     # 干渉条件は他の軸の位置名を参照するので、表が全部揃った後でしか解決できない
@@ -1864,6 +2007,34 @@ def _check_retreat_position(
         f"ありません (homing.direction={homing.direction:+g} なので {side}の値が要ります)。"
         "退避になっていないと、干渉したまま次の軸を寄せます"
     )
+
+
+def _check_homing_prepare(
+    source: str,
+    spec: AxisSpec,
+    axes: Mapping[str, AxisSpec],
+    positions: Mapping[str, Mapping[str, object]],
+) -> None:
+    """探索の前に寄せる軸と位置名が表にあること (無いと探索の直前に落ちる)。"""
+    homing = spec.homing
+    if homing is None:
+        return
+    for axis, name in homing.prepare:
+        where = f"{source}: axes.{spec.name}.homing.prepare"
+        if axis == spec.name:
+            raise ValueError(
+                f"{where} に自分自身 '{axis}' は書けません"
+                " (零点の決まっていない軸は位置名で動かせません)"
+            )
+        if axis not in axes:
+            raise ValueError(f"{where} の軸 '{axis}' が axes にありません")
+        values = positions.get(axis, {})
+        if name not in values:
+            available = ", ".join(values) or "(なし)"
+            raise ValueError(
+                f"{where} の '{axis}: {name}' が positions.{axis} にありません。"
+                f"定義済みの位置: {available}"
+            )
 
 
 def _check_motion_timeout(

@@ -1069,6 +1069,37 @@ async def _retreat(
     logger.info("[homing] %s: 零点確定後に '%s' (%.2f%s) へ退避", spec.name, name, value, spec.unit)
 
 
+async def _prepare(
+    spec: AxisSpec,
+    table: PositionTable,
+    motors: MotorGroup,
+    *,
+    court: Court | None,
+) -> None:
+    """探索を始める前に、経路に居る他の軸を位置名で退ける (後壁を開いてから前後を探す)。"""
+    homing = spec.homing
+    if homing is None:
+        return
+    for axis, name in homing.prepare:
+        other, handle = _axis_handle(table, motors, axis, court)
+        if other.homing is not None and not origin_confirmed(other, motors):
+            raise HomingError(
+                f"軸 '{spec.name}' の探索前に寄せる '{axis}' の零点が確定していません"
+                f" (先に '{axis}' の零点確定を済ませてください)"
+            )
+        value = table.raw(axis, name, court=court)
+        await handle.set_target_value(other.to_commands(value))
+        if not await handle.wait_reached(timeout=other.timeout_s, expect_target=True):
+            raise HomingError(
+                f"軸 '{spec.name}' の探索前に '{axis}' を '{name}' ({value}{other.unit}) へ"
+                f" {other.timeout_s} 秒以内に動かせませんでした"
+                " (退けないまま探すと機構が当たります)"
+            )
+        logger.info(
+            "[homing] %s: 探索前に %s を '%s' (%.2f%s) へ", spec.name, axis, name, value, other.unit
+        )
+
+
 async def measure_switch(
     runner: HomingRunner,
     table: PositionTable,
@@ -1249,6 +1280,7 @@ async def _distance_each(
         try:
             if axis in blocked:
                 raise HomingError(blocked[axis])
+            await _prepare(spec, table, motors, court=court)
             # 差を取るので零点がどこにあっても距離は変わらない
             low = await runner.measure(spec, handle, direction=-1.0)
             high = await runner.measure(spec, handle, direction=1.0)
@@ -1306,6 +1338,7 @@ async def _home_each(
         try:
             if axis in blocked:
                 raise HomingError(blocked[axis])
+            await _prepare(spec, table, motors, court=court)
             await runner.home(spec, handle)
             await _retreat(spec, handle, table, court=court)
         except Exception as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Collection
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -122,9 +123,44 @@ class ManualController:
                     "sync_tolerance": spec.sync_tolerance,
                     "positions": self._position_entries(name),
                     "motors": list(spec.motor_names),
+                    "linkage": self._linkage_info(spec),
                 }
             )
         return info
+
+    def _linkage_info(self, spec: AxisSpec) -> dict | None:
+        """リンク機構の軸だけ持つ、中心のずれとその上限。UI はこれで ± の口を出す。"""
+        linkage = spec.linkage
+        if linkage is None:
+            return None
+        gap = self._axis_target(spec)
+        return {
+            "center": linkage.center.value,
+            "max": linkage.geometry.crank,
+            "limit": None if gap is None else linkage.geometry.center_limit(gap),
+        }
+
+    def set_linkage_center(self, axis: str, center_mm: float) -> float:
+        """左右の中心のずれ [mm] を控える。指令のたびにその隙間でずらせる量へ丸められる。"""
+        spec = self._axis(axis)
+        if spec.linkage is None:
+            raise ManualControlError(f"軸 '{axis}' はリンク機構ではないので中心をずらせません")
+        limit = spec.linkage.geometry.crank
+        if not math.isfinite(center_mm) or abs(center_mm) > limit:
+            raise ManualControlError(
+                f"中心のずれ {center_mm:.3g}mm は ±{limit:.3g}mm を超えています"
+            )
+        spec.linkage.center.value = float(center_mm)
+        return spec.linkage.center.value
+
+    async def resend_target(self, axis: str) -> float | None:
+        """今の目標をもう 1 度送る (中心を変えた直後にその場で効かせる)。目標が無ければ None。"""
+        spec = self._axis(axis)
+        value = self._axis_target(spec)
+        if value is None:
+            return None
+        await self._send(spec, spec.to_commands(value))
+        return value
 
     def reset(self) -> None:
         self._targets.clear()

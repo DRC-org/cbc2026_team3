@@ -702,6 +702,32 @@ class RobotServer:
         if reason is not None:
             await self._reject_command(requester, "homing_start", reason)
 
+    async def _cmd_linkage_center_set(self, data: dict, requester: WSOrNone) -> None:
+        robot_name = data.get("robot")
+        if not isinstance(robot_name, str) or robot_name not in self._robots:
+            return
+        ctx = self._robots[robot_name]
+        axis = data.get("axis")
+        if ctx.manual is None or not isinstance(axis, str) or not axis:
+            await self._reject_command(requester, "linkage_center_set", "軸が指定されていません")
+            return
+        center = await self._manual_number(data, "center", "linkage_center_set", requester)
+        if center is None:
+            return
+        try:
+            stored = ctx.manual.set_linkage_center(axis, center)
+            resent = await ctx.manual.resend_target(axis)
+        except ManualControlError as exc:
+            await self._reject_command(requester, "linkage_center_set", str(exc))
+            return
+        logger.info(
+            "リンクの中心: robot=%s axis=%s center=%+.1fmm%s",
+            robot_name,
+            axis,
+            stored,
+            "" if resent is None else f" (隙間 {resent:.1f}mm を送り直し)",
+        )
+
     async def _cmd_suction_pads_set(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
         if not isinstance(robot_name, str) or robot_name not in self._robots:
