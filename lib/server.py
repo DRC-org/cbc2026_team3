@@ -184,6 +184,8 @@ class RobotServer:
         self._inactive_motors: dict[str, list[str]] = {}
         self._reactivate_tasks: set[asyncio.Task[None]] = set()
         self._reenergize_tasks: dict[str, asyncio.Task[None]] = {}
+        #: 再励磁で今まさに触っているモータ。無いあいだは台ごと (対象が決まる前) に倒す
+        self._reenergizing_motors: dict[str, set[str]] = {}
         self._failed_tasks: dict[str, deque[str]] = {}
         self._dry_run: bool = dry_run
         self._dev_tools: bool = dev_tools
@@ -592,6 +594,15 @@ class RobotServer:
         task = self._reenergize_tasks.get(robot_name)
         return task is not None and not task.done()
 
+    def _is_reenergizing_motors(self, robot_name: str, motor_names: Collection[str]) -> bool:
+        """そのモータが再励磁で触られている最中か。対象が決まる前は台ごと真。"""
+        if not self._is_reenergizing(robot_name):
+            return False
+        touching = self._reenergizing_motors.get(robot_name)
+        if touching is None:
+            return True
+        return bool(touching.intersection(motor_names))
+
     async def _cmd_trigger(self, data: dict, requester: WSOrNone) -> None:
         if await self._deny_while_axis_check("trigger", "トリガーを送れません", requester):
             return
@@ -894,13 +905,22 @@ class RobotServer:
                 requester, command, f"'{robot_name}' は手動操縦に対応していません"
             )
             return None
-        if self._is_reenergizing(robot_name):
-            await self._reject_command(requester, command, f"'{robot_name}' の再励磁が処理中です")
-            return None
-
         axis = data.get("axis")
         if not isinstance(axis, str) or not axis:
             await self._reject_command(requester, command, "軸が指定されていません")
+            return None
+
+        # 塞ぐのは再励磁で触っているモータの軸だけ。台ごと塞ぐと、DM3520 の読み返しを
+        # 待つ十数秒のあいだサーボも弁もポンプも押せない (2026-09-12 実機 #219)
+        try:
+            motor_names = ctx.manual.axis_members(axis)
+        except ManualControlError as exc:
+            await self._reject_command(requester, command, str(exc))
+            return None
+        if self._is_reenergizing_motors(robot_name, motor_names):
+            await self._reject_command(
+                requester, command, f"軸 '{axis}' のモータが再励磁の処理中です"
+            )
             return None
 
         # モード判定は軸の解決より後。manual_always の軸はシーケンス制御中でも通すので、
@@ -1451,7 +1471,11 @@ class RobotServer:
             if ctx.manual is not None:
                 ctx.manual.reset_axes_for_motors(dropped)
 
-            await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
+            self._reenergizing_motors[robot_name] = set(dropped)
+            try:
+                await self._activate_motors_for_robot(robot_name, ctx, only=dropped)
+            finally:
+                self._reenergizing_motors.pop(robot_name, None)
             self._energize_expected_since = time.time()
         except Exception:
             logger.exception("再励磁処理で予期しない例外: robot=%s", robot_name)

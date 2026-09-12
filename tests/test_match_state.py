@@ -98,17 +98,18 @@ class TestPhaseTransitions:
         _enter_match(state)
 
         assert state.match_reset() is True
-        assert state.phase is Phase.SETUP
+        # コートが残るので、指差喚呼が済んでいれば直ちに READY へ戻る
+        assert state.phase in (Phase.SETUP, Phase.READY)
 
-    def test_match_reset_clears_the_court(self) -> None:
+    def test_match_reset_keeps_the_court(self) -> None:
+        """同じコートで何度も走らせるので、リセットのたびに選び直させない (2026-09-12)。"""
         state = _make()
         state.set_court(Court.BLUE)
         state.match_start()
 
         state.match_reset()
-        assert state.court is None
-        assert state.can_start_match is False
-        assert state.match_start() is False
+        assert state.court is Court.BLUE
+        assert state.phase in (Phase.SETUP, Phase.READY)
 
 
 class TestPhaseSets:

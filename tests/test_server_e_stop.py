@@ -294,7 +294,8 @@ class TestEStopBlocksSequenceCommands:
 
             await ws.send_json({"type": "match_reset"})
             await _expect_no_rejection(ws, "match_reset")
-            assert fx.match.phase is Phase.SETUP
+            # コートはリセットでも残るので、指差喚呼が済んでいれば READY のこともある
+            assert fx.match.phase in (Phase.SETUP, Phase.READY)
 
             await ws.close()
 

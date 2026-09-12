@@ -85,6 +85,10 @@ class ManualController:
         self._targets[spec.name] = value
         return value
 
+    def axis_members(self, axis: str) -> tuple[str, ...]:
+        """その軸を成すモータ名。未定義の軸は ManualControlError (指令口ではなく読む口)。"""
+        return self._axis(axis).motor_names
+
     def is_always_manual(self, axis: str) -> bool:
         # 未定義の軸は ManualControlError のまま返す。サーバーがモードの理由で覆い隠すと、
         # 軸名の打ち間違いが「切り替えても直らない拒否」に見える
