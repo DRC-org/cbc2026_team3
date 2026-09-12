@@ -42,7 +42,7 @@ class ReturnHomeController:
     def __init__(
         self,
         *,
-        environment_deny: Callable[[], str | None],
+        environment_deny: Callable[..., str | None],
         is_e_stop_active: Callable[[], bool],
         broadcast: Callable[[dict], Awaitable[None]],
     ) -> None:
@@ -66,15 +66,19 @@ class ReturnHomeController:
         """どれか 1 機でも走っていれば True。軸を握る点検どうしの排他はこれを見る。"""
         return any(run.running for run in self._runs.values())
 
+    def running_for(self, robot: str) -> bool:
+        run = self._runs.get(robot)
+        return run is not None and run.running
+
     def _run_of(self, robot: str) -> _RobotRun:
         return self._runs.setdefault(robot, _RobotRun())
 
-    def _common_deny(self) -> str | None:
+    def _common_deny(self, robot: str | None = None) -> str | None:
         if self._source is None:
             return "初期位置へ戻す口が読み込まれていません"
         if not self._poses:
             return "初期位置が定義されているロボットがありません"
-        return self._environment_deny()
+        return self._environment_deny(robot)
 
     def _robot_deny(self, robot: str) -> str | None:
         run = self._runs.get(robot)
@@ -114,11 +118,11 @@ class ReturnHomeController:
         return tuple(found)
 
     def deny_reason(self, robot: str) -> str | None:
-        return self._common_deny() or self._robot_deny(robot)
+        return self._common_deny(robot) or self._robot_deny(robot)
 
     async def start(self, robot: object) -> str | None:
         """原点復帰を開始する。**拒んだ理由を返す (通れば None)。**"""
-        deny = self._common_deny()
+        deny = self._common_deny(robot if isinstance(robot, str) else None)
         if deny is not None:
             return await self._reject(robot, deny)
 

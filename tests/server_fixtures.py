@@ -186,8 +186,9 @@ class ServerFixture:
     def switch_measure_state(self) -> dict:
         return self.server._switch_measure.payload()
 
-    def set_switch_measure_running(self, running: bool) -> None:
+    def set_switch_measure_running(self, running: bool, robot: str = "sub_hand") -> None:
         self.server._switch_measure._running = running
+        self.server._switch_measure._robot = robot if running else None
 
     async def wait_switch_measure_idle(self, *, timeout: float = 2.0) -> None:
         task = self.server._switch_measure._task
