@@ -144,15 +144,13 @@ positions:
   # TODO(実機で確認): *_after_* の値はどれも仮値。実機で干渉を見ながら詰めること。
   y_axis:
     home: 0.0
-    # 零点確定の直後に退避する先 (homing.retreat_position)。rotate を回してよい位置。
-    # TODO(実機で確認): 仮値。rotate の干渉域を抜ける実測値へ詰めること
     clear: 40.0
     work_1: 65.0
     work_1_after_1: 225.0
     work_2: 255.0
-    work_3: 450.0
-    work_3_after_1: 380.0
-    work_3_after_2: 350.0
+    work_3: 466.0
+    work_3_after_1: 396.0
+    work_3_after_2: 366.0
     work_shared: 550.0
     work_shared_after_1: 400.0
 
@@ -185,4 +183,3 @@ positions:
     initial: 270.0
     closed: 180.0
     open: 80.0
-
