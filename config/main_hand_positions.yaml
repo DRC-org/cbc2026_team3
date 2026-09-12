@@ -165,6 +165,7 @@ positions:
     work_shared_after_1: 185.0
     pick: 185.0
     pick_shared: 165.0
+    via_place: 0.0
     place: 5.0
     after_place: 30.0
 
@@ -177,6 +178,7 @@ positions:
   # 0.3 はファーム側 kDefaultMaxDuty と同値で、超えるとクランプされる。
   conveyor:
     stop: 0.0
+    slow: { red: 0.15, blue: -0.15 }
     run: { red: 0.3, blue: -0.3 }
 
   wall_f:
