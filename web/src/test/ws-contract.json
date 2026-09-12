@@ -385,6 +385,7 @@
         "loops_running": true,
         "monitors_running": true,
         "physical_stop": {
+          "pressed": [],
           "sources": [
             "conveyor"
           ],
@@ -500,6 +501,7 @@
         "loops_running": true,
         "monitors_running": true,
         "physical_stop": {
+          "pressed": [],
           "sources": [
             "conveyor"
           ],

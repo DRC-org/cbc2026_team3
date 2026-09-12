@@ -69,7 +69,7 @@ function safety(over: Partial<SafetyState> = {}): SafetyState {
     unenergized_motors: [],
     unresponsive_motors: [],
     firmware_unconfirmed_motors: [],
-    physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [] },
+    physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [], pressed: [] },
     failed_tasks: [],
     reenergizing: false,
     loops_running: true,
@@ -448,7 +448,14 @@ describe("describeSafetyIssues", () => {
 
   it("物理停止を監視できていないと基板名付きで返す", () => {
     const issues = describeSafetyIssues(
-      safety({ physical_stop: { watched: false, sources: ["pump_vac"], unwatched: ["pump_vac"] } }),
+      safety({
+        physical_stop: {
+          watched: false,
+          sources: ["pump_vac"],
+          unwatched: ["pump_vac"],
+          pressed: [],
+        },
+      }),
     );
     const issue = issues.find((i) => i.kind === "physical_stop_unwatched");
     expect(issue?.detail).toBe("pump_vac");
@@ -457,7 +464,7 @@ describe("describeSafetyIssues", () => {
 
   it("物理停止を受ける基板が構成に無いことも黙らない", () => {
     const issues = describeSafetyIssues(
-      safety({ physical_stop: { watched: false, sources: [], unwatched: [] } }),
+      safety({ physical_stop: { watched: false, sources: [], unwatched: [], pressed: [] } }),
     );
     const issue = issues.find((i) => i.kind === "physical_stop_unwatched");
     expect(issue?.detail).toBe("DC 基板なし");
@@ -466,7 +473,14 @@ describe("describeSafetyIssues", () => {
   it("物理停止を監視できていないと異常判定へ倒す (画面が平常のままにならない)", () => {
     const verdict = verdictWhenConnected(
       health(),
-      safety({ physical_stop: { watched: false, sources: ["pump_vac"], unwatched: ["pump_vac"] } }),
+      safety({
+        physical_stop: {
+          watched: false,
+          sources: ["pump_vac"],
+          unwatched: ["pump_vac"],
+          pressed: [],
+        },
+      }),
     );
     expect(verdict.tone).toBe("error");
   });
@@ -474,7 +488,9 @@ describe("describeSafetyIssues", () => {
   it("監視できているなら黙る", () => {
     expect(
       describeSafetyIssues(
-        safety({ physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [] } }),
+        safety({
+          physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [], pressed: [] },
+        }),
       ),
     ).toEqual([]);
   });

@@ -99,7 +99,7 @@ describe("parseServerMessage", () => {
         unenergized_motors: [],
         unresponsive_motors: [],
         firmware_unconfirmed_motors: [],
-        physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [] },
+        physical_stop: { watched: true, sources: ["pump_vac"], unwatched: [], pressed: [] },
         failed_tasks: [],
         reenergizing: false,
         loops_running: true,

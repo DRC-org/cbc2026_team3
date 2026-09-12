@@ -34,7 +34,8 @@ export type SafetyIssueKind =
   | "monitors_stopped"
   | "limit_monitors_stopped"
   | "refreshers_stopped"
-  | "physical_stop_unwatched";
+  | "physical_stop_unwatched"
+  | "physical_stop_pressed";
 
 export interface SafetyIssue {
   kind: SafetyIssueKind;
@@ -198,6 +199,14 @@ export function describeSafetyIssues(safety: SafetyPayload | undefined): SafetyI
       hint: noSource
         ? "物理非常停止スイッチを受ける DC 基板がこの機体の構成にありません。押しても PC は止まりません"
         : "物理非常停止スイッチを押しても PC が気付けません (DC 基板のフィードバックが届いていない)。CAN 配線と基板の電源を確認してください",
+    });
+  }
+  if (safety.physical_stop.pressed.length > 0) {
+    issues.push({
+      kind: "physical_stop_pressed",
+      label: "物理停止 押下報告中",
+      detail: safety.physical_stop.pressed.join(", "),
+      hint: "DC 基板が物理非常停止の押下を報告しています (押されたまま起動したか、12V 系のスイッチ回路が未接続・断線)。全体の緊急停止は押された瞬間だけ掛かります。この基板の出力 (ポンプ・コンベア) は止まったままです",
     });
   }
 
