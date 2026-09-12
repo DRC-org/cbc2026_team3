@@ -16,10 +16,6 @@ interface ManualPanelProps {
   blocked: boolean;
   sendOrReport: RobotCommands["sendOrReport"];
   excludeAxes?: readonly string[];
-  /** 半自動の面では矢印キーを取らない (Space がトリガーに使われている画面で軸が動いてはならない) */
-  hotkeys?: boolean;
-  /** 見出しの右に出す短い理由 (押せない理由を他の面が言っていないときだけ) */
-  note?: string | null;
 }
 
 const KEY_LEGEND: { keys: string[]; label: string }[] = [
@@ -35,8 +31,6 @@ export function ManualPanel({
   blocked,
   sendOrReport,
   excludeAxes,
-  hotkeys = true,
-  note = null,
 }: ManualPanelProps) {
   const [picked, setPicked] = useState<string | null>(null);
   const { matchState } = useRobotStatus();
@@ -58,11 +52,9 @@ export function ManualPanel({
 
   const steerable = axes.filter((axis) => axis.manual !== null);
   const { pads, rest: presetOnly } = splitOnOffAxes(axes.filter((axis) => axis.manual === null));
-  const selected = !hotkeys
-    ? null
-    : steerable.some((axis) => axis.name === picked)
-      ? picked
-      : (steerable[0]?.name ?? null);
+  const selected = steerable.some((axis) => axis.name === picked)
+    ? picked
+    : (steerable[0]?.name ?? null);
 
   const moveSelection = (direction: 1 | -1) => {
     const index = steerable.findIndex((axis) => axis.name === selected);
@@ -76,16 +68,11 @@ export function ManualPanel({
       ArrowUp: () => moveSelection(-1),
       ArrowDown: () => moveSelection(1),
     },
-    hotkeys && steerable.length > 1,
+    steerable.length > 1,
   );
 
   return (
-    <Panel
-      legend="手動操縦"
-      className="min-h-0 flex-1"
-      bodyClassName="p-0"
-      actions={note ? <span className="text-[0.85em] text-base-content/60">{note}</span> : null}
-    >
+    <Panel legend="手動操縦" className="min-h-0 flex-1" bodyClassName="p-0">
       {axes.length === 0 ? (
         <p className="p-2 text-base-content/70">手動軸なし</p>
       ) : (

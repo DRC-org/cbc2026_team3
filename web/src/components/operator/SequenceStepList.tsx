@@ -6,6 +6,7 @@ import { Icon } from "@/components/ui/Icon";
 import { Modal } from "@/components/ui/Modal";
 import { cx } from "@/lib/cx";
 import type { SequenceStepInfo } from "@/lib/protocol";
+import { scrollWithinContainer } from "@/lib/scrollWithin";
 
 interface SequenceStepListProps {
   steps: SequenceStepInfo[];
@@ -61,7 +62,7 @@ export function SequenceStepList({
   const currentRef = useRef<HTMLLIElement | null>(null);
 
   useEffect(() => {
-    currentRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    scrollWithinContainer(currentRef.current, "center");
   }, [stepIndex]);
 
   if (steps.length === 0) {
