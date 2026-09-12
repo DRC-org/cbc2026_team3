@@ -176,4 +176,7 @@ positions:
   wall_f:
     initial: 270.0
     closed: 180.0
+    # サブハンドが吸うあいだだけ closed から 30deg 押し込む (2026-09-12)。
+    # 指令はサブハンドのシーケンスから出る (sequences/sub_hand.py)
+    assist: 210.0
     open: 80.0

@@ -27,6 +27,10 @@ LIFT_OFF_SHELF: dict[str, str] = {"sub_lift": "lifted"}
 CARRY_POSE: dict[str, str] = {"sub_rotate": "carry"}
 RECEIVE_POSE: dict[str, str] = {"sub_rotate": "receive"}
 WALL_R_INITIAL: dict[str, str] = {"wall_r": "initial"}
+WALL_R_OPEN: dict[str, str] = {"wall_r": "open"}
+# メインハンドの壁 (config/system.yaml の shared_axes で借りている)。吸うあいだだけ
+# 押し込んでワークを押さえる (#224)
+WALL_F_ASSIST: dict[str, str] = {"wall_f": "assist"}
 
 # ピッチとオフセットは同時に動かさない。閉じるとき オフセット -> ピッチ、
 # 開くとき ピッチ -> オフセット。
@@ -54,7 +58,12 @@ class SubHandSequence(Sequence):
                 "吸着に使うパッドが 1 つも選ばれていません (吸着パッドの選択を確認してください)"
             )
         # 選ばれていない弁は閉じ直す。開いたままの弁が 1 つあると真空が抜ける
-        await self.move_to(_all_valves("closed") | dict.fromkeys(enabled, "open"))
+        open_valves = _all_valves("closed") | dict.fromkeys(enabled, "open")
+        await self.move_to(open_valves)
+        # 吸ってからメインハンドの壁で押し付け、吸い付くまで待つ。待ちは弁の settle_s を
+        # 借りる (同じ指令なので機体は動かない)。ここへ秒を書くと config と 2 箇所になる
+        await self.move_to(WALL_F_ASSIST)
+        await self.move_to(open_valves)
 
     def _log_placed_position(self) -> None:
         """下ろした前後の位置を残す。あとから位置定数を詰めるのに使う。"""
@@ -80,6 +89,9 @@ class SubHandSequence(Sequence):
         # 高さは零点確定を終えた位置と同じ pick、前後はその 15cm 後ろ
         await self.move_to(DOWN_TO_PICK)
         await self.move_to(TO_HOME)
+        # ピッチとオフセットは回転が carry のときしか動かせない (棒を伸ばしたので
+        # receive では棚側と当たる。2026-09-12)。守っているのはこの並びだけ
+        await self.move_to(CARRY_POSE)
         await self.move_to(OPEN_PITCH)
         await self.move_to(OPEN_OFFSET)
         await self.move_to(RECEIVE_POSE)
@@ -87,6 +99,8 @@ class SubHandSequence(Sequence):
 
     @step("1 個目: 棚へ寄せる", require_trigger=True)
     async def work_1_to_shelf(self) -> None:
+        # 後壁が閉じたままだと棚へ入れない
+        await self.move_to(WALL_R_OPEN)
         await self.move_to(TO_SHELF)
 
     @step("1 個目: 吸着高さへ下降")
@@ -162,6 +176,8 @@ class SubHandSequence(Sequence):
 
     @step("2 個目: 棚へ寄せる", require_trigger=True)
     async def work_2_to_shelf(self) -> None:
+        # 後壁が閉じたままだと棚へ入れない
+        await self.move_to(WALL_R_OPEN)
         await self.move_to(TO_SHELF)
 
     @step("2 個目: 吸着高さへ下降")
@@ -237,6 +253,8 @@ class SubHandSequence(Sequence):
 
     @step("3 個目: 棚へ寄せる", require_trigger=True)
     async def work_3_to_shelf(self) -> None:
+        # 後壁が閉じたままだと棚へ入れない
+        await self.move_to(WALL_R_OPEN)
         await self.move_to(TO_SHELF)
 
     @step("3 個目: 吸着高さへ下降")
@@ -312,6 +330,8 @@ class SubHandSequence(Sequence):
 
     @step("4 個目: 棚へ寄せる", require_trigger=True)
     async def work_4_to_shelf(self) -> None:
+        # 後壁が閉じたままだと棚へ入れない
+        await self.move_to(WALL_R_OPEN)
         await self.move_to(TO_SHELF)
 
     @step("4 個目: 吸着高さへ下降")
