@@ -130,6 +130,8 @@ axes:
       # (右 + 左 = 270 の関係は今までどおり)
       right: { motor: sub_pitch_r, zero: 80.0, sign: 1 }
       left: { motor: sub_pitch_l, zero: 190.0, sign: -1 }
+      # 起動時の中心のずれ [mm]。正が右。既定で右へ 30mm (2026-09-12 実機の求め)
+      center: 30.0
     motors:
       # 換算は linkage が持つ。ここの scale/offset は使わない
       sub_pitch_r: { scale: 1.0, offset: 0.0 }
