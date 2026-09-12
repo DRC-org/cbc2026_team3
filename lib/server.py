@@ -983,13 +983,14 @@ class RobotServer:
                 await self._reject_command(requester, command, str(exc))
                 return False
 
-        if not always_manual:
-            allowed = ", ".join(manual.always_manual_axes()) or "(なし)"
+        # 止まっているあいだ (開始前・停止後・完走後) は半自動でも全部通す (2026-09-12 実機の
+        # 求め)。塞ぐのは動いている最中だけ —— wait_reached の途中で目標を書き換えると
+        # 到達判定が壊れる。次に走るステップは位置名で書き直すので、動かした分は持ち越されない
+        if not always_manual and ctx.sequence.is_running:
             await self._reject_command(
                 requester,
                 command,
-                "手動操縦モードではありません (モードを切り替えてください)。"
-                f"シーケンス制御中でも操作できる軸: {allowed}",
+                "シーケンス実行中は手動操作できません (停止してから操作してください)",
             )
             return False
 
