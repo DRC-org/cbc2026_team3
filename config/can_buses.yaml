@@ -31,11 +31,11 @@ buses:
     txqueuelen: 1000
 
   # DC 基板は CAN トランシーバ故障のため USB CDC (SLCAN) で PC へ繋ぐ。
-  # VID/PID/serial は実機から未採取 —— scripts/setup_can.sh が採取方法を案内する。
+  # VID/PID は Arduino UNO R4 Minima の USB CDC のもの。
   can_dc:
     link: slcan
-    vendor_id: "TBD"
-    product_id: "TBD"
-    serial: "TBD"
+    vendor_id: "2341"
+    product_id: "0069"
+    serial: "390F192B363235362B0E33334B572F52"
     bitrate: 1000000
     txqueuelen: 1000
