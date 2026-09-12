@@ -168,7 +168,7 @@ class TestHomingComesFirst:
         table = _shipped_table()
         homing_axes = [name for name in table.axes if table.axis(name).homing is not None]
 
-        assert homing_axes == ["y_axis", "rotate", "sub_lift", "sub_y_axis"]
+        assert homing_axes == ["rotate", "y_axis", "sub_lift", "sub_y_axis"]
 
 
 class _EchoDriver(StubFeedbackDriver):

@@ -175,6 +175,54 @@ class ManualController:
         spec.linkage.center.value = float(center_mm)
         return spec.linkage.center.value
 
+    async def shift_linkage_center(self, axis: str, center_mm: float) -> float | None:
+        """中心をずらし、今の隙間で**片側ずつ**送り直す。目標が無ければ控えるだけ (None)。
+
+        両側を同時に動かすと途中で押し合って動かない (2026-09-12 実機)。縮む側をまず
+        縮めきり (open) へ逃がし、伸びる側を目的へ、最後に逃がした側を目的へ戻す。
+        どちらも縮まない (中心が変わらない) ときはまとめて送る。
+        """
+        spec = self._axis(axis)
+        linkage = spec.linkage
+        if linkage is None:
+            raise ManualControlError(f"軸 '{axis}' はリンク機構ではないので中心をずらせません")
+        gap = self._axis_target(spec)
+        self.set_linkage_center(axis, center_mm)
+        if gap is None:
+            return None
+        before = {name: getattr(self._motors, name).target for name in spec.motor_names}
+        after = spec.to_commands(gap)
+        opened = {side.motor: side.servo(180.0) for side in (linkage.left, linkage.right)}
+        retracting = [
+            name
+            for name in spec.motor_names
+            if before[name] is not None
+            and abs(after[name] - opened[name]) < abs(before[name] - opened[name]) - 1e-9
+        ]
+        if len(retracting) != 1:
+            await self._send(spec, after)
+            return gap
+        retract = retracting[0]
+        extend = next(name for name in spec.motor_names if name != retract)
+        await self._move_motor(spec, retract, opened[retract])
+        await self._move_motor(spec, extend, after[extend])
+        await self._move_motor(spec, retract, after[retract])
+        return gap
+
+    async def _move_motor(self, spec: AxisSpec, name: str, value: float) -> None:
+        """リンク軸の片側だけを動かして待つ (中心をずらすときの段取り専用)。"""
+        handle = getattr(self._motors, name)
+        motor = next(m for m in spec.motors if m.name == name)
+        tolerance = None if spec.tolerance is None else motor.to_tolerance(spec.tolerance)
+        await handle.set_target(spec.command_mode, float(value))
+        if not await handle.wait_reached(
+            tolerance=tolerance, timeout=spec.timeout_s, expect_target=True
+        ):
+            raise ManualControlError(
+                f"{name} を {value:.1f}{spec.command_unit} へ"
+                f" {spec.timeout_s} 秒以内に動かせませんでした"
+            )
+
     async def resend_target(self, axis: str) -> float | None:
         """今の目標をもう 1 度送る (中心を変えた直後にその場で効かせる)。目標が無ければ None。"""
         spec = self._axis(axis)

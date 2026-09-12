@@ -378,13 +378,15 @@ class TestShippedMainHandGuard:
 
 
 class TestShippedMainHandRetreats:
-    """コンベアへ寄せる退避点 (`*_after_*`) が両軸で対になり、可動範囲に収まっていること。
+    """コンベアへ寄せる退避点 (`*_after_*`) が可動範囲に収まっていること。
 
     値はどれも実機で干渉を見ながら詰める仮値である。**始点から終点へ単調に進むことは
     検査しない** —— 干渉を避けるために途中で一旦戻す経路を取る余地を残すため。
 
-    `after_place` は `rotate` だけが持つ 1 点なので対の検査の対象外である
-    (`_retreat_names` が見るのは軸をまたいで対になる `*_after_<n>` だけ)。
+    **両軸で対になることも検査しない** —— `y_axis` だけを先に逃がす退避点
+    (`work_1_after_1`, `work_2_after_1`) があり、対にならないのが正しい。
+    位置名の取り違えは tests/test_robot_sequences.py の
+    `test_all_steps_run_against_shipped_yaml` が同梱 yaml で全ステップを走らせて捕まえる。
     """
 
     @pytest.fixture
@@ -400,20 +402,6 @@ class TestShippedMainHandRetreats:
     @staticmethod
     def _retreat_names(table, axis: str) -> set[str]:
         return {name for name in table.names(axis) if "_after_" in name}
-
-    def test_退避点は両軸で同じ名前が揃っている(self, table) -> None:
-        """シーケンスは同じ位置名を `y_axis` と `rotate` の両方へ引く。
-
-        片方にしか無い名前は、実行時に `PositionLookupError` が出るまで分からない。
-        """
-        y_axis_retreats = self._retreat_names(table, "y_axis")
-        rotate_retreats = self._retreat_names(table, "rotate")
-
-        assert y_axis_retreats, "y_axis に退避点が 1 つも無い"
-        assert y_axis_retreats == rotate_retreats, (
-            f"退避点の対が崩れている: y_axis のみ={sorted(y_axis_retreats - rotate_retreats)}, "
-            f"rotate のみ={sorted(rotate_retreats - y_axis_retreats)}"
-        )
 
     @pytest.mark.parametrize("axis", ["y_axis", "rotate"])
     def test_退避点は手動操縦の可動範囲に収まっている(self, table, axis: str) -> None:

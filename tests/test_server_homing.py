@@ -21,7 +21,7 @@ from lib.sequence.homing import HomingError
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
-from tests.fake_can import mock_can_manager
+from tests.fake_can import mock_can_manager, mock_driver, set_motors
 from tests.fake_drivers import StubFeedbackDriver
 from tests.server_fixtures import RecordingClient, ServerFixture
 
@@ -486,6 +486,24 @@ class TestCommand:
         assert rejected and rejected[-1]["command"] == command
         assert "零点合わせ" in rejected[-1]["reason"]
 
+    async def test_零点合わせ中でも別のロボットのシーケンス側は通る(self) -> None:
+        """サブの零点合わせ中にメインが止まるのは邪魔なだけ。握っている軸は台ごとに別。"""
+        fx, runner = _build()
+        fx.enter_match()
+        runner.release = asyncio.Event()
+        client = RecordingClient()
+
+        assert await fx.start_homing("sub_hand") is None
+        await asyncio.wait_for(runner.entered.wait(), timeout=2.0)
+        await fx.command({"type": "trigger", "robot": "main_hand"}, requester=client)
+        rejected = [
+            msg for msg in client.of_type("command_rejected") if "零点合わせ" in msg["reason"]
+        ]
+        runner.release.set()
+        await fx.wait_homing_idle()
+
+        assert rejected == []
+
 
 _INTERFERING_CONFIG = {
     "axes": {
@@ -685,3 +703,33 @@ class TestPanelOrdersWhatWasSelected:
         assert "sub_lift" in result["error"]
         assert "零点が確定していません" in result["error"]
         assert panel.drivers["sub_y_axis"].state.position == pytest.approx(0.0)
+
+
+class TestReenergizeBeforeHoming:
+    async def test_無励磁のモータがあれば先に再励磁してから零点確定する(self) -> None:
+        """物理非常停止のあと、ソフトの停止→解除を挟まないと保持に戻らない (2026-09-12 実機)。"""
+        fx, runner = _build()
+        mgr = fx.can_manager("sub_hand")
+        driver = mock_driver("sub_y_axis", 1)
+        driver.is_energized.return_value = False
+        set_motors(mgr, {"sub_y_axis": driver})
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"})
+        await fx.wait_homing_idle()
+
+        assert mgr.activate_motors.await_count == 1
+        assert mgr.activate_motors.await_args.kwargs["only"] == {"sub_y_axis"}
+        assert runner.homed == ["sub_y_axis"]
+
+    async def test_励磁していれば再励磁を挟まない(self) -> None:
+        fx, runner = _build()
+        mgr = fx.can_manager("sub_hand")
+        driver = mock_driver("sub_y_axis", 1)
+        driver.is_energized.return_value = True
+        set_motors(mgr, {"sub_y_axis": driver})
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"})
+        await fx.wait_homing_idle()
+
+        assert mgr.activate_motors.await_count == 0
+        assert runner.homed == ["sub_y_axis"]

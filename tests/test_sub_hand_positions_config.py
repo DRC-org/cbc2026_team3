@@ -326,3 +326,10 @@ class TestHomingPrepare:
             assert homing is not None and homing.prepare == (("wall_r", "open"),)
         # 開く角が閉じた角と同じなら退けたことにならない
         assert table.raw("wall_r", "open") != table.raw("wall_r", "closed")
+
+
+class TestLinkageDefaultCenter:
+    def test_ピッチの中心は既定で右へ_30mm(self) -> None:
+        table = _load(_YAML_NAME)
+        linkage = table.axis("sub_pitch").linkage
+        assert linkage is not None and linkage.center.value == pytest.approx(30.0)
