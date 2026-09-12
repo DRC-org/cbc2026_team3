@@ -742,9 +742,40 @@ class RobotServer:
         self._motor_check.abort()
 
     async def _cmd_homing_start(self, data: dict, requester: WSOrNone) -> None:
-        reason = await self._homing.start(data.get("robot"), data.get("axes"))
+        robot_name = data.get("robot")
+        if isinstance(robot_name, str) and robot_name in self._robots:
+            await self._reenergize_if_dropped(robot_name, "零点合わせ")
+        reason = await self._homing.start(robot_name, data.get("axes"))
         if reason is not None:
             await self._reject_command(requester, "homing_start", reason)
+
+    async def _reenergize_if_dropped(self, robot_name: str, what: str) -> None:
+        """無励磁のモータがあれば先に再励磁して待つ。
+
+        物理非常停止で電源が落ちたあとは、ソフトの停止→解除か再励磁を挟まないとモータが
+        保持に戻らず、零点合わせが「励磁していない」で止まる (2026-09-12 実機の求め)。
+        緊急停止中・再励磁中は何もしない (このあとの判定がそれぞれの理由で拒む)。
+        """
+        if self._e_stop_active or self._is_reenergizing(robot_name):
+            return
+        ctx = self._robots[robot_name]
+        dropped = sorted(
+            name for name, motor in ctx.can_manager.motors.items() if motor.is_energized() is False
+        )
+        if not dropped and not self._inactive_motors.get(robot_name):
+            return
+        logger.info(
+            "%sの前に無励磁のモータを再励磁します: robot=%s motors=%s",
+            what,
+            robot_name,
+            ", ".join(dropped) or "(起動時に励磁できなかったぶん)",
+        )
+        task = asyncio.create_task(self._reenergize_motors(robot_name))
+        self._reenergize_tasks[robot_name] = task
+        try:
+            await task
+        finally:
+            self._reenergize_tasks.pop(robot_name, None)
 
     async def _cmd_linkage_center_set(self, data: dict, requester: WSOrNone) -> None:
         robot_name = data.get("robot")
