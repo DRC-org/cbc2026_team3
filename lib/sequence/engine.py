@@ -626,8 +626,9 @@ class Sequence:
                 break
             except Exception:
                 logger.exception("シーケンス '%s' の実行中に例外", self.name)
+            # 止めたステップの番号は残す。手動で位置を直してから一覧の同じステップで
+            # 続きを走らせる (2026-09-12 実機の求め)。先頭へ戻すのは START の役目
             if self._stop_event.is_set():
-                self._current_index = 0
                 self._stop_event.clear()
 
     async def run(self) -> None:
@@ -692,6 +693,10 @@ class Sequence:
                     )
                     break
 
+                # 途中で止めたステップは終わっていない。番号を進めると次から再開されて
+                # 止めた移動が飛ばされる
+                if self._stop_event.is_set():
+                    break
                 if self._jump_request is None:
                     self._current_index += 1
                     if self._current_index >= len(self._steps):

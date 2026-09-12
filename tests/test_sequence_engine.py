@@ -239,7 +239,8 @@ class TestLifecycle:
         assert seq.is_running is True
         task.cancel()
 
-    async def test_通常停止でステップが先頭へ巻き戻る(self):
+    async def test_通常停止でも止めたステップの番号を残す(self):
+        """手動で位置を直してから一覧の同じステップで続きを走らせるため。START は先頭から。"""
         seq = SampleSequence()
         task = asyncio.create_task(seq.run_forever())
         seq.request_start()
@@ -250,7 +251,7 @@ class TestLifecycle:
         await asyncio.sleep(0.05)
 
         assert seq.is_running is False
-        assert seq.progress["step_index"] == 0
+        assert seq.progress["step_index"] == 1
 
         seq.request_start()
         await asyncio.sleep(0.05)
@@ -305,7 +306,8 @@ class TestLifecycle:
 
         assert seq.is_running is False
         assert seq.executed == executed_at_stop
-        assert seq.progress["step_index"] == 0
+        # 止めたのはトリガー待ちのステップ 2。番号は残る
+        assert seq.progress["step_index"] == 1
         task.cancel()
 
     async def test_未処理の開始要求を破棄できる(self):
