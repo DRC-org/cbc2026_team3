@@ -94,6 +94,10 @@ class Linkage:
 
         隙間が負 (押し合い) はここで弾く。左右どちらかが可動域を外れるのも弾く。
         """
+        # 今の指令を隙間へ戻して送り直すと丸めで -1e-14 になる (2026-09-12 実機で中心の
+        # 送り直しが全部落ちた)。押し合いと呼べる量だけを弾く
+        if -1e-6 < gap_mm < 0.0:
+            gap_mm = 0.0
         if gap_mm < 0.0:
             raise LinkageError(f"隙間 {gap_mm:.3g}mm が負です。左右が {-gap_mm:.3g}mm 押し合います")
         if gap_mm > self.max_gap + 1e-9:

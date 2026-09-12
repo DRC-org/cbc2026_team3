@@ -85,3 +85,10 @@ class TestRejects:
     def test_crank_が_rod_以上なら組み立てを拒む(self) -> None:
         with pytest.raises(LinkageError):
             Linkage(crank=90.0, rod=65.0, span=230.0, servo_zero=80.0)
+
+
+def test_丸めで僅かに負になった隙間は_0_として扱う() -> None:
+    linkage = Linkage(crank=65.0, rod=90.0, span=230.0, servo_zero=0.0)
+    assert linkage.reaches(-1e-12, 10.0) == linkage.reaches(0.0, 10.0)
+    with pytest.raises(LinkageError):
+        linkage.reaches(-0.01)

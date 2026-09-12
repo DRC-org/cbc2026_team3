@@ -1597,6 +1597,9 @@ class RobotServer:
         command: str,
         reason: str,
     ) -> None:
+        # 画面に出す拒否は journal にも残す。残さないと「押しても効かない」の切り分けが
+        # 画面の一瞬の表示だけになる (2026-09-12)
+        logger.warning("コマンド拒否: %s (%s)", command, reason)
         if requester is None or requester.closed:
             return
         msg = json.dumps(
