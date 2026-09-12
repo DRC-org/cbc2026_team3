@@ -21,7 +21,7 @@ from lib.sequence.homing import HomingError
 from lib.sequence.motors import AxisHandle, MotorGroup, MotorHandle, build_axis_state_reader
 from lib.sequence.positions import AxisSpec, PositionTable, load_position_table
 from lib.server_homing import HomingSource
-from tests.fake_can import mock_can_manager
+from tests.fake_can import mock_can_manager, mock_driver, set_motors
 from tests.fake_drivers import StubFeedbackDriver
 from tests.server_fixtures import RecordingClient, ServerFixture
 
@@ -593,3 +593,33 @@ class TestPanelOrdersWhatWasSelected:
         assert "sub_lift" in result["error"]
         assert "零点が確定していません" in result["error"]
         assert panel.drivers["sub_y_axis"].state.position == pytest.approx(0.0)
+
+
+class TestReenergizeBeforeHoming:
+    async def test_無励磁のモータがあれば先に再励磁してから零点確定する(self) -> None:
+        """物理非常停止のあと、ソフトの停止→解除を挟まないと保持に戻らない (2026-09-12 実機)。"""
+        fx, runner = _build()
+        mgr = fx.can_manager("sub_hand")
+        driver = mock_driver("sub_y_axis", 1)
+        driver.is_energized.return_value = False
+        set_motors(mgr, {"sub_y_axis": driver})
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"})
+        await fx.wait_homing_idle()
+
+        assert mgr.activate_motors.await_count == 1
+        assert mgr.activate_motors.await_args.kwargs["only"] == {"sub_y_axis"}
+        assert runner.homed == ["sub_y_axis"]
+
+    async def test_励磁していれば再励磁を挟まない(self) -> None:
+        fx, runner = _build()
+        mgr = fx.can_manager("sub_hand")
+        driver = mock_driver("sub_y_axis", 1)
+        driver.is_energized.return_value = True
+        set_motors(mgr, {"sub_y_axis": driver})
+
+        await fx.command({"type": "homing_start", "robot": "sub_hand"})
+        await fx.wait_homing_idle()
+
+        assert mgr.activate_motors.await_count == 0
+        assert runner.homed == ["sub_y_axis"]
