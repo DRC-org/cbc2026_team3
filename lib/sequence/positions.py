@@ -315,7 +315,8 @@ class AxisSpec:
     homing: HomingSpec | None = None
     motion: MotionSpec | None = None
     # ドライバ内蔵の位置ループが速度を決める軸が、実測で下回らないと分かっている速さ
-    # [unit/s]。timeout_s の検算にだけ使い、指令には影響しない。None なら検算しない
+    # [unit/s]。timeout_s の検算と、複数軸の着地時刻を揃える遅延の計算に使う
+    # (指令値そのものは変わらないが、送信タイミングには効く)。None ならどちらもしない
     # (書かない = 「速度が分からない」であって「速い」ではない)
     min_speed: float | None = None
     # 指令を出す直前の歯止め (可動端インターロック・跳躍量・トルク)。
@@ -492,6 +493,14 @@ class AxisSpec:
                 f"軸 '{self.name}' の scale はコート別なのにコートが解決されていません "
                 "(AxisSpec.for_court を通してください)"
             )
+
+    def estimated_duration(self, distance: float) -> float | None:
+        """移動距離 [unit] からこの軸の所要時間 [s] を見積もる。見積もれない軸は None。"""
+        if self.motion is not None:
+            return self.motion.duration_for(distance)
+        if self.min_speed is not None:
+            return abs(distance) / self.min_speed
+        return None
 
     def to_commands(self, value: float) -> dict[str, float]:
         self.require_resolved()
@@ -1875,16 +1884,15 @@ def _check_motion_timeout(
         return
 
     span = max(candidates) - min(candidates)
+    required = spec.estimated_duration(span)
+    if required is None:
+        return
     if spec.motion is not None:
-        required = spec.motion.duration_for(span)
         basis = "motion の制限では"
         remedy = "max_velocity / max_acceleration を上げてください"
-    elif spec.min_speed is not None:
-        required = span / spec.min_speed
+    else:
         basis = f"min_speed ({spec.min_speed} {spec.unit}/s) では"
         remedy = "min_speed を実測で上げてください"
-    else:
-        return
     if required <= spec.timeout_s:
         return
 
