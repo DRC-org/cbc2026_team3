@@ -63,7 +63,12 @@ from lib.sequence.motors import (
     build_axis_state_reader,
     build_motor_group,
 )
-from lib.sequence.positions import PositionReloadError, PositionTable, load_position_table
+from lib.sequence.positions import (
+    PositionLookupError,
+    PositionReloadError,
+    PositionTable,
+    load_position_table,
+)
 from lib.server import RobotServer
 from lib.server_homing import HomingSource
 from lib.suction import suction_of
@@ -1173,6 +1178,67 @@ class _RobotWiring:
     motor_group: MotorGroup | None
 
 
+def _share_axes(wirings: list[_RobotWiring], shared_axes: Mapping[str, tuple[str, ...]]) -> None:
+    """`config/system.yaml` の `shared_axes:` に従って、軸を持ち主から貸し先へ渡す。
+
+    **貸すのは実体そのもの** —— 位置定数は持ち主の表を引き続け、モータは持ち主の
+    `MotorHandle` (つまり持ち主の `CANManager`) をそのまま使う。写すと、同じ軸の
+    目標が 2 つのドライバに分かれて持たれ、どちらの機体から指令したかで再送の値が
+    食い違う。CAN へ出るのは今までどおり 1 通である。
+
+    可動端保護の読み口だけは貸し先へ配線し直す。監視そのものは持ち主が 1 つだけ
+    回し、貸し先はその記憶を読む (2 つ回すと同じ軸を 2 回止めにいく)。
+    """
+    if not shared_axes:
+        return
+
+    by_name = {wiring.name: wiring for wiring in wirings}
+    borrowers: dict[str, list[str]] = {}
+
+    for axis, robot_names in shared_axes.items():
+        owner = next((w for w in wirings if axis in w.positions.owned_axes()), None)
+        if owner is None:
+            logger.error(
+                "共有軸 '%s' の持ち主が居ません"
+                " (どの位置定数にも定義されていない)。この軸は共有しない",
+                axis,
+            )
+            continue
+        for robot_name in robot_names:
+            borrower = by_name.get(robot_name)
+            if borrower is None:
+                logger.error(
+                    "共有軸 '%s' の貸し先 '%s' が起動していません (この貸し出しは行わない)",
+                    axis,
+                    robot_name,
+                )
+                continue
+            if borrower is owner:
+                continue
+            try:
+                borrower.positions.borrow_axis(axis, owner.positions)
+            except (ValueError, PositionLookupError) as exc:
+                logger.error("共有軸 '%s' を %s へ貸せません: %s", axis, robot_name, exc)
+                continue
+            for motor_name in owner.positions.axis(axis).motor_names:
+                borrower.sequence.motors.add(owner.sequence.motors[motor_name])
+            borrowers.setdefault(robot_name, []).append(axis)
+            logger.info(
+                "共有軸: %s の '%s' を %s からも指令できるようにした", owner.name, axis, robot_name
+            )
+
+    for robot_name, axes in borrowers.items():
+        borrower = by_name[robot_name]
+        # 借りた軸の可動端監視は持ち主が回す。貸し先は読む口だけを持ち主側へ広げる
+        monitors = [
+            *borrower.limit_monitors,
+            *(m for w in wirings if w is not borrower for m in w.limit_monitors),
+        ]
+        borrower.sequence.bind_limit_interventions(_make_limit_interventions(monitors))
+        borrower.sequence.motors.bind_pressed_toward(_make_pressed_toward_reader(monitors))
+        logger.debug("共有軸: %s が借りた軸 %s", robot_name, ", ".join(axes))
+
+
 def _wire_one_robot(
     server: RobotServer,
     config_path: pathlib.Path,
@@ -1432,6 +1498,8 @@ async def main() -> None:
         )
         for config_path, robot in loaded
     ]
+
+    _share_axes(wirings, system.shared_axes)
 
     _wire_motor_check_sequence(
         server,

@@ -74,9 +74,13 @@ class PositionCaptureStore:
         self._entries: dict[tuple[str, str], PositionCapture] = {}
 
     def targets(self) -> dict[str, tuple[str, ...]]:
-        """控えられる軸と、その軸が受ける位置名。**UI はここに並んだものだけを出す。**"""
+        """控えられる軸と、その軸が受ける位置名。**UI はここに並んだものだけを出す。**
+
+        他のロボットから借りている軸は出さない。控えは「この yaml へ貼る断片」を
+        作るものなので、貼り先の違う軸を混ぜると持ち主でないほうの yaml へ貼られる。
+        """
         found: dict[str, tuple[str, ...]] = {}
-        for axis in self._positions.axes:
+        for axis in self._positions.owned_axes():
             if self._positions.axis(axis).command_mode is not ControlMode.POSITION:
                 continue
             names = self._positions.names(axis)
@@ -128,7 +132,7 @@ class PositionCaptureStore:
         """位置定数 yaml と同じ並び。貼る人が上から順に突き合わせられる。"""
         order = {
             (axis, name): (axis_index, name_index)
-            for axis_index, axis in enumerate(self._positions.axes)
+            for axis_index, axis in enumerate(self._positions.owned_axes())
             for name_index, name in enumerate(self._positions.names(axis))
         }
         return tuple(
@@ -165,6 +169,11 @@ class PositionCaptureStore:
             spec = self._positions.axis(axis)
         except PositionLookupError as exc:
             return None, str(exc)
+        if axis in self._positions.borrowed_axes():
+            return None, (
+                f"軸 '{axis}' は他のロボットの位置定数が持っています。"
+                "持ち主のほうの控え帳で控えてください (貼り先が違います)"
+            )
         if spec.command_mode is not ControlMode.POSITION:
             return None, (
                 f"軸 '{axis}' は位置を控えられません"

@@ -34,7 +34,7 @@ CAN_ID_RANGES: Mapping[str, tuple[int, int]] = MappingProxyType(
     }
 )
 
-_SYSTEM_KEYS = frozenset({"can_buses", "health", "match"})
+_SYSTEM_KEYS = frozenset({"can_buses", "health", "match", "shared_axes"})
 _HEALTH_KEYS = ("feedback_timeout_ms", "temp_warning_c", "temp_critical_c", "tx_error_threshold")
 _MATCH_KEYS = frozenset({"duration_s"})
 
@@ -74,6 +74,9 @@ class SystemConfig:
     can_buses: Mapping[str, str]
     health: HealthThresholds
     match: MatchSettings
+    #: 複数のロボットから指令する軸 → 借りる側のロボット名。持ち主は軸を定義した
+    #: `config/<robot>_positions.yaml` のほうで、ここは貸し先だけを書く
+    shared_axes: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     source: str = "<inline>"
 
 
@@ -250,6 +253,26 @@ def _parse_match(source: str, raw: object) -> MatchSettings:
     return MatchSettings(duration_s=duration)
 
 
+def _parse_shared_axes(source: str, raw: object) -> dict[str, tuple[str, ...]]:
+    section = _require_mapping(source, "shared_axes", raw)
+    shared: dict[str, tuple[str, ...]] = {}
+    for axis, robots in section.items():
+        path = f"shared_axes.{axis}"
+        if isinstance(robots, str) or not isinstance(robots, list):
+            raise ValueError(f"{source}: {path} はロボット名の配列である必要があります: {robots!r}")
+        names: list[str] = []
+        for robot in robots:
+            if not isinstance(robot, str) or not robot:
+                raise ValueError(f"{source}: {path} にロボット名でない要素: {robot!r}")
+            if robot in names:
+                raise ValueError(f"{source}: {path} に同じロボット '{robot}' が 2 回あります")
+            names.append(robot)
+        if not names:
+            raise ValueError(f"{source}: {path} に貸し先が 1 つもありません")
+        shared[str(axis)] = tuple(names)
+    return shared
+
+
 def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> SystemConfig:
     raw = _require_mapping(source, "(最上位)", config)
     _reject_unknown(source, "(最上位)", raw, _SYSTEM_KEYS)
@@ -258,6 +281,7 @@ def load_system_config(config: Mapping | None, *, source: str = "<inline>") -> S
         can_buses=MappingProxyType(_parse_can_buses(source, raw.get("can_buses"))),
         health=_parse_health(source, raw.get("health")),
         match=_parse_match(source, raw.get("match")),
+        shared_axes=MappingProxyType(_parse_shared_axes(source, raw.get("shared_axes"))),
         source=source,
     )
 

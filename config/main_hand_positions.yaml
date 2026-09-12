@@ -127,7 +127,9 @@ axes:
     manual_always: true
 
   # timeout_s はファームのスルーレート (90deg/s) から決まる。突き合わせは
-  # tests/test_servo_travel_budget.py が行う
+  # tests/test_servo_travel_budget.py が行う。
+  # **この軸はサブハンドへも貸している** (config/system.yaml の shared_axes)。
+  # 貸し先は定義も値もここを引き続けるので、直すのはこの 1 箇所だけでよい
   wall_f:
     unit: deg
     command_unit: deg

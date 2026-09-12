@@ -62,6 +62,7 @@ motors:
     control_type: duty
     expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion
 
+  # メインハンドが持ち主。サブハンドからも指令する (config/system.yaml の shared_axes)
   wall_f:
     driver: generic
     bus: generic_bus

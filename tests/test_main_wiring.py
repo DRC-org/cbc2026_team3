@@ -1107,6 +1107,7 @@ class TestShippedMainHandConfig:
 class TestSystemConfigReachesTheServer:
     NOT_FOR_SERVER: ClassVar[dict[str, str]] = {
         "can_buses": "CANManager の生成に使う (サーバーはバスを直接触らない)",
+        "shared_axes": "起動時の配線で軸を貸し借りする (サーバーは軸の持ち主を問わない)",
         "source": "エラーメッセージへ出すファイル名",
     }
 
