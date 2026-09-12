@@ -31,6 +31,7 @@ WALL_R_OPEN: dict[str, str] = {"wall_r": "open"}
 # メインハンドの壁 (config/system.yaml の shared_axes で借りている)。吸うあいだだけ
 # 押し込んでワークを押さえる (#224)
 WALL_F_ASSIST: dict[str, str] = {"wall_f": "assist"}
+WALL_F_RELEASE: dict[str, str] = {"wall_f": "closed"}
 
 # ピッチとオフセットは同時に動かさない。閉じるとき オフセット -> ピッチ、
 # 開くとき ピッチ -> オフセット。
@@ -124,6 +125,8 @@ class SubHandSequence(Sequence):
     @step("1 個目: 回転可能位置へ後退")
     async def work_1_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+        # 前後が離れてから壁を戻す (押し付けたまま後退すると擦る)
+        await self.move_to(WALL_F_RELEASE)
 
     @step("1 個目: 移動高さへ上昇")
     async def work_1_up_before_turn(self) -> None:
@@ -201,6 +204,8 @@ class SubHandSequence(Sequence):
     @step("2 個目: 回転可能位置へ後退")
     async def work_2_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+        # 前後が離れてから壁を戻す (押し付けたまま後退すると擦る)
+        await self.move_to(WALL_F_RELEASE)
 
     @step("2 個目: 移動高さへ上昇")
     async def work_2_up_before_turn(self) -> None:
@@ -278,6 +283,8 @@ class SubHandSequence(Sequence):
     @step("3 個目: 回転可能位置へ後退")
     async def work_3_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+        # 前後が離れてから壁を戻す (押し付けたまま後退すると擦る)
+        await self.move_to(WALL_F_RELEASE)
 
     @step("3 個目: 移動高さへ上昇")
     async def work_3_up_before_turn(self) -> None:
@@ -355,6 +362,8 @@ class SubHandSequence(Sequence):
     @step("4 個目: 回転可能位置へ後退")
     async def work_4_clear_before_turn(self) -> None:
         await self.move_to(TO_CLEAR)
+        # 前後が離れてから壁を戻す (押し付けたまま後退すると擦る)
+        await self.move_to(WALL_F_RELEASE)
 
     @step("4 個目: 移動高さへ上昇")
     async def work_4_up_before_turn(self) -> None:

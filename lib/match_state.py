@@ -103,9 +103,8 @@ class MatchState:
         return True
 
     def match_reset(self) -> bool:
-        # 試合ごとに必ず選び直させる。前の試合のコートが残ると、次の試合で
-        # 選び忘れたことが画面に現れない
-        self._court = None
+        # コートは消さない (2026-09-12 の判断)。同じコートで何度も走らせるので、
+        # リセットのたびに選び直すほうが事故が多い。変えるときは選び直す
         self._phase = Phase.SETUP
         self._started_at = None
         self._frozen_elapsed_s = None

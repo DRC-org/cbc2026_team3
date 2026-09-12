@@ -367,8 +367,9 @@ class TestMatchFinishAndReset:
             await ws.send_json({"type": "match_reset"})
             await asyncio.sleep(0.05)
 
-            assert fx.match.phase is Phase.SETUP
-            assert fx.match.court is None
+            # コートはリセットでも残るので、指差喚呼が済んでいれば READY のこともある
+            assert fx.match.phase in (Phase.SETUP, Phase.READY)
+            assert fx.match.court is Court.RED  # リセットでも残る
             await ws.close()
 
 
