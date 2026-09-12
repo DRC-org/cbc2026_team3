@@ -22,6 +22,8 @@ interface ActionPanelProps {
   blockedLabel: string;
   blocked: boolean;
   onStart: () => void;
+  /** 止まっているステップから続ける (先頭へ戻らない)。止まった位置が無ければ不要 */
+  onResume?: () => void;
   onStop: () => void;
   onTrigger: () => void;
   /** 可動端の歯止めで止まったステップを、歯止めを外して走らせ直す (確認は呼ぶ側が挟む) */
@@ -36,6 +38,7 @@ export function ActionPanel({
   blockedLabel,
   blocked,
   onStart,
+  onResume,
   onStop,
   onTrigger,
   onForce,
@@ -151,7 +154,30 @@ export function ActionPanel({
           STOP
         </Button>
 
-        {idle ? (
+        {idle && restartFromTop && onResume ? (
+          // 途中で止まった (失敗・STOP・手動切替) ときの主役は「続きから」。先頭へ戻るのは脇に
+          <div className="grid grid-cols-[1fr_minmax(7rem,0.3fr)] gap-px bg-base-300">
+            <Button
+              tone="ok"
+              disabled={blocked}
+              onClick={onResume}
+              aria-label={`ステップ ${stepIndex + 1} から続ける`}
+              className={PRIMARY_CLASS}
+            >
+              <Icon as={blocked ? Ban : Play} />
+              続きから ({stepIndex + 1})
+            </Button>
+            <Button
+              tone="warn"
+              disabled={blocked}
+              onClick={onStart}
+              aria-label="シーケンスを先頭から再開"
+              className={PRIMARY_CLASS}
+            >
+              先頭から
+            </Button>
+          </div>
+        ) : idle ? (
           <Button
             tone={restartFromTop ? "warn" : "ok"}
             disabled={blocked}

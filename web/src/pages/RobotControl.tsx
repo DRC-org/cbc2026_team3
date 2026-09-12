@@ -54,6 +54,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const handleStop = () => sendOrReport({ type: "sequence_stop", robot: robotKey }, "通常停止");
   const handleStart = () =>
     sendOrReport({ type: "sequence_start", robot: robotKey }, "シーケンス開始");
+  // 止まったステップからの続きはジャンプと同じ口 (番号は停止時のまま残る)
+  const handleResume = () =>
+    state === undefined
+      ? undefined
+      : sendOrReport(
+          { type: "sequence_jump", robot: robotKey, step_index: state.step_index },
+          "続きから再開",
+        );
   const handleMode = (mode: OperationMode) =>
     sendOrReport({ type: "set_operation_mode", robot: robotKey, mode }, "操作モードの切り替え");
   const handleReenergize = () =>
@@ -115,6 +123,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
       " ": () => {
         if (!inMatch || !state || inManual) return;
         if (kind === "waiting_trigger") handleTrigger();
+        else if (kind === "idle" && needsRestartConfirm) handleResume();
         else if (kind === "idle") requestStart();
       },
     },
@@ -295,6 +304,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 blockedLabel={blockedLabel}
                 blocked={sequenceBlocked}
                 onStart={requestStart}
+                onResume={handleResume}
                 onStop={handleStop}
                 onTrigger={handleTrigger}
                 onForce={() => setForceConfirmOpen(true)}
