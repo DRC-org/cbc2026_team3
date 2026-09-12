@@ -8,6 +8,7 @@ import { commandValueText, hasUnit } from "@/lib/commandValue";
 import { cx } from "@/lib/cx";
 import { isDuringMatch } from "@/lib/phase";
 import type { ManualAxis } from "@/lib/protocol";
+import { scrollWithinContainer } from "@/lib/scrollWithin";
 import { evaluateSync } from "@/lib/syncVerdict";
 
 interface ManualAxisRowProps {
@@ -52,7 +53,7 @@ export function ManualAxisRow({
   const inMatch = isDuringMatch(matchState.phase);
 
   useEffect(() => {
-    if (selected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
+    if (selected) scrollWithinContainer(rowRef.current);
   }, [selected]);
 
   const presetOnly = range === null;

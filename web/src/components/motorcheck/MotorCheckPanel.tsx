@@ -10,6 +10,7 @@ import { useMotorCheck } from "@/hooks/useMotorCheck";
 import { cx } from "@/lib/cx";
 import { motorCheckStatus } from "@/lib/motorCheckStatus";
 import { MALFORMED } from "@/lib/protocol";
+import { scrollWithinContainer } from "@/lib/scrollWithin";
 import { TONE_PROGRESS_CLASS } from "@/lib/tone";
 
 export function MotorCheckPanel() {
@@ -28,7 +29,7 @@ export function MotorCheckPanel() {
   const panelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (outcome === "running" || outcome === "failed") {
-      panelRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      scrollWithinContainer(panelRef.current, "start");
     }
   }, [outcome]);
 
