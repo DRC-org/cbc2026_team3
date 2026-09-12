@@ -3,6 +3,7 @@
 # udev ルールと systemd unit を配置する。
 #   cbc-can.service          … CAN バス初期化。enable する (電源投入で up)
 #   cbc-can-watchdog.service … bus-off 復旧ウォッチドッグ。enable する
+#   cbc-slcand@<バス名>       … slcan バスの slcand 常駐。採取済みのバスだけ enable する
 #   cbc-control.service      … 中央制御プログラム + Web UI。enable しない (手動 start)
 #
 # 使い方:
@@ -33,10 +34,12 @@ require_can_config
 
 UDEV_RULE_PATH="$(can_config_path udev_rule_path)"
 CAN_SERVICE_NAME="$(can_config_path service_name)"
+SLCAND_TEMPLATE="$(can_config_path slcand_service_template)"
 
 UNITS=(
     "$CAN_SERVICE_NAME"
     "cbc-can-watchdog.service"
+    "$SLCAND_TEMPLATE"
     "cbc-control.service"
 )
 
@@ -44,6 +47,19 @@ AUTOSTART_UNITS=(
     "$CAN_SERVICE_NAME"
     "cbc-can-watchdog.service"
 )
+
+# どのインスタンスを enable するかは can_config.py の「採取済みか」が決める。
+# 未採取のバスは tty が生えないので、起こしても待つだけになる。
+if ! slcan_units=$(can_config_slcan --assigned-only); then
+    log_err "CAN バス定義を読めません: ${CAN_CONFIG}"
+    exit 1
+fi
+SLCAND_INSTANCES=()
+while IFS=$'\t' read -r _name _dev _speed unit; do
+    [[ -z "${unit:-}" ]] && continue
+    SLCAND_INSTANCES+=("$unit")
+    AUTOSTART_UNITS+=("$unit")
+done <<< "$slcan_units"
 
 CONTROL_SERVICE_NAME="cbc-control.service"
 
@@ -71,6 +87,9 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 if [[ $UNINSTALL -eq 1 ]]; then
+    for unit in "${SLCAND_INSTANCES[@]}"; do
+        systemctl disable --now "$unit" 2>/dev/null || true
+    done
     for unit in "${UNITS[@]}"; do
         systemctl disable --now "$unit" 2>/dev/null || true
         rm -f "/etc/systemd/system/${unit}"
@@ -113,6 +132,8 @@ done
 log_info "udev ルールを再読み込みして適用"
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=net --action=add
+# slcan のバスは tty の SYMLINK+= で個体固定するので、net だけでは張り直せない。
+udevadm trigger --subsystem-match=tty --action=add
 udevadm settle
 
 log_info "systemd を再読み込みして有効化"

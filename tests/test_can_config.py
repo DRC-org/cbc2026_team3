@@ -189,10 +189,23 @@ class TestListTsv:
         assert can_config.cmd_list(config, assigned_only=False).split("\t")[4] == "250"
 
 
+# 実機から個体識別情報 (serial / VID / PID) をまだ採取できていないバス。
+# 採取したらここから外す。他のバスが黙って未採取へ落ちることは引き続き弾く。
+_PENDING_BUSES = {"can_dc"}
+
+
 class TestRealConfig:
     @staticmethod
     def _load() -> dict:
         return can_config.load_config(_REAL_CONFIG)
+
+    @classmethod
+    def _assigned(cls) -> dict:
+        return {
+            name: entry
+            for name, entry in cls._load()["buses"].items()
+            if can_config._is_assigned(entry)
+        }
 
     def test_loads_without_error(self) -> None:
         assert self._load()["buses"]
@@ -206,13 +219,13 @@ class TestRealConfig:
     def test_every_bus_has_a_serial(self) -> None:
         config = self._load()
 
-        unassigned = [
+        unassigned = {
             name for name, entry in config["buses"].items() if not can_config._is_assigned(entry)
-        ]
-        assert unassigned == []
+        }
+        assert unassigned <= _PENDING_BUSES
 
     def test_serials_are_unique(self) -> None:
-        serials = [str(entry["serial"]).strip() for entry in self._load()["buses"].values()]
+        serials = [str(entry["serial"]).strip() for entry in self._assigned().values()]
 
         assert len(set(serials)) == len(serials)
 
@@ -220,7 +233,7 @@ class TestRealConfig:
         config = self._load()
         listed = can_config.cmd_list(config, assigned_only=True).splitlines()
 
-        assert len(listed) == len(config["buses"])
+        assert len(listed) == len(self._assigned())
         for line in listed:
             name, serial, bitrate, txqueuelen, restart_ms = line.split("\t")
             assert serial != can_config.UNASSIGNED
@@ -232,8 +245,13 @@ class TestRealConfig:
     def test_udev_rules_cover_every_bus(self) -> None:
         rules = can_config.cmd_udev(self._load())
 
-        for name in self._load()["buses"]:
-            assert f'NAME="{name}"' in rules
+        for name, entry in self._assigned().items():
+            # slcan は netdev を slcand が作るので、固定するのは tty の symlink のほう。
+            if can_config._link(entry) == can_config.LINK_SLCAN:
+                symlink = can_config.slcan_device(name).removeprefix("/dev/")
+                assert f'SYMLINK+="{symlink}"' in rules
+            else:
+                assert f'NAME="{name}"' in rules
 
     def test_udev_restart_does_not_take_down_the_control_program(self) -> None:
         rules = can_config.cmd_udev(self._load())

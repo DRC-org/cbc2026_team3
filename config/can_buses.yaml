@@ -1,3 +1,10 @@
+# CAN バス定義の単一情報源。udev ルールと scripts/setup_can.sh の双方がここを読む。
+#
+# link: 接続方式。省略時は gs_usb (CANable2 = カーネルが直接 netdev を生やす)。
+#   gs_usb … usb: の VID/PID + 個体の serial で netdev をリネームする
+#   slcan  … CAN トランシーバを持たない基板。USB CDC の tty を個体固定し、
+#            slcand で netdev へ昇格させる。VID/PID はバスごとに持つ
+
 usb:
   vendor_id: "1d50"
   product_id: "606f"
@@ -20,5 +27,15 @@ buses:
 
   can_dm3520:
     serial: "0069003F4E4D501820343332"
+    bitrate: 1000000
+    txqueuelen: 1000
+
+  # DC 基板は CAN トランシーバ故障のため USB CDC (SLCAN) で PC へ繋ぐ。
+  # VID/PID/serial は実機から未採取 —— scripts/setup_can.sh が採取方法を案内する。
+  can_dc:
+    link: slcan
+    vendor_id: "TBD"
+    product_id: "TBD"
+    serial: "TBD"
     bitrate: 1000000
     txqueuelen: 1000

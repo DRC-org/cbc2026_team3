@@ -30,7 +30,7 @@ ip -brief link show type can          # 何本 up しているか
 |---|---|---|---|
 | `can_m3508` | ✗ | 起動する | 起動しない |
 | `can_dm3520` | 起動する | ✗ | 起動しない |
-| `can_edulite` / `can_generic` | ✗ | ✗ | 起動しない |
+| `can_edulite` / `can_generic` / `can_dc` | ✗ | ✗ | 起動しない |
 
 **既定は両ハンドを読むので、どの 1 本が欠けても起動しないことに変わりはない。**
 そこへ `cbc-control.service` の再起動制限
@@ -53,7 +53,8 @@ scripts/setup_can.sh --strict
 # ② 該当の CANable を挿し直す（ハブ経由なら PC 直挿しに変える）。
 #    バス名は udev が STM32 UID 由来の serial で固定するので、
 #    どのポートに挿しても名前は変わらない
-scripts/setup_can.sh --strict          # 4/4 になるまで ①② を繰り返す
+#    can_dc だけは CANable ではなく DC 基板の USB ケーブルそのもの（§3-2b）
+scripts/setup_can.sh --strict          # 5/5 になるまで ①② を繰り返す
 
 # ③ failed のラッチを外してから起動する（②だけでは起動しない）
 sudo systemctl reset-failed cbc-control
@@ -73,7 +74,7 @@ sudo systemctl stop cbc-control        # service ではなく手で起動する
 
 # (a) 片方のハンドだけで出る — 欠けたバスを使わないほうを渡す
 #     can_m3508 が欠け -> sub_hand は動く / can_dm3520 が欠け -> main_hand は動く
-#     can_edulite・can_generic はどちらのハンドも使うので (a) では逃げられない
+#     can_edulite・can_generic・can_dc はどちらのハンドも使うので (a) では逃げられない
 uv run python main.py --config config/main_hand.yaml
 uv run python main.py --config config/sub_hand.yaml
 
@@ -178,6 +179,28 @@ journalctl -u cbc-can-watchdog -f      # [ WD ] ... down/up で復旧を試み�
 赤いモータの `can_id` を見ればどの基板を見に行けばよいかが分かる
 （**サーボ基板は 3 枚あり、#0 = `0x40`台 / #1 = `0x48`〜 / #2 = `0x50`〜**。
 `0x50` 台もサーボ基板である）。
+
+### 3-2b. コンベアとポンプだけが動かない → **DC 基板は CAN ではなく USB 直結**
+
+**DC 基板だけは CAN トランシーバ故障で USB ケーブルで PC に繋いである**（`can_dc` は
+`slcand` が作る netdev）。**他のバスは無傷のままこの 1 枚だけが切り離される**ので、
+「CAN が落ちた」形には見えない。**一緒に物理非常停止の検出も落ちる**（`REF` は DC 基板にしか
+無いので、安全機構の欄が「物理停止 検出不能」になる）。
+
+```bash
+ip -brief link show can_dc                 # ⓪ netdev があるか
+ls -l /dev/can_dc_tty                      # ① 無ければ USB を挿し直す（udev が生やす symlink）
+systemctl status cbc-slcand@can_dc         # ② slcand の生死（死んでも 10 秒で起き直す）
+sudo systemctl restart cbc-control         # ③ ⓪ が戻ったら制御プログラムを繋ぎ直す
+```
+
+- **`slcand` が死んでも人は何もしなくてよい。** systemd が起こし直し、netdev の up まで戻す。
+  **戻らないのは `cbc-control` の接続だけ**なので、⓪ が戻ったら ③ を打つ（打つまでコンベア・
+  ポンプ・物理停止の検出は止まったまま）
+- **⓪ が `Device "can_dc" does not exist` のまま** → ① → ②。②が `active (running)` で待って
+  いるなら tty が無い（USB の挿し直し）
+- **基板の LED が赤の速い点滅** → `slcand` が繋がっていない（＝送信できない）。**電源を入れた
+  だけで ② がまだ繋がっていない間は赤が正常**なので、点滅だけで基板を疑わないこと
 
 ### 3-3. 動作確認が「センサが応答していません」で止まる
 
@@ -301,10 +324,10 @@ fault で励磁が落ちた後、fault が消えても自動では戻らない�
 scripts/setup_can.sh --strict
 ```
 
-`4/4 バス起動 (未採取 0 / 欠け 0 / 失敗 0)` が出ること。
-1 本でも欠けていたら §1 へ。
+`5/5 バス起動 (未採取 0 / 欠け 0 / 失敗 0)` が出ること。
+1 本でも欠けていたら §1 へ（`can_dc` だけは USB 直結なので §3-2b）。
 
 そのあと Monitor でヘルスが READY・無励磁 0 台であること、
 最後に**実際に非常停止を押して止まること**を確かめる。
-物理停止は DC 基板経由なので、**配線 1 本で機能ごと失われる**。失われていれば安全機構の欄に
+物理停止は DC 基板経由（USB 直結。§3-2b）なので、**ケーブル 1 本で機能ごと失われる**。失われていれば安全機構の欄に
 「物理停止 検出不能」が出るので、押して確かめる前にそこを見ること。

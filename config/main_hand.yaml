@@ -57,7 +57,7 @@ motors:
 
   conveyor:
     driver: generic
-    bus: generic_bus
+    bus: dc_bus
     can_id: 0x80               # DC 基板 #0 ch0
     control_type: duty
     expected_firmware: 2          # firmware/dc_motor/include/config.h の kFirmwareVersion

@@ -631,6 +631,7 @@ class TestShippedConfigs:
             "edulite_bus",
             "generic_bus",
             "dm3520_bus",
+            "dc_bus",
         }
         assert system.health.feedback_timeout_ms == 500.0
         assert system.health.temp_warning_c == 65.0

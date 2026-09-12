@@ -1212,6 +1212,7 @@ class TestLoadAllConfigs:
             "edulite_bus",
             "generic_bus",
             "dm3520_bus",
+            "dc_bus",
         }
         assert [robot.robot_name for _, robot in loaded] == ["main_hand", "sub_hand"]
 

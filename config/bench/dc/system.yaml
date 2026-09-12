@@ -1,2 +1,2 @@
 can_buses:
-  generic_bus: can_generic
+  dc_bus: can_dc

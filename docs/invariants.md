@@ -25,7 +25,20 @@
 
 `can0`/`can1`/`can2` は USB 列挙順で入れ替わり、番号が入れ替わると C620 に EDULITE 用の
 コマンドが飛んでモータを壊す。バス名は `can_m3508` / `can_edulite` / `can_generic` /
-`can_dm3520` で、STM32 UID 由来の serial に紐付ける。
+`can_dm3520` / `can_dc` で、個体固有の serial に紐付ける（CANable は STM32 UID 由来）。
+
+### slcan のバスは tty を個体固定する。netdev を作るのは `slcand` である
+
+**固定する対象が違う。** gs_usb（CANable2）はカーネルが netdev を生やすので udev が
+`NAME=` でリネームできるが、**slcan（`can_dc`、DC 基板の USB CDC）に netdev は無い** ——
+udev は `SYMLINK+=` で **tty を** `/dev/can_dc_tty` に固定し、`slcand` がその tty から netdev を
+作る（規則の生成は `scripts/can_config.py`、`slcand` の起動は `cbc-slcand@<バス名>.service`
+= `scripts/slcand.sh`、netdev の up は `scripts/setup_can.sh`）。
+
+**不変条件は同じで、`/dev/ttyACM0` のような列挙順依存の名前を設定へ書いてはならない。**
+`ttyACM*` の番号は他の USB シリアル（書き込みのために挿した別の基板など）と挿し順で
+入れ替わり、入れ替われば `slcand` は**まったく別の基板の CDC を CAN バスとして開く**。
+どの tty を渡すかは `config/can_buses.yaml` の VID/PID + serial だけが決める。
 
 ### Damiao DM3520 は専用バス（`can_dm3520`）に載せる
 
@@ -877,6 +890,34 @@ PC 側の検出経路は DC 基板のフィードバックに載る緊急停止�
 `duty` の基板に限るのは、`REF` を持つのが DC 用基板だけだからで、**1 台も無い構成は
 「監視できていない」側**になる（そこでは物理停止がそもそも効かない）。判定はサーバーが持ち、UI は
 配られた `watched` を出すだけにする。
+
+### 物理停止の経路は USB CDC の 1 本に乗っている。DC 基板だけが孤立する故障モードがある
+
+`REF` を持つのは DC 基板だけで、押下は `FEEDBACK` の緊急停止ビットでしか PC へ届かない（上の 2 節）。
+その DC 基板だけが CAN トランシーバ故障で **USB CDC + SLCAN**（`can_dc`。`slcand` が netdev へ
+昇格させる。仕様書 §1.1）へ移ったので、**CAN には無かった故障モードが 1 つ増えている。**
+
+- **USB の抜けと `slcand` のプロセス死は、他の 4 本を無傷にしたまま DC 基板だけを切り離す。**
+  他の軸は平常どおり動き、ヘルスの見出しも他バスは緑のままなので、**「CAN が落ちた」形には
+  見えない。** 落ちるのはコンベアとポンプ、そして物理非常停止の検出経路である
+- **bus-off 検出は当てにできない。** このリンクにエラーフレームは存在せず（仕様書 §1.1 の
+  `F00` は「報告できるバスエラーが無い」の意味）、`cbc-can-watchdog` の判定も CAN バスのものである。
+  **頼れるのは「受信が止まった」だけ** —— 受信ループの `rx_down` と、`FEEDBACK` の鮮度
+  （`health.feedback_timeout_ms`。既定値は `lib/config_schema.py`）で立つ STALE、そこから出る
+  `safety.physical_stop` の「監視できていない」の 3 つしか材料が無い
+- **`slcand` が死ぬと netdev `can_dc` だけが残ることがある。** 送信は成功したように見え、
+  受信だけが無音になる ——「バスは上がっている」と読める状態で物理停止が効かない。
+  **`slcand` を起こす責任は `cbc-slcand@<バス名>.service` だけが持つ**（`scripts/slcand.sh`）。
+  systemd が死を検出して起こし直し、その前に取り残された `slcand` と netdev を掃除する。
+  **この掃除を消すと、挿し直しても無音のままの netdev が居座る**。`setup_can.sh` から
+  `slcand` を起こし直すと起こす主体が 2 つになり、tty を奪い合って同じ穴が開く
+- **netdev が戻っても `cbc-control` の socket は戻らない。** netdev が unregister されると
+  カーネルが bind 済みの raw socket を切り離し、同名の netdev が再登録されても**再 bind
+  されない**（`ip link down/up` とは別物で、そちらは socket を保つ）。自動復旧で戻るのは
+  netdev までで、**通信を戻すには `systemctl restart cbc-control` が要る**。
+  これは gs_usb の 4 本を USB ごと抜いたときも同じ性質で、slcan だけの話ではない
+
+会場での切り分けは [`venue_recovery.md`](venue_recovery.md)。
 
 ### 止める処理が止まる形を作らない
 
@@ -1995,7 +2036,9 @@ UI は理由を説明するだけで、配信の他の欄から開始可否を�
 
 **「サーボ基板」どうしでも類推してはならない。**
 
-- **DC 用** … UNO R4 Minima + 内蔵 CAN（`D4`/`D5` 固定）
+- **DC 用** … UNO R4 Minima + 内蔵 CAN（`D4`/`D5` 固定）。**SLCAN 版はこの CAN を使わないが
+  `D4`/`D5` は空けたままにする**（基板は同一で、他用途へ振ると `dc_motor` へ切り戻せなくなる。
+  `main.cpp` の `static_assert` が検出する）
 - **サーボ用** … 3 枚あり MCU が 2 種類にまたがる。**#0/#1 は Arduino Nano + MCP2515（SPI 外付け）**、
   **#2 は UNO R4 Minima + 内蔵 CAN**（MCP2515 は載っていない）
 - **電磁弁用** … **STM32F303K8 + 内蔵 bxCAN**（`PA11`/`PA12` 固定）。出力は GPIO の ON/OFF が 6 本だけ
@@ -2015,6 +2058,19 @@ HAL の `GPIOA` / `GPIOB` が `constexpr` 文脈で使えないため、`config.
 持つ**（HAL を取り込むと重複検査ごと消える）。**`static_assert` は CAN ピンだけでなく全ピンの重複も
 見ること。** かつては CAN との衝突しか見ておらず、`config.h` の想定と実基板の配線がまるごと食い違っても
 ビルドが通った（`DIS` として LOW/HIGH を振っていた `D7` が、実機では ch2 の方向ピンだった）。
+
+### DC 基板だけはプロジェクトが 2 つある。`kFirmwareVersion` は両者で同値に保つ
+
+CAN トランシーバ故障の代替として `firmware/dc_motor_slcan/`（内蔵 CAN を使わず USB CDC で
+SLCAN を喋る。仕様書 §1.1）を足した。`firmware/dc_motor/` は切り戻せるよう無改変で残してある。
+**CAN 上の振る舞いは両者で同一**で、違うのは搬送路だけである。
+
+**2 つの `config.h` の `kFirmwareVersion` は同値でなければならない。** どちらを焼いた基板も
+CAN 上では同じ基板種別・同じ `can_id` を名乗るので、`config/**/*.yaml` の `expected_firmware` は
+**1 つしか持てない**（焼き忘れ検出は `can_id` から基板種別を引く。§3.4）。値を分けると、
+**片方を焼いた基板のチャンネルが一斉に FAULT になる。** `tests/test_firmware_version_sync.py` が
+機械的に固定しているので、プロトコルかピン配置を変えたら 2 つの `config.h` と yaml の
+`expected_firmware` を同じコミットで揃えること。
 
 ### 送信バッファの本数は基板ごとに違う。同じ送信コードが基板ごとに違う壊れ方をする
 

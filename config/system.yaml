@@ -3,6 +3,7 @@ can_buses:
   edulite_bus: can_edulite
   generic_bus: can_generic
   dm3520_bus: can_dm3520
+  dc_bus: can_dc
 
 health:
   feedback_timeout_ms: 500
