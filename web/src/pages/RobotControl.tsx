@@ -302,6 +302,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               robotKey={robotKey}
               manual={manual}
               blockedReason={nudgeBlockedReason}
+              centerBlockedReason={manualBlockedReason}
               sendOrReport={sendOrReport}
             />
 

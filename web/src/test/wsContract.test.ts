@@ -444,6 +444,7 @@ const MANUAL_AXIS = fieldsOf<ManualAxis>({
   sync_tolerance: "ui",
   positions: "ui",
   command_mode: "ui",
+  linkage: "ui",
   motors: {
     unused: "軸行はモータ単位では操作させない (左右直結ペアが別々に動くと機構がねじれる)",
   },

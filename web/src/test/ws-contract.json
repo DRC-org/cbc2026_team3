@@ -221,6 +221,7 @@
           {
             "command_mode": "position",
             "deviation": 0.0,
+            "linkage": null,
             "manual": {
               "max": 20.0,
               "min": -2.0,
@@ -253,6 +254,7 @@
           {
             "command_mode": "position",
             "deviation": null,
+            "linkage": null,
             "manual": null,
             "manual_always": false,
             "motors": [
@@ -277,6 +279,7 @@
           {
             "command_mode": "duty",
             "deviation": null,
+            "linkage": null,
             "manual": null,
             "manual_always": true,
             "motors": [
