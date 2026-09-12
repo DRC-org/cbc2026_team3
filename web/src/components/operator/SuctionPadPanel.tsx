@@ -1,5 +1,8 @@
+import { useState } from "react";
+
 import { onOffPair } from "@/components/operator/OnOffPadGroup";
 import { PadToggle } from "@/components/operator/PadToggle";
+import { Button } from "@/components/ui/Button";
 import { Panel } from "@/components/ui/Panel";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { RobotCommands } from "@/context/RobotContext";
@@ -11,6 +14,8 @@ interface SuctionPadPanelProps {
   suction: SuctionState | Malformed;
   manual: ManualState;
   blockedReason: string | null;
+  /** 半自動で「今すぐ開閉」へ切り替えたときの理由 (手動操縦と同じゲート) */
+  directBlockedReason?: string | null;
   sendOrReport: RobotCommands["sendOrReport"];
 }
 
@@ -19,8 +24,12 @@ export function SuctionPadPanel({
   suction,
   manual,
   blockedReason,
+  directBlockedReason = null,
   sendOrReport,
 }: SuctionPadPanelProps) {
+  // 半自動でも切り替えれば今すぐ開閉できる (弁は manual_always なのでサーバーが通す)。
+  // 常時操作の面に同じ 6 個を並べるより、この面 1 つで切り替えるほうが読める
+  const [direct, setDirect] = useState(false);
   if (suction === MALFORMED) {
     return (
       <Panel legend="吸着パッド" className="shrink-0">
@@ -32,6 +41,9 @@ export function SuctionPadPanel({
   // 手動では同じ 6 個が「宣言」と「今すぐ開閉」で 2 段に並び、どちらが機体を動かすのか
   // 画面から読めなかった。手動ではこの面が開閉そのものを持つ
   const inManual = manual.mode === "manual";
+  const actuating = inManual || direct;
+  const padsBlockedReason =
+    actuating && !inManual ? (directBlockedReason ?? blockedReason) : blockedReason;
 
   // ワークは棚の手前から順に取るので飛び飛びのパッドを選ぶ場面が無く、押す 1 回で個数が決まる
   const selectUpTo = (index: number) => {
@@ -48,7 +60,7 @@ export function SuctionPadPanel({
     label: pad.label,
     on: pad.enabled,
     unknown: false,
-    disabled: blockedReason !== null,
+    disabled: padsBlockedReason !== null,
     ariaLabel:
       index === 0
         ? `パッド ${pad.label} を使う`
@@ -66,7 +78,7 @@ export function SuctionPadPanel({
       label: pad.label,
       on,
       unknown: axis === undefined || axis.target === null,
-      disabled: blockedReason !== null || pair === null,
+      disabled: padsBlockedReason !== null || pair === null,
       ariaLabel: `パッド ${pad.label} を${on ? "閉じる" : "開く"}`,
       onClick: () => {
         if (pair !== null) move(pad.axis, on ? pair.off : pair.on);
@@ -74,7 +86,7 @@ export function SuctionPadPanel({
     };
   });
 
-  const pads = inManual ? openPads : declarePads;
+  const pads = actuating ? openPads : declarePads;
   const fillFromNote =
     suction.fill_from === "left"
       ? "左端から"
@@ -89,30 +101,42 @@ export function SuctionPadPanel({
       className="shrink-0"
       bodyClassName="p-0"
       actions={
-        blockedReason ? (
-          <StatusBadge tone="error">{blockedReason}</StatusBadge>
-        ) : inManual ? (
-          <span className="text-[0.85em] text-base-content/60">
-            開 {onCount}/{suction.pads.length}
-          </span>
-        ) : (
-          <span className="flex items-center gap-1.5 text-[0.85em] text-base-content/60">
-            {fillFromNote}
-            {onCount === 0 ? (
-              <StatusBadge tone="warning">未選択</StatusBadge>
-            ) : (
-              <span>
-                使用 {onCount}/{suction.pads.length}
-              </span>
-            )}
-          </span>
-        )
+        <span className="flex items-center gap-2">
+          {padsBlockedReason ? (
+            <StatusBadge tone="error">{padsBlockedReason}</StatusBadge>
+          ) : actuating ? (
+            <span className="text-[0.85em] text-base-content/60">
+              開 {onCount}/{suction.pads.length}
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 text-[0.85em] text-base-content/60">
+              {fillFromNote}
+              {onCount === 0 ? (
+                <StatusBadge tone="warning">未選択</StatusBadge>
+              ) : (
+                <span>
+                  使用 {onCount}/{suction.pads.length}
+                </span>
+              )}
+            </span>
+          )}
+          {inManual ? null : (
+            <Button
+              className="btn-sm"
+              aria-pressed={direct}
+              aria-label={direct ? "次の吸着で使う弁の宣言へ戻す" : "弁を今すぐ開閉する"}
+              onClick={() => setDirect((value) => !value)}
+            >
+              {direct ? "宣言へ戻す" : "今すぐ開閉"}
+            </Button>
+          )}
+        </span>
       }
     >
       <div
         className="flex flex-wrap gap-2 p-2"
         role="group"
-        aria-label={inManual ? "吸着パッドの開閉" : "吸着に使うパッド"}
+        aria-label={actuating ? "吸着パッドの開閉" : "吸着に使うパッド"}
       >
         {pads.map((pad) => (
           <PadToggle

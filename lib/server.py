@@ -8,7 +8,7 @@ import math
 import pathlib
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from aiohttp import WSMsgType, web
@@ -190,6 +190,8 @@ class RobotServer:
         self._sequence_tasks: dict[str, asyncio.Task[None]] = {}
 
         self.match = MatchState(settings=match_settings)
+        #: コートの控え先。再起動 (物理緊急停止からの復帰で落とし直すことがある) を跨いで保つ
+        self._court_store: pathlib.Path | None = None
 
         self._health = health
         self._last_health: dict[str, HealthSnapshot] = {}
@@ -330,6 +332,37 @@ class RobotServer:
 
     def set_return_home_poses(self, poses: Mapping[str, tuple[Mapping[str, str], ...]]) -> None:
         self._return_home.set_poses(poses)
+
+    def set_court_store(self, path: pathlib.Path) -> None:
+        self._court_store = path
+
+    def _save_court(self) -> None:
+        """控えるのは選んだ瞬間だけ。読めない・書けないは警告に留めて機体は止めない。"""
+        if self._court_store is None:
+            return
+        try:
+            self._court_store.parent.mkdir(parents=True, exist_ok=True)
+            court = self.match.court
+            self._court_store.write_text(
+                json.dumps({"court": None if court is None else court.value}), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("コートを控えられません: %s (%s)", self._court_store, exc)
+
+    def restore_court(self) -> None:
+        """起動時に前回のコートへ戻す。試合のリセットで消したものは戻らない (null を控える)。"""
+        if self._court_store is None or not self._court_store.exists():
+            return
+        try:
+            raw = json.loads(self._court_store.read_text(encoding="utf-8")).get("court")
+            court = None if raw is None else Court(raw)
+        except (OSError, ValueError, AttributeError) as exc:
+            logger.warning("控えたコートを読めません: %s (%s)", self._court_store, exc)
+            return
+        if court is None or not self.match.set_court(court):
+            return
+        self._apply_court()
+        logger.info("コート復元: %s (%s)", court.value, self._court_store)
 
     def _apply_court(self) -> None:
         # 未確定 (None) もそのまま押し下げる。飛ばすと試合をリセットした後も
@@ -979,6 +1012,7 @@ class RobotServer:
 
     async def _cmd_match_reset(self, _data: dict, requester: WSOrNone) -> None:
         self.match.match_reset()
+        self._save_court()
         logger.info("セッティングタイムへ復帰")
         self._stop_all_sequences()
         for robot_name in self._robots:
@@ -1022,6 +1056,7 @@ class RobotServer:
         if not self.match.set_court(court):
             return
         self._apply_court()
+        self._save_court()
         logger.info("コート変更: %s", court.value)
         await self._broadcast_match_state()
 
@@ -1286,7 +1321,24 @@ class RobotServer:
             if device.firmware_confirmed() is False and not freshness.is_stale(device_name, now)
         )
 
+    @contextlib.contextmanager
+    def _suspend_all_sync_monitoring(self, *, reason: str) -> Iterator[None]:
+        """再励磁のあいだ全ロボットの同期監視を止める。
+
+        再励磁は数百 ms かかるが同期監視は 40ms で再トリップするので、止めないと
+        原点を控え直す手前で必ず緊急停止が先着する。
+        """
+        with contextlib.ExitStack() as stack:
+            for ctx in self._robots.values():
+                for monitor in ctx.sync_monitors:
+                    stack.enter_context(monitor.suspend_all(reason=reason))
+            yield
+
     async def _reactivate_motors(self) -> None:
+        with self._suspend_all_sync_monitoring(reason="緊急停止解除の再励磁"):
+            await self._reactivate_motors_inner()
+
+    async def _reactivate_motors_inner(self) -> None:
         await self._settle_pending_reactivation()
         await self._send_e_stop_clear_broadcast()
 

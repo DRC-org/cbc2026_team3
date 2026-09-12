@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import can
@@ -843,3 +843,99 @@ class TestMoveToChecksEveryAxisBeforeSending:
 
         assert drivers["slide"].commands == [(ControlMode.POSITION, -5.0)]
         assert group["lift"].target == -10.0
+
+
+_SYNC_CONFIG = {
+    "axes": {
+        # min_speed 1.0 mm/s、0.0 -> 1.0 mm で 1.0 秒かかる軸
+        "slow_lift": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "scale": 1.0,
+            "min_speed": 1.0,
+            "timeout_s": 2.0,
+        },
+        # 同じ距離を 0.1 秒で走る軸。着地を揃えるには 0.9 秒遅らせる必要がある
+        "fast_lift": {
+            "unit": "mm",
+            "command_unit": "deg",
+            "scale": 1.0,
+            "min_speed": 10.0,
+            "timeout_s": 2.0,
+        },
+        # motion も min_speed も持たない = 速さが分からない軸
+        "blind_gripper": {"unit": "deg", "command_unit": "deg", "timeout_s": 2.0},
+    },
+    "positions": {
+        "slow_lift": {"home": 0.0, "work": 1.0},
+        "fast_lift": {"home": 0.0, "work": 1.0},
+        "blind_gripper": {"open": 20.0},
+    },
+}
+
+#: 到達待ちのポーリング (poll_interval=0.001) と開始遅延を区別するしきい値
+_START_DELAY_FLOOR_S = 0.01
+
+
+def _record_start_delays(
+    monkeypatch: pytest.MonkeyPatch,
+    drivers: Mapping[str, _EchoDriver],
+    *,
+    on_delay: Callable[[], None] | None = None,
+) -> list[tuple[float, dict[str, int]]]:
+    """開始遅延を実時間で待たずに記録する (差し替え方は conftest の `instant_settle` と同じ)。
+
+    記録するのは遅延量と、**その時点で各モータが受け取った指令の数**。
+    """
+    real_sleep = asyncio.sleep
+    records: list[tuple[float, dict[str, int]]] = []
+
+    async def _no_wait(delay: float, result: object = None) -> object:
+        if delay >= _START_DELAY_FLOOR_S:
+            records.append((delay, {name: len(d.commands) for name, d in drivers.items()}))
+            if on_delay is not None:
+                on_delay()
+        return await real_sleep(0, result)
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+    return records
+
+
+class TestSyncedArrival:
+    """**`sync=True` は一番遅い軸に合わせて早い軸の送信を遅らせる。**"""
+
+    def _sequence(self, group: MotorGroup) -> _MoveSequence:
+        seq = _MoveSequence()
+        seq.bind_motors(group)
+        seq.bind_positions(load_position_table(_SYNC_CONFIG, source="<test>"))
+        return seq
+
+    async def test_遅延量は一番遅い軸を基準に決まる(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        group, drivers = _make_group("slow_lift", "fast_lift", "blind_gripper")
+        seq = self._sequence(group)
+        records = _record_start_delays(monkeypatch, drivers)
+
+        await seq.move_to(
+            {"slow_lift": "work", "fast_lift": "work", "blind_gripper": "open"}, sync=True
+        )
+
+        # 遅れるのは速い軸だけ。遅延量は 1.0 秒 - 0.1 秒
+        assert [delay for delay, _ in records] == [pytest.approx(0.9)]
+        _, sent = records[0]
+        # 速さを見積もれない軸は今までどおり即送信 (遅い軸と同じく既に 1 通出ている)
+        assert sent == {"slow_lift": 1, "fast_lift": 0, "blind_gripper": 1}
+        assert drivers["fast_lift"].commands == [(ControlMode.POSITION, 1.0)]
+
+    async def test_遅延待ちの最中に止めたら未送信の軸へ指令が出ない(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**まだ 1 通も出していない軸が停止後に動き出すのが一番危ない。**"""
+        group, drivers = _make_group("slow_lift", "fast_lift")
+        seq = self._sequence(group)
+        _record_start_delays(monkeypatch, drivers, on_delay=seq.request_stop)
+
+        await seq.move_to({"slow_lift": "work", "fast_lift": "work"}, sync=True)
+
+        # 出てよいのは実測位置 (0.0) へのその場で止まれだけ。目標 1.0 は 1 通も出ない
+        assert (ControlMode.POSITION, 1.0) not in drivers["fast_lift"].commands
+        assert drivers["fast_lift"].commands == [(ControlMode.POSITION, 0.0)]

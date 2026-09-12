@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 
 from lib.sequence.engine import Sequence, step
 from lib.sequence.homing import HomingRunner, run_homing
@@ -15,20 +15,24 @@ logger = logging.getLogger(__name__)
 # `sub_pitch` と `sub_offset` は同じ指令で動かせない (`config/sub_hand_positions.yaml`
 # の `guard.not_with`)。昇降を先に上げるのは機構が当たらない高さで前後へ走らせるため。
 # 順序は `SubHandSequence.move_to_initial` と同じで、どの姿勢から押しても踏まない
-SUB_HOME: dict[str, str] = {
-    "sub_lift": "top",
-    "sub_y_axis": "retracted",
-    "sub_pitch": "open",
-    "sub_offset": "open",
-    "sub_rotate": "receive",
-    "wall_r": "initial",
-    "pump_vac": "stop",
-}
+SUB_HOME_STEPS: tuple[tuple[str, str], ...] = (
+    ("sub_lift", "top"),
+    ("sub_y_axis", "retracted"),
+    # ピッチとオフセットは回転が carry のときしか動かせない (2026-09-12、棒を伸ばした)
+    ("sub_rotate", "carry"),
+    ("sub_pitch", "open"),
+    ("sub_offset", "open"),
+    ("sub_rotate", "receive"),
+    ("wall_r", "initial"),
+    ("pump_vac", "stop"),
+)
+#: 最終姿勢。同じ軸は後勝ち (回転は receive で終わる)
+SUB_HOME: dict[str, str] = dict(SUB_HOME_STEPS)
 
 
-def _one_by_one(targets: Mapping[str, str]) -> list[dict[str, str]]:
-    """1 軸ずつの指令へ分ける。**順序を持つのは宣言 (`SUB_HOME`) の側である。**"""
-    return [{axis: position} for axis, position in targets.items()]
+def _one_by_one(steps: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
+    """1 軸ずつの指令へ分ける。**順序を持つのは宣言 (`SUB_HOME_STEPS`) の側である。**"""
+    return [{axis: position} for axis, position in steps]
 
 
 class MotorCheckSequence(Sequence):
@@ -101,7 +105,7 @@ class MotorCheckSequence(Sequence):
 
     @step("サブハンド 初期姿勢へ", axes=SUB_HOME.keys())
     async def sub_home(self) -> None:
-        for targets in _one_by_one(SUB_HOME):
+        for targets in _one_by_one(SUB_HOME_STEPS):
             await self.move_to(targets)
 
     @step("サブハンド 前後スライド (Y 方向)", axes={"sub_y_axis"})
@@ -151,5 +155,5 @@ class MotorCheckSequence(Sequence):
         # **メインハンドは 1 通のまま。** 列へ寄せる段が `y_axis` と `rotate` を意図的に
         # 同じ指令へ入れているので、ここを分けると分ける理由の無い軸まで分かれる
         await self.move_to({**MAIN_HOME, "conveyor": "stop"})
-        for targets in _one_by_one(SUB_HOME):
+        for targets in _one_by_one(SUB_HOME_STEPS):
             await self.move_to(targets)

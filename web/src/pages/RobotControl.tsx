@@ -6,6 +6,7 @@ import { HomingButtons } from "@/components/homing/HomingButtons";
 import { HomingPanel } from "@/components/homing/HomingPanel";
 import { ReturnHomeButton } from "@/components/homing/ReturnHomeButton";
 import { SwitchDistanceButton } from "@/components/homing/SwitchDistanceButton";
+import { CourtSettings } from "@/components/monitor/CourtSettings";
 import { StartGate } from "@/components/monitor/StartGate";
 import { ActionPanel } from "@/components/operator/ActionPanel";
 import { AlwaysManualPanel } from "@/components/operator/AlwaysManualPanel";
@@ -157,9 +158,14 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         suction={state.suction}
         manual={manual}
         blockedReason={inManual ? manualBlockedReason : connected ? null : "切断中"}
+        directBlockedReason={manualBlockedReason}
         sendOrReport={sendOrReport}
       />
     );
+
+  // コートが要る台 (サーバーが court_required で言う) は、この画面からも選べるようにする。
+  // 試合のリセットは Monitor だけが持つので RESET は出さない
+  const courtPanel = state.court_required === true ? <CourtSettings /> : null;
 
   // 手で寄せながら控える流れなので手動の列に置く。位置定数を持たない台では出さない
   const capturePanel =
@@ -229,6 +235,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     const openSubsystemPanel = subsystemPanel(true, "min-h-0 flex-1");
     const statusColumn = (
       <div className="flex min-h-0 flex-col gap-2">
+        {courtPanel}
         {suctionPanel}
         {openSubsystemPanel}
       </div>
@@ -245,6 +252,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
             </div>
           ) : (
             <div className="flex min-h-0 flex-col gap-2">
+              {courtPanel}
               {measurePanel(true)}
               {suctionPanel}
               {openSubsystemPanel}
@@ -282,6 +290,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
               manual={manual}
               blockedReason={manualBlockedReason}
               sendOrReport={sendOrReport}
+              excludeAxes={suctionPadAxes}
             />
 
             {/* 常に出す。押せないときは理由を出す —— 隠すと在り処が画面から読めない */}
@@ -299,6 +308,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
         )}
 
         <div className="flex min-h-0 flex-col gap-2">
+          {courtPanel}
           <MatchTimer timer={matchState.timer} />
 
           {suctionPanel}

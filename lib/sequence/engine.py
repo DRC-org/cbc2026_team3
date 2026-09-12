@@ -84,6 +84,9 @@ LimitInterventions = Callable[[str], LimitIntervention]
 
 NO_LIMIT_INTERVENTION = LimitIntervention(count=0)
 
+#: これ未満の開始遅延は掛けない。到達判定の走査周期 (0.01s) より短く、着地時刻に効かない
+_MIN_START_DELAY_S = 0.01
+
 
 @dataclass(frozen=True)
 class _PlannedMove:
@@ -99,6 +102,34 @@ class _PlannedMove:
     commands: dict[str, float]
     #: 軸の unit へ直した目標。同じ指令に入る他の軸の条件を評価するのに使う
     value: float
+    #: この移動にかかる見込み [s]。速さを見積もれない軸 (duty など) は None
+    duration_s: float | None = None
+
+
+def _estimated_duration(spec: AxisSpec, handle: AxisHandle, value: float) -> float | None:
+    """この移動にかかる見込み [s]。見積もれない軸は None。
+
+    `observed_value()` を引くのは見積もれる軸だけ。duty / on_off の軸は位置
+    フィードバックを持たず `PositionLookupError` になる。
+    """
+    if spec.estimated_duration(0.0) is None:
+        return None
+    return spec.estimated_duration(abs(value - handle.observed_value()))
+
+
+def _start_delays(pending: list[_PlannedMove]) -> list[float]:
+    """着地時刻を揃えるための開始遅延 [s]。速度は変えず、早い軸の送信だけを遅らせる。
+
+    見積もれた軸が 1 本以下なら揃える相手が居ないので全部 0 (従来どおり全軸即送信)。
+    """
+    durations = [move.duration_s for move in pending if move.duration_s is not None]
+    if len(durations) < 2:
+        return [0.0] * len(pending)
+    longest = max(durations)
+    delays = [
+        0.0 if move.duration_s is None else max(0.0, longest - move.duration_s) for move in pending
+    ]
+    return [delay if delay >= _MIN_START_DELAY_S else 0.0 for delay in delays]
 
 
 @dataclass(frozen=True)
@@ -302,8 +333,14 @@ class Sequence:
         targets: Mapping[str, str],
         *,
         timeout: float | None = None,
+        sync: bool = False,
     ) -> None:
         """位置名で指定した軸を同時に動かし、全軸が着くまで待つ。
+
+        `sync=True` は**着地の時刻を揃える**。速度そのものは変えず、早く着く軸の
+        送信を「一番遅い軸の所要時間 - 自分の所要時間」だけ遅らせる。速さを
+        見積もれない軸 (`motion` も `min_speed` も持たない duty / on_off など) は
+        今までどおり即送信する。
 
         **歯止めに掛かったときの `GuardViolation` は失敗であって拒否ではない。**
         手動操縦は「その 1 指令を出さない」で済むので拒否として返す
@@ -350,6 +387,7 @@ class Sequence:
                     wait_s=spec.timeout_s if timeout is None else timeout,
                     commands=commands,
                     value=value,
+                    duration_s=_estimated_duration(spec, handle, value) if sync else None,
                 )
             )
 
@@ -363,14 +401,20 @@ class Sequence:
             move.handle.check_not_with(siblings)
             move.handle.check_target_value(move.commands, pending_targets=planned)
 
-        for move in pending:
-            await move.handle.set_target_value(move.commands, pending_targets=planned)
+        delays = _start_delays(pending)
+        for move, delay in zip(pending, delays, strict=True):
+            if delay <= 0.0:
+                await move.handle.set_target_value(move.commands, pending_targets=planned)
 
         # 停止要求と競わせる。ステップの境界だけで見ると、長い移動の途中で通常停止を
         # 押しても着くまで止まらない (2026-09-11 実機で「止まるまで長い」)
         waits = [
-            asyncio.ensure_future(move.handle.wait_reached(timeout=move.wait_s, expect_target=True))
-            for move in pending
+            asyncio.ensure_future(
+                move.handle.wait_reached(timeout=move.wait_s, expect_target=True)
+                if delay <= 0.0
+                else self._delayed_move(move, planned, delay)
+            )
+            for move, delay in zip(pending, delays, strict=True)
         ]
         stop_wait = asyncio.ensure_future(self._stop_event.wait())
         try:
@@ -427,6 +471,23 @@ class Sequence:
             raise AxisSyncError(
                 f"シーケンス '{self.name}': 軸内のモータ位置がずれています ({', '.join(desynced)})"
             )
+
+    async def _delayed_move(
+        self, move: _PlannedMove, planned: Mapping[str, float], delay: float
+    ) -> bool:
+        """遅れて送り、そのまま到着まで待つ。**送信と待ちを 1 つに束ねる。**
+
+        `wait_reached(expect_target=True)` は目標未設定の状態で待ち始めると即
+        `WaitInterruptedError` を投げるので、送る前に待ちを張れない。
+        """
+        await asyncio.sleep(delay)
+        # まだ 1 通も出していない軸が停止後に動き出すのが一番危ない
+        if self._stop_event.is_set():
+            return True
+        # 遅らせているあいだに他の軸が動くので、ここで `GuardViolation` になりうる。
+        # 握り潰さず上へ抜けさせるが、**その時点で先に出した軸は既に走っている**
+        await move.handle.set_target_value(move.commands, pending_targets=planned)
+        return await move.handle.wait_reached(timeout=move.wait_s, expect_target=True)
 
     @property
     def court(self) -> Court | None:
