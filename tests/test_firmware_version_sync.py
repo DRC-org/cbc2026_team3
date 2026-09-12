@@ -16,6 +16,13 @@ _BOARD_KIND_TO_PROJECT = {
     3: "solenoid",
 }
 
+# 同じ基板種別を名乗る別プロジェクト。can_id からは区別できないので expected_firmware は
+# 1 つしか持てない。dc_motor_slcan は CAN トランシーバ故障時の代替版で、搬送路が
+# USB CDC + SLCAN になるだけで CAN 上の振る舞いは dc_motor と同一。
+_SIBLING_PROJECTS = {
+    "dc_motor": ("dc_motor_slcan",),
+}
+
 _VERSION_RE = re.compile(r"constexpr\s+uint8_t\s+kFirmwareVersion\s*=\s*(\d+)\s*;")
 
 
@@ -73,6 +80,17 @@ class TestFirmwareVersionSync:
 
     def test_shipped_configs_have_sensors(self):
         assert len(_SENSORS) >= 5
+
+    def test_sibling_projects_share_firmware_version(self):
+        for project, siblings in _SIBLING_PROJECTS.items():
+            expected = _firmware_version(project)
+            for sibling in siblings:
+                assert _firmware_version(sibling) == expected, (
+                    f"firmware/{sibling}/include/config.h の kFirmwareVersion が "
+                    f"firmware/{project}/include/config.h の {expected} と食い違っている。"
+                    f"同じ can_id を名乗る以上 config 側の expected_firmware は 1 つしか "
+                    f"持てず、片方を焼いた基板が FAULT になる"
+                )
 
     @pytest.mark.parametrize("entry", _GENERIC_DEVICES, ids=_case_id)
     def test_expected_firmware_is_declared(self, entry):
