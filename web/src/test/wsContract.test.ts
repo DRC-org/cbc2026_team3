@@ -402,6 +402,7 @@ const PHYSICAL_STOP = fieldsOf<PhysicalStopWatch>({
   watched: "ui",
   sources: "ui",
   unwatched: "ui",
+  pressed: "ui",
 });
 
 const SAFETY = fieldsOf<SafetyState>({

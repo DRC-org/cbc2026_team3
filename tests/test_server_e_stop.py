@@ -5,6 +5,7 @@ import contextlib
 import logging
 import struct
 import time
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import can
@@ -37,6 +38,7 @@ from tests.fake_can import (
     set_motors,
 )
 from tests.fake_drivers import StubFeedbackDriver
+from tests.fake_health import ok_health_snapshot
 from tests.feedback_frames import confirm_dm3520_ranges, feed_dm3520, feed_generic, feed_m3508
 from tests.server_fixtures import ServerFixture, drain, recv_type, wait_until
 
@@ -1229,15 +1231,22 @@ class TestBoardReportedEStop:
         set_motors(fx.can_manager("main_hand"), {"conveyor": drv})
         return fx, drv
 
+    async def _pressed(self) -> tuple[ServerFixture, GenericDriver]:
+        """離れている報告を 1 度読ませてから押す (伝わるのは OFF→ON の瞬間だけ)。"""
+        fx, drv = self._fixture_with_generic(e_stop=False)
+        await fx.publish_state()
+        feed_generic(drv, e_stop=True)
+        return fx, drv
+
     async def test_board_flag_activates_server_e_stop(self) -> None:
-        fx, _ = self._fixture_with_generic(e_stop=True)
+        fx, _ = await self._pressed()
 
         await fx.publish_state()
 
         assert fx.e_stop_active is True
 
     async def test_reason_names_the_motor(self) -> None:
-        fx, _ = self._fixture_with_generic(e_stop=True)
+        fx, _ = await self._pressed()
 
         await fx.publish_state()
 
@@ -1261,7 +1270,7 @@ class TestBoardReportedEStop:
         assert fx.e_stop_active is False
 
     async def test_release_is_not_undone_by_feedback_from_before_the_clear(self) -> None:
-        fx, _ = self._fixture_with_generic(e_stop=True)
+        fx, _ = await self._pressed()
         await fx.publish_state()
         assert fx.e_stop_active is True
 
@@ -1277,7 +1286,7 @@ class TestBoardReportedEStop:
         assert fx.e_stop_active is False
 
     async def test_再励磁の最中は基板の報告で止め直さない(self) -> None:
-        fx, _ = self._fixture_with_generic(e_stop=True)
+        fx, _ = await self._pressed()
         gate = asyncio.Event()
 
         async def _slow_activate(**_kwargs: object) -> list[str]:
@@ -1298,8 +1307,9 @@ class TestBoardReportedEStop:
             gate.set()
         await fx.wait_reactivation()
 
-    async def test_still_pressed_after_release_stops_again(self) -> None:
-        fx, _ = self._fixture_with_generic(e_stop=True)
+    async def test_still_pressed_after_release_does_not_stop_again(self) -> None:
+        """押されたままでは止め直さない。押されたまま起動・12V 系の未接続と区別できないため。"""
+        fx, _ = await self._pressed()
         await fx.publish_state()
 
         await fx.command({"type": "e_stop_release"})
@@ -1307,8 +1317,9 @@ class TestBoardReportedEStop:
         await fx.wait_reactivation()
 
         await fx.publish_state()
+        await fx.publish_state()
 
-        assert fx.e_stop_active is True
+        assert fx.e_stop_active is False
 
 
 class TestPhysicalStopWatch:
@@ -1532,6 +1543,9 @@ class TestEStopClearIsBroadcast:
         fx, sent, boards = _fixture_with_boards(with_energized_motor=False)
         board = boards["main_hand"]
         mgr = fx.can_manager("main_hand")
+        feed_generic(board, e_stop=False)
+        mark_feedback_at(mgr, board.name, time.time())
+        await fx.publish_state()
         feed_generic(board, e_stop=True)
         mark_feedback_at(mgr, board.name, time.time())
 
@@ -1552,3 +1566,82 @@ class TestEStopClearIsBroadcast:
         assert fx.e_stop_active is False, (
             "解除フレームより前の起点で基板の報告を信じ、自分で止め直している"
         )
+
+
+class _IdleSequence(Sequence):
+    @step("何もしない")
+    async def nothing(self) -> None:
+        return
+
+
+def _dc_board_fixture() -> tuple[ServerFixture, Any, GenericDriver]:
+    """DC 基板 (pump_vac) 1 枚だけを持つサブハンド。物理停止の報告元はこの基板だけ。"""
+    fx = ServerFixture.build()
+    mgr = mock_can_manager(["pump_vac"], bus_name="can_generic")
+    pump = GenericDriver("pump_vac", 0x81, control_type=ControlMode.DUTY)
+    set_motors(mgr, {"pump_vac": pump})
+    fx.add_robot("sub_hand", _IdleSequence("sub_hand"), mgr)
+    return fx, mgr, pump
+
+
+async def _report(fx: ServerFixture, mgr: Any, pump: GenericDriver, *, e_stop: bool) -> None:
+    feed_generic(pump, e_stop=e_stop)
+    set_last_feedback(mgr, {"pump_vac": time.time()})
+    await fx.publish_state()
+
+
+class TestBoardEStopIsEdgeTriggered:
+    """基板の緊急停止ビットは押された瞬間 (OFF→ON) だけ全体へ伝える。
+
+    水準で伝えると、押されたまま起動したときや 12V 系 (スイッチ回路) が未接続・断線の
+    ときに解除しても止め直され、二度と動かせない (2026-09-12 実機)。
+    """
+
+    async def test_最初の報告から立っていても止めずに押下報告として配る(self) -> None:
+        fx, mgr, pump = _dc_board_fixture()
+
+        await _report(fx, mgr, pump, e_stop=True)
+        await _report(fx, mgr, pump, e_stop=True)
+
+        assert fx.e_stop_active is False
+        safety = fx.state_message("sub_hand")["safety"]
+        assert safety["physical_stop"]["pressed"] == ["pump_vac"]
+        assert safety["physical_stop"]["watched"] is True
+
+    async def test_OFF_から_ON_へ変わった瞬間は止める(self) -> None:
+        fx, mgr, pump = _dc_board_fixture()
+
+        await _report(fx, mgr, pump, e_stop=False)
+        assert fx.e_stop_active is False
+        await _report(fx, mgr, pump, e_stop=True)
+
+        assert fx.e_stop_active is True
+
+    async def test_解除後も押されたままなら止め直さない(self) -> None:
+        fx, mgr, pump = _dc_board_fixture()
+        await _report(fx, mgr, pump, e_stop=False)
+        await _report(fx, mgr, pump, e_stop=True)
+        assert fx.e_stop_active is True
+
+        await fx.command({"type": "e_stop_release"})
+        await fx.wait_reactivation()
+        await asyncio.sleep(0.01)
+        await _report(fx, mgr, pump, e_stop=True)
+        await _report(fx, mgr, pump, e_stop=True)
+
+        assert fx.e_stop_active is False
+        # 離して押し直したら、もう一度止まる
+        await _report(fx, mgr, pump, e_stop=False)
+        await _report(fx, mgr, pump, e_stop=True)
+        assert fx.e_stop_active is True
+
+    async def test_途絶した基板は復帰後の最初の報告を基準にする(self) -> None:
+        fx, mgr, pump = _dc_board_fixture()
+        await _report(fx, mgr, pump, e_stop=False)
+        # 途絶 (フィードバックが古い) のあいだに立ち、そのまま戻ってきた
+        mgr.health.side_effect = lambda **_kwargs: _health_with_feedback_at(mgr, time.time() - 10.0)
+        await fx.publish_state()
+        mgr.health.side_effect = lambda **_kwargs: ok_health_snapshot(mgr)
+        await _report(fx, mgr, pump, e_stop=True)
+
+        assert fx.e_stop_active is False

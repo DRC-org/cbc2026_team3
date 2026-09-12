@@ -421,6 +421,8 @@ export interface PhysicalStopWatch {
   watched: boolean;
   sources: string[];
   unwatched: string[];
+  /** 押下を報告している DC 基板。全体の緊急停止は押された瞬間にしか掛からない */
+  pressed: string[];
 }
 
 export interface SafetyState {
@@ -480,7 +482,8 @@ export function safetyShapeErrors(value: unknown): string[] {
     !isObject(physicalStop) ||
     typeof physicalStop.watched !== "boolean" ||
     !isStringArray(physicalStop.sources) ||
-    !isStringArray(physicalStop.unwatched)
+    !isStringArray(physicalStop.unwatched) ||
+    !isStringArray(physicalStop.pressed)
   ) {
     broken.push("physical_stop");
   }

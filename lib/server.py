@@ -179,6 +179,9 @@ class RobotServer:
         self._e_stop_active: bool = False
         self._e_stop_reason: str | None = None
         self._board_e_stop_ignore_before: float = 0.0
+        # 基板ごとの緊急停止ビットの直近の水準 (新鮮なフィードバックから読めた分だけ)。
+        # 全体の緊急停止へ伝えるのは OFF→ON の瞬間だけ (`_detect_board_e_stop`)
+        self._board_e_stop_levels: dict[tuple[str, str], bool] = {}
         self._energize_expected_since: float | None = None
         self._server_started_at: float | None = None
         self._inactive_motors: dict[str, list[str]] = {}
@@ -1345,10 +1348,18 @@ class RobotServer:
         )
         now = freshness.now()
         unwatched = [name for name in sources if freshness.is_stale(name, now)]
+        # 押下を報告している基板。全体の緊急停止は押された瞬間にしか掛けないので、
+        # 押されたまま (12V 系が未接続・断線を含む) は画面にだけ出す
+        pressed = [
+            name
+            for name in sources
+            if name not in unwatched and ctx.can_manager.motors[name].e_stop_active
+        ]
         return {
             "watched": bool(sources) and not unwatched,
             "sources": sources,
             "unwatched": unwatched,
+            "pressed": pressed,
         }
 
     def _split_inactive_motors(self, robot_name: str) -> tuple[set[str], set[str]]:
@@ -1783,10 +1794,18 @@ class RobotServer:
         return events
 
     def _detect_board_e_stop(self, snapshots: dict[str, HealthSnapshot]) -> str | None:
-        if self._e_stop_active:
-            return None
+        """基板の緊急停止ビットを全体の緊急停止へ伝える。**伝えるのは OFF→ON の瞬間だけ。**
 
-        if self._reactivating:
+        水準 (立っているかどうか) で伝えると、物理停止スイッチが押されたまま起動した
+        ときや 12V 系 (スイッチ回路) が未接続・断線のときに、解除しても次の配信で
+        止め直され、二度と動かせない機体になる (2026-09-12 実機の求め)。最初に読めた
+        報告が既に立っていれば「押された瞬間」ではないので止めず、押下報告として
+        画面に出す (`_physical_stop_watch`)。DC 基板自身はラッチしたままなので、
+        その出力 (ポンプ・コンベア) が勝手に動くことはない。
+        """
+        if self._e_stop_active or self._reactivating:
+            # 停止中は全基板がラッチして立つ。解除後の最初の報告を基準にし直す
+            self._board_e_stop_levels.clear()
             return None
 
         for robot_name, ctx in self._robots.items():
@@ -1794,13 +1813,34 @@ class RobotServer:
             if snapshot is None:
                 continue
             last_feedback = {info.name: info.last_feedback_at for info in snapshot.motors}
+            stale_before = time.time() - self._health.feedback_timeout_ms / 1000.0
             for motor_name, motor in ctx.can_manager.motors.items():
-                if not isinstance(motor, GenericDriver) or not motor.e_stop_active:
+                if not isinstance(motor, GenericDriver):
                     continue
+                key = (robot_name, motor_name)
                 received_at = last_feedback.get(motor_name)
-                if received_at is None or received_at <= self._board_e_stop_ignore_before:
-                    # 読めていないフィードバックからは押下を主張しない。取りこぼしうる
-                    # ことは `_physical_stop_watch` が safety へ載せて画面に出す。
+                if (
+                    received_at is None
+                    or received_at <= self._board_e_stop_ignore_before
+                    or received_at < stale_before
+                ):
+                    # 読めていない / 解除前のフィードバックからは押下を主張しない。
+                    # 途絶した基板は次に届いた報告を基準にし直す
+                    self._board_e_stop_levels.pop(key, None)
+                    continue
+                level = motor.e_stop_active
+                previous = self._board_e_stop_levels.get(key)
+                self._board_e_stop_levels[key] = level
+                if not level or previous is True:
+                    continue
+                if previous is None:
+                    logger.warning(
+                        "%s の %s は最初の報告から緊急停止ビットが立っています"
+                        " (押されたまま起動したか、12V 系のスイッチ回路が未接続・断線)。"
+                        "押された瞬間ではないので全体の緊急停止は掛けません",
+                        robot_name,
+                        motor_name,
+                    )
                     continue
                 return (
                     f"{robot_name} の {motor_name} が基板側の緊急停止を報告 "
