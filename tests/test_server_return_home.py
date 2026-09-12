@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
+import pytest
+
 from lib.drivers.generic import GenericDriver
 from lib.match_state import Court
 from lib.sequence.engine import Sequence, step
@@ -48,6 +50,20 @@ class _IdleSequence(Sequence):
         return
 
 
+class _HoldSequence(Sequence):
+    """解放されるまでステップの中で止まる。制御権の扱いを見るための代役。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @step("解放されるまで待つ")
+    async def hold(self) -> None:
+        self.entered.set()
+        await self.release.wait()
+
+
 def _table() -> PositionTable:
     return load_position_table(_CONFIG, source="<test>")
 
@@ -55,7 +71,12 @@ def _table() -> PositionTable:
 class _Fixture:
     """サーバー 1 台ぶん。**寄せる口は本番と同じ `HomingSource.move_to`。**"""
 
-    def __init__(self, *, origin_confirmed: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        origin_confirmed: bool = True,
+        sequences: dict[str, Sequence] | None = None,
+    ) -> None:
         self.moves: list[dict[str, str]] = []
         self.release: asyncio.Event | None = None
         self.entered = asyncio.Event()
@@ -77,7 +98,7 @@ class _Fixture:
         self.fx = ServerFixture.build()
         self.fx.freeze_broadcast()
         for name in _POSES:
-            self.fx.add_robot(name, _IdleSequence(name))
+            self.fx.add_robot(name, (sequences or {}).get(name) or _IdleSequence(name))
         self.fx.set_homing_source(
             HomingSource(
                 runner=None,  # type: ignore[arg-type]
@@ -173,6 +194,47 @@ class TestDenyGate:
 
         assert reason is not None and "零点合わせ" in reason
         assert env.moves == []
+
+    async def test_相手ロボットの零点合わせ中は通る(self) -> None:
+        """点検どうしの排他は台ごと。相手の台を見て塞ぐと原点を取り戻せない。"""
+        env = _Fixture()
+        env.fx.set_homing_running(True, "main_hand")
+
+        assert await env.fx.start_return_home("sub_hand") is None
+        await env.fx.wait_return_home_idle()
+
+        assert env.moves == [{"sub_lift": "pick"}, {"wall_r": "initial"}]
+
+    @pytest.mark.parametrize("robot", ["main_hand", "sub_hand"])
+    async def test_動作確認の実行中はどの台も拒む(self, robot: str) -> None:
+        # 動作確認は両ハンド 1 本のシーケンスなので、ここだけ全機横断で塞ぐ
+        env = _Fixture()
+        pending: asyncio.Task[None] = asyncio.create_task(asyncio.Event().wait())  # type: ignore[arg-type]
+        env.fx.set_motor_check_task(pending)
+        try:
+            reason = await env.fx.start_return_home(robot)
+        finally:
+            pending.cancel()
+
+        assert reason is not None and "動作確認" in reason
+        assert env.moves == []
+
+    async def test_相手のシーケンス実行中でも通る(self) -> None:
+        env = _Fixture(sequences={"main_hand": _HoldSequence("main_hand")})
+        held = env.fx.sequence("main_hand")
+        task = asyncio.create_task(held.run_forever())
+        held.request_start()
+        await asyncio.wait_for(held.entered.wait(), timeout=2.0)
+
+        assert await env.fx.start_return_home("sub_hand") is None
+        await env.fx.wait_return_home_idle()
+
+        assert env.moves == [{"sub_lift": "pick"}, {"wall_r": "initial"}]
+        assert held.is_running is True
+
+        held.release.set()
+        held.request_stop()
+        task.cancel()
 
     async def test_原点復帰中は動作確認を拒む(self) -> None:
         env = _Fixture()
