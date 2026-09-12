@@ -208,6 +208,7 @@ class TestLastError:
             "step_index": 1,
             "step": "必ず失敗する",
             "message": failure.message,
+            "limit_related": False,
         }
 
     async def test_再実行で消える(self):
@@ -426,3 +427,71 @@ class TestStepLog:
 
         assert seq.last_error is not None
         assert [r.getMessage() for r in caplog.records if "完走" in r.getMessage()] == []
+
+
+class _LimitBlockedSequence(Sequence):
+    """歯止めが外れているあいだだけ通るステップ (可動端で止まった移動の模型)。"""
+
+    def __init__(self) -> None:
+        super().__init__("limit")
+        self.suspended: list[tuple[str, ...]] = []
+        self.active = False
+        self.after_ran_with_guard: bool | None = None
+
+    @contextlib.contextmanager
+    def suspend(self, names):
+        held = tuple(names)
+        self.suspended.append(held)
+        self.active = True
+        try:
+            yield
+        finally:
+            self.active = False
+
+    @step("端へ寄せる")
+    async def toward_limit(self) -> None:
+        if not self.active:
+            from lib.motion_guard import GuardViolation
+
+            raise GuardViolation(
+                "軸 'y' の可動端センサ s_plus が押されているため、その向きへは動かしません"
+            )
+
+    @step("次のステップ")
+    async def after(self) -> None:
+        self.after_ran_with_guard = not self.active
+
+
+class TestForceStepPastLimit:
+    async def test_歯止めで止まった失敗は_limit_related_で配る(self) -> None:
+        seq = _LimitBlockedSequence()
+        seq.bind_limit_override(seq.suspend, ("s_plus", "s_minus"))
+        seq.request_start()
+        await seq.run()
+
+        assert seq.last_error is not None
+        assert seq.last_error.limit_related is True
+        assert seq.last_error.to_dict()["limit_related"] is True
+        assert seq.suspended == []
+
+    async def test_強制続行はそのステップだけ歯止めを外し次は元に戻る(self) -> None:
+        seq = _LimitBlockedSequence()
+        seq.bind_limit_override(seq.suspend, ("s_plus", "s_minus"))
+        seq.request_start()
+        await seq.run()
+
+        seq.request_force_step(0)
+        await seq.run()
+
+        assert seq.last_error is None
+        assert seq.suspended == [("s_plus", "s_minus")]
+        assert seq.after_ran_with_guard is True
+        assert seq.progress["step_index"] == 2
+
+    async def test_口が無い台では強制続行できない(self) -> None:
+        seq = _LimitBlockedSequence()
+        assert seq.can_force is False
+        seq.request_force_step(0)
+        await seq.run()
+        # 覆えないので通常どおり歯止めに掛かって失敗する
+        assert seq.last_error is not None and seq.last_error.limit_related is True

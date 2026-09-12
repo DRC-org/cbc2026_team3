@@ -53,7 +53,12 @@ describe("motorCheckStatus", () => {
   });
 
   describe("失敗理由の畳み込み", () => {
-    const failure = { step_index: 2, step: "メインハンド y 軸", message: "偏差 3.1 > 許容 2.0" };
+    const failure = {
+      step_index: 2,
+      step: "メインハンド y 軸",
+      message: "偏差 3.1 > 許容 2.0",
+      limit_related: false,
+    };
 
     it("error が無くても last_error だけで失敗と読む", () => {
       const status = motorCheckStatus(snapshot({ step_index: 3, last_error: failure }), true);

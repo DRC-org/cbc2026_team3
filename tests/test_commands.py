@@ -32,6 +32,7 @@ _EXPECTED_COMMANDS = {
     "sequence_start",
     "sequence_stop",
     "sequence_jump",
+    "sequence_force_step",
     "motor_check_start",
     "motor_check_abort",
     "homing_start",
@@ -138,6 +139,7 @@ class TestRegistryCoverage:
         assert blocked == {
             "sequence_start",
             "sequence_jump",
+            "sequence_force_step",
             "trigger",
             "manual_move",
             "manual_set",
@@ -156,7 +158,7 @@ class TestRegistryCoverage:
 
     def test_sequence_commands_are_blocked_while_reenergizing(self) -> None:
         blocked = {name for name, spec in COMMANDS.items() if spec.blocked_during_reenergize}
-        assert blocked == {"sequence_start", "sequence_jump", "trigger"}
+        assert blocked == {"sequence_start", "sequence_jump", "sequence_force_step", "trigger"}
 
 
 class TestSpecValidation:
@@ -225,7 +227,9 @@ class TestSpecValidation:
 
 
 class TestPhaseGate:
-    @pytest.mark.parametrize("command", ["sequence_start", "sequence_jump", "trigger"])
+    @pytest.mark.parametrize(
+        "command", ["sequence_start", "sequence_jump", "sequence_force_step", "trigger"]
+    )
     def test_sequence_commands_only_in_match(self, command: str) -> None:
         assert phase_deny_reason(command, Phase.SETUP) is not None
         assert phase_deny_reason(command, Phase.READY) is not None
@@ -262,6 +266,7 @@ class TestEStopGate:
         assert denied == {
             "sequence_start",
             "sequence_jump",
+            "sequence_force_step",
             "trigger",
             "match_start",
             "motor_check_start",
@@ -301,7 +306,7 @@ class TestEStopGate:
 class TestManualModeGate:
     def test_blocked_commands(self) -> None:
         blocked = {name for name, spec in COMMANDS.items() if spec.blocked_during_manual}
-        assert blocked == {"sequence_start", "sequence_jump", "trigger"}
+        assert blocked == {"sequence_start", "sequence_jump", "sequence_force_step", "trigger"}
 
     @pytest.mark.parametrize(
         "command",

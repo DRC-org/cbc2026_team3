@@ -946,6 +946,17 @@ def _make_pressed_toward_reader(monitors: list[LimitMonitor]) -> PressedTowardRe
     return read
 
 
+def _limit_sensor_names(table: PositionTable) -> tuple[str, ...]:
+    """`guard.limits` に宣言された可動端センサ全部 (歯止めを外して続行するときに覆う範囲)。"""
+    names: list[str] = []
+    for axis in table.axes:
+        guard = table.axis(axis).guard
+        if guard is None or guard.limits is None:
+            continue
+        names.extend((*guard.limits.plus, *guard.limits.minus))
+    return tuple(dict.fromkeys(names))
+
+
 def _make_limit_interventions(monitors: list[LimitMonitor]) -> LimitInterventions:
     """`move_to` が「保護に曲げられた移動」を知る読み口。
 
@@ -1326,6 +1337,8 @@ def _wire_one_robot(
     seq.bind_limit_interventions(_make_limit_interventions(limit_monitors))
     # 配線先はここと `_wire_motor_check_sequence` の 2 箇所 (`bind_axis_state` と同じ)
     seq.motors.bind_pressed_toward(_make_pressed_toward_reader(limit_monitors))
+    # 可動端で止まったステップを歯止めを外して走らせ直す口。覆いは零点確定の整列段と同じもの
+    seq.bind_limit_override(sensor_suspension.suspend, _limit_sensor_names(positions))
 
     server.add_robot(
         robot_name,

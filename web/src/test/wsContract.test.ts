@@ -466,6 +466,7 @@ const SEQUENCE_FAILURE = fieldsOf<SequenceFailure>({
   step_index: "ui",
   step: "ui",
   message: "ui",
+  limit_related: "ui",
 });
 
 const STEP = fieldsOf<SequenceStepInfo>({

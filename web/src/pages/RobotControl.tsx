@@ -43,6 +43,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
   const { sendOrReport, matchStart } = useRobotCommands();
   const state = states[robotKey];
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const [forceConfirmOpen, setForceConfirmOpen] = useState(false);
 
   const handleTrigger = () => sendOrReport({ type: "trigger", robot: robotKey }, "トリガー");
   const handleJump = (stepIndex: number) =>
@@ -57,6 +58,10 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
     sendOrReport({ type: "set_operation_mode", robot: robotKey, mode }, "操作モードの切り替え");
   const handleReenergize = () =>
     sendOrReport({ type: "reenergize_motors", robot: robotKey }, "再励磁");
+  const handleForce = () => {
+    setForceConfirmOpen(false);
+    sendOrReport({ type: "sequence_force_step", robot: robotKey }, "歯止めを外して続行");
+  };
 
   const inMatch = isDuringMatch(matchState.phase);
   const setupPhase = isSetupPhase(matchState.phase);
@@ -292,6 +297,7 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
                 onStart={requestStart}
                 onStop={handleStop}
                 onTrigger={handleTrigger}
+                onForce={() => setForceConfirmOpen(true)}
               />
 
               <AlwaysManualPanel
@@ -328,6 +334,33 @@ export function RobotControl({ robotKey, label }: RobotControlProps) {
           {subsystemPanel(inManual, inManual ? "min-h-0 flex-1" : undefined)}
         </div>
       </div>
+
+      <Modal
+        open={forceConfirmOpen}
+        onClose={() => setForceConfirmOpen(false)}
+        tone="danger"
+        title="歯止めを外して続行"
+        footer={
+          <>
+            <Button onClick={() => setForceConfirmOpen(false)}>キャンセル</Button>
+            <Button tone="warn" onClick={handleForce}>
+              歯止めを外して走らせる
+            </Button>
+          </>
+        }
+      >
+        <p>
+          ステップ {state.step_index + 1}「{state.last_error?.step ?? "—"}」を、
+          <span className="font-medium">可動端の歯止めを外して走らせ直します。</span>
+        </p>
+        <p className="mt-2 text-base-content/70">
+          外れるのはこの 1 ステップのあいだだけで、次のステップからは元に戻ります。
+        </p>
+        <p className="mt-2 flex items-center gap-1.5 text-warning">
+          <Icon as={TriangleAlert} />
+          リミットスイッチを踏んでも止まりません。機構が端に当たらないことを目で確かめてから押してください。
+        </p>
+      </Modal>
 
       <Modal
         open={restartConfirmOpen}

@@ -346,6 +346,8 @@ export interface SequenceFailure {
   step_index: number;
   step: string;
   message: string;
+  /** 可動端の歯止めで止まった失敗。歯止めを外してそのステップだけ走らせ直せる */
+  limit_related: boolean;
 }
 
 export function parseSequenceFailure(raw: unknown): SequenceFailure | null {
@@ -353,7 +355,12 @@ export function parseSequenceFailure(raw: unknown): SequenceFailure | null {
   if (typeof raw.step_index !== "number" || !Number.isFinite(raw.step_index)) return null;
   if (typeof raw.step !== "string") return null;
   if (typeof raw.message !== "string" || raw.message.length === 0) return null;
-  return { step_index: raw.step_index, step: raw.step, message: raw.message };
+  return {
+    step_index: raw.step_index,
+    step: raw.step,
+    message: raw.message,
+    limit_related: raw.limit_related === true,
+  };
 }
 
 export interface ExcludedStep {
