@@ -137,11 +137,11 @@ class SubHandSequence(Sequence):
     async def work_1_down_to_pick(self) -> None:
         await self.move_to(DOWN_TO_PICK)
 
-    @step("1 個目: ワーク吸着", require_trigger=True)
+    @step("1 個目: ワーク吸着")
     async def work_1_grip(self) -> None:
         await self._grip_by_suction()
 
-    @step("1 個目: 持ち上げ")
+    @step("1 個目: 吸えたか確認して持ち上げ", require_trigger=True)
     async def work_1_lift_up(self) -> None:
         await self.move_to(LIFT_OFF_SHELF)
 
@@ -216,11 +216,11 @@ class SubHandSequence(Sequence):
     async def work_2_down_to_pick(self) -> None:
         await self.move_to(DOWN_TO_PICK)
 
-    @step("2 個目: ワーク吸着", require_trigger=True)
+    @step("2 個目: ワーク吸着")
     async def work_2_grip(self) -> None:
         await self._grip_by_suction()
 
-    @step("2 個目: 持ち上げ")
+    @step("2 個目: 吸えたか確認して持ち上げ", require_trigger=True)
     async def work_2_lift_up(self) -> None:
         await self.move_to(LIFT_OFF_SHELF)
 
@@ -295,11 +295,11 @@ class SubHandSequence(Sequence):
     async def work_3_down_to_pick(self) -> None:
         await self.move_to(DOWN_TO_PICK)
 
-    @step("3 個目: ワーク吸着", require_trigger=True)
+    @step("3 個目: ワーク吸着")
     async def work_3_grip(self) -> None:
         await self._grip_by_suction()
 
-    @step("3 個目: 持ち上げ")
+    @step("3 個目: 吸えたか確認して持ち上げ", require_trigger=True)
     async def work_3_lift_up(self) -> None:
         await self.move_to(LIFT_OFF_SHELF)
 
@@ -374,11 +374,11 @@ class SubHandSequence(Sequence):
     async def work_4_down_to_pick(self) -> None:
         await self.move_to(DOWN_TO_PICK)
 
-    @step("4 個目: ワーク吸着", require_trigger=True)
+    @step("4 個目: ワーク吸着")
     async def work_4_grip(self) -> None:
         await self._grip_by_suction()
 
-    @step("4 個目: 持ち上げ")
+    @step("4 個目: 吸えたか確認して持ち上げ", require_trigger=True)
     async def work_4_lift_up(self) -> None:
         await self.move_to(LIFT_OFF_SHELF)
 
